@@ -1,0 +1,455 @@
+756:  recordStrategyOutcome(pos: any, pnlRatio: number, closeReason: string) {
+757-    const patternType = pos.analysisMeta?.patternType || 'GENERAL_ANALYSIS';
+758-    const prediction = pos.analysisMeta?.prediction || pos.reason || 'PRICE_DIRECTIONAL';
+759-    const indicatorsAtEntry = pos.analysisMeta?.indicators || {};
+760-    const usedParams = pos.params || { dynamicTP: 0.05, dynamicSL: -0.015, dynamicTrail: 0.005 };
+761-
+762-    const isWin = pnlRatio > 0;
+763-    const wasAnalysisCorrect = isWin;
+764-    const didPriceValidateAnalysis = (pos.peakPnlRatio !== undefined && pos.peakPnlRatio > 0) || isWin;
+765-    const pnlPct = parseFloat((pnlRatio * 100).toFixed(2));
+766-
+767-    const tradeReport = {
+768-      id: pos.id || Date.now(),
+769-      timestamp: new Date().toISOString(),
+770-      symbol: pos.symbol,
+771-      label: pos.label || pos.symbol,
+772-      side: pos.side,
+773-      patternType,
+774-      prediction,
+775-      wasAnalysisCorrect,
+776-      didPriceValidateAnalysis,
+777-      pnlPct,
+778-      pnlUsd: parseFloat((pnlRatio * pos.size * (pos.entryPrice || 0.50)).toFixed(2)),
+779-      closeReason,
+780-      params: usedParams,
+781-      indicators: indicatorsAtEntry,
+782-      
+783-      // Extended Metametrics for DB
+784-      entryPrice: pos.entryPrice || 0.50,
+785-      exitPrice: (pos.entryPrice || 0.50) * (1 + pnlRatio),
+786-      timeInContractSec: (Date.now() - (pos.entryTime || Date.now())) / 1000,
+787-      timeInProfitSec: Math.round(pos.timeInProfitSec || 0),
+788-      timeInLossSec: Math.round(pos.timeInLossSec || 0),
+789-      maxAdverseExcursion: pos.maxAdverseExcursion || 0,
+790-      maxFavorableExcursion: pos.peakPnlRatio || 0,
+791-      marketRegimeAtEntry: pos.marketRegimeAtEntry || 'UNKNOWN',
+792-      volumeSurgeAtEntry: pos.volumeSurgeAtEntry || 1.0,
+793-      bidAskImbalanceAtEntry: pos.bidAskImbalanceAtEntry || 1.0,
+794-      confluenceCountAtEntry: pos.confluenceCountAtEntry || 1,
+795-      entryFeatures: pos.entryFeatures || null
+796-    };
+797-
+798-    // Amendment 4: Online Streaming Meta-Model Adaptation (Real-time SGD continual learning)
+799-    try {
+800-      const spotTA = pos.analysisMeta?.spotTA || {};
+801-      const bidVol = pos.analysisMeta?.indicators?.bidVol || 500;
+802-      const askVol = pos.analysisMeta?.indicators?.askVol || 500;
+803-      const ofi = (bidVol - askVol) / Math.max(1, (bidVol + askVol));
+804-
+805-      const onlineFeatures: EntryFeatures = pos.entryFeatures || {
+806-        rsi: spotTA.rsi || 50,
+807-        macd: 0.15,
+808-        macdHist: 0.05,
+809-        maSpread: 0.02,
+810-        primaryConfidence: 75,
+811-        primaryDirection: pos.side === 'YES' ? 1 : -1,
+812-        atr: (spotTA.candleRangePct / 100) || 0.012,
+813-        bollingerBandWidth: 0.03,
+814-        bidAskSpread: 0.001,
+815-        orderbookImbalance: bidVol / Math.max(1, askVol),
+816-        volumeSurgeRatio: spotTA.volumeSurgeRatio || 1.0,
+817-        stationarityFracDiff: spotTA.fractionalDiffValue || 0.0,
+818-        hourOfDay: new Date().getUTCHours(),
+819-        dayOfWeek: new Date().getUTCDay(),
+820-        tradingSession: (() => {
+821-          const h = new Date().getUTCHours();
+822-          if (h >= 13 && h <= 21) return 'NEW_YORK';
+823-          if (h >= 8 && h < 13) return 'LONDON';
+824-          if (h >= 0 && h < 8) return 'ASIAN';
+825-          return 'OVERLAP';
+826-        })(),
+827-        patternType: pos.patternType || 'ANALYSIS',
+828-        confluenceCount: pos.analysisMeta?.confluenceCount || 1,
+829-        orderFlowImbalance: ofi,
+830-        tradeFlowImbalance: ofi * 0.9,
+831-        vpin: 0.32,
+832-        micropriceDrift: 0.0008,
+833-        cancelToFillRatio: 1.8,
+834-        vwapDistancePct: spotTA.vwapDistancePct || 0,
+835-        fundingRate: fundingRateTracker.fundingRates[spotTA.pair?.replace('USDT', '') || 'BTC'] || 0,
+836-        marketRegime: pos.marketRegimeAtEntry || 'UNKNOWN'
+837-      };
+838-
+839-      if (!tradeReport.entryFeatures) {
+840-        tradeReport.entryFeatures = onlineFeatures;
+841-      }
+842-
+843-      const actualLabel = isWin ? 1 : 0;
+844-      metaModelManager.activeModel.updateOnlineWeights(onlineFeatures, actualLabel);
+845-
+846-      // Top-Tier Alpha Goal-Hitter Tagging: Note any time the $100 goal was hit or high profit achieved ($10+), tagging simultaneous conditions as elite alpha signatures
+847-      const totalPocketedAtOutcome = Math.max(sessionPocketedProfit, vaultedProfits + Math.max(0, cycleEarnedProfit));
+848-      if (isWin && (totalPocketedAtOutcome >= 100 || tradeReport.pnlUsd >= 10.0)) {
+849-        const alphaSig = {
+850-          id: tradeReport.id,
+851-          timestamp: tradeReport.timestamp,
+852-          symbol: tradeReport.symbol,
+853-          side: tradeReport.side,
+854-          pnlUsd: tradeReport.pnlUsd,
+855-          pnlPct: tradeReport.pnlPct,
+856-          totalPocketed: totalPocketedAtOutcome,
+857-          indicators: tradeReport.indicators,
+858-          params: tradeReport.params,
+859-          entryFeatures: onlineFeatures,
+860-          reason: closeReason
+861-        };
+862-        if (!this.topTierAlphaSignatures.some(s => s.symbol === alphaSig.symbol && s.timestamp === alphaSig.timestamp)) {
+863-          this.topTierAlphaSignatures.unshift(alphaSig);
+864-          if (this.topTierAlphaSignatures.length > 50) this.topTierAlphaSignatures.pop();
+865-          spotLogs.unshift({
+866-            id: logIdCounter++, time: new Date().toISOString(), type: 'PROFIT',
+867-            message: `[TOP-TIER ALPHA GOAL-HITTER TAGGED] $100 goal milestone/high-yield condition captured on ${tradeReport.symbol} (+${tradeReport.pnlPct}% / +$${tradeReport.pnlUsd.toFixed(2)}). Tagged as elite training baseline with 3x meta-model reinforcement.`
+868-          });
+869-        }
+870-        // Extra 3x weight update pass for top-tier goal hitters
+871-        metaModelManager.activeModel.updateOnlineWeights(onlineFeatures, 1);
+872-        metaModelManager.activeModel.updateOnlineWeights(onlineFeatures, 1);
+873-      }
+874-    } catch (err) {
+875-      console.error("[ONLINE META-MODEL ADAPTATION ERROR]", err);
+876-    }
+877-
+878-    this.tradeHistory.unshift(tradeReport);
+879-    if (this.tradeHistory.length > 200) {
+880-      this.tradeHistory.pop();
+881-    }
+882-
+883-    // Save trade to SQLite TradeDatabaseManager with bitpacked indicators and JSON raw_metrics
+884-    const activeIndicators = TradeEncoder.extractIndicatorsFromTrade(tradeReport);
+885-    const targetPrice = pos.entryPrice || 0.50;
+886-    const actualPrice = targetPrice * (1 + pnlRatio);
+887-
+888-    tradeDbManager.insertTrade(
+889-      pos.symbol || pos.label || 'UNKNOWN',
+890-      activeIndicators,
+891-      targetPrice,
+892-      actualPrice,
+893-      isWin,
+894-      JSON.stringify(tradeReport)
+895-    ).then(dbId => {
+896-      scheduleCounterfactualSnapshot(dbId, pos.symbol, pos.side, actualPrice, isWin, closeReason);
+897-    }).catch(err => console.error("[DB ERROR] Failed inserting trade to TradeDatabaseManager:", err));
+898-
+899-    unAuditedTradeCount++;
+900-    unTrainedTradeCount++;
+901-    const patternType = pos.analysisMeta?.patternType || 'GENERAL_ANALYSIS';
+902-    unTrainedTradeCountByStrategy[patternType] = (unTrainedTradeCountByStrategy[patternType] || 0) + 1;
+903-
+904-    // Record contract side streak outcome for TP and Trail escalation scaling
+905-    plasticityEngine.recordContractTradeOutcome(
+906-      pos.symbol,
+--
+4231:        tradingBrain.recordStrategyOutcome(pos, adjustedPnlRatio, closeReason);
+4232-        if (recoveryProtocol) {
+4233-          recoveryProtocol.processTradeOutcome(
+4234-            pos.symbol, pos.side, pnlUsd, adjustedPnlRatio * 100, positionCapitalCost,
+4235-            Math.round((Date.now() - pos.entryTime) / 1000), closeReason, pos.category,
+4236-            pos.analysisMeta?.patternType || 'GENERAL_ANALYSIS', pos.analysisMeta?.spotTA
+4237-          );
+4238-        }
+4239-
+4240-        const isStopLossClose = closeReason.includes('Stop Loss') || closeReason.includes('SL');
+4241-        const wasAlreadyReversed = Boolean(pos.analysisMeta?.isReversalFlip);
+4242-
+4243-        spotLogs.unshift({
+4244-          id: logIdCounter++, time: new Date().toISOString(), type: pnlRatio > 0 ? 'PROFIT' : 'TRADE',
+4245-          message: `[POS CLOSED] ${pos.symbol} (${pos.side}) hit ${closeReason}. PnL: ${pnlUsd > 0 ? '+' : ''}$${pnlUsd.toFixed(2)}`
+4246-        });
+4247-
+4248-        // Dispatch live order to Kalshi to close real position when paperTrading is disabled
+4249-        if (!settings.paperTrading) {
+4250-          const isPerp = Boolean(pos.isPerpetual || pos.symbol.endsWith('PERP'));
+4251-          const exitPrice = isPerp ? currentSidePrice : (pos.side === 'YES' ? currentSidePrice : (1.0 - currentSidePrice));
+4252-          const closeAction = isPerp ? (pos.side === 'YES' ? 'sell' : 'buy') : 'sell';
+4253-          kalshiService.placeOrder(pos.symbol, closeAction, pos.side.toLowerCase() as 'yes' | 'no', pos.size, exitPrice).then(res => {
+4254-            if (res.success) {
+4255-              spotLogs.unshift({
+4256-                id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
+4257-                message: `[KALSHI LIVE CLOSE SUCCESS] Closed ${pos.size} contracts of ${pos.symbol} (${pos.side}) on Kalshi at $${exitPrice.toFixed(isPerp ? 4 : 2)} (OrderID: ${res.order_id}).`
+4258-              });
+4259-            } else {
+4260-              spotLogs.unshift({
+4261-                id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+4262-                message: `[KALSHI LIVE CLOSE ERROR] Failed to submit close order for ${pos.symbol}: ${res.error}`
+4263-              });
+4264-            }
+4265-          });
+4266-        }
+4267-
+4268-        activePositions.splice(i, 1);
+4269-
+4270-        if (closeReason.includes('Emergency SL')) {
+4271-           spotLogs.unshift({
+4272-              id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+4273-              message: `[EMERGENCY MONITOR INITIATED] AI deployed to monitor ${pos.symbol} in 10s increments for the next 60 seconds.`
+4274-           });
+4275-           startEmergencyMonitor(pos);
+4276-        }
+4277-
+4278-        // Immediate Momentum Reversal Check on Stop Loss
+4279-        if (isStopLossClose && !wasAlreadyReversed && ctx && !ctx.isExpired) {
+4280-          const oppositeSide: 'YES' | 'NO' = pos.side === 'YES' ? 'NO' : 'YES';
+4281-          const oppositeEntryPrice = oppositeSide === 'YES' ? ctx.currentPrice : (1.0 - ctx.currentPrice);
+4282-
+4283-          const spotPair = getSpotPairFromSymbol(pos.label, pos.category);
+4284-          const pairCandles = scalper.candles[spotPair] || [];
+4285-
+4286-          // Query price action & statistical volatility viability
+4287-          const viability = evaluateCounterPositionViability(pos, ctx, oppositeSide, oppositeEntryPrice, pairCandles);
+4288-
+4289-          if (viability.isViable) {
+4290-            spotLogs.unshift({
+4291-              id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
+4292-              message: `[STOP-LOSS REVERSAL APPROVED] ${pos.symbol} (${pos.side} -> ${oppositeSide}) | Volatility Index: ${viability.volatilityIndex}x, Velocity: ${viability.velocityPctPerMin}%/min, Viability Score: ${viability.score} >= 0.85. Executing counter-position!`
+4293-            });
+4294-
+4295-            openPosition(
+4296-              pos.symbol,
+4297-              oppositeSide,
+4298-              oppositeEntryPrice,
+4299-              pos.size,
+4300-              true,
+4301-              pos.matchId,
+4302-              pos.label,
+4303-              pos.category,
+4304-              `Stop Loss Volatility Reversal (Flipped from ${pos.side} | Viability Score: ${viability.score})`,
+4305-              {
+4306-                patternType: 'MOMENTUM_REVERSAL_FLIP',
+4307-                isReversalFlip: true,
+4308-                spotTA: computeSpotTAMetrics(spotPair, pairCandles),
+4309-                viabilityMeta: viability
+4310-              }
+4311-            );
+4312-          } else {
+4313-            spotLogs.unshift({
+4314-              id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+4315-              message: `[STOP-LOSS REVERSAL SUPPRESSED] Skipped counter-position on ${pos.symbol}: ${viability.reason}`
+4316-            });
+4317-          }
+4318-        }
+4319-
+4320-        // Post-Stop Loss Candidate Re-Evaluation Schedule (5 seconds and 1 minute post-close, max 1 period per 5 minutes per contract)
+4321-        if (isStopLossClose) {
+4322-          const contractKey = `${pos.symbol}:${pos.side}`;
+4323-          const now = Date.now();
+4324-          const FIVE_MINUTES_MS = 5 * 60 * 1000;
+4325-          const lastEvalTime = contractSLEvalPeriodTimestamps[contractKey] || 0;
+4326-
+4327-          if (now - lastEvalTime < FIVE_MINUTES_MS) {
+4328-            const elapsedSec = Math.round((now - lastEvalTime) / 1000);
+4329-            const remainSec = Math.round((FIVE_MINUTES_MS - (now - lastEvalTime)) / 1000);
+4330-            spotLogs.unshift({
+4331-              id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+4332-              message: `[POST-SL RE-EVALUATION LIMITED] ${contractKey}: Post-SL evaluation period throttled (${elapsedSec}s elapsed since last, ${remainSec}s remaining). Limit: 1 period per 5 mins.`
+4333-            });
+4334-          } else {
+4335-            contractSLEvalPeriodTimestamps[contractKey] = now;
+4336-            spotLogs.unshift({
+4337-              id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+4338-              message: `[POST-SL RE-EVALUATION INITIATED] ${contractKey}: Initiated candidate re-evaluation period (Stage 1: 5s, Stage 2: 1m). Limit: 1 period per 5 mins.`
+4339-            });
+4340-
+4341-            // Stage 1: 5 seconds immediately after closing
+4342-            setTimeout(() => {
+4343-              evaluatePostSLContractCandidate(pos.symbol, pos.side, '5s post-SL', pos.category);
+4344-            }, 5000);
+4345-
+4346-            // Stage 2: 1 minute (60s) after closing
+4347-            setTimeout(() => {
+4348-              evaluatePostSLContractCandidate(pos.symbol, pos.side, '1m post-SL', pos.category);
+4349-            }, 60000);
+4350-          }
+4351-        }
+4352-      }
+4353-    }
+4354-
+4355-  if (spotLogs.length > 50) spotLogs.length = 50;
+4356-  lastSuccessfulLoopTime = Date.now();
+4357-  } catch (e) { console.error("[BACKGROUND INTERVAL ERROR]", e); }
+4358-}, 4000);
+4359-
+4360-// API Endpoints
+4361-app.post('/api/reset-bot', async (req, res) => {
+4362-  try {
+4363-    spotContexts = {};
+4364-    await discoverMarkets();
+4365-    spotLogs.unshift({
+4366-      id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
+4367-      message: `[WATCHDOG FORCE RESET] Bot markets re-discovered and loop state refreshed successfully.`
+4368-    });
+4369-    res.json({ success: true, message: 'Bot reset and re-discovered successfully.' });
+4370-  } catch (err: any) {
+4371-    res.status(500).json({ success: false, error: err?.message || 'Failed to reset bot' });
+4372-  }
+4373-});
+4374-
+4375-app.get('/api/top-tier-alpha', (req, res) => {
+4376-  res.json({
+4377-    success: true,
+4378-    topTierAlphaSignatures: tradingBrain.topTierAlphaSignatures || []
+4379-  });
+4380-});
+4381-
+--
+4543:    tradingBrain.recordStrategyOutcome(pos, adjustedPnlRatio, closeReason);
+4544-    if (recoveryProtocol) {
+4545-      recoveryProtocol.processTradeOutcome(
+4546-        pos.symbol, pos.side, pnlUsd, adjustedPnlRatio * 100, positionCapitalCost,
+4547-        Math.round((Date.now() - pos.entryTime) / 1000), closeReason, pos.category,
+4548-        pos.analysisMeta?.patternType || 'GENERAL_ANALYSIS', pos.analysisMeta?.spotTA
+4549-      );
+4550-    }
+4551-
+4552-    spotLogs.unshift({
+4553-      id: logIdCounter++, time: new Date().toISOString(), type: 'ERROR',
+4554-      message: `[PANIC SELL EXECUTED] ${pos.symbol} (${pos.side}) forcefully closed at market price. PnL: ${pnlUsd > 0 ? '+' : ''}$${pnlUsd.toFixed(2)}`
+4555-    });
+4556-
+4557-    activePositions.splice(i, 1);
+4558-    closedCount++;
+4559-  }
+4560-  
+4561-  spotLogs.unshift({
+4562-    id: logIdCounter++, time: new Date().toISOString(), type: 'ERROR',
+4563-    message: `🚨 [BOT PAUSED] Panic Sell executed. ${closedCount} positions closed. Trading engine is offline until manually resumed.`
+4564-  });
+4565-  
+4566-  res.json({ success: true, message: `Panic sell executed. ${closedCount} positions closed.` });
+4567-});
+4568-app.post('/api/contracts/reset', (req, res) => {
+4569-  if (settings.paperTrading) {
+4570-    const closedCount = activePositions.length;
+4571-    activePositions.length = 0;
+4572-    
+4573-    spotLogs.unshift({
+4574-      id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
+4575-      message: `[CONTRACTS RESET] Cleared ${closedCount} active orphaned contracts in paper trading mode.`
+4576-    });
+4577-
+4578-    res.json({ success: true, message: 'All active paper contracts reset successfully.' });
+4579-  } else {
+4580-    res.status(403).json({ success: false, message: 'Cannot reset contracts directly in Live Trading mode. Must use exchange.' });
+4581-  }
+4582-});
+4583-
+4584-app.post('/api/vault/reset', (req, res) => {
+4585-  vaultedProfits = 0;
+4586-  completedGoalCycles = 0;
+4587-  sessionPocketedProfit = 0;
+4588-  tradingBrain._saveMemory();
+4589-
+4590-  spotLogs.unshift({
+4591-    id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
+4592-    message: `[OFF-LIMITS VAULT RESET] Off-limits vault reserve and completed goal cycles reset to $0.00.`
+4593-  });
+4594-
+4595-  res.json({
+4596-    success: true,
+4597-    vaulted_profits: 0,
+4598-    completed_goal_cycles: 0,
+4599-    message: 'Off-Limits Vault reset successfully.'
+4600-  });
+4601-});
+4602-
+4603-app.post('/api/balance/reset', (req, res) => {
+4604-  const amount = req.body && typeof req.body.amount === 'number' ? req.body.amount : 200;
+4605-  simulatedPaperBalance = amount;
+4606-  startingBankroll = amount;
+4607-  cycleEarnedProfit = 0;
+4608-  vaultedProfits = 0;
+4609-  completedGoalCycles = 0;
+4610-  sessionPocketedProfit = 0;
+4611-  isStrict3ConfluenceTriggeredInSession = false;
+4612-  activePositions.length = 0;
+4613-  isCapitalPreservationActive = false;
+4614-
+4615-  tradingBrain.resetBrain();
+4616-  recoveryProtocol.resetProtocol();
+4617-
+4618-  spotLogs.unshift({
+4619-    id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
+4620-    message: `[BANKROLL RESET] Paper trading balance reset to $${simulatedPaperBalance.toFixed(2)}. Vault and P/L history fully cleared.`
+4621-  });
+4622-  res.json({ success: true, balance: simulatedPaperBalance });
+4623-});
+4624-
+4625-app.post('/api/pattern-brain/reset', (req, res) => {
+4626-  tradingBrain.resetBrain();
+4627-  recoveryProtocol.resetProtocol();
+4628-  spotLogs.unshift({
+4629-    id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
+4630-    message: `[PERFORMANCE RESET] Strategy performance summary and trade history cleared.`
+4631-  });
+4632-  res.json({ success: true, message: 'Performance summary cleared.' });
+4633-});
+4634-
+4635-app.get('/api/logs', (req, res) => { res.json({ logs: spotLogs }); });
+4636-app.get('/api/recovery-mode', (req, res) => { res.json(getCapitalPreservationStatus()); });
+4637-app.get('/api/recovery-protocol', (req, res) => { res.json(recoveryProtocol.data); });
+4638-app.post('/api/recovery-protocol/reset', (req, res) => {
+4639-  recoveryProtocol.resetProtocol();
+4640-  res.json(recoveryProtocol.data);
+4641-});
+4642-
+4643-// Plasticity Modifier Engine endpoints
+4644-app.get('/api/plasticity', (req, res) => {
+4645-  res.json(plasticityEngine.getPlasticitySummary());
+4646-});
+4647-
+4648-app.post('/api/plasticity/synthesize', async (req, res) => {
+4649-  try {
+4650-    const { patternType, freshHybridization } = req.body;
+4651-    const targetPattern = patternType || 'RECOVERY_PROTOCOL_GLOBAL';
+4652-    const proposal = freshHybridization || {
+4653-      dynamicTP: 0.015,
+4654-      dynamicSL: -0.008,
+4655-      kellyMultiplier: 0.8,
+4656-      preferredContractTypes: ['YES', 'NO'],
+4657-      winSelectionRules: ['ICHIMOKU_CLOUD_ALIGNMENT'],
+4658-      lossAvoidanceRules: ['AVOID_DOJI_INDECISION_CANDLES'],
+4659-      riskTolerance: 'MODERATE',
+4660-      explanation: 'Manual user trigger for Plasticity comparative cross-synthesis.'
+4661-    };
+4662-
+4663-    const spotContext = spotContexts['BTC'] || spotContexts['SOL'] || {};
+4664-    const result = await plasticityEngine.synthesizePlasticitySolution(targetPattern, proposal, spotContext);
+4665-    res.json({ success: true, targetPattern, result, summary: plasticityEngine.getPlasticitySummary() });
+4666-  } catch (e: any) {
+4667-    res.status(500).json({ error: e.message || 'Plasticity synthesis error' });
+4668-  }
+4669-});
+4670-
+4671-app.get('/api/gemini-status', (req, res) => {
+4672-  res.json({
+4673-    regime: geminiStrategyEngine.getCurrentRegime(),
+4674-    leadLagSol: geminiStrategyEngine.getLeadLagSignal('SOL'),
+4675-    leadLagEth: geminiStrategyEngine.getLeadLagSignal('ETH'),
+4676-    leadLagHype: geminiStrategyEngine.getLeadLagSignal('HYPE'),
+4677-    leadLagDoge: geminiStrategyEngine.getLeadLagSignal('DOGE'),
+4678-    leadLagXrp: geminiStrategyEngine.getLeadLagSignal('XRP'),
+4679-    activeKellyMultiplier: settings.kellyMultiplier
+4680-  });
+4681-});
+4682-
+4683-app.get('/api/pattern-brain', async (req, res) => {
+4684-  try {
+4685-    const dbTrades = await tradeDbManager.getAllTrades(200);
+4686-    if (dbTrades && dbTrades.length > 0) {
+4687-      tradingBrain.tradeHistory = dbTrades;
+4688-    }
+4689-  } catch (e) {}
+4690-
+4691-  res.json({
+4692-    winningStrategies: tradingBrain.winningStrategies,
+4693-    losingStrategies: tradingBrain.losingStrategies,

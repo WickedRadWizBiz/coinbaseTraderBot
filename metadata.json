@@ -1,0 +1,8 @@
+{
+  "name": "PredictionsRunner.exe",
+  "description": "Autonomous cryptocurrency trading bot powered by Gemini and Coinbase Advanced Trade.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
