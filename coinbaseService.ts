@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import 'dotenv/config';
 
 export interface CoinbaseBalanceResult {
   usdCash: number;
@@ -27,18 +28,24 @@ class CoinbaseService {
   private isFetching = false;
 
   constructor() {
-    this.keyName = process.env.COINBASE_API_KEY || '';
-    this.secretRaw = process.env.COINBASE_API_SECRET || '';
+    this.keyName = process.env.COINBASE_API_KEY || process.env.CDP_API_KEY_NAME || process.env.COINBASE_KEY || '';
+    this.secretRaw = process.env.COINBASE_API_SECRET || process.env.CDP_API_PRIVATE_KEY || process.env.COINBASE_SECRET || '';
     this.initPrivateKey();
   }
 
   private initPrivateKey() {
+    this.keyName = this.keyName || process.env.COINBASE_API_KEY || process.env.CDP_API_KEY_NAME || process.env.COINBASE_KEY || '';
+    this.secretRaw = this.secretRaw || process.env.COINBASE_API_SECRET || process.env.CDP_API_PRIVATE_KEY || process.env.COINBASE_SECRET || '';
+    
     if (!this.keyName || !this.secretRaw) {
-      console.warn('[COINBASE] Missing COINBASE_API_KEY or COINBASE_API_SECRET');
       return;
     }
     try {
-      const rawBuf = Buffer.from(this.secretRaw, 'base64');
+      let rawSecret = this.secretRaw.trim();
+      if ((rawSecret.startsWith('"') && rawSecret.endsWith('"')) || (rawSecret.startsWith("'") && rawSecret.endsWith("'"))) {
+        rawSecret = rawSecret.slice(1, -1);
+      }
+      const rawBuf = Buffer.from(rawSecret, 'base64');
       const seed = rawBuf.subarray(0, 32);
       const pkcs8Prefix = Buffer.from('302e020100300506032b657004220420', 'hex');
       const pkcs8Key = Buffer.concat([pkcs8Prefix, seed]);
@@ -52,6 +59,9 @@ class CoinbaseService {
   }
 
   public isConfigured(): boolean {
+    if (!this.privateKey || !this.keyName) {
+      this.initPrivateKey();
+    }
     return !!(this.keyName && this.secretRaw && this.privateKey);
   }
 

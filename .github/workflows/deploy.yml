@@ -1,0 +1,38 @@
+name: Auto Deploy to AWS Lightsail
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  deploy:
+    name: Deploy to Lightsail Server
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH and Deploy to Lightsail
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+          script_stop: true
+          script: |
+            cd ~/${{ secrets.LIGHTSAIL_APP_DIR || 'crypto-bot' }} || cd ~/trading-bot || cd ~/applet
+
+            echo "=== Pulling latest changes from GitHub ==="
+            git pull origin $(git rev-parse --abbrev-ref HEAD)
+
+            echo "=== Installing dependencies ==="
+            npm install
+
+            echo "=== Building production bundle ==="
+            npm run build
+
+            echo "=== Restarting PM2 process ==="
+            pm2 restart crypto-bot || pm2 start dist/server.cjs --name "crypto-bot"
+            pm2 save
+
+            echo "=== Deployment successful! ==="

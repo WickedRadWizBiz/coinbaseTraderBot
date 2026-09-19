@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from "express";
 import path from "path";
 import fs from "fs";
@@ -86,8 +87,19 @@ async function getEffectiveWorkingBalance(forceSync = false): Promise<number> {
       if (res.success && res.balance !== undefined) {
         realKalshiCashPool = res.balance;
         lastRealCashFetchTime = now;
+      } else if (!res.success && res.error) {
+        console.error('[KALSHI] Balance sync issue:', res.error);
+        if (now - lastRealCashFetchTime > 60000) {
+          spotLogs.unshift({
+            id: logIdCounter++,
+            time: new Date().toISOString(),
+            type: 'WARN',
+            message: `[KALSHI LIVE BALANCE ERROR] ${res.error}. Ensure KALSHI_API_KEY and KALSHI_API_SECRET in .env are correct.`
+          });
+          lastRealCashFetchTime = now;
+        }
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error('[KALSHI] Balance sync error:', e);
     }
   }

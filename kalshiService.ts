@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import 'dotenv/config';
 
 export class KalshiService {
   private keyId: string;
@@ -7,18 +8,26 @@ export class KalshiService {
   private baseUrl = 'https://external-api.kalshi.com/trade-api/v2';
 
   constructor() {
-    this.keyId = process.env.KALSHI_API_KEY || '';
-    this.secretRaw = process.env.KALSHI_API_SECRET || '';
+    this.keyId = process.env.KALSHI_API_KEY || process.env.KALSHI_KEY_ID || process.env.KALSHI_KEY || '';
+    this.secretRaw = process.env.KALSHI_API_SECRET || process.env.KALSHI_PRIVATE_KEY || process.env.KALSHI_SECRET || '';
     this.initPrivateKey();
   }
 
   private initPrivateKey() {
+    this.keyId = this.keyId || process.env.KALSHI_API_KEY || process.env.KALSHI_KEY_ID || process.env.KALSHI_KEY || '';
+    this.secretRaw = this.secretRaw || process.env.KALSHI_API_SECRET || process.env.KALSHI_PRIVATE_KEY || process.env.KALSHI_SECRET || '';
+    
     if (!this.keyId || !this.secretRaw) return;
     try {
-      let pem = this.secretRaw;
+      let pem = this.secretRaw.trim();
       
-      // Handle key pasted as a single line with literal \n
-      pem = pem.replace(/\\n/g, '\n');
+      // Strip outer wrapping double or single quotes if present from .env
+      if ((pem.startsWith('"') && pem.endsWith('"')) || (pem.startsWith("'") && pem.endsWith("'"))) {
+        pem = pem.slice(1, -1);
+      }
+
+      // Normalize carriage returns and escaped newlines
+      pem = pem.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\r\n/g, '\n');
       
       if (pem.includes('-----BEGIN') && !pem.includes('\n')) {
         pem = pem.replace(/(-----BEGIN[^-]+-----)\s*/, '$1\n');
@@ -43,6 +52,9 @@ export class KalshiService {
   }
 
   public isConfigured(): boolean {
+    if (!this.privateKey || !this.keyId) {
+      this.initPrivateKey();
+    }
     return !!(this.keyId && this.secretRaw && this.privateKey);
   }
 
