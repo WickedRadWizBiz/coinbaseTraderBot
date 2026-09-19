@@ -320,56 +320,189 @@ export class KalshiService {
     return { success: true };
   }
 
-  public async placeOrder(
-    ticker: string, 
-    action: 'buy' | 'sell', 
-    side: 'yes' | 'no', 
-    count: number, 
-    price?: number,
-    retryCount = 0
-  ): Promise<{ success: boolean; order_id?: string; error?: string }> {
+  public async getPositions(): Promise<{
+    success: boolean;
+    market_positions?: any[];
+    event_positions?: any[];
+    error?: string;
+  }> {
+    if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
+
+    const tryEndpoints = [this.baseUrl, this.fallbackBaseUrl];
+    let lastError = '';
+
+    for (const host of tryEndpoints) {
+      try {
+        const method = 'GET';
+        const path = '/portfolio/positions';
+        const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
+
+        const res = await fetch(host + path, {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            'KALSHI-ACCESS-KEY': this.keyId,
+            'KALSHI-ACCESS-TIMESTAMP': timestamp,
+            'KALSHI-ACCESS-SIGNATURE': signature
+          }
+        });
+
+        if (!res.ok) {
+          const txt = await res.text();
+          lastError = `HTTP ${res.status}: ${txt}`;
+          continue;
+        }
+
+        const data: any = await res.json();
+        return {
+          success: true,
+          market_positions: data.market_positions || [],
+          event_positions: data.event_positions || []
+        };
+      } catch (e: any) {
+        lastError = e.message || String(e);
+      }
+    }
+
+    return { success: false, error: lastError };
+  }
+
+  public async getPortfolioSummary(): Promise<{
+    success: boolean;
+    cash: number;
+    positions_value: number;
+    portfolio_value: number;
+    realized_pnl: number;
+    unrealized_pnl: number;
+    market_positions: any[];
+    event_positions: any[];
+    error?: string;
+  }> {
+    if (!this.isConfigured()) {
+      return {
+        success: false,
+        cash: 0,
+        positions_value: 0,
+        portfolio_value: 0,
+        realized_pnl: 0,
+        unrealized_pnl: 0,
+        market_positions: [],
+        event_positions: [],
+        error: 'Not configured'
+      };
+    }
+
+    try {
+      const [balRes, posRes] = await Promise.all([
+        this.getBalance(),
+        this.getPositions()
+      ]);
+
+      const cash = balRes.success && typeof balRes.balance === 'number' ? balRes.balance : 0;
+      const marketPositions = posRes.success && Array.isArray(posRes.market_positions) ? posRes.market_positions : [];
+      const eventPositions = posRes.success && Array.isArray(posRes.event_positions) ? posRes.event_positions : [];
+
+      let positionsValue = 0;
+      let realizedPnl = 0;
+      let unrealizedPnl = 0;
+
+      for (const p of marketPositions) {
+        const count = typeof p.position === 'number' ? p.position : (p.position_fp ? parseFloat(p.position_fp) : 0);
+        if (count !== 0) {
+          const exposure = typeof p.market_exposure_dollars === 'number' ? p.market_exposure_dollars 
+            : (typeof p.market_exposure === 'number' ? p.market_exposure / 100 
+            : (typeof p.current_value_dollars === 'number' ? p.current_value_dollars 
+            : Math.abs(count) * 0.50));
+          positionsValue += exposure;
+
+          const rPnl = typeof p.realized_pnl_dollars === 'number' ? p.realized_pnl_dollars 
+            : (typeof p.realized_pnl === 'number' ? p.realized_pnl / 100 : 0);
+          realizedPnl += rPnl;
+
+          const uPnl = typeof p.unrealized_pnl_dollars === 'number' ? p.unrealized_pnl_dollars 
+            : (typeof p.unrealized_pnl === 'number' ? p.unrealized_pnl / 100 : 0);
+          unrealizedPnl += uPnl;
+        }
+      }
+
+      const portfolioValue = cash + positionsValue;
+
+      return {
+        success: true,
+        cash,
+        positions_value: positionsValue,
+        portfolio_value: portfolioValue,
+        realized_pnl: realizedPnl,
+        unrealized_pnl: unrealizedPnl,
+        market_positions: marketPositions,
+        event_positions: eventPositions
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        cash: 0,
+        positions_value: 0,
+        portfolio_value: 0,
+        realized_pnl: 0,
+        unrealized_pnl: 0,
+        market_positions: [],
+        event_positions: [],
+        error: err.message || String(err)
+      };
+    }
+  }
+
+  public async getOpenOrders(): Promise<{
+    success: boolean;
+    orders?: any[];
+    error?: string;
+  }> {
+    if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
+
+    const tryEndpoints = [this.baseUrl, this.fallbackBaseUrl];
+    let lastError = '';
+
+    for (const host of tryEndpoints) {
+      try {
+        const method = 'GET';
+        const path = '/portfolio/orders?status=resting';
+        const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
+
+        const res = await fetch(host + path, {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            'KALSHI-ACCESS-KEY': this.keyId,
+            'KALSHI-ACCESS-TIMESTAMP': timestamp,
+            'KALSHI-ACCESS-SIGNATURE': signature
+          }
+        });
+
+        if (!res.ok) {
+          const txt = await res.text();
+          lastError = `HTTP ${res.status}: ${txt}`;
+          continue;
+        }
+
+        const data: any = await res.json();
+        return {
+          success: true,
+          orders: data.orders || []
+        };
+      } catch (e: any) {
+        lastError = e.message || String(e);
+      }
+    }
+
+    return { success: false, error: lastError };
+  }
+
+  public async cancelOrder(orderId: string): Promise<{ success: boolean; error?: string }> {
     if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
 
     try {
-      const isPerp = ticker.toUpperCase().endsWith('PERP');
-      const method = 'POST';
-      const path = '/portfolio/events/orders';
-      
-      let v2Side: 'bid' | 'ask' = 'bid';
-      if (isPerp) {
-        // For perpetuals: action buy -> bid, action sell -> ask
-        v2Side = action === 'buy' ? 'bid' : 'ask';
-      } else {
-        if (action === 'buy' && side === 'yes') v2Side = 'bid';
-        else if (action === 'buy' && side === 'no') v2Side = 'ask';
-        else if (action === 'sell' && side === 'yes') v2Side = 'ask';
-        else if (action === 'sell' && side === 'no') v2Side = 'bid';
-      }
-
-      let finalPrice = typeof price === 'number' && !isNaN(price) && price > 0 ? price : 0.50;
-      if (!isPerp) {
-        if (side === 'no') {
-          finalPrice = 1.0 - finalPrice;
-        }
-        // Strictly clamp price to valid Kalshi market contract boundaries [0.01, 0.99] and round to 2 decimal places (cents)
-        finalPrice = Math.round(Math.max(0.01, Math.min(0.99, finalPrice)) * 100) / 100;
-      } else {
-        // Perpetuals are quoted in actual dollar amounts
-        finalPrice = Math.max(0.0001, Math.round(finalPrice * 10000) / 10000);
-      }
-
-      const payload: any = {
-        ticker,
-        side: v2Side,
-        count: count.toString(),
-        time_in_force: 'good_till_canceled',
-        self_trade_prevention_type: 'taker_at_cross',
-        client_order_id: 'kal_bot_' + Date.now() + '_' + Math.floor(Math.random()*1000),
-        exchange_index: -1 // Auto-route across exchange shards (Shard 0 Elections, Shard 2 Crypto)
-      };
-      
-      payload.price = isPerp ? finalPrice.toFixed(4) : finalPrice.toFixed(2);
-
+      const method = 'DELETE';
+      const path = `/portfolio/orders/${orderId}`;
       const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
 
       const res = await fetch(this.baseUrl + path, {
@@ -379,37 +512,135 @@ export class KalshiService {
           'KALSHI-ACCESS-KEY': this.keyId,
           'KALSHI-ACCESS-TIMESTAMP': timestamp,
           'KALSHI-ACCESS-SIGNATURE': signature
-        },
-        body: JSON.stringify(payload)
+        }
       });
 
       if (!res.ok) {
         const txt = await res.text();
-        if (txt.includes('insufficient_balance') || txt.includes('insufficient_shard_balance')) {
-          console.log('[KALSHI BALANCE NOTICE] Insufficient balance for live order submission:', txt);
-        } else {
-          console.error('[KALSHI ORDER ERROR] HTTP', res.status, txt);
-        }
-
-        // Auto-heal Kalshi Shard Allocation / insufficient balance on shard:
-        if (
-          retryCount === 0 &&
-          (txt.includes('insufficient_shard_balance') || txt.includes('Exchange user not found') || txt.includes('insufficient_balance'))
-        ) {
-          console.log('[KALSHI SHARD HEALER] Insufficient shard balance detected. Funding Crypto Shard 2 directly...');
-          const fundRes = await this.ensureCryptoShardFunded(20);
-          if (fundRes.success) {
-            await new Promise((r) => setTimeout(r, 1000));
-            return this.placeOrder(ticker, action, side, count, price, retryCount + 1);
-          }
-        }
-
         return { success: false, error: `HTTP ${res.status}: ${txt}` };
       }
 
-      const data: any = await res.json();
-      console.log(`[KALSHI ORDER SUCCESS] Order placed successfully: ID ${data.order_id || data.client_order_id}`);
-      return { success: true, order_id: data.order_id || data.order?.order_id || 'submitted' };
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
+  public async placeOrder(
+    ticker: string, 
+    action: 'buy' | 'sell', 
+    side: 'yes' | 'no', 
+    count: number, 
+    price?: number,
+    retryCount = 0
+  ): Promise<{ success: boolean; order_id?: string; order?: any; error?: string }> {
+    if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
+
+    try {
+      const isPerp = ticker.toUpperCase().endsWith('PERP');
+      const orderCount = Math.max(1, Math.round(count));
+      
+      // Kalshi requires a valid RFC 4122 UUID v4 for client_order_id
+      const clientOrderId = typeof crypto.randomUUID === 'function' 
+        ? crypto.randomUUID() 
+        : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+            const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+          });
+
+      const tryEndpoints = [this.baseUrl, this.fallbackBaseUrl];
+      let lastError = '';
+
+      for (const host of tryEndpoints) {
+        try {
+          const method = 'POST';
+          const path = isPerp ? '/margin/orders' : '/portfolio/orders';
+
+          let payload: any;
+          if (isPerp) {
+            const limitPrice = typeof price === 'number' && !isNaN(price) && price > 0 ? price : 0.50;
+            payload = {
+              ticker,
+              side: action === 'buy' ? 'bid' : 'ask',
+              count: orderCount.toString(),
+              type: 'limit',
+              price: limitPrice.toFixed(4),
+              client_order_id: clientOrderId
+            };
+          } else {
+            // Standard Kalshi Event Contract Limit Order
+            // Side is strictly 'yes' or 'no'
+            const normSide = side.toLowerCase() === 'no' ? 'no' : 'yes';
+            const normAction = action.toLowerCase() === 'sell' ? 'sell' : 'buy';
+            
+            let rawPrice = typeof price === 'number' && !isNaN(price) && price > 0 ? price : 0.50;
+            if (rawPrice < 0.01) rawPrice = 0.01;
+            if (rawPrice > 0.99) rawPrice = 0.99;
+
+            const priceInCents = Math.round(rawPrice * 100);
+
+            payload = {
+              ticker,
+              action: normAction,
+              side: normSide,
+              type: 'limit',
+              count: orderCount,
+              client_order_id: clientOrderId,
+              time_in_force: 'good_till_canceled'
+            };
+
+            if (normSide === 'yes') {
+              payload.yes_price = priceInCents;
+            } else {
+              payload.no_price = priceInCents;
+            }
+          }
+
+          const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
+
+          const res = await fetch(host + path, {
+            method,
+            headers: {
+              'Content-Type': 'application/json',
+              'KALSHI-ACCESS-KEY': this.keyId,
+              'KALSHI-ACCESS-TIMESTAMP': timestamp,
+              'KALSHI-ACCESS-SIGNATURE': signature
+            },
+            body: JSON.stringify(payload)
+          });
+
+          if (!res.ok) {
+            const txt = await res.text();
+            lastError = `HTTP ${res.status}: ${txt}`;
+            console.error(`[KALSHI ORDER ERROR on ${host}]`, lastError, 'Payload:', payload);
+
+            // Shard healing check
+            if (
+              retryCount === 0 &&
+              (txt.includes('insufficient_shard_balance') || txt.includes('Exchange user not found') || txt.includes('insufficient_balance'))
+            ) {
+              console.log('[KALSHI SHARD HEALER] Insufficient balance on shard. Moving funds...');
+              const fundRes = await this.ensureCryptoShardFunded(20);
+              if (fundRes.success) {
+                await new Promise((r) => setTimeout(r, 1000));
+                return this.placeOrder(ticker, action, side, count, price, retryCount + 1);
+              }
+            }
+            continue;
+          }
+
+          const data: any = await res.json();
+          const orderObj = data.order || data;
+          const orderId = orderObj.order_id || orderObj.client_order_id || clientOrderId;
+
+          console.log(`[KALSHI LIVE ORDER SUCCESS] Placed ${action} ${side} on ${ticker} (ID: ${orderId})`);
+          return { success: true, order_id: orderId, order: orderObj };
+        } catch (e: any) {
+          lastError = e.message || String(e);
+        }
+      }
+
+      return { success: false, error: lastError };
     } catch (e: any) {
       console.error('[KALSHI ORDER ERROR]', e.message);
       return { success: false, error: e.message };

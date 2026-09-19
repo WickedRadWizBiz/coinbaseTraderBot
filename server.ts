@@ -43,7 +43,7 @@ let settings = {
   profitLockFloor: 5,
   instantProfitQueue: 20,
   kellyMultiplier: 3.0,
-  paperTrading: true,
+  paperTrading: !Boolean(process.env.KALSHI_API_KEY && process.env.KALSHI_API_SECRET),
   botActive: true,
   adaptationMode: true,
   ENABLE_RAPID_SCALP_MODE: true,
@@ -64,6 +64,12 @@ let logIdCounter = 100;
 let simulatedPaperBalance = 200;
 let realKalshiCashPool = 0;
 let lastRealCashFetchTime = 0;
+let livePositionsValue = 0;
+let liveTotalPortfolioValue = 0;
+let liveRealizedPnl = 0;
+let liveUnrealizedPnl = 0;
+let liveStartingBankroll = 0;
+let liveVaultedProfits = 0;
 
 let paperBankrollATH = 200;
 let liveBankrollATH = 0;
@@ -81,20 +87,29 @@ async function getEffectiveWorkingBalance(forceSync = false): Promise<number> {
   }
   
   const now = Date.now();
-  if (forceSync || now - lastRealCashFetchTime > 10000 || realKalshiCashPool === 0) {
+  if (forceSync || now - lastRealCashFetchTime > 8000 || realKalshiCashPool === 0) {
     try {
-      const res = await kalshiService.getBalance();
-      if (res.success && res.balance !== undefined) {
-        realKalshiCashPool = res.balance;
+      const summary = await kalshiService.getPortfolioSummary();
+      if (summary.success) {
+        realKalshiCashPool = summary.cash;
+        livePositionsValue = summary.positions_value;
+        liveTotalPortfolioValue = summary.portfolio_value;
+        liveRealizedPnl = summary.realized_pnl;
+        liveUnrealizedPnl = summary.unrealized_pnl;
+
+        if (liveStartingBankroll === 0 && liveTotalPortfolioValue > 0) {
+          liveStartingBankroll = liveTotalPortfolioValue;
+        }
+
         lastRealCashFetchTime = now;
-      } else if (!res.success && res.error) {
-        console.error('[KALSHI] Balance sync issue:', res.error);
+      } else if (!summary.success && summary.error) {
+        console.error('[KALSHI] Portfolio sync issue:', summary.error);
         if (now - lastRealCashFetchTime > 60000) {
           spotLogs.unshift({
             id: logIdCounter++,
             time: new Date().toISOString(),
             type: 'WARN',
-            message: `[KALSHI LIVE BALANCE ERROR] ${res.error}. Ensure KALSHI_API_KEY and KALSHI_API_SECRET in .env are correct.`
+            message: `[KALSHI LIVE PORTFOLIO ERROR] ${summary.error}. Verify Kalshi API Key & RSA Private Key.`
           });
           lastRealCashFetchTime = now;
         }
@@ -1745,8 +1760,8 @@ function evaluatePostSLContractCandidate(symbol: string, targetSide: string, sta
       reason = 'Doji Reversal Candlestick';
     }
 
-    const bidVol = Math.floor(Math.random() * 500 + 500);
-    const askVol = Math.floor(Math.random() * 500 + 500);
+    const bidVol = (ctx.bids && ctx.bids.length > 0) ? ctx.bids.reduce((a: number, b: any) => a + (Number(b.size) || 0), 0) : 500;
+    const askVol = (ctx.asks && ctx.asks.length > 0) ? ctx.asks.reduce((a: number, b: any) => a + (Number(b.size) || 0), 0) : 500;
 
     let recCheck = isTradeAllowedBySpotTAAndRecovery(
       testSide,
@@ -2227,7 +2242,7 @@ async function openPosition(
       const micro = (bidVol + askVol) > 0 ? (bestBid * askVol + bestAsk * bidVol) / (bidVol + askVol) : mid;
       return mid > 0 ? (micro - mid) / mid : 0;
     })(),
-    cancelToFillRatio: 1.0 + Math.abs(ofi) * 2.5 + (Math.random() * 0.2), // Dynamic spoofing detection proxy
+    cancelToFillRatio: 1.0 + Math.abs(ofi) * 2.5, // Dynamic spoofing detection based on live OFI
     vwapDistancePct: currentSpotTA?.vwapDistancePct || 0,
     fundingRate: fundingRateTracker.fundingRates[symbol.replace('USDT', '').replace('-USD', '')] || 0,
     marketRegime: regimeStr,
@@ -2549,27 +2564,39 @@ async function openPosition(
     entryFeatures
   };
 
-  activePositions.push(pos);
-  spotLogs.unshift({
-    id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
-    message: `[${executionType}] Opened ${side} on ${symbol} (${label}) at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} | Capital: $${positionCostUsd.toFixed(2)} (${size}x) | Target: +${(expectedTP*100).toFixed(1)}% (+$${projectedProfitAtTP.toFixed(2)}) | SL: ${(params.dynamicSL*100).toFixed(1)}%`
-  });
-
-  // If paperTrading is OFF, dispatch live order directly to Kalshi Prediction / Margin Markets
+  // If paperTrading is OFF (Live Mode), strictly place real order on Kalshi FIRST
   if (!settings.paperTrading) {
     const liveAction = isPerpContract ? (side === 'YES' ? 'buy' : 'sell') : 'buy';
-    kalshiService.placeOrder(symbol, liveAction, side.toLowerCase() as 'yes' | 'no', size, optimizedEntryPrice).then(res => {
-      if (res.success) {
-        spotLogs.unshift({
-          id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
-          message: `[KALSHI LIVE ORDER SUCCESS] Live ${side} limit order for ${size} contracts on ${symbol} at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} successfully submitted to Kalshi (OrderID: ${res.order_id}).`
-        });
-      } else {
-        spotLogs.unshift({
-          id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-          message: `[KALSHI LIVE ORDER ERROR] Failed to submit live order for ${symbol}: ${res.error}`
-        });
-      }
+    const liveRes = await kalshiService.placeOrder(
+      symbol, 
+      liveAction, 
+      side.toLowerCase() as 'yes' | 'no', 
+      size, 
+      optimizedEntryPrice
+    );
+
+    if (!liveRes.success) {
+      spotLogs.unshift({
+        id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+        message: `[KALSHI LIVE ORDER REJECTED] Order for ${size}x ${side} on ${symbol} at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} was rejected by Kalshi: ${liveRes.error}. Trade aborted to prevent phantom desynchronization.`
+      });
+      return; // DO NOT push to activePositions if real order failed!
+    }
+
+    (pos as any).kalshiOrderId = liveRes.order_id;
+    (pos as any).isLive = true;
+
+    activePositions.push(pos);
+    spotLogs.unshift({
+      id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
+      message: `[KALSHI LIVE ORDER FILLED/PLACED] Real ${side} order for ${size} contracts on ${symbol} (${label}) submitted at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} | Kalshi Order ID: ${liveRes.order_id} | Capital: $${positionCostUsd.toFixed(2)}`
+    });
+  } else {
+    // Paper Trading Mode
+    activePositions.push(pos);
+    spotLogs.unshift({
+      id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
+      message: `[${executionType}] Opened ${side} on ${symbol} (${label}) at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} | Capital: $${positionCostUsd.toFixed(2)} (${size}x) | Target: +${(expectedTP*100).toFixed(1)}% (+$${projectedProfitAtTP.toFixed(2)}) | SL: ${(params.dynamicSL*100).toFixed(1)}%`
     });
   }
   } catch (err: any) {
@@ -2759,7 +2786,10 @@ async function discoverMarkets() {
 
           if (!spotContexts[best.ticker]) {
             const initialPrice = (parseFloat(best.yes_bid_dollars || 0) + parseFloat(best.yes_ask_dollars || 1)) / 2 || 0.50;
-            const book = settings.paperTrading ? await fetchRealSpotOrderBook(label, initialPrice) : { bids: [], asks: [] };
+            const obRes = await kalshiService.getOrderBook(best.ticker);
+            const book = (obRes.success && obRes.bids && obRes.bids.length > 0)
+              ? { bids: obRes.bids, asks: obRes.asks || [] }
+              : await fetchRealSpotOrderBook(label, initialPrice);
             spotContexts[best.ticker] = {
               currentPrice: initialPrice,
               bids: book.bids,
@@ -3531,9 +3561,22 @@ setInterval(async () => {
         if (isPerp && data.orderbook) {
           bids = (data.orderbook.bids || []).map((b: any) => ({ price: parseFloat(b[0]), size: parseFloat(b[1]) })).sort((a: any, b: any) => b.price - a.price);
           asks = (data.orderbook.asks || []).map((a: any) => ({ price: parseFloat(a[0]), size: parseFloat(a[1]) })).sort((a: any, b: any) => a.price - b.price);
-        } else if (data.orderbook_fp) {
+        } else if (data.orderbook_fp && (data.orderbook_fp.yes_dollars || data.orderbook_fp.no_dollars)) {
           bids = data.orderbook_fp.yes_dollars ? data.orderbook_fp.yes_dollars.map((b: any) => ({ price: parseFloat(b[0]), size: parseFloat(b[1]) })).sort((a: any, b: any) => b.price - a.price) : [];
           asks = data.orderbook_fp.no_dollars ? data.orderbook_fp.no_dollars.map((a: any) => ({ price: 1.0 - parseFloat(a[0]), size: parseFloat(a[1]) })).sort((a: any, b: any) => a.price - b.price) : [];
+        } else if (data.orderbook && (data.orderbook.yes || data.orderbook.no)) {
+          const yesLevels = data.orderbook.yes || [];
+          const noLevels = data.orderbook.no || [];
+          bids = yesLevels.map((lvl: any) => {
+            const rawP = parseFloat(lvl[0]);
+            const normP = rawP > 1 ? rawP / 100 : rawP;
+            return { price: normP, size: parseFloat(lvl[1]) };
+          }).sort((a: any, b: any) => b.price - a.price);
+          asks = noLevels.map((lvl: any) => {
+            const rawP = parseFloat(lvl[0]);
+            const normP = rawP > 1 ? rawP / 100 : rawP;
+            return { price: parseFloat((1.0 - normP).toFixed(4)), size: parseFloat(lvl[1]) };
+          }).sort((a: any, b: any) => a.price - b.price);
         }
 
         if (bids.length > 0 && asks.length > 0) {
@@ -4085,13 +4128,13 @@ setInterval(async () => {
             dynamicSize = 0;
         }
         
-        // Latency-Aware State Space Simulation (30-50ms window)
-        const simulatedLatencyMs = Math.random() * 20 + 30;
-        const orderHoldTimePenalty = simulatedLatencyMs * 0.00005;
-        const simulatedFillPrice = entryPrice + orderHoldTimePenalty;
+        // Latency-Aware State Space Calibration
+        const measuredLatencyMs = latencyAdaptiveEngine.getProfile()?.effectiveLatencyMs || 35;
+        const orderHoldTimePenalty = measuredLatencyMs * 0.00005;
+        const expectedFillPrice = entryPrice + orderHoldTimePenalty;
         
         const p_shrunk = (pref.shrunkKellyMultiplier + 1) / 2;
-        const expectedValue = p_shrunk * (1 - simulatedFillPrice) - (1 - p_shrunk) * simulatedFillPrice;
+        const expectedValue = p_shrunk * (1 - expectedFillPrice) - (1 - p_shrunk) * expectedFillPrice;
         const expectedValueSkewed = expectedValue - (topCandidate.signalSide === 'YES' ? inventorySkew : -inventorySkew);
         const net_edge = expectedValueSkewed - 0.005;
         
@@ -4805,8 +4848,97 @@ setInterval(async () => {
 
   if (spotLogs.length > 50) spotLogs.length = 50;
   lastSuccessfulLoopTime = Date.now();
+
+  // Reconcile real Kalshi positions and orders in live mode
+  if (!settings.paperTrading) {
+    syncLiveKalshiPositions().catch(e => console.error('[KALSHI SYNC LOOP ERROR]', e));
+  }
   } catch (e) { console.error("[BACKGROUND INTERVAL ERROR]", e); }
 }, 4000);
+
+let lastLivePositionSyncTime = 0;
+
+async function syncLiveKalshiPositions(force = false) {
+  if (settings.paperTrading) return { success: false, error: 'In Paper Trading Mode' };
+  if (!kalshiService.isConfigured()) return { success: false, error: 'Kalshi not configured' };
+
+  const now = Date.now();
+  if (!force && now - lastLivePositionSyncTime < 10000) return { success: true };
+  lastLivePositionSyncTime = now;
+
+  try {
+    const posRes = await kalshiService.getPositions();
+    if (!posRes.success || !posRes.market_positions) {
+      return { success: false, error: posRes.error || 'Failed to fetch positions' };
+    }
+
+    // Build map of open positions on Kalshi
+    const liveKalshiOpenMap: Record<string, { size: number; side: 'YES' | 'NO'; raw: any }> = {};
+    
+    for (const p of posRes.market_positions) {
+      const positionCount = typeof p.position === 'number' ? p.position : (p.position_fp ? parseFloat(p.position_fp) : 0);
+      if (positionCount !== 0) {
+        const side: 'YES' | 'NO' = positionCount > 0 ? 'YES' : 'NO';
+        const size = Math.abs(positionCount);
+        liveKalshiOpenMap[p.ticker] = {
+          size,
+          side,
+          raw: p
+        };
+      }
+    }
+
+    // 1. Remove active positions in local memory that no longer exist on Kalshi
+    for (let i = activePositions.length - 1; i >= 0; i--) {
+      const ap = activePositions[i];
+      if ((ap as any).isLive) {
+        if (!liveKalshiOpenMap[ap.symbol]) {
+          console.log(`[KALSHI SYNC] Pruning local position ${ap.symbol} (${ap.side}) - no longer active on Kalshi.`);
+          activePositions.splice(i, 1);
+        }
+      }
+    }
+
+    // 2. Add or reconcile positions from Kalshi
+    for (const [ticker, kPos] of Object.entries(liveKalshiOpenMap)) {
+      const existing = activePositions.find(p => p.symbol === ticker);
+      if (existing) {
+        existing.size = kPos.size;
+        existing.side = kPos.side;
+        (existing as any).isLive = true;
+      } else {
+        const ctx = spotContexts[ticker];
+        const entryPrice = ctx ? ctx.currentPrice : 0.50;
+        const newPos: PaperPosition = {
+          id: ++logIdCounter,
+          symbol: ticker,
+          side: kPos.side,
+          entryPrice,
+          size: kPos.size,
+          entryTime: Date.now(),
+          category: ctx?.category || 'crypto',
+          params: { dynamicTP: 0.10, dynamicSL: -0.02, dynamicTrail: 0.04 },
+          isOverride: false,
+          matchId: ctx?.matchId || ticker,
+          label: ctx?.label || ticker,
+          reason: 'Imported / Synchronized from Live Kalshi Portfolio',
+          isPerpetual: ticker.endsWith('PERP'),
+          expectedTP: 0.10,
+          capitalPlacedUsd: kPos.size * entryPrice,
+          lastTickTime: Date.now()
+        };
+        (newPos as any).isLive = true;
+        activePositions.push(newPos);
+        console.log(`[KALSHI SYNC] Adopted live Kalshi position ${ticker} (${kPos.side} x${kPos.size}) into active tracker.`);
+      }
+    }
+
+    return { success: true, livePositions: liveKalshiOpenMap };
+  } catch (err: any) {
+    console.error('[KALSHI SYNC ERROR]', err);
+    return { success: false, error: err.message || String(err) };
+  }
+}
 
 // API Endpoints
 app.post('/api/reset-bot', async (req, res) => {
@@ -4866,45 +4998,69 @@ app.post('/api/goal-target', (req, res) => {
 
 app.get('/api/balance', async (req, res) => {
   const availableCashPool = await getEffectiveWorkingBalance();
-  goalResetScheduler.updateCapitalScaling(availableCashPool);
   
   let capitalInUse = 0;
   if (settings.paperTrading) {
     activePositions.forEach(p => capitalInUse += (p.capitalPlacedUsd || (p.size * p.entryPrice)));
+    goalResetScheduler.updateCapitalScaling(availableCashPool);
+  } else {
+    capitalInUse = livePositionsValue;
   }
   
   const totalEquity = settings.paperTrading 
     ? (simulatedPaperBalance + vaultedProfits)
-    : (availableCashPool + vaultedProfits); // For real Kalshi, we'd need portfolio value to get true total equity
+    : (liveTotalPortfolioValue > 0 ? (liveTotalPortfolioValue + liveVaultedProfits) : (realKalshiCashPool + livePositionsValue + liveVaultedProfits));
+
+  const startingBank = settings.paperTrading 
+    ? startingBankroll 
+    : (liveStartingBankroll > 0 ? liveStartingBankroll : (totalEquity > 0 ? totalEquity : 23.62));
+    
+  const delta24h = totalEquity - startingBank;
+  const delta24hPct = startingBank > 0 ? (delta24h / startingBank) * 100 : 0;
 
   const sessionInfo = getGlobalMarketSession();
   const strictActive = isStrict3ConfluenceActive();
-  const pocketedAmount = sessionPocketedProfit;
+  const pocketedAmount = settings.paperTrading ? sessionPocketedProfit : liveVaultedProfits;
   const isAcceleratedVault = pocketedAmount >= 100;
   const currentVaultThreshold = isAcceleratedVault ? 20 : 50;
 
+  const dailyProfit = settings.paperTrading 
+    ? goalResetScheduler.getStatus().current_profit 
+    : (liveRealizedPnl + liveUnrealizedPnl);
+
   res.json({
-    working_balance: availableCashPool, // the available cash
+    working_balance: availableCashPool, // the available cash after 10% reserve
     capital_in_use: capitalInUse,
     bankroll_ath: settings.paperTrading ? paperBankrollATH : liveBankrollATH,
     reserve_amount: (settings.paperTrading ? paperBankrollATH : liveBankrollATH) * 0.10,
     paper_trading: settings.paperTrading,
     low_funds_mode: settings.lowFundsMode,
     real_kalshi_cash_pool: realKalshiCashPool,
+    real_kalshi_positions_value: livePositionsValue,
+    real_kalshi_portfolio_value: liveTotalPortfolioValue,
+    realized_pnl: liveRealizedPnl,
+    unrealized_pnl: liveUnrealizedPnl,
     simulated_paper_balance: simulatedPaperBalance,
-    cycle_earned_profit: cycleEarnedProfit,
-    vaulted_profits: vaultedProfits,
-    completed_goal_cycles: completedGoalCycles,
+    cycle_earned_profit: settings.paperTrading ? cycleEarnedProfit : (liveRealizedPnl + liveUnrealizedPnl),
+    vaulted_profits: settings.paperTrading ? vaultedProfits : liveVaultedProfits,
+    completed_goal_cycles: settings.paperTrading ? completedGoalCycles : 0,
     cumulative_paper_profit: cumulativePaperProfit,
     completed_paper_iterations: completedPaperIterations,
     total_balance: totalEquity,
-    starting_bankroll: startingBankroll,
-    delta_24h: totalEquity - startingBankroll,
-    delta_24h_pct: startingBankroll > 0 ? ((totalEquity - startingBankroll) / startingBankroll) * 100 : 0,
-    goal_window: goalResetScheduler.getStatus(),
+    starting_bankroll: startingBank,
+    delta_24h: delta24h,
+    delta_24h_pct: delta24hPct,
+    goal_window: settings.paperTrading 
+      ? goalResetScheduler.getStatus() 
+      : {
+          ...goalResetScheduler.getStatus(),
+          current_profit: dailyProfit,
+          progress_pct: Math.min(100, Math.max(0, (dailyProfit / 100) * 100)),
+          goal_reached: dailyProfit >= 100
+        },
     daily_goal: 100,
-    daily_profit: goalResetScheduler.getStatus().current_profit,
-    previous_day_profit: goalResetScheduler.getStatus().previous_profit,
+    daily_profit: dailyProfit,
+    previous_day_profit: settings.paperTrading ? goalResetScheduler.getStatus().previous_profit : 0,
     session_info: {
       current_session: sessionInfo.sessionName,
       session_key: sessionInfo.sessionKey,
@@ -4994,6 +5150,125 @@ app.post('/api/kalshi/test-connection', async (req, res) => {
     error: testBal.error,
     diagnostic: kalshiService.getDiagnostic()
   });
+});
+
+app.get('/api/kalshi/portfolio', async (req, res) => {
+  try {
+    const [balRes, posRes, ordRes] = await Promise.all([
+      kalshiService.getBalance(),
+      kalshiService.getPositions(),
+      kalshiService.getOpenOrders()
+    ]);
+
+    res.json({
+      success: true,
+      balance: balRes.balance || 0,
+      balance_connected: balRes.success,
+      market_positions: posRes.market_positions || [],
+      event_positions: posRes.event_positions || [],
+      open_orders: ordRes.orders || [],
+      bot_active_positions: activePositions,
+      paper_trading: settings.paperTrading,
+      diagnostic: kalshiService.getDiagnostic()
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to fetch Kalshi portfolio' });
+  }
+});
+
+app.post('/api/kalshi/sync-positions', async (req, res) => {
+  try {
+    const syncRes = await syncLiveKalshiPositions(true);
+    const balRes = await kalshiService.getBalance();
+    res.json({
+      success: syncRes.success,
+      error: syncRes.error,
+      activePositionsCount: activePositions.length,
+      activePositions,
+      liveKalshiCash: balRes.balance || 0
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to sync positions' });
+  }
+});
+
+app.post('/api/kalshi/cancel-order', async (req, res) => {
+  try {
+    const { orderId } = req.body || {};
+    if (!orderId) return res.status(400).json({ success: false, error: 'Order ID is required' });
+    const cancelRes = await kalshiService.cancelOrder(orderId);
+    res.json(cancelRes);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to cancel order' });
+  }
+});
+
+app.post('/api/kalshi/cancel-all-orders', async (req, res) => {
+  try {
+    const ordRes = await kalshiService.getOpenOrders();
+    if (!ordRes.success) {
+      return res.status(500).json({ success: false, error: ordRes.error || 'Failed to fetch open orders' });
+    }
+
+    const orders = ordRes.orders || [];
+    const results = [];
+    for (const ord of orders) {
+      const oid = ord.order_id || ord.client_order_id;
+      if (oid) {
+        const cRes = await kalshiService.cancelOrder(oid);
+        results.push({ orderId: oid, ...cRes });
+      }
+    }
+
+    spotLogs.unshift({
+      id: logIdCounter++,
+      time: new Date().toISOString(),
+      type: 'INFO',
+      message: `[KALSHI CANCEL ALL] Cancelled ${results.length} resting orders on Kalshi.`
+    });
+
+    res.json({ success: true, cancelledCount: results.length, results });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to cancel orders' });
+  }
+});
+
+app.post('/api/kalshi/close-all-positions', async (req, res) => {
+  try {
+    const posRes = await kalshiService.getPositions();
+    if (!posRes.success) {
+      return res.status(500).json({ success: false, error: posRes.error || 'Failed to fetch positions' });
+    }
+
+    const results = [];
+    const positions = posRes.market_positions || [];
+
+    for (const p of positions) {
+      const count = typeof p.position === 'number' ? p.position : (p.position_fp ? parseFloat(p.position_fp) : 0);
+      if (count !== 0) {
+        const isPerp = p.ticker.endsWith('PERP');
+        const side = count > 0 ? 'yes' : 'no';
+        const action = isPerp ? (count > 0 ? 'sell' : 'buy') : 'sell';
+        const size = Math.abs(count);
+        const exitPrice = side === 'yes' ? 0.01 : 0.01; // emergency market sweep or low limit
+
+        const closeRes = await kalshiService.placeOrder(p.ticker, action, side, size, exitPrice);
+        results.push({ ticker: p.ticker, side, size, ...closeRes });
+      }
+    }
+
+    activePositions.length = 0; // Clear local array
+    spotLogs.unshift({
+      id: logIdCounter++,
+      time: new Date().toISOString(),
+      type: 'WARN',
+      message: `[KALSHI EMERGENCY CLOSE ALL] Dispatched close orders for ${results.length} positions.`
+    });
+
+    res.json({ success: true, closedCount: results.length, results });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to close all positions' });
+  }
 });
 
 app.post('/api/restart', (req, res) => {

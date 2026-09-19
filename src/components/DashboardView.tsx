@@ -580,7 +580,7 @@ export function DashboardView() {
                     ? 'border-crypto-success text-crypto-success bg-crypto-success/10' 
                     : 'border-crypto-primary/40 text-crypto-primary bg-black/40'
                 }`}>
-                  {balance?.paper_trading === false ? 'COINBASE REAL POOL' : 'PAPER CASH'}
+                  {balance?.paper_trading === false ? 'KALSHI REAL POOL' : 'PAPER CASH'}
                 </span>
               </div>
             </div>
