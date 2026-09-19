@@ -2572,6 +2572,10 @@ async function openPosition(
       liveAction,
       side.toLowerCase() as 'yes' | 'no',
       size,
+      symbol, 
+      liveAction, 
+      side.toLowerCase() as 'yes' | 'no', 
+      size, 
       optimizedEntryPrice
     );
 
@@ -2751,6 +2755,7 @@ async function discoverMarkets() {
             const book = (obRes.success && obRes.bids && obRes.bids.length > 0)
               ? { bids: obRes.bids, asks: obRes.asks || [] }
               : { bids: [], asks: [] }; // No fake data fallback allowed
+              : await fetchRealSpotOrderBook(label, initialPrice);
             spotContexts[best.ticker] = {
               currentPrice: initialPrice,
               bids: book.bids,
@@ -4836,6 +4841,7 @@ async function syncLiveKalshiPositions(force = false) {
     // Build map of open positions on Kalshi
     const liveKalshiOpenMap: Record<string, { size: number; side: 'YES' | 'NO'; raw: any }> = {};
 
+    
     for (const p of posRes.market_positions) {
       const positionCount = typeof p.position === 'number' ? p.position : (p.position_fp ? parseFloat(p.position_fp) : 0);
       if (positionCount !== 0) {
@@ -4976,6 +4982,10 @@ app.get('/api/balance', async (req, res) => {
     ? startingBankroll
     : (liveStartingBankroll > 0 ? liveStartingBankroll : (totalEquity > 0 ? totalEquity : 23.62));
 
+  const startingBank = settings.paperTrading 
+    ? startingBankroll 
+    : (liveStartingBankroll > 0 ? liveStartingBankroll : (totalEquity > 0 ? totalEquity : 23.62));
+    
   const delta24h = totalEquity - startingBank;
   const delta24hPct = startingBank > 0 ? (delta24h / startingBank) * 100 : 0;
 
@@ -4987,6 +4997,8 @@ app.get('/api/balance', async (req, res) => {
 
   const dailyProfit = settings.paperTrading
     ? goalResetScheduler.getStatus().current_profit
+  const dailyProfit = settings.paperTrading 
+    ? goalResetScheduler.getStatus().current_profit 
     : (liveRealizedPnl + liveUnrealizedPnl);
 
   res.json({
@@ -5013,6 +5025,8 @@ app.get('/api/balance', async (req, res) => {
     delta_24h_pct: delta24hPct,
     goal_window: settings.paperTrading
       ? goalResetScheduler.getStatus()
+    goal_window: settings.paperTrading 
+      ? goalResetScheduler.getStatus() 
       : {
           ...goalResetScheduler.getStatus(),
           current_profit: dailyProfit,
