@@ -2647,9 +2647,10 @@ async function discoverPerpetuals() {
     // Ensure primary perpetual symbols are always available as candidates
     const primaryPerpTickers = ['KXBTCPERP', 'KXETHPERP', 'KXSOLPERP', 'KXDOGEPERP', 'KXXRPPERP', 'KXHYPEPERP'];
     const allPerpTickers = new Set([...marginMarkets.map((m: any) => m.ticker), ...primaryPerpTickers]);
+    const marginMarketsMap = new Map(marginMarkets.map((m: any) => [m.ticker, m]));
 
     for (const ticker of allPerpTickers) {
-      const m = marginMarkets.find((item: any) => item.ticker === ticker);
+      const m = marginMarketsMap.get(ticker);
       const rawAsset = ticker.replace(/^KX/, '').replace(/PERP$/, '');
       const label = `${rawAsset} Perp`;
       const fallbackSpot = scalper.currentCandles[`${rawAsset}-USD`]?.close || (rawAsset === 'BTC' ? 88000 : rawAsset === 'ETH' ? 3200 : rawAsset === 'SOL' ? 180 : rawAsset === 'XRP' ? 2.3 : rawAsset === 'DOGE' ? 0.25 : 35);
