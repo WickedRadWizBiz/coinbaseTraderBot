@@ -90,8 +90,7 @@ export class UnifiedDataHandler {
     symbol: string,
     label: string,
     category: string,
-    candlesMap: { [pair: string]: Candle[] },
-    binanceCandlesMap?: { [pair: string]: Candle[] }
+    candlesMap: { [pair: string]: Candle[] }
   ): SpotTAMetrics {
     const mapping = this.resolveCorrelatedSpotPair(symbol, label, category);
     if (!mapping.isCryptoSpot) {
@@ -122,29 +121,7 @@ export class UnifiedDataHandler {
     }
 
     const candles = candlesMap[mapping.correlatedSpotPair] || [];
-    const primaryMetrics = computeSpotTAMetrics(mapping.correlatedSpotPair, candles);
-
-    if (binanceCandlesMap) {
-      const binanceCandles = binanceCandlesMap[mapping.correlatedSpotPair] || [];
-      if (binanceCandles.length > 0) {
-        const binanceMetrics = computeSpotTAMetrics(mapping.correlatedSpotPair, binanceCandles);
-
-        // Strict Validation: If Binance and Coinbase disagree on trend direction, neutralize the signal.
-        const isCbBullish = primaryMetrics.ichimokuState === 'BULLISH_CLOUD' || primaryMetrics.rsi > 55;
-        const isCbBearish = primaryMetrics.ichimokuState === 'BEARISH_CLOUD' || primaryMetrics.rsi < 45;
-
-        const isBinBullish = binanceMetrics.ichimokuState === 'BULLISH_CLOUD' || binanceMetrics.rsi > 55;
-        const isBinBearish = binanceMetrics.ichimokuState === 'BEARISH_CLOUD' || binanceMetrics.rsi < 45;
-
-        if ((isCbBullish && isBinBearish) || (isCbBearish && isBinBullish)) {
-          // Divergence between exchanges detected. Neutralize to prevent false positive signals.
-          primaryMetrics.ichimokuState = 'NEUTRAL_IN_CLOUD';
-          primaryMetrics.rsi = 50;
-        }
-      }
-    }
-
-    return primaryMetrics;
+    return computeSpotTAMetrics(mapping.correlatedSpotPair, candles);
   }
 
   /**
