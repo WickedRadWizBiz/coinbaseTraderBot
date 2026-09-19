@@ -2665,41 +2665,6 @@ async function discoverPerpetuals() {
   }
 }
 
-async function fetchRealSpotOrderBook(label: string, initialPrice: number) {
-  try {
-    let pair = 'BTC-USD';
-    const l = label.toUpperCase();
-    if (l.includes('ETH')) pair = 'ETH-USD';
-    else if (l.includes('SOL')) pair = 'SOL-USD';
-    else if (l.includes('XRP')) pair = 'XRP-USD';
-    else if (l.includes('DOGE')) pair = 'DOGE-USD';
-    else if (l.includes('HYPE')) pair = 'SOL-USD';
-
-    const res = await fetch(`https://api.exchange.coinbase.com/products/${pair}/book?level=1`, { signal: AbortSignal.timeout(3000), headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.bids && data.asks && data.bids.length > 0 && data.asks.length > 0) {
-        const bestRealBid = Number(data.bids[0][0]);
-        const bestRealAsk = Number(data.asks[0][0]);
-        const spread = Math.max(0.01, Math.min(0.05, Math.abs(bestRealAsk - bestRealBid) / bestRealBid));
-        const pBid = Math.max(0.01, parseFloat((initialPrice - spread / 2).toFixed(2)));
-        const pAsk = Math.min(0.99, parseFloat((initialPrice + spread / 2).toFixed(2)));
-        return {
-          bids: [{ price: pBid, size: Number(data.bids[0][1]) || 500 }, { price: Math.max(0.01, pBid - 0.01), size: 300 }],
-          asks: [{ price: pAsk, size: Number(data.asks[0][1]) || 500 }, { price: Math.min(0.99, pAsk + 0.01), size: 300 }]
-        };
-      }
-    }
-  } catch (e) {
-    // Silent fallback to clean market spread
-  }
-  const pBid = Math.max(0.01, parseFloat((initialPrice - 0.01).toFixed(2)));
-  const pAsk = Math.min(0.99, parseFloat((initialPrice + 0.01).toFixed(2)));
-  return {
-    bids: [{ price: pBid, size: 500 }],
-    asks: [{ price: pAsk, size: 500 }]
-  };
-}
 
 async function fetchJson(url: string) {
   const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
@@ -2759,11 +2724,19 @@ async function discoverMarkets() {
 
           if (!spotContexts[best.ticker]) {
             const initialPrice = (parseFloat(best.yes_bid_dollars || 0) + parseFloat(best.yes_ask_dollars || 1)) / 2 || 0.50;
-            const book = settings.paperTrading ? await fetchRealSpotOrderBook(label, initialPrice) : { bids: [], asks: [] };
+            let bookBids: any[] = [];
+            let bookAsks: any[] = [];
+            if (settings.paperTrading) {
+              const ob = await kalshiService.getOrderBook(best.ticker);
+              if (ob.success) {
+                bookBids = ob.bids || [];
+                bookAsks = ob.asks || [];
+              }
+            }
             spotContexts[best.ticker] = {
               currentPrice: initialPrice,
-              bids: book.bids,
-              asks: book.asks,
+              bids: bookBids,
+              asks: bookAsks,
               volume: 0,
               label: label,
               category: category,
@@ -2908,17 +2881,23 @@ function evaluateCounterPositionViability(
 
 class RapidScalper {
   ws: any = null;
+  binanceWs: any = null;
   candles: { [productId: string]: any[] } = {
     'BTC-USD': [], 'ETH-USD': [], 'SOL-USD': [], 'HYPE-USD': [], 'DOGE-USD': [], 'XRP-USD': [],
     'SUI-USD': [], 'LINK-USD': [], 'ADA-USD': [], 'LTC-USD': [], 'BCH-USD': [], 'AAVE-USD': [], 'AVAX-USD': []
   };
+  binanceCandles: { [productId: string]: any[] } = {
+    'BTC-USD': [], 'ETH-USD': [], 'SOL-USD': [], 'HYPE-USD': [], 'DOGE-USD': [], 'XRP-USD': [],
+    'SUI-USD': [], 'LINK-USD': [], 'ADA-USD': [], 'LTC-USD': [], 'BCH-USD': [], 'AAVE-USD': [], 'AVAX-USD': []
+  };
   currentCandles: { [productId: string]: any } = {};
+  binanceCurrentCandles: { [productId: string]: any } = {};
 
   start() {
     if (this.ws) return;
     spotLogs.unshift({
       id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
-      message: '[SCALP ENGINE] Live Coinbase Spot Ticker Stream connected (BTC, ETH, SOL, HYPE, DOGE, XRP, SUI, LINK, ADA, LTC, BCH, AAVE, AVAX)'
+      message: '[SCALP ENGINE] Live Coinbase & Binance Spot Ticker Streams connected (BTC, ETH, SOL, HYPE, DOGE, XRP, SUI, LINK, ADA, LTC, BCH, AAVE, AVAX)'
     });
     try {
       this.ws = new (globalThis as any).WebSocket('wss://ws-feed.exchange.coinbase.com');
@@ -2943,7 +2922,7 @@ class RapidScalper {
             }
           }
           if (msg.type === 'ticker' && msg.product_id && msg.price) {
-            this.processTick(msg.product_id, parseFloat(msg.price));
+            this.processTick(msg.product_id, parseFloat(msg.price), false);
           }
         } catch (e) {}
       };
@@ -2955,8 +2934,28 @@ class RapidScalper {
         this.ws = null; 
         setTimeout(() => { if (settings.ENABLE_RAPID_SCALP_MODE) this.start(); }, 5000);
       };
+
+      // Connect to Binance as secondary confirmation
+      const streams = [
+        'btcusdt@aggTrade', 'ethusdt@aggTrade', 'solusdt@aggTrade', 'hypeusdt@aggTrade', 'dogeusdt@aggTrade', 'xrpusdt@aggTrade',
+        'suiusdt@aggTrade', 'linkusdt@aggTrade', 'adausdt@aggTrade', 'ltcusdt@aggTrade', 'bchusdt@aggTrade', 'aaveusdt@aggTrade', 'avaxusdt@aggTrade'
+      ].join('/');
+      this.binanceWs = new (globalThis as any).WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
+      this.binanceWs.onmessage = (event: any) => {
+        if (!settings.ENABLE_RAPID_SCALP_MODE || !settings.botActive) return;
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.data && payload.data.s && payload.data.p) {
+            const sym = payload.data.s.toUpperCase().replace('USDT', '-USD');
+            this.processTick(sym, parseFloat(payload.data.p), true);
+          }
+        } catch (e) {}
+      };
+      this.binanceWs.onerror = () => { this.binanceWs = null; };
+      this.binanceWs.onclose = () => { this.binanceWs = null; };
     } catch (e) {
       this.ws = null;
+      this.binanceWs = null;
     }
   }
 
@@ -2965,24 +2964,33 @@ class RapidScalper {
       try { this.ws.close(); } catch(e){}
       this.ws = null;
     }
+    if (this.binanceWs) {
+      try { this.binanceWs.close(); } catch(e){}
+      this.binanceWs = null;
+    }
   }
 
-  processTick(productId: string, price: number) {
+  processTick(productId: string, price: number, isBinance: boolean) {
     const now = Date.now();
-    if (!this.currentCandles[productId]) {
-      this.currentCandles[productId] = { time: now, open: price, high: price, low: price, close: price };
+    const currCandles = isBinance ? this.binanceCurrentCandles : this.currentCandles;
+    const historyCandles = isBinance ? this.binanceCandles : this.candles;
+
+    if (!currCandles[productId]) {
+      currCandles[productId] = { time: now, open: price, high: price, low: price, close: price };
     }
-    let c = this.currentCandles[productId];
+    let c = currCandles[productId];
     c.close = price;
     c.high = Math.max(c.high, price);
     c.low = Math.min(c.low, price);
 
     if (now - c.time > 15000) {
-      if (!this.candles[productId]) this.candles[productId] = [];
-      this.candles[productId].push({ ...c });
-      if (this.candles[productId].length > 50) this.candles[productId].shift();
-      this.currentCandles[productId] = { time: now, open: price, high: price, low: price, close: price };
-      this.analyzeDivergence(productId);
+      if (!historyCandles[productId]) historyCandles[productId] = [];
+      historyCandles[productId].push({ ...c });
+      if (historyCandles[productId].length > 50) historyCandles[productId].shift();
+      currCandles[productId] = { time: now, open: price, high: price, low: price, close: price };
+      if (!isBinance) {
+        this.analyzeDivergence(productId);
+      }
     }
   }
 
@@ -3333,7 +3341,7 @@ function startEmergencyMonitor(pos: PaperPosition) {
       const bidVol = bids.reduce((acc: number, b: any) => acc + (b.size || 0), 0) || 1;
       const askVol = asks.reduce((acc: number, a: any) => acc + (a.size || 0), 0) || 1;
 
-      const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(symbol, ctx.label, pos.category || 'crypto', scalper.candles);
+      const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(symbol, ctx.label, pos.category || 'crypto', scalper.candles, scalper.binanceCandles);
 
       let aiDecision: 'YES' | 'NO' | 'SKIP' = 'SKIP';
 
@@ -3674,7 +3682,7 @@ setInterval(async () => {
 
       // 1. Multi-Pattern Confluence Strategy Evaluator
       // Checks for aligned combinations of multiple independent patterns & parameters (Orderbook + Ichimoku + RSI + Volume Surge)
-      const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(symbol, ctx.label, ctx.category || 'crypto', scalper.candles);
+      const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(symbol, ctx.label, ctx.category || 'crypto', scalper.candles, scalper.binanceCandles);
       const spotPair = spotTA.pair;
 
       const isRawBullishDepth = bidVol > askVol * 1.15;
@@ -4261,7 +4269,7 @@ setInterval(async () => {
       const asks = ctx.asks || [];
       const bidVol = bids.reduce((acc: number, b: any) => acc + (b.size || 0), 0) || 1;
       const askVol = asks.reduce((acc: number, a: any) => acc + (a.size || 0), 0) || 1;
-      const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(pos.symbol, ctx.label, pos.category || 'crypto', scalper.candles);
+      const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(pos.symbol, ctx.label, pos.category || 'crypto', scalper.candles, scalper.binanceCandles);
       const rsi = spotTA.rsi || 50;
 
       let currentImbalanceTowards = pos.side === 'YES' ? bidVol / askVol : askVol / bidVol;
