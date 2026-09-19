@@ -1722,7 +1722,7 @@ function evaluatePostSLContractCandidate(symbol: string, targetSide: string, sta
 
   const spotPair = getSpotPairFromSymbol(symbol, category);
   const pairCandles = scalper.candles[spotPair] || [];
-  const spotTA = computeSpotTAMetrics(spotPair, pairCandles);
+  const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(symbol, ctx.label, category || 'crypto', scalper.candles, scalper.binanceCandles);
 
   const sidesToTest: Array<'YES' | 'NO'> = [targetSide as 'YES' | 'NO', (targetSide === 'YES' ? 'NO' : 'YES')];
   let qualifiedCandidate: any = null;
@@ -2113,7 +2113,7 @@ async function openPosition(
 
   const spotPair = getSpotPairFromSymbol(label, category);
   const pairCandles = scalper.candles[spotPair] || [];
-  const currentSpotTA = analysisMeta?.spotTA || computeSpotTAMetrics(spotPair, pairCandles);
+  const currentSpotTA = analysisMeta?.spotTA || unifiedDataHandler.getSpotIndicatorsForContract(symbol, label, category || 'crypto', scalper.candles, scalper.binanceCandles);
   const volatilitySL = -Math.max(0.025, Math.min(0.035, (currentSpotTA.candleRangePct / 100) * 2.2));
 
   if (isCapitalPreservationActive && recoveryProtocol) {
@@ -2819,7 +2819,7 @@ function evaluateCounterPositionViability(
   }
 
   const spotPair = getSpotPairFromSymbol(pos.label, pos.category);
-  const spotTA = computeSpotTAMetrics(spotPair, candles || []);
+  const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(pos.symbol, pos.label, pos.category || 'crypto', scalper.candles, scalper.binanceCandles);
 
   const candleRangeVol = Math.max(0.5, spotTA.candleRangePct / 0.08);
   const surgeVol = Math.max(0.5, spotTA.volumeSurgeRatio);
@@ -2951,8 +2951,14 @@ class RapidScalper {
           }
         } catch (e) {}
       };
-      this.binanceWs.onerror = () => { this.binanceWs = null; };
-      this.binanceWs.onclose = () => { this.binanceWs = null; };
+      this.binanceWs.onerror = () => {
+        this.binanceWs = null;
+        setTimeout(() => { if (settings.ENABLE_RAPID_SCALP_MODE && this.ws) this.start(); }, 5000);
+      };
+      this.binanceWs.onclose = () => {
+        this.binanceWs = null;
+        setTimeout(() => { if (settings.ENABLE_RAPID_SCALP_MODE && this.ws) this.start(); }, 5000);
+      };
     } catch (e) {
       this.ws = null;
       this.binanceWs = null;
@@ -3022,6 +3028,19 @@ class RapidScalper {
     let reason = "";
 
     const spotTA = computeSpotTAMetrics(productId, this.candles[productId] || []);
+    const binanceList = this.binanceCandles[productId] || [];
+    if (binanceList.length > 0) {
+      const bTA = computeSpotTAMetrics(productId, binanceList);
+      const isCbBull = spotTA.ichimokuState === 'BULLISH_CLOUD' || spotTA.rsi > 55;
+      const isCbBear = spotTA.ichimokuState === 'BEARISH_CLOUD' || spotTA.rsi < 45;
+      const isBinBull = bTA.ichimokuState === 'BULLISH_CLOUD' || bTA.rsi > 55;
+      const isBinBear = bTA.ichimokuState === 'BEARISH_CLOUD' || bTA.rsi < 45;
+
+      if ((isCbBull && isBinBear) || (isCbBear && isBinBull)) {
+        spotTA.ichimokuState = 'NEUTRAL_IN_CLOUD';
+        spotTA.rsi = 50;
+      }
+    }
     const isAssetBearish = spotTA.ichimokuState === 'BEARISH_CLOUD' || spotTA.tenkanKijunCross === 'BEARISH_CROSS';
 
     if (currentRsi > 60 && latestPrice >= prevPrice) {
@@ -4764,7 +4783,7 @@ setInterval(async () => {
               {
                 patternType: 'MOMENTUM_REVERSAL_FLIP',
                 isReversalFlip: true,
-                spotTA: computeSpotTAMetrics(spotPair, pairCandles),
+                spotTA: unifiedDataHandler.getSpotIndicatorsForContract(pos.symbol, pos.label || '', pos.category || 'crypto', scalper.candles, scalper.binanceCandles),
                 viabilityMeta: viability
               }
             );
@@ -5624,10 +5643,9 @@ app.get('/api/order-book/:symbol', (req, res) => {
         ctx = spotContexts[matchKey];
       } else {
         const pr = pos.entryPrice || 0.50;
-        const fallback = settings.paperTrading ? { bids: [{ price: parseFloat((pr - 0.01).toFixed(2)), size: 500 }], asks: [{ price: parseFloat((pr + 0.01).toFixed(2)), size: 500 }] } : { bids: [], asks: [] };
         ctx = {
-          bids: fallback.bids,
-          asks: fallback.asks,
+          bids: [],
+          asks: [],
           currentPrice: pr
         };
       }
@@ -5635,10 +5653,9 @@ app.get('/api/order-book/:symbol', (req, res) => {
   }
 
   if (!ctx) {
-    const fallback = settings.paperTrading ? { bids: [{ price: 0.49, size: 500 }], asks: [{ price: 0.51, size: 500 }] } : { bids: [], asks: [] };
     ctx = {
-      bids: fallback.bids,
-      asks: fallback.asks,
+      bids: [],
+      asks: [],
       currentPrice: 0.50
     };
   }
