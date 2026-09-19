@@ -18,6 +18,7 @@ import { marketTestingEngine } from "./marketTestingProtocol";
 import { coinbaseService } from "./coinbaseService";
 import { kalshiService } from "./kalshiService";
 import { goalResetScheduler } from "./goalResetScheduler";
+import { latencyAdaptiveEngine } from "./latencyAdaptiveEngine";
 
 const app = express();
 app.use(express.json());
@@ -29,6 +30,7 @@ const PORT = 3000;
 
 // Global variables to store bot state and settings
 let settings = {
+  trainingOnTheJob: false,
   overrideConfluence: true,
   winningsLock: 50,
   allocCrypto15m: 50,
@@ -52,6 +54,8 @@ let startingBankroll = 200;
 let cycleEarnedProfit = 0;
 let vaultedProfits = 0;
 let completedGoalCycles = 0;
+let cumulativePaperProfit = 0;
+let completedPaperIterations = 0;
 let spotLogs: any[] = [
   { id: 1, time: new Date().toISOString(), type: 'INFO', message: 'Bot initialized. Connected to Prediction Markets.' }
 ];
@@ -329,6 +333,8 @@ class PatternTradingBrain {
       if (typeof data.cycleEarnedProfit === 'number') cycleEarnedProfit = data.cycleEarnedProfit;
       if (typeof data.vaultedProfits === 'number') vaultedProfits = Math.max(0, data.vaultedProfits);
       if (typeof data.completedGoalCycles === 'number') completedGoalCycles = data.completedGoalCycles;
+      if (typeof data.cumulativePaperProfit === 'number') cumulativePaperProfit = data.cumulativePaperProfit;
+      if (typeof data.completedPaperIterations === 'number') completedPaperIterations = data.completedPaperIterations;
       // Untouchable Profit Vault Rule: Funds never leave the profit vault.
       console.log("[LOG] Pattern Strategy Brain memory loaded from disk.");
 
@@ -383,7 +389,9 @@ class PatternTradingBrain {
           paperBalance: simulatedPaperBalance,
           cycleEarnedProfit,
           vaultedProfits,
-          completedGoalCycles
+          completedGoalCycles,
+          cumulativePaperProfit,
+          completedPaperIterations
         }); // Removed pretty print to save space/time
 
         fs.writeFile(tempFile, payload, 'utf-8', (err) => {
@@ -1605,7 +1613,7 @@ function checkMarketSessionTransition() {
 function isStrict3ConfluenceActive(): boolean {
   if (settings && settings.overrideConfluence) return false;
   checkMarketSessionTransition();
-  return vaultedProfits >= 100;
+  return isStrict3ConfluenceTriggeredInSession || sessionPocketedProfit >= 100;
 }
 
 function evaluateConfluenceFactorsCount(
@@ -1900,6 +1908,17 @@ function canOpenTrade(positions: PaperPosition[], category: string, label: strin
   const predictionCount = positions.filter(p => isPrediction(p.category, !!p.isPerpetual)).length;
   const perpCount = positions.filter(p => p.isPerpetual).length;
 
+  if (isPerpetual) {
+    // Hard requirement: Never more than 4 Perpetual Contracts open at any given time
+    if (perpCount >= 4) return false;
+
+    // Prevent trading cessation / perpetual lockout:
+    // If no 15-minute price prediction contracts are open, do not allow stacking multiple perpetuals alone
+    if (predictionCount === 0 && perpCount >= 1) {
+      return false;
+    }
+  }
+
   const otherCount = positions.length - (tennisCount + predictionCount + perpCount);
 
   const flexUsed = Math.max(0, tennisCount - 1) + 
@@ -1913,13 +1932,10 @@ function canOpenTrade(positions: PaperPosition[], category: string, label: strin
     if (tennisCount < 1) return true;
     return flexAvailable > 0;
   } else if (isPerpetual) {
-    if (predictionCount < 2 && predictionCount <= perpCount) {
-      return false; // Must have more prediction contracts than perps, unless we have at least 2 prediction contracts.
-    }
-    if (perpCount < 3) return true;
-    return flexAvailable > 0;
+    if (perpCount < 4) return true;
+    return false;
   } else if (isPrediction(category, isPerpetual)) {
-    if (predictionCount < 2) return true;
+    if (predictionCount < 6) return true;
     return flexAvailable > 0;
   } else {
     return flexAvailable > 0;
@@ -1978,9 +1994,54 @@ async function openPosition(
     const ctx = spotContexts[symbol];
     const isPerpContract = Boolean(spotContexts[symbol]?.isPerpetual || symbol.endsWith('PERP'));
     const isPerp = ctx ? !!ctx.isPerpetual : false;
+
+    // [LATENCY GATE C] Timestamp Drift & Quote Freshness Verification
+    const freshness = latencyAdaptiveEngine.verifyQuoteFreshness(ctx?.lastQuoteUpdateMs, symbol);
+    if (!freshness.isFresh) {
+      spotLogs.unshift({
+        id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+        message: freshness.reason || `[LATENCY GATE] Market quote for ${symbol} is stale. Order entry aborted to prevent adverse fill slippage.`
+      });
+      return;
+    }
+
     if (!canOpenTrade(activePositions, category, label, isPerp)) return;
 
-  const currentWorkingBalance = await getEffectiveWorkingBalance();
+    const currentWorkingBalance = await getEffectiveWorkingBalance();
+
+    let capitalInUse = 0;
+    let perpCapitalInUse = 0;
+    let predictionCapitalInUse = 0;
+    activePositions.forEach(p => {
+      const cap = p.capitalPlacedUsd || (p.size * p.entryPrice);
+      capitalInUse += cap;
+      if (p.isPerpetual) perpCapitalInUse += cap;
+      else predictionCapitalInUse += cap;
+    });
+
+    const totalWorkingBankroll = (settings.paperTrading ? simulatedPaperBalance : (realKalshiCashPool || currentWorkingBalance)) + capitalInUse;
+    // Requirement: At least 50% of working capital must be preserved/allocated for price prediction contracts.
+    const maxAllowedPerpCapital = totalWorkingBankroll * 0.50;
+    const perpCapReserveThreshold = totalWorkingBankroll * 0.50; // At least 50% reserved for price prediction
+
+    if (isPerpContract) {
+      const activePerps = activePositions.filter(p => p.isPerpetual).length;
+      if (activePerps >= 4) {
+        spotLogs.unshift({
+          id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+          message: `[PERP LIMIT GUARD] Maximum 4 Perpetual Contracts already active (${activePerps}/4). Entry on ${symbol} aborted to maintain 15-minute prediction market capacity.`
+        });
+        return;
+      }
+
+      if (perpCapitalInUse >= maxAllowedPerpCapital || currentWorkingBalance <= perpCapReserveThreshold) {
+        spotLogs.unshift({
+          id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+          message: `[PERP 50% CAPITAL RESERVE VETO] Suppressed Perpetual entry on ${symbol}. Perpetual capital in use ($${perpCapitalInUse.toFixed(2)} of max $${maxAllowedPerpCapital.toFixed(2)}) or available cash ($${currentWorkingBalance.toFixed(2)}) would breach the 50% capital allocation reserved for 15-minute price predictions ($${perpCapReserveThreshold.toFixed(2)} of $${totalWorkingBankroll.toFixed(2)}).`
+        });
+        return;
+      }
+    }
 
   if (settings.paperTrading && simulatedPaperBalance < 0) {
     simulatedPaperBalance = 0;
@@ -2362,6 +2423,24 @@ async function openPosition(
   }
 
   capitalToDeploy = Math.min(currentWorkingBalance, capitalToDeploy);
+
+  // Perpetual Contracts Reserve Guard: Never deploy capital that would breach the 50% working capital reserve for price predictions
+  if (isPerpContract) {
+    const remainingPerpCapRoom = Math.max(0, maxAllowedPerpCapital - perpCapitalInUse);
+    const maxPerpDeployable = Math.min(
+      Math.max(0, currentWorkingBalance - perpCapReserveThreshold),
+      remainingPerpCapRoom
+    );
+    if (maxPerpDeployable < currentContractCost) {
+      spotLogs.unshift({
+        id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+        message: `[PERP CAPITAL RESERVE VETO] Suppressed Perpetual sizing on ${symbol}. Max deployable capital ($${maxPerpDeployable.toFixed(2)}) is less than contract cost ($${currentContractCost.toFixed(2)}) without breaching the 50% reserve for price predictions ($${perpCapReserveThreshold.toFixed(2)}).`
+      });
+      return;
+    }
+    capitalToDeploy = Math.min(capitalToDeploy, maxPerpDeployable);
+  }
+
   let targetSize = Math.max(1, Math.floor(capitalToDeploy / currentContractCost));
 
   // Moderations must NEVER reduce size below what's required for a reasonable win
@@ -2376,7 +2455,18 @@ async function openPosition(
   }
 
   // Respect whichever is larger: caller size or probability-adjusted targetSize
-  size = Math.max(size || 1, targetSize);
+  // If perpetual, strictly cap size so positionCostUsd never exceeds maxPerpDeployable
+  if (isPerpContract) {
+    const remainingPerpCapRoom = Math.max(0, maxAllowedPerpCapital - perpCapitalInUse);
+    const maxPerpDeployable = Math.min(
+      Math.max(0, currentWorkingBalance - perpCapReserveThreshold),
+      remainingPerpCapRoom
+    );
+    const maxPerpContracts = Math.max(1, Math.floor(maxPerpDeployable / currentContractCost));
+    size = Math.min(Math.max(size || 1, targetSize), maxPerpContracts);
+  } else {
+    size = Math.max(size || 1, targetSize);
+  }
   let positionCostUsd = size * currentContractCost;
   let projectedProfitAtTP = positionCostUsd * effectiveExpectedTP;
   
@@ -2392,13 +2482,17 @@ async function openPosition(
     message: `[CONTRACT WIN ESCALATION] ${symbol} (${side}): Stage ${escalated.escalationStage} | TP: ${(params.dynamicTP * 100).toFixed(1)}% | Trail: ${(params.dynamicTrail * 100).toFixed(1)}% | Win Streak: ${escalated.consecutiveWins}`
   });
 
-  // [A] Limit Order Book (LOB) Market Making Transition (Maker vs. Taker)
+  // [A] Limit Order Book (LOB) Market Making Transition (Maker vs. Taker) & Latency Adaptation
   const takerFriction = 0.005; // 0.5% standard taker friction
   const makerRebate = -0.001; // Earning a maker rebate
   const spreadSavings = takerFriction - makerRebate;
-  const optimizedEntryPrice = isPerpContract
+  const baseOptimizedPrice = isPerpContract
     ? (side === 'YES' ? Math.max(0.0001, entryPrice * (1 - spreadSavings)) : Math.max(0.0001, entryPrice * (1 + spreadSavings)))
     : (side === 'YES' ? Math.max(0.01, entryPrice * (1 - spreadSavings)) : Math.min(0.99, entryPrice * (1 - spreadSavings)));
+
+  // [LATENCY GATE B] Adaptive Slippage & Tolerance Buffer based on measured execution environment
+  const latencyBuffer = latencyAdaptiveEngine.getAdaptivePriceTolerance(baseOptimizedPrice, side, isPerpContract);
+  const optimizedEntryPrice = latencyBuffer.optimizedPrice;
 
   // [B] Almgren-Chriss Optimal Execution (Slippage Minimization)
   const isTwap = size >= 50;
@@ -2830,6 +2924,12 @@ class RapidScalper {
         if (!settings.ENABLE_RAPID_SCALP_MODE || !settings.botActive) return;
         try {
           const msg = JSON.parse(event.data);
+          if (msg.time) {
+            const transitLatency = Date.now() - new Date(msg.time).getTime();
+            if (transitLatency > 0 && transitLatency < 5000) {
+              latencyAdaptiveEngine.recordWsLatency(transitLatency);
+            }
+          }
           if (msg.type === 'ticker' && msg.product_id && msg.price) {
             this.processTick(msg.product_id, parseFloat(msg.price));
           }
@@ -3311,6 +3411,69 @@ setInterval(async () => {
     });
   });
 
+  // Paper Mode / Training on the Job: 5 minutes after goal earned cooldown
+  goalResetScheduler.checkPaperGoalCooldown(settings.paperTrading, currentTotalEquity, new Date(), (event) => {
+    if (event.isTrainingOnTheJob) {
+      // Training on the Job Compounding Workflow:
+      // The 5-minute temporary vault amount enters the working capital directly.
+      // 24h P/L, historical gains, and positions are NOT wiped.
+      const compoundedAmount = event.temporaryVaultAmount || event.profitSecured;
+      simulatedPaperBalance += compoundedAmount;
+      cycleEarnedProfit = 0; // reset active cycle target counter for next goal target
+      cumulativePaperProfit += compoundedAmount;
+      completedPaperIterations += 1;
+
+      spotLogs.unshift({
+        id: logIdCounter++,
+        time: new Date().toISOString(),
+        type: 'PROFIT',
+        message: `💼 [TRAINING ON THE JOB // 5M COMPOUND COMPLETE] 5 minutes elapsed since reaching goal target ($${event.target.toFixed(2)}). Compounded +$${compoundedAmount.toFixed(2)} from Temporary Vault directly into Working Capital! Working Balance: $${simulatedPaperBalance.toFixed(2)} | Untouched Vault: $${(event.untouchedVaultBalance || 200).toFixed(2)} | P/L & Trade History preserved.`
+      });
+      return;
+    }
+
+    // Standard Paper Mode: 5 minutes after $100+ goal earned, reset goal and current trades to continue iterating
+    // 1. Keep track of cumulative total in paper mode
+    cumulativePaperProfit += Math.max(0, event.profitSecured);
+    completedPaperIterations += 1;
+
+    // 2. Roll total equity into simulated paper balance so full capital is active, vault resets for fresh cycle
+    simulatedPaperBalance = currentTotalEquity;
+    vaultedProfits = 0;
+    completedGoalCycles = 0;
+
+    // 3. Reset starting bankroll to current equity so Day P/L (delta_24h) starts at $0.00 (+0.0%)
+    startingBankroll = currentTotalEquity;
+
+    // 4. Reset session P/L and active cycle metrics to $0.00
+    cycleEarnedProfit = 0;
+    sessionPocketedProfit = 0;
+    isStrict3ConfluenceTriggeredInSession = false;
+    macroCycleProfit = 0;
+    macroCycleStartTime = Date.now();
+    marketTestingEngine.resetWindowProfit();
+
+    // 5. Close and clear active trades for clean iteration
+    const closedTradesCount = activePositions.length;
+    activePositions.length = 0;
+    executedOverrides.clear();
+    Object.keys(lastWinTimestamps).forEach(k => delete lastWinTimestamps[k]);
+
+    // 6. Reset strategy brain session history and recovery baseline so it behaves as first time trading today
+    tradingBrain.resetBrain();
+    recoveryProtocol.resetProtocol();
+    isCapitalPreservationActive = false;
+
+    tradingBrain._saveMemory();
+
+    spotLogs.unshift({
+      id: logIdCounter++,
+      time: new Date().toISOString(),
+      type: 'PROFIT',
+      message: `🎯 [PAPER MODE 5M FRESH DAY RESET] 5 minutes elapsed since earning $100+ goal ($${event.profitSecured.toFixed(2)} secured). Daily subroutine and P/L reset to fresh Day 1 state ($0.00 P/L, 0 active trades). Total accumulated paper equity ($${currentTotalEquity.toFixed(2)}) and cumulative gains ($${cumulativePaperProfit.toFixed(2)}) preserved across ${completedPaperIterations} cycle(s)!`
+    });
+  });
+
   // Automated Market Testing & Confluence Lifecycle Engine:
   // 1. One hour before market close / next open: 30m testing period (Override Confluence = false)
   // 2. T-30m: Override Confluence toggle activated (true) until $100 profit reached
@@ -3327,7 +3490,7 @@ setInterval(async () => {
       });
     }
   );
-  settings.overrideConfluence = testEval.overrideConfluence;
+  settings.overrideConfluence = settings.trainingOnTheJob ? true : testEval.overrideConfluence;
 
   if (settings.ENABLE_RAPID_SCALP_MODE) scalper.start();
   else scalper.stop();
@@ -3428,6 +3591,8 @@ setInterval(async () => {
 
             targetCtx.bids = bids;
             targetCtx.asks = asks;
+            targetCtx.lastQuoteUpdateMs = Date.now();
+            targetCtx.isOrderBookStale = false;
           } else if (!targetCtx.bids || targetCtx.bids.length === 0) {
             targetCtx.isOrderBookStale = true;
           }
@@ -3798,6 +3963,12 @@ setInterval(async () => {
         const confB = b.recCheck?.confluenceCount || 0;
         if (confB !== confA) {
           return confB - confA; // 3 confluences (highest priority) -> 2 -> 1 -> 0
+        }
+        // Prioritize 15-minute price predictions over perpetual contracts to prevent prediction starvation
+        const isPredA = !a.ctx?.isPerpetual;
+        const isPredB = !b.ctx?.isPerpetual;
+        if (isPredA !== isPredB) {
+          return isPredA ? -1 : 1;
         }
         return b.adaptivePreference.combinedScore - a.adaptivePreference.combinedScore;
       });
@@ -4249,6 +4420,7 @@ setInterval(async () => {
         minDollarTarget: 5.0, // Target $5-$10 without losing gains
         maxDollarTarget: 50.0, // Scale all the way up to $50 dynamically
         isPerpetual: pos.isPerpetual,
+        latencyAgilityFactor: latencyAdaptiveEngine.getProfile().trailingStopAgilityFactor,
         spotDataMetrics: {
           directionalImpact,
           volSurge,
@@ -4409,14 +4581,35 @@ setInterval(async () => {
         // Record both wins and losses toward the $100 market testing net profit milestone
         marketTestingEngine.recordTradeResult(pnlUsd);
 
-        // Record toward the $100 goal (resets at Midnight EST and 9:00 AM EST)
-        goalResetScheduler.recordTrade(pnlUsd, (currProfit, target) => {
-          spotLogs.unshift({
-            id: logIdCounter++,
-            time: new Date().toISOString(),
-            type: 'PROFIT',
-            message: `[GOAL TARGET ACHIEVED] Reached $${currProfit.toFixed(2)} toward the $${target.toFixed(2)} goal for this session! Goal secured until next reset (Midnight EST / 9:00 AM EST).`
-          });
+        // Record toward the goal (resets at Midnight EST and 9:00 AM EST, or 5m compound in Training on the Job)
+        goalResetScheduler.recordTrade(pnlUsd, (currProfit, target, isTraining) => {
+          if (isTraining) {
+            const status = goalResetScheduler.getStatus();
+            const untouched = status.training_on_the_job?.untouched_vault_balance || 0;
+            const isFull = status.training_on_the_job?.is_untouched_vault_full;
+            if (!isFull) {
+              spotLogs.unshift({
+                id: logIdCounter++,
+                time: new Date().toISOString(),
+                type: 'PROFIT',
+                message: `🛡️ [TRAINING ON THE JOB] Initial Vaulting Active: Set aside +$${currProfit.toFixed(2)} toward the $200 Untouched Reserve Vault ($${untouched.toFixed(2)} / $200.00). Confluence Override active.`
+              });
+            } else {
+              spotLogs.unshift({
+                id: logIdCounter++,
+                time: new Date().toISOString(),
+                type: 'PROFIT',
+                message: `⏳ [TRAINING ON THE JOB] Goal ($${target.toFixed(2)}) Reached! Profit ($${currProfit.toFixed(2)}) + next 5 mins gains are accumulating in Temporary Vault and will enter working capital in 5m. Confluence Override active.`
+              });
+            }
+          } else {
+            spotLogs.unshift({
+              id: logIdCounter++,
+              time: new Date().toISOString(),
+              type: 'PROFIT',
+              message: `[GOAL TARGET ACHIEVED] Reached $${currProfit.toFixed(2)} toward the $${target.toFixed(2)} goal for this session! Goal secured until next reset (Midnight EST / 9:00 AM EST).`
+            });
+          }
         });
 
         if (pnlUsd > 0) {
@@ -4630,12 +4823,38 @@ app.get('/api/health', (req, res) => { res.json({ status: 'ok' }); });
 
 app.get('/api/settings', (req, res) => { res.json(settings); });
 app.post('/api/settings', (req, res) => {
-  settings = { ...settings, ...req.body };
-  res.json({ success: true, settings });
+  const updated = { ...settings, ...req.body };
+  if (updated.trainingOnTheJob) {
+    updated.overrideConfluence = true;
+  }
+  settings = updated;
+  goalResetScheduler.setTrainingOnTheJob(!!settings.trainingOnTheJob);
+  if (typeof req.body.daily_goal === 'number' && req.body.daily_goal > 0) {
+    goalResetScheduler.setProfitTarget(req.body.daily_goal);
+  } else if (typeof req.body.profitTarget === 'number' && req.body.profitTarget > 0) {
+    goalResetScheduler.setProfitTarget(req.body.profitTarget);
+  }
+  res.json({ success: true, settings, goal_window: goalResetScheduler.getStatus() });
+});
+
+app.post('/api/goal-target', (req, res) => {
+  const { target } = req.body;
+  if (typeof target === 'number' && target > 0) {
+    goalResetScheduler.setProfitTarget(target);
+    spotLogs.unshift({
+      id: logIdCounter++,
+      time: new Date().toISOString(),
+      type: 'INFO',
+      message: `[GOAL TARGET UPDATED] Profit target set to $${target.toFixed(2)}. ${settings.trainingOnTheJob ? 'Training on the Job mode will require reaching this updated goal before entering temporary vault.' : ''}`
+    });
+    return res.json({ success: true, target, goal_window: goalResetScheduler.getStatus() });
+  }
+  res.status(400).json({ error: 'Invalid target amount' });
 });
 
 app.get('/api/balance', async (req, res) => {
   const availableCashPool = await getEffectiveWorkingBalance();
+  goalResetScheduler.updateCapitalScaling(availableCashPool);
   
   let capitalInUse = 0;
   if (settings.paperTrading) {
@@ -4648,8 +4867,8 @@ app.get('/api/balance', async (req, res) => {
 
   const sessionInfo = getGlobalMarketSession();
   const strictActive = isStrict3ConfluenceActive();
-  const pocketedAmount = Math.max(sessionPocketedProfit, vaultedProfits + Math.max(0, cycleEarnedProfit));
-  const isAcceleratedVault = pocketedAmount >= 100 || vaultedProfits >= 100;
+  const pocketedAmount = sessionPocketedProfit;
+  const isAcceleratedVault = pocketedAmount >= 100;
   const currentVaultThreshold = isAcceleratedVault ? 20 : 50;
 
   res.json({
@@ -4664,10 +4883,12 @@ app.get('/api/balance', async (req, res) => {
     cycle_earned_profit: cycleEarnedProfit,
     vaulted_profits: vaultedProfits,
     completed_goal_cycles: completedGoalCycles,
+    cumulative_paper_profit: cumulativePaperProfit,
+    completed_paper_iterations: completedPaperIterations,
     total_balance: totalEquity,
     starting_bankroll: startingBankroll,
     delta_24h: totalEquity - startingBankroll,
-    delta_24h_pct: ((totalEquity - startingBankroll) / startingBankroll) * 100,
+    delta_24h_pct: startingBankroll > 0 ? ((totalEquity - startingBankroll) / startingBankroll) * 100 : 0,
     goal_window: goalResetScheduler.getStatus(),
     daily_goal: 100,
     daily_profit: goalResetScheduler.getStatus().current_profit,
@@ -4684,7 +4905,23 @@ app.get('/api/balance', async (req, res) => {
       accelerated_vault_active: isAcceleratedVault,
       current_vault_threshold: currentVaultThreshold
     },
-    market_testing: marketTestingEngine.getStatus()
+    market_testing: marketTestingEngine.getStatus(),
+    latency_profile: latencyAdaptiveEngine.getProfile(),
+    perp_allocation_stats: {
+      active_perps_count: activePositions.filter(p => p.isPerpetual).length,
+      max_perps_allowed: 4,
+      active_predictions_count: activePositions.filter(p => !p.isPerpetual).length,
+      perp_capital_in_use: activePositions.filter(p => p.isPerpetual).reduce((sum, p) => sum + (p.capitalPlacedUsd || (p.size * p.entryPrice)), 0),
+      prediction_capital_in_use: activePositions.filter(p => !p.isPerpetual).reduce((sum, p) => sum + (p.capitalPlacedUsd || (p.size * p.entryPrice)), 0),
+      min_prediction_capital_reserve_pct: 0.50
+    }
+  });
+});
+
+app.get('/api/latency', (req, res) => {
+  res.json({
+    success: true,
+    ...latencyAdaptiveEngine.getProfile()
   });
 });
 
@@ -4884,6 +5121,26 @@ app.post('/api/goal-reset', (req, res) => {
     ? (simulatedPaperBalance + vaultedProfits) 
     : (realKalshiCashPool + vaultedProfits);
   goalResetScheduler.resetManual(currentTotalEquity);
+
+  if (settings.paperTrading) {
+    cumulativePaperProfit += Math.max(0, goalResetScheduler.getStatus().previous_profit || 0);
+    completedPaperIterations += 1;
+    simulatedPaperBalance = currentTotalEquity;
+    vaultedProfits = 0;
+    completedGoalCycles = 0;
+    startingBankroll = currentTotalEquity;
+    cycleEarnedProfit = 0;
+    sessionPocketedProfit = 0;
+    isStrict3ConfluenceTriggeredInSession = false;
+    activePositions.length = 0;
+    executedOverrides.clear();
+    Object.keys(lastWinTimestamps).forEach(k => delete lastWinTimestamps[k]);
+    tradingBrain.resetBrain();
+    recoveryProtocol.resetProtocol();
+    isCapitalPreservationActive = false;
+    tradingBrain._saveMemory();
+  }
+
   macroCycleProfit = 0;
   macroCycleStartTime = Date.now();
   marketTestingEngine.resetWindowProfit();
@@ -4892,7 +5149,7 @@ app.post('/api/goal-reset', (req, res) => {
     id: logIdCounter++,
     time: new Date().toISOString(),
     type: 'INFO',
-    message: `[MANUAL GOAL RESET] $100 Goal manually reset. New session window initialized.`
+    message: `[MANUAL GOAL RESET] $100 Goal and session metrics reset to first-time Day 1 state. Baseline bankroll set to $${currentTotalEquity.toFixed(2)}.`
   });
 
   res.json({ success: true, goal_window: goalResetScheduler.getStatus() });
@@ -5391,6 +5648,26 @@ async function startServer() {
     res.json({ ok: true }); 
   });
 
+  // Self-destroying service worker to instantly purge mobile caches
+  app.get(["/sw.js", "/registerSW.js", "/workbox-*.js"], (req, res) => {
+    res.setHeader("Content-Type", "application/javascript");
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    res.send(`
+      self.addEventListener('install', function(e) { self.skipWaiting(); });
+      self.addEventListener('activate', function(e) {
+        self.registration.unregister().then(function() {
+          return self.clients.matchAll();
+        }).then(function(clients) {
+          clients.forEach(function(client) {
+            if (client.url && 'navigate' in client) {
+              client.navigate(client.url);
+            }
+          });
+        });
+      });
+    `);
+  });
+
   if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -5400,8 +5677,19 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    app.use(express.static(distPath, {
+      etag: true,
+      lastModified: true,
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.html')) {
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        } else {
+          res.setHeader('Cache-Control', 'public, max-age=31536000');
+        }
+      }
+    }));
     app.get('*', (req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

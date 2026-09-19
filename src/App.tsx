@@ -163,19 +163,27 @@ export default function App() {
 
         {/* Main Content Area */}
         <main 
-          className="flex-1 p-4 md:p-8 pb-32 md:pb-8 relative z-10"
-          
+          className="flex-1 p-3 sm:p-4 md:p-8 pb-28 md:pb-8 relative z-10 w-full max-w-full overflow-x-hidden"
         >
-          <header className="md:hidden flex justify-between items-start gap-2 mb-2 px-2 relative z-10">
-            <div className="flex flex-col gap-2">
-              <div className="inline-block transform -rotate-1 w-[50vw] md:w-[50%]">
+          <header className="md:hidden flex justify-between items-start gap-2 mb-3 px-1 relative z-10">
+            <div className="flex flex-col gap-1">
+              <div className="inline-block transform -rotate-1 w-[45vw] max-w-[180px]">
                 <img src="/nostratech.png?v=transparent" alt="NOSTRATECH" className="w-full h-auto object-contain" />
               </div>
-              <p className="text-crypto-danger text-[9px] font-bold tracking-widest leading-tight uppercase pl-1 no-glow">
+              <p className="text-crypto-danger text-[8px] font-bold tracking-widest leading-tight uppercase pl-0.5 no-glow">
                 Ultra-Intelligent Qualitative Predictions Runner
               </p>
             </div>
-            <SystemLEDs />
+            <div className="flex items-center gap-2">
+              <SystemLEDs />
+              <button
+                onClick={handleRestartInstance}
+                className="p-1.5 border border-crypto-danger/50 text-crypto-danger bg-black/40 hover:bg-crypto-danger hover:text-white transition-colors"
+                title="Restart Instance"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </header>
 
           <ErrorBoundary>
@@ -189,75 +197,76 @@ export default function App() {
         </main>
       </div>
 
-      {/* Mobile Bottom Navigation (Mechanical Keyboard Tray) */}
-      <div 
-        className={`md:hidden fixed z-50 transition-all duration-500 ease-[cubic-bezier(0.175,0.885,0.32,1.275)] origin-top-left ${
-          isKeyboardExpanded 
-            ? 'bottom-6 right-4' 
-            : 'bottom-4 right-4 translate-y-[calc(100%-40px)] translate-x-[calc(100%-40px)] rotate-[22deg]'
-        }`}
+      {/* Mobile Fixed Bottom Navigation Bar */}
+      <nav 
+        id="mobile-bottom-nav"
+        className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#121212]/95 backdrop-blur-md border-t border-crypto-primary/50 px-2 py-1.5 flex items-center justify-around shadow-[0_-4px_20px_rgba(0,0,0,0.9)]"
       >
-        <div className="bg-[#9ca3af] border-t-2 border-l-2 border-gray-300 border-b-8 border-r-4 border-gray-600 rounded-xl p-2 pt-12 pb-3 shadow-[0_10px_25px_rgba(0,0,0,0.9)] relative flex gap-2">
-          
-          {/* Toggle Button */}
-          <button
-            id="mobile-nav-toggle"
-            onClick={() => setIsKeyboardExpanded(true)}
-            className={`absolute top-2 left-4 w-10 h-10 flex items-center justify-center text-[#6b7280] transition-all duration-500 hover:text-[#4b5563] ${isKeyboardExpanded ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
-            style={{ 
-              transform: 'rotate(-22deg)',
-              filter: 'drop-shadow(0px 1px 1px rgba(255,255,255,0.8))'
-            }}
-          >
-            <Maximize2 className="w-7 h-7" strokeWidth={2.5} />
-          </button>
+        <button 
+          id="mobile-nav-dashboard"
+          onClick={() => setCurrentView('dashboard')}
+          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded transition-all min-w-[56px] min-h-[44px] ${
+            currentView === 'dashboard' 
+              ? 'text-white bg-crypto-danger/30 border border-crypto-danger shadow-[0_0_10px_rgba(255,59,48,0.3)]' 
+              : 'text-crypto-primary/70 hover:text-crypto-primary'
+          }`}
+        >
+          <LayoutDashboard className="w-5 h-5 mb-0.5" />
+          <span className="text-[10px] tracking-wider font-bold uppercase">Dash</span>
+        </button>
 
-          <button 
-            id="mobile-nav-dashboard"
-            onClick={() => setCurrentView('dashboard')}
-            className={`mech-key !px-2.5 !py-1.5 !min-w-[55px] ${currentView === 'dashboard' ? 'is-active' : ''}`}
-          >
-            <LayoutDashboard className="w-5 h-5" />
-            <span className="text-[9px] tracking-wider font-black uppercase">Dash</span>
-          </button>
+        <button 
+          id="mobile-nav-brain"
+          onClick={() => setCurrentView('pattern-brain')}
+          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded transition-all min-w-[56px] min-h-[44px] ${
+            currentView === 'pattern-brain' 
+              ? 'text-white bg-crypto-danger/30 border border-crypto-danger shadow-[0_0_10px_rgba(255,59,48,0.3)]' 
+              : 'text-crypto-primary/70 hover:text-crypto-primary'
+          }`}
+        >
+          <Brain className="w-5 h-5 mb-0.5" />
+          <span className="text-[10px] tracking-wider font-bold uppercase">Brain</span>
+        </button>
 
-          <button 
-            id="mobile-nav-brain"
-            onClick={() => setCurrentView('pattern-brain')}
-            className={`mech-key !px-2.5 !py-1.5 !min-w-[55px] ${currentView === 'pattern-brain' ? 'is-active' : ''}`}
-          >
-            <Brain className="w-5 h-5" />
-            <span className="text-[9px] tracking-wider font-black uppercase">Brain</span>
-          </button>
-
-          <button 
-            id="mobile-nav-retraining"
-            onClick={() => setCurrentView('retraining')}
-            className={`mech-key !px-2.5 !py-1.5 !min-w-[55px] ${currentView === 'retraining' ? 'is-active' : ''}`}
-          >
-            <Cpu className="w-5 h-5" />
-            <span className="text-[9px] tracking-wider font-black uppercase">Train</span>
-          </button>
-          
-          <button 
-            id="mobile-nav-logs"
-            onClick={() => setCurrentView('logs')}
-            className={`mech-key !px-2.5 !py-1.5 !min-w-[55px] ${currentView === 'logs' ? 'is-active' : ''}`}
-          >
-            <TerminalSquare className="w-5 h-5" />
-            <span className="text-[9px] tracking-wider font-black uppercase">Logs</span>
-          </button>
-          
-          <button 
-            id="mobile-nav-settings"
-            onClick={() => setCurrentView('settings')}
-            className={`mech-key !px-2.5 !py-1.5 !min-w-[55px] ${currentView === 'settings' ? 'is-active' : ''}`}
-          >
-            <Settings className="w-5 h-5" />
-            <span className="text-[9px] tracking-wider font-black uppercase">Cfg</span>
-          </button>
-        </div>
-      </div>
+        <button 
+          id="mobile-nav-retraining"
+          onClick={() => setCurrentView('retraining')}
+          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded transition-all min-w-[56px] min-h-[44px] ${
+            currentView === 'retraining' 
+              ? 'text-white bg-crypto-danger/30 border border-crypto-danger shadow-[0_0_10px_rgba(255,59,48,0.3)]' 
+              : 'text-crypto-primary/70 hover:text-crypto-primary'
+          }`}
+        >
+          <Cpu className="w-5 h-5 mb-0.5" />
+          <span className="text-[10px] tracking-wider font-bold uppercase">Train</span>
+        </button>
+        
+        <button 
+          id="mobile-nav-logs"
+          onClick={() => setCurrentView('logs')}
+          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded transition-all min-w-[56px] min-h-[44px] ${
+            currentView === 'logs' 
+              ? 'text-white bg-crypto-danger/30 border border-crypto-danger shadow-[0_0_10px_rgba(255,59,48,0.3)]' 
+              : 'text-crypto-primary/70 hover:text-crypto-primary'
+          }`}
+        >
+          <TerminalSquare className="w-5 h-5 mb-0.5" />
+          <span className="text-[10px] tracking-wider font-bold uppercase">Logs</span>
+        </button>
+        
+        <button 
+          id="mobile-nav-settings"
+          onClick={() => setCurrentView('settings')}
+          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded transition-all min-w-[56px] min-h-[44px] ${
+            currentView === 'settings' 
+              ? 'text-white bg-crypto-danger/30 border border-crypto-danger shadow-[0_0_10px_rgba(255,59,48,0.3)]' 
+              : 'text-crypto-primary/70 hover:text-crypto-primary'
+          }`}
+        >
+          <Settings className="w-5 h-5 mb-0.5" />
+          <span className="text-[10px] tracking-wider font-bold uppercase">Config</span>
+        </button>
+      </nav>
 
       <RestartConfirmModal
         isOpen={showRestartModal}

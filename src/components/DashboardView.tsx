@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, AlertCircle, RefreshCw, TrendingUp, BarChart3, ShieldCheck, Award, Target, DollarSign, ShieldAlert, RotateCcw, Clock } from 'lucide-react';
+import { Activity, AlertCircle, RefreshCw, TrendingUp, BarChart3, ShieldCheck, Award, Target, DollarSign, ShieldAlert, RotateCcw, Clock, Zap } from 'lucide-react';
 import { OrderBookMonitor } from './OrderBookMonitor';
 import { RestartConfirmModal } from './RestartConfirmModal';
 import { RecoveryProtocolCard } from './RecoveryProtocolCard';
@@ -49,6 +49,19 @@ interface SessionInfo {
   current_vault_threshold?: number;
 }
 
+export interface TrainingOnTheJobStatus {
+  enabled: boolean;
+  untouched_vault_balance: number;
+  untouched_vault_target: number;
+  is_untouched_vault_full: boolean;
+  temporary_vault_balance: number;
+  is_in_5m_compound_window: boolean;
+  compound_seconds_remaining: number | null;
+  compounded_cycles_count: number;
+  total_compounded_to_working_capital: number;
+  current_goal_target: number;
+}
+
 export interface GoalWindowData {
   target: number;
   current_profit: number;
@@ -60,6 +73,9 @@ export interface GoalWindowData {
   next_reset_time: string;
   time_remaining: string;
   schedule: string;
+  goal_achieved_timestamp?: number | null;
+  paper_auto_reset_seconds_remaining?: number | null;
+  training_on_the_job?: TrainingOnTheJobStatus;
 }
 
 interface BalanceData {
@@ -74,11 +90,34 @@ interface BalanceData {
   cycle_earned_profit?: number;
   vaulted_profits?: number;
   completed_goal_cycles?: number;
+  cumulative_paper_profit?: number;
+  completed_paper_iterations?: number;
+  paper_trading?: boolean;
+  low_funds_mode?: boolean;
   recovery_mode?: RecoveryModeState;
   session_info?: SessionInfo;
   macroGoalGrade?: number;
   macroCycleProfit?: number;
   market_testing?: MarketTestingStatus;
+  perp_allocation_stats?: {
+    active_perps_count: number;
+    max_perps_allowed: number;
+    active_predictions_count: number;
+    perp_capital_in_use: number;
+    prediction_capital_in_use: number;
+    min_prediction_capital_reserve_pct: number;
+  };
+  latency_profile?: {
+    lastPingTime: number;
+    coinbaseWsPingMs: number;
+    kalshiRestPingMs: number;
+    effectiveLatencyMs: number;
+    isUltraLowLatency: boolean;
+    executionEnvironment: string;
+    staleTickThresholdMs: number;
+    slippageBufferPct: number;
+    trailingStopAgilityFactor: number;
+  };
   error?: string;
 }
 
@@ -351,135 +390,6 @@ export function DashboardView() {
         </div>
       )}
 
-      {/* Automated Market Testing & Pre-Market Strategy Protocol Banner */}
-      {balance?.market_testing && (
-        <div className={`crt-grid-panel p-4 relative overflow-hidden flex flex-col gap-4 border ${
-          balance.market_testing.phase === 'TESTING_PERIOD' 
-            ? 'border-amber-500/60 bg-amber-500/10' 
-            : balance.market_testing.phase === 'OVERRIDE_ACTIVE'
-            ? 'border-crypto-danger/60 bg-crypto-danger/10'
-            : balance.market_testing.phase === 'GOAL_REACHED_CONSERVATIVE'
-            ? 'border-crypto-success/60 bg-crypto-success/10'
-            : 'border-crypto-primary/30 bg-[#8f73ff0d]'
-        }`}>
-          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
-            <div className="flex items-start md:items-center gap-3">
-              <div className={`p-2.5 rounded-none border shrink-0 ${
-                balance.market_testing.phase === 'TESTING_PERIOD'
-                  ? 'border-amber-500 text-amber-400 bg-amber-500/20'
-                  : balance.market_testing.phase === 'OVERRIDE_ACTIVE'
-                  ? 'border-crypto-danger text-crypto-danger bg-crypto-danger/20 animate-pulse'
-                  : balance.market_testing.phase === 'GOAL_REACHED_CONSERVATIVE'
-                  ? 'border-crypto-success text-crypto-success bg-crypto-success/20'
-                  : 'border-crypto-primary text-crypto-primary bg-black/40'
-              }`}>
-                <Clock className="w-5 h-5" />
-              </div>
-              <div className="flex flex-col gap-1">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-bold text-xs uppercase tracking-wider text-crypto-text">Pre-Market Testing & Confluence Protocol</span>
-                  <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider border ${
-                    balance.market_testing.phase === 'TESTING_PERIOD'
-                      ? 'bg-amber-500/30 text-amber-300 border-amber-500'
-                      : balance.market_testing.phase === 'OVERRIDE_ACTIVE'
-                      ? 'bg-crypto-danger/30 text-crypto-danger border-crypto-danger'
-                      : balance.market_testing.phase === 'GOAL_REACHED_CONSERVATIVE'
-                      ? 'bg-crypto-success/30 text-crypto-success border-crypto-success'
-                      : 'bg-black/50 text-crypto-primary border-crypto-primary/40'
-                  }`}>
-                    {balance.market_testing.phase === 'TESTING_PERIOD' && '30m Testing Window'}
-                    {balance.market_testing.phase === 'OVERRIDE_ACTIVE' && 'Override Active ($100 Target)'}
-                    {balance.market_testing.phase === 'GOAL_REACHED_CONSERVATIVE' && '$100 Goal Reached'}
-                    {balance.market_testing.phase === 'NORMAL_CONSERVATIVE' && 'Standard Conservative'}
-                  </span>
-                </div>
-                <p className="text-xs text-crypto-text/80 leading-relaxed font-sans">
-                  {balance.market_testing.statusMessage}
-                </p>
-              </div>
-            </div>
-
-            {/* Quick Confluence Override Toggle */}
-            <div className="flex items-center justify-between w-md-auto w-full pt-2 md:pt-0 border-t md:border-t-0 border-crypto-primary/20">
-              <span className="text-xs text-crypto-text/70 uppercase">Confluence Override:</span>
-              <label className="flex items-center gap-2 cursor-pointer text-xs font-mono">
-                <span className={`text-[11px] font-bold ${overrideConfluence ? 'text-crypto-danger' : 'text-crypto-text/60'}`}>
-                  {overrideConfluence ? 'OVERRIDE ON' : 'OVERRIDE OFF'}
-                </span>
-                <div className="relative inline-flex items-center h-5 rounded-full w-9">
-                  <input 
-                    type="checkbox" 
-                    className="sr-only peer" 
-                    checked={overrideConfluence} 
-                    onChange={toggleOverrideConfluence} 
-                  />
-                  <div className="w-9 h-5 bg-black/40 border border-crypto-primary/30 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-crypto-primary after:border-crypto-primary after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-crypto-danger/20 peer-checked:after:bg-crypto-danger peer-checked:border-crypto-danger/50"></div>
-                </div>
-              </label>
-            </div>
-          </div>
-
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pt-3 border-t border-crypto-primary/20">
-            {/* Low Funds Mode Quick Mobile Bar */}
-            <div className="flex items-center gap-3">
-              <button
-                onClick={async () => {
-                  const newVal = !balance?.low_funds_mode;
-                  await fetch('/api/settings', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ lowFundsMode: newVal })
-                  });
-                  fetchData(false);
-                }}
-                className={`px-3 py-1.5 text-xs uppercase font-bold border transition-colors cursor-pointer flex items-center gap-2 ${
-                  balance?.low_funds_mode 
-                    ? 'bg-crypto-success text-crypto-bg border-crypto-success shadow-[0_0_10px_var(--color-crypto-success)]' 
-                    : 'bg-black/50 text-crypto-primary border-crypto-primary/60 hover:bg-crypto-primary hover:text-crypto-bg'
-                }`}
-                title="Toggle Low Funds Mode ($3-$5 target profit per trade)"
-              >
-                <span className={`w-2 h-2 rounded-full ${balance?.low_funds_mode ? 'bg-black animate-ping' : 'bg-crypto-primary'}`}></span>
-                <span>{balance?.low_funds_mode ? 'Low Funds Mode: ON' : 'Low Funds Mode: OFF'}</span>
-              </button>
-              <span className="text-[11px] text-[#909090] hidden sm:inline">({balance?.low_funds_mode ? 'Targeting any profit + slippage' : 'Standard $10+ target'})</span>
-            </div>
-
-            {/* Progress to $100 Goal */}
-            <div className="flex flex-col items-start sm:items-end gap-1 w-full sm:w-auto">
-              <div className="flex items-center justify-between sm:justify-end gap-2 text-xs w-full">
-                <span className="text-crypto-text/60">Milestone Progress:</span>
-                <span className={`font-bold ${(balance.market_testing?.cycleEarnedProfitInWindow ?? 0) >= 0 ? 'text-crypto-text' : 'text-crypto-danger'}`}>
-                  {(balance.market_testing?.cycleEarnedProfitInWindow ?? 0) >= 0 ? '+' : ''}${(balance.market_testing?.cycleEarnedProfitInWindow ?? 0).toFixed(2)} / ${(balance.market_testing?.profitTargetUsd ?? 100).toFixed(2)}
-                </span>
-                <span className={`text-[10px] px-1 font-bold ${
-                  (balance.market_testing?.cycleEarnedProfitInWindow ?? 0) >= (balance.market_testing?.profitTargetUsd ?? 100) ? 'text-crypto-success' : 'text-crypto-primary'
-                }`}>
-                  ({(balance.market_testing?.profitProgressPct ?? 0).toFixed(0)}%)
-                </span>
-              </div>
-              <div className="flex items-center gap-2 text-[10px] text-crypto-text/60">
-                <span className="text-crypto-success">
-                  +{typeof balance.market_testing?.totalWinsInWindow === 'number' ? `$${balance.market_testing.totalWinsInWindow.toFixed(2)}` : '$0.00'} ({balance.market_testing?.winCountInWindow || 0}W)
-                </span>
-                <span>/</span>
-                <span className="text-crypto-danger">
-                  -{typeof balance.market_testing?.totalLossesInWindow === 'number' ? `$${balance.market_testing.totalLossesInWindow.toFixed(2)}` : '$0.00'} ({balance.market_testing?.lossCountInWindow || 0}L)
-                </span>
-              </div>
-              <div className="w-full sm:w-48 h-2 bg-black/60 border border-crypto-primary/40 overflow-hidden mt-0.5">
-                <div 
-                  className={`h-full transition-all duration-500 ${
-                    balance.market_testing.cycleEarnedProfitInWindow >= balance.market_testing.profitTargetUsd ? 'bg-crypto-success' : 'bg-crypto-primary'
-                  }`}
-                  style={{ width: `${balance.market_testing.profitProgressPct}%` }}
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Main Grid Layout */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         
@@ -611,7 +521,14 @@ export function DashboardView() {
               </div>
             </div>
             <div className="flex border-b border-crypto-primary border-opacity-50 px-4 py-3 justify-between items-center">
-              <span className="uppercase tracking-widest font-bold">24h Delta</span>
+              <div className="flex flex-col">
+                <span className="uppercase tracking-widest font-bold">24h Delta</span>
+                {balance?.paper_trading !== false && Boolean(balance?.cumulative_paper_profit && balance.cumulative_paper_profit > 0) && (
+                  <span className="text-[9px] text-crypto-primary/80 font-mono">
+                    Total Paper Earned: +${(balance?.cumulative_paper_profit || 0).toFixed(2)} ({balance?.completed_paper_iterations || 0} cycles)
+                  </span>
+                )}
+              </div>
               <span className={`font-bold text-lg ${isPositive ? 'text-crypto-text' : 'text-crypto-danger'}`}>
                 {isPositive ? '+' : '-'}${Math.abs(balance?.delta_24h || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </span>
@@ -638,10 +555,20 @@ export function DashboardView() {
             </div>
             <div className="flex border-b border-crypto-primary border-opacity-50 px-4 py-3 justify-between items-center">
               <div className="flex flex-col">
-                <span className="uppercase tracking-widest font-bold flex items-center gap-2">
+                <span className="uppercase tracking-widest font-bold flex items-center gap-2 flex-wrap">
                   Daily Subroutine
-                  <span className="text-[8px] px-1.5 py-0.5 border border-crypto-primary/40 text-crypto-primary bg-black/40 font-mono">
-                    RESETS MIDNIGHT & 9:00 AM EST
+                  <span className={`text-[8px] px-1.5 py-0.5 border font-mono ${
+                    goalWindow?.training_on_the_job?.enabled
+                      ? 'border-crypto-success/60 text-crypto-success bg-crypto-success/10 font-bold'
+                      : balance?.paper_trading !== false 
+                        ? 'border-crypto-primary/40 text-crypto-primary bg-black/40'
+                        : 'border-crypto-primary/40 text-crypto-primary bg-black/40'
+                  }`}>
+                    {goalWindow?.training_on_the_job?.enabled
+                      ? 'TRAINING ON THE JOB // 5M VAULT -> CAPITAL'
+                      : balance?.paper_trading !== false 
+                        ? `AUTO-RESETS 5M POST-$${dailyGoal} GOAL & EST` 
+                        : 'RESETS MIDNIGHT & 9:00 AM EST'}
                   </span>
                 </span>
                 <span className="text-[10px] text-crypto-primary/80 mt-0.5 font-mono">
@@ -654,7 +581,7 @@ export function DashboardView() {
                 </span>
                 {goalWindow?.previous_profit !== undefined && (
                   <span className="text-[10px] text-crypto-text/60 font-mono">
-                    Prev Window: {goalWindow.previous_profit >= 0 ? '+' : '-'}${Math.abs(goalWindow.previous_profit).toFixed(2)}
+                    Prev Cycle: {goalWindow.previous_profit >= 0 ? '+' : '-'}${Math.abs(goalWindow.previous_profit).toFixed(2)}
                   </span>
                 )}
               </div>
@@ -663,13 +590,22 @@ export function DashboardView() {
             {/* Progress Bar Area */}
             <div className="p-4 flex-1 flex flex-col justify-end">
               <div className="text-xs mb-2 tracking-widest flex justify-between items-center">
-                <span className="flex items-center gap-1.5">
+                <span className="flex items-center gap-1.5 flex-wrap">
                   PROGRESS // ROUTING
                   {isGoalReached && (
                     <span className="text-[9px] text-crypto-success bg-crypto-success/15 border border-crypto-success px-1.5 py-0.2 font-bold animate-pulse">
-                      $100 GOAL REACHED
+                      ${dailyGoal} GOAL REACHED
                     </span>
                   )}
+                  {goalWindow?.training_on_the_job?.enabled && goalWindow?.paper_auto_reset_seconds_remaining != null ? (
+                    <span className="text-[9px] text-crypto-success bg-crypto-success/20 border border-crypto-success px-1.5 py-0.2 font-mono font-bold animate-pulse">
+                      COMPOUNDING TO WORKING CAPITAL IN: {Math.floor(goalWindow.paper_auto_reset_seconds_remaining / 60)}m {goalWindow.paper_auto_reset_seconds_remaining % 60}s
+                    </span>
+                  ) : balance?.paper_trading !== false && goalWindow?.paper_auto_reset_seconds_remaining != null ? (
+                    <span className="text-[9px] text-crypto-primary bg-crypto-primary/15 border border-crypto-primary/50 px-1.5 py-0.2 font-mono font-bold animate-pulse">
+                      FRESH DAY RESET IN: {Math.floor(goalWindow.paper_auto_reset_seconds_remaining / 60)}m {goalWindow.paper_auto_reset_seconds_remaining % 60}s
+                    </span>
+                  ) : null}
                 </span>
                 <span className="font-bold">{dailyGoalPct.toFixed(1)}%</span>
               </div>
@@ -679,9 +615,21 @@ export function DashboardView() {
                   style={{ width: `${Math.min(100, Math.max(0, dailyGoalPct))}%` }} 
                 />
               </div>
-              <div className="text-[10px] opacity-70 mt-2 font-mono flex justify-between">
-                <span>EST RESET SCHEDULE: 00:00 & 09:00 EST</span>
-                <span>{goalWindow?.time_remaining ? `${goalWindow.time_remaining} until reset` : 'ACTIVE CYCLE'}</span>
+              <div className="text-[10px] opacity-70 mt-2 font-mono flex justify-between flex-wrap gap-1">
+                <span>
+                  {goalWindow?.training_on_the_job?.enabled
+                    ? 'TRAINING MODE: 5M TEMPORARY VAULT -> WORKING CAPITAL'
+                    : balance?.paper_trading !== false 
+                      ? `PAPER ITERATION: 5M POST-$${dailyGoal} GOAL` 
+                      : 'EST RESET: 00:00 & 09:00 EST'}
+                </span>
+                <span>
+                  {goalWindow?.training_on_the_job?.enabled && goalWindow?.paper_auto_reset_seconds_remaining != null
+                    ? `Injecting to capital in ${goalWindow.paper_auto_reset_seconds_remaining}s`
+                    : balance?.paper_trading !== false && goalWindow?.paper_auto_reset_seconds_remaining != null
+                      ? `Resetting to Day 1 State in ${goalWindow.paper_auto_reset_seconds_remaining}s`
+                      : (goalWindow?.time_remaining ? `${goalWindow.time_remaining} until reset` : 'ACTIVE CYCLE')}
+                </span>
               </div>
             </div>
           </div>
@@ -811,6 +759,65 @@ export function DashboardView() {
 
       {/* CAPITAL PRESERVATION RECOVERY PROTOCOL SCREEN */}
       <RecoveryProtocolCard />
+
+      {/* LATENCY-ADAPTIVE ENVIRONMENT & STALENESS GUARD STATUS */}
+      {balance?.latency_profile && (
+        <div className="crt-grid-panel p-4 font-mono text-xs border border-crypto-primary/40 bg-black/40 text-crypto-primary flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <Zap className="w-6 h-6 shrink-0 mt-0.5 text-crypto-primary animate-pulse" />
+            <div className="flex flex-col gap-1">
+              <div className="font-bold text-sm tracking-wider flex items-center gap-2 flex-wrap">
+                <span>EXECUTION LATENCY ADAPTATION:</span>
+                <span className={`px-2 py-0.5 border text-[10px] uppercase font-bold tracking-widest ${
+                  balance.latency_profile.isUltraLowLatency
+                    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500'
+                    : 'bg-crypto-primary/20 text-crypto-primary border-crypto-primary/50'
+                }`}>
+                  {balance.latency_profile.executionEnvironment === 'AWS_LIGHTSAIL_FAST' ? 'AWS LIGHTSAIL ULTRA-LOW LATENCY (<25ms)' : 'SANDBOX STANDARD ADAPTIVE MODE'}
+                </span>
+                <span className="text-[11px] opacity-75">
+                  (Kalshi REST: {balance.latency_profile.kalshiRestPingMs}ms | Coinbase WS: {balance.latency_profile.coinbaseWsPingMs}ms | Effective: {balance.latency_profile.effectiveLatencyMs}ms)
+                </span>
+              </div>
+              <div className="text-[11px] opacity-90 leading-relaxed">
+                <strong>Quote Freshness Gate (C):</strong> Rejects entries older than <strong>{balance.latency_profile.staleTickThresholdMs}ms</strong> to prevent stale fills. <strong>Adaptive Buffer (B):</strong> Entry tolerance tuned to <strong>{(balance.latency_profile.slippageBufferPct * 100).toFixed(1)}%</strong> with <strong>{(balance.latency_profile.trailingStopAgilityFactor * 100).toFixed(0)}%</strong> trailing stop agility. Automatically tightens to sub-millisecond precision when deployed on AWS Lightsail us-east-1.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* PERPETUAL / 15-MIN PREDICTION ALLOCATION GUARD */}
+      {balance?.perp_allocation_stats && (
+        <div className="crt-grid-panel p-4 font-mono text-xs border border-crypto-primary/40 bg-black/40 text-crypto-primary flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div className="flex items-start gap-3 w-full">
+            <ShieldCheck className="w-6 h-6 shrink-0 mt-0.5 text-crypto-primary" />
+            <div className="flex flex-col gap-1 w-full">
+              <div className="font-bold text-sm tracking-wider flex items-center justify-between gap-2 flex-wrap w-full">
+                <div className="flex items-center gap-2">
+                  <span>MARKET ALLOCATION & CAPITAL GUARD:</span>
+                  <span className={`px-2 py-0.5 border text-[10px] uppercase font-bold tracking-widest ${
+                    balance.perp_allocation_stats.active_perps_count >= balance.perp_allocation_stats.max_perps_allowed
+                      ? 'bg-amber-500/20 text-amber-400 border-amber-500'
+                      : 'bg-emerald-500/20 text-emerald-400 border-emerald-500'
+                  }`}>
+                    PERP SLOTS: {balance.perp_allocation_stats.active_perps_count} / {balance.perp_allocation_stats.max_perps_allowed} MAX
+                  </span>
+                  <span className="px-2 py-0.5 border text-[10px] uppercase font-bold tracking-widest bg-crypto-primary/20 text-crypto-primary border-crypto-primary/50">
+                    15-MIN PREDICTIONS: {balance.perp_allocation_stats.active_predictions_count} ACTIVE
+                  </span>
+                </div>
+                <div className="text-[11px] opacity-80">
+                  Perp Capital: ${balance.perp_allocation_stats.perp_capital_in_use.toFixed(2)} | Prediction Capital: ${balance.perp_allocation_stats.prediction_capital_in_use.toFixed(2)}
+                </div>
+              </div>
+              <div className="text-[11px] opacity-90 leading-relaxed">
+                <strong>50% Capital Reserve Rule:</strong> Perpetual Contracts are strictly hard-capped at <strong>4 concurrent positions</strong> and cannot consume more than 50% of working capital. At least <strong>50% of capital is strictly reserved for 15-minute price predictions</strong>, preventing perpetual stall lockouts.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* TIME-OUT GUARD SCREEN */}
       <ExtinctionListCard />

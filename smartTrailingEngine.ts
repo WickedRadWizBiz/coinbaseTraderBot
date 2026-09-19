@@ -33,6 +33,7 @@ export interface SmartTrailingEvaluationInput {
   minDollarTarget?: number;
   maxDollarTarget?: number;
   isPerpetual?: boolean;
+  latencyAgilityFactor?: number;
   spotDataMetrics?: {
     directionalImpact: number;
     volSurge: number;
@@ -68,7 +69,8 @@ export class SmartTrailingEngine {
       currentState,
       minDollarTarget = 5.0,
       maxDollarTarget = 50.0,
-      isPerpetual = false
+      isPerpetual = false,
+      latencyAgilityFactor = 1.0
     } = input;
 
     const currentCostPerContract = isPerpetual
@@ -180,7 +182,7 @@ export class SmartTrailingEngine {
     }
 
     // Convert locked dollars to trailing floor ratio
-    let calculatedFloorRatio = lockedFloorDollars / Math.max(1, positionCapitalCost);
+    let calculatedFloorRatio = (lockedFloorDollars * Math.max(0.9, Math.min(1.25, latencyAgilityFactor))) / Math.max(1, positionCapitalCost);
     // Floor ratio must never be negative or lower than 3% once active
     calculatedFloorRatio = Math.max(0.03, calculatedFloorRatio);
 

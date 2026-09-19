@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Save, AlertCircle, ShieldCheck, PieChart, Activity, Clock } from 'lucide-react';
+import { Save, AlertCircle, ShieldCheck, PieChart, Activity, Clock, Zap } from 'lucide-react';
 
 import { PWAInstallButton } from './PWAInstallButton';
 
 export function SettingsView() {
   const [settings, setSettings] = useState({
+    trainingOnTheJob: false,
     winningsLock: 50,
     allocCrypto15m: 50,
     allocCrypto1h: 35,
@@ -19,16 +20,20 @@ export function SettingsView() {
     paperTrading: true,
     botActive: true, adaptationMode: true, ENABLE_RAPID_SCALP_MODE: true, lowFundsMode: false
   });
+  const [balanceData, setBalanceData] = useState<any>(null);
   const [marketTesting, setMarketTesting] = useState<any>(null);
   const [startingBankroll, setStartingBankroll] = useState<number>(200);
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
+  const fetchAll = () => {
     fetch('/api/balance')
       .then(r => r.ok ? r.json() : null)
       .then(data => {
-        if (data && typeof data.starting_bankroll === 'number') {
-          setStartingBankroll(data.starting_bankroll);
+        if (data) {
+          setBalanceData(data);
+          if (typeof data.starting_bankroll === 'number') {
+            setStartingBankroll(data.starting_bankroll);
+          }
         }
       }).catch(() => {});
 
@@ -39,19 +44,57 @@ export function SettingsView() {
         if (!ct || !ct.includes('application/json')) return null;
         return r.json().catch(() => null);
       })
-      .then(data => { if (data) setSettings(data); }).catch(() => {});
+      .then(data => { 
+        if (data) setSettings(prev => ({ ...prev, ...data })); 
+      }).catch(() => {});
 
-    const fetchTestingStatus = () => {
-      fetch('/api/market-testing')
-        .then(r => r.ok ? r.json() : null)
-        .then(data => { if (data) setMarketTesting(data); })
-        .catch(() => {});
-    };
+    fetch('/api/market-testing')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setMarketTesting(data); })
+      .catch(() => {});
+  };
 
-    fetchTestingStatus();
-    const interval = setInterval(fetchTestingStatus, 10000);
+  useEffect(() => {
+    fetchAll();
+    const interval = setInterval(fetchAll, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  const handleToggleTrainingOnTheJob = async () => {
+    const newVal = !settings.trainingOnTheJob;
+    const updated = {
+      ...settings,
+      trainingOnTheJob: newVal,
+      overrideConfluence: newVal ? true : settings.overrideConfluence
+    };
+    setSettings(updated);
+    try {
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          trainingOnTheJob: newVal,
+          overrideConfluence: newVal ? true : settings.overrideConfluence
+        })
+      });
+      fetchAll();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleSetGoalTarget = async (tgt: number) => {
+    try {
+      await fetch('/api/goal-target', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: tgt })
+      });
+      fetchAll();
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -61,11 +104,25 @@ export function SettingsView() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings)
       });
+      fetchAll();
     } catch (e) {
       console.error(e);
     } finally {
       setSaving(false);
     }
+  };
+
+  const trainingStatus = balanceData?.goal_window?.training_on_the_job || {
+    enabled: settings.trainingOnTheJob,
+    untouched_vault_balance: 0,
+    untouched_vault_target: 200,
+    is_untouched_vault_full: false,
+    temporary_vault_balance: 0,
+    is_in_5m_compound_window: false,
+    compound_seconds_remaining: null,
+    compounded_cycles_count: 0,
+    total_compounded_to_working_capital: 0,
+    current_goal_target: 100
   };
 
   return (
@@ -78,6 +135,92 @@ export function SettingsView() {
             <p className="text-xs text-[#808080] font-sans">
               Adjust risk tolerances, engine states, and strategy settings.
             </p>
+          </div>
+        </div>
+      </div>
+
+      {/* TRAINING ON THE JOB PROTOCOL SETTING */}
+      <div className={`crt-grid-panel flex flex-col gap-4 relative overflow-hidden border ${
+        settings.trainingOnTheJob 
+          ? 'border-crypto-success/70 bg-crypto-success/5 shadow-[0_0_15px_rgba(74,222,128,0.15)]' 
+          : 'border-crypto-primary/40'
+      }`}>
+        <div className="absolute inset-0 heavy-dither-overlay pointer-events-none" />
+        <div className="flex items-center justify-between pb-3 border-b border-crypto-primary/30 flex-wrap gap-2">
+          <div className="flex items-center gap-3">
+            <Zap className={`w-6 h-6 ${settings.trainingOnTheJob ? 'text-crypto-success animate-pulse' : 'text-crypto-primary'}`} />
+            <div>
+              <h3 className="text-sm font-bold uppercase tracking-wider text-crypto-text">Training on the Job Mode</h3>
+              <p className="text-[11px] text-[#808080] font-sans">Automated non-destructive cycle with $200 untouched vault & 5m capital compounding</p>
+            </div>
+          </div>
+          <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider border ${
+            settings.trainingOnTheJob 
+              ? 'bg-crypto-success/20 text-crypto-success border-crypto-success' 
+              : 'bg-black/50 text-[#808080] border-[#404040]'
+          }`}>
+            {settings.trainingOnTheJob ? 'ENABLED' : 'DISABLED'}
+          </span>
+        </div>
+
+        {/* Toggle Switch */}
+        <div className="flex items-center justify-between gap-4 p-3 bg-black/40 border border-crypto-primary/30">
+          <div className="flex flex-col gap-0.5">
+            <span className="font-bold text-crypto-text text-xs uppercase">Enable "Training on the Job" Mode</span>
+            <span className="text-[11px] text-[#909090] font-sans">
+              Overrides confluence automatically. Quarantines initial $200 into untouched vault, then routes post-goal 5m earnings into working capital.
+            </span>
+          </div>
+          <button
+            onClick={handleToggleTrainingOnTheJob}
+            className={`px-4 py-2 text-xs uppercase font-bold border transition-all cursor-pointer shrink-0 min-h-[44px] flex items-center gap-2 ${
+              settings.trainingOnTheJob
+                ? 'bg-crypto-success text-crypto-bg border-crypto-success shadow-[0_0_12px_rgba(74,222,128,0.5)]'
+                : 'bg-black/60 text-crypto-primary border-crypto-primary hover:bg-crypto-primary hover:text-black'
+            }`}
+          >
+            <span className={`w-2.5 h-2.5 rounded-full ${settings.trainingOnTheJob ? 'bg-black animate-ping' : 'bg-crypto-primary'}`}></span>
+            <span>{settings.trainingOnTheJob ? 'SWITCH: ON' : 'SWITCH: OFF'}</span>
+          </button>
+        </div>
+
+        {/* Dynamic Goal Target Escalation (Linked Directly to Daily Subroutine) */}
+        <div className="flex flex-col gap-2 p-3 bg-black/40 border border-crypto-primary/30 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="font-bold uppercase tracking-wider text-crypto-text">Dynamic Goal Target Escalation</span>
+            <span className="text-crypto-primary font-bold font-mono">${trainingStatus.current_goal_target || 100} Target</span>
+          </div>
+          <p className="text-[11px] text-[#808080] font-sans">
+            Target escalation is linked directly to the daily subroutine. Once the initial $200 enters the untouched vault, the target automatically switches to the daily subroutine scaling dynamically (50%) with the working capital at hand.
+          </p>
+          <div className="flex items-center gap-2 pt-1">
+            <div className={`px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider border flex items-center gap-1.5 ${
+              trainingStatus.is_untouched_vault_full
+                ? 'bg-crypto-success/20 text-crypto-success border-crypto-success'
+                : 'bg-black/60 text-amber-300 border-amber-500/50'
+            }`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${trainingStatus.is_untouched_vault_full ? 'bg-crypto-success' : 'bg-amber-400'}`} />
+              <span>{trainingStatus.is_untouched_vault_full ? 'ACTIVE: DAILY SUBROUTINE (50% WORKING CAPITAL SCALING)' : 'PHASE 1: FILLING $200 UNTOUCHED VAULT ($100 TARGET)'}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Real-Time Training Status Grid */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1 text-xs">
+          <div className="p-2.5 bg-black/40 border border-crypto-primary/30 flex flex-col gap-1">
+            <span className="text-[10px] text-crypto-text/60 uppercase font-bold">Untouched Vault ($200)</span>
+            <span className="text-sm font-bold text-crypto-text">${(trainingStatus.untouched_vault_balance || 0).toFixed(2)} / $200.00</span>
+            <span className="text-[9px] text-[#808080]">{trainingStatus.is_untouched_vault_full ? 'Protected in Vault' : 'Filling Reserve'}</span>
+          </div>
+          <div className="p-2.5 bg-black/40 border border-crypto-primary/30 flex flex-col gap-1">
+            <span className="text-[10px] text-crypto-text/60 uppercase font-bold">5m Temp Vault</span>
+            <span className="text-sm font-bold text-crypto-success">+${(trainingStatus.temporary_vault_balance || 0).toFixed(2)}</span>
+            <span className="text-[9px] text-[#808080]">{trainingStatus.is_in_5m_compound_window ? `Injecting in ${trainingStatus.compound_seconds_remaining || 0}s` : 'Ready'}</span>
+          </div>
+          <div className="p-2.5 bg-black/40 border border-crypto-primary/30 flex flex-col gap-1">
+            <span className="text-[10px] text-crypto-text/60 uppercase font-bold">Total Injected Capital</span>
+            <span className="text-sm font-bold text-crypto-primary">+${(trainingStatus.total_compounded_to_working_capital || 0).toFixed(2)}</span>
+            <span className="text-[9px] text-[#808080]">{trainingStatus.compounded_cycles_count || 0} Cycles Compounded</span>
           </div>
         </div>
       </div>
@@ -150,6 +293,18 @@ export function SettingsView() {
               <div className={`absolute left-1 top-1 bg-white w-4 h-4 rounded-none transition-transform ${settings.lossRecoveryMode ? 'translate-x-6' : ''}`}></div>
             </div>
           </label>
+        </div>
+
+        <div className="flex items-start gap-3 p-3 bg-black/40 crt-border border-crypto-primary/30 mt-1">
+          <ShieldCheck className="w-5 h-5 text-crypto-primary shrink-0 mt-0.5" />
+          <div className="flex flex-col gap-0.5">
+            <span className="text-xs font-bold uppercase tracking-wider text-crypto-text flex items-center gap-2">
+              Perpetual Capital Reserve Guard: <span className="text-crypto-primary font-mono">30% Hard Floor</span>
+            </span>
+            <span className="text-xs text-[#808080]">
+              The last remaining 30% of working capital is hard-locked against Perpetual Contracts, ensuring liquidity is never exhausted by perpetual margin and always preserved for prediction market entries.
+            </span>
+          </div>
         </div>
       </div>
 
@@ -424,24 +579,70 @@ export function SettingsView() {
             <div className={`absolute left-1 top-1 bg-white w-6 h-6 rounded-none transition-transform ${settings.ENABLE_RAPID_SCALP_MODE ? 'translate-x-6' : ''}`}></div>
           </div>
         </label>
+        <label className="flex items-center justify-between cursor-pointer pt-4 mt-4 border-t border-crypto-primary/30 bg-[#8f73ff08] p-3 -mx-3">
+          <div className="flex flex-col pr-4">
+            <span className="font-bold text-crypto-primary flex items-center gap-2">
+              Training on the Job
+              <span className={`px-2 py-0.5 text-[10px] font-bold border rounded-none ${
+                (settings as any).trainingOnTheJob ? 'bg-crypto-success/20 text-crypto-success border-crypto-success' : 'bg-black/50 text-[#808080] border-[#404040]'
+              }`}>
+                {(settings as any).trainingOnTheJob ? 'ACTIVE COMPOUNDING' : 'OFF'}
+              </span>
+            </span>
+            <span className="text-xs text-[#909090] mt-1 leading-relaxed">
+              Sets aside an initial $200 total untouched reserve. Thereafter, places $100+ goal profit plus 5m interim gains into a temporary vault which enters working capital after 5 minutes without wiping P/L. Always forces Confluence Override ON.
+            </span>
+          </div>
+          <div className="relative shrink-0">
+            <input 
+              type="checkbox" 
+              className="sr-only" 
+              checked={Boolean((settings as any).trainingOnTheJob)}
+              onChange={(e) => {
+                const isChecked = e.target.checked;
+                const newSettings = {
+                  ...settings, 
+                  trainingOnTheJob: isChecked,
+                  // Confluence Override is always forced ON in Training on the Job mode
+                  overrideConfluence: isChecked ? true : settings.overrideConfluence
+                };
+                setSettings(newSettings as any);
+                fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newSettings) });
+              }}
+            />
+            <div className={`block w-14 h-8 rounded-none transition-colors crt-border ${(settings as any).trainingOnTheJob ? 'bg-crypto-success' : 'bg-black/60 border border-[#404040]'}`}></div>
+            <div className={`absolute left-1 top-1 bg-white w-6 h-6 rounded-none transition-transform ${(settings as any).trainingOnTheJob ? 'translate-x-6' : ''}`}></div>
+          </div>
+        </label>
+
         <label className="flex items-center justify-between cursor-pointer pt-4 mt-4 border-t border-crypto-primary/30">
           <div className="flex flex-col">
-            <span className="font-medium text-crypto-danger flex items-center gap-2">Override Confluence Rules <span className="px-2 py-0.5 text-[10px] bg-crypto-danger/20 text-crypto-danger border border-crypto-danger rounded-none">Override Active</span></span>
-            <span className="text-xs text-[#808080]">Bypass all multi-tool indicator confluence checks, strict session 3-confluence rules, and doji filters for immediate trade execution.</span>
+            <span className="font-medium text-crypto-danger flex items-center gap-2">
+              Override Confluence Rules 
+              <span className="px-2 py-0.5 text-[10px] bg-crypto-danger/20 text-crypto-danger border border-crypto-danger rounded-none">
+                {(settings as any).trainingOnTheJob ? 'LOCKED ON (TRAINING MODE)' : 'Override Active'}
+              </span>
+            </span>
+            <span className="text-xs text-[#808080]">
+              {(settings as any).trainingOnTheJob 
+                ? 'Permanently engaged while Training on the Job mode is active.' 
+                : 'Bypass all multi-tool indicator confluence checks, strict session 3-confluence rules, and doji filters for immediate trade execution.'}
+            </span>
           </div>
           <div className="relative">
             <input 
               type="checkbox" 
               className="sr-only" 
-              checked={settings.overrideConfluence}
+              checked={settings.overrideConfluence || Boolean((settings as any).trainingOnTheJob)}
+              disabled={Boolean((settings as any).trainingOnTheJob)}
               onChange={(e) => {
                 const newSettings = {...settings, overrideConfluence: e.target.checked};
                 setSettings(newSettings);
                 fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newSettings) });
               }}
             />
-            <div className={`block w-14 h-8 rounded-none transition-colors crt-border ${settings.overrideConfluence ? 'bg-crypto-danger' : 'bg-black/60 border border-[#404040]'}`}></div>
-            <div className={`absolute left-1 top-1 bg-white w-6 h-6 rounded-none transition-transform ${settings.overrideConfluence ? 'translate-x-6' : ''}`}></div>
+            <div className={`block w-14 h-8 rounded-none transition-colors crt-border ${(settings.overrideConfluence || Boolean((settings as any).trainingOnTheJob)) ? 'bg-crypto-danger' : 'bg-black/60 border border-[#404040]'}`}></div>
+            <div className={`absolute left-1 top-1 bg-white w-6 h-6 rounded-none transition-transform ${(settings.overrideConfluence || Boolean((settings as any).trainingOnTheJob)) ? 'translate-x-6' : ''}`}></div>
           </div>
         </label>
 
