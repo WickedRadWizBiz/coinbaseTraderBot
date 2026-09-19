@@ -357,8 +357,8 @@ export function DashboardView() {
   return (
     <div className="flex flex-col gap-6 w-full max-w-7xl mx-auto pb-24 md:pb-6 relative z-10 text-crypto-primary font-mono text-sm tracking-wider">
       
-      {/* Depleted Bankroll Notice Banner */}
-      {activeEquity < 5.0 && (
+      {/* Depleted Bankroll Notice Banner (Paper Trading) */}
+      {balance?.paper_trading && activeEquity < 5.0 && (
         <div className="crt-grid-panel p-4 border border-crypto-danger bg-crypto-danger/15 flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <ShieldAlert className="w-6 h-6 text-crypto-danger animate-pulse shrink-0" />
@@ -387,6 +387,37 @@ export function DashboardView() {
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Live Kalshi Mode Status Banner */}
+      {!balance?.paper_trading && (
+        <div className={`crt-grid-panel p-3 border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${
+          (balance?.real_kalshi_cash_pool ?? 0) > 0
+            ? 'border-crypto-success/50 bg-crypto-success/10 text-crypto-success'
+            : 'border-yellow-500/50 bg-yellow-500/10 text-yellow-300'
+        }`}>
+          <div className="flex items-center gap-2.5">
+            <ShieldCheck className="w-5 h-5 shrink-0 animate-pulse" />
+            <div>
+              <div className="font-bold uppercase tracking-wider text-xs">
+                {(balance?.real_kalshi_cash_pool ?? 0) > 0 
+                  ? `LIVE KALSHI POOL CONNECTED: $${(balance?.real_kalshi_cash_pool ?? 0).toFixed(2)} USD` 
+                  : 'LIVE MODE ACTIVE — Awaiting / Verifying Kalshi Cash Pool'}
+              </div>
+              <div className="text-[11px] opacity-80 mt-0.5">
+                {(balance?.real_kalshi_cash_pool ?? 0) > 0 
+                  ? 'All trading decisions and capital allocations are operating against your authenticated live Kalshi balance.' 
+                  : 'If balance shows $0.00, check the Kalshi Live API Authentication card in Config/Settings to test or update keys.'}
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() => fetchData(true)}
+            className="px-3 py-1 text-xs uppercase font-bold tracking-wider bg-black/50 border border-current hover:bg-white hover:text-black transition-colors shrink-0"
+          >
+            Sync Live Balance
+          </button>
         </div>
       )}
 

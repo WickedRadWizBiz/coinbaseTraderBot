@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Save, AlertCircle, ShieldCheck, PieChart, Activity, Clock, Zap } from 'lucide-react';
 
 import { PWAInstallButton } from './PWAInstallButton';
+import { KalshiKeyConfigCard } from './KalshiKeyConfigCard';
 
 export function SettingsView() {
   const [settings, setSettings] = useState({
@@ -138,6 +139,9 @@ export function SettingsView() {
           </div>
         </div>
       </div>
+
+      {/* KALSHI LIVE API AUTHENTICATION & DIAGNOSTIC CARD */}
+      <KalshiKeyConfigCard onBalanceUpdated={fetchAll} />
 
       {/* TRAINING ON THE JOB PROTOCOL SETTING */}
       <div className={`crt-grid-panel flex flex-col gap-4 relative overflow-hidden border ${

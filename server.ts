@@ -4959,6 +4959,43 @@ app.get('/api/kalshi/pool', async (req, res) => {
   }
 });
 
+app.get('/api/kalshi/diagnostic', (req, res) => {
+  kalshiService.reloadCredentials();
+  res.json({ success: true, diagnostic: kalshiService.getDiagnostic() });
+});
+
+app.post('/api/kalshi/credentials', async (req, res) => {
+  try {
+    const { keyId, secret } = req.body || {};
+    if (!keyId || !secret) {
+      return res.status(400).json({ success: false, error: 'Both Key ID and Secret/Private Key are required.' });
+    }
+
+    kalshiService.updateCredentials(keyId, secret, true);
+    const testBal = await kalshiService.getBalance();
+    
+    res.json({
+      success: testBal.success,
+      balance: testBal.balance,
+      error: testBal.error,
+      diagnostic: kalshiService.getDiagnostic()
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to save credentials' });
+  }
+});
+
+app.post('/api/kalshi/test-connection', async (req, res) => {
+  kalshiService.reloadCredentials();
+  const testBal = await kalshiService.getBalance();
+  res.json({
+    success: testBal.success,
+    balance: testBal.balance,
+    error: testBal.error,
+    diagnostic: kalshiService.getDiagnostic()
+  });
+});
+
 app.post('/api/restart', (req, res) => {
   simulatedPaperBalance = startingBankroll;
   cycleEarnedProfit = 0;

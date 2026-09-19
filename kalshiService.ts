@@ -1,23 +1,107 @@
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import 'dotenv/config';
 
+function scanEnvFilesForKeys(): { keyId: string; secret: string } {
+  const candidateFiles = [
+    path.resolve(process.cwd(), '.env'),
+    path.resolve(process.cwd(), '../.env'),
+    '/home/ubuntu/coinbaseTraderBot/.env',
+    '/home/ubuntu/.env'
+  ];
+
+  let foundKey = '';
+  let foundSecret = '';
+
+  for (const filePath of candidateFiles) {
+    if (fs.existsSync(filePath)) {
+      try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+
+        // Look for multiline or single line RSA key
+        const rsaMatch = content.match(/(?:KALSHI_API_SECRET|KALSHI_PRIVATE_KEY|KALSHI_SECRET)\s*=\s*(["'][\s\S]*?["']|-----BEGIN[\s\S]*?-----END[^\n\r]*|[^\r\n]+)/);
+        if (rsaMatch && rsaMatch[1] && !foundSecret) {
+          let val = rsaMatch[1].trim();
+          if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+            val = val.slice(1, -1);
+          }
+          foundSecret = val;
+        }
+
+        const keyIdMatch = content.match(/(?:KALSHI_API_KEY|KALSHI_KEY_ID|KALSHI_KEY)\s*=\s*["']?([a-zA-Z0-9_\-\.]+)["']?/);
+        if (keyIdMatch && keyIdMatch[1] && !foundKey) {
+          foundKey = keyIdMatch[1].trim();
+        }
+      } catch (err) {
+        // Ignore file read error
+      }
+    }
+  }
+
+  return { keyId: foundKey, secret: foundSecret };
+}
+
 export class KalshiService {
-  private keyId: string;
-  private secretRaw: string;
+  private keyId: string = '';
+  private secretRaw: string = '';
   private privateKey: crypto.KeyObject | null = null;
-  private baseUrl = 'https://external-api.kalshi.com/trade-api/v2';
+  private initError: string | null = null;
+  private lastApiStatus: { success: boolean; statusText?: string; balance?: number; error?: string; timestamp?: number } | null = null;
+  private baseUrl = 'https://api.elections.kalshi.com/trade-api/v2';
+  private fallbackBaseUrl = 'https://external-api.kalshi.com/trade-api/v2';
 
   constructor() {
-    this.keyId = process.env.KALSHI_API_KEY || process.env.KALSHI_KEY_ID || process.env.KALSHI_KEY || '';
-    this.secretRaw = process.env.KALSHI_API_SECRET || process.env.KALSHI_PRIVATE_KEY || process.env.KALSHI_SECRET || '';
+    this.reloadCredentials();
+  }
+
+  public reloadCredentials() {
+    const fromFiles = scanEnvFilesForKeys();
+    this.keyId = process.env.KALSHI_API_KEY || process.env.KALSHI_KEY_ID || process.env.KALSHI_KEY || fromFiles.keyId || '';
+    this.secretRaw = process.env.KALSHI_API_SECRET || process.env.KALSHI_PRIVATE_KEY || process.env.KALSHI_SECRET || fromFiles.secret || '';
     this.initPrivateKey();
   }
 
+  public updateCredentials(keyId: string, secret: string, saveToDisk = true) {
+    this.keyId = keyId.trim();
+    this.secretRaw = secret.trim();
+    process.env.KALSHI_API_KEY = this.keyId;
+    process.env.KALSHI_API_SECRET = this.secretRaw;
+    this.initPrivateKey();
+
+    if (saveToDisk) {
+      try {
+        const envPath = path.resolve(process.cwd(), '.env');
+        let existing = '';
+        if (fs.existsSync(envPath)) {
+          existing = fs.readFileSync(envPath, 'utf-8');
+        }
+
+        // Clean existing entries
+        existing = existing.replace(/(?:KALSHI_API_KEY|KALSHI_KEY_ID|KALSHI_KEY)\s*=.*\n?/g, '');
+        existing = existing.replace(/(?:KALSHI_API_SECRET|KALSHI_PRIVATE_KEY|KALSHI_SECRET)\s*=(?:["'][\s\S]*?["']|-----BEGIN[\s\S]*?-----END[^\n\r]*|[^\r\n]+)\n?/g, '');
+
+        const formattedSecret = this.secretRaw.includes('\n')
+          ? `"${this.secretRaw.replace(/\n/g, '\\n')}"`
+          : `"${this.secretRaw}"`;
+
+        const newEnvContent = `${existing.trim()}\n\nKALSHI_API_KEY="${this.keyId}"\nKALSHI_API_SECRET=${formattedSecret}\n`;
+        fs.writeFileSync(envPath, newEnvContent, 'utf-8');
+        console.log('[KALSHI] Saved updated Kalshi credentials to .env');
+      } catch (err) {
+        console.error('[KALSHI] Failed to write to .env:', err);
+      }
+    }
+  }
+
   private initPrivateKey() {
-    this.keyId = this.keyId || process.env.KALSHI_API_KEY || process.env.KALSHI_KEY_ID || process.env.KALSHI_KEY || '';
-    this.secretRaw = this.secretRaw || process.env.KALSHI_API_SECRET || process.env.KALSHI_PRIVATE_KEY || process.env.KALSHI_SECRET || '';
-    
-    if (!this.keyId || !this.secretRaw) return;
+    this.initError = null;
+    if (!this.keyId || !this.secretRaw) {
+      this.initError = 'Missing Key ID or Private Key in environment or .env';
+      this.privateKey = null;
+      return;
+    }
+
     try {
       let pem = this.secretRaw.trim();
       
@@ -39,23 +123,54 @@ export class KalshiService {
            pem = parts.join('\n');
         }
       } else if (!pem.includes('-----BEGIN')) {
-        if (pem.length > 200) {
+        if (pem.length > 100) {
             const base64 = pem.replace(/\s+/g, '');
             pem = '-----BEGIN RSA PRIVATE KEY-----\n' + (base64.match(/.{1,64}/g)?.join('\n') || base64) + '\n-----END RSA PRIVATE KEY-----';
         }
       }
-      this.privateKey = crypto.createPrivateKey(pem);
+
+      try {
+        this.privateKey = crypto.createPrivateKey(pem);
+      } catch (e1: any) {
+        // If RSA PKCS#1 failed, try wrapping as PKCS#8
+        if (pem.includes('BEGIN RSA PRIVATE KEY')) {
+          const altPem = pem.replace(/BEGIN RSA PRIVATE KEY/g, 'BEGIN PRIVATE KEY').replace(/END RSA PRIVATE KEY/g, 'END PRIVATE KEY');
+          this.privateKey = crypto.createPrivateKey(altPem);
+        } else if (pem.includes('BEGIN PRIVATE KEY')) {
+          const altPem = pem.replace(/BEGIN PRIVATE KEY/g, 'BEGIN RSA PRIVATE KEY').replace(/END PRIVATE KEY/g, 'END RSA PRIVATE KEY');
+          this.privateKey = crypto.createPrivateKey(altPem);
+        } else {
+          throw e1;
+        }
+      }
+
       console.log('[KALSHI] Initialized Kalshi RSA private key successfully.');
-    } catch (err) {
-      console.error('[KALSHI] Error initializing Kalshi private key:', err);
+      this.initError = null;
+    } catch (err: any) {
+      console.error('[KALSHI] Error initializing Kalshi private key:', err?.message || err);
+      this.initError = `RSA Key Parsing Error: ${err?.message || err}`;
+      this.privateKey = null;
     }
   }
 
   public isConfigured(): boolean {
     if (!this.privateKey || !this.keyId) {
-      this.initPrivateKey();
+      this.reloadCredentials();
     }
     return !!(this.keyId && this.secretRaw && this.privateKey);
+  }
+
+  public getDiagnostic() {
+    return {
+      hasKeyId: Boolean(this.keyId),
+      keyIdMasked: this.keyId ? `${this.keyId.substring(0, 4)}...${this.keyId.substring(this.keyId.length - 4)}` : 'NOT_FOUND',
+      hasSecret: Boolean(this.secretRaw),
+      secretLength: this.secretRaw ? this.secretRaw.length : 0,
+      privateKeyLoaded: Boolean(this.privateKey),
+      initError: this.initError,
+      lastApiStatus: this.lastApiStatus,
+      isConfigured: this.isConfigured()
+    };
   }
 
   private signRequest(method: string, path: string): { timestamp: string, signature: string } {
@@ -77,37 +192,54 @@ export class KalshiService {
   }
 
   public async getBalance(): Promise<{ success: boolean; balance?: number; breakdown?: any[]; error?: string }> {
-    if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
-
-    try {
-      const method = 'GET';
-      const path = '/portfolio/balance';
-
-      const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
-
-      const res = await fetch(this.baseUrl + path, {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          'KALSHI-ACCESS-KEY': this.keyId,
-          'KALSHI-ACCESS-TIMESTAMP': timestamp,
-          'KALSHI-ACCESS-SIGNATURE': signature
-        }
-      });
-
-      if (!res.ok) {
-        const txt = await res.text();
-        console.error('[KALSHI BALANCE ERROR] HTTP', res.status, txt);
-        return { success: false, error: `HTTP ${res.status}: ${txt}` };
-      }
-
-      const data: any = await res.json();
-      const balanceDollars = (data.balance || 0) / 100;
-      return { success: true, balance: balanceDollars, breakdown: data.balance_breakdown || [] };
-    } catch (e: any) {
-      console.error('[KALSHI BALANCE ERROR]', e.message);
-      return { success: false, error: e.message };
+    if (!this.isConfigured()) {
+      const err = this.initError || 'Kalshi API credentials not found or unparsed';
+      this.lastApiStatus = { success: false, error: err, timestamp: Date.now() };
+      return { success: false, error: err };
     }
+
+    const tryEndpoints = [this.baseUrl, this.fallbackBaseUrl];
+    let lastError = '';
+
+    for (const host of tryEndpoints) {
+      try {
+        const method = 'GET';
+        const path = '/portfolio/balance';
+
+        const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
+
+        const res = await fetch(host + path, {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            'KALSHI-ACCESS-KEY': this.keyId,
+            'KALSHI-ACCESS-TIMESTAMP': timestamp,
+            'KALSHI-ACCESS-SIGNATURE': signature
+          }
+        });
+
+        if (!res.ok) {
+          const txt = await res.text();
+          lastError = `HTTP ${res.status}: ${txt}`;
+          console.error(`[KALSHI BALANCE ERROR on ${host}]`, lastError);
+          continue;
+        }
+
+        const data: any = await res.json();
+        // Kalshi balances are returned in cents (e.g., 2500 cents = $25.00)
+        let rawBal = data.balance !== undefined ? data.balance : (data.available_balance !== undefined ? data.available_balance : data.cash);
+        if (typeof rawBal !== 'number') rawBal = 0;
+        const balanceDollars = rawBal > 1000000 ? rawBal / 10000 : rawBal / 100; // handle cents vs centicents
+        
+        this.lastApiStatus = { success: true, balance: balanceDollars, statusText: 'Connected & Authenticated', timestamp: Date.now() };
+        return { success: true, balance: balanceDollars, breakdown: data.balance_breakdown || [] };
+      } catch (e: any) {
+        lastError = e.message || String(e);
+      }
+    }
+
+    this.lastApiStatus = { success: false, error: lastError, timestamp: Date.now() };
+    return { success: false, error: lastError };
   }
 
   /**
