@@ -874,7 +874,9 @@ class PatternTradingBrain {
       const bestBid = pos.entryPrice ? pos.entryPrice * 0.999 : 0.499;
       const bestAsk = pos.entryPrice ? pos.entryPrice * 1.001 : 0.501;
 
+      const latMsNN2 = (settings as any).simulatedLatencyMs || latencyAdaptiveEngine.getProfile().effectiveLatencyMs;
       const onlineFeatures: EntryFeatures = pos.entryFeatures || {
+        latency: latMsNN2 / 1000.0,
         smartTrailingActive: settings.smartTrailingTP ? 1 : 0,
         smartTrailingDistance: (settings as any).smartTrailDistance || 0.05,
         macroGoalProgress: macroCycleProfit,
@@ -2189,7 +2191,9 @@ async function openPosition(
   const bestBid = ctx?.bids?.[0]?.price || (entryPrice ? entryPrice * 0.999 : 0.499);
   const bestAsk = ctx?.asks?.[0]?.price || (entryPrice ? entryPrice * 1.001 : 0.501);
 
+  const latMsNN = (settings as any).simulatedLatencyMs || latencyAdaptiveEngine.getProfile().effectiveLatencyMs;
   let entryFeatures: EntryFeatures = {
+    latency: latMsNN / 1000.0,
     smartTrailingActive: settings.smartTrailingTP ? 1 : 0,
     smartTrailingDistance: (settings as any).smartTrailDistance || 0.05,
     macroGoalProgress: macroCycleProfit,
@@ -2543,9 +2547,30 @@ async function openPosition(
       ? (isPerpContract ? optimizedEntryPrice * (1 + modelProbabilityBoost) : Math.min(0.95, optimizedEntryPrice + modelProbabilityBoost))
       : (isPerpContract ? optimizedEntryPrice * (1 - modelProbabilityBoost) : Math.max(0.05, optimizedEntryPrice - modelProbabilityBoost));
 
+  // Inject Latency Simulation for Paper Trading
+  let finalEntryPrice = optimizedEntryPrice;
+  if (settings.paperTrading && (settings as any).simulatedLatencyMs > 0) {
+    const latMs = (settings as any).simulatedLatencyMs;
+    await new Promise(r => setTimeout(r, latMs));
+    // Fetch latest price from context after latency delay
+    const latestCtx = spotContexts[symbol];
+    if (latestCtx && latestCtx.currentPrice) {
+      if (isPerpContract) {
+         finalEntryPrice = side === 'YES' ? latestCtx.currentPrice : (1.0 - latestCtx.currentPrice);
+      } else {
+         finalEntryPrice = side === 'YES' ? latestCtx.currentPrice : (1.0 - latestCtx.currentPrice);
+      }
+    }
+
+    spotLogs.unshift({
+      id: logIdCounter++, time: new Date().toISOString(), type: 'WARN',
+      message: `[LATENCY SIMULATOR] Entry delayed by ${latMs}ms. Price slipped from ${optimizedEntryPrice.toFixed(4)} to ${finalEntryPrice.toFixed(4)}.`
+    });
+  }
+
   const pos: PaperPosition = {
     category, entryTime: Date.now(), params, 
-    id: ++logIdCounter, symbol, side, entryPrice: optimizedEntryPrice, size, isOverride, matchId, label, reason,
+    id: ++logIdCounter, symbol, side, entryPrice: finalEntryPrice, size, isOverride, matchId, label, reason,
     isPerpetual: isPerpContract,
     analysisMeta,
     expectedTP,
@@ -4504,6 +4529,39 @@ setInterval(async () => {
       const timeToExpiryMs = ctx.closeTime ? (new Date(ctx.closeTime).getTime() - Date.now()) : Infinity;
       const isImminentExpiry = timeToExpiryMs < 60 * 1000; // Final 60 seconds of contract
       
+      // Exit Latency Simulation logic
+      let finalExitPrice = currentSidePrice;
+      if (settings.paperTrading && (settings as any).simulatedLatencyMs > 0) {
+        // Evaluate if we WOULD close, so we only wait if we're actually closing
+        let tempShouldClose = false;
+        if (smartTrailRes.shouldClose) {
+            tempShouldClose = true;
+        } else if (isImminentExpiry && pnlRatio > 0.02 && smartTrailRes.state.isActive) {
+            tempShouldClose = true;
+        } else if (isImminentExpiry && pnlRatio > 0.01) {
+            tempShouldClose = true;
+        }
+
+        if (tempShouldClose) {
+          const latMs = (settings as any).simulatedLatencyMs;
+          await new Promise(r => setTimeout(r, latMs));
+          const latestCtx = spotContexts[pos.symbol];
+          if (latestCtx && latestCtx.currentPrice) {
+            if (pos.isPerpetual) {
+              finalExitPrice = pos.side === 'YES' ? latestCtx.currentPrice : (1.0 - latestCtx.currentPrice);
+            } else {
+              finalExitPrice = pos.side === 'YES' ? latestCtx.currentPrice : (1.0 - latestCtx.currentPrice);
+            }
+          }
+          currentSidePrice = finalExitPrice;
+
+          spotLogs.unshift({
+            id: logIdCounter++, time: new Date().toISOString(), type: 'WARN',
+            message: `[LATENCY SIMULATOR] Exit delayed by ${latMs}ms. Exit price slipped to ${finalExitPrice.toFixed(4)}.`
+          });
+        }
+      }
+
       // Trade Model Discrepancy Convergence Check
       const hasConvergedWithFairValue = pos.modelFairValue !== undefined && 
           ((pos.side === 'YES' && currentSidePrice >= pos.modelFairValue) || 
