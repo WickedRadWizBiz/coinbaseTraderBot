@@ -2568,6 +2568,10 @@ async function openPosition(
   if (!settings.paperTrading) {
     const liveAction = isPerpContract ? (side === 'YES' ? 'buy' : 'sell') : 'buy';
     const liveRes = await kalshiService.placeOrder(
+      symbol,
+      liveAction,
+      side.toLowerCase() as 'yes' | 'no',
+      size,
       symbol, 
       liveAction, 
       side.toLowerCase() as 'yes' | 'no', 
@@ -2611,7 +2615,7 @@ async function openPosition(
 // --- DYNAMIC MARKET DISCOVERY ---
 let isInitializing = true;
 
-async function fetchPerpetualOrderBook(ticker: string, initialPrice: number) {
+async function fetchPerpetualOrderBook(ticker: string) {
   try {
     const res = await fetch(`https://api.elections.kalshi.com/trade-api/v2/margin/markets/${ticker}/orderbook`, {
       signal: AbortSignal.timeout(3000),
@@ -2628,14 +2632,11 @@ async function fetchPerpetualOrderBook(ticker: string, initialPrice: number) {
       }
     }
   } catch (e) {
-    // Fallback
+    // Silent fail
   }
-  const tick = Math.max(0.01, initialPrice * 0.0005);
-  const pBid = parseFloat((initialPrice - tick).toFixed(4));
-  const pAsk = parseFloat((initialPrice + tick).toFixed(4));
   return {
-    bids: [{ price: pBid, size: 100 }, { price: parseFloat((pBid - tick).toFixed(4)), size: 50 }],
-    asks: [{ price: pAsk, size: 100 }, { price: parseFloat((pAsk + tick).toFixed(4)), size: 50 }]
+    bids: [],
+    asks: []
   };
 }
 
@@ -2656,7 +2657,7 @@ async function discoverPerpetuals() {
       const fallbackSpot = scalper.currentCandles[`${rawAsset}-USD`]?.close || (rawAsset === 'BTC' ? 88000 : rawAsset === 'ETH' ? 3200 : rawAsset === 'SOL' ? 180 : rawAsset === 'XRP' ? 2.3 : rawAsset === 'DOGE' ? 0.25 : 35);
       const initialPrice = m ? (parseFloat(m.price) || (parseFloat(m.bid) + parseFloat(m.ask)) / 2 || fallbackSpot) : fallbackSpot;
 
-      const book = await fetchPerpetualOrderBook(ticker, initialPrice);
+      const book = await fetchPerpetualOrderBook(ticker);
       const bestBid = book.bids[0]?.price || (m ? parseFloat(m.bid) : initialPrice);
       const bestAsk = book.asks[0]?.price || (m ? parseFloat(m.ask) : initialPrice);
       const mid = (bestBid + bestAsk) / 2;
@@ -2691,42 +2692,6 @@ async function discoverPerpetuals() {
   } catch (e) {
     console.error('[PERPETUAL DISCOVERY ERROR]', e);
   }
-}
-
-async function fetchRealSpotOrderBook(label: string, initialPrice: number) {
-  try {
-    let pair = 'BTC-USD';
-    const l = label.toUpperCase();
-    if (l.includes('ETH')) pair = 'ETH-USD';
-    else if (l.includes('SOL')) pair = 'SOL-USD';
-    else if (l.includes('XRP')) pair = 'XRP-USD';
-    else if (l.includes('DOGE')) pair = 'DOGE-USD';
-    else if (l.includes('HYPE')) pair = 'SOL-USD';
-
-    const res = await fetch(`https://api.exchange.coinbase.com/products/${pair}/book?level=1`, { signal: AbortSignal.timeout(3000), headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.bids && data.asks && data.bids.length > 0 && data.asks.length > 0) {
-        const bestRealBid = Number(data.bids[0][0]);
-        const bestRealAsk = Number(data.asks[0][0]);
-        const spread = Math.max(0.01, Math.min(0.05, Math.abs(bestRealAsk - bestRealBid) / bestRealBid));
-        const pBid = Math.max(0.01, parseFloat((initialPrice - spread / 2).toFixed(2)));
-        const pAsk = Math.min(0.99, parseFloat((initialPrice + spread / 2).toFixed(2)));
-        return {
-          bids: [{ price: pBid, size: Number(data.bids[0][1]) || 500 }, { price: Math.max(0.01, pBid - 0.01), size: 300 }],
-          asks: [{ price: pAsk, size: Number(data.asks[0][1]) || 500 }, { price: Math.min(0.99, pAsk + 0.01), size: 300 }]
-        };
-      }
-    }
-  } catch (e) {
-    // Silent fallback to clean market spread
-  }
-  const pBid = Math.max(0.01, parseFloat((initialPrice - 0.01).toFixed(2)));
-  const pAsk = Math.min(0.99, parseFloat((initialPrice + 0.01).toFixed(2)));
-  return {
-    bids: [{ price: pBid, size: 500 }],
-    asks: [{ price: pAsk, size: 500 }]
-  };
 }
 
 async function fetchJson(url: string) {
@@ -2790,6 +2755,7 @@ async function discoverMarkets() {
             const obRes = await kalshiService.getOrderBook(best.ticker);
             const book = (obRes.success && obRes.bids && obRes.bids.length > 0)
               ? { bids: obRes.bids, asks: obRes.asks || [] }
+              : { bids: [], asks: [] }; // No fake data fallback allowed
               : await fetchRealSpotOrderBook(label, initialPrice);
             spotContexts[best.ticker] = {
               currentPrice: initialPrice,
@@ -4875,6 +4841,7 @@ async function syncLiveKalshiPositions(force = false) {
 
     // Build map of open positions on Kalshi
     const liveKalshiOpenMap: Record<string, { size: number; side: 'YES' | 'NO'; raw: any }> = {};
+
     
     for (const p of posRes.market_positions) {
       const positionCount = typeof p.position === 'number' ? p.position : (p.position_fp ? parseFloat(p.position_fp) : 0);
@@ -5012,6 +4979,10 @@ app.get('/api/balance', async (req, res) => {
     ? (simulatedPaperBalance + vaultedProfits)
     : (liveTotalPortfolioValue > 0 ? (liveTotalPortfolioValue + liveVaultedProfits) : (realKalshiCashPool + livePositionsValue + liveVaultedProfits));
 
+  const startingBank = settings.paperTrading
+    ? startingBankroll
+    : (liveStartingBankroll > 0 ? liveStartingBankroll : (totalEquity > 0 ? totalEquity : 23.62));
+
   const startingBank = settings.paperTrading 
     ? startingBankroll 
     : (liveStartingBankroll > 0 ? liveStartingBankroll : (totalEquity > 0 ? totalEquity : 23.62));
@@ -5025,6 +4996,8 @@ app.get('/api/balance', async (req, res) => {
   const isAcceleratedVault = pocketedAmount >= 100;
   const currentVaultThreshold = isAcceleratedVault ? 20 : 50;
 
+  const dailyProfit = settings.paperTrading
+    ? goalResetScheduler.getStatus().current_profit
   const dailyProfit = settings.paperTrading 
     ? goalResetScheduler.getStatus().current_profit 
     : (liveRealizedPnl + liveUnrealizedPnl);
@@ -5051,6 +5024,8 @@ app.get('/api/balance', async (req, res) => {
     starting_bankroll: startingBank,
     delta_24h: delta24h,
     delta_24h_pct: delta24hPct,
+    goal_window: settings.paperTrading
+      ? goalResetScheduler.getStatus()
     goal_window: settings.paperTrading 
       ? goalResetScheduler.getStatus() 
       : {
