@@ -409,17 +409,6 @@ export class KalshiService {
       for (const p of marketPositions) {
         const count = typeof p.position === 'number' ? p.position : (p.position_fp ? parseFloat(p.position_fp) : 0);
         if (count !== 0) {
-          const exposure = typeof p.market_exposure_dollars === 'number' ? p.market_exposure_dollars
-            : (typeof p.market_exposure === 'number' ? p.market_exposure / 100
-            : (typeof p.current_value_dollars === 'number' ? p.current_value_dollars
-            : Math.abs(count) * 0.50));
-          positionsValue += exposure;
-
-          const rPnl = typeof p.realized_pnl_dollars === 'number' ? p.realized_pnl_dollars
-            : (typeof p.realized_pnl === 'number' ? p.realized_pnl / 100 : 0);
-          realizedPnl += rPnl;
-
-          const uPnl = typeof p.unrealized_pnl_dollars === 'number' ? p.unrealized_pnl_dollars
           const exposure = typeof p.market_exposure_dollars === 'number' ? p.market_exposure_dollars 
             : (typeof p.market_exposure === 'number' ? p.market_exposure / 100 
             : (typeof p.current_value_dollars === 'number' ? p.current_value_dollars 
@@ -511,48 +500,6 @@ export class KalshiService {
   public async cancelOrder(orderId: string): Promise<{ success: boolean; error?: string }> {
     if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
 
-
-    const tryEndpoints = [this.baseUrl, this.fallbackBaseUrl];
-    let lastError = '';
-
-    for (const host of tryEndpoints) {
-      try {
-        const method = 'GET';
-        const path = '/portfolio/orders?status=resting';
-        const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
-
-        const res = await fetch(host + path, {
-          method,
-          headers: {
-            'Content-Type': 'application/json',
-            'KALSHI-ACCESS-KEY': this.keyId,
-            'KALSHI-ACCESS-TIMESTAMP': timestamp,
-            'KALSHI-ACCESS-SIGNATURE': signature
-          }
-        });
-
-        if (!res.ok) {
-          const txt = await res.text();
-          lastError = `HTTP ${res.status}: ${txt}`;
-          continue;
-        }
-
-        const data: any = await res.json();
-        return {
-          success: true,
-          orders: data.orders || []
-        };
-      } catch (e: any) {
-        lastError = e.message || String(e);
-      }
-    }
-
-    return { success: false, error: lastError };
-  }
-
-  public async cancelOrder(orderId: string): Promise<{ success: boolean; error?: string }> {
-    if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
-
     try {
       const method = 'DELETE';
       const path = `/portfolio/orders/${orderId}`;
@@ -578,24 +525,6 @@ export class KalshiService {
       return { success: false, error: e.message };
     }
   }
-
-  public async placeOrder(
-    ticker: string,
-    action: 'buy' | 'sell',
-    side: 'yes' | 'no',
-    count: number,
-    price?: number,
-    retryCount = 0
-  ): Promise<{ success: boolean; order_id?: string; order?: any; error?: string }> {
-    if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
-
-    try {
-      const isPerp = ticker.toUpperCase().endsWith('PERP');
-      const orderCount = Math.max(1, Math.round(count));
-
-      // Kalshi requires a valid RFC 4122 UUID v4 for client_order_id
-      const clientOrderId = typeof crypto.randomUUID === 'function'
-        ? crypto.randomUUID()
 
   public async placeOrder(
     ticker: string, 
@@ -643,7 +572,6 @@ export class KalshiService {
             // Side is strictly 'yes' or 'no'
             const normSide = side.toLowerCase() === 'no' ? 'no' : 'yes';
             const normAction = action.toLowerCase() === 'sell' ? 'sell' : 'buy';
-
             
             let rawPrice = typeof price === 'number' && !isNaN(price) && price > 0 ? price : 0.50;
             if (rawPrice < 0.01) rawPrice = 0.01;

@@ -2568,10 +2568,6 @@ async function openPosition(
   if (!settings.paperTrading) {
     const liveAction = isPerpContract ? (side === 'YES' ? 'buy' : 'sell') : 'buy';
     const liveRes = await kalshiService.placeOrder(
-      symbol,
-      liveAction,
-      side.toLowerCase() as 'yes' | 'no',
-      size,
       symbol, 
       liveAction, 
       side.toLowerCase() as 'yes' | 'no', 
@@ -2755,7 +2751,6 @@ async function discoverMarkets() {
             const book = (obRes.success && obRes.bids && obRes.bids.length > 0)
               ? { bids: obRes.bids, asks: obRes.asks || [] }
               : { bids: [], asks: [] }; // No fake data fallback allowed
-              : await fetchRealSpotOrderBook(label, initialPrice);
             spotContexts[best.ticker] = {
               currentPrice: initialPrice,
               bids: book.bids,
@@ -2904,17 +2899,23 @@ function evaluateCounterPositionViability(
 
 class RapidScalper {
   ws: any = null;
+  binanceWs: any = null;
   candles: { [productId: string]: any[] } = {
     'BTC-USD': [], 'ETH-USD': [], 'SOL-USD': [], 'HYPE-USD': [], 'DOGE-USD': [], 'XRP-USD': [],
     'SUI-USD': [], 'LINK-USD': [], 'ADA-USD': [], 'LTC-USD': [], 'BCH-USD': [], 'AAVE-USD': [], 'AVAX-USD': []
   };
+  binanceCandles: { [productId: string]: any[] } = {
+    'BTC-USD': [], 'ETH-USD': [], 'SOL-USD': [], 'HYPE-USD': [], 'DOGE-USD': [], 'XRP-USD': [],
+    'SUI-USD': [], 'LINK-USD': [], 'ADA-USD': [], 'LTC-USD': [], 'BCH-USD': [], 'AAVE-USD': [], 'AVAX-USD': []
+  };
   currentCandles: { [productId: string]: any } = {};
+  binanceCurrentCandles: { [productId: string]: any } = {};
 
   start() {
     if (this.ws) return;
     spotLogs.unshift({
       id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
-      message: '[SCALP ENGINE] Live Coinbase Spot Ticker Stream connected (BTC, ETH, SOL, HYPE, DOGE, XRP, SUI, LINK, ADA, LTC, BCH, AAVE, AVAX)'
+      message: '[SCALP ENGINE] Live Coinbase & Binance Spot Ticker Streams connected (BTC, ETH, SOL, HYPE, DOGE, XRP, SUI, LINK, ADA, LTC, BCH, AAVE, AVAX)'
     });
     try {
       this.ws = new (globalThis as any).WebSocket('wss://ws-feed.exchange.coinbase.com');
@@ -2939,7 +2940,7 @@ class RapidScalper {
             }
           }
           if (msg.type === 'ticker' && msg.product_id && msg.price) {
-            this.processTick(msg.product_id, parseFloat(msg.price));
+            this.processTick(msg.product_id, parseFloat(msg.price), false);
           }
         } catch (e) {}
       };
@@ -2951,8 +2952,34 @@ class RapidScalper {
         this.ws = null; 
         setTimeout(() => { if (settings.ENABLE_RAPID_SCALP_MODE) this.start(); }, 5000);
       };
+
+      // Connect to Binance as secondary confirmation
+      const streams = [
+        'btcusdt@aggTrade', 'ethusdt@aggTrade', 'solusdt@aggTrade', 'hypeusdt@aggTrade', 'dogeusdt@aggTrade', 'xrpusdt@aggTrade',
+        'suiusdt@aggTrade', 'linkusdt@aggTrade', 'adausdt@aggTrade', 'ltcusdt@aggTrade', 'bchusdt@aggTrade', 'aaveusdt@aggTrade', 'avaxusdt@aggTrade'
+      ].join('/');
+      this.binanceWs = new (globalThis as any).WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
+      this.binanceWs.onmessage = (event: any) => {
+        if (!settings.ENABLE_RAPID_SCALP_MODE || !settings.botActive) return;
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.data && payload.data.s && payload.data.p) {
+            const sym = payload.data.s.toUpperCase().replace('USDT', '-USD');
+            this.processTick(sym, parseFloat(payload.data.p), true);
+          }
+        } catch (e) {}
+      };
+      this.binanceWs.onerror = () => {
+        this.binanceWs = null;
+        setTimeout(() => { if (settings.ENABLE_RAPID_SCALP_MODE && this.ws) this.start(); }, 5000);
+      };
+      this.binanceWs.onclose = () => {
+        this.binanceWs = null;
+        setTimeout(() => { if (settings.ENABLE_RAPID_SCALP_MODE && this.ws) this.start(); }, 5000);
+      };
     } catch (e) {
       this.ws = null;
+      this.binanceWs = null;
     }
   }
 
@@ -2961,24 +2988,33 @@ class RapidScalper {
       try { this.ws.close(); } catch(e){}
       this.ws = null;
     }
+    if (this.binanceWs) {
+      try { this.binanceWs.close(); } catch(e){}
+      this.binanceWs = null;
+    }
   }
 
-  processTick(productId: string, price: number) {
+  processTick(productId: string, price: number, isBinance: boolean) {
     const now = Date.now();
-    if (!this.currentCandles[productId]) {
-      this.currentCandles[productId] = { time: now, open: price, high: price, low: price, close: price };
+    const currCandles = isBinance ? this.binanceCurrentCandles : this.currentCandles;
+    const historyCandles = isBinance ? this.binanceCandles : this.candles;
+
+    if (!currCandles[productId]) {
+      currCandles[productId] = { time: now, open: price, high: price, low: price, close: price };
     }
-    let c = this.currentCandles[productId];
+    let c = currCandles[productId];
     c.close = price;
     c.high = Math.max(c.high, price);
     c.low = Math.min(c.low, price);
 
     if (now - c.time > 15000) {
-      if (!this.candles[productId]) this.candles[productId] = [];
-      this.candles[productId].push({ ...c });
-      if (this.candles[productId].length > 50) this.candles[productId].shift();
-      this.currentCandles[productId] = { time: now, open: price, high: price, low: price, close: price };
-      this.analyzeDivergence(productId);
+      if (!historyCandles[productId]) historyCandles[productId] = [];
+      historyCandles[productId].push({ ...c });
+      if (historyCandles[productId].length > 50) historyCandles[productId].shift();
+      currCandles[productId] = { time: now, open: price, high: price, low: price, close: price };
+      if (!isBinance) {
+        this.analyzeDivergence(productId);
+      }
     }
   }
 
@@ -3010,6 +3046,19 @@ class RapidScalper {
     let reason = "";
 
     const spotTA = computeSpotTAMetrics(productId, this.candles[productId] || []);
+    const binanceList = this.binanceCandles[productId] || [];
+    if (binanceList.length > 0) {
+      const bTA = computeSpotTAMetrics(productId, binanceList);
+      const isCbBull = spotTA.ichimokuState === 'BULLISH_CLOUD' || spotTA.rsi > 55;
+      const isCbBear = spotTA.ichimokuState === 'BEARISH_CLOUD' || spotTA.rsi < 45;
+      const isBinBull = bTA.ichimokuState === 'BULLISH_CLOUD' || bTA.rsi > 55;
+      const isBinBear = bTA.ichimokuState === 'BEARISH_CLOUD' || bTA.rsi < 45;
+
+      if ((isCbBull && isBinBear) || (isCbBear && isBinBull)) {
+        spotTA.ichimokuState = 'NEUTRAL_IN_CLOUD';
+        spotTA.rsi = 50;
+      }
+    }
     const isAssetBearish = spotTA.ichimokuState === 'BEARISH_CLOUD' || spotTA.tenkanKijunCross === 'BEARISH_CROSS';
 
     if (currentRsi > 60 && latestPrice >= prevPrice) {
@@ -4840,7 +4889,6 @@ async function syncLiveKalshiPositions(force = false) {
 
     // Build map of open positions on Kalshi
     const liveKalshiOpenMap: Record<string, { size: number; side: 'YES' | 'NO'; raw: any }> = {};
-
     
     for (const p of posRes.market_positions) {
       const positionCount = typeof p.position === 'number' ? p.position : (p.position_fp ? parseFloat(p.position_fp) : 0);
@@ -4978,10 +5026,6 @@ app.get('/api/balance', async (req, res) => {
     ? (simulatedPaperBalance + vaultedProfits)
     : (liveTotalPortfolioValue > 0 ? (liveTotalPortfolioValue + liveVaultedProfits) : (realKalshiCashPool + livePositionsValue + liveVaultedProfits));
 
-  const startingBank = settings.paperTrading
-    ? startingBankroll
-    : (liveStartingBankroll > 0 ? liveStartingBankroll : (totalEquity > 0 ? totalEquity : 23.62));
-
   const startingBank = settings.paperTrading 
     ? startingBankroll 
     : (liveStartingBankroll > 0 ? liveStartingBankroll : (totalEquity > 0 ? totalEquity : 23.62));
@@ -4995,8 +5039,6 @@ app.get('/api/balance', async (req, res) => {
   const isAcceleratedVault = pocketedAmount >= 100;
   const currentVaultThreshold = isAcceleratedVault ? 20 : 50;
 
-  const dailyProfit = settings.paperTrading
-    ? goalResetScheduler.getStatus().current_profit
   const dailyProfit = settings.paperTrading 
     ? goalResetScheduler.getStatus().current_profit 
     : (liveRealizedPnl + liveUnrealizedPnl);
@@ -5023,8 +5065,6 @@ app.get('/api/balance', async (req, res) => {
     starting_bankroll: startingBank,
     delta_24h: delta24h,
     delta_24h_pct: delta24hPct,
-    goal_window: settings.paperTrading
-      ? goalResetScheduler.getStatus()
     goal_window: settings.paperTrading 
       ? goalResetScheduler.getStatus() 
       : {

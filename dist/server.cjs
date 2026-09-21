@@ -7932,6 +7932,7 @@ function evaluateCounterPositionViability(pos, ctx, oppositeSide, oppositeEntryP
 var RapidScalper = class {
   constructor() {
     this.ws = null;
+    this.binanceWs = null;
     this.candles = {
       "BTC-USD": [],
       "ETH-USD": [],
@@ -7947,7 +7948,23 @@ var RapidScalper = class {
       "AAVE-USD": [],
       "AVAX-USD": []
     };
+    this.binanceCandles = {
+      "BTC-USD": [],
+      "ETH-USD": [],
+      "SOL-USD": [],
+      "HYPE-USD": [],
+      "DOGE-USD": [],
+      "XRP-USD": [],
+      "SUI-USD": [],
+      "LINK-USD": [],
+      "ADA-USD": [],
+      "LTC-USD": [],
+      "BCH-USD": [],
+      "AAVE-USD": [],
+      "AVAX-USD": []
+    };
     this.currentCandles = {};
+    this.binanceCurrentCandles = {};
   }
   start() {
     if (this.ws) return;
@@ -7955,7 +7972,7 @@ var RapidScalper = class {
       id: logIdCounter++,
       time: (/* @__PURE__ */ new Date()).toISOString(),
       type: "INFO",
-      message: "[SCALP ENGINE] Live Coinbase Spot Ticker Stream connected (BTC, ETH, SOL, HYPE, DOGE, XRP, SUI, LINK, ADA, LTC, BCH, AAVE, AVAX)"
+      message: "[SCALP ENGINE] Live Coinbase & Binance Spot Ticker Streams connected (BTC, ETH, SOL, HYPE, DOGE, XRP, SUI, LINK, ADA, LTC, BCH, AAVE, AVAX)"
     });
     try {
       this.ws = new globalThis.WebSocket("wss://ws-feed.exchange.coinbase.com");
@@ -7991,7 +8008,7 @@ var RapidScalper = class {
             }
           }
           if (msg.type === "ticker" && msg.product_id && msg.price) {
-            this.processTick(msg.product_id, parseFloat(msg.price));
+            this.processTick(msg.product_id, parseFloat(msg.price), false);
           }
         } catch (e) {
         }
@@ -8008,8 +8025,48 @@ var RapidScalper = class {
           if (settings.ENABLE_RAPID_SCALP_MODE) this.start();
         }, 5e3);
       };
+      const streams = [
+        "btcusdt@aggTrade",
+        "ethusdt@aggTrade",
+        "solusdt@aggTrade",
+        "hypeusdt@aggTrade",
+        "dogeusdt@aggTrade",
+        "xrpusdt@aggTrade",
+        "suiusdt@aggTrade",
+        "linkusdt@aggTrade",
+        "adausdt@aggTrade",
+        "ltcusdt@aggTrade",
+        "bchusdt@aggTrade",
+        "aaveusdt@aggTrade",
+        "avaxusdt@aggTrade"
+      ].join("/");
+      this.binanceWs = new globalThis.WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
+      this.binanceWs.onmessage = (event) => {
+        if (!settings.ENABLE_RAPID_SCALP_MODE || !settings.botActive) return;
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.data && payload.data.s && payload.data.p) {
+            const sym = payload.data.s.toUpperCase().replace("USDT", "-USD");
+            this.processTick(sym, parseFloat(payload.data.p), true);
+          }
+        } catch (e) {
+        }
+      };
+      this.binanceWs.onerror = () => {
+        this.binanceWs = null;
+        setTimeout(() => {
+          if (settings.ENABLE_RAPID_SCALP_MODE && this.ws) this.start();
+        }, 5e3);
+      };
+      this.binanceWs.onclose = () => {
+        this.binanceWs = null;
+        setTimeout(() => {
+          if (settings.ENABLE_RAPID_SCALP_MODE && this.ws) this.start();
+        }, 5e3);
+      };
     } catch (e) {
       this.ws = null;
+      this.binanceWs = null;
     }
   }
   stop() {
@@ -8020,22 +8077,33 @@ var RapidScalper = class {
       }
       this.ws = null;
     }
-  }
-  processTick(productId, price) {
-    const now = Date.now();
-    if (!this.currentCandles[productId]) {
-      this.currentCandles[productId] = { time: now, open: price, high: price, low: price, close: price };
+    if (this.binanceWs) {
+      try {
+        this.binanceWs.close();
+      } catch (e) {
+      }
+      this.binanceWs = null;
     }
-    let c = this.currentCandles[productId];
+  }
+  processTick(productId, price, isBinance) {
+    const now = Date.now();
+    const currCandles = isBinance ? this.binanceCurrentCandles : this.currentCandles;
+    const historyCandles = isBinance ? this.binanceCandles : this.candles;
+    if (!currCandles[productId]) {
+      currCandles[productId] = { time: now, open: price, high: price, low: price, close: price };
+    }
+    let c = currCandles[productId];
     c.close = price;
     c.high = Math.max(c.high, price);
     c.low = Math.min(c.low, price);
     if (now - c.time > 15e3) {
-      if (!this.candles[productId]) this.candles[productId] = [];
-      this.candles[productId].push({ ...c });
-      if (this.candles[productId].length > 50) this.candles[productId].shift();
-      this.currentCandles[productId] = { time: now, open: price, high: price, low: price, close: price };
-      this.analyzeDivergence(productId);
+      if (!historyCandles[productId]) historyCandles[productId] = [];
+      historyCandles[productId].push({ ...c });
+      if (historyCandles[productId].length > 50) historyCandles[productId].shift();
+      currCandles[productId] = { time: now, open: price, high: price, low: price, close: price };
+      if (!isBinance) {
+        this.analyzeDivergence(productId);
+      }
     }
   }
   calculateRSI(productId, period = 14) {
@@ -8062,6 +8130,18 @@ var RapidScalper = class {
     let signalSide = null;
     let reason = "";
     const spotTA = computeSpotTAMetrics(productId, this.candles[productId] || []);
+    const binanceList = this.binanceCandles[productId] || [];
+    if (binanceList.length > 0) {
+      const bTA = computeSpotTAMetrics(productId, binanceList);
+      const isCbBull = spotTA.ichimokuState === "BULLISH_CLOUD" || spotTA.rsi > 55;
+      const isCbBear = spotTA.ichimokuState === "BEARISH_CLOUD" || spotTA.rsi < 45;
+      const isBinBull = bTA.ichimokuState === "BULLISH_CLOUD" || bTA.rsi > 55;
+      const isBinBear = bTA.ichimokuState === "BEARISH_CLOUD" || bTA.rsi < 45;
+      if (isCbBull && isBinBear || isCbBear && isBinBull) {
+        spotTA.ichimokuState = "NEUTRAL_IN_CLOUD";
+        spotTA.rsi = 50;
+      }
+    }
     const isAssetBearish = spotTA.ichimokuState === "BEARISH_CLOUD" || spotTA.tenkanKijunCross === "BEARISH_CROSS";
     if (currentRsi > 60 && latestPrice >= prevPrice) {
       signalSide = "NO";
