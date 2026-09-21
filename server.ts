@@ -1737,7 +1737,7 @@ function evaluatePostSLContractCandidate(symbol: string, targetSide: string, sta
 
   const spotPair = getSpotPairFromSymbol(symbol, category);
   const pairCandles = scalper.candles[spotPair] || [];
-  const spotTA = computeSpotTAMetrics(spotPair, pairCandles);
+  const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(symbol, ctx.label || symbol, category || 'crypto', scalper.candles, scalper.binanceCandles);
 
   const sidesToTest: Array<'YES' | 'NO'> = [targetSide as 'YES' | 'NO', (targetSide === 'YES' ? 'NO' : 'YES')];
   let qualifiedCandidate: any = null;
@@ -2128,7 +2128,7 @@ async function openPosition(
 
   const spotPair = getSpotPairFromSymbol(label, category);
   const pairCandles = scalper.candles[spotPair] || [];
-  const currentSpotTA = analysisMeta?.spotTA || computeSpotTAMetrics(spotPair, pairCandles);
+  const currentSpotTA = analysisMeta?.spotTA || unifiedDataHandler.getSpotIndicatorsForContract(symbol, label, category || 'crypto', scalper.candles, scalper.binanceCandles);
   const volatilitySL = -Math.max(0.025, Math.min(0.035, (currentSpotTA.candleRangePct / 100) * 2.2));
 
   if (isCapitalPreservationActive && recoveryProtocol) {
@@ -2837,7 +2837,7 @@ function evaluateCounterPositionViability(
   }
 
   const spotPair = getSpotPairFromSymbol(pos.label, pos.category);
-  const spotTA = computeSpotTAMetrics(spotPair, candles || []);
+  const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(pos.symbol, pos.label, pos.category || 'crypto', scalper.candles, scalper.binanceCandles);
 
   const candleRangeVol = Math.max(0.5, spotTA.candleRangePct / 0.08);
   const surgeVol = Math.max(0.5, spotTA.volumeSurgeRatio);
@@ -4814,7 +4814,7 @@ setInterval(async () => {
               {
                 patternType: 'MOMENTUM_REVERSAL_FLIP',
                 isReversalFlip: true,
-                spotTA: computeSpotTAMetrics(spotPair, pairCandles),
+                spotTA: unifiedDataHandler.getSpotIndicatorsForContract(pos.symbol, pos.label || '', pos.category || 'crypto', scalper.candles, scalper.binanceCandles),
                 viabilityMeta: viability
               }
             );

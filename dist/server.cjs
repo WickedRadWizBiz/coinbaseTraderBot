@@ -727,7 +727,7 @@ var UnifiedDataHandler = class {
   /**
    * Extracts historical spot indicators (Ichimoku, RSI, Volume) for the strictly mapped spot USD pair.
    */
-  getSpotIndicatorsForContract(symbol, label, category, candlesMap) {
+  getSpotIndicatorsForContract(symbol, label, category, candlesMap, binanceCandlesMap) {
     const mapping = this.resolveCorrelatedSpotPair(symbol, label, category);
     if (!mapping.isCryptoSpot) {
       return {
@@ -756,7 +756,22 @@ var UnifiedDataHandler = class {
       };
     }
     const candles = candlesMap[mapping.correlatedSpotPair] || [];
-    return computeSpotTAMetrics(mapping.correlatedSpotPair, candles);
+    const primaryMetrics = computeSpotTAMetrics(mapping.correlatedSpotPair, candles);
+    if (binanceCandlesMap) {
+      const binanceCandles = binanceCandlesMap[mapping.correlatedSpotPair] || [];
+      if (binanceCandles.length > 0) {
+        const binanceMetrics = computeSpotTAMetrics(mapping.correlatedSpotPair, binanceCandles);
+        const isCbBullish = primaryMetrics.ichimokuState === "BULLISH_CLOUD" || primaryMetrics.rsi > 55;
+        const isCbBearish = primaryMetrics.ichimokuState === "BEARISH_CLOUD" || primaryMetrics.rsi < 45;
+        const isBinBullish = binanceMetrics.ichimokuState === "BULLISH_CLOUD" || binanceMetrics.rsi > 55;
+        const isBinBearish = binanceMetrics.ichimokuState === "BEARISH_CLOUD" || binanceMetrics.rsi < 45;
+        if (isCbBullish && isBinBearish || isCbBearish && isBinBullish) {
+          primaryMetrics.ichimokuState = "NEUTRAL_IN_CLOUD";
+          primaryMetrics.rsi = 50;
+        }
+      }
+    }
+    return primaryMetrics;
   }
   /**
    * Validation check for the training loop:
@@ -6961,7 +6976,7 @@ function evaluatePostSLContractCandidate(symbol, targetSide, stageLabel, categor
   }
   const spotPair = getSpotPairFromSymbol(symbol, category);
   const pairCandles = scalper.candles[spotPair] || [];
-  const spotTA = computeSpotTAMetrics(spotPair, pairCandles);
+  const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(symbol, ctx.label || symbol, category || "crypto", scalper.candles, scalper.binanceCandles);
   const sidesToTest = [targetSide, targetSide === "YES" ? "NO" : "YES"];
   let qualifiedCandidate = null;
   for (let testSide of sidesToTest) {
@@ -7288,7 +7303,7 @@ async function openPosition(symbol, side, entryPrice, size, isOverride, matchId,
     }
     const spotPair = getSpotPairFromSymbol(label, category);
     const pairCandles = scalper.candles[spotPair] || [];
-    const currentSpotTA = analysisMeta?.spotTA || computeSpotTAMetrics(spotPair, pairCandles);
+    const currentSpotTA = analysisMeta?.spotTA || unifiedDataHandler.getSpotIndicatorsForContract(symbol, label, category || "crypto", scalper.candles, scalper.binanceCandles);
     const volatilitySL = -Math.max(0.025, Math.min(0.035, currentSpotTA.candleRangePct / 100 * 2.2));
     if (isCapitalPreservationActive && recoveryProtocol) {
       params.dynamicSL = -Math.max(0.02, Math.abs(recoveryProtocol.data.hybridParams.dynamicSL || 0.02));
@@ -7881,7 +7896,7 @@ function evaluateCounterPositionViability(pos, ctx, oppositeSide, oppositeEntryP
     };
   }
   const spotPair = getSpotPairFromSymbol(pos.label, pos.category);
-  const spotTA = computeSpotTAMetrics(spotPair, candles || []);
+  const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(pos.symbol, pos.label, pos.category || "crypto", scalper.candles, scalper.binanceCandles);
   const candleRangeVol = Math.max(0.5, spotTA.candleRangePct / 0.08);
   const surgeVol = Math.max(0.5, spotTA.volumeSurgeRatio);
   const volatilityIndex = Number(((candleRangeVol + surgeVol) / 2).toFixed(2));
@@ -9605,7 +9620,7 @@ setInterval(async () => {
               {
                 patternType: "MOMENTUM_REVERSAL_FLIP",
                 isReversalFlip: true,
-                spotTA: computeSpotTAMetrics(spotPair, pairCandles),
+                spotTA: unifiedDataHandler.getSpotIndicatorsForContract(pos.symbol, pos.label || "", pos.category || "crypto", scalper.candles, scalper.binanceCandles),
                 viabilityMeta: viability
               }
             );
