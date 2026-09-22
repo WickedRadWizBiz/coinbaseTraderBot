@@ -20,7 +20,7 @@ jobs:
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
           script_stop: true
           script: |
-            cd ~/${{ secrets.LIGHTSAIL_APP_DIR || 'crypto-bot' }} || cd ~/trading-bot || cd ~/applet
+            cd ~/${{ secrets.LIGHTSAIL_APP_DIR || 'coinbaseTraderBot' }} || cd ~/coinbaseTraderBot
 
             echo "=== Pulling latest changes from GitHub ==="
             git pull origin $(git rev-parse --abbrev-ref HEAD)
@@ -32,7 +32,7 @@ jobs:
             npm run build
 
             echo "=== Restarting PM2 process ==="
-            pm2 restart crypto-bot || pm2 start dist/server.cjs --name "crypto-bot"
+            pm2 restart coinbaseTraderBot || pm2 start dist/server.cjs --name "coinbaseTraderBot"
             pm2 save
 
             echo "=== Deployment successful! ==="

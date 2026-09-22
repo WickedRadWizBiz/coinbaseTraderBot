@@ -19,7 +19,7 @@ export function SettingsView() {
     instantProfitQueue: 20,
     kellyMultiplier: 0.5,
     paperTrading: true,
-    botActive: true, adaptationMode: true, ENABLE_RAPID_SCALP_MODE: true, lowFundsMode: false
+    botActive: true, adaptationMode: true, ENABLE_RAPID_SCALP_MODE: true, lowFundsMode: false, gauntletMode: false
   });
   const [balanceData, setBalanceData] = useState<any>(null);
   const [marketTesting, setMarketTesting] = useState<any>(null);
@@ -165,6 +165,43 @@ export function SettingsView() {
           }`}>
             {settings.trainingOnTheJob ? 'ENABLED' : 'DISABLED'}
           </span>
+        </div>
+
+        {/* The Gauntlet Mode Switch */}
+        <div className="flex items-center justify-between gap-4 p-3 bg-black/40 border border-[#f59e0b]/50">
+          <div className="flex flex-col gap-0.5">
+            <span className="font-bold text-[#f59e0b] text-xs uppercase flex items-center gap-2">
+              🔥 The Gauntlet ($20 to $2000 Crucible)
+              <span className={`px-2 py-0.5 text-[9px] font-bold border rounded-none ${
+                (settings as any).gauntletMode ? 'bg-[#f59e0b]/20 text-[#f59e0b] border-[#f59e0b]' : 'bg-black/50 text-[#808080] border-[#404040]'
+              }`}>
+                {(settings as any).gauntletMode ? 'ACTIVE: CRRA SCALING' : 'DISABLED'}
+              </span>
+            </span>
+            <span className="text-[11px] text-[#909090] font-sans">
+              Engages LARL (Latency-Aware RL) & fractional Kelly dynamic scaling. Starts paper bankroll at $20 and algorithmically drives compounding toward $2,000 using CRRA log-utility maximization.
+            </span>
+          </div>
+          <div className="relative shrink-0">
+            <input
+              type="checkbox"
+              className="sr-only"
+              checked={Boolean((settings as any).gauntletMode)}
+              onChange={(e) => {
+                const isChecked = e.target.checked;
+                const newSettings = {
+                  ...settings,
+                  gauntletMode: isChecked,
+                  paperTrading: isChecked ? true : settings.paperTrading,
+                  simulatedLatencyMs: isChecked && !(settings as any).simulatedLatencyMs ? 50 : (settings as any).simulatedLatencyMs
+                };
+                setSettings(newSettings as any);
+                fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newSettings) });
+              }}
+            />
+            <div className={`block w-14 h-8 rounded-none transition-colors crt-border ${(settings as any).gauntletMode ? 'bg-[#f59e0b]' : 'bg-black/60 border border-[#404040]'}`}></div>
+            <div className={`absolute left-1 top-1 bg-white w-6 h-6 rounded-none transition-transform ${(settings as any).gauntletMode ? 'translate-x-6' : ''}`}></div>
+          </div>
         </div>
 
         {/* Toggle Switch */}

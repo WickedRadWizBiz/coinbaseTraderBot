@@ -409,17 +409,17 @@ export class KalshiService {
       for (const p of marketPositions) {
         const count = typeof p.position === 'number' ? p.position : (p.position_fp ? parseFloat(p.position_fp) : 0);
         if (count !== 0) {
-          const exposure = typeof p.market_exposure_dollars === 'number' ? p.market_exposure_dollars 
-            : (typeof p.market_exposure === 'number' ? p.market_exposure / 100 
-            : (typeof p.current_value_dollars === 'number' ? p.current_value_dollars 
+          const exposure = typeof p.market_exposure_dollars === 'number' ? p.market_exposure_dollars
+            : (typeof p.market_exposure === 'number' ? p.market_exposure / 100
+            : (typeof p.current_value_dollars === 'number' ? p.current_value_dollars
             : Math.abs(count) * 0.50));
           positionsValue += exposure;
 
-          const rPnl = typeof p.realized_pnl_dollars === 'number' ? p.realized_pnl_dollars 
+          const rPnl = typeof p.realized_pnl_dollars === 'number' ? p.realized_pnl_dollars
             : (typeof p.realized_pnl === 'number' ? p.realized_pnl / 100 : 0);
           realizedPnl += rPnl;
 
-          const uPnl = typeof p.unrealized_pnl_dollars === 'number' ? p.unrealized_pnl_dollars 
+          const uPnl = typeof p.unrealized_pnl_dollars === 'number' ? p.unrealized_pnl_dollars
             : (typeof p.unrealized_pnl === 'number' ? p.unrealized_pnl / 100 : 0);
           unrealizedPnl += uPnl;
         }
@@ -497,6 +497,8 @@ export class KalshiService {
     return { success: false, error: lastError };
   }
 
+
+
   public async cancelOrder(orderId: string): Promise<{ success: boolean; error?: string }> {
     if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
 
@@ -527,10 +529,10 @@ export class KalshiService {
   }
 
   public async placeOrder(
-    ticker: string, 
-    action: 'buy' | 'sell', 
-    side: 'yes' | 'no', 
-    count: number, 
+    ticker: string,
+    action: 'buy' | 'sell',
+    side: 'yes' | 'no',
+    count: number,
     price?: number,
     retryCount = 0
   ): Promise<{ success: boolean; order_id?: string; order?: any; error?: string }> {
@@ -572,6 +574,7 @@ export class KalshiService {
             // Side is strictly 'yes' or 'no'
             const normSide = side.toLowerCase() === 'no' ? 'no' : 'yes';
             const normAction = action.toLowerCase() === 'sell' ? 'sell' : 'buy';
+
             
             let rawPrice = typeof price === 'number' && !isNaN(price) && price > 0 ? price : 0.50;
             if (rawPrice < 0.01) rawPrice = 0.01;

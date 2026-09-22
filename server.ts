@@ -48,7 +48,8 @@ let settings = {
   adaptationMode: true,
   ENABLE_RAPID_SCALP_MODE: true,
   smartTrailingTP: true,
-  lowFundsMode: false
+  lowFundsMode: false,
+  gauntletMode: false
 };
 
 let startingBankroll = 200;
@@ -2485,6 +2486,43 @@ async function openPosition(
     targetSize = Math.max(1, Math.min(targetSize, 500));
   }
 
+  // --- GAUNTLET MODE: CRRA / FRACTIONAL KELLY ---
+  if (settings.paperTrading && (settings as any).gauntletMode) {
+    const fractionalKellyMod = 0.25; // Quarter-Kelly for survival
+    const b = Math.max(0.1, expectedTP);
+    const p = Math.max(0.01, estimatedWinProb);
+
+    // Kelly = p - ((1 - p) / b)
+    let kellyFrac = p - ((1 - p) / b);
+    kellyFrac = kellyFrac * fractionalKellyMod;
+
+    // Fallback if kelly is negative or super tiny
+    if (kellyFrac < 0.01) kellyFrac = 0.05;
+
+    // Strict bounding to ensure survival and to never allocate > 25% of bankroll on a single trade
+    kellyFrac = Math.max(0.02, Math.min(0.25, kellyFrac));
+
+    // CRRA Utility function (logarithmic dampening as we approach $2000)
+    // When capital is small ($20), CRRA allows high relative leverage.
+    // When capital approaches $2000, risk aversion increases exponentially.
+    const maxTarget = 2000.0;
+    const currentEq = Math.max(20.0, currentWorkingBalance);
+    const crraAversionFactor = Math.max(0.1, Math.log10(currentEq) / Math.log10(maxTarget));
+
+    // The larger the aversion factor (as Eq approaches 2000), the more the kelly fraction is compressed
+    const crraAdjustedKelly = kellyFrac * Math.max(0.2, (1.0 - crraAversionFactor));
+
+    let gauntletCostUsd = currentEq * crraAdjustedKelly;
+    if (isPerpContract) gauntletCostUsd = Math.min(gauntletCostUsd, maxPerpDeployable);
+
+    targetSize = Math.max(1, Math.floor(gauntletCostUsd / currentContractCost));
+
+    spotLogs.unshift({
+      id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+      message: `[GAUNTLET MODE CRRA SCALING] Eq: ${currentEq.toFixed(2)} | CRRA Aversion: ${crraAversionFactor.toFixed(2)} | Allocating ${(crraAdjustedKelly*100).toFixed(1)}% of bankroll (${gauntletCostUsd.toFixed(2)})`
+    });
+  }
+
   // Respect whichever is larger: caller size or probability-adjusted targetSize
   // If perpetual, strictly cap size so positionCostUsd never exceeds maxPerpDeployable
   if (isPerpContract) {
@@ -2593,6 +2631,10 @@ async function openPosition(
   if (!settings.paperTrading) {
     const liveAction = isPerpContract ? (side === 'YES' ? 'buy' : 'sell') : 'buy';
     const liveRes = await kalshiService.placeOrder(
+      symbol,
+      liveAction,
+      side.toLowerCase() as 'yes' | 'no',
+      size,
       symbol, 
       liveAction, 
       side.toLowerCase() as 'yes' | 'no', 
@@ -2636,7 +2678,7 @@ async function openPosition(
 // --- DYNAMIC MARKET DISCOVERY ---
 let isInitializing = true;
 
-async function fetchPerpetualOrderBook(ticker: string, initialPrice: number) {
+async function fetchPerpetualOrderBook(ticker: string) {
   try {
     const res = await fetch(`https://api.elections.kalshi.com/trade-api/v2/margin/markets/${ticker}/orderbook`, {
       signal: AbortSignal.timeout(3000),
@@ -2653,14 +2695,11 @@ async function fetchPerpetualOrderBook(ticker: string, initialPrice: number) {
       }
     }
   } catch (e) {
-    // Fallback
+    // Silent fail
   }
-  const tick = Math.max(0.01, initialPrice * 0.0005);
-  const pBid = parseFloat((initialPrice - tick).toFixed(4));
-  const pAsk = parseFloat((initialPrice + tick).toFixed(4));
   return {
-    bids: [{ price: pBid, size: 100 }, { price: parseFloat((pBid - tick).toFixed(4)), size: 50 }],
-    asks: [{ price: pAsk, size: 100 }, { price: parseFloat((pAsk + tick).toFixed(4)), size: 50 }]
+    bids: [],
+    asks: []
   };
 }
 
@@ -2681,7 +2720,7 @@ async function discoverPerpetuals() {
       const fallbackSpot = scalper.currentCandles[`${rawAsset}-USD`]?.close || (rawAsset === 'BTC' ? 88000 : rawAsset === 'ETH' ? 3200 : rawAsset === 'SOL' ? 180 : rawAsset === 'XRP' ? 2.3 : rawAsset === 'DOGE' ? 0.25 : 35);
       const initialPrice = m ? (parseFloat(m.price) || (parseFloat(m.bid) + parseFloat(m.ask)) / 2 || fallbackSpot) : fallbackSpot;
 
-      const book = await fetchPerpetualOrderBook(ticker, initialPrice);
+      const book = await fetchPerpetualOrderBook(ticker);
       const bestBid = book.bids[0]?.price || (m ? parseFloat(m.bid) : initialPrice);
       const bestAsk = book.asks[0]?.price || (m ? parseFloat(m.ask) : initialPrice);
       const mid = (bestBid + bestAsk) / 2;
@@ -2716,42 +2755,6 @@ async function discoverPerpetuals() {
   } catch (e) {
     console.error('[PERPETUAL DISCOVERY ERROR]', e);
   }
-}
-
-async function fetchRealSpotOrderBook(label: string, initialPrice: number) {
-  try {
-    let pair = 'BTC-USD';
-    const l = label.toUpperCase();
-    if (l.includes('ETH')) pair = 'ETH-USD';
-    else if (l.includes('SOL')) pair = 'SOL-USD';
-    else if (l.includes('XRP')) pair = 'XRP-USD';
-    else if (l.includes('DOGE')) pair = 'DOGE-USD';
-    else if (l.includes('HYPE')) pair = 'SOL-USD';
-
-    const res = await fetch(`https://api.exchange.coinbase.com/products/${pair}/book?level=1`, { signal: AbortSignal.timeout(3000), headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.bids && data.asks && data.bids.length > 0 && data.asks.length > 0) {
-        const bestRealBid = Number(data.bids[0][0]);
-        const bestRealAsk = Number(data.asks[0][0]);
-        const spread = Math.max(0.01, Math.min(0.05, Math.abs(bestRealAsk - bestRealBid) / bestRealBid));
-        const pBid = Math.max(0.01, parseFloat((initialPrice - spread / 2).toFixed(2)));
-        const pAsk = Math.min(0.99, parseFloat((initialPrice + spread / 2).toFixed(2)));
-        return {
-          bids: [{ price: pBid, size: Number(data.bids[0][1]) || 500 }, { price: Math.max(0.01, pBid - 0.01), size: 300 }],
-          asks: [{ price: pAsk, size: Number(data.asks[0][1]) || 500 }, { price: Math.min(0.99, pAsk + 0.01), size: 300 }]
-        };
-      }
-    }
-  } catch (e) {
-    // Silent fallback to clean market spread
-  }
-  const pBid = Math.max(0.01, parseFloat((initialPrice - 0.01).toFixed(2)));
-  const pAsk = Math.min(0.99, parseFloat((initialPrice + 0.01).toFixed(2)));
-  return {
-    bids: [{ price: pBid, size: 500 }],
-    asks: [{ price: pAsk, size: 500 }]
-  };
 }
 
 async function fetchJson(url: string) {
@@ -2815,7 +2818,7 @@ async function discoverMarkets() {
             const obRes = await kalshiService.getOrderBook(best.ticker);
             const book = (obRes.success && obRes.bids && obRes.bids.length > 0)
               ? { bids: obRes.bids, asks: obRes.asks || [] }
-              : await fetchRealSpotOrderBook(label, initialPrice);
+              : { bids: [], asks: [] }; // No fake data fallback allowed
             spotContexts[best.ticker] = {
               currentPrice: initialPrice,
               bids: book.bids,
@@ -4663,7 +4666,7 @@ setInterval(async () => {
           metaModelManager.recordBlowoutFailure(patternType);
           metaModelManager.recordBlowoutFailure('GLOBAL');
           
-          simulatedPaperBalance = startingBankroll;
+          simulatedPaperBalance = (settings as any).gauntletMode ? 20.0 : startingBankroll;
           cycleEarnedProfit = 0;
           vaultedProfits = 0;
           completedGoalCycles = 0;
@@ -4933,6 +4936,7 @@ async function syncLiveKalshiPositions(force = false) {
 
     // Build map of open positions on Kalshi
     const liveKalshiOpenMap: Record<string, { size: number; side: 'YES' | 'NO'; raw: any }> = {};
+
     
     for (const p of posRes.market_positions) {
       const positionCount = typeof p.position === 'number' ? p.position : (p.position_fp ? parseFloat(p.position_fp) : 0);
@@ -5331,6 +5335,10 @@ app.post('/api/kalshi/close-all-positions', async (req, res) => {
 });
 
 app.post('/api/restart', (req, res) => {
+  if ((settings as any).gauntletMode) {
+    startingBankroll = 20.0;
+  }
+  paperBankrollATH = startingBankroll;
   simulatedPaperBalance = startingBankroll;
   cycleEarnedProfit = 0;
   vaultedProfits = 0;
