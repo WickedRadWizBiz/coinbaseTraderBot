@@ -502,48 +502,6 @@ export class KalshiService {
   public async cancelOrder(orderId: string): Promise<{ success: boolean; error?: string }> {
     if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
 
-
-    const tryEndpoints = [this.baseUrl, this.fallbackBaseUrl];
-    let lastError = '';
-
-    for (const host of tryEndpoints) {
-      try {
-        const method = 'GET';
-        const path = '/portfolio/orders?status=resting';
-        const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
-
-        const res = await fetch(host + path, {
-          method,
-          headers: {
-            'Content-Type': 'application/json',
-            'KALSHI-ACCESS-KEY': this.keyId,
-            'KALSHI-ACCESS-TIMESTAMP': timestamp,
-            'KALSHI-ACCESS-SIGNATURE': signature
-          }
-        });
-
-        if (!res.ok) {
-          const txt = await res.text();
-          lastError = `HTTP ${res.status}: ${txt}`;
-          continue;
-        }
-
-        const data: any = await res.json();
-        return {
-          success: true,
-          orders: data.orders || []
-        };
-      } catch (e: any) {
-        lastError = e.message || String(e);
-      }
-    }
-
-    return { success: false, error: lastError };
-  }
-
-  public async cancelOrder(orderId: string): Promise<{ success: boolean; error?: string }> {
-    if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
-
     try {
       const method = 'DELETE';
       const path = `/portfolio/orders/${orderId}`;
