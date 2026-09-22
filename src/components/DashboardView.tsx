@@ -130,6 +130,7 @@ export function DashboardView() {
   const [showRestartModal, setShowRestartModal] = useState(false);
   const [resettingVault, setResettingVault] = useState(false);
   const [overrideConfluence, setOverrideConfluence] = useState(false);
+  const [settings, setSettings] = useState<any>(null);
   const [panicState, setPanicState] = useState<'idle' | 'flashing' | 'fading'>('idle');
 
   const handlePanicSell = async () => {
@@ -185,6 +186,9 @@ export function DashboardView() {
       const settingsData = await parseJsonSafe(settingsRes);
       if (settingsData && typeof settingsData.overrideConfluence === 'boolean') {
         setOverrideConfluence(settingsData.overrideConfluence);
+      }
+      if (settingsData) {
+        setSettings(settingsData);
       }
     } catch {
       // Suppress transient network fetch error
@@ -430,7 +434,17 @@ export function DashboardView() {
           <div className="relative z-10 flex flex-col h-full w-full">
             <h3 className="font-bold tracking-[0.2em] text-lg uppercase text-crypto-text mb-3 border-b border-crypto-primary pb-2 flex items-center justify-between shrink-0">
               <span>VISUAL TELEMETRY</span>
-              <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-3">
+                <div className="flex flex-col text-[9px] font-mono leading-tight bg-black/60 border border-crypto-primary/30 p-1 mr-2 px-2 text-right">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[#808080]">LATENCY</span>
+                    <span className="text-crypto-primary font-bold">{settings?.simulatedLatencyMs > 0 ? `${settings.simulatedLatencyMs}ms (SIM)` : 'LIVE'}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[#808080]">SAMPLE RT</span>
+                    <span className="text-crypto-accent font-bold">1ms</span>
+                  </div>
+                </div>
                 <label className="flex items-center gap-2 cursor-pointer text-xs font-mono">
                   <span className={overrideConfluence ? 'text-crypto-danger' : 'text-crypto-text/50'}>OVERRIDE CONFLUENCE</span>
                   <div className="relative inline-flex items-center h-5 rounded-full w-9">

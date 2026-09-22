@@ -2588,7 +2588,9 @@ async function openPosition(
   // Inject Latency Simulation for Paper Trading
   let finalEntryPrice = optimizedEntryPrice;
   if (settings.paperTrading && (settings as any).simulatedLatencyMs > 0) {
-    const latMs = (settings as any).simulatedLatencyMs;
+    // Generate a randomized scaling of the latency for variance
+          const baseLatMs = (settings as any).simulatedLatencyMs;
+          const latMs = baseLatMs > 0 ? Math.floor(baseLatMs * (0.5 + Math.random())) : 0;
     await new Promise(r => setTimeout(r, latMs));
     // Fetch latest price from context after latency delay
     const latestCtx = spotContexts[symbol];
@@ -4546,7 +4548,9 @@ setInterval(async () => {
         }
 
         if (tempShouldClose) {
-          const latMs = (settings as any).simulatedLatencyMs;
+          // Generate a randomized scaling of the latency for variance
+          const baseLatMs = (settings as any).simulatedLatencyMs;
+          const latMs = baseLatMs > 0 ? Math.floor(baseLatMs * (0.5 + Math.random())) : 0;
           await new Promise(r => setTimeout(r, latMs));
           const latestCtx = spotContexts[pos.symbol];
           if (latestCtx && latestCtx.currentPrice) {

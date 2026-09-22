@@ -7645,7 +7645,8 @@ async function openPosition(symbol, side, entryPrice, size, isOverride, matchId,
     const modelFairValue = side === "YES" ? isPerpContract ? optimizedEntryPrice * (1 + modelProbabilityBoost) : Math.min(0.95, optimizedEntryPrice + modelProbabilityBoost) : isPerpContract ? optimizedEntryPrice * (1 - modelProbabilityBoost) : Math.max(0.05, optimizedEntryPrice - modelProbabilityBoost);
     let finalEntryPrice = optimizedEntryPrice;
     if (settings.paperTrading && settings.simulatedLatencyMs > 0) {
-      const latMs = settings.simulatedLatencyMs;
+      const baseLatMs = settings.simulatedLatencyMs;
+      const latMs = baseLatMs > 0 ? Math.floor(baseLatMs * (0.5 + Math.random())) : 0;
       await new Promise((r) => setTimeout(r, latMs));
       const latestCtx = spotContexts[symbol];
       if (latestCtx && latestCtx.currentPrice) {
@@ -9328,7 +9329,8 @@ setInterval(async () => {
             tempShouldClose = true;
           }
           if (tempShouldClose) {
-            const latMs = settings.simulatedLatencyMs;
+            const baseLatMs = settings.simulatedLatencyMs;
+            const latMs = baseLatMs > 0 ? Math.floor(baseLatMs * (0.5 + Math.random())) : 0;
             await new Promise((r) => setTimeout(r, latMs));
             const latestCtx = spotContexts[pos.symbol];
             if (latestCtx && latestCtx.currentPrice) {

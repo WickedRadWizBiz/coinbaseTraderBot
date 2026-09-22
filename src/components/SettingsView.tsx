@@ -19,7 +19,7 @@ export function SettingsView() {
     instantProfitQueue: 20,
     kellyMultiplier: 0.5,
     paperTrading: true,
-    botActive: true, adaptationMode: true, ENABLE_RAPID_SCALP_MODE: true, lowFundsMode: false, gauntletMode: false
+    botActive: true, adaptationMode: true, ENABLE_RAPID_SCALP_MODE: true, lowFundsMode: false, gauntletMode: false, simulatedLatencyMs: 0
   });
   const [balanceData, setBalanceData] = useState<any>(null);
   const [marketTesting, setMarketTesting] = useState<any>(null);
@@ -203,6 +203,51 @@ export function SettingsView() {
             <div className={`absolute left-1 top-1 bg-white w-6 h-6 rounded-none transition-transform ${(settings as any).gauntletMode ? 'translate-x-6' : ''}`}></div>
           </div>
         </div>
+
+
+        {/* Latency Simulation Slider */}
+        <div className="flex flex-col gap-2 p-3 bg-black/40 border border-crypto-primary/30 mt-4">
+          <div className="flex items-center justify-between">
+            <span className="font-bold text-crypto-primary text-xs uppercase flex items-center gap-2">
+              Network Latency Simulator
+              <span className={`px-2 py-0.5 text-[9px] font-bold border rounded-none ${
+                (settings as any).simulatedLatencyMs > 0 ? 'bg-amber-500/20 text-amber-500 border-amber-500' : 'bg-black/50 text-[#808080] border-[#404040]'
+              }`}>
+                {(settings as any).simulatedLatencyMs > 0 ? `${(settings as any).simulatedLatencyMs}ms (RANDOMIZED SCALED)` : 'OFF'}
+              </span>
+            </span>
+          </div>
+          <span className="text-[11px] text-[#909090] font-sans">
+            Simulates realistic execution delays during paper trading to model HFT slippage and quote freshness gating. Bypassed when paper trading is off.
+          </span>
+          <div className="pt-2 flex items-center gap-4">
+            <span className="text-[10px] text-[#606060] font-bold">OFF</span>
+            <input
+              type="range"
+              min="0"
+              max="500"
+              step="5"
+              disabled={!settings.paperTrading}
+              value={(settings as any).simulatedLatencyMs || 0}
+              onChange={(e) => {
+                const newLatency = parseInt(e.target.value);
+                const newSettings = { ...settings, simulatedLatencyMs: newLatency };
+                setSettings(newSettings as any);
+                fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newSettings) });
+              }}
+              className="w-full accent-crypto-primary bg-black/60 cursor-pointer disabled:opacity-30"
+            />
+            <span className="text-[10px] text-crypto-danger font-bold">HIGH</span>
+          </div>
+          <div className="flex justify-between text-[9px] text-[#606060] px-8">
+             <span>0ms</span>
+             <span>10ms (Low)</span>
+             <span>50ms (Med)</span>
+             <span>200ms (High)</span>
+             <span>500ms (Extreme)</span>
+          </div>
+        </div>
+
 
         {/* Toggle Switch */}
         <div className="flex items-center justify-between gap-4 p-3 bg-black/40 border border-crypto-primary/30">
