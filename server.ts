@@ -5074,6 +5074,10 @@ app.get('/api/balance', async (req, res) => {
     ? (simulatedPaperBalance + vaultedProfits)
     : (liveTotalPortfolioValue > 0 ? (liveTotalPortfolioValue + liveVaultedProfits) : (realKalshiCashPool + livePositionsValue + liveVaultedProfits));
 
+  const startingBank = settings.paperTrading
+    ? startingBankroll
+    : (liveStartingBankroll > 0 ? liveStartingBankroll : (totalEquity > 0 ? totalEquity : 23.62));
+
   const startingBank = settings.paperTrading 
     ? startingBankroll 
     : (liveStartingBankroll > 0 ? liveStartingBankroll : (totalEquity > 0 ? totalEquity : 23.62));
@@ -5087,6 +5091,8 @@ app.get('/api/balance', async (req, res) => {
   const isAcceleratedVault = pocketedAmount >= 100;
   const currentVaultThreshold = isAcceleratedVault ? 20 : 50;
 
+  const dailyProfit = settings.paperTrading
+    ? goalResetScheduler.getStatus().current_profit
   const dailyProfit = settings.paperTrading 
     ? goalResetScheduler.getStatus().current_profit 
     : (liveRealizedPnl + liveUnrealizedPnl);
@@ -5113,6 +5119,8 @@ app.get('/api/balance', async (req, res) => {
     starting_bankroll: startingBank,
     delta_24h: delta24h,
     delta_24h_pct: delta24hPct,
+    goal_window: settings.paperTrading
+      ? goalResetScheduler.getStatus()
     goal_window: settings.paperTrading 
       ? goalResetScheduler.getStatus() 
       : {
