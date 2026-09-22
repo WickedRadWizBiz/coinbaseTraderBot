@@ -5595,7 +5595,8 @@ var settings = {
   adaptationMode: true,
   ENABLE_RAPID_SCALP_MODE: true,
   smartTrailingTP: true,
-  lowFundsMode: false
+  lowFundsMode: false,
+  gauntletMode: false
 };
 var startingBankroll = 200;
 var cycleEarnedProfit = 0;
@@ -6247,7 +6248,9 @@ var PatternTradingBrain = class {
       const ofi = (bidVol - askVol) / Math.max(1, bidVol + askVol);
       const bestBid = pos.entryPrice ? pos.entryPrice * 0.999 : 0.499;
       const bestAsk = pos.entryPrice ? pos.entryPrice * 1.001 : 0.501;
+      const latMsNN2 = settings.simulatedLatencyMs || latencyAdaptiveEngine.getProfile().effectiveLatencyMs;
       const onlineFeatures = pos.entryFeatures || {
+        latency: latMsNN2 / 1e3,
         smartTrailingActive: settings.smartTrailingTP ? 1 : 0,
         smartTrailingDistance: settings.smartTrailDistance || 0.05,
         macroGoalProgress: macroCycleProfit,
@@ -7336,7 +7339,9 @@ async function openPosition(symbol, side, entryPrice, size, isOverride, matchId,
     const ofi = (bidVol - askVol) / Math.max(1, bidVol + askVol);
     const bestBid = ctx?.bids?.[0]?.price || (entryPrice ? entryPrice * 0.999 : 0.499);
     const bestAsk = ctx?.asks?.[0]?.price || (entryPrice ? entryPrice * 1.001 : 0.501);
+    const latMsNN = settings.simulatedLatencyMs || latencyAdaptiveEngine.getProfile().effectiveLatencyMs;
     let entryFeatures = {
+      latency: latMsNN / 1e3,
       smartTrailingActive: settings.smartTrailingTP ? 1 : 0,
       smartTrailingDistance: settings.smartTrailDistance || 0.05,
       macroGoalProgress: macroCycleProfit,
@@ -7545,20 +7550,20 @@ async function openPosition(symbol, side, entryPrice, size, isOverride, matchId,
     capitalToDeploy = Math.min(currentWorkingBalance, capitalToDeploy);
     if (isPerpContract) {
       const remainingPerpCapRoom = Math.max(0, maxAllowedPerpCapital - perpCapitalInUse);
-      const maxPerpDeployable = Math.min(
+      const maxPerpDeployable2 = Math.min(
         Math.max(0, currentWorkingBalance - perpCapReserveThreshold),
         remainingPerpCapRoom
       );
-      if (maxPerpDeployable < currentContractCost) {
+      if (maxPerpDeployable2 < currentContractCost) {
         spotLogs.unshift({
           id: logIdCounter++,
           time: (/* @__PURE__ */ new Date()).toISOString(),
           type: "ANALYZE",
-          message: `[PERP CAPITAL RESERVE VETO] Suppressed Perpetual sizing on ${symbol}. Max deployable capital ($${maxPerpDeployable.toFixed(2)}) is less than contract cost ($${currentContractCost.toFixed(2)}) without breaching the 50% reserve for price predictions ($${perpCapReserveThreshold.toFixed(2)}).`
+          message: `[PERP CAPITAL RESERVE VETO] Suppressed Perpetual sizing on ${symbol}. Max deployable capital ($${maxPerpDeployable2.toFixed(2)}) is less than contract cost ($${currentContractCost.toFixed(2)}) without breaching the 50% reserve for price predictions ($${perpCapReserveThreshold.toFixed(2)}).`
         });
         return;
       }
-      capitalToDeploy = Math.min(capitalToDeploy, maxPerpDeployable);
+      capitalToDeploy = Math.min(capitalToDeploy, maxPerpDeployable2);
     }
     let targetSize = Math.max(1, Math.floor(capitalToDeploy / currentContractCost));
     if (isCounterTrendYes || isCounterTrendNo) {
@@ -7568,13 +7573,35 @@ async function openPosition(symbol, side, entryPrice, size, isOverride, matchId,
     if (lastWinTimeForCap > 0 && Date.now() - lastWinTimeForCap < 3e5 && targetSize > 500) {
       targetSize = Math.max(1, Math.min(targetSize, 500));
     }
+    if (settings.paperTrading && settings.gauntletMode) {
+      const fractionalKellyMod = 0.25;
+      const b = Math.max(0.1, expectedTP);
+      const p = Math.max(0.01, estimatedWinProb);
+      let kellyFrac = p - (1 - p) / b;
+      kellyFrac = kellyFrac * fractionalKellyMod;
+      if (kellyFrac < 0.01) kellyFrac = 0.05;
+      kellyFrac = Math.max(0.02, Math.min(0.25, kellyFrac));
+      const maxTarget = 2e3;
+      const currentEq = Math.max(20, currentWorkingBalance);
+      const crraAversionFactor = Math.max(0.1, Math.log10(currentEq) / Math.log10(maxTarget));
+      const crraAdjustedKelly = kellyFrac * Math.max(0.2, 1 - crraAversionFactor);
+      let gauntletCostUsd = currentEq * crraAdjustedKelly;
+      if (isPerpContract) gauntletCostUsd = Math.min(gauntletCostUsd, maxPerpDeployable);
+      targetSize = Math.max(1, Math.floor(gauntletCostUsd / currentContractCost));
+      spotLogs.unshift({
+        id: logIdCounter++,
+        time: (/* @__PURE__ */ new Date()).toISOString(),
+        type: "ANALYZE",
+        message: `[GAUNTLET MODE CRRA SCALING] Eq: ${currentEq.toFixed(2)} | CRRA Aversion: ${crraAversionFactor.toFixed(2)} | Allocating ${(crraAdjustedKelly * 100).toFixed(1)}% of bankroll (${gauntletCostUsd.toFixed(2)})`
+      });
+    }
     if (isPerpContract) {
       const remainingPerpCapRoom = Math.max(0, maxAllowedPerpCapital - perpCapitalInUse);
-      const maxPerpDeployable = Math.min(
+      const maxPerpDeployable2 = Math.min(
         Math.max(0, currentWorkingBalance - perpCapReserveThreshold),
         remainingPerpCapRoom
       );
-      const maxPerpContracts = Math.max(1, Math.floor(maxPerpDeployable / currentContractCost));
+      const maxPerpContracts = Math.max(1, Math.floor(maxPerpDeployable2 / currentContractCost));
       size = Math.min(Math.max(size || 1, targetSize), maxPerpContracts);
     } else {
       size = Math.max(size || 1, targetSize);
@@ -7616,6 +7643,25 @@ async function openPosition(symbol, side, entryPrice, size, isOverride, matchId,
     }
     const modelProbabilityBoost = Math.min(0.4, confCount * 0.05 + Math.abs(expectedTP) * 0.1);
     const modelFairValue = side === "YES" ? isPerpContract ? optimizedEntryPrice * (1 + modelProbabilityBoost) : Math.min(0.95, optimizedEntryPrice + modelProbabilityBoost) : isPerpContract ? optimizedEntryPrice * (1 - modelProbabilityBoost) : Math.max(0.05, optimizedEntryPrice - modelProbabilityBoost);
+    let finalEntryPrice = optimizedEntryPrice;
+    if (settings.paperTrading && settings.simulatedLatencyMs > 0) {
+      const latMs = settings.simulatedLatencyMs;
+      await new Promise((r) => setTimeout(r, latMs));
+      const latestCtx = spotContexts[symbol];
+      if (latestCtx && latestCtx.currentPrice) {
+        if (isPerpContract) {
+          finalEntryPrice = side === "YES" ? latestCtx.currentPrice : 1 - latestCtx.currentPrice;
+        } else {
+          finalEntryPrice = side === "YES" ? latestCtx.currentPrice : 1 - latestCtx.currentPrice;
+        }
+      }
+      spotLogs.unshift({
+        id: logIdCounter++,
+        time: (/* @__PURE__ */ new Date()).toISOString(),
+        type: "WARN",
+        message: `[LATENCY SIMULATOR] Entry delayed by ${latMs}ms. Price slipped from ${optimizedEntryPrice.toFixed(4)} to ${finalEntryPrice.toFixed(4)}.`
+      });
+    }
     const pos = {
       category,
       entryTime: Date.now(),
@@ -7623,7 +7669,7 @@ async function openPosition(symbol, side, entryPrice, size, isOverride, matchId,
       id: ++logIdCounter,
       symbol,
       side,
-      entryPrice: optimizedEntryPrice,
+      entryPrice: finalEntryPrice,
       size,
       isOverride,
       matchId,
@@ -7649,6 +7695,10 @@ async function openPosition(symbol, side, entryPrice, size, isOverride, matchId,
     if (!settings.paperTrading) {
       const liveAction = isPerpContract ? side === "YES" ? "buy" : "sell" : "buy";
       const liveRes = await kalshiService.placeOrder(
+        symbol,
+        liveAction,
+        side.toLowerCase(),
+        size,
         symbol,
         liveAction,
         side.toLowerCase(),
@@ -7722,8 +7772,9 @@ async function discoverPerpetuals() {
     const marginMarkets = (data.markets || []).filter((m) => (m.asset_class === "Crypto" || m.ticker?.endsWith("PERP")) && m.status === "active");
     const primaryPerpTickers = ["KXBTCPERP", "KXETHPERP", "KXSOLPERP", "KXDOGEPERP", "KXXRPPERP", "KXHYPEPERP"];
     const allPerpTickers = /* @__PURE__ */ new Set([...marginMarkets.map((m) => m.ticker), ...primaryPerpTickers]);
+    const marginMarketsMap = new Map(marginMarkets.map((m) => [m.ticker, m]));
     for (const ticker of allPerpTickers) {
-      const m = marginMarkets.find((item) => item.ticker === ticker);
+      const m = marginMarketsMap.get(ticker);
       const rawAsset = ticker.replace(/^KX/, "").replace(/PERP$/, "");
       const label = `${rawAsset} Perp`;
       const fallbackSpot = scalper.currentCandles[`${rawAsset}-USD`]?.close || (rawAsset === "BTC" ? 88e3 : rawAsset === "ETH" ? 3200 : rawAsset === "SOL" ? 180 : rawAsset === "XRP" ? 2.3 : rawAsset === "DOGE" ? 0.25 : 35);
@@ -9266,6 +9317,36 @@ setInterval(async () => {
         }
         const timeToExpiryMs = ctx.closeTime ? new Date(ctx.closeTime).getTime() - Date.now() : Infinity;
         const isImminentExpiry = timeToExpiryMs < 60 * 1e3;
+        let finalExitPrice = currentSidePrice;
+        if (settings.paperTrading && settings.simulatedLatencyMs > 0) {
+          let tempShouldClose = false;
+          if (smartTrailRes.shouldClose) {
+            tempShouldClose = true;
+          } else if (isImminentExpiry && pnlRatio > 0.02 && smartTrailRes.state.isActive) {
+            tempShouldClose = true;
+          } else if (isImminentExpiry && pnlRatio > 0.01) {
+            tempShouldClose = true;
+          }
+          if (tempShouldClose) {
+            const latMs = settings.simulatedLatencyMs;
+            await new Promise((r) => setTimeout(r, latMs));
+            const latestCtx = spotContexts[pos.symbol];
+            if (latestCtx && latestCtx.currentPrice) {
+              if (pos.isPerpetual) {
+                finalExitPrice = pos.side === "YES" ? latestCtx.currentPrice : 1 - latestCtx.currentPrice;
+              } else {
+                finalExitPrice = pos.side === "YES" ? latestCtx.currentPrice : 1 - latestCtx.currentPrice;
+              }
+            }
+            currentSidePrice = finalExitPrice;
+            spotLogs.unshift({
+              id: logIdCounter++,
+              time: (/* @__PURE__ */ new Date()).toISOString(),
+              type: "WARN",
+              message: `[LATENCY SIMULATOR] Exit delayed by ${latMs}ms. Exit price slipped to ${finalExitPrice.toFixed(4)}.`
+            });
+          }
+        }
         const hasConvergedWithFairValue = pos.modelFairValue !== void 0 && (pos.side === "YES" && currentSidePrice >= pos.modelFairValue || pos.side === "NO" && currentSidePrice <= pos.modelFairValue);
         if (smartTrailRes.shouldClose) {
           shouldClose = true;
@@ -9341,7 +9422,7 @@ setInterval(async () => {
           });
           metaModelManager.recordBlowoutFailure(patternType);
           metaModelManager.recordBlowoutFailure("GLOBAL");
-          simulatedPaperBalance = startingBankroll;
+          simulatedPaperBalance = settings.gauntletMode ? 20 : startingBankroll;
           cycleEarnedProfit = 0;
           vaultedProfits = 0;
           completedGoalCycles = 0;
@@ -9944,6 +10025,10 @@ app.post("/api/kalshi/close-all-positions", async (req, res) => {
   }
 });
 app.post("/api/restart", (req, res) => {
+  if (settings.gauntletMode) {
+    startingBankroll = 20;
+  }
+  paperBankrollATH = startingBankroll;
   simulatedPaperBalance = startingBankroll;
   cycleEarnedProfit = 0;
   vaultedProfits = 0;

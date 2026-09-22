@@ -48,7 +48,8 @@ let settings = {
   adaptationMode: true,
   ENABLE_RAPID_SCALP_MODE: true,
   smartTrailingTP: true,
-  lowFundsMode: false
+  lowFundsMode: false,
+  gauntletMode: false
 };
 
 let startingBankroll = 200;
@@ -2485,6 +2486,43 @@ async function openPosition(
     targetSize = Math.max(1, Math.min(targetSize, 500));
   }
 
+  // --- GAUNTLET MODE: CRRA / FRACTIONAL KELLY ---
+  if (settings.paperTrading && (settings as any).gauntletMode) {
+    const fractionalKellyMod = 0.25; // Quarter-Kelly for survival
+    const b = Math.max(0.1, expectedTP);
+    const p = Math.max(0.01, estimatedWinProb);
+
+    // Kelly = p - ((1 - p) / b)
+    let kellyFrac = p - ((1 - p) / b);
+    kellyFrac = kellyFrac * fractionalKellyMod;
+
+    // Fallback if kelly is negative or super tiny
+    if (kellyFrac < 0.01) kellyFrac = 0.05;
+
+    // Strict bounding to ensure survival and to never allocate > 25% of bankroll on a single trade
+    kellyFrac = Math.max(0.02, Math.min(0.25, kellyFrac));
+
+    // CRRA Utility function (logarithmic dampening as we approach $2000)
+    // When capital is small ($20), CRRA allows high relative leverage.
+    // When capital approaches $2000, risk aversion increases exponentially.
+    const maxTarget = 2000.0;
+    const currentEq = Math.max(20.0, currentWorkingBalance);
+    const crraAversionFactor = Math.max(0.1, Math.log10(currentEq) / Math.log10(maxTarget));
+
+    // The larger the aversion factor (as Eq approaches 2000), the more the kelly fraction is compressed
+    const crraAdjustedKelly = kellyFrac * Math.max(0.2, (1.0 - crraAversionFactor));
+
+    let gauntletCostUsd = currentEq * crraAdjustedKelly;
+    if (isPerpContract) gauntletCostUsd = Math.min(gauntletCostUsd, maxPerpDeployable);
+
+    targetSize = Math.max(1, Math.floor(gauntletCostUsd / currentContractCost));
+
+    spotLogs.unshift({
+      id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+      message: `[GAUNTLET MODE CRRA SCALING] Eq: ${currentEq.toFixed(2)} | CRRA Aversion: ${crraAversionFactor.toFixed(2)} | Allocating ${(crraAdjustedKelly*100).toFixed(1)}% of bankroll (${gauntletCostUsd.toFixed(2)})`
+    });
+  }
+
   // Respect whichever is larger: caller size or probability-adjusted targetSize
   // If perpetual, strictly cap size so positionCostUsd never exceeds maxPerpDeployable
   if (isPerpContract) {
@@ -2781,7 +2819,6 @@ async function discoverMarkets() {
             const book = (obRes.success && obRes.bids && obRes.bids.length > 0)
               ? { bids: obRes.bids, asks: obRes.asks || [] }
               : { bids: [], asks: [] }; // No fake data fallback allowed
-              : await fetchRealSpotOrderBook(label, initialPrice);
             spotContexts[best.ticker] = {
               currentPrice: initialPrice,
               bids: book.bids,
@@ -4629,7 +4666,7 @@ setInterval(async () => {
           metaModelManager.recordBlowoutFailure(patternType);
           metaModelManager.recordBlowoutFailure('GLOBAL');
           
-          simulatedPaperBalance = startingBankroll;
+          simulatedPaperBalance = (settings as any).gauntletMode ? 20.0 : startingBankroll;
           cycleEarnedProfit = 0;
           vaultedProfits = 0;
           completedGoalCycles = 0;
@@ -5306,6 +5343,10 @@ app.post('/api/kalshi/close-all-positions', async (req, res) => {
 });
 
 app.post('/api/restart', (req, res) => {
+  if ((settings as any).gauntletMode) {
+    startingBankroll = 20.0;
+  }
+  paperBankrollATH = startingBankroll;
   simulatedPaperBalance = startingBankroll;
   cycleEarnedProfit = 0;
   vaultedProfits = 0;
