@@ -25,6 +25,7 @@ export interface EntryFeatures {
   lowerShadowRatio?: number;
   smartTrailingActive?: number;
   smartTrailingDistance?: number;
+  latency?: number;
   macroGoalProgress?: number;
   macroTimeElapsedHours?: number;
   macroGoalGrade?: number;

@@ -19,7 +19,8 @@ export function SettingsView() {
     instantProfitQueue: 20,
     kellyMultiplier: 0.5,
     paperTrading: true,
-    botActive: true, adaptationMode: true, ENABLE_RAPID_SCALP_MODE: true, lowFundsMode: false, gauntletMode: false
+    botActive: true, adaptationMode: true, ENABLE_RAPID_SCALP_MODE: true, lowFundsMode: false, gauntletMode: false,
+    simulatedLatencyMs: 0
   });
   const [balanceData, setBalanceData] = useState<any>(null);
   const [marketTesting, setMarketTesting] = useState<any>(null);
@@ -535,30 +536,68 @@ export function SettingsView() {
           </div>
         </label>
         {settings.paperTrading && (
-          <div className="flex flex-col gap-2 pt-2 pb-4 mb-4 border-b border-crypto-primary/30 pl-2">
-            <span className="text-xs text-[#808080] font-bold uppercase tracking-wider">Starting Cash Bankroll:</span>
-            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-              {[50, 100, 200, 1000].map(amt => (
-                <button
-                  key={amt}
-                  type="button"
-                  onClick={async () => {
-                    setStartingBankroll(amt);
-                    try {
-                      await fetch('/api/balance/reset', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ amount: amt })
-                      });
-                    } catch (e) {}
-                  }}
-                  className={`px-3 py-2 sm:px-4 flex-1 sm:flex-none whitespace-nowrap text-center text-xs font-bold uppercase tracking-wider transition-colors ${startingBankroll === amt ? 'bg-crypto-primary text-black border border-crypto-primary' : 'bg-black/40 text-crypto-primary border border-crypto-primary/40 hover:bg-crypto-primary/10'}`}
-                >
-                  ${amt} Start
-                </button>
-              ))}
+          <>
+            <div className="flex flex-col gap-2 pt-2 pb-4 mb-4 border-b border-crypto-primary/30 pl-2">
+              <span className="text-xs text-[#808080] font-bold uppercase tracking-wider">Starting Cash Bankroll:</span>
+              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                {[50, 100, 200, 1000].map(amt => (
+                  <button
+                    key={amt}
+                    type="button"
+                    onClick={async () => {
+                      setStartingBankroll(amt);
+                      try {
+                        await fetch('/api/balance/reset', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ amount: amt })
+                        });
+                      } catch (e) {}
+                    }}
+                    className={`px-3 py-2 sm:px-4 flex-1 sm:flex-none whitespace-nowrap text-center text-xs font-bold uppercase tracking-wider transition-colors ${startingBankroll === amt ? 'bg-crypto-primary text-black border border-crypto-primary' : 'bg-black/40 text-crypto-primary border border-crypto-primary/40 hover:bg-crypto-primary/10'}`}
+                  >
+                    ${amt} Start
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+
+            {/* Network Latency Simulator Slider (0-500ms) */}
+            <div className="flex flex-col gap-2 pt-2 pb-4 mb-4 border-b border-crypto-primary/30 pl-2">
+              <label className="text-xs text-crypto-primary font-bold uppercase tracking-wider flex justify-between">
+                <span className="flex items-center gap-2">
+                  Network Latency Simulator
+                  <span className={`px-2 py-0.5 text-[9px] font-bold border rounded-none ${
+                    (settings.simulatedLatencyMs || 0) > 0 ? 'bg-amber-500/20 text-amber-300 border-amber-500' : 'bg-crypto-primary/20 text-crypto-primary border-crypto-primary/40'
+                  }`}>
+                    {(settings.simulatedLatencyMs || 0) > 0 ? `${settings.simulatedLatencyMs}ms Delay (SIM)` : '0ms (Zero Latency / LIVE)'}
+                  </span>
+                </span>
+                <span className="text-crypto-primary font-mono">{settings.simulatedLatencyMs || 0}ms</span>
+              </label>
+              <input 
+                type="range" 
+                min="0" 
+                max="500" 
+                step="10"
+                value={settings.simulatedLatencyMs || 0}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value, 10);
+                  const newSettings = { ...settings, simulatedLatencyMs: val };
+                  setSettings(newSettings);
+                  fetch('/api/settings', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ simulatedLatencyMs: val }) 
+                  });
+                }}
+                className="w-full h-2 bg-black/60 border border-[#404040] rounded-none appearance-none cursor-pointer accent-crypto-primary"
+              />
+              <p className="text-[11px] text-[#808080] mt-1 font-sans">
+                Simulates execution slippage and exchange latency (0 to 500ms) during paper trading. Injects delays on entry and exit to test LARL model robustness under real-world network lag.
+              </p>
+            </div>
+          </>
         )}
         <label className="flex items-center justify-between cursor-pointer pt-4 mt-4 border-t border-crypto-primary/30">
           <div className="flex flex-col">

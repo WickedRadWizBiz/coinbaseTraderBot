@@ -49,7 +49,8 @@ let settings = {
   ENABLE_RAPID_SCALP_MODE: true,
   smartTrailingTP: true,
   lowFundsMode: false,
-  gauntletMode: false
+  gauntletMode: false,
+  simulatedLatencyMs: 0
 };
 
 let startingBankroll = 200;
@@ -2457,9 +2458,10 @@ async function openPosition(
   capitalToDeploy = Math.min(currentWorkingBalance, capitalToDeploy);
 
   // Perpetual Contracts Reserve Guard: Never deploy capital that would breach the 50% working capital reserve for price predictions
+  let maxPerpDeployable = 0;
   if (isPerpContract) {
     const remainingPerpCapRoom = Math.max(0, maxAllowedPerpCapital - perpCapitalInUse);
-    const maxPerpDeployable = Math.min(
+    maxPerpDeployable = Math.min(
       Math.max(0, currentWorkingBalance - perpCapReserveThreshold),
       remainingPerpCapRoom
     );
@@ -2527,7 +2529,7 @@ async function openPosition(
   // If perpetual, strictly cap size so positionCostUsd never exceeds maxPerpDeployable
   if (isPerpContract) {
     const remainingPerpCapRoom = Math.max(0, maxAllowedPerpCapital - perpCapitalInUse);
-    const maxPerpDeployable = Math.min(
+    maxPerpDeployable = Math.min(
       Math.max(0, currentWorkingBalance - perpCapReserveThreshold),
       remainingPerpCapRoom
     );
@@ -2635,10 +2637,6 @@ async function openPosition(
       liveAction,
       side.toLowerCase() as 'yes' | 'no',
       size,
-      symbol, 
-      liveAction, 
-      side.toLowerCase() as 'yes' | 'no', 
-      size, 
       optimizedEntryPrice
     );
 
@@ -2711,7 +2709,7 @@ async function discoverPerpetuals() {
     // Ensure primary perpetual symbols are always available as candidates
     const primaryPerpTickers = ['KXBTCPERP', 'KXETHPERP', 'KXSOLPERP', 'KXDOGEPERP', 'KXXRPPERP', 'KXHYPEPERP'];
     const allPerpTickers = new Set([...marginMarkets.map((m: any) => m.ticker), ...primaryPerpTickers]);
-    const marginMarketsMap = new Map(marginMarkets.map((m: any) => [m.ticker, m]));
+    const marginMarketsMap = new Map<string, any>(marginMarkets.map((m: any) => [m.ticker, m]));
 
     for (const ticker of allPerpTickers) {
       const m = marginMarketsMap.get(ticker);

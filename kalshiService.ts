@@ -668,13 +668,17 @@ export class KalshiService {
       const ob = data.orderbook || data.orderbook_fp || {};
       const bids: any[] = [];
       const asks: any[] = [];
-      const yesBids = ob.yes || ob.yes_dollars || [];
-      const noBids = ob.no || ob.no_dollars || [];
+      const yesBids = ob.yes_dollars || ob.yes || [];
+      const noBids = ob.no_dollars || ob.no || [];
       yesBids.forEach((lvl: any) => {
-        bids.push({ price: parseFloat(lvl[0]), size: parseFloat(lvl[1]) });
+        const rawP = parseFloat(lvl[0]);
+        const price = rawP > 1 ? rawP / 100 : rawP;
+        bids.push({ price, size: parseFloat(lvl[1]) });
       });
       noBids.forEach((lvl: any) => {
-        asks.push({ price: parseFloat((1.0 - parseFloat(lvl[0])).toFixed(2)), size: parseFloat(lvl[1]) });
+        const rawP = parseFloat(lvl[0]);
+        const normP = rawP > 1 ? rawP / 100 : rawP;
+        asks.push({ price: parseFloat((1.0 - normP).toFixed(4)), size: parseFloat(lvl[1]) });
       });
       bids.sort((a: any, b: any) => b.price - a.price);
       asks.sort((a: any, b: any) => a.price - b.price);

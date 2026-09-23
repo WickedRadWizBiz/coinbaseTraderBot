@@ -131,6 +131,7 @@ export function DashboardView() {
   const [resettingVault, setResettingVault] = useState(false);
   const [overrideConfluence, setOverrideConfluence] = useState(false);
   const [panicState, setPanicState] = useState<'idle' | 'flashing' | 'fading'>('idle');
+  const [currentSettings, setCurrentSettings] = useState<any>(null);
 
   const handlePanicSell = async () => {
     if (panicState !== 'idle') return;
@@ -183,8 +184,11 @@ export function DashboardView() {
       if (brainDataRes) setBrainData(brainDataRes);
 
       const settingsData = await parseJsonSafe(settingsRes);
-      if (settingsData && typeof settingsData.overrideConfluence === 'boolean') {
-        setOverrideConfluence(settingsData.overrideConfluence);
+      if (settingsData) {
+        setCurrentSettings(settingsData);
+        if (typeof settingsData.overrideConfluence === 'boolean') {
+          setOverrideConfluence(settingsData.overrideConfluence);
+        }
       }
     } catch {
       // Suppress transient network fetch error
@@ -428,9 +432,25 @@ export function DashboardView() {
         <div className="crt-grid-panel relative overflow-hidden h-[340px] flex flex-col p-4">
           <div className="absolute inset-0 heavy-dither-overlay pointer-events-none" />
           <div className="relative z-10 flex flex-col h-full w-full">
-            <h3 className="font-bold tracking-[0.2em] text-lg uppercase text-crypto-text mb-3 border-b border-crypto-primary pb-2 flex items-center justify-between shrink-0">
+            <h3 className="font-bold tracking-[0.2em] text-lg uppercase text-crypto-text mb-3 border-b border-crypto-primary pb-2 flex flex-wrap items-center justify-between gap-2 shrink-0">
               <span>VISUAL TELEMETRY</span>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+                {/* Latency and Sample Rate Status Badges */}
+                <div className="flex items-center gap-1.5 font-mono text-[10px]">
+                  <span className="px-1.5 py-0.5 border border-crypto-primary/40 bg-black/40 text-crypto-text/80 flex items-center gap-1">
+                    <span className="text-[#808080]">LATENCY:</span>
+                    <span className={currentSettings?.paperTrading && (currentSettings?.simulatedLatencyMs || 0) > 0 ? "text-amber-400 font-bold" : "text-crypto-primary font-bold"}>
+                      {currentSettings?.paperTrading && (currentSettings?.simulatedLatencyMs || 0) > 0 
+                        ? `${currentSettings.simulatedLatencyMs}ms (SIM)` 
+                        : 'LIVE'}
+                    </span>
+                  </span>
+                  <span className="px-1.5 py-0.5 border border-crypto-primary/40 bg-black/40 text-crypto-text/80 flex items-center gap-1">
+                    <span className="text-[#808080]">SAMPLE RT:</span>
+                    <span className="text-crypto-primary font-bold">1m</span>
+                  </span>
+                </div>
+
                 <label className="flex items-center gap-2 cursor-pointer text-xs font-mono">
                   <span className={overrideConfluence ? 'text-crypto-danger' : 'text-crypto-text/50'}>OVERRIDE CONFLUENCE</span>
                   <div className="relative inline-flex items-center h-5 rounded-full w-9">
