@@ -2,6 +2,8 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import 'dotenv/config';
+import { latencyAdaptiveEngine } from './latencyAdaptiveEngine';
+import { kalshiRateLimiter, RateLimitTier } from './kalshiRateLimiter';
 
 function scanEnvFilesForKeys(): { keyId: string; secret: string } {
   const candidateFiles = [
@@ -48,11 +50,17 @@ export class KalshiService {
   private privateKey: crypto.KeyObject | null = null;
   private initError: string | null = null;
   private lastApiStatus: { success: boolean; statusText?: string; balance?: number; error?: string; timestamp?: number } | null = null;
-  private baseUrl = 'https://api.elections.kalshi.com/trade-api/v2';
-  private fallbackBaseUrl = 'https://external-api.kalshi.com/trade-api/v2';
+  private baseUrl = 'https://external-api.kalshi.com/trade-api/v2';
+  private fallbackBaseUrl = 'https://api.elections.kalshi.com/trade-api/v2';
 
   constructor() {
     this.reloadCredentials();
+    // Auto-discover account rate limits after a brief delay if keys are configured
+    setTimeout(() => {
+      if (this.isConfigured()) {
+        this.fetchAccountLimits().catch(() => {});
+      }
+    }, 2000);
   }
 
   public reloadCredentials() {
@@ -91,6 +99,10 @@ export class KalshiService {
       } catch (err) {
         console.error('[KALSHI] Failed to write to .env:', err);
       }
+    }
+
+    if (this.isConfigured()) {
+      this.fetchAccountLimits().catch(() => {});
     }
   }
 
@@ -191,6 +203,114 @@ export class KalshiService {
     return { timestamp, signature };
   }
 
+  /**
+   * Fetches account limits dynamically from Kalshi API and updates the Token Bucket Engine
+   */
+  public async fetchAccountLimits(): Promise<{ success: boolean; tier?: RateLimitTier; limits?: any; error?: string }> {
+    if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
+
+    const method = 'GET';
+    const path = '/account/limits';
+    const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
+
+    const tryEndpoints = [this.baseUrl, this.fallbackBaseUrl];
+    let lastError = '';
+
+    for (const host of tryEndpoints) {
+      try {
+        const res = await kalshiRateLimiter.execute(
+          () => fetch(host + path, {
+            method,
+            headers: {
+              'Accept': 'application/json',
+              'KALSHI-ACCESS-KEY': this.keyId,
+              'KALSHI-ACCESS-TIMESTAMP': timestamp,
+              'KALSHI-ACCESS-SIGNATURE': signature
+            }
+          }),
+          { path, method, priority: 'NORMAL' }
+        );
+
+        if (res.ok) {
+          const data: any = await res.json();
+          const tierName = data.tier || data.usage_tier || data.level || (data.read_limit >= 300 ? 'Advanced' : 'Basic');
+          if (tierName && typeof tierName === 'string') {
+            const capitalized = (tierName.charAt(0).toUpperCase() + tierName.slice(1).toLowerCase()) as RateLimitTier;
+            kalshiRateLimiter.setTier(capitalized, true, data);
+            return { success: true, tier: capitalized, limits: data };
+          }
+          kalshiRateLimiter.setTier('Basic', true, data);
+          return { success: true, limits: data };
+        }
+        const txt = await res.text();
+        let parsed: any = null;
+        try { parsed = JSON.parse(txt); } catch (_) {}
+        lastError = parsed?.message || parsed?.error || `HTTP ${res.status}: ${txt}`;
+      } catch (e: any) {
+        lastError = e.message;
+      }
+    }
+
+    return { success: false, error: lastError };
+  }
+
+  /**
+   * Calls the Upgrade Account API Usage Level endpoint to promote to Advanced
+   * Docs: https://docs.kalshi.com/api-reference/account/upgrade-account-api-usage-level
+   * Rule: At least one of the user's last 100 Predictions orders must have been created via API.
+   */
+  public async upgradeApiUsageLevel(): Promise<{ success: boolean; message?: string; error?: string }> {
+    if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
+
+    const method = 'POST';
+    const path = '/account/api_usage_level/upgrade';
+    const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
+
+    const tryEndpoints = [this.baseUrl, this.fallbackBaseUrl];
+    let lastError = '';
+
+    for (const host of tryEndpoints) {
+      try {
+        const res = await kalshiRateLimiter.execute(
+          () => fetch(host + path, {
+            method,
+            headers: {
+              'Accept': 'application/json',
+              'KALSHI-ACCESS-KEY': this.keyId,
+              'KALSHI-ACCESS-TIMESTAMP': timestamp,
+              'KALSHI-ACCESS-SIGNATURE': signature
+            }
+          }),
+          { path, method, priority: 'CRITICAL' }
+        );
+
+        if (res.ok) {
+          kalshiRateLimiter.setTier('Advanced', true);
+          await this.fetchAccountLimits();
+          return {
+            success: true,
+            message: 'Successfully upgraded account usage level to Advanced (300 Read / 300 Write TPS, 3x Burst) via Kalshi API'
+          };
+        }
+
+        const txt = await res.text();
+        let parsed: any = null;
+        try { parsed = JSON.parse(txt); } catch (_) {}
+        const errorDesc = parsed?.message || parsed?.error || txt;
+        lastError = `HTTP ${res.status}: ${errorDesc}`;
+
+        // If client-side / eligibility error returned from official Kalshi host, return immediately
+        if (res.status === 400 || res.status === 403 || res.status === 401) {
+          return { success: false, error: lastError };
+        }
+      } catch (e: any) {
+        lastError = e.message;
+      }
+    }
+
+    return { success: false, error: lastError };
+  }
+
   public async getBalance(): Promise<{ success: boolean; balance?: number; breakdown?: any[]; error?: string }> {
     if (!this.isConfigured()) {
       const err = this.initError || 'Kalshi API credentials not found or unparsed';
@@ -208,15 +328,21 @@ export class KalshiService {
 
         const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
 
-        const res = await fetch(host + path, {
-          method,
-          headers: {
-            'Content-Type': 'application/json',
-            'KALSHI-ACCESS-KEY': this.keyId,
-            'KALSHI-ACCESS-TIMESTAMP': timestamp,
-            'KALSHI-ACCESS-SIGNATURE': signature
-          }
-        });
+        const tBalStart = Date.now();
+        const res = await kalshiRateLimiter.execute(
+          () => fetch(host + path, {
+            method,
+            headers: {
+              'Content-Type': 'application/json',
+              'KALSHI-ACCESS-KEY': this.keyId,
+              'KALSHI-ACCESS-TIMESTAMP': timestamp,
+              'KALSHI-ACCESS-SIGNATURE': signature
+            }
+          }),
+          { path, method, priority: 'NORMAL' }
+        );
+        const tBalElapsed = Date.now() - tBalStart;
+        if (tBalElapsed > 0) latencyAdaptiveEngine.recordKalshiDataLatency(tBalElapsed);
 
         if (!res.ok) {
           const txt = await res.text();
@@ -266,16 +392,19 @@ export class KalshiService {
 
       const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
 
-      const res = await fetch(this.baseUrl + path, {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          'KALSHI-ACCESS-KEY': this.keyId,
-          'KALSHI-ACCESS-TIMESTAMP': timestamp,
-          'KALSHI-ACCESS-SIGNATURE': signature
-        },
-        body: JSON.stringify(payload)
-      });
+      const res = await kalshiRateLimiter.execute(
+        () => fetch(this.baseUrl + path, {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            'KALSHI-ACCESS-KEY': this.keyId,
+            'KALSHI-ACCESS-TIMESTAMP': timestamp,
+            'KALSHI-ACCESS-SIGNATURE': signature
+          },
+          body: JSON.stringify(payload)
+        }),
+        { path, method, priority: 'HIGH', shardId: destShard }
+      );
 
       if (!res.ok) {
         const txt = await res.text();
@@ -337,15 +466,21 @@ export class KalshiService {
         const path = '/portfolio/positions';
         const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
 
-        const res = await fetch(host + path, {
-          method,
-          headers: {
-            'Content-Type': 'application/json',
-            'KALSHI-ACCESS-KEY': this.keyId,
-            'KALSHI-ACCESS-TIMESTAMP': timestamp,
-            'KALSHI-ACCESS-SIGNATURE': signature
-          }
-        });
+        const tPosStart = Date.now();
+        const res = await kalshiRateLimiter.execute(
+          () => fetch(host + path, {
+            method,
+            headers: {
+              'Content-Type': 'application/json',
+              'KALSHI-ACCESS-KEY': this.keyId,
+              'KALSHI-ACCESS-TIMESTAMP': timestamp,
+              'KALSHI-ACCESS-SIGNATURE': signature
+            }
+          }),
+          { path, method, priority: 'NORMAL' }
+        );
+        const tPosElapsed = Date.now() - tPosStart;
+        if (tPosElapsed > 0) latencyAdaptiveEngine.recordKalshiDataLatency(tPosElapsed);
 
         if (!res.ok) {
           const txt = await res.text();
@@ -468,15 +603,21 @@ export class KalshiService {
         const path = '/portfolio/orders?status=resting';
         const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
 
-        const res = await fetch(host + path, {
-          method,
-          headers: {
-            'Content-Type': 'application/json',
-            'KALSHI-ACCESS-KEY': this.keyId,
-            'KALSHI-ACCESS-TIMESTAMP': timestamp,
-            'KALSHI-ACCESS-SIGNATURE': signature
-          }
-        });
+        const tOrdStart = Date.now();
+        const res = await kalshiRateLimiter.execute(
+          () => fetch(host + path, {
+            method,
+            headers: {
+              'Content-Type': 'application/json',
+              'KALSHI-ACCESS-KEY': this.keyId,
+              'KALSHI-ACCESS-TIMESTAMP': timestamp,
+              'KALSHI-ACCESS-SIGNATURE': signature
+            }
+          }),
+          { path, method, priority: 'NORMAL' }
+        );
+        const tOrdElapsed = Date.now() - tOrdStart;
+        if (tOrdElapsed > 0) latencyAdaptiveEngine.recordKalshiDataLatency(tOrdElapsed);
 
         if (!res.ok) {
           const txt = await res.text();
@@ -497,8 +638,6 @@ export class KalshiService {
     return { success: false, error: lastError };
   }
 
-
-
   public async cancelOrder(orderId: string): Promise<{ success: boolean; error?: string }> {
     if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
 
@@ -507,15 +646,21 @@ export class KalshiService {
       const path = `/portfolio/orders/${orderId}`;
       const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
 
-      const res = await fetch(this.baseUrl + path, {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          'KALSHI-ACCESS-KEY': this.keyId,
-          'KALSHI-ACCESS-TIMESTAMP': timestamp,
-          'KALSHI-ACCESS-SIGNATURE': signature
-        }
-      });
+      const tCancelStart = Date.now();
+      const res = await kalshiRateLimiter.execute(
+        () => fetch(this.baseUrl + path, {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            'KALSHI-ACCESS-KEY': this.keyId,
+            'KALSHI-ACCESS-TIMESTAMP': timestamp,
+            'KALSHI-ACCESS-SIGNATURE': signature
+          }
+        }),
+        { path, method, priority: 'CRITICAL', isCancel: true }
+      );
+      const tCancelElapsed = Date.now() - tCancelStart;
+      if (tCancelElapsed > 0) latencyAdaptiveEngine.recordKalshiOrderLatency(tCancelElapsed);
 
       if (!res.ok) {
         const txt = await res.text();
@@ -566,61 +711,55 @@ export class KalshiService {
               side: action === 'buy' ? 'bid' : 'ask',
               count: orderCount.toString(),
               type: 'limit',
-              price: limitPrice.toFixed(4),
-              client_order_id: clientOrderId
+              price: limitPrice.toString(),
+              client_order_id: clientOrderId,
+              post_only: false
             };
           } else {
-            // Standard Kalshi Event Contract Limit Order
-            // Side is strictly 'yes' or 'no'
-            const normSide = side.toLowerCase() === 'no' ? 'no' : 'yes';
-            const normAction = action.toLowerCase() === 'sell' ? 'sell' : 'buy';
-
-            
-            let rawPrice = typeof price === 'number' && !isNaN(price) && price > 0 ? price : 0.50;
-            if (rawPrice < 0.01) rawPrice = 0.01;
-            if (rawPrice > 0.99) rawPrice = 0.99;
-
-            const priceInCents = Math.round(rawPrice * 100);
+            const yesPrice = typeof price === 'number' && !isNaN(price) && price > 0 
+              ? Math.min(99, Math.max(1, Math.round(price * 100))) 
+              : 50;
 
             payload = {
               ticker,
-              action: normAction,
-              side: normSide,
+              action,
               type: 'limit',
+              side,
               count: orderCount,
               client_order_id: clientOrderId,
-              time_in_force: 'good_till_canceled'
+              yes_price: yesPrice
             };
-
-            if (normSide === 'yes') {
-              payload.yes_price = priceInCents;
-            } else {
-              payload.no_price = priceInCents;
-            }
           }
 
           const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
 
-          const res = await fetch(host + path, {
-            method,
-            headers: {
-              'Content-Type': 'application/json',
-              'KALSHI-ACCESS-KEY': this.keyId,
-              'KALSHI-ACCESS-TIMESTAMP': timestamp,
-              'KALSHI-ACCESS-SIGNATURE': signature
-            },
-            body: JSON.stringify(payload)
-          });
+          const tOrdStart = Date.now();
+          const res = await kalshiRateLimiter.execute(
+            () => fetch(host + path, {
+              method,
+              headers: {
+                'Content-Type': 'application/json',
+                'KALSHI-ACCESS-KEY': this.keyId,
+                'KALSHI-ACCESS-TIMESTAMP': timestamp,
+                'KALSHI-ACCESS-SIGNATURE': signature
+              },
+              body: JSON.stringify(payload)
+            }),
+            { path, method, priority: 'HIGH', symbol: ticker }
+          );
+          const tOrdElapsed = Date.now() - tOrdStart;
+          if (tOrdElapsed > 0) latencyAdaptiveEngine.recordKalshiOrderLatency(tOrdElapsed);
 
           if (!res.ok) {
             const txt = await res.text();
             lastError = `HTTP ${res.status}: ${txt}`;
-            console.error(`[KALSHI ORDER ERROR on ${host}]`, lastError, 'Payload:', payload);
+            console.error(`[KALSHI ORDER ERROR on ${host}] HTTP ${res.status}:`, txt);
 
-            // Shard healing check
+            // Shard 2 Auto-Healer: If error is about insufficient balance/margin on the target shard, auto-fund from Shard 0 and retry once
             if (
               retryCount === 0 &&
-              (txt.includes('insufficient_shard_balance') || txt.includes('Exchange user not found') || txt.includes('insufficient_balance'))
+              isPerp &&
+              (txt.includes('insufficient') || txt.includes('balance') || txt.includes('margin') || txt.includes('funds') || txt.includes('exchange_index'))
             ) {
               console.log('[KALSHI SHARD HEALER] Insufficient balance on shard. Moving funds...');
               const fundRes = await this.ensureCryptoShardFunded(20);
@@ -654,7 +793,15 @@ export class KalshiService {
     try {
       const isPerp = ticker.toUpperCase().endsWith('PERP');
       const path = isPerp ? `/margin/markets/${ticker}/orderbook` : `/markets/${ticker}/orderbook`;
-      const res = await fetch(this.baseUrl + path, { method: 'GET' });
+      const tObStart = Date.now();
+      
+      const res = await kalshiRateLimiter.execute(
+        () => fetch(this.baseUrl + path, { method: 'GET' }),
+        { path, method: 'GET', priority: 'LOW', symbol: ticker }
+      );
+      
+      const tObElapsed = Date.now() - tObStart;
+      if (tObElapsed > 0) latencyAdaptiveEngine.recordKalshiDataLatency(tObElapsed);
       if (!res.ok) {
         const txt = await res.text();
         return { success: false, error: `HTTP ${res.status}: ${txt}` };

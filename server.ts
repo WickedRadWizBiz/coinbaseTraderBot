@@ -10,7 +10,7 @@ import { plasticityEngine } from "./plasticityEngine";
 import { computeSpotTAMetrics, isTradeAllowedBySpotTAAndRecovery, SpotTAMetrics } from "./spotTAEngine";
 import { unifiedDataHandler } from "./unifiedDataHandler";
 import { tradeDbManager, TradeEncoder } from "./tradeDatabaseManager";
-import { metaModelManager, EntryFeatures } from "./metaLearningEngine";
+import { metaModelManager, EntryFeatures, NeuralExitSignal } from "./metaLearningEngine";
 import { geminiStrategyEngine } from "./geminiStrategyEngine";
 import { globalMetricsTracker } from "./globalMetricsTracker";
 import { fundingRateTracker } from "./fundingRateTracker";
@@ -20,6 +20,8 @@ import { coinbaseService } from "./coinbaseService";
 import { kalshiService } from "./kalshiService";
 import { goalResetScheduler } from "./goalResetScheduler";
 import { latencyAdaptiveEngine } from "./latencyAdaptiveEngine";
+import { kalshiRateLimiter, RateLimitTier } from "./kalshiRateLimiter";
+import { backpressureQueue } from "./backpressureQueue";
 
 const app = express();
 app.use(express.json());
@@ -34,23 +36,23 @@ let settings = {
   trainingOnTheJob: false,
   overrideConfluence: true,
   winningsLock: 50,
-  allocCrypto15m: 50,
+  allocCrypto15m: 55,
   allocCrypto1h: 35,
-  allocSports: 15,
+  allocSports: 10,
   lossRecoveryMode: false,
   stopLossBase: -15,
   profitLockTrigger: 25,
   profitLockFloor: 5,
   instantProfitQueue: 20,
   kellyMultiplier: 3.0,
+  simulatedLatencyMs: 0,
   paperTrading: !Boolean(process.env.KALSHI_API_KEY && process.env.KALSHI_API_SECRET),
   botActive: true,
   adaptationMode: true,
   ENABLE_RAPID_SCALP_MODE: true,
   smartTrailingTP: true,
   lowFundsMode: false,
-  gauntletMode: false,
-  simulatedLatencyMs: 0
+  gauntletMode: false
 };
 
 let startingBankroll = 200;
@@ -78,8 +80,15 @@ let liveBankrollATH = 0;
 
 async function getEffectiveWorkingBalance(forceSync = false): Promise<number> {
   if (settings.paperTrading) {
-    paperBankrollATH = Math.max(paperBankrollATH, simulatedPaperBalance);
-    const reserve = paperBankrollATH * 0.10;
+    if ((settings as any).gauntletMode || startingBankroll <= 50) {
+      paperBankrollATH = Math.max(startingBankroll, simulatedPaperBalance);
+      let capitalInUse = 0;
+      activePositions.forEach(p => capitalInUse += (p.capitalPlacedUsd || (p.size * p.entryPrice)));
+      const uninvestedCash = simulatedPaperBalance - capitalInUse;
+      return Math.max(0, uninvestedCash);
+    }
+    paperBankrollATH = Math.max(startingBankroll, Math.max(paperBankrollATH, simulatedPaperBalance));
+    const reserve = Math.min(paperBankrollATH * 0.10, simulatedPaperBalance * 0.15);
     
     let capitalInUse = 0;
     activePositions.forEach(p => capitalInUse += (p.capitalPlacedUsd || (p.size * p.entryPrice)));
@@ -320,12 +329,23 @@ class PatternTradingBrain {
       if (data.patternBrain) {
         this.winningStrategies = data.patternBrain.winningStrategies || {};
         this.losingStrategies = data.patternBrain.losingStrategies || {};
-        this.tradeHistory = data.patternBrain.tradeHistory || [];
+        this.tradeHistory = (data.patternBrain.tradeHistory || []).filter((t: any) => {
+          if (!t) return false;
+          const p = Number(t.pnlPct ?? t.pnl_pct ?? 0);
+          return p >= -200 && p <= 200;
+        });
         this.invalidationReviews = data.patternBrain.invalidationReviews || [];
         this.extinctionList = data.patternBrain.extinctionList || {};
         this.featureStats = data.patternBrain.featureStats || {};
         this.geminiAmendments = data.patternBrain.geminiAmendments || [];
-        this.topTierAlphaSignatures = data.patternBrain.topTierAlphaSignatures || [];
+        this.topTierAlphaSignatures = (data.patternBrain.topTierAlphaSignatures || []).filter((s: any) => {
+          if (!s || !s.symbol) return false;
+          const p = Number(s.pnlPct ?? s.pnl_pct ?? 0);
+          if (p < -200 || p > 200) return false;
+          const r = String(s.reason || '');
+          if (r.includes('991') || r.includes('992') || r.includes('993') || r.includes('+99')) return false;
+          return true;
+        });
 
         // Sanitize stored strategy parameters to enforce TP >= |SL| + 0.5% (0.005) and Trailing Lock >= 0.5% (0.005)
         Object.values(this.winningStrategies).forEach((strat: any) => {
@@ -436,6 +456,39 @@ class PatternTradingBrain {
         console.error("[ERROR] Failed preparing pattern brain memory:", e);
       }
     }, 5000); // 5 seconds debounce
+  }
+
+  _saveMemoryImmediate() {
+    if (this._saveTimeout) {
+      clearTimeout(this._saveTimeout);
+      this._saveTimeout = null;
+    }
+    try {
+      const payload = JSON.stringify({
+        patternBrain: {
+          winningStrategies: this.winningStrategies,
+          losingStrategies: this.losingStrategies,
+          tradeHistory: this.tradeHistory,
+          invalidationReviews: this.invalidationReviews,
+          extinctionList: this.extinctionList,
+          featureStats: this.featureStats,
+          geminiAmendments: this.geminiAmendments,
+          topTierAlphaSignatures: this.topTierAlphaSignatures
+        },
+        settings,
+        startingBankroll,
+        paperBalance: simulatedPaperBalance,
+        cycleEarnedProfit,
+        vaultedProfits,
+        completedGoalCycles,
+        cumulativePaperProfit,
+        completedPaperIterations
+      });
+      fs.writeFileSync(this.memoryFile, payload, 'utf-8');
+      console.log("[LOG] Pattern Strategy Brain memory synchronously written to disk.");
+    } catch (e) {
+      console.error("[ERROR] Failed writing pattern brain memory immediate:", e);
+    }
   }
 
   extractActiveIndicatorKeys(spotTA?: any, indicators?: any): string[] {
@@ -698,7 +751,11 @@ class PatternTradingBrain {
     this.losingStrategies = {};
     this.tradeHistory = [];
     this.invalidationReviews = [];
-    this._saveMemory();
+    this.topTierAlphaSignatures = [];
+    this.geminiAmendments = [];
+    this.featureStats = {};
+    this.extinctionList = {};
+    this._saveMemoryImmediate();
   }
 
   getAdaptedParamsForPattern(patternType: string, fallbackParams: any = {}) {
@@ -807,7 +864,8 @@ class PatternTradingBrain {
     const isWin = pnlRatio > 0;
     const wasAnalysisCorrect = isWin;
     const didPriceValidateAnalysis = (pos.peakPnlRatio !== undefined && pos.peakPnlRatio > 0) || isWin;
-    const pnlPct = parseFloat((pnlRatio * 100).toFixed(2));
+    const rawPnlPct = parseFloat((pnlRatio * 100).toFixed(2));
+    const pnlPct = Math.max(-100, Math.min(200, isNaN(rawPnlPct) ? 0 : rawPnlPct));
 
     let smartTrailingEfficiency = 0;
     let smartTrailingFailed = false;
@@ -815,8 +873,12 @@ class PatternTradingBrain {
     if (pos.smartTrailing && pos.smartTrailing.isActive && pos.smartTrailing.peakProfitUsd > 0) {
        const lockedUsd = pos.smartTrailing.lockedProfitUsd;
        const peakUsd = pos.smartTrailing.peakProfitUsd;
-       const actualPnlUsd = pnlRatio * pos.size * (pos.entryPrice || 0.50);
-       smartTrailingEfficiency = actualPnlUsd / peakUsd;
+       const positionCapitalCost = (pos.capitalPlacedUsd && pos.capitalPlacedUsd > 0) 
+         ? pos.capitalPlacedUsd 
+         : (pos.isPerpetual ? 5.0 : (pos.size * (pos.entryPrice || 0.50)));
+       const perpLeverage = pos.isPerpetual ? (pos.leverage || 2.0) : 1.0;
+       const actualPnlUsd = pnlRatio * positionCapitalCost * perpLeverage;
+       smartTrailingEfficiency = peakUsd > 0 ? (actualPnlUsd / peakUsd) : 0;
        
        if (closeReason.includes('Smart Trailing')) {
            const lowerBound = lockedUsd * 0.90;
@@ -834,6 +896,12 @@ class PatternTradingBrain {
        this.smartTrailingStats[patternType].totalEfficiencySum += smartTrailingEfficiency;
     }
 
+    const positionCapitalCost = (pos.capitalPlacedUsd && pos.capitalPlacedUsd > 0) 
+      ? pos.capitalPlacedUsd 
+      : (pos.isPerpetual ? 5.0 : (pos.size * (pos.entryPrice || 0.50)));
+    const perpLeverage = pos.isPerpetual ? (pos.leverage || 2.0) : 1.0;
+    const computedPnlUsd = pnlRatio * positionCapitalCost * perpLeverage;
+
     const tradeReport = {
       id: pos.id || Date.now(),
       timestamp: new Date().toISOString(),
@@ -847,7 +915,7 @@ class PatternTradingBrain {
       wasAnalysisCorrect,
       didPriceValidateAnalysis,
       pnlPct,
-      pnlUsd: parseFloat((pnlRatio * pos.size * (pos.entryPrice || 0.50)).toFixed(2)),
+      pnlUsd: parseFloat(computedPnlUsd.toFixed(2)),
       closeReason,
       params: usedParams,
       indicators: indicatorsAtEntry,
@@ -876,7 +944,7 @@ class PatternTradingBrain {
       const bestBid = pos.entryPrice ? pos.entryPrice * 0.999 : 0.499;
       const bestAsk = pos.entryPrice ? pos.entryPrice * 1.001 : 0.501;
 
-      const latMsNN2 = (settings as any).simulatedLatencyMs || latencyAdaptiveEngine.getProfile().effectiveLatencyMs;
+      const latMsNN2 = latencyAdaptiveEngine.getProfile().kalshiOrderLatencyMs || latencyAdaptiveEngine.getProfile().effectiveLatencyMs;
       const onlineFeatures: EntryFeatures = pos.entryFeatures || {
         latency: latMsNN2 / 1000.0,
         smartTrailingActive: settings.smartTrailingTP ? 1 : 0,
@@ -976,8 +1044,8 @@ class PatternTradingBrain {
 
     // Save trade to SQLite TradeDatabaseManager with bitpacked indicators and JSON raw_metrics
     const activeIndicators = TradeEncoder.extractIndicatorsFromTrade(tradeReport);
-    const targetPrice = pos.entryPrice || 0.50;
-    const actualPrice = targetPrice * (1 + pnlRatio);
+    const targetPrice = Math.max(0.001, pos.entryPrice || 0.50);
+    const actualPrice = Math.max(0.0001, pos.exitPrice || (targetPrice * Math.max(0.0001, 1 + pnlRatio)));
 
     tradeDbManager.insertTrade(
       pos.symbol || pos.label || 'UNKNOWN',
@@ -1248,7 +1316,13 @@ class PatternTradingBrain {
     // for this micro-level strategy doctoring if it was manually triggered.
     // Automated hot-path time-outs will fall back to the mathematical heuristic.
     if (lossContext?.manualUserTrigger && apiKey && !isCoolingDown) {
-      const modelsToTry = ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
+      const modelsToTry = [
+        'gemini-flash-latest',
+        'gemini-3.8-flash',
+        'gemini-3.6-flash',
+        'gemini-3.1-flash-lite',
+        'gemini-3.1-pro-preview'
+      ];
       const ai = new GoogleGenAI({ apiKey });
 
       const prompt = `You are an elite quantitative trading strategy architect analyzing a high-frequency prediction market trading bot signal.
@@ -1515,6 +1589,8 @@ interface PaperPosition {
   params: any;
   reason: string;
   isPerpetual?: boolean;
+  leverage?: number;
+  previousExitLiquidity?: number;
   analysisMeta?: any;
   peakPnlRatio?: number;
   lastRandomTPCheck?: number;
@@ -1539,11 +1615,12 @@ interface PaperPosition {
 }
 
 let activePositions: PaperPosition[] = [];
+let isEvaluatingPositions = false;
 let executedOverrides = new Set<string>();
 let spotContexts: any = {};
 const contractSLEvalPeriodTimestamps: Record<string, number> = {};
 const orderbookImbalanceStreak: Record<string, { streak: number; lastDirection: 'BULLISH' | 'BEARISH' | 'NEUTRAL' }> = {};
-const lastWinTimestamps: Record<string, number> = {};
+let lastWinTimestamps: Record<string, number> = {};
 
 function getSpotPairFromSymbol(label: string, category?: string): string {
   const resolved = unifiedDataHandler.resolveCorrelatedSpotPair(label, label, category);
@@ -1932,7 +2009,7 @@ function evaluatePostSLContractCandidate(symbol: string, targetSide: string, sta
 function canOpenTrade(positions: PaperPosition[], category: string, label: string, isPerpetual: boolean = false) {
   if (positions.length >= 8) return false;
 
-  const isTennis = (cat: string, lbl: string) => cat === 'sports' && (lbl || '').includes('Tennis');
+  const isTennis = (cat: string, lbl: string) => cat === 'sports' || (lbl || '').toLowerCase().includes('tennis') || (lbl || '').toLowerCase().includes('atp');
   const isPrediction = (cat: string, isPerp: boolean) => cat === 'crypto' && !isPerp;
 
   const tennisCount = positions.filter(p => isTennis(p.category, p.label)).length;
@@ -1960,6 +2037,8 @@ function canOpenTrade(positions: PaperPosition[], category: string, label: strin
   const flexAvailable = 2 - flexUsed;
 
   if (isTennis(category, label)) {
+    // Exploring ATP tennis matches though limited: max 2 concurrent positions
+    if (tennisCount >= 2) return false;
     if (tennisCount < 1) return true;
     return flexAvailable > 0;
   } else if (isPerpetual) {
@@ -2040,20 +2119,45 @@ async function openPosition(
 
     const currentWorkingBalance = await getEffectiveWorkingBalance();
 
+    const isTennisContract = category === 'sports' || 
+      (label || '').toLowerCase().includes('tennis') || 
+      (label || '').toLowerCase().includes('atp') || 
+      (symbol || '').includes('ATP');
+
     let capitalInUse = 0;
     let perpCapitalInUse = 0;
+    let tennisCapitalInUse = 0;
     let predictionCapitalInUse = 0;
     activePositions.forEach(p => {
       const cap = p.capitalPlacedUsd || (p.size * p.entryPrice);
       capitalInUse += cap;
-      if (p.isPerpetual) perpCapitalInUse += cap;
-      else predictionCapitalInUse += cap;
+      if (p.isPerpetual) {
+        perpCapitalInUse += cap;
+      } else if (p.category === 'sports' || (p.label || '').toLowerCase().includes('tennis') || (p.label || '').toLowerCase().includes('atp') || (p.symbol || '').includes('ATP')) {
+        tennisCapitalInUse += cap;
+      } else {
+        predictionCapitalInUse += cap;
+      }
     });
 
     const totalWorkingBankroll = (settings.paperTrading ? simulatedPaperBalance : (realKalshiCashPool || currentWorkingBalance)) + capitalInUse;
     // Requirement: At least 50% of working capital must be preserved/allocated for price prediction contracts.
     const maxAllowedPerpCapital = totalWorkingBankroll * 0.50;
     const perpCapReserveThreshold = totalWorkingBankroll * 0.50; // At least 50% reserved for price prediction
+
+    // Requirement: Tennis sports contracts should only be able to access 10% of total available cash at any given time.
+    const maxAllowedTennisCapital = currentWorkingBalance * 0.10;
+
+    if (isTennisContract) {
+      const remainingTennisCapRoom = Math.max(0, maxAllowedTennisCapital - tennisCapitalInUse);
+      if (tennisCapitalInUse >= maxAllowedTennisCapital || remainingTennisCapRoom < 0.10) {
+        spotLogs.unshift({
+          id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+          message: `[TENNIS 10% CAPITAL LIMIT GUARD] Suppressed Tennis entry on ${symbol}. Active tennis capital in use ($${tennisCapitalInUse.toFixed(2)} of max $${maxAllowedTennisCapital.toFixed(2)}) has reached the 10% available cash limit ($${currentWorkingBalance.toFixed(2)} available cash).`
+        });
+        return;
+      }
+    }
 
     if (isPerpContract) {
       const activePerps = activePositions.filter(p => p.isPerpetual).length;
@@ -2193,7 +2297,7 @@ async function openPosition(
   const bestBid = ctx?.bids?.[0]?.price || (entryPrice ? entryPrice * 0.999 : 0.499);
   const bestAsk = ctx?.asks?.[0]?.price || (entryPrice ? entryPrice * 1.001 : 0.501);
 
-  const latMsNN = (settings as any).simulatedLatencyMs || latencyAdaptiveEngine.getProfile().effectiveLatencyMs;
+  const latMsNN = latencyAdaptiveEngine.getProfile().kalshiOrderLatencyMs || latencyAdaptiveEngine.getProfile().effectiveLatencyMs;
   let entryFeatures: EntryFeatures = {
     latency: latMsNN / 1000.0,
     smartTrailingActive: settings.smartTrailingTP ? 1 : 0,
@@ -2397,8 +2501,15 @@ async function openPosition(
     targetGoalDollars = Math.max(2.0, currentWorkingBalance * 0.25);
   }
 
-  const currentContractCost = Math.max(0.01, entryPrice || 0.50);
   const effectiveExpectedTP = Math.max(0.06, Math.min(0.30, expectedTP));
+  const perpLeverage = (spotContexts[symbol]?.leverage || 2.0);
+
+  // Contract unit cost:
+  // Binary: 0.01 to 0.99 USD
+  // Perpetual: margin collateral per micro-unit based on leverage
+  const currentContractCost = isPerpContract
+    ? Math.max(0.50, Math.min(entryPrice / perpLeverage, currentWorkingBalance))
+    : Math.max(0.01, Math.min(0.99, entryPrice || 0.50));
 
   // Capital required for a $10 win to reasonably happen:
   // Required Capital = $10.00 / effectiveExpectedTP
@@ -2407,7 +2518,7 @@ async function openPosition(
   let requiredCapitalUsd = Math.max(minCapForTenDollarWin, targetCapForGoal);
 
   // If caller already computed a size (e.g. from candidate analysis or rapidScalp), respect its capital requirement
-  if (size && size > 0) {
+  if (size && size > 0 && !isPerpContract) {
     const callerRequestedCap = size * currentContractCost;
     requiredCapitalUsd = Math.max(requiredCapitalUsd, callerRequestedCap);
   }
@@ -2434,23 +2545,21 @@ async function openPosition(
   requiredCapitalUsd = requiredCapitalUsd * userKelly;
 
   // Safe bankroll deployment:
-  // Note: Risk on the position is NOT the total capital deployed. The bot executes tight dynamic SL (-2.5% to -4%)
-  // and breakeven ratchets (+0.5%), meaning maximum loss on exit is typically only $2 to $4.
-  // Higher probability setups can safely deploy 65-80% of bankroll to hit the $10-$50 targets.
+  // Strictly bound deployment to available working balance
   const maxBankrollAlloc = Math.min(currentWorkingBalance, currentWorkingBalance * Math.max(0.65, estimatedWinProb * 1.10));
   
   let capitalToDeploy = Math.min(currentWorkingBalance, Math.max(minCapForTenDollarWin, Math.min(requiredCapitalUsd, maxBankrollAlloc)));
   
-  // If bankroll is less than minCapForTenDollarWin, deploy available balance (minus minor buffer) to give highest possible win chance
-  if (currentWorkingBalance < minCapForTenDollarWin && currentWorkingBalance >= currentContractCost) {
-    capitalToDeploy = Math.max(currentContractCost, currentWorkingBalance - 0.50);
+  // If bankroll is less than minCapForTenDollarWin, deploy available balance (minus minor buffer)
+  if (currentWorkingBalance < minCapForTenDollarWin && currentWorkingBalance >= (isPerpContract ? 1.0 : currentContractCost)) {
+    capitalToDeploy = Math.max(isPerpContract ? 1.0 : currentContractCost, currentWorkingBalance - 0.50);
   }
 
-  // If we cannot afford even 1 contract, veto
-  if (currentWorkingBalance < currentContractCost) {
+  // If we cannot afford even 1 contract or minimum margin, veto
+  if (currentWorkingBalance < (isPerpContract ? 1.0 : currentContractCost)) {
     spotLogs.unshift({
       id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-      message: `[INSUFFICIENT FUNDS VETO] Cannot deploy $${capitalToDeploy.toFixed(2)}. Working bankroll ($${currentWorkingBalance.toFixed(2)}) is lower than contract cost ($${currentContractCost.toFixed(2)}).`
+      message: `[INSUFFICIENT FUNDS VETO] Cannot deploy $${capitalToDeploy.toFixed(2)}. Working bankroll ($${currentWorkingBalance.toFixed(2)}) is lower than min requirement ($${(isPerpContract ? 1.0 : currentContractCost).toFixed(2)}).`
     });
     return;
   }
@@ -2465,26 +2574,41 @@ async function openPosition(
       Math.max(0, currentWorkingBalance - perpCapReserveThreshold),
       remainingPerpCapRoom
     );
-    if (maxPerpDeployable < currentContractCost) {
+    if (maxPerpDeployable < 1.0) {
       spotLogs.unshift({
         id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-        message: `[PERP CAPITAL RESERVE VETO] Suppressed Perpetual sizing on ${symbol}. Max deployable capital ($${maxPerpDeployable.toFixed(2)}) is less than contract cost ($${currentContractCost.toFixed(2)}) without breaching the 50% reserve for price predictions ($${perpCapReserveThreshold.toFixed(2)}).`
+        message: `[PERP CAPITAL RESERVE VETO] Suppressed Perpetual sizing on ${symbol}. Max deployable capital ($${maxPerpDeployable.toFixed(2)}) is less than $1.00 min margin without breaching the 50% reserve for price predictions ($${perpCapReserveThreshold.toFixed(2)}).`
       });
       return;
     }
     capitalToDeploy = Math.min(capitalToDeploy, maxPerpDeployable);
   }
 
-  let targetSize = Math.max(1, Math.floor(capitalToDeploy / currentContractCost));
+  // Tennis / Sports Capital Allocation Guard: Strictly clamp deployable capital to remaining 10% available cash capacity
+  if (isTennisContract) {
+    const remainingTennisCap = Math.max(0, maxAllowedTennisCapital - tennisCapitalInUse);
+    if (remainingTennisCap < currentContractCost) {
+      spotLogs.unshift({
+        id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+        message: `[TENNIS 10% CAPITAL LIMIT GUARD] Suppressed Tennis sizing on ${symbol}. Remaining 10% cash room ($${remainingTennisCap.toFixed(2)}) is less than contract cost ($${currentContractCost.toFixed(2)}).`
+      });
+      return;
+    }
+    capitalToDeploy = Math.min(capitalToDeploy, remainingTennisCap);
+  }
+
+  let targetSize = isPerpContract 
+    ? Math.max(0.0001, parseFloat(((capitalToDeploy * perpLeverage) / Math.max(0.0001, entryPrice)).toFixed(6)))
+    : Math.max(1, Math.floor(capitalToDeploy / currentContractCost));
 
   // Moderations must NEVER reduce size below what's required for a reasonable win
-  if (isCounterTrendYes || isCounterTrendNo) {
+  if (!isPerpContract && (isCounterTrendYes || isCounterTrendNo)) {
     targetSize = Math.max(1, Math.round(targetSize * 0.90));
   }
 
   // Post-win sizing cap
   const lastWinTimeForCap = lastWinTimestamps[symbol] || 0;
-  if (lastWinTimeForCap > 0 && (Date.now() - lastWinTimeForCap < 300000) && targetSize > 500) {
+  if (lastWinTimeForCap > 0 && (Date.now() - lastWinTimeForCap < 300000) && targetSize > 500 && !isPerpContract) {
     targetSize = Math.max(1, Math.min(targetSize, 500));
   }
 
@@ -2494,58 +2618,67 @@ async function openPosition(
     const b = Math.max(0.1, expectedTP);
     const p = Math.max(0.01, estimatedWinProb);
 
-    // Kelly = p - ((1 - p) / b)
     let kellyFrac = p - ((1 - p) / b);
     kellyFrac = kellyFrac * fractionalKellyMod;
 
-    // Fallback if kelly is negative or super tiny
     if (kellyFrac < 0.01) kellyFrac = 0.05;
-
-    // Strict bounding to ensure survival and to never allocate > 25% of bankroll on a single trade
     kellyFrac = Math.max(0.02, Math.min(0.25, kellyFrac));
 
-    // CRRA Utility function (logarithmic dampening as we approach $2000)
-    // When capital is small ($20), CRRA allows high relative leverage.
-    // When capital approaches $2000, risk aversion increases exponentially.
     const maxTarget = 2000.0;
     const currentEq = Math.max(20.0, currentWorkingBalance);
     const crraAversionFactor = Math.max(0.1, Math.log10(currentEq) / Math.log10(maxTarget));
-
-    // The larger the aversion factor (as Eq approaches 2000), the more the kelly fraction is compressed
     const crraAdjustedKelly = kellyFrac * Math.max(0.2, (1.0 - crraAversionFactor));
 
     let gauntletCostUsd = currentEq * crraAdjustedKelly;
     if (isPerpContract) gauntletCostUsd = Math.min(gauntletCostUsd, maxPerpDeployable);
+    if (isTennisContract) {
+      const remainingTennisCap = Math.max(0, maxAllowedTennisCapital - tennisCapitalInUse);
+      gauntletCostUsd = Math.min(gauntletCostUsd, remainingTennisCap);
+    }
 
-    targetSize = Math.max(1, Math.floor(gauntletCostUsd / currentContractCost));
+    if (isPerpContract) {
+      targetSize = Math.max(0.0001, parseFloat(((gauntletCostUsd * perpLeverage) / Math.max(0.0001, entryPrice)).toFixed(6)));
+      capitalToDeploy = gauntletCostUsd;
+    } else {
+      targetSize = Math.max(1, Math.floor(gauntletCostUsd / currentContractCost));
+      capitalToDeploy = targetSize * currentContractCost;
+    }
 
     spotLogs.unshift({
       id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-      message: `[GAUNTLET MODE CRRA SCALING] Eq: ${currentEq.toFixed(2)} | CRRA Aversion: ${crraAversionFactor.toFixed(2)} | Allocating ${(crraAdjustedKelly*100).toFixed(1)}% of bankroll (${gauntletCostUsd.toFixed(2)})`
+      message: `[GAUNTLET MODE CRRA SCALING] Eq: ${currentEq.toFixed(2)} | CRRA Aversion: ${crraAversionFactor.toFixed(2)} | Allocating ${(crraAdjustedKelly*100).toFixed(1)}% of bankroll ($${gauntletCostUsd.toFixed(2)})`
     });
   }
 
-  // Respect whichever is larger: caller size or probability-adjusted targetSize
-  // If perpetual, strictly cap size so positionCostUsd never exceeds maxPerpDeployable
+  let positionCostUsd = 0;
   if (isPerpContract) {
-    const remainingPerpCapRoom = Math.max(0, maxAllowedPerpCapital - perpCapitalInUse);
-    maxPerpDeployable = Math.min(
-      Math.max(0, currentWorkingBalance - perpCapReserveThreshold),
-      remainingPerpCapRoom
-    );
-    const maxPerpContracts = Math.max(1, Math.floor(maxPerpDeployable / currentContractCost));
-    size = Math.min(Math.max(size || 1, targetSize), maxPerpContracts);
+    positionCostUsd = Math.min(currentWorkingBalance, capitalToDeploy);
+    size = targetSize;
   } else {
-    size = Math.max(size || 1, targetSize);
+    let maxAffordableContracts = Math.floor(currentWorkingBalance / currentContractCost);
+    if (isTennisContract) {
+      const remainingTennisCap = Math.max(0, maxAllowedTennisCapital - tennisCapitalInUse);
+      const maxTennisContracts = Math.floor(remainingTennisCap / currentContractCost);
+      maxAffordableContracts = Math.min(maxAffordableContracts, maxTennisContracts);
+    }
+
+    if (maxAffordableContracts < 1) {
+      spotLogs.unshift({
+        id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+        message: `[INSUFFICIENT FUNDS VETO] Cannot afford 1 binary contract at $${currentContractCost.toFixed(2)} (${isTennisContract ? `10% Tennis available cash room: $${Math.max(0, maxAllowedTennisCapital - tennisCapitalInUse).toFixed(2)}` : `Working balance: $${currentWorkingBalance.toFixed(2)}`}).`
+      });
+      return;
+    }
+    size = Math.min(maxAffordableContracts, Math.max(1, targetSize));
+    positionCostUsd = size * currentContractCost;
   }
-  let positionCostUsd = size * currentContractCost;
+
   let projectedProfitAtTP = positionCostUsd * effectiveExpectedTP;
-  
   let targetDollarGoal = Math.max(settings.lowFundsMode ? 0.05 : 10.0, Number(projectedProfitAtTP.toFixed(2)));
 
   spotLogs.unshift({
     id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-    message: `[PROBABILITY-ADJUSTED SIZING] Win Prob: ${(estimatedWinProb * 100).toFixed(0)}% (Confluences: ${confCount}) | Capital: $${positionCostUsd.toFixed(2)} (${size} contracts @ $${currentContractCost.toFixed(2)}) | Min $10 Win Capital: $${minCapForTenDollarWin.toFixed(2)} | Projected Profit at TP: +$${projectedProfitAtTP.toFixed(2)} (Scaling to $50)`
+    message: `[PROBABILITY-ADJUSTED SIZING] Win Prob: ${(estimatedWinProb * 100).toFixed(0)}% (Confluences: ${confCount}) | Capital: $${positionCostUsd.toFixed(2)} (${isPerpContract ? `${size} perp units` : `${size} contracts @ $${currentContractCost.toFixed(2)}`}) | Min $10 Win Capital: $${minCapForTenDollarWin.toFixed(2)} | Projected Profit at TP: +$${projectedProfitAtTP.toFixed(2)} (Scaling to $50)`
   });
 
   spotLogs.unshift({
@@ -2587,31 +2720,19 @@ async function openPosition(
       ? (isPerpContract ? optimizedEntryPrice * (1 + modelProbabilityBoost) : Math.min(0.95, optimizedEntryPrice + modelProbabilityBoost))
       : (isPerpContract ? optimizedEntryPrice * (1 - modelProbabilityBoost) : Math.max(0.05, optimizedEntryPrice - modelProbabilityBoost));
 
-  // Inject Latency Simulation for Paper Trading
-  let finalEntryPrice = optimizedEntryPrice;
+  // Simulated Latency Delay for Realistic Paper Execution
   if (settings.paperTrading && (settings as any).simulatedLatencyMs > 0) {
-    const latMs = (settings as any).simulatedLatencyMs;
-    await new Promise(r => setTimeout(r, latMs));
-    // Fetch latest price from context after latency delay
-    const latestCtx = spotContexts[symbol];
-    if (latestCtx && latestCtx.currentPrice) {
-      if (isPerpContract) {
-         finalEntryPrice = side === 'YES' ? latestCtx.currentPrice : (1.0 - latestCtx.currentPrice);
-      } else {
-         finalEntryPrice = side === 'YES' ? latestCtx.currentPrice : (1.0 - latestCtx.currentPrice);
-      }
-    }
-
-    spotLogs.unshift({
-      id: logIdCounter++, time: new Date().toISOString(), type: 'WARN',
-      message: `[LATENCY SIMULATOR] Entry delayed by ${latMs}ms. Price slipped from ${optimizedEntryPrice.toFixed(4)} to ${finalEntryPrice.toFixed(4)}.`
-    });
+    const simLat = Number((settings as any).simulatedLatencyMs);
+    await new Promise(r => setTimeout(r, simLat));
   }
+
+  const finalEntryPrice = optimizedEntryPrice;
 
   const pos: PaperPosition = {
     category, entryTime: Date.now(), params, 
     id: ++logIdCounter, symbol, side, entryPrice: finalEntryPrice, size, isOverride, matchId, label, reason,
     isPerpetual: isPerpContract,
+    leverage: isPerpContract ? perpLeverage : 1.0,
     analysisMeta,
     expectedTP,
     modelFairValue,
@@ -2678,10 +2799,17 @@ let isInitializing = true;
 
 async function fetchPerpetualOrderBook(ticker: string) {
   try {
-    const res = await fetch(`https://api.elections.kalshi.com/trade-api/v2/margin/markets/${ticker}/orderbook`, {
-      signal: AbortSignal.timeout(3000),
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
+    const obUrl = `https://api.elections.kalshi.com/trade-api/v2/margin/markets/${ticker}/orderbook`;
+    const t0 = Date.now();
+    const res = await kalshiRateLimiter.execute(
+      () => fetch(obUrl, {
+        signal: AbortSignal.timeout(3000),
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      }),
+      { path: obUrl, method: 'GET', priority: 'LOW', symbol: ticker }
+    );
+    const elapsed = Date.now() - t0;
+    if (elapsed > 0) latencyAdaptiveEngine.recordKalshiDataLatency(elapsed);
     if (res.ok) {
       const data = await res.json();
       if (data.orderbook && (data.orderbook.bids || data.orderbook.asks)) {
@@ -2693,7 +2821,7 @@ async function fetchPerpetualOrderBook(ticker: string) {
       }
     }
   } catch (e) {
-    // Silent fail
+    // Graceful shed/fail on low-priority quote refresh
   }
   return {
     bids: [],
@@ -2701,62 +2829,11 @@ async function fetchPerpetualOrderBook(ticker: string) {
   };
 }
 
-async function discoverPerpetuals() {
-  try {
-    const data = await fetchJson('https://api.elections.kalshi.com/trade-api/v2/margin/markets');
-    const marginMarkets = (data.markets || []).filter((m: any) => (m.asset_class === 'Crypto' || m.ticker?.endsWith('PERP')) && m.status === 'active');
-    
-    // Ensure primary perpetual symbols are always available as candidates
-    const primaryPerpTickers = ['KXBTCPERP', 'KXETHPERP', 'KXSOLPERP', 'KXDOGEPERP', 'KXXRPPERP', 'KXHYPEPERP'];
-    const allPerpTickers = new Set([...marginMarkets.map((m: any) => m.ticker), ...primaryPerpTickers]);
-    const marginMarketsMap = new Map<string, any>(marginMarkets.map((m: any) => [m.ticker, m]));
-
-    for (const ticker of allPerpTickers) {
-      const m = marginMarketsMap.get(ticker);
-      const rawAsset = ticker.replace(/^KX/, '').replace(/PERP$/, '');
-      const label = `${rawAsset} Perp`;
-      const fallbackSpot = scalper.currentCandles[`${rawAsset}-USD`]?.close || (rawAsset === 'BTC' ? 88000 : rawAsset === 'ETH' ? 3200 : rawAsset === 'SOL' ? 180 : rawAsset === 'XRP' ? 2.3 : rawAsset === 'DOGE' ? 0.25 : 35);
-      const initialPrice = m ? (parseFloat(m.price) || (parseFloat(m.bid) + parseFloat(m.ask)) / 2 || fallbackSpot) : fallbackSpot;
-
-      const book = await fetchPerpetualOrderBook(ticker);
-      const bestBid = book.bids[0]?.price || (m ? parseFloat(m.bid) : initialPrice);
-      const bestAsk = book.asks[0]?.price || (m ? parseFloat(m.ask) : initialPrice);
-      const mid = (bestBid + bestAsk) / 2;
-
-      if (!spotContexts[ticker]) {
-        spotContexts[ticker] = {
-          currentPrice: mid,
-          bids: book.bids,
-          asks: book.asks,
-          volume: m ? parseFloat(m.volume_24h || m.volume || '0') : 50000,
-          label: label,
-          category: 'crypto',
-          seriesTicker: ticker,
-          matchId: ticker,
-          symbol: ticker,
-          isExpired: false,
-          isPerpetual: true,
-          contractSize: m ? parseFloat(m.contract_size || '1') : 1,
-          underlyingAsset: rawAsset,
-          tickSize: m ? parseFloat(m.tick_size || '0.0001') : 0.0001,
-          leverage: m?.leverage_estimate || 2.0
-        };
-        spotLogs.unshift({
-          id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
-          message: `[SCANNER] Attached active Kalshi Perpetual candidate ${ticker} (${label}) - Mid: $${mid.toFixed(4)}`
-        });
-      } else {
-        spotContexts[ticker].isPerpetual = true;
-        spotContexts[ticker].underlyingAsset = rawAsset;
-      }
-    }
-  } catch (e) {
-    console.error('[PERPETUAL DISCOVERY ERROR]', e);
-  }
-}
-
-async function fetchJson(url: string) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
+async function fetchJson(url: string, priority: 'NORMAL' | 'LOW' | 'HIGH' = 'NORMAL') {
+  const res = await kalshiRateLimiter.execute(
+    () => fetch(url, { signal: AbortSignal.timeout(5000) }),
+    { path: url, method: 'GET', priority }
+  );
   if (!res.ok) throw new Error(`Failed to fetch ${url}`);
   return await res.json();
 }
@@ -2841,7 +2918,150 @@ async function discoverMarkets() {
       }
     };
 
+    const discoverPerpetuals = async () => {
+      try {
+        const data = await fetchJson('https://api.elections.kalshi.com/trade-api/v2/margin/markets', 'LOW');
+        const perpMarkets = data.markets || [];
+        for (const m of perpMarkets) {
+          if (m.status !== 'active') continue;
+          const ticker = m.ticker;
+          const bid = parseFloat(m.bid) || parseFloat(m.price) || 0.50;
+          const ask = parseFloat(m.ask) || parseFloat(m.price) || (bid * 1.002);
+          const mid = (bid + ask) / 2;
+          const leverage = typeof m.leverage_estimate === 'number' ? m.leverage_estimate : 2.0;
+          const label = m.title ? `${m.title} Perp` : `${ticker.replace('KX', '').replace('PERP', '')} Perp`;
+
+          if (!spotContexts[ticker]) {
+            const obRes = await kalshiService.getOrderBook(ticker);
+            const bids = (obRes.success && obRes.bids && obRes.bids.length > 0) ? obRes.bids : [{ price: bid, size: 100 }];
+            const asks = (obRes.success && obRes.asks && obRes.asks.length > 0) ? obRes.asks : [{ price: ask, size: 100 }];
+
+            spotContexts[ticker] = {
+              currentPrice: mid,
+              bids,
+              asks,
+              volume: parseFloat(m.volume_24h) || 0,
+              label,
+              category: 'crypto',
+              seriesTicker: ticker,
+              matchId: ticker,
+              symbol: ticker,
+              isExpired: false,
+              isPerpetual: true,
+              leverage: leverage,
+              contractSize: parseFloat(m.contract_size) || 1.0
+            };
+            spotLogs.unshift({
+              id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
+              message: `[SCANNER] Attached active Kalshi Perpetual contract ${ticker} (${label}) - Mark: $${mid.toFixed(4)}`
+            });
+          } else {
+            spotContexts[ticker].currentPrice = mid;
+            spotContexts[ticker].leverage = leverage;
+            spotContexts[ticker].isPerpetual = true;
+          }
+        }
+      } catch (e) {
+        console.error("Perpetual discovery error", e);
+      }
+    };
+
+    const discoverTennisMarkets = async () => {
+      try {
+        const seriesToScan = ['KXATPMATCH', 'KXATPCHALLENGERMATCH', 'KXATPSETWINNER'];
+        const candidateTennisMarkets: any[] = [];
+
+        for (const seriesTicker of seriesToScan) {
+          try {
+            const data = await fetchJson(`https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=${seriesTicker}&status=open`, 'LOW');
+            const markets = data.markets || [];
+            for (const m of markets) {
+              if (m.status !== 'active' && m.status !== 'open') continue;
+              const bid = parseFloat(m.yes_bid_dollars) || 0;
+              const ask = parseFloat(m.yes_ask_dollars) || 1;
+              const spread = Math.abs(ask - bid);
+              // Only consider tradable contracts with valid liquidity and reasonable spread/price
+              if (spread <= 0.08 && bid >= 0.15 && ask <= 0.85) {
+                candidateTennisMarkets.push({
+                  ...m,
+                  bid,
+                  ask,
+                  spread,
+                  mid: (bid + ask) / 2,
+                  seriesTicker
+                });
+              }
+            }
+          } catch (e) {
+            // Ignore failure on single series
+          }
+        }
+
+        // Sort by lowest spread ascending, then proximity to 50c
+        candidateTennisMarkets.sort((a, b) => {
+          if (a.spread !== b.spread) return a.spread - b.spread;
+          return Math.abs(0.5 - a.mid) - Math.abs(0.5 - b.mid);
+        });
+
+        // Pick top 2-3 ATP Tennis markets to attach
+        const topTennis = candidateTennisMarkets.slice(0, 3);
+        const topTickers = new Set(topTennis.map(m => m.ticker));
+
+        // Clean up expired or replaced tennis markets not currently held in activePositions
+        for (const sym of Object.keys(spotContexts)) {
+          const ctx = spotContexts[sym];
+          if (ctx.category === 'sports' && (ctx.label?.includes('ATP') || ctx.label?.includes('Tennis'))) {
+            if (!topTickers.has(sym)) {
+              if (!activePositions.some(p => p.symbol === sym)) {
+                delete spotContexts[sym];
+              } else {
+                ctx.isExpired = true;
+              }
+            }
+          }
+        }
+
+        for (const m of topTennis) {
+          const ticker = m.ticker;
+          const initialPrice = m.mid || 0.50;
+          const label = `[ATP Tennis] ${m.title || ticker}`;
+
+          if (!spotContexts[ticker]) {
+            const obRes = await kalshiService.getOrderBook(ticker);
+            const book = (obRes.success && obRes.bids && obRes.bids.length > 0)
+              ? { bids: obRes.bids, asks: obRes.asks || [] }
+              : { bids: [{ price: m.bid, size: 50 }], asks: [{ price: m.ask, size: 50 }] };
+
+            spotContexts[ticker] = {
+              currentPrice: initialPrice,
+              bids: book.bids,
+              asks: book.asks,
+              volume: parseFloat(m.volume_24h) || 0,
+              label,
+              category: 'sports',
+              seriesTicker: m.seriesTicker,
+              matchId: m.event_ticker,
+              symbol: ticker,
+              isExpired: false,
+              closeTime: m.close_time
+            };
+            spotLogs.unshift({
+              id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
+              message: `[SCANNER] Attached active ATP Tennis contract ${ticker} (${label}) - Bid: $${m.bid.toFixed(2)} / Ask: $${m.ask.toFixed(2)}`
+            });
+          } else {
+            spotContexts[ticker].currentPrice = initialPrice;
+            spotContexts[ticker].isExpired = false;
+          }
+        }
+      } catch (e) {
+        console.error("Tennis discovery error", e);
+      }
+    };
+
     let promises = [
+      discoverPerpetuals(),
+      discoverTennisMarkets(),
       getBestOpenMarket('KXBTC15M', 'BTC 15m', 'crypto'),
       getBestOpenMarket('KXBTC', 'BTC Hourly', 'crypto'),
       getBestOpenMarket('KXETH15M', 'ETH 15m', 'crypto'),
@@ -2857,13 +3077,12 @@ async function discoverMarkets() {
     ];
 
     await Promise.all(promises);
-    await discoverPerpetuals();
 
     if (isInitializing && Object.keys(spotContexts).length > 0) {
       isInitializing = false;
       spotLogs.unshift({
         id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
-        message: `[INITIALIZATION COMPLETE] Market scanner attached ${Object.keys(spotContexts).length} active prediction and perpetual contracts. Automated trading loop ACTIVE.`
+        message: `[INITIALIZATION COMPLETE] Market scanner attached ${Object.keys(spotContexts).length} active prediction contracts from Kalshi exchange. Automated trading loop ACTIVE.`
       });
     }
   } catch (err) {
@@ -2963,6 +3182,8 @@ function evaluateCounterPositionViability(
   };
 }
 
+let lastTickEvalTime = 0;
+
 class RapidScalper {
   ws: any = null;
   candles: { [productId: string]: any[] } = {
@@ -3033,6 +3254,25 @@ class RapidScalper {
     c.close = price;
     c.high = Math.max(c.high, price);
     c.low = Math.min(c.low, price);
+
+    // Continuous Live Contract Telemetry & Neural Network Trigger
+    if (activePositions.length > 0) {
+      const asset = productId.split('-')[0];
+      for (const pos of activePositions) {
+        if (pos.symbol.includes(asset) || (pos.label && pos.label.includes(asset))) {
+          if (spotContexts[pos.symbol]) {
+            if (pos.isPerpetual || pos.symbol.endsWith('PERP')) {
+              spotContexts[pos.symbol].currentPrice = price;
+            }
+            spotContexts[pos.symbol].lastQuoteUpdateMs = now;
+          }
+        }
+      }
+      if (!isEvaluatingPositions && (now - lastTickEvalTime > 1000)) {
+        lastTickEvalTime = now;
+        evaluateActivePositions(true).catch(() => {});
+      }
+    }
 
     if (now - c.time > 15000) {
       if (!this.candles[productId]) this.candles[productId] = [];
@@ -3445,6 +3685,792 @@ function startEmergencyMonitor(pos: PaperPosition) {
   }, 10000);
 }
 
+function computeOrderbookExitDetails(pos: PaperPosition, ctx: any): any {
+  const isPerp = Boolean(pos.isPerpetual || ctx?.isPerpetual || pos.symbol.endsWith('PERP'));
+  const bids = ctx?.bids || [];
+  const asks = ctx?.asks || [];
+  
+  // Counterparty orders that will take the bot's order when exiting
+  let exitOrders: Array<{ price: number; size: number }> = [];
+  let opposingOrders: Array<{ price: number; size: number }> = [];
+  
+  if (isPerp) {
+    if (pos.side === 'YES') {
+      // Long: sell into Bids
+      exitOrders = bids;
+      opposingOrders = asks;
+    } else {
+      // Short: buy from Asks to cover
+      exitOrders = asks;
+      opposingOrders = bids;
+    }
+  } else {
+    if (pos.side === 'YES') {
+      // Holding YES -> sell into YES bids
+      exitOrders = bids;
+      opposingOrders = asks;
+    } else {
+      // Holding NO -> sell into NO bids (or match from inverted YES asks)
+      exitOrders = asks.map((a: any) => ({ price: Math.max(0.01, 1.0 - (a.price || 0.5)), size: a.size || 0 }));
+      opposingOrders = bids.map((b: any) => ({ price: Math.max(0.01, 1.0 - (b.price || 0.5)), size: b.size || 0 }));
+    }
+  }
+
+  const availableExitContracts = exitOrders.reduce((sum, o) => sum + (o.size || 0), 0);
+  const posSize = Math.max(1, pos.size || 1);
+  const exitFillCapacityRatio = availableExitContracts / posSize;
+  const topExitPrice = exitOrders[0]?.price || (isPerp ? (pos.entryPrice || 100) : (pos.entryPrice || 0.50));
+
+  // Walk the book for position size to compute expected execution VWAP
+  let remaining = posSize;
+  let weightedValueSum = 0;
+  for (const order of exitOrders) {
+    const fill = Math.min(remaining, order.size || 0);
+    weightedValueSum += fill * order.price;
+    remaining -= fill;
+    if (remaining <= 0) break;
+  }
+  if (remaining > 0) {
+    const penaltyFloorPrice = exitOrders[exitOrders.length - 1]?.price 
+      ? exitOrders[exitOrders.length - 1].price * 0.96 
+      : topExitPrice * 0.94;
+    weightedValueSum += remaining * penaltyFloorPrice;
+  }
+  const expectedExitVWAP = weightedValueSum / posSize;
+  const availableExitValueUsd = exitOrders.reduce((sum, o) => sum + ((o.size || 0) * (o.price || 0)), 0);
+  const orderbookSlippagePct = topExitPrice > 0 ? Math.max(0, (topExitPrice - expectedExitVWAP) / topExitPrice) : 0;
+
+  // Detect liquidity cliff: available contracts < 75% of position size or sharp book depletion
+  const isLiquidityCliff = exitFillCapacityRatio < 0.75 || (pos.previousExitLiquidity !== undefined && availableExitContracts < pos.previousExitLiquidity * 0.40);
+  pos.previousExitLiquidity = availableExitContracts;
+
+  let recommendedExecutionMode: 'MAKER_PASSIVE' | 'TAKER_AGGRESSIVE' | 'IMMEDIATE_CLIFF_DEFENSE' = 'TAKER_AGGRESSIVE';
+  if (isLiquidityCliff) {
+    recommendedExecutionMode = 'IMMEDIATE_CLIFF_DEFENSE';
+  } else if (exitFillCapacityRatio > 3.0 && orderbookSlippagePct < 0.005) {
+    recommendedExecutionMode = 'MAKER_PASSIVE';
+  }
+
+  return {
+    availableExitContracts,
+    availableExitValueUsd,
+    exitFillCapacityRatio,
+    topExitPrice,
+    expectedExitVWAP,
+    orderbookSlippagePct,
+    isLiquidityCliff,
+    recommendedExecutionMode
+  };
+}
+
+// =========================================================================
+// CONTINUOUS ACTIVE POSITION EVALUATION & NEURAL NETWORK REAL-TIME MONITOR
+// =========================================================================
+async function evaluateActivePositions(isFastContinuousTick: boolean = false): Promise<void> {
+  if (!settings.botActive || activePositions.length === 0) {
+    latencyAdaptiveEngine.setIsNeuralExitMonitorActive(false);
+    return;
+  }
+
+  if (isEvaluatingPositions) return;
+  isEvaluatingPositions = true;
+
+  try {
+    latencyAdaptiveEngine.setIsNeuralExitMonitorActive(true);
+
+    // Fast orderbook refresh for active contracts (throttled to >2000ms to respect rate limits)
+    if (isFastContinuousTick) {
+      for (const p of activePositions) {
+        const c = spotContexts[p.symbol];
+        if (c && (!c.lastFastBookFetch || Date.now() - c.lastFastBookFetch > 2000)) {
+          c.lastFastBookFetch = Date.now();
+          const isPerp = Boolean(p.isPerpetual || c.isPerpetual || p.symbol.endsWith('PERP'));
+          const obUrl = isPerp
+            ? `https://api.elections.kalshi.com/trade-api/v2/margin/markets/${p.symbol}/orderbook`
+            : `https://api.elections.kalshi.com/trade-api/v2/markets/${p.symbol}/orderbook`;
+          fetch(obUrl, { signal: AbortSignal.timeout(1200) }).then(async (res) => {
+            if (res.ok) {
+              const data = await res.json();
+              if (isPerp && data.orderbook) {
+                c.bids = (data.orderbook.bids || []).map((b: any) => ({ price: parseFloat(b[0]), size: parseFloat(b[1]) })).sort((a: any, b: any) => b.price - a.price);
+                c.asks = (data.orderbook.asks || []).map((a: any) => ({ price: parseFloat(a[0]), size: parseFloat(a[1]) })).sort((a: any, b: any) => a.price - b.price);
+              } else if (data.orderbook_fp && (data.orderbook_fp.yes_dollars || data.orderbook_fp.no_dollars)) {
+                c.bids = data.orderbook_fp.yes_dollars ? data.orderbook_fp.yes_dollars.map((b: any) => ({ price: parseFloat(b[0]), size: parseFloat(b[1]) })).sort((a: any, b: any) => b.price - a.price) : [];
+                c.asks = data.orderbook_fp.no_dollars ? data.orderbook_fp.no_dollars.map((a: any) => ({ price: 1.0 - parseFloat(a[0]), size: parseFloat(a[1]) })).sort((a: any, b: any) => a.price - b.price) : [];
+              }
+            }
+          }).catch(() => {});
+        }
+      }
+    }
+
+    // Evaluate active positions for TP / SL
+    for (let i = activePositions.length - 1; i >= 0; i--) {
+      let pos = activePositions[i];
+      let ctx = spotContexts[pos.symbol];
+      let timeInContractSec = (Date.now() - pos.entryTime) / 1000;
+
+      let shouldClose = false;
+      let closeReason = "";
+      let pnlRatio = 0;
+      let currentSidePrice = pos.entryPrice || 0.50;
+
+      let liveFeatures: EntryFeatures = {
+        ...(pos.entryFeatures || {}),
+        hourOfDay: new Date().getUTCHours(),
+        dayOfWeek: new Date().getUTCDay()
+      };
+
+      if (ctx) {
+        let price = ctx.currentPrice;
+        const isPerp = Boolean(pos.isPerpetual || ctx.isPerpetual || pos.symbol.endsWith('PERP'));
+        if (isPerp) {
+          currentSidePrice = price;
+          const safeEntry = Math.max(0.01, pos.entryPrice || 1.0);
+          pnlRatio = pos.side === 'YES'
+            ? (price - safeEntry) / safeEntry
+            : (safeEntry - price) / safeEntry;
+          pnlRatio = Math.max(-1.0, Math.min(5.0, pnlRatio));
+        } else {
+          currentSidePrice = pos.side === 'YES' ? price : (1.0 - price);
+          currentSidePrice = Math.max(0.01, Math.min(0.99, currentSidePrice));
+          const safeEntry = Math.max(0.01, Math.min(0.99, pos.entryPrice || 0.50));
+          const maxGainRatio = (1.0 - safeEntry) / safeEntry;
+          pnlRatio = (currentSidePrice - safeEntry) / safeEntry;
+          pnlRatio = Math.max(-1.0, Math.min(maxGainRatio, pnlRatio));
+        }
+        pos.pnlRatio = pnlRatio;
+
+        if (pos.peakPnlRatio === undefined) pos.peakPnlRatio = pnlRatio;
+        if (pnlRatio > pos.peakPnlRatio) pos.peakPnlRatio = pnlRatio;
+
+        if (pos.maxAdverseExcursion === undefined) pos.maxAdverseExcursion = pnlRatio;
+        if (pnlRatio < pos.maxAdverseExcursion) pos.maxAdverseExcursion = pnlRatio;
+
+        const now = Date.now();
+        if (pos.lastTickTime === undefined) pos.lastTickTime = now;
+        const tickDeltaSec = (now - pos.lastTickTime) / 1000;
+        pos.lastTickTime = now;
+        
+        if (pos.timeInProfitSec === undefined) pos.timeInProfitSec = 0;
+        if (pos.timeInLossSec === undefined) pos.timeInLossSec = 0;
+
+        if (pnlRatio > 0) pos.timeInProfitSec += tickDeltaSec;
+        else if (pnlRatio < 0) pos.timeInLossSec += tickDeltaSec;
+
+        // --- Orderbook, Volume, RSI & Momentum Fetch ---
+        const bids = ctx.bids || [];
+        const asks = ctx.asks || [];
+        const bidVol = bids.reduce((acc: number, b: any) => acc + (b.size || 0), 0) || 1;
+        const askVol = asks.reduce((acc: number, a: any) => acc + (a.size || 0), 0) || 1;
+        const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(pos.symbol, ctx.label, pos.category || 'crypto', scalper.candles);
+        const rsi = spotTA.rsi || 50;
+
+        let currentImbalanceTowards = pos.side === 'YES' ? bidVol / askVol : askVol / bidVol;
+        if (!pos.analysisMeta) pos.analysisMeta = {};
+        if (pos.analysisMeta.entryOFI === undefined) {
+           pos.analysisMeta.entryOFI = ctx.OFI || 0;
+        }
+          
+        const currentOFI = ctx.OFI || 0;
+        const ofiDelta = currentOFI - pos.analysisMeta.entryOFI;
+        const averageDepth = Math.max(1, (bidVol + askVol) / 2);
+        const priceImpact = ofiDelta / averageDepth;
+        const directionalImpact = pos.side === 'YES' ? priceImpact : -priceImpact;
+        const volSurge = spotTA.volumeSurgeRatio || 1.0;
+        const isConsolidating = (spotTA.adx && spotTA.adx < 20) || spotTA.isChoppy || volSurge < 0.90;
+
+        // Ornstein-Uhlenbeck First-Exit-Time boundary calculation
+        const vol = ctx.micropriceVolatility || 0.005;
+        // Stop-loss boundary dynamically expands with microstructure noise to prevent premature exit
+        const fetStopLoss = Math.max(-0.03, Math.min(-0.005, -(vol * 2.5))); // 2.5 std devs of noise
+        
+        // --- DYNAMIC EMERGENCY STOP LOSS (Decaying over time based on indicator score) ---
+        // EXCLUSIVELY USING CONTRACT ORDER BOOK DATA, NO SPOT DATA.
+        let slScore = 0;
+        slScore += Math.min(0.4, vol * 20); // Volatility adds up to 0.4
+        slScore += Math.min(0.3, Math.max(0, (currentImbalanceTowards - 1.0) * 0.3)); // Imbalance adds up to 0.3
+        slScore += Math.min(0.3, Math.max(0, directionalImpact * 2.5)); // OFI flow adds up to 0.3
+        
+        // slScore is 0.0 to 1.0. Wider SL maxes at -0.07 (7%) based on the indicator score.
+        const maxBeginningSL = -0.03 - (0.04 * slScore); 
+        
+        // Decay over 90 seconds. At t=0, SL is wider. At t=90, SL tightens down to fetStopLoss.
+        const decayDurationSec = 90;
+        const timeDecayFactor = Math.max(0, 1.0 - (timeInContractSec / decayDurationSec));
+        const dynamicInitialSL = fetStopLoss + (maxBeginningSL - fetStopLoss) * timeDecayFactor;
+        
+        let dynamicSL = pos.params ? Math.max(-0.10, pos.params.dynamicSL || dynamicInitialSL) : dynamicInitialSL;
+        dynamicSL = Math.min(dynamicSL, fetStopLoss); // Ensure it doesn't get tighter than the FET bound
+
+        let slMag = Math.abs(dynamicSL);
+        // Base trend-following Take Profit starts at 15%, scales with params if provided
+        let dynamicTP = pos.params ? Math.max(0.15, pos.params.dynamicTP) : 0.15;
+        // Widen the trailing stop so the trade can breathe during minor pullbacks
+        let dynamicTrail = pos.params ? Math.max(0.05, pos.params.dynamicTrail || 0.05) : 0.05;
+
+        const escalated = plasticityEngine.getEscalatedContractParams(
+          pos.symbol,
+          pos.side,
+          dynamicTP,
+          dynamicTrail,
+          pos.category
+        );
+        dynamicTP = Math.max(dynamicTP, escalated.dynamicTP);
+        dynamicTrail = Math.max(dynamicTrail, escalated.dynamicTrail);
+
+        if (isCapitalPreservationActive) {
+          // First-Exit-Time boundary under strict mode
+          dynamicSL = Math.max(-0.02, Math.min(-0.005, fetStopLoss));
+          // Keep TP at least 10% even during capital preservation mode so we get larger wins
+          dynamicTP = Math.max(0.10, Math.min(0.20, pos.params?.dynamicTP || 0.15));
+        }
+
+        // --- Dynamic Target Price Adjustments (Strictly Orderbook/OFI Based) ---
+        // 1. Trending Market Flow (Stretch TP) when OFI and Orderbook align
+        let flowMultiplier = 1.0;
+        const isOFIStrong = directionalImpact > 0.05 || currentImbalanceTowards >= 1.25;
+
+        if (isOFIStrong) {
+          flowMultiplier = Math.min(2.25, 1.0 + (directionalImpact * 1.5));
+        } 
+        // 2. Consolidating / Ranging Market (Compress TP) during opposing OFI flow
+        else if (directionalImpact < -0.05) {
+          flowMultiplier = Math.max(0.70, 0.70 + (directionalImpact * 0.5));
+        }
+
+        // Apply OFI Flow Multiplier to dynamicTP (Zero Latency - Synchronous Math)
+        dynamicTP = Math.max(0.10, Math.min(2.50, dynamicTP * flowMultiplier)); // Hard floor at 10%
+
+        // Continuous L2-Norm Inventory Risk Adjustment
+        let netInventory = 0;
+        activePositions.forEach(p => {
+            netInventory += (p.side === 'YES' ? p.size : -p.size);
+        });
+        const inventoryRiskAversion = 0.15; // Low risk aversion
+        const variance = Math.pow(ctx.micropriceVolatility || 0.005, 2);
+        const continuousPenalty = inventoryRiskAversion * Math.pow(netInventory, 2) * variance;
+
+        if ((pos.side === 'YES' && netInventory > 0) || (pos.side === 'NO' && netInventory < 0)) {
+            dynamicTP = Math.max(0.10, dynamicTP - continuousPenalty);
+        }
+
+        const slippageBuffer = 0.015 / pos.entryPrice; 
+        
+        // Hedge Fund Tactic: Breakeven Ratchet SL (Step-Up SL)
+        const breakevenThreshold = 0.04 + slippageBuffer;
+        let ratchetSL = dynamicSL; // Default to standard SL
+        if (pos.peakPnlRatio >= breakevenThreshold) {
+            ratchetSL = 0.005; // Breakeven + 0.5% for fees
+        }
+        
+        // The trailing stop tracks the peak PNL minus the trail distance
+        const trailingLock = Math.max(ratchetSL, pos.peakPnlRatio - dynamicTrail);
+
+        // TP must always be at least 2% above the trailing lock
+        if (dynamicTP < trailingLock + 0.02) {
+            dynamicTP = Math.max(0.10, trailingLock + 0.02);
+        }
+
+        dynamicTP = Math.max(0.10, dynamicTP);
+
+        // Compute full orderbook exit microstructure and available resting depth
+        const orderbookExit = computeOrderbookExitDetails(pos, ctx);
+
+        // =========================================================================
+        // CONTINUOUS NEURAL NETWORK MONITORING (<100ms TICK) & LIGHTNING-FAST EXIT
+        // =========================================================================
+        liveFeatures = {
+          ...(pos.entryFeatures || {}),
+          orderbookImbalance: currentImbalanceTowards,
+          volumeSurgeRatio: volSurge,
+          orderFlowImbalance: directionalImpact,
+          vpin: Math.max(0.01, Math.min(0.99, vol * 20)),
+          micropriceDrift: directionalImpact * vol,
+          vwapDistancePct: spotTA.vwapDistancePct ?? 0,
+          bidAskSpread: (asks[0] && bids[0]) ? Math.abs(asks[0].price - bids[0].price) : 0.01,
+          confluenceCount: pos.confluenceCountAtEntry || 3,
+          hourOfDay: new Date().getUTCHours(),
+          dayOfWeek: new Date().getUTCDay(),
+          availableExitContracts: orderbookExit.availableExitContracts,
+          availableExitValueUsd: orderbookExit.availableExitValueUsd,
+          exitFillCapacityRatio: orderbookExit.exitFillCapacityRatio,
+          topExitPrice: orderbookExit.topExitPrice,
+          expectedExitVWAP: orderbookExit.expectedExitVWAP,
+          orderbookSlippagePct: orderbookExit.orderbookSlippagePct,
+          isLiquidityCliff: orderbookExit.isLiquidityCliff ? 1 : 0,
+          recommendedExecutionMode: orderbookExit.recommendedExecutionMode
+        };
+
+        latencyAdaptiveEngine.recordNeuralExitCheck();
+        const patternType = pos.analysisMeta?.patternType || 'GENERAL_ANALYSIS';
+        const nnExitSignal: NeuralExitSignal = metaModelManager.evaluateExitSignal(
+          patternType,
+          liveFeatures,
+          pnlRatio,
+          timeInContractSec,
+          pos.side,
+          pos.peakPnlRatio || pnlRatio,
+          orderbookExit
+        );
+
+        if (nnExitSignal.shouldSell && !isCapitalPreservationActive) {
+          shouldClose = true;
+          closeReason = nnExitSignal.reason;
+        }
+
+        // [F] Reinforcement Learning (PPO) Dynamic Exits
+        let ppoAction: 'HOLD' | 'EXIT' | 'TRAIL_SL' = 'HOLD';
+        const timeInTradeMin = timeInContractSec / 60.0;
+        let ppoRewardScore = pnlRatio * 100.0; 
+        
+        // Order book toxicity penalty/reward
+        if (pos.side === 'YES') {
+          ppoRewardScore += ((bidVol - askVol) / Math.max(1, askVol)) * 1.5;
+        } else {
+          ppoRewardScore += ((askVol - bidVol) / Math.max(1, bidVol)) * 1.5;
+        }
+        
+        // Time decay penalty (theta decay equivalent)
+        ppoRewardScore -= (timeInTradeMin * 1.2);
+
+        if (ppoRewardScore > 8.0 && pnlRatio > 0.02) {
+           ppoAction = 'TRAIL_SL';
+        } else if (ppoRewardScore < -6.0 && pnlRatio < -0.015) {
+           ppoAction = 'EXIT';
+        }
+
+        if (ppoAction === 'EXIT' && !isCapitalPreservationActive && !shouldClose) {
+            shouldClose = true;
+            closeReason = `[PPO AGENT EXIT] Toxic flow detected. Terminated position dynamically to minimize loss (${(pnlRatio*100).toFixed(2)}%)`;
+        } else if (ppoAction === 'TRAIL_SL') {
+           dynamicTrail = Math.min(0.04, dynamicTrail * 0.8); 
+           dynamicTP = Math.max(dynamicTP, pnlRatio + 0.15);
+        }
+
+        // Dynamic Trailing Profit Expansion on Spike Wins (+15% profit momentum spikes)
+        const isMomentumSpike = pos.peakPnlRatio >= 0.15;
+        if (isMomentumSpike) {
+          dynamicTP = Math.max(dynamicTP, pos.peakPnlRatio + 0.50);
+        }
+
+        // [SMART TRAILING TAKE PROFIT ENGINE]
+        const smartTrailRes = SmartTrailingEngine.evaluate({
+          pnlRatio,
+          peakPnlRatio: pos.peakPnlRatio || pnlRatio,
+          entryPrice: pos.entryPrice || 0.50,
+          size: pos.size || 10,
+          side: pos.side,
+          currentMarketPrice: currentSidePrice,
+          baseDynamicTP: dynamicTP,
+          currentState: pos.smartTrailing,
+          minDollarTarget: 5.0,
+          maxDollarTarget: 50.0,
+          isPerpetual: pos.isPerpetual,
+          latencyAgilityFactor: latencyAdaptiveEngine.getProfile().trailingStopAgilityFactor,
+          spotDataMetrics: {
+            directionalImpact,
+            volSurge,
+            rsi,
+            isConsolidating
+          }
+        });
+
+        pos.smartTrailing = smartTrailRes.state;
+
+        if (smartTrailRes.isInitialActivation) {
+          spotLogs.unshift({
+            id: logIdCounter++, time: new Date().toISOString(), type: 'PROFIT',
+            message: `[SMART TRAILING TP ACTIVATED] ${pos.symbol} (${pos.side}): Reached $5 target zone (+${(pnlRatio * 100).toFixed(1)}% / +$${smartTrailRes.state.currentProfitUsd.toFixed(2)})! Trailing Stop engaged at +${(smartTrailRes.state.trailingFloorRatio * 100).toFixed(1)}% ($${smartTrailRes.state.lockedProfitUsd.toFixed(2)} guaranteed locked). Gains cannot be lost as position scales towards $10-$50.`
+          });
+        } else if (smartTrailRes.newTierReached) {
+          spotLogs.unshift({
+            id: logIdCounter++, time: new Date().toISOString(), type: 'PROFIT',
+            message: `[SMART TRAILING TIER UPGRADE] ${pos.symbol} (${pos.side}): Advanced to Tier ${smartTrailRes.state.tier} (${smartTrailRes.state.tierLabel})! Trailing SL ratcheted up to +${(smartTrailRes.state.trailingFloorRatio * 100).toFixed(1)}% ($${smartTrailRes.state.lockedProfitUsd.toFixed(2)} secured). Dynamic Target: +${(smartTrailRes.state.dynamicTargetRatio * 100).toFixed(1)}% ($${smartTrailRes.state.targetDollarGoal.toFixed(0)} Goal).`
+          });
+        }
+
+        // Exit Evaluation: Time-to-Expiry Cutoff
+        const timeToExpiryMs = ctx.closeTime ? (new Date(ctx.closeTime).getTime() - Date.now()) : Infinity;
+        const isImminentExpiry = timeToExpiryMs < 60 * 1000;
+        
+        // Genuine exit price evaluation
+        const finalExitPrice = currentSidePrice;
+
+        // Trade Model Discrepancy Convergence Check
+        const hasConvergedWithFairValue = pos.modelFairValue !== undefined && 
+            ((pos.side === 'YES' && currentSidePrice >= pos.modelFairValue) || 
+             (pos.side === 'NO' && currentSidePrice <= pos.modelFairValue));
+
+        if (!shouldClose) {
+          if (smartTrailRes.shouldClose) {
+            shouldClose = true;
+            closeReason = smartTrailRes.closeReason || `Smart Trailing TP (+${(pnlRatio * 100).toFixed(1)}%)`;
+          } else if (smartTrailRes.state.isActive) {
+            if (isImminentExpiry && pnlRatio > 0.02) {
+              shouldClose = true;
+              closeReason = `Imminent Expiry Lock-In (<60s to close | Secured +$${smartTrailRes.state.currentProfitUsd.toFixed(2)})`;
+            }
+          } else if (isImminentExpiry && pnlRatio > 0.01) { 
+            shouldClose = true;
+            closeReason = `Imminent Expiry Settlement Lock (<60s to close)`;
+          } else if (hasConvergedWithFairValue && pnlRatio >= 0.10) { 
+            shouldClose = true;
+            closeReason = `Model Fair Value Convergence Triggered (+${(pnlRatio * 100).toFixed(1)}%)`;
+          } else {
+            const isGracePeriodActive = timeInContractSec < 45;
+            const effectiveSL = Math.max(dynamicSL, ratchetSL);
+
+            if (pnlRatio <= effectiveSL) {
+              shouldClose = true;
+              closeReason = effectiveSL === ratchetSL
+                ? `Breakeven Ratchet SL (Locked at +0.5%)`
+                : isGracePeriodActive
+                  ? `Emergency SL (${(effectiveSL * 100).toFixed(1)}% breached during 45s Grace Period)`
+                  : isCapitalPreservationActive
+                    ? `Capital Preservation SL (${(dynamicSL * 100).toFixed(1)}%)`
+                    : `Volatility-Adjusted SL (${(dynamicSL * 100).toFixed(1)}%)`;
+            } else if (ctx.isExpired) {
+              shouldClose = true;
+              closeReason = `Market Expiration / Contract Settlement`;
+            }
+          }
+        }
+      } else {
+        // Handle orphaned / unlisted position where ctx was detached
+        if (timeInContractSec >= 60) {
+          shouldClose = true;
+          pnlRatio = pos.peakPnlRatio || 0;
+          closeReason = `Orphaned Contract Expiration Auto-Settlement (${Math.round(timeInContractSec)}s elapsed)`;
+        }
+      }
+
+      if (shouldClose) {
+        const positionCapitalCost = (pos.capitalPlacedUsd && pos.capitalPlacedUsd > 0)
+          ? pos.capitalPlacedUsd
+          : (pos.isPerpetual ? 5.0 : Math.min(pos.size * (pos.entryPrice || 0.50), 2000.0));
+        
+        // FACTOR IN SLIPPAGE AND FEES
+        const averageSpreadAndFeeFriction = 0.02;
+        let effectiveExitRatio = pnlRatio;
+        if (closeReason.includes('Smart Trailing Stop Triggered') && pos.smartTrailing?.trailingFloorRatio) {
+          effectiveExitRatio = Math.max(pos.smartTrailing.trailingFloorRatio, pnlRatio);
+        } else if (closeReason.includes('Breakeven Ratchet SL')) {
+          effectiveExitRatio = Math.max(0.005, pnlRatio);
+        }
+        const adjustedPnlRatio = effectiveExitRatio - averageSpreadAndFeeFriction;
+        
+        const leverage = pos.isPerpetual ? (pos.leverage || 2.0) : 1.0;
+        let pnlUsd = adjustedPnlRatio * positionCapitalCost * leverage;
+        
+        // Realistic hard bounds to prevent balance runaway/inflation
+        if (pnlUsd < -positionCapitalCost) {
+          pnlUsd = -positionCapitalCost;
+        }
+        if (!pos.isPerpetual) {
+          const maxBinaryWin = pos.size * (1.0 - (pos.entryPrice || 0.50));
+          pnlUsd = Math.min(maxBinaryWin, pnlUsd);
+        } else {
+          pnlUsd = Math.min(positionCapitalCost * 10.0, pnlUsd);
+        }
+        
+        simulatedPaperBalance = Math.max(0, simulatedPaperBalance + pnlUsd);
+        cycleEarnedProfit += pnlUsd;
+
+        // Severe Drawdown Protocol
+        const patternType = pos.analysisMeta?.patternType || 'GENERAL_ANALYSIS';
+        if (settings.paperTrading && startingBankroll > 0) {
+            if (simulatedPaperBalance <= startingBankroll * 0.50 && simulatedPaperBalance > startingBankroll * 0.25) {
+                if (!hasTriggered50PercentDrawdown) {
+                    hasTriggered50PercentDrawdown = true;
+                    const lossAmount = startingBankroll - simulatedPaperBalance;
+                    spotLogs.unshift({
+                        id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+                        message: `[SEVERE DRAWDOWN] Lost 50% of starting capital (Down ${lossAmount.toFixed(2)}). Registering severe drawdown failure for ${patternType} with Meta-Learning Engine.`
+                    });
+                    metaModelManager.recordSevereDrawdown(patternType);
+                    metaModelManager.recordSevereDrawdown('GLOBAL');
+                }
+            } else if (simulatedPaperBalance > startingBankroll * 0.50) {
+                hasTriggered50PercentDrawdown = false;
+            }
+        }
+
+        // Drawdown Blowout Protocol
+        if (settings.paperTrading && startingBankroll > 0 && simulatedPaperBalance <= startingBankroll * 0.25) {
+          const lossAmount = startingBankroll - simulatedPaperBalance;
+          spotLogs.unshift({
+            id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+            message: `[BLOWOUT DETECTED] Lost 75% of starting capital (Down ${lossAmount.toFixed(2)}). Restarting funds, wiping P/L, closing all positions. Registering failure for ${patternType}.`
+          });
+          
+          metaModelManager.recordBlowoutFailure(patternType);
+          metaModelManager.recordBlowoutFailure('GLOBAL');
+          
+          simulatedPaperBalance = (settings as any).gauntletMode ? 20.0 : startingBankroll;
+          cycleEarnedProfit = 0;
+          vaultedProfits = 0;
+          completedGoalCycles = 0;
+          sessionPocketedProfit = 0;
+          isStrict3ConfluenceTriggeredInSession = false;
+          hasTriggered50PercentDrawdown = false;
+          activePositions = activePositions.filter(p => !settings.paperTrading);
+          
+          break;
+        }
+
+        // Track Net Session Profit
+        sessionPocketedProfit = Math.max(0, sessionPocketedProfit + pnlUsd);
+        macroCycleProfit += pnlUsd;
+        if (macroCycleProfit >= 100) {
+           const elapsedHours = (Date.now() - macroCycleStartTime) / (1000 * 60 * 60);
+           spotLogs.unshift({
+              id: logIdCounter++, time: new Date().toISOString(), type: 'PROFIT',
+              message: `[MACRO GOAL ACHIEVED] Earned $100 profit in ${elapsedHours.toFixed(2)} hours! Velocity Grade: A+ (Target was <= 12 hours). NN Primary Goal satisfied. Resetting macro cycle.`
+           });
+           macroCycleStartTime = Date.now();
+           macroCycleProfit = 0;
+        } else if (macroCycleProfit < -200) {
+           macroCycleStartTime = Date.now();
+           macroCycleProfit = 0;
+        }
+
+        marketTestingEngine.recordTradeResult(pnlUsd);
+
+        // Record toward the goal
+        goalResetScheduler.recordTrade(pnlUsd, (currProfit, target, isTraining) => {
+          if (isTraining) {
+            const status = goalResetScheduler.getStatus();
+            const untouched = status.training_on_the_job?.untouched_vault_balance || 0;
+            const isFull = status.training_on_the_job?.is_untouched_vault_full;
+            if (!isFull) {
+              spotLogs.unshift({
+                id: logIdCounter++,
+                time: new Date().toISOString(),
+                type: 'PROFIT',
+                message: `🛡️ [TRAINING ON THE JOB] Initial Vaulting Active: Set aside +$${currProfit.toFixed(2)} toward the $200 Untouched Reserve Vault ($${untouched.toFixed(2)} / $200.00). Confluence Override active.`
+              });
+            } else {
+              spotLogs.unshift({
+                id: logIdCounter++,
+                time: new Date().toISOString(),
+                type: 'PROFIT',
+                message: `⏳ [TRAINING ON THE JOB] Goal ($${target.toFixed(2)}) Reached! Profit ($${currProfit.toFixed(2)}) + next 5 mins gains are accumulating in Temporary Vault and will enter working capital in 5m. Confluence Override active.`
+              });
+            }
+          } else {
+            spotLogs.unshift({
+              id: logIdCounter++,
+              time: new Date().toISOString(),
+              type: 'PROFIT',
+              message: `[GOAL TARGET ACHIEVED] Reached $${currProfit.toFixed(2)} toward the $${target.toFixed(2)} goal for this session! Goal secured until next reset (Midnight EST / 9:00 AM EST).`
+            });
+          }
+        });
+
+        if (pnlUsd > 0) {
+          lastWinTimestamps[pos.symbol] = Date.now();
+          const currentSession = getGlobalMarketSession();
+          const totalPocketed = Math.max(sessionPocketedProfit, vaultedProfits + Math.max(0, cycleEarnedProfit));
+
+          if (!isStrict3ConfluenceTriggeredInSession && totalPocketed >= 100) {
+            isStrict3ConfluenceTriggeredInSession = true;
+            spotLogs.unshift({
+              id: logIdCounter++, time: new Date().toISOString(), type: 'PROFIT',
+              message: `[STRICT 3-CONFLUENCE MODE ACTIVATED] $100+ net profit milestone reached ($${totalPocketed.toFixed(2)} net profit)! Enforcing strict 3-confluence strategy to minimize losses until 35m after ${currentSession.nextSessionName} (${currentSession.nextSessionTransitionStr}).`
+            });
+          }
+        }
+
+        // Micro-Profit Dynamic Ratchet Vaulting
+        if (cycleEarnedProfit >= 3.00) {
+          const ratchetVaultAmt = Math.round((cycleEarnedProfit * 0.50) * 100) / 100;
+          if (ratchetVaultAmt > 0) {
+            vaultedProfits += ratchetVaultAmt;
+            completedGoalCycles += 1;
+            cycleEarnedProfit -= ratchetVaultAmt;
+            simulatedPaperBalance -= ratchetVaultAmt;
+
+            spotLogs.unshift({
+              id: logIdCounter++, time: new Date().toISOString(), type: 'PROFIT',
+              message: `[MICRO-PROFIT RATCHET VAULT] Auto-vaulted 50% of earned profit ($${ratchetVaultAmt.toFixed(2)}) into untouchable reserve! Total Vault: $${vaultedProfits.toFixed(2)} across ${completedGoalCycles} completed micro-cycles.`
+            });
+          }
+        }
+
+        // Auto-Vault profits into Untouchable Reserve
+        const currentSession = getGlobalMarketSession();
+        const totalPocketed = Math.max(sessionPocketedProfit, vaultedProfits + Math.max(0, cycleEarnedProfit));
+        const isAcceleratedVaultMode = totalPocketed >= 100 || vaultedProfits >= 100;
+        const vaultThreshold = isAcceleratedVaultMode ? 20 : 50;
+
+        while (cycleEarnedProfit >= vaultThreshold) {
+          const vaultAmount = vaultThreshold;
+          vaultedProfits += vaultAmount;
+          completedGoalCycles += 1;
+          cycleEarnedProfit -= vaultAmount;
+          simulatedPaperBalance -= vaultAmount;
+
+          const modeLabel = isAcceleratedVaultMode
+            ? `ACCELERATED $20 VAULT MODE ($100+ Profit Milestone)`
+            : `STANDARD $50 VAULT MODE`;
+
+          spotLogs.unshift({
+            id: logIdCounter++, time: new Date().toISOString(), type: 'PROFIT',
+            message: `[UNTOUCHABLE VAULT - ${modeLabel}] Locked $${vaultAmount.toFixed(2)} into untouchable vault! Total Vault: $${vaultedProfits.toFixed(2)} across ${completedGoalCycles} completed cycles (Active until 35m after ${currentSession.nextSessionName} at ${currentSession.nextSessionTransitionStr}).`
+          });
+        }
+
+        tradingBrain.recordStrategyOutcome(pos, adjustedPnlRatio, closeReason);
+        if (recoveryProtocol) {
+          recoveryProtocol.processTradeOutcome(
+            pos.symbol, pos.side, pnlUsd, adjustedPnlRatio * 100, positionCapitalCost,
+            Math.round((Date.now() - pos.entryTime) / 1000), closeReason, pos.category,
+            pos.analysisMeta?.patternType || 'GENERAL_ANALYSIS', pos.analysisMeta?.spotTA
+          );
+        }
+
+        // =========================================================================
+        // CONTINUOUS NEURAL NETWORK ONLINE WEIGHT UPDATE & REAL-TIME LEARNING
+        // =========================================================================
+        const wasNeuralSell = closeReason.includes('NEURAL NETWORK LIGHTNING SELL');
+        const isWin = adjustedPnlRatio > 0;
+        metaModelManager.recordExitOutcome(
+          patternType,
+          liveFeatures,
+          adjustedPnlRatio,
+          wasNeuralSell,
+          isWin
+        );
+
+        spotLogs.unshift({
+          id: logIdCounter++,
+          time: new Date().toISOString(),
+          type: isWin ? 'PROFIT' : 'ANALYZE',
+          message: `[NEURAL NETWORK ONLINE LEARNING] Real-time exit feedback recorded for ${pos.symbol} (${wasNeuralSell ? 'NN Lightning Sell' : closeReason}) | Net PnL: ${adjustedPnlRatio >= 0 ? '+' : ''}${(adjustedPnlRatio * 100).toFixed(1)}% ($${pnlUsd.toFixed(2)}). Online neural weights updated.`
+        });
+
+        const isStopLossClose = closeReason.includes('Stop Loss') || closeReason.includes('SL');
+        const wasAlreadyReversed = Boolean(pos.analysisMeta?.isReversalFlip);
+
+        spotLogs.unshift({
+          id: logIdCounter++, time: new Date().toISOString(), type: pnlRatio > 0 ? 'PROFIT' : 'TRADE',
+          message: `[POS CLOSED] ${pos.symbol} (${pos.side}) hit ${closeReason}. PnL: ${pnlUsd > 0 ? '+' : ''}$${pnlUsd.toFixed(2)}`
+        });
+
+        // Dispatch live order to Kalshi to close real position when paperTrading is disabled
+        if (!settings.paperTrading) {
+          const isPerp = Boolean(pos.isPerpetual || pos.symbol.endsWith('PERP'));
+          const exitPrice = isPerp ? currentSidePrice : (pos.side === 'YES' ? currentSidePrice : (1.0 - currentSidePrice));
+          const closeAction = isPerp ? (pos.side === 'YES' ? 'sell' : 'buy') : 'sell';
+          kalshiService.placeOrder(pos.symbol, closeAction, pos.side.toLowerCase() as 'yes' | 'no', pos.size, exitPrice).then(res => {
+            if (res.success) {
+              spotLogs.unshift({
+                id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
+                message: `[LIVE KALSHI CLOSE] Real position ${pos.symbol} (${closeAction.toUpperCase()} ${pos.size} contracts @ ${exitPrice.toFixed(2)}) executed successfully.`
+              });
+            } else {
+              spotLogs.unshift({
+                id: logIdCounter++, time: new Date().toISOString(), type: 'WARN',
+                message: `[LIVE KALSHI CLOSE FAILED] Real order close failed for ${pos.symbol}: ${res.error}. Will retry on next heartbeat.`
+              });
+            }
+          });
+        }
+
+        activePositions.splice(i, 1);
+
+        if (closeReason.includes('Emergency SL')) {
+           spotLogs.unshift({
+              id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+              message: `[EMERGENCY MONITOR INITIATED] AI deployed to monitor ${pos.symbol} in 10s increments for the next 60 seconds.`
+           });
+           startEmergencyMonitor(pos);
+        }
+
+        // Immediate Momentum Reversal Check on Stop Loss
+        if (isStopLossClose && !wasAlreadyReversed && ctx && !ctx.isExpired) {
+          const oppositeSide: 'YES' | 'NO' = pos.side === 'YES' ? 'NO' : 'YES';
+          const oppositeEntryPrice = oppositeSide === 'YES' ? ctx.currentPrice : (1.0 - ctx.currentPrice);
+
+          const spotPair = getSpotPairFromSymbol(pos.label, pos.category);
+          const pairCandles = scalper.candles[spotPair] || [];
+
+          const viability = evaluateCounterPositionViability(pos, ctx, oppositeSide, oppositeEntryPrice, pairCandles);
+
+          if (viability.isViable) {
+            spotLogs.unshift({
+              id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
+              message: `[STOP-LOSS REVERSAL APPROVED] ${pos.symbol} (${pos.side} -> ${oppositeSide}) | Volatility Index: ${viability.volatilityIndex}x, Velocity: ${viability.velocityPctPerMin}%/min, Viability Score: ${viability.score} >= 0.85. Executing counter-position!`
+            });
+
+            openPosition(
+              pos.symbol,
+              oppositeSide,
+              oppositeEntryPrice,
+              pos.size,
+              true,
+              pos.matchId,
+              pos.label,
+              pos.category,
+              `Stop Loss Volatility Reversal (Flipped from ${pos.side} | Viability Score: ${viability.score})`,
+              {
+                patternType: 'MOMENTUM_REVERSAL_FLIP',
+                isReversalFlip: true,
+                spotTA: computeSpotTAMetrics(spotPair, pairCandles),
+                viabilityMeta: viability
+              }
+            );
+          } else {
+            spotLogs.unshift({
+              id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+              message: `[STOP-LOSS REVERSAL SUPPRESSED] Skipped counter-position on ${pos.symbol}: ${viability.reason}`
+            });
+          }
+        }
+
+        // Post-Stop Loss Candidate Re-Evaluation Schedule
+        if (isStopLossClose) {
+          const contractKey = `${pos.symbol}:${pos.side}`;
+          const now = Date.now();
+          const FIVE_MINUTES_MS = 5 * 60 * 1000;
+          const lastEvalTime = contractSLEvalPeriodTimestamps[contractKey] || 0;
+
+          if (now - lastEvalTime < FIVE_MINUTES_MS) {
+            const elapsedSec = Math.round((now - lastEvalTime) / 1000);
+            const remainSec = Math.round((FIVE_MINUTES_MS - (now - lastEvalTime)) / 1000);
+            spotLogs.unshift({
+              id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+              message: `[POST-SL RE-EVALUATION LIMITED] ${contractKey}: Post-SL evaluation period throttled (${elapsedSec}s elapsed since last, ${remainSec}s remaining). Limit: 1 period per 5 mins.`
+            });
+          } else {
+            contractSLEvalPeriodTimestamps[contractKey] = now;
+            spotLogs.unshift({
+              id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+              message: `[POST-SL RE-EVALUATION INITIATED] ${contractKey}: Initiated candidate re-evaluation period (Stage 1: 5s, Stage 2: 1m). Limit: 1 period per 5 mins.`
+            });
+
+            setTimeout(() => {
+              evaluatePostSLContractCandidate(pos.symbol, pos.side, '5s post-SL', pos.category);
+            }, 5000);
+
+            setTimeout(() => {
+              evaluatePostSLContractCandidate(pos.symbol, pos.side, '1m post-SL', pos.category);
+            }, 60000);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[EVALUATE ACTIVE POSITIONS ERROR]", err);
+  } finally {
+    isEvaluatingPositions = false;
+    if (activePositions.length === 0) {
+      latencyAdaptiveEngine.setIsNeuralExitMonitorActive(false);
+    }
+  }
+}
+
 let lastSuccessfulLoopTime = Date.now();
 
 // Background trading loop
@@ -3578,8 +4604,19 @@ setInterval(async () => {
         ? `https://api.elections.kalshi.com/trade-api/v2/margin/markets/${symbol}/orderbook`
         : `https://api.elections.kalshi.com/trade-api/v2/markets/${symbol}/orderbook`;
 
-      const response = await fetch(obUrl, { signal: AbortSignal.timeout(3000) });
+      const t0 = Date.now();
+      const response = await backpressureQueue.enqueue(
+        () => fetch(obUrl, { signal: AbortSignal.timeout(3000) }),
+        { type: 'ORDERBOOK_POLL', priority: 'LOW', symbol, dropOnSaturation: true }
+      );
+      const elapsed = Date.now() - t0;
+      if (elapsed > 0) latencyAdaptiveEngine.recordKalshiDataLatency(elapsed);
 
+      if (response.status === 429) {
+        backpressureQueue.tripCircuitBreaker(symbol);
+        console.warn(`[KALSHI API] Rate limit hit for ${symbol}. Tripping Circuit Breaker.`);
+        return;
+      }
       if (response.ok) {
         const data = await response.json();
         let bids: any[] = [];
@@ -4284,627 +5321,8 @@ setInterval(async () => {
 
   if (!settings.botActive) return;
 
-  // Evaluate active positions for TP / SL
-  for (let i = activePositions.length - 1; i >= 0; i--) {
-    let pos = activePositions[i];
-    let ctx = spotContexts[pos.symbol];
-    let timeInContractSec = (Date.now() - pos.entryTime) / 1000;
-
-    let shouldClose = false;
-    let closeReason = "";
-    let pnlRatio = 0;
-    let currentSidePrice = pos.entryPrice || 0.50;
-
-    if (ctx) {
-      let price = ctx.currentPrice;
-      const isPerp = Boolean(pos.isPerpetual || ctx.isPerpetual || pos.symbol.endsWith('PERP'));
-      if (isPerp) {
-        currentSidePrice = price;
-        pnlRatio = pos.side === 'YES'
-          ? (price - pos.entryPrice) / pos.entryPrice
-          : (pos.entryPrice - price) / pos.entryPrice;
-      } else {
-        currentSidePrice = pos.side === 'YES' ? price : (1.0 - price);
-        pnlRatio = (currentSidePrice - pos.entryPrice) / pos.entryPrice;
-      }
-      pos.pnlRatio = pnlRatio;
-
-      if (pos.peakPnlRatio === undefined) pos.peakPnlRatio = pnlRatio;
-      if (pnlRatio > pos.peakPnlRatio) pos.peakPnlRatio = pnlRatio;
-
-      if (pos.maxAdverseExcursion === undefined) pos.maxAdverseExcursion = pnlRatio;
-      if (pnlRatio < pos.maxAdverseExcursion) pos.maxAdverseExcursion = pnlRatio;
-
-      const now = Date.now();
-      if (pos.lastTickTime === undefined) pos.lastTickTime = now;
-      const tickDeltaSec = (now - pos.lastTickTime) / 1000;
-      pos.lastTickTime = now;
-      
-      if (pos.timeInProfitSec === undefined) pos.timeInProfitSec = 0;
-      if (pos.timeInLossSec === undefined) pos.timeInLossSec = 0;
-
-      if (pnlRatio > 0) pos.timeInProfitSec += tickDeltaSec;
-      else if (pnlRatio < 0) pos.timeInLossSec += tickDeltaSec;
-
-      // --- Orderbook, Volume, RSI & Momentum Fetch ---
-      const bids = ctx.bids || [];
-      const asks = ctx.asks || [];
-      const bidVol = bids.reduce((acc: number, b: any) => acc + (b.size || 0), 0) || 1;
-      const askVol = asks.reduce((acc: number, a: any) => acc + (a.size || 0), 0) || 1;
-      const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(pos.symbol, ctx.label, pos.category || 'crypto', scalper.candles);
-      const rsi = spotTA.rsi || 50;
-
-      let currentImbalanceTowards = pos.side === 'YES' ? bidVol / askVol : askVol / bidVol;
-      if (!pos.analysisMeta) pos.analysisMeta = {};
-      if (pos.analysisMeta.entryOFI === undefined) {
-         pos.analysisMeta.entryOFI = ctx.OFI || 0;
-      }
-        
-      const currentOFI = ctx.OFI || 0;
-      const ofiDelta = currentOFI - pos.analysisMeta.entryOFI;
-      const averageDepth = Math.max(1, (bidVol + askVol) / 2);
-      const priceImpact = ofiDelta / averageDepth;
-      const directionalImpact = pos.side === 'YES' ? priceImpact : -priceImpact;
-      const volSurge = spotTA.volumeSurgeRatio || 1.0;
-      const isConsolidating = (spotTA.adx && spotTA.adx < 20) || spotTA.isChoppy || volSurge < 0.90;
-
-      // Ornstein-Uhlenbeck First-Exit-Time boundary calculation
-      const vol = ctx.micropriceVolatility || 0.005;
-      // Stop-loss boundary dynamically expands with microstructure noise to prevent premature exit
-      const fetStopLoss = Math.max(-0.03, Math.min(-0.005, -(vol * 2.5))); // 2.5 std devs of noise
-      
-      // --- DYNAMIC EMERGENCY STOP LOSS (Decaying over time based on indicator score) ---
-      // EXCLUSIVELY USING CONTRACT ORDER BOOK DATA, NO SPOT DATA.
-      let slScore = 0;
-      slScore += Math.min(0.4, vol * 20); // Volatility adds up to 0.4
-      slScore += Math.min(0.3, Math.max(0, (currentImbalanceTowards - 1.0) * 0.3)); // Imbalance adds up to 0.3
-      slScore += Math.min(0.3, Math.max(0, directionalImpact * 2.5)); // OFI flow adds up to 0.3
-      
-      // slScore is 0.0 to 1.0. Wider SL maxes at -0.07 (7%) based on the indicator score.
-      const maxBeginningSL = -0.03 - (0.04 * slScore); 
-      
-      // Decay over 90 seconds. At t=0, SL is wider. At t=90, SL tightens down to fetStopLoss.
-      const decayDurationSec = 90;
-      const timeDecayFactor = Math.max(0, 1.0 - (timeInContractSec / decayDurationSec));
-      const dynamicInitialSL = fetStopLoss + (maxBeginningSL - fetStopLoss) * timeDecayFactor;
-      
-      let dynamicSL = pos.params ? Math.max(-0.10, pos.params.dynamicSL || dynamicInitialSL) : dynamicInitialSL;
-      dynamicSL = Math.min(dynamicSL, fetStopLoss); // Ensure it doesn't get tighter than the FET bound
-
-      let slMag = Math.abs(dynamicSL);
-      // Base trend-following Take Profit starts at 15%, scales with params if provided
-      let dynamicTP = pos.params ? Math.max(0.15, pos.params.dynamicTP) : 0.15;
-      // Widen the trailing stop so the trade can breathe during minor pullbacks
-      let dynamicTrail = pos.params ? Math.max(0.05, pos.params.dynamicTrail || 0.05) : 0.05;
-
-      const escalated = plasticityEngine.getEscalatedContractParams(
-        pos.symbol,
-        pos.side,
-        dynamicTP,
-        dynamicTrail,
-        pos.category
-      );
-      dynamicTP = Math.max(dynamicTP, escalated.dynamicTP);
-      dynamicTrail = Math.max(dynamicTrail, escalated.dynamicTrail);
-
-      if (isCapitalPreservationActive) {
-        // First-Exit-Time boundary under strict mode
-        dynamicSL = Math.max(-0.02, Math.min(-0.005, fetStopLoss));
-        // Keep TP at least 10% even during capital preservation mode so we get larger wins
-        dynamicTP = Math.max(0.10, Math.min(0.20, pos.params?.dynamicTP || 0.15));
-      }
-
-      // --- Dynamic Target Price Adjustments (Strictly Orderbook/OFI Based) ---
-      // OFI-Driven Take-Profit Scaling Rule:
-      // 1. Trending Market Flow (Stretch TP) when OFI and Orderbook align
-      let flowMultiplier = 1.0;
-      const isOFIStrong = directionalImpact > 0.05 || currentImbalanceTowards >= 1.25;
-
-      if (isOFIStrong) {
-        // High momentum trend: Stretch TP targets up to 2.25x to capture strong run-ups
-        flowMultiplier = Math.min(2.25, 1.0 + (directionalImpact * 1.5));
-      } 
-      // 2. Consolidating / Ranging Market (Compress TP) during opposing OFI flow
-      else if (directionalImpact < -0.05) {
-        flowMultiplier = Math.max(0.70, 0.70 + (directionalImpact * 0.5));
-      }
-
-      // Apply OFI Flow Multiplier to dynamicTP (Zero Latency - Synchronous Math)
-      dynamicTP = Math.max(0.10, Math.min(2.50, dynamicTP * flowMultiplier)); // Hard floor at 10%
-
-      // Continuous L2-Norm Inventory Risk Adjustment
-      let netInventory = 0;
-      activePositions.forEach(p => {
-          netInventory += (p.side === 'YES' ? p.size : -p.size);
-      });
-      const inventoryRiskAversion = 0.15; // Low risk aversion
-      const variance = Math.pow(ctx.micropriceVolatility || 0.005, 2);
-      const continuousPenalty = inventoryRiskAversion * Math.pow(netInventory, 2) * variance;
-
-      if ((pos.side === 'YES' && netInventory > 0) || (pos.side === 'NO' && netInventory < 0)) {
-          dynamicTP = Math.max(0.10, dynamicTP - continuousPenalty);
-      }
-
-      const slippageBuffer = 0.015 / pos.entryPrice; 
-      
-      // Hedge Fund Tactic: Breakeven Ratchet SL (Step-Up SL)
-      // Once a trade achieves a solid profit buffer (e.g., 4% + slippage), we instantly step the stop-loss up 
-      // to Breakeven + Fees (0.5%), completely eliminating downside risk on the trade. We never let a winning trade go red.
-      const breakevenThreshold = 0.04 + slippageBuffer;
-      let ratchetSL = dynamicSL; // Default to standard SL
-      if (pos.peakPnlRatio >= breakevenThreshold) {
-          ratchetSL = 0.005; // Breakeven + 0.5% for fees
-      }
-      
-      // The trailing stop tracks the peak PNL minus the trail distance. 
-      // This allows the trade to trend freely.
-      const trailingLock = Math.max(ratchetSL, pos.peakPnlRatio - dynamicTrail);
-
-      // TP must always be at least 2% above the trailing lock
-      if (dynamicTP < trailingLock + 0.02) {
-          dynamicTP = Math.max(0.10, trailingLock + 0.02);
-      }
-
-      dynamicTP = Math.max(0.10, dynamicTP);
-      // --- End Dynamic Adjustments ---
-
-      // [F] Reinforcement Learning (PPO) Dynamic Exits
-      // Replace static Stop-Loss/Take-Profit heuristics with continuous PPO agent state evaluation
-      let ppoAction: 'HOLD' | 'EXIT' | 'TRAIL_SL' = 'HOLD';
-      const timeInTradeMin = timeInContractSec / 60.0;
-      let ppoRewardScore = pnlRatio * 100.0; 
-      
-      // Order book toxicity penalty/reward
-      if (pos.side === 'YES') {
-        ppoRewardScore += ((bidVol - askVol) / Math.max(1, askVol)) * 1.5;
-      } else {
-        ppoRewardScore += ((askVol - bidVol) / Math.max(1, bidVol)) * 1.5;
-      }
-      
-      // Time decay penalty (theta decay equivalent)
-      ppoRewardScore -= (timeInTradeMin * 1.2);
-
-      if (ppoRewardScore > 8.0 && pnlRatio > 0.02) {
-         ppoAction = 'TRAIL_SL';
-      } else if (ppoRewardScore < -6.0 && pnlRatio < -0.015) {
-         ppoAction = 'EXIT';
-      }
-
-      if (ppoAction === 'EXIT' && !isCapitalPreservationActive) {
-          shouldClose = true;
-          closeReason = `[PPO AGENT EXIT] Toxic flow detected. Terminated position dynamically to minimize loss (${(pnlRatio*100).toFixed(2)}%)`;
-      } else if (ppoAction === 'TRAIL_SL') {
-         // Keep trail loose enough so the trend doesn't get instantly chopped by noise
-         dynamicTrail = Math.min(0.04, dynamicTrail * 0.8); 
-         dynamicTP = Math.max(dynamicTP, pnlRatio + 0.15); // Stretch take-profit out to let runner run
-      }
-
-      // Enhancement #4: Dynamic Trailing Profit Expansion on Spike Wins (+15% profit momentum spikes)
-      const isMomentumSpike = pos.peakPnlRatio >= 0.15;
-      if (isMomentumSpike) {
-        // Expand dynamicTP so monster spike winners (+100% to +1000%) can keep running
-        dynamicTP = Math.max(dynamicTP, pos.peakPnlRatio + 0.50);
-      }
-
-      // [SMART TRAILING TAKE PROFIT ENGINE]
-      // Instead of an abrupt fixed 10% hard target, Smart Trailing Take Profit adjusts target prices dynamically.
-      // As profit targets are met, it trails the stop-loss upward to lock in gains while allowing
-      // momentum runs targeting the $10-$50 profit range defined by user specifications.
-      const smartTrailRes = SmartTrailingEngine.evaluate({
-        pnlRatio,
-        peakPnlRatio: pos.peakPnlRatio || pnlRatio,
-        entryPrice: pos.entryPrice || 0.50,
-        size: pos.size || 10,
-        side: pos.side,
-        currentMarketPrice: currentSidePrice,
-        baseDynamicTP: dynamicTP,
-        currentState: pos.smartTrailing,
-        minDollarTarget: 5.0, // Target $5-$10 without losing gains
-        maxDollarTarget: 50.0, // Scale all the way up to $50 dynamically
-        isPerpetual: pos.isPerpetual,
-        latencyAgilityFactor: latencyAdaptiveEngine.getProfile().trailingStopAgilityFactor,
-        spotDataMetrics: {
-          directionalImpact,
-          volSurge,
-          rsi,
-          isConsolidating
-        }
-      });
-
-      pos.smartTrailing = smartTrailRes.state;
-
-      if (smartTrailRes.isInitialActivation) {
-        spotLogs.unshift({
-          id: logIdCounter++, time: new Date().toISOString(), type: 'PROFIT',
-          message: `[SMART TRAILING TP ACTIVATED] ${pos.symbol} (${pos.side}): Reached $5 target zone (+${(pnlRatio * 100).toFixed(1)}% / +$${smartTrailRes.state.currentProfitUsd.toFixed(2)})! Trailing Stop engaged at +${(smartTrailRes.state.trailingFloorRatio * 100).toFixed(1)}% ($${smartTrailRes.state.lockedProfitUsd.toFixed(2)} guaranteed locked). Gains cannot be lost as position scales towards $10-$50.`
-        });
-      } else if (smartTrailRes.newTierReached) {
-        spotLogs.unshift({
-          id: logIdCounter++, time: new Date().toISOString(), type: 'PROFIT',
-          message: `[SMART TRAILING TIER UPGRADE] ${pos.symbol} (${pos.side}): Advanced to Tier ${smartTrailRes.state.tier} (${smartTrailRes.state.tierLabel})! Trailing SL ratcheted up to +${(smartTrailRes.state.trailingFloorRatio * 100).toFixed(1)}% ($${smartTrailRes.state.lockedProfitUsd.toFixed(2)} secured). Dynamic Target: +${(smartTrailRes.state.dynamicTargetRatio * 100).toFixed(1)}% ($${smartTrailRes.state.targetDollarGoal.toFixed(0)} Goal).`
-        });
-      }
-
-      // Exit Evaluation:
-      // Time-to-Expiry (Theta) Cutoff
-      const timeToExpiryMs = ctx.closeTime ? (new Date(ctx.closeTime).getTime() - Date.now()) : Infinity;
-      const isImminentExpiry = timeToExpiryMs < 60 * 1000; // Final 60 seconds of contract
-      
-      // Exit Latency Simulation logic
-      let finalExitPrice = currentSidePrice;
-      if (settings.paperTrading && (settings as any).simulatedLatencyMs > 0) {
-        // Evaluate if we WOULD close, so we only wait if we're actually closing
-        let tempShouldClose = false;
-        if (smartTrailRes.shouldClose) {
-            tempShouldClose = true;
-        } else if (isImminentExpiry && pnlRatio > 0.02 && smartTrailRes.state.isActive) {
-            tempShouldClose = true;
-        } else if (isImminentExpiry && pnlRatio > 0.01) {
-            tempShouldClose = true;
-        }
-
-        if (tempShouldClose) {
-          const latMs = (settings as any).simulatedLatencyMs;
-          await new Promise(r => setTimeout(r, latMs));
-          const latestCtx = spotContexts[pos.symbol];
-          if (latestCtx && latestCtx.currentPrice) {
-            if (pos.isPerpetual) {
-              finalExitPrice = pos.side === 'YES' ? latestCtx.currentPrice : (1.0 - latestCtx.currentPrice);
-            } else {
-              finalExitPrice = pos.side === 'YES' ? latestCtx.currentPrice : (1.0 - latestCtx.currentPrice);
-            }
-          }
-          currentSidePrice = finalExitPrice;
-
-          spotLogs.unshift({
-            id: logIdCounter++, time: new Date().toISOString(), type: 'WARN',
-            message: `[LATENCY SIMULATOR] Exit delayed by ${latMs}ms. Exit price slipped to ${finalExitPrice.toFixed(4)}.`
-          });
-        }
-      }
-
-      // Trade Model Discrepancy Convergence Check
-      const hasConvergedWithFairValue = pos.modelFairValue !== undefined && 
-          ((pos.side === 'YES' && currentSidePrice >= pos.modelFairValue) || 
-           (pos.side === 'NO' && currentSidePrice <= pos.modelFairValue));
-
-      if (smartTrailRes.shouldClose) {
-        shouldClose = true;
-        closeReason = smartTrailRes.closeReason || `Smart Trailing TP (+${(pnlRatio * 100).toFixed(1)}%)`;
-      } else if (smartTrailRes.state.isActive) {
-        // Position is actively riding momentum with guaranteed trailing floor!
-        // We do NOT kill winners prematurely with 2% cuts or 5-minute theta cuts.
-        // It runs toward the $10-$50 target range with monotonic gain-locking.
-        if (isImminentExpiry && pnlRatio > 0.02) {
-          shouldClose = true;
-          closeReason = `Imminent Expiry Lock-In (<60s to close | Secured +$${smartTrailRes.state.currentProfitUsd.toFixed(2)})`;
-        }
-      } else if (isImminentExpiry && pnlRatio > 0.01) { 
-        shouldClose = true;
-        closeReason = `Imminent Expiry Settlement Lock (<60s to close)`;
-      } else if (hasConvergedWithFairValue && pnlRatio >= 0.10) { 
-        shouldClose = true;
-        closeReason = `Model Fair Value Convergence Triggered (+${(pnlRatio * 100).toFixed(1)}%)`;
-      } else {
-        // Pre-activation zone (pnl < 10% / < $10): Standard downside risk protections
-        const isGracePeriodActive = timeInContractSec < 45;
-        const effectiveSL = Math.max(dynamicSL, ratchetSL);
-
-        if (pnlRatio <= effectiveSL) {
-          shouldClose = true;
-          closeReason = effectiveSL === ratchetSL
-            ? `Breakeven Ratchet SL (Locked at +0.5%)`
-            : isGracePeriodActive
-              ? `Emergency SL (${(effectiveSL * 100).toFixed(1)}% breached during 45s Grace Period)`
-              : isCapitalPreservationActive
-                ? `Capital Preservation SL (${(dynamicSL * 100).toFixed(1)}%)`
-                : `Volatility-Adjusted SL (${(dynamicSL * 100).toFixed(1)}%)`;
-        } else if (ctx.isExpired) {
-          shouldClose = true;
-          closeReason = `Market Expiration / Contract Settlement`;
-        }
-      }
-    } else {
-      // Handle orphaned / unlisted position where ctx was detached
-      if (timeInContractSec >= 60) {
-        shouldClose = true;
-        pnlRatio = pos.peakPnlRatio || 0;
-        closeReason = `Orphaned Contract Expiration Auto-Settlement (${Math.round(timeInContractSec)}s elapsed)`;
-      }
-    }
-
-      if (shouldClose) {
-        const positionCapitalCost = pos.size * (pos.entryPrice || 0.50);
-        
-        // FACTOR IN SLIPPAGE AND FEES (Execution & Model Training Recalibration)
-        // Subtract exchange fees and bid-ask spread crossing friction directly from the PNL.
-        // This ensures the simulated bankroll, market testing engine, and training modules all learn the true cost of trading.
-        const averageSpreadAndFeeFriction = 0.02; // Roughly 2 cents / 2% friction penalty per round trip
-        let effectiveExitRatio = pnlRatio;
-        if (closeReason.includes('Smart Trailing Stop Triggered') && pos.smartTrailing?.trailingFloorRatio) {
-          // Trailing stop order fills at the ratcheted floor level
-          effectiveExitRatio = Math.max(pos.smartTrailing.trailingFloorRatio, pnlRatio);
-        } else if (closeReason.includes('Breakeven Ratchet SL')) {
-          // Breakeven ratchet stop executes at breakeven + fee buffer (+0.5%)
-          effectiveExitRatio = Math.max(0.005, pnlRatio);
-        }
-        const adjustedPnlRatio = effectiveExitRatio - averageSpreadAndFeeFriction;
-        
-        let pnlUsd = adjustedPnlRatio * positionCapitalCost;
-        simulatedPaperBalance = Math.max(0, simulatedPaperBalance + pnlUsd);
-        cycleEarnedProfit += pnlUsd;
-
-        // Severe Drawdown Protocol
-        const patternType = pos.analysisMeta?.patternType || 'GENERAL_ANALYSIS';
-        if (settings.paperTrading && startingBankroll > 0) {
-            if (simulatedPaperBalance <= startingBankroll * 0.50 && simulatedPaperBalance > startingBankroll * 0.25) {
-                if (!hasTriggered50PercentDrawdown) {
-                    hasTriggered50PercentDrawdown = true;
-                    const lossAmount = startingBankroll - simulatedPaperBalance;
-                    spotLogs.unshift({
-                        id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-                        message: `[SEVERE DRAWDOWN] Lost 50% of starting capital (Down ${lossAmount.toFixed(2)}). Registering severe drawdown failure for ${patternType} with Meta-Learning Engine.`
-                    });
-                    metaModelManager.recordSevereDrawdown(patternType);
-                    metaModelManager.recordSevereDrawdown('GLOBAL');
-                }
-            } else if (simulatedPaperBalance > startingBankroll * 0.50) {
-                hasTriggered50PercentDrawdown = false;
-            }
-        }
-
-        // Drawdown Blowout Protocol
-        if (settings.paperTrading && startingBankroll > 0 && simulatedPaperBalance <= startingBankroll * 0.25) {
-          const lossAmount = startingBankroll - simulatedPaperBalance;
-          spotLogs.unshift({
-            id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-            message: `[BLOWOUT DETECTED] Lost 75% of starting capital (Down ${lossAmount.toFixed(2)}). Restarting funds, wiping P/L, closing all positions. Registering failure for ${patternType}.`
-          });
-          
-          metaModelManager.recordBlowoutFailure(patternType);
-          metaModelManager.recordBlowoutFailure('GLOBAL');
-          
-          simulatedPaperBalance = (settings as any).gauntletMode ? 20.0 : startingBankroll;
-          cycleEarnedProfit = 0;
-          vaultedProfits = 0;
-          completedGoalCycles = 0;
-          sessionPocketedProfit = 0;
-          isStrict3ConfluenceTriggeredInSession = false;
-          hasTriggered50PercentDrawdown = false;
-          activePositions = activePositions.filter(p => !settings.paperTrading);
-          
-          // Clear active positions and exit the evaluation loop
-          break;
-        }
-
-        // Track Net Session Profit (subtract losses, floor at 0)
-        sessionPocketedProfit = Math.max(0, sessionPocketedProfit + pnlUsd);
-        macroCycleProfit += pnlUsd;
-        if (macroCycleProfit >= 100) {
-           const elapsedHours = (Date.now() - macroCycleStartTime) / (1000 * 60 * 60);
-           spotLogs.unshift({
-              id: logIdCounter++, time: new Date().toISOString(), type: 'PROFIT',
-              message: `[MACRO GOAL ACHIEVED] Earned $100 profit in ${elapsedHours.toFixed(2)} hours! Velocity Grade: A+ (Target was <= 12 hours). NN Primary Goal satisfied. Resetting macro cycle.`
-           });
-           macroCycleStartTime = Date.now();
-           macroCycleProfit = 0;
-        } else if (macroCycleProfit < -200) {
-           macroCycleStartTime = Date.now();
-           macroCycleProfit = 0;
-        }
-
-        // Record both wins and losses toward the $100 market testing net profit milestone
-        marketTestingEngine.recordTradeResult(pnlUsd);
-
-        // Record toward the goal (resets at Midnight EST and 9:00 AM EST, or 5m compound in Training on the Job)
-        goalResetScheduler.recordTrade(pnlUsd, (currProfit, target, isTraining) => {
-          if (isTraining) {
-            const status = goalResetScheduler.getStatus();
-            const untouched = status.training_on_the_job?.untouched_vault_balance || 0;
-            const isFull = status.training_on_the_job?.is_untouched_vault_full;
-            if (!isFull) {
-              spotLogs.unshift({
-                id: logIdCounter++,
-                time: new Date().toISOString(),
-                type: 'PROFIT',
-                message: `🛡️ [TRAINING ON THE JOB] Initial Vaulting Active: Set aside +$${currProfit.toFixed(2)} toward the $200 Untouched Reserve Vault ($${untouched.toFixed(2)} / $200.00). Confluence Override active.`
-              });
-            } else {
-              spotLogs.unshift({
-                id: logIdCounter++,
-                time: new Date().toISOString(),
-                type: 'PROFIT',
-                message: `⏳ [TRAINING ON THE JOB] Goal ($${target.toFixed(2)}) Reached! Profit ($${currProfit.toFixed(2)}) + next 5 mins gains are accumulating in Temporary Vault and will enter working capital in 5m. Confluence Override active.`
-              });
-            }
-          } else {
-            spotLogs.unshift({
-              id: logIdCounter++,
-              time: new Date().toISOString(),
-              type: 'PROFIT',
-              message: `[GOAL TARGET ACHIEVED] Reached $${currProfit.toFixed(2)} toward the $${target.toFixed(2)} goal for this session! Goal secured until next reset (Midnight EST / 9:00 AM EST).`
-            });
-          }
-        });
-
-        if (pnlUsd > 0) {
-          lastWinTimestamps[pos.symbol] = Date.now();
-          const currentSession = getGlobalMarketSession();
-          const totalPocketed = Math.max(sessionPocketedProfit, vaultedProfits + Math.max(0, cycleEarnedProfit));
-
-          if (!isStrict3ConfluenceTriggeredInSession && totalPocketed >= 100) {
-            isStrict3ConfluenceTriggeredInSession = true;
-            spotLogs.unshift({
-              id: logIdCounter++, time: new Date().toISOString(), type: 'PROFIT',
-              message: `[STRICT 3-CONFLUENCE MODE ACTIVATED] $100+ net profit milestone reached ($${totalPocketed.toFixed(2)} net profit)! Enforcing strict 3-confluence strategy to minimize losses until 35m after ${currentSession.nextSessionName} (${currentSession.nextSessionTransitionStr}).`
-            });
-          }
-        }
-
-        // Micro-Profit Dynamic Ratchet Vaulting: Automatically vault 50% of un-vaulted earned profits whenever cycleEarnedProfit >= $3.00
-        if (cycleEarnedProfit >= 3.00) {
-          const ratchetVaultAmt = Math.round((cycleEarnedProfit * 0.50) * 100) / 100;
-          if (ratchetVaultAmt > 0) {
-            vaultedProfits += ratchetVaultAmt;
-            completedGoalCycles += 1;
-            cycleEarnedProfit -= ratchetVaultAmt;
-            simulatedPaperBalance -= ratchetVaultAmt;
-
-            spotLogs.unshift({
-              id: logIdCounter++, time: new Date().toISOString(), type: 'PROFIT',
-              message: `[MICRO-PROFIT RATCHET VAULT] Auto-vaulted 50% of earned profit ($${ratchetVaultAmt.toFixed(2)}) into untouchable reserve! Total Vault: $${vaultedProfits.toFixed(2)} across ${completedGoalCycles} completed micro-cycles.`
-            });
-          }
-        }
-
-        // Auto-Vault profits into Untouchable Reserve:
-        // Standard threshold is $50. After $100+ net profit is reached,
-        // the threshold accelerates to taking EVERY $20 into the untouchable vault until 35 minutes after next market session open.
-        const currentSession = getGlobalMarketSession();
-        const totalPocketed = Math.max(sessionPocketedProfit, vaultedProfits + Math.max(0, cycleEarnedProfit));
-        const isAcceleratedVaultMode = totalPocketed >= 100 || vaultedProfits >= 100;
-        const vaultThreshold = isAcceleratedVaultMode ? 20 : 50;
-
-        while (cycleEarnedProfit >= vaultThreshold) {
-          const vaultAmount = vaultThreshold;
-          vaultedProfits += vaultAmount;
-          completedGoalCycles += 1;
-          cycleEarnedProfit -= vaultAmount;
-          simulatedPaperBalance -= vaultAmount; // Remove from working balance to truly "vault" it
-
-          const modeLabel = isAcceleratedVaultMode
-            ? `ACCELERATED $20 VAULT MODE ($100+ Profit Milestone)`
-            : `STANDARD $50 VAULT MODE`;
-
-          spotLogs.unshift({
-            id: logIdCounter++, time: new Date().toISOString(), type: 'PROFIT',
-            message: `[UNTOUCHABLE VAULT - ${modeLabel}] Locked $${vaultAmount.toFixed(2)} into untouchable vault! Total Vault: $${vaultedProfits.toFixed(2)} across ${completedGoalCycles} completed cycles (Active until 35m after ${currentSession.nextSessionName} at ${currentSession.nextSessionTransitionStr}).`
-          });
-        }
-
-        tradingBrain.recordStrategyOutcome(pos, adjustedPnlRatio, closeReason);
-        if (recoveryProtocol) {
-          recoveryProtocol.processTradeOutcome(
-            pos.symbol, pos.side, pnlUsd, adjustedPnlRatio * 100, positionCapitalCost,
-            Math.round((Date.now() - pos.entryTime) / 1000), closeReason, pos.category,
-            pos.analysisMeta?.patternType || 'GENERAL_ANALYSIS', pos.analysisMeta?.spotTA
-          );
-        }
-
-        const isStopLossClose = closeReason.includes('Stop Loss') || closeReason.includes('SL');
-        const wasAlreadyReversed = Boolean(pos.analysisMeta?.isReversalFlip);
-
-        spotLogs.unshift({
-          id: logIdCounter++, time: new Date().toISOString(), type: pnlRatio > 0 ? 'PROFIT' : 'TRADE',
-          message: `[POS CLOSED] ${pos.symbol} (${pos.side}) hit ${closeReason}. PnL: ${pnlUsd > 0 ? '+' : ''}$${pnlUsd.toFixed(2)}`
-        });
-
-        // Dispatch live order to Kalshi to close real position when paperTrading is disabled
-        if (!settings.paperTrading) {
-          const isPerp = Boolean(pos.isPerpetual || pos.symbol.endsWith('PERP'));
-          const exitPrice = isPerp ? currentSidePrice : (pos.side === 'YES' ? currentSidePrice : (1.0 - currentSidePrice));
-          const closeAction = isPerp ? (pos.side === 'YES' ? 'sell' : 'buy') : 'sell';
-          kalshiService.placeOrder(pos.symbol, closeAction, pos.side.toLowerCase() as 'yes' | 'no', pos.size, exitPrice).then(res => {
-            if (res.success) {
-              spotLogs.unshift({
-                id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
-                message: `[KALSHI LIVE CLOSE SUCCESS] Closed ${pos.size} contracts of ${pos.symbol} (${pos.side}) on Kalshi at $${exitPrice.toFixed(isPerp ? 4 : 2)} (OrderID: ${res.order_id}).`
-              });
-            } else {
-              spotLogs.unshift({
-                id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-                message: `[KALSHI LIVE CLOSE ERROR] Failed to submit close order for ${pos.symbol}: ${res.error}`
-              });
-            }
-          });
-        }
-
-        activePositions.splice(i, 1);
-
-        if (closeReason.includes('Emergency SL')) {
-           spotLogs.unshift({
-              id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-              message: `[EMERGENCY MONITOR INITIATED] AI deployed to monitor ${pos.symbol} in 10s increments for the next 60 seconds.`
-           });
-           startEmergencyMonitor(pos);
-        }
-
-        // Immediate Momentum Reversal Check on Stop Loss
-        if (isStopLossClose && !wasAlreadyReversed && ctx && !ctx.isExpired) {
-          const oppositeSide: 'YES' | 'NO' = pos.side === 'YES' ? 'NO' : 'YES';
-          const oppositeEntryPrice = oppositeSide === 'YES' ? ctx.currentPrice : (1.0 - ctx.currentPrice);
-
-          const spotPair = getSpotPairFromSymbol(pos.label, pos.category);
-          const pairCandles = scalper.candles[spotPair] || [];
-
-          // Query price action & statistical volatility viability
-          const viability = evaluateCounterPositionViability(pos, ctx, oppositeSide, oppositeEntryPrice, pairCandles);
-
-          if (viability.isViable) {
-            spotLogs.unshift({
-              id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
-              message: `[STOP-LOSS REVERSAL APPROVED] ${pos.symbol} (${pos.side} -> ${oppositeSide}) | Volatility Index: ${viability.volatilityIndex}x, Velocity: ${viability.velocityPctPerMin}%/min, Viability Score: ${viability.score} >= 0.85. Executing counter-position!`
-            });
-
-            openPosition(
-              pos.symbol,
-              oppositeSide,
-              oppositeEntryPrice,
-              pos.size,
-              true,
-              pos.matchId,
-              pos.label,
-              pos.category,
-              `Stop Loss Volatility Reversal (Flipped from ${pos.side} | Viability Score: ${viability.score})`,
-              {
-                patternType: 'MOMENTUM_REVERSAL_FLIP',
-                isReversalFlip: true,
-                spotTA: computeSpotTAMetrics(spotPair, pairCandles),
-                viabilityMeta: viability
-              }
-            );
-          } else {
-            spotLogs.unshift({
-              id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-              message: `[STOP-LOSS REVERSAL SUPPRESSED] Skipped counter-position on ${pos.symbol}: ${viability.reason}`
-            });
-          }
-        }
-
-        // Post-Stop Loss Candidate Re-Evaluation Schedule (5 seconds and 1 minute post-close, max 1 period per 5 minutes per contract)
-        if (isStopLossClose) {
-          const contractKey = `${pos.symbol}:${pos.side}`;
-          const now = Date.now();
-          const FIVE_MINUTES_MS = 5 * 60 * 1000;
-          const lastEvalTime = contractSLEvalPeriodTimestamps[contractKey] || 0;
-
-          if (now - lastEvalTime < FIVE_MINUTES_MS) {
-            const elapsedSec = Math.round((now - lastEvalTime) / 1000);
-            const remainSec = Math.round((FIVE_MINUTES_MS - (now - lastEvalTime)) / 1000);
-            spotLogs.unshift({
-              id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-              message: `[POST-SL RE-EVALUATION LIMITED] ${contractKey}: Post-SL evaluation period throttled (${elapsedSec}s elapsed since last, ${remainSec}s remaining). Limit: 1 period per 5 mins.`
-            });
-          } else {
-            contractSLEvalPeriodTimestamps[contractKey] = now;
-            spotLogs.unshift({
-              id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-              message: `[POST-SL RE-EVALUATION INITIATED] ${contractKey}: Initiated candidate re-evaluation period (Stage 1: 5s, Stage 2: 1m). Limit: 1 period per 5 mins.`
-            });
-
-            // Stage 1: 5 seconds immediately after closing
-            setTimeout(() => {
-              evaluatePostSLContractCandidate(pos.symbol, pos.side, '5s post-SL', pos.category);
-            }, 5000);
-
-            // Stage 2: 1 minute (60s) after closing
-            setTimeout(() => {
-              evaluatePostSLContractCandidate(pos.symbol, pos.side, '1m post-SL', pos.category);
-            }, 60000);
-          }
-        }
-      }
-    }
+  // Continuous Real-Time & Scheduled Active Position Evaluation
+  await evaluateActivePositions(false);
 
   if (spotLogs.length > 50) spotLogs.length = 50;
   lastSuccessfulLoopTime = Date.now();
@@ -4915,6 +5333,17 @@ setInterval(async () => {
   }
   } catch (e) { console.error("[BACKGROUND INTERVAL ERROR]", e); }
 }, 4000);
+
+// =========================================================================
+// CONTINUOUS POSITION & NEURAL NETWORK REAL-TIME MONITORING (<100ms TICK)
+// =========================================================================
+setInterval(async () => {
+  if (!settings.botActive || activePositions.length === 0) {
+    latencyAdaptiveEngine.setIsNeuralExitMonitorActive(false);
+    return;
+  }
+  await evaluateActivePositions(true);
+}, 500);
 
 let lastLivePositionSyncTime = 0;
 
@@ -5028,9 +5457,32 @@ app.get('/api/health', (req, res) => { res.json({ status: 'ok' }); });
 
 app.get('/api/settings', (req, res) => { res.json(settings); });
 app.post('/api/settings', (req, res) => {
+  const previousGauntlet = Boolean((settings as any).gauntletMode);
   const updated = { ...settings, ...req.body };
+  if (typeof req.body.simulatedLatencyMs === 'number') {
+    updated.simulatedLatencyMs = Math.max(0, Math.min(1000, req.body.simulatedLatencyMs));
+  }
   if (updated.trainingOnTheJob) {
     updated.overrideConfluence = true;
+  }
+  const isNowGauntlet = Boolean((updated as any).gauntletMode);
+  if (!previousGauntlet && isNowGauntlet) {
+    startingBankroll = 20.0;
+    simulatedPaperBalance = 20.0;
+    cycleEarnedProfit = 0;
+    spotLogs.unshift({
+      id: logIdCounter++,
+      time: new Date().toISOString(),
+      type: 'INFO',
+      message: `[GAUNTLET MODE ACTIVATED] Starting capital reset to $20.00 Crucible with CRRA dynamic Kelly scaling toward $2,000.`
+    });
+  } else if (previousGauntlet && !isNowGauntlet) {
+    spotLogs.unshift({
+      id: logIdCounter++,
+      time: new Date().toISOString(),
+      type: 'INFO',
+      message: `[GAUNTLET MODE DEACTIVATED] Standard risk management and sizing parameters restored.`
+    });
   }
   settings = updated;
   goalResetScheduler.setTrainingOnTheJob(!!settings.trainingOnTheJob);
@@ -5143,6 +5595,13 @@ app.get('/api/balance', async (req, res) => {
       perp_capital_in_use: activePositions.filter(p => p.isPerpetual).reduce((sum, p) => sum + (p.capitalPlacedUsd || (p.size * p.entryPrice)), 0),
       prediction_capital_in_use: activePositions.filter(p => !p.isPerpetual).reduce((sum, p) => sum + (p.capitalPlacedUsd || (p.size * p.entryPrice)), 0),
       min_prediction_capital_reserve_pct: 0.50
+    },
+    tennis_allocation_stats: {
+      active_tennis_count: activePositions.filter(p => p.category === 'sports' || (p.label || '').toLowerCase().includes('tennis') || (p.label || '').toLowerCase().includes('atp') || (p.symbol || '').includes('ATP')).length,
+      max_tennis_allowed: 2,
+      max_tennis_capital_pct: 0.10,
+      tennis_capital_in_use: activePositions.filter(p => p.category === 'sports' || (p.label || '').toLowerCase().includes('tennis') || (p.label || '').toLowerCase().includes('atp') || (p.symbol || '').includes('ATP')).reduce((sum, p) => sum + (p.capitalPlacedUsd || (p.size * p.entryPrice)), 0),
+      max_tennis_capital_allowed: availableCashPool * 0.10
     }
   });
 });
@@ -5333,34 +5792,60 @@ app.post('/api/kalshi/close-all-positions', async (req, res) => {
 });
 
 app.post('/api/restart', (req, res) => {
-  if ((settings as any).gauntletMode) {
-    startingBankroll = 20.0;
-  }
+  startingBankroll = (settings as any).gauntletMode ? 20.0 : 200.0;
   paperBankrollATH = startingBankroll;
   simulatedPaperBalance = startingBankroll;
   cycleEarnedProfit = 0;
   vaultedProfits = 0;
   completedGoalCycles = 0;
   sessionPocketedProfit = 0;
+  cumulativePaperProfit = 0;
+  completedPaperIterations = 0;
+  macroCycleProfit = 0;
+  macroCycleStartTime = Date.now();
+  liveRealizedPnl = 0;
+  liveUnrealizedPnl = 0;
+  liveVaultedProfits = 0;
+  liveStartingBankroll = 0;
+  liveBankrollATH = 0;
   isStrict3ConfluenceTriggeredInSession = false;
   activePositions.length = 0;
   executedOverrides.clear();
   isCapitalPreservationActive = false;
+  lastWinTimestamps = {};
 
+  // Wipe brain and database trades
   tradingBrain.resetBrain();
+  tradeDbManager.clearAllTrades();
   recoveryProtocol.resetProtocol();
-  goalResetScheduler.resetManual(startingBankroll);
+  marketTestingEngine.resetWindowProfit();
+  goalResetScheduler.resetFull(startingBankroll);
 
-  spotLogs.unshift({
+  // Synchronously persist memory to prevent stale cache on reloads
+  tradingBrain._saveMemoryImmediate();
+
+  spotLogs = [{
     id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
-    message: `[BANKROLL REBOOT] Working bankroll reset to $${startingBankroll.toFixed(2)}. Performance P/L history & positions cleared.`
-  });
+    message: `[RESTART FRESH] All P&L monetary values wiped to $0.00. Working bankroll reset to $${startingBankroll.toFixed(2)}. Active positions, cycle earnings, vaulted reserves, cumulative gains, goal window metrics, and trade history completely cleared.`
+  }];
 
   res.json({
     success: true,
-    message: 'Working bankroll reset successfully. Performance P/L history cleared.',
+    message: 'All P&L monetary values wiped to $0.00. Working bankroll reset to fresh state.',
     balance: simulatedPaperBalance,
-    vaultedProfits
+    working_balance: simulatedPaperBalance,
+    cycle_earned_profit: 0,
+    vaulted_profits: 0,
+    completed_goal_cycles: 0,
+    cumulative_paper_profit: 0,
+    completed_paper_iterations: 0,
+    daily_profit: 0,
+    previous_day_profit: 0,
+    realized_pnl: 0,
+    unrealized_pnl: 0,
+    delta_24h: 0,
+    delta_24h_pct: 0,
+    goal_window: goalResetScheduler.getStatus()
   });
 });
 
@@ -5482,21 +5967,36 @@ app.post('/api/balance/reset', (req, res) => {
   const amount = req.body && typeof req.body.amount === 'number' ? req.body.amount : 200;
   simulatedPaperBalance = amount;
   startingBankroll = amount;
+  paperBankrollATH = amount;
   cycleEarnedProfit = 0;
   vaultedProfits = 0;
   completedGoalCycles = 0;
   sessionPocketedProfit = 0;
+  cumulativePaperProfit = 0;
+  completedPaperIterations = 0;
+  macroCycleProfit = 0;
+  macroCycleStartTime = Date.now();
+  liveRealizedPnl = 0;
+  liveUnrealizedPnl = 0;
+  liveVaultedProfits = 0;
+  liveStartingBankroll = 0;
+  liveBankrollATH = 0;
   isStrict3ConfluenceTriggeredInSession = false;
   activePositions.length = 0;
+  executedOverrides.clear();
   isCapitalPreservationActive = false;
+  lastWinTimestamps = {};
 
   tradingBrain.resetBrain();
+  tradeDbManager.clearAllTrades();
   recoveryProtocol.resetProtocol();
-  goalResetScheduler.resetManual(amount);
+  marketTestingEngine.resetWindowProfit();
+  goalResetScheduler.resetFull(amount);
+  tradingBrain._saveMemoryImmediate();
 
   spotLogs.unshift({
     id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
-    message: `[BANKROLL RESET] Paper trading balance reset to $${simulatedPaperBalance.toFixed(2)}. Vault and P/L history fully cleared.`
+    message: `[BANKROLL RESET] All P&L monetary values wiped to $0.00. Balance reset to $${simulatedPaperBalance.toFixed(2)}. Vault, goal progress, and trade history fully cleared.`
   });
   res.json({ success: true, balance: simulatedPaperBalance });
 });
@@ -5554,7 +6054,19 @@ app.post('/api/pattern-brain/reset', (req, res) => {
   res.json({ success: true, message: 'Performance summary cleared.' });
 });
 
-app.get('/api/logs', (req, res) => { res.json({ logs: spotLogs }); });
+app.get('/api/logs', (req, res) => { res.json({ logs: spotLogs.slice(0, 100) }); });
+app.get('/api/backpressure-status', (req, res) => { res.json(backpressureQueue.getStats()); });
+app.get('/api/kalshi/rate-limits', (req, res) => { res.json(kalshiRateLimiter.getStats()); });
+app.post('/api/kalshi/sync-limits', async (req, res) => {
+  const result = await kalshiService.fetchAccountLimits();
+  res.json({ ...result, stats: kalshiRateLimiter.getStats() });
+});
+app.post('/api/kalshi/upgrade-tier', async (req, res) => {
+  const result = await kalshiService.upgradeApiUsageLevel();
+  // Fetch new limits after upgrade
+  await kalshiService.fetchAccountLimits();
+  res.json(result);
+});
 app.get('/api/recovery-mode', (req, res) => { res.json(getCapitalPreservationStatus()); });
 app.get('/api/recovery-protocol', (req, res) => { res.json(recoveryProtocol.data); });
 app.post('/api/recovery-protocol/reset', (req, res) => {
@@ -5937,8 +6449,7 @@ setInterval(() => {
 app.get('/api/market-context', (req, res) => {
   res.json({
     activePositions,
-    spotContexts,
-    spotLogs,
+    spotLogs: spotLogs.slice(0, 10),
     isInitializing,
     botActive: settings.botActive
   });
@@ -6065,7 +6576,9 @@ async function startServer() {
 
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = fs.existsSync(path.join(process.cwd(), 'dist', 'index.html'))
+      ? path.join(process.cwd(), 'dist')
+      : path.join(process.cwd(), 'build');
     app.use(express.static(distPath, {
       etag: true,
       lastModified: true,

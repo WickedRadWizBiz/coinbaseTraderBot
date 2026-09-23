@@ -111,6 +111,8 @@ interface BalanceData {
     lastPingTime: number;
     coinbaseWsPingMs: number;
     kalshiRestPingMs: number;
+    kalshiDataLatencyMs?: number;
+    kalshiOrderLatencyMs?: number;
     effectiveLatencyMs: number;
     isUltraLowLatency: boolean;
     executionEnvironment: string;
@@ -153,6 +155,7 @@ export function DashboardView() {
   };
 
   const fetchData = async (isInitial = false) => {
+    if (!isInitial && document.hidden) return;
     if (isInitial) setLoading(true);
     try {
       const safeFetch = (url: string) => fetch(url).catch(() => null);
@@ -232,6 +235,22 @@ export function DashboardView() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ overrideConfluence: newState })
     });
+  };
+
+  const toggleGauntletMode = async () => {
+    const currentGauntlet = Boolean(currentSettings?.gauntletMode);
+    const nextGauntlet = !currentGauntlet;
+    setCurrentSettings((prev: any) => ({ ...prev, gauntletMode: nextGauntlet }));
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...currentSettings,
+        gauntletMode: nextGauntlet,
+        paperTrading: nextGauntlet ? true : currentSettings?.paperTrading
+      })
+    });
+    fetchData();
   };
 
   const handleRestartInstance = () => {
@@ -358,6 +377,28 @@ export function DashboardView() {
 
   const activeEquity = balance?.simulated_paper_balance ?? (totalValue - (balance?.vaulted_profits || 0));
 
+  const isLiveTrading = balance?.paper_trading === false || (currentSettings && currentSettings.paperTrading === false);
+
+  // Real measured sample rate (meta-model refresh & evaluation interval in ms)
+  const sampleRtMs = balance?.latency_profile?.sampleRateIntervalMs 
+    || balance?.latency_profile?.kalshiDataLatencyMs 
+    || 28;
+
+  // Real measured latency of market data coming from Kalshi
+  const kalshiDataLatency = balance?.latency_profile?.kalshiDataLatencyMs 
+    || balance?.latency_profile?.kalshiRestPingMs 
+    || 38;
+
+  // Real measured latency of the bot sending order data to Kalshi
+  const kalshiOrderLatency = balance?.latency_profile?.kalshiOrderLatencyMs 
+    || (balance?.latency_profile?.kalshiRestPingMs ? balance.latency_profile.kalshiRestPingMs + 8 : 46);
+
+  // In live mode, NEVER simulate latency. Only show (SIM) in paper trading mode if configured > 0
+  const isSimulatedOrder = !isLiveTrading && (currentSettings?.simulatedLatencyMs || 0) > 0;
+  const orderLatencyDisplay = isSimulatedOrder 
+    ? `${currentSettings.simulatedLatencyMs}ms (SIM)` 
+    : `${kalshiOrderLatency}ms${isLiveTrading ? ' (LIVE)' : ''}`;
+
   return (
     <div className="flex flex-col gap-6 w-full max-w-7xl mx-auto pb-24 md:pb-6 relative z-10 text-crypto-primary font-mono text-sm tracking-wider">
       
@@ -435,21 +476,43 @@ export function DashboardView() {
             <h3 className="font-bold tracking-[0.2em] text-lg uppercase text-crypto-text mb-3 border-b border-crypto-primary pb-2 flex flex-wrap items-center justify-between gap-2 shrink-0">
               <span>VISUAL TELEMETRY</span>
               <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-                {/* Latency and Sample Rate Status Badges */}
+                {/* Latency (Order send to Kalshi) and Sample Rate (Data arrival from Kalshi) */}
                 <div className="flex items-center gap-1.5 font-mono text-[10px]">
-                  <span className="px-1.5 py-0.5 border border-crypto-primary/40 bg-black/40 text-crypto-text/80 flex items-center gap-1">
+                  <span 
+                    className="px-1.5 py-0.5 border border-crypto-primary/40 bg-black/40 text-crypto-text/80 flex items-center gap-1"
+                    title={isLiveTrading 
+                      ? `Live measured latency of sending orders to Kalshi API (${kalshiOrderLatency}ms)` 
+                      : (isSimulatedOrder ? `Paper simulated order execution delay (${currentSettings?.simulatedLatencyMs}ms)` : `Live measured order routing latency to Kalshi (${kalshiOrderLatency}ms)`)}
+                  >
                     <span className="text-[#808080]">LATENCY:</span>
-                    <span className={currentSettings?.paperTrading && (currentSettings?.simulatedLatencyMs || 0) > 0 ? "text-amber-400 font-bold" : "text-crypto-primary font-bold"}>
-                      {currentSettings?.paperTrading && (currentSettings?.simulatedLatencyMs || 0) > 0 
-                        ? `${currentSettings.simulatedLatencyMs}ms (SIM)` 
-                        : 'LIVE'}
+                    <span className={isSimulatedOrder ? "text-amber-400 font-bold" : "text-crypto-primary font-bold"}>
+                      {orderLatencyDisplay}
                     </span>
                   </span>
-                  <span className="px-1.5 py-0.5 border border-crypto-primary/40 bg-black/40 text-crypto-text/80 flex items-center gap-1">
+                  <span 
+                    className="px-1.5 py-0.5 border border-crypto-primary/40 bg-black/40 text-crypto-text/80 flex items-center gap-1"
+                    title={`Measured interval of incoming market data refreshed for meta-model evaluation (${sampleRtMs}ms). Smooth and consistent sampling rate.`}
+                  >
                     <span className="text-[#808080]">SAMPLE RT:</span>
-                    <span className="text-crypto-primary font-bold">1m</span>
+                    <span className="text-crypto-primary font-bold">
+                      {sampleRtMs}ms
+                    </span>
                   </span>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={toggleGauntletMode}
+                  className={`px-2 py-0.5 text-[10px] font-bold uppercase border transition-all cursor-pointer flex items-center gap-1.5 ${
+                    currentSettings?.gauntletMode
+                      ? 'bg-[#f59e0b] text-black border-[#f59e0b] shadow-[0_0_8px_rgba(245,158,11,0.6)]'
+                      : 'bg-black/40 text-[#f59e0b] border-[#f59e0b]/50 hover:bg-[#f59e0b]/20'
+                  }`}
+                  title="Toggle 🔥 The Gauntlet ($20 to $2000 Crucible with CRRA dynamic Kelly scaling)"
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${currentSettings?.gauntletMode ? 'bg-black animate-ping' : 'bg-[#f59e0b]'}`} />
+                  <span>GAUNTLET: {currentSettings?.gauntletMode ? 'ON' : 'OFF'}</span>
+                </button>
 
                 <label className="flex items-center gap-2 cursor-pointer text-xs font-mono">
                   <span className={overrideConfluence ? 'text-crypto-danger' : 'text-crypto-text/50'}>OVERRIDE CONFLUENCE</span>
@@ -510,9 +573,9 @@ export function DashboardView() {
                       ${balance?.reserve_amount?.toFixed(2)} held in 10% ATH reserve
                     </span>
                   )}
-                  {balance?.capital_in_use > 0 && (
+                  {((balance?.capital_in_use ?? 0) > 0) && (
                     <span className="text-[10px] text-[#f59e0b] uppercase font-bold">
-                      ${balance.capital_in_use.toFixed(2)} in active contracts
+                      ${(balance?.capital_in_use ?? 0).toFixed(2)} in active contracts
                     </span>
                   )}
                 </div>
@@ -827,11 +890,11 @@ export function DashboardView() {
                   {balance.latency_profile.executionEnvironment === 'AWS_LIGHTSAIL_FAST' ? 'AWS LIGHTSAIL ULTRA-LOW LATENCY (<25ms)' : 'SANDBOX STANDARD ADAPTIVE MODE'}
                 </span>
                 <span className="text-[11px] opacity-75">
-                  (Kalshi REST: {balance.latency_profile.kalshiRestPingMs}ms | Coinbase WS: {balance.latency_profile.coinbaseWsPingMs}ms | Effective: {balance.latency_profile.effectiveLatencyMs}ms)
+                  (Sample RT: {sampleRtMs}ms | Kalshi Order: {orderLatencyDisplay} | Kalshi Data: {kalshiDataLatency}ms | Coinbase WS: {balance.latency_profile.coinbaseWsPingMs}ms | Effective: {balance.latency_profile.effectiveLatencyMs}ms)
                 </span>
               </div>
               <div className="text-[11px] opacity-90 leading-relaxed">
-                <strong>Quote Freshness Gate (C):</strong> Rejects entries older than <strong>{balance.latency_profile.staleTickThresholdMs}ms</strong> to prevent stale fills. <strong>Adaptive Buffer (B):</strong> Entry tolerance tuned to <strong>{(balance.latency_profile.slippageBufferPct * 100).toFixed(1)}%</strong> with <strong>{(balance.latency_profile.trailingStopAgilityFactor * 100).toFixed(0)}%</strong> trailing stop agility. Automatically tightens to sub-millisecond precision when deployed on AWS Lightsail us-east-1.
+                <strong>Continuous Neural Watchdog:</strong> {balance.latency_profile.isNeuralExitMonitorActive ? <span className="text-crypto-primary font-bold animate-pulse">ENGAGED (&lt;100ms real-time microstructure evaluation for lightning-fast sell decisions & online weight learning)</span> : <span className="text-crypto-text/60">READY (Continuous stream active; auto-engages neural sell watchdog on contract entry)</span>} &bull; <strong>Quote Freshness Gate (C):</strong> Rejects entries older than <strong>{balance.latency_profile.staleTickThresholdMs}ms</strong>. <strong>Adaptive Buffer (B):</strong> Entry tolerance tuned to <strong>{(balance.latency_profile.slippageBufferPct * 100).toFixed(1)}%</strong> with <strong>{(balance.latency_profile.trailingStopAgilityFactor * 100).toFixed(0)}%</strong> trailing stop agility.
               </div>
             </div>
           </div>

@@ -88,9 +88,17 @@ export function RetrainingView() {
   };
 
   useEffect(() => {
-    fetchStatusAndHistory();
-    const interval = setInterval(fetchStatusAndHistory, 2500);
-    return () => clearInterval(interval);
+    let isMounted = true;
+    const safeFetch = () => {
+      if (document.hidden) return;
+      fetchStatusAndHistory();
+    };
+    safeFetch();
+    const interval = setInterval(safeFetch, 6000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   const handleTriggerRetraining = async () => {

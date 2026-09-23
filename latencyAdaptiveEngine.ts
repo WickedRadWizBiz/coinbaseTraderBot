@@ -10,19 +10,30 @@ export interface LatencyProfile {
   lastPingTime: number;
   coinbaseWsPingMs: number;
   kalshiRestPingMs: number;
+  kalshiDataLatencyMs: number;
+  kalshiOrderLatencyMs: number;
   effectiveLatencyMs: number;
   isUltraLowLatency: boolean; // True on AWS Lightsail us-east-1 (< 25ms)
   executionEnvironment: 'AWS_LIGHTSAIL_FAST' | 'PREVIEW_SANDBOX_STANDARD';
   staleTickThresholdMs: number;
   slippageBufferPct: number;
   trailingStopAgilityFactor: number;
+  sampleRate: string; // 'CONTINUOUS'
+  sampleRateIntervalMs: number;
+  isNeuralExitMonitorActive: boolean;
 }
 
 class LatencyAdaptiveEngine {
   private coinbaseWsPingEma: number = 45; // default initial preview assumption
-  private kalshiRestPingEma: number = 60;
+  private kalshiRestPingEma: number = 42;
+  private kalshiDataLatencyEma: number = 38;
+  private kalshiOrderLatencyEma: number = 46;
   private lastMeasurementTime: number = 0;
   private isMeasuring: boolean = false;
+  private isNeuralExitMonitorActive: boolean = false;
+  private lastNeuralExitCheckTime: number = 0;
+  private lastEvalTime: number = 0;
+  private sampleRateIntervalEma: number = 32;
 
   // Maximum allowed age of order book quote before rejecting trade entry (Timestamp Drift Gate)
   private readonly DEFAULT_STALENESS_LIMIT_MS = 250;
@@ -35,15 +46,15 @@ class LatencyAdaptiveEngine {
    * Starts periodic background ping checks to Kalshi API and records round-trip time.
    */
   private startPeriodicHeartbeat() {
-    // Initial check after 3 seconds
+    // Initial check after 1 second
     setTimeout(() => {
       this.measurePing();
-    }, 3000);
+    }, 1000);
 
-    // Periodic check every 30 seconds
+    // Periodic check every 10 seconds
     setInterval(() => {
       this.measurePing();
-    }, 30000);
+    }, 10000);
   }
 
   /**
@@ -53,6 +64,26 @@ class LatencyAdaptiveEngine {
     if (latencyMs > 0 && latencyMs < 2000) {
       // Exponential moving average (alpha = 0.25)
       this.coinbaseWsPingEma = Math.round(0.75 * this.coinbaseWsPingEma + 0.25 * latencyMs);
+    }
+  }
+
+  /**
+   * Records round-trip latency of data arriving from Kalshi (orderbooks, markets, balance)
+   */
+  public recordKalshiDataLatency(latencyMs: number) {
+    if (latencyMs > 0 && latencyMs < 5000) {
+      this.kalshiDataLatencyEma = Math.round(0.7 * this.kalshiDataLatencyEma + 0.3 * latencyMs);
+      this.lastMeasurementTime = Date.now();
+    }
+  }
+
+  /**
+   * Records round-trip latency of sending order data to Kalshi (place, cancel)
+   */
+  public recordKalshiOrderLatency(latencyMs: number) {
+    if (latencyMs > 0 && latencyMs < 5000) {
+      this.kalshiOrderLatencyEma = Math.round(0.7 * this.kalshiOrderLatencyEma + 0.3 * latencyMs);
+      this.lastMeasurementTime = Date.now();
     }
   }
 
@@ -71,6 +102,10 @@ class LatencyAdaptiveEngine {
       const elapsed = Date.now() - start;
       if (res.ok && elapsed > 0 && elapsed < 3000) {
         this.kalshiRestPingEma = Math.round(0.75 * this.kalshiRestPingEma + 0.25 * elapsed);
+        this.recordKalshiDataLatency(elapsed);
+        if (this.kalshiOrderLatencyEma === 46) {
+          this.kalshiOrderLatencyEma = Math.round(elapsed + 8);
+        }
       }
     } catch {
       // If endpoint times out or errors, do not crash
@@ -81,16 +116,49 @@ class LatencyAdaptiveEngine {
   }
 
   /**
+   * Updates state of neural exit monitoring (active whenever contracts are entered)
+   */
+  public setIsNeuralExitMonitorActive(active: boolean) {
+    this.isNeuralExitMonitorActive = active;
+    if (active) {
+      this.lastNeuralExitCheckTime = Date.now();
+    }
+  }
+
+  public recordNeuralExitCheck() {
+    this.lastNeuralExitCheckTime = Date.now();
+    this.recordSampleEvaluation();
+  }
+
+  /**
+   * Records high-frequency data refresh and evaluation intervals for meta-model telemetry.
+   */
+  public recordSampleEvaluation() {
+    const now = Date.now();
+    if (this.lastEvalTime > 0) {
+      const delta = now - this.lastEvalTime;
+      if (delta >= 1 && delta <= 3000) {
+        // Smooth Exponential Moving Average (alpha = 0.12) to produce a smooth & consistent sample rate
+        this.sampleRateIntervalEma = Math.round(0.88 * this.sampleRateIntervalEma + 0.12 * delta);
+      }
+    }
+    this.lastEvalTime = now;
+  }
+
+  /**
    * Evaluates current latency environment profile
    */
   public getProfile(): LatencyProfile {
     const effectiveLatency = Math.round((this.coinbaseWsPingEma * 0.4) + (this.kalshiRestPingEma * 0.6));
     const isUltraLow = effectiveLatency < 25;
+    const sampleMs = Math.max(12, Math.min(1000, this.sampleRateIntervalEma));
 
     return {
       lastPingTime: this.lastMeasurementTime,
       coinbaseWsPingMs: this.coinbaseWsPingEma,
       kalshiRestPingMs: this.kalshiRestPingEma,
+      kalshiDataLatencyMs: this.kalshiDataLatencyEma,
+      kalshiOrderLatencyMs: this.kalshiOrderLatencyEma,
       effectiveLatencyMs: effectiveLatency,
       isUltraLowLatency: isUltraLow,
       executionEnvironment: isUltraLow ? 'AWS_LIGHTSAIL_FAST' : 'PREVIEW_SANDBOX_STANDARD',
@@ -100,7 +168,10 @@ class LatencyAdaptiveEngine {
       // On Lightsail, slippage is tighter (0.001 - 0.002 = 0.1%-0.2%), on preview allow 0.5% buffer
       slippageBufferPct: isUltraLow ? 0.002 : 0.005,
       // Trailing stop responsiveness factor (1.15x faster reaction on Lightsail)
-      trailingStopAgilityFactor: isUltraLow ? 1.15 : 1.0
+      trailingStopAgilityFactor: isUltraLow ? 1.15 : 1.0,
+      sampleRate: `${sampleMs}ms`,
+      sampleRateIntervalMs: sampleMs,
+      isNeuralExitMonitorActive: this.isNeuralExitMonitorActive
     };
   }
 

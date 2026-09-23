@@ -73,13 +73,19 @@ export class SmartTrailingEngine {
       latencyAgilityFactor = 1.0
     } = input;
 
+    const safeEntry = isPerpetual ? Math.max(0.01, entryPrice || 1.0) : Math.max(0.01, Math.min(0.99, entryPrice || 0.50));
     const currentCostPerContract = isPerpetual
-      ? Math.max(1.0, entryPrice || 100.0)
-      : Math.max(0.01, entryPrice || 0.50);
-    const positionCapitalCost = size * currentCostPerContract;
-    const currentProfitUsd = pnlRatio * positionCapitalCost;
-    const peakPnlRatio = Math.max(pnlRatio, rawPeakPnlRatio || 0);
-    const peakProfitUsd = peakPnlRatio * positionCapitalCost;
+      ? safeEntry
+      : safeEntry;
+    const positionCapitalCost = Math.max(5.0, size * currentCostPerContract);
+    
+    // Strictly sanitize pnlRatio within physically possible contract payouts (capped at max +200%)
+    const maxContractGainRatio = isPerpetual ? 2.0 : Math.max(0.01, Math.min(2.0, (1.0 - safeEntry) / safeEntry));
+    const sanitizedPnlRatio = Math.max(-1.0, Math.min(maxContractGainRatio, pnlRatio));
+    const maxDollarGain = isPerpetual ? positionCapitalCost * 2.0 : size * (1.0 - safeEntry);
+    const currentProfitUsd = Math.max(-positionCapitalCost, Math.min(maxDollarGain, sanitizedPnlRatio * positionCapitalCost));
+    const peakPnlRatio = Math.max(sanitizedPnlRatio, Math.min(maxContractGainRatio, rawPeakPnlRatio || 0));
+    const peakProfitUsd = Math.min(maxDollarGain, peakPnlRatio * positionCapitalCost);
 
     const wasActive = Boolean(currentState?.isActive);
     const prevTier = currentState?.tier || 0;
@@ -181,13 +187,13 @@ export class SmartTrailingEngine {
       lockedFloorDollars = Math.min(lockedFloorDollars, peakProfitUsd * 0.95);
     }
 
-    // Convert locked dollars to trailing floor ratio
+    // Convert locked dollars to trailing floor ratio (strictly clamped to <= 2.0 / +200%)
     let calculatedFloorRatio = (lockedFloorDollars * Math.max(0.9, Math.min(1.25, latencyAgilityFactor))) / Math.max(1, positionCapitalCost);
-    // Floor ratio must never be negative or lower than 3% once active
-    calculatedFloorRatio = Math.max(0.03, calculatedFloorRatio);
+    // Floor ratio must never be negative or lower than 3% once active, and cannot exceed 200%
+    calculatedFloorRatio = Math.max(0.03, Math.min(2.0, calculatedFloorRatio));
 
     // Strictly monotonic ratchet rule: trailing floor can NEVER move downward
-    const finalFloorRatio = Math.max(calculatedFloorRatio, prevFloor);
+    const finalFloorRatio = Math.min(2.0, Math.max(calculatedFloorRatio, prevFloor));
     // Net locked profit accounts for the 2% round-trip exchange fee and spread friction
     const netFloorRatio = Math.max(0, finalFloorRatio - 0.02);
     const finalLockedProfitUsd = netFloorRatio * positionCapitalCost;
@@ -230,14 +236,14 @@ export class SmartTrailingEngine {
 
     if (isFullGoalReached) {
       shouldClose = true;
-      closeReason = `Smart Trailing TP: Full $50 Scaled Target Reached (+${(pnlRatio * 100).toFixed(1)}% | +$${currentProfitUsd.toFixed(2)} Captured)`;
+      closeReason = `Smart Trailing TP: Full $${targetDollarGoal.toFixed(0)} Scaled Target Reached (+${(sanitizedPnlRatio * 100).toFixed(1)}% | +$${currentProfitUsd.toFixed(2)} Captured)`;
     } else if (isPerpetualFastExit) {
       shouldClose = true;
       closeReason = `Perpetual Velocity Heuristic: Accelerated exit secured +$${currentProfitUsd.toFixed(2)} before momentum decay (Peak: +$${peakProfitUsd.toFixed(2)})`;
     } else if (isBinaryMarketCapped && currentProfitUsd >= minDollarTarget) {
       shouldClose = true;
       closeReason = `Smart Trailing TP: Prediction Contract Payoff Ceiling reached at ${(currentMarketPrice * 100).toFixed(0)}¢ (Secured +$${currentProfitUsd.toFixed(2)})`;
-    } else if (pnlRatio <= finalFloorRatio) {
+    } else if (sanitizedPnlRatio <= finalFloorRatio) {
       shouldClose = true;
       closeReason = `Smart Trailing Stop Triggered: Secured +$${finalLockedProfitUsd.toFixed(2)} floor without losing gains (Floor: +${(finalFloorRatio * 100).toFixed(1)}% | Peak: +$${peakProfitUsd.toFixed(2)})`;
     }

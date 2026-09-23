@@ -103,9 +103,17 @@ export function OrderBookMonitor({ marketContext }: OrderBookMonitorProps) {
   };
 
   useEffect(() => {
-    fetchOrderBook();
-    const interval = setInterval(fetchOrderBook, 3000);
-    return () => clearInterval(interval);
+    let isMounted = true;
+    const safeFetch = () => {
+      if (document.hidden) return;
+      fetchOrderBook();
+    };
+    safeFetch();
+    const interval = setInterval(safeFetch, 6000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, [activeTab?.symbol]);
 
   const totalBidVol = orderBook.filter(i => i.bidVol !== null).reduce((acc, i) => Math.max(acc, i.bidVol || 0), 0);

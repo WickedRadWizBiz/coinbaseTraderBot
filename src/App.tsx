@@ -271,6 +271,7 @@ export default function App() {
       <RestartConfirmModal
         isOpen={showRestartModal}
         onClose={() => setShowRestartModal(false)}
+        onSuccess={() => window.location.reload()}
       />
     </div>
   );

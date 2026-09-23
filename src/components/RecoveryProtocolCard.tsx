@@ -73,9 +73,19 @@ export const RecoveryProtocolCard: React.FC = () => {
   };
 
   useEffect(() => {
-    fetchProtocolData(true);
-    const interval = setInterval(() => fetchProtocolData(false), 4000);
-    return () => clearInterval(interval);
+    let isMounted = true;
+    const safeFetch = (isInitial: boolean) => {
+      if (document.hidden) return;
+      fetchProtocolData(isInitial);
+    };
+    safeFetch(true);
+    const interval = setInterval(() => {
+      if (isMounted) safeFetch(false);
+    }, 8000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   if (!data) {

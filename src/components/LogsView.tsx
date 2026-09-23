@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Terminal, Clock, Activity, Cpu } from 'lucide-react';
-
+import { BackpressureMonitor } from './BackpressureMonitor';
+import { KalshiTokenBucketGauges } from './KalshiTokenBucketGauges';
 
 interface Log {
   id: number;
@@ -13,7 +14,9 @@ export function LogsView() {
   const [logs, setLogs] = useState<Log[]>([]);
 
   useEffect(() => {
+    let isMounted = true;
     const fetchLogs = () => {
+      if (document.hidden) return;
       fetch('/api/logs')
         .then(r => {
           if (!r.ok) return null;
@@ -21,11 +24,14 @@ export function LogsView() {
           if (!ct || !ct.includes('application/json')) return null;
           return r.json().catch(() => null);
         })
-        .then(data => { if (data) setLogs(data.logs || []); }).catch(() => {});
+        .then(data => { if (data && isMounted) setLogs(data.logs || []); }).catch(() => {});
     };
     fetchLogs();
-    const interval = setInterval(fetchLogs, 2000);
-    return () => clearInterval(interval);
+    const interval = setInterval(fetchLogs, 4000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   const getTypeColor = (type: string) => {
@@ -61,7 +67,12 @@ export function LogsView() {
         </div>
       </div>
 
-      
+      {/* Kalshi Rate Limit Token Bucket & Tier Engine */}
+      <KalshiTokenBucketGauges />
+
+      {/* Backpressure Queue & Rate Limit Pacing Monitor */}
+      <BackpressureMonitor />
+
       <div className="crt-grid-panel !p-0 overflow-hidden font-mono text-xs relative h-[520px] flex flex-col">
         <div className="absolute inset-0 heavy-dither-overlay pointer-events-none" />
         <div className="absolute inset-0 dither-gradient-overlay pointer-events-none" />

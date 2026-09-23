@@ -744,7 +744,13 @@ OUTPUT FORMAT (JSON strictly):
 }
 `;
 
-        const candidateModels = ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
+        const candidateModels = [
+          'gemini-flash-latest',
+          'gemini-3.8-flash',
+          'gemini-3.6-flash',
+          'gemini-3.1-flash-lite',
+          'gemini-3.1-pro-preview'
+        ];
         let lastError: any = null;
 
         for (const model of candidateModels) {

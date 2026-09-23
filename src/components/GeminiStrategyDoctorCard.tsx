@@ -67,9 +67,17 @@ export function GeminiStrategyDoctorCard() {
   };
 
   useEffect(() => {
-    fetchAmendments();
-    const interval = setInterval(fetchAmendments, 5000);
-    return () => clearInterval(interval);
+    let isMounted = true;
+    const safeFetch = () => {
+      if (document.hidden) return;
+      fetchAmendments();
+    };
+    safeFetch();
+    const interval = setInterval(safeFetch, 10000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   const handleToggle = async (id: string, currentActive: boolean) => {

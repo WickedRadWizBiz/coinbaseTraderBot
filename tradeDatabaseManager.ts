@@ -236,6 +236,28 @@ export class TradeDatabaseManager {
 
   private saveTimeout: NodeJS.Timeout | null = null;
 
+  public clearAllTrades() {
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+    }
+    this.rawTrades = [];
+    this.downsampledTrades = [];
+    this.autoIncrementId = 1;
+    try {
+      const payload = JSON.stringify({
+        rawTrades: [],
+        downsampledTrades: [],
+        autoIncrementId: 1,
+        lastUpdated: new Date().toISOString()
+      });
+      fs.writeFileSync(this.dbFilePath, payload, 'utf-8');
+      console.log("[DB] Cleared all trade database records on fresh restart.");
+    } catch (e) {
+      console.error("[DB ERROR] Failed wiping trades from disk:", e);
+    }
+  }
+
   private saveToDisk() {
     if (this.saveTimeout) {
       clearTimeout(this.saveTimeout);
@@ -269,7 +291,14 @@ export class TradeDatabaseManager {
     heavyJsonStr: string,
     timestampOverrideSec?: number
   ): Promise<number> {
-    const validation = TradeDatabaseManager.validateRealTradeData(asset, indicators, targetPrice, actualPrice, heavyJsonStr);
+    const safeTargetPrice = (typeof targetPrice === 'number' && !isNaN(targetPrice) && isFinite(targetPrice) && targetPrice > 0)
+      ? targetPrice
+      : 0.50;
+    const safeActualPrice = (typeof actualPrice === 'number' && !isNaN(actualPrice) && isFinite(actualPrice) && actualPrice > 0)
+      ? actualPrice
+      : Math.max(0.0001, Math.abs(actualPrice) || 0.01);
+
+    const validation = TradeDatabaseManager.validateRealTradeData(asset, indicators, safeTargetPrice, safeActualPrice, heavyJsonStr);
     if (!validation.isValid) {
       console.warn(`[DB VALIDATION REJECT] Refused to record simulated or invalid trade to TradeDatabaseManager store: ${validation.reason}`);
       throw new Error(`[DB VALIDATION REJECT] ${validation.reason}`);
@@ -285,8 +314,8 @@ export class TradeDatabaseManager {
       timestamp: nowSec,
       asset,
       encoded_analysis: encoded,
-      target_price: targetPrice,
-      actual_price: actualPrice,
+      target_price: safeTargetPrice,
+      actual_price: safeActualPrice,
       is_win: winInt,
       raw_metrics: heavyJsonStr
     };

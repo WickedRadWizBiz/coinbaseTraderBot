@@ -63,9 +63,17 @@ export function MetaLearningSandboxCard() {
   };
 
   useEffect(() => {
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 3000);
-    return () => clearInterval(interval);
+    let isMounted = true;
+    const safeFetch = () => {
+      if (document.hidden) return;
+      fetchStatus();
+    };
+    safeFetch();
+    const interval = setInterval(safeFetch, 8000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   const handleRunRetraining = async () => {

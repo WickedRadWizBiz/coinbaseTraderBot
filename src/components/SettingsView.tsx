@@ -8,9 +8,9 @@ export function SettingsView() {
   const [settings, setSettings] = useState({
     trainingOnTheJob: false,
     winningsLock: 50,
-    allocCrypto15m: 50,
+    allocCrypto15m: 55,
     allocCrypto1h: 35,
-    allocSports: 15,
+    allocSports: 10,
     lossRecoveryMode: false,
     overrideConfluence: false,
     stopLossBase: -20,
@@ -18,9 +18,9 @@ export function SettingsView() {
     profitLockFloor: 5,
     instantProfitQueue: 20,
     kellyMultiplier: 0.5,
+    simulatedLatencyMs: 0,
     paperTrading: true,
-    botActive: true, adaptationMode: true, ENABLE_RAPID_SCALP_MODE: true, lowFundsMode: false, gauntletMode: false,
-    simulatedLatencyMs: 0
+    botActive: true, adaptationMode: true, ENABLE_RAPID_SCALP_MODE: true, lowFundsMode: false, gauntletMode: false
   });
   const [balanceData, setBalanceData] = useState<any>(null);
   const [marketTesting, setMarketTesting] = useState<any>(null);
@@ -57,9 +57,17 @@ export function SettingsView() {
   };
 
   useEffect(() => {
-    fetchAll();
-    const interval = setInterval(fetchAll, 5000);
-    return () => clearInterval(interval);
+    let isMounted = true;
+    const safeFetch = () => {
+      if (document.hidden) return;
+      fetchAll();
+    };
+    safeFetch();
+    const interval = setInterval(safeFetch, 10000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   const handleToggleTrainingOnTheJob = async () => {
@@ -183,26 +191,32 @@ export function SettingsView() {
               Engages LARL (Latency-Aware RL) & fractional Kelly dynamic scaling. Starts paper bankroll at $20 and algorithmically drives compounding toward $2,000 using CRRA log-utility maximization.
             </span>
           </div>
-          <div className="relative shrink-0">
-            <input
-              type="checkbox"
-              className="sr-only"
-              checked={Boolean((settings as any).gauntletMode)}
-              onChange={(e) => {
-                const isChecked = e.target.checked;
-                const newSettings = {
-                  ...settings,
-                  gauntletMode: isChecked,
-                  paperTrading: isChecked ? true : settings.paperTrading,
-                  simulatedLatencyMs: isChecked && !(settings as any).simulatedLatencyMs ? 50 : (settings as any).simulatedLatencyMs
-                };
-                setSettings(newSettings as any);
-                fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newSettings) });
-              }}
-            />
-            <div className={`block w-14 h-8 rounded-none transition-colors crt-border ${(settings as any).gauntletMode ? 'bg-[#f59e0b]' : 'bg-black/60 border border-[#404040]'}`}></div>
-            <div className={`absolute left-1 top-1 bg-white w-6 h-6 rounded-none transition-transform ${(settings as any).gauntletMode ? 'translate-x-6' : ''}`}></div>
-          </div>
+          <button
+            type="button"
+            onClick={() => {
+              const currentGauntlet = Boolean((settings as any).gauntletMode);
+              const nextGauntlet = !currentGauntlet;
+              const newSettings = {
+                ...settings,
+                gauntletMode: nextGauntlet,
+                paperTrading: nextGauntlet ? true : settings.paperTrading
+              };
+              setSettings(newSettings as any);
+              fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(newSettings)
+              });
+            }}
+            className={`px-4 py-2 text-xs uppercase font-bold border transition-all cursor-pointer shrink-0 min-h-[44px] flex items-center gap-2 ${
+              (settings as any).gauntletMode
+                ? 'bg-[#f59e0b] text-black border-[#f59e0b] shadow-[0_0_12px_rgba(245,158,11,0.5)]'
+                : 'bg-black/60 text-[#f59e0b] border-[#f59e0b]/60 hover:bg-[#f59e0b] hover:text-black'
+            }`}
+          >
+            <span className={`w-2.5 h-2.5 rounded-full ${(settings as any).gauntletMode ? 'bg-black animate-ping' : 'bg-[#f59e0b]'}`}></span>
+            <span>{(settings as any).gauntletMode ? 'GAUNTLET: ON' : 'GAUNTLET: OFF'}</span>
+          </button>
         </div>
 
         {/* Toggle Switch */}
@@ -311,7 +325,7 @@ export function SettingsView() {
             </div>
           </div>
           <div className="flex flex-col gap-1 p-3 bg-black/40 crt-border border-crypto-primary/30">
-            <span className="text-xs text-crypto-primary opacity-70 uppercase tracking-wider font-bold">Intraday Sports</span>
+            <span className="text-xs text-crypto-primary opacity-70 uppercase tracking-wider font-bold">ATP Tennis & Sports</span>
             <div className="flex items-center justify-between">
               <span className="text-xl font-semibold text-crypto-primary">{settings.allocSports}%</span>
             </div>
@@ -337,15 +351,29 @@ export function SettingsView() {
           </label>
         </div>
 
-        <div className="flex items-start gap-3 p-3 bg-black/40 crt-border border-crypto-primary/30 mt-1">
-          <ShieldCheck className="w-5 h-5 text-crypto-primary shrink-0 mt-0.5" />
-          <div className="flex flex-col gap-0.5">
-            <span className="text-xs font-bold uppercase tracking-wider text-crypto-text flex items-center gap-2">
-              Perpetual Capital Reserve Guard: <span className="text-crypto-primary font-mono">30% Hard Floor</span>
-            </span>
-            <span className="text-xs text-[#808080]">
-              The last remaining 30% of working capital is hard-locked against Perpetual Contracts, ensuring liquidity is never exhausted by perpetual margin and always preserved for prediction market entries.
-            </span>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-1">
+          <div className="flex items-start gap-3 p-3 bg-black/40 crt-border border-crypto-primary/30">
+            <ShieldCheck className="w-5 h-5 text-crypto-primary shrink-0 mt-0.5" />
+            <div className="flex flex-col gap-0.5">
+              <span className="text-xs font-bold uppercase tracking-wider text-crypto-text flex items-center gap-2">
+                Perpetual Capital Reserve Guard: <span className="text-crypto-primary font-mono">30% Hard Floor</span>
+              </span>
+              <span className="text-xs text-[#808080]">
+                The last remaining 30% of working capital is hard-locked against Perpetual Contracts, ensuring liquidity is preserved for prediction market entries.
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-3 p-3 bg-black/40 crt-border border-crypto-primary/30">
+            <ShieldCheck className="w-5 h-5 text-crypto-primary shrink-0 mt-0.5" />
+            <div className="flex flex-col gap-0.5">
+              <span className="text-xs font-bold uppercase tracking-wider text-crypto-text flex items-center gap-2">
+                Tennis Sports Capital Guard: <span className="text-crypto-primary font-mono">10% Available Cash Limit</span>
+              </span>
+              <span className="text-xs text-[#808080]">
+                ATP Tennis sports contracts are strictly capped at 10% of total available cash at any given time across all active positions.
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -562,40 +590,43 @@ export function SettingsView() {
               </div>
             </div>
 
-            {/* Network Latency Simulator Slider (0-500ms) */}
             <div className="flex flex-col gap-2 pt-2 pb-4 mb-4 border-b border-crypto-primary/30 pl-2">
-              <label className="text-xs text-crypto-primary font-bold uppercase tracking-wider flex justify-between">
-                <span className="flex items-center gap-2">
-                  Network Latency Simulator
-                  <span className={`px-2 py-0.5 text-[9px] font-bold border rounded-none ${
-                    (settings.simulatedLatencyMs || 0) > 0 ? 'bg-amber-500/20 text-amber-300 border-amber-500' : 'bg-crypto-primary/20 text-crypto-primary border-crypto-primary/40'
-                  }`}>
-                    {(settings.simulatedLatencyMs || 0) > 0 ? `${settings.simulatedLatencyMs}ms Delay (SIM)` : '0ms (Zero Latency / LIVE)'}
-                  </span>
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider text-crypto-primary flex items-center gap-1.5">
+                  <Zap className="w-3.5 h-3.5 text-crypto-primary" />
+                  Simulated Network Latency (Paper Trading)
                 </span>
-                <span className="text-crypto-primary font-mono">{settings.simulatedLatencyMs || 0}ms</span>
-              </label>
-              <input 
-                type="range" 
-                min="0" 
-                max="500" 
+                <span className="text-xs font-mono font-bold text-crypto-text bg-black/50 px-2 py-0.5 border border-crypto-primary/40">
+                  {settings.simulatedLatencyMs ?? 0} ms
+                </span>
+              </div>
+              <span className="text-xs text-[#808080]">
+                Inject realistic REST API and WebSocket transit latency during paper trading executions (0ms = Instant execution, 50-300ms = Realistic network).
+              </span>
+              <input
+                type="range"
+                min="0"
+                max="500"
                 step="10"
-                value={settings.simulatedLatencyMs || 0}
+                value={settings.simulatedLatencyMs ?? 0}
                 onChange={(e) => {
                   const val = parseInt(e.target.value, 10);
                   const newSettings = { ...settings, simulatedLatencyMs: val };
                   setSettings(newSettings);
-                  fetch('/api/settings', { 
-                    method: 'POST', 
-                    headers: { 'Content-Type': 'application/json' }, 
-                    body: JSON.stringify({ simulatedLatencyMs: val }) 
+                  fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(newSettings)
                   });
                 }}
-                className="w-full h-2 bg-black/60 border border-[#404040] rounded-none appearance-none cursor-pointer accent-crypto-primary"
+                className="w-full accent-crypto-primary h-2 bg-black border border-crypto-primary/40 cursor-pointer mt-1"
               />
-              <p className="text-[11px] text-[#808080] mt-1 font-sans">
-                Simulates execution slippage and exchange latency (0 to 500ms) during paper trading. Injects delays on entry and exit to test LARL model robustness under real-world network lag.
-              </p>
+              <div className="flex justify-between text-[10px] text-[#808080] font-mono">
+                <span>0 ms (Instant)</span>
+                <span>150 ms (Avg)</span>
+                <span>300 ms (High)</span>
+                <span>500 ms (Stress)</span>
+              </div>
             </div>
           </>
         )}

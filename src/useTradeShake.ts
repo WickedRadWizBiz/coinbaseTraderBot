@@ -5,14 +5,16 @@ export function useTradeShake() {
   const lastLogIdRef = useRef<number | null>(null);
 
   useEffect(() => {
+    let isMounted = true;
     const checkLogs = async () => {
+      if (document.hidden) return;
       try {
-        const res = await fetch('/api/logs');
-        if (!res.ok) return;
+        const res = await fetch('/api/logs').catch(() => null);
+        if (!res || !res.ok) return;
         const ct = res.headers.get('content-type');
         if (!ct || !ct.includes('application/json')) return;
         const data = await res.json().catch(() => null);
-        if (!data || !Array.isArray(data.logs)) return;
+        if (!data || !Array.isArray(data.logs) || !isMounted) return;
         const logs = data.logs;
         
         if (logs.length > 0) {
@@ -24,9 +26,8 @@ export function useTradeShake() {
              const newLogs = logs.filter((l: any) => typeof l?.id === 'number' && l.id > lastLogIdRef.current!);
              if (newLogs.some((l: any) => l.type === 'TRADE' || l.type === 'EXECUTE' || l.type === 'PROFIT')) {
                 setShake(true);
-                // Dispatch event so other components know a trade occurred
                 window.dispatchEvent(new Event('trade_executed'));
-                setTimeout(() => setShake(false), 250);
+                setTimeout(() => { if (isMounted) setShake(false); }, 250);
              }
           }
           lastLogIdRef.current = maxId;
@@ -37,9 +38,13 @@ export function useTradeShake() {
     };
     
     checkLogs();
-    const interval = setInterval(checkLogs, 2000);
-    return () => clearInterval(interval);
+    const interval = setInterval(checkLogs, 5000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
   
   return shake;
 }
+

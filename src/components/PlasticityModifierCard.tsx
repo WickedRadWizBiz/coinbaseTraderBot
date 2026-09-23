@@ -102,9 +102,17 @@ export function PlasticityModifierCard() {
   };
 
   useEffect(() => {
-    fetchPlasticityData();
-    const interval = setInterval(fetchPlasticityData, 6000);
-    return () => clearInterval(interval);
+    let isMounted = true;
+    const safeFetch = () => {
+      if (document.hidden) return;
+      fetchPlasticityData();
+    };
+    safeFetch();
+    const interval = setInterval(safeFetch, 10000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   const patternKeys = [

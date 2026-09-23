@@ -27,6 +27,17 @@ export class UnifiedDataHandler {
     let correlatedSpotPair = 'NONE';
     let isCryptoSpot = false;
 
+    // Prioritize non-crypto sports/tennis detection
+    if (catLower === 'sports' || symUpper.includes('ATP') || symUpper.includes('TENNIS') || lblUpper.includes('TENNIS') || lblUpper.includes('ATP')) {
+      return {
+        contractSymbol: symbol,
+        contractLabel: label || symbol,
+        category: 'sports',
+        correlatedSpotPair: 'NON_CRYPTO_SPORTS',
+        isCryptoSpot: false
+      };
+    }
+
     if (symUpper.includes('ETH') || lblUpper.includes('ETH')) {
       correlatedSpotPair = 'ETH-USD';
       isCryptoSpot = true;

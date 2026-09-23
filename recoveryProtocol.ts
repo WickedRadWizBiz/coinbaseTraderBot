@@ -292,9 +292,10 @@ export class CapitalPreservationProtocol {
             }
           }
         } catch (err: any) {
-          if (err?.status === 429 || String(err?.message || '').includes('429') || String(err?.message || '').includes('Quota exceeded')) {
+          const errMsg = String(err?.message || err);
+          if (err?.status === 429 || err?.status === 503 || errMsg.includes('429') || errMsg.includes('503') || errMsg.includes('Quota exceeded') || errMsg.toLowerCase().includes('unavailable') || errMsg.toLowerCase().includes('high demand')) {
             this.rateLimitCooldownUntil = Date.now() + 60000;
-            console.log('[RECOVERY PROTOCOL] Rate limit reached (429). Falling back gracefully to algorithmic hybridization for 60s.');
+            console.log('[RECOVERY PROTOCOL] AI service busy or rate-limited. Falling back gracefully to algorithmic hybridization for 60s.');
           } else {
             console.warn('[RECOVERY PROTOCOL] AI hybridization query note:', err?.message || err);
           }
@@ -433,7 +434,13 @@ Return JSON strictly matching this schema:
 }
 `;
 
-    const candidateModels = ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-3.1-flash-lite', 'gemini-3.5-flash', 'gemini-3.6-flash'];
+    const candidateModels = [
+      'gemini-flash-latest',
+      'gemini-3.8-flash',
+      'gemini-3.6-flash',
+      'gemini-3.1-flash-lite',
+      'gemini-3.1-pro-preview'
+    ];
     let lastError: any = null;
 
     for (const model of candidateModels) {
@@ -450,8 +457,20 @@ Return JSON strictly matching this schema:
       } catch (err: any) {
         lastError = err;
         const errMsg = String(err?.message || '');
-        if (err?.status === 429 || errMsg.includes('429') || errMsg.includes('Quota exceeded') || errMsg.includes('503') || errMsg.toLowerCase().includes('unavailable') || errMsg.toLowerCase().includes('high demand')) {
-          console.warn(`[RECOVERY PROTOCOL] Model ${model} rate-limited or unavailable, attempting fallback...`);
+        if (
+          err?.status === 429 ||
+          err?.status === 503 ||
+          err?.status === 404 ||
+          errMsg.includes('429') ||
+          errMsg.includes('503') ||
+          errMsg.includes('404') ||
+          errMsg.includes('Quota exceeded') ||
+          errMsg.toLowerCase().includes('unavailable') ||
+          errMsg.toLowerCase().includes('high demand') ||
+          errMsg.toLowerCase().includes('not found') ||
+          errMsg.toLowerCase().includes('no longer available')
+        ) {
+          console.warn(`[RECOVERY PROTOCOL] Model ${model} unavailable or fallback triggered, trying next model...`);
           continue;
         }
         throw err;

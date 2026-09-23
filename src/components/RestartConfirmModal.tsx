@@ -59,21 +59,21 @@ export function RestartConfirmModal({ isOpen, onClose, onSuccess }: RestartConfi
         {success ? (
           <div className="flex flex-col items-center justify-center py-6 gap-3 text-center text-crypto-success">
             <CheckCircle2 className="w-12 h-12 animate-bounce" />
-            <div className="font-bold text-base uppercase tracking-widest">BANKROLL & P/L REBOOTED</div>
-            <div className="text-xs text-crypto-text">Bankroll reset to $200.00, P/L & positions cleared. Memory & logs preserved.</div>
+            <div className="font-bold text-base uppercase tracking-widest">ALL P&L VALUES WIPED</div>
+            <div className="text-xs text-crypto-text">Bankroll reset to fresh state. All cycle profits, vaulted reserves, daily gains, and positions wiped to $0.00.</div>
           </div>
         ) : (
           <>
             <div className="text-crypto-text text-xs leading-relaxed flex flex-col gap-3">
               <p className="font-bold text-crypto-danger uppercase tracking-wider">
-                This action will reset financial metrics & active positions:
+                This action will wipe all P&L monetary values and active trades:
               </p>
               <ul className="list-disc list-inside space-y-1 opacity-90 text-[11px] bg-black/50 p-3 border border-crypto-primary/30">
-                <li>Reset working bankroll to <strong className="text-crypto-success">$200.00 USD</strong></li>
-                <li>Reset <strong className="text-crypto-text">P/L & total equity tracking</strong></li>
-                <li>Close & clear all <strong className="text-crypto-text">active paper positions</strong></li>
+                <li>Wipe <strong className="text-crypto-danger">all P&L monetary values to $0.00</strong> (Cycle P&L, Vaulted Profits, Cumulative Gains, Daily P&L)</li>
+                <li>Reset working bankroll to clean baseline (<strong className="text-crypto-success">$200.00 USD</strong>)</li>
+                <li>Close & clear all <strong className="text-crypto-text">active positions</strong> and pending orders</li>
+                <li>Reset <strong className="text-crypto-text">Goal Windows & Market Testing</strong> profit counters to $0.00</li>
                 <li>Stand down <strong className="text-crypto-text">Capital Preservation Protocol</strong></li>
-                <li className="text-crypto-success font-semibold">Preserves <strong className="text-crypto-success">strategy brain memory & historical logs</strong></li>
               </ul>
             </div>
 
@@ -94,12 +94,12 @@ export function RestartConfirmModal({ isOpen, onClose, onSuccess }: RestartConfi
                 {loading ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Resetting Bankroll...</span>
+                    <span>Wiping P&L Values...</span>
                   </>
                 ) : (
                   <>
                     <RotateCcw className="w-4 h-4" />
-                    <span>Confirm Fresh Reset</span>
+                    <span>Confirm Wipe & Restart</span>
                   </>
                 )}
               </button>

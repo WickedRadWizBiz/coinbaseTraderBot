@@ -48,10 +48,18 @@ export function ExtinctionListCard() {
   };
 
   useEffect(() => {
-    fetchTimeoutList();
-    const fetchInterval = setInterval(fetchTimeoutList, 3000);
-    const clockInterval = setInterval(() => setNow(Date.now()), 1000);
+    let isMounted = true;
+    const safeFetch = () => {
+      if (document.hidden) return;
+      fetchTimeoutList();
+    };
+    safeFetch();
+    const fetchInterval = setInterval(safeFetch, 8000);
+    const clockInterval = setInterval(() => {
+      if (!document.hidden && isMounted) setNow(Date.now());
+    }, 1000);
     return () => {
+      isMounted = false;
       clearInterval(fetchInterval);
       clearInterval(clockInterval);
     };

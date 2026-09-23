@@ -98,9 +98,17 @@ export function PatternBrainView() {
   };
 
   useEffect(() => {
-    fetchBrainData();
-    const interval = setInterval(fetchBrainData, 5000);
-    return () => clearInterval(interval);
+    let isMounted = true;
+    const safeFetch = () => {
+      if (document.hidden) return;
+      fetchBrainData();
+    };
+    safeFetch();
+    const interval = setInterval(safeFetch, 8000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   const defaultPatterns = [

@@ -445,6 +445,23 @@ export class GoalResetScheduler {
     this.saveToFile();
   }
 
+  public resetFull(startingBankroll: number): void {
+    const info = this.getWindowInfo();
+    this.currentProfitUsd = 0;
+    this.previousProfitUsd = 0;
+    this.windowStartEquity = startingBankroll;
+    this.lastWindowId = info.windowId;
+    this.hasLoggedGoalAchieved = false;
+    this.goalAchievedTimestamp = null;
+    this.untouchedVaultBalance = 0;
+    this.temporaryVaultBalance = 0;
+    this.isTemporaryVaultActive = false;
+    this.totalCompoundedToWorkingCapital = 0;
+    this.trainingCyclesCompleted = 0;
+    this.history = [];
+    this.saveToFile();
+  }
+
   public getStatus(now: Date = new Date()): GoalWindowStatus {
     const info = this.getWindowInfo(now);
     const progressPct = Math.min(100, Math.max(0, (this.currentProfitUsd / this.profitTargetUsd) * 100));

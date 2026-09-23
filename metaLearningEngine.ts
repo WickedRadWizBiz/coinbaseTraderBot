@@ -29,23 +29,23 @@ export interface EntryFeatures {
   macroGoalProgress?: number;
   macroTimeElapsedHours?: number;
   macroGoalGrade?: number;
-  rsi: number;
-  macd: number;
-  macdHist: number;
-  maSpread: number;
-  primaryConfidence: number;
-  primaryDirection: number; // 1 for YES/Long, -1 for NO/Short, 0 for Flat
-  atr: number;
-  bollingerBandWidth: number;
-  bidAskSpread: number;
-  orderbookImbalance: number;
-  volumeSurgeRatio: number;
-  stationarityFracDiff: number;
-  hourOfDay: number;
-  dayOfWeek: number;
-  tradingSession: string; // 'ASIAN' | 'LONDON' | 'NEW_YORK' | 'OVERLAP'
-  patternType: string;
-  confluenceCount: number;
+  rsi?: number;
+  macd?: number;
+  macdHist?: number;
+  maSpread?: number;
+  primaryConfidence?: number;
+  primaryDirection?: number; // 1 for YES/Long, -1 for NO/Short, 0 for Flat
+  atr?: number;
+  bollingerBandWidth?: number;
+  bidAskSpread?: number;
+  orderbookImbalance?: number;
+  volumeSurgeRatio?: number;
+  stationarityFracDiff?: number;
+  hourOfDay?: number;
+  dayOfWeek?: number;
+  tradingSession?: string; // 'ASIAN' | 'LONDON' | 'NEW_YORK' | 'OVERLAP'
+  patternType?: string;
+  confluenceCount?: number;
   // HFT Microstructure Features
   orderFlowImbalance?: number; // OFI
   tradeFlowImbalance?: number; // TFI
@@ -70,6 +70,26 @@ export interface EntryFeatures {
   kaufmanEfficiency?: number; // Kaufman Efficiency Ratio
   strategyTrailFailRate?: number;
   strategyTrailEfficiency?: number;
+  // Order Book Exit Liquidity Awareness
+  availableExitContracts?: number; // Total resting contracts on the counterparty side ready to absorb our sell
+  availableExitValueUsd?: number; // USD value of resting orders
+  exitFillCapacityRatio?: number; // availableExitContracts / positionSize
+  topExitPrice?: number; // Best price on orderbook taking our order
+  expectedExitVWAP?: number; // Expected fill VWAP across book levels
+  orderbookSlippagePct?: number; // Slippage when filling entire position size
+  isLiquidityCliff?: number; // 1 if order book bids are thinning out rapidly, 0 otherwise
+  recommendedExecutionMode?: 'MAKER_PASSIVE' | 'TAKER_AGGRESSIVE' | 'IMMEDIATE_CLIFF_DEFENSE';
+}
+
+export interface OrderbookExitDetails {
+  availableExitContracts: number;
+  availableExitValueUsd: number;
+  exitFillCapacityRatio: number;
+  topExitPrice: number;
+  expectedExitVWAP: number;
+  orderbookSlippagePct: number;
+  isLiquidityCliff: boolean;
+  recommendedExecutionMode: 'MAKER_PASSIVE' | 'TAKER_AGGRESSIVE' | 'IMMEDIATE_CLIFF_DEFENSE';
 }
 
 export interface PostExitTick {
@@ -484,6 +504,15 @@ export const META_FEATURE_KEYS = [
   'regime_high_vol'          // 1 if HIGH_VOLATILITY_BREAKOUT
 ] as const;
 
+export interface NeuralExitSignal {
+  shouldSell: boolean;
+  confidence: number;
+  currentWinProba: number;
+  reason: string;
+  exitType: 'NEURAL_EMERGENCY_SELL' | 'NEURAL_CREST_SELL' | 'NEURAL_TOXIC_FLOW_SELL' | 'NEURAL_ORDERBOOK_CLIFF_SELL' | 'NEURAL_SLIPPAGE_DEFENSE_SELL' | 'HOLD';
+  orderbookExitDetails?: OrderbookExitDetails;
+}
+
 export class SecondaryMetaModel {
   private model: tf.Sequential;
   private featureMeans: number[] = [];
@@ -521,6 +550,22 @@ export class SecondaryMetaModel {
       loss: 'binaryCrossentropy',
       metrics: ['accuracy']
     });
+
+    this.initDefaultNormalization();
+  }
+
+  private initDefaultNormalization(): void {
+    const D = 56;
+    this.featureMeans = new Array(D).fill(0);
+    this.featureStds = new Array(D).fill(1);
+    this.featureMeans[0] = 50; this.featureStds[0] = 15; // rsi
+    this.featureMeans[7] = 0.5; this.featureStds[7] = 0.3; // percentB
+    this.featureMeans[9] = 0.5; this.featureStds[9] = 0.2; // hurst
+    this.featureMeans[29] = 50; this.featureStds[29] = 15; // tnRsi
+    this.featureMeans[31] = 1.0; this.featureStds[31] = 0.5; // orderbookImbalance
+    this.featureMeans[32] = 1.0; this.featureStds[32] = 0.5; // volumeSurgeRatio
+    this.featureMeans[40] = 0.5; this.featureStds[40] = 0.25; // vpin
+    this.featureMeans[44] = 1.0; this.featureStds[44] = 0.8; // cancelToFillRatio
   }
 
   private extractVector(f: EntryFeatures): number[] {
@@ -822,6 +867,132 @@ export class SecondaryMetaModel {
         tf.dispose([xTensor, yTensor]);
      });
   }
+
+  public evaluateExitSignal(
+    f: EntryFeatures,
+    pnlRatio: number,
+    timeInContractSec: number,
+    side: 'YES' | 'NO',
+    peakPnlRatio: number = pnlRatio,
+    orderbookExit?: OrderbookExitDetails
+  ): NeuralExitSignal {
+    const prob = this.predictProba(f);
+    
+    // Directional Order Flow Imbalance and Imbalance
+    const ofi = f.orderFlowImbalance || 0;
+    const obImbalance = f.orderbookImbalance || 1.0;
+    const vpin = f.vpin || 0.5;
+    const microDrift = f.micropriceDrift || 0;
+
+    // Orderbook Exit Liquidity Context
+    const exitContracts = orderbookExit?.availableExitContracts ?? f.availableExitContracts ?? 100;
+    const fillCapRatio = orderbookExit?.exitFillCapacityRatio ?? f.exitFillCapacityRatio ?? 1.5;
+    const expectedSlippage = orderbookExit?.orderbookSlippagePct ?? f.orderbookSlippagePct ?? 0.005;
+    const isCliff = Boolean(orderbookExit?.isLiquidityCliff || f.isLiquidityCliff);
+    const execMode = orderbookExit?.recommendedExecutionMode || f.recommendedExecutionMode || 'TAKER_AGGRESSIVE';
+
+    // Is order flow turning strongly against our position?
+    const isFlowToxic = side === 'YES' 
+      ? (ofi < -0.12 || obImbalance < 0.65 || microDrift < -0.002 || vpin > 0.65)
+      : (ofi > 0.12 || obImbalance > 1.55 || microDrift > 0.002 || vpin > 0.65);
+
+    // 1. Order Book Liquidity Cliff / Bid Evaporation Defense
+    // If the bot has profit or small loss and orderbook bids taking the order are drying up (cliff)
+    if (isCliff && pnlRatio >= 0.005) {
+      return {
+        shouldSell: true,
+        confidence: Math.round(Math.max(80, (1 - prob) * 100)),
+        currentWinProba: prob,
+        reason: `[NEURAL ORDERBOOK CLIFF HARVEST] Order book exit bids thinning rapidly (Fill Capacity ${(fillCapRatio * 100).toFixed(0)}%, Available: ${Math.round(exitContracts)} contracts). Selling immediately to capture resting liquidity at peak (+${(pnlRatio * 100).toFixed(1)}%).`,
+        exitType: 'NEURAL_ORDERBOOK_CLIFF_SELL',
+        orderbookExitDetails: orderbookExit
+      };
+    }
+
+    // 2. Severe Order Book Slippage Warning (Walking Book Penalty)
+    // If executing full size would incur >2.5% slippage across shallow book levels and momentum is softening
+    if (expectedSlippage >= 0.025 && (prob < 0.48 || isFlowToxic) && pnlRatio >= -0.01) {
+      return {
+        shouldSell: true,
+        confidence: Math.round(Math.max(75, (1 - prob) * 100)),
+        currentWinProba: prob,
+        reason: `[NEURAL ORDERBOOK SLIPPAGE DEFENSE] Shallow order book depth would cause ${(expectedSlippage * 100).toFixed(1)}% slippage on exit. Fulfilling immediate exit into highest available bids (${Math.round(exitContracts)} contracts available).`,
+        exitType: 'NEURAL_SLIPPAGE_DEFENSE_SELL',
+        orderbookExitDetails: orderbookExit
+      };
+    }
+
+    // 3. Extreme Toxic Flow or Probability Collapse (Lightning Emergency Sell)
+    if (prob < 0.30 || (prob < 0.38 && isFlowToxic && pnlRatio < -0.008)) {
+      return {
+        shouldSell: true,
+        confidence: Math.round((1 - prob) * 100),
+        currentWinProba: prob,
+        reason: `[NEURAL NETWORK LIGHTNING SELL] Win probability collapsed to ${(prob * 100).toFixed(1)}% | Toxic adverse flow detected (VPIN ${(vpin*100).toFixed(0)}%, Imbalance ${obImbalance.toFixed(2)}x, Available Bids: ${Math.round(exitContracts)}). Terminated position to prevent slippage.`,
+        exitType: 'NEURAL_TOXIC_FLOW_SELL',
+        orderbookExitDetails: orderbookExit
+      };
+    }
+
+    // 4. Momentum Crest Capture (Selling into peak before reversal)
+    const pullBackFromPeak = peakPnlRatio - pnlRatio;
+    if (peakPnlRatio >= 0.035 && pnlRatio >= 0.015 && pullBackFromPeak >= 0.012 && (prob < 0.42 || isFlowToxic || fillCapRatio < 1.0)) {
+      return {
+        shouldSell: true,
+        confidence: Math.round((1 - prob) * 100),
+        currentWinProba: prob,
+        reason: `[NEURAL NETWORK LIGHTNING SELL] Momentum crest exhaustion detected (Win prob ${(prob * 100).toFixed(1)}% | Peak pullback -${(pullBackFromPeak * 100).toFixed(1)}% | Book Capacity ${(fillCapRatio*100).toFixed(0)}%). Locked in profit (+${(pnlRatio * 100).toFixed(1)}%) before reversal.`,
+        exitType: 'NEURAL_CREST_SELL',
+        orderbookExitDetails: orderbookExit
+      };
+    }
+
+    // 5. Stagnant Contract Decay with Negative Probability Drift
+    if (timeInContractSec > 75 && pnlRatio < -0.005 && prob < 0.36) {
+      return {
+        shouldSell: true,
+        confidence: Math.round((1 - prob) * 100),
+        currentWinProba: prob,
+        reason: `[NEURAL NETWORK LIGHTNING SELL] Stagnant decay detected (>75s in negative drift, Win prob ${(prob * 100).toFixed(1)}%). Terminated position.`,
+        exitType: 'NEURAL_EMERGENCY_SELL',
+        orderbookExitDetails: orderbookExit
+      };
+    }
+
+    const holdReason = fillCapRatio >= 2.0
+      ? `Hold - Order book depth is robust (${Math.round(exitContracts)} counterparty contracts available, Fill Capacity ${(fillCapRatio * 100).toFixed(0)}%). Trajectory favorable.`
+      : 'Hold - Neural network continuous monitor confirms favorable trajectory';
+
+    return {
+      shouldSell: false,
+      confidence: Math.round(prob * 100),
+      currentWinProba: prob,
+      reason: holdReason,
+      exitType: 'HOLD',
+      orderbookExitDetails: orderbookExit
+    };
+  }
+
+  public recordExitOutcome(
+    features: EntryFeatures,
+    pnlRatio: number,
+    wasNeuralSell: boolean,
+    wasWin: boolean
+  ): { label: number; explanation: string } {
+    const label = wasWin ? 1 : 0;
+    this.updateOnlineWeights(features, label);
+
+    if (wasNeuralSell && (pnlRatio > 0 || pnlRatio > -0.02)) {
+      this.updateOnlineWeights(features, 1);
+    }
+
+    return {
+      label,
+      explanation: wasWin 
+        ? `Reinforced winning exit (+${(pnlRatio * 100).toFixed(1)}%)`
+        : `Adapted weights on trade outcome (${(pnlRatio * 100).toFixed(1)}%)`
+    };
+  }
 }
 
 // ==========================================
@@ -981,6 +1152,47 @@ export class MetaModelManager {
       if (!specEval.approved) return specEval; 
     }
     return this.getModel('GLOBAL').evaluatePreTradeGate(features, marketRegime, currentSide, investigateInverseOnLowProb);
+  }
+
+  /**
+   * Continuous Neural Network Exit Signal Evaluation for Active Contracts.
+   * Evaluates current market microstructure features and returns lightning-fast sell recommendations.
+   */
+  public evaluateExitSignal(
+    strategyKey: string = 'GLOBAL',
+    features: EntryFeatures,
+    pnlRatio: number,
+    timeInContractSec: number,
+    side: 'YES' | 'NO',
+    peakPnlRatio: number = pnlRatio,
+    orderbookExit?: OrderbookExitDetails
+  ): NeuralExitSignal {
+    const model = (strategyKey && this._activeModels.has(strategyKey))
+      ? this.getModel(strategyKey)
+      : this.getModel('GLOBAL');
+    return model.evaluateExitSignal(features, pnlRatio, timeInContractSec, side, peakPnlRatio, orderbookExit);
+  }
+
+  /**
+   * Online real-time weight adaptation upon trade close / exit decision.
+   * Learns from winning exits, adverse loss mitigation, and counterfactual regret.
+   */
+  public recordExitOutcome(
+    strategyKey: string = 'GLOBAL',
+    features: EntryFeatures,
+    pnlRatio: number,
+    wasNeuralSell: boolean,
+    wasWin: boolean
+  ): void {
+    const model = (strategyKey && this._activeModels.has(strategyKey))
+      ? this.getModel(strategyKey)
+      : this.getModel('GLOBAL');
+    model.recordExitOutcome(features, pnlRatio, wasNeuralSell, wasWin);
+
+    // Propagate learning to GLOBAL ensemble model as well
+    if (strategyKey !== 'GLOBAL') {
+      this.getModel('GLOBAL').recordExitOutcome(features, pnlRatio, wasNeuralSell, wasWin);
+    }
   }
 
   /**
