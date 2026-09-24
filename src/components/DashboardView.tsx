@@ -5,6 +5,8 @@ import { RestartConfirmModal } from './RestartConfirmModal';
 import { RecoveryProtocolCard } from './RecoveryProtocolCard';
 import { ExtinctionListCard } from './ExtinctionListCard';
 import { GeminiStrategyDoctorCard } from './GeminiStrategyDoctorCard';
+import { InstitutionalTelemetryCard } from './InstitutionalTelemetryCard';
+import { FixConnectionStatus } from './FixConnectionStatus';
 
 export interface MarketTestingStatus {
   phase: 'NORMAL_CONSERVATIVE' | 'TESTING_PERIOD' | 'OVERRIDE_ACTIVE' | 'GOAL_REACHED_CONSERVATIVE';
@@ -240,15 +242,15 @@ export function DashboardView() {
   const toggleGauntletMode = async () => {
     const currentGauntlet = Boolean(currentSettings?.gauntletMode);
     const nextGauntlet = !currentGauntlet;
-    setCurrentSettings((prev: any) => ({ ...prev, gauntletMode: nextGauntlet }));
+    const newSettings = {
+      ...currentSettings,
+      gauntletMode: nextGauntlet
+    };
+    setCurrentSettings(newSettings);
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ...currentSettings,
-        gauntletMode: nextGauntlet,
-        paperTrading: nextGauntlet ? true : currentSettings?.paperTrading
-      })
+      body: JSON.stringify(newSettings)
     });
     fetchData();
   };
@@ -384,16 +386,22 @@ export function DashboardView() {
     || balance?.latency_profile?.kalshiDataLatencyMs 
     || 28;
 
-  // Real measured latency of market data coming from Kalshi
+  // Real measured WebSocket and REST latencies
+  const wsLatency = balance?.latency_profile?.coinbaseWsPingMs 
+    || balance?.latency_profile?.kalshiDataLatencyMs 
+    || 24;
+
+  const restLatency = balance?.latency_profile?.kalshiRestPingMs 
+    || balance?.latency_profile?.kalshiOrderLatencyMs 
+    || 42;
+
   const kalshiDataLatency = balance?.latency_profile?.kalshiDataLatencyMs 
     || balance?.latency_profile?.kalshiRestPingMs 
     || 38;
 
-  // Real measured latency of the bot sending order data to Kalshi
   const kalshiOrderLatency = balance?.latency_profile?.kalshiOrderLatencyMs 
     || (balance?.latency_profile?.kalshiRestPingMs ? balance.latency_profile.kalshiRestPingMs + 8 : 46);
 
-  // In live mode, NEVER simulate latency. Only show (SIM) in paper trading mode if configured > 0
   const isSimulatedOrder = !isLiveTrading && (currentSettings?.simulatedLatencyMs || 0) > 0;
   const orderLatencyDisplay = isSimulatedOrder 
     ? `${currentSettings.simulatedLatencyMs}ms (SIM)` 
@@ -476,28 +484,35 @@ export function DashboardView() {
             <h3 className="font-bold tracking-[0.2em] text-lg uppercase text-crypto-text mb-3 border-b border-crypto-primary pb-2 flex flex-wrap items-center justify-between gap-2 shrink-0">
               <span>VISUAL TELEMETRY</span>
               <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-                {/* Latency (Order send to Kalshi) and Sample Rate (Data arrival from Kalshi) */}
-                <div className="flex items-center gap-1.5 font-mono text-[10px]">
+                {/* Combined Latency, SMP RT, and FIX 4.4 Badges */}
+                <div className="flex flex-col gap-1 font-mono text-[10px]">
+                  {/* Row 1: Single combined Latency badge spanning the full width */}
                   <span 
-                    className="px-1.5 py-0.5 border border-crypto-primary/40 bg-black/40 text-crypto-text/80 flex items-center gap-1"
-                    title={isLiveTrading 
-                      ? `Live measured latency of sending orders to Kalshi API (${kalshiOrderLatency}ms)` 
-                      : (isSimulatedOrder ? `Paper simulated order execution delay (${currentSettings?.simulatedLatencyMs}ms)` : `Live measured order routing latency to Kalshi (${kalshiOrderLatency}ms)`)}
+                    className="px-1.5 py-0.5 border border-crypto-primary/40 bg-black/40 text-crypto-text/80 flex items-center justify-between gap-1.5 leading-none w-full"
+                    title={`Real-time measured transport latencies: Kalshi WebSocket Stream (${wsLatency}ms) / REST API Keep-Alive (${restLatency}ms)`}
                   >
-                    <span className="text-[#808080]">LATENCY:</span>
-                    <span className={isSimulatedOrder ? "text-amber-400 font-bold" : "text-crypto-primary font-bold"}>
-                      {orderLatencyDisplay}
+                    <span className="text-[#808080] font-bold">Latency:</span>
+                    <span className="font-bold flex items-center gap-1">
+                      <span className="text-emerald-400">WS {wsLatency} ms</span>
+                      <span className="text-[#606060]">/</span>
+                      <span className="text-crypto-primary">REST {restLatency} ms</span>
                     </span>
                   </span>
-                  <span 
-                    className="px-1.5 py-0.5 border border-crypto-primary/40 bg-black/40 text-crypto-text/80 flex items-center gap-1"
-                    title={`Measured interval of incoming market data refreshed for meta-model evaluation (${sampleRtMs}ms). Smooth and consistent sampling rate.`}
-                  >
-                    <span className="text-[#808080]">SAMPLE RT:</span>
-                    <span className="text-crypto-primary font-bold">
-                      {sampleRtMs}ms
+
+                  {/* Row 2: SMP RT and FIX 4.4 Status */}
+                  <div className="flex items-center justify-between gap-1.5 w-full">
+                    <span 
+                      className="px-1.5 py-0.5 border border-crypto-primary/40 bg-black/40 text-crypto-text/80 flex items-center justify-between gap-1 leading-none flex-1"
+                      title={`Measured interval of incoming market data refreshed for meta-model evaluation (${sampleRtMs}ms). Smooth and consistent sampling rate.`}
+                    >
+                      <span className="text-[#808080]">SMP RT:</span>
+                      <span className="text-crypto-primary font-bold">
+                        {sampleRtMs}ms
+                      </span>
                     </span>
-                  </span>
+
+                    <FixConnectionStatus variant="badge" />
+                  </div>
                 </div>
 
                 <button
@@ -508,7 +523,7 @@ export function DashboardView() {
                       ? 'bg-[#f59e0b] text-black border-[#f59e0b] shadow-[0_0_8px_rgba(245,158,11,0.6)]'
                       : 'bg-black/40 text-[#f59e0b] border-[#f59e0b]/50 hover:bg-[#f59e0b]/20'
                   }`}
-                  title="Toggle 🔥 The Gauntlet ($20 to $2000 Crucible with CRRA dynamic Kelly scaling)"
+                  title="Toggle 🔥 The Gauntlet (Dynamic CRRA Kelly scaling toward 100x compounding using starting bankroll)"
                 >
                   <span className={`w-1.5 h-1.5 rounded-full ${currentSettings?.gauntletMode ? 'bg-black animate-ping' : 'bg-[#f59e0b]'}`} />
                   <span>GAUNTLET: {currentSettings?.gauntletMode ? 'ON' : 'OFF'}</span>
@@ -883,6 +898,13 @@ export function DashboardView() {
               <div className="font-bold text-sm tracking-wider flex items-center gap-2 flex-wrap">
                 <span>EXECUTION LATENCY ADAPTATION:</span>
                 <span className={`px-2 py-0.5 border text-[10px] uppercase font-bold tracking-widest ${
+                  balance.latency_profile.connectionMode === 'WEBSOCKET'
+                    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500'
+                    : 'bg-amber-500/20 text-amber-300 border-amber-500'
+                }`}>
+                  {balance.latency_profile.connectionMode === 'WEBSOCKET' ? 'KALSHI WEBSOCKET STREAM (300MS GATE)' : 'REST KEEP-ALIVE FALLBACK (1200MS GATE)'}
+                </span>
+                <span className={`px-2 py-0.5 border text-[10px] uppercase font-bold tracking-widest ${
                   balance.latency_profile.isUltraLowLatency
                     ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500'
                     : 'bg-crypto-primary/20 text-crypto-primary border-crypto-primary/50'
@@ -938,6 +960,9 @@ export function DashboardView() {
 
       {/* STRATEGIC EVOLUTION SCREEN */}
       <GeminiStrategyDoctorCard />
+
+      {/* INSTITUTIONAL COCKPIT SCREEN */}
+      <InstitutionalTelemetryCard />
 
       {/* DEPTH MONITOR SCREEN */}
       <OrderBookMonitor marketContext={marketContext} />

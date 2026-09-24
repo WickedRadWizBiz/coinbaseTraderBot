@@ -545,9 +545,23 @@ export class SecondaryMetaModel {
     
     this.model.add(tf.layers.dense({ units: 1, activation: 'sigmoid' }));
     
+    // Institutional Asymmetric Loss Function (MADL / Asymmetric Sharpe surrogate)
+    // Penalizes False Positives heavily (financial capital loss) vs False Negatives (opportunity cost)
+    const customAsymmetricLoss = (yTrue: tf.Tensor, yPred: tf.Tensor): tf.Tensor => {
+      return tf.tidy(() => {
+        const eps = 1e-7;
+        const clampedPred = tf.clipByValue(yPred, eps, 1 - eps);
+        // Weight false positives 2.5x more than false negatives
+        const posLoss = tf.mul(yTrue, tf.log(clampedPred));
+        const negLoss = tf.mul(tf.sub(1, yTrue), tf.log(tf.sub(1, clampedPred)));
+        const weightedLoss = tf.neg(tf.add(tf.mul(posLoss, 1.0), tf.mul(negLoss, 2.5)));
+        return tf.mean(weightedLoss);
+      });
+    };
+
     this.model.compile({
       optimizer: tf.train.adam(0.005),
-      loss: 'binaryCrossentropy',
+      loss: customAsymmetricLoss as any,
       metrics: ['accuracy']
     });
 

@@ -22,12 +22,25 @@ import { goalResetScheduler } from "./goalResetScheduler";
 import { latencyAdaptiveEngine } from "./latencyAdaptiveEngine";
 import { kalshiRateLimiter, RateLimitTier } from "./kalshiRateLimiter";
 import { backpressureQueue } from "./backpressureQueue";
+import { initializeHttpKeepAlive } from "./httpKeepAlive";
+import { kalshiWsManager } from "./kalshiWebSocket";
+import { kalshiFixEngine } from "./kalshiFixEngine";
+import { jumpDiffusionEngine } from "./jumpDiffusionEngine";
+import { kalmanFilterEngine } from "./kalmanFilterEngine";
+import { bayesianKellyEngine } from "./bayesianKellyEngine";
+import { avellanedaStoikovEngine } from "./avellanedaStoikovEngine";
+
+// Initialize global persistent HTTP Keep-Alive connection pooling (50 sockets, 60s lifetime)
+initializeHttpKeepAlive();
 
 const app = express();
 app.use(express.json());
 
 globalMetricsTracker.start();
 fundingRateTracker.start();
+kalshiWsManager.start();
+kalshiFixEngine.on('error', (err) => console.warn('[FIX 4.4 Engine Warning]:', err.message || err));
+kalshiFixEngine.connect().catch(err => console.warn('[FIX 4.4] Init warning:', err));
 
 const PORT = 3000;
 
@@ -74,21 +87,15 @@ let liveRealizedPnl = 0;
 let liveUnrealizedPnl = 0;
 let liveStartingBankroll = 0;
 let liveVaultedProfits = 0;
+let liveGauntletStartingCash = 0;
 
 let paperBankrollATH = 200;
 let liveBankrollATH = 0;
 
 async function getEffectiveWorkingBalance(forceSync = false): Promise<number> {
   if (settings.paperTrading) {
-    if ((settings as any).gauntletMode || startingBankroll <= 50) {
-      paperBankrollATH = Math.max(startingBankroll, simulatedPaperBalance);
-      let capitalInUse = 0;
-      activePositions.forEach(p => capitalInUse += (p.capitalPlacedUsd || (p.size * p.entryPrice)));
-      const uninvestedCash = simulatedPaperBalance - capitalInUse;
-      return Math.max(0, uninvestedCash);
-    }
     paperBankrollATH = Math.max(startingBankroll, Math.max(paperBankrollATH, simulatedPaperBalance));
-    const reserve = Math.min(paperBankrollATH * 0.10, simulatedPaperBalance * 0.15);
+    const reserve = paperBankrollATH * 0.10;
     
     let capitalInUse = 0;
     activePositions.forEach(p => capitalInUse += (p.capitalPlacedUsd || (p.size * p.entryPrice)));
@@ -111,6 +118,9 @@ async function getEffectiveWorkingBalance(forceSync = false): Promise<number> {
         if (liveStartingBankroll === 0 && liveTotalPortfolioValue > 0) {
           liveStartingBankroll = liveTotalPortfolioValue;
         }
+        if ((settings as any).gauntletMode && liveGauntletStartingCash === 0 && realKalshiCashPool > 0) {
+          liveGauntletStartingCash = realKalshiCashPool;
+        }
 
         lastRealCashFetchTime = now;
       } else if (!summary.success && summary.error) {
@@ -130,7 +140,7 @@ async function getEffectiveWorkingBalance(forceSync = false): Promise<number> {
     }
   }
   
-  liveBankrollATH = Math.max(liveBankrollATH, realKalshiCashPool);
+  liveBankrollATH = Math.max(liveStartingBankroll, Math.max(liveBankrollATH, realKalshiCashPool));
   const reserve = liveBankrollATH * 0.10;
   return Math.max(0, realKalshiCashPool - reserve);
 }
@@ -2083,6 +2093,42 @@ function getCapitalPreservationStatus() {
   };
 }
 
+async function forceRefreshContractOrderBook(symbol: string): Promise<boolean> {
+  try {
+    const isPerp = symbol.endsWith('PERP');
+    const obUrl = isPerp
+      ? `https://api.elections.kalshi.com/trade-api/v2/margin/markets/${symbol}/orderbook`
+      : `https://api.elections.kalshi.com/trade-api/v2/markets/${symbol}/orderbook`;
+
+    const start = Date.now();
+    const data = await fetchJson(obUrl, 'HIGH', 1);
+    const elapsed = Date.now() - start;
+    if (!data) return false;
+
+    let bids: Array<{ price: number; size: number }> = [];
+    let asks: Array<{ price: number; size: number }> = [];
+
+    if (isPerp && data.orderbook) {
+      bids = (data.orderbook.bids || []).map((b: any) => ({ price: parseFloat(b[0]), size: parseFloat(b[1]) })).sort((a: any, b: any) => b.price - a.price);
+      asks = (data.orderbook.asks || []).map((a: any) => ({ price: parseFloat(a[0]), size: parseFloat(a[1]) })).sort((a: any, b: any) => a.price - b.price);
+    } else if (data.orderbook_fp && (data.orderbook_fp.yes_dollars || data.orderbook_fp.no_dollars)) {
+      bids = data.orderbook_fp.yes_dollars ? data.orderbook_fp.yes_dollars.map((b: any) => ({ price: parseFloat(b[0]), size: parseFloat(b[1]) })).sort((a: any, b: any) => b.price - a.price) : [];
+      asks = data.orderbook_fp.no_dollars ? data.orderbook_fp.no_dollars.map((a: any) => ({ price: 1.0 - parseFloat(a[0]), size: parseFloat(a[1]) })).sort((a: any, b: any) => a.price - b.price) : [];
+    } else if (data.orderbook && (data.orderbook.bids || data.orderbook.asks)) {
+      bids = (data.orderbook.bids || []).map((b: any) => ({ price: parseFloat(b[0]), size: parseFloat(b[1]) })).sort((a: any, b: any) => b.price - a.price);
+      asks = (data.orderbook.asks || []).map((a: any) => ({ price: parseFloat(a[0]), size: parseFloat(a[1]) })).sort((a: any, b: any) => a.price - b.price);
+    }
+
+    if (bids.length > 0 || asks.length > 0) {
+      applyOrderBookToSpotContext(symbol, bids, asks, elapsed);
+      return true;
+    }
+    return false;
+  } catch (err) {
+    return false;
+  }
+}
+
 async function openPosition(
   symbol: string, 
   side: 'YES' | 'NO', 
@@ -2093,7 +2139,8 @@ async function openPosition(
   label: string, 
   category: string, 
   reason: string = "",
-  analysisMeta: any = null
+  analysisMeta: any = null,
+  isReEvaluationAttempt: boolean = false
 ) {
   // Hard Gatekeeper 1: Bot Active Status strictly stops bot from placing or opening trades
   if (!settings.botActive) {
@@ -2101,18 +2148,70 @@ async function openPosition(
   }
 
   try {
-    const ctx = spotContexts[symbol];
+    let ctx = spotContexts[symbol];
     const isPerpContract = Boolean(spotContexts[symbol]?.isPerpetual || symbol.endsWith('PERP'));
     const isPerp = ctx ? !!ctx.isPerpetual : false;
 
-    // [LATENCY GATE C] Timestamp Drift & Quote Freshness Verification
+    // [LATENCY GATE C] Timestamp Drift & Quote Freshness Verification with Immediate Re-Evaluation
     const freshness = latencyAdaptiveEngine.verifyQuoteFreshness(ctx?.lastQuoteUpdateMs, symbol);
     if (!freshness.isFresh) {
-      spotLogs.unshift({
-        id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-        message: freshness.reason || `[LATENCY GATE] Market quote for ${symbol} is stale. Order entry aborted to prevent adverse fill slippage.`
-      });
-      return;
+      if (!isReEvaluationAttempt) {
+        spotLogs.unshift({
+          id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+          message: `[LATENCY GATE TRIGGERED] Initial quote check stale for ${symbol} (Age: ${freshness.ageMs}ms). Initiating immediate contract re-evaluation...`
+        });
+
+        // 1. Trigger immediate high-priority quote refresh
+        const refreshed = await forceRefreshContractOrderBook(symbol);
+        ctx = spotContexts[symbol];
+
+        // 2. Re-check Latency Gate on this re-evaluation
+        const recheckFreshness = latencyAdaptiveEngine.verifyQuoteFreshness(ctx?.lastQuoteUpdateMs, symbol);
+        if (!recheckFreshness.isFresh || !refreshed) {
+          // If the latency gate is triggered on this re-evaluation then the contract is moved on from.
+          spotLogs.unshift({
+            id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+            message: `[LATENCY GATE - CONTRACT MOVED ON FROM] Latency Gate re-triggered on re-evaluation for ${symbol} (Age: ${recheckFreshness.ageMs}ms). Contract moved on from.`
+          });
+          return;
+        }
+
+        // 3. Re-evaluate if contract is viable
+        const refreshedSidePrice = ctx?.currentPrice ? (side === 'YES' ? ctx.currentPrice : (isPerp ? ctx.currentPrice : 1.0 - ctx.currentPrice)) : entryPrice;
+        
+        // Price viability bounds check
+        if (refreshedSidePrice <= 0.01 || refreshedSidePrice >= 0.99 || isNaN(refreshedSidePrice)) {
+          spotLogs.unshift({
+            id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+            message: `[LATENCY GATE RE-EVALUATION - UNVIABLE] Price bounds invalid ($${refreshedSidePrice.toFixed(2)}) on ${symbol} after refresh. Contract moved on from.`
+          });
+          return;
+        }
+
+        // Price drift check (e.g. price shifted adversely by > 12%)
+        const priceDriftPct = Math.abs(refreshedSidePrice - entryPrice) / Math.max(0.01, entryPrice);
+        if (priceDriftPct > 0.12) {
+          spotLogs.unshift({
+            id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+            message: `[LATENCY GATE RE-EVALUATION - UNVIABLE] Severe price slippage drift (${(priceDriftPct * 100).toFixed(1)}%) on ${symbol} ($${entryPrice.toFixed(2)} -> $${refreshedSidePrice.toFixed(2)}). Viability voided. Contract moved on from.`
+          });
+          return;
+        }
+
+        spotLogs.unshift({
+          id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+          message: `[LATENCY GATE RE-EVALUATION - VIABLE] Latency gate cleared on re-evaluation for ${symbol} (${recheckFreshness.ageMs}ms fresh). Contract verified viable at $${refreshedSidePrice.toFixed(2)}. Proceeding with execution.`
+        });
+
+        entryPrice = refreshedSidePrice;
+      } else {
+        // Latency gate triggered on re-evaluation: moved on from
+        spotLogs.unshift({
+          id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+          message: `[LATENCY GATE - CONTRACT MOVED ON FROM] Latency Gate triggered on re-evaluation for ${symbol}. Contract moved on from.`
+        });
+        return;
+      }
     }
 
     if (!canOpenTrade(activePositions, category, label, isPerp)) return;
@@ -2613,7 +2712,7 @@ async function openPosition(
   }
 
   // --- GAUNTLET MODE: CRRA / FRACTIONAL KELLY ---
-  if (settings.paperTrading && (settings as any).gauntletMode) {
+  if ((settings as any).gauntletMode) {
     const fractionalKellyMod = 0.25; // Quarter-Kelly for survival
     const b = Math.max(0.1, expectedTP);
     const p = Math.max(0.01, estimatedWinProb);
@@ -2624,9 +2723,16 @@ async function openPosition(
     if (kellyFrac < 0.01) kellyFrac = 0.05;
     kellyFrac = Math.max(0.02, Math.min(0.25, kellyFrac));
 
-    const maxTarget = 2000.0;
-    const currentEq = Math.max(20.0, currentWorkingBalance);
-    const crraAversionFactor = Math.max(0.1, Math.log10(currentEq) / Math.log10(maxTarget));
+    // Dynamic scaling baseline:
+    // In paper mode, starts at $20 and scales toward $2,000 (100x compounding).
+    // In live mode, scales relative to the cash amount present in Kalshi cash pool at start toward 100x compounding.
+    const startEq = settings.paperTrading 
+      ? 20.0 
+      : Math.max(1.0, liveGauntletStartingCash || liveStartingBankroll || realKalshiCashPool || 20.0);
+    const maxTarget = Math.max(startEq * 2.0, startEq * 100.0);
+    const currentEq = Math.max(startEq * 0.25, currentWorkingBalance);
+
+    const crraAversionFactor = Math.max(0.05, Math.min(0.95, Math.log10(Math.max(1.0, currentEq)) / Math.log10(Math.max(10.0, maxTarget))));
     const crraAdjustedKelly = kellyFrac * Math.max(0.2, (1.0 - crraAversionFactor));
 
     let gauntletCostUsd = currentEq * crraAdjustedKelly;
@@ -2646,7 +2752,7 @@ async function openPosition(
 
     spotLogs.unshift({
       id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-      message: `[GAUNTLET MODE CRRA SCALING] Eq: ${currentEq.toFixed(2)} | CRRA Aversion: ${crraAversionFactor.toFixed(2)} | Allocating ${(crraAdjustedKelly*100).toFixed(1)}% of bankroll ($${gauntletCostUsd.toFixed(2)})`
+      message: `[GAUNTLET MODE CRRA SCALING (${settings.paperTrading ? 'PAPER' : 'LIVE'})] Eq: $${currentEq.toFixed(2)} (Start: $${startEq.toFixed(2)} -> Target: $${maxTarget.toFixed(2)}) | CRRA Aversion: ${crraAversionFactor.toFixed(2)} | Allocating ${(crraAdjustedKelly*100).toFixed(1)}% of bankroll ($${gauntletCostUsd.toFixed(2)})`
     });
   }
 
@@ -2829,20 +2935,45 @@ async function fetchPerpetualOrderBook(ticker: string) {
   };
 }
 
-async function fetchJson(url: string, priority: 'NORMAL' | 'LOW' | 'HIGH' = 'NORMAL') {
-  const res = await kalshiRateLimiter.execute(
-    () => fetch(url, { signal: AbortSignal.timeout(5000) }),
-    { path: url, method: 'GET', priority }
-  );
-  if (!res.ok) throw new Error(`Failed to fetch ${url}`);
-  return await res.json();
+async function fetchJson(url: string, priority: 'NORMAL' | 'LOW' | 'HIGH' = 'NORMAL', maxRetries = 2) {
+  const fallbackUrls = [
+    url,
+    url.includes('api.elections.kalshi.com') ? url.replace('api.elections.kalshi.com', 'external-api.kalshi.com') : '',
+    url.includes('api.elections.kalshi.com') ? url.replace('api.elections.kalshi.com', 'trading-api.kalshi.com') : ''
+  ].filter(Boolean);
+
+  let lastError: any = null;
+
+  for (const targetUrl of fallbackUrls) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const res = await kalshiRateLimiter.execute(
+          () => fetch(targetUrl, { signal: AbortSignal.timeout(6000) }),
+          { path: targetUrl, method: 'GET', priority }
+        );
+        if (res.ok) {
+          return await res.json();
+        }
+        if (res.status === 404) {
+          return { markets: [] };
+        }
+      } catch (err: any) {
+        lastError = err;
+        if (attempt < maxRetries) {
+          await new Promise(r => setTimeout(r, 150 * (attempt + 1)));
+        }
+      }
+    }
+  }
+
+  throw lastError || new Error(`Failed to fetch ${url}`);
 }
 
 async function discoverMarkets() {
   try {
     const getBestOpenMarket = async (seriesTicker: string, label: string, category: string) => {
       try {
-        const data = await fetchJson(`https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=${seriesTicker}&status=open`);
+        const data = await fetchJson(`https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=${seriesTicker}&status=open`, 'NORMAL');
         let markets = data.markets || [];
         
         // Strict filter: Only allow true 15-minute and 1-hour contracts. Strictly exclude price ranges, daily, tomorrow, weekly, monthly, or forward contracts.
@@ -2913,8 +3044,9 @@ async function discoverMarkets() {
             });
           }
         }
-      } catch (e) {
-        console.error("Discovery error for", seriesTicker, e);
+      } catch (e: any) {
+        // Softly handle discovery hiccups on individual series without noisy unhandled stack traces
+        console.warn(`[SCANNER] Note: Discovery sync for ${seriesTicker} deferred (${e?.message || 'Gateway transient timeout'})`);
       }
     };
 
@@ -3077,6 +3209,12 @@ async function discoverMarkets() {
     ];
 
     await Promise.all(promises);
+
+    // Sync real-time WebSocket market subscriptions with discovered spotContexts
+    const activeAttachedSymbols = Object.keys(spotContexts);
+    if (activeAttachedSymbols.length > 0) {
+      kalshiWsManager.syncSubscriptions(activeAttachedSymbols);
+    }
 
     if (isInitializing && Object.keys(spotContexts).length > 0) {
       isInitializing = false;
@@ -4471,6 +4609,108 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
   }
 }
 
+function applyOrderBookToSpotContext(
+  symbol: string,
+  bids: Array<{ price: number; size: number }>,
+  asks: Array<{ price: number; size: number }>,
+  elapsedLatency?: number
+) {
+  const targetCtx = spotContexts[symbol];
+  if (!targetCtx) return;
+
+  if (elapsedLatency && elapsedLatency > 0) {
+    latencyAdaptiveEngine.recordKalshiDataLatency(elapsedLatency);
+  }
+
+  if (bids.length > 0 && asks.length > 0) {
+    const bestBid = bids[0].price;
+    const bestBidSize = bids[0].size;
+    const bestAsk = asks[0].price;
+    const bestAskSize = asks[0].size;
+
+    let e_b = 0;
+    if (targetCtx.prevBestBid !== undefined) {
+      if (bestBid > targetCtx.prevBestBid) e_b = bestBidSize;
+      else if (bestBid === targetCtx.prevBestBid) e_b = bestBidSize - targetCtx.prevBidSize;
+      else e_b = -targetCtx.prevBidSize;
+    }
+
+    let e_s = 0;
+    if (targetCtx.prevBestAsk !== undefined) {
+      if (bestAsk < targetCtx.prevBestAsk) e_s = bestAskSize;
+      else if (bestAsk === targetCtx.prevBestAsk) e_s = bestAskSize - targetCtx.prevAskSize;
+      else e_s = -targetCtx.prevAskSize;
+    }
+
+    const currentOFI = e_b - e_s;
+    targetCtx.OFI = targetCtx.OFI !== undefined ? 0.8 * targetCtx.OFI + 0.2 * currentOFI : currentOFI;
+
+    // Deep Hawkes Process for OFI (Order Book Clustering & Excitation)
+    const currentTimeMs = Date.now();
+    if (targetCtx.lastEventTimeMs) {
+      const timeDeltaSec = (currentTimeMs - targetCtx.lastEventTimeMs) / 1000;
+      const decayBeta = 2.0; // Mean reversion speed of the excitation
+      
+      targetCtx.hawkesSelfExcitation = (targetCtx.hawkesSelfExcitation || 0) * Math.exp(-decayBeta * timeDeltaSec);
+      targetCtx.hawkesCrossExcitation = (targetCtx.hawkesCrossExcitation || 0) * Math.exp(-decayBeta * timeDeltaSec);
+      
+      const averageDepth = Math.max(1, (bestBidSize + bestAskSize) / 2);
+      if (Math.abs(currentOFI) > averageDepth * 0.2) {
+        targetCtx.hawkesSelfExcitation += 0.5; // Jump from significant OFI event
+      }
+      
+      if (e_s < 0 || e_b < 0) { // Cancellations indicate cross-excitation (liquidity pulling)
+        targetCtx.hawkesCrossExcitation += 0.5;
+      }
+    }
+    targetCtx.lastEventTimeMs = currentTimeMs;
+    targetCtx.totalHawkesIntensity = (targetCtx.hawkesSelfExcitation || 0) + (targetCtx.hawkesCrossExcitation || 0);
+
+    const imbalance = bestBidSize / (bestBidSize + bestAskSize || 1);
+    // Stoikov Microprice approximation
+    targetCtx.microprice = bestBid * (1 - imbalance) + bestAsk * imbalance;
+    
+    // Track Microprice Volatility for FET (Ornstein-Uhlenbeck)
+    targetCtx.priceHistory = targetCtx.priceHistory || [];
+    targetCtx.priceHistory.push(targetCtx.microprice);
+    if (targetCtx.priceHistory.length > 30) targetCtx.priceHistory.shift();
+    
+    if (targetCtx.priceHistory.length >= 10) {
+      const mean = targetCtx.priceHistory.reduce((a: number, b: number) => a + b, 0) / targetCtx.priceHistory.length;
+      const variance = targetCtx.priceHistory.reduce((a: number, b: number) => a + Math.pow(b - mean, 2), 0) / targetCtx.priceHistory.length;
+      targetCtx.micropriceVolatility = Math.sqrt(variance) / mean; // Volatility %
+    }
+
+    targetCtx.currentPrice = targetCtx.microprice; // Use Microprice instead of naive midpoint
+    targetCtx.prevBestBid = bestBid;
+    targetCtx.prevBidSize = bestBidSize;
+    targetCtx.prevBestAsk = bestAsk;
+    targetCtx.prevAskSize = bestAskSize;
+
+    targetCtx.bids = bids;
+    targetCtx.asks = asks;
+    targetCtx.lastQuoteUpdateMs = Date.now();
+    targetCtx.isOrderBookStale = false;
+  }
+}
+
+// Attach Kalshi WebSocket event subscribers
+kalshiWsManager.onOrderBook((update) => {
+  applyOrderBookToSpotContext(update.symbol, update.bids, update.asks);
+});
+
+kalshiWsManager.onTicker((update) => {
+  const targetCtx = spotContexts[update.symbol];
+  if (targetCtx) {
+    if (update.price !== undefined) {
+      targetCtx.currentPrice = update.price;
+    }
+    targetCtx.lastQuoteUpdateMs = Date.now();
+    targetCtx.isOrderBookStale = false;
+  }
+});
+
+let lastRestOrderbookPollTime = 0;
 let lastSuccessfulLoopTime = Date.now();
 
 // Background trading loop
@@ -4593,125 +4833,63 @@ setInterval(async () => {
   // Run Gemini Intelligence Engine Periodic Jobs
   runGeminiStrategyEngineJobs().catch(() => {});
 
-  // Update orderbook prices for attached spotContexts concurrently (Zero-Latency Parallel Execution)
-  await Promise.all(Object.keys(spotContexts).map(async (symbol) => {
-    try {
-      const targetCtx = spotContexts[symbol];
-      if (!targetCtx) return;
+  // Update orderbook prices for attached spotContexts (WebSocket primary stream with REST Keep-Alive Fallback)
+  const isWsStreaming = kalshiWsManager.getIsConnected();
+  const nowMs = Date.now();
+  const shouldRunRestOrderbookPoll = !isWsStreaming || (nowMs - lastRestOrderbookPollTime > 8000);
 
-      const isPerp = Boolean(targetCtx.isPerpetual || symbol.endsWith('PERP'));
-      const obUrl = isPerp
-        ? `https://api.elections.kalshi.com/trade-api/v2/margin/markets/${symbol}/orderbook`
-        : `https://api.elections.kalshi.com/trade-api/v2/markets/${symbol}/orderbook`;
+  if (shouldRunRestOrderbookPoll) {
+    lastRestOrderbookPollTime = nowMs;
+    await Promise.all(Object.keys(spotContexts).map(async (symbol) => {
+      try {
+        const targetCtx = spotContexts[symbol];
+        if (!targetCtx) return;
 
-      const t0 = Date.now();
-      const response = await backpressureQueue.enqueue(
-        () => fetch(obUrl, { signal: AbortSignal.timeout(3000) }),
-        { type: 'ORDERBOOK_POLL', priority: 'LOW', symbol, dropOnSaturation: true }
-      );
-      const elapsed = Date.now() - t0;
-      if (elapsed > 0) latencyAdaptiveEngine.recordKalshiDataLatency(elapsed);
+        const isPerp = Boolean(targetCtx.isPerpetual || symbol.endsWith('PERP'));
+        const obUrl = isPerp
+          ? `https://api.elections.kalshi.com/trade-api/v2/margin/markets/${symbol}/orderbook`
+          : `https://api.elections.kalshi.com/trade-api/v2/markets/${symbol}/orderbook`;
 
-      if (response.status === 429) {
-        backpressureQueue.tripCircuitBreaker(symbol);
-        console.warn(`[KALSHI API] Rate limit hit for ${symbol}. Tripping Circuit Breaker.`);
-        return;
-      }
-      if (response.ok) {
-        const data = await response.json();
-        let bids: any[] = [];
-        let asks: any[] = [];
+        const t0 = Date.now();
+        const response = await backpressureQueue.enqueue(
+          () => fetch(obUrl, { signal: AbortSignal.timeout(3000) }),
+          { type: 'ORDERBOOK_POLL', priority: 'LOW', symbol, dropOnSaturation: true }
+        );
+        const elapsed = Date.now() - t0;
 
-        if (isPerp && data.orderbook) {
-          bids = (data.orderbook.bids || []).map((b: any) => ({ price: parseFloat(b[0]), size: parseFloat(b[1]) })).sort((a: any, b: any) => b.price - a.price);
-          asks = (data.orderbook.asks || []).map((a: any) => ({ price: parseFloat(a[0]), size: parseFloat(a[1]) })).sort((a: any, b: any) => a.price - b.price);
-        } else if (data.orderbook_fp && (data.orderbook_fp.yes_dollars || data.orderbook_fp.no_dollars)) {
-          bids = data.orderbook_fp.yes_dollars ? data.orderbook_fp.yes_dollars.map((b: any) => ({ price: parseFloat(b[0]), size: parseFloat(b[1]) })).sort((a: any, b: any) => b.price - a.price) : [];
-          asks = data.orderbook_fp.no_dollars ? data.orderbook_fp.no_dollars.map((a: any) => ({ price: 1.0 - parseFloat(a[0]), size: parseFloat(a[1]) })).sort((a: any, b: any) => a.price - b.price) : [];
-        } else if (data.orderbook && (data.orderbook.yes || data.orderbook.no)) {
-          const yesLevels = data.orderbook.yes || [];
-          const noLevels = data.orderbook.no || [];
-          bids = yesLevels.map((lvl: any) => {
-            const rawP = parseFloat(lvl[0]);
-            const normP = rawP > 1 ? rawP / 100 : rawP;
-            return { price: normP, size: parseFloat(lvl[1]) };
-          }).sort((a: any, b: any) => b.price - a.price);
-          asks = noLevels.map((lvl: any) => {
-            const rawP = parseFloat(lvl[0]);
-            const normP = rawP > 1 ? rawP / 100 : rawP;
-            return { price: parseFloat((1.0 - normP).toFixed(4)), size: parseFloat(lvl[1]) };
-          }).sort((a: any, b: any) => a.price - b.price);
+        if (response.status === 429) {
+          backpressureQueue.tripCircuitBreaker(symbol);
+          console.warn(`[KALSHI API] Rate limit hit for ${symbol}. Tripping Circuit Breaker.`);
+          return;
         }
+        if (response.ok) {
+          const data = await response.json();
+          let bids: any[] = [];
+          let asks: any[] = [];
 
-        if (bids.length > 0 && asks.length > 0) {
-            const bestBid = bids[0].price;
-            const bestBidSize = bids[0].size;
-            const bestAsk = asks[0].price;
-            const bestAskSize = asks[0].size;
+          if (isPerp && data.orderbook) {
+            bids = (data.orderbook.bids || []).map((b: any) => ({ price: parseFloat(b[0]), size: parseFloat(b[1]) })).sort((a: any, b: any) => b.price - a.price);
+            asks = (data.orderbook.asks || []).map((a: any) => ({ price: parseFloat(a[0]), size: parseFloat(a[1]) })).sort((a: any, b: any) => a.price - b.price);
+          } else if (data.orderbook_fp && (data.orderbook_fp.yes_dollars || data.orderbook_fp.no_dollars)) {
+            bids = data.orderbook_fp.yes_dollars ? data.orderbook_fp.yes_dollars.map((b: any) => ({ price: parseFloat(b[0]), size: parseFloat(b[1]) })).sort((a: any, b: any) => b.price - a.price) : [];
+            asks = data.orderbook_fp.no_dollars ? data.orderbook_fp.no_dollars.map((a: any) => ({ price: 1.0 - parseFloat(a[0]), size: parseFloat(a[1]) })).sort((a: any, b: any) => a.price - b.price) : [];
+          } else if (data.orderbook && (data.orderbook.yes || data.orderbook.no)) {
+            const yesLevels = data.orderbook.yes || [];
+            const noLevels = data.orderbook.no || [];
+            bids = yesLevels.map((lvl: any) => {
+              const rawP = parseFloat(lvl[0]);
+              const normP = rawP > 1 ? rawP / 100 : rawP;
+              return { price: normP, size: parseFloat(lvl[1]) };
+            }).sort((a: any, b: any) => b.price - a.price);
+            asks = noLevels.map((lvl: any) => {
+              const rawP = parseFloat(lvl[0]);
+              const normP = rawP > 1 ? rawP / 100 : rawP;
+              return { price: parseFloat((1.0 - normP).toFixed(4)), size: parseFloat(lvl[1]) };
+            }).sort((a: any, b: any) => a.price - b.price);
+          }
 
-            let e_b = 0;
-            if (targetCtx.prevBestBid !== undefined) {
-              if (bestBid > targetCtx.prevBestBid) e_b = bestBidSize;
-              else if (bestBid === targetCtx.prevBestBid) e_b = bestBidSize - targetCtx.prevBidSize;
-              else e_b = -targetCtx.prevBidSize;
-            }
-
-            let e_s = 0;
-            if (targetCtx.prevBestAsk !== undefined) {
-              if (bestAsk < targetCtx.prevBestAsk) e_s = bestAskSize;
-              else if (bestAsk === targetCtx.prevBestAsk) e_s = bestAskSize - targetCtx.prevAskSize;
-              else e_s = -targetCtx.prevAskSize;
-            }
-
-            const currentOFI = e_b - e_s;
-            targetCtx.OFI = targetCtx.OFI !== undefined ? 0.8 * targetCtx.OFI + 0.2 * currentOFI : currentOFI;
-
-            // Deep Hawkes Process for OFI (Order Book Clustering & Excitation)
-            const currentTimeMs = Date.now();
-            if (targetCtx.lastEventTimeMs) {
-                const timeDeltaSec = (currentTimeMs - targetCtx.lastEventTimeMs) / 1000;
-                const decayBeta = 2.0; // Mean reversion speed of the excitation
-                
-                targetCtx.hawkesSelfExcitation = (targetCtx.hawkesSelfExcitation || 0) * Math.exp(-decayBeta * timeDeltaSec);
-                targetCtx.hawkesCrossExcitation = (targetCtx.hawkesCrossExcitation || 0) * Math.exp(-decayBeta * timeDeltaSec);
-                
-                const averageDepth = Math.max(1, (bestBidSize + bestAskSize) / 2);
-                if (Math.abs(currentOFI) > averageDepth * 0.2) {
-                    targetCtx.hawkesSelfExcitation += 0.5; // Jump from significant OFI event
-                }
-                
-                if (e_s < 0 || e_b < 0) { // Cancellations indicate cross-excitation (liquidity pulling)
-                    targetCtx.hawkesCrossExcitation += 0.5;
-                }
-            }
-            targetCtx.lastEventTimeMs = currentTimeMs;
-            targetCtx.totalHawkesIntensity = (targetCtx.hawkesSelfExcitation || 0) + (targetCtx.hawkesCrossExcitation || 0);
-
-            const imbalance = bestBidSize / (bestBidSize + bestAskSize || 1);
-            // Stoikov Microprice approximation
-            targetCtx.microprice = bestBid * (1 - imbalance) + bestAsk * imbalance;
-            
-            // Track Microprice Volatility for FET (Ornstein-Uhlenbeck)
-            targetCtx.priceHistory = targetCtx.priceHistory || [];
-            targetCtx.priceHistory.push(targetCtx.microprice);
-            if (targetCtx.priceHistory.length > 30) targetCtx.priceHistory.shift();
-            
-            if (targetCtx.priceHistory.length >= 10) {
-              const mean = targetCtx.priceHistory.reduce((a: number, b: number) => a + b, 0) / targetCtx.priceHistory.length;
-              const variance = targetCtx.priceHistory.reduce((a: number, b: number) => a + Math.pow(b - mean, 2), 0) / targetCtx.priceHistory.length;
-              targetCtx.micropriceVolatility = Math.sqrt(variance) / mean; // Volatility %
-            }
-
-            targetCtx.currentPrice = targetCtx.microprice; // Use Microprice instead of naive midpoint
-            targetCtx.prevBestBid = bestBid;
-            targetCtx.prevBidSize = bestBidSize;
-            targetCtx.prevBestAsk = bestAsk;
-            targetCtx.prevAskSize = bestAskSize;
-
-            targetCtx.bids = bids;
-            targetCtx.asks = asks;
-            targetCtx.lastQuoteUpdateMs = Date.now();
-            targetCtx.isOrderBookStale = false;
+          if (bids.length > 0 && asks.length > 0) {
+            applyOrderBookToSpotContext(symbol, bids, asks, elapsed);
           } else if (!targetCtx.bids || targetCtx.bids.length === 0) {
             targetCtx.isOrderBookStale = true;
           }
@@ -4719,12 +4897,13 @@ setInterval(async () => {
           targetCtx.isOrderBookStale = true;
         }
       } catch (e) {
-      const targetCtx = spotContexts[symbol];
-      if (targetCtx) {
-        targetCtx.isOrderBookStale = true;
+        const targetCtx = spotContexts[symbol];
+        if (targetCtx && (!targetCtx.bids || targetCtx.bids.length === 0)) {
+          targetCtx.isOrderBookStale = true;
+        }
       }
-    }
-  }));
+    }));
+  }
 
   // Live spot price ticker updates are handled securely and optimally via the RapidScalper WebSocket stream.
 
@@ -5467,15 +5646,26 @@ app.post('/api/settings', (req, res) => {
   }
   const isNowGauntlet = Boolean((updated as any).gauntletMode);
   if (!previousGauntlet && isNowGauntlet) {
-    startingBankroll = 20.0;
-    simulatedPaperBalance = 20.0;
-    cycleEarnedProfit = 0;
-    spotLogs.unshift({
-      id: logIdCounter++,
-      time: new Date().toISOString(),
-      type: 'INFO',
-      message: `[GAUNTLET MODE ACTIVATED] Starting capital reset to $20.00 Crucible with CRRA dynamic Kelly scaling toward $2,000.`
-    });
+    if (updated.paperTrading) {
+      startingBankroll = 20.0;
+      simulatedPaperBalance = 20.0;
+      cycleEarnedProfit = 0;
+      spotLogs.unshift({
+        id: logIdCounter++,
+        time: new Date().toISOString(),
+        type: 'INFO',
+        message: `[GAUNTLET MODE ACTIVATED (PAPER)] Virtual bankroll set to $20.00 Crucible with CRRA dynamic Kelly scaling toward $2,000.00.`
+      });
+    } else {
+      liveGauntletStartingCash = realKalshiCashPool > 0 ? realKalshiCashPool : (liveStartingBankroll > 0 ? liveStartingBankroll : 20.0);
+      liveBankrollATH = liveGauntletStartingCash;
+      spotLogs.unshift({
+        id: logIdCounter++,
+        time: new Date().toISOString(),
+        type: 'INFO',
+        message: `[GAUNTLET MODE ACTIVATED (LIVE)] Initialized with starting Kalshi cash pool of $${liveGauntletStartingCash.toFixed(2)}. CRRA dynamic Kelly scaling active toward $${(liveGauntletStartingCash * 100).toFixed(2)} (100x compounding).`
+      });
+    }
   } else if (previousGauntlet && !isNowGauntlet) {
     spotLogs.unshift({
       id: logIdCounter++,
@@ -5648,6 +5838,8 @@ app.post('/api/kalshi/credentials', async (req, res) => {
     }
 
     kalshiService.updateCredentials(keyId, secret, true);
+    kalshiWsManager.reconnectWithNewCredentials();
+    kalshiFixEngine.reconnectWithCredentials();
     const testBal = await kalshiService.getBalance();
     
     res.json({
@@ -5663,6 +5855,8 @@ app.post('/api/kalshi/credentials', async (req, res) => {
 
 app.post('/api/kalshi/test-connection', async (req, res) => {
   kalshiService.reloadCredentials();
+  kalshiWsManager.reconnectWithNewCredentials();
+  kalshiFixEngine.reconnectWithCredentials();
   const testBal = await kalshiService.getBalance();
   res.json({
     success: testBal.success,
@@ -6530,6 +6724,100 @@ app.get('/api/spot-book/:symbol', (req, res) => {
   res.json({ bids, asks, currentPrice: basePrice, spotPair });
 });
 
+// Institutional Architecture Telemetry & FIX 4.4 State Endpoint
+app.post('/api/institutional/reconnect-fix', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    kalshiFixEngine.reconnectWithCredentials();
+    res.json({
+      success: true,
+      message: 'FIX 4.4 reconnect command dispatched',
+      fixEngine: kalshiFixEngine.getStatus()
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to reconnect FIX engine' });
+  }
+});
+
+app.get('/api/institutional/status', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const fixStatus = kalshiFixEngine.getStatus();
+    const kalmanStates = kalmanFilterEngine.getAllStates();
+    const activeRegime = geminiStrategyEngine.getCurrentRegime();
+    
+    // Calculate sample Jump-Diffusion fair values for major assets
+    const btcPrice = (typeof scalper !== 'undefined' && scalper.currentCandles?.['BTC-USD']?.close) || 65000;
+    const ethPrice = (typeof scalper !== 'undefined' && scalper.currentCandles?.['ETH-USD']?.close) || 3500;
+    const solPrice = (typeof scalper !== 'undefined' && scalper.currentCandles?.['SOL-USD']?.close) || 145;
+
+    const btcBinary = jumpDiffusionEngine.calculateBinaryFairValue({
+      spotPrice: btcPrice,
+      strikePrice: btcPrice * 1.0005,
+      timeToExpiryYears: jumpDiffusionEngine.minutesToYears(7),
+      riskFreeRate: 0.04,
+      diffusionVol: 0.45,
+      jumpIntensity: 40,
+      meanJumpSize: 0,
+      jumpVol: 0.035
+    });
+
+    const ethBinary = jumpDiffusionEngine.calculateBinaryFairValue({
+      spotPrice: ethPrice,
+      strikePrice: ethPrice * 1.0005,
+      timeToExpiryYears: jumpDiffusionEngine.minutesToYears(7),
+      riskFreeRate: 0.04,
+      diffusionVol: 0.55,
+      jumpIntensity: 45,
+      meanJumpSize: 0,
+      jumpVol: 0.04
+    });
+
+    const solBinary = jumpDiffusionEngine.calculateBinaryFairValue({
+      spotPrice: solPrice,
+      strikePrice: solPrice * 1.0005,
+      timeToExpiryYears: jumpDiffusionEngine.minutesToYears(7),
+      riskFreeRate: 0.04,
+      diffusionVol: 0.65,
+      jumpIntensity: 50,
+      meanJumpSize: 0,
+      jumpVol: 0.05
+    });
+
+    // Bayesian Kelly & Fee check at $0.50 peak fee
+    const sampleBayesianKelly = bayesianKellyEngine.computeBayesianKelly(0.60, 0.50, 25, 0.85);
+
+    res.json({
+      fixEngine: fixStatus,
+      stochasticPricing: {
+        'BTC-USD': btcBinary,
+        'ETH-USD': ethBinary,
+        'SOL-USD': solBinary
+      },
+      kalmanStateEstimates: kalmanStates,
+      bayesianRisk: {
+        sampleBayesianKelly,
+        cvarConfidenceAlpha: 0.95,
+        quadraticFeeFormula: 'ceil(0.07 * C * P * (1 - P))'
+      },
+      multiAgentAdversarialRegime: activeRegime
+    });
+  } catch (err: any) {
+    console.error('[INSTITUTIONAL STATUS ERROR]', err);
+    res.json({
+      fixEngine: kalshiFixEngine.getStatus(),
+      stochasticPricing: {},
+      kalmanStateEstimates: {},
+      bayesianRisk: {
+        sampleBayesianKelly: { recommendedFraction: 0, posteriorMeanP: 0.5, posteriorVariance: 0.01, grossEV: 0, netEV: 0, calculatedFeePerContract: 0 },
+        cvarConfidenceAlpha: 0.95,
+        quadraticFeeFormula: 'ceil(0.07 * C * P * (1 - P))'
+      },
+      multiAgentAdversarialRegime: { regime: 'NORMAL', kellyAdjustment: 1, tpMultiplier: 1, slMultiplier: 1, reasoning: 'Fallback state' }
+    });
+  }
+});
+
 // API error handler middleware to guarantee /api/* routes always return JSON
 app.use('/api', (err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error('[API ERROR]', err);
@@ -6548,22 +6836,14 @@ async function startServer() {
     res.json({ ok: true }); 
   });
 
-  // Self-destroying service worker to instantly purge mobile caches
+  // Self-destroying service worker to instantly purge mobile caches safely
   app.get(["/sw.js", "/registerSW.js", "/workbox-*.js"], (req, res) => {
     res.setHeader("Content-Type", "application/javascript");
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     res.send(`
       self.addEventListener('install', function(e) { self.skipWaiting(); });
       self.addEventListener('activate', function(e) {
-        self.registration.unregister().then(function() {
-          return self.clients.matchAll();
-        }).then(function(clients) {
-          clients.forEach(function(client) {
-            if (client.url && 'navigate' in client) {
-              client.navigate(client.url);
-            }
-          });
-        });
+        self.registration.unregister().catch(function() {});
       });
     `);
   });

@@ -1,8 +1,8 @@
 {
-  "currentProfitUsd": 0,
-  "previousProfitUsd": 0,
-  "windowStartEquity": 20,
-  "lastWindowId": "2026-09-23_09:00",
+  "currentProfitUsd": 56.67955952650181,
+  "previousProfitUsd": 6.949081472598065,
+  "windowStartEquity": 26.94908147259807,
+  "lastWindowId": "2026-09-24_09:00",
   "hasLoggedGoalAchieved": false,
   "goalAchievedTimestamp": null,
   "profitTargetUsd": 100,
@@ -12,5 +12,18 @@
   "isTemporaryVaultActive": false,
   "totalCompoundedToWorkingCapital": 0,
   "trainingCyclesCompleted": 0,
-  "history": []
+  "history": [
+    {
+      "windowId": "2026-09-24_00:00",
+      "closedAt": "2026-09-24T13:00:03.201Z",
+      "profitUsd": 6.95,
+      "targetReached": false
+    },
+    {
+      "windowId": "2026-09-23_09:00",
+      "closedAt": "2026-09-24T12:58:16.427Z",
+      "profitUsd": 0,
+      "targetReached": false
+    }
+  ]
 }

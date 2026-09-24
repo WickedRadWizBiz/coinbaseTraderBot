@@ -119,7 +119,7 @@ export class KalshiService {
       
       // Strip outer wrapping double or single quotes if present from .env
       if ((pem.startsWith('"') && pem.endsWith('"')) || (pem.startsWith("'") && pem.endsWith("'"))) {
-        pem = pem.slice(1, -1);
+        pem = pem.slice(1, -1).trim();
       }
 
       // Normalize carriage returns and escaped newlines
@@ -134,26 +134,41 @@ export class KalshiService {
            parts[1] = base64.match(/.{1,64}/g)?.join('\n') || base64;
            pem = parts.join('\n');
         }
-      } else if (!pem.includes('-----BEGIN')) {
-        if (pem.length > 100) {
-            const base64 = pem.replace(/\s+/g, '');
-            pem = '-----BEGIN RSA PRIVATE KEY-----\n' + (base64.match(/.{1,64}/g)?.join('\n') || base64) + '\n-----END RSA PRIVATE KEY-----';
+      }
+
+      const candidates: string[] = [pem];
+
+      if (pem.includes('BEGIN RSA PRIVATE KEY')) {
+        candidates.push(pem.replace(/BEGIN RSA PRIVATE KEY/g, 'BEGIN PRIVATE KEY').replace(/END RSA PRIVATE KEY/g, 'END PRIVATE KEY'));
+      } else if (pem.includes('BEGIN PRIVATE KEY')) {
+        candidates.push(pem.replace(/BEGIN PRIVATE KEY/g, 'BEGIN RSA PRIVATE KEY').replace(/END PRIVATE KEY/g, 'END RSA PRIVATE KEY'));
+      }
+
+      if (!pem.includes('-----BEGIN')) {
+        const cleanBase64 = pem.replace(/[\s\r\n]+/g, '');
+        candidates.push(
+          `-----BEGIN RSA PRIVATE KEY-----\n${cleanBase64.match(/.{1,64}/g)?.join('\n') || cleanBase64}\n-----END RSA PRIVATE KEY-----`
+        );
+        candidates.push(
+          `-----BEGIN PRIVATE KEY-----\n${cleanBase64.match(/.{1,64}/g)?.join('\n') || cleanBase64}\n-----END PRIVATE KEY-----`
+        );
+      }
+
+      let parsed = false;
+      let lastErr: any = null;
+
+      for (const cand of candidates) {
+        try {
+          this.privateKey = crypto.createPrivateKey(cand);
+          parsed = true;
+          break;
+        } catch (e) {
+          lastErr = e;
         }
       }
 
-      try {
-        this.privateKey = crypto.createPrivateKey(pem);
-      } catch (e1: any) {
-        // If RSA PKCS#1 failed, try wrapping as PKCS#8
-        if (pem.includes('BEGIN RSA PRIVATE KEY')) {
-          const altPem = pem.replace(/BEGIN RSA PRIVATE KEY/g, 'BEGIN PRIVATE KEY').replace(/END RSA PRIVATE KEY/g, 'END PRIVATE KEY');
-          this.privateKey = crypto.createPrivateKey(altPem);
-        } else if (pem.includes('BEGIN PRIVATE KEY')) {
-          const altPem = pem.replace(/BEGIN PRIVATE KEY/g, 'BEGIN RSA PRIVATE KEY').replace(/END PRIVATE KEY/g, 'END RSA PRIVATE KEY');
-          this.privateKey = crypto.createPrivateKey(altPem);
-        } else {
-          throw e1;
-        }
+      if (!parsed) {
+        throw lastErr || new Error('Invalid RSA key format');
       }
 
       console.log('[KALSHI] Initialized Kalshi RSA private key successfully.');

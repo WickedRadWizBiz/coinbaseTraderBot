@@ -176,13 +176,6 @@ export default function App() {
             </div>
             <div className="flex items-center gap-2">
               <SystemLEDs />
-              <button
-                onClick={handleRestartInstance}
-                className="p-1.5 border border-crypto-danger/50 text-crypto-danger bg-black/40 hover:bg-crypto-danger hover:text-white transition-colors"
-                title="Restart Instance"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-              </button>
             </div>
           </header>
 

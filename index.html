@@ -6,7 +6,7 @@
         var lastErrTime = 0;
         window.onerror = function(m, s, l, c, e) {
           var now = Date.now();
-          if (now - lastErrTime < 10000) return; // rate-limit client error posts to at most 1 every 10s
+          if (now - lastErrTime < 10000) return;
           lastErrTime = now;
           try {
             fetch("/api/client-error", {
@@ -16,6 +16,18 @@
             }).catch(function() {});
           } catch(err) {}
         };
+
+        // Fallback watchdog if JS fails to execute or root stays empty
+        setTimeout(function() {
+          var root = document.getElementById('root');
+          if (root && root.children.length === 0) {
+            root.innerHTML = '<div style="min-height: 100vh; background: #0c0e15; color: #ff549a; font-family: monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px; text-align: center;">' +
+              '<h2 style="font-size: 20px; margin-bottom: 12px; letter-spacing: 2px;">PREDICTIONS RUNNER</h2>' +
+              '<p style="color: #e6e0ff; font-size: 13px; max-width: 480px; margin-bottom: 20px;">Interface is syncing or recovering from cached state.</p>' +
+              '<button onclick="if(window.caches) { caches.keys().then(function(k){ k.forEach(function(n){ caches.delete(n); }); window.location.reload(true); }); } else { window.location.reload(true); }" style="background: #ff549a; color: white; border: none; padding: 12px 24px; font-weight: bold; cursor: pointer; text-transform: uppercase; font-family: monospace; letter-spacing: 1px;">Reload & Clear Cache</button>' +
+              '</div>';
+          }
+        }, 4000);
       })();
     </script>
     <meta charset="UTF-8" />

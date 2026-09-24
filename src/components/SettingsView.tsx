@@ -188,7 +188,7 @@ export function SettingsView() {
               </span>
             </span>
             <span className="text-[11px] text-[#909090] font-sans">
-              Engages LARL (Latency-Aware RL) & fractional Kelly dynamic scaling. Starts paper bankroll at $20 and algorithmically drives compounding toward $2,000 using CRRA log-utility maximization.
+              Engages LARL (Latency-Aware RL) & fractional Kelly dynamic scaling. Anchors to starting Kalshi cash pool in live mode (or $20 in paper mode) and algorithmically drives compounding toward 100x using CRRA log-utility maximization.
             </span>
           </div>
           <button
@@ -198,8 +198,7 @@ export function SettingsView() {
               const nextGauntlet = !currentGauntlet;
               const newSettings = {
                 ...settings,
-                gauntletMode: nextGauntlet,
-                paperTrading: nextGauntlet ? true : settings.paperTrading
+                gauntletMode: nextGauntlet
               };
               setSettings(newSettings as any);
               fetch('/api/settings', {
@@ -372,6 +371,18 @@ export function SettingsView() {
               </span>
               <span className="text-xs text-[#808080]">
                 ATP Tennis sports contracts are strictly capped at 10% of total available cash at any given time across all active positions.
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-3 p-3 bg-black/40 crt-border border-crypto-primary/30">
+            <Zap className="w-5 h-5 text-crypto-primary shrink-0 mt-0.5" />
+            <div className="flex flex-col gap-0.5">
+              <span className="text-xs font-bold uppercase tracking-wider text-crypto-text flex items-center gap-2">
+                Dynamic Transport & Latency Gate: <span className="text-crypto-primary font-mono">WS (300ms) / REST (1200ms)</span>
+              </span>
+              <span className="text-xs text-[#808080]">
+                High-frequency WebSocket stream serves as primary market feed with a 300ms timestamp drift gate. Seamlessly fails over to persistent HTTP Keep-Alive connection pooling with gate automatically scaled to 1200ms.
               </span>
             </div>
           </div>

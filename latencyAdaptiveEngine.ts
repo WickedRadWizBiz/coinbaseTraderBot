@@ -15,6 +15,7 @@ export interface LatencyProfile {
   effectiveLatencyMs: number;
   isUltraLowLatency: boolean; // True on AWS Lightsail us-east-1 (< 25ms)
   executionEnvironment: 'AWS_LIGHTSAIL_FAST' | 'PREVIEW_SANDBOX_STANDARD';
+  connectionMode: 'WEBSOCKET' | 'REST_KEEPALIVE';
   staleTickThresholdMs: number;
   slippageBufferPct: number;
   trailingStopAgilityFactor: number;
@@ -34,12 +35,24 @@ class LatencyAdaptiveEngine {
   private lastNeuralExitCheckTime: number = 0;
   private lastEvalTime: number = 0;
   private sampleRateIntervalEma: number = 32;
+  private connectionMode: 'WEBSOCKET' | 'REST_KEEPALIVE' = 'REST_KEEPALIVE';
 
   // Maximum allowed age of order book quote before rejecting trade entry (Timestamp Drift Gate)
-  private readonly DEFAULT_STALENESS_LIMIT_MS = 250;
+  private readonly DEFAULT_STALENESS_LIMIT_MS = 300;
 
   constructor() {
     this.startPeriodicHeartbeat();
+  }
+
+  /**
+   * Sets the active market data connection transport mode
+   */
+  public setConnectionMode(mode: 'WEBSOCKET' | 'REST_KEEPALIVE') {
+    this.connectionMode = mode;
+  }
+
+  public getConnectionMode(): 'WEBSOCKET' | 'REST_KEEPALIVE' {
+    return this.connectionMode;
   }
 
   /**
@@ -152,6 +165,14 @@ class LatencyAdaptiveEngine {
     const effectiveLatency = Math.round((this.coinbaseWsPingEma * 0.4) + (this.kalshiRestPingEma * 0.6));
     const isUltraLow = effectiveLatency < 25;
     const sampleMs = Math.max(12, Math.min(1000, this.sampleRateIntervalEma));
+    const isWs = this.connectionMode === 'WEBSOCKET';
+
+    // Scale stale tick threshold:
+    // - WebSocket: 300ms (150ms on ultra-low latency Lightsail)
+    // - REST Keep-Alive fallback: 1200ms (800ms on ultra-low latency Lightsail)
+    const staleThreshold = isWs 
+      ? (isUltraLow ? 150 : 300) 
+      : (isUltraLow ? 800 : 1200);
 
     return {
       lastPingTime: this.lastMeasurementTime,
@@ -162,9 +183,8 @@ class LatencyAdaptiveEngine {
       effectiveLatencyMs: effectiveLatency,
       isUltraLowLatency: isUltraLow,
       executionEnvironment: isUltraLow ? 'AWS_LIGHTSAIL_FAST' : 'PREVIEW_SANDBOX_STANDARD',
-      // On ultra-low latency (Lightsail), quotes age out faster so tighten staleness gate to 150ms
-      // In preview, allow up to 300ms
-      staleTickThresholdMs: isUltraLow ? 150 : 300,
+      connectionMode: this.connectionMode,
+      staleTickThresholdMs: staleThreshold,
       // On Lightsail, slippage is tighter (0.001 - 0.002 = 0.1%-0.2%), on preview allow 0.5% buffer
       slippageBufferPct: isUltraLow ? 0.002 : 0.005,
       // Trailing stop responsiveness factor (1.15x faster reaction on Lightsail)
@@ -191,12 +211,13 @@ class LatencyAdaptiveEngine {
     const ageMs = Math.max(0, now - lastTickTimeMs);
     const profile = this.getProfile();
     const limitMs = profile.staleTickThresholdMs;
+    const modeLabel = profile.connectionMode === 'WEBSOCKET' ? 'WEBSOCKET' : 'REST_KEEPALIVE';
 
     if (ageMs > limitMs) {
       return {
         isFresh: false,
         ageMs,
-        reason: `[LATENCY GATE] Quote for ${symbol || 'contract'} is stale (Age: ${ageMs}ms > ${limitMs}ms limit on ${profile.executionEnvironment}). Entry skipped to avoid slippage.`
+        reason: `[LATENCY GATE] Quote for ${symbol || 'contract'} is stale (Age: ${ageMs}ms > ${limitMs}ms limit on ${modeLabel} [${profile.executionEnvironment}]). Entry skipped to avoid slippage.`
       };
     }
 

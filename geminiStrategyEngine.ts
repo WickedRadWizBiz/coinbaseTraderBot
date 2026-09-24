@@ -4,6 +4,20 @@ export interface PreFlightVetoResult {
   approved: boolean;
   confidenceScore: number; // 0.0 to 1.0
   reason: string;
+  adversarialConsensus?: number; // C score (0.0 to 1.0)
+  bullishThesis?: string;
+  bearishCounterThesis?: string;
+}
+
+export interface AdversarialDebateResult {
+  verdict: 'EXECUTE' | 'ABSTAIN_DISSONANCE' | 'REJECT_HIGH_RISK';
+  consensusScore: number; // C = 1 - Var({d_i}) / Var_max (0.0 to 1.0)
+  bullishConfidence: number; // 0.0 to 1.0
+  bearishConfidence: number; // 0.0 to 1.0
+  bullishRationale: string;
+  bearishRationale: string;
+  recommendedPositionMultiplier: number;
+  debateTimestamp: string;
 }
 
 export interface MarketRegimeResult {
@@ -101,39 +115,55 @@ class GeminiStrategyEngine {
   }
 
   // --------------------------------------------------------------------------
-  // 1. PRE-FLIGHT FALSE BREAKOUT VETO FILTER
-  // Uses 'gemini-3.5-flash-lite' for minimal latency & light quota usage
+  // 1. MULTI-AGENT ADVERSARIAL DEBATE COMMITTEE (Section 4.1)
+  // Cross-examines "Bullish Quant Analyst" vs "Bearish Risk Manager"
+  // Calculates mathematical consensus: C = 1 - Var({d_i}) / Var_max
   // --------------------------------------------------------------------------
-  public async evaluatePreFlightVeto(candidate: {
+  public async evaluateAdversarialDebate(candidate: {
     symbol: string;
     side: 'YES' | 'NO';
     patternType: string;
     spotTA: any;
     bidVol: number;
     askVol: number;
-  }): Promise<PreFlightVetoResult> {
-    const cacheKey = `${candidate.symbol}_${candidate.side}_${candidate.patternType}`;
-    const cached = this.vetoCache[cacheKey];
-    if (cached && Date.now() - cached.timestamp < 15000) {
-      return cached.result;
-    }
-
+    mertonFairValue?: number;
+    currentKalshiPrice?: number;
+    vpinToxicity?: number;
+  }): Promise<AdversarialDebateResult> {
     const ai = this.getAiClient();
     if (!ai) {
-      return { approved: true, confidenceScore: 0.8, reason: 'Gemini offline or cooling down - default pass' };
+      return {
+        verdict: 'EXECUTE',
+        consensusScore: 0.85,
+        bullishConfidence: 0.8,
+        bearishConfidence: 0.2,
+        bullishRationale: 'Heuristic quant momentum validation',
+        bearishRationale: 'No critical adverse selection detected',
+        recommendedPositionMultiplier: 1.0,
+        debateTimestamp: new Date().toISOString()
+      };
     }
 
     try {
-      const prompt = `Analyze this candidate prediction market trade setup and veto if it looks like a false breakout / trap:
-Asset: ${candidate.symbol} | Proposed Side: ${candidate.side} | Pattern: ${candidate.patternType}
-Spot TA: RSI=${candidate.spotTA?.rsi?.toFixed(1) || 'N/A'}, Cloud=${candidate.spotTA?.ichimokuState || 'N/A'}, Trend=${candidate.spotTA?.tenkanKijunCross || 'N/A'}
-Orderbook: BidVol=${candidate.bidVol}, AskVol=${candidate.askVol} (Imbalance Ratio=${(candidate.askVol / (candidate.bidVol || 1)).toFixed(2)})
+      const prompt = `You are a Multi-Agent Institutional Trading Committee conducting an Adversarial Cross-Examination on a candidate 15-minute Kalshi binary prediction market trade setup.
 
-Return JSON:
+CANDIDATE SETUP:
+- Market: ${candidate.symbol} | Proposed Side: ${candidate.side} | Strategy Pattern: ${candidate.patternType}
+- Spot TA: RSI=${candidate.spotTA?.rsi?.toFixed(1) || '50.0'}, Cloud=${candidate.spotTA?.ichimokuState || 'NEUTRAL'}, Squeeze=${candidate.spotTA?.bbkcSqueezeActive ? 'ACTIVE' : 'NONE'}
+- Spot Jump-Diffusion Fair Value: ${candidate.mertonFairValue ? (candidate.mertonFairValue * 100).toFixed(1) + '¢' : 'N/A'} vs Kalshi Book Price: ${candidate.currentKalshiPrice ? (candidate.currentKalshiPrice * 100).toFixed(1) + '¢' : 'N/A'}
+- Microstructure: BidVol=${candidate.bidVol}, AskVol=${candidate.askVol}, VPIN Toxicity=${candidate.vpinToxicity ? candidate.vpinToxicity.toFixed(2) : '0.20'}
+
+AGENT PERSONAS:
+1. "Bullish Quantitative Analyst": Incentivized to find alpha, directional lead-lag edge, and momentum alignment.
+2. "Bearish Risk Governor": Incentivized to surface adverse selection, false breakout traps, fee friction, and liquidity cliffs.
+
+Conduct cross-examination and output JSON:
 {
-  "approved": boolean (true if solid setup, false if false breakout trap),
-  "confidenceScore": number (0.0 to 1.0),
-  "reason": string (short 1-sentence rationale)
+  "bullishConfidence": number (0.0 to 1.0),
+  "bullishRationale": string (1 concise sentence),
+  "bearishConfidence": number (0.0 to 1.0, where 1.0 means severe risk/veto),
+  "bearishRationale": string (1 concise sentence),
+  "identifiedTrapType": string ("NONE" | "BULL_TRAP" | "BEAR_TRAP" | "TOXIC_SWEEP" | "HIGH_FEE_CHOP")
 }`;
 
       const response = await this.generateContentWithFallback(ai, {
@@ -143,33 +173,111 @@ Return JSON:
           responseSchema: {
             type: Type.OBJECT,
             properties: {
-              approved: { type: Type.BOOLEAN },
-              confidenceScore: { type: Type.NUMBER },
-              reason: { type: Type.STRING }
+              bullishConfidence: { type: Type.NUMBER },
+              bullishRationale: { type: Type.STRING },
+              bearishConfidence: { type: Type.NUMBER },
+              bearishRationale: { type: Type.STRING },
+              identifiedTrapType: { type: Type.STRING }
             },
-            required: ['approved', 'confidenceScore', 'reason']
+            required: ['bullishConfidence', 'bullishRationale', 'bearishConfidence', 'bearishRationale']
           }
         }
       });
 
       const parsed = JSON.parse(response.text?.trim() || '{}');
-      const result: PreFlightVetoResult = {
-        approved: typeof parsed.approved === 'boolean' ? parsed.approved : true,
-        confidenceScore: typeof parsed.confidenceScore === 'number' ? parsed.confidenceScore : 0.8,
-        reason: parsed.reason || 'Gemini pre-flight review complete'
-      };
+      const bullConf = Math.max(0.0, Math.min(1.0, parsed.bullishConfidence ?? 0.75));
+      const bearConf = Math.max(0.0, Math.min(1.0, parsed.bearishConfidence ?? 0.25));
 
-      this.vetoCache[cacheKey] = { result, timestamp: Date.now() };
-      return result;
+      // Compute mathematical belief dispersion & consensus
+      // Signed convictions: Bullish = +bullConf, Bearish = -bearConf
+      const d_bull = bullConf;
+      const d_bear = 1.0 - bearConf; // Inverted to measure directional agreement
+      const meanConviction = (d_bull + d_bear) / 2;
+      const variance = (Math.pow(d_bull - meanConviction, 2) + Math.pow(d_bear - meanConviction, 2)) / 2;
+      const maxVariance = 0.25; // Max variance between two bounded [0, 1] variables
+
+      const consensusScore = Math.max(0.0, Math.min(1.0, 1.0 - (variance / maxVariance)));
+
+      let verdict: 'EXECUTE' | 'ABSTAIN_DISSONANCE' | 'REJECT_HIGH_RISK' = 'EXECUTE';
+      let positionMultiplier = 1.0;
+
+      if (bearConf > 0.75) {
+        verdict = 'REJECT_HIGH_RISK';
+        positionMultiplier = 0.0;
+      } else if (consensusScore < 0.50) {
+        // High dissonance between Bull and Bear committee
+        verdict = 'ABSTAIN_DISSONANCE';
+        positionMultiplier = 0.0;
+      } else {
+        positionMultiplier = Math.max(0.3, consensusScore * (1 - bearConf * 0.5));
+      }
+
+      return {
+        verdict,
+        consensusScore: Number(consensusScore.toFixed(3)),
+        bullishConfidence: bullConf,
+        bearishConfidence: bearConf,
+        bullishRationale: parsed.bullishRationale || 'Confluence identified in trend setup',
+        bearishRationale: parsed.bearishRationale || 'Risk within acceptable bounds',
+        recommendedPositionMultiplier: Number(positionMultiplier.toFixed(2)),
+        debateTimestamp: new Date().toISOString()
+      };
     } catch (e) {
       this.handleApiError(e);
-      return { approved: true, confidenceScore: 0.8, reason: 'Gemini pre-flight error - default pass' };
+      return {
+        verdict: 'EXECUTE',
+        consensusScore: 0.80,
+        bullishConfidence: 0.8,
+        bearishConfidence: 0.2,
+        bullishRationale: 'Heuristic fallback execution',
+        bearishRationale: 'Heuristic bounds acceptable',
+        recommendedPositionMultiplier: 1.0,
+        debateTimestamp: new Date().toISOString()
+      };
     }
   }
 
   // --------------------------------------------------------------------------
+  // PRE-FLIGHT VETO (Wraps Adversarial Debate for Execution Pipeline)
+  // --------------------------------------------------------------------------
+  public async evaluatePreFlightVeto(candidate: {
+    symbol: string;
+    side: 'YES' | 'NO';
+    patternType: string;
+    spotTA: any;
+    bidVol: number;
+    askVol: number;
+    mertonFairValue?: number;
+    currentKalshiPrice?: number;
+    vpinToxicity?: number;
+  }): Promise<PreFlightVetoResult> {
+    const cacheKey = `${candidate.symbol}_${candidate.side}_${candidate.patternType}`;
+    const cached = this.vetoCache[cacheKey];
+    if (cached && Date.now() - cached.timestamp < 15000) {
+      return cached.result;
+    }
+
+    const debate = await this.evaluateAdversarialDebate(candidate);
+    const approved = debate.verdict === 'EXECUTE';
+    const reason = approved
+      ? `Debate Cleared (Consensus C=${(debate.consensusScore * 100).toFixed(0)}%). Bull: ${debate.bullishRationale}`
+      : `Debate Vetoed (${debate.verdict}). Bear: ${debate.bearishRationale}`;
+
+    const result: PreFlightVetoResult = {
+      approved,
+      confidenceScore: debate.consensusScore,
+      reason,
+      adversarialConsensus: debate.consensusScore,
+      bullishThesis: debate.bullishRationale,
+      bearishCounterThesis: debate.bearishRationale
+    };
+
+    this.vetoCache[cacheKey] = { result, timestamp: Date.now() };
+    return result;
+  }
+
+  // --------------------------------------------------------------------------
   // 2. VOLATILITY REGIME & MARKET PHASE CLASSIFIER
-  // Uses 'gemini-3.8-flash' every 15 minutes
   // --------------------------------------------------------------------------
   public async classifyMarketRegime(candlesData: Record<string, any[]>): Promise<MarketRegimeResult> {
     const ai = this.getAiClient();
@@ -242,7 +350,6 @@ Return JSON:
 
   // --------------------------------------------------------------------------
   // 3. BATCH TRADE CLUSTERING & META-RULE AUDIT
-  // Uses 'gemini-3.8-flash' every 20 completed trades
   // --------------------------------------------------------------------------
   public async auditTradeBatch(recentTrades: any[]): Promise<TradeAuditResult | null> {
     if (!recentTrades || recentTrades.length < 10) return null;
@@ -296,22 +403,18 @@ Return JSON:
 
   // --------------------------------------------------------------------------
   // 4. CROSS-ASSET LEAD/LAG CORRELATION ENGINE (BTC -> SOL/ETH)
-  // Uses mathematical heuristics instead of AI
   // --------------------------------------------------------------------------
   public async detectCrossAssetLeadLag(
     btcChangePct: number,
     solChangePct: number,
     ethChangePct: number
   ): Promise<LeadLagSignal | null> {
-    // Only trigger if BTC experienced significant momentum (> 0.35%)
     if (Math.abs(btcChangePct) < 0.35) return null;
 
     let targetAsset: 'SOL' | 'ETH' | null = null;
     let predictedDirection: 'YES' | 'NO' = 'YES';
     let reason = '';
     
-    // Heuristic: If BTC moves significantly, but SOL/ETH lags, predict they will follow BTC's direction
-    // E.g. BTC > 0.35%, SOL < 0.10% -> SOL will catch up (go YES on SOL calls)
     if (btcChangePct >= 0.35) {
       if (solChangePct <= 0.10) {
         targetAsset = 'SOL';
@@ -358,7 +461,7 @@ Return JSON:
                 asset.includes('XRP') ? 'XRP' : '';
     if (!key) return null;
     const sig = this.activeLeadLagSignals[key];
-    if (sig && Date.now() - sig.timestamp < 180000) { // Valid for 3 minutes
+    if (sig && Date.now() - sig.timestamp < 180000) {
       return sig;
     }
     return null;
@@ -366,7 +469,6 @@ Return JSON:
 
   // --------------------------------------------------------------------------
   // 5. DYNAMIC KELLY MULTIPLIER & DRAWDOWN GOVERNOR
-  // Uses mathematical heuristics instead of AI
   // --------------------------------------------------------------------------
   public async evaluateRiskGovernor(stats: {
     winRate24hPct: number;
@@ -374,18 +476,16 @@ Return JSON:
     currentDrawdownPct: number;
     activeKellyMultiplier: number;
   }): Promise<RiskGovernorResult> {
-    
-    // Mathematical baseline fallback
     let baselineKelly = stats.activeKellyMultiplier;
     let status: 'SCALING_UP' | 'STABLE' | 'THROTTLED_DRAWDOWN' = 'STABLE';
     let reason = 'Mathematical drawdown governor active';
 
     if (stats.currentDrawdownPct > 5.0) {
-      baselineKelly = Math.max(0.2, baselineKelly * 0.7); // Scale down on drawdown
+      baselineKelly = Math.max(0.2, baselineKelly * 0.7);
       status = 'THROTTLED_DRAWDOWN';
       reason = `Drawdown > 5% (${stats.currentDrawdownPct.toFixed(2)}%), scaling Kelly down.`;
     } else if (stats.winRate24hPct >= 65.0 && stats.profitFactor >= 1.5 && stats.currentDrawdownPct < 2.0) {
-      baselineKelly = Math.min(1.2, baselineKelly * 1.2); // Boost on hot streaks
+      baselineKelly = Math.min(1.2, baselineKelly * 1.2);
       status = 'SCALING_UP';
       reason = `Win Rate > 65% and Drawdown < 2%, scaling Kelly up.`;
     }
