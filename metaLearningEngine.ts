@@ -26,6 +26,7 @@ export interface EntryFeatures {
   smartTrailingActive?: number;
   smartTrailingDistance?: number;
   latency?: number;
+  coinbaseLatency?: number; // Coinbase WS latency in seconds (recorded for NN correlation discovery)
   macroGoalProgress?: number;
   macroTimeElapsedHours?: number;
   macroGoalGrade?: number;
@@ -1287,7 +1288,9 @@ export class MetaModelManager {
             cancelToFillRatio: feats.cancelToFillRatio ?? (t.is_win ? 1.2 : 2.6),
             vwapDistancePct: feats.vwapDistancePct ?? 0,
             fundingRate: feats.fundingRate ?? 0,
-            marketRegime: t.marketRegimeAtEntry || 'UNKNOWN'
+            marketRegime: t.marketRegimeAtEntry || 'UNKNOWN',
+            coinbaseLatency: feats.coinbaseLatency ?? (inds.coinbaseLatency ? inds.coinbaseLatency / 1000.0 : undefined),
+            latency: feats.latency
           },
           exit_price: exitP,
           timestamp_exit: t.timestamp || new Date().toISOString(),

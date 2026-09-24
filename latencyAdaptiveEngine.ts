@@ -8,8 +8,9 @@
 
 export interface LatencyProfile {
   lastPingTime: number;
-  coinbaseWsPingMs: number;
+  kalshiWsPingMs: number;
   kalshiRestPingMs: number;
+  coinbaseWsPingMs?: number;
   kalshiDataLatencyMs: number;
   kalshiOrderLatencyMs: number;
   effectiveLatencyMs: number;
@@ -25,8 +26,9 @@ export interface LatencyProfile {
 }
 
 class LatencyAdaptiveEngine {
-  private coinbaseWsPingEma: number = 45; // default initial preview assumption
+  private kalshiWsPingEma: number = 22; // default initial Kalshi WS latency
   private kalshiRestPingEma: number = 42;
+  private coinbaseWsPingEma: number = 24; // Coinbase WS telemetry stream latency (recorded for NN feature correlation, strictly ignored by latency gates)
   private kalshiDataLatencyEma: number = 38;
   private kalshiOrderLatencyEma: number = 46;
   private lastMeasurementTime: number = 0;
@@ -38,7 +40,7 @@ class LatencyAdaptiveEngine {
   private connectionMode: 'WEBSOCKET' | 'REST_KEEPALIVE' = 'REST_KEEPALIVE';
 
   // Maximum allowed age of order book quote before rejecting trade entry (Timestamp Drift Gate)
-  private readonly DEFAULT_STALENESS_LIMIT_MS = 300;
+  private readonly DEFAULT_STALENESS_LIMIT_MS = 500;
 
   constructor() {
     this.startPeriodicHeartbeat();
@@ -71,13 +73,30 @@ class LatencyAdaptiveEngine {
   }
 
   /**
-   * Records WebSocket message transit or heartbeat latency
+   * Records Kalshi WebSocket message transit or heartbeat latency
    */
-  public recordWsLatency(latencyMs: number) {
+  public recordKalshiWsLatency(latencyMs: number) {
     if (latencyMs > 0 && latencyMs < 2000) {
       // Exponential moving average (alpha = 0.25)
+      this.kalshiWsPingEma = Math.round(0.75 * this.kalshiWsPingEma + 0.25 * latencyMs);
+    }
+  }
+
+  /**
+   * Records Coinbase WebSocket ticker transit latency for Neural Network feature correlation.
+   * NOTE: Strictly ignored for latency gates and execution thresholds.
+   */
+  public recordCoinbaseWsLatency(latencyMs: number) {
+    if (latencyMs > 0 && latencyMs < 3000) {
       this.coinbaseWsPingEma = Math.round(0.75 * this.coinbaseWsPingEma + 0.25 * latencyMs);
     }
+  }
+
+  /**
+   * Alias for recording Kalshi WebSocket latency (Coinbase is recorded separately for NN analysis)
+   */
+  public recordWsLatency(latencyMs: number) {
+    this.recordKalshiWsLatency(latencyMs);
   }
 
   /**
@@ -162,22 +181,26 @@ class LatencyAdaptiveEngine {
    * Evaluates current latency environment profile
    */
   public getProfile(): LatencyProfile {
-    const effectiveLatency = Math.round((this.coinbaseWsPingEma * 0.4) + (this.kalshiRestPingEma * 0.6));
+    const isWs = this.connectionMode === 'WEBSOCKET';
+    // Latency logic is strictly calculated from Kalshi WebSocket and Kalshi REST API (Coinbase ignored)
+    const effectiveLatency = isWs 
+      ? Math.round((this.kalshiWsPingEma * 0.5) + (this.kalshiRestPingEma * 0.5))
+      : this.kalshiRestPingEma;
     const isUltraLow = effectiveLatency < 25;
     const sampleMs = Math.max(12, Math.min(1000, this.sampleRateIntervalEma));
-    const isWs = this.connectionMode === 'WEBSOCKET';
 
     // Scale stale tick threshold:
-    // - WebSocket: 300ms (150ms on ultra-low latency Lightsail)
+    // - WebSocket: 500ms (250ms on ultra-low latency Lightsail)
     // - REST Keep-Alive fallback: 1200ms (800ms on ultra-low latency Lightsail)
     const staleThreshold = isWs 
-      ? (isUltraLow ? 150 : 300) 
+      ? (isUltraLow ? 250 : 500) 
       : (isUltraLow ? 800 : 1200);
 
     return {
       lastPingTime: this.lastMeasurementTime,
-      coinbaseWsPingMs: this.coinbaseWsPingEma,
+      kalshiWsPingMs: this.kalshiWsPingEma,
       kalshiRestPingMs: this.kalshiRestPingEma,
+      coinbaseWsPingMs: this.coinbaseWsPingEma,
       kalshiDataLatencyMs: this.kalshiDataLatencyEma,
       kalshiOrderLatencyMs: this.kalshiOrderLatencyEma,
       effectiveLatencyMs: effectiveLatency,

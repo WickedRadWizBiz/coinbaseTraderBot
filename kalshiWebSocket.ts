@@ -36,6 +36,8 @@ export class KalshiWebSocketManager {
   private reconnectTimer: any = null;
   private pingInterval: any = null;
   private msgIdCounter: number = 1;
+  private lastPingSentTime: number = 0;
+  private lastPingMsgId: number = 0;
 
   private orderBookHandlers: KalshiWsOrderBookHandler[] = [];
   private tickerHandlers: KalshiWsTickerHandler[] = [];
@@ -167,10 +169,19 @@ export class KalshiWebSocketManager {
         this.isConnecting = false;
         this.reconnectAttempts = 0;
         latencyAdaptiveEngine.setConnectionMode('WEBSOCKET');
-        console.log(`[KALSHI WS] Connected successfully. Connection Mode set to WEBSOCKET (300ms gate).`);
+        console.log(`[KALSHI WS] Connected successfully. Connection Mode set to WEBSOCKET (500ms gate).`);
 
         this.startHeartbeat();
         this.resubscribeAll();
+      });
+
+      this.ws.on('pong', () => {
+        if (this.lastPingSentTime > 0) {
+          const rtt = Date.now() - this.lastPingSentTime;
+          if (rtt > 0 && rtt < 3000) {
+            latencyAdaptiveEngine.recordKalshiWsLatency(rtt);
+          }
+        }
       });
 
       this.ws.on('message', (data: WebSocket.Data) => {
@@ -202,9 +213,11 @@ export class KalshiWebSocketManager {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         try {
           // Standard ping frame + application-level ping command
+          this.lastPingSentTime = Date.now();
           this.ws.ping();
+          this.lastPingMsgId = this.msgIdCounter++;
           this.ws.send(JSON.stringify({
-            id: this.msgIdCounter++,
+            id: this.lastPingMsgId,
             cmd: 'ping'
           }));
         } catch (_) {}
@@ -299,8 +312,14 @@ export class KalshiWebSocketManager {
 
       if (!data) return;
 
-      // Heartbeat or pong
-      if (data.type === 'pong' || data.cmd === 'pong' || data.id) {
+      // Heartbeat or pong response
+      if (data.type === 'pong' || data.cmd === 'pong' || (data.id && data.id === this.lastPingMsgId)) {
+        if (this.lastPingSentTime > 0) {
+          const rtt = Date.now() - this.lastPingSentTime;
+          if (rtt > 0 && rtt < 3000) {
+            latencyAdaptiveEngine.recordKalshiWsLatency(rtt);
+          }
+        }
         return;
       }
 
@@ -313,7 +332,7 @@ export class KalshiWebSocketManager {
         const serverMs = typeof serverTs === 'number' && serverTs < 1e11 ? serverTs * 1000 : Number(serverTs);
         const transit = Date.now() - serverMs;
         if (transit > 0 && transit < 3000) {
-          latencyAdaptiveEngine.recordWsLatency(transit);
+          latencyAdaptiveEngine.recordKalshiWsLatency(transit);
         }
       }
 

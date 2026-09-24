@@ -42,7 +42,7 @@ kalshiWsManager.start();
 kalshiFixEngine.on('error', (err) => console.warn('[FIX 4.4 Engine Warning]:', err.message || err));
 kalshiFixEngine.connect().catch(err => console.warn('[FIX 4.4] Init warning:', err));
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 // Global variables to store bot state and settings
 let settings = {
@@ -955,8 +955,10 @@ class PatternTradingBrain {
       const bestAsk = pos.entryPrice ? pos.entryPrice * 1.001 : 0.501;
 
       const latMsNN2 = latencyAdaptiveEngine.getProfile().kalshiOrderLatencyMs || latencyAdaptiveEngine.getProfile().effectiveLatencyMs;
+      const cbLatMs2 = latencyAdaptiveEngine.getProfile().coinbaseWsPingMs;
       const onlineFeatures: EntryFeatures = pos.entryFeatures || {
         latency: latMsNN2 / 1000.0,
+        coinbaseLatency: cbLatMs2 !== undefined ? cbLatMs2 / 1000.0 : undefined,
         smartTrailingActive: settings.smartTrailingTP ? 1 : 0,
         smartTrailingDistance: (settings as any).smartTrailDistance || 0.05,
         macroGoalProgress: macroCycleProfit,
@@ -2397,8 +2399,10 @@ async function openPosition(
   const bestAsk = ctx?.asks?.[0]?.price || (entryPrice ? entryPrice * 1.001 : 0.501);
 
   const latMsNN = latencyAdaptiveEngine.getProfile().kalshiOrderLatencyMs || latencyAdaptiveEngine.getProfile().effectiveLatencyMs;
+  const cbLatMs = latencyAdaptiveEngine.getProfile().coinbaseWsPingMs;
   let entryFeatures: EntryFeatures = {
     latency: latMsNN / 1000.0,
+    coinbaseLatency: cbLatMs !== undefined ? cbLatMs / 1000.0 : undefined,
     smartTrailingActive: settings.smartTrailingTP ? 1 : 0,
     smartTrailingDistance: (settings as any).smartTrailDistance || 0.05,
     macroGoalProgress: macroCycleProfit,
@@ -3352,12 +3356,14 @@ class RapidScalper {
         if (!settings.ENABLE_RAPID_SCALP_MODE || !settings.botActive) return;
         try {
           const msg = JSON.parse(event.data);
+          // Measure and record Coinbase WebSocket transit latency for Neural Network feature correlation
           if (msg.time) {
-            const transitLatency = Date.now() - new Date(msg.time).getTime();
-            if (transitLatency > 0 && transitLatency < 5000) {
-              latencyAdaptiveEngine.recordWsLatency(transitLatency);
+            const transitTime = Date.now() - new Date(msg.time).getTime();
+            if (transitTime >= 0 && transitTime < 5000) {
+              latencyAdaptiveEngine.recordCoinbaseWsLatency(transitTime);
             }
           }
+          // Coinbase is ignored for latency gate checks (Kalshi WS and Kalshi REST only)
           if (msg.type === 'ticker' && msg.product_id && msg.price) {
             this.processTick(msg.product_id, parseFloat(msg.price));
           }

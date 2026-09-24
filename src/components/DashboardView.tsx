@@ -111,16 +111,21 @@ interface BalanceData {
   };
   latency_profile?: {
     lastPingTime: number;
-    coinbaseWsPingMs: number;
+    kalshiWsPingMs?: number;
     kalshiRestPingMs: number;
+    coinbaseWsPingMs?: number;
     kalshiDataLatencyMs?: number;
     kalshiOrderLatencyMs?: number;
     effectiveLatencyMs: number;
     isUltraLowLatency: boolean;
     executionEnvironment: string;
+    connectionMode?: 'WEBSOCKET' | 'REST_KEEPALIVE';
     staleTickThresholdMs: number;
     slippageBufferPct: number;
     trailingStopAgilityFactor: number;
+    sampleRate?: string;
+    sampleRateIntervalMs?: number;
+    isNeuralExitMonitorActive?: boolean;
   };
   error?: string;
 }
@@ -386,14 +391,16 @@ export function DashboardView() {
     || balance?.latency_profile?.kalshiDataLatencyMs 
     || 28;
 
-  // Real measured WebSocket and REST latencies
-  const wsLatency = balance?.latency_profile?.coinbaseWsPingMs 
+  // Real measured Kalshi WebSocket and Kalshi REST latencies (Coinbase strictly ignored)
+  const wsLatency = balance?.latency_profile?.kalshiWsPingMs 
     || balance?.latency_profile?.kalshiDataLatencyMs 
-    || 24;
+    || 22;
 
   const restLatency = balance?.latency_profile?.kalshiRestPingMs 
     || balance?.latency_profile?.kalshiOrderLatencyMs 
     || 42;
+
+  const coinbaseLatency = balance?.latency_profile?.coinbaseWsPingMs ?? 24;
 
   const kalshiDataLatency = balance?.latency_profile?.kalshiDataLatencyMs 
     || balance?.latency_profile?.kalshiRestPingMs 
@@ -489,13 +496,15 @@ export function DashboardView() {
                   {/* Row 1: Single combined Latency badge spanning the full width */}
                   <span 
                     className="px-1.5 py-0.5 border border-crypto-primary/40 bg-black/40 text-crypto-text/80 flex items-center justify-between gap-1.5 leading-none w-full"
-                    title={`Real-time measured transport latencies: Kalshi WebSocket Stream (${wsLatency}ms) / REST API Keep-Alive (${restLatency}ms)`}
+                    title={`Real-time measured transport latencies: Kalshi WS (${wsLatency}ms) / Kalshi REST (${restLatency}ms) [Active for Latency Gates & Sizing] | Coinbase WS (${coinbaseLatency}ms) [Recorded for Neural Net Correlation Analysis]`}
                   >
                     <span className="text-[#808080] font-bold">Latency:</span>
                     <span className="font-bold flex items-center gap-1">
-                      <span className="text-emerald-400">WS {wsLatency} ms</span>
+                      <span className="text-emerald-400" title="Kalshi WebSocket (Active Latency Gate)">WS {wsLatency}ms</span>
                       <span className="text-[#606060]">/</span>
-                      <span className="text-crypto-primary">REST {restLatency} ms</span>
+                      <span className="text-crypto-primary" title="Kalshi REST API (Active Latency Gate)">REST {restLatency}ms</span>
+                      <span className="text-[#606060]">/</span>
+                      <span className="text-cyan-400 font-normal" title="Coinbase WS Ticker Latency (Recorded for Neural Network correlation discovery; ignored by latency gate)">CB {coinbaseLatency}ms <span className="text-[8px] text-cyan-300/70">(NN)</span></span>
                     </span>
                   </span>
 
@@ -902,7 +911,7 @@ export function DashboardView() {
                     ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500'
                     : 'bg-amber-500/20 text-amber-300 border-amber-500'
                 }`}>
-                  {balance.latency_profile.connectionMode === 'WEBSOCKET' ? 'KALSHI WEBSOCKET STREAM (300MS GATE)' : 'REST KEEP-ALIVE FALLBACK (1200MS GATE)'}
+                  {balance.latency_profile.connectionMode === 'WEBSOCKET' ? `KALSHI WEBSOCKET STREAM (${balance.latency_profile.staleTickThresholdMs || 500}MS GATE)` : 'REST KEEP-ALIVE FALLBACK (1200MS GATE)'}
                 </span>
                 <span className={`px-2 py-0.5 border text-[10px] uppercase font-bold tracking-widest ${
                   balance.latency_profile.isUltraLowLatency
@@ -912,7 +921,7 @@ export function DashboardView() {
                   {balance.latency_profile.executionEnvironment === 'AWS_LIGHTSAIL_FAST' ? 'AWS LIGHTSAIL ULTRA-LOW LATENCY (<25ms)' : 'SANDBOX STANDARD ADAPTIVE MODE'}
                 </span>
                 <span className="text-[11px] opacity-75">
-                  (Sample RT: {sampleRtMs}ms | Kalshi Order: {orderLatencyDisplay} | Kalshi Data: {kalshiDataLatency}ms | Coinbase WS: {balance.latency_profile.coinbaseWsPingMs}ms | Effective: {balance.latency_profile.effectiveLatencyMs}ms)
+                  (Sample RT: {sampleRtMs}ms | Kalshi Order: {orderLatencyDisplay} | Kalshi Data: {kalshiDataLatency}ms | Kalshi WS: {balance.latency_profile.kalshiWsPingMs || wsLatency}ms | Kalshi REST: {restLatency}ms | Effective: {balance.latency_profile.effectiveLatencyMs}ms | Coinbase WS: {balance.latency_profile.coinbaseWsPingMs || coinbaseLatency}ms [NN Telemetry])
                 </span>
               </div>
               <div className="text-[11px] opacity-90 leading-relaxed">

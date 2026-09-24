@@ -379,10 +379,10 @@ export function SettingsView() {
             <Zap className="w-5 h-5 text-crypto-primary shrink-0 mt-0.5" />
             <div className="flex flex-col gap-0.5">
               <span className="text-xs font-bold uppercase tracking-wider text-crypto-text flex items-center gap-2">
-                Dynamic Transport & Latency Gate: <span className="text-crypto-primary font-mono">WS (300ms) / REST (1200ms)</span>
+                Dynamic Transport & Latency Gate: <span className="text-crypto-primary font-mono">WS (500ms) / REST (1200ms)</span>
               </span>
               <span className="text-xs text-[#808080]">
-                High-frequency WebSocket stream serves as primary market feed with a 300ms timestamp drift gate. Seamlessly fails over to persistent HTTP Keep-Alive connection pooling with gate automatically scaled to 1200ms.
+                High-frequency WebSocket stream serves as primary market feed with a 500ms timestamp drift gate. Seamlessly fails over to persistent HTTP Keep-Alive connection pooling with gate automatically scaled to 1200ms.
               </span>
             </div>
           </div>
