@@ -6473,7 +6473,215 @@ app.post('/api/pattern-brain/reset', (req, res) => {
   res.json({ success: true, message: 'Performance summary cleared.' });
 });
 
-app.get('/api/logs', (req, res) => { res.json({ logs: spotLogs.slice(0, 100) }); });
+app.get('/api/logs', (req, res) => {
+  const limitParam = req.query.limit;
+  if (limitParam === 'all') {
+    res.json({ logs: spotLogs, total: spotLogs.length });
+  } else {
+    const limit = Math.max(1, Math.min(2000, Number(limitParam) || 100));
+    res.json({ logs: spotLogs.slice(0, limit), total: spotLogs.length });
+  }
+});
+
+app.get('/api/logs/export', async (req, res) => {
+  try {
+    const allDbTrades = await tradeDbManager.getAllTrades(300).catch(() => []);
+    const workingBalance = await getEffectiveWorkingBalance().catch(() => 0);
+    const exportTime = new Date().toISOString();
+
+    const exportBundle = {
+      exportMetadata: {
+        exportedAt: exportTime,
+        app: "PredictionsRunner.exe",
+        description: "Autonomous Kalshi & Crypto Trading Telemetry Export",
+        targetConsumer: "Google AI Studio / Gemini Code Assistant",
+        environment: process.env.NODE_ENV || 'production',
+        tradingMode: settings.paperTrading ? 'PAPER_TRADING' : 'LIVE_KALSHI_TRADING',
+        totalLogsRecorded: spotLogs.length,
+        totalHistoricalTrades: allDbTrades.length
+      },
+      botConfiguration: {
+        ...settings,
+        activeKellyMultiplier: settings.kellyMultiplier,
+        currentWorkingBalance: workingBalance,
+        startingBankroll,
+        simulatedPaperBalance,
+        realKalshiCashPool,
+        liveTotalPortfolioValue,
+        liveRealizedPnl,
+        liveUnrealizedPnl
+      },
+      activePositions: activePositions.map(p => ({
+        id: p.id,
+        symbol: p.symbol,
+        label: p.label,
+        side: p.side,
+        entryPrice: p.entryPrice,
+        size: p.size,
+        capitalPlacedUsd: p.capitalPlacedUsd,
+        entryTime: new Date(p.entryTime).toISOString(),
+        expectedTP: p.expectedTP,
+        targetDollarGoal: p.targetDollarGoal,
+        category: p.category,
+        isPerpetual: p.isPerpetual,
+        leverage: p.leverage,
+        marketRegimeAtEntry: p.marketRegimeAtEntry,
+        analysisMeta: p.analysisMeta
+      })),
+      portfolioSnapshot: {
+        mode: settings.paperTrading ? 'PAPER' : 'LIVE',
+        paperBalance: simulatedPaperBalance,
+        paperBankrollATH,
+        realKalshiCash: realKalshiCashPool,
+        livePortfolioValue: liveTotalPortfolioValue,
+        liveRealizedPnl,
+        liveUnrealizedPnl,
+        vaultedProfits,
+        cycleEarnedProfit,
+        cumulativePaperProfit,
+        completedGoalCycles
+      },
+      rateLimiterAndLatency: {
+        rateLimits: kalshiRateLimiter.getStats(),
+        backpressure: backpressureQueue.getStats()
+      },
+      strategyEnginesState: {
+        recoveryProtocol: recoveryProtocol?.data || {},
+        plasticitySummary: plasticityEngine.getPlasticitySummary(),
+        geminiAmendments: tradingBrain.geminiAmendments || [],
+        extinctionAndTimeoutList: Object.values(tradingBrain.extinctionList || {}),
+        featureStats: tradingBrain.featureStats || {},
+        smartTrailingStats: tradingBrain.smartTrailingStats || {}
+      },
+      marketContexts: Object.fromEntries(
+        Object.entries(spotContexts).map(([sym, ctx]: [string, any]) => [
+          sym,
+          {
+            symbol: ctx.symbol,
+            category: ctx.category,
+            currentPrice: ctx.currentPrice,
+            bidPrice: ctx.bidPrice,
+            askPrice: ctx.askPrice,
+            spread: (ctx.askPrice || 0) - (ctx.bidPrice || 0),
+            seriesTicker: ctx.seriesTicker,
+            leverage: ctx.leverage,
+            rsi: ctx.rsi,
+            ichimokuState: ctx.ichimokuState,
+            volumeSurgeRatio: ctx.volumeSurgeRatio,
+            orderbookImbalance: ctx.orderbookImbalance,
+            trendDirection: ctx.trendDirection
+          }
+        ])
+      ),
+      recentLogs: spotLogs,
+      tradeHistory: allDbTrades,
+      aiDiagnosticPrompt: `## SYSTEM TELEMETRY & STRATEGY AUDIT INGESTION
+
+### Objective:
+Analyze the trading telemetry, execution logs, and trade history from PredictionsRunner to diagnose why live Kalshi execution is experiencing losses compared to simulated paper trading, and provide concrete algorithmic solutions.
+
+### Key Context & Known Observations:
+1. **Paper Trading vs. Live Trading Disconnect**:
+   - Paper trading calculates theoretical mark-to-market delta on contracts using spot indicator movements.
+   - Live Kalshi binary contracts are 15-minute / 1-hour discrete payoff derivatives ($1.00 YES / $0.00 NO settlement).
+   - In live trading, taking wide bid-ask spreads (e.g. 5¢ to 15¢ spread on a 30¢ contract) or buying deep Out-Of-The-Money (OTM) lottery contracts ($0.03-$0.10) incurs catastrophic negative expected value (EV) due to high statistical probability of settling at $0.00.
+   - Premature stop-loss exits on live contracts sell into the bid, causing immediate 40-70% spread slippage.
+   
+2. **Telemetry Data Included**:
+   - **botConfiguration**: Sizing, Kelly multipliers, allocations, and toggles.
+   - **portfolioSnapshot**: Real vs. paper balances, realized/unrealized PnL.
+   - **tradeHistory**: Closed trades with indicators, pattern types, entry/exit prices, and close reasons.
+   - **recentLogs**: Complete sequence of execution logs with timestamps and signals.
+`
+    };
+
+    res.json(exportBundle);
+  } catch (err: any) {
+    console.error('[EXPORT ERROR]', err);
+    res.status(500).json({ error: 'Failed to generate log export bundle', details: err?.message || err });
+  }
+});
+
+app.get('/api/logs/download', async (req, res) => {
+  try {
+    const allDbTrades = await tradeDbManager.getAllTrades(300).catch(() => []);
+    const workingBalance = await getEffectiveWorkingBalance().catch(() => 0);
+    const exportTime = new Date().toISOString();
+    const filenameTime = exportTime.replace(/[:.]/g, '-');
+
+    const exportBundle = {
+      exportMetadata: {
+        exportedAt: exportTime,
+        app: "PredictionsRunner.exe",
+        description: "Autonomous Kalshi & Crypto Trading Telemetry Export for AI Studio",
+        targetConsumer: "Google AI Studio / Gemini Code Assistant",
+        environment: process.env.NODE_ENV || 'production',
+        tradingMode: settings.paperTrading ? 'PAPER_TRADING' : 'LIVE_KALSHI_TRADING',
+        totalLogsRecorded: spotLogs.length,
+        totalHistoricalTrades: allDbTrades.length
+      },
+      botConfiguration: {
+        ...settings,
+        activeKellyMultiplier: settings.kellyMultiplier,
+        currentWorkingBalance: workingBalance,
+        startingBankroll,
+        simulatedPaperBalance,
+        realKalshiCashPool,
+        liveTotalPortfolioValue,
+        liveRealizedPnl,
+        liveUnrealizedPnl
+      },
+      activePositions: activePositions.map(p => ({
+        id: p.id,
+        symbol: p.symbol,
+        label: p.label,
+        side: p.side,
+        entryPrice: p.entryPrice,
+        size: p.size,
+        capitalPlacedUsd: p.capitalPlacedUsd,
+        entryTime: new Date(p.entryTime).toISOString(),
+        expectedTP: p.expectedTP,
+        targetDollarGoal: p.targetDollarGoal,
+        category: p.category,
+        isPerpetual: p.isPerpetual,
+        leverage: p.leverage,
+        marketRegimeAtEntry: p.marketRegimeAtEntry,
+        analysisMeta: p.analysisMeta
+      })),
+      portfolioSnapshot: {
+        mode: settings.paperTrading ? 'PAPER' : 'LIVE',
+        paperBalance: simulatedPaperBalance,
+        paperBankrollATH,
+        realKalshiCash: realKalshiCashPool,
+        livePortfolioValue: liveTotalPortfolioValue,
+        liveRealizedPnl,
+        liveUnrealizedPnl,
+        vaultedProfits,
+        cycleEarnedProfit,
+        cumulativePaperProfit,
+        completedGoalCycles
+      },
+      strategyEnginesState: {
+        recoveryProtocol: recoveryProtocol?.data || {},
+        plasticitySummary: plasticityEngine.getPlasticitySummary(),
+        geminiAmendments: tradingBrain.geminiAmendments || [],
+        extinctionAndTimeoutList: Object.values(tradingBrain.extinctionList || {}),
+        featureStats: tradingBrain.featureStats || {},
+        smartTrailingStats: tradingBrain.smartTrailingStats || {}
+      },
+      recentLogs: spotLogs,
+      tradeHistory: allDbTrades,
+      aiDiagnosticPrompt: `## PredictionsRunner Telemetry Ingestion & Optimization Bundle for AI Studio\nExported at: ${exportTime}\nMode: ${settings.paperTrading ? 'Paper Trading' : 'Live Kalshi Trading'}\nLogs Count: ${spotLogs.length}\nTrade History Count: ${allDbTrades.length}`
+    };
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="kalshi-ai-studio-telemetry-${filenameTime}.json"`);
+    res.send(JSON.stringify(exportBundle, null, 2));
+  } catch (err: any) {
+    console.error('[DOWNLOAD ERROR]', err);
+    res.status(500).json({ error: 'Failed to download log bundle' });
+  }
+});
 app.get('/api/backpressure-status', (req, res) => { res.json(backpressureQueue.getStats()); });
 app.get('/api/kalshi/rate-limits', (req, res) => { res.json(kalshiRateLimiter.getStats()); });
 app.post('/api/kalshi/sync-limits', async (req, res) => {
