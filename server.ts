@@ -5962,6 +5962,24 @@ app.post('/api/settings', (req, res) => {
       message: `[GAUNTLET MODE DEACTIVATED] Standard risk management and sizing parameters restored.`
     });
   }
+  if (req.body.botActive !== undefined && req.body.botActive !== settings.botActive) {
+    spotLogs.unshift({
+      id: logIdCounter++,
+      time: new Date().toISOString(),
+      type: req.body.botActive ? 'INFO' : 'WARN',
+      message: `[BOT STATE] Bot execution status toggled to ${req.body.botActive ? 'ACTIVE (Trading Engaged)' : 'STOPPED (Trading Suspended)'}.`
+    });
+  }
+
+  if (req.body.paperTrading !== undefined && req.body.paperTrading !== settings.paperTrading) {
+    spotLogs.unshift({
+      id: logIdCounter++,
+      time: new Date().toISOString(),
+      type: 'INFO',
+      message: `[TRADING POOL SWITCH] Environment toggled to ${req.body.paperTrading ? 'PAPER CASH (Simulated Bankroll)' : 'KALSHI CASH POOL (Live Prediction Exchange)'}.`
+    });
+  }
+
   settings = updated;
   goalResetScheduler.setTrainingOnTheJob(!!settings.trainingOnTheJob);
   if (typeof req.body.daily_goal === 'number' && req.body.daily_goal > 0) {

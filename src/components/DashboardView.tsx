@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Activity, AlertCircle, RefreshCw, TrendingUp, BarChart3, ShieldCheck, Award, Target, DollarSign, ShieldAlert, RotateCcw, Clock, Zap } from 'lucide-react';
+import React, { useEffect, useState, useRef } from 'react';
+import { Activity, AlertCircle, RefreshCw, TrendingUp, BarChart3, ShieldCheck, Award, Target, DollarSign, ShieldAlert, RotateCcw, Clock, Zap, Play, Square } from 'lucide-react';
 import { OrderBookMonitor } from './OrderBookMonitor';
 import { RestartConfirmModal } from './RestartConfirmModal';
 import { RecoveryProtocolCard } from './RecoveryProtocolCard';
@@ -140,6 +140,69 @@ export function DashboardView() {
   const [overrideConfluence, setOverrideConfluence] = useState(false);
   const [panicState, setPanicState] = useState<'idle' | 'flashing' | 'fading'>('idle');
   const [currentSettings, setCurrentSettings] = useState<any>(null);
+  const [isTogglingBot, setIsTogglingBot] = useState(false);
+  const [isTogglingMode, setIsTogglingMode] = useState(false);
+  const lastCashPoolTapRef = useRef<number>(0);
+
+  const handleToggleBotActive = async () => {
+    if (isTogglingBot) return;
+    setIsTogglingBot(true);
+    const isCurrentlyActive = currentSettings?.botActive !== undefined 
+      ? currentSettings.botActive !== false 
+      : marketContext?.botActive !== false;
+    const nextBotActive = !isCurrentlyActive;
+
+    // Optimistically update local states immediately
+    setMarketContext((prev: any) => prev ? { ...prev, botActive: nextBotActive } : { botActive: nextBotActive });
+    setCurrentSettings((prev: any) => prev ? { ...prev, botActive: nextBotActive } : { botActive: nextBotActive });
+
+    try {
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ botActive: nextBotActive })
+      });
+      await fetchData(false);
+    } catch (e) {
+      console.error("[TOGGLE BOT ACTIVE ERROR]", e);
+    } finally {
+      setIsTogglingBot(false);
+    }
+  };
+
+  const handleToggleTradingMode = async () => {
+    if (isTogglingMode) return;
+    setIsTogglingMode(true);
+    const isCurrentlyLive = balance?.paper_trading === false || (currentSettings && currentSettings.paperTrading === false);
+    const nextPaperTrading = isCurrentlyLive; // If live, toggle to paper (true). If paper, toggle to live (false).
+
+    // Optimistically update
+    setBalance((prev: any) => prev ? { ...prev, paper_trading: nextPaperTrading } : prev);
+    setCurrentSettings((prev: any) => prev ? { ...prev, paperTrading: nextPaperTrading } : prev);
+
+    try {
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paperTrading: nextPaperTrading })
+      });
+      await fetchData(false);
+    } catch (e) {
+      console.error("[TOGGLE TRADING MODE ERROR]", e);
+    } finally {
+      setIsTogglingMode(false);
+    }
+  };
+
+  const handleCashPoolClickOrTouch = () => {
+    const now = Date.now();
+    if (now - lastCashPoolTapRef.current < 450) {
+      lastCashPoolTapRef.current = 0;
+      handleToggleTradingMode();
+    } else {
+      lastCashPoolTapRef.current = now;
+    }
+  };
 
   const handlePanicSell = async () => {
     if (panicState !== 'idle') return;
@@ -384,6 +447,9 @@ export function DashboardView() {
   const activeEquity = balance?.simulated_paper_balance ?? (totalValue - (balance?.vaulted_profits || 0));
 
   const isLiveTrading = balance?.paper_trading === false || (currentSettings && currentSettings.paperTrading === false);
+  const isBotActive = currentSettings?.botActive !== undefined 
+    ? currentSettings.botActive !== false 
+    : marketContext?.botActive !== false;
 
   // Real measured sample rate (meta-model refresh & evaluation interval in ms)
   const sampleRtMs = balance?.latency_profile?.sampleRateIntervalMs 
@@ -583,10 +649,20 @@ export function DashboardView() {
           <div className="relative z-10 flex flex-col h-full justify-between">
             
             {/* Data Rows */}
-            <div className="flex border-b border-crypto-primary border-opacity-50 px-4 py-3.5 justify-between items-center bg-[#8f73ff08]">
+            <div 
+              onDoubleClick={handleToggleTradingMode}
+              onClick={handleCashPoolClickOrTouch}
+              title="Double-tap or double-click to toggle between Paper Cash and Kalshi Cash Pool"
+              className="flex border-b border-crypto-primary border-opacity-50 px-4 py-3.5 justify-between items-center bg-[#8f73ff08] cursor-pointer hover:bg-[#8f73ff14] transition-colors"
+            >
               <div className="flex flex-col">
-                <span className="uppercase tracking-widest font-bold">Available Cash Pool</span>
-                <span className="text-[10px] text-crypto-primary/80 uppercase">Capital cleared for new trades</span>
+                <span className="uppercase tracking-widest font-bold flex items-center gap-1.5">
+                  <span>{isLiveTrading ? 'Kalshi Cash Pool' : 'Paper Cash Pool'}</span>
+                  <span className={`text-[8px] px-1 py-0.2 border ${isLiveTrading ? 'border-crypto-success text-crypto-success' : 'border-crypto-primary/40 text-crypto-primary'}`}>
+                    {isLiveTrading ? 'LIVE' : 'SIM'}
+                  </span>
+                </span>
+                <span className="text-[10px] text-crypto-primary/80 uppercase">Capital cleared for new trades (Double-Tap to switch)</span>
               </div>
               <div className="flex flex-col items-end">
                 <span className="text-crypto-text font-bold text-lg">${(balance?.working_balance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
@@ -673,21 +749,74 @@ export function DashboardView() {
             <div className="flex border-b border-crypto-primary border-opacity-50 px-4 py-3 justify-between items-center">
               <span className="uppercase tracking-widest font-bold">Status</span>
               <div className="flex items-center gap-3">
-                <button onClick={fetchData} className="p-1 border border-crypto-primary hover:bg-crypto-primary hover:text-crypto-bg transition-colors">
-                  <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+                <button 
+                  type="button"
+                  onClick={() => fetchData(false)} 
+                  title="Refresh metrics and telemetry"
+                  className="p-1.5 border border-crypto-primary hover:bg-crypto-primary hover:text-crypto-bg transition-colors cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
                 </button>
-                {marketContext?.botActive !== false ? (
-                  <span className="text-crypto-success font-bold drop-shadow-[0_0_8px_var(--color-crypto-success)]">ACTIVE</span>
-                ) : (
-                  <span className="text-crypto-danger font-bold drop-shadow-[0_0_8px_var(--color-crypto-danger)] animate-pulse">STOPPED</span>
-                )}
-                <span className={`text-[10px] px-1.5 py-0.5 border font-bold ${
-                  balance?.paper_trading === false 
-                    ? 'border-crypto-success text-crypto-success bg-crypto-success/10' 
-                    : 'border-crypto-primary/40 text-crypto-primary bg-black/40'
-                }`}>
-                  {balance?.paper_trading === false ? 'KALSHI REAL POOL' : 'PAPER CASH'}
-                </span>
+
+                {/* Active / Stopped with Play / Stop toggle button above the words */}
+                <div className="flex flex-col items-center justify-center gap-1">
+                  <button
+                    type="button"
+                    onClick={handleToggleBotActive}
+                    disabled={isTogglingBot}
+                    title={isBotActive ? "Stop Bot Execution" : "Start Bot Execution"}
+                    className={`px-2 py-0.5 border text-[10px] font-bold uppercase transition-all cursor-pointer active:scale-95 flex items-center gap-1 shadow-sm ${
+                      isBotActive
+                        ? 'border-crypto-danger/70 bg-crypto-danger/20 text-crypto-danger hover:bg-crypto-danger hover:text-white shadow-[0_0_8px_rgba(255,77,77,0.35)]'
+                        : 'border-crypto-success/70 bg-crypto-success/20 text-crypto-success hover:bg-crypto-success hover:text-black shadow-[0_0_8px_rgba(74,222,128,0.35)] animate-pulse'
+                    }`}
+                  >
+                    {isBotActive ? (
+                      <>
+                        <Square className="w-3 h-3 fill-current" />
+                        <span>STOP</span>
+                      </>
+                    ) : (
+                      <>
+                        <Play className="w-3 h-3 fill-current ml-0.5" />
+                        <span>PLAY</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleToggleBotActive}
+                    title={isBotActive ? "Click to stop bot" : "Click to activate bot"}
+                    className={`text-[11px] font-bold tracking-widest leading-none cursor-pointer hover:opacity-80 transition-opacity ${
+                      isBotActive 
+                        ? 'text-crypto-success drop-shadow-[0_0_8px_var(--color-crypto-success)]' 
+                        : 'text-crypto-danger drop-shadow-[0_0_8px_var(--color-crypto-danger)] animate-pulse'
+                    }`}
+                  >
+                    {isBotActive ? 'ACTIVE' : 'STOPPED'}
+                  </button>
+                </div>
+
+                {/* Button that toggles between Paper Cash and Kalshi Cash Pool when double-tapped */}
+                <button
+                  type="button"
+                  onClick={handleCashPoolClickOrTouch}
+                  onDoubleClick={handleToggleTradingMode}
+                  disabled={isTogglingMode}
+                  title="Double-tap or double-click to toggle between PAPER CASH and KALSHI CASH POOL"
+                  className={`text-[10px] px-2.5 py-1 border font-bold uppercase transition-all select-none cursor-pointer flex flex-col items-center justify-center leading-tight active:scale-95 ${
+                    isLiveTrading
+                      ? 'border-crypto-success text-crypto-success bg-crypto-success/15 shadow-[0_0_10px_rgba(74,222,128,0.25)] hover:bg-crypto-success/25' 
+                      : 'border-crypto-primary/60 text-crypto-primary bg-crypto-primary/10 shadow-[0_0_10px_rgba(143,115,255,0.2)] hover:bg-crypto-primary/20'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span className={`w-1.5 h-1.5 rounded-full ${isLiveTrading ? 'bg-crypto-success animate-pulse' : 'bg-crypto-primary'}`} />
+                    <span>{isLiveTrading ? 'KALSHI CASH POOL' : 'PAPER CASH'}</span>
+                  </div>
+                  <span className="text-[7.5px] opacity-60 font-mono tracking-tighter mt-0.5">(DOUBLE-TAP)</span>
+                </button>
               </div>
             </div>
             <div className="flex border-b border-crypto-primary border-opacity-50 px-4 py-3 justify-between items-center">
