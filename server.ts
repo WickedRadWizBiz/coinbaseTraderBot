@@ -90,6 +90,7 @@ let liveGauntletStartingCash = 0;
 
 let paperBankrollATH = startingBankroll;
 let liveBankrollATH = 0;
+const closedPositionCooldowns = new Map<string, number>();
 
 async function getEffectiveWorkingBalance(forceSync = false): Promise<number> {
   if (settings.paperTrading) {
@@ -2275,6 +2276,12 @@ async function openPosition(
     const isPerpContract = Boolean(spotContexts[symbol]?.isPerpetual || symbol.endsWith('PERP'));
     const isPerp = ctx ? !!ctx.isPerpetual : false;
 
+    // Cooldown Guard: Prevent opening a trade on the same symbol within 60 seconds of closing it
+    const lastCloseTime = closedPositionCooldowns.get(symbol);
+    if (lastCloseTime && (Date.now() - lastCloseTime) < 60000 && !isOverride) {
+      return;
+    }
+
     // Queue & Duplicate Guard: Never place duplicate orders on a symbol with an in-flight request or open position
     if (pendingLiveOrders.has(symbol) || activePositions.some(p => p.symbol === symbol)) {
       return;
@@ -2351,6 +2358,18 @@ async function openPosition(
           message: `[LATENCY GATE - CONTRACT MOVED ON FROM] Latency Gate triggered on re-evaluation for ${symbol}. Contract moved on from.`
         });
         return;
+      }
+    }
+
+    // Calibrate Entry Price strictly against the latest real orderbook bids and asks (crossing the spread)
+    if (!isPerpContract) {
+      await forceRefreshContractOrderBook(symbol);
+      ctx = spotContexts[symbol];
+      if (ctx && ctx.bids && ctx.bids.length > 0 && ctx.asks && ctx.asks.length > 0) {
+        const realAskPrice = side === 'YES' ? ctx.asks[0].price : (1.0 - ctx.bids[0].price);
+        if (realAskPrice > 0.01 && realAskPrice < 0.99) {
+          entryPrice = realAskPrice;
+        }
       }
     }
 
@@ -4585,11 +4604,6 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
           });
         }
 
-        // Trade Model Discrepancy Convergence Check
-        const hasConvergedWithFairValue = pos.modelFairValue !== undefined && 
-            ((pos.side === 'YES' && currentSidePrice >= pos.modelFairValue) || 
-             (pos.side === 'NO' && currentSidePrice <= pos.modelFairValue));
-
         if (!shouldClose) {
           if (ctx.isExpired) {
             shouldClose = true;
@@ -4597,9 +4611,6 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
           } else if (smartTrailRes.shouldClose) {
             shouldClose = true;
             closeReason = smartTrailRes.closeReason || `Smart Trailing TP (+${(pnlRatio * 100).toFixed(1)}%)`;
-          } else if (hasConvergedWithFairValue && pnlRatio >= 0.15) { 
-            shouldClose = true;
-            closeReason = `Model Fair Value Convergence Triggered (+${(pnlRatio * 100).toFixed(1)}%)`;
           } else if (isPerp) {
             // Continuous perpetual position: Risk SL + Ratcheting Breakeven Profit Lock
             const perpEffectiveSL = Math.max(dynamicSL, ratchetSL);
@@ -4830,6 +4841,7 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
         }
 
         activePositions.splice(i, 1);
+        closedPositionCooldowns.set(pos.symbol, Date.now());
 
         if (closeReason.includes('Emergency SL')) {
            spotLogs.unshift({
@@ -7580,6 +7592,21 @@ async function startServer() {
     app.get('*', (req, res) => {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  // Auto-correct runaway paper balance on start
+  if (simulatedPaperBalance > 3000) {
+    simulatedPaperBalance = 500;
+    startingBankroll = 500;
+    paperBankrollATH = 500;
+    vaultedProfits = 0;
+    cycleEarnedProfit = 0;
+    cumulativePaperProfit = 0;
+    completedGoalCycles = 0;
+    spotLogs.unshift({
+      id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
+      message: '[SANITY CHECK] Runaway simulated paper balance detected and successfully auto-corrected to $500.00.'
     });
   }
 
