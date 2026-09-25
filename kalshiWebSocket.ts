@@ -38,6 +38,7 @@ export class KalshiWebSocketManager {
   private msgIdCounter: number = 1;
   private lastPingSentTime: number = 0;
   private lastPingMsgId: number = 0;
+  private isPingPending: boolean = false;
 
   private orderBookHandlers: KalshiWsOrderBookHandler[] = [];
   private tickerHandlers: KalshiWsTickerHandler[] = [];
@@ -176,9 +177,10 @@ export class KalshiWebSocketManager {
       });
 
       this.ws.on('pong', () => {
-        if (this.lastPingSentTime > 0) {
+        if (this.isPingPending && this.lastPingSentTime > 0) {
           const rtt = Date.now() - this.lastPingSentTime;
-          if (rtt > 0 && rtt < 3000) {
+          this.isPingPending = false;
+          if (rtt > 0 && rtt < 1500) {
             latencyAdaptiveEngine.recordKalshiWsLatency(rtt);
           }
         }
@@ -212,14 +214,9 @@ export class KalshiWebSocketManager {
     this.pingInterval = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         try {
-          // Standard protocol-level ping frame + application-level ping command for precise bidirectional RTT
           this.lastPingSentTime = Date.now();
+          this.isPingPending = true;
           this.ws.ping();
-          this.lastPingMsgId = this.msgIdCounter++;
-          this.ws.send(JSON.stringify({
-            id: this.lastPingMsgId,
-            cmd: 'ping'
-          }));
         } catch (_) {}
       }
     }, 4000);

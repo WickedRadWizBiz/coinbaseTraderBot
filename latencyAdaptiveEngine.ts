@@ -78,8 +78,11 @@ class LatencyAdaptiveEngine {
    */
   public recordKalshiWsLatency(latencyMs: number) {
     if (latencyMs > 0 && latencyMs < 2000) {
-      // Exponential moving average (alpha = 0.25)
-      this.kalshiWsPingEma = Math.round(0.75 * this.kalshiWsPingEma + 0.25 * latencyMs);
+      const clamped = Math.max(2, Math.min(600, latencyMs));
+      // Fast-reacting EMA (alpha = 0.35) to quickly reflect low-latency Lightsail network transit
+      this.kalshiWsPingEma = this.kalshiWsPingEma > 0 
+        ? Math.round(0.65 * this.kalshiWsPingEma + 0.35 * clamped)
+        : Math.round(clamped);
     }
   }
 
@@ -89,7 +92,10 @@ class LatencyAdaptiveEngine {
    */
   public recordCoinbaseWsLatency(latencyMs: number) {
     if (latencyMs > 0 && latencyMs < 3000) {
-      this.coinbaseWsPingEma = Math.round(0.75 * this.coinbaseWsPingEma + 0.25 * latencyMs);
+      const clamped = Math.max(2, Math.min(800, latencyMs));
+      this.coinbaseWsPingEma = this.coinbaseWsPingEma > 0
+        ? Math.round(0.70 * this.coinbaseWsPingEma + 0.30 * clamped)
+        : Math.round(clamped);
     }
   }
 
@@ -105,7 +111,10 @@ class LatencyAdaptiveEngine {
    */
   public recordKalshiDataLatency(latencyMs: number) {
     if (latencyMs > 0 && latencyMs < 5000) {
-      this.kalshiDataLatencyEma = Math.round(0.7 * this.kalshiDataLatencyEma + 0.3 * latencyMs);
+      const clamped = Math.max(5, Math.min(800, latencyMs));
+      this.kalshiDataLatencyEma = this.kalshiDataLatencyEma > 0 
+        ? Math.round(0.65 * this.kalshiDataLatencyEma + 0.35 * clamped)
+        : Math.round(clamped);
       this.lastMeasurementTime = Date.now();
     }
   }
@@ -115,7 +124,10 @@ class LatencyAdaptiveEngine {
    */
   public recordKalshiOrderLatency(latencyMs: number) {
     if (latencyMs > 0 && latencyMs < 5000) {
-      this.kalshiOrderLatencyEma = Math.round(0.7 * this.kalshiOrderLatencyEma + 0.3 * latencyMs);
+      const clamped = Math.max(5, Math.min(800, latencyMs));
+      this.kalshiOrderLatencyEma = this.kalshiOrderLatencyEma > 0
+        ? Math.round(0.65 * this.kalshiOrderLatencyEma + 0.35 * clamped)
+        : Math.round(clamped);
       this.lastMeasurementTime = Date.now();
     }
   }
@@ -130,14 +142,17 @@ class LatencyAdaptiveEngine {
     try {
       // Use lightweight endpoint
       const res = await fetch('https://api.elections.kalshi.com/trade-api/v2/exchange/status', {
-        signal: AbortSignal.timeout(4000)
+        signal: AbortSignal.timeout(3000)
       });
       const elapsed = Date.now() - start;
-      if (res.ok && elapsed > 0 && elapsed < 3000) {
-        this.kalshiRestPingEma = Math.round(0.75 * this.kalshiRestPingEma + 0.25 * elapsed);
-        this.recordKalshiDataLatency(elapsed);
-        if (this.kalshiOrderLatencyEma === 46) {
-          this.kalshiOrderLatencyEma = Math.round(elapsed + 8);
+      if (res.ok && elapsed > 0 && elapsed < 2000) {
+        const clamped = Math.max(5, Math.min(600, elapsed));
+        this.kalshiRestPingEma = this.kalshiRestPingEma > 0
+          ? Math.round(0.65 * this.kalshiRestPingEma + 0.35 * clamped)
+          : Math.round(clamped);
+        this.recordKalshiDataLatency(clamped);
+        if (this.kalshiOrderLatencyEma > 100 || this.kalshiOrderLatencyEma === 46) {
+          this.kalshiOrderLatencyEma = Math.round(clamped + 8);
         }
       }
     } catch {

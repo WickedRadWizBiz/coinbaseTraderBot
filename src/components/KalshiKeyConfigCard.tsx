@@ -371,7 +371,16 @@ export function KalshiKeyConfigCard({ onBalanceUpdated }: { onBalanceUpdated?: (
                   {portfolioData.market_positions.filter((p: any) => (p.position || p.position_fp) !== 0).map((p: any, idx: number) => {
                     const posCount = typeof p.position === 'number' ? p.position : (p.position_fp ? parseFloat(p.position_fp) : 0);
                     const side = posCount > 0 ? 'YES' : 'NO';
-                    const realized = p.realized_pnl_dollars ?? (p.realized_pnl ? p.realized_pnl / 100 : 0);
+                    const rawExposure = typeof p.market_exposure_dollars === 'number' 
+                      ? p.market_exposure_dollars 
+                      : (p.market_exposure_dollars ? parseFloat(p.market_exposure_dollars) : 0);
+                    const exposure = rawExposure || (Math.abs(posCount) * 0.50);
+
+                    const rawRealized = typeof p.realized_pnl_dollars === 'number'
+                      ? p.realized_pnl_dollars
+                      : (p.realized_pnl_dollars ? parseFloat(p.realized_pnl_dollars) : (p.realized_pnl ? p.realized_pnl / 100 : 0));
+                    const realized = isNaN(rawRealized) ? 0 : rawRealized;
+
                     return (
                       <div key={idx} className="p-2 bg-black/80 border border-crypto-primary/20 flex flex-col gap-1 font-mono text-[11px]">
                         <div className="flex items-center justify-between">
@@ -381,7 +390,7 @@ export function KalshiKeyConfigCard({ onBalanceUpdated }: { onBalanceUpdated?: (
                           </span>
                         </div>
                         <div className="flex items-center justify-between text-[10px] text-[#909090]">
-                          <span>Exposure: ${((p.market_exposure_dollars ?? 0) || Math.abs(posCount) * 0.50).toFixed(2)}</span>
+                          <span>Exposure: ${exposure.toFixed(2)}</span>
                           <span className={realized >= 0 ? 'text-crypto-success' : 'text-crypto-danger'}>
                             PnL: {realized >= 0 ? '+' : ''}${realized.toFixed(2)}
                           </span>

@@ -494,6 +494,11 @@ export class KalshiFixEngine extends EventEmitter {
       throw new Error('[FIX 4.4] Cannot send NewOrderSingle: FIX session is not logged on.');
     }
 
+    const isPerp = Boolean(order.symbol.endsWith('PERP'));
+    const formattedPrice = isPerp 
+      ? order.price.toFixed(4) 
+      : (order.price > 1 ? (order.price / 100).toFixed(2) : order.price.toFixed(2));
+
     const fields: [number, string][] = [
       [35, 'D'],
       [11, order.clOrdId],
@@ -502,7 +507,7 @@ export class KalshiFixEngine extends EventEmitter {
       [60, this.getUtcTimestamp()],
       [38, order.orderQty.toString()],
       [40, order.orderType],
-      [44, (order.price).toFixed(2)],
+      [44, formattedPrice],
       [59, order.timeInForce || '1'],
       [100, order.exDestination || this.config.shardDestination || '100']
     ];
@@ -514,10 +519,10 @@ export class KalshiFixEngine extends EventEmitter {
 
       // When protocol bridge is active, dispatch through live signed Kalshi service to secure real fills
       try {
-        const isPerp = Boolean(order.symbol.endsWith('PERP'));
         const action = isPerp ? (order.side === '1' ? 'buy' : 'sell') : 'buy';
         const side = (order.side === '1' ? 'yes' : 'no') as 'yes' | 'no';
-        const priceDecimal = order.price > 1 ? order.price / 100 : order.price;
+        // For perps, order.price is already in dollars ($1.7602). For binary events, order.price may be in cents (>1).
+        const priceDecimal = isPerp ? order.price : (order.price > 1 ? order.price / 100 : order.price);
 
         const liveRes = await kalshiService.placeOrder(
           order.symbol,

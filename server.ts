@@ -4094,15 +4094,22 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
         let price = ctx.currentPrice;
         const isPerp = Boolean(pos.isPerpetual || ctx.isPerpetual || pos.symbol.endsWith('PERP'));
         if (isPerp) {
-          currentSidePrice = price;
+          // In live trading, use top bid if long (YES) or top ask if short (NO) to reflect true exchange liquidation value
+          const liquidationPrice = !settings.paperTrading && ctx.bids?.length && ctx.asks?.length
+            ? (pos.side === 'YES' ? ctx.bids[0].price : ctx.asks[0].price)
+            : price;
+          currentSidePrice = liquidationPrice;
           const safeEntry = Math.max(0.01, pos.entryPrice || 1.0);
           pnlRatio = pos.side === 'YES'
-            ? (price - safeEntry) / safeEntry
-            : (safeEntry - price) / safeEntry;
+            ? (liquidationPrice - safeEntry) / safeEntry
+            : (safeEntry - liquidationPrice) / safeEntry;
           pnlRatio = Math.max(-1.0, Math.min(5.0, pnlRatio));
         } else {
-          currentSidePrice = pos.side === 'YES' ? price : (1.0 - price);
-          currentSidePrice = Math.max(0.01, Math.min(0.99, currentSidePrice));
+          // For event contracts, in live mode mark to realistic bid liquidation to sync with Kalshi exchange portfolio
+          const liquidationSidePrice = !settings.paperTrading && ctx.bids?.length && ctx.asks?.length
+            ? (pos.side === 'YES' ? ctx.bids[0].price : (1.0 - ctx.asks[0].price))
+            : (pos.side === 'YES' ? price : (1.0 - price));
+          currentSidePrice = Math.max(0.01, Math.min(0.99, liquidationSidePrice));
           const safeEntry = Math.max(0.01, Math.min(0.99, pos.entryPrice || 0.50));
           const maxGainRatio = (1.0 - safeEntry) / safeEntry;
           pnlRatio = (currentSidePrice - safeEntry) / safeEntry;

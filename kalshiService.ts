@@ -343,21 +343,25 @@ export class KalshiService {
 
         const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
 
-        const tBalStart = Date.now();
+        let tNetElapsed = 0;
         const res = await kalshiRateLimiter.execute(
-          () => fetch(host + path, {
-            method,
-            headers: {
-              'Content-Type': 'application/json',
-              'KALSHI-ACCESS-KEY': this.keyId,
-              'KALSHI-ACCESS-TIMESTAMP': timestamp,
-              'KALSHI-ACCESS-SIGNATURE': signature
-            }
-          }),
+          async () => {
+            const tStart = Date.now();
+            const r = await fetch(host + path, {
+              method,
+              headers: {
+                'Content-Type': 'application/json',
+                'KALSHI-ACCESS-KEY': this.keyId,
+                'KALSHI-ACCESS-TIMESTAMP': timestamp,
+                'KALSHI-ACCESS-SIGNATURE': signature
+              }
+            });
+            tNetElapsed = Date.now() - tStart;
+            return r;
+          },
           { path, method, priority: 'NORMAL' }
         );
-        const tBalElapsed = Date.now() - tBalStart;
-        if (tBalElapsed > 0) latencyAdaptiveEngine.recordKalshiDataLatency(tBalElapsed);
+        if (tNetElapsed > 0) latencyAdaptiveEngine.recordKalshiDataLatency(tNetElapsed);
 
         if (!res.ok) {
           const txt = await res.text();
@@ -481,21 +485,25 @@ export class KalshiService {
         const path = '/portfolio/positions';
         const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
 
-        const tPosStart = Date.now();
+        let tNetElapsed = 0;
         const res = await kalshiRateLimiter.execute(
-          () => fetch(host + path, {
-            method,
-            headers: {
-              'Content-Type': 'application/json',
-              'KALSHI-ACCESS-KEY': this.keyId,
-              'KALSHI-ACCESS-TIMESTAMP': timestamp,
-              'KALSHI-ACCESS-SIGNATURE': signature
-            }
-          }),
+          async () => {
+            const tStart = Date.now();
+            const r = await fetch(host + path, {
+              method,
+              headers: {
+                'Content-Type': 'application/json',
+                'KALSHI-ACCESS-KEY': this.keyId,
+                'KALSHI-ACCESS-TIMESTAMP': timestamp,
+                'KALSHI-ACCESS-SIGNATURE': signature
+              }
+            });
+            tNetElapsed = Date.now() - tStart;
+            return r;
+          },
           { path, method, priority: 'NORMAL' }
         );
-        const tPosElapsed = Date.now() - tPosStart;
-        if (tPosElapsed > 0) latencyAdaptiveEngine.recordKalshiDataLatency(tPosElapsed);
+        if (tNetElapsed > 0) latencyAdaptiveEngine.recordKalshiDataLatency(tNetElapsed);
 
         if (!res.ok) {
           const txt = await res.text();
@@ -559,18 +567,25 @@ export class KalshiService {
       for (const p of marketPositions) {
         const count = typeof p.position === 'number' ? p.position : (p.position_fp ? parseFloat(p.position_fp) : 0);
         if (count !== 0) {
-          const exposure = typeof p.market_exposure_dollars === 'number' ? p.market_exposure_dollars
+          const rawExposure = typeof p.market_exposure_dollars === 'number' ? p.market_exposure_dollars
+            : (p.market_exposure_dollars ? parseFloat(p.market_exposure_dollars)
             : (typeof p.market_exposure === 'number' ? p.market_exposure / 100
             : (typeof p.current_value_dollars === 'number' ? p.current_value_dollars
-            : Math.abs(count) * 0.50));
+            : (p.current_value_dollars ? parseFloat(p.current_value_dollars)
+            : Math.abs(count) * 0.50))));
+          const exposure = isNaN(rawExposure) ? 0 : rawExposure;
           positionsValue += exposure;
 
-          const rPnl = typeof p.realized_pnl_dollars === 'number' ? p.realized_pnl_dollars
-            : (typeof p.realized_pnl === 'number' ? p.realized_pnl / 100 : 0);
+          const rawRPnl = typeof p.realized_pnl_dollars === 'number' ? p.realized_pnl_dollars
+            : (p.realized_pnl_dollars ? parseFloat(p.realized_pnl_dollars)
+            : (typeof p.realized_pnl === 'number' ? p.realized_pnl / 100 : 0));
+          const rPnl = isNaN(rawRPnl) ? 0 : rawRPnl;
           realizedPnl += rPnl;
 
-          const uPnl = typeof p.unrealized_pnl_dollars === 'number' ? p.unrealized_pnl_dollars
-            : (typeof p.unrealized_pnl === 'number' ? p.unrealized_pnl / 100 : 0);
+          const rawUPnl = typeof p.unrealized_pnl_dollars === 'number' ? p.unrealized_pnl_dollars
+            : (p.unrealized_pnl_dollars ? parseFloat(p.unrealized_pnl_dollars)
+            : (typeof p.unrealized_pnl === 'number' ? p.unrealized_pnl / 100 : 0));
+          const uPnl = isNaN(rawUPnl) ? 0 : rawUPnl;
           unrealizedPnl += uPnl;
         }
       }
@@ -667,21 +682,25 @@ export class KalshiService {
       for (const path of candidatePaths) {
         const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
 
-        const tCancelStart = Date.now();
+        let tNetElapsed = 0;
         const res = await kalshiRateLimiter.execute(
-          () => fetch(this.baseUrl + path, {
-            method,
-            headers: {
-              'Content-Type': 'application/json',
-              'KALSHI-ACCESS-KEY': this.keyId,
-              'KALSHI-ACCESS-TIMESTAMP': timestamp,
-              'KALSHI-ACCESS-SIGNATURE': signature
-            }
-          }),
+          async () => {
+            const tStart = Date.now();
+            const r = await fetch(this.baseUrl + path, {
+              method,
+              headers: {
+                'Content-Type': 'application/json',
+                'KALSHI-ACCESS-KEY': this.keyId,
+                'KALSHI-ACCESS-TIMESTAMP': timestamp,
+                'KALSHI-ACCESS-SIGNATURE': signature
+              }
+            });
+            tNetElapsed = Date.now() - tStart;
+            return r;
+          },
           { path, method, priority: 'CRITICAL', isCancel: true }
         );
-        const tCancelElapsed = Date.now() - tCancelStart;
-        if (tCancelElapsed > 0) latencyAdaptiveEngine.recordKalshiOrderLatency(tCancelElapsed);
+        if (tNetElapsed > 0) latencyAdaptiveEngine.recordKalshiOrderLatency(tNetElapsed);
 
         if (res.ok) {
           return { success: true };
@@ -729,13 +748,15 @@ export class KalshiService {
 
           let payload: any;
           if (isPerp) {
-            const limitPrice = typeof price === 'number' && !isNaN(price) && price > 0 ? price : 0.50;
+            const rawLimitPrice = typeof price === 'number' && !isNaN(price) && price > 0 ? price : 0.50;
+            // Clean up float precision to maximum 4 decimals to prevent "invalid dollar precision" error
+            const cleanLimitPrice = Math.round(rawLimitPrice * 10000) / 10000;
             payload = {
               ticker,
               side: action === 'buy' ? 'bid' : 'ask',
               count: orderCount.toString(),
               type: 'limit',
-              price: limitPrice.toString(),
+              price: cleanLimitPrice.toFixed(4),
               client_order_id: clientOrderId,
               post_only: false,
               time_in_force: 'good_till_canceled',
@@ -770,22 +791,26 @@ export class KalshiService {
 
           const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
 
-          const tOrdStart = Date.now();
+          let tNetElapsed = 0;
           const res = await kalshiRateLimiter.execute(
-            () => fetch(host + path, {
-              method,
-              headers: {
-                'Content-Type': 'application/json',
-                'KALSHI-ACCESS-KEY': this.keyId,
-                'KALSHI-ACCESS-TIMESTAMP': timestamp,
-                'KALSHI-ACCESS-SIGNATURE': signature
-              },
-              body: JSON.stringify(payload)
-            }),
+            async () => {
+              const tStart = Date.now();
+              const r = await fetch(host + path, {
+                method,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'KALSHI-ACCESS-KEY': this.keyId,
+                  'KALSHI-ACCESS-TIMESTAMP': timestamp,
+                  'KALSHI-ACCESS-SIGNATURE': signature
+                },
+                body: JSON.stringify(payload)
+              });
+              tNetElapsed = Date.now() - tStart;
+              return r;
+            },
             { path, method, priority: 'HIGH', symbol: ticker }
           );
-          const tOrdElapsed = Date.now() - tOrdStart;
-          if (tOrdElapsed > 0) latencyAdaptiveEngine.recordKalshiOrderLatency(tOrdElapsed);
+          if (tNetElapsed > 0) latencyAdaptiveEngine.recordKalshiOrderLatency(tNetElapsed);
 
           if (!res.ok) {
             const txt = await res.text();
@@ -830,15 +855,18 @@ export class KalshiService {
     try {
       const isPerp = ticker.toUpperCase().endsWith('PERP');
       const path = isPerp ? `/margin/markets/${ticker}/orderbook` : `/markets/${ticker}/orderbook`;
-      const tObStart = Date.now();
-      
+      let tNetElapsed = 0;
       const res = await kalshiRateLimiter.execute(
-        () => fetch(this.baseUrl + path, { method: 'GET' }),
+        async () => {
+          const tStart = Date.now();
+          const r = await fetch(this.baseUrl + path, { method: 'GET' });
+          tNetElapsed = Date.now() - tStart;
+          return r;
+        },
         { path, method: 'GET', priority: 'LOW', symbol: ticker }
       );
       
-      const tObElapsed = Date.now() - tObStart;
-      if (tObElapsed > 0) latencyAdaptiveEngine.recordKalshiDataLatency(tObElapsed);
+      if (tNetElapsed > 0) latencyAdaptiveEngine.recordKalshiDataLatency(tNetElapsed);
       if (!res.ok) {
         const txt = await res.text();
         return { success: false, error: `HTTP ${res.status}: ${txt}` };
