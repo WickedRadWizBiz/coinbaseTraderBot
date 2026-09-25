@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build",
+    "build": "vite build && esbuild server.ts --platform=node --target=node20 --bundle --format=cjs --outfile=dist/server.cjs --external:@tensorflow/tfjs-node --external:vite --external:express --external:ws --external:jsonwebtoken --external:undici --external:puppeteer --external:@google/genai && node -e \"const fs=require('fs'); if(fs.existsSync('dist')) { fs.cpSync('dist', 'build', {recursive:true}); }\"",
     "start": "tsx server.ts",
     "lint": "tsc --noEmit"
   },

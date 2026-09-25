@@ -281,7 +281,7 @@ export function KalshiKeyConfigCard({ onBalanceUpdated }: { onBalanceUpdated?: (
         <div className="p-2.5 bg-black/40 border border-crypto-primary/20 flex flex-col gap-1">
           <span className="text-[10px] uppercase text-[#808080] font-bold">Kalshi Live Cash</span>
           <span className="font-mono text-crypto-text font-bold text-sm">
-            {isConnected ? `$${(diagnostic?.lastApiStatus?.balance ?? 0).toFixed(2)}` : '$0.00 (Offline)'}
+            {isConnected ? `$${(Number(diagnostic?.lastApiStatus?.balance) || 0).toFixed(2)}` : '$0.00 (Offline)'}
           </span>
         </div>
       </div>
@@ -390,9 +390,9 @@ export function KalshiKeyConfigCard({ onBalanceUpdated }: { onBalanceUpdated?: (
                           </span>
                         </div>
                         <div className="flex items-center justify-between text-[10px] text-[#909090]">
-                          <span>Exposure: ${exposure.toFixed(2)}</span>
+                          <span>Exposure: ${(Number(exposure) || 0).toFixed(2)}</span>
                           <span className={realized >= 0 ? 'text-crypto-success' : 'text-crypto-danger'}>
-                            PnL: {realized >= 0 ? '+' : ''}${realized.toFixed(2)}
+                            PnL: {realized >= 0 ? '+' : ''}${(Number(realized) || 0).toFixed(2)}
                           </span>
                         </div>
                       </div>

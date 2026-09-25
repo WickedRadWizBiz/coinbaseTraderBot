@@ -441,11 +441,11 @@ export class KalshiService {
   }
 
   /**
-   * Ensures Shard 2 (Crypto/Commodities) has sufficient trading balance by transferring from Shard 0 if needed.
+   * Ensures the target Exchange Shard (Shard 0 for Elections/Events, Shard 2 for Crypto/Perps) has sufficient collateral.
    */
-  public async ensureCryptoShardFunded(minDollars: number = 20): Promise<{ success: boolean; error?: string }> {
+  public async ensureShardFunded(targetShard: number = 0, minDollars: number = 20): Promise<{ success: boolean; error?: string }> {
     const balRes = await this.getBalance();
-    if (!balRes.success || !balRes.breakdown) {
+    if (!balRes.success || !balRes.breakdown || balRes.breakdown.length === 0) {
       return { success: false, error: balRes.error || 'Failed to fetch balance breakdown' };
     }
 
@@ -455,17 +455,27 @@ export class KalshiService {
     const s0Bal = shard0 ? parseFloat(shard0.balance) : 0;
     const s2Bal = shard2 ? parseFloat(shard2.balance) : 0;
 
-    console.log(`[KALSHI SHARD CHECK] Shard 0: $${s0Bal.toFixed(2)}, Shard 2 (Crypto): $${s2Bal.toFixed(2)}`);
+    console.log(`[KALSHI SHARD CHECK] Target Shard ${targetShard} (Shard 0: $${s0Bal.toFixed(2)}, Shard 2: $${s2Bal.toFixed(2)})`);
 
-    if (s2Bal < minDollars && s0Bal > 1) {
-      const transferAmount = Math.min(s0Bal - 1, minDollars - s2Bal);
+    if (targetShard === 2 && s2Bal < minDollars && s0Bal > 1) {
+      const transferAmount = Math.min(s0Bal - 0.50, minDollars - s2Bal);
       if (transferAmount > 0.50) {
-        console.log(`[KALSHI AUTO-FUND] Moving $${transferAmount.toFixed(2)} from Shard 0 to Shard 2 (Crypto)...`);
+        console.log(`[KALSHI AUTO-FUND] Moving $${transferAmount.toFixed(2)} from Shard 0 -> Shard 2...`);
         return this.transferShardBalance(0, 2, transferAmount);
+      }
+    } else if (targetShard === 0 && s0Bal < minDollars && s2Bal > 1) {
+      const transferAmount = Math.min(s2Bal - 0.50, minDollars - s0Bal);
+      if (transferAmount > 0.50) {
+        console.log(`[KALSHI AUTO-FUND] Moving $${transferAmount.toFixed(2)} from Shard 2 -> Shard 0...`);
+        return this.transferShardBalance(2, 0, transferAmount);
       }
     }
 
     return { success: true };
+  }
+
+  public async ensureCryptoShardFunded(minDollars: number = 20): Promise<{ success: boolean; error?: string }> {
+    return this.ensureShardFunded(2, minDollars);
   }
 
   public async getPositions(): Promise<{
@@ -817,16 +827,20 @@ export class KalshiService {
             lastError = `HTTP ${res.status}: ${txt}`;
             console.error(`[KALSHI ORDER ERROR on ${host}] HTTP ${res.status}:`, txt);
 
-            // Shard 2 Auto-Healer: If error is about insufficient balance/margin on the target shard, auto-fund from Shard 0 and retry once
-            if (
-              retryCount === 0 &&
-              isPerp &&
-              (txt.includes('insufficient') || txt.includes('balance') || txt.includes('margin') || txt.includes('funds') || txt.includes('exchange_index') || txt.includes('Exchange user not found'))
-            ) {
-              console.log('[KALSHI SHARD HEALER] Insufficient balance on shard. Moving funds...');
-              const fundRes = await this.ensureCryptoShardFunded(20);
+            // Shard Auto-Healer: If error is about insufficient balance/margin or unallocated shard, auto-fund target shard and retry once
+            const isShardError = txt.includes('insufficient_shard_balance') || 
+              txt.includes('Exchange user not found') || 
+              txt.includes('Exchange Sharding') || 
+              txt.includes('insufficient') || 
+              txt.includes('exchange_index') || 
+              txt.includes('margin');
+
+            if (retryCount === 0 && isShardError) {
+              const targetShard = isPerp || ticker.startsWith('KXBTC') || ticker.startsWith('KXETH') || ticker.startsWith('KXSOL') ? 2 : 0;
+              console.log(`[KALSHI SHARD HEALER] Insufficient shard balance detected. Auto-rebalancing to target Shard ${targetShard}...`);
+              const fundRes = await this.ensureShardFunded(targetShard, 25);
               if (fundRes.success) {
-                await new Promise((r) => setTimeout(r, 1000));
+                await new Promise((r) => setTimeout(r, 800));
                 return this.placeOrder(ticker, action, side, count, price, retryCount + 1);
               }
             }

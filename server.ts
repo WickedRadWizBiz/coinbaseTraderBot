@@ -1646,6 +1646,7 @@ interface PaperPosition {
 }
 
 let activePositions: PaperPosition[] = [];
+const pendingLiveOrders = new Set<string>();
 let isEvaluatingPositions = false;
 let executedOverrides = new Set<string>();
 let spotContexts: any = {};
@@ -2269,6 +2270,22 @@ async function openPosition(
     let ctx = spotContexts[symbol];
     const isPerpContract = Boolean(spotContexts[symbol]?.isPerpetual || symbol.endsWith('PERP'));
     const isPerp = ctx ? !!ctx.isPerpetual : false;
+
+    // Queue & Duplicate Guard: Never place duplicate orders on a symbol with an in-flight request or open position
+    if (pendingLiveOrders.has(symbol) || activePositions.some(p => p.symbol === symbol)) {
+      return;
+    }
+
+    // [EXPIRATION SAFETY GUARD] Pre-Flight Time-to-Expiry Verification
+    // Strictly prohibits entering contracts within 120 seconds (2 minutes) of expiration to prevent late-contract adverse fills
+    const timeToExpiryMs = ctx?.closeTime ? (new Date(ctx.closeTime).getTime() - Date.now()) : Infinity;
+    if (!isPerpContract && timeToExpiryMs < 120 * 1000) {
+      spotLogs.unshift({
+        id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+        message: `[EXPIRATION SAFETY VETO] Suppressed entry on ${symbol}. Contract expires in ${Math.max(0, Math.round(timeToExpiryMs / 1000))}s (< 120s cutoff rule). Late-contract queue placement blocked.`
+      });
+      return;
+    }
 
     // [LATENCY GATE C] Timestamp Drift & Quote Freshness Verification with Immediate Re-Evaluation
     const freshness = latencyAdaptiveEngine.verifyQuoteFreshness(ctx?.lastQuoteUpdateMs, symbol);
@@ -2985,33 +3002,68 @@ async function openPosition(
 
   // If paperTrading is OFF (Live Mode), strictly place real order on Kalshi FIRST
   if (!settings.paperTrading) {
-    const liveAction = isPerpContract ? (side === 'YES' ? 'buy' : 'sell') : 'buy';
-    const liveRes = await routeLiveOrderExecution(
-      symbol,
-      liveAction,
-      side.toLowerCase() as 'yes' | 'no',
-      size,
-      optimizedEntryPrice,
-      isPerpContract
-    );
+    pendingLiveOrders.add(symbol);
+    try {
+      const liveAction = isPerpContract ? (side === 'YES' ? 'buy' : 'sell') : 'buy';
+      const liveRes = await routeLiveOrderExecution(
+        symbol,
+        liveAction,
+        side.toLowerCase() as 'yes' | 'no',
+        size,
+        optimizedEntryPrice,
+        isPerpContract
+      );
 
-    if (!liveRes.success) {
+      if (!liveRes.success) {
+        spotLogs.unshift({
+          id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+          message: `[LIVE ORDER REJECTED] Order for ${size}x ${side} on ${symbol} at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} was rejected (${liveRes.protocol}): ${liveRes.error}. Trade aborted to prevent phantom desynchronization.`
+        });
+        return; // DO NOT push to activePositions if real order failed!
+      }
+
+      (pos as any).kalshiOrderId = liveRes.order_id;
+      (pos as any).isLive = true;
+      (pos as any).routingProtocol = liveRes.protocol;
+
+      activePositions.push(pos);
       spotLogs.unshift({
-        id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-        message: `[LIVE ORDER REJECTED] Order for ${size}x ${side} on ${symbol} at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} was rejected (${liveRes.protocol}): ${liveRes.error}. Trade aborted to prevent phantom desynchronization.`
+        id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
+        message: `[${liveRes.protocol === 'FIX_4.4' ? 'FIX 4.4 LIVE ORDER FILLED/PLACED' : 'KALSHI LIVE ORDER FILLED/PLACED'}] Real ${side} order for ${size} contracts on ${symbol} (${label}) submitted at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} | Order ID: ${liveRes.order_id} | Route: ${liveRes.protocol} | Capital: $${positionCostUsd.toFixed(2)}`
       });
-      return; // DO NOT push to activePositions if real order failed!
+
+      // 5-Second Unfilled Entry Order Watchdog:
+      // If the limit order remains resting and unfilled on Kalshi after 5s, auto-cancel it to prevent queuing into contract expiration
+      if (liveRes.order_id) {
+        const orderIdToWatch = liveRes.order_id;
+        setTimeout(async () => {
+          try {
+            const ordRes = await kalshiService.getOpenOrders();
+            if (ordRes.success && ordRes.orders) {
+              const isStillResting = ordRes.orders.some((o: any) => 
+                (o.order_id === orderIdToWatch || o.client_order_id === orderIdToWatch)
+              );
+              if (isStillResting) {
+                console.log(`[QUEUE TTL AUTO-CANCEL] Order ${orderIdToWatch} on ${symbol} was unfilled after 5s. Cancelling resting order on Kalshi...`);
+                await routeLiveOrderCancel(orderIdToWatch, symbol);
+                const posIdx = activePositions.findIndex(p => (p as any).kalshiOrderId === orderIdToWatch);
+                if (posIdx !== -1) {
+                  activePositions.splice(posIdx, 1);
+                }
+                spotLogs.unshift({
+                  id: logIdCounter++, time: new Date().toISOString(), type: 'WARN',
+                  message: `[RESTING ORDER AUTO-EXPIRED] Cancelled unfilled entry order for ${symbol} after 5s TTL. Prevented adverse queue execution at contract expiration.`
+                });
+              }
+            }
+          } catch (e: any) {
+            console.error(`[ORDER WATCHDOG ERROR] ${orderIdToWatch}:`, e?.message || e);
+          }
+        }, 5000);
+      }
+    } finally {
+      pendingLiveOrders.delete(symbol);
     }
-
-    (pos as any).kalshiOrderId = liveRes.order_id;
-    (pos as any).isLive = true;
-    (pos as any).routingProtocol = liveRes.protocol;
-
-    activePositions.push(pos);
-    spotLogs.unshift({
-      id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
-      message: `[${liveRes.protocol === 'FIX_4.4' ? 'FIX 4.4 LIVE ORDER FILLED/PLACED' : 'KALSHI LIVE ORDER FILLED/PLACED'}] Real ${side} order for ${size} contracts on ${symbol} (${label}) submitted at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} | Order ID: ${liveRes.order_id} | Route: ${liveRes.protocol} | Capital: $${positionCostUsd.toFixed(2)}`
-    });
   } else {
     // Paper Trading Mode
     activePositions.push(pos);
@@ -4094,8 +4146,8 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
         let price = ctx.currentPrice;
         const isPerp = Boolean(pos.isPerpetual || ctx.isPerpetual || pos.symbol.endsWith('PERP'));
         if (isPerp) {
-          // In live trading, use top bid if long (YES) or top ask if short (NO) to reflect true exchange liquidation value
-          const liquidationPrice = !settings.paperTrading && ctx.bids?.length && ctx.asks?.length
+          // Strictly evaluate all positions (Paper and Live) against real top bid/ask liquidation value
+          const liquidationPrice = ctx.bids?.length && ctx.asks?.length
             ? (pos.side === 'YES' ? ctx.bids[0].price : ctx.asks[0].price)
             : price;
           currentSidePrice = liquidationPrice;
@@ -4105,8 +4157,8 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
             : (safeEntry - liquidationPrice) / safeEntry;
           pnlRatio = Math.max(-1.0, Math.min(5.0, pnlRatio));
         } else {
-          // For event contracts, in live mode mark to realistic bid liquidation to sync with Kalshi exchange portfolio
-          const liquidationSidePrice = !settings.paperTrading && ctx.bids?.length && ctx.asks?.length
+          // Strictly evaluate event contracts against real exchange bid liquidation value (crossing the spread)
+          const liquidationSidePrice = ctx.bids?.length && ctx.asks?.length
             ? (pos.side === 'YES' ? ctx.bids[0].price : (1.0 - ctx.asks[0].price))
             : (pos.side === 'YES' ? price : (1.0 - price));
           currentSidePrice = Math.max(0.01, Math.min(0.99, liquidationSidePrice));
@@ -4369,7 +4421,7 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
 
         // Exit Evaluation: Time-to-Expiry Cutoff
         const timeToExpiryMs = ctx.closeTime ? (new Date(ctx.closeTime).getTime() - Date.now()) : Infinity;
-        const isImminentExpiry = timeToExpiryMs < 60 * 1000;
+        const isImminentExpiry = !isPerp && timeToExpiryMs < 60 * 1000;
         
         // Genuine exit price evaluation
         const finalExitPrice = currentSidePrice;
@@ -4380,17 +4432,13 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
              (pos.side === 'NO' && currentSidePrice <= pos.modelFairValue));
 
         if (!shouldClose) {
-          if (smartTrailRes.shouldClose) {
+          if (isImminentExpiry) {
+            // Imminent Expiration Safety Rule: ALWAYS exit active positions with <60s remaining to avoid expiration zero-out
+            shouldClose = true;
+            closeReason = `Imminent Expiry Safety Sweep (<60s to close | Ejected to prevent settlement zero-out)`;
+          } else if (smartTrailRes.shouldClose) {
             shouldClose = true;
             closeReason = smartTrailRes.closeReason || `Smart Trailing TP (+${(pnlRatio * 100).toFixed(1)}%)`;
-          } else if (smartTrailRes.state.isActive) {
-            if (isImminentExpiry && pnlRatio > 0.02) {
-              shouldClose = true;
-              closeReason = `Imminent Expiry Lock-In (<60s to close | Secured +$${smartTrailRes.state.currentProfitUsd.toFixed(2)})`;
-            }
-          } else if (isImminentExpiry && pnlRatio > 0.01) { 
-            shouldClose = true;
-            closeReason = `Imminent Expiry Settlement Lock (<60s to close)`;
           } else if (hasConvergedWithFairValue && pnlRatio >= 0.10) { 
             shouldClose = true;
             closeReason = `Model Fair Value Convergence Triggered (+${(pnlRatio * 100).toFixed(1)}%)`;
@@ -4638,7 +4686,7 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
         // Dispatch live order to Kalshi to close real position when paperTrading is disabled
         if (!settings.paperTrading) {
           const isPerp = Boolean(pos.isPerpetual || pos.symbol.endsWith('PERP'));
-          const exitPrice = isPerp ? currentSidePrice : (pos.side === 'YES' ? currentSidePrice : (1.0 - currentSidePrice));
+          const exitPrice = currentSidePrice;
           const closeAction = isPerp ? (pos.side === 'YES' ? 'sell' : 'buy') : 'sell';
           routeLiveOrderExecution(pos.symbol, closeAction, pos.side.toLowerCase() as 'yes' | 'no', pos.size, exitPrice, isPerp).then(res => {
             if (res.success) {
@@ -4851,6 +4899,42 @@ kalshiWsManager.onTicker((update) => {
 
 let lastRestOrderbookPollTime = 0;
 let lastSuccessfulLoopTime = Date.now();
+
+// [KALSHI RESTING QUEUE SWEEPER]
+// Continuously monitors and purges stale unfilled limit orders resting on Kalshi orderbook
+// Cancels orders older than 6s or on contracts approaching expiration (<90s) to prevent end-of-contract adverse fills
+setInterval(async () => {
+  if (settings.paperTrading || !kalshiService.isConfigured()) return;
+  try {
+    const ordRes = await kalshiService.getOpenOrders();
+    if (ordRes.success && ordRes.orders && ordRes.orders.length > 0) {
+      const now = Date.now();
+      for (const ord of ordRes.orders) {
+        const createdMs = ord.created_time ? new Date(ord.created_time).getTime() : now;
+        const ageSec = (now - createdMs) / 1000;
+        const ticker = ord.ticker || ord.symbol;
+        const ctx = spotContexts[ticker];
+        const isPerp = Boolean(ctx?.isPerpetual || ticker?.endsWith('PERP'));
+        const timeToExpiryMs = ctx?.closeTime ? (new Date(ctx.closeTime).getTime() - now) : Infinity;
+
+        if (ageSec > 6 || (!isPerp && timeToExpiryMs < 90 * 1000)) {
+          const ordId = ord.order_id || ord.client_order_id;
+          if (ordId) {
+            console.log(`[QUEUE SWEEPER] Purging stale resting order ${ordId} on ${ticker} (Age: ${ageSec.toFixed(1)}s, Expiry in ${Math.round(timeToExpiryMs/1000)}s)...`);
+            await routeLiveOrderCancel(ordId, ticker);
+            // Also clean up pending representation from activePositions if any
+            const posIdx = activePositions.findIndex(p => (p as any).kalshiOrderId === ordId);
+            if (posIdx !== -1) {
+              activePositions.splice(posIdx, 1);
+            }
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    // Non-blocking queue sweep
+  }
+}, 4000);
 
 // Background trading loop
 setInterval(async () => {
@@ -6222,7 +6306,7 @@ app.post('/api/panic-sell', (req, res) => {
         }
     } else {
         const isPerp = Boolean(pos.isPerpetual || pos.symbol.endsWith('PERP'));
-        const exitPrice = isPerp ? currentSidePrice : (pos.side === 'YES' ? currentSidePrice : (1.0 - currentSidePrice));
+        const exitPrice = currentSidePrice;
         const closeAction = isPerp ? (pos.side === 'YES' ? 'sell' : 'buy') : 'sell';
         routeLiveOrderExecution(pos.symbol, closeAction, pos.side.toLowerCase() as 'yes' | 'no', pos.size, exitPrice, isPerp).then(res => {
           if (res.success) {
@@ -6803,10 +6887,9 @@ app.get('/api/order-book/:symbol', (req, res) => {
         ctx = spotContexts[matchKey];
       } else {
         const pr = pos.entryPrice || 0.50;
-        const fallback = settings.paperTrading ? { bids: [{ price: parseFloat((pr - 0.01).toFixed(2)), size: 500 }], asks: [{ price: parseFloat((pr + 0.01).toFixed(2)), size: 500 }] } : { bids: [], asks: [] };
         ctx = {
-          bids: fallback.bids,
-          asks: fallback.asks,
+          bids: [],
+          asks: [],
           currentPrice: pr
         };
       }
@@ -6814,10 +6897,9 @@ app.get('/api/order-book/:symbol', (req, res) => {
   }
 
   if (!ctx) {
-    const fallback = settings.paperTrading ? { bids: [{ price: 0.49, size: 500 }], asks: [{ price: 0.51, size: 500 }] } : { bids: [], asks: [] };
     ctx = {
-      bids: fallback.bids,
-      asks: fallback.asks,
+      bids: [],
+      asks: [],
       currentPrice: 0.50
     };
   }

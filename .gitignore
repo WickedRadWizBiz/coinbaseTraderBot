@@ -2,8 +2,6 @@ node_modules
 node_modules/
 node_modules/*
 node_modules/**
-build
-build/
 coverage
 .DS_Store
 *.log
