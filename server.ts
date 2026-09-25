@@ -4,7 +4,6 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { GoogleGenAI } from "@google/genai";
-import { createServer as createViteServer } from "vite";
 import { CapitalPreservationProtocol } from "./recoveryProtocol";
 import { plasticityEngine } from "./plasticityEngine";
 import { computeSpotTAMetrics, isTradeAllowedBySpotTAAndRecovery, SpotTAMetrics } from "./spotTAEngine";
@@ -7073,6 +7072,7 @@ async function startServer() {
   });
 
   if (!isProduction) {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",

@@ -52,7 +52,7 @@ jobs:
             echo "=== Restarting PM2 process ==="
             pm2 delete crypto-bot 2>/dev/null || true
             pm2 delete coinbaseTraderBot 2>/dev/null || true
-            pm2 start dist/server.cjs --name "crypto-bot"
+            NODE_ENV=production pm2 start dist/server.cjs --name "crypto-bot" --update-env
             pm2 save
 
             echo "=== Deployment successful and lightning fast! ==="
