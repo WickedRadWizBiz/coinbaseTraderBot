@@ -8,10 +8,34 @@ on:
 
 jobs:
   deploy:
-    name: Deploy to Lightsail Server
+    name: Build & Deploy to Lightsail Server
     runs-on: ubuntu-latest
     steps:
-      - name: SSH and Deploy to Lightsail
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies & Build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Copy build artifacts to Lightsail via SCP
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+          source: "dist,package.json,package-lock.json,server.ts"
+          target: "~/${{ secrets.LIGHTSAIL_APP_DIR || 'coinbaseTraderBot' }}"
+
+      - name: Restart PM2 on Lightsail via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
@@ -22,29 +46,11 @@ jobs:
           script: |
             cd ~/${{ secrets.LIGHTSAIL_APP_DIR || 'coinbaseTraderBot' }} || cd ~/coinbaseTraderBot
 
-            echo "=== Syncing latest changes from GitHub ==="
-            # Abort any in-progress merge conflict on the server
-            git merge --abort 2>/dev/null || true
-            git reset --hard HEAD
-            git fetch origin
-
-            TARGET_BRANCH="${{ github.ref_name }}"
-            if [ -z "$TARGET_BRANCH" ]; then
-              TARGET_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-            fi
-
-            # Force sync server repository with the target branch from GitHub
-            git checkout "$TARGET_BRANCH" 2>/dev/null || git checkout -b "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
-            git reset --hard "origin/$TARGET_BRANCH"
-
-            echo "=== Installing dependencies ==="
-            npm install
-
-            echo "=== Building production bundle ==="
-            npm run build
+            echo "=== Installing production dependencies ==="
+            npm ci --production
 
             echo "=== Restarting PM2 process ==="
             pm2 restart coinbaseTraderBot || pm2 start dist/server.cjs --name "coinbaseTraderBot"
             pm2 save
 
-            echo "=== Deployment successful! ==="
+            echo "=== Deployment successful and lightning fast! ==="
