@@ -653,36 +653,44 @@ export class KalshiService {
     return { success: false, error: lastError };
   }
 
-  public async cancelOrder(orderId: string): Promise<{ success: boolean; error?: string }> {
+  public async cancelOrder(orderId: string, ticker?: string): Promise<{ success: boolean; error?: string }> {
     if (!this.isConfigured()) return { success: false, error: 'Kalshi API not configured' };
 
     try {
+      const isPerp = Boolean(ticker && ticker.toUpperCase().endsWith('PERP'));
       const method = 'DELETE';
-      const path = `/portfolio/orders/${orderId}`;
-      const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
+      const candidatePaths = isPerp
+        ? [`/margin/orders/${orderId}`, `/portfolio/events/orders/${orderId}`, `/portfolio/orders/${orderId}`]
+        : [`/portfolio/events/orders/${orderId}`, `/margin/orders/${orderId}`, `/portfolio/orders/${orderId}`];
 
-      const tCancelStart = Date.now();
-      const res = await kalshiRateLimiter.execute(
-        () => fetch(this.baseUrl + path, {
-          method,
-          headers: {
-            'Content-Type': 'application/json',
-            'KALSHI-ACCESS-KEY': this.keyId,
-            'KALSHI-ACCESS-TIMESTAMP': timestamp,
-            'KALSHI-ACCESS-SIGNATURE': signature
-          }
-        }),
-        { path, method, priority: 'CRITICAL', isCancel: true }
-      );
-      const tCancelElapsed = Date.now() - tCancelStart;
-      if (tCancelElapsed > 0) latencyAdaptiveEngine.recordKalshiOrderLatency(tCancelElapsed);
+      let lastError = '';
+      for (const path of candidatePaths) {
+        const { timestamp, signature } = this.signRequest(method, '/trade-api/v2' + path);
 
-      if (!res.ok) {
+        const tCancelStart = Date.now();
+        const res = await kalshiRateLimiter.execute(
+          () => fetch(this.baseUrl + path, {
+            method,
+            headers: {
+              'Content-Type': 'application/json',
+              'KALSHI-ACCESS-KEY': this.keyId,
+              'KALSHI-ACCESS-TIMESTAMP': timestamp,
+              'KALSHI-ACCESS-SIGNATURE': signature
+            }
+          }),
+          { path, method, priority: 'CRITICAL', isCancel: true }
+        );
+        const tCancelElapsed = Date.now() - tCancelStart;
+        if (tCancelElapsed > 0) latencyAdaptiveEngine.recordKalshiOrderLatency(tCancelElapsed);
+
+        if (res.ok) {
+          return { success: true };
+        }
         const txt = await res.text();
-        return { success: false, error: `HTTP ${res.status}: ${txt}` };
+        lastError = `HTTP ${res.status}: ${txt}`;
       }
 
-      return { success: true };
+      return { success: false, error: lastError };
     } catch (e: any) {
       return { success: false, error: e.message };
     }
@@ -716,7 +724,8 @@ export class KalshiService {
       for (const host of tryEndpoints) {
         try {
           const method = 'POST';
-          const path = isPerp ? '/margin/orders' : '/portfolio/orders';
+          // V2 Endpoints: /margin/orders for perpetual/margin futures, /portfolio/events/orders for event markets
+          const path = isPerp ? '/margin/orders' : '/portfolio/events/orders';
 
           let payload: any;
           if (isPerp) {
@@ -728,21 +737,34 @@ export class KalshiService {
               type: 'limit',
               price: limitPrice.toString(),
               client_order_id: clientOrderId,
-              post_only: false
+              post_only: false,
+              time_in_force: 'good_till_canceled',
+              self_trade_prevention_type: 'taker_at_cross'
             };
           } else {
-            const yesPrice = typeof price === 'number' && !isNaN(price) && price > 0 
-              ? Math.min(99, Math.max(1, Math.round(price * 100))) 
-              : 50;
+            let v2Side: 'bid' | 'ask' = 'bid';
+            if (action === 'buy' && side === 'yes') v2Side = 'bid';
+            else if (action === 'buy' && side === 'no') v2Side = 'ask';
+            else if (action === 'sell' && side === 'yes') v2Side = 'ask';
+            else if (action === 'sell' && side === 'no') v2Side = 'bid';
+
+            let finalPrice = typeof price === 'number' && !isNaN(price) && price > 0 
+              ? Math.min(0.99, Math.max(0.01, price)) 
+              : 0.50;
+            if (side === 'no') {
+              finalPrice = 1.0 - finalPrice;
+            }
+            finalPrice = Math.round(Math.max(0.01, Math.min(0.99, finalPrice)) * 100) / 100;
 
             payload = {
               ticker,
-              action,
+              side: v2Side,
+              count: orderCount.toString(),
               type: 'limit',
-              side,
-              count: orderCount,
+              price: finalPrice.toFixed(2),
               client_order_id: clientOrderId,
-              yes_price: yesPrice
+              time_in_force: 'good_till_canceled',
+              self_trade_prevention_type: 'taker_at_cross'
             };
           }
 
@@ -774,7 +796,7 @@ export class KalshiService {
             if (
               retryCount === 0 &&
               isPerp &&
-              (txt.includes('insufficient') || txt.includes('balance') || txt.includes('margin') || txt.includes('funds') || txt.includes('exchange_index'))
+              (txt.includes('insufficient') || txt.includes('balance') || txt.includes('margin') || txt.includes('funds') || txt.includes('exchange_index') || txt.includes('Exchange user not found'))
             ) {
               console.log('[KALSHI SHARD HEALER] Insufficient balance on shard. Moving funds...');
               const fundRes = await this.ensureCryptoShardFunded(20);

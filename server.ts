@@ -2238,7 +2238,7 @@ async function routeLiveOrderCancel(
     }
   }
 
-  const restCancel = await kalshiService.cancelOrder(orderId);
+  const restCancel = await kalshiService.cancelOrder(orderId, symbol);
   return {
     success: restCancel.success,
     protocol: 'REST_KEEPALIVE',
