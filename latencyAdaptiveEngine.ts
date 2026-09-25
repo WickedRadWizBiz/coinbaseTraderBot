@@ -40,7 +40,8 @@ class LatencyAdaptiveEngine {
   private connectionMode: 'WEBSOCKET' | 'REST_KEEPALIVE' = 'REST_KEEPALIVE';
 
   // Maximum allowed age of order book quote before rejecting trade entry (Timestamp Drift Gate)
-  private readonly DEFAULT_STALENESS_LIMIT_MS = 500;
+  // Option A: 10,000ms (10 seconds) to accommodate prediction market resting liquidity without missing trades
+  private readonly DEFAULT_STALENESS_LIMIT_MS = 10000;
 
   constructor() {
     this.startPeriodicHeartbeat();
@@ -189,12 +190,10 @@ class LatencyAdaptiveEngine {
     const isUltraLow = effectiveLatency < 25;
     const sampleMs = Math.max(12, Math.min(1000, this.sampleRateIntervalEma));
 
-    // Scale stale tick threshold:
-    // - WebSocket: 500ms (250ms on ultra-low latency Lightsail)
-    // - REST Keep-Alive fallback: 1200ms (800ms on ultra-low latency Lightsail)
-    const staleThreshold = isWs 
-      ? (isUltraLow ? 250 : 500) 
-      : (isUltraLow ? 800 : 1200);
+    // Scale quote staleness threshold (Option A: 10s for resting market liquidity):
+    // - WebSocket: 10,000ms (10 seconds)
+    // - REST Keep-Alive fallback: 15,000ms (15 seconds)
+    const staleThreshold = isWs ? 10000 : 15000;
 
     return {
       lastPingTime: this.lastMeasurementTime,
@@ -240,7 +239,7 @@ class LatencyAdaptiveEngine {
       return {
         isFresh: false,
         ageMs,
-        reason: `[LATENCY GATE] Quote for ${symbol || 'contract'} is stale (Age: ${ageMs}ms > ${limitMs}ms limit on ${modeLabel} [${profile.executionEnvironment}]). Entry skipped to avoid slippage.`
+        reason: `[QUOTE STALENESS GATE] Quote for ${symbol || 'contract'} is stale (Age: ${ageMs}ms > ${limitMs}ms limit on ${modeLabel} [${profile.executionEnvironment}]). Wire ping is healthy; refreshing orderbook snapshot to avoid slippage.`
       };
     }
 

@@ -5,7 +5,6 @@ import { RestartConfirmModal } from './RestartConfirmModal';
 import { RecoveryProtocolCard } from './RecoveryProtocolCard';
 import { ExtinctionListCard } from './ExtinctionListCard';
 import { GeminiStrategyDoctorCard } from './GeminiStrategyDoctorCard';
-import { InstitutionalTelemetryCard } from './InstitutionalTelemetryCard';
 import { FixConnectionStatus } from './FixConnectionStatus';
 
 export interface MarketTestingStatus {
@@ -911,7 +910,7 @@ export function DashboardView() {
                     ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500'
                     : 'bg-amber-500/20 text-amber-300 border-amber-500'
                 }`}>
-                  {balance.latency_profile.connectionMode === 'WEBSOCKET' ? `KALSHI WEBSOCKET STREAM (${balance.latency_profile.staleTickThresholdMs || 500}MS GATE)` : 'REST KEEP-ALIVE FALLBACK (1200MS GATE)'}
+                  {balance.latency_profile.connectionMode === 'WEBSOCKET' ? `KALSHI WEBSOCKET STREAM (${Math.round((balance.latency_profile.staleTickThresholdMs || 10000) / 1000)}S QUOTE GATE)` : 'REST KEEP-ALIVE FALLBACK (15S GATE)'}
                 </span>
                 <span className={`px-2 py-0.5 border text-[10px] uppercase font-bold tracking-widest ${
                   balance.latency_profile.isUltraLowLatency
@@ -925,7 +924,7 @@ export function DashboardView() {
                 </span>
               </div>
               <div className="text-[11px] opacity-90 leading-relaxed">
-                <strong>Continuous Neural Watchdog:</strong> {balance.latency_profile.isNeuralExitMonitorActive ? <span className="text-crypto-primary font-bold animate-pulse">ENGAGED (&lt;100ms real-time microstructure evaluation for lightning-fast sell decisions & online weight learning)</span> : <span className="text-crypto-text/60">READY (Continuous stream active; auto-engages neural sell watchdog on contract entry)</span>} &bull; <strong>Quote Freshness Gate (C):</strong> Rejects entries older than <strong>{balance.latency_profile.staleTickThresholdMs}ms</strong>. <strong>Adaptive Buffer (B):</strong> Entry tolerance tuned to <strong>{(balance.latency_profile.slippageBufferPct * 100).toFixed(1)}%</strong> with <strong>{(balance.latency_profile.trailingStopAgilityFactor * 100).toFixed(0)}%</strong> trailing stop agility.
+                <strong>Continuous Neural Watchdog:</strong> {balance.latency_profile.isNeuralExitMonitorActive ? <span className="text-crypto-primary font-bold animate-pulse">ENGAGED (&lt;100ms real-time microstructure evaluation for lightning-fast sell decisions & online weight learning)</span> : <span className="text-crypto-text/60">READY (Continuous stream active; auto-engages neural sell watchdog on contract entry)</span>} &bull; <strong>Quote Freshness Gate (C):</strong> Rejects entries older than <strong>{Math.round((balance.latency_profile.staleTickThresholdMs || 10000) / 1000)}s ({balance.latency_profile.staleTickThresholdMs}ms)</strong>. <strong>Adaptive Buffer (B):</strong> Entry tolerance tuned to <strong>{(balance.latency_profile.slippageBufferPct * 100).toFixed(1)}%</strong> with <strong>{(balance.latency_profile.trailingStopAgilityFactor * 100).toFixed(0)}%</strong> trailing stop agility.
               </div>
             </div>
           </div>
@@ -969,9 +968,6 @@ export function DashboardView() {
 
       {/* STRATEGIC EVOLUTION SCREEN */}
       <GeminiStrategyDoctorCard />
-
-      {/* INSTITUTIONAL COCKPIT SCREEN */}
-      <InstitutionalTelemetryCard />
 
       {/* DEPTH MONITOR SCREEN */}
       <OrderBookMonitor marketContext={marketContext} />

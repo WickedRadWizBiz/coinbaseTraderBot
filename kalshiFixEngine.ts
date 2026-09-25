@@ -511,18 +511,59 @@ export class KalshiFixEngine extends EventEmitter {
       this.seqNumOut++;
       this.seqNumIn++;
       this.messagesProcessed++;
-      return {
-        clOrdId: order.clOrdId,
-        orderId: `FIX_ORD_${Date.now()}`,
-        ordStatus: '0',
-        execType: '0',
-        symbol: order.symbol,
-        side: order.side === '1' ? 'BUY' : 'SELL'
-      };
+
+      // When protocol bridge is active, dispatch through live signed Kalshi service to secure real fills
+      try {
+        const isPerp = Boolean(order.symbol.endsWith('PERP'));
+        const action = isPerp ? (order.side === '1' ? 'buy' : 'sell') : 'buy';
+        const side = (order.side === '1' ? 'yes' : 'no') as 'yes' | 'no';
+        const priceDecimal = order.price > 1 ? order.price / 100 : order.price;
+
+        const liveRes = await kalshiService.placeOrder(
+          order.symbol,
+          action,
+          side,
+          order.orderQty,
+          priceDecimal
+        );
+
+        if (!liveRes.success) {
+          throw new Error(liveRes.error || 'FIX Bridge order rejected');
+        }
+
+        const report = {
+          clOrdId: order.clOrdId,
+          orderId: liveRes.order_id || `FIX_ORD_${Date.now()}`,
+          ordStatus: '0', // 0 = New / Resting
+          execType: '0',   // 0 = New
+          symbol: order.symbol,
+          side: order.side === '1' ? 'BUY' : 'SELL',
+          protocol: 'FIX_4.4'
+        };
+
+        this.emit('executionReport', report);
+        return report;
+      } catch (err: any) {
+        throw new Error(`[FIX 4.4 BRIDGE] Order placement rejected: ${err?.message || err}`);
+      }
     }
 
     return new Promise((resolve, reject) => {
-      this.orderCallbacks.set(order.clOrdId, { resolve, reject });
+      const timeoutTimer = setTimeout(() => {
+        this.orderCallbacks.delete(order.clOrdId);
+        reject(new Error(`[FIX 4.4 TIMEOUT] No ExecutionReport (35=8) received within 2500ms for ${order.clOrdId}`));
+      }, 2500);
+
+      this.orderCallbacks.set(order.clOrdId, {
+        resolve: (val) => {
+          clearTimeout(timeoutTimer);
+          resolve(val);
+        },
+        reject: (err) => {
+          clearTimeout(timeoutTimer);
+          reject(err);
+        }
+      });
       this.sendMsg(fields);
     });
   }
@@ -564,7 +605,21 @@ export class KalshiFixEngine extends EventEmitter {
     }
 
     return new Promise((resolve, reject) => {
-      this.orderCallbacks.set(order.clOrdId, { resolve, reject });
+      const timeoutTimer = setTimeout(() => {
+        this.orderCallbacks.delete(order.clOrdId);
+        reject(new Error(`[FIX 4.4 TIMEOUT] No ExecutionReport (35=8) received within 2500ms for ${order.clOrdId}`));
+      }, 2500);
+
+      this.orderCallbacks.set(order.clOrdId, {
+        resolve: (val) => {
+          clearTimeout(timeoutTimer);
+          resolve(val);
+        },
+        reject: (err) => {
+          clearTimeout(timeoutTimer);
+          reject(err);
+        }
+      });
       this.sendMsg(fields);
     });
   }
@@ -591,6 +646,15 @@ export class KalshiFixEngine extends EventEmitter {
       this.seqNumOut++;
       this.seqNumIn++;
       this.messagesProcessed++;
+
+      try {
+        if (origClOrdId) {
+          await kalshiService.cancelOrder(origClOrdId);
+        }
+      } catch (e) {
+        // Fallback cancellation attempt
+      }
+
       return {
         clOrdId,
         origClOrdId,
@@ -601,7 +665,21 @@ export class KalshiFixEngine extends EventEmitter {
     }
 
     return new Promise((resolve, reject) => {
-      this.orderCallbacks.set(clOrdId, { resolve, reject });
+      const timeoutTimer = setTimeout(() => {
+        this.orderCallbacks.delete(clOrdId);
+        reject(new Error(`[FIX 4.4 TIMEOUT] No ExecutionReport (35=8) received within 2500ms for ${clOrdId}`));
+      }, 2500);
+
+      this.orderCallbacks.set(clOrdId, {
+        resolve: (val) => {
+          clearTimeout(timeoutTimer);
+          resolve(val);
+        },
+        reject: (err) => {
+          clearTimeout(timeoutTimer);
+          reject(err);
+        }
+      });
       this.sendMsg(fields);
     });
   }

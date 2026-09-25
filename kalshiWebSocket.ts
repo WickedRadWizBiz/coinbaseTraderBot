@@ -169,7 +169,7 @@ export class KalshiWebSocketManager {
         this.isConnecting = false;
         this.reconnectAttempts = 0;
         latencyAdaptiveEngine.setConnectionMode('WEBSOCKET');
-        console.log(`[KALSHI WS] Connected successfully. Connection Mode set to WEBSOCKET (500ms gate).`);
+        console.log(`[KALSHI WS] Connected successfully. Connection Mode set to WEBSOCKET (10s quote freshness gate, <300ms wire gate).`);
 
         this.startHeartbeat();
         this.resubscribeAll();
@@ -212,7 +212,7 @@ export class KalshiWebSocketManager {
     this.pingInterval = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         try {
-          // Standard ping frame + application-level ping command
+          // Standard protocol-level ping frame + application-level ping command for precise bidirectional RTT
           this.lastPingSentTime = Date.now();
           this.ws.ping();
           this.lastPingMsgId = this.msgIdCounter++;
@@ -222,7 +222,7 @@ export class KalshiWebSocketManager {
           }));
         } catch (_) {}
       }
-    }, 15000);
+    }, 4000);
   }
 
   private stopHeartbeat(): void {
@@ -325,16 +325,6 @@ export class KalshiWebSocketManager {
 
       const msgType = data.type || data.channel;
       const msg = data.msg || data.data || data;
-
-      // Measure transit latency if timestamp provided
-      if (msg.ts || msg.timestamp || data.ts) {
-        const serverTs = (msg.ts || msg.timestamp || data.ts);
-        const serverMs = typeof serverTs === 'number' && serverTs < 1e11 ? serverTs * 1000 : Number(serverTs);
-        const transit = Date.now() - serverMs;
-        if (transit > 0 && transit < 3000) {
-          latencyAdaptiveEngine.recordKalshiWsLatency(transit);
-        }
-      }
 
       if (msgType === 'orderbook_snapshot') {
         this.handleOrderBookSnapshot(msg);

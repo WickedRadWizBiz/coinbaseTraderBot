@@ -24,7 +24,7 @@ import { kalshiRateLimiter, RateLimitTier } from "./kalshiRateLimiter";
 import { backpressureQueue } from "./backpressureQueue";
 import { initializeHttpKeepAlive } from "./httpKeepAlive";
 import { kalshiWsManager } from "./kalshiWebSocket";
-import { kalshiFixEngine } from "./kalshiFixEngine";
+import { kalshiFixEngine, FixOrderRequest } from "./kalshiFixEngine";
 import { jumpDiffusionEngine } from "./jumpDiffusionEngine";
 import { kalmanFilterEngine } from "./kalmanFilterEngine";
 import { bayesianKellyEngine } from "./bayesianKellyEngine";
@@ -89,12 +89,19 @@ let liveStartingBankroll = 0;
 let liveVaultedProfits = 0;
 let liveGauntletStartingCash = 0;
 
-let paperBankrollATH = 200;
+let paperBankrollATH = startingBankroll;
 let liveBankrollATH = 0;
 
 async function getEffectiveWorkingBalance(forceSync = false): Promise<number> {
   if (settings.paperTrading) {
-    paperBankrollATH = Math.max(startingBankroll, Math.max(paperBankrollATH, simulatedPaperBalance));
+    // Ground ATH in startingBankroll plus any actual profits earned.
+    // Prevents legacy $200 default from locking accounts that started with $20.
+    const maxRealisticPeak = startingBankroll + Math.max(0, cycleEarnedProfit, cumulativePaperProfit, (simulatedPaperBalance - startingBankroll));
+    if (paperBankrollATH > maxRealisticPeak && maxRealisticPeak > 0) {
+      paperBankrollATH = maxRealisticPeak;
+    } else {
+      paperBankrollATH = Math.max(startingBankroll, Math.max(paperBankrollATH, simulatedPaperBalance));
+    }
     const reserve = paperBankrollATH * 0.10;
     
     let capitalInUse = 0;
@@ -389,6 +396,11 @@ class PatternTradingBrain {
       }
       if (typeof data.startingBankroll === 'number') startingBankroll = data.startingBankroll;
       if (typeof data.paperBalance === 'number') simulatedPaperBalance = Math.max(0, data.paperBalance);
+      if (typeof data.paperBankrollATH === 'number' && data.paperBankrollATH <= startingBankroll + Math.max(0, data.cumulativePaperProfit || 0, data.cycleEarnedProfit || 0) + 1) {
+        paperBankrollATH = data.paperBankrollATH;
+      } else {
+        paperBankrollATH = Math.max(startingBankroll, simulatedPaperBalance);
+      }
       if (typeof data.cycleEarnedProfit === 'number') cycleEarnedProfit = data.cycleEarnedProfit;
       if (typeof data.vaultedProfits === 'number') vaultedProfits = Math.max(0, data.vaultedProfits);
       if (typeof data.completedGoalCycles === 'number') completedGoalCycles = data.completedGoalCycles;
@@ -446,6 +458,7 @@ class PatternTradingBrain {
           settings,
           startingBankroll,
           paperBalance: simulatedPaperBalance,
+          paperBankrollATH,
           cycleEarnedProfit,
           vaultedProfits,
           completedGoalCycles,
@@ -488,6 +501,7 @@ class PatternTradingBrain {
         settings,
         startingBankroll,
         paperBalance: simulatedPaperBalance,
+        paperBankrollATH,
         cycleEarnedProfit,
         vaultedProfits,
         completedGoalCycles,
@@ -2131,6 +2145,103 @@ async function forceRefreshContractOrderBook(symbol: string): Promise<boolean> {
   }
 }
 
+/**
+ * =========================================================================
+ * INSTITUTIONAL EXECUTION ROUTER (FIX 4.4 PRIMARY -> REST KEEP-ALIVE FALLBACK)
+ * =========================================================================
+ * 1. FIX 4.4 Execution Highway: Sub-10ms NewOrderSingle (35=D) over persistent TLS socket
+ * 2. Automatic Failover to REST API Keep-Alive Pool if FIX session is offline, timed out, or rejected
+ */
+async function routeLiveOrderExecution(
+  symbol: string,
+  action: 'buy' | 'sell',
+  side: 'yes' | 'no',
+  size: number,
+  price: number,
+  isPerpContract: boolean
+): Promise<{ success: boolean; order_id?: string; protocol: 'FIX_4.4' | 'REST_KEEPALIVE'; error?: string; raw?: any }> {
+  const fixStatus = kalshiFixEngine.getStatus();
+
+  // 1. Primary Highway: FIX 4.4 Protocol Order Routing
+  if (fixStatus.loggedIn) {
+    try {
+      const clOrdId = `ORD_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const fixSide: '1' | '2' = isPerpContract 
+        ? (action === 'buy' ? '1' : '2') 
+        : (action === 'buy' ? (side === 'yes' ? '1' : '2') : (side === 'yes' ? '2' : '1'));
+
+      const orderPrice = isPerpContract ? price : Math.round(price * 100);
+
+      const fixReq: FixOrderRequest = {
+        clOrdId,
+        symbol,
+        side: fixSide,
+        orderQty: size,
+        price: orderPrice,
+        orderType: '2', // Limit
+        timeInForce: '1' // GTC
+      };
+
+      const fixRes = await kalshiFixEngine.sendNewOrderSingle(fixReq);
+      return {
+        success: true,
+        order_id: fixRes.orderId || fixRes.clOrdId || clOrdId,
+        protocol: 'FIX_4.4',
+        raw: fixRes
+      };
+    } catch (err: any) {
+      console.warn(`[FIX 4.4 ROUTING FAILOVER] NewOrderSingle (35=D) failed (${err?.message || err}). Falling back to REST Keep-Alive order routing...`);
+      spotLogs.unshift({
+        id: logIdCounter++, time: new Date().toISOString(), type: 'WARN',
+        message: `[FIX 4.4 FAILOVER] Execution Highway failed (${err?.message || 'Timeout/Reject'}). Seamlessly falling back to REST Keep-Alive order routing...`
+      });
+    }
+  }
+
+  // 2. Secondary Fallback: Persistent HTTP/1.1 Keep-Alive Connection Pool
+  const restRes = await kalshiService.placeOrder(symbol, action, side, size, price);
+  return {
+    success: restRes.success,
+    order_id: restRes.order_id,
+    protocol: 'REST_KEEPALIVE',
+    error: restRes.error,
+    raw: restRes
+  };
+}
+
+/**
+ * Institutional Execution Router for Order Cancellation:
+ * Routes OrderCancelRequest (35=F) via FIX 4.4 first, falling back to REST.
+ */
+async function routeLiveOrderCancel(
+  orderId: string,
+  symbol?: string
+): Promise<{ success: boolean; protocol: 'FIX_4.4' | 'REST_KEEPALIVE'; error?: string; raw?: any }> {
+  const fixStatus = kalshiFixEngine.getStatus();
+
+  if (fixStatus.loggedIn) {
+    try {
+      const clOrdId = `CXL_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const fixCancel = await kalshiFixEngine.sendOrderCancel(clOrdId, orderId, symbol || '', '1');
+      return {
+        success: true,
+        protocol: 'FIX_4.4',
+        raw: fixCancel
+      };
+    } catch (err: any) {
+      console.warn(`[FIX 4.4 CANCEL FAILOVER] Cancel failed (${err?.message || err}). Falling back to REST cancel...`);
+    }
+  }
+
+  const restCancel = await kalshiService.cancelOrder(orderId);
+  return {
+    success: restCancel.success,
+    protocol: 'REST_KEEPALIVE',
+    error: restCancel.error,
+    raw: restCancel
+  };
+}
+
 async function openPosition(
   symbol: string, 
   side: 'YES' | 'NO', 
@@ -2158,9 +2269,10 @@ async function openPosition(
     const freshness = latencyAdaptiveEngine.verifyQuoteFreshness(ctx?.lastQuoteUpdateMs, symbol);
     if (!freshness.isFresh) {
       if (!isReEvaluationAttempt) {
+        const gateLimit = latencyAdaptiveEngine.getProfile().staleTickThresholdMs;
         spotLogs.unshift({
           id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-          message: `[LATENCY GATE TRIGGERED] Initial quote check stale for ${symbol} (Age: ${freshness.ageMs}ms). Initiating immediate contract re-evaluation...`
+          message: `[QUOTE FRESHNESS GATE] Quote for ${symbol} is ${freshness.ageMs}ms old (> ${gateLimit}ms limit; wire ping is normal). Initiating immediate orderbook snapshot refresh...`
         });
 
         // 1. Trigger immediate high-priority quote refresh
@@ -2173,7 +2285,7 @@ async function openPosition(
           // If the latency gate is triggered on this re-evaluation then the contract is moved on from.
           spotLogs.unshift({
             id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-            message: `[LATENCY GATE - CONTRACT MOVED ON FROM] Latency Gate re-triggered on re-evaluation for ${symbol} (Age: ${recheckFreshness.ageMs}ms). Contract moved on from.`
+            message: `[QUOTE FRESHNESS - CONTRACT MOVED ON FROM] Quote refresh re-triggered on re-evaluation for ${symbol} (Age: ${recheckFreshness.ageMs}ms). Contract moved on from.`
           });
           return;
         }
@@ -2863,29 +2975,31 @@ async function openPosition(
   // If paperTrading is OFF (Live Mode), strictly place real order on Kalshi FIRST
   if (!settings.paperTrading) {
     const liveAction = isPerpContract ? (side === 'YES' ? 'buy' : 'sell') : 'buy';
-    const liveRes = await kalshiService.placeOrder(
+    const liveRes = await routeLiveOrderExecution(
       symbol,
       liveAction,
       side.toLowerCase() as 'yes' | 'no',
       size,
-      optimizedEntryPrice
+      optimizedEntryPrice,
+      isPerpContract
     );
 
     if (!liveRes.success) {
       spotLogs.unshift({
         id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-        message: `[KALSHI LIVE ORDER REJECTED] Order for ${size}x ${side} on ${symbol} at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} was rejected by Kalshi: ${liveRes.error}. Trade aborted to prevent phantom desynchronization.`
+        message: `[LIVE ORDER REJECTED] Order for ${size}x ${side} on ${symbol} at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} was rejected (${liveRes.protocol}): ${liveRes.error}. Trade aborted to prevent phantom desynchronization.`
       });
       return; // DO NOT push to activePositions if real order failed!
     }
 
     (pos as any).kalshiOrderId = liveRes.order_id;
     (pos as any).isLive = true;
+    (pos as any).routingProtocol = liveRes.protocol;
 
     activePositions.push(pos);
     spotLogs.unshift({
       id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
-      message: `[KALSHI LIVE ORDER FILLED/PLACED] Real ${side} order for ${size} contracts on ${symbol} (${label}) submitted at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} | Kalshi Order ID: ${liveRes.order_id} | Capital: $${positionCostUsd.toFixed(2)}`
+      message: `[${liveRes.protocol === 'FIX_4.4' ? 'FIX 4.4 LIVE ORDER FILLED/PLACED' : 'KALSHI LIVE ORDER FILLED/PLACED'}] Real ${side} order for ${size} contracts on ${symbol} (${label}) submitted at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} | Order ID: ${liveRes.order_id} | Route: ${liveRes.protocol} | Capital: $${positionCostUsd.toFixed(2)}`
     });
   } else {
     // Paper Trading Mode
@@ -4507,11 +4621,11 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
           const isPerp = Boolean(pos.isPerpetual || pos.symbol.endsWith('PERP'));
           const exitPrice = isPerp ? currentSidePrice : (pos.side === 'YES' ? currentSidePrice : (1.0 - currentSidePrice));
           const closeAction = isPerp ? (pos.side === 'YES' ? 'sell' : 'buy') : 'sell';
-          kalshiService.placeOrder(pos.symbol, closeAction, pos.side.toLowerCase() as 'yes' | 'no', pos.size, exitPrice).then(res => {
+          routeLiveOrderExecution(pos.symbol, closeAction, pos.side.toLowerCase() as 'yes' | 'no', pos.size, exitPrice, isPerp).then(res => {
             if (res.success) {
               spotLogs.unshift({
                 id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
-                message: `[LIVE KALSHI CLOSE] Real position ${pos.symbol} (${closeAction.toUpperCase()} ${pos.size} contracts @ ${exitPrice.toFixed(2)}) executed successfully.`
+                message: `[LIVE KALSHI CLOSE (${res.protocol})] Real position ${pos.symbol} (${closeAction.toUpperCase()} ${pos.size} contracts @ ${exitPrice.toFixed(2)}) executed successfully via ${res.protocol}.`
               });
             } else {
               spotLogs.unshift({
@@ -5537,7 +5651,8 @@ async function syncLiveKalshiPositions(force = false) {
   if (!kalshiService.isConfigured()) return { success: false, error: 'Kalshi not configured' };
 
   const now = Date.now();
-  if (!force && now - lastLivePositionSyncTime < 10000) return { success: true };
+  // Standard 30-60s Periodic Reconciliation against exchange state
+  if (!force && now - lastLivePositionSyncTime < 30000) return { success: true };
   lastLivePositionSyncTime = now;
 
   try {
@@ -5655,6 +5770,7 @@ app.post('/api/settings', (req, res) => {
     if (updated.paperTrading) {
       startingBankroll = 20.0;
       simulatedPaperBalance = 20.0;
+      paperBankrollATH = 20.0;
       cycleEarnedProfit = 0;
       spotLogs.unshift({
         id: logIdCounter++,
@@ -5916,7 +6032,7 @@ app.post('/api/kalshi/cancel-order', async (req, res) => {
   try {
     const { orderId } = req.body || {};
     if (!orderId) return res.status(400).json({ success: false, error: 'Order ID is required' });
-    const cancelRes = await kalshiService.cancelOrder(orderId);
+    const cancelRes = await routeLiveOrderCancel(orderId);
     res.json(cancelRes);
   } catch (err: any) {
     res.status(500).json({ success: false, error: err?.message || 'Failed to cancel order' });
@@ -5935,7 +6051,7 @@ app.post('/api/kalshi/cancel-all-orders', async (req, res) => {
     for (const ord of orders) {
       const oid = ord.order_id || ord.client_order_id;
       if (oid) {
-        const cRes = await kalshiService.cancelOrder(oid);
+        const cRes = await routeLiveOrderCancel(oid);
         results.push({ orderId: oid, ...cRes });
       }
     }
@@ -5972,7 +6088,7 @@ app.post('/api/kalshi/close-all-positions', async (req, res) => {
         const size = Math.abs(count);
         const exitPrice = side === 'yes' ? 0.01 : 0.01; // emergency market sweep or low limit
 
-        const closeRes = await kalshiService.placeOrder(p.ticker, action, side, size, exitPrice);
+        const closeRes = await routeLiveOrderExecution(p.ticker, action, side, size, exitPrice, isPerp);
         results.push({ ticker: p.ticker, side, size, ...closeRes });
       }
     }
@@ -6088,16 +6204,16 @@ app.post('/api/panic-sell', (req, res) => {
         const isPerp = Boolean(pos.isPerpetual || pos.symbol.endsWith('PERP'));
         const exitPrice = isPerp ? currentSidePrice : (pos.side === 'YES' ? currentSidePrice : (1.0 - currentSidePrice));
         const closeAction = isPerp ? (pos.side === 'YES' ? 'sell' : 'buy') : 'sell';
-        kalshiService.placeOrder(pos.symbol, closeAction, pos.side.toLowerCase() as 'yes' | 'no', pos.size, exitPrice).then(res => {
+        routeLiveOrderExecution(pos.symbol, closeAction, pos.side.toLowerCase() as 'yes' | 'no', pos.size, exitPrice, isPerp).then(res => {
           if (res.success) {
             spotLogs.unshift({
               id: logIdCounter++, time: new Date().toISOString(), type: 'INFO',
-              message: `[KALSHI PANIC SELL SUCCESS] Closed ${pos.size} contracts of ${pos.symbol} (${pos.side}) on Kalshi at $${exitPrice.toFixed(isPerp ? 4 : 2)} (OrderID: ${res.order_id}).`
+              message: `[LIVE POSITION CLOSE (${res.protocol})] Closed ${pos.size} contracts of ${pos.symbol} (${pos.side}) on Kalshi at $${exitPrice.toFixed(isPerp ? 4 : 2)} (OrderID: ${res.order_id}).`
             });
           } else {
             spotLogs.unshift({
               id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-              message: `[KALSHI PANIC SELL ERROR] Failed to panic sell ${pos.symbol}: ${res.error}`
+              message: `[LIVE POSITION CLOSE ERROR] Failed to close ${pos.symbol}: ${res.error}`
             });
           }
         });
