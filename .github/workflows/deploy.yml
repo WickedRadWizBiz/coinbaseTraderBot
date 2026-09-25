@@ -22,8 +22,20 @@ jobs:
           script: |
             cd ~/${{ secrets.LIGHTSAIL_APP_DIR || 'coinbaseTraderBot' }} || cd ~/coinbaseTraderBot
 
-            echo "=== Pulling latest changes from GitHub ==="
-            git pull origin $(git rev-parse --abbrev-ref HEAD)
+            echo "=== Syncing latest changes from GitHub ==="
+            # Abort any in-progress merge conflict on the server
+            git merge --abort 2>/dev/null || true
+            git reset --hard HEAD
+            git fetch origin
+
+            TARGET_BRANCH="${{ github.ref_name }}"
+            if [ -z "$TARGET_BRANCH" ]; then
+              TARGET_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+            fi
+
+            # Force sync server repository with the target branch from GitHub
+            git checkout "$TARGET_BRANCH" 2>/dev/null || git checkout -b "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+            git reset --hard "origin/$TARGET_BRANCH"
 
             echo "=== Installing dependencies ==="
             npm install
