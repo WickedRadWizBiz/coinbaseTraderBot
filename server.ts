@@ -1029,7 +1029,11 @@ class PatternTradingBrain {
       }
 
       const actualLabel = isWin ? 1 : 0;
-      metaModelManager.activeModel.updateOnlineWeights(onlineFeatures, actualLabel);
+      // Guard online weight adaptation: Only train on trades that had time to develop (>=8s)
+      // or had a significant real price move (>= 2%), preventing spread noise on instant exits from corrupting the model.
+      if (tradeReport.timeInContractSec >= 8 || Math.abs(tradeReport.pnlPct) >= 2.0) {
+        metaModelManager.activeModel.updateOnlineWeights(onlineFeatures, actualLabel);
+      }
 
       // Top-Tier Alpha Goal-Hitter Tagging: Note any time the $100 goal was hit or high profit achieved ($10+), tagging simultaneous conditions as elite alpha signatures
       const totalPocketedAtOutcome = Math.max(sessionPocketedProfit, vaultedProfits + Math.max(0, cycleEarnedProfit));
@@ -1638,6 +1642,7 @@ interface PaperPosition {
   pnlRatio?: number;
   smartTrailing?: SmartTrailingState;
   entryFeatures?: EntryFeatures;
+  entryProba?: number;
 }
 
 let activePositions: PaperPosition[] = [];
@@ -2583,6 +2588,8 @@ async function openPosition(
     })()
   };
 
+  let tradeWinProba = (analysisMeta?.winProbability ? analysisMeta.winProbability / 100 : 0.50);
+
   // Pre-Trade Inference: Meta-Model Gatekeeper Veto for Toxic / Negative-EV setups
   if (!isOverride) {
     const metaGate = metaModelManager.evaluatePreTradeGate(
@@ -2592,6 +2599,8 @@ async function openPosition(
       side, 
       true
     );
+
+    tradeWinProba = metaGate.proba;
 
     if (!metaGate.approved) {
       const inv = metaGate.inverseCandidate;
@@ -2623,6 +2632,7 @@ async function openPosition(
           entryPrice = proposedInversePrice;
           entryFeatures = inv.inverseFeatures;
           inverseFlipped = true;
+          tradeWinProba = inv.inverseProba;
 
           // Re-evaluate symmetric trend alignment for the inverted side
           isCounterTrendYes = side === 'YES' && (currentSpotTA.ichimokuState === 'BEARISH_CLOUD' || currentSpotTA.tenkanKijunCross === 'BEARISH_CROSS');
@@ -2969,7 +2979,8 @@ async function openPosition(
     timeInLossSec: 0,
     maxAdverseExcursion: 0,
     lastTickTime: Date.now(),
-    entryFeatures
+    entryFeatures,
+    entryProba: tradeWinProba
   };
 
   // If paperTrading is OFF (Live Mode), strictly place real order on Kalshi FIRST
@@ -4269,7 +4280,8 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
           timeInContractSec,
           pos.side,
           pos.peakPnlRatio || pnlRatio,
-          orderbookExit
+          orderbookExit,
+          pos.entryProba
         );
 
         if (nnExitSignal.shouldSell && !isCapitalPreservationActive) {
@@ -6136,6 +6148,7 @@ app.post('/api/restart', (req, res) => {
   recoveryProtocol.resetProtocol();
   marketTestingEngine.resetWindowProfit();
   goalResetScheduler.resetFull(startingBankroll);
+  metaModelManager.resetModel();
 
   // Synchronously persist memory to prevent stale cache on reloads
   tradingBrain._saveMemoryImmediate();

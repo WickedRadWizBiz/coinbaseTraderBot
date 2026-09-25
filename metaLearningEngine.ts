@@ -510,7 +510,7 @@ export interface NeuralExitSignal {
   confidence: number;
   currentWinProba: number;
   reason: string;
-  exitType: 'NEURAL_EMERGENCY_SELL' | 'NEURAL_CREST_SELL' | 'NEURAL_TOXIC_FLOW_SELL' | 'NEURAL_ORDERBOOK_CLIFF_SELL' | 'NEURAL_SLIPPAGE_DEFENSE_SELL' | 'HOLD';
+  exitType: 'NEURAL_EMERGENCY_SELL' | 'NEURAL_CREST_SELL' | 'NEURAL_TOXIC_FLOW_SELL' | 'NEURAL_ORDERBOOK_CLIFF_SELL' | 'NEURAL_SLIPPAGE_DEFENSE_SELL' | 'HOLD_GRACE_PERIOD' | 'HOLD';
   orderbookExitDetails?: OrderbookExitDetails;
 }
 
@@ -889,10 +889,11 @@ export class SecondaryMetaModel {
     timeInContractSec: number,
     side: 'YES' | 'NO',
     peakPnlRatio: number = pnlRatio,
-    orderbookExit?: OrderbookExitDetails
+    orderbookExit?: OrderbookExitDetails,
+    entryProba?: number
   ): NeuralExitSignal {
     const prob = this.predictProba(f);
-    
+
     // Directional Order Flow Imbalance and Imbalance
     const ofi = f.orderFlowImbalance || 0;
     const obImbalance = f.orderbookImbalance || 1.0;
@@ -906,13 +907,27 @@ export class SecondaryMetaModel {
     const isCliff = Boolean(orderbookExit?.isLiquidityCliff || f.isLiquidityCliff);
     const execMode = orderbookExit?.recommendedExecutionMode || f.recommendedExecutionMode || 'TAKER_AGGRESSIVE';
 
+    // 0. TRADE MATURATION GRACE PERIOD
+    // Newly entered contracts MUST have at least 8 seconds to establish and breathe.
+    // Exiting in <8s causes instant spread loss (-$0.02) and creates an artificial negative feedback loop.
+    if (timeInContractSec < 8) {
+      return {
+        shouldSell: false,
+        confidence: 0,
+        currentWinProba: prob,
+        reason: `Hold - Trade maturation grace period active (${timeInContractSec.toFixed(1)}s < 8s). Position establishing.`,
+        exitType: 'HOLD_GRACE_PERIOD',
+        orderbookExitDetails: orderbookExit
+      };
+    }
+
     // Is order flow turning strongly against our position?
     const isFlowToxic = side === 'YES' 
-      ? (ofi < -0.12 || obImbalance < 0.65 || microDrift < -0.002 || vpin > 0.65)
-      : (ofi > 0.12 || obImbalance > 1.55 || microDrift > 0.002 || vpin > 0.65);
+      ? (ofi < -0.15 || obImbalance < 0.55 || microDrift < -0.003 || vpin > 0.70)
+      : (ofi > 0.15 || obImbalance > 1.80 || microDrift > 0.003 || vpin > 0.70);
 
     // 1. Order Book Liquidity Cliff / Bid Evaporation Defense
-    // If the bot has profit or small loss and orderbook bids taking the order are drying up (cliff)
+    // If the bot has profit and orderbook bids taking the order are drying up (cliff)
     if (isCliff && pnlRatio >= 0.005) {
       return {
         shouldSell: true,
@@ -925,25 +940,33 @@ export class SecondaryMetaModel {
     }
 
     // 2. Severe Order Book Slippage Warning (Walking Book Penalty)
-    // If executing full size would incur >2.5% slippage across shallow book levels and momentum is softening
-    if (expectedSlippage >= 0.025 && (prob < 0.48 || isFlowToxic) && pnlRatio >= -0.01) {
+    // Only trigger if book is deeply gapped (>8% slippage, not regular 1¢ spread) and position is losing past 10 seconds
+    if (expectedSlippage >= 0.08 && timeInContractSec >= 10 && (prob < 0.35 || isFlowToxic) && pnlRatio < -0.015) {
       return {
         shouldSell: true,
         confidence: Math.round(Math.max(75, (1 - prob) * 100)),
         currentWinProba: prob,
-        reason: `[NEURAL ORDERBOOK SLIPPAGE DEFENSE] Shallow order book depth would cause ${(expectedSlippage * 100).toFixed(1)}% slippage on exit. Fulfilling immediate exit into highest available bids (${Math.round(exitContracts)} contracts available).`,
+        reason: `[NEURAL ORDERBOOK SLIPPAGE DEFENSE] Severe book void detected (>${(expectedSlippage * 100).toFixed(1)}% slippage on exit). Fulfilling immediate exit into highest available bids (${Math.round(exitContracts)} contracts available).`,
         exitType: 'NEURAL_SLIPPAGE_DEFENSE_SELL',
         orderbookExitDetails: orderbookExit
       };
     }
 
-    // 3. Extreme Toxic Flow or Probability Collapse (Lightning Emergency Sell)
-    if (prob < 0.30 || (prob < 0.38 && isFlowToxic && pnlRatio < -0.008)) {
+    // 3. Extreme Toxic Flow or True Probability Collapse (Lightning Emergency Sell)
+    // Collapse must be measured relative to entry probability (>=25% drop) or decay below 20% on a losing trade.
+    const baselineProb = entryProba !== undefined && entryProba > 0 ? entryProba : 0.50;
+    const isTrueProbabilityCollapse = (baselineProb - prob >= 0.25) || (prob < 0.20 && timeInContractSec >= 15);
+    const isSevereToxicFlow = (vpin >= 0.70) || (side === 'YES' ? ofi < -0.30 : ofi > 0.30);
+
+    if ((isTrueProbabilityCollapse && pnlRatio < -0.015) || (isSevereToxicFlow && pnlRatio < -0.02)) {
+      const exitCause = isSevereToxicFlow
+        ? `Toxic adverse flow (VPIN ${(vpin*100).toFixed(0)}%, OFI ${ofi.toFixed(2)})`
+        : `Win probability decayed from ${(baselineProb * 100).toFixed(1)}% to ${(prob * 100).toFixed(1)}%`;
       return {
         shouldSell: true,
         confidence: Math.round((1 - prob) * 100),
         currentWinProba: prob,
-        reason: `[NEURAL NETWORK LIGHTNING SELL] Win probability collapsed to ${(prob * 100).toFixed(1)}% | Toxic adverse flow detected (VPIN ${(vpin*100).toFixed(0)}%, Imbalance ${obImbalance.toFixed(2)}x, Available Bids: ${Math.round(exitContracts)}). Terminated position to prevent slippage.`,
+        reason: `[NEURAL NETWORK LIGHTNING SELL] ${exitCause} with negative price drift (${(pnlRatio * 100).toFixed(1)}%). Terminated position to prevent further loss.`,
         exitType: 'NEURAL_TOXIC_FLOW_SELL',
         orderbookExitDetails: orderbookExit
       };
@@ -963,12 +986,12 @@ export class SecondaryMetaModel {
     }
 
     // 5. Stagnant Contract Decay with Negative Probability Drift
-    if (timeInContractSec > 75 && pnlRatio < -0.005 && prob < 0.36) {
+    if (timeInContractSec > 90 && pnlRatio < -0.015 && prob < 0.30) {
       return {
         shouldSell: true,
         confidence: Math.round((1 - prob) * 100),
         currentWinProba: prob,
-        reason: `[NEURAL NETWORK LIGHTNING SELL] Stagnant decay detected (>75s in negative drift, Win prob ${(prob * 100).toFixed(1)}%). Terminated position.`,
+        reason: `[NEURAL NETWORK LIGHTNING SELL] Stagnant decay detected (>90s in negative drift, Win prob ${(prob * 100).toFixed(1)}%). Terminated position.`,
         exitType: 'NEURAL_EMERGENCY_SELL',
         orderbookExitDetails: orderbookExit
       };
@@ -1180,12 +1203,25 @@ export class MetaModelManager {
     timeInContractSec: number,
     side: 'YES' | 'NO',
     peakPnlRatio: number = pnlRatio,
-    orderbookExit?: OrderbookExitDetails
+    orderbookExit?: OrderbookExitDetails,
+    entryProba?: number
   ): NeuralExitSignal {
     const model = (strategyKey && this._activeModels.has(strategyKey))
       ? this.getModel(strategyKey)
       : this.getModel('GLOBAL');
-    return model.evaluateExitSignal(features, pnlRatio, timeInContractSec, side, peakPnlRatio, orderbookExit);
+    return model.evaluateExitSignal(features, pnlRatio, timeInContractSec, side, peakPnlRatio, orderbookExit, entryProba);
+  }
+
+  /**
+   * Resets active meta models to uncorrupted baseline weights.
+   */
+  public resetModel(strategyKey?: string) {
+    if (strategyKey) {
+      this._activeModels.set(strategyKey, new SecondaryMetaModel());
+    } else {
+      this._activeModels.clear();
+      this._activeModels.set('GLOBAL', new SecondaryMetaModel());
+    }
   }
 
   /**
