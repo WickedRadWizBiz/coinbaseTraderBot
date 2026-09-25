@@ -1135,6 +1135,13 @@ export class SecondaryMetaModel {
          // Scale winning trade reinforcement by how efficient the trailing stop was
          trailModifier = Math.max(0.1, t.smartTrailingEfficiency); 
       }
+
+      // Drawdown & Bankroll Depletion Blowout Penalty:
+      // If the model generation suffered bankroll depletion blowout(s), aggressively penalize losing trades in gradient loss
+      if (config.blowoutCount && config.blowoutCount > 0 && (label === 0 || (t.pnlPct && t.pnlPct < 0))) {
+        label = 0;
+        trailModifier *= (1.0 + Math.min(3.0, config.blowoutCount * 1.5));
+      }
       
       seqY.push(label);
       
@@ -1829,11 +1836,19 @@ export class MetaModelManager {
       logMessages.push(`[STEP 4.5] Walk-Forward Validation: ${walkForwardResult.totalFolds} Folds | IS Sharpe: ${walkForwardResult.overallInSampleSharpe} -> OOS Sharpe: ${walkForwardResult.overallOutOfSampleSharpe} (Degradation: -${walkForwardResult.averageDegradationPct}%, Purged: ${walkForwardResult.totalPurgedSamples}, Embargoed: ${walkForwardResult.totalEmbargoedSamples}). Verdict: ${walkForwardResult.robustnessVerdict}.`);
 
       // Step 5: Real Mathematical Model Training (Compact 12-Unit LSTM + 35% Dropout + ElasticNet L1/L2)
+      const currentBlowoutCount = this.currentModelBlowouts.get(strategyKey) || 0;
+      const currentSevereDrawdownCount = this.currentModelSevereDrawdowns.get(strategyKey) || 0;
+
+      if (currentBlowoutCount > 0) {
+        logMessages.push(`[BLOWOUT WEIGHTING] Injected ${(1.0 + Math.min(3.0, currentBlowoutCount * 1.5)).toFixed(1)}x loss penalty into neural network training for ${currentBlowoutCount} bankroll depletion blowout(s) to guarantee anti-drawdown adaptation.`);
+      }
+
       const candidateModel = new SecondaryMetaModel();
       const trainResult = await candidateModel.train(bootstrappedDataset, labels, {
         epochs: 35,
         batchSize: 24,
-        asymmetricLossRatio: 3.0 // 3:1 penalty on false entries
+        asymmetricLossRatio: 3.0, // 3:1 penalty on false entries
+        blowoutCount: currentBlowoutCount
       });
       const cpcvResult = ValidationEngine.combinatorialPurgedCV(bootstrappedDataset);
       logMessages.push(`[STEP 5] Mathematical Optimization Solver converged in ${35} epochs. Initial Loss: ${trainResult.initialLoss} -> Final Loss: ${trainResult.finalLoss} (-${trainResult.convergenceRate}%). Accuracy: ${trainResult.accuracyPct}%. Purged CPCV Accuracy: ${cpcvResult.averageCvAccuracy}%.`);
@@ -1922,9 +1937,6 @@ export class MetaModelManager {
       const optimalMfeTrailTriggerPct = parseFloat((Math.max(0.03, mfe50) * 100).toFixed(2));
 
       logMessages.push(`[EXCURSION ANALYTICS] Empirical 85th %ile MAE of Winners: -${optimalMaeStopLossPct}% | Median MFE Inflection: +${optimalMfeTrailTriggerPct}%.`);
-
-      const currentBlowoutCount = this.currentModelBlowouts.get(strategyKey) || 0;
-      const currentSevereDrawdownCount = this.currentModelSevereDrawdowns.get(strategyKey) || 0;
 
       // Gatekeeper Check:
       // 1. Must pass DSR filter or demonstrate positive Sharpe improvement

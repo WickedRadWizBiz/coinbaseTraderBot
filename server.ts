@@ -2424,7 +2424,11 @@ async function openPosition(
   // Insolvency Protection Guard: Do not open trades if total active equity (excluding vault) falls below $5
   const activeEquity = settings.paperTrading ? simulatedPaperBalance : currentWorkingBalance;
   if (activeEquity <= 5.0) {
-    const balanceType = settings.paperTrading ? 'Total active paper equity' : 'Total live equity';
+    if (settings.paperTrading) {
+      checkPaperDrawdownAndBlowout('INSOLVENCY_GUARD');
+      return;
+    }
+    const balanceType = 'Total live equity';
     spotLogs.unshift({
       id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
       message: `[BANKROLL INSOLVENCY GUARD] ${balanceType} ($${activeEquity.toFixed(2)}) below $5.00 minimum threshold. Pausing new entries until bankroll is restored.`
@@ -3863,6 +3867,98 @@ let unAuditedTradeCount = 0;
 let unTrainedTradeCount = 0;
 const unTrainedTradeCountByStrategy: Record<string, number> = {};
 let hasTriggered50PercentDrawdown = false;
+let lastBlowoutCheckTime = 0;
+
+/**
+ * Continuous Drawdown & Blowout Safety Guard:
+ * Monitors paper trading equity against starting bankroll.
+ * If total equity drops by >= 50% (e.g. losing $100 on $200 bankroll), it triggers an automatic blowout reset:
+ * 1. Closes and liquidates all active paper positions.
+ * 2. Restores bankroll to startingBankroll ($200.00).
+ * 3. Wipes negative P/L and resets goal cycle metrics.
+ * 4. Records blowout failure with metaModelManager for neural network weight adaptation.
+ * 5. Automatically initiates counterfactual retraining in background.
+ */
+function checkPaperDrawdownAndBlowout(contextSource = 'TICK'): boolean {
+  if (!settings.paperTrading || startingBankroll <= 0) return false;
+
+  const totalEquity = simulatedPaperBalance + vaultedProfits;
+  const netDrawdown = startingBankroll - totalEquity;
+  const drawdownPct = (netDrawdown / startingBankroll) * 100;
+
+  // Severe 50% Drawdown Notification & Meta-Model Flagging
+  if (totalEquity <= startingBankroll * 0.50 && !hasTriggered50PercentDrawdown) {
+    hasTriggered50PercentDrawdown = true;
+    spotLogs.unshift({
+      id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+      message: `[SEVERE DRAWDOWN DETECTED] Total equity ($${totalEquity.toFixed(2)}) is down -$${netDrawdown.toFixed(2)} (${drawdownPct.toFixed(1)}% of $${startingBankroll.toFixed(2)} bankroll). Flagging drawdown failure with Meta-Learning Engine.`
+    });
+    metaModelManager.recordSevereDrawdown('GLOBAL');
+  } else if (totalEquity > startingBankroll * 0.50) {
+    hasTriggered50PercentDrawdown = false;
+  }
+
+  // Automatic Self-Reset Blowout Threshold:
+  // Triggers when total equity drops by >= 50% (losing half or more of starting bankroll)
+  // or when available paper cash pool drops below $15 with total equity down >= 40%
+  // or when active paper equity is depleted (<= $5.00)
+  const isBlowoutTriggered = totalEquity <= (startingBankroll * 0.50) || 
+                            (simulatedPaperBalance <= 15.0 && totalEquity <= (startingBankroll * 0.60)) ||
+                            (simulatedPaperBalance <= 5.0 && startingBankroll > 5.0);
+
+  if (isBlowoutTriggered) {
+    const lossAmount = Math.max(0, netDrawdown);
+    spotLogs.unshift({
+      id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+      message: `[BLOWOUT RESET TRIGGERED (${contextSource})] Account lost ${drawdownPct.toFixed(1)}% of starting capital (Down -$${lossAmount.toFixed(2)} | Equity: $${totalEquity.toFixed(2)} <= $${(startingBankroll * 0.50).toFixed(2)} cutoff). Liquidating all paper positions, resetting paper bankroll to $${startingBankroll.toFixed(2)}, and recording blowout failure with Meta-Learning Engine.`
+    });
+
+    // 1. Record blowout failures in MetaModelManager so the learning engine penalizes this generation
+    metaModelManager.recordBlowoutFailure('GLOBAL');
+    activePositions.forEach(p => {
+      const pat = p.analysisMeta?.patternType;
+      if (pat) metaModelManager.recordBlowoutFailure(pat);
+    });
+
+    // 2. Liquidate all active paper positions with liquidation records
+    const paperPositionsToClose = activePositions.filter(p => settings.paperTrading);
+    paperPositionsToClose.forEach(pos => {
+      spotLogs.unshift({
+        id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
+        message: `[BLOWOUT LIQUIDATION] Closed ${pos.symbol} (${pos.side}) due to bankroll depletion blowout reset.`
+      });
+      tradingBrain.recordStrategyOutcome(pos, -0.5, 'Blowout Drawdown Liquidation');
+    });
+    activePositions = activePositions.filter(p => !settings.paperTrading);
+
+    // 3. Reset simulated paper balance back to startingBankroll (or $20 if in Gauntlet Mode)
+    simulatedPaperBalance = (settings as any).gauntletMode ? 20.0 : startingBankroll;
+    paperBankrollATH = simulatedPaperBalance;
+    cycleEarnedProfit = 0;
+    vaultedProfits = 0;
+    completedGoalCycles = 0;
+    sessionPocketedProfit = 0;
+    macroCycleProfit = 0;
+    macroCycleStartTime = Date.now();
+    isStrict3ConfluenceTriggeredInSession = false;
+    hasTriggered50PercentDrawdown = false;
+
+    // 4. Reset goal scheduler
+    goalResetScheduler.resetFull(simulatedPaperBalance);
+
+    // 5. Persist memory immediately
+    tradingBrain._saveMemoryImmediate();
+
+    // 6. Asynchronously trigger counterfactual retraining with the new blowout failure penalty
+    setTimeout(() => {
+      metaModelManager.runRetrainingPipeline('GLOBAL').catch(() => {});
+    }, 1500);
+
+    return true;
+  }
+
+  return false;
+}
 
 async function runGeminiStrategyEngineJobs() {
   const now = Date.now();
@@ -4565,46 +4661,12 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
         simulatedPaperBalance = Math.max(0, simulatedPaperBalance + pnlUsd);
         cycleEarnedProfit += pnlUsd;
 
-        // Severe Drawdown Protocol
-        const patternType = pos.analysisMeta?.patternType || 'GENERAL_ANALYSIS';
-        if (settings.paperTrading && startingBankroll > 0) {
-            if (simulatedPaperBalance <= startingBankroll * 0.50 && simulatedPaperBalance > startingBankroll * 0.25) {
-                if (!hasTriggered50PercentDrawdown) {
-                    hasTriggered50PercentDrawdown = true;
-                    const lossAmount = startingBankroll - simulatedPaperBalance;
-                    spotLogs.unshift({
-                        id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-                        message: `[SEVERE DRAWDOWN] Lost 50% of starting capital (Down ${lossAmount.toFixed(2)}). Registering severe drawdown failure for ${patternType} with Meta-Learning Engine.`
-                    });
-                    metaModelManager.recordSevereDrawdown(patternType);
-                    metaModelManager.recordSevereDrawdown('GLOBAL');
-                }
-            } else if (simulatedPaperBalance > startingBankroll * 0.50) {
-                hasTriggered50PercentDrawdown = false;
-            }
-        }
-
-        // Drawdown Blowout Protocol
-        if (settings.paperTrading && startingBankroll > 0 && simulatedPaperBalance <= startingBankroll * 0.25) {
-          const lossAmount = startingBankroll - simulatedPaperBalance;
-          spotLogs.unshift({
-            id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-            message: `[BLOWOUT DETECTED] Lost 75% of starting capital (Down ${lossAmount.toFixed(2)}). Restarting funds, wiping P/L, closing all positions. Registering failure for ${patternType}.`
-          });
-          
-          metaModelManager.recordBlowoutFailure(patternType);
-          metaModelManager.recordBlowoutFailure('GLOBAL');
-          
-          simulatedPaperBalance = (settings as any).gauntletMode ? 20.0 : startingBankroll;
-          cycleEarnedProfit = 0;
-          vaultedProfits = 0;
-          completedGoalCycles = 0;
-          sessionPocketedProfit = 0;
-          isStrict3ConfluenceTriggeredInSession = false;
-          hasTriggered50PercentDrawdown = false;
-          activePositions = activePositions.filter(p => !settings.paperTrading);
-          
-          break;
+        // Continuous Paper Trading Drawdown & Blowout Safety Protocol
+        if (settings.paperTrading) {
+          const blowoutHappened = checkPaperDrawdownAndBlowout('TRADE_EXIT');
+          if (blowoutHappened) {
+            break;
+          }
         }
 
         // Track Net Session Profit
@@ -4721,6 +4783,7 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
         // =========================================================================
         // CONTINUOUS NEURAL NETWORK ONLINE WEIGHT UPDATE & REAL-TIME LEARNING
         // =========================================================================
+        const patternType = pos.analysisMeta?.patternType || 'GENERAL_ANALYSIS';
         const wasNeuralSell = closeReason.includes('NEURAL NETWORK LIGHTNING SELL');
         const isWin = adjustedPnlRatio > 0;
         metaModelManager.recordExitOutcome(
@@ -5018,6 +5081,11 @@ setInterval(async () => {
   const currentTotalEquity = settings.paperTrading 
     ? (simulatedPaperBalance + vaultedProfits) 
     : (realKalshiCashPool + vaultedProfits);
+
+  // Continuous Paper Trading Drawdown & Blowout Safety Check
+  if (settings.paperTrading) {
+    checkPaperDrawdownAndBlowout('HEARTBEAT');
+  }
 
   goalResetScheduler.checkTransition(currentTotalEquity, new Date(), (event) => {
     macroCycleProfit = 0;
