@@ -1,41 +1,16 @@
 {
-  "currentProfitUsd": 127.30900291271269,
-  "previousProfitUsd": 275.9309338713582,
-  "windowStartEquity": 383.44850611940245,
-  "lastWindowId": "2026-09-25_00:00",
-  "hasLoggedGoalAchieved": true,
-  "goalAchievedTimestamp": 1790320363141,
+  "currentProfitUsd": -105.93292038839303,
+  "previousProfitUsd": 0,
+  "windowStartEquity": 20,
+  "lastWindowId": "2026-09-25_09:00",
+  "hasLoggedGoalAchieved": false,
+  "goalAchievedTimestamp": null,
   "profitTargetUsd": 100,
   "trainingOnTheJob": true,
-  "untouchedVaultBalance": 200,
-  "temporaryVaultBalance": 127.34672748167822,
-  "isTemporaryVaultActive": true,
-  "totalCompoundedToWorkingCapital": 182.97998082304588,
-  "trainingCyclesCompleted": 1,
-  "history": [
-    {
-      "windowId": "2026-09-25_00:00_training_cycle_06:19",
-      "closedAt": "2026-09-25T06:19:38.180Z",
-      "profitUsd": 275.93,
-      "targetReached": true
-    },
-    {
-      "windowId": "2026-09-24_09:00",
-      "closedAt": "2026-09-25T05:42:11.161Z",
-      "profitUsd": 56.68,
-      "targetReached": false
-    },
-    {
-      "windowId": "2026-09-24_00:00",
-      "closedAt": "2026-09-24T13:00:03.201Z",
-      "profitUsd": 6.95,
-      "targetReached": false
-    },
-    {
-      "windowId": "2026-09-23_09:00",
-      "closedAt": "2026-09-24T12:58:16.427Z",
-      "profitUsd": 0,
-      "targetReached": false
-    }
-  ]
+  "untouchedVaultBalance": 0,
+  "temporaryVaultBalance": 0,
+  "isTemporaryVaultActive": false,
+  "totalCompoundedToWorkingCapital": 0,
+  "trainingCyclesCompleted": 0,
+  "history": []
 }

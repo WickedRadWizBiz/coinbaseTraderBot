@@ -17,12 +17,12 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies & Build
         run: |
-          npm ci
+          npm install
           npm run build
 
       - name: Copy build artifacts to Lightsail via SCP
@@ -32,7 +32,7 @@ jobs:
           username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
-          source: "dist,package.json,package-lock.json,server.ts"
+          source: "dist,package.json,package-lock.json"
           target: "~/${{ secrets.LIGHTSAIL_APP_DIR || 'coinbaseTraderBot' }}"
 
       - name: Restart PM2 on Lightsail via SSH
@@ -47,10 +47,12 @@ jobs:
             cd ~/${{ secrets.LIGHTSAIL_APP_DIR || 'coinbaseTraderBot' }} || cd ~/coinbaseTraderBot
 
             echo "=== Installing production dependencies ==="
-            npm ci --production
+            npm install --omit=dev
 
             echo "=== Restarting PM2 process ==="
-            pm2 restart coinbaseTraderBot || pm2 start dist/server.cjs --name "coinbaseTraderBot"
+            pm2 delete crypto-bot 2>/dev/null || true
+            pm2 delete coinbaseTraderBot 2>/dev/null || true
+            pm2 start dist/server.cjs --name "crypto-bot"
             pm2 save
 
             echo "=== Deployment successful and lightning fast! ==="
