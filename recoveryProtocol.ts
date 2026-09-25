@@ -61,15 +61,15 @@ export class CapitalPreservationProtocol {
       status: 'INQUIRY_ACTIVE',
       statusMessage: 'RECOVERY PROTOCOL READY (Down 25% Threshold): Ultra-tight stop loss & aggressive fast profit taking.',
       hybridParams: {
-        dynamicTP: 0.010,
-        dynamicSL: -0.005,
-        kellyMultiplier: 0.5,
+        dynamicTP: 0.20,
+        dynamicSL: -0.40,
+        kellyMultiplier: 0.2,
         preferredContractTypes: ['YES', 'NO'],
         allowedCategories: ['crypto', 'sports', 'orderbook', 'expiration_safety'],
         riskTolerance: 'CONSERVATIVE',
-        winSelectionRules: ['REQUIRE_MULTI_TOOL_CONFLUENCE', 'ICHIMOKU_CLOUD_ALIGNMENT', 'RSI_REVERSION_ZONE', 'ORDERBOOK_BID_ASK_DOMINANCE'],
-        lossAvoidanceRules: ['AVOID_SINGLE_INDICATOR_TRADES', 'AVOID_DOJI_INDECISION_CANDLES', 'AVOID_COUNTER_CLOUD_ENTRIES'],
-        explanation: 'Capital preservation mode: tightest feasible stop loss (-0.5%) & aggressive quick profit taking.',
+        winSelectionRules: ['REQUIRE_MULTI_TOOL_CONFLUENCE', 'ICHIMOKU_CLOUD_ALIGNMENT', 'RSI_REVERSION_ZONE', 'ORDERBOOK_BID_ASK_DOMINANCE', 'POSITIVE_EXPECTED_VALUE_GATE'],
+        lossAvoidanceRules: ['AVOID_SINGLE_INDICATOR_TRADES', 'AVOID_DOJI_INDECISION_CANDLES', 'AVOID_COUNTER_CLOUD_ENTRIES', 'AVOID_MICRO_STOP_SLIPPAGE'],
+        explanation: 'Institutional quantitative recovery mode: Position-sized risk containment with positive EV hurdle.',
         lastUpdated: new Date().toISOString()
       },
       ledger: []
@@ -90,12 +90,8 @@ export class CapitalPreservationProtocol {
         }
       }
       if (this.data.hybridParams) {
-        const sl = Math.min(-0.005, Math.max(-0.015, Number(this.data.hybridParams.dynamicSL) || -0.005));
-        const slMag = Math.abs(sl);
-        let tp = Number(this.data.hybridParams.dynamicTP) || (slMag + 0.003);
-        if (tp < slMag + 0.003) {
-          tp = slMag + 0.003;
-        }
+        const sl = Math.min(-0.15, Math.max(-0.50, Number(this.data.hybridParams.dynamicSL) || -0.40));
+        let tp = Math.max(0.15, Number(this.data.hybridParams.dynamicTP) || 0.25);
         this.data.hybridParams.dynamicSL = sl;
         this.data.hybridParams.dynamicTP = Number(tp.toFixed(3));
       }
@@ -119,17 +115,17 @@ export class CapitalPreservationProtocol {
     this.data.consecutiveLosses = 0;
     this.data.inquiryActive = true;
     this.data.status = 'INQUIRY_ACTIVE';
-    this.data.statusMessage = 'RECOVERY PROTOCOL RESET: Tight stop loss & aggressive fast profit active when down $50 or after 3 consecutive losses.';
+    this.data.statusMessage = 'RECOVERY PROTOCOL RESET: Positive EV entry gates & quarter-Kelly risk sizing active.';
     this.data.hybridParams = {
-      dynamicTP: 0.010,
-      dynamicSL: -0.005,
-      kellyMultiplier: 0.5,
+      dynamicTP: 0.25,
+      dynamicSL: -0.40,
+      kellyMultiplier: 0.2,
       preferredContractTypes: ['YES', 'NO'],
       allowedCategories: ['crypto', 'sports', 'orderbook', 'expiration_safety'],
       riskTolerance: 'CONSERVATIVE',
-      winSelectionRules: ['ICHIMOKU_CLOUD_ALIGNMENT', 'RSI_REVERSION_ZONE', 'ORDERBOOK_BID_ASK_DOMINANCE'],
-      lossAvoidanceRules: ['AVOID_DOJI_INDECISION_CANDLES', 'AVOID_COUNTER_CLOUD_ENTRIES'],
-      explanation: 'Protocol reset to tight baseline parameters.',
+      winSelectionRules: ['ICHIMOKU_CLOUD_ALIGNMENT', 'RSI_REVERSION_ZONE', 'ORDERBOOK_BID_ASK_DOMINANCE', 'POSITIVE_EXPECTED_VALUE_GATE'],
+      lossAvoidanceRules: ['AVOID_DOJI_INDECISION_CANDLES', 'AVOID_COUNTER_CLOUD_ENTRIES', 'AVOID_MICRO_STOP_SLIPPAGE'],
+      explanation: 'Protocol reset to quantitative risk baseline parameters.',
       lastUpdated: new Date().toISOString()
     };
     this.data.ledger = [];
@@ -196,13 +192,13 @@ export class CapitalPreservationProtocol {
     } else if (this.data.consecutiveLosses >= 3) {
       this.data.inquiryActive = true;
       this.data.status = 'RE_EVALUATING_3_LOSSES';
-      this.data.statusMessage = '3 CONSECUTIVE LOSSES DETECTED! Overhauling strategy logic: flipping contract preference, tightening stop loss to -0.5% & updating spot TA avoidance.';
+      this.data.statusMessage = '3 CONSECUTIVE LOSSES DETECTED: Throttling sizing to 0.15x Kelly, enforcing Jump-Diffusion mathematical EV gate, holding binary contracts to expiry.';
       
       // Automatic 3-loss streak strategy logic overhaul
       this.data.hybridParams.preferredContractTypes = ['YES', 'NO'];
-      this.data.hybridParams.dynamicSL = -0.005; // Tightest feasible stop loss (-0.5%)
-      this.data.hybridParams.dynamicTP = 0.008; // Ultra aggressive quick profit (+0.8%)
-      this.data.hybridParams.kellyMultiplier = 0.3; // Scale down risk size
+      this.data.hybridParams.dynamicSL = -0.40; // Stop loss buffer allowing binary options to mature
+      this.data.hybridParams.dynamicTP = 0.25; // Healthy positive take profit target (+25%)
+      this.data.hybridParams.kellyMultiplier = 0.15; // Scale down risk size to preserve bankroll
       if (!this.data.hybridParams.lossAvoidanceRules.includes('AVOID_3_LOSS_PATTERNS')) {
         this.data.hybridParams.lossAvoidanceRules.push('AVOID_3_LOSS_PATTERNS');
       }

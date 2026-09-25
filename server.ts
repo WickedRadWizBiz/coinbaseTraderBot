@@ -2205,6 +2205,11 @@ async function routeLiveOrderExecution(
 
   // 2. Secondary Fallback: Persistent HTTP/1.1 Keep-Alive Connection Pool
   const restRes = await kalshiService.placeOrder(symbol, action, side, size, price);
+  if (!restRes.success && isPerpContract && (restRes.error?.includes('insufficient_shard_balance') || restRes.error?.includes('404'))) {
+    if (spotContexts[symbol]) {
+      spotContexts[symbol].isExpired = true; // Quarantine perpetual ticker without active margin shard
+    }
+  }
   return {
     success: restRes.success,
     order_id: restRes.order_id,
@@ -2632,7 +2637,7 @@ async function openPosition(
               ? (ctx?.currentPrice ?? Math.max(0.01, Math.min(0.99, 1.0 - entryPrice)))
               : Math.max(0.01, Math.min(0.99, 1.0 - (ctx?.currentPrice ?? entryPrice))));
 
-        const isPriceViable = proposedInversePrice >= 0.02 && proposedInversePrice <= 0.98;
+        const isPriceViable = proposedInversePrice >= 0.15 && proposedInversePrice <= 0.85;
         const canAfford = currentWorkingBalance >= proposedInversePrice;
         const isExpired = ctx?.isExpired ?? false;
         const alreadyHoldingInverse = activePositions.some(p => p.symbol === symbol && p.side === proposedInverseSide);
@@ -2688,11 +2693,70 @@ async function openPosition(
     }
   }
 
+  // =========================================================================
+  // INSTITUTIONAL MERTON JUMP-DIFFUSION MATHEMATICAL EXPECTED VALUE ($EV$) GATE
+  // =========================================================================
+  let calculatedModelFairValue = 0.50;
+  if (!isPerpContract && category === 'crypto') {
+    const spotPrice = currentSpotTA?.price || scalper.currentCandles[spotPair]?.close || 1.0;
+    const timeToExpiryMs = ctx?.closeTime ? Math.max(30000, new Date(ctx.closeTime).getTime() - Date.now()) : (15 * 60 * 1000);
+    const tauYears = jumpDiffusionEngine.minutesToYears(timeToExpiryMs / (60 * 1000));
+    
+    // Parse or approximate strike price K from ticker or label
+    let strikePrice = spotPrice;
+    const strikeMatch = symbol.match(/-B?([0-9.]+)(?:-|$)/) || (ctx?.label && ctx.label.match(/\$?([0-9,.]+)/));
+    if (strikeMatch && strikeMatch[1]) {
+      const parsedK = parseFloat(strikeMatch[1].replace(/,/g, ''));
+      if (parsedK > 0 && Math.abs(parsedK - spotPrice) / spotPrice < 0.50) {
+        strikePrice = parsedK;
+      }
+    }
+
+    const jdRes = jumpDiffusionEngine.calculateBinaryFairValue({
+      spotPrice,
+      strikePrice,
+      timeToExpiryYears: tauYears,
+      riskFreeRate: 0.04,
+      diffusionVol: Math.max(0.35, Math.min(1.20, (currentSpotTA?.candleRangePct || 0.15) * 5)),
+      jumpIntensity: 35.0,
+      meanJumpSize: 0.0,
+      jumpVol: 0.03
+    });
+
+    const theoreticalYesFairValue = jdRes.fairValueProbability;
+    const theoreticalSideFairValue = side === 'YES' ? theoreticalYesFairValue : (1.0 - theoreticalYesFairValue);
+    calculatedModelFairValue = theoreticalSideFairValue;
+
+    // Reject deep OTM lottery tickets with under 15% probability unless trading with high probability YES/NO
+    if (entryPrice < 0.18 && theoreticalSideFairValue < 0.22) {
+      spotLogs.unshift({
+        id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+        message: `[LOTTERY CONTRACT VETO] Suppressed deep OTM lottery contract on ${symbol} (${side} @ $${entryPrice.toFixed(2)} | Model Fair Value: ${(theoreticalSideFairValue * 100).toFixed(1)}%). Historical win probability on <$0.18 contracts is statistically negative EV.`
+      });
+      return;
+    }
+
+    // Expected Value Hurdle (Edge >= 0.015 after fees)
+    const expectedValue = theoreticalSideFairValue * 1.00 - entryPrice;
+    if (expectedValue < -0.05 && !isOverride) {
+      spotLogs.unshift({
+        id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+        message: `[NEGATIVE EV VETO] Suppressed ${side} on ${symbol}. Model Fair Value: ${(theoreticalSideFairValue * 100).toFixed(1)}% vs Market Price: $${entryPrice.toFixed(2)} (Edge: ${(expectedValue * 100).toFixed(1)}%). Institutional quants only trade EV > 0.`
+      });
+      return;
+    }
+
+    spotLogs.unshift({
+      id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+      message: `[JUMP-DIFFUSION PRICING] ${symbol} (${side}): Theoretical Fair Value: ${(theoreticalSideFairValue * 100).toFixed(1)}% ($${(theoreticalSideFairValue).toFixed(2)}) | Market Cost: $${entryPrice.toFixed(2)} | Mathematical Edge: ${expectedValue >= 0 ? '+' : ''}${(expectedValue * 100).toFixed(1)}%`
+    });
+  }
+
   // 1. Finalize Dynamic Take Profit (Expected TP)
   // MANDATORY RULE: Take profit MUST always be larger than stop loss magnitude by at least 0.5% (0.005)
   const slMag = Math.abs(params.dynamicSL);
   if (params.dynamicTP < slMag + 0.005) {
-    params.dynamicTP = Math.max(0.10, slMag + 0.005);
+    params.dynamicTP = Math.max(0.15, slMag + 0.005);
   }
   // Give trails room to breathe to hunt for large trends
   params.dynamicTrail = Math.max(0.04, params.dynamicTrail || 0.04);
@@ -2703,11 +2767,11 @@ async function openPosition(
   params.dynamicTrail = Math.max(params.dynamicTrail || 0.04, escalated.dynamicTrail);
   
   if (params.dynamicTP < params.dynamicTrail + 0.025) {
-    params.dynamicTP = Math.max(0.10, params.dynamicTrail + 0.025);
+    params.dynamicTP = Math.max(0.15, params.dynamicTrail + 0.025);
   }
 
-  // Strictly enforce minimum 10% expected TP
-  params.dynamicTP = Math.max(0.10, params.dynamicTP);
+  // Strictly enforce minimum 15% expected TP
+  params.dynamicTP = Math.max(0.15, params.dynamicTP);
   const expectedTP = params.dynamicTP;
 
   // 3. Probability-Adjusted Capital Sizing Model ($5-$10 Base Win -> $50 Dynamic Scaling)
@@ -4247,10 +4311,9 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
         dynamicTrail = Math.max(dynamicTrail, escalated.dynamicTrail);
 
         if (isCapitalPreservationActive) {
-          // First-Exit-Time boundary under strict mode
-          dynamicSL = Math.max(-0.02, Math.min(-0.005, fetStopLoss));
-          // Keep TP at least 10% even during capital preservation mode so we get larger wins
-          dynamicTP = Math.max(0.10, Math.min(0.20, pos.params?.dynamicTP || 0.15));
+          // In capital preservation, scale down TP slightly while giving trades room to mature
+          dynamicSL = isPerp ? -0.05 : -0.50;
+          dynamicTP = Math.max(0.15, Math.min(0.35, pos.params?.dynamicTP || 0.20));
         }
 
         // --- Dynamic Target Price Adjustments (Strictly Orderbook/OFI Based) ---
@@ -4267,7 +4330,7 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
         }
 
         // Apply OFI Flow Multiplier to dynamicTP (Zero Latency - Synchronous Math)
-        dynamicTP = Math.max(0.10, Math.min(2.50, dynamicTP * flowMultiplier)); // Hard floor at 10%
+        dynamicTP = Math.max(0.15, Math.min(2.50, dynamicTP * flowMultiplier)); // Hard floor at 15%
 
         // Continuous L2-Norm Inventory Risk Adjustment
         let netInventory = 0;
@@ -4279,33 +4342,33 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
         const continuousPenalty = inventoryRiskAversion * Math.pow(netInventory, 2) * variance;
 
         if ((pos.side === 'YES' && netInventory > 0) || (pos.side === 'NO' && netInventory < 0)) {
-            dynamicTP = Math.max(0.10, dynamicTP - continuousPenalty);
+            dynamicTP = Math.max(0.15, dynamicTP - continuousPenalty);
         }
 
         const slippageBuffer = 0.015 / pos.entryPrice; 
         
-        // Hedge Fund Tactic: Breakeven Ratchet SL (Step-Up SL)
-        const breakevenThreshold = 0.04 + slippageBuffer;
+        // Institutional Tactic: Step-Up Trailing Lock on Profit Run
+        const breakevenThreshold = 0.12 + slippageBuffer;
         let ratchetSL = dynamicSL; // Default to standard SL
         if (pos.peakPnlRatio >= breakevenThreshold) {
-            ratchetSL = 0.005; // Breakeven + 0.5% for fees
+            ratchetSL = 0.04; // Breakeven + 4% for fees & slippage
         }
         
         // The trailing stop tracks the peak PNL minus the trail distance
         const trailingLock = Math.max(ratchetSL, pos.peakPnlRatio - dynamicTrail);
 
-        // TP must always be at least 2% above the trailing lock
-        if (dynamicTP < trailingLock + 0.02) {
-            dynamicTP = Math.max(0.10, trailingLock + 0.02);
+        // TP must always be at least 3% above the trailing lock
+        if (dynamicTP < trailingLock + 0.03) {
+            dynamicTP = Math.max(0.15, trailingLock + 0.03);
         }
 
-        dynamicTP = Math.max(0.10, dynamicTP);
+        dynamicTP = Math.max(0.15, dynamicTP);
 
         // Compute full orderbook exit microstructure and available resting depth
         const orderbookExit = computeOrderbookExitDetails(pos, ctx);
 
         // =========================================================================
-        // CONTINUOUS NEURAL NETWORK MONITORING (<100ms TICK) & LIGHTNING-FAST EXIT
+        // CONTINUOUS NEURAL NETWORK MONITORING & LIGHTNING PROFIT CAPTURE
         // =========================================================================
         liveFeatures = {
           ...(pos.entryFeatures || {}),
@@ -4342,9 +4405,17 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
           pos.entryProba
         );
 
+        // Anti-Whipsaw Filter: On binary contracts, suppress negative exits during early 90s noise or wide spreads
+        const currentSpread = (asks[0] && bids[0]) ? Math.abs(asks[0].price - bids[0].price) : 0.02;
+        const isSpreadWide = currentSpread > 0.04;
+        const allowEarlyPanicExit = isPerp || (timeInContractSec >= 90 && !isSpreadWide);
+
         if (nnExitSignal.shouldSell && !isCapitalPreservationActive) {
-          shouldClose = true;
-          closeReason = nnExitSignal.reason;
+          // If profit-taking or valid mature exit, allow closure
+          if (pnlRatio > 0.08 || allowEarlyPanicExit) {
+            shouldClose = true;
+            closeReason = nnExitSignal.reason;
+          }
         }
 
         // [F] Reinforcement Learning (PPO) Dynamic Exits
@@ -4362,15 +4433,15 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
         // Time decay penalty (theta decay equivalent)
         ppoRewardScore -= (timeInTradeMin * 1.2);
 
-        if (ppoRewardScore > 8.0 && pnlRatio > 0.02) {
+        if (ppoRewardScore > 8.0 && pnlRatio > 0.05) {
            ppoAction = 'TRAIL_SL';
-        } else if (ppoRewardScore < -6.0 && pnlRatio < -0.015) {
+        } else if (ppoRewardScore < -12.0 && pnlRatio < -0.15 && allowEarlyPanicExit) {
            ppoAction = 'EXIT';
         }
 
         if (ppoAction === 'EXIT' && !isCapitalPreservationActive && !shouldClose) {
             shouldClose = true;
-            closeReason = `[PPO AGENT EXIT] Toxic flow detected. Terminated position dynamically to minimize loss (${(pnlRatio*100).toFixed(2)}%)`;
+            closeReason = `[PPO AGENT EXIT] Toxic flow confirmed on mature position (${(pnlRatio*100).toFixed(2)}%)`;
         } else if (ppoAction === 'TRAIL_SL') {
            dynamicTrail = Math.min(0.04, dynamicTrail * 0.8); 
            dynamicTP = Math.max(dynamicTP, pnlRatio + 0.15);
@@ -4418,45 +4489,38 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
           });
         }
 
-        // Exit Evaluation: Time-to-Expiry Cutoff
-        const timeToExpiryMs = ctx.closeTime ? (new Date(ctx.closeTime).getTime() - Date.now()) : Infinity;
-        const isImminentExpiry = !isPerp && timeToExpiryMs < 60 * 1000;
-        
-        // Genuine exit price evaluation
-        const finalExitPrice = currentSidePrice;
-
         // Trade Model Discrepancy Convergence Check
         const hasConvergedWithFairValue = pos.modelFairValue !== undefined && 
             ((pos.side === 'YES' && currentSidePrice >= pos.modelFairValue) || 
              (pos.side === 'NO' && currentSidePrice <= pos.modelFairValue));
 
         if (!shouldClose) {
-          if (isImminentExpiry) {
-            // Imminent Expiration Safety Rule: ALWAYS exit active positions with <60s remaining to avoid expiration zero-out
+          if (ctx.isExpired) {
             shouldClose = true;
-            closeReason = `Imminent Expiry Safety Sweep (<60s to close | Ejected to prevent settlement zero-out)`;
+            closeReason = `Market Expiration / Contract Settlement`;
           } else if (smartTrailRes.shouldClose) {
             shouldClose = true;
             closeReason = smartTrailRes.closeReason || `Smart Trailing TP (+${(pnlRatio * 100).toFixed(1)}%)`;
-          } else if (hasConvergedWithFairValue && pnlRatio >= 0.10) { 
+          } else if (hasConvergedWithFairValue && pnlRatio >= 0.15) { 
             shouldClose = true;
             closeReason = `Model Fair Value Convergence Triggered (+${(pnlRatio * 100).toFixed(1)}%)`;
+          } else if (isPerp) {
+            // Continuous perpetual position: Risk SL + Ratcheting Breakeven Profit Lock
+            const perpEffectiveSL = Math.max(dynamicSL, ratchetSL);
+            if (pnlRatio <= perpEffectiveSL) {
+              shouldClose = true;
+              closeReason = perpEffectiveSL === ratchetSL
+                ? `Perpetual Breakeven Ratchet SL (Locked at +${(ratchetSL * 100).toFixed(1)}% after +${((pos.peakPnlRatio || 0) * 100).toFixed(1)}% peak)`
+                : `Perpetual Risk SL (${(dynamicSL * 100).toFixed(1)}%)`;
+            }
           } else {
-            const isGracePeriodActive = timeInContractSec < 45;
-            const effectiveSL = Math.max(dynamicSL, ratchetSL);
-
-            if (pnlRatio <= effectiveSL) {
+            // Binary option position: Hold to expiration or take profit on locked gains
+            if (pnlRatio >= dynamicTP) {
               shouldClose = true;
-              closeReason = effectiveSL === ratchetSL
-                ? `Breakeven Ratchet SL (Locked at +0.5%)`
-                : isGracePeriodActive
-                  ? `Emergency SL (${(effectiveSL * 100).toFixed(1)}% breached during 45s Grace Period)`
-                  : isCapitalPreservationActive
-                    ? `Capital Preservation SL (${(dynamicSL * 100).toFixed(1)}%)`
-                    : `Volatility-Adjusted SL (${(dynamicSL * 100).toFixed(1)}%)`;
-            } else if (ctx.isExpired) {
+              closeReason = `Take Profit Target (+${(pnlRatio * 100).toFixed(1)}%)`;
+            } else if (pos.peakPnlRatio >= 0.15 && pnlRatio <= ratchetSL) {
               shouldClose = true;
-              closeReason = `Market Expiration / Contract Settlement`;
+              closeReason = `Profit Lock Protection (Secured +${(pnlRatio * 100).toFixed(1)}% after +${((pos.peakPnlRatio || 0) * 100).toFixed(1)}% peak)`;
             }
           }
         }
