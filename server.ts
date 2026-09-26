@@ -8,7 +8,7 @@ import { CapitalPreservationProtocol } from "./recoveryProtocol";
 import { plasticityEngine } from "./plasticityEngine";
 import { computeSpotTAMetrics, isTradeAllowedBySpotTAAndRecovery, SpotTAMetrics } from "./spotTAEngine";
 import { unifiedDataHandler } from "./unifiedDataHandler";
-import { tradeDbManager, TradeEncoder } from "./tradeDatabaseManager";
+import { tradeDbManager, TradeEncoder, TradeDatabaseManager } from "./tradeDatabaseManager";
 import { metaModelManager, EntryFeatures, NeuralExitSignal, InstitutionalBacktester, WalkForwardValidationEngine } from "./metaLearningEngine";
 import { geminiStrategyEngine } from "./geminiStrategyEngine";
 import { globalMetricsTracker } from "./globalMetricsTracker";

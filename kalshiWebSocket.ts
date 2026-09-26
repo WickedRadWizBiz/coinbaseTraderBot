@@ -148,19 +148,30 @@ export class KalshiWebSocketManager {
     const diagnostic = kalshiService.getDiagnostic();
     if (!diagnostic.isConfigured) {
       latencyAdaptiveEngine.setConnectionMode('REST_KEEPALIVE');
-      console.log('[KALSHI WS] API credentials not configured yet. Operating in high-performance Keep-Alive REST mode. Retrying credentials check in 5s...');
+      console.log('[KALSHI WS] API credentials not configured yet. Operating in high-performance Keep-Alive REST mode. Retrying credentials check in 15s...');
       
       if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
       this.reconnectTimer = setTimeout(() => {
         this.connect();
-      }, 5000);
+      }, 15000);
+      return;
+    }
+
+    const headers = this.generateAuthHeaders();
+    if (!headers || !headers['KALSHI-ACCESS-KEY'] || !headers['KALSHI-ACCESS-SIGNATURE']) {
+      latencyAdaptiveEngine.setConnectionMode('REST_KEEPALIVE');
+      console.log('[KALSHI WS] Missing or invalid RSA signing keys. Operating in Keep-Alive REST mode. Retrying credentials check in 30s...');
+      
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = setTimeout(() => {
+        this.connect();
+      }, 30000);
       return;
     }
 
     this.isConnecting = true;
 
     try {
-      const headers = this.generateAuthHeaders();
       const targetUrl = this.activeUrl;
       console.log(`[KALSHI WS] Connecting to ${targetUrl}... (Subscribed tickers: ${this.subscribedTickers.size})`);
 
@@ -169,6 +180,8 @@ export class KalshiWebSocketManager {
         handshakeTimeout: 8000,
         perMessageDeflate: false
       });
+
+      let authFailed = false;
 
       this.ws.on('open', () => {
         this.isConnected = true;
@@ -198,14 +211,27 @@ export class KalshiWebSocketManager {
       this.ws.on('error', (err: any) => {
         const errMsg = err?.message || String(err);
         if (errMsg.includes('401')) {
-          console.warn(`[KALSHI WS] Authentication failed (401 Unauthorized). Check KALSHI_API_KEY and RSA Private Key.`);
+          authFailed = true;
+          console.warn(`[KALSHI WS] Authentication failed (401 Unauthorized). Operating in REST_KEEPALIVE mode until API key/RSA credentials are re-configured.`);
         } else {
           console.warn(`[KALSHI WS] Connection error on ${this.activeUrl}:`, errMsg);
         }
       });
 
       this.ws.on('close', (code: number, reason: Buffer) => {
-        this.handleDisconnect(code, reason ? reason.toString() : '');
+        if (authFailed || code === 4001) {
+          this.isConnected = false;
+          this.isConnecting = false;
+          this.stopHeartbeat();
+          latencyAdaptiveEngine.setConnectionMode('REST_KEEPALIVE');
+          // On auth failure, back off for 60 seconds before retrying
+          if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = setTimeout(() => {
+            this.connect();
+          }, 60000);
+        } else {
+          this.handleDisconnect(code, reason ? reason.toString() : '');
+        }
       });
 
     } catch (err: any) {
