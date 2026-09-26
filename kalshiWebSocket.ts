@@ -148,7 +148,12 @@ export class KalshiWebSocketManager {
     const diagnostic = kalshiService.getDiagnostic();
     if (!diagnostic.isConfigured) {
       latencyAdaptiveEngine.setConnectionMode('REST_KEEPALIVE');
-      console.log('[KALSHI WS] API credentials not configured yet. Operating in high-performance Keep-Alive REST mode.');
+      console.log('[KALSHI WS] API credentials not configured yet. Operating in high-performance Keep-Alive REST mode. Retrying credentials check in 5s...');
+      
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = setTimeout(() => {
+        this.connect();
+      }, 5000);
       return;
     }
 

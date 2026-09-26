@@ -6,6 +6,7 @@ import { RecoveryProtocolCard } from './RecoveryProtocolCard';
 import { ExtinctionListCard } from './ExtinctionListCard';
 import { GeminiStrategyDoctorCard } from './GeminiStrategyDoctorCard';
 import { FixConnectionStatus } from './FixConnectionStatus';
+import { GeminiTradeAuditorCard } from './GeminiTradeAuditorCard';
 
 export interface MarketTestingStatus {
   phase: 'NORMAL_CONSERVATIVE' | 'TESTING_PERIOD' | 'OVERRIDE_ACTIVE' | 'GOAL_REACHED_CONSERVATIVE';
@@ -1352,6 +1353,8 @@ export function DashboardView() {
               </tbody>
             </table>
           </div>
+
+          <GeminiTradeAuditorCard totalTrades={totalTrades} />
 
         </div>
       </div>

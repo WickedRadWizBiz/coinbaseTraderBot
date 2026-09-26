@@ -3320,9 +3320,9 @@ async function discoverMarkets() {
     const discoverPerpetuals = async () => {
       try {
         const data = await fetchJson('https://api.elections.kalshi.com/trade-api/v2/margin/markets', 'LOW');
-        const perpMarkets = data.markets || [];
-        for (const m of perpMarkets) {
-          if (m.status !== 'active') continue;
+        const perpMarkets = (data.markets || []).filter((m: any) => m.status === 'active');
+        
+        await Promise.all(perpMarkets.map(async (m: any) => {
           const ticker = m.ticker;
           const bid = parseFloat(m.bid) || parseFloat(m.price) || 0.50;
           const ask = parseFloat(m.ask) || parseFloat(m.price) || (bid * 1.002);
@@ -3359,7 +3359,7 @@ async function discoverMarkets() {
             spotContexts[ticker].leverage = leverage;
             spotContexts[ticker].isPerpetual = true;
           }
-        }
+        }));
       } catch (e) {
         console.error("Perpetual discovery error", e);
       }
@@ -3370,7 +3370,7 @@ async function discoverMarkets() {
         const seriesToScan = ['KXATPMATCH', 'KXATPCHALLENGERMATCH', 'KXATPSETWINNER'];
         const candidateTennisMarkets: any[] = [];
 
-        for (const seriesTicker of seriesToScan) {
+        await Promise.all(seriesToScan.map(async (seriesTicker) => {
           try {
             const data = await fetchJson(`https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=${seriesTicker}&status=open`, 'LOW');
             const markets = data.markets || [];
@@ -3379,7 +3379,6 @@ async function discoverMarkets() {
               const bid = parseFloat(m.yes_bid_dollars) || 0;
               const ask = parseFloat(m.yes_ask_dollars) || 1;
               const spread = Math.abs(ask - bid);
-              // Only consider tradable contracts with valid liquidity and reasonable spread/price
               if (spread <= 0.08 && bid >= 0.15 && ask <= 0.85) {
                 candidateTennisMarkets.push({
                   ...m,
@@ -3392,21 +3391,18 @@ async function discoverMarkets() {
               }
             }
           } catch (e) {
-            // Ignore failure on single series
+            // Ignore individual failure
           }
-        }
+        }));
 
-        // Sort by lowest spread ascending, then proximity to 50c
         candidateTennisMarkets.sort((a, b) => {
           if (a.spread !== b.spread) return a.spread - b.spread;
           return Math.abs(0.5 - a.mid) - Math.abs(0.5 - b.mid);
         });
 
-        // Pick top 2-3 ATP Tennis markets to attach
         const topTennis = candidateTennisMarkets.slice(0, 3);
         const topTickers = new Set(topTennis.map(m => m.ticker));
 
-        // Clean up expired or replaced tennis markets not currently held in activePositions
         for (const sym of Object.keys(spotContexts)) {
           const ctx = spotContexts[sym];
           if (ctx.category === 'sports' && (ctx.label?.includes('ATP') || ctx.label?.includes('Tennis'))) {
@@ -3420,7 +3416,7 @@ async function discoverMarkets() {
           }
         }
 
-        for (const m of topTennis) {
+        await Promise.all(topTennis.map(async (m) => {
           const ticker = m.ticker;
           const initialPrice = m.mid || 0.50;
           const label = `[ATP Tennis] ${m.title || ticker}`;
@@ -3452,7 +3448,7 @@ async function discoverMarkets() {
             spotContexts[ticker].currentPrice = initialPrice;
             spotContexts[ticker].isExpired = false;
           }
-        }
+        }));
       } catch (e) {
         console.error("Tennis discovery error", e);
       }
@@ -3495,9 +3491,19 @@ async function discoverMarkets() {
   }
 }
 
-// Kick off discovery immediately
-discoverMarkets();
-setInterval(discoverMarkets, 30000);
+// Start discovery in a non-blocking background thread 1.5 seconds after startup to ensure instant web server loading and automatic connection on boot
+setTimeout(() => {
+  try {
+    console.log('[BOOT] Reloading Kalshi credentials and initiating exchange handshake...');
+    kalshiService.reloadCredentials();
+    kalshiWsManager.reconnectWithNewCredentials();
+    kalshiFixEngine.reconnectWithCredentials();
+  } catch (err) {
+    console.error("[BOOT] Failed to initialize credentials reload on boot:", err);
+  }
+  discoverMarkets().catch(err => console.error("Initial background market scanner failed:", err));
+  setInterval(discoverMarkets, 30000);
+}, 1500);
 
 interface ViabilityCheckResult {
   isViable: boolean;
@@ -3887,6 +3893,112 @@ let unTrainedTradeCount = 0;
 const unTrainedTradeCountByStrategy: Record<string, number> = {};
 let hasTriggered50PercentDrawdown = false;
 let lastBlowoutCheckTime = 0;
+const autonomousAuditsHistory: any[] = [];
+
+/**
+ * Orchestration function that automatically triggers a Gemini-powered audit on the latest batch of 20 trades,
+ * executing the Senior Quantitative Auditor persona & directive.
+ */
+async function triggerGeminiAutonomousAudit() {
+  try {
+    const trades = await tradeDbManager.getAllTrades(20).catch(() => []);
+    if (!trades || trades.length < 20) {
+      console.log(`[AUTONOMOUS AUDIT] Insufficient trade entries to trigger background audit. Found: ${trades.length}/20.`);
+      return;
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      console.warn('[AUTONOMOUS AUDIT] Gemini API key not configured. Skipping background audit.');
+      return;
+    }
+
+    console.log('[AUTONOMOUS AUDIT] Log count multiple of 20 reached. Automatically initiating Gemini Audit...');
+
+    const { GoogleGenAI } = await import("@google/genai");
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build'
+        }
+      }
+    });
+
+    const tradeLogsText = JSON.stringify(trades.map((t: any) => ({
+      id: t.id,
+      timestamp: t.timestamp || t.time || t.createdAt,
+      symbol: t.symbol,
+      patternType: t.patternType,
+      direction: t.direction || t.side || (t.isYes ? 'YES' : 'NO'),
+      entryPrice: t.entryPrice || t.price || 0,
+      exitPrice: t.exitPrice || t.closePrice || 0,
+      profit: t.profit || t.pnl || 0,
+      featureSnapshot: t.featureSnapshot || t.snapshot || {},
+      slippage: t.slippage || 0,
+      executionDelayMs: t.executionDelayMs || 0
+    })), null, 2);
+
+    const directive = `Role: You are a Senior Quantitative Auditor. Your objective is to analyze batches of 20 trades from a neural network cryptocurrency trading bot and identify structural flaws, data leakage, and unfair advantages using institutional model risk management standards (SR 11-7).
+
+Audit Protocol:
+Inspect the provided 20-trade log for the following discrepancies:
+
+1. Data Lineage & Lookahead Bias: Verify the "Feature State Snapshot" for each trade. Cross-reference the exact indicator values (e.g., Ichimoku, RSI, MACD) recorded at the millisecond of the signal against the execution time. If indicator values reflect the end-of-candle state rather than the moment of execution, flag the model for data leakage.
+
+2. Markout Analysis (Adverse Selection): Analyze the price trajectory 1-second, 5-seconds, and 60-seconds immediately following the fill. If the bot consistently buys and the price instantly drops, it is suffering from adverse selection or executing on stale signals against toxic order flow.
+
+3. Implementation Shortfall (Market Impact): Evaluate the order size relative to the liquidity of the specific asset (especially on altcoins like SHIB/USD or XRP/USD). If a large market order is executed with zero slippage or identical mid-price fills, the simulation is failing to model order book depth and market impact.
+
+4. Parameter Overfitting (Deflated Sharpe Concept): Monitor how often the bot's internal parameters or Time Dilation Factor (TDF) shift within the 20-trade window. If parameters are hyper-optimizing too frequently to perfectly fit the immediate past, the bot is curve-fitting historical noise rather than trading a robust edge.
+
+5. Fractal & Regime Awareness: Assess the bot's macro contextual awareness. If a string of losses occurs, determine if the bot failed to recognize a larger fractal shift—such as a time-dilated BTC.D waterfall event—and attempted to trade it using logic meant for a different cycle structure.
+
+Output Requirement:
+- Briefly list your findings.
+- Generate a highly specific prompt directed at an AI Studio Coding Agent to fix the underlying codebase issues.
+- You MUST output this prompt inside a standard Markdown code block (\`\`\`markdown) so it renders with a copy button in the UI.`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.8-flash",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: directive },
+            { text: `Here is the batch of 20 trades:\n${tradeLogsText}` }
+          ]
+        }
+      ]
+    });
+
+    const report = response.text || '';
+    
+    // Push into background audit history
+    autonomousAuditsHistory.unshift({
+      timestamp: new Date().toISOString(),
+      report,
+      tradeCount: trades.length
+    });
+
+    if (autonomousAuditsHistory.length > 20) {
+      autonomousAuditsHistory.pop();
+    }
+
+    // Unshift log entry
+    spotLogs.unshift({
+      id: logIdCounter++,
+      time: new Date().toISOString(),
+      type: 'ANALYZE',
+      message: `[GEMINI AUTONOMOUS AUDIT (SR 11-7)] Executed background model audit on the latest batch of 20 trades.`
+    });
+
+    console.log('[AUTONOMOUS AUDIT] Successfully completed and logged.');
+
+  } catch (err: any) {
+    console.error('[AUTONOMOUS AUDIT ERROR]', err);
+  }
+}
 
 /**
  * Continuous Drawdown & Blowout Safety Guard:
@@ -4061,14 +4173,7 @@ async function runGeminiStrategyEngineJobs() {
   try {
     if (unAuditedTradeCount >= 20) {
       unAuditedTradeCount = 0;
-      const dbTrades = await tradeDbManager.getAllTrades(20);
-      const auditRes = await geminiStrategyEngine.auditTradeBatch(dbTrades);
-      if (auditRes && auditRes.identifiedWeaknesses.length > 0) {
-        spotLogs.unshift({
-          id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-          message: `[GEMINI BATCH AUDIT] Detected Weaknesses: ${auditRes.identifiedWeaknesses.join('; ')} | Recommended Actions: ${auditRes.recommendedRules.join('; ')}`
-        });
-      }
+      triggerGeminiAutonomousAudit().catch(err => console.error("[AUTONOMOUS AUDIT BATCH ERROR]", err));
     }
   } catch (e) {}
 
@@ -7010,6 +7115,98 @@ app.post(['/api/extinction-list/reset', '/api/timeout-list/reset'], (req, res) =
     extinctionList: Object.values(tradingBrain.extinctionList),
     timeoutList: Object.values(tradingBrain.extinctionList)
   });
+});
+
+// GET background autonomous audits history
+app.get('/api/gemini/autonomous-audits', (req, res) => {
+  res.json({
+    success: true,
+    history: autonomousAuditsHistory
+  });
+});
+
+// Gemini Quantitative Trade History Auditor
+app.post('/api/gemini/audit-trades', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit as string) || 20;
+    const trades = await tradeDbManager.getAllTrades(limit).catch(() => []);
+    
+    if (!trades || trades.length === 0) {
+      return res.status(404).json({ error: 'No trade history available to audit. Execute trades first to gather data.' });
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(400).json({ error: 'Gemini API key is not configured on the server. Please add your GEMINI_API_KEY to the secrets.' });
+    }
+
+    const { GoogleGenAI } = await import("@google/genai");
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build'
+        }
+      }
+    });
+
+    const tradeLogsText = JSON.stringify(trades.map((t: any) => ({
+      id: t.id,
+      timestamp: t.timestamp || t.time || t.createdAt,
+      symbol: t.symbol,
+      patternType: t.patternType,
+      direction: t.direction || t.side || (t.isYes ? 'YES' : 'NO'),
+      entryPrice: t.entryPrice || t.price || 0,
+      exitPrice: t.exitPrice || t.closePrice || 0,
+      profit: t.profit || t.pnl || 0,
+      featureSnapshot: t.featureSnapshot || t.snapshot || {},
+      slippage: t.slippage || 0,
+      executionDelayMs: t.executionDelayMs || 0
+    })), null, 2);
+
+    const directive = `Role: You are a Senior Quantitative Auditor. Your objective is to analyze batches of 20 trades from a neural network cryptocurrency trading bot and identify structural flaws, data leakage, and unfair advantages using institutional model risk management standards (SR 11-7).
+
+Audit Protocol:
+Inspect the provided 20-trade log for the following discrepancies:
+
+1. Data Lineage & Lookahead Bias: Verify the "Feature State Snapshot" for each trade. Cross-reference the exact indicator values (e.g., Ichimoku, RSI, MACD) recorded at the millisecond of the signal against the execution time. If indicator values reflect the end-of-candle state rather than the moment of execution, flag the model for data leakage.
+
+2. Markout Analysis (Adverse Selection): Analyze the price trajectory 1-second, 5-seconds, and 60-seconds immediately following the fill. If the bot consistently buys and the price instantly drops, it is suffering from adverse selection or executing on stale signals against toxic order flow.
+
+3. Implementation Shortfall (Market Impact): Evaluate the order size relative to the liquidity of the specific asset (especially on altcoins like SHIB/USD or XRP/USD). If a large market order is executed with zero slippage or identical mid-price fills, the simulation is failing to model order book depth and market impact.
+
+4. Parameter Overfitting (Deflated Sharpe Concept): Monitor how often the bot's internal parameters or Time Dilation Factor (TDF) shift within the 20-trade window. If parameters are hyper-optimizing too frequently to perfectly fit the immediate past, the bot is curve-fitting historical noise rather than trading a robust edge.
+
+5. Fractal & Regime Awareness: Assess the bot's macro contextual awareness. If a string of losses occurs, determine if the bot failed to recognize a larger fractal shift—such as a time-dilated BTC.D waterfall event—and attempted to trade it using logic meant for a different cycle structure.
+
+Output Requirement:
+- Briefly list your findings.
+- Generate a highly specific prompt directed at an AI Studio Coding Agent to fix the underlying codebase issues.
+- You MUST output this prompt inside a standard Markdown code block (\`\`\`markdown) so it renders with a copy button in the UI.`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.8-flash",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: directive },
+            { text: `Here is the batch of ${trades.length} trades:\n${tradeLogsText}` }
+          ]
+        }
+      ]
+    });
+
+    res.json({
+      success: true,
+      auditReport: response.text,
+      tradeCount: trades.length
+    });
+
+  } catch (err: any) {
+    console.error('[GEMINI AUDIT ERROR]', err);
+    res.status(500).json({ error: 'Failed to run Gemini quantitative audit', details: err?.message || err });
+  }
 });
 
 // Gemini Strategy Doctor & Auto-Compiler endpoints

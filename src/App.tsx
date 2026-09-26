@@ -1,14 +1,41 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { LayoutDashboard, Settings, TerminalSquare, Maximize2, Brain, RotateCcw, Cpu } from 'lucide-react';
 import { DashboardView } from './components/DashboardView';
-import { SettingsView } from './components/SettingsView';
-import { LogsView } from './components/LogsView';
-import { PatternBrainView } from './components/PatternBrainView';
-import { RetrainingView } from './components/RetrainingView';
 import { useTradeShake } from './useTradeShake';
 import { MetalBackground } from './components/MetalBackground';
 import { RestartConfirmModal } from './components/RestartConfirmModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
+
+// Robust lazy loading wrapper with automatic fallback reload to prevent client crashes during redeployments or server restarts
+const lazyWithRetry = (componentImport: () => Promise<any>) => {
+  return lazy(async () => {
+    try {
+      return await componentImport();
+    } catch (error) {
+      console.warn("Failed to load neural module chunk. Initiating soft reload to fetch fresh assets...", error);
+      // Wait a brief moment to avoid infinite immediate reload loops on persistent offline states
+      await new Promise(resolve => setTimeout(resolve, 800));
+      window.location.reload();
+      return new Promise(() => {}); // Return a pending promise to avoid broken UI state
+    }
+  });
+};
+
+const SettingsView = lazyWithRetry(() => import('./components/SettingsView').then(m => ({ default: m.SettingsView })));
+const LogsView = lazyWithRetry(() => import('./components/LogsView').then(m => ({ default: m.LogsView })));
+const PatternBrainView = lazyWithRetry(() => import('./components/PatternBrainView').then(m => ({ default: m.PatternBrainView })));
+const RetrainingView = lazyWithRetry(() => import('./components/RetrainingView').then(m => ({ default: m.RetrainingView })));
+
+const ViewLoader = () => (
+  <div className="flex flex-col items-center justify-center p-12 min-h-[400px] gap-4">
+    <div className="relative w-12 h-12">
+      <div className="absolute inset-0 rounded-full border-4 border-crypto-danger/20 border-t-crypto-danger animate-spin" />
+    </div>
+    <div className="text-crypto-danger font-bold text-xs tracking-widest uppercase animate-pulse">
+      Loading Neural Modules...
+    </div>
+  </div>
+);
 
 type ViewType = 'dashboard' | 'pattern-brain' | 'retraining' | 'logs' | 'settings';
 
@@ -59,6 +86,27 @@ export default function App() {
   const [isKeyboardExpanded, setIsKeyboardExpanded] = useState(false);
   const [showRestartModal, setShowRestartModal] = useState(false);
   const isShaking = useTradeShake();
+
+  // Background pre-fetch of lazy-loaded secondary modules during system idle time to make tab transitions instantaneous
+  useEffect(() => {
+    const prefetchModules = () => {
+      const triggerPrefetch = () => {
+        console.log("[PREFETCH] System idle. Pre-loading secondary neural views in the background...");
+        import('./components/SettingsView').catch(() => {});
+        import('./components/LogsView').catch(() => {});
+        import('./components/PatternBrainView').catch(() => {});
+        import('./components/RetrainingView').catch(() => {});
+      };
+
+      if ('requestIdleCallback' in window) {
+        (window as any).requestIdleCallback(triggerPrefetch);
+      } else {
+        setTimeout(triggerPrefetch, 2500);
+      }
+    };
+
+    prefetchModules();
+  }, []);
 
   const handleRestartInstance = () => {
     setShowRestartModal(true);
@@ -180,11 +228,13 @@ export default function App() {
           </header>
 
           <ErrorBoundary>
-            {currentView === 'dashboard' && <DashboardView />}
-            {currentView === 'pattern-brain' && <PatternBrainView />}
-            {currentView === 'retraining' && <RetrainingView />}
-            {currentView === 'logs' && <LogsView />}
-            {currentView === 'settings' && <SettingsView />}
+            <Suspense fallback={<ViewLoader />}>
+              {currentView === 'dashboard' && <DashboardView />}
+              {currentView === 'pattern-brain' && <PatternBrainView />}
+              {currentView === 'retraining' && <RetrainingView />}
+              {currentView === 'logs' && <LogsView />}
+              {currentView === 'settings' && <SettingsView />}
+            </Suspense>
           </ErrorBoundary>
               
         </main>
