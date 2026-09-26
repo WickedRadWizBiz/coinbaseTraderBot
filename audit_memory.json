@@ -1,7 +1,7 @@
 {
   "shortTermMemory": {
-    "lastAuditTimestamp": "2026-09-26T20:14:26.739Z",
-    "lastAuditTradeCount": 20,
+    "lastAuditTimestamp": "2026-09-26T22:26:32.010Z",
+    "lastAuditTradeCount": 1,
     "previousIssues": [
       {
         "id": "IMPLEMENTATION_SHORTFALL_DEPTH_IMPACT",
@@ -9,9 +9,9 @@
         "category": "SLIPPAGE_IMPACT",
         "description": "Verify implementation shortfall dollar values scale non-linearly with contract order size on thinner altcoin books.",
         "severity": "HIGH",
-        "detectionCount": 3,
+        "detectionCount": 4,
         "firstDetectedAt": "2026-09-26T20:13:34.621Z",
-        "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+        "lastDetectedAt": "2026-09-26T22:26:32.010Z",
         "status": "ACTIVE"
       },
       {
@@ -20,9 +20,9 @@
         "category": "REGIME_BIAS",
         "description": "Verify the bot refuses altcoin long exposure when USDT.D is expanding, preventing systemic market drawdowns.",
         "severity": "HIGH",
-        "detectionCount": 2,
+        "detectionCount": 3,
         "firstDetectedAt": "2026-09-26T20:13:34.621Z",
-        "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+        "lastDetectedAt": "2026-09-26T22:26:32.010Z",
         "status": "ACTIVE"
       },
       {
@@ -31,29 +31,25 @@
         "category": "OVERFITTING",
         "description": "Monitor how frequently internal parameters shift within the 20-trade window to prevent curve-fitting historical noise.",
         "severity": "MEDIUM",
-        "detectionCount": 2,
+        "detectionCount": 3,
         "firstDetectedAt": "2026-09-26T20:13:34.621Z",
-        "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+        "lastDetectedAt": "2026-09-26T22:26:32.010Z",
         "status": "ACTIVE"
       }
     ],
     "lastComparison": {
-      "evaluatedAt": "2026-09-26T20:14:26.739Z",
-      "previousAuditTimestamp": "2026-09-26T20:13:34.621Z",
-      "resolvedInThisBatch": [
-        "MICROSECOND_EXECUTION_LATENCY_JITTER"
-      ],
+      "evaluatedAt": "2026-09-26T22:26:32.010Z",
+      "previousAuditTimestamp": "2026-09-26T20:14:26.739Z",
+      "resolvedInThisBatch": [],
       "persistingInThisBatch": [
         "IMPLEMENTATION_SHORTFALL_DEPTH_IMPACT",
         "MACRO_FRACTAL_USDT_DOMINANCE_EXPANSION",
         "TDF_PARAMETER_OVERFITTING_DEFLATED_SHARPE"
       ],
       "newlyDetectedInThisBatch": [
-        "ISSUE_INDICATOR_STAGNATION_DEFAULT_FAL",
-        "ISSUE_SIGNAL_EXECUTION_TIMING_DESYNC",
-        "ISSUE_MARKOUT_FEED_CALCULATION_ERROR"
+        "ISSUE_LATENCY_REPORTING_DISCREPANCY"
       ],
-      "summaryText": "Audit evaluated 20 trades: 1 issue(s) confirmed resolved, 3 persisting, 3 new anomalies logged."
+      "summaryText": "Audit evaluated 1 trades: 0 issue(s) confirmed resolved, 3 persisting, 1 new anomalies logged."
     }
   },
   "recurringIssuesQueue": [
@@ -100,6 +96,17 @@
       "firstDetectedAt": "2026-09-26T20:14:26.739Z",
       "lastDetectedAt": "2026-09-26T20:14:26.739Z",
       "status": "ACTIVE"
+    },
+    {
+      "id": "ISSUE_LATENCY_REPORTING_DISCREPANCY",
+      "title": "LATENCY_REPORTING_DISCREPANCY",
+      "category": "GENERAL",
+      "description": "Discovered during quantitative audit report: LATENCY_REPORTING_DISCREPANCY",
+      "severity": "HIGH",
+      "detectionCount": 1,
+      "firstDetectedAt": "2026-09-26T22:26:32.010Z",
+      "lastDetectedAt": "2026-09-26T22:26:32.010Z",
+      "status": "ACTIVE"
     }
   ],
   "activeWatchList": [
@@ -109,9 +116,9 @@
       "category": "SLIPPAGE_IMPACT",
       "description": "Verify implementation shortfall dollar values scale non-linearly with contract order size on thinner altcoin books.",
       "severity": "HIGH",
-      "detectionCount": 3,
+      "detectionCount": 4,
       "firstDetectedAt": "2026-09-26T20:13:34.621Z",
-      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+      "lastDetectedAt": "2026-09-26T22:26:32.010Z",
       "status": "ACTIVE"
     },
     {
@@ -120,9 +127,9 @@
       "category": "REGIME_BIAS",
       "description": "Verify the bot refuses altcoin long exposure when USDT.D is expanding, preventing systemic market drawdowns.",
       "severity": "HIGH",
-      "detectionCount": 2,
+      "detectionCount": 3,
       "firstDetectedAt": "2026-09-26T20:13:34.621Z",
-      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+      "lastDetectedAt": "2026-09-26T22:26:32.010Z",
       "status": "ACTIVE"
     },
     {
@@ -131,9 +138,9 @@
       "category": "OVERFITTING",
       "description": "Monitor how frequently internal parameters shift within the 20-trade window to prevent curve-fitting historical noise.",
       "severity": "MEDIUM",
-      "detectionCount": 2,
+      "detectionCount": 3,
       "firstDetectedAt": "2026-09-26T20:13:34.621Z",
-      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+      "lastDetectedAt": "2026-09-26T22:26:32.010Z",
       "status": "ACTIVE"
     }
   ],

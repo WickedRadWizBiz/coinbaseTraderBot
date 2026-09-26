@@ -48,13 +48,17 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
 
   // Model Lineage & State Tracking (SR 11-7 Compliance)
   const [configuredModel, setConfiguredModel] = useState<string>('gemini-3.1-pro-preview');
-  const [primaryModelName, setPrimaryModelName] = useState<string>('Gemini Pro Latest (gemini-3.1-pro-preview)');
+  const [primaryModelName, setPrimaryModelName] = useState<string>('Gemini 3.1 Pro (gemini-3.1-pro-preview)');
   const [fallbackModels, setFallbackModels] = useState<string[]>([
-    'gemini-2.5-pro',
+    'gemini-pro-latest',
     'gemini-3.8-flash',
-    'gemini-2.5-flash',
-    'gemini-3.5-flash',
-    'gemini-flash-latest'
+    'gemini-3.7-flash',
+    'gemini-3.6-flash',
+    'gemini-3-flash-preview',
+    'gemini-flash-latest',
+    'gemini-3.1-flash-lite-preview',
+    'gemini-3.5-flash-lite',
+    'gemini-3.5-flash'
   ]);
   const [manualTargetModel, setManualTargetModel] = useState<string | null>(null);
   const [manualUsedModel, setManualUsedModel] = useState<string | null>(null);
@@ -271,14 +275,14 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
             </span>
             <span className="text-[10px] text-[#606060] hidden sm:inline">|</span>
             <span className="text-[#808080] font-bold uppercase tracking-wider hidden sm:inline">Tier:</span>
-            <span className="text-crypto-text font-bold hidden sm:inline">Gemini Pro Latest</span>
+            <span className="text-crypto-text font-bold hidden sm:inline">Gemini 3.1 Pro</span>
           </div>
         </div>
         <div className="flex items-center gap-1.5 text-[10px] text-[#808080] flex-wrap">
           <Zap className="w-3 h-3 text-amber-400 shrink-0" />
-          <span className="uppercase tracking-wider font-semibold">Fallback Pipeline:</span>
+          <span className="uppercase tracking-wider font-semibold">Sequential Fallback:</span>
           <span className="text-[#a0a0a0] font-mono">
-            {fallbackModels.slice(0, 3).join(' ➔ ')}
+            {fallbackModels.slice(0, 3).join(' ➔ ')} ➔ ... ➔ <span className="text-amber-300 font-bold">gemini-3.5-flash (Last Attempt)</span>
           </span>
         </div>
       </div>
@@ -452,7 +456,7 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
       {/* BODY */}
       <div className="relative z-10 flex flex-col gap-4">
         <p className="text-[11px] text-[#a0a0a0] leading-relaxed">
-          The Senior Quantitative Auditor analyzes trade state lineage, execution slippage trajectories (Markout), Implementation Shortfalls, and overfitting metrics. Audits prioritize **Gemini Pro Latest** (<code className="text-crypto-primary font-bold">{configuredModel}</code>) with persistent memory comparing past findings and watching up to 3 reoccurring issues. Audits trigger **automatically on every multiple of 20 trades**, or can be executed on demand.
+          The Senior Quantitative Auditor analyzes trade state lineage, execution slippage trajectories (Markout), Implementation Shortfalls, and overfitting metrics. Audits prioritize **Gemini 3.1 Pro** (<code className="text-crypto-primary font-bold">{configuredModel}</code>) with sequential fallback down the model tier (with 3.5 preserved as the final attempt) and persistent memory comparing past findings. Audits trigger **automatically on every multiple of 20 trades**, or can be executed on demand.
         </p>
 
         {/* CONTROLS */}
@@ -468,7 +472,7 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
               }`}
             >
               <Sparkles className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-              <span>{loading ? 'Auditing with Gemini Pro...' : 'Run Audit On-Demand (Gemini Pro)'}</span>
+              <span>{loading ? 'Auditing with Gemini 3.1 Pro...' : 'Run Audit On-Demand (Gemini 3.1 Pro)'}</span>
             </button>
 
             {activeReport && (
@@ -521,13 +525,13 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
             </div>
             <div className="flex flex-col items-center gap-1.5 text-center">
               <span className="text-crypto-primary font-bold text-[11px] uppercase tracking-widest animate-pulse">
-                &gt; Querying Primary Model: {configuredModel} (Gemini Pro Latest)...
+                &gt; Querying Primary Model: {configuredModel} (Gemini 3.1 Pro)...
               </span>
               <span className="text-[10px] text-[#a0a0a0] uppercase tracking-wider">
                 Auditing Ledger Lineage, Reoccurring Issues ({activeWatchList.length}/3), & Evaluating Markout Adverse Selection Trajectories
               </span>
               <span className="text-[9px] text-[#606060]">
-                * If rate limits or quota constraints occur, dynamic fallback tiers ({fallbackModels.join(', ')}) will engage automatically.
+                * If rate limits or quota constraints occur, dynamic fallback tiers ({fallbackModels.slice(0, 4).join(', ')} ... ending with gemini-3.5-flash) will engage sequentially.
               </span>
             </div>
           </div>
@@ -565,7 +569,7 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
                       {currentModelChanged ? 'Model Fallback Engaged' : 'Target Model Preserved'}:
                     </span>
                     <span className="font-mono font-bold text-white bg-black/60 px-1.5 py-0.5 border border-current">
-                      Target: {currentTargetModel}
+                      Target: {currentTargetModel} (Gemini 3.1 Pro)
                     </span>
                     <ArrowRight className="w-3 h-3 text-current inline" />
                     <span className={`font-mono font-bold px-1.5 py-0.5 border ${
@@ -578,17 +582,17 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
                   </div>
                   {currentModelChanged ? (
                     <span className="text-[10px] text-amber-300/90 font-mono">
-                      {currentFallbackReason || `Primary model (${currentTargetModel}) was not viable/rate-limited. Automatically fell back to ${currentUsedModel} to complete the quantitative audit.`}
+                      {currentFallbackReason || `Primary model (${currentTargetModel} - Gemini 3.1 Pro) was unavailable or rate-limited. Sequentially walked down the fallback list and executed with ${currentUsedModel} (3.5 preserved as last attempt).`}
                     </span>
                   ) : (
                     <span className="text-[10px] text-crypto-success/90 font-mono">
-                      Audit successfully executed using high-reasoning Gemini Pro Latest ({currentTargetModel}).
+                      Audit successfully executed using high-reasoning Gemini 3.1 Pro ({currentTargetModel}).
                     </span>
                   )}
                 </div>
               </div>
               <span className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 border border-current/40 bg-black/40">
-                {currentModelChanged ? 'FALLBACK ACTIVE' : 'GEMINI PRO VERIFIED'}
+                {currentModelChanged ? 'FALLBACK ACTIVE' : 'GEMINI 3.1 PRO VERIFIED'}
               </span>
             </div>
 

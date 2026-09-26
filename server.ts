@@ -4184,13 +4184,19 @@ let lastBlowoutCheckTime = 0;
 const autonomousAuditsHistory: any[] = [];
 
 // Gemini Model Configuration for Quantitative Audit (SR 11-7 Compliance)
+// Primary model is Gemini 3.1 Pro (gemini-3.1-pro-preview).
+// If unavailable or rate-limited, fall back down the list sequentially, with 3.5 reserved as the last attempt.
 const AUDIT_PRIMARY_MODEL = 'gemini-3.1-pro-preview';
 const AUDIT_FALLBACK_MODELS = [
-  'gemini-2.5-pro',
+  'gemini-pro-latest',
   'gemini-3.8-flash',
-  'gemini-2.5-flash',
-  'gemini-3.5-flash',
-  'gemini-flash-latest'
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3-flash-preview',
+  'gemini-flash-latest',
+  'gemini-3.1-flash-lite-preview',
+  'gemini-3.5-flash-lite',
+  'gemini-3.5-flash' // Strictly the last fallback attempt
 ];
 const AUDIT_CANDIDATE_MODELS = [AUDIT_PRIMARY_MODEL, ...AUDIT_FALLBACK_MODELS];
 
@@ -4365,7 +4371,7 @@ Output Requirement:
       usedModel,
       modelChanged,
       attemptedModels,
-      fallbackReason: modelChanged ? `Primary model (${AUDIT_PRIMARY_MODEL}) failed or was rate-limited; automatically fell back to ${usedModel}.` : undefined,
+      fallbackReason: modelChanged ? `Primary model (${AUDIT_PRIMARY_MODEL} - Gemini 3.1 Pro) was unavailable or rate-limited; walked down candidate list sequentially to ${usedModel} (3.5 preserved as last attempt).` : undefined,
       memoryComparison,
       memoryState: updatedMemoryState
     });
@@ -4379,7 +4385,7 @@ Output Requirement:
       id: logIdCounter++,
       time: new Date().toISOString(),
       type: 'ANALYZE',
-      message: `[GEMINI AUTONOMOUS AUDIT (SR 11-7)] Executed via ${usedModel}. Memory update: ${memoryComparison.resolvedInThisBatch.length} resolved, ${memoryComparison.persistingInThisBatch.length} persisting, Active Watch: ${updatedMemoryState.activeWatchList.length}/3.`
+      message: `[GEMINI AUTONOMOUS AUDIT (SR 11-7)] Executed via ${usedModel}${modelChanged ? ` (Fell back from Gemini 3.1 Pro: ${AUDIT_PRIMARY_MODEL})` : ' (Gemini 3.1 Pro)'}. Memory update: ${memoryComparison.resolvedInThisBatch.length} resolved, ${memoryComparison.persistingInThisBatch.length} persisting, Active Watch: ${updatedMemoryState.activeWatchList.length}/3.`
     });
 
     console.log('[AUTONOMOUS AUDIT] Successfully completed and logged by Gemini.');
@@ -7511,7 +7517,7 @@ app.get('/api/gemini/autonomous-audits', (req, res) => {
   res.json({
     success: true,
     configuredModel: AUDIT_PRIMARY_MODEL,
-    primaryModelName: 'Gemini Pro Latest (gemini-3.1-pro-preview)',
+    primaryModelName: 'Gemini 3.1 Pro (gemini-3.1-pro-preview)',
     fallbackModels: AUDIT_FALLBACK_MODELS,
     auditMemory: auditMemoryManager.getState(),
     history: autonomousAuditsHistory
@@ -7523,6 +7529,8 @@ app.get('/api/gemini/audit-memory', (req, res) => {
   res.json({
     success: true,
     configuredModel: AUDIT_PRIMARY_MODEL,
+    primaryModelName: 'Gemini 3.1 Pro (gemini-3.1-pro-preview)',
+    fallbackModels: AUDIT_FALLBACK_MODELS,
     memory: auditMemoryManager.getState()
   });
 });
@@ -7645,7 +7653,7 @@ Output Requirement:
       usedModel,
       modelChanged,
       attemptedModels,
-      fallbackReason: modelChanged ? `Primary model (${AUDIT_PRIMARY_MODEL}) failed or was rate-limited; automatically fell back to ${usedModel}.` : null,
+      fallbackReason: modelChanged ? `Primary model (${AUDIT_PRIMARY_MODEL} - Gemini 3.1 Pro) was unavailable or rate-limited; walked down the candidate list sequentially and executed with ${usedModel} (3.5 preserved as last attempt).` : null,
       memoryComparison,
       memoryState: updatedMemoryState
     });
