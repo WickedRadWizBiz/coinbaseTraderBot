@@ -18,6 +18,7 @@ import { marketTestingEngine } from "./marketTestingProtocol";
 import { coinbaseService } from "./coinbaseService";
 import { kalshiService } from "./kalshiService";
 import { goalResetScheduler } from "./goalResetScheduler";
+import { auditMemoryManager } from "./auditMemoryManager";
 
 /**
  * Dynamic Order Book Matching Simulator (SR 11-7 Realistic Fill & Execution Model)
@@ -4182,6 +4183,17 @@ let hasTriggered50PercentDrawdown = false;
 let lastBlowoutCheckTime = 0;
 const autonomousAuditsHistory: any[] = [];
 
+// Gemini Model Configuration for Quantitative Audit (SR 11-7 Compliance)
+const AUDIT_PRIMARY_MODEL = 'gemini-3.1-pro-preview';
+const AUDIT_FALLBACK_MODELS = [
+  'gemini-2.5-pro',
+  'gemini-3.8-flash',
+  'gemini-2.5-flash',
+  'gemini-3.5-flash',
+  'gemini-flash-latest'
+];
+const AUDIT_CANDIDATE_MODELS = [AUDIT_PRIMARY_MODEL, ...AUDIT_FALLBACK_MODELS];
+
 /**
  * SR 11-7 Institutional Model Validation Serializer
  * Sanitizes and enriches trade logs with microsecond point-in-time features,
@@ -4298,28 +4310,25 @@ Output Requirement:
 - Generate a highly specific prompt directed at an AI Studio Coding Agent to fix the underlying codebase issues.
 - You MUST output this prompt inside a standard Markdown code block (\`\`\`markdown) so it renders with a copy button in the UI.`;
 
-    const candidateModels = [
-      'gemini-3.5-flash',
-      'gemini-3.5-flash-lite',
-      'gemini-3.7-flash',
-      'gemini-3.8-flash',
-      'gemini-3.6-flash',
-      'gemini-flash-latest'
-    ];
+    const memoryPrompt = auditMemoryManager.buildPromptMemoryContext();
+    const fullDirective = `${directive}\n\n${memoryPrompt}`;
 
     let report = '';
     let lastErr: any = null;
+    let usedModel = AUDIT_PRIMARY_MODEL;
+    const attemptedModels: string[] = [];
 
-    for (const model of candidateModels) {
+    for (const model of AUDIT_CANDIDATE_MODELS) {
+      attemptedModels.push(model);
       try {
-        console.log(`[AUTONOMOUS AUDIT] Attempting to generate audit using Gemini model: ${model}...`);
+        console.log(`[AUTONOMOUS AUDIT] Attempting to generate audit using Gemini model: ${model} (Target: ${AUDIT_PRIMARY_MODEL})...`);
         const response = await ai.models.generateContent({
           model,
           contents: [
             {
               role: "user",
               parts: [
-                { text: directive },
+                { text: fullDirective },
                 { text: `Here is the batch of 20 trades:\n${tradeLogsText}` }
               ]
             }
@@ -4327,6 +4336,7 @@ Output Requirement:
         });
         if (response && response.text) {
           report = response.text;
+          usedModel = model;
           console.log(`[AUTONOMOUS AUDIT] Successfully generated audit with Gemini model: ${model}`);
           break;
         }
@@ -4340,11 +4350,24 @@ Output Requirement:
       throw lastErr || new Error("All candidate Gemini models failed to generate the audit report.");
     }
     
-    // Push into background audit history
+    const modelChanged = usedModel !== AUDIT_PRIMARY_MODEL;
+
+    // Process audit result into persistent memory (rotates recurring queue, tracks solved issues, compares short-term memory)
+    const memoryComparison = auditMemoryManager.processAuditResult(report, trades);
+    const updatedMemoryState = auditMemoryManager.getState();
+
+    // Push into background audit history with explicit model lineage and memory comparison
     autonomousAuditsHistory.unshift({
       timestamp: new Date().toISOString(),
       report,
-      tradeCount: trades.length
+      tradeCount: trades.length,
+      targetModel: AUDIT_PRIMARY_MODEL,
+      usedModel,
+      modelChanged,
+      attemptedModels,
+      fallbackReason: modelChanged ? `Primary model (${AUDIT_PRIMARY_MODEL}) failed or was rate-limited; automatically fell back to ${usedModel}.` : undefined,
+      memoryComparison,
+      memoryState: updatedMemoryState
     });
 
     if (autonomousAuditsHistory.length > 20) {
@@ -4356,7 +4379,7 @@ Output Requirement:
       id: logIdCounter++,
       time: new Date().toISOString(),
       type: 'ANALYZE',
-      message: `[GEMINI AUTONOMOUS AUDIT (SR 11-7)] Successfully executed Gemini model audit on the latest batch of 20 trades.`
+      message: `[GEMINI AUTONOMOUS AUDIT (SR 11-7)] Executed via ${usedModel}. Memory update: ${memoryComparison.resolvedInThisBatch.length} resolved, ${memoryComparison.persistingInThisBatch.length} persisting, Active Watch: ${updatedMemoryState.activeWatchList.length}/3.`
     });
 
     console.log('[AUTONOMOUS AUDIT] Successfully completed and logged by Gemini.');
@@ -7487,7 +7510,34 @@ app.post(['/api/extinction-list/reset', '/api/timeout-list/reset'], (req, res) =
 app.get('/api/gemini/autonomous-audits', (req, res) => {
   res.json({
     success: true,
+    configuredModel: AUDIT_PRIMARY_MODEL,
+    primaryModelName: 'Gemini Pro Latest (gemini-3.1-pro-preview)',
+    fallbackModels: AUDIT_FALLBACK_MODELS,
+    auditMemory: auditMemoryManager.getState(),
     history: autonomousAuditsHistory
+  });
+});
+
+// GET persistent audit memory (Short-term diff, active watch list, recurring queue, solved memory)
+app.get('/api/gemini/audit-memory', (req, res) => {
+  res.json({
+    success: true,
+    configuredModel: AUDIT_PRIMARY_MODEL,
+    memory: auditMemoryManager.getState()
+  });
+});
+
+// POST manually resolve an audit issue
+app.post('/api/gemini/audit-memory/resolve', (req, res) => {
+  const { issueId, note } = req.body || {};
+  if (!issueId) {
+    return res.status(400).json({ error: 'Missing issueId in request body.' });
+  }
+  const resolved = auditMemoryManager.manuallyResolveIssue(issueId, note);
+  res.json({
+    success: resolved,
+    message: resolved ? `Issue ${issueId} resolved and archived to Solved Long-Term Memory.` : `Issue ${issueId} not found in active or recurring queues.`,
+    memory: auditMemoryManager.getState()
   });
 });
 
@@ -7541,28 +7591,25 @@ Output Requirement:
 - Generate a highly specific prompt directed at an AI Studio Coding Agent to fix the underlying codebase issues.
 - You MUST output this prompt inside a standard Markdown code block (\`\`\`markdown) so it renders with a copy button in the UI.`;
 
-    const candidateModels = [
-      'gemini-3.5-flash',
-      'gemini-3.5-flash-lite',
-      'gemini-3.7-flash',
-      'gemini-3.8-flash',
-      'gemini-3.6-flash',
-      'gemini-flash-latest'
-    ];
+    const memoryPrompt = auditMemoryManager.buildPromptMemoryContext();
+    const fullDirective = `${directive}\n\n${memoryPrompt}`;
 
     let report = '';
     let lastErr: any = null;
+    let usedModel = AUDIT_PRIMARY_MODEL;
+    const attemptedModels: string[] = [];
 
-    for (const model of candidateModels) {
+    for (const model of AUDIT_CANDIDATE_MODELS) {
+      attemptedModels.push(model);
       try {
-        console.log(`[ON-DEMAND AUDIT] Attempting generateContent using Gemini model: ${model}...`);
+        console.log(`[ON-DEMAND AUDIT] Attempting generateContent using Gemini model: ${model} (Target: ${AUDIT_PRIMARY_MODEL})...`);
         const response = await ai.models.generateContent({
           model,
           contents: [
             {
               role: "user",
               parts: [
-                { text: directive },
+                { text: fullDirective },
                 { text: `Here is the batch of ${trades.length} trades:\n${tradeLogsText}` }
               ]
             }
@@ -7570,6 +7617,7 @@ Output Requirement:
         });
         if (response && response.text) {
           report = response.text;
+          usedModel = model;
           console.log(`[ON-DEMAND AUDIT] Successfully generated audit with Gemini model: ${model}`);
           break;
         }
@@ -7583,10 +7631,23 @@ Output Requirement:
       throw lastErr || new Error("All candidate Gemini models failed to generate the audit report.");
     }
 
+    const modelChanged = usedModel !== AUDIT_PRIMARY_MODEL;
+
+    // Process result into persistent memory (rotates recurring queue, tracks solved issues, compares short-term memory)
+    const memoryComparison = auditMemoryManager.processAuditResult(report, trades);
+    const updatedMemoryState = auditMemoryManager.getState();
+
     res.json({
       success: true,
       auditReport: report,
-      tradeCount: trades.length
+      tradeCount: trades.length,
+      targetModel: AUDIT_PRIMARY_MODEL,
+      usedModel,
+      modelChanged,
+      attemptedModels,
+      fallbackReason: modelChanged ? `Primary model (${AUDIT_PRIMARY_MODEL}) failed or was rate-limited; automatically fell back to ${usedModel}.` : null,
+      memoryComparison,
+      memoryState: updatedMemoryState
     });
 
   } catch (err: any) {

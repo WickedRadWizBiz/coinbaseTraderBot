@@ -1,0 +1,207 @@
+{
+  "shortTermMemory": {
+    "lastAuditTimestamp": "2026-09-26T20:14:26.739Z",
+    "lastAuditTradeCount": 20,
+    "previousIssues": [
+      {
+        "id": "IMPLEMENTATION_SHORTFALL_DEPTH_IMPACT",
+        "title": "Implementation Shortfall Trajectory on Large Fills",
+        "category": "SLIPPAGE_IMPACT",
+        "description": "Verify implementation shortfall dollar values scale non-linearly with contract order size on thinner altcoin books.",
+        "severity": "HIGH",
+        "detectionCount": 3,
+        "firstDetectedAt": "2026-09-26T20:13:34.621Z",
+        "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+        "status": "ACTIVE"
+      },
+      {
+        "id": "MACRO_FRACTAL_USDT_DOMINANCE_EXPANSION",
+        "title": "Cross-Asset Liquidity Shock Guard (USDT.D)",
+        "category": "REGIME_BIAS",
+        "description": "Verify the bot refuses altcoin long exposure when USDT.D is expanding, preventing systemic market drawdowns.",
+        "severity": "HIGH",
+        "detectionCount": 2,
+        "firstDetectedAt": "2026-09-26T20:13:34.621Z",
+        "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+        "status": "ACTIVE"
+      },
+      {
+        "id": "TDF_PARAMETER_OVERFITTING_DEFLATED_SHARPE",
+        "title": "Time Dilation Factor (TDF) Parameter Drift Rate",
+        "category": "OVERFITTING",
+        "description": "Monitor how frequently internal parameters shift within the 20-trade window to prevent curve-fitting historical noise.",
+        "severity": "MEDIUM",
+        "detectionCount": 2,
+        "firstDetectedAt": "2026-09-26T20:13:34.621Z",
+        "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+        "status": "ACTIVE"
+      }
+    ],
+    "lastComparison": {
+      "evaluatedAt": "2026-09-26T20:14:26.739Z",
+      "previousAuditTimestamp": "2026-09-26T20:13:34.621Z",
+      "resolvedInThisBatch": [
+        "MICROSECOND_EXECUTION_LATENCY_JITTER"
+      ],
+      "persistingInThisBatch": [
+        "IMPLEMENTATION_SHORTFALL_DEPTH_IMPACT",
+        "MACRO_FRACTAL_USDT_DOMINANCE_EXPANSION",
+        "TDF_PARAMETER_OVERFITTING_DEFLATED_SHARPE"
+      ],
+      "newlyDetectedInThisBatch": [
+        "ISSUE_INDICATOR_STAGNATION_DEFAULT_FAL",
+        "ISSUE_SIGNAL_EXECUTION_TIMING_DESYNC",
+        "ISSUE_MARKOUT_FEED_CALCULATION_ERROR"
+      ],
+      "summaryText": "Audit evaluated 20 trades: 1 issue(s) confirmed resolved, 3 persisting, 3 new anomalies logged."
+    }
+  },
+  "recurringIssuesQueue": [
+    {
+      "id": "ASYMMETRIC_PAYOFF_RATIO_SL_COMPLIANCE",
+      "title": "Dynamic SL/TP Payoff Asymmetry in Choppy Regimes",
+      "category": "GENERAL",
+      "description": "Ensure stop losses trigger dynamically and preserve profit factor asymmetry during sideways consolidation.",
+      "severity": "MEDIUM",
+      "detectionCount": 1,
+      "firstDetectedAt": "2026-09-26T20:13:34.621Z",
+      "lastDetectedAt": "2026-09-26T20:13:34.621Z",
+      "status": "ACTIVE"
+    },
+    {
+      "id": "ISSUE_INDICATOR_STAGNATION_DEFAULT_FAL",
+      "title": "INDICATOR_STAGNATION_DEFAULT_FALLBACK",
+      "category": "GENERAL",
+      "description": "Discovered during quantitative audit report: INDICATOR_STAGNATION_DEFAULT_FALLBACK",
+      "severity": "HIGH",
+      "detectionCount": 1,
+      "firstDetectedAt": "2026-09-26T20:14:26.739Z",
+      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+      "status": "ACTIVE"
+    },
+    {
+      "id": "ISSUE_SIGNAL_EXECUTION_TIMING_DESYNC",
+      "title": "SIGNAL_EXECUTION_TIMING_DESYNC",
+      "category": "GENERAL",
+      "description": "Discovered during quantitative audit report: SIGNAL_EXECUTION_TIMING_DESYNC",
+      "severity": "HIGH",
+      "detectionCount": 1,
+      "firstDetectedAt": "2026-09-26T20:14:26.739Z",
+      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+      "status": "ACTIVE"
+    },
+    {
+      "id": "ISSUE_MARKOUT_FEED_CALCULATION_ERROR",
+      "title": "MARKOUT_FEED_CALCULATION_ERROR",
+      "category": "GENERAL",
+      "description": "Discovered during quantitative audit report: MARKOUT_FEED_CALCULATION_ERROR",
+      "severity": "HIGH",
+      "detectionCount": 1,
+      "firstDetectedAt": "2026-09-26T20:14:26.739Z",
+      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+      "status": "ACTIVE"
+    }
+  ],
+  "activeWatchList": [
+    {
+      "id": "IMPLEMENTATION_SHORTFALL_DEPTH_IMPACT",
+      "title": "Implementation Shortfall Trajectory on Large Fills",
+      "category": "SLIPPAGE_IMPACT",
+      "description": "Verify implementation shortfall dollar values scale non-linearly with contract order size on thinner altcoin books.",
+      "severity": "HIGH",
+      "detectionCount": 3,
+      "firstDetectedAt": "2026-09-26T20:13:34.621Z",
+      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+      "status": "ACTIVE"
+    },
+    {
+      "id": "MACRO_FRACTAL_USDT_DOMINANCE_EXPANSION",
+      "title": "Cross-Asset Liquidity Shock Guard (USDT.D)",
+      "category": "REGIME_BIAS",
+      "description": "Verify the bot refuses altcoin long exposure when USDT.D is expanding, preventing systemic market drawdowns.",
+      "severity": "HIGH",
+      "detectionCount": 2,
+      "firstDetectedAt": "2026-09-26T20:13:34.621Z",
+      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+      "status": "ACTIVE"
+    },
+    {
+      "id": "TDF_PARAMETER_OVERFITTING_DEFLATED_SHARPE",
+      "title": "Time Dilation Factor (TDF) Parameter Drift Rate",
+      "category": "OVERFITTING",
+      "description": "Monitor how frequently internal parameters shift within the 20-trade window to prevent curve-fitting historical noise.",
+      "severity": "MEDIUM",
+      "detectionCount": 2,
+      "firstDetectedAt": "2026-09-26T20:13:34.621Z",
+      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+      "status": "ACTIVE"
+    }
+  ],
+  "solvedLongTermMemory": [
+    {
+      "id": "MICROSECOND_EXECUTION_LATENCY_JITTER",
+      "title": "Execution Delay & Queue Latency Modeling",
+      "category": "EXECUTION_LATENCY",
+      "description": "Ensure executionDelayMs is non-zero, reflects lognormal jitter (25ms-180ms), and models order arrival queue delays.",
+      "severity": "MEDIUM",
+      "detectionCount": 2,
+      "firstDetectedAt": "2026-09-26T20:13:34.621Z",
+      "lastDetectedAt": "2026-09-26T20:13:34.621Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-26T20:14:26.739Z",
+      "resolutionNote": "Resolved in subsequent batch comparison."
+    },
+    {
+      "id": "DATA_LINEAGE_LOOKAHEAD_ICHIMOKU_RSI",
+      "title": "Lookahead Bias in Intra-Bar Indicator Snapshots",
+      "category": "DATA_LINEAGE",
+      "description": "Features were referencing closing candle states rather than point-in-time closed bar indicators at signal creation.",
+      "severity": "CRITICAL",
+      "detectionCount": 3,
+      "firstDetectedAt": "2026-09-23T20:13:34.621Z",
+      "lastDetectedAt": "2026-09-25T20:13:34.621Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-26T20:13:34.621Z",
+      "resolutionNote": "Strict closed-bar shift-1 verification and nanosecond snapshot serialization implemented."
+    },
+    {
+      "id": "ZERO_SLIPPAGE_ALTCOIN_DEPTH",
+      "title": "Zero-Slippage Simulation on Altcoin Order Books",
+      "category": "SLIPPAGE_IMPACT",
+      "description": "Altcoin contracts (XRP, SOL, HYPE) were clearing without liquidity-tiered depth degradation or slippage.",
+      "severity": "HIGH",
+      "detectionCount": 4,
+      "firstDetectedAt": "2026-09-22T20:13:34.621Z",
+      "lastDetectedAt": "2026-09-25T20:13:34.621Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-26T20:13:34.621Z",
+      "resolutionNote": "Four-tier liquidity model (2.5 to 32 bps) and square-root size impact formula deployed."
+    },
+    {
+      "id": "TOXIC_ORDER_FLOW_MARKOUT_BLINDNESS",
+      "title": "Unmeasured Adverse Selection & Toxic Flow Markouts",
+      "category": "ADVERSE_SELECTION",
+      "description": "Post-fill trade price paths were unmonitored, allowing executions into adverse selection without detection.",
+      "severity": "HIGH",
+      "detectionCount": 2,
+      "firstDetectedAt": "2026-09-24T20:13:34.621Z",
+      "lastDetectedAt": "2026-09-25T20:13:34.621Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-26T20:13:34.621Z",
+      "resolutionNote": "Asynchronous 1s, 5s, and 60s post-fill markout tracker with toxic flow alert threshold added."
+    },
+    {
+      "id": "DIRECTIONAL_MONOCULTURE_100_PERCENT_YES",
+      "title": "Directional Monoculture 100% YES Long Bias",
+      "category": "REGIME_BIAS",
+      "description": "Trading engine clustered into 100% YES contract executions regardless of macro regime.",
+      "severity": "CRITICAL",
+      "detectionCount": 5,
+      "firstDetectedAt": "2026-09-21T20:13:34.621Z",
+      "lastDetectedAt": "2026-09-25T20:13:34.621Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-26T20:13:34.621Z",
+      "resolutionNote": "USDT.D macro expansion gatekeeper and 4-trade consecutive long circuit breaker deployed."
+    }
+  ]
+}
