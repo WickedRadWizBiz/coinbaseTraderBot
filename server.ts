@@ -4054,7 +4054,18 @@ async function triggerGeminiAutonomousAudit() {
       return;
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    let apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey && fs.existsSync(path.join(process.cwd(), '.env'))) {
+      try {
+        const envContent = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf-8');
+        const match = envContent.match(/GEMINI_API_KEY=([^\s\r\n]+)/);
+        if (match && match[1]) {
+          apiKey = match[1].trim();
+          process.env.GEMINI_API_KEY = apiKey;
+        }
+      } catch (e) {}
+    }
+
     if (!apiKey) {
       console.warn('[AUTONOMOUS AUDIT] GEMINI_API_KEY is not configured on the server. Skipping background audit.');
       return;
@@ -7309,10 +7320,21 @@ app.post('/api/gemini/audit-trades', async (req, res) => {
       return res.status(404).json({ error: 'No trade history available to audit. Execute trades first to gather data.' });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    let apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey && fs.existsSync(path.join(process.cwd(), '.env'))) {
+      try {
+        const envContent = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf-8');
+        const match = envContent.match(/GEMINI_API_KEY=([^\s\r\n]+)/);
+        if (match && match[1]) {
+          apiKey = match[1].trim();
+          process.env.GEMINI_API_KEY = apiKey;
+        }
+      } catch (e) {}
+    }
+
     if (!apiKey) {
       return res.status(400).json({ 
-        error: 'Gemini API key is not configured on the server. Please ensure the GEMINI_API_KEY environment variable is set.' 
+        error: 'Gemini API key is not configured on the server. Please ensure the GEMINI_API_KEY environment variable is set in your .env file or server environment.' 
       });
     }
 
