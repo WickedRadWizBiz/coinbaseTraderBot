@@ -48,6 +48,10 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
 
       const data = await response.json();
       if (!response.ok) {
+        const detailsStr = data.details ? String(data.details) : '';
+        if (detailsStr.includes('quota') || detailsStr.includes('429') || detailsStr.includes('RESOURCE_EXHAUSTED') || detailsStr.includes('Quota exceeded')) {
+          throw new Error('Gemini API free tier quota exceeded. Please wait 15–30 seconds for the rate limits to clear, then try again. Fallback models have been engaged.');
+        }
         throw new Error(data.error || 'Failed to complete quantitative audit.');
       }
 

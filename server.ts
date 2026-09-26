@@ -3959,18 +3959,45 @@ Output Requirement:
 - Generate a highly specific prompt directed at an AI Studio Coding Agent to fix the underlying codebase issues.
 - You MUST output this prompt inside a standard Markdown code block (\`\`\`markdown) so it renders with a copy button in the UI.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { text: directive },
-            { text: `Here is the batch of 20 trades:\n${tradeLogsText}` }
+    const candidateModels = [
+      'gemini-flash-latest',
+      'gemini-3.8-flash',
+      'gemini-3.6-flash',
+      'gemini-3.1-flash-lite',
+      'gemini-3.1-pro-preview'
+    ];
+
+    let response: any = null;
+    let lastErr: any = null;
+
+    for (const model of candidateModels) {
+      try {
+        console.log(`[AUTONOMOUS AUDIT] Attempting to generate audit using model: ${model}...`);
+        response = await ai.models.generateContent({
+          model,
+          contents: [
+            {
+              role: "user",
+              parts: [
+                { text: directive },
+                { text: `Here is the batch of 20 trades:\n${tradeLogsText}` }
+              ]
+            }
           ]
+        });
+        if (response) {
+          console.log(`[AUTONOMOUS AUDIT] Successfully generated audit with model: ${model}`);
+          break;
         }
-      ]
-    });
+      } catch (err: any) {
+        lastErr = err;
+        console.warn(`[AUTONOMOUS AUDIT] Model ${model} failed: ${err?.message || err}. Trying next fallback...`);
+      }
+    }
+
+    if (!response) {
+      throw lastErr || new Error("All candidate Gemini models failed to generate the audit report.");
+    }
 
     const report = response.text || '';
     
@@ -7184,18 +7211,45 @@ Output Requirement:
 - Generate a highly specific prompt directed at an AI Studio Coding Agent to fix the underlying codebase issues.
 - You MUST output this prompt inside a standard Markdown code block (\`\`\`markdown) so it renders with a copy button in the UI.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { text: directive },
-            { text: `Here is the batch of ${trades.length} trades:\n${tradeLogsText}` }
+    const candidateModels = [
+      'gemini-flash-latest',
+      'gemini-3.8-flash',
+      'gemini-3.6-flash',
+      'gemini-3.1-flash-lite',
+      'gemini-3.1-pro-preview'
+    ];
+
+    let response: any = null;
+    let lastErr: any = null;
+
+    for (const model of candidateModels) {
+      try {
+        console.log(`[ON-DEMAND AUDIT] Attempting generateContent using model: ${model}...`);
+        response = await ai.models.generateContent({
+          model,
+          contents: [
+            {
+              role: "user",
+              parts: [
+                { text: directive },
+                { text: `Here is the batch of ${trades.length} trades:\n${tradeLogsText}` }
+              ]
+            }
           ]
+        });
+        if (response) {
+          console.log(`[ON-DEMAND AUDIT] Successfully generated audit with model: ${model}`);
+          break;
         }
-      ]
-    });
+      } catch (err: any) {
+        lastErr = err;
+        console.warn(`[ON-DEMAND AUDIT] Model ${model} failed: ${err?.message || err}. Trying next fallback...`);
+      }
+    }
+
+    if (!response) {
+      throw lastErr || new Error("All candidate Gemini models failed to generate the audit report.");
+    }
 
     res.json({
       success: true,
