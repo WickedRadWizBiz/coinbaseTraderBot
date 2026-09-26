@@ -153,7 +153,31 @@ export class TradeDatabaseManager {
   }
 
   /**
-   * Validates that trade data is strictly grounded in real market data and NOT simulated/mock entries.
+   * Enforces strict regex & taxonomy boundary filtering to isolate crypto neural prediction pipelines
+   * from non-crypto instruments (e.g. sports contracts, elections, CPI).
+   */
+  public static isAllowedCryptoAsset(symbol: string): boolean {
+    if (!symbol || typeof symbol !== 'string') return false;
+    const upper = symbol.trim().toUpperCase();
+    if (
+      upper.includes('MATCH') ||
+      upper.includes('CHALLENGER') ||
+      upper.includes('ATP') ||
+      upper.includes('WTA') ||
+      upper.includes('SETWINNER') ||
+      upper.includes('GAME') ||
+      upper.includes('ELECTION') ||
+      upper.includes('FED') ||
+      upper.includes('CPI')
+    ) {
+      return false;
+    }
+    const cryptoRegex = /^KX(BTC|ETH|SOL|DOGE|XRP|SHIB|HYPE|WLD|AVA|UNI|LINK|ADA|NEAR|APT)(15M|1H|4H|PERP|DAILY)?(-[A-Z0-9]+)?$/i;
+    return cryptoRegex.test(upper) || upper.includes('BTC') || upper.includes('ETH') || upper.includes('SOL') || upper.includes('DOGE') || upper.includes('XRP') || upper.includes('SHIB') || upper.includes('HYPE') || upper.includes('WLD');
+  }
+
+  /**
+   * Validates that trade data satisfies strict SR 11-7 model compliance standards.
    */
   public static validateRealTradeData(
     asset: string,
@@ -164,6 +188,10 @@ export class TradeDatabaseManager {
   ): { isValid: boolean; reason?: string } {
     if (!asset || typeof asset !== 'string' || asset.trim() === '') {
       return { isValid: false, reason: 'Missing or empty asset symbol' };
+    }
+
+    if (!TradeDatabaseManager.isAllowedCryptoAsset(asset)) {
+      return { isValid: false, reason: `Asset '${asset}' failed crypto taxonomy boundary validation (non-crypto instrument prohibited)` };
     }
 
     const upperAsset = asset.toUpperCase();
@@ -178,14 +206,14 @@ export class TradeDatabaseManager {
     }
 
     if (typeof targetPrice !== 'number' || isNaN(targetPrice) || !isFinite(targetPrice) || targetPrice <= 0) {
-      return { isValid: false, reason: `Invalid targetPrice: ${targetPrice}` };
+      return { isValid: false, reason: `SR 11-7 Schema Reject: Invalid zero or negative targetPrice: ${targetPrice}` };
     }
 
     if (typeof actualPrice !== 'number' || isNaN(actualPrice) || !isFinite(actualPrice) || actualPrice <= 0) {
-      return { isValid: false, reason: `Invalid actualPrice: ${actualPrice}` };
+      return { isValid: false, reason: `SR 11-7 Schema Reject: Invalid zero or negative actualPrice: ${actualPrice}` };
     }
 
-    // Check JSON payload for mock / simulation flags
+    // Check JSON payload for non-zero pricing fields and featureSnapshot
     if (heavyJsonStr) {
       try {
         const parsed = JSON.parse(heavyJsonStr);
@@ -194,6 +222,18 @@ export class TradeDatabaseManager {
         }
         if (parsed.patternType && (parsed.patternType.includes('MOCK') || parsed.patternType.includes('SIMULATED'))) {
           return { isValid: false, reason: `Pattern type '${parsed.patternType}' is mock/simulated` };
+        }
+
+        // SR 11-7 Schema Validation: Must contain non-empty featureSnapshot and non-zero entry/exit pricing
+        const snapshot = parsed.featureSnapshot || parsed.snapshot || parsed.entryFeatures;
+        if (!snapshot || typeof snapshot !== 'object' || Object.keys(snapshot).length === 0) {
+          return { isValid: false, reason: 'SR 11-7 Schema Reject: Trade featureSnapshot is missing or empty' };
+        }
+
+        const entryP = parsed.entryPrice || parsed.price || targetPrice;
+        const exitP = parsed.exitPrice || parsed.closePrice || actualPrice;
+        if (!entryP || entryP <= 0 || !exitP || exitP <= 0) {
+          return { isValid: false, reason: 'SR 11-7 Schema Reject: Zero-value pricing fields detected in trade record' };
         }
       } catch (e) {
         // invalid JSON string
