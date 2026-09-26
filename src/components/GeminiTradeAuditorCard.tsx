@@ -115,12 +115,11 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <span className={`px-2 py-0.5 border text-[10px] font-bold uppercase tracking-widest ${
-            totalTrades >= 20 
-              ? 'border-crypto-success text-crypto-success bg-crypto-success/10' 
-              : 'border-amber-500/50 text-amber-400 bg-amber-500/5'
-          }`}>
-            {totalTrades} / 20 TRADES INGESTED
+          <span className="px-2 py-0.5 border border-crypto-success text-crypto-success bg-crypto-success/10 text-[10px] font-bold uppercase tracking-widest">
+            {totalTrades} TRADES INGESTED
+          </span>
+          <span className="px-2 py-0.5 border border-[#808080]/30 text-[#a0a0a0] bg-[#808080]/5 text-[10px] font-bold uppercase tracking-widest">
+            Batch Progress: {totalTrades % 20 === 0 && totalTrades > 0 ? 20 : totalTrades % 20} / 20
           </span>
         </div>
       </div>

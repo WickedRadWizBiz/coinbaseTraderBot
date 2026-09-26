@@ -7,3 +7,24 @@ coverage
 *.log
 .env*
 !.env.example
+
+# Build artifacts
+dist
+dist/
+build
+build/
+
+# Dynamic bot states, memories, and logs
+bot_memory.json
+bot_memory_db.json
+plasticity_memory.json
+goal_reset_state.json
+market-context.json
+recovery_protocol.json
+report.json
+retraining_history.json
+*.json.tmp
+*.tmp
+*.pdf
+temp.txt
+server_debug.txt
