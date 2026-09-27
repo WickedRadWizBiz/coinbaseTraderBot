@@ -13,19 +13,38 @@ import math
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 
+from FeatureSnapshotService import FeatureSnapshotService, IncompleteFeatureSnapshotException
+from pre_trade_risk_manager import PreTradeRiskManager
+
+# Alias for backwards compatibility
+IncompleteFeatureStateError = IncompleteFeatureSnapshotException
+
 
 class FeatureVarianceGuard:
     """
     Prevents trading on frozen indicator pipelines.
     Calculates rolling 5-period variance of indicator inputs (RSI, MACD, Ichimoku).
-    Rejects signals if variance < 1e-6 epsilon.
+    Rejects signals if variance < 1e-6 epsilon or if static defaults persist.
     """
     def __init__(self, window_size: int = 5, epsilon: float = 1e-6):
         self.window_size = window_size
         self.epsilon = epsilon
         self.history: Dict[str, Dict[str, List[float]]] = {}
+        self.consecutive_rsi_50_count: Dict[str, int] = {}
 
-    def update_and_check(self, symbol: str, rsi: float, macd: float, ichimoku: float) -> Tuple[bool, str]:
+    def update_and_check(self, symbol: str, rsi: float, macd: float, ichimoku: float, atr: float = 0.012) -> Tuple[bool, str]:
+        # Safety Check for Static Defaults (RSI 50.0000000 and ATR 0.0010000)
+        if abs(float(rsi) - 50.0) < 1e-7 and abs(float(atr) - 0.001) < 1e-7:
+            raise IncompleteFeatureStateError(f"Static indicator pipeline defaults detected on {symbol}: RSI={rsi}, ATR={atr}")
+
+        if abs(float(rsi) - 50.0) < 1e-7:
+            c = self.consecutive_rsi_50_count.get(symbol, 0) + 1
+            self.consecutive_rsi_50_count[symbol] = c
+            if c >= 3:
+                raise IncompleteFeatureStateError(f"IncompleteFeatureStateError: RSI on {symbol} remained exactly 50.0 for {c} consecutive polls.")
+        else:
+            self.consecutive_rsi_50_count[symbol] = 0
+
         if symbol not in self.history:
             self.history[symbol] = {'rsi': [], 'macd': [], 'ichimoku': []}
         
@@ -48,6 +67,21 @@ class FeatureVarianceGuard:
                     return False, f"FEATURE_VARIANCE_HALT: Frozen {key} data stream (5-period variance {variance:.2e} < {self.epsilon})"
 
         return True, "OK"
+
+
+class RegimeGate:
+    """
+    RegimeGate execution controller filter.
+    If marketRegime == 'TRENDING_BEARISH', all 'YES' (Long) signals must be discarded
+    UNLESS VPIN (Volume Probability of Informed Trading) is < 0.10.
+    """
+    @staticmethod
+    def evaluate(market_regime: str, signal_direction: str, vpin: float = 0.22) -> Tuple[bool, str]:
+        if market_regime == 'TRENDING_BEARISH' and signal_direction == 'YES':
+            if vpin < 0.10:
+                return True, "REGIME_GATE_PASSED: Low VPIN (< 0.10) noise-driven exception allowed in TRENDING_BEARISH"
+            return False, f"REGIME_GATE_DISCARD: Long 'YES' position discarded in TRENDING_BEARISH regime (VPIN {vpin:.4f} >= 0.10)"
+        return True, "REGIME_GATE_PASSED"
 
 
 class AdverseSelectionCircuitBreaker:
@@ -99,12 +133,22 @@ class SignalGenerator:
         rsi: float,
         macd: float,
         ichimoku: float,
-        order_flow_imbalance: float = 0.0
-    ) -> Dict[str, Any]:
+        order_flow_imbalance: float = 0.0,
+        vpin: float = 0.22,
+        atr: float = 0.012
+    ) -> Optional[Dict[str, Any]]:
         """
         Evaluates trading signal against all QUANT-REMEDIATION-B00927 constraints.
+        Returns None or { 'status': 'REJECTED' } if safety defaults or halts occur.
         """
         sym_upper = symbol.upper()
+
+        # Validation Safety Check: Static Defaults (RSI = 50.0000000 and ATR = 0.0010000)
+        if (abs(float(rsi) - 50.0) < 1e-7 and abs(float(atr) - 0.001) < 1e-7) or abs(float(rsi) - 50.0) < 1e-7:
+            try:
+                self.variance_guard.update_and_check(sym_upper, rsi, macd, ichimoku, atr)
+            except IncompleteFeatureStateError:
+                return None  # Return null for safety as required by validation suite
 
         # 1. Check Adverse Selection Circuit Breaker
         is_blacklisted, rem_sec = self.adverse_breaker.is_symbol_blacklisted(sym_upper)
@@ -116,20 +160,24 @@ class SignalGenerator:
             }
 
         # 2. Feature Variance Guard
-        var_ok, var_msg = self.variance_guard.update_and_check(sym_upper, rsi, macd, ichimoku)
-        if not var_ok:
-            return {
-                'status': 'REJECTED',
-                'reason': 'FROZEN_INDICATOR_DATA',
-                'details': var_msg
-            }
+        try:
+            var_ok, var_msg = self.variance_guard.update_and_check(sym_upper, rsi, macd, ichimoku, atr)
+            if not var_ok:
+                return {
+                    'status': 'REJECTED',
+                    'reason': 'FROZEN_INDICATOR_DATA',
+                    'details': var_msg
+                }
+        except IncompleteFeatureStateError as err:
+            return None  # Return null for safety
 
-        # 3. Hard Market Regime Constraint (Zero YES/Long trades permitted in Trending Bearish)
-        if market_regime == 'TRENDING_BEARISH' and signal_direction == 'YES':
+        # 3. RegimeGate Filter (Discard YES in TRENDING_BEARISH unless VPIN < 0.10)
+        regime_ok, regime_msg = RegimeGate.evaluate(market_regime, signal_direction, vpin)
+        if not regime_ok:
             return {
                 'status': 'REJECTED',
-                'reason': 'REGIME_MISMATCH',
-                'details': "Strict constraint: Zero YES (Long) signals allowed in TRENDING_BEARISH regime"
+                'reason': 'REGIME_GATE_DISCARD',
+                'details': regime_msg
             }
 
         # 4. USDT Dominance Altcoin Long Veto (Positive slope / delta > 0)
@@ -149,5 +197,7 @@ class SignalGenerator:
             'rsi': rsi,
             'macd': macd,
             'ichimoku': ichimoku,
+            'vpin': vpin,
+            'atr': atr,
             'order_flow_imbalance': order_flow_imbalance
         }
