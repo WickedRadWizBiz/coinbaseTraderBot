@@ -29,9 +29,10 @@ export class SlippageEngine {
     if (sym.includes('BTC')) return 120.0;
     if (sym.includes('ETH')) return 65.0;
     if (sym.includes('SOL')) return 40.0;
+    if (sym.includes('ADA') || sym.includes('KXADA')) return 150.0;
     if (sym.includes('HYPE') || sym.includes('KXHYPE')) return 12.0;
-    if (sym.includes('SHIB') || sym.includes('KXSHIB')) return 15.0;
-    if (sym.includes('DOGE') || sym.includes('XRP')) return 20.0;
+    if (sym.includes('SHIB') || sym.includes('KXSHIB')) return 150.0;
+    if (sym.includes('DOGE') || sym.includes('XRP')) return 60.0;
     if (sym.includes('WLD')) return 18.0;
     return 25.0; // Default generic prediction market depth
   }
@@ -109,13 +110,16 @@ export class SlippageEngine {
     const slippageUsd = Math.max(0.0001, parseFloat(Math.abs(fillPrice - targetPrice).toFixed(4)));
     const slippageBps = parseFloat(((slippageUsd / Math.max(0.01, targetPrice)) * 10000).toFixed(2));
 
-    // Institutional Implementation Shortfall equation:
-    // IS_USD = OrderSize * ( |ExecutionPrice - ArrivalPriceMid| + HalfSpread + gamma * Volatility_ATR * sqrt(OrderSize / MarketDepth) ) * OFI_Multiplier
+    // Institutional Implementation Shortfall equation normalized by order quantity & unit price:
+    // IS_USD = OrderSize * ( |ExecutionPrice - ArrivalPriceMid| + HalfSpread + gamma * (Volatility_ATR * targetPrice) * sqrt(OrderSize / MarketDepth) ) * OFI_Multiplier
     const halfSpread = 0.0005 * Math.max(0.01, targetPrice);
     const gamma = 1.0;
-    const depthImpact = gamma * atr * Math.sqrt(size / depthL1);
-    const rawShortfallPerUnit = Math.abs(fillPrice - midAtSignal) + halfSpread + depthImpact;
-    const implementationShortfallUsd = parseFloat((size * rawShortfallPerUnit * ofiMultiplier).toFixed(4));
+    const depthImpact = gamma * (atr * targetPrice) * Math.sqrt(size / depthL1);
+    const priceDelta = Math.abs(fillPrice - midAtSignal);
+    const rawShortfallPerUnit = priceDelta + halfSpread + depthImpact;
+    const totalNotional = size * targetPrice;
+    const computedShortfall = size * rawShortfallPerUnit * ofiMultiplier;
+    const implementationShortfallUsd = parseFloat(Math.min(totalNotional * 0.25, Math.max(0.0001, computedShortfall)).toFixed(4));
 
     return {
       fillPrice,

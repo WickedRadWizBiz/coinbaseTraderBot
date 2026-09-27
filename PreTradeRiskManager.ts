@@ -15,6 +15,9 @@ export interface PreTradeEvaluationParams {
   symbol: string;
   side: 'YES' | 'NO';
   marketRegime: string;
+  ichimokuState?: string;
+  ichimokuCloudState?: string;
+  orderFlowImbalance?: number;
   deltaUsdtD: number;
   usdtDominanceSignal?: 'UP' | 'DOWN' | 'NEUTRAL';
   rsi: number;
@@ -27,7 +30,7 @@ export interface PreTradeEvaluationParams {
 
 export interface PreTradeEvaluationResult {
   allowed: boolean;
-  code: 'APPROVED' | 'REGIME_VETO' | 'USDT_DOMINANCE_VETO' | 'FEATURE_STASIS_VETO' | 'ADVERSE_SELECTION_VETO' | 'INSUFFICIENT_BUFFER_VETO';
+  code: 'APPROVED' | 'REGIME_VETO' | 'USDT_DOMINANCE_VETO' | 'FEATURE_STASIS_VETO' | 'ADVERSE_SELECTION_VETO' | 'INSUFFICIENT_BUFFER_VETO' | 'TOXIC_OFI_VETO';
   reason?: string;
   recommendedSL: number;
   recommendedTP: number;
@@ -48,20 +51,46 @@ export class PreTradeRiskManager {
     const sym = (params.symbol || '').toUpperCase();
     const isAltcoin = this.ALTCOIN_IDENTIFIERS.some(alt => sym.includes(alt));
     const regime = params.marketRegime || 'CHOPPY_SIDEWAYS';
+    const ichimokuState = params.ichimokuCloudState || params.ichimokuState || 'NEUTRAL_IN_CLOUD';
+    const ichimokuCloudState = ichimokuState;
+    const marketRegime = regime;
     const side = params.side;
+    const ofi = params.orderFlowImbalance ?? 0.0;
 
-    // 1. Adverse Selection Circuit Breaker Check
+    // 1. Adverse Selection Circuit Breaker Check (30s Back-Off)
     if (params.isBlacklisted) {
       return {
         allowed: false,
         code: 'ADVERSE_SELECTION_VETO',
-        reason: `[ADVERSE SELECTION REJECTION] Suppressed trade on ${params.symbol}. Symbol is blacklisted for toxic order flow harvesting (${params.blacklistRemainingSec || 3600}s remaining).`,
+        reason: `[ADVERSE SELECTION REJECTION] Suppressed trade on ${params.symbol}. Symbol is in toxic markout back-off (${params.blacklistRemainingSec || 30}s remaining).`,
         recommendedSL: -0.02,
         recommendedTP: 0.10
       };
     }
 
-    // 2. Candle Buffer Depth Warm-Up Check
+    // 2. Toxic Order Flow Imbalance (OFI) Threshold Gate
+    // If orderFlowImbalance < -0.10, inhibit buy / YES orders (collapsing bid)
+    if (side === 'YES' && ofi < -0.10) {
+      return {
+        allowed: false,
+        code: 'TOXIC_OFI_VETO',
+        reason: `[TOXIC OFI COLLAPSE VETO] Inhibit BUY on ${params.symbol}: Order Flow Imbalance (${ofi.toFixed(4)}) < -0.10 indicates collapsing bid depth.`,
+        recommendedSL: -0.02,
+        recommendedTP: 0.10
+      };
+    }
+    // If orderFlowImbalance > +0.10, inhibit sell / NO orders (surging buy pressure)
+    if (side === 'NO' && ofi > 0.10) {
+      return {
+        allowed: false,
+        code: 'TOXIC_OFI_VETO',
+        reason: `[TOXIC OFI SURGE VETO] Inhibit SELL on ${params.symbol}: Order Flow Imbalance (${ofi.toFixed(4)}) > +0.10 indicates surging buy book.`,
+        recommendedSL: -0.02,
+        recommendedTP: 0.10
+      };
+    }
+
+    // 3. Candle Buffer Depth Warm-Up Check
     if (params.candleCount !== undefined && params.candleCount < 50) {
       return {
         allowed: false,
@@ -72,7 +101,7 @@ export class PreTradeRiskManager {
       };
     }
 
-    // 3. Feature Stasis & Static Default Check
+    // 4. Feature Stasis & Static Default Check
     if (Math.abs(params.rsi - 50.0) < 1e-6 && Math.abs(params.atr - 0.001) < 1e-6) {
       return {
         allowed: false,
@@ -83,32 +112,25 @@ export class PreTradeRiskManager {
       };
     }
 
-    // 4. Macro Regime Constraint (TRENDING_BEARISH Lockout)
-    if (regime === 'TRENDING_BEARISH' && side === 'YES') {
-      if (isAltcoin) {
+    // 5. HARD REGIME LOGIC GATE (Macro Alignment):
+    // Zero 'YES' (Long) trades permitted in TRENDING_BEARISH or BEARISH_CLOUD across all assets
+    if (side === 'YES') {
+      let allowLong = true;
+      if (marketRegime === 'TRENDING_BEARISH' || ichimokuCloudState === 'BEARISH_CLOUD') {
+        allowLong = false;
+      }
+      if (!allowLong) {
         return {
           allowed: false,
           code: 'REGIME_VETO',
-          reason: `[REGIME FILTER REJECTION] Rejected YES (Long) trade on altcoin ${params.symbol}. Strict constraint: Zero YES (Long) altcoin positions permitted in TRENDING_BEARISH regime.`,
+          reason: `[HARD REGIME GATE VETO] Prohibited YES (Long) on ${params.symbol}: Strict constraint active in ${marketRegime} / ${ichimokuCloudState}. Must exit cloud and confirm bullish cross.`,
           recommendedSL: -0.02,
           recommendedTP: 0.10
         };
-      } else {
-        // BTC or non-altcoin: Only allow if VPIN < 0.10 (noise-driven exception)
-        const vpin = params.vpin ?? 0.22;
-        if (vpin >= 0.10) {
-          return {
-            allowed: false,
-            code: 'REGIME_VETO',
-            reason: `[REGIME GATE DISCARD] Discarded YES (Long) trade on ${params.symbol} in TRENDING_BEARISH regime (VPIN ${vpin.toFixed(4)} >= 0.10).`,
-            recommendedSL: -0.02,
-            recommendedTP: 0.10
-          };
-        }
       }
     }
 
-    // 5. USDT Dominance Positive Delta Altcoin Long Veto
+    // 6. USDT Dominance Positive Delta Altcoin Long Veto
     if (isAltcoin && side === 'YES') {
       const deltaUsdt = params.deltaUsdtD || 0;
       if (deltaUsdt > 0.0 || params.usdtDominanceSignal === 'UP') {
@@ -122,7 +144,7 @@ export class PreTradeRiskManager {
       }
     }
 
-    // 6. Dynamic Volatility-Based Stop-Loss & Take-Profit Calibration
+    // 7. Dynamic Volatility-Based Stop-Loss & Take-Profit Calibration
     const liveAtr = Math.max(0.005, params.atr);
     let recommendedSL = -0.02;
     let recommendedTP = 0.10;

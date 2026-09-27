@@ -57,12 +57,34 @@ export class IncompleteFeatureSnapshotError extends Error {
   }
 }
 
+export class StaleFeatureException extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StaleFeatureException';
+  }
+}
+
 export class FeatureExtractor {
   public static readonly MIN_WARMUP_DEPTH = 50;
+  private static readonly FEATURE_BUFFER_TTL_MS = 500; // Strict 500ms TTL
+  private static featureCache: Map<string, { snapshot: FeatureSnapshot; timestampMs: number }> = new Map();
+
+  /**
+   * Forces buffer clearing and cache invalidation (Anti-Stagnation).
+   */
+  public static clearBuffer(symbol?: string): void {
+    if (symbol) {
+      this.featureCache.delete(symbol.toUpperCase());
+    } else {
+      this.featureCache.clear();
+    }
+  }
 
   /**
    * Calculates point-in-time technical features from shift-1 closed bars.
+   * Enforces 500ms TTL and checks for stale signal timestamp > 1000ms.
    * Throws IncompleteFeatureSnapshotError if candle buffer depth < 50.
+   * Throws StaleFeatureException if feature staleness exceeds 1 second.
    */
   public static extractFeatures(
     symbol: string,
@@ -73,8 +95,36 @@ export class FeatureExtractor {
       orderFlowImbalance?: number;
       marketRegime?: string;
       fundingRate?: number;
+      forceRecalculate?: boolean;
     }
   ): FeatureSnapshot {
+    const key = (symbol || '').toUpperCase();
+    const nowMs = Date.now();
+
+    // Check 500ms TTL Cache (unless forced recalculation)
+    if (!context?.forceRecalculate && this.featureCache.has(key)) {
+      const cached = this.featureCache.get(key)!;
+      const ageMs = nowMs - cached.timestampMs;
+      if (ageMs <= this.FEATURE_BUFFER_TTL_MS) {
+        // Verify high-resolution timestamp staleness (must not exceed 1000ms)
+        const nsDeltaMs = (nowMs * 1000000 - cached.snapshot.nanosecondsAtSignal) / 1000000;
+        if (nsDeltaMs > 1000) {
+          this.featureCache.delete(key);
+          throw new StaleFeatureException(
+            `[STALE_FEATURE_EXCEPTION] Cached feature snapshot on ${symbol} exceeded 1s delta (${nsDeltaMs.toFixed(1)}ms). Invalidation triggered.`
+          );
+        }
+        return {
+          ...cached.snapshot,
+          nanosecondsAtSignal: (nowMs * 1000000) + (process.hrtime()[1] % 1000000),
+          signalGenerationNs: (nowMs * 1000000) + (process.hrtime()[1] % 1000000),
+          timestampIso: new Date(nowMs).toISOString()
+        };
+      } else {
+        this.featureCache.delete(key); // Evict stale buffer
+      }
+    }
+
     if (!candles || candles.length < this.MIN_WARMUP_DEPTH) {
       const depth = candles ? candles.length : 0;
       throw new IncompleteFeatureSnapshotError(
@@ -206,7 +256,7 @@ export class FeatureExtractor {
     const hr = process.hrtime();
     const signalGenerationNs = (Date.now() * 1000000) + (hr[1] % 1000000);
 
-    return {
+    const snapshot: FeatureSnapshot = {
       nanosecondsAtSignal: signalGenerationNs,
       timestampIso: new Date().toISOString(),
       signalGenerationNs,
@@ -229,6 +279,9 @@ export class FeatureExtractor {
       fundingRate: context?.fundingRate ?? 0,
       marketRegime: context?.marketRegime ?? 'CHOPPY_SIDEWAYS'
     };
+
+    this.featureCache.set(key, { snapshot, timestampMs: nowMs });
+    return snapshot;
   }
 
   private static calculateEMA(values: number[], period: number): number {
