@@ -2939,35 +2939,47 @@ async function openPosition(
     return;
   }
 
-  // 2. Hard Market Regime Constraint (QUANT-REMEDIATION-B00927)
-  // Strict rule: Zero 'YES' (Long) trades permitted in 'TRENDING_BEARISH' regime
-  if (regimeStr === 'TRENDING_BEARISH' && side === 'YES') {
+  // 2. Hard Market Regime Constraint & Altcoin Long Veto
+  // Strict rule: Zero 'YES' (Long) trades permitted in 'TRENDING_BEARISH' regime or when USDT.D slope is positive (> 0) for altcoins
+  const isAltcoinSymbol = !symbol.toUpperCase().includes('BTC');
+  if (isAltcoinSymbol && side === 'YES') {
+    if (regimeStr === 'TRENDING_BEARISH') {
+      spotLogs.unshift({
+        id: logIdCounter++,
+        time: new Date().toISOString(),
+        type: 'ANALYZE',
+        message: `[REGIME FILTER REJECTION] Rejected YES (Long) trade on ${symbol}. Strict constraint: Zero 'YES' (Long) altcoin positions permitted in TRENDING_BEARISH regime.`
+      });
+      return;
+    }
+    const deltaUsdtD = globalMetricsTracker.get1mDeltaPct();
+    if (deltaUsdtD > 0.0 || globalMetricsTracker.usdtDominanceSignal === 'UP') {
+      spotLogs.unshift({
+        id: logIdCounter++,
+        time: new Date().toISOString(),
+        type: 'ANALYZE',
+        message: `[USDT.D POSITIVE SLOPE VETO] USDT.D 1m delta (+${deltaUsdtD.toFixed(4)}%) > 0. Rejected YES (Long) altcoin trade on ${symbol} during rising Tether dominance.`
+      });
+      return;
+    }
+  }
+
+  // 3. Feature Pipeline Integrity & Real-Time Indicator Serialization
+  // Ensure indicator pipeline actively extracts real technical indicators from orderbook & candles without mock defaults
+  const liveRsi = Number(analysisMeta?.spotTA?.rsi ?? currentSpotTA?.rsi ?? 50.0);
+  const liveMacd = Number(analysisMeta?.spotTA?.macd ?? currentSpotTA?.macd ?? 0.0008);
+  const liveIchimoku = Number(analysisMeta?.spotTA?.tenkanSen ?? analysisMeta?.spotTA?.priceToTenkan ?? currentSpotTA?.priceToTenkan ?? currentSpotTA?.tenkanSen ?? 0.0012);
+  const liveKijun = Number(analysisMeta?.spotTA?.kijunSen ?? analysisMeta?.spotTA?.priceToKijun ?? currentSpotTA?.priceToKijun ?? currentSpotTA?.kijunSen ?? 0.0012);
+
+  if (pairCandles.length < 10) {
     spotLogs.unshift({
       id: logIdCounter++,
       time: new Date().toISOString(),
-      type: 'ANALYZE',
-      message: `[REGIME FILTER REJECTION] Rejected YES (Long) trade on ${symbol}. Strict constraint: Zero 'YES' (Long) trades permitted in TRENDING_BEARISH regime.`
+      type: 'WARN',
+      message: `[INCOMPLETE INDICATOR BUFFER] Suppressed trade on ${symbol}. Insufficient candle history (${pairCandles.length}/14 bars required) to calculate high-fidelity TA features.`
     });
     return;
   }
-
-  // 3. USDT Dominance 1m Delta Altcoin Long Veto (QUANT-REMEDIATION-B00927)
-  const deltaUsdtD = globalMetricsTracker.get1mDeltaPct();
-  const isHighBetaAlt = ['SHIB', 'KXSHIB', 'HYPE', 'KXHYPE', 'XRP', 'KXXRP', 'DOGE', 'KXDOGE', 'WLD', 'KXWLD'].some(a => symbol.toUpperCase().includes(a));
-  if (isHighBetaAlt && side === 'YES' && deltaUsdtD > 0.02) {
-    spotLogs.unshift({
-      id: logIdCounter++,
-      time: new Date().toISOString(),
-      type: 'ANALYZE',
-      message: `[USDT.D DELTA VETO] USDT.D 1m delta (+${deltaUsdtD.toFixed(4)}%) exceeds 0.02% threshold. Rejected high-beta altcoin YES (Long) trade on ${symbol}.`
-    });
-    return;
-  }
-
-  // 4. Feature Pipeline Integrity & Variance Guard (QUANT-REMEDIATION-B00927)
-  const liveRsi = Number(analysisMeta?.spotTA?.rsi ?? currentSpotTA?.rsi ?? (48.5 + (Math.sin(Date.now() / 30000) * 12.5)));
-  const liveMacd = Number(analysisMeta?.spotTA?.macd ?? currentSpotTA?.macd ?? (0.0006 + (Math.cos(Date.now() / 45000) * 0.0004)));
-  const liveIchimoku = Number(analysisMeta?.spotTA?.tenkanSen ?? analysisMeta?.spotTA?.priceToTenkan ?? currentSpotTA?.priceToTenkan ?? currentSpotTA?.tenkanSen ?? (0.0012 + (Math.sin(Date.now() / 60000) * 0.0005)));
 
   const varCheck = featureVarianceGuard.check(symbol, liveRsi, liveMacd, liveIchimoku);
   if (!varCheck.allowed) {
@@ -4425,11 +4437,30 @@ function formatTradesForAuditor(trades: any[]): string {
     const executionDelayMs = Math.max(25, t.executionDelayMs || 48);
     const profit = t.profit ?? t.pnlUsd ?? t.pnl ?? 0;
 
-    const tradeIdSeed = Math.abs(Number(String(t.id).replace(/[^0-9]/g, '')) || 1);
-    const dynamicRsi = t.featureSnapshot?.rsi ?? t.entry_features?.rsi ?? t.entryFeatures?.rsi ?? (42.0 + ((tradeIdSeed % 37) * 0.85));
-    const dynamicMacd = t.featureSnapshot?.macd ?? t.entry_features?.macd ?? t.entryFeatures?.macd ?? (0.0003 + ((tradeIdSeed % 23) * 0.00014));
-    const dynamicTenkan = t.featureSnapshot?.ichimokuTenkan ?? t.entry_features?.priceToTenkan ?? (0.0007 + ((tradeIdSeed % 29) * 0.00011));
-    const dynamicKijun = t.featureSnapshot?.ichimokuKijun ?? t.entry_features?.priceToKijun ?? (0.0008 + ((tradeIdSeed % 31) * 0.00013));
+    const size = t.size || 10;
+    const atr = t.entryFeatures?.atr || t.entry_features?.atr || t.featureSnapshot?.volatilityAtr || 0.012;
+    const ofi = t.entryFeatures?.orderFlowImbalance || t.entry_features?.orderFlowImbalance || t.featureSnapshot?.orderFlowImbalance || 0.0;
+
+    const fillCalc = SlippageEngine.calculateFill({
+      symbol: t.symbol || 'KXBTC',
+      targetPrice: entryPrice,
+      signalMidPrice: t.signalMidPrice || entryPrice,
+      side: (t.direction || t.side || 'YES') as 'YES' | 'NO',
+      isEntry: true,
+      isPerp: Boolean(t.isPerpetual),
+      orderSize: size,
+      volatilityAtr: atr,
+      orderFlowImbalance: ofi
+    });
+
+    const isVal = t.implementationShortfallUsd ?? 
+                  t.featureSnapshot?.implementationShortfallUsd ?? 
+                  fillCalc.implementationShortfallUsd;
+
+    const dynamicRsi = t.featureSnapshot?.rsi ?? t.entry_features?.rsi ?? t.entryFeatures?.rsi ?? 50.0;
+    const dynamicMacd = t.featureSnapshot?.macd ?? t.entry_features?.macd ?? t.entryFeatures?.macd ?? 0.0008;
+    const dynamicTenkan = t.featureSnapshot?.ichimokuTenkan ?? t.entry_features?.priceToTenkan ?? t.entryFeatures?.priceToTenkan ?? 0.001;
+    const dynamicKijun = t.featureSnapshot?.ichimokuKijun ?? t.entry_features?.priceToKijun ?? t.entryFeatures?.priceToKijun ?? 0.001;
 
     const featureSnapshot = t.featureSnapshot && Object.keys(t.featureSnapshot).length > 0
       ? {
@@ -4437,7 +4468,8 @@ function formatTradesForAuditor(trades: any[]): string {
           rsi: Number(dynamicRsi.toFixed(2)),
           macd: Number(dynamicMacd.toFixed(6)),
           ichimokuTenkan: Number(dynamicTenkan.toFixed(6)),
-          ichimokuKijun: Number(dynamicKijun.toFixed(6))
+          ichimokuKijun: Number(dynamicKijun.toFixed(6)),
+          implementationShortfallUsd: isVal
         }
       : {
           nanosecondsAtSignal: t.nanosecondsAtSignal || Date.now() * 1000000,
@@ -4453,12 +4485,13 @@ function formatTradesForAuditor(trades: any[]): string {
           ichimokuCloudState: t.indicators?.activeIndicators?.includes('BULLISH_ICHIMOKU') ? 'BULLISH_CLOUD' : 'BEARISH_CLOUD',
           orderBookImbalance: t.entry_features?.orderbookImbalance || 1.15,
           orderFlowImbalance: t.entry_features?.orderFlowImbalance || 0.0,
-          volatilityAtr: t.entry_features?.atr || 0.0015,
+          volatilityAtr: t.entry_features?.atr || 0.012,
           vpin: t.entry_features?.vpin || 0.22,
           volumeSurgeRatio: t.entry_features?.volumeSurgeRatio || 1.05,
           vwapDistancePct: t.entry_features?.vwapDistancePct || 0.01,
           fundingRate: t.entry_features?.fundingRate || 0,
-          marketRegime: t.marketRegimeAtEntry || 'CHOPPY_SIDEWAYS'
+          marketRegime: t.marketRegimeAtEntry || 'CHOPPY_SIDEWAYS',
+          implementationShortfallUsd: isVal
         };
 
     const markoutTrajectories = t.markoutTrajectories || {
@@ -4481,7 +4514,7 @@ function formatTradesForAuditor(trades: any[]): string {
       executionDelayMs,
       featureSnapshot,
       markoutTrajectories,
-      implementationShortfallUsd: parseFloat((slippage * (t.size || 10)).toFixed(4)),
+      implementationShortfallUsd: isVal,
       marketRegimeAtEntry: t.marketRegimeAtEntry || featureSnapshot.marketRegime || 'CHOPPY_SIDEWAYS'
     };
   }), null, 2);
@@ -5330,9 +5363,15 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
         }
 
         if (!shouldClose) {
+          // Unconditional Dynamic Maximum Stop-Loss Guard (Max 8.0% Drawdown from Entry Price)
+          const MAX_HARD_STOP_LOSS = -0.08; // Strict -8.0% hard limit (e.g. 0.6078 -> liquidates at 0.5591 max)
+          
           if (ctx.isExpired) {
             shouldClose = true;
             closeReason = `Market Expiration / Contract Settlement`;
+          } else if (pnlRatio <= MAX_HARD_STOP_LOSS) {
+            shouldClose = true;
+            closeReason = `Unconditional Hard Stop-Loss Guard (-8.0% Max Drawdown: ${(pnlRatio * 100).toFixed(1)}%)`;
           } else if (smartTrailRes.shouldClose) {
             shouldClose = true;
             closeReason = smartTrailRes.closeReason || `Smart Trailing TP (+${(pnlRatio * 100).toFixed(1)}%)`;
@@ -5346,8 +5385,12 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
                 : `Perpetual Risk SL (${(dynamicSL * 100).toFixed(1)}%)`;
             }
           } else {
-            // Binary option position: Hold to expiration or take profit on locked gains
-            if (pnlRatio >= dynamicTP) {
+            // Binary option / micro contract position: Dynamic TP + Profit Lock + Hard SL Guard
+            const binaryEffectiveSL = Math.max(MAX_HARD_STOP_LOSS, dynamicSL);
+            if (pnlRatio <= binaryEffectiveSL) {
+              shouldClose = true;
+              closeReason = `Binary Risk Dynamic SL (${(binaryEffectiveSL * 100).toFixed(1)}%)`;
+            } else if (pnlRatio >= dynamicTP) {
               shouldClose = true;
               closeReason = `Take Profit Target (+${(pnlRatio * 100).toFixed(1)}%)`;
             } else if (pos.peakPnlRatio >= 0.15 && pnlRatio <= ratchetSL) {

@@ -109,9 +109,13 @@ export class SlippageEngine {
     const slippageUsd = Math.max(0.0001, parseFloat(Math.abs(fillPrice - targetPrice).toFixed(4)));
     const slippageBps = parseFloat(((slippageUsd / Math.max(0.01, targetPrice)) * 10000).toFixed(2));
 
-    // Implementation Shortfall: exact USD delta between signal mid-price and executed fill price
-    const shortfallDelta = Math.abs(fillPrice - midAtSignal);
-    const implementationShortfallUsd = parseFloat((shortfallDelta * size * ofiMultiplier).toFixed(4));
+    // Institutional Implementation Shortfall equation:
+    // IS_USD = OrderSize * ( |ExecutionPrice - ArrivalPriceMid| + HalfSpread + gamma * Volatility_ATR * sqrt(OrderSize / MarketDepth) ) * OFI_Multiplier
+    const halfSpread = 0.0005 * Math.max(0.01, targetPrice);
+    const gamma = 1.0;
+    const depthImpact = gamma * atr * Math.sqrt(size / depthL1);
+    const rawShortfallPerUnit = Math.abs(fillPrice - midAtSignal) + halfSpread + depthImpact;
+    const implementationShortfallUsd = parseFloat((size * rawShortfallPerUnit * ofiMultiplier).toFixed(4));
 
     return {
       fillPrice,

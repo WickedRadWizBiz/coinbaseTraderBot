@@ -84,7 +84,7 @@ class SignalGenerator:
     """
     SR 11-7 Signal Generation with Quantitative Remediation Constraints.
     """
-    HIGH_BETA_ALTS = {'SHIB', 'KXSHIB', 'HYPE', 'KXHYPE', 'XRP', 'KXXRP'}
+    HIGH_BETA_ALTS = {'SOL', 'KXSOL', 'SHIB', 'KXSHIB', 'HYPE', 'KXHYPE', 'XRP', 'KXXRP', 'DOGE', 'KXDOGE', 'WLD', 'KXWLD', 'ETH', 'KXETH'}
 
     def __init__(self):
         self.variance_guard = FeatureVarianceGuard()
@@ -132,13 +132,13 @@ class SignalGenerator:
                 'details': "Strict constraint: Zero YES (Long) signals allowed in TRENDING_BEARISH regime"
             }
 
-        # 4. USDT Dominance Altcoin Long Veto
+        # 4. USDT Dominance Altcoin Long Veto (Positive slope / delta > 0)
         is_alt = any(alt in sym_upper for alt in self.HIGH_BETA_ALTS)
-        if is_alt and signal_direction == 'YES' and delta_usdt_d > 0.02:
+        if is_alt and signal_direction == 'YES' and delta_usdt_d > 0.0:
             return {
                 'status': 'REJECTED',
-                'reason': 'USDT_DOMINANCE_SPIKE_VETO',
-                'details': f"USDT.D 1m delta ({delta_usdt_d:.4f}%) > 0.02% threshold. High-beta altcoin longs blocked."
+                'reason': 'USDT_DOMINANCE_POSITIVE_SLOPE_VETO',
+                'details': f"USDT.D 1m delta ({delta_usdt_d:.4f}%) > 0 threshold. Altcoin longs prohibited during rising Tether dominance."
             }
 
         return {
