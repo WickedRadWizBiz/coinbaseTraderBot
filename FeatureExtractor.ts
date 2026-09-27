@@ -64,6 +64,46 @@ export class StaleFeatureException extends Error {
   }
 }
 
+/**
+ * FeatureStore
+ * ============
+ * Tracks feature write nonces and nanosecond timestamps per symbol.
+ * Enforces: If nanosecondsAtSignal has not advanced by at least 100ms since the last write,
+ * throws STALE_FEATURE_EXCEPTION to abort trade execution.
+ */
+export class FeatureStore {
+  private static lastSignalTimesNs = new Map<string, number>();
+  private static lastNonces = new Map<string, number>();
+
+  public static validateNonceAndTimestamp(symbol: string, currentNs: number): { valid: boolean; nonce: number; deltaMs: number } {
+    const key = (symbol || 'GLOBAL').toUpperCase();
+    const prevNs = this.lastSignalTimesNs.get(key) || 0;
+    const deltaNs = currentNs - prevNs;
+    const deltaMs = deltaNs / 1000000;
+
+    if (prevNs > 0 && deltaMs < 100) {
+      throw new StaleFeatureException(
+        `[STALE_FEATURE_EXCEPTION] Feature timestamp on ${symbol} has not advanced by >=100ms since last write (delta: ${deltaMs.toFixed(1)}ms < 100ms). Aborting trade to prevent frozen feature execution.`
+      );
+    }
+
+    this.lastSignalTimesNs.set(key, currentNs);
+    const nonce = (this.lastNonces.get(key) || 0) + 1;
+    this.lastNonces.set(key, nonce);
+    return { valid: true, nonce, deltaMs };
+  }
+
+  public static reset(symbol?: string): void {
+    if (symbol) {
+      this.lastSignalTimesNs.delete(symbol.toUpperCase());
+      this.lastNonces.delete(symbol.toUpperCase());
+    } else {
+      this.lastSignalTimesNs.clear();
+      this.lastNonces.clear();
+    }
+  }
+}
+
 export class FeatureExtractor {
   public static readonly MIN_WARMUP_DEPTH = 50;
   private static readonly FEATURE_BUFFER_TTL_MS = 500; // Strict 500ms TTL
@@ -255,6 +295,9 @@ export class FeatureExtractor {
     // 10. Nanosecond point-in-time timestamp
     const hr = process.hrtime();
     const signalGenerationNs = (Date.now() * 1000000) + (hr[1] % 1000000);
+
+    // Validate nonce and high-resolution timestamp advancement (must advance by >= 100ms)
+    FeatureStore.validateNonceAndTimestamp(key, signalGenerationNs);
 
     const snapshot: FeatureSnapshot = {
       nanosecondsAtSignal: signalGenerationNs,

@@ -343,4 +343,77 @@ assert(adaFill.implementationShortfallUsd < 0.25, "10 ADA @ $0.2487 ($2.49 notio
 assert(adaFill.implementationShortfallUsd > 0.0001, "Shortfall must be strictly positive");
 console.log("✓ TEST 11 PASSED: Low-unit-price altcoin Implementation Shortfall is accurately normalized by order quantity & price.");
 
+// 12. SignalValidator Institutional Rules (SR 11-7 Remediation)
+console.log("\n[TEST 12] Testing SignalValidator Institutional Constraints & Reference Trades...");
+const { SignalValidator } = require('./SignalValidator');
+const { FeatureStore } = require('./FeatureExtractor');
+
+// Reference Case A: Trade ID 105510 | Entry: 0.3952 | Regime: TRENDING_BEARISH -> Blocked Entry (Regime Bias)
+const test105510 = SignalValidator.validate({
+  symbol: 'KXBTC',
+  side: 'YES',
+  marketRegime: 'TRENDING_BEARISH',
+  ichimokuCloudState: 'BEARISH_CLOUD',
+  orderBookImbalance: 1.15,
+  vpin: 0.22,
+  volatilityAtr: 0.012,
+  is15mPattern: true
+});
+console.log(`- Trade #105510 (Entry: 0.3952, TRENDING_BEARISH): Approved=${test105510.approved}, Code=${test105510.code}`);
+assert(!test105510.approved && test105510.code === 'REGIME_BIAS_VETO', "Trade 105510 must be blocked due to Regime Bias");
+
+// Reference Case B: Trade ID 82496 | Entry: 0.4846 | OrderBookImbalance: 2.4406 (> 2.0) & elevated VPIN -> Limit Order Only
+const test82496 = SignalValidator.validate({
+  symbol: 'KXBTC',
+  side: 'NO',
+  marketRegime: 'TRENDING_BEARISH',
+  ichimokuCloudState: 'BEARISH_CLOUD',
+  orderBookImbalance: 2.4406,
+  vpin: 0.25,
+  volatilityAtr: 0.015,
+  is15mPattern: true
+});
+console.log(`- Trade #82496 (High OB Imbalance 2.4406 & VPIN 0.25): OrderType=${test82496.executionOrderType}, isToxicFlow=${test82496.isToxicFlow}`);
+assert(test82496.executionOrderType === 'POST_ONLY_LIMIT', "Trade 82496 must switch to POST_ONLY_LIMIT");
+assert(test82496.isToxicFlow === true, "Trade 82496 must flag isToxicFlow");
+
+// Reference Case C: Trade ID 82000 | DOGE Long in TRENDING_BEARISH & BEARISH_CLOUD -> Prohibited
+const test82000 = SignalValidator.validate({
+  symbol: 'KXDOGE',
+  side: 'YES',
+  marketRegime: 'TRENDING_BEARISH',
+  ichimokuCloudState: 'BEARISH_CLOUD',
+  orderBookImbalance: 1.05,
+  vpin: 0.18,
+  volatilityAtr: 0.02,
+  is15mPattern: true
+});
+console.log(`- Trade #82000 (DOGE Long in TRENDING_BEARISH): Approved=${test82000.approved}`);
+assert(!test82000.approved, "Trade 82000 Long must be prohibited");
+
+console.log("✓ TEST 12 PASSED: SignalValidator successfully passed all reference test validations.");
+
+// 13. FeatureStore Nonce & Timestamp Invalidation Check (Trade ID 106913 vs 81447)
+console.log("\n[TEST 13] Testing FeatureStore Nonce & Timestamp Advancement...");
+FeatureStore.reset('KXBTC');
+const t1Ns = Date.now() * 1000000;
+const firstWrite = FeatureStore.validateNonceAndTimestamp('KXBTC', t1Ns);
+assert(firstWrite.valid && firstWrite.nonce === 1, "First write should have nonce=1");
+
+// Immediate subsequent write with delta < 100ms must throw StaleFeatureException
+let threwStoreStale = false;
+try {
+  FeatureStore.validateNonceAndTimestamp('KXBTC', t1Ns + 50 * 1000000); // 50ms delta (< 100ms)
+} catch (err) {
+  if (err instanceof StaleFeatureException || err.name === 'StaleFeatureException') {
+    threwStoreStale = true;
+  }
+}
+assert(threwStoreStale, "FeatureStore must throw StaleFeatureException when delta < 100ms");
+
+// Advance by > 100ms
+const advanceWrite = FeatureStore.validateNonceAndTimestamp('KXBTC', t1Ns + 200 * 1000000);
+assert(advanceWrite.valid && advanceWrite.nonce === 2, "Second valid write should have nonce=2");
+console.log("✓ TEST 13 PASSED: FeatureStore strictly enforces >=100ms timestamp advancement and nonces.");
+
 console.log("\nALL VERIFICATION TESTS COMPLETED SUCCESSFULLY!");
