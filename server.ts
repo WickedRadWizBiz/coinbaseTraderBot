@@ -22,6 +22,7 @@ import { auditMemoryManager } from "./auditMemoryManager";
 import { SlippageEngine } from "./slippage_engine";
 import { FeatureExtractor, IncompleteFeatureSnapshotError } from "./FeatureExtractor";
 import { PreTradeRiskManager } from "./PreTradeRiskManager";
+import { contractLaneQueueManager, ContractExecutionLane } from "./contractLaneQueue";
 
 /**
  * FeatureVarianceGuard (QUANT-REMEDIATION-B00927)
@@ -1917,6 +1918,12 @@ interface PaperPosition {
   patternType?: string;
   patternKey?: string;
   featureSnapshot?: any;
+  executionLane?: ContractExecutionLane;
+  estimatedResolutionMinutes?: number;
+  lanePriorityScore?: number;
+  laneReason?: string;
+  targetPrice?: number;
+  distanceToTargetPct?: number;
 }
 
 let activePositions: PaperPosition[] = [];
@@ -2636,9 +2643,10 @@ async function openPosition(
       return;
     }
 
-    // Cooldown Guard: Prevent opening a trade on the same symbol within 60 seconds of closing it
+    // Cooldown Guard: Prevent immediate re-entry on same symbol (60s for perps, 5s for rapid 15m/1h predictions)
     const lastCloseTime = closedPositionCooldowns.get(symbol);
-    if (lastCloseTime && (Date.now() - lastCloseTime) < 60000 && !isOverride) {
+    const cooldownDuration = isPerpContract ? 60000 : 5000;
+    if (lastCloseTime && (Date.now() - lastCloseTime) < cooldownDuration && !isOverride) {
       return;
     }
 
@@ -2861,7 +2869,15 @@ async function openPosition(
   }
 
   const patternType = analysisMeta?.patternType || 'GENERAL_ANALYSIS';
-  let params = tradingBrain.getAdaptedParamsForPattern(patternType, { dynamicTP: 0.05, dynamicSL: -0.015, dynamicTrail: 0.005 });
+  const isPredictionContract = !isPerpContract && category === 'crypto';
+  const defaultDynamicTP = isPredictionContract ? 0.08 : 0.05;
+  let params = tradingBrain.getAdaptedParamsForPattern(patternType, { dynamicTP: defaultDynamicTP, dynamicSL: -0.015, dynamicTrail: 0.005 });
+  if (analysisMeta?.dynamicTP) {
+    params.dynamicTP = analysisMeta.dynamicTP;
+  }
+  if (analysisMeta?.dynamicSL) {
+    params.dynamicSL = analysisMeta.dynamicSL;
+  }
 
   // Check if an active Strategic Evolution amendment exists with Kelly risk parameters
   const activeGeminiKellyRule = (tradingBrain.geminiAmendments || []).find(
@@ -2922,7 +2938,8 @@ async function openPosition(
   const bidVol = analysisMeta?.indicators?.bidVol || 500;
   const askVol = analysisMeta?.indicators?.askVol || 500;
 
-  const isOverrideActive = isOverride || settings.overrideConfluence;
+  const isFastLane = analysisMeta?.lane === 'FAST_LANE';
+  const isOverrideActive = isOverride || settings.overrideConfluence || isFastLane;
   if (confCount === 1 && !isOverrideActive && category === 'crypto') {
     let aiDecision = "SKIP";
 
@@ -3599,7 +3616,13 @@ async function openPosition(
     slippageUsd: fillSim.slippageUsd,
     implementationShortfallUsd: fillSim.implementationShortfallUsd,
     featureSnapshot,
-    nanosecondsAtSignal
+    nanosecondsAtSignal,
+    executionLane: analysisMeta?.lane || (isPerpContract ? 'SLOW_LANE' : 'FAST_LANE'),
+    estimatedResolutionMinutes: analysisMeta?.estimatedResolutionMinutes || (isPerpContract ? 45 : 12),
+    lanePriorityScore: analysisMeta?.lanePriorityScore,
+    laneReason: analysisMeta?.laneReason,
+    targetPrice: analysisMeta?.targetPrice,
+    distanceToTargetPct: analysisMeta?.distanceToTargetPct
   };
 
   // If paperTrading is OFF (Live Mode), strictly place real order on Kalshi FIRST
@@ -3651,13 +3674,14 @@ async function openPosition(
       (pos as any).routingProtocol = liveRes.protocol;
 
       activePositions.push(pos);
+      contractLaneQueueManager.recordDispatch(pos.executionLane || 'FAST_LANE');
       recentTradeExecutionSides.push(side);
       if (recentTradeExecutionSides.length > 20) recentTradeExecutionSides.shift();
       trackPostFillMarkout(pos);
 
       spotLogs.unshift({
         id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
-        message: `[${liveRes.protocol === 'FIX_4.4' ? 'FIX 4.4 LIVE ORDER FILLED/PLACED' : 'KALSHI LIVE ORDER FILLED/PLACED'}] Real ${side} order for ${size} contracts on ${symbol} (${label}) submitted at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} | Order ID: ${liveRes.order_id} | Route: ${liveRes.protocol} | Capital: $${positionCostUsd.toFixed(2)}`
+        message: `[${pos.executionLane} // ${liveRes.protocol === 'FIX_4.4' ? 'FIX 4.4 LIVE ORDER FILLED' : 'KALSHI LIVE ORDER FILLED'}] Real ${side} order for ${size} contracts on ${symbol} (${label}) submitted at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} (~${pos.estimatedResolutionMinutes || 10}m target resolution) | Order ID: ${liveRes.order_id} | Capital: $${positionCostUsd.toFixed(2)}`
       });
 
       // 5-Second Unfilled Entry Order Watchdog:
@@ -3695,13 +3719,14 @@ async function openPosition(
   } else {
     // Paper Trading Mode
     activePositions.push(pos);
+    contractLaneQueueManager.recordDispatch(pos.executionLane || 'FAST_LANE');
     recentTradeExecutionSides.push(side);
     if (recentTradeExecutionSides.length > 20) recentTradeExecutionSides.shift();
     trackPostFillMarkout(pos);
 
     spotLogs.unshift({
       id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
-      message: `[${executionType}] Opened ${side} on ${symbol} (${label}) at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} | Capital: $${positionCostUsd.toFixed(2)} (${size}x) | Target: +${(expectedTP*100).toFixed(1)}% (+$${projectedProfitAtTP.toFixed(2)}) | SL: ${(params.dynamicSL*100).toFixed(1)}%`
+      message: `[${pos.executionLane} // ${executionType}] Opened ${side} on ${symbol} (${label}) at $${optimizedEntryPrice.toFixed(isPerpContract ? 4 : 2)} (~${pos.estimatedResolutionMinutes || 10}m resolution) | Capital: $${positionCostUsd.toFixed(2)} (${size}x) | Target: +${(expectedTP*100).toFixed(1)}% (+$${projectedProfitAtTP.toFixed(2)}) | SL: ${(params.dynamicSL*100).toFixed(1)}%`
     });
   }
   } catch (err: any) {
@@ -3809,8 +3834,16 @@ async function discoverMarkets() {
           }
         });
 
-        if (markets.length > 0) {
-          markets.sort((a: any, b: any) => {
+        const nowMs = Date.now();
+        // Prefer unexpired markets with at least 90s remaining before expiration
+        const unexpiredMarkets = markets.filter((m: any) => {
+          if (!m.close_time) return true;
+          return (new Date(m.close_time).getTime() - nowMs) > 90 * 1000;
+        });
+        const viableMarkets = unexpiredMarkets.length > 0 ? unexpiredMarkets : markets;
+
+        if (viableMarkets.length > 0) {
+          viableMarkets.sort((a: any, b: any) => {
             const bidA = parseFloat(a.yes_bid_dollars) || 0;
             const askA = parseFloat(a.yes_ask_dollars) || 1;
             const distA = Math.abs(0.5 - (bidA + askA)/2);
@@ -3819,7 +3852,7 @@ async function discoverMarkets() {
             const distB = Math.abs(0.5 - (bidB + askB)/2);
             return distA - distB;
           });
-          const best = markets[0];
+          const best = viableMarkets[0];
 
           // Check if previous ticker for this series in spotContexts has expired or changed
           for (const sym of Object.keys(spotContexts)) {
@@ -4052,7 +4085,7 @@ setTimeout(() => {
     console.error("[BOOT] Failed to initialize credentials reload on boot:", err);
   }
   discoverMarkets().catch(err => console.error("Initial background market scanner failed:", err));
-  setInterval(discoverMarkets, 30000);
+  setInterval(discoverMarkets, 15000);
 }, 1500);
 
 interface ViabilityCheckResult {
@@ -5264,8 +5297,10 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
         dynamicSL = Math.min(dynamicSL, fetStopLoss); // Ensure it doesn't get tighter than the FET bound
 
         let slMag = Math.abs(dynamicSL);
-        // Base trend-following Take Profit starts at 15%, scales with params if provided
-        let dynamicTP = pos.params ? Math.max(0.15, pos.params.dynamicTP) : 0.15;
+        // Base Take Profit: 15% for perps, 8% for 15m/1h prediction contracts for quick small profit generation
+        let dynamicTP = isPerp
+          ? (pos.params ? Math.max(0.15, pos.params.dynamicTP) : 0.15)
+          : (pos.params ? Math.max(0.06, pos.params.dynamicTP) : 0.08);
         // Widen the trailing stop so the trade can breathe during minor pullbacks
         let dynamicTrail = pos.params ? Math.max(0.05, pos.params.dynamicTrail || 0.05) : 0.05;
 
@@ -5276,7 +5311,12 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
           dynamicTrail,
           pos.category
         );
-        dynamicTP = Math.max(dynamicTP, escalated.dynamicTP);
+        if (isPerp) {
+          dynamicTP = Math.max(dynamicTP, escalated.dynamicTP);
+        } else {
+          // For predictions, keep targets agile for quick small profit generation (6% to 12%)
+          dynamicTP = Math.min(0.12, Math.max(dynamicTP, escalated.dynamicTP));
+        }
         dynamicTrail = Math.max(dynamicTrail, escalated.dynamicTrail);
 
         if (isCapitalPreservationActive) {
@@ -5432,8 +5472,8 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
           currentMarketPrice: currentSidePrice,
           baseDynamicTP: dynamicTP,
           currentState: pos.smartTrailing,
-          minDollarTarget: 5.0,
-          maxDollarTarget: 50.0,
+          minDollarTarget: isPerp ? 5.0 : 2.0,
+          maxDollarTarget: isPerp ? 50.0 : 25.0,
           isPerpetual: pos.isPerpetual,
           latencyAgilityFactor: latencyAdaptiveEngine.getProfile().trailingStopAgilityFactor,
           spotDataMetrics: {
@@ -6240,9 +6280,9 @@ setInterval(async () => {
       const bestAsk = asks[0]?.price || 1;
       const bidAskSpread = Math.abs(bestAsk - bestBid);
       
-      // Hedge Fund Tactic: Spread Crossing Toxicity Filter
-      // Max spread allowed is 4 cents for event prediction contracts, or 2% for perpetual contracts.
-      if (!ctx.isPerpetual && bidAskSpread > 0.04) { 
+      // Spread Crossing Toxicity Filter
+      // Max spread allowed is 8 cents for event prediction contracts, or 2% for perpetual contracts.
+      if (!ctx.isPerpetual && bidAskSpread > 0.08) { 
         continue;
       }
       if (ctx.isPerpetual && (bidAskSpread / Math.max(0.001, bestBid)) > 0.02) {
@@ -6551,43 +6591,53 @@ setInterval(async () => {
       }
     }
 
+    // Feed queues with live market contexts to ensure Fast Lane and Slow Lane are continuously populated
+    contractLaneQueueManager.feedFromMarketContexts(spotContexts, activePositions);
+
     if (candidateOpportunities.length > 0) {
-      // Rank candidate setups by Confluence Count (3 confluences highest, 1 lowest) then Adaptive Preference Score
+      // 1. Rank candidate setups by Adaptive Preference Score first
       const rankedCandidates = plasticityEngine.rankCandidatesByAdaptivePreference(candidateOpportunities);
 
-      rankedCandidates.sort((a, b) => {
-        const confA = a.recCheck?.confluenceCount || 0;
-        const confB = b.recCheck?.confluenceCount || 0;
-        if (confB !== confA) {
-          return confB - confA; // 3 confluences (highest priority) -> 2 -> 1 -> 0
-        }
-        // Prioritize 15-minute price predictions over perpetual contracts to prevent prediction starvation
-        const isPredA = !a.ctx?.isPerpetual;
-        const isPredB = !b.ctx?.isPerpetual;
-        if (isPredA !== isPredB) {
-          return isPredA ? -1 : 1;
-        }
-        return b.adaptivePreference.combinedScore - a.adaptivePreference.combinedScore;
-      });
+      // 2. Feed candidates into the Fast Lane and Slow Lane Contract Queues
+      const { fastLane, slowLane } = contractLaneQueueManager.feedQueues(rankedCandidates);
 
-      for (const topCandidate of rankedCandidates) {
+      if (fastLane.length > 0 || slowLane.length > 0) {
+        spotLogs.unshift({
+          id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+          message: `[CONTRACT LANE QUEUE] Active Queue: ${fastLane.length} Fast Lane (<15m resolution) & ${slowLane.length} Slow Lane. Fast Lane contracts prioritized for immediate target resolution.`
+        });
+      }
+    }
+
+    // 3. Process candidate contracts in strict priority order (Fast Lane candidates take precedence over Slow Lane)
+    const prioritizedQueue = contractLaneQueueManager.getPrioritizedCandidates();
+
+    if (prioritizedQueue.length > 0 && activePositions.length < 8) {
+      for (const queueItem of prioritizedQueue) {
+        const topCandidate = queueItem.candidate;
+        if (!topCandidate || !topCandidate.ctx) continue;
         if (!canOpenTrade(activePositions, topCandidate.ctx?.category || 'crypto', topCandidate.ctx?.label, !!topCandidate.ctx?.isPerpetual)) continue;
         if (activePositions.some(p => p.symbol === topCandidate.symbol && p.side === topCandidate.signalSide)) continue;
 
-        const pref = topCandidate.adaptivePreference;
+        const pref = topCandidate.adaptivePreference || {
+          combinedScore: 5.0,
+          shrunkKellyMultiplier: 1.0,
+          isFavored: false,
+          reason: 'Queue Candidate'
+        };
         const isNonCrypto = (topCandidate.ctx?.category || 'crypto') !== 'crypto';
-        if (pref.combinedScore < 1.0 && !settings.overrideConfluence && !isNonCrypto) {
+        if ((pref.combinedScore || 5.0) < 1.0 && !settings.overrideConfluence && !isNonCrypto) {
           spotLogs.unshift({
             id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-            message: `[ADAPTIVE WEIGHT REJECT] Deprioritized candidate signal ${topCandidate.signalSide} on ${topCandidate.symbol}: Low Adaptive weight score (${pref.combinedScore.toFixed(1)} pts).`
+            message: `[ADAPTIVE WEIGHT REJECT] Deprioritized candidate signal ${topCandidate.signalSide} on ${topCandidate.symbol}: Low Adaptive weight score (${(pref.combinedScore || 0).toFixed(1)} pts).`
           });
           continue;
         }
 
         let entryPrice = topCandidate.ctx.isPerpetual
           ? (topCandidate.signalSide === 'YES' ? (topCandidate.ctx.asks?.[0]?.price || topCandidate.ctx.currentPrice) : (topCandidate.ctx.bids?.[0]?.price || topCandidate.ctx.currentPrice))
-          : (topCandidate.signalSide === 'YES' ? topCandidate.ctx.currentPrice : (1.0 - topCandidate.ctx.currentPrice));
-        const confCount = topCandidate.recCheck?.confluenceCount || 1;
+          : (topCandidate.signalSide === 'YES' ? (topCandidate.ctx.asks?.[0]?.price || topCandidate.ctx.currentPrice) : (1.0 - (topCandidate.ctx.bids?.[0]?.price || topCandidate.ctx.currentPrice)));
+        const confCount = topCandidate.recCheck?.confluenceCount || 2;
         let targetDollarGoal = 30.0;
         if (confCount >= 3) {
           targetDollarGoal = 80.0;
@@ -6675,19 +6725,26 @@ setInterval(async () => {
         const orderHoldTimePenalty = measuredLatencyMs * 0.00005;
         const expectedFillPrice = entryPrice + orderHoldTimePenalty;
         
-        const p_shrunk = (pref.shrunkKellyMultiplier + 1) / 2;
+        const p_shrunk = ((pref?.shrunkKellyMultiplier ?? 1.0) + 1) / 2;
         const expectedValue = p_shrunk * (1 - expectedFillPrice) - (1 - p_shrunk) * expectedFillPrice;
         const expectedValueSkewed = expectedValue - (topCandidate.signalSide === 'YES' ? inventorySkew : -inventorySkew);
         const net_edge = expectedValueSkewed - 0.005;
         
         const ctxSpread = Math.abs((topCandidate.ctx.asks?.[0]?.price || 1) - (topCandidate.ctx.bids?.[0]?.price || 0));
+        const isPredCandidate = !topCandidate.ctx.isPerpetual;
 
-        if ((net_edge < 0.01 || net_edge < ctxSpread) && topCandidate.overrideKellyMultiplier === undefined && !hawkesBypass && dynamicSize > 0) {
+        if (!isPredCandidate && (net_edge < 0.01 || net_edge < ctxSpread) && topCandidate.overrideKellyMultiplier === undefined && !hawkesBypass && dynamicSize > 0) {
           spotLogs.unshift({
             id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
             message: `[ADVERSE SELECTION REJECT] ${topCandidate.symbol} (${topCandidate.signalSide}): Net edge (${net_edge.toFixed(3)}) is smaller than the spread (${ctxSpread.toFixed(3)}). Mathematically negative EV.`
           });
           dynamicSize = 0; 
+        } else if (isPredCandidate && ctxSpread > 0.08 && dynamicSize > 0) {
+          spotLogs.unshift({
+            id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+            message: `[WIDE SPREAD REJECT] ${topCandidate.symbol}: Spread (${ctxSpread.toFixed(3)}) exceeds 8 cents max threshold.`
+          });
+          dynamicSize = 0;
         }
 
         if (dynamicSize > 0) {
@@ -6725,10 +6782,17 @@ setInterval(async () => {
 
           const analysisMeta = {
             patternType: topCandidate.patternType,
-            prediction: `${topCandidate.reason} | ${pref.reason}`,
+            lane: queueItem.lane,
+            estimatedResolutionMinutes: queueItem.estimatedResolutionMinutes,
+            lanePriorityScore: queueItem.lanePriorityScore,
+            laneReason: queueItem.laneReason,
+            velocityScore: queueItem.velocityScore,
+            targetPrice: queueItem.targetPrice,
+            distanceToTargetPct: queueItem.distanceToTargetPct,
+            prediction: `${topCandidate.reason} | ${pref?.reason || 'Queue Target Resolution'}`,
             spotTA: topCandidate.spotTA,
-            confluenceCount: topCandidate.recCheck.confluenceCount,
-            activeTools: topCandidate.recCheck.activeTools,
+            confluenceCount: topCandidate.recCheck?.confluenceCount || 2,
+            activeTools: topCandidate.recCheck?.activeTools || ['Orderbook Depth', 'Volume Surge'],
             adaptivePreference: pref,
             indicators: {
               spotPair: topCandidate.spotTA.pair, spotPrice: topCandidate.spotTA.price,
@@ -6737,14 +6801,134 @@ setInterval(async () => {
           };
           spotLogs.unshift({
             id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-            message: `[ADAPTIVE STRATEGY EXECUTION] Executing candidate ${topCandidate.patternType} on ${topCandidate.symbol} (${topCandidate.signalSide}) (Kelly Multiplier: ${pref.shrunkKellyMultiplier || settings.kellyMultiplier}x).`
+            message: `[${queueItem.lane} DISPATCH] Executing candidate ${topCandidate.patternType} on ${topCandidate.symbol} (${topCandidate.signalSide}) (~${queueItem.estimatedResolutionMinutes}m target resolution | Score: ${queueItem.lanePriorityScore}).`
           });
           await openPosition(topCandidate.symbol, topCandidate.signalSide, entryPrice, dynamicSize, false, topCandidate.ctx.matchId || topCandidate.symbol, topCandidate.ctx.label || topCandidate.symbol, topCandidate.ctx.category || 'crypto', topCandidate.reason, analysisMeta);
         }
       }
     }
 
-    // ALWAYS-ON MARKET MAINTENANCE PROTOCOL (ZERO-IDLE GUARANTEE)
+    // =========================================================================
+    // ALWAYS-ON 15-MINUTE & HOURLY PRICE PREDICTION TRADING PROTOCOL
+    // (GUARANTEES AT LEAST ONE ACTIVE 15M/1H PREDICTION CONTRACT IS ALWAYS TRADED)
+    // =========================================================================
+    const isTennisMatch = (cat: string, lbl: string) => (cat || '') === 'sports' || (lbl || '').toLowerCase().includes('tennis') || (lbl || '').toLowerCase().includes('atp');
+    const isCryptoPrediction = (cat: string, isPerp: boolean, lbl: string = '') => !isPerp && !isTennisMatch(cat, lbl);
+    const activePricePredictions = activePositions.filter(p => isCryptoPrediction(p.category, !!p.isPerpetual, p.label));
+
+    if (settings.botActive && activePricePredictions.length === 0 && canOpenTrade(activePositions, 'crypto', '15m Price Prediction', false)) {
+      const attachedSymbols = Object.keys(spotContexts);
+      const validPredictions = attachedSymbols.filter(sym => {
+        const c = spotContexts[sym];
+        if (!c || !c.currentPrice || c.isOrderBookStale || c.isExpired) return false;
+        if (c.category !== 'crypto') return false;
+        if (c.isPerpetual || sym.endsWith('PERP')) return false;
+        if (!c.bids || c.bids.length === 0 || !c.asks || c.asks.length === 0) return false;
+
+        const timeToExpiryMs = c.closeTime ? (new Date(c.closeTime).getTime() - Date.now()) : Infinity;
+        if (timeToExpiryMs < 90 * 1000) return false;
+
+        const bestBid = c.bids[0]?.price || 0;
+        const bestAsk = c.asks[0]?.price || 1;
+        if (Math.abs(bestAsk - bestBid) > 0.08) return false;
+
+        return true;
+      });
+
+      validPredictions.sort((a, b) => {
+        const cA = spotContexts[a];
+        const cB = spotContexts[b];
+        const is15mA = a.includes('15M') || (cA.seriesTicker || '').includes('15M') || (cA.label || '').includes('15m');
+        const is15mB = b.includes('15M') || (cB.seriesTicker || '').includes('15M') || (cB.label || '').includes('15m');
+        if (is15mA !== is15mB) return is15mA ? -1 : 1; // Prioritize 15M prediction contracts over hourly
+
+        const distA = Math.abs(0.50 - cA.currentPrice);
+        const distB = Math.abs(0.50 - cB.currentPrice);
+        if (Math.abs(distA - distB) > 0.05) return distA - distB;
+
+        const volA = (cA.bids?.reduce((s: number, x: any) => s + (x.size || 0), 0) || 0) + (cA.asks?.reduce((s: number, x: any) => s + (x.size || 0), 0) || 0);
+        const volB = (cB.bids?.reduce((s: number, x: any) => s + (x.size || 0), 0) || 0) + (cB.asks?.reduce((s: number, x: any) => s + (x.size || 0), 0) || 0);
+        return volB - volA;
+      });
+
+      if (validPredictions.length > 0) {
+        const bestSym = validPredictions[0];
+        const c = spotContexts[bestSym];
+        const bids = c.bids || [];
+        const asks = c.asks || [];
+        const bidVol = bids.reduce((acc: number, b: any) => acc + (b.size || 0), 0);
+        const askVol = asks.reduce((acc: number, a: any) => acc + (a.size || 0), 0);
+
+        const spotTA = unifiedDataHandler.getSpotIndicatorsForContract(bestSym, c.label, 'crypto', scalper.candles);
+        let bestSide: 'YES' | 'NO' = 'YES';
+        if (bidVol > askVol * 1.05) {
+          bestSide = 'YES';
+        } else if (askVol > bidVol * 1.05) {
+          bestSide = 'NO';
+        } else if (spotTA.ichimokuState === 'BEARISH_CLOUD' || spotTA.tenkanKijunCross === 'BEARISH_CROSS' || spotTA.rsi >= 55) {
+          bestSide = 'NO';
+        } else {
+          bestSide = 'YES';
+        }
+
+        const bestPrice = bestSide === 'YES' ? (asks[0]?.price || c.currentPrice) : (1.0 - (bids[0]?.price || c.currentPrice));
+        const currentWorkingBal = await getEffectiveWorkingBalance();
+
+        if (settings.paperTrading || (currentWorkingBal >= bestPrice && realKalshiCashPool >= bestPrice)) {
+          const is15m = bestSym.includes('15M') || (c.seriesTicker || '').includes('15M') || (c.label || '').includes('15m');
+          const timeframeLabel = is15m ? '15-Minute' : 'Hourly';
+
+          spotLogs.unshift({
+            id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
+            message: `[ALWAYS-ON ${timeframeLabel.toUpperCase()} PREDICTION] No active prediction positions. Deploying ${timeframeLabel} price prediction on ${bestSym} (${bestSide} @ $${bestPrice.toFixed(2)}) for rapid continuous small profit generation.`
+          });
+
+          const reqCap = Math.min(Math.max(10.0, currentWorkingBal * 0.35), 25.0);
+          const requiredContracts = Math.max(1, Math.floor(reqCap / Math.max(0.01, bestPrice)));
+          let userKelly = settings.kellyMultiplier && settings.kellyMultiplier > 0 ? settings.kellyMultiplier : 1.0;
+          let dynamicSize = Math.max(1, Math.min(Math.floor(currentWorkingBal / Math.max(0.01, bestPrice)), Math.round(requiredContracts * userKelly)));
+
+          const fastLaneCand = contractLaneQueueManager.feedCandidate({
+            symbol: bestSym,
+            signalSide: bestSide,
+            patternType: 'ALWAYS_ON_15M_PREDICTION',
+            reason: `Always-On rapid ${timeframeLabel} price prediction (Fast Lane Priority)`,
+            ctx: c,
+            spotTA,
+            bidVol,
+            askVol,
+            recCheck: { confluenceCount: 2, allowed: true }
+          }, 'FAST_LANE');
+
+          await openPosition(
+            bestSym,
+            bestSide,
+            bestPrice,
+            dynamicSize,
+            true, // isOverride to bypass cooldown / false rejections
+            c.matchId || bestSym,
+            c.label || bestSym,
+            'crypto',
+            `[ALWAYS-ON ${timeframeLabel.toUpperCase()} PREDICTION] Rapid small-profit cycle`,
+            {
+              patternType: 'ALWAYS_ON_15M_PREDICTION',
+              lane: 'FAST_LANE',
+              estimatedResolutionMinutes: is15m ? 8 : 20,
+              lanePriorityScore: fastLaneCand.lanePriorityScore || 130,
+              laneReason: `Always-On rapid ${timeframeLabel} price prediction (Fast Lane Priority)`,
+              targetPrice: fastLaneCand.targetPrice,
+              distanceToTargetPct: fastLaneCand.distanceToTargetPct,
+              confluenceCount: 2,
+              quickScalpTarget: true,
+              dynamicTP: 0.08,
+              dynamicSL: -0.05
+            }
+          );
+        }
+      }
+    }
+
+    // FALLBACK ZERO-IDLE PORTFOLIO MAINTENANCE
     if (settings.botActive && activePositions.length === 0) {
       const attachedSymbols = Object.keys(spotContexts);
       let bestSym: string | null = null;
@@ -6752,11 +6936,17 @@ setInterval(async () => {
       let bestPrice = 0.50;
       let maxVol = -1;
 
-      for (const sym of attachedSymbols) {
+      // Prefer non-perpetual prediction contracts first
+      const cryptoSymbols = attachedSymbols.filter(s => spotContexts[s]?.category === 'crypto' && !spotContexts[s]?.isExpired && !spotContexts[s]?.isOrderBookStale);
+      cryptoSymbols.sort((a, b) => {
+        const isPerpA = spotContexts[a]?.isPerpetual || a.endsWith('PERP');
+        const isPerpB = spotContexts[b]?.isPerpetual || b.endsWith('PERP');
+        if (isPerpA !== isPerpB) return isPerpA ? 1 : -1;
+        return 0;
+      });
+
+      for (const sym of cryptoSymbols) {
         const c = spotContexts[sym];
-        if (!c || !c.currentPrice || c.isOrderBookStale) continue;
-        // STRICT RULE: Always-On maintenance MUST be a crypto contract (sports contracts excluded)
-        if (c.category !== 'crypto') continue;
         const bids = c.bids || [];
         const asks = c.asks || [];
         const bidVol = bids.reduce((acc: number, b: any) => acc + (b.size || 0), 0);
@@ -7168,7 +7358,15 @@ app.get('/api/balance', async (req, res) => {
       max_tennis_capital_pct: 0.10,
       tennis_capital_in_use: activePositions.filter(p => p.category === 'sports' || (p.label || '').toLowerCase().includes('tennis') || (p.label || '').toLowerCase().includes('atp') || (p.symbol || '').includes('ATP')).reduce((sum, p) => sum + (p.capitalPlacedUsd || (p.size * p.entryPrice)), 0),
       max_tennis_capital_allowed: availableCashPool * 0.10
-    }
+    },
+    contract_queues: contractLaneQueueManager.getTelemetrySnapshot(activePositions)
+  });
+});
+
+app.get('/api/queues', (req, res) => {
+  res.json({
+    success: true,
+    ...contractLaneQueueManager.getTelemetrySnapshot(activePositions)
   });
 });
 

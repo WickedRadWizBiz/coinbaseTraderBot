@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Save, AlertCircle, ShieldCheck, PieChart, Activity, Clock, Zap } from 'lucide-react';
+import { Save, AlertCircle, ShieldCheck, PieChart, Activity, Clock, Zap, FastForward } from 'lucide-react';
 
 import { PWAInstallButton } from './PWAInstallButton';
 import { KalshiKeyConfigCard } from './KalshiKeyConfigCard';
@@ -388,10 +388,10 @@ export function SettingsView() {
             <ShieldCheck className="w-5 h-5 text-crypto-primary shrink-0 mt-0.5" />
             <div className="flex flex-col gap-0.5">
               <span className="text-xs font-bold uppercase tracking-wider text-crypto-text flex items-center gap-2">
-                Concurrency Slots: <span className="text-crypto-primary font-mono">3 Max Perps | 3 Max Predictions</span>
+                Concurrency & Speed: <span className="text-crypto-primary font-mono">3 Max Perps | 3 Max Predictions</span>
               </span>
               <span className="text-xs text-[#808080]">
-                Strict position guards cap active contracts at maximum 3 perpetual positions and 3 price prediction positions concurrently.
+                Strict position guards cap contracts at 3 perps and 3 predictions. An Always-On 15m/1h prediction engine guarantees that faster prediction contracts are continuously traded to generate rapid small profits.
               </span>
             </div>
           </div>
@@ -428,6 +428,18 @@ export function SettingsView() {
               </span>
               <span className="text-xs text-[#808080]">
                 High-frequency WebSocket stream serves as primary market feed with a 500ms timestamp drift gate. Seamlessly fails over to persistent HTTP Keep-Alive connection pooling with gate automatically scaled to 1200ms.
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-3 p-3 bg-black/40 crt-border border-emerald-500/30 md:col-span-2">
+            <FastForward className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+            <div className="flex flex-col gap-0.5">
+              <span className="text-xs font-bold uppercase tracking-wider text-crypto-text flex items-center gap-2">
+                Fast Lane vs. Slow Lane Priority Queue: <span className="text-emerald-400 font-mono">Fast Lane Preempts Slow Lane</span>
+              </span>
+              <span className="text-xs text-[#808080]">
+                Contracts signaling for faster resolution to target price (15M predictions, high OFI sweeps, tight strike deltas) feed the <strong>Fast Lane Queue</strong> and take absolute execution precedence over the <strong>Slow Lane Queue</strong> (perpetual contracts, macro trend swings). Fast Lane contracts dispatch first whenever trade slots or capital become available.
               </span>
             </div>
           </div>

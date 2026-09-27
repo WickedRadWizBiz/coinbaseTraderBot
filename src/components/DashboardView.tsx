@@ -8,6 +8,7 @@ import { ExtinctionListCard } from './ExtinctionListCard';
 import { GeminiStrategyDoctorCard } from './GeminiStrategyDoctorCard';
 import { FixConnectionStatus } from './FixConnectionStatus';
 import { GeminiTradeAuditorCard } from './GeminiTradeAuditorCard';
+import { ContractLaneQueueCard, ContractQueuesData } from './ContractLaneQueueCard';
 
 export interface MarketTestingStatus {
   phase: 'NORMAL_CONSERVATIVE' | 'TESTING_PERIOD' | 'OVERRIDE_ACTIVE' | 'GOAL_REACHED_CONSERVATIVE';
@@ -111,6 +112,7 @@ interface BalanceData {
     prediction_capital_in_use: number;
     min_prediction_capital_reserve_pct: number;
   };
+  contract_queues?: ContractQueuesData;
   latency_profile?: {
     lastPingTime: number;
     kalshiWsPingMs?: number;
@@ -1142,18 +1144,25 @@ export function DashboardView() {
                   }`}>
                     PREDICTIONS: {balance.perp_allocation_stats.active_predictions_count} / {balance.perp_allocation_stats.max_predictions_allowed || 3} MAX
                   </span>
+                  <span className="px-2 py-0.5 border text-[10px] uppercase font-bold tracking-widest bg-emerald-500/20 text-emerald-400 border-emerald-500/50 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    15M/1H ENGINE: ALWAYS-ON ACTIVE
+                  </span>
                 </div>
                 <div className="text-[11px] opacity-80">
                   Perp Capital: ${balance.perp_allocation_stats.perp_capital_in_use.toFixed(2)} | Prediction Capital: ${balance.perp_allocation_stats.prediction_capital_in_use.toFixed(2)}
                 </div>
               </div>
               <div className="text-[11px] opacity-90 leading-relaxed">
-                <strong>Allocation Rule:</strong> Perpetual Contracts are strictly hard-capped at <strong>3 concurrent positions max</strong>, and Price Predictions are strictly capped at <strong>3 concurrent positions max</strong>. At least <strong>50% of capital is strictly reserved for price predictions</strong>.
+                <strong>Allocation & Speed Rule:</strong> Perpetual Contracts are capped at <strong>3 positions max</strong> and Price Predictions at <strong>3 positions max</strong> with <strong>50% capital reserved</strong>. The <strong>Always-On 15M / Hourly Engine</strong> guarantees that rapid price predictions are continuously traded to generate fast, incremental profits without being stalled by slower perpetual contracts.
               </div>
             </div>
           </div>
         </div>
       )}
+
+      {/* CONTRACT EXECUTION QUEUES (FAST LANE VS. SLOW LANE) */}
+      <ContractLaneQueueCard queuesData={balance?.contract_queues} />
 
       {/* TIME-OUT GUARD SCREEN */}
       <ExtinctionListCard />
