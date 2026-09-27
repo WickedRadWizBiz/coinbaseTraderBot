@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { Activity, AlertCircle, RefreshCw, TrendingUp, BarChart3, ShieldCheck, Award, Target, DollarSign, ShieldAlert, RotateCcw, Clock, Zap, Play, Square } from 'lucide-react';
 import { OrderBookMonitor } from './OrderBookMonitor';
 import { RestartConfirmModal } from './RestartConfirmModal';
+import { LiveTradingConfirmationModal } from './LiveTradingConfirmationModal';
 import { RecoveryProtocolCard } from './RecoveryProtocolCard';
 import { ExtinctionListCard } from './ExtinctionListCard';
 import { GeminiStrategyDoctorCard } from './GeminiStrategyDoctorCard';
@@ -143,7 +144,9 @@ export function DashboardView() {
   const [currentSettings, setCurrentSettings] = useState<any>(null);
   const [isTogglingBot, setIsTogglingBot] = useState(false);
   const [isTogglingMode, setIsTogglingMode] = useState(false);
-  const lastCashPoolTapRef = useRef<number>(0);
+  const [showLiveConfirmModal, setShowLiveConfirmModal] = useState(false);
+  const [pendingDoubleTapSelection, setPendingDoubleTapSelection] = useState(false);
+  const selectionTapTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const handleToggleBotActive = async () => {
     if (isTogglingBot) return;
@@ -171,37 +174,60 @@ export function DashboardView() {
     }
   };
 
-  const handleToggleTradingMode = async () => {
+  // Safe, immediate disarm to Paper Trading (zero friction)
+  const handleSwitchToPaperMode = async () => {
     if (isTogglingMode) return;
     setIsTogglingMode(true);
-    const isCurrentlyLive = balance?.paper_trading === false || (currentSettings && currentSettings.paperTrading === false);
-    const nextPaperTrading = isCurrentlyLive; // If live, toggle to paper (true). If paper, toggle to live (false).
-
-    // Optimistically update
-    setBalance((prev: any) => prev ? { ...prev, paper_trading: nextPaperTrading } : prev);
-    setCurrentSettings((prev: any) => prev ? { ...prev, paperTrading: nextPaperTrading } : prev);
+    setBalance((prev: any) => prev ? { ...prev, paper_trading: true } : prev);
+    setCurrentSettings((prev: any) => prev ? { ...prev, paperTrading: true } : prev);
 
     try {
       await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paperTrading: nextPaperTrading })
+        body: JSON.stringify({ paperTrading: true })
       });
       await fetchData(false);
     } catch (e) {
-      console.error("[TOGGLE TRADING MODE ERROR]", e);
+      console.error("[SWITCH TO PAPER MODE ERROR]", e);
     } finally {
       setIsTogglingMode(false);
     }
   };
 
+  // Enforces DOUBLE-TAP SELECTION to request switching from Paper to Live
   const handleCashPoolClickOrTouch = () => {
-    const now = Date.now();
-    if (now - lastCashPoolTapRef.current < 450) {
-      lastCashPoolTapRef.current = 0;
-      handleToggleTradingMode();
+    const isCurrentlyLive = balance?.paper_trading === false || (currentSettings && currentSettings.paperTrading === false);
+
+    // If currently live, tapping immediately disarms back to safe Paper mode
+    if (isCurrentlyLive) {
+      handleSwitchToPaperMode();
+      return;
+    }
+
+    // If in Paper mode, user must perform a DOUBLE-TAP to trigger the confirmation dialog
+    if (!pendingDoubleTapSelection) {
+      setPendingDoubleTapSelection(true);
+      if (selectionTapTimerRef.current) clearTimeout(selectionTapTimerRef.current);
+      selectionTapTimerRef.current = setTimeout(() => {
+        setPendingDoubleTapSelection(false);
+      }, 1000);
     } else {
-      lastCashPoolTapRef.current = now;
+      // Second tap detected within 1000ms! Double-tap selection complete.
+      if (selectionTapTimerRef.current) clearTimeout(selectionTapTimerRef.current);
+      setPendingDoubleTapSelection(false);
+      setShowLiveConfirmModal(true); // Open dialog which itself requires a double-tap
+    }
+  };
+
+  const handleDoubleClickCashPool = () => {
+    const isCurrentlyLive = balance?.paper_trading === false || (currentSettings && currentSettings.paperTrading === false);
+    if (isCurrentlyLive) {
+      handleSwitchToPaperMode();
+    } else {
+      if (selectionTapTimerRef.current) clearTimeout(selectionTapTimerRef.current);
+      setPendingDoubleTapSelection(false);
+      setShowLiveConfirmModal(true);
     }
   };
 
@@ -538,12 +564,20 @@ export function DashboardView() {
               </div>
             </div>
           </div>
-          <button
-            onClick={() => fetchData(true)}
-            className="px-3 py-1 text-xs uppercase font-bold tracking-wider bg-black/50 border border-current hover:bg-white hover:text-black transition-colors shrink-0"
-          >
-            Sync Live Balance
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={handleSwitchToPaperMode}
+              className="px-3 py-1.5 text-xs uppercase font-bold tracking-wider bg-crypto-danger text-white border border-crypto-danger hover:bg-white hover:text-crypto-danger transition-colors shadow-[0_0_10px_rgba(255,59,48,0.4)]"
+            >
+              Disarm / Return to Paper
+            </button>
+            <button
+              onClick={() => fetchData(true)}
+              className="px-3 py-1.5 text-xs uppercase font-bold tracking-wider bg-black/50 border border-current hover:bg-white hover:text-black transition-colors"
+            >
+              Sync Live Balance
+            </button>
+          </div>
         </div>
       )}
 
@@ -651,19 +685,36 @@ export function DashboardView() {
             
             {/* Data Rows */}
             <div 
-              onDoubleClick={handleToggleTradingMode}
+              onDoubleClick={handleDoubleClickCashPool}
               onClick={handleCashPoolClickOrTouch}
-              title="Double-tap or double-click to toggle between Paper Cash and Kalshi Cash Pool"
-              className="flex border-b border-crypto-primary border-opacity-50 px-4 py-3.5 justify-between items-center bg-[#8f73ff08] cursor-pointer hover:bg-[#8f73ff14] transition-colors"
+              title={isLiveTrading 
+                ? "Click to immediately disarm and return to Paper Cash" 
+                : "Double-tap to initiate Live Kalshi Cash Pool confirmation dialog"}
+              className={`flex border-b border-crypto-primary border-opacity-50 px-4 py-3.5 justify-between items-center transition-all cursor-pointer ${
+                pendingDoubleTapSelection 
+                  ? 'bg-crypto-danger/25 border-crypto-danger animate-pulse'
+                  : 'bg-[#8f73ff08] hover:bg-[#8f73ff14]'
+              }`}
             >
               <div className="flex flex-col">
-                <span className="uppercase tracking-widest font-bold flex items-center gap-1.5">
+                <span className="uppercase tracking-widest font-bold flex items-center gap-1.5 flex-wrap">
                   <span>{isLiveTrading ? 'Kalshi Cash Pool' : 'Paper Cash Pool'}</span>
                   <span className={`text-[8px] px-1 py-0.2 border ${isLiveTrading ? 'border-crypto-success text-crypto-success' : 'border-crypto-primary/40 text-crypto-primary'}`}>
                     {isLiveTrading ? 'LIVE' : 'SIM'}
                   </span>
+                  {pendingDoubleTapSelection && (
+                    <span className="text-[9px] px-1.5 py-0.5 bg-crypto-danger text-white font-bold uppercase animate-bounce">
+                      TAP AGAIN (2/2) FOR LIVE DIALOG
+                    </span>
+                  )}
                 </span>
-                <span className="text-[10px] text-crypto-primary/80 uppercase">Capital cleared for new trades (Double-Tap to switch)</span>
+                <span className="text-[10px] text-crypto-primary/80 uppercase">
+                  {isLiveTrading 
+                    ? 'Operating with Real Kalshi Balance (Tap to disarm)' 
+                    : pendingDoubleTapSelection 
+                      ? '⚠️ Tap once more to open Live Risk Confirmation Dialog'
+                      : 'Capital cleared for new trades (Double-Tap for Live Dialog)'}
+                </span>
               </div>
               <div className="flex flex-col items-end">
                 <span className="text-crypto-text font-bold text-lg">${(balance?.working_balance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
@@ -799,24 +850,30 @@ export function DashboardView() {
                   </button>
                 </div>
 
-                {/* Button that toggles between Paper Cash and Kalshi Cash Pool when double-tapped */}
+                {/* Button that toggles between Paper Cash and Kalshi Cash Pool */}
                 <button
                   type="button"
                   onClick={handleCashPoolClickOrTouch}
-                  onDoubleClick={handleToggleTradingMode}
+                  onDoubleClick={handleDoubleClickCashPool}
                   disabled={isTogglingMode}
-                  title="Double-tap or double-click to toggle between PAPER CASH and KALSHI CASH POOL"
+                  title={isLiveTrading 
+                    ? "Click to disarm and return to Paper Cash" 
+                    : "Double-tap to initiate Live Kalshi Cash Pool confirmation dialog"}
                   className={`text-[10px] px-2.5 py-1 border font-bold uppercase transition-all select-none cursor-pointer flex flex-col items-center justify-center leading-tight active:scale-95 ${
                     isLiveTrading
                       ? 'border-crypto-success text-crypto-success bg-crypto-success/15 shadow-[0_0_10px_rgba(74,222,128,0.25)] hover:bg-crypto-success/25' 
-                      : 'border-crypto-primary/60 text-crypto-primary bg-crypto-primary/10 shadow-[0_0_10px_rgba(143,115,255,0.2)] hover:bg-crypto-primary/20'
+                      : pendingDoubleTapSelection
+                        ? 'border-crypto-danger text-white bg-crypto-danger animate-pulse shadow-[0_0_15px_rgba(255,59,48,0.5)]'
+                        : 'border-crypto-primary/60 text-crypto-primary bg-crypto-primary/10 shadow-[0_0_10px_rgba(143,115,255,0.2)] hover:bg-crypto-primary/20'
                   }`}
                 >
                   <div className="flex items-center gap-1.5">
                     <span className={`w-1.5 h-1.5 rounded-full ${isLiveTrading ? 'bg-crypto-success animate-pulse' : 'bg-crypto-primary'}`} />
-                    <span>{isLiveTrading ? 'KALSHI CASH POOL' : 'PAPER CASH'}</span>
+                    <span>{isLiveTrading ? 'KALSHI CASH POOL' : (pendingDoubleTapSelection ? 'TAP AGAIN (2/2)' : 'PAPER CASH')}</span>
                   </div>
-                  <span className="text-[7.5px] opacity-60 font-mono tracking-tighter mt-0.5">(DOUBLE-TAP)</span>
+                  <span className="text-[7.5px] opacity-75 font-mono tracking-tighter mt-0.5">
+                    {isLiveTrading ? '(TAP TO DISARM)' : (pendingDoubleTapSelection ? 'CONFIRM SELECTION' : '(DOUBLE-TAP)')}
+                  </span>
                 </button>
               </div>
             </div>
@@ -1363,6 +1420,15 @@ export function DashboardView() {
         isOpen={showRestartModal} 
         onClose={() => setShowRestartModal(false)} 
         onSuccess={fetchData} 
+      />
+
+      <LiveTradingConfirmationModal
+        isOpen={showLiveConfirmModal}
+        onClose={() => setShowLiveConfirmModal(false)}
+        onConfirmSuccess={() => {
+          fetchData(true);
+        }}
+        currentKalshiBalance={balance?.real_kalshi_cash_pool ?? 0}
       />
 
     </div>

@@ -825,20 +825,25 @@ export class KalshiService {
           if (!res.ok) {
             const txt = await res.text();
             lastError = `HTTP ${res.status}: ${txt}`;
+
+            // If account has insufficient balance, terminate immediately without hammering fallback host
+            if (txt.includes('insufficient_balance')) {
+              console.warn(`[KALSHI ORDER REJECTED] Account cash is insufficient for ${orderCount}x ${action} ${side} on ${ticker}: ${lastError}`);
+              return { success: false, error: lastError };
+            }
+
             console.error(`[KALSHI ORDER ERROR on ${host}] HTTP ${res.status}:`, txt);
 
-            // Shard Auto-Healer: If error is about insufficient balance/margin or unallocated shard, auto-fund target shard and retry once
+            // Shard Auto-Healer: If error is about unallocated shard or shard index, auto-fund target shard within available account balance
             const isShardError = txt.includes('insufficient_shard_balance') || 
               txt.includes('Exchange user not found') || 
               txt.includes('Exchange Sharding') || 
-              txt.includes('insufficient') || 
-              txt.includes('exchange_index') || 
-              txt.includes('margin');
+              txt.includes('exchange_index');
 
             if (retryCount === 0 && isShardError) {
               const targetShard = isPerp || ticker.startsWith('KXBTC') || ticker.startsWith('KXETH') || ticker.startsWith('KXSOL') ? 2 : 0;
               console.log(`[KALSHI SHARD HEALER] Insufficient shard balance detected. Auto-rebalancing to target Shard ${targetShard}...`);
-              const fundRes = await this.ensureShardFunded(targetShard, 25);
+              const fundRes = await this.ensureShardFunded(targetShard, 5);
               if (fundRes.success) {
                 await new Promise((r) => setTimeout(r, 800));
                 return this.placeOrder(ticker, action, side, count, price, retryCount + 1);

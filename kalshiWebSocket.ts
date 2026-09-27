@@ -25,7 +25,8 @@ export type KalshiWsTickerHandler = (update: KalshiWsPriceUpdate) => void;
 
 export class KalshiWebSocketManager {
   private ws: WebSocket | null = null;
-  private wsUrl = 'wss://trading-api.kalshi.com/trade-api/ws/v2';
+  // Official Kalshi v2 WebSocket production endpoints
+  private wsUrl = 'wss://external-api-ws.kalshi.com/trade-api/ws/v2';
   private fallbackWsUrl = 'wss://api.elections.kalshi.com/trade-api/ws/v2';
   private activeUrl = this.wsUrl;
   

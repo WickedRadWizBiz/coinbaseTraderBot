@@ -46,6 +46,23 @@ export class GlobalMetricsTracker {
     } catch (e) {}
   }
 
+  /**
+   * Returns the 1-minute delta percentage of USDT Dominance (e.g., +0.03 for +0.03%).
+   */
+  public get1mDeltaPct(): number {
+    if (this.history.length >= 2) {
+      const current = this.history[this.history.length - 1].val;
+      const prev = this.history[this.history.length - 2].val;
+      if (prev > 0) {
+        return ((current - prev) / prev) * 100;
+      }
+    }
+    if (this.lastDominance > 0 && this.usdtDominance > 0) {
+      return ((this.usdtDominance - this.lastDominance) / this.lastDominance) * 100;
+    }
+    return 0;
+  }
+
   // Calculate RSI 7 for sub-30min timeframes
   private aggregateCloses(intervalMin: number): number[] {
     const grouped = new Map<number, number>();

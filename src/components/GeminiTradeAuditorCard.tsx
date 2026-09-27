@@ -184,27 +184,78 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
     }
   };
 
-  // Extract the markdown block containing the AI Studio prompt
+  // Extract the markdown block containing the AI Studio prompt or directive section
   const extractCodeBlock = (text: string | null): string => {
     if (!text) return '';
-    const match = text.match(/```markdown([\s\S]*?)```/);
+    const match = text.match(/```markdown([\s\S]*?)```/i);
     if (match && match[1]) {
       return match[1].trim();
     }
-    // Fallback if formatting was slightly different
+    // Fallback for general code blocks
     const fallbackMatch = text.match(/```([\s\S]*?)```/);
     if (fallbackMatch && fallbackMatch[1]) {
       return fallbackMatch[1].trim();
     }
-    return '';
+    // Fallback if the auditor provided a directive header without backticks
+    if (text.includes('### AI STUDIO CODING AGENT DIRECTIVE') || text.includes('AI STUDIO CODING AGENT DIRECTIVE')) {
+      const directiveIdx = text.indexOf('AI STUDIO CODING AGENT DIRECTIVE');
+      const startIdx = text.lastIndexOf('#', directiveIdx) !== -1 ? text.lastIndexOf('#', directiveIdx) : directiveIdx;
+      return text.substring(startIdx).trim();
+    }
+    return text.trim();
   };
 
-  const handleCopyPrompt = (reportText: string | null) => {
-    const code = extractCodeBlock(reportText);
+  // Robust universal copy supporting non-secure HTTP contexts (e.g. AWS Lightsail) and modern async clipboard API
+  const copyToClipboard = async (textToCopy: string): Promise<boolean> => {
+    if (!textToCopy) return false;
+    
+    // 1. Try modern navigator.clipboard if in secure context
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(textToCopy);
+        return true;
+      } catch (err) {
+        console.warn('[CLIPBOARD] Modern clipboard writeText failed, falling back to execCommand', err);
+      }
+    }
+
+    // 2. Fallback using temporary textarea (works reliably on HTTP / AWS Lightsail IP deployments)
+    try {
+      const textArea = document.createElement('textarea');
+      textArea.value = textToCopy;
+      textArea.style.position = 'fixed';
+      textArea.style.top = '0';
+      textArea.style.left = '0';
+      textArea.style.width = '2em';
+      textArea.style.height = '2em';
+      textArea.style.padding = '0';
+      textArea.style.border = 'none';
+      textArea.style.outline = 'none';
+      textArea.style.boxShadow = 'none';
+      textArea.style.background = 'transparent';
+      textArea.style.opacity = '0';
+      textArea.setAttribute('readonly', '');
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      textArea.setSelectionRange(0, textToCopy.length);
+      const successful = document.execCommand('copy');
+      document.body.removeChild(textArea);
+      return successful;
+    } catch (err) {
+      console.error('[CLIPBOARD ERROR] Fallback copy failed', err);
+      return false;
+    }
+  };
+
+  const handleCopyPrompt = async (reportText: string | null) => {
+    const code = extractCodeBlock(reportText) || reportText || '';
     if (code) {
-      navigator.clipboard.writeText(code);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      const success = await copyToClipboard(code);
+      if (success) {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2500);
+      }
     }
   };
 

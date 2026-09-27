@@ -3,6 +3,7 @@ import { Save, AlertCircle, ShieldCheck, PieChart, Activity, Clock, Zap } from '
 
 import { PWAInstallButton } from './PWAInstallButton';
 import { KalshiKeyConfigCard } from './KalshiKeyConfigCard';
+import { LiveTradingConfirmationModal } from './LiveTradingConfirmationModal';
 
 export function SettingsView() {
   const [settings, setSettings] = useState({
@@ -26,6 +27,38 @@ export function SettingsView() {
   const [marketTesting, setMarketTesting] = useState<any>(null);
   const [startingBankroll, setStartingBankroll] = useState<number>(200);
   const [saving, setSaving] = useState(false);
+  const [showLiveConfirmModal, setShowLiveConfirmModal] = useState(false);
+  const [pendingDoubleTapSelection, setPendingDoubleTapSelection] = useState(false);
+  const selectionTapTimerRef = React.useRef<NodeJS.Timeout | null>(null);
+
+  const handlePaperTradingToggleClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (!settings.paperTrading) {
+      // Currently Live -> safely disarm back to Paper mode immediately
+      const newSettings = { ...settings, paperTrading: true };
+      setSettings(newSettings);
+      fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paperTrading: true })
+      });
+      return;
+    }
+
+    // Currently Paper -> enforce DOUBLE-TAP SELECTION before opening confirmation dialog
+    if (!pendingDoubleTapSelection) {
+      setPendingDoubleTapSelection(true);
+      if (selectionTapTimerRef.current) clearTimeout(selectionTapTimerRef.current);
+      selectionTapTimerRef.current = setTimeout(() => {
+        setPendingDoubleTapSelection(false);
+      }, 1000);
+    } else {
+      // Second tap!
+      if (selectionTapTimerRef.current) clearTimeout(selectionTapTimerRef.current);
+      setPendingDoubleTapSelection(false);
+      setShowLiveConfirmModal(true);
+    }
+  };
 
   const fetchAll = () => {
     fetch('/api/balance')
@@ -545,35 +578,49 @@ export function SettingsView() {
             <div className={`absolute left-1 top-1 bg-white w-6 h-6 rounded-none transition-transform ${settings.adaptationMode ? 'translate-x-6' : ''}`}></div>
           </div>
         </label>
-        <label className="flex items-center justify-between cursor-pointer border-b border-crypto-primary/30 pb-4 mb-4">
+        <div 
+          onClick={handlePaperTradingToggleClick}
+          className={`flex items-center justify-between cursor-pointer border-b border-crypto-primary/30 pb-4 mb-4 transition-colors ${
+            pendingDoubleTapSelection ? 'bg-crypto-danger/10 p-2 border-crypto-danger' : ''
+          }`}
+        >
           <div className="flex flex-col">
-            <span className="font-medium text-crypto-primary flex items-center gap-2">
+            <span className="font-medium text-crypto-primary flex items-center gap-2 flex-wrap">
               Paper Trading (Simulation) 
               <span className={`px-2 py-0.5 text-[10px] rounded-none font-bold uppercase tracking-wider ${settings.paperTrading ? 'bg-crypto-primary/20 text-crypto-primary border border-crypto-primary/40' : 'bg-crypto-success/20 text-crypto-success border border-crypto-success/40'}`}>
                 {settings.paperTrading ? 'Simulated Paper Cash' : 'Real Kalshi Predictions Pool'}
               </span>
+              {pendingDoubleTapSelection && (
+                <span className="text-[9px] px-1.5 py-0.5 bg-crypto-danger text-white font-bold uppercase animate-bounce">
+                  TAP AGAIN (2/2) FOR LIVE DIALOG
+                </span>
+              )}
             </span>
             <span className="text-xs text-[#808080]">
               {settings.paperTrading 
-                ? 'Using simulated cash bankroll ($200 starting) and local balance testing without real risk.' 
-                : 'LIVE MODE: Bankroll strictly reflects actual Kalshi USD cash balance via authenticated API.'}
+                ? (pendingDoubleTapSelection 
+                    ? '⚠️ Tap again to open Live Kalshi Risk Confirmation Dialog (Requires second double-tap to arm).' 
+                    : 'Using simulated cash bankroll ($200 starting) and local balance testing without real risk. (Double-tap to switch)')
+                : 'LIVE MODE: Bankroll strictly reflects actual Kalshi USD cash balance. (Click to disarm)'}
             </span>
           </div>
-          <div className="relative">
+          <div className="relative pointer-events-none">
             <input 
               type="checkbox" 
               className="sr-only" 
               checked={settings.paperTrading}
-              onChange={(e) => {
-                const newSettings = {...settings, paperTrading: e.target.checked};
-                setSettings(newSettings);
-                fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newSettings) });
-              }}
+              readOnly
             />
-            <div className={`block w-14 h-8 rounded-none transition-colors ${settings.paperTrading ? 'bg-crypto-primary' : 'bg-black/60 border border-[#404040]'}`}></div>
+            <div className={`block w-14 h-8 rounded-none transition-colors ${
+              pendingDoubleTapSelection 
+                ? 'bg-crypto-danger animate-pulse' 
+                : settings.paperTrading 
+                  ? 'bg-crypto-primary' 
+                  : 'bg-black/60 border border-[#404040]'
+            }`}></div>
             <div className={`absolute left-1 top-1 bg-white w-6 h-6 rounded-none transition-transform ${settings.paperTrading ? 'translate-x-6' : ''}`}></div>
           </div>
-        </label>
+        </div>
         {settings.paperTrading && (
           <>
             <div className="flex flex-col gap-2 pt-2 pb-4 mb-4 border-b border-crypto-primary/30 pl-2">
@@ -840,6 +887,16 @@ export function SettingsView() {
       <div className="mt-4">
         <PWAInstallButton />
       </div>
+
+      <LiveTradingConfirmationModal
+        isOpen={showLiveConfirmModal}
+        onClose={() => setShowLiveConfirmModal(false)}
+        onConfirmSuccess={() => {
+          setSettings(prev => ({ ...prev, paperTrading: false }));
+          fetchAll();
+        }}
+        currentKalshiBalance={balanceData?.real_kalshi_cash_pool ?? 0}
+      />
     </div>
   );
 }
