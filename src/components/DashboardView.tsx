@@ -106,6 +106,7 @@ interface BalanceData {
     active_perps_count: number;
     max_perps_allowed: number;
     active_predictions_count: number;
+    max_predictions_allowed?: number;
     perp_capital_in_use: number;
     prediction_capital_in_use: number;
     min_prediction_capital_reserve_pct: number;
@@ -1128,14 +1129,18 @@ export function DashboardView() {
                 <div className="flex items-center gap-2">
                   <span>MARKET ALLOCATION & CAPITAL GUARD:</span>
                   <span className={`px-2 py-0.5 border text-[10px] uppercase font-bold tracking-widest ${
-                    balance.perp_allocation_stats.active_perps_count >= balance.perp_allocation_stats.max_perps_allowed
+                    balance.perp_allocation_stats.active_perps_count >= (balance.perp_allocation_stats.max_perps_allowed || 3)
                       ? 'bg-amber-500/20 text-amber-400 border-amber-500'
                       : 'bg-emerald-500/20 text-emerald-400 border-emerald-500'
                   }`}>
-                    PERP SLOTS: {balance.perp_allocation_stats.active_perps_count} / {balance.perp_allocation_stats.max_perps_allowed} MAX
+                    PERP SLOTS: {balance.perp_allocation_stats.active_perps_count} / {balance.perp_allocation_stats.max_perps_allowed || 3} MAX
                   </span>
-                  <span className="px-2 py-0.5 border text-[10px] uppercase font-bold tracking-widest bg-crypto-primary/20 text-crypto-primary border-crypto-primary/50">
-                    15-MIN PREDICTIONS: {balance.perp_allocation_stats.active_predictions_count} ACTIVE
+                  <span className={`px-2 py-0.5 border text-[10px] uppercase font-bold tracking-widest ${
+                    balance.perp_allocation_stats.active_predictions_count >= (balance.perp_allocation_stats.max_predictions_allowed || 3)
+                      ? 'bg-amber-500/20 text-amber-400 border-amber-500'
+                      : 'bg-crypto-primary/20 text-crypto-primary border-crypto-primary/50'
+                  }`}>
+                    PREDICTIONS: {balance.perp_allocation_stats.active_predictions_count} / {balance.perp_allocation_stats.max_predictions_allowed || 3} MAX
                   </span>
                 </div>
                 <div className="text-[11px] opacity-80">
@@ -1143,7 +1148,7 @@ export function DashboardView() {
                 </div>
               </div>
               <div className="text-[11px] opacity-90 leading-relaxed">
-                <strong>50% Capital Reserve Rule:</strong> Perpetual Contracts are strictly hard-capped at <strong>4 concurrent positions</strong> and cannot consume more than 50% of working capital. At least <strong>50% of capital is strictly reserved for 15-minute price predictions</strong>, preventing perpetual stall lockouts.
+                <strong>Allocation Rule:</strong> Perpetual Contracts are strictly hard-capped at <strong>3 concurrent positions max</strong>, and Price Predictions are strictly capped at <strong>3 concurrent positions max</strong>. At least <strong>50% of capital is strictly reserved for price predictions</strong>.
               </div>
             </div>
           </div>

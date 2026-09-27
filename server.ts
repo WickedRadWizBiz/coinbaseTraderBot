@@ -1910,6 +1910,13 @@ interface PaperPosition {
     toxicOrderFlowAdverseSelection: boolean;
   };
   implementationShortfallUsd?: number;
+  executionDelayMs?: number;
+  slippageBps?: number;
+  slippageUsd?: number;
+  nanosecondsAtSignal?: number;
+  patternType?: string;
+  patternKey?: string;
+  featureSnapshot?: any;
 }
 
 let activePositions: PaperPosition[] = [];
@@ -2355,47 +2362,29 @@ function evaluatePostSLContractCandidate(symbol: string, targetSide: string, sta
 function canOpenTrade(positions: PaperPosition[], category: string, label: string, isPerpetual: boolean = false) {
   if (positions.length >= 8) return false;
 
-  const isTennis = (cat: string, lbl: string) => cat === 'sports' || (lbl || '').toLowerCase().includes('tennis') || (lbl || '').toLowerCase().includes('atp');
-  const isPrediction = (cat: string, isPerp: boolean) => cat === 'crypto' && !isPerp;
+  const isTennis = (cat: string, lbl: string) => (cat || '') === 'sports' || (lbl || '').toLowerCase().includes('tennis') || (lbl || '').toLowerCase().includes('atp');
+  const isPrediction = (cat: string, isPerp: boolean, lbl: string = '') => !isPerp && !isTennis(cat, lbl);
 
   const tennisCount = positions.filter(p => isTennis(p.category, p.label)).length;
-  const predictionCount = positions.filter(p => isPrediction(p.category, !!p.isPerpetual)).length;
+  const predictionCount = positions.filter(p => isPrediction(p.category, !!p.isPerpetual, p.label)).length;
   const perpCount = positions.filter(p => p.isPerpetual).length;
 
   if (isPerpetual) {
-    // Hard requirement: Never more than 4 Perpetual Contracts open at any given time
-    if (perpCount >= 4) return false;
-
-    // Prevent trading cessation / perpetual lockout:
-    // If no 15-minute price prediction contracts are open, do not allow stacking multiple perpetuals alone
-    if (predictionCount === 0 && perpCount >= 1) {
-      return false;
-    }
+    // Hard requirement: Never more than 3 Perpetual Contracts open at any given time
+    return perpCount < 3;
   }
 
-  const otherCount = positions.length - (tennisCount + predictionCount + perpCount);
-
-  const flexUsed = Math.max(0, tennisCount - 1) + 
-                   Math.max(0, predictionCount - 2) + 
-                   Math.max(0, perpCount - 3) + 
-                   otherCount;
-
-  const flexAvailable = 2 - flexUsed;
+  if (isPrediction(category, isPerpetual, label)) {
+    // Hard requirement: Never more than 3 Price Prediction Contracts open at any given time
+    return predictionCount < 3;
+  }
 
   if (isTennis(category, label)) {
-    // Exploring ATP tennis matches though limited: max 2 concurrent positions
-    if (tennisCount >= 2) return false;
-    if (tennisCount < 1) return true;
-    return flexAvailable > 0;
-  } else if (isPerpetual) {
-    if (perpCount < 4) return true;
-    return false;
-  } else if (isPrediction(category, isPerpetual)) {
-    if (predictionCount < 6) return true;
-    return flexAvailable > 0;
-  } else {
-    return flexAvailable > 0;
+    // ATP tennis matches: max 2 concurrent positions
+    return tennisCount < 2;
   }
+
+  return positions.length < 8;
 }
 
 function isPatternAllowedInRecoveryMode(patternType: string): boolean {
@@ -2623,7 +2612,7 @@ async function openPosition(
   }
 
   // SR 11-7 Asset Taxonomy Boundary Filter: Reject non-crypto instruments from entering crypto neural pipelines
-  if (!TradeDatabaseManager.isAllowedCryptoAsset(symbol)) {
+  if (category === 'crypto' && !TradeDatabaseManager.isAllowedCryptoAsset(symbol)) {
     spotLogs.unshift({
       id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
       message: `[ASSET TAXONOMY FILTER VETO] Suppressed entry on ${symbol}. Instrument failed crypto neural whitelist validation.`
@@ -2815,10 +2804,10 @@ async function openPosition(
 
     if (isPerpContract) {
       const activePerps = activePositions.filter(p => p.isPerpetual).length;
-      if (activePerps >= 4) {
+      if (activePerps >= 3) {
         spotLogs.unshift({
           id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
-          message: `[PERP LIMIT GUARD] Maximum 4 Perpetual Contracts already active (${activePerps}/4). Entry on ${symbol} aborted to maintain 15-minute prediction market capacity.`
+          message: `[PERP LIMIT GUARD] Maximum 3 Perpetual Contracts already active (${activePerps}/3). Entry on ${symbol} aborted to maintain 3-perp max limit.`
         });
         return;
       }
@@ -2827,6 +2816,15 @@ async function openPosition(
         spotLogs.unshift({
           id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
           message: `[PERP 50% CAPITAL RESERVE VETO] Suppressed Perpetual entry on ${symbol}. Perpetual capital in use ($${perpCapitalInUse.toFixed(2)} of max $${maxAllowedPerpCapital.toFixed(2)}) or available cash ($${currentWorkingBalance.toFixed(2)}) would breach the 50% capital allocation reserved for 15-minute price predictions ($${perpCapReserveThreshold.toFixed(2)} of $${totalWorkingBankroll.toFixed(2)}).`
+        });
+        return;
+      }
+    } else if (!isTennisContract) {
+      const activePredictions = activePositions.filter(p => !p.isPerpetual && p.category !== 'sports' && !(p.label || '').toLowerCase().includes('tennis') && !(p.symbol || '').includes('ATP')).length;
+      if (activePredictions >= 3) {
+        spotLogs.unshift({
+          id: logIdCounter++, time: new Date().toISOString(), type: 'ANALYZE',
+          message: `[PREDICTION LIMIT GUARD] Maximum 3 Price Prediction Contracts already active (${activePredictions}/3). Entry on ${symbol} aborted to maintain 3-prediction max limit.`
         });
         return;
       }
@@ -2924,7 +2922,8 @@ async function openPosition(
   const bidVol = analysisMeta?.indicators?.bidVol || 500;
   const askVol = analysisMeta?.indicators?.askVol || 500;
 
-  if (confCount === 1 && !isOverride && category === 'crypto') {
+  const isOverrideActive = isOverride || settings.overrideConfluence;
+  if (confCount === 1 && !isOverrideActive && category === 'crypto') {
     let aiDecision = "SKIP";
 
     // HEURISTIC EVALUATION for 1-confluence (Replacing API Call)
@@ -3824,11 +3823,15 @@ async function discoverMarkets() {
 
           // Check if previous ticker for this series in spotContexts has expired or changed
           for (const sym of Object.keys(spotContexts)) {
-            if (spotContexts[sym].seriesTicker === seriesTicker && sym !== best.ticker) {
+            const sc = spotContexts[sym];
+            if (sc.closeTime && Date.now() >= new Date(sc.closeTime).getTime()) {
+              sc.isExpired = true;
+            }
+            if (sc.seriesTicker === seriesTicker && sym !== best.ticker) {
               if (!activePositions.some(p => p.symbol === sym)) {
                 delete spotContexts[sym];
               } else {
-                spotContexts[sym].isExpired = true;
+                sc.isExpired = true;
               }
             }
           }
@@ -5143,6 +5146,11 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
                 c.bids = data.orderbook_fp.yes_dollars ? data.orderbook_fp.yes_dollars.map((b: any) => ({ price: parseFloat(b[0]), size: parseFloat(b[1]) })).sort((a: any, b: any) => b.price - a.price) : [];
                 c.asks = data.orderbook_fp.no_dollars ? data.orderbook_fp.no_dollars.map((a: any) => ({ price: 1.0 - parseFloat(a[0]), size: parseFloat(a[1]) })).sort((a: any, b: any) => a.price - b.price) : [];
               }
+              if (c.bids.length > 0 && c.asks.length > 0) {
+                c.currentPrice = (c.bids[0].price + c.asks[0].price) / 2;
+                c.lastQuoteUpdateMs = Date.now();
+                c.isOrderBookStale = false;
+              }
             }
           }).catch(() => {});
         }
@@ -5462,6 +5470,11 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
           const rawAtr = pos.entryFeatures?.atr || pos.featureSnapshot?.volatilityAtr || 0.012;
           const choppyStopLimit = -Math.max(0.02, Math.min(0.05, 1.5 * rawAtr));
 
+          const isContractPastExpiry = ctx?.closeTime ? (Date.now() >= new Date(ctx.closeTime).getTime()) : false;
+          const isPredictionLifespanTimeout = !isPerp && timeInContractSec >= 900; // 15 minutes hard duration for 15M prediction contracts
+          const isPerpStagnant = isPerp && timeInContractSec >= 600 && Math.abs(pnlRatio) < 0.015; // Perp stagnant/flat for >10 min (<1.5% move)
+          const isPerpHardCap = isPerp && timeInContractSec >= 900; // 15 minutes maximum hold time hard cap for perps
+
           // 1. Check Hard Drawdown Limits FIRST to prevent runaway liquidation drops
           if (pnlRatio <= MAX_HARD_STOP_LOSS) {
             shouldClose = true;
@@ -5469,9 +5482,35 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
           } else if (isChoppyOrMicro && pnlRatio <= choppyStopLimit) {
             shouldClose = true;
             closeReason = `[CHOPPY_SIDEWAYS VOLATILITY STOP] Hit ${(choppyStopLimit * 100).toFixed(1)}% limit (1.5x ATR). Liquidated to prevent blowout.`;
-          } else if (ctx.isExpired) {
+          } else if (ctx.isExpired || isContractPastExpiry || isPredictionLifespanTimeout) {
             shouldClose = true;
-            closeReason = `Market Expiration / Contract Settlement`;
+            closeReason = isContractPastExpiry
+              ? `Market Expiration / Contract Settlement (closeTime reached)`
+              : isPredictionLifespanTimeout
+              ? `15-Minute Contract Lifespan Expiration Auto-Settlement (${Math.round(timeInContractSec)}s elapsed)`
+              : `Market Expiration / Contract Settlement`;
+
+            // For expired binary event contracts, evaluate terminal settlement outcome
+            if (!isPerp) {
+              const spotPair = getSpotPairFromSymbol(pos.label || pos.symbol, pos.category);
+              const curSpot = scalper.currentCandles[spotPair]?.close || currentSidePrice;
+              let strikePrice = 0;
+              const strikeMatch = pos.symbol.match(/-B?([0-9.]+)(?:-|$)/) || (pos.label && pos.label.match(/\$?([0-9,.]+)/));
+              if (strikeMatch && strikeMatch[1]) {
+                strikePrice = parseFloat(strikeMatch[1].replace(/,/g, ''));
+              }
+              if (strikePrice > 0 && curSpot > 0) {
+                const isYesWinning = curSpot >= strikePrice;
+                const won = (pos.side === 'YES' && isYesWinning) || (pos.side === 'NO' && !isYesWinning);
+                const safeEntry = Math.max(0.01, Math.min(0.99, pos.entryPrice || 0.50));
+                pnlRatio = won ? (1.0 - safeEntry) / safeEntry : -1.0;
+              }
+            }
+          } else if (isPerpStagnant || isPerpHardCap) {
+            shouldClose = true;
+            closeReason = isPerpHardCap
+              ? `[PERPETUAL 15M DURATION LIMIT] Position held for 15 minutes. Closed at market to cycle working capital.`
+              : `[PERPETUAL STAGNATION EXIT] Position flat for >10m (${(pnlRatio * 100).toFixed(2)}%). Closed to release capital for active opportunities.`;
           } else if (smartTrailRes.shouldClose) {
             shouldClose = true;
             closeReason = smartTrailRes.closeReason || `Smart Trailing TP (+${(pnlRatio * 100).toFixed(1)}%)`;
@@ -5986,8 +6025,9 @@ setInterval(async () => {
       });
 
       for (const pos of altLongs) {
-        tradingBrain.recordTrade(pos.symbol, pos.patternType, false, -0.015, 'USDT_DOMINANCE_SPIKE_FORCE_CLOSE', { isPerp: pos.isPerpetual });
-        closePaperPosition(pos, 'USDT_DOMINANCE_SPIKE_FORCE_CLOSE');
+        tradingBrain.recordStrategyOutcome(pos, -0.015, 'USDT_DOMINANCE_SPIKE_FORCE_CLOSE');
+        activePositions = activePositions.filter(p => p.id !== pos.id);
+        closedPositionCooldowns.set(pos.symbol, Date.now());
       }
     }
   }
@@ -6531,7 +6571,7 @@ setInterval(async () => {
       });
 
       for (const topCandidate of rankedCandidates) {
-        if (!canOpenTrade(activePositions, topCandidate.ctx?.category || 'crypto', topCandidate.ctx?.label, !!topCandidate.ctx?.isPerpetual)) break;
+        if (!canOpenTrade(activePositions, topCandidate.ctx?.category || 'crypto', topCandidate.ctx?.label, !!topCandidate.ctx?.isPerpetual)) continue;
         if (activePositions.some(p => p.symbol === topCandidate.symbol && p.side === topCandidate.signalSide)) continue;
 
         const pref = topCandidate.adaptivePreference;
@@ -7115,10 +7155,11 @@ app.get('/api/balance', async (req, res) => {
     latency_profile: latencyAdaptiveEngine.getProfile(),
     perp_allocation_stats: {
       active_perps_count: activePositions.filter(p => p.isPerpetual).length,
-      max_perps_allowed: 4,
-      active_predictions_count: activePositions.filter(p => !p.isPerpetual).length,
+      max_perps_allowed: 3,
+      active_predictions_count: activePositions.filter(p => !p.isPerpetual && p.category !== 'sports' && !(p.label || '').toLowerCase().includes('tennis') && !(p.symbol || '').includes('ATP')).length,
+      max_predictions_allowed: 3,
       perp_capital_in_use: activePositions.filter(p => p.isPerpetual).reduce((sum, p) => sum + (p.capitalPlacedUsd || (p.size * p.entryPrice)), 0),
-      prediction_capital_in_use: activePositions.filter(p => !p.isPerpetual).reduce((sum, p) => sum + (p.capitalPlacedUsd || (p.size * p.entryPrice)), 0),
+      prediction_capital_in_use: activePositions.filter(p => !p.isPerpetual && p.category !== 'sports' && !(p.label || '').toLowerCase().includes('tennis') && !(p.symbol || '').includes('ATP')).reduce((sum, p) => sum + (p.capitalPlacedUsd || (p.size * p.entryPrice)), 0),
       min_prediction_capital_reserve_pct: 0.50
     },
     tennis_allocation_stats: {

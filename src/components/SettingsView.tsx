@@ -388,6 +388,18 @@ export function SettingsView() {
             <ShieldCheck className="w-5 h-5 text-crypto-primary shrink-0 mt-0.5" />
             <div className="flex flex-col gap-0.5">
               <span className="text-xs font-bold uppercase tracking-wider text-crypto-text flex items-center gap-2">
+                Concurrency Slots: <span className="text-crypto-primary font-mono">3 Max Perps | 3 Max Predictions</span>
+              </span>
+              <span className="text-xs text-[#808080]">
+                Strict position guards cap active contracts at maximum 3 perpetual positions and 3 price prediction positions concurrently.
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-3 p-3 bg-black/40 crt-border border-crypto-primary/30">
+            <ShieldCheck className="w-5 h-5 text-crypto-primary shrink-0 mt-0.5" />
+            <div className="flex flex-col gap-0.5">
+              <span className="text-xs font-bold uppercase tracking-wider text-crypto-text flex items-center gap-2">
                 Perpetual Capital Reserve Guard: <span className="text-crypto-primary font-mono">30% Hard Floor</span>
               </span>
               <span className="text-xs text-[#808080]">
