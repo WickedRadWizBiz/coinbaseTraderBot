@@ -88,6 +88,8 @@ export class SlippageEngine {
     // Hard Rule: If OrderBookImbalance < 0.75 (e.g. ID 609411: OrderBookImbalance 0.7471), reduce position sizing by 50%
     if (obImbalance < 0.75) {
       imbalanceScaleFactor = Number((imbalanceScaleFactor * 0.50).toFixed(3));
+    } else if (obImbalance > 1.8) {
+      imbalanceScaleFactor = Number((imbalanceScaleFactor * Math.max(0.40, 1.8 / obImbalance)).toFixed(3));
     }
 
     // Tie entry size to VolumeSurgeRatio
@@ -98,12 +100,16 @@ export class SlippageEngine {
     const atr = Math.max(0.001, volatilityAtr || 0.012);
     const volatilityScaleFactor = Number(Math.max(0.35, Math.min(1.0, 0.015 / Math.max(0.008, atr))).toFixed(3));
 
-    // Scale down size if historical slippage on this symbol exceeds threshold (> $0.015)
-    const slippageScaleFactor = Number((historicalSlippageUsd > 0.015 
-      ? Math.max(0.30, 0.015 / historicalSlippageUsd) 
+    // Scale down size if historical slippage on this symbol exceeds threshold (> $0.008)
+    const slippageScaleFactor = Number((historicalSlippageUsd > 0.008 
+      ? Math.max(0.20, 0.008 / Math.max(0.008, historicalSlippageUsd)) 
       : 1.0).toFixed(3));
 
-    const combinedMultiplier = tierMultiplier * imbalanceScaleFactor * surgeScaleFactor * volatilityScaleFactor * slippageScaleFactor;
+    // Perpetual contract liquidity guard: high-notional altcoin perps scale by 0.50 to avoid high market impact
+    const isPerp = sym.includes('PERP');
+    const perpLiquidityMultiplier = isPerp ? 0.50 : 1.0;
+
+    const combinedMultiplier = tierMultiplier * imbalanceScaleFactor * surgeScaleFactor * volatilityScaleFactor * slippageScaleFactor * perpLiquidityMultiplier;
     const scaledOrderSize = Math.max(1, Math.round(baseOrderSize * combinedMultiplier));
 
     return {
@@ -113,7 +119,7 @@ export class SlippageEngine {
       imbalanceScaleFactor,
       volatilityScaleFactor,
       slippageScaleFactor,
-      reason: `Tier: ${tier} (x${tierMultiplier}) | OB Imbalance ${obImbalance < 0.75 ? '(<0.75 50% cut)' : ''}: x${imbalanceScaleFactor} | Surge: x${surgeScaleFactor} | Vol Scale: x${volatilityScaleFactor} | Slippage Scale: x${slippageScaleFactor} ➔ Sized ${scaledOrderSize} contracts (Base: ${baseOrderSize})`
+      reason: `Tier: ${tier} (x${tierMultiplier}) | OB Imbalance ${obImbalance < 0.75 ? '(<0.75 50% cut)' : obImbalance > 1.8 ? '(>1.8 cut)' : ''}: x${imbalanceScaleFactor} | Surge: x${surgeScaleFactor} | Vol Scale: x${volatilityScaleFactor} | Slippage Scale: x${slippageScaleFactor}${isPerp ? ' | Perp Guard: x0.5' : ''} ➔ Sized ${scaledOrderSize} contracts (Base: ${baseOrderSize})`
     };
   }
 

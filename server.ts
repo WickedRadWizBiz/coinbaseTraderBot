@@ -3043,6 +3043,8 @@ async function openPosition(
     ichimokuState: ichimokuCloudState,
     deltaUsdtD: globalMetricsTracker.get1mDeltaPct(),
     usdtDominanceSignal: globalMetricsTracker.usdtDominanceSignal,
+    btcDominanceSignal: globalMetricsTracker.btcDominanceSignal,
+    deltaBtcD: globalMetricsTracker.get1mBtcDeltaPct(),
     patternType: (params as any)?.strategyName || analysisMeta?.patternType || label
   });
 
@@ -4695,7 +4697,9 @@ function computeDynamicMarketRegime({
   ichimokuState,
   deltaUsdtD,
   usdtDominanceSignal,
-  patternType
+  patternType,
+  btcDominanceSignal,
+  deltaBtcD
 }: {
   symbol?: string;
   baseRegime?: string;
@@ -4706,13 +4710,18 @@ function computeDynamicMarketRegime({
   deltaUsdtD?: number;
   usdtDominanceSignal?: string;
   patternType?: string;
+  btcDominanceSignal?: string;
+  deltaBtcD?: number;
 }): string {
   const isRisingUsdt = (usdtDominanceSignal === 'UP') || (deltaUsdtD !== undefined && deltaUsdtD > 0);
+  const isRisingBtcD = (btcDominanceSignal === 'UP') || (deltaBtcD !== undefined && deltaBtcD > 0.01);
+  const isFallingBtcD = (btcDominanceSignal === 'DOWN') || (deltaBtcD !== undefined && deltaBtcD < -0.01);
   const currentRsi = rsi ?? 50.0;
   const currentAtr = atr ?? 0.012;
   const currentBbWidth = bandWidth ?? 0.03;
   const cloud = ichimokuState ?? 'NEUTRAL_IN_CLOUD';
   const sym = (symbol || '').toUpperCase();
+  const isAltcoin = !sym.includes('BTC');
 
   // 1. Extreme overbought momentum (RSI >= 70 / 77.4) or Bearish Divergence or Bearish Cloud with expanding Tether dominance
   if (currentRsi >= 70 || patternType === 'STRONG_BEARISH_DIVERGENCE' || cloud === 'BEARISH_CLOUD' || (isRisingUsdt && (sym.includes('SOL') || sym.includes('HYPE') || sym.includes('XRP') || sym.includes('ADA') || sym.includes('DOGE')))) {
@@ -4730,9 +4739,20 @@ function computeDynamicMarketRegime({
     return 'MEAN_REVERTING';
   }
 
-  // 3. Low volatility / compression
+  // 3. Multi-timeframe BTC.D & USDT.D Regime shifts:
+  // When BTC dominance is contracting and USDT is not expanding, altcoins experience relief flow
+  if (isAltcoin && isFallingBtcD && !isRisingUsdt && currentRsi > 45 && currentRsi < 65) {
+    return 'TRENDING_BULLISH';
+  }
+
+  // 4. Low volatility / compression
   if (currentBbWidth <= 0.025 && currentAtr <= 0.008) {
     return 'CHOPPY_SIDEWAYS';
+  }
+
+  // 5. Prevent rigid TRENDING_BULLISH lockouts when local oscillators show exhaustion (RSI >= 65)
+  if (baseRegime === 'TRENDING_BULLISH' && (currentRsi >= 65 || isRisingUsdt || isRisingBtcD)) {
+    return 'MEAN_REVERTING';
   }
 
   return baseRegime || 'CHOPPY_SIDEWAYS';
@@ -4810,6 +4830,8 @@ function getSanitizedTradesList(trades: any[]): any[] {
       ichimokuState: t.indicators?.activeIndicators?.includes('BULLISH_ICHIMOKU') ? 'BULLISH_CLOUD' : (t.marketRegimeAtEntry === 'TRENDING_BEARISH' ? 'BEARISH_CLOUD' : 'NEUTRAL_IN_CLOUD'),
       deltaUsdtD: globalMetricsTracker.get1mDeltaPct(),
       usdtDominanceSignal: globalMetricsTracker.usdtDominanceSignal,
+      btcDominanceSignal: globalMetricsTracker.btcDominanceSignal,
+      deltaBtcD: globalMetricsTracker.get1mBtcDeltaPct(),
       patternType: t.patternType
     });
 

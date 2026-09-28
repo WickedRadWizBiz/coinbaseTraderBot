@@ -3,8 +3,13 @@ export class GlobalMetricsTracker {
   public usdtDominanceSignal: 'UP' | 'DOWN' | 'NEUTRAL' = 'NEUTRAL';
   public lastDominance: number = 7.0;
   
+  public btcDominance: number = 55.0;
+  public btcDominanceSignal: 'UP' | 'DOWN' | 'NEUTRAL' = 'NEUTRAL';
+  public lastBtcDominance: number = 55.0;
+
   // Store 1-minute historical closes: { timestamp, close }
   public history: { time: number; val: number }[] = [];
+  public btcHistory: { time: number; val: number }[] = [];
 
   private pollingInterval: NodeJS.Timeout | null = null;
 
@@ -22,25 +27,42 @@ export class GlobalMetricsTracker {
       const res = await fetch('https://api.coingecko.com/api/v3/global', { signal: AbortSignal.timeout(5000) });
       if (!res.ok) return;
       const data = await res.json();
-      if (data && data.data && data.data.market_cap_percentage && data.data.market_cap_percentage.usdt) {
-        const newUsdtD = data.data.market_cap_percentage.usdt;
-        
-        if (this.lastDominance > 0 && this.lastDominance !== 7.0) {
-            const diff = newUsdtD - this.lastDominance;
-            if (diff > 0.005) this.usdtDominanceSignal = 'UP';
-            else if (diff < -0.005) this.usdtDominanceSignal = 'DOWN';
-            else this.usdtDominanceSignal = 'NEUTRAL';
+      if (data && data.data && data.data.market_cap_percentage) {
+        if (data.data.market_cap_percentage.usdt) {
+          const newUsdtD = data.data.market_cap_percentage.usdt;
+          
+          if (this.lastDominance > 0 && this.lastDominance !== 7.0) {
+              const diff = newUsdtD - this.lastDominance;
+              if (diff > 0.005) this.usdtDominanceSignal = 'UP';
+              else if (diff < -0.005) this.usdtDominanceSignal = 'DOWN';
+              else this.usdtDominanceSignal = 'NEUTRAL';
+          }
+          
+          this.lastDominance = this.usdtDominance;
+          this.usdtDominance = newUsdtD;
+          
+          const now = Date.now();
+          this.history.push({ time: now, val: newUsdtD });
+          if (this.history.length > 240) {
+            this.history.shift();
+          }
         }
-        
-        this.lastDominance = this.usdtDominance;
-        this.usdtDominance = newUsdtD;
-        
-        // Add to history
-        const now = Date.now();
-        this.history.push({ time: now, val: newUsdtD });
-        // Keep up to 240 minutes of data
-        if (this.history.length > 240) {
-          this.history.shift();
+
+        if (data.data.market_cap_percentage.btc) {
+          const newBtcD = data.data.market_cap_percentage.btc;
+          if (this.lastBtcDominance > 0 && this.lastBtcDominance !== 55.0) {
+            const diff = newBtcD - this.lastBtcDominance;
+            if (diff > 0.01) this.btcDominanceSignal = 'UP';
+            else if (diff < -0.01) this.btcDominanceSignal = 'DOWN';
+            else this.btcDominanceSignal = 'NEUTRAL';
+          }
+          this.lastBtcDominance = this.btcDominance;
+          this.btcDominance = newBtcD;
+          const now = Date.now();
+          this.btcHistory.push({ time: now, val: newBtcD });
+          if (this.btcHistory.length > 240) {
+            this.btcHistory.shift();
+          }
         }
       }
     } catch (e) {}
@@ -59,6 +81,23 @@ export class GlobalMetricsTracker {
     }
     if (this.lastDominance > 0 && this.usdtDominance > 0) {
       return ((this.usdtDominance - this.lastDominance) / this.lastDominance) * 100;
+    }
+    return 0;
+  }
+
+  /**
+   * Returns the 1-minute delta percentage of BTC Dominance.
+   */
+  public get1mBtcDeltaPct(): number {
+    if (this.btcHistory.length >= 2) {
+      const current = this.btcHistory[this.btcHistory.length - 1].val;
+      const prev = this.btcHistory[this.btcHistory.length - 2].val;
+      if (prev > 0) {
+        return ((current - prev) / prev) * 100;
+      }
+    }
+    if (this.lastBtcDominance > 0 && this.btcDominance > 0) {
+      return ((this.btcDominance - this.lastBtcDominance) / this.lastBtcDominance) * 100;
     }
     return 0;
   }

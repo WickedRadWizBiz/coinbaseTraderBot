@@ -71,8 +71,8 @@ export class SignalValidator {
       };
     }
 
-    // 2. HARD VPIN TOXIC FLOW REJECTION (If VPIN > 0.15 e.g. ID 594237 VPIN 0.1857 -> ABORT SIGNAL)
-    if (params.vpin > 0.15) {
+    // 2. HARD VPIN TOXIC FLOW REJECTION (If VPIN >= 0.18 e.g. ID 594237 VPIN 0.1857 -> ABORT SIGNAL)
+    if (params.vpin >= 0.18) {
       return {
         approved: false,
         allowLongs: false,
@@ -83,7 +83,7 @@ export class SignalValidator {
         vaslTakeProfitPct: 0.08,
         maxDrawdownLimitPct: -0.03,
         code: 'VPIN_RISK_REJECTION',
-        reason: `[VPIN RISK REJECTION] Aborted execution on ${sym}: VPIN (${params.vpin.toFixed(4)}) > 0.15 indicates extreme order flow toxicity.`
+        reason: `[VPIN RISK REJECTION] Aborted execution on ${sym}: VPIN (${params.vpin.toFixed(4)}) >= 0.18 indicates extreme order flow toxicity.`
       };
     }
 
@@ -151,12 +151,17 @@ export class SignalValidator {
     }
 
     // 3. Adaptive Toxic Flow & Adverse Selection Markout Guard
-    // If vpin > 0.15 OR orderBookImbalance > 2.0, switch from Market Orders to Post-Only Limit Orders and widen quoting spread
+    // When VPIN >= 0.15, OFI diverges against signal direction, or orderBookImbalance > 2.0, enforce Post-Only Limit Orders with spread widening
     const isElevatedVpin = params.vpin >= 0.15;
     const isHighImbalance = params.orderBookImbalance > 2.0;
-    const isToxicFlow = isElevatedVpin || isHighImbalance;
+    const isOfiDiverging = (side === 'YES' && ofi < -0.04) || (side === 'NO' && ofi > 0.04);
+    const isToxicFlow = isElevatedVpin || isHighImbalance || isOfiDiverging;
     const executionOrderType = isToxicFlow ? 'POST_ONLY_LIMIT' : 'MARKET_ORDER';
-    const spreadWideningBps = isElevatedVpin ? Math.round((params.vpin - 0.15) * 200 + 10) : (isHighImbalance ? 15 : 0);
+    const spreadWideningBps = isElevatedVpin 
+      ? Math.round((params.vpin - 0.15) * 200 + 15) 
+      : isOfiDiverging 
+        ? 20 
+        : (isHighImbalance ? 15 : 0);
 
     // 4. Volatility-Adjusted Stop Loss (VASL) & Drawdown Limits
     // SL = entryPrice - (volatilityAtr * 1.5), capped at 3% maximum drawdown for 15M patterns
