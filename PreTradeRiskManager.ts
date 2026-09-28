@@ -31,11 +31,13 @@ export interface PreTradeEvaluationParams {
   isBlacklisted?: boolean;
   blacklistRemainingSec?: number;
   is15mPattern?: boolean;
+  patternType?: string;
+  executionDelayMs?: number;
 }
 
 export interface PreTradeEvaluationResult {
   allowed: boolean;
-  code: 'APPROVED' | 'REGIME_VETO' | 'USDT_DOMINANCE_VETO' | 'FEATURE_STASIS_VETO' | 'ADVERSE_SELECTION_VETO' | 'INSUFFICIENT_BUFFER_VETO' | 'TOXIC_OFI_VETO';
+  code: 'APPROVED' | 'REGIME_VETO' | 'USDT_DOMINANCE_VETO' | 'FEATURE_STASIS_VETO' | 'ADVERSE_SELECTION_VETO' | 'INSUFFICIENT_BUFFER_VETO' | 'TOXIC_OFI_VETO' | 'VPIN_RISK_REJECTION' | 'LATENCY_TTL_EXCEEDED_VETO' | 'REGIME_CONSTRAINT_VETO';
   reason?: string;
   recommendedSL: number;
   recommendedTP: number;
@@ -63,7 +65,7 @@ export class PreTradeRiskManager {
     const side = params.side;
     const ofi = params.orderFlowImbalance ?? 0.0;
     const obImbalance = params.orderBookImbalance ?? 1.0;
-    const vpinVal = params.vpin ?? 0.22;
+    const vpinVal = params.vpin ?? 0.05;
     const is15m = params.is15mPattern ?? (sym.includes('15M') || sym.includes('15m'));
 
     // 1. Adverse Selection Circuit Breaker Check (30s Back-Off)
@@ -87,15 +89,22 @@ export class PreTradeRiskManager {
       usdtDominanceSignal: params.usdtDominanceSignal,
       deltaUsdtD: params.deltaUsdtD,
       orderBookImbalance: obImbalance,
+      orderFlowImbalance: ofi,
       vpin: vpinVal,
       volatilityAtr: params.atr,
-      is15mPattern: is15m
+      is15mPattern: is15m,
+      patternType: params.patternType,
+      executionDelayMs: params.executionDelayMs
     });
 
     if (!validatorResult.approved) {
       return {
         allowed: false,
-        code: validatorResult.code === 'USDT_DOMINANCE_LOCK' ? 'USDT_DOMINANCE_VETO' : 'REGIME_VETO',
+        code: validatorResult.code === 'USDT_DOMINANCE_LOCK' ? 'USDT_DOMINANCE_VETO' : 
+              validatorResult.code === 'VPIN_RISK_REJECTION' ? 'VPIN_RISK_REJECTION' :
+              validatorResult.code === 'LATENCY_TTL_EXCEEDED_VETO' ? 'LATENCY_TTL_EXCEEDED_VETO' :
+              validatorResult.code === 'TOXIC_OFI_VETO' ? 'TOXIC_OFI_VETO' :
+              validatorResult.code === 'REGIME_CONSTRAINT_VETO' ? 'REGIME_CONSTRAINT_VETO' : 'REGIME_VETO',
         reason: validatorResult.reason,
         recommendedSL: validatorResult.vaslStopLossPct,
         recommendedTP: validatorResult.vaslTakeProfitPct,

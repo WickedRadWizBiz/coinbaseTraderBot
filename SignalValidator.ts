@@ -25,6 +25,8 @@ export interface SignalValidationParams {
   vpin: number;
   volatilityAtr: number;
   is15mPattern?: boolean;
+  patternType?: string;
+  executionDelayMs?: number;
 }
 
 export interface SignalValidationResult {
@@ -36,7 +38,7 @@ export interface SignalValidationResult {
   vaslStopLossPct: number;
   vaslTakeProfitPct: number;
   maxDrawdownLimitPct: number;
-  code: 'APPROVED' | 'REGIME_BIAS_VETO' | 'USDT_DOMINANCE_LOCK' | 'BEARISH_CLOUD_VETO' | 'TOXIC_OFI_VETO' | 'TOXIC_FLOW_VETO';
+  code: 'APPROVED' | 'REGIME_BIAS_VETO' | 'USDT_DOMINANCE_LOCK' | 'BEARISH_CLOUD_VETO' | 'TOXIC_OFI_VETO' | 'TOXIC_FLOW_VETO' | 'VPIN_RISK_REJECTION' | 'LATENCY_TTL_EXCEEDED_VETO' | 'REGIME_CONSTRAINT_VETO';
   reason?: string;
 }
 
@@ -50,7 +52,57 @@ export class SignalValidator {
     const ichimokuState = params.ichimokuCloudState || 'NEUTRAL_IN_CLOUD';
     const side = params.side;
     const ofi = params.orderFlowImbalance ?? 0.0;
+    const pattern = params.patternType || '';
     const usdtTrend = params.usdtDominanceTrend || (params.usdtDominanceSignal === 'UP' || (params.deltaUsdtD && params.deltaUsdtD > 0) ? 'EXPANDING' : 'NEUTRAL');
+
+    // 1. HARD BLOCK on MOMENTUM_REVERSAL_FLIP during MEAN_REVERTING market regimes
+    if ((pattern === 'MOMENTUM_REVERSAL_FLIP' || pattern.includes('REVERSAL_FLIP')) && regime === 'MEAN_REVERTING') {
+      return {
+        approved: false,
+        allowLongs: false,
+        executionOrderType: 'POST_ONLY_LIMIT',
+        isToxicFlow: false,
+        spreadWideningBps: 0,
+        vaslStopLossPct: -0.03,
+        vaslTakeProfitPct: 0.08,
+        maxDrawdownLimitPct: -0.03,
+        code: 'REGIME_CONSTRAINT_VETO',
+        reason: `[REGIME CONSTRAINT VETO] Blocked MOMENTUM_REVERSAL_FLIP on ${sym} during MEAN_REVERTING market regime. Counter-trend momentum flips prohibited in mean-reverting markets.`
+      };
+    }
+
+    // 2. HARD VPIN TOXIC FLOW REJECTION (If VPIN > 0.15 e.g. ID 594237 VPIN 0.1857 -> ABORT SIGNAL)
+    if (params.vpin > 0.15) {
+      return {
+        approved: false,
+        allowLongs: false,
+        executionOrderType: 'POST_ONLY_LIMIT',
+        isToxicFlow: true,
+        spreadWideningBps: Math.round((params.vpin - 0.15) * 200 + 15),
+        vaslStopLossPct: -0.02,
+        vaslTakeProfitPct: 0.08,
+        maxDrawdownLimitPct: -0.03,
+        code: 'VPIN_RISK_REJECTION',
+        reason: `[VPIN RISK REJECTION] Aborted execution on ${sym}: VPIN (${params.vpin.toFixed(4)}) > 0.15 indicates extreme order flow toxicity.`
+      };
+    }
+
+    // 3. LATENCY TTL CHECK (If latency > 20ms in MEAN_REVERTING regime -> REJECT/RE-EVALUATE)
+    const delay = params.executionDelayMs ?? 0;
+    if (regime === 'MEAN_REVERTING' && delay > 20) {
+      return {
+        approved: false,
+        allowLongs: true,
+        executionOrderType: 'POST_ONLY_LIMIT',
+        isToxicFlow: false,
+        spreadWideningBps: 10,
+        vaslStopLossPct: -0.02,
+        vaslTakeProfitPct: 0.08,
+        maxDrawdownLimitPct: -0.03,
+        code: 'LATENCY_TTL_EXCEEDED_VETO',
+        reason: `[LATENCY TTL EXCEEDED VETO] Aborted signal on ${sym}: Execution delay (${delay}ms > 20ms TTL limit) too high for MEAN_REVERTING regime.`
+      };
+    }
 
     // 1. USDT.D Macro-Regime Lock
     let allow_longs = true;

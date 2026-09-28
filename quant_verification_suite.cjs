@@ -355,7 +355,7 @@ const test105510 = SignalValidator.validate({
   marketRegime: 'TRENDING_BEARISH',
   ichimokuCloudState: 'BEARISH_CLOUD',
   orderBookImbalance: 1.15,
-  vpin: 0.22,
+  vpin: 0.05,
   volatilityAtr: 0.012,
   is15mPattern: true
 });
@@ -369,7 +369,7 @@ const test82496 = SignalValidator.validate({
   marketRegime: 'TRENDING_BEARISH',
   ichimokuCloudState: 'BEARISH_CLOUD',
   orderBookImbalance: 2.4406,
-  vpin: 0.25,
+  vpin: 0.05,
   volatilityAtr: 0.015,
   is15mPattern: true
 });
@@ -497,5 +497,74 @@ console.log(`- HYPE Sizing (Trade #687445): ${hypeSizing.scaledOrderSize} contra
 assert(btcSizing.scaledOrderSize >= 8, "Tier 1 BTC sizing should maintain full allocation");
 assert(hypeSizing.scaledOrderSize <= 3, "Tier 3 HYPE sizing under extreme OB Imbalance & elevated slippage must scale down <= 3");
 console.log("✓ TEST 16 PASSED: Altcoin order sizing dynamically scales down to restrict implementation shortfall.");
+
+// 17. Toxic Flow Filter Hard Rejection (VPIN > 0.15) & Reference Trade ID 594237
+console.log("\n[TEST 17] Testing Toxic Flow Filter Hard Rejection (VPIN > 0.15)...");
+// Reference Case: Trade ID 594237 (VPIN = 0.1857 > 0.15) -> MUST ABORT / REJECT SIGNAL
+const testVpin594237 = SignalValidator.validate({
+  symbol: 'KXSOL15M',
+  side: 'NO',
+  marketRegime: 'MEAN_REVERTING',
+  ichimokuCloudState: 'NEUTRAL_IN_CLOUD',
+  orderBookImbalance: 1.15,
+  orderFlowImbalance: 0.0,
+  vpin: 0.1857,
+  volatilityAtr: 0.0043,
+  executionDelayMs: 15
+});
+console.log(`- Trade #594237 (VPIN: 0.1857): Approved=${testVpin594237.approved}, Code=${testVpin594237.code}`);
+assert(!testVpin594237.approved && testVpin594237.code === 'VPIN_RISK_REJECTION', "Trade 594237 with VPIN 0.1857 > 0.15 must be aborted with VPIN_RISK_REJECTION");
+console.log("✓ TEST 17 PASSED: VPIN > 0.15 hard risk rejection active.");
+
+// 18. Latency Compensation & Signal TTL (> 20ms in MEAN_REVERTING) & Reference Trade ID 610007
+console.log("\n[TEST 18] Testing Latency Compensation & Signal TTL (> 20ms in MEAN_REVERTING)...");
+// Reference Case: Trade ID 610007 (Symbol: KXSOL15M, Execution Delay: 60ms > 20ms TTL in MEAN_REVERTING) -> MUST REJECT
+const testLatency610007 = SignalValidator.validate({
+  symbol: 'KXSOL15M',
+  side: 'NO',
+  marketRegime: 'MEAN_REVERTING',
+  ichimokuCloudState: 'NEUTRAL_IN_CLOUD',
+  orderBookImbalance: 1.5129,
+  orderFlowImbalance: 0.0,
+  vpin: 0.05,
+  volatilityAtr: 0.00435,
+  executionDelayMs: 60
+});
+console.log(`- Trade #610007 (60ms delay in MEAN_REVERTING): Approved=${testLatency610007.approved}, Code=${testLatency610007.code}`);
+assert(!testLatency610007.approved && testLatency610007.code === 'LATENCY_TTL_EXCEEDED_VETO', "Trade 610007 with 60ms delay > 20ms TTL in MEAN_REVERTING must be rejected");
+console.log("✓ TEST 18 PASSED: Latency compensation & 20ms TTL limit enforced.");
+
+// 19. Liquidity-Aware Sizing (< 0.75 OrderBookImbalance 50% cut) & Reference Trade ID 609411
+console.log("\n[TEST 19] Testing Liquidity-Aware Sizing (OrderBookImbalance < 0.75)...");
+// Reference Case: Trade ID 609411 (OrderBookImbalance = 0.7471 < 0.75, VolSurge = 1.12)
+const sizing609411 = SlippageEngine.calculateLiquidityTieredSizing({
+  symbol: 'KXHYPE15M',
+  baseOrderSize: 10,
+  orderBookImbalance: 0.7471,
+  volumeSurgeRatio: 1.12,
+  volatilityAtr: 0.00435,
+  historicalSlippageUsd: 0.0104
+});
+console.log(`- Trade #609411 Sizing: Scaled=${sizing609411.scaledOrderSize} contracts (Reason: ${sizing609411.reason})`);
+assert(sizing609411.scaledOrderSize <= 3, "OrderBookImbalance 0.7471 < 0.75 must trigger 50% cut and reduce sizing <= 3");
+console.log("✓ TEST 19 PASSED: OrderBookImbalance < 0.75 50% position sizing reduction enforced.");
+
+// 20. Hard Block on MOMENTUM_REVERSAL_FLIP during MEAN_REVERTING Market Regime
+console.log("\n[TEST 20] Testing Hard Block on MOMENTUM_REVERSAL_FLIP in MEAN_REVERTING Regime...");
+const testReversalFlipMeanReverting = SignalValidator.validate({
+  symbol: 'KXSOL15M',
+  side: 'NO',
+  marketRegime: 'MEAN_REVERTING',
+  patternType: 'MOMENTUM_REVERSAL_FLIP',
+  ichimokuCloudState: 'NEUTRAL_IN_CLOUD',
+  orderBookImbalance: 1.10,
+  orderFlowImbalance: 0.0,
+  vpin: 0.05,
+  volatilityAtr: 0.00435,
+  executionDelayMs: 15
+});
+console.log(`- MOMENTUM_REVERSAL_FLIP in MEAN_REVERTING: Approved=${testReversalFlipMeanReverting.approved}, Code=${testReversalFlipMeanReverting.code}`);
+assert(!testReversalFlipMeanReverting.approved && testReversalFlipMeanReverting.code === 'REGIME_CONSTRAINT_VETO', "MOMENTUM_REVERSAL_FLIP in MEAN_REVERTING must be vetoed");
+console.log("✓ TEST 20 PASSED: Hard block on MOMENTUM_REVERSAL_FLIP in MEAN_REVERTING active.");
 
 console.log("\nALL VERIFICATION TESTS COMPLETED SUCCESSFULLY!");

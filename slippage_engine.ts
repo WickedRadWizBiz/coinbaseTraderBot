@@ -46,12 +46,14 @@ export class SlippageEngine {
     symbol,
     baseOrderSize = 10,
     orderBookImbalance = 1.0,
+    volumeSurgeRatio = 1.0,
     volatilityAtr = 0.012,
     historicalSlippageUsd = 0.0
   }: {
     symbol: string;
     baseOrderSize?: number;
     orderBookImbalance?: number;
+    volumeSurgeRatio?: number;
     volatilityAtr?: number;
     historicalSlippageUsd?: number;
   }): {
@@ -78,10 +80,19 @@ export class SlippageEngine {
       tierMultiplier = 0.50;
     }
 
-    // Penalize extreme order book asymmetry/imbalance variance (e.g. < 0.5 or > 1.8)
+    // Penalize extreme order book asymmetry/imbalance variance
     const obImbalance = Math.max(0.01, orderBookImbalance || 1.0);
     const imbalanceDistFromParity = Math.abs(1.0 - obImbalance);
-    const imbalanceScaleFactor = Number((1.0 / (1.0 + Math.min(2.5, imbalanceDistFromParity) * 0.45)).toFixed(3));
+    let imbalanceScaleFactor = Number((1.0 / (1.0 + Math.min(2.5, imbalanceDistFromParity) * 0.45)).toFixed(3));
+
+    // Hard Rule: If OrderBookImbalance < 0.75 (e.g. ID 609411: OrderBookImbalance 0.7471), reduce position sizing by 50%
+    if (obImbalance < 0.75) {
+      imbalanceScaleFactor = Number((imbalanceScaleFactor * 0.50).toFixed(3));
+    }
+
+    // Tie entry size to VolumeSurgeRatio
+    const surgeRatio = Math.max(0.1, volumeSurgeRatio || 1.0);
+    const surgeScaleFactor = Number(Math.max(0.40, Math.min(1.20, surgeRatio >= 1.0 ? 1.0 + (surgeRatio - 1.0) * 0.1 : surgeRatio)).toFixed(3));
 
     // Scale down size if local ATR is elevated (> 0.015)
     const atr = Math.max(0.001, volatilityAtr || 0.012);
@@ -92,7 +103,7 @@ export class SlippageEngine {
       ? Math.max(0.30, 0.015 / historicalSlippageUsd) 
       : 1.0).toFixed(3));
 
-    const combinedMultiplier = tierMultiplier * imbalanceScaleFactor * volatilityScaleFactor * slippageScaleFactor;
+    const combinedMultiplier = tierMultiplier * imbalanceScaleFactor * surgeScaleFactor * volatilityScaleFactor * slippageScaleFactor;
     const scaledOrderSize = Math.max(1, Math.round(baseOrderSize * combinedMultiplier));
 
     return {
@@ -102,7 +113,7 @@ export class SlippageEngine {
       imbalanceScaleFactor,
       volatilityScaleFactor,
       slippageScaleFactor,
-      reason: `Tier: ${tier} (x${tierMultiplier}) | OB Imbalance Scale: x${imbalanceScaleFactor} | Vol Scale: x${volatilityScaleFactor} | Slippage Scale: x${slippageScaleFactor} ➔ Sized ${scaledOrderSize} contracts (Base: ${baseOrderSize})`
+      reason: `Tier: ${tier} (x${tierMultiplier}) | OB Imbalance ${obImbalance < 0.75 ? '(<0.75 50% cut)' : ''}: x${imbalanceScaleFactor} | Surge: x${surgeScaleFactor} | Vol Scale: x${volatilityScaleFactor} | Slippage Scale: x${slippageScaleFactor} ➔ Sized ${scaledOrderSize} contracts (Base: ${baseOrderSize})`
     };
   }
 

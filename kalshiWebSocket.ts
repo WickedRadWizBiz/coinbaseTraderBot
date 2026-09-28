@@ -132,10 +132,12 @@ export class KalshiWebSocketManager {
     this.reconnectAttempts = 0;
     if (this.ws) {
       try {
-        this.ws.removeAllListeners();
-        this.ws.close();
+        const socket = this.ws;
+        this.ws = null;
+        socket.removeAllListeners();
+        socket.on('error', () => {}); // Noop error handler to suppress unhandled error events during close
+        socket.close();
       } catch (_) {}
-      this.ws = null;
     }
     this.isConnected = false;
     this.isConnecting = false;
@@ -184,6 +186,17 @@ export class KalshiWebSocketManager {
 
       let authFailed = false;
 
+      // Register error listener FIRST to capture any handshake or close error immediately
+      this.ws.on('error', (err: any) => {
+        const errMsg = err?.message || String(err);
+        if (errMsg.includes('401')) {
+          authFailed = true;
+          console.warn(`[KALSHI WS] Authentication failed (401 Unauthorized). Operating in REST_KEEPALIVE mode until API key/RSA credentials are re-configured.`);
+        } else {
+          console.warn(`[KALSHI WS] Connection error on ${this.activeUrl}:`, errMsg);
+        }
+      });
+
       this.ws.on('open', () => {
         this.isConnected = true;
         this.isConnecting = false;
@@ -207,16 +220,6 @@ export class KalshiWebSocketManager {
 
       this.ws.on('message', (data: WebSocket.Data) => {
         this.handleMessage(data);
-      });
-
-      this.ws.on('error', (err: any) => {
-        const errMsg = err?.message || String(err);
-        if (errMsg.includes('401')) {
-          authFailed = true;
-          console.warn(`[KALSHI WS] Authentication failed (401 Unauthorized). Operating in REST_KEEPALIVE mode until API key/RSA credentials are re-configured.`);
-        } else {
-          console.warn(`[KALSHI WS] Connection error on ${this.activeUrl}:`, errMsg);
-        }
       });
 
       this.ws.on('close', (code: number, reason: Buffer) => {

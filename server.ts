@@ -123,6 +123,25 @@ class AdverseSelectionCircuitBreaker {
     return { blacklisted: false };
   }
 
+  public recordToxicTick(symbol: string, isToxic: boolean): { blacklisted: boolean; message?: string } {
+    const key = (symbol || '').toUpperCase();
+    if (isToxic) {
+      const count = (this.consecutiveNegativeMarkouts.get(key) || 0) + 1;
+      this.consecutiveNegativeMarkouts.set(key, count);
+      if (count >= 3) {
+        const expireAt = Date.now() + this.blacklistDurationMs;
+        this.symbolBlacklists.set(key, expireAt);
+        return {
+          blacklisted: true,
+          message: `[TOXIC FLOW CIRCUIT BREAKER ACTIVATED] 3 consecutive toxic order flow adverse selection ticks detected on ${symbol}. Blacklisting symbol for 30 seconds.`
+        };
+      }
+    } else {
+      this.consecutiveNegativeMarkouts.set(key, 0);
+    }
+    return { blacklisted: false };
+  }
+
   public isBlacklisted(symbol: string): { blacklisted: boolean; remainingSec: number } {
     const key = (symbol || '').toUpperCase();
     const expireAt = this.symbolBlacklists.get(key) || 0;
@@ -3066,6 +3085,9 @@ async function openPosition(
   const adverseBlackCheck = adverseSelectionBreaker.isBlacklisted(symbol);
   const deltaUsdtD = globalMetricsTracker.get1mDeltaPct();
 
+  const latMsNN = latencyAdaptiveEngine.getProfile().kalshiOrderLatencyMs || latencyAdaptiveEngine.getProfile().effectiveLatencyMs;
+  const currentExecDelay = latMsNN || Math.round(Math.random() * 20 + 20);
+
   const riskCheck = PreTradeRiskManager.evaluateTrade({
     symbol,
     side,
@@ -3073,6 +3095,7 @@ async function openPosition(
     ichimokuCloudState,
     ichimokuState: ichimokuCloudState,
     orderFlowImbalance: ofi,
+    orderBookImbalance: extractedSnapshot.orderBookImbalance,
     deltaUsdtD,
     usdtDominanceSignal: globalMetricsTracker.usdtDominanceSignal,
     rsi: liveRsi,
@@ -3080,7 +3103,9 @@ async function openPosition(
     vpin: liveVpin,
     candleCount: pairCandles.length,
     isBlacklisted: adverseBlackCheck.blacklisted,
-    blacklistRemainingSec: adverseBlackCheck.remainingSec
+    blacklistRemainingSec: adverseBlackCheck.remainingSec,
+    patternType: (params as any)?.strategyName || analysisMeta?.patternType || label,
+    executionDelayMs: currentExecDelay
   });
 
   if (!riskCheck.allowed) {
@@ -3112,7 +3137,6 @@ async function openPosition(
   const bestBid = ctx?.bids?.[0]?.price || (entryPrice ? entryPrice * 0.999 : 0.499);
   const bestAsk = ctx?.asks?.[0]?.price || (entryPrice ? entryPrice * 1.001 : 0.501);
 
-  const latMsNN = latencyAdaptiveEngine.getProfile().kalshiOrderLatencyMs || latencyAdaptiveEngine.getProfile().effectiveLatencyMs;
   const cbLatMs = latencyAdaptiveEngine.getProfile().coinbaseWsPingMs;
   let entryFeatures: EntryFeatures = {
     latency: latMsNN / 1000.0,
@@ -3559,11 +3583,12 @@ async function openPosition(
   }
 
   // [LIQUIDITY TIERING & ORDER SIZING NORMALIZATION]
-  // Dynamically scale down base order size for tail-risk altcoins, Order Book Imbalance variance, and volatility ATR
+  // Dynamically scale down base order size for tail-risk altcoins, Order Book Imbalance variance, Volume Surge Ratio, and volatility ATR
   const liquiditySizing = SlippageEngine.calculateLiquidityTieredSizing({
     symbol,
     baseOrderSize: size,
     orderBookImbalance: extractedSnapshot.orderBookImbalance,
+    volumeSurgeRatio: liveVolumeSurge,
     volatilityAtr: liveAtr,
     historicalSlippageUsd: (entryFeatures as any)?.historicalSlippageUsd || 0.0
   });
@@ -4210,6 +4235,18 @@ function evaluateCounterPositionViability(
   const spotPair = getSpotPairFromSymbol(pos.label, pos.category);
   const spotTA = computeSpotTAMetrics(spotPair, candles || []);
 
+  // HARD BLOCK on MOMENTUM_REVERSAL_FLIP during MEAN_REVERTING market regimes
+  if (pos.marketRegimeAtEntry === 'MEAN_REVERTING' || (spotTA as any).marketRegime === 'MEAN_REVERTING') {
+    return {
+      isViable: false,
+      score: 0,
+      volatilityIndex: 0,
+      velocityPctPerMin: 0,
+      orderbookImbalanceRatio: 0,
+      reason: `[REGIME CONSTRAINT VETO] Blocked MOMENTUM_REVERSAL_FLIP during MEAN_REVERTING market regime. Counter-trend momentum flips prohibited in mean-reverting markets.`
+    };
+  }
+
   const candleRangeVol = Math.max(0.5, spotTA.candleRangePct / 0.08);
   const surgeVol = Math.max(0.5, spotTA.volumeSurgeRatio);
   const volatilityIndex = Number(((candleRangeVol + surgeVol) / 2).toFixed(2));
@@ -4324,17 +4361,33 @@ class RapidScalper {
     });
     try {
       this.ws = new (globalThis as any).WebSocket('wss://ws-feed.exchange.coinbase.com');
-      this.ws.onopen = () => {
-        this.ws.send(JSON.stringify({
-          type: 'subscribe',
-          product_ids: [
-            'BTC-USD', 'ETH-USD', 'SOL-USD', 'HYPE-USD', 'DOGE-USD', 'XRP-USD',
-            'SUI-USD', 'LINK-USD', 'ADA-USD', 'LTC-USD', 'BCH-USD', 'AAVE-USD', 'AVAX-USD'
-          ],
-          channels: ['ticker']
-        }));
+      const socket = this.ws;
+
+      const handleErr = (err: any) => {
+        if (this.ws === socket) this.ws = null;
+        setTimeout(() => { if (settings.ENABLE_RAPID_SCALP_MODE) this.start(); }, 5000);
       };
-      this.ws.onmessage = (event: any) => {
+
+      if (socket.on) {
+        socket.on('error', handleErr);
+      }
+      socket.onerror = handleErr;
+
+      socket.onopen = () => {
+        try {
+          if (socket.readyState === 1 || socket.readyState === (globalThis as any).WebSocket?.OPEN) {
+            socket.send(JSON.stringify({
+              type: 'subscribe',
+              product_ids: [
+                'BTC-USD', 'ETH-USD', 'SOL-USD', 'HYPE-USD', 'DOGE-USD', 'XRP-USD',
+                'SUI-USD', 'LINK-USD', 'ADA-USD', 'LTC-USD', 'BCH-USD', 'AAVE-USD', 'AVAX-USD'
+              ],
+              channels: ['ticker']
+            }));
+          }
+        } catch (_) {}
+      };
+      socket.onmessage = (event: any) => {
         if (!settings.ENABLE_RAPID_SCALP_MODE || !settings.botActive) return;
         try {
           const msg = JSON.parse(event.data);
@@ -4351,12 +4404,8 @@ class RapidScalper {
           }
         } catch (e) {}
       };
-      this.ws.onerror = (err: any) => { 
-        this.ws = null; 
-        setTimeout(() => { if (settings.ENABLE_RAPID_SCALP_MODE) this.start(); }, 5000);
-      };
-      this.ws.onclose = () => { 
-        this.ws = null; 
+      socket.onclose = () => { 
+        if (this.ws === socket) this.ws = null; 
         setTimeout(() => { if (settings.ENABLE_RAPID_SCALP_MODE) this.start(); }, 5000);
       };
     } catch (e) {
@@ -4366,8 +4415,13 @@ class RapidScalper {
 
   stop() {
     if (this.ws) {
-      try { this.ws.close(); } catch(e){}
-      this.ws = null;
+      try {
+        const socket = this.ws;
+        this.ws = null;
+        if (socket.on) socket.on('error', () => {});
+        socket.onerror = () => {};
+        socket.close();
+      } catch(e){}
     }
   }
 
@@ -5666,6 +5720,29 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
           orderbookExit,
           pos.entryProba
         );
+
+        // REGIME-BASED EXIT DYNAMICS
+        // Switch between MEAN_REVERTING (RSI-based exit) and TRENDING (trailing ATR)
+        const currentRegime = pos.marketRegimeAtEntry || (spotTA as any).marketRegime || 'CHOPPY_SIDEWAYS';
+        if (currentRegime === 'MEAN_REVERTING') {
+          // RSI mean reversion exit: Re-cross overbought (>= 65 -> <= 55) for YES or oversold (<= 35 -> >= 45) for NO, or RSI target reached
+          if (pos.side === 'YES' && (rsi <= 48 || (rsi >= 65 && pnlRatio > 0.02))) {
+            if (!shouldClose) {
+              shouldClose = true;
+              closeReason = `[MEAN_REVERTING RSI EXIT] RSI mean reversion target reached (${rsi.toFixed(1)}). PnL: +${(pnlRatio*100).toFixed(2)}%`;
+            }
+          } else if (pos.side === 'NO' && (rsi >= 52 || (rsi <= 35 && pnlRatio > 0.02))) {
+            if (!shouldClose) {
+              shouldClose = true;
+              closeReason = `[MEAN_REVERTING RSI EXIT] RSI mean reversion target reached (${rsi.toFixed(1)}). PnL: +${(pnlRatio*100).toFixed(2)}%`;
+            }
+          }
+        } else if (currentRegime.includes('TRENDING')) {
+          // Use trailing ATR stop/take profit logic
+          const liveAtr = spotTA.bandWidth || 0.012;
+          dynamicTrail = Math.min(0.05, Math.max(0.01, liveAtr * 1.5));
+          dynamicSL = -Math.max(0.03, liveAtr * 1.5);
+        }
 
         // Anti-Whipsaw Filter: On binary contracts, suppress negative exits during early 90s noise or wide spreads
         const currentSpread = (asks[0] && bids[0]) ? Math.abs(asks[0].price - bids[0].price) : 0.02;
@@ -9324,5 +9401,23 @@ async function startServer() {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
   });
 }
+
+process.on('uncaughtException', (err: any) => {
+  const msg = err?.message || String(err);
+  if (msg.includes('WebSocket') || msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('EPIPE')) {
+    console.warn(`[PROCESS GUARD] Suppressed transient network/WebSocket exception: ${msg}`);
+  } else {
+    console.error('[PROCESS UNCAUGHT EXCEPTION]', err);
+  }
+});
+
+process.on('unhandledRejection', (reason: any) => {
+  const msg = reason?.message || String(reason);
+  if (msg.includes('WebSocket') || msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('EPIPE')) {
+    console.warn(`[PROCESS GUARD] Suppressed transient unhandled promise rejection: ${msg}`);
+  } else {
+    console.error('[PROCESS UNHANDLED REJECTION]', reason);
+  }
+});
 
 startServer();
