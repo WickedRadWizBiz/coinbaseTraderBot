@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Activity, AlertCircle, CheckCircle, Copy, FileText, Play, RotateCcw, ShieldAlert, Sparkles, Terminal, Clock, Eye, Cpu, Zap, ArrowRight, ShieldCheck, Database, History, ListOrdered, CheckCircle2, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
+import { Activity, AlertCircle, CheckCircle, Copy, FileText, Play, RotateCcw, ShieldAlert, Sparkles, Terminal, Clock, Eye, Cpu, Zap, ArrowRight, ShieldCheck, Database, History, ListOrdered, CheckCircle2, ChevronDown, ChevronUp, AlertTriangle, Download, FileDown, Table } from 'lucide-react';
 
 interface GeminiTradeAuditorCardProps {
   totalTrades: number;
@@ -64,6 +64,8 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
   const [manualUsedModel, setManualUsedModel] = useState<string | null>(null);
   const [manualModelChanged, setManualModelChanged] = useState<boolean>(false);
   const [manualFallbackReason, setManualFallbackReason] = useState<string | null>(null);
+  const [manualTradesData, setManualTradesData] = useState<any[]>([]);
+  const [showDataTable, setShowDataTable] = useState<boolean>(false);
   
   // Background autonomous audits states
   const [autoAudits, setAutoAudits] = useState<any[]>([]);
@@ -146,6 +148,9 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
       }
 
       setAuditReport(data.auditReport);
+      if (data.tradesData) {
+        setManualTradesData(data.tradesData);
+      }
       setManualTargetModel(data.targetModel || configuredModel);
       setManualUsedModel(data.usedModel || configuredModel);
       setManualModelChanged(Boolean(data.modelChanged));
@@ -287,6 +292,20 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
   const activeWatchList = auditMemory?.activeWatchList || [];
   const recurringQueue = auditMemory?.recurringIssuesQueue || [];
   const solvedMemory = auditMemory?.solvedLongTermMemory || [];
+
+  const activeTradesData: any[] = selectedAutoAuditIdx === 'MANUAL'
+    ? manualTradesData
+    : (autoAudits[selectedAutoAuditIdx]?.tradesData || []);
+
+  const handleDownloadData = (format: 'json' | 'csv' = 'json') => {
+    const url = `/api/gemini/download-audit-data?auditIdx=${selectedAutoAuditIdx}&format=${format}`;
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `referenced_audit_trades.${format}`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   return (
     <div className="border border-crypto-primary/40 bg-black/60 p-5 font-mono text-xs shadow-[0_0_15px_rgba(143,115,255,0.05)] relative overflow-hidden flex flex-col gap-4">
@@ -675,24 +694,112 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-crypto-success/20 pb-2">
                   <div className="flex items-center gap-2 text-crypto-success font-bold text-[11px]">
                     <CheckCircle className="w-4 h-4 animate-pulse" />
-                    <span>SYNTHESIZED CODEBASE RECONCILIATION PROMPT</span>
+                    <span>SYNTHESIZED CODEBASE RECONCILIATION PROMPT (WITH CONCRETE DATA)</span>
                   </div>
-                  <button
-                    onClick={() => handleCopyPrompt(activeReport)}
-                    className="px-3 py-1 bg-crypto-success text-black hover:bg-white font-bold text-[10px] tracking-wider uppercase transition-colors flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Copy className="w-3 h-3" />
-                    <span>{copied ? 'Copied!' : 'Copy Prompt'}</span>
-                  </button>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      onClick={() => handleDownloadData('json')}
+                      className="px-2.5 py-1 bg-crypto-primary/20 hover:bg-crypto-primary hover:text-black text-crypto-primary border border-crypto-primary/50 font-bold text-[10px] tracking-wider uppercase transition-colors flex items-center gap-1.5 cursor-pointer"
+                      title="Download raw empirical dataset JSON referenced in this audit"
+                    >
+                      <Download className="w-3 h-3" />
+                      <span>Download Raw Data (JSON)</span>
+                    </button>
+                    <button
+                      onClick={() => handleDownloadData('csv')}
+                      className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500 hover:text-black text-amber-300 border border-amber-500/50 font-bold text-[10px] tracking-wider uppercase transition-colors flex items-center gap-1.5 cursor-pointer"
+                      title="Download raw empirical dataset CSV referenced in this audit"
+                    >
+                      <FileDown className="w-3 h-3" />
+                      <span>Export CSV</span>
+                    </button>
+                    <button
+                      onClick={() => handleCopyPrompt(activeReport)}
+                      className="px-3 py-1 bg-crypto-success text-black hover:bg-white font-bold text-[10px] tracking-wider uppercase transition-colors flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>{copied ? 'Copied!' : 'Copy Prompt'}</span>
+                    </button>
+                  </div>
                 </div>
                 <div className="relative">
-                  <pre className="p-3 bg-black/90 border border-crypto-success/30 max-h-[180px] overflow-y-auto font-mono text-[10px] leading-relaxed text-crypto-success text-left select-all whitespace-pre-wrap">
+                  <pre className="p-3 bg-black/90 border border-crypto-success/30 max-h-[220px] overflow-y-auto font-mono text-[10px] leading-relaxed text-crypto-success text-left select-all whitespace-pre-wrap">
                     {extractCodeBlock(activeReport)}
                   </pre>
                 </div>
                 <span className="text-[9px] text-[#808080] tracking-wider">
-                  * Copy this prompt and send it to your AI Studio coding assistant to resolve these structural model risks immediately.
+                  * This prompt includes the full empirical data table & citations. You can copy it or download the raw JSON/CSV data above.
                 </span>
+              </div>
+            )}
+
+            {/* RAW EMPIRICAL DATASET VIEWER */}
+            {activeTradesData && activeTradesData.length > 0 && (
+              <div className="border border-crypto-primary/30 bg-black/80 p-3.5 flex flex-col gap-2.5">
+                <div 
+                  onClick={() => setShowDataTable(!showDataTable)}
+                  className="flex items-center justify-between cursor-pointer select-none text-[11px] text-crypto-primary font-bold"
+                >
+                  <div className="flex items-center gap-2">
+                    <Table className="w-4 h-4" />
+                    <span className="uppercase tracking-wider">Referenced Empirical Trade Dataset ({activeTradesData.length} Trades)</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-[#808080]">{showDataTable ? 'Collapse Table' : 'Expand Data Table'}</span>
+                    {showDataTable ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                  </div>
+                </div>
+
+                {showDataTable && (
+                  <div className="overflow-x-auto max-h-[240px] overflow-y-auto scrollbar-thin scrollbar-thumb-crypto-primary/40 border border-crypto-primary/20">
+                    <table className="w-full text-left font-mono text-[10px] text-[#a0a0a0]">
+                      <thead className="bg-crypto-primary/10 text-crypto-text uppercase tracking-wider sticky top-0 border-b border-crypto-primary/30">
+                        <tr>
+                          <th className="p-1.5">ID</th>
+                          <th className="p-1.5">Symbol</th>
+                          <th className="p-1.5">Dir</th>
+                          <th className="p-1.5">Entry</th>
+                          <th className="p-1.5">Exit</th>
+                          <th className="p-1.5">PnL ($)</th>
+                          <th className="p-1.5">RSI</th>
+                          <th className="p-1.5">ATR</th>
+                          <th className="p-1.5">OFI</th>
+                          <th className="p-1.5">VPIN</th>
+                          <th className="p-1.5">Slip ($)</th>
+                          <th className="p-1.5">Shortfall ($)</th>
+                          <th className="p-1.5">Markout 1s</th>
+                          <th className="p-1.5">Regime</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-crypto-primary/10">
+                        {activeTradesData.map((t, idx) => (
+                          <tr key={`raw-t-${t.id || idx}`} className="hover:bg-crypto-primary/5">
+                            <td className="p-1.5 font-bold text-crypto-primary">{t.id}</td>
+                            <td className="p-1.5 text-white">{t.symbol}</td>
+                            <td className="p-1.5">
+                              <span className={`px-1 py-0.2 text-[9px] font-bold ${t.direction === 'YES' ? 'text-crypto-success bg-crypto-success/10' : 'text-crypto-danger bg-crypto-danger/10'}`}>
+                                {t.direction}
+                              </span>
+                            </td>
+                            <td className="p-1.5">${t.entryPrice?.toFixed(4)}</td>
+                            <td className="p-1.5">${t.exitPrice?.toFixed(4)}</td>
+                            <td className={`p-1.5 font-bold ${(t.profit ?? 0) >= 0 ? 'text-crypto-success' : 'text-crypto-danger'}`}>
+                              {(t.profit ?? 0) >= 0 ? `+$${Number(t.profit).toFixed(2)}` : `-$${Math.abs(Number(t.profit)).toFixed(2)}`}
+                            </td>
+                            <td className="p-1.5">{t.featureSnapshot?.rsi ?? '—'}</td>
+                            <td className="p-1.5">{t.featureSnapshot?.volatilityAtr ?? '—'}</td>
+                            <td className="p-1.5">{t.featureSnapshot?.orderFlowImbalance?.toFixed(3) ?? '—'}</td>
+                            <td className="p-1.5">{t.featureSnapshot?.vpin?.toFixed(3) ?? '—'}</td>
+                            <td className="p-1.5">${t.slippage?.toFixed(4) ?? '0.0000'}</td>
+                            <td className="p-1.5">${t.implementationShortfallUsd?.toFixed(4) ?? '0.0000'}</td>
+                            <td className="p-1.5">{t.markoutTrajectories?.markout1s ? `${t.markoutTrajectories.markout1s.toFixed(2)}%` : '—'}</td>
+                            <td className="p-1.5 text-[9px] text-[#808080]">{t.marketRegimeAtEntry || 'CHOPPY'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             )}
           </div>

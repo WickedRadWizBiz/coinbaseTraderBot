@@ -38,6 +38,75 @@ export class SlippageEngine {
   }
 
   /**
+   * Calculates dynamic order sizing calibrated by symbol liquidity tier,
+   * Order Book Imbalance variance, volatility ATR, and historical slippage.
+   * Restricts implementation shortfall on tail-risk altcoins.
+   */
+  public static calculateLiquidityTieredSizing({
+    symbol,
+    baseOrderSize = 10,
+    orderBookImbalance = 1.0,
+    volatilityAtr = 0.012,
+    historicalSlippageUsd = 0.0
+  }: {
+    symbol: string;
+    baseOrderSize?: number;
+    orderBookImbalance?: number;
+    volatilityAtr?: number;
+    historicalSlippageUsd?: number;
+  }): {
+    scaledOrderSize: number;
+    tier: 'TIER_1_MAJORS' | 'TIER_2_MIDCAP' | 'TIER_3_TAIL_ALT';
+    tierMultiplier: number;
+    imbalanceScaleFactor: number;
+    volatilityScaleFactor: number;
+    slippageScaleFactor: number;
+    reason: string;
+  } {
+    const sym = (symbol || '').toUpperCase();
+    let tier: 'TIER_1_MAJORS' | 'TIER_2_MIDCAP' | 'TIER_3_TAIL_ALT' = 'TIER_3_TAIL_ALT';
+    let tierMultiplier = 0.50;
+
+    if (sym.includes('BTC') || sym.includes('ETH')) {
+      tier = 'TIER_1_MAJORS';
+      tierMultiplier = 1.0;
+    } else if (sym.includes('SOL') || sym.includes('XRP')) {
+      tier = 'TIER_2_MIDCAP';
+      tierMultiplier = 0.75;
+    } else {
+      tier = 'TIER_3_TAIL_ALT';
+      tierMultiplier = 0.50;
+    }
+
+    // Penalize extreme order book asymmetry/imbalance variance (e.g. < 0.5 or > 1.8)
+    const obImbalance = Math.max(0.01, orderBookImbalance || 1.0);
+    const imbalanceDistFromParity = Math.abs(1.0 - obImbalance);
+    const imbalanceScaleFactor = Number((1.0 / (1.0 + Math.min(2.5, imbalanceDistFromParity) * 0.45)).toFixed(3));
+
+    // Scale down size if local ATR is elevated (> 0.015)
+    const atr = Math.max(0.001, volatilityAtr || 0.012);
+    const volatilityScaleFactor = Number(Math.max(0.35, Math.min(1.0, 0.015 / Math.max(0.008, atr))).toFixed(3));
+
+    // Scale down size if historical slippage on this symbol exceeds threshold (> $0.015)
+    const slippageScaleFactor = Number((historicalSlippageUsd > 0.015 
+      ? Math.max(0.30, 0.015 / historicalSlippageUsd) 
+      : 1.0).toFixed(3));
+
+    const combinedMultiplier = tierMultiplier * imbalanceScaleFactor * volatilityScaleFactor * slippageScaleFactor;
+    const scaledOrderSize = Math.max(1, Math.round(baseOrderSize * combinedMultiplier));
+
+    return {
+      scaledOrderSize,
+      tier,
+      tierMultiplier,
+      imbalanceScaleFactor,
+      volatilityScaleFactor,
+      slippageScaleFactor,
+      reason: `Tier: ${tier} (x${tierMultiplier}) | OB Imbalance Scale: x${imbalanceScaleFactor} | Vol Scale: x${volatilityScaleFactor} | Slippage Scale: x${slippageScaleFactor} ➔ Sized ${scaledOrderSize} contracts (Base: ${baseOrderSize})`
+    };
+  }
+
+  /**
    * Calculates non-linear market impact and implementation shortfall.
    */
   public static calculateFill({
