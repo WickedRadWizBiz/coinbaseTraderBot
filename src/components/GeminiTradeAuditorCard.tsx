@@ -76,6 +76,7 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
   const [latestComparison, setLatestComparison] = useState<ShortTermComparison | null>(null);
   const [showSolvedHistory, setShowSolvedHistory] = useState<boolean>(false);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
+  const [unAuditedTradeCount, setUnAuditedTradeCount] = useState<number>(0);
 
   // Auto-run trigger or status helper
   const isEligible = totalTrades >= 1; // Show readiness, run on demand
@@ -102,6 +103,9 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
         if (data.primaryModelName) setPrimaryModelName(data.primaryModelName);
         if (data.fallbackModels) setFallbackModels(data.fallbackModels);
         if (data.history) setAutoAudits(data.history);
+        if (typeof data.unAuditedTradeCount === 'number') {
+          setUnAuditedTradeCount(data.unAuditedTradeCount);
+        }
         if (data.auditMemory) {
           setAuditMemory(data.auditMemory);
           if (data.auditMemory.shortTermMemory?.lastComparison) {
@@ -162,12 +166,27 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
       if (data.memoryState) {
         setAuditMemory(data.memoryState);
       }
+      if (typeof data.unAuditedTradeCount === 'number') {
+        setUnAuditedTradeCount(data.unAuditedTradeCount);
+      } else {
+        setUnAuditedTradeCount(0);
+      }
     } catch (err: any) {
       console.error('[AUDIT CARD ERROR]', err);
       setError(err?.message || 'An error occurred during trade history validation.');
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleResetCount = async () => {
+    try {
+      const res = await fetch('/api/gemini/reset-audit-count', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        setUnAuditedTradeCount(0);
+      }
+    } catch (e) {}
   };
 
   const handleManualResolve = async (issueId: string) => {
@@ -544,6 +563,24 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
               <Sparkles className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
               <span>{loading ? 'Auditing with Gemini 3.1 Pro...' : 'Run Audit On-Demand (Gemini 3.1 Pro)'}</span>
             </button>
+
+            {/* 20 Audit Batch Counter Badge */}
+            <div className="flex items-center gap-2 px-2.5 py-1.5 bg-black/60 border border-crypto-primary/30 text-[10px] font-mono">
+              <span className="text-[#a0a0a0]">Batch Progress:</span>
+              <span className="text-crypto-primary font-bold">{unAuditedTradeCount} / 20</span>
+              <span className="text-crypto-success text-[9px] uppercase tracking-wider">
+                {unAuditedTradeCount >= 20 ? '(Auto-Triggering)' : '(Resets on Audit)'}
+              </span>
+              {unAuditedTradeCount > 0 && (
+                <button
+                  onClick={handleResetCount}
+                  title="Reset 20 audit count"
+                  className="ml-1 text-[9px] text-[#a0a0a0] hover:text-white underline cursor-pointer"
+                >
+                  Reset
+                </button>
+              )}
+            </div>
 
             {activeReport && (
               <button

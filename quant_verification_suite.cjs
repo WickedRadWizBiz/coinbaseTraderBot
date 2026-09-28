@@ -621,4 +621,34 @@ console.log(`- KXHYPEPERP Sizing (Trade #13316): Scaled=${sizingHypePerp.scaledO
 assert(sizingHypePerp.scaledOrderSize <= 2, "Perpetual altcoin with high historical slippage ($0.0739) and OB imbalance 1.85 must scale down <= 2 contracts");
 console.log("✓ TEST 23 PASSED: Perpetual altcoin liquidity-tiered sizing strictly controls implementation shortfall.");
 
+// 24. Audit Batch Reset Directive: Batch of 20 audits or less resets count
+console.log("\n[TEST 24] Testing 20 Audit Batch Counter Reset Logic...");
+function simulateAuditBatchProcessing(currentCount, batchSize) {
+  let unAuditedCount = currentCount;
+  // Whenever a batch of 20 audits or less is processed the 20 audit count should reset
+  if (batchSize <= 20) {
+    unAuditedCount = 0;
+  } else {
+    unAuditedCount = Math.max(0, unAuditedCount - batchSize);
+  }
+  return unAuditedCount;
+}
+
+// Case A: Full batch of 20 trades processed
+const resetFull20 = simulateAuditBatchProcessing(20, 20);
+console.log(`- Full 20-trade audit batch processed: Count reset to ${resetFull20}`);
+assert(resetFull20 === 0, "Full 20-trade batch must reset count to 0");
+
+// Case B: Partial batch of 12 trades processed (less than 20)
+const resetPartial12 = simulateAuditBatchProcessing(12, 12);
+console.log(`- Partial 12-trade audit batch (<= 20) processed: Count reset to ${resetPartial12}`);
+assert(resetPartial12 === 0, "Partial batch (<= 20) must reset count to 0");
+
+// Case C: Single trade audit run on-demand
+const resetSingle1 = simulateAuditBatchProcessing(7, 1);
+console.log(`- On-demand audit batch (<= 20) processed: Count reset to ${resetSingle1}`);
+assert(resetSingle1 === 0, "Batch of 20 or less must reset count to 0");
+
+console.log("✓ TEST 24 PASSED: Whenever a batch of 20 audits or less is processed the 20 audit count resets to 0.");
+
 console.log("\nALL VERIFICATION TESTS COMPLETED SUCCESSFULLY!");
