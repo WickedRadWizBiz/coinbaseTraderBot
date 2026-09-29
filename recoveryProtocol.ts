@@ -3,6 +3,7 @@ import path from 'path';
 import { GoogleGenAI } from '@google/genai';
 import { plasticityEngine, StrategyParameterSet } from './plasticityEngine';
 import { unifiedDataHandler } from './unifiedDataHandler';
+import { getGeminiApiKey } from './geminiKeyLoader.ts';
 
 export interface HybridParams {
   dynamicTP: number;
@@ -213,7 +214,7 @@ export class CapitalPreservationProtocol {
     let hybridizationDeltas = '';
 
     if (this.data.inquiryActive) {
-      const apiKey = process.env.GEMINI_API_KEY;
+      const apiKey = getGeminiApiKey();
       if (apiKey && Date.now() > this.rateLimitCooldownUntil) {
         try {
           const aiResponse = await this._queryGeminiForHybridization(
@@ -369,7 +370,12 @@ export class CapitalPreservationProtocol {
     isWin: boolean,
     apiKey: string
   ): Promise<any> {
-    const aiClient = new GoogleGenAI({ apiKey });
+    const aiClient = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: { 'User-Agent': 'aistudio-build' }
+      }
+    });
 
     const previousSameAssetTrades = this.data.ledger.filter(item => item.symbol === symbol || item.category === category);
     const prevWins = previousSameAssetTrades.filter(item => item.wasWin);

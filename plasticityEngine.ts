@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { GoogleGenAI } from '@google/genai';
 import { unifiedDataHandler } from './unifiedDataHandler';
+import { getGeminiApiKey } from './geminiKeyLoader.ts';
 
 export interface StrategyParameterSet {
   dynamicTP: number;
@@ -686,12 +687,17 @@ export class PlasticityModifierEngine {
     let comparisonReasoning = '';
     let winningFactors: string[] = [];
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = getGeminiApiKey();
     let aiSuccess = false;
 
     if (apiKey && Date.now() > this.rateLimitCooldownUntil) {
       try {
-        const aiClient = new GoogleGenAI({ apiKey });
+        const aiClient = new GoogleGenAI({
+          apiKey,
+          httpOptions: {
+            headers: { 'User-Agent': 'aistudio-build' }
+          }
+        });
         const prompt = `
 You are the Algorithmic Plasticity Modifier Engine operating under Adaptive Shrinkage & Oja's Learning.
 Compare a FRESH Strategy Hybridization Proposal with the ALL-TIME BEST (Highest Yield) Past Strategy Parameters for strategy type: "${patternType}".

@@ -1,145 +1,112 @@
 {
   "shortTermMemory": {
-    "lastAuditTimestamp": "2026-09-27T02:15:33.078Z",
-    "lastAuditTradeCount": 5,
+    "lastAuditTimestamp": "2026-09-29T09:08:50.098Z",
+    "lastAuditTradeCount": 20,
     "previousIssues": [
       {
-        "id": "IMPLEMENTATION_SHORTFALL_DEPTH_IMPACT",
-        "title": "Implementation Shortfall Trajectory on Large Fills",
-        "category": "SLIPPAGE_IMPACT",
-        "description": "Verify implementation shortfall dollar values scale non-linearly with contract order size on thinner altcoin books.",
+        "id": "ISSUE_REGIME_MISALIGNMENT",
+        "title": "REGIME_MISALIGNMENT",
+        "category": "GENERAL",
+        "description": "Discovered during quantitative audit report: REGIME_MISALIGNMENT",
         "severity": "HIGH",
-        "detectionCount": 7,
-        "firstDetectedAt": "2026-09-26T20:13:34.621Z",
-        "lastDetectedAt": "2026-09-27T02:15:33.078Z",
-        "status": "ACTIVE"
-      },
-      {
-        "id": "MACRO_FRACTAL_USDT_DOMINANCE_EXPANSION",
-        "title": "Cross-Asset Liquidity Shock Guard (USDT.D)",
-        "category": "REGIME_BIAS",
-        "description": "Verify the bot refuses altcoin long exposure when USDT.D is expanding, preventing systemic market drawdowns.",
-        "severity": "HIGH",
-        "detectionCount": 6,
-        "firstDetectedAt": "2026-09-26T20:13:34.621Z",
-        "lastDetectedAt": "2026-09-27T02:15:33.078Z",
-        "status": "ACTIVE"
-      },
-      {
-        "id": "TDF_PARAMETER_OVERFITTING_DEFLATED_SHARPE",
-        "title": "Time Dilation Factor (TDF) Parameter Drift Rate",
-        "category": "OVERFITTING",
-        "description": "Monitor how frequently internal parameters shift within the 20-trade window to prevent curve-fitting historical noise.",
-        "severity": "MEDIUM",
-        "detectionCount": 6,
-        "firstDetectedAt": "2026-09-26T20:13:34.621Z",
-        "lastDetectedAt": "2026-09-27T02:15:33.078Z",
+        "detectionCount": 4,
+        "firstDetectedAt": "2026-09-29T08:32:25.210Z",
+        "lastDetectedAt": "2026-09-29T09:08:50.098Z",
         "status": "ACTIVE"
       }
     ],
     "lastComparison": {
-      "evaluatedAt": "2026-09-27T02:15:33.078Z",
-      "previousAuditTimestamp": "2026-09-27T01:53:45.438Z",
-      "resolvedInThisBatch": [],
+      "evaluatedAt": "2026-09-29T09:08:50.098Z",
+      "previousAuditTimestamp": "2026-09-29T09:02:04.602Z",
+      "resolvedInThisBatch": [
+        "ISSUE_SYSTEMIC_SLIPPAGE_CORRELATION"
+      ],
       "persistingInThisBatch": [
-        "IMPLEMENTATION_SHORTFALL_DEPTH_IMPACT",
-        "MACRO_FRACTAL_USDT_DOMINANCE_EXPANSION",
-        "TDF_PARAMETER_OVERFITTING_DEFLATED_SHARPE"
+        "ISSUE_REGIME_MISALIGNMENT"
       ],
-      "newlyDetectedInThisBatch": [
-        "ISSUE_MARKOUT_CALCULATION_FROZEN"
-      ],
-      "summaryText": "Audit evaluated 5 trades: 0 issue(s) confirmed resolved, 3 persisting, 1 new anomalies logged."
+      "newlyDetectedInThisBatch": [],
+      "summaryText": "Audit evaluated 20 trades: 1 issue(s) confirmed resolved, 1 persisting, 0 new anomalies logged."
     }
   },
-  "recurringIssuesQueue": [
+  "recurringIssuesQueue": [],
+  "activeWatchList": [
     {
-      "id": "ASYMMETRIC_PAYOFF_RATIO_SL_COMPLIANCE",
-      "title": "Dynamic SL/TP Payoff Asymmetry in Choppy Regimes",
+      "id": "ISSUE_REGIME_MISALIGNMENT",
+      "title": "REGIME_MISALIGNMENT",
       "category": "GENERAL",
-      "description": "Ensure stop losses trigger dynamically and preserve profit factor asymmetry during sideways consolidation.",
-      "severity": "MEDIUM",
-      "detectionCount": 1,
-      "firstDetectedAt": "2026-09-26T20:13:34.621Z",
-      "lastDetectedAt": "2026-09-26T20:13:34.621Z",
+      "description": "Discovered during quantitative audit report: REGIME_MISALIGNMENT",
+      "severity": "HIGH",
+      "detectionCount": 4,
+      "firstDetectedAt": "2026-09-29T08:32:25.210Z",
+      "lastDetectedAt": "2026-09-29T09:08:50.098Z",
       "status": "ACTIVE"
+    }
+  ],
+  "solvedLongTermMemory": [
+    {
+      "id": "ISSUE_SYSTEMIC_SLIPPAGE_CORRELATION",
+      "title": "SYSTEMIC_SLIPPAGE_CORRELATION",
+      "category": "GENERAL",
+      "description": "Discovered during quantitative audit report: SYSTEMIC_SLIPPAGE_CORRELATION",
+      "severity": "HIGH",
+      "detectionCount": 3,
+      "firstDetectedAt": "2026-09-29T08:32:25.210Z",
+      "lastDetectedAt": "2026-09-29T09:02:04.602Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T09:08:50.098Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 9:08:50 AM."
     },
     {
-      "id": "ISSUE_INDICATOR_STAGNATION_DEFAULT_FAL",
-      "title": "INDICATOR_STAGNATION_DEFAULT_FALLBACK",
+      "id": "ISSUE_ADVERSE_SELECTION_TOXIC_FLOW_SPI",
+      "title": "ADVERSE_SELECTION_TOXIC_FLOW_SPIKE",
       "category": "GENERAL",
-      "description": "Discovered during quantitative audit report: INDICATOR_STAGNATION_DEFAULT_FALLBACK",
+      "description": "Discovered during quantitative audit report: ADVERSE_SELECTION_TOXIC_FLOW_SPIKE",
       "severity": "HIGH",
-      "detectionCount": 1,
-      "firstDetectedAt": "2026-09-26T20:14:26.739Z",
-      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
-      "status": "ACTIVE"
+      "detectionCount": 5,
+      "firstDetectedAt": "2026-09-29T07:01:57.515Z",
+      "lastDetectedAt": "2026-09-29T08:47:18.941Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T09:02:04.602Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 9:02:04 AM."
     },
     {
-      "id": "ISSUE_SIGNAL_EXECUTION_TIMING_DESYNC",
-      "title": "SIGNAL_EXECUTION_TIMING_DESYNC",
+      "id": "ISSUE_EXECUTION_LATENCY_SLIPPAGE_MISMA",
+      "title": "EXECUTION_LATENCY_SLIPPAGE_MISMATCH",
       "category": "GENERAL",
-      "description": "Discovered during quantitative audit report: SIGNAL_EXECUTION_TIMING_DESYNC",
+      "description": "Discovered during quantitative audit report: EXECUTION_LATENCY_SLIPPAGE_MISMATCH",
       "severity": "HIGH",
-      "detectionCount": 1,
-      "firstDetectedAt": "2026-09-26T20:14:26.739Z",
-      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
-      "status": "ACTIVE"
+      "detectionCount": 2,
+      "firstDetectedAt": "2026-09-29T06:31:07.538Z",
+      "lastDetectedAt": "2026-09-29T06:48:23.440Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T07:01:57.515Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 7:01:57 AM."
     },
     {
-      "id": "ISSUE_MARKOUT_FEED_CALCULATION_ERROR",
-      "title": "MARKOUT_FEED_CALCULATION_ERROR",
+      "id": "ISSUE_ADVERSE_SELECTION_TOXIC_FLOW",
+      "title": "ADVERSE_SELECTION_TOXIC_FLOW",
       "category": "GENERAL",
-      "description": "Discovered during quantitative audit report: MARKOUT_FEED_CALCULATION_ERROR",
+      "description": "Discovered during quantitative audit report: ADVERSE_SELECTION_TOXIC_FLOW",
       "severity": "HIGH",
       "detectionCount": 1,
-      "firstDetectedAt": "2026-09-26T20:14:26.739Z",
-      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
-      "status": "ACTIVE"
+      "firstDetectedAt": "2026-09-29T05:30:34.990Z",
+      "lastDetectedAt": "2026-09-29T05:30:34.990Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T06:15:45.474Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 6:15:45 AM."
     },
     {
-      "id": "ISSUE_LATENCY_REPORTING_DISCREPANCY",
-      "title": "LATENCY_REPORTING_DISCREPANCY",
+      "id": "ISSUE_UNMITIGATED_TOXIC_FLOW_ADVERSE_S",
+      "title": "UNMITIGATED_TOXIC_FLOW_ADVERSE_SELECTION",
       "category": "GENERAL",
-      "description": "Discovered during quantitative audit report: LATENCY_REPORTING_DISCREPANCY",
+      "description": "Discovered during quantitative audit report: UNMITIGATED_TOXIC_FLOW_ADVERSE_SELECTION",
       "severity": "HIGH",
       "detectionCount": 1,
-      "firstDetectedAt": "2026-09-26T22:26:32.010Z",
-      "lastDetectedAt": "2026-09-26T22:26:32.010Z",
-      "status": "ACTIVE"
-    },
-    {
-      "id": "ISSUE_ADVERSE_SELECTION_MARKOUT_LATENC",
-      "title": "ADVERSE_SELECTION_MARKOUT_LATENCY",
-      "category": "GENERAL",
-      "description": "Discovered during quantitative audit report: ADVERSE_SELECTION_MARKOUT_LATENCY",
-      "severity": "HIGH",
-      "detectionCount": 1,
-      "firstDetectedAt": "2026-09-27T00:22:45.180Z",
-      "lastDetectedAt": "2026-09-27T00:22:45.180Z",
-      "status": "ACTIVE"
-    },
-    {
-      "id": "ISSUE_FEATURE_PIPELINE_STASIS",
-      "title": "FEATURE_PIPELINE_STASIS",
-      "category": "GENERAL",
-      "description": "Discovered during quantitative audit report: FEATURE_PIPELINE_STASIS",
-      "severity": "HIGH",
-      "detectionCount": 1,
-      "firstDetectedAt": "2026-09-27T01:53:45.438Z",
-      "lastDetectedAt": "2026-09-27T01:53:45.438Z",
-      "status": "ACTIVE"
-    },
-    {
-      "id": "ISSUE_TOXIC_MARKOUT_CORRELATION",
-      "title": "TOXIC_MARKOUT_CORRELATION",
-      "category": "GENERAL",
-      "description": "Discovered during quantitative audit report: TOXIC_MARKOUT_CORRELATION",
-      "severity": "HIGH",
-      "detectionCount": 1,
-      "firstDetectedAt": "2026-09-27T01:53:45.438Z",
-      "lastDetectedAt": "2026-09-27T01:53:45.438Z",
-      "status": "ACTIVE"
+      "firstDetectedAt": "2026-09-29T03:16:39.448Z",
+      "lastDetectedAt": "2026-09-29T03:16:39.448Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T06:15:45.474Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 6:15:45 AM."
     },
     {
       "id": "ISSUE_MARKOUT_CALCULATION_FROZEN",
@@ -150,31 +117,113 @@
       "detectionCount": 1,
       "firstDetectedAt": "2026-09-27T02:15:33.078Z",
       "lastDetectedAt": "2026-09-27T02:15:33.078Z",
-      "status": "ACTIVE"
-    }
-  ],
-  "activeWatchList": [
-    {
-      "id": "IMPLEMENTATION_SHORTFALL_DEPTH_IMPACT",
-      "title": "Implementation Shortfall Trajectory on Large Fills",
-      "category": "SLIPPAGE_IMPACT",
-      "description": "Verify implementation shortfall dollar values scale non-linearly with contract order size on thinner altcoin books.",
-      "severity": "HIGH",
-      "detectionCount": 7,
-      "firstDetectedAt": "2026-09-26T20:13:34.621Z",
-      "lastDetectedAt": "2026-09-27T02:15:33.078Z",
-      "status": "ACTIVE"
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T06:15:45.474Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 6:15:45 AM."
     },
     {
-      "id": "MACRO_FRACTAL_USDT_DOMINANCE_EXPANSION",
-      "title": "Cross-Asset Liquidity Shock Guard (USDT.D)",
-      "category": "REGIME_BIAS",
-      "description": "Verify the bot refuses altcoin long exposure when USDT.D is expanding, preventing systemic market drawdowns.",
+      "id": "ISSUE_TOXIC_MARKOUT_CORRELATION",
+      "title": "TOXIC_MARKOUT_CORRELATION",
+      "category": "GENERAL",
+      "description": "Discovered during quantitative audit report: TOXIC_MARKOUT_CORRELATION",
       "severity": "HIGH",
-      "detectionCount": 6,
+      "detectionCount": 1,
+      "firstDetectedAt": "2026-09-27T01:53:45.438Z",
+      "lastDetectedAt": "2026-09-27T01:53:45.438Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T06:01:19.490Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 6:01:19 AM."
+    },
+    {
+      "id": "ISSUE_FEATURE_PIPELINE_STASIS",
+      "title": "FEATURE_PIPELINE_STASIS",
+      "category": "GENERAL",
+      "description": "Discovered during quantitative audit report: FEATURE_PIPELINE_STASIS",
+      "severity": "HIGH",
+      "detectionCount": 1,
+      "firstDetectedAt": "2026-09-27T01:53:45.438Z",
+      "lastDetectedAt": "2026-09-27T01:53:45.438Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T06:01:19.490Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 6:01:19 AM."
+    },
+    {
+      "id": "ISSUE_ADVERSE_SELECTION_MARKOUT_LATENC",
+      "title": "ADVERSE_SELECTION_MARKOUT_LATENCY",
+      "category": "GENERAL",
+      "description": "Discovered during quantitative audit report: ADVERSE_SELECTION_MARKOUT_LATENCY",
+      "severity": "HIGH",
+      "detectionCount": 1,
+      "firstDetectedAt": "2026-09-27T00:22:45.180Z",
+      "lastDetectedAt": "2026-09-27T00:22:45.180Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T06:01:19.490Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 6:01:19 AM."
+    },
+    {
+      "id": "ISSUE_LATENCY_REPORTING_DISCREPANCY",
+      "title": "LATENCY_REPORTING_DISCREPANCY",
+      "category": "GENERAL",
+      "description": "Discovered during quantitative audit report: LATENCY_REPORTING_DISCREPANCY",
+      "severity": "HIGH",
+      "detectionCount": 1,
+      "firstDetectedAt": "2026-09-26T22:26:32.010Z",
+      "lastDetectedAt": "2026-09-26T22:26:32.010Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T05:45:56.821Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 5:45:56 AM."
+    },
+    {
+      "id": "ISSUE_MARKOUT_FEED_CALCULATION_ERROR",
+      "title": "MARKOUT_FEED_CALCULATION_ERROR",
+      "category": "GENERAL",
+      "description": "Discovered during quantitative audit report: MARKOUT_FEED_CALCULATION_ERROR",
+      "severity": "HIGH",
+      "detectionCount": 1,
+      "firstDetectedAt": "2026-09-26T20:14:26.739Z",
+      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T05:45:56.821Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 5:45:56 AM."
+    },
+    {
+      "id": "ISSUE_SIGNAL_EXECUTION_TIMING_DESYNC",
+      "title": "SIGNAL_EXECUTION_TIMING_DESYNC",
+      "category": "GENERAL",
+      "description": "Discovered during quantitative audit report: SIGNAL_EXECUTION_TIMING_DESYNC",
+      "severity": "HIGH",
+      "detectionCount": 1,
+      "firstDetectedAt": "2026-09-26T20:14:26.739Z",
+      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T05:45:56.821Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 5:45:56 AM."
+    },
+    {
+      "id": "ISSUE_INDICATOR_STAGNATION_DEFAULT_FAL",
+      "title": "INDICATOR_STAGNATION_DEFAULT_FALLBACK",
+      "category": "GENERAL",
+      "description": "Discovered during quantitative audit report: INDICATOR_STAGNATION_DEFAULT_FALLBACK",
+      "severity": "HIGH",
+      "detectionCount": 1,
+      "firstDetectedAt": "2026-09-26T20:14:26.739Z",
+      "lastDetectedAt": "2026-09-26T20:14:26.739Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T05:30:34.990Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 5:30:34 AM."
+    },
+    {
+      "id": "ASYMMETRIC_PAYOFF_RATIO_SL_COMPLIANCE",
+      "title": "Dynamic SL/TP Payoff Asymmetry in Choppy Regimes",
+      "category": "GENERAL",
+      "description": "Ensure stop losses trigger dynamically and preserve profit factor asymmetry during sideways consolidation.",
+      "severity": "MEDIUM",
+      "detectionCount": 2,
       "firstDetectedAt": "2026-09-26T20:13:34.621Z",
-      "lastDetectedAt": "2026-09-27T02:15:33.078Z",
-      "status": "ACTIVE"
+      "lastDetectedAt": "2026-09-29T05:00:52.650Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T05:30:34.990Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 5:30:34 AM."
     },
     {
       "id": "TDF_PARAMETER_OVERFITTING_DEFLATED_SHARPE",
@@ -182,13 +231,39 @@
       "category": "OVERFITTING",
       "description": "Monitor how frequently internal parameters shift within the 20-trade window to prevent curve-fitting historical noise.",
       "severity": "MEDIUM",
-      "detectionCount": 6,
+      "detectionCount": 11,
       "firstDetectedAt": "2026-09-26T20:13:34.621Z",
-      "lastDetectedAt": "2026-09-27T02:15:33.078Z",
-      "status": "ACTIVE"
-    }
-  ],
-  "solvedLongTermMemory": [
+      "lastDetectedAt": "2026-09-29T05:00:52.650Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T05:30:34.990Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 5:30:34 AM."
+    },
+    {
+      "id": "MACRO_FRACTAL_USDT_DOMINANCE_EXPANSION",
+      "title": "Cross-Asset Liquidity Shock Guard (USDT.D)",
+      "category": "REGIME_BIAS",
+      "description": "Verify the bot refuses altcoin long exposure when USDT.D is expanding, preventing systemic market drawdowns.",
+      "severity": "HIGH",
+      "detectionCount": 10,
+      "firstDetectedAt": "2026-09-26T20:13:34.621Z",
+      "lastDetectedAt": "2026-09-29T04:31:45.073Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T05:00:52.650Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 5:00:52 AM."
+    },
+    {
+      "id": "IMPLEMENTATION_SHORTFALL_DEPTH_IMPACT",
+      "title": "Implementation Shortfall Trajectory on Large Fills",
+      "category": "SLIPPAGE_IMPACT",
+      "description": "Verify implementation shortfall dollar values scale non-linearly with contract order size on thinner altcoin books.",
+      "severity": "HIGH",
+      "detectionCount": 10,
+      "firstDetectedAt": "2026-09-26T20:13:34.621Z",
+      "lastDetectedAt": "2026-09-29T04:15:51.505Z",
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T04:31:45.073Z",
+      "resolutionNote": "Verified resolved in audit batch of 20 trades at 4:31:45 AM."
+    },
     {
       "id": "MICROSECOND_EXECUTION_LATENCY_JITTER",
       "title": "Execution Delay & Queue Latency Modeling",

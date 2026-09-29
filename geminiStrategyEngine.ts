@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from '@google/genai';
+import { getGeminiApiKey } from './geminiKeyLoader.ts';
 
 export interface PreFlightVetoResult {
   approved: boolean;
@@ -65,7 +66,7 @@ class GeminiStrategyEngine {
   private lastBatchAuditTradeCount: number = 0;
 
   private getAiClient(): GoogleGenAI | null {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = getGeminiApiKey();
     if (!apiKey) return null;
     if (Date.now() < this.rateLimitCooldownUntil) return null;
     return new GoogleGenAI({

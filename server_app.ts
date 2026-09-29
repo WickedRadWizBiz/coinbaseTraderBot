@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import './geminiKeyLoader.ts';
+import { getGeminiApiKey as resolveGeminiApiKey } from './geminiKeyLoader.ts';
 import express from "express";
 import path from "path";
 import fs from "fs";
@@ -225,18 +227,7 @@ kalshiFixEngine.connect().catch(err => console.warn('[FIX 4.4] Init warning:', e
 const PORT = (process.env.PORT && process.env.PORT !== '8080') ? Number(process.env.PORT) : 3000;
 
 export function getGeminiApiKey(): string | undefined {
-  let apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey && fs.existsSync(path.join(process.cwd(), '.env'))) {
-    try {
-      const envContent = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf-8');
-      const match = envContent.match(/GEMINI_API_KEY=([^\s\r\n]+)/);
-      if (match && match[1]) {
-        apiKey = match[1].trim();
-        process.env.GEMINI_API_KEY = apiKey;
-      }
-    } catch (e) {}
-  }
-  return apiKey || undefined;
+  return resolveGeminiApiKey();
 }
 
 // Global variables to store bot state and settings
@@ -1631,7 +1622,12 @@ class PatternTradingBrain {
         'gemini-3.1-flash-lite',
         'gemini-3.1-pro-preview'
       ];
-      const ai = new GoogleGenAI({ apiKey });
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: { 'User-Agent': 'aistudio-build' }
+        }
+      });
 
       const prompt = `You are an elite quantitative trading strategy architect analyzing a high-frequency prediction market trading bot signal.
 An indicator/pattern feature combination has failed in live trading and entered a TIME-OUT.
