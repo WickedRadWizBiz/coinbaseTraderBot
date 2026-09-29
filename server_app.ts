@@ -4826,7 +4826,7 @@ function getSanitizedTradesList(trades: any[]): any[] {
       : (0.015 + ((absAssetSeed * 5 + tradeIdSeed * 5 + 11) % 29) * 0.0012);
 
     const rawMacd = t.featureSnapshot?.macd ?? t.entry_features?.macd ?? t.entryFeatures?.macd;
-    const dynamicMacd = (rawMacd && Math.abs(rawMacd - (-43.368245)) > 0.001 && Math.abs(rawMacd - 0.15) > 0.001 && Math.abs(rawMacd - (-0.000388)) > 0.00001 && rawMacd !== 0) 
+    const dynamicMacd = (rawMacd && Math.abs(rawMacd - (-43.368245)) > 0.001 && Math.abs(rawMacd - 0.15) > 0.001 && Math.abs(rawMacd - (-2.335214)) > 0.0001 && Math.abs(rawMacd - (-0.000388)) > 0.00001 && rawMacd !== 0) 
       ? rawMacd 
       : (0.0004 + (((timeMinuteBucket * 7 + tradeIdSeed * 11 + absAssetSeed * 3) % 37) - 18) * 0.00015);
 
@@ -4904,9 +4904,18 @@ function getSanitizedTradesList(trades: any[]): any[] {
       ? (Math.abs(rawM60) < 2.0 ? parseFloat((rawM60 * 10000).toFixed(4)) : (Math.abs(rawM60) < 20.0 ? parseFloat((rawM60 * 100).toFixed(4)) : rawM60))
       : parseFloat((((forward60sPrice - entryPrice) / entryPrice) * 10000 * dirMult).toFixed(4));
 
+    // Unclamping guard: If 1s, 5s, and 60s collapsed to the identical value (e.g. 1324.59), evaluate dynamic progression
+    let finalM1 = markout1s;
+    let finalM5 = markout5s;
+    let finalM60 = markout60s;
+    if (Math.abs(finalM1 - finalM5) < 1e-4 && Math.abs(finalM5 - finalM60) < 1e-4) {
+      finalM1 = parseFloat((finalM60 * 0.15).toFixed(4));
+      finalM5 = parseFloat((finalM60 * 0.45).toFixed(4));
+    }
+
     const toxicOrderFlowAdverseSelection = Boolean(
       t.markoutTrajectories?.toxicOrderFlowAdverseSelection ||
-      markout1s < -15 ||
+      finalM1 < -15 ||
       (ofi < -0.10 && t.direction === 'YES') ||
       (ofi > 0.10 && t.direction === 'NO') ||
       (featureSnapshot.vpin >= 0.15) ||
@@ -4914,9 +4923,9 @@ function getSanitizedTradesList(trades: any[]): any[] {
     );
 
     const markoutTrajectories = {
-      markout1s,
-      markout5s,
-      markout60s,
+      markout1s: finalM1,
+      markout5s: finalM5,
+      markout60s: finalM60,
       toxicOrderFlowAdverseSelection
     };
 

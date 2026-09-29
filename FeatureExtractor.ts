@@ -130,9 +130,11 @@ export class FeatureExtractor {
           this.symbolRingBuffers.delete(k);
         }
       }
+      FeatureStore.reset(symbol);
     } else {
       this.featureCache.clear();
       this.symbolRingBuffers.clear();
+      FeatureStore.reset();
     }
   }
 
@@ -268,12 +270,18 @@ export class FeatureExtractor {
     const bbLower = bbMean - (2 * stdDev);
     const bollingerBandWidth = parseFloat(((bbUpper - bbLower) / Math.max(0.01, bbMean)).toFixed(5));
 
-    // 4. Dynamic MACD (12, 26, 9)
-    const ema12 = this.calculateEMA(closedBars.map(b => b.close), 12);
-    const ema26 = this.calculateEMA(closedBars.map(b => b.close), 26);
-    const macdLine = ema12 - ema26;
+    // 4. Dynamic MACD (12, 26, 9) with Live Forming Tick Integration
+    const priceSeries = context?.currentTickPrice && context.currentTickPrice > 0 
+      ? [...closedBars.map(b => b.close), context.currentTickPrice]
+      : closedBars.map(b => b.close);
+      
+    const macdSeries = this.calculateMACDSeries(priceSeries, 12, 26);
+    const macdLine = macdSeries.length > 0 ? macdSeries[macdSeries.length - 1] : 0;
+    const signalSeries = this.calculateEMASeries(macdSeries, 9);
+    const signalLine = signalSeries.length > 0 ? signalSeries[signalSeries.length - 1] : (macdLine * 0.8);
+    const macdHistVal = macdLine - signalLine;
     const macd = parseFloat(macdLine.toFixed(6));
-    const macdHist = parseFloat((macdLine * 0.2).toFixed(6));
+    const macdHist = parseFloat(macdHistVal.toFixed(6));
 
     // 5. Ichimoku Cloud (Tenkan 9, Kijun 26, Senkou 52)
     const tenkanSlice = closedBars.slice(-9);
@@ -368,5 +376,26 @@ export class FeatureExtractor {
       ema = (values[i] * k) + (ema * (1 - k));
     }
     return ema;
+  }
+
+  private static calculateEMASeries(values: number[], period: number): number[] {
+    if (values.length === 0) return [];
+    const k = 2 / (period + 1);
+    const series: number[] = [values[0]];
+    for (let i = 1; i < values.length; i++) {
+      series.push((values[i] * k) + (series[i - 1] * (1 - k)));
+    }
+    return series;
+  }
+
+  private static calculateMACDSeries(prices: number[], fastPeriod = 12, slowPeriod = 26): number[] {
+    if (prices.length < slowPeriod) return prices.map(() => 0);
+    const emaFast = this.calculateEMASeries(prices, fastPeriod);
+    const emaSlow = this.calculateEMASeries(prices, slowPeriod);
+    const macdSeries: number[] = [];
+    for (let i = 0; i < prices.length; i++) {
+      macdSeries.push(emaFast[i] - emaSlow[i]);
+    }
+    return macdSeries;
   }
 }
