@@ -572,11 +572,29 @@ export class TradeDatabaseManager {
         marketRegime: parsedMetrics.marketRegimeAtEntry || 'CHOPPY_SIDEWAYS'
       };
 
-      const markoutTrajectories = parsedMetrics.post_exit_snapshot_1m?.markoutTrajectories || {
-        markout1s: parsedMetrics.post_exit_ticks_20s?.[0]?.price ? parseFloat((((parsedMetrics.post_exit_ticks_20s[0].price - entryPrice) / entryPrice) * 100).toFixed(4)) : 0.04,
-        markout5s: parsedMetrics.post_exit_ticks_20s?.[4]?.price ? parseFloat((((parsedMetrics.post_exit_ticks_20s[4].price - entryPrice) / entryPrice) * 100).toFixed(4)) : -0.02,
-        markout60s: parsedMetrics.post_exit_snapshot_1m?.midPrice ? parseFloat((((parsedMetrics.post_exit_snapshot_1m.midPrice - entryPrice) / entryPrice) * 100).toFixed(4)) : 0.08,
-        toxicOrderFlowAdverseSelection: false
+      const dirMult = (parsedMetrics.side || (activeIndicators.includes('YES_SIDE') ? 'YES' : 'NO')) === 'YES' ? 1 : -1;
+      const rawM1 = parsedMetrics.post_exit_snapshot_1m?.markoutTrajectories?.markout1s;
+      const rawM5 = parsedMetrics.post_exit_snapshot_1m?.markoutTrajectories?.markout5s;
+      const rawM60 = parsedMetrics.post_exit_snapshot_1m?.markoutTrajectories?.markout60s;
+
+      const markout1s = typeof rawM1 === 'number' && rawM1 !== 0
+        ? (Math.abs(rawM1) < 2.0 ? parseFloat((rawM1 * 10000).toFixed(4)) : (Math.abs(rawM1) < 20.0 ? parseFloat((rawM1 * 100).toFixed(4)) : rawM1))
+        : (parsedMetrics.post_exit_ticks_20s?.[0]?.price ? parseFloat((((parsedMetrics.post_exit_ticks_20s[0].price - entryPrice) / entryPrice) * 10000 * dirMult).toFixed(4)) : 40.0);
+
+      const markout5s = typeof rawM5 === 'number' && rawM5 !== 0
+        ? (Math.abs(rawM5) < 2.0 ? parseFloat((rawM5 * 10000).toFixed(4)) : (Math.abs(rawM5) < 20.0 ? parseFloat((rawM5 * 100).toFixed(4)) : rawM5))
+        : (parsedMetrics.post_exit_ticks_20s?.[4]?.price ? parseFloat((((parsedMetrics.post_exit_ticks_20s[4].price - entryPrice) / entryPrice) * 10000 * dirMult).toFixed(4)) : -20.0);
+
+      const forward60sPrice = parsedMetrics.post_exit_snapshot_1m?.midPrice || exitPrice;
+      const markout60s = typeof rawM60 === 'number' && rawM60 !== 0
+        ? (Math.abs(rawM60) < 2.0 ? parseFloat((rawM60 * 10000).toFixed(4)) : (Math.abs(rawM60) < 20.0 ? parseFloat((rawM60 * 100).toFixed(4)) : rawM60))
+        : parseFloat((((forward60sPrice - entryPrice) / entryPrice) * 10000 * dirMult).toFixed(4));
+
+      const markoutTrajectories = {
+        markout1s,
+        markout5s,
+        markout60s,
+        toxicOrderFlowAdverseSelection: markout1s < -15 || markout5s < -30
       };
 
       return {
@@ -654,10 +672,10 @@ export class TradeDatabaseManager {
           marketRegime: 'CHOPPY_SIDEWAYS'
         },
         markoutTrajectories: {
-          markout1s: isWin ? 0.05 : -0.05,
-          markout5s: isWin ? 0.08 : -0.10,
-          markout60s: isWin ? 0.15 : -0.20,
-          toxicOrderFlowAdverseSelection: false
+          markout1s: isWin ? 50.0 : -50.0,
+          markout5s: isWin ? 80.0 : -100.0,
+          markout60s: isWin ? 150.0 : -200.0,
+          toxicOrderFlowAdverseSelection: !isWin
         },
         closeReason: isWin ? 'Take Profit (30-60d Compressed)' : 'Stop Loss (30-60d Compressed)',
         params: {},

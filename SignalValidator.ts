@@ -150,18 +150,42 @@ export class SignalValidator {
       };
     }
 
-    // 3. Adaptive Toxic Flow & Adverse Selection Markout Guard
-    // When VPIN >= 0.15, OFI diverges against signal direction, or orderBookImbalance > 2.0, enforce Post-Only Limit Orders with spread widening
+    // 3. Counter-Trend & Reversal Adverse Selection Pre-Trade Gate (Directive 3)
+    // When placing counter-trend NO orders or reversal flips under high Order Book Imbalance (> 1.30),
+    // elevated VPIN (> 0.12), or diverging OFI, inhibit execution or enforce Post-Only Limit with spread widening.
+    const isReversalSignal = pattern.includes('REVERSAL') || pattern.includes('FLIP');
+    const isCounterTrendNo = side === 'NO' && (ichimokuState === 'BULLISH_CLOUD' || ofi > 0.03 || params.orderBookImbalance > 1.30);
+    const isCounterTrendYes = side === 'YES' && (ichimokuState === 'BEARISH_CLOUD' || ofi < -0.03 || params.orderBookImbalance < 0.75);
+
+    if ((isReversalSignal || isCounterTrendNo || isCounterTrendYes) && (params.orderBookImbalance > 1.30 || params.vpin >= 0.12 || Math.abs(ofi) > 0.05)) {
+      if (params.orderBookImbalance > 1.70 || (side === 'NO' && ofi > 0.08) || (side === 'YES' && ofi < -0.08)) {
+        return {
+          approved: false,
+          allowLongs: allow_longs,
+          executionOrderType: 'POST_ONLY_LIMIT',
+          isToxicFlow: true,
+          spreadWideningBps: 25,
+          vaslStopLossPct: -0.02,
+          vaslTakeProfitPct: 0.08,
+          maxDrawdownLimitPct: -0.03,
+          code: 'TOXIC_FLOW_VETO',
+          reason: `[REVERSAL ADVERSE SELECTION VETO] Blocked counter-trend/reversal ${side} on ${sym}: OB Imbalance (${params.orderBookImbalance.toFixed(2)} > 1.30) or OFI (${ofi.toFixed(4)}) signals adverse toxic order flow.`
+        };
+      }
+    }
+
+    // 4. Adaptive Toxic Flow & Adverse Selection Markout Guard
+    // When VPIN >= 0.15, OFI diverges against signal direction, or orderBookImbalance > 1.30, enforce Post-Only Limit Orders with spread widening
     const isElevatedVpin = params.vpin >= 0.15;
-    const isHighImbalance = params.orderBookImbalance > 2.0;
+    const isHighImbalance = params.orderBookImbalance > 1.30;
     const isOfiDiverging = (side === 'YES' && ofi < -0.04) || (side === 'NO' && ofi > 0.04);
-    const isToxicFlow = isElevatedVpin || isHighImbalance || isOfiDiverging;
+    const isToxicFlow = isElevatedVpin || isHighImbalance || isOfiDiverging || isReversalSignal;
     const executionOrderType = isToxicFlow ? 'POST_ONLY_LIMIT' : 'MARKET_ORDER';
     const spreadWideningBps = isElevatedVpin 
       ? Math.round((params.vpin - 0.15) * 200 + 15) 
       : isOfiDiverging 
         ? 20 
-        : (isHighImbalance ? 15 : 0);
+        : (isHighImbalance ? 18 : (isReversalSignal ? 15 : 0));
 
     // 4. Volatility-Adjusted Stop Loss (VASL) & Drawdown Limits
     // SL = entryPrice - (volatilityAtr * 1.5), capped at 3% maximum drawdown for 15M patterns

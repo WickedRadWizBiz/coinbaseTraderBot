@@ -37,7 +37,7 @@ export interface PreTradeEvaluationParams {
 
 export interface PreTradeEvaluationResult {
   allowed: boolean;
-  code: 'APPROVED' | 'REGIME_VETO' | 'USDT_DOMINANCE_VETO' | 'FEATURE_STASIS_VETO' | 'ADVERSE_SELECTION_VETO' | 'INSUFFICIENT_BUFFER_VETO' | 'TOXIC_OFI_VETO' | 'VPIN_RISK_REJECTION' | 'LATENCY_TTL_EXCEEDED_VETO' | 'REGIME_CONSTRAINT_VETO';
+  code: 'APPROVED' | 'REGIME_VETO' | 'USDT_DOMINANCE_VETO' | 'FEATURE_STASIS_VETO' | 'ADVERSE_SELECTION_VETO' | 'INSUFFICIENT_BUFFER_VETO' | 'TOXIC_OFI_VETO' | 'TOXIC_FLOW_VETO' | 'VPIN_RISK_REJECTION' | 'LATENCY_TTL_EXCEEDED_VETO' | 'REGIME_CONSTRAINT_VETO';
   reason?: string;
   recommendedSL: number;
   recommendedTP: number;
@@ -104,6 +104,7 @@ export class PreTradeRiskManager {
               validatorResult.code === 'VPIN_RISK_REJECTION' ? 'VPIN_RISK_REJECTION' :
               validatorResult.code === 'LATENCY_TTL_EXCEEDED_VETO' ? 'LATENCY_TTL_EXCEEDED_VETO' :
               validatorResult.code === 'TOXIC_OFI_VETO' ? 'TOXIC_OFI_VETO' :
+              validatorResult.code === 'TOXIC_FLOW_VETO' ? 'TOXIC_FLOW_VETO' :
               validatorResult.code === 'REGIME_CONSTRAINT_VETO' ? 'REGIME_CONSTRAINT_VETO' : 'REGIME_VETO',
         reason: validatorResult.reason,
         recommendedSL: validatorResult.vaslStopLossPct,

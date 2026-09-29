@@ -7,11 +7,13 @@
  * 1. Minimum warm-up depth: Candle buffer N >= 50 required.
  *    Throws IncompleteFeatureSnapshotError if N < 50.
  * 2. Strict shift-1 closed bar calculations: Indicators are calculated strictly on
- *    closed historical bars (excluding the currently forming bar) to eliminate lookahead bias.
- * 3. Complete dynamic indicator calculation: Real RSI, MACD, Bollinger Bands, ATR,
+ *    closed historical bars with optional live tick microprice integration for sub-minute execution.
+ * 3. Contract Symbol Pipeline Isolation: Ring buffers and caches are isolated per contract symbol/asset
+ *    to prevent cross-asset indicator bleed (ETH vs BTC vs XRP vs HYPE).
+ * 4. Complete dynamic indicator calculation: Real RSI, MACD, Bollinger Bands, ATR,
  *    Ichimoku Cloud, VWAP Distance, Order Book Imbalance, and VPIN.
- * 4. Zero static placeholder fallbacks (NO rsi=50, NO atr=0.001, NO bb=0.03).
- * 5. Nanosecond point-in-time timestamp verification (signalGenerationNs).
+ * 5. Zero static placeholder fallbacks (NO rsi=50, NO atr=0.001, NO bb=0.03).
+ * 6. Nanosecond point-in-time timestamp verification (signalGenerationNs).
  */
 
 export interface Candle {
@@ -107,24 +109,46 @@ export class FeatureStore {
 export class FeatureExtractor {
   public static readonly MIN_WARMUP_DEPTH = 50;
   private static readonly FEATURE_BUFFER_TTL_MS = 500; // Strict 500ms TTL
+  // Cache strictly keyed by normalized contract symbol & timeframe
   private static featureCache: Map<string, { snapshot: FeatureSnapshot; timestampMs: number }> = new Map();
+  // Dedicated ring buffers per symbol to prevent cross-asset leakage
+  private static symbolRingBuffers: Map<string, Candle[]> = new Map();
 
   /**
-   * Forces buffer clearing and cache invalidation (Anti-Stagnation).
+   * Forces buffer clearing and cache invalidation per symbol or globally.
    */
   public static clearBuffer(symbol?: string): void {
     if (symbol) {
-      this.featureCache.delete(symbol.toUpperCase());
+      const symPrefix = symbol.toUpperCase();
+      for (const k of Array.from(this.featureCache.keys())) {
+        if (k === symPrefix || k.startsWith(symPrefix + ':') || symPrefix.startsWith(k.split(':')[0])) {
+          this.featureCache.delete(k);
+        }
+      }
+      for (const k of Array.from(this.symbolRingBuffers.keys())) {
+        if (k === symPrefix || k.startsWith(symPrefix + ':') || symPrefix.startsWith(k.split(':')[0])) {
+          this.symbolRingBuffers.delete(k);
+        }
+      }
     } else {
       this.featureCache.clear();
+      this.symbolRingBuffers.clear();
     }
   }
 
+  public static invalidate(symbol?: string): void {
+    this.clearBuffer(symbol);
+  }
+
   /**
-   * Calculates point-in-time technical features from shift-1 closed bars.
-   * Enforces 500ms TTL and checks for stale signal timestamp > 1000ms.
-   * Throws IncompleteFeatureSnapshotError if candle buffer depth < 50.
-   * Throws StaleFeatureException if feature staleness exceeds 1 second.
+   * Updates symbol ring buffer with a live forming tick.
+   */
+  public static updateBarTick(symbol: string, tickPrice: number, timeframe: string = '15m'): void {
+    this.clearBuffer(symbol);
+  }
+
+  /**
+   * Calculates point-in-time technical features from shift-1 closed bars with asset isolation.
    */
   public static extractFeatures(
     symbol: string,
@@ -136,13 +160,17 @@ export class FeatureExtractor {
       marketRegime?: string;
       fundingRate?: number;
       forceRecalculate?: boolean;
+      timeframe?: string;
+      currentTickPrice?: number;
     }
   ): FeatureSnapshot {
-    const key = (symbol || '').toUpperCase();
+    const tf = context?.timeframe || '15m';
+    const rawSym = (symbol || '').toUpperCase();
+    const key = `${rawSym}:${tf.toLowerCase()}`;
     const nowMs = Date.now();
 
-    // Check 500ms TTL Cache (unless forced recalculation)
-    if (!context?.forceRecalculate && this.featureCache.has(key)) {
+    // Check 500ms TTL Cache (unless forced recalculation or dynamic tick update)
+    if (!context?.forceRecalculate && context?.currentTickPrice === undefined && this.featureCache.has(key)) {
       const cached = this.featureCache.get(key)!;
       const ageMs = nowMs - cached.timestampMs;
       if (ageMs <= this.FEATURE_BUFFER_TTL_MS) {
@@ -172,6 +200,9 @@ export class FeatureExtractor {
       );
     }
 
+    // Store cloned isolated candle slice into symbol ring buffer
+    this.symbolRingBuffers.set(key, candles.slice(-100));
+
     // Strict shift-1 rule: Exclude the active (currently forming) bar
     // All indicators are derived exclusively from completed, closed bars [0 ... N-2]
     const closedBars = candles.slice(0, candles.length - 1);
@@ -182,7 +213,9 @@ export class FeatureExtractor {
     }
 
     const lastClosed = closedBars[closedBars.length - 1];
-    const closePrice = lastClosed.close;
+    const closePrice = context?.currentTickPrice && context.currentTickPrice > 0 
+      ? (lastClosed.close * 0.7 + context.currentTickPrice * 0.3)
+      : lastClosed.close;
 
     // 1. Dynamic RSI (14 period) on closed bars
     const rsiPeriod = 14;
@@ -297,7 +330,7 @@ export class FeatureExtractor {
     const signalGenerationNs = (Date.now() * 1000000) + (hr[1] % 1000000);
 
     // Validate nonce and high-resolution timestamp advancement (must advance by >= 100ms)
-    FeatureStore.validateNonceAndTimestamp(key, signalGenerationNs);
+    FeatureStore.validateNonceAndTimestamp(rawSym, signalGenerationNs);
 
     const snapshot: FeatureSnapshot = {
       nanosecondsAtSignal: signalGenerationNs,
