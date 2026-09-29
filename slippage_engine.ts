@@ -185,10 +185,12 @@ export class SlippageEngine {
       }
       fillPrice = Math.max(0.0001, parseFloat(fillPrice.toFixed(4)));
     } else {
+      // In binary prediction markets, entering YES or NO is purchasing a contract (buyer incurs positive slippage).
+      // Exiting is selling the contract at the bid (seller incurs negative slippage).
       if (isEntry) {
-        fillPrice = side === 'YES' ? targetPrice * (1 + effectiveSlippageFraction) : targetPrice * (1 - effectiveSlippageFraction);
+        fillPrice = targetPrice * (1 + effectiveSlippageFraction);
       } else {
-        fillPrice = side === 'YES' ? targetPrice * (1 - effectiveSlippageFraction) : targetPrice * (1 + effectiveSlippageFraction);
+        fillPrice = targetPrice * (1 - effectiveSlippageFraction);
       }
       fillPrice = Math.max(0.01, Math.min(0.99, parseFloat(fillPrice.toFixed(4))));
     }

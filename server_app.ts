@@ -236,12 +236,7 @@ export function getGeminiApiKey(): string | undefined {
       }
     } catch (e) {}
   }
-  if (!apiKey) {
-    // Safe base64-decoded runtime fallback to prevent GitHub push protection from blocking commits
-    apiKey = Buffer.from('QVEuQWI4Uk42S25wZTQ3WjZ1a2MtTUF1X3VSUG05cDNZSTludjJUT082T1lSVFNnWHFlRmc=', 'base64').toString('utf-8');
-    process.env.GEMINI_API_KEY = apiKey;
-  }
-  return apiKey;
+  return apiKey || undefined;
 }
 
 // Global variables to store bot state and settings
@@ -257,7 +252,7 @@ let settings = {
   profitLockTrigger: 25,
   profitLockFloor: 5,
   instantProfitQueue: 20,
-  kellyMultiplier: 3.0,
+  kellyMultiplier: 0.5,
   simulatedLatencyMs: 0,
   paperTrading: true, // HARD SAFETY RULE: Never default to live mode on server boot or restart. Always default to Paper Trading.
   botActive: true,
@@ -1148,7 +1143,8 @@ class PatternTradingBrain {
     );
     const actualExitPrice = exitFillSim.fillPrice;
     const totalExecutionDelayMs = Math.round(((pos.executionDelayMs || 50) + exitFillSim.executionDelayMs) / 2);
-    const totalSlippageUsd = parseFloat(((pos.slippageUsd || 0) + exitFillSim.slippageUsd).toFixed(4));
+    // E-06: Multiply per-contract slippage by position contract size
+    const totalSlippageUsd = parseFloat((((pos.slippageUsd || 0) + exitFillSim.slippageUsd) * (pos.size || 1)).toFixed(4));
     const netPnlUsd = parseFloat((rawPnlUsd - totalSlippageUsd).toFixed(2));
 
     const nanosecondsAtSignal = pos.nanosecondsAtSignal || ((Date.now() * 1000000) + (process.hrtime()[1] % 1000000));
@@ -1179,27 +1175,26 @@ class PatternTradingBrain {
       implementationShortfallUsd: exitFillSim.implementationShortfallUsd
     };
 
-    const calcMarkout1s = isWin ? 0.05 : -0.07;
-    const calcMarkout5s = isWin ? 0.08 : -0.11;
-    const calcMarkout60s = isWin ? 0.16 : -0.19;
-
+    // E-07: Never synthesize markouts from trade outcomes (isWin ? 0.05 : -0.07).
+    // Store null/zero if unobserved, and do not trigger circuit breakers on outcome-derived labels.
     const markoutTrajectories = pos.markoutTrajectories || {
-      markout1s: calcMarkout1s,
-      markout5s: calcMarkout5s,
-      markout60s: calcMarkout60s,
-      toxicOrderFlowAdverseSelection: calcMarkout1s < 0
+      markout1s: 0.0,
+      markout5s: 0.0,
+      markout60s: 0.0,
+      toxicOrderFlowAdverseSelection: false
     };
 
-    // Adverse Selection Circuit Breaker (QUANT-REMEDIATION-B00927)
-    // If markout1s is negative for 3 consecutive trades in a specific symbol, blacklist for 3600s
-    const adverseCheck = adverseSelectionBreaker.recordMarkout(pos.symbol, markoutTrajectories.markout1s);
-    if (adverseCheck.blacklisted && adverseCheck.message) {
-      spotLogs.unshift({
-        id: logIdCounter++,
-        time: new Date().toISOString(),
-        type: 'WARN',
-        message: adverseCheck.message
-      });
+    // Adverse Selection Circuit Breaker (only records when actual market markouts exist)
+    if (pos.markoutTrajectories && typeof pos.markoutTrajectories.markout1s === 'number' && pos.markoutTrajectories.markout1s !== 0) {
+      const adverseCheck = adverseSelectionBreaker.recordMarkout(pos.symbol, markoutTrajectories.markout1s);
+      if (adverseCheck.blacklisted && adverseCheck.message) {
+        spotLogs.unshift({
+          id: logIdCounter++,
+          time: new Date().toISOString(),
+          type: 'WARN',
+          message: adverseCheck.message
+        });
+      }
     }
 
     const tradeReport = {
@@ -1307,15 +1302,15 @@ class PatternTradingBrain {
         })()
       };
 
+      // M-08: If entryFeatures were not captured at entry, do NOT synthesize leaked exit-time features
       if (!tradeReport.entryFeatures) {
-        tradeReport.entryFeatures = onlineFeatures;
+        tradeReport.entryFeatures = pos.entryFeatures || null;
       }
 
       const actualLabel = isWin ? 1 : 0;
-      // Guard online weight adaptation: Only train on trades that had time to develop (>=8s)
-      // or had a significant real price move (>= 2%), preventing spread noise on instant exits from corrupting the model.
-      if (tradeReport.timeInContractSec >= 8 || Math.abs(tradeReport.pnlPct) >= 2.0) {
-        metaModelManager.activeModel.updateOnlineWeights(onlineFeatures, actualLabel);
+      // Guard online weight adaptation: Only train on trades with legitimate point-in-time entryFeatures
+      if (pos.entryFeatures && (tradeReport.timeInContractSec >= 8 || Math.abs(tradeReport.pnlPct) >= 2.0)) {
+        metaModelManager.activeModel.updateOnlineWeights(pos.entryFeatures, actualLabel);
       }
 
       // Top-Tier Alpha Goal-Hitter Tagging: Note any time the $100 goal was hit or high profit achieved ($10+), tagging simultaneous conditions as elite alpha signatures
@@ -3633,12 +3628,8 @@ async function openPosition(
   const isReversalOrCounterTrend = ((params as any)?.strategyName || analysisMeta?.patternType || label || '').includes('REVERSAL') || ((params as any)?.strategyName || analysisMeta?.patternType || label || '').includes('FLIP') || (side === 'NO' && extractedSnapshot.orderBookImbalance > 1.30);
   const isToxicFlow = isHighObImbalance || isElevatedVpin || isExtremeOfiDivergence || isReversalOrCounterTrend;
 
-  const takerFriction = 0.005; // 0.5% standard taker friction
-  const makerRebate = -0.001; // Earning a maker rebate
-  const spreadSavings = takerFriction - makerRebate + (isElevatedVpin ? (liveVpin - 0.15) * 0.02 : 0.0);
-  const baseOptimizedPrice = isPerpContract
-    ? (side === 'YES' ? Math.max(0.0001, entryPrice * (1 - spreadSavings)) : Math.max(0.0001, entryPrice * (1 + spreadSavings)))
-    : (side === 'YES' ? Math.max(0.01, entryPrice * (1 - spreadSavings)) : Math.min(0.99, entryPrice * (1 - spreadSavings)));
+  // Realistic entry pricing: Market orders execute at executable price without artificial maker discounts
+  const baseOptimizedPrice = entryPrice;
 
   // [LATENCY GATE B] Adaptive Slippage & Tolerance Buffer based on measured execution environment
   const latencyBuffer = latencyAdaptiveEngine.getAdaptivePriceTolerance(baseOptimizedPrice, side, isPerpContract);
@@ -4798,58 +4789,26 @@ function getSanitizedTradesList(trades: any[]): any[] {
     });
 
     const isVal = fillCalc.implementationShortfallUsd;
-    const symUpper = (t.symbol || 'KXBTC').toUpperCase();
-    let assetSeed = 0;
-    for (let i = 0; i < symUpper.length; i++) {
-      assetSeed = (assetSeed << 5) - assetSeed + symUpper.charCodeAt(i);
-      assetSeed |= 0;
-    }
-    const absAssetSeed = Math.abs(assetSeed) || 1;
-    const tradeIdSeed = Math.abs(Number(String(t.id).replace(/[^0-9]/g, '')) || 1);
     const tradeTimeMs = t.timestamp ? new Date(t.timestamp).getTime() : (t.entryTime || Date.now());
-    const highResNs = (tradeTimeMs * 1000000) + ((tradeIdSeed * 37 + absAssetSeed * 17 + 101) % 1000000);
-    const timeMinuteBucket = Math.floor(tradeTimeMs / 60000);
+    const signalNs = t.nanosecondsAtSignal || (tradeTimeMs * 1000000);
 
-    const rawRsi = t.featureSnapshot?.rsi ?? t.entry_features?.rsi ?? t.entryFeatures?.rsi;
-    const dynamicRsi = (rawRsi && Math.abs(rawRsi - 52.43) > 0.01 && Math.abs(rawRsi - 50.0) > 0.01 && Math.abs(rawRsi - 52.47) > 0.01) 
-      ? rawRsi 
-      : (38.0 + ((timeMinuteBucket * 13 + tradeIdSeed * 7 + absAssetSeed * 11) % 52) * 0.75);
-
-    const rawAtr = t.entryFeatures?.atr ?? t.entry_features?.atr ?? t.featureSnapshot?.volatilityAtr;
-    const dynamicAtr = (rawAtr && Math.abs(rawAtr - 0.001) > 0.0001 && Math.abs(rawAtr - 0.00435) > 0.00001 && Math.abs(rawAtr - 0.00436) > 0.00001) 
-      ? rawAtr 
-      : (0.008 + ((absAssetSeed * 7 + tradeIdSeed * 3 + (timeMinuteBucket % 17)) % 31) * 0.0008);
-
-    const rawBb = t.entryFeatures?.bollingerBandWidth ?? t.entry_features?.bollingerBandWidth ?? t.featureSnapshot?.bollingerBandWidth;
-    const dynamicBb = (rawBb && Math.abs(rawBb - 0.03) > 0.0001 && Math.abs(rawBb - 0.0278) > 0.0001 && Math.abs(rawBb - 0.02773) > 0.0001) 
-      ? rawBb 
-      : (0.015 + ((absAssetSeed * 5 + tradeIdSeed * 5 + 11) % 29) * 0.0012);
-
-    const rawMacd = t.featureSnapshot?.macd ?? t.entry_features?.macd ?? t.entryFeatures?.macd;
-    const dynamicMacd = (rawMacd && Math.abs(rawMacd - (-43.368245)) > 0.001 && Math.abs(rawMacd - 0.15) > 0.001 && Math.abs(rawMacd - (-2.335214)) > 0.0001 && Math.abs(rawMacd - (-0.000388)) > 0.00001 && rawMacd !== 0) 
-      ? rawMacd 
-      : (0.0004 + (((timeMinuteBucket * 7 + tradeIdSeed * 11 + absAssetSeed * 3) % 37) - 18) * 0.00015);
-
-    const rawVwap = t.entryFeatures?.vwapDistancePct ?? t.entry_features?.vwapDistancePct ?? t.featureSnapshot?.vwapDistancePct;
-    const dynamicVwap = (rawVwap && rawVwap !== 0) ? rawVwap : (0.002 + ((absAssetSeed * 2 + tradeIdSeed * 2 + 5) % 23) * 0.0007);
-
-    const rawSurge = t.entryFeatures?.volumeSurgeRatio ?? t.entry_features?.volumeSurgeRatio ?? t.featureSnapshot?.volumeSurgeRatio;
-    const dynamicSurge = (rawSurge && rawSurge !== 1.0 && Math.abs(rawSurge - 1.12) > 0.01) ? rawSurge : (1.08 + ((absAssetSeed * 3 + tradeIdSeed * 4 + 9) % 17) * 0.07);
-
-    const dynamicTenkan = (t.featureSnapshot?.ichimokuTenkan && t.featureSnapshot.ichimokuTenkan !== 0.001 && Math.abs(t.featureSnapshot.ichimokuTenkan - 0.00722) > 0.00001 && Math.abs(t.featureSnapshot.ichimokuTenkan - 0.00726) > 0.00001)
-      ? t.featureSnapshot.ichimokuTenkan
-      : (0.0006 + ((absAssetSeed * 9 + tradeIdSeed * 9 + (timeMinuteBucket % 11)) % 29) * 0.00018);
-
-    const dynamicKijun = (t.featureSnapshot?.ichimokuKijun && t.featureSnapshot.ichimokuKijun !== 0.001 && Math.abs(t.featureSnapshot.ichimokuKijun - 0.00443) > 0.00001 && Math.abs(t.featureSnapshot.ichimokuKijun - 0.00453) > 0.00001)
-      ? t.featureSnapshot.ichimokuKijun
-      : (0.0007 + ((absAssetSeed * 13 + tradeIdSeed * 13 + (timeMinuteBucket % 13)) % 33) * 0.00016);
+    // D-01: Export stored feature values verbatim, using null for uncaptured fields (zero fabrication)
+    const rawRsi = t.featureSnapshot?.rsi ?? t.entry_features?.rsi ?? t.entryFeatures?.rsi ?? null;
+    const rawAtr = t.entryFeatures?.atr ?? t.entry_features?.atr ?? t.featureSnapshot?.volatilityAtr ?? null;
+    const rawBb = t.entryFeatures?.bollingerBandWidth ?? t.entry_features?.bollingerBandWidth ?? t.featureSnapshot?.bollingerBandWidth ?? null;
+    const rawMacd = t.featureSnapshot?.macd ?? t.entry_features?.macd ?? t.entryFeatures?.macd ?? null;
+    const rawMacdHist = t.featureSnapshot?.macdHist ?? t.entry_features?.macdHist ?? t.entryFeatures?.macdHist ?? null;
+    const rawVwap = t.entryFeatures?.vwapDistancePct ?? t.entry_features?.vwapDistancePct ?? t.featureSnapshot?.vwapDistancePct ?? null;
+    const rawSurge = t.entryFeatures?.volumeSurgeRatio ?? t.entry_features?.volumeSurgeRatio ?? t.featureSnapshot?.volumeSurgeRatio ?? null;
+    const rawTenkan = t.featureSnapshot?.ichimokuTenkan ?? null;
+    const rawKijun = t.featureSnapshot?.ichimokuKijun ?? null;
 
     const dynRegime = computeDynamicMarketRegime({
       symbol: t.symbol,
       baseRegime: t.marketRegimeAtEntry || t.featureSnapshot?.marketRegime || 'CHOPPY_SIDEWAYS',
-      rsi: dynamicRsi,
-      atr: dynamicAtr,
-      bandWidth: dynamicBb,
+      rsi: rawRsi !== null ? rawRsi : undefined,
+      atr: rawAtr !== null ? rawAtr : undefined,
+      bandWidth: rawBb !== null ? rawBb : undefined,
       ichimokuState: t.indicators?.activeIndicators?.includes('BULLISH_ICHIMOKU') ? 'BULLISH_CLOUD' : (t.marketRegimeAtEntry === 'TRENDING_BEARISH' ? 'BEARISH_CLOUD' : 'NEUTRAL_IN_CLOUD'),
       deltaUsdtD: globalMetricsTracker.get1mDeltaPct(),
       usdtDominanceSignal: globalMetricsTracker.usdtDominanceSignal,
@@ -4860,25 +4819,22 @@ function getSanitizedTradesList(trades: any[]): any[] {
 
     const featureSnapshot = {
       ...(t.featureSnapshot || {}),
-      nanosecondsAtSignal: highResNs,
+      nanosecondsAtSignal: signalNs,
       timestampIso: t.timestamp || new Date(tradeTimeMs).toISOString(),
-      signalGenerationNs: highResNs,
-      pointInTimeSignalVerified: true,
-      lookaheadBiasVerified: "STRICT_CLOSED_BAR_SHIFT_1_VERIFIED",
-      futureLookingIndicesCheck: "SHIFT_1_RULE_VERIFIED",
-      rsi: Number(dynamicRsi.toFixed(2)),
-      macd: Number(dynamicMacd.toFixed(6)),
-      macdHist: Number((dynamicMacd * 0.25).toFixed(6)),
-      ichimokuTenkan: Number(dynamicTenkan.toFixed(6)),
-      ichimokuKijun: Number(dynamicKijun.toFixed(6)),
+      signalGenerationNs: signalNs,
+      rsi: rawRsi !== null ? Number(rawRsi.toFixed(2)) : null,
+      macd: rawMacd !== null ? Number(rawMacd.toFixed(6)) : null,
+      macdHist: rawMacdHist !== null ? Number(rawMacdHist.toFixed(6)) : null,
+      ichimokuTenkan: rawTenkan !== null ? Number(rawTenkan.toFixed(6)) : null,
+      ichimokuKijun: rawKijun !== null ? Number(rawKijun.toFixed(6)) : null,
       ichimokuCloudState: t.indicators?.activeIndicators?.includes('BULLISH_ICHIMOKU') ? 'BULLISH_CLOUD' : (dynRegime === 'TRENDING_BEARISH' ? 'BEARISH_CLOUD' : 'NEUTRAL_IN_CLOUD'),
-      orderBookImbalance: t.entry_features?.orderbookImbalance || 1.15,
+      orderBookImbalance: t.entry_features?.orderbookImbalance ?? (t.entryFeatures?.orderbookImbalance ?? null),
       orderFlowImbalance: ofi,
-      volatilityAtr: Number(dynamicAtr.toFixed(5)),
-      bollingerBandWidth: Number(dynamicBb.toFixed(5)),
-      volumeSurgeRatio: Number(dynamicSurge.toFixed(2)),
-      vpin: t.entry_features?.vpin || 0.155,
-      vwapDistancePct: Number(dynamicVwap.toFixed(4)),
+      volatilityAtr: rawAtr !== null ? Number(rawAtr.toFixed(5)) : null,
+      bollingerBandWidth: rawBb !== null ? Number(rawBb.toFixed(5)) : null,
+      volumeSurgeRatio: rawSurge !== null ? Number(rawSurge.toFixed(2)) : null,
+      vpin: t.entry_features?.vpin ?? (t.entryFeatures?.vpin ?? null),
+      vwapDistancePct: rawVwap !== null ? Number(rawVwap.toFixed(4)) : null,
       fundingRate: t.entry_features?.fundingRate || 0,
       marketRegime: dynRegime,
       implementationShortfallUsd: isVal
@@ -5228,7 +5184,7 @@ function checkPaperDrawdownAndBlowout(contextSource = 'TICK'): boolean {
         id: logIdCounter++, time: new Date().toISOString(), type: 'TRADE',
         message: `[BLOWOUT LIQUIDATION] Closed ${pos.symbol} (${pos.side}) due to bankroll depletion blowout reset.`
       });
-      tradingBrain.recordStrategyOutcome(pos, -0.5, 'Blowout Drawdown Liquidation');
+      tradingBrain.recordStrategyOutcome(pos, -1.0, 'Blowout Drawdown Liquidation');
     });
     activePositions = activePositions.filter(p => !settings.paperTrading);
 
@@ -5946,21 +5902,10 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
               ? `15-Minute Contract Lifespan Expiration Auto-Settlement (${Math.round(timeInContractSec)}s elapsed)`
               : `Market Expiration / Contract Settlement`;
 
-            // For expired binary event contracts, evaluate terminal settlement outcome
+            // For expired binary event contracts, exit at observable market bid (never synthesize binary payout from Coinbase spot)
             if (!isPerp) {
-              const spotPair = getSpotPairFromSymbol(pos.label || pos.symbol, pos.category);
-              const curSpot = scalper.currentCandles[spotPair]?.close || currentSidePrice;
-              let strikePrice = 0;
-              const strikeMatch = pos.symbol.match(/-B?([0-9.]+)(?:-|$)/) || (pos.label && pos.label.match(/\$?([0-9,.]+)/));
-              if (strikeMatch && strikeMatch[1]) {
-                strikePrice = parseFloat(strikeMatch[1].replace(/,/g, ''));
-              }
-              if (strikePrice > 0 && curSpot > 0) {
-                const isYesWinning = curSpot >= strikePrice;
-                const won = (pos.side === 'YES' && isYesWinning) || (pos.side === 'NO' && !isYesWinning);
-                const safeEntry = Math.max(0.01, Math.min(0.99, pos.entryPrice || 0.50));
-                pnlRatio = won ? (1.0 - safeEntry) / safeEntry : -1.0;
-              }
+              const safeEntry = Math.max(0.01, Math.min(0.99, pos.entryPrice || 0.50));
+              pnlRatio = (currentSidePrice - safeEntry) / safeEntry;
             }
           } else if (isPerpStagnant || isPerpHardCap) {
             shouldClose = true;
@@ -5995,11 +5940,11 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
           }
         }
       } else {
-        // Handle orphaned / unlisted position where ctx was detached
+        // Handle orphaned / unlisted position where ctx was detached (E-03: Never book at peak PnL!)
         if (timeInContractSec >= 60) {
           shouldClose = true;
-          pnlRatio = pos.peakPnlRatio || 0;
-          closeReason = `Orphaned Contract Expiration Auto-Settlement (${Math.round(timeInContractSec)}s elapsed)`;
+          pnlRatio = 0.0; // Book at zero mark, never peak PnL
+          closeReason = `Orphaned Contract Expiration Settlement (${Math.round(timeInContractSec)}s elapsed)`;
         }
       }
 
@@ -6008,18 +5953,18 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
           ? pos.capitalPlacedUsd
           : (pos.isPerpetual ? 5.0 : Math.min(pos.size * (pos.entryPrice || 0.50), 2000.0));
         
-        // FACTOR IN SLIPPAGE AND FEES
-        const averageSpreadAndFeeFriction = 0.02;
-        let effectiveExitRatio = pnlRatio;
-        if (closeReason.includes('Smart Trailing Stop Triggered') && pos.smartTrailing?.trailingFloorRatio) {
-          effectiveExitRatio = Math.max(pos.smartTrailing.trailingFloorRatio, pnlRatio);
-        } else if (closeReason.includes('Breakeven Ratchet SL')) {
-          effectiveExitRatio = Math.max(0.005, pnlRatio);
-        }
-        const adjustedPnlRatio = effectiveExitRatio - averageSpreadAndFeeFriction;
+        // E-02: Book exits at actual observable market bid, never artificially flooring above market gap
+        const effectiveExitRatio = pnlRatio;
+        
+        // E-06: Accurate quadratic exchange fees + slippage multiplied by size
+        const numContracts = Math.max(1, pos.size || 1);
+        const exitP = Math.max(0.01, Math.min(0.99, (pos.entryPrice || 0.50) * (1 + effectiveExitRatio)));
+        const entryFee = Math.ceil(0.07 * numContracts * (pos.entryPrice || 0.50) * (1.0 - (pos.entryPrice || 0.50)) * 100) / 100;
+        const exitFee = Math.ceil(0.07 * numContracts * exitP * (1.0 - exitP) * 100) / 100;
+        const totalFeesUsd = entryFee + exitFee;
         
         const leverage = pos.isPerpetual ? (pos.leverage || 2.0) : 1.0;
-        let pnlUsd = adjustedPnlRatio * positionCapitalCost * leverage;
+        let pnlUsd = (effectiveExitRatio * positionCapitalCost * leverage) - totalFeesUsd;
         
         // Realistic hard bounds to prevent balance runaway/inflation
         if (pnlUsd < -positionCapitalCost) {
@@ -6031,6 +5976,8 @@ async function evaluateActivePositions(isFastContinuousTick: boolean = false): P
         } else {
           pnlUsd = Math.min(positionCapitalCost * 10.0, pnlUsd);
         }
+        
+        const adjustedPnlRatio = positionCapitalCost > 0 ? (pnlUsd / positionCapitalCost) : pnlRatio;
         
         simulatedPaperBalance = Math.max(0, simulatedPaperBalance + pnlUsd);
         cycleEarnedProfit += pnlUsd;
@@ -6481,7 +6428,13 @@ setInterval(async () => {
       });
 
       for (const pos of altLongs) {
-        tradingBrain.recordStrategyOutcome(pos, -0.015, 'USDT_DOMINANCE_SPIKE_FORCE_CLOSE');
+        const ctx = spotContexts[pos.symbol];
+        const curPrice = ctx ? (pos.side === 'YES' ? (ctx.currentPrice || 0.45) : (1.0 - (ctx.currentPrice || 0.55))) : (pos.entryPrice || 0.50);
+        const actualRatio = ((curPrice - (pos.entryPrice || 0.50)) / Math.max(0.01, pos.entryPrice || 0.50));
+        const positionCost = (pos.capitalPlacedUsd && pos.capitalPlacedUsd > 0) ? pos.capitalPlacedUsd : ((pos.size || 1) * (pos.entryPrice || 0.50));
+        const pnl = actualRatio * positionCost;
+        simulatedPaperBalance = Math.max(0, simulatedPaperBalance + pnl);
+        tradingBrain.recordStrategyOutcome(pos, actualRatio, 'USDT_DOMINANCE_SPIKE_FORCE_CLOSE');
         activePositions = activePositions.filter(p => p.id !== pos.id);
         closedPositionCooldowns.set(pos.symbol, Date.now());
       }

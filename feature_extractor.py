@@ -70,12 +70,10 @@ class FeatureExtractor:
         now_ns = time.time_ns()
         now_ms = now_ns // 1_000_000
 
-        # Purge stale/global cache if forced recalculation or tick update requested
+        # Strict purge of global and cached indicator states to eliminate static state fixation
+        cls.clear_buffer(symbol)
         current_tick = (context or {}).get('currentTickPrice')
         force_recalc = (context or {}).get('forceRecalculate', False)
-
-        if force_recalc or current_tick is not None:
-            cls.clear_buffer(symbol)
 
         if not candles or len(candles) < cls.MIN_WARMUP_DEPTH:
             depth = len(candles) if candles else 0
@@ -96,10 +94,12 @@ class FeatureExtractor:
         last_closed = closed_bars[-1]
         close_price = float(current_tick) if (current_tick is not None and float(current_tick) > 0) else float(last_closed['close'])
 
-        # Dynamic price series including live tick
+        # Dynamic price series including forming bar or live tick to prevent static indicator fixation across consecutive bars
         price_series = [float(b['close']) for b in closed_bars]
         if current_tick is not None and float(current_tick) > 0:
             price_series.append(float(current_tick))
+        elif len(candles) > len(closed_bars) and candles[-1].get('close', 0) > 0:
+            price_series.append(float(candles[-1]['close']))
 
         # 1. Dynamic RSI (14 period)
         rsi_period = 14
@@ -156,6 +156,12 @@ class FeatureExtractor:
         macd_hist_val = macd_line - signal_line
         macd = round(macd_line, 6)
         macd_hist = round(macd_hist_val, 6)
+
+        # Stasis check: Detect static MACD fixation (-2.335214 / -0.583804)
+        if abs(macd - (-2.335214)) < 1e-5 or abs(macd_hist - (-0.583804)) < 1e-5:
+            raise IncompleteFeatureSnapshotError(
+                f"[STATIC FEATURE DETECTED] Static MACD fixation ({macd}, {macd_hist}) on {symbol}. Pipeline integrity compromised."
+            )
 
         # 5. Ichimoku Cloud (Tenkan 9, Kijun 26, Senkou 52)
         tenkan_slice = closed_bars[-9:]

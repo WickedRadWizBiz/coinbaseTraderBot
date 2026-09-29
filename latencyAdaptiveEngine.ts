@@ -284,9 +284,8 @@ class LatencyAdaptiveEngine {
       if (profile.isUltraLowLatency) {
         adjustedPrice = basePrice; // Exact resting price snipe
       } else {
-        adjustedPrice = side === 'YES' 
-          ? Math.min(0.98, Number((basePrice + 0.01).toFixed(2)))
-          : Math.max(0.02, Number((basePrice - 0.01).toFixed(2)));
+        // Realistic tolerance: Never artificially discount entry price below market
+        adjustedPrice = basePrice;
       }
     }
 
