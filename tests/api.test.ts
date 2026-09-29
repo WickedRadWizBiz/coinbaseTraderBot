@@ -25,3 +25,21 @@ test('every protected route requires the bearer token and locks out brute force'
     server.close();
   }
 });
+
+test('spot book service parses Coinbase L2, caches, and surfaces errors', async () => {
+  const { SpotBookService } = await import('../bot/marketdata/spotBook');
+  let calls = 0;
+  const fake = (async (url: string) => {
+    calls++;
+    if (String(url).includes('BAD-USD')) return new Response('nope', { status: 404 });
+    return new Response(JSON.stringify({ bids: [['64000.10', '0.5', 3], ['63999.00', 'x', 1]], asks: [['64000.50', '1.25', 2]] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const svc = new SpotBookService('https://example.test', 60_000, 50, fake);
+  const b = await svc.get('btc');
+  assert.equal(b.product, 'BTC-USD');
+  assert.deepEqual(b.bids, [{ price: 64000.1, size: 0.5 }]);
+  assert.deepEqual(b.asks, [{ price: 64000.5, size: 1.25 }]);
+  await svc.get('BTC');
+  assert.equal(calls, 1, 'cached');
+  await assert.rejects(svc.get('BAD'), /404/);
+});

@@ -1,5 +1,16 @@
+import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { App } from './App';
-import './styles.css';
+import App from './App';
+import './index.css';
 
-createRoot(document.getElementById('root')!).render(<App />);
+// Purge service workers/caches left by the previous PWA build.
+try {
+  navigator.serviceWorker?.getRegistrations().then((rs) => rs.forEach((r) => r.unregister().catch(() => {}))).catch(() => {});
+  if ('caches' in window) caches.keys().then((ks) => ks.forEach((k) => caches.delete(k).catch(() => {}))).catch(() => {});
+} catch { /* sandboxed */ }
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);

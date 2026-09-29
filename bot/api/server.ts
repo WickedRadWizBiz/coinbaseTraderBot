@@ -21,6 +21,7 @@ import type { Reconciler } from '../recon/reconciler';
 import type { MetaModel } from '../model/metaModel';
 import type { Tca } from '../tca/tca';
 import type { MarketData } from '../marketdata/marketData';
+import { SpotBookService } from '../marketdata/spotBook';
 
 export interface ApiDeps {
   cfg: Readonly<Config>;
@@ -33,6 +34,7 @@ export interface ApiDeps {
   tca: Tca;
   md: MarketData;
   startedAt: number;
+  spotBooks?: SpotBookService;
 }
 
 export function tokenMatches(expected: string, provided: string | undefined): boolean {
@@ -74,7 +76,7 @@ export function createApi(d: ApiDeps): express.Express {
       'X-Frame-Options': 'DENY',
       'Referrer-Policy': 'no-referrer',
       'Cache-Control': 'no-store',
-      'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'",
+      'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
     });
     next();
   });
@@ -115,6 +117,44 @@ export function createApi(d: ApiDeps): express.Express {
   });
 
   api.get('/tca', (_req, res) => res.json(d.tca.summary()));
+
+  // Depth view: the contract's YES book as the bot sees it.
+  api.get('/order-book/:ticker', (req, res) => {
+    const ticker = req.params.ticker;
+    const book = d.md.books.get(ticker);
+    const m = d.md.markets.get(ticker);
+    if (!book || !m) {
+      res.status(404).json({ error: 'unknown market' });
+      return;
+    }
+    const st = d.engine.status.get(ticker);
+    res.json({
+      asset: m.asset,
+      closeTs: m.closeTime,
+      usable: book.isUsable(Date.now(), d.cfg.risk.maxBookAgeMs),
+      ...book.snapshot(25),
+      fairValue: st?.fairValue ?? null,
+      pYes: st?.pYes ?? null,
+      position: d.oms.positions.position(ticker),
+    });
+  });
+
+  // Depth view: the matching spot USD pair (display only) plus the settlement index.
+  const spotBooks = d.spotBooks ?? new SpotBookService();
+  api.get('/spot-book/:ticker', async (req, res) => {
+    const m = d.md.markets.get(req.params.ticker);
+    if (!m) {
+      res.status(404).json({ error: 'unknown market' });
+      return;
+    }
+    const idx = d.md.index.get(m.asset)?.latest();
+    try {
+      const book = await spotBooks.get(m.asset);
+      res.json({ ...book, index: idx?.value ?? null, indexTs: idx?.ts ?? null, indexSource: d.md.indexSource, strike: m.strike ?? null });
+    } catch (e) {
+      res.status(502).json({ error: (e as Error).message, product: `${m.asset}-USD`, index: idx?.value ?? null, strike: m.strike ?? null });
+    }
+  });
 
   api.get('/audit', (req, res) => {
     const limit = Math.min(500, Number(req.query.limit) || 100);

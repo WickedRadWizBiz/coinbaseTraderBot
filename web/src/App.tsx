@@ -1,186 +1,171 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { Brain, LayoutDashboard, LogOut, TerminalSquare } from 'lucide-react';
+import { getToken, setToken } from './api';
+import { DashboardView } from './components/DashboardView';
+import { MetalBackground } from './components/MetalBackground';
+import { ModelView } from './components/ModelView';
+import { TelemetryView } from './components/TelemetryView';
+import { useTradeShake } from './useTradeShake';
 
-type Json = any;
-const TOKEN_KEY = 'bot-console-token';
+type ViewType = 'dashboard' | 'model' | 'telemetry';
 
-function getToken(): string {
-  try { return sessionStorage.getItem(TOKEN_KEY) ?? ''; } catch { return ''; }
-}
+const SystemLEDs = () => {
+  const [active, setActive] = useState(false);
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const onTrade = () => {
+      setActive(true);
+      clearTimeout(timer);
+      timer = setTimeout(() => setActive(false), 2000);
+    };
+    window.addEventListener('trade_executed', onTrade);
+    return () => { window.removeEventListener('trade_executed', onTrade); clearTimeout(timer); };
+  }, []);
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout>;
+    const id = setInterval(() => {
+      if (Math.random() > 0.7) {
+        setActive(true);
+        clearTimeout(t);
+        t = setTimeout(() => setActive(false), Math.random() * 500 + 200);
+      }
+    }, 3000);
+    return () => { clearInterval(id); clearTimeout(t); };
+  }, []);
+  return (
+    <div className="flex gap-2">
+      <div className={`w-3 h-3 border border-[#6b7280] shadow-[inset_0_1px_2px_rgba(0,0,0,0.1),0_1px_1px_rgba(255,255,255,0.4)] ${active ? 'bg-crypto-primary shadow-[0_0_12px_var(--color-crypto-primary)] animate-[led-flicker_0.1s_infinite]' : 'bg-[#f3f4f6] opacity-80'}`}></div>
+      <div className={`w-3 h-3 border border-[#6b7280] shadow-[inset_0_1px_2px_rgba(0,0,0,0.1),0_1px_1px_rgba(255,255,255,0.4)] ${active ? 'bg-crypto-danger shadow-[0_0_12px_var(--color-crypto-danger)] animate-[led-flicker_0.15s_infinite]' : 'bg-[#f3f4f6] opacity-80'}`}></div>
+      <div className="w-3 h-3 border border-[#6b7280] shadow-[inset_0_1px_2px_rgba(0,0,0,0.1),0_1px_1px_rgba(255,255,255,0.4)] bg-crypto-success shadow-[0_0_8px_var(--color-crypto-success)] animate-[led-flicker_3s_infinite]"></div>
+    </div>
+  );
+};
 
-async function api(path: string, token: string, init?: RequestInit): Promise<Json> {
-  const res = await fetch(`/api${path}`, {
-    ...init,
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  });
-  if (res.status === 401) throw new Error('unauthorized');
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-  return body;
-}
+const NAV: Array<{ id: ViewType; label: string; short: string; Icon: typeof LayoutDashboard }> = [
+  { id: 'dashboard', label: 'Dashboard', short: 'Dash', Icon: LayoutDashboard },
+  { id: 'model', label: 'Strategy Brain', short: 'Brain', Icon: Brain },
+  { id: 'telemetry', label: 'Telemetry', short: 'Logs', Icon: TerminalSquare },
+];
 
-const usd = (x: number | null | undefined) => (x === null || x === undefined ? '—' : `${x < 0 ? '-' : ''}$${Math.abs(x).toFixed(2)}`);
-const pct = (x: number | null | undefined) => (x === null || x === undefined ? '—' : `${(x * 100).toFixed(1)}%`);
-const px = (x: number | null | undefined) => (x === null || x === undefined ? '—' : x.toFixed(2));
-const time = (ts: number) => new Date(ts).toLocaleTimeString();
-
-export function App() {
-  const [token, setToken] = useState(getToken());
+function Login() {
   const [draft, setDraft] = useState('');
-  const [data, setData] = useState<{ status?: Json; markets?: Json[]; positions?: Json[]; orders?: Json[]; tca?: Json; audit?: Json[] }>({});
-  const [error, setError] = useState('');
+  return (
+    <div className="flex items-center justify-center min-h-[70vh] w-full">
+      <form
+        className="crt-grid-panel w-full max-w-md flex flex-col gap-4 p-6 text-crypto-primary font-mono text-sm tracking-wider"
+        onSubmit={(e) => { e.preventDefault(); setToken(draft.trim()); }}
+      >
+        <div className="absolute inset-0 heavy-dither-overlay pointer-events-none" />
+        <div className="relative z-10 flex flex-col gap-4">
+          <h3 className="font-bold tracking-[0.2em] text-lg uppercase text-crypto-text border-b border-crypto-primary pb-2">&gt; Secure Access</h3>
+          <p className="text-xs opacity-80 normal-case">Enter the dashboard token (DASHBOARD_TOKEN). It is kept only for this browser tab.</p>
+          <input
+            type="password"
+            autoComplete="off"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="TOKEN"
+            className="crt-border bg-black/50 px-3 py-2 text-crypto-text outline-none focus:border-crypto-danger"
+          />
+          <button type="submit" className="mech-key self-start">Connect</button>
+        </div>
+      </form>
+    </div>
+  );
+}
 
-  const refresh = useCallback(async () => {
-    if (!token) return;
-    try {
-      const [status, markets, positions, orders, tca, audit] = await Promise.all([
-        api('/status', token), api('/markets', token), api('/positions', token), api('/orders?limit=50', token), api('/tca', token), api('/audit?limit=40', token),
-      ]);
-      setData({ status, markets, positions, orders, tca, audit });
-      setError('');
-    } catch (e) {
-      const msg = (e as Error).message;
-      if (msg === 'unauthorized') { try { sessionStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ } setToken(''); }
-      setError(msg);
-    }
-  }, [token]);
+export default function App() {
+  const [view, setView] = useState<ViewType>('dashboard');
+  const [token, setTok] = useState(getToken());
+  const isShaking = useTradeShake();
 
   useEffect(() => {
-    void refresh();
-    const id = setInterval(() => void refresh(), 2000);
-    return () => clearInterval(id);
-  }, [refresh]);
+    const onChange = () => setTok(getToken());
+    window.addEventListener('token_changed', onChange);
+    return () => window.removeEventListener('token_changed', onChange);
+  }, []);
 
-  if (!token) {
-    return (
-      <main>
-        <h1>Bot Console</h1>
-        <p className="muted">Enter the dashboard token (DASHBOARD_TOKEN). It is kept only for this browser tab.</p>
-        <form className="row" onSubmit={(e) => { e.preventDefault(); try { sessionStorage.setItem(TOKEN_KEY, draft); } catch { /* ignore */ } setToken(draft); }}>
-          <input type="password" autoComplete="off" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="token" />
-          <button type="submit">Connect</button>
-        </form>
-        {error && <p className="bad">{error}</p>}
-      </main>
-    );
-  }
-
-  const s = data.status;
-  const kill = async () => {
-    const reason = prompt('Engage kill switch: cancels all orders and blocks new ones. Reason?');
-    if (reason === null) return;
-    await api('/kill', token, { method: 'POST', body: JSON.stringify({ reason: reason || 'manual' }) }).catch((e) => setError(e.message));
-    void refresh();
-  };
-  const reset = async () => {
-    const confirm = prompt('Type RESET KILL SWITCH to re-enable trading.');
-    if (confirm === null) return;
-    await api('/kill/reset', token, { method: 'POST', body: JSON.stringify({ confirm }) }).catch((e) => setError(e.message));
-    void refresh();
-  };
+  const navBtn = (id: ViewType, label: string, Icon: typeof LayoutDashboard) => (
+    <button
+      key={id}
+      onClick={() => setView(id)}
+      className={`flex items-center gap-3 px-4 py-3 transition font-medium crt-border ${view === id ? 'bg-crypto-danger text-crypto-text' : 'text-crypto-primary hover:bg-[#1a0208]'}`}
+    >
+      <Icon className="w-5 h-5" />
+      <span className="tracking-widest text-sm uppercase">{label}</span>
+    </button>
+  );
 
   return (
-    <main>
-      <header>
-        <h1>Bot Console {s && <span className="muted">· {s.mode.toUpperCase()} · {s.kalshiEnv}</span>}</h1>
-        <div className="row">
-          {s?.kill?.engaged ? <button onClick={reset}>Reset kill switch</button> : <button className="danger" onClick={kill}>Kill switch</button>}
-        </div>
-      </header>
-      {error && <div className="banner">Error: {error}</div>}
-      {s?.kill?.engaged && <div className="banner">KILL SWITCH ENGAGED ({s.kill.source}): {s.kill.reason} — since {s.kill.engagedAt}</div>}
-      {s && s.haltReasons.length > 0 && !s.kill.engaged && <div className="banner">New risk halted: {s.haltReasons.join('; ')}</div>}
+    <div className="relative min-h-screen w-full flex flex-col md:flex-row text-crypto-text overflow-x-hidden bg-[#111]">
+      <MetalBackground />
 
-      {s && (
-        <div className="grid">
-          <div className="card"><div className="label">Daily PnL (net of fees)</div><div className={`value ${s.dailyPnl < 0 ? 'bad' : 'ok'}`}>{usd(s.dailyPnl)}</div><div className="label">limit {usd(-s.dailyLossLimit)}</div></div>
-          <div className="card"><div className="label">Balance / bankroll</div><div className="value">{usd(s.balance)}</div><div className="label">bankroll {usd(s.bankroll)}</div></div>
-          <div className="card"><div className="label">Reconciliation</div><div className={`value ${s.recon?.ok ? 'ok' : 'bad'}`}>{s.recon ? (s.recon.ok ? 'clean' : 'BREAK') : '—'}</div><div className="label">{s.recon ? time(s.recon.ts) : ''}</div></div>
-          <div className="card"><div className="label">Model</div><div className="value" style={{ fontSize: 14 }}>{s.model.id}</div><div className={`label ${s.model.liveBlockers.length ? 'warn' : 'ok'}`}>{s.model.liveBlockers.length ? `not live-validated (${s.model.liveBlockers.length})` : 'validated'}</div></div>
-          <div className="card"><div className="label">Data</div><div className="value" style={{ fontSize: 14 }}>index: {s.indexSource}</div><div className="label">ws {s.wsConnected ? 'connected' : 'off'} · order errors {s.consecutiveOrderErrors}</div></div>
-        </div>
+      <div className={`flex-1 flex flex-col md:flex-row w-full relative z-10 ${isShaking ? 'is-shaking' : ''}`}>
+        <aside className="hidden md:flex flex-col w-64 shrink-0 h-screen sticky top-0 border-r-2 border-[#1f2937]/30 shadow-[4px_0_12px_rgba(0,0,0,0.5)] p-4 bg-transparent z-20">
+          <div className="flex justify-between items-start mb-4 px-2 relative z-10 w-full">
+            <div className="flex flex-col gap-4">
+              <div className="inline-block transform -rotate-1 w-[50vw] md:w-[50%]">
+                <img src="/nostratech.png?v=transparent" alt="NOSTRATECH" className="w-full h-auto object-contain" />
+              </div>
+              <p className="text-crypto-danger text-[9px] font-bold tracking-widest leading-tight uppercase pl-1 no-glow">
+                Ultra-Intelligent<br />Qualitative<br />Predictions Runner
+              </p>
+            </div>
+            <SystemLEDs />
+          </div>
+          <nav className="flex flex-col gap-4 flex-1 mt-4" id="main-nav">
+            {NAV.map((n) => navBtn(n.id, n.label, n.Icon))}
+            {token && (
+              <button
+                onClick={() => setToken('')}
+                className="flex items-center gap-3 px-4 py-3 transition font-medium crt-border border border-crypto-danger/50 text-crypto-danger hover:bg-crypto-danger hover:text-white mt-auto font-bold uppercase tracking-widest text-xs"
+              >
+                <LogOut className="w-4 h-4" />
+                <span>Lock Console</span>
+              </button>
+            )}
+          </nav>
+        </aside>
+
+        <main className="flex-1 p-3 sm:p-4 md:p-8 pb-28 md:pb-8 relative z-10 w-full max-w-full overflow-x-hidden">
+          <header className="md:hidden flex justify-between items-start gap-2 mb-3 px-1 relative z-10">
+            <div className="flex flex-col gap-1">
+              <div className="inline-block transform -rotate-1 w-[45vw] max-w-[180px]">
+                <img src="/nostratech.png?v=transparent" alt="NOSTRATECH" className="w-full h-auto object-contain" />
+              </div>
+              <p className="text-crypto-danger text-[8px] font-bold tracking-widest leading-tight uppercase pl-0.5 no-glow">
+                Ultra-Intelligent Qualitative Predictions Runner
+              </p>
+            </div>
+            <SystemLEDs />
+          </header>
+
+          {!token ? <Login /> : (
+            <>
+              {view === 'dashboard' && <DashboardView />}
+              {view === 'model' && <ModelView />}
+              {view === 'telemetry' && <TelemetryView />}
+            </>
+          )}
+        </main>
+      </div>
+
+      {token && (
+        <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#121212]/95 backdrop-blur-md border-t border-crypto-primary/50 px-2 py-1.5 flex items-center justify-around shadow-[0_-4px_20px_rgba(0,0,0,0.9)]">
+          {NAV.map(({ id, short, Icon }) => (
+            <button
+              key={id}
+              onClick={() => setView(id)}
+              className={`flex flex-col items-center justify-center py-1 px-2.5 rounded transition-all min-w-[56px] min-h-[44px] ${
+                view === id ? 'text-white bg-crypto-danger/30 border border-crypto-danger shadow-[0_0_10px_rgba(255,59,48,0.3)]' : 'text-crypto-primary/70 hover:text-crypto-primary'
+              }`}
+            >
+              <Icon className="w-5 h-5 mb-0.5" />
+              <span className="text-[10px] tracking-wider font-bold uppercase">{short}</span>
+            </button>
+          ))}
+        </nav>
       )}
-
-      <section>
-        <h2>Markets</h2>
-        <table>
-          <thead><tr><th>Ticker</th><th>Close</th><th>Spot</th><th>Strike</th><th>Fair value</th><th>Model p</th><th>Bid</th><th>Ask</th><th>Pos</th><th>State</th></tr></thead>
-          <tbody>
-            {(data.markets ?? []).map((m) => (
-              <tr key={m.ticker}>
-                <td><code>{m.ticker}</code></td><td>{time(m.closeTs)}</td><td>{m.spot?.toFixed(2) ?? '—'}</td>
-                <td>{m.strike?.toFixed(2) ?? '—'} <span className="muted">{m.strikeSource === 'computed' ? '(ours)' : ''}</span></td>
-                <td>{pct(m.fairValue)}</td><td>{pct(m.pYes)}</td><td>{px(m.bestBid)}</td><td>{px(m.bestAsk)}</td><td>{m.position}</td>
-                <td className={m.blocked ? 'warn' : 'muted'}>{m.blocked ?? (m.notes.join('; ') || 'ok')}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-
-      <section>
-        <h2>Positions</h2>
-        <table>
-          <thead><tr><th>Ticker</th><th>YES</th><th>Fees</th><th>If YES</th><th>If NO</th><th>Max loss</th><th>Settled</th><th>Realized</th></tr></thead>
-          <tbody>
-            {(data.positions ?? []).slice(0, 30).map((p) => (
-              <tr key={p.ticker}>
-                <td><code>{p.ticker}</code></td><td>{p.yes}</td><td>{usd(p.fees)}</td><td>{usd(p.scenario.ifYes)}</td><td>{usd(p.scenario.ifNo)}</td>
-                <td>{usd(p.maxLoss)}</td><td>{p.settled ? p.result : '—'}</td><td className={(p.realized ?? 0) < 0 ? 'bad' : 'ok'}>{p.settled ? usd(p.realized) : '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-
-      <section>
-        <h2>Orders</h2>
-        <table>
-          <thead><tr><th>Time</th><th>Ticker</th><th>Side</th><th>Price</th><th>Count</th><th>Filled</th><th>Purpose</th><th>State</th><th>FV</th></tr></thead>
-          <tbody>
-            {(data.orders ?? []).map((o) => (
-              <tr key={o.clientOrderId}>
-                <td>{time(o.createdTs)}</td><td><code>{o.ticker}</code></td><td>{o.side}</td><td>{px(o.price)}</td><td>{o.count}</td><td>{o.filledCount}</td>
-                <td>{o.purpose}{o.postOnly ? ' · post' : ''}{o.reduceOnly ? ' · reduce' : ''}</td><td>{o.state}</td><td>{pct(o.fairValue)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-
-      {data.tca && (
-        <section>
-          <h2>Execution quality (TCA)</h2>
-          <table>
-            <thead><tr><th></th><th>Fills</th><th>Contracts</th><th>Fees</th><th>Edge at decision</th><th>Markout 5s</th><th>30s</th><th>60s</th></tr></thead>
-            <tbody>
-              {(['maker', 'taker'] as const).map((k) => {
-                const b = data.tca[k];
-                return (
-                  <tr key={k}>
-                    <td>{k}</td><td>{b.fills}</td><td>{b.contracts.toFixed(2)}</td><td>{usd(b.fees)}</td>
-                    <td>{b.avgEdgeAtDecision === null ? '—' : `${(b.avgEdgeAtDecision * 100).toFixed(2)}¢`}</td>
-                    {(['avgMarkout5s', 'avgMarkout30s', 'avgMarkout60s'] as const).map((h) => (
-                      <td key={h} className={b[h] !== null && b[h] < 0 ? 'bad' : ''}>{b[h] === null ? '—' : `${(b[h] * 100).toFixed(2)}¢`}</td>
-                    ))}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </section>
-      )}
-
-      <section>
-        <h2>Audit log</h2>
-        <table>
-          <thead><tr><th>#</th><th>Time</th><th>Kind</th><th>Detail</th></tr></thead>
-          <tbody>
-            {(data.audit ?? []).slice().reverse().map((a) => (
-              <tr key={a.seq}><td>{a.seq}</td><td>{new Date(a.ts).toLocaleTimeString()}</td><td>{a.kind}</td><td className="muted"><code>{JSON.stringify(a.data).slice(0, 140)}</code></td></tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-    </main>
+    </div>
   );
 }
