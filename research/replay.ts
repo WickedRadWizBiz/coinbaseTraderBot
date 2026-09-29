@@ -38,6 +38,8 @@ export class ReplayState {
   readonly index = new Map<string, IndexTracker>();
   readonly results = new Map<string, 'yes' | 'no'>();
   readonly spot = new Map<string, IndexTracker>();
+  readonly usdtd = new IndexTracker('USDT.D', 90 * 60_000, 300);
+  readonly btcd = new IndexTracker('BTC.D', 90 * 60_000, 300);
   /** Same feature state machine production uses (MarketData.features). */
   readonly features = new FeatureHub();
   now = 0;
@@ -54,6 +56,10 @@ export class ReplayState {
         tr.add(e.value, e.ts ?? e.t);
         break;
       }
+      case 'dominance':
+        this.usdtd.add(e.usdtd, e.ts ?? e.t);
+        this.btcd.add(e.btcd, e.ts ?? e.t);
+        break;
       case 'spot': {
         let tr = this.spot.get(e.asset);
         if (!tr) { tr = new IndexTracker(e.asset); this.spot.set(e.asset, tr); }

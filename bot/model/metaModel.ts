@@ -18,7 +18,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import { FEATURES, vectorFor } from './featureEngine';
 import { FEATURE_NAMES } from './features';
-import { clamp, sigmoid } from '../util/num';
+import { clamp, logit, sigmoid } from '../util/num';
 
 export type Activation = 'tanh' | 'relu' | 'linear';
 
@@ -122,6 +122,36 @@ export class MetaModel {
     const cal = p.calibration ?? { a: 1, b: 0 };
     return clamp(sigmoid(cal.a * z + cal.b), 1e-4, 1 - 1e-4);
   }
+}
+
+export interface Driver {
+  feature: string;
+  value: number;
+  /** Change in log-odds of P(YES) attributable to this feature vs its training mean. */
+  logitContribution: number;
+}
+
+export interface Explanation {
+  /** logit(model P) - logit(fair value): how far the model moved off the physics price. */
+  shiftFromFairValue: number;
+  drivers: Driver[];
+}
+
+/** Occlusion attribution: replace one feature at a time with its training mean. */
+export function explain(model: MetaModel, featureMap: Record<string, number>, fairValue: number, top = 6): Explanation {
+  const p = model.predict(featureMap, fairValue);
+  const shift = logit(p) - logit(fairValue);
+  if (model.params.kind === 'identity') return { shiftFromFairValue: 0, drivers: [] };
+  const drivers: Driver[] = [];
+  for (const f of model.params.features) {
+    if (f === 'logit_fv') continue;
+    const v = featureMap[f];
+    if (!Number.isFinite(v)) continue;
+    const q = model.predict({ ...featureMap, [f]: NaN }, fairValue);
+    drivers.push({ feature: f, value: v, logitContribution: logit(p) - logit(q) });
+  }
+  drivers.sort((a, b) => Math.abs(b.logitContribution) - Math.abs(a.logitContribution));
+  return { shiftFromFairValue: shift, drivers: drivers.slice(0, top) };
 }
 
 export function forward(layer: DenseLayer, x: number[]): number[] {

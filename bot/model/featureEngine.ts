@@ -10,13 +10,14 @@
 //
 // Not ported (no testable basis for a 15-minute binary, or data we don't
 // have): macro goal progress, smart-trailing state, latency, funding rate,
-// pattern/confluence labels, USDT dominance, exit-liquidity heuristics.
+// hand-set pattern labels, exit-liquidity heuristics. USDT.D/BTC.D and
+// confluence are included as learned inputs (macro / confluence groups).
 
 import type { OrderBook } from '../marketdata/orderBook';
 import type { IndexTracker } from '../marketdata/indexTracker';
 import { clamp, logit } from '../util/num';
 
-export type FeatureGroup = 'base' | 'micro' | 'momentum' | 'spot' | 'time';
+export type FeatureGroup = 'base' | 'micro' | 'momentum' | 'spot' | 'macro' | 'confluence' | 'time';
 
 // ---- Per-market microstructure state ----------------------------------------
 
@@ -94,10 +95,15 @@ export interface FeatureContext {
   micro?: MicroTracker;
   index: IndexTracker;
   spot?: IndexTracker;
+  /** Underlying asset symbol (BTC, ETH, ...). */
+  asset?: string;
+  /** USDT.D and BTC.D trackers (percent). */
+  usdtd?: IndexTracker;
+  btcd?: IndexTracker;
 }
 
 type Fn = (c: FeatureContext, cache: Cache) => number;
-interface Cache { idx: Map<number, number[] | undefined>; spot: Map<number, number[] | undefined> }
+interface Cache { idx: Map<number, number[] | undefined>; spot: Map<number, number[] | undefined>; memo: Map<string, number> }
 
 const NA = NaN;
 const clip = (x: number, lim = 10) => (Number.isFinite(x) ? clamp(x, -lim, lim) : NA);
@@ -121,6 +127,59 @@ function ema(xs: number[], n: number): number[] {
   for (const x of xs) { e = a * x + (1 - a) * e; out.push(e); }
   return out;
 }
+const memo = (k: Cache, key: string, f: () => number): number => {
+  if (!k.memo.has(key)) k.memo.set(key, f());
+  return k.memo.get(key)!;
+};
+
+/** Sigma-scaled log change of a dominance series over `sec` seconds. */
+const domZ = (tr: IndexTracker | undefined, c: FeatureContext, sec: number): number => {
+  if (!tr) return NA;
+  const s = tr.series(c.now, sec, 10_000);
+  const v = tr.vol(120);
+  if (!s || !v || !(v.sigmaPerSqrtSec > 0)) return NA;
+  return clip(Math.log(s[s.length - 1] / s[0]) / (v.sigmaPerSqrtSec * Math.sqrt(sec)));
+};
+
+/** Deviation of the latest value from its trailing-hour mean, in standard deviations. */
+const levelDev = (tr: IndexTracker | undefined, c: FeatureContext): number => {
+  if (!tr) return NA;
+  const s = tr.series(c.now, 3600, 10_000);
+  if (!s) return NA;
+  const m = s.reduce((a, b) => a + b, 0) / s.length;
+  const sd = Math.sqrt(s.reduce((a, b) => a + (b - m) ** 2, 0) / s.length);
+  return sd > 0 ? clip((s[s.length - 1] - m) / sd) : 0;
+};
+
+/** RSI(14) on one-minute closes of the settlement index, scaled to [-1, 1] (oversold < 0). */
+const rsi14x1m = (c: FeatureContext, k: Cache): number => memo(k, 'rsi14', () => {
+  const s = series(c, k, 15 * 60);
+  if (!s) return NA;
+  const closes = s.filter((_, i) => i % 60 === 0);
+  let up = 0, dn = 0;
+  for (let i = 1; i < closes.length; i++) { const d = closes[i] - closes[i - 1]; if (d > 0) up += d; else dn -= d; }
+  return up + dn > 0 ? (100 - 100 / (1 + up / Math.max(1e-12, dn)) - 50) / 50 : 0;
+});
+
+// Oriented macro factors: positive = bullish for THIS contract's underlying.
+const riskOn5m = (c: FeatureContext, k: Cache) => memo(k, 'riskOn5m', () => -domZ(c.usdtd, c, 300));     // USDT.D falling
+const btcdRel5m = (c: FeatureContext, k: Cache) => memo(k, 'btcdRel5m', () => {
+  const z = domZ(c.btcd, c, 300);
+  return (c.asset ?? 'BTC') === 'BTC' ? z : -z;                                                        // BTC.D rising helps BTC, falling helps alts
+});
+const mom = (sec: number) => (c: FeatureContext, k: Cache) => memo(k, `mom${sec}`, () => retZ(sec)(c, k));
+
+/**
+ * Confluence: non-zero only when every factor points the same way; signed by
+ * that direction; magnitude is the geometric mean of the factor strengths.
+ */
+export function agree(...xs: number[]): number {
+  if (xs.some((x) => !Number.isFinite(x))) return NA;
+  const sgn = Math.sign(xs[0]);
+  if (sgn === 0 || xs.some((x) => Math.sign(x) !== sgn)) return 0;
+  return sgn * Math.exp(xs.reduce((a, x) => a + Math.log(Math.abs(x)), 0) / xs.length);
+}
+
 const midRange = (sec: number): Fn => (c, k) => {
   const s = series(c, k, sec);
   if (!s) return NA;
@@ -216,6 +275,7 @@ export const FEATURES: Record<string, { group: FeatureGroup; description: string
     const rv = Math.sqrt(ss / (s.length - 1));
     return rv > 0 ? clip(Math.log(rv / c.sigmaPerSqrtSec), 5) : -5;
   } },
+  rsi_14_1m: { group: 'momentum', description: 'RSI(14) on 1-minute index closes, (rsi-50)/50', fn: (c, k) => rsi14x1m(c, k) },
   tenkan_dist: { group: 'momentum', description: 'distance to 9-min midrange (Ichimoku tenkan), sigma-scaled', fn: midRange(540) },
   kijun_dist: { group: 'momentum', description: 'distance to 26-min midrange (Ichimoku kijun), sigma-scaled', fn: midRange(1560) },
 
@@ -232,6 +292,30 @@ export const FEATURES: Record<string, { group: FeatureGroup; description: string
     return clip((Math.log(sp[sp.length - 1] / sp[0]) - Math.log(ix[ix.length - 1] / ix[0])) / (c.sigmaPerSqrtSec * Math.sqrt(10)));
   } },
 
+  // Macro: USDT.D / BTC.D via Binance prices anchored to CoinGecko (old: usdtDominance locks, now a learned input).
+  usdtd_ret_5m_z: { group: 'macro', description: 'USDT.D 5-min change, sigma-scaled (negative = risk-on)', fn: (c) => domZ(c.usdtd, c, 300) },
+  usdtd_ret_15m_z: { group: 'macro', description: 'USDT.D 15-min change, sigma-scaled', fn: (c) => domZ(c.usdtd, c, 900) },
+  usdtd_level_dev_1h: { group: 'macro', description: 'USDT.D vs its 1-hour mean, in std devs', fn: (c) => levelDev(c.usdtd, c) },
+  btcd_ret_5m_z: { group: 'macro', description: 'BTC.D 5-min change, sigma-scaled', fn: (c) => domZ(c.btcd, c, 300) },
+  btcd_ret_15m_z: { group: 'macro', description: 'BTC.D 15-min change, sigma-scaled', fn: (c) => domZ(c.btcd, c, 900) },
+  btcd_level_dev_1h: { group: 'macro', description: 'BTC.D vs its 1-hour mean, in std devs', fn: (c) => levelDev(c.btcd, c) },
+  btcd_rel_5m_z: { group: 'macro', description: 'BTC.D 5-min change oriented to the asset (+ for BTC, - for alts)', fn: (c, k) => btcdRel5m(c, k) },
+
+  // Confluence: explicit agreement between independent factors. Weights are LEARNED
+  // offline (never hand-set); a factor set that agrees raises or lowers P(YES)
+  // only as much as validation supports, which then scales edge, size and aggressiveness.
+  conf_riskon_momentum: { group: 'confluence', description: 'USDT.D falling AND index rising (or the bearish mirror)', fn: (c, k) => agree(riskOn5m(c, k), mom(300)(c, k)) },
+  conf_riskon_momentum_rsi: { group: 'confluence', description: 'USDT.D falling AND index rising AND RSI(14,1m) oversold (or mirror)', fn: (c, k) => agree(riskOn5m(c, k), mom(60)(c, k), -3 * rsi14x1m(c, k)) },
+  conf_btcd_momentum: { group: 'confluence', description: 'BTC.D favouring this asset AND index rising (or mirror)', fn: (c, k) => agree(btcdRel5m(c, k), mom(300)(c, k)) },
+  conf_macro_pair: { group: 'confluence', description: 'USDT.D and asset-oriented BTC.D agree', fn: (c, k) => agree(riskOn5m(c, k), btcdRel5m(c, k)) },
+  conf_riskon_orderflow: { group: 'confluence', description: 'USDT.D falling AND Kalshi order flow buying YES (or mirror)', fn: (c, k) => agree(riskOn5m(c, k), FEATURES.ofi_30s.fn(c, k)) },
+  conf_count: { group: 'confluence', description: 'bullish minus bearish factors with |z| > 1 (macro, momentum, RSI, order flow, spot lead)', fn: (c, k) => {
+    const factors = [riskOn5m(c, k), btcdRel5m(c, k), mom(60)(c, k), mom(300)(c, k), -3 * rsi14x1m(c, k), FEATURES.ofi_30s.fn(c, k), FEATURES.spot_lead_10s_z.fn(c, k)];
+    const avail = factors.filter(Number.isFinite);
+    if (avail.length < 3) return NA;
+    return avail.reduce((a, x) => a + (x > 1 ? 1 : x < -1 ? -1 : 0), 0);
+  } },
+
   // Time (old: hourOfDay, dayOfWeek, tradingSession).
   hour_sin: { group: 'time', description: 'sin(UTC hour)', fn: (c) => Math.sin((2 * Math.PI * (new Date(c.now).getUTCHours() + new Date(c.now).getUTCMinutes() / 60)) / 24) },
   hour_cos: { group: 'time', description: 'cos(UTC hour)', fn: (c) => Math.cos((2 * Math.PI * (new Date(c.now).getUTCHours() + new Date(c.now).getUTCMinutes() / 60)) / 24) },
@@ -243,7 +327,7 @@ export const featuresInGroups = (groups: FeatureGroup[]) => ALL_FEATURES.filter(
 
 /** Compute every registered feature. Values are finite numbers or NaN. */
 export function computeFeatureMap(c: FeatureContext): Record<string, number> {
-  const cache: Cache = { idx: new Map(), spot: new Map() };
+  const cache: Cache = { idx: new Map(), spot: new Map(), memo: new Map() };
   const out: Record<string, number> = {};
   for (const [name, f] of Object.entries(FEATURES)) {
     let v: number;

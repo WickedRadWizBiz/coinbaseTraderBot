@@ -80,6 +80,11 @@ export interface Config {
   allowProxyIndex: boolean;
   /** Stream Coinbase spot for lead-lag features and the dashboard (never a pricing input). */
   spotFeed: boolean;
+  /** Track USDT.D / BTC.D (Binance prices anchored to CoinGecko) as feature inputs. */
+  dominanceFeed: boolean;
+  binanceWsUrl: string;
+  coingeckoUrl: string;
+  coingeckoApiKey?: string;
   reconcileIntervalMs: number;
   heartbeatTimeoutMs: number;
   alertTelegramToken?: string;
@@ -255,6 +260,11 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     seriesAssetMap,
     allowProxyIndex,
     spotFeed: bool(env, 'SPOT_FEED', true),
+    dominanceFeed: bool(env, 'DOMINANCE_FEED', true),
+    // Binance.com blocks US IPs; the market-data-only host usually works. Override if needed.
+    binanceWsUrl: env.BINANCE_WS_URL ?? 'wss://data-stream.binance.vision/ws/!miniTicker@arr',
+    coingeckoUrl: env.COINGECKO_URL ?? 'https://api.coingecko.com/api/v3',
+    coingeckoApiKey: env.COINGECKO_API_KEY || undefined,
     reconcileIntervalMs: num(env, 'RECONCILE_INTERVAL_MS', 45000, 5000, 600000),
     heartbeatTimeoutMs: num(env, 'HEARTBEAT_TIMEOUT_MS', 15000, 2000, 300000),
     alertTelegramToken: env.ALERT_TELEGRAM_TOKEN || undefined,
@@ -284,7 +294,7 @@ function checkKeyFile(p: string): void {
 
 /** Redacted view for logs and the dashboard. */
 export function publicConfig(cfg: Config): Record<string, unknown> {
-  const { dashboardToken, kalshiKeyId, kalshiPrivateKeyPath, alertTelegramToken, alertWebhookUrl, ...rest } = cfg;
+  const { dashboardToken, kalshiKeyId, kalshiPrivateKeyPath, alertTelegramToken, alertWebhookUrl, coingeckoApiKey, ...rest } = cfg;
   return {
     ...rest,
     kalshiKeyId: kalshiKeyId ? `${kalshiKeyId.slice(0, 4)}…` : undefined,

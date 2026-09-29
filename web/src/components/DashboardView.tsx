@@ -100,6 +100,12 @@ export function DashboardView() {
             <div className="flex flex-col">
               <Row label="Model" value={s.model.id} sub={s.model.liveBlockers.length ? `not live-validated (${s.model.liveBlockers.length} blockers)` : 'validated for live'} tone={s.model.liveBlockers.length ? 'warn' : 'ok'} />
               <Row label="Settlement index" value={String(s.indexSource).toUpperCase()} sub={s.indexSource === 'proxy' ? 'Coinbase spot proxy (paper only)' : 'CF Benchmarks RTI via Kalshi'} tone={s.indexSource === 'none' ? 'bad' : s.indexSource === 'proxy' ? 'warn' : 'ok'} />
+              <Row label="USDT.D (Binance×CoinGecko)" value={s.dominance?.usdtd != null ? `${s.dominance.usdtd.toFixed(3)}%` : 'NO DATA'}
+                sub={s.dominance?.usdtdChange5mPct != null ? `5m ${s.dominance.usdtdChange5mPct >= 0 ? '+' : ''}${s.dominance.usdtdChange5mPct.toFixed(3)}% · ${s.dominance.usdtdChange5mPct < 0 ? 'RISK-ON' : 'RISK-OFF'}` : (s.dominance?.error ?? (s.dominance?.enabled ? 'warming up' : 'disabled'))}
+                tone={s.dominance?.usdtd == null ? 'warn' : s.dominance.usdtdChange5mPct < 0 ? 'ok' : 'bad'} />
+              <Row label="BTC.D" value={s.dominance?.btcd != null ? `${s.dominance.btcd.toFixed(2)}%` : 'NO DATA'}
+                sub={s.dominance?.btcdChange5mPct != null ? `5m ${s.dominance.btcdChange5mPct >= 0 ? '+' : ''}${s.dominance.btcdChange5mPct.toFixed(3)}%` : undefined}
+                tone={s.dominance?.btcd == null ? 'warn' : undefined} />
               <Row label="Kalshi WebSocket" value={s.wsConnected ? 'CONNECTED' : 'OFFLINE'} tone={s.wsConnected ? 'ok' : 'warn'} />
               <Row label="Active markets" value={String((markets ?? []).length)} />
               <Row label="Uptime" value={`${Math.floor(s.uptimeSec / 3600)}h ${Math.floor((s.uptimeSec % 3600) / 60)}m`} />
@@ -113,14 +119,15 @@ export function DashboardView() {
       <Panel title="Active Markets">
         <div className="overflow-x-auto">
           <table className="crt-table">
-            <thead><tr><th>Ticker</th><th>Close</th><th>Spot</th><th>Strike</th><th>Fair value</th><th>Model p</th><th>Bid</th><th>Ask</th><th>Pos</th><th>State</th></tr></thead>
+            <thead><tr><th>Ticker</th><th>Close</th><th>Spot</th><th>Strike</th><th>Fair value</th><th>Model p</th><th>Conf</th><th>Bid</th><th>Ask</th><th>Pos</th><th>State</th></tr></thead>
             <tbody>
-              {(markets ?? []).length === 0 && <tr><td colSpan={10} className="opacity-60">[AWAITING MARKET DISCOVERY]</td></tr>}
+              {(markets ?? []).length === 0 && <tr><td colSpan={11} className="opacity-60">[AWAITING MARKET DISCOVERY]</td></tr>}
               {(markets ?? []).map((m) => (
                 <tr key={m.ticker}>
                   <td>{m.ticker}</td><td>{clock(m.closeTs)}</td><td>{m.spot?.toFixed(2) ?? '—'}</td>
                   <td>{m.strike?.toFixed(2) ?? '—'}{m.strikeSource === 'computed' ? ' *' : ''}</td>
                   <td>{pct(m.fairValue)}</td><td className="text-crypto-primary font-bold">{pct(m.pYes)}</td>
+                  <td className={(m.macro?.conf_count ?? 0) > 0 ? 'text-crypto-success' : (m.macro?.conf_count ?? 0) < 0 ? 'text-crypto-danger' : 'opacity-60'}>{m.macro?.conf_count == null ? '—' : `${m.macro.conf_count > 0 ? '+' : ''}${m.macro.conf_count}`}</td>
                   <td>{px(m.bestBid)}</td><td>{px(m.bestAsk)}</td>
                   <td className={m.position > 0 ? 'text-crypto-success' : m.position < 0 ? 'text-crypto-danger' : ''}>{m.position}</td>
                   <td className={m.blocked ? 'text-yellow-300' : 'opacity-70'}>{m.blocked ? m.blocked.toUpperCase() : (m.notes.join('; ') || 'QUOTING').toUpperCase()}</td>

@@ -68,6 +68,28 @@ export function authMiddleware(token: string, now: () => number = Date.now) {
   };
 }
 
+function dominanceStatus(md: MarketData) {
+  const now = Date.now();
+  const pctChange = (tr: MarketData['usdtd'], sec: number) => {
+    const ser = tr.series(now, sec, 10_000);
+    return ser ? (ser[ser.length - 1] / ser[0] - 1) * 100 : null;
+  };
+  const u = md.usdtd.fresh(now, 10_000);
+  const b = md.btcd.fresh(now, 10_000);
+  return {
+    enabled: Boolean(md.dominance),
+    usdtd: u?.value ?? null,
+    btcd: b?.value ?? null,
+    usdtdChange5mPct: pctChange(md.usdtd, 300),
+    usdtdChange15mPct: pctChange(md.usdtd, 900),
+    btcdChange5mPct: pctChange(md.btcd, 300),
+    btcdChange15mPct: pctChange(md.btcd, 900),
+    coveredShare: md.dominance?.latest?.coveredShare ?? null,
+    anchoredAt: md.dominance?.calc.anchoredAt || null,
+    error: md.dominance?.lastError ?? null,
+  };
+}
+
 export function createApi(d: ApiDeps): express.Express {
   const app = express();
   app.disable('x-powered-by');
@@ -109,6 +131,7 @@ export function createApi(d: ApiDeps): express.Express {
       dailyPnl: d.engine.dailyPnl(),
       dailyLossLimit: bankroll !== undefined ? Math.min(bankroll * d.cfg.risk.dailyLossLimitFrac, d.cfg.risk.dailyLossLimitUsd) : d.cfg.risk.dailyLossLimitUsd,
       indexSource: d.md.indexSource,
+      dominance: dominanceStatus(d.md),
       wsConnected: d.md.wsConnected,
       consecutiveOrderErrors: d.oms.consecutiveErrors,
     });

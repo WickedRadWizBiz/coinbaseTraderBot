@@ -13,7 +13,7 @@ import type { ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
 import { computeFeatureMap } from './model/featureEngine';
 import { fairValue, SETTLEMENT_AVG_SEC } from './model/fairValue';
-import type { MetaModel } from './model/metaModel';
+import { explain, type Driver, type MetaModel } from './model/metaModel';
 import type { Oms, OrderIntent } from './oms/oms';
 import { isLive } from './oms/orderState';
 import { PositionBook } from './oms/positions';
@@ -41,6 +41,11 @@ export interface MarketStatus {
   position: number;
   blocked?: string;
   notes: string[];
+  /** Log-odds shift the model applied on top of fair value, and what drove it. */
+  modelShift?: number;
+  drivers?: Driver[];
+  /** Current values of the macro/confluence inputs for display. */
+  macro?: Record<string, number | null>;
   updatedTs: number;
 }
 
@@ -255,9 +260,14 @@ export class Engine {
     const mid = (bid.price + ask.price) / 2;
     const features = computeFeatureMap({
       now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma,
-      inWindow: fv.regime !== 'pre_window', book, micro: md.features.micro.get(m.ticker), index: idx!, spot: md.spot.get(m.asset),
+      inWindow: fv.regime !== 'pre_window', book, micro: md.features.micro.get(m.ticker), index: idx!, spot: md.spot.get(m.asset), asset: m.asset, usdtd: md.usdtd, btcd: md.btcd,
     });
     const pYes = model.predict(features, fv.pYes);
+    const why = explain(model, features, fv.pYes);
+    st.modelShift = why.shiftFromFairValue;
+    st.drivers = why.drivers;
+    st.macro = Object.fromEntries(['usdtd_ret_5m_z', 'btcd_rel_5m_z', 'rsi_14_1m', 'conf_riskon_momentum', 'conf_riskon_momentum_rsi', 'conf_count']
+      .map((k) => [k, Number.isFinite(features[k]) ? features[k] : null]));
     Object.assign(st, { strike, strikeSource: m.strikeSource, spot: spot.value, sigma: vol.sigmaPerSqrtSec, fairValue: fv.pYes, pYes, bestBid: bid.price, bestAsk: ask.price, blocked: undefined });
 
     const ret = idx!.trailingLogReturn(now, cfg.strategy.fastMoveWindowSec * 1000);
@@ -287,7 +297,7 @@ export class Engine {
       this.lastDecisionAudit.set(m.ticker, now);
       this.d.audit.write('decision', {
         decisionId, ticker: m.ticker, model: model.id, spot: spot.value, strike, strikeSource: m.strikeSource, sigma: vol.sigmaPerSqrtSec,
-        tauSec, fv: fv.pYes, regime: fv.regime, pYes, features, bid: bid.price, ask: ask.price, position: st.position, fastMove,
+        tauSec, fv: fv.pYes, regime: fv.regime, pYes, features, modelShift: why.shiftFromFairValue, drivers: why.drivers, bid: bid.price, ask: ask.price, position: st.position, fastMove,
         place: plan.place.map((p) => ({ side: p.side, price: p.price, count: p.count, purpose: p.purpose, edge: p.edge, why: p.why })),
         cancel: plan.cancel,
       });

@@ -22,6 +22,7 @@ import { yesPrice } from '../kalshi/wire';
 import { logger } from '../util/log';
 import { parseCount } from '../util/num';
 import { FeatureHub } from '../model/featureEngine';
+import { DominanceService } from './dominance';
 import { IndexTracker } from './indexTracker';
 import { OrderBook } from './orderBook';
 
@@ -55,6 +56,10 @@ export class MarketData extends EventEmitter {
   readonly index = new Map<string, IndexTracker>();
   /** Coinbase spot per asset (feature input only; never the settlement price). */
   readonly spot = new Map<string, IndexTracker>();
+  /** USDT.D and BTC.D (percent), fed by the dominance service. */
+  readonly usdtd = new IndexTracker('USDT.D', 90 * 60_000, 300);
+  readonly btcd = new IndexTracker('BTC.D', 90 * 60_000, 300);
+  dominance: DominanceService | undefined;
   /** Microstructure feature state, fed identically in production and replay. */
   readonly features = new FeatureHub();
   readonly markets = new Map<string, ActiveMarket>();
@@ -102,12 +107,18 @@ export class MarketData extends EventEmitter {
     }
     const proxy = this.cfg.allowProxyIndex && (!this.ws || this.cfg.mode === 'paper');
     if (proxy || this.cfg.spotFeed) this.startSpotFeed(proxy);
+    if (this.cfg.dominanceFeed) {
+      this.dominance = new DominanceService({ binanceWsUrl: this.cfg.binanceWsUrl, coingeckoUrl: this.cfg.coingeckoUrl, coingeckoApiKey: this.cfg.coingeckoApiKey });
+      this.dominance.on('sample', (d: { usdtd: number; btcd: number; coveredShare: number; ts: number }) => this.onDominance(d));
+      this.dominance.start();
+    }
   }
 
   stop(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.ws?.close();
     this.proxyWs?.close();
+    this.dominance?.stop();
     this.recorder.close();
   }
 
@@ -161,6 +172,13 @@ export class MarketData extends EventEmitter {
       if (m.closeTime < now - 30 * 60_000) { this.markets.delete(t); this.books.delete(t); this.features.forget(t); }
     }
     this.ws?.setMarkets(this.activeMarkets(now).map((m) => m.ticker));
+  }
+
+  /** A USDT.D / BTC.D sample (from the dominance service). */
+  onDominance(d: { usdtd: number; btcd: number; coveredShare?: number; ts: number }): void {
+    this.usdtd.add(d.usdtd, d.ts);
+    this.btcd.add(d.btcd, d.ts);
+    this.recorder.write('dominance', { usdtd: d.usdtd, btcd: d.btcd, covered: d.coveredShare ?? null, ts: d.ts });
   }
 
   /** Record an official settlement result for research labels. */

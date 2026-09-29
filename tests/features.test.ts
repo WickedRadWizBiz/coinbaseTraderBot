@@ -85,7 +85,7 @@ test('every feature has a group and description', () => {
 test('production and research replay compute identical features from the same events', async () => {
   const dir = tmpDir();
   const recDir = path.join(dir, 'rec');
-  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, SPOT_FEED: 'false' });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, SPOT_FEED: 'false', DOMINANCE_FEED: 'false' });
   const ws = Object.assign(new EventEmitter(), { connect() {}, close() {}, setMarkets() {} }) as unknown as KalshiWs;
   const rest = { getSeriesFees: async () => undefined, getOpenMarkets: async () => [] } as unknown as KalshiRest;
   const rec = new Recorder(recDir);
@@ -98,6 +98,7 @@ test('production and research replay compute identical features from the same ev
   emit('book_snapshot', { ticker: T, bids: [{ price: 0.5, size: 20 }], asks: [{ price: 0.54, size: 12 }], ts: now - 30_000 });
   emit('book_delta', { ticker: T, side: 'bid', price: 0.51, delta: 6, ts: now - 20_000 });
   emit('book_delta', { ticker: T, side: 'ask', price: 0.54, delta: -4, ts: now - 10_000 });
+  for (let s = 1200; s >= 0; s -= 1) md.onDominance({ usdtd: 4.8 * Math.exp(-1e-6 * (1200 - s) + 1e-5 * (s % 5)), btcd: 55 + 0.001 * (s % 11), ts: now - s * 1000 });
   for (let i = 0; i < 15; i++) emit('trade', { ticker: T, price: 0.52, count: 2 + i, takerSide: i % 3 ? 'yes' : 'no', ts: now - 40_000 + i * 2000 });
   rec.close();
   await new Promise((r) => setTimeout(r, 100));
@@ -106,11 +107,80 @@ test('production and research replay compute identical features from the same ev
   for await (const e of readRecordings(recDir)) st.apply(e);
 
   const base = { now, fairValue: 0.56, mid: 0.525, tauSec: 200, sigmaPerSqrtSec: 1e-4, referenceSigma: 1e-4, inWindow: false };
-  const live = computeFeatureMap({ ...base, book: md.book(T), micro: md.features.micro.get(T), index: md.index.get('BTC')!, spot: md.spot.get('BTC') });
-  const replay = computeFeatureMap({ ...base, book: st.book(T), micro: st.features.micro.get(T), index: st.index.get('BTC')!, spot: st.spot.get('BTC') });
+  const live = computeFeatureMap({ ...base, book: md.book(T), micro: md.features.micro.get(T), index: md.index.get('BTC')!, spot: md.spot.get('BTC'), asset: 'BTC', usdtd: md.usdtd, btcd: md.btcd });
+  const replay = computeFeatureMap({ ...base, book: st.book(T), micro: st.features.micro.get(T), index: st.index.get('BTC')!, spot: st.spot.get('BTC'), asset: 'BTC', usdtd: st.usdtd, btcd: st.btcd });
   for (const k of ALL_FEATURES) {
     const a = live[k], b = replay[k];
     assert.ok((Number.isNaN(a) && Number.isNaN(b)) || Math.abs(a - b) < 1e-12, `${k}: live ${a} vs replay ${b}`);
   }
   assert.ok(Number.isFinite(live.ofi_30s) && Number.isFinite(live.tfi_60s), 'microstructure features populated');
+  assert.ok(Number.isFinite(live.usdtd_ret_5m_z) && Number.isFinite(live.btcd_ret_15m_z), 'macro features populated');
+});
+
+import { agree } from '../bot/model/featureEngine';
+import { explain, MetaModel } from '../bot/model/metaModel';
+
+function domTracker(now: number, seconds: number, drift: number, start = 5): IndexTracker {
+  const t = new IndexTracker('D', 90 * 60_000, 300);
+  let seed = 3;
+  const rand = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
+  for (let s = seconds; s >= 0; s--) t.add(start * Math.exp(-drift * s + 0.00002 * (rand() - 0.5)), now - s * 1000);
+  return t;
+}
+
+test('agree(): fires only when all factors share a sign, signed by direction', () => {
+  assert.ok(Math.abs(agree(2, 8) - 4) < 1e-12);
+  assert.ok(Math.abs(agree(-2, -8) + 4) < 1e-12);
+  assert.equal(agree(2, -8), 0);
+  assert.equal(agree(0, 3), 0);
+  assert.ok(Number.isNaN(agree(1, NaN)));
+});
+
+test('macro and confluence features: USDT.D falling + index rising + oversold RSI', () => {
+  const base = ctx();
+  const now = base.now;
+  // Index: long decline (oversold on 1m RSI) then a sharp 60s bounce.
+  const idx = new IndexTracker('BTC');
+  for (let s = 1800; s >= 0; s--) {
+    const v = s > 60 ? 60000 * Math.exp(-2e-5 * (1800 - s)) : 60000 * Math.exp(-2e-5 * 1740) * Math.exp(3e-4 * (60 - s) / 60);
+    idx.add(v, now - s * 1000);
+  }
+  const usdtdFalling = domTracker(now, 3600, -2e-6); // falling over time
+  const f = computeFeatureMap({ ...base, index: idx, asset: 'BTC', usdtd: usdtdFalling, btcd: domTracker(now, 3600, 0, 55) });
+  assert.ok(f.usdtd_ret_5m_z < 0, `usdtd z ${f.usdtd_ret_5m_z}`);
+  assert.ok(f.rsi_14_1m < -0.5, `rsi ${f.rsi_14_1m}`);
+  assert.ok(f.ret_60s_z > 0);
+  assert.ok(f.conf_riskon_momentum_rsi > 0, `conf3 ${f.conf_riskon_momentum_rsi}`);
+  assert.ok(Number.isFinite(f.conf_count));
+  // Same picture but USDT.D RISING: the three-way confluence switches off.
+  const g = computeFeatureMap({ ...base, index: idx, asset: 'BTC', usdtd: domTracker(now, 3600, 2e-6), btcd: domTracker(now, 3600, 0, 55) });
+  assert.equal(g.conf_riskon_momentum_rsi, 0);
+});
+
+test('BTC.D is oriented per asset: rising BTC.D is bullish for BTC, bearish for alts', () => {
+  const base = ctx();
+  const btcdUp = domTracker(base.now, 3600, 2e-6, 55);
+  const forBtc = computeFeatureMap({ ...base, asset: 'BTC', btcd: btcdUp });
+  const forEth = computeFeatureMap({ ...base, asset: 'ETH', btcd: btcdUp });
+  assert.ok(forBtc.btcd_rel_5m_z > 0 && forEth.btcd_rel_5m_z < 0);
+  assert.ok(Math.abs(forBtc.btcd_rel_5m_z + forEth.btcd_rel_5m_z) < 1e-12);
+});
+
+test('macro features are NaN without dominance data', () => {
+  const f = computeFeatureMap(ctx());
+  for (const k of ['usdtd_ret_5m_z', 'btcd_ret_5m_z', 'conf_riskon_momentum', 'conf_macro_pair']) assert.ok(Number.isNaN(f[k]), k);
+});
+
+test('explain() attributes the model shift to the confluence feature that caused it', () => {
+  const feats = ['logit_fv', 'conf_riskon_momentum_rsi', 'spread'];
+  const m = MetaModel.fromJson(JSON.stringify({
+    version: 't', kind: 'mlp', features: feats, referenceSigma: 1e-4, residualFeature: 0,
+    normalization: { mean: [0, 0, 0.03], std: [1, 1, 0.01] },
+    layers: [{ weights: [[0, 0.4, 0]], bias: [0], activation: 'linear' }],
+  }));
+  const map = { logit_fv: 0, conf_riskon_momentum_rsi: 1.5, spread: 0.05 };
+  const e = explain(m, map, 0.5);
+  assert.ok(Math.abs(e.shiftFromFairValue - 0.6) < 1e-9);
+  assert.equal(e.drivers[0].feature, 'conf_riskon_momentum_rsi');
+  assert.ok(Math.abs(e.drivers[0].logitContribution - 0.6) < 1e-9);
 });

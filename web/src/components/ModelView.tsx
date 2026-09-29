@@ -1,4 +1,5 @@
 import { Brain } from 'lucide-react';
+import { pct } from '../api';
 import { Panel } from './Panel';
 import { usePoll } from './usePoll';
 
@@ -9,6 +10,8 @@ const GROUP_LABEL: Record<string, string> = {
   micro: 'Microstructure (Kalshi book & trades)',
   momentum: 'Momentum / TA (settlement index)',
   spot: 'Spot lead-lag (Coinbase)',
+  macro: 'Macro: USDT.D / BTC.D (Binance × CoinGecko)',
+  confluence: 'Confluence (agreement between factors)',
   time: 'Time of day',
 };
 
@@ -40,6 +43,72 @@ function FeatureTable({ model }: { model: any }) {
         </div>
       ))}
     </div>
+  );
+}
+
+const FACTOR_LABEL: Record<string, string> = {
+  usdtd_ret_5m_z: 'USDT.D 5m (z)',
+  btcd_rel_5m_z: 'BTC.D 5m, asset-oriented (z)',
+  rsi_14_1m: 'RSI(14, 1m)',
+  conf_riskon_momentum: 'Risk-on × momentum',
+  conf_riskon_momentum_rsi: 'Risk-on × momentum × oversold',
+  conf_count: 'Confluence count',
+};
+
+function ConfluenceMonitor({ modelKind }: { modelKind: string }) {
+  const { data: markets } = usePoll<any[]>('/markets', 2000);
+  const rows = (markets ?? []).filter((m) => !m.blocked);
+  return (
+    <Panel title="Confluence Monitor">
+      <p className="text-xs opacity-80 normal-case leading-relaxed mb-3">
+        Confluence factors are signed: positive = bullish for YES, negative = bearish; agreement features are zero unless every factor points the same way.
+        Their weights are learned offline and validated, and they act on trades only through the model&apos;s probability: a stronger, agreeing signal raises the edge,
+        which raises Kelly size and permits taking liquidity. {modelKind === 'identity' && 'No trained model yet: factors are tracked and recorded but carry no weight.'}
+      </p>
+      {rows.length === 0 ? <div className="opacity-60 text-xs">[NO PRICED MARKETS]</div> : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {rows.map((m) => (
+            <div key={m.ticker} className="crt-border bg-black/30 p-3 flex flex-col gap-2">
+              <div className="flex justify-between text-xs font-bold uppercase">
+                <span className="text-crypto-text">{m.ticker}</span>
+                <span>FV {pct(m.fairValue)} → MODEL <span className="text-crypto-primary">{pct(m.pYes)}</span></span>
+              </div>
+              <table className="crt-table">
+                <tbody>
+                  {Object.entries(m.macro ?? {}).map(([k, v]) => {
+                    const n = v as number | null;
+                    return (
+                      <tr key={k}>
+                        <td className="opacity-80">{FACTOR_LABEL[k] ?? k}</td>
+                        <td className={`text-right ${n == null ? 'opacity-50' : n > 0 ? 'text-crypto-success' : n < 0 ? 'text-crypto-danger' : ''}`}>{n == null ? 'n/a' : n.toFixed(2)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {(m.drivers ?? []).length > 0 && (
+                <div className="flex flex-col gap-1">
+                  <div className="text-[10px] uppercase tracking-widest opacity-70">Model drivers (log-odds vs fair value, total {m.modelShift >= 0 ? '+' : ''}{(m.modelShift ?? 0).toFixed(3)})</div>
+                  {m.drivers.map((d: any) => {
+                    const w = Math.min(50, Math.abs(d.logitContribution) * 200);
+                    return (
+                      <div key={d.feature} className="flex items-center gap-2 text-[11px]">
+                        <span className="w-48 truncate opacity-80">{d.feature}</span>
+                        <div className="relative flex-1 h-3 crt-border bg-black/30 overflow-hidden">
+                          <div className="absolute left-1/2 top-0 bottom-0 w-px bg-crypto-primary" />
+                          <div className={`absolute h-full ${d.logitContribution >= 0 ? 'left-1/2 bg-crypto-success/60 dither-bg-light' : 'right-1/2 bg-crypto-danger/60 dither-bg-dark'}`} style={{ width: `${w}%` }} />
+                        </div>
+                        <span className="w-16 text-right">{d.logitContribution >= 0 ? '+' : ''}{d.logitContribution.toFixed(3)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
   );
 }
 
@@ -92,6 +161,7 @@ export function ModelView() {
           </div>
         )}
       </Panel>
+      {m && <ConfluenceMonitor modelKind={m.kind} />}
     </div>
   );
 }

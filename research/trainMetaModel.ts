@@ -34,10 +34,10 @@ function arg(name: string, def: string): string {
 
 export const MIN_DAYS_FOR_TIME = 14;
 
-export const DEFAULT_SETS = ['base', 'base+micro', 'base+momentum', 'base+spot', 'base+time', 'all'];
+export const DEFAULT_SETS = ['base', 'base+micro', 'base+momentum', 'base+spot', 'base+macro', 'base+macro+confluence', 'base+momentum+macro+confluence', 'base+time', 'all'];
 
 export function resolveSet(spec: string): string[] {
-  const groups: FeatureGroup[] = spec === 'all' ? ['base', 'micro', 'momentum', 'spot', 'time'] : (spec.split('+') as FeatureGroup[]);
+  const groups: FeatureGroup[] = spec === 'all' ? ['base', 'micro', 'momentum', 'spot', 'macro', 'confluence', 'time'] : (spec.split('+') as FeatureGroup[]);
   return featuresInGroups(groups);
 }
 

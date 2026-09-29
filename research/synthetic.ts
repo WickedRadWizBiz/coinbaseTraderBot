@@ -8,7 +8,7 @@ import path from 'path';
 import { fairValue } from '../bot/model/fairValue';
 import { rng } from './stats';
 
-export function writeSyntheticRecordings(dir: string, opts: { windows: number; seed?: number; sigma?: number; marketNoise?: number; start?: number }): void {
+export function writeSyntheticRecordings(dir: string, opts: { windows: number; seed?: number; sigma?: number; marketNoise?: number; start?: number; dominanceLeadSec?: number }): void {
   fs.mkdirSync(dir, { recursive: true });
   const r = rng(opts.seed ?? 11);
   const gauss = () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 * Math.PI * r());
@@ -25,13 +25,21 @@ export function writeSyntheticRecordings(dir: string, opts: { windows: number; s
   // lead-lag features have real signal to find in synthetic data.
   const LEAD = 3;
   const walk: number[] = [];
-  for (let s = 0; s < total + LEAD; s++) { x += sigma * gauss(); walk.push(Math.exp(x)); }
+  // USDT.D moves inversely to where the index will be DOM_LEAD seconds later
+  // (0 disables the dominance stream).
+  const DOM_LEAD = opts.dominanceLeadSec ?? 20;
+  for (let s = 0; s < total + Math.max(LEAD, DOM_LEAD) + 1; s++) { x += sigma * gauss(); walk.push(Math.exp(x)); }
   for (let s = 0; s < total; s++) {
     const t = start + s * 1000;
     const S = walk[s];
     hist.push(S);
     lines.push(JSON.stringify({ t, k: 'index', asset: 'BTC', value: S, ts: t, src: 'synthetic' }));
     lines.push(JSON.stringify({ t, k: 'spot', asset: 'BTC', value: walk[s + LEAD] * (1 + 0.00002 * gauss()), ts: t }));
+    if (DOM_LEAD > 0) {
+      const usdtd = 5 * Math.pow(walk[s + DOM_LEAD] / walk[0], -0.9) * (1 + 0.00001 * gauss());
+      const btcd = 55 * Math.pow(walk[s] / walk[0], 0.1) * (1 + 0.00001 * gauss());
+      lines.push(JSON.stringify({ t, k: 'dominance', usdtd, btcd, covered: 0.9, ts: t }));
+    }
     const rel = s - 600;
     if (rel >= 0 && rel % W === 0 && rel / W < opts.windows) {
       const open = t, close = t + W * 1000;

@@ -67,7 +67,7 @@ export async function buildDataset(dir: string, everySec: number, referenceSigma
       const mid = (bid.price + ask.price) / 2;
       const fx = computeFeatureMap({
         now: st.now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma, inWindow: fv.regime !== 'pre_window',
-        book, micro: st.features.micro.get(m.ticker), index: idx!, spot: st.spot.get(m.asset),
+        book, micro: st.features.micro.get(m.ticker), index: idx!, spot: st.spot.get(m.asset), asset: m.asset, usdtd: st.usdtd, btcd: st.btcd,
       });
       const arr = pending.get(m.ticker) ?? [];
       arr.push({ t: st.now, ticker: m.ticker, asset: m.asset, window: m.closeTime, tauSec, fv: fv.pYes, mid, bid: bid.price, ask: ask.price, sigma: vol.sigmaPerSqrtSec, fx });
