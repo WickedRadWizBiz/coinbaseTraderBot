@@ -1,58 +1,74 @@
-name: Auto Deploy to AWS Lightsail
+# Manual, reviewed deployment of a TAGGED release. Nothing deploys on push.
+# (The previous workflow deployed every push to main straight to the live box
+# with `npm install` — the Knight Capital failure mode.)
+#
+# Requirements:
+#  - Run from the Actions tab with the release tag (e.g. v2.0.0).
+#  - The `production` GitHub environment should require a reviewer approval.
+#  - The server keeps its own .env (TRADING_MODE etc.); this workflow never
+#    changes trading mode or credentials.
+name: Deploy release
 
 on:
-  push:
-    branches:
-      - main
-      - master
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to deploy (must already exist, e.g. v2.0.0)'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
 
 jobs:
   deploy:
-    name: Build & Deploy to Lightsail Server
     runs-on: ubuntu-latest
+    environment: production
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Validate tag format
+        run: |
+          [[ "${{ inputs.tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3"; exit 1; }
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: 'npm'
 
-      - name: Install dependencies & Build
+      - name: Install (lockfile only), verify, build
         run: |
-          npm install
+          npm ci
+          npm run typecheck
+          npm test
           npm run build
+          echo "${{ inputs.tag }}" > dist/RELEASE
 
-      - name: Copy build artifacts to Lightsail via SCP
+      - name: Upload release to server
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
-          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
-          source: "dist,package.json,package-lock.json"
-          target: "~/${{ secrets.LIGHTSAIL_APP_DIR || 'coinbaseTraderBot' }}"
+          source: "dist,web/dist,params,package.json,package-lock.json,deploy"
+          target: "~/releases/${{ inputs.tag }}"
 
-      - name: Restart PM2 on Lightsail via SSH
+      - name: Activate release (keeps previous for rollback)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
-          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
           script_stop: true
           script: |
-            cd ~/${{ secrets.LIGHTSAIL_APP_DIR || 'coinbaseTraderBot' }} || cd ~/coinbaseTraderBot
-
-            echo "=== Installing production dependencies ==="
-            npm install --omit=dev
-
-            echo "=== Restarting PM2 process ==="
-            pm2 delete crypto-bot 2>/dev/null || true
-            pm2 delete coinbaseTraderBot 2>/dev/null || true
-            NODE_ENV=production pm2 start dist/server.cjs --name "crypto-bot" --update-env
-            pm2 save
-
-            echo "=== Deployment successful and lightning fast! ==="
+            set -euo pipefail
+            cd ~/releases/${{ inputs.tag }}
+            npm ci --omit=dev
+            bash deploy/activate.sh ~/releases/${{ inputs.tag }}

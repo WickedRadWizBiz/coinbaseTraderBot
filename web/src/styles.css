@@ -1,0 +1,31 @@
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #5d6470; --border: #dfe3e8;
+  --ok: #1a7f37; --warn: #9a6700; --bad: #cf222e; --accent: #0969da;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0d1117; --panel: #161b22; --text: #e6edf3; --muted: #8d96a0; --border: #30363d;
+    --ok: #3fb950; --warn: #d29922; --bad: #f85149; --accent: #58a6ff; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-bottom: 16px; }
+.card, section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+section { margin-bottom: 16px; overflow-x: auto; }
+.label { color: var(--muted); font-size: 12px; }
+.value { font-size: 20px; font-variant-numeric: tabular-nums; }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer; }
+button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+input { font: inherit; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--text); width: 100%; max-width: 420px; }
+.banner { padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; border: 1px solid var(--bad); color: var(--bad); }
+.muted { color: var(--muted); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+code { font-size: 12px; }

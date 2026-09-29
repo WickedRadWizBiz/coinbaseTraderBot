@@ -1,0 +1,31 @@
+# /etc/systemd/system/kalshi-bot.service
+# Runs the bot as an unprivileged user from ~/bot/current with the server's
+# own environment file. The API binds to 127.0.0.1 only; reach it via
+#   ssh -L 3000:127.0.0.1:3000 ubuntu@<host>   (or Tailscale)
+[Unit]
+Description=Kalshi 15m crypto bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bot/current
+EnvironmentFile=/home/ubuntu/bot/bot.env
+Environment=DATA_DIR=/home/ubuntu/bot/data
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node dist/bot.cjs
+Restart=on-failure
+RestartSec=10
+# A config error exits with code 2/3: do not restart-loop on it.
+RestartPreventExitStatus=2 3
+KillSignal=SIGTERM
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/ubuntu/bot/data
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
