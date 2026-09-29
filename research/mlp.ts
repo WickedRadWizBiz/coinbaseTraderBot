@@ -21,23 +21,26 @@ export interface TrainOptions {
 
 export interface Normalization { mean: number[]; std: number[] }
 
+/** Mean/std per column, ignoring NaN (missing) values. */
 export function fitNormalization(X: number[][]): Normalization {
   const d = X[0].length;
-  const mean = new Array(d).fill(0), std = new Array(d).fill(0);
-  for (const x of X) for (let j = 0; j < d; j++) mean[j] += x[j] / X.length;
-  for (const x of X) for (let j = 0; j < d; j++) std[j] += (x[j] - mean[j]) ** 2 / X.length;
-  return { mean, std: std.map((v) => Math.sqrt(v) || 1) };
+  const mean = new Array(d).fill(0), std = new Array(d).fill(0), cnt = new Array(d).fill(0);
+  for (const x of X) for (let j = 0; j < d; j++) if (Number.isFinite(x[j])) { mean[j] += x[j]; cnt[j]++; }
+  for (let j = 0; j < d; j++) mean[j] = cnt[j] ? mean[j] / cnt[j] : 0;
+  for (const x of X) for (let j = 0; j < d; j++) if (Number.isFinite(x[j])) std[j] += (x[j] - mean[j]) ** 2;
+  return { mean, std: std.map((v, j) => (cnt[j] > 1 ? Math.sqrt(v / cnt[j]) : 0) || 1) };
 }
 
+/** Normalize; missing values become 0 (= training mean), exactly as MetaModel.predict does. */
 function normalize(X: number[][], n: Normalization): number[][] {
-  return X.map((x) => x.map((v, j) => (v - n.mean[j]) / n.std[j]));
+  return X.map((x) => x.map((v, j) => (Number.isFinite(v) ? (v - n.mean[j]) / n.std[j] : 0)));
 }
 
 export function predictLogits(layers: DenseLayer[], norm: Normalization, X: number[][], residual: number): number[] {
   return X.map((x) => {
-    let h = x.map((v, j) => (v - norm.mean[j]) / norm.std[j]);
+    let h = x.map((v, j) => (Number.isFinite(v) ? (v - norm.mean[j]) / norm.std[j] : 0));
     for (const l of layers) h = forward(l, h);
-    return h[0] + x[residual];
+    return h[0] + (Number.isFinite(x[residual]) ? x[residual] : 0);
   });
 }
 

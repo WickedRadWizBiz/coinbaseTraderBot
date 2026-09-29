@@ -16,6 +16,7 @@
 
 import crypto from 'crypto';
 import fs from 'fs';
+import { FEATURES, vectorFor } from './featureEngine';
 import { FEATURE_NAMES } from './features';
 import { clamp, sigmoid } from '../util/num';
 
@@ -108,14 +109,16 @@ export class MetaModel {
     return out;
   }
 
-  /** Probability that YES settles, given the feature vector. */
-  predict(features: number[], fairValue: number): number {
+  /** Probability that YES settles, given the named feature map. Missing
+   * features (NaN) are imputed as the training mean (normalized 0). */
+  predict(featureMap: Record<string, number>, fairValue: number): number {
     const p = this.params;
     if (p.kind === 'identity') return fairValue;
-    if (features.length !== p.features.length) throw new Error(`feature length ${features.length} != ${p.features.length}`);
-    let x = features.map((v, i) => (v - p.normalization!.mean[i]) / p.normalization!.std[i]);
+    const features = vectorFor(p.features, featureMap);
+    let x = features.map((v, i) => (Number.isFinite(v) ? (v - p.normalization!.mean[i]) / p.normalization!.std[i] : 0));
     for (const layer of p.layers!) x = forward(layer, x);
-    const z = x[0] + (p.residualFeature !== undefined ? features[p.residualFeature] : 0);
+    const resid = p.residualFeature !== undefined ? features[p.residualFeature] : 0;
+    const z = x[0] + (Number.isFinite(resid) ? resid : 0);
     const cal = p.calibration ?? { a: 1, b: 0 };
     return clamp(sigmoid(cal.a * z + cal.b), 1e-4, 1 - 1e-4);
   }
@@ -137,11 +140,11 @@ function validateParams(p: MetaModelParams): void {
   if (!(p.referenceSigma > 0)) throw new Error('model params missing referenceSigma');
   if (p.kind === 'identity') return;
   if (p.kind !== 'mlp') throw new Error(`unknown model kind ${p.kind}`);
-  const names = [...FEATURE_NAMES];
-  if (JSON.stringify(p.features) !== JSON.stringify(names)) {
-    throw new Error(`model features ${JSON.stringify(p.features)} do not match code ${JSON.stringify(names)}`);
-  }
-  const n = names.length;
+  if (!Array.isArray(p.features) || !p.features.length) throw new Error('model features missing');
+  const unknown = p.features.filter((f) => !(f in FEATURES));
+  if (unknown.length) throw new Error(`model features not in registry: ${unknown.join(', ')}`);
+  if (new Set(p.features).size !== p.features.length) throw new Error('duplicate model features');
+  const n = p.features.length;
   if (!p.normalization || p.normalization.mean.length !== n || p.normalization.std.length !== n) throw new Error('bad normalization');
   if (p.normalization.std.some((s) => !(s > 0))) throw new Error('normalization std must be > 0');
   if (!p.layers?.length) throw new Error('mlp has no layers');

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { brier, fitPlatt, maxCalibrationErrorPp, reliability } from '../bot/model/calibration';
-import { buildFeatures, FEATURE_NAMES } from '../bot/model/features';
+import { FEATURE_NAMES } from '../bot/model/features';
 import { MetaModel, MetaModelParams } from '../bot/model/metaModel';
 import { logit, sigmoid } from '../bot/util/num';
 
@@ -19,12 +19,12 @@ function mlp(over: Partial<MetaModelParams> = {}): MetaModelParams {
 
 test('identity model passes fair value through and is blocked from live', () => {
   const m = MetaModel.identity();
-  assert.equal(m.predict([], 0.63), 0.63);
+  assert.equal(m.predict({}, 0.63), 0.63);
   assert.ok(m.liveBlockers().length > 0);
 });
 
 test('mlp forward pass is deterministic and applies Platt calibration', () => {
-  const f = buildFeatures({ fairValue: 0.7, mid: 0.6, tauSec: 300, sigmaPerSqrtSec: 5e-5, referenceSigma: 5e-5, spread: 0.02, imbalance: 0, inWindow: false });
+  const f = { logit_fv: logit(0.7), logit_mid: logit(0.6), fv_minus_mid: 0.1, sqrt_tau_min: Math.sqrt(5), log_vol_ratio: 0, spread: 0.02, imbalance: 0, in_window: 0 };
   const m = MetaModel.fromJson(JSON.stringify(mlp()));
   assert.ok(Math.abs(m.predict(f, 0.7) - 0.7) < 1e-6);
   const cal = MetaModel.fromJson(JSON.stringify(mlp({ calibration: { a: 0.5, b: 0 } })));
@@ -33,7 +33,7 @@ test('mlp forward pass is deterministic and applies Platt calibration', () => {
 });
 
 test('loader rejects mismatched features and malformed weights', () => {
-  assert.throws(() => MetaModel.fromJson(JSON.stringify(mlp({ features: ['a'] }))), /features/);
+  assert.throws(() => MetaModel.fromJson(JSON.stringify(mlp({ features: ['a'] }))), /registry/);
   assert.throws(() => MetaModel.fromJson(JSON.stringify(mlp({ layers: [{ weights: [[1]], bias: [0], activation: 'linear' }] }))), /width/);
   const nan = mlp();
   nan.layers![0].weights[0][0] = null as unknown as number;
@@ -65,4 +65,19 @@ test('Brier, reliability and Platt scaling', () => {
   const fixed = z.map((zi) => sigmoid(cal.a * zi + cal.b));
   assert.ok(brier(fixed, y) < brier(raw, y));
   assert.ok(maxCalibrationErrorPp(reliability(fixed, y)) < maxCalibrationErrorPp(reliability(raw, y)));
+});
+
+test('models may use any subset of registry features; missing values impute to the training mean', () => {
+  const feats = ['logit_fv', 'ofi_30s', 'spot_lead_10s_z'];
+  const p = mlp({
+    features: feats,
+    normalization: { mean: [0, 1, 0], std: [1, 2, 1] },
+    layers: [{ weights: [[1, 0.5, 0.3]], bias: [0], activation: 'linear' }],
+  });
+  const m = MetaModel.fromJson(JSON.stringify(p));
+  const fv = 0.6;
+  // ofi at its mean and spot missing -> identity on fair value.
+  assert.ok(Math.abs(m.predict({ logit_fv: logit(fv), ofi_30s: 1, spot_lead_10s_z: NaN }, fv) - fv) < 1e-9);
+  // positive spot lead raises P(YES).
+  assert.ok(m.predict({ logit_fv: logit(fv), ofi_30s: 1, spot_lead_10s_z: 2 }, fv) > m.predict({ logit_fv: logit(fv), ofi_30s: 1, spot_lead_10s_z: 0 }, fv));
 });

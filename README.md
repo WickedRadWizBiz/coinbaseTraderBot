@@ -63,6 +63,13 @@ The old `metaLearningEngine.ts` and `plasticityEngine.ts` (tfjs-node) retrained 
    - it is trained **offline only** with purged walk-forward CV by window, and the untouched holdout is used once
    - Platt scaling is applied only when enough independent windows support it
    - the file's SHA-256 is stamped on every decision and order
+   - **Candidate features ported from the old model** (`bot/model/featureEngine.ts`) are available to it in four groups:
+     - microstructure: order-flow imbalance, trade-flow imbalance, VPIN-style toxicity, microprice drift, depth imbalance, trade intensity
+     - momentum/TA on the settlement index: sigma-scaled returns, RSI, MACD histogram, Bollinger %B, Kaufman efficiency, Ichimoku tenkan/kijun distance, realized-vol ratio
+     - Coinbase spot lead-lag: basis and spot-minus-index return
+     - time of day (only eligible once there are 14+ days of data)
+
+     The offline trainer searches over feature sets (base, base plus each group, all) along with network size. Every variant counts toward the Deflated Sharpe, and holdout permutation importance shows which features actually help. Production and research compute features through the same `FeatureHub`, and a test checks they are identical. Features the old model had that aren't ported (macro goal, trailing state, latency, funding, confluence labels, USDT dominance) had no testable basis for this contract.
 3. **Go-live gates enforced in code.** Live mode refuses to start unless the model's validation report shows:
    - at least 1,000 holdout windows
    - a Brier score better than the market mid

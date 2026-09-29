@@ -7,7 +7,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { buildFeatures } from '../bot/model/features';
+import { computeFeatureMap } from '../bot/model/featureEngine';
 import { fairValue, SETTLEMENT_AVG_SEC } from '../bot/model/fairValue';
 import { readRecordings, RecMarket, ReplayState } from './replay';
 
@@ -22,7 +22,8 @@ export interface DatasetRow {
   bid: number;
   ask: number;
   sigma: number;
-  features: number[];
+  /** Every registered feature by name (NaN/null = unavailable). */
+  fx: Record<string, number>;
   label: 0 | 1;
   labelSource: 'official' | 'computed';
 }
@@ -64,9 +65,12 @@ export async function buildDataset(dir: string, everySec: number, referenceSigma
       const fv = fairValue({ spot: spot.value, strike, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, tauSec, observedAvg: observed });
       if (!fv) continue;
       const mid = (bid.price + ask.price) / 2;
-      const features = buildFeatures({ fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma, spread: ask.price - bid.price, imbalance: book.imbalance(), inWindow: fv.regime !== 'pre_window' });
+      const fx = computeFeatureMap({
+        now: st.now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma, inWindow: fv.regime !== 'pre_window',
+        book, micro: st.features.micro.get(m.ticker), index: idx!, spot: st.spot.get(m.asset),
+      });
       const arr = pending.get(m.ticker) ?? [];
-      arr.push({ t: st.now, ticker: m.ticker, asset: m.asset, window: m.closeTime, tauSec, fv: fv.pYes, mid, bid: bid.price, ask: ask.price, sigma: vol.sigmaPerSqrtSec, features });
+      arr.push({ t: st.now, ticker: m.ticker, asset: m.asset, window: m.closeTime, tauSec, fv: fv.pYes, mid, bid: bid.price, ask: ask.price, sigma: vol.sigmaPerSqrtSec, fx });
       pending.set(m.ticker, arr);
     }
   }

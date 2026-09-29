@@ -21,6 +21,7 @@ import type { MarketInfo } from '../kalshi/types';
 import { yesPrice } from '../kalshi/wire';
 import { logger } from '../util/log';
 import { parseCount } from '../util/num';
+import { FeatureHub } from '../model/featureEngine';
 import { IndexTracker } from './indexTracker';
 import { OrderBook } from './orderBook';
 
@@ -52,6 +53,10 @@ export class Recorder {
 export class MarketData extends EventEmitter {
   readonly books = new Map<string, OrderBook>();
   readonly index = new Map<string, IndexTracker>();
+  /** Coinbase spot per asset (feature input only; never the settlement price). */
+  readonly spot = new Map<string, IndexTracker>();
+  /** Microstructure feature state, fed identically in production and replay. */
+  readonly features = new FeatureHub();
   readonly markets = new Map<string, ActiveMarket>();
   private readonly fees = new Map<string, FeeSchedule>();
   private readonly feesFetchedAt = new Map<string, number>();
@@ -71,16 +76,17 @@ export class MarketData extends EventEmitter {
     for (const s of cfg.strategy.series) {
       const asset = cfg.seriesAssetMap[s];
       if (!this.index.has(asset)) this.index.set(asset, new IndexTracker(asset));
+      if (!this.spot.has(asset)) this.spot.set(asset, new IndexTracker(asset));
     }
   }
 
   start(): void {
     if (this.ws) {
       this.indexSource = 'kalshi';
-      this.ws.on('book_snapshot', (e) => { this.book(e.ticker).applySnapshot(e, e.ts); this.recorder.write('book', e); });
-      this.ws.on('book_delta', (e) => { this.book(e.ticker).applyDelta(e.side, e.price, e.delta, e.ts); this.recorder.write('delta', e); });
+      this.ws.on('book_snapshot', (e) => { const b = this.book(e.ticker); b.applySnapshot(e, e.ts); this.features.onBook(e.ticker, b, e.ts); this.recorder.write('book', e); });
+      this.ws.on('book_delta', (e) => { const b = this.book(e.ticker); b.applyDelta(e.side, e.price, e.delta, e.ts); this.features.onBook(e.ticker, b, e.ts); this.recorder.write('delta', e); });
       this.ws.on('book_gap', (e) => { if (e.ticker) this.books.get(e.ticker)?.invalidate(); this.emit('gap', e); });
-      this.ws.on('trade', (e) => { this.recorder.write('trade', e); this.emit('trade', e); });
+      this.ws.on('trade', (e) => { this.features.onTrade(e.ticker, e.count, e.takerSide, e.ts); this.recorder.write('trade', e); this.emit('trade', e); });
       this.ws.on('index', (e) => this.onIndex(e.indexId, e.value, e.ts));
       this.ws.on('lifecycle', (e) => { this.recorder.write('lifecycle', e); this.emit('lifecycle', e); });
       this.ws.on('connected', () => { this.wsConnected = true; });
@@ -94,7 +100,8 @@ export class MarketData extends EventEmitter {
     } else {
       this.pollTimer = setInterval(() => void this.poll(), 2000);
     }
-    if (this.cfg.allowProxyIndex && (!this.ws || this.cfg.mode === 'paper')) this.startProxyIndex();
+    const proxy = this.cfg.allowProxyIndex && (!this.ws || this.cfg.mode === 'paper');
+    if (proxy || this.cfg.spotFeed) this.startSpotFeed(proxy);
   }
 
   stop(): void {
@@ -151,7 +158,7 @@ export class MarketData extends EventEmitter {
       }
     }
     for (const [t, m] of this.markets) {
-      if (m.closeTime < now - 30 * 60_000) { this.markets.delete(t); this.books.delete(t); }
+      if (m.closeTime < now - 30 * 60_000) { this.markets.delete(t); this.books.delete(t); this.features.forget(t); }
     }
     this.ws?.setMarkets(this.activeMarkets(now).map((m) => m.ticker));
   }
@@ -185,7 +192,9 @@ export class MarketData extends EventEmitter {
     for (const m of this.activeMarkets(now)) {
       try {
         const snap = await this.rest.getOrderbook(m.ticker);
-        this.book(m.ticker).applySnapshot(snap, snap.ts);
+        const b = this.book(m.ticker);
+        b.applySnapshot(snap, snap.ts);
+        this.features.onBook(m.ticker, b, snap.ts);
         this.recorder.write('book', snap as unknown as Record<string, unknown>);
         await this.pollTrades(m.ticker);
       } catch (e) {
@@ -206,6 +215,7 @@ export class MarketData extends EventEmitter {
       const count = parseCount(t.count_fp) ?? parseCount(t.count);
       if (price === undefined || count === undefined) continue;
       const e = { ticker, price, count, takerSide: t.taker_side, ts };
+      this.features.onTrade(ticker, count, e.takerSide, ts);
       this.recorder.write('trade', e);
       this.emit('trade', e);
       maxTs = Math.max(maxTs, ts);
@@ -213,7 +223,9 @@ export class MarketData extends EventEmitter {
     this.tradeCursor.set(ticker, maxTs);
   }
 
-  private startProxyIndex(): void {
+  /** Coinbase public ticker: always recorded as `spot` (feature input); also
+   * feeds the index when running on the paper-only proxy. */
+  private startSpotFeed(feedIndex: boolean): void {
     const products = [...this.index.keys()].map((a) => `${a}-USD`);
     const connect = () => {
       const ws = new WebSocket('wss://ws-feed.exchange.coinbase.com');
@@ -226,15 +238,22 @@ export class MarketData extends EventEmitter {
           const asset = String(m.product_id).split('-')[0];
           const value = Number(m.price);
           const ts = Date.parse(m.time) || Date.now();
-          this.index.get(asset)?.add(value, ts);
-          this.recorder.write('index', { asset, value, ts, src: 'proxy' });
+          if (!(value > 0)) return;
+          this.spot.get(asset)?.add(value, ts);
+          this.recorder.write('spot', { asset, value, ts });
+          if (feedIndex) {
+            this.index.get(asset)?.add(value, ts);
+            this.recorder.write('index', { asset, value, ts, src: 'proxy' });
+          }
         } catch { /* ignore */ }
       });
       ws.on('close', () => setTimeout(connect, 3000));
       ws.on('error', () => undefined);
     };
-    if (this.indexSource === 'none') this.indexSource = 'proxy';
-    log.warn('using Coinbase spot as an index PROXY (basis risk vs CF RTI; paper only)');
+    if (feedIndex) {
+      if (this.indexSource === 'none') this.indexSource = 'proxy';
+      log.warn('using Coinbase spot as an index PROXY (basis risk vs CF RTI; paper only)');
+    }
     connect();
   }
 }

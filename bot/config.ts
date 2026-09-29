@@ -78,6 +78,8 @@ export interface Config {
   seriesAssetMap: Record<string, string>;
   /** Allow using the Coinbase public ticker as an index proxy (basis risk; paper/shadow only). */
   allowProxyIndex: boolean;
+  /** Stream Coinbase spot for lead-lag features and the dashboard (never a pricing input). */
+  spotFeed: boolean;
   reconcileIntervalMs: number;
   heartbeatTimeoutMs: number;
   alertTelegramToken?: string;
@@ -252,6 +254,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     indexIdMap: jsonMap(env, 'INDEX_ID_MAP', DEFAULT_INDEX_IDS),
     seriesAssetMap,
     allowProxyIndex,
+    spotFeed: bool(env, 'SPOT_FEED', true),
     reconcileIntervalMs: num(env, 'RECONCILE_INTERVAL_MS', 45000, 5000, 600000),
     heartbeatTimeoutMs: num(env, 'HEARTBEAT_TIMEOUT_MS', 15000, 2000, 300000),
     alertTelegramToken: env.ALERT_TELEGRAM_TOKEN || undefined,

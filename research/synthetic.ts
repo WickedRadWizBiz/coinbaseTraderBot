@@ -21,12 +21,17 @@ export function writeSyntheticRecordings(dir: string, opts: { windows: number; s
   let x = Math.log(60000);
   // 10 minutes of warm-up index before the first window.
   const total = opts.windows * W + 600 + 120;
+  // Coinbase spot leads the settlement index by LEAD seconds (plus noise), so
+  // lead-lag features have real signal to find in synthetic data.
+  const LEAD = 3;
+  const walk: number[] = [];
+  for (let s = 0; s < total + LEAD; s++) { x += sigma * gauss(); walk.push(Math.exp(x)); }
   for (let s = 0; s < total; s++) {
     const t = start + s * 1000;
-    x += sigma * gauss();
-    const S = Math.exp(x);
+    const S = walk[s];
     hist.push(S);
     lines.push(JSON.stringify({ t, k: 'index', asset: 'BTC', value: S, ts: t, src: 'synthetic' }));
+    lines.push(JSON.stringify({ t, k: 'spot', asset: 'BTC', value: walk[s + LEAD] * (1 + 0.00002 * gauss()), ts: t }));
     const rel = s - 600;
     if (rel >= 0 && rel % W === 0 && rel / W < opts.windows) {
       const open = t, close = t + W * 1000;

@@ -11,7 +11,7 @@ import type { AuditLog } from './audit/auditLog';
 import type { Config } from './config';
 import type { ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
-import { buildFeatures } from './model/features';
+import { computeFeatureMap } from './model/featureEngine';
 import { fairValue, SETTLEMENT_AVG_SEC } from './model/fairValue';
 import type { MetaModel } from './model/metaModel';
 import type { Oms, OrderIntent } from './oms/oms';
@@ -253,9 +253,9 @@ export class Engine {
     const fv = fairValue({ spot: spot.value, strike, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, tauSec, observedAvg: observed });
     if (!fv) return block('fair value unavailable');
     const mid = (bid.price + ask.price) / 2;
-    const features = buildFeatures({
-      fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma,
-      spread: ask.price - bid.price, imbalance: book.imbalance(), inWindow: fv.regime !== 'pre_window',
+    const features = computeFeatureMap({
+      now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma,
+      inWindow: fv.regime !== 'pre_window', book, micro: md.features.micro.get(m.ticker), index: idx!, spot: md.spot.get(m.asset),
     });
     const pYes = model.predict(features, fv.pYes);
     Object.assign(st, { strike, strikeSource: m.strikeSource, spot: spot.value, sigma: vol.sigmaPerSqrtSec, fairValue: fv.pYes, pYes, bestBid: bid.price, bestAsk: ask.price, blocked: undefined });

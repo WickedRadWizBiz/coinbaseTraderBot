@@ -4,6 +4,45 @@ import { usePoll } from './usePoll';
 
 const fmt = (v: unknown, dp = 4) => (typeof v === 'number' ? v.toFixed(dp) : v === undefined || v === null ? '—' : String(v));
 
+const GROUP_LABEL: Record<string, string> = {
+  base: 'Base (fair value & book)',
+  micro: 'Microstructure (Kalshi book & trades)',
+  momentum: 'Momentum / TA (settlement index)',
+  spot: 'Spot lead-lag (Coinbase)',
+  time: 'Time of day',
+};
+
+function FeatureTable({ model }: { model: any }) {
+  const { data: feats } = usePoll<Array<{ name: string; group: string; description: string }>>('/features', 60_000);
+  if (!feats) return null;
+  const used = new Set<string>(model.kind === 'identity' ? [] : model.features);
+  const imp = new Map<string, number>((model.importance ?? []).map((i: any) => [i.feature, i.logLossIncrease]));
+  const groups = [...new Set(feats.map((f) => f.group))];
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="text-[11px] uppercase tracking-widest opacity-80">
+        Candidate features — {model.kind === 'identity' ? 'none in use (pure fair value until a model is trained)' : `${used.size} in use${model.selected ? ` · selected set: ${model.selected.set}, ${model.selected.hidden} hidden units` : ''}`}
+      </div>
+      {groups.map((g) => (
+        <div key={g} className="crt-border bg-black/30 p-3">
+          <div className="text-xs font-bold uppercase tracking-widest text-crypto-text mb-2">{GROUP_LABEL[g] ?? g}</div>
+          <table className="crt-table">
+            <tbody>
+              {feats.filter((f) => f.group === g).map((f) => (
+                <tr key={f.name}>
+                  <td className={used.has(f.name) ? 'text-crypto-success font-bold' : 'opacity-60'}>{used.has(f.name) ? '● ' : '○ '}{f.name}</td>
+                  <td className="opacity-70 normal-case whitespace-normal">{f.description}</td>
+                  <td className="text-right">{imp.has(f.name) ? `Δ logloss ${imp.get(f.name)!.toFixed(4)}` : ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function ModelView() {
   const { data: s } = usePoll<any>('/status', 5000);
   const m = s?.model;
@@ -43,6 +82,7 @@ export function ModelView() {
                 </tbody>
               </table>
             )}
+            <FeatureTable model={m} />
             {m.liveBlockers.length > 0 && (
               <div className="border border-yellow-500/40 bg-yellow-500/10 p-3 text-yellow-300 text-xs">
                 <div className="font-bold uppercase mb-1">Live trading blocked until:</div>

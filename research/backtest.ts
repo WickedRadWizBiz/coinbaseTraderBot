@@ -12,7 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import { loadConfig, type StrategyConfig, type RiskLimits } from '../bot/config';
 import { DEFAULT_FEES } from '../bot/fees';
-import { buildFeatures } from '../bot/model/features';
+import { computeFeatureMap } from '../bot/model/featureEngine';
 import { fairValue, SETTLEMENT_AVG_SEC } from '../bot/model/fairValue';
 import { MetaModel } from '../bot/model/metaModel';
 import type { OrderIntent } from '../bot/oms/oms';
@@ -101,7 +101,7 @@ export async function runBacktest(dir: string, model: MetaModel, strategy: Strat
       const fv = fairValue({ spot: spot.value, strike, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, tauSec, observedAvg: observed });
       if (!fv) continue;
       const mid = (bid.price + ask.price) / 2;
-      const pYes = model.predict(buildFeatures({ fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma, spread: ask.price - bid.price, imbalance: book.imbalance(), inWindow: fv.regime !== 'pre_window' }), fv.pYes);
+      const pYes = model.predict(computeFeatureMap({ now: st.now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma, inWindow: fv.regime !== 'pre_window', book, micro: st.features.micro.get(m.ticker), index: idx!, spot: st.spot.get(m.asset) }), fv.pYes);
       const ret = idx!.trailingLogReturn(st.now, strategy.fastMoveWindowSec * 1000);
       const fastMove = ret !== undefined && Math.abs(ret) > strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(strategy.fastMoveWindowSec);
       const bankroll = (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0);

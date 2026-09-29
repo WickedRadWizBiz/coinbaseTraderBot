@@ -7,6 +7,7 @@ import path from 'path';
 import readline from 'readline';
 import { IndexTracker } from '../bot/marketdata/indexTracker';
 import { OrderBook } from '../bot/marketdata/orderBook';
+import { FeatureHub } from '../bot/model/featureEngine';
 
 export interface RecMarket {
   ticker: string;
@@ -36,6 +37,9 @@ export class ReplayState {
   readonly books = new Map<string, OrderBook>();
   readonly index = new Map<string, IndexTracker>();
   readonly results = new Map<string, 'yes' | 'no'>();
+  readonly spot = new Map<string, IndexTracker>();
+  /** Same feature state machine production uses (MarketData.features). */
+  readonly features = new FeatureHub();
   now = 0;
 
   apply(e: RecEvent): void {
@@ -46,15 +50,30 @@ export class ReplayState {
         break;
       case 'index': {
         let tr = this.index.get(e.asset);
-        if (!tr) { tr = new IndexTracker(e.asset, 30 * 60_000); this.index.set(e.asset, tr); }
+        if (!tr) { tr = new IndexTracker(e.asset); this.index.set(e.asset, tr); }
         tr.add(e.value, e.ts ?? e.t);
         break;
       }
-      case 'book':
-        this.book(e.ticker).applySnapshot({ bids: e.bids ?? [], asks: e.asks ?? [] }, e.t);
+      case 'spot': {
+        let tr = this.spot.get(e.asset);
+        if (!tr) { tr = new IndexTracker(e.asset); this.spot.set(e.asset, tr); }
+        tr.add(e.value, e.ts ?? e.t);
         break;
-      case 'delta':
-        this.book(e.ticker).applyDelta(e.side, e.price, e.delta, e.t);
+      }
+      case 'book': {
+        const b = this.book(e.ticker);
+        b.applySnapshot({ bids: e.bids ?? [], asks: e.asks ?? [] }, e.t);
+        this.features.onBook(e.ticker, b, e.t);
+        break;
+      }
+      case 'delta': {
+        const b = this.book(e.ticker);
+        b.applyDelta(e.side, e.price, e.delta, e.t);
+        this.features.onBook(e.ticker, b, e.t);
+        break;
+      }
+      case 'trade':
+        this.features.onTrade(e.ticker, e.count, e.takerSide, e.ts ?? e.t);
         break;
       case 'result':
         this.results.set(e.ticker, e.result);

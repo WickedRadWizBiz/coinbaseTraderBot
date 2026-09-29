@@ -22,7 +22,7 @@ export class IndexTracker {
   constructor(
     readonly asset: string,
     /** How much history to keep (ms). */
-    private readonly retainMs = 20 * 60_000,
+    private readonly retainMs = 40 * 60_000,
     /** EWMA half-life in seconds for the variance estimate. */
     private readonly volHalfLifeSec = 300,
   ) {}
@@ -102,6 +102,33 @@ export class IndexTracker {
     if (to - t > maxGapMs) return undefined;
     area += v * (to - t);
     return { avg: area / (to - from), coveredMs: to - from };
+  }
+
+  /**
+   * Values resampled on a 1 s grid (last print at or before each second) for
+   * the trailing `seconds`, oldest first. Undefined if the window is not
+   * covered or has a hole longer than `maxGapMs`.
+   */
+  series(now: number, seconds: number, maxGapMs = 5000): number[] | undefined {
+    const pts = this.points;
+    const start = now - seconds * 1000;
+    let i = pts.length - 1;
+    while (i >= 0 && pts[i].ts > start) i--;
+    if (i < 0 || start - pts[i].ts > maxGapMs) return undefined;
+    const out: number[] = [];
+    let j = i;
+    let lastTs = pts[i].ts;
+    for (let k = 0; k <= seconds; k++) {
+      const t = start + k * 1000;
+      while (j + 1 < pts.length && pts[j + 1].ts <= t) {
+        j++;
+        if (pts[j].ts - lastTs > maxGapMs) return undefined;
+        lastTs = pts[j].ts;
+      }
+      out.push(pts[j].value);
+    }
+    if (now - lastTs > maxGapMs) return undefined;
+    return out;
   }
 
   /** Log return over the trailing window, for fast-move detection. */

@@ -18,6 +18,7 @@ import type { Oms } from '../oms/oms';
 import { PositionBook } from '../oms/positions';
 import type { KillSwitch } from '../risk/killSwitch';
 import type { Reconciler } from '../recon/reconciler';
+import { FEATURES } from '../model/featureEngine';
 import type { MetaModel } from '../model/metaModel';
 import type { Tca } from '../tca/tca';
 import type { MarketData } from '../marketdata/marketData';
@@ -91,7 +92,15 @@ export function createApi(d: ApiDeps): express.Express {
       mode: d.cfg.mode,
       kalshiEnv: d.cfg.kalshiEnv,
       uptimeSec: Math.round((Date.now() - d.startedAt) / 1000),
-      model: { id: d.model.id, kind: d.model.params.kind, liveBlockers: d.model.liveBlockers(), validation: d.model.params.validation ?? null },
+      model: {
+        id: d.model.id,
+        kind: d.model.params.kind,
+        features: d.model.params.features,
+        selected: d.model.params.training?.selected ?? null,
+        importance: d.model.params.training?.holdoutImportance ?? null,
+        liveBlockers: d.model.liveBlockers(),
+        validation: d.model.params.validation ?? null,
+      },
       kill: d.kill.status(),
       haltReasons: d.engine.haltReasons(),
       recon: d.recon.lastResult ?? null,
@@ -117,6 +126,9 @@ export function createApi(d: ApiDeps): express.Express {
   });
 
   api.get('/tca', (_req, res) => res.json(d.tca.summary()));
+
+  // Candidate feature registry (for the Strategy Brain view).
+  api.get('/features', (_req, res) => res.json(Object.entries(FEATURES).map(([name, f]) => ({ name, group: f.group, description: f.description }))));
 
   // Depth view: the contract's YES book as the bot sees it.
   api.get('/order-book/:ticker', (req, res) => {
