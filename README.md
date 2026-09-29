@@ -118,7 +118,7 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 | % TP/SL and trailing stops on binaries | Removed. The bot holds to settlement and exits only when the bid beats fair value by the fee plus a buffer. |
 | USDT-dominance, Ichimoku, VPIN gates; trade-ID-tuned gates | Removed. |
 | Paper "blowout reset" | Removed. The paper exchange never refills. |
-| Cosmetic modules (Avellaneda-Stoikov, jump-diffusion, Kalman, Bayesian Kelly, HRP, Almgren-Chriss, "SR 11-7") | Not part of the new build. See the legacy note below. |
+| Cosmetic modules (Avellaneda-Stoikov, jump-diffusion, Kalman, Bayesian Kelly, HRP, Almgren-Chriss, "SR 11-7"), the Python bot, patch scripts, committed state, second lockfile | Deleted. |
 | Legacy `/portfolio/orders` | Orders go to `POST /portfolio/events/orders` (V2) with `post_only`, `self_trade_prevention_type`, `expiration_time` and `cancel_order_on_pause`. |
 | Risk gateway (fail closed) | `bot/risk/riskGateway.ts`. It checks: per-order, per-window (correlated, no netting), total and daily-loss limits; price collar vs fair value and vs the touch; longshot guard; stale book and index; throttles; time to close. |
 | OMS state machine and idempotency | `bot/oms/`. The id is persisted before send. Acceptance is not a fill. Fills are de-duplicated. Exits stay tracked until confirmed. |
@@ -155,4 +155,4 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 
 ## Legacy code
 
-The previous implementation (`server_app.ts`, the `*Engine.ts` modules, `kalshiFixEngine.ts`, the Python bot, the `fix_*`/`patch*`/`check_*` scripts, `src/`, and committed state such as `audit_memory.json`) is **not built, bundled or deployed** by v2. `package.json`, `tsconfig.json` and the deploy workflow only reference `bot/`, `research/`, `tests/`, `web/` and `scripts/`. Those files should be deleted in a follow-up commit. Git history keeps them.
+The previous implementation was removed in v2. That covers `server_app.ts`, the `*Engine.ts` modules, `kalshiFixEngine.ts`, the Python bot, the `fix_*`/`patch*`/`check_*` scripts, the old `src/` frontend, `bun.lock`, and committed state such as `audit_memory.json`. Git history still has it.
