@@ -42,6 +42,8 @@ export interface PreTradeEvaluationResult {
   recommendedSL: number;
   recommendedTP: number;
   executionOrderType?: 'MARKET_ORDER' | 'POST_ONLY_LIMIT';
+  isToxicFlow?: boolean;
+  spreadWideningBps?: number;
 }
 
 export class PreTradeRiskManager {
@@ -200,7 +202,10 @@ export class PreTradeRiskManager {
       code: 'APPROVED',
       recommendedSL,
       recommendedTP,
-      executionOrderType: validatorResult.executionOrderType
+      executionOrderType: validatorResult.executionOrderType,
+      isToxicFlow: validatorResult.isToxicFlow,
+      spreadWideningBps: validatorResult.spreadWideningBps,
+      reason: validatorResult.reason
     };
   }
 

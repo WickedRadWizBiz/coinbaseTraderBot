@@ -25,6 +25,7 @@ import { SlippageEngine } from "./slippage_engine";
 import { FeatureExtractor, IncompleteFeatureSnapshotError, StaleFeatureException, FeatureStore } from "./FeatureExtractor";
 import { PreTradeRiskManager } from "./PreTradeRiskManager";
 import { SignalValidator } from "./SignalValidator";
+import { computeDynamicMarketRegime } from "./macroRegime";
 import { contractLaneQueueManager, ContractExecutionLane } from "./contractLaneQueue";
 
 /**
@@ -229,6 +230,9 @@ const PORT = (process.env.PORT && process.env.PORT !== '8080') ? Number(process.
 export function getGeminiApiKey(): string | undefined {
   return resolveGeminiApiKey();
 }
+
+// Track measured historical slippage by symbol to dynamically scale down altcoin sizing
+export const historicalSlippageBySymbol: Record<string, number> = {};
 
 // Global variables to store bot state and settings
 let settings = {
@@ -3588,13 +3592,14 @@ async function openPosition(
 
   // [LIQUIDITY TIERING & ORDER SIZING NORMALIZATION]
   // Dynamically scale down base order size for tail-risk altcoins, Order Book Imbalance variance, Volume Surge Ratio, and volatility ATR
+  const measuredHistoricalSlippage = historicalSlippageBySymbol[symbol] || (entryFeatures as any)?.historicalSlippageUsd || (entryFeatures as any)?.slippageUsd || 0.0;
   const liquiditySizing = SlippageEngine.calculateLiquidityTieredSizing({
     symbol,
     baseOrderSize: size,
     orderBookImbalance: extractedSnapshot.orderBookImbalance,
     volumeSurgeRatio: liveVolumeSurge,
     volatilityAtr: liveAtr,
-    historicalSlippageUsd: (entryFeatures as any)?.historicalSlippageUsd || 0.0
+    historicalSlippageUsd: measuredHistoricalSlippage
   });
   size = liquiditySizing.scaledOrderSize;
   positionCostUsd = isPerpContract ? size * entryPrice : size * currentContractCost;
@@ -3620,7 +3625,7 @@ async function openPosition(
   // [A] Limit Order Book (LOB) Market Making Transition (Maker vs. Taker) & Latency Adaptation
   const isElevatedVpin = (liveVpin >= 0.15);
   const isHighObImbalance = (extractedSnapshot.orderBookImbalance > 1.30);
-  const isExtremeOfiDivergence = (side === 'YES' && ofi < -0.06) || (side === 'NO' && ofi > 0.06);
+  const isExtremeOfiDivergence = (side === 'YES' && ofi < 0) || (side === 'NO' && ofi > 0);
   const isReversalOrCounterTrend = ((params as any)?.strategyName || analysisMeta?.patternType || label || '').includes('REVERSAL') || ((params as any)?.strategyName || analysisMeta?.patternType || label || '').includes('FLIP') || (side === 'NO' && extractedSnapshot.orderBookImbalance > 1.30);
   const isToxicFlow = isHighObImbalance || isElevatedVpin || isExtremeOfiDivergence || isReversalOrCounterTrend;
 
@@ -4681,81 +4686,6 @@ const AUDIT_FALLBACK_MODELS = [
   'gemini-pro-latest'
 ];
 const AUDIT_CANDIDATE_MODELS = [AUDIT_PRIMARY_MODEL, ...AUDIT_FALLBACK_MODELS];
-
-/**
- * Dynamic Multi-Timeframe Macro Regime Aggregator
- * Computes context-aware transitions (e.g. overbought RSI 77.4, BEARISH_DIVERGENCE,
- * BEARISH_CLOUD, or expanding Tether dominance) to eliminate regime blindness.
- */
-function computeDynamicMarketRegime({
-  symbol,
-  baseRegime,
-  rsi,
-  atr,
-  bandWidth,
-  ichimokuState,
-  deltaUsdtD,
-  usdtDominanceSignal,
-  patternType,
-  btcDominanceSignal,
-  deltaBtcD
-}: {
-  symbol?: string;
-  baseRegime?: string;
-  rsi?: number;
-  atr?: number;
-  bandWidth?: number;
-  ichimokuState?: string;
-  deltaUsdtD?: number;
-  usdtDominanceSignal?: string;
-  patternType?: string;
-  btcDominanceSignal?: string;
-  deltaBtcD?: number;
-}): string {
-  const isRisingUsdt = (usdtDominanceSignal === 'UP') || (deltaUsdtD !== undefined && deltaUsdtD > 0);
-  const isRisingBtcD = (btcDominanceSignal === 'UP') || (deltaBtcD !== undefined && deltaBtcD > 0.01);
-  const isFallingBtcD = (btcDominanceSignal === 'DOWN') || (deltaBtcD !== undefined && deltaBtcD < -0.01);
-  const currentRsi = rsi ?? 50.0;
-  const currentAtr = atr ?? 0.012;
-  const currentBbWidth = bandWidth ?? 0.03;
-  const cloud = ichimokuState ?? 'NEUTRAL_IN_CLOUD';
-  const sym = (symbol || '').toUpperCase();
-  const isAltcoin = !sym.includes('BTC');
-
-  // 1. Extreme overbought momentum (RSI >= 70 / 77.4) or Bearish Divergence or Bearish Cloud with expanding Tether dominance
-  if (currentRsi >= 70 || patternType === 'STRONG_BEARISH_DIVERGENCE' || cloud === 'BEARISH_CLOUD' || (isRisingUsdt && (sym.includes('SOL') || sym.includes('HYPE') || sym.includes('XRP') || sym.includes('ADA') || sym.includes('DOGE')))) {
-    if (currentRsi >= 75 || cloud === 'BEARISH_CLOUD' || patternType === 'STRONG_BEARISH_DIVERGENCE') {
-      return 'TRENDING_BEARISH';
-    }
-    return 'MEAN_REVERTING';
-  }
-
-  // 2. Extreme oversold momentum (RSI <= 30) or Bullish Divergence or Bullish Cloud with contracting Tether dominance
-  if (currentRsi <= 30 || patternType === 'STRONG_BULLISH_DIVERGENCE' || (cloud === 'BULLISH_CLOUD' && !isRisingUsdt)) {
-    if (cloud === 'BULLISH_CLOUD' && !isRisingUsdt) {
-      return 'TRENDING_BULLISH';
-    }
-    return 'MEAN_REVERTING';
-  }
-
-  // 3. Multi-timeframe BTC.D & USDT.D Regime shifts:
-  // When BTC dominance is contracting and USDT is not expanding, altcoins experience relief flow
-  if (isAltcoin && isFallingBtcD && !isRisingUsdt && currentRsi > 45 && currentRsi < 65) {
-    return 'TRENDING_BULLISH';
-  }
-
-  // 4. Low volatility / compression
-  if (currentBbWidth <= 0.025 && currentAtr <= 0.008) {
-    return 'CHOPPY_SIDEWAYS';
-  }
-
-  // 5. Prevent rigid TRENDING_BULLISH lockouts when local oscillators show exhaustion (RSI >= 65)
-  if (baseRegime === 'TRENDING_BULLISH' && (currentRsi >= 65 || isRisingUsdt || isRisingBtcD)) {
-    return 'MEAN_REVERTING';
-  }
-
-  return baseRegime || 'CHOPPY_SIDEWAYS';
-}
 
 /**
  * Sanitizes and enriches trade logs into structured empirical trade records.
@@ -6858,7 +6788,8 @@ setInterval(async () => {
           usdtDominanceSignal: scanUsdtSig,
           deltaUsdtD: scanDeltaUsdt,
           orderBookImbalance: scanObImbalance,
-          vpin: 0.22,
+          orderFlowImbalance: (spotTA as any)?.orderFlowImbalance || 0.0,
+          vpin: (spotTA as any)?.vpin || 0.05,
           volatilityAtr: spotTA.bandWidth || 0.015,
           is15mPattern: symbol.includes('15M') || symbol.includes('15m')
         });

@@ -178,14 +178,24 @@ export class SignalValidator {
     // When VPIN >= 0.15, OFI diverges against signal direction, or orderBookImbalance > 1.30, enforce Post-Only Limit Orders with spread widening
     const isElevatedVpin = params.vpin >= 0.15;
     const isHighImbalance = params.orderBookImbalance > 1.30;
-    const isOfiDiverging = (side === 'YES' && ofi < -0.04) || (side === 'NO' && ofi > 0.04);
+    // OFI diverges when buying into negative OFI or selling into positive OFI
+    const isOfiDiverging = (side === 'YES' && ofi < 0) || (side === 'NO' && ofi > 0);
     const isToxicFlow = isElevatedVpin || isHighImbalance || isOfiDiverging || isReversalSignal;
     const executionOrderType = isToxicFlow ? 'POST_ONLY_LIMIT' : 'MARKET_ORDER';
-    const spreadWideningBps = isElevatedVpin 
-      ? Math.round((params.vpin - 0.15) * 200 + 15) 
-      : isOfiDiverging 
-        ? 20 
-        : (isHighImbalance ? 18 : (isReversalSignal ? 15 : 0));
+
+    let spreadWideningBps = 0;
+    if (isElevatedVpin) {
+      spreadWideningBps = Math.max(16, Math.round((params.vpin - 0.15) * 200 + 16));
+    }
+    if (isOfiDiverging) {
+      spreadWideningBps = Math.max(spreadWideningBps, Math.max(16, Math.round(Math.abs(ofi) * 100 + 16)));
+    }
+    if (isHighImbalance) {
+      spreadWideningBps = Math.max(spreadWideningBps, 18);
+    }
+    if (isReversalSignal) {
+      spreadWideningBps = Math.max(spreadWideningBps, 15);
+    }
 
     // 4. Volatility-Adjusted Stop Loss (VASL) & Drawdown Limits
     // SL = entryPrice - (volatilityAtr * 1.5), capped at 3% maximum drawdown for 15M patterns
@@ -210,7 +220,7 @@ export class SignalValidator {
       maxDrawdownLimitPct,
       code: 'APPROVED',
       reason: isToxicFlow 
-        ? `[ADAPTIVE TOXIC FLOW GUARD] VPIN (${params.vpin.toFixed(4)}${isElevatedVpin ? ' >= 0.15' : ''}) or OB Imbalance (${params.orderBookImbalance.toFixed(2)}) elevated. Enforced Post-Only Limit with +${spreadWideningBps}bps spread widening.`
+        ? `[ADAPTIVE TOXIC FLOW GUARD] ${isElevatedVpin ? `VPIN (${params.vpin.toFixed(4)} >= 0.15) ` : ''}${isOfiDiverging ? `OFI divergence (${ofi.toFixed(4)} opposing ${side}) ` : ''}${isHighImbalance ? `OB Imbalance (${params.orderBookImbalance.toFixed(2)}) ` : ''}detected. Enforced Post-Only Limit with +${spreadWideningBps}bps spread widening.`
         : undefined
     };
   }

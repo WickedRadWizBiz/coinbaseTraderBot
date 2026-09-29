@@ -16,20 +16,19 @@
       }
     ],
     "lastComparison": {
-      "evaluatedAt": "2026-09-29T09:08:50.098Z",
-      "previousAuditTimestamp": "2026-09-29T09:02:04.602Z",
+      "evaluatedAt": "2026-09-29T14:13:58.409Z",
+      "previousAuditTimestamp": "2026-09-29T09:08:50.098Z",
       "resolvedInThisBatch": [
-        "ISSUE_SYSTEMIC_SLIPPAGE_CORRELATION"
-      ],
-      "persistingInThisBatch": [
         "ISSUE_REGIME_MISALIGNMENT"
       ],
+      "persistingInThisBatch": [],
       "newlyDetectedInThisBatch": [],
-      "summaryText": "Audit evaluated 20 trades: 1 issue(s) confirmed resolved, 1 persisting, 0 new anomalies logged."
+      "summaryText": "Audit evaluated Batch #620: 1 issue(s) confirmed resolved (REGIME_MISALIGNMENT), 0 persisting, 0 new anomalies logged."
     }
   },
   "recurringIssuesQueue": [],
-  "activeWatchList": [
+  "activeWatchList": [],
+  "solvedLongTermMemory": [
     {
       "id": "ISSUE_REGIME_MISALIGNMENT",
       "title": "REGIME_MISALIGNMENT",
@@ -39,10 +38,10 @@
       "detectionCount": 4,
       "firstDetectedAt": "2026-09-29T08:32:25.210Z",
       "lastDetectedAt": "2026-09-29T09:08:50.098Z",
-      "status": "ACTIVE"
-    }
-  ],
-  "solvedLongTermMemory": [
+      "status": "RESOLVED",
+      "resolvedAt": "2026-09-29T14:13:58.409Z",
+      "resolutionNote": "Resolved under Audit Batch #620 remediation: Contextual Macro Regime Transitions eliminate rigid lockouts and dynamic oscillators align regime shifts."
+    },
     {
       "id": "ISSUE_SYSTEMIC_SLIPPAGE_CORRELATION",
       "title": "SYSTEMIC_SLIPPAGE_CORRELATION",

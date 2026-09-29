@@ -25,6 +25,7 @@ from typing import List, Dict, Any
 from feature_extractor import FeatureExtractor, IncompleteFeatureSnapshotError
 from markout_simulator import MarkoutSimulator, calculateMarkoutTrajectories
 from FeatureSnapshotService import FeatureSnapshotService
+from pre_trade_risk_manager import PreTradeRiskManager
 
 
 def generate_candle_series(n: int, base_price: float = 2650.0, trend: float = 0.5) -> List[Dict[str, float]]:
@@ -260,6 +261,134 @@ class TestMarkoutTrajectoryCalculationUnclamping(unittest.TestCase):
 
         self.assertTrue(result['toxicOrderFlowAdverseSelection'], "Negative markout1s (< -15 bps) must trigger toxic flow flag")
         self.assertLess(result['markout1s'], -15.0)
+
+
+class TestAuditBatch620Remediation(unittest.TestCase):
+    """
+    SR 11-7 Compliance Remediation Suite for Audit Batch #620:
+    1. Adaptive Toxicity & Spread Quoting Guard:
+       - VPIN >= 0.15 enforces POST_ONLY_LIMIT with spread widening.
+       - OFI diverging against signal direction enforces POST_ONLY_LIMIT with spread widening.
+    2. Contextual Macro Regime Transitions:
+       - Prevent rigid TRENDING_BULLISH lockouts; compute rolling multi-timeframe BTC.D and local oscillator regime shifts.
+    3. Dynamic Liquidity Tiered Sizing:
+       - Scale down altcoin order sizing proportional to Order Book Imbalance variance and historical slippage parameters.
+    """
+
+    def test_batch_620_adaptive_toxicity_vpin_guard(self):
+        """Trade with VPIN >= 0.15 (e.g. VPIN=0.158) must enforce POST_ONLY_LIMIT with spread widening >= 16bps."""
+        eval_result = PreTradeRiskManager.evaluate_trade(
+            symbol='KXETH15M-26SEP290600-00',
+            side='YES',
+            market_regime='TRENDING_BULLISH',
+            delta_usdt_d=-0.005,
+            rsi=52.43,
+            atr=0.00435,
+            vpin=0.158,
+            candle_count=60,
+            order_book_imbalance=1.15,
+            order_flow_imbalance=0.05
+        )
+
+        self.assertTrue(eval_result['allowed'])
+        self.assertEqual(eval_result['execution_order_type'], 'POST_ONLY_LIMIT')
+        self.assertTrue(eval_result['is_toxic_flow'])
+        self.assertGreaterEqual(eval_result['spread_widening_bps'], 16)
+
+    def test_batch_620_adaptive_toxicity_ofi_divergence_guard(self):
+        """Trade with side='NO' and positive OFI (+0.0566) opposes signal -> enforce POST_ONLY_LIMIT with spread widening."""
+        eval_result = PreTradeRiskManager.evaluate_trade(
+            symbol='KXSOL15M-26SEP290615-15',
+            side='NO',
+            market_regime='TRENDING_BEARISH',
+            delta_usdt_d=0.0,
+            rsi=52.43,
+            atr=0.00435,
+            vpin=0.08,
+            candle_count=60,
+            order_book_imbalance=1.10,
+            order_flow_imbalance=0.0566  # Positive OFI opposes NO (sell) direction
+        )
+
+        self.assertTrue(eval_result['allowed'])
+        self.assertEqual(eval_result['execution_order_type'], 'POST_ONLY_LIMIT')
+        self.assertTrue(eval_result['is_toxic_flow'])
+        self.assertGreaterEqual(eval_result['spread_widening_bps'], 16)
+
+    def test_batch_620_contextual_macro_regime_exhaustion_transition(self):
+        """Prevent rigid TRENDING_BULLISH lockout when local oscillator is exhausted (RSI 72.5)."""
+        regime = PreTradeRiskManager.compute_dynamic_market_regime(
+            symbol='KXHYPE15M',
+            base_regime='TRENDING_BULLISH',
+            rsi=72.5,
+            atr=0.00435,
+            band_width=0.03
+        )
+        self.assertEqual(regime, 'MEAN_REVERTING', "Overbought RSI 72.5 must transition from TRENDING_BULLISH to MEAN_REVERTING")
+
+    def test_batch_620_contextual_macro_regime_altcoin_relief(self):
+        """Contracting BTC.D with non-expanding USDT.D provides relief rally transition for altcoins to TRENDING_BULLISH."""
+        regime = PreTradeRiskManager.compute_dynamic_market_regime(
+            symbol='KXSOL15M',
+            base_regime='CHOPPY_SIDEWAYS',
+            rsi=54.0,
+            atr=0.00435,
+            band_width=0.03,
+            btc_dominance_signal='DOWN',
+            delta_btc_d=-0.015,
+            usdt_dominance_signal='DOWN'
+        )
+        self.assertEqual(regime, 'TRENDING_BULLISH', "Falling BTC.D and contracting USDT.D must transition altcoins to TRENDING_BULLISH")
+
+    def test_batch_620_contextual_macro_regime_btc_drain(self):
+        """Surging BTC.D drains altcoin liquidity, preventing rigid TRENDING_BULLISH lockouts on altcoins."""
+        regime = PreTradeRiskManager.compute_dynamic_market_regime(
+            symbol='KXDOGE15M',
+            base_regime='TRENDING_BULLISH',
+            rsi=52.0,
+            atr=0.00435,
+            band_width=0.03,
+            btc_dominance_signal='UP',
+            delta_btc_d=0.02
+        )
+        self.assertEqual(regime, 'MEAN_REVERTING', "Surging BTC.D must prevent rigid TRENDING_BULLISH on altcoins")
+
+    def test_batch_620_dynamic_liquidity_tiered_sizing_altcoin_perps(self):
+        """
+        Scale down altcoin order sizing proportional to Order Book Imbalance variance and historical slippage:
+        - Trade 19050 (KXNEARPERP): historical slippage $0.1185 -> scaled to 1 contract
+        - Trade 150 (KXDOGEPERP): historical slippage $0.043 -> scaled to 1 contract
+        - Trade 36169 (KXSOL15M): historical slippage $0.4884 -> scaled to 1 contract
+        """
+        near_sizing = PreTradeRiskManager.calculate_liquidity_tiered_sizing(
+            symbol='KXNEARPERP',
+            base_order_size=10,
+            order_book_imbalance=1.15,
+            volume_surge_ratio=1.0,
+            volatility_atr=0.00435,
+            historical_slippage_usd=0.1185
+        )
+        self.assertLessEqual(near_sizing['scaled_order_size'], 1)
+
+        doge_sizing = PreTradeRiskManager.calculate_liquidity_tiered_sizing(
+            symbol='KXDOGEPERP',
+            base_order_size=10,
+            order_book_imbalance=1.20,
+            volume_surge_ratio=1.0,
+            volatility_atr=0.00429,
+            historical_slippage_usd=0.043
+        )
+        self.assertLessEqual(doge_sizing['scaled_order_size'], 1)
+
+        sol_sizing = PreTradeRiskManager.calculate_liquidity_tiered_sizing(
+            symbol='KXSOL15M',
+            base_order_size=10,
+            order_book_imbalance=1.35,
+            volume_surge_ratio=1.0,
+            volatility_atr=0.00435,
+            historical_slippage_usd=0.4884
+        )
+        self.assertLessEqual(sol_sizing['scaled_order_size'], 1)
 
 
 if __name__ == '__main__':

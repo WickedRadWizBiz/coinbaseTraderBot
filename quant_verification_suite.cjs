@@ -808,4 +808,121 @@ assert(clampedInputTest.markout1s !== clampedInputTest.markout60s, "Fallback unc
 
 console.log("✓ TEST 29 PASSED: Markout trajectories show dynamic time-series progressions with zero clamping.");
 
+// 30. Audit Batch #620: Adaptive Toxicity & Spread Quoting Guard
+console.log("\n[TEST 30] Testing Audit Batch #620 Adaptive Toxicity & Spread Quoting Guard...");
+// Case A: VPIN >= 0.15 enforces POST_ONLY_LIMIT with spread widening
+const test620Vpin = SignalValidator.validate({
+  symbol: 'KXETH15M-26SEP290600-00',
+  side: 'YES',
+  marketRegime: 'TRENDING_BULLISH',
+  ichimokuCloudState: 'BULLISH_CLOUD',
+  orderBookImbalance: 1.15,
+  orderFlowImbalance: 0.05,
+  vpin: 0.158,
+  volatilityAtr: 0.00435
+});
+console.log(`- Batch #620 VPIN Guard (VPIN 0.158): OrderType=${test620Vpin.executionOrderType}, isToxicFlow=${test620Vpin.isToxicFlow}, spreadWidening=${test620Vpin.spreadWideningBps}bps`);
+assert(test620Vpin.executionOrderType === 'POST_ONLY_LIMIT', "VPIN >= 0.15 must enforce POST_ONLY_LIMIT");
+assert(test620Vpin.isToxicFlow === true, "isToxicFlow must be true for VPIN >= 0.15");
+assert(test620Vpin.spreadWideningBps >= 16, "Spread widening must be >= 16bps");
+
+// Case B: OFI divergence opposing signal direction (Side: NO with positive OFI = +0.0566)
+const test620OfiDiv = SignalValidator.validate({
+  symbol: 'KXSOL15M-26SEP290615-15',
+  side: 'NO',
+  marketRegime: 'TRENDING_BEARISH',
+  ichimokuCloudState: 'BEARISH_CLOUD',
+  orderBookImbalance: 1.10,
+  orderFlowImbalance: 0.0566, // Positive OFI opposes NO (sell) signal
+  vpin: 0.08,
+  volatilityAtr: 0.00435
+});
+console.log(`- Batch #620 OFI Divergence (NO with +0.0566 OFI): OrderType=${test620OfiDiv.executionOrderType}, isToxicFlow=${test620OfiDiv.isToxicFlow}, spreadWidening=${test620OfiDiv.spreadWideningBps}bps`);
+assert(test620OfiDiv.executionOrderType === 'POST_ONLY_LIMIT', "OFI opposing NO signal must enforce POST_ONLY_LIMIT");
+assert(test620OfiDiv.isToxicFlow === true, "isToxicFlow must be true when OFI opposes signal");
+assert(test620OfiDiv.spreadWideningBps >= 16, "Spread widening must be >= 16bps for opposing OFI");
+console.log("✓ TEST 30 PASSED: Adaptive toxicity & spread quoting guard enforced for Batch #620.");
+
+// 31. Audit Batch #620: Contextual Macro Regime Transitions (Rolling BTC.D & Local Oscillators)
+console.log("\n[TEST 31] Testing Audit Batch #620 Contextual Macro Regime Transitions...");
+const { computeDynamicMarketRegime } = require('./macroRegime');
+
+// Case A: Prevent rigid TRENDING_BULLISH lockout when local oscillator exhausted (RSI 72.5 like KXHYPE15M / Trade 16377)
+const regExhausted = computeDynamicMarketRegime({
+  symbol: 'KXHYPE15M',
+  baseRegime: 'TRENDING_BULLISH',
+  rsi: 72.5,
+  atr: 0.00435,
+  bandWidth: 0.03
+});
+console.log(`- Exhaustion Transition (Base: TRENDING_BULLISH, RSI: 72.5): ${regExhausted}`);
+assert(regExhausted === 'MEAN_REVERTING', "Overbought RSI 72.5 must transition from TRENDING_BULLISH to MEAN_REVERTING");
+
+// Case B: Altcoin Relief Transition on contracting BTC.D and contracting USDT.D
+const regAltRelief620 = computeDynamicMarketRegime({
+  symbol: 'KXSOL15M',
+  baseRegime: 'CHOPPY_SIDEWAYS',
+  rsi: 54.0,
+  atr: 0.00435,
+  bandWidth: 0.03,
+  btcDominanceSignal: 'DOWN',
+  deltaBtcD: -0.015,
+  usdtDominanceSignal: 'DOWN'
+});
+console.log(`- Altcoin Relief Transition (Falling BTC.D, Contracting USDT.D): ${regAltRelief620}`);
+assert(regAltRelief620 === 'TRENDING_BULLISH', "Falling BTC.D with contracting USDT.D must transition altcoins to TRENDING_BULLISH");
+
+// Case C: Surging BTC.D drains altcoin liquidity, preventing rigid TRENDING_BULLISH on altcoins
+const regBtcDrain = computeDynamicMarketRegime({
+  symbol: 'KXDOGE15M',
+  baseRegime: 'TRENDING_BULLISH',
+  rsi: 52.0,
+  atr: 0.00435,
+  bandWidth: 0.03,
+  btcDominanceSignal: 'UP',
+  deltaBtcD: 0.02
+});
+console.log(`- BTC Dominance Drain Transition (Rising BTC.D +0.02%): ${regBtcDrain}`);
+assert(regBtcDrain === 'MEAN_REVERTING', "Surging BTC.D must prevent rigid TRENDING_BULLISH on altcoins");
+console.log("✓ TEST 31 PASSED: Contextual macro regime transitions active for Batch #620.");
+
+// 32. Audit Batch #620: Dynamic Liquidity Tiered Sizing for Altcoins
+console.log("\n[TEST 32] Testing Audit Batch #620 Dynamic Liquidity Tiered Sizing...");
+// Case A: KXNEARPERP (Trade #19050) with historical slippage $0.1185
+const nearPerpSizing = SlippageEngine.calculateLiquidityTieredSizing({
+  symbol: 'KXNEARPERP',
+  baseOrderSize: 10,
+  orderBookImbalance: 1.15,
+  volumeSurgeRatio: 1.0,
+  volatilityAtr: 0.00435,
+  historicalSlippageUsd: 0.1185
+});
+console.log(`- KXNEARPERP Sizing (Trade #19050, Slip $0.1185): Scaled=${nearPerpSizing.scaledOrderSize} contracts (Reason: ${nearPerpSizing.reason})`);
+assert(nearPerpSizing.scaledOrderSize <= 1, "KXNEARPERP with $0.1185 historical slippage must scale down to 1 contract");
+
+// Case B: KXDOGEPERP (Trade #150) with historical slippage $0.043
+const dogePerpSizing = SlippageEngine.calculateLiquidityTieredSizing({
+  symbol: 'KXDOGEPERP',
+  baseOrderSize: 10,
+  orderBookImbalance: 1.20,
+  volumeSurgeRatio: 1.0,
+  volatilityAtr: 0.00429,
+  historicalSlippageUsd: 0.043
+});
+console.log(`- KXDOGEPERP Sizing (Trade #150, Slip $0.043): Scaled=${dogePerpSizing.scaledOrderSize} contracts`);
+assert(dogePerpSizing.scaledOrderSize <= 1, "KXDOGEPERP with $0.043 historical slippage must scale down to 1 contract");
+
+// Case C: KXSOL15M (Trade #36169 / #36216) with extreme historical slippage $0.4884
+const solSlipSizing = SlippageEngine.calculateLiquidityTieredSizing({
+  symbol: 'KXSOL15M',
+  baseOrderSize: 10,
+  orderBookImbalance: 1.35,
+  volumeSurgeRatio: 1.0,
+  volatilityAtr: 0.00435,
+  historicalSlippageUsd: 0.4884
+});
+console.log(`- KXSOL15M Sizing (Trade #36169, Slip $0.4884): Scaled=${solSlipSizing.scaledOrderSize} contracts`);
+assert(solSlipSizing.scaledOrderSize <= 1, "KXSOL15M with $0.4884 historical slippage must scale down to 1 contract");
+console.log("✓ TEST 32 PASSED: Dynamic liquidity tiered sizing scales down altcoins to prevent implementation shortfall.");
+
 console.log("\nALL VERIFICATION TESTS COMPLETED SUCCESSFULLY!");
