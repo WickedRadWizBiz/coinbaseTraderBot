@@ -455,7 +455,7 @@ export class Engine {
           quote: { bid: b?.price, ask: a?.price, bidSize: b?.size, askSize: a?.size },
           book: book.isUsable(now, cfg.risk.maxBookAgeMs) ? book : undefined,
           flow: (() => {
-            const tr = md.features.micro.get(m.ticker)?.tradesIn(now, 60_000) ?? [];
+            const tr = md.features.micro.get(m.ticker)?.tradesIn(now, T.confWindowSec * 1000) ?? [];
             const tot = tr.reduce((x, y) => x + y.count, 0);
             return tot > 0 ? tr.reduce((x, y) => x + y.signed, 0) / tot : undefined;
           })(),

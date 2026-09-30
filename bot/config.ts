@@ -214,6 +214,23 @@ export interface TennisConfig {
   huntMinSignals: number;
   huntMaxSec: number;
   huntTrailTicks: number;
+  /** Tennis confluence thresholds (over confWindowSec): our mid up, taker flow, top-3 depth imbalance, opponent mid down. */
+  confWindowSec: number;
+  confMomentumCents: number;
+  confFlow: number;
+  confDepth: number;
+  confOpponentCents: number;
+  /** Signals required to ENTER: underdog before the start / once live; favorite re-entry. */
+  entryMinSignalsPre: number;
+  entryMinSignalsLive: number;
+  favEntryMinSignals: number;
+  /** Early is what matters for underdogs: full size before the start and for the first earlyFullSizeMin
+   * minutes, tapering to half size by the end of the entry window. */
+  earlyFullSizeMin: number;
+  /** Underdog positions age badly: from this match progress take any exit in profit; from the cut
+   * progress sell at the bid regardless (0 = off). */
+  underdogLateProgress: number;
+  underdogCutProgress: number;
 }
 
 export interface PerpsConfig {
@@ -541,7 +558,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       orderFrac: num(env, 'TENNIS_ORDER_FRAC', 0.05, 0.001, 0.25),
       underdogMax: num(env, 'TENNIS_UNDERDOG_MAX', 0.25, 0.02, 0.45),
       underdogMin: num(env, 'TENNIS_UNDERDOG_MIN', 0.08, 0.01, 0.45),
-      preStartMin: num(env, 'TENNIS_PRE_START_MIN', 15, 0, 240),
+      // Never more than 30 minutes before the published start.
+      preStartMin: num(env, 'TENNIS_PRE_START_MIN', 30, 0, 30),
       entryWindowMin: num(env, 'TENNIS_ENTRY_WINDOW_MIN', 20, 1, 240),
       maxSpread: num(env, 'TENNIS_MAX_SPREAD', 0.03, 0.01, 0.2),
       takeProfitCents: num(env, 'TENNIS_TP_CENTS', 0.06, 0.01, 0.5),
@@ -564,6 +582,17 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       huntMinSignals: num(env, 'TENNIS_HUNT_MIN_SIGNALS', 2, 1, 4),
       huntMaxSec: num(env, 'TENNIS_HUNT_MAX_SEC', 180, 0, 3600),
       huntTrailTicks: num(env, 'TENNIS_HUNT_TRAIL_TICKS', 2, 1, 20),
+      confWindowSec: num(env, 'TENNIS_CONF_WINDOW_SEC', 60, 10, 900),
+      confMomentumCents: num(env, 'TENNIS_CONF_MOMENTUM_CENTS', 0.01, 0.001, 0.5),
+      confFlow: num(env, 'TENNIS_CONF_FLOW', 0.2, 0.01, 1),
+      confDepth: num(env, 'TENNIS_CONF_DEPTH', 0.2, 0.01, 1),
+      confOpponentCents: num(env, 'TENNIS_CONF_OPPONENT_CENTS', 0.01, 0.001, 0.5),
+      entryMinSignalsPre: num(env, 'TENNIS_ENTRY_MIN_SIGNALS_PRE', 1, 0, 4),
+      entryMinSignalsLive: num(env, 'TENNIS_ENTRY_MIN_SIGNALS_LIVE', 2, 0, 4),
+      favEntryMinSignals: num(env, 'TENNIS_FAV_ENTRY_MIN_SIGNALS', 2, 0, 4),
+      earlyFullSizeMin: num(env, 'TENNIS_EARLY_FULL_SIZE_MIN', 10, 0, 240),
+      underdogLateProgress: num(env, 'TENNIS_UNDERDOG_LATE_PROGRESS', 0.35, 0, 1),
+      underdogCutProgress: num(env, 'TENNIS_UNDERDOG_CUT_PROGRESS', 0.6, 0, 1),
     },
   };
   return deepFreeze(cfg);

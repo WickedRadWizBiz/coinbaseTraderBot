@@ -26,8 +26,8 @@ export interface TennisBacktest {
 }
 
 /** Signed taker flow over the last minute, as the engine computes it. */
-function flowOf(st: ReplayState, ticker: string): number | undefined {
-  const tr = st.features.micro.get(ticker)?.tradesIn(st.now, 60_000) ?? [];
+function flowOf(st: ReplayState, ticker: string, windowSec = 60): number | undefined {
+  const tr = st.features.micro.get(ticker)?.tradesIn(st.now, windowSec * 1000) ?? [];
   const tot = tr.reduce((x, y) => x + y.count, 0);
   return tot > 0 ? tr.reduce((x, y) => x + y.signed, 0) / tot : undefined;
 }
@@ -85,7 +85,7 @@ export async function runTennisBacktest(dir: string, cfg: TennisConfig, bankroll
         const b = st.books.get(m.ticker);
         const p = pos.get(m.ticker);
         const usable = b?.isUsable(st.now, 10_000);
-        return { ticker: m.ticker, title: m.title, position: p?.yes ?? 0, avgEntry: p && p.yes > 0 ? -p.netCash / p.yes : undefined, quote: { bid: usable ? b!.bestBid()?.price : undefined, ask: usable ? b!.bestAsk()?.price : undefined }, book: usable ? b : undefined, flow: flowOf(st, m.ticker) };
+        return { ticker: m.ticker, title: m.title, position: p?.yes ?? 0, avgEntry: p && p.yes > 0 ? -p.netCash / p.yes : undefined, quote: { bid: usable ? b!.bestBid()?.price : undefined, ask: usable ? b!.bestAsk()?.price : undefined }, book: usable ? b : undefined, flow: flowOf(st, m.ticker, cfg.confWindowSec) };
       });
       const risk = tennisRisk();
       res.maxTennisRisk = Math.max(res.maxTennisRisk, risk);

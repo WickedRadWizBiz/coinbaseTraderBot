@@ -7,6 +7,7 @@ import { Engine } from '../bot/engine';
 import type { KalshiRest } from '../bot/kalshi/rest';
 import type { MarketInfo } from '../bot/kalshi/types';
 import { MarketData, Recorder } from '../bot/marketdata/marketData';
+import { OrderBook } from '../bot/marketdata/orderBook';
 import { contractKind } from '../bot/model/fairValue';
 import { MetaModel } from '../bot/model/metaModel';
 import { Oms } from '../bot/oms/oms';
@@ -21,6 +22,12 @@ const T = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).tennis;
 const t0 = 1_800_000_000_000;
 const mk = (ticker: string, bid: number, ask: number, o: Partial<MatchMarket> = {}): MatchMarket => ({ ticker, quote: { bid, ask, bidSize: 50, askSize: 50 }, position: 0, ...o });
 const budget = { bankroll: 1000, tennisRisk: 0, matchRisk: 0 };
+/** Market with a real book: `bidSize` vs `askSize` sets the depth-imbalance confluence signal. */
+const mkb = (ticker: string, bid: number, ask: number, bidSize: number, askSize: number, now: number, o: Partial<MatchMarket> = {}): MatchMarket => {
+  const book = new OrderBook(ticker);
+  book.applySnapshot({ bids: [{ price: bid, size: bidSize }], asks: [{ price: ask, size: askSize }] }, now);
+  return { ...mk(ticker, bid, ask, o), book };
+};
 
 test('defaults: 25% total tennis cap (and it cannot be raised above 25%)', () => {
   assert.equal(T.maxTotalFrac, 0.25);
@@ -39,7 +46,7 @@ test('sizing respects per-order, per-match and the 25% total cap', () => {
 
 test('underdog rule: skewed match about to start -> maker bid on the underdog; not when balanced', () => {
   const tr = new MatchTracker('E', T);
-  const snap = { event: 'E', now: t0, startTime: t0 + 10 * 60_000, closeTime: t0 + 86_400_000, markets: [mk('E-ALC', 0.84, 0.86), mk('E-DOG', 0.14, 0.17)] };
+  const snap = { event: 'E', now: t0, startTime: t0 + 10 * 60_000, closeTime: t0 + 86_400_000, markets: [mk('E-ALC', 0.84, 0.86), mkb('E-DOG', 0.14, 0.17, 300, 100, t0)] };
   const out = decideMatch(tr, snap, T, budget);
   assert.equal(out.phase, 'underdog_window');
   assert.equal(out.plans.length, 1);
@@ -64,7 +71,6 @@ test('fixed take-profit mode (TENNIS_TRAIL=false): resting take-profit at max(+6
   assert.deepEqual([tp.leg, tp.side, tp.count, tp.price], ['underdog_tp', 'ask', 100, 0.21]); // 0.15 + max(0.06, 0.06)
 });
 
-import { OrderBook } from '../bot/marketdata/orderBook';
 
 test('conservative price hunt: no confluence -> take the profit at the target; confluence -> hunt, then the next exit in profit', () => {
   const run = (tr: MatchTracker, now: number, dogBids: Array<[number, number]>, dogAsk: number, favBid: number, flow?: number) => {
@@ -113,7 +119,8 @@ test('conservative price hunt: no confluence -> take the profit at the target; c
 test('in-play detection without a start time, then favorite re-entry once half the match is done', () => {
   const tr = new MatchTracker('E', T);
   let now = t0;
-  const snap = (pFav: number) => ({ event: 'E', now, closeTime: t0 + 86_400_000, markets: [mk('E-A', pFav - 0.01, pFav + 0.01), mk('E-B', 1 - pFav - 0.01, 1 - pFav + 0.01)] });
+  // The leader's book leans to the bid side and buyers are lifting: 2 confluence signals.
+  const snap = (pFav: number) => ({ event: 'E', now, closeTime: t0 + 86_400_000, markets: [mkb('E-A', pFav - 0.01, pFav + 0.01, 300, 100, now, { flow: 0.5 }), mk('E-B', 1 - pFav - 0.01, 1 - pFav + 0.01)] });
   // Quiet pre-match: not live.
   for (let i = 0; i < 10; i++) { assert.equal(decideMatch(tr, snap(0.6), T, budget).phase, 'pre'); now += 30_000; }
   // A 4c move within 3 minutes: in play.
@@ -159,7 +166,7 @@ test('engine trades tennis inside its own 25% budget and keeps it out of the cry
   await md.refreshCatalog(now);
   assert.equal(md.markets.get('KXATPMATCH-E1-DOG')?.kind, 'match');
   md.book('KXATPMATCH-E1-FAV').applySnapshot({ bids: [{ price: 0.84, size: 100 }], asks: [{ price: 0.86, size: 100 }] }, Date.now());
-  md.book('KXATPMATCH-E1-DOG').applySnapshot({ bids: [{ price: 0.14, size: 100 }], asks: [{ price: 0.17, size: 100 }] }, Date.now());
+  md.book('KXATPMATCH-E1-DOG').applySnapshot({ bids: [{ price: 0.14, size: 300 }], asks: [{ price: 0.17, size: 100 }] }, Date.now());
   const paper = new PaperExchange(undefined, 200, (t) => md.books.get(t), () => ({ takerMultiplier: 1, makerMultiplier: 1 }));
   const kill = new KillSwitch(path.join(dir, 'kill.json'), audit);
   const oms = new Oms({ gateway: paper, audit, statePath: path.join(dir, 'oms.json'), feesFor: (t) => md.feesFor(t), sleep: async () => undefined });
@@ -194,7 +201,7 @@ test('tennis backtest: underdog bought pre-start, trailed up the bounce, sold wh
   for (let s = 0; s <= 3 * 3600; s += 5) {
     const t = t0 + s * 1000;
     // pre-start 0.14/0.17 -> bounce past the 0.21 target -> run to 0.30 (wall at 0.28) -> slip to 0.27 -> 0.19.
-    const dog = s < 1800 ? { bids: [{ price: 0.14, size: 100 }], asks: [{ price: 0.17, size: 100 }] }
+    const dog = s < 1800 ? { bids: [{ price: 0.14, size: 300 }], asks: [{ price: 0.17, size: 100 }] }
       : s < 3600 ? { bids: [{ price: 0.22, size: 300 }], asks: [{ price: 0.24, size: 100 }] }
       : s < 5400 ? { bids: [{ price: 0.30, size: 300 }, { price: 0.28, size: 400 }], asks: [{ price: 0.32, size: 100 }] }
       : s < 5460 ? { bids: [{ price: 0.27, size: 300 }], asks: [{ price: 0.29, size: 100 }] }
@@ -212,4 +219,71 @@ test('tennis backtest: underdog bought pre-start, trailed up the bounce, sold wh
   assert.ok(r.byLeg.underdog_trail?.fills > 0, JSON.stringify(r.byLeg));
   assert.ok(r.pnl > 0, `pnl ${r.pnl}`);
   assert.ok(r.maxTennisRisk <= 0.25 * 200 + 1e-9);
+});
+
+test('entries need tennis confluence: 1 signal pre-match, 2 live; thresholds are configurable', () => {
+  const start = t0 + 10 * 60_000;
+  const snap = (e: string, dog: MatchMarket, now = t0) => ({ event: e, now, startTime: start, closeTime: t0 + 86_400_000, markets: [mk(`${e}-FAV`, 0.84, 0.86), { ...dog, ticker: `${e}-DOG` }] });
+  // Flat, balanced book: no signal, no entry.
+  const flat = decideMatch(new MatchTracker('A', T), snap('A', mk('x', 0.14, 0.17)), T, budget);
+  assert.equal(flat.plans.length, 0);
+  assert.ok(flat.notes.some((n) => n.includes('waits for confluence: 0/4 < 1 (pre-match)')), JSON.stringify(flat.notes));
+  // The same book passes when the pre-match gate is configured to 0.
+  assert.equal(decideMatch(new MatchTracker('B', T), snap('B', mk('x', 0.14, 0.17)), { ...T, entryMinSignalsPre: 0 }, budget).plans[0]?.leg, 'underdog_entry');
+  // Depth threshold: a 300/100 book (imbalance 0.5) passes the default 0.2, not a 0.6 threshold.
+  assert.equal(decideMatch(new MatchTracker('C', T), snap('C', mkb('x', 0.14, 0.17, 300, 100, t0)), T, budget).plans.length, 1);
+  assert.equal(decideMatch(new MatchTracker('D', T), snap('D', mkb('x', 0.14, 0.17, 300, 100, t0)), { ...T, confDepth: 0.6 }, budget).plans.length, 0);
+  // Live (just started): one signal is not enough, two are.
+  const live = (e: string, flow?: number) => {
+    const tr = new MatchTracker(e, T);
+    tr.liveSince = start;
+    return decideMatch(tr, { ...snap(e, mkb('x', 0.14, 0.17, 300, 100, start + 60_000, { flow }), start + 60_000) }, T, budget);
+  };
+  const one = live('L1');
+  assert.equal(one.plans.length, 0);
+  assert.ok(one.notes.some((n) => n.includes('1/4 < 2 (live)')), JSON.stringify(one.notes));
+  assert.equal(live('L2', 0.5).plans[0]?.leg, 'underdog_entry');
+  // The favorite re-entry has its own gate.
+  assert.equal(T.favEntryMinSignals, 2);
+});
+
+test('underdog window opens at most 30 minutes before the start; early entries get full size, later ones taper', () => {
+  assert.equal(T.preStartMin, 30);
+  assert.throws(() => loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), TENNIS_PRE_START_MIN: '60' }));
+  const at = (minsBefore: number) => new MatchTracker('P', T).observe({ event: 'P', now: t0, startTime: t0 + minsBefore * 60_000, closeTime: t0 + 86_400_000, markets: [mk('P-A', 0.84, 0.86), mk('P-B', 0.14, 0.17)] });
+  assert.equal(at(29), 'underdog_window');
+  assert.equal(at(31), 'pre');
+  const sized = (minIn: number) => {
+    const tr = new MatchTracker('S', T);
+    tr.liveSince = t0;
+    const now = t0 + minIn * 60_000;
+    const out = decideMatch(tr, { event: 'S', now, startTime: t0, closeTime: t0 + 86_400_000, markets: [mk('S-FAV', 0.84, 0.86), mkb('S-DOG', 0.14, 0.17, 300, 100, now, { flow: 0.5 })] }, T, budget);
+    return out.plans[0]?.count ?? 0;
+  };
+  const full = sized(0);
+  assert.ok(full > 0);
+  assert.equal(sized(T.earlyFullSizeMin), full, 'full size through the first minutes');
+  const later = sized(T.entryWindowMin);
+  assert.ok(later < full && later >= Math.floor(full * 0.5 * 100) / 100 - 0.01, `${later} vs ${full}`);
+});
+
+test('underdogs lose late: past 35% of the match take any profit, past 60% sell regardless', () => {
+  const run = (minIn: number, bid: number, cfg = T) => {
+    const tr = new MatchTracker('U', cfg);
+    tr.liveSince = t0; tr.underdogTicker = 'U-DOG';
+    const now = t0 + minIn * 60_000;
+    return decideMatch(tr, { event: 'U', now, startTime: t0, closeTime: t0 + 86_400_000, markets: [mk('U-FAV', 1 - bid - 0.02, 1 - bid), mkb('U-DOG', bid, bid + 0.02, 300, 100, now, { position: 100, avgEntry: 0.15 })] }, cfg, budget);
+  };
+  // Early (20% of a 105-min Bo3): +2c is below the target, keep riding.
+  assert.equal(run(21, 0.17).plans.length, 0);
+  // 40% in: +2c is a profit the bids can fill -> take it.
+  const late = run(42, 0.17);
+  assert.deepEqual([late.plans[0]?.leg, late.plans[0]?.price, late.plans[0]?.reduceOnly], ['underdog_late', 0.17, true]);
+  // 40% in but under water: hold (no forced loss before the cut).
+  assert.equal(run(42, 0.13).plans.length, 0);
+  // 65% in: sell at the bid even at a loss.
+  const cut = run(68, 0.10);
+  assert.deepEqual([cut.plans[0]?.leg, cut.plans[0]?.price], ['underdog_cut', 0.10]);
+  // The cut can be switched off.
+  assert.equal(run(68, 0.10, { ...T, underdogCutProgress: 0 }).plans.length, 0);
 });

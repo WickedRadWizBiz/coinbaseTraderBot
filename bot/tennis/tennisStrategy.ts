@@ -64,7 +64,7 @@ export interface TennisPlan {
   postOnly: boolean;
   reduceOnly: boolean;
   timeInForce: 'good_till_canceled' | 'immediate_or_cancel';
-  leg: 'underdog_entry' | 'underdog_tp' | 'underdog_trail' | 'underdog_stop' | 'fav_entry' | 'fav_trail' | 'fav_stop';
+  leg: 'underdog_entry' | 'underdog_tp' | 'underdog_trail' | 'underdog_late' | 'underdog_cut' | 'underdog_stop' | 'fav_entry' | 'fav_trail' | 'fav_stop';
   why: string;
 }
 
@@ -165,20 +165,23 @@ export class MatchTracker {
 
 /**
  * Tennis confluence: tennis has no macro factors, but the book and tape of the two player
- * markets give four independent confirmations that a move in our favour is real:
- *   momentum     our player's mid rose >= 1c over the last minute
- *   flow         taker flow on our market over the last minute favours our player (>= +0.2)
- *   depth        top-3 book imbalance favours our player (bids heavier, >= +0.2)
- *   crossMarket  the opponent's market fell >= 1c over the same minute (the move is not one
- *                noisy book)
+ * markets give four independent confirmations that a move toward OUR player is real
+ * (thresholds configurable; defaults over the last 60 s):
+ *   momentum     our player's mid rose >= confMomentumCents (1c)
+ *   flow         taker flow on our market favours our player (>= confFlow, +0.2)
+ *   depth        top-3 book imbalance favours our player (bids heavier, >= confDepth, +0.2)
+ *   crossMarket  the opponent's market fell >= confOpponentCents (1c): the move is not one
+ *                noisy book
+ * Used to enter (underdog, favorite) and to decide whether to keep hunting past the target.
  */
-export function tennisConfluence(t: MatchTracker, m: MatchMarket, other: MatchMarket | undefined, now: number) {
-  const mom = t.midChange(m.ticker, now);
-  const oth = other ? t.midChange(other.ticker, now) : undefined;
-  const momentum = mom !== undefined && mom >= 0.01 - 1e-9;
-  const flow = m.flow !== undefined && m.flow >= 0.2;
-  const depth = m.book !== undefined && m.book.imbalance(3) >= 0.2;
-  const crossMarket = oth !== undefined && oth <= -0.01 + 1e-9;
+export function tennisConfluence(t: MatchTracker, m: MatchMarket, other: MatchMarket | undefined, now: number, cfg: TennisConfig) {
+  const w = cfg.confWindowSec * 1000;
+  const mom = t.midChange(m.ticker, now, w);
+  const oth = other ? t.midChange(other.ticker, now, w) : undefined;
+  const momentum = mom !== undefined && mom >= cfg.confMomentumCents - 1e-9;
+  const flow = m.flow !== undefined && m.flow >= cfg.confFlow - 1e-9;
+  const depth = m.book !== undefined && m.book.imbalance(3) >= cfg.confDepth - 1e-9;
+  const crossMarket = oth !== undefined && oth <= -cfg.confOpponentCents + 1e-9;
   return { score: [momentum, flow, depth, crossMarket].filter(Boolean).length, momentum, flow, depth, crossMarket };
 }
 
@@ -207,7 +210,7 @@ function nextFillableExit(m: MatchMarket, minPx: number): number | undefined {
  */
 function huntExit(t: MatchTracker, m: MatchMarket, other: MatchMarket | undefined, entry: number, target: number, now: number, cfg: TennisConfig, tick: number, leg: 'underdog_trail' | 'fav_trail', notes: string[]): TennisPlan[] {
   const bid = m.quote.bid;
-  const sig = tennisConfluence(t, m, other, now);
+  const sig = tennisConfluence(t, m, other, now, cfg);
   t.signals.set(m.ticker, sig);
   if (!t.armed.has(m.ticker)) {
     if (bid === undefined || bid < target - 1e-9) {
@@ -306,10 +309,25 @@ export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig
     const entry = ud.avgEntry ?? ud.quote.bid ?? 0;
     const target = Math.min(0.99, Math.max(entry + cfg.takeProfitCents, entry * (1 + cfg.takeProfitPct)));
     const tpPx = floorToTick(target + tick - 1e-9, tick); // target rounded up to the tick
+    const prog = t.progress(s.now, s.markets);
+    const other = s.markets.find((x) => x.ticker !== ud.ticker);
+    if (cfg.underdogCutProgress > 0 && prog >= cfg.underdogCutProgress && ud.quote.bid !== undefined) {
+      // Underdogs usually lose late: salvage what the position is still worth.
+      plans.push({ ticker: ud.ticker, side: 'ask', price: ud.quote.bid, count: ud.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg: 'underdog_cut', why: `match ${(prog * 100).toFixed(0)}% done: underdogs usually lose late, selling at ${ud.quote.bid}` });
+      return { phase, plans, notes };
+    }
+    if (prog >= cfg.underdogLateProgress && ud.quote.bid !== undefined && ud.quote.bid >= entry + tick - 1e-9) {
+      // Past the early phase: no more hunting, take the next available exit in profit.
+      const px = nextFillableExit(ud, round(entry + tick, 4));
+      if (px !== undefined) {
+        plans.push({ ticker: ud.ticker, side: 'ask', price: round(px, 4), count: ud.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg: 'underdog_late', why: `match ${(prog * 100).toFixed(0)}% done: taking the profit while the underdog is still ahead` });
+        return { phase, plans, notes };
+      }
+    }
     if (cfg.trail) {
       // Ratcheting trail from the target: no fixed exit; the stop starts at the target and climbs
       // to order-book walls the price moves past.
-      plans.push(...huntExit(t, ud, s.markets.find((x) => x.ticker !== ud.ticker), entry, tpPx, s.now, cfg, tick, 'underdog_trail', notes));
+      plans.push(...huntExit(t, ud, other, entry, tpPx, s.now, cfg, tick, 'underdog_trail', notes));
     } else if (ud.quote.bid !== undefined && ud.quote.bid >= tpPx - 1e-9) {
       // The bounce already went past the target: take the profit at the bid now.
       plans.push({ ticker: ud.ticker, side: 'ask', price: ud.quote.bid, count: ud.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg: 'underdog_tp', why: `underdog bid ${ud.quote.bid} >= take-profit ${round(tpPx, 2)} (entry ${round(entry, 3)})` });
@@ -333,13 +351,23 @@ export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig
     else if (pU < cfg.underdogMin) notes.push(`underdog ${pU.toFixed(2)} below ${cfg.underdogMin}: too long a shot`);
     else if (!m) notes.push('underdog market not listed');
     else {
+      // Entry confirmation: the tennis confluence must be leaning toward the underdog.
+      const pre = t.liveSince === undefined;
+      const sig = tennisConfluence(t, m, s.markets.find((x) => x.ticker !== m.ticker), s.now, cfg);
+      t.signals.set(m.ticker, sig);
+      const need = pre ? cfg.entryMinSignalsPre : cfg.entryMinSignalsLive;
+      // Early is what matters: full size before the start and in the first minutes, tapering after.
+      const minIn = pre ? 0 : (s.now - t.liveSince!) / 60_000;
+      const span = Math.max(1e-9, cfg.entryWindowMin - cfg.earlyFullSizeMin);
+      const early = minIn <= cfg.earlyFullSizeMin ? 1 : Math.max(0.5, 1 - (0.5 * (minIn - cfg.earlyFullSizeMin)) / span);
       const px = makerBid(m.quote, tick, cfg.maxSpread);
-      const n = px ? tennisSize(px, cfg, budget) : 0;
-      if (!px) notes.push('underdog book too wide or one-sided');
+      const n = px ? Math.floor(tennisSize(px, cfg, budget) * early * 100) / 100 : 0;
+      if (sig.score < need) notes.push(`underdog entry waits for confluence: ${sig.score}/4 < ${need} (${pre ? 'pre-match' : 'live'})`);
+      else if (!px) notes.push('underdog book too wide or one-sided');
       else if (n <= 0) notes.push('tennis budget exhausted');
       else {
         t.underdogTicker = m.ticker;
-        plans.push({ ticker: m.ticker, side: 'bid', price: px, count: n, postOnly: true, reduceOnly: false, timeInForce: 'good_till_canceled', leg: 'underdog_entry', why: `underdog ${pU.toFixed(2)} vs favorite ${(1 - pU).toFixed(2)}` });
+        plans.push({ ticker: m.ticker, side: 'bid', price: px, count: n, postOnly: true, reduceOnly: false, timeInForce: 'good_till_canceled', leg: 'underdog_entry', why: `underdog ${pU.toFixed(2)} vs favorite ${(1 - pU).toFixed(2)}, confluence ${sig.score}/4, ${pre ? 'pre-match' : `${minIn.toFixed(0)} min in`}${early < 1 ? `, size x${early.toFixed(2)}` : ''}` });
       }
     }
     return { phase, plans, notes };
@@ -371,9 +399,12 @@ export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig
     else if (chg < -cfg.favStableCents) notes.push(`leader slipping ${(chg * 100).toFixed(1)}c over 5 min`);
     else if (!m) notes.push('leader market not listed');
     else {
+      const sig = tennisConfluence(t, m, s.markets.find((x) => x.ticker !== m.ticker), s.now, cfg);
+      t.signals.set(m.ticker, sig);
       const px = makerBid(m.quote, tick, cfg.maxSpread);
       const n = px ? tennisSize(px, cfg, budget) : 0;
-      if (!px) notes.push('leader book too wide or one-sided');
+      if (sig.score < cfg.favEntryMinSignals) notes.push(`favorite entry waits for confluence: ${sig.score}/4 < ${cfg.favEntryMinSignals}`);
+      else if (!px) notes.push('leader book too wide or one-sided');
       else if (n <= 0) notes.push('tennis budget exhausted');
       else plans.push({ ticker: m.ticker, side: 'bid', price: px, count: n, postOnly: true, reduceOnly: false, timeInForce: 'good_till_canceled', leg: 'fav_entry', why: `leader ${pL.toFixed(2)} at ${(t.progress(s.now, s.markets) * 100).toFixed(0)}% of the match` });
     }
