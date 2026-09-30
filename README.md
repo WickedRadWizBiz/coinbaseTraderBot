@@ -266,7 +266,15 @@ The backtest mirrors the engine: cadence-gated entries, entry windows, target-EV
 - **Liquidity ratchet.** Stops sit at exit-side book levels big enough to absorb the whole position (`--ratchet-fill`) that have persisted for `--ratchet-age` seconds. The stop ratchets up as price moves past higher walls. If price comes back down to the stop, the bot exits with an immediate-or-cancel order limited to the stop minus `--ratchet-slip` ticks. A gap through the stop falls back to the next wall down.
 - **Hybrid.** The same ratchet, but a triggered stop only exits if the model agrees the position is worth less than the stop.
 
-- **Confluence ratchet ("let the winner run").** Normally the fair-value exit applies. The bot switches to hunt mode only when a position has beaten its entry fair value by `--hunt-margin` AND the confluence score oriented to the position is at least `--hunt-confluence`. In hunt mode the liquidity ratchet manages the exit and nothing else may reduce the position: no fair-value exit, no opposite quote, no opposite takes. Hunt mode turns off if confluence flips against the position, or if the price gives back the outperformance before a stop forms. It is available live as the opt-in `EXIT_POLICY=confluence_ratchet` (default `fair_value`), and the dashboard shows HUNTING with the target and stop.
+- **Confluence ratchet ("let the winner run").** Normally the fair-value exit applies. The bot switches to hunt mode only when a position has beaten its entry fair value by `--hunt-margin` AND the confluence score oriented to the position is at least `--hunt-confluence`. In hunt mode an **order-book ratcheting trailing stop** manages the exit, and nothing else may reduce the position: no fair-value exit, no opposite quote, no opposite takes.
+  - The stop starts **at the target** as soon as hunting begins, which locks that profit.
+  - As the surge continues, the stop ratchets up to each exit-side level the price moves past that could actually fill the whole position: size at least `--ratchet-fill` × position, persisting for `--ratchet-age` seconds.
+  - When the surge reverses below the stop, the bot exits reduce-only at the stop minus `--ratchet-slip` ticks.
+  - It takes the profit early at the bid, never below the lock, if confluence flips against the position or the session turns unsafe for book-anchored stops.
+  - A gap through the stop sells at the bid while that is still above the entry fair value. Below it, hunt mode ends and the fair-value exit takes over.
+  - **Evaluated in research.** `research:backtest` runs hunt mode over a grid of target margins (`--hunt-grid`, default 1/2/4¢) and wall fill ratios (`--ratchet-fill-grid`, default 1×/2×). Every variant counts toward the Deflated Sharpe. The best variant is compared with the fair-value exit window by window, and `--annotate` writes the result into the model file as `validation.exitEvaluation`. `huntOk` requires at least 300 windows, a paired bootstrap CI lower bound above 0, and a deflated probability above 0.95.
+  - With a passing evaluation the engine uses the winning parameters. In live mode an unevaluated or losing hunt mode falls back to the fair-value exit, and the dashboard says so.
+  - It is available as the opt-in `EXIT_POLICY=confluence_ratchet`, and the dashboard shows HUNTING with the target and stop.
 
 Every exit executes one tick after it triggers. The exit policy governs all active reductions, so taker entries against a position are blocked under hold and ratchet. The diagnostics report:
 - exit regret: settlement value of the exited contracts minus exit proceeds
@@ -302,7 +310,7 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 | Kill switch | Persists on disk, survives restart, auto-trips on loss limit, repeated order errors, persistent break or a stalled heartbeat. Resting orders also carry an exchange-side `expiration_time` as a dead-man switch. |
 | Fee-correct PnL | Exact fee formula with round-up. Uses exchange-reported fees when present. Wins and losses are labelled after fees at settlement. |
 | Data recorder, fill simulator, TCA, alerts, audit log | Recorder: `marketdata/`. Fill simulator: `paper/` (queue position, trade-through fills). TCA: `tca/` (markouts). Alerts: Telegram or webhook. Audit log: hash-chained JSONL, checked with `npm run audit:verify`. |
-| Tests / CI | 194 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
+| Tests / CI | 196 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
 
 ## Things you must do yourself
 

@@ -153,27 +153,33 @@ test('in hunt mode the liquidity ratchet manages the exit', () => {
   hunt(h, { sideBid: 0.62, confluence: 3, b, now: 1000 });         // activate; wall at 0.59 starts aging
   const armed = hunt(h, { sideBid: 0.62, confluence: 3, b, now: 4500 });
   assert.equal(armed.stop, 0.59);
-  b = book([[0.59, 30]], [[0.63, 10]]);                               // price comes back to the wall
-  const out = hunt(h, { sideBid: 0.59, confluence: 3, b, now: 5500 });
+  b = book([[0.58, 30]], [[0.63, 10]]);                               // the surge reverses below the wall
+  const out = hunt(h, { sideBid: 0.58, confluence: 3, b, now: 5500 });
   assert.equal(out.mode, 'hunt');
   assert.equal(out.plan?.side, 'ask');
   assert.equal(out.plan?.price, 0.58);
 });
 
-test('hunt mode turns off when confluence flips or the move is given back before a stop forms', () => {
-  const b = book([[0.6, 8]], [[0.63, 10]]); // no wall below the bid: no stop can form
+test('hunt mode locks the target at activation; takes profit on a confluence flip; exits on reversal; ends on a deep gap', () => {
+  const b = book([[0.6, 8]], [[0.63, 10]]); // no wall below the bid: the stop stays at the lock
   const h = new ConfluenceRatchetExit(H, P);
   hunt(h, { qSide: 0.55, sideBid: 0.5, b, now: 0 });
-  assert.equal(hunt(h, { sideBid: 0.6, confluence: 3, b, now: 1000 }).mode, 'hunt');
+  const on = hunt(h, { sideBid: 0.6, confluence: 3, b, now: 1000 });
+  assert.deepEqual([on.mode, on.event, on.stop], ['hunt', 'activated', 0.57], 'stop starts at the target (entry fv 0.55 + 0.02)');
   const flip = hunt(h, { sideBid: 0.6, confluence: -2, b, now: 2000 });
-  assert.equal(flip.mode, 'fair_value');
-  assert.equal(flip.event, 'deactivated_confluence');
+  assert.deepEqual([flip.mode, flip.event, flip.plan?.side, flip.plan?.price], ['hunt', 'profit_take_confluence', 'ask', 0.6]);
 
   const g = new ConfluenceRatchetExit(H, P);
   hunt(g, { qSide: 0.55, sideBid: 0.5, b, now: 0 });
   hunt(g, { sideBid: 0.6, confluence: 3, b, now: 1000 });
-  const back = hunt(g, { sideBid: 0.54, confluence: 3, b, now: 2000 });
-  assert.equal(back.event, 'deactivated_giveback');
+  const rev = hunt(g, { sideBid: 0.56, confluence: 3, b: book([[0.56, 8]], [[0.6, 10]]), now: 2000 });
+  assert.deepEqual([rev.event, rev.plan?.price], ['triggered', 0.56], 'reversal below the lock exits at the lock minus one tick');
+
+  const k = new ConfluenceRatchetExit(H, P);
+  hunt(k, { qSide: 0.55, sideBid: 0.5, b, now: 0 });
+  hunt(k, { sideBid: 0.6, confluence: 3, b, now: 1000 });
+  const deep = hunt(k, { sideBid: 0.5, confluence: 3, b: book([[0.5, 8]], [[0.53, 10]]), now: 2000 });
+  assert.deepEqual([deep.mode, deep.event], ['fair_value', 'deactivated_giveback'], 'gapped below the entry fair value: fair-value exit takes over');
 });
 
 test('confluence is oriented to the position: long NO hunts on bearish confluence', () => {
@@ -182,4 +188,41 @@ test('confluence is oriented to the position: long NO hunts on bearish confluenc
   hunt(h, { position: -5, qSide: 0.55, sideBid: 0.5, b, now: 0 });
   assert.equal(hunt(h, { position: -5, sideBid: 0.62, confluence: 3, b, now: 1000 }).mode, 'fair_value', 'bullish confluence does not help a NO');
   assert.equal(hunt(h, { position: -5, sideBid: 0.62, confluence: -3, b, now: 2000 }).mode, 'hunt');
+});
+
+import { evaluateHunt, type BacktestResult } from '../research/backtest';
+
+test('hunt mode is evaluated against the fair-value exit on identical windows; only a clear win enables it', () => {
+  const mkRes = (policy: 'fair_value' | 'confluence_ratchet', perWindow: (i: number) => number, margin = 0.02): BacktestResult => {
+    const windows = new Map<number, { pnl: number; contracts: number; fees: number }>();
+    let pnl = 0;
+    for (let i = 0; i < 400; i++) { const p = perWindow(i); windows.set(i * 900_000, { pnl: p, contracts: 5, fees: 0 }); pnl += p; }
+    return {
+      exitPolicy: policy, label: policy, huntParams: policy === 'confluence_ratchet' ? { hunt: { targetMargin: margin, minConfluence: 2 }, ratchet: { minFillRatio: 1, minWallAgeMs: 3000, slippageTicks: 1 } } : undefined,
+      vaultEnd: 0, pocketEnd: 0, bySession: {}, trades: [], takeProfitFills: 0, entryEvaluations: 0, days: 4, minEdge: 0.03, windows, fills: 0, contracts: 0, fees: 0, pnl,
+      exits: { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 10, huntDeactivations: 0, huntProfitTakes: 3, avgSlippage: null },
+    };
+  };
+  const base = mkRes('fair_value', (i) => ((i * 37) % 11) / 10 - 0.5);
+  const all = [...base.windows.keys()];
+  const better = mkRes('confluence_ratchet', (i) => ((i * 37) % 11) / 10 - 0.5 + 0.08 + ((i * 13) % 5) / 100, 0.04);
+  const worse = mkRes('confluence_ratchet', (i) => ((i * 37) % 11) / 10 - 0.5 - 0.02, 0.01);
+  const good = evaluateHunt([base, better, worse], all, 0.03)!;
+  assert.equal(good.huntOk, true);
+  assert.equal(good.hunt.targetMargin, 0.04, 'the winning variant is recorded');
+  assert.equal(good.variants, 2);
+  const bad = evaluateHunt([base, worse], all, 0.03)!;
+  assert.equal(bad.huntOk, false);
+  assert.equal(evaluateHunt([base], all, 0.03), undefined);
+});
+
+
+test('validated hunt parameters come from the model file only when hunt mode won', () => {
+  const v = { passed: false, nWindows: 0, brierModel: 0, brierMarket: 0, maxCalibrationErrorPp: 0, evaluatedAt: 'x' };
+  const hunt = { targetMargin: 0.04, minConfluence: 2, minFillRatio: 2, minWallAgeMs: 3000, slippageTicks: 1 };
+  const ok = MetaModel.fromJson(JSON.stringify({ version: 'i', kind: 'identity', features: [], referenceSigma: 1e-4, validation: { ...v, exitEvaluation: { huntOk: true, windows: 400, pairedDiffMean: 0.1, pairedDiffCiLo: 0.05, dsrProbability: 0.99, hunt } } }));
+  assert.deepEqual(ok.validatedHunt(), hunt);
+  const no = MetaModel.fromJson(JSON.stringify({ version: 'i', kind: 'identity', features: [], referenceSigma: 1e-4, validation: { ...v, exitEvaluation: { huntOk: false, windows: 400, pairedDiffMean: -0.1, pairedDiffCiLo: -0.2, dsrProbability: 0.1, hunt } } }));
+  assert.equal(no.validatedHunt(), undefined);
+  assert.equal(MetaModel.identity().validatedHunt(), undefined);
 });

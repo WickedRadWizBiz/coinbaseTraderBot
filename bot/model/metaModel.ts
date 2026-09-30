@@ -49,6 +49,17 @@ export interface ValidationReport {
   dsrProbability?: number;
   /** Probability of backtest overfitting across the variants compared. */
   pbo?: number;
+  /** Hunt mode (confluence ratchet with the order-book trailing stop) vs the fair-value exit, from
+   * research:backtest --annotate. huntOk gates live use; `hunt` holds the winning parameters. */
+  exitEvaluation?: {
+    huntOk: boolean;
+    windows: number;
+    pairedDiffMean: number;
+    pairedDiffCiLo: number;
+    dsrProbability: number;
+    hunt: { targetMargin: number; minConfluence: number; minFillRatio: number; minWallAgeMs: number; slippageTicks: number };
+    [k: string]: unknown;
+  };
   /** Fee-inclusive net edge per contract, 95% CI lower bound (backtest). */
   netEdgeCiLow?: number;
   deflatedSharpe?: number;
@@ -151,6 +162,12 @@ export class MetaModel {
     else if (!(v.dsrProbability > GO_LIVE_GATES.minDsrProbability)) out.push(`deflated Sharpe probability ${v.dsrProbability} <= ${GO_LIVE_GATES.minDsrProbability}`);
     if (v.pbo !== undefined && !(v.pbo < GO_LIVE_GATES.maxPbo)) out.push(`PBO ${v.pbo} >= ${GO_LIVE_GATES.maxPbo}`);
     return out;
+  }
+
+  /** Hunt-mode parameters validated by the backtest, when hunt mode beat the fair-value exit. */
+  validatedHunt(): NonNullable<ValidationReport['exitEvaluation']>['hunt'] | undefined {
+    const e = this.params.validation?.exitEvaluation;
+    return e?.huntOk ? e.hunt : undefined;
   }
 
   /** p_mkt_cal: the market mid corrected by the fitted market calibration (identity if none). */

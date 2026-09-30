@@ -652,14 +652,21 @@ export class Engine {
     // its entry fair value AND confluence agrees with the position.
     let huntMode = false;
     let huntPlan: OrderPlan | undefined;
-    if (cfg.strategy.exitPolicy === 'confluence_ratchet') {
+    // Hunt mode is evaluated by research:backtest --annotate. With a passing evaluation the winning
+    // parameters are used; in live mode an unevaluated (or losing) hunt falls back to the fair-value exit.
+    const vh = model.validatedHunt();
+    const huntAllowed = cfg.strategy.exitPolicy === 'confluence_ratchet' && (cfg.mode !== 'live' || vh !== undefined);
+    const huntNote = cfg.strategy.exitPolicy === 'confluence_ratchet' && !huntAllowed ? 'hunt mode not validated by the backtest: fair-value exit in live' : undefined;
+    if (huntAllowed) {
       let h = this.hunts.get(m.ticker);
       if (!h) {
         const S = cfg.strategy;
-        h = new ConfluenceRatchetExit(
-          { targetMargin: S.huntTargetMargin, minConfluence: S.huntMinConfluence },
-          { minFillRatio: S.ratchetMinFillRatio, minWallAgeMs: S.ratchetMinWallAgeSec * 1000, slippageTicks: S.ratchetSlippageTicks },
-        );
+        h = vh
+          ? new ConfluenceRatchetExit({ targetMargin: vh.targetMargin, minConfluence: vh.minConfluence }, { minFillRatio: vh.minFillRatio, minWallAgeMs: vh.minWallAgeMs, slippageTicks: vh.slippageTicks })
+          : new ConfluenceRatchetExit(
+            { targetMargin: S.huntTargetMargin, minConfluence: S.huntMinConfluence },
+            { minFillRatio: S.ratchetMinFillRatio, minWallAgeMs: S.ratchetMinWallAgeSec * 1000, slippageTicks: S.ratchetSlippageTicks },
+          );
         this.hunts.set(m.ticker, h);
       }
       const d = h.update({
@@ -672,7 +679,7 @@ export class Engine {
       st.exitMode = d.mode;
       st.huntTarget = d.target;
       st.huntStop = d.stop;
-      if (d.event === 'activated' || d.event === 'deactivated_confluence' || d.event === 'deactivated_giveback' || d.event === 'deactivated_session' || d.event === 'triggered' || d.event === 'gapped') {
+      if (d.event && d.event !== 'armed') {
         this.d.audit.write('decision', { ticker: m.ticker, huntEvent: d.event, target: d.target, stop: d.stop, position: st.position, confCount: features.conf_count, pYes });
       }
       if (d.plan) {
@@ -695,6 +702,7 @@ export class Engine {
     if (sessRisk.applied.length) plan.notes.push(`session risk ${sessRisk.applied.join('+')}: size x${sessRisk.sizeMult}, +${sessRisk.minEdgeAdd} edge`);
     if (huntPlan) plan.place.unshift(huntPlan);
     if (huntMode) plan.notes.push(`hunting: stop ${st.huntStop ?? 'forming'}`);
+    if (huntNote) plan.notes.push(huntNote);
     st.notes = plan.notes;
 
     const decisionId = crypto.randomUUID();

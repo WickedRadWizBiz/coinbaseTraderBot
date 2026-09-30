@@ -61,7 +61,7 @@ test('hunt guard blocks twilight, weekend and the minutes around session changes
   assert.equal(huntBlockedBySession(sessionState(T('2026-07-15T14:45:00Z')), 10), undefined);
 });
 
-test('an active hunt reverts to the fair-value exit when the session turns unsafe', () => {
+test('an active hunt takes its locked profit at the bid when the session turns unsafe', () => {
   const b = new OrderBook('T');
   b.applySnapshot({ bids: [{ price: 0.6, size: 8 }], asks: [{ price: 0.63, size: 10 }] }, 0);
   const h = new ConfluenceRatchetExit({ targetMargin: 0.02, minConfluence: 2 });
@@ -70,8 +70,8 @@ test('an active hunt reverts to the fair-value exit when the session turns unsaf
   assert.equal(up({ sessionBlocked: 'weekend liquidity' }).mode, 'fair_value', 'cannot activate while blocked');
   assert.equal(up({}).mode, 'hunt');
   const d = up({ sessionBlocked: 'twilight liquidity' });
-  assert.equal(d.mode, 'fair_value');
-  assert.equal(d.event, 'deactivated_session');
+  assert.equal(d.event, 'profit_take_session');
+  assert.deepEqual([d.plan?.side, d.plan?.price], ['ask', 0.6]);
 });
 
 // ---- Intraday volatility profile ---------------------------------------------

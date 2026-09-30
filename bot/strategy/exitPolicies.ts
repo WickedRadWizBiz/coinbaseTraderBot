@@ -172,7 +172,7 @@ export interface HuntParams {
 
 export const DEFAULT_HUNT: HuntParams = { targetMargin: 0.02, minConfluence: 2 };
 
-export type HuntEvent = 'activated' | 'deactivated_confluence' | 'deactivated_giveback' | 'deactivated_session' | RatchetEvent;
+export type HuntEvent = 'activated' | 'profit_take_confluence' | 'profit_take_session' | 'profit_take_gap' | 'deactivated_giveback' | 'deactivated_session' | RatchetEvent;
 
 export interface HuntInput {
   position: number;
@@ -199,19 +199,29 @@ export interface HuntDecision {
 }
 
 /**
- * Normal behaviour is the fair-value exit. Hunt mode (ratchet-managed exit,
- * no other reductions) switches on only when BOTH:
- *   - the exit price has beaten the entry fair value + targetMargin, and
+ * Normal behaviour is the fair-value exit. Hunt mode ("let the winner run")
+ * switches on only when BOTH:
+ *   - the exit price has beaten the entry fair value + targetMargin (the
+ *     TARGET), and
  *   - confluence oriented to the position >= minConfluence.
- * It switches off (back to fair_value) if confluence flips against the
- * position (<= -minConfluence) or, before any stop has formed, the price
- * gives back the outperformance (exit price < entry fair value).
+ * Once on, profit is hunted with an order-book ratcheting trailing stop:
+ *   - the stop starts AT the target (the profit is locked from activation);
+ *   - as the surge continues it ratchets up to the highest exit-side wall the
+ *     price has moved past: a level big enough to fill the whole position that
+ *     has persisted (so the exit can actually be filled there);
+ *   - when the price reverses to below the stop, exit reduce-only there.
+ * Take-profit early, at the bid (never below the lock): confluence flips
+ * against the position, or the session turns unsafe for book-anchored stops.
+ * A gap through the stop sells at the bid while still above the entry fair
+ * value; below it, hunt mode ends and the fair-value exit takes over.
  */
 export class ConfluenceRatchetExit {
   private readonly ratchet: LiquidityRatchet;
   private sign = 0;
   entryQ: number | undefined;
   active = false;
+  /** Profit lock (side terms) set at activation. */
+  floor: number | undefined;
 
   constructor(private readonly h: HuntParams = DEFAULT_HUNT, ratchet: RatchetParams = DEFAULT_RATCHET) {
     this.ratchet = new LiquidityRatchet(ratchet);
@@ -221,7 +231,14 @@ export class ConfluenceRatchetExit {
     this.sign = 0;
     this.entryQ = undefined;
     this.active = false;
+    this.floor = undefined;
     this.ratchet.reset();
+  }
+
+  private sellAtBid(i: HuntInput, sign: number): ExitOrderPlan {
+    const n = round(Math.abs(i.position), 2);
+    const px = i.sideBid!;
+    return sign > 0 ? { side: 'ask', price: round(px, 4), count: n, stop: px } : { side: 'bid', price: round(1 - px, 4), count: n, stop: px };
   }
 
   update(i: HuntInput): HuntDecision {
@@ -230,37 +247,31 @@ export class ConfluenceRatchetExit {
     if (sign !== this.sign) { this.reset(); this.sign = sign; this.entryQ = i.qSide; }
     const target = this.entryQ! + this.h.targetMargin;
     const oriented = Number.isFinite(i.confluence) ? sign * i.confluence : NaN;
-    let event: HuntEvent;
-
-    // Thin/transitional session liquidity: book-anchored stops are unreliable.
-    if (i.sessionBlocked) {
-      if (this.active) {
-        this.active = false;
-        this.ratchet.reset();
-        return { mode: 'fair_value', event: 'deactivated_session', target };
-      }
-      return { mode: 'fair_value', target };
-    }
 
     if (!this.active) {
-      if (i.sideBid !== undefined && i.sideBid >= target - 1e-9 && oriented >= this.h.minConfluence) {
-        this.active = true;
-        this.ratchet.reset();
-        event = 'activated';
-      } else {
-        return { mode: 'fair_value', target };
-      }
-    } else if (oriented <= -this.h.minConfluence) {
-      this.active = false;
+      // Thin/transitional session liquidity: never START hunting with book-anchored stops.
+      if (i.sessionBlocked) return { mode: 'fair_value', target };
+      if (!(i.sideBid !== undefined && i.sideBid >= target - 1e-9 && oriented >= this.h.minConfluence)) return { mode: 'fair_value', target };
+      this.active = true;
       this.ratchet.reset();
-      return { mode: 'fair_value', event: 'deactivated_confluence', target };
-    } else if (this.ratchet.stop === undefined && i.sideBid !== undefined && i.sideBid < this.entryQ! - 1e-9) {
+      this.floor = round(Math.floor(target / i.tick + 1e-9) * i.tick, 4);
+      const r0 = this.ratchet.evaluate({ position: i.position, book: i.book, now: i.now, tick: i.tick, fees: i.fees, floor: this.floor });
+      return { mode: 'hunt', event: 'activated', target, stop: r0.stop };
+    }
+
+    // Take the locked profit early at the bid when the reason to hunt is gone.
+    const above = i.sideBid !== undefined && i.sideBid >= this.floor! - 1e-9;
+    if (i.sessionBlocked && above) return { mode: 'hunt', plan: this.sellAtBid(i, sign), event: 'profit_take_session', target, stop: this.ratchet.stop };
+    if (oriented <= -this.h.minConfluence && above) return { mode: 'hunt', plan: this.sellAtBid(i, sign), event: 'profit_take_confluence', target, stop: this.ratchet.stop };
+
+    const r = this.ratchet.evaluate({ position: i.position, book: i.book, now: i.now, tick: i.tick, fees: i.fees, floor: this.floor });
+    if (r.event === 'gapped') {
+      if (i.sideBid !== undefined && i.sideBid >= this.entryQ! - 1e-9) return { mode: 'hunt', plan: this.sellAtBid(i, sign), event: 'profit_take_gap', target, stop: r.stop };
       this.active = false;
+      this.floor = undefined;
       this.ratchet.reset();
       return { mode: 'fair_value', event: 'deactivated_giveback', target };
     }
-
-    const r = this.ratchet.evaluate({ position: i.position, book: i.book, now: i.now, tick: i.tick, fees: i.fees });
-    return { mode: 'hunt', plan: r.plan, event: event ?? r.event, target, stop: r.stop };
+    return { mode: 'hunt', plan: r.plan, event: r.event, target, stop: r.stop };
   }
 }

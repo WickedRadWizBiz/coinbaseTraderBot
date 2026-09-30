@@ -68,6 +68,8 @@ export interface ExitStats {
   /** confluence_ratchet: times hunt mode switched on / off, and exits it made. */
   huntActivations: number;
   huntDeactivations: number;
+  /** Early take-profits at the bid (confluence flipped, session unsafe, gap through the stop). */
+  huntProfitTakes: number;
   /** Mean (stop - fill price) in side terms for ratchet exits; positive = filled below the stop. */
   avgSlippage: number | null;
 }
@@ -79,6 +81,9 @@ export interface TradeResult { ticker: string; closeTs: number; pnl: number; con
 
 export interface BacktestResult {
   exitPolicy: ExitPolicyName;
+  /** Variant label (hunt variants carry their parameters). */
+  label: string;
+  huntParams?: { hunt: HuntParams; ratchet: RatchetParams };
   /** Vault and pocket at the end of the run (bookkeeping; reduces tradable bankroll). */
   vaultEnd: number;
   pocketEnd: number;
@@ -109,9 +114,9 @@ export async function runBacktest(
   const pos = new PositionBook();
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => DEFAULT_FEES, () => st.now);
   const gateway = new RiskGateway(limits);
-  const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, avgSlippage: null };
+  const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, huntProfitTakes: 0, avgSlippage: null };
   const vault = opts.vault ? new Vault(opts.vault, undefined, () => st.now) : undefined;
-  const res: BacktestResult = { exitPolicy: policy, vaultEnd: 0, pocketEnd: 0, bySession: {}, exits, trades: [], takeProfitFills: 0, entryEvaluations: 0, days: 0, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
+  const res: BacktestResult = { exitPolicy: policy, label: policy === 'confluence_ratchet' ? `confluence_ratchet[m=${(opts.hunt ?? DEFAULT_HUNT).targetMargin},f=${(opts.ratchet ?? DEFAULT_RATCHET).minFillRatio}]` : policy, huntParams: policy === 'confluence_ratchet' ? { hunt: opts.hunt ?? DEFAULT_HUNT, ratchet: opts.ratchet ?? DEFAULT_RATCHET } : undefined, vaultEnd: 0, pocketEnd: 0, bySession: {}, exits, trades: [], takeProfitFills: 0, entryEvaluations: 0, days: 0, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
   const cadence = new CadenceGate(strategy);
   const lastPos = new Map<string, number>();
   // Bankroll tiers from the tradable high-water mark, with the tier's drawdown brake (mirrors the engine).
@@ -282,7 +287,8 @@ export async function runBacktest(
         });
         huntMode = d.mode === 'hunt';
         if (d.event === 'activated') exits.huntActivations++;
-        if (d.event === 'deactivated_confluence' || d.event === 'deactivated_giveback' || d.event === 'deactivated_session') exits.huntDeactivations++;
+        if (d.event === 'deactivated_giveback') exits.huntDeactivations++;
+        if (d.event === 'profit_take_confluence' || d.event === 'profit_take_session' || d.event === 'profit_take_gap') exits.huntProfitTakes++;
         if (d.event === 'gapped') exits.gaps++;
         if (d.plan && !pending.has(m.ticker)) {
           exits.ratchetTriggers++;
@@ -359,6 +365,46 @@ export async function runBacktest(
   return res;
 }
 
+export interface HuntEvaluation {
+  baseline: 'fair_value';
+  hunt: { targetMargin: number; minConfluence: number; minFillRatio: number; minWallAgeMs: number; slippageTicks: number };
+  windows: number;
+  pnlHunt: number;
+  pnlBaseline: number;
+  pairedDiffMean: number;
+  pairedDiffCiLo: number;
+  pairedDiffCiHi: number;
+  /** Deflated for the number of hunt variants tried (the best of the grid is reported). */
+  dsrProbability: number;
+  activations: number;
+  profitTakes: number;
+  exitRegret: number;
+  variants: number;
+  /** Hunt mode may be used live (and its parameters applied) only when true. */
+  huntOk: boolean;
+}
+
+/** Paired comparison: best hunt variant vs the fair-value exit on identical windows. */
+export function evaluateHunt(results: BacktestResult[], allWindows: number[], minEdge: number): HuntEvaluation | undefined {
+  const base = results.find((r) => r.exitPolicy === 'fair_value' && r.minEdge === minEdge);
+  const hunts = results.filter((r) => r.exitPolicy === 'confluence_ratchet' && r.minEdge === minEdge && r.huntParams);
+  if (!base || !hunts.length) return undefined;
+  const top = hunts.reduce((a, b) => (b.pnl > a.pnl ? b : a));
+  const ws = allWindows.filter((w) => (base.windows.get(w)?.contracts ?? 0) > 0 || (top.windows.get(w)?.contracts ?? 0) > 0);
+  const diffs = ws.map((w) => (top.windows.get(w)?.pnl ?? 0) - (base.windows.get(w)?.pnl ?? 0));
+  const ci = bootstrapMeanCi(diffs);
+  const dsr = diffs.length > 2 ? deflatedSharpe(diffs, hunts.length) : { probability: NaN };
+  const hp = top.huntParams!;
+  return {
+    baseline: 'fair_value',
+    hunt: { targetMargin: hp.hunt.targetMargin, minConfluence: hp.hunt.minConfluence, minFillRatio: hp.ratchet.minFillRatio, minWallAgeMs: hp.ratchet.minWallAgeMs, slippageTicks: hp.ratchet.slippageTicks },
+    windows: diffs.length, pnlHunt: top.pnl, pnlBaseline: base.pnl,
+    pairedDiffMean: ci.mean, pairedDiffCiLo: ci.lo, pairedDiffCiHi: ci.hi, dsrProbability: dsr.probability,
+    activations: top.exits.huntActivations, profitTakes: top.exits.huntProfitTakes, exitRegret: top.exits.regret, variants: hunts.length,
+    huntOk: diffs.length >= 300 && ci.lo > 0 && dsr.probability > 0.95,
+  };
+}
+
 async function main() {
   const dir = arg('recordings', 'data/recordings');
   const modelPath = arg('model', 'params/model.json');
@@ -378,7 +424,10 @@ async function main() {
     targetMargin: Number(arg('hunt-margin', String(DEFAULT_HUNT.targetMargin))),
     minConfluence: Number(arg('hunt-confluence', String(DEFAULT_HUNT.minConfluence))),
   };
-  const variants = grid.length * policies.length;
+  // Hunt mode is evaluated over a parameter grid (target margin x wall fill ratio); every variant
+  // counts toward the Deflated Sharpe.
+  const huntMargins = arg('hunt-grid', policies.includes('confluence_ratchet') ? '0.01,0.02,0.04' : String(hunt.targetMargin)).split(',').map(Number);
+  const huntFills = arg('ratchet-fill-grid', policies.includes('confluence_ratchet') ? '1,2' : String(ratchet.minFillRatio)).split(',').map(Number);
   // Price with the seasonal volatility profile when given (mirror production).
   const vpPath = arg('vol-profile', '');
   const volProfile = vpPath ? loadVolProfile(vpPath) : undefined;
@@ -387,13 +436,19 @@ async function main() {
   const results: BacktestResult[] = [];
   for (const minEdge of grid) {
     for (const exitPolicy of policies) {
-      results.push(await runBacktest(dir, model, { ...cfg.strategy, minEdge }, cfg.risk, bankroll, {
-        exitPolicy, ratchet, hunt, volProfile, applyVolSeasonality: Boolean(volProfile),
-        sessionRisk: cfg.strategy.sessionRisk, huntSessionGuard: cfg.strategy.huntSessionGuard, huntTransitionBufferMin: cfg.strategy.huntTransitionBufferMin,
-        vault: cfg.vault.enabled ? cfg.vault : undefined, calendar, sizingTiers: cfg.sizingTiers,
-      }));
+      const combos = exitPolicy === 'confluence_ratchet'
+        ? huntMargins.flatMap((m) => huntFills.map((f) => ({ hunt: { ...hunt, targetMargin: m }, ratchet: { ...ratchet, minFillRatio: f } })))
+        : [{ hunt, ratchet }];
+      for (const c of combos) {
+        results.push(await runBacktest(dir, model, { ...cfg.strategy, minEdge }, cfg.risk, bankroll, {
+          exitPolicy, ratchet: c.ratchet, hunt: c.hunt, volProfile, applyVolSeasonality: Boolean(volProfile),
+          sessionRisk: cfg.strategy.sessionRisk, huntSessionGuard: cfg.strategy.huntSessionGuard, huntTransitionBufferMin: cfg.strategy.huntTransitionBufferMin,
+          vault: cfg.vault.enabled ? cfg.vault : undefined, calendar, sizingTiers: cfg.sizingTiers,
+        }));
+      }
     }
   }
+  const variants = results.length;
   const allWindows = [...new Set(results.flatMap((r) => [...r.windows.keys()]))].sort((a, b) => a - b);
 
   const summaries = results.map((r) => {
@@ -404,7 +459,7 @@ async function main() {
     const dsr = deflatedSharpe(series, priorTrials * variants);
     const perTrade = bootstrapMeanCi(r.trades.map((t) => t.pnl));
     return {
-      exit: r.exitPolicy, minEdge: r.minEdge, vault: +r.vaultEnd.toFixed(2), pocket: +r.pocketEnd.toFixed(2), windowsTraded: traded.length, fills: r.fills, contracts: r.contracts, fees: +r.fees.toFixed(2), pnl: +r.pnl.toFixed(2),
+      exit: r.label, minEdge: r.minEdge, vault: +r.vaultEnd.toFixed(2), pocket: +r.pocketEnd.toFixed(2), windowsTraded: traded.length, fills: r.fills, contracts: r.contracts, fees: +r.fees.toFixed(2), pnl: +r.pnl.toFixed(2),
       trades: r.trades.length, tradesPerDay: +(r.trades.length / r.days).toFixed(1), pnlPerTrade: perTrade.mean, pnlPerTradeCiLo: perTrade.lo, pnlPerDay: +(r.pnl / r.days).toFixed(2), tpFills: r.takeProfitFills,
       edgePerContract: ci.mean, edgeCiLo: ci.lo, edgeCiHi: ci.hi, sharpePerWindow: sharpe(series), deflatedExcess: dsr.excess, dsrProb: dsr.probability,
     };
@@ -413,10 +468,10 @@ async function main() {
   console.log('Relaxed-spec target: $1-$10 average profit per trade at this bankroll, 10-25 trades/day; $100/day is a monthly average.');
   console.log('exit diagnostics (regret > 0 means exiting cost money vs holding to settlement):');
   console.table(results.map((r) => ({
-    exit: r.exitPolicy, minEdge: r.minEdge, exitOrders: r.exits.orders, exitFills: r.exits.fills, contracts: +r.exits.contracts.toFixed(2),
+    exit: r.label, minEdge: r.minEdge, exitOrders: r.exits.orders, exitFills: r.exits.fills, contracts: +r.exits.contracts.toFixed(2),
     proceeds: +r.exits.proceeds.toFixed(2), regret: +r.exits.regret.toFixed(2), stoppedWinners: r.exits.stoppedWinners,
     ratchetTriggers: r.exits.ratchetTriggers, gaps: r.exits.gaps, hybridHolds: r.exits.hybridHolds,
-    huntOn: r.exits.huntActivations, huntOff: r.exits.huntDeactivations,
+    huntOn: r.exits.huntActivations, huntOff: r.exits.huntDeactivations, huntTakes: r.exits.huntProfitTakes,
     avgSlippage: r.exits.avgSlippage === null ? null : +r.exits.avgSlippage.toFixed(4),
   })));
   console.log('P&L by session at window open (fee-inclusive):');
@@ -432,7 +487,10 @@ async function main() {
     if (Number.isFinite(pb.pbo)) pboValue = pb.pbo;
   }
   // The model annotation uses the production exit policy at the configured minEdge.
-  const best = summaries.find((s) => s.minEdge === cfg.strategy.minEdge && s.exit === cfg.strategy.exitPolicy) ?? summaries[0];
+  const prod = cfg.strategy.exitPolicy === 'confluence_ratchet' ? 'fair_value' : cfg.strategy.exitPolicy;
+  const best = summaries.find((s) => s.minEdge === cfg.strategy.minEdge && s.exit === prod) ?? summaries[0];
+  const exitEvaluation = evaluateHunt(results, allWindows, cfg.strategy.minEdge);
+  if (exitEvaluation) console.log('hunt mode vs fair-value exit (paired per window):', exitEvaluation);
   console.log(`windows traded: ${best.windowsTraded} (need >= 1000 independent windows before trusting any edge)`);
 
   if (process.argv.includes('--annotate') && fs.existsSync(modelPath)) {
@@ -447,6 +505,7 @@ async function main() {
       backtestWindowsTraded: best.windowsTraded,
       backtestPnlPerTrade: best.pnlPerTrade,
       backtestTradesPerDay: best.tradesPerDay,
+      ...(exitEvaluation ? { exitEvaluation } : {}),
     };
     params.validation.passed = Boolean(params.validation.passed) && best.edgeCiLo > 0 && best.deflatedExcess > 0 && best.dsrProb > 0.95
       && (pboValue === undefined || pboValue < 0.2) && best.windowsTraded >= 1000;
