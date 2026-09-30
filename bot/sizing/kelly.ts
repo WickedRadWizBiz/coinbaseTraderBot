@@ -66,10 +66,10 @@ export interface TargetEvConfig {
   minEdge: number;
 }
 
-/** Effective $ target and $ minimum for a bankroll: min(absolute, fraction x bankroll). */
-export function evThresholds(c: { targetEvUsd: number; minTradeEvUsd: number; targetEvFrac: number; minTradeEvFrac: number }, bankroll: number): { targetEv: number; minEv: number } {
-  const b = Math.max(0, bankroll);
-  return { targetEv: Math.min(c.targetEvUsd, c.targetEvFrac * b), minEv: Math.min(c.minTradeEvUsd, c.minTradeEvFrac * b) };
+/** Effective $ target and $ minimum: target = min($, share of the per-order risk budget), so it never
+ * caps size below the tier's risk limit; minimum = min($, fraction of bankroll). */
+export function evThresholds(c: { targetEvUsd: number; targetEvOfRisk: number; minTradeEvUsd: number; minTradeEvFrac: number }, bankroll: number, orderRiskUsd: number): { targetEv: number; minEv: number } {
+  return { targetEv: Math.min(c.targetEvUsd, c.targetEvOfRisk * Math.max(0, orderRiskUsd)), minEv: Math.min(c.minTradeEvUsd, c.minTradeEvFrac * Math.max(0, bankroll)) };
 }
 
 export interface TargetEvInput {

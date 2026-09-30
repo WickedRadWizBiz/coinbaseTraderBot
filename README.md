@@ -125,7 +125,18 @@ In the final minute, open positions ride to settlement.
 - A trade with expected profit under $1 is skipped.
 - Kelly is scaled by `max(0, 1 − drawdown/15%)`. New risk pauses for 24 hours after a 7-day loss above 8%. The daily loss stop is 3%.
 - The $100/day vault goal is a **monthly average**. Expect about 35–40% losing days even when the edge is real.
-- **The minimum tradable bankroll is $20** (`MIN_TRADABLE_BANKROLL_USD`, also the `PAPER_BANKROLL_USD` default); below it no new risk is taken. The $10 target and $1 minimum scale down with the bankroll: effective = min($ amount, fraction × bankroll), where the fractions (0.16% and 0.016%) reproduce the spec's figures at about $6,250. At $20 a trade aims for about $0.03 of expected profit and is sized by quarter-Kelly and the 2%-per-order cap, typically under one contract (Kalshi allows 0.01-contract granularity). The spec's $10/trade figures start applying from about $6,250.
+- **Bankroll-scaled risk tiers** (`bot/risk/sizingTiers.ts`, `SIZING_TIERS`). A small account is treated as expendable and sized aggressively; sizing tapers as it grows. Between the points below every limit is interpolated in log(bankroll), so there are no jumps. Across the whole ladder the dollar risk per order stays around $2.
+
+  | High-water mark | Tier | Per order | Daily stop | Kelly | Drawdown brake reaches 0 at |
+  |---|---|---|---|---|---|
+  | $20 | aggressive | 10% ($2) | 20% ($4) | 3/4 | 60% |
+  | $50 | moderate | 5% ($2.50) | 10% ($5) | 1/2 | 35% |
+  | $100+ | normal | 2% | 3% | 1/4 | 15% |
+
+  - The tier comes from the **high-water mark** of tradable bankroll, not the current balance. Once the account has grown into a tier it stays there, and losses never re-escalate risk. Withdrawals from trading cash lower the mark.
+  - The **hard floor is $10** (`MIN_TRADABLE_BANKROLL_USD`): a $20 account keeps trading after a $2 loss and stops only below $10. `PAPER_BANKROLL_USD` defaults to $20.
+  - The EV target is a share (25%) of the per-order risk budget, capped at $10, so it never limits size below the tier. At $20 a typical trade (about 3.5 contracts at 56¢ with a 6.5¢ edge) expects about $0.23, winning about $1.50 or losing $2. Five losses in a row, a normal streak, takes $20 to about $12 (each loss is 10% of what is left, and the drawdown brake shrinks size further).
+  - The normal tier is the configured `RISK_*` and `STRATEGY_KELLY_FRACTION` values, and `SIZING_TIERS=off` applies it at every size.
 
 **Pricing (`bot/model/fairValue.ts`).**
 - Martingale drift (`d2 = (ln S/K − v/2)/√v`).
@@ -256,7 +267,7 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 | Kill switch | Persists on disk, survives restart, auto-trips on loss limit, repeated order errors, persistent break or a stalled heartbeat. Resting orders also carry an exchange-side `expiration_time` as a dead-man switch. |
 | Fee-correct PnL | Exact fee formula with round-up. Uses exchange-reported fees when present. Wins and losses are labelled after fees at settlement. |
 | Data recorder, fill simulator, TCA, alerts, audit log | Recorder: `marketdata/`. Fill simulator: `paper/` (queue position, trade-through fills). TCA: `tca/` (markouts). Alerts: Telegram or webhook. Audit log: hash-chained JSONL, checked with `npm run audit:verify`. |
-| Tests / CI | 174 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
+| Tests / CI | 176 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
 
 ## Things you must do yourself
 

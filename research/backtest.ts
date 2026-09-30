@@ -32,6 +32,7 @@ import { Vault, type VaultConfig } from '../bot/vault/vault';
 import { ladderQuotes } from '../bot/model/ladder';
 import { priceContract, SETTLEMENT_AVG_SEC } from '../bot/model/fairValue';
 import { kalshiMaintenance } from '../bot/model/sessions';
+import { defaultTiers, tierAt, type TierPoint } from '../bot/risk/sizingTiers';
 import { CadenceGate, inEntryWindow } from '../bot/strategy/cadence';
 import type { MacroEvent } from '../bot/model/featureEngine';
 import { loadCalendar } from '../bot/model/calendar';
@@ -101,7 +102,7 @@ export interface BacktestResult {
 
 export async function runBacktest(
   dir: string, model: MetaModel, strategy: StrategyConfig, limits: RiskLimits, bankroll0: number,
-  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams; hunt?: HuntParams; volProfile?: VolProfile; applyVolSeasonality?: boolean; sessionRisk?: SessionRiskProfile; huntSessionGuard?: boolean; huntTransitionBufferMin?: number; vault?: VaultConfig; calendar?: MacroEvent[] } = {},
+  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams; hunt?: HuntParams; volProfile?: VolProfile; applyVolSeasonality?: boolean; sessionRisk?: SessionRiskProfile; huntSessionGuard?: boolean; huntTransitionBufferMin?: number; vault?: VaultConfig; calendar?: MacroEvent[]; sizingTiers?: TierPoint[] } = {},
 ): Promise<BacktestResult> {
   const policy = opts.exitPolicy ?? 'fair_value';
   const st = new ReplayState();
@@ -113,6 +114,9 @@ export async function runBacktest(
   const res: BacktestResult = { exitPolicy: policy, vaultEnd: 0, pocketEnd: 0, bySession: {}, exits, trades: [], takeProfitFills: 0, entryEvaluations: 0, days: 0, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
   const cadence = new CadenceGate(strategy);
   const lastPos = new Map<string, number>();
+  // Bankroll tiers from the tradable high-water mark, with the tier's drawdown brake (mirrors the engine).
+  const tiers = opts.sizingTiers ?? defaultTiers({ risk: limits, strategy });
+  let peakBank = 0;
   const stratRun: StrategyConfig = { ...strategy, exitPolicy: policy === 'take_profit' ? 'take_profit' : policy === 'hold' ? 'hold' : strategy.exitPolicy === 'take_profit' ? 'fair_value' : strategy.exitPolicy };
   let firstTs = 0;
   const closeOf = new Map<string, number>();
@@ -222,6 +226,10 @@ export async function runBacktest(
       const fastMove = ret !== undefined && Math.abs(ret) > strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(strategy.fastMoveWindowSec);
       vault?.tick(st.now);
       const bankroll = Math.max(0, (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0) - (vault?.reserved() ?? 0));
+      peakBank = Math.max(peakBank, bankroll);
+      const tier = tierAt(tiers, peakBank);
+      const ddScale = peakBank > 0 ? Math.max(0, 1 - (1 - bankroll / peakBank) / tier.ddScaleAt) : 1;
+      const tierLimits = { maxOrderRiskFrac: tier.orderFrac, maxWindowRiskFrac: tier.windowFrac, maxTotalRiskFrac: tier.totalFrac, dailyLossLimitFrac: tier.dailyLossFrac };
       const q = (side: 'bid' | 'ask') => { const o = open.find((x) => x.side === side); return o ? { clientOrderId: o.orderId, price: o.price, remaining: o.remainingCount } : undefined; };
       // Submit an exit that triggered on the previous tick (1 s reaction delay for every policy).
       const due = pending.get(m.ticker);
@@ -298,12 +306,12 @@ export async function runBacktest(
       const entrySide = pNow && pNow.yes > 0 ? -pNow.netCash / pNow.yes : pNow && pNow.yes < 0 ? 1 - pNow.netCash / -pNow.yes : undefined;
       const plan = decide({
         ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: pos.position(m.ticker), bankroll,
-        maxOrderRiskUsd: limits.maxOrderRiskFrac * bankroll * sessRisk.sizeMult, maxContracts: Math.floor(limits.maxContractsPerOrder * sessRisk.sizeMult * 100) / 100, minSidePrice: limits.minSidePrice,
+        maxOrderRiskUsd: tier.orderFrac * bankroll * sessRisk.sizeMult, maxContracts: Math.floor(limits.maxContractsPerOrder * sessRisk.sizeMult * 100) / 100, minSidePrice: limits.minSidePrice,
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,
         restingBid: rb, restingAsk: ra, nowSec: Math.floor(st.now / 1000), closeSec: Math.floor(m.closeTime / 1000),
         pMarket, pStd: pred.std, makerBuffer: strategy.makerBuffer, entrySidePrice: entrySide !== undefined && entrySide > 0 && entrySide < 1 ? entrySide : undefined,
         entryWindowOpen, exitWindowOpen: tauSec > strategy.noExitBeforeCloseSec,
-      }, { ...stratRun, minEdge: strategy.minEdge + sessRisk.minEdgeAdd, inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult }, {
+      }, { ...stratRun, kellyFraction: tier.kellyFraction * ddScale, minEdge: strategy.minEdge + sessRisk.minEdgeAdd, inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult }, {
         exits: policy === 'fair_value' || policy === 'take_profit' || policy === 'hybrid' || (policy === 'confluence_ratchet' && !huntMode),
         blockReductions: huntMode,
         entries: Boolean(reason),
@@ -334,7 +342,7 @@ export async function runBacktest(
           bestBid: bid.price, bestAsk: ask.price, indexFresh: true, marketCloseTs: m.closeTime, tickSize: m.tickSize, fees: DEFAULT_FEES,
           position: pos.position(m.ticker), marketRiskNow: riskOf(m.ticker),
           marketRiskWith: p.reduceOnly ? riskOf(m.ticker) : riskOf(m.ticker, [{ ticker: m.ticker, side: p.side, price: p.price, remaining: p.count, isTaker: !p.postOnly }]),
-          windowRisk, totalRisk, ordersLastMinute: 0, openOrders: openNow.length, modelLiveBlockers: [],
+          windowRisk, totalRisk, ordersLastMinute: 0, openOrders: openNow.length, modelLiveBlockers: [], limitOverrides: tierLimits,
         });
         if (!d.ok) continue;
         try {
@@ -381,7 +389,7 @@ async function main() {
       results.push(await runBacktest(dir, model, { ...cfg.strategy, minEdge }, cfg.risk, bankroll, {
         exitPolicy, ratchet, hunt, volProfile, applyVolSeasonality: Boolean(volProfile),
         sessionRisk: cfg.strategy.sessionRisk, huntSessionGuard: cfg.strategy.huntSessionGuard, huntTransitionBufferMin: cfg.strategy.huntTransitionBufferMin,
-        vault: cfg.vault.enabled ? cfg.vault : undefined, calendar,
+        vault: cfg.vault.enabled ? cfg.vault : undefined, calendar, sizingTiers: cfg.sizingTiers,
       }));
     }
   }

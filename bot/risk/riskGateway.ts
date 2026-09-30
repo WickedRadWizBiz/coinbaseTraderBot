@@ -14,6 +14,8 @@ export interface RiskContext {
   killEngaged: boolean;
   /** Non-empty when new risk is halted (recon break, stale data, startup). */
   haltReasons: string[];
+  /** Bankroll-tier limits that replace the configured fractions (sizing tiers). */
+  limitOverrides?: Partial<RiskLimits>;
   /** Bankroll used for fractional limits; undefined = unknown = reject. */
   bankroll: number | undefined;
   /** Today's PnL, realized + mark-to-market, net of fees. */
@@ -59,13 +61,14 @@ export class RiskGateway {
     }
   }
 
-  dailyLossLimit(bankroll: number | undefined): number {
-    const frac = bankroll !== undefined && bankroll > 0 ? bankroll * this.limits.dailyLossLimitFrac : 0;
-    return Math.min(frac || Infinity, this.limits.dailyLossLimitUsd);
+  dailyLossLimit(bankroll: number | undefined, overrides?: Partial<RiskLimits>): number {
+    const L = { ...this.limits, ...overrides };
+    const frac = bankroll !== undefined && bankroll > 0 ? bankroll * L.dailyLossLimitFrac : 0;
+    return Math.min(frac || Infinity, L.dailyLossLimitUsd);
   }
 
   private evaluate(i: OrderIntent, c: RiskContext): RiskDecision {
-    const L = this.limits;
+    const L = { ...this.limits, ...c.limitOverrides };
     const r: string[] = [];
     const reduces = i.reduceOnly;
 
@@ -140,7 +143,7 @@ export class RiskGateway {
     if (c.totalRisk + addRisk > L.maxTotalRiskFrac * bank + EPS) r.push(`total risk $${(c.totalRisk + addRisk).toFixed(2)} > ${(L.maxTotalRiskFrac * 100).toFixed(1)}% cap`);
 
     // Daily loss limit trips the kill switch.
-    const limit = this.dailyLossLimit(bank);
+    const limit = this.dailyLossLimit(bank, c.limitOverrides);
     if (c.dailyPnl <= -limit) {
       r.push(`daily loss $${(-c.dailyPnl).toFixed(2)} at limit $${limit.toFixed(2)}`);
       return { ok: false, reasons: r, tripKill: `daily loss limit $${limit.toFixed(2)} reached` };

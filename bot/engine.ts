@@ -8,7 +8,7 @@
 import crypto from 'crypto';
 import type { Alerter } from './alerts/alerter';
 import type { AuditLog } from './audit/auditLog';
-import type { Config } from './config';
+import type { Config, RiskLimits } from './config';
 import type { ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
 import { computeFeatureMap, FEATURE_SCHEMA_VERSION } from './model/featureEngine';
@@ -34,6 +34,7 @@ import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
 import { effectiveSigma, type VolProfile } from './model/volSeasonality';
 import { floorCount } from './util/num';
 import { evThresholds } from './sizing/kelly';
+import { tierAt, type Tier } from './risk/sizingTiers';
 import { BalanceMonitor, fillCashDelta, settleCashDelta } from './vault/balanceMonitor';
 import type { Vault } from './vault/vault';
 import { writeJsonAtomic } from './util/persist';
@@ -155,7 +156,7 @@ export class Engine {
     if (!this.d.vault) throw new Error('vault disabled');
     const split = this.d.vault.onWithdrawal(amount, 'manual', this.now());
     this.d.balanceMonitor?.onCash(-amount);
-    this.d.equityGuard?.onCashFlow(-amount, this.now());
+    this.d.equityGuard?.onCashFlow(-amount, this.now(), -split.fromTrading);
     this.saveMonitor();
     this.d.audit.write('vault', { event: 'withdrawal', source: by, amount, ...split });
     return split;
@@ -172,10 +173,11 @@ export class Engine {
     const quiet = !awaiting && now - this.lastSettleTs > 10 * 60_000;
     const res = mon.check(balance, quiet);
     this.saveMonitor();
-    if (res.withdrawal) this.d.equityGuard?.onCashFlow(-res.withdrawal, now);
     if (res.deposit) this.d.equityGuard?.onCashFlow(res.deposit, now);
+    if (res.withdrawal && !vault) this.d.equityGuard?.onCashFlow(-res.withdrawal, now);
     if (res.withdrawal && vault) {
       const split = vault.onWithdrawal(res.withdrawal, 'detected', now);
+      this.d.equityGuard?.onCashFlow(-res.withdrawal, now, -split.fromTrading);
       this.d.audit.write('vault', { event: 'withdrawal', amount: res.withdrawal, ...split });
       this.d.alerter.notify('info', 'withdrawal', `Withdrawal of $${res.withdrawal.toFixed(2)} detected: vault -$${split.fromVault.toFixed(2)}, pocket -$${split.fromPocket.toFixed(2)}, trading -$${split.fromTrading.toFixed(2)}`);
     }
@@ -274,17 +276,32 @@ export class Engine {
     return r;
   }
 
+  /** Sizing tier for the current tradable high-water mark ($20 aggressive -> $50 moderate -> $100 normal). */
+  tier(): Tier {
+    const b = this.bankroll() ?? 0;
+    return tierAt(this.d.cfg.sizingTiers, this.d.equityGuard?.tierReference(b) ?? b);
+  }
+
+  /** Configured limits replaced by the tier's fractions. */
+  private tierLimits(t: Tier): Partial<RiskLimits> {
+    return { maxOrderRiskFrac: t.orderFrac, maxWindowRiskFrac: t.windowFrac, maxTotalRiskFrac: t.totalFrac, dailyLossLimitFrac: t.dailyLossFrac };
+  }
+
   /** Relaxed-cadence and risk-guard state for the dashboard. */
   guardStatus(now = this.now()) {
     const S = this.d.cfg.strategy;
     const eq = this.equity();
+    const b = this.bankroll() ?? 0;
+    const t = this.tier();
+    const ev = evThresholds(S, b, t.orderFrac * b);
     return {
       cadence: S.cadence, sizing: S.sizing, exitPolicy: S.exitPolicy, kappa: S.kappa,
-      ...(() => { const t = evThresholds(S, this.bankroll() ?? 0); return { targetEvUsd: +t.targetEv.toFixed(2), minTradeEvUsd: +t.minEv.toFixed(3) }; })(),
+      targetEvUsd: +ev.targetEv.toFixed(2), minTradeEvUsd: +ev.minEv.toFixed(3),
       minTradableBankrollUsd: S.minTradableBankrollUsd,
+      tier: { ...t, orderRiskUsd: +(t.orderFrac * b).toFixed(2), dailyLossLimitUsd: +this.d.risk.dailyLossLimit(b, this.tierLimits(t)).toFixed(2) },
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null,
-      equity: eq ?? null, equityGuard: this.d.equityGuard?.status(eq, now) ?? null,
+      equity: eq ?? null, equityGuard: this.d.equityGuard?.status(eq, now, t.ddScaleAt) ?? null,
       modelHealth: this.d.modelHealth?.status() ?? null,
       entryGuards: this.entryGuards(now),
     };
@@ -357,13 +374,13 @@ export class Engine {
     this.lastTickTs = this.now();
     this.d.vault?.tick(this.lastTickTs);
     const eq = this.equity();
-    if (eq !== undefined) this.d.equityGuard?.update(eq, this.lastTickTs);
+    if (eq !== undefined) this.d.equityGuard?.update(eq, this.lastTickTs, this.bankroll(), this.tier().weeklyLossPause);
     if (this.dataHalt === 'engine heartbeat stalled') this.dataHalt = undefined;
     if (this.dataHalt === 'awaiting market data' && this.d.md.activeMarkets().length) this.dataHalt = undefined;
     const { kill, risk } = this.d;
     if (kill.engaged) return;
 
-    const limit = risk.dailyLossLimit(this.bankroll());
+    const limit = risk.dailyLossLimit(this.bankroll(), this.tierLimits(this.tier()));
     const pnl = this.dailyPnl();
     if (pnl <= -limit) {
       await kill.engage(`daily loss $${(-pnl).toFixed(2)} reached limit $${limit.toFixed(2)}`, 'risk');
@@ -488,11 +505,12 @@ export class Engine {
     if (reason && entryWindowOpen) this.d.modelHealth?.record(m.ticker, pYes, pMarket, m.closeTime);
     const pos = oms.positions.get(m.ticker);
     const entrySidePrice = pos && pos.yes > 0 ? -pos.netCash / pos.yes : pos && pos.yes < 0 ? 1 - pos.netCash / -pos.yes : undefined;
-    const kellyScale = this.d.equityGuard?.kellyScale(this.equity() ?? 0) ?? 1;
+    const tier = this.tier();
+    const kellyScale = this.d.equityGuard?.kellyScale(this.equity() ?? 0, tier.ddScaleAt) ?? 1;
     const view: MarketView = {
       ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: st.position, bankroll,
       // Session risk profile can only shrink size (sizeMult in [0, 1]).
-      maxOrderRiskUsd: R.maxOrderRiskFrac * bankroll * sessRisk.sizeMult, maxContracts: floorCount(R.maxContractsPerOrder * sessRisk.sizeMult), minSidePrice: R.minSidePrice,
+      maxOrderRiskUsd: tier.orderFrac * bankroll * sessRisk.sizeMult, maxContracts: floorCount(R.maxContractsPerOrder * sessRisk.sizeMult), minSidePrice: R.minSidePrice,
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
       restingBid, restingAsk, nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
       pMarket, pStd: pred.std, makerBuffer: this.makerBuffer(), entrySidePrice: entrySidePrice !== undefined && entrySidePrice > 0 && entrySidePrice < 1 ? entrySidePrice : undefined,
@@ -536,10 +554,11 @@ export class Engine {
       ...cfg.strategy,
       minEdge: cfg.strategy.minEdge + sessRisk.minEdgeAdd,
       inventorySkewPerContract: cfg.strategy.inventorySkewPerContract * sessRisk.skewMult,
-      kellyFraction: cfg.strategy.kellyFraction * kellyScale,
+      kellyFraction: tier.kellyFraction * kellyScale,
     };
     st.q = decisionProbability(view, strat);
     const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode, entries: Boolean(reason) });
+    plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
     if (kellyScale < 1) plan.notes.push(`drawdown: Kelly x${kellyScale.toFixed(2)}`);
     for (const g of guards) plan.notes.push(g);
     if (sessRisk.applied.length) plan.notes.push(`session risk ${sessRisk.applied.join('+')}: size x${sessRisk.sizeMult}, +${sessRisk.minEdgeAdd} edge`);
@@ -600,6 +619,7 @@ export class Engine {
       ordersLastMinute: oms.ordersSentInLast(60_000),
       openOrders: oms.liveOrders().length,
       modelLiveBlockers: model.liveBlockers(),
+      limitOverrides: this.tierLimits(this.tier()),
     };
     const decision = risk.check(intent, ctx);
     if (decision.tripKill) {

@@ -129,13 +129,18 @@ test('a manually recorded withdrawal is not counted again by the detector', asyn
   assert.equal(vault.status().withdrawnTotal, 30);
 });
 
-test('no new risk below the $20 minimum tradable bankroll', async () => {
+test('no new risk below the $10 hard floor; $20 trades on the aggressive tier', async () => {
   const { engine, recon, paper } = await setup();
   await recon.run('startup');
-  engine.balance = 15;
-  assert.ok(engine.haltReasons().some((r) => r.includes('below the $20 minimum')));
+  engine.balance = 8;
+  assert.ok(engine.haltReasons().some((r) => r.includes('below the $10 minimum')));
   await engine.tick();
   assert.equal((await paper.getOpenOrders()).length, 0);
-  engine.balance = 25;
+  engine.balance = 18; // e.g. $20 after one $2 loss: still trading
   assert.ok(!engine.haltReasons().some((r) => r.includes('minimum')));
+  engine.balance = 20;
+  const g = engine.guardStatus();
+  assert.equal(g.tier.name, 'aggressive');
+  assert.equal(g.tier.orderRiskUsd, 2);
+  assert.equal(g.tier.dailyLossLimitUsd, 4);
 });

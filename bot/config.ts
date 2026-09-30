@@ -4,6 +4,7 @@
 
 import fs from 'fs';
 import { parseSessionRisk, type SessionRiskProfile } from './model/sessionRisk';
+import { defaultTiers, validateTiers, type TierPoint } from './risk/sizingTiers';
 import type { VaultConfig } from './vault/vault';
 import path from 'path';
 
@@ -85,13 +86,14 @@ export interface StrategyConfig {
   /** kelly = fractional Kelly on the model probability; target_ev = spec sizing (shrink to market, $ target, min EV). */
   sizing: 'kelly' | 'target_ev';
   kappa: number;
-  /** Per-trade $ target and $ minimum EV, capped at these fractions of bankroll so small accounts
-   * scale down (the spec's $10 / $1 correspond to a ~$6,250 bankroll). */
+  /** Per-trade $ target: min(targetEvUsd, targetEvOfRisk x the per-order risk budget), so the
+   * target never caps size below what the tier's risk limit allows. */
   targetEvUsd: number;
+  targetEvOfRisk: number;
+  /** Per-trade $ minimum EV: min(minTradeEvUsd, minTradeEvFrac x bankroll). */
   minTradeEvUsd: number;
-  targetEvFrac: number;
   minTradeEvFrac: number;
-  /** Below this tradable bankroll no new risk is taken (exits still run). */
+  /** Hard floor: below this tradable bankroll no new risk is taken (exits still run). */
   minTradableBankrollUsd: number;
   /** Veto entries when |q - p_mkt| < this many ensemble standard deviations. */
   ensembleVetoSigmas: number;
@@ -154,6 +156,8 @@ export interface Config {
   strategy: StrategyConfig;
   /** Profit vault / pocket rules (bookkeeping: reserved cash is not traded). */
   vault: VaultConfig;
+  /** Bankroll-scaled risk ladder ($20 aggressive -> $50 moderate -> $100 normal); see risk/sizingTiers.ts. */
+  sizingTiers: TierPoint[];
 }
 
 export class ConfigError extends Error {}
@@ -205,6 +209,18 @@ function oneOf<T extends string>(env: Env, key: string, def: T, allowed: readonl
   const raw = (env[key] ?? def) as T;
   if (!allowed.includes(raw)) throw new ConfigError(`${key}=${raw} must be one of ${allowed.join(', ')}`);
   return raw;
+}
+
+/** SIZING_TIERS: unset = default ladder, "off" = configured limits at every size, or a JSON array of tier points. */
+function parseSizingTiers(raw: string | undefined, base: { risk: RiskLimits; strategy: StrategyConfig }): TierPoint[] {
+  const normal = defaultTiers(base)[2];
+  try {
+    if (!raw) return validateTiers(defaultTiers(base));
+    if (raw === 'off') return [normal];
+    return validateTiers(JSON.parse(raw) as TierPoint[]);
+  } catch (e) {
+    throw new ConfigError(`SIZING_TIERS: ${(e as Error).message}`);
+  }
 }
 
 /** "earliest,latest" seconds before close. */
@@ -345,9 +361,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     kappa: num(env, 'STRATEGY_KAPPA', 0.5, 0, 1),
     targetEvUsd: num(env, 'STRATEGY_TARGET_EV_USD', 10, 0, 10000),
     minTradeEvUsd: num(env, 'STRATEGY_MIN_TRADE_EV_USD', 1, 0, 10000),
-    targetEvFrac: num(env, 'STRATEGY_TARGET_EV_FRAC', 0.0016, 0, 1),
+    targetEvOfRisk: num(env, 'STRATEGY_TARGET_EV_OF_RISK', 0.25, 0, 1),
     minTradeEvFrac: num(env, 'STRATEGY_MIN_TRADE_EV_FRAC', 0.00016, 0, 1),
-    minTradableBankrollUsd: num(env, 'MIN_TRADABLE_BANKROLL_USD', 20, 0, 1e7),
+    minTradableBankrollUsd: num(env, 'MIN_TRADABLE_BANKROLL_USD', 10, 0, 1e7),
     ensembleVetoSigmas: num(env, 'STRATEGY_ENSEMBLE_VETO_SIGMAS', 2, 0, 10),
     ddScaleAt: num(env, 'RISK_DD_SCALE_AT', 0.15, 0.01, 1),
     weeklyLossPause: num(env, 'RISK_WEEKLY_LOSS_PAUSE', 0.08, 0.01, 1),
@@ -380,7 +396,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     dashboardToken: token,
     dataDir,
     paramsPath: path.resolve(env.MODEL_PARAMS_PATH ?? './params/model.json'),
-    // The minimum tradable bankroll; EV targets scale down with bankroll (see targetEvFrac).
+    // Starts in the aggressive tier; see SIZING_TIERS.
     paperBankrollUsd: num(env, 'PAPER_BANKROLL_USD', 20, 1, 1e7),
     indexIdMap: jsonMap(env, 'INDEX_ID_MAP', DEFAULT_INDEX_IDS),
     seriesAssetMap,
@@ -407,6 +423,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       quotaReset: oneOf(env, 'VAULT_QUOTA_RESET', 'session', ['session', 'us_open'] as const),
       dailyGoalUsd: num(env, 'VAULT_DAILY_GOAL_USD', 100, 0, 1e7),
     },
+    sizingTiers: parseSizingTiers(env.SIZING_TIERS, { risk, strategy }),
   };
   return deepFreeze(cfg);
 }

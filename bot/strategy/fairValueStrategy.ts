@@ -108,7 +108,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     if (targetEv && v.pMarket !== undefined) {
       const qk = side === 'yes' ? v.pMarket : 1 - v.pMarket;
       return targetEvSize({ qModel: qm, qMarket: qk, cost, feePerContract: fee, bankroll: v.bankroll, maxRiskUsd: v.maxOrderRiskUsd, maxContracts },
-        { kappa: cfg.kappa, kellyFraction: cfg.kellyFraction, ...evThresholds(cfg, v.bankroll), minEdge: cfg.minEdge });
+        { kappa: cfg.kappa, kellyFraction: cfg.kellyFraction, ...evThresholds(cfg, v.bankroll, v.maxOrderRiskUsd), minEdge: cfg.minEdge });
     }
     return kellySize({ q: side === 'yes' ? q : 1 - q, cost, feePerContract: fee, bankroll: v.bankroll, kellyFraction: cfg.kellyFraction, maxRiskUsd: v.maxOrderRiskUsd, maxContracts });
   };

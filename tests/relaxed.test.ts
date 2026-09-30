@@ -337,16 +337,55 @@ test('PBO treats identical variants as uninformative (0.5), not as overfit', () 
 
 import { evThresholds } from '../bot/sizing/kelly';
 
-test('$20 is tradable: EV thresholds scale with bankroll, spec figures from ~$6,250', () => {
+test('EV target follows the risk budget, so it never caps size below the tier limit', () => {
   assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).paperBankrollUsd, 20);
-  assert.equal(relaxed.minTradableBankrollUsd, 20);
-  const small = evThresholds(relaxed, 20);
-  assert.ok(Math.abs(small.targetEv - 0.032) < 1e-9 && Math.abs(small.minEv - 0.0032) < 1e-9);
-  const big = evThresholds(relaxed, 6250);
-  assert.ok(Math.abs(big.targetEv - 10) < 1e-9 && Math.abs(big.minEv - 1) < 1e-9);
-  assert.deepEqual(evThresholds(relaxed, 1e6), { targetEv: 10, minEv: 1 });
-  // A $20 account with a 2% per-order cap still quotes (fractional contracts).
-  const out = decide(view({ bankroll: 20, maxOrderRiskUsd: 0.4 }), { ...strat, style: 'maker' });
+  assert.equal(relaxed.minTradableBankrollUsd, 10);
+  const small = evThresholds(relaxed, 20, 2); // $20 aggressive: $2 per order
+  assert.ok(Math.abs(small.targetEv - 0.5) < 1e-9 && Math.abs(small.minEv - 0.0032) < 1e-9);
+  assert.deepEqual(evThresholds(relaxed, 1e6, 20_000), { targetEv: 10, minEv: 1 });
+  // A $20 account on the aggressive tier ($2 per order) buys ~3.5 contracts, not a fraction.
+  const out = decide(view({ bankroll: 20, maxOrderRiskUsd: 2 }), { ...strat, style: 'maker', kellyFraction: 0.75 });
   const bid = out.place.find((p) => p.side === 'bid')!;
-  assert.ok(bid && bid.count > 0 && bid.count * bid.price <= 0.4 + 1e-9, JSON.stringify(out));
+  assert.ok(bid && bid.count > 2 && bid.count * bid.price <= 2 + 1e-9, JSON.stringify(out));
+  assert.ok(bid.count * (0.625 - bid.price) > 0.15, 'expected profit well above $0.03');
+});
+
+import { AGGRESSIVE, MODERATE, defaultTiers, tierAt, validateTiers } from '../bot/risk/sizingTiers';
+
+test('sizing tiers: $20 aggressive -> $50 moderate -> $100 normal, smooth in between', () => {
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) });
+  const t = cfg.sizingTiers;
+  assert.deepEqual(t.map((p) => [p.bankroll, p.name]), [[20, 'aggressive'], [50, 'moderate'], [100, 'normal']]);
+  assert.equal(tierAt(t, 20).orderFrac, AGGRESSIVE.orderFrac);
+  assert.equal(tierAt(t, 12).orderFrac, AGGRESSIVE.orderFrac, 'below $20 stays aggressive');
+  assert.equal(tierAt(t, 50).orderFrac, MODERATE.orderFrac);
+  assert.equal(tierAt(t, 100).orderFrac, cfg.risk.maxOrderRiskFrac);
+  assert.equal(tierAt(t, 10_000).kellyFraction, cfg.strategy.kellyFraction);
+  // No jump at a boundary; monotone taper.
+  assert.ok(Math.abs(tierAt(t, 49.99).orderFrac - tierAt(t, 50.01).orderFrac) < 1e-4);
+  const xs = [20, 25, 30, 40, 50, 60, 75, 90, 100].map((b) => tierAt(t, b));
+  for (let i = 1; i < xs.length; i++) {
+    assert.ok(xs[i].orderFrac <= xs[i - 1].orderFrac + 1e-12 && xs[i].dailyLossFrac <= xs[i - 1].dailyLossFrac + 1e-12);
+    assert.ok(xs[i].orderFrac * [20, 25, 30, 40, 50, 60, 75, 90, 100][i] >= 1.9, 'dollar risk stays around $2 across the ladder');
+  }
+  assert.deepEqual(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), SIZING_TIERS: 'off' }).sizingTiers.map((p) => p.name), ['normal']);
+  assert.throws(() => loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), SIZING_TIERS: JSON.stringify([{ ...AGGRESSIVE, bankroll: 20, orderFrac: 0.5 }]) }));
+  assert.throws(() => validateTiers([{ ...MODERATE, bankroll: 50 }, { ...AGGRESSIVE, bankroll: 20 }]));
+  assert.equal(defaultTiers(cfg)[2].dailyLossFrac, cfg.risk.dailyLossLimitFrac);
+});
+
+test('tier follows the high-water mark: losses never re-escalate risk; the brake widens with the tier', () => {
+  const g = new EquityGuard({ ddScaleAt: 0.15, weeklyLossPause: 0.08 });
+  const t0 = 1_800_000_000_000;
+  g.update(20, t0, 20);
+  assert.equal(g.tierReference(20), 20);
+  g.update(110, t0 + 1, 110);
+  assert.equal(g.tierReference(60), 110, 'after a drop to $60 the account stays on the normal tier');
+  g.onCashFlow(-50, t0 + 2, -50);
+  assert.equal(g.tierReference(40), 60, 'a $50 withdrawal from trading cash lowers the high-water mark');
+  // One $2 loss at $20: the aggressive brake (60%) keeps most of the size; the normal one (15%) would not.
+  const a = new EquityGuard({ ddScaleAt: 0.15, weeklyLossPause: 0.08 });
+  a.update(20, t0, 20);
+  assert.ok(a.kellyScale(18, AGGRESSIVE.ddScaleAt) > 0.8);
+  assert.ok(a.kellyScale(18) < 0.4);
 });
