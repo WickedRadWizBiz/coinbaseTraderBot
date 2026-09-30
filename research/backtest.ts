@@ -28,6 +28,7 @@ import { computeFeatureMap } from '../bot/model/featureEngine';
 import { effectiveSigma, loadVolProfile, type VolProfile } from '../bot/model/volSeasonality';
 import { sessionRiskFor, huntBlockedBySession, type SessionRiskProfile } from '../bot/model/sessionRisk';
 import { sessionState } from '../bot/model/sessions';
+import { Vault, type VaultConfig } from '../bot/vault/vault';
 import { fairValue, SETTLEMENT_AVG_SEC } from '../bot/model/fairValue';
 import { MetaModel } from '../bot/model/metaModel';
 import type { OrderIntent } from '../bot/oms/oms';
@@ -69,6 +70,9 @@ export interface SessionBreakdown { windows: number; pnl: number; contracts: num
 
 export interface BacktestResult {
   exitPolicy: ExitPolicyName;
+  /** Vault and pocket at the end of the run (bookkeeping; reduces tradable bankroll). */
+  vaultEnd: number;
+  pocketEnd: number;
   /** P&L attributed to the session in effect when each 15-minute window opened. */
   bySession: Record<string, SessionBreakdown>;
   exits: ExitStats;
@@ -82,7 +86,7 @@ export interface BacktestResult {
 
 export async function runBacktest(
   dir: string, model: MetaModel, strategy: StrategyConfig, limits: RiskLimits, bankroll0: number,
-  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams; hunt?: HuntParams; volProfile?: VolProfile; applyVolSeasonality?: boolean; sessionRisk?: SessionRiskProfile; huntSessionGuard?: boolean; huntTransitionBufferMin?: number } = {},
+  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams; hunt?: HuntParams; volProfile?: VolProfile; applyVolSeasonality?: boolean; sessionRisk?: SessionRiskProfile; huntSessionGuard?: boolean; huntTransitionBufferMin?: number; vault?: VaultConfig } = {},
 ): Promise<BacktestResult> {
   const policy = opts.exitPolicy ?? 'fair_value';
   const st = new ReplayState();
@@ -90,7 +94,8 @@ export async function runBacktest(
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => DEFAULT_FEES, () => st.now);
   const gateway = new RiskGateway(limits);
   const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, avgSlippage: null };
-  const res: BacktestResult = { exitPolicy: policy, bySession: {}, exits, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
+  const vault = opts.vault ? new Vault(opts.vault, undefined, () => st.now) : undefined;
+  const res: BacktestResult = { exitPolicy: policy, vaultEnd: 0, pocketEnd: 0, bySession: {}, exits, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
   const closeOf = new Map<string, number>();
   const ratchets = new Map<string, LiquidityRatchet>();
   const hunts = new Map<string, ConfluenceRatchetExit>();
@@ -151,6 +156,7 @@ export async function runBacktest(
             b.pnl += p.realized ?? 0;
             res.windows.set(m.closeTime, b);
             res.pnl += p.realized ?? 0;
+            if ((p.realized ?? 0) > 0) vault?.onSettled(p.realized!, m.ticker, st.now);
             const sk = sessionState(m.openTime).key;
             const sb = res.bySession[sk] ?? { windows: 0, pnl: 0, contracts: 0, fees: 0 };
             sb.windows++; sb.pnl += p.realized ?? 0; sb.contracts += b.contracts; sb.fees += b.fees;
@@ -184,7 +190,8 @@ export async function runBacktest(
       const pYes = model.predict(fmap, fv.pYes);
       const ret = idx!.trailingLogReturn(st.now, strategy.fastMoveWindowSec * 1000);
       const fastMove = ret !== undefined && Math.abs(ret) > strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(strategy.fastMoveWindowSec);
-      const bankroll = (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0);
+      vault?.tick(st.now);
+      const bankroll = Math.max(0, (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0) - (vault?.reserved() ?? 0));
       const q = (side: 'bid' | 'ask') => { const o = open.find((x) => x.side === side); return o ? { clientOrderId: o.orderId, price: o.price, remaining: o.remainingCount } : undefined; };
       // Submit an exit that triggered on the previous tick (1 s reaction delay for every policy).
       const due = pending.get(m.ticker);
@@ -289,6 +296,8 @@ export async function runBacktest(
     }
   }
   exits.avgSlippage = slipN ? slipSum / slipN : null;
+  res.vaultEnd = vault?.vaultTotal ?? 0;
+  res.pocketEnd = vault?.pocketTotal ?? 0;
   return res;
 }
 
@@ -322,6 +331,7 @@ async function main() {
       results.push(await runBacktest(dir, model, { ...cfg.strategy, minEdge }, cfg.risk, bankroll, {
         exitPolicy, ratchet, hunt, volProfile, applyVolSeasonality: Boolean(volProfile),
         sessionRisk: cfg.strategy.sessionRisk, huntSessionGuard: cfg.strategy.huntSessionGuard, huntTransitionBufferMin: cfg.strategy.huntTransitionBufferMin,
+        vault: cfg.vault.enabled ? cfg.vault : undefined,
       }));
     }
   }
@@ -333,7 +343,7 @@ async function main() {
     const ci = bootstrapMeanCi(perContract);
     const series = allWindows.map((w) => r.windows.get(w)?.pnl ?? 0);
     const dsr = deflatedSharpe(series, priorTrials * variants);
-    return { exit: r.exitPolicy, minEdge: r.minEdge, windowsTraded: traded.length, fills: r.fills, contracts: r.contracts, fees: +r.fees.toFixed(2), pnl: +r.pnl.toFixed(2), edgePerContract: ci.mean, edgeCiLo: ci.lo, edgeCiHi: ci.hi, sharpePerWindow: sharpe(series), deflatedExcess: dsr.excess, dsrProb: dsr.probability };
+    return { exit: r.exitPolicy, minEdge: r.minEdge, vault: +r.vaultEnd.toFixed(2), pocket: +r.pocketEnd.toFixed(2), windowsTraded: traded.length, fills: r.fills, contracts: r.contracts, fees: +r.fees.toFixed(2), pnl: +r.pnl.toFixed(2), edgePerContract: ci.mean, edgeCiLo: ci.lo, edgeCiHi: ci.hi, sharpePerWindow: sharpe(series), deflatedExcess: dsr.excess, dsrProb: dsr.probability };
   });
   console.table(summaries);
   console.log('exit diagnostics (regret > 0 means exiting cost money vs holding to settlement):');

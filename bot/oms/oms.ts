@@ -306,13 +306,17 @@ export class Oms extends EventEmitter {
     }
     this.o.audit.write('fill', { fill: f, fee, feeEstimated: f.fee === undefined, clientOrderId: rec?.clientOrderId, orphan: !rec, position: pos.yes });
     this.save();
-    this.emit('fill', f, rec, fee);
+    this.emit('fill', f, rec, fee, pos.yes);
     if (!rec) this.emit('orphan_fill', f);
     return true;
   }
 
   settle(ticker: string, result: 'yes' | 'no'): MarketPosition | undefined {
+    const before = this.positions.get(ticker);
+    const wasSettled = before?.settled ?? true;
+    const positionBefore = before?.yes ?? 0;
     const m = this.positions.settle(ticker, result, this.now());
+    if (m && !wasSettled) this.emit('settled', { ticker, result, realized: m.realized ?? 0, positionBefore });
     if (m) {
       this.o.audit.write('settlement', { ticker, result, realized: m.realized, fees: m.fees, win: (m.realized ?? 0) > 0 });
       this.save();

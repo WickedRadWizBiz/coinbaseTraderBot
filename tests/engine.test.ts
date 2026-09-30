@@ -14,8 +14,10 @@ import { KillSwitch } from '../bot/risk/killSwitch';
 import { RiskGateway } from '../bot/risk/riskGateway';
 import { Reconciler } from '../bot/recon/reconciler';
 import { tmpAudit, tmpDir } from './helpers';
+import { Vault } from '../bot/vault/vault';
+import { BalanceMonitor } from '../bot/vault/balanceMonitor';
 
-async function setup(opts: { dailyLossUsd?: string; exitPolicy?: string } = {}) {
+async function setup(opts: { dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor } = {}) {
   const dir = tmpDir();
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy });
   const now = Date.now();
@@ -43,7 +45,7 @@ async function setup(opts: { dailyLossUsd?: string; exitPolicy?: string } = {}) 
   paper.on('fill', (f) => oms.onFill(f));
   paper.on('order', (o) => oms.onExchangeOrder(o));
   const recon = new Reconciler({ gateway: paper, oms, audit, getMarket: rest.getMarket, onPersistentBreak: (r) => void kill.engage(r, 'recon') });
-  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity() });
+  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor });
   return { cfg, md, paper, oms, kill, recon, engine, market, audit };
 }
 
@@ -100,4 +102,29 @@ test('opt-in confluence ratchet runs in the engine and starts in fair-value mode
   await engine.tick();
   // No position and no confluence data: normal fair-value behaviour, quotes still placed.
   assert.equal(engine.status.get(market.ticker)!.exitMode, 'fair_value');
+});
+
+test('vault and pocket are excluded from the tradable bankroll; wins feed the vault', async () => {
+  const vault = new Vault({ enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session' });
+  const { engine, recon, oms } = await setup({ vault, monitor: new BalanceMonitor() });
+  const r = await recon.run('startup');
+  engine.onBalance(r!.balance!);
+  assert.equal(engine.bankroll(), 200);
+  // A settled win of $10 (fee-inclusive): $5 vaulted.
+  oms.onFill({ tradeId: 'w', orderId: '', ticker: 'W', side: 'bid', count: 20, price: 0.5, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: Date.now() - 1, asset: 'BTC' });
+  oms.settle('W', 'yes');
+  assert.equal(vault.vaultTotal, 5);
+  assert.equal(engine.bankroll(), 195);
+});
+
+test('a manually recorded withdrawal is not counted again by the detector', async () => {
+  const vault = new Vault({ enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session' });
+  const monitor = new BalanceMonitor();
+  const { engine } = await setup({ vault, monitor });
+  engine.onBalance(200);
+  engine.recordWithdrawal(30, 'test');
+  // Kalshi now reports the lower balance on consecutive checks: nothing new is booked.
+  engine.onBalance(170);
+  engine.onBalance(170);
+  assert.equal(vault.status().withdrawnTotal, 30);
 });

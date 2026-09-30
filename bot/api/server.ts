@@ -23,6 +23,7 @@ import type { MetaModel } from '../model/metaModel';
 import type { Tca } from '../tca/tca';
 import type { MarketData } from '../marketdata/marketData';
 import { SpotBookService } from '../marketdata/spotBook';
+import type { Vault } from '../vault/vault';
 
 export interface ApiDeps {
   cfg: Readonly<Config>;
@@ -36,6 +37,7 @@ export interface ApiDeps {
   md: MarketData;
   startedAt: number;
   spotBooks?: SpotBookService;
+  vault?: Vault;
 }
 
 export function tokenMatches(expected: string, provided: string | undefined): boolean {
@@ -133,6 +135,7 @@ export function createApi(d: ApiDeps): express.Express {
       indexSource: d.md.indexSource,
       exitPolicy: d.cfg.strategy.exitPolicy,
       session: d.engine.sessionStatus(),
+      vault: d.vault?.status() ?? null,
       dominance: dominanceStatus(d.md),
       wsConnected: d.md.wsConnected,
       consecutiveOrderErrors: d.oms.consecutiveErrors,
@@ -200,6 +203,18 @@ export function createApi(d: ApiDeps): express.Express {
   });
 
   api.get('/config', (_req, res) => res.json(publicConfig(d.cfg as Config)));
+
+  // Record a withdrawal the detector missed (or before the next reconciliation).
+  // Bookkeeping only: nothing is sent to Kalshi. Comes out of the vault first.
+  api.post('/vault/withdrawal', (req, res) => {
+    const amount = Number(req.body?.amount);
+    if (!d.vault || !(amount > 0) || amount > 1e7) {
+      res.status(400).json({ error: 'body must include a positive "amount" in dollars' });
+      return;
+    }
+    const split = d.engine.recordWithdrawal(amount, `api:${req.ip}`);
+    res.json({ ...split, status: d.vault.status() });
+  });
 
   api.post('/kill', async (req, res) => {
     const reason = typeof req.body?.reason === 'string' ? req.body.reason.slice(0, 200) : 'manual';

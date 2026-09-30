@@ -15,6 +15,7 @@ export type AuditKind =
   | 'recon_ok' | 'recon_break' | 'recon_repair'
   | 'kill_engaged' | 'kill_reset'
   | 'data_stale' | 'data_gap'
+  | 'vault'
   | 'alert' | 'error';
 
 export interface AuditRecord {

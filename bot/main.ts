@@ -15,6 +15,9 @@ import { KalshiWs } from './kalshi/ws';
 import { MarketData, Recorder } from './marketdata/marketData';
 import { MetaModel } from './model/metaModel';
 import { loadVolProfile, type VolProfile } from './model/volSeasonality';
+import { BalanceMonitor, type MonitorState } from './vault/balanceMonitor';
+import { Vault } from './vault/vault';
+import { readJson } from './util/persist';
 import { Oms } from './oms/oms';
 import { PaperExchange } from './paper/paperExchange';
 import { KillSwitch } from './risk/killSwitch';
@@ -96,7 +99,10 @@ async function main(): Promise<void> {
     onPersistentBreak: (reason) => void kill.engage(reason, 'recon'),
   });
   const risk = new RiskGateway(cfg.risk);
-  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile });
+  const vault = new Vault(cfg.vault, path.join(cfg.dataDir, 'vault.json'));
+  const balanceMonitorPath = path.join(cfg.dataDir, 'balance_monitor.json');
+  const balanceMonitor = new BalanceMonitor(readJson<MonitorState>(balanceMonitorPath) ?? {});
+  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath });
   const tca = new Tca(path.join(cfg.dataDir, 'tca'), (t) => md.books.get(t)?.mid());
 
   // Execution events -> OMS (same path for paper and live).
@@ -135,7 +141,7 @@ async function main(): Promise<void> {
   md.start();
   await engine.start();
 
-  const app = createApi({ cfg, audit, engine, oms, kill, recon, model, tca, md, startedAt: Date.now() });
+  const app = createApi({ cfg, audit, engine, oms, kill, recon, model, tca, md, vault, startedAt: Date.now() });
   const server = app.listen(cfg.port, cfg.host, () => log.info(`operator API on http://${cfg.host}:${cfg.port} (token required)`));
 
   let stopping = false;

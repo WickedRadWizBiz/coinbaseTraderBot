@@ -1,0 +1,194 @@
+// Profit vault and pocket: rules for how much of the Kalshi cash pool the bot
+// treats as its own to trade. Nothing moves on the exchange; reserved money is
+// simply excluded from the tradable bankroll (sizing and risk limits).
+//
+// Vault (quota): 50% of every win (market settled with positive, fee-inclusive
+//   realized PnL) is vaulted until the quota ($100) is met. Vaulting then stops
+//   until the next market session opens (any session: Asia, London, overlap,
+//   New York, twilight, weekend), when the quota resets. Vaulted money is
+//   permanent until withdrawn.
+// Pocket: only while the quota is met, 10% of each win is pocketed. Pocket
+//   cycles run from one US market open (NYSE 09:30 ET) to the next; money
+//   pocketed in a cycle is released back to trading at the next US open.
+//   A win that crosses the quota fills it, and the rest of that win is
+//   subject to the pocket.
+// Withdrawals from the Kalshi account come out of the vault first, then the
+//   pocket, then trading cash. Deposits add to trading cash.
+
+import { readJson, writeJsonAtomic } from '../util/persist';
+import { sessionState, VENUES, zoneTime } from '../model/sessions';
+
+export interface VaultConfig {
+  enabled: boolean;
+  quotaUsd: number;
+  winShare: number;      // 0.5
+  pocketShare: number;   // 0.1
+  /** When the quota resets: at every session open, or once per day at the US open. */
+  quotaReset: 'session' | 'us_open';
+}
+
+export const DEFAULT_VAULT: VaultConfig = { enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session' };
+
+export type VaultEventKind = 'vault' | 'pocket' | 'release' | 'withdrawal' | 'deposit' | 'quota_reset';
+
+export interface VaultEvent {
+  ts: number;
+  kind: VaultEventKind;
+  amount: number;
+  ticker?: string;
+  note?: string;
+}
+
+interface PocketEntry { amount: number; ts: number; releaseAt: number }
+
+export interface VaultState {
+  vault: number;
+  pocket: PocketEntry[];
+  quotaPeriodStart: number;
+  quotaFilled: number;
+  withdrawnTotal: number;
+  events: VaultEvent[];
+}
+
+const r2 = (x: number) => Math.round(x * 100) / 100;
+
+/** Next NYSE open (09:30 America/New_York on a weekday) strictly after ts. */
+export function nextUsOpen(ts: number): number {
+  const step = 30 * 60_000;
+  let t = Math.floor(ts / step) * step + step;
+  for (let i = 0; i < 7 * 48; i++, t += step) {
+    const z = zoneTime(t, VENUES.newYork.tz);
+    if (z.weekday >= 1 && z.weekday <= 5 && z.minutes === VENUES.newYork.open) return t;
+  }
+  return ts + 86_400_000;
+}
+
+/** Most recent NYSE open at or before ts. */
+export function prevUsOpen(ts: number): number {
+  const step = 30 * 60_000;
+  let t = Math.floor(ts / step) * step;
+  for (let i = 0; i < 7 * 48; i++, t -= step) {
+    const z = zoneTime(t, VENUES.newYork.tz);
+    if (z.weekday >= 1 && z.weekday <= 5 && z.minutes === VENUES.newYork.open) return t;
+  }
+  return ts - 86_400_000;
+}
+
+/** Start of the quota period containing ts. */
+export function quotaPeriodStart(ts: number, mode: VaultConfig['quotaReset']): number {
+  return mode === 'session' ? sessionState(ts).since ?? ts : prevUsOpen(ts);
+}
+
+export class Vault {
+  private st: VaultState;
+
+  constructor(private readonly cfg: VaultConfig, private readonly file?: string, private readonly now: () => number = Date.now) {
+    this.st = (file && readJson<VaultState>(file)) || { vault: 0, pocket: [], quotaPeriodStart: 0, quotaFilled: 0, withdrawnTotal: 0, events: [] };
+  }
+
+  private save(): void {
+    if (this.st.events.length > 500) this.st.events = this.st.events.slice(-500);
+    if (this.file) writeJsonAtomic(this.file, this.st);
+  }
+
+  private log(e: VaultEvent): void {
+    this.st.events.push(e);
+  }
+
+  get vaultTotal(): number { return r2(this.st.vault); }
+  get pocketTotal(): number { return r2(this.st.pocket.reduce((s, p) => s + p.amount, 0)); }
+  /** Money excluded from the tradable bankroll. */
+  reserved(): number { return this.cfg.enabled ? r2(this.st.vault + this.pocketTotal) : 0; }
+
+  /** Roll the quota period and release matured pocket entries. */
+  tick(now = this.now()): void {
+    if (!this.cfg.enabled) return;
+    let changed = false;
+    const start = quotaPeriodStart(now, this.cfg.quotaReset);
+    if (start !== this.st.quotaPeriodStart) {
+      if (this.st.quotaPeriodStart && this.st.quotaFilled > 0) this.log({ ts: now, kind: 'quota_reset', amount: this.st.quotaFilled, note: 'new period: 50% vaulting resumes' });
+      this.st.quotaPeriodStart = start;
+      this.st.quotaFilled = 0;
+      changed = true;
+    }
+    const due = this.st.pocket.filter((p) => p.releaseAt <= now);
+    if (due.length) {
+      const amt = r2(due.reduce((s, p) => s + p.amount, 0));
+      this.st.pocket = this.st.pocket.filter((p) => p.releaseAt > now);
+      this.log({ ts: now, kind: 'release', amount: amt, note: 'US market open: pocket released to trading' });
+      changed = true;
+    }
+    if (changed) this.save();
+  }
+
+  /** A market settled. Only positive realized PnL (a win) is shared. */
+  onSettled(realized: number, ticker: string, now = this.now()): void {
+    if (!this.cfg.enabled || !(realized > 0)) return;
+    this.tick(now);
+    const toQuota = Math.max(0, this.cfg.quotaUsd - this.st.quotaFilled);
+    const wantVault = this.cfg.winShare * realized;
+    const v = r2(Math.min(wantVault, toQuota));
+    if (v > 0) {
+      this.st.vault = r2(this.st.vault + v);
+      this.st.quotaFilled = r2(this.st.quotaFilled + v);
+      this.log({ ts: now, kind: 'vault', amount: v, ticker, note: `${Math.round(this.cfg.winShare * 100)}% of $${realized.toFixed(2)} win` });
+    }
+    // Portion of the win after the quota was met is subject to the pocket.
+    const postQuotaShare = wantVault > 0 ? 1 - v / wantVault : 1;
+    const p = r2(this.cfg.pocketShare * realized * postQuotaShare);
+    if (p > 0 && this.st.quotaFilled >= this.cfg.quotaUsd - 1e-9) {
+      const releaseAt = nextUsOpen(now);
+      this.st.pocket.push({ amount: p, ts: now, releaseAt });
+      this.log({ ts: now, kind: 'pocket', amount: p, ticker, note: `${Math.round(this.cfg.pocketShare * 100)}% pocketed until ${new Date(releaseAt).toISOString()}` });
+    }
+    this.save();
+  }
+
+  /** Withdrawal: vault first, then pocket (newest first), then trading cash. */
+  onWithdrawal(amount: number, source: 'detected' | 'manual', now = this.now()): { fromVault: number; fromPocket: number; fromTrading: number } {
+    const amt = r2(Math.abs(amount));
+    const fromVault = r2(Math.min(this.st.vault, amt));
+    this.st.vault = r2(this.st.vault - fromVault);
+    let rest = r2(amt - fromVault);
+    let fromPocket = 0;
+    this.st.pocket.sort((a, b) => b.ts - a.ts);
+    for (const e of this.st.pocket) {
+      if (rest <= 0) break;
+      const take = Math.min(e.amount, rest);
+      e.amount = r2(e.amount - take);
+      rest = r2(rest - take);
+      fromPocket = r2(fromPocket + take);
+    }
+    this.st.pocket = this.st.pocket.filter((e) => e.amount > 0);
+    this.st.withdrawnTotal = r2(this.st.withdrawnTotal + amt);
+    this.log({ ts: now, kind: 'withdrawal', amount: amt, note: `${source}: vault -$${fromVault.toFixed(2)}, pocket -$${fromPocket.toFixed(2)}, trading -$${rest.toFixed(2)}` });
+    this.save();
+    return { fromVault, fromPocket, fromTrading: rest };
+  }
+
+  onDeposit(amount: number, now = this.now()): void {
+    this.log({ ts: now, kind: 'deposit', amount: r2(amount), note: 'added to trading cash' });
+    this.save();
+  }
+
+  status(now = this.now()) {
+    const quotaMet = this.st.quotaFilled >= this.cfg.quotaUsd - 1e-9;
+    return {
+      enabled: this.cfg.enabled,
+      vault: this.vaultTotal,
+      pocket: this.pocketTotal,
+      reserved: this.reserved(),
+      quotaUsd: this.cfg.quotaUsd,
+      quotaFilled: r2(this.st.quotaFilled),
+      quotaReset: this.cfg.quotaReset,
+      quotaPeriodStart: this.st.quotaPeriodStart || null,
+      phase: quotaMet ? 'pocketing' : 'vaulting',
+      winShare: this.cfg.winShare,
+      pocketShare: this.cfg.pocketShare,
+      nextRelease: this.st.pocket.length ? Math.min(...this.st.pocket.map((p) => p.releaseAt)) : null,
+      nextUsOpen: nextUsOpen(now),
+      withdrawnTotal: this.st.withdrawnTotal,
+      events: this.st.events.slice(-30).reverse(),
+    };
+  }
+}

@@ -1,6 +1,7 @@
 import { Power, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { api, clock, pct, px, usd } from '../api';
 import { MarketSessionCard } from './MarketSessionCard';
+import { VaultCard } from './VaultCard';
 import { OrderBookMonitor } from './OrderBookMonitor';
 import { Panel } from './Panel';
 import { usePoll } from './usePoll';
@@ -85,13 +86,15 @@ export function DashboardView() {
 
       {s?.session && <MarketSessionCard session={s.session} />}
 
+      {s?.vault?.enabled && <VaultCard vault={s.vault} session={s.session} onChange={() => void refresh()} />}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <Panel title="Capital & Risk" className="!p-0" bodyClass="h-full" flush>
           {s ? (
             <div className="flex flex-col">
               <Row label="Daily PnL (net of fees)" value={usd(s.dailyPnl)} sub={`loss limit ${usd(-s.dailyLossLimit)}`} tone={s.dailyPnl < 0 ? 'bad' : 'ok'} />
               <Row label="Cash balance" value={usd(s.balance)} />
-              <Row label="Bankroll (cash + committed)" value={usd(s.bankroll)} />
+              <Row label="Tradable bankroll" value={usd(s.bankroll)} sub={s.vault?.enabled ? `cash + committed − vault ${usd(s.vault.vault)} − pocket ${usd(s.vault.pocket)}` : 'cash + committed'} />
               <Row label="Reconciliation" value={s.recon ? (s.recon.ok ? 'CLEAN' : 'BREAK') : '—'} sub={s.recon ? `${clock(s.recon.ts)}${s.recon.breaks?.length ? ' · ' + s.recon.breaks[0] : ''}` : undefined} tone={s.recon?.ok ? 'ok' : 'bad'} />
               <Row label="Order errors (consecutive)" value={String(s.consecutiveOrderErrors)} tone={s.consecutiveOrderErrors ? 'warn' : undefined} />
             </div>

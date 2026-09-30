@@ -4,6 +4,7 @@
 
 import fs from 'fs';
 import { parseSessionRisk, type SessionRiskProfile } from './model/sessionRisk';
+import type { VaultConfig } from './vault/vault';
 import path from 'path';
 
 export type TradingMode = 'paper' | 'shadow' | 'live';
@@ -108,6 +109,8 @@ export interface Config {
   alertWebhookUrl?: string;
   risk: RiskLimits;
   strategy: StrategyConfig;
+  /** Profit vault / pocket rules (bookkeeping: reserved cash is not traded). */
+  vault: VaultConfig;
 }
 
 export class ConfigError extends Error {}
@@ -299,6 +302,13 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     alertWebhookUrl: env.ALERT_WEBHOOK_URL || undefined,
     risk,
     strategy,
+    vault: {
+      enabled: bool(env, 'VAULT_ENABLED', true),
+      quotaUsd: num(env, 'VAULT_QUOTA_USD', 100, 0, 1e7),
+      winShare: num(env, 'VAULT_WIN_SHARE', 0.5, 0, 1),
+      pocketShare: num(env, 'POCKET_SHARE', 0.1, 0, 1),
+      quotaReset: oneOf(env, 'VAULT_QUOTA_RESET', 'session', ['session', 'us_open'] as const),
+    },
   };
   return deepFreeze(cfg);
 }

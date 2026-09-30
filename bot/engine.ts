@@ -27,6 +27,9 @@ import { sessionState, type SessionState } from './model/sessions';
 import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
 import { effectiveSigma, type VolProfile } from './model/volSeasonality';
 import { floorCount } from './util/num';
+import { BalanceMonitor, fillCashDelta, settleCashDelta } from './vault/balanceMonitor';
+import type { Vault } from './vault/vault';
+import { writeJsonAtomic } from './util/persist';
 import { logger } from './util/log';
 
 const log = logger('engine');
@@ -73,6 +76,11 @@ export interface EngineDeps {
   model: MetaModel;
   /** Validated intraday volatility profile, applied to fair value when present. */
   volProfile?: VolProfile;
+  /** Profit vault / pocket: reserved cash is excluded from the tradable bankroll. */
+  vault?: Vault;
+  /** Withdrawal/deposit detector (with its persistence file). */
+  balanceMonitor?: BalanceMonitor;
+  balanceMonitorPath?: string;
   now?: () => number;
 }
 
@@ -88,28 +96,83 @@ export class Engine {
   readonly status = new Map<string, MarketStatus>();
   private readonly now: () => number;
 
+  private lastSettleTs = 0;
+
   constructor(private readonly d: EngineDeps) {
     this.now = d.now ?? Date.now;
+    // Registered before the startup reconciliation replays fills, so the
+    // balance monitor sees every cash movement the bot's trading causes.
+    d.oms.on('fill', (f: { side: 'bid' | 'ask'; count: number; price: number }, _rec: unknown, fee: number, positionAfter: number) => {
+      const signed = f.side === 'bid' ? f.count : -f.count;
+      d.balanceMonitor?.onCash(fillCashDelta(f.side, f.count, f.price, fee, positionAfter - signed));
+      this.saveMonitor();
+    });
+    d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized: number; positionBefore: number }) => {
+      this.lastSettleTs = this.now();
+      d.balanceMonitor?.onCash(settleCashDelta(e.positionBefore, e.result));
+      this.saveMonitor();
+      if (d.vault && e.realized > 0) {
+        d.vault.onSettled(e.realized, e.ticker, this.now());
+        d.audit.write('vault', { event: 'win', ticker: e.ticker, realized: e.realized, status: d.vault.status(this.now()) });
+      }
+    });
+  }
+
+  private saveMonitor(): void {
+    if (this.d.balanceMonitor && this.d.balanceMonitorPath) writeJsonAtomic(this.d.balanceMonitorPath, this.d.balanceMonitor.state);
+  }
+
+  /** Manually recorded withdrawal: book it (vault first) and tell the detector to expect the
+   * balance drop, so the same withdrawal is never counted twice. */
+  recordWithdrawal(amount: number, by: string) {
+    if (!this.d.vault) throw new Error('vault disabled');
+    const split = this.d.vault.onWithdrawal(amount, 'manual', this.now());
+    this.d.balanceMonitor?.onCash(-amount);
+    this.saveMonitor();
+    this.d.audit.write('vault', { event: 'withdrawal', source: by, amount, ...split });
+    return split;
+  }
+
+  /** New balance from reconciliation: detect withdrawals/deposits, then store. */
+  onBalance(balance: number): void {
+    this.balance = balance;
+    const { balanceMonitor: mon, vault } = this.d;
+    if (!mon) return;
+    const now = this.now();
+    // Quiet = nothing awaiting settlement and no settlement in the last 10 minutes.
+    const awaiting = this.d.oms.positions.unsettled().some((m) => m.closeTs && m.closeTs < now);
+    const quiet = !awaiting && now - this.lastSettleTs > 10 * 60_000;
+    const res = mon.check(balance, quiet);
+    this.saveMonitor();
+    if (res.withdrawal && vault) {
+      const split = vault.onWithdrawal(res.withdrawal, 'detected', now);
+      this.d.audit.write('vault', { event: 'withdrawal', amount: res.withdrawal, ...split });
+      this.d.alerter.notify('info', 'withdrawal', `Withdrawal of $${res.withdrawal.toFixed(2)} detected: vault -$${split.fromVault.toFixed(2)}, pocket -$${split.fromPocket.toFixed(2)}, trading -$${split.fromTrading.toFixed(2)}`);
+    }
+    if (res.deposit) {
+      vault?.onDeposit(res.deposit, now);
+      this.d.audit.write('vault', { event: 'deposit', amount: res.deposit });
+    }
   }
 
   async start(): Promise<void> {
     const { cfg, md, recon, oms, kill } = this.d;
     await md.refreshCatalog();
     const first = await recon.run('startup');
-    if (first?.balance !== undefined) this.balance = first.balance;
+    if (first?.balance !== undefined) this.onBalance(first.balance);
 
     this.timers.push(setInterval(() => void this.tick(), 1000));
     this.timers.push(setInterval(() => void md.refreshCatalog(), 20_000));
     this.timers.push(setInterval(async () => {
       const r = await recon.run('interval');
-      if (r?.balance !== undefined) this.balance = r.balance;
+      if (r?.balance !== undefined) this.onBalance(r.balance);
     }, cfg.reconcileIntervalMs));
     this.timers.push(setInterval(() => this.watchdog(), 1000));
 
     md.on('reconnected', async () => {
       this.dataHalt = undefined;
       const r = await recon.run('ws_reconnect');
-      if (r?.balance !== undefined) this.balance = r.balance;
+      if (r?.balance !== undefined) this.onBalance(r.balance);
     });
     md.on('disconnected', () => {
       this.dataHalt = 'market data disconnected';
@@ -160,6 +223,7 @@ export class Engine {
     if (this.d.recon.halted) r.push('reconciliation not clean');
     if (this.dataHalt) r.push(this.dataHalt);
     if (this.balance === undefined) r.push('balance unknown');
+    else if (this.bankroll() === 0) r.push('no tradable cash (vault/pocket reserved)');
     return r;
   }
 
@@ -167,7 +231,8 @@ export class Engine {
   bankroll(): number | undefined {
     if (this.balance === undefined) return undefined;
     const committed = this.d.oms.positions.open().reduce((s, m) => s + PositionBook.maxLoss(m), 0);
-    return this.balance + committed;
+    // Vaulted and pocketed profit is not the bot's to trade.
+    return Math.max(0, this.balance + committed - (this.d.vault?.reserved() ?? 0));
   }
 
   /** Today's (UTC) PnL: realized settlements + conservative mark-to-market. */
@@ -213,6 +278,7 @@ export class Engine {
 
   async tick(): Promise<void> {
     this.lastTickTs = this.now();
+    this.d.vault?.tick(this.lastTickTs);
     if (this.dataHalt === 'engine heartbeat stalled') this.dataHalt = undefined;
     if (this.dataHalt === 'awaiting market data' && this.d.md.activeMarkets().length) this.dataHalt = undefined;
     const { kill, risk } = this.d;
