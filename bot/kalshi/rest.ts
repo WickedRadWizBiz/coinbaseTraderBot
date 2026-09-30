@@ -84,12 +84,12 @@ export class KalshiRest implements ExchangeGateway {
     }
   }
 
-  private async paginate(path: string, key: string, maxPages = 20): Promise<any[]> {
+  private async paginate(path: string, key: string, maxPages = 20, auth = true): Promise<any[]> {
     const out: any[] = [];
     let cursor = '';
     for (let i = 0; i < maxPages; i++) {
       const sep = path.includes('?') ? '&' : '?';
-      const data = await this.read(`${path}${sep}limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+      const data = await this.read(`${path}${sep}limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, auth);
       out.push(...(data[key] ?? []));
       cursor = data.cursor ?? '';
       if (!cursor) break;
@@ -199,8 +199,15 @@ export class KalshiRest implements ExchangeGateway {
   // ---- Market data (public) ----------------------------------------------
 
   async getOpenMarkets(seriesTicker: string): Promise<MarketInfo[]> {
-    const data = await this.read(`/markets?series_ticker=${encodeURIComponent(seriesTicker)}&status=open&limit=200`, false);
-    return (data.markets ?? []).map(parseMarket).filter(Boolean) as MarketInfo[];
+    // Hourly ladders list many strikes per close time: page through all of them.
+    const rows = await this.paginate(`/markets?series_ticker=${encodeURIComponent(seriesTicker)}&status=open`, 'markets', 10, false);
+    return rows.map(parseMarket).filter(Boolean) as MarketInfo[];
+  }
+
+  /** Every series in a category (public), e.g. "Crypto": ticker, title, frequency. */
+  async listSeries(category: string): Promise<Array<{ ticker: string; title?: string; frequency?: string }>> {
+    const data = await this.read(`/series?category=${encodeURIComponent(category)}`, false);
+    return (data.series ?? []).map((s: any) => ({ ticker: String(s.ticker), title: s.title, frequency: s.frequency }));
   }
 
   async getMarket(ticker: string): Promise<MarketInfo | undefined> {

@@ -138,6 +138,8 @@ In the final minute, open positions ride to settlement.
   - The EV target is a share (25%) of the per-order risk budget, capped at $10, so it never limits size below the tier. At $20 a typical trade (about 3.5 contracts at 56¢ with a 6.5¢ edge) expects about $0.23, winning about $1.50 or losing $2. Five losses in a row, a normal streak, takes $20 to about $12 (each loss is 10% of what is left, and the drawdown brake shrinks size further).
   - The normal tier is the configured `RISK_*` and `STRATEGY_KELLY_FRACTION` values, and `SIZING_TIERS=off` applies it at every size.
 
+**Markets (`STRATEGY_SERIES=auto`, the default).** Every hour the bot discovers every crypto series it can price from Kalshi's series listing (`bot/marketdata/seriesDiscovery.ts`). That covers 15-minute Up/Down (`KX<ASSET>15M`), hourly/daily greater-than ladders (`KX<ASSET>D`) and range brackets (`KX<ASSET>`) for every asset with a settlement index in `INDEX_ID_MAP` (BTC, ETH, SOL, XRP, DOGE). Crypto series that don't settle on a 60-second index average, such as yearly highs, are skipped because they would be mispriced. An explicit comma list still works. Market listings are paged, so large hourly ladders are complete.
+
 **Pricing (`bot/model/fairValue.ts`).**
 - Martingale drift (`d2 = (ln S/K − v/2)/√v`).
 - Optional Student-t tails, with ν chosen offline. The trainer keeps Gaussian tails unless a fat-tailed ν beats them by more than one standard error.
@@ -267,7 +269,7 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 | Kill switch | Persists on disk, survives restart, auto-trips on loss limit, repeated order errors, persistent break or a stalled heartbeat. Resting orders also carry an exchange-side `expiration_time` as a dead-man switch. |
 | Fee-correct PnL | Exact fee formula with round-up. Uses exchange-reported fees when present. Wins and losses are labelled after fees at settlement. |
 | Data recorder, fill simulator, TCA, alerts, audit log | Recorder: `marketdata/`. Fill simulator: `paper/` (queue position, trade-through fills). TCA: `tca/` (markouts). Alerts: Telegram or webhook. Audit log: hash-chained JSONL, checked with `npm run audit:verify`. |
-| Tests / CI | 176 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
+| Tests / CI | 178 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
 
 ## Things you must do yourself
 

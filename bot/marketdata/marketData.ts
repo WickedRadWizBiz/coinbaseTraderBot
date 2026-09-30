@@ -22,6 +22,7 @@ import { yesPrice } from '../kalshi/wire';
 import { logger } from '../util/log';
 import { parseCount } from '../util/num';
 import { FeatureHub } from '../model/featureEngine';
+import { selectCryptoSeries } from './seriesDiscovery';
 import { contractKind, type ContractTerms, type MarketKind } from '../model/fairValue';
 import { DominanceService } from './dominance';
 import { IndexTracker } from './indexTracker';
@@ -81,8 +82,10 @@ export class MarketData extends EventEmitter {
     private readonly recorder: Recorder,
   ) {
     super();
-    for (const s of cfg.strategy.series) {
-      const asset = cfg.seriesAssetMap[s];
+    for (const s of cfg.strategy.series) this.series.set(s, cfg.seriesAssetMap[s]);
+    // Track every asset that has a settlement index, so discovered series can be priced at once.
+    const assets = new Set([...this.series.values(), ...(cfg.strategy.seriesAuto ? Object.values(cfg.indexIdMap) : [])]);
+    for (const asset of assets) {
       if (!this.index.has(asset)) this.index.set(asset, new IndexTracker(asset));
       if (!this.spot.has(asset)) this.spot.set(asset, new IndexTracker(asset));
     }
@@ -149,10 +152,35 @@ export class MarketData extends EventEmitter {
     this.recorder.write('index', { asset, value, ts, src: this.indexSource });
   }
 
+  /** Series being traded: the configured list, or (STRATEGY_SERIES=auto) every priceable crypto
+   * series discovered from the exchange, refreshed hourly. */
+  readonly series = new Map<string, string>();
+  private discoveredAt = 0;
+
+  private async refreshSeries(now: number): Promise<void> {
+    if (!this.cfg.strategy.seriesAuto) return;
+    if (now - this.discoveredAt < 3_600_000 && this.series.size) return;
+    try {
+      const found = selectCryptoSeries(await this.rest.listSeries('Crypto'), new Set(Object.values(this.cfg.indexIdMap)));
+      if (Object.keys(found).length) {
+        // Discovery replaces the built-in fallback list.
+        const before = new Set(this.discoveredAt ? this.series.keys() : []);
+        this.series.clear();
+        for (const [s, a] of Object.entries(found)) {
+          if (!before.has(s)) log.info('discovered series', { series: s, asset: a });
+          this.series.set(s, a);
+        }
+        this.discoveredAt = now;
+      }
+    } catch (e) {
+      log.warn('series discovery failed; using the built-in list', { error: String(e) });
+    }
+  }
+
   /** Refresh the list of open markets for each configured series. */
   async refreshCatalog(now = Date.now()): Promise<void> {
-    for (const series of this.cfg.strategy.series) {
-      const asset = this.cfg.seriesAssetMap[series];
+    await this.refreshSeries(now);
+    for (const [series, asset] of this.series) {
       try {
         if (now - (this.feesFetchedAt.get(series) ?? 0) > 3_600_000) {
           const f = await this.rest.getSeriesFees(series);

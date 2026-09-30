@@ -42,8 +42,10 @@ export interface RiskLimits {
 
 export interface StrategyConfig {
   style: StrategyStyle;
-  /** Series to trade, e.g. KXBTC15M. */
+  /** Series to trade, e.g. KXBTC15M (with seriesAuto: the fallback list). */
   series: string[];
+  /** Discover every priceable crypto 15-minute / hourly series from the exchange (STRATEGY_SERIES=auto). */
+  seriesAuto: boolean;
   /** Fractional Kelly multiplier (0.1–0.25 recommended). */
   kellyFraction: number;
   /** Required edge beyond fees, in probability points, before quoting/taking. */
@@ -275,8 +277,12 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     throw new ConfigError(`BIND_HOST=${host} is not loopback. Reach the dashboard through an SSH tunnel or Tailscale, or set ALLOW_NON_LOOPBACK_BIND=true behind TLS.`);
   }
 
-  const series = (env.STRATEGY_SERIES ?? 'KXBTC15M').split(',').map((s) => s.trim()).filter(Boolean);
+  // auto (default): every crypto 15-minute and hourly series the exchange lists whose asset has a
+  // settlement index; the built-in list below is only the fallback if discovery fails.
+  const rawSeries = (env.STRATEGY_SERIES ?? 'auto').trim();
+  const seriesAuto = rawSeries === 'auto';
   const seriesAssetMap = jsonMap(env, 'SERIES_ASSET_MAP', DEFAULT_SERIES_ASSET);
+  const series = seriesAuto ? Object.keys(seriesAssetMap) : rawSeries.split(',').map((s) => s.trim()).filter(Boolean);
   for (const s of series) {
     if (!seriesAssetMap[s]) throw new ConfigError(`Series ${s} has no asset mapping in SERIES_ASSET_MAP`);
   }
@@ -334,6 +340,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
   const strategy: StrategyConfig = {
     style: oneOf<StrategyStyle>(env, 'STRATEGY_STYLE', 'maker', ['maker', 'taker', 'both']),
     series,
+    seriesAuto,
     kellyFraction: num(env, 'STRATEGY_KELLY_FRACTION', 0.25, 0.01, 0.5),
     // Relaxed spec: e_min = 3c for maker entries; take only with >= 5c net edge (3c + 2c buffer).
     minEdge: num(env, 'STRATEGY_MIN_EDGE', relaxed ? 0.03 : 0.02, 0.0, 0.5),
