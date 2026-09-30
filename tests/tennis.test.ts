@@ -54,13 +54,54 @@ test('underdog rule: skewed match about to start -> maker bid on the underdog; n
   assert.equal(early.plans.length, 0, 'hours before the start: wait');
 });
 
-test('after an underdog fill: resting take-profit at max(+6c, +40%)', () => {
-  const tr = new MatchTracker('E', T);
+test('fixed take-profit mode (TENNIS_TRAIL=false): resting take-profit at max(+6c, +40%)', () => {
+  const noTrail = { ...T, trail: false };
+  const tr = new MatchTracker('E', noTrail);
   const markets = [mk('E-ALC', 0.80, 0.82), mk('E-DOG', 0.18, 0.20, { position: 100, avgEntry: 0.15 })];
   tr.underdogTicker = 'E-DOG';
-  const out = decideMatch(tr, { event: 'E', now: t0, startTime: t0 - 60_000, closeTime: t0 + 86_400_000, markets }, T, budget);
+  const out = decideMatch(tr, { event: 'E', now: t0, startTime: t0 - 60_000, closeTime: t0 + 86_400_000, markets }, noTrail, budget);
   const tp = out.plans[0];
   assert.deepEqual([tp.leg, tp.side, tp.count, tp.price], ['underdog_tp', 'ask', 100, 0.21]); // 0.15 + max(0.06, 0.06)
+});
+
+import { OrderBook } from '../bot/marketdata/orderBook';
+
+test('order-book ratcheting trail: arms at the target, climbs to walls, exits below the stop, handles gaps', () => {
+  const tr = new MatchTracker('E', T);
+  tr.underdogTicker = 'E-DOG';
+  const book = new OrderBook('E-DOG');
+  let now = t0;
+  const step = (bids: Array<[number, number]>, ask: number) => {
+    book.applySnapshot({ bids: bids.map(([price, size]) => ({ price, size })), asks: [{ price: ask, size: 100 }] }, now);
+    const m = [mk('E-ALC', 1 - ask, 1 - bids[0][0]), { ...mk('E-DOG', bids[0][0], ask, { position: 100, avgEntry: 0.15 }), book }];
+    const out = decideMatch(tr, { event: 'E', now, startTime: t0 - 60_000, closeTime: t0 + 86_400_000, markets: m }, T, budget);
+    now += 5000;
+    return out;
+  };
+  // Below the 0.21 target: hold, no exit order.
+  let o = step([[0.18, 300]], 0.20);
+  assert.equal(o.plans.length, 0);
+  assert.ok(o.notes.some((n) => n.includes('trail arms at 0.21')));
+  // Bid reaches the target: armed, stop = target; still riding.
+  o = step([[0.22, 300]], 0.24);
+  assert.equal(o.plans.length, 0);
+  assert.equal(tr.stops.get('E-DOG'), 0.21);
+  // Price runs to 0.30 with a persistent wall at 0.28: stop ratchets to 0.28.
+  step([[0.30, 300], [0.28, 400]], 0.32);
+  o = step([[0.30, 300], [0.28, 400]], 0.32);
+  assert.equal(tr.stops.get('E-DOG'), 0.28);
+  assert.equal(o.plans.length, 0);
+  // Bid slips to 0.27, below the stop: exit reduce-only at stop - 1 tick.
+  o = step([[0.27, 300]], 0.29);
+  assert.deepEqual([o.plans[0].leg, o.plans[0].side, o.plans[0].price, o.plans[0].reduceOnly, o.plans[0].count], ['underdog_trail', 'ask', 0.27, true, 100]);
+  // A gap far below the stop: sell at the bid while still in profit.
+  const tr2 = new MatchTracker('F', T);
+  tr2.underdogTicker = 'F-DOG';
+  tr2.armed.add('F-DOG');
+  const b2 = new OrderBook('F-DOG');
+  b2.applySnapshot({ bids: [{ price: 0.19, size: 300 }], asks: [{ price: 0.21, size: 100 }] }, now);
+  const g = decideMatch(tr2, { event: 'F', now, startTime: t0, closeTime: t0 + 86_400_000, markets: [mk('F-ALC', 0.79, 0.81), { ...mk('F-DOG', 0.19, 0.21, { position: 100, avgEntry: 0.15 }), book: b2 }] }, T, budget);
+  assert.equal(g.plans[0]?.price, 0.19, JSON.stringify(g));
 });
 
 test('in-play detection without a start time, then favorite re-entry once half the match is done', () => {
@@ -137,7 +178,7 @@ test('engine trades tennis inside its own 25% budget and keeps it out of the cry
 import fs from 'fs';
 import { runTennisBacktest } from '../research/tennisBacktest';
 
-test('tennis backtest: underdog bought pre-start, sold into the bounce, settled', async () => {
+test('tennis backtest: underdog bought pre-start, trailed up the bounce, sold when it slipped below the stop', async () => {
   const dir = path.join(tmpDir(), 'rec');
   fs.mkdirSync(dir, { recursive: true });
   const t0 = Date.parse('2026-10-01T12:00:00Z');
@@ -146,11 +187,15 @@ test('tennis backtest: underdog bought pre-start, sold into the bounce, settled'
   ev.push(mkt('KXATPMATCH-E-DOG'), mkt('KXATPMATCH-E-FAV'));
   for (let s = 0; s <= 3 * 3600; s += 5) {
     const t = t0 + s * 1000;
-    const bounce = s >= 1800;
-    ev.push({ t, k: 'book', ticker: 'KXATPMATCH-E-DOG', bids: [{ price: bounce ? 0.22 : 0.14, size: 100 }], asks: [{ price: bounce ? 0.24 : 0.17, size: 100 }] });
-    ev.push({ t, k: 'book', ticker: 'KXATPMATCH-E-FAV', bids: [{ price: bounce ? 0.76 : 0.83, size: 100 }], asks: [{ price: bounce ? 0.78 : 0.86, size: 100 }] });
+    // pre-start 0.14/0.17 -> bounce past the 0.21 target -> run to 0.30 (wall at 0.28) -> slip to 0.27 -> 0.19.
+    const dog = s < 1800 ? { bids: [{ price: 0.14, size: 100 }], asks: [{ price: 0.17, size: 100 }] }
+      : s < 3600 ? { bids: [{ price: 0.22, size: 300 }], asks: [{ price: 0.24, size: 100 }] }
+      : s < 5400 ? { bids: [{ price: 0.30, size: 300 }, { price: 0.28, size: 400 }], asks: [{ price: 0.32, size: 100 }] }
+      : s < 5460 ? { bids: [{ price: 0.27, size: 300 }], asks: [{ price: 0.29, size: 100 }] }
+      : { bids: [{ price: 0.19, size: 300 }], asks: [{ price: 0.21, size: 100 }] };
+    ev.push({ t, k: 'book', ticker: 'KXATPMATCH-E-DOG', ...dog });
+    ev.push({ t, k: 'book', ticker: 'KXATPMATCH-E-FAV', bids: [{ price: 1 - dog.asks[0].price, size: 100 }], asks: [{ price: 1 - dog.bids[0].price, size: 100 }] });
     if (s === 60) ev.push({ t, k: 'trade', ticker: 'KXATPMATCH-E-DOG', price: 0.15, count: 1000, takerSide: 'no', ts: t });
-    if (s === 1805) ev.push({ t, k: 'trade', ticker: 'KXATPMATCH-E-DOG', price: 0.22, count: 1000, takerSide: 'yes', ts: t });
   }
   ev.push({ t: t0 + 3 * 3600 * 1000 + 1000, k: 'result', ticker: 'KXATPMATCH-E-DOG', result: 'no' }, { t: t0 + 3 * 3600 * 1000 + 1000, k: 'result', ticker: 'KXATPMATCH-E-FAV', result: 'yes' });
   ev.push({ t: t0 + 3 * 3600 * 1000 + 10_000, k: 'book', ticker: 'KXATPMATCH-E-DOG', bids: [], asks: [] });
@@ -158,7 +203,7 @@ test('tennis backtest: underdog bought pre-start, sold into the bounce, settled'
   const r = await runTennisBacktest(dir, T, 200);
   assert.equal(r.matches, 1);
   assert.ok(r.byLeg.underdog_entry?.fills > 0, JSON.stringify(r.byLeg));
-  assert.ok(r.byLeg.underdog_tp?.fills > 0, JSON.stringify(r.byLeg));
+  assert.ok(r.byLeg.underdog_trail?.fills > 0, JSON.stringify(r.byLeg));
   assert.ok(r.pnl > 0, `pnl ${r.pnl}`);
   assert.ok(r.maxTennisRisk <= 0.25 * 200 + 1e-9);
 });

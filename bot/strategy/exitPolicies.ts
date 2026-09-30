@@ -76,6 +76,9 @@ export interface RatchetInput {
   /** hybrid only: model probability that OUR side wins. */
   qSide?: number;
   hybrid?: boolean;
+  /** Profit lock (side terms): the stop never sits below this, arms at it, and only a price
+   * strictly BELOW the stop triggers (a trailing stop that "begins at the target price"). */
+  floor?: number;
 }
 
 export type RatchetEvent = 'armed' | 'ratcheted' | 'triggered' | 'gapped' | 'hybrid_hold' | undefined;
@@ -123,11 +126,18 @@ export class LiquidityRatchet {
 
     let event: RatchetEvent;
     const slip = this.p.slippageTicks * i.tick;
+    if (i.floor !== undefined && (this.stop === undefined || this.stop < i.floor - 1e-9)) {
+      event = this.stop === undefined ? 'armed' : 'ratcheted';
+      this.stop = i.floor;
+    }
+    const hit = this.stop !== undefined && (i.floor !== undefined ? best < this.stop - 1e-9 : best <= this.stop + 1e-9);
 
-    if (this.stop !== undefined && best <= this.stop + 1e-9) {
+    if (this.stop !== undefined && hit) {
       if (best < this.stop - slip - 1e-9) {
-        // Gapped through: the exit cannot fill at an acceptable price. Fall back to the next wall down.
-        this.stop = wallBelow(best);
+        // Gapped through: the exit cannot fill at an acceptable price. Fall back to the next wall down
+        // (never below the profit lock: the caller decides what to do below it).
+        const below = wallBelow(best);
+        this.stop = i.floor !== undefined ? Math.max(i.floor, below ?? i.floor) : below;
         return { event: 'gapped', stop: this.stop };
       }
       if (i.hybrid && i.qSide !== undefined) {
@@ -144,7 +154,7 @@ export class LiquidityRatchet {
     // Ratchet: the highest persistent wall the price has moved past.
     const candidate = wallBelow(best);
     if (candidate !== undefined && (this.stop === undefined || candidate > this.stop + 1e-9)) {
-      event = this.stop === undefined ? 'armed' : 'ratcheted';
+      event = this.stop === undefined ? 'armed' : event === 'armed' ? 'armed' : 'ratcheted';
       this.stop = candidate;
     }
     return { event, stop: this.stop };

@@ -32,11 +32,13 @@
 // Pure logic (no I/O): the engine turns plans into risk-checked orders.
 
 import type { TennisConfig } from '../config';
+import type { OrderBook } from '../marketdata/orderBook';
+import { LiquidityRatchet } from '../strategy/exitPolicies';
 import { floorToTick, round } from '../util/num';
 
 export interface Quote { bid?: number; ask?: number; bidSize?: number; askSize?: number }
 
-export interface MatchMarket { ticker: string; title?: string; quote: Quote; position: number; avgEntry?: number }
+export interface MatchMarket { ticker: string; title?: string; quote: Quote; position: number; avgEntry?: number; book?: OrderBook }
 
 export type MatchPhase = 'pre' | 'underdog_window' | 'live' | 'late' | 'done';
 
@@ -58,7 +60,7 @@ export interface TennisPlan {
   postOnly: boolean;
   reduceOnly: boolean;
   timeInForce: 'good_till_canceled' | 'immediate_or_cancel';
-  leg: 'underdog_entry' | 'underdog_tp' | 'underdog_stop' | 'fav_entry' | 'fav_stop';
+  leg: 'underdog_entry' | 'underdog_tp' | 'underdog_trail' | 'underdog_stop' | 'fav_entry' | 'fav_trail' | 'fav_stop';
   why: string;
 }
 
@@ -73,6 +75,10 @@ export class MatchTracker {
   underdogEntered = false;
   underdogClosed = false;
   favEntered = false;
+  /** Trailing stops (per held market): armed once the bid reached the target. */
+  readonly armed = new Set<string>();
+  readonly ratchets = new Map<string, LiquidityRatchet>();
+  readonly stops = new Map<string, number>();
   private history: Array<{ ts: number; p: number }> = [];
 
   constructor(readonly event: string, private readonly cfg: TennisConfig) {}
@@ -129,6 +135,40 @@ export class MatchTracker {
   }
 }
 
+/**
+ * Ratcheting "smart trailing" exit for a long YES position, the same order-book logic as the
+ * crypto liquidity ratchet: it arms when the bid first reaches `target` (the stop starts AT the
+ * target, locking that profit), then the stop climbs to the highest bid wall the price has moved
+ * past (a level big enough to absorb the whole position that has persisted a few seconds). When
+ * the bid falls below the stop, sell reduce-only at stop - slippage. If the price gaps through,
+ * sell at the bid while that is still a profit; otherwise keep holding (optional hard stop).
+ * Before the target is reached there is no exit order: the position rides.
+ */
+function trailExit(t: MatchTracker, m: MatchMarket, entry: number, target: number, now: number, cfg: TennisConfig, tick: number, leg: 'underdog_trail' | 'fav_trail', notes: string[]): TennisPlan[] {
+  const bid = m.quote.bid;
+  if (!t.armed.has(m.ticker)) {
+    if (bid === undefined || bid < target - 1e-9) {
+      notes.push(`${leg}: holding, trail arms at ${target.toFixed(2)} (bid ${bid ?? '—'})`);
+      return [];
+    }
+    t.armed.add(m.ticker);
+  }
+  const sell = (price: number, why: string): TennisPlan[] => [{ ticker: m.ticker, side: 'ask', price: round(price, 4), count: m.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg, why }];
+  let r = t.ratchets.get(m.ticker);
+  if (!r) { r = new LiquidityRatchet({ minFillRatio: cfg.trailMinFillRatio, minWallAgeMs: cfg.trailMinWallAgeSec * 1000, slippageTicks: cfg.trailSlippageTicks }); t.ratchets.set(m.ticker, r); }
+  if (!m.book) {
+    // No depth available: fall back to a plain trail at the target.
+    t.stops.set(m.ticker, target);
+    return bid !== undefined && bid < target - 1e-9 && bid > entry ? sell(bid, `${leg}: bid ${bid} below trail ${target}`) : [];
+  }
+  const out = r.evaluate({ position: m.position, book: m.book, now, tick, fees: { takerMultiplier: 1, makerMultiplier: 1 }, floor: target });
+  if (out.stop !== undefined) t.stops.set(m.ticker, out.stop);
+  notes.push(`${leg}: stop ${out.stop?.toFixed(2)} (entry ${entry.toFixed(3)})`);
+  if (out.plan) return sell(out.plan.price, `${leg}: bid fell below stop ${out.stop}`);
+  if (out.event === 'gapped' && bid !== undefined && bid >= entry + tick - 1e-9) return sell(bid, `${leg}: gapped below stop ${out.stop}; selling at ${bid} while still in profit`);
+  return [];
+}
+
 /** Buy-side view of a market: price to bid (maker) for YES of this player. */
 function makerBid(q: Quote, tick: number, maxSpread: number): number | undefined {
   if (q.bid === undefined || q.ask === undefined) return undefined;
@@ -178,6 +218,9 @@ export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig
   const pSide = (side: 'a' | 'b') => (side === 'a' ? pA : 1 - pA);
   const held = s.markets.filter((m) => m.position > 0);
 
+  // A flat market has no trail (a later leg on the same player starts a fresh one).
+  for (const m of s.markets) if (m.position <= 0) { t.armed.delete(m.ticker); t.ratchets.delete(m.ticker); t.stops.delete(m.ticker); }
+
   // After a restart the tracker is fresh: a held position bought cheap is the underdog trade.
   if (!t.underdogTicker && !t.underdogEntered && !t.favEntered && held.length) {
     const h = held[0];
@@ -191,7 +234,11 @@ export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig
     const entry = ud.avgEntry ?? ud.quote.bid ?? 0;
     const target = Math.min(0.99, Math.max(entry + cfg.takeProfitCents, entry * (1 + cfg.takeProfitPct)));
     const tpPx = floorToTick(target + tick - 1e-9, tick); // target rounded up to the tick
-    if (ud.quote.bid !== undefined && ud.quote.bid >= tpPx - 1e-9) {
+    if (cfg.trail) {
+      // Ratcheting trail from the target: no fixed exit; the stop starts at the target and climbs
+      // to order-book walls the price moves past.
+      plans.push(...trailExit(t, ud, entry, tpPx, s.now, cfg, tick, 'underdog_trail', notes));
+    } else if (ud.quote.bid !== undefined && ud.quote.bid >= tpPx - 1e-9) {
       // The bounce already went past the target: take the profit at the bid now.
       plans.push({ ticker: ud.ticker, side: 'ask', price: ud.quote.bid, count: ud.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg: 'underdog_tp', why: `underdog bid ${ud.quote.bid} >= take-profit ${round(tpPx, 2)} (entry ${round(entry, 3)})` });
     } else {
@@ -232,8 +279,11 @@ export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig
   const fav = held.find((m) => t.underdogClosed || m.ticker !== t.underdogTicker);
   if (fav) {
     t.favEntered = true;
-    if (cfg.favStopCents > 0 && fav.avgEntry !== undefined && fav.quote.bid !== undefined && fav.quote.bid <= fav.avgEntry - cfg.favStopCents) {
+    if (cfg.favStopCents > 0 && fav.avgEntry !== undefined && fav.quote.bid !== undefined && fav.quote.bid <= fav.avgEntry - cfg.favStopCents && !t.armed.has(fav.ticker)) {
       plans.push({ ticker: fav.ticker, side: 'ask', price: fav.quote.bid, count: fav.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg: 'fav_stop', why: `favorite stop ${fav.quote.bid}` });
+    } else if (cfg.trail && fav.avgEntry !== undefined) {
+      const target = floorToTick(Math.min(cfg.favTrailCap, fav.avgEntry + cfg.favTrailCents) + tick - 1e-9, tick);
+      plans.push(...trailExit(t, fav, fav.avgEntry, target, s.now, cfg, tick, 'fav_trail', notes));
     }
     return { phase, plans, notes };
   }

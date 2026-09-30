@@ -200,6 +200,15 @@ export interface TennisConfig {
   durationBo5Min: number;
   /** In-play detection from price action when no start time is published: a mid move of this size within 3 minutes. */
   liveMoveCents: number;
+  /** Order-book ratcheting trailing stop from the target price (both legs) instead of a fixed take-profit. */
+  trail: boolean;
+  /** Favorite leg: the trail arms at min(favTrailCap, entry + favTrailCents). */
+  favTrailCents: number;
+  favTrailCap: number;
+  /** Walls: bid levels >= trailMinFillRatio x position, persisting trailMinWallAgeSec; exit limit stop - slippage ticks. */
+  trailMinFillRatio: number;
+  trailMinWallAgeSec: number;
+  trailSlippageTicks: number;
 }
 
 export interface PerpsConfig {
@@ -541,6 +550,12 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       durationBo3Min: num(env, 'TENNIS_DURATION_BO3_MIN', 105, 30, 400),
       durationBo5Min: num(env, 'TENNIS_DURATION_BO5_MIN', 170, 60, 600),
       liveMoveCents: num(env, 'TENNIS_LIVE_MOVE_CENTS', 0.03, 0.005, 0.5),
+      trail: bool(env, 'TENNIS_TRAIL', true),
+      favTrailCents: num(env, 'TENNIS_FAV_TRAIL_CENTS', 0.06, 0.01, 0.5),
+      favTrailCap: num(env, 'TENNIS_FAV_TRAIL_CAP', 0.97, 0.5, 0.99),
+      trailMinFillRatio: num(env, 'TENNIS_TRAIL_MIN_FILL_RATIO', 1, 0.1, 20),
+      trailMinWallAgeSec: num(env, 'TENNIS_TRAIL_MIN_WALL_AGE_SEC', 3, 0, 120),
+      trailSlippageTicks: num(env, 'TENNIS_TRAIL_SLIPPAGE_TICKS', 1, 0, 10),
     },
   };
   return deepFreeze(cfg);
