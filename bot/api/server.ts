@@ -137,6 +137,7 @@ export function createApi(d: ApiDeps): express.Express {
       exitPolicy: d.cfg.strategy.exitPolicy,
       session: d.engine.sessionStatus(),
       guards: d.engine.guardStatus(),
+      perps: d.engine.perpStatus(),
       vault: d.vault?.status() ?? null,
       dominance: dominanceStatus(d.md),
       wsConnected: d.md.wsConnected,

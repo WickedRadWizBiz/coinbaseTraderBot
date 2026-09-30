@@ -89,6 +89,9 @@ export class ReplayState {
       case 'trade':
         this.features.onTrade(e.ticker, e.count, e.takerSide, e.ts ?? e.t);
         break;
+      case 'perp':
+        this.features.onPerp({ ...(e as any), ts: e.ts ?? e.t });
+        break;
       case 'result':
         this.results.set(e.ticker, e.result);
         break;

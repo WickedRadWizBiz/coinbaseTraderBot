@@ -105,6 +105,7 @@ export async function buildDataset(
         kind: m.kind, strike: terms.strike, cap: terms.cap, d2: fv.d2, vEff: fv.vEff, sigmaPricing: sigmaFv,
         bars: st.features.bars.get(m.asset), openTime: m.openTime, calendar: opts.calendar,
         ticker: m.ticker, siblings: m.kind === 'updown' ? undefined : ladderQuotes(st.markets.values(), (t) => st.books.get(t), m.asset, m.closeTime),
+        perp: st.features.perps.get(m.asset),
       });
       const arr = pending.get(m.ticker) ?? [];
       arr.push({

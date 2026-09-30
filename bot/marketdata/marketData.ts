@@ -23,6 +23,9 @@ import { logger } from '../util/log';
 import { parseCount } from '../util/num';
 import { FeatureHub } from '../model/featureEngine';
 import { selectCryptoSeries } from './seriesDiscovery';
+import { PerpFeed } from '../perps/perpFeed';
+import { KalshiPerpsRest } from '../perps/perpRest';
+import type { PerpSnapshot } from '../perps/perpData';
 import { contractKind, type ContractTerms, type MarketKind } from '../model/fairValue';
 import { DominanceService } from './dominance';
 import { IndexTracker } from './indexTracker';
@@ -118,6 +121,21 @@ export class MarketData extends EventEmitter {
       this.dominance.on('sample', (d: { usdtd: number; btcd: number; coveredShare: number; ts: number }) => this.onDominance(d));
       this.dominance.start();
     }
+    if (this.cfg.perps.feed) {
+      this.perpFeed = new PerpFeed(new KalshiPerpsRest(this.cfg.perps.restUrl), Object.values(this.cfg.indexIdMap), this.cfg.perps.pollMs);
+      this.perpFeed.on('snapshot', (s: PerpSnapshot) => this.onPerp(s));
+      this.perpFeed.start();
+    }
+  }
+
+  /** Kalshi perpetuals feed (features and hedging), when enabled. */
+  perpFeed: PerpFeed | undefined;
+
+  /** A perp market snapshot: feature state + research recording. */
+  onPerp(s: PerpSnapshot): void {
+    this.features.onPerp(s);
+    this.recorder.write('perp', { ...s });
+    this.emit('perp', s);
   }
 
   stop(): void {
@@ -125,6 +143,7 @@ export class MarketData extends EventEmitter {
     this.ws?.close();
     this.proxyWs?.close();
     this.dominance?.stop();
+    this.perpFeed?.stop();
     this.recorder.close();
   }
 

@@ -180,8 +180,26 @@ The trainer's ablation decides which groups are kept.
 
 In live trading, `ModelHealth` stops new risk if the rolling log-loss advantage over the calibrated market turns significantly negative across at least 200 windows. The Telemetry page shows cadence, sizing, drawdown, model health and the entry guards. Operationally, the gate still requires 2 weeks live at 10–20% size, with realized edge at least 50% of the backtest edge.
 
+**Kalshi perpetuals (`bot/perps/`).** Perps run on a separate exchange: REST at `external-api[.demo].kalshi.com/trade-api/v2` under `/margin/...`, with their own API keys. Endpoint and field names follow the perps OpenAPI as mirrored by the public kalshi-python-sdk, because docs.kalshi.com is blocked from the build host. **Verify on Kalshi demo before relying on them.** All wire parsing lives in `perpData.ts` and `perpRest.ts`.
+- **Stage 1, perps as features (on by default, no key needed).** Every 2 seconds the bot polls the public perp market list (one call covers all markets) and each market's funding estimate. It records them for research and feeds a new `perp` feature group, which the trainer adds one group at a time like the others:
+  - the perp premium to the settlement index, and its 5-minute change (perps tend to lead spot)
+  - perp-minus-index return over 1 and 5 minutes
+  - the funding rate and minutes to the next funding time (00:00, 08:00 and 16:00 New York)
+  - the 1-hour change in open interest
+- **Stage 2, delta-hedging the binary book (`PERP_HEDGE`, `paper` by default).**
+  - Each binary's sensitivity to the underlying (dP/dS) comes from re-pricing at S ± 0.05%. Positions net per asset, and the hedge target is `−Σ position × dP/dS ÷ contract size`.
+  - It hedges only when the book's dollar delta is at least `PERP_HEDGE_MIN_DOLLAR_DELTA` (default $2,000, which is $20 per 1% move) and a whole step is needed. A 25% hysteresis band stops churn.
+  - Contracts within 2 minutes of close are excluded because their delta is unstable.
+  - Each asset is capped at `PERP_HEDGE_MAX_NOTIONAL_USD`, and the hedge never exceeds the exposure it offsets.
+  - Entries are post-only maker orders at the touch, re-priced every 30 seconds.
+  - A reduction left unfilled for 5 minutes crosses the spread reduce-only, for example when the binaries have settled and the hedge would otherwise be naked.
+  - While new risk is halted or the kill switch is on, the hedger only reduces. The kill switch also cancels perp orders.
+  - `paper` simulates hedges against live perp quotes: fills on trade-through only, maker/taker fees in bps, and funding accrued at each funding time. `live` sends real orders and needs `TRADING_MODE=live`, the perps keys, and a funded margin account.
+  - At small bankrolls the $2,000 threshold means the hedge rarely fires, which is intended: hedging a $20 book would cost more in fees and margin than the risk it removes.
+  - `/api/status` shows the perp feed, premium, funding, the hedge targets and resting orders.
+- **Stage 3, directional perp trading, is not built.** Taker round trips (24 bps) are about the size of a 15-minute BTC move. It would need its own model, liquidation-aware limits, funding in P&L and a backtest that passes the same gates.
+
 **Researched and deliberately not adopted (yet):**
-- **Perps (hedging and features).** The spec's hedge threshold (about $2,000 of net delta) is far above this bankroll. Kalshi's perp tick size and mark-price formula are unpublished. Binance and Bybit block US IPs. Revisit when a US-accessible perp feed is verified.
 - **LightGBM in Python plus ONNX.** Replaced by the in-repo TypeScript GBDT, which gives the same model class with nothing to keep in parity.
 - **GRU/TCN encoder, gated regime stacker, HMM/BOCPD regimes.** Both documents rank these last. They need 3 months or more of logs, and must beat the GBDT in CPCV to be kept.
 - **Scenario/copula Kelly.** Correlated same-close BTC/ETH/SOL exposure is instead capped as one position by `RISK_MAX_WINDOW_FRAC`.
@@ -269,7 +287,7 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 | Kill switch | Persists on disk, survives restart, auto-trips on loss limit, repeated order errors, persistent break or a stalled heartbeat. Resting orders also carry an exchange-side `expiration_time` as a dead-man switch. |
 | Fee-correct PnL | Exact fee formula with round-up. Uses exchange-reported fees when present. Wins and losses are labelled after fees at settlement. |
 | Data recorder, fill simulator, TCA, alerts, audit log | Recorder: `marketdata/`. Fill simulator: `paper/` (queue position, trade-through fills). TCA: `tca/` (markouts). Alerts: Telegram or webhook. Audit log: hash-chained JSONL, checked with `npm run audit:verify`. |
-| Tests / CI | 178 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
+| Tests / CI | 185 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
 
 ## Things you must do yourself
 

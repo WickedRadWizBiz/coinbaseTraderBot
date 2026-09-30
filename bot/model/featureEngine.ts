@@ -18,11 +18,12 @@ import type { IndexTracker } from '../marketdata/indexTracker';
 import { clamp, logit, normInv, normPdf, studentTCdf } from '../util/num';
 import { kalshiMaintenance, sessionState, usMarketClock, zoneTime } from './sessions';
 import { neighborGap, violationAt, type LadderQuote } from './ladder';
+import { PerpHub, type PerpSnapshot, type PerpState } from '../perps/perpData';
 import { EWMA_LOOKBACK_SEC, seasonalVarianceRatio, type VolProfile } from './volSeasonality';
 
 export type FeatureGroup = 'base' | 'micro' | 'momentum' | 'spot' | 'macro' | 'confluence' | 'session' | 'time'
   // Relaxed-cadence catalog (minute windows and slower).
-  | 'geometry' | 'vol' | 'kalshi' | 'returns' | 'clock' | 'calendar' | 'interaction' | 'ladder';
+  | 'geometry' | 'vol' | 'kalshi' | 'returns' | 'clock' | 'calendar' | 'interaction' | 'ladder' | 'perp';
 
 /** Build tiers from the relaxed-cadence spec: T1 first, T2 only after ablation proves them, T3 experimental. */
 export type FeatureTier = 'T1' | 'T2' | 'T3';
@@ -205,6 +206,9 @@ export class FeatureHub {
   readonly micro = new Map<string, MicroTracker>();
   readonly asiaRange = new Map<string, AsiaRangeTracker>();
   readonly bars = new Map<string, BarStore>();
+  /** Kalshi perpetuals per asset (premium to the index, funding, open interest). */
+  readonly perps = new PerpHub();
+  onPerp(s: PerpSnapshot): void { this.perps.apply(s); }
   onIndex(asset: string, value: number, ts: number): void {
     let b = this.bars.get(asset);
     if (!b) { b = new BarStore(); this.bars.set(asset, b); }
@@ -264,6 +268,8 @@ export interface FeatureContext {
   /** This contract's ticker and the other strikes/brackets settling with it (hourly events). */
   ticker?: string;
   siblings?: LadderQuote[];
+  /** Kalshi perp state for this contract's asset. */
+  perp?: PerpState;
 }
 
 type Fn = (c: FeatureContext, cache: Cache) => number;
@@ -430,6 +436,11 @@ const macroClock = (c: FeatureContext, dir: 'to' | 'since'): number => {
   return best <= 86_400_000 ? Math.min(240, best / 60_000) : NA;
 };
 const minuteOfHour = (now: number) => (now % 3_600_000) / 60_000;
+const perpRetDiff = (c: FeatureContext, k: Cache, sec: number): number => {
+  const ps = c.perp?.mid.series(c.now, sec, 15_000), ix = series(c, k, sec);
+  if (!ps || !ix) return NA;
+  return clip((Math.log(ps[ps.length - 1] / ps[0]) - Math.log(ix[ix.length - 1] / ix[0])) / (c.sigmaPerSqrtSec * Math.sqrt(sec)));
+};
 
 export const FEATURES: Record<string, { group: FeatureGroup; description: string; fn: Fn; tier?: FeatureTier }> = {
   // Base (the original v2 set).
@@ -710,6 +721,21 @@ export const FEATURES: Record<string, { group: FeatureGroup; description: string
     const b = c.siblings.filter((q) => q.kind === 'between' && q.mid !== undefined);
     return b.length >= 3 ? clip((b.reduce((s2, q) => s2 + q.mid!, 0) - 1) * 100, 50) : NA;
   } },
+
+  // G/H. Kalshi perpetuals: premium to the settlement index (perps lead spot), funding, positioning.
+  perp_premium_bps: { group: 'perp', tier: 'T2', description: 'Kalshi perp price vs settlement index, bps', fn: (c) => {
+    const p = c.perp?.price(c.now), ix = c.index.latest()?.value;
+    return p && ix ? clip(1e4 * Math.log(p / ix), 100) : NA;
+  } },
+  perp_premium_chg_5m: { group: 'perp', tier: 'T2', description: 'change in the perp premium over 5 min, bps', fn: (c, k) => {
+    const ps = c.perp?.mid.series(c.now, 300, 15_000), ix = series(c, k, 300);
+    return ps && ix ? clip(1e4 * (Math.log(ps[ps.length - 1] / ix[ix.length - 1]) - Math.log(ps[0] / ix[0])), 100) : NA;
+  } },
+  perp_ret_diff_1m_z: { group: 'perp', tier: 'T2', description: 'perp 1-min return minus index 1-min return, sigma-scaled (lead-lag)', fn: (c, k) => perpRetDiff(c, k, 60) },
+  perp_ret_diff_5m_z: { group: 'perp', tier: 'T2', description: 'perp 5-min return minus index 5-min return, sigma-scaled', fn: (c, k) => perpRetDiff(c, k, 300) },
+  funding_rate_bps: { group: 'perp', tier: 'T2', description: 'current funding-rate estimate per 8 h, bps (positive = longs pay)', fn: (c) => { const r = c.perp?.latest?.fundingRate; return r === undefined ? NA : clip(r * 1e4, 200); } },
+  min_to_funding: { group: 'perp', tier: 'T2', description: 'minutes to the next funding payment', fn: (c) => { const t = c.perp?.latest?.nextFundingTs; return t === undefined ? NA : clamp((t - c.now) / 60_000, 0, 480); } },
+  perp_oi_chg_1h: { group: 'perp', tier: 'T2', description: 'log change in perp open interest over 1 h', fn: (c) => { const s = c.perp?.oi.series(c.now, 3600, 120_000); return s && s[0] > 0 ? clip(Math.log(s[s.length - 1] / s[0]), 5) : NA; } },
 
   // N. Interactions (kept only if ablation proves them; trees find most on their own).
   gap_x_spread: { group: 'interaction', tier: 'T1', description: 'logit_gap x spread (cents): a disagreement is tradable only where the spread is tight', fn: (c) => { const b = c.book.bestBid(), a = c.book.bestAsk(); return b && a ? clip(logitGap(c) * (a.price - b.price) * 100, 50) : NA; } },

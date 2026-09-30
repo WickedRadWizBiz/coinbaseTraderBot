@@ -30,6 +30,7 @@ import type { ModelHealth } from './model/modelHealth';
 import type { Tca } from './tca/tca';
 import type { MacroEvent } from './model/featureEngine';
 import { ladderQuotes } from './model/ladder';
+import type { BinaryExposure, PerpHedger } from './perps/hedger';
 import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
 import { effectiveSigma, type VolProfile } from './model/volSeasonality';
 import { floorCount } from './util/num';
@@ -50,6 +51,8 @@ export interface MarketStatus {
   strike?: number;
   cap?: number;
   strikeSource?: string;
+  /** dP(YES)/dS per $1 of the underlying index (for the perp delta hedge). */
+  dPdS?: number;
   spot?: number;
   sigma?: number;
   fairValue?: number;
@@ -106,6 +109,8 @@ export interface EngineDeps {
   modelHealth?: ModelHealth;
   /** Scheduled macro releases (CPI, FOMC, NFP, PCE) for calendar features. */
   calendar?: MacroEvent[];
+  /** Perp delta hedge of the binary book (stage 2). */
+  hedger?: PerpHedger;
   now?: () => number;
 }
 
@@ -378,7 +383,11 @@ export class Engine {
     if (this.dataHalt === 'engine heartbeat stalled') this.dataHalt = undefined;
     if (this.dataHalt === 'awaiting market data' && this.d.md.activeMarkets().length) this.dataHalt = undefined;
     const { kill, risk } = this.d;
-    if (kill.engaged) return;
+    if (kill.engaged) {
+      // A stale hedge must still be unwound when the binaries it offset are gone.
+      await this.d.hedger?.tick(this.exposures(), { reduceOnly: true });
+      return;
+    }
 
     const limit = risk.dailyLossLimit(this.bankroll(), this.tierLimits(this.tier()));
     const pnl = this.dailyPnl();
@@ -388,6 +397,34 @@ export class Engine {
     }
     await Promise.all(this.d.md.activeMarkets(this.now()).map((m) => this.evaluate(m)));
     this.prune();
+    // Stage 2: offset the binary book's net delta with perps (reduce-only when new risk is halted).
+    await this.d.hedger?.tick(this.exposures(), { reduceOnly: this.haltReasons().length > 0 });
+  }
+
+  /** Perp feed and hedge state for the dashboard. */
+  perpStatus(now = this.now()) {
+    const f = this.d.md.perpFeed;
+    const markets = [...this.d.md.features.perps.byAsset.entries()].map(([asset, s]) => {
+      const ix = this.d.md.index.get(asset)?.latest()?.value;
+      const p = s.price(now);
+      return { asset, ticker: s.latest?.ticker, bid: s.latest?.bid, ask: s.latest?.ask, premiumBps: p && ix ? 1e4 * Math.log(p / ix) : null, fundingRate: s.latest?.fundingRate ?? null, nextFundingTs: s.latest?.nextFundingTs ?? null, contractSize: s.latest?.contractSize ?? null, leverage: s.latest?.leverage ?? null };
+    });
+    return {
+      feed: f ? { ok: !f.lastError, lastError: f.lastError ?? null, lastOkTs: f.lastOkTs || null } : null,
+      markets,
+      hedge: this.d.hedger ? { mode: this.d.cfg.perps.hedge, ...this.d.hedger.status() } : { mode: 'off' },
+    };
+  }
+
+  /** Open binary positions with their sensitivity to the underlying, for the perp hedger. */
+  exposures(now = this.now()): BinaryExposure[] {
+    const out: BinaryExposure[] = [];
+    for (const p of this.d.oms.positions.unsettled()) {
+      const st = this.status.get(p.ticker);
+      if (!p.yes || !st || st.dPdS === undefined || st.updatedTs < now - 10_000) continue;
+      out.push({ asset: st.asset, ticker: p.ticker, position: p.yes, dPdS: st.dPdS, tauSec: (st.closeTs - now) / 1000 });
+    }
+    return out;
   }
 
   private prune(): void {
@@ -463,6 +500,7 @@ export class Engine {
       kind: m.kind, strike: terms.strike, cap: terms.cap, d2: fv.d2, vEff: fv.vEff, sigmaPricing, tNu: model.params.tNu,
       bars: md.features.bars.get(m.asset), openTime: m.openTime, calendar: this.d.calendar,
       ticker: m.ticker, siblings: m.kind === 'updown' ? undefined : ladderQuotes(md.markets.values(), (t) => md.books.get(t), m.asset, m.closeTime),
+      perp: md.features.perps.get(m.asset),
     });
     const pred = model.predictDetailed(features, fv.pYes);
     const pYes = pred.p;
@@ -472,7 +510,12 @@ export class Engine {
     st.drivers = why.drivers;
     st.macro = Object.fromEntries(['usdtd_ret_5m_z', 'btcd_rel_5m_z', 'rsi_14_1m', 'conf_riskon_momentum', 'conf_riskon_momentum_rsi', 'conf_count']
       .map((k) => [k, Number.isFinite(features[k]) ? features[k] : null]));
-    Object.assign(st, { kind: m.kind, strike: terms.strike, cap: terms.cap, strikeSource: m.strikeSource, spot: spot.value, sigma: vol.sigmaPerSqrtSec, sigmaPricing, fairValue: fv.pYes, pYes, pMarket, pStd: pred.std, bestBid: bid.price, bestAsk: ask.price, blocked: undefined });
+    // Sensitivity to the underlying (per $1 of index) for the perp hedge: re-price at S +/- 0.05%.
+    const bump = spot.value * 0.0005;
+    const up = priceContract(terms, { spot: spot.value + bump, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, nu: model.params.tNu });
+    const dn = priceContract(terms, { spot: spot.value - bump, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, nu: model.params.tNu });
+    const dPdS = up && dn ? (up.pYes - dn.pYes) / (2 * bump) : undefined;
+    Object.assign(st, { kind: m.kind, strike: terms.strike, cap: terms.cap, strikeSource: m.strikeSource, spot: spot.value, sigma: vol.sigmaPerSqrtSec, sigmaPricing, fairValue: fv.pYes, pYes, pMarket, pStd: pred.std, bestBid: bid.price, bestAsk: ask.price, dPdS, blocked: undefined });
 
     const ret = idx!.trailingLogReturn(now, cfg.strategy.fastMoveWindowSec * 1000);
     const fastMove = ret !== undefined && Math.abs(ret) > cfg.strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(cfg.strategy.fastMoveWindowSec);

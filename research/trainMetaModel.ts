@@ -61,11 +61,11 @@ export const DEFAULT_SETS = [
   'base', 'base+micro', 'base+momentum', 'base+spot', 'base+macro', 'base+macro+confluence', 'base+momentum+macro+confluence',
   'base+session', 'base+session+macro+confluence', 'base+time',
   // Relaxed-cadence catalog: T1 groups first, then the rest one at a time.
-  RELAXED, `${RELAXED}+returns`, `${RELAXED}+returns+clock+calendar`, `${RELAXED}+returns+interaction`, `${RELAXED}+returns+ladder`, `${RELAXED}+returns+macro+confluence`,
+  RELAXED, `${RELAXED}+returns`, `${RELAXED}+returns+clock+calendar`, `${RELAXED}+returns+interaction`, `${RELAXED}+returns+ladder`, `${RELAXED}+returns+perp`, `${RELAXED}+returns+macro+confluence`,
   'all',
 ];
 
-const ALL_GROUPS: FeatureGroup[] = ['base', 'micro', 'momentum', 'spot', 'macro', 'confluence', 'session', 'time', 'geometry', 'vol', 'kalshi', 'returns', 'clock', 'calendar', 'interaction', 'ladder'];
+const ALL_GROUPS: FeatureGroup[] = ['base', 'micro', 'momentum', 'spot', 'macro', 'confluence', 'session', 'time', 'geometry', 'vol', 'kalshi', 'returns', 'clock', 'calendar', 'interaction', 'ladder', 'perp'];
 
 export function resolveSet(spec: string, tiers: FeatureTier[] = ['T1', 'T2']): string[] {
   const groups: FeatureGroup[] = spec === 'all' ? ALL_GROUPS : (spec.split('+') as FeatureGroup[]);

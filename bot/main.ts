@@ -18,6 +18,9 @@ import { loadVolProfile, type VolProfile } from './model/volSeasonality';
 import { loadCalendar } from './model/calendar';
 import { ModelHealth } from './model/modelHealth';
 import { EquityGuard } from './risk/equityGuard';
+import { PerpHedger } from './perps/hedger';
+import { PaperPerpExchange } from './perps/paperPerp';
+import { KalshiPerpsRest, type PerpGateway } from './perps/perpRest';
 import { BalanceMonitor, type MonitorState } from './vault/balanceMonitor';
 import { Vault } from './vault/vault';
 import { readJson } from './util/persist';
@@ -110,7 +113,25 @@ async function main(): Promise<void> {
   const modelHealth = new ModelHealth({ minWindows: cfg.strategy.modelHealthMinWindows }, path.join(cfg.dataDir, 'model_health.json'));
   const calendar = loadCalendar(path.resolve(process.env.MACRO_CALENDAR_PATH ?? './params/calendar.json'));
   if (!calendar) log.info('no macro calendar (params/calendar.json): calendar features unavailable');
-  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar });
+  // Stage 2 perp hedge: simulated against live perp quotes (paper) or real perp orders (live).
+  let hedger: PerpHedger | undefined;
+  const P = cfg.perps;
+  if (P.hedge !== 'off' && !P.feed) log.warn('PERP_HEDGE needs PERPS_FEED=true; hedging disabled');
+  else if (P.hedge !== 'off') {
+    const tickerAsset = (t: string) => [...md.features.perps.byAsset.entries()].find(([, s]) => s.latest?.ticker === t)?.[0];
+    let perpGateway: PerpGateway;
+    if (P.hedge === 'live') {
+      perpGateway = new KalshiPerpsRest(P.restUrl, KalshiSigner.fromFile(P.keyId!, P.privateKeyPath!), fetch, P.subaccount);
+    } else {
+      const sim = new PaperPerpExchange(md.features.perps, tickerAsset, { makerBps: P.makerFeeBps, takerBps: P.takerFeeBps }, path.join(cfg.dataDir, 'paper_perps.json'));
+      md.on('perp', () => sim.step());
+      perpGateway = sim;
+    }
+    hedger = new PerpHedger({ gateway: perpGateway, hub: md.features.perps, audit, params: { minDollarDelta: P.minDollarDelta, maxNotionalUsd: P.maxNotionalUsd, excludeTauSec: P.excludeTauSec, repriceSec: P.repriceSec, takerAfterSec: P.takerAfterSec } });
+    kill.bindCancelAll(async (reason) => { await oms.cancelAll(reason); await hedger!.cancelAll(reason); });
+    log.info('perp hedging enabled', { mode: P.hedge });
+  }
+  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger });
 
   // Execution events -> OMS (same path for paper and live).
   if (paper) {

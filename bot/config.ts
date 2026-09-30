@@ -160,6 +160,28 @@ export interface Config {
   vault: VaultConfig;
   /** Bankroll-scaled risk ladder ($20 aggressive -> $50 moderate -> $100 normal); see risk/sizingTiers.ts. */
   sizingTiers: TierPoint[];
+  /** Kalshi perpetuals: market data as features (stage 1) and delta-hedging the binary book (stage 2). */
+  perps: PerpsConfig;
+}
+
+export interface PerpsConfig {
+  /** Poll public perp market data (premium, funding, OI) for features and the hedger. */
+  feed: boolean;
+  restUrl: string;
+  pollMs: number;
+  /** Separate perps API credentials (the perps exchange has its own keys). */
+  keyId?: string;
+  privateKeyPath?: string;
+  subaccount?: number;
+  /** off | paper (simulate hedges against live perp quotes) | live (real perp orders; needs TRADING_MODE=live). */
+  hedge: 'off' | 'paper' | 'live';
+  minDollarDelta: number;
+  maxNotionalUsd: number;
+  excludeTauSec: number;
+  repriceSec: number;
+  takerAfterSec: number;
+  makerFeeBps: number;
+  takerFeeBps: number;
 }
 
 export class ConfigError extends Error {}
@@ -431,6 +453,32 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       dailyGoalUsd: num(env, 'VAULT_DAILY_GOAL_USD', 100, 0, 1e7),
     },
     sizingTiers: parseSizingTiers(env.SIZING_TIERS, { risk, strategy }),
+    perps: (() => {
+      const hedge = oneOf(env, 'PERP_HEDGE', 'paper', ['off', 'paper', 'live'] as const);
+      const keyId = env.KALSHI_PERPS_KEY_ID || undefined;
+      const privateKeyPath = env.KALSHI_PERPS_PRIVATE_KEY_PATH || undefined;
+      if (hedge === 'live') {
+        if (mode !== 'live') throw new ConfigError('PERP_HEDGE=live requires TRADING_MODE=live (use PERP_HEDGE=paper to simulate)');
+        if (!keyId || !privateKeyPath) throw new ConfigError('PERP_HEDGE=live requires KALSHI_PERPS_KEY_ID and KALSHI_PERPS_PRIVATE_KEY_PATH');
+        checkKeyFile(privateKeyPath);
+      }
+      return {
+        feed: bool(env, 'PERPS_FEED', true),
+        restUrl: env.KALSHI_PERPS_REST_URL ?? (kalshiEnv === 'prod' ? 'https://external-api.kalshi.com/trade-api/v2' : 'https://external-api.demo.kalshi.co/trade-api/v2'),
+        pollMs: num(env, 'PERPS_POLL_MS', 2000, 500, 60000),
+        keyId, privateKeyPath,
+        subaccount: env.KALSHI_PERPS_SUBACCOUNT ? num(env, 'KALSHI_PERPS_SUBACCOUNT', 0, 0, 1000) : undefined,
+        hedge,
+        // Blueprint: hedge only above a dollar delta that justifies 5-12 bps (the $ P&L of a 100% move; $2,000 = $20 per 1%).
+        minDollarDelta: num(env, 'PERP_HEDGE_MIN_DOLLAR_DELTA', 2000, 1, 1e9),
+        maxNotionalUsd: num(env, 'PERP_HEDGE_MAX_NOTIONAL_USD', 1000, 0, 1e9),
+        excludeTauSec: num(env, 'PERP_HEDGE_EXCLUDE_TAU_SEC', 120, 0, 3600),
+        repriceSec: num(env, 'PERP_HEDGE_REPRICE_SEC', 30, 5, 600),
+        takerAfterSec: num(env, 'PERP_HEDGE_TAKER_AFTER_SEC', 300, 10, 86400),
+        makerFeeBps: num(env, 'PERP_MAKER_FEE_BPS', 5, 0, 100),
+        takerFeeBps: num(env, 'PERP_TAKER_FEE_BPS', 12, 0, 100),
+      };
+    })(),
   };
   return deepFreeze(cfg);
 }
@@ -457,6 +505,7 @@ export function publicConfig(cfg: Config): Record<string, unknown> {
   return {
     ...rest,
     kalshiKeyId: kalshiKeyId ? `${kalshiKeyId.slice(0, 4)}…` : undefined,
+    perps: { ...cfg.perps, keyId: cfg.perps.keyId ? `${cfg.perps.keyId.slice(0, 4)}…` : undefined, privateKeyPath: cfg.perps.privateKeyPath ? '(set)' : undefined },
     alerts: { telegram: Boolean(alertTelegramToken), webhook: Boolean(alertWebhookUrl) },
   };
 }
