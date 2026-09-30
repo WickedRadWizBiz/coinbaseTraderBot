@@ -45,7 +45,7 @@ import { RiskGateway } from '../bot/risk/riskGateway';
 import { decide } from '../bot/strategy/fairValueStrategy';
 import { ConfluenceRatchetExit, DEFAULT_HUNT, DEFAULT_RATCHET, EXIT_POLICIES, ExitPolicyName, HuntParams, LiquidityRatchet, RatchetParams } from '../bot/strategy/exitPolicies';
 import { readRecordings, ReplayState } from './replay';
-import { bootstrapMeanCi, deflatedSharpe, pbo, sharpe } from './stats';
+import { bootstrapMeanCi, deflatedSharpe, pbo, rng, sharpe } from './stats';
 
 function arg(name: string, def: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -94,6 +94,8 @@ export interface BacktestResult {
   trades: TradeResult[];
   /** Mode B take-profit fills. */
   takeProfitFills: number;
+  /** Injected latency and its effects (see BacktestLatency). */
+  latency?: { orderMs: number; cancelMs: number; jitterMs: number; sent: number; cancelRaceFills: number; cancelRaceContracts: number; lateKills: number };
   /** Evaluations that ran the full (entry) decision under the cadence. */
   entryEvaluations: number;
   days: number;
@@ -105,9 +107,19 @@ export interface BacktestResult {
   pnl: number;
 }
 
+/**
+ * Execution latency: every order and cancel the bot sends reaches the exchange `orderMs` /
+ * `cancelMs` (+/- jitter) after the decision, against whatever the book and the tape look like
+ * THEN. So a taker order fills at the later price, a maker quote joins the queue later (trades that
+ * printed in flight cannot fill it), and a cancel can lose the race against a trade that reaches
+ * the quote first (counted as `cancelRaceFills`). While a ticker has anything in flight the
+ * strategy does not plan new quotes for it, as the engine's per-market busy flag does live.
+ */
+export interface BacktestLatency { orderMs: number; cancelMs?: number; jitterMs?: number }
+
 export async function runBacktest(
   dir: string, model: MetaModel, strategy: StrategyConfig, limits: RiskLimits, bankroll0: number,
-  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams; hunt?: HuntParams; volProfile?: VolProfile; applyVolSeasonality?: boolean; sessionRisk?: SessionRiskProfile; huntSessionGuard?: boolean; huntTransitionBufferMin?: number; vault?: VaultConfig; calendar?: MacroEvent[]; sizingTiers?: TierPoint[] } = {},
+  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams; hunt?: HuntParams; volProfile?: VolProfile; applyVolSeasonality?: boolean; sessionRisk?: SessionRiskProfile; huntSessionGuard?: boolean; huntTransitionBufferMin?: number; vault?: VaultConfig; calendar?: MacroEvent[]; sizingTiers?: TierPoint[]; latency?: BacktestLatency } = {},
 ): Promise<BacktestResult> {
   const policy = opts.exitPolicy ?? 'fair_value';
   const st = new ReplayState();
@@ -116,7 +128,7 @@ export async function runBacktest(
   const gateway = new RiskGateway(limits);
   const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, huntProfitTakes: 0, avgSlippage: null };
   const vault = opts.vault ? new Vault(opts.vault, undefined, () => st.now) : undefined;
-  const res: BacktestResult = { exitPolicy: policy, label: policy === 'confluence_ratchet' ? `confluence_ratchet[m=${(opts.hunt ?? DEFAULT_HUNT).targetMargin},f=${(opts.ratchet ?? DEFAULT_RATCHET).minFillRatio}]` : policy, huntParams: policy === 'confluence_ratchet' ? { hunt: opts.hunt ?? DEFAULT_HUNT, ratchet: opts.ratchet ?? DEFAULT_RATCHET } : undefined, vaultEnd: 0, pocketEnd: 0, bySession: {}, exits, trades: [], takeProfitFills: 0, entryEvaluations: 0, days: 0, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
+  const res: BacktestResult = { exitPolicy: policy, label: policy === 'confluence_ratchet' ? `confluence_ratchet[m=${(opts.hunt ?? DEFAULT_HUNT).targetMargin},f=${(opts.ratchet ?? DEFAULT_RATCHET).minFillRatio}]` : policy, huntParams: policy === 'confluence_ratchet' ? { hunt: opts.hunt ?? DEFAULT_HUNT, ratchet: opts.ratchet ?? DEFAULT_RATCHET } : undefined, vaultEnd: 0, pocketEnd: 0, bySession: {}, exits, trades: [], takeProfitFills: 0, latency: { orderMs: opts.latency?.orderMs ?? 0, cancelMs: opts.latency?.cancelMs ?? opts.latency?.orderMs ?? 0, jitterMs: opts.latency?.jitterMs ?? 0, sent: 0, cancelRaceFills: 0, cancelRaceContracts: 0, lateKills: 0 }, entryEvaluations: 0, days: 0, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
   const cadence = new CadenceGate(strategy);
   const lastPos = new Map<string, number>();
   // Bankroll tiers from the tradable high-water mark, with the tier's drawdown brake (mirrors the engine).
@@ -140,6 +152,7 @@ export async function runBacktest(
     b.fees += f.fee ?? 0;
     res.windows.set(w, b);
     res.fills++; res.contracts += f.count; res.fees += f.fee ?? 0;
+    if (cancelInFlight.has(f.orderId)) { L.cancelRaceFills++; L.cancelRaceContracts += f.count; }
     if (f.clientOrderId?.endsWith('-tp')) res.takeProfitFills++;
     if (f.clientOrderId?.includes('-exit-')) {
       const sideSign = f.side === 'ask' ? 1 : -1; // selling YES exits a long YES; buying YES exits a long NO
@@ -154,8 +167,27 @@ export async function runBacktest(
     }
   });
 
+  // Latency: actions wait in `inflight` until their arrival time; each runs against the state at that time.
+  const L = res.latency!;
+  const jitter = rng(17);
+  const inflight: Array<{ due: number; ticker: string; orderId?: string; run: () => Promise<void> }> = [];
+  const cancelInFlight = new Set<string>();
+  const send = async (ticker: string, kind: 'order' | 'cancel', run: () => Promise<void>, orderId?: string): Promise<void> => {
+    const base = kind === 'cancel' ? L.cancelMs : L.orderMs;
+    if (base <= 0 && L.jitterMs <= 0) return run();
+    L.sent++;
+    const due = st.now + Math.max(0, base + (jitter() * 2 - 1) * L.jitterMs);
+    let i = inflight.length;
+    while (i > 0 && inflight[i - 1].due > due) i--;
+    inflight.splice(i, 0, { due, ticker, orderId: kind === 'cancel' ? orderId : undefined, run });
+    if (kind === 'cancel' && orderId) cancelInFlight.add(orderId);
+  };
+  const inflightFor = (t: string) => inflight.some((x) => x.ticker === t);
+  const cancelNow = async (orderId: string) => { cancelInFlight.delete(orderId); try { await ex.cancelOrder(orderId); } catch { /* already gone: the cancel lost the race */ L.lateKills++; } };
+
   let lastTick = 0;
   for await (const e of readRecordings(dir)) {
+    while (inflight.length && inflight[0].due <= e.t) await inflight.shift()!.run();
     st.apply(e);
     if (!firstTs) firstTs = st.now;
     if (e.k === 'trade') ex.onTrade(e.ticker, e.price, e.count, e.takerSide);
@@ -163,6 +195,7 @@ export async function runBacktest(
     lastTick = st.now;
 
     for (const m of [...st.markets.values()]) {
+      if (m.recordOnly) { if (st.now >= m.closeTime + 90_000) st.markets.delete(m.ticker); continue; } // recorded for research, never traded
       closeOf.set(m.ticker, m.closeTime);
       // Settle closed markets.
       if (st.now >= m.closeTime + 60_000) {
@@ -189,7 +222,7 @@ export async function runBacktest(
             b.pnl += p.realized ?? 0;
             res.windows.set(m.closeTime, b);
             res.pnl += p.realized ?? 0;
-            if ((p.realized ?? 0) > 0) vault?.onSettled(p.realized!, m.ticker, st.now);
+            if ((p.realized ?? 0) > 0) vault?.onSettled(p.realized!, m.ticker, st.now, peakBank);
             const sk = sessionState(m.openTime).key;
             const sb = res.bySession[sk] ?? { windows: 0, pnl: 0, contracts: 0, fees: 0 };
             sb.windows++; sb.pnl += p.realized ?? 0; sb.contracts += b.contracts; sb.fees += b.fees;
@@ -209,14 +242,15 @@ export async function runBacktest(
       const terms = st.terms(m);
       const open = (await ex.getOpenOrders()).filter((o) => o.ticker === m.ticker);
       if (!book?.isUsable(st.now, limits.maxBookAgeMs) || !bid || !ask || !spot || !vol || !terms) {
-        for (const o of open) await ex.cancelOrder(o.orderId);
+        for (const o of open) if (!cancelInFlight.has(o.orderId)) await send(m.ticker, 'cancel', () => cancelNow(o.orderId), o.orderId);
         pending.delete(m.ticker); // never fire a queued exit into a stale book later
         continue;
       }
       const tauSec = (m.closeTime - st.now) / 1000;
-      const observed = tauSec <= SETTLEMENT_AVG_SEC ? idx!.average(m.closeTime - 60_000, st.now, 3000)?.avg : undefined;
+      const settle = tauSec <= SETTLEMENT_AVG_SEC ? idx!.settlement(m.closeTime, st.now, SETTLEMENT_AVG_SEC) : undefined;
+      const observed = settle?.avg, observedCount = settle?.n;
       const sigmaFv = opts.applyVolSeasonality ? effectiveSigma(vol.sigmaPerSqrtSec, opts.volProfile, m.asset, st.now, m.closeTime) : vol.sigmaPerSqrtSec;
-      const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaFv, tauSec, observedAvg: observed, nu: model.params.tNu });
+      const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaFv, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
       if (!fv) continue;
       const mid = (bid.price + ask.price) / 2;
       const fmap = computeFeatureMap({
@@ -235,7 +269,7 @@ export async function runBacktest(
       peakBank = Math.max(peakBank, bankroll);
       const tier = tierAt(tiers, peakBank);
       const ddScale = peakBank > 0 ? Math.max(0, 1 - (1 - bankroll / peakBank) / tier.ddScaleAt) : 1;
-      const tierLimits = { maxOrderRiskFrac: tier.orderFrac, maxWindowRiskFrac: tier.windowFrac, maxTotalRiskFrac: tier.totalFrac, dailyLossLimitFrac: tier.dailyLossFrac };
+      const tierLimits = { maxOrderRiskFrac: tier.orderFrac, maxWindowRiskFrac: tier.windowFrac, maxTotalRiskFrac: tier.totalFrac, dailyLossLimitFrac: tier.dailyLossFrac, dailyLossLimitUsd: tier.dailyLossUsd };
       const q = (side: 'bid' | 'ask') => { const o = open.find((x) => x.side === side); return o ? { clientOrderId: o.orderId, price: o.price, remaining: o.remainingCount } : undefined; };
       // Submit an exit that triggered on the previous tick (1 s reaction delay for every policy).
       const due = pending.get(m.ticker);
@@ -253,7 +287,7 @@ export async function runBacktest(
           const id = `${m.ticker}-${st.now}-exit-${due.kind}`;
           if (due.stop !== undefined) stopByOrder.set(id, due.stop);
           exits.orders++;
-          try { await ex.createOrder({ ticker: m.ticker, side: due.side, count, price: due.price, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, selfTradePrevention: 'taker_at_cross', clientOrderId: id }); } catch { /* no fill */ }
+          await send(m.ticker, 'order', async () => { try { await ex.createOrder({ ticker: m.ticker, side: due.side, count, price: due.price, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, selfTradePrevention: 'taker_at_cross', clientOrderId: id }); } catch { /* no fill */ } });
         }
       }
 
@@ -296,6 +330,8 @@ export async function runBacktest(
         }
       }
 
+      if (inflightFor(m.ticker)) continue; // orders/cancels still travelling: no new plan until they land
+
       // Relaxed cadence and entry windows, mirroring the engine.
       const mt = kalshiMaintenance(st.now);
       const kindWindow = strategy.cadence === 'relaxed'
@@ -323,7 +359,7 @@ export async function runBacktest(
         blockReductions: huntMode,
         entries: Boolean(reason),
       });
-      for (const c of plan.cancel) await ex.cancelOrder(c.clientOrderId);
+      for (const c of plan.cancel) if (!cancelInFlight.has(c.clientOrderId)) await send(m.ticker, 'cancel', () => cancelNow(c.clientOrderId), c.clientOrderId);
 
       for (const p of plan.place) {
         if (p.purpose === 'exit') {
@@ -352,9 +388,12 @@ export async function runBacktest(
           windowRisk, totalRisk, ordersLastMinute: 0, openOrders: openNow.length, modelLiveBlockers: [], limitOverrides: tierLimits,
         });
         if (!d.ok) continue;
-        try {
-          await ex.createOrder({ ticker: m.ticker, side: p.side, count: p.count, price: p.price, timeInForce: p.timeInForce, postOnly: p.postOnly, reduceOnly: p.reduceOnly, selfTradePrevention: 'taker_at_cross', clientOrderId: `${m.ticker}-${st.now}-${p.side}-${p.purpose}${p.why.startsWith('take-profit') ? '-tp' : ''}`, expirationTime: p.expirationTime });
-        } catch { /* rejected like the exchange would */ }
+        const clientOrderId = `${m.ticker}-${st.now}-${p.side}-${p.purpose}${p.why.startsWith('take-profit') ? '-tp' : ''}`;
+        await send(m.ticker, 'order', async () => {
+          try {
+            await ex.createOrder({ ticker: m.ticker, side: p.side, count: p.count, price: p.price, timeInForce: p.timeInForce, postOnly: p.postOnly, reduceOnly: p.reduceOnly, selfTradePrevention: 'taker_at_cross', clientOrderId, expirationTime: p.expirationTime });
+          } catch { /* rejected like the exchange would */ }
+        });
       }
     }
   }
@@ -432,6 +471,10 @@ async function main() {
   const vpPath = arg('vol-profile', '');
   const volProfile = vpPath ? loadVolProfile(vpPath) : undefined;
   const calendar = loadCalendar(arg('calendar', 'params/calendar.json'));
+  // Execution latency (ms): --latency-ms 250 [--cancel-latency-ms 150] [--latency-jitter-ms 100]. Default: none.
+  const latency: BacktestLatency | undefined = Number(arg('latency-ms', '0')) > 0 || Number(arg('latency-jitter-ms', '0')) > 0
+    ? { orderMs: Number(arg('latency-ms', '0')), cancelMs: arg('cancel-latency-ms', '') ? Number(arg('cancel-latency-ms', '0')) : undefined, jitterMs: Number(arg('latency-jitter-ms', '0')) }
+    : undefined;
 
   const results: BacktestResult[] = [];
   for (const minEdge of grid) {
@@ -443,7 +486,7 @@ async function main() {
         results.push(await runBacktest(dir, model, { ...cfg.strategy, minEdge }, cfg.risk, bankroll, {
           exitPolicy, ratchet: c.ratchet, hunt: c.hunt, volProfile, applyVolSeasonality: Boolean(volProfile),
           sessionRisk: cfg.strategy.sessionRisk, huntSessionGuard: cfg.strategy.huntSessionGuard, huntTransitionBufferMin: cfg.strategy.huntTransitionBufferMin,
-          vault: cfg.vault.enabled ? cfg.vault : undefined, calendar, sizingTiers: cfg.sizingTiers,
+          vault: cfg.vault.enabled ? cfg.vault : undefined, calendar, sizingTiers: cfg.sizingTiers, latency,
         }));
       }
     }
@@ -460,7 +503,7 @@ async function main() {
     const perTrade = bootstrapMeanCi(r.trades.map((t) => t.pnl));
     return {
       exit: r.label, minEdge: r.minEdge, vault: +r.vaultEnd.toFixed(2), pocket: +r.pocketEnd.toFixed(2), windowsTraded: traded.length, fills: r.fills, contracts: r.contracts, fees: +r.fees.toFixed(2), pnl: +r.pnl.toFixed(2),
-      trades: r.trades.length, tradesPerDay: +(r.trades.length / r.days).toFixed(1), pnlPerTrade: perTrade.mean, pnlPerTradeCiLo: perTrade.lo, pnlPerDay: +(r.pnl / r.days).toFixed(2), tpFills: r.takeProfitFills,
+      trades: r.trades.length, tradesPerDay: +(r.trades.length / r.days).toFixed(1), pnlPerTrade: perTrade.mean, pnlPerTradeCiLo: perTrade.lo, pnlPerDay: +(r.pnl / r.days).toFixed(2), tpFills: r.takeProfitFills, latencyMs: r.latency?.orderMs ?? 0, cancelRaceFills: r.latency?.cancelRaceFills ?? 0,
       edgePerContract: ci.mean, edgeCiLo: ci.lo, edgeCiHi: ci.hi, sharpePerWindow: sharpe(series), deflatedExcess: dsr.excess, dsrProb: dsr.probability,
     };
   });

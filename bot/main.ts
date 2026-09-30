@@ -17,6 +17,7 @@ import { MetaModel } from './model/metaModel';
 import { loadVolProfile, type VolProfile } from './model/volSeasonality';
 import { loadCalendar } from './model/calendar';
 import { ModelHealth } from './model/modelHealth';
+import { ClockSkewMonitor } from './risk/clockSkew';
 import { EquityGuard } from './risk/equityGuard';
 import { PerpHedger } from './perps/hedger';
 import { PaperPerpExchange } from './perps/paperPerp';
@@ -84,7 +85,8 @@ async function main(): Promise<void> {
   }
 
   const signer = cfg.kalshiKeyId && cfg.kalshiPrivateKeyPath ? KalshiSigner.fromFile(cfg.kalshiKeyId, cfg.kalshiPrivateKeyPath) : undefined;
-  const rest = new KalshiRest({ baseUrl: cfg.restBaseUrl, signer, subaccount: cfg.kalshiSubaccount });
+  const clock = new ClockSkewMonitor(cfg.clockSkewMaxMs || 2000, cfg.clockSkewWarnMs);
+  const rest = new KalshiRest({ baseUrl: cfg.restBaseUrl, signer, subaccount: cfg.kalshiSubaccount, onServerDate: (d, s, r) => clock.observe(d, s, r) });
   const indexIds = Object.keys(cfg.indexIdMap);
   const ws = signer ? new KalshiWs(cfg.wsUrl, signer, indexIds) : undefined;
   const md = new MarketData(cfg, rest, ws, new Recorder(path.join(cfg.dataDir, 'recordings')));
@@ -131,7 +133,7 @@ async function main(): Promise<void> {
     kill.bindCancelAll(async (reason) => { await oms.cancelAll(reason); await hedger!.cancelAll(reason); });
     log.info('perp hedging enabled', { mode: P.hedge });
   }
-  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger });
+  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, clock });
 
   // Execution events -> OMS (same path for paper and live).
   if (paper) {

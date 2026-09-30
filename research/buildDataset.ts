@@ -81,6 +81,7 @@ export async function buildDataset(
     if (st.now < nextSample) continue;
     nextSample = Math.floor(st.now / 1000 / everySec + 1) * everySec * 1000;
     for (const m of st.markets.values()) {
+      if (m.recordOnly) { if (st.now >= m.closeTime + 90_000) st.markets.delete(m.ticker); continue; } // recorded for research, never priced
       if (st.now >= m.closeTime + 90_000) { flush(m); st.markets.delete(m.ticker); continue; }
       if (st.now < m.openTime || st.now >= m.closeTime) continue;
       const book = st.books.get(m.ticker);
@@ -93,9 +94,10 @@ export async function buildDataset(
       if (!book?.isUsable(st.now, 5000) || !bid || !ask || !spot || !vol || !terms) continue;
       const tauSec = (m.closeTime - st.now) / 1000;
       if (opts.entryWindowOnly && !inEntryWindow(m.kind, tauSec, opts.entryWindowUpdown ?? [840, 120], opts.entryWindowHourly ?? [3300, 300])) continue;
-      const observed = tauSec <= SETTLEMENT_AVG_SEC ? idx!.average(m.closeTime - 60_000, st.now, 3000)?.avg : undefined;
+      const settle = tauSec <= SETTLEMENT_AVG_SEC ? idx!.settlement(m.closeTime, st.now, SETTLEMENT_AVG_SEC) : undefined;
+      const observed = settle?.avg, observedCount = settle?.n;
       const sigmaFv = opts.applyVolSeasonality ? effectiveSigma(vol.sigmaPerSqrtSec, volProfile, m.asset, st.now, m.closeTime) : vol.sigmaPerSqrtSec;
-      const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaFv, tauSec, observedAvg: observed });
+      const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaFv, tauSec, observedAvg: observed, observedCount });
       if (!fv) continue;
       const mid = (bid.price + ask.price) / 2;
       const fx = computeFeatureMap({
@@ -116,7 +118,7 @@ export async function buildDataset(
       pending.set(m.ticker, arr);
     }
   }
-  for (const m of st.markets.values()) if (st.now >= m.closeTime + 60_000) flush(m);
+  for (const m of st.markets.values()) if (!m.recordOnly && st.now >= m.closeTime + 60_000) flush(m);
   return rows;
 }
 

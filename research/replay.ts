@@ -5,10 +5,13 @@
 import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
-import { IndexTracker } from '../bot/marketdata/indexTracker';
+import { IndexTracker, type AvgMode } from '../bot/marketdata/indexTracker';
 import { OrderBook } from '../bot/marketdata/orderBook';
 import { FeatureHub } from '../bot/model/featureEngine';
 import { contractKind, type ContractTerms, type MarketKind } from '../bot/model/fairValue';
+
+/** Settlement averaging in research, matching the bot's SETTLEMENT_AVG (default official). */
+const AVG_MODE: AvgMode = process.env.SETTLEMENT_AVG === 'continuous' ? 'continuous' : 'official';
 
 export interface RecMarket {
   ticker: string;
@@ -23,6 +26,8 @@ export interface RecMarket {
   tickSize: number;
   title?: string;
   startTime?: number;
+  /** Recorded for research only (RECORD_SERIES): not priced or traded by the bot. */
+  recordOnly?: boolean;
 }
 
 export interface RecEvent { t: number; k: string; [key: string]: any }
@@ -57,12 +62,12 @@ export class ReplayState {
         this.markets.set(e.ticker, {
           ticker: e.ticker, series: e.series, asset: e.asset, openTime: e.openTime, closeTime: e.closeTime, strike: e.strike ?? undefined, cap: e.cap ?? undefined,
           kind: e.kind ?? contractKind(e.series ?? ''), event: e.event ?? undefined, tickSize: e.tickSize ?? 0.01,
-          title: e.title ?? undefined, startTime: e.startTime ?? undefined,
+          title: e.title ?? undefined, startTime: e.startTime ?? undefined, recordOnly: e.recordOnly ? true : undefined,
         });
         break;
       case 'index': {
         let tr = this.index.get(e.asset);
-        if (!tr) { tr = new IndexTracker(e.asset); this.index.set(e.asset, tr); }
+        if (!tr) { tr = new IndexTracker(e.asset, undefined, undefined, AVG_MODE); this.index.set(e.asset, tr); }
         tr.add(e.value, e.ts ?? e.t);
         this.features.onIndex(e.asset, e.value, e.ts ?? e.t);
         break;
@@ -117,8 +122,8 @@ export class ReplayState {
     if (m.kind === 'match') return undefined;
     if (m.strike) return m.strike;
     if (m.kind !== 'updown') return undefined;
-    const a = this.index.get(m.asset)?.average(m.openTime - 60_000, m.openTime, 3000);
-    if (a) m.strike = a.avg;
+    const a = this.index.get(m.asset)?.settlement(m.openTime, m.openTime);
+    if (a && a.n >= 60) m.strike = a.avg;
     return m.strike;
   }
 
@@ -136,8 +141,8 @@ export class ReplayState {
     const r = this.results.get(m.ticker);
     if (r) return { label: r === 'yes' ? 1 : 0, source: 'official' };
     const t = this.terms(m);
-    const a = this.index.get(m.asset)?.average(m.closeTime - 60_000, m.closeTime, 3000);
-    if (!t || !a) return undefined;
+    const a = this.index.get(m.asset)?.settlement(m.closeTime, m.closeTime);
+    if (!t || !a || a.n < 60) return undefined;
     const A = a.avg;
     const yes = t.kind === 'less' ? A < t.cap! : t.kind === 'between' ? A >= t.strike! && A < t.cap! : A >= t.strike!;
     return { label: yes ? 1 : 0, source: 'computed' };

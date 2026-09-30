@@ -29,6 +29,8 @@ export interface RestOptions {
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
   subaccount?: number;
+  /** Called with every response's Date header (epoch ms) and the local send/receive times, for the clock-skew guard. */
+  onServerDate?: (serverDateMs: number, sentTs: number, recvTs: number) => void;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -58,12 +60,19 @@ export class KalshiRest implements ExchangeGateway {
       if (!this.opts.signer) throw new Error(`Authenticated call ${method} ${path} without credentials`);
       Object.assign(headers, this.opts.signer.headers(method, this.prefix + path));
     }
+    const sentTs = Date.now();
     const res = await this.fetchImpl(this.base + path, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(this.timeoutMs),
     });
+    const recvTs = Date.now();
+    const dateHeader = res.headers?.get?.('date');
+    if (dateHeader && this.opts.onServerDate) {
+      const d = Date.parse(dateHeader);
+      if (Number.isFinite(d)) this.opts.onServerDate(d, sentTs, recvTs);
+    }
     const text = await res.text();
     if (!res.ok) throw new HttpError(res.status, text);
     return text ? JSON.parse(text) : {};

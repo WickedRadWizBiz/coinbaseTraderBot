@@ -22,7 +22,7 @@ import { yesPrice } from '../kalshi/wire';
 import { logger } from '../util/log';
 import { parseCount } from '../util/num';
 import { FeatureHub } from '../model/featureEngine';
-import { selectCryptoSeries } from './seriesDiscovery';
+import { assetFromSeries, selectCryptoSeries } from './seriesDiscovery';
 import { PerpFeed } from '../perps/perpFeed';
 import type { CandleRow } from '../ta/candleStore';
 import type { Timeframe } from '../ta/knowledge';
@@ -42,6 +42,8 @@ export interface ActiveMarket extends MarketInfo {
   strike?: number;
   cap?: number;
   strikeSource?: 'exchange' | 'computed';
+  /** Recorded for research only: never priced, quoted or traded (RECORD_SERIES). */
+  recordOnly?: boolean;
 }
 
 export class Recorder {
@@ -94,7 +96,7 @@ export class MarketData extends EventEmitter {
     // Track every asset that has a settlement index, so discovered series can be priced at once.
     const assets = new Set([...this.series.values(), ...(cfg.strategy.seriesAuto ? Object.values(cfg.indexIdMap) : [])]);
     for (const asset of assets) {
-      if (!this.index.has(asset)) this.index.set(asset, new IndexTracker(asset));
+      if (!this.index.has(asset)) this.index.set(asset, new IndexTracker(asset, undefined, undefined, cfg.settlementAvg));
       if (!this.spot.has(asset)) this.spot.set(asset, new IndexTracker(asset));
     }
   }
@@ -216,12 +218,21 @@ export class MarketData extends EventEmitter {
     }
   }
 
-  /** Refresh the list of open markets for each configured series. */
+  /** Record-only series (RECORD_SERIES) that are not already traded, with their asset when it names one. */
+  private recordSeriesList(): Array<[string, string]> {
+    return this.cfg.strategy.recordSeries.filter((s) => !this.series.has(s)).map((s) => [s, assetFromSeries(s, Object.values(this.cfg.indexIdMap)) ?? 'REC']);
+  }
+
+  private readonly resultChecked = new Set<string>();
+
+  /** Refresh the list of open markets for each configured series (traded first, then record-only). */
   async refreshCatalog(now = Date.now()): Promise<void> {
     await this.refreshSeries(now);
-    for (const [series, asset] of this.series) {
+    const entries: Array<[string, string, boolean]> = [...[...this.series].map(([s, a]) => [s, a, false] as [string, string, boolean]), ...this.recordSeriesList().map(([s, a]) => [s, a, true] as [string, string, boolean])];
+    let recordCount = [...this.markets.values()].filter((m) => m.recordOnly && m.closeTime > now).length;
+    for (const [series, asset, recordOnly] of entries) {
       try {
-        if (now - (this.feesFetchedAt.get(series) ?? 0) > 3_600_000) {
+        if (!recordOnly && now - (this.feesFetchedAt.get(series) ?? 0) > 3_600_000) {
           const f = await this.rest.getSeriesFees(series);
           if (f) this.fees.set(series, { takerMultiplier: f.takerMultiplier, makerMultiplier: f.makerMultiplier });
           this.feesFetchedAt.set(series, now);
@@ -234,8 +245,12 @@ export class MarketData extends EventEmitter {
           const horizonMs = kind === 'match' ? this.cfg.tennis.horizonHours * 3_600_000 : this.cfg.catalogHorizonMin * 60_000;
           if (m.closeTime > now + horizonMs && !(kind === 'match' && m.startTime !== undefined && m.startTime < now + horizonMs)) continue;
           const prev = this.markets.get(m.ticker);
-          if (!prev) this.recorder.write('market', { ticker: m.ticker, series, asset, openTime: m.openTime, closeTime: m.closeTime, strike: m.floorStrike, cap: m.capStrike, kind, event: m.eventTicker, tickSize: m.tickSize, title: m.title, startTime: m.startTime });
-          const am: ActiveMarket = { ...m, seriesTicker: series, asset, kind, cap: m.capStrike, strike: prev?.strike, strikeSource: prev?.strikeSource };
+          if (recordOnly && !prev) {
+            if (recordCount >= this.cfg.strategy.recordMaxMarkets) continue;
+            recordCount++;
+          }
+          if (!prev) this.recorder.write('market', { ticker: m.ticker, series, asset, openTime: m.openTime, closeTime: m.closeTime, strike: m.floorStrike, cap: m.capStrike, kind, event: m.eventTicker, tickSize: m.tickSize, title: m.title, startTime: m.startTime, recordOnly: recordOnly || undefined });
+          const am: ActiveMarket = { ...m, seriesTicker: series, asset, kind, cap: m.capStrike, strike: prev?.strike, strikeSource: prev?.strikeSource, recordOnly: recordOnly || undefined };
           if (m.floorStrike) { am.strike = m.floorStrike; am.strikeSource = 'exchange'; }
           this.markets.set(m.ticker, am);
         }
@@ -243,10 +258,21 @@ export class MarketData extends EventEmitter {
         log.warn('catalog refresh failed', { series, error: String(e) });
       }
     }
-    for (const [t, m] of this.markets) {
-      if (m.closeTime < now - 30 * 60_000) { this.markets.delete(t); this.books.delete(t); this.features.forget(t); }
+    // Record-only markets have no position to settle, so fetch their official result once they close.
+    let looked = 0;
+    for (const m of this.markets.values()) {
+      if (!m.recordOnly || m.closeTime > now - 30_000 || this.resultChecked.has(m.ticker) || looked >= 10) continue;
+      looked++;
+      try {
+        const info = await this.rest.getMarket(m.ticker);
+        if (info?.result === 'yes' || info?.result === 'no') { this.recordResult(m.ticker, info.result); this.resultChecked.add(m.ticker); }
+        else if (now - m.closeTime > 3_600_000) this.resultChecked.add(m.ticker); // give up after an hour
+      } catch { /* retry at the next refresh */ }
     }
-    this.ws?.setMarkets(this.activeMarkets(now).map((m) => m.ticker));
+    for (const [t, m] of this.markets) {
+      if (m.closeTime < now - 30 * 60_000 && (!m.recordOnly || this.resultChecked.has(t) || m.closeTime < now - 70 * 60_000)) { this.markets.delete(t); this.books.delete(t); this.features.forget(t); this.resultChecked.delete(t); }
+    }
+    this.ws?.setMarkets(this.recordedMarkets(now).map((m) => m.ticker));
   }
 
   /** A USDT.D / BTC.D sample (from the dominance service). */
@@ -261,7 +287,13 @@ export class MarketData extends EventEmitter {
     this.recorder.write('result', { ticker, result });
   }
 
+  /** Open markets the bot may price and trade (record-only markets excluded). */
   activeMarkets(now = Date.now()): ActiveMarket[] {
+    return [...this.markets.values()].filter((m) => !m.recordOnly && m.openTime <= now && now < m.closeTime);
+  }
+
+  /** Every open market that is being recorded, traded or not (subscriptions, dashboard). */
+  recordedMarkets(now = Date.now()): ActiveMarket[] {
     return [...this.markets.values()].filter((m) => m.openTime <= now && now < m.closeTime);
   }
 
@@ -282,8 +314,8 @@ export class MarketData extends EventEmitter {
     if (m.strike) return m.strike;
     if (m.kind !== 'updown') return undefined;
     const idx = this.index.get(m.asset);
-    const avg = idx?.average(m.openTime - 60_000, m.openTime, 3000);
-    if (avg) {
+    const avg = idx?.settlement(m.openTime, m.openTime);
+    if (avg && avg.n >= 60) {
       m.strike = avg.avg;
       m.strikeSource = 'computed';
       return m.strike;
@@ -295,7 +327,7 @@ export class MarketData extends EventEmitter {
 
   private async poll(): Promise<void> {
     const now = Date.now();
-    for (const m of this.activeMarkets(now)) {
+    for (const m of this.recordedMarkets(now)) {
       try {
         const snap = await this.rest.getOrderbook(m.ticker);
         const b = this.book(m.ticker);

@@ -39,6 +39,7 @@ import { effectiveSigma, type VolProfile } from './model/volSeasonality';
 import { floorCount } from './util/num';
 import { evThresholds } from './sizing/kelly';
 import { tierAt, type Tier } from './risk/sizingTiers';
+import type { ClockSkewMonitor } from './risk/clockSkew';
 import { BalanceMonitor, fillCashDelta, settleCashDelta } from './vault/balanceMonitor';
 import type { Vault } from './vault/vault';
 import { writeJsonAtomic } from './util/persist';
@@ -114,6 +115,8 @@ export interface EngineDeps {
   calendar?: MacroEvent[];
   /** Perp delta hedge of the binary book (stage 2). */
   hedger?: PerpHedger;
+  /** Local clock vs Kalshi's server time. */
+  clock?: ClockSkewMonitor;
   now?: () => number;
 }
 
@@ -148,7 +151,7 @@ export class Engine {
       d.balanceMonitor?.onCash(settleCashDelta(e.positionBefore, e.result));
       this.saveMonitor();
       if (d.vault && e.realized > 0) {
-        d.vault.onSettled(e.realized, e.ticker, this.now());
+        d.vault.onSettled(e.realized, e.ticker, this.now(), this.d.equityGuard?.tierReference(this.bankroll() ?? 0) ?? this.bankroll());
         d.audit.write('vault', { event: 'win', ticker: e.ticker, realized: e.realized, status: d.vault.status(this.now()) });
       }
     });
@@ -274,6 +277,8 @@ export class Engine {
     const r: string[] = [];
     const paused = this.d.equityGuard?.paused(now);
     if (paused) r.push(paused);
+    const skew = this.d.cfg.clockSkewMaxMs > 0 ? this.d.clock?.haltReason(Date.now()) : undefined;
+    if (skew) r.push(skew);
     const h = this.d.modelHealth?.status();
     if (this.d.cfg.strategy.modelHealthHalt && h?.halt) r.push(`model log loss significantly worse than the calibrated market over ${h.windows} windows (p=${h.pWorse?.toFixed(3)})`);
     const b = this.bankroll();
@@ -292,7 +297,12 @@ export class Engine {
 
   /** Configured limits replaced by the tier's fractions. */
   private tierLimits(t: Tier): Partial<RiskLimits> {
-    return { maxOrderRiskFrac: t.orderFrac, maxWindowRiskFrac: t.windowFrac, maxTotalRiskFrac: t.totalFrac, dailyLossLimitFrac: t.dailyLossFrac };
+    return { maxOrderRiskFrac: t.orderFrac, maxWindowRiskFrac: t.windowFrac, maxTotalRiskFrac: t.totalFrac, dailyLossLimitFrac: t.dailyLossFrac, dailyLossLimitUsd: t.dailyLossUsd };
+  }
+
+  /** Today's loss limit in dollars: the current tier's fraction of bankroll, under its dollar ceiling. */
+  dailyLossLimit(): number {
+    return this.d.risk.dailyLossLimit(this.bankroll(), this.tierLimits(this.tier()));
   }
 
   /** Relaxed-cadence and risk-guard state for the dashboard. */
@@ -309,6 +319,7 @@ export class Engine {
       tier: { ...t, orderRiskUsd: +(t.orderFrac * b).toFixed(2), dailyLossLimitUsd: +this.d.risk.dailyLossLimit(b, this.tierLimits(t)).toFixed(2) },
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null,
+      clock: this.d.clock?.status(Date.now()) ?? null,
       equity: eq ?? null, equityGuard: this.d.equityGuard?.status(eq, now, t.ddScaleAt) ?? null,
       modelHealth: this.d.modelHealth?.status() ?? null,
       entryGuards: this.entryGuards(now),
@@ -404,7 +415,7 @@ export class Engine {
       return;
     }
 
-    const limit = risk.dailyLossLimit(this.bankroll(), this.tierLimits(this.tier()));
+    const limit = this.dailyLossLimit();
     const pnl = this.dailyPnl();
     if (pnl <= -limit) {
       await kill.engage(`daily loss $${(-pnl).toFixed(2)} reached limit $${limit.toFixed(2)}`, 'risk');
@@ -606,11 +617,12 @@ export class Engine {
     if (!bid || !ask) return block('one-sided book');
 
     const tauSec = (m.closeTime - now) / 1000;
-    const observed = tauSec <= SETTLEMENT_AVG_SEC ? idx!.average(m.closeTime - SETTLEMENT_AVG_SEC * 1000, now, 3000)?.avg : undefined;
+    const settle = tauSec <= SETTLEMENT_AVG_SEC ? idx!.settlement(m.closeTime, now, SETTLEMENT_AVG_SEC) : undefined;
+    const observed = settle?.avg, observedCount = settle?.n;
     // Intraday volatility periodicity: scale the backward-looking EWMA sigma to the variance
     // expected over this contract's remaining life (only with a validated profile).
     const sigmaPricing = effectiveSigma(vol.sigmaPerSqrtSec, this.d.volProfile, m.asset, now, m.closeTime);
-    const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, nu: model.params.tNu });
+    const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
     if (!fv) return block('fair value unavailable');
     const sess = sessionState(now);
     const sessRisk = sessionRiskFor(cfg.strategy.sessionRisk, sess);
@@ -634,8 +646,8 @@ export class Engine {
       .map((k) => [k, Number.isFinite(features[k]) ? features[k] : null]));
     // Sensitivity to the underlying (per $1 of index) for the perp hedge: re-price at S +/- 0.05%.
     const bump = spot.value * 0.0005;
-    const up = priceContract(terms, { spot: spot.value + bump, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, nu: model.params.tNu });
-    const dn = priceContract(terms, { spot: spot.value - bump, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, nu: model.params.tNu });
+    const up = priceContract(terms, { spot: spot.value + bump, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
+    const dn = priceContract(terms, { spot: spot.value - bump, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
     const dPdS = up && dn ? (up.pYes - dn.pYes) / (2 * bump) : undefined;
     Object.assign(st, { kind: m.kind, strike: terms.strike, cap: terms.cap, strikeSource: m.strikeSource, spot: spot.value, sigma: vol.sigmaPerSqrtSec, sigmaPricing, fairValue: fv.pYes, pYes, pMarket, pStd: pred.std, bestBid: bid.price, bestAsk: ask.price, dPdS, blocked: undefined });
 

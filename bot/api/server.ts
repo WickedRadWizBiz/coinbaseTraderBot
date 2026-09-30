@@ -134,8 +134,9 @@ export function createApi(d: ApiDeps): express.Express {
       recon: d.recon.lastResult ?? null,
       balance: d.engine.balance ?? null,
       bankroll: bankroll ?? null,
+      recording: { series: d.cfg.strategy.recordSeries, markets: d.md.recordedMarkets().filter((m) => m.recordOnly).length },
       dailyPnl: d.engine.dailyPnl(),
-      dailyLossLimit: bankroll !== undefined ? Math.min(bankroll * d.cfg.risk.dailyLossLimitFrac, d.cfg.risk.dailyLossLimitUsd) : d.cfg.risk.dailyLossLimitUsd,
+      dailyLossLimit: d.engine.dailyLossLimit(),
       indexSource: d.md.indexSource,
       exitPolicy: d.cfg.strategy.exitPolicy,
       session: d.engine.sessionStatus(),
@@ -211,7 +212,7 @@ export function createApi(d: ApiDeps): express.Express {
   // Hourly strike-ladder consistency and arbitrage scan (report only).
   api.get('/ladder', (_req, res) => {
     const groups = new Map<string, { asset: string; closeTime: number }>();
-    for (const m of d.md.markets.values()) if (m.kind !== 'updown') groups.set(`${m.asset}:${m.closeTime}`, { asset: m.asset, closeTime: m.closeTime });
+    for (const m of d.md.markets.values()) if (m.kind !== 'updown' && !m.recordOnly) groups.set(`${m.asset}:${m.closeTime}`, { asset: m.asset, closeTime: m.closeTime });
     res.json([...groups.values()].sort((a, b) => a.closeTime - b.closeTime).map((g) => {
       const quotes = ladderQuotes(d.md.markets.values(), (t) => d.md.books.get(t), g.asset, g.closeTime);
       const first = quotes[0];

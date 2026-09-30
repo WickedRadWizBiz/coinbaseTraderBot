@@ -6,6 +6,7 @@
 //            the window opened ("at least": a tie resolves YES).
 //   greater  hourly ladder (KXBTCD): YES iff A >= floor strike.
 //   between  hourly range bracket (KXBTC): YES iff floor <= A < cap.
+// The average is the official one: sixty one-per-second RTI values (IndexTracker.settlement).
 // Missing/incomplete index data resolves NO (not modelled; it only lowers
 // P(YES) by a small tail).
 //
@@ -40,6 +41,9 @@ export interface FairValueInput {
   tauSec: number;
   /** Average of the index over [close - w, now], required once tau < w. */
   observedAvg?: number;
+  /** How many of the w one-per-second settlement samples observedAvg contains (official averaging).
+   * Omitted: observedAvg is a continuous average over the elapsed part of the window. */
+  observedCount?: number;
   averagingSec?: number;
   /** Student-t degrees of freedom (> 2); omit for Gaussian tails. */
   nu?: number;
@@ -85,6 +89,15 @@ function probAboveSettlement(inp: FairValueInput, K: number): { p: number; d2: n
   }
   const F = inp.observedAvg;
   if (F === undefined || !(F > 0)) return undefined; // cannot price without the fixed part
+  const n = inp.observedCount;
+  if (n !== undefined) {
+    // Discrete settlement: n of w samples are fixed, the other w - n are still to print.
+    if (n >= w) return { p: F >= K ? 1 : 0, d2: NaN, v: 0, regime: 'determined' }; // tie goes to YES
+    const rest = (w * K - n * F) / (w - n);
+    if (rest <= 0) return { p: 1, d2: NaN, v: 0, regime: 'determined' };
+    const vd = (sigma * sigma * Math.max(tau, 1e-6)) / 3;
+    return { ...probAbove(S, rest, vd, inp.nu), v: vd, regime: 'in_window' };
+  }
   if (tau < 0.5) return { p: F >= K ? 1 : 0, d2: NaN, v: 0, regime: 'determined' }; // tie goes to YES
   const kStar = (w * K - (w - tau) * F) / tau;
   if (kStar <= 0) return { p: 1, d2: NaN, v: 0, regime: 'determined' };

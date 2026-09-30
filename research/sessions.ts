@@ -97,7 +97,7 @@ export async function measureSessions(dir: string): Promise<SessionResearch> {
       const k = sessionState(st.now).key;
       for (const [t, b] of st.books) {
         const m = st.markets.get(t);
-        if (!m || st.now < m.openTime || st.now >= m.closeTime || !b.isUsable(st.now, 5000)) continue;
+        if (!m || m.recordOnly || st.now < m.openTime || st.now >= m.closeTime || !b.isUsable(st.now, 5000)) continue;
         const bb = b.bestBid(), ba = b.bestAsk();
         if (!bb || !ba) continue;
         (spreads.get(k) ?? spreads.set(k, []).get(k)!).push(ba.price - bb.price);

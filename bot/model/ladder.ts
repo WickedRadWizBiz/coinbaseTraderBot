@@ -15,14 +15,14 @@
 import type { OrderBook } from '../marketdata/orderBook';
 import { takerFee, type FeeSchedule, DEFAULT_FEES } from '../fees';
 
-export interface LadderMarket { ticker: string; asset: string; closeTime: number; kind: string; strike?: number; cap?: number }
+export interface LadderMarket { ticker: string; asset: string; closeTime: number; kind: string; strike?: number; cap?: number; recordOnly?: boolean }
 export interface LadderQuote { ticker: string; kind: string; strike?: number; cap?: number; bid?: number; ask?: number; mid?: number; bidSize?: number; askSize?: number }
 
 /** Quotes for every contract settling at the same time on the same asset. */
 export function ladderQuotes(markets: Iterable<LadderMarket>, bookOf: (ticker: string) => OrderBook | undefined, asset: string, closeTime: number): LadderQuote[] {
   const out: LadderQuote[] = [];
   for (const m of markets) {
-    if (m.asset !== asset || m.closeTime !== closeTime || m.kind === 'updown') continue;
+    if (m.asset !== asset || m.closeTime !== closeTime || m.kind === 'updown' || m.recordOnly) continue;
     const b = bookOf(m.ticker);
     const bid = b?.bestBid(), ask = b?.bestAsk();
     out.push({ ticker: m.ticker, kind: m.kind, strike: m.strike, cap: m.cap, bid: bid?.price, ask: ask?.price, bidSize: bid?.size, askSize: ask?.size, mid: bid && ask ? (bid.price + ask.price) / 2 : undefined });

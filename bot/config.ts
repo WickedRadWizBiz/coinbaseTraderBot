@@ -44,6 +44,10 @@ export interface StrategyConfig {
   style: StrategyStyle;
   /** Series to trade, e.g. KXBTC15M (with seriesAuto: the fallback list). */
   series: string[];
+  /** Series that are recorded (books, trades, lifecycle, results) for research but never priced or traded (RECORD_SERIES). */
+  recordSeries: string[];
+  /** Cap on simultaneously tracked record-only markets. */
+  recordMaxMarkets: number;
   /** Discover every priceable crypto 15-minute / hourly series from the exchange (STRATEGY_SERIES=auto). */
   seriesAuto: boolean;
   /** Fractional Kelly multiplier (0.1–0.25 recommended). */
@@ -148,6 +152,11 @@ export interface Config {
   dominanceFeed: boolean;
   /** Poll Coinbase spot candles (1m..1d) for the TA library (features, dashboard, research). */
   taCandles: boolean;
+  /** Clock-skew guard: halt new risk when the local clock is confidently off Kalshi's by more than this (ms); 0 disables. */
+  clockSkewMaxMs: number;
+  clockSkewWarnMs: number;
+  /** Settlement average: official = sixty one-per-second RTI values; continuous = time-weighted step average. */
+  settlementAvg: 'official' | 'continuous';
   /** Output of `npm run research:ta` (measured hit rates per rule), shown with live signals. */
   taStudyPath: string;
   coinbaseRestUrl: string;
@@ -446,6 +455,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     style: oneOf<StrategyStyle>(env, 'STRATEGY_STYLE', 'maker', ['maker', 'taker', 'both']),
     series,
     seriesAuto,
+    recordSeries: (env.RECORD_SERIES ?? '').split(',').map((x) => x.trim()).filter(Boolean),
+    recordMaxMarkets: num(env, 'RECORD_MAX_MARKETS', 150, 1, 2000),
     kellyFraction: num(env, 'STRATEGY_KELLY_FRACTION', 0.25, 0.01, 0.5),
     // Relaxed spec: e_min = 3c for maker entries; take only with >= 5c net edge (3c + 2c buffer).
     minEdge: num(env, 'STRATEGY_MIN_EDGE', relaxed ? 0.03 : 0.02, 0.0, 0.5),
@@ -517,6 +528,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     spotFeed: bool(env, 'SPOT_FEED', true),
     dominanceFeed: bool(env, 'DOMINANCE_FEED', true),
     taCandles: bool(env, 'TA_CANDLES', true),
+    clockSkewMaxMs: num(env, 'CLOCK_SKEW_MAX_MS', 2000, 0, 60_000),
+    clockSkewWarnMs: num(env, 'CLOCK_SKEW_WARN_MS', 1000, 0, 60_000),
+    settlementAvg: oneOf(env, 'SETTLEMENT_AVG', 'official', ['official', 'continuous'] as const),
     taStudyPath: path.resolve(env.TA_STUDY_PATH ?? './params/ta_study.json'),
     coinbaseRestUrl: env.COINBASE_REST_URL ?? 'https://api.exchange.coinbase.com',
     // Binance.com blocks US IPs; the market-data-only host usually works. Override if needed.
@@ -537,6 +551,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       pocketShare: num(env, 'POCKET_SHARE', 0.1, 0, 1),
       quotaReset: oneOf(env, 'VAULT_QUOTA_RESET', 'session', ['session', 'us_open'] as const),
       dailyGoalUsd: num(env, 'VAULT_DAILY_GOAL_USD', 100, 0, 1e7),
+      rampStartUsd: num(env, 'VAULT_RAMP_START_USD', 20, 0, 1e7),
+      rampFullUsd: num(env, 'VAULT_RAMP_FULL_USD', 100, 0, 1e7),
     },
     sizingTiers: parseSizingTiers(env.SIZING_TIERS, { risk, strategy }),
     perps: (() => {

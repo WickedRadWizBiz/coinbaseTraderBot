@@ -6,6 +6,15 @@
 
 export interface IndexPoint { ts: number; value: number }
 
+/**
+ * How the 60 s settlement average is reproduced:
+ *  - official: Kalshi's rule, the simple average of the sixty one-per-second CF RTI values in the
+ *    last minute. The RTI publishes once a second, so the value at each second mark is the last
+ *    print at or before that mark; the marks are windowEnd - 59 s ... windowEnd.
+ *  - continuous: the time-weighted average of the index as a step function (the earlier model).
+ */
+export type AvgMode = 'official' | 'continuous';
+
 export interface VolEstimate {
   /** Volatility of log price per sqrt(second). */
   sigmaPerSqrtSec: number;
@@ -25,6 +34,7 @@ export class IndexTracker {
     private readonly retainMs = 40 * 60_000,
     /** EWMA half-life in seconds for the variance estimate. */
     private readonly volHalfLifeSec = 300,
+    private readonly avgMode: AvgMode = 'official',
   ) {}
 
   add(value: number, ts: number): void {
@@ -102,6 +112,30 @@ export class IndexTracker {
     if (to - t > maxGapMs) return undefined;
     area += v * (to - t);
     return { avg: area / (to - from), coveredMs: to - from };
+  }
+
+  /**
+   * The settlement average of the `windowSec` seconds ending at `windowEnd`, using only what was
+   * observable by `now`. `n` is how many of the `windowSec` samples are in (all of them once the
+   * window has closed). Undefined unless every mark so far is covered by a print no older than
+   * maxGapMs, and at least one mark has passed.
+   */
+  settlement(windowEnd: number, now: number, windowSec = 60, maxGapMs = 3000): { avg: number; n: number } | undefined {
+    if (this.avgMode === 'continuous') {
+      const a = this.average(windowEnd - windowSec * 1000, Math.min(now, windowEnd), maxGapMs);
+      return a ? { avg: a.avg, n: Math.round(a.coveredMs / 1000) } : undefined;
+    }
+    const pts = this.points;
+    let sum = 0, n = 0, j = 0;
+    for (let k = 1; k <= windowSec; k++) {
+      const mark = windowEnd - (windowSec - k) * 1000;
+      if (mark > now) break;
+      while (j + 1 < pts.length && pts[j + 1].ts <= mark) j++;
+      if (!pts.length || pts[j].ts > mark || mark - pts[j].ts > maxGapMs) return undefined;
+      sum += pts[j].value;
+      n++;
+    }
+    return n > 0 ? { avg: sum / n, n } : undefined;
   }
 
   /**
