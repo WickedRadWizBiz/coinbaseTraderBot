@@ -161,6 +161,40 @@ In the final minute, open positions ride to settlement.
 
 The trainer's ablation decides which groups are kept.
 
+**TA knowledge library (`bot/ta/`, readable version in [`docs/TA_LIBRARY.md`](docs/TA_LIBRARY.md)).** The bot has direct access to technical analysis of the Coinbase spot USD pair behind each contract (BTC-USD, ETH-USD, ...). The library is built from the operator's reference PDF *Quantitative Technical Analysis in Cryptocurrency Markets* and cross-checked against the original authors and the empirical literature.
+- **Data.** `SpotCandleFeed` polls Coinbase candles on 1m, 5m, 15m, 1h and 1d; 4h is built from complete 1h groups. Only closed candles count, so there is no look-ahead. New candles are recorded as `candles` events, so research replays exactly what live saw. `TA_CANDLES=false` turns it off.
+- **Indicators (`indicators.ts`).**
+  - Trend: SMA/EMA, ADX with ±DI, Ichimoku.
+  - Volatility: Bollinger Bands with %B, bandwidth and the Keltner squeeze; ATR.
+  - Momentum: RSI, MACD, Stochastic, Williams %R.
+  - Volume: OBV, CMF, MFI, session VWAP, volume profile (POC, value area, high/low-volume nodes); Donchian channels.
+  - All are standard author definitions with Wilder smoothing where the original uses it.
+- **Structure (`structure.ts`).** Confirmed fractal swings, HH/HL/LH/LL structure, break of structure and change of character, liquidity sweeps vs true breakouts (wick-and-reclaim vs solid body on volume), equal highs/lows, unfilled fair value gaps, regular and hidden divergences (RSI, MACD histogram, OBV, MFI), engulfing/doji/pin-bar candles, and round-number levels (Osler's stop and take-profit clustering).
+- **Knowledge (`knowledge.ts`).** Every indicator has an entry covering its formula, parameters, the timeframes the reference recommends vs the ones the bot uses, what each state means for price action, caveats, and an **evidence rating with sources**.
+  - Moderate: MA and breakout rules (Hudson & Urquhart 2021, Detzel et al. 2021, Gerritsen et al. 2020) and round numbers (Osler 2003).
+  - Weak: oscillators and candlesticks (Park & Irwin 2007, Marshall et al. 2006).
+  - Practitioner only: SMC liquidity concepts, volume profile, the "80% rule".
+  - On-chain MVRV and NVT are documented but not computed: they are cycle-scale metrics with no information at a 15-minute horizon.
+- **Rules and confluences.** 47 live rules (122 rule × timeframe checks, e.g. `rsi_divergence`, `liquidity_sweep`, `squeeze_release`, `vp_80_rule`, `dominance_matrix`) are evaluated per timeframe. 13 confluences encode the reference's combinations:
+  - the Volatility Reversal Matrix (sweep + LVN rejection + RSI divergence + MACD shift) on 15m and 1h;
+  - the SMC sweep → CHoCH → FVG reversal;
+  - trend alignment;
+  - squeeze breakouts;
+  - range mean reversion (only with ADX < 20);
+  - volume confirmation;
+  - multi-oscillator exhaustion;
+  - value-area rotation;
+  - multi-timeframe momentum;
+  - the BTC.D × USDT.D rotation matrix (asset-aware: altseason is bullish for alts, risk-on-for-BTC is not);
+  - the higher-timeframe regime.
+- **How the bot learns from it.**
+  1. **Features.** 68 new features: `ta` (51) holds indicator readings per timeframe, normalised by ATR; `taconf` (17) holds confluence scores and nets per rule kind. Stale charts read NaN. The trainer tries `…+ta` and `…+ta+taconf` sets, and walk-forward validation (counted in the Deflated Sharpe) decides whether TA earns a place in the model. Nothing is hand-weighted.
+  2. **Rule study.** `npm run research:ta` walks forward over Coinbase history (`--assets BTC,ETH,SOL --days 120`) or recorded candles (`--recordings`). For each rule × timeframe and each confluence it measures the hit rate and drift-removed forward return at 15 and 60 minutes, with a moving-block bootstrap. A Benjamini-Hochberg false-discovery-rate cut runs across every hypothesis. The result is written to `params/ta_study.json`.
+- **API.**
+  - `GET /api/ta` shows each asset's live reading: indicators per timeframe, active signals with their textbook meaning **and their measured study stats**, and firing confluences.
+  - `GET /api/ta/library` returns the full knowledge base.
+  - `npm run ta:docs` regenerates `docs/TA_LIBRARY.md`.
+
 **Model (`research/trainMetaModel.ts`).**
 - Rows are weighted 1 / snapshots per contract, and additionally divided by the number of strikes per hourly event.
 - Walk-forward folds are purged, with a 1-hour embargo.
@@ -270,6 +304,7 @@ npm run dev              # paper mode by default
 npm run research:dataset -- --recordings data/recordings --every 60 --entry-window-only   # relaxed-spec sampling
 npm run research:train -- --families mlp,gbdt --ensemble 5 --cpcv 10                      # -> params/model.candidate.json
 npm run research:backtest -- --model params/model.candidate.json --grid 0.02,0.03,0.04 --exits hold,take_profit,fair_value --annotate
+npm run research:ta -- --assets BTC,ETH,SOL,XRP,DOGE --days 120                        # TA rule study -> params/ta_study.json
 ```
 
 `npm run research:sessions` reports volatility, Kalshi spreads and depth, and trade activity for each session. It fits and validates the intraday volatility profile (`params/vol_profile.json`), backtests P&L by session, and prints a recommended `SESSION_RISK` along with the evidence behind it.

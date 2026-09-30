@@ -26,6 +26,9 @@ import type { MarketData } from '../marketdata/marketData';
 import { SpotBookService } from '../marketdata/spotBook';
 import type { Vault } from '../vault/vault';
 
+import { CONFLUENCES, KNOWLEDGE, RULES } from '../ta/knowledge';
+import { studyFor, studyMeta } from '../ta/study';
+
 export interface ApiDeps {
   cfg: Readonly<Config>;
   audit: AuditLog;
@@ -214,6 +217,33 @@ export function createApi(d: ApiDeps): express.Express {
       const first = quotes[0];
       return { ...g, ...scanLadder(quotes, first ? d.md.feesFor(first.ticker) : undefined) };
     }));
+  });
+
+  // TA library: the knowledge base, and each asset's live reading of the spot chart.
+  api.get('/ta/library', (_req, res) => {
+    res.json({
+      knowledge: KNOWLEDGE,
+      rules: RULES.map(({ evaluate: _e, ...r }) => r),
+      confluences: CONFLUENCES,
+      study: studyMeta(d.cfg.taStudyPath) ?? null,
+    });
+  });
+  api.get('/ta', (_req, res) => {
+    const now = Date.now();
+    const out = [...d.md.features.candles.values()].map((set) => {
+      const snap = set.snapshot(now, { usdtdChg: undefined, btcdChg: undefined });
+      const tf = Object.fromEntries(Object.entries(snap.tf).map(([k, s]) => [k, s && {
+        lastClosed: set.lastTs(k as never) ?? null, close: s.close, rsi: s.rsi, macdHist: s.macdHist, adx: s.adx, plusDI: s.plusDI, minusDI: s.minusDI,
+        bbPctB: s.bbPctB, squeeze: s.squeeze, atrPct: s.atrPct, ema21: s.ema21, ema50: s.ema50, sma200: s.sma200, cloud: s.cloud, stochK: s.stochK,
+        cmf: s.cmf, mfi: s.mfi, obvSlope: s.obvSlope, vwap: s.vwap, profile: s.profile, trend: s.trend, sweep: s.sweep, bos: s.bos, choch: s.choch, round: s.round,
+      }]));
+      return {
+        asset: set.asset, net: snap.net, tf,
+        signals: snap.signals.map((x) => ({ ...x, study: studyFor(d.cfg.taStudyPath, 'rule', x.id, x.tf) ?? null })),
+        confluences: snap.confluences.filter((c) => c.score !== 0).map((c) => ({ ...c, study: studyFor(d.cfg.taStudyPath, 'confluence', c.id, 'multi') ?? null })),
+      };
+    });
+    res.json({ study: studyMeta(d.cfg.taStudyPath) ?? null, assets: out });
   });
 
   api.get('/audit', (req, res) => {

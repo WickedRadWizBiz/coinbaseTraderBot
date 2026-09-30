@@ -20,10 +20,16 @@ import { kalshiMaintenance, sessionState, usMarketClock, zoneTime } from './sess
 import { neighborGap, violationAt, type LadderQuote } from './ladder';
 import { PerpHub, type PerpSnapshot, type PerpState } from '../perps/perpData';
 import { EWMA_LOOKBACK_SEC, seasonalVarianceRatio, type VolProfile } from './volSeasonality';
+import { CandleSet, fromRow, toRow, type CandleRow } from '../ta/candleStore';
+import type { Timeframe } from '../ta/knowledge';
+import { CONFLUENCES, RULES } from '../ta/knowledge';
+import type { TaSnapshot, TfState } from '../ta/analyzer';
 
 export type FeatureGroup = 'base' | 'micro' | 'momentum' | 'spot' | 'macro' | 'confluence' | 'session' | 'time'
   // Relaxed-cadence catalog (minute windows and slower).
-  | 'geometry' | 'vol' | 'kalshi' | 'returns' | 'clock' | 'calendar' | 'interaction' | 'ladder' | 'perp';
+  | 'geometry' | 'vol' | 'kalshi' | 'returns' | 'clock' | 'calendar' | 'interaction' | 'ladder' | 'perp'
+  // TA library on the Coinbase spot USD pair (bot/ta): indicator readings, and rule/confluence scores.
+  | 'ta' | 'taconf';
 
 /** Build tiers from the relaxed-cadence spec: T1 first, T2 only after ablation proves them, T3 experimental. */
 export type FeatureTier = 'T1' | 'T2' | 'T3';
@@ -209,6 +215,13 @@ export class FeatureHub {
   /** Kalshi perpetuals per asset (premium to the index, funding, open interest). */
   readonly perps = new PerpHub();
   onPerp(s: PerpSnapshot): void { this.perps.apply(s); }
+  /** Coinbase spot candles per asset (TA library); returns the rows that were new. */
+  readonly candles = new Map<string, CandleSet>();
+  onCandles(asset: string, tf: Timeframe, rows: CandleRow[], ts: number): CandleRow[] {
+    let set = this.candles.get(asset);
+    if (!set) { set = new CandleSet(asset); this.candles.set(asset, set); }
+    return set.add(tf, rows.map(fromRow), ts).map(toRow);
+  }
   onIndex(asset: string, value: number, ts: number): void {
     let b = this.bars.get(asset);
     if (!b) { b = new BarStore(); this.bars.set(asset, b); }
@@ -270,10 +283,12 @@ export interface FeatureContext {
   siblings?: LadderQuote[];
   /** Kalshi perp state for this contract's asset. */
   perp?: PerpState;
+  /** Coinbase spot candles for this contract's asset (TA library). */
+  candles?: CandleSet;
 }
 
 type Fn = (c: FeatureContext, cache: Cache) => number;
-interface Cache { idx: Map<number, number[] | undefined>; spot: Map<number, number[] | undefined>; memo: Map<string, number> }
+interface Cache { idx: Map<number, number[] | undefined>; spot: Map<number, number[] | undefined>; memo: Map<string, number>; ta?: TaSnapshot | null }
 
 const NA = NaN;
 const clip = (x: number, lim = 10) => (Number.isFinite(x) ? clamp(x, -lim, lim) : NA);
@@ -742,6 +757,82 @@ export const FEATURES: Record<string, { group: FeatureGroup; description: string
   d2_x_log_tau: { group: 'interaction', tier: 'T1', description: 'd2 x log(tau): strike distance means different things at 3 vs 50 minutes', fn: (c) => (hasGeometry(c) ? clip(c.d2! * Math.log(Math.max(1, c.tauSec)), 50) : NA) },
   ret15_x_efficiency: { group: 'interaction', tier: 'T2', description: 'ret_15m_z x efficiency_ratio_15m: momentum only counts when trending', fn: (c, k) => { const a = barRetZ(15)(c, k), b = efficiency(15)(c, k); return Number.isFinite(a) && Number.isFinite(b) ? a * b : NA; } },
 };
+
+// ---- TA library features (bot/ta) -------------------------------------------------------------
+// Computed on CLOSED Coinbase spot candles; a timeframe whose last candle is older than 3 periods
+// reads NaN (feed down or history too short), so a model never trades on stale charts.
+
+const TF_PERIOD: Record<Timeframe, number> = { '1m': 60_000, '5m': 300_000, '15m': 900_000, '1h': 3_600_000, '4h': 14_400_000, '1d': 86_400_000 };
+
+const taOf = (c: FeatureContext, k: Cache): TaSnapshot | undefined => {
+  if (k.ta === undefined) {
+    k.ta = c.candles ? c.candles.snapshot(c.now, { usdtdChg: domZ(c.usdtd, c, 900), btcdChg: domZ(c.btcd, c, 900) }) : null;
+  }
+  return k.ta ?? undefined;
+};
+const tfOf = (c: FeatureContext, k: Cache, tf: Timeframe): TfState | undefined => {
+  const last = c.candles?.lastTs(tf);
+  if (last === undefined || c.now - last > 4 * TF_PERIOD[tf]) return undefined;
+  return taOf(c, k)?.tf[tf];
+};
+const taFeat = (tf: Timeframe, pick: (s: TfState) => number, lim = 10): Fn => (c, k) => {
+  const s = tfOf(c, k, tf);
+  return s ? clip(pick(s), lim) : NA;
+};
+const perAtr = (s: TfState, x: number) => (s.atr > 0 ? x / s.atr : NA);
+
+function taFeatures(): typeof FEATURES {
+  const out: typeof FEATURES = {};
+  const add = (name: string, group: FeatureGroup, description: string, fn: Fn) => { out[name] = { group, tier: 'T2', description, fn }; };
+  for (const tf of ['15m', '1h', '4h'] as Timeframe[]) {
+    add(`ta_rsi_${tf}`, 'ta', `RSI(14) on ${tf} spot candles, (rsi-50)/50`, taFeat(tf, (s) => (s.rsi - 50) / 50));
+    add(`ta_macd_hist_${tf}`, 'ta', `MACD(12,26,9) histogram on ${tf}, in ATRs`, taFeat(tf, (s) => perAtr(s, s.macdHist)));
+    add(`ta_adx_${tf}`, 'ta', `ADX(14) on ${tf} / 50 (trend strength)`, taFeat(tf, (s) => s.adx / 50));
+    add(`ta_di_diff_${tf}`, 'ta', `(+DI - -DI) / 50 on ${tf} (trend direction)`, taFeat(tf, (s) => (s.plusDI - s.minusDI) / 50));
+    add(`ta_bb_pctb_${tf}`, 'ta', `Bollinger %B - 0.5 on ${tf}`, taFeat(tf, (s) => s.bbPctB - 0.5, 3));
+    add(`ta_bb_bw_rank_${tf}`, 'ta', `Bollinger bandwidth percentile (120 bars) on ${tf}: low = squeeze`, taFeat(tf, (s) => s.bbBandwidthRank));
+    add(`ta_ema_stack_${tf}`, 'ta', `+1 price > EMA21 > EMA50, -1 mirror, 0 mixed, on ${tf}`, taFeat(tf, (s) => (s.close > s.ema21 && s.ema21 > s.ema50 ? 1 : s.close < s.ema21 && s.ema21 < s.ema50 ? -1 : Number.isFinite(s.ema50) ? 0 : NA)));
+    add(`ta_structure_${tf}`, 'ta', `market structure on ${tf}: +1 HH/HL, -1 LH/LL, 0 range`, taFeat(tf, (s) => (s.trend === 'up' ? 1 : s.trend === 'down' ? -1 : 0)));
+    add(`ta_cmf_${tf}`, 'ta', `Chaikin money flow (20) on ${tf}`, taFeat(tf, (s) => s.cmf, 1));
+  }
+  for (const tf of ['1h', '4h', '1d'] as Timeframe[]) {
+    add(`ta_price_ma50_${tf}`, 'ta', `(close - SMA50) / ATR on ${tf} (price-to-MA, Detzel et al.)`, taFeat(tf, (s) => perAtr(s, s.close - s.sma50)));
+    add(`ta_cloud_${tf}`, 'ta', `Ichimoku on ${tf}: +1 above the cloud, -1 below, 0 inside`, taFeat(tf, (s) => (!s.cloud ? NA : s.cloud.above ? 1 : s.cloud.below ? -1 : 0)));
+  }
+  add('ta_price_sma200_1d', 'ta', '(close - SMA200) / ATR on daily candles (long-term regime)', taFeat('1d', (s) => perAtr(s, s.close - s.sma200), 30));
+  for (const tf of ['15m', '1h'] as Timeframe[]) {
+    add(`ta_squeeze_${tf}`, 'ta', `Bollinger inside Keltner (squeeze) on ${tf}`, taFeat(tf, (s) => (s.squeeze ? 1 : 0)));
+    add(`ta_stoch_${tf}`, 'ta', `stochastic %K(14) on ${tf}, (k-50)/50`, taFeat(tf, (s) => (s.stochK - 50) / 50));
+    add(`ta_mfi_${tf}`, 'ta', `money flow index (14) on ${tf}, (mfi-50)/50`, taFeat(tf, (s) => (s.mfi - 50) / 50));
+    add(`ta_vwap_dist_${tf}`, 'ta', `(close - session VWAP) / ATR on ${tf}`, taFeat(tf, (s) => perAtr(s, s.close - s.vwap)));
+    add(`ta_vp_pos_${tf}`, 'ta', `(close - POC) / value-area width, volume profile of 96 ${tf} bars`, taFeat(tf, (s) => (s.profile && s.profile.vah > s.profile.val ? (s.close - s.profile.poc) / (s.profile.vah - s.profile.val) : NA), 5));
+    add(`ta_vol_ratio_${tf}`, 'ta', `log(last ${tf} volume / 20-bar average)`, taFeat(tf, (s) => (s.volRatio > 0 ? Math.log(s.volRatio) : NA), 5));
+  }
+  for (const tf of ['1h', '4h'] as Timeframe[]) add(`ta_obv_slope_${tf}`, 'ta', `OBV 20-bar change / (20 x avg volume) on ${tf}`, taFeat(tf, (s) => s.obvSlope, 3));
+  add('ta_willr_15m', 'ta', 'Williams %R(14) on 15m, (r+50)/50', taFeat('15m', (s) => (s.willR + 50) / 50));
+  add('ta_atr_rank_1h', 'ta', 'ATR/price percentile over 100 1h bars (volatility regime)', taFeat('1h', (s) => s.atrRank));
+  add('ta_round_dist_15m', 'ta', 'signed distance to the nearest round-number level, in 15m ATRs (Osler)', taFeat('15m', (s) => s.round.distAtr, 20));
+
+  // Confluence scores and signal nets (group taconf).
+  const fresh = (c: FeatureContext, k: Cache) => tfOf(c, k, '15m') ?? tfOf(c, k, '1h');
+  for (const cf of CONFLUENCES) {
+    add(`taconf_${cf.id}`, 'taconf', `${cf.name} confluence score in [-1, 1] (${cf.source})`, (c, k) => {
+      if (!fresh(c, k)) return NA;
+      return taOf(c, k)?.confluences.find((x) => x.id === cf.id)?.score ?? NA;
+    });
+  }
+  const kindOf = new Map(RULES.map((r) => [r.id, r.kind]));
+  for (const kind of ['trend', 'reversal', 'continuation'] as const) {
+    add(`taconf_net_${kind}`, 'taconf', `sum of signed ${kind}-rule strengths over all timeframes (bullish - bearish)`, (c, k) => {
+      if (!fresh(c, k)) return NA;
+      const t = taOf(c, k);
+      return t ? clip(t.signals.filter((x) => kindOf.get(x.id) === kind).reduce((a, x) => a + x.dir * x.strength, 0), 30) : NA;
+    });
+  }
+  add('taconf_net', 'taconf', 'sum of all signed rule strengths (bullish - bearish)', (c, k) => (fresh(c, k) ? clip(taOf(c, k)?.net ?? NA, 60) : NA));
+  return out;
+}
+Object.assign(FEATURES, taFeatures());
 
 export const ALL_FEATURES = Object.keys(FEATURES);
 export const featuresInGroups = (groups: FeatureGroup[]) => ALL_FEATURES.filter((n) => groups.includes(FEATURES[n].group));

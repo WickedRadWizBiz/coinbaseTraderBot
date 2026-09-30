@@ -85,7 +85,7 @@ test('every feature has a group and description', () => {
 test('production and research replay compute identical features from the same events', async () => {
   const dir = tmpDir();
   const recDir = path.join(dir, 'rec');
-  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, SPOT_FEED: 'false', DOMINANCE_FEED: 'false', PERPS_FEED: 'false' });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, SPOT_FEED: 'false', DOMINANCE_FEED: 'false', PERPS_FEED: 'false', TA_CANDLES: 'false' });
   const ws = Object.assign(new EventEmitter(), { connect() {}, close() {}, setMarkets() {} }) as unknown as KalshiWs;
   const rest = { getSeriesFees: async () => undefined, getOpenMarkets: async () => [] } as unknown as KalshiRest;
   const rec = new Recorder(recDir);

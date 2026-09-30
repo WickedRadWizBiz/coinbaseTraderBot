@@ -146,6 +146,11 @@ export interface Config {
   spotFeed: boolean;
   /** Track USDT.D / BTC.D (Binance prices anchored to CoinGecko) as feature inputs. */
   dominanceFeed: boolean;
+  /** Poll Coinbase spot candles (1m..1d) for the TA library (features, dashboard, research). */
+  taCandles: boolean;
+  /** Output of `npm run research:ta` (measured hit rates per rule), shown with live signals. */
+  taStudyPath: string;
+  coinbaseRestUrl: string;
   binanceWsUrl: string;
   coingeckoUrl: string;
   coingeckoApiKey?: string;
@@ -511,6 +516,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     allowProxyIndex,
     spotFeed: bool(env, 'SPOT_FEED', true),
     dominanceFeed: bool(env, 'DOMINANCE_FEED', true),
+    taCandles: bool(env, 'TA_CANDLES', true),
+    taStudyPath: path.resolve(env.TA_STUDY_PATH ?? './params/ta_study.json'),
+    coinbaseRestUrl: env.COINBASE_REST_URL ?? 'https://api.exchange.coinbase.com',
     // Binance.com blocks US IPs; the market-data-only host usually works. Override if needed.
     binanceWsUrl: env.BINANCE_WS_URL ?? 'wss://data-stream.binance.vision/ws/!miniTicker@arr',
     coingeckoUrl: env.COINGECKO_URL ?? 'https://api.coingecko.com/api/v3',

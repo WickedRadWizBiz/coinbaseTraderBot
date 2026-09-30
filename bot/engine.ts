@@ -622,7 +622,7 @@ export class Engine {
       kind: m.kind, strike: terms.strike, cap: terms.cap, d2: fv.d2, vEff: fv.vEff, sigmaPricing, tNu: model.params.tNu,
       bars: md.features.bars.get(m.asset), openTime: m.openTime, calendar: this.d.calendar,
       ticker: m.ticker, siblings: m.kind === 'updown' ? undefined : ladderQuotes(md.markets.values(), (t) => md.books.get(t), m.asset, m.closeTime),
-      perp: md.features.perps.get(m.asset),
+      perp: md.features.perps.get(m.asset), candles: md.features.candles.get(m.asset),
     });
     const pred = model.predictDetailed(features, fv.pYes);
     const pYes = pred.p;

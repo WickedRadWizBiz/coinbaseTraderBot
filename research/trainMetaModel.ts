@@ -62,10 +62,12 @@ export const DEFAULT_SETS = [
   'base+session', 'base+session+macro+confluence', 'base+time',
   // Relaxed-cadence catalog: T1 groups first, then the rest one at a time.
   RELAXED, `${RELAXED}+returns`, `${RELAXED}+returns+clock+calendar`, `${RELAXED}+returns+interaction`, `${RELAXED}+returns+ladder`, `${RELAXED}+returns+perp`, `${RELAXED}+returns+macro+confluence`,
+  // TA library on the spot pair (bot/ta): indicator readings, then rule/confluence scores.
+  `${RELAXED}+returns+ta`, `${RELAXED}+returns+ta+taconf`, `${RELAXED}+returns+macro+confluence+ta+taconf`,
   'all',
 ];
 
-const ALL_GROUPS: FeatureGroup[] = ['base', 'micro', 'momentum', 'spot', 'macro', 'confluence', 'session', 'time', 'geometry', 'vol', 'kalshi', 'returns', 'clock', 'calendar', 'interaction', 'ladder', 'perp'];
+const ALL_GROUPS: FeatureGroup[] = ['base', 'micro', 'momentum', 'spot', 'macro', 'confluence', 'session', 'time', 'geometry', 'vol', 'kalshi', 'returns', 'clock', 'calendar', 'interaction', 'ladder', 'perp', 'ta', 'taconf'];
 
 export function resolveSet(spec: string, tiers: FeatureTier[] = ['T1', 'T2']): string[] {
   const groups: FeatureGroup[] = spec === 'all' ? ALL_GROUPS : (spec.split('+') as FeatureGroup[]);

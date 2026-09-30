@@ -21,6 +21,8 @@
     "research:backtest": "tsx research/backtest.ts",
     "research:sessions": "tsx research/sessions.ts",
     "research:tennis": "tsx research/tennisBacktest.ts",
+    "research:ta": "tsx research/taStudy.ts",
+    "ta:docs": "tsx scripts/taLibraryDoc.ts",
     "audit:verify": "tsx scripts/verifyAudit.ts"
   },
   "dependencies": {

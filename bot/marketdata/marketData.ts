@@ -24,6 +24,9 @@ import { parseCount } from '../util/num';
 import { FeatureHub } from '../model/featureEngine';
 import { selectCryptoSeries } from './seriesDiscovery';
 import { PerpFeed } from '../perps/perpFeed';
+import type { CandleRow } from '../ta/candleStore';
+import type { Timeframe } from '../ta/knowledge';
+import { SpotCandleFeed } from './spotCandles';
 import { KalshiPerpsRest } from '../perps/perpRest';
 import type { PerpSnapshot } from '../perps/perpData';
 import { contractKind, type ContractTerms, type MarketKind } from '../model/fairValue';
@@ -75,6 +78,7 @@ export class MarketData extends EventEmitter {
   private pollTimer: NodeJS.Timeout | null = null;
   private readonly tradeCursor = new Map<string, number>();
   private proxyWs: WebSocket | null = null;
+  private candleFeed?: SpotCandleFeed;
   indexSource: 'kalshi' | 'proxy' | 'none' = 'none';
   wsConnected = false;
 
@@ -122,6 +126,14 @@ export class MarketData extends EventEmitter {
       this.dominance.on('sample', (d: { usdtd: number; btcd: number; coveredShare: number; ts: number }) => this.onDominance(d));
       this.dominance.start();
     }
+    if (this.cfg.taCandles) {
+      this.candleFeed = new SpotCandleFeed([...this.index.keys()], this.cfg.coinbaseRestUrl);
+      this.candleFeed.on('candles', (e: { asset: string; tf: Timeframe; rows: CandleRow[]; ts: number }) => {
+        const fresh = this.features.onCandles(e.asset, e.tf, e.rows, e.ts);
+        if (fresh.length) this.recorder.write('candles', { asset: e.asset, tf: e.tf, rows: fresh, ts: e.ts });
+      });
+      this.candleFeed.start();
+    }
     if (this.cfg.perps.feed) {
       this.perpFeed = new PerpFeed(new KalshiPerpsRest(this.cfg.perps.restUrl), Object.values(this.cfg.indexIdMap), this.cfg.perps.pollMs);
       this.perpFeed.on('snapshot', (s: PerpSnapshot) => this.onPerp(s));
@@ -150,6 +162,7 @@ export class MarketData extends EventEmitter {
     this.proxyWs?.close();
     this.dominance?.stop();
     this.perpFeed?.stop();
+    this.candleFeed?.stop();
     this.recorder.close();
   }
 
