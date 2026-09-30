@@ -66,6 +66,12 @@ export interface TargetEvConfig {
   minEdge: number;
 }
 
+/** Effective $ target and $ minimum for a bankroll: min(absolute, fraction x bankroll). */
+export function evThresholds(c: { targetEvUsd: number; minTradeEvUsd: number; targetEvFrac: number; minTradeEvFrac: number }, bankroll: number): { targetEv: number; minEv: number } {
+  const b = Math.max(0, bankroll);
+  return { targetEv: Math.min(c.targetEvUsd, c.targetEvFrac * b), minEv: Math.min(c.minTradeEvUsd, c.minTradeEvFrac * b) };
+}
+
 export interface TargetEvInput {
   /** Model and calibrated-market probabilities that the PURCHASED side wins. */
   qModel: number;

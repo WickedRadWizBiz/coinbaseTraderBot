@@ -21,7 +21,7 @@ import type { StrategyConfig } from '../config';
 import { orderFee, type FeeSchedule } from '../fees';
 import type { BookSide, TimeInForce } from '../kalshi/types';
 import type { OrderPurpose } from '../oms/orderState';
-import { kellySize, targetEvSize } from '../sizing/kelly';
+import { evThresholds, kellySize, targetEvSize } from '../sizing/kelly';
 import { ceilToTick, floorToTick, round } from '../util/num';
 
 export interface RestingQuote {
@@ -108,7 +108,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     if (targetEv && v.pMarket !== undefined) {
       const qk = side === 'yes' ? v.pMarket : 1 - v.pMarket;
       return targetEvSize({ qModel: qm, qMarket: qk, cost, feePerContract: fee, bankroll: v.bankroll, maxRiskUsd: v.maxOrderRiskUsd, maxContracts },
-        { kappa: cfg.kappa, kellyFraction: cfg.kellyFraction, targetEv: cfg.targetEvUsd, minEv: cfg.minTradeEvUsd, minEdge: cfg.minEdge });
+        { kappa: cfg.kappa, kellyFraction: cfg.kellyFraction, ...evThresholds(cfg, v.bankroll), minEdge: cfg.minEdge });
     }
     return kellySize({ q: side === 'yes' ? q : 1 - q, cost, feePerContract: fee, bankroll: v.bankroll, kellyFraction: cfg.kellyFraction, maxRiskUsd: v.maxOrderRiskUsd, maxContracts });
   };

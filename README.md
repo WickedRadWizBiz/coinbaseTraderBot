@@ -124,7 +124,8 @@ In the final minute, open positions ride to settlement.
 - Size is `N = min(ceil($target / e), ⌊λ f* B / c⌋, caps)`, with a $10 target and λ = 0.25.
 - A trade with expected profit under $1 is skipped.
 - Kelly is scaled by `max(0, 1 − drawdown/15%)`. New risk pauses for 24 hours after a 7-day loss above 8%. The daily loss stop is 3%.
-- The $100/day vault goal is a **monthly average**. Expect about 35–40% losing days even when the edge is real. `PAPER_BANKROLL_USD` defaults to $6,250, which is what a $10-EV trade at a 4¢ edge needs at quarter-Kelly. With smaller bankrolls, most trades fall under the $1 minimum.
+- The $100/day vault goal is a **monthly average**. Expect about 35–40% losing days even when the edge is real.
+- **The minimum tradable bankroll is $20** (`MIN_TRADABLE_BANKROLL_USD`, also the `PAPER_BANKROLL_USD` default); below it no new risk is taken. The $10 target and $1 minimum scale down with the bankroll: effective = min($ amount, fraction × bankroll), where the fractions (0.16% and 0.016%) reproduce the spec's figures at about $6,250. At $20 a trade aims for about $0.03 of expected profit and is sized by quarter-Kelly and the 2%-per-order cap, typically under one contract (Kalshi allows 0.01-contract granularity). The spec's $10/trade figures start applying from about $6,250.
 
 **Pricing (`bot/model/fairValue.ts`).**
 - Martingale drift (`d2 = (ln S/K − v/2)/√v`).
@@ -255,7 +256,7 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 | Kill switch | Persists on disk, survives restart, auto-trips on loss limit, repeated order errors, persistent break or a stalled heartbeat. Resting orders also carry an exchange-side `expiration_time` as a dead-man switch. |
 | Fee-correct PnL | Exact fee formula with round-up. Uses exchange-reported fees when present. Wins and losses are labelled after fees at settlement. |
 | Data recorder, fill simulator, TCA, alerts, audit log | Recorder: `marketdata/`. Fill simulator: `paper/` (queue position, trade-through fills). TCA: `tca/` (markouts). Alerts: Telegram or webhook. Audit log: hash-chained JSONL, checked with `npm run audit:verify`. |
-| Tests / CI | 172 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
+| Tests / CI | 174 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
 
 ## Things you must do yourself
 

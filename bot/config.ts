@@ -85,8 +85,14 @@ export interface StrategyConfig {
   /** kelly = fractional Kelly on the model probability; target_ev = spec sizing (shrink to market, $ target, min EV). */
   sizing: 'kelly' | 'target_ev';
   kappa: number;
+  /** Per-trade $ target and $ minimum EV, capped at these fractions of bankroll so small accounts
+   * scale down (the spec's $10 / $1 correspond to a ~$6,250 bankroll). */
   targetEvUsd: number;
   minTradeEvUsd: number;
+  targetEvFrac: number;
+  minTradeEvFrac: number;
+  /** Below this tradable bankroll no new risk is taken (exits still run). */
+  minTradableBankrollUsd: number;
   /** Veto entries when |q - p_mkt| < this many ensemble standard deviations. */
   ensembleVetoSigmas: number;
   /** Scale Kelly by max(0, 1 - drawdown / ddScaleAt); pause entries 24 h after a 7-day loss beyond weeklyLossPause. */
@@ -339,6 +345,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     kappa: num(env, 'STRATEGY_KAPPA', 0.5, 0, 1),
     targetEvUsd: num(env, 'STRATEGY_TARGET_EV_USD', 10, 0, 10000),
     minTradeEvUsd: num(env, 'STRATEGY_MIN_TRADE_EV_USD', 1, 0, 10000),
+    targetEvFrac: num(env, 'STRATEGY_TARGET_EV_FRAC', 0.0016, 0, 1),
+    minTradeEvFrac: num(env, 'STRATEGY_MIN_TRADE_EV_FRAC', 0.00016, 0, 1),
+    minTradableBankrollUsd: num(env, 'MIN_TRADABLE_BANKROLL_USD', 20, 0, 1e7),
     ensembleVetoSigmas: num(env, 'STRATEGY_ENSEMBLE_VETO_SIGMAS', 2, 0, 10),
     ddScaleAt: num(env, 'RISK_DD_SCALE_AT', 0.15, 0.01, 1),
     weeklyLossPause: num(env, 'RISK_WEEKLY_LOSS_PAUSE', 0.08, 0.01, 1),
@@ -371,9 +380,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     dashboardToken: token,
     dataDir,
     paramsPath: path.resolve(env.MODEL_PARAMS_PATH ?? './params/model.json'),
-    // ~$6,250 is what a $10-EV trade at a 4c edge needs at quarter-Kelly (relaxed spec); smaller
-    // bankrolls mostly fall under the $1 minimum trade EV and trade rarely.
-    paperBankrollUsd: num(env, 'PAPER_BANKROLL_USD', 6250, 1, 1e7),
+    // The minimum tradable bankroll; EV targets scale down with bankroll (see targetEvFrac).
+    paperBankrollUsd: num(env, 'PAPER_BANKROLL_USD', 20, 1, 1e7),
     indexIdMap: jsonMap(env, 'INDEX_ID_MAP', DEFAULT_INDEX_IDS),
     seriesAssetMap,
     catalogHorizonMin: num(env, 'CATALOG_HORIZON_MIN', 90, 16, 7 * 24 * 60),

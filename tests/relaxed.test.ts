@@ -334,3 +334,19 @@ test('PBO treats identical variants as uninformative (0.5), not as overfit', () 
   const col = Array.from({ length: 64 }, () => r() - 0.5);
   assert.equal(pbo(col.map((v) => [v, v, v]), 8).pbo, 0.5);
 });
+
+import { evThresholds } from '../bot/sizing/kelly';
+
+test('$20 is tradable: EV thresholds scale with bankroll, spec figures from ~$6,250', () => {
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).paperBankrollUsd, 20);
+  assert.equal(relaxed.minTradableBankrollUsd, 20);
+  const small = evThresholds(relaxed, 20);
+  assert.ok(Math.abs(small.targetEv - 0.032) < 1e-9 && Math.abs(small.minEv - 0.0032) < 1e-9);
+  const big = evThresholds(relaxed, 6250);
+  assert.ok(Math.abs(big.targetEv - 10) < 1e-9 && Math.abs(big.minEv - 1) < 1e-9);
+  assert.deepEqual(evThresholds(relaxed, 1e6), { targetEv: 10, minEv: 1 });
+  // A $20 account with a 2% per-order cap still quotes (fractional contracts).
+  const out = decide(view({ bankroll: 20, maxOrderRiskUsd: 0.4 }), { ...strat, style: 'maker' });
+  const bid = out.place.find((p) => p.side === 'bid')!;
+  assert.ok(bid && bid.count > 0 && bid.count * bid.price <= 0.4 + 1e-9, JSON.stringify(out));
+});

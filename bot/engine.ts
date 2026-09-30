@@ -33,6 +33,7 @@ import { ladderQuotes } from './model/ladder';
 import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
 import { effectiveSigma, type VolProfile } from './model/volSeasonality';
 import { floorCount } from './util/num';
+import { evThresholds } from './sizing/kelly';
 import { BalanceMonitor, fillCashDelta, settleCashDelta } from './vault/balanceMonitor';
 import type { Vault } from './vault/vault';
 import { writeJsonAtomic } from './util/persist';
@@ -265,6 +266,9 @@ export class Engine {
     if (paused) r.push(paused);
     const h = this.d.modelHealth?.status();
     if (this.d.cfg.strategy.modelHealthHalt && h?.halt) r.push(`model log loss significantly worse than the calibrated market over ${h.windows} windows (p=${h.pWorse?.toFixed(3)})`);
+    const b = this.bankroll();
+    const minB = this.d.cfg.strategy.minTradableBankrollUsd;
+    if (b !== undefined && b > 0 && b < minB) r.push(`tradable bankroll $${b.toFixed(2)} below the $${minB} minimum`);
     const mt = kalshiMaintenance(now);
     if (mt.inside || mt.minutesTo <= 30) r.push(mt.inside ? 'Kalshi maintenance window' : `Kalshi maintenance in ${mt.minutesTo} min`);
     return r;
@@ -275,7 +279,9 @@ export class Engine {
     const S = this.d.cfg.strategy;
     const eq = this.equity();
     return {
-      cadence: S.cadence, sizing: S.sizing, exitPolicy: S.exitPolicy, kappa: S.kappa, targetEvUsd: S.targetEvUsd, minTradeEvUsd: S.minTradeEvUsd,
+      cadence: S.cadence, sizing: S.sizing, exitPolicy: S.exitPolicy, kappa: S.kappa,
+      ...(() => { const t = evThresholds(S, this.bankroll() ?? 0); return { targetEvUsd: +t.targetEv.toFixed(2), minTradeEvUsd: +t.minEv.toFixed(3) }; })(),
+      minTradableBankrollUsd: S.minTradableBankrollUsd,
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null,
       equity: eq ?? null, equityGuard: this.d.equityGuard?.status(eq, now) ?? null,

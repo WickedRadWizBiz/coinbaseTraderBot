@@ -286,7 +286,7 @@ export async function runBacktest(
       const kindWindow = strategy.cadence === 'relaxed'
         ? inEntryWindow(m.kind, tauSec, strategy.entryWindowUpdown, strategy.entryWindowHourly) && (m.kind === 'updown' || (mid >= strategy.hourlyMidBand[0] && mid <= strategy.hourlyMidBand[1]))
         : true;
-      const entryWindowOpen = kindWindow && !mt.inside && mt.minutesTo > 30;
+      const entryWindowOpen = kindWindow && !mt.inside && mt.minutesTo > 30 && bankroll >= strategy.minTradableBankrollUsd;
       const rb = q('bid'), ra = q('ask');
       const through = (r: { price: number } | undefined, best: number) => r !== undefined && Math.abs(best - r.price) >= 2 * strategy.requoteThreshold - 1e-9;
       const posC = pos.position(m.ticker);
