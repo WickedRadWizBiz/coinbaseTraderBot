@@ -113,6 +113,8 @@ npm run research:backtest -- --model params/model.candidate.json --grid 0.01,0.0
 - **Liquidity ratchet.** Stops sit at exit-side book levels big enough to absorb the whole position (`--ratchet-fill`) that have persisted for `--ratchet-age` seconds. The stop ratchets up as price moves past higher walls. If price comes back down to the stop, the bot exits with an immediate-or-cancel order limited to the stop minus `--ratchet-slip` ticks. A gap through the stop falls back to the next wall down.
 - **Hybrid.** The same ratchet, but a triggered stop only exits if the model agrees the position is worth less than the stop.
 
+- **Confluence ratchet ("let the winner run").** Normally the fair-value exit applies. The bot switches to hunt mode only when a position has beaten its entry fair value by `--hunt-margin` AND the confluence score oriented to the position is at least `--hunt-confluence`. In hunt mode the liquidity ratchet manages the exit and nothing else may reduce the position: no fair-value exit, no opposite quote, no opposite takes. Hunt mode turns off if confluence flips against the position, or if the price gives back the outperformance before a stop forms. It is available live as the opt-in `EXIT_POLICY=confluence_ratchet` (default `fair_value`), and the dashboard shows HUNTING with the target and stop.
+
 Every exit executes one tick after it triggers. The exit policy governs all active reductions, so taker entries against a position are blocked under hold and ratchet. The diagnostics report:
 - exit regret: settlement value of the exited contracts minus exit proceeds
 - stopped-out winners

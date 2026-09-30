@@ -1,8 +1,9 @@
 // Fee-inclusive backtest on recorded data using the production strategy,
 // risk gateway and the conservative queue-aware fill simulator.
 //   npm run research:backtest -- --recordings data/recordings --model params/model.candidate.json \
-//       [--grid 0.01,0.02,0.03] [--exits hold,fair_value,liquidity_ratchet,hybrid] \
-//       [--ratchet-fill 1] [--ratchet-age 3] [--ratchet-slip 1] [--trials 6] [--annotate]
+//       [--grid 0.01,0.02,0.03] [--exits hold,fair_value,liquidity_ratchet,hybrid,confluence_ratchet] \
+//       [--ratchet-fill 1] [--ratchet-age 3] [--ratchet-slip 1] [--hunt-margin 0.02] [--hunt-confluence 2] \
+//       [--trials 6] [--annotate]
 //
 // Exit policies (bot/strategy/exitPolicies.ts) are compared on identical data.
 // The exit policy governs every ACTIVE reduction: under hold / liquidity_ratchet,
@@ -32,7 +33,7 @@ import { PaperExchange } from '../bot/paper/paperExchange';
 import { marketWorstLoss } from '../bot/risk/exposure';
 import { RiskGateway } from '../bot/risk/riskGateway';
 import { decide } from '../bot/strategy/fairValueStrategy';
-import { DEFAULT_RATCHET, EXIT_POLICIES, ExitPolicyName, LiquidityRatchet, RatchetParams } from '../bot/strategy/exitPolicies';
+import { ConfluenceRatchetExit, DEFAULT_HUNT, DEFAULT_RATCHET, EXIT_POLICIES, ExitPolicyName, HuntParams, LiquidityRatchet, RatchetParams } from '../bot/strategy/exitPolicies';
 import { readRecordings, ReplayState } from './replay';
 import { bootstrapMeanCi, deflatedSharpe, pbo, sharpe } from './stats';
 
@@ -54,6 +55,9 @@ export interface ExitStats {
   ratchetTriggers: number;
   gaps: number;
   hybridHolds: number;
+  /** confluence_ratchet: times hunt mode switched on / off, and exits it made. */
+  huntActivations: number;
+  huntDeactivations: number;
   /** Mean (stop - fill price) in side terms for ratchet exits; positive = filled below the stop. */
   avgSlippage: number | null;
 }
@@ -71,17 +75,18 @@ export interface BacktestResult {
 
 export async function runBacktest(
   dir: string, model: MetaModel, strategy: StrategyConfig, limits: RiskLimits, bankroll0: number,
-  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams } = {},
+  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams; hunt?: HuntParams } = {},
 ): Promise<BacktestResult> {
   const policy = opts.exitPolicy ?? 'fair_value';
   const st = new ReplayState();
   const pos = new PositionBook();
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => DEFAULT_FEES, () => st.now);
   const gateway = new RiskGateway(limits);
-  const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, avgSlippage: null };
+  const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, avgSlippage: null };
   const res: BacktestResult = { exitPolicy: policy, exits, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
   const closeOf = new Map<string, number>();
   const ratchets = new Map<string, LiquidityRatchet>();
+  const hunts = new Map<string, ConfluenceRatchetExit>();
   const pending = new Map<string, { side: 'bid' | 'ask'; price: number; count: number; kind: 'fv' | 'rt'; stop?: number }>();
   const stopByOrder = new Map<string, number>();
   const exitLedger = new Map<string, Array<{ sideSign: number; n: number; proceeds: number }>>();
@@ -130,6 +135,7 @@ export async function runBacktest(
           }
           exitLedger.delete(m.ticker);
           ratchets.delete(m.ticker);
+          hunts.delete(m.ticker);
           pending.delete(m.ticker);
           const p = pos.get(m.ticker);
           if (p && !p.settled) {
@@ -162,7 +168,8 @@ export async function runBacktest(
       const fv = fairValue({ spot: spot.value, strike, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, tauSec, observedAvg: observed });
       if (!fv) continue;
       const mid = (bid.price + ask.price) / 2;
-      const pYes = model.predict(computeFeatureMap({ now: st.now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma, inWindow: fv.regime !== 'pre_window', book, micro: st.features.micro.get(m.ticker), index: idx!, spot: st.spot.get(m.asset), asset: m.asset, usdtd: st.usdtd, btcd: st.btcd }), fv.pYes);
+      const fmap = computeFeatureMap({ now: st.now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma, inWindow: fv.regime !== 'pre_window', book, micro: st.features.micro.get(m.ticker), index: idx!, spot: st.spot.get(m.asset), asset: m.asset, usdtd: st.usdtd, btcd: st.btcd });
+      const pYes = model.predict(fmap, fv.pYes);
       const ret = idx!.trailingLogReturn(st.now, strategy.fastMoveWindowSec * 1000);
       const fastMove = ret !== undefined && Math.abs(ret) > strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(strategy.fastMoveWindowSec);
       const bankroll = (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0);
@@ -201,12 +208,36 @@ export async function runBacktest(
         }
       }
 
+      // Confluence ratchet: fair-value exit normally; hunt mode (ratchet exit, no other reductions)
+      // only while the contract has beaten its entry fair value AND confluence agrees.
+      let huntMode = false;
+      if (policy === 'confluence_ratchet') {
+        const posH = pos.position(m.ticker);
+        let h = hunts.get(m.ticker);
+        if (!h) { h = new ConfluenceRatchetExit(opts.hunt ?? DEFAULT_HUNT, opts.ratchet ?? DEFAULT_RATCHET); hunts.set(m.ticker, h); }
+        const d = h.update({
+          position: posH, qSide: posH >= 0 ? pYes : 1 - pYes, sideBid: posH > 0 ? bid.price : posH < 0 ? 1 - ask.price : undefined,
+          confluence: fmap.conf_count, book, now: st.now, tick: m.tickSize, fees: DEFAULT_FEES,
+        });
+        huntMode = d.mode === 'hunt';
+        if (d.event === 'activated') exits.huntActivations++;
+        if (d.event === 'deactivated_confluence' || d.event === 'deactivated_giveback') exits.huntDeactivations++;
+        if (d.event === 'gapped') exits.gaps++;
+        if (d.plan && !pending.has(m.ticker)) {
+          exits.ratchetTriggers++;
+          pending.set(m.ticker, { side: d.plan.side, price: d.plan.price, count: d.plan.count, kind: 'rt', stop: d.plan.stop });
+        }
+      }
+
       const plan = decide({
         ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: pos.position(m.ticker), bankroll,
         maxOrderRiskUsd: limits.maxOrderRiskFrac * bankroll, maxContracts: limits.maxContractsPerOrder, minSidePrice: limits.minSidePrice,
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,
         restingBid: q('bid'), restingAsk: q('ask'), nowSec: Math.floor(st.now / 1000), closeSec: Math.floor(m.closeTime / 1000),
-      }, strategy, { exits: policy === 'fair_value' || policy === 'hybrid' });
+      }, strategy, {
+        exits: policy === 'fair_value' || policy === 'hybrid' || (policy === 'confluence_ratchet' && !huntMode),
+        blockReductions: huntMode,
+      });
       for (const c of plan.cancel) await ex.cancelOrder(c.clientOrderId);
 
       for (const p of plan.place) {
@@ -261,11 +292,15 @@ async function main() {
     minWallAgeMs: Number(arg('ratchet-age', String(DEFAULT_RATCHET.minWallAgeMs / 1000))) * 1000,
     slippageTicks: Number(arg('ratchet-slip', String(DEFAULT_RATCHET.slippageTicks))),
   };
+  const hunt: HuntParams = {
+    targetMargin: Number(arg('hunt-margin', String(DEFAULT_HUNT.targetMargin))),
+    minConfluence: Number(arg('hunt-confluence', String(DEFAULT_HUNT.minConfluence))),
+  };
   const variants = grid.length * policies.length;
 
   const results: BacktestResult[] = [];
   for (const minEdge of grid) {
-    for (const exitPolicy of policies) results.push(await runBacktest(dir, model, { ...cfg.strategy, minEdge }, cfg.risk, bankroll, { exitPolicy, ratchet }));
+    for (const exitPolicy of policies) results.push(await runBacktest(dir, model, { ...cfg.strategy, minEdge }, cfg.risk, bankroll, { exitPolicy, ratchet, hunt }));
   }
   const allWindows = [...new Set(results.flatMap((r) => [...r.windows.keys()]))].sort((a, b) => a - b);
 
@@ -283,6 +318,7 @@ async function main() {
     exit: r.exitPolicy, minEdge: r.minEdge, exitOrders: r.exits.orders, exitFills: r.exits.fills, contracts: +r.exits.contracts.toFixed(2),
     proceeds: +r.exits.proceeds.toFixed(2), regret: +r.exits.regret.toFixed(2), stoppedWinners: r.exits.stoppedWinners,
     ratchetTriggers: r.exits.ratchetTriggers, gaps: r.exits.gaps, hybridHolds: r.exits.hybridHolds,
+    huntOn: r.exits.huntActivations, huntOff: r.exits.huntDeactivations,
     avgSlippage: r.exits.avgSlippage === null ? null : +r.exits.avgSlippage.toFixed(4),
   })));
   if (results.length > 1) {

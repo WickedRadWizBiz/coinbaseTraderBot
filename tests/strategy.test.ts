@@ -7,6 +7,7 @@ import { decide, MarketView } from '../bot/strategy/fairValueStrategy';
 const cfg: StrategyConfig = {
   style: 'maker', series: ['KXBTC15M'], kellyFraction: 0.25, minEdge: 0.02, takerBuffer: 0.01,
   inventorySkewPerContract: 0.002, requoteThreshold: 0.01, fastMoveSigmas: 3, fastMoveWindowSec: 5, orderTtlSec: 60,
+  exitPolicy: 'fair_value', huntTargetMargin: 0.02, huntMinConfluence: 2, ratchetMinFillRatio: 1, ratchetMinWallAgeSec: 3, ratchetSlippageTicks: 1,
 };
 
 const view = (o: Partial<MarketView> = {}): MarketView => ({
@@ -63,4 +64,15 @@ test('exit only when the bid pays more than fair value plus exit fee; no percent
   assert.equal(exit.reduceOnly, true);
   assert.equal(exit.timeInForce, 'immediate_or_cancel');
   assert.equal(exit.count, 5);
+});
+
+test('blockReductions (hunt mode) removes the fair-value exit, the opposite quote and opposite takes', () => {
+  const long = view({ position: 5, pYes: 0.4, bestBid: { price: 0.5, size: 10 } });
+  const normal = decide(long, { ...cfg, style: 'both' });
+  assert.ok(normal.place.some((p) => p.purpose === 'exit'));
+  const hunting = decide(long, { ...cfg, style: 'both' }, { exits: false, blockReductions: true });
+  assert.equal(hunting.place.filter((p) => p.side === 'ask').length, 0, 'nothing sells YES while hunting a long YES');
+  // A resting ask (which would unwind the winner) is cancelled.
+  const withAsk = decide({ ...long, restingAsk: { clientOrderId: 'a', price: 0.62, remaining: 5 } }, cfg, { exits: false, blockReductions: true });
+  assert.deepEqual(withAsk.cancel.map((c) => c.clientOrderId), ['a']);
 });

@@ -22,6 +22,7 @@ import type { KillSwitch } from './risk/killSwitch';
 import { RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
 import { decide, MarketView, OrderPlan } from './strategy/fairValueStrategy';
+import { ConfluenceRatchetExit } from './strategy/exitPolicies';
 import { logger } from './util/log';
 
 const log = logger('engine');
@@ -44,6 +45,10 @@ export interface MarketStatus {
   /** Log-odds shift the model applied on top of fair value, and what drove it. */
   modelShift?: number;
   drivers?: Driver[];
+  /** Exit mode: normal fair-value exit, or hunting a winner under the confluence ratchet. */
+  exitMode?: 'fair_value' | 'hunt';
+  huntTarget?: number;
+  huntStop?: number;
   /** Current values of the macro/confluence inputs for display. */
   macro?: Record<string, number | null>;
   updatedTs: number;
@@ -65,6 +70,7 @@ export interface EngineDeps {
 
 export class Engine {
   private readonly busy = new Set<string>();
+  private readonly hunts = new Map<string, ConfluenceRatchetExit>();
   private timers: NodeJS.Timeout[] = [];
   private lastTickTs = 0;
   private lastDecisionAudit = new Map<string, number>();
@@ -207,6 +213,7 @@ export class Engine {
     for (const [t, st] of this.status) {
       if (st.closeTs < cutoff) {
         this.status.delete(t);
+        this.hunts.delete(t);
         this.lastDecisionAudit.delete(t);
       }
     }
@@ -288,7 +295,42 @@ export class Engine {
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
       restingBid: quote('bid'), restingAsk: quote('ask'), nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
     };
-    const plan = decide(view, cfg.strategy);
+    // Exit policy. confluence_ratchet: fair-value exit normally; "hunt" mode (liquidity ratchet
+    // manages the exit, nothing else may reduce the position) only while the contract has beaten
+    // its entry fair value AND confluence agrees with the position.
+    let huntMode = false;
+    let huntPlan: OrderPlan | undefined;
+    if (cfg.strategy.exitPolicy === 'confluence_ratchet') {
+      let h = this.hunts.get(m.ticker);
+      if (!h) {
+        const S = cfg.strategy;
+        h = new ConfluenceRatchetExit(
+          { targetMargin: S.huntTargetMargin, minConfluence: S.huntMinConfluence },
+          { minFillRatio: S.ratchetMinFillRatio, minWallAgeMs: S.ratchetMinWallAgeSec * 1000, slippageTicks: S.ratchetSlippageTicks },
+        );
+        this.hunts.set(m.ticker, h);
+      }
+      const d = h.update({
+        position: st.position, qSide: st.position >= 0 ? pYes : 1 - pYes,
+        sideBid: st.position > 0 ? bid.price : st.position < 0 ? 1 - ask.price : undefined,
+        confluence: features.conf_count, book, now, tick: m.tickSize, fees: md.feesFor(m.ticker),
+      });
+      huntMode = d.mode === 'hunt';
+      st.exitMode = d.mode;
+      st.huntTarget = d.target;
+      st.huntStop = d.stop;
+      if (d.event === 'activated' || d.event === 'deactivated_confluence' || d.event === 'deactivated_giveback' || d.event === 'triggered' || d.event === 'gapped') {
+        this.d.audit.write('decision', { ticker: m.ticker, huntEvent: d.event, target: d.target, stop: d.stop, position: st.position, confCount: features.conf_count, pYes });
+      }
+      if (d.plan) {
+        huntPlan = { side: d.plan.side, price: d.plan.price, count: d.plan.count, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge: 0, why: `confluence ratchet stop ${d.plan.stop}` };
+      }
+    } else {
+      st.exitMode = 'fair_value';
+    }
+    const plan = decide(view, cfg.strategy, { exits: !huntMode, blockReductions: huntMode });
+    if (huntPlan) plan.place.unshift(huntPlan);
+    if (huntMode) plan.notes.push(`hunting: stop ${st.huntStop ?? 'forming'}`);
     st.notes = plan.notes;
 
     const decisionId = crypto.randomUUID();

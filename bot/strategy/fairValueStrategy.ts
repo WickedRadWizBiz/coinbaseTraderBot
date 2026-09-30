@@ -63,9 +63,12 @@ export interface StrategyOutput {
   notes: string[];
 }
 
-/** `opts.exits: false` disables the built-in fair-value exit (the backtester
- * substitutes another exit policy). Production always uses the default. */
-export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boolean } = {}): StrategyOutput {
+/** `opts.exits: false` disables the built-in fair-value exit (another exit
+ * policy manages the position). `opts.blockReductions: true` suppresses every
+ * order that would reduce the current position (the opposite-side quote and
+ * opposite-side takes), used while a winner is being run under the
+ * confluence ratchet. */
+export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boolean; blockReductions?: boolean } = {}): StrategyOutput {
   const out: StrategyOutput = { place: [], cancel: [], notes: [] };
   const tick = v.tickSize;
   const bid = v.bestBid;
@@ -123,12 +126,18 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
       if (count > 0) desiredAsk = { side: 'ask', price: ap, count, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, purpose: 'quote', expirationTime: expiry, edge: (1 - v.pYes) - noCost - fee, why: 'maker ask' };
     }
   }
+  if (opts.blockReductions) {
+    if (v.position > 0) desiredAsk = undefined;
+    if (v.position < 0) desiredBid = undefined;
+  }
   reconcileQuote(v.restingBid, desiredBid, cfg.requoteThreshold, out);
   reconcileQuote(v.restingAsk, desiredAsk, cfg.requoteThreshold, out);
 
   // ---- Selective taking -------------------------------------------------------
   if ((cfg.style === 'taker' || cfg.style === 'both') && entriesAllowed && !v.fastMove && out.place.every((p) => p.purpose !== 'exit')) {
-    if (ask && ask.price >= v.minSidePrice && ask.price <= 1 - v.minSidePrice) {
+    const mayBuyYes = !(opts.blockReductions && v.position < 0);
+    const mayBuyNo = !(opts.blockReductions && v.position > 0);
+    if (mayBuyYes && ask && ask.price >= v.minSidePrice && ask.price <= 1 - v.minSidePrice) {
       const fee1 = orderFee(1, ask.price, true, v.fees);
       const k = kellySize({ q: v.pYes, cost: ask.price, feePerContract: fee1, bankroll: v.bankroll, kellyFraction: cfg.kellyFraction, maxRiskUsd: v.maxOrderRiskUsd, maxContracts: Math.min(v.maxContracts, ask.size) });
       if (k.contracts > 0) {
@@ -140,7 +149,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
       }
     }
     const noCost = bid ? round(1 - bid.price, 4) : 0;
-    if (bid && noCost >= v.minSidePrice && noCost <= 1 - v.minSidePrice) {
+    if (mayBuyNo && bid && noCost >= v.minSidePrice && noCost <= 1 - v.minSidePrice) {
       const fee1 = orderFee(1, noCost, true, v.fees);
       const k = kellySize({ q: 1 - v.pYes, cost: noCost, feePerContract: fee1, bankroll: v.bankroll, kellyFraction: cfg.kellyFraction, maxRiskUsd: v.maxOrderRiskUsd, maxContracts: Math.min(v.maxContracts, bid.size) });
       if (k.contracts > 0) {

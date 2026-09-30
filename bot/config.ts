@@ -56,6 +56,13 @@ export interface StrategyConfig {
   fastMoveWindowSec: number;
   /** Resting orders expire on the exchange after this many seconds (dead-man switch). */
   orderTtlSec: number;
+  /** fair_value (default) or confluence_ratchet ("let the winner run" under confluence). */
+  exitPolicy: 'fair_value' | 'confluence_ratchet';
+  huntTargetMargin: number;
+  huntMinConfluence: number;
+  ratchetMinFillRatio: number;
+  ratchetMinWallAgeSec: number;
+  ratchetSlippageTicks: number;
 }
 
 export interface Config {
@@ -238,6 +245,12 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     fastMoveSigmas: num(env, 'STRATEGY_FAST_MOVE_SIGMAS', 3, 0.5, 20),
     fastMoveWindowSec: num(env, 'STRATEGY_FAST_MOVE_WINDOW_SEC', 5, 1, 120),
     orderTtlSec: num(env, 'STRATEGY_ORDER_TTL_SEC', 60, 10, 900),
+    exitPolicy: oneOf(env, 'EXIT_POLICY', 'fair_value', ['fair_value', 'confluence_ratchet'] as const),
+    huntTargetMargin: num(env, 'HUNT_TARGET_MARGIN', 0.02, 0, 0.5),
+    huntMinConfluence: num(env, 'HUNT_MIN_CONFLUENCE', 2, 1, 7),
+    ratchetMinFillRatio: num(env, 'RATCHET_MIN_FILL_RATIO', 1, 0.1, 20),
+    ratchetMinWallAgeSec: num(env, 'RATCHET_MIN_WALL_AGE_SEC', 3, 0, 120),
+    ratchetSlippageTicks: num(env, 'RATCHET_SLIPPAGE_TICKS', 1, 0, 10),
   };
 
   const dataDir = path.resolve(env.DATA_DIR ?? './data');

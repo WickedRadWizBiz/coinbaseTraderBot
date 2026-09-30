@@ -7,6 +7,11 @@
 //   hybrid            liquidity_ratchet, but a triggered stop only exits if
 //                     the model agrees the position is worth less than the
 //                     stop (otherwise hold); fair_value exits stay active.
+//   confluence_ratchet fair_value normally; switches to "hunt" mode — the
+//                     liquidity ratchet manages the exit and nothing else may
+//                     reduce the position — only while the contract has
+//                     outperformed its entry fair value AND confluence agrees
+//                     with the position (ConfluenceRatchetExit below).
 //
 // Liquidity ratchet
 //   - Exit-side book levels (YES bids for a long YES; NO bids = 1 - YES asks
@@ -28,8 +33,8 @@ import type { BookSide } from '../kalshi/types';
 import { orderFee, type FeeSchedule } from '../fees';
 import { round } from '../util/num';
 
-export type ExitPolicyName = 'hold' | 'fair_value' | 'liquidity_ratchet' | 'hybrid';
-export const EXIT_POLICIES: ExitPolicyName[] = ['hold', 'fair_value', 'liquidity_ratchet', 'hybrid'];
+export type ExitPolicyName = 'hold' | 'fair_value' | 'liquidity_ratchet' | 'hybrid' | 'confluence_ratchet';
+export const EXIT_POLICIES: ExitPolicyName[] = ['hold', 'fair_value', 'liquidity_ratchet', 'hybrid', 'confluence_ratchet'];
 
 export interface RatchetParams {
   /** A level is a wall if its size >= minFillRatio x position size. */
@@ -141,5 +146,97 @@ export class LiquidityRatchet {
       this.stop = candidate;
     }
     return { event, stop: this.stop };
+  }
+}
+
+// ---- Confluence-gated ratchet ("let the winner run") ----------------------
+
+export interface HuntParams {
+  /** Hunt only once the exit price exceeds entry fair value by this much (side terms). */
+  targetMargin: number;
+  /** Minimum confluence score oriented to the position (conf_count x side sign). */
+  minConfluence: number;
+}
+
+export const DEFAULT_HUNT: HuntParams = { targetMargin: 0.02, minConfluence: 2 };
+
+export type HuntEvent = 'activated' | 'deactivated_confluence' | 'deactivated_giveback' | RatchetEvent;
+
+export interface HuntInput {
+  position: number;
+  /** Model probability that OUR side wins, now. */
+  qSide: number;
+  /** Best price we could sell our side at now (side terms). */
+  sideBid: number | undefined;
+  /** conf_count feature (NaN when unavailable). */
+  confluence: number;
+  book: OrderBook;
+  now: number;
+  tick: number;
+  fees: FeeSchedule;
+}
+
+export interface HuntDecision {
+  mode: 'fair_value' | 'hunt';
+  plan?: ExitOrderPlan;
+  event?: HuntEvent;
+  target?: number;
+  stop?: number;
+}
+
+/**
+ * Normal behaviour is the fair-value exit. Hunt mode (ratchet-managed exit,
+ * no other reductions) switches on only when BOTH:
+ *   - the exit price has beaten the entry fair value + targetMargin, and
+ *   - confluence oriented to the position >= minConfluence.
+ * It switches off (back to fair_value) if confluence flips against the
+ * position (<= -minConfluence) or, before any stop has formed, the price
+ * gives back the outperformance (exit price < entry fair value).
+ */
+export class ConfluenceRatchetExit {
+  private readonly ratchet: LiquidityRatchet;
+  private sign = 0;
+  entryQ: number | undefined;
+  active = false;
+
+  constructor(private readonly h: HuntParams = DEFAULT_HUNT, ratchet: RatchetParams = DEFAULT_RATCHET) {
+    this.ratchet = new LiquidityRatchet(ratchet);
+  }
+
+  reset(): void {
+    this.sign = 0;
+    this.entryQ = undefined;
+    this.active = false;
+    this.ratchet.reset();
+  }
+
+  update(i: HuntInput): HuntDecision {
+    if (Math.abs(i.position) < 1e-9) { this.reset(); return { mode: 'fair_value' }; }
+    const sign = Math.sign(i.position);
+    if (sign !== this.sign) { this.reset(); this.sign = sign; this.entryQ = i.qSide; }
+    const target = this.entryQ! + this.h.targetMargin;
+    const oriented = Number.isFinite(i.confluence) ? sign * i.confluence : NaN;
+    let event: HuntEvent;
+
+    if (!this.active) {
+      if (i.sideBid !== undefined && i.sideBid >= target - 1e-9 && oriented >= this.h.minConfluence) {
+        this.active = true;
+        this.ratchet.reset();
+        event = 'activated';
+      } else {
+        return { mode: 'fair_value', target };
+      }
+    } else if (oriented <= -this.h.minConfluence) {
+      this.active = false;
+      this.ratchet.reset();
+      return { mode: 'fair_value', event: 'deactivated_confluence', target };
+    } else if (this.ratchet.stop === undefined && i.sideBid !== undefined && i.sideBid < this.entryQ! - 1e-9) {
+      this.active = false;
+      this.ratchet.reset();
+      return { mode: 'fair_value', event: 'deactivated_giveback', target };
+    }
+
+    const r = this.ratchet.evaluate({ position: i.position, book: i.book, now: i.now, tick: i.tick, fees: i.fees });
+    return { mode: 'hunt', plan: r.plan, event: event ?? r.event, target, stop: r.stop };
   }
 }

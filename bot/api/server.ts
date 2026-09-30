@@ -131,6 +131,7 @@ export function createApi(d: ApiDeps): express.Express {
       dailyPnl: d.engine.dailyPnl(),
       dailyLossLimit: bankroll !== undefined ? Math.min(bankroll * d.cfg.risk.dailyLossLimitFrac, d.cfg.risk.dailyLossLimitUsd) : d.cfg.risk.dailyLossLimitUsd,
       indexSource: d.md.indexSource,
+      exitPolicy: d.cfg.strategy.exitPolicy,
       dominance: dominanceStatus(d.md),
       wsConnected: d.md.wsConnected,
       consecutiveOrderErrors: d.oms.consecutiveErrors,

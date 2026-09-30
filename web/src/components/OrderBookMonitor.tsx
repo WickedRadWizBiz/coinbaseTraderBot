@@ -13,6 +13,9 @@ interface MarketRow {
   bestAsk?: number;
   strike?: number;
   spot?: number;
+  exitMode?: 'fair_value' | 'hunt';
+  huntTarget?: number;
+  huntStop?: number;
 }
 
 interface Level { price: number; size: number }
@@ -164,6 +167,12 @@ export function OrderBookMonitor({ markets }: { markets: MarketRow[] }) {
                   <span className="px-2 py-0.5 crt-border bg-[#f59e0b15] text-[#f59e0b] font-mono text-[11px]">
                     {spot?.product || `${tab.asset}-USD`} {fmtSpot(spotMid)} · INDEX {fmtSpot(spot?.index ?? tab.spot)} · STRIKE {fmtSpot(spot?.strike ?? tab.strike)}
                   </span>
+                  {tab.exitMode === 'hunt' && (
+                    <span className="px-2 py-0.5 crt-border bg-crypto-success/20 text-crypto-success font-bold flex items-center gap-1.5 text-[11px]">
+                      <span className="w-1.5 h-1.5 rounded-full bg-crypto-success animate-pulse" />
+                      HUNTING · TARGET {px(tab.huntTarget)} · STOP {tab.huntStop !== undefined ? px(tab.huntStop) : 'FORMING'}
+                    </span>
+                  )}
                   {book && !book.usable && (
                     <span className="px-2 py-0.5 crt-border bg-crypto-danger/20 text-crypto-danger font-bold text-[11px]">BOOK STALE</span>
                   )}

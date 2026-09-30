@@ -15,9 +15,9 @@ import { RiskGateway } from '../bot/risk/riskGateway';
 import { Reconciler } from '../bot/recon/reconciler';
 import { tmpAudit, tmpDir } from './helpers';
 
-async function setup(opts: { dailyLossUsd?: string } = {}) {
+async function setup(opts: { dailyLossUsd?: string; exitPolicy?: string } = {}) {
   const dir = tmpDir();
-  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false' });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy });
   const now = Date.now();
   const market: MarketInfo = { ticker: 'KXBTC15M-TEST', seriesTicker: 'KXBTC15M', status: 'open', openTime: now - 300_000, closeTime: now + 600_000, floorStrike: 60000, tickSize: 0.01 };
   const rest = {
@@ -90,4 +90,14 @@ test('daily loss limit trips the persistent kill switch and cancels everything',
   assert.equal(kill.engaged, true);
   assert.equal((await paper.getOpenOrders()).length, 0);
   assert.ok(engine.status.get(market.ticker));
+});
+
+test('opt-in confluence ratchet runs in the engine and starts in fair-value mode', async () => {
+  const { engine, recon, market, cfg } = await setup({ exitPolicy: 'confluence_ratchet' });
+  assert.equal(cfg.strategy.exitPolicy, 'confluence_ratchet');
+  const r = await recon.run('startup');
+  engine.balance = r!.balance;
+  await engine.tick();
+  // No position and no confluence data: normal fair-value behaviour, quotes still placed.
+  assert.equal(engine.status.get(market.ticker)!.exitMode, 'fair_value');
 });

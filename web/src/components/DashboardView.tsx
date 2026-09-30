@@ -106,6 +106,8 @@ export function DashboardView() {
               <Row label="BTC.D" value={s.dominance?.btcd != null ? `${s.dominance.btcd.toFixed(2)}%` : 'NO DATA'}
                 sub={s.dominance?.btcdChange5mPct != null ? `5m ${s.dominance.btcdChange5mPct >= 0 ? '+' : ''}${s.dominance.btcdChange5mPct.toFixed(3)}%` : undefined}
                 tone={s.dominance?.btcd == null ? 'warn' : undefined} />
+              <Row label="Exit policy" value={s.exitPolicy === 'confluence_ratchet' ? 'CONFLUENCE RATCHET' : 'FAIR VALUE'}
+                sub={s.exitPolicy === 'confluence_ratchet' ? 'hunts winners only on outperformance + confluence' : 'exit when bid > fair value + fee'} />
               <Row label="Kalshi WebSocket" value={s.wsConnected ? 'CONNECTED' : 'OFFLINE'} tone={s.wsConnected ? 'ok' : 'warn'} />
               <Row label="Active markets" value={String((markets ?? []).length)} />
               <Row label="Uptime" value={`${Math.floor(s.uptimeSec / 3600)}h ${Math.floor((s.uptimeSec % 3600) / 60)}m`} />

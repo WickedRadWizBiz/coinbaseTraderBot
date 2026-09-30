@@ -110,16 +110,75 @@ test('backtester compares all exit policies on identical data', async () => {
   writeSyntheticRecordings(dir, { windows: 8, seed: 9, marketNoise: 0.05 });
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both' });
   const out: Record<string, Awaited<ReturnType<typeof runBacktest>>> = {};
-  for (const exitPolicy of ['hold', 'fair_value', 'liquidity_ratchet', 'hybrid'] as const) {
+  for (const exitPolicy of ['hold', 'fair_value', 'liquidity_ratchet', 'hybrid', 'confluence_ratchet'] as const) {
     out[exitPolicy] = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy });
   }
   assert.equal(out.hold.exits.orders, 0, 'hold never exits early');
   assert.equal(out.hold.exits.ratchetTriggers, 0);
   assert.ok(out.liquidity_ratchet.exits.ratchetTriggers > 0, 'ratchet fires on synthetic data');
   assert.ok(out.liquidity_ratchet.exits.orders > 0);
+  // Identity model + no dominance data: confluence rarely reaches the threshold, so the
+  // confluence ratchet mostly behaves like fair_value, and never hunts without activation.
+  if (out.confluence_ratchet.exits.huntActivations === 0) assert.equal(out.confluence_ratchet.exits.ratchetTriggers, 0);
   for (const r of Object.values(out)) {
     assert.ok(Number.isFinite(r.pnl) && Number.isFinite(r.exits.regret));
     // Exited contracts are accounted for: regret is settlement value minus proceeds.
     if (r.exits.fills === 0) assert.equal(r.exits.regret, 0);
   }
+});
+
+import { ConfluenceRatchetExit } from '../bot/strategy/exitPolicies';
+
+const H = { targetMargin: 0.02, minConfluence: 2 };
+const hunt = (h: ConfluenceRatchetExit, o: { position?: number; qSide?: number; sideBid?: number; confluence?: number; b: OrderBook; now: number }) =>
+  h.update({ position: o.position ?? 5, qSide: o.qSide ?? 0.55, sideBid: o.sideBid, confluence: o.confluence ?? 0, book: o.b, now: o.now, tick: 0.01, fees: DEFAULT_FEES });
+
+test('confluence ratchet stays in fair-value mode until outperformance AND confluence', () => {
+  const h = new ConfluenceRatchetExit(H, P);
+  const b = book([[0.6, 8], [0.57, 30]], [[0.63, 10]]);
+  assert.equal(hunt(h, { qSide: 0.55, sideBid: 0.5, confluence: 4, b, now: 0 }).mode, 'fair_value'); // entry fv 0.55 recorded
+  assert.equal(hunt(h, { sideBid: 0.6, confluence: 1, b, now: 1000 }).mode, 'fair_value', 'outperformed but weak confluence');
+  assert.equal(hunt(h, { sideBid: 0.56, confluence: 5, b, now: 2000 }).mode, 'fair_value', 'confluence but not past target 0.57');
+  const d = hunt(h, { sideBid: 0.6, confluence: 3, b, now: 3000 });
+  assert.equal(d.mode, 'hunt');
+  assert.equal(d.event, 'activated');
+  assert.ok(Math.abs(d.target! - 0.57) < 1e-12);
+});
+
+test('in hunt mode the liquidity ratchet manages the exit', () => {
+  const h = new ConfluenceRatchetExit(H, P);
+  let b = book([[0.62, 6], [0.59, 30]], [[0.65, 10]]);
+  hunt(h, { qSide: 0.55, sideBid: 0.5, b, now: 0 });
+  hunt(h, { sideBid: 0.62, confluence: 3, b, now: 1000 });         // activate; wall at 0.59 starts aging
+  const armed = hunt(h, { sideBid: 0.62, confluence: 3, b, now: 4500 });
+  assert.equal(armed.stop, 0.59);
+  b = book([[0.59, 30]], [[0.63, 10]]);                               // price comes back to the wall
+  const out = hunt(h, { sideBid: 0.59, confluence: 3, b, now: 5500 });
+  assert.equal(out.mode, 'hunt');
+  assert.equal(out.plan?.side, 'ask');
+  assert.equal(out.plan?.price, 0.58);
+});
+
+test('hunt mode turns off when confluence flips or the move is given back before a stop forms', () => {
+  const b = book([[0.6, 8]], [[0.63, 10]]); // no wall below the bid: no stop can form
+  const h = new ConfluenceRatchetExit(H, P);
+  hunt(h, { qSide: 0.55, sideBid: 0.5, b, now: 0 });
+  assert.equal(hunt(h, { sideBid: 0.6, confluence: 3, b, now: 1000 }).mode, 'hunt');
+  const flip = hunt(h, { sideBid: 0.6, confluence: -2, b, now: 2000 });
+  assert.equal(flip.mode, 'fair_value');
+  assert.equal(flip.event, 'deactivated_confluence');
+
+  const g = new ConfluenceRatchetExit(H, P);
+  hunt(g, { qSide: 0.55, sideBid: 0.5, b, now: 0 });
+  hunt(g, { sideBid: 0.6, confluence: 3, b, now: 1000 });
+  const back = hunt(g, { sideBid: 0.54, confluence: 3, b, now: 2000 });
+  assert.equal(back.event, 'deactivated_giveback');
+});
+
+test('confluence is oriented to the position: long NO hunts on bearish confluence', () => {
+  const h = new ConfluenceRatchetExit(H, P);
+  const b = book([[0.35, 10]], [[0.38, 8], [0.41, 30]]);
+  hunt(h, { position: -5, qSide: 0.55, sideBid: 0.5, b, now: 0 });
+  assert.equal(hunt(h, { position: -5, sideBid: 0.62, confluence: 3, b, now: 1000 }).mode, 'fair_value', 'bullish confluence does not help a NO');
+  assert.equal(hunt(h, { position: -5, sideBid: 0.62, confluence: -3, b, now: 2000 }).mode, 'hunt');
 });
