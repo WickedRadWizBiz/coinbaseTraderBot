@@ -18,6 +18,8 @@ import crypto from 'crypto';
 import fs from 'fs';
 import { FEATURES, vectorFor } from './featureEngine';
 import { FEATURE_NAMES } from './features';
+import { applyBeta, type BetaCal } from './calibration';
+import { gbdtLogit, validateGbdt, type GbdtModel } from './trees';
 import { clamp, logit, sigmoid } from '../util/num';
 
 export type Activation = 'tanh' | 'relu' | 'linear';
@@ -36,6 +38,17 @@ export interface ValidationReport {
   brierMarket: number;
   brierFairValue?: number;
   maxCalibrationErrorPp: number;
+  /** Holdout log loss of the model and of the beta-calibrated market mid (primary benchmark). */
+  logLossModel?: number;
+  logLossMarketCal?: number;
+  /** Diebold-Mariano one-sided p-value, per-window log loss, model vs calibrated market. */
+  dmPValue?: number;
+  /** Largest calibration error beyond sampling noise across price and time-to-close slices (pp). */
+  maxExcessCalibrationPp?: number;
+  /** Deflated Sharpe probability (PSR against the expected max Sharpe of all variants tried). */
+  dsrProbability?: number;
+  /** Probability of backtest overfitting across the variants compared. */
+  pbo?: number;
   /** Fee-inclusive net edge per contract, 95% CI lower bound (backtest). */
   netEdgeCiLow?: number;
   deflatedSharpe?: number;
@@ -44,9 +57,26 @@ export interface ValidationReport {
   notes?: string;
 }
 
+/** One additional ensemble member (same kind and features as the primary). */
+export interface EnsembleMember {
+  normalization?: { mean: number[]; std: number[] };
+  layers?: DenseLayer[];
+  gbdt?: GbdtModel;
+}
+
 export interface MetaModelParams {
   version: string;
-  kind: 'identity' | 'mlp';
+  kind: 'identity' | 'mlp' | 'gbdt';
+  /** Gradient-boosted trees (kind 'gbdt'); logit = baseScore + sum(trees) + residual. */
+  gbdt?: GbdtModel;
+  /** Extra members (seeds/bootstraps). Prediction averages member logits; their spread is the uncertainty. */
+  ensemble?: EnsembleMember[];
+  /** Beta calibration of the output probability (applied instead of Platt when present). */
+  betaCalibration?: BetaCal;
+  /** Beta calibration of the market mid: p_mkt_cal, the market corrected for its own favourite-longshot bias. */
+  marketCalibration?: BetaCal;
+  /** Student-t degrees of freedom for the pricer's tails (fitted offline); omitted = Gaussian. */
+  tNu?: number;
   features: string[];
   normalization?: { mean: number[]; std: number[] };
   layers?: DenseLayer[];
@@ -65,6 +95,12 @@ export interface MetaModelParams {
 export const GO_LIVE_GATES = {
   minWindows: 1000,
   maxCalibrationErrorPp: 3,
+  /** Relaxed spec: calibration error < 1.5c in every price and time-to-close bucket (beyond sampling noise). */
+  maxExcessCalibrationPp: 1.5,
+  /** Log loss must beat the calibrated market with Diebold-Mariano p below this. */
+  maxDmPValue: 0.05,
+  minDsrProbability: 0.95,
+  maxPbo: 0.2,
 };
 
 export class MetaModel {
@@ -106,22 +142,56 @@ export class MetaModel {
     else if (!(v.netEdgeCiLow > 0)) out.push(`net edge CI lower bound ${v.netEdgeCiLow} <= 0`);
     if (v.deflatedSharpe === undefined) out.push('no deflated Sharpe result');
     else if (!(v.deflatedSharpe > 0)) out.push(`deflated Sharpe ${v.deflatedSharpe} <= 0`);
+    if (v.logLossModel === undefined || v.logLossMarketCal === undefined) out.push('no log-loss comparison against the calibrated market');
+    else if (!(v.logLossModel < v.logLossMarketCal)) out.push(`log loss ${v.logLossModel} does not beat calibrated market ${v.logLossMarketCal}`);
+    if (v.dmPValue === undefined) out.push('no Diebold-Mariano test vs the calibrated market');
+    else if (!(v.dmPValue < GO_LIVE_GATES.maxDmPValue)) out.push(`Diebold-Mariano p ${v.dmPValue} >= ${GO_LIVE_GATES.maxDmPValue}`);
+    if (v.maxExcessCalibrationPp !== undefined && v.maxExcessCalibrationPp > GO_LIVE_GATES.maxExcessCalibrationPp) out.push(`calibration slice error ${v.maxExcessCalibrationPp}pp beyond noise > ${GO_LIVE_GATES.maxExcessCalibrationPp}pp`);
+    if (v.dsrProbability === undefined) out.push('no deflated Sharpe probability (run research:backtest --annotate)');
+    else if (!(v.dsrProbability > GO_LIVE_GATES.minDsrProbability)) out.push(`deflated Sharpe probability ${v.dsrProbability} <= ${GO_LIVE_GATES.minDsrProbability}`);
+    if (v.pbo !== undefined && !(v.pbo < GO_LIVE_GATES.maxPbo)) out.push(`PBO ${v.pbo} >= ${GO_LIVE_GATES.maxPbo}`);
     return out;
+  }
+
+  /** p_mkt_cal: the market mid corrected by the fitted market calibration (identity if none). */
+  marketProbability(mid: number): number {
+    const c = this.params.marketCalibration;
+    return clamp(c ? applyBeta(mid, c) : mid, 1e-4, 1 - 1e-4);
   }
 
   /** Probability that YES settles, given the named feature map. Missing
    * features (NaN) are imputed as the training mean (normalized 0). */
   predict(featureMap: Record<string, number>, fairValue: number): number {
-    const p = this.params;
-    if (p.kind === 'identity') return fairValue;
-    const features = vectorFor(p.features, featureMap);
-    let x = features.map((v, i) => (Number.isFinite(v) ? (v - p.normalization!.mean[i]) / p.normalization!.std[i] : 0));
-    for (const layer of p.layers!) x = forward(layer, x);
-    const resid = p.residualFeature !== undefined ? features[p.residualFeature] : 0;
-    const z = x[0] + (Number.isFinite(resid) ? resid : 0);
-    const cal = p.calibration ?? { a: 1, b: 0 };
-    return clamp(sigmoid(cal.a * z + cal.b), 1e-4, 1 - 1e-4);
+    return this.predictDetailed(featureMap, fairValue).p;
   }
+
+  /** Probability plus ensemble uncertainty (std of member probabilities) when the model has members. */
+  predictDetailed(featureMap: Record<string, number>, fairValue: number): { p: number; std?: number } {
+    const p = this.params;
+    if (p.kind === 'identity') return { p: fairValue };
+    const features = vectorFor(p.features, featureMap);
+    const resid = p.residualFeature !== undefined && Number.isFinite(features[p.residualFeature]) ? features[p.residualFeature] : 0;
+    const members: EnsembleMember[] = [{ normalization: p.normalization, layers: p.layers, gbdt: p.gbdt }, ...(p.ensemble ?? [])];
+    const logits = members.map((m) => memberLogit(p.kind, m, features) + resid);
+    const z = logits.reduce((a, b) => a + b, 0) / logits.length;
+    const out = (zz: number) => {
+      if (p.betaCalibration) return clamp(applyBeta(sigmoid(zz), p.betaCalibration), 1e-4, 1 - 1e-4);
+      const cal = p.calibration ?? { a: 1, b: 0 };
+      return clamp(sigmoid(cal.a * zz + cal.b), 1e-4, 1 - 1e-4);
+    };
+    if (logits.length < 2) return { p: out(z) };
+    const ps = logits.map(out);
+    const mp = ps.reduce((a, b) => a + b, 0) / ps.length;
+    const std = Math.sqrt(ps.reduce((a, b) => a + (b - mp) ** 2, 0) / (ps.length - 1));
+    return { p: out(z), std };
+  }
+}
+
+function memberLogit(kind: MetaModelParams['kind'], m: EnsembleMember, features: number[]): number {
+  if (kind === 'gbdt') return gbdtLogit(m.gbdt!, features);
+  let x = features.map((v, i) => (Number.isFinite(v) ? (v - m.normalization!.mean[i]) / m.normalization!.std[i] : 0));
+  for (const layer of m.layers!) x = forward(layer, x);
+  return x[0];
 }
 
 export interface Driver {
@@ -168,26 +238,36 @@ export function forward(layer: DenseLayer, x: number[]): number[] {
 function validateParams(p: MetaModelParams): void {
   if (!p || typeof p.version !== 'string') throw new Error('model params missing version');
   if (!(p.referenceSigma > 0)) throw new Error('model params missing referenceSigma');
+  if (p.tNu !== undefined && !(p.tNu > 2)) throw new Error('tNu must be > 2');
+  for (const c of [p.marketCalibration, p.betaCalibration]) if (c && ![c.a, c.b, c.c].every(Number.isFinite)) throw new Error('bad beta calibration');
   if (p.kind === 'identity') return;
-  if (p.kind !== 'mlp') throw new Error(`unknown model kind ${p.kind}`);
+  if (p.kind !== 'mlp' && p.kind !== 'gbdt') throw new Error(`unknown model kind ${p.kind}`);
   if (!Array.isArray(p.features) || !p.features.length) throw new Error('model features missing');
   const unknown = p.features.filter((f) => !(f in FEATURES));
   if (unknown.length) throw new Error(`model features not in registry: ${unknown.join(', ')}`);
   if (new Set(p.features).size !== p.features.length) throw new Error('duplicate model features');
   const n = p.features.length;
-  if (!p.normalization || p.normalization.mean.length !== n || p.normalization.std.length !== n) throw new Error('bad normalization');
-  if (p.normalization.std.some((s) => !(s > 0))) throw new Error('normalization std must be > 0');
-  if (!p.layers?.length) throw new Error('mlp has no layers');
-  let width = n;
-  for (const [i, l] of p.layers.entries()) {
-    if (l.weights.length !== l.bias.length) throw new Error(`layer ${i}: weights/bias mismatch`);
-    for (const row of l.weights) {
-      if (row.length !== width) throw new Error(`layer ${i}: expected input width ${width}`);
-      if (row.some((w) => !Number.isFinite(w))) throw new Error(`layer ${i}: non-finite weight`);
+  const members: EnsembleMember[] = [{ normalization: p.normalization, layers: p.layers, gbdt: p.gbdt }, ...(p.ensemble ?? [])];
+  for (const [mi, m] of members.entries()) {
+    if (p.kind === 'gbdt') {
+      if (!m.gbdt) throw new Error(`member ${mi}: gbdt missing`);
+      validateGbdt(m.gbdt, n);
+      continue;
     }
-    width = l.bias.length;
+    if (!m.normalization || m.normalization.mean.length !== n || m.normalization.std.length !== n) throw new Error('bad normalization');
+    if (m.normalization.std.some((s) => !(s > 0))) throw new Error('normalization std must be > 0');
+    if (!m.layers?.length) throw new Error('mlp has no layers');
+    let width = n;
+    for (const [i, l] of m.layers.entries()) {
+      if (l.weights.length !== l.bias.length) throw new Error(`layer ${i}: weights/bias mismatch`);
+      for (const row of l.weights) {
+        if (row.length !== width) throw new Error(`layer ${i}: expected input width ${width}`);
+        if (row.some((w) => !Number.isFinite(w))) throw new Error(`layer ${i}: non-finite weight`);
+      }
+      width = l.bias.length;
+    }
+    if (width !== 1) throw new Error('mlp must output a single logit');
   }
-  if (width !== 1) throw new Error('mlp must output a single logit');
   if (p.residualFeature !== undefined && !(Number.isInteger(p.residualFeature) && p.residualFeature >= 0 && p.residualFeature < n)) {
     throw new Error('residualFeature out of range');
   }

@@ -95,3 +95,56 @@ export function stdev(xs: number[]): number {
   const m = mean(xs);
   return Math.sqrt(xs.reduce((a, b) => a + (b - m) ** 2, 0) / (xs.length - 1));
 }
+
+/** Standard normal density. */
+export function normPdf(x: number): number {
+  return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+}
+
+/** log Gamma (Lanczos, g = 7), accurate to ~1e-13 for x > 0. */
+export function lgamma(x: number): number {
+  const c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313, -176.61502916214059, 12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
+  if (x < 0.5) return Math.log(Math.PI / Math.abs(Math.sin(Math.PI * x))) - lgamma(1 - x);
+  x -= 1;
+  let a = c[0];
+  const t = x + 7.5;
+  for (let i = 1; i < 9; i++) a += c[i] / (x + i);
+  return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(t) - t + Math.log(a);
+}
+
+/** Regularized incomplete beta I_x(a, b) (continued fraction, Numerical Recipes 6.4). */
+export function incBeta(x: number, a: number, b: number): number {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  const front = Math.exp(lgamma(a + b) - lgamma(a) - lgamma(b) + a * Math.log(x) + b * Math.log(1 - x));
+  const cf = (xx: number, aa: number, bb: number) => {
+    const tiny = 1e-300;
+    let c = 1, d = 1 - ((aa + bb) * xx) / (aa + 1);
+    if (Math.abs(d) < tiny) d = tiny;
+    d = 1 / d;
+    let h = d;
+    for (let m = 1; m <= 300; m++) {
+      const m2 = 2 * m;
+      let num = (m * (bb - m) * xx) / ((aa + m2 - 1) * (aa + m2));
+      d = 1 + num * d; if (Math.abs(d) < tiny) d = tiny;
+      c = 1 + num / c; if (Math.abs(c) < tiny) c = tiny;
+      d = 1 / d; h *= d * c;
+      num = (-(aa + m) * (aa + bb + m) * xx) / ((aa + m2) * (aa + m2 + 1));
+      d = 1 + num * d; if (Math.abs(d) < tiny) d = tiny;
+      c = 1 + num / c; if (Math.abs(c) < tiny) c = tiny;
+      d = 1 / d;
+      const del = d * c;
+      h *= del;
+      if (Math.abs(del - 1) < 1e-14) break;
+    }
+    return h;
+  };
+  return x < (a + 1) / (a + b + 2) ? (front * cf(x, a, b)) / a : 1 - (front * cf(1 - x, b, a)) / b;
+}
+
+/** Student-t CDF with nu degrees of freedom. */
+export function studentTCdf(t: number, nu: number): number {
+  if (!Number.isFinite(t)) return t > 0 ? 1 : 0;
+  const tail = 0.5 * incBeta(nu / (nu + t * t), nu / 2, 0.5);
+  return t >= 0 ? 1 - tail : tail;
+}

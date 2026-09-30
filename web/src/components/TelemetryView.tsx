@@ -10,11 +10,28 @@ export function TelemetryView() {
   const [kind, setKind] = useState('');
   const { data: audit } = usePoll<any[]>(`/audit?limit=150${kind ? `&kind=${kind}` : ''}`, 2500);
   const { data: tca } = usePoll<any>('/tca', 5000);
+  const { data: status } = usePoll<any>('/status', 5000);
+  const g = status?.guards;
+  const pct = (x: number | null | undefined) => (x === null || x === undefined ? '—' : `${(x * 100).toFixed(1)}%`);
 
   const tone = (k: string) => (/break|reject|error|kill/.test(k) ? 'text-crypto-danger' : /fill|settlement|recon_ok/.test(k) ? 'text-crypto-success' : 'text-crypto-primary');
 
   return (
     <div className="flex flex-col gap-6 w-full max-w-7xl mx-auto pb-24 md:pb-6 relative z-10 text-crypto-primary font-mono text-sm tracking-wider">
+      {g && (
+        <Panel title="Cadence, Sizing & Risk Guards">
+          <div className="overflow-x-auto">
+            <table className="crt-table">
+              <tbody>
+                <tr><td className="uppercase font-bold">Cadence</td><td>{g.cadence}</td><td className="uppercase font-bold">Sizing</td><td>{g.sizing} · κ {g.kappa} · target ${g.targetEvUsd} · min ${g.minTradeEvUsd}</td></tr>
+                <tr><td className="uppercase font-bold">Exit mode</td><td>{g.exitPolicy}</td><td className="uppercase font-bold">Entry windows</td><td>15m {g.entryWindowUpdown?.[0] / 60}–{g.entryWindowUpdown?.[1] / 60} min · hourly {g.entryWindowHourly?.[0] / 60}–{g.entryWindowHourly?.[1] / 60} min</td></tr>
+                <tr><td className="uppercase font-bold">Maker buffer</td><td>{cents(g.makerBuffer)}{g.makerMarkout60?.n ? ` (${g.makerMarkout60.n} fills)` : ' (default)'}</td><td className="uppercase font-bold">Drawdown</td><td className={g.equityGuard?.kellyScale !== null && g.equityGuard?.kellyScale < 1 ? 'text-crypto-danger' : ''}>{pct(g.equityGuard?.drawdown)} · Kelly ×{g.equityGuard?.kellyScale?.toFixed(2) ?? '—'}</td></tr>
+                <tr><td className="uppercase font-bold">Model vs market</td><td className={g.modelHealth?.halt ? 'text-crypto-danger' : ''}>{g.modelHealth?.advantage === null || g.modelHealth?.advantage === undefined ? `${g.modelHealth?.windows ?? 0} windows` : `${g.modelHealth.advantage >= 0 ? '+' : ''}${g.modelHealth.advantage.toFixed(4)} nats · ${g.modelHealth.windows} windows`}</td><td className="uppercase font-bold">Entry guards</td><td className={g.entryGuards?.length ? 'text-crypto-danger' : 'text-crypto-success'}>{g.entryGuards?.length ? g.entryGuards.join(' · ') : 'clear'}</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      )}
       {tca && (
         <Panel title="Execution Quality (TCA)">
           <div className="overflow-x-auto">

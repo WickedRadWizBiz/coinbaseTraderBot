@@ -19,6 +19,7 @@ import { PositionBook } from '../oms/positions';
 import type { KillSwitch } from '../risk/killSwitch';
 import type { Reconciler } from '../recon/reconciler';
 import { FEATURES } from '../model/featureEngine';
+import { ladderQuotes, scanLadder } from '../model/ladder';
 import type { MetaModel } from '../model/metaModel';
 import type { Tca } from '../tca/tca';
 import type { MarketData } from '../marketdata/marketData';
@@ -135,6 +136,7 @@ export function createApi(d: ApiDeps): express.Express {
       indexSource: d.md.indexSource,
       exitPolicy: d.cfg.strategy.exitPolicy,
       session: d.engine.sessionStatus(),
+      guards: d.engine.guardStatus(),
       vault: d.vault?.status() ?? null,
       dominance: dominanceStatus(d.md),
       wsConnected: d.md.wsConnected,
@@ -156,7 +158,7 @@ export function createApi(d: ApiDeps): express.Express {
   api.get('/tca', (_req, res) => res.json(d.tca.summary()));
 
   // Candidate feature registry (for the Strategy Brain view).
-  api.get('/features', (_req, res) => res.json(Object.entries(FEATURES).map(([name, f]) => ({ name, group: f.group, description: f.description }))));
+  api.get('/features', (_req, res) => res.json(Object.entries(FEATURES).map(([name, f]) => ({ name, group: f.group, tier: f.tier ?? 'T1', description: f.description }))));
 
   // Depth view: the contract's YES book as the bot sees it.
   api.get('/order-book/:ticker', (req, res) => {
@@ -194,6 +196,17 @@ export function createApi(d: ApiDeps): express.Express {
     } catch (e) {
       res.status(502).json({ error: (e as Error).message, product: `${m.asset}-USD`, index: idx?.value ?? null, strike: m.strike ?? null });
     }
+  });
+
+  // Hourly strike-ladder consistency and arbitrage scan (report only).
+  api.get('/ladder', (_req, res) => {
+    const groups = new Map<string, { asset: string; closeTime: number }>();
+    for (const m of d.md.markets.values()) if (m.kind !== 'updown') groups.set(`${m.asset}:${m.closeTime}`, { asset: m.asset, closeTime: m.closeTime });
+    res.json([...groups.values()].sort((a, b) => a.closeTime - b.closeTime).map((g) => {
+      const quotes = ladderQuotes(d.md.markets.values(), (t) => d.md.books.get(t), g.asset, g.closeTime);
+      const first = quotes[0];
+      return { ...g, ...scanLadder(quotes, first ? d.md.feesFor(first.ticker) : undefined) };
+    }));
   });
 
   api.get('/audit', (req, res) => {

@@ -8,6 +8,7 @@ import readline from 'readline';
 import { IndexTracker } from '../bot/marketdata/indexTracker';
 import { OrderBook } from '../bot/marketdata/orderBook';
 import { FeatureHub } from '../bot/model/featureEngine';
+import { contractKind, type ContractTerms, type MarketKind } from '../bot/model/fairValue';
 
 export interface RecMarket {
   ticker: string;
@@ -16,6 +17,9 @@ export interface RecMarket {
   openTime: number;
   closeTime: number;
   strike?: number;
+  cap?: number;
+  kind: MarketKind;
+  event?: string;
   tickSize: number;
 }
 
@@ -48,7 +52,10 @@ export class ReplayState {
     this.now = e.t;
     switch (e.k) {
       case 'market':
-        this.markets.set(e.ticker, { ticker: e.ticker, series: e.series, asset: e.asset, openTime: e.openTime, closeTime: e.closeTime, strike: e.strike, tickSize: e.tickSize ?? 0.01 });
+        this.markets.set(e.ticker, {
+          ticker: e.ticker, series: e.series, asset: e.asset, openTime: e.openTime, closeTime: e.closeTime, strike: e.strike ?? undefined, cap: e.cap ?? undefined,
+          kind: e.kind ?? contractKind(e.series ?? ''), event: e.event ?? undefined, tickSize: e.tickSize ?? 0.01,
+        });
         break;
       case 'index': {
         let tr = this.index.get(e.asset);
@@ -99,18 +106,29 @@ export class ReplayState {
 
   strike(m: RecMarket): number | undefined {
     if (m.strike) return m.strike;
+    if (m.kind !== 'updown') return undefined;
     const a = this.index.get(m.asset)?.average(m.openTime - 60_000, m.openTime, 3000);
     if (a) m.strike = a.avg;
     return m.strike;
+  }
+
+  /** Pricing terms, mirroring MarketData.termsFor. */
+  terms(m: RecMarket): ContractTerms | undefined {
+    if (m.kind === 'updown') { const k = this.strike(m); return k ? { kind: 'updown', strike: k } : undefined; }
+    if (m.kind === 'less') return m.cap ? { kind: 'less', cap: m.cap } : undefined;
+    if (m.kind === 'between') return m.strike && m.cap ? { kind: 'between', strike: m.strike, cap: m.cap } : undefined;
+    return m.strike ? { kind: 'greater', strike: m.strike } : undefined;
   }
 
   /** Official result if recorded, else computed from the recorded index. */
   outcome(m: RecMarket): { label: 0 | 1; source: 'official' | 'computed' } | undefined {
     const r = this.results.get(m.ticker);
     if (r) return { label: r === 'yes' ? 1 : 0, source: 'official' };
-    const k = this.strike(m);
+    const t = this.terms(m);
     const a = this.index.get(m.asset)?.average(m.closeTime - 60_000, m.closeTime, 3000);
-    if (!k || !a) return undefined;
-    return { label: a.avg >= k ? 1 : 0, source: 'computed' };
+    if (!t || !a) return undefined;
+    const A = a.avg;
+    const yes = t.kind === 'less' ? A < t.cap! : t.kind === 'between' ? A >= t.strike! && A < t.cap! : A >= t.strike!;
+    return { label: yes ? 1 : 0, source: 'computed' };
   }
 }

@@ -11,8 +11,8 @@ import type { AuditLog } from './audit/auditLog';
 import type { Config } from './config';
 import type { ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
-import { computeFeatureMap } from './model/featureEngine';
-import { fairValue, SETTLEMENT_AVG_SEC } from './model/fairValue';
+import { computeFeatureMap, FEATURE_SCHEMA_VERSION } from './model/featureEngine';
+import { priceContract, SETTLEMENT_AVG_SEC } from './model/fairValue';
 import { explain, type Driver, type MetaModel } from './model/metaModel';
 import type { Oms, OrderIntent } from './oms/oms';
 import { isLive } from './oms/orderState';
@@ -21,9 +21,15 @@ import { marketWorstLoss, RestingLike } from './risk/exposure';
 import type { KillSwitch } from './risk/killSwitch';
 import { RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
-import { decide, MarketView, OrderPlan } from './strategy/fairValueStrategy';
+import { decide, decisionProbability, MarketView, OrderPlan } from './strategy/fairValueStrategy';
 import { ConfluenceRatchetExit } from './strategy/exitPolicies';
-import { sessionState, type SessionState } from './model/sessions';
+import { CadenceGate, inEntryWindow, type CadenceReason } from './strategy/cadence';
+import { kalshiMaintenance, sessionState, type SessionState } from './model/sessions';
+import type { EquityGuard } from './risk/equityGuard';
+import type { ModelHealth } from './model/modelHealth';
+import type { Tca } from './tca/tca';
+import type { MacroEvent } from './model/featureEngine';
+import { ladderQuotes } from './model/ladder';
 import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
 import { effectiveSigma, type VolProfile } from './model/volSeasonality';
 import { floorCount } from './util/num';
@@ -38,12 +44,21 @@ export interface MarketStatus {
   ticker: string;
   asset: string;
   closeTs: number;
+  kind?: string;
   strike?: number;
+  cap?: number;
   strikeSource?: string;
   spot?: number;
   sigma?: number;
   fairValue?: number;
   pYes?: number;
+  /** Calibrated market probability (p_mkt_cal), decision probability q, and ensemble std. */
+  pMarket?: number;
+  q?: number;
+  pStd?: number;
+  entryWindow?: boolean;
+  /** Why the last full (entry) evaluation ran under the relaxed cadence. */
+  lastEval?: { reason: CadenceReason; ts: number };
   bestBid?: number;
   bestAsk?: number;
   position: number;
@@ -81,12 +96,22 @@ export interface EngineDeps {
   /** Withdrawal/deposit detector (with its persistence file). */
   balanceMonitor?: BalanceMonitor;
   balanceMonitorPath?: string;
+  /** Maker markouts feed the adverse-selection buffer. */
+  tca?: Tca;
+  /** Drawdown-scaled Kelly and the weekly loss pause. */
+  equityGuard?: EquityGuard;
+  /** Rolling log-loss advantage vs the calibrated market. */
+  modelHealth?: ModelHealth;
+  /** Scheduled macro releases (CPI, FOMC, NFP, PCE) for calendar features. */
+  calendar?: MacroEvent[];
   now?: () => number;
 }
 
 export class Engine {
   private readonly busy = new Set<string>();
   private readonly hunts = new Map<string, ConfluenceRatchetExit>();
+  private readonly cadence: CadenceGate;
+  private readonly lastPosition = new Map<string, number>();
   private timers: NodeJS.Timeout[] = [];
   private lastTickTs = 0;
   private lastDecisionAudit = new Map<string, number>();
@@ -100,6 +125,7 @@ export class Engine {
 
   constructor(private readonly d: EngineDeps) {
     this.now = d.now ?? Date.now;
+    this.cadence = new CadenceGate(d.cfg.strategy);
     // Registered before the startup reconciliation replays fills, so the
     // balance monitor sees every cash movement the bot's trading causes.
     d.oms.on('fill', (f: { side: 'bid' | 'ask'; count: number; price: number }, _rec: unknown, fee: number, positionAfter: number) => {
@@ -128,6 +154,7 @@ export class Engine {
     if (!this.d.vault) throw new Error('vault disabled');
     const split = this.d.vault.onWithdrawal(amount, 'manual', this.now());
     this.d.balanceMonitor?.onCash(-amount);
+    this.d.equityGuard?.onCashFlow(-amount, this.now());
     this.saveMonitor();
     this.d.audit.write('vault', { event: 'withdrawal', source: by, amount, ...split });
     return split;
@@ -144,6 +171,8 @@ export class Engine {
     const quiet = !awaiting && now - this.lastSettleTs > 10 * 60_000;
     const res = mon.check(balance, quiet);
     this.saveMonitor();
+    if (res.withdrawal) this.d.equityGuard?.onCashFlow(-res.withdrawal, now);
+    if (res.deposit) this.d.equityGuard?.onCashFlow(res.deposit, now);
     if (res.withdrawal && vault) {
       const split = vault.onWithdrawal(res.withdrawal, 'detected', now);
       this.d.audit.write('vault', { event: 'withdrawal', amount: res.withdrawal, ...split });
@@ -181,6 +210,7 @@ export class Engine {
     md.on('lifecycle', (e: { ticker: string; event: string; result?: string }) => {
       if ((e.result === 'yes' || e.result === 'no') && /settle|determin/i.test(e.event)) {
         oms.settle(e.ticker, e.result);
+        this.d.modelHealth?.onResult(e.ticker, e.result);
       }
     });
     oms.on('order_error', (n: number, msg: string) => {
@@ -224,7 +254,48 @@ export class Engine {
     if (this.dataHalt) r.push(this.dataHalt);
     if (this.balance === undefined) r.push('balance unknown');
     else if (this.bankroll() === 0) r.push('no tradable cash (vault/pocket reserved)');
+    r.push(...this.entryGuards());
     return r;
+  }
+
+  /** Guards that stop NEW risk (exits stay allowed): weekly loss pause, model health, maintenance. */
+  entryGuards(now = this.now()): string[] {
+    const r: string[] = [];
+    const paused = this.d.equityGuard?.paused(now);
+    if (paused) r.push(paused);
+    const h = this.d.modelHealth?.status();
+    if (this.d.cfg.strategy.modelHealthHalt && h?.halt) r.push(`model log loss significantly worse than the calibrated market over ${h.windows} windows (p=${h.pWorse?.toFixed(3)})`);
+    const mt = kalshiMaintenance(now);
+    if (mt.inside || mt.minutesTo <= 30) r.push(mt.inside ? 'Kalshi maintenance window' : `Kalshi maintenance in ${mt.minutesTo} min`);
+    return r;
+  }
+
+  /** Relaxed-cadence and risk-guard state for the dashboard. */
+  guardStatus(now = this.now()) {
+    const S = this.d.cfg.strategy;
+    const eq = this.equity();
+    return {
+      cadence: S.cadence, sizing: S.sizing, exitPolicy: S.exitPolicy, kappa: S.kappa, targetEvUsd: S.targetEvUsd, minTradeEvUsd: S.minTradeEvUsd,
+      entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
+      makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null,
+      equity: eq ?? null, equityGuard: this.d.equityGuard?.status(eq, now) ?? null,
+      modelHealth: this.d.modelHealth?.status() ?? null,
+      entryGuards: this.entryGuards(now),
+    };
+  }
+
+  /** Cash + committed premium (before vault/pocket reservations): the drawdown reference. */
+  equity(): number | undefined {
+    if (this.balance === undefined) return undefined;
+    return this.balance + this.d.oms.positions.open().reduce((s, m) => s + PositionBook.maxLoss(m), 0);
+  }
+
+  /** Adverse-selection buffer for maker entries: -(average 60 s maker markout), clamped; default until 30 maker fills. */
+  makerBuffer(): number {
+    const S = this.d.cfg.strategy;
+    const m = this.d.tca?.makerMarkout60();
+    if (!m || m.n < 30 || m.avg === null) return S.makerBuffer;
+    return Math.min(S.makerBufferRange[1], Math.max(S.makerBufferRange[0], -m.avg));
   }
 
   /** Bankroll for fractional limits: cash + premium committed to open positions. */
@@ -279,6 +350,8 @@ export class Engine {
   async tick(): Promise<void> {
     this.lastTickTs = this.now();
     this.d.vault?.tick(this.lastTickTs);
+    const eq = this.equity();
+    if (eq !== undefined) this.d.equityGuard?.update(eq, this.lastTickTs);
     if (this.dataHalt === 'engine heartbeat stalled') this.dataHalt = undefined;
     if (this.dataHalt === 'awaiting market data' && this.d.md.activeMarkets().length) this.dataHalt = undefined;
     const { kill, risk } = this.d;
@@ -300,6 +373,9 @@ export class Engine {
       if (st.closeTs < cutoff) {
         this.status.delete(t);
         this.hunts.delete(t);
+        this.cadence.forget(t);
+        this.lastPosition.delete(t);
+        this.d.modelHealth?.forget(t);
         this.lastDecisionAudit.delete(t);
       }
     }
@@ -340,8 +416,9 @@ export class Engine {
     if (!spot) return block('index stale');
     const vol = idx!.vol();
     if (!vol) return block('volatility warming up');
-    const strike = md.strikeFor(m);
-    if (!strike) return block('strike unknown');
+    const terms = md.termsFor(m);
+    if (!terms) return block('strike unknown');
+    const strike = terms.strike ?? terms.cap!;
     const bid = book.bestBid();
     const ask = book.bestAsk();
     if (!bid || !ask) return block('one-sided book');
@@ -351,7 +428,7 @@ export class Engine {
     // Intraday volatility periodicity: scale the backward-looking EWMA sigma to the variance
     // expected over this contract's remaining life (only with a validated profile).
     const sigmaPricing = effectiveSigma(vol.sigmaPerSqrtSec, this.d.volProfile, m.asset, now, m.closeTime);
-    const fv = fairValue({ spot: spot.value, strike, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed });
+    const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, nu: model.params.tNu });
     if (!fv) return block('fair value unavailable');
     const sess = sessionState(now);
     const sessRisk = sessionRiskFor(cfg.strategy.sessionRisk, sess);
@@ -360,14 +437,19 @@ export class Engine {
       now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma,
       inWindow: fv.regime !== 'pre_window', book, micro: md.features.micro.get(m.ticker), index: idx!, spot: md.spot.get(m.asset), asset: m.asset, usdtd: md.usdtd, btcd: md.btcd,
       closeTs: m.closeTime, volProfile: this.d.volProfile, asiaRange: md.features.asiaRange.get(m.asset),
+      kind: m.kind, strike: terms.strike, cap: terms.cap, d2: fv.d2, vEff: fv.vEff, sigmaPricing, tNu: model.params.tNu,
+      bars: md.features.bars.get(m.asset), openTime: m.openTime, calendar: this.d.calendar,
+      ticker: m.ticker, siblings: m.kind === 'updown' ? undefined : ladderQuotes(md.markets.values(), (t) => md.books.get(t), m.asset, m.closeTime),
     });
-    const pYes = model.predict(features, fv.pYes);
+    const pred = model.predictDetailed(features, fv.pYes);
+    const pYes = pred.p;
+    const pMarket = model.marketProbability(mid);
     const why = explain(model, features, fv.pYes);
     st.modelShift = why.shiftFromFairValue;
     st.drivers = why.drivers;
     st.macro = Object.fromEntries(['usdtd_ret_5m_z', 'btcd_rel_5m_z', 'rsi_14_1m', 'conf_riskon_momentum', 'conf_riskon_momentum_rsi', 'conf_count']
       .map((k) => [k, Number.isFinite(features[k]) ? features[k] : null]));
-    Object.assign(st, { strike, strikeSource: m.strikeSource, spot: spot.value, sigma: vol.sigmaPerSqrtSec, sigmaPricing, fairValue: fv.pYes, pYes, bestBid: bid.price, bestAsk: ask.price, blocked: undefined });
+    Object.assign(st, { kind: m.kind, strike: terms.strike, cap: terms.cap, strikeSource: m.strikeSource, spot: spot.value, sigma: vol.sigmaPerSqrtSec, sigmaPricing, fairValue: fv.pYes, pYes, pMarket, pStd: pred.std, bestBid: bid.price, bestAsk: ask.price, blocked: undefined });
 
     const ret = idx!.trailingLogReturn(now, cfg.strategy.fastMoveWindowSec * 1000);
     const fastMove = ret !== undefined && Math.abs(ret) > cfg.strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(cfg.strategy.fastMoveWindowSec);
@@ -381,12 +463,34 @@ export class Engine {
       return q ? { clientOrderId: q.clientOrderId, price: q.price, remaining: Math.max(0, q.count - q.exchangeFillCount) } : undefined;
     };
     const bankroll = this.bankroll() ?? 0;
+    const S = cfg.strategy;
+    // Entry window: contract kind and time to close (relaxed spec), hourly strikes only while the
+    // market is between 10c and 90c, and never during the guards that stop new risk.
+    const guards = this.entryGuards(now);
+    const kindWindow = S.cadence === 'relaxed'
+      ? inEntryWindow(m.kind, tauSec, S.entryWindowUpdown, S.entryWindowHourly) && (m.kind === 'updown' || (mid >= S.hourlyMidBand[0] && mid <= S.hourlyMidBand[1]))
+      : true;
+    const entryWindowOpen = kindWindow && guards.length === 0;
+    const restingBid = quote('bid');
+    const restingAsk = quote('ask');
+    const through = (r: { price: number } | undefined, best: number) => r !== undefined && Math.abs(best - r.price) >= 2 * S.requoteThreshold - 1e-9;
+    const positionChanged = (this.lastPosition.get(m.ticker) ?? 0) !== st.position;
+    this.lastPosition.set(m.ticker, st.position);
+    const reason = this.cadence.check(m.ticker, { now, fairValue: pYes, entryWindowOpen, hasResting: Boolean(restingBid || restingAsk), bookThroughQuote: through(restingBid, bid.price) || through(restingAsk, ask.price), positionChanged });
+    if (reason) st.lastEval = { reason, ts: now };
+    st.entryWindow = entryWindowOpen;
+    if (reason && entryWindowOpen) this.d.modelHealth?.record(m.ticker, pYes, pMarket, m.closeTime);
+    const pos = oms.positions.get(m.ticker);
+    const entrySidePrice = pos && pos.yes > 0 ? -pos.netCash / pos.yes : pos && pos.yes < 0 ? 1 - pos.netCash / -pos.yes : undefined;
+    const kellyScale = this.d.equityGuard?.kellyScale(this.equity() ?? 0) ?? 1;
     const view: MarketView = {
       ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: st.position, bankroll,
       // Session risk profile can only shrink size (sizeMult in [0, 1]).
       maxOrderRiskUsd: R.maxOrderRiskFrac * bankroll * sessRisk.sizeMult, maxContracts: floorCount(R.maxContractsPerOrder * sessRisk.sizeMult), minSidePrice: R.minSidePrice,
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
-      restingBid: quote('bid'), restingAsk: quote('ask'), nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
+      restingBid, restingAsk, nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
+      pMarket, pStd: pred.std, makerBuffer: this.makerBuffer(), entrySidePrice: entrySidePrice !== undefined && entrySidePrice > 0 && entrySidePrice < 1 ? entrySidePrice : undefined,
+      entryWindowOpen, exitWindowOpen: tauSec > S.noExitBeforeCloseSec,
     };
     // Exit policy. confluence_ratchet: fair-value exit normally; "hunt" mode (liquidity ratchet
     // manages the exit, nothing else may reduce the position) only while the contract has beaten
@@ -426,8 +530,12 @@ export class Engine {
       ...cfg.strategy,
       minEdge: cfg.strategy.minEdge + sessRisk.minEdgeAdd,
       inventorySkewPerContract: cfg.strategy.inventorySkewPerContract * sessRisk.skewMult,
+      kellyFraction: cfg.strategy.kellyFraction * kellyScale,
     };
-    const plan = decide(view, strat, { exits: !huntMode, blockReductions: huntMode });
+    st.q = decisionProbability(view, strat);
+    const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode, entries: Boolean(reason) });
+    if (kellyScale < 1) plan.notes.push(`drawdown: Kelly x${kellyScale.toFixed(2)}`);
+    for (const g of guards) plan.notes.push(g);
     if (sessRisk.applied.length) plan.notes.push(`session risk ${sessRisk.applied.join('+')}: size x${sessRisk.sizeMult}, +${sessRisk.minEdgeAdd} edge`);
     if (huntPlan) plan.place.unshift(huntPlan);
     if (huntMode) plan.notes.push(`hunting: stop ${st.huntStop ?? 'forming'}`);
@@ -440,6 +548,7 @@ export class Engine {
       this.d.audit.write('decision', {
         decisionId, ticker: m.ticker, model: model.id, spot: spot.value, strike, strikeSource: m.strikeSource, sigma: vol.sigmaPerSqrtSec, sigmaPricing,
         session: sess.key, sessionRisk: sessRisk,
+        kind: m.kind, cap: terms.cap, cadence: reason ?? null, featureSchema: FEATURE_SCHEMA_VERSION, pMarket, pStd: pred.std, q: st.q,
         tauSec, fv: fv.pYes, regime: fv.regime, pYes, features, modelShift: why.shiftFromFairValue, drivers: why.drivers, bid: bid.price, ask: ask.price, position: st.position, fastMove,
         place: plan.place.map((p) => ({ side: p.side, price: p.price, count: p.count, purpose: p.purpose, edge: p.edge, why: p.why })),
         cancel: plan.cancel,
@@ -447,7 +556,9 @@ export class Engine {
     }
 
     await Promise.all(plan.cancel.map((c) => oms.cancel(c.clientOrderId, c.reason)));
-    for (const p of plan.place) await this.placeChecked(m, p, pYes, decisionId);
+    // Orders carry the decision probability (q_adj under target-EV sizing): the gateway's fee-net
+    // edge collar and TCA's edge-at-decision then judge the same number the strategy traded on.
+    for (const p of plan.place) await this.placeChecked(m, p, st.q ?? pYes, decisionId);
   }
 
   private async placeChecked(m: ActiveMarket, p: OrderPlan, pYes: number, decisionId: string): Promise<void> {

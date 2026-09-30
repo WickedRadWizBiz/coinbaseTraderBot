@@ -15,11 +15,89 @@
 
 import type { OrderBook } from '../marketdata/orderBook';
 import type { IndexTracker } from '../marketdata/indexTracker';
-import { clamp, logit } from '../util/num';
-import { sessionState, zoneTime } from './sessions';
+import { clamp, logit, normInv, normPdf, studentTCdf } from '../util/num';
+import { kalshiMaintenance, sessionState, usMarketClock, zoneTime } from './sessions';
+import { neighborGap, violationAt, type LadderQuote } from './ladder';
 import { EWMA_LOOKBACK_SEC, seasonalVarianceRatio, type VolProfile } from './volSeasonality';
 
-export type FeatureGroup = 'base' | 'micro' | 'momentum' | 'spot' | 'macro' | 'confluence' | 'session' | 'time';
+export type FeatureGroup = 'base' | 'micro' | 'momentum' | 'spot' | 'macro' | 'confluence' | 'session' | 'time'
+  // Relaxed-cadence catalog (minute windows and slower).
+  | 'geometry' | 'vol' | 'kalshi' | 'returns' | 'clock' | 'calendar' | 'interaction' | 'ladder';
+
+/** Build tiers from the relaxed-cadence spec: T1 first, T2 only after ablation proves them, T3 experimental. */
+export type FeatureTier = 'T1' | 'T2' | 'T3';
+
+/** Bump whenever any feature formula changes; older training rows for changed features are retired. */
+export const FEATURE_SCHEMA_VERSION = '3';
+
+/** A scheduled macro release (operator-maintained params/calendar.json). */
+export interface MacroEvent { ts: number; kind: 'CPI' | 'FOMC' | 'NFP' | 'PCE' | 'OTHER' }
+
+// ---- One-minute bars of the settlement index --------------------------------
+
+export interface Bar { ts: number; o: number; h: number; l: number; c: number }
+
+/**
+ * One-minute OHLC bars of the settlement index (24 h kept) plus EWMA
+ * per-minute variances of 1-minute log returns (lambda 0.97 slow, 0.94 fast).
+ * Returns are raw; the seasonal variance ratio is a separate feature.
+ */
+export class BarStore {
+  readonly bars: Bar[] = [];
+  private cur?: Bar;
+  ewmaSlow?: number;
+  ewmaFast?: number;
+  private n = 0;
+
+  onPrice(value: number, ts: number): void {
+    const t = Math.floor(ts / 60_000) * 60_000;
+    if (this.cur && t < this.cur.ts) return;
+    if (!this.cur || t > this.cur.ts) {
+      if (this.cur) this.close(this.cur, t);
+      this.cur = { ts: t, o: value, h: value, l: value, c: value };
+      return;
+    }
+    const b = this.cur;
+    b.h = Math.max(b.h, value); b.l = Math.min(b.l, value); b.c = value;
+  }
+
+  private close(b: Bar, nextTs: number): void {
+    const prev = this.bars[this.bars.length - 1];
+    // A gap (missing minutes) restarts the return chain.
+    if (prev && b.ts - prev.ts === 60_000) {
+      const r = Math.log(b.c / prev.c);
+      this.ewmaSlow = this.ewmaSlow === undefined ? r * r : 0.97 * this.ewmaSlow + 0.03 * r * r;
+      this.ewmaFast = this.ewmaFast === undefined ? r * r : 0.94 * this.ewmaFast + 0.06 * r * r;
+      this.n++;
+    } else if (prev && nextTs - prev.ts > 10 * 60_000) {
+      this.bars.length = 0;
+    }
+    this.bars.push(b);
+    if (this.bars.length > 1500) this.bars.shift();
+  }
+
+  /** Per-minute volatility (slow EWMA) once 30 returns are in. */
+  sigma1m(): number | undefined {
+    return this.ewmaSlow !== undefined && this.n >= 30 ? Math.sqrt(this.ewmaSlow) : undefined;
+  }
+
+  /** The last n completed bars if they are contiguous. */
+  last(n: number): Bar[] | undefined {
+    if (this.bars.length < n) return undefined;
+    const out = this.bars.slice(-n);
+    for (let i = 1; i < out.length; i++) if (out[i].ts - out[i - 1].ts !== 60_000) return undefined;
+    return out;
+  }
+
+  /** 1-minute log returns over the last n minutes (n + 1 contiguous bars). */
+  returns(n: number): number[] | undefined {
+    const b = this.last(n + 1);
+    if (!b) return undefined;
+    const r: number[] = [];
+    for (let i = 1; i < b.length; i++) r.push(Math.log(b[i].c / b[i - 1].c));
+    return r;
+  }
+}
 
 // ---- Per-market microstructure state ----------------------------------------
 
@@ -29,6 +107,7 @@ export class MicroTracker {
   private prev?: { bid: number; bidSz: number; ask: number; askSz: number };
   private readonly ofi: Stamped[] = [];
   private readonly trades: Array<{ ts: number; signed: number; count: number }> = [];
+  private readonly mids: Stamped[] = [];
 
   /** Call after every book update (snapshot or delta). Order-flow imbalance per Cont, Kukanov & Stoikov. */
   onBook(book: OrderBook, ts: number): void {
@@ -36,6 +115,10 @@ export class MicroTracker {
     const a = book.bestAsk();
     if (!b || !a) { this.prev = undefined; return; }
     const cur = { bid: b.price, bidSz: b.size, ask: a.price, askSz: a.size };
+    const mid = (b.price + a.price) / 2;
+    const lastMid = this.mids[this.mids.length - 1];
+    if (!lastMid || ts - lastMid.ts >= 1000) this.mids.push({ ts, v: mid });
+    else if (ts >= lastMid.ts) lastMid.v = mid;
     if (this.prev) {
       const p = this.prev;
       const e = (cur.bid >= p.bid ? cur.bidSz : 0) - (cur.bid <= p.bid ? p.bidSz : 0)
@@ -54,9 +137,16 @@ export class MicroTracker {
   }
 
   private trim(now: number): void {
-    const cut = now - 600_000;
+    const cut = now - 960_000;
     while (this.ofi.length && this.ofi[0].ts < cut) this.ofi.shift();
     while (this.trades.length && this.trades[0].ts < cut) this.trades.shift();
+    while (this.mids.length && this.mids[0].ts < cut) this.mids.shift();
+  }
+
+  /** Mid at or before `ts` (within 5 s), if recorded. */
+  midAt(ts: number): number | undefined {
+    for (let i = this.mids.length - 1; i >= 0; i--) if (this.mids[i].ts <= ts) return ts - this.mids[i].ts <= 5000 ? this.mids[i].v : undefined;
+    return undefined;
   }
 
   ofiSum(now: number, windowMs: number): number {
@@ -114,7 +204,11 @@ export class AsiaRangeTracker {
 export class FeatureHub {
   readonly micro = new Map<string, MicroTracker>();
   readonly asiaRange = new Map<string, AsiaRangeTracker>();
+  readonly bars = new Map<string, BarStore>();
   onIndex(asset: string, value: number, ts: number): void {
+    let b = this.bars.get(asset);
+    if (!b) { b = new BarStore(); this.bars.set(asset, b); }
+    b.onPrice(value, ts);
     let t = this.asiaRange.get(asset);
     if (!t) { t = new AsiaRangeTracker(); this.asiaRange.set(asset, t); }
     t.onIndex(value, ts);
@@ -154,6 +248,22 @@ export interface FeatureContext {
   volProfile?: VolProfile;
   /** Asian-session range tracker for this asset. */
   asiaRange?: AsiaRangeTracker;
+  /** Contract terms and the pricer's outputs for this contract. */
+  kind?: string;
+  strike?: number;
+  cap?: number;
+  d2?: number;
+  vEff?: number;
+  sigmaPricing?: number;
+  tNu?: number;
+  openTime?: number;
+  /** One-minute bars of the settlement index for this asset. */
+  bars?: BarStore;
+  /** Scheduled macro releases. */
+  calendar?: MacroEvent[];
+  /** This contract's ticker and the other strikes/brackets settling with it (hourly events). */
+  ticker?: string;
+  siblings?: LadderQuote[];
 }
 
 type Fn = (c: FeatureContext, cache: Cache) => number;
@@ -242,7 +352,86 @@ const midRange = (sec: number): Fn => (c, k) => {
   return clip(Math.log(S / mid) / (c.sigmaPerSqrtSec * Math.sqrt(sec)));
 };
 
-export const FEATURES: Record<string, { group: FeatureGroup; description: string; fn: Fn }> = {
+// ---- Relaxed-cadence helpers --------------------------------------------------
+
+const rvLog = (c: FeatureContext, min: number): number => {
+  const r = c.bars?.returns(min);
+  if (!r) return NA;
+  const ms = r.reduce((a, x) => a + x * x, 0) / r.length;
+  return ms > 0 ? Math.log(ms) : NA;
+};
+/** Log return over `min` minutes (current price vs the close `min` bars ago) / (sigma_1m sqrt(min)). */
+const barRetZ = (min: number): Fn => (c) => {
+  const b = c.bars?.last(min);
+  const s = c.bars?.sigma1m();
+  const S = c.index.latest()?.value;
+  if (!b || !s || S === undefined) return NA;
+  return clip(Math.log(S / b[0].c) / (s * Math.sqrt(min)));
+};
+const efficiency = (min: number): Fn => (c) => {
+  const r = c.bars?.returns(min);
+  if (!r) return NA;
+  const path = r.reduce((a, x) => a + Math.abs(x), 0);
+  return path > 0 ? Math.abs(r.reduce((a, x) => a + x, 0)) / path : 0;
+};
+const rangePos = (min: number): Fn => (c) => {
+  const b = c.bars?.last(min);
+  const S = c.index.latest()?.value;
+  if (!b || S === undefined) return NA;
+  const hi = Math.max(...b.map((x) => x.h)), lo = Math.min(...b.map((x) => x.l));
+  return hi > lo ? clamp((S - lo) / (hi - lo), -0.5, 1.5) : 0.5;
+};
+const distExtreme = (min: number, which: 'high' | 'low'): Fn => (c) => {
+  const b = c.bars?.last(min);
+  const s = c.bars?.sigma1m();
+  const S = c.index.latest()?.value;
+  if (!b || !s || S === undefined) return NA;
+  const x = which === 'high' ? Math.max(...b.map((y) => y.h)) : Math.min(...b.map((y) => y.l));
+  return clip(Math.log(S / x) / (s * Math.sqrt(min)));
+};
+/** Kalshi order flow over `sec`: signed taker contracts / (trailing 15-min volume rate x window). */
+const kalshiFlow = (sec: number): Fn => (c) => {
+  if (!c.micro) return NA;
+  const all = c.micro.tradesIn(c.now, 900_000);
+  const vol = all.reduce((a, x) => a + x.count, 0);
+  if (!(vol > 0)) return 0;
+  const w = c.micro.tradesIn(c.now, sec * 1000).reduce((a, x) => a + x.signed, 0);
+  return clip(w / ((vol / 900) * sec));
+};
+const midChange = (sec: number): Fn => (c) => {
+  const then = c.micro?.midAt(c.now - sec * 1000);
+  return then === undefined ? NA : c.mid - then;
+};
+const ofiDepth = (sec: number): Fn => (c) => {
+  if (!c.micro) return NA;
+  const b = c.book.bestBid(), a = c.book.bestAsk();
+  const depth = ((b?.size ?? 0) + (a?.size ?? 0)) / 2;
+  return depth > 0 ? clip(c.micro.ofiSum(c.now, sec * 1000) / depth / Math.sqrt(sec / 30)) : NA;
+};
+/** Pricer outputs only exist for single-threshold contracts before the averaging window. */
+const hasGeometry = (c: FeatureContext) => (c.kind === 'updown' || c.kind === 'greater') && !c.inWindow && Number.isFinite(c.d2) && (c.vEff ?? 0) > 0;
+/** Fixed nu = 5 so the feature never depends on which pricer nu a model was trained with. */
+const pAnalyticT = (c: FeatureContext): number => {
+  if (!hasGeometry(c)) return NA;
+  const nu = 5;
+  return studentTCdf(c.d2! / Math.sqrt((nu - 2) / nu), nu);
+};
+const logitGap = (c: FeatureContext): number => {
+  const p = pAnalyticT(c);
+  return Number.isFinite(p) ? clip(logit(c.mid) - logit(p)) : clip(logit(c.mid) - logit(c.fairValue));
+};
+const macroClock = (c: FeatureContext, dir: 'to' | 'since'): number => {
+  if (!c.calendar?.length) return NA;
+  let best = Infinity;
+  for (const e of c.calendar) {
+    const dt = dir === 'to' ? e.ts - c.now : c.now - e.ts;
+    if (dt >= 0 && dt < best) best = dt;
+  }
+  return best <= 86_400_000 ? Math.min(240, best / 60_000) : NA;
+};
+const minuteOfHour = (now: number) => (now % 3_600_000) / 60_000;
+
+export const FEATURES: Record<string, { group: FeatureGroup; description: string; fn: Fn; tier?: FeatureTier }> = {
   // Base (the original v2 set).
   logit_fv: { group: 'base', description: 'digital-option fair value (log-odds)', fn: (c) => logit(c.fairValue) },
   logit_mid: { group: 'base', description: 'market mid (log-odds)', fn: (c) => logit(c.mid) },
@@ -418,6 +607,114 @@ export const FEATURES: Record<string, { group: FeatureGroup; description: string
   hour_sin: { group: 'time', description: 'sin(UTC hour)', fn: (c) => Math.sin((2 * Math.PI * (new Date(c.now).getUTCHours() + new Date(c.now).getUTCMinutes() / 60)) / 24) },
   hour_cos: { group: 'time', description: 'cos(UTC hour)', fn: (c) => Math.cos((2 * Math.PI * (new Date(c.now).getUTCHours() + new Date(c.now).getUTCMinutes() / 60)) / 24) },
   weekend: { group: 'time', description: '1 on Saturday/Sunday UTC', fn: (c) => { const d = new Date(c.now).getUTCDay(); return d === 0 || d === 6 ? 1 : 0; } },
+
+  // ===== Relaxed-cadence catalog (1-minute windows and slower) =====
+  // A. Contract and settlement geometry.
+  log_tau: { group: 'geometry', tier: 'T1', description: 'log(seconds to close)', fn: (c) => Math.log(Math.max(1, c.tauSec)) },
+  strike_dist_z: { group: 'geometry', tier: 'T1', description: 'ln(S/K) / sqrt(v_eff)', fn: (c) => { const S = c.index.latest()?.value; return hasGeometry(c) && S && c.strike ? clip(Math.log(S / c.strike) / Math.sqrt(c.vEff!)) : NA; } },
+  d2: { group: 'geometry', tier: 'T1', description: '(ln(S/K) - v_eff/2) / sqrt(v_eff)', fn: (c) => (hasGeometry(c) ? clip(c.d2!) : NA) },
+  phi_d2: { group: 'geometry', tier: 'T1', description: 'normal density at d2: sensitivity to the next move', fn: (c) => (hasGeometry(c) ? normPdf(c.d2!) : NA) },
+  p_analytic_t: { group: 'geometry', tier: 'T1', description: 'Student-t (nu = 5) pricer probability (log-odds)', fn: (c) => { const p = pAnalyticT(c); return Number.isFinite(p) ? logit(p) : NA; } },
+  kind_updown: { group: 'geometry', tier: 'T1', description: '15-minute Up/Down contract', fn: (c) => (c.kind === undefined ? NA : c.kind === 'updown' ? 1 : 0) },
+  kind_greater: { group: 'geometry', tier: 'T1', description: 'hourly greater-than ladder strike', fn: (c) => (c.kind === undefined ? NA : c.kind === 'greater' ? 1 : 0) },
+  kind_between: { group: 'geometry', tier: 'T1', description: 'hourly range bracket', fn: (c) => (c.kind === undefined ? NA : c.kind === 'between' ? 1 : 0) },
+  bracket_width_z: { group: 'geometry', tier: 'T2', description: '(cap - floor) / (S sqrt(v_eff)), brackets only', fn: (c) => { const S = c.index.latest()?.value; const v = (c.sigmaPricing ?? c.sigmaPerSqrtSec) ** 2 * Math.max(1, c.tauSec - 40); return c.kind === 'between' && c.cap && c.strike && S ? clip((c.cap - c.strike) / (S * Math.sqrt(v)), 20) : NA; } },
+
+  // C. Volatility (1-minute returns).
+  log_rv_15m: { group: 'vol', tier: 'T1', description: 'log mean squared 1-min return, 15 min', fn: (c) => rvLog(c, 15) },
+  log_rv_1h: { group: 'vol', tier: 'T1', description: 'log mean squared 1-min return, 1 h', fn: (c) => rvLog(c, 60) },
+  log_rv_4h: { group: 'vol', tier: 'T1', description: 'log mean squared 1-min return, 4 h', fn: (c) => rvLog(c, 240) },
+  ewma_vol_ratio: { group: 'vol', tier: 'T1', description: 'sqrt(fast / slow EWMA variance): volatility accelerating (>1) or fading', fn: (c) => { const b = c.bars; return b?.sigma1m() && b.ewmaFast !== undefined && b.ewmaSlow! > 0 ? clip(Math.sqrt(b.ewmaFast / b.ewmaSlow!), 5) : NA; } },
+  vol_ratio_15m_4h: { group: 'vol', tier: 'T1', description: 'log(rv_15m / rv_4h)', fn: (c) => { const a = rvLog(c, 15), b = rvLog(c, 240); return Number.isFinite(a) && Number.isFinite(b) ? clip(a - b) : NA; } },
+  jump_ratio_1h: { group: 'vol', tier: 'T1', description: 'max(RV - BV, 0) / RV over 60 one-minute returns (bipower variation)', fn: (c) => {
+    const r = c.bars?.returns(60);
+    if (!r) return NA;
+    const rv = r.reduce((a, x) => a + x * x, 0);
+    let bv = 0;
+    for (let i = 1; i < r.length; i++) bv += Math.abs(r[i]) * Math.abs(r[i - 1]);
+    bv *= Math.PI / 2;
+    return rv > 0 ? Math.max(0, rv - bv) / rv : 0;
+  } },
+  jump_count_4h: { group: 'vol', tier: 'T2', description: '1-minute returns beyond 4 sigma in 4 h', fn: (c) => { const r = c.bars?.returns(240); const s = c.bars?.sigma1m(); return r && s ? r.filter((x) => Math.abs(x) > 4 * s).length : NA; } },
+  garman_klass_15m: { group: 'vol', tier: 'T2', description: 'log Garman-Klass variance from 1-min OHLC, 15 min', fn: (c) => {
+    const b = c.bars?.last(15);
+    if (!b) return NA;
+    const v = b.reduce((a, x) => a + 0.5 * Math.log(x.h / x.l) ** 2 - (2 * Math.LN2 - 1) * Math.log(x.c / x.o) ** 2, 0) / b.length;
+    return v > 0 ? Math.log(v) : NA;
+  } },
+
+  // D. Kalshi market state.
+  logit_gap: { group: 'kalshi', tier: 'T1', description: 'logit(mid) - logit(analytic price): where the market disagrees with the pricer', fn: (c) => logitGap(c) },
+  sigma_gap: { group: 'kalshi', tier: 'T1', description: '0.5 ln(market-implied variance / v_eff); null near the money', fn: (c) => {
+    const S = c.index.latest()?.value;
+    if (!hasGeometry(c) || !S || !c.strike) return NA;
+    const x = Math.log(S / c.strike);
+    const z = normInv(clamp(c.mid, 0.01, 0.99));
+    if (Math.abs(z) < 0.1 || Math.abs(x) < 1e-5 || Math.sign(x) !== Math.sign(z)) return NA;
+    return clip(0.5 * Math.log((x / z) ** 2 / c.vEff!), 5);
+  } },
+  kalshi_flow_1m: { group: 'kalshi', tier: 'T1', description: 'YES-taker minus NO-taker contracts, 1 min, / trailing volume rate', fn: kalshiFlow(60) },
+  kalshi_flow_5m: { group: 'kalshi', tier: 'T1', description: 'YES-taker minus NO-taker contracts, 5 min, / trailing volume rate', fn: kalshiFlow(300) },
+  p_mkt_chg_1m: { group: 'kalshi', tier: 'T1', description: 'change in the Kalshi mid over 1 min', fn: midChange(60) },
+  p_mkt_chg_5m: { group: 'kalshi', tier: 'T1', description: 'change in the Kalshi mid over 5 min', fn: midChange(300) },
+  ofi_1m: { group: 'kalshi', tier: 'T1', description: 'Kalshi order-flow imbalance, 1 min, / top depth', fn: ofiDepth(60) },
+  ofi_5m: { group: 'kalshi', tier: 'T1', description: 'Kalshi order-flow imbalance, 5 min, / top depth', fn: ofiDepth(300) },
+  ofi_15m: { group: 'kalshi', tier: 'T1', description: 'Kalshi order-flow imbalance, 15 min, / top depth', fn: ofiDepth(900) },
+
+  // I. Returns and technical analysis (volatility-normalized).
+  ret_5m_z: { group: 'returns', tier: 'T1', description: '5-min log return / (sigma_1m sqrt 5)', fn: barRetZ(5) },
+  ret_15m_z: { group: 'returns', tier: 'T1', description: '15-min log return, sigma-scaled', fn: barRetZ(15) },
+  ret_1h_z: { group: 'returns', tier: 'T1', description: '1-hour log return, sigma-scaled', fn: barRetZ(60) },
+  ret_4h_z: { group: 'returns', tier: 'T2', description: '4-hour log return, sigma-scaled', fn: barRetZ(240) },
+  ret_since_open_z: { group: 'returns', tier: 'T1', description: 'Up/Down: return since the window opened (vs the opening reference), sigma-scaled', fn: (c) => {
+    const S = c.index.latest()?.value, s = c.bars?.sigma1m();
+    if (c.kind !== 'updown' || !S || !s || !c.strike || c.openTime === undefined) return NA;
+    const min = Math.max(1, (c.now - c.openTime) / 60_000);
+    return clip(Math.log(S / c.strike) / (s * Math.sqrt(min)));
+  } },
+  efficiency_ratio_15m: { group: 'returns', tier: 'T1', description: '|net move| / sum |1-min moves|, 15 min: trend vs chop', fn: efficiency(15) },
+  efficiency_ratio_1h: { group: 'returns', tier: 'T1', description: '|net move| / sum |1-min moves|, 1 h', fn: efficiency(60) },
+  range_pos_1h: { group: 'returns', tier: 'T2', description: 'position in the 1-hour high/low range', fn: rangePos(60) },
+  range_pos_4h: { group: 'returns', tier: 'T2', description: 'position in the 4-hour high/low range', fn: rangePos(240) },
+  dist_24h_high_z: { group: 'returns', tier: 'T2', description: 'distance to the 24 h high, sigma-scaled', fn: distExtreme(1440, 'high') },
+  dist_24h_low_z: { group: 'returns', tier: 'T2', description: 'distance to the 24 h low, sigma-scaled', fn: distExtreme(1440, 'low') },
+  variance_ratio_1m_15m: { group: 'returns', tier: 'T2', description: 'Var(15-min returns) / (15 Var(1-min returns)) over 4 h; > 1 trending', fn: (c) => {
+    const r = c.bars?.returns(240);
+    if (!r) return NA;
+    const v1 = r.reduce((a, x) => a + x * x, 0) / r.length;
+    let v15 = 0, n = 0;
+    for (let i = 0; i + 15 <= r.length; i += 15) { v15 += r.slice(i, i + 15).reduce((a, x) => a + x, 0) ** 2; n++; }
+    return v1 > 0 && n ? clip(v15 / n / (15 * v1), 10) : NA;
+  } },
+
+  // K. Clock and calendar (quarter-hour effects align with Kalshi window boundaries).
+  min_of_hour_sin: { group: 'clock', tier: 'T1', description: 'sin(minute of hour)', fn: (c) => Math.sin((2 * Math.PI * minuteOfHour(c.now)) / 60) },
+  min_of_hour_cos: { group: 'clock', tier: 'T1', description: 'cos(minute of hour)', fn: (c) => Math.cos((2 * Math.PI * minuteOfHour(c.now)) / 60) },
+  sec_since_quarter: { group: 'clock', tier: 'T1', description: 'seconds since the last :00/:15/:30/:45', fn: (c) => (c.now % 900_000) / 1000 },
+  min_to_us_open: { group: 'clock', tier: 'T2', description: 'minutes to the NYSE open (clipped +/-240; null on weekends)', fn: (c) => usMarketClock(c.now).toOpen },
+  min_to_us_close: { group: 'clock', tier: 'T2', description: 'minutes to the NYSE close (clipped +/-240; null on weekends)', fn: (c) => usMarketClock(c.now).toClose },
+  near_kalshi_maintenance: { group: 'clock', tier: 'T2', description: 'within 30 min of the Thursday 3-5 AM ET maintenance window', fn: (c) => { const m = kalshiMaintenance(c.now); return m.inside || m.minutesTo <= 30 ? 1 : 0; } },
+  min_to_macro_event: { group: 'calendar', tier: 'T1', description: 'minutes to the next CPI/FOMC/NFP/PCE release (clipped 240; null if none within 24 h)', fn: (c) => macroClock(c, 'to') },
+  min_since_macro_event: { group: 'calendar', tier: 'T1', description: 'minutes since the last scheduled macro release (clipped 240)', fn: (c) => macroClock(c, 'since') },
+
+  // E. Ladder and cross-contract structure (hourly events).
+  ladder_violation_c: { group: 'ladder', tier: 'T2', description: 'largest monotonicity breach touching this strike, cents (arbitrage flag)', fn: (c) => {
+    if (c.kind !== 'greater' || !c.siblings || !c.ticker) return NA;
+    const l = c.siblings.filter((q) => q.kind === 'greater' && q.strike !== undefined && q.mid !== undefined).sort((a, b) => a.strike! - b.strike!);
+    const i = l.findIndex((q) => q.ticker === c.ticker);
+    return i >= 0 && l.length >= 2 ? violationAt(l.map((q) => q.mid!), i) * 100 : NA;
+  } },
+  neighbor_gap: { group: 'ladder', tier: 'T2', description: "this strike's mid minus the interpolation of its neighbours", fn: (c) => (c.kind === 'greater' && c.siblings && c.ticker ? neighborGap(c.siblings, c.ticker) ?? NA : NA) },
+  bracket_sum_dev_c: { group: 'ladder', tier: 'T2', description: 'sum of range-bracket mids minus 100c (same settlement)', fn: (c) => {
+    if (c.kind !== 'between' || !c.siblings) return NA;
+    const b = c.siblings.filter((q) => q.kind === 'between' && q.mid !== undefined);
+    return b.length >= 3 ? clip((b.reduce((s2, q) => s2 + q.mid!, 0) - 1) * 100, 50) : NA;
+  } },
+
+  // N. Interactions (kept only if ablation proves them; trees find most on their own).
+  gap_x_spread: { group: 'interaction', tier: 'T1', description: 'logit_gap x spread (cents): a disagreement is tradable only where the spread is tight', fn: (c) => { const b = c.book.bestBid(), a = c.book.bestAsk(); return b && a ? clip(logitGap(c) * (a.price - b.price) * 100, 50) : NA; } },
+  d2_x_log_tau: { group: 'interaction', tier: 'T1', description: 'd2 x log(tau): strike distance means different things at 3 vs 50 minutes', fn: (c) => (hasGeometry(c) ? clip(c.d2! * Math.log(Math.max(1, c.tauSec)), 50) : NA) },
+  ret15_x_efficiency: { group: 'interaction', tier: 'T2', description: 'ret_15m_z x efficiency_ratio_15m: momentum only counts when trending', fn: (c, k) => { const a = barRetZ(15)(c, k), b = efficiency(15)(c, k); return Number.isFinite(a) && Number.isFinite(b) ? a * b : NA; } },
 };
 
 export const ALL_FEATURES = Object.keys(FEATURES);

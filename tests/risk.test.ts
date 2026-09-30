@@ -61,6 +61,15 @@ test('rejects longshots, bad ticks, oversize, and near-close entries', () => {
   assert.equal(gw.check(intent({ price: 0.47 }), ctx()).ok, false); // post-only would cross
 });
 
+test('a resting take-profit that only reduces the position is not a longshot purchase', () => {
+  // Long 4 YES; resting ask at 0.95 (= buying NO at 5c) only closes the position.
+  const tp = intent({ side: 'ask', price: 0.95, fairValue: 0.9 });
+  const book = { bestBid: 0.93, bestAsk: 0.96, marketRiskWith: 0 };
+  assert.equal(gw.check(tp, ctx({ ...book, position: 4 })).ok, true);
+  assert.equal(gw.check(tp, ctx({ ...book, position: 0 })).ok, false, 'flat: a 5c NO purchase is a longshot');
+  assert.equal(gw.check({ ...tp, count: 5 }, ctx({ ...book, position: 4 })).ok, false, 'more than the position flips it');
+});
+
 test('capital thresholds: per-order, per-window, total', () => {
   assert.equal(gw.check(intent({ count: 10 }), ctx({ marketRiskWith: 4.5 })).ok, false); // $4.50 > 2% of $200
   assert.equal(gw.check(intent(), ctx({ windowRisk: 5 })).ok, false); // 5 + 1.8 > $6

@@ -140,3 +140,24 @@ export function sessionState(ts: number): SessionState {
   cache.set(minute, st);
   return st;
 }
+
+/** Kalshi's weekly maintenance: Thursday 03:00-05:00 America/New_York (per the crypto contract terms). */
+export const KALSHI_MAINTENANCE = { weekday: 4, start: 3 * 60, end: 5 * 60 };
+
+/** Minutes until the maintenance window starts (0 while inside it; Infinity if more than a day away). */
+export function kalshiMaintenance(ts: number): { inside: boolean; minutesTo: number } {
+  const z = zoneTime(ts, VENUES.newYork.tz);
+  const M = KALSHI_MAINTENANCE;
+  if (z.weekday === M.weekday && z.minutes >= M.start && z.minutes < M.end) return { inside: true, minutesTo: 0 };
+  if (z.weekday === M.weekday && z.minutes < M.start) return { inside: false, minutesTo: M.start - z.minutes };
+  if (z.weekday === (M.weekday + 6) % 7) return { inside: false, minutesTo: 24 * 60 - z.minutes + M.start };
+  return { inside: false, minutesTo: Infinity };
+}
+
+/** Minutes to the next NYSE open/close today (clipped to +/-240; NaN on weekends). Negative = already passed. */
+export function usMarketClock(ts: number): { toOpen: number; toClose: number } {
+  const z = zoneTime(ts, VENUES.newYork.tz);
+  if (z.weekday === 0 || z.weekday === 6) return { toOpen: NaN, toClose: NaN };
+  const c = (x: number) => Math.max(-240, Math.min(240, x));
+  return { toOpen: c(VENUES.newYork.open - z.minutes), toClose: c(VENUES.newYork.close - z.minutes) };
+}

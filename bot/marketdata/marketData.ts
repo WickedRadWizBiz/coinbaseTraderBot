@@ -22,6 +22,7 @@ import { yesPrice } from '../kalshi/wire';
 import { logger } from '../util/log';
 import { parseCount } from '../util/num';
 import { FeatureHub } from '../model/featureEngine';
+import { contractKind, type ContractTerms, type MarketKind } from '../model/fairValue';
 import { DominanceService } from './dominance';
 import { IndexTracker } from './indexTracker';
 import { OrderBook } from './orderBook';
@@ -30,7 +31,9 @@ const log = logger('marketdata');
 
 export interface ActiveMarket extends MarketInfo {
   asset: string;
+  kind: MarketKind;
   strike?: number;
+  cap?: number;
   strikeSource?: 'exchange' | 'computed';
 }
 
@@ -159,9 +162,12 @@ export class MarketData extends EventEmitter {
         const markets = await this.rest.getOpenMarkets(series);
         for (const m of markets) {
           if (m.closeTime <= now) continue;
+          // Far-dated strikes (daily/weekly ladders) are never inside an entry window; skip them.
+          if (m.closeTime > now + this.cfg.catalogHorizonMin * 60_000) continue;
+          const kind = contractKind(series, m.strikeType);
           const prev = this.markets.get(m.ticker);
-          if (!prev) this.recorder.write('market', { ticker: m.ticker, series, asset, openTime: m.openTime, closeTime: m.closeTime, strike: m.floorStrike, tickSize: m.tickSize });
-          const am: ActiveMarket = { ...m, seriesTicker: series, asset, strike: prev?.strike, strikeSource: prev?.strikeSource };
+          if (!prev) this.recorder.write('market', { ticker: m.ticker, series, asset, openTime: m.openTime, closeTime: m.closeTime, strike: m.floorStrike, cap: m.capStrike, kind, event: m.eventTicker, tickSize: m.tickSize });
+          const am: ActiveMarket = { ...m, seriesTicker: series, asset, kind, cap: m.capStrike, strike: prev?.strike, strikeSource: prev?.strikeSource };
           if (m.floorStrike) { am.strike = m.floorStrike; am.strikeSource = 'exchange'; }
           this.markets.set(m.ticker, am);
         }
@@ -191,9 +197,21 @@ export class MarketData extends EventEmitter {
     return [...this.markets.values()].filter((m) => m.openTime <= now && now < m.closeTime);
   }
 
-  /** Strike: exchange-published, else our own opening 60 s average if fully observed. */
+  /** Pricing terms: exchange-published strikes, else (Up/Down only) our own opening 60 s average. */
+  termsFor(m: ActiveMarket): ContractTerms | undefined {
+    if (m.kind === 'updown') {
+      const k = this.strikeFor(m);
+      return k ? { kind: 'updown', strike: k } : undefined;
+    }
+    if (m.kind === 'less') return m.cap ? { kind: 'less', cap: m.cap } : undefined;
+    if (m.kind === 'between') return m.strike && m.cap ? { kind: 'between', strike: m.strike, cap: m.cap } : undefined;
+    return m.strike ? { kind: 'greater', strike: m.strike } : undefined;
+  }
+
+  /** Strike: exchange-published, else (Up/Down) our own opening 60 s average if fully observed. */
   strikeFor(m: ActiveMarket): number | undefined {
     if (m.strike) return m.strike;
+    if (m.kind !== 'updown') return undefined;
     const idx = this.index.get(m.asset);
     const avg = idx?.average(m.openTime - 60_000, m.openTime, 3000);
     if (avg) {

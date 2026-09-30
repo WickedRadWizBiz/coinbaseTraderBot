@@ -1,8 +1,10 @@
 // Exit policies compared in the backtester (research:backtest --exits ...).
 //
 //   hold              hold every position to settlement (no settlement fee).
-//   fair_value        production rule: sell when the market bid for our side
-//                     exceeds model fair value + exit fee + buffer.
+//   fair_value        model exit: sell when the market bid for our side
+//                     exceeds the model's value + exit fee + margin.
+//   take_profit       Mode B (relaxed spec): a resting maker take-profit at
+//                     entry + TP (never below model value) plus the model exit.
 //   liquidity_ratchet order-book-anchored ratcheting stop (below).
 //   hybrid            liquidity_ratchet, but a triggered stop only exits if
 //                     the model agrees the position is worth less than the
@@ -33,8 +35,8 @@ import type { BookSide } from '../kalshi/types';
 import { orderFee, type FeeSchedule } from '../fees';
 import { round } from '../util/num';
 
-export type ExitPolicyName = 'hold' | 'fair_value' | 'liquidity_ratchet' | 'hybrid' | 'confluence_ratchet';
-export const EXIT_POLICIES: ExitPolicyName[] = ['hold', 'fair_value', 'liquidity_ratchet', 'hybrid', 'confluence_ratchet'];
+export type ExitPolicyName = 'hold' | 'fair_value' | 'take_profit' | 'liquidity_ratchet' | 'hybrid' | 'confluence_ratchet';
+export const EXIT_POLICIES: ExitPolicyName[] = ['hold', 'fair_value', 'take_profit', 'liquidity_ratchet', 'hybrid', 'confluence_ratchet'];
 
 export interface RatchetParams {
   /** A level is a wall if its size >= minFillRatio x position size. */

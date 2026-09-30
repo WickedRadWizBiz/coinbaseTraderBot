@@ -58,8 +58,43 @@ export interface StrategyConfig {
   fastMoveWindowSec: number;
   /** Resting orders expire on the exchange after this many seconds (dead-man switch). */
   orderTtlSec: number;
-  /** fair_value (default) or confluence_ratchet ("let the winner run" under confluence). */
-  exitPolicy: 'fair_value' | 'confluence_ratchet';
+  /** Exit mode. hold = Mode A (ride to settlement, no exit fee); fair_value = model exit only;
+   * take_profit = Mode B (resting maker take-profit + model exit); confluence_ratchet = hunt winners. */
+  exitPolicy: 'hold' | 'fair_value' | 'take_profit' | 'confluence_ratchet';
+  /** Model exit: sell at the bid when bid - taker fee > q_adj + exitMargin. */
+  exitMargin: number;
+  /** Mode B take-profit distance above the entry price (dollars per contract). */
+  takeProfit: number;
+  /** relaxed = decide on each 1-minute bar close or on a trigger (spec cadence); continuous = every tick. */
+  cadence: 'relaxed' | 'continuous';
+  /** Scheduled evaluation period, fair-value move that triggers an evaluation, re-price period, and the floor between evaluations. */
+  evalBarSec: number;
+  evalFvMove: number;
+  repriceSec: number;
+  minEvalIntervalSec: number;
+  /** Entry windows [earliest, latest] seconds before close, per contract kind. */
+  entryWindowUpdown: [number, number];
+  entryWindowHourly: [number, number];
+  /** Hourly strikes are only entered while the market mid is inside this band. */
+  hourlyMidBand: [number, number];
+  /** No exits in the final seconds: positions ride to settlement (spreads widen inside the averaging window). */
+  noExitBeforeCloseSec: number;
+  /** Maker adverse-selection buffer: default, and clamp range when estimated from 60 s markouts. */
+  makerBuffer: number;
+  makerBufferRange: [number, number];
+  /** kelly = fractional Kelly on the model probability; target_ev = spec sizing (shrink to market, $ target, min EV). */
+  sizing: 'kelly' | 'target_ev';
+  kappa: number;
+  targetEvUsd: number;
+  minTradeEvUsd: number;
+  /** Veto entries when |q - p_mkt| < this many ensemble standard deviations. */
+  ensembleVetoSigmas: number;
+  /** Scale Kelly by max(0, 1 - drawdown / ddScaleAt); pause entries 24 h after a 7-day loss beyond weeklyLossPause. */
+  ddScaleAt: number;
+  weeklyLossPause: number;
+  /** Halt new risk when the rolling log-loss advantage vs the calibrated market is significantly negative. */
+  modelHealthHalt: boolean;
+  modelHealthMinWindows: number;
   huntTargetMargin: number;
   huntMinConfluence: number;
   ratchetMinFillRatio: number;
@@ -93,6 +128,8 @@ export interface Config {
   indexIdMap: Record<string, string>;
   /** Map of series ticker -> asset symbol. */
   seriesAssetMap: Record<string, string>;
+  /** Ignore markets closing further out than this (daily/weekly strikes of hourly series). */
+  catalogHorizonMin: number;
   /** Allow using the Coinbase public ticker as an index proxy (basis risk; paper/shadow only). */
   allowProxyIndex: boolean;
   /** Stream Coinbase spot for lead-lag features and the dashboard (never a pricing input). */
@@ -121,6 +158,12 @@ const DEFAULT_SERIES_ASSET: Record<string, string> = {
   KXSOL15M: 'SOL',
   KXXRP15M: 'XRP',
   KXDOGE15M: 'DOGE',
+  // Hourly: greater-than ladders (KX*D) and range brackets.
+  KXBTCD: 'BTC',
+  KXETHD: 'ETH',
+  KXSOLD: 'SOL',
+  KXBTC: 'BTC',
+  KXETH: 'ETH',
 };
 
 // Kalshi streams CF Benchmarks real-time indices; ids verified only for BRTI.
@@ -156,6 +199,23 @@ function oneOf<T extends string>(env: Env, key: string, def: T, allowed: readonl
   const raw = (env[key] ?? def) as T;
   if (!allowed.includes(raw)) throw new ConfigError(`${key}=${raw} must be one of ${allowed.join(', ')}`);
   return raw;
+}
+
+/** "earliest,latest" seconds before close. */
+function window(env: Env, key: string, def: [number, number]): [number, number] {
+  const raw = env[key];
+  if (!raw) return def;
+  const [a, b] = raw.split(',').map(Number);
+  if (!(Number.isFinite(a) && Number.isFinite(b) && a > b && b >= 0)) throw new ConfigError(`${key}=${raw} must be "earliest,latest" seconds before close with earliest > latest >= 0`);
+  return [a, b];
+}
+
+function band(env: Env, key: string, def: [number, number]): [number, number] {
+  const raw = env[key];
+  if (!raw) return def;
+  const [a, b] = raw.split(',').map(Number);
+  if (!(Number.isFinite(a) && Number.isFinite(b) && a <= b && a >= 0)) throw new ConfigError(`${key}=${raw} must be "lo,hi" with 0 <= lo <= hi`);
+  return [a, b];
 }
 
 function jsonMap(env: Env, key: string, def: Record<string, string>): Record<string, string> {
@@ -229,11 +289,12 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     : 'wss://demo-api.kalshi.co/trade-api/ws/v2');
 
   const risk: RiskLimits = {
-    maxContractsPerOrder: num(env, 'RISK_MAX_CONTRACTS_PER_ORDER', 5, 0.01, 1000),
+    // The bankroll-fraction limits below bind first; this is a fat-finger ceiling.
+    maxContractsPerOrder: num(env, 'RISK_MAX_CONTRACTS_PER_ORDER', 250, 0.01, 5000),
     maxOrderRiskFrac: num(env, 'RISK_MAX_ORDER_FRAC', 0.02, 0.001, 0.05),
     maxWindowRiskFrac: num(env, 'RISK_MAX_WINDOW_FRAC', 0.03, 0.001, 0.1),
     maxTotalRiskFrac: num(env, 'RISK_MAX_TOTAL_FRAC', 0.10, 0.001, 0.25),
-    dailyLossLimitFrac: num(env, 'RISK_DAILY_LOSS_FRAC', 0.05, 0.001, 0.2),
+    dailyLossLimitFrac: num(env, 'RISK_DAILY_LOSS_FRAC', 0.03, 0.001, 0.2),
     dailyLossLimitUsd: num(env, 'RISK_DAILY_LOSS_USD', 5, 0.01, 100000),
     minSidePrice: num(env, 'RISK_MIN_SIDE_PRICE', 0.10, 0.01, 0.45),
     maxOrdersPerMinute: num(env, 'RISK_MAX_ORDERS_PER_MIN', 30, 1, 600),
@@ -246,18 +307,43 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
   if (risk.maxOrderRiskFrac > risk.maxWindowRiskFrac) throw new ConfigError('RISK_MAX_ORDER_FRAC must be <= RISK_MAX_WINDOW_FRAC');
   if (risk.maxWindowRiskFrac > risk.maxTotalRiskFrac) throw new ConfigError('RISK_MAX_WINDOW_FRAC must be <= RISK_MAX_TOTAL_FRAC');
 
+  const cadence = oneOf(env, 'STRATEGY_CADENCE', 'relaxed', ['relaxed', 'continuous'] as const);
+  const relaxed = cadence === 'relaxed';
   const strategy: StrategyConfig = {
     style: oneOf<StrategyStyle>(env, 'STRATEGY_STYLE', 'maker', ['maker', 'taker', 'both']),
     series,
-    kellyFraction: num(env, 'STRATEGY_KELLY_FRACTION', 0.15, 0.01, 0.5),
-    minEdge: num(env, 'STRATEGY_MIN_EDGE', 0.02, 0.0, 0.5),
-    takerBuffer: num(env, 'STRATEGY_TAKER_BUFFER', 0.01, 0.0, 0.5),
+    kellyFraction: num(env, 'STRATEGY_KELLY_FRACTION', 0.25, 0.01, 0.5),
+    // Relaxed spec: e_min = 3c for maker entries; take only with >= 5c net edge (3c + 2c buffer).
+    minEdge: num(env, 'STRATEGY_MIN_EDGE', relaxed ? 0.03 : 0.02, 0.0, 0.5),
+    takerBuffer: num(env, 'STRATEGY_TAKER_BUFFER', relaxed ? 0.02 : 0.01, 0.0, 0.5),
     inventorySkewPerContract: num(env, 'STRATEGY_INVENTORY_SKEW', 0.002, 0, 0.05),
     requoteThreshold: num(env, 'STRATEGY_REQUOTE_THRESHOLD', 0.01, 0.01, 0.2),
     fastMoveSigmas: num(env, 'STRATEGY_FAST_MOVE_SIGMAS', 3, 0.5, 20),
     fastMoveWindowSec: num(env, 'STRATEGY_FAST_MOVE_WINDOW_SEC', 5, 1, 120),
     orderTtlSec: num(env, 'STRATEGY_ORDER_TTL_SEC', 60, 10, 900),
-    exitPolicy: oneOf(env, 'EXIT_POLICY', 'fair_value', ['fair_value', 'confluence_ratchet'] as const),
+    exitPolicy: oneOf(env, 'EXIT_POLICY', relaxed ? 'hold' : 'fair_value', ['hold', 'fair_value', 'take_profit', 'confluence_ratchet'] as const),
+    exitMargin: num(env, 'STRATEGY_EXIT_MARGIN', 0.01, 0, 0.5),
+    takeProfit: num(env, 'STRATEGY_TAKE_PROFIT', 0.08, 0.01, 0.5),
+    cadence,
+    evalBarSec: num(env, 'STRATEGY_EVAL_BAR_SEC', 60, 5, 600),
+    evalFvMove: num(env, 'STRATEGY_EVAL_FV_MOVE', 0.015, 0.001, 0.2),
+    repriceSec: num(env, 'STRATEGY_REPRICE_SEC', 30, 5, 600),
+    minEvalIntervalSec: num(env, 'STRATEGY_MIN_EVAL_INTERVAL_SEC', 10, 0, 120),
+    entryWindowUpdown: window(env, 'ENTRY_WINDOW_15M', relaxed ? [840, 120] : [900, 15]),
+    entryWindowHourly: window(env, 'ENTRY_WINDOW_HOURLY', relaxed ? [3300, 300] : [3600, 15]),
+    hourlyMidBand: band(env, 'HOURLY_MID_BAND', [0.1, 0.9]),
+    noExitBeforeCloseSec: num(env, 'STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC', relaxed ? 60 : 0, 0, 600),
+    makerBuffer: num(env, 'STRATEGY_MAKER_BUFFER', relaxed ? 0.01 : 0, 0, 0.1),
+    makerBufferRange: band(env, 'STRATEGY_MAKER_BUFFER_RANGE', relaxed ? [0.005, 0.015] : [0, 0]),
+    sizing: oneOf(env, 'STRATEGY_SIZING', relaxed ? 'target_ev' : 'kelly', ['kelly', 'target_ev'] as const),
+    kappa: num(env, 'STRATEGY_KAPPA', 0.5, 0, 1),
+    targetEvUsd: num(env, 'STRATEGY_TARGET_EV_USD', 10, 0, 10000),
+    minTradeEvUsd: num(env, 'STRATEGY_MIN_TRADE_EV_USD', 1, 0, 10000),
+    ensembleVetoSigmas: num(env, 'STRATEGY_ENSEMBLE_VETO_SIGMAS', 2, 0, 10),
+    ddScaleAt: num(env, 'RISK_DD_SCALE_AT', 0.15, 0.01, 1),
+    weeklyLossPause: num(env, 'RISK_WEEKLY_LOSS_PAUSE', 0.08, 0.01, 1),
+    modelHealthHalt: bool(env, 'MODEL_HEALTH_HALT', true),
+    modelHealthMinWindows: num(env, 'MODEL_HEALTH_MIN_WINDOWS', 200, 20, 100000),
     huntTargetMargin: num(env, 'HUNT_TARGET_MARGIN', 0.02, 0, 0.5),
     huntMinConfluence: num(env, 'HUNT_MIN_CONFLUENCE', 2, 1, 7),
     ratchetMinFillRatio: num(env, 'RATCHET_MIN_FILL_RATIO', 1, 0.1, 20),
@@ -285,9 +371,12 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     dashboardToken: token,
     dataDir,
     paramsPath: path.resolve(env.MODEL_PARAMS_PATH ?? './params/model.json'),
-    paperBankrollUsd: num(env, 'PAPER_BANKROLL_USD', 200, 1, 1e7),
+    // ~$6,250 is what a $10-EV trade at a 4c edge needs at quarter-Kelly (relaxed spec); smaller
+    // bankrolls mostly fall under the $1 minimum trade EV and trade rarely.
+    paperBankrollUsd: num(env, 'PAPER_BANKROLL_USD', 6250, 1, 1e7),
     indexIdMap: jsonMap(env, 'INDEX_ID_MAP', DEFAULT_INDEX_IDS),
     seriesAssetMap,
+    catalogHorizonMin: num(env, 'CATALOG_HORIZON_MIN', 90, 16, 7 * 24 * 60),
     allowProxyIndex,
     spotFeed: bool(env, 'SPOT_FEED', true),
     dominanceFeed: bool(env, 'DOMINANCE_FEED', true),

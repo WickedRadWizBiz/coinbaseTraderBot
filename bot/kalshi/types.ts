@@ -73,6 +73,10 @@ export interface MarketInfo {
   closeTime: number;
   /** Strike for up/down markets (the opening 60s average), when published. */
   floorStrike?: number;
+  /** Upper strike for range ('between') and 'less' markets. */
+  capStrike?: number;
+  /** Kalshi strike_type: greater, greater_or_equal, less, between, ... */
+  strikeType?: string;
   tickSize: number;
   result?: 'yes' | 'no' | '';
 }

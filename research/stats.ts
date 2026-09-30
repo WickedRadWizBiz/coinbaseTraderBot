@@ -112,10 +112,34 @@ export function pbo(returns: number[][], S = 8): { pbo: number; splits: number }
       if (s > bestScore) { bestScore = s; best = m; }
     }
     const oos = Array.from({ length: M }, (_, m) => score(oosRows, m));
-    const rank = oos.filter((x) => x < oos[best]).length + 1; // 1..M
+    // Average rank for ties, so identical variants read as median (half-counted), not as overfit.
+    const less = oos.filter((x) => x < oos[best]).length;
+    const ties = oos.filter((x, m) => m !== best && x === oos[best]).length;
+    const rank = less + 1 + ties / 2; // 1..M
     const w = rank / (M + 1);
-    if (Math.log(w / (1 - w)) <= 0) below++;
+    const lg = Math.log(w / (1 - w));
+    if (lg < -1e-12) below++;
+    else if (Math.abs(lg) <= 1e-12) below += 0.5;
     splits++;
   }
   return { pbo: below / splits, splits };
+}
+
+/**
+ * Diebold-Mariano test of equal predictive accuracy on a loss differential
+ * series d_t = loss_model_t - loss_benchmark_t (one value per settlement
+ * window). Newey-West HAC variance with lag floor(n^(1/3)). One-sided p-value
+ * for H1: the model's loss is lower (mean d < 0).
+ */
+export function dieboldMariano(d: number[], lag?: number): { meanDiff: number; stat: number; pValue: number; n: number } {
+  const n = d.length;
+  if (n < 10) return { meanDiff: NaN, stat: NaN, pValue: NaN, n };
+  const m = mean(d);
+  const L = lag ?? Math.floor(Math.cbrt(n));
+  const gamma = (k: number) => { let s = 0; for (let t = k; t < n; t++) s += (d[t] - m) * (d[t - k] - m); return s / n; };
+  let v = gamma(0);
+  for (let k = 1; k <= L; k++) v += 2 * (1 - k / (L + 1)) * gamma(k);
+  const se = Math.sqrt(Math.max(1e-18, v / n));
+  const stat = m / se;
+  return { meanDiff: m, stat, pValue: normCdf(stat), n };
 }

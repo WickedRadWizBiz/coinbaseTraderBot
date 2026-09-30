@@ -118,6 +118,7 @@ export function parseMarket(m: Obj): MarketInfo | undefined {
   const closeTime = ts(m.close_time ?? m.expected_expiration_time);
   if (!m.ticker || openTime === undefined || closeTime === undefined) return undefined;
   const strike = parseDollars(m.floor_strike);
+  const cap = parseDollars(m.cap_strike);
   const tick = parseDollars(m.tick_size_dollars) ?? (typeof m.tick_size === 'number' ? m.tick_size / 100 : undefined);
   return {
     ticker: String(m.ticker),
@@ -127,6 +128,8 @@ export function parseMarket(m: Obj): MarketInfo | undefined {
     openTime,
     closeTime,
     floorStrike: strike !== undefined && strike > 0 ? strike : undefined,
+    capStrike: cap !== undefined && cap > 0 ? cap : undefined,
+    strikeType: m.strike_type ? String(m.strike_type) : undefined,
     tickSize: tick && tick > 0 ? tick : 0.01,
     result: m.result,
   };

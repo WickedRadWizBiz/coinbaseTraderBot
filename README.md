@@ -1,4 +1,4 @@
-# Kalshi 15-minute crypto bot, v2
+# Kalshi crypto bot (15-minute and hourly), v3
 
 This is a rebuild that follows *Your Kalshi Bot vs. an Institutional Trading System*. The old bot's problems weren't a lack of sophistication. It had no sound core underneath the "institutional" modules. v2 is small and deliberately plain:
 
@@ -22,20 +22,23 @@ bot/
   kalshi/                REST (Create Order V2 only), WebSocket, signing (RSA-PSS / Ed25519), wire parsing, rate limiter
   marketdata/            order books (snapshot+delta, gap -> resnapshot), CF RTI index tracker, recorder
   model/
-    fairValue.ts         digital option on the 60 s settlement average (tie -> YES, partial fixing in final minute)
-    metaModel.ts         frozen, versioned neural network with residual on fair value + go-live gates
-    features.ts          one feature builder shared by production and research
-    calibration.ts       Brier, reliability, Platt
-  sizing/kelly.ts        fee-net fractional Kelly; zero size when edge <= 0 (no fallback)
-  risk/                  RiskGateway (fails closed), worst-case exposure incl. resting orders, persistent KillSwitch
+    fairValue.ts         settlement-exact pricer: 60 s average, martingale drift, Student-t tails, Up/Down, ladders, brackets
+    metaModel.ts         frozen, versioned residual model (MLP or gradient-boosted trees, deep ensemble) + go-live gates
+    trees.ts             GBDT inference (missing values follow learned default directions)
+    featureEngine.ts     one feature engine shared by production and research (~120 candidates, tiered, schema-versioned)
+    calibration.ts       Brier, log loss, reliability, Platt, beta calibration, calibration slices
+    ladder.ts            strike-ladder monotonicity, isotonic projection, ladder arbitrage scan
+    modelHealth.ts       live log-loss advantage vs the calibrated market (Diebold-Mariano), halts when worse
+  sizing/kelly.ts        fee-net fractional Kelly; target-EV sizing (shrink to market, $ target, min EV); zero when edge <= 0
+  risk/                  RiskGateway (fails closed), worst-case exposure incl. resting orders, persistent KillSwitch, EquityGuard
   oms/                   order state machine, idempotent client_order_id, positions change only on fills
   recon/                 exchange-is-truth reconciliation, fill replay, orphan cancel, break -> halt -> kill
-  strategy/              maker quoting (post_only), selective taking, fair-value exits (no % stops)
+  strategy/              relaxed cadence gate, maker quoting (post_only), selective taking, model exit, Mode B take-profit
   paper/                 paper exchange: same gateway interface, queue-aware fills, no bankroll refills
   tca/                   per-fill edge-at-decision and 5/30/60 s markouts
   api/                   authenticated, read-only operator API; kill switch only
   engine.ts, main.ts
-research/                offline only: dataset builder, walk-forward meta-model trainer, backtest, DSR/PBO stats
+research/                offline only: dataset builder, walk-forward trainer (MLP + GBDT), backtest, DSR/PBO/DM/CPCV stats
 tests/                   node:test suite (fees, Kelly, fair value vs Monte Carlo, OMS, risk, recon, paper, strategy, engine)
 web/                     read-only dashboard (React), served by the API
 deploy/                  systemd unit, activate/rollback scripts
@@ -86,7 +89,91 @@ The old `metaLearningEngine.ts` and `plasticityEngine.ts` (tfjs-node) retrained 
    - a fee-inclusive net-edge 95% CI lower bound above 0
    - a deflated Sharpe above 0
 
+   v3 adds the gates listed above: log loss against the calibrated market with Diebold–Mariano, calibration slices, DSR probability and PBO.
+
 With no model file, the identity model (pure fair value) is used. That's fine for paper and shadow, and live mode rejects it.
+
+## v3: the institutional blueprint and the relaxed-cadence spec
+
+v3 implements *Institutional-Grade ML Trading for Kalshi Crypto Binaries and Perps* and the *Kalshi Relaxed-Cadence Model Spec*. Both documents make the same point: the edge comes from exact settlement math, calibration against the market, maker patience and strict validation. It does not come from a more exotic network.
+
+**Cadence (`bot/strategy/cadence.ts`).** `STRATEGY_CADENCE=relaxed` is the default. Each contract gets a full entry/quote decision at every 1-minute bar close. A decision also runs early when:
+- fair value moves by 1.5¢ or more
+- the book moves through a resting quote
+- a fill changes the position, so a take-profit rests at once
+- the entry window opens or closes
+- a resting quote is due for its 30-second re-price
+
+Decisions are never closer than 10 seconds apart. Exits are checked every tick. Entry windows:
+- 15-minute Up/Down: from 14 down to 2 minutes before close. The final minutes are a latency race.
+- Hourly strikes: from 55 down to 5 minutes before close, and only while the mid is between 10¢ and 90¢.
+
+In the final minute, open positions ride to settlement.
+
+**Entries and exits.**
+- **Maker entries** bid at `floor(q_adj − e_min − buffer)`, with e_min = 3¢. The adverse-selection buffer is estimated from 60-second maker markouts and clamped to 0.5–1.5¢.
+- **Taker entries** need at least 5¢ of net edge after the taker fee.
+- **Model exit.** Sell at the bid only when the bid minus the taker fee exceeds q_adj + 1¢.
+- **`EXIT_POLICY`:**
+  - `hold` (Mode A, the default) has no exit fee.
+  - `take_profit` (Mode B) rests a maker take-profit at entry + 8¢. It never offers below what the model thinks the position is worth.
+  - `fair_value` and `confluence_ratchet` work as before.
+
+**Sizing (`STRATEGY_SIZING=target_ev`).**
+- The decision probability is `q_adj = p_mkt_cal + κ(p_model − p_mkt_cal)`, with κ = 0.5. It shrinks the model toward the market after the market's own favourite-longshot bias has been removed.
+- Size is `N = min(ceil($target / e), ⌊λ f* B / c⌋, caps)`, with a $10 target and λ = 0.25.
+- A trade with expected profit under $1 is skipped.
+- Kelly is scaled by `max(0, 1 − drawdown/15%)`. New risk pauses for 24 hours after a 7-day loss above 8%. The daily loss stop is 3%.
+- The $100/day vault goal is a **monthly average**. Expect about 35–40% losing days even when the edge is real. `PAPER_BANKROLL_USD` defaults to $6,250, which is what a $10-EV trade at a 4¢ edge needs at quarter-Kelly. With smaller bankrolls, most trades fall under the $1 minimum.
+
+**Pricing (`bot/model/fairValue.ts`).**
+- Martingale drift (`d2 = (ln S/K − v/2)/√v`).
+- Optional Student-t tails, with ν chosen offline. The trainer keeps Gaussian tails unless a fat-tailed ν beats them by more than one standard error.
+- Hourly `greater` ladders (KXBTCD), `between` brackets (KXBTC) and `less` markets, as well as the 15-minute Up/Down.
+- `/api/ladder` checks monotonicity and projects the ladder onto a consistent CDF (isotonic). It also flags executable ladder arbitrage (YES(≥K1) + NO(≥K2) < $1 after fees) and bracket-versus-ladder deviations. It is report-only.
+
+**Features (`bot/model/featureEngine.ts`, schema v3, tiered T1/T2).** New minute-scale groups:
+
+| Group | Features |
+|---|---|
+| geometry | τ, d2, φ(d2), strike distance, Student-t price, contract kind |
+| vol | realized variance over 15 min, 1 h and 4 h; EWMA fast/slow ratio; bipower jump ratio; Garman–Klass |
+| kalshi | `logit_gap` (market vs pricer), `sigma_gap` (market-implied vs our variance), 1/5-minute flow, mid changes, 1/5/15-minute OFI |
+| returns | σ-normalized 5 min/15 min/1 h/4 h returns, return since open, efficiency ratio, range position, variance ratio |
+| clock | minute of hour, seconds since the quarter hour, NYSE open/close distance, Kalshi maintenance |
+| calendar | minutes to/since CPI, FOMC, NFP and PCE from `params/calendar.json` |
+| ladder | violation, neighbour gap, bracket sum |
+| interaction | a few interaction terms |
+
+The trainer's ablation decides which groups are kept.
+
+**Model (`research/trainMetaModel.ts`).**
+- Rows are weighted 1 / snapshots per contract, and additionally divided by the number of strikes per hourly event.
+- Walk-forward folds are purged, with a 1-hour embargo.
+- Two model families are compared: a residual MLP, and residual gradient-boosted trees whose init score is the fair-value log-odds. The trees are written in TypeScript (`research/gbdt.ts` and `bot/model/trees.ts`), so there is no ONNX export step and no parity gap.
+- The **one-standard-error rule** picks the simplest configuration within 1 SE of the best.
+- A beta-calibrated market benchmark (`marketCalibration`) is fitted, and the output is calibrated with Platt or beta scaling, whichever wins out of fold.
+- A 5-member bootstrap **deep ensemble** supplies the ensemble spread. Entries are vetoed when |p − p_mkt| < 2σ_ens.
+- An optional **CPCV** report (10 groups, 2 held out, 45 splits) gives a distribution of the advantage.
+- Holdout predictions go through the production `MetaModel` class, so train/serve parity holds by construction.
+
+**Go-live gates (all enforced by `MetaModel.liveBlockers`).**
+- The earlier gates: at least 1,000 windows, Brier better than the market, calibration within 3pp, net-edge CI > 0, DSR > 0.
+- **Log loss better than the calibrated market, with Diebold–Mariano p < 0.05.**
+- **No calibration slice (price or time to close) off by more than 1.5¢ beyond sampling noise.**
+- **Deflated Sharpe probability > 0.95**, counting every configuration tried.
+- **PBO < 0.2.**
+
+In live trading, `ModelHealth` stops new risk if the rolling log-loss advantage over the calibrated market turns significantly negative across at least 200 windows. The Telemetry page shows cadence, sizing, drawdown, model health and the entry guards. Operationally, the gate still requires 2 weeks live at 10–20% size, with realized edge at least 50% of the backtest edge.
+
+**Researched and deliberately not adopted (yet):**
+- **Perps (hedging and features).** The spec's hedge threshold (about $2,000 of net delta) is far above this bankroll. Kalshi's perp tick size and mark-price formula are unpublished. Binance and Bybit block US IPs. Revisit when a US-accessible perp feed is verified.
+- **LightGBM in Python plus ONNX.** Replaced by the in-repo TypeScript GBDT, which gives the same model class with nothing to keep in parity.
+- **GRU/TCN encoder, gated regime stacker, HMM/BOCPD regimes.** Both documents rank these last. They need 3 months or more of logs, and must beat the GBDT in CPCV to be kept.
+- **Scenario/copula Kelly.** Correlated same-close BTC/ETH/SOL exposure is instead capped as one position by `RISK_MAX_WINDOW_FRAC`.
+- **Funding, OI and liquidations; DVOL; NQ/DXY; Coinbase multi-level OFI.** These need feeds the bot does not have (or that are US-blocked), and they are T2/T3 anyway.
+- **Full Avellaneda–Stoikov quoting and RL quote offsets.** They need fill-intensity estimates from our own fills first. Inventory skew stays in place.
+- **Tennis.** Out of scope per the spec.
 
 ## Profit vault and pocket
 
@@ -119,14 +206,16 @@ npm run dev              # paper mode by default
 ### Research loop
 
 ```bash
-npm run research:dataset -- --recordings data/recordings
-npm run research:train                                   # -> params/model.candidate.json
-npm run research:backtest -- --model params/model.candidate.json --grid 0.01,0.02,0.03 --annotate
+npm run research:dataset -- --recordings data/recordings --every 60 --entry-window-only   # relaxed-spec sampling
+npm run research:train -- --families mlp,gbdt --ensemble 5 --cpcv 10                      # -> params/model.candidate.json
+npm run research:backtest -- --model params/model.candidate.json --grid 0.02,0.03,0.04 --exits hold,take_profit,fair_value --annotate
 ```
 
 `npm run research:sessions` reports volatility, Kalshi spreads and depth, and trade activity for each session. It fits and validates the intraday volatility profile (`params/vol_profile.json`), backtests P&L by session, and prints a recommended `SESSION_RISK` along with the evidence behind it.
 
-`--exits hold,fair_value,liquidity_ratchet,hybrid` compares exit policies on identical data (`bot/strategy/exitPolicies.ts`):
+The backtest mirrors the engine: cadence-gated entries, entry windows, target-EV sizing and exit modes. It reports profit per trade (with CI), trades and P&L per day, and take-profit fills alongside the per-window statistics. `--annotate` writes `netEdgeCiLow`, `deflatedSharpe`, `dsrProbability` and `pbo` into the model file.
+
+`--exits hold,fair_value,take_profit,liquidity_ratchet,hybrid` compares exit policies on identical data (`bot/strategy/exitPolicies.ts`):
 - **Liquidity ratchet.** Stops sit at exit-side book levels big enough to absorb the whole position (`--ratchet-fill`) that have persisted for `--ratchet-age` seconds. The stop ratchets up as price moves past higher walls. If price comes back down to the stop, the bot exits with an immediate-or-cancel order limited to the stop minus `--ratchet-slip` ticks. A gap through the stop falls back to the next wall down.
 - **Hybrid.** The same ratchet, but a triggered stop only exits if the model agrees the position is worth less than the stop.
 
@@ -166,7 +255,7 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 | Kill switch | Persists on disk, survives restart, auto-trips on loss limit, repeated order errors, persistent break or a stalled heartbeat. Resting orders also carry an exchange-side `expiration_time` as a dead-man switch. |
 | Fee-correct PnL | Exact fee formula with round-up. Uses exchange-reported fees when present. Wins and losses are labelled after fees at settlement. |
 | Data recorder, fill simulator, TCA, alerts, audit log | Recorder: `marketdata/`. Fill simulator: `paper/` (queue position, trade-through fills). TCA: `tca/` (markouts). Alerts: Telegram or webhook. Audit log: hash-chained JSONL, checked with `npm run audit:verify`. |
-| Tests / CI | 87 tests, including an engine integration test and an end-to-end research pipeline test on synthetic data. |
+| Tests / CI | 172 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
 
 ## Things you must do yourself
 
@@ -188,9 +277,9 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 |---|---|
 | 0 Lockdown | Port scan shows only SSH. Live flag only at deploy. Old key revoked. |
 | 1–2 Core | Tests pass. On Kalshi **demo**, 500+ orders with zero reconciliation breaks, orphans or duplicates. A kill-switch drill cancels everything within 5 s and survives restart. |
-| 3 Data & model | At least 1,000 windows recorded. Out-of-sample, fee-inclusive net edge 95% CI lower bound above 0. Deflated Sharpe above 0. Brier better than market. Calibration within ±3 pp. |
+| 3 Data & model | At least 1,000 windows recorded. Out-of-sample, fee-inclusive net edge 95% CI lower bound above 0. Log loss beats the calibrated market (DM p < 0.05). DSR probability above 0.95, PBO below 0.2. Calibration within 1.5¢ in every price and time-to-close slice. Backtest shows $1–$10 average profit per trade at the chosen bankroll. |
 | 4 Shadow | The same gates on new data. Max drawdown under 15%. Maker markouts no worse than half the quoted edge. |
-| 5 Pilot | $50–$100, 1–2 contracts per order, 2% window cap, $5 daily loss limit. At least 200 fills, live edge at least 50% of paper edge, zero breaks. |
+| 5 Pilot | 2 weeks at 10–20% size (`RISK_MAX_CONTRACTS_PER_ORDER`, `STRATEGY_TARGET_EV_USD`), 2% window cap, 3% daily loss stop. At least 200 fills, realized edge per contract at least 50% of backtest edge, zero breaks. |
 | 6 Ramp | Double capital at most once per clean month. |
 
 ## Legacy code

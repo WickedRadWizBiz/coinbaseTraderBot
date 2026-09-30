@@ -41,7 +41,10 @@ test('loader rejects mismatched features and malformed weights', () => {
 });
 
 test('go-live gates: enough windows, beats market Brier, calibrated, positive edge CI', () => {
-  const good = { passed: true, nWindows: 1500, brierModel: 0.2, brierMarket: 0.21, maxCalibrationErrorPp: 2, netEdgeCiLow: 0.004, deflatedSharpe: 0.5, evaluatedAt: 'x' };
+  const good = {
+    passed: true, nWindows: 1500, brierModel: 0.2, brierMarket: 0.21, maxCalibrationErrorPp: 2, netEdgeCiLow: 0.004, deflatedSharpe: 0.5, evaluatedAt: 'x',
+    logLossModel: 0.60, logLossMarketCal: 0.61, dmPValue: 0.01, maxExcessCalibrationPp: 0.5, dsrProbability: 0.97, pbo: 0.1,
+  };
   assert.deepEqual(MetaModel.fromJson(JSON.stringify(mlp({ validation: good }))).liveBlockers(), []);
   const few = MetaModel.fromJson(JSON.stringify(mlp({ validation: { ...good, nWindows: 200 } })));
   assert.ok(few.liveBlockers().some((b) => b.includes('windows')));
@@ -49,6 +52,13 @@ test('go-live gates: enough windows, beats market Brier, calibrated, positive ed
   assert.ok(worse.liveBlockers().some((b) => b.includes('Brier')));
   const neg = MetaModel.fromJson(JSON.stringify(mlp({ validation: { ...good, netEdgeCiLow: -0.001 } })));
   assert.ok(neg.liveBlockers().some((b) => b.includes('edge')));
+  // Relaxed-spec gates: beat the calibrated market on log loss (DM p < 0.05), DSR > 0.95, PBO < 0.2.
+  for (const [patch, word] of [[{ dmPValue: 0.2 }, 'Diebold'], [{ logLossModel: 0.62 }, 'log loss'], [{ dsrProbability: 0.9 }, 'deflated Sharpe probability'], [{ pbo: 0.3 }, 'PBO'], [{ maxExcessCalibrationPp: 2 }, 'slice']] as const) {
+    const m = MetaModel.fromJson(JSON.stringify(mlp({ validation: { ...good, ...patch } })));
+    assert.ok(m.liveBlockers().some((b) => b.includes(word)), word);
+  }
+  const { dmPValue: _dm, ...noDm } = good;
+  assert.ok(MetaModel.fromJson(JSON.stringify(mlp({ validation: noDm }))).liveBlockers().some((b) => b.includes('Diebold')));
 });
 
 test('Brier, reliability and Platt scaling', () => {

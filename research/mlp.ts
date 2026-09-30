@@ -40,7 +40,7 @@ export function predictLogits(layers: DenseLayer[], norm: Normalization, X: numb
   return X.map((x) => {
     let h = x.map((v, j) => (Number.isFinite(v) ? (v - norm.mean[j]) / norm.std[j] : 0));
     for (const l of layers) h = forward(l, h);
-    return h[0] + (Number.isFinite(x[residual]) ? x[residual] : 0);
+    return h[0] + residualOf(x, residual);
   });
 }
 
@@ -55,22 +55,28 @@ function initLayers(d: number, hidden: number, seed: number): DenseLayer[] {
   ];
 }
 
-function loss(layers: DenseLayer[], Xn: number[][], Xraw: number[][], y: number[], residual: number, l2: number): number {
-  let s = 0;
+const residualOf = (x: number[], residual: number) => (residual >= 0 && Number.isFinite(x[residual]) ? x[residual] : 0);
+
+function loss(layers: DenseLayer[], Xn: number[][], Xraw: number[][], y: number[], residual: number, l2: number, w?: number[]): number {
+  let s = 0, ws = 0;
   for (let i = 0; i < Xn.length; i++) {
     let h = Xn[i];
     for (const l of layers) h = forward(l, h);
-    const p = Math.min(1 - 1e-9, Math.max(1e-9, sigmoid(h[0] + Xraw[i][residual])));
-    s += y[i] ? -Math.log(p) : -Math.log(1 - p);
+    const p = Math.min(1 - 1e-9, Math.max(1e-9, sigmoid(h[0] + residualOf(Xraw[i], residual))));
+    const wi = w?.[i] ?? 1;
+    s += wi * (y[i] ? -Math.log(p) : -Math.log(1 - p));
+    ws += wi;
   }
   let reg = 0;
-  for (const l of layers) for (const row of l.weights) for (const w of row) reg += w * w;
-  return s / Xn.length + l2 * reg;
+  for (const l of layers) for (const row of l.weights) for (const wt of row) reg += wt * wt;
+  return s / Math.max(1e-12, ws) + l2 * reg;
 }
 
+/** `w` / `wval`: row weights (default 1). The gradient is the weighted mean. */
 export function train(
-  X: number[][], y: number[], Xval: number[][], yval: number[], o: TrainOptions,
+  X: number[][], y: number[], Xval: number[][], yval: number[], o: TrainOptions, w?: number[], wval?: number[],
 ): { layers: DenseLayer[]; norm: Normalization; valLoss: number; epochs: number } {
+  const wsum = w ? w.reduce((a, b) => a + b, 0) : X.length;
   const norm = fitNormalization(X);
   const Xn = normalize(X, norm);
   const Xvn = normalize(Xval, norm);
@@ -88,8 +94,9 @@ export function train(
       // Forward with cached activations.
       const acts: number[][] = [Xn[i]];
       for (const l of layers) acts.push(forward(l, acts[acts.length - 1]));
-      const p = sigmoid(acts[acts.length - 1][0] + X[i][o.residual]);
-      let delta = [p - y[i]]; // dL/dz at output
+      const p = sigmoid(acts[acts.length - 1][0] + residualOf(X[i], o.residual));
+      const scale = ((w?.[i] ?? 1) * Xn.length) / wsum; // weighted mean, reusing the /n below
+      let delta = [(p - y[i]) * scale]; // dL/dz at output
       for (let li = layers.length - 1; li >= 0; li--) {
         const l = layers[li];
         const input = acts[li];
@@ -124,7 +131,7 @@ export function train(
       }
     }
     if (epoch % 5 === 0 || epoch === o.maxEpochs) {
-      const val = loss(layers, Xvn, Xval, yval, o.residual, 0);
+      const val = loss(layers, Xvn, Xval, yval, o.residual, 0, wval);
       if (val < best.val - 1e-7) best = { layers: structuredClone(layers), val, epoch };
       else if (epoch - best.epoch > o.patience) break;
     }

@@ -72,6 +72,12 @@ export class Tca {
     }
   }
 
+  /** Average 60 s markout of maker fills (negative = picked off), for the adverse-selection buffer. */
+  makerMarkout60(): { n: number; avg: number | null } {
+    const xs = this.recent.filter((r) => !r.isTaker && typeof r.markouts['60s'] === 'number').map((r) => r.markouts['60s'] as number);
+    return { n: xs.length, avg: xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null };
+  }
+
   summary(): Record<string, unknown> {
     const rows = this.recent;
     const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);

@@ -108,9 +108,10 @@ test('flat position resets the ratchet', () => {
 test('backtester compares all exit policies on identical data', async () => {
   const dir = path.join(tmpDir(), 'rec');
   writeSyntheticRecordings(dir, { windows: 8, seed: 9, marketNoise: 0.05 });
-  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both' });
+  // Continuous cadence + Kelly: an exit-policy comparison with plenty of trades.
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both', STRATEGY_CADENCE: 'continuous' });
   const out: Record<string, Awaited<ReturnType<typeof runBacktest>>> = {};
-  for (const exitPolicy of ['hold', 'fair_value', 'liquidity_ratchet', 'hybrid', 'confluence_ratchet'] as const) {
+  for (const exitPolicy of ['hold', 'fair_value', 'take_profit', 'liquidity_ratchet', 'hybrid', 'confluence_ratchet'] as const) {
     out[exitPolicy] = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy });
   }
   assert.equal(out.hold.exits.orders, 0, 'hold never exits early');

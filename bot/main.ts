@@ -15,6 +15,9 @@ import { KalshiWs } from './kalshi/ws';
 import { MarketData, Recorder } from './marketdata/marketData';
 import { MetaModel } from './model/metaModel';
 import { loadVolProfile, type VolProfile } from './model/volSeasonality';
+import { loadCalendar } from './model/calendar';
+import { ModelHealth } from './model/modelHealth';
+import { EquityGuard } from './risk/equityGuard';
 import { BalanceMonitor, type MonitorState } from './vault/balanceMonitor';
 import { Vault } from './vault/vault';
 import { readJson } from './util/persist';
@@ -102,8 +105,12 @@ async function main(): Promise<void> {
   const vault = new Vault(cfg.vault, path.join(cfg.dataDir, 'vault.json'));
   const balanceMonitorPath = path.join(cfg.dataDir, 'balance_monitor.json');
   const balanceMonitor = new BalanceMonitor(readJson<MonitorState>(balanceMonitorPath) ?? {});
-  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath });
   const tca = new Tca(path.join(cfg.dataDir, 'tca'), (t) => md.books.get(t)?.mid());
+  const equityGuard = new EquityGuard({ ddScaleAt: cfg.strategy.ddScaleAt, weeklyLossPause: cfg.strategy.weeklyLossPause }, path.join(cfg.dataDir, 'equity_guard.json'));
+  const modelHealth = new ModelHealth({ minWindows: cfg.strategy.modelHealthMinWindows }, path.join(cfg.dataDir, 'model_health.json'));
+  const calendar = loadCalendar(path.resolve(process.env.MACRO_CALENDAR_PATH ?? './params/calendar.json'));
+  if (!calendar) log.info('no macro calendar (params/calendar.json): calendar features unavailable');
+  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar });
 
   // Execution events -> OMS (same path for paper and live).
   if (paper) {
