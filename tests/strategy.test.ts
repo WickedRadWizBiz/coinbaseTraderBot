@@ -8,6 +8,7 @@ const cfg: StrategyConfig = {
   style: 'maker', series: ['KXBTC15M'], kellyFraction: 0.25, minEdge: 0.02, takerBuffer: 0.01,
   inventorySkewPerContract: 0.002, requoteThreshold: 0.01, fastMoveSigmas: 3, fastMoveWindowSec: 5, orderTtlSec: 60,
   exitPolicy: 'fair_value', huntTargetMargin: 0.02, huntMinConfluence: 2, ratchetMinFillRatio: 1, ratchetMinWallAgeSec: 3, ratchetSlippageTicks: 1,
+  sessionRisk: {}, huntSessionGuard: true, huntTransitionBufferMin: 10, volSeasonality: false, volProfilePath: 'params/vol_profile.json',
 };
 
 const view = (o: Partial<MarketView> = {}): MarketView => ({

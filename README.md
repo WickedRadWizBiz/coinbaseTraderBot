@@ -72,6 +72,13 @@ The old `metaLearningEngine.ts` and `plasticityEngine.ts` (tfjs-node) retrained 
      - time of day (only eligible once there are 14+ days of data)
 
      The offline trainer searches over feature sets (base, base plus each group, all) along with network size. Every variant counts toward the Deflated Sharpe, and holdout permutation importance shows which features actually help. Production and research compute features through the same `FeatureHub`, and a test checks they are identical. Features the old model had that aren't ported (macro goal, trailing state, latency, funding, confluence labels, USDT dominance) had no testable basis for this contract.
+   - **Market sessions** (`bot/model/sessions.ts`) are computed from each venue's local hours through IANA time zones, so US and UK daylight-saving shifts are handled. The sessions are Asia, London, London/NY overlap, New York, twilight (US close to Asia open) and weekend.
+     - **In learning:** session indicators, time to and since a session change, the US-open window (09:30–10:00 ET, the documented ETF-era volatility spike), Monday Asia open, a seasonal volatility ratio, and, as weak-evidence candidates only, Asian-range position and breakout. All of these are eligible only with 14+ days of data.
+     - **In logic:**
+       - an intraday volatility profile scales the EWMA sigma used for fair value, following Andersen & Bollerslev (1997). It is fitted and validated out of sample by `npm run research:sessions` and applied only if it improved accuracy;
+       - reduce-only per-session risk multipliers (`SESSION_RISK`), with values recommended from backtest evidence;
+       - a session guard that keeps hunt mode's order-book stops out of twilight and weekend liquidity and away from session changes.
+     - The dashboard shows the session card with venue clocks and a countdown.
 3. **Go-live gates enforced in code.** Live mode refuses to start unless the model's validation report shows:
    - at least 1,000 holdout windows
    - a Brier score better than the market mid
@@ -108,6 +115,8 @@ npm run research:dataset -- --recordings data/recordings
 npm run research:train                                   # -> params/model.candidate.json
 npm run research:backtest -- --model params/model.candidate.json --grid 0.01,0.02,0.03 --annotate
 ```
+
+`npm run research:sessions` reports volatility, Kalshi spreads and depth, and trade activity for each session. It fits and validates the intraday volatility profile (`params/vol_profile.json`), backtests P&L by session, and prints a recommended `SESSION_RISK` along with the evidence behind it.
 
 `--exits hold,fair_value,liquidity_ratchet,hybrid` compares exit policies on identical data (`bot/strategy/exitPolicies.ts`):
 - **Liquidity ratchet.** Stops sit at exit-side book levels big enough to absorb the whole position (`--ratchet-fill`) that have persisted for `--ratchet-age` seconds. The stop ratchets up as price moves past higher walls. If price comes back down to the stop, the bot exits with an immediate-or-cancel order limited to the stop minus `--ratchet-slip` ticks. A gap through the stop falls back to the next wall down.

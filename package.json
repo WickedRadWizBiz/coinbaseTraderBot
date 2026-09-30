@@ -19,6 +19,7 @@
     "research:dataset": "tsx research/buildDataset.ts",
     "research:train": "tsx research/trainMetaModel.ts",
     "research:backtest": "tsx research/backtest.ts",
+    "research:sessions": "tsx research/sessions.ts",
     "audit:verify": "tsx scripts/verifyAudit.ts"
   },
   "dependencies": {

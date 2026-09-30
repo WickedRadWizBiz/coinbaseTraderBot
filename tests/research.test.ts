@@ -57,3 +57,26 @@ test('research pipeline runs end to end on synthetic recordings', async () => {
   assert.ok(bt.windows.size > 0);
   assert.ok(Number.isFinite(bt.pnl));
 });
+
+import { fitAndValidateVolProfile, measureSessions, recommendSessionRisk } from '../research/sessions';
+
+test('session research: measures sessions, and will not validate a profile on too few days', async () => {
+  const dir = path.join(tmpDir(), 'rec');
+  writeSyntheticRecordings(dir, { windows: 10, seed: 4 });
+  const m = await measureSessions(dir);
+  assert.ok(m.returns.length > 100);
+  assert.ok(m.stats.some((s) => s.hours > 0 && s.medianSpread !== null));
+  const p = await fitAndValidateVolProfile(dir, m.returns);
+  assert.equal(p.validation!.improved, false, 'one day of data can never pass');
+  assert.ok(p.assets.BTC && p.assets['*']);
+});
+
+test('session risk recommendations are reduce-only and need enough windows', () => {
+  const lose = Array.from({ length: 40 }, (_, i) => -0.05 + (i % 3) * 0.001);
+  const flat = Array.from({ length: 40 }, (_, i) => (i % 2 ? 0.02 : -0.02));
+  const rec = recommendSessionRisk(new Map([['twilight', lose], ['london', flat], ['asia', [0.1]]]), []);
+  assert.deepEqual(rec.profile.twilight, { sizeMult: 0 });
+  assert.deepEqual(rec.profile.london, { sizeMult: 0.5 });
+  assert.equal(rec.profile.asia, undefined);
+  assert.match(String(rec.evidence.find((e) => e.session === 'asia')!.recommendation), /insufficient/);
+});

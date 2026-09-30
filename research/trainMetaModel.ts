@@ -34,10 +34,10 @@ function arg(name: string, def: string): string {
 
 export const MIN_DAYS_FOR_TIME = 14;
 
-export const DEFAULT_SETS = ['base', 'base+micro', 'base+momentum', 'base+spot', 'base+macro', 'base+macro+confluence', 'base+momentum+macro+confluence', 'base+time', 'all'];
+export const DEFAULT_SETS = ['base', 'base+micro', 'base+momentum', 'base+spot', 'base+macro', 'base+macro+confluence', 'base+momentum+macro+confluence', 'base+session', 'base+session+macro+confluence', 'base+time', 'all'];
 
 export function resolveSet(spec: string): string[] {
-  const groups: FeatureGroup[] = spec === 'all' ? ['base', 'micro', 'momentum', 'spot', 'macro', 'confluence', 'time'] : (spec.split('+') as FeatureGroup[]);
+  const groups: FeatureGroup[] = spec === 'all' ? ['base', 'micro', 'momentum', 'spot', 'macro', 'confluence', 'session', 'time'] : (spec.split('+') as FeatureGroup[]);
   return featuresInGroups(groups);
 }
 
@@ -76,7 +76,9 @@ export function trainMetaModel(rows: DatasetRow[], opts: TrainOpts = {}): TrainR
   const sets = (opts.sets ?? DEFAULT_SETS).map((spec) => {
     const names = resolveSet(spec).filter((n) => {
       if (FEATURES[n].group === 'base') return true;
-      if (FEATURES[n].group === 'time' && devDays < MIN_DAYS_FOR_TIME) {
+      // Session and time-of-day features alias to "which part of the sample" until
+      // the data spans many days (every session recurring many times).
+      if ((FEATURES[n].group === 'time' || FEATURES[n].group === 'session') && devDays < MIN_DAYS_FOR_TIME) {
         (dropped[spec] ??= []).push(`${n} (needs ${MIN_DAYS_FOR_TIME}+ days, have ${devDays})`);
         return false;
       }

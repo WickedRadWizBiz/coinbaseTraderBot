@@ -160,7 +160,7 @@ export interface HuntParams {
 
 export const DEFAULT_HUNT: HuntParams = { targetMargin: 0.02, minConfluence: 2 };
 
-export type HuntEvent = 'activated' | 'deactivated_confluence' | 'deactivated_giveback' | RatchetEvent;
+export type HuntEvent = 'activated' | 'deactivated_confluence' | 'deactivated_giveback' | 'deactivated_session' | RatchetEvent;
 
 export interface HuntInput {
   position: number;
@@ -174,6 +174,8 @@ export interface HuntInput {
   now: number;
   tick: number;
   fees: FeeSchedule;
+  /** Reason hunt mode is unsafe in the current market session (see sessionRisk.ts), if any. */
+  sessionBlocked?: string;
 }
 
 export interface HuntDecision {
@@ -217,6 +219,16 @@ export class ConfluenceRatchetExit {
     const target = this.entryQ! + this.h.targetMargin;
     const oriented = Number.isFinite(i.confluence) ? sign * i.confluence : NaN;
     let event: HuntEvent;
+
+    // Thin/transitional session liquidity: book-anchored stops are unreliable.
+    if (i.sessionBlocked) {
+      if (this.active) {
+        this.active = false;
+        this.ratchet.reset();
+        return { mode: 'fair_value', event: 'deactivated_session', target };
+      }
+      return { mode: 'fair_value', target };
+    }
 
     if (!this.active) {
       if (i.sideBid !== undefined && i.sideBid >= target - 1e-9 && oriented >= this.h.minConfluence) {

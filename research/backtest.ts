@@ -25,6 +25,9 @@ import path from 'path';
 import { loadConfig, type StrategyConfig, type RiskLimits } from '../bot/config';
 import { DEFAULT_FEES } from '../bot/fees';
 import { computeFeatureMap } from '../bot/model/featureEngine';
+import { effectiveSigma, loadVolProfile, type VolProfile } from '../bot/model/volSeasonality';
+import { sessionRiskFor, huntBlockedBySession, type SessionRiskProfile } from '../bot/model/sessionRisk';
+import { sessionState } from '../bot/model/sessions';
 import { fairValue, SETTLEMENT_AVG_SEC } from '../bot/model/fairValue';
 import { MetaModel } from '../bot/model/metaModel';
 import type { OrderIntent } from '../bot/oms/oms';
@@ -62,8 +65,12 @@ export interface ExitStats {
   avgSlippage: number | null;
 }
 
+export interface SessionBreakdown { windows: number; pnl: number; contracts: number; fees: number }
+
 export interface BacktestResult {
   exitPolicy: ExitPolicyName;
+  /** P&L attributed to the session in effect when each 15-minute window opened. */
+  bySession: Record<string, SessionBreakdown>;
   exits: ExitStats;
   minEdge: number;
   windows: Map<number, { pnl: number; contracts: number; fees: number }>;
@@ -75,7 +82,7 @@ export interface BacktestResult {
 
 export async function runBacktest(
   dir: string, model: MetaModel, strategy: StrategyConfig, limits: RiskLimits, bankroll0: number,
-  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams; hunt?: HuntParams } = {},
+  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams; hunt?: HuntParams; volProfile?: VolProfile; applyVolSeasonality?: boolean; sessionRisk?: SessionRiskProfile; huntSessionGuard?: boolean; huntTransitionBufferMin?: number } = {},
 ): Promise<BacktestResult> {
   const policy = opts.exitPolicy ?? 'fair_value';
   const st = new ReplayState();
@@ -83,7 +90,7 @@ export async function runBacktest(
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => DEFAULT_FEES, () => st.now);
   const gateway = new RiskGateway(limits);
   const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, avgSlippage: null };
-  const res: BacktestResult = { exitPolicy: policy, exits, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
+  const res: BacktestResult = { exitPolicy: policy, bySession: {}, exits, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
   const closeOf = new Map<string, number>();
   const ratchets = new Map<string, LiquidityRatchet>();
   const hunts = new Map<string, ConfluenceRatchetExit>();
@@ -144,6 +151,10 @@ export async function runBacktest(
             b.pnl += p.realized ?? 0;
             res.windows.set(m.closeTime, b);
             res.pnl += p.realized ?? 0;
+            const sk = sessionState(m.openTime).key;
+            const sb = res.bySession[sk] ?? { windows: 0, pnl: 0, contracts: 0, fees: 0 };
+            sb.windows++; sb.pnl += p.realized ?? 0; sb.contracts += b.contracts; sb.fees += b.fees;
+            res.bySession[sk] = sb;
           }
         }
         st.markets.delete(m.ticker);
@@ -165,10 +176,11 @@ export async function runBacktest(
       }
       const tauSec = (m.closeTime - st.now) / 1000;
       const observed = tauSec <= SETTLEMENT_AVG_SEC ? idx!.average(m.closeTime - 60_000, st.now, 3000)?.avg : undefined;
-      const fv = fairValue({ spot: spot.value, strike, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, tauSec, observedAvg: observed });
+      const sigmaFv = opts.applyVolSeasonality ? effectiveSigma(vol.sigmaPerSqrtSec, opts.volProfile, m.asset, st.now, m.closeTime) : vol.sigmaPerSqrtSec;
+      const fv = fairValue({ spot: spot.value, strike, sigmaPerSqrtSec: sigmaFv, tauSec, observedAvg: observed });
       if (!fv) continue;
       const mid = (bid.price + ask.price) / 2;
-      const fmap = computeFeatureMap({ now: st.now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma, inWindow: fv.regime !== 'pre_window', book, micro: st.features.micro.get(m.ticker), index: idx!, spot: st.spot.get(m.asset), asset: m.asset, usdtd: st.usdtd, btcd: st.btcd });
+      const fmap = computeFeatureMap({ now: st.now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma, inWindow: fv.regime !== 'pre_window', book, micro: st.features.micro.get(m.ticker), index: idx!, spot: st.spot.get(m.asset), asset: m.asset, usdtd: st.usdtd, btcd: st.btcd, closeTs: m.closeTime, volProfile: opts.volProfile, asiaRange: st.features.asiaRange.get(m.asset) });
       const pYes = model.predict(fmap, fv.pYes);
       const ret = idx!.trailingLogReturn(st.now, strategy.fastMoveWindowSec * 1000);
       const fastMove = ret !== undefined && Math.abs(ret) > strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(strategy.fastMoveWindowSec);
@@ -210,6 +222,8 @@ export async function runBacktest(
 
       // Confluence ratchet: fair-value exit normally; hunt mode (ratchet exit, no other reductions)
       // only while the contract has beaten its entry fair value AND confluence agrees.
+      const sess = sessionState(st.now);
+      const sessRisk = sessionRiskFor(opts.sessionRisk ?? {}, sess);
       let huntMode = false;
       if (policy === 'confluence_ratchet') {
         const posH = pos.position(m.ticker);
@@ -218,10 +232,11 @@ export async function runBacktest(
         const d = h.update({
           position: posH, qSide: posH >= 0 ? pYes : 1 - pYes, sideBid: posH > 0 ? bid.price : posH < 0 ? 1 - ask.price : undefined,
           confluence: fmap.conf_count, book, now: st.now, tick: m.tickSize, fees: DEFAULT_FEES,
+          sessionBlocked: (opts.huntSessionGuard ?? true) ? huntBlockedBySession(sess, opts.huntTransitionBufferMin ?? 10) : undefined,
         });
         huntMode = d.mode === 'hunt';
         if (d.event === 'activated') exits.huntActivations++;
-        if (d.event === 'deactivated_confluence' || d.event === 'deactivated_giveback') exits.huntDeactivations++;
+        if (d.event === 'deactivated_confluence' || d.event === 'deactivated_giveback' || d.event === 'deactivated_session') exits.huntDeactivations++;
         if (d.event === 'gapped') exits.gaps++;
         if (d.plan && !pending.has(m.ticker)) {
           exits.ratchetTriggers++;
@@ -231,10 +246,10 @@ export async function runBacktest(
 
       const plan = decide({
         ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: pos.position(m.ticker), bankroll,
-        maxOrderRiskUsd: limits.maxOrderRiskFrac * bankroll, maxContracts: limits.maxContractsPerOrder, minSidePrice: limits.minSidePrice,
+        maxOrderRiskUsd: limits.maxOrderRiskFrac * bankroll * sessRisk.sizeMult, maxContracts: Math.floor(limits.maxContractsPerOrder * sessRisk.sizeMult * 100) / 100, minSidePrice: limits.minSidePrice,
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,
         restingBid: q('bid'), restingAsk: q('ask'), nowSec: Math.floor(st.now / 1000), closeSec: Math.floor(m.closeTime / 1000),
-      }, strategy, {
+      }, { ...strategy, minEdge: strategy.minEdge + sessRisk.minEdgeAdd, inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult }, {
         exits: policy === 'fair_value' || policy === 'hybrid' || (policy === 'confluence_ratchet' && !huntMode),
         blockReductions: huntMode,
       });
@@ -297,10 +312,18 @@ async function main() {
     minConfluence: Number(arg('hunt-confluence', String(DEFAULT_HUNT.minConfluence))),
   };
   const variants = grid.length * policies.length;
+  // Price with the seasonal volatility profile when given (mirror production).
+  const vpPath = arg('vol-profile', '');
+  const volProfile = vpPath ? loadVolProfile(vpPath) : undefined;
 
   const results: BacktestResult[] = [];
   for (const minEdge of grid) {
-    for (const exitPolicy of policies) results.push(await runBacktest(dir, model, { ...cfg.strategy, minEdge }, cfg.risk, bankroll, { exitPolicy, ratchet, hunt }));
+    for (const exitPolicy of policies) {
+      results.push(await runBacktest(dir, model, { ...cfg.strategy, minEdge }, cfg.risk, bankroll, {
+        exitPolicy, ratchet, hunt, volProfile, applyVolSeasonality: Boolean(volProfile),
+        sessionRisk: cfg.strategy.sessionRisk, huntSessionGuard: cfg.strategy.huntSessionGuard, huntTransitionBufferMin: cfg.strategy.huntTransitionBufferMin,
+      }));
+    }
   }
   const allWindows = [...new Set(results.flatMap((r) => [...r.windows.keys()]))].sort((a, b) => a - b);
 
@@ -321,6 +344,11 @@ async function main() {
     huntOn: r.exits.huntActivations, huntOff: r.exits.huntDeactivations,
     avgSlippage: r.exits.avgSlippage === null ? null : +r.exits.avgSlippage.toFixed(4),
   })));
+  console.log('P&L by session at window open (fee-inclusive):');
+  console.table(results.flatMap((r) => Object.entries(r.bySession).map(([session, b]) => ({
+    exit: r.exitPolicy, minEdge: r.minEdge, session, windows: b.windows, contracts: +b.contracts.toFixed(2), fees: +b.fees.toFixed(2),
+    pnl: +b.pnl.toFixed(2), perContract: b.contracts ? +(b.pnl / b.contracts).toFixed(4) : null,
+  }))));
   if (results.length > 1) {
     const matrix = allWindows.map((w) => results.map((r) => r.windows.get(w)?.pnl ?? 0));
     console.log('PBO (CSCV):', pbo(matrix));

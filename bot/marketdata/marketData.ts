@@ -142,6 +142,7 @@ export class MarketData extends EventEmitter {
     const asset = this.cfg.indexIdMap[indexId];
     if (!asset) return;
     this.index.get(asset)?.add(value, ts);
+    this.features.onIndex(asset, value, ts);
     this.recorder.write('index', { asset, value, ts, src: this.indexSource });
   }
 
@@ -261,6 +262,7 @@ export class MarketData extends EventEmitter {
           this.recorder.write('spot', { asset, value, ts });
           if (feedIndex) {
             this.index.get(asset)?.add(value, ts);
+            this.features.onIndex(asset, value, ts);
             this.recorder.write('index', { asset, value, ts, src: 'proxy' });
           }
         } catch { /* ignore */ }

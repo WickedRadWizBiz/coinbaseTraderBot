@@ -54,6 +54,7 @@ export class ReplayState {
         let tr = this.index.get(e.asset);
         if (!tr) { tr = new IndexTracker(e.asset); this.index.set(e.asset, tr); }
         tr.add(e.value, e.ts ?? e.t);
+        this.features.onIndex(e.asset, e.value, e.ts ?? e.t);
         break;
       }
       case 'dominance':

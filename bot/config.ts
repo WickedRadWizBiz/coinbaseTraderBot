@@ -3,6 +3,7 @@
 // parameter means a reviewed commit and a redeploy.
 
 import fs from 'fs';
+import { parseSessionRisk, type SessionRiskProfile } from './model/sessionRisk';
 import path from 'path';
 
 export type TradingMode = 'paper' | 'shadow' | 'live';
@@ -63,6 +64,14 @@ export interface StrategyConfig {
   ratchetMinFillRatio: number;
   ratchetMinWallAgeSec: number;
   ratchetSlippageTicks: number;
+  /** Per-session risk multipliers (can only reduce risk). */
+  sessionRisk: SessionRiskProfile;
+  /** Block hunt mode in twilight/weekend liquidity and near session changes. */
+  huntSessionGuard: boolean;
+  huntTransitionBufferMin: number;
+  /** Apply a fitted, validated intraday volatility profile to fair value. */
+  volSeasonality: boolean;
+  volProfilePath: string;
 }
 
 export interface Config {
@@ -251,6 +260,11 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     ratchetMinFillRatio: num(env, 'RATCHET_MIN_FILL_RATIO', 1, 0.1, 20),
     ratchetMinWallAgeSec: num(env, 'RATCHET_MIN_WALL_AGE_SEC', 3, 0, 120),
     ratchetSlippageTicks: num(env, 'RATCHET_SLIPPAGE_TICKS', 1, 0, 10),
+    sessionRisk: (() => { try { return parseSessionRisk(env.SESSION_RISK); } catch (e) { throw new ConfigError((e as Error).message); } })(),
+    huntSessionGuard: bool(env, 'HUNT_SESSION_GUARD', true),
+    huntTransitionBufferMin: num(env, 'HUNT_TRANSITION_BUFFER_MIN', 10, 0, 120),
+    volSeasonality: bool(env, 'VOL_SEASONALITY', true),
+    volProfilePath: path.resolve(env.VOL_PROFILE_PATH ?? './params/vol_profile.json'),
   };
 
   const dataDir = path.resolve(env.DATA_DIR ?? './data');

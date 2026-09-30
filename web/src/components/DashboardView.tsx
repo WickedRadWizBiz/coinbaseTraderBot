@@ -1,5 +1,6 @@
 import { Power, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { api, clock, pct, px, usd } from '../api';
+import { MarketSessionCard } from './MarketSessionCard';
 import { OrderBookMonitor } from './OrderBookMonitor';
 import { Panel } from './Panel';
 import { usePoll } from './usePoll';
@@ -81,6 +82,8 @@ export function DashboardView() {
           </button>
         </div>
       )}
+
+      {s?.session && <MarketSessionCard session={s.session} />}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <Panel title="Capital & Risk" className="!p-0" bodyClass="h-full" flush>

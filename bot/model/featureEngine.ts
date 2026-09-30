@@ -16,8 +16,10 @@
 import type { OrderBook } from '../marketdata/orderBook';
 import type { IndexTracker } from '../marketdata/indexTracker';
 import { clamp, logit } from '../util/num';
+import { sessionState, zoneTime } from './sessions';
+import { EWMA_LOOKBACK_SEC, seasonalVarianceRatio, type VolProfile } from './volSeasonality';
 
-export type FeatureGroup = 'base' | 'micro' | 'momentum' | 'spot' | 'macro' | 'confluence' | 'time';
+export type FeatureGroup = 'base' | 'micro' | 'momentum' | 'spot' | 'macro' | 'confluence' | 'session' | 'time';
 
 // ---- Per-market microstructure state ----------------------------------------
 
@@ -68,9 +70,55 @@ export class MicroTracker {
   }
 }
 
+/**
+ * High/low of the settlement index during the most recent Asian session
+ * (Tokyo date). Complete once the Asian session has ended and was observed
+ * from (near) its start without large gaps.
+ */
+export class AsiaRangeTracker {
+  private day: string | undefined;
+  private hi = 0;
+  private lo = 0;
+  private first = 0;
+  private last = 0;
+  private start = 0;
+  private maxGap = 0;
+
+  onIndex(value: number, ts: number): void {
+    const st = sessionState(ts);
+    if (st.key !== 'asia') return;
+    const day = zoneTime(ts, 'Asia/Tokyo').ymd;
+    if (day !== this.day) {
+      this.day = day; this.hi = value; this.lo = value; this.first = ts; this.last = ts; this.maxGap = 0; this.start = st.since ?? ts;
+      return;
+    }
+    if (ts < this.last) return;
+    this.hi = Math.max(this.hi, value);
+    this.lo = Math.min(this.lo, value);
+    this.maxGap = Math.max(this.maxGap, ts - this.last);
+    this.last = ts;
+  }
+
+  /** The completed range, usable during the following London / New York hours. */
+  range(now: number): { hi: number; lo: number } | undefined {
+    if (!this.day) return undefined;
+    const k = sessionState(now).key;
+    if (k !== 'london' && k !== 'london_ny_overlap' && k !== 'new_york') return undefined;
+    if (now - this.last > 16 * 3_600_000) return undefined;
+    if (this.first - this.start > 15 * 60_000 || this.maxGap > 10 * 60_000 || !(this.hi > this.lo)) return undefined;
+    return { hi: this.hi, lo: this.lo };
+  }
+}
+
 /** Shared event sink: production and replay both drive features through this. */
 export class FeatureHub {
   readonly micro = new Map<string, MicroTracker>();
+  readonly asiaRange = new Map<string, AsiaRangeTracker>();
+  onIndex(asset: string, value: number, ts: number): void {
+    let t = this.asiaRange.get(asset);
+    if (!t) { t = new AsiaRangeTracker(); this.asiaRange.set(asset, t); }
+    t.onIndex(value, ts);
+  }
   tracker(ticker: string): MicroTracker {
     let m = this.micro.get(ticker);
     if (!m) { m = new MicroTracker(); this.micro.set(ticker, m); }
@@ -100,6 +148,12 @@ export interface FeatureContext {
   /** USDT.D and BTC.D trackers (percent). */
   usdtd?: IndexTracker;
   btcd?: IndexTracker;
+  /** Contract close time (for the seasonal volatility ratio). */
+  closeTs?: number;
+  /** Fitted intraday volatility profile, when available. */
+  volProfile?: VolProfile;
+  /** Asian-session range tracker for this asset. */
+  asiaRange?: AsiaRangeTracker;
 }
 
 type Fn = (c: FeatureContext, cache: Cache) => number;
@@ -314,6 +368,50 @@ export const FEATURES: Record<string, { group: FeatureGroup; description: string
     const avail = factors.filter(Number.isFinite);
     if (avail.length < 3) return NA;
     return avail.reduce((a, x) => a + (x > 1 ? 1 : x < -1 ? -1 : 0), 0);
+  } },
+
+  // Order-flow excitation (Hawkes-style): exponentially-decayed Kalshi trade intensity,
+  // fast (10 s) vs slow (300 s) kernel. Bursts of self-exciting flow read > 0.
+  hawkes_excitation: { group: 'micro', description: 'log ratio of 10s vs 300s exponentially-decayed trade intensity (Hawkes-style burst)', fn: (c) => {
+    const t = c.micro?.tradesIn(c.now, 600_000) ?? [];
+    if (!t.length) return NA;
+    let fast = 0, slow = 0;
+    for (const x of t) {
+      const age = (c.now - x.ts) / 1000;
+      fast += x.count * Math.exp(-age / 10) / 10;
+      slow += x.count * Math.exp(-age / 300) / 300;
+    }
+    return clip(Math.log((fast + 1e-3) / (slow + 1e-3)), 8);
+  } },
+
+  // Market sessions (old: tradingSession card). DST-correct via IANA zones; see sessions.ts.
+  sess_asia: { group: 'session', description: 'Asian session (Tokyo/Hong Kong open)', fn: (c) => (sessionState(c.now).key === 'asia' ? 1 : 0) },
+  sess_london: { group: 'session', description: 'London session (NY closed)', fn: (c) => (sessionState(c.now).key === 'london' ? 1 : 0) },
+  sess_overlap: { group: 'session', description: 'London / New York overlap', fn: (c) => (sessionState(c.now).key === 'london_ny_overlap' ? 1 : 0) },
+  sess_new_york: { group: 'session', description: 'New York session (London closed)', fn: (c) => (sessionState(c.now).key === 'new_york' ? 1 : 0) },
+  sess_twilight: { group: 'session', description: 'US close -> Asia open transition (liquidity trough)', fn: (c) => (sessionState(c.now).key === 'twilight' ? 1 : 0) },
+  sess_weekend: { group: 'session', description: 'weekend regime (UTC Sat/Sun)', fn: (c) => (sessionState(c.now).key === 'weekend' ? 1 : 0) },
+  sess_min_to_transition: { group: 'session', description: 'log(1 + minutes until the next session change)', fn: (c) => Math.log1p(sessionState(c.now).minutesToTransition) },
+  sess_min_since_transition: { group: 'session', description: 'log(1 + minutes since the session began)', fn: (c) => Math.log1p(sessionState(c.now).minutesSinceTransition) },
+  us_open_window: { group: 'session', description: 'first 30 min after the NYSE open (ETF-era volatility spike)', fn: (c) => (sessionState(c.now).usOpenWindow ? 1 : 0) },
+  monday_asia_open: { group: 'session', description: 'first 3 h after the Monday Tokyo open', fn: (c) => (sessionState(c.now).mondayAsiaOpen ? 1 : 0) },
+  vol_season_ratio: { group: 'session', description: 'log seasonal variance ratio, contract window vs EWMA lookback (needs a fitted profile)', fn: (c) => {
+    if (!c.volProfile || c.closeTs === undefined) return NA;
+    return Math.log(seasonalVarianceRatio(c.volProfile, c.asset ?? '*', c.now, c.closeTs, EWMA_LOOKBACK_SEC));
+  } },
+  // Asian-range ideas from practitioner (ICT/SMC) literature: no peer-reviewed support; kept
+  // only as candidates the trainer can reject.
+  asia_range_pos: { group: 'session', description: 'index position vs completed Asian-session range (-1 low, +1 high; beyond = breakout) [weak evidence]', fn: (c) => {
+    const r = c.asiaRange?.range(c.now);
+    const S = c.index.latest()?.value;
+    if (!r || S === undefined) return NA;
+    return clip((S - (r.hi + r.lo) / 2) / ((r.hi - r.lo) / 2), 5);
+  } },
+  asia_range_break: { group: 'session', description: '+1 above / -1 below the completed Asian range, 0 inside [weak evidence]', fn: (c) => {
+    const r = c.asiaRange?.range(c.now);
+    const S = c.index.latest()?.value;
+    if (!r || S === undefined) return NA;
+    return S > r.hi ? 1 : S < r.lo ? -1 : 0;
   } },
 
   // Time (old: hourOfDay, dayOfWeek, tradingSession).

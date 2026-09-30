@@ -14,6 +14,7 @@ import type { ExchangeGateway } from './kalshi/types';
 import { KalshiWs } from './kalshi/ws';
 import { MarketData, Recorder } from './marketdata/marketData';
 import { MetaModel } from './model/metaModel';
+import { loadVolProfile, type VolProfile } from './model/volSeasonality';
 import { Oms } from './oms/oms';
 import { PaperExchange } from './paper/paperExchange';
 import { KillSwitch } from './risk/killSwitch';
@@ -60,6 +61,19 @@ async function main(): Promise<void> {
     }
   }
 
+  // Intraday volatility profile: applied to fair value only if enabled AND its own
+  // out-of-sample validation showed fair-value accuracy improved.
+  let volProfile: VolProfile | undefined;
+  const vp = loadVolProfile(cfg.strategy.volProfilePath);
+  if (vp && cfg.strategy.volSeasonality) {
+    if (vp.validation?.improved) {
+      volProfile = vp;
+      log.info(`applying intraday volatility profile ${vp.version}`);
+    } else {
+      log.warn(`vol profile ${vp.version} not applied: validation did not show improvement`);
+    }
+  }
+
   const signer = cfg.kalshiKeyId && cfg.kalshiPrivateKeyPath ? KalshiSigner.fromFile(cfg.kalshiKeyId, cfg.kalshiPrivateKeyPath) : undefined;
   const rest = new KalshiRest({ baseUrl: cfg.restBaseUrl, signer, subaccount: cfg.kalshiSubaccount });
   const indexIds = Object.keys(cfg.indexIdMap);
@@ -82,7 +96,7 @@ async function main(): Promise<void> {
     onPersistentBreak: (reason) => void kill.engage(reason, 'recon'),
   });
   const risk = new RiskGateway(cfg.risk);
-  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model });
+  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile });
   const tca = new Tca(path.join(cfg.dataDir, 'tca'), (t) => md.books.get(t)?.mid());
 
   // Execution events -> OMS (same path for paper and live).

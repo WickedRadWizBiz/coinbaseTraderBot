@@ -12,6 +12,7 @@ const GROUP_LABEL: Record<string, string> = {
   spot: 'Spot lead-lag (Coinbase)',
   macro: 'Macro: USDT.D / BTC.D (Binance × CoinGecko)',
   confluence: 'Confluence (agreement between factors)',
+  session: 'Market sessions (Asia / London / New York, DST-correct)',
   time: 'Time of day',
 };
 

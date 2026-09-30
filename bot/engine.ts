@@ -23,6 +23,10 @@ import { RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
 import { decide, MarketView, OrderPlan } from './strategy/fairValueStrategy';
 import { ConfluenceRatchetExit } from './strategy/exitPolicies';
+import { sessionState, type SessionState } from './model/sessions';
+import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
+import { effectiveSigma, type VolProfile } from './model/volSeasonality';
+import { floorCount } from './util/num';
 import { logger } from './util/log';
 
 const log = logger('engine');
@@ -45,6 +49,8 @@ export interface MarketStatus {
   /** Log-odds shift the model applied on top of fair value, and what drove it. */
   modelShift?: number;
   drivers?: Driver[];
+  /** Seasonally adjusted sigma actually used for fair value (equals sigma without a profile). */
+  sigmaPricing?: number;
   /** Exit mode: normal fair-value exit, or hunting a winner under the confluence ratchet. */
   exitMode?: 'fair_value' | 'hunt';
   huntTarget?: number;
@@ -65,6 +71,8 @@ export interface EngineDeps {
   kill: KillSwitch;
   recon: Reconciler;
   model: MetaModel;
+  /** Validated intraday volatility profile, applied to fair value when present. */
+  volProfile?: VolProfile;
   now?: () => number;
 }
 
@@ -133,6 +141,18 @@ export class Engine {
       this.d.alerter.notify('critical', 'heartbeat', 'Engine heartbeat stalled; cancelling all orders');
       void this.d.oms.cancelAll('heartbeat stalled');
     }
+  }
+
+  /** Current market session, its risk multipliers and the hunt guard, for the dashboard. */
+  sessionStatus(now = this.now()): SessionState & { risk: ReturnType<typeof sessionRiskFor>; huntBlocked?: string; volProfile?: { version: string; applied: boolean } } {
+    const st = sessionState(now);
+    const S = this.d.cfg.strategy;
+    return {
+      ...st,
+      risk: sessionRiskFor(S.sessionRisk, st),
+      huntBlocked: S.exitPolicy === 'confluence_ratchet' && S.huntSessionGuard ? huntBlockedBySession(st, S.huntTransitionBufferMin) : undefined,
+      volProfile: this.d.volProfile ? { version: this.d.volProfile.version, applied: true } : undefined,
+    };
   }
 
   haltReasons(): string[] {
@@ -262,12 +282,18 @@ export class Engine {
 
     const tauSec = (m.closeTime - now) / 1000;
     const observed = tauSec <= SETTLEMENT_AVG_SEC ? idx!.average(m.closeTime - SETTLEMENT_AVG_SEC * 1000, now, 3000)?.avg : undefined;
-    const fv = fairValue({ spot: spot.value, strike, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, tauSec, observedAvg: observed });
+    // Intraday volatility periodicity: scale the backward-looking EWMA sigma to the variance
+    // expected over this contract's remaining life (only with a validated profile).
+    const sigmaPricing = effectiveSigma(vol.sigmaPerSqrtSec, this.d.volProfile, m.asset, now, m.closeTime);
+    const fv = fairValue({ spot: spot.value, strike, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed });
     if (!fv) return block('fair value unavailable');
+    const sess = sessionState(now);
+    const sessRisk = sessionRiskFor(cfg.strategy.sessionRisk, sess);
     const mid = (bid.price + ask.price) / 2;
     const features = computeFeatureMap({
       now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma,
       inWindow: fv.regime !== 'pre_window', book, micro: md.features.micro.get(m.ticker), index: idx!, spot: md.spot.get(m.asset), asset: m.asset, usdtd: md.usdtd, btcd: md.btcd,
+      closeTs: m.closeTime, volProfile: this.d.volProfile, asiaRange: md.features.asiaRange.get(m.asset),
     });
     const pYes = model.predict(features, fv.pYes);
     const why = explain(model, features, fv.pYes);
@@ -275,7 +301,7 @@ export class Engine {
     st.drivers = why.drivers;
     st.macro = Object.fromEntries(['usdtd_ret_5m_z', 'btcd_rel_5m_z', 'rsi_14_1m', 'conf_riskon_momentum', 'conf_riskon_momentum_rsi', 'conf_count']
       .map((k) => [k, Number.isFinite(features[k]) ? features[k] : null]));
-    Object.assign(st, { strike, strikeSource: m.strikeSource, spot: spot.value, sigma: vol.sigmaPerSqrtSec, fairValue: fv.pYes, pYes, bestBid: bid.price, bestAsk: ask.price, blocked: undefined });
+    Object.assign(st, { strike, strikeSource: m.strikeSource, spot: spot.value, sigma: vol.sigmaPerSqrtSec, sigmaPricing, fairValue: fv.pYes, pYes, bestBid: bid.price, bestAsk: ask.price, blocked: undefined });
 
     const ret = idx!.trailingLogReturn(now, cfg.strategy.fastMoveWindowSec * 1000);
     const fastMove = ret !== undefined && Math.abs(ret) > cfg.strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(cfg.strategy.fastMoveWindowSec);
@@ -291,7 +317,8 @@ export class Engine {
     const bankroll = this.bankroll() ?? 0;
     const view: MarketView = {
       ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: st.position, bankroll,
-      maxOrderRiskUsd: R.maxOrderRiskFrac * bankroll, maxContracts: R.maxContractsPerOrder, minSidePrice: R.minSidePrice,
+      // Session risk profile can only shrink size (sizeMult in [0, 1]).
+      maxOrderRiskUsd: R.maxOrderRiskFrac * bankroll * sessRisk.sizeMult, maxContracts: floorCount(R.maxContractsPerOrder * sessRisk.sizeMult), minSidePrice: R.minSidePrice,
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
       restingBid: quote('bid'), restingAsk: quote('ask'), nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
     };
@@ -314,12 +341,13 @@ export class Engine {
         position: st.position, qSide: st.position >= 0 ? pYes : 1 - pYes,
         sideBid: st.position > 0 ? bid.price : st.position < 0 ? 1 - ask.price : undefined,
         confluence: features.conf_count, book, now, tick: m.tickSize, fees: md.feesFor(m.ticker),
+        sessionBlocked: cfg.strategy.huntSessionGuard ? huntBlockedBySession(sess, cfg.strategy.huntTransitionBufferMin) : undefined,
       });
       huntMode = d.mode === 'hunt';
       st.exitMode = d.mode;
       st.huntTarget = d.target;
       st.huntStop = d.stop;
-      if (d.event === 'activated' || d.event === 'deactivated_confluence' || d.event === 'deactivated_giveback' || d.event === 'triggered' || d.event === 'gapped') {
+      if (d.event === 'activated' || d.event === 'deactivated_confluence' || d.event === 'deactivated_giveback' || d.event === 'deactivated_session' || d.event === 'triggered' || d.event === 'gapped') {
         this.d.audit.write('decision', { ticker: m.ticker, huntEvent: d.event, target: d.target, stop: d.stop, position: st.position, confCount: features.conf_count, pYes });
       }
       if (d.plan) {
@@ -328,7 +356,13 @@ export class Engine {
     } else {
       st.exitMode = 'fair_value';
     }
-    const plan = decide(view, cfg.strategy, { exits: !huntMode, blockReductions: huntMode });
+    const strat = {
+      ...cfg.strategy,
+      minEdge: cfg.strategy.minEdge + sessRisk.minEdgeAdd,
+      inventorySkewPerContract: cfg.strategy.inventorySkewPerContract * sessRisk.skewMult,
+    };
+    const plan = decide(view, strat, { exits: !huntMode, blockReductions: huntMode });
+    if (sessRisk.applied.length) plan.notes.push(`session risk ${sessRisk.applied.join('+')}: size x${sessRisk.sizeMult}, +${sessRisk.minEdgeAdd} edge`);
     if (huntPlan) plan.place.unshift(huntPlan);
     if (huntMode) plan.notes.push(`hunting: stop ${st.huntStop ?? 'forming'}`);
     st.notes = plan.notes;
@@ -338,7 +372,8 @@ export class Engine {
     if (plan.place.length || plan.cancel.length || now - lastAudit > 30_000) {
       this.lastDecisionAudit.set(m.ticker, now);
       this.d.audit.write('decision', {
-        decisionId, ticker: m.ticker, model: model.id, spot: spot.value, strike, strikeSource: m.strikeSource, sigma: vol.sigmaPerSqrtSec,
+        decisionId, ticker: m.ticker, model: model.id, spot: spot.value, strike, strikeSource: m.strikeSource, sigma: vol.sigmaPerSqrtSec, sigmaPricing,
+        session: sess.key, sessionRisk: sessRisk,
         tauSec, fv: fv.pYes, regime: fv.regime, pYes, features, modelShift: why.shiftFromFairValue, drivers: why.drivers, bid: bid.price, ask: ask.price, position: st.position, fastMove,
         place: plan.place.map((p) => ({ side: p.side, price: p.price, count: p.count, purpose: p.purpose, edge: p.edge, why: p.why })),
         cancel: plan.cancel,
