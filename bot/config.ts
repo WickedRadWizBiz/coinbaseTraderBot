@@ -274,6 +274,31 @@ export interface PerpsConfig {
   takerAfterSec: number;
   makerFeeBps: number;
   takerFeeBps: number;
+  /** Stage 3 directional trading: off | paper (simulated against live perp quotes) | live (real orders). */
+  trading: 'off' | 'paper' | 'live';
+  /** Frozen perp signal model (research:perp-train); without it the momentum prior trades at pilot size. */
+  modelPath: string;
+  /** Paper margin balance for the simulated perps account. */
+  paperBalanceUsd: number;
+  horizonMin: number;
+  entryEdgeBps: number;
+  exitEdgeBps: number;
+  kellyFraction: number;
+  maxLeverage: number;
+  maxTradeNotionalUsd: number;
+  maxTotalNotionalUsd: number;
+  stopAtrMult: number;
+  minStopBps: number;
+  maxHoldMin: number;
+  dailyLossFrac: number;
+  cooldownMin: number;
+  pilotMaxNotionalUsd: number;
+  pilotMaxLeverage: number;
+  priorIc: number;
+  requireValidation: boolean;
+  minEquityUsd: number;
+  maxOrderNotionalUsd: number;
+  collarBps: number;
 }
 
 export class ConfigError extends Error {}
@@ -557,13 +582,17 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     sizingTiers: parseSizingTiers(env.SIZING_TIERS, { risk, strategy }),
     perps: (() => {
       const hedge = oneOf(env, 'PERP_HEDGE', 'paper', ['off', 'paper', 'live'] as const);
+      const trading = oneOf(env, 'PERP_TRADING', 'paper', ['off', 'paper', 'live'] as const);
       const keyId = env.KALSHI_PERPS_KEY_ID || undefined;
       const privateKeyPath = env.KALSHI_PERPS_PRIVATE_KEY_PATH || undefined;
-      if (hedge === 'live') {
-        if (mode !== 'live') throw new ConfigError('PERP_HEDGE=live requires TRADING_MODE=live (use PERP_HEDGE=paper to simulate)');
-        if (!keyId || !privateKeyPath) throw new ConfigError('PERP_HEDGE=live requires KALSHI_PERPS_KEY_ID and KALSHI_PERPS_PRIVATE_KEY_PATH');
+      for (const [name, v] of [['PERP_HEDGE', hedge], ['PERP_TRADING', trading]] as const) {
+        if (v !== 'live') continue;
+        if (mode !== 'live') throw new ConfigError(`${name}=live requires TRADING_MODE=live (use ${name}=paper to simulate)`);
+        if (!keyId || !privateKeyPath) throw new ConfigError(`${name}=live requires KALSHI_PERPS_KEY_ID and KALSHI_PERPS_PRIVATE_KEY_PATH`);
         checkKeyFile(privateKeyPath);
       }
+      // One perps account, one gateway: hedging and trading cannot run on different venues.
+      if (hedge !== 'off' && trading !== 'off' && hedge !== trading) throw new ConfigError(`PERP_HEDGE=${hedge} and PERP_TRADING=${trading} must match (one perps account); set both to live or both to paper`);
       return {
         feed: bool(env, 'PERPS_FEED', true),
         restUrl: env.KALSHI_PERPS_REST_URL ?? (kalshiEnv === 'prod' ? 'https://external-api.kalshi.com/trade-api/v2' : 'https://external-api.demo.kalshi.co/trade-api/v2'),
@@ -579,6 +608,28 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         takerAfterSec: num(env, 'PERP_HEDGE_TAKER_AFTER_SEC', 300, 10, 86400),
         makerFeeBps: num(env, 'PERP_MAKER_FEE_BPS', 5, 0, 100),
         takerFeeBps: num(env, 'PERP_TAKER_FEE_BPS', 12, 0, 100),
+        trading,
+        modelPath: path.resolve(env.PERP_MODEL_PATH ?? './params/perp_model.json'),
+        paperBalanceUsd: num(env, 'PERP_PAPER_BALANCE_USD', 20, 1, 1e9),
+        horizonMin: num(env, 'PERP_HORIZON_MIN', 240, 15, 7 * 24 * 60),
+        entryEdgeBps: num(env, 'PERP_ENTRY_EDGE_BPS', 5, 0, 500),
+        exitEdgeBps: num(env, 'PERP_EXIT_EDGE_BPS', 0, -500, 500),
+        kellyFraction: num(env, 'PERP_KELLY_FRACTION', 0.25, 0.01, 1),
+        maxLeverage: num(env, 'PERP_MAX_LEVERAGE', 3, 0.1, 20),
+        maxTradeNotionalUsd: num(env, 'PERP_MAX_NOTIONAL_USD', 500, 1, 1e9),
+        maxTotalNotionalUsd: num(env, 'PERP_MAX_TOTAL_NOTIONAL_USD', 1000, 1, 1e9),
+        stopAtrMult: num(env, 'PERP_STOP_ATR_MULT', 2, 0.25, 20),
+        minStopBps: num(env, 'PERP_MIN_STOP_BPS', 50, 5, 5000),
+        maxHoldMin: num(env, 'PERP_MAX_HOLD_MIN', 480, 15, 30 * 24 * 60),
+        dailyLossFrac: num(env, 'PERP_DAILY_LOSS_FRAC', 0.10, 0.005, 0.5),
+        cooldownMin: num(env, 'PERP_COOLDOWN_MIN', 60, 0, 24 * 60),
+        pilotMaxNotionalUsd: num(env, 'PERP_PILOT_MAX_NOTIONAL_USD', 25, 1, 1e9),
+        pilotMaxLeverage: num(env, 'PERP_PILOT_MAX_LEVERAGE', 1, 0.1, 20),
+        priorIc: num(env, 'PERP_PRIOR_IC', 0.05, 0, 0.3),
+        requireValidation: bool(env, 'PERP_REQUIRE_VALIDATION', false),
+        minEquityUsd: num(env, 'PERP_MIN_EQUITY_USD', 5, 0, 1e9),
+        maxOrderNotionalUsd: num(env, 'PERP_MAX_ORDER_NOTIONAL_USD', 1000, 1, 1e9),
+        collarBps: num(env, 'PERP_COLLAR_BPS', 150, 5, 2000),
       };
     })(),
     tennis: {

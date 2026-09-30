@@ -20,6 +20,8 @@ import { ModelHealth } from './model/modelHealth';
 import { ClockSkewMonitor } from './risk/clockSkew';
 import { EquityGuard } from './risk/equityGuard';
 import { PerpHedger } from './perps/hedger';
+import { PerpModel } from './perps/perpSignal';
+import { PerpTrader } from './perps/perpTrader';
 import { PaperPerpExchange } from './perps/paperPerp';
 import { KalshiPerpsRest, type PerpGateway } from './perps/perpRest';
 import { BalanceMonitor, type MonitorState } from './vault/balanceMonitor';
@@ -65,10 +67,15 @@ async function main(): Promise<void> {
   }
   if (cfg.mode === 'live') {
     const blockers = model.liveBlockers();
-    if (blockers.length) {
+    // Other live books (perps, tennis) run on their own gates; the risk gateway keeps rejecting every
+    // binary crypto order while the model is unvalidated, so the process only refuses to start when
+    // there is nothing else to trade live.
+    const otherLive = cfg.perps.trading === 'live' || cfg.perps.hedge === 'live' || (cfg.tennis.enabled && cfg.tennis.live);
+    if (blockers.length && !otherLive) {
       log.error(`refusing to start live: model ${model.id} is not validated: ${blockers.join('; ')}`);
       process.exit(3);
     }
+    if (blockers.length) log.warn(`binary crypto trading blocked (model ${model.id} not validated: ${blockers.join('; ')}); perps/tennis trade live on their own gates`);
   }
 
   // Intraday volatility profile: applied to fair value only if enabled AND its own
@@ -115,25 +122,55 @@ async function main(): Promise<void> {
   const modelHealth = new ModelHealth({ minWindows: cfg.strategy.modelHealthMinWindows }, path.join(cfg.dataDir, 'model_health.json'));
   const calendar = loadCalendar(path.resolve(process.env.MACRO_CALENDAR_PATH ?? './params/calendar.json'));
   if (!calendar) log.info('no macro calendar (params/calendar.json): calendar features unavailable');
-  // Stage 2 perp hedge: simulated against live perp quotes (paper) or real perp orders (live).
+  // Perps: one executor per perps account drives each position to hedge (stage 2) + directional
+  // (stage 3) targets, simulated against live perp quotes (paper) or with real orders (live).
   let hedger: PerpHedger | undefined;
+  let perpTrader: PerpTrader | undefined;
   const P = cfg.perps;
-  if (P.hedge !== 'off' && !P.feed) log.warn('PERP_HEDGE needs PERPS_FEED=true; hedging disabled');
-  else if (P.hedge !== 'off') {
-    const tickerAsset = (t: string) => [...md.features.perps.byAsset.entries()].find(([, s]) => s.latest?.ticker === t)?.[0];
+  const perpsWanted = P.hedge !== 'off' || P.trading !== 'off';
+  if (perpsWanted && !P.feed) log.warn('perp hedging/trading needs PERPS_FEED=true; perps disabled');
+  else if (perpsWanted) {
+    const hub = md.features.perps;
+    const tickerAsset = (t: string) => [...hub.byAsset.entries()].find(([, s]) => s.latest?.ticker === t)?.[0];
     let perpGateway: PerpGateway;
-    if (P.hedge === 'live') {
-      perpGateway = new KalshiPerpsRest(P.restUrl, KalshiSigner.fromFile(P.keyId!, P.privateKeyPath!), fetch, P.subaccount);
+    if (P.hedge === 'live' || P.trading === 'live') {
+      const live = new KalshiPerpsRest(P.restUrl, KalshiSigner.fromFile(P.keyId!, P.privateKeyPath!), fetch, P.subaccount);
+      if (!(await live.enabled().catch(() => false))) log.warn('GET /margin/enabled says margin trading is not enabled for this account yet (rolling out member by member); perp orders will be rejected');
+      perpGateway = live;
     } else {
-      const sim = new PaperPerpExchange(md.features.perps, tickerAsset, { makerBps: P.makerFeeBps, takerBps: P.takerFeeBps }, path.join(cfg.dataDir, 'paper_perps.json'));
+      const sim = new PaperPerpExchange(hub, tickerAsset, { makerBps: P.makerFeeBps, takerBps: P.takerFeeBps }, path.join(cfg.dataDir, 'paper_perps.json'), Date.now, P.paperBalanceUsd);
       md.on('perp', () => sim.step());
       perpGateway = sim;
     }
-    hedger = new PerpHedger({ gateway: perpGateway, hub: md.features.perps, audit, params: { minDollarDelta: P.minDollarDelta, maxNotionalUsd: P.maxNotionalUsd, excludeTauSec: P.excludeTauSec, repriceSec: P.repriceSec, takerAfterSec: P.takerAfterSec } });
+    // Underlying units per contract, from the market itself (perp prices are per contract).
+    const units = (asset: string) => {
+      const px = hub.get(asset)?.price(Date.now(), 60_000), ix = md.index.get(asset)?.fresh(Date.now(), 15_000)?.value;
+      return px && ix ? px / ix : undefined;
+    };
+    hedger = new PerpHedger({
+      gateway: perpGateway, hub, audit, units,
+      params: { minDollarDelta: P.minDollarDelta, maxNotionalUsd: P.maxNotionalUsd, excludeTauSec: P.excludeTauSec, repriceSec: P.repriceSec, takerAfterSec: P.takerAfterSec },
+      risk: { maxOrderNotionalUsd: P.maxOrderNotionalUsd, collarBps: P.collarBps },
+    });
+    if (P.trading !== 'off') {
+      const perpModel = PerpModel.load(P.modelPath);
+      if (!perpModel) log.warn(`no perp model at ${P.modelPath}: trading the momentum prior at pilot size ($${P.pilotMaxNotionalUsd}, ${P.pilotMaxLeverage}x)`);
+      else if (!perpModel.validated()) log.warn(`perp model ${perpModel.params.version} not validated (${perpModel.blockers().join('; ')}): pilot size only`);
+      perpTrader = new PerpTrader({
+        params: {
+          horizonMin: P.horizonMin, entryEdgeBps: P.entryEdgeBps, exitEdgeBps: P.exitEdgeBps, kellyFraction: P.kellyFraction, maxLeverage: P.maxLeverage,
+          maxNotionalUsd: P.maxTradeNotionalUsd, maxTotalNotionalUsd: P.maxTotalNotionalUsd, stopAtrMult: P.stopAtrMult, minStopBps: P.minStopBps, maxHoldMin: P.maxHoldMin,
+          dailyLossFrac: P.dailyLossFrac, cooldownMin: P.cooldownMin, pilotMaxNotionalUsd: P.pilotMaxNotionalUsd, pilotMaxLeverage: P.pilotMaxLeverage, priorIc: P.priorIc,
+          makerBps: P.makerFeeBps, requireValidation: P.requireValidation, minEquityUsd: P.minEquityUsd,
+        },
+        hub, gateway: perpGateway, model: perpModel, audit,
+        sources: (asset) => ({ index: md.index.get(asset), spot: md.spot.get(asset), bars: md.features.bars.get(asset), candles: md.features.candles.get(asset), usdtd: md.usdtd, btcd: md.btcd, perp: hub.get(asset) }),
+      });
+    }
     kill.bindCancelAll(async (reason) => { await oms.cancelAll(reason); await hedger!.cancelAll(reason); });
-    log.info('perp hedging enabled', { mode: P.hedge });
+    log.info('perps enabled', { hedge: P.hedge, trading: P.trading, gateway: perpGateway.name });
   }
-  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, clock });
+  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader, clock });
 
   // Execution events -> OMS (same path for paper and live).
   if (paper) {

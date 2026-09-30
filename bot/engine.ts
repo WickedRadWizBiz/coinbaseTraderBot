@@ -30,7 +30,8 @@ import type { ModelHealth } from './model/modelHealth';
 import type { Tca } from './tca/tca';
 import type { MacroEvent } from './model/featureEngine';
 import { ladderQuotes } from './model/ladder';
-import type { BinaryExposure, PerpHedger } from './perps/hedger';
+import type { BinaryExposure, DirectionalContext, PerpHedger } from './perps/hedger';
+import type { PerpTrader } from './perps/perpTrader';
 import { decideMatch, MatchTracker, type MatchMarket } from './tennis/tennisStrategy';
 import { parseTennisScore } from './tennis/liveScore';
 import type { TennisScore } from './tennis/tennisModel';
@@ -117,6 +118,8 @@ export interface EngineDeps {
   hedger?: PerpHedger;
   /** Local clock vs Kalshi's server time. */
   clock?: ClockSkewMonitor;
+  /** Stage 3 directional perp trading (targets combined with the hedge by the executor). */
+  perpTrader?: PerpTrader;
   now?: () => number;
 }
 
@@ -410,8 +413,9 @@ export class Engine {
     if (this.dataHalt === 'awaiting market data' && this.d.md.activeMarkets().length) this.dataHalt = undefined;
     const { kill, risk } = this.d;
     if (kill.engaged) {
-      // A stale hedge must still be unwound when the binaries it offset are gone.
-      await this.d.hedger?.tick(this.exposures(), { reduceOnly: true });
+      // A stale hedge must still be unwound when the binaries it offset are gone, and directional
+      // perp positions are flattened (leverage: never sit on them unattended).
+      await this.d.hedger?.tick(this.exposures(), { reduceOnly: true, directional: this.perpDirectional('kill switch engaged') });
       return;
     }
 
@@ -424,7 +428,8 @@ export class Engine {
     await Promise.all(this.d.md.activeMarkets(this.now()).filter((m) => m.kind !== 'match').map((m) => this.evaluate(m)));
     this.prune();
     // Stage 2: offset the binary book's net delta with perps (reduce-only when new risk is halted).
-    await this.d.hedger?.tick(this.exposures(), { reduceOnly: this.haltReasons().length > 0 });
+    // Perps: the hedge is reduce-only while binary risk is halted; directional trading has its own guards.
+    await this.d.hedger?.tick(this.exposures(), { reduceOnly: this.haltReasons().length > 0 && !this.d.perpTrader, directional: this.perpDirectional() });
     await this.tennisTick();
   }
 
@@ -534,6 +539,18 @@ export class Engine {
     for (const ev of this.matches.keys()) if (!byEvent.has(ev)) { this.matches.delete(ev); this.tennisStatus.delete(ev); }
   }
 
+  /** Directional perp targets for the executor, or undefined without a trader. `halt` flattens. */
+  private perpDirectional(halt?: string): ((c: DirectionalContext) => Promise<import('./perps/hedger').DirTarget[]>) | undefined {
+    const t = this.d.perpTrader;
+    if (!t) return undefined;
+    return (c) => {
+      const f = this.d.md.perpFeed;
+      const skew = this.d.cfg.clockSkewMaxMs > 0 ? this.d.clock?.haltReason(Date.now()) : undefined;
+      const noEntry = skew ?? (f?.lastError ? `perps feed unavailable (${f.lastError})` : undefined);
+      return t.targets(c, { halt, noEntry });
+    };
+  }
+
   /** Perp feed and hedge state for the dashboard. */
   perpStatus(now = this.now()) {
     const f = this.d.md.perpFeed;
@@ -546,6 +563,7 @@ export class Engine {
       feed: f ? { ok: !f.lastError, lastError: f.lastError ?? null, lastOkTs: f.lastOkTs || null } : null,
       markets,
       hedge: this.d.hedger ? { mode: this.d.cfg.perps.hedge, ...this.d.hedger.status() } : { mode: 'off' },
+      trading: this.d.perpTrader ? { mode: this.d.cfg.perps.trading, ...this.d.perpTrader.status() } : { mode: 'off' },
     };
   }
 

@@ -219,24 +219,50 @@ The trainer's ablation decides which groups are kept.
 
 In live trading, `ModelHealth` stops new risk if the rolling log-loss advantage over the calibrated market turns significantly negative across at least 200 windows. The Telemetry page shows cadence, sizing, drawdown, model health and the entry guards. Operationally, the gate still requires 2 weeks live at 10–20% size, with realized edge at least 50% of the backtest edge.
 
-**Kalshi perpetuals (`bot/perps/`).** Perps run on a separate exchange: REST at `external-api[.demo].kalshi.com/trade-api/v2` under `/margin/...`, with their own API keys. Endpoint and field names follow the perps OpenAPI as mirrored by the public kalshi-python-sdk, because docs.kalshi.com is blocked from the build host. **Verify on Kalshi demo before relying on them.** All wire parsing lives in `perpData.ts` and `perpRest.ts`.
+**Kalshi perpetuals (`bot/perps/`).** Perps run on a separate exchange: REST at `external-api[.demo].kalshi.com/trade-api/v2` under `/margin/...`, with their own API keys. Endpoint and field names follow Kalshi's perps overview page and the perps OpenAPI spec (`specs/perps_openapi.yaml` in the public kalshi-python-sdk): orders, positions, balance (`/margin/balance?compute_available_balance=true`), risk (`/margin/risk`), `/margin/enabled` and exit triggers. **Verify on Kalshi demo before relying on them.** All wire parsing lives in `perpData.ts` and `perpRest.ts`. Rules from the spec that the code enforces:
+- Perp prices are **per contract**. The exchange computes notional as `|qty| × mark`, so a contract's exposure to the underlying is measured as perp price ÷ index price, not from `contract_size`.
+- `reduce_only` is accepted **only on immediate-or-cancel / fill-or-kill orders**. Resting reductions are plain post-only orders sized to the position; urgent reductions are reduce-only IOC.
+- Counts and prices are fixed-point strings (prices in dollars, 4 decimals).
 - **Stage 1, perps as features (on by default, no key needed).** Every 2 seconds the bot polls the public perp market list (one call covers all markets) and each market's funding estimate. It records them for research and feeds a new `perp` feature group, which the trainer adds one group at a time like the others:
   - the perp premium to the settlement index, and its 5-minute change (perps tend to lead spot)
   - perp-minus-index return over 1 and 5 minutes
   - the funding rate and minutes to the next funding time (00:00, 08:00 and 16:00 New York)
   - the 1-hour change in open interest
 - **Stage 2, delta-hedging the binary book (`PERP_HEDGE`, `paper` by default).**
-  - Each binary's sensitivity to the underlying (dP/dS) comes from re-pricing at S ± 0.05%. Positions net per asset, and the hedge target is `−Σ position × dP/dS ÷ contract size`.
+  - Each binary's sensitivity to the underlying (dP/dS) comes from re-pricing at S ± 0.05%. Positions net per asset, and the hedge target is `−Σ position × dP/dS ÷ (underlying units per contract)`.
   - It hedges only when the book's dollar delta is at least `PERP_HEDGE_MIN_DOLLAR_DELTA` (default $2,000, which is $20 per 1% move) and a whole step is needed. A 25% hysteresis band stops churn.
   - Contracts within 2 minutes of close are excluded because their delta is unstable.
   - Each asset is capped at `PERP_HEDGE_MAX_NOTIONAL_USD`, and the hedge never exceeds the exposure it offsets.
-  - Entries are post-only maker orders at the touch, re-priced every 30 seconds.
-  - A reduction left unfilled for 5 minutes crosses the spread reduce-only, for example when the binaries have settled and the hedge would otherwise be naked.
-  - While new risk is halted or the kill switch is on, the hedger only reduces. The kill switch also cancels perp orders.
-  - `paper` simulates hedges against live perp quotes: fills on trade-through only, maker/taker fees in bps, and funding accrued at each funding time. `live` sends real orders and needs `TRADING_MODE=live`, the perps keys, and a funded margin account.
   - At small bankrolls the $2,000 threshold means the hedge rarely fires, which is intended: hedging a $20 book would cost more in fees and margin than the risk it removes.
-  - `/api/status` shows the perp feed, premium, funding, the hedge targets and resting orders.
-- **Stage 3, directional perp trading, is not built.** Taker round trips (24 bps) are about the size of a 15-minute BTC move. It would need its own model, liquidation-aware limits, funding in P&L and a backtest that passes the same gates.
+- **Stage 3, LIVE directional perp trading (`PERP_TRADING`, `paper` by default, `live` for real orders).** `bot/perps/perpTrader.ts` decides a target position per perp market. One executor (`hedger.ts`) drives each position to hedge + directional target.
+  - **Signal.** The expected return over `PERP_HORIZON_MIN` (240 min) comes from a frozen ridge model (`params/perp_model.json`) on ~30 features: returns and volatility, perp premium, funding, open interest, USDT.D/BTC.D, and the TA library readings and confluences. The features come from the same registry the binary model uses.
+    - Without a model, a time-series-momentum prior (IC `PERP_PRIOR_IC` = 0.05 × σ_H × clipped 4-hour momentum z) lets the bot trade live at **pilot size**. With realistic costs it trades rarely, which is the honest outcome.
+  - **Entry and exit.** `net = dir × μ − 2 × maker fee − funding over the horizon in the position's direction` (positive funding: longs pay). It enters when net ≥ `PERP_ENTRY_EDGE_BPS` (5) and holds while `dir × μ − exit fee − funding ≥ PERP_EXIT_EDGE_BPS` (0), a hysteresis band. It reverses on a strong opposite signal, and exits after `PERP_MAX_HOLD_MIN` (480) without a fresh entry-strength signal.
+  - **Size.** Fractional Kelly for a continuous bet: `leverage = PERP_KELLY_FRACTION × net ÷ σ_H²`, capped by:
+    - `PERP_MAX_LEVERAGE` (3) and half the exchange's leverage estimate;
+    - `0.5 ÷ stop distance`, so the stop always sits well inside the liquidation distance;
+    - `PERP_MAX_NOTIONAL_USD` per market and `PERP_MAX_TOTAL_NOTIONAL_USD` overall.
+  - **Stops on the exchange.** Each directional position gets a Kalshi exit trigger (`PUT /margin/cross/positions/{ticker}/exit_trigger`, stop-loss on the liquidation mark) at `max(PERP_STOP_ATR_MULT × 1h ATR, PERP_MIN_STOP_BPS)` from the entry. It protects the position even while the bot is down. The bot also flattens itself if the touch crosses the stop, then cools down for `PERP_COOLDOWN_MIN`.
+  - **Account guards.**
+    - A perp daily loss stop on margin-account equity (`PERP_DAILY_LOSS_FRAC`, 10%) flattens and halts for the rest of the UTC day.
+    - The kill switch flattens every directional position with reduce-only IOC orders.
+    - The clock-skew guard and a failed perps feed block new entries.
+    - There is a minimum equity for new entries (`PERP_MIN_EQUITY_USD`).
+    - Every order passes quote freshness (20 s), a price collar (`PERP_COLLAR_BPS`) and a per-order notional cap (`PERP_MAX_ORDER_NOTIONAL_USD`).
+  - **Pilot vs full size.** Until a model passes both gates below, directional trading is capped at `PERP_PILOT_MAX_NOTIONAL_USD` ($25) and `PERP_PILOT_MAX_LEVERAGE` (1×). `PERP_REQUIRE_VALIDATION=true` blocks unvalidated entries entirely.
+  - **Validation (research).**
+    1. `npm run research:perp-train` builds the dataset from recordings (perp quotes, index, candles, dominance), then runs a walk-forward ridge fit with an H embargo. It checks the out-of-sample IC CI lower bound > 0 (block bootstrap), the per-trade P&L CI lower bound > 0 for the live trading rule net of fees and funding, a deflated Sharpe probability > 0.95, and an effective sample ≥ 200.
+    2. `npm run research:perp-backtest -- --model … --annotate` replays the recordings through the same trader and executor against the paper perps exchange: maker fills on trade-through, fees, funding and exchange stops. It needs a positive per-day P&L CI lower bound and a DSR probability > 0.95 over at least 30 days.
+    - A test checks the pipeline on synthetic data: a random walk never validates, and a planted momentum signal is found and trades profitably.
+- **Execution (hedge and directional).**
+  - Entries and ordinary reductions are post-only maker orders at the touch, re-priced every 30 seconds.
+  - A reduction left unfilled for 5 minutes, or an urgent one (stop, kill switch, daily loss), crosses the spread reduce-only.
+  - A flip closes first; the new side opens on the next tick. An open position nobody wants any more is unwound.
+- **Venue and modes.** Hedging and trading share one perps account, so `PERP_HEDGE` and `PERP_TRADING` must both be `live` or both `paper`.
+  - `live` needs `TRADING_MODE=live`, `KALSHI_PERPS_KEY_ID` / `KALSHI_PERPS_PRIVATE_KEY_PATH` and a funded margin account. At startup the bot checks `/margin/enabled` (perps are rolling out member by member). Transfers from the event-contract balance to margin are not available yet, so fund the margin account directly.
+  - In live mode an unvalidated binary model no longer stops the process when perps or tennis trade live. The risk gateway still rejects every binary crypto order until that model validates.
+  - `paper` simulates against live perp quotes with a `PERP_PAPER_BALANCE_USD` ($20) margin account.
+  - `/api/status` → `perps` shows the feed, premium, funding, hedge and combined targets, resting orders, exchange stops, and the trader's equity, signal source, model gates and last decision per market. The telemetry page has a Perps row.
 
 **ATP tennis (`bot/tennis/`, series `KXATPMATCH`).** Tennis runs as a rules-based strategy driven by the order book, with its own hard budget:
 - **Budget.** All tennis positions plus resting orders are capped at 25% of the working cash pool (the tradable bankroll after vault/pocket). The cap can't be configured above 25%. Each match is capped at 10% and each order at 5%. Sizing includes tennis maker fees (multiplier 1). Tennis is budgeted separately from the crypto book, so neither eats the other's limits.
@@ -311,6 +337,8 @@ npm run research:dataset -- --recordings data/recordings --every 60 --entry-wind
 npm run research:train -- --families mlp,gbdt --ensemble 5 --cpcv 10                      # -> params/model.candidate.json
 npm run research:backtest -- --model params/model.candidate.json --grid 0.02,0.03,0.04 --exits hold,take_profit,fair_value --annotate
 npm run research:ta -- --assets BTC,ETH,SOL,XRP,DOGE --days 120                        # TA rule study -> params/ta_study.json
+npm run research:perp-train -- --recordings data/recordings --every 300                 # -> params/perp_model.candidate.json
+npm run research:perp-backtest -- --model params/perp_model.candidate.json --annotate   # execution gate for full-size perps
 ```
 
 `npm run research:sessions` reports volatility, Kalshi spreads and depth, and trade activity for each session. It fits and validates the intraday volatility profile (`params/vol_profile.json`), backtests P&L by session, and prints a recommended `SESSION_RISK` along with the evidence behind it.
@@ -354,10 +382,10 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 | Gemini writing live parameters | Removed from the runtime. LLMs may help offline (reviews, reports) and must never change a running parameter. |
 | `ALWAYS_ON_15M`, profit-target sizing, Kelly fail-open, EV-gate override, $0.50 default price | Removed. Kelly returns zero when edge ≤ 0. The gateway has no override. Missing data blocks trading and pulls quotes. |
 | FIX path, and FIX→REST fallback with a new id | Removed. There is one REST order path. Retries reuse the same `client_order_id`, and a timeout queries by id before any resend. |
-| Perps / margin | Removed until the core is proven. |
+| Perps / margin | Rebuilt on the new core: features (stage 1), a delta hedge (stage 2) and live directional trading (stage 3) with exchange-side stops, liquidation-aware leverage, a perp daily loss stop, pilot size until a model validates, and research gates. |
 | Online NN, meta-learning, plasticity, hand-set win probability, confluence | Replaced by the fair value plus the frozen, offline-validated meta-model. |
-| % TP/SL and trailing stops on binaries | Removed. The bot holds to settlement and exits only when the bid beats fair value by the fee plus a buffer. |
-| USDT-dominance, Ichimoku, VPIN gates; trade-ID-tuned gates | Removed. |
+| % TP/SL and trailing stops on binaries | Fixed-% stops removed. Exits are fair-value or model-based. The order-book ratchet / hunt mode runs live only after the backtest shows it beating the fair-value exit. |
+| USDT-dominance, Ichimoku, VPIN gates; trade-ID-tuned gates | Removed as gates. USDT.D/BTC.D, Ichimoku and VPIN return only as learned model features, weighted by walk-forward validation. |
 | Paper "blowout reset" | Removed. The paper exchange never refills. |
 | Cosmetic modules (Avellaneda-Stoikov, jump-diffusion, Kalman, Bayesian Kelly, HRP, Almgren-Chriss, "SR 11-7"), the Python bot, patch scripts, committed state, second lockfile | Deleted. |
 | Legacy `/portfolio/orders` | Orders go to `POST /portfolio/events/orders` (V2) with `post_only`, `self_trade_prevention_type`, `expiration_time` and `cancel_order_on_pause`. |
@@ -367,7 +395,7 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 | Kill switch | Persists on disk, survives restart, auto-trips on loss limit, repeated order errors, persistent break or a stalled heartbeat. Resting orders also carry an exchange-side `expiration_time` as a dead-man switch. |
 | Fee-correct PnL | Exact fee formula with round-up. Uses exchange-reported fees when present. Wins and losses are labelled after fees at settlement. |
 | Data recorder, fill simulator, TCA, alerts, audit log | Recorder: `marketdata/`. Fill simulator: `paper/` (queue position, trade-through fills). TCA: `tca/` (markouts). Alerts: Telegram or webhook. Audit log: hash-chained JSONL, checked with `npm run audit:verify`. |
-| Tests / CI | 196 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
+| Tests / CI | 232 tests, including an engine integration test and end-to-end research pipeline tests (binary MLP/GBDT, tennis, TA study, perps) on synthetic data. |
 
 ## Things you must do yourself
 

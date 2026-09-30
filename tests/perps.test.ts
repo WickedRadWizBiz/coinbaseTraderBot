@@ -113,7 +113,7 @@ test('paper hedger: maker entry fills only on trade-through; stale hedge unwinds
   let now = 1_800_000_000_000;
   hub.apply(snap({ ts: now }));
   const sim = new PaperPerpExchange(hub, () => 'BTC', { makerBps: 5, takerBps: 12 }, undefined, () => now);
-  const h = new PerpHedger({ gateway: sim, hub, params: { ...P, maxNotionalUsd: 1e9 }, now: () => now });
+  const h = new PerpHedger({ gateway: sim, hub, params: { ...P, maxNotionalUsd: 1e9 }, now: () => now, risk: { maxOrderNotionalUsd: 1e12 } });
   const exp = [{ asset: 'BTC', ticker: 'A', position: 300, dPdS: 1e-4, tauSec: 600 }];
   await h.tick(exp);
   const open = await sim.getOpenOrders();
@@ -135,7 +135,7 @@ test('paper hedger: maker entry fills only on trade-through; stale hedge unwinds
   now += 301_000;
   hub.apply(snap({ ts: now, bid: 100_000, ask: 100_020 }));
   await h.tick([], { reduceOnly: true });
-  assert.equal((await sim.getPositions())[0].position, 0);
+  assert.equal((await sim.getPositions()).length, 0, 'flat');
   assert.equal((await sim.getOpenOrders()).length, 0);
   const led = sim.ledger()['BTC-PERP'];
   assert.ok(led.fees > 0 && Number.isFinite(led.realized));

@@ -9,6 +9,8 @@
 //     price, bid, ask, open_interest(_fp), reference_price, settlement_mark_price,
 //     liquidation_mark_price (TickerPrice), leverage_estimate, asset_class
 // Prices are fixed-point dollar strings; counts are fixed-point strings.
+// Prices are PER CONTRACT: the exchange's own notional is |qty| x mark (GET /margin/risk), so a
+// contract's exposure to the underlying is best measured as perp price / index price.
 // All parsing is defensive and lives here, so a field rename is a one-file fix.
 // VERIFY ON KALSHI DEMO before relying on live perps data.
 
@@ -32,6 +34,10 @@ export interface PerpSnapshot {
   tickSize?: number;
   fractional?: boolean;
   leverage?: number;
+  /** Mark used for liquidation (and by exchange-side exit triggers). */
+  liquidationMark?: number;
+  /** False while a scheduled market is closed (24/7 markets: undefined). */
+  isOpen?: boolean;
 }
 
 const num = (v: unknown): number | undefined => {
@@ -83,6 +89,8 @@ export function parseMarginMarket(m: Record<string, any>, assets: Iterable<strin
     tickSize: num(m.tick_size ?? m.tick_size_dollars),
     fractional: typeof m.fractional_trading_enabled === 'boolean' ? m.fractional_trading_enabled : undefined,
     leverage: num(m.leverage_estimate),
+    liquidationMark: num(m.liquidation_mark_price),
+    isOpen: m.schedule && typeof m.schedule === 'object' && typeof m.schedule.is_open === 'boolean' ? m.schedule.is_open : undefined,
   };
 }
 

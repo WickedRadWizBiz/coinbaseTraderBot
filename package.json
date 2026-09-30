@@ -22,6 +22,8 @@
     "research:sessions": "tsx research/sessions.ts",
     "research:tennis": "tsx research/tennisBacktest.ts",
     "research:ta": "tsx research/taStudy.ts",
+    "research:perp-train": "tsx research/trainPerpModel.ts",
+    "research:perp-backtest": "tsx research/perpBacktest.ts",
     "ta:docs": "tsx scripts/taLibraryDoc.ts",
     "audit:verify": "tsx scripts/verifyAudit.ts"
   },
