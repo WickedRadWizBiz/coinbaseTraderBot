@@ -127,7 +127,7 @@ test('in-play detection without a start time, then favorite re-entry once half t
   decideMatch(tr, snap(0.64), T, budget);
   assert.equal(tr.liveSince, now);
   // 0.6 is not skewed enough for the underdog rule; move to the middle of the match.
-  now += 50 * 60_000;
+  now += 85 * 60_000;
   for (let i = 0; i < 12; i++) { decideMatch(tr, snap(0.85), T, budget); now += 30_000; }
   const out = decideMatch(tr, snap(0.85), T, budget);
   assert.equal(out.phase, 'late');
@@ -137,6 +137,7 @@ test('in-play detection without a start time, then favorite re-entry once half t
   // A slipping leader is not bought.
   const tr2 = new MatchTracker('E2', T);
   tr2.liveSince = t0;
+  tr2.progress = () => 0.6; // past half: only the slipping check can block
   now = t0 + 60 * 60_000;
   for (let i = 0; i < 12; i++) { decideMatch(tr2, snap(0.90 - i * 0.01), T, budget); now += 30_000; }
   const slip = decideMatch(tr2, snap(0.78), T, budget);
@@ -268,22 +269,23 @@ test('underdog window opens at most 30 minutes before the start; early entries g
 });
 
 test('underdogs lose late: past 35% of the match take any profit, past 60% sell regardless', () => {
-  const run = (minIn: number, bid: number, cfg = T) => {
+  const run = (prog: number, bid: number, cfg = T) => {
     const tr = new MatchTracker('U', cfg);
     tr.liveSince = t0; tr.underdogTicker = 'U-DOG';
-    const now = t0 + minIn * 60_000;
+    tr.progress = () => prog; // progress itself is tested with the scoring model
+    const now = t0 + 30 * 60_000;
     return decideMatch(tr, { event: 'U', now, startTime: t0, closeTime: t0 + 86_400_000, markets: [mk('U-FAV', 1 - bid - 0.02, 1 - bid), mkb('U-DOG', bid, bid + 0.02, 300, 100, now, { position: 100, avgEntry: 0.15 })] }, cfg, budget);
   };
-  // Early (20% of a 105-min Bo3): +2c is below the target, keep riding.
-  assert.equal(run(21, 0.17).plans.length, 0);
+  // Early: +2c is below the target, keep riding.
+  assert.equal(run(0.2, 0.17).plans.length, 0);
   // 40% in: +2c is a profit the bids can fill -> take it.
-  const late = run(42, 0.17);
+  const late = run(0.4, 0.17);
   assert.deepEqual([late.plans[0]?.leg, late.plans[0]?.price, late.plans[0]?.reduceOnly], ['underdog_late', 0.17, true]);
   // 40% in but under water: hold (no forced loss before the cut).
-  assert.equal(run(42, 0.13).plans.length, 0);
+  assert.equal(run(0.4, 0.13).plans.length, 0);
   // 65% in: sell at the bid even at a loss.
-  const cut = run(68, 0.10);
+  const cut = run(0.65, 0.10);
   assert.deepEqual([cut.plans[0]?.leg, cut.plans[0]?.price], ['underdog_cut', 0.10]);
   // The cut can be switched off.
-  assert.equal(run(68, 0.10, { ...T, underdogCutProgress: 0 }).plans.length, 0);
+  assert.equal(run(0.65, 0.10, { ...T, underdogCutProgress: 0 }).plans.length, 0);
 });

@@ -210,6 +210,19 @@ export class KalshiRest implements ExchangeGateway {
     return (data.series ?? []).map((s: any) => ({ ticker: String(s.ticker), title: s.title, frequency: s.frequency }));
   }
 
+  /** Milestones linked to an event (sports: the real-world match), e.g. for live scores. */
+  async getMilestones(eventTicker: string): Promise<Array<{ id: string; type: string; title?: string }>> {
+    const data = await this.read(`/milestones?limit=10&related_event_ticker=${encodeURIComponent(eventTicker)}`, false);
+    return (data.milestones ?? []).map((m: any) => ({ id: String(m.id), type: String(m.type), title: m.title }));
+  }
+
+  /** Live data for a milestone: { type, details } (details is sport-specific and undocumented). */
+  async getLiveData(type: string, milestoneId: string): Promise<{ type: string; details: unknown } | undefined> {
+    const data = await this.read(`/live_data/${encodeURIComponent(type)}/milestone/${encodeURIComponent(milestoneId)}`, false);
+    const ld = data.live_data ?? data;
+    return ld ? { type: String(ld.type ?? type), details: ld.details } : undefined;
+  }
+
   async getMarket(ticker: string): Promise<MarketInfo | undefined> {
     const data = await this.read(`/markets/${encodeURIComponent(ticker)}`, false);
     return parseMarket(data.market ?? data);

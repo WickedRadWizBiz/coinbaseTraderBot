@@ -80,7 +80,7 @@ export class MarketData extends EventEmitter {
 
   constructor(
     private readonly cfg: Readonly<Config>,
-    private readonly rest: KalshiRest,
+    readonly rest: KalshiRest,
     private readonly ws: KalshiWs | undefined,
     private readonly recorder: Recorder,
   ) {

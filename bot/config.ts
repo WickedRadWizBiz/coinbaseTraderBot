@@ -195,9 +195,18 @@ export interface TennisConfig {
   favMinProgress: number;
   favStableCents: number;
   favStopCents: number;
-  /** Expected match duration (minutes) for best-of-3 and best-of-5, used as the progress proxy. */
-  durationBo3Min: number;
-  durationBo5Min: number;
+  /** Match progress (bot/tennis/tennisModel.ts): a point -> game -> set -> match model (deuce,
+   * tiebreaks, 10-point final-set tiebreak at the Slams, best of 3/5) calibrated to the pre-match
+   * price gives the expected number of points; minutes are converted at secPerPoint (incl.
+   * changeovers). Blended with the information clock (share of the match's price uncertainty
+   * already resolved, sampled every qvSampleSec) at progressInfoWeight. serveBase: tour-average
+   * serve-point win rate. A live score (scoreFeed) replaces both when available. */
+  secPerPoint: number;
+  serveBase: number;
+  progressInfoWeight: number;
+  qvSampleSec: number;
+  scoreFeed: 'off' | 'kalshi';
+  scorePollSec: number;
   /** In-play detection from price action when no start time is published: a mid move of this size within 3 minutes. */
   liveMoveCents: number;
   /** Order-book ratcheting trailing stop from the target price (both legs) instead of a fixed take-profit. */
@@ -570,8 +579,12 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       favMinProgress: num(env, 'TENNIS_FAV_MIN_PROGRESS', 0.5, 0, 1),
       favStableCents: num(env, 'TENNIS_FAV_STABLE_CENTS', 0.04, 0, 0.5),
       favStopCents: num(env, 'TENNIS_FAV_STOP_CENTS', 0, 0, 0.9),
-      durationBo3Min: num(env, 'TENNIS_DURATION_BO3_MIN', 105, 30, 400),
-      durationBo5Min: num(env, 'TENNIS_DURATION_BO5_MIN', 170, 60, 600),
+      secPerPoint: num(env, 'TENNIS_SEC_PER_POINT', 40, 15, 120),
+      serveBase: num(env, 'TENNIS_SERVE_BASE', 0.64, 0.5, 0.8),
+      progressInfoWeight: num(env, 'TENNIS_PROGRESS_INFO_WEIGHT', 0.5, 0, 1),
+      qvSampleSec: num(env, 'TENNIS_QV_SAMPLE_SEC', 30, 5, 600),
+      scoreFeed: oneOf(env, 'TENNIS_SCORE_FEED', 'off', ['off', 'kalshi'] as const),
+      scorePollSec: num(env, 'TENNIS_SCORE_POLL_SEC', 15, 5, 300),
       liveMoveCents: num(env, 'TENNIS_LIVE_MOVE_CENTS', 0.03, 0.005, 0.5),
       trail: bool(env, 'TENNIS_TRAIL', true),
       favTrailCents: num(env, 'TENNIS_FAV_TRAIL_CENTS', 0.06, 0.01, 0.5),

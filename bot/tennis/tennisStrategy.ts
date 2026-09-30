@@ -21,13 +21,16 @@
 //      "Safer" means a high hit rate, not low risk: at 85c a win pays 15c and a
 //      loss costs 85c.
 //
-// Match state without a score feed: the bot only sees Kalshi's books, so
+// Match state:
 //   - started = the published start time passed, or (without one) the first
 //     mid move of liveMoveCents within 3 minutes (in-play prices move on
 //     every point; pre-match prices barely move);
-//   - progress = minutes since start / expected duration (best-of-5 at the
-//     Grand Slams, else best-of-3). It is a proxy for "half the sets played".
-// A licensed point-by-point feed would make both exact.
+//   - progress is measured in points by a tennis scoring model
+//     (tennisModel.ts: deuce, 7-point tiebreaks, 10-point final-set tiebreak
+//     at the Slams, best of 3/5) calibrated to the pre-match price, blended
+//     with how much of the match's price uncertainty has already resolved.
+//     With a live score (TENNIS_SCORE_FEED) progress comes from the exact
+//     score. See MatchTracker.progress.
 //
 // Pure logic (no I/O): the engine turns plans into risk-checked orders.
 
@@ -35,6 +38,7 @@ import type { TennisConfig } from '../config';
 import type { OrderBook } from '../marketdata/orderBook';
 import { LiquidityRatchet } from '../strategy/exitPolicies';
 import { floorToTick, round } from '../util/num';
+import { impliedModel, scoreProgress, timeProgress, type MatchFormat, type TennisScore } from './tennisModel';
 
 export interface Quote { bid?: number; ask?: number; bidSize?: number; askSize?: number }
 
@@ -54,6 +58,8 @@ export interface MatchSnapshot {
   /** The two player markets (one is enough: the other side is 1 - p). */
   markets: MatchMarket[];
   closeTime: number;
+  /** Live score, when a score feed is configured (TENNIS_SCORE_FEED). */
+  score?: TennisScore;
 }
 
 export interface TennisPlan {
@@ -89,6 +95,13 @@ export class MatchTracker {
   /** Last tennis-confluence reading per held market (dashboard). */
   readonly signals = new Map<string, { score: number; momentum: boolean; flow: boolean; depth: boolean; crossMarket: boolean }>();
   private history: Array<{ ts: number; p: number }> = [];
+  /** Match price at the start (calibrates the scoring model), last pre-match price, realized
+   * variation of the price since the start (information clock), live score when known. */
+  pStart?: number;
+  private pPre?: number;
+  private qv = 0;
+  private qvLast?: { ts: number; p: number };
+  score?: TennisScore;
   private readonly mids = new Map<string, Array<{ ts: number; p: number }>>();
 
   /** Mid change of one market over the last `ms` (undefined without enough history). */
@@ -111,14 +124,56 @@ export class MatchTracker {
     return a ?? (b !== undefined ? 1 - b : undefined);
   }
 
-  bestOf(ms: MatchMarket[]): 3 | 5 {
-    return ms.some((m) => m.title && GRAND_SLAMS.test(m.title)) ? 5 : 3;
+  /** Grand Slam main draw: best of 5 with a 10-point final-set tiebreak. Slam qualifying: best of 3
+   * with the 10-point final-set tiebreak. Everything else on the ATP tour: best of 3, 7-point tiebreaks. */
+  format(ms: MatchMarket[]): MatchFormat {
+    const titles = ms.map((m) => m.title ?? '').join(' ');
+    const slam = GRAND_SLAMS.test(titles);
+    const quali = /qualif/i.test(titles);
+    return { bestOf: slam && !quali ? 5 : 3, finalTiebreak: slam ? 10 : 7 };
   }
 
+  bestOf(ms: MatchMarket[]): 3 | 5 {
+    return this.format(ms).bestOf;
+  }
+
+  /**
+   * How far along the match is, 0..1, measured in points rather than minutes:
+   *  - score clock (when a live score is known): points played vs the model's expected remaining
+   *    points from the exact score (sets, games, deuce, tiebreak);
+   *  - otherwise a blend of
+   *    - point clock: minutes / secPerPoint vs the model's distribution of the match length, which
+   *      depends on the format and on how lopsided the pre-match price was (a 90/10 match is ~20%
+   *      shorter than a 50/50 one); a match running long is assumed to have more to go, never 100%;
+   *    - information clock: the share of the match's price uncertainty already resolved. The win
+   *      probability is a martingale ending at 0 or 1, so the price variation still to come is
+   *      p(1-p) on average: progress = resolved / (resolved + p(1-p)), resolved = max(realised
+   *      variation, p0(1-p0) - p(1-p)). A blowout resolves fast, a tight tiebreak-heavy match slowly.
+   */
   progress(now: number, ms: MatchMarket[]): number {
-    if (this.liveSince === undefined) return 0;
-    const dur = this.bestOf(ms) === 5 ? this.cfg.durationBo5Min : this.cfg.durationBo3Min;
-    return (now - this.liveSince) / (dur * 60_000);
+    return this.progressDetail(now, ms).progress;
+  }
+
+  progressDetail(now: number, ms: MatchMarket[]): { progress: number; time?: number; info?: number; score?: number; expectedMin?: number; bestOf: 3 | 5 } {
+    const format = this.format(ms);
+    if (this.liveSince === undefined) return { progress: 0, bestOf: format.bestOf };
+    const model = impliedModel(this.pStart ?? 0.5, format, this.cfg.serveBase);
+    const st = model.start();
+    const expectedMin = (st.mean * this.cfg.secPerPoint) / 60;
+    if (this.score) {
+      const sc = scoreProgress(model, this.score);
+      return { progress: sc, score: sc, expectedMin, bestOf: format.bestOf };
+    }
+    const time = timeProgress(Math.max(0, now - this.liveSince) / 1000 / this.cfg.secPerPoint, st.mean, st.sd);
+    const p = this.history.length ? this.history[this.history.length - 1].p : undefined;
+    const rest = p === undefined ? undefined : p * (1 - p);
+    // Resolved variance so far: realised variation, or at least the drop in p(1-p) since the start
+    // (their expectations are equal; the drop is robust to smooth drifts and sparse sampling).
+    const p0 = this.pStart ?? 0.5;
+    const resolved = rest === undefined ? 0 : Math.max(this.qv, p0 * (1 - p0) - rest);
+    const info = rest === undefined ? undefined : resolved + rest > 0 ? resolved / (resolved + rest) : 1;
+    const w = info === undefined ? 0 : this.cfg.progressInfoWeight;
+    return { progress: w * (info ?? 0) + (1 - w) * time, time, info, expectedMin, bestOf: format.bestOf };
   }
 
   /** Update from a snapshot; returns the phase. */
@@ -136,12 +191,22 @@ export class MatchTracker {
       while (h.length && h[0].ts < s.now - 5 * 60_000) h.shift();
       this.mids.set(m.ticker, h);
     }
+    if (s.score) this.score = s.score;
     if (this.liveSince === undefined) {
       if (s.startTime !== undefined && s.now >= s.startTime) this.liveSince = s.startTime;
       else if (s.startTime === undefined && p !== undefined) {
         const recent = this.history.filter((h) => h.ts >= s.now - 3 * 60_000);
         const moved = recent.length > 1 && Math.max(...recent.map((h) => h.p)) - Math.min(...recent.map((h) => h.p)) >= this.cfg.liveMoveCents - 1e-9;
-        if (moved) this.liveSince = s.now;
+        if (moved) { this.liveSince = s.now; this.pPre = recent[0].p; }
+      }
+      if (this.liveSince === undefined && p !== undefined) this.pPre = p;
+    }
+    if (this.liveSince !== undefined && p !== undefined) {
+      this.pStart ??= this.pPre ?? p;
+      if (!this.qvLast) this.qvLast = { ts: s.now, p: this.pStart };
+      if (s.now - this.qvLast.ts >= this.cfg.qvSampleSec * 1000) {
+        this.qv += (p - this.qvLast.p) ** 2;
+        this.qvLast = { ts: s.now, p };
       }
     }
     if (s.now >= s.closeTime) return 'done';

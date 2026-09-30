@@ -32,6 +32,8 @@ import type { MacroEvent } from './model/featureEngine';
 import { ladderQuotes } from './model/ladder';
 import type { BinaryExposure, PerpHedger } from './perps/hedger';
 import { decideMatch, MatchTracker, type MatchMarket } from './tennis/tennisStrategy';
+import { parseTennisScore } from './tennis/liveScore';
+import type { TennisScore } from './tennis/tennisModel';
 import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
 import { effectiveSigma, type VolProfile } from './model/volSeasonality';
 import { floorCount } from './util/num';
@@ -418,12 +420,38 @@ export class Engine {
   // ---- ATP tennis (bot/tennis/tennisStrategy.ts) --------------------------------------
   private readonly matches = new Map<string, MatchTracker>();
   private lastTennisTick = 0;
-  readonly tennisStatus = new Map<string, { event: string; phase: string; pA?: number; progress: number; liveSince?: number; notes: string[]; tickers: string[]; updatedTs: number; trailingStops?: Record<string, number>; confluence?: Record<string, unknown> }>();
+  /** Live tennis scores (TENNIS_SCORE_FEED=kalshi): milestone per event, last poll, raw payload. */
+  private readonly scores = new Map<string, { milestone?: { id: string; type: string } | null; polledTs: number; score?: TennisScore; raw?: unknown; error?: string }>();
+  readonly tennisStatus = new Map<string, { event: string; phase: string; pA?: number; progress: number; progressDetail?: Record<string, unknown>; score?: TennisScore; scoreRaw?: unknown; liveSince?: number; notes: string[]; tickers: string[]; updatedTs: number; trailingStops?: Record<string, number>; confluence?: Record<string, unknown> }>();
 
   /** Tennis budget use: worst-case loss of all tennis positions + resting orders vs the 25% cap. */
   tennisBudget(): { used: number; cap: number; bankroll: number } {
     const b = this.bankroll() ?? 0;
     return { used: this.riskTotals(0, '__none__').total, cap: this.d.cfg.tennis.maxTotalFrac * b, bankroll: b };
+  }
+
+  /** Poll Kalshi's live data for a match (every scorePollSec; milestone looked up once). Never throws. */
+  private async pollScore(event: string, now: number) {
+    const T = this.d.cfg.tennis;
+    const rest = this.d.md.rest;
+    let st = this.scores.get(event);
+    if (!st) { st = { polledTs: 0 }; this.scores.set(event, st); }
+    if (!rest || now - st.polledTs < T.scorePollSec * 1000) return st;
+    st.polledTs = now;
+    try {
+      if (st.milestone === undefined) {
+        const ms = await rest.getMilestones(event);
+        st.milestone = ms[0] ?? null;
+      }
+      if (!st.milestone) { st.error = 'no Kalshi milestone for this match'; return st; }
+      const ld = await rest.getLiveData(st.milestone.type, st.milestone.id);
+      st.raw = ld?.details;
+      st.score = parseTennisScore(ld?.details);
+      st.error = st.score ? undefined : 'live data not recognised as a tennis score (see scoreRaw)';
+    } catch (e) {
+      st.error = `score feed: ${(e as Error).message}`;
+    }
+    return st;
   }
 
   private async tennisTick(): Promise<void> {
@@ -462,10 +490,11 @@ export class Engine {
         };
       });
       const totals = this.riskTotals(0, event);
-      const out = decideMatch(tracker, { event, now, startTime: ms.find((m) => m.startTime)?.startTime, markets, closeTime: Math.min(...ms.map((m) => m.closeTime)) }, T,
+      const sc = T.scoreFeed === 'kalshi' ? await this.pollScore(event, now) : undefined;
+      const out = decideMatch(tracker, { event, now, startTime: ms.find((m) => m.startTime)?.startTime, markets, closeTime: Math.min(...ms.map((m) => m.closeTime)), score: sc?.score }, T,
         { bankroll, tennisRisk: totals.total, matchRisk: totals.window }, ms[0].tickSize);
       const notes = [...out.notes, ...(tradeable ? [] : ['tracking only: set TENNIS_LIVE=true to trade tennis with real money'])];
-      this.tennisStatus.set(event, { event, phase: out.phase, pA: MatchTracker.probability(markets), progress: tracker.progress(now, markets), liveSince: tracker.liveSince, notes, tickers: ms.map((m) => m.ticker), updatedTs: now, trailingStops: Object.fromEntries(tracker.stops), confluence: Object.fromEntries(tracker.signals) });
+      this.tennisStatus.set(event, { event, phase: out.phase, pA: MatchTracker.probability(markets), progress: tracker.progress(now, markets), progressDetail: tracker.progressDetail(now, markets), score: tracker.score, scoreRaw: sc?.raw ?? sc?.error, liveSince: tracker.liveSince, notes, tickers: ms.map((m) => m.ticker), updatedTs: now, trailingStops: Object.fromEntries(tracker.stops), confluence: Object.fromEntries(tracker.signals) });
 
       // Reconcile resting tennis orders with the plan (never touch another market's orders).
       const plans = tradeable ? out.plans : [];
