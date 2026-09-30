@@ -203,14 +203,19 @@ In live trading, `ModelHealth` stops new risk if the rolling log-loss advantage 
 - **Budget.** All tennis positions plus resting orders are capped at 25% of the working cash pool (the tradable bankroll after vault/pocket). The cap can't be configured above 25%. Each match is capped at 10% and each order at 5%. Sizing includes tennis maker fees (multiplier 1). Tennis is budgeted separately from the crypto book, so neither eats the other's limits.
 - **Underdog bounce.** From 15 minutes before the start until 20 minutes after it, if the match is heavily skewed (underdog priced 8–25¢), the bot bids for the underdog as a maker, one tick inside the spread when there's room. After a fill it rests a take-profit at `max(entry + 6¢, entry × 1.4)`. If the price jumps past that target, it sells at the bid immediately. This is a volatility trade. Tennis and Kalshi studies find longshots win *less* often than their price implies (Lahvička 2014; Bürgi, Deng & Whelan), so holding underdogs to settlement is expected to lose, and the take-profit is the whole point. An optional stop is off by default, so the maximum loss is the entry price.
 - **Favorite re-entry.** Once the match is at least half done, and the leader is priced 75–92¢ and hasn't slipped more than 4¢ in 5 minutes, the bot bids for the leader and holds to settlement. The hit rate is high, but the payoff is asymmetric: at 85¢ a win pays 15¢ and a loss costs 85¢. An optional stop is off by default.
-- **Ratcheting trailing stop from the target (`TENNIS_TRAIL=true`, the default, on both legs).** This replaces the fixed take-profit and uses the same order-book logic as the crypto liquidity ratchet (`LiquidityRatchet` with a profit-lock floor).
+- **Conservative price hunt, then the next exit in profit (`TENNIS_TRAIL=true`, the default, on both legs).** Tennis has no macro confluence, so it uses a **tennis confluence** built from the two player markets' books and tapes. It counts four independent confirmations over the last minute:
+  - momentum: our player's mid is up at least 1¢
+  - trade flow: aggressive buying favours our player
+  - depth: bids are heavier in the top three levels
+  - cross-market: the opponent's market fell at least 1¢
+
+  How the exit works:
   - Below the target there is no exit order and the position rides. The target is `max(entry + 6¢, entry × 1.4)` for the underdog and `min(97¢, entry + 6¢)` for the favorite.
-  - When the bid first reaches the target, the stop is set **at the target**, which locks that profit.
-  - As the price climbs, the stop ratchets up to the highest bid "wall" it has moved past. A wall is a level that can absorb the whole position (`TENNIS_TRAIL_MIN_FILL_RATIO`) and has persisted for `TENNIS_TRAIL_MIN_WALL_AGE_SEC`.
-  - When the bid drops below the stop, the bot sells reduce-only at the stop minus one tick.
-  - If the price gaps through the stop, it sells at the bid while that is still a profit, and otherwise keeps holding (the optional hard stop is separate).
-  - Exits are taker orders (about 1.2¢ at 20¢ with the tennis fee multiplier of 1), the price of letting winners run.
-  - `TENNIS_TRAIL=false` restores the fixed maker take-profit. The dashboard shows each position's current stop.
+  - At the target the bot hunts only if at least `TENNIS_HUNT_MIN_SIGNALS` (2) signals agree. Otherwise it takes the profit at once.
+  - While hunting, the stop is the highest of the target lock, the order-book wall ratchet (levels that can fill the whole position, as in crypto) and 2 ticks under the peak bid (`TENNIS_HUNT_TRAIL_TICKS`). The hunt lasts at most `TENNIS_HUNT_MAX_SEC` (180 s).
+  - When the bid breaks the stop, the signals fade, or time runs out, the bot takes the **next available exit in profit**: a reduce-only sell at the price where visible bid depth can absorb the whole position, never below entry + 1 tick. Below that it holds (the optional hard stop is separate).
+  - Exits are taker orders, about 1.2¢ at 20¢ with the tennis fee multiplier of 1.
+  - `TENNIS_TRAIL=false` restores the fixed maker take-profit. The dashboard shows each position's stop and confluence reading.
 - **Match state without a score feed.** "Started" means the published start time has passed, or, when none is published, the first 3¢ move of the mid within 3 minutes (in-play prices move on every point). "Half the match" is time-based: 105 minutes for best-of-3, 170 minutes for best-of-5 at the Slams (detected from the title). A licensed point-by-point feed would make both exact.
 - **Rollout.** Tennis trades in paper and shadow modes. In live mode it only tracks matches until you set `TENNIS_LIVE=true`. `npm run research:tennis` replays recorded tennis books through the same decision code and reports P&L per leg with a per-match bootstrap CI. Enable real money only once that CI's lower bound is above 0 over about 200 matches.
 - `/api/status` and the Telemetry panel show each match's phase, the budget in use, and why the bot is or isn't acting.

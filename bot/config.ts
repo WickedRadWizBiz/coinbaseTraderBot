@@ -209,6 +209,11 @@ export interface TennisConfig {
   trailMinFillRatio: number;
   trailMinWallAgeSec: number;
   trailSlippageTicks: number;
+  /** Conservative price hunt past the target: continue only while >= huntMinSignals of the tennis
+   * confluence signals agree, for at most huntMaxSec, trailing huntTrailTicks under the peak bid. */
+  huntMinSignals: number;
+  huntMaxSec: number;
+  huntTrailTicks: number;
 }
 
 export interface PerpsConfig {
@@ -556,6 +561,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       trailMinFillRatio: num(env, 'TENNIS_TRAIL_MIN_FILL_RATIO', 1, 0.1, 20),
       trailMinWallAgeSec: num(env, 'TENNIS_TRAIL_MIN_WALL_AGE_SEC', 3, 0, 120),
       trailSlippageTicks: num(env, 'TENNIS_TRAIL_SLIPPAGE_TICKS', 1, 0, 10),
+      huntMinSignals: num(env, 'TENNIS_HUNT_MIN_SIGNALS', 2, 1, 4),
+      huntMaxSec: num(env, 'TENNIS_HUNT_MAX_SEC', 180, 0, 3600),
+      huntTrailTicks: num(env, 'TENNIS_HUNT_TRAIL_TICKS', 2, 1, 20),
     },
   };
   return deepFreeze(cfg);

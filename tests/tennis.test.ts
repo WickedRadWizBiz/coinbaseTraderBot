@@ -66,42 +66,48 @@ test('fixed take-profit mode (TENNIS_TRAIL=false): resting take-profit at max(+6
 
 import { OrderBook } from '../bot/marketdata/orderBook';
 
-test('order-book ratcheting trail: arms at the target, climbs to walls, exits below the stop, handles gaps', () => {
-  const tr = new MatchTracker('E', T);
-  tr.underdogTicker = 'E-DOG';
-  const book = new OrderBook('E-DOG');
-  let now = t0;
-  const step = (bids: Array<[number, number]>, ask: number) => {
-    book.applySnapshot({ bids: bids.map(([price, size]) => ({ price, size })), asks: [{ price: ask, size: 100 }] }, now);
-    const m = [mk('E-ALC', 1 - ask, 1 - bids[0][0]), { ...mk('E-DOG', bids[0][0], ask, { position: 100, avgEntry: 0.15 }), book }];
-    const out = decideMatch(tr, { event: 'E', now, startTime: t0 - 60_000, closeTime: t0 + 86_400_000, markets: m }, T, budget);
-    now += 5000;
-    return out;
+test('conservative price hunt: no confluence -> take the profit at the target; confluence -> hunt, then the next exit in profit', () => {
+  const run = (tr: MatchTracker, now: number, dogBids: Array<[number, number]>, dogAsk: number, favBid: number, flow?: number) => {
+    const book = new OrderBook('E-DOG');
+    book.applySnapshot({ bids: dogBids.map(([price, size]) => ({ price, size })), asks: [{ price: dogAsk, size: 100 }] }, now);
+    const m = [mk('E-ALC', favBid, favBid + 0.02), { ...mk('E-DOG', dogBids[0][0], dogAsk, { position: 100, avgEntry: 0.15, flow }), book }];
+    return decideMatch(tr, { event: 'E', now, startTime: t0 - 60_000, closeTime: t0 + 86_400_000, markets: m }, T, budget);
   };
-  // Below the 0.21 target: hold, no exit order.
-  let o = step([[0.18, 300]], 0.20);
+  // Below the 0.21 target: ride, no exit order.
+  const a = new MatchTracker('E', T); a.underdogTicker = 'E-DOG';
+  const o0 = run(a, t0, [[0.18, 300]], 0.20, 0.80);
+  assert.equal(o0.plans.length, 0);
+  assert.ok(o0.notes.some((n) => n.includes('hunt starts at 0.21')));
+  // Reaches the target with no confirming signals (flat, balanced book): take the profit now.
+  const quiet = new MatchTracker('Q', T); quiet.underdogTicker = 'E-DOG';
+  for (let i = 0; i < 13; i++) run(quiet, t0 + i * 5000, [[0.21, 100]], 0.23, 0.77);
+  const take = run(quiet, t0 + 13 * 5000, [[0.21, 100]], 0.23, 0.77);
+  assert.deepEqual([take.plans[0]?.leg, take.plans[0]?.price, take.plans[0]?.reduceOnly], ['underdog_trail', 0.21, true], JSON.stringify(take.notes));
+  // A surge with confluence (momentum, heavy bids, opponent falling, buyers lifting): hunt.
+  const h = new MatchTracker('H', T); h.underdogTicker = 'E-DOG';
+  let now = t0;
+  for (let i = 0; i < 13; i++) { run(h, now, [[0.15, 100]], 0.17, 0.83); now += 5000; }
+  let o = run(h, now, [[0.24, 400], [0.22, 400]], 0.25, 0.74, 0.6);
+  assert.equal(o.plans.length, 0, JSON.stringify(o.notes));
+  assert.ok(h.signals.get('E-DOG')!.score >= 2);
+  now += 5000;
+  o = run(h, now, [[0.27, 400], [0.25, 400]], 0.28, 0.71, 0.6);
   assert.equal(o.plans.length, 0);
-  assert.ok(o.notes.some((n) => n.includes('trail arms at 0.21')));
-  // Bid reaches the target: armed, stop = target; still riding.
-  o = step([[0.22, 300]], 0.24);
-  assert.equal(o.plans.length, 0);
-  assert.equal(tr.stops.get('E-DOG'), 0.21);
-  // Price runs to 0.30 with a persistent wall at 0.28: stop ratchets to 0.28.
-  step([[0.30, 300], [0.28, 400]], 0.32);
-  o = step([[0.30, 300], [0.28, 400]], 0.32);
-  assert.equal(tr.stops.get('E-DOG'), 0.28);
-  assert.equal(o.plans.length, 0);
-  // Bid slips to 0.27, below the stop: exit reduce-only at stop - 1 tick.
-  o = step([[0.27, 300]], 0.29);
-  assert.deepEqual([o.plans[0].leg, o.plans[0].side, o.plans[0].price, o.plans[0].reduceOnly, o.plans[0].count], ['underdog_trail', 'ask', 0.27, true, 100]);
-  // A gap far below the stop: sell at the bid while still in profit.
-  const tr2 = new MatchTracker('F', T);
-  tr2.underdogTicker = 'F-DOG';
-  tr2.armed.add('F-DOG');
-  const b2 = new OrderBook('F-DOG');
-  b2.applySnapshot({ bids: [{ price: 0.19, size: 300 }], asks: [{ price: 0.21, size: 100 }] }, now);
-  const g = decideMatch(tr2, { event: 'F', now, startTime: t0, closeTime: t0 + 86_400_000, markets: [mk('F-ALC', 0.79, 0.81), { ...mk('F-DOG', 0.19, 0.21, { position: 100, avgEntry: 0.15 }), book: b2 }] }, T, budget);
-  assert.equal(g.plans[0]?.price, 0.19, JSON.stringify(g));
+  assert.equal(h.stops.get('E-DOG'), 0.25, 'stop trails 2 ticks under the peak bid');
+  // The bid breaks the stop: next available exit in profit, where the bids can fill 100.
+  now += 5000;
+  o = run(h, now, [[0.24, 60], [0.23, 400]], 0.26, 0.74, 0.6);
+  assert.deepEqual([o.plans[0].leg, o.plans[0].price], ['underdog_trail', 0.23], 'sell where depth covers the position');
+  // Time limit ends a hunt that keeps confirming.
+  const lim = new MatchTracker('L', { ...T, huntMaxSec: 10 }); lim.underdogTicker = 'E-DOG';
+  now = t0;
+  for (let i = 0; i < 13; i++) { run(lim, now, [[0.15, 100]], 0.17, 0.83); now += 5000; }
+  const cfgL = { ...T, huntMaxSec: 10 };
+  const runL = (bid: number) => { const book = new OrderBook('E-DOG'); book.applySnapshot({ bids: [{ price: bid, size: 400 }], asks: [{ price: bid + 0.01, size: 50 }] }, now); return decideMatch(lim, { event: 'E', now, startTime: t0 - 60_000, closeTime: t0 + 86_400_000, markets: [mk('E-ALC', 1 - bid - 0.02, 1 - bid), { ...mk('E-DOG', bid, bid + 0.01, { position: 100, avgEntry: 0.15, flow: 0.8 }), book }] }, cfgL, budget); };
+  assert.equal(runL(0.24).plans.length, 0);
+  now += 12_000;
+  const late = runL(0.26);
+  assert.match(late.plans[0]?.why ?? '', /time limit/);
 });
 
 test('in-play detection without a start time, then favorite re-entry once half the match is done', () => {

@@ -418,7 +418,7 @@ export class Engine {
   // ---- ATP tennis (bot/tennis/tennisStrategy.ts) --------------------------------------
   private readonly matches = new Map<string, MatchTracker>();
   private lastTennisTick = 0;
-  readonly tennisStatus = new Map<string, { event: string; phase: string; pA?: number; progress: number; liveSince?: number; notes: string[]; tickers: string[]; updatedTs: number; trailingStops?: Record<string, number> }>();
+  readonly tennisStatus = new Map<string, { event: string; phase: string; pA?: number; progress: number; liveSince?: number; notes: string[]; tickers: string[]; updatedTs: number; trailingStops?: Record<string, number>; confluence?: Record<string, unknown> }>();
 
   /** Tennis budget use: worst-case loss of all tennis positions + resting orders vs the 25% cap. */
   tennisBudget(): { used: number; cap: number; bankroll: number } {
@@ -454,13 +454,18 @@ export class Engine {
           avgEntry: pos && pos.yes > 0 ? -pos.netCash / pos.yes : undefined,
           quote: { bid: b?.price, ask: a?.price, bidSize: b?.size, askSize: a?.size },
           book: book.isUsable(now, cfg.risk.maxBookAgeMs) ? book : undefined,
+          flow: (() => {
+            const tr = md.features.micro.get(m.ticker)?.tradesIn(now, 60_000) ?? [];
+            const tot = tr.reduce((x, y) => x + y.count, 0);
+            return tot > 0 ? tr.reduce((x, y) => x + y.signed, 0) / tot : undefined;
+          })(),
         };
       });
       const totals = this.riskTotals(0, event);
       const out = decideMatch(tracker, { event, now, startTime: ms.find((m) => m.startTime)?.startTime, markets, closeTime: Math.min(...ms.map((m) => m.closeTime)) }, T,
         { bankroll, tennisRisk: totals.total, matchRisk: totals.window }, ms[0].tickSize);
       const notes = [...out.notes, ...(tradeable ? [] : ['tracking only: set TENNIS_LIVE=true to trade tennis with real money'])];
-      this.tennisStatus.set(event, { event, phase: out.phase, pA: MatchTracker.probability(markets), progress: tracker.progress(now, markets), liveSince: tracker.liveSince, notes, tickers: ms.map((m) => m.ticker), updatedTs: now, trailingStops: Object.fromEntries(tracker.stops) });
+      this.tennisStatus.set(event, { event, phase: out.phase, pA: MatchTracker.probability(markets), progress: tracker.progress(now, markets), liveSince: tracker.liveSince, notes, tickers: ms.map((m) => m.ticker), updatedTs: now, trailingStops: Object.fromEntries(tracker.stops), confluence: Object.fromEntries(tracker.signals) });
 
       // Reconcile resting tennis orders with the plan (never touch another market's orders).
       const plans = tradeable ? out.plans : [];

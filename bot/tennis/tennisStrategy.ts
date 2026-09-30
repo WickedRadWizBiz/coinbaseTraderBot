@@ -38,7 +38,11 @@ import { floorToTick, round } from '../util/num';
 
 export interface Quote { bid?: number; ask?: number; bidSize?: number; askSize?: number }
 
-export interface MatchMarket { ticker: string; title?: string; quote: Quote; position: number; avgEntry?: number; book?: OrderBook }
+export interface MatchMarket {
+  ticker: string; title?: string; quote: Quote; position: number; avgEntry?: number; book?: OrderBook;
+  /** Signed taker flow on this market over the last minute: (YES-taker - NO-taker) / total, in [-1, 1]. */
+  flow?: number;
+}
 
 export type MatchPhase = 'pre' | 'underdog_window' | 'live' | 'late' | 'done';
 
@@ -79,7 +83,23 @@ export class MatchTracker {
   readonly armed = new Set<string>();
   readonly ratchets = new Map<string, LiquidityRatchet>();
   readonly stops = new Map<string, number>();
+  /** When each trail armed, and the best bid seen since (conservative price hunt). */
+  readonly armedAt = new Map<string, number>();
+  readonly peak = new Map<string, number>();
+  /** Last tennis-confluence reading per held market (dashboard). */
+  readonly signals = new Map<string, { score: number; momentum: boolean; flow: boolean; depth: boolean; crossMarket: boolean }>();
   private history: Array<{ ts: number; p: number }> = [];
+  private readonly mids = new Map<string, Array<{ ts: number; p: number }>>();
+
+  /** Mid change of one market over the last `ms` (undefined without enough history). */
+  midChange(ticker: string, now: number, ms = 60_000): number | undefined {
+    const h = this.mids.get(ticker);
+    if (!h?.length) return undefined;
+    const past = h.find((x) => x.ts >= now - ms);
+    const last = h[h.length - 1];
+    if (!past || last.ts - past.ts < ms / 2) return undefined;
+    return last.p - past.p;
+  }
 
   constructor(readonly event: string, private readonly cfg: TennisConfig) {}
 
@@ -107,6 +127,14 @@ export class MatchTracker {
     if (p !== undefined) {
       this.history.push({ ts: s.now, p });
       while (this.history.length && this.history[0].ts < s.now - 15 * 60_000) this.history.shift();
+    }
+    for (const m of s.markets) {
+      const mp = mid(m.quote);
+      if (mp === undefined) continue;
+      const h = this.mids.get(m.ticker) ?? [];
+      h.push({ ts: s.now, p: mp });
+      while (h.length && h[0].ts < s.now - 5 * 60_000) h.shift();
+      this.mids.set(m.ticker, h);
     }
     if (this.liveSince === undefined) {
       if (s.startTime !== undefined && s.now >= s.startTime) this.liveSince = s.startTime;
@@ -136,36 +164,80 @@ export class MatchTracker {
 }
 
 /**
- * Ratcheting "smart trailing" exit for a long YES position, the same order-book logic as the
- * crypto liquidity ratchet: it arms when the bid first reaches `target` (the stop starts AT the
- * target, locking that profit), then the stop climbs to the highest bid wall the price has moved
- * past (a level big enough to absorb the whole position that has persisted a few seconds). When
- * the bid falls below the stop, sell reduce-only at stop - slippage. If the price gaps through,
- * sell at the bid while that is still a profit; otherwise keep holding (optional hard stop).
- * Before the target is reached there is no exit order: the position rides.
+ * Tennis confluence: tennis has no macro factors, but the book and tape of the two player
+ * markets give four independent confirmations that a move in our favour is real:
+ *   momentum     our player's mid rose >= 1c over the last minute
+ *   flow         taker flow on our market over the last minute favours our player (>= +0.2)
+ *   depth        top-3 book imbalance favours our player (bids heavier, >= +0.2)
+ *   crossMarket  the opponent's market fell >= 1c over the same minute (the move is not one
+ *                noisy book)
  */
-function trailExit(t: MatchTracker, m: MatchMarket, entry: number, target: number, now: number, cfg: TennisConfig, tick: number, leg: 'underdog_trail' | 'fav_trail', notes: string[]): TennisPlan[] {
+export function tennisConfluence(t: MatchTracker, m: MatchMarket, other: MatchMarket | undefined, now: number) {
+  const mom = t.midChange(m.ticker, now);
+  const oth = other ? t.midChange(other.ticker, now) : undefined;
+  const momentum = mom !== undefined && mom >= 0.01 - 1e-9;
+  const flow = m.flow !== undefined && m.flow >= 0.2;
+  const depth = m.book !== undefined && m.book.imbalance(3) >= 0.2;
+  const crossMarket = oth !== undefined && oth <= -0.01 + 1e-9;
+  return { score: [momentum, flow, depth, crossMarket].filter(Boolean).length, momentum, flow, depth, crossMarket };
+}
+
+/** Sell price that the visible bids can absorb for the whole position, never below `minPx`. */
+function nextFillableExit(m: MatchMarket, minPx: number): number | undefined {
   const bid = m.quote.bid;
+  if (bid === undefined) return undefined;
+  let px = bid;
+  if (m.book) {
+    let cum = 0;
+    for (const l of m.book.snapshot(20).bids) { cum += l.size; px = l.price; if (cum + 1e-9 >= m.position) break; }
+  }
+  const limit = Math.max(px, minPx);
+  return bid >= minPx - 1e-9 ? limit : undefined;
+}
+
+/**
+ * Conservative price hunt past the target, then the next available exit in profit.
+ *  - Below the target: no exit order, the position rides.
+ *  - At the target: hunt only if >= huntMinSignals tennis-confluence signals agree; otherwise take
+ *    the profit right away.
+ *  - While hunting: stop = max(target lock, order-book wall ratchet (levels that can fill the whole
+ *    position), peak bid - huntTrailTicks). The hunt lasts at most huntMaxSec.
+ *  - Exit (bid breaks the stop, signals fade, or time is up): sell reduce-only at the price the
+ *    visible bids can absorb, never below entry + 1 tick. Below that, hold (optional hard stop).
+ */
+function huntExit(t: MatchTracker, m: MatchMarket, other: MatchMarket | undefined, entry: number, target: number, now: number, cfg: TennisConfig, tick: number, leg: 'underdog_trail' | 'fav_trail', notes: string[]): TennisPlan[] {
+  const bid = m.quote.bid;
+  const sig = tennisConfluence(t, m, other, now);
+  t.signals.set(m.ticker, sig);
   if (!t.armed.has(m.ticker)) {
     if (bid === undefined || bid < target - 1e-9) {
-      notes.push(`${leg}: holding, trail arms at ${target.toFixed(2)} (bid ${bid ?? '—'})`);
+      notes.push(`${leg}: holding, hunt starts at ${target.toFixed(2)} (bid ${bid ?? '—'})`);
       return [];
     }
     t.armed.add(m.ticker);
+    t.armedAt.set(m.ticker, now);
   }
-  const sell = (price: number, why: string): TennisPlan[] => [{ ticker: m.ticker, side: 'ask', price: round(price, 4), count: m.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg, why }];
-  let r = t.ratchets.get(m.ticker);
-  if (!r) { r = new LiquidityRatchet({ minFillRatio: cfg.trailMinFillRatio, minWallAgeMs: cfg.trailMinWallAgeSec * 1000, slippageTicks: cfg.trailSlippageTicks }); t.ratchets.set(m.ticker, r); }
-  if (!m.book) {
-    // No depth available: fall back to a plain trail at the target.
-    t.stops.set(m.ticker, target);
-    return bid !== undefined && bid < target - 1e-9 && bid > entry ? sell(bid, `${leg}: bid ${bid} below trail ${target}`) : [];
+  const floorPx = round(entry + tick, 4);
+  const sell = (why: string): TennisPlan[] => {
+    const px = nextFillableExit(m, floorPx);
+    if (px === undefined) { notes.push(`${leg}: exit wanted but bid ${bid} is not in profit; holding`); return []; }
+    return [{ ticker: m.ticker, side: 'ask', price: round(px, 4), count: m.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg, why }];
+  };
+  const peak = Math.max(t.peak.get(m.ticker) ?? 0, bid ?? 0);
+  t.peak.set(m.ticker, peak);
+  let stop = Math.max(target, round(peak - cfg.huntTrailTicks * tick, 4));
+  if (m.book) {
+    let r = t.ratchets.get(m.ticker);
+    if (!r) { r = new LiquidityRatchet({ minFillRatio: cfg.trailMinFillRatio, minWallAgeMs: cfg.trailMinWallAgeSec * 1000, slippageTicks: cfg.trailSlippageTicks }); t.ratchets.set(m.ticker, r); }
+    const out = r.evaluate({ position: m.position, book: m.book, now, tick, fees: { takerMultiplier: 1, makerMultiplier: 1 }, floor: target });
+    if (out.stop !== undefined) stop = Math.max(stop, out.stop);
   }
-  const out = r.evaluate({ position: m.position, book: m.book, now, tick, fees: { takerMultiplier: 1, makerMultiplier: 1 }, floor: target });
-  if (out.stop !== undefined) t.stops.set(m.ticker, out.stop);
-  notes.push(`${leg}: stop ${out.stop?.toFixed(2)} (entry ${entry.toFixed(3)})`);
-  if (out.plan) return sell(out.plan.price, `${leg}: bid fell below stop ${out.stop}`);
-  if (out.event === 'gapped' && bid !== undefined && bid >= entry + tick - 1e-9) return sell(bid, `${leg}: gapped below stop ${out.stop}; selling at ${bid} while still in profit`);
+  t.stops.set(m.ticker, stop);
+  const huntedSec = (now - (t.armedAt.get(m.ticker) ?? now)) / 1000;
+  notes.push(`${leg}: hunting, stop ${stop.toFixed(2)}, confluence ${sig.score}/4, ${huntedSec.toFixed(0)}s`);
+  if (bid !== undefined && bid < stop - 1e-9) return sell(`${leg}: bid ${bid} broke the stop ${stop.toFixed(2)}`);
+  if (sig.score < cfg.huntMinSignals) return sell(`${leg}: only ${sig.score}/4 confluence signals: taking the profit`);
+  if (huntedSec >= cfg.huntMaxSec) return sell(`${leg}: hunt time limit ${cfg.huntMaxSec}s: taking the profit`);
   return [];
 }
 
@@ -219,7 +291,7 @@ export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig
   const held = s.markets.filter((m) => m.position > 0);
 
   // A flat market has no trail (a later leg on the same player starts a fresh one).
-  for (const m of s.markets) if (m.position <= 0) { t.armed.delete(m.ticker); t.ratchets.delete(m.ticker); t.stops.delete(m.ticker); }
+  for (const m of s.markets) if (m.position <= 0) { t.armed.delete(m.ticker); t.ratchets.delete(m.ticker); t.stops.delete(m.ticker); t.armedAt.delete(m.ticker); t.peak.delete(m.ticker); t.signals.delete(m.ticker); }
 
   // After a restart the tracker is fresh: a held position bought cheap is the underdog trade.
   if (!t.underdogTicker && !t.underdogEntered && !t.favEntered && held.length) {
@@ -237,7 +309,7 @@ export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig
     if (cfg.trail) {
       // Ratcheting trail from the target: no fixed exit; the stop starts at the target and climbs
       // to order-book walls the price moves past.
-      plans.push(...trailExit(t, ud, entry, tpPx, s.now, cfg, tick, 'underdog_trail', notes));
+      plans.push(...huntExit(t, ud, s.markets.find((x) => x.ticker !== ud.ticker), entry, tpPx, s.now, cfg, tick, 'underdog_trail', notes));
     } else if (ud.quote.bid !== undefined && ud.quote.bid >= tpPx - 1e-9) {
       // The bounce already went past the target: take the profit at the bid now.
       plans.push({ ticker: ud.ticker, side: 'ask', price: ud.quote.bid, count: ud.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg: 'underdog_tp', why: `underdog bid ${ud.quote.bid} >= take-profit ${round(tpPx, 2)} (entry ${round(entry, 3)})` });
@@ -283,7 +355,7 @@ export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig
       plans.push({ ticker: fav.ticker, side: 'ask', price: fav.quote.bid, count: fav.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg: 'fav_stop', why: `favorite stop ${fav.quote.bid}` });
     } else if (cfg.trail && fav.avgEntry !== undefined) {
       const target = floorToTick(Math.min(cfg.favTrailCap, fav.avgEntry + cfg.favTrailCents) + tick - 1e-9, tick);
-      plans.push(...trailExit(t, fav, fav.avgEntry, target, s.now, cfg, tick, 'fav_trail', notes));
+      plans.push(...huntExit(t, fav, s.markets.find((x) => x.ticker !== fav.ticker), fav.avgEntry, target, s.now, cfg, tick, 'fav_trail', notes));
     }
     return { phase, plans, notes };
   }
