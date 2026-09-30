@@ -25,9 +25,11 @@ export interface VaultConfig {
   pocketShare: number;   // 0.1
   /** When the quota resets: at every session open, or once per day at the US open. */
   quotaReset: 'session' | 'us_open';
+  /** Headline daily vault goal (US open to next US open). Exceeding it is fine. */
+  dailyGoalUsd: number;
 }
 
-export const DEFAULT_VAULT: VaultConfig = { enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session' };
+export const DEFAULT_VAULT: VaultConfig = { enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session', dailyGoalUsd: 100 };
 
 export type VaultEventKind = 'vault' | 'pocket' | 'release' | 'withdrawal' | 'deposit' | 'quota_reset';
 
@@ -47,6 +49,9 @@ export interface VaultState {
   quotaPeriodStart: number;
   quotaFilled: number;
   withdrawnTotal: number;
+  /** Vaulted since the day (US open) began, and when that day began. */
+  dailyVaulted?: number;
+  dailyStart?: number;
   events: VaultEvent[];
 }
 
@@ -111,6 +116,12 @@ export class Vault {
       this.st.quotaFilled = 0;
       changed = true;
     }
+    const day = prevUsOpen(now);
+    if (day !== this.st.dailyStart) {
+      this.st.dailyStart = day;
+      this.st.dailyVaulted = 0;
+      changed = true;
+    }
     const due = this.st.pocket.filter((p) => p.releaseAt <= now);
     if (due.length) {
       const amt = r2(due.reduce((s, p) => s + p.amount, 0));
@@ -131,6 +142,7 @@ export class Vault {
     if (v > 0) {
       this.st.vault = r2(this.st.vault + v);
       this.st.quotaFilled = r2(this.st.quotaFilled + v);
+      this.st.dailyVaulted = r2((this.st.dailyVaulted ?? 0) + v);
       this.log({ ts: now, kind: 'vault', amount: v, ticker, note: `${Math.round(this.cfg.winShare * 100)}% of $${realized.toFixed(2)} win` });
     }
     // Portion of the win after the quota was met is subject to the pocket.
@@ -182,6 +194,9 @@ export class Vault {
       quotaFilled: r2(this.st.quotaFilled),
       quotaReset: this.cfg.quotaReset,
       quotaPeriodStart: this.st.quotaPeriodStart || null,
+      dailyGoalUsd: this.cfg.dailyGoalUsd,
+      dailyVaulted: r2(this.st.dailyVaulted ?? 0),
+      dailyGoalMet: (this.st.dailyVaulted ?? 0) >= this.cfg.dailyGoalUsd - 1e-9,
       phase: quotaMet ? 'pocketing' : 'vaulting',
       winShare: this.cfg.winShare,
       pocketShare: this.cfg.pocketShare,

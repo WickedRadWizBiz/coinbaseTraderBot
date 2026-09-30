@@ -57,7 +57,18 @@ export function VaultCard({ vault, session, onChange }: { vault: any; session: a
         </div>
         <div className="px-4 py-3 flex flex-col gap-2 border-b border-crypto-primary/50">
           <div className="flex justify-between text-xs font-bold tracking-widest uppercase gap-2 flex-wrap">
-            <span className="text-crypto-primary">Quota {usd(vault.quotaFilled)} / {usd(vault.quotaUsd)}</span>
+            <span className="text-crypto-text">Today&apos;s goal {usd(vault.dailyVaulted)} / {usd(vault.dailyGoalUsd)}</span>
+            <span className={vault.dailyGoalMet ? 'text-crypto-success' : 'text-crypto-primary'}>
+              {vault.dailyGoalMet ? `GOAL MET${vault.dailyVaulted > vault.dailyGoalUsd ? ` · +${usd(vault.dailyVaulted - vault.dailyGoalUsd)} OVER` : ''}` : `${usd(vault.dailyGoalUsd - vault.dailyVaulted)} to go`} · day resets at US open ({countdown(vault.nextUsOpen - now)})
+            </span>
+          </div>
+          <div className="relative w-full h-5 crt-border bg-black/30 overflow-hidden">
+            <div className="absolute left-0 top-0 h-full dither-bg-light bg-crypto-primary/60 transition-all duration-500" style={{ width: `${Math.min(100, (vault.dailyVaulted / Math.max(0.01, vault.dailyGoalUsd)) * 100)}%` }} />
+          </div>
+        </div>
+        <div className="px-4 py-3 flex flex-col gap-2 border-b border-crypto-primary/50">
+          <div className="flex justify-between text-xs font-bold tracking-widest uppercase gap-2 flex-wrap">
+            <span className="text-crypto-primary">Session quota {usd(vault.quotaFilled)} / {usd(vault.quotaUsd)}</span>
             <span className="text-crypto-text">
               {pocketing
                 ? `met · resets ${vault.quotaReset === 'session' ? `at ${session?.next?.label ?? 'next session'}${session?.next ? ` (${countdown(session.next.at - now)})` : ''}` : `at US open (${countdown(vault.nextUsOpen - now)})`}`

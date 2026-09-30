@@ -308,6 +308,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       winShare: num(env, 'VAULT_WIN_SHARE', 0.5, 0, 1),
       pocketShare: num(env, 'POCKET_SHARE', 0.1, 0, 1),
       quotaReset: oneOf(env, 'VAULT_QUOTA_RESET', 'session', ['session', 'us_open'] as const),
+      dailyGoalUsd: num(env, 'VAULT_DAILY_GOAL_USD', 100, 0, 1e7),
     },
   };
   return deepFreeze(cfg);

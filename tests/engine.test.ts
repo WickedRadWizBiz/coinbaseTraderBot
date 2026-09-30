@@ -105,7 +105,7 @@ test('opt-in confluence ratchet runs in the engine and starts in fair-value mode
 });
 
 test('vault and pocket are excluded from the tradable bankroll; wins feed the vault', async () => {
-  const vault = new Vault({ enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session' });
+  const vault = new Vault({ enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session', dailyGoalUsd: 100 });
   const { engine, recon, oms } = await setup({ vault, monitor: new BalanceMonitor() });
   const r = await recon.run('startup');
   engine.onBalance(r!.balance!);
@@ -118,7 +118,7 @@ test('vault and pocket are excluded from the tradable bankroll; wins feed the va
 });
 
 test('a manually recorded withdrawal is not counted again by the detector', async () => {
-  const vault = new Vault({ enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session' });
+  const vault = new Vault({ enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session', dailyGoalUsd: 100 });
   const monitor = new BalanceMonitor();
   const { engine } = await setup({ vault, monitor });
   engine.onBalance(200);

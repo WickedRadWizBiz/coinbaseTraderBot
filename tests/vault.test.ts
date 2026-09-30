@@ -10,7 +10,7 @@ import { nextUsOpen, prevUsOpen, Vault, type VaultConfig } from '../bot/vault/va
 import { tmpAudit, tmpDir } from './helpers';
 
 const T = (iso: string) => Date.parse(iso);
-const CFG: VaultConfig = { enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session' };
+const CFG: VaultConfig = { enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session', dailyGoalUsd: 100 };
 
 test('US open boundaries are DST-correct and skip weekends', () => {
   assert.equal(nextUsOpen(T('2026-07-15T14:00:00Z')), T('2026-07-16T13:30:00Z')); // EDT
@@ -141,4 +141,19 @@ test('a transient race that resolves is never booked', () => {
   assert.deepEqual(m.check(96, true), {}); // fill landed after the fill replay
   m.onCash(-4);                            // next reconciliation replays it
   assert.deepEqual(m.check(96, true), {});
+});
+
+test('daily goal: per-session quotas accumulate toward $100/day and may exceed it; resets at US open', () => {
+  let now = T('2026-07-15T14:00:00Z');
+  const v = new Vault(CFG, undefined, () => now);
+  v.onSettled(120, 'A'); // overlap session: $60 vaulted
+  assert.equal(v.status().dailyVaulted, 60);
+  assert.equal(v.status().dailyGoalMet, false);
+  now = T('2026-07-15T16:00:00Z'); // New York session: fresh session quota
+  v.onSettled(200, 'B'); // $100 more vaulted
+  assert.equal(v.status().dailyVaulted, 160);
+  assert.equal(v.status().dailyGoalMet, true, 'over the daily goal is fine');
+  now = T('2026-07-16T13:31:00Z'); v.tick(); // next US open: new day
+  assert.equal(v.status().dailyVaulted, 0);
+  assert.equal(v.vaultTotal, 160, 'the vault itself keeps everything');
 });
