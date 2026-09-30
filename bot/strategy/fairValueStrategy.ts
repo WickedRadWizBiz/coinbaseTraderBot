@@ -63,21 +63,24 @@ export interface StrategyOutput {
   notes: string[];
 }
 
-export function decide(v: MarketView, cfg: StrategyConfig): StrategyOutput {
+/** `opts.exits: false` disables the built-in fair-value exit (the backtester
+ * substitutes another exit policy). Production always uses the default. */
+export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boolean } = {}): StrategyOutput {
   const out: StrategyOutput = { place: [], cancel: [], notes: [] };
   const tick = v.tickSize;
   const bid = v.bestBid;
   const ask = v.bestAsk;
 
   // ---- Exits (risk-reducing, allowed in every style) ------------------------
-  if (v.position > 0 && bid) {
+  const exits = opts.exits !== false;
+  if (exits && v.position > 0 && bid) {
     const n = Math.min(v.position, bid.size);
     const fee = n > 0 ? orderFee(n, bid.price, true, v.fees) / n : 0;
     const edge = bid.price - v.pYes - fee;
     if (n > 0 && edge >= cfg.takerBuffer) {
       out.place.push({ side: 'ask', price: bid.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge, why: `bid ${bid.price} > fv ${v.pYes.toFixed(3)} + fee` });
     }
-  } else if (v.position < 0 && ask) {
+  } else if (exits && v.position < 0 && ask) {
     const n = Math.min(-v.position, ask.size);
     const fee = n > 0 ? orderFee(n, 1 - ask.price, true, v.fees) / n : 0;
     const edge = v.pYes - ask.price - fee;

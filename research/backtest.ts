@@ -1,7 +1,18 @@
 // Fee-inclusive backtest on recorded data using the production strategy,
 // risk gateway and the conservative queue-aware fill simulator.
 //   npm run research:backtest -- --recordings data/recordings --model params/model.candidate.json \
-//       [--grid 0.01,0.02,0.03] [--trials 6] [--annotate]
+//       [--grid 0.01,0.02,0.03] [--exits hold,fair_value,liquidity_ratchet,hybrid] \
+//       [--ratchet-fill 1] [--ratchet-age 3] [--ratchet-slip 1] [--trials 6] [--annotate]
+//
+// Exit policies (bot/strategy/exitPolicies.ts) are compared on identical data.
+// The exit policy governs every ACTIVE reduction: under hold / liquidity_ratchet,
+// taker entries against an existing position are blocked (they are exits in
+// disguise). Passive maker quotes unwind at favourable prices under every policy.
+// Every exit executes one tick (1 s) after it triggers, against the book at
+// that moment, so no policy gets instantaneous reaction for free. Exit
+// diagnostics: exit regret (what exited contracts would have paid at
+// settlement minus what the exit actually received; positive = the exit cost
+// money), stopped-out winners, ratchet slippage vs the stop, and gap-throughs.
 //
 // Reports per-WINDOW results (correlated markets closing together count once),
 // a bootstrap CI on net edge per contract, the Deflated Sharpe given every
@@ -21,6 +32,7 @@ import { PaperExchange } from '../bot/paper/paperExchange';
 import { marketWorstLoss } from '../bot/risk/exposure';
 import { RiskGateway } from '../bot/risk/riskGateway';
 import { decide } from '../bot/strategy/fairValueStrategy';
+import { DEFAULT_RATCHET, EXIT_POLICIES, ExitPolicyName, LiquidityRatchet, RatchetParams } from '../bot/strategy/exitPolicies';
 import { readRecordings, ReplayState } from './replay';
 import { bootstrapMeanCi, deflatedSharpe, pbo, sharpe } from './stats';
 
@@ -29,7 +41,26 @@ function arg(name: string, def: string): string {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : def;
 }
 
+export interface ExitStats {
+  orders: number;
+  fills: number;
+  contracts: number;
+  /** Net proceeds of exit fills (side price x count - fees). */
+  proceeds: number;
+  /** Settlement value of exited contracts minus exit proceeds (positive = exiting cost money). */
+  regret: number;
+  /** Exit fills whose side went on to settle in the money. */
+  stoppedWinners: number;
+  ratchetTriggers: number;
+  gaps: number;
+  hybridHolds: number;
+  /** Mean (stop - fill price) in side terms for ratchet exits; positive = filled below the stop. */
+  avgSlippage: number | null;
+}
+
 export interface BacktestResult {
+  exitPolicy: ExitPolicyName;
+  exits: ExitStats;
   minEdge: number;
   windows: Map<number, { pnl: number; contracts: number; fees: number }>;
   fills: number;
@@ -38,13 +69,23 @@ export interface BacktestResult {
   pnl: number;
 }
 
-export async function runBacktest(dir: string, model: MetaModel, strategy: StrategyConfig, limits: RiskLimits, bankroll0: number): Promise<BacktestResult> {
+export async function runBacktest(
+  dir: string, model: MetaModel, strategy: StrategyConfig, limits: RiskLimits, bankroll0: number,
+  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams } = {},
+): Promise<BacktestResult> {
+  const policy = opts.exitPolicy ?? 'fair_value';
   const st = new ReplayState();
   const pos = new PositionBook();
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => DEFAULT_FEES, () => st.now);
   const gateway = new RiskGateway(limits);
-  const res: BacktestResult = { minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
+  const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, avgSlippage: null };
+  const res: BacktestResult = { exitPolicy: policy, exits, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
   const closeOf = new Map<string, number>();
+  const ratchets = new Map<string, LiquidityRatchet>();
+  const pending = new Map<string, { side: 'bid' | 'ask'; price: number; count: number; kind: 'fv' | 'rt'; stop?: number }>();
+  const stopByOrder = new Map<string, number>();
+  const exitLedger = new Map<string, Array<{ sideSign: number; n: number; proceeds: number }>>();
+  let slipSum = 0, slipN = 0;
 
   ex.on('fill', (f) => {
     pos.applyFill({ ticker: f.ticker, side: f.side, count: f.count, price: f.price, fee: f.fee ?? 0 }, { closeTs: closeOf.get(f.ticker) });
@@ -54,6 +95,17 @@ export async function runBacktest(dir: string, model: MetaModel, strategy: Strat
     b.fees += f.fee ?? 0;
     res.windows.set(w, b);
     res.fills++; res.contracts += f.count; res.fees += f.fee ?? 0;
+    if (f.clientOrderId?.includes('-exit-')) {
+      const sideSign = f.side === 'ask' ? 1 : -1; // selling YES exits a long YES; buying YES exits a long NO
+      const sidePrice = sideSign > 0 ? f.price : 1 - f.price;
+      const proceeds = f.count * sidePrice - (f.fee ?? 0);
+      exits.fills++; exits.contracts += f.count; exits.proceeds += proceeds;
+      const arr = exitLedger.get(f.ticker) ?? [];
+      arr.push({ sideSign, n: f.count, proceeds });
+      exitLedger.set(f.ticker, arr);
+      const stop = stopByOrder.get(f.clientOrderId);
+      if (stop !== undefined) { slipSum += stop - sidePrice; slipN++; }
+    }
   });
 
   let lastTick = 0;
@@ -71,6 +123,14 @@ export async function runBacktest(dir: string, model: MetaModel, strategy: Strat
         if (out) {
           const result = out.label ? 'yes' : 'no';
           ex.settle(m.ticker, result);
+          for (const x of exitLedger.get(m.ticker) ?? []) {
+            const won = (x.sideSign > 0) === (result === 'yes');
+            exits.regret += (won ? x.n : 0) - x.proceeds;
+            if (won) exits.stoppedWinners++;
+          }
+          exitLedger.delete(m.ticker);
+          ratchets.delete(m.ticker);
+          pending.delete(m.ticker);
           const p = pos.get(m.ticker);
           if (p && !p.settled) {
             pos.settle(m.ticker, result, st.now);
@@ -94,6 +154,7 @@ export async function runBacktest(dir: string, model: MetaModel, strategy: Strat
       const open = (await ex.getOpenOrders()).filter((o) => o.ticker === m.ticker);
       if (!book?.isUsable(st.now, limits.maxBookAgeMs) || !bid || !ask || !spot || !vol || !strike) {
         for (const o of open) await ex.cancelOrder(o.orderId);
+        pending.delete(m.ticker); // never fire a queued exit into a stale book later
         continue;
       }
       const tauSec = (m.closeTime - st.now) / 1000;
@@ -106,15 +167,60 @@ export async function runBacktest(dir: string, model: MetaModel, strategy: Strat
       const fastMove = ret !== undefined && Math.abs(ret) > strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(strategy.fastMoveWindowSec);
       const bankroll = (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0);
       const q = (side: 'bid' | 'ask') => { const o = open.find((x) => x.side === side); return o ? { clientOrderId: o.orderId, price: o.price, remaining: o.remainingCount } : undefined; };
+      // Submit an exit that triggered on the previous tick (1 s reaction delay for every policy).
+      const due = pending.get(m.ticker);
+      pending.delete(m.ticker);
+      const curPos = pos.position(m.ticker);
+      if (due && Math.sign(curPos) === (due.side === 'ask' ? 1 : -1)) {
+        const count = Math.min(due.count, Math.abs(curPos));
+        const intent: OrderIntent = { ticker: m.ticker, asset: m.asset, windowCloseTs: m.closeTime, side: due.side, price: due.price, count, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', fairValue: pYes, modelId: model.id, decisionId: 'bt' };
+        const d = gateway.check(intent, {
+          now: st.now, mode: 'paper', killEngaged: false, haltReasons: [], bankroll: 1, dailyPnl: 0, bookUsable: true, bestBid: bid.price, bestAsk: ask.price,
+          indexFresh: true, marketCloseTs: m.closeTime, tickSize: m.tickSize, fees: DEFAULT_FEES, position: curPos, marketRiskNow: 0, marketRiskWith: 0,
+          windowRisk: 0, totalRisk: 0, ordersLastMinute: 0, openOrders: 0, modelLiveBlockers: [],
+        });
+        if (d.ok) {
+          const id = `${m.ticker}-${st.now}-exit-${due.kind}`;
+          if (due.stop !== undefined) stopByOrder.set(id, due.stop);
+          exits.orders++;
+          try { await ex.createOrder({ ticker: m.ticker, side: due.side, count, price: due.price, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, selfTradePrevention: 'taker_at_cross', clientOrderId: id }); } catch { /* no fill */ }
+        }
+      }
+
+      // Ratchet / hybrid: evaluate the order-book-anchored stop.
+      const posNow = pos.position(m.ticker);
+      if ((policy === 'liquidity_ratchet' || policy === 'hybrid') && posNow !== 0) {
+        let r = ratchets.get(m.ticker);
+        if (!r) { r = new LiquidityRatchet(opts.ratchet ?? DEFAULT_RATCHET); ratchets.set(m.ticker, r); }
+        const out = r.evaluate({ position: posNow, book, now: st.now, tick: m.tickSize, fees: DEFAULT_FEES, qSide: posNow > 0 ? pYes : 1 - pYes, hybrid: policy === 'hybrid' });
+        if (out.event === 'gapped') exits.gaps++;
+        if (out.event === 'hybrid_hold') exits.hybridHolds++;
+        if (out.plan && !pending.has(m.ticker)) {
+          exits.ratchetTriggers++;
+          pending.set(m.ticker, { side: out.plan.side, price: out.plan.price, count: out.plan.count, kind: 'rt', stop: out.plan.stop });
+        }
+      }
+
       const plan = decide({
         ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: pos.position(m.ticker), bankroll,
         maxOrderRiskUsd: limits.maxOrderRiskFrac * bankroll, maxContracts: limits.maxContractsPerOrder, minSidePrice: limits.minSidePrice,
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,
         restingBid: q('bid'), restingAsk: q('ask'), nowSec: Math.floor(st.now / 1000), closeSec: Math.floor(m.closeTime / 1000),
-      }, strategy);
+      }, strategy, { exits: policy === 'fair_value' || policy === 'hybrid' });
       for (const c of plan.cancel) await ex.cancelOrder(c.clientOrderId);
 
       for (const p of plan.place) {
+        if (p.purpose === 'exit') {
+          // Queue for next tick, like every other exit.
+          if (!pending.has(m.ticker)) pending.set(m.ticker, { side: p.side, price: p.price, count: p.count, kind: 'fv' });
+          continue;
+        }
+        // A taker entry against an existing position is an early exit in disguise
+        // (e.g. "buy NO" while long YES). Only policies with fair-value exits may do it,
+        // so hold / liquidity_ratchet are compared honestly. Passive maker quotes still
+        // unwind at favourable prices under every policy.
+        const cur = pos.position(m.ticker);
+        if (p.purpose === 'entry' && (policy === 'hold' || policy === 'liquidity_ratchet') && cur !== 0 && Math.sign(cur) !== (p.side === 'bid' ? 1 : -1)) continue;
         const openNow = await ex.getOpenOrders();
         const resting = openNow.map((o) => ({ ticker: o.ticker, side: o.side, price: o.price, remaining: o.remainingCount, isTaker: false }));
         const riskOf = (t: string, extra = [] as typeof resting) => marketWorstLoss(pos.get(t), [...resting.filter((r) => r.ticker === t), ...extra], DEFAULT_FEES);
@@ -136,6 +242,7 @@ export async function runBacktest(dir: string, model: MetaModel, strategy: Strat
       }
     }
   }
+  exits.avgSlippage = slipN ? slipSum / slipN : null;
   return res;
 }
 
@@ -147,9 +254,19 @@ async function main() {
   const grid = arg('grid', String(cfg.strategy.minEdge)).split(',').map(Number);
   const bankroll = Number(arg('bankroll', String(cfg.paperBankrollUsd)));
   const priorTrials = Number(arg('trials', String((model.params.validation?.variantsTried ?? 1))));
+  const policies = arg('exits', EXIT_POLICIES.join(',')).split(',') as ExitPolicyName[];
+  for (const p of policies) if (!EXIT_POLICIES.includes(p)) throw new Error(`unknown exit policy ${p}`);
+  const ratchet: RatchetParams = {
+    minFillRatio: Number(arg('ratchet-fill', String(DEFAULT_RATCHET.minFillRatio))),
+    minWallAgeMs: Number(arg('ratchet-age', String(DEFAULT_RATCHET.minWallAgeMs / 1000))) * 1000,
+    slippageTicks: Number(arg('ratchet-slip', String(DEFAULT_RATCHET.slippageTicks))),
+  };
+  const variants = grid.length * policies.length;
 
   const results: BacktestResult[] = [];
-  for (const minEdge of grid) results.push(await runBacktest(dir, model, { ...cfg.strategy, minEdge }, cfg.risk, bankroll));
+  for (const minEdge of grid) {
+    for (const exitPolicy of policies) results.push(await runBacktest(dir, model, { ...cfg.strategy, minEdge }, cfg.risk, bankroll, { exitPolicy, ratchet }));
+  }
   const allWindows = [...new Set(results.flatMap((r) => [...r.windows.keys()]))].sort((a, b) => a - b);
 
   const summaries = results.map((r) => {
@@ -157,15 +274,23 @@ async function main() {
     const perContract = traded.map((w) => w.pnl / w.contracts);
     const ci = bootstrapMeanCi(perContract);
     const series = allWindows.map((w) => r.windows.get(w)?.pnl ?? 0);
-    const dsr = deflatedSharpe(series, priorTrials * grid.length);
-    return { minEdge: r.minEdge, windowsTraded: traded.length, fills: r.fills, contracts: r.contracts, fees: +r.fees.toFixed(2), pnl: +r.pnl.toFixed(2), edgePerContract: ci.mean, edgeCiLo: ci.lo, edgeCiHi: ci.hi, sharpePerWindow: sharpe(series), deflatedExcess: dsr.excess, dsrProb: dsr.probability };
+    const dsr = deflatedSharpe(series, priorTrials * variants);
+    return { exit: r.exitPolicy, minEdge: r.minEdge, windowsTraded: traded.length, fills: r.fills, contracts: r.contracts, fees: +r.fees.toFixed(2), pnl: +r.pnl.toFixed(2), edgePerContract: ci.mean, edgeCiLo: ci.lo, edgeCiHi: ci.hi, sharpePerWindow: sharpe(series), deflatedExcess: dsr.excess, dsrProb: dsr.probability };
   });
   console.table(summaries);
-  if (grid.length > 1) {
+  console.log('exit diagnostics (regret > 0 means exiting cost money vs holding to settlement):');
+  console.table(results.map((r) => ({
+    exit: r.exitPolicy, minEdge: r.minEdge, exitOrders: r.exits.orders, exitFills: r.exits.fills, contracts: +r.exits.contracts.toFixed(2),
+    proceeds: +r.exits.proceeds.toFixed(2), regret: +r.exits.regret.toFixed(2), stoppedWinners: r.exits.stoppedWinners,
+    ratchetTriggers: r.exits.ratchetTriggers, gaps: r.exits.gaps, hybridHolds: r.exits.hybridHolds,
+    avgSlippage: r.exits.avgSlippage === null ? null : +r.exits.avgSlippage.toFixed(4),
+  })));
+  if (results.length > 1) {
     const matrix = allWindows.map((w) => results.map((r) => r.windows.get(w)?.pnl ?? 0));
     console.log('PBO (CSCV):', pbo(matrix));
   }
-  const best = summaries.find((s) => s.minEdge === cfg.strategy.minEdge) ?? summaries[0];
+  // The model annotation always uses the production exit (fair_value) at the configured minEdge.
+  const best = summaries.find((s) => s.minEdge === cfg.strategy.minEdge && s.exit === 'fair_value') ?? summaries[0];
   console.log(`windows traded: ${best.windowsTraded} (need >= 1000 independent windows before trusting any edge)`);
 
   if (process.argv.includes('--annotate') && fs.existsSync(modelPath)) {
@@ -174,7 +299,7 @@ async function main() {
       ...params.validation,
       netEdgeCiLow: best.edgeCiLo,
       deflatedSharpe: best.deflatedExcess,
-      variantsTried: priorTrials * grid.length,
+      variantsTried: priorTrials * variants,
       backtestWindowsTraded: best.windowsTraded,
     };
     params.validation.passed = Boolean(params.validation.passed) && best.edgeCiLo > 0 && best.deflatedExcess > 0 && best.windowsTraded >= 1000;

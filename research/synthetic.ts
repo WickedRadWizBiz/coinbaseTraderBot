@@ -59,7 +59,10 @@ export function writeSyntheticRecordings(dir: string, opts: { windows: number; s
       const bid = Math.max(0.01, Math.floor((m - 0.02) * 100) / 100);
       const ask = Math.min(0.99, Math.ceil((m + 0.02) * 100) / 100);
       const ticker = `SYN-${w}`;
-      lines.push(JSON.stringify({ t, k: 'book', ticker, bids: [{ price: bid, size: 20 }], asks: [{ price: ask, size: 20 }], ts: t }));
+      // Five levels a side with uneven sizes, so some levels are "walls".
+      const lvls = (p0: number, dir: number) => Array.from({ length: 5 }, (_, i) => ({ price: Math.round((p0 + dir * i * 0.01) * 100) / 100, size: Math.round(3 + r() * 37) }))
+        .filter((l) => l.price >= 0.01 && l.price <= 0.99);
+      lines.push(JSON.stringify({ t, k: 'book', ticker, bids: lvls(bid, -1), asks: lvls(ask, 1), ts: t }));
       if (r() < 0.5) lines.push(JSON.stringify({ t, k: 'trade', ticker, price: r() < 0.5 ? bid : ask, count: 5, takerSide: r() < 0.5 ? 'no' : 'yes', ts: t }));
     }
   }

@@ -109,6 +109,18 @@ npm run research:train                                   # -> params/model.candi
 npm run research:backtest -- --model params/model.candidate.json --grid 0.01,0.02,0.03 --annotate
 ```
 
+`--exits hold,fair_value,liquidity_ratchet,hybrid` compares exit policies on identical data (`bot/strategy/exitPolicies.ts`):
+- **Liquidity ratchet.** Stops sit at exit-side book levels big enough to absorb the whole position (`--ratchet-fill`) that have persisted for `--ratchet-age` seconds. The stop ratchets up as price moves past higher walls. If price comes back down to the stop, the bot exits with an immediate-or-cancel order limited to the stop minus `--ratchet-slip` ticks. A gap through the stop falls back to the next wall down.
+- **Hybrid.** The same ratchet, but a triggered stop only exits if the model agrees the position is worth less than the stop.
+
+Every exit executes one tick after it triggers. The exit policy governs all active reductions, so taker entries against a position are blocked under hold and ratchet. The diagnostics report:
+- exit regret: settlement value of the exited contracts minus exit proceeds
+- stopped-out winners
+- slippage versus the stop
+- gap-throughs
+
+Production keeps the fair-value exit unless a policy wins on real recordings after fees and the overfitting correction.
+
 The backtest reports per-window results. Correlated BTC, ETH and SOL markets that close together count as one observation. It also reports a bootstrap CI of net edge per contract, the Deflated Sharpe for every variant tried, and PBO (CSCV) across the grid. Promoting a candidate is a reviewed PR; see `params/README.md`.
 
 ## Guide checklist: what changed
