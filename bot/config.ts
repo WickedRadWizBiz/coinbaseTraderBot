@@ -162,6 +162,44 @@ export interface Config {
   sizingTiers: TierPoint[];
   /** Kalshi perpetuals: market data as features (stage 1) and delta-hedging the binary book (stage 2). */
   perps: PerpsConfig;
+  /** ATP tennis match-winner markets (bot/tennis). */
+  tennis: TennisConfig;
+}
+
+export interface TennisConfig {
+  /** Track and (in paper/shadow) trade ATP match markets. */
+  enabled: boolean;
+  /** Real-money tennis orders additionally need this explicit opt-in in live mode. */
+  live: boolean;
+  series: string[];
+  /** Ignore matches closing further out than this. */
+  horizonHours: number;
+  /** Hard cap: worst-case loss of all tennis positions + resting orders <= this fraction of the working cash pool. */
+  maxTotalFrac: number;
+  /** Per match and per order caps (fractions of the working cash pool). */
+  maxMatchFrac: number;
+  orderFrac: number;
+  /** Underdog rule. */
+  underdogMax: number;
+  underdogMin: number;
+  preStartMin: number;
+  entryWindowMin: number;
+  maxSpread: number;
+  takeProfitCents: number;
+  takeProfitPct: number;
+  /** Optional stop on the underdog trade (0 = off: hold to settlement if the take-profit never fills). */
+  underdogStopCents: number;
+  /** Favorite re-entry after the match is at least half done. */
+  favMin: number;
+  favMax: number;
+  favMinProgress: number;
+  favStableCents: number;
+  favStopCents: number;
+  /** Expected match duration (minutes) for best-of-3 and best-of-5, used as the progress proxy. */
+  durationBo3Min: number;
+  durationBo5Min: number;
+  /** In-play detection from price action when no start time is published: a mid move of this size within 3 minutes. */
+  liveMoveCents: number;
 }
 
 export interface PerpsConfig {
@@ -479,6 +517,31 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         takerFeeBps: num(env, 'PERP_TAKER_FEE_BPS', 12, 0, 100),
       };
     })(),
+    tennis: {
+      enabled: bool(env, 'TENNIS_ENABLED', true),
+      live: bool(env, 'TENNIS_LIVE', false),
+      series: (env.TENNIS_SERIES ?? 'KXATPMATCH').split(',').map((s) => s.trim()).filter(Boolean),
+      horizonHours: num(env, 'TENNIS_HORIZON_HOURS', 36, 1, 24 * 14),
+      maxTotalFrac: num(env, 'TENNIS_MAX_TOTAL_FRAC', 0.25, 0, 0.25),
+      maxMatchFrac: num(env, 'TENNIS_MAX_MATCH_FRAC', 0.10, 0.001, 0.25),
+      orderFrac: num(env, 'TENNIS_ORDER_FRAC', 0.05, 0.001, 0.25),
+      underdogMax: num(env, 'TENNIS_UNDERDOG_MAX', 0.25, 0.02, 0.45),
+      underdogMin: num(env, 'TENNIS_UNDERDOG_MIN', 0.08, 0.01, 0.45),
+      preStartMin: num(env, 'TENNIS_PRE_START_MIN', 15, 0, 240),
+      entryWindowMin: num(env, 'TENNIS_ENTRY_WINDOW_MIN', 20, 1, 240),
+      maxSpread: num(env, 'TENNIS_MAX_SPREAD', 0.03, 0.01, 0.2),
+      takeProfitCents: num(env, 'TENNIS_TP_CENTS', 0.06, 0.01, 0.5),
+      takeProfitPct: num(env, 'TENNIS_TP_PCT', 0.40, 0, 5),
+      underdogStopCents: num(env, 'TENNIS_UNDERDOG_STOP_CENTS', 0, 0, 0.5),
+      favMin: num(env, 'TENNIS_FAV_MIN', 0.75, 0.5, 0.99),
+      favMax: num(env, 'TENNIS_FAV_MAX', 0.92, 0.5, 0.99),
+      favMinProgress: num(env, 'TENNIS_FAV_MIN_PROGRESS', 0.5, 0, 1),
+      favStableCents: num(env, 'TENNIS_FAV_STABLE_CENTS', 0.04, 0, 0.5),
+      favStopCents: num(env, 'TENNIS_FAV_STOP_CENTS', 0, 0, 0.9),
+      durationBo3Min: num(env, 'TENNIS_DURATION_BO3_MIN', 105, 30, 400),
+      durationBo5Min: num(env, 'TENNIS_DURATION_BO5_MIN', 170, 60, 600),
+      liveMoveCents: num(env, 'TENNIS_LIVE_MOVE_CENTS', 0.03, 0.005, 0.5),
+    },
   };
   return deepFreeze(cfg);
 }

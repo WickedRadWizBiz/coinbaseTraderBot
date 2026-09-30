@@ -138,6 +138,12 @@ export function createApi(d: ApiDeps): express.Express {
       session: d.engine.sessionStatus(),
       guards: d.engine.guardStatus(),
       perps: d.engine.perpStatus(),
+      tennis: {
+        enabled: d.cfg.tennis.enabled,
+        trading: d.cfg.tennis.enabled && (d.cfg.mode !== 'live' || d.cfg.tennis.live),
+        budget: d.engine.tennisBudget(),
+        matches: [...d.engine.tennisStatus.values()],
+      },
       vault: d.vault?.status() ?? null,
       dominance: dominanceStatus(d.md),
       wsConnected: d.md.wsConnected,

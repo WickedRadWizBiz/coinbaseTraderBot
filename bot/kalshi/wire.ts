@@ -132,6 +132,9 @@ export function parseMarket(m: Obj): MarketInfo | undefined {
     strikeType: m.strike_type ? String(m.strike_type) : undefined,
     tickSize: tick && tick > 0 ? tick : 0.01,
     result: m.result,
+    title: m.title ?? m.yes_sub_title ?? undefined,
+    // Sports: scheduled start when the exchange publishes one (field name unverified; several tried).
+    startTime: ts(m.occurrence_datetime ?? m.expected_start_time ?? m.event_start_time ?? m.start_time),
   };
 }
 

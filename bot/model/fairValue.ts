@@ -124,11 +124,16 @@ export function impliedVariance(S: number, K: number, pMkt: number): number | un
   return (x / z) ** 2;
 }
 
-export type MarketKind = ContractKind | 'less';
+/** 'match': a sports match-winner market (ATP tennis), traded by bot/tennis, never priced here. */
+export type MarketKind = ContractKind | 'less' | 'match';
+
+/** Series traded as sports match-winner markets. */
+export const MATCH_SERIES = /^KXATPMATCH$/i;
 
 /** Contract kind from the series and Kalshi strike_type. 15-minute series are
  * Up/Down; otherwise strike_type decides (default 'greater', the hourly ladder). */
 export function contractKind(seriesTicker: string, strikeType?: string): MarketKind {
+  if (MATCH_SERIES.test(seriesTicker)) return 'match';
   const st = (strikeType ?? '').toLowerCase();
   if (st === 'between') return 'between';
   if (st === 'less' || st === 'less_or_equal') return 'less';
@@ -151,5 +156,7 @@ export function priceContract(terms: ContractTerms, inp: Omit<FairValueInput, 's
       const f = fairValue({ ...inp, strike: terms.cap });
       return f && { ...f, pYes: clamp(1 - f.pYes, P_MIN, P_MAX), d2: -f.d2 };
     }
+    case 'match':
+      return undefined;
   }
 }

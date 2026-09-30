@@ -79,6 +79,10 @@ export interface MarketInfo {
   strikeType?: string;
   tickSize: number;
   result?: 'yes' | 'no' | '';
+  /** Market title (sports: player / match / tournament). */
+  title?: string;
+  /** Scheduled event start, when published (sports). */
+  startTime?: number;
 }
 
 export interface SeriesFeeInfo {

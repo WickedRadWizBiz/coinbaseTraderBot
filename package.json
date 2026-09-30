@@ -20,6 +20,7 @@
     "research:train": "tsx research/trainMetaModel.ts",
     "research:backtest": "tsx research/backtest.ts",
     "research:sessions": "tsx research/sessions.ts",
+    "research:tennis": "tsx research/tennisBacktest.ts",
     "audit:verify": "tsx scripts/verifyAudit.ts"
   },
   "dependencies": {

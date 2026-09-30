@@ -199,13 +199,20 @@ In live trading, `ModelHealth` stops new risk if the rolling log-loss advantage 
   - `/api/status` shows the perp feed, premium, funding, the hedge targets and resting orders.
 - **Stage 3, directional perp trading, is not built.** Taker round trips (24 bps) are about the size of a 15-minute BTC move. It would need its own model, liquidation-aware limits, funding in P&L and a backtest that passes the same gates.
 
+**ATP tennis (`bot/tennis/`, series `KXATPMATCH`).** Tennis runs as a rules-based strategy driven by the order book, with its own hard budget:
+- **Budget.** All tennis positions plus resting orders are capped at 25% of the working cash pool (the tradable bankroll after vault/pocket). The cap can't be configured above 25%. Each match is capped at 10% and each order at 5%. Sizing includes tennis maker fees (multiplier 1). Tennis is budgeted separately from the crypto book, so neither eats the other's limits.
+- **Underdog bounce.** From 15 minutes before the start until 20 minutes after it, if the match is heavily skewed (underdog priced 8–25¢), the bot bids for the underdog as a maker, one tick inside the spread when there's room. After a fill it rests a take-profit at `max(entry + 6¢, entry × 1.4)`. If the price jumps past that target, it sells at the bid immediately. This is a volatility trade. Tennis and Kalshi studies find longshots win *less* often than their price implies (Lahvička 2014; Bürgi, Deng & Whelan), so holding underdogs to settlement is expected to lose, and the take-profit is the whole point. An optional stop is off by default, so the maximum loss is the entry price.
+- **Favorite re-entry.** Once the match is at least half done, and the leader is priced 75–92¢ and hasn't slipped more than 4¢ in 5 minutes, the bot bids for the leader and holds to settlement. The hit rate is high, but the payoff is asymmetric: at 85¢ a win pays 15¢ and a loss costs 85¢. An optional stop is off by default.
+- **Match state without a score feed.** "Started" means the published start time has passed, or, when none is published, the first 3¢ move of the mid within 3 minutes (in-play prices move on every point). "Half the match" is time-based: 105 minutes for best-of-3, 170 minutes for best-of-5 at the Slams (detected from the title). A licensed point-by-point feed would make both exact.
+- **Rollout.** Tennis trades in paper and shadow modes. In live mode it only tracks matches until you set `TENNIS_LIVE=true`. `npm run research:tennis` replays recorded tennis books through the same decision code and reports P&L per leg with a per-match bootstrap CI. Enable real money only once that CI's lower bound is above 0 over about 200 matches.
+- `/api/status` and the Telemetry panel show each match's phase, the budget in use, and why the bot is or isn't acting.
+
 **Researched and deliberately not adopted (yet):**
 - **LightGBM in Python plus ONNX.** Replaced by the in-repo TypeScript GBDT, which gives the same model class with nothing to keep in parity.
 - **GRU/TCN encoder, gated regime stacker, HMM/BOCPD regimes.** Both documents rank these last. They need 3 months or more of logs, and must beat the GBDT in CPCV to be kept.
 - **Scenario/copula Kelly.** Correlated same-close BTC/ETH/SOL exposure is instead capped as one position by `RISK_MAX_WINDOW_FRAC`.
 - **Funding, OI and liquidations; DVOL; NQ/DXY; Coinbase multi-level OFI.** These need feeds the bot does not have (or that are US-blocked), and they are T2/T3 anyway.
 - **Full Avellaneda–Stoikov quoting and RL quote offsets.** They need fill-intensity estimates from our own fills first. Inventory skew stays in place.
-- **Tennis.** Out of scope per the spec.
 
 ## Profit vault and pocket
 
@@ -287,7 +294,7 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 | Kill switch | Persists on disk, survives restart, auto-trips on loss limit, repeated order errors, persistent break or a stalled heartbeat. Resting orders also carry an exchange-side `expiration_time` as a dead-man switch. |
 | Fee-correct PnL | Exact fee formula with round-up. Uses exchange-reported fees when present. Wins and losses are labelled after fees at settlement. |
 | Data recorder, fill simulator, TCA, alerts, audit log | Recorder: `marketdata/`. Fill simulator: `paper/` (queue position, trade-through fills). TCA: `tca/` (markouts). Alerts: Telegram or webhook. Audit log: hash-chained JSONL, checked with `npm run audit:verify`. |
-| Tests / CI | 185 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
+| Tests / CI | 193 tests, including an engine integration test and end-to-end research pipeline tests (MLP and GBDT) on synthetic data. |
 
 ## Things you must do yourself
 

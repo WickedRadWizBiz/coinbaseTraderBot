@@ -31,6 +31,7 @@ import type { Tca } from './tca/tca';
 import type { MacroEvent } from './model/featureEngine';
 import { ladderQuotes } from './model/ladder';
 import type { BinaryExposure, PerpHedger } from './perps/hedger';
+import { decideMatch, MatchTracker, type MatchMarket } from './tennis/tennisStrategy';
 import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
 import { effectiveSigma, type VolProfile } from './model/volSeasonality';
 import { floorCount } from './util/num';
@@ -363,12 +364,24 @@ export class Engine {
     return marketWorstLoss(this.d.oms.positions.get(ticker), r, this.d.md.feesFor(ticker));
   }
 
-  private riskTotals(windowCloseTs: number): { window: number; total: number } {
+  /** Tennis tickers are budgeted separately (their own 25% cap) from the crypto book. */
+  isTennis(ticker: string): boolean {
+    const m = this.d.md.markets.get(ticker);
+    return m ? m.kind === 'match' : this.d.cfg.tennis.series.some((s) => ticker.startsWith(`${s}-`));
+  }
+
+  /** Crypto: window = markets closing together. Tennis (`tennisEvent`): window = the match, total = all tennis. */
+  private riskTotals(windowCloseTs: number, tennisEvent?: string): { window: number; total: number } {
     const tickers = new Set<string>([...this.d.oms.positions.unsettled().map((m) => m.ticker), ...this.d.oms.liveOrders().map((o) => o.ticker)]);
     let window = 0, total = 0;
     for (const t of tickers) {
+      if (this.isTennis(t) !== (tennisEvent !== undefined)) continue;
       const loss = this.marketRisk(t);
       total += loss;
+      if (tennisEvent !== undefined) {
+        if ((this.d.md.markets.get(t)?.eventTicker ?? t.slice(0, t.lastIndexOf('-'))) === tennisEvent) window += loss;
+        continue;
+      }
       const close = this.d.md.markets.get(t)?.closeTime ?? this.d.oms.positions.get(t)?.closeTs ?? 0;
       if (close === windowCloseTs) window += loss;
     }
@@ -395,10 +408,84 @@ export class Engine {
       await kill.engage(`daily loss $${(-pnl).toFixed(2)} reached limit $${limit.toFixed(2)}`, 'risk');
       return;
     }
-    await Promise.all(this.d.md.activeMarkets(this.now()).map((m) => this.evaluate(m)));
+    await Promise.all(this.d.md.activeMarkets(this.now()).filter((m) => m.kind !== 'match').map((m) => this.evaluate(m)));
     this.prune();
     // Stage 2: offset the binary book's net delta with perps (reduce-only when new risk is halted).
     await this.d.hedger?.tick(this.exposures(), { reduceOnly: this.haltReasons().length > 0 });
+    await this.tennisTick();
+  }
+
+  // ---- ATP tennis (bot/tennis/tennisStrategy.ts) --------------------------------------
+  private readonly matches = new Map<string, MatchTracker>();
+  private lastTennisTick = 0;
+  readonly tennisStatus = new Map<string, { event: string; phase: string; pA?: number; progress: number; liveSince?: number; notes: string[]; tickers: string[]; updatedTs: number }>();
+
+  /** Tennis budget use: worst-case loss of all tennis positions + resting orders vs the 25% cap. */
+  tennisBudget(): { used: number; cap: number; bankroll: number } {
+    const b = this.bankroll() ?? 0;
+    return { used: this.riskTotals(0, '__none__').total, cap: this.d.cfg.tennis.maxTotalFrac * b, bankroll: b };
+  }
+
+  private async tennisTick(): Promise<void> {
+    const { cfg, md, oms } = this.d;
+    const T = cfg.tennis;
+    const now = this.now();
+    if (!T.enabled || now - this.lastTennisTick < 5_000) return;
+    this.lastTennisTick = now;
+    const tradeable = cfg.mode !== 'live' || T.live;
+    const byEvent = new Map<string, ActiveMarket[]>();
+    for (const m of md.activeMarkets(now)) {
+      if (m.kind !== 'match') continue;
+      const ev = m.eventTicker ?? m.ticker.slice(0, m.ticker.lastIndexOf('-'));
+      byEvent.set(ev, [...(byEvent.get(ev) ?? []), m]);
+    }
+    const bankroll = this.bankroll() ?? 0;
+    for (const [event, ms] of byEvent) {
+      ms.sort((a, b) => a.ticker.localeCompare(b.ticker));
+      let tracker = this.matches.get(event);
+      if (!tracker) { tracker = new MatchTracker(event, T); this.matches.set(event, tracker); }
+      const markets: MatchMarket[] = ms.map((m) => {
+        const book = md.book(m.ticker);
+        const b = book.isUsable(now, cfg.risk.maxBookAgeMs) ? book.bestBid() : undefined;
+        const a = book.isUsable(now, cfg.risk.maxBookAgeMs) ? book.bestAsk() : undefined;
+        const pos = oms.positions.get(m.ticker);
+        return {
+          ticker: m.ticker, title: m.title, position: pos?.yes ?? 0,
+          avgEntry: pos && pos.yes > 0 ? -pos.netCash / pos.yes : undefined,
+          quote: { bid: b?.price, ask: a?.price, bidSize: b?.size, askSize: a?.size },
+        };
+      });
+      const totals = this.riskTotals(0, event);
+      const out = decideMatch(tracker, { event, now, startTime: ms.find((m) => m.startTime)?.startTime, markets, closeTime: Math.min(...ms.map((m) => m.closeTime)) }, T,
+        { bankroll, tennisRisk: totals.total, matchRisk: totals.window }, ms[0].tickSize);
+      const notes = [...out.notes, ...(tradeable ? [] : ['tracking only: set TENNIS_LIVE=true to trade tennis with real money'])];
+      this.tennisStatus.set(event, { event, phase: out.phase, pA: MatchTracker.probability(markets), progress: tracker.progress(now, markets), liveSince: tracker.liveSince, notes, tickers: ms.map((m) => m.ticker), updatedTs: now });
+
+      // Reconcile resting tennis orders with the plan (never touch another market's orders).
+      const plans = tradeable ? out.plans : [];
+      const resting = oms.liveOrders().filter((o) => ms.some((m) => m.ticker === o.ticker) && !o.cancelRequested);
+      for (const o of resting) {
+        const keep = plans.some((p) => p.ticker === o.ticker && p.side === o.side && p.postOnly && Math.abs(p.price - o.price) < 1e-9 && Math.abs(p.count - (o.count - o.exchangeFillCount)) < 0.01 + 1e-9);
+        if (!keep && o.postOnly) await oms.cancel(o.clientOrderId, 'tennis plan changed');
+      }
+      for (const p of plans) {
+        const already = resting.some((o) => o.ticker === p.ticker && o.side === p.side && Math.abs(p.price - o.price) < 1e-9 && Math.abs(p.count - (o.count - o.exchangeFillCount)) < 0.01 + 1e-9);
+        if (already) continue;
+        const m = ms.find((x) => x.ticker === p.ticker)!;
+        const book = md.book(m.ticker);
+        const b = book.bestBid()?.price, a = book.bestAsk()?.price;
+        const fairValue = b !== undefined && a !== undefined ? (b + a) / 2 : p.price;
+        const plan: OrderPlan = {
+          side: p.side, price: p.price, count: p.count, timeInForce: p.timeInForce, postOnly: p.postOnly, reduceOnly: p.reduceOnly,
+          purpose: p.reduceOnly ? 'exit' : 'quote', expirationTime: p.timeInForce === 'good_till_canceled' ? Math.min(Math.floor(now / 1000) + 3600, Math.floor(m.closeTime / 1000) - 1) : undefined,
+          edge: 0, why: `tennis ${p.leg}: ${p.why}`,
+        };
+        const decisionId = crypto.randomUUID();
+        this.d.audit.write('decision', { decisionId, ticker: m.ticker, strategy: 'tennis', event, leg: p.leg, phase: out.phase, why: p.why, price: p.price, count: p.count, side: p.side, pA: MatchTracker.probability(markets) });
+        await this.placeChecked(m, plan, fairValue, decisionId, { event });
+      }
+    }
+    for (const ev of this.matches.keys()) if (!byEvent.has(ev)) { this.matches.delete(ev); this.tennisStatus.delete(ev); }
   }
 
   /** Perp feed and hedge state for the dashboard. */
@@ -629,16 +716,17 @@ export class Engine {
     for (const p of plan.place) await this.placeChecked(m, p, st.q ?? pYes, decisionId);
   }
 
-  private async placeChecked(m: ActiveMarket, p: OrderPlan, pYes: number, decisionId: string): Promise<void> {
+  private async placeChecked(m: ActiveMarket, p: OrderPlan, pYes: number, decisionId: string, tennis?: { event: string }): Promise<void> {
     const { cfg, md, oms, risk, kill, model } = this.d;
     const now = this.now();
+    const T = cfg.tennis;
     const intent: OrderIntent = {
       ticker: m.ticker, asset: m.asset, windowCloseTs: m.closeTime, side: p.side, price: p.price, count: p.count,
       timeInForce: p.timeInForce, postOnly: p.postOnly, reduceOnly: p.reduceOnly, expirationTime: p.expirationTime,
       purpose: p.purpose, fairValue: pYes, modelId: model.id, decisionId,
     };
     const book = md.book(m.ticker);
-    const totals = this.riskTotals(m.closeTime);
+    const totals = this.riskTotals(m.closeTime, tennis?.event);
     const extra: RestingLike = { ticker: m.ticker, side: p.side, price: p.price, remaining: p.count, isTaker: !p.postOnly };
     const ctx: RiskContext = {
       now,
@@ -650,7 +738,8 @@ export class Engine {
       bookUsable: book.isUsable(now, cfg.risk.maxBookAgeMs),
       bestBid: book.bestBid()?.price,
       bestAsk: book.bestAsk()?.price,
-      indexFresh: Boolean(md.index.get(m.asset)?.fresh(now, cfg.risk.maxIndexAgeMs)),
+      // Tennis has no settlement index.
+      indexFresh: tennis ? true : Boolean(md.index.get(m.asset)?.fresh(now, cfg.risk.maxIndexAgeMs)),
       marketCloseTs: m.closeTime,
       tickSize: m.tickSize,
       fees: md.feesFor(m.ticker),
@@ -664,6 +753,14 @@ export class Engine {
       modelLiveBlockers: model.liveBlockers(),
       limitOverrides: this.tierLimits(this.tier()),
     };
+    if (tennis) {
+      // Rules-based, budgeted separately: 25% of the working cash pool in total, per-match and
+      // per-order caps. The crypto model's live gate doesn't apply (TENNIS_LIVE does), and there is
+      // no model fair value to require an edge against.
+      ctx.modelLiveBlockers = [];
+      ctx.skipEdgeCollar = true;
+      ctx.limitOverrides = { maxOrderRiskFrac: T.orderFrac, maxWindowRiskFrac: T.maxMatchFrac, maxTotalRiskFrac: T.maxTotalFrac, minSidePrice: Math.min(T.underdogMin, cfg.risk.minSidePrice) };
+    }
     const decision = risk.check(intent, ctx);
     if (decision.tripKill) {
       await kill.engage(decision.tripKill, 'risk');

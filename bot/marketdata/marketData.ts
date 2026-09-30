@@ -86,6 +86,7 @@ export class MarketData extends EventEmitter {
   ) {
     super();
     for (const s of cfg.strategy.series) this.series.set(s, cfg.seriesAssetMap[s]);
+    this.addTennisSeries();
     // Track every asset that has a settlement index, so discovered series can be priced at once.
     const assets = new Set([...this.series.values(), ...(cfg.strategy.seriesAuto ? Object.values(cfg.indexIdMap) : [])]);
     for (const asset of assets) {
@@ -126,6 +127,11 @@ export class MarketData extends EventEmitter {
       this.perpFeed.on('snapshot', (s: PerpSnapshot) => this.onPerp(s));
       this.perpFeed.start();
     }
+  }
+
+  /** ATP match-winner series (books, trades and lifecycle for bot/tennis). */
+  private addTennisSeries(): void {
+    if (this.cfg.tennis?.enabled) for (const s of this.cfg.tennis.series) this.series.set(s, 'TENNIS');
   }
 
   /** Kalshi perpetuals feed (features and hedging), when enabled. */
@@ -189,6 +195,7 @@ export class MarketData extends EventEmitter {
           if (!before.has(s)) log.info('discovered series', { series: s, asset: a });
           this.series.set(s, a);
         }
+        this.addTennisSeries();
         this.discoveredAt = now;
       }
     } catch (e) {
@@ -209,11 +216,12 @@ export class MarketData extends EventEmitter {
         const markets = await this.rest.getOpenMarkets(series);
         for (const m of markets) {
           if (m.closeTime <= now) continue;
-          // Far-dated strikes (daily/weekly ladders) are never inside an entry window; skip them.
-          if (m.closeTime > now + this.cfg.catalogHorizonMin * 60_000) continue;
           const kind = contractKind(series, m.strikeType);
+          // Far-dated strikes (daily/weekly ladders) are never inside an entry window; skip them.
+          const horizonMs = kind === 'match' ? this.cfg.tennis.horizonHours * 3_600_000 : this.cfg.catalogHorizonMin * 60_000;
+          if (m.closeTime > now + horizonMs && !(kind === 'match' && m.startTime !== undefined && m.startTime < now + horizonMs)) continue;
           const prev = this.markets.get(m.ticker);
-          if (!prev) this.recorder.write('market', { ticker: m.ticker, series, asset, openTime: m.openTime, closeTime: m.closeTime, strike: m.floorStrike, cap: m.capStrike, kind, event: m.eventTicker, tickSize: m.tickSize });
+          if (!prev) this.recorder.write('market', { ticker: m.ticker, series, asset, openTime: m.openTime, closeTime: m.closeTime, strike: m.floorStrike, cap: m.capStrike, kind, event: m.eventTicker, tickSize: m.tickSize, title: m.title, startTime: m.startTime });
           const am: ActiveMarket = { ...m, seriesTicker: series, asset, kind, cap: m.capStrike, strike: prev?.strike, strikeSource: prev?.strikeSource };
           if (m.floorStrike) { am.strike = m.floorStrike; am.strikeSource = 'exchange'; }
           this.markets.set(m.ticker, am);
@@ -246,6 +254,7 @@ export class MarketData extends EventEmitter {
 
   /** Pricing terms: exchange-published strikes, else (Up/Down only) our own opening 60 s average. */
   termsFor(m: ActiveMarket): ContractTerms | undefined {
+    if (m.kind === 'match') return undefined;
     if (m.kind === 'updown') {
       const k = this.strikeFor(m);
       return k ? { kind: 'updown', strike: k } : undefined;

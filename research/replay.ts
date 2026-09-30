@@ -21,6 +21,8 @@ export interface RecMarket {
   kind: MarketKind;
   event?: string;
   tickSize: number;
+  title?: string;
+  startTime?: number;
 }
 
 export interface RecEvent { t: number; k: string; [key: string]: any }
@@ -55,6 +57,7 @@ export class ReplayState {
         this.markets.set(e.ticker, {
           ticker: e.ticker, series: e.series, asset: e.asset, openTime: e.openTime, closeTime: e.closeTime, strike: e.strike ?? undefined, cap: e.cap ?? undefined,
           kind: e.kind ?? contractKind(e.series ?? ''), event: e.event ?? undefined, tickSize: e.tickSize ?? 0.01,
+          title: e.title ?? undefined, startTime: e.startTime ?? undefined,
         });
         break;
       case 'index': {
@@ -108,6 +111,7 @@ export class ReplayState {
   }
 
   strike(m: RecMarket): number | undefined {
+    if (m.kind === 'match') return undefined;
     if (m.strike) return m.strike;
     if (m.kind !== 'updown') return undefined;
     const a = this.index.get(m.asset)?.average(m.openTime - 60_000, m.openTime, 3000);
@@ -117,6 +121,7 @@ export class ReplayState {
 
   /** Pricing terms, mirroring MarketData.termsFor. */
   terms(m: RecMarket): ContractTerms | undefined {
+    if (m.kind === 'match') return undefined;
     if (m.kind === 'updown') { const k = this.strike(m); return k ? { kind: 'updown', strike: k } : undefined; }
     if (m.kind === 'less') return m.cap ? { kind: 'less', cap: m.cap } : undefined;
     if (m.kind === 'between') return m.strike && m.cap ? { kind: 'between', strike: m.strike, cap: m.cap } : undefined;

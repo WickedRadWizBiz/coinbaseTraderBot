@@ -16,6 +16,8 @@ export interface RiskContext {
   haltReasons: string[];
   /** Bankroll-tier limits that replace the configured fractions (sizing tiers). */
   limitOverrides?: Partial<RiskLimits>;
+  /** Rules-based strategies without a model fair value (tennis): skip the fee-net edge collar only. */
+  skipEdgeCollar?: boolean;
   /** Bankroll used for fractional limits; undefined = unknown = reject. */
   bankroll: number | undefined;
   /** Today's PnL, realized + mark-to-market, net of fees. */
@@ -132,7 +134,7 @@ export class RiskGateway {
     const isTaker = !i.postOnly;
     const feePer = orderFee(i.count, sideCost, isTaker, c.fees) / i.count;
     const q = i.side === 'bid' ? i.fairValue : 1 - i.fairValue;
-    if (!(q - sideCost - feePer > 0)) r.push(`no fee-net edge: q=${q.toFixed(4)} cost=${sideCost} fee=${feePer.toFixed(4)}`);
+    if (!c.skipEdgeCollar && !(q - sideCost - feePer > 0)) r.push(`no fee-net edge: q=${q.toFixed(4)} cost=${sideCost} fee=${feePer.toFixed(4)}`);
 
     // Capital thresholds.
     const bank = c.bankroll;
