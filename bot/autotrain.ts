@@ -1,7 +1,7 @@
 // In-bot automation: runs the training pipeline (research/pipeline.ts) on a schedule in a child
 // process at low CPU priority, and hot-swaps whatever it promotes (meta-model, SNN, perp model,
-// volatility profile) into the running engine without a restart. When the meta-model changes and
-// the promoted SNN was not evaluated against it, the SNN steps are re-run automatically.
+// volatility profile, tennis model) into the running engine without a restart. The MLP, perps and
+// tennis models read the SNN's outputs, so a new SNN automatically re-runs their training.
 
 import { spawn, type ChildProcess } from 'child_process';
 import fs from 'fs';
@@ -16,18 +16,19 @@ import { loadVolProfile } from './model/volSeasonality';
 import { PerpModel } from './perps/perpSignal';
 import type { PerpTrader } from './perps/perpTrader';
 import { createSnn } from './snn';
+import { TennisFairModel } from './tennis/tennisFair';
 import { logger } from './util/log';
 
 const log = logger('autotrain');
 
-export const MODEL_FILES = { mlp: 'model.json', perp: 'perp_model.json', snn: 'snn_model.json', vol: 'vol_profile.json' } as const;
+export const MODEL_FILES = { mlp: 'model.json', perp: 'perp_model.json', snn: 'snn_model.json', vol: 'vol_profile.json', tennis: 'tennis_model.json' } as const;
 type Kind = keyof typeof MODEL_FILES;
 
 /** The file the bot should load for each model: the pipeline's promoted copy in AUTO_TRAIN_DIR
  *  when it exists, else the configured params/ path. */
 export function resolveModelPaths(cfg: Readonly<Config>): Record<Kind, string> {
   const pick = (k: Kind, fallback: string) => { const p = path.join(cfg.autoTrain.dir, MODEL_FILES[k]); return fs.existsSync(p) ? p : fallback; };
-  return { mlp: pick('mlp', cfg.paramsPath), perp: pick('perp', cfg.perps.modelPath), snn: pick('snn', cfg.snn.modelPath), vol: pick('vol', cfg.strategy.volProfilePath) };
+  return { mlp: pick('mlp', cfg.paramsPath), perp: pick('perp', cfg.perps.modelPath), snn: pick('snn', cfg.snn.modelPath), vol: pick('vol', cfg.strategy.volProfilePath), tennis: pick('tennis', cfg.tennis.modelPath) };
 }
 
 /** How to launch the pipeline: the bundled dist/pipeline.cjs in production, the TS source under tsx in development. */
@@ -50,7 +51,7 @@ export class AutoTrainer {
   private logFile: string | null = null;
   private readonly mtimes = new Map<string, number | null>();
   private readonly swaps: AutoTrainStatus['swaps'] = [];
-  private readonly snnRerunFor = new Set<string>();
+  private readonly retrainFor = new Set<string>();
   private queued?: string[];
 
   constructor(private readonly d: {
@@ -84,7 +85,7 @@ export class AutoTrainer {
     return t;
   }
 
-  state(): { lastRun?: number; mlpId?: string; snnEvaluatedAgainst?: string; snnStage?: string; lastReport?: string } {
+  state(): { lastRun?: number; mlpId?: string; snnVersion?: string; mlpTrainedWithSnn?: string; snnStage?: string; lastReport?: string } {
     try { return JSON.parse(fs.readFileSync(path.join(this.d.cfg.autoTrain.dir, 'pipeline_state.json'), 'utf8')); } catch { return {}; }
   }
 
@@ -124,7 +125,7 @@ export class AutoTrainer {
   /** Poll the model files; hot-swap whatever changed. */
   async watch(): Promise<void> {
     const paths = resolveModelPaths(this.d.cfg);
-    for (const k of ['mlp', 'vol', 'perp', 'snn'] as Kind[]) {
+    for (const k of ['snn', 'mlp', 'vol', 'perp', 'tennis'] as Kind[]) {
       const p = paths[k], m = mtime(p);
       if (m === null || this.mtimes.get(p) === m) continue;
       // Do not load a file the pipeline is still writing (promotion is a copy; wait one poll).
@@ -145,14 +146,7 @@ export class AutoTrainer {
       const m = MetaModel.load(file);
       if (m.id === engine.model.id) return;
       engine.setModel(m);
-      this.record('mlp', `${m.id} (${m.params.kind})`);
-      // The SNN must be re-ablated/re-trained against this exact MLP.
-      const st = this.state();
-      if (cfg.autoTrain.onModelChange && st.snnEvaluatedAgainst !== m.id && !this.child && !this.snnRerunFor.has(m.id)) {
-        this.snnRerunFor.add(m.id);
-        log.info('meta-model changed: re-running the SNN steps against it', { model: m.id });
-        this.run(['--only', 'snn']);
-      }
+      this.record('mlp', `${m.id} (${m.params.kind}${m.params.features.some((f) => f.startsWith('snn_')) ? ', reads SNN' : ''}${m.params.take?.validation.validated ? ', take gate on' : ''})`);
     } else if (kind === 'vol') {
       const vp = loadVolProfile(file);
       const apply = vp && cfg.strategy.volSeasonality && vp.validation?.improved ? vp : undefined;
@@ -163,6 +157,10 @@ export class AutoTrainer {
       if (!m || !this.d.perpTrader) return;
       this.d.perpTrader.setModel(m);
       this.record('perp', `${m.params.version} (validated=${m.validated()})`);
+    } else if (kind === 'tennis') {
+      const m = TennisFairModel.load(file);
+      engine.setTennisFair(m);
+      this.record('tennis', m ? `${m.params.version} (validated=${m.validated}, ${m.params.validation.matches} matches)` : 'removed');
     } else if (kind === 'snn') {
       if (cfg.snn.mode === 'off') return;
       const old = engine.snn;
@@ -172,7 +170,14 @@ export class AutoTrainer {
       engine.saveSnnBlender();
       engine.setSnn(next);
       await old?.host.stop();
-      this.record('snn', `${next.model?.version ?? next.host.version} (${next.model?.notes ?? 'untrained'})`);
+      const v = next.model?.version ?? next.host.version;
+      this.record('snn', `${v} (${next.model?.notes ?? 'untrained'})`);
+      // The MLP, perps and tennis models were trained on the previous SNN's outputs: retrain them.
+      if (cfg.autoTrain.onModelChange && this.state().mlpTrainedWithSnn !== v && !this.child && !this.retrainFor.has(v)) {
+        this.retrainFor.add(v);
+        log.info('SNN changed: retraining the models that read it', { snn: v });
+        this.run(['--only', 'dataset,mlp,perps,tennis']);
+      }
     }
     this.d.audit.write('config', { event: 'hot_swap', kind, file });
     log.info('hot-swapped', { kind, file });

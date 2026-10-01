@@ -15,6 +15,7 @@
 //    default until a trained model earns its place.
 
 import crypto from 'crypto';
+import type { TakeModelParams } from './takeModel';
 import fs from 'fs';
 import { FEATURES, vectorFor } from './featureEngine';
 import { FEATURE_NAMES } from './features';
@@ -101,6 +102,8 @@ export interface MetaModelParams {
   referenceSigma: number;
   training?: Record<string, unknown>;
   validation?: ValidationReport;
+  /** "Should we take this trade" head (bot/model/takeModel.ts), trained out-of-fold. */
+  take?: TakeModelParams;
 }
 
 export const GO_LIVE_GATES = {

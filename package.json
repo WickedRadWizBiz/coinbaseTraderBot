@@ -25,6 +25,7 @@
     "research:perp-train": "tsx research/trainPerpModel.ts",
     "research:perp-backtest": "tsx research/perpBacktest.ts",
     "pipeline": "tsx research/pipeline.ts",
+    "research:tennis-train": "tsx research/trainTennisModel.ts",
     "research:snn-train": "tsx research/trainSnn.ts",
     "research:snn-ablation": "tsx research/snnAblation.ts",
     "research:snn-golden": "python3 research/snn_reference.py",

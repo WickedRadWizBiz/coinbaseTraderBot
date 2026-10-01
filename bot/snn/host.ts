@@ -112,6 +112,11 @@ export class SnnHost {
     await this.call({ type: 'settle', ticker, result, now }, 5_000);
   }
 
+  /** Drop columns (tennis matches that ended). */
+  async remove(keys: string[]): Promise<void> {
+    if (keys.length) await this.call({ type: 'remove', keys }, 5_000);
+  }
+
   async status(): Promise<unknown> {
     const r = await this.call({ type: 'status' }, 2_000);
     return r?.ok ? r.result : { error: r ? r.error : 'timeout' };

@@ -46,6 +46,8 @@ import type { DatasetRow } from './buildDataset';
 import { eventOf } from './buildDataset';
 import { predictGbdtLogits, trainGbdt } from './gbdt';
 import { predictLogits, train } from './mlp';
+import { takerFee } from '../bot/fees';
+import { TAKE_FEATURES, takeInputs, type TakeModelParams } from '../bot/model/takeModel';
 import { dieboldMariano, rng } from './stats';
 
 function arg(name: string, def: string): string {
@@ -66,10 +68,12 @@ export const DEFAULT_SETS = [
   RELAXED, `${RELAXED}+returns`, `${RELAXED}+returns+clock+calendar`, `${RELAXED}+returns+interaction`, `${RELAXED}+returns+ladder`, `${RELAXED}+returns+perp`, `${RELAXED}+returns+macro+confluence`,
   // TA library on the spot pair (bot/ta): indicator readings, then rule/confluence scores.
   `${RELAXED}+returns+ta`, `${RELAXED}+returns+ta+taconf`, `${RELAXED}+returns+macro+confluence+ta+taconf`,
+  // Cortex-like SNN outputs (direction calls and fair-value bias), alone and on top of the TA sets.
+  `${RELAXED}+returns+snn`, `${RELAXED}+returns+ta+taconf+snn`,
   'all',
 ];
 
-const ALL_GROUPS: FeatureGroup[] = ['base', 'micro', 'momentum', 'spot', 'macro', 'confluence', 'session', 'time', 'geometry', 'vol', 'kalshi', 'returns', 'clock', 'calendar', 'interaction', 'ladder', 'perp', 'ta', 'taconf'];
+const ALL_GROUPS: FeatureGroup[] = ['base', 'micro', 'momentum', 'spot', 'macro', 'confluence', 'session', 'time', 'geometry', 'vol', 'kalshi', 'returns', 'clock', 'calendar', 'interaction', 'ladder', 'perp', 'ta', 'taconf', 'snn'];
 
 export function resolveSet(spec: string, tiers: FeatureTier[] = ['T1', 'T2']): string[] {
   const groups: FeatureGroup[] = spec === 'all' ? ALL_GROUPS : (spec.split('+') as FeatureGroup[]);
@@ -108,6 +112,9 @@ export interface TrainOpts {
   maxEpochs?: number;
   sets?: string[];
   families?: Array<'mlp' | 'gbdt'>;
+  /** Train the take/skip head (default true) and the edge that defines a would-be trade. */
+  takeModel?: boolean;
+  takeMinEdge?: number;
   hidden?: number[];
   l2?: number[];
   depths?: number[];
@@ -366,6 +373,10 @@ export function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts = {}): Trai
     }
   }
 
+  // ---- "Should we take this trade" head (meta-labeling) on the OOF would-be trades. ----
+  const calP = (z: number) => (betaCalibration ? applyBeta(sigmoid(z), betaCalibration) : calibration ? sigmoid(calibration.a * z + calibration.b) : sigmoid(z));
+  const take = opts.takeModel === false ? undefined : fitTakeModel(chosen.oofRows, chosen.oofZ.map(calP), opts.takeMinEdge ?? 0.02, seed);
+
   const referenceSigma = rows.reduce((s, r) => s + r.sigma, 0) / rows.length;
   const variantsTried = grid.length + (opts.fixedNu === undefined ? NU_CANDIDATES.length : 0);
   const params: MetaModelParams = {
@@ -380,6 +391,7 @@ export function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts = {}): Trai
     marketCalibration,
     ...(chosenNu !== undefined ? { tNu: chosenNu } : {}),
     referenceSigma,
+    ...(take ? { take } : {}),
   };
 
   // ---- Holdout, predicted by the production class (parity by construction). ----
@@ -479,3 +491,44 @@ export async function trainMetaModelMain(argOf: (k: string, d: string) => string
 if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void trainMetaModelMain();
 
 function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; }
+
+/** Fit the take/skip head on out-of-fold would-be trades: side chosen by the OOF fair-value
+ *  probability vs the touch (edge after taker fees >= minEdge), label = the trade won. Validated on
+ *  the last 30% of trade windows against the fair-value probability alone; refit on all trades. */
+export function fitTakeModel(rows: DatasetRow[], p: number[], minEdge: number, seed: number): TakeModelParams | undefined {
+  const X: number[][] = [], Y: number[] = [], win: number[] = [], base: number[] = [];
+  rows.forEach((r, i) => {
+    const pY = p[i];
+    if (!(r.ask > 0 && r.ask < 1 && r.bid > 0 && r.bid < 1)) return;
+    const eYes = pY - r.ask - takerFee(1, r.ask), eNo = 1 - pY - (1 - r.bid) - takerFee(1, 1 - r.bid);
+    const side = eYes >= minEdge ? 'yes' : eNo >= minEdge ? 'no' : undefined;
+    if (!side) return;
+    const price = side === 'yes' ? r.ask : 1 - r.bid;
+    X.push(takeInputs(side, pY, price, r.ask - r.bid, r.tauSec, r.fx));
+    Y.push(side === 'yes' ? r.label : 1 - r.label);
+    win.push(r.window);
+    base.push(side === 'yes' ? pY : 1 - pY);
+  });
+  if (X.length < 300) return undefined;
+  const wins = [...new Set(win)].sort((a, b) => a - b);
+  const cut = wins[Math.floor(wins.length * 0.7)];
+  const idx = (f: (w: number) => boolean) => win.map((w, i) => (f(w) ? i : -1)).filter((i) => i >= 0);
+  const fitOn = (ids: number[]) => {
+    const ws = [...new Set(ids.map((i) => win[i]))].sort((a, b) => a - b);
+    const vcut = ws[Math.floor(ws.length * 0.8)];
+    const tr = ids.filter((i) => win[i] < vcut), va = ids.filter((i) => win[i] >= vcut);
+    return train(tr.map((i) => X[i]), tr.map((i) => Y[i]), va.map((i) => X[i]), va.map((i) => Y[i]), { hidden: 0, l2: 1e-2, lr: 0.01, maxEpochs: 300, patience: 40, seed, residual: -1 });
+  };
+  const ll = (q: number[], y: number[]) => q.reduce((s, v, i) => s - (y[i] ? Math.log(Math.max(1e-6, v)) : Math.log(Math.max(1e-6, 1 - v))), 0) / Math.max(1, q.length);
+  const trIds = idx((w) => w < cut), teIds = idx((w) => w >= cut);
+  let validation = { trades: X.length, windows: wins.length, logLossBase: NaN, logLossTake: NaN, validated: false };
+  if (trIds.length >= 200 && teIds.length >= 100) {
+    const m = fitOn(trIds);
+    const q = predictLogits(m.layers, m.norm, teIds.map((i) => X[i]), -1).map(sigmoid);
+    const yb = teIds.map((i) => Y[i]);
+    const lb = ll(teIds.map((i) => base[i]), yb), lt = ll(q, yb);
+    validation = { trades: X.length, windows: wins.length, logLossBase: lb, logLossTake: lt, validated: lt < lb - 0.002 };
+  }
+  const all = fitOn(win.map((_, i) => i));
+  return { features: [...TAKE_FEATURES], normalization: all.norm, layers: all.layers, validation };
+}

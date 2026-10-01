@@ -4,13 +4,16 @@
 // Evaluation is prequential walk-forward with strict timestamps: every prediction is recorded
 // before its own label (or any later label) can touch the weights.
 
-import { computeFeatureMap, type MacroEvent } from '../bot/model/featureEngine';
+import fs from 'fs';
+import path from 'path';
+import { assetFeatureMap, computeFeatureMap, type MacroEvent } from '../bot/model/featureEngine';
+import { CRYPTO_HORIZONS, cryptoColumnKey, cryptoValues, type CryptoHorizon } from '../bot/snn/inputs';
 import { priceContract, SETTLEMENT_AVG_SEC } from '../bot/model/fairValue';
 import { ladderQuotes } from '../bot/model/ladder';
 import { MetaModel } from '../bot/model/metaModel';
 import { N_BASE } from '../bot/snn/column';
 import { brier, sigmoid } from '../bot/snn/formulas';
-import { SnnNetwork, type ColumnInput, type ContractQuery, type SnnModelFile } from '../bot/snn/network';
+import { SnnNetwork, type ColumnInput, type ContractQuery, type SnnCheckpoint, type SnnModelFile } from '../bot/snn/network';
 import type { SnnParams } from '../bot/snn/params';
 import { exceedLabel } from '../bot/snn/readout';
 import { readRecordings, ReplayState, type RecMarket } from './replay';
@@ -45,14 +48,27 @@ export interface SnnReplayOpts {
   training?: { eprop?: { eta: number }; collect?: boolean };
   calendar?: MacroEvent[];
   onProgress?: (ts: number) => void;
+  /** Write the SNN's per-minute outputs (direction calls, p_snn per contract) as recording-format
+   *  'snn' events to <dir>/snnfill-YYYY-MM-DD.jsonl, for minutes without live 'snn' logs. These are
+   *  prequential (each output precedes every label that could have trained on it). */
+  backfillDir?: string;
+  /** Asset-level features are recomputed this often (same cadence as the live engine). */
+  assetEverySec?: number;
+  /** Continue from a saved network state (incremental day-by-day backfill). */
+  checkpoint?: SnnCheckpoint;
+  /** Only read recording files in this day range (YYYY-MM-DD, inclusive; warm-up included by the caller). */
+  fromDay?: string;
+  toDay?: string;
 }
 
-export const columnOf = (m: { asset: string; openTime: number; closeTime: number }) => `${m.asset}-${Math.round((m.closeTime - m.openTime) / 60_000)}m`;
+/** Same mapping as the engine's snnColumn: 15-minute contracts -> asset-15m, hourly -> asset-60m. */
+export const columnOf = (m: { asset: string; openTime: number; closeTime: number }) => cryptoColumnKey(m.asset, (m.closeTime - m.openTime) / 60_000 <= 20 ? 15 : 60);
 
 export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnReplayResult> {
   const st = new ReplayState();
   const net = new SnnNetwork(o.params, { whitelist: o.whitelist, model: o.snnModel });
   net.training = Boolean(o.training?.eprop);
+  if (o.checkpoint) net.restore(o.checkpoint);
   const model = o.model ?? MetaModel.identity();
   const scoreEvery = (o.scoreEverySec ?? 60) * 1000;
   const noEntry = (o.noEntryBeforeCloseSec ?? 60) * 1000;
@@ -119,7 +135,13 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     rankRefs.delete(m.ticker);
   };
 
-  for await (const e of readRecordings(dir)) {
+  const assetCache = new Map<string, { ts: number; f: Record<string, number> }>();
+  const assetEvery = (o.assetEverySec ?? 5) * 1000;
+  let lastLive = -Infinity;
+  const backfillOut = new Map<string, number>();
+  if (o.backfillDir) fs.mkdirSync(o.backfillDir, { recursive: true });
+  for await (const e of readRecordings(dir, o.backfillDir ? '' : undefined, o.fromDay, o.toDay)) {
+    if (e.k === 'snn') lastLive = e.t;
     if (o.to && e.t >= o.to) break;
     st.apply(e);
     if (o.from && st.now < o.from) continue;
@@ -141,11 +163,22 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
       const k = columnOf(m), cur = atm.get(k);
       if (!cur || Math.abs(x.fv.d2) < Math.abs(priced.get(cur.ticker)!.fv.d2)) atm.set(k, m);
     }
+    // Every crypto column (asset x 15m/60m/240m) is fed every second from asset-level data, as live.
     const inputs: ColumnInput[] = [];
-    for (const [key, m] of atm) {
-      const x = priced.get(m.ticker)!;
-      const f = featureMap(m, st.now, x);
-      inputs.push({ key, asset: m.asset, spot: x.spot.value, mid: x.mid, spread: x.ask.price - x.bid.price, imbalance: f.imbalance, dAtm: x.fv.d2, tauFrac: x.tauSec / Math.max(1, (m.closeTime - m.openTime) / 1000), rsi: Number.isFinite(f.rsi_14_1m) ? 50 + 50 * f.rsi_14_1m : undefined, retZ: f.ret_5m_z });
+    for (const [asset, idx] of [...st.index].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+      const px = idx.fresh(st.now, 30_000)?.value;
+      if (!px) continue;
+      let ac = assetCache.get(asset);
+      if (!ac || st.now - ac.ts >= assetEvery) {
+        ac = { ts: st.now, f: assetFeatureMap(asset, st.now, { index: idx, spot: st.spot.get(asset), bars: st.features.bars.get(asset), candles: st.features.candles.get(asset), usdtd: st.usdtd, btcd: st.btcd, perp: st.features.perps.get(asset) }) };
+        assetCache.set(asset, ac);
+      }
+      for (const h of CRYPTO_HORIZONS) {
+        const key = cryptoColumnKey(asset, h);
+        const m = atm.get(key), x = m ? priced.get(m.ticker) : undefined;
+        const contract = m && x ? { dAtm: x.fv.d2, tauFrac: x.tauSec / Math.max(1, (m.closeTime - m.openTime) / 1000), mid: x.mid, spread: x.ask.price - x.bid.price, imbalance: x.book.imbalance(3) } : undefined;
+        inputs.push({ key, asset, price: px, mid: contract?.mid, values: cryptoValues(h as CryptoHorizon, ac.f, contract) });
+      }
     }
     const t0 = performance.now();
     net.step(T, inputs);
@@ -162,6 +195,13 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     }
     const scores = net.score(queries, T);
     stepMs.push(performance.now() - t0);
+    if (o.backfillDir && T - lastLive > 300_000) {
+      const day = new Date(T).toISOString().slice(0, 10);
+      const file = path.join(o.backfillDir, `snnfill-${day}.jsonl`);
+      if (!backfillOut.has(file)) { fs.writeFileSync(file, ''); backfillOut.set(file, 0); }
+      fs.appendFileSync(file, JSON.stringify({ t: T, k: 'snn', backfill: true, dirs: net.directions().map((d) => [d.key, +d.pUp.toFixed(5), +d.expSignedMove.toFixed(3), d.labelled]), c: Object.fromEntries(scores.map((sc) => [sc.ticker, +sc.p.toFixed(5)])) }) + '\n');
+      backfillOut.set(file, backfillOut.get(file)! + 1);
+    }
     const day = new Date(T).toISOString().slice(0, 10);
     const edgeByCol = new Map<string, number[]>();
     const mids = new Map<string, Mid>();

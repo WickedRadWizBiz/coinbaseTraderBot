@@ -15,8 +15,7 @@
 
 import fs from 'fs';
 import type { IndexTracker } from '../marketdata/indexTracker';
-import { OrderBook } from '../marketdata/orderBook';
-import { computeFeatureMap, type BarStore, type FeatureContext } from '../model/featureEngine';
+import { assetFeatureMap, type BarStore, type SnnContext } from '../model/featureEngine';
 import type { CandleSet } from '../ta/candleStore';
 import type { PerpState } from './perpData';
 
@@ -28,6 +27,8 @@ export const PERP_FEATURES = [
   'ta_rsi_1h', 'ta_rsi_4h', 'ta_macd_hist_1h', 'ta_di_diff_1h', 'ta_adx_1h', 'ta_ema_stack_1h', 'ta_ema_stack_4h', 'ta_bb_pctb_1h',
   'ta_cmf_1h', 'ta_price_ma50_4h', 'ta_cloud_4h', 'ta_structure_1h', 'ta_vwap_dist_1h', 'ta_obv_slope_4h',
   'taconf_trend_alignment', 'taconf_mtf_momentum', 'taconf_net_trend', 'taconf_net_reversal',
+  // SNN direction calls over the perp horizons (1 h and 4 h).
+  'snn_up_1h', 'snn_up_4h',
 ];
 
 export interface PerpFeatureSources {
@@ -38,19 +39,15 @@ export interface PerpFeatureSources {
   usdtd?: IndexTracker;
   btcd?: IndexTracker;
   perp?: PerpState;
+  /** SNN direction calls for this asset (P(up) and expected move per horizon). */
+  snn?: SnnContext;
 }
 
-const EMPTY_BOOK = new OrderBook('perp-context');
 
 /** Feature values for one asset at `now` (NaN where data is missing). */
 export function perpFeatures(asset: string, now: number, s: PerpFeatureSources): Record<string, number> {
   if (!s.index) return Object.fromEntries(PERP_FEATURES.map((n) => [n, NaN]));
-  const vol = s.index.vol();
-  const ctx: FeatureContext = {
-    now, fairValue: 0.5, mid: 0.5, tauSec: 3600, sigmaPerSqrtSec: vol?.sigmaPerSqrtSec ?? NaN, referenceSigma: vol?.sigmaPerSqrtSec ?? NaN,
-    inWindow: false, book: EMPTY_BOOK, index: s.index, spot: s.spot, asset, usdtd: s.usdtd, btcd: s.btcd, bars: s.bars, candles: s.candles, perp: s.perp,
-  };
-  const all = computeFeatureMap(ctx);
+  const all = assetFeatureMap(asset, now, s);
   return Object.fromEntries(PERP_FEATURES.map((n) => [n, all[n] ?? NaN]));
 }
 

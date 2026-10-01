@@ -11,6 +11,8 @@ import type { Engine } from '../bot/engine';
 import { MetaModel } from '../bot/model/metaModel';
 import { DEFAULT_BLENDER, SnnBlender } from '../bot/snn/blender';
 import { acceptedChain, recordingDays, runPipeline } from '../research/pipeline';
+import { SnnNetwork } from '../bot/snn/network';
+import { DEFAULT_SNN, versionHash, withFlags } from '../bot/snn/params';
 import { writeSyntheticRecordings } from '../research/synthetic';
 import { tmpAudit, tmpDir } from './helpers';
 
@@ -59,35 +61,42 @@ function fakeEngine() {
     get model() { return model; },
     setModel(m: MetaModel) { model = m; calls.push(`model:${m.id}`); },
     setVolProfile() { calls.push('vol'); },
-    snn: undefined, setSnn() { calls.push('snn'); }, saveSnnBlender() { /* noop */ },
+    snn: undefined, setSnn(x: unknown) { calls.push('snn'); (e as any).__lastSnn = x; }, saveSnnBlender() { /* noop */ }, setTennisFair() { calls.push('tennis'); },
   };
   return { engine: e as unknown as Engine, calls };
 }
 
-test('hot swap: a new model.json is loaded into the running engine and re-runs the SNN steps against it', async () => {
+test('hot swap: a new model.json goes live in the running engine; a new SNN retrains the models that read it', async () => {
   const dir = tmpDir();
-  const cfg = cfgFor(dir, { AUTO_TRAIN: 'off' });
+  const cfg = cfgFor(dir, { AUTO_TRAIN: 'off', SNN_WORKER: 'false' });
   const { engine, calls } = fakeEngine();
   const audit = tmpAudit();
   let now = T0;
   const t = new AutoTrainer({ cfg, engine, audit, alerter: new Alerter([], audit), now: () => now, command: { cmd: process.execPath, args: ['-e', 'setTimeout(()=>{}, 50)'] } });
   t.start();
   t.stop();
-  // Pipeline promotes a new MLP.
+  // Pipeline promotes a new MLP: swapped in, nothing else re-runs (the MLP reads the SNN, not vice versa).
   fs.mkdirSync(cfg.autoTrain.dir, { recursive: true });
   const p = { ...MetaModel.identity().params, version: 'mlp-new', kind: 'identity' as const };
   fs.writeFileSync(path.join(cfg.autoTrain.dir, 'model.json'), JSON.stringify(p));
   now = Date.now() + 10_000;
   await t.watch();
   assert.ok(calls.some((c) => c.startsWith('model:')), `swapped: ${calls}`);
-  assert.equal(t.status().running, true, 'SNN re-run launched against the new MLP');
-  assert.deepEqual((t as any).lastExit, null);
-  await new Promise((r) => setTimeout(r, 400));
   assert.equal(t.status().running, false);
-  assert.deepEqual(t.status().lastExit!.args, ['--only', 'snn']);
-  // The same model again does not trigger another swap or run.
   await t.watch();
-  assert.equal(calls.filter((c) => c.startsWith('model:')).length, 1);
+  assert.equal(calls.filter((c) => c.startsWith('model:')).length, 1, 'same file: no second swap');
+  // A new SNN model: swapped in, and the MLP / perps / tennis retrain is launched.
+  const sp = withFlags({ ...DEFAULT_SNN, nE: 16, nI: 4, nL1: 8 }, {});
+  const net = new SnnNetwork(sp);
+  net.step(T0, [{ key: 'BTC-15m', asset: 'BTC', price: 60000 }]);
+  fs.writeFileSync(path.join(cfg.autoTrain.dir, 'snn_model.json'), JSON.stringify({ ...net.exportModel('t'), version: versionHash(sp) }));
+  now = Date.now() + 10_000;
+  await t.watch();
+  assert.ok(calls.includes('snn'), `snn swapped: ${calls}`);
+  assert.equal(t.status().running, true, 'retrain launched');
+  await new Promise((r) => setTimeout(r, 400));
+  assert.deepEqual(t.status().lastExit!.args, ['--only', 'dataset,mlp,perps,tennis']);
+  await (engine as any).__lastSnn?.host.stop?.();
 });
 
 test('scheduler: daily at the configured UTC hour, once per day', () => {
@@ -111,25 +120,34 @@ test('stage selection: the highest stage whose whole chain S1..Sk was accepted',
   assert.equal(acceptedChain([v('S1 tags', false), v('S2 dendrites', true)]), 0);
 });
 
-test('pipeline end to end: MLP first, then the SNN ablated and trained against that MLP; promoted and recorded', async () => {
+test('pipeline end to end: SNN first, backfilled SNN outputs, then the MLP trained on them; promoted and recorded', async () => {
   const dir = tmpDir();
   const rec = path.join(dir, 'recordings');
   writeSyntheticRecordings(rec, { windows: 10, seed: 7 });
   assert.equal(recordingDays(rec).length, 1);
   const cfg = cfgFor(dir, { AUTO_TRAIN_ABLATION_DAYS: '1' });
   const logs: string[] = [];
-  const r = await runPipeline({ cfg, only: ['dataset', 'mlp', 'perps', 'snn'], ablationOnly: 'S1', log: (m) => logs.push(m), now: T0 });
+  const r = await runPipeline({ cfg, only: ['snn', 'dataset', 'mlp', 'perps', 'tennis'], ablationOnly: 'S1', log: (m) => logs.push(m), now: T0 });
+  const order = r.steps.map((s) => s.step);
+  assert.deepEqual(order, ['snn-ablation', 'snn-train', 'snn-backfill', 'dataset', 'mlp', 'perps', 'tennis'], 'SNN before the models that read it');
   const by = Object.fromEntries(r.steps.map((s) => [s.step, s]));
-  assert.ok(by.dataset.ok && by.mlp.ok, JSON.stringify(r.steps.map((s) => [s.step, s.ok, s.error?.slice(0, 200)])));
-  assert.equal(by.perps.ok, true); assert.match(String(by.perps.skipped), /no perp quotes/, 'no perp data: skipped, not failed');
-  assert.ok(by['snn-ablation'].ok && !by['snn-ablation'].skipped);
-  assert.ok(by['snn-train'].ok && !by['snn-train'].skipped, JSON.stringify(by['snn-train']));
+  assert.ok(r.steps.every((s) => s.ok), JSON.stringify(r.steps.map((s) => [s.step, s.ok, s.skipped, s.error?.slice(0, 300)])));
+  assert.match(String(by.perps.skipped), /no perp quotes/, 'no perp data: skipped, not failed');
+  assert.match(String(by.tennis.skipped), /tennis matches/, 'no tennis data: skipped, not failed');
+  // The backfill wrote prequential 'snn' events the dataset joined as features.
+  const fill = path.join(cfg.autoTrain.dir, 'work', 'snnfill');
+  const files = fs.readdirSync(fill).filter((f) => f.startsWith('snnfill-'));
+  assert.equal(files.length, 1);
+  const first = JSON.parse(fs.readFileSync(path.join(fill, files[0]), 'utf8').split('\n')[0]);
+  assert.equal(first.k, 'snn'); assert.ok(first.dirs.some((d: unknown[]) => d[0] === 'BTC-15m'));
+  const rows = fs.readFileSync(path.join(cfg.autoTrain.dir, 'work', 'dataset.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.ok(rows.filter((x) => Number.isFinite(x.fx.snn_up_15m)).length > rows.length * 0.5, 'SNN direction available as an MLP input');
   const mlp = MetaModel.load(path.join(cfg.autoTrain.dir, 'model.json'));
   assert.equal(mlp.params.kind, 'mlp', 'MLP-only default');
+  assert.equal(r.state.mlpTrainedWithSnn, r.state.snnVersion, 'the promoted MLP was trained on the promoted SNN\'s outputs');
   assert.ok(fs.existsSync(path.join(cfg.autoTrain.dir, 'snn_model.json')));
-  assert.equal(r.state.snnEvaluatedAgainst, mlp.id, 'the promoted SNN was evaluated against the promoted MLP');
   assert.ok(fs.existsSync(r.report));
-  // Re-running just the SNN with the same MLP: ablation not due, training up to date.
+  // Re-running the SNN steps soon after: ablation not due, training up to date, backfill incremental.
   const again = await runPipeline({ cfg, only: ['snn'], ablationOnly: 'S1', log: () => undefined, now: T0 + 3_600_000 });
   assert.match(String(again.steps.find((s) => s.step === 'snn-ablation')!.skipped), /not due/);
   assert.match(String(again.steps.find((s) => s.step === 'snn-train')!.skipped), /up to date/);

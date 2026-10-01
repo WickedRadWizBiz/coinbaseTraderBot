@@ -34,6 +34,8 @@ import { RiskGateway } from './risk/riskGateway';
 import { Reconciler } from './recon/reconciler';
 import { Tca } from './tca/tca';
 import { createSnn } from './snn';
+import { TennisScoreClient } from './tennis/liveTennisApi';
+import { TennisFairModel } from './tennis/tennisFair';
 import { AutoTrainer, resolveModelPaths } from './autotrain';
 import { logger } from './util/log';
 
@@ -129,6 +131,8 @@ async function main(): Promise<void> {
   if (!calendar) log.info('no macro calendar (params/calendar.json): calendar features unavailable');
   // Perps: one executor per perps account drives each position to hedge (stage 2) + directional
   // (stage 3) targets, simulated against live perp quotes (paper) or with real orders (live).
+  // The perps trader reads the SNN's direction calls from the engine (set once it exists).
+  let engineRef: Engine | undefined;
   let hedger: PerpHedger | undefined;
   let perpTrader: PerpTrader | undefined;
   const P = cfg.perps;
@@ -169,7 +173,7 @@ async function main(): Promise<void> {
           makerBps: P.makerFeeBps, requireValidation: P.requireValidation, minEquityUsd: P.minEquityUsd,
         },
         hub, gateway: perpGateway, model: perpModel, audit,
-        sources: (asset) => ({ index: md.index.get(asset), spot: md.spot.get(asset), bars: md.features.bars.get(asset), candles: md.features.candles.get(asset), usdtd: md.usdtd, btcd: md.btcd, perp: hub.get(asset) }),
+        sources: (asset) => ({ index: md.index.get(asset), spot: md.spot.get(asset), bars: md.features.bars.get(asset), candles: md.features.candles.get(asset), usdtd: md.usdtd, btcd: md.btcd, perp: hub.get(asset), snn: engineRef?.snnContext(asset) }),
       });
     }
     kill.bindCancelAll(async (reason) => { await oms.cancelAll(reason); await hedger!.cancelAll(reason); });
@@ -185,7 +189,16 @@ async function main(): Promise<void> {
       log.error('SNN failed to start; continuing without it', { error: String(e) });
     }
   }
-  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader, clock, snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
+  let tennisFair: TennisFairModel | undefined;
+  try { tennisFair = TennisFairModel.load(modelPaths.tennis); if (tennisFair) log.info(`tennis model ${tennisFair.params.version} (validated=${tennisFair.validated})`); }
+  catch (e) { log.warn(`tennis model not loaded: ${(e as Error).message}`); }
+  let tennisScores: TennisScoreClient | undefined;
+  if (cfg.tennis.enabled && cfg.tennis.scoreFeed === 'livetennis') {
+    try { tennisScores = new TennisScoreClient({ stateFile: path.join(cfg.dataDir, 'tennis_api_budget.json') }); }
+    catch (e) { log.warn(`live tennis scores disabled: ${(e as Error).message}`); }
+  }
+  const engine: Engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader, clock, tennisScores, tennisFair, snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
+  engineRef = engine;
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();
 

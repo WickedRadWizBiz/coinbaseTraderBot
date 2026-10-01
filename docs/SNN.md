@@ -1,12 +1,32 @@
 # Cortex-like SNN (bot/snn)
 
-Implementation of *From Flat SNN to Cortex-Like Predictor: Verified PDF Review and a Multi-Level
-SNN Design for the Kalshi Bot*. The SNN is an **experiment platform behind strict gates**. It runs in
-shadow by default and never touches the hard limits: whitelist, position caps, daily loss stop and
-kill switch all sit outside it. It can move the traded probability only with an earned
-α ≤ 0.25:
+This implements *From Flat SNN to Cortex-Like Predictor: Verified PDF Review and a Multi-Level SNN Design
+for the Kalshi Bot*, extended so that **the SNN informs and the MLP decides**. The SNN never touches the
+hard limits: whitelist, position caps, daily loss stop and kill switch all sit outside it.
 
-    p_final = (1 − α·c)·p_model + α·c·p_snn
+## Roles
+
+| | SNN (multilayered spiking network, `bot/snn`) | MLP (original network, `bot/model`) |
+|---|---|---|
+| Job | Direction and fair-value bias | Fair value, and **whether to take each trade** |
+| Inputs | TA library on the Coinbase spot USD pair (indicators and rule/confluence scores), perp premium/funding, Kalshi books; for tennis, the 4 confluence signals (momentum, flow, depth, cross-market) plus the live score | The same feature catalog **plus the SNN's outputs** (`snn_up_15m/1h/4h`, `snn_up_h`, `snn_move_h_z`, `snn_bias`, `snn_dir_agree`) |
+| Learns | Continuously, 24/7, traded or not: direction heads from realised moves, readouts from settlements | Daily, offline, on the recordings plus the logged SNN outputs |
+| Output | P(up) over 15m / 1h / 4h per asset, P(up) over 5 min per tennis match, expected move, and p_snn per contract | p_model, plus a take/skip probability for each would-be trade |
+
+**Crypto.** The fair-value MLP and its take/skip head (`bot/model/takeModel.ts`) read the SNN's calls.
+- **Take/skip head:** for every entry the edge would place, it estimates P(trade wins). The trade is taken only if that clears the side's break-even (price + fee).
+- **Validation gate:** the gate switches on only after its out-of-fold held-out check beats the fair value alone.
+
+**Perps** read `snn_up_1h` and `snn_up_4h`.
+
+**Tennis.**
+- The tennis MLP (`bot/tennis/tennisFair.ts`) learns fair P(A wins) from the 4 signals, the score, the book and the SNN.
+- Once validated (100+ matches, held-out Brier better than the market's), an entry needs fair − price ≥ `TENNIS_FAIR_MIN_EDGE`.
+- Live scores come from the Live Tennis API (`TENNIS_SCORE_FEED=livetennis`, key in `LIVE_TENNIS_API_KEY`). The free tier allows 100 calls a day: one slate call covers every match, and it is only refreshed on a price move, an exit, or after `TENNIS_SCORE_IDLE_MIN`.
+
+**Logging and the legacy blend.**
+- The SNN's calls are written to the recordings every minute as `snn` events. That is what the MLP trains on.
+- The old end-of-pipeline blend (`SNN_MODE=blend`, α ≤ 0.25) is still available but no longer needed. In the default `shadow` mode the SNN runs, logs and feeds the MLP without blending.
 
 ## Every formula, where it lives, and how it is checked
 
@@ -46,16 +66,23 @@ regenerate with `npm run research:snn-golden`).
 
 | Level | Model | Size | Learning |
 |---|---|---|---|
-| L0 encoding | send-on-delta (3/6/12 bp, Kalshi mid ±1¢) + 8-band population codes of 7 features → LIF τ 2 s | 64 | none |
+| L0 encoding | crypto: send-on-delta on the index (3/6/12 bp) and the Kalshi mid (±1¢), plus 8-band population codes of 24 inputs (TA library ×2 timeframes, rule/confluence scores, perp, returns, USDT.D, ATM Kalshi book). Tennis: deltas on P(A) plus 15 inputs (4 signals, score, breaks, progress, score model, book). Both feed LIF τ 2 s | 200 crypto / 128 tennis (widened from the PDF's 64 to carry these inputs) | none |
 | L1 dendritic | Poirazi: 6 branches × 16 synapses, sigmoid branches low-passed at τ ∈ {5, 30, 120} s, LIF soma; AMPA-like + NMDA-like (gated) classes | 48 | offline e-prop surrogate; S6 triplet × NMDA gate × governor |
 | L2/3 | ALIF E (τ_m 10 s, τ_a 300 s) + LIF I (τ_m 3 s), 10% recurrent, CSR, event-driven; cross-column lateral inhibition; 64 error units | 128 E + 32 I | S6 triplet (E→E) with NMDA gate; inhibitory plasticity off |
 | PC pathway | U1: L2/3 → L1 (48 × 128), U0: L1 → L0 (64 × 48), tanh predictors | — | offline pretraining; S6 online with precision 1/σ² |
 | L5 readout | logistic on EWMA L2/3 rates + L1 rates + pooled d×rate (~200 features) | 1 per column | per-contract tags + delta rule (η ≈ 1e-4, capped), two-speed weights |
 | Governor | first-order low-pass G ∈ [0, 1] | 1 per column | rule-based |
+| Direction head | logistic on the column state; label = price higher after the column's horizon (15m / 60m / 240m; 5 min for tennis) | 1 per column | delta rule on every minute's tag once its horizon passes, 24/7 (η 2e-3, capped), two-speed weights |
+
+**Columns.**
+- Crypto: one per asset × {15m, 60m, 240m} (`BTC-15m`, `BTC-60m`, `BTC-240m`, …). Up to `SNN_MAX_COLUMNS`, default 18.
+- Tennis: one per live match (`TEN:<event>`), created and removed with the match. Up to 8.
+- Crypto columns are fed every second from asset-level data, whether or not anything trades. So the direction heads keep learning around the clock.
+- 15-minute contracts are scored on the 15m column, hourly ladders on the 60m column, and perps use the 60m and 240m calls.
 
 The clock is Δt = 1 s of market time, run in a `worker_threads` worker (`bot/snn/worker.ts`, bundled to
 `dist/snnWorker.cjs`). Readouts have a 200 ms deadline: on a timeout, α = 0 for that tick. A latency p99 above
-150 ms skips the vote. On the default sizes, measured cost is about 1.9 ms per market-second for six columns.
+150 ms skips the vote. On the default sizes the measured cost is about 0.3 ms per column per market-second.
 Within a step the order is: inputs → synaptic currents → dendrites → soma → spikes → traces → plasticity →
 governor → PC → readout features. State is struct-of-arrays typed arrays. Exact exponential decays are
 precomputed, and slow accumulators use Float64. The seeded xoshiro128** PRNG state is checkpointed.

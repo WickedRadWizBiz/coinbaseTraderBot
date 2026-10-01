@@ -17,6 +17,10 @@ export type { ColumnInput } from './column';
 
 export interface ContractQuery {
   ticker: string;
+  /** Tennis (kind 'match'): the threshold distance is given directly as d = logit(model P(A)),
+   *  and the life fraction as 1 - progress; spot/sigma/strike are unused. */
+  d?: number;
+  lifeFrac?: number;
   /** Column key (asset-horizon). */
   column: string;
   kind: 'updown' | 'greater' | 'less' | 'between' | string;
@@ -54,12 +58,23 @@ export interface SnnStepResult {
   steps: number;
 }
 
+/** A column's market-direction call: P(price higher in horizonSec), the expected absolute move
+ *  (crypto: bps; tennis: probability points x 1e4), and how well the head has scored so far. */
+export interface DirectionPred {
+  key: string; asset: string; kind: 'crypto' | 'tennis'; horizonSec: number;
+  pUp: number; expMove: number; expSignedMove: number;
+  labelled: number; brier: number | null;
+}
+
+interface DirTag { ts: number; phi: Float32Array; p: number; price0: number }
+
 export interface SnnModelFile {
   version: string;
   params: SnnParams;
   /** Offline-trained weights by column key (base64 Float32 per array name). */
   columns?: Record<string, Record<string, string>>;
   readouts?: Record<string, number[]>;
+  dirReadouts?: Record<string, number[]>;
   healthRef?: HealthRef;
   trainedAt?: string;
   notes?: string;
@@ -79,6 +94,10 @@ export class SnnNetwork {
   readonly version: string;
   readonly columns = new Map<string, Column>();
   readonly readouts = new Map<string, Readout>();
+  /** Direction heads (one per column): trained continuously on realised price moves, traded or not. */
+  readonly dirReadouts = new Map<string, Readout>();
+  readonly dirTags = new Map<string, DirTag[]>();
+  readonly dirStats = new Map<string, { absMove: number; n: number }>();
   readonly health: SnnHealth;
   readonly wc = new Map<string, { E: number; I: number }>();
   /** Proxy: EWMA BTC-ETH return co-moments per horizon (correlation feature vs gap junctions). */
@@ -110,8 +129,10 @@ export class SnnNetwork {
   column(key: string, asset: string): Column | undefined {
     let c = this.columns.get(key);
     if (c) return c;
-    if (this.whitelist && !this.whitelist.includes(key)) return undefined;
-    if (this.columns.size >= this.p.maxColumns) return undefined;
+    const tennis = key.startsWith('TEN:');
+    if (!tennis && this.whitelist && !this.whitelist.includes(key) && !this.whitelist.includes(asset)) return undefined;
+    const count = [...this.columns.keys()].filter((k) => k.startsWith('TEN:') === tennis).length;
+    if (count >= (tennis ? this.p.maxTennisColumns : this.p.maxColumns)) return undefined;
     c = new Column(key, asset, this.p, this.columns.size);
     const pre = this.preset?.columns?.[key];
     if (pre) for (const [name, b64] of Object.entries(pre)) copyInto(c.arrays()[name], decodeArr(b64, c.arrays()[name]));
@@ -119,7 +140,56 @@ export class SnnNetwork {
     const ro = new Readout(c.nFeat, { eta: this.p.readoutEta, cap: this.p.readoutCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: this.p.tagsPerContract, maxTagged: this.p.maxTaggedContracts, traceTauSec: this.p.traceTauSec, useTags: this.p.flags.tags },
       this.preset?.readouts?.[key] ?? priorWeights(c.nFeat, this.p.priorSlope));
     this.readouts.set(key, ro);
+    const dir = new Readout(c.nFeat, { eta: this.p.dirEta, cap: this.p.dirCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: 1, maxTagged: 1, traceTauSec: this.p.traceTauSec, useTags: true },
+      (this.preset as { dirReadouts?: Record<string, number[]> } | undefined)?.dirReadouts?.[key]);
+    this.dirReadouts.set(key, dir);
+    this.dirTags.set(key, []);
     return c;
+  }
+
+  /** Drop a column (a tennis match that ended): its state, readouts and pending tags. */
+  removeColumn(key: string): void {
+    this.columns.delete(key); this.readouts.delete(key); this.dirReadouts.delete(key); this.dirTags.delete(key); this.dirStats.delete(key); this.inputs.delete(key);
+  }
+
+  /** Direction calls of every column (state-only features: d = 0, no contract). */
+  directions(): DirectionPred[] {
+    return this.sortedColumns().map((c) => {
+      const ro = this.dirReadouts.get(c.key)!;
+      const pUp = ro.predict(c.features(0, 0, this.extras(c)));
+      const st = this.dirStats.get(c.key);
+      const expMove = st?.absMove ?? 0;
+      return {
+        key: c.key, asset: c.asset, kind: c.kind, horizonSec: c.horizonSec, pUp, expMove, expSignedMove: (2 * pUp - 1) * expMove,
+        labelled: ro.history.length, brier: Number.isFinite(ro.brierSlow) ? ro.brierSlow : null,
+      };
+    });
+  }
+
+  /** Direction heads: tag the state every dirEverySec; label each tag when its horizon has passed
+   *  (y = price higher than at the tag). Runs every step whether or not anything is traded. */
+  private stepDirections(ts: number, cols: Column[]): void {
+    const sample = ts % (this.p.dirEverySec * 1000) === 0;
+    const learn = !this.health.freezeLearning;
+    for (const c of cols) {
+      const ro = this.dirReadouts.get(c.key)!, tags = this.dirTags.get(c.key)!;
+      const price = c.lastSpot;
+      while (tags.length && tags[0].ts + c.horizonSec * 1000 <= ts) {
+        const t = tags.shift()!;
+        if (!(price > 0) || !(t.price0 > 0) || price === t.price0) continue; // no move: no label
+        const y: 0 | 1 = price > t.price0 ? 1 : 0;
+        const move = c.kind === 'tennis' ? 1e4 * Math.abs(price - t.price0) : 1e4 * Math.abs(Math.log(price / t.price0));
+        const st = this.dirStats.get(c.key) ?? { absMove: move, n: 0 };
+        st.absMove += (move - st.absMove) / Math.min(200, ++st.n);
+        this.dirStats.set(c.key, st);
+        ro.tag('dir', 'greater', 'strike', t.phi, t.p, t.ts);
+        ro.settle('dir', y ? 'yes' : 'no', ts, 1 - this.p.govDelta * c.G, learn);
+      }
+      if (sample && price > 0) {
+        const phi = c.features(0, 0, this.extras(c));
+        tags.push({ ts, phi: Float32Array.from(phi), p: ro.predict(phi), price0: price });
+      }
+    }
   }
 
   private sortedColumns(): Column[] {
@@ -190,8 +260,9 @@ export class SnnNetwork {
       let best = -1;
       cols.forEach((c, i) => { if (sal[i] > best) { best = sal[i]; this.top = c.key; } });
     }
+    this.stepDirections(ts, cols);
     // Readout two-speed relaxation (multi-rate, exact).
-    if ((this.steps + 1) % this.p.slowEverySec === 0) for (const r of this.readouts.values()) r.relax(this.p.slowEverySec);
+    if ((this.steps + 1) % this.p.slowEverySec === 0) for (const r of [...this.readouts.values(), ...this.dirReadouts.values()]) r.relax(this.p.slowEverySec);
     this.steps++;
     this.observeHealth(ts, cols);
     // NaN/Inf anywhere -> restore the last good in-memory checkpoint.
@@ -244,7 +315,15 @@ export class SnnNetwork {
     for (const q of queries) {
       const c = this.columns.get(q.column);
       const ro = this.readouts.get(q.column);
-      if (!c || !ro || !(q.spot > 0) || !(q.sigma > 0) || !(q.tauSec > 0)) continue;
+      if (!c || !ro) continue;
+      if (q.d !== undefined) {
+        // Tennis: one threshold, distance given directly.
+        if (!Number.isFinite(q.d)) continue;
+        const phi = c.features(q.d, q.lifeFrac ?? 0, this.extras(c));
+        ths.push({ q, role: 'strike', K: 1, p: ro.predict(phi), phi });
+        continue;
+      }
+      if (!(q.spot > 0) || !(q.sigma > 0) || !(q.tauSec > 0)) continue;
       const roles: [ThresholdRole, number | undefined][] = q.kind === 'less' ? [['cap', q.cap]] : q.kind === 'between' ? [['strike', q.strike], ['cap', q.cap]] : [['strike', q.strike]];
       const life = q.lifeSec > 0 ? Math.min(1, q.tauSec / q.lifeSec) : 0;
       for (const [role, K] of roles) {
@@ -315,6 +394,7 @@ export class SnnNetwork {
           rates: { L0: +c.rateL0.toFixed(4), L1: +c.rateL1.toFixed(4), E: +c.rateE.toFixed(4), I: +c.rateI.toFixed(4) },
           ei: c.inh > 1e-9 ? +(c.exc / c.inh).toFixed(3) : null, fSat: +c.fSat.toFixed(4),
           readout: { tagged: ro.tags.size, updates: ro.updates, settled: ro.history.length, brier: Number.isFinite(ro.brierSlow) ? +ro.brierSlow.toFixed(4) : null, divergence: +ro.divergence().toFixed(4) },
+          direction: (() => { const d = this.directions().find((x) => x.key === c.key)!; return { horizonSec: d.horizonSec, pUp: +d.pUp.toFixed(4), expMove: +d.expMove.toFixed(2), labelled: d.labelled, brier: d.brier === null ? null : +d.brier.toFixed(4), pending: this.dirTags.get(c.key)?.length ?? 0 }; })(),
         };
       }),
     };
@@ -331,6 +411,14 @@ export class SnnNetwork {
         arrays: Object.fromEntries(Object.entries(c.arrays()).map(([k, a]) => [k, encodeArr(a)])),
         scalars: c.scalars(),
         inputs: this.inputs.get(c.key) ?? null,
+        dir: (() => {
+          const r = this.dirReadouts.get(c.key)!;
+          return {
+            wf: encodeArr(r.wf), ws: encodeArr(r.ws), brierFast: r.brierFast, brierSlow: r.brierSlow, updates: r.updates, history: r.history.slice(-500),
+            tags: (this.dirTags.get(c.key) ?? []).map((t) => ({ ts: t.ts, phi: encodeArr(t.phi), p: t.p, price0: t.price0 })),
+            stats: this.dirStats.get(c.key) ?? null,
+          };
+        })(),
         readout: (() => {
           const r = this.readouts.get(c.key)!;
           return {
@@ -345,7 +433,7 @@ export class SnnNetwork {
   /** Restore a checkpoint (must match the version hash). Columns are recreated in their saved order. */
   restore(cp: SnnCheckpoint): void {
     if (cp.version !== this.version) throw new Error(`SNN checkpoint version ${cp.version} does not match ${this.version}`);
-    this.columns.clear(); this.readouts.clear(); this.inputs.clear();
+    this.columns.clear(); this.readouts.clear(); this.inputs.clear(); this.dirReadouts.clear(); this.dirTags.clear(); this.dirStats.clear();
     for (const col of cp.columns) {
       const c = new Column(col.key, col.asset, this.p, this.columns.size);
       for (const [k, b64] of Object.entries(col.arrays)) copyInto(c.arrays()[k], decodeArr(b64, c.arrays()[k]));
@@ -359,6 +447,15 @@ export class SnnNetwork {
       r.history.splice(0, r.history.length, ...ro.history);
       for (const [t, e] of ro.tags) r.tags.set(t, { kind: e.kind, tags: e.tags.map((g) => ({ phi: decodeArr(g.phi, new Float32Array(c.nFeat)) as Float32Array, p: g.p, ts: g.ts, role: g.role })) });
       this.readouts.set(c.key, r);
+      const dr = new Readout(c.nFeat, { eta: this.p.dirEta, cap: this.p.dirCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: 1, maxTagged: 1, traceTauSec: this.p.traceTauSec, useTags: true });
+      if (col.dir) {
+        copyInto(dr.wf, decodeArr(col.dir.wf, dr.wf)); copyInto(dr.ws, decodeArr(col.dir.ws, dr.ws));
+        dr.brierFast = col.dir.brierFast ?? NaN; dr.brierSlow = col.dir.brierSlow ?? NaN; dr.updates = col.dir.updates;
+        dr.history.splice(0, dr.history.length, ...col.dir.history);
+        this.dirTags.set(c.key, col.dir.tags.map((t) => ({ ts: t.ts, phi: decodeArr(t.phi, new Float32Array(c.nFeat)) as Float32Array, p: t.p, price0: t.price0 })));
+        if (col.dir.stats) this.dirStats.set(c.key, col.dir.stats);
+      } else this.dirTags.set(c.key, []);
+      this.dirReadouts.set(c.key, dr);
     }
     this.lastTs = cp.lastTs; this.steps = cp.steps; this.salience = cp.salience; this.top = cp.top ?? undefined;
     this.wc.clear(); for (const [k, v] of cp.wc) this.wc.set(k, v);
@@ -375,6 +472,7 @@ export class SnnNetwork {
       version: this.version, params: this.p, trainedAt: new Date().toISOString(), notes,
       columns: Object.fromEntries(this.sortedColumns().map((c) => [c.key, Object.fromEntries(trained.map((k) => [k, encodeArr(c.arrays()[k])]))])),
       readouts: Object.fromEntries([...this.readouts].map(([k, r]) => [k, Array.from(r.wf)])),
+      dirReadouts: Object.fromEntries([...this.dirReadouts].map(([k, r]) => [k, Array.from(r.wf)])),
       healthRef: this.health.ref,
     };
   }
@@ -388,6 +486,7 @@ export interface SnnCheckpoint {
   wc: [string, { E: number; I: number }][]; corr?: [string, { ab: number; aa: number; bb: number }][]; health: ReturnType<SnnHealth['state']>; lastTag: [string, number][]; nanRestores?: number;
   columns: {
     key: string; asset: string; arrays: Record<string, string>; scalars: Record<string, number | boolean>; inputs: ColumnInput | null;
+    dir?: { wf: string; ws: string; brierFast: number | null; brierSlow: number | null; updates: number; history: { p: number; y: number; ts: number }[]; tags: { ts: number; phi: string; p: number; price0: number }[]; stats: { absMove: number; n: number } | null };
     readout: { wf: string; ws: string; trace: string; traceTs: number; brierFast: number | null; brierSlow: number | null; updates: number; history: { p: number; y: number; ts: number }[]; tags: [string, { kind: string; tags: { phi: string; p: number; ts: number; role: ThresholdRole }[] }][] };
   }[];
 }

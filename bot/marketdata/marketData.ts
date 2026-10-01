@@ -282,6 +282,11 @@ export class MarketData extends EventEmitter {
     this.recorder.write('dominance', { usdtd: d.usdtd, btcd: d.btcd, covered: d.coveredShare ?? null, ts: d.ts });
   }
 
+  /** Write any event to the research recordings (SNN outputs, tennis scores, ...). */
+  record(kind: string, data: Record<string, unknown>): void {
+    this.recorder.write(kind, data);
+  }
+
   /** Record an official settlement result for research labels. */
   recordResult(ticker: string, result: 'yes' | 'no'): void {
     this.recorder.write('result', { ticker, result });

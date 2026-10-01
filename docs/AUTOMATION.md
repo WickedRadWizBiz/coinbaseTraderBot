@@ -17,26 +17,34 @@ While the bot runs in any mode (paper, shadow or live), it writes every book upd
 
 ### 2. It runs the training pipeline every day
 
-This is `research/pipeline.ts`, run as a low-priority background process so trading isn't slowed down. The steps always run in this order:
+This is `research/pipeline.ts`, run as a low-priority background process so trading isn't slowed down.
+
+**The SNN goes first.** The MLP, perps and tennis models use the SNN's outputs as inputs, so they're trained after it. The steps always run in this order:
 
 | Step | What it does | Output (in `data/models/`) |
 |---|---|---|
-| dataset | Turns the recordings into labelled training rows | `work/dataset.jsonl` |
-| mlp | Trains the MLP meta-model, then backtests it after fees and records the result inside the model file | `model.json` |
+| snn-ablation | Tests SNN stages S0–S6, and the experimental mechanisms against their simpler stand-ins. Runs weekly, or when forced | `work/snn_ablation.json` |
+| snn-train | Trains the SNN at the highest stage whose whole chain passed | `snn_model.json` |
+| snn-backfill | Fills in SNN outputs for recorded minutes that have no live SNN log, one day at a time, picking up where it left off. Built so that no output ever saw its own result | `work/snnfill/` |
+| dataset | Turns the recordings, plus the logged and backfilled SNN outputs, into labelled training rows | `work/dataset.jsonl` |
+| mlp | Trains the MLP fair value and its take/skip head (with SNN feature sets), backtests it after fees, records the result in the model file | `model.json` |
 | vol | Fits the intraday volatility profile | `vol_profile.json` |
-| perps | Trains the perps model, then runs its execution backtest | `perp_model.json` |
-| snn-ablation | Tests SNN stages S0–S6 **against the MLP that was just promoted** | `work/snn_ablation.json` |
-| snn-train | Trains the SNN at the best stage that passed, again against that same MLP | `snn_model.json` |
+| perps | Trains the perps model (with the SNN's 1h/4h direction), then runs its execution backtest | `perp_model.json` |
+| tennis | Trains the tennis MLP (4 signals, score, book, SNN) | `tennis_model.json` |
 
 There's a report for each run in `data/models/reports/` and a log in `data/models/logs/`.
 
-A step with nothing to work on yet is reported as **skipped**, not failed. For example: no perp quotes recorded, or fewer than 8 settlement windows.
+A step with nothing to work on yet is reported as **skipped**, not failed. Examples: no perp quotes recorded, fewer than 8 settlement windows, fewer than 5 settled tennis matches.
 
-### 3. Retraining the MLP re-runs the SNN steps
+### 3. A new SNN retrains the models that read it
 
-- **Inside the pipeline:** the SNN steps always come after the MLP and use the MLP that was just promoted.
-- **If the MLP changes any other way:** say you copy in a model by hand. The bot sees the new `model.json`, notices the SNN was never tested against it, and runs the SNN steps on their own (`--only snn`). Turn this off with `AUTO_TRAIN_ON_MODEL_CHANGE=false`.
-- **The SNN ablation also re-runs weekly** with the same MLP (`AUTO_TRAIN_ABLATION_EVERY_DAYS=7`).
+- **Inside the pipeline:** the MLP, perps and tennis steps always come after the SNN and use its outputs.
+- **If the SNN changes any other way,** for example you drop in a new `snn_model.json`:
+  - The bot swaps it in.
+  - It sees the MLP was trained on the old SNN's outputs.
+  - It reruns `dataset, mlp, perps, tennis` on its own.
+  - Turn this off with `AUTO_TRAIN_ON_MODEL_CHANGE=false`.
+- **A new MLP doesn't retrain the SNN.** The SNN learns from the market, not from the MLP.
 
 ### 4. It hot-swaps new models
 
@@ -47,6 +55,7 @@ About every 30 seconds the bot checks `data/models/` for changed files:
 | `model.json` | The new meta-model trades immediately. The SNN blend history is cleared, because it was recorded against the old model, and α (the SNN's vote) starts again from 0. |
 | `snn_model.json` | A fresh SNN starts from the trained weights. The old one is checkpointed and stopped. |
 | `perp_model.json` | The perps trader switches to the new model. |
+| `tennis_model.json` | The tennis model switches. It only gates entries once validated. |
 | `vol_profile.json` | Applied only if its own validation showed an improvement and `VOL_SEASONALITY=true`. |
 
 A file in `data/models/` always wins over the same file in `params/`. To go back to the `params/` version, delete the file from `data/models/`.
@@ -84,6 +93,7 @@ These can't be automated, or deliberately aren't.
 **1. Keep the bot running so it records data.**
 - Training needs recordings. Expect at least a few days before the MLP trains: it needs 8 or more settlement windows just to try, and about 1,000 before its validation can pass.
 - Perps training needs `PERPS_FEED=true` so perp quotes get recorded.
+- Tennis scores need a Live Tennis API key in `LIVE_TENNIS_API_KEY`. That switches `TENNIS_SCORE_FEED` to `livetennis` automatically. The tennis model needs at least 100 settled matches before it can pass validation.
 
 **2. Flip the "real money" switches yourself, on the server, in `bot.env`. Then restart the bot.**
 - `TRADING_MODE=live`, and its acknowledgement line, for live binaries.

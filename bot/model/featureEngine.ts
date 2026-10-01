@@ -13,7 +13,7 @@
 // hand-set pattern labels, exit-liquidity heuristics. USDT.D/BTC.D and
 // confluence are included as learned inputs (macro / confluence groups).
 
-import type { OrderBook } from '../marketdata/orderBook';
+import { OrderBook } from '../marketdata/orderBook';
 import type { IndexTracker } from '../marketdata/indexTracker';
 import { clamp, logit, normInv, normPdf, studentTCdf } from '../util/num';
 import { kalshiMaintenance, sessionState, usMarketClock, zoneTime } from './sessions';
@@ -28,6 +28,8 @@ import type { TaSnapshot, TfState } from '../ta/analyzer';
 export type FeatureGroup = 'base' | 'micro' | 'momentum' | 'spot' | 'macro' | 'confluence' | 'session' | 'time'
   // Relaxed-cadence catalog (minute windows and slower).
   | 'geometry' | 'vol' | 'kalshi' | 'returns' | 'clock' | 'calendar' | 'interaction' | 'ladder' | 'perp'
+  // Cortex-like SNN outputs (bot/snn): market-direction calls and the contract fair-value bias.
+  | 'snn'
   // TA library on the Coinbase spot USD pair (bot/ta): indicator readings, and rule/confluence scores.
   | 'ta' | 'taconf';
 
@@ -285,7 +287,27 @@ export interface FeatureContext {
   perp?: PerpState;
   /** Coinbase spot candles for this contract's asset (TA library). */
   candles?: CandleSet;
+  /** SNN outputs for this asset: P(up) per direction horizon (minutes), expected signed move in bps,
+   *  and the SNN's P(YES) for this contract. Missing -> features NaN (imputed as the training mean). */
+  snn?: SnnContext;
 }
+
+export interface SnnContext {
+  up?: Partial<Record<15 | 60 | 240, number>>;
+  move?: Partial<Record<15 | 60 | 240, number>>;
+  pContract?: number;
+}
+
+/** Direction horizon matching a contract: 15-minute contracts -> 15, longer (hourly ladders) -> 60. */
+export const snnHorizonFor = (c: { openTime?: number; closeTs?: number; tauSec: number }): 15 | 60 =>
+  (c.openTime && c.closeTs ? (c.closeTs - c.openTime) / 60_000 : c.tauSec / 60) <= 20 ? 15 : 60;
+
+const snnLogit = (p: number | undefined) => (p === undefined || !Number.isFinite(p) ? NA : clip(Math.log(clamp(p, 1e-4, 1 - 1e-4) / (1 - clamp(p, 1e-4, 1 - 1e-4))), 6));
+const snnMoveZ = (c: FeatureContext, h: 15 | 60 | 240) => {
+  const m = c.snn?.move?.[h];
+  if (m === undefined || !Number.isFinite(m) || !(c.sigmaPerSqrtSec > 0)) return NA;
+  return clip(m / 1e4 / (c.sigmaPerSqrtSec * Math.sqrt(h * 60)), 5);
+};
 
 type Fn = (c: FeatureContext, cache: Cache) => number;
 interface Cache { idx: Map<number, number[] | undefined>; spot: Map<number, number[] | undefined>; memo: Map<string, number>; ta?: TaSnapshot | null }
@@ -752,6 +774,16 @@ export const FEATURES: Record<string, { group: FeatureGroup; description: string
   min_to_funding: { group: 'perp', tier: 'T2', description: 'minutes to the next funding payment', fn: (c) => { const t = c.perp?.latest?.nextFundingTs; return t === undefined ? NA : clamp((t - c.now) / 60_000, 0, 480); } },
   perp_oi_chg_1h: { group: 'perp', tier: 'T2', description: 'log change in perp open interest over 1 h', fn: (c) => { const s = c.perp?.oi.series(c.now, 3600, 120_000); return s && s[0] > 0 ? clip(Math.log(s[s.length - 1] / s[0]), 5) : NA; } },
 
+  // O. Cortex-like SNN (bot/snn): direction calls learned continuously from realised moves, and its
+  // fair-value bias for this contract. Logged live; research reads the logs (or a prequential replay).
+  snn_up_15m: { group: 'snn', tier: 'T2', description: 'SNN P(index up in 15 min), as log-odds', fn: (c) => snnLogit(c.snn?.up?.[15]) },
+  snn_up_1h: { group: 'snn', tier: 'T2', description: 'SNN P(index up in 1 h), as log-odds', fn: (c) => snnLogit(c.snn?.up?.[60]) },
+  snn_up_4h: { group: 'snn', tier: 'T2', description: 'SNN P(index up in 4 h), as log-odds', fn: (c) => snnLogit(c.snn?.up?.[240]) },
+  snn_up_h: { group: 'snn', tier: 'T2', description: "SNN P(up) over this contract's horizon, as log-odds", fn: (c) => snnLogit(c.snn?.up?.[snnHorizonFor(c)]) },
+  snn_move_h_z: { group: 'snn', tier: 'T2', description: "SNN expected signed move over this contract's horizon, sigma-scaled", fn: (c) => snnMoveZ(c, snnHorizonFor(c)) },
+  snn_bias: { group: 'snn', tier: 'T2', description: 'SNN fair-value bias: logit(p_snn) - logit(fair value) for this contract', fn: (c) => { const a = snnLogit(c.snn?.pContract), b = snnLogit(c.fairValue); return Number.isFinite(a) && Number.isFinite(b) ? clip(a - b, 6) : NA; } },
+  snn_dir_agree: { group: 'snn', tier: 'T2', description: "+1 when the SNN direction over the contract's horizon agrees with the fair value's side, -1 when it disagrees", fn: (c) => { const u = c.snn?.up?.[snnHorizonFor(c)]; return u === undefined || !Number.isFinite(u) ? NA : Math.sign(u - 0.5) * Math.sign(c.fairValue - 0.5); } },
+
   // N. Interactions (kept only if ablation proves them; trees find most on their own).
   gap_x_spread: { group: 'interaction', tier: 'T1', description: 'logit_gap x spread (cents): a disagreement is tradable only where the spread is tight', fn: (c) => { const b = c.book.bestBid(), a = c.book.bestAsk(); return b && a ? clip(logitGap(c) * (a.price - b.price) * 100, 50) : NA; } },
   d2_x_log_tau: { group: 'interaction', tier: 'T1', description: 'd2 x log(tau): strike distance means different things at 3 vs 50 minutes', fn: (c) => (hasGeometry(c) ? clip(c.d2! * Math.log(Math.max(1, c.tauSec)), 50) : NA) },
@@ -838,6 +870,16 @@ export const ALL_FEATURES = Object.keys(FEATURES);
 export const featuresInGroups = (groups: FeatureGroup[]) => ALL_FEATURES.filter((n) => groups.includes(FEATURES[n].group));
 
 /** Compute every registered feature. Values are finite numbers or NaN. */
+/** Asset-level features (no contract): the context the SNN's crypto columns and the perps read. */
+export function assetFeatureMap(asset: string, now: number, s: { index?: IndexTracker; spot?: IndexTracker; bars?: BarStore; candles?: CandleSet; usdtd?: IndexTracker; btcd?: IndexTracker; perp?: PerpState; snn?: SnnContext }): Record<string, number> {
+  const vol = s.index?.vol();
+  return computeFeatureMap({
+    now, fairValue: 0.5, mid: 0.5, tauSec: 3600, sigmaPerSqrtSec: vol?.sigmaPerSqrtSec ?? NaN, referenceSigma: vol?.sigmaPerSqrtSec ?? NaN,
+    inWindow: false, book: ASSET_BOOK, index: s.index!, spot: s.spot, asset, usdtd: s.usdtd, btcd: s.btcd, bars: s.bars, candles: s.candles, perp: s.perp, snn: s.snn,
+  });
+}
+const ASSET_BOOK = new OrderBook('asset-context');
+
 export function computeFeatureMap(c: FeatureContext): Record<string, number> {
   const cache: Cache = { idx: new Map(), spot: new Map(), memo: new Map() };
   const out: Record<string, number> = {};

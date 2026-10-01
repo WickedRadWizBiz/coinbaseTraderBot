@@ -34,8 +34,11 @@ import type { BinaryExposure, DirectionalContext, PerpHedger } from './perps/hed
 import type { PerpTrader } from './perps/perpTrader';
 import { decideMatch, MatchTracker, type MatchMarket } from './tennis/tennisStrategy';
 import { parseTennisScore } from './tennis/liveScore';
+import { diffScore, findMatch, toTennisScore, type LiveTennisMatch, type TennisScoreClient } from './tennis/liveTennisApi';
+import { tennisFairInputs, type TennisFairModel } from './tennis/tennisFair';
 import type { TennisScore } from './tennis/tennisModel';
 import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
+import { applyTakeGate } from './model/takeModel';
 import { effectiveSigma, type VolProfile } from './model/volSeasonality';
 import { floorCount } from './util/num';
 import { evThresholds } from './sizing/kelly';
@@ -46,7 +49,10 @@ import type { Vault } from './vault/vault';
 import { writeJsonAtomic } from './util/persist';
 import type { SnnBlender, TargetScaler } from './snn/blender';
 import type { SnnHost } from './snn/host';
-import type { ColumnInput, ContractQuery, ContractScore } from './snn/network';
+import type { ColumnInput, ContractQuery, ContractScore, DirectionPred } from './snn/network';
+import { CRYPTO_HORIZONS, cryptoColumnKey, cryptoValues, tennisColumnKey, tennisSnapshotValues, type CryptoHorizon } from './snn/inputs';
+import { assetFeatureMap, type SnnContext } from './model/featureEngine';
+import { logit as logitP } from './util/num';
 import type { StepReply } from './snn/runtime';
 import { logger } from './util/log';
 
@@ -98,9 +104,10 @@ export interface MarketStatus {
   updatedTs: number;
 }
 
-/** SNN column key of a market: asset x horizon (e.g. BTC-15m, ETH-60m). */
+/** SNN column key of a contract: asset x direction horizon (15-minute contracts -> BTC-15m, hourly
+ *  ladders -> BTC-60m). The 240m column serves the perps. */
 export function snnColumn(m: { asset: string; openTime: number; closeTime: number }): string {
-  return `${m.asset}-${Math.round((m.closeTime - m.openTime) / 60_000)}m`;
+  return cryptoColumnKey(m.asset, (m.closeTime - m.openTime) / 60_000 <= 20 ? 15 : 60);
 }
 
 export interface EngineDeps {
@@ -135,6 +142,10 @@ export interface EngineDeps {
   clock?: ClockSkewMonitor;
   /** Stage 3 directional perp trading (targets combined with the hedge by the executor). */
   perpTrader?: PerpTrader;
+  /** Live Tennis API client (TENNIS_SCORE_FEED=livetennis). */
+  tennisScores?: TennisScoreClient;
+  /** Tennis MLP (fair P(A wins)); gates tennis entries once validated. */
+  tennisFair?: TennisFairModel;
   /** Cortex-like SNN (bot/snn): worker host, blender with earned alpha, conservative target scaler. */
   snn?: { host: SnnHost; blender: SnnBlender; scaler: TargetScaler };
   /** Where the blender's settled (p_model, p_snn) history is saved (survives restarts). */
@@ -158,7 +169,14 @@ export class Engine {
 
   private lastSettleTs = 0;
   // SNN: L0 inputs observed during the last tick (one ATM contract per column), the latest readout.
-  private readonly snnObs = new Map<string, { input: ColumnInput; absD: number; ts: number }>();
+  /** Closest-to-the-money Kalshi contract per crypto column (its book feeds the column's contract channels). */
+  private readonly snnObs = new Map<string, { contract: { dAtm?: number; tauFrac?: number; mid?: number; spread?: number; imbalance?: number }; absD: number; ts: number }>();
+  /** Tennis columns: latest input and contract query per live match. */
+  private readonly snnTennis = new Map<string, { input: ColumnInput; query: ContractQuery; ts: number }>();
+  /** Latest direction calls by column key. */
+  readonly snnDirs = new Map<string, DirectionPred>();
+  private snnLastLog = 0;
+  private readonly snnAssetCache = new Map<string, { ts: number; f: Record<string, number> }>();
   private snnScores = new Map<string, ContractScore>();
   private snnReply: StepReply | undefined;
   private snnLastAlert = 0;
@@ -467,8 +485,8 @@ export class Engine {
   private readonly matches = new Map<string, MatchTracker>();
   private lastTennisTick = 0;
   /** Live tennis scores (TENNIS_SCORE_FEED=kalshi): milestone per event, last poll, raw payload. */
-  private readonly scores = new Map<string, { milestone?: { id: string; type: string } | null; polledTs: number; score?: TennisScore; raw?: unknown; error?: string }>();
-  readonly tennisStatus = new Map<string, { event: string; phase: string; pA?: number; progress: number; progressDetail?: Record<string, unknown>; score?: TennisScore; scoreRaw?: unknown; liveSince?: number; notes: string[]; tickers: string[]; updatedTs: number; trailingStops?: Record<string, number>; confluence?: Record<string, unknown> }>();
+  private readonly scores = new Map<string, { milestone?: { id: string; type: string } | null; polledTs: number; score?: TennisScore; raw?: unknown; error?: string; pAtPoll?: number; prev?: LiveTennisMatch; breaks?: [number, number]; breaksTotal?: [number, number] }>();
+  readonly tennisStatus = new Map<string, { event: string; phase: string; fairA?: number; pA?: number; progress: number; progressDetail?: Record<string, unknown>; score?: TennisScore; scoreRaw?: unknown; liveSince?: number; notes: string[]; tickers: string[]; updatedTs: number; trailingStops?: Record<string, number>; confluence?: Record<string, unknown> }>();
 
   /** Tennis budget use: worst-case loss of all tennis positions + resting orders vs the 25% cap. */
   tennisBudget(): { used: number; cap: number; bankroll: number } {
@@ -497,6 +515,38 @@ export class Engine {
     } catch (e) {
       st.error = `score feed: ${(e as Error).message}`;
     }
+    return st;
+  }
+
+  /** Live Tennis API (free tier: 100 calls/day): one slate call covers every match, so it is only
+   *  refreshed when this match's price moved >= liveMoveCents since its last score, after
+   *  scoreIdleMin, or (exit priority) every 5 min while we hold a position. Never throws. */
+  private async pollLiveTennis(event: string, now: number, ms: { title?: string }[], pA: number | undefined, holding: boolean) {
+    const T = this.d.cfg.tennis;
+    const client = this.d.tennisScores;
+    let st = this.scores.get(event);
+    if (!st) { st = { polledTs: 0 }; this.scores.set(event, st); }
+    if (!client) { st.error = 'TENNIS_SCORE_FEED=livetennis but LIVE_TENNIS_API_KEY is not set'; return st; }
+    const moved = pA !== undefined && st.pAtPoll !== undefined && Math.abs(pA - st.pAtPoll) >= T.liveMoveCents - 1e-9;
+    const idle = now - st.polledTs >= T.scoreIdleMin * 60_000;
+    const exitDue = holding && now - st.polledTs >= 5 * 60_000;
+    const cached = client.cached();
+    const fresh = cached && cached.at > st.polledTs;
+    if (!(moved || idle || exitDue || !st.polledTs || fresh)) return st;
+    const slate = fresh ? cached!.matches : await client.getLiveSlate(holding ? 'exit' : 'normal');
+    st.polledTs = now; st.pAtPoll = pA;
+    if (!slate) { st.error = `live tennis: no slate (${client.lastError ?? 'budget exhausted or no live matches'}; ${client.usage().callsToday}/${client.usage().dailyLimit} calls today)`; return st; }
+    const hit = findMatch(slate, ms[0]?.title ?? '', ms[1]?.title);
+    if (!hit) { st.error = 'live tennis: match not found in the live slate (names did not match the Kalshi titles)'; return st; }
+    const score = toTennisScore(hit.match, hit.flip);
+    if (st.prev && st.prev.id === hit.match.id) {
+      const d = diffScore(st.prev, hit.match);
+      const b: [number, number] = hit.flip ? [d.breaks[1], d.breaks[0]] : d.breaks;
+      st.breaks = b;
+      st.breaksTotal = [(st.breaksTotal?.[0] ?? 0) + b[0], (st.breaksTotal?.[1] ?? 0) + b[1]];
+    }
+    st.prev = hit.match; st.raw = hit.match; st.score = score; st.error = score ? undefined : 'live tennis: score not recognised';
+    if (score) this.d.md.record('tennis_score', { event, ...score, tiebreak: hit.match.is_tiebreak, breaks: st.breaks ?? null, breaksTotal: st.breaksTotal ?? null, matchId: hit.match.id });
     return st;
   }
 
@@ -536,11 +586,16 @@ export class Engine {
         };
       });
       const totals = this.riskTotals(0, event);
-      const sc = T.scoreFeed === 'kalshi' ? await this.pollScore(event, now) : undefined;
-      const out = decideMatch(tracker, { event, now, startTime: ms.find((m) => m.startTime)?.startTime, markets, closeTime: Math.min(...ms.map((m) => m.closeTime)), score: sc?.score }, T,
+      const sc = T.scoreFeed === 'kalshi' ? await this.pollScore(event, now)
+        : T.scoreFeed === 'livetennis' ? await this.pollLiveTennis(event, now, ms, MatchTracker.probability(markets), markets.some((x) => x.position !== 0))
+        : undefined;
+      // Tennis SNN column inputs and the tennis MLP's fair value (it decides whether an entry is worth taking).
+      const tv = this.snnTennisObserve(event, ms, markets, tracker, sc, now);
+      const fairA = this.tennisFairFor(event, tv, ms[0].ticker);
+      const out = decideMatch(tracker, { event, now, startTime: ms.find((m) => m.startTime)?.startTime, markets, closeTime: Math.min(...ms.map((m) => m.closeTime)), score: sc?.score, fairA }, T,
         { bankroll, tennisRisk: totals.total, matchRisk: totals.window }, ms[0].tickSize);
       const notes = [...out.notes, ...(tradeable ? [] : ['tracking only: set TENNIS_LIVE=true to trade tennis with real money'])];
-      this.tennisStatus.set(event, { event, phase: out.phase, pA: MatchTracker.probability(markets), progress: tracker.progress(now, markets), progressDetail: tracker.progressDetail(now, markets), score: tracker.score, scoreRaw: sc?.raw ?? sc?.error, liveSince: tracker.liveSince, notes, tickers: ms.map((m) => m.ticker), updatedTs: now, trailingStops: Object.fromEntries(tracker.stops), confluence: Object.fromEntries(tracker.signals) });
+      this.tennisStatus.set(event, { event, phase: out.phase, fairA, pA: MatchTracker.probability(markets), progress: tracker.progress(now, markets), progressDetail: tracker.progressDetail(now, markets), score: tracker.score, scoreRaw: sc?.raw ?? sc?.error, liveSince: tracker.liveSince, notes, tickers: ms.map((m) => m.ticker), updatedTs: now, trailingStops: Object.fromEntries(tracker.stops), confluence: Object.fromEntries(tracker.signals) });
 
       // Reconcile resting tennis orders with the plan (never touch another market's orders).
       const plans = tradeable ? out.plans : [];
@@ -566,7 +621,9 @@ export class Engine {
         await this.placeChecked(m, plan, fairValue, decisionId, { event });
       }
     }
-    for (const ev of this.matches.keys()) if (!byEvent.has(ev)) { this.matches.delete(ev); this.tennisStatus.delete(ev); }
+    const ended: string[] = [];
+    for (const ev of this.matches.keys()) if (!byEvent.has(ev)) { this.matches.delete(ev); this.tennisStatus.delete(ev); if (this.snnTennis.delete(ev)) ended.push(tennisColumnKey(ev)); }
+    if (ended.length) void this.d.snn?.host.remove(ended);
   }
 
   /** Directional perp targets for the executor, or undefined without a trader. `halt` flattens. */
@@ -599,13 +656,36 @@ export class Engine {
 
   // ---- Cortex-like SNN (bot/snn) ---------------------------------------------------------
 
-  /** Advance the SNN clock with last tick's inputs and score every active contract (one batched,
-   *  200 ms-bounded request). Timeouts and errors leave no scores: the blend uses alpha = 0. */
+  /** Advance the SNN clock and score every active contract (one batched, 200 ms-bounded request).
+   *  Every crypto column (asset x 15m/60m/240m) is fed EVERY second from asset-level data (TA library
+   *  on the spot pair, perp, returns) whether or not anything trades, so the direction heads keep
+   *  learning around the clock; Kalshi contract channels come from last tick's closest-to-the-money
+   *  contract. Tennis columns are fed by the tennis loop. Timeouts leave no scores (alpha = 0). */
   private async snnTick(): Promise<void> {
     const snn = this.d.snn;
     if (!snn) return;
     const { md, cfg } = this.d;
     const now = this.now();
+    const inputs: ColumnInput[] = [];
+    const assets = new Set<string>([...Object.values(cfg.indexIdMap), ...md.activeMarkets(now).filter((m) => m.kind !== 'match').map((m) => m.asset)]);
+    for (const asset of [...assets].sort()) {
+      const idx = md.index.get(asset);
+      const px = idx?.fresh(now, Math.max(cfg.risk.maxIndexAgeMs, 30_000))?.value;
+      if (!idx || !px) continue;
+      // Asset-level features every 5 s (TA is on closed candles; same cadence as research replay).
+      let ac = this.snnAssetCache.get(asset);
+      if (!ac || now - ac.ts >= 5_000) {
+        ac = { ts: now, f: assetFeatureMap(asset, now, { index: idx, spot: md.spot.get(asset), bars: md.features.bars.get(asset), candles: md.features.candles.get(asset), usdtd: md.usdtd, btcd: md.btcd, perp: md.features.perps.get(asset) }) };
+        this.snnAssetCache.set(asset, ac);
+      }
+      const f = ac.f;
+      for (const h of CRYPTO_HORIZONS) {
+        const key = cryptoColumnKey(asset, h);
+        const ob = this.snnObs.get(key);
+        const contract = ob && now - ob.ts < 10_000 ? ob.contract : undefined;
+        inputs.push({ key, asset, price: px, mid: contract?.mid, values: cryptoValues(h as CryptoHorizon, f, contract) });
+      }
+    }
     const queries: ContractQuery[] = [];
     for (const m of md.activeMarkets(now)) {
       if (m.kind === 'match') continue;
@@ -618,13 +698,22 @@ export class Engine {
         tauSec, lifeSec: (m.closeTime - m.openTime) / 1000, eventKey: `${m.asset}:${m.closeTime}`, tag: tauSec > cfg.risk.noEntryBeforeCloseSec,
       });
     }
-    const inputs = [...this.snnObs.values()].filter((o) => now - o.ts < 10_000).map((o) => o.input);
+    for (const t of this.snnTennis.values()) if (now - t.ts < 15_000) { inputs.push(t.input); queries.push(t.query); }
     const r = await snn.host.stepAndScore(now, inputs, queries);
     this.snnReply = r;
     this.snnScores = new Map((r?.scores ?? []).map((s) => [s.ticker, s]));
+    for (const d of r?.directions ?? []) this.snnDirs.set(d.key, d);
     if (r && r.scores.length) {
       const n = r.scores.length;
       snn.scaler.update(now, r.scores.reduce((a, s) => a + s.surprise, 0) / n, r.scores.reduce((a, s) => a + s.surprise0, 0) / n, r.scores.reduce((a, s) => a + s.G, 0) / n);
+    }
+    // Log the SNN's calls with the data stream: research and the MLP learn from them.
+    if (r && now - this.snnLastLog >= 60_000) {
+      this.snnLastLog = now;
+      md.record('snn', {
+        dirs: r.directions.map((d) => [d.key, +d.pUp.toFixed(5), +d.expSignedMove.toFixed(3), d.labelled]),
+        c: Object.fromEntries(r.scores.map((s) => [s.ticker, +s.p.toFixed(5)])),
+      });
     }
     if (r?.alerts.length && now - this.snnLastAlert > 3_600_000) {
       this.snnLastAlert = now;
@@ -633,14 +722,52 @@ export class Engine {
     }
   }
 
-  /** Remember this market's L0 inputs for the next SNN step (the closest-to-the-money contract per column). */
-  private snnObserve(m: ActiveMarket, input: Omit<ColumnInput, 'key' | 'asset'>, now: number): void {
+  /** SNN outputs for an asset (and a contract): direction calls per horizon and p_snn. Fed to the
+   *  MLP's features and to the perps trader. */
+  snnContext(asset: string, ticker?: string): SnnContext | undefined {
+    if (!this.d.snn) return undefined;
+    const up: SnnContext['up'] = {}, move: SnnContext['move'] = {};
+    for (const h of CRYPTO_HORIZONS) {
+      const d = this.snnDirs.get(cryptoColumnKey(asset, h));
+      if (d) { up[h] = d.pUp; move[h] = d.expSignedMove; }
+    }
+    return { up, move, pContract: ticker ? this.snnScores.get(ticker)?.p : undefined };
+  }
+
+  /** Tennis column inputs for one match (oriented to player A = the event's first market): the four
+   *  confluence signals with magnitudes, the live score, progress, the score model, the book; and
+   *  the contract query for P(A wins). */
+  /** Tennis MLP fair P(A wins) (validated models only; otherwise undefined and the rules decide). */
+  private tennisFairFor(event: string, tv: Record<string, number | undefined> | undefined, tickerA: string): number | undefined {
+    const m = this.d.tennisFair;
+    if (!m?.validated || !tv) return undefined;
+    const p = m.predict(tennisFairInputs(tv, { p: this.snnScores.get(tickerA)?.p, up: this.snnDirs.get(tennisColumnKey(event))?.pUp }));
+    return Number.isFinite(p) ? p : undefined;
+  }
+
+  setTennisFair(m: TennisFairModel | undefined): void { this.d.tennisFair = m; }
+
+  private snnTennisObserve(event: string, ms: ActiveMarket[], markets: MatchMarket[], tracker: MatchTracker, sc: { score?: TennisScore; raw?: unknown; breaksTotal?: [number, number] } | undefined, now: number): Record<string, number | undefined> | undefined {
+    const values = tennisSnapshotValues(tracker, markets, now, this.d.cfg.tennis, { tiebreak: (sc?.raw as { is_tiebreak?: boolean } | undefined)?.is_tiebreak, breaksTotal: sc?.breaksTotal });
+    if (!values || !this.d.snn) return values;
+    const key = tennisColumnKey(event);
+    const pA = values.mid!;
+    const dP = values.modelPA ?? pA;
+    this.snnTennis.set(event, {
+      input: { key, asset: 'TENNIS', price: pA, values }, ts: now,
+      query: { ticker: ms[0].ticker, column: key, kind: 'match', d: logitP(Math.min(0.99, Math.max(0.01, dP))), lifeFrac: 1 - (values.progress ?? 0), spot: 0, sigma: 0, tauSec: 0, lifeSec: 0, eventKey: ms[0].ticker, tag: true },
+    });
+    return values;
+  }
+
+  /** Remember this market's book for its column's contract channels (closest-to-the-money contract). */
+  private snnObserve(m: ActiveMarket, contract: { dAtm?: number; tauFrac?: number; mid?: number; spread?: number; imbalance?: number }, now: number): void {
     if (!this.d.snn || (m.kind !== 'updown' && m.kind !== 'greater')) return;
     const key = snnColumn(m);
-    const absD = Number.isFinite(input.dAtm) ? Math.abs(input.dAtm!) : Infinity;
+    const absD = Number.isFinite(contract.dAtm) ? Math.abs(contract.dAtm!) : Infinity;
     const prev = this.snnObs.get(key);
     if (prev && now - prev.ts < 1000 && prev.absD <= absD) return;
-    this.snnObs.set(key, { input: { key, asset: m.asset, ...input }, absD, ts: now });
+    this.snnObs.set(key, { contract, absD, ts: now });
   }
 
   /** p_final = (1 - alpha c) p_model + alpha c p_snn in blend mode; otherwise p_model (SNN logged only). */
@@ -713,7 +840,9 @@ export class Engine {
     const snn = this.d.snn;
     if (!snn) return { mode: 'off' };
     const e = snn.blender.alpha();
-    return { mode: this.d.cfg.snn.mode, stage: this.d.cfg.snn.stage, alpha: e.alpha, events: e.events, reason: e.reason, shadow: this.snnReply?.shadow ?? true, top: this.snnReply?.top ?? null, p99Ms: +snn.host.p99().toFixed(1), targetScale: snn.scaler.scale };
+    const dirs = [...this.snnDirs.values()].filter((d) => d.kind === 'crypto').sort((x, y) => x.key.localeCompare(y.key))
+      .map((d) => ({ key: d.key, pUp: +d.pUp.toFixed(3), labelled: d.labelled, brier: d.brier === null ? null : +d.brier.toFixed(4) }));
+    return { mode: this.d.cfg.snn.mode, stage: this.d.cfg.snn.stage, alpha: e.alpha, events: e.events, reason: e.reason, shadow: this.snnReply?.shadow ?? true, top: this.snnReply?.top ?? null, p99Ms: +snn.host.p99().toFixed(1), targetScale: snn.scaler.scale, dirs, takeGate: this.d.model.params.take?.validation ?? null };
   }
 
   /** SNN state for the dashboard. */
@@ -814,14 +943,12 @@ export class Engine {
       bars: md.features.bars.get(m.asset), openTime: m.openTime, calendar: this.d.calendar,
       ticker: m.ticker, siblings: m.kind === 'updown' ? undefined : ladderQuotes(md.markets.values(), (t) => md.books.get(t), m.asset, m.closeTime),
       perp: md.features.perps.get(m.asset), candles: md.features.candles.get(m.asset),
+      snn: this.snnContext(m.asset, m.ticker),
     });
     const pred = model.predictDetailed(features, fv.pYes);
     const pMarket = model.marketProbability(mid);
     // SNN: feed this market's encodings to the next 1 s step, then blend (alpha = 0 unless earned).
-    this.snnObserve(m, {
-      spot: spot.value, mid, spread: ask.price - bid.price, imbalance: features.imbalance, dAtm: fv.d2, tauFrac: tauSec / Math.max(1, (m.closeTime - m.openTime) / 1000),
-      rsi: Number.isFinite(features.rsi_14_1m) ? 50 + 50 * features.rsi_14_1m : undefined, retZ: features.ret_5m_z,
-    }, now);
+    this.snnObserve(m, { mid, spread: ask.price - bid.price, imbalance: features.imbalance, dAtm: fv.d2, tauFrac: tauSec / Math.max(1, (m.closeTime - m.openTime) / 1000) }, now);
     const pYes = this.snnBlend(m, st, pred.p, tauSec > R.noEntryBeforeCloseSec, now);
     const why = explain(model, features, fv.pYes);
     st.modelShift = why.shiftFromFairValue;
@@ -926,6 +1053,8 @@ export class Engine {
     };
     st.q = decisionProbability(view, strat);
     const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode, entries: Boolean(reason) });
+    // The MLP decides whether each entry is worth taking (take/skip head, once validated).
+    if (S.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: S.takeMargin });
     plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
     if (kellyScale < 1) plan.notes.push(`drawdown: Kelly x${kellyScale.toFixed(2)}`);
     for (const g of guards) plan.notes.push(g);

@@ -122,6 +122,10 @@ export interface StrategyConfig {
   /** Apply a fitted, validated intraday volatility profile to fair value. */
   volSeasonality: boolean;
   volProfilePath: string;
+  /** MLP take/skip head: 'validated' gates entries once its held-out check passed; 'off' never. */
+  takeGate: 'validated' | 'off';
+  /** Extra P(win) required above a trade's break-even (price + fee). */
+  takeMargin: number;
 }
 
 export interface Config {
@@ -269,7 +273,9 @@ export interface TennisConfig {
   serveBase: number;
   progressInfoWeight: number;
   qvSampleSec: number;
-  scoreFeed: 'off' | 'kalshi';
+  scoreFeed: 'off' | 'kalshi' | 'livetennis';
+  /** livetennis: refresh a match's score when its price moved this much since the last score, or after this many minutes. */
+  scoreIdleMin: number;
   scorePollSec: number;
   /** In-play detection from price action when no start time is published: a mid move of this size within 3 minutes. */
   liveMoveCents: number;
@@ -304,6 +310,11 @@ export interface TennisConfig {
    * progress sell at the bid regardless (0 = off). */
   underdogLateProgress: number;
   underdogCutProgress: number;
+  /** Tennis MLP (fair P(win) from the 4 signals, score, book and SNN): when validated, entries need
+   *  fair - price >= this. */
+  fairMinEdge: number;
+  /** Tennis MLP file (research:tennis-train). */
+  modelPath: string;
 }
 
 export interface PerpsConfig {
@@ -577,6 +588,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     huntTransitionBufferMin: num(env, 'HUNT_TRANSITION_BUFFER_MIN', 10, 0, 120),
     volSeasonality: bool(env, 'VOL_SEASONALITY', true),
     volProfilePath: path.resolve(env.VOL_PROFILE_PATH ?? './params/vol_profile.json'),
+    takeGate: oneOf(env, 'TAKE_GATE', 'validated', ['validated', 'off'] as const),
+    takeMargin: num(env, 'TAKE_MARGIN', 0, 0, 0.2),
   };
 
   const dataDir = path.resolve(env.DATA_DIR ?? './data');
@@ -747,7 +760,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       serveBase: num(env, 'TENNIS_SERVE_BASE', 0.64, 0.5, 0.8),
       progressInfoWeight: num(env, 'TENNIS_PROGRESS_INFO_WEIGHT', 0.5, 0, 1),
       qvSampleSec: num(env, 'TENNIS_QV_SAMPLE_SEC', 30, 5, 600),
-      scoreFeed: oneOf(env, 'TENNIS_SCORE_FEED', 'off', ['off', 'kalshi'] as const),
+      scoreFeed: oneOf(env, 'TENNIS_SCORE_FEED', env.LIVE_TENNIS_API_KEY ? 'livetennis' : 'off', ['off', 'kalshi', 'livetennis'] as const),
+      scoreIdleMin: num(env, 'TENNIS_SCORE_IDLE_MIN', 30, 1, 24 * 60),
       scorePollSec: num(env, 'TENNIS_SCORE_POLL_SEC', 15, 5, 300),
       liveMoveCents: num(env, 'TENNIS_LIVE_MOVE_CENTS', 0.03, 0.005, 0.5),
       trail: bool(env, 'TENNIS_TRAIL', true),
@@ -770,6 +784,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       earlyFullSizeMin: num(env, 'TENNIS_EARLY_FULL_SIZE_MIN', 10, 0, 240),
       underdogLateProgress: num(env, 'TENNIS_UNDERDOG_LATE_PROGRESS', 0.35, 0, 1),
       underdogCutProgress: num(env, 'TENNIS_UNDERDOG_CUT_PROGRESS', 0.6, 0, 1),
+      fairMinEdge: num(env, 'TENNIS_FAIR_MIN_EDGE', 0.01, -0.5, 0.5),
+      modelPath: path.resolve(env.TENNIS_MODEL_PATH ?? './params/tennis_model.json'),
     },
   };
   return deepFreeze(cfg);

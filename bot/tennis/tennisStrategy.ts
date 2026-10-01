@@ -60,6 +60,16 @@ export interface MatchSnapshot {
   closeTime: number;
   /** Live score, when a score feed is configured (TENNIS_SCORE_FEED). */
   score?: TennisScore;
+  /** Tennis MLP fair P(player A wins), present only when that model is validated. */
+  fairA?: number;
+}
+
+/** The tennis MLP decides whether an entry is worth taking: our player's fair P(win) must clear the
+ *  buy price by fairMinEdge. Undefined = no validated model (the rules decide alone). */
+function fairBlocks(s: MatchSnapshot, m: MatchMarket, px: number, cfg: TennisConfig): string | undefined {
+  if (s.fairA === undefined) return undefined;
+  const fair = m === s.markets[0] ? s.fairA : 1 - s.fairA;
+  return fair - px < cfg.fairMinEdge - 1e-12 ? `tennis model: fair ${fair.toFixed(3)} - price ${px.toFixed(2)} < ${cfg.fairMinEdge}` : undefined;
 }
 
 export interface TennisPlan {
@@ -427,9 +437,11 @@ export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig
       const early = minIn <= cfg.earlyFullSizeMin ? 1 : Math.max(0.5, 1 - (0.5 * (minIn - cfg.earlyFullSizeMin)) / span);
       const px = makerBid(m.quote, tick, cfg.maxSpread);
       const n = px ? Math.floor(tennisSize(px, cfg, budget) * early * 100) / 100 : 0;
+      const fairNo = px ? fairBlocks(s, m, px, cfg) : undefined;
       if (sig.score < need) notes.push(`underdog entry waits for confluence: ${sig.score}/4 < ${need} (${pre ? 'pre-match' : 'live'})`);
       else if (!px) notes.push('underdog book too wide or one-sided');
       else if (n <= 0) notes.push('tennis budget exhausted');
+      else if (fairNo) notes.push(`underdog entry skipped: ${fairNo}`);
       else {
         t.underdogTicker = m.ticker;
         plans.push({ ticker: m.ticker, side: 'bid', price: px, count: n, postOnly: true, reduceOnly: false, timeInForce: 'good_till_canceled', leg: 'underdog_entry', why: `underdog ${pU.toFixed(2)} vs favorite ${(1 - pU).toFixed(2)}, confluence ${sig.score}/4, ${pre ? 'pre-match' : `${minIn.toFixed(0)} min in`}${early < 1 ? `, size x${early.toFixed(2)}` : ''}` });
@@ -468,9 +480,11 @@ export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig
       t.signals.set(m.ticker, sig);
       const px = makerBid(m.quote, tick, cfg.maxSpread);
       const n = px ? tennisSize(px, cfg, budget) : 0;
+      const fairNo = px ? fairBlocks(s, m, px, cfg) : undefined;
       if (sig.score < cfg.favEntryMinSignals) notes.push(`favorite entry waits for confluence: ${sig.score}/4 < ${cfg.favEntryMinSignals}`);
       else if (!px) notes.push('leader book too wide or one-sided');
       else if (n <= 0) notes.push('tennis budget exhausted');
+      else if (fairNo) notes.push(`favorite entry skipped: ${fairNo}`);
       else plans.push({ ticker: m.ticker, side: 'bid', price: px, count: n, postOnly: true, reduceOnly: false, timeInForce: 'good_till_canceled', leg: 'fav_entry', why: `leader ${pL.toFixed(2)} at ${(t.progress(s.now, s.markets) * 100).toFixed(0)}% of the match` });
     }
   }

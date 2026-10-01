@@ -1,17 +1,18 @@
 // Message handler that owns all SNN state. Runs inside the worker thread (bot/snn/worker.ts) or,
 // as a fallback, in-process. The main thread never touches network state directly.
 
-import { SnnNetwork, type ColumnInput, type ContractQuery, type ContractScore, type SnnCheckpoint, type SnnModelFile } from './network';
+import { SnnNetwork, type ColumnInput, type ContractQuery, type ContractScore, type DirectionPred, type SnnCheckpoint, type SnnModelFile } from './network';
 import type { SnnParams } from './params';
 
 export type SnnRequest =
   | { id: number; type: 'init'; params: SnnParams; whitelist?: string[]; model?: SnnModelFile; checkpoint?: SnnCheckpoint }
   | { id: number; type: 'step'; now: number; inputs: ColumnInput[]; queries: ContractQuery[] }
   | { id: number; type: 'settle'; ticker: string; result: 'yes' | 'no'; now: number }
+  | { id: number; type: 'remove'; keys: string[] }
   | { id: number; type: 'checkpoint' }
   | { id: number; type: 'status' };
 
-export interface StepReply { scores: ContractScore[]; salience: Record<string, number>; top?: string; shadow: boolean; freezeLearning: boolean; alerts: string[]; steps: number; computeMs: number }
+export interface StepReply { scores: ContractScore[]; directions: DirectionPred[]; salience: Record<string, number>; top?: string; shadow: boolean; freezeLearning: boolean; alerts: string[]; steps: number; computeMs: number }
 
 export type SnnReply = { id: number; ok: true; result: unknown } | { id: number; ok: false; error: string };
 
@@ -43,10 +44,11 @@ export class SnnRuntime {
         const t0 = performance.now();
         const r = net.step(m.now, m.inputs);
         const scores = net.score(m.queries, m.now);
-        const reply: StepReply = { scores, salience: r.salience, top: r.top, shadow: net.health.shadow, freezeLearning: net.health.freezeLearning, alerts: net.health.alerts, steps: r.steps, computeMs: performance.now() - t0 };
+        const reply: StepReply = { scores, directions: net.directions(), salience: r.salience, top: r.top, shadow: net.health.shadow, freezeLearning: net.health.freezeLearning, alerts: net.health.alerts, steps: r.steps, computeMs: performance.now() - t0 };
         return reply;
       }
       case 'settle': return net.settle(m.ticker, m.result, m.now);
+      case 'remove': for (const k of m.keys) net.removeColumn(k); return { removed: m.keys.length };
       case 'checkpoint': return net.serialize();
       case 'status': return { ...net.status(), restoredFrom: this.restoredFrom ?? null };
     }

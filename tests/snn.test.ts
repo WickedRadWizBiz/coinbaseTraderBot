@@ -20,6 +20,7 @@ import { SnnHost } from '../bot/snn/host';
 import { createSnn, snnParams } from '../bot/snn';
 import { SnnNetwork, type ColumnInput, type ContractQuery } from '../bot/snn/network';
 import { DEFAULT_SNN, stageFlags, versionHash, withFlags, type SnnParams } from '../bot/snn/params';
+import { CRYPTO_POP, cryptoValues, l0Width, tennisValues } from '../bot/snn/inputs';
 import { exceedLabel, Readout } from '../bot/snn/readout';
 import { Xoshiro128 } from '../bot/snn/rng';
 import { tmpAudit, tmpDir } from './helpers';
@@ -78,15 +79,22 @@ test('architecture sizes match the design (per column) and the step order runs a
   const net = new SnnNetwork(DEFAULT_SNN);
   net.step(T0, [tape(1)[0][0]]);
   const c = net.columns.get('BTC-15m')!;
-  assert.equal(c.v0.length, 64, 'L0 64 channels');
+  // L0 widened beyond the PDF's 64 to carry the TA library, perp and book inputs (8 delta + 24 x 8 bands).
+  assert.equal(c.v0.length, l0Width('crypto'), 'L0 crypto channels');
+  assert.equal(l0Width('crypto'), 8 + 8 * CRYPTO_POP.length);
   assert.equal(c.v1.length, 48, 'L1 48 Poirazi neurons');
   assert.equal(c.nSyn, 48 * 6 * 16, '6 branches x 16 synapses');
   assert.equal(c.v2.length, 160, '128 E + 32 I');
   assert.equal(c.U1.length, 48 * 128, 'U1: L2/3 -> L1');
-  assert.equal(c.U0.length, 64 * 48, 'U0: L1 -> L0');
-  assert.equal(c.err0.length, 64, '64 error units');
+  assert.equal(c.U0.length, l0Width('crypto') * 48, 'U0: L1 -> L0');
+  assert.equal(c.err0.length, l0Width('crypto'), 'signed L0 error units');
+  assert.equal(c.horizonSec, 900, 'BTC-15m predicts 15 minutes ahead');
   assert.ok(Math.abs(c.recW.length / (160 * 159) - 0.1) < 0.02, `~10% recurrent (${c.recW.length})`);
-  assert.ok(c.nFeat >= 195 && c.nFeat <= 205, `~200 readout features (${c.nFeat})`);
+  assert.ok(c.nFeat >= 195 && c.nFeat <= 210, `~200 readout features (${c.nFeat})`);
+  const t = new SnnNetwork(DEFAULT_SNN);
+  t.step(T0, [{ key: 'TEN:KXATPMATCH-X', asset: 'TENNIS', price: 0.4, values: { momentum: 0.01, flow: 0.2 } }]);
+  const tc = t.columns.get('TEN:KXATPMATCH-X')!;
+  assert.equal(tc.kind, 'tennis'); assert.equal(tc.v0.length, l0Width('tennis')); assert.equal(tc.horizonSec, 300);
 });
 
 test('the network is alive: levels fire in the asynchronous low-rate regime and PC produces a surprise signal', () => {
@@ -415,6 +423,10 @@ test('engine shadow mode: SNN scores every contract and is logged, but p_model i
   assert.ok(st.pSnn !== undefined && st.pSnn > 0 && st.pSnn < 1, JSON.stringify(st));
   assert.equal(st.pYes, st.pModel, 'shadow never changes the traded probability');
   assert.equal(st.snnShadow, 'shadow mode');
+  // Every crypto column is fed every second (not only while trading): 15m, 60m and the perp 240m.
+  for (const h of ['BTC-15m', 'BTC-60m', 'BTC-240m']) assert.ok(engine.snnDirs.has(h), `${h} direction call: ${[...engine.snnDirs.keys()]}`);
+  const ctx = engine.snnContext('BTC', market.ticker)!;
+  assert.ok(ctx.up?.[15] !== undefined && ctx.up?.[240] !== undefined && ctx.pContract !== undefined);
   const brief = engine.snnBrief() as { mode: string; alpha: number };
   assert.equal(brief.mode, 'shadow'); assert.equal(brief.alpha, 0);
 });
@@ -437,4 +449,47 @@ test('engine blend mode: alpha = 0 until earned, then p_final = (1 - alpha c) p_
   assert.equal(st.snnShadow, undefined, `voting: ${st.snnShadow}`);
   const want = (1 - 0.2 * st.snnC!) * st.pModel! + 0.2 * st.snnC! * st.pSnn!;
   assert.ok(Math.abs(st.pYes! - want) < 1e-12, `${st.pYes} vs ${want}`);
+});
+
+test('direction heads: learn continuously from realised moves (no trading, no settlement) and predict the drift', () => {
+  const net = new SnnNetwork({ ...small(), dirEta: 0.05, dirCap: 1, dirEverySec: 60 });
+  // A steadily rising index with TA readings that say "trend up": the 15m head must learn P(up) > 0.5.
+  let px = 60000;
+  for (let s = 0; s < 6 * 3600; s++) {
+    px *= Math.exp(0.00004 + 0.0001 * Math.sin(s / 13));
+    net.step(T0 + s * 1000, [{ key: 'BTC-15m', asset: 'BTC', price: px, values: { ta_rsi_a: 0.4, ta_di_a: 0.5, ret_h_z: 1.5, taconf_net: 4 } }]);
+  }
+  const d = net.directions().find((x) => x.key === 'BTC-15m')!;
+  assert.ok(d.labelled > 200, `labelled ${d.labelled}`);
+  assert.ok(d.pUp > 0.6, `P(up) ${d.pUp}`);
+  assert.ok(d.expMove > 0 && d.expSignedMove > 0);
+  assert.equal(d.horizonSec, 900);
+  // Direction heads and their pending tags survive a checkpoint.
+  const cp = JSON.parse(JSON.stringify(net.serialize()));
+  const r = new SnnNetwork({ ...small(), dirEta: 0.05, dirCap: 1, dirEverySec: 60 });
+  r.restore(cp);
+  assert.equal(r.directions()[0].pUp, d.pUp);
+  assert.equal(r.dirTags.get('BTC-15m')!.length, net.dirTags.get('BTC-15m')!.length);
+});
+
+test('inputs: crypto columns read the TA library, perp and book; tennis columns read the 4 signals and the score', () => {
+  const f = { ret_15m_z: 1, ret_1h_z: 2, ret_5m_z: 0.5, ta_rsi_15m: 0.2, ta_rsi_1h: 0.3, ta_macd_hist_1h: 0.1, ta_di_diff_4h: -0.2, taconf_net: 3, perp_premium_bps: 4, funding_rate_bps: 1, usdtd_ret_15m_z: -1 } as Record<string, number>;
+  const v15 = cryptoValues(15, f, { mid: 0.4, spread: 0.02, imbalance: 0.3, dAtm: 0.5, tauFrac: 0.6 });
+  assert.equal(v15.ret_h_z, 1); assert.equal(v15.ta_rsi_a, 0.2); assert.equal(v15.ta_rsi_b, 0.3); assert.equal(v15.perp_premium_bps, 4); assert.equal(v15.mid, 0.4);
+  const v240 = cryptoValues(240, f);
+  assert.equal(v240.ret_h_z, undefined); assert.equal(v240.ta_di_b, -0.2); assert.equal(v240.mid, undefined, 'perp column: no Kalshi contract');
+  const tv = tennisValues({ pA: 0.35, spread: 0.02, momentum: 0.02, opponentMove: -0.015, flow: 0.4, depth: 0.25, confluence: 3, score: { setsA: 1, setsB: 0, gamesA: 3, gamesB: 5, pointsA: 2, pointsB: 3, serverA: true }, tiebreak: false, breaksTotal: [2, 1], progress: 0.55, pStart: 0.4, format: { bestOf: 3, finalSetTiebreak: 7 } as never });
+  assert.equal(tv.momentum, 0.02); assert.equal(tv.crossMarket, 0.015); assert.equal(tv.flow, 0.4); assert.equal(tv.depth, 0.25); assert.equal(tv.confluence, 3);
+  assert.equal(tv.setDiff, 1); assert.equal(tv.gameDiff, -2); assert.equal(tv.pointDiff, -1); assert.equal(tv.serverA, 1); assert.equal(tv.breakDiff, 1);
+  assert.ok(tv.modelPA! > 0 && tv.modelPA! < 1);
+});
+
+test('tennis column: P(A wins) readout trained by the match result; removed when the match ends', () => {
+  const net = new SnnNetwork(small());
+  for (let s = 0; s < 120; s++) net.step(T0 + s * 1000, [{ key: 'TEN:EV1', asset: 'TENNIS', price: 0.4 + 0.001 * s, values: { momentum: 0.01, modelPA: 0.45 } }]);
+  const sc = net.score([{ ticker: 'EV1-A', column: 'TEN:EV1', kind: 'match', d: Math.log(0.45 / 0.55), lifeFrac: 0.5, spot: 0, sigma: 0, tauSec: 0, lifeSec: 0, eventKey: 'EV1-A', tag: true }], T0 + 120e3);
+  assert.equal(sc.length, 1); assert.ok(sc[0].p > 0 && sc[0].p < 1);
+  assert.deepEqual(net.settle('EV1-A', 'yes', T0 + 200e3), { column: 'TEN:EV1', used: 1 });
+  net.removeColumn('TEN:EV1');
+  assert.equal(net.columns.has('TEN:EV1'), false);
 });

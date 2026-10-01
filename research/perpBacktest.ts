@@ -51,7 +51,7 @@ export async function runPerpBacktest(dir: string, P: PerpsConfig, model: PerpMo
   const ex = new PerpHedger({ gateway: sim, hub, units, now: () => st.now, params: { minDollarDelta: P.minDollarDelta, maxNotionalUsd: P.maxNotionalUsd, excludeTauSec: P.excludeTauSec, repriceSec: P.repriceSec, takerAfterSec: P.takerAfterSec }, risk: { maxOrderNotionalUsd: P.maxOrderNotionalUsd, collarBps: P.collarBps } });
   const trader = new PerpTrader({
     params: traderParams(P), hub, gateway: sim, model,
-    sources: (asset) => ({ index: st.index.get(asset), spot: st.spot.get(asset), bars: st.features.bars.get(asset), candles: st.features.candles.get(asset), usdtd: st.usdtd, btcd: st.btcd, perp: hub.get(asset) }),
+    sources: (asset) => ({ index: st.index.get(asset), spot: st.spot.get(asset), bars: st.features.bars.get(asset), candles: st.features.candles.get(asset), usdtd: st.usdtd, btcd: st.btcd, perp: hub.get(asset), snn: st.snnContext(asset) }),
   });
   const daily: number[] = [];
   let dayKey = '', dayStart = start, first = 0, lastTick = 0, trades = 0;

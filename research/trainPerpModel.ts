@@ -44,7 +44,7 @@ export async function buildPerpDataset(dir: string, opts: { everySec?: number; h
     mids.set(asset, arr);
     if (st.now < (nextAt.get(asset) ?? 0)) continue;
     nextAt.set(asset, Math.floor(st.now / every + 1) * every);
-    const f = perpFeatures(asset, st.now, { index: st.index.get(asset), spot: st.spot.get(asset), bars: st.features.bars.get(asset), candles: st.features.candles.get(asset), usdtd: st.usdtd, btcd: st.btcd, perp: ps });
+    const f = perpFeatures(asset, st.now, { index: st.index.get(asset), spot: st.spot.get(asset), bars: st.features.bars.get(asset), candles: st.features.candles.get(asset), usdtd: st.usdtd, btcd: st.btcd, perp: ps, snn: st.snnContext(asset) });
     samples.push({ ts: st.now, asset, x: PERP_FEATURES.map((n) => f[n]), mid, fundingBps: Number.isFinite(f.funding_rate_bps) ? f.funding_rate_bps : 0 });
   }
   const rows: PerpRow[] = [];

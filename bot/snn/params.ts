@@ -41,9 +41,14 @@ export interface SnnFlags {
 export interface SnnParams {
   seed: number;
   flags: SnnFlags;
-  /** Sizes per column (PDF section 4.2). */
+  /** Sizes per column (PDF section 4.2). L0 width is set by the column kind (bot/snn/inputs.ts);
+   *  nL0 is kept only for model-file compatibility. */
   nL0: number; nL1: number; branches: number; synPerBranch: number; nE: number; nI: number;
   maxColumns: number;
+  /** Live tennis matches with their own column (created and removed with the match). */
+  maxTennisColumns: number;
+  /** Direction heads: learning rate (dense labels, one per column per minute) and sampling period. */
+  dirEta: number; dirCap: number; dirEverySec: number;
   /** L0 encoders. */
   deltaBps: number[]; midDelta: number; tauL0: number; popGain: number; deltaGain: number; thetaL0: number;
   /** L1 (Poirazi). */
@@ -98,7 +103,8 @@ export const DEFAULT_SNN: SnnParams = {
   seed: 20260601,
   flags: { ...stageFlags('S5') },
   nL0: 64, nL1: 48, branches: 6, synPerBranch: 16, nE: 128, nI: 32,
-  maxColumns: 6,
+  maxColumns: 18, maxTennisColumns: 8,
+  dirEta: 2e-3, dirCap: 0.02, dirEverySec: 60,
   deltaBps: [3, 6, 12], midDelta: 0.01, tauL0: 2, popGain: 1.2, deltaGain: 1.5, thetaL0: 0.5,
   branchTaus: [5, 5, 30, 30, 120, 120], tauL1: 5, thetaL1: 0.5, l1Gain: 1.2, nmdaWeight: 0.02, mg: 1, branchTheta: 0.5, wInitL1: 0.25,
   feedbackGain: 0.2,

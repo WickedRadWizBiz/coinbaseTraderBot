@@ -25,6 +25,7 @@ import path from 'path';
 import { loadConfig, type StrategyConfig, type RiskLimits } from '../bot/config';
 import { DEFAULT_FEES } from '../bot/fees';
 import { computeFeatureMap } from '../bot/model/featureEngine';
+import { applyTakeGate } from '../bot/model/takeModel';
 import { effectiveSigma, loadVolProfile, type VolProfile } from '../bot/model/volSeasonality';
 import { sessionRiskFor, huntBlockedBySession, type SessionRiskProfile } from '../bot/model/sessionRisk';
 import { sessionState } from '../bot/model/sessions';
@@ -257,7 +258,7 @@ export async function runBacktest(
         now: st.now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma, inWindow: fv.regime !== 'pre_window', book, micro: st.features.micro.get(m.ticker), index: idx!, spot: st.spot.get(m.asset), asset: m.asset, usdtd: st.usdtd, btcd: st.btcd, closeTs: m.closeTime, volProfile: opts.volProfile, asiaRange: st.features.asiaRange.get(m.asset),
         kind: m.kind, strike: terms.strike, cap: terms.cap, d2: fv.d2, vEff: fv.vEff, sigmaPricing: sigmaFv, tNu: model.params.tNu, bars: st.features.bars.get(m.asset), openTime: m.openTime, calendar: opts.calendar,
         ticker: m.ticker, siblings: m.kind === 'updown' ? undefined : ladderQuotes(st.markets.values(), (t) => st.books.get(t), m.asset, m.closeTime),
-        perp: st.features.perps.get(m.asset), candles: st.features.candles.get(m.asset),
+        perp: st.features.perps.get(m.asset), candles: st.features.candles.get(m.asset), snn: st.snnContext(m.asset, m.ticker),
       });
       const pred = model.predictDetailed(fmap, fv.pYes);
       const pYes = pred.p;
@@ -359,6 +360,7 @@ export async function runBacktest(
         blockReductions: huntMode,
         entries: Boolean(reason),
       });
+      if (strategy.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features: fmap, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: strategy.takeMargin });
       for (const c of plan.cancel) if (!cancelInFlight.has(c.clientOrderId)) await send(m.ticker, 'cancel', () => cancelNow(c.clientOrderId), c.clientOrderId);
 
       for (const p of plan.place) {

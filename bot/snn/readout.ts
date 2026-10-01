@@ -18,6 +18,7 @@ export interface ContractLabel { kind: string; result: 'yes' | 'no' }
  *  (a 'between' contract that settled NO could have finished below the floor or above the cap). */
 export function exceedLabel(kind: string, role: ThresholdRole, result: 'yes' | 'no'): 0 | 1 | undefined {
   const yes = result === 'yes';
+  if (kind === 'match') return yes ? 1 : 0; // tennis: P(our player wins)
   if (kind === 'less') return yes ? 0 : 1; // pays iff A < cap  => exceed(cap) = !yes
   if (kind === 'between') {
     if (!yes) return undefined;

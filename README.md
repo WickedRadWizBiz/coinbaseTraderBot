@@ -303,9 +303,15 @@ In live trading, `ModelHealth` stops new risk if the rolling log-loss advantage 
 
 ## Automated training and hot-swapping
 
-The bot retrains itself. Every day at `AUTO_TRAIN_HOUR_UTC` (06:00 UTC by default) it runs `research/pipeline.ts` as a low-priority background process. The pipeline builds the dataset, trains the MLP and backtests it, fits the volatility profile, trains and backtests the perps model, and then runs the SNN ablation and SNN training against that same MLP. Promoted models land in `data/models/`, and the running bot hot-swaps them without a restart.
+The bot retrains itself. Every day at `AUTO_TRAIN_HOUR_UTC` (06:00 UTC by default) it runs `research/pipeline.ts` as a low-priority background process. The pipeline runs in this order:
+1. Tests and trains the SNN.
+2. Backfills its outputs without leakage.
+3. Builds the dataset.
+4. Trains the MLP on the SNN's outputs, then backtests it.
+5. Fits the volatility profile.
+6. Trains the perps model and the tennis model. Promoted models land in `data/models/`, and the running bot hot-swaps them without a restart.
 
-A new MLP always re-runs the SNN steps, including when you swap one in by hand. The SNN's blend history is saved across restarts and cleared when the MLP changes.
+A new SNN always retrains the models that read it, including when you swap one in by hand. The SNN's blend history is saved across restarts and cleared when the MLP changes.
 
 `docs/AUTOMATION.md` is the plain-language guide. It covers what runs by itself, what you still do by hand, every setting, and how to roll back.
 
@@ -322,6 +328,16 @@ The network has these levels:
 - an L5 readout trained only by settlement labels through per-contract tags.
 
 It runs on a 1 s market clock in a worker thread. Readouts have a 200 ms deadline.
+
+**Division of labour: the SNN informs, the MLP decides.**
+- **What the SNN reads:** the TA library on the Coinbase spot USD pairs, the perps, the Kalshi books, and for tennis the four confluence signals plus Live Tennis API scores.
+- **What it does with them:**
+  - Learns the direction of each market around the clock (15m / 1h / 4h; 5 minutes for tennis) from realised moves, whether or not anything trades.
+  - Logs its calls with the data stream.
+- **What the models do with those calls:**
+  - The MLP uses them as inputs for its fair value and for its take/skip head, which decides whether each trade is worth taking.
+  - The perps model uses the 1h/4h calls.
+  - A tennis MLP uses them for match fair values.
 
 `SNN_MODE=shadow` is the default: the network scores and labels every scanned contract but never changes what is traded. In `SNN_MODE=blend`, p_final = (1 − α·c)·p_model + α·c·p_snn. α starts at 0, is capped at 0.25, and is earned only when the out-of-sample Brier improvement is significant.
 

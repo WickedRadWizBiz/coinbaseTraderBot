@@ -20,29 +20,27 @@ import {
   governorStep, IZH, izhikevichStep, nmdaGate, pcPredict, pcScratch, pcUpdate, populationCode, sigmoid, SYN_CLASSES, toMvEquivalent,
   twoSpeedStep, type PcParams, type PcScratch,
 } from './formulas';
+import { columnHorizonSec, columnKind, CRYPTO_DELTA_BPS, l0Width, popSpec, TENNIS_DELTA_CENTS, type ColumnKind, type PopSpec } from './inputs';
 import type { SnnParams } from './params';
 import { Xoshiro128 } from './rng';
 
 export interface ColumnInput {
   key: string;
   asset: string;
+  /** Primary price for the send-on-delta channels (crypto: settlement index; tennis: P(A wins)).
+   *  It is also the price the column's direction head predicts. `spot` is the legacy alias. */
+  price?: number;
   spot?: number;
+  /** Secondary delta channel (crypto: ATM Kalshi mid). */
   mid?: number;
+  /** Population-coded values by name (bot/snn/inputs.ts: CRYPTO_POP / TENNIS_POP). */
+  values?: Record<string, number | undefined>;
+  // Legacy contract fields (folded into `values` when `values` is absent).
   spread?: number;
   imbalance?: number;
-  /** At-the-money strike distance ln(S/K)/(sigma sqrt(tau)). */
   dAtm?: number;
-  /** Remaining fraction of the contract's life, [0, 1]. */
   tauFrac?: number;
-  rsi?: number;
-  retZ?: number;
 }
-
-/** Ranges of the 7 population-coded features (8 bands each). */
-export const POP_FEATURES: { key: keyof ColumnInput; lo: number; hi: number }[] = [
-  { key: 'dAtm', lo: -3, hi: 3 }, { key: 'tauFrac', lo: 0, hi: 1 }, { key: 'mid', lo: 0, hi: 1 }, { key: 'spread', lo: 0, hi: 0.1 },
-  { key: 'imbalance', lo: -1, hi: 1 }, { key: 'rsi', lo: 20, hi: 80 }, { key: 'retZ', lo: -3, hi: 3 },
-];
 
 export const N_POOL = 16;
 export const N_BASE = 6;
@@ -58,6 +56,12 @@ export function fnv1a(s: string): number {
 
 export class Column {
   readonly N: number;
+  readonly kind: ColumnKind;
+  readonly nL0: number;
+  /** Seconds ahead the direction head predicts (15m/60m/240m crypto, 5 min tennis). */
+  readonly horizonSec: number;
+  private readonly pop: PopSpec[];
+  private readonly deltaThr: number[];
   readonly nSyn: number;
   readonly nFeat: number;
   // ---- L0
@@ -104,14 +108,20 @@ export class Column {
 
   constructor(readonly key: string, readonly asset: string, p: SnnParams, readonly index: number) {
     this.p = p;
-    const { nL0, nL1, branches: B, synPerBranch: K, nE, nI } = p;
+    this.kind = columnKind(key);
+    this.pop = popSpec(this.kind);
+    this.nL0 = l0Width(this.kind);
+    this.horizonSec = columnHorizonSec(key);
+    this.deltaThr = this.kind === 'tennis' ? TENNIS_DELTA_CENTS : CRYPTO_DELTA_BPS;
+    const nL0 = this.nL0;
+    const { nL1, branches: B, synPerBranch: K, nE, nI } = p;
     this.N = nE + nI;
     this.nSyn = nL1 * B * K;
-    this.nFeat = N_BASE + nE + nL1 + N_POOL + N_EXTRA;
+    this.nFeat = N_BASE + Math.max(nE + nL1 + N_POOL + N_EXTRA, nL0);
     const rng = new Xoshiro128((p.seed ^ fnv1a(key)) >>> 0);
     const f64 = (n: number) => new Float64Array(n);
     this.I0 = f64(nL0); this.v0 = f64(nL0); this.s0 = new Uint8Array(nL0); this.rate0 = f64(nL0);
-    this.deltaAcc = f64(p.deltaBps.length);
+    this.deltaAcc = f64(this.deltaThr.length);
     this.aR0 = f64(nL0); this.aD0 = f64(nL0); this.nR0 = f64(nL0); this.nD0 = f64(nL0); this.gA0 = f64(nL0); this.gN0 = f64(nL0);
     // L1 connectivity: each branch samples 16 distinct L0 channels.
     this.src = new Int32Array(this.nSyn); this.w1 = new Float32Array(this.nSyn); this.w1s = new Float32Array(this.nSyn);
@@ -227,23 +237,26 @@ export class Column {
    *  steps); `latInh` is the cross-column lateral inhibition; `gapV` the partner column's I voltages. */
   step(inp: ColumnInput, first: boolean, ctx: { latInh: number; gapV?: Float64Array; dBrier: number; refRateE?: number; frozen: boolean; training?: boolean }): void {
     const p = this.p, F = p.flags, d = this.dec;
-    const { nL0, nL1, branches: B, synPerBranch: K, nE } = p;
+    const nL0 = this.nL0;
+    const { nL1, branches: B, synPerBranch: K, nE } = p;
     const N = this.N;
     // ---- 1. inputs -> L0 encoder currents
     const I0 = this.I0;
     I0.fill(0);
     this.lastRetBp = 0;
+    const price = inp.price ?? inp.spot;
     if (first) {
-      if (inp.spot && inp.spot > 0 && this.lastSpot > 0) {
-        const dx = 1e4 * Math.log(inp.spot / this.lastSpot);
-        this.lastRetBp = dx;
-        for (let k = 0; k < p.deltaBps.length; k++) {
-          const e = deltaEncode(this.deltaAcc[k], dx, p.deltaBps[k]);
+      if (price && price > 0 && this.lastSpot > 0) {
+        // Crypto: log return in bp; tennis: probability change in absolute units (cents as fractions).
+        const dx = this.kind === 'tennis' ? price - this.lastSpot : 1e4 * Math.log(price / this.lastSpot);
+        this.lastRetBp = this.kind === 'tennis' ? 1e4 * dx : dx;
+        for (let k = 0; k < this.deltaThr.length; k++) {
+          const e = deltaEncode(this.deltaAcc[k], dx, this.deltaThr[k]);
           this.deltaAcc[k] = e.acc; I0[2 * k] = p.deltaGain * e.up; I0[2 * k + 1] = p.deltaGain * e.down;
         }
       }
-      if (inp.spot && inp.spot > 0) this.lastSpot = inp.spot;
-      if (inp.mid !== undefined && Number.isFinite(inp.mid)) {
+      if (price && price > 0) this.lastSpot = price;
+      if (this.kind === 'crypto' && inp.mid !== undefined && Number.isFinite(inp.mid)) {
         if (Number.isFinite(this.lastMid)) {
           const e = deltaEncode(this.midAcc, inp.mid - this.lastMid, p.midDelta);
           this.midAcc = e.acc; I0[6] = p.deltaGain * e.up; I0[7] = p.deltaGain * e.down;
@@ -251,13 +264,14 @@ export class Column {
         this.lastMid = inp.mid;
       }
     }
-    for (let f = 0; f < POP_FEATURES.length; f++) {
-      const pf = POP_FEATURES[f];
-      populationCode(inp[pf.key] as number, pf.lo, pf.hi, 8, I0, 8 + f * 8);
+    const vals = inp.values ?? { dAtm: inp.dAtm, tauFrac: inp.tauFrac, mid: inp.mid, spread: inp.spread, imbalance: inp.imbalance };
+    for (let f = 0; f < this.pop.length; f++) {
+      const pf = this.pop[f];
+      populationCode(vals[pf.name] ?? NaN, pf.lo, pf.hi, 8, I0, 8 + f * 8);
     }
     for (let i = 8; i < nL0; i++) I0[i] *= p.popGain;
     let deltas = 0;
-    for (let k = 0; k < 2 * p.deltaBps.length; k++) deltas += I0[k] / p.deltaGain;
+    for (let k = 0; k < 2 * this.deltaThr.length; k++) deltas += I0[k] / p.deltaGain;
     this.deltaFast = ewma(this.deltaFast, deltas, 60);
     this.deltaSlow = ewma(this.deltaSlow, deltas, 3600);
     // ---- 2. L0 LIF (exact), spikes, rates
@@ -453,7 +467,7 @@ export class Column {
   }
 
   private pcStep(frozen: boolean): void {
-    const p = this.p, { nL0, nL1, nE } = p;
+    const p = this.p, nL0 = this.nL0, { nL1, nE } = p;
     const P1: PcParams = { k1: p.pcK1, k2: p.pcK2 * (1 - p.govDelta * this.G), sigma2: this.sigma2_1, sigmaTd2: p.pcSigmaTd2, lambda: p.pcLambda, eMax: p.pcEMax, priorL2: p.pcPriorL2 };
     const P0: PcParams = { ...P1, sigma2: this.sigma2_0 };
     const n1 = pcPredict(this.U1, this.z2, this.rate1, this.sc1);
@@ -509,7 +523,7 @@ export class Column {
     phi[0] = 1; phi[1] = dc; phi[2] = Math.tanh(Number.isFinite(d) ? d : 0); phi[3] = tf; phi[4] = Math.sqrt(tf); phi[5] = dc * tf;
     let o = N_BASE;
     if (p.flags.rawReadout) {
-      for (let i = 0; i < p.nL0; i++) phi[o + i] = this.rate0[i];
+      for (let i = 0; i < this.nL0; i++) phi[o + i] = this.rate0[i];
       return phi;
     }
     for (let i = 0; i < nE; i++) phi[o + i] = this.rate2[i];
@@ -530,7 +544,7 @@ export class Column {
   /** Mean E rate (salience input) and mean I rate (lateral inhibition source). */
   meanRateE(): number { let s = 0; for (let i = 0; i < this.p.nE; i++) s += this.rate2[i]; return s / this.p.nE; }
   meanRateI(): number { let s = 0; for (let i = this.p.nE; i < this.N; i++) s += this.rate2[i]; return s / (this.N - this.p.nE); }
-  meanRateL0(): number { let s = 0; for (let i = 0; i < this.p.nL0; i++) s += this.rate0[i]; return s / this.p.nL0; }
+  meanRateL0(): number { let s = 0; for (let i = 0; i < this.nL0; i++) s += this.rate0[i]; return s / this.nL0; }
 
   /** Mean BCM sliding threshold theta_M = (rhobar/rho0)^p rhobar over L1 and E neurons (health). */
   bcmTheta(): number {
