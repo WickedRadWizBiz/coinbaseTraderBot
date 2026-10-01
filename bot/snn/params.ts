@@ -134,3 +134,27 @@ export function withFlags(p: SnnParams, flags: Partial<SnnFlags>): SnnParams {
 export function versionHash(p: SnnParams): string {
   return crypto.createHash('sha256').update(JSON.stringify(p)).digest('hex').slice(0, 16);
 }
+
+/** The three isolated SNNs: one per contract family, each in its own worker with its own params,
+ *  stage, health monitor, model file and checkpoints. They never read each other's state or
+ *  outputs; only the decision models (MLP / perps / tennis) consume their outputs. */
+export type SnnDomain = 'crypto' | 'perps' | 'tennis';
+export const SNN_DOMAINS: SnnDomain[] = ['crypto', 'perps', 'tennis'];
+
+/** Time constants matched to each domain's horizons. Crypto (15m / 1h contracts) keeps the PDF's
+ *  values; perps (1h / 4h) run ~3-5x slower; tennis (point by point, 5-minute calls) faster. */
+export function domainParams(domain: SnnDomain, base: SnnParams = DEFAULT_SNN): SnnParams {
+  if (domain === 'perps') {
+    return {
+      ...base, tauL0: 4, branchTaus: [30, 30, 120, 120, 600, 600], tauL1: 15, tauE: 30, tauA: 1800, tauI: 8,
+      tauRateL0: 15, tauRateL1: 120, tauRateL23: 600, surpriseTau: 300, dirEverySec: 300, maxTennisColumns: 0,
+    };
+  }
+  if (domain === 'tennis') {
+    return {
+      ...base, tauL0: 1, branchTaus: [2, 2, 10, 10, 60, 60], tauL1: 3, tauE: 5, tauA: 120, tauI: 2,
+      tauRateL0: 3, tauRateL1: 10, tauRateL23: 30, surpriseTau: 30, dirEverySec: 30, maxColumns: 0,
+    };
+  }
+  return { ...base, maxTennisColumns: 0 };
+}

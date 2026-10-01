@@ -14,6 +14,7 @@ import { TENNIS_FAIR_FEATURES, tennisFairInputs, type TennisFairParams } from '.
 import { MatchTracker, type MatchMarket } from '../bot/tennis/tennisStrategy';
 import { sigmoid } from '../bot/util/num';
 import { predictLogits, train } from './mlp';
+import { predictGbdtLogits, trainGbdt } from './gbdt';
 import { readRecordings, ReplayState } from './replay';
 
 export interface TennisRow { event: string; t: number; f: Record<string, number>; pA: number; y: 0 | 1 }
@@ -63,8 +64,10 @@ export async function buildTennisDataset(dir: string, cfg: TennisConfig, everySe
       const v = tennisSnapshotValues(tr, markets, st.now, cfg, { tiebreak: score?.tiebreak, breaksTotal: score?.breaksTotal ?? undefined });
       if (!v || v.mid === undefined) continue;
       lastSample.set(event, st.now);
-      const snnP = st.snnContract.get(ms[0].ticker), snnD = st.snnDirs.get(`TEN:${event}`);
-      const f = tennisFairInputs(v, { p: snnP && st.now - snnP.ts < 180_000 ? snnP.p : undefined, up: snnD && st.now - snnD.ts < 180_000 ? snnD.pUp : undefined });
+      // Only the tennis network's own outputs (the networks never read each other).
+      const snnP = st.snnContract.get(ms[0].ticker), snnD = st.snnDirs.get(`tennis:TEN:${event}`);
+      const dFresh = snnD && st.now - snnD.ts < 180_000 ? snnD : undefined;
+      const f = tennisFairInputs(v, { p: snnP && st.now - snnP.ts < 180_000 && snnP.domain !== 'crypto' && snnP.domain !== 'perps' ? snnP.p : undefined, up: dFresh?.pUp, skill: dFresh?.conf.skill, calConf: dFresh?.conf.calConf });
       pending.set(event, [...(pending.get(event) ?? []), { event, t: st.now, f, pA: v.mid }]);
     }
   }
@@ -86,12 +89,22 @@ export function trainTennisModel(rows: TennisRow[], seed = 7): TennisFairParams 
   const devMatches = byMatch.filter((m) => !cut.has(m));
   const vcut = new Set(devMatches.slice(Math.floor(devMatches.length * 0.8)));
   const tr = dev.filter((r) => !vcut.has(r.event)), va = dev.filter((r) => vcut.has(r.event));
-  const m = train(X(tr), tr.map((r) => r.y), X(va.length ? va : tr), (va.length ? va : tr).map((r) => r.y), { hidden: 8, l2: 1e-2, lr: 0.01, maxEpochs: 400, patience: 60, seed, residual }, w(tr), w(va.length ? va : tr));
+  const trv = va.length ? va : tr;
+  const m = train(X(tr), tr.map((r) => r.y), X(trv), trv.map((r) => r.y), { hidden: 8, l2: 1e-2, lr: 0.01, maxEpochs: 400, patience: 60, seed, residual }, w(tr), w(trv));
+  // Tree candidate: boosted trees on the residual of the market's log-odds (missing inputs routed natively).
+  const init = (rs: TennisRow[]) => rs.map((r) => (Number.isFinite(r.f.logit_pA) ? r.f.logit_pA : 0));
+  const g = trainGbdt(X(tr), tr.map((r) => r.y), w(tr), init(tr), X(trv), trv.map((r) => r.y), w(trv), init(trv), { nTrees: 200, learningRate: 0.05, maxDepth: 2, minLeafWeight: 2, seed });
+  const pMlp = (rs: TennisRow[]) => predictLogits(m.layers, m.norm, X(rs), residual).map(sigmoid);
+  const pTree = (rs: TennisRow[]) => predictGbdtLogits(g.model, X(rs), residual).map(sigmoid);
+  const llW = (p: number[], rs: TennisRow[]) => { const ww = w(rs); const s = ww.reduce((a, b) => a + b, 0); return p.reduce((a, q, i) => { const c = Math.min(1 - 1e-6, Math.max(1e-6, q)); return a - ww[i] * (rs[i].y ? Math.log(c) : Math.log(1 - c)); }, 0) / Math.max(1e-9, s); };
+  const candidates = [{ kind: 'mlp' as const, valLogLoss: llW(pMlp(trv), trv) }, { kind: 'gbdt' as const, valLogLoss: g.trees > 0 ? llW(pTree(trv), trv) : Infinity }];
+  const kind = candidates[1].valLogLoss < candidates[0].valLogLoss ? 'gbdt' : 'mlp';
   const brierW = (p: number[], rs: TennisRow[]) => { const ww = w(rs); const s = ww.reduce((a, b) => a + b, 0); return p.reduce((a, q, i) => a + ww[i] * (q - rs[i].y) ** 2, 0) / Math.max(1e-9, s); };
-  const pHold = predictLogits(m.layers, m.norm, X(hold), residual).map(sigmoid);
+  const pHold = kind === 'gbdt' ? pTree(hold) : pMlp(hold);
   const brierModel = brierW(pHold, hold), brierMarket = brierW(hold.map((r) => r.pA), hold);
   return {
-    version: `tennis-mlp-${new Date().toISOString().slice(0, 10)}`, features: names, normalization: m.norm, layers: m.layers, residual,
+    version: `tennis-${kind}-${new Date().toISOString().slice(0, 10)}`, features: names, kind,
+    ...(kind === 'gbdt' ? { gbdt: g.model } : { normalization: m.norm, layers: m.layers }), residual, candidates,
     validation: { matches: byMatch.length, holdoutMatches: cut.size, brierModel, brierMarket, validated: byMatch.length >= 100 && cut.size >= 20 && brierModel < brierMarket },
     trainedAt: new Date().toISOString(),
   };

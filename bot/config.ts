@@ -122,6 +122,13 @@ export interface StrategyConfig {
   /** Apply a fitted, validated intraday volatility profile to fair value. */
   volSeasonality: boolean;
   volProfilePath: string;
+  /** Tree-based volatility forecast (research:vol-train): applied to fair value once validated. */
+  volModel: boolean;
+  volModelPath: string;
+  /** Fill / adverse-selection model (research:fill-train): brings itself online once validated. */
+  fillModelPath: string;
+  /** Maker quotes need expected value (P(fill) x (edge - expected markout)) of at least this per contract. */
+  fillMinEv: number;
   /** MLP take/skip head: 'validated' gates entries once its held-out check passed; 'off' never. */
   takeGate: 'validated' | 'off';
   /** Extra P(win) required above a trade's break-even (price + fee). */
@@ -219,7 +226,6 @@ export interface SnnConfig {
   /** Whitelisted columns (asset-horizon keys such as BTC-15m); empty = first maxColumns seen. */
   columns: string[];
   maxColumns: number;
-  modelPath: string;
   checkpointDir: string;
   checkpointEveryMin: number;
   worker: boolean;
@@ -232,6 +238,11 @@ export interface SnnConfig {
   /** Conservative-only dynamic target scaling (hunt take-profit distance), one step per 15 min. */
   targetScaling: boolean;
   deferred: { wilsonCowan: boolean; gapJunctions: boolean; izhikevichCH: boolean; dcaap: boolean };
+  /** Three isolated SNNs (crypto contracts, perps, tennis): on/off, stage and model file each. */
+  domains: Record<'crypto' | 'perps' | 'tennis', { enabled: boolean; stage: SnnConfig['stage']; modelPath: string }>;
+  /** Let a decision model read ANOTHER domain's SNN outputs (e.g. the crypto MLP reading the perps
+   *  SNN's 4h call). The SNNs themselves never read each other either way. Off by default. */
+  crossFeed: boolean;
 }
 
 export interface TennisConfig {
@@ -588,6 +599,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     huntTransitionBufferMin: num(env, 'HUNT_TRANSITION_BUFFER_MIN', 10, 0, 120),
     volSeasonality: bool(env, 'VOL_SEASONALITY', true),
     volProfilePath: path.resolve(env.VOL_PROFILE_PATH ?? './params/vol_profile.json'),
+    volModel: bool(env, 'VOL_MODEL', true),
+    volModelPath: path.resolve(env.VOL_MODEL_PATH ?? './params/vol_model.json'),
+    fillModelPath: path.resolve(env.FILL_MODEL_PATH ?? './params/fill_model.json'),
+    fillMinEv: num(env, 'FILL_MIN_EV', 0, -0.5, 0.5),
     takeGate: oneOf(env, 'TAKE_GATE', 'validated', ['validated', 'off'] as const),
     takeMargin: num(env, 'TAKE_MARGIN', 0, 0, 0.2),
   };
@@ -714,7 +729,6 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       stage: oneOf(env, 'SNN_STAGE', 'S5', ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const),
       columns: (env.SNN_COLUMNS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
       maxColumns: num(env, 'SNN_MAX_COLUMNS', 6, 1, 32),
-      modelPath: path.resolve(env.SNN_MODEL_PATH ?? './params/snn_model.json'),
       checkpointDir: path.resolve(env.SNN_CHECKPOINT_DIR ?? path.join(dataDir, 'snn')),
       checkpointEveryMin: num(env, 'SNN_CHECKPOINT_EVERY_MIN', 10, 1, 1440),
       worker: bool(env, 'SNN_WORKER', true),
@@ -727,6 +741,18 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       readoutEta: num(env, 'SNN_READOUT_ETA', 1e-4, 0, 0.1),
       seed: num(env, 'SNN_SEED', 20260601, 0, 2 ** 31),
       targetScaling: bool(env, 'SNN_TARGET_SCALING', true),
+      domains: (() => {
+        const stage = oneOf(env, 'SNN_STAGE', 'S5', ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const);
+        const st = (d: string, def: typeof stage) => oneOf(env, `SNN_${d}_STAGE`, def, ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const);
+        const mp = (d: string) => path.resolve(env[`SNN_${d}_MODEL_PATH`] ?? `./params/snn_${d.toLowerCase()}.json`);
+        return {
+          crypto: { enabled: bool(env, 'SNN_CRYPTO', true), stage: st('CRYPTO', stage), modelPath: mp('CRYPTO') },
+          perps: { enabled: bool(env, 'SNN_PERPS', true), stage: st('PERPS', stage), modelPath: mp('PERPS') },
+          // Tennis cannot be pretrained offline (no tennis replay): S3 by default (no PC pathway).
+          tennis: { enabled: bool(env, 'SNN_TENNIS', true), stage: st('TENNIS', 'S3'), modelPath: mp('TENNIS') },
+        };
+      })(),
+      crossFeed: bool(env, 'SNN_CROSS_FEED', false),
       deferred: {
         wilsonCowan: bool(env, 'SNN_WILSON_COWAN', false),
         gapJunctions: bool(env, 'SNN_GAP_JUNCTIONS', false),

@@ -10,14 +10,22 @@
 
 import { takerFee } from '../fees';
 import type { DenseLayer } from './metaModel';
+import { gbdtLogit, type GbdtModel } from './trees';
 import type { OrderPlan } from '../strategy/fairValueStrategy';
 
-export const TAKE_FEATURES = ['edge', 'logit_p_side', 'price_side', 'spread', 'tau_min', 'snn_up_side', 'snn_bias_side', 'snn_agree_side', 'p_std'] as const;
+export const TAKE_FEATURES = ['edge', 'logit_p_side', 'price_side', 'spread', 'tau_min', 'snn_up_side', 'snn_bias_side', 'snn_agree_side', 'p_std', 'snn_skill_h', 'snn_cal_h'] as const;
+/** Index of logit_p_side: the tree candidate learns a residual on the fair-value probability. */
+export const TAKE_RESIDUAL = 1;
 
 export interface TakeModelParams {
   features: string[];
-  normalization: { mean: number[]; std: number[] };
-  layers: DenseLayer[];
+  /** mlp (default for older files) or gbdt (boosted trees on the logit of the fair-value side probability). */
+  kind?: 'mlp' | 'gbdt';
+  normalization?: { mean: number[]; std: number[] };
+  layers?: DenseLayer[];
+  gbdt?: GbdtModel;
+  /** Candidates compared on the inner validation split (log loss); the lower one was kept. */
+  candidates?: { kind: 'mlp' | 'gbdt'; valLogLoss: number }[];
   /** Held-out check (last 30% of OOF trade windows): log loss of P(win) vs the fair-value probability. */
   validation: { trades: number; windows: number; logLossBase: number; logLossTake: number; validated: boolean };
 }
@@ -39,6 +47,9 @@ export function takeInputs(side: 'yes' | 'no', pYes: number, price: number, spre
     Number.isFinite(bias) ? s * bias : NaN,
     Number.isFinite(up) ? s * Math.sign(up) : NaN,
     pStd ?? NaN,
+    // The crypto network's confidence in its own calls (graded direction skill, contract calibration).
+    Number.isFinite(f.snn_skill_h) ? f.snn_skill_h : NaN,
+    Number.isFinite(f.snn_cal_h) ? f.snn_cal_h : NaN,
   ];
 }
 
@@ -48,10 +59,13 @@ function forward(layer: DenseLayer, x: number[]): number[] {
   return layer.activation === 'tanh' ? out.map(Math.tanh) : layer.activation === 'relu' ? out.map((v) => Math.max(0, v)) : out;
 }
 
-/** P(trade wins). Missing inputs are imputed as the training mean. */
+/** P(trade wins). MLP: missing inputs are imputed as the training mean; trees route them by learned defaults. */
 export function takeProbability(p: TakeModelParams, x: number[]): number {
-  let h = x.map((v, i) => (Number.isFinite(v) ? (v - p.normalization.mean[i]) / p.normalization.std[i] : 0));
-  for (const l of p.layers) h = forward(l, h);
+  // Older files were trained on fewer inputs: use the leading ones.
+  x = x.slice(0, p.features.length);
+  if (p.kind === 'gbdt' && p.gbdt) return 1 / (1 + Math.exp(-(gbdtLogit(p.gbdt, x) + x[TAKE_RESIDUAL])));
+  let h = x.map((v, i) => (Number.isFinite(v) ? (v - p.normalization!.mean[i]) / p.normalization!.std[i] : 0));
+  for (const l of p.layers!) h = forward(l, h);
   return 1 / (1 + Math.exp(-h[0]));
 }
 

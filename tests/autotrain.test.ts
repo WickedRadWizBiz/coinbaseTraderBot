@@ -61,7 +61,10 @@ function fakeEngine() {
     get model() { return model; },
     setModel(m: MetaModel) { model = m; calls.push(`model:${m.id}`); },
     setVolProfile() { calls.push('vol'); },
-    snn: undefined, setSnn(x: unknown) { calls.push('snn'); (e as any).__lastSnn = x; }, saveSnnBlender() { /* noop */ }, setTennisFair() { calls.push('tennis'); },
+    snn: { units: {} as Record<string, unknown> },
+    setSnnUnit(domain: string, u: unknown) { calls.push(`snn:${domain}`); e.snn.units[domain] = u; },
+    saveSnnBlender() { /* noop */ }, setTennisFair() { calls.push('tennis'); },
+    setVolModel(m: unknown) { calls.push(`vol_model:${m ? 'set' : 'none'}`); }, setFillModel(m: { validated: boolean } | undefined) { calls.push(`fill:${m?.validated ? 'active' : 'inactive'}`); },
   };
   return { engine: e as unknown as Engine, calls };
 }
@@ -85,18 +88,19 @@ test('hot swap: a new model.json goes live in the running engine; a new SNN retr
   assert.equal(t.status().running, false);
   await t.watch();
   assert.equal(calls.filter((c) => c.startsWith('model:')).length, 1, 'same file: no second swap');
-  // A new SNN model: swapped in, and the MLP / perps / tennis retrain is launched.
+  // A new crypto network: swapped in alone, and only its consumer (dataset + MLP) is retrained.
   const sp = withFlags({ ...DEFAULT_SNN, nE: 16, nI: 4, nL1: 8 }, {});
   const net = new SnnNetwork(sp);
   net.step(T0, [{ key: 'BTC-15m', asset: 'BTC', price: 60000 }]);
-  fs.writeFileSync(path.join(cfg.autoTrain.dir, 'snn_model.json'), JSON.stringify({ ...net.exportModel('t'), version: versionHash(sp) }));
+  fs.writeFileSync(path.join(cfg.autoTrain.dir, 'snn_crypto.json'), JSON.stringify({ ...net.exportModel('t'), version: versionHash(sp) }));
   now = Date.now() + 10_000;
   await t.watch();
-  assert.ok(calls.includes('snn'), `snn swapped: ${calls}`);
+  assert.ok(calls.includes('snn:crypto'), `snn swapped: ${calls}`);
+  assert.ok(!calls.includes('snn:perps') && !calls.includes('snn:tennis'), 'the other networks are untouched');
   assert.equal(t.status().running, true, 'retrain launched');
   await new Promise((r) => setTimeout(r, 400));
-  assert.deepEqual(t.status().lastExit!.args, ['--only', 'dataset,mlp,perps,tennis']);
-  await (engine as any).__lastSnn?.host.stop?.();
+  assert.deepEqual(t.status().lastExit!.args, ['--only', 'dataset,mlp']);
+  await ((engine as any).snn.units.crypto as { host: { stop(): Promise<void> } } | undefined)?.host.stop();
 });
 
 test('scheduler: daily at the configured UTC hour, once per day', () => {
@@ -129,26 +133,36 @@ test('pipeline end to end: SNN first, backfilled SNN outputs, then the MLP train
   const logs: string[] = [];
   const r = await runPipeline({ cfg, only: ['snn', 'dataset', 'mlp', 'perps', 'tennis'], ablationOnly: 'S1', log: (m) => logs.push(m), now: T0 });
   const order = r.steps.map((s) => s.step);
-  assert.deepEqual(order, ['snn-ablation', 'snn-train', 'snn-backfill', 'dataset', 'mlp', 'perps', 'tennis'], 'SNN before the models that read it');
+  assert.deepEqual(order, ['snn-crypto-ablation', 'snn-crypto-train', 'snn-crypto-backfill', 'snn-perps-ablation', 'snn-perps-train', 'snn-perps-backfill', 'snn-tennis', 'dataset', 'mlp', 'perps', 'tennis'], 'every network before the models that read it');
   const by = Object.fromEntries(r.steps.map((s) => [s.step, s]));
   assert.ok(r.steps.every((s) => s.ok), JSON.stringify(r.steps.map((s) => [s.step, s.ok, s.skipped, s.error?.slice(0, 300)])));
   assert.match(String(by.perps.skipped), /no perp quotes/, 'no perp data: skipped, not failed');
   assert.match(String(by.tennis.skipped), /tennis matches/, 'no tennis data: skipped, not failed');
   // The backfill wrote prequential 'snn' events the dataset joined as features.
-  const fill = path.join(cfg.autoTrain.dir, 'work', 'snnfill');
-  const files = fs.readdirSync(fill).filter((f) => f.startsWith('snnfill-'));
-  assert.equal(files.length, 1);
-  const first = JSON.parse(fs.readFileSync(path.join(fill, files[0]), 'utf8').split('\n')[0]);
-  assert.equal(first.k, 'snn'); assert.ok(first.dirs.some((d: unknown[]) => d[0] === 'BTC-15m'));
+  for (const [d, want, never] of [['crypto', 'BTC-15m', 'BTC-240m'], ['perps', 'BTC-240m', 'BTC-15m']] as const) {
+    const fill = path.join(cfg.autoTrain.dir, 'work', 'snnfill', d);
+    const files = fs.readdirSync(fill).filter((f) => f.startsWith('snnfill-'));
+    assert.equal(files.length, 1);
+    const first = JSON.parse(fs.readFileSync(path.join(fill, files[0]), 'utf8').split('\n')[0]);
+    assert.equal(first.k, 'snn'); assert.equal(first.d, d);
+    assert.ok(first.dirs.some((x: unknown[]) => x[0] === want), `${d} network calls ${want}`);
+    assert.ok(!first.dirs.some((x: unknown[]) => x[0] === never), `${d} network has no ${never} column`);
+    assert.equal(first.dirs[0].length, 9, 'each call carries its confidence (skill, calConf, contractSkill, surprise, G)');
+    if (d === 'perps') assert.deepEqual(first.c, {}, 'the perps network scores no contracts');
+  }
   const rows = fs.readFileSync(path.join(cfg.autoTrain.dir, 'work', 'dataset.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.ok(rows.filter((x) => Number.isFinite(x.fx.snn_up_15m)).length > rows.length * 0.5, 'SNN direction available as an MLP input');
   const mlp = MetaModel.load(path.join(cfg.autoTrain.dir, 'model.json'));
   assert.equal(mlp.params.kind, 'mlp', 'MLP-only default');
-  assert.equal(r.state.mlpTrainedWithSnn, r.state.snnVersion, 'the promoted MLP was trained on the promoted SNN\'s outputs');
-  assert.ok(fs.existsSync(path.join(cfg.autoTrain.dir, 'snn_model.json')));
+  assert.ok(r.state.snnVersions?.crypto && r.state.snnVersions?.perps);
+  assert.equal(r.state.trainedWithSnn?.crypto, r.state.snnVersions?.crypto, 'the promoted MLP was trained on the promoted crypto network\'s outputs');
+  assert.ok(fs.existsSync(path.join(cfg.autoTrain.dir, 'snn_crypto.json')) && fs.existsSync(path.join(cfg.autoTrain.dir, 'snn_perps.json')));
+  assert.notEqual(r.state.snnVersions?.crypto, r.state.snnVersions?.perps, 'separate networks with their own params');
   assert.ok(fs.existsSync(r.report));
   // Re-running the SNN steps soon after: ablation not due, training up to date, backfill incremental.
   const again = await runPipeline({ cfg, only: ['snn'], ablationOnly: 'S1', log: () => undefined, now: T0 + 3_600_000 });
-  assert.match(String(again.steps.find((s) => s.step === 'snn-ablation')!.skipped), /not due/);
-  assert.match(String(again.steps.find((s) => s.step === 'snn-train')!.skipped), /up to date/);
+  for (const d of ['crypto', 'perps']) {
+    assert.match(String(again.steps.find((s) => s.step === `snn-${d}-ablation`)!.skipped), /not due/);
+    assert.match(String(again.steps.find((s) => s.step === `snn-${d}-train`)!.skipped), /up to date/);
+  }
 });

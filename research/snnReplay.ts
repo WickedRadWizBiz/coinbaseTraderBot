@@ -7,14 +7,14 @@
 import fs from 'fs';
 import path from 'path';
 import { assetFeatureMap, computeFeatureMap, type MacroEvent } from '../bot/model/featureEngine';
-import { CRYPTO_HORIZONS, cryptoColumnKey, cryptoValues, type CryptoHorizon } from '../bot/snn/inputs';
+import { cryptoColumnKey, cryptoValues, DOMAIN_HORIZONS, type CryptoHorizon } from '../bot/snn/inputs';
 import { priceContract, SETTLEMENT_AVG_SEC } from '../bot/model/fairValue';
 import { ladderQuotes } from '../bot/model/ladder';
 import { MetaModel } from '../bot/model/metaModel';
 import { N_BASE } from '../bot/snn/column';
 import { brier, sigmoid } from '../bot/snn/formulas';
 import { SnnNetwork, type ColumnInput, type ContractQuery, type SnnCheckpoint, type SnnModelFile } from '../bot/snn/network';
-import type { SnnParams } from '../bot/snn/params';
+import type { SnnDomain, SnnParams } from '../bot/snn/params';
 import { exceedLabel } from '../bot/snn/readout';
 import { readRecordings, ReplayState, type RecMarket } from './replay';
 
@@ -59,6 +59,11 @@ export interface SnnReplayOpts {
   /** Only read recording files in this day range (YYYY-MM-DD, inclusive; warm-up included by the caller). */
   fromDay?: string;
   toDay?: string;
+  /** Which isolated network to replay (params should come from domainParams(domain, ...)):
+   *  crypto = 15m/60m columns with contract channels, scored against settlements;
+   *  perps = 1h/4h columns from asset-level data only, no contracts (perps never settle), graded on
+   *  their direction calls alone. Tennis is not replayable (no recorded score feed) and learns live. */
+  domain?: Exclude<SnnDomain, 'tennis'>;
 }
 
 /** Same mapping as the engine's snnColumn: 15-minute contracts -> asset-15m, hourly -> asset-60m. */
@@ -66,7 +71,11 @@ export const columnOf = (m: { asset: string; openTime: number; closeTime: number
 
 export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnReplayResult> {
   const st = new ReplayState();
+  const domain = o.domain ?? 'crypto';
+  const horizons = DOMAIN_HORIZONS[domain];
+  const contracts = domain === 'crypto';
   const net = new SnnNetwork(o.params, { whitelist: o.whitelist, model: o.snnModel });
+  net.dirLog = [];
   net.training = Boolean(o.training?.eprop);
   if (o.checkpoint) net.restore(o.checkpoint);
   const model = o.model ?? MetaModel.identity();
@@ -173,9 +182,9 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
         ac = { ts: st.now, f: assetFeatureMap(asset, st.now, { index: idx, spot: st.spot.get(asset), bars: st.features.bars.get(asset), candles: st.features.candles.get(asset), usdtd: st.usdtd, btcd: st.btcd, perp: st.features.perps.get(asset) }) };
         assetCache.set(asset, ac);
       }
-      for (const h of CRYPTO_HORIZONS) {
+      for (const h of horizons) {
         const key = cryptoColumnKey(asset, h);
-        const m = atm.get(key), x = m ? priced.get(m.ticker) : undefined;
+        const m = contracts ? atm.get(key) : undefined, x = m ? priced.get(m.ticker) : undefined;
         const contract = m && x ? { dAtm: x.fv.d2, tauFrac: x.tauSec / Math.max(1, (m.closeTime - m.openTime) / 1000), mid: x.mid, spread: x.ask.price - x.bid.price, imbalance: x.book.imbalance(3) } : undefined;
         inputs.push({ key, asset, price: px, mid: contract?.mid, values: cryptoValues(h as CryptoHorizon, ac.f, contract) });
       }
@@ -188,7 +197,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     if (T % scoreEvery !== 0) { stepMs.push(performance.now() - t0); continue; }
     // Score every open contract.
     const queries: ContractQuery[] = [];
-    for (const m of active) {
+    for (const m of contracts ? active : []) {
       const x = priced.get(m.ticker);
       if (!x) continue;
       queries.push({ ticker: m.ticker, column: columnOf(m), kind: x.terms.kind, strike: x.terms.strike, cap: x.terms.cap, spot: x.spot.value, sigma: x.vol.sigmaPerSqrtSec, tauSec: x.tauSec, lifeSec: (m.closeTime - m.openTime) / 1000, eventKey: `${m.asset}:${m.closeTime}`, tag: m.closeTime - st.now > noEntry });
@@ -199,7 +208,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
       const day = new Date(T).toISOString().slice(0, 10);
       const file = path.join(o.backfillDir, `snnfill-${day}.jsonl`);
       if (!backfillOut.has(file)) { fs.writeFileSync(file, ''); backfillOut.set(file, 0); }
-      fs.appendFileSync(file, JSON.stringify({ t: T, k: 'snn', backfill: true, dirs: net.directions().map((d) => [d.key, +d.pUp.toFixed(5), +d.expSignedMove.toFixed(3), d.labelled]), c: Object.fromEntries(scores.map((sc) => [sc.ticker, +sc.p.toFixed(5)])) }) + '\n');
+      fs.appendFileSync(file, JSON.stringify({ t: T, k: 'snn', backfill: true, d: domain, dirs: net.directions().map(dirRow), c: Object.fromEntries(scores.map((sc) => [sc.ticker, +sc.p.toFixed(5)])) }) + '\n');
       backfillOut.set(file, backfillOut.get(file)! + 1);
     }
     const day = new Date(T).toISOString().slice(0, 10);
@@ -252,7 +261,29 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     const a = cap(pr.sal), b = cap(pr.edge);
     if (Number.isFinite(a) && Number.isFinite(b)) ranking.push({ ts: pr.ts, bySalience: a, byEdge: b });
   }
+  // Perps never settle: grade the network on its own direction calls (each logged before its label).
+  if (!contracts) rows.push(...directionRows(net.dirLog));
   return { rows, net, stepMs, frozenSteps, steps, ranking, collected };
+}
+
+const r5 = (x: number) => (Number.isFinite(x) ? +x.toFixed(5) : null);
+/** Logged direction row, same layout as the engine's 'snn' events:
+ *  [key, pUp, expSignedMove, labelled, skill, calConf, contractSkill, surpriseRatio, G]. */
+export const dirRow = (d: ReturnType<SnnNetwork['directions']>[number]) =>
+  [d.key, +d.pUp.toFixed(5), +d.expSignedMove.toFixed(3), d.labelled, r5(d.skill), r5(d.calConf), r5(d.contractSkill), r5(d.surpriseRatio), r5(d.G)] as const;
+
+/** Graded direction calls as rows for the ablation: the baseline ("model") is the prequential up-rate
+ *  of the same column (a no-skill forecaster), the "market" a coin flip. Calls are clustered by
+ *  column-hour so overlapping horizons are not counted as independent events. */
+export function directionRows(log: { key: string; ts: number; p: number; y: 0 | 1 }[] = []): SnnRow[] {
+  const rate = new Map<string, { up: number; n: number }>();
+  return log.map((d) => {
+    const r = rate.get(d.key) ?? { up: 1, n: 2 };
+    const base = r.up / r.n;
+    r.up += d.y; r.n++;
+    rate.set(d.key, r);
+    return { ticker: `${d.key}:${d.ts}`, eventKey: `${d.key}:${Math.floor(d.ts / 3_600_000)}`, column: d.key, ts: d.ts, day: new Date(d.ts).toISOString().slice(0, 10), kind: 'direction', pModel: base, pSnn: d.p, mid: 0.5, y: d.y, surprise: 0, surprise0: 1, G: 1, volRatio: 1 };
+  });
 }
 
 export const meanBrier = (rows: SnnRow[], f: (r: SnnRow) => number) => rows.reduce((a, r) => a + brier(f(r), r.y), 0) / Math.max(1, rows.length);

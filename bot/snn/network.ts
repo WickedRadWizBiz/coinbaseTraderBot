@@ -64,6 +64,27 @@ export interface DirectionPred {
   key: string; asset: string; kind: 'crypto' | 'tennis'; horizonSec: number;
   pUp: number; expMove: number; expSignedMove: number;
   labelled: number; brier: number | null;
+  /** Confidence of this column's outputs, from its own graded history (NaN until enough):
+   *  skill = 1 - Brier/0.25 of the direction calls over the last 500 graded (0 = coin flip),
+   *  calConf = calibration confidence of the contract readout on settled snapshots (1 = slope 1,
+   *  0 at |slope - 1| >= 0.5), contractSkill = 1 - Brier/0.25 of those snapshots, surpriseRatio =
+   *  current surprise / reference (> 1 = more confused than usual), G = governor level. */
+  skill: number; calConf: number; contractSkill: number; settled: number; surpriseRatio: number; G: number;
+}
+
+/** Brier skill vs a coin flip over the most recent graded predictions (NaN below `min`). */
+export function brierSkill(h: { p: number; y: number }[], n = 500, min = 50): number {
+  const r = h.slice(-n);
+  if (r.length < min) return NaN;
+  return 1 - r.reduce((a, x) => a + (x.p - x.y) ** 2, 0) / r.length / 0.25;
+}
+
+/** Calibration confidence from the reliability slope (NaN below `min`). */
+export function calibrationConfidence(h: { p: number; y: number }[], n = 500, min = 50): number {
+  const r = h.slice(-n);
+  if (r.length < min) return NaN;
+  const b = calibrationSlope(r.map((x) => x.p), r.map((x) => x.y));
+  return Number.isFinite(b) ? Math.max(0, Math.min(1, 1 - Math.abs(b - 1) / 0.5)) : NaN;
 }
 
 interface DirTag { ts: number; phi: Float32Array; p: number; price0: number }
@@ -115,6 +136,8 @@ export class SnnNetwork {
   nanRestores = 0;
   /** Offline training only: accumulate e-prop eligibility in columns that carry an `elig` array. */
   training = false;
+  /** Research only: every graded direction call (ablation of direction-only domains such as perps). */
+  dirLog?: { key: string; ts: number; p: number; y: 0 | 1 }[];
 
   constructor(p: SnnParams = DEFAULT_SNN, opts: { whitelist?: string[]; model?: SnnModelFile; health?: HealthOpts } = {}) {
     this.p = p;
@@ -159,9 +182,13 @@ export class SnnNetwork {
       const pUp = ro.predict(c.features(0, 0, this.extras(c)));
       const st = this.dirStats.get(c.key);
       const expMove = st?.absMove ?? 0;
+      const cr = this.readouts.get(c.key)!;
+      const s0 = this.health.ref?.surprise;
       return {
         key: c.key, asset: c.asset, kind: c.kind, horizonSec: c.horizonSec, pUp, expMove, expSignedMove: (2 * pUp - 1) * expMove,
         labelled: ro.history.length, brier: Number.isFinite(ro.brierSlow) ? ro.brierSlow : null,
+        skill: brierSkill(ro.history), calConf: calibrationConfidence(cr.history), contractSkill: brierSkill(cr.history), settled: cr.history.length,
+        surpriseRatio: s0 && s0 > 0 && c.surprise > 0 ? c.surprise / s0 : NaN, G: c.G,
       };
     });
   }
@@ -182,6 +209,7 @@ export class SnnNetwork {
         const st = this.dirStats.get(c.key) ?? { absMove: move, n: 0 };
         st.absMove += (move - st.absMove) / Math.min(200, ++st.n);
         this.dirStats.set(c.key, st);
+        this.dirLog?.push({ key: c.key, ts: t.ts, p: t.p, y });
         ro.tag('dir', 'greater', 'strike', t.phi, t.p, t.ts);
         ro.settle('dir', y ? 'yes' : 'no', ts, 1 - this.p.govDelta * c.G, learn);
       }

@@ -25,6 +25,8 @@ export interface PopSpec { name: string; lo: number; hi: number }
 export const CRYPTO_HORIZONS = [15, 60, 240] as const;
 export type CryptoHorizon = typeof CRYPTO_HORIZONS[number];
 export const TENNIS_DIRECTION_SEC = 300;
+/** Column horizons per isolated SNN: crypto contracts (15m, 1h) and perps (1h, 4h). */
+export const DOMAIN_HORIZONS: { crypto: CryptoHorizon[]; perps: CryptoHorizon[] } = { crypto: [15, 60], perps: [60, 240] };
 
 /** TA timeframes encoded by each crypto horizon (the library computes 15m, 1h, 4h). */
 export const TA_TFS: Record<CryptoHorizon, [string, string]> = { 15: ['15m', '1h'], 60: ['1h', '4h'], 240: ['1h', '4h'] };

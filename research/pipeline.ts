@@ -2,26 +2,30 @@
 // promoting the results to AUTO_TRAIN_DIR (data/models), where the running bot picks them up
 // without a restart (bot/autotrain.ts).
 //
-// The SNN informs, the MLP decides: the MLP (and the perps and tennis models) use the SNN's
-// direction calls and fair-value bias as inputs, so the SNN comes FIRST and every model that reads
-// it is retrained after it:
+// Three isolated SNNs inform, the decision models decide. Each network (crypto, perps, tennis)
+// reads only its own domain's inputs and is read only by its own decision model (MLP, perps model,
+// tennis model), so every network comes FIRST and each model that reads it is retrained after it:
 //
-//   1. snn-ablation  stages S0..S6 (and deferred mechanisms vs their proxies), when due
-//   2. snn-train     at the best accepted stage -> promote snn_model.json
-//   3. snn-backfill  prequential SNN outputs for recorded minutes without live 'snn' logs
-//                    (day by day, resumable; no output ever saw its own label) -> work/snnfill
-//   4. dataset       research:dataset (with the logged/backfilled SNN outputs)
-//   5. mlp           research:train (MLP fair value + take/skip head) -> backtest --annotate -> promote
-//   6. vol           intraday volatility profile -> promote
-//   7. perps         perp-train (with SNN 1h/4h direction) -> perp-backtest --annotate -> promote
-//   8. tennis        tennis MLP (4 signals, score, book, SNN) -> promote
+//   1. snn           per replayable network (crypto: 15m/1h with contracts; perps: 1h/4h, graded on
+//                    direction calls): ablation when due -> train at the best accepted stage ->
+//                    promote snn_<domain>.json -> prequential backfill (work/snnfill/<domain>).
+//                    The tennis network learns live only (no recorded score feed to replay).
+//   2. vol_model     tree-based volatility forecast (sigma multiplier for fair value) -> promote
+//   3. dataset       research:dataset (with the crypto network's logged/backfilled outputs)
+//   4. mlp           research:train (MLP fair value + take/skip head, tree candidates) -> backtest -> promote
+//   5. vol           intraday volatility profile -> promote
+//   6. perps         perp-train (perps network's 1h/4h calls; MLP/tree candidates) -> perp-backtest -> promote
+//   7. tennis        tennis model (4 signals, score, book, tennis network; MLP vs trees) -> promote
+//   8. fill          fill / adverse-selection model from the bot's own maker quotes: skipped until
+//                    enough quotes and fills exist, promoted once it beats the base rate on holdout;
+//                    the engine starts using it the moment a validated file appears.
 //
-// A new SNN triggers the MLP/perps/tennis retrain on its own (the bot watches snn_model.json,
-// AUTO_TRAIN_ON_MODEL_CHANGE), because those models were trained on the previous SNN's outputs.
+// A new network triggers the retrain of its own consumer only (the bot watches snn_<domain>.json,
+// AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: snn, dataset, mlp, vol, perps, tennis
-//   npm run pipeline -- --force-ablation     # re-run the SNN ablation even if not due
+//   npm run pipeline -- --only mlp,perps     # steps: snn, vol_model, dataset, mlp, vol, perps, tennis, fill
+//   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 
 import fs from 'fs';
 import path from 'path';
@@ -30,7 +34,10 @@ import { loadConfig, type Config } from '../bot/config';
 import { MetaModel } from '../bot/model/metaModel';
 import { PerpModel } from '../bot/perps/perpSignal';
 import type { SnnCheckpoint } from '../bot/snn/network';
-import { DEFAULT_SNN, STAGES, stageFlags, type Stage } from '../bot/snn/params';
+import { DEFAULT_SNN, domainParams, STAGES, stageFlags, type SnnDomain, type Stage } from '../bot/snn/params';
+import { FillModel } from '../bot/tca/fillModel';
+import { trainFillMain } from './trainFillModel';
+import { trainVolModelMain } from './trainVolModel';
 import { backtestMain } from './backtest';
 import { buildDatasetMain } from './buildDataset';
 import { perpBacktestMain } from './perpBacktest';
@@ -42,20 +49,29 @@ import { trainPerpMain } from './trainPerpModel';
 import { trainSnnMain } from './trainSnn';
 import { trainTennisMain } from './trainTennisModel';
 
-export const STEPS = ['snn', 'dataset', 'mlp', 'vol', 'perps', 'tennis'] as const;
+export const STEPS = ['snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill'] as const;
 export type Step = typeof STEPS[number];
+
+/** Per replayable network. */
+export interface SnnDomainState {
+  lastAblation?: number;
+  stage?: Stage;
+  version?: string;
+  /** Last day fully backfilled with prequential outputs, and the stage of that backfill. */
+  backfillThrough?: string;
+  backfillStage?: Stage;
+}
+
+export const REPLAYABLE: Exclude<SnnDomain, 'tennis'>[] = ['crypto', 'perps'];
 
 export interface PipelineState {
   lastRun?: number;
-  lastAblation?: number;
   mlpId?: string;
-  snnStage?: Stage;
-  snnVersion?: string;
-  /** SNN version whose outputs the promoted MLP / perps / tennis models were trained with. */
-  mlpTrainedWithSnn?: string;
-  /** Last day fully backfilled with prequential SNN outputs, and the network state after it. */
-  backfillThrough?: string;
-  backfillStage?: Stage;
+  snn?: Partial<Record<SnnDomain, SnnDomainState>>;
+  /** Promoted network version per domain. */
+  snnVersions?: Partial<Record<SnnDomain, string>>;
+  /** Network version whose outputs each consumer (crypto = MLP, perps, tennis) was trained with. */
+  trainedWithSnn?: Partial<Record<SnnDomain, string>>;
   lastReport?: string;
 }
 
@@ -108,8 +124,9 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const log = o.log ?? ((m: string) => console.log(`[pipeline] ${m}`));
   const now = o.now ?? Date.now();
   const work = path.join(A.dir, 'work');
-  const fill = path.join(work, 'snnfill');
-  fs.mkdirSync(fill, { recursive: true });
+  const fillRoot = path.join(work, 'snnfill');
+  const fillDir = (d: SnnDomain) => path.join(fillRoot, d);
+  for (const d of REPLAYABLE) fs.mkdirSync(fillDir(d), { recursive: true });
   const state = readState(A.dir);
   const steps: StepResult[] = [];
   const want = (s: Step) => !o.only?.length || o.only.includes(s);
@@ -136,69 +153,100 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const lastDays = (n: number) => (days.length ? days.slice(-n) : []);
   const mlpPath = () => (fs.existsSync(promoted('mlp')) ? promoted('mlp') : fs.existsSync(cfg.paramsPath) ? cfg.paramsPath : undefined);
 
-  // ---- 1-3. SNN first: ablation (when due) -> train at the best accepted stage -> backfill ----
-  let snnChanged = false;
+  // ---- 1. The networks first, each alone: ablation (when due) -> train -> backfill ----
+  const snnChanged: SnnDomain[] = [];
+  state.snn ??= {}; state.snnVersions ??= {}; state.trainedWithSnn ??= {};
   if (want('snn')) {
-    const due = o.forceAblation || !state.lastAblation || (A.ablationEveryDays > 0 && now - state.lastAblation >= A.ablationEveryDays * 86_400_000);
-    let stage: Stage = A.snnStage === 'auto' ? (state.snnStage ?? cfg.snn.stage) : A.snnStage;
-    let stageAccepted = false;
-    const abDays = lastDays(A.ablationDays);
-    const verdicts = await run('snn-ablation', async () => {
-      const v = await snnAblationMain(argsOf({ recordings: rec, model: mlpPath(), from: abDays[0], out: path.join(work, 'snn_ablation.json'), only: o.ablationOnly }));
-      state.lastAblation = now;
-      return v;
-    }, tooFew ?? (due ? undefined : 'not due (ablated recently)')) as Verdict[] | undefined;
-    if (verdicts) {
-      const k = acceptedChain(verdicts);
-      if (A.snnStage === 'auto') stage = k > 0 ? STAGES[k] : cfg.snn.stage;
-      stageAccepted = k > 0 && STAGES.indexOf(stage) <= k;
-    }
-    const trainNeeded = Boolean(verdicts) || !fs.existsSync(promoted('snn')) || state.snnStage !== stage;
-    await run('snn-train', async () => {
-      const span = lastDays(A.snnTrainDays);
-      const nEval = span.length >= 2 ? Math.max(1, Math.round(span.length * 0.2)) : 0;
-      const trainSpan = span.slice(0, span.length - nEval), evalSpan = span.slice(span.length - nEval);
-      const cand = path.join(work, 'snn_model.candidate.json');
-      const r = await trainSnnMain(argsOf({
-        recordings: rec, stage, out: cand, model: mlpPath(),
-        from: trainSpan[0], to: evalSpan[0] ?? undefined,
-        'eval-from': evalSpan[0], 'eval-to': evalSpan.length ? nextDay(evalSpan[evalSpan.length - 1]) : undefined,
-      }));
-      if (A.promote === 'validated' && !stageAccepted) return { promoted: false, stage, reason: 'stage not accepted by the ablation', result: r };
-      fs.copyFileSync(cand, promoted('snn'));
-      snnChanged = state.snnVersion !== r?.version;
-      state.snnStage = stage;
-      state.snnVersion = r?.version;
-      return { promoted: true, stage, stageAccepted, result: r };
-    }, tooFew ?? (trainNeeded ? undefined : 'up to date'));
-    // Prequential backfill, day by day from the last backfilled day (a fresh online network of the
-    // promoted stage: it was never fitted offline on these days, so no output saw its own label).
-    await run('snn-backfill', async () => {
-      if (state.backfillStage !== stage) { for (const f of fs.readdirSync(fill)) fs.rmSync(path.join(fill, f), { force: true }); state.backfillThrough = undefined; state.backfillStage = stage; }
-      const todo = days.filter((d) => !state.backfillThrough || d >= state.backfillThrough);
-      let cp: SnnCheckpoint | undefined;
-      const cpFile = path.join(fill, 'state.json');
-      if (state.backfillThrough && fs.existsSync(cpFile)) cp = JSON.parse(fs.readFileSync(cpFile, 'utf8'));
-      const params = { ...DEFAULT_SNN, flags: { ...stageFlags(stage), ...cfg.snn.deferred }, seed: cfg.snn.seed, maxColumns: cfg.snn.maxColumns, readoutEta: cfg.snn.readoutEta };
-      let filled = 0;
-      for (const d of todo) {
-        // The day before warms up the trackers; outputs are written only for day d.
-        const prev = days[days.indexOf(d) - 1];
-        const r = await replaySnn(rec, { params, checkpoint: cp, backfillDir: fill, from: dayMs(d), to: dayMs(nextDay(d)), fromDay: prev ?? d, toDay: d });
-        cp = r.net.serialize();
-        filled++;
-        // Today is redone next run (it is still being recorded); completed days are final.
-        if (d < new Date(now).toISOString().slice(0, 10)) { state.backfillThrough = nextDay(d); writeAtomic(cpFile, JSON.stringify(cp)); }
+    for (const domain of REPLAYABLE) {
+      if (!cfg.snn.domains[domain].enabled) { await run(`snn-${domain}`, async () => undefined, `SNN_${domain.toUpperCase()}=false`); continue; }
+      const ds: SnnDomainState = (state.snn[domain] ??= {});
+      const fill = fillDir(domain);
+      const file = promoted(`snn_${domain}`);
+      const base = cfg.snn.domains[domain].stage;
+      const due = o.forceAblation || !ds.lastAblation || (A.ablationEveryDays > 0 && now - ds.lastAblation >= A.ablationEveryDays * 86_400_000);
+      let stage: Stage = A.snnStage === 'auto' ? (ds.stage ?? base) : A.snnStage;
+      let stageAccepted = false;
+      const abDays = lastDays(A.ablationDays);
+      // The crypto network is judged on settled contracts against the MLP; perps on its own direction calls.
+      const verdicts = await run(`snn-${domain}-ablation`, async () => {
+        const v = await snnAblationMain(argsOf({ recordings: rec, domain, model: domain === 'crypto' ? mlpPath() : undefined, from: abDays[0], out: path.join(work, `snn_${domain}_ablation.json`), only: o.ablationOnly }));
+        ds.lastAblation = now;
+        return v;
+      }, tooFew ?? (due ? undefined : 'not due (ablated recently)')) as Verdict[] | undefined;
+      if (verdicts) {
+        const k = acceptedChain(verdicts);
+        if (A.snnStage === 'auto') stage = k > 0 ? STAGES[k] : base;
+        stageAccepted = k > 0 && STAGES.indexOf(stage) <= k;
       }
-      return { days: filled, through: state.backfillThrough ?? null };
+      const trainNeeded = Boolean(verdicts) || !fs.existsSync(file) || ds.stage !== stage;
+      await run(`snn-${domain}-train`, async () => {
+        const span = lastDays(A.snnTrainDays);
+        const nEval = span.length >= 2 ? Math.max(1, Math.round(span.length * 0.2)) : 0;
+        const trainSpan = span.slice(0, span.length - nEval), evalSpan = span.slice(span.length - nEval);
+        const cand = path.join(work, `snn_${domain}.candidate.json`);
+        const r = await trainSnnMain(argsOf({
+          recordings: rec, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined,
+          from: trainSpan[0], to: evalSpan[0] ?? undefined,
+          'eval-from': evalSpan[0], 'eval-to': evalSpan.length ? nextDay(evalSpan[evalSpan.length - 1]) : undefined,
+        }));
+        if (A.promote === 'validated' && !stageAccepted) return { promoted: false, stage, reason: 'stage not accepted by the ablation', result: r };
+        fs.copyFileSync(cand, file);
+        if (state.snnVersions![domain] !== r?.version) snnChanged.push(domain);
+        ds.stage = stage;
+        ds.version = r?.version;
+        state.snnVersions![domain] = r?.version;
+        return { promoted: true, stage, stageAccepted, result: r };
+      }, tooFew ?? (trainNeeded ? undefined : 'up to date'));
+      // Prequential backfill, day by day from the last backfilled day (a fresh online network of the
+      // promoted stage: it was never fitted offline on these days, so no output saw its own label).
+      await run(`snn-${domain}-backfill`, async () => {
+        if (ds.backfillStage !== stage) { for (const f of fs.readdirSync(fill)) fs.rmSync(path.join(fill, f), { force: true }); ds.backfillThrough = undefined; ds.backfillStage = stage; }
+        const todo = days.filter((d) => !ds.backfillThrough || d >= ds.backfillThrough);
+        let cp: SnnCheckpoint | undefined;
+        const cpFile = path.join(fill, 'state.json');
+        if (ds.backfillThrough && fs.existsSync(cpFile)) cp = JSON.parse(fs.readFileSync(cpFile, 'utf8'));
+        const params = domainParams(domain, { ...DEFAULT_SNN, flags: { ...stageFlags(stage), ...cfg.snn.deferred }, seed: cfg.snn.seed, maxColumns: cfg.snn.maxColumns, readoutEta: cfg.snn.readoutEta });
+        let filled = 0;
+        for (const d of todo) {
+          // The day before warms up the trackers; outputs are written only for day d.
+          const prev = days[days.indexOf(d) - 1];
+          const r = await replaySnn(rec, { params, domain, checkpoint: cp, backfillDir: fill, from: dayMs(d), to: dayMs(nextDay(d)), fromDay: prev ?? d, toDay: d });
+          cp = r.net.serialize();
+          filled++;
+          // Today is redone next run (it is still being recorded); completed days are final.
+          if (d < new Date(now).toISOString().slice(0, 10)) { ds.backfillThrough = nextDay(d); writeAtomic(cpFile, JSON.stringify(cp)); }
+        }
+        return { days: filled, through: ds.backfillThrough ?? null };
+      }, tooFew);
+    }
+    await run('snn-tennis', async () => undefined, 'the tennis network learns live only (no recorded score feed to replay); its checkpoints persist in data/snn/tennis');
+  }
+  // Every later step reads the logged + backfilled outputs (each consumer picks its own network's).
+  process.env.SNN_BACKFILL_DIR = REPLAYABLE.map(fillDir).join(path.delimiter);
+  process.env.SNN_CROSS_FEED = String(cfg.snn.crossFeed);
+
+  // ---- 2. tree volatility forecast (fair value's sigma multiplier) ----
+  if (want('vol_model')) {
+    await run('vol_model', async () => {
+      const cand = path.join(work, 'vol_model.candidate.json');
+      let p;
+      try { p = await trainVolModelMain(argsOf({ recordings: rec, out: cand })); } catch (e) {
+        if (/need at least/.test((e as Error).message)) throw new SkipStep(`not enough index history yet (${(e as Error).message})`);
+        throw e;
+      }
+      if (A.promote === 'validated' && !p.validation.validated) return { promoted: false, validation: p.validation };
+      fs.copyFileSync(cand, promoted('vol_model'));
+      return { promoted: true, validation: p.validation };
     }, tooFew);
   }
-  // Every later step reads the logged + backfilled SNN outputs.
-  process.env.SNN_BACKFILL_DIR = fill;
 
   // ---- 4-5. dataset -> MLP (fair value + take/skip head) -> backtest -> promote ----
   const dataset = path.join(work, 'dataset.jsonl');
-  if (want('dataset') || want('mlp')) await run('dataset', () => buildDatasetMain(argsOf({ recordings: rec, out: dataset, every: 60 })), tooFew);
+  // Price the dataset and the backtest exactly as production will: with the vol forecast (when on)
+  // and the fill model (each is applied only if validated).
+  const volModelArg = cfg.strategy.volModel && fs.existsSync(promoted('vol_model')) ? promoted('vol_model') : undefined;
+  const fillModelArg = fs.existsSync(promoted('fill')) ? promoted('fill') : undefined;
+  if (want('dataset') || want('mlp')) await run('dataset', () => buildDatasetMain(argsOf({ recordings: rec, out: dataset, every: 60, 'vol-model': volModelArg })), tooFew);
   if (want('mlp')) {
     const cand = path.join(work, 'model.candidate.json');
     await run('mlp', async () => {
@@ -207,14 +255,14 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         if (/need at least \d+ windows/.test((e as Error).message)) throw new SkipStep(`not enough settlement windows yet: ${(e as Error).message}`);
         throw e;
       }
-      await backtestMain(argsOf({ recordings: rec, model: cand, exits: cfg.strategy.exitPolicy }), true);
+      await backtestMain(argsOf({ recordings: rec, model: cand, exits: cfg.strategy.exitPolicy, 'vol-model': volModelArg, 'fill-model': fillModelArg }), true);
       const m = MetaModel.load(cand);
       const passed = Boolean(m.params.validation?.passed);
       const usesSnn = m.params.features.some((f) => f.startsWith('snn_'));
       if (A.promote === 'validated' && !passed) return { promoted: false, id: m.id, reason: `validation not passed (${m.liveBlockers().join('; ')})` };
       fs.copyFileSync(cand, promoted('mlp'));
       state.mlpId = m.id;
-      state.mlpTrainedWithSnn = state.snnVersion;
+      state.trainedWithSnn!.crypto = state.snnVersions!.crypto;
       return { promoted: true, id: m.id, kind: m.params.kind, usesSnnFeatures: usesSnn, take: m.params.take?.validation ?? null, validationPassed: passed, liveBlockers: m.liveBlockers() };
     }, tooFew);
   }
@@ -243,6 +291,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const ok = Boolean(m?.validated());
       if (A.promote === 'validated' && !ok) return { promoted: false, reason: m?.blockers().join('; ') };
       fs.copyFileSync(cand, promoted('perp'));
+      state.trainedWithSnn!.perps = state.snnVersions!.perps;
       return { promoted: true, validated: ok, blockers: m?.blockers() ?? [] };
     }, tooFew);
   }
@@ -258,8 +307,27 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       }
       if (A.promote === 'validated' && !p.validation.validated) return { promoted: false, validation: p.validation };
       fs.copyFileSync(cand, promoted('tennis'));
+      state.trainedWithSnn!.tennis = state.snnVersions!.tennis;
       return { promoted: true, validation: p.validation };
     }, tooFew);
+  }
+
+  // ---- 8. fill / adverse-selection model: brings itself online once it validates ----
+  if (want('fill')) {
+    await run('fill', async () => {
+      const cand = path.join(work, 'fill_model.candidate.json');
+      let p;
+      try { p = await trainFillMain(argsOf({ fills: path.join(cfg.dataDir, 'fills'), out: cand })); } catch (e) {
+        if (/not ready/.test((e as Error).message)) throw new SkipStep(`collecting maker quotes (${(e as Error).message})`);
+        throw e;
+      }
+      // Promoted only once it beats the base rate on held-out days (in either promotion mode): the
+      // engine starts using a validated fill model as soon as the file appears.
+      if (!p.validation.validated) return { promoted: false, validation: p.validation, reason: 'does not beat the base rate on holdout yet' };
+      fs.copyFileSync(cand, promoted('fill'));
+      const m = FillModel.load(promoted('fill'));
+      return { promoted: true, active: Boolean(m?.validated), validation: p.validation };
+    });
   }
 
   state.lastRun = now;

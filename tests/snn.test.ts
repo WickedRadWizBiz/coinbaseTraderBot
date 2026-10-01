@@ -17,7 +17,7 @@ import { RiskGateway } from '../bot/risk/riskGateway';
 import { blendedTarget, dayBlockBootstrap, impliedQuantile, SnnBlender, TargetScaler, DEFAULT_BLENDER } from '../bot/snn/blender';
 import { SnnHealth } from '../bot/snn/health';
 import { SnnHost } from '../bot/snn/host';
-import { createSnn, snnParams } from '../bot/snn';
+import { createSnnFleet, snnParams } from '../bot/snn';
 import { SnnNetwork, type ColumnInput, type ContractQuery } from '../bot/snn/network';
 import { DEFAULT_SNN, stageFlags, versionHash, withFlags, type SnnParams } from '../bot/snn/params';
 import { CRYPTO_POP, cryptoValues, l0Width, tennisValues } from '../bot/snn/inputs';
@@ -384,7 +384,7 @@ test('config: SNN defaults to shadow, alpha capped at 0.25, 200 ms deadline', ()
   assert.throws(() => loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), SNN_ALPHA_MAX: '0.5' }));
   assert.throws(() => loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), SNN_TIMEOUT_MS: '500' }));
   assert.equal(snnParams(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), SNN_STAGE: 'S6' }).snn).flags.plasticity, true);
-  assert.equal(createSnn(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), SNN_MODE: 'off' }).snn), undefined);
+  assert.equal(createSnnFleet(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), SNN_MODE: 'off' }).snn), undefined);
 });
 
 async function engineSetup(mode: 'shadow' | 'blend') {
@@ -405,9 +405,8 @@ async function engineSetup(mode: 'shadow' | 'blend') {
   const kill = new KillSwitch(path.join(dir, 'kill.json'), audit);
   const oms = new Oms({ gateway: paper, audit, statePath: path.join(dir, 'oms.json'), feesFor: (t) => md.feesFor(t), sleep: async () => undefined });
   const recon = new Reconciler({ gateway: paper, oms, audit, getMarket: rest.getMarket, onPersistentBreak: (why) => void kill.engage(why, 'recon') });
-  const snn = createSnn({ ...cfg.snn, checkpointDir: path.join(dir, 'snn') }, { worker: false })!;
-  (snn.host as any).o.params = { ...snn.params };
-  await snn.host.start();
+  const snn = createSnnFleet({ ...cfg.snn, checkpointDir: path.join(dir, 'snn') }, {}, { worker: false })!;
+  for (const u of Object.values(snn.units)) await u!.host.start();
   const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), snn });
   const rr = await recon.run('startup');
   engine.balance = rr!.balance;
@@ -423,10 +422,18 @@ test('engine shadow mode: SNN scores every contract and is logged, but p_model i
   assert.ok(st.pSnn !== undefined && st.pSnn > 0 && st.pSnn < 1, JSON.stringify(st));
   assert.equal(st.pYes, st.pModel, 'shadow never changes the traded probability');
   assert.equal(st.snnShadow, 'shadow mode');
-  // Every crypto column is fed every second (not only while trading): 15m, 60m and the perp 240m.
-  for (const h of ['BTC-15m', 'BTC-60m', 'BTC-240m']) assert.ok(engine.snnDirs.has(h), `${h} direction call: ${[...engine.snnDirs.keys()]}`);
+  // Two isolated networks fed every second (not only while trading): crypto 15m/1h, perps 1h/4h.
+  for (const k of ['crypto:BTC-15m', 'crypto:BTC-60m', 'perps:BTC-60m', 'perps:BTC-240m']) assert.ok(engine.snnDirs.has(k), `${k} direction call: ${[...engine.snnDirs.keys()]}`);
+  assert.ok(!engine.snnDirs.has('crypto:BTC-240m') && !engine.snnDirs.has('perps:BTC-15m'));
+  // Each decision model reads only its own network (SNN_CROSS_FEED off), with the confidence of each call.
   const ctx = engine.snnContext('BTC', market.ticker)!;
-  assert.ok(ctx.up?.[15] !== undefined && ctx.up?.[240] !== undefined && ctx.pContract !== undefined);
+  assert.ok(ctx.up?.[15] !== undefined && ctx.up?.[60] !== undefined && ctx.pContract !== undefined);
+  assert.equal(ctx.up?.[240], undefined, 'the MLP never reads the perps network');
+  assert.ok(ctx.conf?.[15] && 'skill' in ctx.conf[15]!);
+  const pctx = engine.snnContext('BTC', market.ticker, 'perps')!;
+  assert.ok(pctx.up?.[60] !== undefined && pctx.up?.[240] !== undefined);
+  assert.equal(pctx.up?.[15], undefined, 'the perps model never reads the crypto network');
+  assert.equal(pctx.pContract, undefined, 'contract scores come from the crypto network only');
   const brief = engine.snnBrief() as { mode: string; alpha: number };
   assert.equal(brief.mode, 'shadow'); assert.equal(brief.alpha, 0);
 });
@@ -440,7 +447,7 @@ test('engine blend mode: alpha = 0 until earned, then p_final = (1 - alpha c) p_
   (snn.blender as any).earned = { alpha: 0.2, alphaStar: 0.2, ciHi: -0.01, meanDiff: -0.01, events: 999, reason: 'test' };
   (snn.blender as any).dirty = false;
   (snn.blender as any).calibrationConfidence = () => 1;
-  const net = (snn.host as any).local.net as SnnNetwork;
+  const net = (snn.units.crypto!.host as any).local.net as SnnNetwork;
   net.health.ref = { rateL0: 1, rateL1: 1, rateE: 1, rateI: 1, ei: 1, theta: 1, surprise: 1, ts: 0 };
   (net.health as any).observe = function () { this.shadow = false; this.freezeLearning = false; };
   net.health.shadow = false;

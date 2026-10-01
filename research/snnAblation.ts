@@ -20,7 +20,7 @@ import { loadCalendar } from '../bot/model/calendar';
 import { MetaModel } from '../bot/model/metaModel';
 import { dayBlockBootstrap } from '../bot/snn/blender';
 import { blend, brier, calibrationSlope, correlation, surpriseConfidence } from '../bot/snn/formulas';
-import { DEFAULT_SNN, stageFlags, type SnnFlags, type SnnParams, type Stage } from '../bot/snn/params';
+import { DEFAULT_SNN, domainParams, stageFlags, type SnnFlags, type SnnParams, type Stage } from '../bot/snn/params';
 import { replaySnn, type SnnReplayResult, type SnnRow } from './snnReplay';
 
 export interface Mechanism { name: string; candidate: { stage: Stage; flags?: Partial<SnnFlags> }; baseline: { stage: Stage; flags?: Partial<SnnFlags> }; note: string }
@@ -160,14 +160,16 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
   const model = modelPath && fs.existsSync(modelPath) ? MetaModel.load(modelPath) : undefined;
   const grid: Record<string, Partial<SnnParams>[]> = argOf('grid', '') ? JSON.parse(fs.readFileSync(argOf('grid', ''), 'utf8')) : {};
   const only = argOf('only', '');
+  // --domain perps grades the perps network on its direction calls (perps never settle).
+  const domain = argOf('domain', 'crypto') as 'crypto' | 'perps';
   const calendar = loadCalendar(path.resolve('params/calendar.json'));
   const cache = new Map<string, { res: SnnReplayResult; sum: RunSummary }>();
   const run = async (name: string, stage: Stage, flags: Partial<SnnFlags> | undefined, overrides: Partial<SnnParams>) => {
-    const params: SnnParams = { ...DEFAULT_SNN, ...overrides, flags: { ...stageFlags(stage), ...(flags ?? {}) } };
+    const params: SnnParams = domainParams(domain, { ...DEFAULT_SNN, ...overrides, flags: { ...stageFlags(stage), ...(flags ?? {}) } });
     const k = JSON.stringify(params);
     if (!cache.has(k)) {
       process.stderr.write(`replaying ${name} ${JSON.stringify(overrides)}...\n`);
-      const res = await replaySnn(dir, { params, model, from, to, calendar });
+      const res = await replaySnn(dir, { params, model, from, to, calendar, domain });
       cache.set(k, { res, sum: summarize(name, overrides, res) });
     }
     return cache.get(k)!;
@@ -187,7 +189,7 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
   }
   const out = argOf('out', 'research/out/snn_ablation.json');
   fs.mkdirSync(path.dirname(out), { recursive: true });
-  fs.writeFileSync(out, JSON.stringify({ generatedAt: new Date().toISOString(), recordings: dir, from: from ?? null, to: to ?? null, verdicts }, null, 1));
+  fs.writeFileSync(out, JSON.stringify({ generatedAt: new Date().toISOString(), domain, recordings: dir, from: from ?? null, to: to ?? null, verdicts }, null, 1));
   console.log(`wrote ${out} (${verdicts.filter((v) => v.accepted).length}/${verdicts.length} accepted; expect most to fail - that is the system working)`);
   return verdicts;
 }

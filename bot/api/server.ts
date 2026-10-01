@@ -145,6 +145,7 @@ export function createApi(d: ApiDeps): express.Express {
       guards: d.engine.guardStatus(),
       perps: d.engine.perpStatus(),
       snn: d.engine.snnBrief(),
+      treeModels: d.engine.treeModelStatus(),
       autoTrain: d.autoTrain ? (() => { const a = d.autoTrain!.status(); return { mode: a.mode, running: a.running, nextRun: a.nextRun, lastExit: a.lastExit, lastSwap: a.swaps[0] ?? null }; })() : null,
       tennis: {
         enabled: d.cfg.tennis.enabled,

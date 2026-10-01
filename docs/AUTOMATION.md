@@ -19,32 +19,36 @@ While the bot runs in any mode (paper, shadow or live), it writes every book upd
 
 This is `research/pipeline.ts`, run as a low-priority background process so trading isn't slowed down.
 
-**The SNN goes first.** The MLP, perps and tennis models use the SNN's outputs as inputs, so they're trained after it. The steps always run in this order:
+**The SNNs go first.** There are three isolated SNNs (crypto, perps, tennis; docs/SNN.md). Each decision model reads only its own network, so every network is trained before the model that reads it. The steps always run in this order:
 
 | Step | What it does | Output (in `data/models/`) |
 |---|---|---|
-| snn-ablation | Tests SNN stages S0–S6, and the experimental mechanisms against their simpler stand-ins. Runs weekly, or when forced | `work/snn_ablation.json` |
-| snn-train | Trains the SNN at the highest stage whose whole chain passed | `snn_model.json` |
-| snn-backfill | Fills in SNN outputs for recorded minutes that have no live SNN log, one day at a time, picking up where it left off. Built so that no output ever saw its own result | `work/snnfill/` |
-| dataset | Turns the recordings, plus the logged and backfilled SNN outputs, into labelled training rows | `work/dataset.jsonl` |
-| mlp | Trains the MLP fair value and its take/skip head (with SNN feature sets), backtests it after fees, records the result in the model file | `model.json` |
+| snn-crypto-ablation | Tests the crypto network's stages S0–S6 on settled contracts. Runs weekly, or when forced | `work/snn_crypto_ablation.json` |
+| snn-crypto-train | Trains the crypto network (15m/1h) at the highest stage whose whole chain passed | `snn_crypto.json` |
+| snn-crypto-backfill | Fills in the crypto network's outputs for recorded minutes with no live log, one day at a time, resuming where it left off. No output ever saw its own result | `work/snnfill/crypto/` |
+| snn-perps-ablation / -train / -backfill | The same for the perps network (1h/4h), judged on its own direction calls because perps never settle | `snn_perps.json`, `work/snnfill/perps/` |
+| snn-tennis | Always skipped: the tennis network can't be replayed (no recorded score feed), so it learns live and keeps its checkpoints in `data/snn/tennis/` | — |
+| vol_model | Trains the tree volatility forecast (how far realised vol over a contract's life will differ from the EWMA) and checks it on held-out days | `vol_model.json` |
+| dataset | Turns the recordings, plus the crypto network's logged and backfilled outputs, into labelled training rows. Priced with the vol forecast when it is validated | `work/dataset.jsonl` |
+| mlp | Trains the MLP fair value and its take/skip head (MLP vs trees, the better one kept), backtests it after fees, records the result in the model file | `model.json` |
 | vol | Fits the intraday volatility profile | `vol_profile.json` |
-| perps | Trains the perps model (with the SNN's 1h/4h direction), then runs its execution backtest | `perp_model.json` |
-| tennis | Trains the tennis MLP (4 signals, score, book, SNN) | `tennis_model.json` |
+| perps | Trains the perps model (ridge vs trees, on the perps network's 1h/4h calls and skill), then runs its execution backtest | `perp_model.json` |
+| tennis | Trains the tennis model (MLP vs trees; 4 signals, score, book, tennis network) | `tennis_model.json` |
+| fill | Trains the fill / adverse-selection model from the bot's own maker quotes. Skipped ("collecting") until 500 quotes and 100 fills exist; promoted only once it beats the base rate on held-out days | `fill_model.json` |
 
 There's a report for each run in `data/models/reports/` and a log in `data/models/logs/`.
 
-A step with nothing to work on yet is reported as **skipped**, not failed. Examples: no perp quotes recorded, fewer than 8 settlement windows, fewer than 5 settled tennis matches.
+A step with nothing to work on yet is reported as **skipped**, not failed. Examples: no perp quotes recorded, fewer than 8 settlement windows, fewer than 5 settled tennis matches, fewer than 3 days of index data for the vol forecast, not enough maker quotes for the fill model.
 
-### 3. A new SNN retrains the models that read it
+### 3. A new network retrains only the model that reads it
 
-- **Inside the pipeline:** the MLP, perps and tennis steps always come after the SNN and use its outputs.
-- **If the SNN changes any other way,** for example you drop in a new `snn_model.json`:
-  - The bot swaps it in.
-  - It sees the MLP was trained on the old SNN's outputs.
-  - It reruns `dataset, mlp, perps, tennis` on its own.
+- **Inside the pipeline:** the MLP, perps and tennis steps always come after the networks and use their outputs.
+- **If a network changes any other way,** for example you drop in a new `snn_perps.json`:
+  - The bot swaps in that network alone; the other two keep running untouched.
+  - It sees its consumer was trained on the old network's outputs.
+  - It reruns that consumer on its own: `snn_crypto.json` → `dataset, mlp`; `snn_perps.json` → `perps`; `snn_tennis.json` → `tennis`.
   - Turn this off with `AUTO_TRAIN_ON_MODEL_CHANGE=false`.
-- **A new MLP doesn't retrain the SNN.** The SNN learns from the market, not from the MLP.
+- **A new MLP doesn't retrain any network.** The networks learn from the market, not from the models.
 
 ### 4. It hot-swaps new models
 
@@ -53,14 +57,26 @@ About every 30 seconds the bot checks `data/models/` for changed files:
 | File changed | What happens |
 |---|---|
 | `model.json` | The new meta-model trades immediately. The SNN blend history is cleared, because it was recorded against the old model, and α (the SNN's vote) starts again from 0. |
-| `snn_model.json` | A fresh SNN starts from the trained weights. The old one is checkpointed and stopped. |
+| `snn_crypto.json` / `snn_perps.json` / `snn_tennis.json` | A fresh network of that kind starts from the trained weights. The old one is checkpointed and stopped. The other networks are not touched. |
+| `vol_model.json` | Fair value's sigma is multiplied by the forecast, only if its validation passed and `VOL_MODEL=true`. |
+| `fill_model.json` | The fill model switches on at once if validated (see "The fill model brings itself online" below). |
 | `perp_model.json` | The perps trader switches to the new model. |
 | `tennis_model.json` | The tennis model switches. It only gates entries once validated. |
 | `vol_profile.json` | Applied only if its own validation showed an improvement and `VOL_SEASONALITY=true`. |
 
 A file in `data/models/` always wins over the same file in `params/`. To go back to the `params/` version, delete the file from `data/models/`.
 
-### 5. It keeps the SNN blend history across restarts
+### 5. The fill model brings itself online
+
+Nothing to do by hand:
+1. From the first day, every maker entry quote the bot sends is logged to `data/fills/` with its placement (distance to the touch, queue ahead, book imbalance, spread, order flow, time to close, volatility, edge), whether it filled within 60 s, and the 60 s markout of the fill.
+2. Each daily run, the **fill** step checks whether there is enough: 500 quotes and 100 fills. Until then it is reported as skipped ("collecting maker quotes").
+3. Once there is enough, it trains two tree models: P(fill within 60 s) and the expected markout given a fill. It promotes the file only when the P(fill) model beats the plain fill rate on held-out days and the markout model is no worse than the average markout.
+4. The bot hot-swaps it in and starts using it immediately. For every maker entry it compares the expected value of quoting (P(fill) × (edge + expected markout)) with crossing the spread now (edge at the touch, after the taker fee). It quotes, crosses or skips, whichever is better. It skips when neither clears `FILL_MIN_EV`. A cross must also clear the strategy's own taker threshold, and the risk gateway still checks every order.
+
+The Telemetry page's **Fill model** row shows "collecting quotes" until then, and "active" after.
+
+### 6. It keeps the SNN blend history across restarts
 
 The history is saved in `data/snn/blender.json`. It is thrown away automatically if the meta-model has changed since it was recorded.
 
@@ -80,9 +96,9 @@ Set `AUTO_TRAIN_PROMOTE=validated` once you want only models that passed their c
 | What you want | How |
 |---|---|
 | Run everything now (on the server) | `curl -X POST -H "Authorization: Bearer $DASHBOARD_TOKEN" http://127.0.0.1:3000/api/autotrain/run` |
-| Run just the SNN steps | same, with `-H 'Content-Type: application/json' -d '{"only":"snn"}'` |
+| Run just the SNN steps | same, with `-H 'Content-Type: application/json' -d '{"only":"snn"}'` (crypto and perps networks) |
 | See status, next run and last swap | `GET /api/autotrain`, or the **Auto-train** row on the Telemetry page |
-| Run it from a checkout | `npm run pipeline` (or `npm run pipeline -- --only snn`, or `--force-ablation`) |
+| Run it from a checkout | `npm run pipeline` (or `npm run pipeline -- --only snn,vol_model,fill`, or `--force-ablation`) |
 
 Running from a checkout: `npm run pipeline` reads recordings from `data/recordings` and writes to `data/models`. Point it elsewhere with `AUTO_TRAIN_RECORDINGS=... AUTO_TRAIN_DIR=...`.
 
@@ -126,10 +142,13 @@ These can't be automated, or deliberately aren't.
 | `AUTO_TRAIN_HOUR_UTC` | `6` | Hour of the daily run. |
 | `AUTO_TRAIN_PROMOTE` | `always` | `always` = hot-swap every new model; `validated` = only models that passed. |
 | `AUTO_TRAIN_SNN_STAGE` | `auto` | `auto` = the highest stage whose whole chain passed the ablation (otherwise `SNN_STAGE`); or force `S0`–`S6`. |
-| `AUTO_TRAIN_ABLATION_DAYS` | `7` | Days of recordings the SNN ablation replays. It's the slow step: roughly 5–40 minutes per recorded day on a small server. |
+| `AUTO_TRAIN_ABLATION_DAYS` | `7` | Days of recordings each network's ablation replays (crypto and perps, so twice). It's the slow step: roughly 5–40 minutes per recorded day per network on a small server. |
 | `AUTO_TRAIN_ABLATION_EVERY_DAYS` | `7` | Re-run the ablation this often even if the MLP didn't change. |
 | `AUTO_TRAIN_SNN_TRAIN_DAYS` | `21` | Days the SNN trains on. The last 20% is held out for an out-of-sample check. |
-| `AUTO_TRAIN_ON_MODEL_CHANGE` | `true` | Re-run the SNN steps when the MLP changes outside the pipeline. |
+| `AUTO_TRAIN_ON_MODEL_CHANGE` | `true` | Retrain a network's consumer when that network's file changes outside the pipeline. |
+| `SNN_CROSS_FEED` | `false` | Let each decision model also read the other crypto-side network (only for horizons its own lacks). |
+| `VOL_MODEL` | `true` | Apply the tree volatility forecast to fair value (only if validated). |
+| `FILL_MIN_EV` | `0` | Minimum expected value per contract ($) for a maker quote or a cross once the fill model is active. |
 | `AUTO_TRAIN_MIN_DAYS` | `1` | Don't train with fewer days of recordings than this. |
 | `AUTO_TRAIN_DIR` | `data/models` | Where promoted models go. |
 | `AUTO_TRAIN_RECORDINGS` | `data/recordings` | Where recordings are read from. |

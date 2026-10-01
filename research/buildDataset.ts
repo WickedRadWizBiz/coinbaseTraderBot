@@ -11,7 +11,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { computeFeatureMap } from '../bot/model/featureEngine';
+import { assetFeatureMap, computeFeatureMap } from '../bot/model/featureEngine';
+import { VolForecaster, VolModel } from '../bot/model/volModel';
 import { effectiveSigma, loadVolProfile, type VolProfile } from '../bot/model/volSeasonality';
 import { ladderQuotes } from '../bot/model/ladder';
 import { priceContract, SETTLEMENT_AVG_SEC, type MarketKind } from '../bot/model/fairValue';
@@ -62,10 +63,11 @@ export function eventOf(ticker: string, event?: string): string {
 
 export async function buildDataset(
   dir: string, everySec: number, referenceSigma = 5e-5,
-  opts: { volProfile?: VolProfile; applyVolSeasonality?: boolean; entryWindowOnly?: boolean; calendar?: MacroEvent[]; entryWindowUpdown?: [number, number]; entryWindowHourly?: [number, number] } = {},
+  opts: { volProfile?: VolProfile; applyVolSeasonality?: boolean; volModel?: VolModel; entryWindowOnly?: boolean; calendar?: MacroEvent[]; entryWindowUpdown?: [number, number]; entryWindowHourly?: [number, number] } = {},
 ): Promise<DatasetRow[]> {
   const volProfile = opts.volProfile;
   const st = new ReplayState();
+  const volFc = new VolForecaster(opts.volModel);
   const pending = new Map<string, Omit<DatasetRow, 'label' | 'labelSource'>[]>();
   const rows: DatasetRow[] = [];
   let nextSample = 0;
@@ -96,7 +98,8 @@ export async function buildDataset(
       if (opts.entryWindowOnly && !inEntryWindow(m.kind, tauSec, opts.entryWindowUpdown ?? [840, 120], opts.entryWindowHourly ?? [3300, 300])) continue;
       const settle = tauSec <= SETTLEMENT_AVG_SEC ? idx!.settlement(m.closeTime, st.now, SETTLEMENT_AVG_SEC) : undefined;
       const observed = settle?.avg, observedCount = settle?.n;
-      const sigmaFv = opts.applyVolSeasonality ? effectiveSigma(vol.sigmaPerSqrtSec, volProfile, m.asset, st.now, m.closeTime) : vol.sigmaPerSqrtSec;
+      const sigmaFv = (opts.applyVolSeasonality ? effectiveSigma(vol.sigmaPerSqrtSec, volProfile, m.asset, st.now, m.closeTime) : vol.sigmaPerSqrtSec)
+        * volFc.multiplier(m.asset, st.now, vol.sigmaPerSqrtSec, tauSec, () => assetFeatureMap(m.asset, st.now, { index: idx, spot: st.spot.get(m.asset), bars: st.features.bars.get(m.asset), candles: st.features.candles.get(m.asset), usdtd: st.usdtd, btcd: st.btcd, perp: st.features.perps.get(m.asset) }));
       const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaFv, tauSec, observedAvg: observed, observedCount });
       if (!fv) continue;
       const mid = (bid.price + ask.price) / 2;
@@ -130,7 +133,10 @@ export async function buildDatasetMain(argOf: (k: string, d: string) => string =
   // Match production pricing: pass --vol-profile when production applies the seasonal profile.
   const vp = argOf('vol-profile', '');
   const volProfile = vp ? loadVolProfile(vp) : undefined;
-  const rows = await buildDataset(dir, every, 5e-5, { volProfile, applyVolSeasonality: Boolean(volProfile), entryWindowOnly: process.argv.includes('--entry-window-only'), calendar: loadCalendar(cal) });
+  // ...and --vol-model when production applies the tree vol forecast (used only if validated).
+  const vm = argOf('vol-model', '');
+  const volModel = vm ? VolModel.load(vm) : undefined;
+  const rows = await buildDataset(dir, every, 5e-5, { volProfile, applyVolSeasonality: Boolean(volProfile), volModel, entryWindowOnly: process.argv.includes('--entry-window-only'), calendar: loadCalendar(cal) });
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''));
   const windows = new Set(rows.map((r) => r.window)).size;

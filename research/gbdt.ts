@@ -1,4 +1,4 @@
-// Gradient-boosted trees for binary log loss, trained offline in TypeScript
+// Gradient-boosted trees for binary log loss (or squared error for regression), trained offline in TypeScript
 // and evaluated live by bot/model/trees.ts. Training and serving share one
 // language and one feature engine, so there is no ONNX export step and no
 // train/serve parity gap to police.
@@ -28,11 +28,13 @@ export interface GbdtParams {
   maxBins: number;
   patience: number;
   seed: number;
+  /** logistic = binary log loss on y in {0,1} (margins are log-odds); squared = regression (MSE). */
+  loss: 'logistic' | 'squared';
 }
 
 export const DEFAULT_GBDT: GbdtParams = {
   nTrees: 400, learningRate: 0.03, maxDepth: 3, minLeafWeight: 20, lambda: 5,
-  featureFraction: 0.7, baggingFraction: 0.7, maxBins: 32, patience: 40, seed: 7,
+  featureFraction: 0.7, baggingFraction: 0.7, maxBins: 32, patience: 40, seed: 7, loss: 'logistic',
 };
 
 interface Binned { cuts: number[][]; bins: Int16Array[] }
@@ -129,8 +131,12 @@ function buildTree(rows: number[], g: Float64Array, h: Float64Array, w: Float64A
   return nodes;
 }
 
-function weightedLoss(margins: number[], y: number[], w: number[]): number {
+function weightedLoss(margins: number[], y: number[], w: number[], loss: GbdtParams['loss'] = 'logistic'): number {
   let s = 0, ws = 0;
+  if (loss === 'squared') {
+    for (let i = 0; i < y.length; i++) { s += w[i] * (margins[i] - y[i]) ** 2; ws += w[i]; }
+    return ws > 0 ? s / ws : NaN;
+  }
   for (let i = 0; i < y.length; i++) {
     const p = Math.min(1 - 1e-9, Math.max(1e-9, sigmoid(margins[i])));
     s += w[i] * (y[i] ? -Math.log(p) : -Math.log(1 - p));
@@ -160,9 +166,10 @@ export function trainGbdt(
   const vMargin = initv.slice();
   const g = new Float64Array(n), h = new Float64Array(n), wa = Float64Array.from(w);
   const trees: TreeNode[][] = [];
-  let best = { val: weightedLoss(vMargin, yv, wv), n: 0 };
+  let best = { val: weightedLoss(vMargin, yv, wv, p.loss), n: 0 };
   for (let t = 0; t < p.nTrees; t++) {
     for (let i = 0; i < n; i++) {
+      if (p.loss === 'squared') { g[i] = w[i] * (margin[i] - y[i]); h[i] = w[i]; continue; }
       const pr = sigmoid(margin[i]);
       g[i] = w[i] * (pr - y[i]);
       h[i] = w[i] * Math.max(1e-6, pr * (1 - pr));
@@ -177,7 +184,7 @@ export function trainGbdt(
     const one: GbdtModel = { trees: [tree], baseScore: 0 };
     for (let i = 0; i < n; i++) margin[i] += gbdtLogit(one, X[i]);
     for (let i = 0; i < Xv.length; i++) vMargin[i] += gbdtLogit(one, Xv[i]);
-    const val = weightedLoss(vMargin, yv, wv);
+    const val = weightedLoss(vMargin, yv, wv, p.loss);
     if (val < best.val - 1e-7) best = { val, n: t + 1 };
     else if (t + 1 - best.n > p.patience) break;
   }

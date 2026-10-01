@@ -47,14 +47,18 @@ import type { ClockSkewMonitor } from './risk/clockSkew';
 import { BalanceMonitor, fillCashDelta, settleCashDelta } from './vault/balanceMonitor';
 import type { Vault } from './vault/vault';
 import { writeJsonAtomic } from './util/persist';
-import type { SnnBlender, TargetScaler } from './snn/blender';
-import type { SnnHost } from './snn/host';
+import type { SnnBlender } from './snn/blender';
+import type { SnnFleet, SnnUnit } from './snn';
+import type { SnnDomain } from './snn/params';
 import type { ColumnInput, ContractQuery, ContractScore, DirectionPred } from './snn/network';
-import { CRYPTO_HORIZONS, cryptoColumnKey, cryptoValues, tennisColumnKey, tennisSnapshotValues, type CryptoHorizon } from './snn/inputs';
-import { assetFeatureMap, type SnnContext } from './model/featureEngine';
+import { cryptoColumnKey, cryptoValues, DOMAIN_HORIZONS, tennisColumnKey, tennisSnapshotValues } from './snn/inputs';
+import { assetFeatureMap, type SnnConf, type SnnContext } from './model/featureEngine';
 import { logit as logitP } from './util/num';
 import type { StepReply } from './snn/runtime';
 import { logger } from './util/log';
+import { VolForecaster, type VolModel } from './model/volModel';
+import { applyFillModel, fillInputs, isMakerEntry, type FillModel } from './tca/fillModel';
+import { FillLog } from './tca/fillLog';
 
 const log = logger('engine');
 
@@ -147,9 +151,15 @@ export interface EngineDeps {
   /** Tennis MLP (fair P(A wins)); gates tennis entries once validated. */
   tennisFair?: TennisFairModel;
   /** Cortex-like SNN (bot/snn): worker host, blender with earned alpha, conservative target scaler. */
-  snn?: { host: SnnHost; blender: SnnBlender; scaler: TargetScaler };
+  snn?: SnnFleet;
   /** Where the blender's settled (p_model, p_snn) history is saved (survives restarts). */
   snnBlenderPath?: string;
+  /** Tree volatility forecast: sigma multiplier for fair value (applied when validated and VOL_MODEL=true). */
+  volModel?: VolModel;
+  /** Fill / adverse-selection model: quote vs cross vs skip per maker entry (applied once validated). */
+  fillModel?: FillModel;
+  /** Where every maker entry quote's placement features and 60 s outcome are logged (its training data). */
+  fillLogDir?: string;
   now?: () => number;
 }
 
@@ -177,18 +187,26 @@ export class Engine {
   readonly snnDirs = new Map<string, DirectionPred>();
   private snnLastLog = 0;
   private readonly snnAssetCache = new Map<string, { ts: number; f: Record<string, number> }>();
-  private snnScores = new Map<string, ContractScore>();
-  private snnReply: StepReply | undefined;
-  private snnLastAlert = 0;
+  private readonly snnScores = new Map<string, ContractScore & { domain: SnnDomain; ts?: number }>();
+  private readonly snnReplies = new Map<SnnDomain, StepReply | undefined>();
+  private readonly snnLastAlert = new Map<string, number>();
   private snnLastSave = 0;
+
+  private readonly volFc: VolForecaster;
+  private readonly fillLog?: FillLog;
+  /** Placement features of the maker entry quotes in the current plan (logged once actually sent). */
+  private readonly fillX = new WeakMap<OrderPlan, Record<string, number>>();
 
   constructor(private readonly d: EngineDeps) {
     this.now = d.now ?? Date.now;
     this.cadence = new CadenceGate(d.cfg.strategy);
+    this.volFc = new VolForecaster(d.cfg.strategy.volModel ? d.volModel : undefined);
+    if (d.fillLogDir) this.fillLog = new FillLog(d.fillLogDir, (t) => d.md.books.get(t)?.mid(), this.now);
     if (d.snn) this.attachBlender(d.snn.blender);
     // Registered before the startup reconciliation replays fills, so the
     // balance monitor sees every cash movement the bot's trading causes.
-    d.oms.on('fill', (f: { side: 'bid' | 'ask'; count: number; price: number }, _rec: unknown, fee: number, positionAfter: number) => {
+    d.oms.on('fill', (f: { ticker: string; side: 'bid' | 'ask'; count: number; price: number; isTaker?: boolean; ts?: number }, _rec: unknown, fee: number, positionAfter: number) => {
+      this.fillLog?.onFill({ ticker: f.ticker, side: f.side, price: f.price, isTaker: Boolean(f.isTaker), ts: f.ts });
       const signed = f.side === 'bid' ? f.count : -f.count;
       d.balanceMonitor?.onCash(fillCashDelta(f.side, f.count, f.price, fee, positionAfter - signed));
       this.saveMonitor();
@@ -287,6 +305,8 @@ export class Engine {
   stop(): void {
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
+    this.fillLog?.flush();
+    this.fillLog?.stop();
   }
 
   /** Dead-man: if the tick loop stalls, pull every resting order. */
@@ -623,7 +643,7 @@ export class Engine {
     }
     const ended: string[] = [];
     for (const ev of this.matches.keys()) if (!byEvent.has(ev)) { this.matches.delete(ev); this.tennisStatus.delete(ev); if (this.snnTennis.delete(ev)) ended.push(tennisColumnKey(ev)); }
-    if (ended.length) void this.d.snn?.host.remove(ended);
+    if (ended.length) void this.d.snn?.units.tennis?.host.remove(ended);
   }
 
   /** Directional perp targets for the executor, or undefined without a trader. `halt` flattens. */
@@ -654,19 +674,23 @@ export class Engine {
     };
   }
 
-  // ---- Cortex-like SNN (bot/snn) ---------------------------------------------------------
+  // ---- Cortex-like SNNs (bot/snn): three isolated networks -------------------------------
+  //   crypto  Kalshi price-prediction contracts: asset x {15m, 60m} columns, contract readouts
+  //   perps   perpetuals: asset x {60m, 240m} columns, direction only (perps never settle)
+  //   tennis  one column per live match, P(A wins) readout
+  // Each runs in its own worker with its own params, stage, health and model file. They never
+  // read each other's state or outputs: the engine sends each only its own domain's market data,
+  // and their outputs go only to the decision models (MLP, perps model, tennis model).
 
-  /** Advance the SNN clock and score every active contract (one batched, 200 ms-bounded request).
-   *  Every crypto column (asset x 15m/60m/240m) is fed EVERY second from asset-level data (TA library
-   *  on the spot pair, perp, returns) whether or not anything trades, so the direction heads keep
-   *  learning around the clock; Kalshi contract channels come from last tick's closest-to-the-money
-   *  contract. Tennis columns are fed by the tennis loop. Timeouts leave no scores (alpha = 0). */
+  /** Advance every SNN's clock and score its contracts (one batched, 200 ms-bounded request per
+   *  network, in parallel). Crypto and perps columns are fed EVERY second from asset-level data
+   *  whether or not anything trades, so the direction heads keep learning around the clock. */
   private async snnTick(): Promise<void> {
     const snn = this.d.snn;
     if (!snn) return;
     const { md, cfg } = this.d;
     const now = this.now();
-    const inputs: ColumnInput[] = [];
+    const crypto: ColumnInput[] = [], perps: ColumnInput[] = [];
     const assets = new Set<string>([...Object.values(cfg.indexIdMap), ...md.activeMarkets(now).filter((m) => m.kind !== 'match').map((m) => m.asset)]);
     for (const asset of [...assets].sort()) {
       const idx = md.index.get(asset);
@@ -678,78 +702,92 @@ export class Engine {
         ac = { ts: now, f: assetFeatureMap(asset, now, { index: idx, spot: md.spot.get(asset), bars: md.features.bars.get(asset), candles: md.features.candles.get(asset), usdtd: md.usdtd, btcd: md.btcd, perp: md.features.perps.get(asset) }) };
         this.snnAssetCache.set(asset, ac);
       }
-      const f = ac.f;
-      for (const h of CRYPTO_HORIZONS) {
+      if (snn.units.crypto) for (const h of DOMAIN_HORIZONS.crypto) {
         const key = cryptoColumnKey(asset, h);
         const ob = this.snnObs.get(key);
         const contract = ob && now - ob.ts < 10_000 ? ob.contract : undefined;
-        inputs.push({ key, asset, price: px, mid: contract?.mid, values: cryptoValues(h as CryptoHorizon, f, contract) });
+        crypto.push({ key, asset, price: px, mid: contract?.mid, values: cryptoValues(h, ac.f, contract) });
       }
+      // Perps: no Kalshi contract channels (the perp's own premium/funding are in the values).
+      if (snn.units.perps) for (const h of DOMAIN_HORIZONS.perps) perps.push({ key: cryptoColumnKey(asset, h), asset, price: px, values: cryptoValues(h, ac.f) });
     }
-    const queries: ContractQuery[] = [];
-    for (const m of md.activeMarkets(now)) {
+    const cq: ContractQuery[] = [];
+    if (snn.units.crypto) for (const m of md.activeMarkets(now)) {
       if (m.kind === 'match') continue;
       const terms = md.termsFor(m), idx = md.index.get(m.asset);
       const spot = idx?.fresh(now, cfg.risk.maxIndexAgeMs), vol = idx?.vol();
       if (!terms || !spot || !vol) continue;
       const tauSec = (m.closeTime - now) / 1000;
-      queries.push({
+      cq.push({
         ticker: m.ticker, column: snnColumn(m), kind: terms.kind, strike: terms.strike, cap: terms.cap, spot: spot.value, sigma: vol.sigmaPerSqrtSec,
         tauSec, lifeSec: (m.closeTime - m.openTime) / 1000, eventKey: `${m.asset}:${m.closeTime}`, tag: tauSec > cfg.risk.noEntryBeforeCloseSec,
       });
     }
-    for (const t of this.snnTennis.values()) if (now - t.ts < 15_000) { inputs.push(t.input); queries.push(t.query); }
-    const r = await snn.host.stepAndScore(now, inputs, queries);
-    this.snnReply = r;
-    this.snnScores = new Map((r?.scores ?? []).map((s) => [s.ticker, s]));
-    for (const d of r?.directions ?? []) this.snnDirs.set(d.key, d);
-    if (r && r.scores.length) {
-      const n = r.scores.length;
-      snn.scaler.update(now, r.scores.reduce((a, s) => a + s.surprise, 0) / n, r.scores.reduce((a, s) => a + s.surprise0, 0) / n, r.scores.reduce((a, s) => a + s.G, 0) / n);
+    const ti: ColumnInput[] = [], tq: ContractQuery[] = [];
+    for (const t of this.snnTennis.values()) if (now - t.ts < 15_000) { ti.push(t.input); tq.push(t.query); }
+    const jobs: [SnnDomain, ColumnInput[], ContractQuery[]][] = [['crypto', crypto, cq], ['perps', perps, []], ['tennis', ti, tq]];
+    const replies = await Promise.all(jobs.map(async ([d, inp, q]) => [d, snn.units[d] ? await snn.units[d]!.host.stepAndScore(now, inp, q) : undefined] as const));
+    const logIt = now - this.snnLastLog >= 60_000;
+    if (logIt) this.snnLastLog = now;
+    for (const [d, r] of replies) {
+      this.snnReplies.set(d, r);
+      if (!r) continue;
+      for (const s of r.scores) this.snnScores.set(s.ticker, { ...s, domain: d });
+      for (const x of r.directions) this.snnDirs.set(`${d}:${x.key}`, x);
+      // Log each network's calls with their confidence: research and the decision models learn from them.
+      if (logIt) md.record('snn', { d, dirs: r.directions.map(dirRow), c: Object.fromEntries(r.scores.map((s) => [s.ticker, +s.p.toFixed(5)])) });
+      if (r.alerts.length && now - (this.snnLastAlert.get(d) ?? 0) > 3_600_000) {
+        this.snnLastAlert.set(d, now);
+        this.d.audit.write('snn', { event: 'health_alert', domain: d, alerts: r.alerts });
+        this.d.alerter.notify('warn', 'snn-health', `SNN ${d} health: ${r.alerts.join('; ')}`);
+      }
     }
-    // Log the SNN's calls with the data stream: research and the MLP learn from them.
-    if (r && now - this.snnLastLog >= 60_000) {
-      this.snnLastLog = now;
-      md.record('snn', {
-        dirs: r.directions.map((d) => [d.key, +d.pUp.toFixed(5), +d.expSignedMove.toFixed(3), d.labelled]),
-        c: Object.fromEntries(r.scores.map((s) => [s.ticker, +s.p.toFixed(5)])),
-      });
-    }
-    if (r?.alerts.length && now - this.snnLastAlert > 3_600_000) {
-      this.snnLastAlert = now;
-      this.d.audit.write('snn', { event: 'health_alert', alerts: r.alerts });
-      this.d.alerter.notify('warn', 'snn-health', `SNN health: ${r.alerts.join('; ')}`);
+    for (const [t, s] of this.snnScores) if (now - (s.ts ?? now) > 120_000) this.snnScores.delete(t);
+    const cr = this.snnReplies.get('crypto');
+    if (cr && cr.scores.length) {
+      const n = cr.scores.length;
+      snn.scaler.update(now, cr.scores.reduce((a, s) => a + s.surprise, 0) / n, cr.scores.reduce((a, s) => a + s.surprise0, 0) / n, cr.scores.reduce((a, s) => a + s.G, 0) / n);
     }
   }
 
-  /** SNN outputs for an asset (and a contract): direction calls per horizon and p_snn. Fed to the
-   *  MLP's features and to the perps trader. */
-  snnContext(asset: string, ticker?: string): SnnContext | undefined {
-    if (!this.d.snn) return undefined;
-    const up: SnnContext['up'] = {}, move: SnnContext['move'] = {};
-    for (const h of CRYPTO_HORIZONS) {
-      const d = this.snnDirs.get(cryptoColumnKey(asset, h));
-      if (d) { up[h] = d.pUp; move[h] = d.expSignedMove; }
+  /** SNN outputs for a decision model: direction calls, expected moves and their confidence per
+   *  horizon, and p_snn for the contract. `consumer` picks the network: the crypto MLP reads the
+   *  crypto SNN, the perps model the perps SNN (another domain's calls only with SNN_CROSS_FEED). */
+  snnContext(asset: string, ticker?: string, consumer: 'crypto' | 'perps' = 'crypto'): SnnContext | undefined {
+    const snn = this.d.snn;
+    if (!snn) return undefined;
+    const own: SnnDomain = consumer;
+    const other: SnnDomain = consumer === 'crypto' ? 'perps' : 'crypto';
+    const up: SnnContext['up'] = {}, move: SnnContext['move'] = {}, conf: SnnContext['conf'] = {};
+    for (const [d, allowed] of [[own, true], [other, this.d.cfg.snn.crossFeed]] as const) {
+      if (!allowed) continue;
+      for (const h of DOMAIN_HORIZONS[d as 'crypto' | 'perps']) {
+        if (up[h] !== undefined) continue; // own network first
+        const x = this.snnDirs.get(`${d}:${cryptoColumnKey(asset, h)}`);
+        if (x) { up[h] = x.pUp; move[h] = x.expSignedMove; conf[h] = dirConf(x); }
+      }
     }
-    return { up, move, pContract: ticker ? this.snnScores.get(ticker)?.p : undefined };
+    const s = ticker ? this.snnScores.get(ticker) : undefined;
+    return { up, move, conf, pContract: s && s.domain === own ? s.p : undefined };
   }
 
-  /** Tennis column inputs for one match (oriented to player A = the event's first market): the four
-   *  confluence signals with magnitudes, the live score, progress, the score model, the book; and
-   *  the contract query for P(A wins). */
   /** Tennis MLP fair P(A wins) (validated models only; otherwise undefined and the rules decide). */
   private tennisFairFor(event: string, tv: Record<string, number | undefined> | undefined, tickerA: string): number | undefined {
     const m = this.d.tennisFair;
     if (!m?.validated || !tv) return undefined;
-    const p = m.predict(tennisFairInputs(tv, { p: this.snnScores.get(tickerA)?.p, up: this.snnDirs.get(tennisColumnKey(event))?.pUp }));
+    const dir = this.snnDirs.get(`tennis:${tennisColumnKey(event)}`);
+    const s = this.snnScores.get(tickerA);
+    const p = m.predict(tennisFairInputs(tv, { p: s?.domain === 'tennis' ? s.p : undefined, up: dir?.pUp, skill: dir?.skill, calConf: dir?.calConf }));
     return Number.isFinite(p) ? p : undefined;
   }
 
   setTennisFair(m: TennisFairModel | undefined): void { this.d.tennisFair = m; }
 
+  /** Tennis column inputs for one match (oriented to player A = the event's first market) and the
+   *  contract query for P(A wins); fed to the tennis SNN only. */
   private snnTennisObserve(event: string, ms: ActiveMarket[], markets: MatchMarket[], tracker: MatchTracker, sc: { score?: TennisScore; raw?: unknown; breaksTotal?: [number, number] } | undefined, now: number): Record<string, number | undefined> | undefined {
     const values = tennisSnapshotValues(tracker, markets, now, this.d.cfg.tennis, { tiebreak: (sc?.raw as { is_tiebreak?: boolean } | undefined)?.is_tiebreak, breaksTotal: sc?.breaksTotal });
-    if (!values || !this.d.snn) return values;
+    if (!values || !this.d.snn?.units.tennis) return values;
     const key = tennisColumnKey(event);
     const pA = values.mid!;
     const dP = values.modelPA ?? pA;
@@ -762,7 +800,7 @@ export class Engine {
 
   /** Remember this market's book for its column's contract channels (closest-to-the-money contract). */
   private snnObserve(m: ActiveMarket, contract: { dAtm?: number; tauFrac?: number; mid?: number; spread?: number; imbalance?: number }, now: number): void {
-    if (!this.d.snn || (m.kind !== 'updown' && m.kind !== 'greater')) return;
+    if (!this.d.snn?.units.crypto || (m.kind !== 'updown' && m.kind !== 'greater')) return;
     const key = snnColumn(m);
     const absD = Number.isFinite(contract.dAtm) ? Math.abs(contract.dAtm!) : Infinity;
     const prev = this.snnObs.get(key);
@@ -774,14 +812,16 @@ export class Engine {
   private snnBlend(m: ActiveMarket, st: MarketStatus, pModel: number, tradable: boolean, now: number): number {
     const snn = this.d.snn;
     st.pModel = pModel;
-    if (!snn) return pModel;
+    const unit = snn?.units.crypto;
+    if (!snn || !unit) return pModel;
+    const reply = this.snnReplies.get('crypto');
     const s = this.snnScores.get(m.ticker);
-    if (!s) { st.snnShadow = this.snnReply ? 'not scored' : 'no readout (timeout or warming up)'; return pModel; }
+    if (!s || s.domain !== 'crypto') { st.snnShadow = reply ? 'not scored' : 'no readout (timeout or warming up)'; return pModel; }
     const c = snn.blender.confidence(s.surprise, s.surprise0, s.G);
     const shadow = this.d.cfg.snn.mode !== 'blend' ? 'shadow mode'
-      : !this.snnReply ? 'readout timed out'
-      : this.snnReply.shadow ? 'health: shadow'
-      : !snn.host.latencyOk() ? `latency p99 ${snn.host.p99().toFixed(0)} ms` : undefined;
+      : !reply ? 'readout timed out'
+      : reply.shadow ? 'health: shadow'
+      : !unit.host.latencyOk() ? `latency p99 ${unit.host.p99().toFixed(0)} ms` : undefined;
     const p = snn.blender.pFinal(pModel, s.p, c, Boolean(shadow));
     Object.assign(st, { pSnn: s.p, snnC: c, snnAlpha: shadow ? 0 : snn.blender.alpha().alpha, snnShadow: shadow });
     if (tradable) snn.blender.record({ ticker: m.ticker, eventKey: s.eventKey, ts: now, pModel, pSnn: s.p, c });
@@ -809,14 +849,30 @@ export class Engine {
     log.info('meta-model hot-swapped', { from: old, to: model.id });
   }
 
-  /** Hot-swap the SNN (new trained model file); the old host is stopped by the caller. */
+  /** Hot-swap the whole SNN fleet (tests, restarts). */
   setSnn(snn: EngineDeps['snn']): void {
     this.d.snn = snn;
     this.snnScores.clear();
-    this.snnReply = undefined;
+    this.snnReplies.clear();
+    this.snnDirs.clear();
     this.snnObs.clear();
     if (snn) this.attachBlender(snn.blender);
   }
+
+  /** Hot-swap ONE network (a new trained model file for that domain); the caller stops the old host. */
+  setSnnUnit(domain: SnnDomain, unit: SnnUnit | undefined): void {
+    if (!this.d.snn) return;
+    if (unit) this.d.snn.units[domain] = unit; else delete this.d.snn.units[domain];
+    this.snnReplies.delete(domain);
+    for (const k of [...this.snnDirs.keys()]) if (k.startsWith(`${domain}:`)) this.snnDirs.delete(k);
+    for (const [t, s] of this.snnScores) if (s.domain === domain) this.snnScores.delete(t);
+  }
+
+  /** Hot-swap the tree volatility forecast (used only when validated and VOL_MODEL=true). */
+  setVolModel(m: VolModel | undefined): void { this.volFc.setModel(this.d.cfg.strategy.volModel ? m : undefined); this.d.volModel = m; }
+  /** Hot-swap the fill model: it takes effect the moment a validated file appears. */
+  setFillModel(m: FillModel | undefined): void { this.d.fillModel = m; }
+  get fillModelActive(): boolean { return Boolean(this.d.fillModel?.validated); }
 
   /** Hot-swap the validated intraday volatility profile (undefined removes it). */
   setVolProfile(vp: VolProfile | undefined): void {
@@ -829,7 +885,8 @@ export class Engine {
   private snnSettle(ticker: string, result: 'yes' | 'no'): void {
     const snn = this.d.snn;
     if (!snn) return;
-    void snn.host.settle(ticker, result, this.now());
+    // Only the network that scored (and tagged) the contract holds tags for it; the others ignore it.
+    for (const d of ['crypto', 'tennis'] as const) void snn.units[d]?.host.settle(ticker, result, this.now());
     const rec = snn.blender.settle(ticker, result === 'yes' ? 1 : 0);
     if (rec && this.now() - this.snnLastSave > 30_000) { this.snnLastSave = this.now(); this.saveSnnBlender(); }
     if (rec) this.d.audit.write('snn', { event: 'settle', ticker, y: rec.y, pModel: rec.pModel, pSnn: rec.pSnn, c: rec.c, eventKey: rec.eventKey, brierModel: (rec.pModel - rec.y!) ** 2, brierSnn: (rec.pSnn - rec.y!) ** 2 });
@@ -840,21 +897,38 @@ export class Engine {
     const snn = this.d.snn;
     if (!snn) return { mode: 'off' };
     const e = snn.blender.alpha();
-    const dirs = [...this.snnDirs.values()].filter((d) => d.kind === 'crypto').sort((x, y) => x.key.localeCompare(y.key))
-      .map((d) => ({ key: d.key, pUp: +d.pUp.toFixed(3), labelled: d.labelled, brier: d.brier === null ? null : +d.brier.toFixed(4) }));
-    return { mode: this.d.cfg.snn.mode, stage: this.d.cfg.snn.stage, alpha: e.alpha, events: e.events, reason: e.reason, shadow: this.snnReply?.shadow ?? true, top: this.snnReply?.top ?? null, p99Ms: +snn.host.p99().toFixed(1), targetScale: snn.scaler.scale, dirs, takeGate: this.d.model.params.take?.validation ?? null };
+    const dirs = [...this.snnDirs.entries()].filter(([, d]) => d.kind === 'crypto').sort((x, y) => x[0].localeCompare(y[0]))
+      .map(([k, d]) => ({ key: k, pUp: +d.pUp.toFixed(3), labelled: d.labelled, skill: Number.isFinite(d.skill) ? +d.skill.toFixed(3) : null, brier: d.brier === null ? null : +d.brier.toFixed(4) }));
+    const units = Object.fromEntries(Object.entries(snn.units).map(([d, u]) => [d, { stage: this.d.cfg.snn.domains[d as SnnDomain].stage, p99Ms: +u!.host.p99().toFixed(1), shadow: this.snnReplies.get(d as SnnDomain)?.shadow ?? true }]));
+    const cr = this.snnReplies.get('crypto');
+    return { mode: this.d.cfg.snn.mode, stage: this.d.cfg.snn.stage, units, alpha: e.alpha, events: e.events, reason: e.reason, shadow: cr?.shadow ?? true, top: cr?.top ?? null, p99Ms: Math.max(0, ...Object.values(snn.units).map((u) => u!.host.p99())), targetScale: snn.scaler.scale, dirs, takeGate: this.d.model.params.take?.validation ?? null };
   }
 
-  /** SNN state for the dashboard. */
+  /** Tree models next to the decision models: the vol forecast and the fill model (each acts only once validated). */
+  treeModelStatus() {
+    const v = this.d.volModel, f = this.d.fillModel;
+    return {
+      volModel: v ? { version: v.params.version, validated: v.validated, applied: Boolean(v.validated && this.d.cfg.strategy.volModel), improvement: v.params.validation.improvement.mean } : null,
+      fill: f ? { version: f.params.version, validated: f.validated, active: f.validated, quotes: f.params.validation.quotes, fills: f.params.validation.fills } : null,
+      fillLogging: Boolean(this.fillLog),
+    };
+  }
+
+  /** SNN state for the dashboard: every network separately. */
   async snnStatus() {
     const snn = this.d.snn;
     if (!snn) return { mode: 'off' };
-    return {
-      mode: this.d.cfg.snn.mode, stage: this.d.cfg.snn.stage, host: { mode: snn.host.mode, version: snn.host.version, p99Ms: +snn.host.p99().toFixed(1), timeouts: snn.host.timeouts, lastError: snn.host.lastError ?? null, restoredFrom: snn.host.restoredFrom ?? null },
-      blender: snn.blender.status(), targetScale: snn.scaler.scale,
-      salience: this.snnReply?.salience ?? {}, top: this.snnReply?.top ?? null, shadow: this.snnReply?.shadow ?? true,
-      network: await snn.host.status(),
-    };
+    const units: Record<string, unknown> = {};
+    for (const [d, u] of Object.entries(snn.units)) {
+      const r = this.snnReplies.get(d as SnnDomain);
+      units[d] = {
+        stage: this.d.cfg.snn.domains[d as SnnDomain].stage,
+        host: { mode: u!.host.mode, version: u!.host.version, p99Ms: +u!.host.p99().toFixed(1), timeouts: u!.host.timeouts, lastError: u!.host.lastError ?? null, restoredFrom: u!.host.restoredFrom ?? null },
+        salience: r?.salience ?? {}, top: r?.top ?? null, shadow: r?.shadow ?? true,
+        network: await u!.host.status(),
+      };
+    }
+    return { mode: this.d.cfg.snn.mode, crossFeed: this.d.cfg.snn.crossFeed, blender: snn.blender.status(), targetScale: snn.scaler.scale, units };
   }
 
   /** Open binary positions with their sensitivity to the underlying, for the perp hedger. */
@@ -929,7 +1003,9 @@ export class Engine {
     const observed = settle?.avg, observedCount = settle?.n;
     // Intraday volatility periodicity: scale the backward-looking EWMA sigma to the variance
     // expected over this contract's remaining life (only with a validated profile).
-    const sigmaPricing = effectiveSigma(vol.sigmaPerSqrtSec, this.d.volProfile, m.asset, now, m.closeTime);
+    // Tree vol forecast (validated only): how far realised vol over the remaining life will differ from the EWMA.
+    const volMult = this.volFc.multiplier(m.asset, now, vol.sigmaPerSqrtSec, tauSec, () => assetFeatureMap(m.asset, now, { index: idx, spot: md.spot.get(m.asset), bars: md.features.bars.get(m.asset), candles: md.features.candles.get(m.asset), usdtd: md.usdtd, btcd: md.btcd, perp: md.features.perps.get(m.asset) }));
+    const sigmaPricing = effectiveSigma(vol.sigmaPerSqrtSec, this.d.volProfile, m.asset, now, m.closeTime) * volMult;
     const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
     if (!fv) return block('fair value unavailable');
     const sess = sessionState(now);
@@ -1055,6 +1131,10 @@ export class Engine {
     const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode, entries: Boolean(reason) });
     // The MLP decides whether each entry is worth taking (take/skip head, once validated).
     if (S.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: S.takeMargin });
+    // Quote, cross or skip each maker entry by expected value (fill model, once validated).
+    const fillCtx = { q: st.q ?? pYes, book, tick: m.tickSize, tauSec, sigma: vol.sigmaPerSqrtSec, features, minEv: S.fillMinEv, takerMinEdge: strat.takerBuffer + strat.minEdge };
+    applyFillModel(plan, this.d.fillModel, fillCtx);
+    if (this.fillLog) for (const p of plan.place) if (isMakerEntry(p)) this.fillX.set(p, fillInputs(p, fillCtx));
     plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
     if (kellyScale < 1) plan.notes.push(`drawdown: Kelly x${kellyScale.toFixed(2)}`);
     for (const g of guards) plan.notes.push(g);
@@ -1150,6 +1230,8 @@ export class Engine {
       return;
     }
     await oms.submit(intent);
+    const fx = this.fillX.get(p);
+    if (fx && !tennis) this.fillLog?.onQuote({ ticker: m.ticker, side: p.side, price: p.price, count: p.count, x: fx });
   }
 
   private async cancelMarketQuotes(ticker: string, reason: string): Promise<void> {
@@ -1161,4 +1243,14 @@ export class Engine {
     const quotes = this.d.oms.liveOrders().filter((o) => o.purpose === 'quote' && !o.cancelRequested);
     await Promise.all(quotes.map((q) => this.d.oms.cancel(q.clientOrderId, reason)));
   }
+}
+
+/** Compact log row of a direction call with its confidence (see ReplayState 'snn' parsing). */
+function dirRow(d: DirectionPred): (string | number | null)[] {
+  const r = (x: number, k = 4) => (Number.isFinite(x) ? +x.toFixed(k) : null);
+  return [d.key, +d.pUp.toFixed(5), +d.expSignedMove.toFixed(3), d.labelled, r(d.skill), r(d.calConf), r(d.contractSkill), r(d.surpriseRatio), r(d.G)];
+}
+
+function dirConf(d: DirectionPred): SnnConf {
+  return { skill: d.skill, calConf: d.calConf, contractSkill: d.contractSkill, surpriseRatio: d.surpriseRatio, G: d.G, labelled: d.labelled };
 }

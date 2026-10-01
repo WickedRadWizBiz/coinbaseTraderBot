@@ -24,7 +24,9 @@ import fs from 'fs';
 import path from 'path';
 import { loadConfig, type StrategyConfig, type RiskLimits } from '../bot/config';
 import { DEFAULT_FEES } from '../bot/fees';
-import { computeFeatureMap } from '../bot/model/featureEngine';
+import { assetFeatureMap, computeFeatureMap } from '../bot/model/featureEngine';
+import { VolForecaster, VolModel } from '../bot/model/volModel';
+import { applyFillModel, FillModel } from '../bot/tca/fillModel';
 import { applyTakeGate } from '../bot/model/takeModel';
 import { effectiveSigma, loadVolProfile, type VolProfile } from '../bot/model/volSeasonality';
 import { sessionRiskFor, huntBlockedBySession, type SessionRiskProfile } from '../bot/model/sessionRisk';
@@ -120,10 +122,11 @@ export interface BacktestLatency { orderMs: number; cancelMs?: number; jitterMs?
 
 export async function runBacktest(
   dir: string, model: MetaModel, strategy: StrategyConfig, limits: RiskLimits, bankroll0: number,
-  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams; hunt?: HuntParams; volProfile?: VolProfile; applyVolSeasonality?: boolean; sessionRisk?: SessionRiskProfile; huntSessionGuard?: boolean; huntTransitionBufferMin?: number; vault?: VaultConfig; calendar?: MacroEvent[]; sizingTiers?: TierPoint[]; latency?: BacktestLatency } = {},
+  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams; hunt?: HuntParams; volProfile?: VolProfile; applyVolSeasonality?: boolean; volModel?: VolModel; fillModel?: FillModel; sessionRisk?: SessionRiskProfile; huntSessionGuard?: boolean; huntTransitionBufferMin?: number; vault?: VaultConfig; calendar?: MacroEvent[]; sizingTiers?: TierPoint[]; latency?: BacktestLatency } = {},
 ): Promise<BacktestResult> {
   const policy = opts.exitPolicy ?? 'fair_value';
   const st = new ReplayState();
+  const volFc = new VolForecaster(opts.volModel);
   const pos = new PositionBook();
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => DEFAULT_FEES, () => st.now);
   const gateway = new RiskGateway(limits);
@@ -250,7 +253,8 @@ export async function runBacktest(
       const tauSec = (m.closeTime - st.now) / 1000;
       const settle = tauSec <= SETTLEMENT_AVG_SEC ? idx!.settlement(m.closeTime, st.now, SETTLEMENT_AVG_SEC) : undefined;
       const observed = settle?.avg, observedCount = settle?.n;
-      const sigmaFv = opts.applyVolSeasonality ? effectiveSigma(vol.sigmaPerSqrtSec, opts.volProfile, m.asset, st.now, m.closeTime) : vol.sigmaPerSqrtSec;
+      const sigmaFv = (opts.applyVolSeasonality ? effectiveSigma(vol.sigmaPerSqrtSec, opts.volProfile, m.asset, st.now, m.closeTime) : vol.sigmaPerSqrtSec)
+        * volFc.multiplier(m.asset, st.now, vol.sigmaPerSqrtSec, tauSec, () => assetFeatureMap(m.asset, st.now, { index: idx, spot: st.spot.get(m.asset), bars: st.features.bars.get(m.asset), candles: st.features.candles.get(m.asset), usdtd: st.usdtd, btcd: st.btcd, perp: st.features.perps.get(m.asset) }));
       const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaFv, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
       if (!fv) continue;
       const mid = (bid.price + ask.price) / 2;
@@ -361,6 +365,8 @@ export async function runBacktest(
         entries: Boolean(reason),
       });
       if (strategy.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features: fmap, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: strategy.takeMargin });
+      // Fill model (validated only), as live: quote, cross or skip each maker entry by expected value.
+      applyFillModel(plan, opts.fillModel, { q: pYes, book, tick: m.tickSize, tauSec, sigma: vol.sigmaPerSqrtSec, features: fmap, minEv: strategy.fillMinEv, takerMinEdge: strategy.takerBuffer + strategy.minEdge });
       for (const c of plan.cancel) if (!cancelInFlight.has(c.clientOrderId)) await send(m.ticker, 'cancel', () => cancelNow(c.clientOrderId), c.clientOrderId);
 
       for (const p of plan.place) {
@@ -472,6 +478,11 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
   // Price with the seasonal volatility profile when given (mirror production).
   const vpPath = argOf('vol-profile', '');
   const volProfile = vpPath ? loadVolProfile(vpPath) : undefined;
+  // Tree vol forecast / fill model, as production applies them (each only when validated).
+  const vmPath = argOf('vol-model', '');
+  const volModel = vmPath ? VolModel.load(vmPath) : undefined;
+  const fmPath = argOf('fill-model', '');
+  const fillModel = fmPath ? FillModel.load(fmPath) : undefined;
   const calendar = loadCalendar(argOf('calendar', 'params/calendar.json'));
   // Execution latency (ms): --latency-ms 250 [--cancel-latency-ms 150] [--latency-jitter-ms 100]. Default: none.
   const latency: BacktestLatency | undefined = Number(argOf('latency-ms', '0')) > 0 || Number(argOf('latency-jitter-ms', '0')) > 0
@@ -486,7 +497,7 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
         : [{ hunt, ratchet }];
       for (const c of combos) {
         results.push(await runBacktest(dir, model, { ...cfg.strategy, minEdge }, cfg.risk, bankroll, {
-          exitPolicy, ratchet: c.ratchet, hunt: c.hunt, volProfile, applyVolSeasonality: Boolean(volProfile),
+          exitPolicy, ratchet: c.ratchet, hunt: c.hunt, volProfile, applyVolSeasonality: Boolean(volProfile), volModel, fillModel,
           sessionRisk: cfg.strategy.sessionRisk, huntSessionGuard: cfg.strategy.huntSessionGuard, huntTransitionBufferMin: cfg.strategy.huntTransitionBufferMin,
           vault: cfg.vault.enabled ? cfg.vault : undefined, calendar, sizingTiers: cfg.sizingTiers, latency,
         }));

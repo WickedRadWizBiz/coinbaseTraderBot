@@ -295,14 +295,25 @@ export interface FeatureContext {
 export interface SnnContext {
   up?: Partial<Record<15 | 60 | 240, number>>;
   move?: Partial<Record<15 | 60 | 240, number>>;
+  /** Confidence of each call, from the network's own graded history. */
+  conf?: Partial<Record<15 | 60 | 240, SnnConf>>;
   pContract?: number;
 }
+
+/** skill / contractSkill = 1 - Brier/0.25 (0 = coin flip); calConf = calibration confidence of the
+ *  contract readout; surpriseRatio = surprise vs normal (> 1 = confused); G = governor; labelled =
+ *  graded direction calls. NaN until enough history. */
+export interface SnnConf { skill?: number; calConf?: number; contractSkill?: number; surpriseRatio?: number; G?: number; labelled?: number }
 
 /** Direction horizon matching a contract: 15-minute contracts -> 15, longer (hourly ladders) -> 60. */
 export const snnHorizonFor = (c: { openTime?: number; closeTs?: number; tauSec: number }): 15 | 60 =>
   (c.openTime && c.closeTs ? (c.closeTs - c.openTime) / 60_000 : c.tauSec / 60) <= 20 ? 15 : 60;
 
 const snnLogit = (p: number | undefined) => (p === undefined || !Number.isFinite(p) ? NA : clip(Math.log(clamp(p, 1e-4, 1 - 1e-4) / (1 - clamp(p, 1e-4, 1 - 1e-4))), 6));
+const snnConfOf = (c: FeatureContext, h: 15 | 60 | 240, k: keyof SnnConf, lim: number) => {
+  const v = c.snn?.conf?.[h]?.[k];
+  return v === undefined || !Number.isFinite(v) ? NA : clip(v, lim);
+};
 const snnMoveZ = (c: FeatureContext, h: 15 | 60 | 240) => {
   const m = c.snn?.move?.[h];
   if (m === undefined || !Number.isFinite(m) || !(c.sigmaPerSqrtSec > 0)) return NA;
@@ -782,6 +793,14 @@ export const FEATURES: Record<string, { group: FeatureGroup; description: string
   snn_up_h: { group: 'snn', tier: 'T2', description: "SNN P(up) over this contract's horizon, as log-odds", fn: (c) => snnLogit(c.snn?.up?.[snnHorizonFor(c)]) },
   snn_move_h_z: { group: 'snn', tier: 'T2', description: "SNN expected signed move over this contract's horizon, sigma-scaled", fn: (c) => snnMoveZ(c, snnHorizonFor(c)) },
   snn_bias: { group: 'snn', tier: 'T2', description: 'SNN fair-value bias: logit(p_snn) - logit(fair value) for this contract', fn: (c) => { const a = snnLogit(c.snn?.pContract), b = snnLogit(c.fairValue); return Number.isFinite(a) && Number.isFinite(b) ? clip(a - b, 6) : NA; } },
+  // Confidence of the SNN's calls (its own graded history: the snapshot/settlement analysis).
+  snn_skill_h: { group: 'snn', tier: 'T2', description: "SNN direction skill over this contract's horizon: 1 - Brier/0.25 of its graded calls (0 = coin flip)", fn: (c) => snnConfOf(c, snnHorizonFor(c), 'skill', 1) },
+  snn_cal_h: { group: 'snn', tier: 'T2', description: 'SNN contract readout calibration confidence on settled snapshots (1 = calibrated)', fn: (c) => snnConfOf(c, snnHorizonFor(c), 'calConf', 1) },
+  snn_contract_skill_h: { group: 'snn', tier: 'T2', description: 'SNN contract readout skill on settled snapshots: 1 - Brier/0.25', fn: (c) => snnConfOf(c, snnHorizonFor(c), 'contractSkill', 1) },
+  snn_surprise_h: { group: 'snn', tier: 'T2', description: 'SNN surprise vs its normal level (> 1 = the network is confused right now)', fn: (c) => snnConfOf(c, snnHorizonFor(c), 'surpriseRatio', 5) },
+  snn_gov_h: { group: 'snn', tier: 'T2', description: 'SNN governor level G (0 calm .. 1 over-active / deteriorating)', fn: (c) => snnConfOf(c, snnHorizonFor(c), 'G', 1) },
+  snn_skill_1h: { group: 'snn', tier: 'T2', description: 'SNN 1-hour direction skill (1 - Brier/0.25)', fn: (c) => snnConfOf(c, 60, 'skill', 1) },
+  snn_skill_4h: { group: 'snn', tier: 'T2', description: 'SNN 4-hour direction skill (1 - Brier/0.25)', fn: (c) => snnConfOf(c, 240, 'skill', 1) },
   snn_dir_agree: { group: 'snn', tier: 'T2', description: "+1 when the SNN direction over the contract's horizon agrees with the fair value's side, -1 when it disagrees", fn: (c) => { const u = c.snn?.up?.[snnHorizonFor(c)]; return u === undefined || !Number.isFinite(u) ? NA : Math.sign(u - 0.5) * Math.sign(c.fairValue - 0.5); } },
 
   // N. Interactions (kept only if ablation proves them; trees find most on their own).

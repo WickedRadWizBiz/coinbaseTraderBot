@@ -33,7 +33,9 @@ import { KillSwitch } from './risk/killSwitch';
 import { RiskGateway } from './risk/riskGateway';
 import { Reconciler } from './recon/reconciler';
 import { Tca } from './tca/tca';
-import { createSnn } from './snn';
+import { createSnnFleet } from './snn';
+import { VolModel } from './model/volModel';
+import { FillModel } from './tca/fillModel';
 import { TennisScoreClient } from './tennis/liveTennisApi';
 import { TennisFairModel } from './tennis/tennisFair';
 import { AutoTrainer, resolveModelPaths } from './autotrain';
@@ -173,20 +175,24 @@ async function main(): Promise<void> {
           makerBps: P.makerFeeBps, requireValidation: P.requireValidation, minEquityUsd: P.minEquityUsd,
         },
         hub, gateway: perpGateway, model: perpModel, audit,
-        sources: (asset) => ({ index: md.index.get(asset), spot: md.spot.get(asset), bars: md.features.bars.get(asset), candles: md.features.candles.get(asset), usdtd: md.usdtd, btcd: md.btcd, perp: hub.get(asset), snn: engineRef?.snnContext(asset) }),
+        sources: (asset) => ({ index: md.index.get(asset), spot: md.spot.get(asset), bars: md.features.bars.get(asset), candles: md.features.candles.get(asset), usdtd: md.usdtd, btcd: md.btcd, perp: hub.get(asset), snn: engineRef?.snnContext(asset, undefined, 'perps') }),
       });
     }
     kill.bindCancelAll(async (reason) => { await oms.cancelAll(reason); await hedger!.cancelAll(reason); });
     log.info('perps enabled', { hedge: P.hedge, trading: P.trading, gateway: perpGateway.name });
   }
   // Cortex-like SNN: shadow by default; in blend mode alpha is earned (<= 0.25) by out-of-sample Brier.
-  const snn = createSnn({ ...cfg.snn, modelPath: modelPaths.snn });
+  // Three isolated SNNs (crypto contracts, perps, tennis): each its own worker, model and checkpoints.
+  const snn = createSnnFleet(cfg.snn, { crypto: modelPaths.snn_crypto, perps: modelPaths.snn_perps, tennis: modelPaths.snn_tennis });
   if (snn) {
-    try {
-      await snn.host.start();
-      log.info('SNN started', { mode: cfg.snn.mode, stage: cfg.snn.stage, host: snn.host.mode, version: snn.host.version, restored: snn.host.restoredFrom });
-    } catch (e) {
-      log.error('SNN failed to start; continuing without it', { error: String(e) });
+    for (const [d, u] of Object.entries(snn.units)) {
+      try {
+        await u!.host.start();
+        log.info(`SNN ${d} started`, { mode: cfg.snn.mode, stage: cfg.snn.domains[d as 'crypto'].stage, host: u!.host.mode, version: u!.host.version, restored: u!.host.restoredFrom });
+      } catch (e) {
+        log.error(`SNN ${d} failed to start; continuing without it`, { error: String(e) });
+        delete snn.units[d as 'crypto'];
+      }
     }
   }
   let tennisFair: TennisFairModel | undefined;
@@ -197,7 +203,12 @@ async function main(): Promise<void> {
     try { tennisScores = new TennisScoreClient({ stateFile: path.join(cfg.dataDir, 'tennis_api_budget.json') }); }
     catch (e) { log.warn(`live tennis scores disabled: ${(e as Error).message}`); }
   }
-  const engine: Engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader, clock, tennisScores, tennisFair, snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
+  // Tree-based volatility forecast and fill model: used only once their own validation passed.
+  let volModel: VolModel | undefined;
+  try { volModel = cfg.strategy.volModel ? VolModel.load(modelPaths.vol_model) : undefined; } catch (e) { log.warn(`vol model not loaded: ${(e as Error).message}`); }
+  let fillModel: FillModel | undefined;
+  try { fillModel = FillModel.load(modelPaths.fill); } catch (e) { log.warn(`fill model not loaded: ${(e as Error).message}`); }
+  const engine: Engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
   engineRef = engine;
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();
@@ -250,7 +261,7 @@ async function main(): Promise<void> {
     try { await oms.cancelAll(`shutdown (${sig})`); } catch (e) { log.error('cancel on shutdown failed', { error: String(e) }); }
     paper?.flush();
     autoTrain.stop();
-    try { engine.saveSnnBlender(); await engine.snn?.host.stop(); } catch (e) { log.error('SNN checkpoint on shutdown failed', { error: String(e) }); }
+    try { engine.saveSnnBlender(); await Promise.all(Object.values(engine.snn?.units ?? {}).map((u) => u!.host.stop())); } catch (e) { log.error('SNN checkpoint on shutdown failed', { error: String(e) }); }
     audit.write('shutdown', { sig });
     md.stop();
     server.close(() => process.exit(0));

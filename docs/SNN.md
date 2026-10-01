@@ -13,19 +13,52 @@ hard limits: whitelist, position caps, daily loss stop and kill switch all sit o
 | Learns | Continuously, 24/7, traded or not: direction heads from realised moves, readouts from settlements | Daily, offline, on the recordings plus the logged SNN outputs |
 | Output | P(up) over 15m / 1h / 4h per asset, P(up) over 5 min per tennis match, expected move, and p_snn per contract | p_model, plus a take/skip probability for each would-be trade |
 
-**Crypto.** The fair-value MLP and its take/skip head (`bot/model/takeModel.ts`) read the SNN's calls.
+## Three isolated networks
+
+There are three separate SNNs, one per contract type. Each has its own worker thread, parameters (time
+constants matched to its horizons), health monitor, governor, lateral inhibition, checkpoint directory
+(`data/snn/<domain>/`) and model file (`snn_<domain>.json`). **They never read each other's data**, and
+inhibition / salience only compete inside one network.
+
+| Network | Columns | Inputs | Graded on | Read by |
+|---|---|---|---|---|
+| crypto | asset × {15m, 1h} | TA on the spot USD pair, perp premium/funding, the Kalshi contract book | settled Kalshi contracts (snapshot + settlement) and its direction calls | the MLP + take/skip head |
+| perps | asset × {1h, 4h} | the same asset-level data, no contract channels | its direction calls (perps never settle) | the perps model |
+| tennis | one per live match | the 4 signals (momentum, flow, depth, cross-market), live score, book | settled match contracts and its 5-minute direction calls | the tennis model |
+
+Each decision model reads **only its own network** (`SNN_CROSS_FEED=false`, the default). With
+`SNN_CROSS_FEED=true` a model may also read the other crypto-side network, and only for horizons its own
+network lacks (MLP ← perps 4h, perps ← crypto 15m). Contract scores always come from the network that
+owns the contract.
+
+**Confidence.** The networks still do the same snapshot-and-settlement analysis as the MLP. Each call
+carries its network's own graded record, logged with it and fed to its decision model:
+
+| Field | Meaning | Feature |
+|---|---|---|
+| skill | 1 − Brier/0.25 of the last ≤ 500 graded direction calls (0 = coin flip; NaN below 50) | `snn_skill_h`, `snn_skill_1h`, `snn_skill_4h`, tennis `snn_skill` |
+| calConf | calibration confidence of the contract readout on settled snapshots (1 = slope 1) | `snn_cal_h`, tennis `snn_cal` |
+| contractSkill | 1 − Brier/0.25 of the contract readout on settled snapshots | `snn_contract_skill_h` |
+| surpriseRatio | prediction error now vs its normal level (> 1 = confused right now) | `snn_surprise_h` |
+| G | governor level (0 calm … 1 over-active) | `snn_gov_h` |
+
+The perps network has no settlements, so its confidence is its direction skill alone. The tennis network
+cannot be replayed (there is no recorded score feed to replay), so it learns live only and its
+checkpoints persist across restarts.
+
+**Crypto.** The fair-value MLP and its take/skip head (`bot/model/takeModel.ts`) read the crypto network's calls.
 - **Take/skip head:** for every entry the edge would place, it estimates P(trade wins). The trade is taken only if that clears the side's break-even (price + fee).
 - **Validation gate:** the gate switches on only after its out-of-fold held-out check beats the fair value alone.
 
-**Perps** read `snn_up_1h` and `snn_up_4h`.
+**Perps** read the perps network's `snn_up_1h`, `snn_up_4h`, `snn_skill_1h` and `snn_skill_4h`.
 
 **Tennis.**
-- The tennis MLP (`bot/tennis/tennisFair.ts`) learns fair P(A wins) from the 4 signals, the score, the book and the SNN.
+- The tennis model (`bot/tennis/tennisFair.ts`, an MLP or boosted trees, whichever validates better) learns fair P(A wins) from the 4 signals, the score, the book and the tennis network (its P(A), direction call and confidence).
 - Once validated (100+ matches, held-out Brier better than the market's), an entry needs fair − price ≥ `TENNIS_FAIR_MIN_EDGE`.
 - Live scores come from the Live Tennis API (`TENNIS_SCORE_FEED=livetennis`, key in `LIVE_TENNIS_API_KEY`). The free tier allows 100 calls a day: one slate call covers every match, and it is only refreshed on a price move, an exit, or after `TENNIS_SCORE_IDLE_MIN`.
 
 **Logging and the legacy blend.**
-- The SNN's calls are written to the recordings every minute as `snn` events. That is what the MLP trains on.
+- Each network's calls are written to the recordings every minute as `snn` events tagged with the network (`d: crypto | perps | tennis`), each call as `[key, pUp, expSignedMove, labelled, skill, calConf, contractSkill, surpriseRatio, G]`. That is what the decision models train on. Events logged before the split (no `d`) are read as: 15m → crypto, 4h → perps, 1h → both.
 - The old end-of-pipeline blend (`SNN_MODE=blend`, α ≤ 0.25) is still available but no longer needed. In the default `shadow` mode the SNN runs, logs and feeds the MLP without blending.
 
 ## Every formula, where it lives, and how it is checked
@@ -75,10 +108,12 @@ regenerate with `npm run research:snn-golden`).
 | Direction head | logistic on the column state; label = price higher after the column's horizon (15m / 60m / 240m; 5 min for tennis) | 1 per column | delta rule on every minute's tag once its horizon passes, 24/7 (η 2e-3, capped), two-speed weights |
 
 **Columns.**
-- Crypto: one per asset × {15m, 60m, 240m} (`BTC-15m`, `BTC-60m`, `BTC-240m`, …). Up to `SNN_MAX_COLUMNS`, default 18.
-- Tennis: one per live match (`TEN:<event>`), created and removed with the match. Up to 8.
-- Crypto columns are fed every second from asset-level data, whether or not anything trades. So the direction heads keep learning around the clock.
-- 15-minute contracts are scored on the 15m column, hourly ladders on the 60m column, and perps use the 60m and 240m calls.
+- Crypto network: one per asset × {15m, 60m} (`BTC-15m`, `BTC-60m`, …). Up to `SNN_MAX_COLUMNS`, default 18.
+- Perps network: one per asset × {60m, 240m}, in its own network (so `BTC-60m` exists in both, independently).
+- Tennis network: one per live match (`TEN:<event>`), created and removed with the match. Up to 8.
+- Crypto and perps columns are fed every second from asset-level data, whether or not anything trades. So the direction heads keep learning around the clock.
+- 15-minute contracts are scored on the crypto 15m column, hourly ladders on the crypto 60m column.
+- Time constants per network (`domainParams`): crypto keeps the PDF's values; perps run 3–5× slower (τ_A 30 min, branch τ up to 10 min, a call every 5 min); tennis faster (τ_A 2 min, a call every 30 s).
 
 The clock is Δt = 1 s of market time, run in a `worker_threads` worker (`bot/snn/worker.ts`, bundled to
 `dist/snnWorker.cjs`). Readouts have a 200 ms deadline: on a timeout, α = 0 for that tick. A latency p99 above
@@ -92,7 +127,7 @@ The same tick log gives bit-identical outputs, and a checkpoint → restore → 
 uninterrupted one. The worker and the in-process runtime agree exactly. All of this is tested in
 `tests/snn.test.ts`.
 
-**Checkpoints.** `data/snn/snn-<version>-<ts>.json` is written every `SNN_CHECKPOINT_EVERY_MIN` and at
+**Checkpoints.** `data/snn/<domain>/snn-<version>-<ts>.json` is written every `SNN_CHECKPOINT_EVERY_MIN` and at
 shutdown, and the newest 5 are kept. A corrupt newest file rolls back to the previous one, and a version
 mismatch is refused. A checkpoint holds weights (fast and slow), thresholds, θ_M, traces, the tags awaiting
 settlement, G, PC precisions, the PRNG state and the version hash. After a gap longer than 120 s, transient
@@ -136,8 +171,11 @@ The design expects most mechanisms to fail, and that is the system working.
 2. Truncated surrogate-gradient (e-prop) training of the L1 branches.
 3. An L2 logistic readout fit on a training window, then out-of-sample evaluation on the next window.
 
-It writes `params/snn_model.candidate.json`. Promote it to `params/snn_model.json` only after the
-ablation accepts the stage.
+Both scripts take `--domain crypto|perps`. The crypto network is judged on settled contracts as above. The
+perps network is judged on its own graded direction calls: the baseline is the column's prequential
+up-rate (a no-skill forecaster), and calls are clustered per column-hour so overlapping horizons are not
+counted as independent events. The automated pipeline runs both and promotes `snn_crypto.json` and
+`snn_perps.json` (docs/AUTOMATION.md).
 
 ## Health (freeze learning and drop to shadow on breach)
 
@@ -164,13 +202,15 @@ Learning resumes after 30 min back within band.
 
 ## Configuration
 
-`SNN_MODE` (off | **shadow** | blend), `SNN_STAGE` (default S5), `SNN_COLUMNS` (whitelist),
-`SNN_MAX_COLUMNS`, `SNN_MODEL_PATH`, `SNN_CHECKPOINT_DIR`, `SNN_CHECKPOINT_EVERY_MIN`, `SNN_WORKER`,
+`SNN_MODE` (off | **shadow** | blend), `SNN_STAGE` (default S5), `SNN_CRYPTO` / `SNN_PERPS` / `SNN_TENNIS`
+(each network on/off), `SNN_<CRYPTO|PERPS|TENNIS>_STAGE` (default `SNN_STAGE`; tennis S3),
+`SNN_<CRYPTO|PERPS|TENNIS>_MODEL_PATH` (default `params/snn_<domain>.json`), `SNN_CROSS_FEED` (default false),
+`SNN_COLUMNS` (whitelist), `SNN_MAX_COLUMNS`, `SNN_CHECKPOINT_DIR`, `SNN_CHECKPOINT_EVERY_MIN`, `SNN_WORKER`,
 `SNN_TIMEOUT_MS` (≤ 200), `SNN_LATENCY_SKIP_P99_MS`, `SNN_ALPHA_MAX` (≤ 0.25), `SNN_MIN_EVENTS`,
 `SNN_READOUT_ETA`, `SNN_SEED`, `SNN_TARGET_SCALING`, and the deferred flags `SNN_WILSON_COWAN`,
 `SNN_GAP_JUNCTIONS`, `SNN_IZHIKEVICH_CH`, `SNN_DCAAP`.
 
-**α is earned.** It is the grid α* ∈ [0, 0.25] that minimises blended Brier over the last ≤ 2000 settled
+The legacy blend uses the crypto network only. **α is earned.** It is the grid α* ∈ [0, 0.25] that minimises blended Brier over the last ≤ 2000 settled
 scanned contracts, with at least 200 events. It is adopted only when the event-clustered day-block CI of
 Brier(blend) − Brier(model) is entirely below 0.
 

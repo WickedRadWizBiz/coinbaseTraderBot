@@ -4,10 +4,11 @@
 //      the fast-sigmoid surrogate, k = 25) through the L1-rate readout features, with settlement labels.
 //   3. Readout fit: L2-regularised logistic regression of the settlement labels on the collected
 //      per-contract feature snapshots, one readout per column.
-// Exports frozen weights (params/snn_model.candidate.json) with the health reference measured on
+// One network at a time (--domain crypto|perps; tennis learns live). Exports frozen weights
+// (params/snn_<domain>.candidate.json) with the health reference measured on
 // the training window. Evaluate out-of-sample on the NEXT window (--eval-from/--eval-to) before use.
 //
-//   npm run research:snn-train -- --recordings data/recordings --from 2026-06-01 --to 2026-06-22 --eval-from 2026-06-22 --eval-to 2026-06-29 [--stage S5] [--out params/snn_model.candidate.json]
+//   npm run research:snn-train -- --recordings data/recordings --from 2026-06-01 --to 2026-06-22 --eval-from 2026-06-22 --eval-to 2026-06-29 [--domain crypto|perps] [--stage S5] [--out params/snn_crypto.candidate.json]
 
 import fs from 'fs';
 import path from 'path';
@@ -15,7 +16,7 @@ import { loadCalendar } from '../bot/model/calendar';
 import { MetaModel } from '../bot/model/metaModel';
 import { brier, sigmoid } from '../bot/snn/formulas';
 import { encodeArr, type SnnModelFile } from '../bot/snn/network';
-import { DEFAULT_SNN, stageFlags, versionHash, withFlags, type SnnParams, type Stage } from '../bot/snn/params';
+import { DEFAULT_SNN, domainParams, stageFlags, versionHash, withFlags, type SnnParams, type Stage } from '../bot/snn/params';
 import { replaySnn } from './snnReplay';
 
 /** L2-regularised logistic regression by gradient descent with backtracking (full batch). */
@@ -50,12 +51,15 @@ export async function trainSnnMain(argOf: (k: string, d: string) => string = cli
   const dir = argOf('recordings', 'data/recordings');
   const date = (k: string) => (argOf(k, '') ? Date.parse(argOf(k, '')) : undefined);
   const stage = argOf('stage', 'S5') as Stage;
-  const out = argOf('out', 'params/snn_model.candidate.json');
   const modelPath = argOf('model', '');
   const model = modelPath && fs.existsSync(modelPath) ? MetaModel.load(modelPath) : undefined;
   const calendar = loadCalendar(path.resolve('params/calendar.json'));
-  const params: SnnParams = withFlags({ ...DEFAULT_SNN, seed: Number(argOf('seed', String(DEFAULT_SNN.seed))) }, stageFlags(stage));
-  const win = { from: date('from'), to: date('to') };
+  // --domain crypto|perps: each network trains alone on its own inputs (never on the other's).
+  const domain = argOf('domain', 'crypto') as 'crypto' | 'perps';
+  if (domain !== 'crypto' && domain !== 'perps') throw new Error(`--domain ${domain}: only crypto and perps are replayable (tennis learns live)`);
+  const out = argOf('out', `params/snn_${domain}.candidate.json`);
+  const params: SnnParams = domainParams(domain, withFlags({ ...DEFAULT_SNN, seed: Number(argOf('seed', String(DEFAULT_SNN.seed))) }, stageFlags(stage)));
+  const win = { from: date('from'), to: date('to'), domain };
 
   // 1. PC pretraining (U0, U1, precisions), only for stages with the PC pathway.
   let preset: SnnModelFile | undefined;
@@ -79,9 +83,9 @@ export async function trainSnnMain(argOf: (k: string, d: string) => string = cli
   const trained = ['w1', 'w1s', 'theta1', 'alpha1', 'U1', 'U0'];
   const file: SnnModelFile = {
     version: versionHash(params), params, trainedAt: new Date().toISOString(),
-    notes: `stage ${stage}; window ${win.from ? new Date(win.from).toISOString() : 'start'}..${win.to ? new Date(win.to).toISOString() : 'end'}`,
+    notes: `${domain} stage ${stage}; window ${win.from ? new Date(win.from).toISOString() : 'start'}..${win.to ? new Date(win.to).toISOString() : 'end'}`,
     columns: Object.fromEntries([...tr.net.columns].map(([k, c]) => [k, Object.fromEntries(trained.map((n) => [n, encodeArr(c.arrays()[n])]))])),
-    readouts, healthRef: tr.net.health.ref,
+    readouts, dirReadouts: tr.net.exportModel().dirReadouts, healthRef: tr.net.health.ref,
   };
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(file));
@@ -96,8 +100,8 @@ export async function trainSnnMain(argOf: (k: string, d: string) => string = cli
     evalStats = b(res.rows);
     console.log('eval window (out-of-sample):', evalStats);
   }
-  console.log(`wrote ${out} (version ${file.version}); copy to params/snn_model.json only after research:snn-ablation accepts the stage`);
-  return { out, version: file.version, stage, train: trainStats, eval: evalStats };
+  console.log(`wrote ${out} (version ${file.version}); copy to params/snn_${domain}.json only after research:snn-ablation --domain ${domain} accepts the stage`);
+  return { out, version: file.version, stage, domain, train: trainStats, eval: evalStats };
 }
 
 if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void trainSnnMain();

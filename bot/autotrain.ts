@@ -15,20 +15,27 @@ import { MetaModel } from './model/metaModel';
 import { loadVolProfile } from './model/volSeasonality';
 import { PerpModel } from './perps/perpSignal';
 import type { PerpTrader } from './perps/perpTrader';
-import { createSnn } from './snn';
+import { createSnnUnit } from './snn';
+import type { SnnDomain } from './snn/params';
+import { VolModel } from './model/volModel';
+import { FillModel } from './tca/fillModel';
 import { TennisFairModel } from './tennis/tennisFair';
 import { logger } from './util/log';
 
 const log = logger('autotrain');
 
-export const MODEL_FILES = { mlp: 'model.json', perp: 'perp_model.json', snn: 'snn_model.json', vol: 'vol_profile.json', tennis: 'tennis_model.json' } as const;
+export const MODEL_FILES = { mlp: 'model.json', perp: 'perp_model.json', snn_crypto: 'snn_crypto.json', snn_perps: 'snn_perps.json', snn_tennis: 'snn_tennis.json', vol: 'vol_profile.json', vol_model: 'vol_model.json', tennis: 'tennis_model.json', fill: 'fill_model.json' } as const;
 type Kind = keyof typeof MODEL_FILES;
 
 /** The file the bot should load for each model: the pipeline's promoted copy in AUTO_TRAIN_DIR
  *  when it exists, else the configured params/ path. */
 export function resolveModelPaths(cfg: Readonly<Config>): Record<Kind, string> {
   const pick = (k: Kind, fallback: string) => { const p = path.join(cfg.autoTrain.dir, MODEL_FILES[k]); return fs.existsSync(p) ? p : fallback; };
-  return { mlp: pick('mlp', cfg.paramsPath), perp: pick('perp', cfg.perps.modelPath), snn: pick('snn', cfg.snn.modelPath), vol: pick('vol', cfg.strategy.volProfilePath), tennis: pick('tennis', cfg.tennis.modelPath) };
+  return {
+    mlp: pick('mlp', cfg.paramsPath), perp: pick('perp', cfg.perps.modelPath),
+    snn_crypto: pick('snn_crypto', cfg.snn.domains.crypto.modelPath), snn_perps: pick('snn_perps', cfg.snn.domains.perps.modelPath), snn_tennis: pick('snn_tennis', cfg.snn.domains.tennis.modelPath),
+    vol: pick('vol', cfg.strategy.volProfilePath), vol_model: pick('vol_model', cfg.strategy.volModelPath), tennis: pick('tennis', cfg.tennis.modelPath), fill: pick('fill', cfg.strategy.fillModelPath),
+  };
 }
 
 /** How to launch the pipeline: the bundled dist/pipeline.cjs in production, the TS source under tsx in development. */
@@ -85,7 +92,7 @@ export class AutoTrainer {
     return t;
   }
 
-  state(): { lastRun?: number; mlpId?: string; snnVersion?: string; mlpTrainedWithSnn?: string; snnStage?: string; lastReport?: string } {
+  state(): { lastRun?: number; mlpId?: string; snnVersions?: Partial<Record<SnnDomain, string>>; trainedWithSnn?: Partial<Record<SnnDomain, string>>; lastReport?: string } {
     try { return JSON.parse(fs.readFileSync(path.join(this.d.cfg.autoTrain.dir, 'pipeline_state.json'), 'utf8')); } catch { return {}; }
   }
 
@@ -125,7 +132,7 @@ export class AutoTrainer {
   /** Poll the model files; hot-swap whatever changed. */
   async watch(): Promise<void> {
     const paths = resolveModelPaths(this.d.cfg);
-    for (const k of ['snn', 'mlp', 'vol', 'perp', 'tennis'] as Kind[]) {
+    for (const k of ['snn_crypto', 'snn_perps', 'snn_tennis', 'vol_model', 'mlp', 'vol', 'perp', 'tennis', 'fill'] as Kind[]) {
       const p = paths[k], m = mtime(p);
       if (m === null || this.mtimes.get(p) === m) continue;
       // Do not load a file the pipeline is still writing (promotion is a copy; wait one poll).
@@ -161,22 +168,30 @@ export class AutoTrainer {
       const m = TennisFairModel.load(file);
       engine.setTennisFair(m);
       this.record('tennis', m ? `${m.params.version} (validated=${m.validated}, ${m.params.validation.matches} matches)` : 'removed');
-    } else if (kind === 'snn') {
-      if (cfg.snn.mode === 'off') return;
-      const old = engine.snn;
-      const next = createSnn({ ...cfg.snn, modelPath: file });
-      if (!next) return;
+    } else if (kind === 'vol_model') {
+      const m = VolModel.load(file);
+      engine.setVolModel(m && cfg.strategy.volModel ? m : undefined);
+      this.record('vol_model', m ? `${m.params.version} (validated=${m.validated})` : 'removed');
+    } else if (kind === 'fill') {
+      const m = FillModel.load(file);
+      engine.setFillModel(m);
+      this.record('fill', m ? `${m.params.version} (validated=${m.validated}, ${m.params.validation.quotes} quotes)` : 'removed');
+    } else if (kind.startsWith('snn_')) {
+      const domain = kind.slice(4) as SnnDomain;
+      if (cfg.snn.mode === 'off' || !cfg.snn.domains[domain].enabled || !engine.snn) return;
+      const old = engine.snn.units[domain];
+      const next = createSnnUnit(cfg.snn, domain, file);
       await next.host.start();
-      engine.saveSnnBlender();
-      engine.setSnn(next);
+      engine.setSnnUnit(domain, next);
       await old?.host.stop();
       const v = next.model?.version ?? next.host.version;
-      this.record('snn', `${v} (${next.model?.notes ?? 'untrained'})`);
-      // The MLP, perps and tennis models were trained on the previous SNN's outputs: retrain them.
-      if (cfg.autoTrain.onModelChange && this.state().mlpTrainedWithSnn !== v && !this.child && !this.retrainFor.has(v)) {
-        this.retrainFor.add(v);
-        log.info('SNN changed: retraining the models that read it', { snn: v });
-        this.run(['--only', 'dataset,mlp,perps,tennis']);
+      this.record(kind, `${v} (${next.model?.notes ?? 'untrained'})`);
+      // The models that read this network were trained on its previous outputs: retrain them.
+      const consumers: Record<SnnDomain, string> = { crypto: 'dataset,mlp', perps: 'perps', tennis: 'tennis' };
+      if (cfg.autoTrain.onModelChange && this.state().trainedWithSnn?.[domain] !== v && !this.child && !this.retrainFor.has(`${domain}:${v}`)) {
+        this.retrainFor.add(`${domain}:${v}`);
+        log.info('SNN changed: retraining the models that read it', { domain, snn: v });
+        this.run(['--only', consumers[domain]]);
       }
     }
     this.d.audit.write('config', { event: 'hot_swap', kind, file });

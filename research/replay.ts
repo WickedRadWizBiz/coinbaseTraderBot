@@ -9,7 +9,7 @@ import { IndexTracker, type AvgMode } from '../bot/marketdata/indexTracker';
 import { OrderBook } from '../bot/marketdata/orderBook';
 import { FeatureHub } from '../bot/model/featureEngine';
 import { contractKind, type ContractTerms, type MarketKind } from '../bot/model/fairValue';
-import type { SnnContext } from '../bot/model/featureEngine';
+import type { SnnConf, SnnContext } from '../bot/model/featureEngine';
 import type { TennisScore } from '../bot/tennis/tennisModel';
 
 /** Settlement averaging in research, matching the bot's SETTLEMENT_AVG (default official). */
@@ -42,19 +42,25 @@ async function* lines(file: string): AsyncGenerator<RecEvent> {
   }
 }
 
-/** Recordings in time order. When `sidecar` (default: env SNN_BACKFILL_DIR) holds a
- *  snnfill-YYYY-MM-DD.jsonl for a day, its events (prequential SNN outputs) are merged in by time. */
+/** Recordings in time order. `sidecar` (default: env SNN_BACKFILL_DIR) is one or more directories
+ *  (path.delimiter-separated, one per SNN domain) of snnfill-YYYY-MM-DD.jsonl files; each day's
+ *  sidecar events (prequential SNN outputs) are merged in by time. */
 export async function* readRecordings(dir: string, sidecar = process.env.SNN_BACKFILL_DIR, fromDay?: string, toDay?: string): AsyncGenerator<RecEvent> {
   const files = fs.readdirSync(dir).filter((f) => /^md-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)).sort()
     .filter((f) => (!fromDay || f.slice(3, 13) >= fromDay) && (!toDay || f.slice(3, 13) <= toDay));
+  const sides = (sidecar ?? '').split(path.delimiter).filter(Boolean);
   for (const f of files) {
-    const side = sidecar ? path.join(sidecar, f.replace(/^md-/, 'snnfill-')) : undefined;
-    if (!side || !fs.existsSync(side)) { yield* lines(path.join(dir, f)); continue; }
-    const a = lines(path.join(dir, f)), b = lines(side);
-    let x = await a.next(), y = await b.next();
-    while (!x.done || !y.done) {
-      if (y.done || (!x.done && x.value.t <= y.value.t)) { yield x.value as RecEvent; x = await a.next(); }
-      else { yield y.value as RecEvent; y = await b.next(); }
+    const extra = sides.map((d) => path.join(d, f.replace(/^md-/, 'snnfill-'))).filter((x) => fs.existsSync(x));
+    if (!extra.length) { yield* lines(path.join(dir, f)); continue; }
+    // k-way merge by time; ties go to the recording first, then the sidecars in order.
+    const its = [path.join(dir, f), ...extra].map((x) => lines(x));
+    const heads = await Promise.all(its.map((it) => it.next()));
+    for (;;) {
+      let best = -1;
+      for (let i = 0; i < heads.length; i++) if (!heads[i].done && (best < 0 || (heads[i].value as RecEvent).t < (heads[best].value as RecEvent).t)) best = i;
+      if (best < 0) break;
+      yield heads[best].value as RecEvent;
+      heads[best] = await its[best].next();
     }
   }
 }
@@ -69,10 +75,11 @@ export class ReplayState {
   readonly btcd = new IndexTracker('BTC.D', 90 * 60_000, 300);
   /** Same feature state machine production uses (MarketData.features). */
   readonly features = new FeatureHub();
-  /** Logged SNN outputs (live 'snn' events, or a prequential backfill): direction calls per column
-   *  key and p_snn per contract, with their timestamps. */
-  readonly snnDirs = new Map<string, { pUp: number; move: number; ts: number }>();
-  readonly snnContract = new Map<string, { p: number; ts: number }>();
+  /** Logged SNN outputs (live 'snn' events, or a prequential backfill), keyed `${domain}:${column}`
+   *  (domain = the isolated network that made the call: crypto / perps / tennis): direction calls
+   *  with their confidence, and p_snn per contract, with their timestamps. */
+  readonly snnDirs = new Map<string, { pUp: number; move: number; ts: number; conf: SnnConf }>();
+  readonly snnContract = new Map<string, { p: number; ts: number; domain: string }>();
   /** Live tennis scores (Live Tennis API), latest per event. */
   readonly tennisScores = new Map<string, TennisScore & { ts: number; tiebreak?: boolean; breaksTotal?: [number, number] | null }>();
   now = 0;
@@ -128,10 +135,18 @@ export class ReplayState {
       case 'result':
         this.results.set(e.ticker, e.result);
         break;
-      case 'snn':
-        for (const [key, pUp, move] of (e.dirs ?? []) as [string, number, number][]) this.snnDirs.set(key, { pUp, move, ts: e.t });
-        for (const [t, p] of Object.entries((e.c ?? {}) as Record<string, number>)) this.snnContract.set(t, { p, ts: e.t });
+      case 'snn': {
+        type Row = [string, number, number, number?, (number | null)?, (number | null)?, (number | null)?, (number | null)?, (number | null)?];
+        const num = (x: number | null | undefined) => (x === null || x === undefined ? undefined : x);
+        for (const [key, pUp, move, labelled, skill, calConf, contractSkill, surpriseRatio, G] of (e.dirs ?? []) as Row[]) {
+          const v = { pUp, move, ts: e.t, conf: { labelled, skill: num(skill), calConf: num(calConf), contractSkill: num(contractSkill), surpriseRatio: num(surpriseRatio), G: num(G) } };
+          // Before the networks were split one SNN fed everyone: its 15m/1h calls go to crypto, 1h/4h to perps.
+          const domains = e.d ? [e.d] : key.startsWith('TEN:') ? ['tennis'] : key.endsWith('-240m') ? ['perps'] : key.endsWith('-60m') ? ['crypto', 'perps'] : ['crypto'];
+          for (const d of domains) this.snnDirs.set(`${d}:${key}`, v);
+        }
+        for (const [t, p] of Object.entries((e.c ?? {}) as Record<string, number>)) this.snnContract.set(t, { p, ts: e.t, domain: e.d ?? 'any' }); // legacy: one network scored every contract
         break;
+      }
       case 'tennis_score':
         this.tennisScores.set(e.event, { setsA: e.setsA, setsB: e.setsB, gamesA: e.gamesA, gamesB: e.gamesB, pointsA: e.pointsA, pointsB: e.pointsB, serverA: e.serverA, tiebreak: e.tiebreak, breaksTotal: e.breaksTotal, ts: e.t });
         break;
@@ -141,17 +156,23 @@ export class ReplayState {
     }
   }
 
-  /** SNN context for the MLP/perp features at `now` (calls older than 3 minutes are ignored). */
-  snnContext(asset: string, ticker?: string, maxAgeMs = 180_000): SnnContext | undefined {
-    const up: SnnContext['up'] = {}, move: SnnContext['move'] = {};
+  /** SNN context for a decision model at `now`, same rule as the engine's snnContext: the consumer
+   *  (crypto = MLP, perps = perps model) reads its own network; the other only when `crossFeed`
+   *  (SNN_CROSS_FEED) is on. Calls older than 3 minutes are ignored. */
+  snnContext(asset: string, ticker?: string, consumer: 'crypto' | 'perps' = 'crypto', maxAgeMs = 180_000, crossFeed = process.env.SNN_CROSS_FEED === 'true'): SnnContext | undefined {
+    const up: SnnContext['up'] = {}, move: SnnContext['move'] = {}, conf: SnnContext['conf'] = {};
     let any = false;
-    for (const h of [15, 60, 240] as const) {
-      const d = this.snnDirs.get(`${asset}-${h}m`);
-      if (d && this.now - d.ts <= maxAgeMs) { up[h] = d.pUp; move[h] = d.move; any = true; }
+    const other = consumer === 'crypto' ? 'perps' : 'crypto';
+    for (const d of crossFeed ? [consumer, other] : [consumer]) {
+      for (const h of [15, 60, 240] as const) {
+        if (up[h] !== undefined) continue; // own network first
+        const x = this.snnDirs.get(`${d}:${asset}-${h}m`);
+        if (x && this.now - x.ts <= maxAgeMs) { up[h] = x.pUp; move[h] = x.move; conf[h] = x.conf; any = true; }
+      }
     }
     const c = ticker ? this.snnContract.get(ticker) : undefined;
-    const pContract = c && this.now - c.ts <= maxAgeMs ? c.p : undefined;
-    return any || pContract !== undefined ? { up, move, pContract } : undefined;
+    const pContract = c && this.now - c.ts <= maxAgeMs && (c.domain === consumer || c.domain === 'any') ? c.p : undefined;
+    return any || pContract !== undefined ? { up, move, conf, pContract } : undefined;
   }
 
   book(t: string): OrderBook {

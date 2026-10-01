@@ -304,14 +304,23 @@ In live trading, `ModelHealth` stops new risk if the rolling log-loss advantage 
 ## Automated training and hot-swapping
 
 The bot retrains itself. Every day at `AUTO_TRAIN_HOUR_UTC` (06:00 UTC by default) it runs `research/pipeline.ts` as a low-priority background process. The pipeline runs in this order:
-1. Tests and trains the SNN.
-2. Backfills its outputs without leakage.
-3. Builds the dataset.
-4. Trains the MLP on the SNN's outputs, then backtests it.
-5. Fits the volatility profile.
-6. Trains the perps model and the tennis model. Promoted models land in `data/models/`, and the running bot hot-swaps them without a restart.
+1. Tests and trains the crypto and perps SNNs (the tennis SNN learns live).
+2. Backfills each network's outputs without leakage.
+3. Trains the tree volatility forecast.
+4. Builds the dataset.
+5. Trains the MLP on the crypto network's outputs (MLP vs trees for the take/skip head), then backtests it.
+6. Fits the volatility profile.
+7. Trains the perps model and the tennis model (each: its own network's outputs; MLP/ridge vs trees).
+8. Trains the fill / adverse-selection model once enough maker quotes are logged.
 
-A new SNN always retrains the models that read it, including when you swap one in by hand. The SNN's blend history is saved across restarts and cleared when the MLP changes.
+Promoted models land in `data/models/`, and the running bot hot-swaps them without a restart.
+
+A new network retrains only the model that reads it, including when you swap one in by hand. The blend history is saved across restarts and cleared when the MLP changes.
+
+**Tree models.** Gradient-boosted trees (`research/gbdt.ts`, logistic or squared loss, missing values routed natively) fill three gaps:
+- **Vol forecast** (`bot/model/volModel.ts`): predicts how far realised volatility over a contract's remaining life will differ from the backward-looking EWMA, and multiplies fair value's sigma by it (clamped to 0.5–2×). Applied only after its held-out QLIKE check passes (`VOL_MODEL`).
+- **Fill / adverse-selection model** (`bot/tca/fillModel.ts`): from the bot's own logged maker quotes, P(fill within 60 s) and the expected markout given a fill. Per maker entry the bot then quotes, crosses or skips by expected value. It brings itself online: it collects quotes from day one, trains once 500 quotes / 100 fills exist, and is promoted and used only after it beats the base rate on held-out days.
+- **Candidates** for the take/skip head, the perps model and the tennis model, compared with the existing MLP / ridge on the same validation data; the better one is kept.
 
 `docs/AUTOMATION.md` is the plain-language guide. It covers what runs by itself, what you still do by hand, every setting, and how to roll back.
 
@@ -329,6 +338,8 @@ The network has these levels:
 
 It runs on a 1 s market clock in a worker thread. Readouts have a 200 ms deadline.
 
+**Three isolated networks.** One per contract type: crypto (15m/1h, scored on settled contracts), perps (1h/4h, graded on its direction calls) and tennis (per live match). Each has its own worker, parameters, health, checkpoints and model file. They never read each other, and each decision model reads only its own network (`SNN_CROSS_FEED=false`). Every call carries its network's confidence from the same snapshot-and-settlement grading the MLP gets: direction skill, contract calibration, surprise and governor level.
+
 **Division of labour: the SNN informs, the MLP decides.**
 - **What the SNN reads:** the TA library on the Coinbase spot USD pairs, the perps, the Kalshi books, and for tennis the four confluence signals plus Live Tennis API scores.
 - **What it does with them:**
@@ -336,8 +347,8 @@ It runs on a 1 s market clock in a worker thread. Readouts have a 200 ms deadlin
   - Logs its calls with the data stream.
 - **What the models do with those calls:**
   - The MLP uses them as inputs for its fair value and for its take/skip head, which decides whether each trade is worth taking.
-  - The perps model uses the 1h/4h calls.
-  - A tennis MLP uses them for match fair values.
+  - The perps model uses the perps network's 1h/4h calls and skill.
+  - The tennis model uses the tennis network's calls for match fair values.
 
 `SNN_MODE=shadow` is the default: the network scores and labels every scanned contract but never changes what is traded. In `SNN_MODE=blend`, p_final = (1 − α·c)·p_model + α·c·p_snn. α starts at 0, is capped at 0.25, and is earned only when the out-of-sample Brier improvement is significant.
 
@@ -389,8 +400,10 @@ npm run research:backtest -- --model params/model.candidate.json --grid 0.02,0.0
 npm run research:ta -- --assets BTC,ETH,SOL,XRP,DOGE --days 120                        # TA rule study -> params/ta_study.json
 npm run research:perp-train -- --recordings data/recordings --every 300                 # -> params/perp_model.candidate.json
 npm run research:perp-backtest -- --model params/perp_model.candidate.json --annotate   # execution gate for full-size perps
-npm run research:snn-train -- --from 2026-06-01 --to 2026-06-22 --eval-from 2026-06-22 --eval-to 2026-06-29   # -> params/snn_model.candidate.json
-npm run research:snn-ablation -- --recordings data/recordings [--grid grid.json]          # S0..S6 + deferred vs proxies, criteria (a)-(f)
+npm run research:snn-train -- --domain crypto --from 2026-06-01 --to 2026-06-22 --eval-from 2026-06-22 --eval-to 2026-06-29   # or --domain perps
+npm run research:snn-ablation -- --recordings data/recordings --domain crypto [--grid grid.json]   # S0..S6 + deferred vs proxies, criteria (a)-(f)
+npm run research:vol-model -- --recordings data/recordings                               # tree vol forecast -> params/vol_model.json
+npm run research:fill-train -- --fills data/fills                                        # fill model (needs 500 quotes / 100 fills)
 npm run research:snn-golden                                                              # regenerate the Python golden vectors
 ```
 

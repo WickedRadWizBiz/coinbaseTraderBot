@@ -21,6 +21,8 @@ import { loadConfig } from '../bot/config';
 import { PERP_FEATURES, perpFeatures, type PerpModelParams } from '../bot/perps/perpSignal';
 import { readRecordings, ReplayState } from './replay';
 import { deflatedSharpe, rng } from './stats';
+import { gbdtLogit, type GbdtModel } from '../bot/model/trees';
+import { trainGbdt } from './gbdt';
 
 export interface PerpRow { ts: number; asset: string; x: number[]; y: number; fundingBps: number }
 
@@ -44,7 +46,7 @@ export async function buildPerpDataset(dir: string, opts: { everySec?: number; h
     mids.set(asset, arr);
     if (st.now < (nextAt.get(asset) ?? 0)) continue;
     nextAt.set(asset, Math.floor(st.now / every + 1) * every);
-    const f = perpFeatures(asset, st.now, { index: st.index.get(asset), spot: st.spot.get(asset), bars: st.features.bars.get(asset), candles: st.features.candles.get(asset), usdtd: st.usdtd, btcd: st.btcd, perp: ps, snn: st.snnContext(asset) });
+    const f = perpFeatures(asset, st.now, { index: st.index.get(asset), spot: st.spot.get(asset), bars: st.features.bars.get(asset), candles: st.features.candles.get(asset), usdtd: st.usdtd, btcd: st.btcd, perp: ps, snn: st.snnContext(asset, undefined, 'perps') });
     samples.push({ ts: st.now, asset, x: PERP_FEATURES.map((n) => f[n]), mid, fundingBps: Number.isFinite(f.funding_rate_bps) ? f.funding_rate_bps : 0 });
   }
   const rows: PerpRow[] = [];
@@ -121,9 +123,26 @@ function blockCi(n: number, block: number, stat: (idx: number[]) => number, iter
   return { lo: vals[Math.floor(0.025 * iters)], hi: vals[Math.floor(0.975 * iters)] };
 }
 
-export interface TrainPerpOpts { horizonMin: number; everySec: number; folds?: number; lambdas?: number[]; makerBps?: number; entryEdgeBps?: number; minEff?: number }
+export interface TrainPerpOpts { horizonMin: number; everySec: number; folds?: number; lambdas?: number[]; makerBps?: number; entryEdgeBps?: number; minEff?: number; trees?: boolean }
 
-export function trainPerp(rows: PerpRow[], o: TrainPerpOpts): { params: PerpModelParams; oos: { lambda: number; ic: number }[] } {
+type Cand = number | 'gbdt';
+
+/** Boosted regression trees on the raw features (missing values routed by the trees); early
+ *  stopping on the last 20% of the training rows by time, with a horizon-long embargo. */
+function fitTrees(train: PerpRow[], H: number): GbdtModel | undefined {
+  if (train.length < 60) return undefined;
+  const vi = Math.floor(train.length * 0.8);
+  const vStart = train[vi].ts;
+  const tr = train.filter((r) => r.ts <= vStart - H), va = train.slice(vi);
+  if (tr.length < 40 || va.length < 10) return undefined;
+  const ybar = tr.reduce((s, r) => s + r.y, 0) / tr.length;
+  const ones = (k: number) => new Array(k).fill(1), base = (k: number) => new Array(k).fill(ybar);
+  const g = trainGbdt(tr.map((r) => r.x), tr.map((r) => r.y), ones(tr.length), base(tr.length), va.map((r) => r.x), va.map((r) => r.y), ones(va.length), base(va.length),
+    { loss: 'squared', nTrees: 200, learningRate: 0.05, maxDepth: 2, minLeafWeight: 20, seed: 7 });
+  return { ...g.model, baseScore: ybar };
+}
+
+export function trainPerp(rows: PerpRow[], o: TrainPerpOpts): { params: PerpModelParams; oos: { lambda: Cand; ic: number }[] } {
   if (rows.length < 50) throw new Error(`only ${rows.length} labelled rows: record more perp data first`);
   const folds = o.folds ?? 5, lambdas = o.lambdas ?? [0.1, 1, 10, 100];
   const maker = o.makerBps ?? 5, edge = o.entryEdgeBps ?? 5;
@@ -133,17 +152,25 @@ export function trainPerp(rows: PerpRow[], o: TrainPerpOpts): { params: PerpMode
   const start = Math.floor(n / (folds + 1));
   const blocks: Array<[number, number]> = [];
   for (let k = 0; k < folds; k++) blocks.push([start + Math.floor((k * (n - start)) / folds), start + Math.floor(((k + 1) * (n - start)) / folds)]);
-  const oosPred = new Map<number, number[]>(lambdas.map((l) => [l, new Array(n).fill(NaN)]));
+  // Candidates: ridge at each lambda, and boosted regression trees (squared loss), all walked
+  // forward on the same folds and judged on the same out-of-sample IC.
+  const cands: Cand[] = [...lambdas, ...(o.trees === false ? [] : ['gbdt' as const])];
+  const oosPred = new Map<Cand, number[]>(cands.map((l) => [l, new Array(n).fill(NaN)]));
   for (const [a, b] of blocks) {
     const cut = rows[a].ts - H; // embargo: labels of training rows must end before the test block starts
     const train = rows.filter((r, i) => i < a && r.ts <= cut);
     if (train.length < 30) continue;
-    for (const l of lambdas) {
+    for (const l of cands) {
+      if (l === 'gbdt') {
+        const g = fitTrees(train, H);
+        for (let i = a; i < b; i++) oosPred.get(l)![i] = g ? gbdtLogit(g, rows[i].x) : NaN;
+        continue;
+      }
       const f = fitRidge(train, l);
       for (let i = a; i < b; i++) oosPred.get(l)![i] = predict(f, rows[i].x);
     }
   }
-  const scored = lambdas.map((l) => {
+  const scored = cands.map((l) => {
     const p = oosPred.get(l)!;
     const idx = p.map((v, i) => (Number.isFinite(v) ? i : -1)).filter((i) => i >= 0);
     return { lambda: l, ic: pearson(idx.map((i) => p[i]), idx.map((i) => rows[i].y)), idx };
@@ -167,7 +194,7 @@ export function trainPerp(rows: PerpRow[], o: TrainPerpOpts): { params: PerpMode
   }
   const mean = trades.length ? trades.reduce((s, x) => s + x, 0) / trades.length : NaN;
   const pnlCi = trades.length >= 10 ? blockCi(trades.length, 1, (s) => s.reduce((a, j) => a + trades[j], 0) / s.length) : { lo: NaN, hi: NaN };
-  const dsr = trades.length >= 10 ? deflatedSharpe(trades, lambdas.length).probability : 0;
+  const dsr = trades.length >= 10 ? deflatedSharpe(trades, cands.length).probability : 0;
   const resid = idx.map((i) => rows[i].y - p[i]);
   const residStd = Math.sqrt(resid.reduce((s, x) => s + x * x, 0) / Math.max(1, resid.length - 1));
   const nEff = Math.floor(idx.length / stride);
@@ -177,13 +204,20 @@ export function trainPerp(rows: PerpRow[], o: TrainPerpOpts): { params: PerpMode
   if (!(icCi.lo > 0)) notes.push(`IC CI lower bound ${icCi.lo?.toFixed(3)} <= 0`);
   if (!(pnlCi.lo > 0)) notes.push(`net P&L per trade CI lower bound ${pnlCi.lo?.toFixed(2)} bps <= 0 (${trades.length} trades)`);
   if (!(dsr > 0.95)) notes.push(`deflated Sharpe probability ${dsr.toFixed(3)} <= 0.95`);
-  const final = fitRidge(rows, best.lambda);
+  const validation = { passed: notes.length === 0, nEff, ic: best.ic, icCiLo: icCi.lo, pnlBpsPerTrade: mean, pnlCiLo: pnlCi.lo, dsrProbability: dsr, trials: cands.length, notes };
+  const common = { horizonMin: o.horizonMin, features: PERP_FEATURES, residStdBps: residStd || 1, trainedAt: new Date().toISOString(), validation };
+  const trees = best.lambda === 'gbdt' ? fitTrees(rows, H) : undefined;
+  if (trees) {
+    const d = PERP_FEATURES.length;
+    return {
+      params: { ...common, version: `perp-gbdt-${new Date().toISOString().slice(0, 10)}`, kind: 'gbdt', gbdt: trees, mean: new Array(d).fill(0), std: new Array(d).fill(1), weights: [], bias: 0, lambda: NaN },
+      oos: scored.map((s) => ({ lambda: s.lambda, ic: s.ic })),
+    };
+  }
+  const lam = typeof best.lambda === 'number' ? best.lambda : lambdas[0];
+  const final = fitRidge(rows, lam);
   return {
-    params: {
-      version: `perp-ridge-${new Date().toISOString().slice(0, 10)}`, kind: 'linear', horizonMin: o.horizonMin, features: PERP_FEATURES,
-      mean: final.mean, std: final.std, weights: final.w, bias: final.b, residStdBps: residStd || 1, lambda: best.lambda, trainedAt: new Date().toISOString(),
-      validation: { passed: notes.length === 0, nEff, ic: best.ic, icCiLo: icCi.lo, pnlBpsPerTrade: mean, pnlCiLo: pnlCi.lo, dsrProbability: dsr, trials: lambdas.length, notes },
-    },
+    params: { ...common, version: `perp-ridge-${new Date().toISOString().slice(0, 10)}`, kind: 'linear', mean: final.mean, std: final.std, weights: final.w, bias: final.b, lambda: lam },
     oos: scored.map((s) => ({ lambda: s.lambda, ic: s.ic })),
   };
 }

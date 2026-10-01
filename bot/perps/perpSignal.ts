@@ -18,6 +18,7 @@ import type { IndexTracker } from '../marketdata/indexTracker';
 import { assetFeatureMap, type BarStore, type SnnContext } from '../model/featureEngine';
 import type { CandleSet } from '../ta/candleStore';
 import type { PerpState } from './perpData';
+import { gbdtLogit, validateGbdt, type GbdtModel } from '../model/trees';
 
 /** Candidate inputs for the perp model: returns/volatility, perp premium/funding/OI, macro, TA. */
 export const PERP_FEATURES = [
@@ -27,8 +28,8 @@ export const PERP_FEATURES = [
   'ta_rsi_1h', 'ta_rsi_4h', 'ta_macd_hist_1h', 'ta_di_diff_1h', 'ta_adx_1h', 'ta_ema_stack_1h', 'ta_ema_stack_4h', 'ta_bb_pctb_1h',
   'ta_cmf_1h', 'ta_price_ma50_4h', 'ta_cloud_4h', 'ta_structure_1h', 'ta_vwap_dist_1h', 'ta_obv_slope_4h',
   'taconf_trend_alignment', 'taconf_mtf_momentum', 'taconf_net_trend', 'taconf_net_reversal',
-  // SNN direction calls over the perp horizons (1 h and 4 h).
-  'snn_up_1h', 'snn_up_4h',
+  // The perps network's direction calls over the perp horizons (1 h and 4 h) and its graded skill.
+  'snn_up_1h', 'snn_up_4h', 'snn_skill_1h', 'snn_skill_4h',
 ];
 
 export interface PerpFeatureSources {
@@ -68,7 +69,9 @@ export interface PerpModelValidation {
 
 export interface PerpModelParams {
   version: string;
-  kind: 'linear';
+  /** linear = ridge on standardised features; gbdt = boosted regression trees (squared loss). */
+  kind: 'linear' | 'gbdt';
+  gbdt?: GbdtModel;
   horizonMin: number;
   features: string[];
   mean: number[];
@@ -88,6 +91,7 @@ export class PerpModel {
     try {
       if (!fs.existsSync(path)) return undefined;
       const p = JSON.parse(fs.readFileSync(path, 'utf8')) as PerpModelParams;
+      if (p.kind === 'gbdt') { if (!p.gbdt) return undefined; validateGbdt(p.gbdt, p.features.length); return new PerpModel(p); }
       if (p.kind !== 'linear' || p.features.length !== p.weights.length) return undefined;
       return new PerpModel(p);
     } catch {
@@ -114,6 +118,11 @@ export class PerpModel {
   /** Expected return over the horizon (bps) and residual std (bps). */
   predict(f: Record<string, number>): { muBps: number; sigmaBps: number } {
     const p = this.params;
+    if (p.kind === 'gbdt' && p.gbdt) {
+      const cap = 3 * p.residStdBps;
+      const mu = gbdtLogit(p.gbdt, p.features.map((n) => (Number.isFinite(f[n]) ? f[n] : NaN)));
+      return { muBps: Math.max(-cap, Math.min(cap, Number.isFinite(mu) ? mu : 0)), sigmaBps: p.residStdBps };
+    }
     let mu = p.bias;
     p.features.forEach((name, i) => {
       const x = f[name];
