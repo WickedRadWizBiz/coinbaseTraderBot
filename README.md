@@ -41,7 +41,7 @@ bot/
 research/                offline only: dataset builder, walk-forward trainer (MLP + GBDT), backtest, DSR/PBO/DM/CPCV stats
 tests/                   node:test suite (fees, Kelly, fair value vs Monte Carlo, OMS, risk, recon, paper, strategy, engine)
 web/                     read-only dashboard (React), served by the API
-deploy/                  systemd unit, activate/rollback scripts
+deploy/                  systemd unit, activate/rollback/first-deploy scripts (docs/DEPLOY.md)
 ```
 
 Every order goes down one path. Paper, shadow and live all run the same OMS, risk and reconciliation code; only the `ExchangeGateway` changes.
@@ -444,7 +444,7 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 | Public `0.0.0.0` binding, 75 open routes | Binds `127.0.0.1` by default; a non-loopback bind needs an explicit flag. Every `/api` route needs a bearer token (constant-time compare, lockout). |
 | Live toggle via API, raw settings merge, credential-writing endpoints | Removed. There is no settings, credential, restart or reset-state route. Live mode is env-only, checked at startup. |
 | Open cancel-all, panic, restart and download routes | Replaced by one authenticated kill switch and a reset that needs a typed phrase and clean reconciliation. |
-| Auto-deploy on push to `main` with `npm install` | Replaced. CI runs typecheck, tests and build. Deploy is manual, tag-only, uses `npm ci`, sits behind a GitHub `production` environment, and supports rollback. |
+| Auto-deploy on push to `main` with `npm install` | Replaced. Pushes to `main` still auto-deploy to the Lightsail static IP, but only after typecheck, tests and build pass, from the lockfile (`npm ci`), with a health check and automatic rollback. Tag-only, approval-gated deploys are one setting away (`AUTO_DEPLOY=false`, required reviewers). See `docs/DEPLOY.md`. |
 | Gemini writing live parameters | Removed from the runtime. LLMs may help offline (reviews, reports) and must never change a running parameter. |
 | `ALWAYS_ON_15M`, profit-target sizing, Kelly fail-open, EV-gate override, $0.50 default price | Removed. Kelly returns zero when edge ≤ 0. The gateway has no override. Missing data blocks trading and pulls quotes. |
 | FIX path, and FIX→REST fallback with a new id | Removed. There is one REST order path. Retries reuse the same `client_order_id`, and a timeout queries by id before any resend. |

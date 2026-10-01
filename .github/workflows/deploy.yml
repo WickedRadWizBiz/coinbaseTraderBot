@@ -1,20 +1,28 @@
-# Manual, reviewed deployment of a TAGGED release. Nothing deploys on push.
-# (The previous workflow deployed every push to main straight to the live box
-# with `npm install` — the Knight Capital failure mode.)
+# Deploys to the Lightsail box (static IP, systemd service `kalshi-bot`).
 #
-# Requirements:
-#  - Run from the Actions tab with the release tag (e.g. v2.0.0).
-#  - The `production` GitHub environment should require a reviewer approval.
-#  - The server keeps its own .env (TRADING_MODE etc.); this workflow never
-#    changes trading mode or credentials.
-name: Deploy release
+#  - Every push to main (i.e. when a PR is merged) tests, builds and deploys automatically.
+#  - Run manually from the Actions tab to redeploy main, or to deploy an existing release tag
+#    (v1.2.3) by entering it.
+#  - Rollback is one command on the server: `bash ~/bot/current/deploy/rollback.sh`.
+#
+# Switching to reviewed, tag-only deploys later (more secure): set the repository variable
+# AUTO_DEPLOY=false (Settings > Secrets and variables > Actions > Variables) and add required
+# reviewers to the `production` environment. See docs/DEPLOY.md.
+#
+# The server keeps its own ~/bot/bot.env (TRADING_MODE etc.); this workflow never changes trading
+# mode or credentials. A fresh server gets a paper-mode bot.env on first deploy.
+#
+# Required secrets: LIGHTSAIL_HOST, LIGHTSAIL_USERNAME, LIGHTSAIL_SSH_KEY (optional LIGHTSAIL_PORT).
+name: Deploy
 
 on:
+  push:
+    branches: [main, master]
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to deploy (must already exist, e.g. v2.0.0)'
-        required: true
+        description: 'Optional: release tag to deploy instead of the current branch (e.g. v2.0.0)'
+        required: false
 
 permissions:
   contents: read
@@ -25,16 +33,25 @@ concurrency:
 
 jobs:
   deploy:
+    # Pushes deploy unless AUTO_DEPLOY is set to 'false'; manual runs always deploy.
+    if: github.event_name == 'workflow_dispatch' || vars.AUTO_DEPLOY != 'false'
     runs-on: ubuntu-latest
     environment: production
     steps:
       - name: Validate tag format
+        if: inputs.tag != ''
         run: |
           [[ "${{ inputs.tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3"; exit 1; }
 
       - uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: ${{ inputs.tag != '' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+
+      - name: Release name
+        id: rel
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else echo "name=main-$(date -u +%Y%m%d%H%M)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"; fi
 
       - uses: actions/setup-node@v4
         with:
@@ -47,7 +64,7 @@ jobs:
           npm run typecheck
           npm test
           npm run build
-          echo "${{ inputs.tag }}" > dist/RELEASE
+          echo "${{ steps.rel.outputs.name }}" > dist/RELEASE
 
       - name: Upload release to server
         uses: appleboy/scp-action@v0.1.7
@@ -57,7 +74,7 @@ jobs:
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
           source: "dist,web/dist,params,package.json,package-lock.json,deploy"
-          target: "~/releases/${{ inputs.tag }}"
+          target: "~/releases/${{ steps.rel.outputs.name }}"
 
       - name: Activate release (keeps previous for rollback)
         uses: appleboy/ssh-action@v1.0.3
@@ -69,6 +86,9 @@ jobs:
           script_stop: true
           script: |
             set -euo pipefail
-            cd ~/releases/${{ inputs.tag }}
+            cd ~/releases/${{ steps.rel.outputs.name }}
             npm ci --omit=dev
-            bash deploy/activate.sh ~/releases/${{ inputs.tag }}
+            bash deploy/activate.sh ~/releases/${{ steps.rel.outputs.name }}
+            # Keep the 5 newest releases (plus whatever current/previous point to).
+            keep="$(readlink ~/bot/current):$(readlink ~/bot/previous 2>/dev/null || true)"
+            ls -dt ~/releases/*/ | tail -n +6 | while read -r d; do d="${d%/}"; case ":$keep:" in *":$d:"*) ;; *) rm -rf "$d";; esac; done

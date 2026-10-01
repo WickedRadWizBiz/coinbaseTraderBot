@@ -1,7 +1,8 @@
 # /etc/systemd/system/kalshi-bot.service
 # Runs the bot as an unprivileged user from ~/bot/current with the server's
-# own environment file. The API binds to 127.0.0.1 only; reach it via
-#   ssh -L 3000:127.0.0.1:3000 ubuntu@<host>   (or Tailscale)
+# own environment file (~/bot/bot.env, created on first deploy). By default the dashboard is open
+# on the static IP (http://<host>:3000, BIND_HOST=0.0.0.0). To lock it down, see docs/DEPLOY.md:
+#   BIND_HOST=127.0.0.1 and reach it via  ssh -L 3000:127.0.0.1:3000 ubuntu@<host>  (or Tailscale)
 [Unit]
 Description=Kalshi 15m crypto bot
 After=network-online.target

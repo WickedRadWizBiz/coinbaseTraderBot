@@ -118,11 +118,7 @@ These can't be automated, or deliberately aren't.
 
 **3. Deploy code changes.**
 - Models are retrained automatically. Code is not.
-- Deploy a code change with the "Deploy release" GitHub Action and a version tag, e.g. `v2.1.0`. Steps:
-  1. Create the tag.
-  2. Go to Actions → Deploy release → Run workflow.
-  3. Enter the tag.
-  4. Approve it.
+- Code deploys itself: merging to `main` runs the Deploy workflow, which tests, builds, uploads and restarts the bot on Lightsail (docs/DEPLOY.md). To redeploy or deploy a tag by hand, use Actions → Deploy → Run workflow.
 - `data/models/` and `data/recordings/` stay where they are across deploys.
 
 **4. Optional extras, any time:**
