@@ -46,6 +46,9 @@ test('research pipeline runs end to end on synthetic recordings', async () => {
 
   const rep = trainMetaModel(rows, { folds: 3, maxEpochs: 40 });
   const model = MetaModel.fromJson(JSON.stringify(rep.params));
+  // Default search is MLP-only with a hidden layer: a real neural network.
+  assert.equal(rep.params.kind, 'mlp');
+  assert.ok(rep.cv.every((r: { model: string }) => /^mlp-h(8|16)-/.test(r.model)), JSON.stringify(rep.cv.map((r: { model: string }) => r.model)));
   // Tiny sample: must NOT pass go-live gates.
   assert.equal(rep.params.validation!.passed, false);
   assert.ok(model.liveBlockers().length > 0);

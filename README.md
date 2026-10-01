@@ -203,7 +203,7 @@ The trainer's ablation decides which groups are kept.
 **Model (`research/trainMetaModel.ts`).**
 - Rows are weighted 1 / snapshots per contract, and additionally divided by the number of strikes per hourly event.
 - Walk-forward folds are purged, with a 1-hour embargo.
-- Two model families are compared: a residual MLP, and residual gradient-boosted trees whose init score is the fair-value log-odds. The trees are written in TypeScript (`research/gbdt.ts` and `bot/model/trees.ts`), so there is no ONNX export step and no parity gap.
+- The default model is a residual **MLP with a hidden layer** (8 or 16 units, chosen by the 1-SE rule). `--families mlp,gbdt` also compares residual gradient-boosted trees whose init score is the fair-value log-odds, and `--hidden 0` adds the no-hidden-layer (logistic) variant. The trees are written in TypeScript (`research/gbdt.ts` and `bot/model/trees.ts`), so there is no ONNX export step and no parity gap.
 - The **one-standard-error rule** picks the simplest configuration within 1 SE of the best.
 - A beta-calibrated market benchmark (`marketCalibration`) is fitted, and the output is calibrated with Platt or beta scaling, whichever wins out of fold.
 - A 5-member bootstrap **deep ensemble** supplies the ensemble spread. Entries are vetoed when |p − p_mkt| < 2σ_ens.
@@ -360,7 +360,7 @@ npm run dev              # paper mode by default
 
 ```bash
 npm run research:dataset -- --recordings data/recordings --every 60 --entry-window-only   # relaxed-spec sampling
-npm run research:train -- --families mlp,gbdt --ensemble 5 --cpcv 10                      # -> params/model.candidate.json
+npm run research:train -- --ensemble 5 --cpcv 10                                         # MLP (hidden 8/16) -> params/model.candidate.json
 npm run research:backtest -- --model params/model.candidate.json --grid 0.02,0.03,0.04 --exits hold,take_profit,fair_value --annotate
 npm run research:ta -- --assets BTC,ETH,SOL,XRP,DOGE --days 120                        # TA rule study -> params/ta_study.json
 npm run research:perp-train -- --recordings data/recordings --every 300                 # -> params/perp_model.candidate.json

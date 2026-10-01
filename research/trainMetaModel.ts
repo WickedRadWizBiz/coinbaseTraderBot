@@ -1,6 +1,8 @@
 // Train and validate the meta-model OFFLINE with purged walk-forward CV.
 //   npm run research:train -- --data research/out/dataset.jsonl --out params/model.candidate.json
-//        [--sets base,base+geometry+vol+kalshi,...,all] [--families mlp,gbdt] [--hidden 0,8] [--depths 2,3]
+//        [--sets base,base+geometry+vol+kalshi,...,all] [--families mlp] [--hidden 8,16] [--depths 2,3]
+//   Default: MLP only, with hidden layers (a real neural network). Pass --families mlp,gbdt to also
+//   compare gradient-boosted trees, or --hidden 0 to include the no-hidden-layer (logistic) MLP.
 //        [--ensemble 5] [--epochs 400] [--cpcv 10]   (0 disables the CPCV report)
 //
 // Protocol (institutional blueprint 5-7, relaxed-cadence spec "Labels"):
@@ -73,6 +75,10 @@ export function resolveSet(spec: string, tiers: FeatureTier[] = ['T1', 'T2']): s
   const groups: FeatureGroup[] = spec === 'all' ? ALL_GROUPS : (spec.split('+') as FeatureGroup[]);
   return featuresInGroups(groups).filter((n) => tiers.includes(FEATURES[n].tier ?? 'T1'));
 }
+
+/** Default model search: MLP only, with hidden layers (8 or 16 units, picked by the 1-SE rule). */
+export const DEFAULT_FAMILIES: Array<'mlp' | 'gbdt'> = ['mlp'];
+export const DEFAULT_HIDDEN = [8, 16];
 
 export type ModelSpec = { family: 'mlp'; hidden: number; l2: number } | { family: 'gbdt'; depth: number; learningRate: number };
 
@@ -244,9 +250,9 @@ export function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts = {}): Trai
     return { spec, names };
   }).filter((set, i, all) => all.findIndex((o) => o.names.join() === set.names.join()) === i);
 
-  const families = opts.families ?? ['mlp', 'gbdt'];
+  const families = opts.families ?? DEFAULT_FAMILIES;
   const models: ModelSpec[] = [];
-  if (families.includes('mlp')) for (const hidden of opts.hidden ?? [0, 8]) for (const l2 of opts.l2 ?? (hidden === 0 ? [1e-3] : [1e-2])) models.push({ family: 'mlp', hidden, l2 });
+  if (families.includes('mlp')) for (const hidden of opts.hidden ?? DEFAULT_HIDDEN) for (const l2 of opts.l2 ?? (hidden === 0 ? [1e-3] : [1e-2])) models.push({ family: 'mlp', hidden, l2 });
   if (families.includes('gbdt')) for (const depth of opts.depths ?? [2, 3]) models.push({ family: 'gbdt', depth, learningRate: 0.03 });
   const grid: Array<{ set: typeof sets[number]; model: ModelSpec }> = [];
   for (const set of sets) for (const model of models) grid.push({ set, model });
@@ -451,8 +457,8 @@ async function main() {
   const rep = trainMetaModel(rows, {
     maxEpochs: Number(arg('epochs', '400')),
     sets: arg('sets', DEFAULT_SETS.join(',')).split(','),
-    families: arg('families', 'mlp,gbdt').split(',') as Array<'mlp' | 'gbdt'>,
-    hidden: arg('hidden', '0,8').split(',').map(Number),
+    families: arg('families', DEFAULT_FAMILIES.join(',')).split(',') as Array<'mlp' | 'gbdt'>,
+    hidden: arg('hidden', DEFAULT_HIDDEN.join(',')).split(',').map(Number),
     depths: arg('depths', '2,3').split(',').map(Number),
     ensemble: Number(arg('ensemble', '5')),
     cpcvGroups: Number(arg('cpcv', '10')),
