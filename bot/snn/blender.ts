@@ -10,6 +10,8 @@
 //           p_snn), and surprise and the governor may only REDUCE it.
 // Every scanned contract is logged at settlement, traded or not.
 
+import fs from 'fs';
+import path from 'path';
 import { blend, brier, calibrationSlope, sat01, surpriseConfidence } from './formulas';
 import { Xoshiro128 } from './rng';
 
@@ -102,11 +104,51 @@ export class SnnBlender {
     };
   }
 
-  state() { return { settled: this.settled, pending: [...this.pending] }; }
-  restore(st: ReturnType<SnnBlender['state']>): void {
+  /** Meta-model the stored (p_model, p_snn) pairs were recorded against. */
+  modelId?: string;
+
+  /** Tie the history to a meta-model: a different model invalidates every stored pair (they hold
+   *  the old model's p_model), so alpha must be re-earned from scratch. Returns true if it reset. */
+  bindModel(id: string): boolean {
+    if (this.modelId === id) return false;
+    const had = this.modelId !== undefined && (this.settled.length > 0 || this.pending.size > 0);
+    this.modelId = id;
+    this.reset();
+    return had;
+  }
+
+  reset(): void {
+    this.settled.length = 0;
+    this.pending.clear();
+    this.lastRecord.clear();
+    this.earned = { alpha: 0, alphaStar: 0, ciHi: null, meanDiff: null, events: 0, reason: 'no settled events yet' };
+    this.dirty = true;
+  }
+
+  state() { return { modelId: this.modelId ?? null, settled: this.settled, pending: [...this.pending] }; }
+  restore(st: { modelId?: string | null; settled: BlendRecord[]; pending: [string, BlendRecord][] }): void {
     this.settled.splice(0, this.settled.length, ...st.settled);
     this.pending.clear(); for (const [k, v] of st.pending) this.pending.set(k, v);
+    this.modelId = st.modelId ?? undefined;
     this.dirty = true;
+  }
+
+  /** Persist to disk (atomic). */
+  save(file: string): void {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(this.state()));
+    fs.renameSync(tmp, file);
+  }
+
+  /** Load saved history, discarding it if it was recorded against a different meta-model. */
+  load(file: string, modelId: string): 'loaded' | 'reset' | 'none' {
+    let st: ReturnType<SnnBlender['state']> | undefined;
+    try { st = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { st = undefined; }
+    if (!st) { this.modelId = modelId; return 'none'; }
+    if (st.modelId !== modelId) { this.modelId = modelId; this.reset(); return 'reset'; }
+    this.restore(st);
+    return 'loaded';
   }
 }
 

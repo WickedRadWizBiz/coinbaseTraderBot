@@ -90,16 +90,15 @@ export async function runPerpBacktest(dir: string, P: PerpsConfig, model: PerpMo
   };
 }
 
-async function main() {
-  const arg = (k: string, d: string) => { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
+export async function perpBacktestMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
   const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
-  const modelPath = arg('model', cfg.perps.modelPath);
+  const modelPath = argOf('model', cfg.perps.modelPath);
   const model = PerpModel.load(modelPath);
   if (!model) console.warn(`no model at ${modelPath}: backtesting the momentum prior at pilot size`);
-  const r = await runPerpBacktest(arg('recordings', 'data/recordings'), cfg.perps, model, { startBalance: Number(arg('balance', String(cfg.perps.paperBalanceUsd))) });
+  const r = await runPerpBacktest(argOf('recordings', 'data/recordings'), cfg.perps, model, { startBalance: Number(argOf('balance', String(cfg.perps.paperBalanceUsd))) });
   const { dailyPnl: _d, ...summary } = r;
   console.table([{ ...summary, pnlUsd: +r.pnlUsd.toFixed(2), fees: +r.fees.toFixed(2), funding: +r.funding.toFixed(2), days: +r.days.toFixed(1) }]);
-  if (process.argv.includes('--annotate') && model && fs.existsSync(modelPath)) {
+  if (annotate && model && fs.existsSync(modelPath)) {
     const p = model.params;
     p.validation = { ...(p.validation ?? { passed: false, nEff: 0, ic: NaN, icCiLo: NaN, pnlBpsPerTrade: NaN, pnlCiLo: NaN, dsrProbability: 0, trials: 1 }), backtest: { ok: r.ok, pnlUsd: r.pnlUsd, pnlCiLo: r.pnlCiLo, dsrProbability: r.dsrProbability, trades: r.trades, days: r.days, fees: r.fees, funding: r.funding } };
     fs.writeFileSync(modelPath, JSON.stringify(p, null, 1));
@@ -107,4 +106,6 @@ async function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]))) void main();
+if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void perpBacktestMain();
+
+function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; }

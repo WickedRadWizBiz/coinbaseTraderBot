@@ -179,9 +179,9 @@ export function recommendSessionRisk(
   return { profile, evidence };
 }
 
-async function main() {
-  const dir = arg('recordings', 'data/recordings');
-  const out = arg('out', 'params/vol_profile.json');
+export async function sessionsMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
+  const dir = argOf('recordings', 'data/recordings');
+  const out = argOf('out', 'params/vol_profile.json');
   console.log(`measuring sessions in ${dir} ...`);
   const m = await measureSessions(dir);
   console.table(m.stats.map((s) => ({
@@ -198,9 +198,9 @@ async function main() {
   console.log('volatility profile validation (holdout days, fair value re-priced):', profile.validation);
   console.log(`wrote ${out} — production applies it only because validation.improved=${profile.validation?.improved}`);
 
-  if (!process.argv.includes('--no-backtest')) {
+  if (!process.argv.includes('--no-backtest') && argOf('no-backtest', '') !== '1') {
     const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
-    const modelPath = arg('model', 'params/model.json');
+    const modelPath = argOf('model', 'params/model.json');
     const model = fs.existsSync(modelPath) ? MetaModel.load(modelPath) : MetaModel.identity();
     const bt = await runBacktest(dir, model, cfg.strategy, cfg.risk, cfg.paperBankrollUsd, {
       exitPolicy: 'fair_value', volProfile: profile.validation?.improved ? profile : undefined, applyVolSeasonality: Boolean(profile.validation?.improved),
@@ -219,4 +219,6 @@ async function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]))) void main();
+if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void sessionsMain();
+
+function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; }

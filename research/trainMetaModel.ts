@@ -446,22 +446,22 @@ export function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts = {}): Trai
   };
 }
 
-async function main() {
-  const data = arg('data', 'research/out/dataset.jsonl');
-  const out = arg('out', 'params/model.candidate.json');
+export async function trainMetaModelMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
+  const data = argOf('data', 'research/out/dataset.jsonl');
+  const out = argOf('out', 'params/model.candidate.json');
   const rows = fs.readFileSync(data, 'utf8').split('\n').filter(Boolean).map((l) => {
     const r = JSON.parse(l) as DatasetRow;
     for (const k of Object.keys(r.fx)) if (r.fx[k] === null) r.fx[k] = NaN;
     return r;
   });
   const rep = trainMetaModel(rows, {
-    maxEpochs: Number(arg('epochs', '400')),
-    sets: arg('sets', DEFAULT_SETS.join(',')).split(','),
-    families: arg('families', DEFAULT_FAMILIES.join(',')).split(',') as Array<'mlp' | 'gbdt'>,
-    hidden: arg('hidden', DEFAULT_HIDDEN.join(',')).split(',').map(Number),
-    depths: arg('depths', '2,3').split(',').map(Number),
-    ensemble: Number(arg('ensemble', '5')),
-    cpcvGroups: Number(arg('cpcv', '10')),
+    maxEpochs: Number(argOf('epochs', '400')),
+    sets: argOf('sets', DEFAULT_SETS.join(',')).split(','),
+    families: argOf('families', DEFAULT_FAMILIES.join(',')).split(',') as Array<'mlp' | 'gbdt'>,
+    hidden: argOf('hidden', DEFAULT_HIDDEN.join(',')).split(',').map(Number),
+    depths: argOf('depths', '2,3').split(',').map(Number),
+    ensemble: Number(argOf('ensemble', '5')),
+    cpcvGroups: Number(argOf('cpcv', '10')),
   });
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(rep.params, null, 2) + '\n');
@@ -476,4 +476,6 @@ async function main() {
   console.log('Next: npm run research:backtest -- --model', out, '--annotate');
 }
 
-if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]))) void main();
+if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void trainMetaModelMain();
+
+function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; }

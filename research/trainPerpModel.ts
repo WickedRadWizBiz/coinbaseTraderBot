@@ -188,20 +188,21 @@ export function trainPerp(rows: PerpRow[], o: TrainPerpOpts): { params: PerpMode
   };
 }
 
-async function main() {
-  const arg = (k: string, d: string) => { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
+export async function trainPerpMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
   const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
-  const horizonMin = Number(arg('horizon', String(cfg.perps.horizonMin)));
-  const everySec = Number(arg('every', '300'));
-  const rows = await buildPerpDataset(arg('recordings', 'data/recordings'), { everySec, horizonMin });
+  const horizonMin = Number(argOf('horizon', String(cfg.perps.horizonMin)));
+  const everySec = Number(argOf('every', '300'));
+  const rows = await buildPerpDataset(argOf('recordings', 'data/recordings'), { everySec, horizonMin });
   console.log(`${rows.length} labelled rows`);
   const res = trainPerp(rows, { horizonMin, everySec, makerBps: cfg.perps.makerFeeBps, entryEdgeBps: cfg.perps.entryEdgeBps });
   console.table(res.oos);
   console.log(JSON.stringify(res.params.validation, null, 1));
-  const out = arg('out', 'params/perp_model.candidate.json');
+  const out = argOf('out', 'params/perp_model.candidate.json');
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(res.params, null, 1));
   console.log(`wrote ${out}. Next: npm run research:perp-backtest -- --model ${out} --annotate, then review and copy to params/perp_model.json.`);
 }
 
-if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]))) void main();
+if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void trainPerpMain();
+
+function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; }

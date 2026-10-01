@@ -21,6 +21,7 @@ import type { Reconciler } from '../recon/reconciler';
 import { FEATURES } from '../model/featureEngine';
 import { ladderQuotes, scanLadder } from '../model/ladder';
 import type { MetaModel } from '../model/metaModel';
+import type { AutoTrainer } from '../autotrain';
 import type { Tca } from '../tca/tca';
 import type { MarketData } from '../marketdata/marketData';
 import { SpotBookService } from '../marketdata/spotBook';
@@ -42,6 +43,7 @@ export interface ApiDeps {
   startedAt: number;
   spotBooks?: SpotBookService;
   vault?: Vault;
+  autoTrain?: AutoTrainer;
 }
 
 export function tokenMatches(expected: string, provided: string | undefined): boolean {
@@ -121,13 +123,13 @@ export function createApi(d: ApiDeps): express.Express {
       kalshiEnv: d.cfg.kalshiEnv,
       uptimeSec: Math.round((Date.now() - d.startedAt) / 1000),
       model: {
-        id: d.model.id,
-        kind: d.model.params.kind,
-        features: d.model.params.features,
-        selected: d.model.params.training?.selected ?? null,
-        importance: d.model.params.training?.holdoutImportance ?? null,
-        liveBlockers: d.model.liveBlockers(),
-        validation: d.model.params.validation ?? null,
+        id: d.engine.model.id,
+        kind: d.engine.model.params.kind,
+        features: d.engine.model.params.features,
+        selected: d.engine.model.params.training?.selected ?? null,
+        importance: d.engine.model.params.training?.holdoutImportance ?? null,
+        liveBlockers: d.engine.model.liveBlockers(),
+        validation: d.engine.model.params.validation ?? null,
       },
       kill: d.kill.status(),
       haltReasons: d.engine.haltReasons(),
@@ -143,6 +145,7 @@ export function createApi(d: ApiDeps): express.Express {
       guards: d.engine.guardStatus(),
       perps: d.engine.perpStatus(),
       snn: d.engine.snnBrief(),
+      autoTrain: d.autoTrain ? (() => { const a = d.autoTrain!.status(); return { mode: a.mode, running: a.running, nextRun: a.nextRun, lastExit: a.lastExit, lastSwap: a.swaps[0] ?? null }; })() : null,
       tennis: {
         enabled: d.cfg.tennis.enabled,
         trading: d.cfg.tennis.enabled && (d.cfg.mode !== 'live' || d.cfg.tennis.live),
@@ -154,6 +157,16 @@ export function createApi(d: ApiDeps): express.Express {
       wsConnected: d.md.wsConnected,
       consecutiveOrderErrors: d.oms.consecutiveErrors,
     });
+  });
+
+  api.get('/autotrain', (_req, res) => res.json(d.autoTrain?.status() ?? { mode: 'off' }));
+  // Run the training pipeline now (body: { only?: "snn" | "mlp,snn" | ... }).
+  api.post('/autotrain/run', (req, res) => {
+    if (!d.autoTrain) return res.status(400).json({ error: 'auto-train not available' });
+    const only = typeof req.body?.only === 'string' && req.body.only ? ['--only', req.body.only] : [];
+    const started = d.autoTrain.run(only);
+    d.audit.write('config', { event: 'pipeline_requested', only: req.body?.only ?? null, started });
+    res.json({ started, queued: !started });
   });
 
   api.get('/snn', async (_req, res) => res.json(await d.engine.snnStatus()));

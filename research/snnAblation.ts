@@ -153,14 +153,13 @@ export function judge(m: Mechanism, cand: SnnReplayResult, base: SnnReplayResult
   };
 }
 
-async function main() {
-  const arg = (k: string, d: string) => { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
-  const dir = arg('recordings', 'data/recordings');
-  const from = arg('from', '') ? Date.parse(arg('from', '')) : undefined, to = arg('to', '') ? Date.parse(arg('to', '')) : undefined;
-  const modelPath = arg('model', '');
+export async function snnAblationMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
+  const dir = argOf('recordings', 'data/recordings');
+  const from = argOf('from', '') ? Date.parse(argOf('from', '')) : undefined, to = argOf('to', '') ? Date.parse(argOf('to', '')) : undefined;
+  const modelPath = argOf('model', '');
   const model = modelPath && fs.existsSync(modelPath) ? MetaModel.load(modelPath) : undefined;
-  const grid: Record<string, Partial<SnnParams>[]> = arg('grid', '') ? JSON.parse(fs.readFileSync(arg('grid', ''), 'utf8')) : {};
-  const only = arg('only', '');
+  const grid: Record<string, Partial<SnnParams>[]> = argOf('grid', '') ? JSON.parse(fs.readFileSync(argOf('grid', ''), 'utf8')) : {};
+  const only = argOf('only', '');
   const calendar = loadCalendar(path.resolve('params/calendar.json'));
   const cache = new Map<string, { res: SnnReplayResult; sum: RunSummary }>();
   const run = async (name: string, stage: Stage, flags: Partial<SnnFlags> | undefined, overrides: Partial<SnnParams>) => {
@@ -186,10 +185,13 @@ async function main() {
     verdicts.push(v);
     console.log(`${v.accepted ? 'ACCEPT' : 'reject'}  ${m.name}: dBrier ${v.delta.mean.toFixed(5)} [${v.delta.lo.toFixed(5)}, ${v.delta.hi.toFixed(5)}] over ${v.delta.events} events / ${v.delta.days} days; slope ${v.candidate.calSlope.toFixed(2)}; corr ${v.candidate.corrModel.toFixed(2)}; blend a=${v.blend.alpha} [${v.blend.lo.toFixed(5)}, ${v.blend.hi.toFixed(5)}]; p99 ${v.candidate.p99Ms.toFixed(1)} ms; ${JSON.stringify(v.criteria)}`);
   }
-  const out = arg('out', 'research/out/snn_ablation.json');
+  const out = argOf('out', 'research/out/snn_ablation.json');
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify({ generatedAt: new Date().toISOString(), recordings: dir, from: from ?? null, to: to ?? null, verdicts }, null, 1));
   console.log(`wrote ${out} (${verdicts.filter((v) => v.accepted).length}/${verdicts.length} accepted; expect most to fail - that is the system working)`);
+  return verdicts;
 }
 
-if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]))) void main();
+if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void snnAblationMain();
+
+function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; }

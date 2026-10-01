@@ -34,6 +34,7 @@ import { RiskGateway } from './risk/riskGateway';
 import { Reconciler } from './recon/reconciler';
 import { Tca } from './tca/tca';
 import { createSnn } from './snn';
+import { AutoTrainer, resolveModelPaths } from './autotrain';
 import { logger } from './util/log';
 
 const log = logger('main');
@@ -58,12 +59,15 @@ async function main(): Promise<void> {
   if (cfg.alertWebhookUrl) sinks.push(new WebhookSink(cfg.alertWebhookUrl));
   const alerter = new Alerter(sinks, audit);
 
-  // Model: frozen, versioned, validated offline. Identity (pure fair value) if no file.
+  // Model: frozen, versioned, validated offline. Identity (pure fair value) if no file. The
+  // automated pipeline's promoted copies (AUTO_TRAIN_DIR) win over params/ and are hot-swapped.
+  const modelPaths = resolveModelPaths(cfg);
   let model: MetaModel;
-  if (fs.existsSync(cfg.paramsPath)) {
-    model = MetaModel.load(cfg.paramsPath);
+  if (fs.existsSync(modelPaths.mlp)) {
+    model = MetaModel.load(modelPaths.mlp);
+    log.info(`meta-model ${model.id} from ${modelPaths.mlp}`);
   } else {
-    log.warn(`no model params at ${cfg.paramsPath}; using identity model (pure fair value)`);
+    log.warn(`no model params at ${modelPaths.mlp}; using identity model (pure fair value)`);
     model = MetaModel.identity();
   }
   if (cfg.mode === 'live') {
@@ -82,7 +86,7 @@ async function main(): Promise<void> {
   // Intraday volatility profile: applied to fair value only if enabled AND its own
   // out-of-sample validation showed fair-value accuracy improved.
   let volProfile: VolProfile | undefined;
-  const vp = loadVolProfile(cfg.strategy.volProfilePath);
+  const vp = loadVolProfile(modelPaths.vol);
   if (vp && cfg.strategy.volSeasonality) {
     if (vp.validation?.improved) {
       volProfile = vp;
@@ -154,7 +158,7 @@ async function main(): Promise<void> {
       risk: { maxOrderNotionalUsd: P.maxOrderNotionalUsd, collarBps: P.collarBps },
     });
     if (P.trading !== 'off') {
-      const perpModel = PerpModel.load(P.modelPath);
+      const perpModel = PerpModel.load(modelPaths.perp);
       if (!perpModel) log.warn(`no perp model at ${P.modelPath}: trading the momentum prior at pilot size ($${P.pilotMaxNotionalUsd}, ${P.pilotMaxLeverage}x)`);
       else if (!perpModel.validated()) log.warn(`perp model ${perpModel.params.version} not validated (${perpModel.blockers().join('; ')}): pilot size only`);
       perpTrader = new PerpTrader({
@@ -172,7 +176,7 @@ async function main(): Promise<void> {
     log.info('perps enabled', { hedge: P.hedge, trading: P.trading, gateway: perpGateway.name });
   }
   // Cortex-like SNN: shadow by default; in blend mode alpha is earned (<= 0.25) by out-of-sample Brier.
-  const snn = createSnn(cfg.snn);
+  const snn = createSnn({ ...cfg.snn, modelPath: modelPaths.snn });
   if (snn) {
     try {
       await snn.host.start();
@@ -181,7 +185,9 @@ async function main(): Promise<void> {
       log.error('SNN failed to start; continuing without it', { error: String(e) });
     }
   }
-  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader, clock, snn });
+  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader, clock, snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
+  const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
+  autoTrain.start();
 
   // Execution events -> OMS (same path for paper and live).
   if (paper) {
@@ -219,7 +225,7 @@ async function main(): Promise<void> {
   md.start();
   await engine.start();
 
-  const app = createApi({ cfg, audit, engine, oms, kill, recon, model, tca, md, vault, startedAt: Date.now() });
+  const app = createApi({ cfg, audit, engine, oms, kill, recon, model, tca, md, vault, autoTrain, startedAt: Date.now() });
   const server = app.listen(cfg.port, cfg.host, () => log.info(`operator API on http://${cfg.host}:${cfg.port} (token required)`));
 
   let stopping = false;
@@ -230,7 +236,8 @@ async function main(): Promise<void> {
     engine.stop();
     try { await oms.cancelAll(`shutdown (${sig})`); } catch (e) { log.error('cancel on shutdown failed', { error: String(e) }); }
     paper?.flush();
-    try { await snn?.host.stop(); } catch (e) { log.error('SNN checkpoint on shutdown failed', { error: String(e) }); }
+    autoTrain.stop();
+    try { engine.saveSnnBlender(); await engine.snn?.host.stop(); } catch (e) { log.error('SNN checkpoint on shutdown failed', { error: String(e) }); }
     audit.write('shutdown', { sig });
     md.stop();
     server.close(() => process.exit(0));

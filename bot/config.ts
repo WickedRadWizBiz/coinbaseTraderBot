@@ -180,6 +180,31 @@ export interface Config {
   tennis: TennisConfig;
   /** Cortex-like spiking network (bot/snn): shadow by default, blended only with an earned alpha. */
   snn: SnnConfig;
+  /** Automated training pipeline (research/pipeline.ts) and model hot-swapping. */
+  autoTrain: AutoTrainConfig;
+}
+
+export interface AutoTrainConfig {
+  /** off | daily (run the full pipeline once a day at hourUtc). */
+  mode: 'off' | 'daily';
+  hourUtc: number;
+  /** Where the pipeline writes promoted models; the bot prefers these over params/ and hot-swaps them. */
+  dir: string;
+  recordingsDir: string;
+  /** always = promote every freshly trained model (hot-swap mode); validated = only models whose
+   *  validation passed (MLP: validation.passed; perps: validated(); SNN: its stage accepted). */
+  promote: 'always' | 'validated';
+  /** auto = highest stage whose whole chain S1..Sk the ablation accepted (else SNN_STAGE). */
+  snnStage: 'auto' | 'S0' | 'S1' | 'S2' | 'S3' | 'S4' | 'S5' | 'S6';
+  ablationDays: number;
+  ablationEveryDays: number;
+  snnTrainDays: number;
+  /** Re-run the SNN steps automatically whenever the meta-model changes (e.g. a manual swap). */
+  onModelChange: boolean;
+  /** Minimum days of recordings before anything is trained. */
+  minDays: number;
+  /** Poll interval for model-file changes (hot reload). */
+  watchSec: number;
 }
 
 export interface SnnConfig {
@@ -657,6 +682,20 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         collarBps: num(env, 'PERP_COLLAR_BPS', 150, 5, 2000),
       };
     })(),
+    autoTrain: {
+      mode: oneOf(env, 'AUTO_TRAIN', 'daily', ['off', 'daily'] as const),
+      hourUtc: num(env, 'AUTO_TRAIN_HOUR_UTC', 6, 0, 23),
+      dir: path.resolve(env.AUTO_TRAIN_DIR ?? path.join(dataDir, 'models')),
+      recordingsDir: path.resolve(env.AUTO_TRAIN_RECORDINGS ?? path.join(dataDir, 'recordings')),
+      promote: oneOf(env, 'AUTO_TRAIN_PROMOTE', 'always', ['always', 'validated'] as const),
+      snnStage: oneOf(env, 'AUTO_TRAIN_SNN_STAGE', 'auto', ['auto', 'S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const),
+      ablationDays: num(env, 'AUTO_TRAIN_ABLATION_DAYS', 7, 1, 365),
+      ablationEveryDays: num(env, 'AUTO_TRAIN_ABLATION_EVERY_DAYS', 7, 0, 365),
+      snnTrainDays: num(env, 'AUTO_TRAIN_SNN_TRAIN_DAYS', 21, 1, 365),
+      onModelChange: bool(env, 'AUTO_TRAIN_ON_MODEL_CHANGE', true),
+      minDays: num(env, 'AUTO_TRAIN_MIN_DAYS', 1, 0, 365),
+      watchSec: num(env, 'AUTO_TRAIN_WATCH_SEC', 30, 5, 3600),
+    },
     snn: {
       mode: oneOf(env, 'SNN_MODE', 'shadow', ['off', 'shadow', 'blend'] as const),
       stage: oneOf(env, 'SNN_STAGE', 'S5', ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const),

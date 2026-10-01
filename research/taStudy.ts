@@ -227,4 +227,4 @@ async function main() {
   console.log(`wrote ${out}`);
 }
 
-if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]))) void main();
+if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void main();

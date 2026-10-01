@@ -137,6 +137,8 @@ export interface EngineDeps {
   perpTrader?: PerpTrader;
   /** Cortex-like SNN (bot/snn): worker host, blender with earned alpha, conservative target scaler. */
   snn?: { host: SnnHost; blender: SnnBlender; scaler: TargetScaler };
+  /** Where the blender's settled (p_model, p_snn) history is saved (survives restarts). */
+  snnBlenderPath?: string;
   now?: () => number;
 }
 
@@ -160,10 +162,12 @@ export class Engine {
   private snnScores = new Map<string, ContractScore>();
   private snnReply: StepReply | undefined;
   private snnLastAlert = 0;
+  private snnLastSave = 0;
 
   constructor(private readonly d: EngineDeps) {
     this.now = d.now ?? Date.now;
     this.cadence = new CadenceGate(d.cfg.strategy);
+    if (d.snn) this.attachBlender(d.snn.blender);
     // Registered before the startup reconciliation replays fills, so the
     // balance monitor sees every cash movement the bot's trading causes.
     d.oms.on('fill', (f: { side: 'bid' | 'ask'; count: number; price: number }, _rec: unknown, fee: number, positionAfter: number) => {
@@ -657,11 +661,50 @@ export class Engine {
     return p;
   }
 
+  /** Load the blender's saved history; it is discarded when it was recorded against another meta-model. */
+  private attachBlender(b: SnnBlender): void {
+    const r = this.d.snnBlenderPath ? b.load(this.d.snnBlenderPath, this.d.model.id) : (b.bindModel(this.d.model.id), 'none');
+    if (r === 'reset') this.d.audit.write('snn', { event: 'blender_reset', reason: 'meta-model changed since the history was recorded', model: this.d.model.id });
+  }
+
+  saveSnnBlender(): void {
+    if (this.d.snn && this.d.snnBlenderPath) this.d.snn.blender.save(this.d.snnBlenderPath);
+  }
+
+  /** Hot-swap the meta-model (automated pipeline / file watcher). The SNN blend history is reset:
+   *  its pairs hold the old model's p_model, so alpha must be re-earned against the new one. */
+  setModel(model: MetaModel): void {
+    const old = this.d.model.id;
+    this.d.model = model;
+    this.hunts.clear();
+    if (this.d.snn && this.d.snn.blender.bindModel(model.id)) this.saveSnnBlender();
+    this.d.audit.write('config', { event: 'model_swapped', from: old, to: model.id });
+    log.info('meta-model hot-swapped', { from: old, to: model.id });
+  }
+
+  /** Hot-swap the SNN (new trained model file); the old host is stopped by the caller. */
+  setSnn(snn: EngineDeps['snn']): void {
+    this.d.snn = snn;
+    this.snnScores.clear();
+    this.snnReply = undefined;
+    this.snnObs.clear();
+    if (snn) this.attachBlender(snn.blender);
+  }
+
+  /** Hot-swap the validated intraday volatility profile (undefined removes it). */
+  setVolProfile(vp: VolProfile | undefined): void {
+    this.d.volProfile = vp;
+  }
+
+  get model(): MetaModel { return this.d.model; }
+  get snn(): EngineDeps['snn'] { return this.d.snn; }
+
   private snnSettle(ticker: string, result: 'yes' | 'no'): void {
     const snn = this.d.snn;
     if (!snn) return;
     void snn.host.settle(ticker, result, this.now());
     const rec = snn.blender.settle(ticker, result === 'yes' ? 1 : 0);
+    if (rec && this.now() - this.snnLastSave > 30_000) { this.snnLastSave = this.now(); this.saveSnnBlender(); }
     if (rec) this.d.audit.write('snn', { event: 'settle', ticker, y: rec.y, pModel: rec.pModel, pSnn: rec.pSnn, c: rec.c, eventKey: rec.eventKey, brierModel: (rec.pModel - rec.y!) ** 2, brierSnn: (rec.pSnn - rec.y!) ** 2 });
   }
 

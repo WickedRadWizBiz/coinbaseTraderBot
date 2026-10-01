@@ -122,13 +122,13 @@ export async function buildDataset(
   return rows;
 }
 
-async function main() {
-  const dir = arg('recordings', 'data/recordings');
-  const out = arg('out', 'research/out/dataset.jsonl');
-  const every = Number(arg('every', '60'));
-  const cal = arg('calendar', 'params/calendar.json');
+export async function buildDatasetMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
+  const dir = argOf('recordings', 'data/recordings');
+  const out = argOf('out', 'research/out/dataset.jsonl');
+  const every = Number(argOf('every', '60'));
+  const cal = argOf('calendar', 'params/calendar.json');
   // Match production pricing: pass --vol-profile when production applies the seasonal profile.
-  const vp = arg('vol-profile', '');
+  const vp = argOf('vol-profile', '');
   const volProfile = vp ? loadVolProfile(vp) : undefined;
   const rows = await buildDataset(dir, every, 5e-5, { volProfile, applyVolSeasonality: Boolean(volProfile), entryWindowOnly: process.argv.includes('--entry-window-only'), calendar: loadCalendar(cal) });
   fs.mkdirSync(path.dirname(out), { recursive: true });
@@ -138,4 +138,6 @@ async function main() {
   console.log(`wrote ${rows.length} rows over ${windows} windows (${official} with official labels) to ${out}`);
 }
 
-if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]))) void main();
+if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void buildDatasetMain();
+
+function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; }

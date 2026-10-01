@@ -117,4 +117,4 @@ async function main() {
   console.log('Enable real-money tennis (TENNIS_LIVE=true) only if the per-match CI lower bound is above 0 over at least ~200 matches.');
 }
 
-if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]))) void main();
+if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void main();

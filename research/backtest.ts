@@ -444,36 +444,36 @@ export function evaluateHunt(results: BacktestResult[], allWindows: number[], mi
   };
 }
 
-async function main() {
-  const dir = arg('recordings', 'data/recordings');
-  const modelPath = arg('model', 'params/model.json');
+export async function backtestMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
+  const dir = argOf('recordings', 'data/recordings');
+  const modelPath = argOf('model', 'params/model.json');
   const model = fs.existsSync(modelPath) ? MetaModel.load(modelPath) : MetaModel.identity();
   const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
-  const grid = arg('grid', String(cfg.strategy.minEdge)).split(',').map(Number);
-  const bankroll = Number(arg('bankroll', String(cfg.paperBankrollUsd)));
-  const priorTrials = Number(arg('trials', String((model.params.validation?.variantsTried ?? 1))));
-  const policies = arg('exits', EXIT_POLICIES.join(',')).split(',') as ExitPolicyName[];
+  const grid = argOf('grid', String(cfg.strategy.minEdge)).split(',').map(Number);
+  const bankroll = Number(argOf('bankroll', String(cfg.paperBankrollUsd)));
+  const priorTrials = Number(argOf('trials', String((model.params.validation?.variantsTried ?? 1))));
+  const policies = argOf('exits', EXIT_POLICIES.join(',')).split(',') as ExitPolicyName[];
   for (const p of policies) if (!EXIT_POLICIES.includes(p)) throw new Error(`unknown exit policy ${p}`);
   const ratchet: RatchetParams = {
-    minFillRatio: Number(arg('ratchet-fill', String(DEFAULT_RATCHET.minFillRatio))),
-    minWallAgeMs: Number(arg('ratchet-age', String(DEFAULT_RATCHET.minWallAgeMs / 1000))) * 1000,
-    slippageTicks: Number(arg('ratchet-slip', String(DEFAULT_RATCHET.slippageTicks))),
+    minFillRatio: Number(argOf('ratchet-fill', String(DEFAULT_RATCHET.minFillRatio))),
+    minWallAgeMs: Number(argOf('ratchet-age', String(DEFAULT_RATCHET.minWallAgeMs / 1000))) * 1000,
+    slippageTicks: Number(argOf('ratchet-slip', String(DEFAULT_RATCHET.slippageTicks))),
   };
   const hunt: HuntParams = {
-    targetMargin: Number(arg('hunt-margin', String(DEFAULT_HUNT.targetMargin))),
-    minConfluence: Number(arg('hunt-confluence', String(DEFAULT_HUNT.minConfluence))),
+    targetMargin: Number(argOf('hunt-margin', String(DEFAULT_HUNT.targetMargin))),
+    minConfluence: Number(argOf('hunt-confluence', String(DEFAULT_HUNT.minConfluence))),
   };
   // Hunt mode is evaluated over a parameter grid (target margin x wall fill ratio); every variant
   // counts toward the Deflated Sharpe.
-  const huntMargins = arg('hunt-grid', policies.includes('confluence_ratchet') ? '0.01,0.02,0.04' : String(hunt.targetMargin)).split(',').map(Number);
-  const huntFills = arg('ratchet-fill-grid', policies.includes('confluence_ratchet') ? '1,2' : String(ratchet.minFillRatio)).split(',').map(Number);
+  const huntMargins = argOf('hunt-grid', policies.includes('confluence_ratchet') ? '0.01,0.02,0.04' : String(hunt.targetMargin)).split(',').map(Number);
+  const huntFills = argOf('ratchet-fill-grid', policies.includes('confluence_ratchet') ? '1,2' : String(ratchet.minFillRatio)).split(',').map(Number);
   // Price with the seasonal volatility profile when given (mirror production).
-  const vpPath = arg('vol-profile', '');
+  const vpPath = argOf('vol-profile', '');
   const volProfile = vpPath ? loadVolProfile(vpPath) : undefined;
-  const calendar = loadCalendar(arg('calendar', 'params/calendar.json'));
+  const calendar = loadCalendar(argOf('calendar', 'params/calendar.json'));
   // Execution latency (ms): --latency-ms 250 [--cancel-latency-ms 150] [--latency-jitter-ms 100]. Default: none.
-  const latency: BacktestLatency | undefined = Number(arg('latency-ms', '0')) > 0 || Number(arg('latency-jitter-ms', '0')) > 0
-    ? { orderMs: Number(arg('latency-ms', '0')), cancelMs: arg('cancel-latency-ms', '') ? Number(arg('cancel-latency-ms', '0')) : undefined, jitterMs: Number(arg('latency-jitter-ms', '0')) }
+  const latency: BacktestLatency | undefined = Number(argOf('latency-ms', '0')) > 0 || Number(argOf('latency-jitter-ms', '0')) > 0
+    ? { orderMs: Number(argOf('latency-ms', '0')), cancelMs: argOf('cancel-latency-ms', '') ? Number(argOf('cancel-latency-ms', '0')) : undefined, jitterMs: Number(argOf('latency-jitter-ms', '0')) }
     : undefined;
 
   const results: BacktestResult[] = [];
@@ -536,7 +536,7 @@ async function main() {
   if (exitEvaluation) console.log('hunt mode vs fair-value exit (paired per window):', exitEvaluation);
   console.log(`windows traded: ${best.windowsTraded} (need >= 1000 independent windows before trusting any edge)`);
 
-  if (process.argv.includes('--annotate') && fs.existsSync(modelPath)) {
+  if (annotate && fs.existsSync(modelPath)) {
     const params = JSON.parse(fs.readFileSync(modelPath, 'utf8'));
     params.validation = {
       ...params.validation,
@@ -557,4 +557,6 @@ async function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]))) void main();
+if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void backtestMain();
+
+function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; }

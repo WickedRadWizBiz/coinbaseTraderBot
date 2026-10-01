@@ -46,16 +46,15 @@ export function fitLogistic(X: Float64Array[], y: number[], w0: Float64Array, l2
   return { w, loss };
 }
 
-async function main() {
-  const arg = (k: string, d: string) => { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
-  const dir = arg('recordings', 'data/recordings');
-  const date = (k: string) => (arg(k, '') ? Date.parse(arg(k, '')) : undefined);
-  const stage = arg('stage', 'S5') as Stage;
-  const out = arg('out', 'params/snn_model.candidate.json');
-  const modelPath = arg('model', '');
+export async function trainSnnMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
+  const dir = argOf('recordings', 'data/recordings');
+  const date = (k: string) => (argOf(k, '') ? Date.parse(argOf(k, '')) : undefined);
+  const stage = argOf('stage', 'S5') as Stage;
+  const out = argOf('out', 'params/snn_model.candidate.json');
+  const modelPath = argOf('model', '');
   const model = modelPath && fs.existsSync(modelPath) ? MetaModel.load(modelPath) : undefined;
   const calendar = loadCalendar(path.resolve('params/calendar.json'));
-  const params: SnnParams = withFlags({ ...DEFAULT_SNN, seed: Number(arg('seed', String(DEFAULT_SNN.seed))) }, stageFlags(stage));
+  const params: SnnParams = withFlags({ ...DEFAULT_SNN, seed: Number(argOf('seed', String(DEFAULT_SNN.seed))) }, stageFlags(stage));
   const win = { from: date('from'), to: date('to') };
 
   // 1. PC pretraining (U0, U1, precisions), only for stages with the PC pathway.
@@ -67,13 +66,13 @@ async function main() {
   }
   // 2. e-prop L1 training + feature collection for the readout.
   process.stderr.write('surrogate-gradient L1 training + readout data...\n');
-  const tr = await replaySnn(dir, { params, model, snnModel: preset, ...win, calendar, training: { eprop: { eta: Number(arg('eprop-eta', '1e-3')) }, collect: true } });
+  const tr = await replaySnn(dir, { params, model, snnModel: preset, ...win, calendar, training: { eprop: { eta: Number(argOf('eprop-eta', '1e-3')) }, collect: true } });
   // 3. Readout fit per column.
   const readouts: Record<string, number[]> = {};
   for (const [k, ro] of tr.net.readouts) {
     const data = tr.collected.filter((c) => c.column === k);
     if (data.length < 50) { readouts[k] = Array.from(ro.wf); continue; }
-    const fit = fitLogistic(data.map((d) => d.phi), data.map((d) => d.y), ro.wf, Number(arg('l2', '1e-3')));
+    const fit = fitLogistic(data.map((d) => d.phi), data.map((d) => d.y), ro.wf, Number(argOf('l2', '1e-3')));
     readouts[k] = Array.from(fit.w);
     console.log(`readout ${k}: ${data.length} labelled snapshots, log-loss ${fit.loss.toFixed(4)}`);
   }
@@ -87,14 +86,20 @@ async function main() {
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(file));
   const b = (rows: { pSnn: number; pModel: number; y: 0 | 1 }[]) => ({ n: rows.length, snn: rows.reduce((a, r) => a + brier(r.pSnn, r.y), 0) / Math.max(1, rows.length), model: rows.reduce((a, r) => a + brier(r.pModel, r.y), 0) / Math.max(1, rows.length) });
-  console.log('train window (in-sample, prequential):', b(tr.rows));
+  const trainStats = b(tr.rows);
+  console.log('train window (in-sample, prequential):', trainStats);
+  let evalStats: ReturnType<typeof b> | undefined;
   // Out-of-sample evaluation on the next window with the frozen export.
   const ev = { from: date('eval-from'), to: date('eval-to') };
   if (ev.from) {
     const res = await replaySnn(dir, { params, model, snnModel: file, ...ev, calendar });
-    console.log('eval window (out-of-sample):', b(res.rows));
+    evalStats = b(res.rows);
+    console.log('eval window (out-of-sample):', evalStats);
   }
   console.log(`wrote ${out} (version ${file.version}); copy to params/snn_model.json only after research:snn-ablation accepts the stage`);
+  return { out, version: file.version, stage, train: trainStats, eval: evalStats };
 }
 
-if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]))) void main();
+if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void trainSnnMain();
+
+function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; }

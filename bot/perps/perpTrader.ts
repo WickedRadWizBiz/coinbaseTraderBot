@@ -249,6 +249,11 @@ export class PerpTrader {
     return out;
   }
 
+  /** Hot-swap the frozen perp model (automated pipeline). */
+  setModel(model: PerpModel | undefined): void {
+    (this.d as { model?: PerpModel }).model = model;
+  }
+
   status() {
     const m = this.d.model;
     return {

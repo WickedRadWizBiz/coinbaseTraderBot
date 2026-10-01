@@ -301,6 +301,14 @@ In live trading, `ModelHealth` stops new risk if the rolling log-loss advantage 
 - **Funding, OI and liquidations; DVOL; NQ/DXY; Coinbase multi-level OFI.** These need feeds the bot does not have (or that are US-blocked), and they are T2/T3 anyway.
 - **Full Avellaneda–Stoikov quoting and RL quote offsets.** They need fill-intensity estimates from our own fills first. Inventory skew stays in place.
 
+## Automated training and hot-swapping
+
+The bot retrains itself. Every day at `AUTO_TRAIN_HOUR_UTC` (06:00 UTC by default) it runs `research/pipeline.ts` as a low-priority background process. The pipeline builds the dataset, trains the MLP and backtests it, fits the volatility profile, trains and backtests the perps model, and then runs the SNN ablation and SNN training against that same MLP. Promoted models land in `data/models/`, and the running bot hot-swaps them without a restart.
+
+A new MLP always re-runs the SNN steps, including when you swap one in by hand. The SNN's blend history is saved across restarts and cleared when the MLP changes.
+
+`docs/AUTOMATION.md` is the plain-language guide. It covers what runs by itself, what you still do by hand, every setting, and how to roll back.
+
 ## Cortex-like SNN (bot/snn)
 
 This is a multi-level spiking network built from *From Flat SNN to Cortex-Like Predictor*. Every equation from that document is implemented in its corrected form in `bot/snn/formulas.ts`. Each one is checked at 1e-5 against an independent Python reference. `docs/SNN.md` maps each formula to its code and test.
