@@ -5221,13 +5221,8 @@ async function runGeminiStrategyEngineJobs() {
     } catch (e) {}
   }
 
-  // Job 4: Batch Trade Audit (Every 20 completed trades)
-  try {
-    if (unAuditedTradeCount >= 20) {
-      unAuditedTradeCount = 0;
-      triggerGeminiAutonomousAudit().catch(err => console.error("[AUTONOMOUS AUDIT BATCH ERROR]", err));
-    }
-  } catch (e) {}
+  // Job 4: Batch Trade Audit (Auto-reports disabled per user directive; audits executed exclusively on-demand)
+  // Automatic background batch audit generation is turned off.
 
   // Job 5: Automated Retraining Pipeline (Every 50 completed trades)
   try {    
@@ -8522,17 +8517,18 @@ app.post(['/api/extinction-list/reset', '/api/timeout-list/reset'], (req, res) =
   });
 });
 
-// GET background autonomous audits history
+// GET background autonomous audits history (Auto-reports disabled)
 app.get('/api/gemini/autonomous-audits', (req, res) => {
   res.json({
     success: true,
+    autoReportsEnabled: false,
     configuredModel: AUDIT_PRIMARY_MODEL,
     primaryModelName: 'Gemini 3.1 Pro (gemini-3.1-pro-preview)',
     fallbackModels: AUDIT_FALLBACK_MODELS,
     auditMemory: auditMemoryManager.getState(),
     unAuditedTradeCount,
     nextBatchThreshold: 20,
-    history: autonomousAuditsHistory
+    history: []
   });
 });
 

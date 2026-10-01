@@ -66,11 +66,8 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
   const [manualFallbackReason, setManualFallbackReason] = useState<string | null>(null);
   const [manualTradesData, setManualTradesData] = useState<any[]>([]);
   const [showDataTable, setShowDataTable] = useState<boolean>(false);
+  const [activeTimestamp, setActiveTimestamp] = useState<string | null>(null);
   
-  // Background autonomous audits states
-  const [autoAudits, setAutoAudits] = useState<any[]>([]);
-  const [selectedAutoAuditIdx, setSelectedAutoAuditIdx] = useState<number | 'MANUAL'>('MANUAL');
-
   // Audit Memory & Recurrence State
   const [auditMemory, setAuditMemory] = useState<AuditMemoryState | null>(null);
   const [latestComparison, setLatestComparison] = useState<ShortTermComparison | null>(null);
@@ -102,7 +99,6 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
         if (data.configuredModel) setConfiguredModel(data.configuredModel);
         if (data.primaryModelName) setPrimaryModelName(data.primaryModelName);
         if (data.fallbackModels) setFallbackModels(data.fallbackModels);
-        if (data.history) setAutoAudits(data.history);
         if (typeof data.unAuditedTradeCount === 'number') {
           setUnAuditedTradeCount(data.unAuditedTradeCount);
         }
@@ -130,7 +126,6 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
     setLoading(true);
     setError(null);
     setAuditReport(null);
-    setSelectedAutoAuditIdx('MANUAL');
     setManualTargetModel(configuredModel);
     setManualUsedModel(null);
     setManualModelChanged(false);
@@ -152,6 +147,7 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
       }
 
       setAuditReport(data.auditReport);
+      setActiveTimestamp(new Date().toISOString());
       if (data.tradesData) {
         setManualTradesData(data.tradesData);
       }
@@ -284,40 +280,20 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
   };
 
   // Determine current active report and its corresponding model state
-  const activeReport = selectedAutoAuditIdx === 'MANUAL' 
-    ? auditReport 
-    : (autoAudits[selectedAutoAuditIdx]?.report || null);
-
-  const activeTimestamp = selectedAutoAuditIdx === 'MANUAL'
-    ? null
-    : autoAudits[selectedAutoAuditIdx]?.timestamp;
-
-  const currentTargetModel = selectedAutoAuditIdx === 'MANUAL'
-    ? (manualTargetModel || configuredModel)
-    : (autoAudits[selectedAutoAuditIdx]?.targetModel || configuredModel);
-
-  const currentUsedModel = selectedAutoAuditIdx === 'MANUAL'
-    ? manualUsedModel
-    : (autoAudits[selectedAutoAuditIdx]?.usedModel || configuredModel);
-
-  const currentModelChanged = selectedAutoAuditIdx === 'MANUAL'
-    ? manualModelChanged
-    : Boolean(autoAudits[selectedAutoAuditIdx]?.modelChanged);
-
-  const currentFallbackReason = selectedAutoAuditIdx === 'MANUAL'
-    ? manualFallbackReason
-    : (autoAudits[selectedAutoAuditIdx]?.fallbackReason || null);
+  const activeReport = auditReport;
+  const currentTargetModel = manualTargetModel || configuredModel;
+  const currentUsedModel = manualUsedModel || configuredModel;
+  const currentModelChanged = manualModelChanged;
+  const currentFallbackReason = manualFallbackReason;
 
   const activeWatchList = auditMemory?.activeWatchList || [];
   const recurringQueue = auditMemory?.recurringIssuesQueue || [];
   const solvedMemory = auditMemory?.solvedLongTermMemory || [];
 
-  const activeTradesData: any[] = selectedAutoAuditIdx === 'MANUAL'
-    ? manualTradesData
-    : (autoAudits[selectedAutoAuditIdx]?.tradesData || []);
+  const activeTradesData: any[] = manualTradesData;
 
   const handleDownloadData = (format: 'json' | 'csv' = 'json') => {
-    const url = `/api/gemini/download-audit-data?auditIdx=${selectedAutoAuditIdx}&format=${format}`;
+    const url = `/api/gemini/download-audit-data?format=${format}`;
     const link = document.createElement('a');
     link.href = url;
     link.setAttribute('download', `referenced_audit_trades.${format}`);
@@ -339,7 +315,7 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
               &gt; QUANTITATIVE AUDIT PROTOCOL (SR 11-7)
             </span>
             <span className="text-[10px] text-[#808080] tracking-widest uppercase">
-              Autonomous Risk Model Orchestration & Recurrence Surveillance
+              On-Demand Risk Model Assessment & Recurrence Surveillance
             </span>
           </div>
         </div>
@@ -348,7 +324,7 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
             {totalTrades} TRADES INGESTED
           </span>
           <span className="px-2 py-0.5 border border-[#808080]/30 text-[#a0a0a0] bg-[#808080]/5 text-[10px] font-bold uppercase tracking-widest">
-            Batch Progress: {totalTrades % 20 === 0 && totalTrades > 0 ? 20 : totalTrades % 20} / 20
+            ON-DEMAND ONLY
           </span>
         </div>
       </div>
@@ -545,7 +521,7 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
       {/* BODY */}
       <div className="relative z-10 flex flex-col gap-4">
         <p className="text-[11px] text-[#a0a0a0] leading-relaxed">
-          The Senior Quantitative Auditor analyzes trade state lineage, execution slippage trajectories (Markout), Implementation Shortfalls, and overfitting metrics. Audits prioritize **Gemini 3.1 Pro** (<code className="text-crypto-primary font-bold">{configuredModel}</code>) with sequential fallback down the model tier (with 3.5 preserved as the final attempt) and persistent memory comparing past findings. Audits trigger **automatically on every multiple of 20 trades**, or can be executed on demand.
+          The Senior Quantitative Auditor analyzes trade state lineage, execution slippage trajectories (Markout), Implementation Shortfalls, and overfitting metrics. Audits prioritize **Gemini 3.1 Pro** (<code className="text-crypto-primary font-bold">{configuredModel}</code>) with sequential fallback down the model tier (with 3.5 preserved as the final attempt) and persistent memory comparing past findings. Audits are executed exclusively on demand (automatic reports disabled).
         </p>
 
         {/* CONTROLS */}
@@ -564,17 +540,14 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
               <span>{loading ? 'Auditing with Gemini 3.1 Pro...' : 'Run Audit On-Demand (Gemini 3.1 Pro)'}</span>
             </button>
 
-            {/* 20 Audit Batch Counter Badge */}
+            {/* Unaudited Trade Count Badge */}
             <div className="flex items-center gap-2 px-2.5 py-1.5 bg-black/60 border border-crypto-primary/30 text-[10px] font-mono">
-              <span className="text-[#a0a0a0]">Batch Progress:</span>
-              <span className="text-crypto-primary font-bold">{unAuditedTradeCount} / 20</span>
-              <span className="text-crypto-success text-[9px] uppercase tracking-wider">
-                {unAuditedTradeCount >= 20 ? '(Auto-Triggering)' : '(Resets on Audit)'}
-              </span>
+              <span className="text-[#a0a0a0]">Pending Evaluation:</span>
+              <span className="text-crypto-primary font-bold">{unAuditedTradeCount} Trades</span>
               {unAuditedTradeCount > 0 && (
                 <button
                   onClick={handleResetCount}
-                  title="Reset 20 audit count"
+                  title="Reset un-audited trade count"
                   className="ml-1 text-[9px] text-[#a0a0a0] hover:text-white underline cursor-pointer"
                 >
                   Reset
@@ -587,8 +560,8 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
                 onClick={() => { 
                   setAuditReport(null); 
                   setError(null); 
-                  setSelectedAutoAuditIdx('MANUAL'); 
                   setManualUsedModel(null);
+                  setActiveTimestamp(null);
                 }}
                 className="px-3 py-1.5 border border-crypto-danger/50 text-crypto-danger hover:bg-crypto-danger hover:text-white transition-colors uppercase font-bold text-[10px] tracking-widest flex items-center gap-1 cursor-pointer"
               >
@@ -597,31 +570,6 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
               </button>
             )}
           </div>
-
-          {/* Background Auto Audits Selector */}
-          {autoAudits.length > 0 && (
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-[#808080] font-bold uppercase flex items-center gap-1">
-                <Clock className="w-3.5 h-3.5 text-crypto-success animate-pulse" />
-                <span>Auto Reports:</span>
-              </span>
-              <select
-                value={selectedAutoAuditIdx}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setSelectedAutoAuditIdx(val === 'MANUAL' ? 'MANUAL' : parseInt(val));
-                }}
-                className="bg-black text-[11px] text-crypto-success border border-crypto-success/40 px-2 py-1 font-mono focus:outline-none"
-              >
-                <option value="MANUAL">Manual On-Demand Audit {auditReport ? '(Active)' : ''}</option>
-                {autoAudits.map((audit, i) => (
-                  <option key={`auto-audit-opt-${i}`} value={i}>
-                    Auto-Audit ({new Date(audit.timestamp).toLocaleTimeString()}) - {audit.usedModel || 'Gemini'}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
         </div>
 
         {/* LOADING STATE (EXPLICIT MODEL REPORTING BEFORE/DURING AUDIT) */}
@@ -708,11 +656,7 @@ export function GeminiTradeAuditorCard({ totalTrades }: GeminiTradeAuditorCardPr
               <div className="flex items-center justify-between gap-3 border-b border-crypto-primary/20 pb-2">
                 <div className="flex items-center gap-1.5 text-crypto-primary font-bold">
                   <FileText className="w-4 h-4" />
-                  <span>
-                    {selectedAutoAuditIdx === 'MANUAL' 
-                      ? 'ON-DEMAND QUANTITATIVE AUDIT REPORT' 
-                      : 'ORCHESTRATED AUTONOMOUS AUDIT REPORT'}
-                  </span>
+                  <span>ON-DEMAND QUANTITATIVE AUDIT REPORT (SR 11-7)</span>
                 </div>
                 {activeTimestamp && (
                   <span className="text-[9px] text-[#808080]">
