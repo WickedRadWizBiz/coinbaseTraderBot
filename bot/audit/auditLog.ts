@@ -16,6 +16,7 @@ export type AuditKind =
   | 'kill_engaged' | 'kill_reset'
   | 'data_stale' | 'data_gap'
   | 'vault'
+  | 'snn'
   | 'alert' | 'error';
 
 export interface AuditRecord {

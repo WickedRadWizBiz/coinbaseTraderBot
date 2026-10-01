@@ -301,6 +301,32 @@ In live trading, `ModelHealth` stops new risk if the rolling log-loss advantage 
 - **Funding, OI and liquidations; DVOL; NQ/DXY; Coinbase multi-level OFI.** These need feeds the bot does not have (or that are US-blocked), and they are T2/T3 anyway.
 - **Full Avellaneda–Stoikov quoting and RL quote offsets.** They need fill-intensity estimates from our own fills first. Inventory skew stays in place.
 
+## Cortex-like SNN (bot/snn)
+
+This is a multi-level spiking network built from *From Flat SNN to Cortex-Like Predictor*. Every equation from that document is implemented in its corrected form in `bot/snn/formulas.ts`. Each one is checked at 1e-5 against an independent Python reference. `docs/SNN.md` maps each formula to its code and test.
+
+The network has these levels:
+- L0 encoders;
+- L1 Poirazi dendritic neurons with AMPA/NMDA synapse classes and an NMDA learning gate;
+- L2/3 ALIF/LIF populations with lateral inhibition and error units;
+- a Rao–Ballard predictive-coding pathway;
+- an astrocyte-like governor;
+- an L5 readout trained only by settlement labels through per-contract tags.
+
+It runs on a 1 s market clock in a worker thread. Readouts have a 200 ms deadline.
+
+`SNN_MODE=shadow` is the default: the network scores and labels every scanned contract but never changes what is traded. In `SNN_MODE=blend`, p_final = (1 − α·c)·p_model + α·c·p_snn. α starts at 0, is capped at 0.25, and is earned only when the out-of-sample Brier improvement is significant.
+
+The network is staged S0–S6 (`SNN_STAGE`). Each stage must pass `research:snn-ablation`, which requires all of the following:
+- an event-clustered paired Brier CI below 0;
+- a calibration slope of 0.9–1.1;
+- correlation with p_model below 0.7;
+- a blended Brier gain;
+- latency and health within band;
+- fee-aware paper P&L not worse.
+
+A health monitor freezes learning and drops to shadow on any breach. Checkpoints are versioned with rollback.
+
 ## Profit vault and pocket
 
 These are rules for how much of the Kalshi cash the bot treats as its own to trade (`bot/vault/`). Nothing moves on the exchange; reserved money is simply left out of the tradable bankroll, which drives sizing and risk limits.
@@ -339,6 +365,9 @@ npm run research:backtest -- --model params/model.candidate.json --grid 0.02,0.0
 npm run research:ta -- --assets BTC,ETH,SOL,XRP,DOGE --days 120                        # TA rule study -> params/ta_study.json
 npm run research:perp-train -- --recordings data/recordings --every 300                 # -> params/perp_model.candidate.json
 npm run research:perp-backtest -- --model params/perp_model.candidate.json --annotate   # execution gate for full-size perps
+npm run research:snn-train -- --from 2026-06-01 --to 2026-06-22 --eval-from 2026-06-22 --eval-to 2026-06-29   # -> params/snn_model.candidate.json
+npm run research:snn-ablation -- --recordings data/recordings [--grid grid.json]          # S0..S6 + deferred vs proxies, criteria (a)-(f)
+npm run research:snn-golden                                                              # regenerate the Python golden vectors
 ```
 
 `npm run research:sessions` reports volatility, Kalshi spreads and depth, and trade activity for each session. It fits and validates the intraday volatility profile (`params/vol_profile.json`), backtests P&L by session, and prints a recommended `SESSION_RISK` along with the evidence behind it.

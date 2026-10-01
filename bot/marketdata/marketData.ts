@@ -285,6 +285,7 @@ export class MarketData extends EventEmitter {
   /** Record an official settlement result for research labels. */
   recordResult(ticker: string, result: 'yes' | 'no'): void {
     this.recorder.write('result', { ticker, result });
+    this.emit('result', { ticker, result });
   }
 
   /** Open markets the bot may price and trade (record-only markets excluded). */

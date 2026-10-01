@@ -33,6 +33,7 @@ import { KillSwitch } from './risk/killSwitch';
 import { RiskGateway } from './risk/riskGateway';
 import { Reconciler } from './recon/reconciler';
 import { Tca } from './tca/tca';
+import { createSnn } from './snn';
 import { logger } from './util/log';
 
 const log = logger('main');
@@ -170,7 +171,17 @@ async function main(): Promise<void> {
     kill.bindCancelAll(async (reason) => { await oms.cancelAll(reason); await hedger!.cancelAll(reason); });
     log.info('perps enabled', { hedge: P.hedge, trading: P.trading, gateway: perpGateway.name });
   }
-  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader, clock });
+  // Cortex-like SNN: shadow by default; in blend mode alpha is earned (<= 0.25) by out-of-sample Brier.
+  const snn = createSnn(cfg.snn);
+  if (snn) {
+    try {
+      await snn.host.start();
+      log.info('SNN started', { mode: cfg.snn.mode, stage: cfg.snn.stage, host: snn.host.mode, version: snn.host.version, restored: snn.host.restoredFrom });
+    } catch (e) {
+      log.error('SNN failed to start; continuing without it', { error: String(e) });
+    }
+  }
+  const engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader, clock, snn });
 
   // Execution events -> OMS (same path for paper and live).
   if (paper) {
@@ -219,6 +230,7 @@ async function main(): Promise<void> {
     engine.stop();
     try { await oms.cancelAll(`shutdown (${sig})`); } catch (e) { log.error('cancel on shutdown failed', { error: String(e) }); }
     paper?.flush();
+    try { await snn?.host.stop(); } catch (e) { log.error('SNN checkpoint on shutdown failed', { error: String(e) }); }
     audit.write('shutdown', { sig });
     md.stop();
     server.close(() => process.exit(0));

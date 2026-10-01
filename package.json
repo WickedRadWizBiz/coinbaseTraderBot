@@ -11,7 +11,7 @@
     "dev": "tsx bot/main.ts",
     "start": "node dist/bot.cjs",
     "build": "npm run build:web && npm run build:bot",
-    "build:bot": "esbuild bot/main.ts --platform=node --target=node20 --bundle --format=cjs --outfile=dist/bot.cjs --packages=external",
+    "build:bot": "esbuild bot/main.ts --platform=node --target=node20 --bundle --format=cjs --outfile=dist/bot.cjs --packages=external && esbuild bot/snn/worker.ts --platform=node --target=node20 --bundle --format=cjs --outfile=dist/snnWorker.cjs --packages=external",
     "build:web": "vite build --config web/vite.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --import tsx --test tests/*.test.ts",
@@ -24,6 +24,9 @@
     "research:ta": "tsx research/taStudy.ts",
     "research:perp-train": "tsx research/trainPerpModel.ts",
     "research:perp-backtest": "tsx research/perpBacktest.ts",
+    "research:snn-train": "tsx research/trainSnn.ts",
+    "research:snn-ablation": "tsx research/snnAblation.ts",
+    "research:snn-golden": "python3 research/snn_reference.py",
     "ta:docs": "tsx scripts/taLibraryDoc.ts",
     "audit:verify": "tsx scripts/verifyAudit.ts"
   },

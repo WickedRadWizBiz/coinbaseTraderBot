@@ -178,6 +178,31 @@ export interface Config {
   perps: PerpsConfig;
   /** ATP tennis match-winner markets (bot/tennis). */
   tennis: TennisConfig;
+  /** Cortex-like spiking network (bot/snn): shadow by default, blended only with an earned alpha. */
+  snn: SnnConfig;
+}
+
+export interface SnnConfig {
+  /** off | shadow (score, label, log; never trades) | blend (p_final = (1 - alpha c) p_model + alpha c p_snn). */
+  mode: 'off' | 'shadow' | 'blend';
+  /** Staging: S0..S6, each stage adds one mechanism (S6 = online plasticity). */
+  stage: 'S0' | 'S1' | 'S2' | 'S3' | 'S4' | 'S5' | 'S6';
+  /** Whitelisted columns (asset-horizon keys such as BTC-15m); empty = first maxColumns seen. */
+  columns: string[];
+  maxColumns: number;
+  modelPath: string;
+  checkpointDir: string;
+  checkpointEveryMin: number;
+  worker: boolean;
+  timeoutMs: number;
+  latencySkipP99Ms: number;
+  alphaMax: number;
+  minEvents: number;
+  readoutEta: number;
+  seed: number;
+  /** Conservative-only dynamic target scaling (hunt take-profit distance), one step per 15 min. */
+  targetScaling: boolean;
+  deferred: { wilsonCowan: boolean; gapJunctions: boolean; izhikevichCH: boolean; dcaap: boolean };
 }
 
 export interface TennisConfig {
@@ -632,6 +657,31 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         collarBps: num(env, 'PERP_COLLAR_BPS', 150, 5, 2000),
       };
     })(),
+    snn: {
+      mode: oneOf(env, 'SNN_MODE', 'shadow', ['off', 'shadow', 'blend'] as const),
+      stage: oneOf(env, 'SNN_STAGE', 'S5', ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const),
+      columns: (env.SNN_COLUMNS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+      maxColumns: num(env, 'SNN_MAX_COLUMNS', 6, 1, 32),
+      modelPath: path.resolve(env.SNN_MODEL_PATH ?? './params/snn_model.json'),
+      checkpointDir: path.resolve(env.SNN_CHECKPOINT_DIR ?? path.join(dataDir, 'snn')),
+      checkpointEveryMin: num(env, 'SNN_CHECKPOINT_EVERY_MIN', 10, 1, 1440),
+      worker: bool(env, 'SNN_WORKER', true),
+      // The decision deadline: never wait longer than 200 ms for a readout.
+      timeoutMs: num(env, 'SNN_TIMEOUT_MS', 200, 10, 200),
+      latencySkipP99Ms: num(env, 'SNN_LATENCY_SKIP_P99_MS', 150, 5, 200),
+      // Hard guardrail: alpha can never exceed 0.25.
+      alphaMax: num(env, 'SNN_ALPHA_MAX', 0.25, 0, 0.25),
+      minEvents: num(env, 'SNN_MIN_EVENTS', 200, 20, 100_000),
+      readoutEta: num(env, 'SNN_READOUT_ETA', 1e-4, 0, 0.1),
+      seed: num(env, 'SNN_SEED', 20260601, 0, 2 ** 31),
+      targetScaling: bool(env, 'SNN_TARGET_SCALING', true),
+      deferred: {
+        wilsonCowan: bool(env, 'SNN_WILSON_COWAN', false),
+        gapJunctions: bool(env, 'SNN_GAP_JUNCTIONS', false),
+        izhikevichCH: bool(env, 'SNN_IZHIKEVICH_CH', false),
+        dcaap: bool(env, 'SNN_DCAAP', false),
+      },
+    },
     tennis: {
       enabled: bool(env, 'TENNIS_ENABLED', true),
       live: bool(env, 'TENNIS_LIVE', false),

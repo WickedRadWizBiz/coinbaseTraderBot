@@ -142,6 +142,7 @@ export function createApi(d: ApiDeps): express.Express {
       session: d.engine.sessionStatus(),
       guards: d.engine.guardStatus(),
       perps: d.engine.perpStatus(),
+      snn: d.engine.snnBrief(),
       tennis: {
         enabled: d.cfg.tennis.enabled,
         trading: d.cfg.tennis.enabled && (d.cfg.mode !== 'live' || d.cfg.tennis.live),
@@ -154,6 +155,8 @@ export function createApi(d: ApiDeps): express.Express {
       consecutiveOrderErrors: d.oms.consecutiveErrors,
     });
   });
+
+  api.get('/snn', async (_req, res) => res.json(await d.engine.snnStatus()));
 
   api.get('/markets', (_req, res) => res.json([...d.engine.status.values()].sort((a, b) => a.closeTs - b.closeTs || a.ticker.localeCompare(b.ticker))));
 

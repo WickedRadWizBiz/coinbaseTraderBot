@@ -44,6 +44,10 @@ import type { ClockSkewMonitor } from './risk/clockSkew';
 import { BalanceMonitor, fillCashDelta, settleCashDelta } from './vault/balanceMonitor';
 import type { Vault } from './vault/vault';
 import { writeJsonAtomic } from './util/persist';
+import type { SnnBlender, TargetScaler } from './snn/blender';
+import type { SnnHost } from './snn/host';
+import type { ColumnInput, ContractQuery, ContractScore } from './snn/network';
+import type { StepReply } from './snn/runtime';
 import { logger } from './util/log';
 
 const log = logger('engine');
@@ -85,7 +89,18 @@ export interface MarketStatus {
   huntStop?: number;
   /** Current values of the macro/confluence inputs for display. */
   macro?: Record<string, number | null>;
+  /** SNN: model-only probability, p_snn, confidence c, alpha applied, and why it is not voting. */
+  pModel?: number;
+  pSnn?: number;
+  snnC?: number;
+  snnAlpha?: number;
+  snnShadow?: string;
   updatedTs: number;
+}
+
+/** SNN column key of a market: asset x horizon (e.g. BTC-15m, ETH-60m). */
+export function snnColumn(m: { asset: string; openTime: number; closeTime: number }): string {
+  return `${m.asset}-${Math.round((m.closeTime - m.openTime) / 60_000)}m`;
 }
 
 export interface EngineDeps {
@@ -120,6 +135,8 @@ export interface EngineDeps {
   clock?: ClockSkewMonitor;
   /** Stage 3 directional perp trading (targets combined with the hedge by the executor). */
   perpTrader?: PerpTrader;
+  /** Cortex-like SNN (bot/snn): worker host, blender with earned alpha, conservative target scaler. */
+  snn?: { host: SnnHost; blender: SnnBlender; scaler: TargetScaler };
   now?: () => number;
 }
 
@@ -138,6 +155,11 @@ export class Engine {
   private readonly now: () => number;
 
   private lastSettleTs = 0;
+  // SNN: L0 inputs observed during the last tick (one ATM contract per column), the latest readout.
+  private readonly snnObs = new Map<string, { input: ColumnInput; absD: number; ts: number }>();
+  private snnScores = new Map<string, ContractScore>();
+  private snnReply: StepReply | undefined;
+  private snnLastAlert = 0;
 
   constructor(private readonly d: EngineDeps) {
     this.now = d.now ?? Date.now;
@@ -228,8 +250,11 @@ export class Engine {
       if ((e.result === 'yes' || e.result === 'no') && /settle|determin/i.test(e.event)) {
         oms.settle(e.ticker, e.result);
         this.d.modelHealth?.onResult(e.ticker, e.result);
+        this.snnSettle(e.ticker, e.result);
       }
     });
+    // Official results of every scanned market (traded or not): the SNN's settlement labels.
+    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => this.snnSettle(e.ticker, e.result));
     oms.on('order_error', (n: number, msg: string) => {
       if (n >= cfg.risk.maxConsecutiveOrderErrors) void kill.engage(`${n} consecutive order errors (last: ${msg})`, 'oms');
     });
@@ -425,6 +450,7 @@ export class Engine {
       await kill.engage(`daily loss $${(-pnl).toFixed(2)} reached limit $${limit.toFixed(2)}`, 'risk');
       return;
     }
+    await this.snnTick();
     await Promise.all(this.d.md.activeMarkets(this.now()).filter((m) => m.kind !== 'match').map((m) => this.evaluate(m)));
     this.prune();
     // Stage 2: offset the binary book's net delta with perps (reduce-only when new risk is halted).
@@ -567,6 +593,98 @@ export class Engine {
     };
   }
 
+  // ---- Cortex-like SNN (bot/snn) ---------------------------------------------------------
+
+  /** Advance the SNN clock with last tick's inputs and score every active contract (one batched,
+   *  200 ms-bounded request). Timeouts and errors leave no scores: the blend uses alpha = 0. */
+  private async snnTick(): Promise<void> {
+    const snn = this.d.snn;
+    if (!snn) return;
+    const { md, cfg } = this.d;
+    const now = this.now();
+    const queries: ContractQuery[] = [];
+    for (const m of md.activeMarkets(now)) {
+      if (m.kind === 'match') continue;
+      const terms = md.termsFor(m), idx = md.index.get(m.asset);
+      const spot = idx?.fresh(now, cfg.risk.maxIndexAgeMs), vol = idx?.vol();
+      if (!terms || !spot || !vol) continue;
+      const tauSec = (m.closeTime - now) / 1000;
+      queries.push({
+        ticker: m.ticker, column: snnColumn(m), kind: terms.kind, strike: terms.strike, cap: terms.cap, spot: spot.value, sigma: vol.sigmaPerSqrtSec,
+        tauSec, lifeSec: (m.closeTime - m.openTime) / 1000, eventKey: `${m.asset}:${m.closeTime}`, tag: tauSec > cfg.risk.noEntryBeforeCloseSec,
+      });
+    }
+    const inputs = [...this.snnObs.values()].filter((o) => now - o.ts < 10_000).map((o) => o.input);
+    const r = await snn.host.stepAndScore(now, inputs, queries);
+    this.snnReply = r;
+    this.snnScores = new Map((r?.scores ?? []).map((s) => [s.ticker, s]));
+    if (r && r.scores.length) {
+      const n = r.scores.length;
+      snn.scaler.update(now, r.scores.reduce((a, s) => a + s.surprise, 0) / n, r.scores.reduce((a, s) => a + s.surprise0, 0) / n, r.scores.reduce((a, s) => a + s.G, 0) / n);
+    }
+    if (r?.alerts.length && now - this.snnLastAlert > 3_600_000) {
+      this.snnLastAlert = now;
+      this.d.audit.write('snn', { event: 'health_alert', alerts: r.alerts });
+      this.d.alerter.notify('warn', 'snn-health', `SNN health: ${r.alerts.join('; ')}`);
+    }
+  }
+
+  /** Remember this market's L0 inputs for the next SNN step (the closest-to-the-money contract per column). */
+  private snnObserve(m: ActiveMarket, input: Omit<ColumnInput, 'key' | 'asset'>, now: number): void {
+    if (!this.d.snn || (m.kind !== 'updown' && m.kind !== 'greater')) return;
+    const key = snnColumn(m);
+    const absD = Number.isFinite(input.dAtm) ? Math.abs(input.dAtm!) : Infinity;
+    const prev = this.snnObs.get(key);
+    if (prev && now - prev.ts < 1000 && prev.absD <= absD) return;
+    this.snnObs.set(key, { input: { key, asset: m.asset, ...input }, absD, ts: now });
+  }
+
+  /** p_final = (1 - alpha c) p_model + alpha c p_snn in blend mode; otherwise p_model (SNN logged only). */
+  private snnBlend(m: ActiveMarket, st: MarketStatus, pModel: number, tradable: boolean, now: number): number {
+    const snn = this.d.snn;
+    st.pModel = pModel;
+    if (!snn) return pModel;
+    const s = this.snnScores.get(m.ticker);
+    if (!s) { st.snnShadow = this.snnReply ? 'not scored' : 'no readout (timeout or warming up)'; return pModel; }
+    const c = snn.blender.confidence(s.surprise, s.surprise0, s.G);
+    const shadow = this.d.cfg.snn.mode !== 'blend' ? 'shadow mode'
+      : !this.snnReply ? 'readout timed out'
+      : this.snnReply.shadow ? 'health: shadow'
+      : !snn.host.latencyOk() ? `latency p99 ${snn.host.p99().toFixed(0)} ms` : undefined;
+    const p = snn.blender.pFinal(pModel, s.p, c, Boolean(shadow));
+    Object.assign(st, { pSnn: s.p, snnC: c, snnAlpha: shadow ? 0 : snn.blender.alpha().alpha, snnShadow: shadow });
+    if (tradable) snn.blender.record({ ticker: m.ticker, eventKey: s.eventKey, ts: now, pModel, pSnn: s.p, c });
+    return p;
+  }
+
+  private snnSettle(ticker: string, result: 'yes' | 'no'): void {
+    const snn = this.d.snn;
+    if (!snn) return;
+    void snn.host.settle(ticker, result, this.now());
+    const rec = snn.blender.settle(ticker, result === 'yes' ? 1 : 0);
+    if (rec) this.d.audit.write('snn', { event: 'settle', ticker, y: rec.y, pModel: rec.pModel, pSnn: rec.pSnn, c: rec.c, eventKey: rec.eventKey, brierModel: (rec.pModel - rec.y!) ** 2, brierSnn: (rec.pSnn - rec.y!) ** 2 });
+  }
+
+  /** Compact SNN state for the status endpoint. */
+  snnBrief() {
+    const snn = this.d.snn;
+    if (!snn) return { mode: 'off' };
+    const e = snn.blender.alpha();
+    return { mode: this.d.cfg.snn.mode, stage: this.d.cfg.snn.stage, alpha: e.alpha, events: e.events, reason: e.reason, shadow: this.snnReply?.shadow ?? true, top: this.snnReply?.top ?? null, p99Ms: +snn.host.p99().toFixed(1), targetScale: snn.scaler.scale };
+  }
+
+  /** SNN state for the dashboard. */
+  async snnStatus() {
+    const snn = this.d.snn;
+    if (!snn) return { mode: 'off' };
+    return {
+      mode: this.d.cfg.snn.mode, stage: this.d.cfg.snn.stage, host: { mode: snn.host.mode, version: snn.host.version, p99Ms: +snn.host.p99().toFixed(1), timeouts: snn.host.timeouts, lastError: snn.host.lastError ?? null, restoredFrom: snn.host.restoredFrom ?? null },
+      blender: snn.blender.status(), targetScale: snn.scaler.scale,
+      salience: this.snnReply?.salience ?? {}, top: this.snnReply?.top ?? null, shadow: this.snnReply?.shadow ?? true,
+      network: await snn.host.status(),
+    };
+  }
+
   /** Open binary positions with their sensitivity to the underlying, for the perp hedger. */
   exposures(now = this.now()): BinaryExposure[] {
     const out: BinaryExposure[] = [];
@@ -655,8 +773,13 @@ export class Engine {
       perp: md.features.perps.get(m.asset), candles: md.features.candles.get(m.asset),
     });
     const pred = model.predictDetailed(features, fv.pYes);
-    const pYes = pred.p;
     const pMarket = model.marketProbability(mid);
+    // SNN: feed this market's encodings to the next 1 s step, then blend (alpha = 0 unless earned).
+    this.snnObserve(m, {
+      spot: spot.value, mid, spread: ask.price - bid.price, imbalance: features.imbalance, dAtm: fv.d2, tauFrac: tauSec / Math.max(1, (m.closeTime - m.openTime) / 1000),
+      rsi: Number.isFinite(features.rsi_14_1m) ? 50 + 50 * features.rsi_14_1m : undefined, retZ: features.ret_5m_z,
+    }, now);
+    const pYes = this.snnBlend(m, st, pred.p, tauSec > R.noEntryBeforeCloseSec, now);
     const why = explain(model, features, fv.pYes);
     st.modelShift = why.shiftFromFairValue;
     st.drivers = why.drivers;
@@ -697,7 +820,7 @@ export class Engine {
     const reason = this.cadence.check(m.ticker, { now, fairValue: pYes, entryWindowOpen, hasResting: Boolean(restingBid || restingAsk), bookThroughQuote: through(restingBid, bid.price) || through(restingAsk, ask.price), positionChanged });
     if (reason) st.lastEval = { reason, ts: now };
     st.entryWindow = entryWindowOpen;
-    if (reason && entryWindowOpen) this.d.modelHealth?.record(m.ticker, pYes, pMarket, m.closeTime);
+    if (reason && entryWindowOpen) this.d.modelHealth?.record(m.ticker, pred.p, pMarket, m.closeTime);
     const pos = oms.positions.get(m.ticker);
     const entrySidePrice = pos && pos.yes > 0 ? -pos.netCash / pos.yes : pos && pos.yes < 0 ? 1 - pos.netCash / -pos.yes : undefined;
     const tier = this.tier();
@@ -726,9 +849,9 @@ export class Engine {
       if (!h) {
         const S = cfg.strategy;
         h = vh
-          ? new ConfluenceRatchetExit({ targetMargin: vh.targetMargin, minConfluence: vh.minConfluence }, { minFillRatio: vh.minFillRatio, minWallAgeMs: vh.minWallAgeMs, slippageTicks: vh.slippageTicks })
+          ? new ConfluenceRatchetExit({ targetMargin: vh.targetMargin * this.snnTargetScale(), minConfluence: vh.minConfluence }, { minFillRatio: vh.minFillRatio, minWallAgeMs: vh.minWallAgeMs, slippageTicks: vh.slippageTicks })
           : new ConfluenceRatchetExit(
-            { targetMargin: S.huntTargetMargin, minConfluence: S.huntMinConfluence },
+            { targetMargin: S.huntTargetMargin * this.snnTargetScale(), minConfluence: S.huntMinConfluence },
             { minFillRatio: S.ratchetMinFillRatio, minWallAgeMs: S.ratchetMinWallAgeSec * 1000, slippageTicks: S.ratchetSlippageTicks },
           );
         this.hunts.set(m.ticker, h);
@@ -787,6 +910,12 @@ export class Engine {
     // Orders carry the decision probability (q_adj under target-EV sizing): the gateway's fee-net
     // edge collar and TCA's edge-at-decision then judge the same number the strategy traded on.
     for (const p of plan.place) await this.placeChecked(m, p, st.q ?? pYes, decisionId);
+  }
+
+  /** Conservative-only target scale in [0.85, 1] (blend mode with target scaling on), else 1. */
+  private snnTargetScale(): number {
+    const snn = this.d.snn;
+    return snn && this.d.cfg.snn.mode === 'blend' && this.d.cfg.snn.targetScaling ? Math.min(1, snn.scaler.scale) : 1;
   }
 
   private async placeChecked(m: ActiveMarket, p: OrderPlan, pYes: number, decisionId: string, tennis?: { event: string }): Promise<void> {
