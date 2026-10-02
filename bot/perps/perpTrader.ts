@@ -29,6 +29,8 @@ import type { PerpGateway } from './perpRest';
 import { perpFeatures, priorMuBps, type PerpFeatureSources, type PerpModel } from './perpSignal';
 
 export interface PerpTraderParams {
+  /** Perp sigma inflation per unit of capital locked in binaries (sigma x (1 + k x locked)). */
+  lockedVolMult?: number;
   horizonMin: number;
   entryEdgeBps: number;
   exitEdgeBps: number;
@@ -74,6 +76,8 @@ export interface PerpDecisionInput {
   halt?: string;
   /** New entries not allowed (existing positions are still managed). */
   noEntry?: string;
+  /** Share of total capital locked in binary bets until settlement (inflates the perp's sigma). */
+  lockedFrac?: number;
 }
 
 export interface PerpDecision { target: number; urgent: boolean; reason: string; stopPrice?: number; netEdgeBps?: number; leverage?: number }
@@ -117,8 +121,9 @@ export function decidePerp(i: PerpDecisionInput, p: PerpTraderParams): PerpDecis
     return { target: 0, urgent: false, reason: `edge ${entryNet(best).toFixed(1)} bps below entry threshold ${p.entryEdgeBps} (mu ${i.muBps.toFixed(1)} bps, costs ${(2 * p.makerBps + fundingBps(best)).toFixed(1)} bps)`, netEdgeBps: entryNet(best) };
   }
 
-  // Size: fractional Kelly on the net edge, with every cap.
-  const sigma = i.sigmaHBps / 1e4;
+  // Size: fractional Kelly on the net edge, with every cap. Capital locked in binaries cannot buffer
+  // margin, so the perp's assumed volatility is inflated by that share (smaller perp size).
+  const sigma = (i.sigmaHBps / 1e4) * (1 + (p.lockedVolMult ?? 1) * Math.max(0, Math.min(1, i.lockedFrac ?? 0)));
   const kellyLev = (p.kellyFraction * Math.max(0, net) / 1e4) / (sigma * sigma);
   const caps = [
     p.maxLeverage,
@@ -182,7 +187,7 @@ export class PerpTrader {
   }
 
   /** Directional targets for the executor (called after it has synced positions). */
-  async targets(c: DirectionalContext, guards: { halt?: string; noEntry?: string }): Promise<DirTarget[]> {
+  async targets(c: DirectionalContext, guards: { halt?: string; noEntry?: string; lockedFrac?: number }): Promise<DirTarget[]> {
     const P = this.d.params;
     const now = c.now;
     const equity = await this.refreshEquity(now);
@@ -240,7 +245,7 @@ export class PerpTrader {
         current, entryPrice: current !== 0 ? c.positions.get(ticker)?.entryPrice : undefined,
         heldMin: this.heldSince.has(ticker) ? (now - this.heldSince.get(ticker)!) / 60_000 : undefined,
         equity: equity ?? 0, atrFrac, marketLeverage: l.leverage, step: l.fractional ? 0.01 : 1, otherNotional: used - mine,
-        halt: guards.halt ?? this.dayHalt, noEntry,
+        halt: guards.halt ?? this.dayHalt, noEntry, lockedFrac: guards.lockedFrac,
       }, P);
       this.lastDecisions.set(ticker, { ...dec, muBps, sigmaHBps: sig, source, current });
       if (dec.target !== current || dec.urgent) this.d.audit?.write('perp_decision', { asset, ticker, current, target: dec.target, reason: dec.reason, muBps, sigmaHBps: sig, source, validated, equity, stop: dec.stopPrice });

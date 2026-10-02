@@ -17,6 +17,8 @@ export type { ColumnInput } from './column';
 
 export interface ContractQuery {
   ticker: string;
+  /** Market mid at the query (not read by the network; the live tennis tournament grades members on it). */
+  mid?: number;
   /** Tennis (kind 'match'): the threshold distance is given directly as d = logit(model P(A)),
    *  and the life fraction as 1 - progress; spot/sigma/strike are unused. */
   d?: number;
@@ -458,9 +460,11 @@ export class SnnNetwork {
     };
   }
 
-  /** Restore a checkpoint (must match the version hash). Columns are recreated in their saved order. */
-  restore(cp: SnnCheckpoint): void {
-    if (cp.version !== this.version) throw new Error(`SNN checkpoint version ${cp.version} does not match ${this.version}`);
+  /** Restore a checkpoint (must match the version hash). Columns are recreated in their saved order.
+   *  `allowParamChange`: accept a checkpoint from a network whose hyperparameters differ but whose
+   *  shapes are the same (the population tournament clones the elite into a mutated member). */
+  restore(cp: SnnCheckpoint, opts: { allowParamChange?: boolean } = {}): void {
+    if (cp.version !== this.version && !opts.allowParamChange) throw new Error(`SNN checkpoint version ${cp.version} does not match ${this.version}`);
     this.columns.clear(); this.readouts.clear(); this.inputs.clear(); this.dirReadouts.clear(); this.dirTags.clear(); this.dirStats.clear();
     for (const col of cp.columns) {
       const c = new Column(col.key, col.asset, this.p, this.columns.size);

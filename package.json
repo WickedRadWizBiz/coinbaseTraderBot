@@ -29,6 +29,7 @@
     "research:vol-model": "tsx research/trainVolModel.ts",
     "research:fill-train": "tsx research/trainFillModel.ts",
     "research:ta-net": "tsx research/trainTaNet.ts",
+    "research:snn-pbt": "tsx research/snnPbt.ts",
     "history:import": "tsx research/history/importCsv.ts",
     "history:binance": "tsx research/history/binanceVision.ts",
     "history:coinbase": "tsx research/history/coinbaseBackfill.ts",

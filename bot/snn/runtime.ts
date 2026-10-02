@@ -5,7 +5,7 @@ import { SnnNetwork, type ColumnInput, type ContractQuery, type ContractScore, t
 import type { SnnParams } from './params';
 
 export type SnnRequest =
-  | { id: number; type: 'init'; params: SnnParams; whitelist?: string[]; model?: SnnModelFile; checkpoint?: SnnCheckpoint }
+  | { id: number; type: 'init'; params: SnnParams; whitelist?: string[]; model?: SnnModelFile; checkpoint?: SnnCheckpoint; allowParamChange?: boolean }
   | { id: number; type: 'step'; now: number; inputs: ColumnInput[]; queries: ContractQuery[] }
   | { id: number; type: 'settle'; ticker: string; result: 'yes' | 'no'; now: number }
   | { id: number; type: 'remove'; keys: string[] }
@@ -32,7 +32,7 @@ export class SnnRuntime {
     if (m.type === 'init') {
       this.net = new SnnNetwork(m.params, { whitelist: m.whitelist, model: m.model });
       if (m.checkpoint) {
-        try { this.net.restore(m.checkpoint); this.restoredFrom = `checkpoint @ ${new Date(m.checkpoint.lastTs).toISOString()}`; }
+        try { this.net.restore(m.checkpoint, { allowParamChange: m.allowParamChange }); this.restoredFrom = `checkpoint @ ${new Date(m.checkpoint.lastTs).toISOString()}`; }
         catch (e) { this.restoredFrom = `checkpoint rejected: ${(e as Error).message}`; }
       }
       return { version: this.net.version, restoredFrom: this.restoredFrom ?? null };

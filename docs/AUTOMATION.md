@@ -24,11 +24,12 @@ This is `research/pipeline.ts`, run as a low-priority background process so trad
 | Step | What it does | Output (in `data/models/`) |
 |---|---|---|
 | history | Downloads new Binance Vision archives and Coinbase candles for every crypto asset Kalshi lists. Skipped if the server can't reach them, or with `HISTORY_AUTO_UPDATE=false` | `data/history/` |
-| ta_net | Retrains the TA network on the hourly history every `TA_NET_RETRAIN_DAYS` (7), with a blind walk-forward test; only validated heads speak live | `ta_net.json` |
+| ta_net | Runs the TA network's tournament of three over the hourly history. The first one is spread over daily runs; afterwards it continues month by month every `TA_NET_RETRAIN_DAYS` (7). Promoted only once it reaches the present; only heads that pass the holdout and hurdles speak live (docs/EVOLUTION.md) | `ta_net.json` |
 | snn-crypto-ablation | Tests the crypto network's stages S0–S6 on settled contracts. Runs weekly, or when forced | `work/snn_crypto_ablation.json` |
-| snn-crypto-train | Trains the crypto network (15m/1h) at the highest stage whose whole chain passed | `snn_crypto.json` |
+| snn-crypto-pbt | Tournament of three identical crypto networks over the last 7 recorded days. The elite's knobs are used from then on. Runs at the start, when the stage changes, and every 30 days | `work/snnpbt/crypto/` |
+| snn-crypto-train | Trains the crypto network (15m/1h) at the highest stage whose whole chain passed, with the tournament's knobs | `snn_crypto.json` |
 | snn-crypto-backfill | Fills in the crypto network's outputs for recorded minutes with no live log, one day at a time, resuming where it left off. No output ever saw its own result | `work/snnfill/crypto/` |
-| snn-perps-ablation / -train / -backfill | The same for the perps network (1h/4h), judged on its own direction calls because perps never settle | `snn_perps.json`, `work/snnfill/perps/` |
+| snn-perps-ablation / -pbt / -train / -backfill | The same for the perps network (1h/4h), judged on its own direction calls because perps never settle | `snn_perps.json`, `work/snnfill/perps/` |
 | snn-tennis | Always skipped: the tennis network can't be replayed (no recorded score feed), so it learns live and keeps its checkpoints in `data/snn/tennis/` | — |
 | vol_model | Trains the tree volatility forecast (how far realised vol over a contract's life will differ from the EWMA) and checks it on held-out days | `vol_model.json` |
 | dataset | Turns the recordings, plus the crypto network's logged and backfilled outputs, into labelled training rows. Priced with the vol forecast when it is validated | `work/dataset.jsonl` |
@@ -156,7 +157,8 @@ These can't be automated, or deliberately aren't.
 | `AUTO_TRAIN_RECORDINGS` | `data/recordings` | Where recordings are read from. |
 | `AUTO_TRAIN_WATCH_SEC` | `30` | How often to check for changed model files. |
 | `HISTORY_AUTO_UPDATE` | `true` | Refresh Binance/Coinbase history in the daily run (the other history and TA network settings are in docs/TA_NETWORK.md). |
-| `TA_NET_RETRAIN_DAYS` | `7` | Retrain the TA network at most this often. |
+| `TA_NET_RETRAIN_DAYS` | `7` | Continue the TA network's tournament at most this often. |
+| `AUTO_TRAIN_SNN_PBT_DAYS` / `AUTO_TRAIN_SNN_PBT_EVERY_DAYS` | `7` / `30` | SNN tournaments: days replayed, how often they rerun (docs/EVOLUTION.md has every tournament setting). |
 
 ## If something goes wrong
 

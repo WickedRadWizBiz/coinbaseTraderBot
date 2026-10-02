@@ -61,6 +61,12 @@ checkpoints persist across restarts.
 - Each network's calls are written to the recordings every minute as `snn` events tagged with the network (`d: crypto | perps | tennis`), each call as `[key, pUp, expSignedMove, labelled, skill, calConf, contractSkill, surpriseRatio, G]`. That is what the decision models train on. Events logged before the split (no `d`) are read as: 15m → crypto, 4h → perps, 1h → both.
 - The old end-of-pipeline blend (`SNN_MODE=blend`, α ≤ 0.25) is still available but no longer needed. In the default `shadow` mode the SNN runs, logs and feeds the MLP without blending.
 
+## Starting each network: a tournament of three (docs/EVOLUTION.md)
+
+Each network starts as three identical networks (same seed and weights) whose shape-preserving knobs (learning rates, gains, time constants) differ by up to ±10%. They fight for fitness on simulated trades, and the elite becomes the network:
+- **Crypto and perps:** step `snn-<domain>-pbt` replays the recordings (`research/snnPbt.ts`). There are 3 days of initial learning, then a tournament after every day. The elite's knobs are used for training, backfill and live. It reruns every 30 days.
+- **Tennis:** the tournament runs **live** (`bot/snn/population.ts`), because there is no recorded score feed. All three see every input, and the bot reads the elite. After every 30 graded matches the worst restarts from the elite's state with mutated knobs.
+
 ## Every formula, where it lives, and how it is checked
 
 All equations are in `bot/snn/formulas.ts` in their **corrected** form. Each one is asserted in

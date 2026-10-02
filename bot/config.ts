@@ -52,6 +52,9 @@ export interface StrategyConfig {
   seriesAuto: boolean;
   /** Fractional Kelly multiplier (0.1–0.25 recommended). */
   kellyFraction: number;
+  /** Portfolio numerical Kelly cap on new binary orders (reduce-only), and its shrink (0.25-0.5). */
+  portfolioKelly: boolean;
+  portfolioKellyShrink: number;
   /** Required edge beyond fees, in probability points, before quoting/taking. */
   minEdge: number;
   /** Additional buffer for taker entries on top of the taker fee. */
@@ -214,8 +217,22 @@ export interface TaNetConfig {
   coinbaseTfs: string[];
   /** Retrain the network at most every N days (and whenever it is missing). */
   retrainEveryDays: number;
-  /** Walk-forward refit interval through the blind test period. */
-  refitMonths: number;
+  /** Population tournament: rolling training block, evaluation window, untouched holdout (months). */
+  trainMonths: number;
+  evalMonths: number;
+  /** How far each round rolls forward (months). */
+  stepMonths: number;
+  holdoutMonths: number;
+  /** Train on every k-th hourly sample per epoch (adjacent hours are highly correlated). */
+  stride: number;
+  /** Statistical hurdles: independent interactions per regime, deflated Sharpe probability. */
+  minPerRegime: number;
+  dsrThreshold: number;
+  /** Live forward test of the elite's position rule: days, and whether a failure mutes the direction heads. */
+  forwardDays: number;
+  muteOnForwardFail: boolean;
+  /** Tournament rounds per pipeline run (0 = all): the initialisation is spread over daily runs. */
+  maxRoundsPerRun: number;
 }
 
 export interface AutoTrainConfig {
@@ -239,6 +256,12 @@ export interface AutoTrainConfig {
   minDays: number;
   /** Poll interval for model-file changes (hot reload). */
   watchSec: number;
+  /** SNN population tournaments (crypto, perps): recorded days replayed, initial training block,
+   *  rounds per pipeline run (0 = all), and how often the tournament is re-run (0 = only at init). */
+  snnPbtDays: number;
+  snnPbtInitDays: number;
+  snnPbtMaxRounds: number;
+  snnPbtEveryDays: number;
 }
 
 export interface SnnConfig {
@@ -261,6 +284,10 @@ export interface SnnConfig {
   /** Conservative-only dynamic target scaling (hunt take-profit distance), one step per 15 min. */
   targetScaling: boolean;
   deferred: { wilsonCowan: boolean; gapJunctions: boolean; izhikevichCH: boolean; dcaap: boolean };
+  /** Tennis: run three networks live and keep the fittest (population-based training). */
+  tennisPopulation: boolean;
+  /** Graded matches between live tournament rounds. */
+  tennisPopulationSettles: number;
   /** Three isolated SNNs (crypto contracts, perps, tennis): on/off, stage and model file each. */
   domains: Record<'crypto' | 'perps' | 'tennis', { enabled: boolean; stage: SnnConfig['stage']; modelPath: string }>;
   /** Let a decision model read ANOTHER domain's SNN outputs (e.g. the crypto MLP reading the perps
@@ -578,6 +605,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     recordSeries: (env.RECORD_SERIES ?? '').split(',').map((x) => x.trim()).filter(Boolean),
     recordMaxMarkets: num(env, 'RECORD_MAX_MARKETS', 150, 1, 2000),
     kellyFraction: num(env, 'STRATEGY_KELLY_FRACTION', 0.25, 0.01, 0.5),
+    portfolioKelly: bool(env, 'PORTFOLIO_KELLY', true),
+    portfolioKellyShrink: num(env, 'PORTFOLIO_KELLY_SHRINK', 0.5, 0.05, 0.5),
     // Relaxed spec: e_min = 3c for maker entries; take only with >= 5c net edge (3c + 2c buffer).
     minEdge: num(env, 'STRATEGY_MIN_EDGE', relaxed ? 0.03 : 0.02, 0.0, 0.5),
     takerBuffer: num(env, 'STRATEGY_TAKER_BUFFER', relaxed ? 0.02 : 0.01, 0.0, 0.5),
@@ -716,6 +745,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         entryEdgeBps: num(env, 'PERP_ENTRY_EDGE_BPS', 5, 0, 500),
         exitEdgeBps: num(env, 'PERP_EXIT_EDGE_BPS', 0, -500, 500),
         kellyFraction: num(env, 'PERP_KELLY_FRACTION', 0.25, 0.01, 1),
+        lockedVolMult: num(env, 'PERP_LOCKED_VOL_MULT', 1, 0, 10),
         maxLeverage: num(env, 'PERP_MAX_LEVERAGE', 3, 0.1, 20),
         maxTradeNotionalUsd: num(env, 'PERP_MAX_NOTIONAL_USD', 500, 1, 1e9),
         maxTotalNotionalUsd: num(env, 'PERP_MAX_TOTAL_NOTIONAL_USD', 1000, 1, 1e9),
@@ -746,6 +776,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       onModelChange: bool(env, 'AUTO_TRAIN_ON_MODEL_CHANGE', true),
       minDays: num(env, 'AUTO_TRAIN_MIN_DAYS', 1, 0, 365),
       watchSec: num(env, 'AUTO_TRAIN_WATCH_SEC', 30, 5, 3600),
+      snnPbtDays: num(env, 'AUTO_TRAIN_SNN_PBT_DAYS', 7, 2, 365),
+      snnPbtInitDays: num(env, 'AUTO_TRAIN_SNN_PBT_INIT_DAYS', 3, 1, 60),
+      snnPbtMaxRounds: num(env, 'AUTO_TRAIN_SNN_PBT_MAX_ROUNDS', 0, 0, 1000),
+      snnPbtEveryDays: num(env, 'AUTO_TRAIN_SNN_PBT_EVERY_DAYS', 30, 0, 365),
     },
     snn: {
       mode: oneOf(env, 'SNN_MODE', 'shadow', ['off', 'shadow', 'blend'] as const),
@@ -764,6 +798,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       readoutEta: num(env, 'SNN_READOUT_ETA', 1e-4, 0, 0.1),
       seed: num(env, 'SNN_SEED', 20260601, 0, 2 ** 31),
       targetScaling: bool(env, 'SNN_TARGET_SCALING', true),
+      tennisPopulation: bool(env, 'SNN_TENNIS_POPULATION', true),
+      tennisPopulationSettles: num(env, 'SNN_TENNIS_POPULATION_SETTLES', 30, 3, 10_000),
       domains: (() => {
         const stage = oneOf(env, 'SNN_STAGE', 'S5', ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const);
         const st = (d: string, def: typeof stage) => oneOf(env, `SNN_${d}_STAGE`, def, ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const);
@@ -846,7 +882,16 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       binanceIntervals: (env.HISTORY_BINANCE_INTERVALS ?? '1h,15m,1d').split(',').map((x) => x.trim()).filter(Boolean),
       coinbaseTfs: (env.HISTORY_COINBASE_TFS ?? '1h,1d').split(',').map((x) => x.trim()).filter(Boolean),
       retrainEveryDays: num(env, 'TA_NET_RETRAIN_DAYS', 7, 0, 365),
-      refitMonths: num(env, 'TA_NET_REFIT_MONTHS', 6, 1, 24),
+      trainMonths: num(env, 'TA_NET_TRAIN_MONTHS', 12, 1, 36),
+      evalMonths: num(env, 'TA_NET_EVAL_MONTHS', 1, 0.25, 6),
+      stepMonths: num(env, 'TA_NET_STEP_MONTHS', 1, 0.25, 6),
+      holdoutMonths: num(env, 'TA_NET_HOLDOUT_MONTHS', 3, 0.5, 12),
+      stride: num(env, 'TA_NET_STRIDE', 2, 1, 24),
+      minPerRegime: num(env, 'TA_NET_MIN_PER_REGIME', 100, 1, 100_000),
+      dsrThreshold: num(env, 'TA_NET_DSR', 0.95, 0, 1),
+      forwardDays: num(env, 'TA_NET_FORWARD_DAYS', 90, 1, 365),
+      muteOnForwardFail: bool(env, 'TA_NET_MUTE_ON_FORWARD_FAIL', true),
+      maxRoundsPerRun: num(env, 'TA_NET_MAX_ROUNDS_PER_RUN', 36, 0, 10_000),
     },
   };
   return deepFreeze(cfg);

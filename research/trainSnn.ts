@@ -18,6 +18,7 @@ import { brier, sigmoid } from '../bot/snn/formulas';
 import { encodeArr, type SnnModelFile } from '../bot/snn/network';
 import { DEFAULT_SNN, domainParams, stageFlags, versionHash, withFlags, type SnnParams, type Stage } from '../bot/snn/params';
 import { replaySnn } from './snnReplay';
+import { withSnnHyper } from '../bot/snn/population';
 
 /** L2-regularised logistic regression by gradient descent with backtracking (full batch). */
 export function fitLogistic(X: Float64Array[], y: number[], w0: Float64Array, l2 = 1e-3, iters = 300): { w: Float64Array; loss: number } {
@@ -58,7 +59,9 @@ export async function trainSnnMain(argOf: (k: string, d: string) => string = cli
   const domain = argOf('domain', 'crypto') as 'crypto' | 'perps';
   if (domain !== 'crypto' && domain !== 'perps') throw new Error(`--domain ${domain}: only crypto and perps are replayable (tennis learns live)`);
   const out = argOf('out', `params/snn_${domain}.candidate.json`);
-  const params: SnnParams = domainParams(domain, withFlags({ ...DEFAULT_SNN, seed: Number(argOf('seed', String(DEFAULT_SNN.seed))) }, stageFlags(stage)));
+  // --hyper: knobs chosen by the population tournament (research/snnPbt.ts).
+  const hyperArg = argOf('hyper', '');
+  const params: SnnParams = withSnnHyper(domainParams(domain, withFlags({ ...DEFAULT_SNN, seed: Number(argOf('seed', String(DEFAULT_SNN.seed))) }, stageFlags(stage))), hyperArg ? JSON.parse(hyperArg) : undefined);
   const win = { from: date('from'), to: date('to'), domain };
 
   // 1. PC pretraining (U0, U1, precisions), only for stages with the PC pathway.

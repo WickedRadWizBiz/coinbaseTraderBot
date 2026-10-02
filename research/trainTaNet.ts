@@ -1,45 +1,49 @@
-// Trains the TA network (bot/ta/taNet.ts) on historical hourly + daily candles (research/history).
+// Initialises the TA network (bot/ta/taNet.ts) with a population tournament over years of hourly
+// history (research/history): three identical three-branch networks (bot/ta/branchNet.ts) with
+// slightly different hyperparameters train walk-forward and fight for fitness (research/pbt.ts).
 //
 //   npm run research:ta-net                                   # every asset in data/history
 //   npm run research:ta-net -- --assets BTC,ETH,SOL --out params/ta_net.json
-//   npm run research:ta-net -- --val-from 2024-01-01 --test-from 2025-01-01
+//   npm run research:ta-net -- --train-months 12 --eval-months 1 --holdout-months 3 --stride 2
 //
-// 1. Rows: at every closed hourly bar with a full 288-bar window, the network's ~200 TA inputs
-//    (cached per asset under --cache; only new bars are computed on re-runs) and three targets:
-//    up in 1 h, up in 4 h, log(next-4h realised vol / last-24h realised vol). Assets are pooled:
-//    every input is scale-free, so one coin's patterns can inform another's.
-// 2. Split by time: train | validation | test (default: the last 20% of the span is the test,
-//    the 15% before it validation), with a 5-hour embargo at each boundary (targets overlap).
-// 3. Candidates per head (logistic regression, MLP, boosted trees) are fitted on train and compared
-//    on validation; the best one is kept.
-// 4. Blind walk-forward test: through the test period the chosen candidate is refitted every
-//    --refit-months on everything before, and each segment is forecast by a model that never saw
-//    it. Graded against the naive forecast (base rate / mean) with a day-block bootstrap; a head is
-//    `validated` only when the 95% CI of the improvement is above zero.
-// 5. The deployed model is refitted on all rows. Only validated heads speak live by default.
+// 1. Inputs per closed hourly bar (cached per asset; only new bars are computed on re-runs): the last
+//    12 hourly TA steps (GRU branch), the last 30 daily TA steps (attention branch), the last 32
+//    15-minute bars (convolution branch). Targets: up in 1h, up in 4h, next-4h vol vs last-24h.
+// 2. Tournament: rolling training block (--train-months, 12-18), evaluation on the NEXT month, roll
+//    forward one month. Every member trains one epoch per round on its block, then is scored on the
+//    unseen month by trading the network's own position rule (fractional Kelly on its forecasts,
+//    taNetPosition): Fitness = Sortino - 5 x max drawdown - 5 x costs. Elite survives, worst clones
+//    it, middle + clone mutate (learning rate, L2, the 15m / hourly / daily branch gates, vol weight).
+//    The blocks deliberately cross the 2016-2026 regime shifts (research/fitness.ts REGIMES).
+// 3. Hurdles: the elite lineage's out-of-sample record, clustered into independent interactions
+//    (one continuous position = one interaction), must pass the deflated Sharpe ratio with every
+//    member evaluation counted as a trial, and every regime it covers must hold at least
+//    --min-per-regime independent interactions. The last --holdout-months are never touched by the
+//    tournament: each head is graded there against the naive forecast (day-block bootstrap).
+// 4. Speaking live: vol_4h when its holdout CI is above zero; up_1h / up_4h only when their holdout
+//    CI is above zero AND the network passed the DSR and regime hurdles. The live bot then
+//    forward-tests the position rule (TaNetRuntime.enableForwardTest).
+// The population is saved (--state): later runs continue the tournament month by month instead of
+// starting over, so it is an initialisation followed by continual evolution.
 
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import type { Candle } from '../bot/ta/indicators';
-import { TANET_FEATURES, TANET_H1_BARS, TANET_SCHEMA, taNetFeatureMap, windowOk, type TaNetHead, type TaNetHeadName, type TaNetHeadParams, type TaNetParams, type TaNetStateCache } from '../bot/ta/taNet';
-import { gbdtLogit } from '../bot/model/trees';
+import { branchBackward, branchForward, branchLayout, branchLoss, initBranchParams, type BranchDims, type BranchGates, type BranchInput } from '../bot/ta/branchNet';
+import {
+  buildBranchInput, closedIndex, sigma24, TANET_D1_BARS, TANET_DAY_FEATURES, TANET_FEATURES, TANET_H1_BARS, TANET_MACRO_DAYS, TANET_MICRO_F, TANET_MICRO_STEPS, TANET_SCHEMA,
+  TANET_STRATEGY, TANET_TREND_FEATURES, TANET_TREND_STEPS, taNetDayVector, taNetFeatureMap, taNetMicro, taNetPosition, windowOk,
+  type TaNetHeadName, type TaNetHeadValidation, type TaNetNorm, type TaNetParams, type TaNetStateCache,
+} from '../bot/ta/taNet';
+import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type Interaction } from './fitness';
+import { runPbt, walkForwardRounds, type Hyper, type MutationSpec, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
 import { loadSeries, storedAssets } from './history/candles';
-import { trainGbdt } from './gbdt';
-import { trainMinibatch, type Matrix } from './mlpMinibatch';
 import { rng } from './stats';
 
 const H = 3_600_000;
 const DAY = 86_400_000;
-
-export interface TaNetRows {
-  assets: string[];
-  X: Matrix;
-  ts: Float64Array;
-  asset: Uint16Array;
-  y: Record<TaNetHeadName, Float32Array>;
-  sources: Record<string, string[]>;
-}
+const MONTH = 30.44 * DAY;
 
 const hashBars = (h: crypto.Hash, cs: Candle[]) => { for (const c of cs) h.update(`${c.ts},${c.o},${c.h},${c.l},${c.c},${c.v};`); };
 
@@ -93,9 +97,9 @@ export function assetRows(asset: string, h1: Candle[], d1: Candle[], cacheDir: s
 }
 
 /** Targets for the bar at `ts` from the hourly series. */
-function targets(h1: Candle[], idx: Map<number, number>, ts: number): [number, number, number] {
+function targets(h1: Candle[], idx: Map<number, number>, ts: number): [number, number, number, number] {
   const i = idx.get(ts);
-  if (i === undefined) return [NaN, NaN, NaN];
+  if (i === undefined) return [NaN, NaN, NaN, NaN];
   const c0 = h1[i].c;
   const at = (k: number) => { const j = idx.get(ts + k * H); return j === undefined ? undefined : h1[j].c; };
   const c1 = at(1), c4 = at(4);
@@ -109,85 +113,191 @@ function targets(h1: Candle[], idx: Map<number, number>, ts: number): [number, n
   for (let k = 0; k < 24; k++) { const a = idx.get(ts - k * H), b = idx.get(ts - (k + 1) * H); if (a === undefined || b === undefined) { past.length = 0; break; } past.push(Math.log(h1[a].c / h1[b].c)); }
   if (next.length === 4 && past.length === 24) {
     const rms = (xs: number[]) => Math.sqrt(xs.reduce((s, x) => s + x * x, 0) / xs.length);
-    const a = Math.max(1e-6, rms(next)), b = Math.max(1e-6, rms(past));
-    yv = Math.max(-3, Math.min(3, Math.log(a / b)));
+    yv = Math.max(-3, Math.min(3, Math.log(Math.max(1e-6, rms(next)) / Math.max(1e-6, rms(past)))));
   }
-  return [y1, y4, yv];
+  return [y1, y4, yv, c1 === undefined ? NaN : Math.log(c1 / c0)];
 }
 
-export function buildRows(histDir: string, assets: string[], cacheDir: string | undefined, log: (m: string) => void): TaNetRows {
-  const parts: Array<{ ts: number[]; X: Float32Array; y: number[][]; a: number }> = [];
+export interface AssetData {
+  asset: string;
+  m15?: Candle[];
+  rowTs: number[];
+  /** Hourly TA rows (rows x TANET_FEATURES). */
+  X: Float32Array;
+  /** Daily step vectors per daily bar open time. */
+  dayVec: Map<number, number[]>;
+  d1: Candle[];
+}
+
+/** One training example: an asset's hourly row with full branch inputs and its targets. */
+export interface TaNetData {
+  assets: AssetData[];
+  /** Sorted by time. */
+  sa: Uint16Array; sr: Int32Array; ts: Float64Array;
+  y1: Float32Array; y4: Float32Array; yv: Float32Array; ret1: Float32Array; sig: Float32Array;
+  sources: Record<string, string[]>;
+  /** Bars with 15-minute input available (share). */
+  microShare: number;
+}
+
+export function buildData(histDir: string, assets: string[], cacheDir: string | undefined, log: (m: string) => void): TaNetData {
+  const out: AssetData[] = [];
   const sources: Record<string, string[]> = {};
-  const used: string[] = [];
+  const S: Array<[number, number, number, number, number, number, number, number]> = [];
+  let micro = 0;
   for (const asset of assets) {
-    const s1 = loadSeries(histDir, asset, '1h'), s24 = loadSeries(histDir, asset, '1d');
+    const s1 = loadSeries(histDir, asset, '1h'), s24 = loadSeries(histDir, asset, '1d'), s15 = loadSeries(histDir, asset, '15m');
     const h1 = s1.candles, d1 = s24.candles;
-    if (h1.length < TANET_H1_BARS + 50) { log(`${asset}: only ${h1.length} hourly bars, skipped`); continue; }
-    sources[asset] = [...new Set([...s1.segments, ...s24.segments].map((s) => s.source))];
+    if (h1.length < TANET_H1_BARS + 200 || d1.length < TANET_D1_BARS + TANET_MACRO_DAYS) { log(`${asset}: only ${h1.length} hourly / ${d1.length} daily bars, skipped`); continue; }
+    sources[asset] = [...new Set([...s1.segments, ...s24.segments, ...s15.segments].map((s) => s.source))];
     const { ts, X } = assetRows(asset, h1, d1, cacheDir, log);
+    const dayVec = new Map<number, number[]>();
+    for (let j = TANET_D1_BARS - 1; j < d1.length; j++) { const v = taNetDayVector(d1, j); if (v) dayVec.set(d1[j].ts, v); }
+    const a = out.length;
+    out.push({ asset, m15: s15.candles.length ? s15.candles : undefined, rowTs: ts, X, dayVec, d1 });
     const idx = new Map(h1.map((c, i) => [c.ts, i]));
-    parts.push({ ts, X, y: ts.map((t) => targets(h1, idx, t)), a: used.length });
-    used.push(asset);
-  }
-  const n = parts.reduce((s, p) => s + p.ts.length, 0), d = TANET_FEATURES.length;
-  const data = new Float32Array(n * d), tsA = new Float64Array(n), assetA = new Uint16Array(n);
-  const y = { up_1h: new Float32Array(n), up_4h: new Float32Array(n), vol_4h: new Float32Array(n) };
-  let o = 0;
-  for (const p of parts) {
-    data.set(p.X, o * d);
-    for (let i = 0; i < p.ts.length; i++) {
-      tsA[o + i] = p.ts[i]; assetA[o + i] = p.a;
-      y.up_1h[o + i] = p.y[i][0]; y.up_4h[o + i] = p.y[i][1]; y.vol_4h[o + i] = p.y[i][2];
+    for (let r = TANET_TREND_STEPS - 1; r < ts.length; r++) {
+      const t = ts[r];
+      if (ts[r - TANET_TREND_STEPS + 1] !== t - (TANET_TREND_STEPS - 1) * H) continue;
+      const dj = closedIndex(d1, DAY, t + H);
+      if (dj - TANET_MACRO_DAYS + 1 < 0 || !dayVec.has(d1[dj - TANET_MACRO_DAYS + 1].ts)) continue;
+      const [y1, y4, yv, r1] = targets(h1, idx, t);
+      const hi = idx.get(t)!;
+      S.push([t, a, r, y1, y4, yv, r1, sigma24(h1, hi)]);
+      if (s15.candles.length && Number.isFinite(taNetMicro(s15.candles, t + H)[0])) micro++;
     }
-    o += p.ts.length;
   }
-  return { assets: used, X: { data, rows: n, cols: d }, ts: tsA, asset: assetA, y, sources };
+  S.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  const n = S.length;
+  const f32 = (k: number) => Float32Array.from(S, (x) => x[k]);
+  return {
+    assets: out, sa: Uint16Array.from(S, (x) => x[1]), sr: Int32Array.from(S, (x) => x[2]), ts: Float64Array.from(S, (x) => x[0]),
+    y1: f32(3), y4: f32(4), yv: f32(5), ret1: f32(6), sig: f32(7), sources, microShare: n ? micro / n : 0,
+  };
 }
 
-// ---- Fitting ------------------------------------------------------------------------------------
+const TREND_IDX = TANET_TREND_FEATURES.map((k) => TANET_FEATURES.indexOf(k));
 
-export type CandidateKind = 'logistic' | 'mlp16' | 'mlp32' | 'gbdt';
-
-const sig = (z: number) => 1 / (1 + Math.exp(-z));
-const ll = (p: number, y: number) => { const q = Math.min(1 - 1e-9, Math.max(1e-9, p)); return y ? -Math.log(q) : -Math.log(1 - q); };
-const mean = (xs: ArrayLike<number>) => { let s = 0; for (let i = 0; i < xs.length; i++) s += xs[i]; return xs.length ? s / xs.length : NaN; };
-
-/** Row views (no copy) for the tree trainer. */
-const rowViews = (X: Matrix, idx: ArrayLike<number>) => Array.from(idx, (i) => X.data.subarray(i * X.cols, (i + 1) * X.cols)) as unknown as number[][];
-
-/** Fit one candidate on `idx` (early stopping on its last 10% by time). */
-export function fitCandidate(kind: CandidateKind, rows: TaNetRows, yAll: Float32Array, idx: number[], loss: 'logistic' | 'squared', seed = 7): TaNetHead {
-  const sorted = [...idx].sort((a, b) => rows.ts[a] - rows.ts[b]);
-  const cut = Math.floor(sorted.length * 0.9);
-  const cutTs = rows.ts[sorted[cut]];
-  const tr = sorted.slice(0, cut).filter((i) => rows.ts[i] < cutTs - 5 * H), es = sorted.slice(cut);
-  if (kind === 'gbdt') {
-    const stride = tr.length > 120_000 ? 3 : tr.length > 60_000 ? 2 : 1;
-    const trS = tr.filter((_, k) => k % stride === 0);
-    const base = loss === 'logistic' ? (() => { const m = mean(trS.map((i) => yAll[i])); return Math.log(Math.max(1e-4, m) / Math.max(1e-4, 1 - m)); })() : mean(trS.map((i) => yAll[i]));
-    const fit = trainGbdt(rowViews(rows.X, trS), trS.map((i) => yAll[i]), trS.map(() => 1), trS.map(() => base),
-      rowViews(rows.X, es), es.map((i) => yAll[i]), es.map(() => 1), es.map(() => base),
-      { loss, nTrees: 300, learningRate: 0.05, maxDepth: 4, minLeafWeight: 100, lambda: 10, featureFraction: 0.5, baggingFraction: 0.7, patience: 30, seed });
-    fit.model.baseScore = base;
-    return { kind: 'gbdt', model: fit.model };
+/** Raw step vectors of sample i (trend rows, daily vectors, 15-minute steps). */
+export function rawInputs(D: TaNetData, i: number): { trend: Float32Array[]; macro: number[][]; micro: Float64Array } {
+  const A = D.assets[D.sa[i]], r = D.sr[i], t = D.ts[i];
+  const F = TANET_FEATURES.length;
+  const trend: Float32Array[] = [];
+  for (let s = TANET_TREND_STEPS - 1; s >= 0; s--) {
+    const row = A.X.subarray((r - s) * F, (r - s + 1) * F);
+    trend.push(Float32Array.from(TREND_IDX, (j) => row[j]));
   }
-  const hidden = kind === 'logistic' ? 0 : kind === 'mlp16' ? 16 : 32;
-  const f = trainMinibatch(rows.X, yAll, tr, es, { hidden, loss, l2: hidden ? 3e-4 : 1e-4, lr: 1e-3, batch: 512, maxEpochs: 25, patience: 3, seed });
-  return { kind: 'mlp', layers: f.layers, norm: f.norm };
+  const dj = closedIndex(A.d1, DAY, t + H);
+  const macro: number[][] = [];
+  for (let k = dj - TANET_MACRO_DAYS + 1; k <= dj; k++) macro.push(A.dayVec.get(A.d1[k].ts)!);
+  return { trend, macro, micro: taNetMicro(A.m15, t + H) };
 }
 
-export function headValue(h: TaNetHead, X: Matrix, i: number): number {
-  const x = X.data.subarray(i * X.cols, (i + 1) * X.cols);
-  if (h.kind === 'constant') return h.value;
-  if (h.kind === 'gbdt') return gbdtLogit(h.model, x as unknown as number[]);
-  // Same arithmetic as taNet.evalHead (Float32 storage, NaN -> 0 after normalisation).
-  let v = Array.from(x, (val, j) => (Number.isFinite(val) ? (val - h.norm.mean[j]) / h.norm.std[j] : 0));
-  for (const l of h.layers) {
-    const o: number[] = new Array(l.bias.length);
-    for (let k = 0; k < l.bias.length; k++) { let s = l.bias[k]; const w = l.weights[k]; for (let j = 0; j < v.length; j++) s += w[j] * v[j]; o[k] = l.activation === 'tanh' ? Math.tanh(s) : s; }
-    v = o;
+export function fitNorms(D: TaNetData, idx: ArrayLike<number>, maxSamples = 20_000): TaNetParams['norm'] {
+  const pick = Array.from(idx).filter((_, k, all) => k % Math.max(1, Math.floor(all.length / maxSamples)) === 0);
+  const acc = (dim: number) => ({ s: new Float64Array(dim), s2: new Float64Array(dim), n: new Float64Array(dim) });
+  const T = acc(TANET_TREND_FEATURES.length), M = acc(TANET_DAY_FEATURES.length), U = acc(TANET_MICRO_F);
+  const add = (a: ReturnType<typeof acc>, j: number, v: number) => { if (Number.isFinite(v)) { a.s[j] += v; a.s2[j] += v * v; a.n[j]++; } };
+  for (const i of pick) {
+    const x = rawInputs(D, i);
+    for (const row of x.trend) row.forEach((v, j) => add(T, j, v));
+    for (const row of x.macro) row.forEach((v, j) => add(M, j, v));
+    for (let k = 0; k < x.micro.length; k++) add(U, k % TANET_MICRO_F, x.micro[k]);
   }
-  return v[0];
+  const fin = (a: ReturnType<typeof acc>): TaNetNorm => {
+    const mean = Array.from(a.s, (v, j) => (a.n[j] ? v / a.n[j] : 0));
+    return { mean, std: Array.from(a.s2, (v, j) => (a.n[j] > 1 ? Math.sqrt(Math.max(0, v / a.n[j] - mean[j] ** 2)) : 0) || 1) };
+  };
+  return { trend: fin(T), macro: fin(M), micro: fin(U) };
+}
+
+export function taNetDims(): BranchDims {
+  return { mT: TANET_MICRO_STEPS, mF: TANET_MICRO_F, kW: 3, mC: 8, tT: TANET_TREND_STEPS, tF: TANET_TREND_FEATURES.length, tH: 12, dT: TANET_MACRO_DAYS, dF: TANET_DAY_FEATURES.length, dE: 8, hM: 16, nOut: 3 };
+}
+
+// ---- Population members -------------------------------------------------------------------------
+
+export interface Member { w: Float64Array; m: Float64Array; v: Float64Array; step: number }
+
+export const BASE_HYPER: Hyper = { lr: 1e-3, l2: 1e-4, gMicro: 1, gTrend: 1, gMacro: 1, volWeight: 0.5 };
+export const HYPER_SPEC: MutationSpec = {
+  lr: { min: 1e-4, max: 1e-2 }, l2: { min: 1e-7, max: 1e-3 },
+  gMicro: { min: 0.25, max: 2 }, gTrend: { min: 0.25, max: 2 }, gMacro: { min: 0.25, max: 2 }, volWeight: { min: 0.1, max: 2 },
+};
+const gatesOf = (h: Hyper): BranchGates => ({ micro: h.gMicro, trend: h.gTrend, macro: h.gMacro });
+
+/** One epoch of mini-batch Adam over `idx` (shuffled with `seed`). */
+export function trainEpoch(D: TaNetData, dims: BranchDims, norm: TaNetParams['norm'], st: Member, h: Hyper, idx: number[], seed: number, batch = 64): number {
+  const L = branchLayout(dims).layout;
+  const g = gatesOf(h);
+  const r = rng(seed);
+  const order = idx.slice();
+  for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+  const grad = new Float64Array(st.w.length);
+  let total = 0;
+  for (let s = 0; s < order.length; s += batch) {
+    grad.fill(0);
+    const e = Math.min(order.length, s + batch);
+    for (let q = s; q < e; q++) {
+      const i = order[q];
+      const raw = rawInputs(D, i);
+      const x = buildBranchInput(dims, norm, raw.trend, raw.macro, raw.micro);
+      const f = branchForward(dims, st.w, g, x, L);
+      const { loss, dOut } = branchLoss(f.out, [D.y1[i], D.y4[i], D.yv[i]], h.volWeight);
+      total += loss;
+      branchBackward(dims, st.w, g, x, f.cache, dOut, grad, L);
+    }
+    const nb = e - s;
+    st.step++;
+    const c1 = 1 - 0.9 ** st.step, c2 = 1 - 0.999 ** st.step;
+    for (let k = 0; k < st.w.length; k++) {
+      const gr = grad[k] / nb + h.l2 * st.w[k];
+      st.m[k] = 0.9 * st.m[k] + 0.1 * gr;
+      st.v[k] = 0.999 * st.v[k] + 0.001 * gr * gr;
+      st.w[k] -= (h.lr * (st.m[k] / c1)) / (Math.sqrt(st.v[k] / c2) + 1e-8);
+    }
+  }
+  return total / Math.max(1, order.length);
+}
+
+export interface Forecasts { idx: number[]; up1: Float64Array; up4: Float64Array; vol: Float64Array }
+
+export function forecast(D: TaNetData, dims: BranchDims, norm: TaNetParams['norm'], w: Float64Array, h: Hyper, idx: number[]): Forecasts {
+  const L = branchLayout(dims).layout, g = gatesOf(h);
+  const up1 = new Float64Array(idx.length), up4 = new Float64Array(idx.length), vol = new Float64Array(idx.length);
+  idx.forEach((i, k) => {
+    const raw = rawInputs(D, i);
+    const o = branchForward(dims, w, g, buildBranchInput(dims, norm, raw.trend, raw.macro, raw.micro), L).out;
+    up1[k] = 1 / (1 + Math.exp(-o[0])); up4[k] = 1 / (1 + Math.exp(-o[1])); vol[k] = Math.max(-3, Math.min(3, o[2]));
+  });
+  return { idx, up1, up4, vol };
+}
+
+/** Trade the position rule on forecasts (equal capital per asset); one interaction per asset-hour with
+ *  a position or turnover. */
+export function strategyInteractions(D: TaNetData, f: Forecasts, strategy = TANET_STRATEGY): Interaction[] {
+  const pos = new Map<number, number>();
+  const out: Interaction[] = [];
+  const nA = Math.max(1, D.assets.length);
+  f.idx.forEach((i, k) => {
+    const a = D.sa[i];
+    const p = taNetPosition(f.up1[k], f.vol[k], D.sig[i], strategy);
+    const prev = pos.get(a) ?? 0;
+    pos.set(a, p);
+    const r1 = D.ret1[i];
+    if (!Number.isFinite(r1) || (p === 0 && prev === 0)) return;
+    const cost = (strategy.costPerTurnover * Math.abs(p - prev)) / nA;
+    out.push({ ts: D.ts[i], ret: (p * r1) / nA - cost, cost, group: D.assets[a].asset });
+  });
+  return out;
+}
+
+const b64 = (a: Float64Array) => Buffer.from(a.buffer, a.byteOffset, a.byteLength).toString('base64');
+const unb64 = (s: string) => { const b = Buffer.from(s, 'base64'); return new Float64Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)); };
+
+interface SavedState {
+  schema: string; dims: BranchDims; assets: string[]; norm: TaNetParams['norm']; trials: number; lastEvalTo: number; nextIndex: number;
+  log: PbtRoundLog[]; members: Array<{ id: number; hyper: Hyper; w: string; m: string; v: string; step: number; lineage: number[]; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }> }>;
 }
 
 /** Day-block bootstrap of the mean of per-row differences (rows grouped by UTC day). */
@@ -209,95 +319,165 @@ export function dayBootstrap(diff: number[], ts: number[], iters = 1000, seed = 
 }
 
 export interface TaNetTrainOpts {
-  valFrom?: number;
-  testFrom?: number;
-  refitMonths?: number;
-  candidates?: CandidateKind[];
-  volCandidates?: CandidateKind[];
-  heads?: TaNetHeadName[];
+  trainMonths?: number;
+  evalMonths?: number;
+  stepMonths?: number;
+  holdoutMonths?: number;
+  /** Use every k-th training sample per epoch (adjacent hours are highly correlated). */
+  stride?: number;
+  epochsPerRound?: number;
+  minPerRegime?: number;
+  dsrThreshold?: number;
   seed?: number;
+  /** Persist / continue the population here. */
+  statePath?: string;
+  /** Restart the tournament even if a saved population exists. */
+  fresh?: boolean;
+  /** Stop after this many rounds in this call (testing / time budget). */
+  maxRounds?: number;
+  /** Override base hyperparameters (member 0; the others start within +/-10% of it). */
+  baseHyper?: Partial<Hyper>;
   log?: (m: string) => void;
 }
 
-export interface TaNetReport { params: TaNetParams; split: { trainRows: number; valRows: number; testRows: number; valFrom: string; testFrom: string } }
+export interface TaNetReport { params: TaNetParams; rounds: number; newRounds: number; /** The tournament has reached the holdout (no rounds left to run). */ complete: boolean; remaining: number }
 
-export function trainTaNet(rows: TaNetRows, o: TaNetTrainOpts = {}): TaNetReport {
+export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<TaNetReport> {
   const log = o.log ?? (() => {});
-  const seed = o.seed ?? 7;
-  const all = Array.from({ length: rows.X.rows }, (_, i) => i);
-  if (!all.length) throw new Error('need at least some history: no rows (import or download hourly candles first)');
-  let tMin = Infinity, tMax = -Infinity;
-  for (const i of all) { tMin = Math.min(tMin, rows.ts[i]); tMax = Math.max(tMax, rows.ts[i]); }
-  const dayFloor = (t: number) => Math.floor(t / DAY) * DAY;
-  const testFrom = o.testFrom ?? dayFloor(tMin + 0.8 * (tMax - tMin));
-  const valFrom = o.valFrom ?? dayFloor(tMin + 0.65 * (tMax - tMin));
+  const n = D.ts.length;
+  if (n < 2000) throw new Error(`need at least 2000 hourly samples with full inputs (have ${n}): add more history`);
+  const dims = taNetDims();
+  const trainMs = (o.trainMonths ?? 12) * MONTH, evalMs = (o.evalMonths ?? 1) * MONTH, stepMs = (o.stepMonths ?? 1) * MONTH;
+  const t0 = D.ts[0], tEnd = D.ts[n - 1] + H;
+  const holdoutFrom = Math.floor((tEnd - (o.holdoutMonths ?? 3) * MONTH) / DAY) * DAY;
+  const stride = Math.max(1, o.stride ?? 2), epochs = Math.max(1, o.epochsPerRound ?? 1), seed = o.seed ?? 7;
+  const minPerRegime = o.minPerRegime ?? 100, dsrThreshold = o.dsrThreshold ?? 0.95;
   const emb = 5 * H;
-  const refitMs = (o.refitMonths ?? 6) * 30.44 * DAY;
-  const heads = o.heads ?? ['up_1h', 'up_4h', 'vol_4h'];
-  const out: Partial<Record<TaNetHeadName, TaNetHeadParams>> = {};
-  let split = { trainRows: 0, valRows: 0, testRows: 0 };
-  for (const name of heads) {
-    const y = rows.y[name];
-    const loss: 'logistic' | 'squared' = name === 'vol_4h' ? 'squared' : 'logistic';
-    const ok = all.filter((i) => Number.isFinite(y[i]));
-    const train = ok.filter((i) => rows.ts[i] < valFrom - emb);
-    const val = ok.filter((i) => rows.ts[i] >= valFrom && rows.ts[i] < testFrom - emb);
-    const test = ok.filter((i) => rows.ts[i] >= testFrom);
-    split = { trainRows: train.length, valRows: val.length, testRows: test.length };
-    if (train.length < 2000 || val.length < 300 || test.length < 300) throw new Error(`need at least 2000 train / 300 validation / 300 test rows for ${name} (have ${train.length} / ${val.length} / ${test.length}): add more history`);
-    const baseOf = (idx: number[]) => mean(idx.map((i) => y[i]));
-    const lossOf = (pred: number, yy: number) => (loss === 'logistic' ? ll(sig(pred), yy) : (pred - yy) ** 2);
-    const baseLoss = (b: number, yy: number) => (loss === 'logistic' ? ll(b, yy) : (b - yy) ** 2);
-    // 3. candidates on validation
-    const kinds = name === 'vol_4h' ? (o.volCandidates ?? ['logistic', 'mlp16', 'gbdt']) : (o.candidates ?? ['logistic', 'mlp16', 'gbdt']);
-    const cands: Array<{ kind: CandidateKind; valLoss: number }> = [];
-    const b0 = baseOf(train);
-    cands.push({ kind: 'base' as CandidateKind, valLoss: mean(val.map((i) => baseLoss(b0, y[i]))) });
-    for (const k of kinds) {
-      const t0 = Date.now();
-      const h = fitCandidate(k, rows, y, train, loss, seed);
-      const vl = mean(val.map((i) => lossOf(headValue(h, rows.X, i), y[i])));
-      cands.push({ kind: k, valLoss: vl });
-      log(`${name}: ${k} validation ${loss === 'logistic' ? 'log loss' : 'MSE'} ${vl.toFixed(5)} (base ${cands[0].valLoss.toFixed(5)}) in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
-    }
-    const best = cands.filter((c) => c.kind !== ('base' as CandidateKind)).sort((a, b) => a.valLoss - b.valLoss)[0];
-    // 4. blind walk-forward through the test period
-    const preds: number[] = [], bases: number[] = [], ys: number[] = [], tss: number[] = [];
-    for (let s = testFrom; s <= tMax; s += refitMs) {
-      const seg = test.filter((i) => rows.ts[i] >= s && rows.ts[i] < s + refitMs);
-      if (!seg.length) continue;
-      const fitIdx = ok.filter((i) => rows.ts[i] < s - emb);
-      const h = fitCandidate(best.kind, rows, y, fitIdx, loss, seed);
-      const b = baseOf(fitIdx);
-      for (const i of seg) { preds.push(headValue(h, rows.X, i)); bases.push(b); ys.push(y[i]); tss.push(rows.ts[i]); }
-      log(`${name}: walk-forward segment from ${new Date(s).toISOString().slice(0, 10)}: ${seg.length} rows, model fitted on ${fitIdx.length}`);
-    }
-    const mLoss = preds.map((p, k) => lossOf(p, ys[k])), bLoss = bases.map((b, k) => baseLoss(b, ys[k]));
-    const imp = dayBootstrap(bLoss.map((b, k) => b - mLoss[k]), tss);
-    const v: TaNetHeadParams['validation'] = {
-      metric: loss === 'logistic' ? 'logloss' : 'mse', rows: preds.length,
-      from: new Date(testFrom).toISOString().slice(0, 10), to: new Date(tMax).toISOString().slice(0, 10),
-      base: mean(bLoss), model: mean(mLoss), improvement: imp, validated: Number.isFinite(imp.lo) && imp.lo > 0,
-    };
-    if (loss === 'logistic') {
-      const ps = preds.map(sig);
-      v.skill = 1 - mean(ps.map((p, k) => (p - ys[k]) ** 2)) / 0.25;
-      v.hitRate = mean(ps.map((p, k) => ((p > 0.5 ? 1 : 0) === ys[k] ? 1 : 0)));
-    }
-    log(`${name}: blind test ${v.metric} ${v.model.toFixed(5)} vs base ${v.base.toFixed(5)}; improvement ${imp.mean.toExponential(2)} [${imp.lo.toExponential(2)}, ${imp.hi.toExponential(2)}]${v.skill !== undefined ? `; skill ${v.skill.toFixed(4)}, hit ${(v.hitRate! * 100).toFixed(2)}%` : ''}; validated=${v.validated}`);
-    // 5. deployed model: refit on everything
-    const head = fitCandidate(best.kind, rows, y, ok, loss, seed);
-    out[name] = { head, validation: v, candidates: cands.map((c) => ({ kind: String(c.kind), valLoss: c.valLoss })) };
+  const allRounds = walkForwardRounds(t0, holdoutFrom, trainMs, evalMs, stepMs);
+  if (!allRounds.length) throw new Error(`need at least ${(o.trainMonths ?? 12) + (o.evalMonths ?? 1) + (o.holdoutMonths ?? 3)} months of history for one tournament round plus the holdout`);
+  const between = (a: number, b: number, k = 1) => { const out: number[] = []; let c = 0; for (let i = 0; i < n; i++) if (D.ts[i] >= a && D.ts[i] < b) { if (c++ % k === 0) out.push(i); } return out; };
+
+  // Saved population (continue) or a fresh one.
+  let saved: SavedState | undefined;
+  if (o.statePath && !o.fresh && fs.existsSync(o.statePath)) {
+    try {
+      saved = JSON.parse(fs.readFileSync(o.statePath, 'utf8')) as SavedState;
+      if (saved.schema !== TANET_SCHEMA || JSON.stringify(saved.dims) !== JSON.stringify(dims) || saved.assets.join() !== D.assets.map((a) => a.asset).join()) { log('saved population is for other inputs; starting a fresh tournament'); saved = undefined; }
+    } catch { saved = undefined; }
   }
+  const norm = saved?.norm ?? fitNorms(D, between(allRounds[0].trainFrom, allRounds[0].trainTo));
+  let rounds = saved ? allRounds.filter((r) => r.evalFrom >= saved!.lastEvalTo - 1) : allRounds;
+  rounds = rounds.map((r, k) => ({ ...r, index: (saved?.nextIndex ?? 0) + k }));
+  const pending = rounds.length;
+  if (o.maxRounds !== undefined && o.maxRounds > 0) rounds = rounds.slice(0, o.maxRounds);
+  const remaining = pending - rounds.length;
+  const resume = saved ? {
+    trials: saved.trials, log: saved.log,
+    members: saved.members.map((m): PbtMember<Member> => ({ id: m.id, hyper: m.hyper, state: { w: unb64(m.w), m: unb64(m.m), v: unb64(m.v), step: m.step }, lineage: m.lineage, scores: m.scores, record: m.record.map(([ts, ret, cost, group]) => ({ ts, ret, cost, group })) })),
+  } : undefined;
+  log(`${n} samples over ${D.assets.map((a) => a.asset).join(', ')}; 15m input on ${(D.microShare * 100).toFixed(0)}% of them; ${saved ? `continuing a saved population (${saved.log.length} rounds so far)` : 'fresh population of 3'}; ${rounds.length} round(s) to run; holdout from ${new Date(holdoutFrom).toISOString().slice(0, 10)}`);
+
+  const save = (members: PbtMember<Member>[], trials: number, plog: PbtRoundLog[], lastEvalTo: number, nextIndex: number) => {
+    if (!o.statePath) return;
+    const st: SavedState = {
+      schema: TANET_SCHEMA, dims, assets: D.assets.map((a) => a.asset), norm, trials, lastEvalTo, nextIndex, log: plog,
+      members: members.map((m) => ({ id: m.id, hyper: m.hyper, w: b64(m.state.w), m: b64(m.state.m), v: b64(m.state.v), step: m.state.step, lineage: m.lineage, scores: m.scores, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]) })),
+    };
+    fs.mkdirSync(path.dirname(o.statePath), { recursive: true });
+    const tmp = `${o.statePath}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(st));
+    fs.renameSync(tmp, o.statePath);
+  };
+
+  const size = branchLayout(dims).size;
+  const res = await runPbt<Member>({
+    base: { ...BASE_HYPER, ...o.baseHyper } as Hyper, spec: HYPER_SPEC, rounds, seed, resume, exploreAfterLast: true, log,
+    hooks: {
+      // Three identical networks: same seed, same weights; only the hyperparameters differ.
+      init: () => ({ w: initBranchParams(dims, seed), m: new Float64Array(size), v: new Float64Array(size), step: 0 }),
+      clone: (s) => ({ w: s.w.slice(), m: s.m.slice(), v: s.v.slice(), step: s.step }),
+      train: (s, h, r: PbtRound) => {
+        const idx = between(r.trainFrom, r.trainTo - emb, stride);
+        for (let e = 0; e < epochs; e++) trainEpoch(D, dims, norm, s, h, idx, seed + r.index * 131 + e);
+        return s;
+      },
+      evaluate: (s, h, r: PbtRound) => {
+        const idx = between(r.evalFrom, r.evalTo);
+        const xs = strategyInteractions(D, forecast(D, dims, norm, s.w, h, idx));
+        return { report: fitnessOf(xs, { from: r.evalFrom, to: r.evalTo, clusterMs: H }), interactions: independentInteractions(xs, H) };
+      },
+    },
+    onRound: ({ members, trials, log: plog, round }) => save(members, trials, plog, round.evalTo, round.index + 1),
+  });
+  if (!rounds.length && resume) Object.assign(res, { members: resume.members, trials: resume.trials, log: resume.log, elite: resume.members.find((m) => m.id === resume.log[resume.log.length - 1]?.ranking[0]?.member) ?? resume.members[0] });
+  const elite = res.elite;
+
+  // Bring the elite up to the holdout (one more pass on the block just before it), never past it.
+  const finalW = elite.state.w.slice();
+  const finalSt: Member = { w: finalW, m: elite.state.m.slice(), v: elite.state.v.slice(), step: elite.state.step };
+  trainEpoch(D, dims, norm, finalSt, elite.hyper, between(holdoutFrom - trainMs, holdoutFrom - emb, stride), seed + 99_991);
+
+  // Holdout: strategy fitness and per-head grading against the naive forecast.
+  const ho = between(holdoutFrom, tEnd);
+  const fc = forecast(D, dims, norm, finalW, elite.hyper, ho);
+  const hoX = strategyInteractions(D, fc);
+  const hoFit = fitnessOf(hoX, { from: holdoutFrom, to: tEnd, clusterMs: H });
+  const pre = between(holdoutFrom - trainMs, holdoutFrom - emb);
+  const meanOf = (a: Float32Array, idx: number[]) => { let s = 0, c = 0; for (const i of idx) if (Number.isFinite(a[i])) { s += a[i]; c++; } return c ? s / c : NaN; };
+  const ll = (p: number, y: number) => { const q = Math.min(1 - 1e-9, Math.max(1e-9, p)); return y ? -Math.log(q) : -Math.log(1 - q); };
   const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
+  const grade = (name: TaNetHeadName): TaNetHeadValidation => {
+    const y = name === 'up_1h' ? D.y1 : name === 'up_4h' ? D.y4 : D.yv;
+    const pred = name === 'up_1h' ? fc.up1 : name === 'up_4h' ? fc.up4 : fc.vol;
+    const base = meanOf(y, pre);
+    const mL: number[] = [], bL: number[] = [], ts: number[] = [], ps: number[] = [], ys: number[] = [];
+    ho.forEach((i, k) => {
+      if (!Number.isFinite(y[i])) return;
+      if (name === 'vol_4h') { mL.push((pred[k] - y[i]) ** 2); bL.push((base - y[i]) ** 2); } else { mL.push(ll(pred[k], y[i])); bL.push(ll(base, y[i])); ps.push(pred[k]); ys.push(y[i]); }
+      ts.push(D.ts[i]);
+    });
+    const imp = dayBootstrap(bL.map((b, k) => b - mL[k]), ts);
+    const v: TaNetHeadValidation = {
+      metric: name === 'vol_4h' ? 'mse' : 'logloss', rows: mL.length, from: iso(holdoutFrom), to: iso(tEnd),
+      base: bL.reduce((a, b) => a + b, 0) / Math.max(1, bL.length), model: mL.reduce((a, b) => a + b, 0) / Math.max(1, mL.length),
+      improvement: imp, holdoutPassed: Number.isFinite(imp.lo) && imp.lo > 0, validated: false,
+    };
+    if (ps.length) { v.skill = 1 - ps.reduce((a, p, k) => a + (p - ys[k]) ** 2, 0) / ps.length / 0.25; v.hitRate = ps.filter((p, k) => (p > 0.5 ? 1 : 0) === ys[k]).length / ps.length; }
+    return v;
+  };
+  const heads = { up_1h: { validation: grade('up_1h') }, up_4h: { validation: grade('up_4h') }, vol_4h: { validation: grade('vol_4h') } };
+
+  // Network-level hurdles on the elite lineage's out-of-sample record.
+  const dsr = dsrOf(elite.record, H, res.trials);
+  const regimes = regimeReport(elite.record, H, minPerRegime);
+  const covered = regimes.filter((g) => {
+    const def = elite.record.filter((x) => regimesIn(x.ts, x.ts + 1).includes(g.regime));
+    return def.length && (Math.max(...def.map((x) => x.ts)) - Math.min(...def.map((x) => x.ts))) >= 60 * DAY;
+  });
+  const netOk = Number.isFinite(dsr.probability) && dsr.probability >= dsrThreshold && covered.every((g) => g.enough);
+  heads.vol_4h.validation.validated = heads.vol_4h.validation.holdoutPassed;
+  heads.up_1h.validation.validated = heads.up_1h.validation.holdoutPassed && netOk;
+  heads.up_4h.validation.validated = heads.up_4h.validation.holdoutPassed && netOk;
+  log(`elite #${elite.id} (lineage ${elite.lineage.join('>')}) hyper ${JSON.stringify(Object.fromEntries(Object.entries(elite.hyper).map(([k, v]) => [k, +v.toPrecision(3)])))}`);
+  log(`out-of-sample record: ${dsr.n} independent interactions, Sharpe ${dsr.sharpe.toFixed(3)} vs ${dsr.sr0.toFixed(3)} expected from ${res.trials} trials; DSR probability ${dsr.probability.toFixed(3)} (need ${dsrThreshold}); regimes ${regimes.map((g) => `${g.regime}:${g.independent}`).join(' ')}`);
+  log(`holdout ${iso(holdoutFrom)}..${iso(tEnd)}: fitness ${hoFit.fitness.toFixed(2)}, Sortino ${hoFit.sortino.toFixed(2)}, maxDD ${(hoFit.maxDrawdown * 100).toFixed(1)}%, net ${(hoFit.netReturn * 100).toFixed(2)}%`);
+  for (const [k, h] of Object.entries(heads)) log(`${k}: holdout ${h.validation.metric} ${h.validation.model.toFixed(5)} vs ${h.validation.base.toFixed(5)}, CI [${h.validation.improvement.lo.toExponential(2)}, ${h.validation.improvement.hi.toExponential(2)}]${h.validation.hitRate !== undefined ? `, hit ${(h.validation.hitRate * 100).toFixed(2)}%` : ''}; speaks live: ${h.validation.validated}`);
+
   return {
+    rounds: res.log.length, newRounds: rounds.length, complete: remaining === 0, remaining,
     params: {
-      version: `tanet-${new Date().toISOString().slice(0, 10)}-${rows.assets.length}a-${rows.X.rows}r`,
-      schema: TANET_SCHEMA, features: [...TANET_FEATURES], heads: out,
-      data: { assets: rows.assets, from: iso(tMin), to: iso(tMax), rows: rows.X.rows, sources: rows.sources },
+      version: `tanet2-${new Date().toISOString().slice(0, 10)}-${D.assets.length}a-r${res.log.length}`,
+      schema: TANET_SCHEMA, dims, gates: gatesOf(elite.hyper), weights: Array.from(finalW), norm,
+      trendFeatures: [...TANET_TREND_FEATURES], dayFeatures: [...TANET_DAY_FEATURES], strategy: { ...TANET_STRATEGY }, heads,
+      network: {
+        dsr: { sharpe: dsr.sharpe, sr0: dsr.sr0, probability: dsr.probability, n: dsr.n }, trials: res.trials, regimes,
+        holdout: { fitness: hoFit.fitness, sortino: hoFit.sortino, maxDrawdown: hoFit.maxDrawdown, costs: hoFit.costs, netReturn: hoFit.netReturn, independent: hoFit.independent, days: hoFit.days },
+        minIndependentPerRegime: minPerRegime, dsrThreshold, validated: netOk,
+      },
+      pbt: { rounds: res.log.length, trials: res.trials, elite: { member: elite.id, hyper: elite.hyper, lineage: elite.lineage }, recent: res.log.slice(-12) },
+      data: { assets: D.assets.map((a) => a.asset), from: iso(t0), to: iso(tEnd), rows: n, sources: D.sources, holdoutFrom: iso(holdoutFrom) },
       trainedAt: new Date().toISOString(),
     },
-    split: { ...split, valFrom: iso(valFrom), testFrom: iso(testFrom) },
   };
 }
 
@@ -307,16 +487,19 @@ export async function trainTaNetMain(argOf: (k: string, d: string) => string = c
   const spec = argOf('assets', 'all');
   const assets = spec === 'all' ? storedAssets(hist) : spec.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
   if (!assets.length) throw new Error(`need at least one asset with hourly history in ${hist} (npm run history:binance / history:import)`);
-  const rows = buildRows(hist, assets, argOf('cache', path.join(hist, '.tanet-cache')), log);
-  log(`${rows.X.rows} rows over ${rows.assets.join(', ')}`);
-  const day = (k: string) => { const v = argOf(k, ''); return v ? Date.parse(`${v}T00:00:00Z`) : undefined; };
-  const kinds = (k: string, d: string) => argOf(k, d).split(',').map((s) => s.trim()).filter(Boolean) as CandidateKind[];
-  const rep = trainTaNet(rows, { valFrom: day('val-from'), testFrom: day('test-from'), refitMonths: Number(argOf('refit-months', '6')), candidates: kinds('candidates', 'logistic,mlp16,gbdt'), volCandidates: kinds('vol-candidates', 'logistic,mlp16,gbdt'), log });
+  const D = buildData(hist, assets, argOf('cache', path.join(hist, '.tanet-cache')), log);
+  const num = (k: string, d: string) => Number(argOf(k, d));
+  const rep = await trainTaNet(D, {
+    trainMonths: num('train-months', '12'), evalMonths: num('eval-months', '1'), stepMonths: num('step-months', '1'), holdoutMonths: num('holdout-months', '3'),
+    stride: num('stride', '2'), epochsPerRound: num('epochs', '1'), minPerRegime: num('min-per-regime', '100'), dsrThreshold: num('dsr', '0.95'),
+    statePath: argOf('state', path.join(hist, '.tanet-population.json')), fresh: argOf('fresh', '') === 'true' || process.argv.includes('--fresh'),
+    maxRounds: num('max-rounds', '0') || undefined, log,
+  });
   const out = argOf('out', 'params/ta_net.json');
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(rep.params));
-  console.table(Object.entries(rep.params.heads).map(([k, h]) => ({ head: k, model: h!.head.kind, test: `${h!.validation.metric} ${h!.validation.model.toFixed(5)} vs ${h!.validation.base.toFixed(5)}`, skill: h!.validation.skill?.toFixed(4) ?? '', hit: h!.validation.hitRate !== undefined ? `${(h!.validation.hitRate * 100).toFixed(2)}%` : '', validated: h!.validation.validated })));
-  log(`split: train < ${rep.split.valFrom} <= validation < ${rep.split.testFrom} <= blind test; wrote ${out}`);
+  console.table(Object.entries(rep.params.heads).map(([k, h]) => ({ head: k, holdout: `${h.validation.metric} ${h.validation.model.toFixed(5)} vs ${h.validation.base.toFixed(5)}`, hit: h.validation.hitRate !== undefined ? `${(h.validation.hitRate * 100).toFixed(2)}%` : '', holdoutPassed: h.validation.holdoutPassed, speaks: h.validation.validated })));
+  log(`network: DSR probability ${rep.params.network.dsr.probability.toFixed(3)} over ${rep.params.network.trials} trials; validated=${rep.params.network.validated}; ${rep.complete ? 'tournament complete' : `${rep.remaining} round(s) still to run (continue with the same --state)`}; wrote ${out}`);
   return rep;
 }
 

@@ -331,11 +331,18 @@ A new network retrains only the model that reads it, including when you swap one
   - Coinbase backfill.
   - An importer for your own CSVs (Bittrex, CryptoDataDownload, Yahoo, anything with OHLC columns) that converts every timestamp to bar-open UTC and refuses files whose clock is a bar off.
   - Sources are spliced by priority, never mixed bar by bar.
-- **TA network:** a neural network, with logistic regression and boosted trees competing against it. It reads every indicator, rule and confluence of the TA library on 1h, 4h and 1d candles, and forecasts P(up) over 1h and 4h plus the next 4 hours' volatility.
-- **Training and validation:** trained on years of pooled hourly history with a blind walk-forward test. Only heads that beat the naive forecast out of sample speak live, and every live call is graded (`tanet_skill_*`).
+- **TA network:** a three-branch neural network (15m convolution, hourly GRU over the TA library, daily attention). It forecasts P(up) over 1h and 4h, plus the next 4 hours' volatility.
+- **Training and validation:** chosen by a tournament of three over years of pooled hourly history. It must pass an untouched holdout, a deflated-Sharpe and per-regime hurdle, and a live forward test. Every live call is graded (`tanet_skill_*`).
 - **Who uses it:** its forecasts are features for the MLP, the perps model and the vol forecast, each of which keeps them only if its own validation improves.
 
 `docs/TA_NETWORK.md` covers the commands, the training, and the first real results.
+
+## Evolutionary initialisation and portfolio Kelly
+
+- **Every network starts as three:** the TA network and the crypto, perps and tennis SNNs each begin as three identical networks with slightly different knobs. They fight for fitness walk-forward (Sortino − drawdown − costs). The elite survives, the worst copies it, and the middle and the copy mutate. The elite becomes the network.
+- **Hurdles:** independent-interaction counts per regime, the deflated Sharpe ratio counting every mutation as a trial, an untouched holdout, and a live forward test.
+- **Portfolio Kelly:** a numerical Kelly solver caps new crypto orders, treating contracts on the same index and close as one bet. It can only shrink an order, never enlarge it. Perp size shrinks when capital is locked in binaries.
+- `docs/EVOLUTION.md` maps every part of the protocol to the code.
 
 ## Cortex-like SNN (bot/snn)
 

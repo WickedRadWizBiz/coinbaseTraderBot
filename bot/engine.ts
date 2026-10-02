@@ -57,6 +57,8 @@ import { logit as logitP } from './util/num';
 import type { StepReply } from './snn/runtime';
 import { logger } from './util/log';
 import { VolForecaster, type VolModel } from './model/volModel';
+import { marginalKelly, timeNormalizedEdge, type BinaryBet } from './sizing/portfolioKelly';
+import { orderFee } from './fees';
 import { activeTaNet } from './ta/taNet';
 import { applyFillModel, fillInputs, isMakerEntry, type FillModel } from './tca/fillModel';
 import { FillLog } from './tca/fillLog';
@@ -397,6 +399,13 @@ export class Engine {
     };
   }
 
+  /** Share of equity locked in open binary positions until they settle (it cannot buffer perp margin). */
+  lockedFraction(): number {
+    const eq = this.equity();
+    if (!(eq && eq > 0)) return 0;
+    return Math.min(1, this.d.oms.positions.open().reduce((s, m) => s + PositionBook.maxLoss(m), 0) / eq);
+  }
+
   /** Cash + committed premium (before vault/pocket reservations): the drawdown reference. */
   equity(): number | undefined {
     if (this.balance === undefined) return undefined;
@@ -655,7 +664,7 @@ export class Engine {
       const f = this.d.md.perpFeed;
       const skew = this.d.cfg.clockSkewMaxMs > 0 ? this.d.clock?.haltReason(Date.now()) : undefined;
       const noEntry = skew ?? (f?.lastError ? `perps feed unavailable (${f.lastError})` : undefined);
-      return t.targets(c, { halt, noEntry });
+      return t.targets(c, { halt, noEntry, lockedFrac: this.lockedFraction() });
     };
   }
 
@@ -794,7 +803,7 @@ export class Engine {
     const dP = values.modelPA ?? pA;
     this.snnTennis.set(event, {
       input: { key, asset: 'TENNIS', price: pA, values }, ts: now,
-      query: { ticker: ms[0].ticker, column: key, kind: 'match', d: logitP(Math.min(0.99, Math.max(0.01, dP))), lifeFrac: 1 - (values.progress ?? 0), spot: 0, sigma: 0, tauSec: 0, lifeSec: 0, eventKey: ms[0].ticker, tag: true },
+      query: { ticker: ms[0].ticker, mid: pA, column: key, kind: 'match', d: logitP(Math.min(0.99, Math.max(0.01, dP))), lifeFrac: 1 - (values.progress ?? 0), spot: 0, sigma: 0, tauSec: 0, lifeSec: 0, eventKey: ms[0].ticker, tag: true },
     });
     return values;
   }
@@ -929,7 +938,8 @@ export class Engine {
     }
     return {
       version: p.version, trainedAt: p.trainedAt, data: p.data, requireValidated: rt.requireValidated, activeHeads: rt.net.active(rt.requireValidated),
-      heads: Object.fromEntries(Object.entries(p.heads).map(([k, h]) => [k, { kind: h!.head.kind, ...h!.validation, candidates: h!.candidates }])),
+      heads: Object.fromEntries(Object.entries(p.heads).map(([k, h]) => [k, h.validation])),
+      network: p.network, pbt: { rounds: p.pbt.rounds, trials: p.pbt.trials, elite: p.pbt.elite }, gates: p.gates, forward: rt.forwardStatus(now) ?? null,
       assets,
     };
   }
@@ -1190,10 +1200,48 @@ export class Engine {
     return snn && this.d.cfg.snn.mode === 'blend' && this.d.cfg.snn.targetScaling ? Math.min(1, snn.scaler.scale) : 1;
   }
 
+  /** Portfolio numerical Kelly cap for a new binary order (reduce-only: never more than `p.count`):
+   *  the stake that maximises expected log growth given the positions already held, with contracts
+   *  on the same index and close time sharing one scenario factor, shrunk by PORTFOLIO_KELLY_SHRINK. */
+  portfolioCap(m: ActiveMarket, p: OrderPlan, pYes: number, now = this.now()): { contracts: number; fStar: number; edgePerDay: number } | undefined {
+    const S = this.d.cfg.strategy;
+    const bank = this.bankroll();
+    if (!S.portfolioKelly || p.reduceOnly || !(bank && bank > 0) || (p.purpose !== 'entry' && p.purpose !== 'quote') || p.why.startsWith('take-profit')) return undefined;
+    const fees = this.d.md.feesFor(m.ticker);
+    const grouped = (kind?: string) => kind === 'updown' || kind === 'greater' || kind === 'less';
+    const dirOf = (kind: string | undefined, yesSide: boolean): 1 | -1 => ((kind === 'less' ? -1 : 1) * (yesSide ? 1 : -1)) as 1 | -1;
+    const buyYes = p.side === 'bid';
+    const price = buyYes ? p.price : 1 - p.price;
+    const fee = orderFee(1, price, !p.postOnly, fees);
+    const cost = Math.min(0.999, price + fee);
+    const candidate: BinaryBet = { id: m.ticker, prob: buyYes ? pYes : 1 - pYes, cost, lockSec: Math.max(60, (m.closeTime - now) / 1000), group: grouped(m.kind) ? `${m.asset}:${m.closeTime}` : undefined, direction: dirOf(m.kind, buyYes) };
+    const held: Array<BinaryBet & { frac: number }> = [];
+    for (const pos of this.d.oms.positions.unsettled()) {
+      if (!pos.yes || pos.closeTs <= now) continue;
+      const st = this.status.get(pos.ticker);
+      const yesSide = pos.yes > 0;
+      const n = Math.abs(pos.yes);
+      const c = Math.min(0.99, Math.max(0.01, Math.abs(pos.netCash) / n));
+      // Without a current decision probability the position is assumed fairly priced (no edge).
+      const q = st?.q !== undefined ? (yesSide ? st.q : 1 - st.q) : c;
+      held.push({ id: pos.ticker, prob: q, cost: c, lockSec: Math.max(60, (pos.closeTs - now) / 1000), frac: PositionBook.maxLoss(pos) / bank, group: grouped(st?.kind) ? `${pos.asset}:${pos.closeTs}` : undefined, direction: dirOf(st?.kind, yesSide) });
+    }
+    const fStar = marginalKelly(candidate, held, [], { scenarios: 2000 });
+    const contracts = Math.max(0, Math.floor((S.portfolioKellyShrink * fStar * bank) / cost + 1e-9));
+    return { contracts, fStar, edgePerDay: timeNormalizedEdge(candidate) };
+  }
+
   private async placeChecked(m: ActiveMarket, p: OrderPlan, pYes: number, decisionId: string, tennis?: { event: string }): Promise<void> {
     const { cfg, md, oms, risk, kill, model } = this.d;
     const now = this.now();
     const T = cfg.tennis;
+    // Tennis orders are rules-based (no model probability to size an edge from): budgeted separately.
+    const pk = tennis ? undefined : this.portfolioCap(m, p, pYes, now);
+    if (pk && pk.contracts < p.count) {
+      this.d.audit.write('decision', { decisionId, ticker: m.ticker, event: 'portfolio_kelly_cap', from: p.count, to: pk.contracts, fStar: +pk.fStar.toFixed(4), edgePerDay: +pk.edgePerDay.toFixed(4) });
+      if (pk.contracts <= 0) return;
+      p = { ...p, count: pk.contracts };
+    }
     const intent: OrderIntent = {
       ticker: m.ticker, asset: m.asset, windowCloseTs: m.closeTime, side: p.side, price: p.price, count: p.count,
       timeInForce: p.timeInForce, postOnly: p.postOnly, reduceOnly: p.reduceOnly, expirationTime: p.expirationTime,

@@ -6,8 +6,9 @@ import path from 'path';
 import type { SnnConfig } from '../config';
 import { logger } from '../util/log';
 import { DEFAULT_BLENDER, SnnBlender, TargetScaler } from './blender';
-import { SnnHost } from './host';
-import type { SnnModelFile } from './network';
+import { SnnHost, type SnnHostLike } from './host';
+import type { SnnCheckpoint, SnnModelFile } from './network';
+import { SnnPopulationHost } from './population';
 import { DEFAULT_SNN, domainParams, SNN_DOMAINS, stageFlags, versionHash, type SnnDomain, type SnnParams } from './params';
 
 export { SnnBlender, TargetScaler } from './blender';
@@ -35,7 +36,7 @@ export function workerScript(entry = process.argv[1] ?? ''): { path: string; exe
 }
 
 /** One isolated SNN: its own worker, params, model file and checkpoint directory. */
-export interface SnnUnit { domain: SnnDomain; host: SnnHost; params: SnnParams; model?: SnnModelFile }
+export interface SnnUnit { domain: SnnDomain; host: SnnHostLike; params: SnnParams; model?: SnnModelFile }
 
 /** The three isolated SNNs (crypto contracts, perps, tennis), plus the legacy blender (crypto only)
  *  and the conservative target scaler. */
@@ -47,11 +48,17 @@ export function createSnnUnit(c: SnnConfig, domain: SnnDomain, modelPath: string
   const params = model?.params ?? snnParams(c, domain);
   if (model) log.info(`SNN ${domain} model ${model.version} (${model.trainedAt ?? 'untrained'})`);
   const useWorker = (opts.worker ?? c.worker) && fs.existsSync(workerScript().path);
-  const host = new SnnHost({
-    params, whitelist: domain === 'tennis' ? undefined : c.columns, model, worker: useWorker ? workerScript() : undefined,
-    timeoutMs: c.timeoutMs, latencySkipP99Ms: c.latencySkipP99Ms, checkpointDir: path.join(c.checkpointDir, domain), checkpointEveryMin: c.checkpointEveryMin, keepCheckpoints: 5,
+  const hostFor = (p: SnnParams, dir: string, seed?: SnnCheckpoint) => new SnnHost({
+    params: p, whitelist: domain === 'tennis' ? undefined : c.columns, model: p === params ? model : model ? { ...model, params: p, version: versionHash(p) } : undefined,
+    worker: useWorker ? workerScript() : undefined, timeoutMs: c.timeoutMs, latencySkipP99Ms: c.latencySkipP99Ms, checkpointDir: dir, checkpointEveryMin: c.checkpointEveryMin, keepCheckpoints: 5, seedCheckpoint: seed,
   });
-  return { domain, host, params, model };
+  // The tennis network learns live only, so its population tournament runs live (population.ts).
+  if (domain === 'tennis' && c.tennisPopulation) {
+    const dir = path.join(c.checkpointDir, domain, 'population');
+    const host = new SnnPopulationHost({ base: params, dir, roundSettles: c.tennisPopulationSettles, seed: c.seed, makeHost: (p, member, seed) => hostFor(p, path.join(dir, `m${member}`), seed) });
+    return { domain, host, params, model };
+  }
+  return { domain, host: hostFor(params, path.join(c.checkpointDir, domain)), params, model };
 }
 
 /** Build the fleet; `paths` overrides each domain's model file (the auto-trainer's promoted copies). */

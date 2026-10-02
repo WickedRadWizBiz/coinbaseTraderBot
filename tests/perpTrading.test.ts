@@ -204,3 +204,9 @@ test('research pipeline: a random walk never validates; a planted momentum signa
   assert.ok(sig.bt.trades > 0 && sig.bt.pnlUsd > 0, JSON.stringify({ ...sig.bt, dailyPnl: undefined }));
   assert.ok(sig.bt.fees > 0);
 });
+
+test('capital locked in binaries inflates the perp sigma: smaller Kelly size, never larger', () => {
+  const free = decidePerp(base({ muBps: 16 }), P), locked = decidePerp(base({ muBps: 16, lockedFrac: 0.6 }), P);
+  assert.ok(Math.abs(locked.target) <= Math.abs(free.target));
+  assert.ok((locked.leverage ?? 0) < (free.leverage ?? 0) || Math.abs(locked.target) < Math.abs(free.target), `${free.target} -> ${locked.target}`);
+});

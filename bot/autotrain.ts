@@ -20,7 +20,7 @@ import type { SnnDomain } from './snn/params';
 import { VolModel } from './model/volModel';
 import { FillModel } from './tca/fillModel';
 import { TennisFairModel } from './tennis/tennisFair';
-import { setTaNet, TaNet } from './ta/taNet';
+import { activeTaNet, setTaNet, TaNet } from './ta/taNet';
 import { logger } from './util/log';
 
 const log = logger('autotrain');
@@ -181,6 +181,7 @@ export class AutoTrainer {
       if (!cfg.taNet.enabled) return;
       const n = TaNet.load(file);
       setTaNet(n, cfg.taNet.requireValidated);
+      if (n) activeTaNet()?.enableForwardTest(path.join(cfg.dataDir, 'ta_net_forward.json'), this.now, { days: cfg.taNet.forwardDays, muteOnFail: cfg.taNet.muteOnForwardFail });
       const v = n?.version;
       this.record('ta_net', n ? `${v} (validated heads: ${n.active(true).join(', ') || 'none'})` : 'removed');
       // The models that read its forecasts were trained on the previous network: retrain them.

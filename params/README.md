@@ -37,9 +37,8 @@ calendar features read as unavailable.
 
 ## TA network
 
-`ta_net.json` is the TA network (`bot/ta/taNet.ts`, docs/TA_NETWORK.md), trained with
-`npm run research:ta-net` on Binance spot history for BTC, ETH, SOL, XRP and DOGE
-(Aug 2017 – Oct 2026). Only heads that passed the blind walk-forward test speak live
-(`up_1h` and `vol_4h` in this file). The server's pipeline retrains it on every crypto
-asset Kalshi lists and promotes the result to `data/models/ta_net.json`, which is preferred
-over this file.
+`ta_net.json` is the TA network (`bot/ta/taNet.ts`, docs/TA_NETWORK.md): the elite of a tournament
+of three networks trained walk-forward with `npm run research:ta-net` (docs/EVOLUTION.md). Only
+heads that passed the holdout and hurdles speak live. The server's pipeline continues the
+tournament on every crypto asset Kalshi lists and promotes the result to `data/models/ta_net.json`,
+which is preferred over this file.

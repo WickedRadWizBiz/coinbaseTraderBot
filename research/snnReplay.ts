@@ -56,6 +56,8 @@ export interface SnnReplayOpts {
   assetEverySec?: number;
   /** Continue from a saved network state (incremental day-by-day backfill). */
   checkpoint?: SnnCheckpoint;
+  /** Accept a checkpoint taken under different (shape-preserving) hyperparameters (tournament clones). */
+  allowParamChange?: boolean;
   /** Only read recording files in this day range (YYYY-MM-DD, inclusive; warm-up included by the caller). */
   fromDay?: string;
   toDay?: string;
@@ -77,7 +79,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
   const net = new SnnNetwork(o.params, { whitelist: o.whitelist, model: o.snnModel });
   net.dirLog = [];
   net.training = Boolean(o.training?.eprop);
-  if (o.checkpoint) net.restore(o.checkpoint);
+  if (o.checkpoint) net.restore(o.checkpoint, { allowParamChange: o.allowParamChange });
   const model = o.model ?? MetaModel.identity();
   const scoreEvery = (o.scoreEverySec ?? 60) * 1000;
   const noEntry = (o.noEntryBeforeCloseSec ?? 60) * 1000;

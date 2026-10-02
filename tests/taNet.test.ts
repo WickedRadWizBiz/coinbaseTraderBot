@@ -1,6 +1,6 @@
-// TA network: features (identical offline and live), training with a blind walk-forward test on a
-// planted signal, train/serve parity, the live runtime's grading, the feature registry, and the
-// pipeline's history / ta_net steps.
+// TA network v2: inputs (identical offline and live, no look-ahead), the population tournament with
+// its hurdles, saving/continuing the population, train/serve parity of the three-branch network,
+// the live runtime (grading, forward test), the feature registry, and the pipeline step.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -9,150 +9,173 @@ import { loadConfig } from '../bot/config';
 import { assetFeatureMap } from '../bot/model/featureEngine';
 import { CandleSet } from '../bot/ta/candleStore';
 import type { Candle } from '../bot/ta/indicators';
-import { activeTaNet, setTaNet, TANET_FEATURES, TANET_H1_BARS, TANET_SCHEMA, TaNet, TaNetRuntime, taNetFeatureMap, windowOk, type TaNetStateCache } from '../bot/ta/taNet';
+import {
+  activeTaNet, setTaNet, TANET_D1_BARS, TANET_FEATURES, TANET_H1_BARS, TANET_SCHEMA, TANET_TREND_STEPS, TaNet, TaNetRuntime, taNetDayVector, taNetFeatureMap, taNetMicro, taNetPosition, windowOk, type TaNetStateCache,
+} from '../bot/ta/taNet';
 import { aggregateCandles, upsertSeries } from '../research/history/candles';
 import { runPipeline } from '../research/pipeline';
-import { buildRows, headValue, trainTaNet } from '../research/trainTaNet';
+import { buildData, forecast, trainTaNet } from '../research/trainTaNet';
 import { tmpDir } from './helpers';
 
-const H = 3_600_000;
+const H = 3_600_000, Q = 900_000, DAY = 86_400_000;
 const T0 = Date.UTC(2020, 0, 1);
 
-/** Hourly candles whose returns are autocorrelated (phi) with clustered volatility: a learnable signal. */
-function planted(n: number, seed = 3, phi = 0.35): Candle[] {
+/** 15-minute candles whose HOURLY returns are autocorrelated (phi) with clustered volatility. */
+function planted(hours: number, seed = 3, phi = 0.6): Candle[] {
   let s = seed;
   const r = () => { s = (s * 16807) % 2147483647; return s / 2147483647; };
   const gauss = () => Math.sqrt(-2 * Math.log(Math.max(1e-12, r()))) * Math.cos(2 * Math.PI * r());
   let p = 100, prev = 0, v = 0.006 ** 2;
   const out: Candle[] = [];
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < hours; i++) {
     v = 0.000002 + 0.1 * prev * prev + 0.85 * v;
     const ret = phi * prev + Math.sqrt(v) * gauss();
-    const o = p;
-    p = p * Math.exp(ret);
-    out.push({ ts: T0 + i * H, o, h: Math.max(o, p) * (1 + Math.abs(gauss()) * 0.001), l: Math.min(o, p) * (1 - Math.abs(gauss()) * 0.001), c: p, v: 100 * (1 + Math.abs(ret) * 50) * (0.5 + r()) });
-    prev = ret;
+    for (let k = 0; k < 4; k++) {
+      const o = p;
+      p = p * Math.exp(ret / 4 + Math.sqrt(v) * 0.15 * gauss());
+      out.push({ ts: T0 + i * H + k * Q, o, h: Math.max(o, p) * (1 + Math.abs(gauss()) * 0.0005), l: Math.min(o, p) * (1 - Math.abs(gauss()) * 0.0005), c: p, v: 25 * (1 + Math.abs(ret) * 50) * (0.5 + r()) });
+    }
+    prev = Math.log(out[out.length - 1].c / out[out.length - 4].o);
   }
   return out;
 }
 
-const DATA = planted(4200);
-const DAILY = aggregateCandles(DATA, H, 24 * H);
+const M15 = planted(9000);
+const H1 = aggregateCandles(M15, Q, H);
+const D1 = aggregateCandles(M15, Q, DAY);
 
 function historyDir(): string {
   const dir = tmpDir();
-  upsertSeries(dir, 'binance', 'TST', '1h', DATA);
+  upsertSeries(dir, 'binance', 'TST', '15m', M15);
   return dir;
 }
+const OPTS = { trainMonths: 1.5, evalMonths: 0.25, stepMonths: 0.25, holdoutMonths: 0.5, stride: 1, minPerRegime: 5, epochsPerRound: 2, baseHyper: { lr: 3e-3, l2: 1e-3 } };
 
-test('feature map: every input present, cache-identical, window checks', () => {
-  const w = DATA.slice(1000 - TANET_H1_BARS + 1, 1001);
-  const f = taNetFeatureMap('TST', w, DAILY);
+test('inputs: hourly map, daily steps and 15m steps are complete, cache-identical and never look ahead', () => {
+  const i = 8000;
+  const w = H1.slice(i - TANET_H1_BARS + 1, i + 1);
+  const f = taNetFeatureMap('TST', w, D1);
   assert.deepEqual(Object.keys(f).sort(), [...TANET_FEATURES].sort());
-  const finite = TANET_FEATURES.filter((k) => Number.isFinite(f[k])).length;
-  assert.ok(finite > TANET_FEATURES.length * 0.85, `${finite}/${TANET_FEATURES.length} finite`);
   const cache: TaNetStateCache = {};
-  for (let i = 1000; i < 1030; i++) {
-    const win = DATA.slice(i - TANET_H1_BARS + 1, i + 1);
-    const a = taNetFeatureMap('TST', win, DAILY, cache), b = taNetFeatureMap('TST', win, DAILY);
-    for (const k of TANET_FEATURES) assert.ok(Object.is(a[k], b[k]), `${k} differs with the state cache at ${i}`);
+  for (let k = i; k < i + 10; k++) {
+    const win = H1.slice(k - TANET_H1_BARS + 1, k + 1);
+    const a = taNetFeatureMap('TST', win, D1, cache), b = taNetFeatureMap('TST', win, D1);
+    for (const key of TANET_FEATURES) assert.ok(Object.is(a[key], b[key]), `${key} differs with the state cache`);
   }
-  // No look-ahead: changing bars after the window does not change the features.
-  const later = DATA.map((c, i) => (i > 1000 ? { ...c, c: c.c * 2, h: c.h * 2 } : c));
-  const g = taNetFeatureMap('TST', later.slice(1000 - TANET_H1_BARS + 1, 1001), aggregateCandles(later, H, 24 * H));
-  for (const k of TANET_FEATURES) assert.ok(Object.is(f[k], g[k]), `${k} looked ahead`);
+  const t = H1[i].ts + H;
+  const later = M15.map((c) => (c.ts >= t ? { ...c, c: c.c * 3, h: c.h * 3 } : c));
+  const H1b = aggregateCandles(later, Q, H), D1b = aggregateCandles(later, Q, DAY);
+  const g = taNetFeatureMap('TST', H1b.slice(i - TANET_H1_BARS + 1, i + 1), D1b);
+  for (const key of TANET_FEATURES) assert.ok(Object.is(f[key], g[key]), `${key} looked ahead`);
+  assert.deepEqual(Array.from(taNetMicro(later, t)), Array.from(taNetMicro(M15, t)), '15m steps looked ahead');
+  const dj = D1.findIndex((c) => c.ts + DAY > t) - 1;
+  assert.deepEqual(taNetDayVector(D1b, dj), taNetDayVector(D1, dj), 'daily step looked ahead');
+  assert.ok(Number.isFinite(taNetMicro(M15, t)[0]));
+  assert.ok(Number.isNaN(taNetMicro(M15.filter((c) => c.ts !== t - 2 * Q), t)[0]), 'a missing 15m bar -> no micro input');
   assert.equal(windowOk(w), true);
-  assert.equal(windowOk([...w.slice(0, 100), ...w.slice(120)]), false, 'a 20-hour outage inside the window');
+  // Position rule: flat below the minimum Kelly size, Kelly-sized and clipped above it.
+  assert.equal(taNetPosition(0.502, 0, 0.01), 0);
+  assert.ok(taNetPosition(0.6, 0, 0.01) > 0 && taNetPosition(0.4, 0, 0.01) < 0);
+  assert.equal(taNetPosition(0.99, 0, 0.0001), 1);
 });
 
-test('training: candidates on validation, blind walk-forward test, validated head, train/serve parity', () => {
+test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, continue, parity, live runtime', async () => {
   const dir = historyDir();
-  const rows = buildRows(dir, ['TST'], path.join(dir, '.cache'), () => undefined);
-  assert.equal(rows.X.cols, TANET_FEATURES.length);
-  assert.ok(rows.X.rows > 3800);
-  const rep = trainTaNet(rows, { candidates: ['logistic', 'gbdt'], volCandidates: ['logistic'], refitMonths: 12 });
-  const up = rep.params.heads.up_1h!;
-  assert.equal(up.validation.validated, true, `planted autocorrelation should validate: ${JSON.stringify(up.validation)}`);
-  assert.ok(up.validation.skill! > 0.01);
-  assert.ok(up.candidates.some((c) => c.kind === 'base') && up.candidates.length === 3);
-  assert.ok(rep.params.heads.vol_4h, 'vol head trained');
-  assert.equal(rep.params.schema, TANET_SCHEMA);
-  // Save / load / predict == trainer's evaluation of the same row.
+  const D = buildData(dir, ['TST'], path.join(dir, '.cache'), () => undefined);
+  assert.ok(D.ts.length > 2000, `${D.ts.length} samples`);
+  assert.ok(D.microShare > 0.95);
+  const state = path.join(dir, 'pop.json');
+  const logs: string[] = [];
+  const first = await trainTaNet(D, { ...OPTS, statePath: state, maxRounds: 2, log: (m) => logs.push(m) });
+  assert.equal(first.complete, false);
+  assert.equal(first.rounds, 2);
+  const saved = JSON.parse(fs.readFileSync(state, 'utf8'));
+  assert.equal(saved.members.length, 3);
+  // Identical starts: round 0's members differ only in hyperparameters (member 0 = the base).
+  assert.equal(saved.log[0].ranking.length, 3);
+  assert.ok(saved.log[0].culled !== saved.log[0].elite && saved.log[0].mutated.length === 2);
+  const rep = await trainTaNet(D, { ...OPTS, statePath: state, log: (m) => logs.push(m) });
+  assert.equal(rep.complete, true);
+  assert.ok(rep.rounds > 2 && rep.newRounds === rep.rounds - 2, 'continued from the saved population');
+  const p = rep.params;
+  assert.equal(p.schema, TANET_SCHEMA);
+  assert.equal(p.pbt.trials, rep.rounds * 3, 'every member evaluation is a trial');
+  assert.ok(p.network.dsr.n > 0 && Number.isFinite(p.network.dsr.probability));
+  assert.ok(p.network.regimes.length >= 1);
+  // The planted autocorrelation is learned (direction right more often than not on the unseen holdout).
+  assert.ok(p.heads.up_1h.validation.hitRate! > 0.52, `planted autocorrelation: ${JSON.stringify(p.heads.up_1h.validation)}`);
+  assert.equal(p.heads.up_1h.validation.validated, p.heads.up_1h.validation.holdoutPassed && p.network.validated);
+  assert.ok(logs.some((l) => /elite #\d/.test(l)));
+
+  // Save / load / live forecast == offline forecast for the same bar.
   const file = path.join(dir, 'ta_net.json');
-  fs.writeFileSync(file, JSON.stringify(rep.params));
+  fs.writeFileSync(file, JSON.stringify(p));
   const net = TaNet.load(file)!;
-  const i = rows.X.rows - 10;
-  const bar = DATA.findIndex((c) => c.ts === rows.ts[i]);
-  const f = taNetFeatureMap('TST', DATA.slice(bar - TANET_H1_BARS + 1, bar + 1), DAILY);
-  const live = net.predict('up_1h', f);
-  const offline = 1 / (1 + Math.exp(-headValue(up.head, rows.X, i)));
-  assert.ok(Math.abs(live - offline) < 1e-4, `live ${live} vs offline ${offline}`);
-  // The row cache is reused on a second build.
-  const again = buildRows(dir, ['TST'], path.join(dir, '.cache'), () => undefined);
-  assert.deepEqual(Array.from(again.X.data.subarray(0, 500)), Array.from(rows.X.data.subarray(0, 500)));
-  // A model from another feature schema is refused.
-  fs.writeFileSync(file, JSON.stringify({ ...rep.params, schema: '0' }));
-  assert.throws(() => TaNet.load(file), /schema/);
-
-  // Live runtime on a CandleSet (288+ closed hourly bars): forecasts, then grades them as bars close.
-  const rt = new TaNetRuntime(net, false);
+  const k = D.ts.length - 100;
+  const off = forecast(D, p.dims, p.norm, Float64Array.from(p.weights), { gMicro: p.gates.micro, gTrend: p.gates.trend, gMacro: p.gates.macro }, [k]);
+  const barTs = D.ts[k];
+  const end = H1.findIndex((c) => c.ts === barTs) + 1;
   const set = new CandleSet('TST');
-  const end = 3000;
-  set.add('1h', DATA.slice(end - 299, end), DATA[end].ts + 60_000);
-  set.add('1d', DAILY.filter((c) => c.ts + 24 * H <= DATA[end].ts), DATA[end].ts + 60_000);
-  const o1 = rt.outputFor('TST', set, DATA[end].ts + 60_000)!;
-  assert.ok(o1, 'output from the first poll (299 closed bars)');
-  assert.equal(o1.barTs, DATA[end - 1].ts);
-  assert.ok(o1.up[60]! > 0 && o1.up[60]! < 1);
-  assert.ok(Number.isFinite(o1.vol4h!));
-  for (let k = end; k < end + 40; k++) set.add('1h', [DATA[k]], DATA[k].ts + H + 60_000);
-  const o2 = rt.outputFor('TST', set, DATA[end + 39].ts + H + 60_000)!;
-  assert.ok(o2.graded[60]! >= 24 && Number.isFinite(o2.skill[60]!), `graded ${o2.graded[60]}`);
-  assert.equal(rt.outputFor('TST', set, DATA[end + 39].ts + 10 * H), undefined, 'stale candles: no forecast');
-  assert.equal(rt.outputFor('TST', set, DATA[end + 39].ts + H + 60_000), o2, 'reused until a new bar arrives');
-  // Replaying an earlier span in the same process: no skill from calls graded after `now`.
-  const early = new CandleSet('TST');
-  early.add('1h', DATA.slice(end - 299, end), DATA[end].ts + 60_000);
-  early.add('1d', DAILY.filter((c) => c.ts + 24 * H <= DATA[end].ts), DATA[end].ts + 60_000);
-  const back = rt.outputFor('TST', early, DATA[end].ts + 60_000)!;
-  assert.equal(back.graded[60], o1.graded[60]);
-  assert.ok(Math.abs(back.up[60]! - o1.up[60]!) < 1e-12);
-  // Validated-only runtime hides heads that did not validate.
-  const strict = new TaNetRuntime(net, true);
-  const o3 = strict.outputFor('TST', set, DATA[end + 39].ts + H + 60_000)!;
-  for (const [h, k] of [[60, 'up_1h'], [240, 'up_4h']] as const) assert.equal(Number.isFinite(o3.up[h]!), Boolean(rep.params.heads[k]?.validation.validated));
+  const now = barTs + H + 60_000;
+  set.add('1h', H1.slice(end - 299, end), now);
+  set.add('1d', D1.filter((c) => c.ts + DAY <= now).slice(-299), now);
+  set.add('15m', M15.filter((c) => c.ts + Q <= now).slice(-299), now);
+  const rt = new TaNetRuntime(net, false);
+  const o = rt.outputFor('TST', set, now)!;
+  assert.ok(o, 'forecast from the first poll (299 closed hourly bars)');
+  assert.equal(o.barTs, barTs);
+  assert.ok(Math.abs(o.up[60]! - off.up1[0]) < 1e-4, `live ${o.up[60]} vs offline ${off.up1[0]}`);
+  assert.ok(Math.abs(o.vol4h! - off.vol[0]) < 1e-3);
+  assert.equal(rt.outputFor('TST', set, now), o, 'reused until a new bar arrives');
+  assert.equal(rt.outputFor('TST', set, now + 10 * H), undefined, 'stale candles: no forecast');
 
-  // Feature registry: tanet_* read the installed network, NaN without one.
+  // Forward test: results recorded per hour; a failed test mutes the direction heads.
+  const fwd = path.join(dir, 'fwd.json');
+  const rt2 = new TaNetRuntime(net, false);
+  rt2.enableForwardTest(fwd, now - 1, { days: 1, muteOnFail: true });
+  const s2 = new CandleSet('TST');
+  s2.add('1h', H1.slice(end - 299, end), now); s2.add('1d', D1.filter((c) => c.ts + DAY <= now).slice(-299), now); s2.add('15m', M15.filter((c) => c.ts + Q <= now).slice(-299), now);
+  rt2.outputFor('TST', s2, now);
+  for (let j = end; j < end + 30; j++) {
+    const t = H1[j].ts + H + 60_000;
+    s2.add('1h', [H1[j]], t); s2.add('15m', M15.filter((c) => c.ts >= H1[j].ts && c.ts < H1[j].ts + H), t);
+    rt2.outputFor('TST', s2, t);
+  }
+  const st = rt2.forwardStatus(H1[end + 29].ts + 2 * H)!;
+  assert.ok(st.days > 1 && ['confirmed', 'failed'].includes(st.status), JSON.stringify(st));
+  assert.ok(fs.existsSync(fwd));
+
+  // Feature registry reads the installed network; nothing without one.
   setTaNet(net, false);
-  const fm = assetFeatureMap('TST', DATA[end + 39].ts + H + 60_000, { candles: set });
-  assert.ok(Number.isFinite(fm.tanet_up_1h) && Number.isFinite(fm.tanet_vol_4h) && Number.isFinite(fm.tanet_skill_1h));
-  assert.ok(Math.abs(fm.tanet_up_1h - Math.log(o2.up[60]! / (1 - o2.up[60]!))) < 1e-9);
+  const fm = assetFeatureMap('TST', now, { candles: set });
+  assert.ok(Math.abs(fm.tanet_up_1h - Math.log(o.up[60]! / (1 - o.up[60]!))) < 1e-9);
   setTaNet(undefined);
   assert.equal(activeTaNet(), undefined);
-  assert.ok(Number.isNaN(assetFeatureMap('TST', DATA[end + 39].ts + H + 60_000, { candles: set }).tanet_up_1h));
+  assert.ok(Number.isNaN(assetFeatureMap('TST', now, { candles: set }).tanet_up_1h));
+  fs.writeFileSync(file, JSON.stringify({ ...p, schema: '1' }));
+  assert.throws(() => TaNet.load(file), /schema/);
 });
 
-test('pipeline: history step obeys HISTORY_AUTO_UPDATE; ta_net trains, promotes, then waits until due', async () => {
+test('pipeline: ta_net runs the tournament in chunks and promotes only when it reaches the present', async () => {
   const data = tmpDir();
-  const hist = path.join(data, 'history');
-  upsertSeries(hist, 'binance', 'TST', '1h', DATA);
-  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: data, HISTORY_AUTO_UPDATE: 'false', TA_NET_REFIT_MONTHS: '12' });
+  upsertSeries(path.join(data, 'history'), 'binance', 'TST', '15m', M15);
+  const env = { DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: data, HISTORY_AUTO_UPDATE: 'false', TA_NET_TRAIN_MONTHS: '1.5', TA_NET_EVAL_MONTHS: '0.25', TA_NET_HOLDOUT_MONTHS: '0.5', TA_NET_STRIDE: '2', TA_NET_MIN_PER_REGIME: '5', TA_NET_STEP_MONTHS: '0.25' };
+  const cfg = loadConfig({ ...env, TA_NET_MAX_ROUNDS_PER_RUN: '2' });
   const now = Date.UTC(2026, 9, 1);
-  const r = await runPipeline({ cfg, only: ['history', 'ta_net'], log: () => undefined, now });
-  const step = (n: string) => r.steps.find((s) => s.step === n)!;
-  assert.equal(step('history').skipped, 'HISTORY_AUTO_UPDATE=false');
-  assert.ok(step('ta_net').ok && !step('ta_net').skipped, step('ta_net').error);
-  const promotedFile = path.join(cfg.autoTrain.dir, 'ta_net.json');
-  assert.ok(fs.existsSync(promotedFile));
-  assert.equal(r.state.taNetVersion, TaNet.load(promotedFile)!.version);
-  assert.ok(activeTaNet(), 'installed for the steps that follow');
-  const r2 = await runPipeline({ cfg, only: ['ta_net'], log: () => undefined, now: now + 3_600_000 });
-  assert.match(r2.steps[0].skipped ?? '', /trained 0\.0 day/);
-  const r3 = await runPipeline({ cfg, only: ['ta_net'], forceTaNet: true, log: () => undefined, now: now + 7_200_000 });
-  assert.ok(r3.steps[0].ok && !r3.steps[0].skipped);
-  // No history: skipped with instructions.
-  const empty = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: tmpDir(), HISTORY_AUTO_UPDATE: 'false' });
-  const r4 = await runPipeline({ cfg: empty, only: ['ta_net'], log: () => undefined, now });
-  assert.match(r4.steps[0].skipped ?? '', /no history/);
+  const r1 = await runPipeline({ cfg, only: ['history', 'ta_net'], log: () => undefined, now });
+  const step = (r: typeof r1, n: string) => r.steps.find((s) => s.step === n)!;
+  assert.equal(step(r1, 'history').skipped, 'HISTORY_AUTO_UPDATE=false');
+  assert.match(String((step(r1, 'ta_net').detail as { reason?: string })?.reason), /in progress/);
+  assert.equal(fs.existsSync(path.join(cfg.autoTrain.dir, 'ta_net.json')), false);
+  const cfgAll = loadConfig({ ...env, TA_NET_MAX_ROUNDS_PER_RUN: '0' });
+  const r2 = await runPipeline({ cfg: cfgAll, only: ['ta_net'], log: () => undefined, now: now + H });
+  assert.ok(step(r2, 'ta_net').ok, step(r2, 'ta_net').error);
+  assert.equal((step(r2, 'ta_net').detail as { promoted?: boolean }).promoted, true);
+  assert.ok(fs.existsSync(path.join(cfgAll.autoTrain.dir, 'ta_net.json')));
+  assert.equal(r2.state.taNetComplete, true);
+  const r3 = await runPipeline({ cfg: cfgAll, only: ['ta_net'], log: () => undefined, now: now + 2 * H });
+  assert.match(r3.steps[0].skipped ?? '', /trained 0\.0 day/);
   setTaNet(undefined);
 });
+
+void TANET_D1_BARS; void TANET_TREND_STEPS;

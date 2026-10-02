@@ -1,6 +1,12 @@
 # Historical data and the TA network
 
-The TA network is a fourth learned model. It reads the whole TA library (every indicator, structure reading, rule signal and confluence score) on hourly, 4-hour and daily spot USD candles. It is trained on years of exchange history instead of the bot's own recordings.
+The TA network is a fourth learned model, trained on years of exchange history instead of the bot's own recordings. It reads three timeframes in three separate branches (docs/EVOLUTION.md, Phase 2):
+
+| Branch | Input | Layer |
+|---|---|---|
+| Micro | last 32 fifteen-minute bars | 1-D convolution |
+| Trend | last 12 hourly steps of the whole TA library (every 1h and 4h indicator and structure reading, every rule signal and confluence score) | GRU |
+| Macro | last 30 daily steps (daily TA readings, daily returns, volatility) | attention |
 
 At the close of every hourly bar it forecasts:
 
@@ -10,12 +16,14 @@ At the close of every hourly bar it forecasts:
 | `up_4h` | Probability it is higher four hours later |
 | `vol_4h` | How much the next 4 hours' realised volatility will differ from the last 24 hours' (log ratio) |
 
-Those forecasts become features (`tanet_*`) for three decision models:
+**How it's chosen:** a tournament of three identical networks with slightly different settings, walk-forward month by month over the history. The surviving elite is the network the bot uses (docs/EVOLUTION.md).
+
+Its forecasts become features (`tanet_*`) for three decision models:
 - the crypto MLP (hourly ladders and 15-minute contracts),
 - the perps model (1h and 4h holds),
 - the volatility forecast.
 
-Each of those models keeps the features only if its own validation improves with them, the same rule the SNNs follow. The network never trades by itself.
+Each of those models keeps the features only if its own validation improves with them. The network never trades by itself.
 
 It does not read dominance charts (USDT.D, BTC.D) because there is no history for them. The rules that need them stay silent, both in training and live.
 
@@ -82,27 +90,29 @@ bash ~/bot/current/deploy/history.sh status
 
 This lists every series and shows how the network will see each asset. When several sources cover the same asset, the best one keeps its whole time span. The order is Coinbase, then Binance, then the others, then Bittrex, then Yahoo. A lower-ranked source only fills time **before or after** that span, never bars inside it. Mixing exchanges bar by bar would create fake price jumps. So your Bittrex 2018 files extend the history back before the Binance or Coinbase data starts. Hourly files are also combined into 4h and daily bars where no daily file exists.
 
-## 2. Training
+## 2. Training: the tournament
 
 The pipeline does it automatically:
 - Step `history` refreshes Binance and Coinbase data every day (if the server has internet access).
-- Step `ta_net` retrains the network every 7 days, or straight away when no model exists yet.
+- Step `ta_net` runs the tournament. The first time, it covers years of history, spread over several daily runs (36 rounds per run by default). Afterwards it continues month by month every 7 days.
+- Nothing is promoted until the tournament has reached the present.
 
-To train right away:
+To run it now:
 
 ```bash
 bash ~/bot/current/deploy/history.sh train          # through the pipeline: validated, promoted, hot-swapped
 npm run research:ta-net                         # from a checkout, writes params/ta_net.json
+npm run pipeline -- --fresh-ta-net              # restart the tournament from scratch
 ```
 
-What training does:
-1. **Rows.** At every closed hourly bar it computes the network's ~200 inputs. It uses the same windows the live bot has: 288 hourly bars, 4h bars built from them, and 288 daily bars. All assets are pooled, because every input is scale-free, so one coin's patterns can inform another's. Rows are cached, so re-runs only compute new bars.
-2. **Time split.** The data is split into train | validation | blind test. The test is the last 20% of the time span and validation the 15% before it, with a 5-hour gap at each boundary.
-3. **Candidates.** Logistic regression, a neural network (16 hidden units) and boosted trees are each trained on the train period. The one with the lowest validation loss is kept.
-4. **Blind walk-forward test.** Through the test period the chosen model is refitted every 6 months on everything before it. Each segment is forecast by a model that never saw it. The results are compared with the naive forecast (the base rate or mean) using a day-block bootstrap. A head counts as **validated** only when the 95% confidence interval of its improvement is above zero.
-5. **Deployed model.** It's refitted on all the data. Live, **only validated heads speak** (`TA_NET_REQUIRE_VALIDATED=true`). The others read as missing.
+What it does:
+1. **Inputs.** For every closed hourly bar it builds the three branch inputs, using the same windows the live bot has: 280 hourly bars, 4h built from them, 250 daily bars, and 32 fifteen-minute bars. All assets are pooled, because every input is scale-free. Hourly rows are cached, so re-runs only compute new bars.
+2. **Tournament.** Three identical networks with slightly different settings train on a rolling 12-month block and are scored on the next month. Each one trades its own position rule (quarter-Kelly on its forecasts, 5 bp costs). Fitness = Sortino − 5 × max drawdown − 5 × costs. Each month the elite survives, the worst copies it, and the middle one and the copy get mutated (learning rate, L2, the weight of each branch, the vol head's weight). Then everything rolls forward one month.
+3. **Hurdles.** The elite's out-of-sample record is clustered so that one continuous position counts as one interaction. It must pass the deflated Sharpe ratio, with every member evaluation counted as a trial, and hold at least 100 independent interactions in every regime it covers.
+4. **Unseen holdout.** The last 3 months are never touched. Each head is graded there against the naive forecast. The volatility head speaks live if it beats it. The direction heads also need step 3's hurdles.
+5. **Live forward test.** The bot trades the elite's position rule on paper for 90 days. If that fails, the direction heads go silent.
 
-Live, every forecast is graded against the candles that follow. `tanet_skill_1h` and `tanet_skill_4h` are the network's rolling skill over its last 168 graded calls, so the decision models can learn when to trust it.
+Live, every forecast is also graded against the candles that follow. `tanet_skill_1h` and `tanet_skill_4h` are the network's rolling skill over its last 168 graded calls.
 
 ## 3. First real results (Binance spot, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026, ~348,000 hourly rows)
 
@@ -130,8 +140,13 @@ That's why the outputs go to the decision models as features instead of trading 
 | `TA_NET` | `true` | Compute the network's forecasts as features. |
 | `TA_NET_PATH` | `params/ta_net.json` | Fallback model file (the pipeline's `data/models/ta_net.json` is preferred). |
 | `TA_NET_REQUIRE_VALIDATED` | `true` | Only heads that passed the blind test speak. |
-| `TA_NET_RETRAIN_DAYS` | `7` | Retrain at most this often. |
-| `TA_NET_REFIT_MONTHS` | `6` | Walk-forward refit interval in the blind test. |
+| `TA_NET_RETRAIN_DAYS` | `7` | Continue the tournament at most this often (daily while the first one is still running). |
+| `TA_NET_TRAIN_MONTHS` / `TA_NET_EVAL_MONTHS` / `TA_NET_STEP_MONTHS` | `12` / `1` / `1` | Tournament blocks. |
+| `TA_NET_HOLDOUT_MONTHS` | `3` | Never touched by the tournament. |
+| `TA_NET_STRIDE` | `2` | Train on every 2nd hourly sample. |
+| `TA_NET_MIN_PER_REGIME` / `TA_NET_DSR` | `100` / `0.95` | Statistical hurdles for the direction heads. |
+| `TA_NET_FORWARD_DAYS` / `TA_NET_MUTE_ON_FORWARD_FAIL` | `90` / `true` | Live forward test. |
+| `TA_NET_MAX_ROUNDS_PER_RUN` | `36` | Rounds per pipeline run while the first tournament runs (0 = all at once). |
 | `HISTORY_DIR` | `data/history` | The candle store. |
 | `HISTORY_AUTO_UPDATE` | `true` | Refresh Binance and Coinbase data in the daily pipeline. |
 | `HISTORY_ASSETS` | `auto` | `auto` = every crypto asset Kalshi lists; or a list like `BTC,ETH,SOL`. |

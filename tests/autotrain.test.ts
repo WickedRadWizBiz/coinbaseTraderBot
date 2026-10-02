@@ -133,7 +133,7 @@ test('pipeline end to end: SNN first, backfilled SNN outputs, then the MLP train
   const logs: string[] = [];
   const r = await runPipeline({ cfg, only: ['snn', 'dataset', 'mlp', 'perps', 'tennis'], ablationOnly: 'S1', log: (m) => logs.push(m), now: T0 });
   const order = r.steps.map((s) => s.step);
-  assert.deepEqual(order, ['snn-crypto-ablation', 'snn-crypto-train', 'snn-crypto-backfill', 'snn-perps-ablation', 'snn-perps-train', 'snn-perps-backfill', 'snn-tennis', 'dataset', 'mlp', 'perps', 'tennis'], 'every network before the models that read it');
+  assert.deepEqual(order, ['snn-crypto-ablation', 'snn-crypto-pbt', 'snn-crypto-train', 'snn-crypto-backfill', 'snn-perps-ablation', 'snn-perps-pbt', 'snn-perps-train', 'snn-perps-backfill', 'snn-tennis', 'dataset', 'mlp', 'perps', 'tennis'], 'every network before the models that read it');
   const by = Object.fromEntries(r.steps.map((s) => [s.step, s]));
   assert.ok(r.steps.every((s) => s.ok), JSON.stringify(r.steps.map((s) => [s.step, s.ok, s.skipped, s.error?.slice(0, 300)])));
   assert.match(String(by.perps.skipped), /no perp quotes/, 'no perp data: skipped, not failed');

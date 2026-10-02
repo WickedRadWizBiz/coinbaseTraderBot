@@ -25,11 +25,32 @@ export interface SnnHostOpts {
   checkpointDir?: string;
   checkpointEveryMin: number;
   keepCheckpoints: number;
+  /** Start from this state instead of the newest checkpoint on disk (a tournament clone), accepted
+   *  even though its hyperparameters differ (same shapes). */
+  seedCheckpoint?: SnnCheckpoint;
+}
+
+/** What the engine needs from a network host: one SnnHost, or the tennis population (population.ts). */
+export interface SnnHostLike {
+  readonly version: string;
+  readonly mode: string;
+  timeouts: number;
+  lastError?: string;
+  restoredFrom?: string | null;
+  start(now?: number): Promise<void>;
+  stepAndScore(now: number, inputs: ColumnInput[], queries: ContractQuery[]): Promise<StepReply | undefined>;
+  p99(): number;
+  latencyOk(): boolean;
+  settle(ticker: string, result: 'yes' | 'no', now: number): Promise<void>;
+  remove(keys: string[]): Promise<void>;
+  status(): Promise<unknown>;
+  checkpoint(now?: number): Promise<string | undefined>;
+  stop(now?: number): Promise<void>;
 }
 
 type Req = SnnRequest extends infer T ? (T extends { id: number } ? Omit<T, 'id'> : never) : never;
 
-export class SnnHost {
+export class SnnHost implements SnnHostLike {
   private worker?: Worker;
   private readonly local = new SnnRuntime();
   private seq = 0;
@@ -60,8 +81,9 @@ export class SnnHost {
         this.worker = undefined;
       }
     }
-    const cp = this.loadCheckpoint();
-    const r = await this.call({ type: 'init', params: this.o.params, whitelist: this.o.whitelist, model: this.o.model, checkpoint: cp }, 30_000);
+    const seeded = this.o.seedCheckpoint;
+    const cp = this.loadCheckpoint() ?? seeded;
+    const r = await this.call({ type: 'init', params: this.o.params, whitelist: this.o.whitelist, model: this.o.model, checkpoint: cp, allowParamChange: Boolean(seeded) && cp === seeded }, 30_000);
     if (!r?.ok) throw new Error(`SNN init failed: ${r && !r.ok ? r.error : 'timeout'}`);
     this.restoredFrom = (r.result as { restoredFrom: string | null }).restoredFrom;
     this.lastCheckpoint = now;
@@ -141,6 +163,12 @@ export class SnnHost {
     if (!this.o.checkpointDir || !fs.existsSync(this.o.checkpointDir)) return [];
     return fs.readdirSync(this.o.checkpointDir).filter((f) => f.startsWith(`snn-${this.version}-`) && f.endsWith('.json'))
       .sort((a, b) => Number(b.split('-').pop()!.slice(0, -5)) - Number(a.split('-').pop()!.slice(0, -5)));
+  }
+
+  /** Current network state (for cloning into another member). */
+  async snapshot(): Promise<SnnCheckpoint | undefined> {
+    const r = await this.call({ type: 'checkpoint' }, 30_000);
+    return r?.ok ? (r.result as SnnCheckpoint) : undefined;
   }
 
   /** Newest readable checkpoint of this version; a corrupt file rolls back to the previous one. */

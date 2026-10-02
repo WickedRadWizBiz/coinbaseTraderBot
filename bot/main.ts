@@ -35,7 +35,7 @@ import { Reconciler } from './recon/reconciler';
 import { Tca } from './tca/tca';
 import { createSnnFleet } from './snn';
 import { VolModel } from './model/volModel';
-import { setTaNet, TaNet } from './ta/taNet';
+import { activeTaNet, setTaNet, TaNet } from './ta/taNet';
 import { FillModel } from './tca/fillModel';
 import { TennisScoreClient } from './tennis/liveTennisApi';
 import { TennisFairModel } from './tennis/tennisFair';
@@ -213,7 +213,11 @@ async function main(): Promise<void> {
   let taNet: TaNet | undefined;
   try { taNet = cfg.taNet.enabled ? TaNet.load(modelPaths.ta_net) : undefined; } catch (e) { log.warn(`TA network not loaded: ${(e as Error).message}`); }
   setTaNet(taNet, cfg.taNet.requireValidated);
-  if (taNet) log.info('TA network loaded', { version: taNet.version, validatedHeads: taNet.active(true) });
+  if (taNet) {
+    // Out-of-sample finality: the live bot forward-tests the elite's position rule.
+    activeTaNet()?.enableForwardTest(path.join(cfg.dataDir, 'ta_net_forward.json'), Date.now(), { days: cfg.taNet.forwardDays, muteOnFail: cfg.taNet.muteOnForwardFail });
+    log.info('TA network loaded', { version: taNet.version, validatedHeads: taNet.active(true) });
+  }
   const engine: Engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
   engineRef = engine;
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });

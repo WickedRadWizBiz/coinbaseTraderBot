@@ -8,11 +8,13 @@
 //
 //   0a. history      refresh the historical candle store (Binance Vision + Coinbase backfill) for
 //                    every crypto asset Kalshi lists (HISTORY_AUTO_UPDATE; needs internet)
-//   0b. ta_net       TA network on years of hourly history (bot/ta/taNet.ts): retrained every
-//                    TA_NET_RETRAIN_DAYS -> promote ta_net.json; its forecasts are features of
-//                    vol_model, mlp and perps below (each keeps them only if its validation improves)
+//   0b. ta_net       TA network on years of hourly history (bot/ta/taNet.ts): a tournament of three
+//                    networks initialises it, later runs continue the tournament as new months
+//                    arrive (every TA_NET_RETRAIN_DAYS) -> promote ta_net.json; its forecasts are
+//                    features of vol_model, mlp and perps below (kept only if their validation improves)
 //   1. snn           per replayable network (crypto: 15m/1h with contracts; perps: 1h/4h, graded on
-//                    direction calls): ablation when due -> train at the best accepted stage ->
+//                    direction calls): ablation when due -> population tournament of three identical
+//                    networks (snnPbt.ts; the elite's knobs) -> train at the best accepted stage ->
 //                    promote snn_<domain>.json -> prequential backfill (work/snnfill/<domain>).
 //                    The tennis network learns live only (no recorded score feed to replay).
 //   2. vol_model     tree-based volatility forecast (sigma multiplier for fair value) -> promote
@@ -53,6 +55,9 @@ import { replaySnn } from './snnReplay';
 import { trainMetaModelMain } from './trainMetaModel';
 import { trainPerpMain } from './trainPerpModel';
 import { trainSnnMain } from './trainSnn';
+import { runSnnPbt } from './snnPbt';
+import { withSnnHyper } from '../bot/snn/population';
+import { versionHash } from '../bot/snn/params';
 import { trainTennisMain } from './trainTennisModel';
 import { trainTaNetMain } from './trainTaNet';
 import { downloadBinance, type BinanceMarket } from './history/binanceVision';
@@ -72,6 +77,13 @@ export interface SnnDomainState {
   /** Last day fully backfilled with prequential outputs, and the stage of that backfill. */
   backfillThrough?: string;
   backfillStage?: Stage;
+  /** Params version the backfill was made with (changes when the tournament picks new knobs). */
+  backfillVersion?: string;
+  /** Population tournament: the elite's knobs, the stage they were found for, when, and progress. */
+  pbtHyper?: Record<string, number>;
+  pbtStage?: Stage;
+  pbtAt?: number;
+  pbtComplete?: boolean;
 }
 
 export const REPLAYABLE: Exclude<SnnDomain, 'tennis'>[] = ['crypto', 'perps'];
@@ -88,6 +100,8 @@ export interface PipelineState {
   taNetVersion?: string;
   taNetTrainedAt?: number;
   trainedWithTaNet?: string;
+  /** false while the TA network's initial tournament is still running (chunked over daily runs). */
+  taNetComplete?: boolean;
   lastHistoryUpdate?: number;
   lastReport?: string;
 }
@@ -135,6 +149,10 @@ export interface PipelineOpts {
   ablationOnly?: string;
   /** Retrain the TA network even if it is not due. */
   forceTaNet?: boolean;
+  /** Restart the TA network's population tournament from scratch. */
+  forceTaNetFresh?: boolean;
+  /** Re-run the SNN population tournaments even if not due. */
+  forceSnnPbt?: boolean;
 }
 
 export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepResult[]; state: PipelineState; report: string }> {
@@ -192,22 +210,33 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     }, T.historyUpdate ? undefined : 'HISTORY_AUTO_UPDATE=false');
   }
   if (want('ta_net')) {
-    const due = o.forceTaNet || !fs.existsSync(taNetFile) || !state.taNetTrainedAt || now - state.taNetTrainedAt >= T.retrainEveryDays * 86_400_000;
+    const due = o.forceTaNet || state.taNetComplete === false || !fs.existsSync(taNetFile) || !state.taNetTrainedAt || now - state.taNetTrainedAt >= T.retrainEveryDays * 86_400_000;
     const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet (npm run history:binance, or history:import your CSVs)`;
     await run('ta_net', async () => {
       const cand = path.join(work, 'ta_net.candidate.json');
       let rep;
-      try { rep = await trainTaNetMain(argsOf({ history: T.historyDir, out: cand, cache: path.join(work, 'tanet-cache'), 'refit-months': T.refitMonths })); } catch (e) {
+      try {
+        rep = await trainTaNetMain(argsOf({
+          history: T.historyDir, out: cand, cache: path.join(work, 'tanet-cache'), state: path.join(work, 'tanet-population.json'), fresh: o.forceTaNetFresh ? 'true' : undefined,
+          'train-months': T.trainMonths, 'eval-months': T.evalMonths, 'step-months': T.stepMonths, 'holdout-months': T.holdoutMonths, stride: T.stride, 'min-per-regime': T.minPerRegime, dsr: T.dsrThreshold,
+          'max-rounds': T.maxRoundsPerRun || undefined,
+        }));
+      } catch (e) {
         if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
         throw e;
       }
       const validated = Object.entries(rep.params.heads).filter(([, h]) => h?.validation.validated).map(([k]) => k);
+      state.taNetComplete = rep.complete;
+      // The initialisation runs in chunks of rounds (one chunk per daily run); nothing is promoted
+      // until the tournament has reached the present.
+      if (!rep.complete) return { promoted: false, reason: `tournament in progress: ${rep.rounds} round(s) done, ${rep.remaining} to go (continues on the next run)` };
       state.taNetTrainedAt = now;
-      if (A.promote === 'validated' && !validated.length) return { promoted: false, version: rep.params.version, reason: 'no head beat the naive forecast in the blind test', split: rep.split };
+      const summary = { rounds: rep.rounds, newRounds: rep.newRounds, network: rep.params.network, heads: Object.fromEntries(Object.entries(rep.params.heads).map(([k, h]) => [k, h.validation])), elite: rep.params.pbt.elite };
+      if (A.promote === 'validated' && !validated.length) return { promoted: false, version: rep.params.version, reason: 'no head passed the holdout and network hurdles', ...summary };
       fs.copyFileSync(cand, taNetFile);
       state.taNetVersion = rep.params.version;
       installTaNet();
-      return { promoted: true, version: rep.params.version, validatedHeads: validated, split: rep.split, heads: Object.fromEntries(Object.entries(rep.params.heads).map(([k, h]) => [k, { kind: h!.head.kind, ...h!.validation }])) };
+      return { promoted: true, version: rep.params.version, validatedHeads: validated, ...summary };
     }, !T.enabled ? 'TA_NET=false' : noHistory ?? (due ? undefined : `trained ${((now - state.taNetTrainedAt!) / 86_400_000).toFixed(1)} day(s) ago (TA_NET_RETRAIN_DAYS=${T.retrainEveryDays})`));
   }
 
@@ -236,14 +265,32 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         if (A.snnStage === 'auto') stage = k > 0 ? STAGES[k] : base;
         stageAccepted = k > 0 && STAGES.indexOf(stage) <= k;
       }
-      const trainNeeded = Boolean(verdicts) || !fs.existsSync(file) || ds.stage !== stage;
+      // Population tournament: three identical networks of this stage, knobs within +/-10%, fight
+      // over the recorded days; the elite's knobs are this network's hyperparameters from now on.
+      const pbtDue = o.forceSnnPbt || ds.pbtStage !== stage || !ds.pbtHyper || ds.pbtComplete === false || (A.snnPbtEveryDays > 0 && now - (ds.pbtAt ?? 0) >= A.snnPbtEveryDays * 86_400_000);
+      const pbtDays = lastDays(A.snnPbtDays);
+      const pbt = await run(`snn-${domain}-pbt`, async () => {
+        let r;
+        try {
+          r = await runSnnPbt({ recordings: rec, domain, stage, days: pbtDays, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, log });
+        } catch (e) {
+          if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
+          throw e;
+        }
+        ds.pbtComplete = r.complete;
+        if (!r.complete) return { complete: false, reason: `tournament in progress: ${r.rounds} round(s) done, ${r.remaining} to go`, elite: r.elite };
+        ds.pbtHyper = r.elite.hyper; ds.pbtStage = stage; ds.pbtAt = now;
+        return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr };
+      }, tooFew ?? (pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`)) as { complete?: boolean } | undefined;
+      const hyper = ds.pbtStage === stage ? ds.pbtHyper : undefined;
+      const trainNeeded = Boolean(verdicts) || Boolean(pbt?.complete) || !fs.existsSync(file) || ds.stage !== stage;
       await run(`snn-${domain}-train`, async () => {
         const span = lastDays(A.snnTrainDays);
         const nEval = span.length >= 2 ? Math.max(1, Math.round(span.length * 0.2)) : 0;
         const trainSpan = span.slice(0, span.length - nEval), evalSpan = span.slice(span.length - nEval);
         const cand = path.join(work, `snn_${domain}.candidate.json`);
         const r = await trainSnnMain(argsOf({
-          recordings: rec, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined,
+          recordings: rec, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined, hyper: hyper ? JSON.stringify(hyper) : undefined,
           from: trainSpan[0], to: evalSpan[0] ?? undefined,
           'eval-from': evalSpan[0], 'eval-to': evalSpan.length ? nextDay(evalSpan[evalSpan.length - 1]) : undefined,
         }));
@@ -258,12 +305,14 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       // Prequential backfill, day by day from the last backfilled day (a fresh online network of the
       // promoted stage: it was never fitted offline on these days, so no output saw its own label).
       await run(`snn-${domain}-backfill`, async () => {
-        if (ds.backfillStage !== stage) { for (const f of fs.readdirSync(fill)) fs.rmSync(path.join(fill, f), { force: true }); ds.backfillThrough = undefined; ds.backfillStage = stage; }
+        const params = withSnnHyper(domainParams(domain, { ...DEFAULT_SNN, flags: { ...stageFlags(stage), ...cfg.snn.deferred }, seed: cfg.snn.seed, maxColumns: cfg.snn.maxColumns, readoutEta: cfg.snn.readoutEta }), hyper);
+        const pv = versionHash(params);
+        if (ds.backfillStage !== stage || (ds.backfillVersion && ds.backfillVersion !== pv)) { for (const f of fs.readdirSync(fill)) fs.rmSync(path.join(fill, f), { force: true }); ds.backfillThrough = undefined; ds.backfillStage = stage; }
+        ds.backfillVersion = pv;
         const todo = days.filter((d) => !ds.backfillThrough || d >= ds.backfillThrough);
         let cp: SnnCheckpoint | undefined;
         const cpFile = path.join(fill, 'state.json');
         if (ds.backfillThrough && fs.existsSync(cpFile)) cp = JSON.parse(fs.readFileSync(cpFile, 'utf8'));
-        const params = domainParams(domain, { ...DEFAULT_SNN, flags: { ...stageFlags(stage), ...cfg.snn.deferred }, seed: cfg.snn.seed, maxColumns: cfg.snn.maxColumns, readoutEta: cfg.snn.readoutEta });
         let filled = 0;
         for (const d of todo) {
           // The day before warms up the trackers; outputs are written only for day d.
@@ -402,7 +451,7 @@ async function main() {
   const i = process.argv.indexOf('--only');
   const only = i >= 0 ? (process.argv[i + 1] ?? '').split(',').filter(Boolean) as Step[] : undefined;
   for (const s of only ?? []) if (!STEPS.includes(s)) throw new Error(`unknown step ${s} (steps: ${STEPS.join(', ')})`);
-  const r = await runPipeline({ only, forceAblation: process.argv.includes('--force-ablation'), forceTaNet: process.argv.includes('--force-ta-net') });
+  const r = await runPipeline({ only, forceAblation: process.argv.includes('--force-ablation'), forceTaNet: process.argv.includes('--force-ta-net') || process.argv.includes('--fresh-ta-net'), forceTaNetFresh: process.argv.includes('--fresh-ta-net'), forceSnnPbt: process.argv.includes('--force-snn-pbt') });
   const failed = r.steps.filter((s) => !s.ok);
   console.log(`[pipeline] ${r.steps.length - failed.length}/${r.steps.length} steps ok${failed.length ? `; failed: ${failed.map((f) => f.step).join(', ')}` : ''}`);
   process.exitCode = failed.length ? 1 : 0;
