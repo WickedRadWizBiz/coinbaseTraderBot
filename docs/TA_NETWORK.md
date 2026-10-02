@@ -114,24 +114,34 @@ What it does:
 
 Live, every forecast is also graded against the candles that follow. `tanet_skill_1h` and `tanet_skill_4h` are the network's rolling skill over its last 168 graded calls.
 
-## 3. First real results (Binance spot, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026, ~348,000 hourly rows)
+## 3. Real results of the first tournament (Binance spot, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
 
-The split was: train before 2023-07-27, validation until 2024-12-06, then a blind walk-forward test to 2026-10-01 (about 80,000 forecasts, refitted every 6 months). Boosted trees won the validation comparison for all three heads.
+**Setup:** 85 monthly rounds from mid-2019 to June 2026, 255 member evaluations (trials), and an untouched holdout from 2026-07-02 to 2026-10-02.
 
-| Head | Blind test vs the naive forecast | 95% CI of the improvement | Validated |
-|---|---|---|---|
-| `up_1h` | log loss 0.69193 vs 0.69316; hit rate 52.3%; skill 0.24% | +0.00025 to +0.0021 | **yes** |
-| `up_4h` | log loss 0.69303 vs 0.69322; hit rate 51.7% | −0.0011 to +0.0014 | no: stays silent live |
-| `vol_4h` | mean squared error 0.305 vs 0.403 (24% lower) | +0.088 to +0.108 | **yes** |
+The elite's settings after evolution:
 
-This model ships as `params/ta_net.json`. The server's pipeline retrains it on every Kalshi crypto asset. The pipeline report (`data/models/reports/`) and `GET /api/status` → `treeModels.taNet` show the numbers for the model actually running.
+| Knob | Value |
+|---|---|
+| learning rate | 0.00062 |
+| L2 | 0.00051 |
+| 15m branch weight | 0.25 (the minimum: the tournament mostly switched the 15-minute branch off) |
+| hourly branch weight | 0.66 |
+| daily branch weight | 0.82 |
 
-**Read these honestly:**
-- **The volatility forecast is the strong result.** It knows when the next few hours will be calmer or wilder than the last day. That helps the vol model price contracts and size risk.
-- **1-hour direction is real but small.** A 52% hit rate is statistically significant. Some of it is probably short-term mean reversion in exchange closing prices, which Kalshi's averaged settlement prices partly remove.
-- **4-hour direction showed no reliable edge, so it's switched off.**
+| Check | Result | Passes |
+|---|---|---|
+| Elite lineage's out-of-sample record | 544 independent interactions over 6 regimes, Sharpe −0.14 vs 0.12 expected from luck with 255 trials; deflated Sharpe probability 0.00 | no |
+| Holdout, position rule | Sortino −4.0, max drawdown 29.6%, net −26% | no |
+| Holdout, `up_1h` | log loss 0.6994 vs 0.6932 (coin flip), hit rate 51.6% | no: silent live |
+| Holdout, `up_4h` | log loss 0.7289 vs 0.6936, hit rate 51.4% | no: silent live |
+| Holdout, `vol_4h` | mean squared error 0.349 vs 0.434 (20% lower), CI +0.054 to +0.118 | **yes: speaks live** |
 
-That's why the outputs go to the decision models as features instead of trading directly. Each model keeps them only if they improve its own after-fee validation.
+**What this means:**
+- **The volatility forecast is real.** It held up through a tournament it wasn't selected on, and on three months nobody touched. It feeds the vol model and the perps model as a feature.
+- **No direction edge after costs, so direction is switched off.** Trading the network's 1h/4h direction calls lost money once costs and selection bias were counted. The earlier single-model test showed a 52% hit rate on 1-hour direction. Under this protocol that did not survive: it loses after a 5 bp cost, and with 255 trials counted the deflated Sharpe rejects it outright. This is the protocol doing its job.
+- **Selection was on the trading strategy.** Fitness was the direction strategy, so the vol head rode along rather than being selected on. A future change could add a volatility-scored fitness.
+
+This model ships as `params/ta_net.json`. The server's pipeline continues the tournament on every Kalshi crypto asset (with your Bittrex CSVs adding 2016–2018) and re-runs these checks. The pipeline report (`data/models/reports/`) and `GET /api/status` → `treeModels.taNet` show the numbers for the model actually running.
 
 ## Settings (`bot.env`)
 

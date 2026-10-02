@@ -39,6 +39,6 @@ calendar features read as unavailable.
 
 `ta_net.json` is the TA network (`bot/ta/taNet.ts`, docs/TA_NETWORK.md): the elite of a tournament
 of three networks trained walk-forward with `npm run research:ta-net` (docs/EVOLUTION.md). Only
-heads that passed the holdout and hurdles speak live. The server's pipeline continues the
+heads that passed the holdout and hurdles speak live (in this file: `vol_4h` only; the direction heads failed). The server's pipeline continues the
 tournament on every crypto asset Kalshi lists and promotes the result to `data/models/ta_net.json`,
 which is preferred over this file.
