@@ -25,6 +25,8 @@ export class SpotCandleFeed extends EventEmitter {
     private readonly baseUrl = 'https://api.exchange.coinbase.com',
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly now: () => number = Date.now,
+    /** Live taker order flow; when it covered a whole bar the row carries its taker-buy volume. */
+    private readonly flow?: { takerBuy(asset: string, ts: number, periodMs: number, volume: number): number | undefined },
   ) { super(); }
 
   start(): void {
@@ -50,7 +52,7 @@ export class SpotCandleFeed extends EventEmitter {
           if ((this.next.get(key) ?? 0) > now) continue;
           this.next.set(key, now + EVERY_MS[tf]!);
           try {
-            const rows = await this.fetchCandles(asset, tf);
+            const rows = this.withFlow(asset, tf, await this.fetchCandles(asset, tf));
             if (rows.length) this.emit('candles', { asset, tf, rows, ts: this.now() });
           } catch (e) {
             if ((e as Error).message.includes('HTTP 404')) { this.dead.add(asset); log.warn(`no Coinbase ${asset}-USD product: TA disabled for ${asset}`); break; }
@@ -61,6 +63,12 @@ export class SpotCandleFeed extends EventEmitter {
     } finally {
       this.busy = false;
     }
+  }
+
+  private withFlow(asset: string, tf: Timeframe, rows: CandleRow[]): CandleRow[] {
+    const g = GRANULARITY[tf];
+    if (!this.flow || !g || g < 900) return rows;
+    return rows.map((r) => { const tb = this.flow!.takerBuy(asset, r[0] * 1000, g * 1000, r[5]); return tb === undefined ? r : [r[0], r[1], r[2], r[3], r[4], r[5], tb] as CandleRow; });
   }
 
   async fetchCandles(asset: string, tf: Timeframe): Promise<CandleRow[]> {

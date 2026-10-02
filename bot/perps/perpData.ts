@@ -115,12 +115,26 @@ export function nextFundingTime(now: number): number {
 export class PerpState {
   readonly mid = new IndexTracker('perp', 5 * 3_600_000, 300);
   readonly oi = new IndexTracker('perp-oi', 5 * 3_600_000, 300);
+  /** Funding-rate estimates over the last 10 hours (they can be negative: not an IndexTracker). */
+  readonly funding: Array<{ ts: number; rate: number }> = [];
   latest?: PerpSnapshot;
+
+  /** Funding estimate at or before `ts` (undefined when none is that old). */
+  fundingAt(ts: number): number | undefined {
+    for (let i = this.funding.length - 1; i >= 0; i--) if (this.funding[i].ts <= ts) return this.funding[i].rate;
+    return undefined;
+  }
 
   apply(s: PerpSnapshot): void {
     const m = s.bid !== undefined && s.ask !== undefined && s.ask >= s.bid ? (s.bid + s.ask) / 2 : s.mark ?? s.last;
     if (m !== undefined && m > 0) this.mid.add(m, s.ts);
     if (s.openInterest !== undefined && s.openInterest > 0) this.oi.add(s.openInterest, s.ts);
+    const lastF = this.funding[this.funding.length - 1];
+    // At most one point a minute (the current value is always in `latest`), at most 600 in 10 hours.
+    if (s.fundingRate !== undefined && Number.isFinite(s.fundingRate) && (!lastF || s.ts - lastF.ts >= 60_000)) {
+      this.funding.push({ ts: s.ts, rate: s.fundingRate });
+      while (this.funding.length && this.funding[0].ts < s.ts - 10 * 3_600_000) this.funding.shift();
+    }
     this.latest = { ...this.latest, ...Object.fromEntries(Object.entries(s).filter(([, v]) => v !== undefined)) } as PerpSnapshot;
   }
 

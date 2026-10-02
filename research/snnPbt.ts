@@ -75,7 +75,7 @@ export interface SnnPbtResult {
 
 export async function runSnnPbt(o: {
   recordings: string; domain: 'crypto' | 'perps'; stage: Stage; days: string[]; initDays?: number; evalDays?: number;
-  model?: MetaModel; seed?: number; stateDir?: string; maxRounds?: number; fresh?: boolean; log?: (m: string) => void;
+  model?: MetaModel; seed?: number; stateDir?: string; maxRounds?: number; restartEvery?: number; fresh?: boolean; log?: (m: string) => void;
 }): Promise<SnnPbtResult> {
   const log = o.log ?? (() => {});
   const initDays = o.initDays ?? 3, evalDays = o.evalDays ?? 1;
@@ -125,7 +125,7 @@ export async function runSnnPbt(o: {
     fs.writeFileSync(stateFile!, JSON.stringify(st));
   };
   const res = await runPbt<MemberState>({
-    base: snnHyperOf(base), spec: SNN_HYPER_SPEC, rounds, seed: o.seed ?? 17, resume, exploreAfterLast: true, log,
+    base: snnHyperOf(base), spec: SNN_HYPER_SPEC, rounds, seed: o.seed ?? 17, resume, exploreAfterLast: true, restartEvery: o.restartEvery ?? 0, log,
     hooks: {
       init: () => ({ through: start }),
       clone: (s) => ({ through: s.through, cp: s.cp ? JSON.parse(JSON.stringify(s.cp)) : undefined }),
@@ -157,7 +157,7 @@ export async function snnPbtMain(argOf: (k: string, d: string) => string = cliAr
   const res = await runSnnPbt({
     recordings: dir, domain, stage: argOf('stage', 'S5') as Stage, days: days.slice(-n), initDays: Number(argOf('init-days', '3')), evalDays: Number(argOf('eval-days', '1')),
     model: modelPath && fs.existsSync(modelPath) ? MetaModel.load(modelPath) : undefined, stateDir: argOf('state', '') || undefined,
-    maxRounds: Number(argOf('max-rounds', '0')) || undefined, fresh: argOf('fresh', '') === 'true', log: (m) => console.log(`[snn-pbt] ${m}`),
+    maxRounds: Number(argOf('max-rounds', '0')) || undefined, restartEvery: Number(argOf('restart-every', '0')), fresh: argOf('fresh', '') === 'true', log: (m) => console.log(`[snn-pbt] ${m}`),
   });
   const out = argOf('out', '');
   if (out) { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify(res, null, 1)); }

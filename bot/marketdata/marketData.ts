@@ -27,6 +27,7 @@ import { PerpFeed } from '../perps/perpFeed';
 import type { CandleRow } from '../ta/candleStore';
 import type { Timeframe } from '../ta/knowledge';
 import { SpotCandleFeed } from './spotCandles';
+import { TakerFlowFeed } from './takerFlow';
 import { KalshiPerpsRest } from '../perps/perpRest';
 import type { PerpSnapshot } from '../perps/perpData';
 import { contractKind, type ContractTerms, type MarketKind } from '../model/fairValue';
@@ -81,6 +82,7 @@ export class MarketData extends EventEmitter {
   private readonly tradeCursor = new Map<string, number>();
   private proxyWs: WebSocket | null = null;
   private candleFeed?: SpotCandleFeed;
+  private takerFlow?: TakerFlowFeed;
   indexSource: 'kalshi' | 'proxy' | 'none' = 'none';
   wsConnected = false;
 
@@ -129,7 +131,9 @@ export class MarketData extends EventEmitter {
       this.dominance.start();
     }
     if (this.cfg.taCandles) {
-      this.candleFeed = new SpotCandleFeed([...this.index.keys()], this.cfg.coinbaseRestUrl);
+      // Live order flow (Coinbase public trades) so live candles carry taker-buy volume like the history.
+      if (this.cfg.takerFlow) { this.takerFlow = new TakerFlowFeed([...this.index.keys()], this.cfg.coinbaseWsUrl); this.takerFlow.start(); }
+      this.candleFeed = new SpotCandleFeed([...this.index.keys()], this.cfg.coinbaseRestUrl, fetch, Date.now, this.takerFlow);
       this.candleFeed.on('candles', (e: { asset: string; tf: Timeframe; rows: CandleRow[]; ts: number }) => {
         const fresh = this.features.onCandles(e.asset, e.tf, e.rows, e.ts);
         if (fresh.length) this.recorder.write('candles', { asset: e.asset, tf: e.tf, rows: fresh, ts: e.ts });
@@ -165,6 +169,7 @@ export class MarketData extends EventEmitter {
     this.dominance?.stop();
     this.perpFeed?.stop();
     this.candleFeed?.stop();
+    this.takerFlow?.stop();
     this.recorder.close();
   }
 

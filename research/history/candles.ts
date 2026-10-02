@@ -38,8 +38,12 @@ export function readSeries(file: string): Candle[] {
   const out: Candle[] = [];
   for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
     if (!line || line.startsWith('ts')) continue;
-    const [ts, o, h, l, c, v] = line.split(',').map(Number);
-    if (Number.isFinite(ts) && Number.isFinite(c)) out.push({ ts, o, h, l, c, v: Number.isFinite(v) ? v : 0 });
+    const f = line.split(',');
+    const [ts, o, h, l, c, v] = f.map(Number);
+    if (!Number.isFinite(ts) || !Number.isFinite(c)) continue;
+    const bar: Candle = { ts, o, h, l, c, v: Number.isFinite(v) ? v : 0 };
+    if (f[6] !== undefined && f[6] !== '' && Number.isFinite(Number(f[6]))) bar.tb = Number(f[6]);
+    out.push(bar);
   }
   return out;
 }
@@ -49,7 +53,8 @@ const fmt = (x: number) => (Number.isInteger(x) ? String(x) : String(+x.toPrecis
 export function writeSeries(file: string, cs: Candle[]): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  const lines = ['ts,o,h,l,c,v', ...cs.map((c) => `${c.ts},${fmt(c.o)},${fmt(c.h)},${fmt(c.l)},${fmt(c.c)},${fmt(c.v)}`)];
+  const anyTb = cs.some((c) => c.tb !== undefined);
+  const lines = [anyTb ? 'ts,o,h,l,c,v,tb' : 'ts,o,h,l,c,v', ...cs.map((c) => `${c.ts},${fmt(c.o)},${fmt(c.h)},${fmt(c.l)},${fmt(c.c)},${fmt(c.v)}${anyTb ? `,${c.tb !== undefined ? fmt(c.tb) : ''}` : ''}`)];
   fs.writeFileSync(tmp, `${lines.join('\n')}\n`);
   fs.renameSync(tmp, file);
 }
@@ -111,7 +116,11 @@ export function aggregateCandles(cs: Candle[], fromMs: number, ms: number): Cand
     const start = Math.floor(cs[i].ts / ms) * ms;
     let j = i, n = 0, h = -Infinity, l = Infinity, v = 0;
     while (j < cs.length && cs[j].ts < start + ms) { h = Math.max(h, cs[j].h); l = Math.min(l, cs[j].l); v += cs[j].v; n++; j++; }
-    if (n === per && cs[i].ts === start) out.push({ ts: start, o: cs[i].o, h, l, c: cs[j - 1].c, v });
+    if (n === per && cs[i].ts === start) {
+      const g = cs.slice(i, j);
+      const tb = g.every((x) => x.tb !== undefined) ? g.reduce((s, x) => s + x.tb!, 0) : undefined;
+      out.push({ ts: start, o: cs[i].o, h, l, c: cs[j - 1].c, v, ...(tb !== undefined ? { tb } : {}) });
+    }
     i = j;
   }
   return out;
@@ -152,7 +161,12 @@ export function loadSeries(dir: string, asset: string, tf: HistTf, priority = DE
     }
     if (cs.length) parts.push({ source, candles: cs });
   }
-  return spliceSources(parts, priority);
+  const spliced = spliceSources(parts, priority);
+  // Order flow: a bar from a source without the taker split (Coinbase REST, Bittrex, Yahoo) borrows
+  // the taker-buy SHARE of the same bar from any source that has it (tb = v x donor tb / donor v).
+  const donors = parts.flatMap((p) => p.candles.filter((c) => c.tb !== undefined && c.v > 0)).reduce((m, c) => (m.has(c.ts) ? m : m.set(c.ts, c.tb! / c.v)), new Map<number, number>());
+  if (donors.size) spliced.candles = spliced.candles.map((c) => (c.tb === undefined && donors.has(c.ts) ? { ...c, tb: c.v * donors.get(c.ts)! } : c));
+  return spliced;
 }
 
 /** Candles per library timeframe for one asset (1h base plus 4h and 1d; 15m when stored). */
@@ -192,7 +206,10 @@ export function cleanAndValidate(cs: Candle[], tf: HistTf, jumpLimit = tf === '1
     if (seen.has(c.ts)) { duplicate++; continue; }
     seen.add(c.ts);
     if (c.ts % ms !== 0) misaligned++;
-    ok.push({ ...c, v: Number.isFinite(c.v) && c.v >= 0 ? c.v : 0 });
+    const v = Number.isFinite(c.v) && c.v >= 0 ? c.v : 0;
+    const bar: Candle = { ...c, v };
+    if (c.tb !== undefined) { if (Number.isFinite(c.tb) && c.tb >= 0) bar.tb = Math.min(c.tb, v); else delete bar.tb; }
+    ok.push(bar);
   }
   const gapsList: Array<{ from: number; to: number; bars: number }> = [];
   const jumps: Array<{ ts: string; ret: number }> = [];

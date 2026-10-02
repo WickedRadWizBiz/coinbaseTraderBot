@@ -1,29 +1,31 @@
-// Multi-branch TA network: hand-written backprop matches finite differences for every parameter.
+// Multi-branch TA network: hand-written backprop matches finite differences for every parameter
+// (fractal blocks with drop-path masks, GRU, attention, merge, branch drops); the fractal block's
+// structure (columns of depth 1/2/4 seeing 3/7/31 bars).
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { branchBackward, branchForward, branchLayout, branchLoss, initBranchParams, type BranchDims, type BranchInput } from '../bot/ta/branchNet';
+import { branchBackward, branchForward, branchLayout, branchLoss, fractalPlan, initBranchParams, type BranchDims, type BranchDrop, type BranchInput } from '../bot/ta/branchNet';
+import { buildFractal, columnMask, columnReach, localDropMask } from '../bot/ta/fractal';
 
-const dims: BranchDims = { mT: 6, mF: 3, kW: 3, mC: 2, tT: 4, tF: 5, tH: 3, dT: 5, dF: 4, dE: 3, hM: 4, nOut: 3 };
+const dims: BranchDims = { mT: 10, mF: 3, mC: 2, sT: 9, sF: 2, sC: 2, fDepth: 3, tT: 4, tF: 5, tH: 3, dT: 5, dF: 4, dE: 3, hM: 4, nOut: 3 };
 
 function rand(n: number, seed: number): Float64Array {
   let s = seed;
   return Float64Array.from({ length: n }, () => { s = (s * 16807) % 2147483647; return (s / 2147483647) * 2 - 1; });
 }
+const input = (): BranchInput => ({ micro: rand(dims.mT * dims.mF, 2), swing: rand(dims.sT * dims.sF, 6), trend: rand(dims.tT * dims.tF, 3), macro: rand(dims.dT * dims.dF, 4) });
+const g = { micro: 0.9, swing: 1.2, trend: 1.1, macro: 0.7 };
 
-test('analytic gradients match finite differences (conv, GRU, attention, merge, loss)', () => {
+function gradCheck(drop?: BranchDrop) {
   const { size, layout } = branchLayout(dims);
   const p = initBranchParams(dims, 5);
-  // Non-zero output layer so every path carries gradient.
   const r = rand(size, 9);
   for (let i = 0; i < size; i++) p[i] += 0.3 * r[i];
-  const x: BranchInput = { micro: rand(dims.mT * dims.mF, 2), trend: rand(dims.tT * dims.tF, 3), macro: rand(dims.dT * dims.dF, 4) };
-  const g = { micro: 0.9, trend: 1.1, macro: 0.7 };
+  const x = input();
   const y: [number, number, number] = [1, 0, 0.4];
-  const lossAt = (q: Float64Array) => branchLoss(branchForward(dims, q, g, x).out, y, 0.5).loss;
-  const f = branchForward(dims, p, g, x);
-  const { dOut } = branchLoss(f.out, y, 0.5);
+  const lossAt = (q: Float64Array) => branchLoss(branchForward(dims, q, g, x, undefined, drop).out, y, 0.5).loss;
+  const f = branchForward(dims, p, g, x, undefined, drop);
   const grad = new Float64Array(size);
-  branchBackward(dims, p, g, x, f.cache, dOut, grad);
+  branchBackward(dims, p, g, x, f.cache, branchLoss(f.out, y, 0.5).dOut, grad);
   let worst = { name: '', i: 0, rel: 0 };
   for (const [name, { off, n }] of Object.entries(layout)) {
     for (let i = 0; i < n; i++) {
@@ -35,13 +37,33 @@ test('analytic gradients match finite differences (conv, GRU, attention, merge, 
       if (rel > worst.rel) worst = { name, i, rel };
     }
   }
-  assert.ok(worst.rel < 1e-4, `worst relative error ${worst.rel} at ${worst.name}[${worst.i}]`);
+  return worst;
+}
+
+test('fractal block: columns of 1, 2 and 4 convolutions seeing 3, 7 and 31 bars; masks', () => {
+  const spec = { depth: 3, channels: 2, kernel: 3 };
+  const plan = buildFractal(spec);
+  assert.equal(plan.convs.length, 7);
+  assert.deepEqual([1, 2, 3].map((c) => plan.convs.filter((x) => x.col === c).length), [1, 2, 4]);
+  assert.deepEqual(columnReach(plan, spec), [3, 7, 31]);
+  assert.deepEqual([...columnMask(plan, 1).values()], [[true, false]]);
+  assert.ok([...columnMask(plan, 3).values()].every(([a, b]) => !a && b));
+  let s = 1;
+  const m = localDropMask(plan, 0.9, () => { s = (s * 16807) % 2147483647; return s / 2147483647; });
+  assert.ok([...m.values()].every(([a, b]) => a || b), 'a join always keeps an input');
+});
+
+test('analytic gradients match finite differences: all paths, drop-path masks, branch drops', () => {
+  const all = gradCheck();
+  assert.ok(all.rel < 1e-4, `worst relative error ${all.rel} at ${all.name}[${all.i}]`);
+  const plan = fractalPlan({ depth: 3, channels: 2, kernel: 3 });
+  const dropped = gradCheck({ micro: columnMask(plan, 3), swing: new Map([[0, [true, false]], [1, [false, true]], [2, [true, true]]]), branches: [true, true, false, true], keep: 0.8 });
+  assert.ok(dropped.rel < 1e-4, `with drop-path: worst relative error ${dropped.rel} at ${dropped.name}[${dropped.i}]`);
 });
 
 test('identical seeds give identical networks; an untrained network predicts the base rate', () => {
   const a = initBranchParams(dims, 7), b = initBranchParams(dims, 7);
   assert.deepEqual(Array.from(a), Array.from(b));
-  const x: BranchInput = { micro: rand(18, 1), trend: rand(20, 2), macro: rand(20, 3) };
-  const o = branchForward(dims, a, { micro: 1, trend: 1, macro: 1 }, x).out;
+  const o = branchForward(dims, a, { micro: 1, swing: 1, trend: 1, macro: 1 }, input()).out;
   assert.deepEqual(Array.from(o), [0, 0, 0]);
 });

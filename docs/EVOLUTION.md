@@ -18,6 +18,7 @@ The tournament follows DeepMind's population-based training, adapted to time ser
 | Exploit | Each member trains on the round's training block (past data only). |
 | Evaluate | Each member is scored on the **next** block, which none of them has seen. |
 | Explore | **Elite** (best fitness) survives untouched. **Culled** (worst) throws away its weights and becomes an exact copy of the elite. The **middle** member and the new copy get mutated: each knob is multiplied by 0.8 or 1.25, within its limits. |
+| Explore (exploration member) | Every N rounds (`TA_NET_RESTART_EVERY` 6, `AUTO_TRAIN_SNN_PBT_RESTART_EVERY` 4) the culled member does **not** copy the elite. It restarts from scratch: new weights, every knob drawn at random (log-uniform) within its limits, its own lineage and an empty record. Only the middle member is mutated that round. Without this, all three members soon descend from one ancestor and the population can get stuck in that ancestor's local optimum. The elite still survives, so a restart costs nothing if the newcomer is worse. |
 | Roll forward | The blocks advance and the round repeats. |
 
 Every member keeps a record of its evaluation windows. A copy inherits the elite's record, so the final elite's record is the out-of-sample history of its whole lineage. Every evaluation of every member counts as a **trial** for the deflated Sharpe ratio (Phase 5).
@@ -29,7 +30,7 @@ Every member keeps a record of its evaluation windows. A copy inherits the elite
 **TA network** (`research/trainTaNet.ts`), over years of exchange history:
 - **Blocks:** a rolling 12-month training block (`TA_NET_TRAIN_MONTHS`, 12–18 recommended), a 1-month evaluation block, rolled forward one month at a time.
 - **What it trades in evaluation:** its own position rule. That is quarter-Kelly on its forecasts, with the volatility forecast setting the risk scale, a 5 bp cost on turnover, and equal capital per asset.
-- **Mutated knobs:** learning rate, L2 penalty, the weight of each branch (15-minute, hourly, daily), and the weight of the volatility head.
+- **Mutated knobs:** learning rate, L2 penalty, the weight of each branch (15-minute, hourly swing, hourly TA, daily), the weight of the volatility head, and the drop-path probabilities (per join, per branch).
 
 **Crypto and perps SNNs** (`research/snnPbt.ts`), over the recordings. Only days or weeks exist, so the blocks are measured in days:
 - **Blocks:** 3 days of initial learning, then 1-day evaluation blocks. The networks learn online, so each evaluation day is also prequential: every output is made before the label that could train on it.
@@ -50,15 +51,16 @@ Every member keeps a record of its evaluation windows. A copy inherits the elite
 
 ## Phase 2: multi-timeframe network (`bot/ta/branchNet.ts`, TA network)
 
-The three granularities feed three separate branches. They are never flattened into one vector.
+The granularities feed four separate branches. They are never flattened into one vector.
 
 | Branch | Input | Layer | Purpose |
 |---|---|---|---|
-| Micro | last 32 fifteen-minute bars (return, range, close position, volume) | 1-D convolution, kernel 3, mean + last pooling | microstructure, noise filtering |
+| Micro | last 32 fifteen-minute bars (return, range, close position, volume, taker flow) | fractal convolution block (columns see 3 / 7 / 31 bars), mean + last pooling | microstructure, noise filtering |
+| Swing | last 48 raw hourly bars (same readings) | fractal convolution block | candle patterns, short structure, swings |
 | Trend | last 12 hourly steps of the TA library (1h + 4h readings, confluences, returns, calendar) | GRU | intraday and multi-day momentum |
 | Macro | last 30 daily steps (daily TA readings, daily returns, volatility) | attention, with today as the query | regime, support and resistance |
 
-The three outputs are concatenated, each scaled by its branch weight (mutated by the tournament), then go through a dense layer. That layer has three outputs: P(up in 1h), P(up in 4h), and the 4-hour volatility ratio. Backpropagation is hand-written and checked against finite differences for every parameter (`tests/branchNet.test.ts`).
+The fractal blocks, drop-path and the per-pattern report are described in docs/TA_NETWORK.md. The four outputs are concatenated, each scaled by its branch weight (mutated by the tournament), then go through a dense layer. That layer has three outputs: P(up in 1h), P(up in 4h), and the 4-hour volatility ratio. Backpropagation is hand-written and checked against finite differences for every parameter (`tests/branchNet.test.ts`).
 
 The SNNs keep their spiking architecture; their multi-timeframe inputs come through their columns.
 
@@ -106,6 +108,7 @@ Each report shows results per regime. History before the Binance data starts (Au
 | `TA_NET_MAX_ROUNDS_PER_RUN` | `36` | spread the first tournament over daily runs (0 = all at once) |
 | `AUTO_TRAIN_SNN_PBT_DAYS` / `AUTO_TRAIN_SNN_PBT_INIT_DAYS` | `7` / `3` | SNN tournament span and initial learning block |
 | `AUTO_TRAIN_SNN_PBT_EVERY_DAYS` / `AUTO_TRAIN_SNN_PBT_MAX_ROUNDS` | `30` / `0` | re-run the SNN tournaments monthly; rounds per run |
+| `TA_NET_RESTART_EVERY` / `AUTO_TRAIN_SNN_PBT_RESTART_EVERY` | `6` / `4` | exploration member: every N rounds the worst network restarts from scratch (0 = never) |
 | `SNN_TENNIS_POPULATION` / `SNN_TENNIS_POPULATION_SETTLES` | `true` / `30` | live tennis tournament |
 | `PORTFOLIO_KELLY` / `PORTFOLIO_KELLY_SHRINK` | `true` / `0.5` | portfolio cap on crypto orders |
 | `PERP_LOCKED_VOL_MULT` | `1` | perp volatility inflation per unit of locked capital |

@@ -1,20 +1,29 @@
-// Multi-timeframe network for the TA network (bot/ta/taNet.ts). Three branches read three
-// granularities WITHOUT flattening them into one vector, then merge:
+// Multi-timeframe network for the TA network (bot/ta/taNet.ts). Four branches read four views of
+// the market WITHOUT flattening them into one vector, then merge:
 //
-//   micro  15-minute bars  -> 1-D convolution (kernel 3) + mean/last pooling   microstructure, noise filter
-//   trend  hourly TA steps -> GRU over the last 12 hours                        intraday / multi-day momentum
-//   macro  daily TA steps  -> attention over the last 30 days (query = today)   regime, support/resistance
+//   micro  last 32 fifteen-minute bars -> fractal convolution block (columns see 3 / 7 / 31 bars)
+//   swing  last 48 hourly bars          -> fractal convolution block (candles / structure / swings)
+//   trend  last 12 hourly TA steps      -> GRU (the whole TA library, step by step)
+//   macro  last 30 daily TA steps       -> attention, today as the query (regime, levels)
 //
-//   concat(gMicro*micro, gTrend*trend, gMacro*macro) -> dense tanh -> [logit up 1h, logit up 4h, vol 4h]
+//   concat(g x branch outputs) -> dense tanh -> [logit up 1h, logit up 4h, vol 4h]
 //
-// The branch gates g* are hyperparameters the population tournament mutates ("shift weight between
-// the 15m and daily branches"). All parameters live in one flat Float64Array (cheap to clone, one
-// Adam state). Forward runs live; forward + backward (hand-written, checked against finite
-// differences in tests/branchNet.test.ts) run in training.
+// Fractal blocks (bot/ta/fractal.ts) are FractalNet-style: parallel columns of causal convolutions
+// of depth 1, 2 and 4 (dilated), joined by averaging, regularised by drop-path. Branch gates g and
+// the drop-path rates are hyperparameters the population tournament mutates; whole branches are
+// also dropped during training (inverted scaling), so no branch can carry the others. All
+// parameters live in one flat Float64Array. Backward is hand-written and checked against finite
+// differences in tests/branchNet.test.ts.
+
+import { buildFractal, fractalBackward, fractalForward, type FCache, type FractalPlan, type FractalSpec, type JoinMask } from './fractal';
 
 export interface BranchDims {
-  /** micro: steps, features per step, conv kernel width, filters. */
-  mT: number; mF: number; kW: number; mC: number;
+  /** micro: 15m steps, features per step, fractal channels. */
+  mT: number; mF: number; mC: number;
+  /** swing: hourly bars, features per bar, fractal channels. */
+  sT: number; sF: number; sC: number;
+  /** fractal depth (3 = columns of 1, 2, 4 convolutions). */
+  fDepth: number;
   /** trend: steps, features per step, GRU hidden size. */
   tT: number; tF: number; tH: number;
   /** macro: steps (days), features per day, embedding size. */
@@ -23,22 +32,39 @@ export interface BranchDims {
   hM: number; nOut: number;
 }
 
-export interface BranchGates { micro: number; trend: number; macro: number }
+export interface BranchGates { micro: number; swing: number; trend: number; macro: number }
 
 interface Layout { [name: string]: { off: number; n: number } }
+
+const KERNEL = 3;
+export const fractalSpecs = (d: BranchDims): { micro: FractalSpec; swing: FractalSpec } => ({
+  micro: { depth: d.fDepth, channels: d.mC, kernel: KERNEL }, swing: { depth: d.fDepth, channels: d.sC, kernel: KERNEL },
+});
+const planCache = new Map<string, FractalPlan>();
+export function fractalPlan(spec: FractalSpec): FractalPlan {
+  const k = `${spec.depth}|${spec.channels}|${spec.kernel}`;
+  let p = planCache.get(k);
+  if (!p) { p = buildFractal(spec); planCache.set(k, p); }
+  return p;
+}
 
 export function branchLayout(d: BranchDims): { layout: Layout; size: number } {
   const L: Layout = {};
   let off = 0;
   const add = (name: string, n: number) => { L[name] = { off, n }; off += n; };
-  add('Wc', d.mC * d.kW * d.mF); add('bc', d.mC);
+  const fs = fractalSpecs(d);
+  add('Wpm', d.mC * d.mF); add('bpm', d.mC); add('Fm', fractalPlan(fs.micro).params);
+  add('Wps', d.sC * d.sF); add('bps', d.sC); add('Fs', fractalPlan(fs.swing).params);
   for (const g of ['z', 'r', 'h']) { add(`W${g}`, d.tH * d.tF); add(`U${g}`, d.tH * d.tH); add(`b${g}`, d.tH); }
   add('We', d.dE * d.dF); add('be', d.dE); add('Wq', d.dE * d.dE); add('Wk', d.dE * d.dE);
-  const nIn = 2 * d.mC + d.tH + 2 * d.dE;
+  const nIn = mergeWidth(d);
   add('W1', d.hM * nIn); add('b1', d.hM);
   add('W2', d.nOut * d.hM); add('b2', d.nOut);
   return { layout: L, size: off };
 }
+
+const mergeWidth = (d: BranchDims) => 2 * d.mC + 2 * d.sC + d.tH + 2 * d.dE;
+const convOff = (base: number, ch: number) => (id: number) => base + id * (ch * KERNEL * ch + ch);
 
 /** Deterministic initialisation (same seed -> identical networks). */
 export function initBranchParams(d: BranchDims, seed: number): Float64Array {
@@ -46,11 +72,16 @@ export function initBranchParams(d: BranchDims, seed: number): Float64Array {
   const p = new Float64Array(size);
   let s = seed >>> 0 || 1;
   const r = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
-  const fill = (name: string, fanIn: number) => { const { off, n } = layout[name]; const a = 1 / Math.sqrt(fanIn); for (let i = 0; i < n; i++) p[off + i] = (r() * 2 - 1) * a; };
-  fill('Wc', d.kW * d.mF);
+  const fill = (name: string, fanIn: number, from = 0, n?: number) => { const { off } = layout[name]; const len = n ?? layout[name].n; const a = 1 / Math.sqrt(fanIn); for (let i = 0; i < len; i++) p[off + from + i] = (r() * 2 - 1) * a; };
+  fill('Wpm', d.mF); fill('Wps', d.sF);
+  for (const [name, ch] of [['Fm', d.mC], ['Fs', d.sC]] as const) {
+    const per = ch * KERNEL * ch + ch;
+    const n = layout[name].n / per;
+    for (let c = 0; c < n; c++) fill(name, KERNEL * ch, c * per, ch * KERNEL * ch);
+  }
   for (const g of ['z', 'r', 'h']) { fill(`W${g}`, d.tF); fill(`U${g}`, d.tH); }
   fill('We', d.dF); fill('Wq', d.dE); fill('Wk', d.dE);
-  fill('W1', 2 * d.mC + d.tH + 2 * d.dE);
+  fill('W1', mergeWidth(d));
   // Output layer starts at zero: an untrained network predicts the base rate / zero vol change.
   return p;
 }
@@ -58,40 +89,69 @@ export function initBranchParams(d: BranchDims, seed: number): Float64Array {
 export interface BranchInput {
   /** mT x mF (row-major), normalised; missing -> 0. */
   micro: Float64Array;
+  /** sT x sF hourly bars, oldest first. */
+  swing: Float64Array;
   /** tT x tF, oldest first. */
   trend: Float64Array;
   /** dT x dF, oldest first. */
   macro: Float64Array;
 }
 
+/** Training-time structure noise: drop-path masks inside the fractal blocks and whole-branch drops. */
+export interface BranchDrop {
+  micro?: JoinMask;
+  swing?: JoinMask;
+  /** Kept branches [micro, swing, trend, macro] and the keep probability (inverted scaling). */
+  branches?: [boolean, boolean, boolean, boolean];
+  keep?: number;
+}
+
 const sig = (x: number) => 1 / (1 + Math.exp(-x));
 
 export interface BranchCache {
-  conv: Float64Array; u: Float64Array; m: Float64Array; out: Float64Array;
+  pm: Float64Array; fm: Float64Array; cm: FCache;
+  ps: Float64Array; fsy: Float64Array; cs: FCache;
+  u: Float64Array; m: Float64Array; out: Float64Array;
   gh: Float64Array; gz: Float64Array; gr: Float64Array; ghh: Float64Array;
   e: Float64Array; q: Float64Array; k: Float64Array; a: Float64Array;
+  scale: [number, number, number, number];
+}
+
+/** 1x1 input projection + tanh: raw T x F -> T x C. */
+function project(p: Float64Array, wOff: number, bOff: number, x: Float64Array, T: number, F: number, C: number): Float64Array {
+  const y = new Float64Array(T * C);
+  for (let t = 0; t < T; t++) for (let c = 0; c < C; c++) {
+    let a = p[bOff + c];
+    for (let f = 0; f < F; f++) a += p[wOff + c * F + f] * x[t * F + f];
+    y[t * C + c] = Math.tanh(a);
+  }
+  return y;
 }
 
 /** Forward pass; returns [logit up1h, logit up4h, vol4h] and the cache for backward. */
-export function branchForward(d: BranchDims, p: Float64Array, g: BranchGates, x: BranchInput, L = branchLayout(d).layout): { out: Float64Array; cache: BranchCache } {
-  const P = d.mT - d.kW + 1;
-  // micro: conv + tanh, pooled (mean over positions, last position)
-  const conv = new Float64Array(P * d.mC);
-  const Wc = L.Wc.off, bc = L.bc.off;
-  for (let t = 0; t < P; t++) for (let c = 0; c < d.mC; c++) {
-    let a = p[bc + c];
-    const wb = Wc + c * d.kW * d.mF;
-    for (let k = 0; k < d.kW; k++) { const xb = (t + k) * d.mF, wk = wb + k * d.mF; for (let f = 0; f < d.mF; f++) a += p[wk + f] * x.micro[xb + f]; }
-    conv[t * d.mC + c] = Math.tanh(a);
-  }
-  const nIn = 2 * d.mC + d.tH + 2 * d.dE;
+export function branchForward(d: BranchDims, p: Float64Array, g: BranchGates, x: BranchInput, L = branchLayout(d).layout, drop?: BranchDrop): { out: Float64Array; cache: BranchCache } {
+  const fs = fractalSpecs(d);
+  const keep = drop?.keep ?? 1;
+  const on = drop?.branches ?? [true, true, true, true];
+  const scale = on.map((b, i) => (b ? [g.micro, g.swing, g.trend, g.macro][i] / keep : 0)) as [number, number, number, number];
+  const nIn = mergeWidth(d);
   const u = new Float64Array(nIn);
-  for (let c = 0; c < d.mC; c++) {
-    let s = 0;
-    for (let t = 0; t < P; t++) s += conv[t * d.mC + c];
-    u[c] = g.micro * (s / P);
-    u[d.mC + c] = g.micro * conv[(P - 1) * d.mC + c];
-  }
+  // micro + swing: projection -> fractal block -> pooled (mean over bars, last bar)
+  const pm = project(p, L.Wpm.off, L.bpm.off, x.micro, d.mT, d.mF, d.mC);
+  const rm = fractalForward(fractalPlan(fs.micro), fs.micro, p, convOff(L.Fm.off, d.mC), pm, d.mT, drop?.micro);
+  const ps = project(p, L.Wps.off, L.bps.off, x.swing, d.sT, d.sF, d.sC);
+  const rs = fractalForward(fractalPlan(fs.swing), fs.swing, p, convOff(L.Fs.off, d.sC), ps, d.sT, drop?.swing);
+  const pool = (y: Float64Array, T: number, C: number, at: number, sc: number) => {
+    for (let c = 0; c < C; c++) {
+      let s = 0;
+      for (let t = 0; t < T; t++) s += y[t * C + c];
+      u[at + c] = sc * (s / T);
+      u[at + C + c] = sc * y[(T - 1) * C + c];
+    }
+  };
+  pool(rm.y, d.mT, d.mC, 0, scale[0]);
+  pool(rs.y, d.sT, d.sC, 2 * d.mC, scale[1]);
+  const tOff = 2 * d.mC + 2 * d.sC;
   // trend: GRU
   const H = d.tH, F = d.tF;
   const gh = new Float64Array((d.tT + 1) * H), gz = new Float64Array(d.tT * H), gr = new Float64Array(d.tT * H), ghh = new Float64Array(d.tT * H);
@@ -115,7 +175,7 @@ export function branchForward(d: BranchDims, p: Float64Array, g: BranchGates, x:
       gh[(s + 1) * H + j] = (1 - z) * gh[hp + j] + z * hh;
     }
   }
-  for (let j = 0; j < H; j++) u[2 * d.mC + j] = g.trend * gh[d.tT * H + j];
+  for (let j = 0; j < H; j++) u[tOff + j] = scale[2] * gh[d.tT * H + j];
   // macro: embeddings, attention with today's embedding as the query
   const E = d.dE, D = d.dF;
   const e = new Float64Array(d.dT * E), q = new Float64Array(E), k = new Float64Array(d.dT * E), a = new Float64Array(d.dT);
@@ -139,24 +199,26 @@ export function branchForward(d: BranchDims, p: Float64Array, g: BranchGates, x:
   let z = 0;
   for (let t = 0; t < d.dT; t++) { a[t] = Math.exp(a[t] - mx); z += a[t]; }
   for (let t = 0; t < d.dT; t++) a[t] /= z;
-  const o0 = 2 * d.mC + H;
+  const o0 = tOff + H;
   for (let j = 0; j < E; j++) {
     let s = 0;
     for (let t = 0; t < d.dT; t++) s += a[t] * e[t * E + j];
-    u[o0 + j] = g.macro * s;
-    u[o0 + E + j] = g.macro * e[last + j];
+    u[o0 + j] = scale[3] * s;
+    u[o0 + E + j] = scale[3] * e[last + j];
   }
   // merge
   const m = new Float64Array(d.hM);
   for (let j = 0; j < d.hM; j++) { let s = p[L.b1.off + j]; const w = L.W1.off + j * nIn; for (let i = 0; i < nIn; i++) s += p[w + i] * u[i]; m[j] = Math.tanh(s); }
   const out = new Float64Array(d.nOut);
   for (let o = 0; o < d.nOut; o++) { let s = p[L.b2.off + o]; const w = L.W2.off + o * d.hM; for (let j = 0; j < d.hM; j++) s += p[w + j] * m[j]; out[o] = s; }
-  return { out, cache: { conv, u, m, out, gh, gz, gr, ghh, e, q, k, a } };
+  return { out, cache: { pm, fm: rm.y, cm: rm.cache, ps, fsy: rs.y, cs: rs.cache, u, m, out, gh, gz, gr, ghh, e, q, k, a, scale } };
 }
 
 /** Accumulate dLoss/dParams into `grad` given dLoss/dOut. */
 export function branchBackward(d: BranchDims, p: Float64Array, g: BranchGates, x: BranchInput, c: BranchCache, dOut: ArrayLike<number>, grad: Float64Array, L = branchLayout(d).layout): void {
-  const nIn = 2 * d.mC + d.tH + 2 * d.dE;
+  void g;
+  const fs = fractalSpecs(d);
+  const nIn = mergeWidth(d);
   const dm = new Float64Array(d.hM);
   for (let o = 0; o < d.nOut; o++) {
     const go = dOut[o];
@@ -173,22 +235,32 @@ export function branchBackward(d: BranchDims, p: Float64Array, g: BranchGates, x
     const w = L.W1.off + j * nIn;
     for (let i = 0; i < nIn; i++) { grad[w + i] += da * c.u[i]; du[i] += da * p[w + i]; }
   }
-  // micro
-  const P = d.mT - d.kW + 1;
-  for (let t = 0; t < P; t++) for (let ch = 0; ch < d.mC; ch++) {
-    let dy = g.micro * du[ch] / P;
-    if (t === P - 1) dy += g.micro * du[d.mC + ch];
-    const y = c.conv[t * d.mC + ch];
-    const da = dy * (1 - y * y);
-    if (!da) continue;
-    grad[L.bc.off + ch] += da;
-    const wb = L.Wc.off + ch * d.kW * d.mF;
-    for (let k = 0; k < d.kW; k++) { const xb = (t + k) * d.mF, wk = wb + k * d.mF; for (let f = 0; f < d.mF; f++) grad[wk + f] += da * x.micro[xb + f]; }
-  }
+  // micro + swing: pooled -> fractal -> projection
+  const fracBack = (yPool: Float64Array, T: number, C: number, at: number, sc: number, plan: FractalPlan, spec: FractalSpec, base: number, cache: FCache, proj: Float64Array, raw: Float64Array, F: number, wOff: number, bOff: number) => {
+    if (!sc) return;
+    const dy = new Float64Array(T * C);
+    for (let ch = 0; ch < C; ch++) {
+      const dMean = (sc * du[at + ch]) / T;
+      for (let t = 0; t < T; t++) dy[t * C + ch] += dMean;
+      dy[(T - 1) * C + ch] += sc * du[at + C + ch];
+    }
+    void yPool;
+    const dProj = fractalBackward(plan, spec, p, convOff(base, C), cache, dy, T, grad);
+    for (let t = 0; t < T; t++) for (let ch = 0; ch < C; ch++) {
+      const v = proj[t * C + ch];
+      const da = dProj[t * C + ch] * (1 - v * v);
+      if (!da) continue;
+      grad[bOff + ch] += da;
+      for (let f = 0; f < F; f++) grad[wOff + ch * F + f] += da * raw[t * F + f];
+    }
+  };
+  fracBack(c.fm, d.mT, d.mC, 0, c.scale[0], fractalPlan(fs.micro), fs.micro, L.Fm.off, c.cm, c.pm, x.micro, d.mF, L.Wpm.off, L.bpm.off);
+  fracBack(c.fsy, d.sT, d.sC, 2 * d.mC, c.scale[1], fractalPlan(fs.swing), fs.swing, L.Fs.off, c.cs, c.ps, x.swing, d.sF, L.Wps.off, L.bps.off);
+  const tOff = 2 * d.mC + 2 * d.sC;
   // trend: BPTT
   const H = d.tH, F = d.tF;
   let dh = new Float64Array(H);
-  for (let j = 0; j < H; j++) dh[j] = g.trend * du[2 * d.mC + j];
+  for (let j = 0; j < H; j++) dh[j] = c.scale[2] * du[tOff + j];
   const drh = new Float64Array(H);
   for (let s = d.tT - 1; s >= 0; s--) {
     const hp = s * H, xo = s * F;
@@ -227,10 +299,10 @@ export function branchBackward(d: BranchDims, p: Float64Array, g: BranchGates, x
   }
   // macro
   const E = d.dE, D = d.dF, T = d.dT;
-  const o0 = 2 * d.mC + H;
+  const o0 = tOff + H;
   const dctx = new Float64Array(E), de = new Float64Array(T * E);
   const last = (T - 1) * E;
-  for (let j = 0; j < E; j++) { dctx[j] = g.macro * du[o0 + j]; de[last + j] += g.macro * du[o0 + E + j]; }
+  for (let j = 0; j < E; j++) { dctx[j] = c.scale[3] * du[o0 + j]; de[last + j] += c.scale[3] * du[o0 + E + j]; }
   const da = new Float64Array(T);
   let sumAda = 0;
   for (let t = 0; t < T; t++) {

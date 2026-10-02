@@ -191,7 +191,10 @@ function binanceRows(lines: string[]): Candle[] {
     if (f.length < 6) continue;
     const t = Number(f[0]);
     if (!Number.isFinite(t)) continue;
-    out.push({ ts: epochToMs(t), o: Number(f[1]), h: Number(f[2]), l: Number(f[3]), c: Number(f[4]), v: Number(f[5]) });
+    const bar: Candle = { ts: epochToMs(t), o: Number(f[1]), h: Number(f[2]), l: Number(f[3]), c: Number(f[4]), v: Number(f[5]) };
+    // Column 10: taker buy base asset volume (order flow).
+    if (f.length >= 10 && Number.isFinite(Number(f[9]))) bar.tb = Number(f[9]);
+    out.push(bar);
   }
   return out;
 }

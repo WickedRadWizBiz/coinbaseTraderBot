@@ -8,8 +8,9 @@ import { computeStates, evaluate, TF_MS, type MacroInput, type TaSnapshot, type 
 import type { Candle } from './indicators';
 import type { Timeframe } from './knowledge';
 
-/** Coinbase REST row: [time_sec, low, high, open, close, volume]. */
-export type CandleRow = [number, number, number, number, number, number];
+/** Coinbase REST row: [time_sec, low, high, open, close, volume], plus the taker-buy volume when the
+ *  live trade feed covered the whole bar (7th element). */
+export type CandleRow = [number, number, number, number, number, number] | [number, number, number, number, number, number, number];
 
 const MAX_BARS = 320;
 
@@ -31,8 +32,10 @@ export class CandleSet {
       if (!(r.ts + TF_MS[tf] <= receivedTs)) continue; // still forming
       if (!(r.h >= r.l) || !(r.c > 0)) continue;
       const had = byTs.get(r.ts);
-      if (!had || had.c !== r.c || had.v !== r.v || had.h !== r.h || had.l !== r.l) fresh.push(r);
-      byTs.set(r.ts, r);
+      // A REST refresh never erases taker-buy volume the trade feed already attached.
+      const row = r.tb === undefined && had?.tb !== undefined && had.v === r.v ? { ...r, tb: had.tb } : r;
+      if (!had || had.c !== row.c || had.v !== row.v || had.h !== row.h || had.l !== row.l || had.tb !== row.tb) fresh.push(row);
+      byTs.set(r.ts, row);
     }
     if (!fresh.length) return [];
     const merged = [...byTs.values()].sort((a, b) => a.ts - b.ts).slice(-MAX_BARS);
@@ -70,11 +73,23 @@ export function aggregate(cs: Candle[], ms: number): Candle[] {
     const group: Candle[] = [];
     while (i < cs.length && cs[i].ts < start + ms) group.push(cs[i++]);
     if (group.length === per && group[0].ts === start) {
-      out.push({ ts: start, o: group[0].o, h: Math.max(...group.map((c) => c.h)), l: Math.min(...group.map((c) => c.l)), c: group[group.length - 1].c, v: group.reduce((s, c) => s + c.v, 0) });
+      const tb = group.every((c) => c.tb !== undefined) ? group.reduce((s, c) => s + c.tb!, 0) : undefined;
+      out.push({ ts: start, o: group[0].o, h: Math.max(...group.map((c) => c.h)), l: Math.min(...group.map((c) => c.l)), c: group[group.length - 1].c, v: group.reduce((s, c) => s + c.v, 0), ...(tb !== undefined ? { tb } : {}) });
     }
   }
   return out;
 }
 
-export const fromRow = (r: CandleRow): Candle => ({ ts: r[0] * 1000, l: r[1], h: r[2], o: r[3], c: r[4], v: r[5] });
-export const toRow = (c: Candle): CandleRow => [c.ts / 1000, c.l, c.h, c.o, c.c, c.v];
+export const fromRow = (r: CandleRow): Candle => {
+  const c: Candle = { ts: r[0] * 1000, l: r[1], h: r[2], o: r[3], c: r[4], v: r[5] };
+  if (r.length > 6 && Number.isFinite(r[6])) c.tb = r[6] as number;
+  return c;
+};
+export const toRow = (c: Candle): CandleRow => (c.tb !== undefined ? [c.ts / 1000, c.l, c.h, c.o, c.c, c.v, c.tb] : [c.ts / 1000, c.l, c.h, c.o, c.c, c.v]);
+
+/** Taker order-flow imbalance of bars: 2 sum(tb) / sum(v) - 1 in [-1, 1]; NaN unless every bar has tb. */
+export function takerImbalance(cs: Candle[]): number {
+  let tb = 0, v = 0;
+  for (const c of cs) { if (c.tb === undefined) return NaN; tb += c.tb; v += c.v; }
+  return v > 0 ? Math.max(-1, Math.min(1, (2 * tb) / v - 1)) : NaN;
+}

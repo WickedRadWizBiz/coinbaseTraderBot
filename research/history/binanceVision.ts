@@ -41,7 +41,9 @@ export interface BinanceOpts {
   log?: (m: string) => void;
 }
 
-interface Manifest { files: Record<string, { size: number; bars: number; at: string }> }
+interface Manifest { version?: number; files: Record<string, { size: number; bars: number; at: string }> }
+/** 2: bars carry taker-buy volume (tb); files fetched before that are fetched again once. */
+const MANIFEST_VERSION = 2;
 
 export interface BinanceSummary { pair: string; market: BinanceMarket; tf: HistTf; listed: number; fetched: number; skipped: number; failed: number; bars: number; note?: string }
 
@@ -102,6 +104,10 @@ export async function downloadBinance(o: BinanceOpts): Promise<BinanceSummary[]>
   const manifestFile = path.join(o.out, 'binance-manifest.json');
   let manifest: Manifest = { files: {} };
   try { manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')); } catch { /* first run */ }
+  if ((manifest.version ?? 1) < MANIFEST_VERSION) {
+    if (Object.keys(manifest.files).length) log('store predates taker-buy volume: fetching every file once more to add it');
+    manifest = { version: MANIFEST_VERSION, files: {} };
+  }
   const saveManifest = () => { if (!o.dryRun) { fs.mkdirSync(o.out, { recursive: true }); fs.writeFileSync(manifestFile, JSON.stringify(manifest)); } };
   const out: BinanceSummary[] = [];
   for (const market of o.markets) {

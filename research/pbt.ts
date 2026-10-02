@@ -58,6 +58,8 @@ export interface PbtRoundLog {
   evalFrom: string; evalTo: string;
   ranking: Array<{ member: number; fitness: number; sortino: number; maxDrawdown: number; costs: number; independent: number; hyper: Hyper }>;
   elite: number; culled: number; mutated: number[];
+  /** Member that restarted fresh this round (exploration), if any. */
+  restarted?: number;
 }
 
 export interface PbtResult<S> {
@@ -80,6 +82,8 @@ export async function runPbt<S>(o: {
   resume?: { members: PbtMember<S>[]; trials: number; log: PbtRoundLog[] };
   /** Also explore after the last round of this call (the tournament continues later). */
   exploreAfterLast?: boolean;
+  /** Every N rounds the culled member restarts fresh with random knobs instead of cloning (0 = never). */
+  restartEvery?: number;
   /** Called after every round (e.g. to persist the population). */
   onRound?: (state: { members: PbtMember<S>[]; trials: number; log: PbtRoundLog[]; round: PbtRound }) => Promise<void> | void;
 }): Promise<PbtResult<S>> {
@@ -118,11 +122,23 @@ export async function runPbt<S>(o: {
     // Exploration after every round except the final one; a resumed tournament explores between
     // calls too, so the population keeps evolving as new months arrive.
     if ((round !== o.rounds[o.rounds.length - 1] || o.exploreAfterLast) && n >= 2) {
-      culled.state = await o.hooks.clone(elite.state);
-      culled.hyper = { ...elite.hyper };
-      culled.lineage = [...elite.lineage, culled.id];
-      culled.record = [...elite.record];
-      for (const m of [...middle, culled]) {
+      // Exploration member: every `restartEvery` rounds the worst network does not copy the elite but
+      // starts afresh (new weights, random knobs within their ranges), so the population cannot
+      // collapse onto one lineage and get stuck in its local optimum.
+      const restart = (o.restartEvery ?? 0) > 0 && (round.index + 1) % o.restartEvery! === 0;
+      if (restart) {
+        culled.hyper = randomHyper(o.spec, o.base, r);
+        culled.state = await o.hooks.init(culled.hyper, culled.id);
+        culled.lineage = [culled.id];
+        culled.record = [];
+        entry.restarted = culled.id;
+      } else {
+        culled.state = await o.hooks.clone(elite.state);
+        culled.hyper = { ...elite.hyper };
+        culled.lineage = [...elite.lineage, culled.id];
+        culled.record = [...elite.record];
+      }
+      for (const m of restart ? middle : [...middle, culled]) {
         m.hyper = perturb(m.hyper, o.spec, r, 'explore');
         if (o.hooks.rehyper) m.state = await o.hooks.rehyper(m.state, m.hyper);
         entry.mutated.push(m.id);
@@ -134,6 +150,19 @@ export async function runPbt<S>(o: {
   }
   const lastRank = out[out.length - 1]?.ranking[0]?.member ?? 0;
   return { elite: members.find((m) => m.id === lastRank) ?? members[0], members, log: out, trials };
+}
+
+/** Random knobs: log-uniform within each range (knobs outside the spec keep the base value). */
+export function randomHyper(spec: MutationSpec, base: Hyper, r: () => number): Hyper {
+  const out: Hyper = { ...base };
+  for (const [k, s] of Object.entries(spec)) {
+    if (!(k in out)) continue;
+    const lo = Math.max(s.min, 1e-12), hi = Math.max(lo, s.max);
+    let v = s.min <= 0 ? s.min + r() * (s.max - s.min) : Math.exp(Math.log(lo) + r() * (Math.log(hi) - Math.log(lo)));
+    if (s.integer) v = Math.round(v);
+    out[k] = v;
+  }
+  return out;
 }
 
 /** Walk-forward rounds: rolling training block of `trainMs`, evaluation block of `evalMs`,

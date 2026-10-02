@@ -64,7 +64,7 @@ import { downloadBinance, type BinanceMarket } from './history/binanceVision';
 import { backfillCoinbase } from './history/coinbaseBackfill';
 import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
-import { setTaNet, TaNet } from '../bot/ta/taNet';
+import { setTaNet, TaNet, TANET_SCHEMA } from '../bot/ta/taNet';
 
 export const STEPS = ['history', 'ta_net', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill'] as const;
 export type Step = typeof STEPS[number];
@@ -210,7 +210,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     }, T.historyUpdate ? undefined : 'HISTORY_AUTO_UPDATE=false');
   }
   if (want('ta_net')) {
-    const due = o.forceTaNet || state.taNetComplete === false || !fs.existsSync(taNetFile) || !state.taNetTrainedAt || now - state.taNetTrainedAt >= T.retrainEveryDays * 86_400_000;
+    const staleSchema = (() => { try { return fs.existsSync(taNetFile) && (JSON.parse(fs.readFileSync(taNetFile, 'utf8')) as { schema?: string }).schema !== TANET_SCHEMA; } catch { return true; } })();
+    const due = o.forceTaNet || staleSchema || state.taNetComplete === false || !fs.existsSync(taNetFile) || !state.taNetTrainedAt || now - state.taNetTrainedAt >= T.retrainEveryDays * 86_400_000;
     const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet (npm run history:binance, or history:import your CSVs)`;
     await run('ta_net', async () => {
       const cand = path.join(work, 'ta_net.candidate.json');
@@ -219,7 +220,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         rep = await trainTaNetMain(argsOf({
           history: T.historyDir, out: cand, cache: path.join(work, 'tanet-cache'), state: path.join(work, 'tanet-population.json'), fresh: o.forceTaNetFresh ? 'true' : undefined,
           'train-months': T.trainMonths, 'eval-months': T.evalMonths, 'step-months': T.stepMonths, 'holdout-months': T.holdoutMonths, stride: T.stride, 'min-per-regime': T.minPerRegime, dsr: T.dsrThreshold,
-          'max-rounds': T.maxRoundsPerRun || undefined,
+          'max-rounds': T.maxRoundsPerRun || undefined, 'restart-every': T.restartEvery,
         }));
       } catch (e) {
         if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
@@ -272,7 +273,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const pbt = await run(`snn-${domain}-pbt`, async () => {
         let r;
         try {
-          r = await runSnnPbt({ recordings: rec, domain, stage, days: pbtDays, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, log });
+          r = await runSnnPbt({ recordings: rec, domain, stage, days: pbtDays, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, log });
         } catch (e) {
           if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;

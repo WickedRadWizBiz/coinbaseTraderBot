@@ -227,7 +227,9 @@ In live trading, `ModelHealth` stops new risk if the rolling log-loss advantage 
   - the perp premium to the settlement index, and its 5-minute change (perps tend to lead spot)
   - perp-minus-index return over 1 and 5 minutes
   - the funding rate and minutes to the next funding time (00:00, 08:00 and 16:00 New York)
-  - the 1-hour change in open interest
+  - the 4-hour change in the funding estimate (leverage demand building or unwinding)
+  - the 1-hour change in open interest, and its acceleration (last hour vs the hour before)
+  - taker order-flow imbalance over 1 and 4 hours, from the Coinbase trade feed (docs/TA_NETWORK.md)
 - **Stage 2, delta-hedging the binary book (`PERP_HEDGE`, `paper` by default).**
   - Each binary's sensitivity to the underlying (dP/dS) comes from re-pricing at S ± 0.05%. Positions net per asset, and the hedge target is `−Σ position × dP/dS ÷ (underlying units per contract)`.
   - It hedges only when the book's dollar delta is at least `PERP_HEDGE_MIN_DOLLAR_DELTA` (default $2,000, which is $20 per 1% move) and a whole step is needed. A 25% hysteresis band stops churn.

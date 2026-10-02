@@ -30,11 +30,12 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import type { Candle } from '../bot/ta/indicators';
-import { branchBackward, branchForward, branchLayout, branchLoss, initBranchParams, type BranchDims, type BranchGates, type BranchInput } from '../bot/ta/branchNet';
+import { branchBackward, branchForward, branchLayout, branchLoss, fractalPlan, fractalSpecs, initBranchParams, type BranchDims, type BranchDrop, type BranchGates } from '../bot/ta/branchNet';
+import { columnMask, columnReach, localDropMask, type FractalPlan, type JoinMask } from '../bot/ta/fractal';
 import {
   buildBranchInput, closedIndex, sigma24, TANET_D1_BARS, TANET_DAY_FEATURES, TANET_FEATURES, TANET_H1_BARS, TANET_MACRO_DAYS, TANET_MICRO_F, TANET_MICRO_STEPS, TANET_SCHEMA,
-  TANET_STRATEGY, TANET_TREND_FEATURES, TANET_TREND_STEPS, taNetDayVector, taNetFeatureMap, taNetMicro, taNetPosition, windowOk,
-  type TaNetHeadName, type TaNetHeadValidation, type TaNetNorm, type TaNetParams, type TaNetStateCache,
+  TANET_STRATEGY, TANET_SWING_BARS, TANET_SWING_F, TANET_TREND_FEATURES, TANET_TREND_STEPS, taNetDayVector, taNetFeatureMap, taNetMicro, taNetPosition, taNetSwing, windowOk,
+  type PatternReport, type TaNetHeadName, type TaNetHeadValidation, type TaNetNorm, type TaNetParams, type TaNetStateCache,
 } from '../bot/ta/taNet';
 import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type Interaction } from './fitness';
 import { runPbt, walkForwardRounds, type Hyper, type MutationSpec, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
@@ -127,6 +128,9 @@ export interface AssetData {
   /** Daily step vectors per daily bar open time. */
   dayVec: Map<number, number[]>;
   d1: Candle[];
+  /** Hourly bars and their index by open time (the swing branch reads raw bars). */
+  h1: Candle[];
+  h1Idx: Map<number, number>;
 }
 
 /** One training example: an asset's hourly row with full branch inputs and its targets. */
@@ -154,8 +158,8 @@ export function buildData(histDir: string, assets: string[], cacheDir: string | 
     const dayVec = new Map<number, number[]>();
     for (let j = TANET_D1_BARS - 1; j < d1.length; j++) { const v = taNetDayVector(d1, j); if (v) dayVec.set(d1[j].ts, v); }
     const a = out.length;
-    out.push({ asset, m15: s15.candles.length ? s15.candles : undefined, rowTs: ts, X, dayVec, d1 });
     const idx = new Map(h1.map((c, i) => [c.ts, i]));
+    out.push({ asset, m15: s15.candles.length ? s15.candles : undefined, rowTs: ts, X, dayVec, d1, h1, h1Idx: idx });
     for (let r = TANET_TREND_STEPS - 1; r < ts.length; r++) {
       const t = ts[r];
       if (ts[r - TANET_TREND_STEPS + 1] !== t - (TANET_TREND_STEPS - 1) * H) continue;
@@ -163,6 +167,7 @@ export function buildData(histDir: string, assets: string[], cacheDir: string | 
       if (dj - TANET_MACRO_DAYS + 1 < 0 || !dayVec.has(d1[dj - TANET_MACRO_DAYS + 1].ts)) continue;
       const [y1, y4, yv, r1] = targets(h1, idx, t);
       const hi = idx.get(t)!;
+      if (hi < TANET_SWING_BARS) continue;
       S.push([t, a, r, y1, y4, yv, r1, sigma24(h1, hi)]);
       if (s15.candles.length && Number.isFinite(taNetMicro(s15.candles, t + H)[0])) micro++;
     }
@@ -178,8 +183,8 @@ export function buildData(histDir: string, assets: string[], cacheDir: string | 
 
 const TREND_IDX = TANET_TREND_FEATURES.map((k) => TANET_FEATURES.indexOf(k));
 
-/** Raw step vectors of sample i (trend rows, daily vectors, 15-minute steps). */
-export function rawInputs(D: TaNetData, i: number): { trend: Float32Array[]; macro: number[][]; micro: Float64Array } {
+/** Raw step vectors of sample i (trend rows, daily vectors, 15-minute steps, 48 raw hourly bars). */
+export function rawInputs(D: TaNetData, i: number): { trend: Float32Array[]; macro: number[][]; micro: Float64Array; swing: Float64Array } {
   const A = D.assets[D.sa[i]], r = D.sr[i], t = D.ts[i];
   const F = TANET_FEATURES.length;
   const trend: Float32Array[] = [];
@@ -190,47 +195,67 @@ export function rawInputs(D: TaNetData, i: number): { trend: Float32Array[]; mac
   const dj = closedIndex(A.d1, DAY, t + H);
   const macro: number[][] = [];
   for (let k = dj - TANET_MACRO_DAYS + 1; k <= dj; k++) macro.push(A.dayVec.get(A.d1[k].ts)!);
-  return { trend, macro, micro: taNetMicro(A.m15, t + H) };
+  return { trend, macro, micro: taNetMicro(A.m15, t + H), swing: taNetSwing(A.h1, A.h1Idx.get(t)!) };
 }
 
 export function fitNorms(D: TaNetData, idx: ArrayLike<number>, maxSamples = 20_000): TaNetParams['norm'] {
   const pick = Array.from(idx).filter((_, k, all) => k % Math.max(1, Math.floor(all.length / maxSamples)) === 0);
   const acc = (dim: number) => ({ s: new Float64Array(dim), s2: new Float64Array(dim), n: new Float64Array(dim) });
-  const T = acc(TANET_TREND_FEATURES.length), M = acc(TANET_DAY_FEATURES.length), U = acc(TANET_MICRO_F);
+  const T = acc(TANET_TREND_FEATURES.length), M = acc(TANET_DAY_FEATURES.length), U = acc(TANET_MICRO_F), W = acc(TANET_SWING_F);
   const add = (a: ReturnType<typeof acc>, j: number, v: number) => { if (Number.isFinite(v)) { a.s[j] += v; a.s2[j] += v * v; a.n[j]++; } };
   for (const i of pick) {
     const x = rawInputs(D, i);
     for (const row of x.trend) row.forEach((v, j) => add(T, j, v));
     for (const row of x.macro) row.forEach((v, j) => add(M, j, v));
     for (let k = 0; k < x.micro.length; k++) add(U, k % TANET_MICRO_F, x.micro[k]);
+    for (let k = 0; k < x.swing.length; k++) add(W, k % TANET_SWING_F, x.swing[k]);
   }
   const fin = (a: ReturnType<typeof acc>): TaNetNorm => {
     const mean = Array.from(a.s, (v, j) => (a.n[j] ? v / a.n[j] : 0));
     return { mean, std: Array.from(a.s2, (v, j) => (a.n[j] > 1 ? Math.sqrt(Math.max(0, v / a.n[j] - mean[j] ** 2)) : 0) || 1) };
   };
-  return { trend: fin(T), macro: fin(M), micro: fin(U) };
+  return { trend: fin(T), macro: fin(M), micro: fin(U), swing: fin(W) };
 }
 
 export function taNetDims(): BranchDims {
-  return { mT: TANET_MICRO_STEPS, mF: TANET_MICRO_F, kW: 3, mC: 8, tT: TANET_TREND_STEPS, tF: TANET_TREND_FEATURES.length, tH: 12, dT: TANET_MACRO_DAYS, dF: TANET_DAY_FEATURES.length, dE: 8, hM: 16, nOut: 3 };
+  return { mT: TANET_MICRO_STEPS, mF: TANET_MICRO_F, mC: 8, sT: TANET_SWING_BARS, sF: TANET_SWING_F, sC: 8, fDepth: 3, tT: TANET_TREND_STEPS, tF: TANET_TREND_FEATURES.length, tH: 12, dT: TANET_MACRO_DAYS, dF: TANET_DAY_FEATURES.length, dE: 8, hM: 16, nOut: 3 };
 }
 
 // ---- Population members -------------------------------------------------------------------------
 
 export interface Member { w: Float64Array; m: Float64Array; v: Float64Array; step: number }
 
-export const BASE_HYPER: Hyper = { lr: 1e-3, l2: 1e-4, gMicro: 1, gTrend: 1, gMacro: 1, volWeight: 0.5 };
+// pJoin: drop-path probability per join input inside the fractal blocks; pBranch: probability of
+// dropping a whole branch for a sample (at least one always stays).
+export const BASE_HYPER: Hyper = { lr: 1e-3, l2: 1e-4, gMicro: 1, gSwing: 1, gTrend: 1, gMacro: 1, volWeight: 0.5, pJoin: 0.15, pBranch: 0.1 };
 export const HYPER_SPEC: MutationSpec = {
   lr: { min: 1e-4, max: 1e-2 }, l2: { min: 1e-7, max: 1e-3 },
-  gMicro: { min: 0.25, max: 2 }, gTrend: { min: 0.25, max: 2 }, gMacro: { min: 0.25, max: 2 }, volWeight: { min: 0.1, max: 2 },
+  gMicro: { min: 0.25, max: 2 }, gSwing: { min: 0.25, max: 2 }, gTrend: { min: 0.25, max: 2 }, gMacro: { min: 0.25, max: 2 }, volWeight: { min: 0.1, max: 2 },
+  pJoin: { min: 0.02, max: 0.5 }, pBranch: { min: 0.02, max: 0.3 },
 };
-const gatesOf = (h: Hyper): BranchGates => ({ micro: h.gMicro, trend: h.gTrend, macro: h.gMacro });
+const gatesOf = (h: Hyper): BranchGates => ({ micro: h.gMicro, swing: h.gSwing ?? 1, trend: h.gTrend, macro: h.gMacro });
+
+/** Per-sample structure noise (FractalNet): half the samples drop join inputs locally, half keep a
+ *  single random column through the block ("global" drop-path); plus whole-branch drops. */
+export function sampleDrop(plans: { micro: FractalPlan; swing: FractalPlan }, depth: number, h: Hyper, r: () => number): BranchDrop {
+  const pj = h.pJoin ?? 0, pb = h.pBranch ?? 0;
+  const mask = (plan: FractalPlan): JoinMask | undefined => (pj <= 0 ? undefined : r() < 0.5 ? localDropMask(plan, pj, r) : columnMask(plan, 1 + Math.floor(r() * depth)));
+  const drop: BranchDrop = { micro: mask(plans.micro), swing: mask(plans.swing) };
+  if (pb > 0) {
+    const on = [0, 1, 2, 3].map(() => r() >= pb) as [boolean, boolean, boolean, boolean];
+    if (!on.some(Boolean)) on[Math.floor(r() * 4)] = true;
+    drop.branches = on;
+    drop.keep = 1 - pb;
+  }
+  return drop;
+}
 
 /** One epoch of mini-batch Adam over `idx` (shuffled with `seed`). */
 export function trainEpoch(D: TaNetData, dims: BranchDims, norm: TaNetParams['norm'], st: Member, h: Hyper, idx: number[], seed: number, batch = 64): number {
   const L = branchLayout(dims).layout;
   const g = gatesOf(h);
   const r = rng(seed);
+  const fs = fractalSpecs(dims), plans = { micro: fractalPlan(fs.micro), swing: fractalPlan(fs.swing) };
   const order = idx.slice();
   for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
   const grad = new Float64Array(st.w.length);
@@ -241,8 +266,8 @@ export function trainEpoch(D: TaNetData, dims: BranchDims, norm: TaNetParams['no
     for (let q = s; q < e; q++) {
       const i = order[q];
       const raw = rawInputs(D, i);
-      const x = buildBranchInput(dims, norm, raw.trend, raw.macro, raw.micro);
-      const f = branchForward(dims, st.w, g, x, L);
+      const x = buildBranchInput(dims, norm, raw.trend, raw.macro, raw.micro, raw.swing);
+      const f = branchForward(dims, st.w, g, x, L, sampleDrop(plans, dims.fDepth, h, r));
       const { loss, dOut } = branchLoss(f.out, [D.y1[i], D.y4[i], D.yv[i]], h.volWeight);
       total += loss;
       branchBackward(dims, st.w, g, x, f.cache, dOut, grad, L);
@@ -262,15 +287,100 @@ export function trainEpoch(D: TaNetData, dims: BranchDims, norm: TaNetParams['no
 
 export interface Forecasts { idx: number[]; up1: Float64Array; up4: Float64Array; vol: Float64Array }
 
-export function forecast(D: TaNetData, dims: BranchDims, norm: TaNetParams['norm'], w: Float64Array, h: Hyper, idx: number[]): Forecasts {
+export function forecast(D: TaNetData, dims: BranchDims, norm: TaNetParams['norm'], w: Float64Array, h: Hyper, idx: number[], drop?: BranchDrop): Forecasts {
   const L = branchLayout(dims).layout, g = gatesOf(h);
   const up1 = new Float64Array(idx.length), up4 = new Float64Array(idx.length), vol = new Float64Array(idx.length);
   idx.forEach((i, k) => {
     const raw = rawInputs(D, i);
-    const o = branchForward(dims, w, g, buildBranchInput(dims, norm, raw.trend, raw.macro, raw.micro), L).out;
+    const o = branchForward(dims, w, g, buildBranchInput(dims, norm, raw.trend, raw.macro, raw.micro, raw.swing), L, drop).out;
     up1[k] = 1 / (1 + Math.exp(-o[0])); up4[k] = 1 / (1 + Math.exp(-o[1])); vol[k] = Math.max(-3, Math.min(3, o[2]));
   });
   return { idx, up1, up4, vol };
+}
+
+// ---- Which fractal depth carries which TA pattern -----------------------------------------------
+
+/** TA pattern families of the hourly feature map (the TA library's readings) the report compares the
+ *  fractal columns against. */
+export const PATTERN_FAMILIES: Record<string, string[]> = {
+  candlestick: ['h1_engulf', 'h1_pin', 'h1_doji'],
+  structure: ['h1_trend', 'h1_bos', 'h1_choch', 'h1_sweep', 'h1_breakout', 'h1_eq_highs', 'h1_eq_lows', 'h1_donchian'],
+  momentum: ['h1_rsi', 'h1_rsi_chg', 'h1_macd_atr', 'h1_stoch', 'h1_willr', 'h1_chg_atr'],
+  divergence: ['h1_div', 'h1_hdiv'],
+  volatility: ['h1_squeeze', 'h1_squeeze_release', 'h1_bb_bw_rank', 'h1_atr_rank', 'h1_log_atr_pct'],
+  volume_flow: ['h1_vol_ratio', 'h1_obv_slope', 'h1_cmf', 'h1_mfi', 'flow_1h', 'flow_4h'],
+  levels: ['h1_round_dist', 'h1_vp_pos', 'h1_fvg_dist', 'h1_in_fvg'],
+  swing_4h: ['h4_trend', 'h4_bos', 'h4_choch', 'h4_ema_stack', 'h4_div'],
+};
+
+function absCorr(a: number[], b: number[]): number {
+  let n = 0, sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+  for (let k = 0; k < a.length; k++) {
+    const x = a[k], y = b[k];
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    n++; sa += x; sb += y; saa += x * x; sbb += y * y; sab += x * y;
+  }
+  if (n < 30) return 0;
+  const cov = sab / n - (sa / n) * (sb / n), va = saa / n - (sa / n) ** 2, vb = sbb / n - (sb / n) ** 2;
+  return va > 1e-12 && vb > 1e-12 ? Math.abs(cov / Math.sqrt(va * vb)) : 0;
+}
+
+/**
+ * Pattern report on held-out rows. For each fractal block (15-minute micro, hourly swing) and each
+ * column (depth 1 / 2 / 4 = 3 / 7 / 31 bars), run the network with ONLY that column active in that
+ * block (the drop-path training makes single columns meaningful) and record
+ *   - ablation: holdout log loss of up_1h and MSE of vol_4h with that column alone, and
+ *   - families: the max |correlation| between the column's pooled channels and the readings of each
+ *     TA pattern family (candlesticks, structure, momentum, divergence, volatility, volume/flow,
+ *     levels, 4h swing structure),
+ * so the report says which depth has learned which kind of pattern, and whether a depth carries
+ * anything the TA library does not already encode (good ablation, weak family correlation).
+ */
+export function patternReport(D: TaNetData, dims: BranchDims, norm: TaNetParams['norm'], w: Float64Array, h: Hyper, rows: number[], maxRows = 4000): PatternReport {
+  const step = Math.max(1, Math.floor(rows.length / maxRows));
+  const idx = rows.filter((_, k) => k % step === 0);
+  const L = branchLayout(dims).layout, g = gatesOf(h);
+  const fs = fractalSpecs(dims);
+  const plans = { micro: fractalPlan(fs.micro), swing: fractalPlan(fs.swing) };
+  const reach = columnReach(plans.micro, fs.micro);
+  const F = TANET_FEATURES.length;
+  const fam = Object.entries(PATTERN_FAMILIES).map(([name, keys]) => [name, keys.map((k) => TANET_FEATURES.indexOf(k)).filter((j) => j >= 0)] as const).filter(([, js]) => js.length);
+  const feats = fam.map(([, js]) => js.map((j) => idx.map((i) => D.assets[D.sa[i]].X[D.sr[i] * F + j])));
+  const inputs = idx.map((i) => { const raw = rawInputs(D, i); return { x: buildBranchInput(dims, norm, raw.trend, raw.macro, raw.micro, raw.swing), hasMicro: Number.isFinite(raw.micro[0]) }; });
+  const ll = (z: number, y: number) => { const q = Math.min(1 - 1e-9, Math.max(1e-9, 1 / (1 + Math.exp(-z)))); return y ? -Math.log(q) : -Math.log(1 - q); };
+  const losses = (outs: Float64Array[]) => {
+    let a = 0, na = 0, b = 0, nb = 0;
+    outs.forEach((o, k) => { const i = idx[k]; if (Number.isFinite(D.y1[i])) { a += ll(o[0], D.y1[i]); na++; } if (Number.isFinite(D.yv[i])) { b += (Math.max(-3, Math.min(3, o[2])) - D.yv[i]) ** 2; nb++; } });
+    return { logLossUp1h: na ? a / na : NaN, mseVol: nb ? b / nb : NaN };
+  };
+  const allColumns = losses(inputs.map(({ x }) => branchForward(dims, w, g, x, L).out));
+  const ablation: PatternReport['ablation'] = [];
+  const families: PatternReport['families'] = [];
+  const best: NonNullable<PatternReport['best']> = {};
+  for (const block of ['micro', 'swing'] as const) {
+    const C = block === 'micro' ? dims.mC : dims.sC, at = block === 'micro' ? 0 : 2 * dims.mC;
+    for (let col = 1; col <= dims.fDepth; col++) {
+      const drop: BranchDrop = { [block]: columnMask(plans[block], col) };
+      const outs: Float64Array[] = [];
+      const ch: number[][] = Array.from({ length: 2 * C }, () => []);
+      inputs.forEach(({ x, hasMicro }) => {
+        const f = branchForward(dims, w, g, x, L, drop);
+        outs.push(f.out);
+        for (let c = 0; c < 2 * C; c++) ch[c].push(block === 'micro' && !hasMicro ? NaN : f.cache.u[at + c]);
+      });
+      ablation.push({ block, column: col, reach: reach[col - 1], ...losses(outs) });
+      const row: PatternReport['families'][number] = { block, column: col, reach: reach[col - 1] };
+      fam.forEach(([name], q) => {
+        let m = 0;
+        for (const series of feats[q]) for (const c of ch) m = Math.max(m, absCorr(c, series));
+        row[name] = +m.toFixed(3);
+        const key = `${block}:${name}`;
+        if (!best[key] || m > best[key].corr) best[key] = { block, family: name, column: col, reach: reach[col - 1], corr: +m.toFixed(3) };
+      });
+      families.push(row);
+    }
+  }
+  return { reach, ablation, allColumns, families, best, rows: idx.length };
 }
 
 /** Trade the position rule on forecasts (equal capital per asset); one interaction per asset-hour with
@@ -337,6 +447,10 @@ export interface TaNetTrainOpts {
   maxRounds?: number;
   /** Override base hyperparameters (member 0; the others start within +/-10% of it). */
   baseHyper?: Partial<Hyper>;
+  /** Every N rounds the culled member restarts from scratch with random knobs (0 = never). */
+  restartEvery?: number;
+  /** Compute the per-fractal-column pattern report on the holdout (default true). */
+  patterns?: boolean;
   log?: (m: string) => void;
 }
 
@@ -390,11 +504,13 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
   };
 
   const size = branchLayout(dims).size;
+  let inits = 0;
   const res = await runPbt<Member>({
-    base: { ...BASE_HYPER, ...o.baseHyper } as Hyper, spec: HYPER_SPEC, rounds, seed, resume, exploreAfterLast: true, log,
+    base: { ...BASE_HYPER, ...o.baseHyper } as Hyper, spec: HYPER_SPEC, rounds, seed, resume, exploreAfterLast: true, restartEvery: o.restartEvery ?? 0, log,
     hooks: {
-      // Three identical networks: same seed, same weights; only the hyperparameters differ.
-      init: () => ({ w: initBranchParams(dims, seed), m: new Float64Array(size), v: new Float64Array(size), step: 0 }),
+      // Three identical networks: same seed, same weights; only the hyperparameters differ. A later
+      // init is an exploration restart and gets fresh weights from a new seed.
+      init: () => { const restart = resume !== undefined || inits >= 3; inits++; return { w: initBranchParams(dims, restart ? seed + 7919 * inits : seed), m: new Float64Array(size), v: new Float64Array(size), step: 0 }; },
       clone: (s) => ({ w: s.w.slice(), m: s.m.slice(), v: s.v.slice(), step: s.step }),
       train: (s, h, r: PbtRound) => {
         const idx = between(r.trainFrom, r.trainTo - emb, stride);
@@ -445,6 +561,12 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
     if (ps.length) { v.skill = 1 - ps.reduce((a, p, k) => a + (p - ys[k]) ** 2, 0) / ps.length / 0.25; v.hitRate = ps.filter((p, k) => (p > 0.5 ? 1 : 0) === ys[k]).length / ps.length; }
     return v;
   };
+  const patterns = o.patterns === false ? undefined : patternReport(D, dims, norm, finalW, elite.hyper, ho);
+  if (patterns) {
+    log(`pattern report (${patterns.rows} holdout rows; columns see ${patterns.reach.join(' / ')} bars): all columns logloss ${patterns.allColumns.logLossUp1h.toFixed(5)}, vol MSE ${patterns.allColumns.mseVol.toFixed(4)}`);
+    for (const a of patterns.ablation) log(`  ${a.block} column ${a.column} (${a.reach} bars) alone: logloss ${a.logLossUp1h.toFixed(5)}, vol MSE ${a.mseVol.toFixed(4)}`);
+    for (const b of Object.values(patterns.best ?? {})) log(`  ${b.block} ${b.family}: best tracked by column ${b.column} (${b.reach} bars), |corr| ${b.corr}`);
+  }
   const heads = { up_1h: { validation: grade('up_1h') }, up_4h: { validation: grade('up_4h') }, vol_4h: { validation: grade('vol_4h') } };
 
   // Network-level hurdles on the elite lineage's out-of-sample record.
@@ -466,8 +588,8 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
   return {
     rounds: res.log.length, newRounds: rounds.length, complete: remaining === 0, remaining,
     params: {
-      version: `tanet2-${new Date().toISOString().slice(0, 10)}-${D.assets.length}a-r${res.log.length}`,
-      schema: TANET_SCHEMA, dims, gates: gatesOf(elite.hyper), weights: Array.from(finalW), norm,
+      version: `tanet3-${new Date().toISOString().slice(0, 10)}-${D.assets.length}a-r${res.log.length}`,
+      schema: TANET_SCHEMA, dims, gates: gatesOf(elite.hyper), weights: Array.from(finalW), norm, patterns,
       trendFeatures: [...TANET_TREND_FEATURES], dayFeatures: [...TANET_DAY_FEATURES], strategy: { ...TANET_STRATEGY }, heads,
       network: {
         dsr: { sharpe: dsr.sharpe, sr0: dsr.sr0, probability: dsr.probability, n: dsr.n }, trials: res.trials, regimes,
@@ -493,7 +615,7 @@ export async function trainTaNetMain(argOf: (k: string, d: string) => string = c
     trainMonths: num('train-months', '12'), evalMonths: num('eval-months', '1'), stepMonths: num('step-months', '1'), holdoutMonths: num('holdout-months', '3'),
     stride: num('stride', '2'), epochsPerRound: num('epochs', '1'), minPerRegime: num('min-per-regime', '100'), dsrThreshold: num('dsr', '0.95'),
     statePath: argOf('state', path.join(hist, '.tanet-population.json')), fresh: argOf('fresh', '') === 'true' || process.argv.includes('--fresh'),
-    maxRounds: num('max-rounds', '0') || undefined, log,
+    maxRounds: num('max-rounds', '0') || undefined, restartEvery: num('restart-every', '0'), patterns: argOf('patterns', 'true') !== 'false', log,
   });
   const out = argOf('out', 'params/ta_net.json');
   fs.mkdirSync(path.dirname(out), { recursive: true });

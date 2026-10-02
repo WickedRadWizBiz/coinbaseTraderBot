@@ -24,6 +24,8 @@ import { gbdtLogit, validateGbdt, type GbdtModel } from '../model/trees';
 export const PERP_FEATURES = [
   'ret_15m_z', 'ret_1h_z', 'ret_4h_z', 'efficiency_ratio_1h', 'log_rv_1h', 'vol_ratio_15m_4h',
   'perp_premium_bps', 'perp_premium_chg_5m', 'perp_ret_diff_5m_z', 'funding_rate_bps', 'min_to_funding', 'perp_oi_chg_1h',
+  // Leverage dynamics and order flow.
+  'funding_delta_4h', 'perp_oi_accel_1h', 'ta_taker_imb_1h', 'ta_taker_imb_4h',
   'usdtd_ret_15m_z', 'btcd_rel_5m_z',
   'ta_rsi_1h', 'ta_rsi_4h', 'ta_macd_hist_1h', 'ta_di_diff_1h', 'ta_adx_1h', 'ta_ema_stack_1h', 'ta_ema_stack_4h', 'ta_bb_pctb_1h',
   'ta_cmf_1h', 'ta_price_ma50_4h', 'ta_cloud_4h', 'ta_structure_1h', 'ta_vwap_dist_1h', 'ta_obv_slope_4h',

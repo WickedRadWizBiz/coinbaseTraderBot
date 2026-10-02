@@ -12,6 +12,9 @@ export interface Candle {
   o: number; h: number; l: number; c: number;
   /** Base-asset volume. */
   v: number;
+  /** Taker-buy base volume (aggressive buyers), when the source splits it (Binance klines, the live
+   *  Coinbase trade feed); undefined otherwise. Order-flow imbalance = 2 tb / v - 1. */
+  tb?: number;
 }
 
 export type Series = number[];

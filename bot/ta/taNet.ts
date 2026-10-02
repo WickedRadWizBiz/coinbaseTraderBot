@@ -22,12 +22,12 @@
 import fs from 'fs';
 import { branchForward, branchLayout, type BranchDims, type BranchGates, type BranchInput } from './branchNet';
 import { evaluate, TF_MS, tfState, type TaSnapshot, type TfState } from './analyzer';
-import { aggregate, type CandleSet } from './candleStore';
+import { aggregate, takerImbalance, type CandleSet } from './candleStore';
 import type { Candle } from './indicators';
 import { CONFLUENCES, RULES, type Timeframe } from './knowledge';
 
 /** Bump when a feature formula or window changes (old models are then refused). */
-export const TANET_SCHEMA = '2';
+export const TANET_SCHEMA = '3';
 /** Hourly bars per window, and the GRU's hourly steps. Coinbase returns 300 candles per request
  *  including the forming one, so the live store holds >= 299 closed bars from the first poll:
  *  280 + 11 earlier steps = 291 always fit. */
@@ -38,7 +38,10 @@ export const TANET_D1_BARS = 250;
 export const TANET_MACRO_DAYS = 30;
 /** 15-minute bars the convolution reads (33 closed bars needed for 32 returns). */
 export const TANET_MICRO_STEPS = 32;
-export const TANET_MICRO_F = 4;
+export const TANET_MICRO_F = 5;
+/** Raw hourly bars the swing branch's fractal block reads (49 closed bars for 48 returns). */
+export const TANET_SWING_BARS = 48;
+export const TANET_SWING_F = 5;
 /** Maximum missing hours inside the window before a step is skipped (exchange outages). */
 export const TANET_MAX_MISSING = 12;
 export const TANET_HORIZONS = [60, 240] as const;
@@ -134,6 +137,8 @@ export const TANET_FEATURES: string[] = [
   ...RULE_KINDS.map((k) => `net_${k}`), 'net_all', 'n_signals',
   'ret_1h_z', 'ret_4h_z', 'ret_24h_z', 'ret_168h_z', 'log_sigma_1h', 'rv_24_168', 'rv_4_24', 'range_24h_pos',
   'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'weekend', 'missing_hours',
+  // Order flow: taker-buy share of volume (2 tb / v - 1) over 1, 4 and 24 hours, and its change.
+  'flow_1h', 'flow_4h', 'flow_24h', 'flow_chg',
 ];
 
 /** Reuses the 4h / 1d states between consecutive steps (they change every 4 / 24 bars). */
@@ -197,6 +202,8 @@ export function taNetFeatureMap(asset: string, h1: Candle[], d1: Candle[] | unde
   out.dow_sin = Math.sin((2 * Math.PI * dow) / 7); out.dow_cos = Math.cos((2 * Math.PI * dow) / 7);
   out.weekend = dow === 0 || dow === 6 ? 1 : 0;
   out.missing_hours = Math.max(0, Math.round((last.ts - h1[0].ts) / H) - (h1.length - 1));
+  out.flow_1h = takerImbalance(h1.slice(-1)); out.flow_4h = takerImbalance(h1.slice(-4)); out.flow_24h = takerImbalance(h1.slice(-24));
+  out.flow_chg = Number.isFinite(out.flow_4h) && Number.isFinite(out.flow_24h) ? out.flow_4h - out.flow_24h : NA;
   for (const k of TANET_FEATURES) if (!(k in out)) out[k] = NA;
   return out;
 }
@@ -260,10 +267,35 @@ export function taNetMicro(m15: Candle[] | undefined, t: number): Float64Array {
   if (!(s > 0)) return out;
   for (let k = 0; k < TANET_MICRO_STEPS; k++) {
     const b = w[k + 1];
-    out[k * 4] = clip(r[k] / s, 10);
-    out[k * 4 + 1] = b.h > b.l ? clip(Math.log(b.h / b.l) / s, 20) : 0;
-    out[k * 4 + 2] = b.h > b.l ? ((b.c - b.l) / (b.h - b.l)) * 2 - 1 : 0;
-    out[k * 4 + 3] = avgV > 0 ? clip(Math.log((b.v + 1e-9) / avgV), 5) : 0;
+    const F = TANET_MICRO_F;
+    out[k * F] = clip(r[k] / s, 10);
+    out[k * F + 1] = b.h > b.l ? clip(Math.log(b.h / b.l) / s, 20) : 0;
+    out[k * F + 2] = b.h > b.l ? ((b.c - b.l) / (b.h - b.l)) * 2 - 1 : 0;
+    out[k * F + 3] = avgV > 0 ? clip(Math.log((b.v + 1e-9) / avgV), 5) : 0;
+    out[k * F + 4] = takerImbalance([b]);
+  }
+  return out;
+}
+
+/** Raw hourly bars ending at index i (the swing branch): [return/sigma, log(high/low)/sigma, close
+ *  position, log volume vs the 48-bar mean, taker imbalance], sigma = rms of the 48 returns. */
+export function taNetSwing(h1: Candle[], i: number): Float64Array {
+  const B = TANET_SWING_BARS, F = TANET_SWING_F;
+  const out = new Float64Array(B * F).fill(NaN);
+  if (i < B) return out;
+  const w = h1.slice(i - B, i + 1);
+  const r: number[] = [];
+  for (let k = 1; k < w.length; k++) r.push(Math.log(w[k].c / w[k - 1].c));
+  const s = Math.sqrt(r.reduce((a, x) => a + x * x, 0) / r.length);
+  const avgV = w.slice(1).reduce((a, x) => a + x.v, 0) / B;
+  if (!(s > 0)) return out;
+  for (let k = 0; k < B; k++) {
+    const b = w[k + 1];
+    out[k * F] = clip(r[k] / s, 10);
+    out[k * F + 1] = b.h > b.l ? clip(Math.log(b.h / b.l) / s, 20) : 0;
+    out[k * F + 2] = b.h > b.l ? ((b.c - b.l) / (b.h - b.l)) * 2 - 1 : 0;
+    out[k * F + 3] = avgV > 0 ? clip(Math.log((b.v + 1e-9) / avgV), 5) : 0;
+    out[k * F + 4] = takerImbalance([b]);
   }
   return out;
 }
@@ -332,13 +364,29 @@ export interface TaNetNetworkValidation {
   validated: boolean;
 }
 
+export interface PatternReport {
+  /** Bars each fractal column sees (e.g. 3 / 7 / 31). */
+  reach: number[];
+  /** Holdout loss with only one column active in a block, vs all columns (lower = that depth alone does well). */
+  ablation: Array<{ block: 'micro' | 'swing'; column: number; reach: number; logLossUp1h: number; mseVol: number }>;
+  allColumns: { logLossUp1h: number; mseVol: number };
+  /** Max |correlation| between a column's channels and each TA pattern family's readings. */
+  families: Array<{ block: 'micro' | 'swing'; column: number; reach: number } & Record<string, number | string>>;
+  /** Per block and family: the column whose channels track that family most closely. */
+  best?: Record<string, { block: 'micro' | 'swing'; family: string; column: number; reach: number; corr: number }>;
+  /** Held-out rows the report was computed on. */
+  rows?: number;
+}
+
 export interface TaNetParams {
   version: string;
   schema: string;
   dims: BranchDims;
   gates: BranchGates;
   weights: number[];
-  norm: { trend: TaNetNorm; macro: TaNetNorm; micro: TaNetNorm };
+  norm: { trend: TaNetNorm; macro: TaNetNorm; micro: TaNetNorm; swing: TaNetNorm };
+  /** Which fractal depth carries which kind of TA pattern (research/trainTaNet.ts patternReport). */
+  patterns?: PatternReport;
   trendFeatures: string[];
   dayFeatures: string[];
   strategy: TaNetStrategy;
@@ -352,13 +400,14 @@ export interface TaNetParams {
 const sigmoid = (z: number) => 1 / (1 + Math.exp(-z));
 
 /** Normalised branch input from raw step vectors (missing -> 0 = the training mean). */
-export function buildBranchInput(dims: BranchDims, norm: TaNetParams['norm'], trend: ArrayLike<number>[], macro: ArrayLike<number>[], micro: ArrayLike<number>): BranchInput {
+export function buildBranchInput(dims: BranchDims, norm: TaNetParams['norm'], trend: ArrayLike<number>[], macro: ArrayLike<number>[], micro: ArrayLike<number>, swing: ArrayLike<number>): BranchInput {
   const nz = (v: number, n: TaNetNorm, j: number) => (Number.isFinite(v) ? Math.max(-8, Math.min(8, (v - n.mean[j]) / n.std[j])) : 0);
-  const t = new Float64Array(dims.tT * dims.tF), m = new Float64Array(dims.dT * dims.dF), u = new Float64Array(dims.mT * dims.mF);
+  const t = new Float64Array(dims.tT * dims.tF), m = new Float64Array(dims.dT * dims.dF), u = new Float64Array(dims.mT * dims.mF), w = new Float64Array(dims.sT * dims.sF);
+  for (let s = 0; s < dims.sT; s++) for (let f = 0; f < dims.sF; f++) w[s * dims.sF + f] = nz(swing[s * dims.sF + f], norm.swing, f);
   for (let s = 0; s < dims.tT; s++) for (let f = 0; f < dims.tF; f++) t[s * dims.tF + f] = nz(trend[s][f], norm.trend, f);
   for (let s = 0; s < dims.dT; s++) for (let f = 0; f < dims.dF; f++) m[s * dims.dF + f] = nz(macro[s][f], norm.macro, f);
   for (let s = 0; s < dims.mT; s++) for (let f = 0; f < dims.mF; f++) u[s * dims.mF + f] = nz(micro[s * dims.mF + f], norm.micro, f);
-  return { trend: t, macro: m, micro: u };
+  return { trend: t, macro: m, micro: u, swing: w };
 }
 
 export class TaNet {
@@ -387,8 +436,8 @@ export class TaNet {
   }
 
   /** P(up 1h), P(up 4h), vol log ratio from raw step vectors. */
-  predict(trend: ArrayLike<number>[], macro: ArrayLike<number>[], micro: ArrayLike<number>): { up1: number; up4: number; vol: number } {
-    const x = buildBranchInput(this.params.dims, this.params.norm, trend, macro, micro);
+  predict(trend: ArrayLike<number>[], macro: ArrayLike<number>[], micro: ArrayLike<number>, swing: ArrayLike<number>): { up1: number; up4: number; vol: number } {
+    const x = buildBranchInput(this.params.dims, this.params.norm, trend, macro, micro, swing);
     const o = branchForward(this.params.dims, this.w, this.params.gates, x, this.layout).out;
     return { up1: sigmoid(o[0]), up4: sigmoid(o[1]), vol: clip(o[2], 3) };
   }
@@ -528,7 +577,7 @@ export class TaNetRuntime {
       for (let k = dj - TANET_MACRO_DAYS + 1; k <= dj && k >= 0; k++) { const v = days.get(d1[k].ts); if (v) macro.push(v); }
       const fr = feats.get(ts);
       if (trend.length < TANET_TREND_STEPS || macro.length < TANET_MACRO_DAYS || !fr) { memo.set(ts, { up60: NA, up240: NA, vol: NA, close: h1[i].c, pos: 0 }); continue; }
-      const o = this.net.predict(trend, macro, taNetMicro(set!.bars['15m'], t));
+      const o = this.net.predict(trend, macro, taNetMicro(set!.bars['15m'], t), taNetSwing(h1, i));
       const up60 = active.includes('up_1h') && !muted ? o.up1 : NA;
       const up240 = active.includes('up_4h') && !muted ? o.up4 : NA;
       const vol = active.includes('vol_4h') ? o.vol : NA;

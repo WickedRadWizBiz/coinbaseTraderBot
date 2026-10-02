@@ -20,7 +20,7 @@ import { kalshiMaintenance, sessionState, usMarketClock, zoneTime } from './sess
 import { neighborGap, violationAt, type LadderQuote } from './ladder';
 import { PerpHub, type PerpSnapshot, type PerpState } from '../perps/perpData';
 import { EWMA_LOOKBACK_SEC, seasonalVarianceRatio, type VolProfile } from './volSeasonality';
-import { CandleSet, fromRow, toRow, type CandleRow } from '../ta/candleStore';
+import { CandleSet, fromRow, takerImbalance, toRow, type CandleRow } from '../ta/candleStore';
 import type { Timeframe } from '../ta/knowledge';
 import { CONFLUENCES, RULES } from '../ta/knowledge';
 import type { TaSnapshot, TfState } from '../ta/analyzer';
@@ -786,6 +786,15 @@ export const FEATURES: Record<string, { group: FeatureGroup; description: string
   perp_ret_diff_5m_z: { group: 'perp', tier: 'T2', description: 'perp 5-min return minus index 5-min return, sigma-scaled', fn: (c, k) => perpRetDiff(c, k, 300) },
   funding_rate_bps: { group: 'perp', tier: 'T2', description: 'current funding-rate estimate per 8 h, bps (positive = longs pay)', fn: (c) => { const r = c.perp?.latest?.fundingRate; return r === undefined ? NA : clip(r * 1e4, 200); } },
   min_to_funding: { group: 'perp', tier: 'T2', description: 'minutes to the next funding payment', fn: (c) => { const t = c.perp?.latest?.nextFundingTs; return t === undefined ? NA : clamp((t - c.now) / 60_000, 0, 480); } },
+  funding_delta_4h: { group: 'perp', tier: 'T2', description: 'change in the funding-rate estimate over 4 h, bps per 8 h (leverage demand building or unwinding)', fn: (c) => {
+    const now = c.perp?.latest?.fundingRate, then = c.perp?.fundingAt(c.now - 4 * 3_600_000);
+    return now === undefined || then === undefined ? NA : clip((now - then) * 1e4, 200);
+  } },
+  perp_oi_accel_1h: { group: 'perp', tier: 'T2', description: 'open-interest acceleration: log OI change over the last hour minus the hour before (positions piling in vs unwinding)', fn: (c) => {
+    const s = c.perp?.oi.series(c.now, 7200, 300_000);
+    if (!s || !(s[0] > 0) || !(s[3600] > 0)) return NA;
+    return clip(Math.log(s[7200] / s[3600]) - Math.log(s[3600] / s[0]), 5);
+  } },
   perp_oi_chg_1h: { group: 'perp', tier: 'T2', description: 'log change in perp open interest over 1 h', fn: (c) => { const s = c.perp?.oi.series(c.now, 3600, 120_000); return s && s[0] > 0 ? clip(Math.log(s[s.length - 1] / s[0]), 5) : NA; } },
 
   // O. Cortex-like SNN (bot/snn): direction calls learned continuously from realised moves, and its
@@ -863,6 +872,16 @@ function taFeatures(): typeof FEATURES {
     add(`ta_vol_ratio_${tf}`, 'ta', `log(last ${tf} volume / 20-bar average)`, taFeat(tf, (s) => (s.volRatio > 0 ? Math.log(s.volRatio) : NA), 5));
   }
   for (const tf of ['1h', '4h'] as Timeframe[]) add(`ta_obv_slope_${tf}`, 'ta', `OBV 20-bar change / (20 x avg volume) on ${tf}`, taFeat(tf, (s) => s.obvSlope, 3));
+  // Order flow: taker-buy share of volume (Binance klines in history, the Coinbase trade feed live).
+  const flowFeat = (tf: Timeframe, bars: number): Fn => (c) => {
+    const cs = c.candles?.bars[tf], last = c.candles?.lastTs(tf);
+    if (!cs || last === undefined || c.now - last > 4 * TF_PERIOD[tf] || cs.length < bars) return NA;
+    return takerImbalance(cs.slice(-bars));
+  };
+  add('ta_taker_imb_15m', 'ta', 'taker order-flow imbalance of the last 15m bar: 2 x taker-buy / volume - 1', flowFeat('15m', 1));
+  add('ta_taker_imb_1h', 'ta', 'taker order-flow imbalance of the last hourly bar', flowFeat('1h', 1));
+  add('ta_taker_imb_4h', 'ta', 'taker order-flow imbalance of the last 4 hourly bars', flowFeat('1h', 4));
+  add('ta_taker_imb_24h', 'ta', 'taker order-flow imbalance of the last 24 hourly bars (cumulative delta / volume)', flowFeat('1h', 24));
   add('ta_willr_15m', 'ta', 'Williams %R(14) on 15m, (r+50)/50', taFeat('15m', (s) => (s.willR + 50) / 50));
   add('ta_atr_rank_1h', 'ta', 'ATR/price percentile over 100 1h bars (volatility regime)', taFeat('1h', (s) => s.atrRank));
   add('ta_round_dist_15m', 'ta', 'signed distance to the nearest round-number level, in 15m ATRs (Osler)', taFeat('15m', (s) => s.round.distAtr, 20));

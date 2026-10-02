@@ -1,10 +1,11 @@
 # Historical data and the TA network
 
-The TA network is a fourth learned model, trained on years of exchange history instead of the bot's own recordings. It reads three timeframes in three separate branches (docs/EVOLUTION.md, Phase 2):
+The TA network is a fourth learned model, trained on years of exchange history instead of the bot's own recordings. It reads its inputs in four separate branches (docs/EVOLUTION.md, Phase 2):
 
 | Branch | Input | Layer |
 |---|---|---|
-| Micro | last 32 fifteen-minute bars | 1-D convolution |
+| Micro | last 32 fifteen-minute bars (return, range, close position, volume, taker order flow) | fractal convolution block |
+| Swing | last 48 raw hourly bars (same five readings) | fractal convolution block |
 | Trend | last 12 hourly steps of the whole TA library (every 1h and 4h indicator and structure reading, every rule signal and confluence score) | GRU |
 | Macro | last 30 daily steps (daily TA readings, daily returns, volatility) | attention |
 
@@ -26,6 +27,40 @@ Its forecasts become features (`tanet_*`) for three decision models:
 Each of those models keeps the features only if its own validation improves with them. The network never trades by itself.
 
 It does not read dominance charts (USDT.D, BTC.D) because there is no history for them. The rules that need them stay silent, both in training and live.
+
+### Fractal blocks: one block, three pattern scales
+
+The micro and swing branches each use a **fractal convolution block** (FractalNet, the "fractal" half of the fractal SNN paper). It is built by one rule: a block of depth C+1 is the average of a single convolution and two depth-C blocks in series. At depth 3 that gives three parallel columns of causal convolutions, joined where they meet:
+
+| Column | Convolutions | Sees the last | Pattern scale it can learn |
+|---|---|---|---|
+| 1 | 1 | 3 bars | single candles and pairs: engulfing, pin bars, dojis, volume spikes |
+| 2 | 2 | 7 bars | short structure: breakouts, sweeps, break of structure, momentum bursts |
+| 3 | 4 | 31 bars | swing and chart-pattern scale: divergences, squeezes, ranges, trend legs |
+
+On the hourly swing branch 31 bars is about 1.3 days; on the 15-minute branch about 8 hours.
+
+**Drop-path** (training only): at every join each input is dropped at random (at least one stays), and half the samples keep just one random column through the whole block. So no column can lean on another; each depth has to work on its own. Whole branches are also dropped now and then (`pBranch`). The tournament mutates both probabilities.
+
+**Which depth carries which pattern (the pattern report).** Because each column works alone, the trainer can switch the others off and measure each depth on the holdout. For each block and column it records:
+- the holdout loss with only that column active (`ablation`), and
+- the strongest correlation between that column's outputs and each family of TA library readings: candlesticks (engulf, pin, doji), structure (trend, BOS, CHoCH, sweep, breakout, equal highs/lows, Donchian), momentum (RSI, MACD, stochastic, Williams %R), divergences, volatility (squeeze, Bollinger width, ATR rank), volume and flow (volume ratio, OBV, CMF, MFI, taker flow), levels (round numbers, volume profile, FVGs), and 4h structure.
+
+The report is saved in the model file (`patterns`) and printed in the training log, for example `swing momentum: best tracked by column 1 (3 bars), |corr| 0.80`. How to read it:
+- High correlation with a family means that depth has learned to see what the TA library already computes. That is consistent, but the network gets no new information from it.
+- A column that **lowers the holdout loss on its own but correlates weakly** with every family has found something the library does not encode. That is the interesting case, and the place to look for a new hand-written pattern.
+- A column that does neither is dead weight at that scale.
+
+It is a diagnostic, not a trading gate: the heads still speak only after the holdout and hurdles.
+
+### Order flow (taker buy vs sell)
+
+Every candle can carry `tb`, the volume bought by aggressive (taker) buyers. Order-flow imbalance = 2 × tb / volume − 1, from −1 (all selling) to +1 (all buying).
+- **History:** Binance klines include taker-buy volume (column 10). Bars from sources without it (Coinbase, Bittrex) borrow Binance's taker-buy share for the same hour when it exists.
+- **Live:** Coinbase REST candles have no split, so the bot listens to Coinbase's public trade feed (`matches`) and counts buyer-initiated volume per 15 minutes. A bar is only reported if the feed was connected for the whole of it. After a restart, 15-minute flow appears after the first full bar, hourly flow after an hour, and the 24-hour reading after a day; until then those inputs count as missing.
+- **Where it's used:** the network's micro and swing bars (fifth reading), its hourly features `flow_1h/4h/24h/flow_chg`, and the decision-model features `ta_taker_imb_15m/1h/4h/24h` (the perps model uses the 1h and 4h ones).
+
+Re-run `history.sh binance` once after this update so the stored Binance files gain the `tb` column.
 
 ## 1. Getting the data
 
@@ -106,15 +141,17 @@ npm run pipeline -- --fresh-ta-net              # restart the tournament from sc
 ```
 
 What it does:
-1. **Inputs.** For every closed hourly bar it builds the three branch inputs, using the same windows the live bot has: 280 hourly bars, 4h built from them, 250 daily bars, and 32 fifteen-minute bars. All assets are pooled, because every input is scale-free. Hourly rows are cached, so re-runs only compute new bars.
-2. **Tournament.** Three identical networks with slightly different settings train on a rolling 12-month block and are scored on the next month. Each one trades its own position rule (quarter-Kelly on its forecasts, 5 bp costs). Fitness = Sortino − 5 × max drawdown − 5 × costs. Each month the elite survives, the worst copies it, and the middle one and the copy get mutated (learning rate, L2, the weight of each branch, the vol head's weight). Then everything rolls forward one month.
+1. **Inputs.** For every closed hourly bar it builds the four branch inputs, using the same windows the live bot has: 280 hourly bars (the last 48 also raw, for the swing branch), 4h built from them, 250 daily bars, and 32 fifteen-minute bars. All assets are pooled, because every input is scale-free. Hourly rows are cached, so re-runs only compute new bars.
+2. **Tournament.** Three identical networks with slightly different settings train on a rolling 12-month block and are scored on the next month. Each one trades its own position rule (quarter-Kelly on its forecasts, 5 bp costs). Fitness = Sortino − 5 × max drawdown − 5 × costs. Each month the elite survives, the worst copies it, and the middle one and the copy get mutated (learning rate, L2, the weight of each branch, the vol head's weight, the drop-path probabilities). Every 6th round the worst network instead restarts from scratch with random settings (the exploration member). Then everything rolls forward one month.
 3. **Hurdles.** The elite's out-of-sample record is clustered so that one continuous position counts as one interaction. It must pass the deflated Sharpe ratio, with every member evaluation counted as a trial, and hold at least 100 independent interactions in every regime it covers.
 4. **Unseen holdout.** The last 3 months are never touched. Each head is graded there against the naive forecast. The volatility head speaks live if it beats it. The direction heads also need step 3's hurdles.
 5. **Live forward test.** The bot trades the elite's position rule on paper for 90 days. If that fails, the direction heads go silent.
 
+6. **Pattern report.** The elite is run on the holdout with one fractal column at a time (see above).
+
 Live, every forecast is also graded against the candles that follow. `tanet_skill_1h` and `tanet_skill_4h` are the network's rolling skill over its last 168 graded calls.
 
-## 3. Real results of the first tournament (Binance spot, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
+## 3. Real results of the first tournament (schema 2, before the fractal blocks and order flow; Binance spot, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
 
 **Setup:** 85 monthly rounds from mid-2019 to June 2026, 255 member evaluations (trials), and an untouched holdout from 2026-07-02 to 2026-10-02.
 
@@ -157,6 +194,9 @@ This model ships as `params/ta_net.json`. The server's pipeline continues the to
 | `TA_NET_MIN_PER_REGIME` / `TA_NET_DSR` | `100` / `0.95` | Statistical hurdles for the direction heads. |
 | `TA_NET_FORWARD_DAYS` / `TA_NET_MUTE_ON_FORWARD_FAIL` | `90` / `true` | Live forward test. |
 | `TA_NET_MAX_ROUNDS_PER_RUN` | `36` | Rounds per pipeline run while the first tournament runs (0 = all at once). |
+| `TA_NET_RESTART_EVERY` | `6` | Every N rounds the worst network restarts from scratch with random settings (0 = never). |
+| `TAKER_FLOW` | `true` | Listen to the Coinbase trade feed for live taker order flow. |
+| `COINBASE_WS_URL` | `wss://ws-feed.exchange.coinbase.com` | Coinbase Exchange public WebSocket. |
 | `HISTORY_DIR` | `data/history` | The candle store. |
 | `HISTORY_AUTO_UPDATE` | `true` | Refresh Binance and Coinbase data in the daily pipeline. |
 | `HISTORY_ASSETS` | `auto` | `auto` = every crypto asset Kalshi lists; or a list like `BTC,ETH,SOL`. |

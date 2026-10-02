@@ -174,6 +174,9 @@ export interface Config {
   /** Output of `npm run research:ta` (measured hit rates per rule), shown with live signals. */
   taStudyPath: string;
   coinbaseRestUrl: string;
+  /** Coinbase public trade feed (taker order flow for the candles) and its URL. */
+  takerFlow: boolean;
+  coinbaseWsUrl: string;
   binanceWsUrl: string;
   coingeckoUrl: string;
   coingeckoApiKey?: string;
@@ -233,6 +236,8 @@ export interface TaNetConfig {
   muteOnForwardFail: boolean;
   /** Tournament rounds per pipeline run (0 = all): the initialisation is spread over daily runs. */
   maxRoundsPerRun: number;
+  /** Exploration member: every N rounds the worst network restarts from scratch (0 = never). */
+  restartEvery: number;
 }
 
 export interface AutoTrainConfig {
@@ -262,6 +267,9 @@ export interface AutoTrainConfig {
   snnPbtInitDays: number;
   snnPbtMaxRounds: number;
   snnPbtEveryDays: number;
+  /** Exploration member: every N tournament rounds the worst SNN restarts from scratch with random
+   *  knobs instead of copying the elite (0 = never). */
+  snnPbtRestartEvery: number;
 }
 
 export interface SnnConfig {
@@ -688,6 +696,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     settlementAvg: oneOf(env, 'SETTLEMENT_AVG', 'official', ['official', 'continuous'] as const),
     taStudyPath: path.resolve(env.TA_STUDY_PATH ?? './params/ta_study.json'),
     coinbaseRestUrl: env.COINBASE_REST_URL ?? 'https://api.exchange.coinbase.com',
+    takerFlow: bool(env, 'TAKER_FLOW', true),
+    coinbaseWsUrl: env.COINBASE_WS_URL ?? 'wss://ws-feed.exchange.coinbase.com',
     // Binance.com blocks US IPs; the market-data-only host usually works. Override if needed.
     binanceWsUrl: env.BINANCE_WS_URL ?? 'wss://data-stream.binance.vision/ws/!miniTicker@arr',
     coingeckoUrl: env.COINGECKO_URL ?? 'https://api.coingecko.com/api/v3',
@@ -780,6 +790,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       snnPbtInitDays: num(env, 'AUTO_TRAIN_SNN_PBT_INIT_DAYS', 3, 1, 60),
       snnPbtMaxRounds: num(env, 'AUTO_TRAIN_SNN_PBT_MAX_ROUNDS', 0, 0, 1000),
       snnPbtEveryDays: num(env, 'AUTO_TRAIN_SNN_PBT_EVERY_DAYS', 30, 0, 365),
+      snnPbtRestartEvery: num(env, 'AUTO_TRAIN_SNN_PBT_RESTART_EVERY', 4, 0, 1000),
     },
     snn: {
       mode: oneOf(env, 'SNN_MODE', 'shadow', ['off', 'shadow', 'blend'] as const),
@@ -892,6 +903,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       forwardDays: num(env, 'TA_NET_FORWARD_DAYS', 90, 1, 365),
       muteOnForwardFail: bool(env, 'TA_NET_MUTE_ON_FORWARD_FAIL', true),
       maxRoundsPerRun: num(env, 'TA_NET_MAX_ROUNDS_PER_RUN', 36, 0, 10_000),
+      restartEvery: num(env, 'TA_NET_RESTART_EVERY', 6, 0, 1000),
     },
   };
   return deepFreeze(cfg);

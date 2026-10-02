@@ -78,6 +78,35 @@ test('tournament: identical start, elite survives, worst clones elite, middle + 
   assert.ok(rest.elite.record.length >= rest.log.length, 'out-of-sample record of the lineage');
 });
 
+test('exploration member: every N rounds the worst network restarts fresh with random knobs', async () => {
+  const rounds = walkForwardRounds(0, 10 * DAY, 2 * DAY, DAY, DAY);
+  const spec = { target: { min: 0.1, max: 10 } };
+  const inits: Array<{ target: number; id: number }> = [];
+  const hooks = {
+    init: (h: Record<string, number>, id: number) => { inits.push({ target: h.target, id }); return { x: 0 }; },
+    clone: (s: { x: number }) => ({ x: s.x }),
+    train: (s: { x: number }, h: Record<string, number>) => { s.x += 0.5 * (h.target - s.x); return s; },
+    evaluate: (s: { x: number }, _h: Record<string, number>, r: { evalFrom: number }) => {
+      const fit = -Math.abs(s.x - 3);
+      return { report: { fitness: fit, sortino: fit, maxDrawdown: 0, costs: 0, netReturn: 0, interactions: 1, independent: 1, days: 1 }, interactions: [{ ts: r.evalFrom, ret: fit, cost: 0 }] };
+    },
+  };
+  const res = await runPbt({ base: { target: 1 }, spec, rounds: rounds.slice(0, 6), hooks, seed: 5, restartEvery: 3, exploreAfterLast: true });
+  const restarted = res.log.filter((l) => l.restarted !== undefined);
+  assert.deepEqual(restarted.map((l) => l.round), [2, 5], 'rounds 3 and 6 (1-based) restart the culled member');
+  for (const l of restarted) {
+    assert.equal(l.restarted, l.culled);
+    assert.equal(l.mutated.length, 1, 'only the middle member mutates on a restart round');
+    assert.ok(!l.mutated.includes(l.culled));
+  }
+  assert.equal(inits.length, 5, '3 initial members + 2 fresh restarts');
+  assert.ok(inits.slice(3).every((x) => x.target >= 0.1 && x.target <= 10));
+  // A restarted member starts its own lineage and an empty out-of-sample record.
+  const last = res.members.find((m) => m.id === restarted[restarted.length - 1].culled)!;
+  assert.deepEqual(last.lineage, [last.id]);
+  assert.equal(last.record.length, 0);
+});
+
 test('SNN knobs: shape-preserving mutation, clone into a mutated network', () => {
   const p = withFlags({ ...DEFAULT_SNN, nE: 32, nI: 8, nL1: 12, maxColumns: 4 }, {});
   const h = snnHyperOf(p);

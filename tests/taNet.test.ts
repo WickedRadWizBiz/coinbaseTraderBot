@@ -106,13 +106,20 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
   assert.ok(p.heads.up_1h.validation.hitRate! > 0.52, `planted autocorrelation: ${JSON.stringify(p.heads.up_1h.validation)}`);
   assert.equal(p.heads.up_1h.validation.validated, p.heads.up_1h.validation.holdoutPassed && p.network.validated);
   assert.ok(logs.some((l) => /elite #\d/.test(l)));
+  // Pattern report: which fractal column (3 / 7 / 31 bars) carries which TA pattern family.
+  assert.deepEqual(p.patterns!.reach, [3, 7, 31]);
+  assert.equal(p.patterns!.ablation.length, 6, 'micro + swing blocks x 3 columns');
+  assert.ok(p.patterns!.ablation.every((a) => Number.isFinite(a.logLossUp1h) && Number.isFinite(a.mseVol)));
+  assert.ok(p.patterns!.families.every((f) => typeof f.candlestick === 'number' && typeof f.structure === 'number'));
+  assert.ok(Object.values(p.patterns!.best!).some((b) => b.family === 'momentum'));
+  assert.ok(logs.some((l) => /pattern report/.test(l)));
 
   // Save / load / live forecast == offline forecast for the same bar.
   const file = path.join(dir, 'ta_net.json');
   fs.writeFileSync(file, JSON.stringify(p));
   const net = TaNet.load(file)!;
   const k = D.ts.length - 100;
-  const off = forecast(D, p.dims, p.norm, Float64Array.from(p.weights), { gMicro: p.gates.micro, gTrend: p.gates.trend, gMacro: p.gates.macro }, [k]);
+  const off = forecast(D, p.dims, p.norm, Float64Array.from(p.weights), { gMicro: p.gates.micro, gSwing: p.gates.swing, gTrend: p.gates.trend, gMacro: p.gates.macro }, [k]);
   const barTs = D.ts[k];
   const end = H1.findIndex((c) => c.ts === barTs) + 1;
   const set = new CandleSet('TST');
