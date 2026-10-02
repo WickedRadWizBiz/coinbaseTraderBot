@@ -61,6 +61,17 @@ function assetFromName(name: string): { asset: string; quote: string } | undefin
   return undefined;
 }
 
+/** TradingView index export (CRYPTOCAP:BTC.D, USDT.D, TOTAL, TOTAL2, TOTAL3, OTHERS.D, ...): TradingView's
+ *  own "CRYPTOCAP_BTC.D, 1D.csv" / "CRYPTOCAP_USDT.D, 60.csv" or deploy/tv_dominance.py's
+ *  "CRYPTOCAP_BTC.D_1d.csv". These are market-wide index series, stored apart from spot pairs. */
+export function tradingViewIndexFromName(name: string): { asset: string; tf?: HistTf } | undefined {
+  const b = path.basename(name).replace(/\.csv$/i, '');
+  const m = /CRYPTOCAP[_:\s]+([A-Z0-9]+(?:\.D)?)(?:[,_\s]+([0-9]+[a-z]?|[a-z])(?=$|[^0-9a-z]))?/i.exec(b);
+  if (!m) return undefined;
+  const tf = ({ '1d': '1d', d: '1d', '1440': '1d', '240': '4h', '4h': '4h', '60': '1h', '1h': '1h', '15': '15m', '15m': '15m' } as Record<string, HistTf>)[(m[2] ?? '').toLowerCase()];
+  return { asset: m[1].toUpperCase(), tf };
+}
+
 function exchangeFromName(name: string): string | undefined {
   const b = path.basename(name).toLowerCase();
   return EXCHANGES.find((e) => b.startsWith(`${e}_`) || b.startsWith(`${e}-`) || b.includes(`_${e}_`));
@@ -119,7 +130,8 @@ export function parseCandleCsv(text: string, fileName = 'data.csv', hint: { asse
   const notes: string[] = [];
   const lines = text.split(/\r?\n/).filter((l) => l.trim() !== '');
   if (!lines.length) throw new Error(`${fileName}: empty file`);
-  const nameAsset = assetFromName(fileName);
+  const tvIndex = tradingViewIndexFromName(fileName);
+  const nameAsset = tvIndex ? undefined : assetFromName(fileName);
   const exch = exchangeFromName(fileName);
   let format: ParsedCsv['format'];
   let candles: Candle[] = [];
@@ -170,17 +182,19 @@ export function parseCandleCsv(text: string, fileName = 'data.csv', hint: { asse
   // Asset / quote: explicit hint, symbol column, file name.
   const fromSym = symbolSeen ? splitSymbol(symbolSeen) : undefined;
   const aq = fromSym ?? nameAsset;
-  const asset = (hint.asset ?? aq?.asset)?.toUpperCase();
+  const asset = (hint.asset ?? tvIndex?.asset ?? aq?.asset)?.toUpperCase();
   const quote = aq?.quote;
   if (!hint.asset && symbolSeen && !fromSym) notes.push(`symbol "${symbolSeen}" is not a USD pair`);
 
   // Timeframe: hint, file name, then spacing; warn when name and spacing disagree.
   const spacing = inferTf(candles.map((c) => c.ts));
-  const named = tfFromName(fileName);
+  // (".D" in a dominance symbol would read as "daily": TradingView names carry their own interval.)
+  const named = tvIndex ? tvIndex.tf : tfFromName(fileName);
   const tf = hint.tf ?? named ?? spacing;
   if (named && spacing && named !== spacing) notes.push(`file name says ${named} but bars are spaced ${spacing}`);
 
-  const source = hint.source ?? (format === 'yahoo' ? 'yahoo' : format === 'binance' ? 'binance' : format === 'coinbase' ? 'coinbase' : format === 'bittrex' ? 'bittrex' : exch ?? (format === 'cdd' ? 'cdd' : 'other'));
+  if (tvIndex) notes.push(`TradingView index ${tvIndex.asset}: stored apart from spot pairs`);
+  const source = hint.source ?? (tvIndex ? 'tradingview' : format === 'yahoo' ? 'yahoo' : format === 'binance' ? 'binance' : format === 'coinbase' ? 'coinbase' : format === 'bittrex' ? 'bittrex' : exch ?? (format === 'cdd' ? 'cdd' : 'other'));
   return { format, source, asset, quote, tf, candles: candles.sort((a, b) => a.ts - b.ts), notes };
 }
 
@@ -192,8 +206,8 @@ function binanceRows(lines: string[]): Candle[] {
     const t = Number(f[0]);
     if (!Number.isFinite(t)) continue;
     const bar: Candle = { ts: epochToMs(t), o: Number(f[1]), h: Number(f[2]), l: Number(f[3]), c: Number(f[4]), v: Number(f[5]) };
-    // Column 10: taker buy base asset volume (order flow).
-    if (f.length >= 10 && Number.isFinite(Number(f[9]))) bar.tb = Number(f[9]);
+    // Column 10: taker buy base asset volume (order flow). Index-price klines carry zeros there.
+    if (f.length >= 10 && Number.isFinite(Number(f[9])) && bar.v > 0) bar.tb = Number(f[9]);
     out.push(bar);
   }
   return out;

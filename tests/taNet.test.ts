@@ -10,8 +10,10 @@ import { assetFeatureMap } from '../bot/model/featureEngine';
 import { CandleSet } from '../bot/ta/candleStore';
 import type { Candle } from '../bot/ta/indicators';
 import {
-  activeTaNet, setTaNet, TANET_D1_BARS, TANET_FEATURES, TANET_H1_BARS, TANET_SCHEMA, TANET_TREND_STEPS, TaNet, TaNetRuntime, taNetDayVector, taNetFeatureMap, taNetMicro, taNetPosition, windowOk, type TaNetStateCache,
+  activeTaNet, setTaNet, setTaNetContextSource, TANET_D1_BARS, TANET_DAY_FEATURES, TANET_FEATURES, TANET_H1_BARS, TANET_SCHEMA, TANET_TREND_STEPS, TaNet, TaNetRuntime, taNetDayVector, taNetFeatureMap, taNetMicro, taNetPosition, windowOk, type TaNetStateCache,
 } from '../bot/ta/taNet';
+import { CONTEXT_FEATURES, DAILY_CONTEXT_FEATURES, domMatrixScore, TaNetContext } from '../bot/ta/taNetContext';
+import { IndexStore } from '../bot/marketdata/indexBars';
 import { aggregateCandles, upsertSeries } from '../research/history/candles';
 import { runPipeline } from '../research/pipeline';
 import { buildData, forecast, trainTaNet } from '../research/trainTaNet';
@@ -43,10 +45,26 @@ function planted(hours: number, seed = 3, phi = 0.6): Candle[] {
 const M15 = planted(9000);
 const H1 = aggregateCandles(M15, Q, H);
 const D1 = aggregateCandles(M15, Q, DAY);
+// Market context: a second coin (BTC), Binance's BTCDOM index (hourly) and the BTC.D / USDT.D daily charts.
+const BTC_M15 = planted(9000, 11, 0.2);
+const BTC_H1 = aggregateCandles(BTC_M15, Q, H);
+function walk(n: number, step: number, t0: number, level: number, vol: number, seed: number): Candle[] {
+  let s = seed, p = level;
+  const r = () => { s = (s * 16807) % 2147483647; return s / 2147483647 - 0.5; };
+  return Array.from({ length: n }, (_, i) => { const o = p; p *= Math.exp(vol * r()); return { ts: t0 + i * step, o, h: Math.max(o, p) * (1 + vol / 4), l: Math.min(o, p) * (1 - vol / 4), c: p, v: 0 }; });
+}
+const DOM = walk(H1.length, H, T0, 1000, 0.004, 5);
+const BTCD = walk(D1.length + 300, DAY, T0 - 300 * DAY, 55, 0.02, 7);
+const USDTD = walk(D1.length + 300, DAY, T0 - 300 * DAY, 5, 0.03, 9);
+const CTX = new TaNetContext({ h1: { TST: H1, BTC: BTC_H1 }, btcdom1h: DOM, btcd1d: BTCD, usdtd1d: USDTD });
 
 function historyDir(): string {
   const dir = tmpDir();
   upsertSeries(dir, 'binance', 'TST', '15m', M15);
+  upsertSeries(dir, 'binance', 'BTC', '15m', BTC_M15);
+  upsertSeries(dir, 'binance-index', 'BTCDOM', '1h', DOM);
+  upsertSeries(dir, 'tradingview', 'BTC.D', '1d', BTCD);
+  upsertSeries(dir, 'tradingview', 'USDT.D', '1d', USDTD);
   return dir;
 }
 const OPTS = { trainMonths: 1.5, evalMonths: 0.25, stepMonths: 0.25, holdoutMonths: 0.5, stride: 1, minPerRegime: 5, epochsPerRound: 2, baseHyper: { lr: 3e-3, l2: 1e-3 } };
@@ -54,22 +72,47 @@ const OPTS = { trainMonths: 1.5, evalMonths: 0.25, stepMonths: 0.25, holdoutMont
 test('inputs: hourly map, daily steps and 15m steps are complete, cache-identical and never look ahead', () => {
   const i = 8000;
   const w = H1.slice(i - TANET_H1_BARS + 1, i + 1);
-  const f = taNetFeatureMap('TST', w, D1);
+  const f = taNetFeatureMap('TST', w, D1, undefined, { ctx: CTX, m15: M15 });
   assert.deepEqual(Object.keys(f).sort(), [...TANET_FEATURES].sort());
+  // The 15-minute library and the market context are filled in.
+  for (const k of ['m15_rsi', 'm15_trend', 'm15_engulf', 'x_btc_ret_4h_z', 'x_rel_btc_24h', 'x_mkt_ret_4h_z', 'x_breadth_24h', 'x_btcdom_ret_4h_z', 'x_btcdom_trend', 'x_dom_matrix_4h']) assert.ok(Number.isFinite(f[k]), `${k} = ${f[k]}`);
+  assert.ok(CONTEXT_FEATURES.every((k) => TANET_FEATURES.includes(k)));
   const cache: TaNetStateCache = {};
   for (let k = i; k < i + 10; k++) {
     const win = H1.slice(k - TANET_H1_BARS + 1, k + 1);
-    const a = taNetFeatureMap('TST', win, D1, cache), b = taNetFeatureMap('TST', win, D1);
+    const a = taNetFeatureMap('TST', win, D1, cache, { ctx: CTX, m15: M15 }), b = taNetFeatureMap('TST', win, D1, undefined, { ctx: CTX, m15: M15 });
     for (const key of TANET_FEATURES) assert.ok(Object.is(a[key], b[key]), `${key} differs with the state cache`);
   }
+  // Nothing after the forecast time matters: not the coin's own bars, not BTC's, BTCDOM's or the dominance charts'.
   const t = H1[i].ts + H;
   const later = M15.map((c) => (c.ts >= t ? { ...c, c: c.c * 3, h: c.h * 3 } : c));
   const H1b = aggregateCandles(later, Q, H), D1b = aggregateCandles(later, Q, DAY);
-  const g = taNetFeatureMap('TST', H1b.slice(i - TANET_H1_BARS + 1, i + 1), D1b);
+  const bump = (cs: Candle[], cut: number) => cs.map((c) => (c.ts >= cut ? { ...c, c: c.c * 2, h: c.h * 2 } : c));
+  const ctxLater = new TaNetContext({ h1: { TST: H1b, BTC: bump(BTC_H1, t) }, btcdom1h: bump(DOM, t), btcd1d: bump(BTCD, t - DAY + 1), usdtd1d: bump(USDTD, t - DAY + 1) });
+  const g = taNetFeatureMap('TST', H1b.slice(i - TANET_H1_BARS + 1, i + 1), D1b, undefined, { ctx: ctxLater, m15: later });
   for (const key of TANET_FEATURES) assert.ok(Object.is(f[key], g[key]), `${key} looked ahead`);
   assert.deepEqual(Array.from(taNetMicro(later, t)), Array.from(taNetMicro(M15, t)), '15m steps looked ahead');
   const dj = D1.findIndex((c) => c.ts + DAY > t) - 1;
   assert.deepEqual(taNetDayVector(D1b, dj), taNetDayVector(D1, dj), 'daily step looked ahead');
+  assert.equal(taNetDayVector(D1, dj)!.length, TANET_DAY_FEATURES.length);
+  // TA on the BTC.D / USDT.D daily charts as of the last closed day (context branch), never later.
+  const dayTs = D1[dj].ts;
+  assert.deepEqual(ctxLater.daily('TST', dayTs), CTX.daily('TST', dayTs), 'dominance TA looked ahead');
+  const dom = CTX.daily('TST', dayTs);
+  assert.equal(dom.length, DAILY_CONTEXT_FEATURES.length);
+  assert.ok(dom.every(Number.isFinite), `TA on the BTC.D / USDT.D daily charts: ${dom}`);
+  // BTC.D readings are flipped for alts; USDT.D readings are not.
+  const domBtc = CTX.daily('BTC', dayTs);
+  const at = (k: string) => DAILY_CONTEXT_FEATURES.indexOf(k);
+  assert.equal(domBtc[at('dd_btcd_chg_5')], -dom[at('dd_btcd_chg_5')]);
+  assert.equal(domBtc[at('dd_usdtd_chg_5')], dom[at('dd_usdtd_chg_5')]);
+  assert.ok(Number.isNaN(CTX.daily('TST', dayTs + DAY / 2)[0]), 'no bar for that day -> missing, never an older value');
+  // The dominance quadrant: altseason favours alts most, risk-on-for-BTC favours BTC only.
+  assert.equal(domMatrixScore(-1, -1, false), 1);
+  assert.equal(domMatrixScore(-1, 1, false), 0);
+  assert.equal(domMatrixScore(-1, 1, true), 1);
+  assert.equal(domMatrixScore(1, 1, false), -1);
+  assert.ok(CTX.macro('TST', H1[i].ts)?.usdtdChg !== undefined, 'the TA library gets the quadrant inputs');
   assert.ok(Number.isFinite(taNetMicro(M15, t)[0]));
   assert.ok(Number.isNaN(taNetMicro(M15.filter((c) => c.ts !== t - 2 * Q), t)[0]), 'a missing 15m bar -> no micro input');
   assert.equal(windowOk(w), true);
@@ -84,6 +127,8 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
   const D = buildData(dir, ['TST'], path.join(dir, '.cache'), () => undefined);
   assert.ok(D.ts.length > 2000, `${D.ts.length} samples`);
   assert.ok(D.microShare > 0.95);
+  assert.deepEqual(D.context.basket, ['BTC', 'TST'], 'every stored coin is in the market basket, trained or not');
+  assert.deepEqual(Object.keys(D.context.indexes).sort(), ['BTC.D', 'BTCDOM', 'USDT.D']);
   const state = path.join(dir, 'pop.json');
   const logs: string[] = [];
   const first = await trainTaNet(D, { ...OPTS, statePath: state, maxRounds: 2, log: (m) => logs.push(m) });
@@ -99,6 +144,7 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
   assert.ok(rep.rounds > 2 && rep.newRounds === rep.rounds - 2, 'continued from the saved population');
   const p = rep.params;
   assert.equal(p.schema, TANET_SCHEMA);
+  assert.deepEqual(p.context?.basket, ['BTC', 'TST']);
   assert.equal(p.pbt.trials, rep.rounds * 3, 'every member evaluation is a trial');
   assert.ok(p.network.dsr.n > 0 && Number.isFinite(p.network.dsr.probability));
   assert.ok(p.network.regimes.length >= 1);
@@ -119,7 +165,7 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
   fs.writeFileSync(file, JSON.stringify(p));
   const net = TaNet.load(file)!;
   const k = D.ts.length - 100;
-  const off = forecast(D, p.dims, p.norm, Float64Array.from(p.weights), { gMicro: p.gates.micro, gSwing: p.gates.swing, gTrend: p.gates.trend, gMacro: p.gates.macro }, [k]);
+  const off = forecast(D, p.dims, p.norm, Float64Array.from(p.weights), { gMicro: p.gates.micro, gSwing: p.gates.swing, gTrend: p.gates.trend, gMacro: p.gates.macro, gCtx: p.gates.ctx }, [k]);
   const barTs = D.ts[k];
   const end = H1.findIndex((c) => c.ts === barTs) + 1;
   const set = new CandleSet('TST');
@@ -127,6 +173,13 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
   set.add('1h', H1.slice(end - 299, end), now);
   set.add('1d', D1.filter((c) => c.ts + DAY <= now).slice(-299), now);
   set.add('15m', M15.filter((c) => c.ts + Q <= now).slice(-299), now);
+  // Live context: every tracked coin's candles and the index series from the same history store.
+  const btcSet = new CandleSet('BTC');
+  btcSet.add('1h', BTC_H1.slice(end - 299, end), now);
+  const store = new IndexStore(dir);
+  let clock = now;
+  let sets = new Map([['TST', set], ['BTC', btcSet]]);
+  setTaNetContextSource({ sets: () => sets, index: (a, tf) => store.get(a, tf)?.filter((c) => c.ts + (tf === '1d' ? DAY : H) <= clock) });
   const rt = new TaNetRuntime(net, false);
   const o = rt.outputFor('TST', set, now)!;
   assert.ok(o, 'forecast from the first poll (299 closed hourly bars)');
@@ -140,12 +193,19 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
   const fwd = path.join(dir, 'fwd.json');
   const rt2 = new TaNetRuntime(net, false);
   rt2.enableForwardTest(fwd, now - 1, { days: 1, muteOnFail: true });
-  const s2 = new CandleSet('TST');
+  const s2 = new CandleSet('TST'), b2 = new CandleSet('BTC');
   s2.add('1h', H1.slice(end - 299, end), now); s2.add('1d', D1.filter((c) => c.ts + DAY <= now).slice(-299), now); s2.add('15m', M15.filter((c) => c.ts + Q <= now).slice(-299), now);
+  b2.add('1h', BTC_H1.slice(end - 299, end), now);
+  sets = new Map([['TST', s2], ['BTC', b2]]);
   rt2.outputFor('TST', s2, now);
   for (let j = end; j < end + 30; j++) {
     const t = H1[j].ts + H + 60_000;
+    clock = t;
     s2.add('1h', [H1[j]], t); s2.add('15m', M15.filter((c) => c.ts >= H1[j].ts && c.ts < H1[j].ts + H), t);
+    if (H1[j].ts % DAY === 23 * H) s2.add('1d', D1.filter((c) => c.ts + DAY <= t), t);
+    // The runtime waits (up to 30 minutes) for BTC's bar of the new hour: first without it, then with.
+    if (j === end) assert.equal(rt2.outputFor('TST', s2, t)?.barTs, undefined, 'waits for the other coins');
+    b2.add('1h', [BTC_H1[j]], t);
     rt2.outputFor('TST', s2, t);
   }
   const st = rt2.forwardStatus(H1[end + 29].ts + 2 * H)!;
@@ -161,6 +221,7 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
   assert.ok(Number.isNaN(assetFeatureMap('TST', now, { candles: set }).tanet_up_1h));
   fs.writeFileSync(file, JSON.stringify({ ...p, schema: '1' }));
   assert.throws(() => TaNet.load(file), /schema/);
+  setTaNetContextSource(undefined);
 });
 
 test('pipeline: ta_net runs the tournament in chunks and promotes only when it reaches the present', async () => {

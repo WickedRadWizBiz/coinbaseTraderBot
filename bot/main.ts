@@ -35,7 +35,7 @@ import { Reconciler } from './recon/reconciler';
 import { Tca } from './tca/tca';
 import { createSnnFleet } from './snn';
 import { VolModel } from './model/volModel';
-import { activeTaNet, setTaNet, TaNet } from './ta/taNet';
+import { activeTaNet, setTaNet, setTaNetContextSource, TaNet } from './ta/taNet';
 import { FillModel } from './tca/fillModel';
 import { TennisScoreClient } from './tennis/liveTennisApi';
 import { TennisFairModel } from './tennis/tennisFair';
@@ -213,6 +213,8 @@ async function main(): Promise<void> {
   let taNet: TaNet | undefined;
   try { taNet = cfg.taNet.enabled ? TaNet.load(modelPaths.ta_net) : undefined; } catch (e) { log.warn(`TA network not loaded: ${(e as Error).message}`); }
   setTaNet(taNet, cfg.taNet.requireValidated);
+  // Market-wide context for the TA network: every tracked coin's candles and the index series.
+  setTaNetContextSource({ sets: () => md.features.candles, index: (asset, tf) => md.indexStore.get(asset, tf) });
   if (taNet) {
     // Out-of-sample finality: the live bot forward-tests the elite's position rule.
     activeTaNet()?.enableForwardTest(path.join(cfg.dataDir, 'ta_net_forward.json'), Date.now(), { days: cfg.taNet.forwardDays, muteOnFail: cfg.taNet.muteOnForwardFail });

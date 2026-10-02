@@ -1,6 +1,6 @@
 # Historical data and the TA network
 
-The TA network is a fourth learned model, trained on years of exchange history instead of the bot's own recordings. It reads its inputs in four separate branches (docs/EVOLUTION.md, Phase 2):
+The TA network is a fourth learned model, trained on years of exchange history instead of the bot's own recordings. It reads its inputs in five separate branches (docs/EVOLUTION.md, Phase 2):
 
 | Branch | Input | Layer |
 |---|---|---|
@@ -8,6 +8,7 @@ The TA network is a fourth learned model, trained on years of exchange history i
 | Swing | last 48 raw hourly bars (same five readings) | fractal convolution block |
 | Trend | last 12 hourly steps of the whole TA library (every 1h and 4h indicator and structure reading, every rule signal and confluence score) | GRU |
 | Macro | last 30 daily steps (daily TA readings, daily returns, volatility) | attention |
+| Context | one vector at the forecast hour: the TA library on 15-minute bars, BTC and the whole market, Binance's BTC dominance index, the BTC.D × USDT.D quadrant, and TA on the BTC.D and USDT.D daily charts | dense layer |
 
 At the close of every hourly bar it forecasts:
 
@@ -26,7 +27,36 @@ Its forecasts become features (`tanet_*`) for three decision models:
 
 Each of those models keeps the features only if its own validation improves with them. The network never trades by itself.
 
-It does not read dominance charts (USDT.D, BTC.D) because there is no history for them. The rules that need them stay silent, both in training and live.
+### Market context: BTC, the market, BTC dominance and USDT dominance
+
+Every coin's forecast also sees the market around it. All of it is computed the same way from history in training and from the live feeds, and never from anything after the bar being forecast.
+
+| Input | What it is | History | Live |
+|---|---|---|---|
+| BTC | BTC's own moves over 1h, 4h, 24h and 7 days, and its position in its 24h range | every coin in the store | the bot's Coinbase candles |
+| Strength against BTC | the coin's move minus BTC's (for BTC: BTC minus the alt basket), over the same spans. This is BTC dominance at the level of one coin: "is this alt beating BTC?" | same | same |
+| Market momentum and breadth | the average move of every tracked coin, and the share of coins up over 4h and 24h. USDT.D's hour-to-hour moves are mostly the inverse of total crypto market cap (USDT's own cap barely moves within a day), so this stands in for USDT.D at the hourly scale | same | same |
+| BTCDOM | Binance's BTC dominance index: BTC priced against a market-cap-weighted basket of the top 20 altcoins, stablecoins excluded. Rising = BTC beating the alts. Its moves and TA readings (trend, RSI, MACD, structure), flipped for alts | Binance index history, hourly since June 2021 (downloaded with `history.sh binance`) | rebuilt every second from Binance spot prices and CoinGecko market caps (Binance's futures API refuses US servers), continuing from the stored level |
+| Dominance quadrant | the knowledge base's BTC.D × USDT.D matrix (altseason, risk-on for BTC only, risk-off, distribution) at the 4h and 24h scale, from BTCDOM and market momentum. The 4h reading is also handed to the TA library, so the `dominance_matrix` rule and the `macro_rotation` confluence now fire | same | same |
+| Daily BTC.D and USDT.D | the TA library on the real dominance charts as of the last closed day: trend, RSI, MACD, structure, distance to the 50/200-day averages and to round numbers, 1/5/20-day changes (BTC.D flipped for alts) | TradingView's charts, a one-off export (below) | the bot's own dominance feed, recorded as hourly bars and lined up with TradingView's levels |
+
+**The 15-minute TA library.** Every indicator and structure reading is also computed on the last 256 fifteen-minute bars, so the six confluences built on 15-minute members (squeeze breakout, value-area rotation, volatility reversal, range reversion, SMC reversal, multi-timeframe momentum) now fire in training. With the dominance quadrant, all 13 confluences are live in the network.
+
+**Why a separate context branch.** Feeding these ~120 extra readings into every one of the GRU's 12 hourly steps slowed learning: on a planted-signal test the hit rate fell from 57% to 52% even with the new inputs empty. Read once, through a small dense layer with its own weight and dropout, they cost far fewer weights, and the planted-signal result is back to 57%.
+
+**Getting the dominance history (one-off).** TradingView has the real BTC.D and USDT.D charts back to 2013. `deploy/tv_dominance.py` exports them (plus TOTAL, TOTAL2, TOTAL3 and OTHERS.D) with tvdatafeed, an unofficial client, without logging in: daily for the whole history, 4-hour for about 2.3 years and hourly for about 7 months. Automated downloading is against TradingView's terms, so run it once to backfill; after that the bot keeps the series up to date from its own feed.
+
+```bash
+bash ~/bot/current/deploy/history.sh tradingview   # on the server: installs tvdatafeed in a venv, exports, imports
+# or on your own computer, then copy the CSVs to the server and import them:
+pip install --upgrade --no-cache-dir git+https://github.com/rongardF/tvdatafeed.git
+python3 tv_dominance.py --out tradingview
+bash ~/bot/current/deploy/history.sh import ~/incoming/tradingview
+```
+
+The importer files `CRYPTOCAP_*` exports (also TradingView's own "Export chart data" CSVs) as index series, never as coins. On the server this needs `sudo apt install python3-venv git` once. If TradingView blocks the server's address, run it from your own computer.
+
+When new context history arrives (BTCDOM for the first time, or the TradingView export), every past row changes, so the next pipeline run starts the tournament afresh to learn from it.
 
 ### Fractal blocks: one block, three pattern scales
 
@@ -142,7 +172,7 @@ npm run pipeline -- --fresh-ta-net              # restart the tournament from sc
 ```
 
 What it does:
-1. **Inputs.** For every closed hourly bar it builds the four branch inputs, using the same windows the live bot has: 280 hourly bars (the last 48 also raw, for the swing branch), 4h built from them, 250 daily bars, and 32 fifteen-minute bars. All assets are pooled, because every input is scale-free. Hourly rows are cached, so re-runs only compute new bars.
+1. **Inputs.** For every closed hourly bar it builds the five branch inputs, using the same windows the live bot has: 280 hourly bars (the last 48 also raw, for the swing branch), 4h built from them, 250 daily bars, 256 fifteen-minute bars (the last 32 also raw), every coin's hourly bars for the market context, BTCDOM and the daily dominance charts. All assets are pooled, because every input is scale-free. Hourly rows are cached, so re-runs only compute new bars.
 2. **Tournament.** Three identical networks with slightly different settings train on a rolling 12-month block and are scored on the next month. Each one trades its own position rule (quarter-Kelly on its forecasts, 5 bp costs). Fitness = Sortino − 5 × max drawdown − 5 × costs. Each month the elite survives, the worst copies it, and the middle one and the copy get mutated (learning rate, L2, the weight of each branch, the vol head's weight, the drop-path probabilities). Every 6th round the worst network instead restarts from scratch with random settings (the exploration member). Then everything rolls forward one month.
 3. **Hurdles.** The elite's out-of-sample record is clustered so that one continuous position counts as one interaction. It must pass the deflated Sharpe ratio, with every member evaluation counted as a trial, and hold at least 100 independent interactions in every regime it covers.
 4. **Unseen holdout.** The last 3 months are never touched. Each head is graded there against the naive forecast. The volatility head speaks live if it beats it. The direction heads also need step 3's hurdles.

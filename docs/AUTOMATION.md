@@ -23,7 +23,7 @@ This is `research/pipeline.ts`, run as a low-priority background process so trad
 
 | Step | What it does | Output (in `data/models/`) |
 |---|---|---|
-| history | Downloads new Binance Vision archives and Coinbase candles for every crypto asset Kalshi lists. Skipped if the server can't reach them, or with `HISTORY_AUTO_UPDATE=false` | `data/history/` |
+| history | Downloads new Binance Vision archives (spot, plus Binance's BTCDOM index) and Coinbase candles for every crypto asset Kalshi lists. Skipped if the server can't reach them, or with `HISTORY_AUTO_UPDATE=false`. The live bot also appends its own hourly USDT.D / BTC.D / BTCDOM bars here | `data/history/` |
 | ta_net | Runs the TA network's tournament of three over the hourly history. The first one is spread over daily runs; afterwards it continues month by month every `TA_NET_RETRAIN_DAYS` (7). Promoted only once it reaches the present; only heads that pass the holdout and hurdles speak live (docs/EVOLUTION.md) | `ta_net.json` |
 | snn-crypto-ablation | Tests the crypto network's stages S0–S6 on settled contracts. Runs weekly, or when forced | `work/snn_crypto_ablation.json` |
 | snn-crypto-pbt | Tournament of three identical crypto networks over the last 7 recorded days. The elite's knobs are used from then on. Runs at the start, when the stage changes, and every 30 days | `work/snnpbt/crypto/` |
@@ -104,7 +104,7 @@ Set `AUTO_TRAIN_PROMOTE=validated` once you want only models that passed their c
 | See status, next run and last swap | `GET /api/autotrain`, or the **Auto-train** row on the Telemetry page |
 | Run it from a checkout | `npm run pipeline` (or `npm run pipeline -- --only snn,vol_model,fill`, or `--force-ablation`) |
 | Retrain the TA network now (server) | `bash ~/bot/current/deploy/history.sh train` |
-| Import your own CSVs / download history (server) | `bash ~/bot/current/deploy/history.sh import ~/incoming`, `... binance`, `... coinbase`, `... status` (docs/TA_NETWORK.md) |
+| Import your own CSVs / download history (server) | `bash ~/bot/current/deploy/history.sh import ~/incoming`, `... binance` (spot plus Binance's BTCDOM index), `... coinbase`, `... tradingview` (one-off BTC.D / USDT.D history), `... status` (docs/TA_NETWORK.md) |
 
 Running from a checkout: `npm run pipeline` reads recordings from `data/recordings` and writes to `data/models`. Point it elsewhere with `AUTO_TRAIN_RECORDINGS=... AUTO_TRAIN_DIR=...`.
 

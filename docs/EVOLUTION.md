@@ -30,7 +30,7 @@ Every member keeps a record of its evaluation windows. A copy inherits the elite
 **TA network** (`research/trainTaNet.ts`), over years of exchange history:
 - **Blocks:** a rolling 12-month training block (`TA_NET_TRAIN_MONTHS`, 12–18 recommended), a 1-month evaluation block, rolled forward one month at a time.
 - **What it trades in evaluation:** its own position rule. That is quarter-Kelly on its forecasts, with the volatility forecast setting the risk scale, a 5 bp cost on turnover, and equal capital per asset.
-- **Mutated knobs:** learning rate, L2 penalty, the weight of each branch (15-minute, hourly swing, hourly TA, daily), the weight of the volatility head, and the drop-path probabilities (per join, per branch).
+- **Mutated knobs:** learning rate, L2 penalty, the weight of each branch (15-minute, hourly swing, hourly TA, daily, market context), the weight of the volatility head, and the drop-path probabilities (per join, per branch).
 
 **Crypto and perps SNNs** (`research/snnPbt.ts`), over the recordings. Only days or weeks exist, so the blocks are measured in days:
 - **Blocks:** 3 days of initial learning, then 1-day evaluation blocks. The networks learn online, so each evaluation day is also prequential: every output is made before the label that could train on it.
@@ -57,10 +57,11 @@ The granularities feed four separate branches. They are never flattened into one
 |---|---|---|---|
 | Micro | last 32 fifteen-minute bars (return, range, close position, volume, taker flow) | fractal convolution block (columns see 3 / 7 / 31 bars), mean + last pooling | microstructure, noise filtering |
 | Swing | last 48 raw hourly bars (same readings) | fractal convolution block | candle patterns, short structure, swings |
+| Context | one vector at the forecast hour: 15m TA library, BTC / market / BTCDOM, the dominance quadrant, TA on the daily BTC.D and USDT.D charts | dense tanh | what the coin's own chart can't show: the market around it |
 | Trend | last 12 hourly steps of the TA library (1h + 4h readings, confluences, returns, calendar) | GRU | intraday and multi-day momentum |
 | Macro | last 30 daily steps (daily TA readings, daily returns, volatility) | attention, with today as the query | regime, support and resistance |
 
-The fractal blocks, drop-path and the per-pattern report are described in docs/TA_NETWORK.md. The four outputs are concatenated, each scaled by its branch weight (mutated by the tournament), then go through a dense layer. That layer has three outputs: P(up in 1h), P(up in 4h), and the 4-hour volatility ratio. Backpropagation is hand-written and checked against finite differences for every parameter (`tests/branchNet.test.ts`).
+The fractal blocks, drop-path, the per-pattern report and the market context are described in docs/TA_NETWORK.md. The five outputs are concatenated, each scaled by its branch weight (mutated by the tournament), then go through a dense layer. That layer has three outputs: P(up in 1h), P(up in 4h), and the 4-hour volatility ratio. Backpropagation is hand-written and checked against finite differences for every parameter (`tests/branchNet.test.ts`).
 
 The SNNs keep their spiking architecture; their multi-timeframe inputs come through their columns.
 

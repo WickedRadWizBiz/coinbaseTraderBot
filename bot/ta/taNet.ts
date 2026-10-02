@@ -1,7 +1,9 @@
-// TA network ("tanet"): reads the whole TA library - every indicator and structure reading on 1h,
-// 4h and 1d spot USD candles, every rule's signal and every confluence score - plus the raw 15-minute
-// bars, through a three-branch network (bot/ta/branchNet.ts: 15m convolution, hourly GRU, daily
-// attention) and forecasts, at each closed hourly bar:
+// TA network ("tanet"): reads the whole TA library - every indicator and structure reading on 15m,
+// 1h, 4h and 1d spot USD candles, every rule's signal and every confluence score - plus raw 15m and
+// hourly bars and the market around the coin (BTC, market breadth, Binance's BTC dominance index,
+// the BTC.D x USDT.D quadrant, TA on the daily dominance charts), through a five-branch network
+// (bot/ta/branchNet.ts: fractal blocks over 15m and hourly bars, hourly GRU, daily attention, market
+// context) and forecasts, at each closed hourly bar:
 //
 //   up_1h   P(close one hour later > close now)
 //   up_4h   P(close four hours later > close now)
@@ -9,9 +11,9 @@
 //
 // Initialised by a population tournament (research/trainTaNet.ts + research/pbt.ts): three
 // identical networks with slightly different hyperparameters train walk-forward over years of
-// hourly history and fight for fitness month by month; the surviving elite is this file. It reads
-// no dominance charts (no history for them), so rules that need USDT.D / BTC.D stay silent, exactly
-// as in training.
+// hourly history and fight for fitness month by month; the surviving elite is this file. The market
+// context (bot/ta/taNetContext.ts) is computed by the same code from the history store in training
+// and from the live feeds here, never from anything after the bar being forecast.
 //
 // Live, the same inputs are computed from the bot's Coinbase candles with the same windows as
 // training, every forecast is graded against the candles that follow (tanet_skill_*), and the
@@ -23,11 +25,12 @@ import fs from 'fs';
 import { branchForward, branchLayout, type BranchDims, type BranchGates, type BranchInput } from './branchNet';
 import { evaluate, TF_MS, tfState, type TaSnapshot, type TfState } from './analyzer';
 import { aggregate, takerImbalance, type CandleSet } from './candleStore';
+import { CONTEXT_FEATURES, DAILY_CONTEXT_FEATURES, TaNetContext } from './taNetContext';
 import type { Candle } from './indicators';
 import { CONFLUENCES, RULES, type Timeframe } from './knowledge';
 
 /** Bump when a feature formula or window changes (old models are then refused). */
-export const TANET_SCHEMA = '3';
+export const TANET_SCHEMA = '4';
 /** Hourly bars per window, and the GRU's hourly steps. Coinbase returns 300 candles per request
  *  including the forming one, so the live store holds >= 299 closed bars from the first poll:
  *  280 + 11 earlier steps = 291 always fit. */
@@ -124,8 +127,10 @@ const BASE_KEYS = ['rsi', 'rsi_chg', 'macd_atr', 'macd_chg_atr', 'macd_cross', '
 function TF_KEYS(o: { sma200: boolean; vwap: boolean }): string[] {
   return [...BASE_KEYS, ...(o.sma200 ? ['sma200_dist', 'golden'] : []), ...(o.vwap ? ['vwap_dist'] : [])];
 }
-// 4h is built from the 280-bar hourly window (70 bars): no SMA200 there, live or in training.
-const TF_OPTS: Array<[Timeframe, string, { sma200: boolean; vwap: boolean }]> = [['1h', 'h1', { sma200: true, vwap: true }], ['4h', 'h4', { sma200: false, vwap: false }], ['1d', 'd1', { sma200: true, vwap: false }]];
+// 4h is built from the 280-bar hourly window (70 bars): no SMA200 there, live or in training. 15m reads
+// the last TANET_M15_BARS closed bars (live keeps 320, enough for that window 12 hours back).
+const TF_OPTS: Array<[Timeframe, string, { sma200: boolean; vwap: boolean }]> = [['1h', 'h1', { sma200: true, vwap: true }], ['4h', 'h4', { sma200: false, vwap: false }], ['1d', 'd1', { sma200: true, vwap: false }], ['15m', 'm15', { sma200: true, vwap: true }]];
+export const TANET_M15_BARS = 256;
 
 const KIND_OF = new Map(RULES.map((r) => [r.id, r.kind]));
 const RULE_KINDS = ['trend', 'reversal', 'continuation', 'regime', 'volatility'] as const;
@@ -139,16 +144,23 @@ export const TANET_FEATURES: string[] = [
   'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos', 'weekend', 'missing_hours',
   // Order flow: taker-buy share of volume (2 tb / v - 1) over 1, 4 and 24 hours, and its change.
   'flow_1h', 'flow_4h', 'flow_24h', 'flow_chg',
+  // Market-wide context: BTC, relative strength vs BTC, market momentum / breadth, BTCDOM, the
+  // dominance quadrant (bot/ta/taNetContext.ts).
+  ...CONTEXT_FEATURES,
 ];
 
 /** Reuses the 4h / 1d states between consecutive steps (they change every 4 / 24 bars). */
 export interface TaNetStateCache { h4?: { key: string; s?: TfState }; d1?: { j: number; n: number; s?: TfState } }
 
 /** States the network reads at the close of the last bar of `h1` (h1 = the hourly window). */
-export function taNetStates(h1: Candle[], d1: Candle[] | undefined, t: number, cache?: TaNetStateCache): Partial<Record<Timeframe, TfState>> {
+export function taNetStates(h1: Candle[], d1: Candle[] | undefined, t: number, cache?: TaNetStateCache, m15?: Candle[]): Partial<Record<Timeframe, TfState>> {
   const st: Partial<Record<Timeframe, TfState>> = {};
   const s1 = tfState('1h', h1);
   if (s1) st['1h'] = s1;
+  if (m15?.length) {
+    const j = closedIndex(m15, TF_MS['15m'], t);
+    if (j >= TANET_M15_BARS - 1) { const s = tfState('15m', m15.slice(j - TANET_M15_BARS + 1, j + 1)); if (s) st['15m'] = s; }
+  }
   const h4 = aggregate(h1, TF_MS['4h']).filter((c) => c.ts + TF_MS['4h'] <= t);
   if (h4.length) {
     const key = `${h4.length}|${h4[0].ts}|${h4[h4.length - 1].ts}|${h4[h4.length - 1].c}`;
@@ -169,12 +181,14 @@ export function taNetStates(h1: Candle[], d1: Candle[] | undefined, t: number, c
   return st;
 }
 
-/** The feature map at the close of the last bar of `h1` (TANET_H1_BARS hourly bars), with daily bars `d1`. */
-export function taNetFeatureMap(asset: string, h1: Candle[], d1: Candle[] | undefined, cache?: TaNetStateCache): Record<string, number> {
+/** The feature map at the close of the last bar of `h1` (TANET_H1_BARS hourly bars), with daily bars
+ *  `d1`, 15-minute bars `m15` and the market-wide context. */
+export function taNetFeatureMap(asset: string, h1: Candle[], d1: Candle[] | undefined, cache?: TaNetStateCache, o: { ctx?: TaNetContext; m15?: Candle[] } = {}): Record<string, number> {
   const last = h1[h1.length - 1];
   const t = last.ts + H;
-  const states = taNetStates(h1, d1, t, cache);
-  const snap: TaSnapshot = evaluate(asset, states, t);
+  const states = taNetStates(h1, d1, t, cache, o.m15);
+  // The dominance quadrant (4h scale) lets the dominance_matrix rule and macro_rotation confluence fire.
+  const snap: TaSnapshot = evaluate(asset, states, t, o.ctx?.macro(asset, last.ts));
   const out: Record<string, number> = {};
   for (const [tf, p, o] of TF_OPTS) tfFeatures(p, states[tf], out, o);
   for (const c of CONFLUENCES) out[`conf_${c.id}`] = snap.confluences.find((x) => x.id === c.id)?.score ?? 0;
@@ -204,6 +218,7 @@ export function taNetFeatureMap(asset: string, h1: Candle[], d1: Candle[] | unde
   out.missing_hours = Math.max(0, Math.round((last.ts - h1[0].ts) / H) - (h1.length - 1));
   out.flow_1h = takerImbalance(h1.slice(-1)); out.flow_4h = takerImbalance(h1.slice(-4)); out.flow_24h = takerImbalance(h1.slice(-24));
   out.flow_chg = Number.isFinite(out.flow_4h) && Number.isFinite(out.flow_24h) ? out.flow_4h - out.flow_24h : NA;
+  if (o.ctx) Object.assign(out, o.ctx.hourly(asset, last.ts));
   for (const k of TANET_FEATURES) if (!(k in out)) out[k] = NA;
   return out;
 }
@@ -218,8 +233,13 @@ export function windowOk(h1: Candle[]): boolean {
 
 // ---- Branch inputs --------------------------------------------------------------------------------
 
-/** Hourly GRU step: every hourly feature except the daily-timeframe ones (those feed the macro branch). */
-export const TANET_TREND_FEATURES = TANET_FEATURES.filter((k) => !k.startsWith('d1_'));
+/** Hourly GRU step: the coin's hourly / 4h readings, rule nets, confluences, returns and flow (the daily
+ *  readings feed the macro branch; 15m readings and the market context feed the context branch). */
+export const TANET_TREND_FEATURES = TANET_FEATURES.filter((k) => !k.startsWith('d1_') && !k.startsWith('m15_') && !k.startsWith('x_'));
+/** Context branch, read once at the forecast hour: the 15m TA library, the market-wide context, and
+ *  TA on the BTC.D / USDT.D daily charts as of the last closed day. */
+export const TANET_CTX_HOURLY = TANET_FEATURES.filter((k) => k.startsWith('m15_') || k.startsWith('x_'));
+export const TANET_CTX_FEATURES = [...TANET_CTX_HOURLY, ...DAILY_CONTEXT_FEATURES];
 const D1_OPTS = { sma200: true, vwap: false };
 /** One attention step per closed day: the daily TA readings plus daily returns and volatility. */
 export const TANET_DAY_FEATURES = [...TF_KEYS(D1_OPTS).map((k) => `d1_${k}`), 'dret_1', 'dret_5', 'dret_20', 'dvol_10_60', 'ddow_sin', 'ddow_cos'];
@@ -384,9 +404,11 @@ export interface TaNetParams {
   dims: BranchDims;
   gates: BranchGates;
   weights: number[];
-  norm: { trend: TaNetNorm; macro: TaNetNorm; micro: TaNetNorm; swing: TaNetNorm };
+  norm: { trend: TaNetNorm; macro: TaNetNorm; micro: TaNetNorm; swing: TaNetNorm; ctx: TaNetNorm };
   /** Which fractal depth carries which kind of TA pattern (research/trainTaNet.ts patternReport). */
   patterns?: PatternReport;
+  /** Market-wide context the network was trained with: index series coverage and the coin basket. */
+  context?: { indexes: Record<string, { from: string; to: string; bars: number }>; basket: string[] };
   trendFeatures: string[];
   dayFeatures: string[];
   strategy: TaNetStrategy;
@@ -400,14 +422,16 @@ export interface TaNetParams {
 const sigmoid = (z: number) => 1 / (1 + Math.exp(-z));
 
 /** Normalised branch input from raw step vectors (missing -> 0 = the training mean). */
-export function buildBranchInput(dims: BranchDims, norm: TaNetParams['norm'], trend: ArrayLike<number>[], macro: ArrayLike<number>[], micro: ArrayLike<number>, swing: ArrayLike<number>): BranchInput {
+export function buildBranchInput(dims: BranchDims, norm: TaNetParams['norm'], trend: ArrayLike<number>[], macro: ArrayLike<number>[], micro: ArrayLike<number>, swing: ArrayLike<number>, ctxVec: ArrayLike<number>): BranchInput {
   const nz = (v: number, n: TaNetNorm, j: number) => (Number.isFinite(v) ? Math.max(-8, Math.min(8, (v - n.mean[j]) / n.std[j])) : 0);
   const t = new Float64Array(dims.tT * dims.tF), m = new Float64Array(dims.dT * dims.dF), u = new Float64Array(dims.mT * dims.mF), w = new Float64Array(dims.sT * dims.sF);
   for (let s = 0; s < dims.sT; s++) for (let f = 0; f < dims.sF; f++) w[s * dims.sF + f] = nz(swing[s * dims.sF + f], norm.swing, f);
   for (let s = 0; s < dims.tT; s++) for (let f = 0; f < dims.tF; f++) t[s * dims.tF + f] = nz(trend[s][f], norm.trend, f);
   for (let s = 0; s < dims.dT; s++) for (let f = 0; f < dims.dF; f++) m[s * dims.dF + f] = nz(macro[s][f], norm.macro, f);
   for (let s = 0; s < dims.mT; s++) for (let f = 0; f < dims.mF; f++) u[s * dims.mF + f] = nz(micro[s * dims.mF + f], norm.micro, f);
-  return { trend: t, macro: m, micro: u, swing: w };
+  const c = new Float64Array(dims.cF);
+  for (let f = 0; f < dims.cF; f++) c[f] = nz(ctxVec[f], norm.ctx, f);
+  return { trend: t, macro: m, micro: u, swing: w, ctx: c };
 }
 
 /** Schema of a TA network file, read from its first few KB (the key follows `version`); undefined when
@@ -451,8 +475,8 @@ export class TaNet {
   }
 
   /** P(up 1h), P(up 4h), vol log ratio from raw step vectors. */
-  predict(trend: ArrayLike<number>[], macro: ArrayLike<number>[], micro: ArrayLike<number>, swing: ArrayLike<number>): { up1: number; up4: number; vol: number } {
-    const x = buildBranchInput(this.params.dims, this.params.norm, trend, macro, micro, swing);
+  predict(trend: ArrayLike<number>[], macro: ArrayLike<number>[], micro: ArrayLike<number>, swing: ArrayLike<number>, ctxVec: ArrayLike<number>): { up1: number; up4: number; vol: number } {
+    const x = buildBranchInput(this.params.dims, this.params.norm, trend, macro, micro, swing, ctxVec);
     const o = branchForward(this.params.dims, this.w, this.params.gates, x, this.layout).out;
     return { up1: sigmoid(o[0]), up4: sigmoid(o[1]), vol: clip(o[2], 3) };
   }
@@ -488,10 +512,20 @@ export interface ForwardRecord {
   decidedAt?: number;
 }
 
+/** Where the live runtime gets the market-wide context: every tracked coin's candles and the index
+ *  series (bot/marketdata/indexBars.ts IndexStore). Set once at startup (main.ts, research replay). */
+export interface TaNetContextSource {
+  sets(): Map<string, CandleSet>;
+  index(asset: string, tf: '1h' | '1d'): Candle[] | undefined;
+}
+let contextSource: TaNetContextSource | undefined;
+export function setTaNetContextSource(s: TaNetContextSource | undefined): void { contextSource = s; }
+
 /** Per-asset forecasts from a CandleSet, memoised per closed hourly bar, graded as later bars close,
  *  and (live only) forward-tested with the position rule. */
 export class TaNetRuntime {
-  private readonly feats = new Map<string, Map<number, { f: number[]; close: number; sig: number }>>();
+  private ctxCache?: { key: string; ctx: TaNetContext };
+  private readonly feats = new Map<string, Map<number, { f: number[]; c: number[]; close: number; sig: number }>>();
   private readonly days = new Map<string, Map<number, number[]>>();
   private readonly calls = new Map<string, Map<number, Call>>();
   private readonly briers = new Map<string, Record<TaNetHorizon, number[]>>();
@@ -552,6 +586,23 @@ export class TaNetRuntime {
     }
   }
 
+  /** The live context, rebuilt when any coin's hourly candles or an index series changed. Only the
+   *  recent part of each series is used (every feature looks back at most 280 + 168 hours). */
+  private context(): TaNetContext | undefined {
+    const src = contextSource;
+    if (!src) return undefined;
+    const h1: Record<string, Candle[]> = {};
+    let key = '';
+    for (const [a, s] of src.sets()) { const b = s.bars['1h']; if (b?.length) { h1[a] = b; key += `${a}:${b[b.length - 1].ts}:${b.length};`; } }
+    const dom = src.index('BTCDOM', '1h'), btcd = src.index('BTC.D', '1d'), usdtd = src.index('USDT.D', '1d');
+    const tail = (cs: Candle[] | undefined) => `${cs?.length ?? 0}:${cs?.[cs.length - 1]?.ts ?? 0}:${cs?.[cs.length - 1]?.c ?? 0}`;
+    key += `|${tail(dom)}|${tail(btcd)}|${tail(usdtd)}`;
+    if (this.ctxCache?.key === key) return this.ctxCache.ctx;
+    const ctx = new TaNetContext({ h1, btcdom1h: dom?.slice(-800), btcd1d: btcd?.slice(-500), usdtd1d: usdtd?.slice(-500) });
+    this.ctxCache = { key, ctx };
+    return ctx;
+  }
+
   /** Forecast at the last closed hourly bar of `set` (undefined when stale or history too short). */
   outputFor(asset: string, set: CandleSet | undefined, now: number): TaNetOutput | undefined {
     const h1 = set?.bars['1h'];
@@ -569,13 +620,18 @@ export class TaNetRuntime {
     const memo = this.calls.get(asset) ?? new Map<number, Call>(); this.calls.set(asset, memo);
     const p = this.net.params;
     const trendIdx = p.trendFeatures.map((k) => TANET_FEATURES.indexOf(k));
+    const ctxIdx = TANET_CTX_HOURLY.map((k) => TANET_FEATURES.indexOf(k));
+    const ctx = this.context();
+    // Wait (a minute or so) until the other coins' and BTCDOM's bars for the newest hour are in, so a
+    // cached feature row never misses context that training had.
+    if (ctx && !feats.has(lastTs) && !ctx.ready(lastTs, now)) return prev && prev.lastTs === lastTs ? prev.out : undefined;
     for (let i = TANET_H1_BARS - 1; i < h1.length; i++) {
       if (feats.has(h1[i].ts)) continue;
       const w = h1.slice(i - TANET_H1_BARS + 1, i + 1);
       if (!windowOk(w)) continue;
-      const fm = taNetFeatureMap(asset, w, set!.bars['1d']);
+      const fm = taNetFeatureMap(asset, w, set!.bars['1d'], undefined, { ctx, m15: set!.bars['15m'] });
       const all = TANET_FEATURES.map((k) => fin(fm[k]));
-      feats.set(h1[i].ts, { f: trendIdx.map((j) => all[j]), close: h1[i].c, sig: sigma24(h1, i) });
+      feats.set(h1[i].ts, { f: trendIdx.map((j) => all[j]), c: ctxIdx.map((j) => all[j]), close: h1[i].c, sig: sigma24(h1, i) });
     }
     const d1 = set!.bars['1d'] ?? [];
     for (let j = TANET_D1_BARS - 1; j < d1.length; j++) if (!days.has(d1[j].ts)) { const v = taNetDayVector(d1, j); if (v) days.set(d1[j].ts, v); }
@@ -592,7 +648,10 @@ export class TaNetRuntime {
       for (let k = dj - TANET_MACRO_DAYS + 1; k <= dj && k >= 0; k++) { const v = days.get(d1[k].ts); if (v) macro.push(v); }
       const fr = feats.get(ts);
       if (trend.length < TANET_TREND_STEPS || macro.length < TANET_MACRO_DAYS || !fr) { memo.set(ts, { up60: NA, up240: NA, vol: NA, close: h1[i].c, pos: 0 }); continue; }
-      const o = this.net.predict(trend, macro, taNetMicro(set!.bars['15m'], t), taNetSwing(h1, i));
+      // Context vector: this hour's 15m readings and market context, then the dominance charts' TA as of
+      // the last closed day (the same day the macro branch ends on).
+      const ctxVec = [...fr.c, ...(ctx && dj >= 0 ? ctx.daily(asset, d1[dj].ts) : DAILY_CONTEXT_FEATURES.map(() => NA))];
+      const o = this.net.predict(trend, macro, taNetMicro(set!.bars['15m'], t), taNetSwing(h1, i), ctxVec);
       const up60 = active.includes('up_1h') && !muted ? o.up1 : NA;
       const up240 = active.includes('up_4h') && !muted ? o.up4 : NA;
       const vol = active.includes('vol_4h') ? o.vol : NA;

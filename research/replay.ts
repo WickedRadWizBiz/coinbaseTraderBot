@@ -5,7 +5,9 @@
 import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
+import { IndexStore } from '../bot/marketdata/indexBars';
 import { IndexTracker, type AvgMode } from '../bot/marketdata/indexTracker';
+import { setTaNetContextSource } from '../bot/ta/taNet';
 import { OrderBook } from '../bot/marketdata/orderBook';
 import { FeatureHub } from '../bot/model/featureEngine';
 import { contractKind, type ContractTerms, type MarketKind } from '../bot/model/fairValue';
@@ -65,7 +67,17 @@ export async function* readRecordings(dir: string, sidecar = process.env.SNN_BAC
   }
 }
 
+/** The history store's index series (BTCDOM, BTC.D, USDT.D) for the TA network's context in replays:
+ *  the same store and splice the live bot uses (lookups never pass the replayed bar's time). */
+let replayIndex: IndexStore | undefined;
+const replayIndexStore = () => (replayIndex ??= new IndexStore(path.resolve(process.env.HISTORY_DIR ?? path.join(process.env.DATA_DIR ?? './data', 'history'))));
+
 export class ReplayState {
+  constructor() {
+    // The TA network reads every replayed coin's candles and the index series, exactly as live.
+    setTaNetContextSource({ sets: () => this.features.candles, index: (asset, tf) => replayIndexStore().get(asset, tf) });
+  }
+
   readonly markets = new Map<string, RecMarket>();
   readonly books = new Map<string, OrderBook>();
   readonly index = new Map<string, IndexTracker>();

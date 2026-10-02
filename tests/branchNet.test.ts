@@ -6,14 +6,14 @@ import { test } from 'node:test';
 import { branchBackward, branchForward, branchLayout, branchLoss, fractalPlan, initBranchParams, type BranchDims, type BranchDrop, type BranchInput } from '../bot/ta/branchNet';
 import { buildFractal, columnMask, columnReach, localDropMask } from '../bot/ta/fractal';
 
-const dims: BranchDims = { mT: 10, mF: 3, mC: 2, sT: 9, sF: 2, sC: 2, fDepth: 3, tT: 4, tF: 5, tH: 3, dT: 5, dF: 4, dE: 3, hM: 4, nOut: 3 };
+const dims: BranchDims = { mT: 10, mF: 3, mC: 2, sT: 9, sF: 2, sC: 2, fDepth: 3, tT: 4, tF: 5, tH: 3, dT: 5, dF: 4, dE: 3, cF: 6, cH: 3, hM: 4, nOut: 3 };
 
 function rand(n: number, seed: number): Float64Array {
   let s = seed;
   return Float64Array.from({ length: n }, () => { s = (s * 16807) % 2147483647; return (s / 2147483647) * 2 - 1; });
 }
-const input = (): BranchInput => ({ micro: rand(dims.mT * dims.mF, 2), swing: rand(dims.sT * dims.sF, 6), trend: rand(dims.tT * dims.tF, 3), macro: rand(dims.dT * dims.dF, 4) });
-const g = { micro: 0.9, swing: 1.2, trend: 1.1, macro: 0.7 };
+const input = (): BranchInput => ({ micro: rand(dims.mT * dims.mF, 2), swing: rand(dims.sT * dims.sF, 6), trend: rand(dims.tT * dims.tF, 3), macro: rand(dims.dT * dims.dF, 4), ctx: rand(dims.cF, 8) });
+const g = { micro: 0.9, swing: 1.2, trend: 1.1, macro: 0.7, ctx: 0.8 };
 
 function gradCheck(drop?: BranchDrop) {
   const { size, layout } = branchLayout(dims);
@@ -57,13 +57,16 @@ test('analytic gradients match finite differences: all paths, drop-path masks, b
   const all = gradCheck();
   assert.ok(all.rel < 1e-4, `worst relative error ${all.rel} at ${all.name}[${all.i}]`);
   const plan = fractalPlan({ depth: 3, channels: 2, kernel: 3 });
-  const dropped = gradCheck({ micro: columnMask(plan, 3), swing: new Map([[0, [true, false]], [1, [false, true]], [2, [true, true]]]), branches: [true, true, false, true], keep: 0.8 });
+  const dropped = gradCheck({ micro: columnMask(plan, 3), swing: new Map([[0, [true, false]], [1, [false, true]], [2, [true, true]]]), branches: [true, true, false, true, true], keep: 0.8 });
+  assert.ok(dropped.rel < 1e-4, `with drop-path: worst relative error ${dropped.rel} at ${dropped.name}[${dropped.i}]`);
+  const noCtx = gradCheck({ branches: [true, false, true, true, false], keep: 0.9 });
+  assert.ok(noCtx.rel < 1e-4, `context branch dropped: worst relative error ${noCtx.rel} at ${noCtx.name}[${noCtx.i}]`);
   assert.ok(dropped.rel < 1e-4, `with drop-path: worst relative error ${dropped.rel} at ${dropped.name}[${dropped.i}]`);
 });
 
 test('identical seeds give identical networks; an untrained network predicts the base rate', () => {
   const a = initBranchParams(dims, 7), b = initBranchParams(dims, 7);
   assert.deepEqual(Array.from(a), Array.from(b));
-  const o = branchForward(dims, a, { micro: 1, swing: 1, trend: 1, macro: 1 }, input()).out;
+  const o = branchForward(dims, a, { micro: 1, swing: 1, trend: 1, macro: 1, ctx: 1 }, input()).out;
   assert.deepEqual(Array.from(o), [0, 0, 0]);
 });

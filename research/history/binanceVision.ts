@@ -9,6 +9,9 @@
 // monthly zip not yet fetched plus the daily zips of the current month, verify each against its
 // published SHA-256 .CHECKSUM, unzip, validate and merge into data/history/binance/<ASSET>/<tf>.csv
 // (USD-M perpetual futures, --markets um, go to binance-um/: stored, never spliced into spot).
+// Binance's BTC dominance index (BTCDOM: BTC priced against a market-cap-weighted basket of the top 20
+// alts, stablecoins excluded) comes along by default, from the futures index-price klines, as the
+// index series binance-index/BTCDOM/1h.csv (hourly since June 2021).
 // A manifest remembers what was fetched, so re-running only downloads what is new.
 //
 // Spot open times switched from milliseconds to microseconds on 2025-01-01; the parser handles both.
@@ -24,9 +27,13 @@ import { unzip } from './zip';
 export const BINANCE_HOSTS = ['https://data.binance.vision', 'https://s3-ap-northeast-1.amazonaws.com/data.binance.vision'];
 const LIST_HOST = 'https://s3-ap-northeast-1.amazonaws.com/data.binance.vision';
 
-export type BinanceMarket = 'spot' | 'um';
-const MARKET_PREFIX: Record<BinanceMarket, string> = { spot: 'data/spot', um: 'data/futures/um' };
-const MARKET_SOURCE: Record<BinanceMarket, string> = { spot: 'binance', um: 'binance-um' };
+/** spot pairs, USD-M perpetuals, or USD-M index prices (BTCDOM). */
+export type BinanceMarket = 'spot' | 'um' | 'um-index';
+const MARKET_PREFIX: Record<BinanceMarket, string> = { spot: 'data/spot', um: 'data/futures/um', 'um-index': 'data/futures/um' };
+const MARKET_KIND: Record<BinanceMarket, string> = { spot: 'klines', um: 'klines', 'um-index': 'indexPriceKlines' };
+const MARKET_SOURCE: Record<BinanceMarket, string> = { spot: 'binance', um: 'binance-um', 'um-index': 'binance-index' };
+/** Index series downloaded with the spot history (market um-index). */
+export const BINANCE_INDEXES = ['BTCDOM'];
 
 export interface BinanceOpts {
   out: string;
@@ -118,8 +125,8 @@ export async function downloadBinance(o: BinanceOpts): Promise<BinanceSummary[]>
         out.push(s);
         let monthly: Array<{ key: string; size: number }>, daily: Array<{ key: string; size: number }>;
         try {
-          monthly = (await listKeys(`${MARKET_PREFIX[market]}/monthly/klines/${pair}/${tf}/`, f)).filter((k) => k.key.endsWith('.zip'));
-          daily = (await listKeys(`${MARKET_PREFIX[market]}/daily/klines/${pair}/${tf}/`, f)).filter((k) => k.key.endsWith('.zip'));
+          monthly = (await listKeys(`${MARKET_PREFIX[market]}/monthly/${MARKET_KIND[market]}/${pair}/${tf}/`, f)).filter((k) => k.key.endsWith('.zip'));
+          daily = (await listKeys(`${MARKET_PREFIX[market]}/daily/${MARKET_KIND[market]}/${pair}/${tf}/`, f)).filter((k) => k.key.endsWith('.zip'));
         } catch (e) { s.note = (e as Error).message; log(`${pair} ${market} ${tf}: ${s.note}`); continue; }
         if (!monthly.length && !daily.length) { s.note = 'not listed on Binance'; continue; }
         const month = (k: string) => /-(\d{4}-\d{2})(?:-\d{2})?\.zip$/.exec(k)?.[1] ?? '';
@@ -167,6 +174,7 @@ export async function binanceMain(argOf: (k: string, d: string) => string = cliA
     markets: argOf('markets', 'spot').split(',').map((s) => s.trim()) as BinanceMarket[],
     fromMonth: argOf('from', '') || undefined, dryRun: flags('dry-run'), concurrency: Number(argOf('concurrency', '4')), log,
   });
+  if (!flags('no-index')) res.push(...await downloadBinance({ out: argOf('out', 'data/history'), assets: BINANCE_INDEXES, intervals: ['1h'], markets: ['um-index'], dryRun: flags('dry-run'), log }));
   console.table(res.map((r) => ({ pair: r.pair, market: r.market, tf: r.tf, listed: r.listed, fetched: r.fetched, had: r.skipped, failed: r.failed, bars: r.bars, note: r.note ?? '' })));
   return res;
 }

@@ -30,6 +30,7 @@ If the old bot is running under the same `kalshi-bot` service name, the first de
 | Deploy a tagged release | same, entering the tag (e.g. `v2.1.0`) |
 | Import history CSVs | `ssh ubuntu@54.145.7.203 mkdir -p ~/incoming`, `scp *.csv ubuntu@54.145.7.203:~/incoming/`, then `bash ~/bot/current/deploy/history.sh import ~/incoming` |
 | Download / refresh history now | `bash ~/bot/current/deploy/history.sh binance` and `... coinbase` (the daily pipeline does this too) |
+| One-off BTC.D / USDT.D history from TradingView | `bash ~/bot/current/deploy/history.sh tradingview` (needs `sudo apt install python3-venv git` once; docs/TA_NETWORK.md) |
 | See stored history | `bash ~/bot/current/deploy/history.sh status` |
 | Retrain the TA network now | `bash ~/bot/current/deploy/history.sh train` |
 

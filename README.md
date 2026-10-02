@@ -333,7 +333,7 @@ A new network retrains only the model that reads it, including when you swap one
   - Coinbase backfill.
   - An importer for your own CSVs (Bittrex, CryptoDataDownload, Yahoo, anything with OHLC columns) that converts every timestamp to bar-open UTC and refuses files whose clock is a bar off.
   - Sources are spliced by priority, never mixed bar by bar.
-- **TA network:** a three-branch neural network (15m convolution, hourly GRU over the TA library, daily attention). It forecasts P(up) over 1h and 4h, plus the next 4 hours' volatility.
+- **TA network:** a five-branch neural network (fractal blocks over 15m and hourly bars, hourly GRU over the TA library, daily attention, and a market-context branch: BTC, market breadth, Binance's BTC dominance index, the BTC.D × USDT.D quadrant, TA on the daily dominance charts). It forecasts P(up) over 1h and 4h, plus the next 4 hours' volatility.
 - **Training and validation:** chosen by a tournament of three over years of pooled hourly history. It must pass an untouched holdout, a deflated-Sharpe and per-regime hurdle, and a live forward test. Every live call is graded (`tanet_skill_*`).
 - **Who uses it:** its forecasts are features for the MLP, the perps model and the vol forecast, each of which keeps them only if its own validation improves.
 

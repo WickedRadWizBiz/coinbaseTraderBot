@@ -1,10 +1,13 @@
-// Multi-timeframe network for the TA network (bot/ta/taNet.ts). Four branches read four views of
+// Multi-timeframe network for the TA network (bot/ta/taNet.ts). Five branches read five views of
 // the market WITHOUT flattening them into one vector, then merge:
 //
-//   micro  last 32 fifteen-minute bars -> fractal convolution block (columns see 3 / 7 / 31 bars)
-//   swing  last 48 hourly bars          -> fractal convolution block (candles / structure / swings)
-//   trend  last 12 hourly TA steps      -> GRU (the whole TA library, step by step)
-//   macro  last 30 daily TA steps       -> attention, today as the query (regime, levels)
+//   micro    last 32 fifteen-minute bars -> fractal convolution block (columns see 3 / 7 / 31 bars)
+//   swing    last 48 hourly bars          -> fractal convolution block (candles / structure / swings)
+//   trend    last 12 hourly TA steps      -> GRU (the coin's hourly / 4h TA library, step by step)
+//   macro    last 30 daily TA steps       -> attention, today as the query (regime, levels)
+//   context  one vector at the forecast hour -> dense tanh (15m TA library, BTC / market / BTCDOM,
+//            the BTC.D x USDT.D quadrant, TA on the daily dominance charts). Read once rather than at
+//            every GRU step: the same information for far fewer weights.
 //
 //   concat(g x branch outputs) -> dense tanh -> [logit up 1h, logit up 4h, vol 4h]
 //
@@ -28,11 +31,13 @@ export interface BranchDims {
   tT: number; tF: number; tH: number;
   /** macro: steps (days), features per day, embedding size. */
   dT: number; dF: number; dE: number;
+  /** context: features, hidden size. */
+  cF: number; cH: number;
   /** merge hidden size; outputs (3). */
   hM: number; nOut: number;
 }
 
-export interface BranchGates { micro: number; swing: number; trend: number; macro: number }
+export interface BranchGates { micro: number; swing: number; trend: number; macro: number; ctx: number }
 
 interface Layout { [name: string]: { off: number; n: number } }
 
@@ -57,13 +62,14 @@ export function branchLayout(d: BranchDims): { layout: Layout; size: number } {
   add('Wps', d.sC * d.sF); add('bps', d.sC); add('Fs', fractalPlan(fs.swing).params);
   for (const g of ['z', 'r', 'h']) { add(`W${g}`, d.tH * d.tF); add(`U${g}`, d.tH * d.tH); add(`b${g}`, d.tH); }
   add('We', d.dE * d.dF); add('be', d.dE); add('Wq', d.dE * d.dE); add('Wk', d.dE * d.dE);
+  add('Wc', d.cH * d.cF); add('bc', d.cH);
   const nIn = mergeWidth(d);
   add('W1', d.hM * nIn); add('b1', d.hM);
   add('W2', d.nOut * d.hM); add('b2', d.nOut);
   return { layout: L, size: off };
 }
 
-const mergeWidth = (d: BranchDims) => 2 * d.mC + 2 * d.sC + d.tH + 2 * d.dE;
+const mergeWidth = (d: BranchDims) => 2 * d.mC + 2 * d.sC + d.tH + 2 * d.dE + d.cH;
 const convOff = (base: number, ch: number) => (id: number) => base + id * (ch * KERNEL * ch + ch);
 
 /** Deterministic initialisation (same seed -> identical networks). */
@@ -81,6 +87,7 @@ export function initBranchParams(d: BranchDims, seed: number): Float64Array {
   }
   for (const g of ['z', 'r', 'h']) { fill(`W${g}`, d.tF); fill(`U${g}`, d.tH); }
   fill('We', d.dF); fill('Wq', d.dE); fill('Wk', d.dE);
+  if (d.cF > 0 && d.cH > 0) fill('Wc', d.cF);
   fill('W1', mergeWidth(d));
   // Output layer starts at zero: an untrained network predicts the base rate / zero vol change.
   return p;
@@ -95,14 +102,16 @@ export interface BranchInput {
   trend: Float64Array;
   /** dT x dF, oldest first. */
   macro: Float64Array;
+  /** cF context features at the forecast hour. */
+  ctx: Float64Array;
 }
 
 /** Training-time structure noise: drop-path masks inside the fractal blocks and whole-branch drops. */
 export interface BranchDrop {
   micro?: JoinMask;
   swing?: JoinMask;
-  /** Kept branches [micro, swing, trend, macro] and the keep probability (inverted scaling). */
-  branches?: [boolean, boolean, boolean, boolean];
+  /** Kept branches [micro, swing, trend, macro, context] and the keep probability (inverted scaling). */
+  branches?: [boolean, boolean, boolean, boolean, boolean];
   keep?: number;
 }
 
@@ -114,7 +123,8 @@ export interface BranchCache {
   u: Float64Array; m: Float64Array; out: Float64Array;
   gh: Float64Array; gz: Float64Array; gr: Float64Array; ghh: Float64Array;
   e: Float64Array; q: Float64Array; k: Float64Array; a: Float64Array;
-  scale: [number, number, number, number];
+  hc: Float64Array;
+  scale: [number, number, number, number, number];
 }
 
 /** 1x1 input projection + tanh: raw T x F -> T x C. */
@@ -132,8 +142,8 @@ function project(p: Float64Array, wOff: number, bOff: number, x: Float64Array, T
 export function branchForward(d: BranchDims, p: Float64Array, g: BranchGates, x: BranchInput, L = branchLayout(d).layout, drop?: BranchDrop): { out: Float64Array; cache: BranchCache } {
   const fs = fractalSpecs(d);
   const keep = drop?.keep ?? 1;
-  const on = drop?.branches ?? [true, true, true, true];
-  const scale = on.map((b, i) => (b ? [g.micro, g.swing, g.trend, g.macro][i] / keep : 0)) as [number, number, number, number];
+  const on = drop?.branches ?? [true, true, true, true, true];
+  const scale = on.map((b, i) => (b ? [g.micro, g.swing, g.trend, g.macro, g.ctx][i] / keep : 0)) as [number, number, number, number, number];
   const nIn = mergeWidth(d);
   const u = new Float64Array(nIn);
   // micro + swing: projection -> fractal block -> pooled (mean over bars, last bar)
@@ -206,12 +216,21 @@ export function branchForward(d: BranchDims, p: Float64Array, g: BranchGates, x:
     u[o0 + j] = scale[3] * s;
     u[o0 + E + j] = scale[3] * e[last + j];
   }
+  // context: one dense tanh layer over the forecast hour's vector
+  const cOff = o0 + 2 * E, hc = new Float64Array(d.cH);
+  for (let j = 0; j < d.cH; j++) {
+    let s = p[L.bc.off + j];
+    const w = L.Wc.off + j * d.cF;
+    for (let f = 0; f < d.cF; f++) s += p[w + f] * x.ctx[f];
+    hc[j] = Math.tanh(s);
+    u[cOff + j] = scale[4] * hc[j];
+  }
   // merge
   const m = new Float64Array(d.hM);
   for (let j = 0; j < d.hM; j++) { let s = p[L.b1.off + j]; const w = L.W1.off + j * nIn; for (let i = 0; i < nIn; i++) s += p[w + i] * u[i]; m[j] = Math.tanh(s); }
   const out = new Float64Array(d.nOut);
   for (let o = 0; o < d.nOut; o++) { let s = p[L.b2.off + o]; const w = L.W2.off + o * d.hM; for (let j = 0; j < d.hM; j++) s += p[w + j] * m[j]; out[o] = s; }
-  return { out, cache: { pm, fm: rm.y, cm: rm.cache, ps, fsy: rs.y, cs: rs.cache, u, m, out, gh, gz, gr, ghh, e, q, k, a, scale } };
+  return { out, cache: { pm, fm: rm.y, cm: rm.cache, ps, fsy: rs.y, cs: rs.cache, u, m, out, gh, gz, gr, ghh, e, q, k, a, hc, scale } };
 }
 
 /** Accumulate dLoss/dParams into `grad` given dLoss/dOut. */
@@ -300,6 +319,15 @@ export function branchBackward(d: BranchDims, p: Float64Array, g: BranchGates, x
   // macro
   const E = d.dE, D = d.dF, T = d.dT;
   const o0 = tOff + H;
+  // context
+  const cOff = o0 + 2 * E;
+  for (let j = 0; j < d.cH; j++) {
+    const dac = c.scale[4] * du[cOff + j] * (1 - c.hc[j] * c.hc[j]);
+    if (!dac) continue;
+    grad[L.bc.off + j] += dac;
+    const w = L.Wc.off + j * d.cF;
+    for (let f = 0; f < d.cF; f++) grad[w + f] += dac * x.ctx[f];
+  }
   const dctx = new Float64Array(E), de = new Float64Array(T * E);
   const last = (T - 1) * E;
   for (let j = 0; j < E; j++) { dctx[j] = c.scale[3] * du[o0 + j]; de[last + j] += c.scale[3] * du[o0 + E + j]; }

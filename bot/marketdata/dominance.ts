@@ -11,6 +11,11 @@
 // total crypto market cap ("risk-on" when it falls). BTC.D rises when BTC
 // outperforms the rest of the market.
 //
+// It also rebuilds Binance's BTC dominance index (BTCDOM: BTC priced against the
+// top-20 altcoins, market-cap weighted, stablecoins excluded) from the same
+// prices and caps, because Binance's futures API refuses US connections; the
+// TA network trains on Binance's own index history (Binance Vision).
+//
 // These are feature inputs only. Missing or stale inputs produce no sample —
 // never an invented value — and the features read NaN.
 
@@ -29,12 +34,74 @@ export interface CoinSnapshot {
 export interface DominanceSample {
   usdtd: number;         // percent
   btcd: number;          // percent
+  btcdom?: number;       // BTC dominance index (Binance's BTCDOM level)
   totalCap: number;      // USD
   coveredShare: number;  // share of total cap priced live from Binance
   ts: number;
 }
 
 const STABLES = new Set(['usdt', 'usdc', 'dai', 'fdusd', 'usde', 'tusd', 'usdd', 'pyusd', 'usds', 'busd', 'usd1']);
+/** Wrapped, staked and gold-backed tokens: not altcoins in their own right. */
+const NOT_ALTS = new Set(['wbtc', 'cbbtc', 'steth', 'wsteth', 'weth', 'weeth', 'wbeth', 'reth', 'ezeth', 'rseth', 'meth', 'jitosol', 'msol', 'bnsol', 'stsol', 'paxg', 'xaut']);
+
+/**
+ * Binance's BTC dominance index rebuilt from spot prices: BTC priced in each of the top `size`
+ * non-stable altcoins that trade on Binance (BTC/ETH, BTC/XRP, ...), weighted by market cap. Like
+ * Binance's, it holds fixed quantities between rebalances (daily, at the first update of a UTC day,
+ * or when the constituents change) and sets the new quantities so the level does not jump. It rises
+ * when BTC outperforms the alt basket and falls in alt rallies; stablecoins never move it.
+ */
+export class BtcDomIndex {
+  private weights = new Map<string, number>();
+  private qty = new Map<string, number>();
+  private ratio = new Map<string, number>();
+  private rebalancedDay = -1;
+  value: number | undefined;
+
+  /** `anchor`: the level to continue from (the last stored BTCDOM value), else Binance's launch level. */
+  constructor(private anchor = 1000, private readonly size = 20) {}
+
+  /** Continue from this level (before the first value only). */
+  setAnchor(v: number): void { if (this.value === undefined && v > 0) this.anchor = v; }
+
+  /** Constituents and weights from a market-cap snapshot (only coins with a live Binance price). */
+  setCaps(coins: CoinSnapshot[], live: Map<string, number>): void {
+    const alts = coins
+      .filter((c) => { const s = c.symbol.toLowerCase(); return s !== 'btc' && !STABLES.has(s) && !NOT_ALTS.has(s) && c.marketCap > 0 && live.has(c.symbol.toUpperCase()); })
+      .sort((a, b) => b.marketCap - a.marketCap)
+      .slice(0, this.size);
+    const total = alts.reduce((s, c) => s + c.marketCap, 0);
+    if (alts.length < 5 || !(total > 0)) return;
+    const w = new Map(alts.map((c) => [c.symbol.toUpperCase(), c.marketCap / total]));
+    if (w.size !== this.weights.size || [...w.keys()].some((k) => !this.weights.has(k))) this.rebalancedDay = -1;
+    this.weights = w;
+  }
+
+  /** The index at these USDT prices; undefined until caps and a BTC price exist. */
+  update(live: Map<string, number>, ts: number): number | undefined {
+    const btc = live.get('BTC');
+    if (!(btc! > 0) || !this.weights.size) return this.value;
+    for (const sym of this.weights.keys()) { const p = live.get(sym); if (p! > 0) this.ratio.set(sym, btc! / p!); }
+    const day = Math.floor(ts / 86_400_000);
+    if (day !== this.rebalancedDay) {
+      const level = this.qty.size ? this.level() : this.anchor;
+      const have = [...this.weights].filter(([sym]) => this.ratio.get(sym)! > 0);
+      const wSum = have.reduce((s, [, w]) => s + w, 0);
+      if (have.length >= 5 && wSum > 0 && level > 0) {
+        this.qty = new Map(have.map(([sym, w]) => [sym, ((w / wSum) * level) / this.ratio.get(sym)!]));
+        this.rebalancedDay = day;
+      }
+    }
+    if (this.qty.size) this.value = this.level();
+    return this.value;
+  }
+
+  private level(): number {
+    let s = 0;
+    for (const [sym, q] of this.qty) s += q * (this.ratio.get(sym) ?? 0);
+    return s;
+  }
+}
 
 /** Pure dominance arithmetic (testable without network). */
 export class DominanceCalculator {
@@ -116,6 +183,7 @@ export interface DominanceOptions {
 /** Streams Binance mini-tickers, anchors to CoinGecko, emits 1 Hz samples. */
 export class DominanceService extends EventEmitter {
   readonly calc = new DominanceCalculator();
+  readonly btcdom = new BtcDomIndex();
   readonly prices = new Map<string, number>();
   private readonly priceTs = new Map<string, number>();
   private ws: WebSocket | null = null;
@@ -161,8 +229,10 @@ export class DominanceService extends EventEmitter {
   }
 
   tick(now = Date.now()): DominanceSample | undefined {
-    const s = this.calc.compute(this.livePrices(now), now);
+    const live = this.livePrices(now);
+    const s = this.calc.compute(live, now);
     if (s) {
+      s.btcdom = this.btcdom.update(live, now);
       this.latest = s;
       this.emit('sample', s);
     }
@@ -183,12 +253,10 @@ export class DominanceService extends EventEmitter {
       const global = (await g.json()) as { data?: { total_market_cap?: { usd?: number } } };
       const markets = (await m.json()) as Array<{ symbol: string; current_price: number; market_cap: number }>;
       const total = Number(global.data?.total_market_cap?.usd);
-      this.calc.setBaseline(
-        markets.map((c) => ({ symbol: c.symbol, price: Number(c.current_price), marketCap: Number(c.market_cap) })),
-        total,
-        this.livePrices(Date.now()),
-        Date.now(),
-      );
+      const coins = markets.map((c) => ({ symbol: c.symbol, price: Number(c.current_price), marketCap: Number(c.market_cap) }));
+      const live = this.livePrices(Date.now());
+      this.calc.setBaseline(coins, total, live, Date.now());
+      this.btcdom.setCaps(coins, live);
       this.lastError = undefined;
     } catch (e) {
       this.lastError = `baseline: ${(e as Error).message}`;

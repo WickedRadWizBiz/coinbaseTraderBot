@@ -1,5 +1,7 @@
 // Historical OHLCV store for spot USD pairs, fed by CSV imports (Bittrex, Binance, CryptoDataDownload,
-// Yahoo, Coinbase) and by the Binance Vision / Coinbase downloaders.
+// Yahoo, Coinbase) and by the Binance Vision / Coinbase downloaders. The on-disk layout and the
+// generic read / write / splice code live in bot/marketdata/historyStore.ts (the live bot appends its
+// own index bars to the same store); this module adds the spot-specific reading and validation.
 //
 // Layout: <dir>/<source>/<ASSET>/<tf>.csv, header `ts,o,h,l,c,v`, one row per bar, ts = bar OPEN
 // time in UTC milliseconds, ascending, no duplicates. Every importer converts to this convention;
@@ -10,142 +12,28 @@
 // lower-priority source only fills time BEFORE or AFTER what better sources cover, never inside it
 // (bar-by-bar mixing of exchanges would create artificial jumps).
 
-import fs from 'fs';
-import path from 'path';
 import type { Candle } from '../../bot/ta/indicators';
 import type { Timeframe } from '../../bot/ta/knowledge';
+import { aggregateCandles, DEFAULT_SOURCE_PRIORITY, HIST_TF_MS, INDEX_SOURCES, listSeries, mergeCandles, readSeries, spliceSources, type HistTf } from '../../bot/marketdata/historyStore';
 
-export type HistTf = '1m' | '5m' | '15m' | '1h' | '4h' | '1d';
-export const HIST_TF_MS: Record<HistTf, number> = { '1m': 60_000, '5m': 300_000, '15m': 900_000, '1h': 3_600_000, '4h': 14_400_000, '1d': 86_400_000 };
-export const HIST_TFS = Object.keys(HIST_TF_MS) as HistTf[];
-
-/** Splice priority (first = preferred). Coinbase is closest to the CF Benchmarks indices Kalshi settles on. */
-export const DEFAULT_SOURCE_PRIORITY = ['coinbase', 'binance', 'bitstamp', 'kraken', 'gemini', 'cdd', 'bittrex', 'yahoo', 'other'];
+export {
+  aggregateCandles, aggregateIndex, DEFAULT_SOURCE_PRIORITY, HIST_TF_MS, HIST_TFS, INDEX_SOURCE_PRIORITY, INDEX_SOURCES, listSeries, loadIndexSeries, mergeCandles,
+  readSeries, seriesPath, spliceSources, storedIndexAssets, tfFromMs, upsertSeries, writeSeries, type HistTf, type SeriesInfo,
+} from '../../bot/marketdata/historyStore';
 
 /** Sources stored but never spliced into spot series (perp futures trade at a basis to spot). */
 export const NON_SPOT_SOURCES = new Set(['binance-um']);
-
-export function tfFromMs(ms: number): HistTf | undefined {
-  return HIST_TFS.find((t) => HIST_TF_MS[t] === ms);
-}
-
-export function seriesPath(dir: string, source: string, asset: string, tf: HistTf): string {
-  return path.join(dir, source, asset.toUpperCase(), `${tf}.csv`);
-}
-
-export function readSeries(file: string): Candle[] {
-  if (!fs.existsSync(file)) return [];
-  const out: Candle[] = [];
-  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-    if (!line || line.startsWith('ts')) continue;
-    const f = line.split(',');
-    const [ts, o, h, l, c, v] = f.map(Number);
-    if (!Number.isFinite(ts) || !Number.isFinite(c)) continue;
-    const bar: Candle = { ts, o, h, l, c, v: Number.isFinite(v) ? v : 0 };
-    if (f[6] !== undefined && f[6] !== '' && Number.isFinite(Number(f[6]))) bar.tb = Number(f[6]);
-    out.push(bar);
-  }
-  return out;
-}
-
-const fmt = (x: number) => (Number.isInteger(x) ? String(x) : String(+x.toPrecision(12)));
-
-export function writeSeries(file: string, cs: Candle[]): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  const anyTb = cs.some((c) => c.tb !== undefined);
-  const lines = [anyTb ? 'ts,o,h,l,c,v,tb' : 'ts,o,h,l,c,v', ...cs.map((c) => `${c.ts},${fmt(c.o)},${fmt(c.h)},${fmt(c.l)},${fmt(c.c)},${fmt(c.v)}${anyTb ? `,${c.tb !== undefined ? fmt(c.tb) : ''}` : ''}`)];
-  fs.writeFileSync(tmp, `${lines.join('\n')}\n`);
-  fs.renameSync(tmp, file);
-}
-
-/** Union by timestamp; `incoming` wins on conflicts. Sorted ascending. */
-export function mergeCandles(existing: Candle[], incoming: Candle[]): Candle[] {
-  const m = new Map(existing.map((c) => [c.ts, c]));
-  for (const c of incoming) m.set(c.ts, c);
-  return [...m.values()].sort((a, b) => a.ts - b.ts);
-}
-
-/** Merge `incoming` into the stored series and write it back; returns the stored length. */
-export function upsertSeries(dir: string, source: string, asset: string, tf: HistTf, incoming: Candle[]): number {
-  const file = seriesPath(dir, source, asset, tf);
-  const merged = mergeCandles(readSeries(file), incoming);
-  writeSeries(file, merged);
-  return merged.length;
-}
-
-export interface SeriesInfo { source: string; asset: string; tf: HistTf; file: string }
-
-/** Every stored series (optionally for one asset). */
-export function listSeries(dir: string, asset?: string): SeriesInfo[] {
-  const out: SeriesInfo[] = [];
-  if (!fs.existsSync(dir)) return out;
-  for (const source of fs.readdirSync(dir)) {
-    const sd = path.join(dir, source);
-    if (!fs.statSync(sd).isDirectory()) continue;
-    for (const a of fs.readdirSync(sd)) {
-      if (asset && a !== asset.toUpperCase()) continue;
-      const ad = path.join(sd, a);
-      if (!fs.statSync(ad).isDirectory()) continue;
-      for (const f of fs.readdirSync(ad)) {
-        const tf = /^(\w+)\.csv$/.exec(f)?.[1] as HistTf | undefined;
-        if (tf && tf in HIST_TF_MS) out.push({ source, asset: a, tf, file: path.join(ad, f) });
-      }
-    }
-  }
-  return out;
-}
+/** Spot pair sources: everything except perps and the market-wide index series. */
+export const isSpotSource = (source: string) => !NON_SPOT_SOURCES.has(source) && !INDEX_SOURCES.has(source);
 
 export function storedAssets(dir: string): string[] {
-  return [...new Set(listSeries(dir).filter((s) => !NON_SPOT_SOURCES.has(s.source)).map((s) => s.asset))].sort();
-}
-
-const rankOf = (source: string, priority: string[]) => {
-  const i = priority.indexOf(source);
-  if (i >= 0) return i;
-  const j = priority.indexOf(source.split('-')[0]); // cdd-bitstamp -> cdd
-  return j >= 0 ? j + 0.5 : priority.length;
-};
-
-/** Complete, aligned groups of `ms` built from finer candles (incomplete groups are dropped). */
-export function aggregateCandles(cs: Candle[], fromMs: number, ms: number): Candle[] {
-  const per = Math.round(ms / fromMs);
-  const out: Candle[] = [];
-  let i = 0;
-  while (i < cs.length) {
-    const start = Math.floor(cs[i].ts / ms) * ms;
-    let j = i, n = 0, h = -Infinity, l = Infinity, v = 0;
-    while (j < cs.length && cs[j].ts < start + ms) { h = Math.max(h, cs[j].h); l = Math.min(l, cs[j].l); v += cs[j].v; n++; j++; }
-    if (n === per && cs[i].ts === start) {
-      const g = cs.slice(i, j);
-      const tb = g.every((x) => x.tb !== undefined) ? g.reduce((s, x) => s + x.tb!, 0) : undefined;
-      out.push({ ts: start, o: cs[i].o, h, l, c: cs[j - 1].c, v, ...(tb !== undefined ? { tb } : {}) });
-    }
-    i = j;
-  }
-  return out;
-}
-
-/** Splice: better sources keep their whole span; worse ones only extend it before/after. */
-export function spliceSources(parts: Array<{ source: string; candles: Candle[] }>, priority = DEFAULT_SOURCE_PRIORITY): { candles: Candle[]; segments: Array<{ source: string; from: number; to: number; bars: number }> } {
-  const sorted = parts.filter((p) => p.candles.length).sort((a, b) => rankOf(a.source, priority) - rankOf(b.source, priority));
-  const spans: Array<[number, number]> = [];
-  const byTs = new Map<number, Candle>();
-  const segments: Array<{ source: string; from: number; to: number; bars: number }> = [];
-  for (const p of sorted) {
-    const covered = (t: number) => spans.some(([a, b]) => t >= a && t <= b);
-    const take = p.candles.filter((c) => !covered(c.ts) && !byTs.has(c.ts));
-    for (const c of take) byTs.set(c.ts, c);
-    if (take.length) segments.push({ source: p.source, from: take[0].ts, to: take[take.length - 1].ts, bars: take.length });
-    spans.push([p.candles[0].ts, p.candles[p.candles.length - 1].ts]);
-  }
-  return { candles: [...byTs.values()].sort((a, b) => a.ts - b.ts), segments };
+  return [...new Set(listSeries(dir).filter((s) => isSpotSource(s.source)).map((s) => s.asset))].sort();
 }
 
 /** One spot series for (asset, tf): stored sources at that tf, plus each source's finer data
  *  aggregated up (a real file wins over an aggregate from the same source). */
 export function loadSeries(dir: string, asset: string, tf: HistTf, priority = DEFAULT_SOURCE_PRIORITY): { candles: Candle[]; segments: Array<{ source: string; from: number; to: number; bars: number }> } {
-  const all = listSeries(dir, asset).filter((s) => !NON_SPOT_SOURCES.has(s.source));
+  const all = listSeries(dir, asset).filter((s) => isSpotSource(s.source));
   const parts: Array<{ source: string; candles: Candle[] }> = [];
   for (const source of [...new Set(all.map((s) => s.source))]) {
     const mine = all.filter((s) => s.source === source);

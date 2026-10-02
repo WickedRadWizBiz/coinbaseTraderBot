@@ -32,6 +32,7 @@ import { KalshiPerpsRest } from '../perps/perpRest';
 import type { PerpSnapshot } from '../perps/perpData';
 import { contractKind, type ContractTerms, type MarketKind } from '../model/fairValue';
 import { DominanceService } from './dominance';
+import { IndexBars, IndexStore } from './indexBars';
 import { IndexTracker } from './indexTracker';
 import { OrderBook } from './orderBook';
 
@@ -79,6 +80,11 @@ export class MarketData extends EventEmitter {
   private readonly fees = new Map<string, FeeSchedule>();
   private readonly feesFetchedAt = new Map<string, number>();
   private pollTimer: NodeJS.Timeout | null = null;
+  private indexTimer: NodeJS.Timeout | null = null;
+  /** Hourly bars of USDT.D, BTC.D and BTCDOM from the dominance feed, appended to the history store. */
+  readonly indexBars: IndexBars;
+  /** Index series for the TA network (history store: TradingView, Binance BTCDOM, the bot's own bars). */
+  readonly indexStore: IndexStore;
   private readonly tradeCursor = new Map<string, number>();
   private proxyWs: WebSocket | null = null;
   private candleFeed?: SpotCandleFeed;
@@ -93,6 +99,10 @@ export class MarketData extends EventEmitter {
     private readonly recorder: Recorder,
   ) {
     super();
+    const histDir = cfg.taNet?.enabled ? cfg.taNet.historyDir : undefined;
+    this.indexBars = new IndexBars(histDir);
+    this.indexStore = new IndexStore(histDir);
+    this.indexBars.onClose = () => this.indexStore.invalidate();
     for (const s of cfg.strategy.series) this.series.set(s, cfg.seriesAssetMap[s]);
     this.addTennisSeries();
     // Track every asset that has a settlement index, so discovered series can be priced at once.
@@ -127,8 +137,12 @@ export class MarketData extends EventEmitter {
     if (proxy || this.cfg.spotFeed) this.startSpotFeed(proxy);
     if (this.cfg.dominanceFeed) {
       this.dominance = new DominanceService({ binanceWsUrl: this.cfg.binanceWsUrl, coingeckoUrl: this.cfg.coingeckoUrl, coingeckoApiKey: this.cfg.coingeckoApiKey });
-      this.dominance.on('sample', (d: { usdtd: number; btcd: number; coveredShare: number; ts: number }) => this.onDominance(d));
+      // Continue the BTCDOM level where the stored history (Binance's index, or our own bars) ends.
+      const last = this.cfg.taNet?.enabled ? IndexBars.lastStored(this.cfg.taNet.historyDir, 'BTCDOM') : undefined;
+      if (last) this.dominance.btcdom.setAnchor(last);
+      this.dominance.on('sample', (d: { usdtd: number; btcd: number; btcdom?: number; coveredShare: number; ts: number }) => this.onDominance(d));
       this.dominance.start();
+      this.indexTimer = setInterval(() => this.indexBars.flush(Date.now()), 60_000);
     }
     if (this.cfg.taCandles) {
       // Live order flow (Coinbase public trades) so live candles carry taker-buy volume like the history.
@@ -164,6 +178,7 @@ export class MarketData extends EventEmitter {
 
   stop(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.indexTimer) clearInterval(this.indexTimer);
     this.ws?.close();
     this.proxyWs?.close();
     this.dominance?.stop();
@@ -281,10 +296,13 @@ export class MarketData extends EventEmitter {
   }
 
   /** A USDT.D / BTC.D sample (from the dominance service). */
-  onDominance(d: { usdtd: number; btcd: number; coveredShare?: number; ts: number }): void {
+  onDominance(d: { usdtd: number; btcd: number; btcdom?: number; coveredShare?: number; ts: number }): void {
+    this.indexBars.add('USDT.D', d.usdtd, d.ts);
+    this.indexBars.add('BTC.D', d.btcd, d.ts);
+    this.indexBars.add('BTCDOM', d.btcdom, d.ts);
     this.usdtd.add(d.usdtd, d.ts);
     this.btcd.add(d.btcd, d.ts);
-    this.recorder.write('dominance', { usdtd: d.usdtd, btcd: d.btcd, covered: d.coveredShare ?? null, ts: d.ts });
+    this.recorder.write('dominance', { usdtd: d.usdtd, btcd: d.btcd, btcdom: d.btcdom ?? null, covered: d.coveredShare ?? null, ts: d.ts });
   }
 
   /** Write any event to the research recordings (SNN outputs, tennis scores, ...). */

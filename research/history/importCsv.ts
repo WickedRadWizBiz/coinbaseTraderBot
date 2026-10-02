@@ -15,7 +15,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { alignmentCheck, cleanAndValidate, loadSeries, shiftCandles, upsertSeries, type AlignmentResult, type HistTf, type ValidationReport } from './candles';
+import { alignmentCheck, cleanAndValidate, INDEX_SOURCES, loadIndexSeries, loadSeries, shiftCandles, upsertSeries, type AlignmentResult, type HistTf, type ValidationReport } from './candles';
 import { parseCandleCsv } from './csvFormats';
 import { unzip } from './zip';
 
@@ -54,14 +54,15 @@ export function importCsvText(text: string, name: string, o: ImportOpts): Import
     res.notes.push(...p.notes);
     if (!p.asset) throw new Error('could not tell the asset from the file name or symbol column: pass --asset');
     if (!p.tf) throw new Error('could not tell the timeframe: pass --tf (1m, 5m, 15m, 1h, 4h, 1d)');
-    if (!p.quote && !o.asset) res.notes.push('quote currency unknown (assumed USD-like)');
+    const isIndex = INDEX_SOURCES.has(p.source);
+    if (!p.quote && !o.asset && !isIndex) res.notes.push('quote currency unknown (assumed USD-like)');
     if (p.quote && !/^USD/.test(p.quote) && p.quote !== 'DAI' && !o.allowNonUsd) throw new Error(`quote ${p.quote} is not USD-like`);
     const { candles: clean, report } = cleanAndValidate(shiftCandles(p.candles, p.tf, o.shiftBars ?? 0), p.tf);
     res.report = report;
     if (!clean.length) throw new Error('no valid bars');
     if (report.misaligned > clean.length * 0.01) res.notes.push(`${report.misaligned} bars are not on ${p.tf} boundaries`);
     // Alignment against the other sources already stored.
-    const ref = loadSeries(o.out, p.asset, p.tf);
+    const ref = isIndex ? loadIndexSeries(o.out, p.asset, p.tf) : loadSeries(o.out, p.asset, p.tf);
     const others = ref.candles.filter((c) => !ref.segments.some((s) => s.source === p.source && c.ts >= s.from && c.ts <= s.to));
     const al = others.length ? alignmentCheck(clean, others, p.tf) : undefined;
     if (al) {
