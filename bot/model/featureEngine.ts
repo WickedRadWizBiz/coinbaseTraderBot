@@ -24,6 +24,7 @@ import { CandleSet, fromRow, toRow, type CandleRow } from '../ta/candleStore';
 import type { Timeframe } from '../ta/knowledge';
 import { CONFLUENCES, RULES } from '../ta/knowledge';
 import type { TaSnapshot, TfState } from '../ta/analyzer';
+import { activeTaNet, type TaNetOutput } from '../ta/taNet';
 
 export type FeatureGroup = 'base' | 'micro' | 'momentum' | 'spot' | 'macro' | 'confluence' | 'session' | 'time'
   // Relaxed-cadence catalog (minute windows and slower).
@@ -31,7 +32,9 @@ export type FeatureGroup = 'base' | 'micro' | 'momentum' | 'spot' | 'macro' | 'c
   // Cortex-like SNN outputs (bot/snn): market-direction calls and the contract fair-value bias.
   | 'snn'
   // TA library on the Coinbase spot USD pair (bot/ta): indicator readings, and rule/confluence scores.
-  | 'ta' | 'taconf';
+  | 'ta' | 'taconf'
+  // TA network (bot/ta/taNet.ts): forecasts learned from years of hourly history, and its live skill.
+  | 'tanet';
 
 /** Build tiers from the relaxed-cadence spec: T1 first, T2 only after ablation proves them, T3 experimental. */
 export type FeatureTier = 'T1' | 'T2' | 'T3';
@@ -321,7 +324,7 @@ const snnMoveZ = (c: FeatureContext, h: 15 | 60 | 240) => {
 };
 
 type Fn = (c: FeatureContext, cache: Cache) => number;
-interface Cache { idx: Map<number, number[] | undefined>; spot: Map<number, number[] | undefined>; memo: Map<string, number>; ta?: TaSnapshot | null }
+interface Cache { idx: Map<number, number[] | undefined>; spot: Map<number, number[] | undefined>; memo: Map<string, number>; ta?: TaSnapshot | null; tanet?: TaNetOutput | null }
 
 const NA = NaN;
 const clip = (x: number, lim = 10) => (Number.isFinite(x) ? clamp(x, -lim, lim) : NA);
@@ -884,6 +887,24 @@ function taFeatures(): typeof FEATURES {
   return out;
 }
 Object.assign(FEATURES, taFeatures());
+
+// ---- TA network outputs (bot/ta/taNet.ts) -----------------------------------------------------
+// Computed from the same Coinbase candles (288 closed hourly bars, 288 daily) as in its training;
+// NaN when no network is installed, the head did not validate, or the candles are stale.
+
+const tanetOf = (c: FeatureContext, k: Cache): TaNetOutput | undefined => {
+  if (k.tanet === undefined) k.tanet = (c.asset && c.candles ? activeTaNet()?.outputFor(c.asset, c.candles, c.now) : undefined) ?? null;
+  return k.tanet ?? undefined;
+};
+const tnLogit = (p: number | undefined) => (p === undefined || !Number.isFinite(p) ? NA : clip(Math.log(clamp(p, 1e-4, 1 - 1e-4) / (1 - clamp(p, 1e-4, 1 - 1e-4))), 6));
+Object.assign(FEATURES, {
+  tanet_up_1h: { group: 'tanet', tier: 'T2', description: 'TA network P(spot up over the next hour), as log-odds', fn: (c, k) => tnLogit(tanetOf(c, k)?.up[60]) },
+  tanet_up_4h: { group: 'tanet', tier: 'T2', description: 'TA network P(spot up over the next 4 hours), as log-odds', fn: (c, k) => tnLogit(tanetOf(c, k)?.up[240]) },
+  tanet_vol_4h: { group: 'tanet', tier: 'T2', description: 'TA network forecast of log(next-4h realised vol / last-24h realised vol)', fn: (c, k) => { const v = tanetOf(c, k)?.vol4h; return v === undefined || !Number.isFinite(v) ? NA : clip(v, 3); } },
+  tanet_skill_1h: { group: 'tanet', tier: 'T2', description: 'TA network 1-hour skill over its last graded calls (1 - Brier/0.25; NaN until 24 graded)', fn: (c, k) => { const v = tanetOf(c, k)?.skill[60]; return v === undefined || !Number.isFinite(v) ? NA : clip(v, 1); } },
+  tanet_skill_4h: { group: 'tanet', tier: 'T2', description: 'TA network 4-hour skill over its last graded calls', fn: (c, k) => { const v = tanetOf(c, k)?.skill[240]; return v === undefined || !Number.isFinite(v) ? NA : clip(v, 1); } },
+  tanet_dir_agree: { group: 'tanet', tier: 'T2', description: "+1 when the TA network's 1-hour direction agrees with the fair value's side, -1 when it disagrees", fn: (c, k) => { const u = tanetOf(c, k)?.up[60]; return u === undefined || !Number.isFinite(u) ? NA : Math.sign(u - 0.5) * Math.sign(c.fairValue - 0.5); } },
+} satisfies typeof FEATURES);
 
 export const ALL_FEATURES = Object.keys(FEATURES);
 export const featuresInGroups = (groups: FeatureGroup[]) => ALL_FEATURES.filter((n) => groups.includes(FEATURES[n].group));

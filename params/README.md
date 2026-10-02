@@ -34,3 +34,12 @@ the calendar features: `[{ "ts": "<ISO time>", "kind": "CPI" }, ...]`.
 `calendar.example.json` shows the format; its dates are placeholders, so copy
 the official BLS, Federal Reserve and BEA schedules. Without the file, the
 calendar features read as unavailable.
+
+## TA network
+
+`ta_net.json` is the TA network (`bot/ta/taNet.ts`, docs/TA_NETWORK.md), trained with
+`npm run research:ta-net` on Binance spot history for BTC, ETH, SOL, XRP and DOGE
+(Aug 2017 – Oct 2026). Only heads that passed the blind walk-forward test speak live
+(`up_1h` and `vol_4h` in this file). The server's pipeline retrains it on every crypto
+asset Kalshi lists and promotes the result to `data/models/ta_net.json`, which is preferred
+over this file.

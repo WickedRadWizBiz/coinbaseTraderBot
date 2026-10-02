@@ -30,6 +30,8 @@ export const PERP_FEATURES = [
   'taconf_trend_alignment', 'taconf_mtf_momentum', 'taconf_net_trend', 'taconf_net_reversal',
   // The perps network's direction calls over the perp horizons (1 h and 4 h) and its graded skill.
   'snn_up_1h', 'snn_up_4h', 'snn_skill_1h', 'snn_skill_4h',
+  // The TA network's 1h / 4h forecasts (years of hourly history), its vol forecast and live skill.
+  'tanet_up_1h', 'tanet_up_4h', 'tanet_vol_4h', 'tanet_skill_4h',
 ];
 
 export interface PerpFeatureSources {

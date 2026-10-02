@@ -57,6 +57,7 @@ import { logit as logitP } from './util/num';
 import type { StepReply } from './snn/runtime';
 import { logger } from './util/log';
 import { VolForecaster, type VolModel } from './model/volModel';
+import { activeTaNet } from './ta/taNet';
 import { applyFillModel, fillInputs, isMakerEntry, type FillModel } from './tca/fillModel';
 import { FillLog } from './tca/fillLog';
 
@@ -911,6 +912,25 @@ export class Engine {
       volModel: v ? { version: v.params.version, validated: v.validated, applied: Boolean(v.validated && this.d.cfg.strategy.volModel), improvement: v.params.validation.improvement.mean } : null,
       fill: f ? { version: f.params.version, validated: f.validated, active: f.validated, quotes: f.params.validation.quotes, fills: f.params.validation.fills } : null,
       fillLogging: Boolean(this.fillLog),
+      taNet: this.taNetStatus(),
+    };
+  }
+
+  /** TA network: version, blind-test results per head, and each asset's latest forecast and live skill. */
+  taNetStatus() {
+    const rt = activeTaNet();
+    if (!rt) return null;
+    const p = rt.net.params;
+    const now = this.now();
+    const assets: Record<string, unknown> = {};
+    for (const [asset, set] of this.d.md.features.candles) {
+      const o = rt.outputFor(asset, set, now);
+      if (o) assets[asset] = { barTs: o.barTs, up1h: o.up[60], up4h: o.up[240], vol4h: o.vol4h, skill1h: o.skill[60], skill4h: o.skill[240], graded: o.graded };
+    }
+    return {
+      version: p.version, trainedAt: p.trainedAt, data: p.data, requireValidated: rt.requireValidated, activeHeads: rt.net.active(rt.requireValidated),
+      heads: Object.fromEntries(Object.entries(p.heads).map(([k, h]) => [k, { kind: h!.head.kind, ...h!.validation, candidates: h!.candidates }])),
+      assets,
     };
   }
 

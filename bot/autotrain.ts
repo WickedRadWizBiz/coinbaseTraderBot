@@ -20,11 +20,12 @@ import type { SnnDomain } from './snn/params';
 import { VolModel } from './model/volModel';
 import { FillModel } from './tca/fillModel';
 import { TennisFairModel } from './tennis/tennisFair';
+import { setTaNet, TaNet } from './ta/taNet';
 import { logger } from './util/log';
 
 const log = logger('autotrain');
 
-export const MODEL_FILES = { mlp: 'model.json', perp: 'perp_model.json', snn_crypto: 'snn_crypto.json', snn_perps: 'snn_perps.json', snn_tennis: 'snn_tennis.json', vol: 'vol_profile.json', vol_model: 'vol_model.json', tennis: 'tennis_model.json', fill: 'fill_model.json' } as const;
+export const MODEL_FILES = { mlp: 'model.json', perp: 'perp_model.json', snn_crypto: 'snn_crypto.json', snn_perps: 'snn_perps.json', snn_tennis: 'snn_tennis.json', vol: 'vol_profile.json', vol_model: 'vol_model.json', tennis: 'tennis_model.json', fill: 'fill_model.json', ta_net: 'ta_net.json' } as const;
 type Kind = keyof typeof MODEL_FILES;
 
 /** The file the bot should load for each model: the pipeline's promoted copy in AUTO_TRAIN_DIR
@@ -34,7 +35,7 @@ export function resolveModelPaths(cfg: Readonly<Config>): Record<Kind, string> {
   return {
     mlp: pick('mlp', cfg.paramsPath), perp: pick('perp', cfg.perps.modelPath),
     snn_crypto: pick('snn_crypto', cfg.snn.domains.crypto.modelPath), snn_perps: pick('snn_perps', cfg.snn.domains.perps.modelPath), snn_tennis: pick('snn_tennis', cfg.snn.domains.tennis.modelPath),
-    vol: pick('vol', cfg.strategy.volProfilePath), vol_model: pick('vol_model', cfg.strategy.volModelPath), tennis: pick('tennis', cfg.tennis.modelPath), fill: pick('fill', cfg.strategy.fillModelPath),
+    vol: pick('vol', cfg.strategy.volProfilePath), vol_model: pick('vol_model', cfg.strategy.volModelPath), tennis: pick('tennis', cfg.tennis.modelPath), fill: pick('fill', cfg.strategy.fillModelPath), ta_net: pick('ta_net', cfg.taNet.modelPath),
   };
 }
 
@@ -92,7 +93,7 @@ export class AutoTrainer {
     return t;
   }
 
-  state(): { lastRun?: number; mlpId?: string; snnVersions?: Partial<Record<SnnDomain, string>>; trainedWithSnn?: Partial<Record<SnnDomain, string>>; lastReport?: string } {
+  state(): { lastRun?: number; mlpId?: string; snnVersions?: Partial<Record<SnnDomain, string>>; trainedWithSnn?: Partial<Record<SnnDomain, string>>; taNetVersion?: string; trainedWithTaNet?: string; lastReport?: string } {
     try { return JSON.parse(fs.readFileSync(path.join(this.d.cfg.autoTrain.dir, 'pipeline_state.json'), 'utf8')); } catch { return {}; }
   }
 
@@ -132,7 +133,7 @@ export class AutoTrainer {
   /** Poll the model files; hot-swap whatever changed. */
   async watch(): Promise<void> {
     const paths = resolveModelPaths(this.d.cfg);
-    for (const k of ['snn_crypto', 'snn_perps', 'snn_tennis', 'vol_model', 'mlp', 'vol', 'perp', 'tennis', 'fill'] as Kind[]) {
+    for (const k of ['ta_net', 'snn_crypto', 'snn_perps', 'snn_tennis', 'vol_model', 'mlp', 'vol', 'perp', 'tennis', 'fill'] as Kind[]) {
       const p = paths[k], m = mtime(p);
       if (m === null || this.mtimes.get(p) === m) continue;
       // Do not load a file the pipeline is still writing (promotion is a copy; wait one poll).
@@ -176,6 +177,18 @@ export class AutoTrainer {
       const m = FillModel.load(file);
       engine.setFillModel(m);
       this.record('fill', m ? `${m.params.version} (validated=${m.validated}, ${m.params.validation.quotes} quotes)` : 'removed');
+    } else if (kind === 'ta_net') {
+      if (!cfg.taNet.enabled) return;
+      const n = TaNet.load(file);
+      setTaNet(n, cfg.taNet.requireValidated);
+      const v = n?.version;
+      this.record('ta_net', n ? `${v} (validated heads: ${n.active(true).join(', ') || 'none'})` : 'removed');
+      // The models that read its forecasts were trained on the previous network: retrain them.
+      if (v && cfg.autoTrain.onModelChange && this.state().trainedWithTaNet !== v && !this.child && !this.retrainFor.has(`ta_net:${v}`)) {
+        this.retrainFor.add(`ta_net:${v}`);
+        log.info('TA network changed: retraining the models that read it', { taNet: v });
+        this.run(['--only', 'vol_model,dataset,mlp,perps']);
+      }
     } else if (kind.startsWith('snn_')) {
       const domain = kind.slice(4) as SnnDomain;
       if (cfg.snn.mode === 'off' || !cfg.snn.domains[domain].enabled || !engine.snn) return;

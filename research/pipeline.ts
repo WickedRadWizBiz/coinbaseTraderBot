@@ -2,10 +2,15 @@
 // promoting the results to AUTO_TRAIN_DIR (data/models), where the running bot picks them up
 // without a restart (bot/autotrain.ts).
 //
-// Three isolated SNNs inform, the decision models decide. Each network (crypto, perps, tennis)
+// The TA network and three isolated SNNs inform, the decision models decide. Each network (crypto, perps, tennis)
 // reads only its own domain's inputs and is read only by its own decision model (MLP, perps model,
 // tennis model), so every network comes FIRST and each model that reads it is retrained after it:
 //
+//   0a. history      refresh the historical candle store (Binance Vision + Coinbase backfill) for
+//                    every crypto asset Kalshi lists (HISTORY_AUTO_UPDATE; needs internet)
+//   0b. ta_net       TA network on years of hourly history (bot/ta/taNet.ts): retrained every
+//                    TA_NET_RETRAIN_DAYS -> promote ta_net.json; its forecasts are features of
+//                    vol_model, mlp and perps below (each keeps them only if its validation improves)
 //   1. snn           per replayable network (crypto: 15m/1h with contracts; perps: 1h/4h, graded on
 //                    direction calls): ablation when due -> train at the best accepted stage ->
 //                    promote snn_<domain>.json -> prequential backfill (work/snnfill/<domain>).
@@ -24,8 +29,9 @@
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: snn, vol_model, dataset, mlp, vol, perps, tennis, fill
+//   npm run pipeline -- --only mlp,perps     # steps: history, ta_net, snn, vol_model, dataset, mlp, vol, perps, tennis, fill
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
+//   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
 
 import fs from 'fs';
 import path from 'path';
@@ -48,8 +54,14 @@ import { trainMetaModelMain } from './trainMetaModel';
 import { trainPerpMain } from './trainPerpModel';
 import { trainSnnMain } from './trainSnn';
 import { trainTennisMain } from './trainTennisModel';
+import { trainTaNetMain } from './trainTaNet';
+import { downloadBinance, type BinanceMarket } from './history/binanceVision';
+import { backfillCoinbase } from './history/coinbaseBackfill';
+import { resolveAssets } from './history/assets';
+import { storedAssets, type HistTf } from './history/candles';
+import { setTaNet, TaNet } from '../bot/ta/taNet';
 
-export const STEPS = ['snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill'] as const;
+export const STEPS = ['history', 'ta_net', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -72,6 +84,11 @@ export interface PipelineState {
   snnVersions?: Partial<Record<SnnDomain, string>>;
   /** Network version whose outputs each consumer (crypto = MLP, perps, tennis) was trained with. */
   trainedWithSnn?: Partial<Record<SnnDomain, string>>;
+  /** Promoted TA network, when it was trained, and the version the MLP was trained with. */
+  taNetVersion?: string;
+  taNetTrainedAt?: number;
+  trainedWithTaNet?: string;
+  lastHistoryUpdate?: number;
   lastReport?: string;
 }
 
@@ -116,6 +133,8 @@ export interface PipelineOpts {
   cfg?: Readonly<Config>; only?: Step[]; forceAblation?: boolean; now?: number; log?: (m: string) => void;
   /** Restrict the SNN ablation to mechanisms whose name starts with this (testing). */
   ablationOnly?: string;
+  /** Retrain the TA network even if it is not due. */
+  forceTaNet?: boolean;
 }
 
 export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepResult[]; state: PipelineState; report: string }> {
@@ -152,6 +171,45 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const tooFew = days.length < A.minDays ? `only ${days.length} day(s) of recordings in ${rec} (< AUTO_TRAIN_MIN_DAYS=${A.minDays})` : undefined;
   const lastDays = (n: number) => (days.length ? days.slice(-n) : []);
   const mlpPath = () => (fs.existsSync(promoted('mlp')) ? promoted('mlp') : fs.existsSync(cfg.paramsPath) ? cfg.paramsPath : undefined);
+
+  // ---- 0. History and the TA network (no recordings needed: years of exchange candles) ----
+  const T = cfg.taNet;
+  const taNetFile = promoted('ta_net');
+  const installTaNet = () => {
+    if (!T.enabled) { setTaNet(undefined); return; }
+    try { setTaNet(fs.existsSync(taNetFile) ? TaNet.load(taNetFile) : undefined, T.requireValidated); } catch (e) { log(`TA network not loaded: ${(e as Error).message}`); setTaNet(undefined); }
+  };
+  installTaNet();
+  if (want('history')) {
+    await run('history', async () => {
+      const assets = await resolveAssets(T.historyAssets, { log });
+      const bin = await downloadBinance({ out: T.historyDir, assets, intervals: T.binanceIntervals as HistTf[], markets: ['spot' as BinanceMarket], log: (m) => log(`binance: ${m}`) });
+      const cb = T.coinbaseTfs.length ? await backfillCoinbase({ out: T.historyDir, assets, tfs: T.coinbaseTfs as HistTf[], fromTs: Date.parse('2015-01-01T00:00:00Z'), baseUrl: cfg.coinbaseRestUrl, log: (m) => log(`coinbase: ${m}`) }) : [];
+      const reached = bin.some((b) => b.listed > 0) || cb.some((c) => c.requests > 0 && !/kept failing/.test(c.note ?? ''));
+      if (!reached) throw new SkipStep('Binance Vision and Coinbase unreachable from this machine');
+      state.lastHistoryUpdate = now;
+      return { assets, binance: { fetched: bin.reduce((a, b) => a + b.fetched, 0), failed: bin.reduce((a, b) => a + b.failed, 0) }, coinbase: { added: cb.reduce((a, c) => a + c.added, 0) } };
+    }, T.historyUpdate ? undefined : 'HISTORY_AUTO_UPDATE=false');
+  }
+  if (want('ta_net')) {
+    const due = o.forceTaNet || !fs.existsSync(taNetFile) || !state.taNetTrainedAt || now - state.taNetTrainedAt >= T.retrainEveryDays * 86_400_000;
+    const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet (npm run history:binance, or history:import your CSVs)`;
+    await run('ta_net', async () => {
+      const cand = path.join(work, 'ta_net.candidate.json');
+      let rep;
+      try { rep = await trainTaNetMain(argsOf({ history: T.historyDir, out: cand, cache: path.join(work, 'tanet-cache'), 'refit-months': T.refitMonths })); } catch (e) {
+        if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
+        throw e;
+      }
+      const validated = Object.entries(rep.params.heads).filter(([, h]) => h?.validation.validated).map(([k]) => k);
+      state.taNetTrainedAt = now;
+      if (A.promote === 'validated' && !validated.length) return { promoted: false, version: rep.params.version, reason: 'no head beat the naive forecast in the blind test', split: rep.split };
+      fs.copyFileSync(cand, taNetFile);
+      state.taNetVersion = rep.params.version;
+      installTaNet();
+      return { promoted: true, version: rep.params.version, validatedHeads: validated, split: rep.split, heads: Object.fromEntries(Object.entries(rep.params.heads).map(([k, h]) => [k, { kind: h!.head.kind, ...h!.validation }])) };
+    }, !T.enabled ? 'TA_NET=false' : noHistory ?? (due ? undefined : `trained ${((now - state.taNetTrainedAt!) / 86_400_000).toFixed(1)} day(s) ago (TA_NET_RETRAIN_DAYS=${T.retrainEveryDays})`));
+  }
 
   // ---- 1. The networks first, each alone: ablation (when due) -> train -> backfill ----
   const snnChanged: SnnDomain[] = [];
@@ -263,6 +321,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       fs.copyFileSync(cand, promoted('mlp'));
       state.mlpId = m.id;
       state.trainedWithSnn!.crypto = state.snnVersions!.crypto;
+      state.trainedWithTaNet = state.taNetVersion;
       return { promoted: true, id: m.id, kind: m.params.kind, usesSnnFeatures: usesSnn, take: m.params.take?.validation ?? null, validationPassed: passed, liveBlockers: m.liveBlockers() };
     }, tooFew);
   }
@@ -343,7 +402,7 @@ async function main() {
   const i = process.argv.indexOf('--only');
   const only = i >= 0 ? (process.argv[i + 1] ?? '').split(',').filter(Boolean) as Step[] : undefined;
   for (const s of only ?? []) if (!STEPS.includes(s)) throw new Error(`unknown step ${s} (steps: ${STEPS.join(', ')})`);
-  const r = await runPipeline({ only, forceAblation: process.argv.includes('--force-ablation') });
+  const r = await runPipeline({ only, forceAblation: process.argv.includes('--force-ablation'), forceTaNet: process.argv.includes('--force-ta-net') });
   const failed = r.steps.filter((s) => !s.ok);
   console.log(`[pipeline] ${r.steps.length - failed.length}/${r.steps.length} steps ok${failed.length ? `; failed: ${failed.map((f) => f.step).join(', ')}` : ''}`);
   process.exitCode = failed.length ? 1 : 0;

@@ -19,10 +19,12 @@ While the bot runs in any mode (paper, shadow or live), it writes every book upd
 
 This is `research/pipeline.ts`, run as a low-priority background process so trading isn't slowed down.
 
-**The SNNs go first.** There are three isolated SNNs (crypto, perps, tennis; docs/SNN.md). Each decision model reads only its own network, so every network is trained before the model that reads it. The steps always run in this order:
+**History and the TA network go first**, then the SNNs. The TA network (docs/TA_NETWORK.md) learns from years of exchange candles, not from recordings, so it doesn't wait for recorded days. There are three isolated SNNs (crypto, perps, tennis; docs/SNN.md). Each decision model reads only its own network, so every network is trained before the model that reads it. The steps always run in this order:
 
 | Step | What it does | Output (in `data/models/`) |
 |---|---|---|
+| history | Downloads new Binance Vision archives and Coinbase candles for every crypto asset Kalshi lists. Skipped if the server can't reach them, or with `HISTORY_AUTO_UPDATE=false` | `data/history/` |
+| ta_net | Retrains the TA network on the hourly history every `TA_NET_RETRAIN_DAYS` (7), with a blind walk-forward test; only validated heads speak live | `ta_net.json` |
 | snn-crypto-ablation | Tests the crypto network's stages S0–S6 on settled contracts. Runs weekly, or when forced | `work/snn_crypto_ablation.json` |
 | snn-crypto-train | Trains the crypto network (15m/1h) at the highest stage whose whole chain passed | `snn_crypto.json` |
 | snn-crypto-backfill | Fills in the crypto network's outputs for recorded minutes with no live log, one day at a time, resuming where it left off. No output ever saw its own result | `work/snnfill/crypto/` |
@@ -57,6 +59,7 @@ About every 30 seconds the bot checks `data/models/` for changed files:
 | File changed | What happens |
 |---|---|
 | `model.json` | The new meta-model trades immediately. The SNN blend history is cleared, because it was recorded against the old model, and α (the SNN's vote) starts again from 0. |
+| `ta_net.json` | The new TA network's forecasts are used at once. The models that read them (vol forecast, MLP, perps) are retrained on their own if they were trained on an older network. |
 | `snn_crypto.json` / `snn_perps.json` / `snn_tennis.json` | A fresh network of that kind starts from the trained weights. The old one is checkpointed and stopped. The other networks are not touched. |
 | `vol_model.json` | Fair value's sigma is multiplied by the forecast, only if its validation passed and `VOL_MODEL=true`. |
 | `fill_model.json` | The fill model switches on at once if validated (see "The fill model brings itself online" below). |
@@ -99,6 +102,8 @@ Set `AUTO_TRAIN_PROMOTE=validated` once you want only models that passed their c
 | Run just the SNN steps | same, with `-H 'Content-Type: application/json' -d '{"only":"snn"}'` (crypto and perps networks) |
 | See status, next run and last swap | `GET /api/autotrain`, or the **Auto-train** row on the Telemetry page |
 | Run it from a checkout | `npm run pipeline` (or `npm run pipeline -- --only snn,vol_model,fill`, or `--force-ablation`) |
+| Retrain the TA network now (server) | `bash ~/bot/current/deploy/history.sh train` |
+| Import your own CSVs / download history (server) | `bash ~/bot/current/deploy/history.sh import ~/incoming`, `... binance`, `... coinbase`, `... status` (docs/TA_NETWORK.md) |
 
 Running from a checkout: `npm run pipeline` reads recordings from `data/recordings` and writes to `data/models`. Point it elsewhere with `AUTO_TRAIN_RECORDINGS=... AUTO_TRAIN_DIR=...`.
 
@@ -122,7 +127,8 @@ These can't be automated, or deliberately aren't.
 - `data/models/` and `data/recordings/` stay where they are across deploys.
 
 **4. Optional extras, any time:**
-- `npm run research:ta` refreshes the TA rule hit rates. It needs internet access to Coinbase. They are only shown on the dashboard; nothing trades on them.
+- `npm run research:ta` refreshes the TA rule hit rates. It needs internet access to Coinbase. They are only shown on the dashboard; nothing trades on them. `npm run research:ta -- --history data/history` runs it on the long hourly history instead.
+- Import extra history (your Bittrex/Yahoo/CryptoDataDownload CSVs) whenever you get it: `bash ~/bot/current/deploy/history.sh import <folder>`. The next `ta_net` run uses it.
 - Edit `params/calendar.json` (macro release dates) when the calendar changes.
 - If you want a trained model saved in git, copy it from `data/models/` into `params/` and commit it.
 
@@ -149,6 +155,8 @@ These can't be automated, or deliberately aren't.
 | `AUTO_TRAIN_DIR` | `data/models` | Where promoted models go. |
 | `AUTO_TRAIN_RECORDINGS` | `data/recordings` | Where recordings are read from. |
 | `AUTO_TRAIN_WATCH_SEC` | `30` | How often to check for changed model files. |
+| `HISTORY_AUTO_UPDATE` | `true` | Refresh Binance/Coinbase history in the daily run (the other history and TA network settings are in docs/TA_NETWORK.md). |
+| `TA_NET_RETRAIN_DAYS` | `7` | Retrain the TA network at most this often. |
 
 ## If something goes wrong
 

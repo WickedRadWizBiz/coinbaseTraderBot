@@ -324,6 +324,19 @@ A new network retrains only the model that reads it, including when you swap one
 
 `docs/AUTOMATION.md` is the plain-language guide. It covers what runs by itself, what you still do by hand, every setting, and how to roll back.
 
+## Historical data and the TA network (bot/ta/taNet.ts)
+
+- **History store** (`research/history`, `data/history`):
+  - Binance Vision bulk download (checksummed) for every crypto asset Kalshi lists, in its binary series and its perps.
+  - Coinbase backfill.
+  - An importer for your own CSVs (Bittrex, CryptoDataDownload, Yahoo, anything with OHLC columns) that converts every timestamp to bar-open UTC and refuses files whose clock is a bar off.
+  - Sources are spliced by priority, never mixed bar by bar.
+- **TA network:** a neural network, with logistic regression and boosted trees competing against it. It reads every indicator, rule and confluence of the TA library on 1h, 4h and 1d candles, and forecasts P(up) over 1h and 4h plus the next 4 hours' volatility.
+- **Training and validation:** trained on years of pooled hourly history with a blind walk-forward test. Only heads that beat the naive forecast out of sample speak live, and every live call is graded (`tanet_skill_*`).
+- **Who uses it:** its forecasts are features for the MLP, the perps model and the vol forecast, each of which keeps them only if its own validation improves.
+
+`docs/TA_NETWORK.md` covers the commands, the training, and the first real results.
+
 ## Cortex-like SNN (bot/snn)
 
 This is a multi-level spiking network built from *From Flat SNN to Cortex-Like Predictor*. Every equation from that document is implemented in its corrected form in `bot/snn/formulas.ts`. Each one is checked at 1e-5 against an independent Python reference. `docs/SNN.md` maps each formula to its code and test.

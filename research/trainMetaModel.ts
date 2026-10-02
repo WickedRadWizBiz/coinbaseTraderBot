@@ -70,10 +70,12 @@ export const DEFAULT_SETS = [
   `${RELAXED}+returns+ta`, `${RELAXED}+returns+ta+taconf`, `${RELAXED}+returns+macro+confluence+ta+taconf`,
   // Cortex-like SNN outputs (direction calls and fair-value bias), alone and on top of the TA sets.
   `${RELAXED}+returns+snn`, `${RELAXED}+returns+ta+taconf+snn`,
+  // TA network forecasts (bot/ta/taNet.ts), alone and on top of everything above.
+  `${RELAXED}+returns+tanet`, `${RELAXED}+returns+ta+taconf+tanet`, `${RELAXED}+returns+ta+taconf+snn+tanet`,
   'all',
 ];
 
-const ALL_GROUPS: FeatureGroup[] = ['base', 'micro', 'momentum', 'spot', 'macro', 'confluence', 'session', 'time', 'geometry', 'vol', 'kalshi', 'returns', 'clock', 'calendar', 'interaction', 'ladder', 'perp', 'ta', 'taconf', 'snn'];
+const ALL_GROUPS: FeatureGroup[] = ['base', 'micro', 'momentum', 'spot', 'macro', 'confluence', 'session', 'time', 'geometry', 'vol', 'kalshi', 'returns', 'clock', 'calendar', 'interaction', 'ladder', 'perp', 'ta', 'taconf', 'snn', 'tanet'];
 
 export function resolveSet(spec: string, tiers: FeatureTier[] = ['T1', 'T2']): string[] {
   const groups: FeatureGroup[] = spec === 'all' ? ALL_GROUPS : (spec.split('+') as FeatureGroup[]);

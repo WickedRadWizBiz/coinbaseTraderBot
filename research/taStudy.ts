@@ -10,6 +10,8 @@
 //
 //   npm run research:ta -- --assets BTC,ETH,SOL --days 120            (Coinbase history)
 //   npm run research:ta -- --recordings data/recordings                (recorded candles)
+//   npm run research:ta -- --history data/history                      (years of hourly history:
+//                                                                       base 1h, horizons 60/240 min)
 
 import fs from 'fs';
 import path from 'path';
@@ -19,6 +21,7 @@ import type { Candle } from '../bot/ta/indicators';
 import type { Timeframe } from '../bot/ta/knowledge';
 import { readRecordings } from './replay';
 import { rng } from './stats';
+import { loadHistory, storedAssets } from './history/candles';
 
 export interface StudyRow {
   id: string;
@@ -86,8 +89,11 @@ export function benjaminiHochberg(ps: number[], q = 0.1): boolean[] {
   return pass;
 }
 
-export function runTaStudy(histories: Record<string, History>, opts: { horizons?: number[]; stride?: number; fdr?: number; minN?: number; source?: string } = {}): StudyResult {
-  const horizons = opts.horizons ?? [15, 60];
+export function runTaStudy(histories: Record<string, History>, opts: { horizons?: number[]; stride?: number; fdr?: number; minN?: number; source?: string; baseTf?: '15m' | '1h' } = {}): StudyResult {
+  const baseTf = opts.baseTf ?? '15m';
+  const baseMin = TF_MS[baseTf] / 60_000;
+  const horizons = opts.horizons ?? (baseTf === '1h' ? [60, 240] : [15, 60]);
+  for (const h of horizons) if (h % baseMin) throw new Error(`horizon ${h} min is not a multiple of the ${baseTf} base`);
   const stride = opts.stride ?? 1;
   const fdr = opts.fdr ?? 0.1;
   const minN = opts.minN ?? 30;
@@ -95,21 +101,21 @@ export function runTaStudy(histories: Record<string, History>, opts: { horizons?
   const obs = new Map<string, { id: string; kind: 'rule' | 'confluence'; tf: Timeframe | 'multi'; byH: Map<number, { adj: number[]; hits: number }> }>();
   let steps = 0;
   for (const [asset, hist] of Object.entries(histories)) {
-    const base = hist['15m'];
+    const base = hist[baseTf];
     if (!base || base.length < WINDOW + 10) continue;
     if (hist['1h'] && !hist['4h']) hist['4h'] = aggregate(hist['1h'], TF_MS['4h']);
-    const closes15 = base.map((c) => c.c);
+    const closes = base.map((c) => c.c);
     // Unconditional mean forward return per horizon (drift removed from every signal).
     const drift = new Map(horizons.map((h) => {
-      const k = h / 15;
+      const k = h / baseMin;
       const rs: number[] = [];
-      for (let i = 0; i + k < closes15.length; i++) rs.push(Math.log(closes15[i + k] / closes15[i]));
+      for (let i = 0; i + k < closes.length; i++) rs.push(Math.log(closes[i + k] / closes[i]));
       return [h, rs.reduce((a, x) => a + x, 0) / Math.max(1, rs.length)];
     }));
     const cache = new Map<Timeframe, { idx: number; state?: TfState }>();
-    const maxK = Math.max(...horizons) / 15;
+    const maxK = Math.max(...horizons) / baseMin;
     for (let i = WINDOW; i + maxK < base.length; i += stride) {
-      const t = base[i].ts + TF_MS['15m']; // just after bar i closed
+      const t = base[i].ts + TF_MS[baseTf]; // just after bar i closed
       const states: Partial<Record<Timeframe, TfState>> = {};
       for (const tf of STUDY_TFS) {
         const cs = hist[tf];
@@ -129,7 +135,7 @@ export function runTaStudy(histories: Record<string, History>, opts: { horizons?
         let o = obs.get(key);
         if (!o) { o = { id, kind, tf, byH: new Map() }; obs.set(key, o); }
         for (const h of horizons) {
-          const r = Math.log(closes15[i + h / 15] / closes15[i]);
+          const r = Math.log(closes[i + h / baseMin] / closes[i]);
           const adj = dir * (r - drift.get(h)!);
           let b = o.byH.get(h);
           if (!b) { b = { adj: [], hits: 0 }; o.byH.set(h, b); }
@@ -146,7 +152,7 @@ export function runTaStudy(histories: Record<string, History>, opts: { horizons?
     for (const [h, b] of o.byH) {
       if (b.adj.length < minN) continue;
       const mean = b.adj.reduce((a, x) => a + x, 0) / b.adj.length;
-      const bs = blockBootstrap(b.adj, Math.max(2, h / 15 * 2));
+      const bs = blockBootstrap(b.adj, Math.max(2, (h / baseMin) * 2));
       rows.push({ id: o.id, kind: o.kind, tf: o.tf, horizonMin: h, n: b.adj.length, hitRate: b.hits / b.adj.length, meanBps: mean * 1e4, ciLo: bs.lo * 1e4, ciHi: bs.hi * 1e4, p: bs.p, fdrPass: false });
     }
   }
@@ -204,11 +210,19 @@ export async function historyFromRecordings(dir: string): Promise<Record<string,
 async function main() {
   const arg = (n: string, d: string) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
   const rec = arg('recordings', '');
+  const histDir = arg('history', '');
   const assets = arg('assets', 'BTC,ETH,SOL,XRP,DOGE').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
   const days = Number(arg('days', '120'));
   let hist: Record<string, History>;
   let source: string;
-  if (rec) { hist = await historyFromRecordings(rec); source = `recordings:${rec}`; }
+  let baseTf: '15m' | '1h' = '15m';
+  if (histDir) {
+    hist = {};
+    const list = arg('assets', 'all') === 'all' ? storedAssets(histDir) : assets;
+    for (const a of list) hist[a] = loadHistory(histDir, a, ['1h', '4h', '1d']);
+    baseTf = '1h';
+    source = `history:${histDir}`;
+  } else if (rec) { hist = await historyFromRecordings(rec); source = `recordings:${rec}`; }
   else {
     hist = {};
     for (const a of assets) {
@@ -217,7 +231,7 @@ async function main() {
     }
     source = `coinbase:${days}d`;
   }
-  const res = runTaStudy(hist, { stride: Number(arg('stride', '1')), fdr: Number(arg('fdr', '0.1')), source });
+  const res = runTaStudy(hist, { stride: Number(arg('stride', '1')), fdr: Number(arg('fdr', '0.1')), source, baseTf });
   const out = arg('out', 'params/ta_study.json');
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(res, null, 1));

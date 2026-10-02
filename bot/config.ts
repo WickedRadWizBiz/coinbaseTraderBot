@@ -193,6 +193,29 @@ export interface Config {
   snn: SnnConfig;
   /** Automated training pipeline (research/pipeline.ts) and model hot-swapping. */
   autoTrain: AutoTrainConfig;
+  /** TA network (bot/ta/taNet.ts) and the historical candle store it trains on (research/history). */
+  taNet: TaNetConfig;
+}
+
+export interface TaNetConfig {
+  /** Compute the TA network's forecasts as features (they are only used by models that validated them). */
+  enabled: boolean;
+  modelPath: string;
+  /** Only heads that beat the naive forecast in the blind walk-forward test speak (default true). */
+  requireValidated: boolean;
+  /** Historical candles (data/history/<source>/<ASSET>/<tf>.csv). */
+  historyDir: string;
+  /** Pipeline: refresh history from Binance Vision + Coinbase before training (needs internet). */
+  historyUpdate: boolean;
+  /** Assets to collect: "auto" = every crypto asset Kalshi lists (binary series + perps), or a list. */
+  historyAssets: string;
+  /** Binance intervals to download, and Coinbase timeframes to backfill. */
+  binanceIntervals: string[];
+  coinbaseTfs: string[];
+  /** Retrain the network at most every N days (and whenever it is missing). */
+  retrainEveryDays: number;
+  /** Walk-forward refit interval through the blind test period. */
+  refitMonths: number;
 }
 
 export interface AutoTrainConfig {
@@ -812,6 +835,18 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       underdogCutProgress: num(env, 'TENNIS_UNDERDOG_CUT_PROGRESS', 0.6, 0, 1),
       fairMinEdge: num(env, 'TENNIS_FAIR_MIN_EDGE', 0.01, -0.5, 0.5),
       modelPath: path.resolve(env.TENNIS_MODEL_PATH ?? './params/tennis_model.json'),
+    },
+    taNet: {
+      enabled: bool(env, 'TA_NET', true),
+      modelPath: path.resolve(env.TA_NET_PATH ?? './params/ta_net.json'),
+      requireValidated: bool(env, 'TA_NET_REQUIRE_VALIDATED', true),
+      historyDir: path.resolve(env.HISTORY_DIR ?? path.join(dataDir, 'history')),
+      historyUpdate: bool(env, 'HISTORY_AUTO_UPDATE', true),
+      historyAssets: env.HISTORY_ASSETS ?? 'auto',
+      binanceIntervals: (env.HISTORY_BINANCE_INTERVALS ?? '1h,15m,1d').split(',').map((x) => x.trim()).filter(Boolean),
+      coinbaseTfs: (env.HISTORY_COINBASE_TFS ?? '1h,1d').split(',').map((x) => x.trim()).filter(Boolean),
+      retrainEveryDays: num(env, 'TA_NET_RETRAIN_DAYS', 7, 0, 365),
+      refitMonths: num(env, 'TA_NET_REFIT_MONTHS', 6, 1, 24),
     },
   };
   return deepFreeze(cfg);
