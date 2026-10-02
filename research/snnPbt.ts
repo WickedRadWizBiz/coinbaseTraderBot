@@ -63,7 +63,7 @@ interface MemberState { cp?: SnnCheckpoint; through: number }
 
 interface Saved {
   domain: string; stage: string; baseVersion: string; trials: number; nextIndex: number; lastEvalTo: number; log: PbtRoundLog[];
-  members: Array<{ id: number; hyper: Hyper; lineage: number[]; through: number; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }> }>;
+  members: Array<{ id: number; hyper: Hyper; lineage: number[]; through: number; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }>; bornRound?: number }>;
 }
 
 export interface SnnPbtResult {
@@ -98,7 +98,7 @@ export async function runSnnPbt(o: {
   const resume = saved ? {
     trials: saved.trials, log: saved.log,
     members: saved.members.map((m): PbtMember<MemberState> => ({
-      id: m.id, hyper: m.hyper, lineage: m.lineage, scores: m.scores, record: m.record.map(([ts, ret, cost, group]) => ({ ts, ret, cost, group })),
+      id: m.id, hyper: m.hyper, lineage: m.lineage, scores: m.scores, bornRound: m.bornRound, record: m.record.map(([ts, ret, cost, group]) => ({ ts, ret, cost, group })),
       state: { through: m.through, cp: fs.existsSync(cpFile(m.id)) ? JSON.parse(fs.readFileSync(cpFile(m.id), 'utf8')) : undefined },
     })),
   } : undefined;
@@ -120,7 +120,7 @@ export async function runSnnPbt(o: {
     for (const m of members) if (m.state.cp) fs.writeFileSync(cpFile(m.id), JSON.stringify(m.state.cp));
     const st: Saved = {
       domain: o.domain, stage: o.stage, baseVersion, trials, nextIndex, lastEvalTo, log: plog,
-      members: members.map((m) => ({ id: m.id, hyper: m.hyper, lineage: m.lineage, through: m.state.through, scores: m.scores, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]) })),
+      members: members.map((m) => ({ id: m.id, hyper: m.hyper, lineage: m.lineage, through: m.state.through, scores: m.scores, bornRound: m.bornRound, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]) })),
     };
     fs.writeFileSync(stateFile!, JSON.stringify(st));
   };

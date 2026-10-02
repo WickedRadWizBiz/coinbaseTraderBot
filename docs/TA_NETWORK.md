@@ -131,6 +131,7 @@ The pipeline does it automatically:
 - Step `history` refreshes Binance and Coinbase data every day (if the server has internet access).
 - Step `ta_net` runs the tournament. The first time, it covers years of history, spread over several daily runs (36 rounds per run by default). Afterwards it continues month by month every 7 days.
 - Nothing is promoted until the tournament has reached the present.
+- After an update that changes the network's inputs (like this one: schema 3), the old promoted model can't be loaded. The bot uses the shipped `params/ta_net.json` instead, and the pipeline starts a new tournament on the server's own history. The bot switches to the server's model once that tournament reaches the present and passes.
 
 To run it now:
 

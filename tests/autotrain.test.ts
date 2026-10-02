@@ -9,6 +9,7 @@ import { AutoTrainer, MODEL_FILES, resolveModelPaths } from '../bot/autotrain';
 import { loadConfig } from '../bot/config';
 import type { Engine } from '../bot/engine';
 import { MetaModel } from '../bot/model/metaModel';
+import { taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
 import { DEFAULT_BLENDER, SnnBlender } from '../bot/snn/blender';
 import { acceptedChain, recordingDays, runPipeline } from '../research/pipeline';
 import { SnnNetwork } from '../bot/snn/network';
@@ -52,6 +53,18 @@ test('model paths: the pipeline-promoted copy wins over params/', () => {
   fs.mkdirSync(cfg.autoTrain.dir, { recursive: true });
   fs.writeFileSync(path.join(cfg.autoTrain.dir, MODEL_FILES.mlp), JSON.stringify(MetaModel.identity().params));
   assert.equal(resolveModelPaths(cfg).mlp, path.join(cfg.autoTrain.dir, 'model.json'));
+  // A promoted TA network with an older input schema is skipped for the shipped one (when it exists).
+  const shipped = path.join(dir, 'ta_net_shipped.json');
+  const tcfg = cfgFor(dir, { TA_NET_PATH: shipped });
+  const promotedTa = path.join(tcfg.autoTrain.dir, MODEL_FILES.ta_net);
+  fs.writeFileSync(promotedTa, JSON.stringify({ version: 'tanet2-old', schema: '2', weights: [] }));
+  assert.equal(taNetFileSchema(promotedTa), '2');
+  assert.equal(resolveModelPaths(tcfg).ta_net, promotedTa, 'nothing shipped: keep the promoted file (the loader reports the mismatch)');
+  fs.writeFileSync(shipped, JSON.stringify({ version: 'tanet3-new', schema: TANET_SCHEMA, weights: [] }));
+  assert.equal(resolveModelPaths(tcfg).ta_net, shipped);
+  fs.writeFileSync(promotedTa, JSON.stringify({ version: 'tanet3-retrained', schema: TANET_SCHEMA, weights: [] }));
+  assert.equal(resolveModelPaths(tcfg).ta_net, promotedTa, 'retrained by the pipeline: the promoted copy wins again');
+  assert.equal(taNetFileSchema(path.join(dir, 'missing.json')), undefined);
 });
 
 function fakeEngine() {

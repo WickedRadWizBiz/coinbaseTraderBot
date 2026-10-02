@@ -20,7 +20,7 @@ import type { SnnDomain } from './snn/params';
 import { VolModel } from './model/volModel';
 import { FillModel } from './tca/fillModel';
 import { TennisFairModel } from './tennis/tennisFair';
-import { activeTaNet, setTaNet, TaNet } from './ta/taNet';
+import { activeTaNet, setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from './ta/taNet';
 import { logger } from './util/log';
 
 const log = logger('autotrain');
@@ -29,9 +29,15 @@ export const MODEL_FILES = { mlp: 'model.json', perp: 'perp_model.json', snn_cry
 type Kind = keyof typeof MODEL_FILES;
 
 /** The file the bot should load for each model: the pipeline's promoted copy in AUTO_TRAIN_DIR
- *  when it exists, else the configured params/ path. */
+ *  when it exists, else the configured params/ path. A promoted TA network with an older input schema
+ *  (written before an update changed the network) is skipped for the shipped one until the pipeline
+ *  has retrained it. */
 export function resolveModelPaths(cfg: Readonly<Config>): Record<Kind, string> {
-  const pick = (k: Kind, fallback: string) => { const p = path.join(cfg.autoTrain.dir, MODEL_FILES[k]); return fs.existsSync(p) ? p : fallback; };
+  const pick = (k: Kind, fallback: string) => {
+    const p = path.join(cfg.autoTrain.dir, MODEL_FILES[k]);
+    if (!fs.existsSync(p)) return fallback;
+    return k === 'ta_net' && taNetFileSchema(p) !== TANET_SCHEMA && fs.existsSync(fallback) ? fallback : p;
+  };
   return {
     mlp: pick('mlp', cfg.paramsPath), perp: pick('perp', cfg.perps.modelPath),
     snn_crypto: pick('snn_crypto', cfg.snn.domains.crypto.modelPath), snn_perps: pick('snn_perps', cfg.snn.domains.perps.modelPath), snn_tennis: pick('snn_tennis', cfg.snn.domains.tennis.modelPath),

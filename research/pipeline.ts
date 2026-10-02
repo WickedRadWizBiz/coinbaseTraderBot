@@ -64,7 +64,7 @@ import { downloadBinance, type BinanceMarket } from './history/binanceVision';
 import { backfillCoinbase } from './history/coinbaseBackfill';
 import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
-import { setTaNet, TaNet, TANET_SCHEMA } from '../bot/ta/taNet';
+import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
 
 export const STEPS = ['history', 'ta_net', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill'] as const;
 export type Step = typeof STEPS[number];
@@ -195,7 +195,9 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const taNetFile = promoted('ta_net');
   const installTaNet = () => {
     if (!T.enabled) { setTaNet(undefined); return; }
-    try { setTaNet(fs.existsSync(taNetFile) ? TaNet.load(taNetFile) : undefined, T.requireValidated); } catch (e) { log(`TA network not loaded: ${(e as Error).message}`); setTaNet(undefined); }
+    // The promoted network, or the shipped one while the promoted file predates this build's inputs.
+    const file = fs.existsSync(taNetFile) && taNetFileSchema(taNetFile) === TANET_SCHEMA ? taNetFile : fs.existsSync(T.modelPath) ? T.modelPath : undefined;
+    try { setTaNet(file ? TaNet.load(file) : undefined, T.requireValidated); } catch (e) { log(`TA network not loaded: ${(e as Error).message}`); setTaNet(undefined); }
   };
   installTaNet();
   if (want('history')) {
@@ -210,7 +212,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     }, T.historyUpdate ? undefined : 'HISTORY_AUTO_UPDATE=false');
   }
   if (want('ta_net')) {
-    const staleSchema = (() => { try { return fs.existsSync(taNetFile) && (JSON.parse(fs.readFileSync(taNetFile, 'utf8')) as { schema?: string }).schema !== TANET_SCHEMA; } catch { return true; } })();
+    const staleSchema = fs.existsSync(taNetFile) && taNetFileSchema(taNetFile) !== TANET_SCHEMA;
     const due = o.forceTaNet || staleSchema || state.taNetComplete === false || !fs.existsSync(taNetFile) || !state.taNetTrainedAt || now - state.taNetTrainedAt >= T.retrainEveryDays * 86_400_000;
     const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet (npm run history:binance, or history:import your CSVs)`;
     await run('ta_net', async () => {

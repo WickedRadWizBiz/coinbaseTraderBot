@@ -407,7 +407,7 @@ const unb64 = (s: string) => { const b = Buffer.from(s, 'base64'); return new Fl
 
 interface SavedState {
   schema: string; dims: BranchDims; assets: string[]; norm: TaNetParams['norm']; trials: number; lastEvalTo: number; nextIndex: number;
-  log: PbtRoundLog[]; members: Array<{ id: number; hyper: Hyper; w: string; m: string; v: string; step: number; lineage: number[]; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }> }>;
+  log: PbtRoundLog[]; members: Array<{ id: number; hyper: Hyper; w: string; m: string; v: string; step: number; lineage: number[]; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }>; bornRound?: number }>;
 }
 
 /** Day-block bootstrap of the mean of per-row differences (rows grouped by UTC day). */
@@ -449,6 +449,9 @@ export interface TaNetTrainOpts {
   baseHyper?: Partial<Hyper>;
   /** Every N rounds the culled member restarts from scratch with random knobs (0 = never). */
   restartEvery?: number;
+  /** Extra epochs for an untrained network on its first block (the newcomer catches up with members
+   *  that have trained on every earlier block; the three initial members get them too). */
+  catchUpEpochs?: number;
   /** Compute the per-fractal-column pattern report on the holdout (default true). */
   patterns?: boolean;
   log?: (m: string) => void;
@@ -465,6 +468,7 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
   const t0 = D.ts[0], tEnd = D.ts[n - 1] + H;
   const holdoutFrom = Math.floor((tEnd - (o.holdoutMonths ?? 3) * MONTH) / DAY) * DAY;
   const stride = Math.max(1, o.stride ?? 2), epochs = Math.max(1, o.epochsPerRound ?? 1), seed = o.seed ?? 7;
+  const catchUp = Math.max(0, o.catchUpEpochs ?? 3);
   const minPerRegime = o.minPerRegime ?? 100, dsrThreshold = o.dsrThreshold ?? 0.95;
   const emb = 5 * H;
   const allRounds = walkForwardRounds(t0, holdoutFrom, trainMs, evalMs, stepMs);
@@ -487,7 +491,7 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
   const remaining = pending - rounds.length;
   const resume = saved ? {
     trials: saved.trials, log: saved.log,
-    members: saved.members.map((m): PbtMember<Member> => ({ id: m.id, hyper: m.hyper, state: { w: unb64(m.w), m: unb64(m.m), v: unb64(m.v), step: m.step }, lineage: m.lineage, scores: m.scores, record: m.record.map(([ts, ret, cost, group]) => ({ ts, ret, cost, group })) })),
+    members: saved.members.map((m): PbtMember<Member> => ({ id: m.id, hyper: m.hyper, state: { w: unb64(m.w), m: unb64(m.m), v: unb64(m.v), step: m.step }, lineage: m.lineage, scores: m.scores, bornRound: m.bornRound, record: m.record.map(([ts, ret, cost, group]) => ({ ts, ret, cost, group })) })),
   } : undefined;
   log(`${n} samples over ${D.assets.map((a) => a.asset).join(', ')}; 15m input on ${(D.microShare * 100).toFixed(0)}% of them; ${saved ? `continuing a saved population (${saved.log.length} rounds so far)` : 'fresh population of 3'}; ${rounds.length} round(s) to run; holdout from ${new Date(holdoutFrom).toISOString().slice(0, 10)}`);
 
@@ -495,7 +499,7 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
     if (!o.statePath) return;
     const st: SavedState = {
       schema: TANET_SCHEMA, dims, assets: D.assets.map((a) => a.asset), norm, trials, lastEvalTo, nextIndex, log: plog,
-      members: members.map((m) => ({ id: m.id, hyper: m.hyper, w: b64(m.state.w), m: b64(m.state.m), v: b64(m.state.v), step: m.state.step, lineage: m.lineage, scores: m.scores, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]) })),
+      members: members.map((m) => ({ id: m.id, hyper: m.hyper, w: b64(m.state.w), m: b64(m.state.m), v: b64(m.state.v), step: m.state.step, lineage: m.lineage, scores: m.scores, bornRound: m.bornRound, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]) })),
     };
     fs.mkdirSync(path.dirname(o.statePath), { recursive: true });
     const tmp = `${o.statePath}.${process.pid}.tmp`;
@@ -514,7 +518,8 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
       clone: (s) => ({ w: s.w.slice(), m: s.m.slice(), v: s.v.slice(), step: s.step }),
       train: (s, h, r: PbtRound) => {
         const idx = between(r.trainFrom, r.trainTo - emb, stride);
-        for (let e = 0; e < epochs; e++) trainEpoch(D, dims, norm, s, h, idx, seed + r.index * 131 + e);
+        const nEpochs = epochs + (s.step === 0 ? catchUp : 0);
+        for (let e = 0; e < nEpochs; e++) trainEpoch(D, dims, norm, s, h, idx, seed + r.index * 131 + e);
         return s;
       },
       evaluate: (s, h, r: PbtRound) => {
@@ -615,7 +620,7 @@ export async function trainTaNetMain(argOf: (k: string, d: string) => string = c
     trainMonths: num('train-months', '12'), evalMonths: num('eval-months', '1'), stepMonths: num('step-months', '1'), holdoutMonths: num('holdout-months', '3'),
     stride: num('stride', '2'), epochsPerRound: num('epochs', '1'), minPerRegime: num('min-per-regime', '100'), dsrThreshold: num('dsr', '0.95'),
     statePath: argOf('state', path.join(hist, '.tanet-population.json')), fresh: argOf('fresh', '') === 'true' || process.argv.includes('--fresh'),
-    maxRounds: num('max-rounds', '0') || undefined, restartEvery: num('restart-every', '0'), patterns: argOf('patterns', 'true') !== 'false', log,
+    maxRounds: num('max-rounds', '0') || undefined, restartEvery: num('restart-every', '0'), catchUpEpochs: num('catch-up-epochs', '3'), patterns: argOf('patterns', 'true') !== 'false', log,
   });
   const out = argOf('out', 'params/ta_net.json');
   fs.mkdirSync(path.dirname(out), { recursive: true });

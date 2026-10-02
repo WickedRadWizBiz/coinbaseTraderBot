@@ -51,6 +51,8 @@ export interface PbtMember<S> {
   /** Out-of-sample record: interactions from every evaluation window of this lineage. */
   record: Interaction[];
   scores: Array<{ round: number; fitness: number }>;
+  /** Round after which this member restarted fresh (exploration): protected from culling for a while. */
+  bornRound?: number;
 }
 
 export interface PbtRoundLog {
@@ -60,6 +62,8 @@ export interface PbtRoundLog {
   elite: number; culled: number; mutated: number[];
   /** Member that restarted fresh this round (exploration), if any. */
   restarted?: number;
+  /** Worst-ranked member that was not culled because it is a newcomer still in its grace period. */
+  spared?: number;
 }
 
 export interface PbtResult<S> {
@@ -84,6 +88,9 @@ export async function runPbt<S>(o: {
   exploreAfterLast?: boolean;
   /** Every N rounds the culled member restarts fresh with random knobs instead of cloning (0 = never). */
   restartEvery?: number;
+  /** Rounds a restarted member cannot be culled (default 2): month-to-month fitness noise is larger
+   *  than the gaps between members, so a newcomer needs a few evaluations before it can be judged. */
+  restartGrace?: number;
   /** Called after every round (e.g. to persist the population). */
   onRound?: (state: { members: PbtMember<S>[]; trials: number; log: PbtRoundLog[]; round: PbtRound }) => Promise<void> | void;
 }): Promise<PbtResult<S>> {
@@ -111,12 +118,19 @@ export async function runPbt<S>(o: {
       evals.push(e);
     }
     const order = members.map((m, i) => ({ m, e: evals[i] })).sort((a, b) => b.e.report.fitness - a.e.report.fitness);
-    const elite = order[0].m, culled = order[order.length - 1].m;
-    const middle = order.slice(1, -1).map((x) => x.m);
+    const elite = order[0].m;
+    // The worst member is culled unless it is a newcomer in its grace period; then the next worst.
+    const grace = o.restartGrace ?? 2;
+    const inGrace = (m: PbtMember<S>) => m.bornRound !== undefined && round.index - m.bornRound <= grace;
+    const candidates = order.slice(1).map((x) => x.m);
+    const culled = [...candidates].reverse().find((m) => !inGrace(m)) ?? order[order.length - 1].m;
+    const worst = order[order.length - 1].m;
+    const middle = candidates.filter((m) => m !== culled);
     const entry: PbtRoundLog = {
       round: round.index, evalFrom: iso(round.evalFrom), evalTo: iso(round.evalTo),
       ranking: order.map(({ m, e }) => ({ member: m.id, fitness: e.report.fitness, sortino: e.report.sortino, maxDrawdown: e.report.maxDrawdown, costs: e.report.costs, independent: e.report.independent, hyper: { ...m.hyper } })),
       elite: elite.id, culled: culled.id, mutated: [],
+      ...(worst !== culled ? { spared: worst.id } : {}),
     };
     // Exploration (not after the last round: the elite is final).
     // Exploration after every round except the final one; a resumed tournament explores between
@@ -131,14 +145,17 @@ export async function runPbt<S>(o: {
         culled.state = await o.hooks.init(culled.hyper, culled.id);
         culled.lineage = [culled.id];
         culled.record = [];
+        culled.bornRound = round.index;
         entry.restarted = culled.id;
       } else {
         culled.state = await o.hooks.clone(elite.state);
         culled.hyper = { ...elite.hyper };
         culled.lineage = [...elite.lineage, culled.id];
         culled.record = [...elite.record];
+        delete culled.bornRound;
       }
-      for (const m of restart ? middle : [...middle, culled]) {
+      // A newcomer in its grace period keeps its knobs (it is being judged on them).
+      for (const m of (restart ? middle : [...middle, culled]).filter((x) => !inGrace(x))) {
         m.hyper = perturb(m.hyper, o.spec, r, 'explore');
         if (o.hooks.rehyper) m.state = await o.hooks.rehyper(m.state, m.hyper);
         entry.mutated.push(m.id);
@@ -146,7 +163,7 @@ export async function runPbt<S>(o: {
     }
     out.push(entry);
     await o.onRound?.({ members, trials, log: out, round });
-    log(`round ${round.index} (${entry.evalFrom}..${entry.evalTo}): ${entry.ranking.map((x) => `#${x.member} ${x.fitness.toFixed(2)}`).join(', ')}; elite #${elite.id}, #${culled.id} clones it`);
+    log(`round ${round.index} (${entry.evalFrom}..${entry.evalTo}): ${entry.ranking.map((x) => `#${x.member} ${x.fitness.toFixed(2)}`).join(', ')}; elite #${elite.id}, #${culled.id} ${entry.restarted !== undefined ? 'restarts fresh (exploration)' : 'clones it'}${entry.spared !== undefined ? ` (#${entry.spared} spared: newcomer)` : ''}`);
   }
   const lastRank = out[out.length - 1]?.ranking[0]?.member ?? 0;
   return { elite: members.find((m) => m.id === lastRank) ?? members[0], members, log: out, trials };

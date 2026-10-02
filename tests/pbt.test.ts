@@ -100,6 +100,15 @@ test('exploration member: every N rounds the worst network restarts fresh with r
     assert.ok(!l.mutated.includes(l.culled));
   }
   assert.equal(inits.length, 5, '3 initial members + 2 fresh restarts');
+  // Grace period: a fresh member (x = 0, far from the optimum) ranks last at first, but for two
+  // rounds the next-worst member is culled instead and the newcomer keeps its knobs.
+  const born = restarted[0];
+  for (const l of res.log.filter((x) => x.round === born.round + 1 || x.round === born.round + 2)) {
+    assert.notEqual(l.culled, born.restarted, `newcomer #${born.restarted} culled in its grace period (round ${l.round})`);
+    assert.ok(!l.mutated.includes(born.restarted!), 'a newcomer in its grace period is not mutated');
+    if (l.ranking[l.ranking.length - 1].member === born.restarted) assert.equal(l.spared, born.restarted);
+  }
+  assert.ok(res.log.some((l) => l.spared === born.restarted), 'the newcomer was spared at least once');
   assert.ok(inits.slice(3).every((x) => x.target >= 0.1 && x.target <= 10));
   // A restarted member starts its own lineage and an empty out-of-sample record.
   const last = res.members.find((m) => m.id === restarted[restarted.length - 1].culled)!;

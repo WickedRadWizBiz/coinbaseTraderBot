@@ -410,6 +410,21 @@ export function buildBranchInput(dims: BranchDims, norm: TaNetParams['norm'], tr
   return { trend: t, macro: m, micro: u, swing: w };
 }
 
+/** Schema of a TA network file, read from its first few KB (the key follows `version`); undefined when
+ *  the file is missing or unreadable. Lets callers skip a file this build cannot load. */
+export function taNetFileSchema(file: string): string | undefined {
+  try {
+    const fd = fs.openSync(file, 'r');
+    let head = '';
+    try {
+      const buf = Buffer.alloc(4096);
+      head = buf.toString('utf8', 0, fs.readSync(fd, buf, 0, buf.length, 0));
+    } finally { fs.closeSync(fd); }
+    const m = /"schema"\s*:\s*"([^"]*)"/.exec(head);
+    return m ? m[1] : (JSON.parse(fs.readFileSync(file, 'utf8')) as { schema?: string }).schema;
+  } catch { return undefined; }
+}
+
 export class TaNet {
   private readonly w: Float64Array;
   private readonly layout: ReturnType<typeof branchLayout>['layout'];
