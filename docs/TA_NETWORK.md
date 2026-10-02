@@ -152,7 +152,41 @@ What it does:
 
 Live, every forecast is also graded against the candles that follow. `tanet_skill_1h` and `tanet_skill_4h` are the network's rolling skill over its last 168 graded calls.
 
-## 3. Real results of the first tournament (schema 2, before the fractal blocks and order flow; Binance spot, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
+## 3. Real results: fractal network with order flow (schema 3; Binance spot with taker volume, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
+
+**Setup:** 85 monthly rounds (255 member evaluations), exploration restarts every 6 rounds, untouched holdout 2026-07-02 to 2026-10-02. The last 10 rounds already ran with the newcomer grace period and catch-up epochs: the round-77 newcomer won round 78 outright.
+
+| Check | Result | Passes |
+|---|---|---|
+| Holdout, `vol_4h` | MSE 0.361 vs 0.434 (17% lower), CI +0.046 to +0.105 | **yes: speaks live** |
+| Holdout, `up_1h` | log loss 0.6946 vs 0.6932, hit rate 51.7% | no |
+| Holdout, `up_4h` | log loss 0.7151 vs 0.6936, hit rate 51.4% | no |
+| Elite lineage's out-of-sample record | Sharpe −0.55 vs 0.26 expected from luck with 255 trials; DSR probability 0.00 | no |
+| Holdout, position rule | net −11.7% (schema 2: −26%), max drawdown 20.3% | no |
+
+The elite's branch weights: 15-minute 0.30 (turned down again), hourly swing 1.03, hourly TA 0.68, daily 1.60.
+
+**Pattern report** (holdout, 5,520 rows): the strongest correlation between any one fractal column's output and each TA pattern family.
+
+| Pattern family | 15-minute block: best column | Hourly swing block: best column |
+|---|---|---|
+| Candlesticks | 3 bars (0.30) | 3 bars (0.33) |
+| Structure (BOS, CHoCH, sweeps) | 3 bars (0.29) | 3 bars (0.27) |
+| Momentum (RSI, MACD, stochastic) | 3 bars (0.54) | 3 bars (0.37) |
+| Divergences | 7 bars (0.11) | 3 bars (0.16) |
+| Volatility (squeeze, band width, ATR rank) | 7 bars (0.21) | **31 bars (0.62)** |
+| Volume and order flow | 3 bars (0.65) | 3 bars (0.71) |
+| Levels (round numbers, volume profile, FVGs) | 3 bars (0.34) | 31 bars (0.34) |
+| 4h structure | 3 bars (0.16) | 31 bars (0.27) |
+
+With one column at a time, holdout `up_1h` log loss is 0.6947–0.6952 for every column (all columns: 0.6948; coin flip: 0.6932), and `vol_4h` MSE is 0.3601 for the 3-bar 15-minute column alone (all columns: 0.3601) up to 0.3616 for the 31-bar hourly column.
+
+What it means:
+- **Depth specialises.** The 3-bar columns carry candle patterns, momentum and order flow; the 31-bar hourly column carries the volatility regime, levels and 4h structure.
+- **Divergences are not rebuilt** by any column (0.16 at most): they need an indicator compared across two swings, which small convolutions over raw bars don't reconstruct. The library's divergence readings are the only source of that information.
+- **No column has a direction edge**, alone or together. The volatility forecast comes from the short columns; the deep ones add nothing to it.
+
+## 3b. Real results of the first tournament (schema 2, before the fractal blocks and order flow; Binance spot, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
 
 **Setup:** 85 monthly rounds from mid-2019 to June 2026, 255 member evaluations (trials), and an untouched holdout from 2026-07-02 to 2026-10-02.
 
