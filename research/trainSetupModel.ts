@@ -59,9 +59,12 @@ export function stepOn15m(A: AssetBars, t: OpenTrade, k: number, costs: CostMode
   const tfMs = TF_MS[t.tf]!;
   let tfClose: { close: number; atr: number } | undefined;
   if ((b.ts + M15) % tfMs === 0) {
-    const j = A.tfIdx[t.tf]!.get(b.ts + M15 - tfMs);
+    // A bar of the trade's timeframe closes with this 15m bar (same close). Its ATR, or the last one
+    // known when that candle is missing from the data (the clock keeps running through gaps).
     const s = A.series[t.tf]!;
-    if (j !== undefined) tfClose = { close: s.cs[j].c, atr: s.atr[j] };
+    let j = A.tfIdx[t.tf]!.get(b.ts + M15 - tfMs);
+    if (j === undefined) { let lo = 0, hi = s.cs.length - 1; j = -1; while (lo <= hi) { const m = (lo + hi) >> 1; if (s.cs[m].ts < b.ts + M15 - tfMs) { j = m; lo = m + 1; } else hi = m - 1; } }
+    tfClose = { close: b.c, atr: j >= 0 ? s.atr[j] : NaN };
   }
   return stepTrade(t, b, M15, costs, tfClose);
 }
@@ -304,6 +307,14 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
       for (const [kind, s] of Object.entries(p.byKind)) log(`    ${kind}: ${s.trades} trades, win ${(100 * s.winRate).toFixed(1)}%, mean R ${s.avgR.toFixed(3)}`);
     }
     log(`${lane} lane ${reasons.length ? `NOT validated: ${reasons.join('; ')}` : 'validated'}`);
+  }
+  // Information only (not used for any choice): the same book with limit-order entries (maker fee,
+  // no slippage) instead of market entries, from the holdout on.
+  const makerCosts: CostModel = { ...costs, entry: costs.makerExit };
+  const mk = backtestLanes(assets, events, scores, book, makerCosts, equity, holdoutFrom, end);
+  for (const lane of ['fast', 'slow'] as const) {
+    const p = periodStats(mk.filter((t) => t.lane === lane), holdoutFrom, end);
+    log(`${lane} with limit-order entries, holdout + final ${p.from}..${p.to}: ${p.trades} trades, win ${(100 * p.winRate).toFixed(1)}%, mean net R ${p.avgR.toFixed(3)} [${p.avgRLo.toFixed(3)}, ${p.avgRHi.toFixed(3)}], net $${p.netUsd.toFixed(0)} ($${p.usdPerDay.toFixed(1)}/day on $${equity})`);
   }
   // Deployed model: refit on every event.
   const lanes: SetupModelParams['lanes'] = {};

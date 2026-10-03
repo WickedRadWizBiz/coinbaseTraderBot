@@ -11,7 +11,7 @@
 // exits, and perp funding while the position is open.
 
 import type { Candle } from '../ta/indicators';
-import type { ExitPlan, Lane, SetupKind } from './detectors';
+import { TF_MS, type ExitPlan, type Lane, type SetupKind } from './detectors';
 import type { Timeframe } from '../ta/knowledge';
 
 export interface CostModel {
@@ -107,6 +107,8 @@ export function stepTrade(t: OpenTrade, bar: Candle, barMs: number, costs: CostM
     close(t, d > 0 ? Math.max(p.target2, bar.o) : Math.min(p.target2, bar.o), bar.ts + barMs, 'target', costs.makerExit);
     return true;
   }
+  // Hard age limit: the time stop also fires on elapsed time (missing candles cannot keep a trade open).
+  if (bar.ts + barMs - t.entryTs > (p.maxBars + 2) * (TF_MS[t.tf] ?? 0)) { close(t, bar.c, bar.ts + barMs, 'time', costs.takerExit); return true; }
   if (tfClose) {
     t.bars++;
     if (d * (tfClose.close - t.best) > 0) t.best = tfClose.close;
