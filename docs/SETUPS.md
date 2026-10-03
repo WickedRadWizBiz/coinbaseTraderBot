@@ -102,9 +102,38 @@ A lane that fails trades at pilot size (`PERP_PILOT_MAX_NOTIONAL_USD`), or not a
 
 The automated pipeline retrains every `SETUP_RETRAIN_DAYS` (7). The live trader reloads the model when its file changes.
 
-## Results
+## Results (first real-data run: Binance spot BTC/ETH/SOL/XRP/DOGE, 2017 – Oct 2026)
 
-See the latest section below; it's rewritten after every real-data run.
+**Costs assumed:** perps defaults, so market entry 14 bp (12 bp taker + 2 bp slippage), target exit 5 bp, stop exit 14 bp, and 1 bp funding per 8 hours. Dollar figures assume $10,000 of equity.
+
+**Setups taken every time** (no model):
+
+| Setup | Trades | Win rate | Net R per trade | Before costs | Costs in R | Median stop |
+|---|---|---|---|---|---|---|
+| 15m fade | 24,023 | 41.6% | −0.32 | −0.02 | 0.31 | 1.05% |
+| 15m pullback | 57,235 | 40.5% | −0.48 | +0.01 | 0.49 | 0.67% |
+| 1h fade | 6,494 | 43.7% | −0.23 | −0.06 | 0.17 | 1.94% |
+| 1h pullback | 15,117 | 48.1% | −0.21 | +0.02 | 0.23 | 1.40% |
+| 1d breakout | 1,453 | 39.0% | **+0.36** | +0.41 | 0.06 | 17% |
+| 1d dip | 910 | 30.2% | **+0.23** | +0.32 | 0.09 | 11% |
+
+The intraday setups are break-even before costs. With stops under 2% wide, a 0.28% round trip costs 0.2–0.5R per trade.
+
+**Lanes with the model** (walk-forward scores, the real lane book; fast threshold = the model's top 5%, slow = top 30%, both picked on 2020 – Sep 2025):
+
+| Lane | Period | Trades | Win rate | Net R per trade (90% interval) | Net $ | Sharpe |
+|---|---|---|---|---|---|---|
+| fast | 2020 – Sep 2025 | 1,995 | 53.3% | −0.05 (−0.09 to −0.02) | −$4,024 | −0.87 |
+| fast | holdout Oct 2025 – Jun 2026 | 219 | 47.5% | −0.08 (−0.17 to +0.02) | −$682 | −1.22 |
+| fast | final Jul – Sep 2026 | 100 | 46.0% | −0.19 (−0.34 to −0.05) | −$775 | −3.74 |
+| slow | 2020 – Sep 2025 | 165 | 35.8% | **+0.45 (+0.08 to +0.88)** | +$4,715 | 0.69 |
+| slow | holdout | 5 | 60% | +1.19 | +$393 | – |
+| slow | final | 4 | 0% | −0.72 | −$168 | – |
+
+- **Fast lane: not validated.** The model raises the win rate (42% → 53%) and cuts the loss per trade from −0.39R to −0.05R. That's real ranking skill, but not enough to cover costs. Limit-order entries (maker fee) didn't change the verdict (−0.07R on the holdout and final window).
+- **Slow lane: positive over 2020–2025** (daily breakouts +0.91R per trade on 64 trades). But 9 trades in a year can't pass a 30-trade holdout. It needs more coins or a longer holdout before it can validate.
+
+Both lanes therefore trade at pilot size on paper (`PERP_PILOT_MAX_NOTIONAL_USD`), which builds a live record without risking real size.
 
 ## Settings (`bot.env`)
 
