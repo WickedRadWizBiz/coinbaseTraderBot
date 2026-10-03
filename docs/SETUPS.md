@@ -219,3 +219,20 @@ The setup trader used to stand alone. It now reads the TA network and the perps 
 - The trainer exports the last 24 months of traded setups with their walk-forward scores (`setup_oos.json`).
 - The whole-bot replay (`npm run research:whole-bot`) runs them through the lane book alongside the Kalshi backtester over the recorded days, from one pot of capital with one daily stop.
 - The `bot` sweep target tunes the shared settings on the combined daily P&L.
+
+### Update: first run with the TA network connected
+
+The walk-forward export covered May 2019 – Oct 2026: 88 months and 296,635 hourly forecasts.
+
+- **TA network inputs: kept, narrowly.** On the development years across both lanes, the model with them scored a t-statistic of 2.96 (792 trades, +0.24R) against 2.41 without (751 trades, +0.23R).
+- **Volatility trail: stays off.** The `setups-vol` sweep found no setting better than 0. With it off, tuning was +0.26R (702 trades), check +0.13R (242) and final +0.28R (274).
+- **Fast lane (1h bursts):**
+
+| Fast lane | Trades | Net R per trade (90% interval) | Net $ on $10k |
+|---|---|---|---|
+| 2020 – Sep 2025 | 671 | +0.19 (+0.06 to +0.32) | +$6,554 |
+| holdout Oct 2025 – Jun 2026 | 110 | +0.04 (−0.19 to +0.30) | +$422 |
+| final Jul – Sep 2026 | 38 | +1.06 (−0.12 to +2.58) | +$2,328 |
+
+- **What this means:** about the same as before the TA network was connected (holdout +0.06R on 92 trades, final +0.90R on 39). It is still not validated, because the holdout's lower bound is below zero, so the lane still trades at pilot size on paper. With limit-order entries, the last 12 months come to 148 trades at +0.37R (+0.02 to +0.80).
+- **Slow lane:** now trades only daily breakouts, at score ≥ 0.7. Development: 123 trades at +0.58R. Holdout and final: 13 trades, too few to judge.
