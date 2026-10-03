@@ -209,12 +209,14 @@ test('spot candle feed: parses Coinbase rows, emits them, and disables an asset 
   const got: any[] = [];
   feed.on('candles', (e) => got.push(e));
   await feed.tick();
-  assert.equal(got.length, 5, 'BTC on 1m, 5m, 15m, 1h, 1d');
+  assert.equal(got.length, 6, 'BTC on 1m, 5m, 15m (+ one older page at startup), 1h, 1d');
+  const back = calls.find((u) => u.includes('granularity=900&start='));
+  assert.ok(back && back.includes(`end=${new Date((1_700_000_000 - 900) * 1000).toISOString()}`), `15m backfill ends before the oldest bar: ${back}`);
   assert.deepEqual(got[0].rows[0], [1_700_000_060, 99, 101, 100, 100.5, 3]);
   assert.equal(got[0].rows.length, 2);
   assert.equal(calls.filter((u) => u.includes('XYZ')).length, 1, 'no retries for a missing product');
   await feed.tick();
-  assert.equal(got.length, 5, 'nothing due yet');
+  assert.equal(got.length, 6, 'nothing due yet, and the backfill happens once');
 });
 
 test('research:ta writes a study the API can read', async () => {

@@ -67,7 +67,7 @@ function historyDir(): string {
   upsertSeries(dir, 'tradingview', 'USDT.D', '1d', USDTD);
   return dir;
 }
-const OPTS = { trainMonths: 1.5, evalMonths: 0.25, stepMonths: 0.25, holdoutMonths: 0.5, stride: 1, minPerRegime: 5, epochsPerRound: 2, baseHyper: { lr: 3e-3, l2: 1e-3 } };
+const OPTS = { trainMonths: 1.5, evalMonths: 0.25, stepMonths: 0.25, holdoutMonths: 0.5, stride: 1, minPerRegime: 5, epochsPerRound: 2, baseHyper: { lr: 3e-3, wd: 1e-2 } };
 
 test('inputs: hourly map, daily steps and 15m steps are complete, cache-identical and never look ahead', () => {
   const i = 8000;
@@ -172,7 +172,7 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
   const now = barTs + H + 60_000;
   set.add('1h', H1.slice(end - 299, end), now);
   set.add('1d', D1.filter((c) => c.ts + DAY <= now).slice(-299), now);
-  set.add('15m', M15.filter((c) => c.ts + Q <= now).slice(-299), now);
+  set.add('15m', M15.filter((c) => c.ts + Q <= now).slice(-320), now);
   // Live context: every tracked coin's candles and the index series from the same history store.
   const btcSet = new CandleSet('BTC');
   btcSet.add('1h', BTC_H1.slice(end - 299, end), now);
@@ -194,7 +194,7 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
   const rt2 = new TaNetRuntime(net, false);
   rt2.enableForwardTest(fwd, now - 1, { days: 1, muteOnFail: true });
   const s2 = new CandleSet('TST'), b2 = new CandleSet('BTC');
-  s2.add('1h', H1.slice(end - 299, end), now); s2.add('1d', D1.filter((c) => c.ts + DAY <= now).slice(-299), now); s2.add('15m', M15.filter((c) => c.ts + Q <= now).slice(-299), now);
+  s2.add('1h', H1.slice(end - 299, end), now); s2.add('1d', D1.filter((c) => c.ts + DAY <= now).slice(-299), now); s2.add('15m', M15.filter((c) => c.ts + Q <= now).slice(-320), now);
   b2.add('1h', BTC_H1.slice(end - 299, end), now);
   sets = new Map([['TST', s2], ['BTC', b2]]);
   rt2.outputFor('TST', s2, now);

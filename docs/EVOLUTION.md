@@ -30,7 +30,8 @@ Every member keeps a record of its evaluation windows. A copy inherits the elite
 **TA network** (`research/trainTaNet.ts`), over years of exchange history:
 - **Blocks:** a rolling 12-month training block (`TA_NET_TRAIN_MONTHS`, 12–18 recommended), a 1-month evaluation block, rolled forward one month at a time.
 - **What it trades in evaluation:** its own position rule. That is quarter-Kelly on its forecasts, with the volatility forecast setting the risk scale, a 5 bp cost on turnover, and equal capital per asset.
-- **Mutated knobs:** learning rate, L2 penalty, the weight of each branch (15-minute, hourly swing, hourly TA, daily, market context), the weight of the volatility head, and the drop-path probabilities (per join, per branch).
+- **Optimizer:** AdamW (decoupled weight decay, none on biases), learning rate capped at 0.003. Plain L2 inside Adam decayed schema 4's 15-minute and swing blocks to zero: Adam rescales the penalty into full-size steps for weights with a weak learning signal.
+- **Mutated knobs:** learning rate, weight decay, the weight of each branch (15-minute, hourly swing, hourly TA, daily, market context), the weight of the volatility head, and the drop-path probabilities (per join, per branch).
 
 **Crypto and perps SNNs** (`research/snnPbt.ts`), over the recordings. Only days or weeks exist, so the blocks are measured in days:
 - **Blocks:** 3 days of initial learning, then 1-day evaluation blocks. The networks learn online, so each evaluation day is also prequential: every output is made before the label that could train on it.

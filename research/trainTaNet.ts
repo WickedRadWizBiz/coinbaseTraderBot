@@ -260,9 +260,13 @@ export interface Member { w: Float64Array; m: Float64Array; v: Float64Array; ste
 
 // pJoin: drop-path probability per join input inside the fractal blocks; pBranch: probability of
 // dropping a whole branch for a sample (at least one always stays).
-export const BASE_HYPER: Hyper = { lr: 1e-3, l2: 1e-4, gMicro: 1, gSwing: 1, gTrend: 1, gMacro: 1, gCtx: 1, volWeight: 0.5, pJoin: 0.15, pBranch: 0.1 };
+// wd: decoupled weight decay (AdamW): each step shrinks weights by lr x wd, independently of the
+// gradient. Plain L2 inside Adam was rescaled by Adam into full-size steps for weights with a weak
+// learning signal, which decayed whole branches to zero (schema 4's 15-minute and swing blocks).
+export const BASE_HYPER: Hyper = { lr: 1e-3, wd: 1e-2, gMicro: 1, gSwing: 1, gTrend: 1, gMacro: 1, gCtx: 1, volWeight: 0.5, pJoin: 0.15, pBranch: 0.1 };
 export const HYPER_SPEC: MutationSpec = {
-  lr: { min: 1e-4, max: 1e-2 }, l2: { min: 1e-7, max: 1e-2 },
+  // Learning rate capped at 3e-3: the schema-4 elite ran at 1e-2 and over-shrank weak branches.
+  lr: { min: 1e-4, max: 3e-3 }, wd: { min: 1e-4, max: 1e-1 },
   gMicro: { min: 0.25, max: 2 }, gSwing: { min: 0.25, max: 2 }, gTrend: { min: 0.25, max: 2 }, gMacro: { min: 0.25, max: 2 }, gCtx: { min: 0.25, max: 2 }, volWeight: { min: 0.1, max: 2 },
   pJoin: { min: 0.02, max: 0.5 }, pBranch: { min: 0.02, max: 0.3 },
 };
@@ -283,9 +287,24 @@ export function sampleDrop(plans: { micro: FractalPlan; swing: FractalPlan }, de
   return drop;
 }
 
-/** One epoch of mini-batch Adam over `idx` (shuffled with `seed`). */
+/** Parameters weight decay applies to: weights and convolution kernels, not biases. */
+const decayMasks = new Map<string, Uint8Array>();
+function decayMask(dims: BranchDims): Uint8Array {
+  const key = JSON.stringify(dims);
+  let m = decayMasks.get(key);
+  if (!m) {
+    const { layout, size } = branchLayout(dims);
+    m = new Uint8Array(size);
+    for (const [name, { off, n }] of Object.entries(layout)) if (!name.startsWith('b')) m.fill(1, off, off + n);
+    decayMasks.set(key, m);
+  }
+  return m;
+}
+
+/** One epoch of mini-batch AdamW over `idx` (shuffled with `seed`). */
 export function trainEpoch(D: TaNetData, dims: BranchDims, norm: TaNetParams['norm'], st: Member, h: Hyper, idx: number[], seed: number, batch = 64): number {
   const L = branchLayout(dims).layout;
+  const mask = decayMask(dims);
   const g = gatesOf(h);
   const r = rng(seed);
   const fs = fractalSpecs(dims), plans = { micro: fractalPlan(fs.micro), swing: fractalPlan(fs.swing) };
@@ -308,11 +327,12 @@ export function trainEpoch(D: TaNetData, dims: BranchDims, norm: TaNetParams['no
     const nb = e - s;
     st.step++;
     const c1 = 1 - 0.9 ** st.step, c2 = 1 - 0.999 ** st.step;
+    const wd = h.wd ?? 0;
     for (let k = 0; k < st.w.length; k++) {
-      const gr = grad[k] / nb + h.l2 * st.w[k];
+      const gr = grad[k] / nb;
       st.m[k] = 0.9 * st.m[k] + 0.1 * gr;
       st.v[k] = 0.999 * st.v[k] + 0.001 * gr * gr;
-      st.w[k] -= (h.lr * (st.m[k] / c1)) / (Math.sqrt(st.v[k] / c2) + 1e-8);
+      st.w[k] -= h.lr * ((st.m[k] / c1) / (Math.sqrt(st.v[k] / c2) + 1e-8) + wd * mask[k] * st.w[k]);
     }
   }
   return total / Math.max(1, order.length);
@@ -449,6 +469,8 @@ interface SavedState {
   schema: string; dims: BranchDims; assets: string[]; norm: TaNetParams['norm']; trials: number; lastEvalTo: number; nextIndex: number;
   /** Which index series (and from when) the rows were built with: a change starts a fresh tournament. */
   contextSig?: string;
+  /** Optimizer the population trained with ('adamw'); members trained otherwise start over. */
+  optimizer?: string;
   log: PbtRoundLog[]; members: Array<{ id: number; hyper: Hyper; w: string; m: string; v: string; step: number; lineage: number[]; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }>; bornRound?: number }>;
 }
 
@@ -525,6 +547,7 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
     try {
       saved = JSON.parse(fs.readFileSync(o.statePath, 'utf8')) as SavedState;
       if (saved.schema !== TANET_SCHEMA || JSON.stringify(saved.dims) !== JSON.stringify(dims) || saved.assets.join() !== D.assets.map((a) => a.asset).join()) { log('saved population is for other inputs; starting a fresh tournament'); saved = undefined; }
+      else if (saved.optimizer !== 'adamw') { log('saved population trained with Adam + L2; starting a fresh tournament with AdamW'); saved = undefined; }
       else if ((saved.contextSig ?? '') !== contextSig) { log(`market context changed (${saved.contextSig || 'none'} -> ${contextSig || 'none'}); starting a fresh tournament`); saved = undefined; }
     } catch { saved = undefined; }
   }
@@ -543,7 +566,7 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
   const save = (members: PbtMember<Member>[], trials: number, plog: PbtRoundLog[], lastEvalTo: number, nextIndex: number) => {
     if (!o.statePath) return;
     const st: SavedState = {
-      schema: TANET_SCHEMA, dims, assets: D.assets.map((a) => a.asset), norm, trials, lastEvalTo, nextIndex, contextSig, log: plog,
+      schema: TANET_SCHEMA, dims, assets: D.assets.map((a) => a.asset), norm, trials, lastEvalTo, nextIndex, contextSig, optimizer: 'adamw', log: plog,
       members: members.map((m) => ({ id: m.id, hyper: m.hyper, w: b64(m.state.w), m: b64(m.state.m), v: b64(m.state.v), step: m.state.step, lineage: m.lineage, scores: m.scores, bornRound: m.bornRound, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]) })),
     };
     fs.mkdirSync(path.dirname(o.statePath), { recursive: true });

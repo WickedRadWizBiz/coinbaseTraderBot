@@ -13,11 +13,15 @@ const log = logger('spot-candles');
 
 const GRANULARITY: Partial<Record<Timeframe, number>> = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '1d': 86400 };
 const EVERY_MS: Partial<Record<Timeframe, number>> = { '1m': 60_000, '5m': 150_000, '15m': 300_000, '1h': 600_000, '1d': 3_600_000 };
+/** Timeframes that get one older page at startup: the TA network reads 256 closed 15m bars at each of
+ *  its last 12 hourly steps (300 bars), one more than a single Coinbase page (300 incl. the forming bar). */
+const BACKFILL: Timeframe[] = ['15m'];
 
 export class SpotCandleFeed extends EventEmitter {
   private timer?: NodeJS.Timeout;
   private readonly next = new Map<string, number>();
   private readonly dead = new Set<string>();
+  private readonly backfilled = new Set<string>();
   private busy = false;
 
   constructor(
@@ -54,6 +58,14 @@ export class SpotCandleFeed extends EventEmitter {
           try {
             const rows = this.withFlow(asset, tf, await this.fetchCandles(asset, tf));
             if (rows.length) this.emit('candles', { asset, tf, rows, ts: this.now() });
+            if (rows.length && BACKFILL.includes(tf) && !this.backfilled.has(key)) {
+              this.backfilled.add(key);
+              const oldest = Math.min(...rows.map((r) => r[0]));
+              try {
+                const older = await this.fetchCandles(asset, tf, (oldest - 300 * GRANULARITY[tf]!) * 1000, (oldest - GRANULARITY[tf]!) * 1000);
+                if (older.length) this.emit('candles', { asset, tf, rows: older, ts: this.now() });
+              } catch { /* best effort: the store fills up over the next hours anyway */ }
+            }
           } catch (e) {
             if ((e as Error).message.includes('HTTP 404')) { this.dead.add(asset); log.warn(`no Coinbase ${asset}-USD product: TA disabled for ${asset}`); break; }
             this.next.set(key, now + 30_000);
@@ -71,8 +83,9 @@ export class SpotCandleFeed extends EventEmitter {
     return rows.map((r) => { const tb = this.flow!.takerBuy(asset, r[0] * 1000, g * 1000, r[5]); return tb === undefined ? r : [r[0], r[1], r[2], r[3], r[4], r[5], tb] as CandleRow; });
   }
 
-  async fetchCandles(asset: string, tf: Timeframe): Promise<CandleRow[]> {
-    const url = `${this.baseUrl}/products/${encodeURIComponent(`${asset}-USD`)}/candles?granularity=${GRANULARITY[tf]}`;
+  async fetchCandles(asset: string, tf: Timeframe, startMs?: number, endMs?: number): Promise<CandleRow[]> {
+    const range = startMs !== undefined && endMs !== undefined ? `&start=${new Date(startMs).toISOString()}&end=${new Date(endMs).toISOString()}` : '';
+    const url = `${this.baseUrl}/products/${encodeURIComponent(`${asset}-USD`)}/candles?granularity=${GRANULARITY[tf]}${range}`;
     const res = await this.fetchImpl(url, { headers: { Accept: 'application/json', 'User-Agent': 'kalshi-bot-ta' }, signal: AbortSignal.timeout(8000) });
     if (!res.ok) throw new Error(`candles ${asset} ${tf}: HTTP ${res.status}`);
     const data = (await res.json()) as unknown[];
