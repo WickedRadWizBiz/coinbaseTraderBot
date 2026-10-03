@@ -136,6 +136,28 @@ The intraday setups are break-even before costs. With stops under 2% wide, a 0.2
 
 Both lanes therefore trade at pilot size on paper (`PERP_PILOT_MAX_NOTIONAL_USD`), which builds a live record without risking real size.
 
+
+### Update: momentum bursts and per-type selection
+
+Two changes. The fast lane gained the **momentum burst**: join a volatile move as it happens (a wide-range bar, a volume spike, one-sided taker flow, a breakout of the 20-bar range, the higher timeframe agreeing), trailed by 2.5 ATR from entry. And each setup type now gets its own on/off and score threshold, chosen on 2020 – Sep 2025 only (`research/momentumStudy.ts` has the burst study).
+
+**Chosen on the development years:**
+- Traded: **1h burst** (every one: 376 development trades, +$2,748 on $10k), **1d breakout** and **1d dip** (the model's top half).
+- Off, because even their best threshold lost in development: 15m burst, 15m fade, 15m pullback, 1h fade, 1h pullback.
+
+| Lane | Period | Trades | Win rate | Net R per trade (90% interval) | Net $ on $10k |
+|---|---|---|---|---|---|
+| fast (1h bursts) | 2020 – Sep 2025 | 228 | 41.7% | +0.11 (−0.04 to +0.29) | +$1,705 |
+| fast | holdout Oct 2025 – Jun 2026 | 53 | 39.6% | **+0.25** (−0.17 to +0.71) | +$277 |
+| fast | final Jul – Sep 2026 | 15 | 60.0% | **+0.15** (−0.25 to +0.56) | +$141 |
+| slow | 2020 – Sep 2025 | 200 | 36.5% | +0.48 (+0.09 to +0.97) | +$6,723 |
+| slow | holdout | 25 | 32.0% | +0.02 | +$167 |
+| slow | final | 5 | 0% | −0.70 | −$218 |
+
+- **Fast lane:** positive in every period, including the 12 months it never saw. With limit-order entries it's +0.28R. It isn't validated yet only because 68 trades are too few for the 5% lower bound to clear zero.
+- **Slow lane:** positive over 2020–25 but flat-to-negative over the last 12 months, on only 30 trades.
+- **At $5 risk per trade:** the fast lane's per-trade average is about +$0.55 to +$1.25. Bursts are rare, though: about one every 5–6 days across 5 coins.
+
 ## Settings (`bot.env`)
 
 | Setting | Default | Meaning |
