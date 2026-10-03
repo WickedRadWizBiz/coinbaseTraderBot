@@ -30,6 +30,8 @@ export interface LaneParams {
   refScore: number;
   /** Re-check: largest move toward the target since the signal, in R. */
   maxChaseR: number;
+  /** Fixed dollars at risk per trade (entry to stop) instead of riskFrac x equity (0 / unset = off). */
+  riskUsd?: number;
 }
 
 export interface LaneBookParams {
@@ -39,6 +41,10 @@ export interface LaneBookParams {
   maxLeverage: number;
   /** One asset's notional / equity. */
   maxAssetLeverage: number;
+  /** Skip a trade whose first target pays less than this many dollars after the round-trip fee (0 = off). */
+  minTargetUsd?: number;
+  /** Round-trip fee as a fraction of notional (entry + exit), for minTargetUsd. */
+  roundTripFee?: number;
 }
 
 export const DEFAULT_LANES: LaneBookParams = {
@@ -112,9 +118,18 @@ export class LaneBook {
         if (d * (r.px - s.ref) > L.maxChaseR * risk) { this.skip(c, `price ran ${((d * (r.px - s.ref)) / risk).toFixed(2)}R toward the target: not chasing`, now); continue; }
         const riskPct = Math.abs(r.px - s.stop) / r.px;
         const scale = L.refScore > 0 ? Math.max(0.5, Math.min(1.5, r.score / L.refScore)) : 1;
-        let notional = (equity * L.riskFrac * scale) / riskPct;
+        const riskDollars = (L.riskUsd && L.riskUsd > 0 ? L.riskUsd : equity * L.riskFrac) * scale;
+        let notional = riskDollars / riskPct;
         notional = Math.min(notional, equity * this.params.maxAssetLeverage, Math.max(0, equity * this.params.maxLeverage - used));
         if (!(notional > 0)) { keep.push(c); continue; }
+        // Worth it? The first target (the slow lane has none: 2R, its typical first leg) must pay at least
+        // minTargetUsd after the round-trip fee at this size.
+        const minUsd = this.params.minTargetUsd ?? 0;
+        if (minUsd > 0) {
+          const t1 = s.plan.target1 ?? s.plan.target2 ?? r.px + d * 2 * Math.abs(r.px - s.stop);
+          const payoff = notional * (Math.abs(t1 - r.px) / r.px - (this.params.roundTripFee ?? 0));
+          if (payoff < minUsd) { this.skip(c, `first target pays $${payoff.toFixed(2)} after fees at $${notional.toFixed(0)} notional (minimum $${minUsd})`, now); continue; }
+        }
         out.push({ cand: c, px: r.px, score: r.score, notional });
         used += notional; open++; busy.add(s.asset);
       }

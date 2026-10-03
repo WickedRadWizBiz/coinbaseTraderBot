@@ -86,7 +86,8 @@ Since the spot ETFs started (Jan 2024):
   - price not beyond the stop or the first target;
   - not chased: no more than 0.3R (fast) or 0.5R (slow) toward the target since the signal.
 - **One position per coin.** The slow lane is served first; a fast candidate on a coin the slow lane holds waits in the queue.
-- **Sizing:** each trade risks a set share of equity between entry and stop (`SETUP_FAST_RISK` 0.4%, `SETUP_SLOW_RISK` 0.6%), scaled 0.5×–1.5× by the score. Caps: per coin (`SETUP_MAX_ASSET_LEVERAGE`) and in total (`SETUP_MAX_LEVERAGE`).
+- **Sizing:** each trade risks a set share of equity between entry and stop (`SETUP_FAST_RISK` 0.4%, `SETUP_SLOW_RISK` 0.6%), or a fixed dollar amount (`SETUP_FAST_RISK_USD`, `SETUP_SLOW_RISK_USD`), scaled 0.5×–1.5× by the score. Caps: per coin (`SETUP_MAX_ASSET_LEVERAGE`), in total (`SETUP_MAX_LEVERAGE`), and half the exchange's leverage for the market (liquidation stays well beyond the stop).
+- **Worth taking:** with `SETUP_MIN_TARGET_USD`, a trade whose first target would pay less than that after the round-trip fee is skipped.
 
 ## Training and validation (`npm run research:setups`)
 
@@ -147,6 +148,8 @@ Both lanes therefore trade at pilot size on paper (`PERP_PILOT_MAX_NOTIONAL_USD`
 | `SETUP_MAX_LEVERAGE` / `SETUP_MAX_ASSET_LEVERAGE` | 3 / 1.5 | Notional caps as multiples of equity |
 | `SETUP_DAILY_GOAL_USD` | 100 | Shown on the dashboard next to today's realized P&L. It does not change how the bot trades: chasing a daily target makes traders overtrade. |
 | `SETUP_RETRAIN_DAYS` | 7 | Pipeline retraining interval |
+| `SETUP_FAST_RISK_USD` / `SETUP_SLOW_RISK_USD` | 0 | Fixed dollars at risk per trade (entry to stop) instead of a share of equity; 0 = use `SETUP_*_RISK` |
+| `SETUP_MIN_TARGET_USD` | 0 | Skip trades whose first target pays less than this after the round-trip fee (e.g. 2) |
 | `PERP_DAILY_LOSS_FRAC` | 0.10 | Perp daily loss stop: flatten and halt for the UTC day |
 | `PERP_PILOT_MAX_NOTIONAL_USD` | 25 | Size cap while a lane is unvalidated |
 

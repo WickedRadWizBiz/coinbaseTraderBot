@@ -448,6 +448,11 @@ export interface PerpsConfig {
   setupDailyGoalUsd: number;
   /** Retrain the setup scorer every this many days (automated pipeline). */
   setupRetrainDays: number;
+  /** Fixed dollars at risk per trade per lane (0 = use SETUP_*_RISK as a share of equity). */
+  setupFastRiskUsd: number;
+  setupSlowRiskUsd: number;
+  /** Skip trades whose first target pays less than this after fees (0 = off). */
+  setupMinTargetUsd: number;
 }
 
 export class ConfigError extends Error {}
@@ -800,6 +805,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         setupMaxAssetLeverage: num(env, 'SETUP_MAX_ASSET_LEVERAGE', 1.5, 0.1, 20),
         setupDailyGoalUsd: num(env, 'SETUP_DAILY_GOAL_USD', 100, 0, 1e9),
         setupRetrainDays: num(env, 'SETUP_RETRAIN_DAYS', 7, 1, 365),
+        setupFastRiskUsd: num(env, 'SETUP_FAST_RISK_USD', 0, 0, 1e7),
+        setupSlowRiskUsd: num(env, 'SETUP_SLOW_RISK_USD', 0, 0, 1e7),
+        setupMinTargetUsd: num(env, 'SETUP_MIN_TARGET_USD', 0, 0, 1e7),
       };
     })(),
     autoTrain: {

@@ -173,9 +173,10 @@ async function main(): Promise<void> {
       directionalTrader = new SetupTrader({
         params: {
           book: {
-            fast: { ...DEFAULT_LANES.fast, maxPositions: P.setupFastMax, riskFrac: P.setupFastRisk },
-            slow: { ...DEFAULT_LANES.slow, maxPositions: P.setupSlowMax, riskFrac: P.setupSlowRisk },
+            fast: { ...DEFAULT_LANES.fast, maxPositions: P.setupFastMax, riskFrac: P.setupFastRisk, riskUsd: P.setupFastRiskUsd },
+            slow: { ...DEFAULT_LANES.slow, maxPositions: P.setupSlowMax, riskFrac: P.setupSlowRisk, riskUsd: P.setupSlowRiskUsd },
             maxLeverage: P.setupMaxLeverage, maxAssetLeverage: P.setupMaxAssetLeverage,
+            minTargetUsd: P.setupMinTargetUsd, roundTripFee: (2 * P.takerFeeBps + 2) / 1e4,
           },
           costs: { entry: (P.takerFeeBps + 2) / 1e4, makerExit: P.makerFeeBps / 1e4, takerExit: (P.takerFeeBps + 2) / 1e4, fundingPer8h: 0.0001 },
           dailyLossFrac: P.dailyLossFrac, minEquityUsd: P.minEquityUsd, pilotMaxNotionalUsd: P.pilotMaxNotionalUsd, requireValidation: P.requireValidation, dailyGoalUsd: P.setupDailyGoalUsd,

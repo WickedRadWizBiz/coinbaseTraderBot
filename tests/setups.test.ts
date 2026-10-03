@@ -196,3 +196,21 @@ test('lane score: percentile of the prediction in the calibration quantiles; no 
   assert.equal(laneScore({ meanR: 0.3, trades: 10 }, []), 1);
   assert.equal(laneScore({ meanR: -0.3, trades: 10 }, []), 0);
 });
+
+test('lane book: fixed dollar risk per trade, and trades whose first target pays under the minimum are skipped', async () => {
+  const { LaneBook } = await import('../bot/setups/lanes');
+  const P = {
+    fast: { maxPositions: 3, riskFrac: 0.004, ttlBars: 2, minScore: 0, refScore: 0.5, maxChaseR: 0.3, riskUsd: 5 },
+    slow: { maxPositions: 1, riskFrac: 0.01, ttlBars: 1, minScore: 0, refScore: 0.5, maxChaseR: 0.5 },
+    maxLeverage: 10, maxAssetLeverage: 10, minTargetUsd: 2, roundTripFee: 0.0026,
+  };
+  const book = new LaneBook(P);
+  // Stop 2% away, $5 risk -> $250 notional; first target 2% away pays 250 x (0.02 - 0.0026) = $4.35.
+  book.offer({ ...fade(1, 98, 102, 104), asset: 'A' }, 0.5, 0);
+  // Stop 2% away, first target only 0.5% away: pays 250 x (0.005 - 0.0026) = $0.60 < $2 -> skipped.
+  book.offer({ ...fade(1, 98, 100.5, 104), asset: 'B' }, 0.5, 0);
+  const e = book.select(1, 100, (c) => ({ px: 100, score: 0.5 }));
+  assert.deepEqual(e.map((x) => x.cand.sig.asset), ['A']);
+  assert.ok(Math.abs(e[0].notional - 250) < 1e-6, 'fixed $5 at risk over a 2% stop');
+  assert.ok(book.lastSkips.some((s) => s.asset === 'B' && /first target pays \$0\.60/.test(s.reason)));
+});

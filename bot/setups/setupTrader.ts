@@ -225,7 +225,10 @@ export class SetupTrader {
         const t = openTrade(e.cand.sig, e.px, now, this.d.params.costs);
         if (!t) continue;
         const pilot = !this.model?.validated(t.lane);
-        t.notional = pilot ? Math.min(e.notional, this.d.params.pilotMaxNotionalUsd) : e.notional;
+        // Keep liquidation well beyond the stop: at most half the exchange's leverage for the market.
+        const lev = this.d.hub.get(t.asset)?.latest?.leverage;
+        const levCap = lev && lev > 0 ? equity * 0.5 * lev : Infinity;
+        t.notional = Math.min(pilot ? Math.min(e.notional, this.d.params.pilotMaxNotionalUsd) : e.notional, levCap);
         t.score = e.score;
         this.book.add(t);
         this.lastPx.set(t.asset, e.px);
@@ -270,7 +273,7 @@ export class SetupTrader {
   status() {
     const m = this.model;
     const today = this.day ? this.day.realized : 0;
-    const open = [...this.book.positions.values()].map((t) => ({ asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, stop: t.stop, target1: t.plan.target1 ?? null, target2: t.plan.target2 ?? null, half_off: t.partialDone, bars: t.bars, notional: t.notional ?? null, score: t.score ?? null, open_r: tradeResult(t, this.lastPx.get(t.asset)).r }));
+    const open = [...this.book.positions.values()].map((t) => ({ asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, stop: t.stop, target1: t.plan.target1 ?? null, target2: t.plan.target2 ?? null, half_off: t.partialDone, bars: t.bars, notional: t.notional ?? null, score: t.score ?? null, open_r: tradeResult(t, this.lastPx.get(t.asset)).r, usd_at_stop: -(t.notional ?? 0) * Math.abs(t.entry - t.initialStop) / t.entry, usd_at_target1: t.plan.target1 !== undefined ? (t.notional ?? 0) * Math.abs(t.plan.target1 - t.entry) / t.entry : null, open_usd: tradeResult(t, this.lastPx.get(t.asset)).ret * (t.notional ?? 0) }));
     const cand = (lane: Lane) => this.book.queues[lane].map((c) => ({ asset: c.sig.asset, kind: c.sig.kind, tf: c.sig.tf, dir: c.sig.dir, score: c.score, expires: c.expires }));
     return {
       strategy: 'setups',
