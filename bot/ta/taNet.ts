@@ -341,6 +341,9 @@ export interface TaNetStrategy {
   maxPos: number;
   /** Cost per unit of turnover (taker fee + slippage), as a fraction of notional. */
   costPerTurnover: number;
+  /** Confidence threshold: a barrier trade is taken only when |P(up in 4h) - 0.5| >= minEdge (tuned
+   *  by the tournament; trading fewer, surer hours instead of every hour). */
+  minEdge?: number;
 }
 export const TANET_STRATEGY: TaNetStrategy = { minPos: 0.1, shrink: 0.25, maxPos: 1, costPerTurnover: 0.0005 };
 
@@ -363,6 +366,7 @@ export const TANET_BARRIER = { horizon: 4, k: 1 };
 
 /** Position for the 4-hour barrier trade: fractional Kelly on P(up in 4h) with the 4-hour vol scale. */
 export function taNetBarrierPosition(pUp4: number, volLogRatio: number, sig24: number, s: TaNetStrategy = TANET_STRATEGY): number {
+  if (!(Math.abs(pUp4 - 0.5) >= (s.minEdge ?? 0))) return 0;
   return taNetPosition(pUp4, volLogRatio, sig24 * Math.sqrt(TANET_BARRIER.horizon), s);
 }
 
@@ -399,9 +403,15 @@ export interface TaNetHeadValidation {
   skill?: number; hitRate?: number;
   /** The holdout CI is above zero. */
   holdoutPassed: boolean;
+  /** The same head on the frozen final window (the most recent months, never used for anything else):
+   *  passed = mean improvement above zero. */
+  final?: { rows: number; from: string; to: string; base: number; model: number; improvement: { mean: number; lo: number; hi: number }; hitRate?: number; passed: boolean };
   /** Allowed to speak live: holdoutPassed, and for direction heads also the network-level gates. */
   validated: boolean;
 }
+
+/** Selective prediction: hours traded (barrier trade taken) and their win rate with a Wilson 95% interval. */
+export interface TaNetSelective { hours: number; taken: number; coverage: number; hitRate: number; hitLo: number; hitHi: number; netReturn: number }
 
 export interface TaNetNetworkValidation {
   /** Deflated Sharpe of the elite lineage's out-of-sample record (independent interactions). */
@@ -409,7 +419,10 @@ export interface TaNetNetworkValidation {
   trials: number;
   regimes: Array<{ regime: string; independent: number; netReturn: number; sortino: number; hitRate: number; enough: boolean }>;
   /** Strategy fitness on the unseen holdout months. */
-  holdout: { fitness: number; sortino: number; maxDrawdown: number; costs: number; netReturn: number; independent: number; days: number };
+  holdout: { fitness: number; sortino: number; maxDrawdown: number; costs: number; netReturn: number; independent: number; days: number; selective?: TaNetSelective };
+  /** The frozen final window: strategy fitness, selective hit rate, and how often this window has been
+   *  evaluated (more than once = it is no longer an unseen test). */
+  final?: { from: string; to: string; fitness: number; sortino: number; maxDrawdown: number; netReturn: number; selective: TaNetSelective; views: number };
   minIndependentPerRegime: number;
   dsrThreshold: number;
   /** DSR probability >= threshold AND every covered regime has enough independent interactions. */
@@ -447,7 +460,7 @@ export interface TaNetParams {
   heads: Record<TaNetHeadName, { validation: TaNetHeadValidation }>;
   network: TaNetNetworkValidation;
   pbt: { rounds: number; trials: number; elite: { member: number; hyper: Record<string, number>; lineage: number[] }; recent: unknown[] };
-  data: { assets: string[]; from: string; to: string; rows: number; sources: Record<string, string[]>; holdoutFrom: string };
+  data: { assets: string[]; from: string; to: string; rows: number; sources: Record<string, string[]>; holdoutFrom: string; finalFrom?: string };
   trainedAt: string;
 }
 

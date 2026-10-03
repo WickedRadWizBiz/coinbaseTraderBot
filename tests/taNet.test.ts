@@ -67,7 +67,7 @@ function historyDir(): string {
   upsertSeries(dir, 'tradingview', 'USDT.D', '1d', USDTD);
   return dir;
 }
-const OPTS = { trainMonths: 1.5, evalMonths: 0.25, stepMonths: 0.25, holdoutMonths: 0.5, stride: 1, minPerRegime: 5, epochsPerRound: 2, baseHyper: { lr: 3e-3, wd: 1e-2 } };
+const OPTS = { trainMonths: 1.25, evalMonths: 0.25, stepMonths: 0.25, holdoutMonths: 0.5, finalMonths: 0.25, stride: 1, minPerRegime: 5, epochsPerRound: 2, baseHyper: { lr: 3e-3, wd: 1e-2 } };
 
 test('inputs: hourly map, daily steps and 15m steps are complete, cache-identical and never look ahead', () => {
   const i = 8000;
@@ -145,6 +145,12 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
   const p = rep.params;
   assert.equal(p.schema, TANET_SCHEMA);
   assert.deepEqual(p.context?.basket, ['BTC', 'TST']);
+  // Selective trading: a tuned confidence threshold, hit rate on trades taken, and the frozen final window.
+  assert.ok(p.strategy.minEdge! >= 0.002 && p.strategy.minEdge! <= 0.15);
+  const sel = p.network.holdout.selective!;
+  assert.ok(sel.taken <= sel.hours && sel.hitLo <= sel.hitRate && sel.hitRate <= sel.hitHi);
+  assert.ok(p.network.final && p.network.final.views >= 1 && p.heads.up_1h.validation.final !== undefined);
+  assert.equal(p.heads.vol_4h.validation.validated, p.heads.vol_4h.validation.holdoutPassed && p.heads.vol_4h.validation.final!.passed);
   assert.equal(p.pbt.trials, rep.rounds * 3, 'every member evaluation is a trial');
   assert.ok(p.network.dsr.n > 0 && Number.isFinite(p.network.dsr.probability));
   assert.ok(p.network.regimes.length >= 1);
@@ -227,7 +233,7 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
 test('pipeline: ta_net runs the tournament in chunks and promotes only when it reaches the present', async () => {
   const data = tmpDir();
   upsertSeries(path.join(data, 'history'), 'binance', 'TST', '15m', M15);
-  const env = { DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: data, HISTORY_AUTO_UPDATE: 'false', TA_NET_TRAIN_MONTHS: '1.5', TA_NET_EVAL_MONTHS: '0.25', TA_NET_HOLDOUT_MONTHS: '0.5', TA_NET_STRIDE: '2', TA_NET_MIN_PER_REGIME: '5', TA_NET_STEP_MONTHS: '0.25' };
+  const env = { DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: data, HISTORY_AUTO_UPDATE: 'false', TA_NET_TRAIN_MONTHS: '1.25', TA_NET_EVAL_MONTHS: '0.25', TA_NET_HOLDOUT_MONTHS: '0.5', TA_NET_FINAL_MONTHS: '0.25', TA_NET_STRIDE: '2', TA_NET_MIN_PER_REGIME: '5', TA_NET_STEP_MONTHS: '0.25' };
   const cfg = loadConfig({ ...env, TA_NET_MAX_ROUNDS_PER_RUN: '2' });
   const now = Date.UTC(2026, 9, 1);
   const r1 = await runPipeline({ cfg, only: ['history', 'ta_net'], log: () => undefined, now });

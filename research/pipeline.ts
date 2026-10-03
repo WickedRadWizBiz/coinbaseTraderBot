@@ -228,7 +228,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       try {
         rep = await trainTaNetMain(argsOf({
           history: T.historyDir, out: cand, cache: path.join(work, 'tanet-cache'), state: path.join(work, 'tanet-population.json'), fresh: o.forceTaNetFresh ? 'true' : undefined,
-          'train-months': T.trainMonths, 'eval-months': T.evalMonths, 'step-months': T.stepMonths, 'holdout-months': T.holdoutMonths, stride: T.stride, 'min-per-regime': T.minPerRegime, dsr: T.dsrThreshold,
+          'train-months': T.trainMonths, 'eval-months': T.evalMonths, 'step-months': T.stepMonths, 'holdout-months': T.holdoutMonths, 'final-months': T.finalMonths, stride: T.stride, 'min-per-regime': T.minPerRegime, dsr: T.dsrThreshold,
           'max-rounds': T.maxRoundsPerRun || undefined, 'restart-every': T.restartEvery,
         }));
       } catch (e) {

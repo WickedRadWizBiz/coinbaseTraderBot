@@ -226,6 +226,8 @@ export interface TaNetConfig {
   /** How far each round rolls forward (months). */
   stepMonths: number;
   holdoutMonths: number;
+  /** Frozen final window after the holdout (months, 0 = none): every head must also hold up there. */
+  finalMonths: number;
   /** Train on every k-th hourly sample per epoch (adjacent hours are highly correlated). */
   stride: number;
   /** Statistical hurdles: independent interactions per regime, deflated Sharpe probability. */
@@ -897,6 +899,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       evalMonths: num(env, 'TA_NET_EVAL_MONTHS', 1, 0.25, 6),
       stepMonths: num(env, 'TA_NET_STEP_MONTHS', 1, 0.25, 6),
       holdoutMonths: num(env, 'TA_NET_HOLDOUT_MONTHS', 3, 0.5, 12),
+      finalMonths: num(env, 'TA_NET_FINAL_MONTHS', 2, 0, 12),
       stride: num(env, 'TA_NET_STRIDE', 2, 1, 24),
       minPerRegime: num(env, 'TA_NET_MIN_PER_REGIME', 100, 1, 100_000),
       dsrThreshold: num(env, 'TA_NET_DSR', 0.95, 0, 1),
