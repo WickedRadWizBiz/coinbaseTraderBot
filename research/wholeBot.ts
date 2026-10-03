@@ -172,8 +172,9 @@ export async function wholeBotMain(argOf: (k: string, d: string) => string = cli
   const share = argOf('perps-share', '');
   if (share) s.perpsShare = Number(share);
   const r = await runWholeBot(D, 'all', s);
-  for (const d of r.days) console.log(`${d.day}: kalshi ${d.kalshi >= 0 ? '+' : ''}$${d.kalshi.toFixed(2)} (${d.kalshiTrades}) | perps ${d.perps >= 0 ? '+' : ''}$${d.perps.toFixed(2)} (${d.perpsTrades}) | total ${d.total >= 0 ? '+' : ''}$${d.total.toFixed(2)}${d.stopped ? ' (daily stop)' : ''}`);
-  console.log(`[whole-bot] ${r.days.length} day(s) on $${s.totalUsd.toFixed(0)} (perps ${(100 * s.perpsShare).toFixed(0)}%): kalshi $${r.kalshiUsd.toFixed(2)}, perps $${r.perpsUsd.toFixed(2)}, total $${r.totalUsd.toFixed(2)} ($${(r.totalUsd / Math.max(1, r.days.length)).toFixed(2)}/day); ${r.dropped} trade(s) blocked by the daily stop`);
+  const usd = (x: number) => `${x < 0 ? '-' : '+'}$${Math.abs(x).toFixed(2)}`;
+  for (const d of r.days) console.log(`${d.day}: kalshi ${usd(d.kalshi)} (${d.kalshiTrades}) | perps ${usd(d.perps)} (${d.perpsTrades}) | total ${usd(d.total)}${d.stopped ? ' (daily stop hit)' : ''}`);
+  console.log(`[whole-bot] ${r.days.length} day(s) on $${s.totalUsd.toFixed(0)} (perps ${(100 * s.perpsShare).toFixed(0)}%): kalshi ${usd(r.kalshiUsd)}, perps ${usd(r.perpsUsd)}, total ${usd(r.totalUsd)} (${usd(r.totalUsd / Math.max(1, r.days.length))}/day); ${r.dropped} trade(s) blocked by the daily stop`);
   return r;
 }
 

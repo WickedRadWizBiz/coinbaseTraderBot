@@ -200,3 +200,22 @@ The coordinate-descent sweep tuned each burst setting in turn on 2020 – Jun 20
 
 - **Longs:** no single-setting change beat the current settings, so the sweep stopped after one pass. Final window: 221 trades at +0.32R.
 - **Shorts:** the sweep accepted a 10-bar breakout lookback instead of 20. The tuning window went from +0.27R to +0.32R and the check window from +0.13R to +0.15R. On the unseen final window, though, the result went from +0.10R (53 trades) to −0.01R (65 trades). **The change was not applied**, and shorts keep the 20-bar lookback. Tuning and check gains this small fall within the noise for about 60–80 trades.
+
+## Connected to the rest of the bot
+
+The setup trader used to stand alone. It now reads the TA network and the perps SNN, and its results feed the whole-bot replay.
+
+**TA network (history available, tested now)**
+- **Walk-forward forecasts:** the TA network's forecasts over the whole history come from a network that walks forward month by month. It trains on the trailing 12 months and forecasts the next month (`npm run research:ta-net-oos`, pipeline step `ta_net_oos`), so a setup's TA network inputs never saw the future.
+- **The same network live:** the live setup trader reads that walking network (`ta_net_wf.json`), so live inputs come from the same network the model was trained on. All three heads are passed through ungated; the setup model decides whether they count.
+- **Model inputs, only if they help:** P(up 1h), P(up 4h) and the 4h volatility forecast are setup-model inputs, plus copies oriented to the trade's side. The trainer runs the walk-forward twice, with and without them, and keeps them only if they improve the development years (t-statistic of net R per trade across both lanes). Otherwise they are blanked. The model file records the comparison (`groupChoice`), and the status page shows it under `inputs`.
+- **Volatility-scaled trail:** fast-lane trails can be multiplied by exp(k × the 4h volatility forecast), clamped to 0.67–1.5× (`VOL_ADAPT` in `bot/setups/detectors.ts`). The trail widens before an expected volatility expansion and tightens before a quiet spell. k is tuned by the `setups-vol` sweep and is off (0) unless the sweep proves it.
+
+**Perps SNN (no history, so it is measured as the recordings grow)**
+- **Journal:** every setup and trade is written to `data/setups/journal-YYYY-MM-DD.jsonl` with the SNN's 1h and 4h calls, their skill, and the TA network's forecast at that moment.
+- **Gate:** the pipeline's `setup_snn` step tests whether trades the SNN agreed with did better. Once at least 150 closed trades show that the trades it disagreed with lose money out of sample, it switches on an agreement gate, which the trader applies at entry. Until then it reports "collecting" (docs/AUTOMATION.md, section 8).
+
+**Whole-bot replay**
+- The trainer exports the last 24 months of traded setups with their walk-forward scores (`setup_oos.json`).
+- The whole-bot replay (`npm run research:whole-bot`) runs them through the lane book alongside the Kalshi backtester over the recorded days, from one pot of capital with one daily stop.
+- The `bot` sweep target tunes the shared settings on the combined daily P&L.

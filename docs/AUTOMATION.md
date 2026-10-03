@@ -13,7 +13,11 @@ You only need to do the things in **"What you still do by hand"** below.
 
 ### 1. It records data, all the time
 
-While the bot runs in any mode (paper, shadow or live), it writes every book update, trade, index tick and settlement to `data/recordings/md-YYYY-MM-DD.jsonl`. This is what everything below learns from.
+While the bot runs in any mode (paper, shadow or live), it writes every book update, trade, index tick and settlement to `data/recordings/md-YYYY-MM-DD.jsonl`. This is what everything below learns from, and the longer the bot runs, the more of the whole system becomes testable (see 8 below).
+
+- **Compression:** days older than `RECORDINGS_GZIP_AFTER_DAYS` (2) are gzipped to `md-YYYY-MM-DD.jsonl.gz`, about a tenth of the size, so months of recordings fit on the server. Every replay, trainer and sweep reads both forms.
+- **Disk alert:** if free space where the recordings live drops below `RECORDINGS_MIN_FREE_GB` (3), the bot sends a warning alert. Nothing is ever deleted automatically.
+- **Setup journal:** the perps setup trader also writes `data/setups/journal-YYYY-MM-DD.jsonl`. Every setup it sees and every trade it opens and closes is logged there, together with what the TA network and the perps SNN said at that moment.
 
 ### 2. It runs the training pipeline every day
 
@@ -25,6 +29,10 @@ This is `research/pipeline.ts`, run as a low-priority background process so trad
 |---|---|---|
 | history | Downloads new Binance Vision archives (spot, plus Binance's BTCDOM index) and Coinbase candles for every crypto asset Kalshi lists. Skipped if the server can't reach them, or with `HISTORY_AUTO_UPDATE=false`. The live bot also appends its own hourly USDT.D / BTC.D / BTCDOM bars here | `data/history/` |
 | ta_net | Runs the TA network's tournament of three over the hourly history. The first one is spread over daily runs; afterwards it continues month by month every `TA_NET_RETRAIN_DAYS` (7). Promoted only once it reaches the present; only heads that pass the holdout and hurdles speak live (docs/EVOLUTION.md) | `ta_net.json` |
+| ta_net_oos | Walk-forward forecasts of the TA network over all history (`research/taNetOos.ts`): one network with the tournament winner's settings trains on the trailing 12 months and forecasts the next month, month by month. Later runs only add new months; it starts over when a new TA network is promoted. These forecasts are the setup scorer's TA network inputs, and the walking network is what the live setup trader reads | `ta_net_wf.json`; forecasts in `data/history/.tanet-oos/` |
+| setups | Retrains the setup scorer for the perps fast and slow lanes every `SETUP_RETRAIN_DAYS` (7). The TA network inputs are kept only if they beat the candle-only model on the development years. Also exports its recent out-of-sample setups for the whole-bot replay | `setup_model.json`, `setup_oos.json` |
+| setup_snn | Checks the setup journal: do trades the perps SNN agreed with do better? It stays off ("collecting") until 150 closed trades with SNN readings exist, and switches on only once proven (see 8 below) | `setup_snn_gate.json` |
+| sweep-&lt;target&gt; | The sweep optimizer, weekly (see 7 below). Proposals only | `sweeps/<target>.json` |
 | snn-crypto-ablation | Tests the crypto network's stages S0–S6 on settled contracts. Runs weekly, or when forced | `work/snn_crypto_ablation.json` |
 | snn-crypto-pbt | Tournament of three identical crypto networks over the last 7 recorded days. The elite's knobs are used from then on. Runs at the start, when the stage changes, and every 30 days | `work/snnpbt/crypto/` |
 | snn-crypto-train | Trains the crypto network (15m/1h) at the highest stage whose whole chain passed, with the tournament's knobs | `snn_crypto.json` |
@@ -90,12 +98,24 @@ Once a week (`SWEEP_EVERY_DAYS`), the pipeline runs the sweep optimizer (`resear
 
 - **Targets:**
   - `setups-long` and `setups-short`: the momentum-burst entry thresholds and exits for each side, scored on years of candle history.
+  - `setups-vol`: how strongly the TA network's 4-hour volatility forecast widens or tightens fast-lane trails (`VOL_ADAPT.trailK`; 0 = off). It needs the walk-forward forecasts from `ta_net_oos`.
   - `kalshi`: the contract strategy's edge thresholds, buffers, exit margin, Kelly fraction and per-trade EV target, scored in the production backtester over the bot's own recordings. It needs at least 20 recorded days.
+  - `bot`: the **whole bot** over the recordings (`research/wholeBot.ts`). Kalshi contracts go through the production backtester and the perps setup lanes run on their walk-forward scores, trading from one pot of capital under one combined daily loss stop. It tunes the shared settings: the capital split between Kalshi and perps, risk per fast and slow lane trade, lane sizes, the minimum target, the daily stop, and Kalshi's minimum edge and Kelly fraction. It scores them by the t-statistic of the combined profit per day, and needs at least 20 recorded days. To see the whole bot's day-by-day result with the current settings, run `npm run research:whole-bot`.
 - **How it searches:** it tries every value of one setting while the others stay fixed, keeps the best, then moves to the next setting, and repeats until a full pass changes nothing.
 - **What counts as an improvement:** a change is kept only if it raises the tuning-window score by at least 0.05 and doesn't lower the check-window score by more than 0.1. A final window is scored only once, at the end.
 - **What it produces:** a proposal in `AUTO_TRAIN_DIR/sweeps/<target>.json` (start and end settings, every step, all three window scores). It never changes the live configuration. Apply a proposal by setting its values, after reading the final-window result.
 
 The search runs as a background process, so a long sweep (`npm run research:sweep -- --target setups-long --hours 24`) costs nothing while it grinds. If a sweep stops partway, it resumes from its ledger.
+
+### 8. It reports what the recordings make testable, and switches on what they prove
+
+Some parts of the bot can be tested on years of exchange history. Others exist only in the bot's own recordings: the SNNs' live states, Kalshi order books, perps funding, and the SNN's calls on setup trades. Each daily report (and `pipeline_state.json`) has a **readiness** block. It shows how many recorded days there are, how much disk they use and how much is free, and for each step that needs recordings, how much it has against how much it needs. For example: `sweep bot (whole-bot replay) 12/20`, `setup_snn gate 37/150`.
+
+The SNN gate for the setup trader brings itself online like the fill model:
+1. Every setup trade is journaled with the perps SNN's 1h and 4h calls at entry.
+2. The **setup_snn** step reports "collecting" until there are 150 closed trades with SNN readings.
+3. It then picks an agreement level on the earlier 70% of trades. Agreement is the trade's side × (P(up) − 0.5), at 1h for the fast lane and 4h for the slow lane. On the later 30%, the trades that level would have blocked must have lost money, with the bootstrap 90% upper bound of their mean below zero.
+4. If so, `setup_snn_gate.json` turns on and the setup trader picks it up immediately: an entry is skipped when the SNN's call disagrees by more than that level. If not, the gate stays off and the file says why. It is re-tested every run, so it can also switch off again.
 
 ## Promotion policy
 
@@ -171,6 +191,11 @@ These can't be automated, or deliberately aren't.
 | `AUTO_TRAIN_WATCH_SEC` | `30` | How often to check for changed model files. |
 | `HISTORY_AUTO_UPDATE` | `true` | Refresh Binance/Coinbase history in the daily run (the other history and TA network settings are in docs/TA_NETWORK.md). |
 | `TA_NET_RETRAIN_DAYS` | `7` | Continue the TA network's tournament at most this often. |
+| `TA_NET_OOS_HOURS` | `3` | Time budget per run for the TA network's walk-forward export (it resumes on the next run). |
+| `SETUP_TA_NET_PATH` | `params/ta_net_wf.json` | The walking TA network the setup trader reads when `data/models/ta_net_wf.json` doesn't exist yet. |
+| `SWEEP_TARGETS` | `setups-long,setups-short,setups-vol,kalshi,bot` | Sweep targets run weekly. |
+| `RECORDINGS_GZIP_AFTER_DAYS` | `2` | Gzip recorded days older than this (0 = never). |
+| `RECORDINGS_MIN_FREE_GB` | `3` | Send a low-disk alert below this much free space. |
 | `AUTO_TRAIN_SNN_PBT_DAYS` / `AUTO_TRAIN_SNN_PBT_EVERY_DAYS` | `7` / `30` | SNN tournaments: days replayed, how often they rerun (docs/EVOLUTION.md has every tournament setting). |
 
 ## If something goes wrong
