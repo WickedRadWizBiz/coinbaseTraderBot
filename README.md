@@ -339,6 +339,17 @@ A new network retrains only the model that reads it, including when you swap one
 
 `docs/TA_NETWORK.md` covers the commands, the training, and the first real results.
 
+## Setup trader: fast and slow lanes (bot/setups)
+
+The perps trader trades chart setups the way a discretionary trader does. The full guide is [`docs/SETUPS.md`](docs/SETUPS.md).
+
+- **Fast lane:** 15m and 1h setups held for hours. Fade: RSI overbought, the band tagged, momentum fading, sellers stepping in. Pullback: a dip in a higher-timeframe trend.
+- **Slow lane:** daily trend setups held for days to weeks.
+- **Scoring:** a walk-forward model over the whole TA library on 4 timeframes, BTC, and a DST-correct market clock (NYSE open and close, holidays, the 11:00 ET hour, the last 30 minutes, the London and Tokyo opens, the CME break) decides which setups to take and how big.
+- **Queues:** candidates wait in their lane's queue and are re-checked on fresh data right before entry.
+- **Trade management:** half off at the first target, stop to break-even, the rest trailed.
+- **Commands:** `npm run research:setups` trains and backtests. `PERP_STRATEGY=setups` (the default) runs it live, on paper first with `PERPS_TRADING=paper`.
+
 ## Evolutionary initialisation and portfolio Kelly
 
 - **Every network starts as three:** the TA network and the crypto, perps and tennis SNNs each begin as three identical networks with slightly different knobs. They fight for fitness walk-forward (Sortino − drawdown − costs). The elite survives, the worst copies it, and the middle and the copy mutate. The elite becomes the network.
