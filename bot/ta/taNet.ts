@@ -60,7 +60,7 @@ const perAtr = (s: TfState, x: number) => (s.atr > 0 ? x / s.atr : NA);
 const sgn = (b: boolean | undefined) => (b === undefined ? NA : b ? 1 : 0);
 
 /** Readings of one timeframe, scale-free (ATR units, oscillators centred), prefixed by tf. */
-function tfFeatures(p: string, s: TfState | undefined, out: Record<string, number>, opts: { sma200: boolean; vwap: boolean }): void {
+export function tfFeatures(p: string, s: TfState | undefined, out: Record<string, number>, opts: { sma200: boolean; vwap: boolean }): void {
   const put = (k: string, v: number, lim = 10) => { out[`${p}_${k}`] = s ? clip(v, lim) : NA; };
   if (!s) { for (const k of TF_KEYS(opts)) out[`${p}_${k}`] = NA; return; }
   put('rsi', (s.rsi - 50) / 50);
@@ -126,16 +126,16 @@ function tfFeatures(p: string, s: TfState | undefined, out: Record<string, numbe
 const BASE_KEYS = ['rsi', 'rsi_chg', 'macd_atr', 'macd_chg_atr', 'macd_cross', 'adx', 'adx_chg', 'di', 'bb_pctb', 'bb_bw_rank', 'squeeze', 'squeeze_release', 'ema_stack', 'ema12_26', 'ema21_dist', 'ema50_dist', 'sma50_dist',
   'cloud', 'cloud_thick', 'cloud_future', 'tk_cross', 'tk_above', 'stoch', 'stoch_kd', 'stoch_cross', 'willr', 'obv_slope', 'cmf', 'mfi', 'vol_ratio', 'log_atr_pct', 'atr_rank', 'chg_atr', 'chg20_atr', 'donchian',
   'trend', 'bos', 'choch', 'sweep', 'breakout', 'eq_highs', 'eq_lows', 'div', 'hdiv', 'engulf', 'pin', 'doji', 'obv_div', 'obv_hdiv', 'fvg_dist', 'in_fvg', 'vp_pos', 'vp_reentry', 'vp_node', 'round_dist', 'round_cross'];
-function TF_KEYS(o: { sma200: boolean; vwap: boolean }): string[] {
+export function TF_KEYS(o: { sma200: boolean; vwap: boolean }): string[] {
   return [...BASE_KEYS, ...(o.sma200 ? ['sma200_dist', 'golden'] : []), ...(o.vwap ? ['vwap_dist'] : [])];
 }
 // 4h is built from the 280-bar hourly window (70 bars): no SMA200 there, live or in training. 15m reads
 // the last TANET_M15_BARS closed bars (live keeps 320, enough for that window 12 hours back).
-const TF_OPTS: Array<[Timeframe, string, { sma200: boolean; vwap: boolean }]> = [['1h', 'h1', { sma200: true, vwap: true }], ['4h', 'h4', { sma200: false, vwap: false }], ['1d', 'd1', { sma200: true, vwap: false }], ['15m', 'm15', { sma200: true, vwap: true }]];
+export const TF_OPTS: Array<[Timeframe, string, { sma200: boolean; vwap: boolean }]> = [['1h', 'h1', { sma200: true, vwap: true }], ['4h', 'h4', { sma200: false, vwap: false }], ['1d', 'd1', { sma200: true, vwap: false }], ['15m', 'm15', { sma200: true, vwap: true }]];
 export const TANET_M15_BARS = 256;
 
-const KIND_OF = new Map(RULES.map((r) => [r.id, r.kind]));
-const RULE_KINDS = ['trend', 'reversal', 'continuation', 'regime', 'volatility'] as const;
+export const KIND_OF = new Map(RULES.map((r) => [r.id, r.kind]));
+export const RULE_KINDS = ['trend', 'reversal', 'continuation', 'regime', 'volatility'] as const;
 
 /** Every input of the network, in order. */
 export const TANET_FEATURES: string[] = [
