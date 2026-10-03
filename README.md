@@ -348,7 +348,7 @@ The perps trader trades chart setups the way a discretionary trader does. The fu
 - **Scoring:** a walk-forward model over the whole TA library on 4 timeframes, BTC, and a DST-correct market clock (NYSE open and close, holidays, the 11:00 ET hour, the last 30 minutes, the London and Tokyo opens, the CME break) decides which setups to take and how big.
 - **Queues:** candidates wait in their lane's queue and are re-checked on fresh data right before entry.
 - **Trade management:** half off at the first target, stop to break-even, the rest trailed.
-- **Commands:** `npm run research:setups` trains and backtests. `PERP_STRATEGY=setups` (the default) runs it live, on paper first with `PERPS_TRADING=paper`.
+- **Commands:** `npm run research:setups` trains and backtests. `PERP_STRATEGY=setups` (the default) runs it live, on paper by default (`PERP_TRADING=paper`).
 
 ## Evolutionary initialisation and portfolio Kelly
 

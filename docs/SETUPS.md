@@ -111,7 +111,7 @@ See the latest section below; it's rewritten after every real-data run.
 | Setting | Default | Meaning |
 |---|---|---|
 | `PERP_STRATEGY` | `setups` | `setups` = this trader; `signal` = the older horizon-return trader |
-| `PERPS_TRADING` | `off` | `paper` simulates against live perp quotes; `live` sends real orders (needs `TRADING_MODE=live`) |
+| `PERP_TRADING` | `paper` | `paper` simulates against live perp quotes; `live` sends real orders (needs `TRADING_MODE=live`); `off` disables directional trading |
 | `SETUP_MODEL_PATH` | `params/setup_model.json` | The scorer (the pipeline's promoted copy wins when present) |
 | `SETUP_FAST_RISK` / `SETUP_SLOW_RISK` | 0.004 / 0.006 | Equity at risk per trade |
 | `SETUP_FAST_MAX_POSITIONS` / `SETUP_SLOW_MAX_POSITIONS` | 3 / 3 | Open trades per lane |
