@@ -27,7 +27,7 @@ import { detectAt, FAST_TFS, SLOW_TFS, setupSeries, TF_MS, type Lane, type Setup
 import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from '../bot/setups/exits';
 import { SETUP_FEATURES, setupFeatureMap, setupVector, type SetupBars } from '../bot/setups/features';
 import { DEFAULT_LANES, LaneBook, type LaneBookParams } from '../bot/setups/lanes';
-import { SETUP_SCHEMA, type LanePeriodStats, type LaneValidation, type SetupModelParams } from '../bot/setups/setupModel';
+import { laneScore, quantilesOf, rawPrediction, SETUP_SCHEMA, type LanePeriodStats, type LaneScorer, type SetupModelParams } from '../bot/setups/setupModel';
 
 const M15 = 900_000;
 const DAY = 86_400_000;
@@ -82,7 +82,7 @@ export function simulateSetup(A: AssetBars, sig: SetupSignal, costs: CostModel):
 }
 
 function cacheKey(): string {
-  return crypto.createHash('sha1').update(`${SETUP_SCHEMA}|${SETUP_FEATURES.join(',')}`).digest('hex').slice(0, 12);
+  return crypto.createHash('sha1').update(`features-1|${SETUP_FEATURES.join(',')}`).digest('hex').slice(0, 12);
 }
 
 /** Every setup of an asset with its standalone outcome and features (features cached on disk). */
@@ -135,7 +135,7 @@ const yOf = (e: SetupEvent) => Math.max(-2, Math.min(4, e.r));
 const MIN_MODEL_TRADES = 400;
 const MAX_TRAIN = 40_000;
 
-export interface LaneFit { model?: GbdtModel; meanR: number; trades: number }
+export type LaneFit = LaneScorer;
 
 export function fitLane(train: SetupEvent[], seed = 7): LaneFit {
   const meanR = train.length ? train.reduce((a, e) => a + yOf(e), 0) / train.length : 0;
@@ -146,10 +146,14 @@ export function fitLane(train: SetupEvent[], seed = 7): LaneFit {
   const tr = sorted.slice(0, cut), va = sorted.slice(cut);
   const X = tr.map((e) => Array.from(e.x)), Xv = va.map((e) => Array.from(e.x));
   const fit = trainGbdt(X, tr.map(yOf), tr.map(() => 1), tr.map(() => meanR), Xv, va.map(yOf), va.map(() => 1), va.map(() => meanR), { ...GBDT, seed });
-  return { model: fit.trees ? fit.model : undefined, meanR, trades: train.length };
+  if (!fit.trees) return { meanR, trades: train.length };
+  const out: LaneFit = { model: fit.model, meanR, trades: train.length };
+  // Calibration: where the model's predictions fall on trades it did not train on (the early-stopping set).
+  out.quantiles = quantilesOf(va.map((e) => rawPrediction(out, e.x)));
+  return out;
 }
 
-export const scoreWith = (f: LaneFit, x: ArrayLike<number>) => (f.model ? f.meanR + gbdtLogit({ ...f.model, baseScore: 0 }, Array.from(x)) : f.meanR);
+export const scoreWith = (f: LaneFit, x: ArrayLike<number>) => laneScore(f, x);
 
 /** Walk-forward out-of-sample scores (NaN before the first fold). */
 export function walkForward(events: SetupEvent[], lane: Lane, firstFold: number, foldMs: number, log: (m: string) => void): Float64Array {
@@ -275,7 +279,7 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
     s.forEach((v, i) => { if (Number.isFinite(v)) scores[i] = v; });
   }
   // minScore per lane on the development years only.
-  const GRID = [-Infinity, 0, 0.05, 0.1, 0.2, 0.3];
+  const GRID = [-Infinity, 0.5, 0.7, 0.8, 0.9, 0.95];
   const book: LaneBookParams = JSON.parse(JSON.stringify(DEFAULT_LANES));
   const validation: SetupModelParams['validation'] = {};
   for (const lane of ['fast', 'slow'] as const) {
@@ -287,9 +291,9 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
       log(`  ${lane} minScore ${th === -Infinity ? 'none' : th}: development ${tr.length} trades, net $${usd.toFixed(0)}`);
       if (usd > best.usd) best = { th, usd };
     }
-    const devScores = events.map((e, i) => (e.sig.lane === lane && e.at >= firstFold && e.at < holdoutFrom ? scores[i] : NaN)).filter((v) => Number.isFinite(v) && v >= best.th).sort((a, b) => a - b);
+    // Scores are percentiles: size 1x halfway between the threshold and the top.
     book[lane].minScore = best.th === -Infinity ? -1e9 : best.th;
-    book[lane].refScore = Math.max(0.05, devScores.length ? devScores[Math.floor(devScores.length / 2)] : 0.2);
+    book[lane].refScore = best.th === -Infinity ? 0.5 : (1 + best.th) / 2;
   }
   // Both lanes together, every period.
   const trades = backtestLanes(assets, events, scores, book, costs, equity, firstFold, end);

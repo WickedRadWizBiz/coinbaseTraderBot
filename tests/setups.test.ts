@@ -182,3 +182,17 @@ test('live setup trader: detects on a closed candle, queues, re-checks, enters w
   assert.equal(st.recentTrades[0].reason, 'stop');
   assert.ok(st.recentTrades[0].r < -0.9);
 });
+
+test('lane score: percentile of the prediction in the calibration quantiles; no model -> 1 or 0 by the lane average', async () => {
+  const { laneScore, quantilesOf } = await import('../bot/setups/setupModel');
+  const q = quantilesOf(Array.from({ length: 1001 }, (_, i) => i / 1000 - 0.5));
+  assert.equal(q.length, 101);
+  // A one-leaf "model" adding a constant to meanR.
+  const lane = (add: number) => ({ meanR: 0, trades: 1, quantiles: q, model: { baseScore: 0, trees: [[{ f: -1, t: 0, l: 0, r: 0, v: add }]] } as never });
+  assert.ok(Math.abs(laneScore(lane(0), []) - 0.5) < 0.01);
+  assert.ok(Math.abs(laneScore(lane(0.4), []) - 0.9) < 0.01);
+  assert.equal(laneScore(lane(9), []), 1);
+  assert.equal(laneScore(lane(-9), []), 0);
+  assert.equal(laneScore({ meanR: 0.3, trades: 10 }, []), 1);
+  assert.equal(laneScore({ meanR: -0.3, trades: 10 }, []), 0);
+});

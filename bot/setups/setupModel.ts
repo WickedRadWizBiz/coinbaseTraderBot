@@ -10,7 +10,37 @@ import type { CostModel } from './exits';
 import type { LaneBookParams } from './lanes';
 import { SETUP_FEATURES } from './features';
 
-export const SETUP_SCHEMA = '1';
+export const SETUP_SCHEMA = '2';
+
+/** One lane's scorer: a model predicting net R, and the distribution of its predictions on held-out
+ *  trades (101 quantiles). The score is the prediction's percentile in that distribution (0..1), so a
+ *  threshold like 0.9 means "the model's top 10%" whatever the scale of its raw output (an early-stopped
+ *  model with few trees predicts close to the lane average, which made absolute thresholds fall silent).
+ *  Without a model every setup scores 1 when the lane's average result is positive, else 0. */
+export interface LaneScorer { model?: GbdtModel; meanR: number; trades: number; quantiles?: number[] }
+
+export function rawPrediction(l: LaneScorer, x: ArrayLike<number>): number {
+  return l.model ? l.meanR + gbdtLogit({ ...l.model, baseScore: 0 }, Array.from(x)) : l.meanR;
+}
+
+export function laneScore(l: LaneScorer, x: ArrayLike<number>): number {
+  if (!l.model || !l.quantiles?.length) return l.meanR > 0 ? 1 : 0;
+  const v = rawPrediction(l, x), q = l.quantiles;
+  if (!Number.isFinite(v)) return NaN;
+  if (v <= q[0]) return 0;
+  if (v >= q[q.length - 1]) return 1;
+  let lo = 0, hi = q.length - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (q[m] <= v) lo = m; else hi = m; }
+  const f = q[hi] > q[lo] ? (v - q[lo]) / (q[hi] - q[lo]) : 0;
+  return (lo + f) / (q.length - 1);
+}
+
+/** 101 quantiles of a set of predictions. */
+export function quantilesOf(xs: number[]): number[] {
+  const s = xs.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!s.length) return [];
+  return Array.from({ length: 101 }, (_, i) => s[Math.min(s.length - 1, Math.round((i / 100) * (s.length - 1)))]);
+}
 
 export interface LaneValidation {
   /** Out-of-sample lane backtest per period (walk-forward scores, the lane book, costs). */
@@ -35,7 +65,7 @@ export interface SetupModelParams {
   version: string;
   schema: string;
   features: string[];
-  lanes: Partial<Record<Lane, { model?: GbdtModel; meanR: number; trades: number }>>;
+  lanes: Partial<Record<Lane, LaneScorer>>;
   book: LaneBookParams;
   costs: CostModel;
   /** Equity the dollar figures in the validation assume. */
@@ -57,11 +87,16 @@ export class SetupModel {
     return new SetupModel(p);
   }
 
-  /** Expected net R of a setup in a lane (x = setupVector). */
+  /** Percentile score of a setup in its lane (0..1; x = setupVector). */
   score(lane: Lane, x: number[]): number {
     const l = this.params.lanes[lane];
-    if (!l) return NaN;
-    return l.model ? l.meanR + gbdtLogit({ ...l.model, baseScore: 0 }, x) : l.meanR;
+    return l ? laneScore(l, x) : NaN;
+  }
+
+  /** The model's raw expected net R (for the record). */
+  expectedR(lane: Lane, x: number[]): number {
+    const l = this.params.lanes[lane];
+    return l ? rawPrediction(l, x) : NaN;
   }
 
   validated(lane: Lane): boolean { return Boolean(this.params.validation[lane]?.passed); }
