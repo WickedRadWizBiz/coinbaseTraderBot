@@ -29,7 +29,7 @@ Every member keeps a record of its evaluation windows. A copy inherits the elite
 
 **TA network** (`research/trainTaNet.ts`), over years of exchange history:
 - **Blocks:** a rolling 12-month training block (`TA_NET_TRAIN_MONTHS`, 12–18 recommended), a 1-month evaluation block, rolled forward one month at a time.
-- **What it trades in evaluation:** triple-barrier trades on its own forecasts: every hour a 4-hour trade sized by quarter-Kelly on P(up in 4h), take-profit and stop at ±1 forecast 4-hour sigma (the volatility forecast sets the barriers), first touch decides, 5 bp costs on entry and exit, equal capital per asset.
+- **What it trades in evaluation:** triple-barrier trades on its own forecasts: every hour a 4-hour trade sized by quarter-Kelly on P(up in 4h), take-profit and stop at ±1 forecast 4-hour sigma (the volatility forecast sets the barriers), first touch decides, 5 bp costs on entry and exit, equal capital per asset. A trade is only taken when P(up in 4h) is at least `minEdge` from 50%; `minEdge` is mutated like the other knobs. A member that trades fewer than 5% of the hours in a round scores up to −10 instead of the cash score of 0: in the first schema-5 run, sitting out kept winning until no member traded at all.
 - **Optimizer:** AdamW (decoupled weight decay, none on biases), learning rate capped at 0.003. Plain L2 inside Adam decayed schema 4's 15-minute and swing blocks to zero: Adam rescales the penalty into full-size steps for weights with a weak learning signal.
 - **Mutated knobs:** learning rate, weight decay, the weight of each branch (15-minute, hourly swing, hourly TA, daily, market context), the weight of the volatility head, and the drop-path probabilities (per join, per branch).
 

@@ -12,7 +12,8 @@
 // 2. Tournament: rolling training block (--train-months, 12-18), evaluation on the NEXT month, roll
 //    forward one month. Every member trains one epoch per round on its block, then is scored on the
 //    unseen month by trading the network's own position rule (fractional Kelly on its forecasts,
-//    taNetPosition): Fitness = Sortino - 5 x max drawdown - 5 x costs. Elite survives, worst clones
+//    taNetPosition): Fitness = Sortino - 5 x max drawdown - 5 x costs, and a member trading under 5% of
+//    the hours scores up to -10 (coverageFloor: sitting out must not win). Elite survives, worst clones
 //    it, middle + clone mutate (learning rate, L2, the 15m / hourly / daily branch gates, vol weight).
 //    The blocks deliberately cross the 2016-2026 regime shifts (research/fitness.ts REGIMES).
 // 3. Hurdles: the elite lineage's out-of-sample record, clustered into independent interactions
@@ -37,7 +38,7 @@ import {
   TANET_STRATEGY, TANET_SWING_BARS, TANET_SWING_F, TANET_TREND_FEATURES, TANET_TREND_STEPS, taNetDayVector, taNetFeatureMap, barrierResult, taNetBarrierPosition, taNetBarrierWidth, TANET_BARRIER, tripleBarrier, taNetMicro, taNetSwing, windowOk,
   type PatternReport, type TaNetHeadName, type TaNetNetworkValidation, type TaNetStrategy, type TaNetHeadValidation, type TaNetNorm, type TaNetParams, type TaNetStateCache,
 } from '../bot/ta/taNet';
-import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type Interaction } from './fitness';
+import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type FitnessReport, type Interaction } from './fitness';
 import { runPbt, walkForwardRounds, type Hyper, type MutationSpec, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
 import { loadIndexSeries, loadSeries, storedAssets } from './history/candles';
 import { DAILY_CONTEXT_FEATURES, TaNetContext } from '../bot/ta/taNetContext';
@@ -470,6 +471,17 @@ export function selectiveStats(D: TaNetData, f: Forecasts, strategy: TaNetStrate
   return { hours, taken, coverage: hours ? taken / hours : 0, hitRate: ph, hitLo: mid - half, hitHi: mid + half, netReturn: net };
 }
 
+/** Minimum share of hours a member must trade in a round. Without it, sitting out scores 0 (cash) and
+ *  beats every member that traded and lost, so the confidence threshold evolves until nothing trades
+ *  (schema-5 run: minEdge 0.14, 0 trades on the holdout). Below the floor the round scores up to -10,
+ *  the Sortino floor, scaled by how far short the member fell. */
+export const TANET_MIN_COVERAGE = 0.05;
+export function coverageFloor(rep: FitnessReport, taken: number, hours: number, min = TANET_MIN_COVERAGE): FitnessReport {
+  const cov = hours > 0 ? taken / hours : 0;
+  if (cov >= min) return rep;
+  return { ...rep, fitness: Math.min(rep.fitness, 0) - 10 * (1 - cov / min) };
+}
+
 export function strategyInteractions(D: TaNetData, f: Forecasts, strategy: TaNetStrategy = TANET_STRATEGY): Interaction[] {
   // Triple-barrier trades (bot/ta/taNet.ts tripleBarrier): every hour, a 4-hour trade sized by Kelly on
   // P(up in 4h), with take-profit / stop at +/- 1 forecast 4-hour sigma; first touch decides, costs on
@@ -624,7 +636,7 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
       evaluate: (s, h, r: PbtRound) => {
         const idx = between(r.evalFrom, r.evalTo);
         const xs = strategyInteractions(D, forecast(D, dims, norm, s.w, h, idx), strategyOf(h));
-        return { report: fitnessOf(xs, { from: r.evalFrom, to: r.evalTo, clusterMs: H }), interactions: independentInteractions(xs, H) };
+        return { report: coverageFloor(fitnessOf(xs, { from: r.evalFrom, to: r.evalTo, clusterMs: H }), xs.length, idx.length), interactions: independentInteractions(xs, H) };
       },
     },
     onRound: ({ members, trials, log: plog, round }) => save(members, trials, plog, round.evalTo, round.index + 1),

@@ -185,7 +185,35 @@ What it does:
 
 Live, every forecast is also graded against the candles that follow. `tanet_skill_1h` and `tanet_skill_4h` are the network's rolling skill over its last 168 graded calls.
 
-## 3. Real results: market context and BTC dominance (schema 4; Binance spot + Binance's BTCDOM index, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
+## 3. Real results: AdamW, OBV divergence, triple-barrier fitness, confidence threshold (schema 5; Binance spot + BTCDOM, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
+
+**Setup:** 83 monthly rounds (249 member evaluations), AdamW, continuous OBV divergence, triple-barrier trades as the fitness, the confidence threshold `minEdge` evolved by the tournament. Untouched holdout 2026-05-02 to 2026-08-02; frozen final window 2026-08-02 to 2026-10-02, evaluated once.
+
+| Check | Result | Passes |
+|---|---|---|
+| Holdout, `vol_4h` | MSE 0.330 vs 0.413 (20% lower), CI +0.060 to +0.109; holds on the final window | **yes: speaks live** |
+| Holdout, `up_1h` | log loss 0.69261 vs 0.69316, CI −0.0012 to +0.0021, hit rate 50.9% | no |
+| Holdout, `up_4h` | log loss 0.69276 vs 0.69296, CI −0.0039 to +0.0039, hit rate 52.0% | no |
+| Barrier trades taken (holdout and final window) | 0 of 11,040 and 0 of 7,300 hours | no (see below) |
+| Deflated Sharpe | no out-of-sample trades to test | no |
+
+**The tournament learned to sit out.** A month with no trades scored 0, which beat every member that traded and lost, so `minEdge` climbed from 0.02 to 0.14 (trade only when P(up in 4h) is below 36% or above 64%). The network's largest holdout edge was 0.116, so the elite never traded. From round 79 on, members that took no trades won every round. Fixed: a member that trades fewer than 5% of the hours now scores up to −10 (`coverageFloor` in `research/trainTaNet.ts`), so sitting out ranks below trading and losing.
+
+**Selective trading would not have helped either.** The elite's holdout win rate by confidence (diagnostic on the holdout only; the final window stays unseen):
+
+| Hours traded (most confident) | Trades | Win rate (95% CI) | Net |
+|---|---|---|---|
+| top 50% | 5,521 | 50.6% (49.3–52.0) | −29.9% |
+| top 20% | 2,209 | 51.2% (49.1–53.2) | −10.5% |
+| top 10% | 1,105 | 49.4% (46.5–52.4) | −7.4% |
+| top 5% | 553 | 51.2% (47.0–55.3) | −2.9% |
+| top 1% | 112 | 57.1% (47.9–65.9) | −0.3% |
+
+Every interval includes 50%. Higher confidence does not mean more wins, so the direction heads are not calibrated: the network is not more often right when it is surer. Costs make every slice lose.
+
+AdamW did its job on the weights: the elite's branch gates stayed balanced (micro 0.94, swing 1.05, trend 0.85, daily 1.82, context 0.31), and the volatility forecast is the best so far (0.330, against 0.376 in schema 4 and 0.361 in schema 3). But the pattern report's direction log loss is 0.69315 with every column, which is exactly a coin flip, so no single pattern scale carries direction either.
+
+## 3a. Real results: market context and BTC dominance (schema 4; Binance spot + Binance's BTCDOM index, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
 
 **Setup:** 85 monthly rounds (255 member evaluations), exploration restarts with the grace period and catch-up epochs, untouched holdout 2026-07-02 to 2026-10-02. Context: the 5-coin basket and BTCDOM from June 2021. No TradingView BTC.D / USDT.D history was available for this run, so the daily dominance inputs were empty; the server's tournament adds them once `history.sh tradingview` has run.
 
@@ -197,11 +225,11 @@ Live, every forecast is also graded against the candles that follow. `tanet_skil
 | Elite lineage's out-of-sample record | Sharpe −0.42 vs 0.18 expected from luck with 255 trials; DSR probability 0.00 | no |
 | Holdout, position rule | net −10.0%, max drawdown 20.3% | no |
 
-The elite's branch weights: daily 2.0 (the maximum), hourly swing 1.67, hourly TA 1.36, 15-minute 0.83, market context 0.39 (turned down). Its learning rate hit the maximum (0.01), and the 15-minute and swing blocks' input weights decayed to almost zero, so this model's pattern report is close to empty (schema 3's report above is the informative one). The cause is L2 regularisation applied inside Adam: for weights with a weak learning signal, Adam rescales the shrinkage into full-size steps toward zero. Decoupled weight decay (AdamW) is the standard fix.
+The elite's branch weights: daily 2.0 (the maximum), hourly swing 1.67, hourly TA 1.36, 15-minute 0.83, market context 0.39 (turned down). Its learning rate hit the maximum (0.01), and the 15-minute and swing blocks' input weights decayed to almost zero, so this model's pattern report is close to empty (schema 3's report below is the informative one). The cause is L2 regularisation applied inside Adam: for weights with a weak learning signal, Adam rescales the shrinkage into full-size steps toward zero. Decoupled weight decay (AdamW) is the standard fix.
 
 The context did not add a measurable edge on this holdout: the volatility forecast is within noise of schema 3's (0.376 vs 0.361, overlapping intervals), and direction is still a coin flip.
 
-## 3a. Real results: fractal network with order flow (schema 3; Binance spot with taker volume, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
+## 3b. Real results: fractal network with order flow (schema 3; Binance spot with taker volume, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
 
 **Setup:** 85 monthly rounds (255 member evaluations), exploration restarts every 6 rounds, untouched holdout 2026-07-02 to 2026-10-02. The last 10 rounds already ran with the newcomer grace period and catch-up epochs: the round-77 newcomer won round 78 outright.
 
@@ -235,7 +263,7 @@ What it means:
 - **Divergences are not rebuilt** by any column (0.16 at most): they need an indicator compared across two swings, which small convolutions over raw bars don't reconstruct. The library's divergence readings are the only source of that information.
 - **No column has a direction edge**, alone or together. The volatility forecast comes from the short columns; the deep ones add nothing to it.
 
-## 3b. Real results of the first tournament (schema 2, before the fractal blocks and order flow; Binance spot, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
+## 3c. Real results of the first tournament (schema 2, before the fractal blocks and order flow; Binance spot, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
 
 **Setup:** 85 monthly rounds from mid-2019 to June 2026, 255 member evaluations (trials), and an untouched holdout from 2026-07-02 to 2026-10-02.
 

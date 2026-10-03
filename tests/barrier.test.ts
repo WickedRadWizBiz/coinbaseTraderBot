@@ -61,3 +61,14 @@ test('OBV divergence strength: hidden bullish positive, regular bearish negative
   const sc = obvDivergenceStrength(cut, obv(cut), 0.5, swings(cut));
   assert.equal(sc.hidden, 0, 'the second low is not confirmed yet');
 });
+
+test('coverage floor: sitting out a round loses to trading, a member above the floor is unchanged', async () => {
+  const { coverageFloor, TANET_MIN_COVERAGE } = await import('../research/trainTaNet');
+  const rep = { fitness: 0, sortino: 0, maxDrawdown: 0, costs: 0, netReturn: 0, interactions: 0, independent: 0, days: 30 };
+  assert.equal(coverageFloor(rep, 0, 1000).fitness, -10);
+  const losing = { ...rep, fitness: -3 };
+  assert.equal(coverageFloor(losing, 100, 1000), losing, 'above the floor: unchanged');
+  assert.ok(coverageFloor(rep, 0, 1000).fitness < losing.fitness, 'no trades ranks below a losing trader');
+  const half = coverageFloor({ ...rep, fitness: 4 }, (TANET_MIN_COVERAGE / 2) * 1000, 1000);
+  assert.ok(Math.abs(half.fitness - -5) < 1e-9, 'half the floor: a lucky few trades cannot score positive');
+});
