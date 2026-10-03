@@ -431,6 +431,21 @@ export interface PerpsConfig {
   minEquityUsd: number;
   maxOrderNotionalUsd: number;
   collarBps: number;
+  /** Directional strategy: setups = the fast / slow lane setup trader (bot/setups), signal = the
+   *  horizon-return signal (PerpTrader). */
+  strategy: 'signal' | 'setups';
+  /** Setup scorer (research:setups). */
+  setupModelPath: string;
+  /** Equity at risk per trade (entry to stop) in the fast / slow lane. */
+  setupFastRisk: number;
+  setupSlowRisk: number;
+  setupFastMax: number;
+  setupSlowMax: number;
+  /** Total and per-asset notional caps as multiples of equity. */
+  setupMaxLeverage: number;
+  setupMaxAssetLeverage: number;
+  /** Daily profit goal shown on the dashboard (it does not change how the bot trades). */
+  setupDailyGoalUsd: number;
 }
 
 export class ConfigError extends Error {}
@@ -773,6 +788,15 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         minEquityUsd: num(env, 'PERP_MIN_EQUITY_USD', 5, 0, 1e9),
         maxOrderNotionalUsd: num(env, 'PERP_MAX_ORDER_NOTIONAL_USD', 1000, 1, 1e9),
         collarBps: num(env, 'PERP_COLLAR_BPS', 150, 5, 2000),
+        strategy: oneOf(env, 'PERP_STRATEGY', 'setups', ['signal', 'setups'] as const),
+        setupModelPath: path.resolve(env.SETUP_MODEL_PATH ?? './params/setup_model.json'),
+        setupFastRisk: num(env, 'SETUP_FAST_RISK', 0.004, 0.0005, 0.05),
+        setupSlowRisk: num(env, 'SETUP_SLOW_RISK', 0.006, 0.0005, 0.05),
+        setupFastMax: num(env, 'SETUP_FAST_MAX_POSITIONS', 3, 0, 20),
+        setupSlowMax: num(env, 'SETUP_SLOW_MAX_POSITIONS', 3, 0, 20),
+        setupMaxLeverage: num(env, 'SETUP_MAX_LEVERAGE', 3, 0.1, 20),
+        setupMaxAssetLeverage: num(env, 'SETUP_MAX_ASSET_LEVERAGE', 1.5, 0.1, 20),
+        setupDailyGoalUsd: num(env, 'SETUP_DAILY_GOAL_USD', 100, 0, 1e9),
       };
     })(),
     autoTrain: {

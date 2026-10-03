@@ -31,7 +31,7 @@ import type { Tca } from './tca/tca';
 import type { MacroEvent } from './model/featureEngine';
 import { ladderQuotes } from './model/ladder';
 import type { BinaryExposure, DirectionalContext, PerpHedger } from './perps/hedger';
-import type { PerpTrader } from './perps/perpTrader';
+import type { DirectionalTrader } from './perps/hedger';
 import { decideMatch, MatchTracker, type MatchMarket } from './tennis/tennisStrategy';
 import { parseTennisScore } from './tennis/liveScore';
 import { diffScore, findMatch, toTennisScore, type LiveTennisMatch, type TennisScoreClient } from './tennis/liveTennisApi';
@@ -148,7 +148,7 @@ export interface EngineDeps {
   /** Local clock vs Kalshi's server time. */
   clock?: ClockSkewMonitor;
   /** Stage 3 directional perp trading (targets combined with the hedge by the executor). */
-  perpTrader?: PerpTrader;
+  perpTrader?: DirectionalTrader;
   /** Live Tennis API client (TENNIS_SCORE_FEED=livetennis). */
   tennisScores?: TennisScoreClient;
   /** Tennis MLP (fair P(A wins)); gates tennis entries once validated. */

@@ -22,6 +22,9 @@ import { EquityGuard } from './risk/equityGuard';
 import { PerpHedger } from './perps/hedger';
 import { PerpModel } from './perps/perpSignal';
 import { PerpTrader } from './perps/perpTrader';
+import type { DirectionalTrader } from './perps/hedger';
+import { SetupTrader } from './setups/setupTrader';
+import { DEFAULT_LANES } from './setups/lanes';
 import { PaperPerpExchange } from './perps/paperPerp';
 import { KalshiPerpsRest, type PerpGateway } from './perps/perpRest';
 import { BalanceMonitor, type MonitorState } from './vault/balanceMonitor';
@@ -138,6 +141,7 @@ async function main(): Promise<void> {
   let engineRef: Engine | undefined;
   let hedger: PerpHedger | undefined;
   let perpTrader: PerpTrader | undefined;
+  let directionalTrader: DirectionalTrader | undefined;
   const P = cfg.perps;
   const perpsWanted = P.hedge !== 'off' || P.trading !== 'off';
   if (perpsWanted && !P.feed) log.warn('perp hedging/trading needs PERPS_FEED=true; perps disabled');
@@ -164,7 +168,26 @@ async function main(): Promise<void> {
       params: { minDollarDelta: P.minDollarDelta, maxNotionalUsd: P.maxNotionalUsd, excludeTauSec: P.excludeTauSec, repriceSec: P.repriceSec, takerAfterSec: P.takerAfterSec },
       risk: { maxOrderNotionalUsd: P.maxOrderNotionalUsd, collarBps: P.collarBps },
     });
-    if (P.trading !== 'off') {
+    if (P.trading !== 'off' && P.strategy === 'setups') {
+      // Fast / slow lane setup trader (bot/setups): levels from spot candles, orders on the perps.
+      directionalTrader = new SetupTrader({
+        params: {
+          book: {
+            fast: { ...DEFAULT_LANES.fast, maxPositions: P.setupFastMax, riskFrac: P.setupFastRisk },
+            slow: { ...DEFAULT_LANES.slow, maxPositions: P.setupSlowMax, riskFrac: P.setupSlowRisk },
+            maxLeverage: P.setupMaxLeverage, maxAssetLeverage: P.setupMaxAssetLeverage,
+          },
+          costs: { entry: (P.takerFeeBps + 2) / 1e4, makerExit: P.makerFeeBps / 1e4, takerExit: (P.takerFeeBps + 2) / 1e4, fundingPer8h: 0.0001 },
+          dailyLossFrac: P.dailyLossFrac, minEquityUsd: P.minEquityUsd, pilotMaxNotionalUsd: P.pilotMaxNotionalUsd, requireValidation: P.requireValidation, dailyGoalUsd: P.setupDailyGoalUsd,
+        },
+        hub, gateway: perpGateway, audit, modelPath: () => resolveModelPaths(cfg).setups, statePath: path.join(cfg.dataDir, 'setups_state.json'),
+        candles: (asset) => md.features.candles.get(asset),
+        spot: (asset, now) => md.spot.get(asset)?.fresh(now, 15_000)?.value ?? md.index.get(asset)?.fresh(now, 15_000)?.value,
+      });
+      const st = (directionalTrader as SetupTrader).status();
+      if (st.modelError) log.warn(`setup trader: ${st.modelError}; it records setups but opens no trades until a model exists`);
+      else log.info('setup trader', { model: st.model?.version, fast: st.model?.fast.validated, slow: st.model?.slow.validated });
+    } else if (P.trading !== 'off') {
       const perpModel = PerpModel.load(modelPaths.perp);
       if (!perpModel) log.warn(`no perp model at ${P.modelPath}: trading the momentum prior at pilot size ($${P.pilotMaxNotionalUsd}, ${P.pilotMaxLeverage}x)`);
       else if (!perpModel.validated()) log.warn(`perp model ${perpModel.params.version} not validated (${perpModel.blockers().join('; ')}): pilot size only`);
@@ -178,6 +201,7 @@ async function main(): Promise<void> {
         hub, gateway: perpGateway, model: perpModel, audit,
         sources: (asset) => ({ index: md.index.get(asset), spot: md.spot.get(asset), bars: md.features.bars.get(asset), candles: md.features.candles.get(asset), usdtd: md.usdtd, btcd: md.btcd, perp: hub.get(asset), snn: engineRef?.snnContext(asset, undefined, 'perps') }),
       });
+      directionalTrader = perpTrader;
     }
     kill.bindCancelAll(async (reason) => { await oms.cancelAll(reason); await hedger!.cancelAll(reason); });
     log.info('perps enabled', { hedge: P.hedge, trading: P.trading, gateway: perpGateway.name });
@@ -220,7 +244,7 @@ async function main(): Promise<void> {
     activeTaNet()?.enableForwardTest(path.join(cfg.dataDir, 'ta_net_forward.json'), Date.now(), { days: cfg.taNet.forwardDays, muteOnFail: cfg.taNet.muteOnForwardFail });
     log.info('TA network loaded', { version: taNet.version, validatedHeads: taNet.active(true) });
   }
-  const engine: Engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
+  const engine: Engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
   engineRef = engine;
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();

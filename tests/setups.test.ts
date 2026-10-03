@@ -127,3 +127,58 @@ test('lane book: queue by score, re-check before entry, slow lane first, one pos
   b4.offer({ ...sig('F', 'fast'), stop: 99.9, atr: 0.2 }, 0.2, 0);
   assert.equal(b4.select(1, 10_000, () => ({ px: 100, score: 0.2 }))[0].notional, 20_000);
 });
+
+test('live setup trader: detects on a closed candle, queues, re-checks, enters with an exchange stop, exits on the stop', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { CandleSet } = await import('../bot/ta/candleStore');
+  const { PerpHub } = await import('../bot/perps/perpData');
+  const { SetupTrader, defaultSetupParams } = await import('../bot/setups/setupTrader');
+  const { SETUP_FEATURES } = await import('../bot/setups/features');
+  const { SETUP_SCHEMA } = await import('../bot/setups/setupModel');
+  const { DEFAULT_LANES } = await import('../bot/setups/lanes');
+  // Find a 15m setup in a synthetic series; the candle store holds the bars up to and including it.
+  const all = walk(3000, 11);
+  const s = setupSeries(all, '15m');
+  let at = -1;
+  for (let i = 1500; i < all.length - 50; i++) if (detectAt('BTC', '15m', s, i)?.lane === 'fast') { at = i; break; }
+  assert.ok(at > 0, 'a setup exists');
+  const sig = detectAt('BTC', '15m', s, at)!;
+  const dir = tmpDir();
+  function tmpDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'setups-')); }
+  const modelFile = path.join(dir, 'setup_model.json');
+  fs.writeFileSync(modelFile, JSON.stringify({
+    version: 'test', schema: SETUP_SCHEMA, features: SETUP_FEATURES, lanes: { fast: { meanR: 0.4, trades: 1000 }, slow: { meanR: 0.4, trades: 100 } },
+    book: { ...DEFAULT_LANES, fast: { ...DEFAULT_LANES.fast, minScore: 0.1, refScore: 0.4 } }, costs: {}, equityUsd: 10000,
+    validation: { fast: { periods: {}, trials: 1, passed: true, reasons: [] } }, trainedAt: '', data: {},
+  }));
+  const set = new CandleSet('BTC');
+  const now = all[at].ts + 900_000 + 5_000;
+  set.add('15m', all.slice(0, at + 1).slice(-320), now);
+  const hourly = (k: number) => all.slice(0, at + 1).filter((c) => c.ts % 3_600_000 === 0).slice(-k);
+  set.add('1h', hourly(320).map((c) => ({ ...c })), now);
+  const hub = new PerpHub();
+  const px = { v: sig.ref };
+  hub.apply({ ticker: 'BTC-PERP', asset: 'BTC', ts: now, bid: px.v * 1.001 - 0.01, ask: px.v * 1.001 + 0.01, fractional: true });
+  const gateway = { name: 'fake', createOrder: async () => { throw new Error('no'); }, cancelOrder: async () => {}, getOpenOrders: async () => [], getPositions: async () => [], getBalance: async () => ({ equity: 10_000, available: 10_000 }) } as never;
+  const trader = new SetupTrader({ params: defaultSetupParams({ pilotMaxNotionalUsd: 1e9 }), hub, gateway, modelPath: modelFile, statePath: path.join(dir, 'state.json'), candles: (a) => (a === 'BTC' ? set : undefined), spot: () => px.v });
+  const t1 = await trader.targets({ positions: new Map(), hedge: [], now }, {});
+  const tgt = t1.find((t) => t.asset === 'BTC')!;
+  assert.notEqual(tgt.target, 0, `entered: ${tgt.reason}`);
+  assert.equal(Math.sign(tgt.target), sig.dir);
+  assert.ok(tgt.stopPrice && Math.abs(tgt.stopPrice / (sig.stop * 1.001) - 1) < 1e-3, 'exchange stop = spot stop x perp/spot ratio');
+  assert.ok(fs.existsSync(path.join(dir, 'state.json')), 'book saved');
+  // A restarted trader resumes the open trade.
+  const again = new SetupTrader({ params: defaultSetupParams({ pilotMaxNotionalUsd: 1e9 }), hub, gateway, modelPath: modelFile, statePath: path.join(dir, 'state.json'), candles: () => set, spot: () => px.v });
+  assert.equal(again.book.positions.size, 1);
+  // Price through the stop: flat, urgent, recorded as a stop.
+  px.v = sig.stop - sig.dir * sig.atr;
+  hub.apply({ ticker: 'BTC-PERP', asset: 'BTC', ts: now + 60_000, bid: px.v - 0.01, ask: px.v + 0.01 });
+  const t2 = await trader.targets({ positions: new Map([['BTC-PERP', { ticker: 'BTC-PERP', position: tgt.target } as never]]), hedge: [], now: now + 60_000 }, {});
+  const out = t2.find((t) => t.asset === 'BTC')!;
+  assert.equal(out.target, 0); assert.equal(out.urgent, true);
+  const st = trader.status();
+  assert.equal(st.recentTrades[0].reason, 'stop');
+  assert.ok(st.recentTrades[0].r < -0.9);
+});

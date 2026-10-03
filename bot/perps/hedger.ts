@@ -118,6 +118,12 @@ export function hedgeTargets(
 
 export interface DirectionalContext { positions: Map<string, PerpPosition>; hedge: HedgeTarget[]; now: number }
 
+/** A directional strategy the executor drives (PerpTrader, SetupTrader). */
+export interface DirectionalTrader {
+  targets(c: DirectionalContext, guards: { halt?: string; noEntry?: string; lockedFrac?: number }): Promise<DirTarget[]>;
+  status(): object;
+}
+
 export class PerpHedger {
   private orders = new Map<string, { order: PerpOrder; placedTs: number; reduce: boolean; firstTs: number }>();
   private positions = new Map<string, PerpPosition>();

@@ -14,7 +14,7 @@
 import { evaluate } from '../ta/analyzer';
 import { CONFLUENCES } from '../ta/knowledge';
 import type { Candle } from '../ta/indicators';
-import { KIND_OF, RULE_KINDS, taNetStates, TANET_H1_BARS, TF_KEYS, TF_OPTS, tfFeatures } from '../ta/taNet';
+import { closedIndex, KIND_OF, RULE_KINDS, taNetStates, TANET_D1_BARS, TANET_H1_BARS, TF_KEYS, TF_OPTS, tfFeatures } from '../ta/taNet';
 import { marketClockFeatures, MARKET_CLOCK_FEATURES } from '../model/sessions';
 import type { SetupSignal } from './detectors';
 import { TF_MS } from './detectors';
@@ -41,14 +41,20 @@ export interface SetupBars { m15?: Candle[]; h1: Candle[]; d1?: Candle[] }
 
 /** Hourly window closed by t (the TA network's window length). */
 export function h1Window(h1: Candle[], t: number): Candle[] {
-  let j = h1.length - 1;
-  while (j >= 0 && h1[j].ts + 3_600_000 > t) j--;
+  const j = closedIndex(h1, 3_600_000, t);
   return j < 0 ? [] : h1.slice(Math.max(0, j - TANET_H1_BARS + 1), j + 1);
+}
+
+/** Daily bars closed by t, the last TANET_D1_BARS + 10 of them (taNetStates reads 250). */
+function d1Upto(d1: Candle[] | undefined, t: number): Candle[] | undefined {
+  if (!d1) return undefined;
+  const j = closedIndex(d1, 86_400_000, t);
+  return j < 0 ? [] : d1.slice(Math.max(0, j - TANET_D1_BARS - 10), j + 1);
 }
 
 function taMap(prefix: string, bars: SetupBars, t: number, out: Record<string, number>, tfs = TF_OPTS, withConf = true): void {
   const h1 = h1Window(bars.h1, t);
-  const states = h1.length >= 30 ? taNetStates(h1, bars.d1, t, undefined, bars.m15) : {};
+  const states = h1.length >= 30 ? taNetStates(h1, d1Upto(bars.d1, t), t, undefined, bars.m15) : {};
   for (const [tf, p, o] of tfs) tfFeatures(`${prefix}${p}`, states[tf], out, o);
   if (!withConf) return;
   const snap = evaluate('', states, t);
