@@ -12,6 +12,13 @@
 //                    networks initialises it, later runs continue the tournament as new months
 //                    arrive (every TA_NET_RETRAIN_DAYS) -> promote ta_net.json; its forecasts are
 //                    features of vol_model, mlp and perps below (kept only if their validation improves)
+//   0c. ta_net_oos   walk-forward forecasts of that network over all history (research/taNetOos.ts),
+//                    extended month by month -> inputs of the setup scorer; promote ta_net_wf.json (the
+//                    walking network, read live by the setup trader)
+//   0d. setups       setup scorer for the fast / slow lanes (TA network inputs kept only if they help)
+//   0e. setup_snn    does the perps SNN help the setup trader? Tested on the bot's own setup journal
+//                    (research/setupSnnStudy.ts); writes setup_snn_gate.json, on only once proven
+//   0f. sweep        sweep optimizer proposals (setups per side, the volatility trail, kalshi, the whole bot)
 //   1. snn           per replayable network (crypto: 15m/1h with contracts; perps: 1h/4h, graded on
 //                    direction calls): ablation when due -> population tournament of three identical
 //                    networks (snnPbt.ts; the elite's knobs) -> train at the best accepted stage ->
@@ -31,7 +38,7 @@
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: history, ta_net, setups, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill
+//   npm run pipeline -- --only mlp,perps     # steps: history, ta_net, ta_net_oos, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
 
@@ -62,6 +69,10 @@ import { trainTennisMain } from './trainTennisModel';
 import { trainTaNetMain } from './trainTaNet';
 import { trainSetupMain } from './trainSetupModel';
 import { sweepMain } from './sweep';
+import { recordingDayList, recordingsUsage } from '../bot/marketdata/recordingFiles';
+import { readJournalTrades } from '../bot/setups/journal';
+import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
+import { exportTaNetOos, oosDir } from './taNetOos';
 import { BINANCE_INDEXES, downloadBinance, type BinanceMarket } from './history/binanceVision';
 import { compareIndexSources } from '../bot/marketdata/historyStore';
 import { backfillCoinbase } from './history/coinbaseBackfill';
@@ -69,7 +80,7 @@ import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
 import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
 
-export const STEPS = ['history', 'ta_net', 'setups', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill'] as const;
+export const STEPS = ['history', 'ta_net', 'ta_net_oos', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -108,10 +119,19 @@ export interface PipelineState {
   /** Promoted setup model (fast / slow lanes) and when it was trained. */
   setupsVersion?: string;
   setupsTrainedAt?: number;
+  /** What the recordings make testable so far (see the readiness block of each report). */
+  readiness?: Readiness;
   /** Last sweep run per target. */
   sweptAt?: Record<string, number>;
   lastHistoryUpdate?: number;
   lastReport?: string;
+}
+
+/** Data-growth progress: which recording-based steps can run, and how far the others are. */
+export interface Readiness {
+  recordedDays: number; firstDay: string | null; lastDay: string | null; recordingsGb: number; freeGb: number | null;
+  /** Per step that needs recordings: days or trades it has / needs. */
+  gates: Record<string, { have: number; need: number; ready: boolean }>;
 }
 
 /** Thrown by a step that has nothing to do yet (e.g. no perp quotes recorded): reported as skipped. */
@@ -130,10 +150,9 @@ function writeAtomic(file: string, text: string): void {
   fs.renameSync(tmp, file);
 }
 
-/** Recording days present (md-YYYY-MM-DD.jsonl), sorted. */
+/** Recording days present (md-YYYY-MM-DD.jsonl or .jsonl.gz), sorted. */
 export function recordingDays(dir: string): string[] {
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).map((f) => /^md-(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(f)?.[1]).filter((d): d is string => Boolean(d)).sort();
+  return recordingDayList(dir);
 }
 
 const dayMs = (d: string) => Date.parse(`${d}T00:00:00Z`);
@@ -196,6 +215,21 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   };
   const tooFew = days.length < A.minDays ? `only ${days.length} day(s) of recordings in ${rec} (< AUTO_TRAIN_MIN_DAYS=${A.minDays})` : undefined;
   const lastDays = (n: number) => (days.length ? days.slice(-n) : []);
+  // How far the recordings have grown (and what that unlocks): reported every run.
+  {
+    const u = recordingsUsage(rec);
+    const journalTrades = readJournalTrades(path.join(cfg.dataDir, 'setups')).filter((t) => t.snn_up1 !== null || t.snn_up4 !== null).length;
+    const g = (have: number, need: number) => ({ have, need, ready: have >= need });
+    state.readiness = {
+      recordedDays: days.length, firstDay: days[0] ?? null, lastDay: days[days.length - 1] ?? null, recordingsGb: +(u.bytes / 1e9).toFixed(2), freeGb: u.freeBytes !== undefined ? +(u.freeBytes / 1e9).toFixed(1) : null,
+      gates: {
+        'snn / mlp / perps / vol_model (AUTO_TRAIN_MIN_DAYS)': g(days.length, A.minDays),
+        'sweep kalshi': g(days.length, 20), 'sweep bot (whole-bot replay)': g(days.length, 20),
+        'setup_snn gate': g(journalTrades, SNN_GATE_MIN_TRADES),
+      },
+    };
+    log(`recordings: ${days.length} day(s)${days.length ? ` ${days[0]}..${days[days.length - 1]}` : ''}, ${state.readiness.recordingsGb} GB${state.readiness.freeGb !== null ? `, ${state.readiness.freeGb} GB free` : ''}; ${Object.entries(state.readiness.gates).map(([k, v]) => `${k} ${v.have}/${v.need}`).join(', ')}`);
+  }
   const mlpPath = () => (fs.existsSync(promoted('mlp')) ? promoted('mlp') : fs.existsSync(cfg.paramsPath) ? cfg.paramsPath : undefined);
 
   // ---- 0. History and the TA network (no recordings needed: years of exchange candles) ----
@@ -257,7 +291,20 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     }, !T.enabled ? 'TA_NET=false' : noHistory ?? (due ? undefined : `trained ${((now - state.taNetTrainedAt!) / 86_400_000).toFixed(1)} day(s) ago (TA_NET_RETRAIN_DAYS=${T.retrainEveryDays})`));
   }
 
-  // ---- 0c. Setup scorer for the fast / slow lane trader (years of 15m / 1h / daily candles) ----
+  // ---- 0c. Walk-forward TA network forecasts for the setup scorer (and the walking network for live) ----
+  if (want('ta_net_oos')) {
+    const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet`;
+    await run('ta_net_oos', async () => {
+      const params = fs.existsSync(taNetFile) && taNetFileSchema(taNetFile) === TANET_SCHEMA ? taNetFile : T.modelPath;
+      if (!fs.existsSync(params)) throw new SkipStep('no TA network yet');
+      const r = await exportTaNetOos(T.historyDir, { paramsPath: params, cacheDir: path.join(work, 'tanet-cache'), hours: A.taNetOosHours, log });
+      const wf = path.join(oosDir(T.historyDir), 'ta_net_wf.json');
+      if (r.complete && fs.existsSync(wf)) fs.copyFileSync(wf, promoted('ta_net_wf'));
+      return { ...r, promoted: r.complete };
+    }, cfg.perps.strategy !== 'setups' ? 'PERP_STRATEGY is not setups' : !T.enabled ? 'TA_NET=false' : noHistory);
+  }
+
+  // ---- 0d. Setup scorer for the fast / slow lane trader (years of 15m / 1h / daily candles) ----
   if (want('setups')) {
     const file = promoted('setups');
     const P = cfg.perps;
@@ -265,18 +312,29 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet`;
     await run('setups', async () => {
       const cand = path.join(work, 'setup_model.candidate.json');
-      const p = await trainSetupMain(argsOf({ history: T.historyDir, out: cand, equity: P.paperBalanceUsd > 100 ? P.paperBalanceUsd : 10_000 }));
+      const oosCand = path.join(work, 'setup_oos.candidate.json');
+      const p = await trainSetupMain(argsOf({ history: T.historyDir, out: cand, 'oos-out': oosCand, equity: P.paperBalanceUsd > 100 ? P.paperBalanceUsd : 10_000 }));
       state.setupsTrainedAt = now;
       const validated = (['fast', 'slow'] as const).filter((l) => p.validation[l]?.passed);
       const summary = { version: p.version, validated, holdout: Object.fromEntries((['fast', 'slow'] as const).map((l) => [l, p.validation[l]?.periods.holdout])), reasons: Object.fromEntries((['fast', 'slow'] as const).map((l) => [l, p.validation[l]?.reasons])) };
       if (A.promote === 'validated' && !validated.length) return { promoted: false, reason: 'no lane passed its holdout and final window', ...summary };
       fs.copyFileSync(cand, file);
+      // Its recent out-of-sample setups, for the whole-bot replay (research/wholeBot.ts).
+      if (fs.existsSync(oosCand)) fs.copyFileSync(oosCand, path.join(A.dir, 'setup_oos.json'));
       state.setupsVersion = p.version;
       return { promoted: true, ...summary };
     }, cfg.perps.strategy !== 'setups' ? 'PERP_STRATEGY is not setups' : noHistory ?? (due ? undefined : `trained ${((now - state.setupsTrainedAt!) / 86_400_000).toFixed(1)} day(s) ago (SETUP_RETRAIN_DAYS=${P.setupRetrainDays})`));
   }
 
-  // ---- 0d. Sweep optimizer: setting by setting until a plateau, as a PROPOSAL (never auto-applied) ----
+  // ---- 0e. SNN gate for the setup trader, from its own journal ----
+  if (want('setup_snn')) {
+    await run('setup_snn', async () => {
+      const g = setupSnnMain(argsOf({ journal: path.join(cfg.dataDir, 'setups'), out: path.join(A.dir, 'setup_snn_gate.json') }));
+      return g;
+    }, cfg.perps.strategy !== 'setups' ? 'PERP_STRATEGY is not setups' : undefined);
+  }
+
+  // ---- 0f. Sweep optimizer: setting by setting until a plateau, as a PROPOSAL (never auto-applied) ----
   if (want('sweep')) {
     state.sweptAt ??= {};
     for (const target of A.sweepTargets) {
@@ -287,9 +345,9 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         if (fs.existsSync(out)) fs.renameSync(out, out.replace(/\.json$/, `.${new Date(now).toISOString().slice(0, 10)}.json`));
         let r;
         try {
-          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: rec, model: mlpPath(), out }));
+          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: rec, model: mlpPath(), out, 'setup-oos': path.join(A.dir, 'setup_oos.json'), 'setup-model': fs.existsSync(promoted('setups')) ? promoted('setups') : undefined }));
         } catch (e) {
-          if (/needs at least|recorded day/.test((e as Error).message)) throw new SkipStep((e as Error).message);
+          if (/needs at least|needs the TA network|recorded day/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;
         }
         state.sweptAt![target] = now;
@@ -498,7 +556,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
 
   state.lastRun = now;
   const report = path.join(A.dir, 'reports', `pipeline-${new Date(now).toISOString().replace(/[:.]/g, '-')}.json`);
-  writeAtomic(report, JSON.stringify({ at: new Date(now).toISOString(), recordings: rec, days: days.length, promote: A.promote, snnChanged, steps }, null, 1));
+  writeAtomic(report, JSON.stringify({ at: new Date(now).toISOString(), recordings: rec, days: days.length, readiness: state.readiness, promote: A.promote, snnChanged, steps }, null, 1));
   state.lastReport = report;
   writeAtomic(path.join(A.dir, 'pipeline_state.json'), JSON.stringify(state, null, 1));
   log(`report: ${report}`);

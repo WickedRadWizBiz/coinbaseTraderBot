@@ -12,6 +12,10 @@
 //      is the trade's stop converted from spot to the perp's price.
 // Levels come from spot candles and are checked against the spot price; orders go to the perp.
 // The book (queues and open trades) is saved to disk, so a restart resumes managing the trades.
+// Inputs from the rest of the bot: the TA network's forecast at the last closed hour (a model input
+// when the setup model kept that group, and its vol forecast scales fast-lane trails when the model was
+// trained with VOL_ADAPT on) and the perps SNN's direction calls (journaled with every setup, see
+// bot/setups/journal.ts, so their value can be measured as recordings grow).
 // Guards: kill switch / halts flatten urgently; the perp daily loss stop flattens and halts for the
 // day; an unvalidated lane trades at pilot size (or not at all with PERP_REQUIRE_VALIDATION).
 
@@ -23,9 +27,10 @@ import type { Timeframe } from '../ta/knowledge';
 import type { DirTarget, DirectionalContext } from '../perps/hedger';
 import type { PerpHub } from '../perps/perpData';
 import type { PerpGateway } from '../perps/perpRest';
-import { detectLast, FAST_TFS, SLOW_TFS, SETUP_MIN_BARS, TF_MS, type Lane, type SetupSignal } from './detectors';
+import { adaptToVol, detectLast, FAST_TFS, SLOW_TFS, SETUP_MIN_BARS, TF_MS, type Lane, type SetupSignal } from './detectors';
 import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from './exits';
-import { setupFeatureMap, setupVector, type SetupBars } from './features';
+import { setupFeatureMap, setupVector, type SetupBars, type TaNetReading } from './features';
+import type { SnnContext } from '../model/featureEngine';
 import { DEFAULT_LANES, LaneBook, type Candidate, type LaneBookParams } from './lanes';
 import { SetupModel } from './setupModel';
 
@@ -50,7 +55,18 @@ export interface SetupTraderDeps {
   /** Current spot price of an asset (the level the setups were drawn on). */
   spot: (asset: string, now: number) => number | undefined;
   audit?: AuditLog;
+  /** TA network forecast for an asset at its last closed hour (the walking network, ungated). */
+  taNet?: (asset: string, now: number) => TaNetReading | undefined;
+  /** Perps SNN's calls for an asset. */
+  snn?: (asset: string) => SnnContext | undefined;
+  /** Journal of every setup with these readings and its outcome (bot/setups/journal.ts). */
+  journal?: { signal(rec: Record<string, unknown>): void; trade(rec: Record<string, unknown>): void };
+  /** SNN gate file written by the pipeline (research/setupSnnStudy.ts) once the journal proves the SNN
+   *  helps: enter only when the SNN's call agrees with the trade by at least minAgree. */
+  snnGatePath?: () => string;
 }
+
+interface SnnGateFile { enabled: boolean; minAgree?: { fast: number; slow: number }; reason?: string; trades?: number; needed?: number }
 
 interface SavedBook { positions: OpenTrade[]; queues: Record<Lane, Candidate[]>; seen: Record<string, number>; day?: { key: string; start: number; realized: number }; history: ClosedRecord[] }
 export interface ClosedRecord { asset: string; lane: Lane; kind: string; tf: string; dir: number; entry: number; exit: number; entryTs: number; exitTs: number; reason: string; r: number; ret: number; usd: number; score?: number }
@@ -70,6 +86,7 @@ export class SetupTrader {
   private history: ClosedRecord[] = [];
   readonly lastDecisions = new Map<string, { target: number; reason: string; stop?: number }>();
   lastError?: string;
+  private gate?: { file: string; mtime: number; g?: SnnGateFile };
 
   constructor(private readonly d: SetupTraderDeps) {
     this.book = new LaneBook(d.params.book);
@@ -142,12 +159,44 @@ export class SetupTrader {
     return { m15: c.bars['15m'], h1: c.bars['1h'], d1: c.bars['1d'] };
   }
 
+  private reading(asset: string, now: number): TaNetReading | undefined {
+    try { return this.d.taNet?.(asset, now); } catch { return undefined; }
+  }
+
   /** Model score of a setup as of `t` (fresh features), NaN without a model. */
   private score(sig: SetupSignal, t: number): number {
     if (!this.model) return NaN;
     const bars = this.bars(sig.asset);
     if (!bars) return NaN;
-    return this.model.score(sig.lane, setupVector(setupFeatureMap(sig, bars, this.bars('BTC'), t)));
+    return this.model.score(sig.lane, setupVector(setupFeatureMap(sig, bars, this.bars('BTC'), t, this.reading(sig.asset, t))));
+  }
+
+  /** The SNN gate (hot reload on change; off when missing). */
+  private snnGate(): SnnGateFile | undefined {
+    const file = this.d.snnGatePath?.();
+    if (!file) return undefined;
+    try {
+      const m = fs.existsSync(file) ? fs.statSync(file).mtimeMs : 0;
+      if (this.gate?.file !== file || this.gate.mtime !== m) this.gate = { file, mtime: m, g: m ? JSON.parse(fs.readFileSync(file, 'utf8')) as SnnGateFile : undefined };
+    } catch { this.gate = { file, mtime: -1 }; }
+    return this.gate.g;
+  }
+
+  /** Whether the SNN gate blocks this entry (only when the gate is on and the SNN has a call). */
+  private snnBlocks(sig: SetupSignal): boolean {
+    const g = this.snnGate();
+    if (!g?.enabled || !g.minAgree) return false;
+    const s = this.snnOf(sig.asset);
+    const p = sig.lane === 'slow' ? s.snn_up4 ?? s.snn_up1 : s.snn_up1 ?? s.snn_up4;
+    return p !== null && p !== undefined && sig.dir * (p - 0.5) < g.minAgree[sig.lane];
+  }
+
+  /** The perps SNN's calls in the journal's flat form. */
+  private snnOf(asset: string): Record<string, number | null> {
+    let c: SnnContext | undefined;
+    try { c = this.d.snn?.(asset); } catch { c = undefined; }
+    const v = (x: number | undefined) => (x !== undefined && Number.isFinite(x) ? +x.toFixed(4) : null);
+    return { snn_up1: v(c?.up?.[60]), snn_up4: v(c?.up?.[240]), snn_skill1: v(c?.conf?.[60]?.skill), snn_skill4: v(c?.conf?.[240]?.skill) };
   }
 
   private record(t: OpenTrade, now: number): void {
@@ -156,6 +205,7 @@ export class SetupTrader {
     if (this.day) this.day.realized += usd;
     this.history.push({ asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, exit: t.closed?.px ?? NaN, entryTs: t.entryTs, exitTs: t.closed?.ts ?? now, reason: t.closed?.reason ?? 'manual', r: res.r, ret: res.ret, usd, score: t.score });
     this.d.audit?.write('setup_trade', { event: 'closed', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, exit: t.closed?.px, reason: t.closed?.reason, r: res.r, usd });
+    this.d.journal?.trade({ ts: now, event: 'closed', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entryTs: t.entryTs, entry: t.entry, exit: t.closed?.px ?? null, reason: t.closed?.reason ?? 'manual', r: res.r, ret: res.ret, usd, score: t.score ?? null });
   }
 
   /** Directional targets for the executor (called after it synced positions). */
@@ -200,11 +250,15 @@ export class SetupTrader {
         if ((this.seen.get(key) ?? 0) >= last.ts) continue;
         this.seen.set(key, last.ts); changed = true;
         if (now - (last.ts + TF_MS[tf]!) > TF_MS[tf]!) continue; // stale candles (feed catching up)
-        const sig = detectLast(asset, tf, cs, set.bars['1d']);
-        if (!sig) continue;
-        const score = this.score(sig, last.ts + TF_MS[tf]!);
+        const raw = detectLast(asset, tf, cs, set.bars['1d']);
+        if (!raw) continue;
+        const at = last.ts + TF_MS[tf]!;
+        const tn = this.reading(asset, at);
+        const sig = adaptToVol(raw, tn?.vol, this.model?.params.volTrailK ?? 0);
+        const score = this.score(sig, at);
         const queued = Number.isFinite(score) && this.book.offer(sig, score, now);
         this.d.audit?.write('setup_signal', { asset, lane: sig.lane, kind: sig.kind, tf, dir: sig.dir, ref: sig.ref, stop: sig.stop, score, queued });
+        this.d.journal?.signal({ ts: now, at, asset, lane: sig.lane, kind: sig.kind, tf, dir: sig.dir, ref: sig.ref, stop: sig.stop, trailAtr: sig.plan.trailAtr, score: Number.isFinite(score) ? +score.toFixed(4) : null, queued, tn_up1: tn?.up1 ?? null, tn_up4: tn?.up4 ?? null, tn_vol: tn?.vol ?? null, ...this.snnOf(asset), model: this.model?.params.version ?? null });
       }
     }
 
@@ -219,6 +273,7 @@ export class SetupTrader {
         const q = this.d.hub.get(cand.sig.asset)?.latest;
         if (!(px && px > 0) || q?.bid === undefined || q.ask === undefined || q.isOpen === false) return undefined;
         if (this.d.params.requireValidation && !this.model?.validated(cand.sig.lane)) return undefined;
+        if (this.snnBlocks(cand.sig)) return undefined;
         return { px, score: this.score(cand.sig, now) };
       });
       for (const e of entries) {
@@ -234,6 +289,8 @@ export class SetupTrader {
         this.lastPx.set(t.asset, e.px);
         changed = true;
         this.d.audit?.write('setup_trade', { event: 'opened', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, stop: t.stop, target1: t.plan.target1, target2: t.plan.target2, notional: t.notional, score: e.score, pilot });
+        const tnE = this.reading(t.asset, now);
+        this.d.journal?.trade({ ts: now, event: 'opened', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entryTs: t.entryTs, entry: t.entry, stop: t.stop, notional: t.notional, score: e.score, pilot, tn_up1: tnE?.up1 ?? null, tn_up4: tnE?.up4 ?? null, tn_vol: tnE?.vol ?? null, ...this.snnOf(t.asset) });
       }
     }
 
@@ -279,6 +336,9 @@ export class SetupTrader {
       strategy: 'setups',
       model: m ? { version: m.params.version, fast: { validated: m.validated('fast'), blockers: m.blockers('fast') }, slow: { validated: m.validated('slow'), blockers: m.blockers('slow') } } : null,
       modelError: this.modelError ?? null,
+      // What the rest of the bot contributes: the TA network as model inputs (when the model kept them)
+      // and as the volatility trail, the SNN gate (off until the journal proves it).
+      inputs: { taNetFeatures: m?.uses('tanet') ?? false, taNetChoice: m?.params.groupChoice ?? null, volTrailK: m?.params.volTrailK ?? 0, snnGate: (() => { const g = this.snnGate(); return g ? { enabled: g.enabled, minAgree: g.minAgree ?? null, reason: g.reason ?? null } : null; })() },
       equity: this.equity?.value ?? null, dayStartEquity: this.day?.start ?? null, dayHalt: this.dayHalt ?? null,
       today: { realizedUsd: today, goalUsd: this.d.params.dailyGoalUsd, trades: this.history.filter((h) => this.day && new Date(h.exitTs).toISOString().slice(0, 10) === this.day.key).length },
       lanes: { fast: { open: open.filter((o) => o.lane === 'fast'), queue: cand('fast'), params: this.book.params.fast }, slow: { open: open.filter((o) => o.lane === 'slow'), queue: cand('slow'), params: this.book.params.slow } },

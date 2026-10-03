@@ -200,3 +200,17 @@ export function detectLast(asset: string, tf: Timeframe, cs: Candle[], daily?: C
   if (cs.length < SETUP_MIN_BARS) return undefined;
   return detectAt(asset, tf, setupSeries(cs, tf), cs.length - 1, daily && daily.length >= 60 ? setupSeries(daily, '1d') : undefined);
 }
+
+/** Volatility-adapted trail for fast-lane setups: the trail distance in ATRs is multiplied by
+ *  exp(trailK x the TA network's 4h volatility forecast), clamped to 0.67-1.5x. The forecast is the log
+ *  ratio of the next 4 hours' volatility to the last 24 hours' (its one validated head), so a trail
+ *  widens before an expected volatility expansion and tightens before a quiet spell. trailK = 0 turns it
+ *  off; the sweep optimizer tunes it (research/sweep.ts, target setups-vol). */
+export const VOL_ADAPT = { trailK: 0 };
+
+/** The signal with its trail scaled by the volatility forecast (unchanged when off or without one). */
+export function adaptToVol(sig: SetupSignal, vol: number | undefined, k = VOL_ADAPT.trailK): SetupSignal {
+  if (!k || sig.lane !== 'fast' || vol === undefined || !Number.isFinite(vol)) return sig;
+  const m = Math.max(0.67, Math.min(1.5, Math.exp(k * vol)));
+  return { ...sig, plan: { ...sig.plan, trailAtr: sig.plan.trailAtr * m, ...(sig.plan.tightTrailAtr !== undefined ? { tightTrailAtr: sig.plan.tightTrailAtr * m } : {}) } };
+}

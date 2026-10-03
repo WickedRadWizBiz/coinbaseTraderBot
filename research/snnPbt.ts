@@ -18,6 +18,7 @@
 //
 //   npm run research:snn-pbt -- --recordings data/recordings --domain crypto --stage S5 [--days 7]
 
+import { recordingDayList } from '../bot/marketdata/recordingFiles';
 import fs from 'fs';
 import path from 'path';
 import { MetaModel } from '../bot/model/metaModel';
@@ -151,7 +152,7 @@ export async function runSnnPbt(o: {
 export async function snnPbtMain(argOf: (k: string, d: string) => string = cliArg): Promise<SnnPbtResult> {
   const dir = argOf('recordings', 'data/recordings');
   const domain = argOf('domain', 'crypto') as 'crypto' | 'perps';
-  const days = fs.existsSync(dir) ? fs.readdirSync(dir).map((f) => /^md-(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(f)?.[1]).filter((d): d is string => Boolean(d)).sort() : [];
+  const days = recordingDayList(dir);
   const n = Number(argOf('days', '7'));
   const modelPath = argOf('model', '');
   const res = await runSnnPbt({

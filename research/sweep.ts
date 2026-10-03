@@ -19,10 +19,19 @@
 //   setups-long / setups-short   the 1h momentum burst per side (bot/setups/detectors.ts BURST): entry
 //                                thresholds and exits, scored by the t-statistic of net R per trade on
 //                                years of candle history (all coins, order flow, the real fees)
+//   setups-vol                   the volatility-adapted trail (bot/setups/detectors.ts VOL_ADAPT): how
+//                                much the TA network's 4h volatility forecast (walk-forward export,
+//                                research/taNetOos.ts) widens / tightens fast-lane trails; both sides
 //   kalshi                       the Kalshi contract strategy (edge thresholds, buffers, exit margin,
 //                                Kelly fraction, per-trade EV target), scored by the t-statistic of net
 //                                P&L per 15-minute window in the production backtester over the bot's
 //                                own recordings (needs data/recordings: run it on the server)
+//   bot                          the WHOLE bot over the recordings (research/wholeBot.ts): Kalshi through
+//                                the production backtester and the perps setup lanes on walk-forward
+//                                scores, one pot of capital, one daily loss stop; tunes the shared
+//                                settings (capital split, risk per lane trade, lane sizes, minimum
+//                                target, daily stop, Kalshi edge and Kelly) by the t-statistic of the
+//                                combined P&L per day
 
 import fs from 'fs';
 import os from 'os';
@@ -127,23 +136,28 @@ export async function runSweep(t: SweepTarget, o: SweepOpts): Promise<SweepRepor
 
 // ---- Targets ----------------------------------------------------------------------------------------
 
-/** 1h momentum burst, one side. Windows: tune 2020 to Jun 2024, check Jul 2024 to Jun 2025, final after. */
-export async function setupsTarget(hist: string, side: 1 | -1): Promise<SweepTarget> {
+/** 1h momentum burst, one side (or both with side 0: the volatility trail). Windows: tune 2020 to Jun
+ *  2024, check Jul 2024 to Jun 2025, final after. */
+export async function setupsTarget(hist: string, side: 1 | -1 | 0): Promise<SweepTarget> {
   const { loadAssetBars, simulateSetup } = await import('./trainSetupModel');
-  const { BURST, detectAt } = await import('../bot/setups/detectors');
+  const { BURST, VOL_ADAPT, adaptToVol, detectAt } = await import('../bot/setups/detectors');
+  const { loadOos, OosIndex } = await import('./taNetOos');
+  const oos = new OosIndex(loadOos(hist));
+  if (side === 0 && !oos.f) throw new Error(`the setups-vol sweep needs the TA network's walk-forward forecasts in ${hist}/.tanet-oos (npm run research:ta-net-oos)`);
   const { DEFAULT_COSTS, tradeResult } = await import('../bot/setups/exits');
   const assets = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'].map((a) => loadAssetBars(hist, a)).filter((A): A is NonNullable<typeof A> => Boolean(A));
-  const P = side > 0 ? BURST.long : BURST.short;
+  const P = side >= 0 ? BURST.long : BURST.short;
   const WIN: Record<SweepWindow, [number, number]> = { tune: [Date.UTC(2020, 0, 1), Date.UTC(2024, 6, 1)], check: [Date.UTC(2024, 6, 1), Date.UTC(2025, 6, 1)], final: [Date.UTC(2025, 6, 1), Infinity] };
   const num = (k: keyof typeof P, values: number[]): SweepParam => ({ name: `${side > 0 ? 'long' : 'short'}.${String(k)}`, values, get: () => Number(P[k]), set: (v) => { (P as Record<string, number | boolean>)[k] = typeof P[k] === 'boolean' ? v > 0 : v; } });
+  const volK: SweepParam = { name: 'vol.trailK', values: [-0.5, 0, 0.25, 0.5, 1], get: () => VOL_ADAPT.trailK, set: (v) => { VOL_ADAPT.trailK = v; } };
   return {
-    name: side > 0 ? 'setups-long' : 'setups-short',
+    name: side > 0 ? 'setups-long' : side < 0 ? 'setups-short' : 'setups-vol',
     minN: 40,
-    params: [
+    params: side === 0 ? [volK] : [
       num('range', [1.25, 1.5, 1.75, 2, 2.5]), num('vol', [1.5, 2, 2.5, 3, 4]), num('flow', [0.55, 0.6, 0.65, 0.7]),
       num('lookback', [10, 20, 40]), num('daily', [0, 1]), num('trail', [2, 2.5, 3, 3.5, 4]), num('bars', [12, 16, 24, 32, 48]),
     ],
-    snapshot: () => Object.fromEntries(Object.entries(P).map(([k, v]) => [`${side > 0 ? 'long' : 'short'}.${k}`, Number(v)])),
+    snapshot: () => (side === 0 ? { 'vol.trailK': VOL_ADAPT.trailK } : Object.fromEntries(Object.entries(P).map(([k, v]) => [`${side > 0 ? 'long' : 'short'}.${k}`, Number(v)]))),
     async fitness(w) {
       const [from, to] = WIN[w];
       const rs: number[] = [];
@@ -154,8 +168,8 @@ export async function setupsTarget(hist: string, side: 1 | -1): Promise<SweepTar
           const ts = s.cs[i].ts;
           if (ts < from || ts >= to || ts < busyUntil) continue;
           const g = detectAt(A.asset, '1h', s, i, A.series['1d']);
-          if (!g || g.kind !== 'burst' || g.dir !== side) continue;
-          const t = simulateSetup(A, g, DEFAULT_COSTS);
+          if (!g || g.kind !== 'burst' || (side !== 0 && g.dir !== side)) continue;
+          const t = simulateSetup(A, adaptToVol(g, oos.at(A.asset, ts + 3_600_000)?.vol), DEFAULT_COSTS);
           if (!t?.closed) continue;
           busyUntil = t.closed.ts;
           rs.push(tradeResult(t).r);
@@ -173,14 +187,15 @@ export async function kalshiTarget(recordings: string, modelPath: string): Promi
   const { MetaModel } = await import('../bot/model/metaModel');
   const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
   const model = fs.existsSync(modelPath) ? MetaModel.load(modelPath) : MetaModel.identity();
-  const days = fs.readdirSync(recordings).filter((f) => /^md-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)).sort();
+  const { recordingFiles, linkDays } = await import('../bot/marketdata/recordingFiles');
+  const days = recordingFiles(recordings);
   if (days.length < 20) throw new Error(`only ${days.length} recorded day(s) in ${recordings}: the kalshi sweep needs at least 20`);
   const a = Math.floor(days.length * 0.7), b = Math.floor(days.length * 0.85);
-  const split: Record<SweepWindow, string[]> = { tune: days.slice(0, a), check: days.slice(a, b), final: days.slice(b) };
+  const split = { tune: days.slice(0, a), check: days.slice(a, b), final: days.slice(b) };
   const dirs = {} as Record<SweepWindow, string>;
   for (const w of ['tune', 'check', 'final'] as const) {
     dirs[w] = fs.mkdtempSync(path.join(os.tmpdir(), `sweep-${w}-`));
-    for (const f of split[w]) fs.symlinkSync(path.resolve(recordings, f), path.join(dirs[w], f));
+    linkDays(split[w], dirs[w]);
   }
   const S = { ...cfg.strategy };
   const num = (k: 'minEdge' | 'takerBuffer' | 'makerBuffer' | 'exitMargin' | 'kellyFraction' | 'targetEvUsd' | 'targetEvOfRisk', values: number[]): SweepParam => ({ name: `strategy.${k}`, values, get: () => S[k], set: (v) => { S[k] = v; } });
@@ -202,12 +217,48 @@ export async function kalshiTarget(recordings: string, modelPath: string): Promi
   };
 }
 
+/** The whole bot over the recordings. Windows: the recorded days split 70 / 15 / 15. */
+export async function botTarget(recordings: string, history: string, modelPath: string, setupOos: string, setupModelPath?: string): Promise<SweepTarget> {
+  const { loadWholeBot, runWholeBot, settingsFromConfig, recordedDays } = await import('./wholeBot');
+  const n = recordedDays(recordings).length;
+  if (n < 20) throw new Error(`only ${n} recorded day(s) in ${recordings}: the whole-bot sweep needs at least 20`);
+  const D = await loadWholeBot({ recordings, history, setupOos, modelPath, split: { tune: [0, 0.7], check: [0.7, 0.85], final: [0.85, 1] } });
+  const { SetupModel } = await import('../bot/setups/setupModel');
+  let book;
+  try { book = SetupModel.load(setupModelPath ?? D.cfg.perps.setupModelPath)?.params.book; } catch { book = undefined; }
+  const S = settingsFromConfig(D.cfg, book);
+  const cache = new Map<string, unknown>();
+  const p = (name: string, values: number[], get: () => number, set: (v: number) => void): SweepParam => ({ name, values, get, set });
+  const risk = (S.totalUsd || 100) * Math.max(0.05, S.perpsShare);
+  return {
+    name: 'bot',
+    minN: 5,
+    params: [
+      p('perpsShare', [0, 0.25, 0.4, 0.5, 0.6, 0.75, 1], () => S.perpsShare, (v) => { S.perpsShare = v; }),
+      p('SETUP_FAST_RISK_USD', [0, 0.005, 0.01, 0.02, 0.03].map((f) => +(f * risk).toFixed(2)), () => S.book.fast.riskUsd ?? 0, (v) => { S.book.fast.riskUsd = v; }),
+      p('SETUP_SLOW_RISK_USD', [0, 0.005, 0.01, 0.02].map((f) => +(f * risk).toFixed(2)), () => S.book.slow.riskUsd ?? 0, (v) => { S.book.slow.riskUsd = v; }),
+      p('SETUP_FAST_MAX_POSITIONS', [1, 2, 3, 5], () => S.book.fast.maxPositions, (v) => { S.book.fast.maxPositions = v; }),
+      p('SETUP_SLOW_MAX_POSITIONS', [0, 1, 2, 3], () => S.book.slow.maxPositions, (v) => { S.book.slow.maxPositions = v; }),
+      p('SETUP_MIN_TARGET_USD', [0, 1, 2, 3, 5], () => S.book.minTargetUsd ?? 0, (v) => { S.book.minTargetUsd = v; }),
+      p('dailyLossFrac', [0, 0.03, 0.05, 0.1, 0.2], () => S.dailyLossFrac, (v) => { S.dailyLossFrac = v; }),
+      p('STRATEGY_MIN_EDGE', [0.01, 0.02, 0.03, 0.05], () => S.strategy.minEdge, (v) => { S.strategy.minEdge = v; }),
+      p('STRATEGY_KELLY_FRACTION', [0.1, 0.15, 0.25, 0.35, 0.5], () => S.strategy.kellyFraction, (v) => { S.strategy.kellyFraction = v; }),
+    ],
+    snapshot: () => ({ perpsShare: S.perpsShare, SETUP_FAST_RISK_USD: S.book.fast.riskUsd ?? 0, SETUP_SLOW_RISK_USD: S.book.slow.riskUsd ?? 0, SETUP_FAST_MAX_POSITIONS: S.book.fast.maxPositions, SETUP_SLOW_MAX_POSITIONS: S.book.slow.maxPositions, SETUP_MIN_TARGET_USD: S.book.minTargetUsd ?? 0, dailyLossFrac: S.dailyLossFrac, STRATEGY_MIN_EDGE: S.strategy.minEdge, STRATEGY_KELLY_FRACTION: S.strategy.kellyFraction }),
+    async fitness(w) {
+      const r = await runWholeBot(D, w, structuredClone(S), cache);
+      return tStat(r.days.map((d) => d.total));
+    },
+  };
+}
+
 function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith('--') ? process.argv[i + 1] : d; }
 
 export async function sweepMain(argOf: (k: string, d: string) => string = cliArg): Promise<SweepReport> {
   const target = argOf('target', 'setups-long');
   const t = target === 'kalshi' ? await kalshiTarget(argOf('recordings', 'data/recordings'), argOf('model', 'params/model.json'))
-    : await setupsTarget(argOf('history', 'data/history'), target === 'setups-short' ? -1 : 1);
+    : target === 'bot' ? await botTarget(argOf('recordings', 'data/recordings'), argOf('history', 'data/history'), argOf('model', 'params/model.json'), argOf('setup-oos', 'data/models/setup_oos.json'), argOf('setup-model', '') || undefined)
+    : await setupsTarget(argOf('history', 'data/history'), target === 'setups-short' ? -1 : target === 'setups-vol' ? 0 : 1);
   const out = argOf('out', path.join('data', 'sweeps', `${target}.json`));
   return runSweep(t, { hours: Number(argOf('hours', '2')), epsilon: Number(argOf('epsilon', '0.05')), tolerance: Number(argOf('tolerance', '0.1')), maxPasses: Number(argOf('passes', '6')), ledgerPath: out });
 }

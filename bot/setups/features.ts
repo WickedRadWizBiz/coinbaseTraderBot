@@ -9,6 +9,10 @@
 //     readings (RSI, %B, taker flow, band width, volume)
 //   - every directional reading again multiplied by the trade's side ("o_" prefix), so "RSI high" and
 //     "RSI high against my short" are both visible to the model.
+//   - the TA network's forecasts at the last closed hour (P(up 1h), P(up 4h), the 4h volatility
+//     forecast), the "tanet" group: in research they come from its walk-forward export
+//     (research/taNetOos.ts), live from the same walking network. The trainer keeps the group only if
+//     it improves the development years; otherwise these inputs are blanked (NaN) for the model.
 // The states come from bot/ta/taNet.ts taNetStates on the same windows live and in research.
 
 import { evaluate } from '../ta/analyzer';
@@ -33,8 +37,39 @@ const SETUP_KEYS = [
   'risk_atr', 'log_risk_pct', 't1_r', 't2_r', 'trig_rsi', 'trig_pctb', 'trig_flow', 'trig_bw', 'trig_vol',
 ];
 
+/** Inputs computed from the candles (cached per setup in research). */
+export const SETUP_BASE_FEATURES: string[] = [...SETUP_KEYS, ...MARKET_CLOCK_FEATURES, ...TA_KEYS, ...BTC_KEYS, ...TA_KEYS.map((k) => `o_${k}`), ...BTC_KEYS.map((k) => `o_${k}`)];
+/** The TA network's forecasts (side-oriented copies: P(up) - 0.5 times the trade's side). */
+export const TANET_SETUP_KEYS = ['tn_up1', 'tn_up4', 'tn_vol', 'o_tn_up1', 'o_tn_up4'];
+/** Optional input groups the trainer switches on only when they help (off = blanked to NaN). */
+export const SETUP_GROUPS: Record<string, string[]> = { tanet: TANET_SETUP_KEYS };
 /** Every input, in order. */
-export const SETUP_FEATURES: string[] = [...SETUP_KEYS, ...MARKET_CLOCK_FEATURES, ...TA_KEYS, ...BTC_KEYS, ...TA_KEYS.map((k) => `o_${k}`), ...BTC_KEYS.map((k) => `o_${k}`)];
+export const SETUP_FEATURES: string[] = [...SETUP_BASE_FEATURES, ...TANET_SETUP_KEYS];
+
+/** TA network forecast at a setup (P(up 1h), P(up 4h), 4h vol log ratio). */
+export interface TaNetReading { up1: number; up4: number; vol: number }
+
+/** Fill the TA network inputs of a feature map (NaN when no forecast). */
+export function tanetFeatures(out: Record<string, number>, dir: number, r: TaNetReading | undefined): void {
+  out.tn_up1 = r && Number.isFinite(r.up1) ? r.up1 - 0.5 : NaN;
+  out.tn_up4 = r && Number.isFinite(r.up4) ? r.up4 - 0.5 : NaN;
+  out.tn_vol = r && Number.isFinite(r.vol) ? r.vol : NaN;
+  out.o_tn_up1 = dir * out.tn_up1;
+  out.o_tn_up4 = dir * out.tn_up4;
+}
+
+/** Indices of the inputs of the groups NOT enabled (blanked before scoring / training). */
+export function maskedIndices(enabled: string[] | undefined): number[] {
+  const off = Object.entries(SETUP_GROUPS).filter(([g]) => !(enabled ?? []).includes(g)).flatMap(([, ks]) => ks);
+  return off.map((k) => SETUP_FEATURES.indexOf(k)).filter((i) => i >= 0);
+}
+
+/** Blank the inputs at `idx` (a copy). */
+export function applyMask<T extends ArrayLike<number>>(x: T, idx: number[]): number[] {
+  const v = Array.from(x);
+  for (const i of idx) v[i] = NaN;
+  return v;
+}
 
 /** Candles an asset's features read, as of the setup's close time `t` (only closed bars are used). */
 export interface SetupBars { m15?: Candle[]; h1: Candle[]; d1?: Candle[] }
@@ -64,7 +99,7 @@ function taMap(prefix: string, bars: SetupBars, t: number, out: Record<string, n
 }
 
 /** Feature vector of a setup known at time `t` (= signal bar close), from the asset's and BTC's bars. */
-export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBars | undefined, t = sig.ts + TF_MS[sig.tf]!): Record<string, number> {
+export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBars | undefined, t = sig.ts + TF_MS[sig.tf]!, tanet?: TaNetReading): Record<string, number> {
   const out: Record<string, number> = {};
   const risk = Math.abs(sig.ref - sig.stop);
   out.dir = sig.dir;
@@ -84,7 +119,8 @@ export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBar
   taMap('', bars, t, out);
   if (btc) taMap('btc_', btc, t, out, BTC_TFS, false);
   for (const k of [...TA_KEYS, ...BTC_KEYS]) out[`o_${k}`] = Number.isFinite(out[k]) ? sig.dir * out[k] : NaN;
+  tanetFeatures(out, sig.dir, tanet);
   return out;
 }
 
-export const setupVector = (m: Record<string, number>): number[] => SETUP_FEATURES.map((k) => (Number.isFinite(m[k]) ? m[k] : NaN));
+export const setupVector = (m: Record<string, number>, names: string[] = SETUP_FEATURES): number[] => names.map((k) => (Number.isFinite(m[k]) ? m[k] : NaN));

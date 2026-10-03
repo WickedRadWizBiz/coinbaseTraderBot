@@ -8,9 +8,9 @@ import { gbdtLogit, validateGbdt, type GbdtModel } from '../model/trees';
 import type { Lane } from './detectors';
 import type { CostModel } from './exits';
 import type { LaneBookParams } from './lanes';
-import { SETUP_FEATURES } from './features';
+import { applyMask, maskedIndices, SETUP_FEATURES } from './features';
 
-export const SETUP_SCHEMA = '3';
+export const SETUP_SCHEMA = '4';
 
 /** One lane's scorer: a model predicting net R, and the distribution of its predictions on held-out
  *  trades (101 quantiles). The score is the prediction's percentile in that distribution (0..1), so a
@@ -65,6 +65,12 @@ export interface SetupModelParams {
   version: string;
   schema: string;
   features: string[];
+  /** Optional input groups the model uses (bot/setups/features.ts SETUP_GROUPS); the others are blanked. */
+  groups?: string[];
+  /** Development-years comparison behind the group choice (information). */
+  groupChoice?: Record<string, { withGroup: number; without: number; kept: boolean }>;
+  /** VOL_ADAPT.trailK the events were simulated with (the trail scaling by the TA network's vol forecast). */
+  volTrailK?: number;
   lanes: Partial<Record<Lane, LaneScorer>>;
   book: LaneBookParams;
   costs: CostModel;
@@ -76,7 +82,8 @@ export interface SetupModelParams {
 }
 
 export class SetupModel {
-  constructor(readonly params: SetupModelParams) {}
+  private readonly mask: number[];
+  constructor(readonly params: SetupModelParams) { this.mask = maskedIndices(params.groups); }
 
   static load(file: string): SetupModel | undefined {
     if (!fs.existsSync(file)) return undefined;
@@ -90,14 +97,17 @@ export class SetupModel {
   /** Percentile score of a setup in its lane (0..1; x = setupVector). */
   score(lane: Lane, x: number[]): number {
     const l = this.params.lanes[lane];
-    return l ? laneScore(l, x) : NaN;
+    return l ? laneScore(l, applyMask(x, this.mask)) : NaN;
   }
 
   /** The model's raw expected net R (for the record). */
   expectedR(lane: Lane, x: number[]): number {
     const l = this.params.lanes[lane];
-    return l ? rawPrediction(l, x) : NaN;
+    return l ? rawPrediction(l, applyMask(x, this.mask)) : NaN;
   }
+
+  /** Whether an input group (e.g. 'tanet') is used. */
+  uses(group: string): boolean { return Boolean(this.params.groups?.includes(group)); }
 
   validated(lane: Lane): boolean { return Boolean(this.params.validation[lane]?.passed); }
   blockers(lane: Lane): string[] { const v = this.params.validation[lane]; return v ? (v.passed ? [] : v.reasons) : [`no ${lane} lane in the model`]; }

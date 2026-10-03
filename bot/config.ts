@@ -249,6 +249,10 @@ export interface AutoTrainConfig {
   /** Where the pipeline writes promoted models; the bot prefers these over params/ and hot-swaps them. */
   dir: string;
   recordingsDir: string;
+  /** Gzip recorded days older than this many days (0 = never); readers handle both forms. */
+  recordingsGzipAfterDays: number;
+  /** Alert when free disk space where the recordings live drops below this (GB). */
+  recordingsMinFreeGb: number;
   /** always = promote every freshly trained model (hot-swap mode); validated = only models whose
    *  validation passed (MLP: validation.passed; perps: validated(); SNN: its stage accepted). */
   promote: 'always' | 'validated';
@@ -262,6 +266,8 @@ export interface AutoTrainConfig {
   /** Sweep optimizer (research/sweep.ts): targets run by the pipeline, hours per target, and how often. */
   sweepTargets: string[];
   sweepHours: number;
+  /** Time budget per run for the TA network's walk-forward export (it resumes on the next run). */
+  taNetOosHours: number;
   sweepEveryDays: number;
   /** Minimum days of recordings before anything is trained. */
   minDays: number;
@@ -440,6 +446,8 @@ export interface PerpsConfig {
   strategy: 'signal' | 'setups';
   /** Setup scorer (research:setups). */
   setupModelPath: string;
+  /** The TA network the setup trader reads (its walk-forward network: research/taNetOos.ts). */
+  setupTaNetPath: string;
   /** Equity at risk per trade (entry to stop) in the fast / slow lane. */
   setupFastRisk: number;
   setupSlowRisk: number;
@@ -801,6 +809,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         collarBps: num(env, 'PERP_COLLAR_BPS', 150, 5, 2000),
         strategy: oneOf(env, 'PERP_STRATEGY', 'setups', ['signal', 'setups'] as const),
         setupModelPath: path.resolve(env.SETUP_MODEL_PATH ?? './params/setup_model.json'),
+        setupTaNetPath: path.resolve(env.SETUP_TA_NET_PATH ?? './params/ta_net_wf.json'),
         setupFastRisk: num(env, 'SETUP_FAST_RISK', 0.004, 0.0005, 0.05),
         setupSlowRisk: num(env, 'SETUP_SLOW_RISK', 0.006, 0.0005, 0.05),
         setupFastMax: num(env, 'SETUP_FAST_MAX_POSITIONS', 3, 0, 20),
@@ -819,14 +828,17 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       hourUtc: num(env, 'AUTO_TRAIN_HOUR_UTC', 6, 0, 23),
       dir: path.resolve(env.AUTO_TRAIN_DIR ?? path.join(dataDir, 'models')),
       recordingsDir: path.resolve(env.AUTO_TRAIN_RECORDINGS ?? path.join(dataDir, 'recordings')),
+      recordingsGzipAfterDays: num(env, 'RECORDINGS_GZIP_AFTER_DAYS', 2, 0, 365),
+      recordingsMinFreeGb: num(env, 'RECORDINGS_MIN_FREE_GB', 3, 0, 1e4),
       promote: oneOf(env, 'AUTO_TRAIN_PROMOTE', 'always', ['always', 'validated'] as const),
       snnStage: oneOf(env, 'AUTO_TRAIN_SNN_STAGE', 'auto', ['auto', 'S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const),
       ablationDays: num(env, 'AUTO_TRAIN_ABLATION_DAYS', 7, 1, 365),
       ablationEveryDays: num(env, 'AUTO_TRAIN_ABLATION_EVERY_DAYS', 7, 0, 365),
       snnTrainDays: num(env, 'AUTO_TRAIN_SNN_TRAIN_DAYS', 21, 1, 365),
       onModelChange: bool(env, 'AUTO_TRAIN_ON_MODEL_CHANGE', true),
-      sweepTargets: (env.SWEEP_TARGETS ?? 'setups-long,setups-short,kalshi').split(',').map((x) => x.trim()).filter(Boolean),
+      sweepTargets: (env.SWEEP_TARGETS ?? 'setups-long,setups-short,setups-vol,kalshi,bot').split(',').map((x) => x.trim()).filter(Boolean),
       sweepHours: num(env, 'SWEEP_HOURS', 2, 0.05, 48),
+      taNetOosHours: num(env, 'TA_NET_OOS_HOURS', 3, 0.05, 48),
       sweepEveryDays: num(env, 'SWEEP_EVERY_DAYS', 7, 1, 365),
       minDays: num(env, 'AUTO_TRAIN_MIN_DAYS', 1, 0, 365),
       watchSec: num(env, 'AUTO_TRAIN_WATCH_SEC', 30, 5, 3600),

@@ -24,6 +24,8 @@ import { PerpModel } from './perps/perpSignal';
 import { PerpTrader } from './perps/perpTrader';
 import type { DirectionalTrader } from './perps/hedger';
 import { SetupTrader } from './setups/setupTrader';
+import { SetupJournal } from './setups/journal';
+import { compressOldRecordings, recordingsUsage } from './marketdata/recordingFiles';
 import { DEFAULT_LANES } from './setups/lanes';
 import { PaperPerpExchange } from './perps/paperPerp';
 import { KalshiPerpsRest, type PerpGateway } from './perps/perpRest';
@@ -38,7 +40,7 @@ import { Reconciler } from './recon/reconciler';
 import { Tca } from './tca/tca';
 import { createSnnFleet } from './snn';
 import { VolModel } from './model/volModel';
-import { activeTaNet, setTaNet, setTaNetContextSource, TaNet } from './ta/taNet';
+import { activeTaNet, setTaNet, setTaNetContextSource, TaNet, TaNetRuntime } from './ta/taNet';
 import { FillModel } from './tca/fillModel';
 import { TennisScoreClient } from './tennis/liveTennisApi';
 import { TennisFairModel } from './tennis/tennisFair';
@@ -110,6 +112,23 @@ async function main(): Promise<void> {
   const indexIds = Object.keys(cfg.indexIdMap);
   const ws = signer ? new KalshiWs(cfg.wsUrl, signer, indexIds) : undefined;
   const md = new MarketData(cfg, rest, ws, new Recorder(path.join(cfg.dataDir, 'recordings')));
+  // Recordings grow by a day file per day: older days are gzipped (about 10x smaller) so months of them
+  // fit on disk, and a low-disk alert fires before writes would fail.
+  const recDir = path.join(cfg.dataDir, 'recordings');
+  const maintainRecordings = async () => {
+    try {
+      if (cfg.autoTrain.recordingsGzipAfterDays > 0) {
+        const done = await compressOldRecordings(recDir, cfg.autoTrain.recordingsGzipAfterDays);
+        if (done.length) log.info('recordings compressed', { days: done });
+      }
+      const u = recordingsUsage(recDir);
+      if (u.freeBytes !== undefined && u.freeBytes < cfg.autoTrain.recordingsMinFreeGb * 1e9) {
+        alerter.notify('warn', 'recordings-disk', `Low disk: ${(u.freeBytes / 1e9).toFixed(1)} GB free; recordings use ${(u.bytes / 1e9).toFixed(1)} GB over ${u.days} days (RECORDINGS_MIN_FREE_GB=${cfg.autoTrain.recordingsMinFreeGb})`);
+      }
+    } catch (e) { log.warn('recordings maintenance failed', { error: String(e) }); }
+  };
+  void maintainRecordings();
+  setInterval(() => void maintainRecordings(), 3_600_000).unref();
 
   const paper = cfg.mode === 'live'
     ? undefined
@@ -184,6 +203,21 @@ async function main(): Promise<void> {
         hub, gateway: perpGateway, audit, modelPath: () => resolveModelPaths(cfg).setups, statePath: path.join(cfg.dataDir, 'setups_state.json'),
         candles: (asset) => md.features.candles.get(asset),
         spot: (asset, now) => md.spot.get(asset)?.fresh(now, 15_000)?.value ?? md.index.get(asset)?.fresh(now, 15_000)?.value,
+        // The walking TA network (the one whose forecasts trained the setup model), all heads ungated:
+        // the setup model itself decides whether they count. Reloaded when the pipeline promotes a newer one.
+        taNet: (() => {
+          let rt: TaNetRuntime | undefined, mt = -1;
+          return (asset: string, now: number) => {
+            const file = resolveModelPaths(cfg).ta_net_wf;
+            const m = fs.existsSync(file) ? fs.statSync(file).mtimeMs : 0;
+            if (m !== mt) { mt = m; try { const n = m ? TaNet.load(file) : undefined; rt = n ? new TaNetRuntime(n, false) : undefined; } catch (e) { rt = undefined; log.warn(`setup trader: TA network ${file} not loaded: ${(e as Error).message}`); } }
+            const o = rt?.outputFor(asset, md.features.candles.get(asset), now);
+            return o ? { up1: o.up[60] ?? NaN, up4: o.up[240] ?? NaN, vol: o.vol4h ?? NaN } : undefined;
+          };
+        })(),
+        snn: (asset) => engineRef?.snnContext(asset, undefined, 'perps'),
+        journal: new SetupJournal(path.join(cfg.dataDir, 'setups'), (e) => log.warn(`setup journal: ${String(e)}`)),
+        snnGatePath: () => path.join(cfg.autoTrain.dir, 'setup_snn_gate.json'),
       });
       const st = (directionalTrader as SetupTrader).status();
       if (st.modelError) log.warn(`setup trader: ${st.modelError}; it records setups but opens no trades until a model exists`);

@@ -5,6 +5,7 @@
 import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
+import { recordingFiles, recordingLines } from '../bot/marketdata/recordingFiles';
 import { IndexStore } from '../bot/marketdata/indexBars';
 import { IndexTracker, type AvgMode } from '../bot/marketdata/indexTracker';
 import { setTaNetContextSource } from '../bot/ta/taNet';
@@ -37,7 +38,7 @@ export interface RecMarket {
 export interface RecEvent { t: number; k: string; [key: string]: any }
 
 async function* lines(file: string): AsyncGenerator<RecEvent> {
-  const rl = readline.createInterface({ input: fs.createReadStream(file), crlfDelay: Infinity });
+  const rl = file.endsWith('.gz') ? recordingLines(file) : readline.createInterface({ input: fs.createReadStream(file), crlfDelay: Infinity });
   for await (const line of rl) {
     if (!line) continue;
     try { yield JSON.parse(line) as RecEvent; } catch { /* torn line */ }
@@ -48,14 +49,13 @@ async function* lines(file: string): AsyncGenerator<RecEvent> {
  *  (path.delimiter-separated, one per SNN domain) of snnfill-YYYY-MM-DD.jsonl files; each day's
  *  sidecar events (prequential SNN outputs) are merged in by time. */
 export async function* readRecordings(dir: string, sidecar = process.env.SNN_BACKFILL_DIR, fromDay?: string, toDay?: string): AsyncGenerator<RecEvent> {
-  const files = fs.readdirSync(dir).filter((f) => /^md-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)).sort()
-    .filter((f) => (!fromDay || f.slice(3, 13) >= fromDay) && (!toDay || f.slice(3, 13) <= toDay));
+  const files = recordingFiles(dir).filter((f) => (!fromDay || f.day >= fromDay) && (!toDay || f.day <= toDay));
   const sides = (sidecar ?? '').split(path.delimiter).filter(Boolean);
   for (const f of files) {
-    const extra = sides.map((d) => path.join(d, f.replace(/^md-/, 'snnfill-'))).filter((x) => fs.existsSync(x));
-    if (!extra.length) { yield* lines(path.join(dir, f)); continue; }
+    const extra = sides.map((d) => path.join(d, `snnfill-${f.day}.jsonl`)).filter((x) => fs.existsSync(x));
+    if (!extra.length) { yield* lines(f.file); continue; }
     // k-way merge by time; ties go to the recording first, then the sidecars in order.
-    const its = [path.join(dir, f), ...extra].map((x) => lines(x));
+    const its = [f.file, ...extra].map((x) => lines(x));
     const heads = await Promise.all(its.map((it) => it.next()));
     for (;;) {
       let best = -1;
