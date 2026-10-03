@@ -182,7 +182,23 @@ What it does:
 
 Live, every forecast is also graded against the candles that follow. `tanet_skill_1h` and `tanet_skill_4h` are the network's rolling skill over its last 168 graded calls.
 
-## 3. Real results: fractal network with order flow (schema 3; Binance spot with taker volume, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
+## 3. Real results: market context and BTC dominance (schema 4; Binance spot + Binance's BTCDOM index, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
+
+**Setup:** 85 monthly rounds (255 member evaluations), exploration restarts with the grace period and catch-up epochs, untouched holdout 2026-07-02 to 2026-10-02. Context: the 5-coin basket and BTCDOM from June 2021. No TradingView BTC.D / USDT.D history was available for this run, so the daily dominance inputs were empty; the server's tournament adds them once `history.sh tradingview` has run.
+
+| Check | Result | Passes |
+|---|---|---|
+| Holdout, `vol_4h` | MSE 0.376 vs 0.434 (13% lower), CI +0.035 to +0.084 | **yes: speaks live** |
+| Holdout, `up_1h` | log loss 0.6963 vs 0.6932, hit rate 50.0% | no |
+| Holdout, `up_4h` | log loss 0.7098 vs 0.6936, hit rate 49.4% | no |
+| Elite lineage's out-of-sample record | Sharpe −0.42 vs 0.18 expected from luck with 255 trials; DSR probability 0.00 | no |
+| Holdout, position rule | net −10.0%, max drawdown 20.3% | no |
+
+The elite's branch weights: daily 2.0 (the maximum), hourly swing 1.67, hourly TA 1.36, 15-minute 0.83, market context 0.39 (turned down). Its learning rate hit the maximum (0.01), and the 15-minute and swing blocks' input weights decayed to almost zero, so this model's pattern report is close to empty (schema 3's report above is the informative one). The cause is L2 regularisation applied inside Adam: for weights with a weak learning signal, Adam rescales the shrinkage into full-size steps toward zero. Decoupled weight decay (AdamW) is the standard fix.
+
+The context did not add a measurable edge on this holdout: the volatility forecast is within noise of schema 3's (0.376 vs 0.361, overlapping intervals), and direction is still a coin flip.
+
+## 3a. Real results: fractal network with order flow (schema 3; Binance spot with taker volume, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
 
 **Setup:** 85 monthly rounds (255 member evaluations), exploration restarts every 6 rounds, untouched holdout 2026-07-02 to 2026-10-02. The last 10 rounds already ran with the newcomer grace period and catch-up epochs: the round-77 newcomer won round 78 outright.
 
