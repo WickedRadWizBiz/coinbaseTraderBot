@@ -31,7 +31,7 @@
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: history, ta_net, setups, snn, vol_model, dataset, mlp, vol, perps, tennis, fill
+//   npm run pipeline -- --only mlp,perps     # steps: history, ta_net, setups, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
 
@@ -61,6 +61,7 @@ import { versionHash } from '../bot/snn/params';
 import { trainTennisMain } from './trainTennisModel';
 import { trainTaNetMain } from './trainTaNet';
 import { trainSetupMain } from './trainSetupModel';
+import { sweepMain } from './sweep';
 import { BINANCE_INDEXES, downloadBinance, type BinanceMarket } from './history/binanceVision';
 import { compareIndexSources } from '../bot/marketdata/historyStore';
 import { backfillCoinbase } from './history/coinbaseBackfill';
@@ -68,7 +69,7 @@ import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
 import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
 
-export const STEPS = ['history', 'ta_net', 'setups', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill'] as const;
+export const STEPS = ['history', 'ta_net', 'setups', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -107,6 +108,8 @@ export interface PipelineState {
   /** Promoted setup model (fast / slow lanes) and when it was trained. */
   setupsVersion?: string;
   setupsTrainedAt?: number;
+  /** Last sweep run per target. */
+  sweptAt?: Record<string, number>;
   lastHistoryUpdate?: number;
   lastReport?: string;
 }
@@ -271,6 +274,28 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       state.setupsVersion = p.version;
       return { promoted: true, ...summary };
     }, cfg.perps.strategy !== 'setups' ? 'PERP_STRATEGY is not setups' : noHistory ?? (due ? undefined : `trained ${((now - state.setupsTrainedAt!) / 86_400_000).toFixed(1)} day(s) ago (SETUP_RETRAIN_DAYS=${P.setupRetrainDays})`));
+  }
+
+  // ---- 0d. Sweep optimizer: setting by setting until a plateau, as a PROPOSAL (never auto-applied) ----
+  if (want('sweep')) {
+    state.sweptAt ??= {};
+    for (const target of A.sweepTargets) {
+      const last = state.sweptAt[target];
+      const due = !last || now - last >= A.sweepEveryDays * 86_400_000;
+      await run(`sweep-${target}`, async () => {
+        const out = path.join(A.dir, 'sweeps', `${target}.json`);
+        if (fs.existsSync(out)) fs.renameSync(out, out.replace(/\.json$/, `.${new Date(now).toISOString().slice(0, 10)}.json`));
+        let r;
+        try {
+          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: rec, model: mlpPath(), out }));
+        } catch (e) {
+          if (/needs at least|recorded day/.test((e as Error).message)) throw new SkipStep((e as Error).message);
+          throw e;
+        }
+        state.sweptAt![target] = now;
+        return { proposal: out, plateau: r.plateau, passes: r.passes, evaluations: r.evaluations, start: r.start, end: r.end, changed: r.steps.filter((x) => x.accepted).map((x) => `${x.param}: ${x.from} -> ${x.to}`) };
+      }, due ? undefined : `swept ${((now - last!) / 86_400_000).toFixed(1)} day(s) ago (SWEEP_EVERY_DAYS=${A.sweepEveryDays})`);
+    }
   }
 
   // ---- 1. The networks first, each alone: ablation (when due) -> train -> backfill ----
