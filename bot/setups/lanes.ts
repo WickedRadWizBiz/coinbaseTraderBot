@@ -32,6 +32,17 @@ export interface LaneParams {
   maxChaseR: number;
   /** Fixed dollars at risk per trade (entry to stop) instead of riskFrac x equity (0 / unset = off). */
   riskUsd?: number;
+  /** Per setup type ("1h burst"): its own minimum score; types missing from the map are not traded.
+   *  Unset = every type with minScore. */
+  minScoreByKind?: Record<string, number>;
+}
+
+/** Setup type key ("15m fade", "1d breakout"). */
+export const kindKey = (s: { tf: string; kind: string }) => `${s.tf} ${s.kind}`;
+
+/** Minimum score for a setup in its lane (undefined = this type is not traded). */
+export function minScoreFor(L: LaneParams, s: { tf: string; kind: string }): number | undefined {
+  return L.minScoreByKind ? L.minScoreByKind[kindKey(s)] : L.minScore;
 }
 
 export interface LaneBookParams {
@@ -72,7 +83,8 @@ export class LaneBook {
   /** Queue a scored setup (ignored below the lane's minimum score). */
   offer(sig: SetupSignal, score: number, now: number): boolean {
     const L = this.params[sig.lane];
-    if (!(score >= L.minScore)) return false;
+    const th = minScoreFor(L, sig);
+    if (th === undefined || !(score >= th)) return false;
     const q = this.queues[sig.lane].filter((c) => c.sig.asset !== sig.asset);
     q.push({ sig, score, queuedAt: now, expires: sig.ts + TF_MS[sig.tf]! * (1 + L.ttlBars) });
     q.sort((a, b) => b.score - a.score);
@@ -111,13 +123,15 @@ export class LaneBook {
         if (busy.has(c.sig.asset)) { keep.push(c); continue; } // waits for the asset to free up
         const r = recheck(c);
         if (!r) { this.skip(c, 'gone on re-check', now); continue; }
-        if (!(r.score >= L.minScore)) { this.skip(c, `re-scored ${r.score.toFixed(3)} below ${L.minScore}`, now); continue; }
+        const th = minScoreFor(L, c.sig) ?? Infinity;
+        if (!(r.score >= th)) { this.skip(c, `re-scored ${r.score.toFixed(3)} below ${th}`, now); continue; }
         const s = c.sig, d = s.dir;
         const risk = Math.abs(s.ref - s.stop);
         if (!(d * (r.px - s.stop) > 0)) { this.skip(c, 'price beyond the stop', now); continue; }
         if (d * (r.px - s.ref) > L.maxChaseR * risk) { this.skip(c, `price ran ${((d * (r.px - s.ref)) / risk).toFixed(2)}R toward the target: not chasing`, now); continue; }
         const riskPct = Math.abs(r.px - s.stop) / r.px;
-        const scale = L.refScore > 0 ? Math.max(0.5, Math.min(1.5, r.score / L.refScore)) : 1;
+        const ref = L.minScoreByKind ? (1 + Math.max(0, th)) / 2 : L.refScore;
+        const scale = ref > 0 ? Math.max(0.5, Math.min(1.5, r.score / ref)) : 1;
         const riskDollars = (L.riskUsd && L.riskUsd > 0 ? L.riskUsd : equity * L.riskFrac) * scale;
         let notional = riskDollars / riskPct;
         notional = Math.min(notional, equity * this.params.maxAssetLeverage, Math.max(0, equity * this.params.maxLeverage - used));

@@ -214,3 +214,16 @@ test('lane book: fixed dollar risk per trade, and trades whose first target pays
   assert.ok(Math.abs(e[0].notional - 250) < 1e-6, 'fixed $5 at risk over a 2% stop');
   assert.ok(book.lastSkips.some((s) => s.asset === 'B' && /first target pays \$0\.60/.test(s.reason)));
 });
+
+test('lane book: per-type thresholds; types missing from the map are not traded', async () => {
+  const { LaneBook } = await import('../bot/setups/lanes');
+  const book = new LaneBook({
+    fast: { maxPositions: 3, riskFrac: 0.01, ttlBars: 2, minScore: 0, refScore: 0.5, maxChaseR: 0.3, minScoreByKind: { '1h burst': 0.8 } },
+    slow: { maxPositions: 1, riskFrac: 0.01, ttlBars: 1, minScore: 0, refScore: 0.5, maxChaseR: 0.5 },
+    maxLeverage: 10, maxAssetLeverage: 10,
+  });
+  const burst = (asset: string): SetupSignal => ({ ...fade(1, 98, 102, 104), asset, kind: 'burst', tf: '1h' });
+  assert.equal(book.offer({ ...fade(1, 98, 102, 104), asset: 'A' }, 0.99, 0), false, '15m fade not traded');
+  assert.equal(book.offer(burst('B'), 0.7, 0), false, 'below its own threshold');
+  assert.equal(book.offer(burst('C'), 0.9, 0), true);
+});

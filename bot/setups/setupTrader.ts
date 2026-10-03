@@ -88,7 +88,7 @@ export class SetupTrader {
       this.modelMtime = m;
       this.modelError = undefined;
       const P = this.d.params.book, M = this.model?.params.book;
-      if (M) for (const lane of ['fast', 'slow'] as const) this.book.params[lane] = { ...P[lane], minScore: M[lane].minScore, refScore: M[lane].refScore, ttlBars: M[lane].ttlBars, maxChaseR: M[lane].maxChaseR };
+      if (M) for (const lane of ['fast', 'slow'] as const) this.book.params[lane] = { ...P[lane], minScore: M[lane].minScore, refScore: M[lane].refScore, ttlBars: M[lane].ttlBars, maxChaseR: M[lane].maxChaseR, minScoreByKind: M[lane].minScoreByKind };
       this.d.audit?.write('setup_model', { version: this.model?.params.version, fast: this.model?.validated('fast'), slow: this.model?.validated('slow') });
     } catch (e) {
       this.model = undefined;

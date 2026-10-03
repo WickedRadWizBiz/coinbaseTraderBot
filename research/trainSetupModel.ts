@@ -26,7 +26,7 @@ import type { Timeframe } from '../bot/ta/knowledge';
 import { detectAt, FAST_TFS, SLOW_TFS, setupSeries, TF_MS, type Lane, type SetupSeries, type SetupSignal } from '../bot/setups/detectors';
 import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from '../bot/setups/exits';
 import { SETUP_FEATURES, setupFeatureMap, setupVector, type SetupBars } from '../bot/setups/features';
-import { DEFAULT_LANES, LaneBook, type LaneBookParams } from '../bot/setups/lanes';
+import { DEFAULT_LANES, kindKey, LaneBook, type LaneBookParams } from '../bot/setups/lanes';
 import { laneScore, quantilesOf, rawPrediction, SETUP_SCHEMA, type LanePeriodStats, type LaneScorer, type SetupModelParams } from '../bot/setups/setupModel';
 
 const M15 = 900_000;
@@ -175,11 +175,11 @@ export function walkForward(events: SetupEvent[], lane: Lane, firstFold: number,
 export interface ClosedTrade { asset: string; lane: Lane; kind: string; entryTs: number; exitTs: number; r: number; ret: number; usd: number; score: number }
 
 /** One event loop over every asset's 15-minute bars with the lane book (fixed equity for sizing). */
-export function backtestLanes(assets: Map<string, AssetBars>, events: SetupEvent[], scores: Float64Array, book: LaneBookParams, costs: CostModel, equity: number, from: number, to: number, lanes: Lane[] = ['fast', 'slow']): ClosedTrade[] {
+export function backtestLanes(assets: Map<string, AssetBars>, events: SetupEvent[], scores: Float64Array, book: LaneBookParams, costs: CostModel, equity: number, from: number, to: number, lanes: Lane[] = ['fast', 'slow'], keep: (e: SetupEvent) => boolean = () => true): ClosedTrade[] {
   const B = new LaneBook(book);
   const out: ClosedTrade[] = [];
   const byAt = new Map<number, number[]>();
-  events.forEach((e, i) => { if (e.at >= from && e.at < to && Number.isFinite(scores[i]) && lanes.includes(e.sig.lane)) { const l = byAt.get(e.at) ?? []; l.push(i); byAt.set(e.at, l); } });
+  events.forEach((e, i) => { if (e.at >= from && e.at < to && Number.isFinite(scores[i]) && lanes.includes(e.sig.lane) && keep(e)) { const l = byAt.get(e.at) ?? []; l.push(i); byAt.set(e.at, l); } });
   const times = new Set<number>();
   for (const A of assets.values()) for (const c of A.m15) if (c.ts >= from - M15 && c.ts < to) times.add(c.ts);
   const timeline = [...times].sort((a, b) => a - b);
@@ -272,28 +272,50 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
     const ev = events.filter((e) => e.sig.lane === lane);
     log(`${lane} lane: ${ev.length} setups, standalone mean net R ${(ev.reduce((a, e) => a + e.r, 0) / Math.max(1, ev.length)).toFixed(3)}, win ${(100 * ev.filter((e) => e.ret > 0).length / Math.max(1, ev.length)).toFixed(1)}%`);
   }
-  // Walk-forward scores.
-  const scores = new Float64Array(events.length).fill(NaN);
-  for (const lane of ['fast', 'slow'] as const) {
-    const s = walkForward(events, lane, firstFold, foldMs, log);
-    s.forEach((v, i) => { if (Number.isFinite(v)) scores[i] = v; });
+  // Walk-forward scores (cached: same events, outcomes, folds and model settings give the same scores).
+  const cacheDir = o.cacheDir ?? path.join(hist, '.setup-cache');
+  const h = crypto.createHash('sha1').update(JSON.stringify({ GBDT, MAX_TRAIN, MIN_MODEL_TRADES, firstFold, foldMs, schema: SETUP_SCHEMA }));
+  for (const e of events) h.update(`${e.asset}|${e.sig.tf}|${e.sig.ts}|${e.sig.kind}|${e.sig.dir}|${e.r.toFixed(6)}\n`);
+  const scoreFile = path.join(cacheDir, `wf-scores.${h.digest('hex').slice(0, 16)}.json`);
+  let scores: Float64Array;
+  if (fs.existsSync(scoreFile)) {
+    scores = Float64Array.from((JSON.parse(fs.readFileSync(scoreFile, 'utf8')) as Array<number | null>).map((v) => (v === null ? NaN : v)));
+    log(`walk-forward scores from cache (${path.basename(scoreFile)})`);
+  } else {
+    scores = new Float64Array(events.length).fill(NaN);
+    for (const lane of ['fast', 'slow'] as const) {
+      const s = walkForward(events, lane, firstFold, foldMs, log);
+      s.forEach((v, i) => { if (Number.isFinite(v)) scores[i] = v; });
+    }
+    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.writeFileSync(scoreFile, JSON.stringify(Array.from(scores, (v) => (Number.isFinite(v) ? v : null))));
   }
-  // minScore per lane on the development years only.
+  // Per setup type, on the development years only: its minimum score from a short grid (the lane book
+  // with only that type), and whether it is traded at all (its best development result must be net
+  // positive). Every (type, threshold) tried counts as a trial.
   const GRID = [-Infinity, 0.5, 0.7, 0.8, 0.9, 0.95];
   const book: LaneBookParams = JSON.parse(JSON.stringify(DEFAULT_LANES));
   const validation: SetupModelParams['validation'] = {};
+  const trialsOf: Record<string, number> = {};
   for (const lane of ['fast', 'slow'] as const) {
-    let best = { th: -Infinity, usd: -Infinity };
-    for (const th of GRID) {
-      const b: LaneBookParams = { ...book, [lane]: { ...book[lane], minScore: th } };
-      const tr = backtestLanes(assets, events, scores, b, costs, equity, firstFold, holdoutFrom, [lane]);
-      const usd = tr.reduce((a, t) => a + t.usd, 0);
-      log(`  ${lane} minScore ${th === -Infinity ? 'none' : th}: development ${tr.length} trades, net $${usd.toFixed(0)}`);
-      if (usd > best.usd) best = { th, usd };
+    const kinds = [...new Set(events.filter((e) => e.sig.lane === lane).map((e) => kindKey(e.sig)))].sort();
+    const byKind: Record<string, number> = {};
+    for (const k of kinds) {
+      let best = { th: -Infinity, usd: -Infinity, n: 0 };
+      for (const th of GRID) {
+        const b: LaneBookParams = { ...book, [lane]: { ...book[lane], minScore: th, minScoreByKind: undefined } };
+        const tr = backtestLanes(assets, events, scores, b, costs, equity, firstFold, holdoutFrom, [lane], (e) => kindKey(e.sig) === k);
+        const usd = tr.reduce((a, t) => a + t.usd, 0);
+        if (usd > best.usd) best = { th, usd, n: tr.length };
+      }
+      const on = best.usd > 0 && best.n >= 20;
+      if (on) byKind[k] = best.th === -Infinity ? -1e9 : best.th;
+      log(`  ${lane} ${k}: best development threshold ${best.th === -Infinity ? 'none' : best.th} -> ${best.n} trades, net $${best.usd.toFixed(0)}: ${on ? 'TRADED' : 'off'}`);
     }
-    // Scores are percentiles: size 1x halfway between the threshold and the top.
-    book[lane].minScore = best.th === -Infinity ? -1e9 : best.th;
-    book[lane].refScore = best.th === -Infinity ? 0.5 : (1 + best.th) / 2;
+    book[lane].minScoreByKind = byKind;
+    book[lane].minScore = Math.min(...Object.values(byKind), 1e9);
+    book[lane].refScore = 0.5;
+    trialsOf[lane] = kinds.length * GRID.length;
   }
   // Both lanes together, every period.
   const trades = backtestLanes(assets, events, scores, book, costs, equity, firstFold, end);
@@ -305,7 +327,7 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
     if (h.trades < 30) reasons.push(`holdout: only ${h.trades} trades (need 30)`);
     if (!(h.avgRLo > 0)) reasons.push(`holdout: mean net R ${h.avgR.toFixed(3)}, 5% bound ${h.avgRLo.toFixed(3)} (needs > 0)`);
     if (!(f.netUsd > 0)) reasons.push(`final window: net $${f.netUsd.toFixed(0)} (needs > 0)`);
-    validation[lane] = { periods, trials: GRID.length, passed: reasons.length === 0, reasons };
+    validation[lane] = { periods, trials: trialsOf[lane], passed: reasons.length === 0, reasons };
     for (const [k, p] of Object.entries(periods)) {
       log(`${lane} ${k} ${p.from}..${p.to}: ${p.trades} trades (${p.tradesPerDay.toFixed(2)}/day), win ${(100 * p.winRate).toFixed(1)}%, mean net R ${p.avgR.toFixed(3)} [${p.avgRLo.toFixed(3)}, ${p.avgRHi.toFixed(3)}], PF ${p.profitFactor.toFixed(2)}, net $${p.netUsd.toFixed(0)} ($${p.usdPerDay.toFixed(1)}/day on $${equity}), max DD $${p.maxDrawdownUsd.toFixed(0)}, Sharpe ${p.sharpe.toFixed(2)}`);
       for (const [kind, s] of Object.entries(p.byKind)) log(`    ${kind}: ${s.trades} trades, win ${(100 * s.winRate).toFixed(1)}%, mean R ${s.avgR.toFixed(3)}`);
