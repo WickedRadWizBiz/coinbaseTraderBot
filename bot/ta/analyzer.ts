@@ -1,5 +1,6 @@
 // Multi-timeframe TA snapshot for one spot USD pair: every indicator in the library computed on
-// each timeframe's CLOSED candles, then the knowledge base's rules and confluences evaluated on
+// each timeframe's CLOSED candles (the core indicators by TA-Lib, bot/ta/talib.ts, when it is
+// installed; the built-in implementations otherwise), then the knowledge base's rules and confluences evaluated on
 // top. The same snapshot feeds the meta-model's features (ta / taconf groups), the dashboard/API
 // ("what the chart says and what it means") and the offline rule study (research/taStudy.ts).
 
@@ -8,6 +9,7 @@ import {
 } from './indicators';
 import { candlePatterns, divergence, equalLevels, obvDivergenceStrength, fairValueGaps, liquiditySweep, marketStructure, roundLevel, swings, trueBreakout, type Trend } from './structure';
 import { CONFLUENCES, RULES, type Timeframe } from './knowledge';
+import { talibCore, talibExtras } from './talib';
 
 export const TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d'];
 export const TF_MS: Record<Timeframe, number> = { '1m': 60_000, '5m': 300_000, '15m': 900_000, '1h': 3_600_000, '4h': 14_400_000, '1d': 86_400_000 };
@@ -57,6 +59,8 @@ export interface TfState {
   divMfi: { regular: -1 | 0 | 1; hidden: -1 | 0 | 1 };
   candle: { engulfing: -1 | 0 | 1; doji: 0 | 1; pinBar: -1 | 0 | 1 };
   round: { level: number; distAtr: number; crossed: -1 | 0 | 1 };
+  /** TA-Lib-only readings and the candlestick-pattern summary (bot/ta/talib.ts TALIB_KEYS; NaN without TA-Lib). */
+  tl: Record<string, number>;
 }
 
 export interface TaSignal {
@@ -107,18 +111,28 @@ export function tfState(tf: Timeframe, cs: Candle[]): TfState | undefined {
   if (cs.length < 30) return undefined;
   const cl = cs.map((c) => c.c);
   const n = cs.length - 1;
-  const A = atr(cs, 14);
+  // Core indicators: TA-Lib when available (the main engine), the built-in versions otherwise.
+  const T = talibCore(cs);
+  const A = T?.atr ?? atr(cs, 14);
   const a = A[n];
   const close = cl[n];
   const atrPctS = A.map((x, i) => x / cl[i]);
-  const e12 = ema(cl, 12), e26 = ema(cl, 26), s50 = sma(cl, 50), s200 = sma(cl, 200);
-  const ad = adx(cs, 14);
+  const e12 = T?.ema12 ?? ema(cl, 12), e26 = T?.ema26 ?? ema(cl, 26), s50 = T?.sma50 ?? sma(cl, 50), s200 = T?.sma200 ?? sma(cl, 200);
+  const e21 = T?.ema21 ?? ema(cl, 21), e50 = T?.ema50 ?? ema(cl, 50);
+  const ad = T ? { adx: T.adx, plusDI: T.plusDI, minusDI: T.minusDI } : adx(cs, 14);
   const ich = ichimoku(cs);
-  const bb = bollinger(cl, 20, 2), kc = keltner(cs, 20, 1.5, 10);
-  const r = rsi(cl, 14);
-  const m = macd(cl);
-  const st = stochastic(cs, 14, 3);
-  const o = obv(cs);
+  const bb = T ? {
+    upper: T.bbUpper, lower: T.bbLower, mid: T.bbMiddle,
+    pctB: cl.map((x, i) => (Number.isFinite(T.bbMiddle[i]) ? (T.bbUpper[i] > T.bbLower[i] ? (x - T.bbLower[i]) / (T.bbUpper[i] - T.bbLower[i]) : 0.5) : NaN)),
+    bandwidth: T.bbMiddle.map((md, i) => (Number.isFinite(md) && md > 0 ? (T.bbUpper[i] - T.bbLower[i]) / md : NaN)),
+  } : bollinger(cl, 20, 2);
+  const kc = keltner(cs, 20, 1.5, 10);
+  const r = T?.rsi ?? rsi(cl, 14);
+  const m = T ? { line: T.macd, signal: T.macdSignal, hist: T.macdHist } : macd(cl);
+  const st = T ? { k: T.stochK, d: T.stochD } : stochastic(cs, 14, 3);
+  const o = T?.obv ?? obv(cs);
+  const mfiS = T?.mfi ?? mfi(cs, 14);
+  const willR = T ? T.willR[n] : last(williamsR(cs, 14));
   const vols = cs.map((c) => c.v);
   const avgV = sma(vols, 20);
   const sw = swings(cs, 3, 3);
@@ -156,7 +170,7 @@ export function tfState(tf: Timeframe, cs: Candle[]): TfState | undefined {
   const obvSlope = n >= 20 && avgV[n] > 0 ? (o[n] - o[n - 20]) / (20 * avgV[n]) : NaN;
   return {
     tf, bars: cs.length, close, atr: a, atrPct: a / close, atrRank: rank(atrPctS.slice(-100), atrPctS[n]),
-    ema12: e12[n], ema21: last(ema(cl, 21)), ema26: e26[n], ema50: last(ema(cl, 50)), sma50: s50[n], sma200: s200[n],
+    ema12: e12[n], ema21: e21[n], ema26: e26[n], ema50: e50[n], sma50: s50[n], sma200: s200[n],
     smaDiffPrev: s50[n - 1] - s200[n - 1],
     adx: ad.adx[n], adxPrev: ad.adx[n - 3], plusDI: ad.plusDI[n], minusDI: ad.minusDI[n],
     cloud: Number.isFinite(cloudTop) ? {
@@ -173,8 +187,8 @@ export function tfState(tf: Timeframe, cs: Candle[]): TfState | undefined {
     rsi: r[n], rsiPrev: r[n - 1],
     macdLine: m.line[n], macdSignal: m.signal[n], macdHist: m.hist[n], macdHistPrev: m.hist[n - 1],
     macdCross: cross(m.line[n], m.signal[n], m.line[n - 1], m.signal[n - 1]),
-    stochK: st.k[n], stochD: st.d[n], stochCross: cross(st.k[n], st.d[n], st.k[n - 1], st.d[n - 1]), willR: last(williamsR(cs, 14)),
-    obvSlope, cmf: last(cmf(cs, 20)), mfi: last(mfi(cs, 14)), vwap: vw[n],
+    stochK: st.k[n], stochD: st.d[n], stochCross: cross(st.k[n], st.d[n], st.k[n - 1], st.d[n - 1]), willR,
+    obvSlope, cmf: last(cmf(cs, 20)), mfi: mfiS[n], vwap: vw[n],
     volRatio: avgV[n - 1] > 0 ? cs[n].v / avgV[n - 1] : NaN,
     chgAtr: a > 0 ? (close - cl[n - 1]) / a : NaN, chg20Atr: a > 0 && n >= 20 ? (close - cl[n - 20]) / a : NaN,
     donchianBreak: close > dc.upper[n] ? 1 : close < dc.lower[n] ? -1 : 0,
@@ -183,9 +197,10 @@ export function tfState(tf: Timeframe, cs: Candle[]): TfState | undefined {
     sweep: liquiditySweep(cs, sw), breakout: trueBreakout(cs, sw),
     equalHighs: eq.highs, equalLows: eq.lows,
     fvgDistAtr, inFvg,
-    divRsi: divergence(cs, r, sw), divMacd: divergence(cs, m.hist, sw), divObv: divergence(cs, o, sw), obvDiv: obvDivergenceStrength(cs, o, a, sw), divMfi: divergence(cs, mfi(cs, 14), sw),
+    divRsi: divergence(cs, r, sw), divMacd: divergence(cs, m.hist, sw), divObv: divergence(cs, o, sw), obvDiv: obvDivergenceStrength(cs, o, a, sw), divMfi: divergence(cs, mfiS, sw),
     candle: candlePatterns(cs),
     round: { level: rl.level, distAtr: a > 0 ? rl.dist / a : NaN, crossed },
+    tl: talibExtras(cs, a),
   };
 }
 

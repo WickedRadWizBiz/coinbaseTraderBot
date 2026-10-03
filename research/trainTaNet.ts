@@ -27,6 +27,7 @@
 // The population is saved (--state): later runs continue the tournament month by month instead of
 // starting over, so it is an initialisation followed by continual evolution.
 
+import { taEngine } from '../bot/ta/talib';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -41,7 +42,7 @@ import {
 import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type FitnessReport, type Interaction } from './fitness';
 import { runPbt, walkForwardRounds, type Hyper, type MutationSpec, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
 import { loadIndexSeries, loadSeries, storedAssets } from './history/candles';
-import { DAILY_CONTEXT_FEATURES, TaNetContext } from '../bot/ta/taNetContext';
+import { DAILY_CONTEXT_FEATURES, SLOW_INDEXES, TaNetContext } from '../bot/ta/taNetContext';
 import { rng } from './stats';
 
 const H = 3_600_000;
@@ -174,7 +175,10 @@ export function buildData(histDir: string, assets: string[], cacheDir: string | 
   const basket: Record<string, Candle[]> = Object.fromEntries(loaded.filter((x) => x.s1.candles.length).map((x) => [x.asset, x.s1.candles]));
   for (const a of storedAssets(histDir)) if (!(a in basket)) { const c = loadSeries(histDir, a, '1h').candles; if (c.length) basket[a] = c; }
   const btcdom = loadIndexSeries(histDir, 'BTCDOM', '1h').candles;
-  const ctx = new TaNetContext({ h1: basket, btcdom1h: btcdom, btcd1d: loadIndexSeries(histDir, 'BTC.D', '1d').candles, usdtd1d: loadIndexSeries(histDir, 'USDT.D', '1d').candles });
+  const ctx = new TaNetContext({
+    h1: basket, btcdom1h: btcdom, btcd1d: loadIndexSeries(histDir, 'BTC.D', '1d').candles, usdtd1d: loadIndexSeries(histDir, 'USDT.D', '1d').candles,
+    slow1d: Object.fromEntries(SLOW_INDEXES.map(({ asset }) => [asset, loadIndexSeries(histDir, asset, '1d').candles])),
+  });
   const cov = ctx.coverage();
   log(`market context: basket ${ctx.basket.join(', ') || 'none'}; ${Object.entries(cov).map(([k, v]) => `${k} ${v.from}..${v.to}`).join(', ') || 'no index series (BTCDOM: history.sh binance; BTC.D / USDT.D: history.sh tradingview)'}`);
   for (const { asset, s1, s24, s15 } of loaded) {
@@ -740,7 +744,7 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
     params: {
       version: `tanet5-${new Date().toISOString().slice(0, 10)}-${D.assets.length}a-r${res.log.length}`,
       schema: TANET_SCHEMA, dims, gates: gatesOf(elite.hyper), weights: Array.from(finalW), norm, patterns, context: D.context,
-      trendFeatures: [...TANET_TREND_FEATURES], dayFeatures: [...TANET_DAY_FEATURES], strategy: strat, heads,
+      trendFeatures: [...TANET_TREND_FEATURES], dayFeatures: [...TANET_DAY_FEATURES], strategy: strat, heads, taEngine: taEngine(),
       network: {
         dsr: { sharpe: dsr.sharpe, sr0: dsr.sr0, probability: dsr.probability, n: dsr.n }, trials: res.trials, regimes,
         holdout: { fitness: hoFit.fitness, sortino: hoFit.sortino, maxDrawdown: hoFit.maxDrawdown, costs: hoFit.costs, netReturn: hoFit.netReturn, independent: hoFit.independent, days: hoFit.days, selective: hoSel },

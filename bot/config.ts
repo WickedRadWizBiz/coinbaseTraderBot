@@ -218,6 +218,8 @@ export interface TaNetConfig {
   historyDir: string;
   /** Pipeline: refresh history from Binance Vision + Coinbase before training (needs internet). */
   historyUpdate: boolean;
+  /** Fill history holes and keep the TradingView index series (BTC.D, USDT.D, TOTAL3, OTHERS.D, RTY) with tvdatafeed (TV_FILL). */
+  tvFill: boolean;
   /** Assets to collect: "auto" = every crypto asset Kalshi lists (binary series + perps), or a list. */
   historyAssets: string;
   /** Binance intervals to download, and Coinbase timeframes to backfill. */
@@ -954,6 +956,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       requireValidated: bool(env, 'TA_NET_REQUIRE_VALIDATED', true),
       historyDir: path.resolve(env.HISTORY_DIR ?? path.join(dataDir, 'history')),
       historyUpdate: bool(env, 'HISTORY_AUTO_UPDATE', true),
+      tvFill: bool(env, 'TV_FILL', true),
       historyAssets: env.HISTORY_ASSETS ?? 'auto',
       binanceIntervals: (env.HISTORY_BINANCE_INTERVALS ?? '1h,15m,1d').split(',').map((x) => x.trim()).filter(Boolean),
       coinbaseTfs: (env.HISTORY_COINBASE_TFS ?? '1h,1d').split(',').map((x) => x.trim()).filter(Boolean),

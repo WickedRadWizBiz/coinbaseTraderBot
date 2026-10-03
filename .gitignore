@@ -29,3 +29,8 @@ report.json
 retraining_history.json
 audit_memory.json
 __pycache__/
+
+# TA-Lib native build outputs (compiled on install from vendor/talib)
+vendor/talib/build/
+vendor/talib/src/lib/temp/csr/*.o
+vendor/talib/src/lib/lib/*.a

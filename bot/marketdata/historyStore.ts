@@ -19,7 +19,8 @@ export const HIST_TF_MS: Record<HistTf, number> = { '1m': 60_000, '5m': 300_000,
 export const HIST_TFS = Object.keys(HIST_TF_MS) as HistTf[];
 
 /** Splice priority for spot series (first = preferred). Coinbase is closest to the CF Benchmarks indices Kalshi settles on. */
-export const DEFAULT_SOURCE_PRIORITY = ['coinbase', 'binance', 'bitstamp', 'kraken', 'gemini', 'cdd', 'bittrex', 'yahoo', 'other'];
+// tvspot: TradingView bars of an exchange's pair (deploy/tv_history.py), fetched only to fill holes.
+export const DEFAULT_SOURCE_PRIORITY = ['coinbase', 'binance', 'bitstamp', 'kraken', 'gemini', 'cdd', 'bittrex', 'tvspot', 'yahoo', 'other'];
 
 /** Market-wide index series, never spliced into spot pairs: TradingView's charts (one-off export),
  *  Binance's BTCDOM index (Binance Vision), and the bot's live-recorded bars. */
@@ -141,7 +142,11 @@ export function aggregateIndex(cs: Candle[], fromMs: number, ms: number, minShar
 
 export type Segment = { source: string; from: number; to: number; bars: number };
 
-/** Splice: better sources keep their whole span; worse ones only extend it before/after. */
+/** Sources fetched only to repair missing bars: they fill holes INSIDE better sources' spans too. */
+export const GAP_FILL_SOURCES = new Set(['tvspot']);
+
+/** Splice: better sources keep their whole span; worse ones only extend it before/after (gap-fill
+ *  sources also fill the missing bars inside it). */
 export function spliceSources(parts: Array<{ source: string; candles: Candle[] }>, priority = DEFAULT_SOURCE_PRIORITY): { candles: Candle[]; segments: Segment[] } {
   const sorted = parts.filter((p) => p.candles.length).sort((a, b) => rankOf(a.source, priority) - rankOf(b.source, priority));
   const spans: Array<[number, number]> = [];
@@ -149,7 +154,8 @@ export function spliceSources(parts: Array<{ source: string; candles: Candle[] }
   const segments: Segment[] = [];
   for (const p of sorted) {
     const covered = (t: number) => spans.some(([a, b]) => t >= a && t <= b);
-    const take = p.candles.filter((c) => !covered(c.ts) && !byTs.has(c.ts));
+    const fill = GAP_FILL_SOURCES.has(p.source);
+    const take = p.candles.filter((c) => (fill || !covered(c.ts)) && !byTs.has(c.ts));
     for (const c of take) byTs.set(c.ts, c);
     if (take.length) segments.push({ source: p.source, from: take[0].ts, to: take[take.length - 1].ts, bars: take.length });
     spans.push([p.candles[0].ts, p.candles[p.candles.length - 1].ts]);

@@ -48,6 +48,7 @@
   },
   "dependencies": {
     "dotenv": "^17.2.3",
+    "talib": "file:vendor/talib",
     "express": "^4.21.2",
     "ws": "^8.18.3"
   },

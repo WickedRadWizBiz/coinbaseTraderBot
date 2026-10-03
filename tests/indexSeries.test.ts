@@ -23,7 +23,7 @@ test('TradingView exports: dominance charts are index series, never coins', () =
   assert.deepEqual(tradingViewIndexFromName('CRYPTOCAP_BTC.D, 1D.csv'), { asset: 'BTC.D', tf: '1d' });
   assert.deepEqual(tradingViewIndexFromName('CRYPTOCAP_USDT.D, 60.csv'), { asset: 'USDT.D', tf: '1h' });
   assert.deepEqual(tradingViewIndexFromName('CRYPTOCAP_TOTAL3, 240_ab12c.csv'), { asset: 'TOTAL3', tf: '4h' });
-  assert.deepEqual(tradingViewIndexFromName('CRYPTOCAP_OTHERS.D_1h.csv'), { asset: 'OTHERS.D', tf: '1h' }, 'tv_dominance.py naming: ".D" is not "daily"');
+  assert.deepEqual(tradingViewIndexFromName('CRYPTOCAP_OTHERS.D_1h.csv'), { asset: 'OTHERS.D', tf: '1h' }, 'tv_history.py naming: ".D" is not "daily"');
   assert.equal(tradingViewIndexFromName('BTCUSDT-1h-2021-03.csv'), undefined);
   const dir = tmpDir();
   upsertSeries(dir, 'binance', 'BTC', '1h', Array.from({ length: 30 }, (_, i) => bar(T0 + i * H, 100 + i)));

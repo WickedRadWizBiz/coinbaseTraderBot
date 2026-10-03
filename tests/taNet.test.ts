@@ -56,7 +56,9 @@ function walk(n: number, step: number, t0: number, level: number, vol: number, s
 const DOM = walk(H1.length, H, T0, 1000, 0.004, 5);
 const BTCD = walk(D1.length + 300, DAY, T0 - 300 * DAY, 55, 0.02, 7);
 const USDTD = walk(D1.length + 300, DAY, T0 - 300 * DAY, 5, 0.03, 9);
-const CTX = new TaNetContext({ h1: { TST: H1, BTC: BTC_H1 }, btcdom1h: DOM, btcd1d: BTCD, usdtd1d: USDTD });
+// Slow context series (TOTAL3, OTHERS.D, RTY) reuse the dominance shapes.
+const SLOW = { TOTAL3: BTCD, 'OTHERS.D': USDTD, RTY: BTCD };
+const CTX = new TaNetContext({ h1: { TST: H1, BTC: BTC_H1 }, btcdom1h: DOM, btcd1d: BTCD, usdtd1d: USDTD, slow1d: SLOW });
 
 function historyDir(): string {
   const dir = tmpDir();
@@ -65,6 +67,7 @@ function historyDir(): string {
   upsertSeries(dir, 'binance-index', 'BTCDOM', '1h', DOM);
   upsertSeries(dir, 'tradingview', 'BTC.D', '1d', BTCD);
   upsertSeries(dir, 'tradingview', 'USDT.D', '1d', USDTD);
+  for (const [k, v] of Object.entries(SLOW)) upsertSeries(dir, 'tradingview', k, '1d', v);
   return dir;
 }
 const OPTS = { trainMonths: 1.25, evalMonths: 0.25, stepMonths: 0.25, holdoutMonths: 0.5, finalMonths: 0.25, stride: 1, minPerRegime: 5, epochsPerRound: 2, baseHyper: { lr: 3e-3, wd: 1e-2 } };
@@ -88,7 +91,7 @@ test('inputs: hourly map, daily steps and 15m steps are complete, cache-identica
   const later = M15.map((c) => (c.ts >= t ? { ...c, c: c.c * 3, h: c.h * 3 } : c));
   const H1b = aggregateCandles(later, Q, H), D1b = aggregateCandles(later, Q, DAY);
   const bump = (cs: Candle[], cut: number) => cs.map((c) => (c.ts >= cut ? { ...c, c: c.c * 2, h: c.h * 2 } : c));
-  const ctxLater = new TaNetContext({ h1: { TST: H1b, BTC: bump(BTC_H1, t) }, btcdom1h: bump(DOM, t), btcd1d: bump(BTCD, t - DAY + 1), usdtd1d: bump(USDTD, t - DAY + 1) });
+  const ctxLater = new TaNetContext({ h1: { TST: H1b, BTC: bump(BTC_H1, t) }, btcdom1h: bump(DOM, t), btcd1d: bump(BTCD, t - DAY + 1), usdtd1d: bump(USDTD, t - DAY + 1), slow1d: { TOTAL3: bump(BTCD, t - DAY + 1), 'OTHERS.D': bump(USDTD, t - DAY + 1), RTY: bump(BTCD, t - DAY + 1) } });
   const g = taNetFeatureMap('TST', H1b.slice(i - TANET_H1_BARS + 1, i + 1), D1b, undefined, { ctx: ctxLater, m15: later });
   for (const key of TANET_FEATURES) assert.ok(Object.is(f[key], g[key]), `${key} looked ahead`);
   assert.deepEqual(Array.from(taNetMicro(later, t)), Array.from(taNetMicro(M15, t)), '15m steps looked ahead');
@@ -128,7 +131,7 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
   assert.ok(D.ts.length > 2000, `${D.ts.length} samples`);
   assert.ok(D.microShare > 0.95);
   assert.deepEqual(D.context.basket, ['BTC', 'TST'], 'every stored coin is in the market basket, trained or not');
-  assert.deepEqual(Object.keys(D.context.indexes).sort(), ['BTC.D', 'BTCDOM', 'USDT.D']);
+  assert.deepEqual(Object.keys(D.context.indexes).sort(), ['BTC.D', 'BTCDOM', 'OTHERS.D', 'RTY', 'TOTAL3', 'USDT.D']);
   const state = path.join(dir, 'pop.json');
   const logs: string[] = [];
   const first = await trainTaNet(D, { ...OPTS, statePath: state, maxRounds: 2, log: (m) => logs.push(m) });

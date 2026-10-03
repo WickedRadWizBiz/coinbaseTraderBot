@@ -46,17 +46,20 @@ Every coin's forecast also sees the market around it. All of it is computed the 
 
 **Why a separate context branch.** Feeding these ~120 extra readings into every one of the GRU's 12 hourly steps slowed learning: on a planted-signal test the hit rate fell from 57% to 52% even with the new inputs empty. Read once, through a small dense layer with its own weight and dropout, they cost far fewer weights, and the planted-signal result is back to 57%.
 
-**Getting the dominance history (one-off).** TradingView has the real BTC.D and USDT.D charts back to 2013. `deploy/tv_dominance.py` exports them (plus TOTAL, TOTAL2, TOTAL3 and OTHERS.D) with tvdatafeed, an unofficial client, without logging in: daily for the whole history, 4-hour for about 2.3 years and hourly for about 7 months. Automated downloading is against TradingView's terms, so run it once to backfill; after that the bot keeps the series up to date from its own feed.
+**TradingView history (tvdatafeed).** `deploy/tv_history.py` uses tvdatafeed (an unofficial TradingView client, no login) for two jobs, and the daily pipeline runs both in its history step (`TV_FILL=true`, the default):
+- **Index series, 5,000 bars each** (tvdatafeed's maximum) at 1d, 4h and 1h. The symbols are BTC.D, USDT.D, TOTAL3 (crypto market cap without BTC and ETH) and OTHERS.D (the share outside the top 10), all from CRYPTOCAP, and RTY, the US Russell 2000 (the first of TVC:RUT, RUSSELL:RUT, CME_MINI:RTY1! and AMEX:IWM that answers). A series with fewer than 3,000 daily bars gets the full backfill. TOTAL3, OTHERS.D and RTY have no live feed in the bot, so their last 40 daily bars are refreshed whenever the newest is more than 2 days old (4 for RTY, which skips weekends). BTC.D and USDT.D stay current from the bot's own dominance feed.
+- **Gap filling for every coin.** Each run checks every timeframe (15m, 1h, 4h, 1d) of every coin for missing bars within tvdatafeed's 5,000-bar reach, leaving out the last 3 days, which the exchange archives haven't published yet. The worst 20 get that window from the first venue that has the pair (Coinbase, Binance, Bitstamp, Kraken). The bars are stored as source `tvspot`, which fills the missing bars only, including inside the exchanges' own spans, and never replaces an exchange's bar. A hole TradingView can't fill either (an outage on every venue) is retried weekly instead of daily.
 
 ```bash
-bash ~/bot/current/deploy/history.sh tradingview   # on the server: installs tvdatafeed in a venv, exports, imports
-# or on your own computer, then copy the CSVs to the server and import them:
-pip install --upgrade --no-cache-dir git+https://github.com/rongardF/tvdatafeed.git
-python3 tv_dominance.py --out tradingview
-bash ~/bot/current/deploy/history.sh import ~/incoming/tradingview
+bash ~/bot/current/deploy/history.sh tradingview   # on the server, now: index backfill (installs tvdatafeed in a venv), then import
+bash ~/bot/current/deploy/history.sh tvfetch --out ~/incoming/tv --spot BTC:1h,SOL:15m   # spot bars for named holes
 ```
 
-The importer files `CRYPTOCAP_*` exports (also TradingView's own "Export chart data" CSVs) as index series, never as coins. On the server this needs `sudo apt install python3-venv git` once. If TradingView blocks the server's address, run it from your own computer.
+The importer files `CRYPTOCAP_*` and `TVINDEX_*` exports (also TradingView's own "Export chart data" CSVs) as index series, never as coins. The deploy installs python3-venv and git on the server. Downloading through an unofficial client is against TradingView's terms, so the pipeline only asks for what is missing or stale. If TradingView blocks the server's address, the step reports it and the bot carries on with what it has.
+
+**TA-Lib inputs.** The core indicators come from TA-Lib (docs/TA_LIBRARY.md, "Engine"). Of its extra readings, the network takes a compact set per timeframe through the context branch: the candlestick net score (last bar and last 3 bars), CCI, the Aroon oscillator, the Ultimate Oscillator, distance to the Parabolic SAR, the Hilbert trend mode, and distance to KAMA. With all ~170 TA-Lib extras, the tournament test's planted signal was no longer learned (holdout hit rate 50%, against 52%+ with the compact set), the same overfitting the market context caused before it got its own branch. The setup scorer, a tree model, gets every TA-Lib reading.
+
+**Slow context: TOTAL3, OTHERS.D, RTY.** The same daily readings as BTC.D and USDT.D (1/5/20-day changes plus trend, momentum, structure and moving-average distances) are added to the context branch for these three series. They're there for the network to find patterns and extra confluence, not as rules. They lag one extra day (the bar that closed a day before the dominance bars), so live always has the bar training had, even before the daily refresh. RTY's last bar carries for up to 4 days, covering weekends and holidays. Signs: TOTAL3 and RTY up = risk-on for every coin; OTHERS.D up = small alts outperforming (bullish alts, bearish BTC relative).
 
 When new context history arrives (BTCDOM for the first time, or the TradingView export), every past row changes, so the next pipeline run starts the tournament afresh to learn from it.
 

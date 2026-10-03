@@ -21,16 +21,17 @@
 // The outputs are features of the decision models (MLP, perps, vol forecast) that keep them only
 // when their own validation improves.
 
+import { TALIB_KEYS, taEngine } from './talib';
 import fs from 'fs';
 import { branchForward, branchLayout, type BranchDims, type BranchGates, type BranchInput } from './branchNet';
 import { evaluate, TF_MS, tfState, type TaSnapshot, type TfState } from './analyzer';
 import { aggregate, takerImbalance, type CandleSet } from './candleStore';
-import { CONTEXT_FEATURES, DAILY_CONTEXT_FEATURES, TaNetContext } from './taNetContext';
+import { CONTEXT_FEATURES, DAILY_CONTEXT_FEATURES, SLOW_INDEXES, TaNetContext } from './taNetContext';
 import type { Candle } from './indicators';
 import { CONFLUENCES, RULES, type Timeframe } from './knowledge';
 
 /** Bump when a feature formula or window changes (old models are then refused). */
-export const TANET_SCHEMA = '5';
+export const TANET_SCHEMA = '6';
 /** Hourly bars per window, and the GRU's hourly steps. Coinbase returns 300 candles per request
  *  including the forming one, so the live store holds >= 299 closed bars from the first poll:
  *  280 + 11 earlier steps = 291 always fit. */
@@ -121,13 +122,15 @@ export function tfFeatures(p: string, s: TfState | undefined, out: Record<string
   put('round_dist', s.round.distAtr, 20);
   put('round_cross', s.round.crossed);
   if (opts.vwap) put('vwap_dist', perAtr(s, s.close - s.vwap), 20);
+  // TA-Lib-only readings and candlestick patterns (already scale-free; NaN without TA-Lib).
+  for (const k of TALIB_KEYS) put(k, s.tl?.[k] ?? NaN, 30);
 }
 
 const BASE_KEYS = ['rsi', 'rsi_chg', 'macd_atr', 'macd_chg_atr', 'macd_cross', 'adx', 'adx_chg', 'di', 'bb_pctb', 'bb_bw_rank', 'squeeze', 'squeeze_release', 'ema_stack', 'ema12_26', 'ema21_dist', 'ema50_dist', 'sma50_dist',
   'cloud', 'cloud_thick', 'cloud_future', 'tk_cross', 'tk_above', 'stoch', 'stoch_kd', 'stoch_cross', 'willr', 'obv_slope', 'cmf', 'mfi', 'vol_ratio', 'log_atr_pct', 'atr_rank', 'chg_atr', 'chg20_atr', 'donchian',
   'trend', 'bos', 'choch', 'sweep', 'breakout', 'eq_highs', 'eq_lows', 'div', 'hdiv', 'engulf', 'pin', 'doji', 'obv_div', 'obv_hdiv', 'fvg_dist', 'in_fvg', 'vp_pos', 'vp_reentry', 'vp_node', 'round_dist', 'round_cross'];
 export function TF_KEYS(o: { sma200: boolean; vwap: boolean }): string[] {
-  return [...BASE_KEYS, ...(o.sma200 ? ['sma200_dist', 'golden'] : []), ...(o.vwap ? ['vwap_dist'] : [])];
+  return [...BASE_KEYS, ...(o.sma200 ? ['sma200_dist', 'golden'] : []), ...(o.vwap ? ['vwap_dist'] : []), ...TALIB_KEYS];
 }
 // 4h is built from the 280-bar hourly window (70 bars): no SMA200 there, live or in training. 15m reads
 // the last TANET_M15_BARS closed bars (live keeps 320, enough for that window 12 hours back).
@@ -237,14 +240,23 @@ export function windowOk(h1: Candle[]): boolean {
 
 /** Hourly GRU step: the coin's hourly / 4h readings, rule nets, confluences, returns and flow (the daily
  *  readings feed the macro branch; 15m readings and the market context feed the context branch). */
-export const TANET_TREND_FEATURES = TANET_FEATURES.filter((k) => !k.startsWith('d1_') && !k.startsWith('m15_') && !k.startsWith('x_'));
-/** Context branch, read once at the forecast hour: the 15m TA library, the market-wide context, and
- *  TA on the BTC.D / USDT.D daily charts as of the last closed day. */
-export const TANET_CTX_HOURLY = TANET_FEATURES.filter((k) => k.startsWith('m15_') || k.startsWith('x_'));
+/** TA-Lib-only readings and candlestick patterns (h1_tl_cci, d1_cdl_net, ...): read once, through the
+ *  context branch, not in every GRU / attention step (dozens of extra inputs per step made the
+ *  network overfit, as the market context did before it got its own branch). */
+const isTalibKey = (k: string) => TALIB_KEYS.some((t) => k.endsWith(`_${t}`));
+/** The TA-Lib readings the network reads (per timeframe): a compact set. All of them reach the setup
+ *  scorer (trees cope with wide inputs); ~170 extra context inputs made this network overfit a planted
+ *  signal it otherwise learns, so it gets the candlestick summary and the oscillators that add the most. */
+export const TANET_TALIB_KEYS = ['cdl_net', 'cdl_net3', 'tl_cci', 'tl_aroonosc', 'tl_ultosc', 'tl_sar_dist', 'tl_ht_trendmode', 'tl_kama_dist'];
+const isNetTalibKey = (k: string) => TANET_TALIB_KEYS.some((t) => k.endsWith(`_${t}`));
+export const TANET_TREND_FEATURES = TANET_FEATURES.filter((k) => !k.startsWith('d1_') && !k.startsWith('m15_') && !k.startsWith('x_') && !isTalibKey(k));
+/** Context branch, read once at the forecast hour: the 15m TA library, the market-wide context, the
+ *  TA-Lib readings of every timeframe, and TA on the daily index charts as of the last closed day. */
+export const TANET_CTX_HOURLY = TANET_FEATURES.filter((k) => ((k.startsWith('m15_') || k.startsWith('x_')) && !isTalibKey(k)) || isNetTalibKey(k));
 export const TANET_CTX_FEATURES = [...TANET_CTX_HOURLY, ...DAILY_CONTEXT_FEATURES];
 const D1_OPTS = { sma200: true, vwap: false };
 /** One attention step per closed day: the daily TA readings plus daily returns and volatility. */
-export const TANET_DAY_FEATURES = [...TF_KEYS(D1_OPTS).map((k) => `d1_${k}`), 'dret_1', 'dret_5', 'dret_20', 'dvol_10_60', 'ddow_sin', 'ddow_cos'];
+export const TANET_DAY_FEATURES = [...TF_KEYS(D1_OPTS).filter((k) => !TALIB_KEYS.includes(k)).map((k) => `d1_${k}`), 'dret_1', 'dret_5', 'dret_20', 'dvol_10_60', 'ddow_sin', 'ddow_cos'];
 
 /** Daily step vector at the close of daily bar `j` (undefined until a full window exists). */
 export function taNetDayVector(d1: Candle[], j: number): number[] | undefined {
@@ -461,6 +473,8 @@ export interface TaNetParams {
   network: TaNetNetworkValidation;
   pbt: { rounds: number; trials: number; elite: { member: number; hyper: Record<string, number>; lineage: number[] }; recent: unknown[] };
   data: { assets: string[]; from: string; to: string; rows: number; sources: Record<string, string[]>; holdoutFrom: string; finalFrom?: string };
+  /** Indicator engine the inputs were computed with ('talib' or 'builtin'; bot/ta/talib.ts). */
+  taEngine?: string;
   trainedAt: string;
 }
 
@@ -509,6 +523,7 @@ export class TaNet {
     const p = JSON.parse(fs.readFileSync(file, 'utf8')) as TaNetParams;
     if (p.schema !== TANET_SCHEMA) throw new Error(`TA network ${file} has schema ${p.schema}, this build needs ${TANET_SCHEMA} (retrain it)`);
     if (!p.dims || !Array.isArray(p.weights) || !p.heads) throw new Error(`invalid TA network ${file}`);
+    if (p.taEngine && p.taEngine !== taEngine()) console.warn(`[ta-net] ${file} was trained with the ${p.taEngine} indicator engine but ${taEngine()} is active: its inputs differ from training (install TA-Lib: npm ci)`);
     return new TaNet(p);
   }
 
@@ -650,10 +665,11 @@ export class TaNetRuntime {
     let key = '';
     for (const [a, s] of src.sets()) { const b = s.bars['1h']; if (b?.length) { h1[a] = b; key += `${a}:${b[b.length - 1].ts}:${b.length};`; } }
     const dom = src.index('BTCDOM', '1h'), btcd = src.index('BTC.D', '1d'), usdtd = src.index('USDT.D', '1d');
+    const slow = Object.fromEntries(SLOW_INDEXES.map(({ asset }) => [asset, src.index(asset, '1d')?.slice(-400)]));
     const tail = (cs: Candle[] | undefined) => `${cs?.length ?? 0}:${cs?.[cs.length - 1]?.ts ?? 0}:${cs?.[cs.length - 1]?.c ?? 0}`;
-    key += `|${tail(dom)}|${tail(btcd)}|${tail(usdtd)}`;
+    key += `|${tail(dom)}|${tail(btcd)}|${tail(usdtd)}|${SLOW_INDEXES.map(({ asset }) => tail(slow[asset])).join('|')}`;
     if (this.ctxCache?.key === key) return this.ctxCache.ctx;
-    const ctx = new TaNetContext({ h1, btcdom1h: dom?.slice(-800), btcd1d: btcd?.slice(-500), usdtd1d: usdtd?.slice(-500) });
+    const ctx = new TaNetContext({ h1, btcdom1h: dom?.slice(-800), btcd1d: btcd?.slice(-500), usdtd1d: usdtd?.slice(-500), slow1d: slow });
     this.ctxCache = { key, ctx };
     return ctx;
   }

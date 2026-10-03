@@ -10,7 +10,9 @@ const log = logger('index-bars');
 const H = 3_600_000;
 
 /** Index series the TA network reads, and at which timeframe. */
-export const TANET_INDEX_SERIES: Array<{ asset: string; tf: HistTf }> = [{ asset: 'BTCDOM', tf: '1h' }, { asset: 'BTC.D', tf: '1d' }, { asset: 'USDT.D', tf: '1d' }];
+export const TANET_INDEX_SERIES: Array<{ asset: string; tf: HistTf }> = [{ asset: 'BTCDOM', tf: '1h' }, { asset: 'BTC.D', tf: '1d' }, { asset: 'USDT.D', tf: '1d' },
+  // Slow context from TradingView (refreshed daily by the pipeline): TOTAL3, OTHERS.D, US Russell 2000.
+  { asset: 'TOTAL3', tf: '1d' }, { asset: 'OTHERS.D', tf: '1d' }, { asset: 'RTY', tf: '1d' }];
 
 /** Hourly OHLC bars of live index values, written to <dir>/bot-index/<ASSET>/1h.csv when each hour ends. */
 export class IndexBars {

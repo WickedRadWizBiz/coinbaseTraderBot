@@ -15,6 +15,13 @@
 //              also handed to the TA library, so the dominance_matrix rule and macro_rotation fire.
 //   daily      TA on the real BTC.D and USDT.D daily charts (TradingView history + the bot's own bars):
 //              trend, momentum, structure, distance to moving averages and round numbers.
+//   slow       the same daily readings on TOTAL3 (crypto market cap without BTC and ETH), OTHERS.D (the
+//              share of everything outside the top 10) and RTY (US Russell 2000, risk appetite in US
+//              small caps), from TradingView (deploy/tv_history.py, refreshed daily by the pipeline).
+//              These lag one extra day (the bar that closed a day before the dominance bars) so live
+//              always has the same bar training had, also before the daily refresh; RTY only trades on
+//              weekdays, so its last bar is carried up to 4 days. Signed: TOTAL3 and RTY up = risk-on
+//              for every coin; OTHERS.D up = small alts outperforming (bearish BTC relative).
 
 import { tfState, type MacroInput, type TfState } from './analyzer';
 import type { Candle } from './indicators';
@@ -58,10 +65,18 @@ export const CONTEXT_FEATURES: string[] = [
   'x_dom_matrix_4h', 'x_dom_matrix_24h',
 ];
 
+/** Slow context series (TradingView): store name, feature prefix, sign for BTC and for alts. */
+export const SLOW_INDEXES: Array<{ asset: string; p: string; btc: number; alt: number }> = [
+  { asset: 'TOTAL3', p: 'total3', btc: 1, alt: 1 },
+  { asset: 'OTHERS.D', p: 'othersd', btc: -1, alt: 1 },
+  { asset: 'RTY', p: 'rty', btc: 1, alt: 1 },
+];
+
 /** Daily dominance features (names, in order), appended to the daily branch's step vector. */
 export const DAILY_CONTEXT_FEATURES: string[] = [
   ...['btcd', 'usdtd'].flatMap((p) => [`dd_${p}_chg_1`, `dd_${p}_chg_5`, `dd_${p}_chg_20`, ...DAILY_STATE_KEYS.map((k) => `dd_${p}_${k}`)]),
   'dd_dom_matrix_5d',
+  ...SLOW_INDEXES.flatMap(({ p }) => [`dd_${p}_chg_1`, `dd_${p}_chg_5`, `dd_${p}_chg_20`, ...DAILY_STATE_KEYS.map((k) => `dd_${p}_${k}`)]),
 ];
 
 /** The knowledge base's dominance quadrant as a number (bot/ta/knowledge.ts dominance_matrix): USDT.D
@@ -106,6 +121,8 @@ export interface TaNetContextData {
   btcdom1h?: Candle[];
   btcd1d?: Candle[];
   usdtd1d?: Candle[];
+  /** Slow context daily series by store name (SLOW_INDEXES: TOTAL3, OTHERS.D, RTY). */
+  slow1d?: Record<string, Candle[] | undefined>;
 }
 
 export class TaNetContext {
@@ -113,6 +130,7 @@ export class TaNetContext {
   private readonly dom?: Series;
   private readonly btcd?: Series;
   private readonly usdtd?: Series;
+  private readonly slow = new Map<string, Series>();
   private readonly domState = new Map<number, Float64Array>();
   private readonly dayState = new Map<string, Float64Array>();
   private readonly mktSigma = new Map<number, number>();
@@ -122,13 +140,14 @@ export class TaNetContext {
     this.dom = series(d.btcdom1h);
     this.btcd = series(d.btcd1d);
     this.usdtd = series(d.usdtd1d);
+    for (const { asset } of SLOW_INDEXES) { const s = series(d.slow1d?.[asset]); if (s) this.slow.set(asset, s); }
   }
 
   /** Which context series exist (for the model file and the tournament's data signature). */
   coverage(): Record<string, { from: string; to: string; bars: number }> {
     const out: Record<string, { from: string; to: string; bars: number }> = {};
     const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
-    for (const [k, s] of [['BTCDOM', this.dom], ['BTC.D', this.btcd], ['USDT.D', this.usdtd]] as const) if (s) out[k] = { from: iso(s.ts[0]), to: iso(s.ts[s.ts.length - 1]), bars: s.ts.length };
+    for (const [k, s] of [['BTCDOM', this.dom], ['BTC.D', this.btcd], ['USDT.D', this.usdtd], ...[...this.slow.entries()]] as Array<[string, Series | undefined]>) if (s) out[k] = { from: iso(s.ts[0]), to: iso(s.ts[s.ts.length - 1]), bars: s.ts.length };
     return out;
   }
 
@@ -252,14 +271,15 @@ export class TaNetContext {
     return out;
   }
 
-  private dailyReadings(name: 'btcd' | 'usdtd', s: Series | undefined, j: number): Float64Array {
+  private dailyReadings(name: string, s: Series | undefined, j: number, byBars = false): Float64Array {
     const key = `${name}|${j}`;
     let v = this.dayState.get(key);
     if (!v) {
       const st = j >= 29 ? tfState('1d', s!.bars.slice(Math.max(0, j - 249), j + 1)) : undefined;
-      // Daily log changes, z-scored by the RMS of the last 60 daily changes.
+      // Daily log changes, z-scored by the RMS of the last 60 daily changes (calendar days; by bars for
+      // series that only trade on weekdays).
       const sg = j >= 60 ? Math.sqrt(Math.max(0, s!.cum2[j] - s!.cum2[j - 60]) / 60) : NaN;
-      const chg = (k: number) => (j >= k && sg > 0 && s!.ts[j] - s!.ts[j - k] === k * DAY ? clip(Math.log(s!.c[j] / s!.c[j - k]) / (sg * Math.sqrt(k)), 10) : NaN);
+      const chg = (k: number) => (j >= k && sg > 0 && (byBars || s!.ts[j] - s!.ts[j - k] === k * DAY) ? clip(Math.log(s!.c[j] / s!.c[j - k]) / (sg * Math.sqrt(k)), 10) : NaN);
       v = Float64Array.from([chg(1), chg(5), chg(20), ...DAILY_STATE_KEYS.map((k) => (st ? stateReading(st, k) : NaN))]);
       this.dayState.set(key, v);
     }
@@ -282,6 +302,15 @@ export class TaNetContext {
     const [btcd5] = pick('btcd', this.btcd, isBtc ? 1 : -1);
     const [usdtd5] = pick('usdtd', this.usdtd, 1);
     out.push(domMatrixScore(usdtd5, btcd5, isBtc));
+    // Slow context: the bar of the day before (one extra day of lag), or the last one within 4 days.
+    for (const { asset: name, p, btc, alt } of SLOW_INDEXES) {
+      const s = this.slow.get(name);
+      const j = s ? atOrBefore(s, dayTs - DAY) : -1;
+      if (!s || j < 0 || dayTs - DAY - s.ts[j] > 4 * DAY) { for (let k = 0; k < per; k++) out.push(NaN); continue; }
+      const v = this.dailyReadings(p, s, j, true);
+      const sign = isBtc ? btc : alt;
+      for (let k = 0; k < per; k++) out.push(sign * v[k]);
+    }
     return out;
   }
 }

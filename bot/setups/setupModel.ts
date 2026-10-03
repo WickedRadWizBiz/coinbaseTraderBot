@@ -9,8 +9,9 @@ import type { Lane } from './detectors';
 import type { CostModel } from './exits';
 import type { LaneBookParams } from './lanes';
 import { applyMask, maskedIndices, SETUP_FEATURES } from './features';
+import { taEngine } from '../ta/talib';
 
-export const SETUP_SCHEMA = '4';
+export const SETUP_SCHEMA = '5';
 
 /** One lane's scorer: a model predicting net R, and the distribution of its predictions on held-out
  *  trades (101 quantiles). The score is the prediction's percentile in that distribution (0..1), so a
@@ -69,6 +70,8 @@ export interface SetupModelParams {
   groups?: string[];
   /** Development-years comparison behind the group choice (information). */
   groupChoice?: Record<string, { withGroup: number; without: number; kept: boolean }>;
+  /** Indicator engine the inputs were computed with ('talib' or 'builtin'). */
+  taEngine?: string;
   /** VOL_ADAPT.trailK the events were simulated with (the trail scaling by the TA network's vol forecast). */
   volTrailK?: number;
   lanes: Partial<Record<Lane, LaneScorer>>;
@@ -91,6 +94,7 @@ export class SetupModel {
     if (p.schema !== SETUP_SCHEMA) throw new Error(`setup model schema ${p.schema}, code expects ${SETUP_SCHEMA}: retrain (research:setups)`);
     if (p.features.length !== SETUP_FEATURES.length || p.features.some((k, i) => k !== SETUP_FEATURES[i])) throw new Error('setup model features differ from the code: retrain (research:setups)');
     for (const l of Object.values(p.lanes)) if (l?.model) validateGbdt(l.model, p.features.length);
+    if (p.taEngine && p.taEngine !== taEngine()) console.warn(`[setups] ${file} was trained with the ${p.taEngine} indicator engine but ${taEngine()} is active (install TA-Lib: npm ci)`);
     return new SetupModel(p);
   }
 

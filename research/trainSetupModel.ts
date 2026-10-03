@@ -18,6 +18,7 @@
 //    its bootstrap 5% lower bound above zero, and the frozen final window must be net positive. The
 //    deployed model is refit on every event with the same settings.
 
+import { taEngine } from '../bot/ta/talib';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -86,7 +87,7 @@ export function simulateSetup(A: AssetBars, sig: SetupSignal, costs: CostModel):
 }
 
 function cacheKey(): string {
-  return crypto.createHash('sha1').update(`features-1|${SETUP_BASE_FEATURES.join(',')}`).digest('hex').slice(0, 12);
+  return crypto.createHash('sha1').update(`features-1|${taEngine()}|${SETUP_BASE_FEATURES.join(',')}`).digest('hex').slice(0, 12);
 }
 
 /** Every setup of an asset with its standalone outcome and features (features cached on disk). */
@@ -408,7 +409,7 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
   const lanes: SetupModelParams['lanes'] = {};
   for (const lane of ['fast', 'slow'] as const) lanes[lane] = fitLane(events.filter((e) => e.sig.lane === lane), 11, maskedIndices(groups));
   return {
-    version: `setups1-${iso(Date.now())}`, schema: SETUP_SCHEMA, features: SETUP_FEATURES, groups, groupChoice, volTrailK: VOL_ADAPT.trailK, lanes, book, costs, equityUsd: equity, validation, trainedAt: new Date().toISOString(),
+    version: `setups1-${iso(Date.now())}`, schema: SETUP_SCHEMA, features: SETUP_FEATURES, groups, groupChoice, volTrailK: VOL_ADAPT.trailK, taEngine: taEngine(), lanes, book, costs, equityUsd: equity, validation, trainedAt: new Date().toISOString(),
     data: { assets: [...assets.keys()], from: iso(events[0].at), to: iso(end), holdoutFrom: iso(holdoutFrom), finalFrom: iso(finalFrom), events: events.length },
   };
 }

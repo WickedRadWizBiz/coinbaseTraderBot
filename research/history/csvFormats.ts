@@ -62,11 +62,12 @@ function assetFromName(name: string): { asset: string; quote: string } | undefin
 }
 
 /** TradingView index export (CRYPTOCAP:BTC.D, USDT.D, TOTAL, TOTAL2, TOTAL3, OTHERS.D, ...): TradingView's
- *  own "CRYPTOCAP_BTC.D, 1D.csv" / "CRYPTOCAP_USDT.D, 60.csv" or deploy/tv_dominance.py's
+ *  own "CRYPTOCAP_BTC.D, 1D.csv" / "CRYPTOCAP_USDT.D, 60.csv" or deploy/tv_history.py's
  *  "CRYPTOCAP_BTC.D_1d.csv". These are market-wide index series, stored apart from spot pairs. */
 export function tradingViewIndexFromName(name: string): { asset: string; tf?: HistTf } | undefined {
   const b = path.basename(name).replace(/\.csv$/i, '');
-  const m = /CRYPTOCAP[_:\s]+([A-Z0-9]+(?:\.D)?)(?:[,_\s]+([0-9]+[a-z]?|[a-z])(?=$|[^0-9a-z]))?/i.exec(b);
+  // CRYPTOCAP_<SYMBOL>_<tf> (TradingView's crypto indexes) or TVINDEX_<NAME>_<tf> (other indexes, e.g. RTY).
+  const m = /(?:CRYPTOCAP|TVINDEX)[_:\s]+([A-Z0-9]+(?:\.D)?)(?:[,_\s]+([0-9]+[a-z]?|[a-z])(?=$|[^0-9a-z]))?/i.exec(b);
   if (!m) return undefined;
   const tf = ({ '1d': '1d', d: '1d', '1440': '1d', '240': '4h', '4h': '4h', '60': '1h', '1h': '1h', '15': '15m', '15m': '15m' } as Record<string, HistTf>)[(m[2] ?? '').toLowerCase()];
   return { asset: m[1].toUpperCase(), tf };

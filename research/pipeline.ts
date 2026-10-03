@@ -71,6 +71,7 @@ import { trainSetupMain } from './trainSetupModel';
 import { sweepMain } from './sweep';
 import { collectFiles, importFile } from './history/importCsv';
 import { downloadKalshiHistory } from './history/kalshiHistory';
+import { tvFill } from './history/tradingview';
 import { recordingDayList, recordingsUsage } from '../bot/marketdata/recordingFiles';
 import { readJournalTrades } from '../bot/setups/journal';
 import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
@@ -126,6 +127,8 @@ export interface PipelineState {
   /** Last sweep run per target. */
   sweptAt?: Record<string, number>;
   lastHistoryUpdate?: number;
+  /** Spot holes already sent to TradingView (asset|tf|missing -> when), retried weekly. */
+  tvTried?: Record<string, number>;
   /** Seed history files already imported (name:size list). */
   historySeed?: string;
   lastReport?: string;
@@ -274,10 +277,16 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       // Kalshi's own settled contracts (1-minute candles) for the traded series: real contract prices for research.
       let kalshi: unknown;
       try { kalshi = await downloadKalshiHistory({ baseUrl: cfg.restBaseUrl, series: cfg.strategy.series, days: 60, out: path.join(T.historyDir, 'kalshi'), log: (m) => log(`kalshi: ${m}`) }); } catch (e) { kalshi = { error: String(e) }; }
+      // TradingView (tvdatafeed): the index series' 5,000-bar backfill and daily refresh, and the spot holes.
+      let tradingview: unknown;
+      if (T.tvFill) {
+        state.tvTried ??= {};
+        try { tradingview = await tvFill({ histDir: T.historyDir, assets, log: (m) => log(`tradingview: ${m}`), tried: state.tvTried }); } catch (e) { tradingview = { error: String(e) }; }
+      }
       const reached = bin.some((b) => b.listed > 0) || cb.some((c) => c.requests > 0 && !/kept failing/.test(c.note ?? ''));
       if (!reached) throw new SkipStep('Binance Vision and Coinbase unreachable from this machine');
       state.lastHistoryUpdate = now;
-      return { kalshi, assets, binance: { fetched: bin.reduce((a, b) => a + b.fetched, 0), failed: bin.reduce((a, b) => a + b.failed, 0) }, coinbase: { added: cb.reduce((a, c) => a + c.added, 0) }, btcdomCheck };
+      return { tradingview, kalshi, assets, binance: { fetched: bin.reduce((a, b) => a + b.fetched, 0), failed: bin.reduce((a, b) => a + b.failed, 0) }, coinbase: { added: cb.reduce((a, c) => a + c.added, 0) }, btcdomCheck };
     }, T.historyUpdate ? undefined : 'HISTORY_AUTO_UPDATE=false');
   }
   if (want('ta_net')) {
