@@ -32,6 +32,7 @@ If the old bot is running under the same `kalshi-bot` service name, the first de
 | Download / refresh history now | `bash ~/bot/current/deploy/history.sh binance` and `... coinbase` (the daily pipeline does this too) |
 | One-off BTC.D / USDT.D history from TradingView | `bash ~/bot/current/deploy/history.sh tradingview` (needs `sudo apt install python3-venv git` once; docs/TA_NETWORK.md) |
 | See stored history | `bash ~/bot/current/deploy/history.sh status` |
+| Seed history shipped with the code | `deploy/seed/history/` (Yahoo daily BTC, ETH, SOL, XRP, DOGE back to 2016–2020); the daily pipeline imports it once. It only fills days Binance and Coinbase don't cover |
 | Retrain the TA network now | `bash ~/bot/current/deploy/history.sh train` |
 
 ### Live trading is a separate switch

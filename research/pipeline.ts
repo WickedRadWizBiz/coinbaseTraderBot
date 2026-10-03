@@ -69,6 +69,7 @@ import { trainTennisMain } from './trainTennisModel';
 import { trainTaNetMain } from './trainTaNet';
 import { trainSetupMain } from './trainSetupModel';
 import { sweepMain } from './sweep';
+import { collectFiles, importFile } from './history/importCsv';
 import { downloadKalshiHistory } from './history/kalshiHistory';
 import { recordingDayList, recordingsUsage } from '../bot/marketdata/recordingFiles';
 import { readJournalTrades } from '../bot/setups/journal';
@@ -125,6 +126,8 @@ export interface PipelineState {
   /** Last sweep run per target. */
   sweptAt?: Record<string, number>;
   lastHistoryUpdate?: number;
+  /** Seed history files already imported (name:size list). */
+  historySeed?: string;
   lastReport?: string;
 }
 
@@ -243,6 +246,20 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     try { setTaNet(file ? TaNet.load(file) : undefined, T.requireValidated); } catch (e) { log(`TA network not loaded: ${(e as Error).message}`); setTaNet(undefined); }
   };
   installTaNet();
+  // Seed history shipped with the release (deploy/seed/history: Yahoo daily bars from before Binance's
+  // archives start), imported once per file version; lowest source priority, so it only fills gaps.
+  if (want('history')) {
+    await run('history-seed', async () => {
+      const dir = path.resolve('deploy', 'seed', 'history');
+      if (!fs.existsSync(dir)) throw new SkipStep('no seed history in this release');
+      const files = collectFiles([dir]);
+      const sig = files.map((f) => `${path.basename(f)}:${fs.statSync(f).size}`).join('|');
+      if (state.historySeed === sig) throw new SkipStep('seed history already imported');
+      const res = files.flatMap((f) => importFile(f, { out: T.historyDir }));
+      state.historySeed = sig;
+      return res.map((r) => ({ file: path.basename(r.file), ok: r.ok, asset: r.asset, tf: r.tf, error: r.error }));
+    });
+  }
   if (want('history')) {
     await run('history', async () => {
       const assets = await resolveAssets(T.historyAssets, { log });
