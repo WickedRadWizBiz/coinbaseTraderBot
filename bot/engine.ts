@@ -5,6 +5,8 @@
 //   -> cancels first -> RiskGateway.check (fails closed) -> OMS.submit
 // Every decision is audited with the model id and inputs.
 
+import type { ExchangeStatusMonitor } from './kalshi/exchangeStatus';
+import { snapToGrid } from './kalshi/priceGrid';
 import crypto from 'crypto';
 import type { Alerter } from './alerts/alerter';
 import type { AuditLog } from './audit/auditLog';
@@ -163,6 +165,8 @@ export interface EngineDeps {
   fillModel?: FillModel;
   /** Where every maker entry quote's placement features and 60 s outcome are logged (its training data). */
   fillLogDir?: string;
+  /** Live exchange status and maintenance schedule (bot/kalshi/exchangeStatus.ts). */
+  exchangeStatus?: ExchangeStatusMonitor;
   now?: () => number;
 }
 
@@ -357,8 +361,13 @@ export class Engine {
     const b = this.bankroll();
     const minB = this.d.cfg.strategy.minTradableBankrollUsd;
     if (b !== undefined && b > 0 && b < minB) r.push(`tradable bankroll $${b.toFixed(2)} below the $${minB} minimum`);
-    const mt = kalshiMaintenance(now);
-    if (mt.inside || mt.minutesTo <= 30) r.push(mt.inside ? 'Kalshi maintenance window' : `Kalshi maintenance in ${mt.minutesTo} min`);
+    // The exchange's own status and schedule when reachable; the built-in weekly guess otherwise.
+    const xs = this.d.exchangeStatus;
+    if (xs?.scheduleKnown()) { const b = xs.entryBlock(now); if (b) r.push(b); }
+    else {
+      const mt = kalshiMaintenance(now);
+      if (mt.inside || mt.minutesTo <= 30) r.push(mt.inside ? 'Kalshi maintenance window' : `Kalshi maintenance in ${mt.minutesTo} min`);
+    }
     return r;
   }
 
@@ -663,7 +672,7 @@ export class Engine {
     return (c) => {
       const f = this.d.md.perpFeed;
       const skew = this.d.cfg.clockSkewMaxMs > 0 ? this.d.clock?.haltReason(Date.now()) : undefined;
-      const noEntry = skew ?? (f?.lastError ? `perps feed unavailable (${f.lastError})` : undefined);
+      const noEntry = skew ?? this.d.exchangeStatus?.perpsBlock() ?? (f?.lastError ? `perps feed unavailable (${f.lastError})` : undefined);
       return t.targets(c, { halt, noEntry, lockedFrac: this.lockedFraction() });
     };
   }
@@ -1235,6 +1244,10 @@ export class Engine {
     const { cfg, md, oms, risk, kill, model } = this.d;
     const now = this.now();
     const T = cfg.tennis;
+    // Snap to the market's price grid (bands taper near $0 / $1): bids down, asks up, never through.
+    const snapped = snapToGrid(p.price, m.priceRanges, m.tickSize, p.side === 'bid' ? -1 : 1);
+    if (snapped === undefined || !(snapped > 0 && snapped < 1)) return;
+    if (snapped !== p.price) p = { ...p, price: snapped };
     // Tennis orders are rules-based (no model probability to size an edge from): budgeted separately.
     const pk = tennis ? undefined : this.portfolioCap(m, p, pYes, now);
     if (pk && pk.contracts < p.count) {
@@ -1264,6 +1277,7 @@ export class Engine {
       indexFresh: tennis ? true : Boolean(md.index.get(m.asset)?.fresh(now, cfg.risk.maxIndexAgeMs)),
       marketCloseTs: m.closeTime,
       tickSize: m.tickSize,
+      priceRanges: m.priceRanges,
       fees: md.feesFor(m.ticker),
       position: oms.positions.position(m.ticker),
       marketRiskNow: this.marketRisk(m.ticker),
@@ -1272,7 +1286,7 @@ export class Engine {
       totalRisk: totals.total,
       ordersLastMinute: oms.ordersSentInLast(60_000),
       openOrders: oms.liveOrders().length,
-      modelLiveBlockers: model.liveBlockers(),
+      modelLiveBlockers: cfg.liveAllowUnvalidated ? [] : model.liveBlockers(),
       limitOverrides: this.tierLimits(this.tier()),
     };
     if (tennis) {

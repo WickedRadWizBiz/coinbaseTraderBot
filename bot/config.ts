@@ -146,6 +146,11 @@ export interface Config {
   kalshiKeyId?: string;
   kalshiPrivateKeyPath?: string;
   kalshiSubaccount?: number;
+  /** Balance precision for fee rounding: 0.01 for non-direct (FCM-cleared) members, 0.0001 for direct members. */
+  kalshiBalancePrecision: number;
+  /** LIVE_ALLOW_UNVALIDATED_MODEL=true: trade binary contracts live even when the model failed validation
+   *  (the operator accepts the risk; every other limit still applies). */
+  liveAllowUnvalidated: boolean;
   host: string;
   port: number;
   dashboardToken: string;
@@ -713,6 +718,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     kalshiKeyId,
     kalshiPrivateKeyPath,
     kalshiSubaccount: env.KALSHI_SUBACCOUNT ? num(env, 'KALSHI_SUBACCOUNT', 0, 0, 1000) : undefined,
+    kalshiBalancePrecision: env.KALSHI_BALANCE_PRECISION === '0.0001' ? 0.0001 : 0.01,
+    liveAllowUnvalidated: bool(env, 'LIVE_ALLOW_UNVALIDATED_MODEL', false),
     host,
     port: num(env, 'PORT', 3000, 1, 65535),
     dashboardToken: token,
@@ -759,12 +766,14 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     perps: (() => {
       const hedge = oneOf(env, 'PERP_HEDGE', 'paper', ['off', 'paper', 'live'] as const);
       const trading = oneOf(env, 'PERP_TRADING', 'paper', ['off', 'paper', 'live'] as const);
-      const keyId = env.KALSHI_PERPS_KEY_ID || undefined;
-      const privateKeyPath = env.KALSHI_PERPS_PRIVATE_KEY_PATH || undefined;
+      // The perps REST API uses the same authentication as event contracts: without a separate perps key
+      // the main Kalshi key is used (separate keys are only required for FIX).
+      const keyId = env.KALSHI_PERPS_KEY_ID || env.KALSHI_KEY_ID || undefined;
+      const privateKeyPath = env.KALSHI_PERPS_PRIVATE_KEY_PATH || (env.KALSHI_PERPS_KEY_ID ? undefined : env.KALSHI_PRIVATE_KEY_PATH) || undefined;
       for (const [name, v] of [['PERP_HEDGE', hedge], ['PERP_TRADING', trading]] as const) {
         if (v !== 'live') continue;
         if (mode !== 'live') throw new ConfigError(`${name}=live requires TRADING_MODE=live (use ${name}=paper to simulate)`);
-        if (!keyId || !privateKeyPath) throw new ConfigError(`${name}=live requires KALSHI_PERPS_KEY_ID and KALSHI_PERPS_PRIVATE_KEY_PATH`);
+        if (!keyId || !privateKeyPath) throw new ConfigError(`${name}=live requires a key: KALSHI_PERPS_KEY_ID + KALSHI_PERPS_PRIVATE_KEY_PATH, or KALSHI_KEY_ID + KALSHI_PRIVATE_KEY_PATH`);
         checkKeyFile(privateKeyPath);
       }
       // One perps account, one gateway: hedging and trading cannot run on different venues.

@@ -422,7 +422,8 @@ npm run dev              # paper mode by default
   - `TRADING_MODE=live`
   - `KALSHI_ENV=prod`
   - `LIVE_TRADING_ACKNOWLEDGED=I_ACCEPT_REAL_MONEY_RISK`
-  - a validated `params/model.json`
+  - a validated `params/model.json`, unless `LIVE_ALLOW_UNVALIDATED_MODEL=true` (trade anyway, at your risk)
+  - step by step, for both APIs: docs/DEPLOY.md, "Connecting the prediction and perps APIs"
 
 ### Research loop
 

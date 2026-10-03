@@ -9,6 +9,7 @@
 //    trades; the index then comes from the Coinbase proxy feed, which has
 //    basis risk vs the RTI and is refused in live mode by config validation.
 
+import { parsePriceRanges } from '../kalshi/priceGrid';
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import path from 'path';
@@ -79,6 +80,8 @@ export class MarketData extends EventEmitter {
   readonly markets = new Map<string, ActiveMarket>();
   private readonly fees = new Map<string, FeeSchedule>();
   private readonly feesFetchedAt = new Map<string, number>();
+  /** Scheduled fee changes per series (GET /series/fee_changes), applied the moment they take effect. */
+  private readonly feeChanges = new Map<string, Array<{ multiplier?: number; scheduledTs: number }>>();
   private pollTimer: NodeJS.Timeout | null = null;
   private indexTimer: NodeJS.Timeout | null = null;
   /** Hourly bars of USDT.D, BTC.D and BTCDOM from the dominance feed, appended to the history store. */
@@ -121,7 +124,11 @@ export class MarketData extends EventEmitter {
       this.ws.on('book_gap', (e) => { if (e.ticker) this.books.get(e.ticker)?.invalidate(); this.emit('gap', e); });
       this.ws.on('trade', (e) => { this.features.onTrade(e.ticker, e.count, e.takerSide, e.ts); this.recorder.write('trade', e); this.emit('trade', e); });
       this.ws.on('index', (e) => this.onIndex(e.indexId, e.value, e.ts));
-      this.ws.on('lifecycle', (e) => { this.recorder.write('lifecycle', e); this.emit('lifecycle', e); });
+      this.ws.on('lifecycle', (e) => {
+        // A market's price grid can change (price_level_structure_updated carries the new bands).
+        if (e.priceRanges) { const m = this.markets.get(e.ticker); const r = parsePriceRanges(e.priceRanges); if (m && r) m.priceRanges = r; }
+        this.recorder.write('lifecycle', e); this.emit('lifecycle', e);
+      });
       this.ws.on('connected', () => { this.wsConnected = true; });
       this.ws.on('reconnected', () => { this.wsConnected = true; this.emit('reconnected'); });
       this.ws.on('disconnected', () => {
@@ -197,7 +204,11 @@ export class MarketData extends EventEmitter {
   feesFor(ticker: string): FeeSchedule {
     const m = this.markets.get(ticker);
     const series = m?.seriesTicker ?? ticker.split('-')[0];
-    return this.fees.get(series) ?? DEFAULT_FEES;
+    const base = this.fees.get(series) ?? DEFAULT_FEES;
+    // A scheduled change that has taken effect since the series fees were fetched overrides the taker multiplier.
+    const fetched = this.feesFetchedAt.get(series) ?? 0, now = Date.now();
+    const ch = this.feeChanges.get(series)?.filter((c) => c.scheduledTs > fetched && c.scheduledTs <= now && c.multiplier !== undefined).pop();
+    return ch ? { ...base, takerMultiplier: ch.multiplier! } : base;
   }
 
   hasVerifiedFees(series: string): boolean {
@@ -256,6 +267,7 @@ export class MarketData extends EventEmitter {
           const f = await this.rest.getSeriesFees(series);
           if (f) this.fees.set(series, { takerMultiplier: f.takerMultiplier, makerMultiplier: f.makerMultiplier });
           this.feesFetchedAt.set(series, now);
+          try { this.feeChanges.set(series, (await this.rest.getSeriesFeeChanges(series)).sort((a, b) => a.scheduledTs - b.scheduledTs)); } catch { /* optional: keep the last list */ }
         }
         const markets = await this.rest.getOpenMarkets(series);
         for (const m of markets) {

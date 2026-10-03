@@ -69,6 +69,7 @@ import { trainTennisMain } from './trainTennisModel';
 import { trainTaNetMain } from './trainTaNet';
 import { trainSetupMain } from './trainSetupModel';
 import { sweepMain } from './sweep';
+import { downloadKalshiHistory } from './history/kalshiHistory';
 import { recordingDayList, recordingsUsage } from '../bot/marketdata/recordingFiles';
 import { readJournalTrades } from '../bot/setups/journal';
 import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
@@ -253,10 +254,13 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const btcdomCheck = compareIndexSources(T.historyDir, 'BTCDOM', 'binance-index', 'bot-index');
       if (btcdomCheck.overlap) log(`BTCDOM: live rebuild vs Binance over ${btcdomCheck.overlap} hours: hourly return correlation ${btcdomCheck.returnCorr.toFixed(3)}, level ratio ${btcdomCheck.levelRatio.toFixed(4)}`);
       const cb = T.coinbaseTfs.length ? await backfillCoinbase({ out: T.historyDir, assets, tfs: T.coinbaseTfs as HistTf[], fromTs: Date.parse('2015-01-01T00:00:00Z'), baseUrl: cfg.coinbaseRestUrl, log: (m) => log(`coinbase: ${m}`) }) : [];
+      // Kalshi's own settled contracts (1-minute candles) for the traded series: real contract prices for research.
+      let kalshi: unknown;
+      try { kalshi = await downloadKalshiHistory({ baseUrl: cfg.restBaseUrl, series: cfg.strategy.series, days: 60, out: path.join(T.historyDir, 'kalshi'), log: (m) => log(`kalshi: ${m}`) }); } catch (e) { kalshi = { error: String(e) }; }
       const reached = bin.some((b) => b.listed > 0) || cb.some((c) => c.requests > 0 && !/kept failing/.test(c.note ?? ''));
       if (!reached) throw new SkipStep('Binance Vision and Coinbase unreachable from this machine');
       state.lastHistoryUpdate = now;
-      return { assets, binance: { fetched: bin.reduce((a, b) => a + b.fetched, 0), failed: bin.reduce((a, b) => a + b.failed, 0) }, coinbase: { added: cb.reduce((a, c) => a + c.added, 0) }, btcdomCheck };
+      return { kalshi, assets, binance: { fetched: bin.reduce((a, b) => a + b.fetched, 0), failed: bin.reduce((a, b) => a + b.failed, 0) }, coinbase: { added: cb.reduce((a, c) => a + c.added, 0) }, btcdomCheck };
     }, T.historyUpdate ? undefined : 'HISTORY_AUTO_UPDATE=false');
   }
   if (want('ta_net')) {

@@ -3,6 +3,7 @@
 // an unknown bankroll, a stale book, or an exception inside a check all reject.
 // There is no override flag.
 
+import { onGrid, type PriceBand } from '../kalshi/priceGrid';
 import type { RiskLimits, TradingMode } from '../config';
 import { orderFee, type FeeSchedule } from '../fees';
 import type { OrderIntent } from '../oms/oms';
@@ -28,6 +29,8 @@ export interface RiskContext {
   indexFresh: boolean;
   marketCloseTs: number;
   tickSize: number;
+  /** The market's price bands (price_ranges); the tick size alone when absent. */
+  priceRanges?: PriceBand[];
   fees: FeeSchedule;
   /** Signed YES position in this market. */
   position: number;
@@ -79,8 +82,7 @@ export class RiskGateway {
 
     // Order sanity.
     if (!(i.price > 0 && i.price < 1)) r.push(`price ${i.price} outside (0,1)`);
-    const ticks = i.price / c.tickSize;
-    if (Math.abs(ticks - Math.round(ticks)) > 1e-6) r.push(`price ${i.price} off tick ${c.tickSize}`);
+    if (!onGrid(i.price, c.priceRanges, c.tickSize)) r.push(`price ${i.price} off the market's price grid (tick ${c.priceRanges ? 'per band' : c.tickSize})`);
     if (!(i.count > 0)) r.push(`count ${i.count} must be > 0`);
     if (i.count > L.maxContractsPerOrder + EPS) r.push(`count ${i.count} > max ${L.maxContractsPerOrder}`);
     if (Math.abs(i.count * 100 - Math.round(i.count * 100)) > 1e-6) r.push(`count ${i.count} finer than 0.01`);

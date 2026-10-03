@@ -21,7 +21,7 @@ export interface WsEvents {
   fill: (e: ExchangeFill) => void;
   user_order: (e: ExchangeOrder) => void;
   index: (e: { indexId: string; value: number; ts: number }) => void;
-  lifecycle: (e: { ticker: string; event: string; result?: string; ts: number }) => void;
+  lifecycle: (e: { ticker: string; event: string; result?: string; ts: number; priceRanges?: unknown }) => void;
   connected: () => void;
   reconnected: () => void;
   disconnected: () => void;
@@ -190,7 +190,7 @@ export class KalshiWs extends EventEmitter {
         }
         case 'market_lifecycle_v2':
         case 'market_lifecycle':
-          this.emit('lifecycle', { ticker: String(msg.market_ticker), event: String(msg.event_type ?? msg.status), result: msg.result, ts: Date.now() });
+          this.emit('lifecycle', { ticker: String(msg.market_ticker), event: String(msg.event_type ?? msg.status), result: msg.result, ts: Date.now(), ...(msg.price_ranges ? { priceRanges: msg.price_ranges } : {}) });
           break;
         case 'error':
           log.error('server error message', env);

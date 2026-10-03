@@ -7,6 +7,7 @@
 // numeric fields parse to undefined and callers must fail closed.
 
 import { parseCount, parseDollars } from '../util/num';
+import { parsePriceRanges } from './priceGrid';
 import type { BookLevel, BookSide, ExchangeFill, ExchangeOrder, ExchangeOrderStatus, ExchangePosition, MarketInfo, SeriesFeeInfo } from './types';
 
 type Obj = Record<string, any>;
@@ -131,6 +132,7 @@ export function parseMarket(m: Obj): MarketInfo | undefined {
     capStrike: cap !== undefined && cap > 0 ? cap : undefined,
     strikeType: m.strike_type ? String(m.strike_type) : undefined,
     tickSize: tick && tick > 0 ? tick : 0.01,
+    priceRanges: parsePriceRanges(m.price_ranges),
     result: m.result,
     title: m.title ?? m.yes_sub_title ?? undefined,
     // Sports: scheduled start when the exchange publishes one (field name unverified; several tried).

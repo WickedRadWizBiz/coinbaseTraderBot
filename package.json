@@ -31,6 +31,7 @@
     "research:ta-net": "tsx research/trainTaNet.ts",
     "research:setups": "tsx research/trainSetupModel.ts",
     "research:ta-net-oos": "tsx research/taNetOos.ts",
+    "history:kalshi": "tsx research/history/kalshiHistory.ts",
     "research:sweep": "tsx research/sweep.ts",
     "research:whole-bot": "tsx research/wholeBot.ts",
     "research:setup-snn": "tsx research/setupSnnStudy.ts",

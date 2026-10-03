@@ -10,6 +10,9 @@
 //  3. Compare positions per market. Markets that closed are settled from the
 //     exchange's result before comparing.
 //  4. Record the balance.
+// The REST views lag the exchange slightly (GET /exchange/user_data_timestamp says how much): a
+// position mismatch while that data predates our latest fill is a timing gap, not a break, and is
+// re-checked on the next run.
 // Any remaining mismatch is a BREAK: new risk halts and the operator is
 // alerted. A break that persists for `killAfterBreaks` runs trips the kill
 // switch. Two clean runs in a row clear the halt.
@@ -159,6 +162,13 @@ export class Reconciler {
       // A fill may have landed between the fill replay and the position read.
       for (const f of await gateway.getFills(since)) if (oms.onFill(f)) repairedFills++;
       posBreaks = mismatches();
+    }
+    if (posBreaks.length && gateway.getUserDataTimestamp && oms.lastFillTs) {
+      const asOf = await gateway.getUserDataTimestamp().catch(() => undefined);
+      if (asOf !== undefined && asOf < oms.lastFillTs && ts - asOf < 120_000) {
+        this.o.audit.write('recon_pending', { reason: 'exchange user data predates our last fill', asOf, lastFillTs: oms.lastFillTs, mismatches: posBreaks });
+        posBreaks = [];
+      }
     }
     breaks.push(...posBreaks);
 

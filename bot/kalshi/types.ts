@@ -2,6 +2,7 @@
 // converts to and from Kalshi's wire format. Book side on the wire (V2):
 //   bid = buy YES at price     |  ask = sell YES at price (== buy NO at 1 - price)
 
+import type { PriceBand } from './priceGrid';
 export type BookSide = 'bid' | 'ask';
 export type TimeInForce = 'fill_or_kill' | 'good_till_canceled' | 'immediate_or_cancel';
 export type SelfTradePrevention = 'taker_at_cross' | 'maker';
@@ -78,6 +79,8 @@ export interface MarketInfo {
   /** Kalshi strike_type: greater, greater_or_equal, less, between, ... */
   strikeType?: string;
   tickSize: number;
+  /** Valid price bands (price_ranges): the source of truth for the price grid (bot/kalshi/priceGrid.ts). */
+  priceRanges?: PriceBand[];
   result?: 'yes' | 'no' | '';
   /** Market title (sports: player / match / tournament). */
   title?: string;
@@ -106,6 +109,8 @@ export interface BookSnapshot {
  * paper exchange, so paper and live exercise identical OMS/risk code. */
 export interface ExchangeGateway {
   readonly name: string;
+  /** When the exchange last validated balance / orders / fills / positions (GET /exchange/user_data_timestamp). */
+  getUserDataTimestamp?(): Promise<number | undefined>;
   createOrder(req: CreateOrderRequest): Promise<ExchangeOrder>;
   cancelOrder(orderId: string): Promise<void>;
   getOrder(orderId: string): Promise<ExchangeOrder | undefined>;

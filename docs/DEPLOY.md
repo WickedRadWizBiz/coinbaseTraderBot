@@ -36,7 +36,36 @@ If the old bot is running under the same `kalshi-bot` service name, the first de
 
 ### Live trading is a separate switch
 
-The deploy never changes `TRADING_MODE`. A new server starts in `paper`. Going live is done by hand in `~/bot/bot.env` (see the README's live checklist).
+The deploy never changes `TRADING_MODE`. A new server starts in `paper`. Going live is done by hand in `~/bot/bot.env`.
+
+### Connecting the prediction and perps APIs (live)
+
+1. **Key:** in Kalshi's account settings, create an API key and download its private key. Copy the private key to the server (`scp key.pem ubuntu@54.145.7.203:~/.kalshi/private_key.pem`), then `chmod 600 ~/.kalshi/private_key.pem`. One key works for both the prediction API and the perps REST API (a separate perps key is optional).
+2. **Edit `~/bot/bot.env`:**
+   ```
+   TRADING_MODE=live
+   KALSHI_ENV=prod
+   LIVE_TRADING_ACKNOWLEDGED=I_ACCEPT_REAL_MONEY_RISK
+   KALSHI_KEY_ID=<your key id>
+   KALSHI_PRIVATE_KEY_PATH=/home/ubuntu/.kalshi/private_key.pem
+   PERP_TRADING=live
+   PERP_HEDGE=live
+   # Optional: trade binary contracts even though the model hasn't passed validation (your risk).
+   LIVE_ALLOW_UNVALIDATED_MODEL=true
+   # Optional: a separate perps key instead of the one above.
+   # KALSHI_PERPS_KEY_ID=...
+   # KALSHI_PERPS_PRIVATE_KEY_PATH=...
+   ```
+3. **Restart and check:** `sudo systemctl restart kalshi-bot`, then `journalctl -u kalshi-bot -f`.
+   - `GET /margin/enabled says margin trading is not enabled` means Kalshi hasn't switched perps on for the account yet (it is rolling out member by member). Perp orders are rejected until it is. The prediction side still trades.
+   - Perps trade from the margin balance. Moving money from the event-contract balance to margin needs Kalshi's transfer, which isn't available through the API yet, so do it on the website.
+
+**What stays on while live, whatever the settings:**
+- the risk limits, the daily loss stops and the kill switch
+- the exchange's own status and maintenance schedule: no new entries while trading is paused, during maintenance, or in the 10 minutes before a scheduled window
+- price-grid snapping (orders always land on the market's valid prices)
+- reconciliation against the exchange
+- for perps, the setup lanes size by risk per trade, at pilot size (`PERP_PILOT_MAX_NOTIONAL_USD`) while a lane isn't validated
 
 ## Making it more secure (later)
 

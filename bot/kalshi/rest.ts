@@ -232,6 +232,26 @@ export class KalshiRest implements ExchangeGateway {
     return ld ? { type: String(ld.type ?? type), details: ld.details } : undefined;
   }
 
+  /** GET /exchange/status (public): exchange_active, trading_active, estimated resume time. */
+  async getExchangeStatus(): Promise<Record<string, any>> { return this.read('/exchange/status', false); }
+
+  /** GET /exchange/schedule (public): standard hours and maintenance windows. */
+  async getExchangeSchedule(): Promise<Record<string, any>> { return this.read('/exchange/schedule', false); }
+
+  /** GET /exchange/user_data_timestamp: when balance / orders / fills / positions were last validated (ms). */
+  async getUserDataTimestamp(): Promise<number | undefined> {
+    const d = await this.read('/exchange/user_data_timestamp');
+    const t = Date.parse(String(d?.as_of_time ?? ''));
+    return Number.isFinite(t) ? t : undefined;
+  }
+
+  /** GET /series/fee_changes (public): scheduled fee changes (series_ticker, fee_type, fee_multiplier, scheduled_ts). */
+  async getSeriesFeeChanges(seriesTicker?: string): Promise<Array<{ seriesTicker: string; feeType?: string; multiplier?: number; scheduledTs: number }>> {
+    const d = await this.read(`/series/fee_changes${seriesTicker ? `?series_ticker=${encodeURIComponent(seriesTicker)}` : ''}`, false);
+    return (d?.series_fee_change_arr ?? []).map((c: any) => ({ seriesTicker: String(c.series_ticker), feeType: c.fee_type ? String(c.fee_type) : undefined, multiplier: Number.isFinite(Number(c.fee_multiplier)) ? Number(c.fee_multiplier) : undefined, scheduledTs: Date.parse(String(c.scheduled_ts)) }))
+      .filter((c: { scheduledTs: number }) => Number.isFinite(c.scheduledTs));
+  }
+
   async getMarket(ticker: string): Promise<MarketInfo | undefined> {
     const data = await this.read(`/markets/${encodeURIComponent(ticker)}`, false);
     return parseMarket(data.market ?? data);

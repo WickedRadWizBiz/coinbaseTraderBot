@@ -1,5 +1,7 @@
 // Entry point. Wires the components; all behaviour lives in the modules.
 
+import { ExchangeStatusMonitor } from './kalshi/exchangeStatus';
+import { setBalancePrecision } from './fees';
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
@@ -60,6 +62,7 @@ async function main(): Promise<void> {
     }
     throw e;
   }
+  setBalancePrecision(cfg.kalshiBalancePrecision);
   fs.mkdirSync(cfg.dataDir, { recursive: true, mode: 0o700 });
   const audit = new AuditLog(path.join(cfg.dataDir, 'audit'));
   audit.write('startup', { pid: process.pid, node: process.version, config: publicConfig(cfg as Config) });
@@ -81,7 +84,8 @@ async function main(): Promise<void> {
     model = MetaModel.identity();
   }
   if (cfg.mode === 'live') {
-    const blockers = model.liveBlockers();
+    const blockers = cfg.liveAllowUnvalidated ? [] : model.liveBlockers();
+    if (cfg.liveAllowUnvalidated && model.liveBlockers().length) log.warn(`LIVE_ALLOW_UNVALIDATED_MODEL=true: trading binary contracts live with model ${model.id} although it is not validated (${model.liveBlockers().join('; ')})`);
     // Other live books (perps, tennis) run on their own gates; the risk gateway keeps rejecting every
     // binary crypto order while the model is unvalidated, so the process only refuses to start when
     // there is nothing else to trade live.
@@ -279,7 +283,10 @@ async function main(): Promise<void> {
     activeTaNet()?.enableForwardTest(path.join(cfg.dataDir, 'ta_net_forward.json'), Date.now(), { days: cfg.taNet.forwardDays, muteOnFail: cfg.taNet.muteOnForwardFail });
     log.info('TA network loaded', { version: taNet.version, validatedHeads: taNet.active(true) });
   }
-  const engine: Engine = new Engine({ cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
+  // The exchange's own status and maintenance schedule gate new entries (exits stay allowed).
+  const exchangeStatus = new ExchangeStatusMonitor(rest);
+  exchangeStatus.start();
+  const engine: Engine = new Engine({ exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
   engineRef = engine;
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();
