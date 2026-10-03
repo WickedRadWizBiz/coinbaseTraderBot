@@ -11,6 +11,10 @@
 //   pullback  trend continuation: higher-timeframe trend up (SMA 20 > SMA 50, close above SMA 50),
 //             price dips (RSI < 40 or the lower band tagged), then a green bar with buyers -> long;
 //             mirror -> short. Targets 1R (half off) then 3R; ATR trail.
+//   burst     momentum: join a move that is happening now in a volatile moment: a wide-range bar
+//             (>= 1.5 ATR, body >= 60% of it) on >= 2x volume, closing beyond the 20-bar range, with
+//             taker flow >= 60% on its side and the higher timeframe agreeing. Stop under the bar (at
+//             least 1 ATR); no target, a 2.5-ATR trail from entry, 16-bar time stop.
 // Slow lane (daily bars, held days to weeks):
 //   breakout  Donchian: close beyond the prior 20-day high (low) with the 50/200-day trend agreeing.
 //   dip       daily pullback in an established trend (close above SMA 200, SMA 50 above SMA 200, RSI
@@ -25,7 +29,7 @@ import { aggregate } from '../ta/candleStore';
 import type { Timeframe } from '../ta/knowledge';
 
 export type Lane = 'fast' | 'slow';
-export type SetupKind = 'fade' | 'pullback' | 'breakout' | 'dip';
+export type SetupKind = 'fade' | 'pullback' | 'burst' | 'breakout' | 'dip';
 
 export interface ExitPlan {
   /** First target: half the position off, stop to break-even. */
@@ -37,6 +41,8 @@ export interface ExitPlan {
   trailAtr: number;
   /** Time stop in bars of the setup's timeframe. */
   maxBars: number;
+  /** Trail from entry (momentum trades ride the move from the start). */
+  trailFromStart?: boolean;
 }
 
 export interface SetupSignal {
@@ -124,6 +130,15 @@ export function detectAt(asset: string, tf: Timeframe, s: SetupSeries, i: number
   }
 
   const sh = s.share[i];
+  // Burst (momentum in a volatile moment): checked first; it is the move happening now.
+  const aPrev = s.atr[i - 1], range = b.h - b.l;
+  if (aPrev > 0 && s.volAvg[i - 1] > 0 && range >= 1.5 * aPrev && Math.abs(b.c - b.o) >= 0.6 * range && b.v >= 2 * s.volAvg[i - 1] && s.htf && fin(s.htf.s50[i])) {
+    let hi20 = -Infinity, lo20 = Infinity;
+    for (let k = i - 20; k < i; k++) { hi20 = Math.max(hi20, cs[k].h); lo20 = Math.min(lo20, cs[k].l); }
+    const burstPlan: ExitPlan = { trailAtr: 2.5, maxBars: 16, trailFromStart: true };
+    if (b.c > b.o && b.c > hi20 && sh >= 0.6 && s.htf.s20[i] > s.htf.s50[i]) return mk('burst', 'fast', 1, Math.min(b.l, b.c - aPrev) - 0.1 * aPrev, burstPlan);
+    if (b.c < b.o && b.c < lo20 && sh <= 0.4 && s.htf.s20[i] < s.htf.s50[i]) return mk('burst', 'fast', -1, Math.max(b.h, b.c + aPrev) + 0.1 * aPrev, burstPlan);
+  }
   const avgShare = (s.share[i - 1] + s.share[i - 2] + s.share[i - 3] + s.share[i - 4]) / 4;
   // Fade (exhaustion reversal).
   const rMax = Math.max(s.rsi[i - 1], s.rsi[i - 2], s.rsi[i - 3]), rMin = Math.min(s.rsi[i - 1], s.rsi[i - 2], s.rsi[i - 3]);

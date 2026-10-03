@@ -10,7 +10,7 @@ import type { CostModel } from './exits';
 import type { LaneBookParams } from './lanes';
 import { SETUP_FEATURES } from './features';
 
-export const SETUP_SCHEMA = '2';
+export const SETUP_SCHEMA = '3';
 
 /** One lane's scorer: a model predicting net R, and the distribution of its predictions on held-out
  *  trades (101 quantiles). The score is the prediction's percentile in that distribution (0..1), so a

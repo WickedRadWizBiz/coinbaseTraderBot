@@ -112,7 +112,7 @@ export function stepTrade(t: OpenTrade, bar: Candle, barMs: number, costs: CostM
   if (tfClose) {
     t.bars++;
     if (d * (tfClose.close - t.best) > 0) t.best = tfClose.close;
-    if ((t.lane === 'slow' || t.partialDone) && tfClose.atr > 0) {
+    if ((t.lane === 'slow' || t.partialDone || p.trailFromStart) && tfClose.atr > 0) {
       const trail = t.best - d * p.trailAtr * tfClose.atr;
       if (d * (trail - t.stop) > 0) t.stop = trail;
     }

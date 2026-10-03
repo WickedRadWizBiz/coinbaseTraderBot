@@ -29,7 +29,7 @@ const TA_KEYS = [
 const BTC_TFS = TF_OPTS.filter(([tf]) => tf === '1h' || tf === '15m');
 const BTC_KEYS = BTC_TFS.flatMap(([, p, o]) => TF_KEYS(o).map((k) => `btc_${p}_${k}`));
 const SETUP_KEYS = [
-  'dir', 'lane_slow', 'kind_fade', 'kind_pullback', 'kind_breakout', 'kind_dip', 'tf_15m', 'tf_1h', 'tf_1d',
+  'dir', 'lane_slow', 'kind_fade', 'kind_pullback', 'kind_burst', 'kind_breakout', 'kind_dip', 'tf_15m', 'tf_1h', 'tf_1d',
   'risk_atr', 'log_risk_pct', 't1_r', 't2_r', 'trig_rsi', 'trig_pctb', 'trig_flow', 'trig_bw', 'trig_vol',
 ];
 
@@ -69,7 +69,7 @@ export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBar
   const risk = Math.abs(sig.ref - sig.stop);
   out.dir = sig.dir;
   out.lane_slow = sig.lane === 'slow' ? 1 : 0;
-  for (const k of ['fade', 'pullback', 'breakout', 'dip']) out[`kind_${k}`] = sig.kind === k ? 1 : 0;
+  for (const k of ['fade', 'pullback', 'burst', 'breakout', 'dip']) out[`kind_${k}`] = sig.kind === k ? 1 : 0;
   for (const k of ['15m', '1h', '1d']) out[`tf_${k}`] = sig.tf === k ? 1 : 0;
   out.risk_atr = sig.atr > 0 ? clip(risk / sig.atr, 20) : NaN;
   out.log_risk_pct = risk > 0 && sig.ref > 0 ? Math.log(risk / sig.ref) : NaN;
