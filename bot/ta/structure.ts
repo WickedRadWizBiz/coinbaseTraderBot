@@ -132,6 +132,39 @@ export function divergence(cs: Candle[], osc: Series, sw = swings(cs), maxAge = 
   return { regular, hidden };
 }
 
+/**
+ * Continuous OBV divergence between the last two CONFIRMED swing lows / highs (a swing is known only
+ * once 3 bars after it exist, so nothing here looks ahead). Same patterns as divergence(), but scored
+ * by size instead of flagged:
+ *   strength = tanh(0.25 x |price move| / ATR + |OBV move| / volume traded between the two swings)
+ * faded by exp(-age / maxAge), where age = bars since the second swing. Positive = bullish (regular:
+ * price lower low + OBV higher low; hidden: price higher low + OBV lower low), negative = bearish.
+ */
+export function obvDivergenceStrength(cs: Candle[], obvS: Series, atr: number, sw = swings(cs), maxAge = 10): { regular: number; hidden: number } {
+  const out = { regular: 0, hidden: 0 };
+  if (!(atr > 0)) return out;
+  const score = (a: Swing, b: Swing) => {
+    let vol = 0;
+    for (let i = a.i + 1; i <= b.i; i++) vol += cs[i].v;
+    const dObv = vol > 0 ? Math.abs(obvS[b.i] - obvS[a.i]) / vol : 0;
+    const age = cs.length - 1 - b.i;
+    return Math.tanh(0.25 * (Math.abs(b.price - a.price) / atr) + dObv) * Math.exp(-age / maxAge);
+  };
+  const lows = sw.filter((s) => s.kind === 'low' && Number.isFinite(obvS[s.i])).slice(-2);
+  const highs = sw.filter((s) => s.kind === 'high' && Number.isFinite(obvS[s.i])).slice(-2);
+  const lowIsLatest = lows.length === 2 && (highs.length < 2 || lows[1].i >= highs[1].i);
+  if (lows.length === 2 && lowIsLatest) {
+    const [a, b] = lows;
+    if (b.price < a.price && obvS[b.i] > obvS[a.i]) out.regular = score(a, b);
+    else if (b.price > a.price && obvS[b.i] < obvS[a.i]) out.hidden = score(a, b);
+  } else if (highs.length === 2) {
+    const [a, b] = highs;
+    if (b.price > a.price && obvS[b.i] < obvS[a.i]) out.regular = -score(a, b);
+    else if (b.price < a.price && obvS[b.i] > obvS[a.i]) out.hidden = -score(a, b);
+  }
+  return out;
+}
+
 /** Candlestick patterns on the last bar: +1 bullish, -1 bearish, 0 none (doji: 1 when present). */
 export function candlePatterns(cs: Candle[]): { engulfing: -1 | 0 | 1; doji: 0 | 1; pinBar: -1 | 0 | 1 } {
   const c = cs[cs.length - 1], p = cs[cs.length - 2];

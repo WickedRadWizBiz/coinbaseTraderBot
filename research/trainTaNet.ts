@@ -34,7 +34,7 @@ import { branchBackward, branchForward, branchLayout, branchLoss, fractalPlan, f
 import { columnMask, columnReach, localDropMask, type FractalPlan, type JoinMask } from '../bot/ta/fractal';
 import {
   buildBranchInput, closedIndex, sigma24, TANET_CTX_FEATURES, TANET_CTX_HOURLY, TANET_D1_BARS, TANET_DAY_FEATURES, TANET_FEATURES, TANET_H1_BARS, TANET_MACRO_DAYS, TANET_MICRO_F, TANET_MICRO_STEPS, TANET_SCHEMA,
-  TANET_STRATEGY, TANET_SWING_BARS, TANET_SWING_F, TANET_TREND_FEATURES, TANET_TREND_STEPS, taNetDayVector, taNetFeatureMap, taNetMicro, taNetPosition, taNetSwing, windowOk,
+  TANET_STRATEGY, TANET_SWING_BARS, TANET_SWING_F, TANET_TREND_FEATURES, TANET_TREND_STEPS, taNetDayVector, taNetFeatureMap, barrierResult, taNetBarrierPosition, taNetBarrierWidth, TANET_BARRIER, taNetMicro, taNetSwing, windowOk,
   type PatternReport, type TaNetHeadName, type TaNetHeadValidation, type TaNetNorm, type TaNetParams, type TaNetStateCache,
 } from '../bot/ta/taNet';
 import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type Interaction } from './fitness';
@@ -359,7 +359,7 @@ export const PATTERN_FAMILIES: Record<string, string[]> = {
   candlestick: ['h1_engulf', 'h1_pin', 'h1_doji'],
   structure: ['h1_trend', 'h1_bos', 'h1_choch', 'h1_sweep', 'h1_breakout', 'h1_eq_highs', 'h1_eq_lows', 'h1_donchian'],
   momentum: ['h1_rsi', 'h1_rsi_chg', 'h1_macd_atr', 'h1_stoch', 'h1_willr', 'h1_chg_atr'],
-  divergence: ['h1_div', 'h1_hdiv'],
+  divergence: ['h1_div', 'h1_hdiv', 'h1_obv_div', 'h1_obv_hdiv'],
   volatility: ['h1_squeeze', 'h1_squeeze_release', 'h1_bb_bw_rank', 'h1_atr_rank', 'h1_log_atr_pct'],
   volume_flow: ['h1_vol_ratio', 'h1_obv_slope', 'h1_cmf', 'h1_mfi', 'flow_1h', 'flow_4h'],
   levels: ['h1_round_dist', 'h1_vp_pos', 'h1_fvg_dist', 'h1_in_fvg'],
@@ -446,18 +446,19 @@ export function patternReport(D: TaNetData, dims: BranchDims, norm: TaNetParams[
 /** Trade the position rule on forecasts (equal capital per asset); one interaction per asset-hour with
  *  a position or turnover. */
 export function strategyInteractions(D: TaNetData, f: Forecasts, strategy = TANET_STRATEGY): Interaction[] {
-  const pos = new Map<number, number>();
+  // Triple-barrier trades (bot/ta/taNet.ts tripleBarrier): every hour, a 4-hour trade sized by Kelly on
+  // P(up in 4h), with take-profit / stop at +/- 1 forecast 4-hour sigma; first touch decides, costs on
+  // entry and exit. Path-aware, unlike scoring one hourly close-to-close return.
   const out: Interaction[] = [];
-  const nA = Math.max(1, D.assets.length);
+  const nA = Math.max(1, D.assets.length), n = TANET_BARRIER.horizon;
   f.idx.forEach((i, k) => {
-    const a = D.sa[i];
-    const p = taNetPosition(f.up1[k], f.vol[k], D.sig[i], strategy);
-    const prev = pos.get(a) ?? 0;
-    pos.set(a, p);
-    const r1 = D.ret1[i];
-    if (!Number.isFinite(r1) || (p === 0 && prev === 0)) return;
-    const cost = (strategy.costPerTurnover * Math.abs(p - prev)) / nA;
-    out.push({ ts: D.ts[i], ret: (p * r1) / nA - cost, cost, group: D.assets[a].asset });
+    const A = D.assets[D.sa[i]], ts = D.ts[i];
+    const p = taNetBarrierPosition(f.up4[k], f.vol[k], D.sig[i], strategy);
+    if (p === 0) return;
+    const hi = A.h1Idx.get(ts);
+    if (hi === undefined || hi + n >= A.h1.length || A.h1[hi + n].ts - ts !== n * H) return;
+    const { ret, cost } = barrierResult(p, A.h1[hi].c, A.h1.slice(hi + 1, hi + 1 + n), taNetBarrierWidth(f.vol[k], D.sig[i]), strategy, nA);
+    out.push({ ts, ret, cost, group: A.asset });
   });
   return out;
 }

@@ -29,7 +29,7 @@ Every member keeps a record of its evaluation windows. A copy inherits the elite
 
 **TA network** (`research/trainTaNet.ts`), over years of exchange history:
 - **Blocks:** a rolling 12-month training block (`TA_NET_TRAIN_MONTHS`, 12–18 recommended), a 1-month evaluation block, rolled forward one month at a time.
-- **What it trades in evaluation:** its own position rule. That is quarter-Kelly on its forecasts, with the volatility forecast setting the risk scale, a 5 bp cost on turnover, and equal capital per asset.
+- **What it trades in evaluation:** triple-barrier trades on its own forecasts: every hour a 4-hour trade sized by quarter-Kelly on P(up in 4h), take-profit and stop at ±1 forecast 4-hour sigma (the volatility forecast sets the barriers), first touch decides, 5 bp costs on entry and exit, equal capital per asset.
 - **Optimizer:** AdamW (decoupled weight decay, none on biases), learning rate capped at 0.003. Plain L2 inside Adam decayed schema 4's 15-minute and swing blocks to zero: Adam rescales the penalty into full-size steps for weights with a weak learning signal.
 - **Mutated knobs:** learning rate, weight decay, the weight of each branch (15-minute, hourly swing, hourly TA, daily, market context), the weight of the volatility head, and the drop-path probabilities (per join, per branch).
 
@@ -84,7 +84,7 @@ Each report shows results per regime. History before the Binance data starts (Au
 - **Deflated Sharpe ratio:** computed on the elite lineage's independent interactions, with every member evaluation counted as a trial. The TA network's direction heads need a probability of at least `TA_NET_DSR` (0.95) to speak.
 - **Unseen holdout:** the last `TA_NET_HOLDOUT_MONTHS` (3) are never touched by the tournament. Each head is graded there against the naive forecast with a day-block bootstrap. The volatility head speaks if it passes. The direction heads also need the deflated Sharpe and regime hurdles.
 - **Live forward test (out-of-sample finality):**
-  - The live bot trades the elite's position rule on paper, hour by hour, for `TA_NET_FORWARD_DAYS` (90).
+  - The live bot trades the elite's triple-barrier rule on paper, hour by hour, for `TA_NET_FORWARD_DAYS` (90).
   - It is **confirmed** if the record is positive after costs, with a positive Sortino over at least 30 independent runs.
   - If it **fails**, the direction heads go silent (`TA_NET_MUTE_ON_FORWARD_FAIL`).
   - The record is kept in `data/ta_net_forward.json`.

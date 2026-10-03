@@ -30,7 +30,7 @@ import type { Candle } from './indicators';
 import { CONFLUENCES, RULES, type Timeframe } from './knowledge';
 
 /** Bump when a feature formula or window changes (old models are then refused). */
-export const TANET_SCHEMA = '4';
+export const TANET_SCHEMA = '5';
 /** Hourly bars per window, and the GRU's hourly steps. Coinbase returns 300 candles per request
  *  including the forming one, so the live store holds >= 299 closed bars from the first poll:
  *  280 + 11 earlier steps = 291 always fit. */
@@ -108,6 +108,8 @@ function tfFeatures(p: string, s: TfState | undefined, out: Record<string, numbe
   put('eq_lows', s.equalLows ? 1 : 0);
   put('div', s.divRsi.regular + s.divMacd.regular + s.divObv.regular + s.divMfi.regular, 4);
   put('hdiv', s.divRsi.hidden + s.divMacd.hidden + s.divObv.hidden + s.divMfi.hidden, 4);
+  put('obv_div', s.obvDiv.regular, 1);
+  put('obv_hdiv', s.obvDiv.hidden, 1);
   put('engulf', s.candle.engulfing);
   put('pin', s.candle.pinBar);
   put('doji', s.candle.doji);
@@ -123,7 +125,7 @@ function tfFeatures(p: string, s: TfState | undefined, out: Record<string, numbe
 
 const BASE_KEYS = ['rsi', 'rsi_chg', 'macd_atr', 'macd_chg_atr', 'macd_cross', 'adx', 'adx_chg', 'di', 'bb_pctb', 'bb_bw_rank', 'squeeze', 'squeeze_release', 'ema_stack', 'ema12_26', 'ema21_dist', 'ema50_dist', 'sma50_dist',
   'cloud', 'cloud_thick', 'cloud_future', 'tk_cross', 'tk_above', 'stoch', 'stoch_kd', 'stoch_cross', 'willr', 'obv_slope', 'cmf', 'mfi', 'vol_ratio', 'log_atr_pct', 'atr_rank', 'chg_atr', 'chg20_atr', 'donchian',
-  'trend', 'bos', 'choch', 'sweep', 'breakout', 'eq_highs', 'eq_lows', 'div', 'hdiv', 'engulf', 'pin', 'doji', 'fvg_dist', 'in_fvg', 'vp_pos', 'vp_reentry', 'vp_node', 'round_dist', 'round_cross'];
+  'trend', 'bos', 'choch', 'sweep', 'breakout', 'eq_highs', 'eq_lows', 'div', 'hdiv', 'engulf', 'pin', 'doji', 'obv_div', 'obv_hdiv', 'fvg_dist', 'in_fvg', 'vp_pos', 'vp_reentry', 'vp_node', 'round_dist', 'round_cross'];
 function TF_KEYS(o: { sma200: boolean; vwap: boolean }): string[] {
   return [...BASE_KEYS, ...(o.sma200 ? ['sma200_dist', 'golden'] : []), ...(o.vwap ? ['vwap_dist'] : [])];
 }
@@ -355,6 +357,36 @@ export function taNetPosition(pUp: number, volLogRatio: number, sig24: number, s
 
 // ---- Model ---------------------------------------------------------------------------------------
 
+/** Triple-barrier trade (López de Prado): take-profit and stop at +/- k forecast 4-hour standard
+ *  deviations, a 4-hour time barrier; the first barrier touched decides. */
+export const TANET_BARRIER = { horizon: 4, k: 1 };
+
+/** Position for the 4-hour barrier trade: fractional Kelly on P(up in 4h) with the 4-hour vol scale. */
+export function taNetBarrierPosition(pUp4: number, volLogRatio: number, sig24: number, s: TaNetStrategy = TANET_STRATEGY): number {
+  return taNetPosition(pUp4, volLogRatio, sig24 * Math.sqrt(TANET_BARRIER.horizon), s);
+}
+
+/** Barrier half-width (log) from the forecast hourly vol: k x sigma_1h x sqrt(horizon). */
+export function taNetBarrierWidth(volLogRatio: number, sig24: number): number {
+  return TANET_BARRIER.k * sig24 * Math.exp(Number.isFinite(volLogRatio) ? Math.max(-3, Math.min(3, volLogRatio)) : 0) * Math.sqrt(TANET_BARRIER.horizon);
+}
+
+/**
+ * Log return of a triple-barrier trade in direction `dir`, entered at `entry`, over the following bars
+ * `next` (horizon bars). Path-aware and conservative: a bar that touches both barriers counts as the
+ * stop, and a bar that opens beyond a barrier exits at its open (gaps are not filled at the barrier).
+ */
+export function tripleBarrier(entry: number, next: Candle[], dir: 1 | -1, width: number): number {
+  const up = entry * Math.exp(width), dn = entry * Math.exp(-width);
+  for (const b of next) {
+    const stopHit = dir > 0 ? b.l <= dn : b.h >= up;
+    const takeHit = dir > 0 ? b.h >= up : b.l <= dn;
+    if (stopHit) return dir > 0 ? Math.log(Math.min(dn, b.o) / entry) : -Math.log(Math.max(up, b.o) / entry);
+    if (takeHit) return dir > 0 ? Math.log(Math.max(up, b.o) / entry) : -Math.log(Math.min(dn, b.o) / entry);
+  }
+  return dir * Math.log(next[next.length - 1].c / entry);
+}
+
 export interface TaNetNorm { mean: number[]; std: number[] }
 
 export interface TaNetHeadValidation {
@@ -497,7 +529,7 @@ export interface TaNetOutput {
   forward?: { status: 'forward-testing' | 'confirmed' | 'failed'; days: number };
 }
 
-interface Call { up60: number; up240: number; vol: number; close: number; pos: number }
+interface Call { up60: number; up240: number; vol: number; close: number; pos: number; pos4: number; width: number }
 
 const ROLL = 168;
 const MIN_GRADED = 24;
@@ -510,6 +542,15 @@ export interface ForwardRecord {
   results: Record<string, Array<[number, number, number]>>;
   status: 'forward-testing' | 'confirmed' | 'failed';
   decidedAt?: number;
+}
+
+/** One barrier trade's contribution: |position| x barrier return minus entry + exit costs, divided by
+ *  the horizon (a new trade opens every hour, so `horizon` overlap) and the number of coins. */
+export function barrierResult(pos: number, entry: number, next: Candle[], width: number, s: TaNetStrategy, nCoins: number): { ret: number; cost: number } {
+  if (pos === 0 || !(width > 0) || next.length < TANET_BARRIER.horizon) return { ret: 0, cost: 0 };
+  const scale = 1 / (TANET_BARRIER.horizon * Math.max(1, nCoins));
+  const cost = 2 * s.costPerTurnover * Math.abs(pos) * scale;
+  return { ret: Math.abs(pos) * tripleBarrier(entry, next, pos > 0 ? 1 : -1, width) * scale - cost, cost };
 }
 
 /** Where the live runtime gets the market-wide context: every tracked coin's candles and the index
@@ -563,14 +604,15 @@ export class TaNetRuntime {
     if (!f || f.rec.status !== 'forward-testing') return;
     const rs = (f.rec.results[asset] ??= []);
     const lastDone = rs.length ? rs[rs.length - 1][0] : -Infinity;
-    for (let i = 1; i < h1.length; i++) {
-      const prev = h1[i - 1], cur = h1[i];
-      if (prev.ts <= lastDone || prev.ts < f.rec.startTs || cur.ts - prev.ts !== H) continue;
-      const call = memo.get(prev.ts), before = memo.get(prev.ts - H);
+    // The same triple-barrier trade the tournament scored: one per hour, graded once its 4 bars closed.
+    const n = TANET_BARRIER.horizon;
+    for (let i = 0; i + n < h1.length; i++) {
+      const bar = h1[i];
+      if (bar.ts <= lastDone || bar.ts < f.rec.startTs || h1[i + n].ts - bar.ts !== n * H) continue;
+      const call = memo.get(bar.ts);
       if (!call) continue;
-      const ret = call.pos * Math.log(cur.c / prev.c);
-      const cost = this.net.params.strategy.costPerTurnover * Math.abs(call.pos - (before?.pos ?? 0));
-      rs.push([prev.ts, ret - cost, cost]);
+      const { ret, cost } = barrierResult(call.pos4, bar.c, h1.slice(i + 1, i + 1 + n), call.width, this.net.params.strategy, 1);
+      rs.push([bar.ts, ret, cost]);
     }
     const day = Math.floor(now / DAY_MS);
     if ((now - f.rec.startTs) / DAY_MS >= f.minDays) {
@@ -647,7 +689,7 @@ export class TaNetRuntime {
       const macro: number[][] = [];
       for (let k = dj - TANET_MACRO_DAYS + 1; k <= dj && k >= 0; k++) { const v = days.get(d1[k].ts); if (v) macro.push(v); }
       const fr = feats.get(ts);
-      if (trend.length < TANET_TREND_STEPS || macro.length < TANET_MACRO_DAYS || !fr) { memo.set(ts, { up60: NA, up240: NA, vol: NA, close: h1[i].c, pos: 0 }); continue; }
+      if (trend.length < TANET_TREND_STEPS || macro.length < TANET_MACRO_DAYS || !fr) { memo.set(ts, { up60: NA, up240: NA, vol: NA, close: h1[i].c, pos: 0, pos4: 0, width: NaN }); continue; }
       // Context vector: this hour's 15m readings and market context, then the dominance charts' TA as of
       // the last closed day (the same day the macro branch ends on).
       const ctxVec = [...fr.c, ...(ctx && dj >= 0 ? ctx.daily(asset, d1[dj].ts) : DAILY_CONTEXT_FEATURES.map(() => NA))];
@@ -655,7 +697,7 @@ export class TaNetRuntime {
       const up60 = active.includes('up_1h') && !muted ? o.up1 : NA;
       const up240 = active.includes('up_4h') && !muted ? o.up4 : NA;
       const vol = active.includes('vol_4h') ? o.vol : NA;
-      memo.set(ts, { up60, up240, vol, close: h1[i].c, pos: taNetPosition(o.up1, o.vol, fr.sig, p.strategy) });
+      memo.set(ts, { up60, up240, vol, close: h1[i].c, pos: taNetPosition(o.up1, o.vol, fr.sig, p.strategy), pos4: taNetBarrierPosition(o.up4, o.vol, fr.sig, p.strategy), width: taNetBarrierWidth(o.vol, fr.sig) });
     }
     this.grade(asset, h1, memo);
     this.forwardStep(asset, h1, memo, now);

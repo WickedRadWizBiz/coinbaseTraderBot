@@ -6,7 +6,7 @@
 import {
   adx, atr, bollinger, cmf, donchian, ema, ichimoku, keltner, last, macd, mfi, obv, rsi, sma, stochastic, volumeProfile, vwap, williamsR, type Candle,
 } from './indicators';
-import { candlePatterns, divergence, equalLevels, fairValueGaps, liquiditySweep, marketStructure, roundLevel, swings, trueBreakout, type Trend } from './structure';
+import { candlePatterns, divergence, equalLevels, obvDivergenceStrength, fairValueGaps, liquiditySweep, marketStructure, roundLevel, swings, trueBreakout, type Trend } from './structure';
 import { CONFLUENCES, RULES, type Timeframe } from './knowledge';
 
 export const TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d'];
@@ -52,6 +52,8 @@ export interface TfState {
   divRsi: { regular: -1 | 0 | 1; hidden: -1 | 0 | 1 };
   divMacd: { regular: -1 | 0 | 1; hidden: -1 | 0 | 1 };
   divObv: { regular: -1 | 0 | 1; hidden: -1 | 0 | 1 };
+  /** Continuous OBV divergence strength in [-1, 1] (structure.ts obvDivergenceStrength). */
+  obvDiv: { regular: number; hidden: number };
   divMfi: { regular: -1 | 0 | 1; hidden: -1 | 0 | 1 };
   candle: { engulfing: -1 | 0 | 1; doji: 0 | 1; pinBar: -1 | 0 | 1 };
   round: { level: number; distAtr: number; crossed: -1 | 0 | 1 };
@@ -181,7 +183,7 @@ export function tfState(tf: Timeframe, cs: Candle[]): TfState | undefined {
     sweep: liquiditySweep(cs, sw), breakout: trueBreakout(cs, sw),
     equalHighs: eq.highs, equalLows: eq.lows,
     fvgDistAtr, inFvg,
-    divRsi: divergence(cs, r, sw), divMacd: divergence(cs, m.hist, sw), divObv: divergence(cs, o, sw), divMfi: divergence(cs, mfi(cs, 14), sw),
+    divRsi: divergence(cs, r, sw), divMacd: divergence(cs, m.hist, sw), divObv: divergence(cs, o, sw), obvDiv: obvDivergenceStrength(cs, o, a, sw), divMfi: divergence(cs, mfi(cs, 14), sw),
     candle: candlePatterns(cs),
     round: { level: rl.level, distAtr: a > 0 ? rl.dist / a : NaN, crossed },
   };
