@@ -446,6 +446,8 @@ export interface PerpsConfig {
   setupMaxAssetLeverage: number;
   /** Daily profit goal shown on the dashboard (it does not change how the bot trades). */
   setupDailyGoalUsd: number;
+  /** Retrain the setup scorer every this many days (automated pipeline). */
+  setupRetrainDays: number;
 }
 
 export class ConfigError extends Error {}
@@ -797,6 +799,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         setupMaxLeverage: num(env, 'SETUP_MAX_LEVERAGE', 3, 0.1, 20),
         setupMaxAssetLeverage: num(env, 'SETUP_MAX_ASSET_LEVERAGE', 1.5, 0.1, 20),
         setupDailyGoalUsd: num(env, 'SETUP_DAILY_GOAL_USD', 100, 0, 1e9),
+        setupRetrainDays: num(env, 'SETUP_RETRAIN_DAYS', 7, 1, 365),
       };
     })(),
     autoTrain: {

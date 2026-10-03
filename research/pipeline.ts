@@ -31,7 +31,7 @@
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: history, ta_net, snn, vol_model, dataset, mlp, vol, perps, tennis, fill
+//   npm run pipeline -- --only mlp,perps     # steps: history, ta_net, setups, snn, vol_model, dataset, mlp, vol, perps, tennis, fill
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
 
@@ -60,6 +60,7 @@ import { withSnnHyper } from '../bot/snn/population';
 import { versionHash } from '../bot/snn/params';
 import { trainTennisMain } from './trainTennisModel';
 import { trainTaNetMain } from './trainTaNet';
+import { trainSetupMain } from './trainSetupModel';
 import { BINANCE_INDEXES, downloadBinance, type BinanceMarket } from './history/binanceVision';
 import { compareIndexSources } from '../bot/marketdata/historyStore';
 import { backfillCoinbase } from './history/coinbaseBackfill';
@@ -67,7 +68,7 @@ import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
 import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
 
-export const STEPS = ['history', 'ta_net', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill'] as const;
+export const STEPS = ['history', 'ta_net', 'setups', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -103,6 +104,9 @@ export interface PipelineState {
   trainedWithTaNet?: string;
   /** false while the TA network's initial tournament is still running (chunked over daily runs). */
   taNetComplete?: boolean;
+  /** Promoted setup model (fast / slow lanes) and when it was trained. */
+  setupsVersion?: string;
+  setupsTrainedAt?: number;
   lastHistoryUpdate?: number;
   lastReport?: string;
 }
@@ -248,6 +252,25 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       installTaNet();
       return { promoted: true, version: rep.params.version, validatedHeads: validated, ...summary };
     }, !T.enabled ? 'TA_NET=false' : noHistory ?? (due ? undefined : `trained ${((now - state.taNetTrainedAt!) / 86_400_000).toFixed(1)} day(s) ago (TA_NET_RETRAIN_DAYS=${T.retrainEveryDays})`));
+  }
+
+  // ---- 0c. Setup scorer for the fast / slow lane trader (years of 15m / 1h / daily candles) ----
+  if (want('setups')) {
+    const file = promoted('setups');
+    const P = cfg.perps;
+    const due = !fs.existsSync(file) || !state.setupsTrainedAt || now - state.setupsTrainedAt >= P.setupRetrainDays * 86_400_000;
+    const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet`;
+    await run('setups', async () => {
+      const cand = path.join(work, 'setup_model.candidate.json');
+      const p = await trainSetupMain(argsOf({ history: T.historyDir, out: cand, equity: P.paperBalanceUsd > 100 ? P.paperBalanceUsd : 10_000 }));
+      state.setupsTrainedAt = now;
+      const validated = (['fast', 'slow'] as const).filter((l) => p.validation[l]?.passed);
+      const summary = { version: p.version, validated, holdout: Object.fromEntries((['fast', 'slow'] as const).map((l) => [l, p.validation[l]?.periods.holdout])), reasons: Object.fromEntries((['fast', 'slow'] as const).map((l) => [l, p.validation[l]?.reasons])) };
+      if (A.promote === 'validated' && !validated.length) return { promoted: false, reason: 'no lane passed its holdout and final window', ...summary };
+      fs.copyFileSync(cand, file);
+      state.setupsVersion = p.version;
+      return { promoted: true, ...summary };
+    }, cfg.perps.strategy !== 'setups' ? 'PERP_STRATEGY is not setups' : noHistory ?? (due ? undefined : `trained ${((now - state.setupsTrainedAt!) / 86_400_000).toFixed(1)} day(s) ago (SETUP_RETRAIN_DAYS=${P.setupRetrainDays})`));
   }
 
   // ---- 1. The networks first, each alone: ablation (when due) -> train -> backfill ----
