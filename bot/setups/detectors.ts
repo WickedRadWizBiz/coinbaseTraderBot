@@ -12,9 +12,9 @@
 //             price dips (RSI < 40 or the lower band tagged), then a green bar with buyers -> long;
 //             mirror -> short. Targets 1R (half off) then 3R; ATR trail.
 //   burst     momentum: join a move that is happening now in a volatile moment: a wide-range bar
-//             (>= 1.5 ATR, body >= 60% of it) on >= 2x volume, closing beyond the 20-bar range, with
-//             taker flow >= 60% on its side and the higher timeframe agreeing. Stop under the bar (at
-//             least 1 ATR); no target, a 2.5-ATR trail from entry, 16-bar time stop.
+//             (body >= 60% of it) on a volume spike, closing beyond the recent range, with taker flow
+//             on its side and the higher timeframe agreeing; thresholds and exits per side (BURST).
+//             Stop under the bar (at least 1 ATR); no target, an ATR trail from entry, a time stop.
 // Slow lane (daily bars, held days to weeks):
 //   breakout  Donchian: close beyond the prior 20-day high (low) with the 50/200-day trend agreeing.
 //   dip       daily pullback in an established trend (close above SMA 200, SMA 50 above SMA 200, RSI
@@ -66,6 +66,16 @@ export interface SetupSignal {
   /** Readings that triggered it (also model inputs). */
   info: { rsi: number; pctB: number; flow: number; bandwidth: number; volRatio: number };
 }
+
+/** Momentum-burst thresholds and exits per side, from the per-side search (research/burstParamSearch.ts,
+ *  ranked on 2020 to Jun 2025, checked on Jul 2025 onward). Longs: the top tuning setting; all ten best
+ *  long settings were also profitable on the test window (median +0.35R per trade). Shorts: the search's
+ *  best tuning settings all lost on the test window, so shorts keep the original thresholds plus the
+ *  daily-trend rule (which improved them in both windows). */
+export const BURST = {
+  long: { range: 1.5, vol: 1.5, flow: 0.55, lookback: 10, daily: false, trail: 3.5, bars: 32 },
+  short: { range: 1.5, vol: 2, flow: 0.6, lookback: 20, daily: true, trail: 2.5, bars: 16 },
+};
 
 export const TF_MS: Partial<Record<Timeframe, number>> = { '15m': 900_000, '1h': 3_600_000, '4h': 14_400_000, '1d': 86_400_000 };
 export const FAST_TFS: Timeframe[] = ['15m', '1h'];
@@ -147,14 +157,21 @@ export function detectAt(asset: string, tf: Timeframe, s: SetupSeries, i: number
   }
 
   const sh = s.share[i];
-  // Burst (momentum in a volatile moment): checked first; it is the move happening now.
+  // Burst (momentum in a volatile moment): checked first; it is the move happening now. Each side has
+  // its own thresholds and exits (BURST).
   const aPrev = s.atr[i - 1], range = b.h - b.l;
-  if (aPrev > 0 && s.volAvg[i - 1] > 0 && range >= 1.5 * aPrev && Math.abs(b.c - b.o) >= 0.6 * range && b.v >= 2 * s.volAvg[i - 1] && s.htf && fin(s.htf.s50[i])) {
-    let hi20 = -Infinity, lo20 = Infinity;
-    for (let k = i - 20; k < i; k++) { hi20 = Math.max(hi20, cs[k].h); lo20 = Math.min(lo20, cs[k].l); }
-    const burstPlan: ExitPlan = { trailAtr: 2.5, maxBars: 16, trailFromStart: true };
-    if (b.c > b.o && b.c > hi20 && sh >= 0.6 && s.htf.s20[i] > s.htf.s50[i]) return mk('burst', 'fast', 1, Math.min(b.l, b.c - aPrev) - 0.1 * aPrev, burstPlan);
-    if (b.c < b.o && b.c < lo20 && sh <= 0.4 && s.htf.s20[i] < s.htf.s50[i] && dailyTrendAt(daily, b.ts + TF_MS[tf]!) <= 0) return mk('burst', 'fast', -1, Math.max(b.h, b.c + aPrev) + 0.1 * aPrev, burstPlan);
+  if (aPrev > 0 && s.volAvg[i - 1] > 0 && Math.abs(b.c - b.o) >= 0.6 * range && s.htf && fin(s.htf.s50[i])) {
+    const side: 1 | -1 = b.c > b.o ? 1 : -1;
+    const P = side > 0 ? BURST.long : BURST.short;
+    const flow = side > 0 ? sh : 1 - sh;
+    if (range >= P.range * aPrev && b.v >= P.vol * s.volAvg[i - 1] && flow >= P.flow && (side > 0 ? s.htf.s20[i] > s.htf.s50[i] : s.htf.s20[i] < s.htf.s50[i])) {
+      let hi = -Infinity, lo = Infinity;
+      for (let k = i - P.lookback; k < i; k++) { hi = Math.max(hi, cs[k].h); lo = Math.min(lo, cs[k].l); }
+      const trendOk = !P.daily || (side > 0 ? dailyTrendAt(daily, b.ts + TF_MS[tf]!) >= 0 : dailyTrendAt(daily, b.ts + TF_MS[tf]!) <= 0);
+      const plan: ExitPlan = { trailAtr: P.trail, maxBars: P.bars, trailFromStart: true };
+      if (side > 0 && b.c > hi && trendOk) return mk('burst', 'fast', 1, Math.min(b.l, b.c - aPrev) - 0.1 * aPrev, plan);
+      if (side < 0 && b.c < lo && trendOk) return mk('burst', 'fast', -1, Math.max(b.h, b.c + aPrev) + 0.1 * aPrev, plan);
+    }
   }
   const avgShare = (s.share[i - 1] + s.share[i - 2] + s.share[i - 3] + s.share[i - 4]) / 4;
   // Fade (exhaustion reversal).
