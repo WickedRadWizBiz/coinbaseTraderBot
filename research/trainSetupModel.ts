@@ -90,7 +90,7 @@ export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: Cos
   const sigs: SetupSignal[] = [];
   for (const tf of [...FAST_TFS, ...SLOW_TFS]) {
     const s = A.series[tf]!;
-    for (let i = 60; i < s.cs.length; i++) { const g = detectAt(A.asset, tf, s, i); if (g) sigs.push(g); }
+    for (let i = 60; i < s.cs.length; i++) { const g = detectAt(A.asset, tf, s, i, A.series['1d']); if (g) sigs.push(g); }
   }
   const key = (g: SetupSignal) => `${g.tf}|${g.ts}|${g.kind}|${g.dir}`;
   const F = SETUP_FEATURES.length;

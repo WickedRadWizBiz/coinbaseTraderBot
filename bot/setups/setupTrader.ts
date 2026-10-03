@@ -200,7 +200,7 @@ export class SetupTrader {
         if ((this.seen.get(key) ?? 0) >= last.ts) continue;
         this.seen.set(key, last.ts); changed = true;
         if (now - (last.ts + TF_MS[tf]!) > TF_MS[tf]!) continue; // stale candles (feed catching up)
-        const sig = detectLast(asset, tf, cs);
+        const sig = detectLast(asset, tf, cs, set.bars['1d']);
         if (!sig) continue;
         const score = this.score(sig, last.ts + TF_MS[tf]!);
         const queued = Number.isFinite(score) && this.book.offer(sig, score, now);

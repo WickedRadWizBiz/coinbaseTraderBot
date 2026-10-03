@@ -43,6 +43,11 @@ export interface ExitPlan {
   maxBars: number;
   /** Trail from entry (momentum trades ride the move from the start). */
   trailFromStart?: boolean;
+  /** Move the stop to break-even once price has gone this many R in our favour (unset = off). */
+  breakevenR?: number;
+  /** Profit lock: once price has gone this many R in our favour, trail by tightTrailAtr instead. */
+  tightenAfterR?: number;
+  tightTrailAtr?: number;
 }
 
 export interface SetupSignal {
@@ -107,7 +112,19 @@ export function setupSeries(cs: Candle[], tf: Timeframe): SetupSeries {
 const fin = Number.isFinite;
 
 /** Setup at bar i of a series (undefined = none). Reads bars <= i only. */
-export function detectAt(asset: string, tf: Timeframe, s: SetupSeries, i: number): SetupSignal | undefined {
+/** Daily trend at a moment: the last daily bar closed by `t` above (+1) or below (-1) its SMA 50 (0 = unknown). */
+export function dailyTrendAt(daily: SetupSeries | undefined, t: number): -1 | 0 | 1 {
+  if (!daily) return 0;
+  let lo = 0, hi = daily.cs.length - 1, j = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (daily.cs[m].ts + 86_400_000 <= t) { j = m; lo = m + 1; } else hi = m - 1; }
+  if (j < 0 || !fin(daily.sma50[j])) return 0;
+  return daily.cs[j].c > daily.sma50[j] ? 1 : -1;
+}
+
+/** Setup at bar i. `daily` (the asset's daily series) lets burst shorts require the daily trend down
+ *  (close below its 50-day average): in the trade-anatomy study that rule improved shorts in both the
+ *  tuning years and the unseen test months, while it hurt longs, so longs do not use it. */
+export function detectAt(asset: string, tf: Timeframe, s: SetupSeries, i: number, daily?: SetupSeries): SetupSignal | undefined {
   if (i < 60 || i >= s.cs.length) return undefined;
   const cs = s.cs, b = cs[i], a = s.atr[i];
   if (!(a > 0) || !fin(s.upper[i]) || !fin(s.rsi[i])) return undefined;
@@ -137,7 +154,7 @@ export function detectAt(asset: string, tf: Timeframe, s: SetupSeries, i: number
     for (let k = i - 20; k < i; k++) { hi20 = Math.max(hi20, cs[k].h); lo20 = Math.min(lo20, cs[k].l); }
     const burstPlan: ExitPlan = { trailAtr: 2.5, maxBars: 16, trailFromStart: true };
     if (b.c > b.o && b.c > hi20 && sh >= 0.6 && s.htf.s20[i] > s.htf.s50[i]) return mk('burst', 'fast', 1, Math.min(b.l, b.c - aPrev) - 0.1 * aPrev, burstPlan);
-    if (b.c < b.o && b.c < lo20 && sh <= 0.4 && s.htf.s20[i] < s.htf.s50[i]) return mk('burst', 'fast', -1, Math.max(b.h, b.c + aPrev) + 0.1 * aPrev, burstPlan);
+    if (b.c < b.o && b.c < lo20 && sh <= 0.4 && s.htf.s20[i] < s.htf.s50[i] && dailyTrendAt(daily, b.ts + TF_MS[tf]!) <= 0) return mk('burst', 'fast', -1, Math.max(b.h, b.c + aPrev) + 0.1 * aPrev, burstPlan);
   }
   const avgShare = (s.share[i - 1] + s.share[i - 2] + s.share[i - 3] + s.share[i - 4]) / 4;
   // Fade (exhaustion reversal).
@@ -162,7 +179,7 @@ export function detectAt(asset: string, tf: Timeframe, s: SetupSeries, i: number
 }
 
 /** Setup on the last closed bar of `cs` (live). */
-export function detectLast(asset: string, tf: Timeframe, cs: Candle[]): SetupSignal | undefined {
+export function detectLast(asset: string, tf: Timeframe, cs: Candle[], daily?: Candle[]): SetupSignal | undefined {
   if (cs.length < SETUP_MIN_BARS) return undefined;
-  return detectAt(asset, tf, setupSeries(cs, tf), cs.length - 1);
+  return detectAt(asset, tf, setupSeries(cs, tf), cs.length - 1, daily && daily.length >= 60 ? setupSeries(daily, '1d') : undefined);
 }

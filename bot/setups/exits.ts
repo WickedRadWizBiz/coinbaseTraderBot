@@ -51,6 +51,9 @@ export interface OpenTrade {
   realized: number;
   costs: number;
   closed?: { ts: number; px: number; reason: ExitReason };
+  /** Best and worst prices reached since entry (max favourable / adverse excursion). */
+  maxFav?: number;
+  maxAdv?: number;
   /** Model score at entry and the size (fraction of equity at risk / notional), for the record. */
   score?: number;
   notional?: number;
@@ -86,6 +89,10 @@ function close(t: OpenTrade, px: number, ts: number, reason: ExitReason, cost: n
 export function stepTrade(t: OpenTrade, bar: Candle, barMs: number, costs: CostModel = DEFAULT_COSTS, tfClose?: { close: number; atr: number }): boolean {
   if (t.closed) return true;
   const d = t.dir;
+  // Excursions: favourable and adverse extremes since entry (for the trade record and analysis).
+  const fav = d > 0 ? bar.h : bar.l, adv = d > 0 ? bar.l : bar.h;
+  t.maxFav = t.maxFav === undefined || d * (fav - t.maxFav) > 0 ? fav : t.maxFav;
+  t.maxAdv = t.maxAdv === undefined || d * (adv - t.maxAdv) < 0 ? adv : t.maxAdv;
   t.costs += t.frac * costs.fundingPer8h * (barMs / 28_800_000);
   const stopHit = d > 0 ? bar.l <= t.stop : bar.h >= t.stop;
   if (stopHit) {
@@ -107,13 +114,16 @@ export function stepTrade(t: OpenTrade, bar: Candle, barMs: number, costs: CostM
     close(t, d > 0 ? Math.max(p.target2, bar.o) : Math.min(p.target2, bar.o), bar.ts + barMs, 'target', costs.makerExit);
     return true;
   }
+  // Break-even: once price has gone breakevenR in our favour, the stop moves to the entry (from the next bar).
+  if (p.breakevenR !== undefined && d * (fav - t.entry) >= p.breakevenR * Math.abs(t.entry - t.initialStop) && d * (t.entry - t.stop) > 0) t.stop = t.entry;
   // Hard age limit: the time stop also fires on elapsed time (missing candles cannot keep a trade open).
   if (bar.ts + barMs - t.entryTs > (p.maxBars + 2) * (TF_MS[t.tf] ?? 0)) { close(t, bar.c, bar.ts + barMs, 'time', costs.takerExit); return true; }
   if (tfClose) {
     t.bars++;
     if (d * (tfClose.close - t.best) > 0) t.best = tfClose.close;
     if ((t.lane === 'slow' || t.partialDone || p.trailFromStart) && tfClose.atr > 0) {
-      const trail = t.best - d * p.trailAtr * tfClose.atr;
+      const locked = p.tightenAfterR !== undefined && p.tightTrailAtr !== undefined && t.maxFav !== undefined && d * (t.maxFav - t.entry) >= p.tightenAfterR * Math.abs(t.entry - t.initialStop);
+      const trail = t.best - d * (locked ? p.tightTrailAtr! : p.trailAtr) * tfClose.atr;
       if (d * (trail - t.stop) > 0) t.stop = trail;
     }
     if (t.bars >= p.maxBars) { close(t, tfClose.close, bar.ts + barMs, 'time', costs.takerExit); return true; }
