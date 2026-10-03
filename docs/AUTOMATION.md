@@ -84,6 +84,19 @@ The Telemetry page's **Fill model** row shows "collecting quotes" until then, an
 
 The history is saved in `data/snn/blender.json`. It is thrown away automatically if the meta-model has changed since it was recorded.
 
+### 7. It sweeps the bot's settings, one at a time (proposals only)
+
+Once a week (`SWEEP_EVERY_DAYS`), the pipeline runs the sweep optimizer (`research/sweep.ts`) on each target in `SWEEP_TARGETS`. Each target gets up to `SWEEP_HOURS` (2) hours, unattended.
+
+- **Targets:**
+  - `setups-long` and `setups-short`: the momentum-burst entry thresholds and exits for each side, scored on years of candle history.
+  - `kalshi`: the contract strategy's edge thresholds, buffers, exit margin, Kelly fraction and per-trade EV target, scored in the production backtester over the bot's own recordings. It needs at least 20 recorded days.
+- **How it searches:** it tries every value of one setting while the others stay fixed, keeps the best, then moves to the next setting, and repeats until a full pass changes nothing.
+- **What counts as an improvement:** a change is kept only if it raises the tuning-window score by at least 0.05 and doesn't lower the check-window score by more than 0.1. A final window is scored only once, at the end.
+- **What it produces:** a proposal in `AUTO_TRAIN_DIR/sweeps/<target>.json` (start and end settings, every step, all three window scores). It never changes the live configuration. Apply a proposal by setting its values, after reading the final-window result.
+
+The search runs as a background process, so a long sweep (`npm run research:sweep -- --target setups-long --hours 24`) costs nothing while it grinds. If a sweep stops partway, it resumes from its ledger.
+
 ## Promotion policy
 
 `AUTO_TRAIN_PROMOTE=always` is the default, and it is hot-swap mode: every freshly trained model goes live in the bot straight away.
