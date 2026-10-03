@@ -10,7 +10,7 @@ import { assetFeatureMap } from '../bot/model/featureEngine';
 import { CandleSet } from '../bot/ta/candleStore';
 import type { Candle } from '../bot/ta/indicators';
 import {
-  activeTaNet, setTaNet, setTaNetContextSource, TANET_D1_BARS, TANET_DAY_FEATURES, TANET_FEATURES, TANET_H1_BARS, TANET_SCHEMA, TANET_TREND_STEPS, TaNet, TaNetRuntime, taNetDayVector, taNetFeatureMap, taNetMicro, taNetPosition, windowOk, type TaNetStateCache,
+  activeTaNet, familyOf, setTaNet, taNetFamilies, TANET_CTX_FEATURES, TANET_MACRO_DAYS, TANET_MICRO_F, TANET_MICRO_STEPS, TANET_SWING_BARS, TANET_SWING_F, TANET_TREND_FEATURES, setTaNetContextSource, TANET_D1_BARS, TANET_DAY_FEATURES, TANET_FEATURES, TANET_H1_BARS, TANET_SCHEMA, TANET_TREND_STEPS, TaNet, TaNetRuntime, taNetDayVector, taNetFeatureMap, taNetMicro, taNetPosition, windowOk, type TaNetStateCache,
 } from '../bot/ta/taNet';
 import { CONTEXT_FEATURES, DAILY_CONTEXT_FEATURES, domMatrixScore, TaNetContext } from '../bot/ta/taNetContext';
 import { IndexStore } from '../bot/marketdata/indexBars';
@@ -256,3 +256,24 @@ test('pipeline: ta_net runs the tournament in chunks and promotes only when it r
 });
 
 void TANET_D1_BARS; void TANET_TREND_STEPS;
+
+test('grouped network: indicator families, learns the planted signal, reports family weights live', async () => {
+  const fams = taNetFamilies();
+  // Same indicator on 1h and 4h lands in the same family; every input has a family.
+  assert.equal(familyOf('h1_rsi'), 'momentum'); assert.equal(familyOf('h4_rsi'), 'momentum'); assert.equal(familyOf('h1_tl_cci'), 'momentum');
+  assert.equal(familyOf('h1_adx'), 'trend'); assert.equal(familyOf('h1_cdl_net'), 'candles'); assert.equal(familyOf('h4_bos'), 'structure');
+  assert.equal(familyOf('dd_rty_rsi'), 'slow'); assert.equal(familyOf('x_btcdom_trend'), 'dominance'); assert.equal(familyOf('x_breadth_4h'), 'market');
+  assert.equal(fams.trend.length, TANET_TREND_FEATURES.length);
+  assert.ok(fams.trendNames.length >= 6 && fams.ctxNames.includes('slow') && fams.ctxNames.includes('dominance'));
+  const dir = historyDir();
+  const D = buildData(dir, ['TST'], path.join(dir, '.cache'), () => undefined);
+  const rep = await trainTaNet(D, { ...OPTS, arch: 'grouped', statePath: path.join(dir, 'popg.json'), log: () => undefined });
+  const p = rep.params;
+  assert.equal(p.arch, 'grouped');
+  assert.ok(p.dims.fam && p.familyNames && p.familyNames.length === p.dims.fam.nT + p.dims.fam.nC);
+  assert.ok(p.heads.up_1h.validation.hitRate! > 0.52, `planted autocorrelation (grouped): ${JSON.stringify(p.heads.up_1h.validation)}`);
+  // Live: the call says how much each family counted.
+  const net = new TaNet(p);
+  const o = net.predict(Array.from({ length: TANET_TREND_STEPS }, () => new Array(TANET_TREND_FEATURES.length).fill(0.1)), Array.from({ length: TANET_MACRO_DAYS }, () => new Array(TANET_DAY_FEATURES.length).fill(0)), new Float64Array(TANET_MICRO_STEPS * TANET_MICRO_F), new Float64Array(TANET_SWING_BARS * TANET_SWING_F), new Array(TANET_CTX_FEATURES.length).fill(0));
+  assert.ok(o.families && Math.abs(Object.values(o.families).reduce((a, v) => a + v, 0) - 1) < 0.01);
+});

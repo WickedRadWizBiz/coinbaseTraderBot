@@ -63,6 +63,28 @@ The importer files `CRYPTOCAP_*` and `TVINDEX_*` exports (also TradingView's own
 
 When new context history arrives (BTCDOM for the first time, or the TradingView export), every past row changes, so the next pipeline run starts the tournament afresh to learn from it.
 
+### Grouped variant: indicator families (challenger)
+
+`TA_NET_ARCH=grouped` (or `--arch grouped`) builds the network around indicator families instead of feeding it the raw readings. Indicators that measure the same thing are stacked: RSI, MACD, Stochastic, CCI and the other oscillators on 1h and 4h all go into the momentum family, and so on.
+
+| Family | Members (any timeframe) |
+|---|---|
+| trend | moving averages and their stack, ADX / DI, Ichimoku, golden cross, market-structure trend, KAMA, Parabolic SAR, Aroon, linear-regression slope, Hilbert trend mode |
+| momentum | RSI, MACD, Stochastic, Williams %R, price change in ATRs, CCI, momentum, Ultimate Oscillator, CMO, PPO, TRIX, Stochastic RSI, z-scored returns |
+| volume | OBV slope, CMF, MFI, volume ratio, VWAP, volume profile, taker flow, A/D oscillator, balance of power |
+| volatility | Bollinger %B and bandwidth, squeeze, ATR level and rank, NATR, standard deviation, realised-volatility ratios |
+| structure | BOS, CHoCH, sweeps, true breakouts, equal highs and lows, Donchian, fair-value gaps, round numbers, divergences |
+| candles | engulfing, pin bar, doji, TA-Lib's candlestick scores |
+| confluence | the knowledge base's confluences and rule tallies |
+| timing | hour, weekday, weekend, missing bars |
+| market, dominance, slow (context only) | BTC and the basket; BTCDOM, BTC.D, USDT.D and the quadrant; TOTAL3, OTHERS.D, RTY |
+
+- **Level 1:** each family has its own small encoder (4 units) that reads only its members.
+- **Level 2 (deep path):** the GRU reads the 12 hourly steps of family summaries, and the context layer the context families, instead of 150–250 raw readings. That is far fewer weights.
+- **Level 3 (shallow path, the fractal join):** an attention over all families at the forecast hour. Each family scores its own salience; a softmax turns the scores into weights that blend the family summaries into one vector, which goes straight to the merge layer next to the deep path. The network can follow a single family directly or the deep confluence, and the live output (`families` in the TA network's status) says how much each family counted in each call.
+
+The backward pass is hand-written and checked against finite differences (tests/branchNet.test.ts). On the tournament test's synthetic data the grouped network learns the planted signal with every input group present. It replaces the flat network only if it does better on the same tournament, holdout and final-window tests.
+
 ### Fractal blocks: one block, three pattern scales
 
 The micro and swing branches each use a **fractal convolution block** (FractalNet, the "fractal" half of the fractal SNN paper). It is built by one rule: a block of depth C+1 is the average of a single convolution and two depth-C blocks in series. At depth 3 that gives three parallel columns of causal convolutions, joined where they meet:

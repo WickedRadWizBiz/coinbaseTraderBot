@@ -76,8 +76,10 @@ export async function exportTaNetOos(hist: string, o: OosOpts): Promise<{ rounds
   const dir = oosDir(hist);
   fs.mkdirSync(dir, { recursive: true });
   const D = o.data ?? buildData(hist, storedAssets(hist), o.cacheDir ?? path.join(hist, '.tanet-cache'), log);
-  const dims = taNetDims();
-  if (JSON.stringify(dims) !== JSON.stringify(P.dims)) throw new Error('network layout in the params differs from the code');
+  // The params' own layout (flat or grouped), checked against the code's input sizes.
+  const dims = P.dims;
+  const want = taNetDims(P.arch ?? (P.dims.fam ? 'grouped' : 'flat'), P.dims.fam?.k ?? 4);
+  if (JSON.stringify(dims) !== JSON.stringify(want)) throw new Error('network layout in the params differs from the code');
   const norm = P.norm;
   const n = D.ts.length;
   const t0 = D.ts[0], tEnd = D.ts[n - 1] + H;

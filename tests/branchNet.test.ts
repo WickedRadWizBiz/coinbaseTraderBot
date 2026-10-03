@@ -6,16 +6,17 @@ import { test } from 'node:test';
 import { branchBackward, branchForward, branchLayout, branchLoss, fractalPlan, initBranchParams, type BranchDims, type BranchDrop, type BranchInput } from '../bot/ta/branchNet';
 import { buildFractal, columnMask, columnReach, localDropMask } from '../bot/ta/fractal';
 
-const dims: BranchDims = { mT: 10, mF: 3, mC: 2, sT: 9, sF: 2, sC: 2, fDepth: 3, tT: 4, tF: 5, tH: 3, dT: 5, dF: 4, dE: 3, cF: 6, cH: 3, hM: 4, nOut: 3 };
+const DIMS: BranchDims = { mT: 10, mF: 3, mC: 2, sT: 9, sF: 2, sC: 2, fDepth: 3, tT: 4, tF: 5, tH: 3, dT: 5, dF: 4, dE: 3, cF: 6, cH: 3, hM: 4, nOut: 3 };
 
 function rand(n: number, seed: number): Float64Array {
   let s = seed;
   return Float64Array.from({ length: n }, () => { s = (s * 16807) % 2147483647; return (s / 2147483647) * 2 - 1; });
 }
+const dims = DIMS;
 const input = (): BranchInput => ({ micro: rand(dims.mT * dims.mF, 2), swing: rand(dims.sT * dims.sF, 6), trend: rand(dims.tT * dims.tF, 3), macro: rand(dims.dT * dims.dF, 4), ctx: rand(dims.cF, 8) });
 const g = { micro: 0.9, swing: 1.2, trend: 1.1, macro: 0.7, ctx: 0.8 };
 
-function gradCheck(drop?: BranchDrop) {
+function gradCheck(drop?: BranchDrop, dims: BranchDims = DIMS) {
   const { size, layout } = branchLayout(dims);
   const p = initBranchParams(dims, 5);
   const r = rand(size, 9);
@@ -69,4 +70,24 @@ test('identical seeds give identical networks; an untrained network predicts the
   assert.deepEqual(Array.from(a), Array.from(b));
   const o = branchForward(dims, a, { micro: 1, swing: 1, trend: 1, macro: 1, ctx: 1 }, input()).out;
   assert.deepEqual(Array.from(o), [0, 0, 0]);
+});
+
+test('grouped variant: family encoders, family attention and the deep path all match finite differences', () => {
+  // 5 trend features in 2 families, 6 context features in 3 families, k = 2 per family.
+  const grouped: BranchDims = { ...DIMS, fam: { trend: [0, 1, 0, 1, 1], ctx: [0, 0, 1, 2, 2, 1], nT: 2, nC: 3, k: 2 } };
+  const w = gradCheck(undefined, grouped);
+  assert.ok(w.rel < 1e-4, `worst relative error ${w.rel} at ${w.name}[${w.i}]`);
+  const wd = gradCheck({ branches: [true, false, true, true, false], keep: 0.8 }, grouped);
+  assert.ok(wd.rel < 1e-4, `with branch drops: worst relative error ${wd.rel} at ${wd.name}[${wd.i}]`);
+  // Block structure: a trend feature only moves its own family's encoder outputs.
+  const p = initBranchParams(grouped, 3);
+  const x = input();
+  const a = branchForward(grouped, p, g, x).cache.xt;
+  const x2 = { ...x, trend: Float64Array.from(x.trend) }; x2.trend[0] += 0.5; // feature 0 -> family 0
+  const b = branchForward(grouped, p, g, x2).cache.xt;
+  for (let j = 0; j < 2; j++) assert.equal(a[2 + j], b[2 + j], 'family 1 unaffected');
+  assert.notEqual(a[0], b[0]);
+  const pi = branchForward(grouped, p, g, x).cache.pi!;
+  assert.equal(pi.length, 5);
+  assert.ok(Math.abs(pi.reduce((s, v) => s + v, 0) - 1) < 1e-12);
 });

@@ -37,7 +37,7 @@ import { columnMask, columnReach, localDropMask, type FractalPlan, type JoinMask
 import {
   buildBranchInput, closedIndex, sigma24, TANET_CTX_FEATURES, TANET_CTX_HOURLY, TANET_D1_BARS, TANET_DAY_FEATURES, TANET_FEATURES, TANET_H1_BARS, TANET_MACRO_DAYS, TANET_MICRO_F, TANET_MICRO_STEPS, TANET_SCHEMA,
   TANET_STRATEGY, TANET_SWING_BARS, TANET_SWING_F, TANET_TREND_FEATURES, TANET_TREND_STEPS, taNetDayVector, taNetFeatureMap, barrierResult, taNetBarrierPosition, taNetBarrierWidth, TANET_BARRIER, tripleBarrier, taNetMicro, taNetSwing, windowOk,
-  type PatternReport, type TaNetHeadName, type TaNetNetworkValidation, type TaNetStrategy, type TaNetHeadValidation, type TaNetNorm, type TaNetParams, type TaNetStateCache,
+  taNetFamilies, type PatternReport, type TaNetHeadName, type TaNetNetworkValidation, type TaNetStrategy, type TaNetHeadValidation, type TaNetNorm, type TaNetParams, type TaNetStateCache,
 } from '../bot/ta/taNet';
 import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type FitnessReport, type Interaction } from './fitness';
 import { runPbt, walkForwardRounds, type Hyper, type MutationSpec, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
@@ -255,8 +255,11 @@ export function fitNorms(D: TaNetData, idx: ArrayLike<number>, maxSamples = 20_0
   return { trend: fin(T), macro: fin(M), micro: fin(U), swing: fin(W), ctx: fin(C) };
 }
 
-export function taNetDims(): BranchDims {
-  return { mT: TANET_MICRO_STEPS, mF: TANET_MICRO_F, mC: 8, sT: TANET_SWING_BARS, sF: TANET_SWING_F, sC: 8, fDepth: 3, tT: TANET_TREND_STEPS, tF: TANET_TREND_FEATURES.length, tH: 12, dT: TANET_MACRO_DAYS, dF: TANET_DAY_FEATURES.length, dE: 8, cF: TANET_CTX_FEATURES.length, cH: 8, hM: 16, nOut: 3 };
+/** Network layout: 'flat' reads the raw readings, 'grouped' stacks them into indicator families (k units each). */
+export function taNetDims(arch: 'flat' | 'grouped' = 'flat', k = 4): BranchDims {
+  const d: BranchDims = { mT: TANET_MICRO_STEPS, mF: TANET_MICRO_F, mC: 8, sT: TANET_SWING_BARS, sF: TANET_SWING_F, sC: 8, fDepth: 3, tT: TANET_TREND_STEPS, tF: TANET_TREND_FEATURES.length, tH: 12, dT: TANET_MACRO_DAYS, dF: TANET_DAY_FEATURES.length, dE: 8, cF: TANET_CTX_FEATURES.length, cH: 8, hM: 16, nOut: 3 };
+  if (arch === 'grouped') { const f = taNetFamilies(); d.fam = { trend: f.trend, ctx: f.ctx, nT: f.nT, nC: f.nC, k }; }
+  return d;
 }
 
 // ---- Population members -------------------------------------------------------------------------
@@ -535,6 +538,9 @@ export function dayBootstrap(diff: number[], ts: number[], iters = 1000, seed = 
 }
 
 export interface TaNetTrainOpts {
+  /** 'flat' (default) or 'grouped' (indicator families, bot/ta/branchNet.ts), and units per family. */
+  arch?: 'flat' | 'grouped';
+  famK?: number;
   trainMonths?: number;
   evalMonths?: number;
   stepMonths?: number;
@@ -572,7 +578,7 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
   const log = o.log ?? (() => {});
   const n = D.ts.length;
   if (n < 2000) throw new Error(`need at least 2000 hourly samples with full inputs (have ${n}): add more history`);
-  const dims = taNetDims();
+  const dims = taNetDims(o.arch ?? 'flat', o.famK ?? 4);
   const trainMs = (o.trainMonths ?? 12) * MONTH, evalMs = (o.evalMonths ?? 1) * MONTH, stepMs = (o.stepMonths ?? 1) * MONTH;
   const t0 = D.ts[0], tEnd = D.ts[n - 1] + H;
   const finalMonths = o.finalMonths ?? 2;
@@ -745,6 +751,7 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
       version: `tanet5-${new Date().toISOString().slice(0, 10)}-${D.assets.length}a-r${res.log.length}`,
       schema: TANET_SCHEMA, dims, gates: gatesOf(elite.hyper), weights: Array.from(finalW), norm, patterns, context: D.context,
       trendFeatures: [...TANET_TREND_FEATURES], dayFeatures: [...TANET_DAY_FEATURES], strategy: strat, heads, taEngine: taEngine(),
+      arch: o.arch ?? 'flat', ...(dims.fam ? { familyNames: (() => { const f = taNetFamilies(); return [...f.trendNames.map((n) => `trend:${n}`), ...f.ctxNames.map((n) => `ctx:${n}`)]; })() } : {}),
       network: {
         dsr: { sharpe: dsr.sharpe, sr0: dsr.sr0, probability: dsr.probability, n: dsr.n }, trials: res.trials, regimes,
         holdout: { fitness: hoFit.fitness, sortino: hoFit.sortino, maxDrawdown: hoFit.maxDrawdown, costs: hoFit.costs, netReturn: hoFit.netReturn, independent: hoFit.independent, days: hoFit.days, selective: hoSel },
@@ -768,6 +775,7 @@ export async function trainTaNetMain(argOf: (k: string, d: string) => string = c
   const num = (k: string, d: string) => Number(argOf(k, d));
   const rep = await trainTaNet(D, {
     trainMonths: num('train-months', '12'), evalMonths: num('eval-months', '1'), stepMonths: num('step-months', '1'), holdoutMonths: num('holdout-months', '3'), finalMonths: num('final-months', '2'),
+    arch: argOf('arch', 'flat') === 'grouped' ? 'grouped' : 'flat', famK: num('fam-k', '4'),
     stride: num('stride', '2'), epochsPerRound: num('epochs', '1'), minPerRegime: num('min-per-regime', '100'), dsrThreshold: num('dsr', '0.95'),
     statePath: argOf('state', path.join(hist, '.tanet-population.json')), fresh: argOf('fresh', '') === 'true' || process.argv.includes('--fresh'),
     maxRounds: num('max-rounds', '0') || undefined, restartEvery: num('restart-every', '0'), catchUpEpochs: num('catch-up-epochs', '3'), patterns: argOf('patterns', 'true') !== 'false', log,

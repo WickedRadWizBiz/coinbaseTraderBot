@@ -254,6 +254,39 @@ export const TANET_TREND_FEATURES = TANET_FEATURES.filter((k) => !k.startsWith('
  *  TA-Lib readings of every timeframe, and TA on the daily index charts as of the last closed day. */
 export const TANET_CTX_HOURLY = TANET_FEATURES.filter((k) => ((k.startsWith('m15_') || k.startsWith('x_')) && !isTalibKey(k)) || isNetTalibKey(k));
 export const TANET_CTX_FEATURES = [...TANET_CTX_HOURLY, ...DAILY_CONTEXT_FEATURES];
+
+// ---- Indicator families (grouped variant, bot/ta/branchNet.ts dims.fam) -------------------------
+// Indicators that measure the same thing are stacked: RSI, MACD, Stochastic, CCI ... on 1h and 4h
+// all feed the momentum family's encoder; ADX, moving averages, Ichimoku, SAR, KAMA the trend
+// family; and so on. Context adds market (BTC, the basket, breadth), dominance (BTCDOM, BTC.D,
+// USDT.D, the quadrant) and the slow series (TOTAL3, OTHERS.D, RTY).
+const FAMILY_RULES: Array<[string, RegExp]> = [
+  ['slow', /^dd_(total3|othersd|rty)_/],
+  ['dominance', /^(x_btcdom_|x_dom_|dd_btcd_|dd_usdtd_|dd_dom_)/],
+  ['market', /^(x_btc_|x_rel_|x_mkt_|x_breadth_)/],
+  ['confluence', /^(conf_|net_|n_signals$)/],
+  ['timing', /^(hour_|dow_|weekend$|missing_hours$)/],
+  ['candles', /^(engulf|pin|doji|cdl_)/],
+  ['volume', /^(obv_slope|cmf|mfi|vol_ratio|vwap_dist|vp_|flow_|tl_adosc|tl_bop)/],
+  ['volatility', /^(bb_|squeeze|log_atr_pct|atr_rank|tl_natr|tl_stddev_atr|log_sigma_|rv_|range_24h_pos)/],
+  ['structure', /^(bos|choch|sweep|breakout|eq_highs|eq_lows|donchian|fvg_dist|in_fvg|round_|div|hdiv|obv_div|obv_hdiv)$/],
+  ['momentum', /^(rsi|rsi_chg|macd_|stoch|willr|chg_atr|chg20_atr|tl_cci|tl_mom_atr|tl_ultosc|tl_cmo|tl_ppo|tl_trix|tl_stochrsi|ret_)/],
+  ['trend', /^(ema|sma|golden|cloud|tk_|adx|di$|trend$|tl_kama_dist|tl_ht_trendmode|tl_sar_dist|tl_aroonosc|tl_linreg_slope)/],
+];
+
+/** Family of one input (the timeframe prefix h1_ / h4_ / m15_ / d1_ is ignored: same indicator, same family). */
+export function familyOf(name: string): string {
+  const base = name.replace(/^(h1|h4|m15|d1)_/, '');
+  for (const [fam, re] of FAMILY_RULES) if (re.test(name) || re.test(base)) return fam;
+  return 'other';
+}
+
+/** Family index per trend / context input and the family names (in order of first appearance). */
+export function taNetFamilies(): { trend: number[]; ctx: number[]; nT: number; nC: number; trendNames: string[]; ctxNames: string[] } {
+  const index = (names: string[]) => { const order: string[] = []; const idx = names.map((n) => { const f = familyOf(n); let i = order.indexOf(f); if (i < 0) { i = order.length; order.push(f); } return i; }); return { idx, order }; };
+  const t = index(TANET_TREND_FEATURES), c = index(TANET_CTX_FEATURES);
+  return { trend: t.idx, ctx: c.idx, nT: t.order.length, nC: c.order.length, trendNames: t.order, ctxNames: c.order };
+}
 const D1_OPTS = { sma200: true, vwap: false };
 /** One attention step per closed day: the daily TA readings plus daily returns and volatility. */
 export const TANET_DAY_FEATURES = [...TF_KEYS(D1_OPTS).filter((k) => !TALIB_KEYS.includes(k)).map((k) => `d1_${k}`), 'dret_1', 'dret_5', 'dret_20', 'dvol_10_60', 'ddow_sin', 'ddow_cos'];
@@ -475,6 +508,10 @@ export interface TaNetParams {
   data: { assets: string[]; from: string; to: string; rows: number; sources: Record<string, string[]>; holdoutFrom: string; finalFrom?: string };
   /** Indicator engine the inputs were computed with ('talib' or 'builtin'; bot/ta/talib.ts). */
   taEngine?: string;
+  /** Architecture: 'flat' (raw readings into the GRU / context layer) or 'grouped' (indicator families). */
+  arch?: 'flat' | 'grouped';
+  /** Grouped: family names, trend families first then context families (the attention's order). */
+  familyNames?: string[];
   trainedAt: string;
 }
 
@@ -535,10 +572,14 @@ export class TaNet {
   }
 
   /** P(up 1h), P(up 4h), vol log ratio from raw step vectors. */
-  predict(trend: ArrayLike<number>[], macro: ArrayLike<number>[], micro: ArrayLike<number>, swing: ArrayLike<number>, ctxVec: ArrayLike<number>): { up1: number; up4: number; vol: number } {
+  predict(trend: ArrayLike<number>[], macro: ArrayLike<number>[], micro: ArrayLike<number>, swing: ArrayLike<number>, ctxVec: ArrayLike<number>): { up1: number; up4: number; vol: number; families?: Record<string, number> } {
     const x = buildBranchInput(this.params.dims, this.params.norm, trend, macro, micro, swing, ctxVec);
-    const o = branchForward(this.params.dims, this.w, this.params.gates, x, this.layout).out;
-    return { up1: sigmoid(o[0]), up4: sigmoid(o[1]), vol: clip(o[2], 3) };
+    const f = branchForward(this.params.dims, this.w, this.params.gates, x, this.layout);
+    const o = f.out;
+    // Grouped network: how much each indicator family counted in this call (the family attention).
+    const names = this.params.familyNames;
+    const families = f.cache.pi && names?.length === f.cache.pi.length ? Object.fromEntries(names.map((n, i) => [n, +f.cache.pi![i].toFixed(3)])) : undefined;
+    return { up1: sigmoid(o[0]), up4: sigmoid(o[1]), vol: clip(o[2], 3), families };
   }
 }
 
@@ -553,11 +594,13 @@ export interface TaNetOutput {
   skill: Partial<Record<TaNetHorizon, number>>;
   graded: Partial<Record<TaNetHorizon, number>>;
   version: string;
+  /** Grouped network: weight of each indicator family in this call (trend families, then context). */
+  families?: Record<string, number>;
   /** Live forward test of the position rule: status and days so far. */
   forward?: { status: 'forward-testing' | 'confirmed' | 'failed'; days: number };
 }
 
-interface Call { up60: number; up240: number; vol: number; close: number; pos: number; pos4: number; width: number }
+interface Call { up60: number; up240: number; vol: number; close: number; pos: number; pos4: number; width: number; families?: Record<string, number> }
 
 const ROLL = 168;
 const MIN_GRADED = 24;
@@ -726,7 +769,7 @@ export class TaNetRuntime {
       const up60 = active.includes('up_1h') && !muted ? o.up1 : NA;
       const up240 = active.includes('up_4h') && !muted ? o.up4 : NA;
       const vol = active.includes('vol_4h') ? o.vol : NA;
-      memo.set(ts, { up60, up240, vol, close: h1[i].c, pos: taNetPosition(o.up1, o.vol, fr.sig, p.strategy), pos4: taNetBarrierPosition(o.up4, o.vol, fr.sig, p.strategy), width: taNetBarrierWidth(o.vol, fr.sig) });
+      memo.set(ts, { up60, up240, vol, close: h1[i].c, pos: taNetPosition(o.up1, o.vol, fr.sig, p.strategy), pos4: taNetBarrierPosition(o.up4, o.vol, fr.sig, p.strategy), width: taNetBarrierWidth(o.vol, fr.sig), families: o.families });
     }
     this.grade(asset, h1, memo);
     this.forwardStep(asset, h1, memo, now);
@@ -739,7 +782,7 @@ export class TaNetRuntime {
     const out: TaNetOutput = {
       barTs: lastTs, up: { 60: cur.up60, 240: cur.up240 }, vol4h: cur.vol,
       skill: { 60: skillOf(60), 240: skillOf(240) }, graded: { 60: br?.[60].length ?? 0, 240: br?.[240].length ?? 0 },
-      version: this.net.version, forward: fs_ ? { status: fs_.status, days: fs_.days } : undefined,
+      version: this.net.version, families: cur.families, forward: fs_ ? { status: fs_.status, days: fs_.days } : undefined,
     };
     this.last.set(asset, { lastTs, len: h1.length, out });
     return out;

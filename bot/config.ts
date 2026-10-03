@@ -227,6 +227,8 @@ export interface TaNetConfig {
   coinbaseTfs: string[];
   /** Retrain the network at most every N days (and whenever it is missing). */
   retrainEveryDays: number;
+  /** Network layout trained by the pipeline: flat, or grouped (indicator families; TA_NET_ARCH). */
+  arch: 'flat' | 'grouped';
   /** Population tournament: rolling training block, evaluation window, untouched holdout (months). */
   trainMonths: number;
   evalMonths: number;
@@ -961,6 +963,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       binanceIntervals: (env.HISTORY_BINANCE_INTERVALS ?? '1h,15m,1d').split(',').map((x) => x.trim()).filter(Boolean),
       coinbaseTfs: (env.HISTORY_COINBASE_TFS ?? '1h,1d').split(',').map((x) => x.trim()).filter(Boolean),
       retrainEveryDays: num(env, 'TA_NET_RETRAIN_DAYS', 7, 0, 365),
+      arch: oneOf(env, 'TA_NET_ARCH', 'flat', ['flat', 'grouped'] as const),
       trainMonths: num(env, 'TA_NET_TRAIN_MONTHS', 12, 1, 36),
       evalMonths: num(env, 'TA_NET_EVAL_MONTHS', 1, 0.25, 6),
       stepMonths: num(env, 'TA_NET_STEP_MONTHS', 1, 0.25, 6),
