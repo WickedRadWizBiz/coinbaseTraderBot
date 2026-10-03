@@ -193,3 +193,10 @@ The dashboard's perps panel (`trading`) shows both lanes: open trades with their
 | final Jul – Sep 2026 | 39 | +0.90 (−0.24 to +2.35) | +$1,738 |
 
 That's about 0.3–0.4 trades a day. Across the last 12 months combined: 131 trades at about +0.31R, or +0.37R with limit-order entries. The lane is still not validated, because the holdout's 5% bound is below zero, so it trades at pilot size on paper.
+
+### Update: first sweep runs (`research/sweep.ts`)
+
+The coordinate-descent sweep tuned each burst setting in turn on 2020 – Jun 2024, checked it on Jul 2024 – Jun 2025, and kept the final window (Jul 2025 on) unseen until the end.
+
+- **Longs:** no single-setting change beat the current settings, so the sweep stopped after one pass. Final window: 221 trades at +0.32R.
+- **Shorts:** the sweep accepted a 10-bar breakout lookback instead of 20. The tuning window went from +0.27R to +0.32R and the check window from +0.13R to +0.15R. On the unseen final window, though, the result went from +0.10R (53 trades) to −0.01R (65 trades). **The change was not applied**, and shorts keep the 20-bar lookback. Tuning and check gains this small fall within the noise for about 60–80 trades.
