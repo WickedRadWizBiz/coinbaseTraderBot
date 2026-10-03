@@ -176,3 +176,20 @@ Two changes. The fast lane gained the **momentum burst**: join a volatile move a
 | `PERP_PILOT_MAX_NOTIONAL_USD` | 25 | Size cap while a lane is unvalidated |
 
 The dashboard's perps panel (`trading`) shows both lanes: open trades with their stops and targets, the queues with scores, recent skips with reasons, recent trades, and today's P&L against the goal.
+
+
+### Update: per-side burst search
+
+`research/burstParamSearch.ts` searched every burst threshold and exit for longs and shorts separately: bar range, volume spike, taker flow, breakout lookback, the daily-trend rule, the ATR trail and the time stop. Each setting was ranked on 2020 – Jun 2025 and checked on Jul 2025 – Oct 2026.
+
+- **Longs:** all ten best tuning settings were also profitable on the test window (median +0.35R per trade). The bot now uses the top tuning setting: range ≥ 1.5 ATR, volume ≥ 1.5×, at least 55% of volume on the buy side, a 10-bar breakout, a 3.5-ATR trail and a 32-bar time stop. That gives 811 tuning trades at +0.23R and 221 test trades at +0.32R, against +0.13R in both windows for the old settings.
+- **Shorts:** the best tuning settings all lost on the test window (median −0.10R), so shorts keep their original thresholds plus the daily-trend rule (`BURST` in `bot/setups/detectors.ts`).
+- **Selection:** a setup type is now traded only with real evidence, meaning a development t-statistic of at least 1. With the looser long settings the 15m bursts scraped above zero (t 0.37), lost afterwards, and took position slots from the 1h bursts.
+
+| Fast lane (1h bursts) | Trades | Net R per trade (90% interval) | Net $ on $10k |
+|---|---|---|---|
+| 2020 – Sep 2025 | 560 | +0.23 (+0.07 to +0.40) | +$6,651 |
+| holdout Oct 2025 – Jun 2026 | 92 | +0.06 (−0.27 to +0.43) | +$42 |
+| final Jul – Sep 2026 | 39 | +0.90 (−0.24 to +2.35) | +$1,738 |
+
+That's about 0.3–0.4 trades a day. Across the last 12 months combined: 131 trades at about +0.31R, or +0.37R with limit-order entries. The lane is still not validated, because the holdout's 5% bound is below zero, so it trades at pilot size on paper.

@@ -301,16 +301,20 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
     const kinds = [...new Set(events.filter((e) => e.sig.lane === lane).map((e) => kindKey(e.sig)))].sort();
     const byKind: Record<string, number> = {};
     for (const k of kinds) {
-      let best = { th: -Infinity, usd: -Infinity, n: 0 };
+      let best = { th: -Infinity, usd: -Infinity, n: 0, t: 0 };
       for (const th of GRID) {
         const b: LaneBookParams = { ...book, [lane]: { ...book[lane], minScore: th, minScoreByKind: undefined } };
         const tr = backtestLanes(assets, events, scores, b, costs, equity, firstFold, holdoutFrom, [lane], (e) => kindKey(e.sig) === k);
         const usd = tr.reduce((a, t) => a + t.usd, 0);
-        if (usd > best.usd) best = { th, usd, n: tr.length };
+        const rs = tr.map((t) => t.r), m = rs.reduce((a, v) => a + v, 0) / Math.max(1, rs.length);
+        const sd = Math.sqrt(rs.reduce((a, v) => a + (v - m) ** 2, 0) / Math.max(1, rs.length - 1));
+        if (usd > best.usd) best = { th, usd, n: tr.length, t: sd > 0 ? m / (sd / Math.sqrt(rs.length)) : 0 };
       }
-      const on = best.usd > 0 && best.n >= 20;
+      // Traded only with real evidence: net positive, enough trades, and a t-statistic of at least 1
+      // (a type that merely scrapes above zero would take position slots from the types that work).
+      const on = best.usd > 0 && best.n >= 20 && best.t >= 1;
       if (on) byKind[k] = best.th === -Infinity ? -1e9 : best.th;
-      log(`  ${lane} ${k}: best development threshold ${best.th === -Infinity ? 'none' : best.th} -> ${best.n} trades, net $${best.usd.toFixed(0)}: ${on ? 'TRADED' : 'off'}`);
+      log(`  ${lane} ${k}: best development threshold ${best.th === -Infinity ? 'none' : best.th} -> ${best.n} trades, net $${best.usd.toFixed(0)}, t ${best.t.toFixed(2)}: ${on ? 'TRADED' : 'off'}`);
     }
     book[lane].minScoreByKind = byKind;
     book[lane].minScore = Math.min(...Object.values(byKind), 1e9);
