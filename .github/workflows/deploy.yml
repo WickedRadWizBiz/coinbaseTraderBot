@@ -103,6 +103,7 @@ jobs:
               pm2 save --force 2>/dev/null || true
             fi
             npm ci --omit=dev
+            node -e "require('talib'); console.log('TA-Lib native module OK')" || echo 'WARNING: TA-Lib did not load; the bot uses its built-in indicators'
             bash deploy/activate.sh ~/releases/${{ steps.rel.outputs.name }}
             # Keep the 5 newest releases (plus whatever current/previous point to).
             keep="$(readlink ~/bot/current):$(readlink ~/bot/previous 2>/dev/null || true)"

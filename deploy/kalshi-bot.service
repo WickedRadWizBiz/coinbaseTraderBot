@@ -1,4 +1,5 @@
 # /etc/systemd/system/kalshi-bot.service
+# deploy/activate.sh installs this with the server's own user, home and node path filled in.
 # Runs the bot as an unprivileged user from ~/bot/current with the server's
 # own environment file (~/bot/bot.env, created on first deploy). By default the dashboard is open
 # on the static IP (http://<host>:3000, BIND_HOST=0.0.0.0). To lock it down, see docs/DEPLOY.md:
@@ -25,7 +26,7 @@ TimeoutStopSec=20
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/home/ubuntu/bot/data
+ReadWritePaths=/home/ubuntu/bot
 ProtectHome=read-only
 
 [Install]
