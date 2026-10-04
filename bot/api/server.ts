@@ -28,6 +28,7 @@ import { SpotBookService } from '../marketdata/spotBook';
 import type { Vault } from '../vault/vault';
 
 import { CONFLUENCES, KNOWLEDGE, RULES } from '../ta/knowledge';
+import { buildNeuralMap } from './neuralMap';
 import { studyFor, studyMeta } from '../ta/study';
 
 export interface ApiDeps {
@@ -173,6 +174,8 @@ export function createApi(d: ApiDeps): express.Express {
   });
 
   api.get('/snn', async (_req, res) => res.json(await d.engine.snnStatus()));
+  // The neural map page: every network as a block of pixels, in the order information flows.
+  api.get('/neural-map', async (_req, res) => res.json(await buildNeuralMap(d)));
 
   api.get('/markets', (_req, res) => res.json([...d.engine.status.values()].sort((a, b) => a.closeTs - b.closeTs || a.ticker.localeCompare(b.ticker))));
 
