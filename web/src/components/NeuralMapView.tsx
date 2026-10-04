@@ -67,7 +67,7 @@ function squareLayout(map: NeuralMap, N: number): Section[] {
 // block's agreeing pixels gather at the matching point on its top edge, so bright seams line up along the
 // pipeline's real links. The pull is capped at PULL_CAP of the pixels right at the attractor (fading
 // with distance) and scales with the link's activity, so most of each block stays scattered.
-const PULL_CAP = 0.3;
+const PULL_CAP = 0.4;
 
 const hash01 = (a: number, b: number) => (((Math.imul(a + 7, 2654435761) ^ Math.imul(b + 13, 40503)) >>> 0) % 10007) / 10007;
 const scatterIndex = (gx: number, gy: number, n: number) => (n ? ((Math.imul(gy + 1, 73856093) ^ Math.imul(gx + 1, 19349663)) >>> 0) % n : 0);
