@@ -15,6 +15,7 @@ import {
   MarketInfo, OrderRejectedError, OrderStateUnknownError, SeriesFeeInfo, BookSnapshot,
 } from './types';
 import { formatCount, formatPrice, parseBalance, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, parseSeriesFees } from './wire';
+import { recordLatency } from '../util/latency';
 
 const log = logger('kalshi-rest');
 
@@ -68,6 +69,7 @@ export class KalshiRest implements ExchangeGateway {
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     const recvTs = Date.now();
+    recordLatency('kalshiRest', recvTs - sentTs, recvTs);
     const dateHeader = res.headers?.get?.('date');
     if (dateHeader && this.opts.onServerDate) {
       const d = Date.parse(dateHeader);

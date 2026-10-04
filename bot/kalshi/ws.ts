@@ -10,6 +10,7 @@ import { parseCount, parseDollars } from '../util/num';
 import type { KalshiSigner } from './auth';
 import type { BookLevel, ExchangeFill, ExchangeOrder } from './types';
 import { parseFill, parseOrder, yesPrice } from './wire';
+import { recordLatency } from '../util/latency';
 
 const log = logger('kalshi-ws');
 
@@ -37,6 +38,7 @@ export class KalshiWs extends EventEmitter {
   private backoffMs = 1000;
   private closed = false;
   private pingTimer: NodeJS.Timeout | null = null;
+  private pingSentAt = 0;
   lastMessageTs = 0;
 
   constructor(
@@ -64,10 +66,11 @@ export class KalshiWs extends EventEmitter {
       this.lastSeq.clear();
       this.sidTicker.clear();
       this.subscribeAll();
-      this.pingTimer = setInterval(() => ws.readyState === WebSocket.OPEN && ws.ping(), 10_000);
+      this.pingTimer = setInterval(() => { if (ws.readyState === WebSocket.OPEN) { this.pingSentAt = Date.now(); ws.ping(); } }, 10_000);
       this.emit(this.everConnected ? 'reconnected' : 'connected');
       this.everConnected = true;
     });
+    ws.on('pong', () => { if (this.pingSentAt) recordLatency('kalshiWs', Date.now() - this.pingSentAt); });
     ws.on('message', (buf) => this.onMessage(buf.toString()));
     ws.on('close', (code) => {
       log.warn('closed', { code });

@@ -2,10 +2,10 @@
 //  - Bound to loopback by default (reach it through an SSH tunnel/Tailscale).
 //  - With DASHBOARD_PASSWORD set, every /api route requires it as the bearer (constant-time compare),
 //    with a lockout after repeated failures. Without one the dashboard is open (no login).
-//  - There is NO route to change settings, switch to live, write credentials,
-//    restart, or reset state. The only write actions are engaging the kill
-//    switch and resetting it (with an explicit confirmation phrase, and only
-//    when reconciliation is clean).
+//  - Write actions: the kill switch (engage / reset with a confirmation phrase), PLAY / STOP (pause new
+//    entries), and the PAPER / LIVE switch, which rewrites TRADING_MODE (and the perps / tennis modes) in
+//    the server's bot.env and restarts the bot; a switch whose settings would not start (e.g. live without
+//    Kalshi keys) is refused before anything is written. No route writes credentials.
 
 import crypto from 'crypto';
 import express, { NextFunction, Request, Response } from 'express';
@@ -29,6 +29,10 @@ import type { Vault } from '../vault/vault';
 
 import { CONFLUENCES, KNOWLEDGE, RULES } from '../ta/knowledge';
 import { buildNeuralMap } from './neuralMap';
+import type { RunControl } from '../control';
+import { ConfigError, loadConfig } from '../config';
+import { latencySnapshot } from '../util/latency';
+import { updateEnvFile } from '../util/envFile';
 import { studyFor, studyMeta } from '../ta/study';
 
 export interface ApiDeps {
@@ -45,6 +49,9 @@ export interface ApiDeps {
   spotBooks?: SpotBookService;
   vault?: Vault;
   autoTrain?: AutoTrainer;
+  control?: RunControl;
+  /** Restart the bot (systemd starts it again). */
+  restart?: () => void;
 }
 
 export function tokenMatches(expected: string, provided: string | undefined): boolean {
@@ -159,6 +166,9 @@ export function createApi(d: ApiDeps): express.Express {
       vault: d.vault?.status() ?? null,
       dominance: dominanceStatus(d.md),
       wsConnected: d.md.wsConnected,
+      latency: latencySnapshot(),
+      run: d.control?.status() ?? { active: true, since: null },
+      perpsMode: d.cfg.perps.trading,
       consecutiveOrderErrors: d.oms.consecutiveErrors,
     });
   });
@@ -287,6 +297,41 @@ export function createApi(d: ApiDeps): express.Express {
     }
     const split = d.engine.recordWithdrawal(amount, `api:${req.ip}`);
     res.json({ ...split, status: d.vault.status() });
+  });
+
+  // PLAY / STOP: stopping pauses new entries and cancels resting orders (exits are re-placed by the engine).
+  api.post('/run', async (req, res) => {
+    if (!d.control) return res.status(400).json({ error: 'run control not available' });
+    const active = req.body?.active === true;
+    d.control.set(active);
+    d.audit.write('config', { event: active ? 'bot_play' : 'bot_stop', by: 'dashboard' });
+    if (!active) { try { await d.oms.cancelAll('stopped from the dashboard'); } catch { /* reported by the OMS */ } }
+    res.json({ ok: true, run: d.control.status() });
+  });
+
+  // PAPER / LIVE: rewrite the modes in bot.env and restart. Live needs { confirm: 'LIVE' } (the dashboard's
+  // double-tap + double-tap dialog) and settings that pass the same checks as a start would.
+  api.post('/mode', (req, res) => {
+    const mode = req.body?.mode;
+    if (mode !== 'paper' && mode !== 'live') return res.status(400).json({ error: 'mode must be paper or live' });
+    if (mode === 'live' && req.body?.confirm !== 'LIVE') return res.status(400).json({ error: 'live mode needs the double-tap confirmation' });
+    if (mode === d.cfg.mode) return res.json({ ok: true, mode, restarting: false });
+    const perps = (v: string) => (v === 'off' ? 'off' : mode);
+    const changes: Record<string, string> = {
+      TRADING_MODE: mode,
+      PERP_TRADING: perps(d.cfg.perps.trading),
+      PERP_HEDGE: perps(d.cfg.perps.hedge),
+      TENNIS_LIVE: mode === 'live' && d.cfg.tennis.enabled ? 'true' : 'false',
+      ...(mode === 'live' ? { KALSHI_ENV: 'prod', LIVE_TRADING_ACKNOWLEDGED: 'I_ACCEPT_REAL_MONEY_RISK' } : {}),
+    };
+    try { loadConfig({ ...process.env, ...changes }); } catch (e) {
+      return res.status(400).json({ error: e instanceof ConfigError ? e.message : String(e) });
+    }
+    if (!fs.existsSync(d.cfg.botEnvFile)) return res.status(400).json({ error: `bot.env not found at ${d.cfg.botEnvFile}` });
+    try { updateEnvFile(d.cfg.botEnvFile, changes); } catch (e) { return res.status(500).json({ error: `could not write bot.env: ${String(e)}` }); }
+    d.audit.write('config', { event: 'mode_switch', from: d.cfg.mode, to: mode, changes: Object.keys(changes) });
+    res.json({ ok: true, mode, restarting: Boolean(d.restart) });
+    if (d.restart) setTimeout(d.restart, 500);
   });
 
   api.post('/kill', async (req, res) => {

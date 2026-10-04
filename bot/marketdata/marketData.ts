@@ -36,6 +36,7 @@ import { DominanceService } from './dominance';
 import { IndexBars, IndexStore } from './indexBars';
 import { IndexTracker } from './indexTracker';
 import { OrderBook } from './orderBook';
+import { recordLatency } from '../util/latency';
 
 const log = logger('marketdata');
 
@@ -417,6 +418,7 @@ export class MarketData extends EventEmitter {
           const asset = String(m.product_id).split('-')[0];
           const value = Number(m.price);
           const ts = Date.parse(m.time) || Date.now();
+          if (m.time) recordLatency('coinbase', Date.now() - ts);
           if (!(value > 0)) return;
           this.spot.get(asset)?.add(value, ts);
           this.recorder.write('spot', { asset, value, ts });
