@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Network } from 'lucide-react';
+import { Maximize2, Minimize2, Network } from 'lucide-react';
 import { Panel } from './Panel';
 import { usePoll } from './usePoll';
 
@@ -16,146 +16,172 @@ function ramp(x: number): [number, number, number] {
   const i = Math.floor(t), f = t - i, a = RAMP[i], b = RAMP[i + 1];
   return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
 }
-const scoreColor = (s: number | null) => (s === null ? 'rgba(160,160,170,0.55)' : s >= 0 ? `rgba(52,211,153,${0.45 + 0.55 * Math.min(1, s)})` : `rgba(239,68,68,${0.45 + 0.55 * Math.min(1, -s)})`);
+const scoreColor = (s: number | null) => (s === null ? 'rgba(160,160,170,0.6)' : s >= 0 ? `rgba(52,211,153,${0.5 + 0.5 * Math.min(1, s)})` : `rgba(239,68,68,${0.5 + 0.5 * Math.min(1, -s)})`);
 
-interface Placed { b: MapBlock; layer: string; x: number; y: number; px: number; rows: number; w: number; h: number }
+// ---- Square layout -------------------------------------------------------------------------------
+// The map is one square screen of N x N equal pixels. Tiers are horizontal bands, top to bottom in the
+// order information flows (feeds -> indicator families -> TA network -> SNNs -> decision models -> MLP
+// -> traders). A band's sections tile its full width; a tier with more than MAX_ACROSS blocks stacks
+// into sub-rows (the 11 indicator families become 6 + 5). Each section's cells are resampled to fill
+// its rectangle, so every pixel of the square belongs to some network, and the funnels (the TA network,
+// the MLP) span the full width of their band.
+const MAX_ACROSS = 6;
+/** Relative band height per tier (per sub-row). */
+const TIER_WEIGHT: Record<string, number> = { feeds: 1, families: 0.95, tanet: 1.25, snn: 1.1, models: 1, mlp: 1.45, bots: 1 };
 
-const PAD = 12, GAP = 10, MIN_BLOCK = 50, LAYER_GAP = 30, LABEL_H = 14;
+interface Section { b: MapBlock; gx: number; gy: number; gw: number; gh: number }
 
-/** Positions of every block for a canvas width (rows wrap when a layer has too many blocks to fit). */
-function layout(map: NeuralMap, W: number): { placed: Placed[]; height: number; rowsY: Array<{ label: string; y: number }> } {
-  const placed: Placed[] = [];
-  const rowsY: Array<{ label: string; y: number }> = [];
-  let y = PAD;
-  const perRow = Math.max(1, Math.floor((W - 2 * PAD + GAP) / (MIN_BLOCK + GAP)));
+/** Integer sizes that add up to `total` exactly, proportional to `weights`. */
+function split(total: number, weights: number[]): number[] {
+  const sum = weights.reduce((a, b) => a + b, 0);
+  let acc = 0, prev = 0;
+  return weights.map((w) => { acc += (w / sum) * total; const edge = Math.round(acc); const n = edge - prev; prev = edge; return n; });
+}
+
+function squareLayout(map: NeuralMap, N: number): Section[] {
+  const rows: Array<{ layer: string; blocks: MapBlock[] }> = [];
   for (const L of map.layers) {
-    rowsY.push({ label: L.label, y });
-    y += LABEL_H;
-    // One block size per layer (a wrapped remainder row keeps the size of the full rows).
-    const across = Math.min(L.blocks.length, perRow);
-    const wide = L.blocks.some((b) => b.cols > 16);
-    const bw = Math.min(wide ? 230 : 112, (W - 2 * PAD - GAP * (across - 1)) / across);
-    for (let s = 0; s < L.blocks.length; s += perRow) {
-      const chunk = L.blocks.slice(s, s + perRow);
-      let rowH = 0;
-      const sized = chunk.map((b) => {
-        const rows = Math.ceil(b.cells.length / b.cols);
-        const px = Math.max(2, Math.floor(bw / b.cols));
-        const w = px * b.cols, h = px * rows;
-        rowH = Math.max(rowH, h);
-        return { b, rows, px, w, h };
-      });
-      const total = sized.reduce((a, z) => a + z.w, 0) + GAP * (sized.length - 1);
-      let x = (W - total) / 2;
-      for (const z of sized) { placed.push({ ...z, layer: L.id, x, y }); x += z.w + GAP; }
-      y += rowH + 18;
-    }
-    y += LAYER_GAP - 18;
+    if (!L.blocks.length) continue;
+    const nRows = Math.ceil(L.blocks.length / MAX_ACROSS), per = Math.ceil(L.blocks.length / nRows);
+    for (let r = 0; r < nRows; r++) rows.push({ layer: L.id, blocks: L.blocks.slice(r * per, (r + 1) * per) });
   }
-  return { placed, height: y + PAD, rowsY };
+  const heights = split(N - (rows.length - 1), rows.map((r) => TIER_WEIGHT[r.layer] ?? 1));
+  const out: Section[] = [];
+  let gy = 0;
+  rows.forEach((r, ri) => {
+    const widths = split(N - (r.blocks.length - 1), r.blocks.map(() => 1));
+    let gx = 0;
+    r.blocks.forEach((b, bi) => { out.push({ b, gx, gy, gw: widths[bi], gh: heights[ri] }); gx += widths[bi] + 1; });
+    gy += heights[ri] + 1;
+  });
+  return out;
 }
 
 export function NeuralMapView() {
   const { data, error } = usePoll<NeuralMap>('/neural-map', 3000);
+  const screenRef = useRef<HTMLDivElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [width, setWidth] = useState(800);
-  const [hover, setHover] = useState<{ p: Placed; x: number; y: number } | null>(null);
+  const [side, setSide] = useState(600);
+  const [full, setFull] = useState(false);
+  const [hover, setHover] = useState<{ s: Section; x: number; y: number } | null>(null);
   // Displayed cell values ease toward each new poll.
   const shown = useRef(new Map<string, Float32Array>());
 
+  // The square: as wide as the card allows and no taller than the screen (the whole screen when full-screen).
   useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => setWidth(Math.max(280, el.clientWidth)));
-    ro.observe(el);
-    return () => ro.disconnect();
+    const fit = () => {
+      const el = wrapRef.current;
+      if (!el) return;
+      const fs = !!document.fullscreenElement;
+      const w = fs ? window.innerWidth : el.clientWidth;
+      const h = fs ? window.innerHeight : window.innerHeight - 110;
+      setSide(Math.max(260, Math.floor(Math.min(w, h))));
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    if (wrapRef.current) ro.observe(wrapRef.current);
+    const onFs = () => { setFull(!!document.fullscreenElement); setTimeout(fit, 50); };
+    window.addEventListener('resize', fit);
+    document.addEventListener('fullscreenchange', onFs);
+    return () => { ro.disconnect(); window.removeEventListener('resize', fit); document.removeEventListener('fullscreenchange', onFs); };
   }, []);
 
-  const geo = useMemo(() => (data ? layout(data, width) : null), [data, width]);
+  // Pixel pitch around 6 px.
+  const N = useMemo(() => Math.max(56, Math.min(160, Math.round(side / 6))), [side]);
+  const sections = useMemo(() => (data ? squareLayout(data, N) : []), [data, N]);
 
   useEffect(() => {
     const cv = canvasRef.current;
-    if (!cv || !geo || !data) return;
+    if (!cv || !data || !sections.length) return;
     const dpr = window.devicePixelRatio || 1;
-    cv.width = Math.round(width * dpr); cv.height = Math.round(geo.height * dpr);
-    cv.style.width = `${width}px`; cv.style.height = `${geo.height}px`;
+    cv.width = Math.round(side * dpr); cv.height = Math.round(side * dpr);
+    cv.style.width = `${side}px`; cv.style.height = `${side}px`;
     const ctx = cv.getContext('2d');
     if (!ctx) return;
-    const byId = new Map(geo.placed.map((p) => [p.b.id, p]));
+    const pitch = side / N, gap = pitch > 4 ? 1 : 0;
+    const byId = new Map(sections.map((s) => [s.b.id, s]));
     let raf = 0;
     const t0 = performance.now();
     const draw = (now: number) => {
       const t = (now - t0) / 1000;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, width, geo.height);
-      // Scanlines.
-      ctx.fillStyle = 'rgba(255,255,255,0.025)';
-      for (let y = 0; y < geo.height; y += 3) ctx.fillRect(0, y, width, 1);
-      // Layer labels.
-      ctx.font = '9px monospace'; ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(155,124,255,0.75)';
-      for (const r of geo.rowsY) ctx.fillText(`> ${r.label.toUpperCase()}`, PAD, r.y + 9);
-      // Links with packets travelling down them.
-      for (const [a, b, s] of data.links) {
-        const A = byId.get(a), B = byId.get(b);
-        if (!A || !B) continue;
-        const x1 = A.x + A.w / 2, y1 = A.y + A.h + 2, x2 = B.x + B.w / 2, y2 = B.y - 2, my = (y1 + y2) / 2;
-        ctx.strokeStyle = `rgba(155,124,255,${0.06 + 0.22 * s})`; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.bezierCurveTo(x1, my, x2, my, x2, y2); ctx.stroke();
-        const k = s > 0.6 ? 3 : s > 0.25 ? 2 : 1;
-        for (let j = 0; j < k; j++) {
-          const u = ((t * (0.12 + 0.45 * s)) + j / k + (a.length * 0.137 + b.length * 0.071)) % 1;
-          const v = 1 - u;
-          const px = v ** 3 * x1 + 3 * v * v * u * x1 + 3 * v * u * u * x2 + u ** 3 * x2;
-          const py = v ** 3 * y1 + 3 * v * v * u * my + 3 * v * u * u * my + u ** 3 * y2;
-          const [r, g, bl] = ramp(0.25 + 0.75 * s);
-          ctx.fillStyle = `rgba(${r | 0},${g | 0},${bl | 0},${0.35 + 0.6 * s})`;
-          ctx.fillRect(px - 1.5, py - 1.5, 3, 3);
-        }
-      }
-      // A pulse sweeping down the layers: the logic flowing toward the traders.
-      const wave = ((t % 5) / 5) * geo.height;
-      for (const p of geo.placed) {
-        const { b } = p;
+      ctx.fillStyle = '#050308'; ctx.fillRect(0, 0, side, side);
+      // A pulse sweeping down the tiers (grid rows): the logic flowing toward the traders.
+      const wave = ((t % 5) / 5) * (N + 20) - 10;
+      for (const s of sections) {
+        const { b } = s;
         let cur = shown.current.get(b.id);
         if (!cur || cur.length !== b.cells.length) { cur = Float32Array.from(b.cells); shown.current.set(b.id, cur); }
-        const dz = ((p.y + p.h / 2) - wave) / 60;
-        const pulse = Math.exp(-(dz * dz)) * (0.25 + 0.6 * b.activity);
-        for (let i = 0; i < b.cells.length; i++) {
-          cur[i] += (b.cells[i] - cur[i]) * 0.06;
-          const shimmer = 1 + 0.18 * b.activity * Math.sin(t * 2.6 + i * 1.73 + p.x * 0.01);
-          const m = Math.min(1, Math.abs(cur[i]) * shimmer);
-          const [r, g, bl] = ramp(m);
-          // Faint weights stay dim teal; strong ones glow. The passing pulse lifts everything it crosses.
-          const lum = 0.55 + 0.45 * Math.sqrt(m) + pulse;
-          ctx.fillStyle = `rgba(${Math.min(255, r * lum) | 0},${Math.min(255, g * lum) | 0},${Math.min(255, bl * lum) | 0},${Math.min(1, 0.22 + 0.9 * Math.sqrt(m) + pulse * 0.5)})`;
-          const cx = p.x + (i % b.cols) * p.px, cy = p.y + Math.floor(i / b.cols) * p.px;
-          ctx.fillRect(cx, cy, Math.max(1, p.px - (p.px > 4 ? 1 : 0)), Math.max(1, p.px - (p.px > 4 ? 1 : 0)));
+        for (let i = 0; i < b.cells.length; i++) cur[i] += (b.cells[i] - cur[i]) * 0.06;
+        // Every screen pixel gets its own value: the section reads the block's cells in order, wrapping
+        // when it has more pixels than cells (no stretched pixels in the wide funnels).
+        const n = b.cells.length;
+        for (let gy = 0; gy < s.gh; gy++) {
+          const dz = (s.gy + gy - wave) / 5;
+          const pulse = Math.exp(-(dz * dz)) * (0.2 + 0.6 * b.activity);
+          for (let gx = 0; gx < s.gw; gx++) {
+            const i = n ? (gy * s.gw + gx + gy * 7) % n : 0;
+            const shimmer = 1 + 0.2 * b.activity * Math.sin(t * 2.6 + (s.gx + gx) * 1.31 + (s.gy + gy) * 0.77);
+            const m = Math.min(1, Math.abs(cur[i] ?? 0) * shimmer);
+            const [r, g, bl] = ramp(m);
+            const lum = 0.55 + 0.45 * Math.sqrt(m) + pulse;
+            ctx.fillStyle = `rgba(${Math.min(255, r * lum) | 0},${Math.min(255, g * lum) | 0},${Math.min(255, bl * lum) | 0},${Math.min(1, 0.2 + 0.9 * Math.sqrt(m) + pulse * 0.5)})`;
+            ctx.fillRect((s.gx + gx) * pitch, (s.gy + gy) * pitch, pitch - gap, pitch - gap);
+          }
         }
-        // Frame (performance), score bar and label.
-        const sc = scoreColor(b.score);
-        ctx.strokeStyle = sc; ctx.lineWidth = hover?.p.b.id === b.id ? 2 : 1;
-        ctx.shadowColor = sc; ctx.shadowBlur = b.score === null ? 0 : 6 * Math.abs(b.score);
-        ctx.strokeRect(p.x - 1.5, p.y - 1.5, p.w + 3, p.h + 3);
-        ctx.shadowBlur = 0;
-        ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(p.x, p.y + p.h + 3, p.w, 3);
-        if (b.score !== null) { ctx.fillStyle = sc; const bw = (p.w / 2) * Math.min(1, Math.abs(b.score)); ctx.fillRect(b.score >= 0 ? p.x + p.w / 2 : p.x + p.w / 2 - bw, p.y + p.h + 3, bw, 3); }
-        ctx.fillStyle = 'rgba(230,224,255,0.85)'; ctx.font = `${p.w >= 70 ? 9 : 8}px monospace`; ctx.textAlign = 'center';
-        const text = p.w >= 90 ? b.label.toUpperCase() : b.short;
-        ctx.fillText(text.length * 5.5 > p.w + 10 ? b.short : text, p.x + p.w / 2, p.y + p.h + 15);
+      }
+      // Signal packets travelling down each link (source section -> target section).
+      const sz = Math.max(2, pitch * 0.9);
+      for (const [a, c, st] of data.links) {
+        const A = byId.get(a), B = byId.get(c);
+        if (!A || !B) continue;
+        const x1 = (A.gx + A.gw / 2) * pitch, y1 = (A.gy + A.gh * 0.7) * pitch, x2 = (B.gx + B.gw / 2) * pitch, y2 = (B.gy + B.gh * 0.3) * pitch;
+        const k = st > 0.6 ? 2 : 1;
+        for (let j = 0; j < k; j++) {
+          const u = (t * (0.15 + 0.5 * st) + j / k + (a.length * 0.137 + c.length * 0.071)) % 1;
+          const e = u * u * (3 - 2 * u);
+          const [r, g, bl] = ramp(0.35 + 0.65 * st);
+          ctx.fillStyle = `rgba(${r | 0},${g | 0},${bl | 0},${0.45 + 0.5 * st})`;
+          ctx.fillRect(x1 + (x2 - x1) * e - sz / 2, y1 + (y2 - y1) * u - sz / 2, sz, sz);
+        }
+      }
+      // Frames (performance) and labels overlaid on each section.
+      const font = Math.max(8, Math.min(12, pitch * 1.8));
+      ctx.font = `bold ${font}px monospace`; ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+      for (const s of sections) {
+        const x = s.gx * pitch, y = s.gy * pitch, w = s.gw * pitch - gap, h = s.gh * pitch - gap;
+        const sc = scoreColor(s.b.score);
+        ctx.strokeStyle = sc; ctx.lineWidth = hover?.s.b.id === s.b.id ? 2.5 : 1.25;
+        ctx.strokeRect(x + 0.75, y + 0.75, w - 1.5, h - 1.5);
+        const long = s.b.label.toUpperCase();
+        const text = ctx.measureText(long).width + 12 < w ? long : s.b.short;
+        const scoreTxt = s.b.score === null ? '' : `${s.b.score >= 0 ? '+' : ''}${Math.round(s.b.score * 100)}`;
+        const tw = Math.min(ctx.measureText(text).width, w - 12);
+        const sw = scoreTxt ? ctx.measureText(scoreTxt).width : 0;
+        const showScore = !!scoreTxt && tw + sw + 22 < w;
+        ctx.fillStyle = 'rgba(5,3,8,0.8)';
+        ctx.fillRect(x + 3, y + 3, tw + 8 + (showScore ? sw + 8 : 0), font + 5);
+        ctx.fillStyle = 'rgba(236,230,255,0.95)';
+        ctx.fillText(text, x + 7, y + 5.5, w - 12);
+        if (showScore) { ctx.fillStyle = sc; ctx.fillText(scoreTxt, x + 7 + tw + 8, y + 5.5); }
       }
       raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [geo, data, width, hover]);
+  }, [sections, data, side, N, hover]);
 
   const onMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!geo) return;
     const r = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - r.left, y = e.clientY - r.top;
-    const p = geo.placed.find((q) => x >= q.x - 3 && x <= q.x + q.w + 3 && y >= q.y - 3 && y <= q.y + q.h + 18);
-    setHover(p ? { p, x, y } : null);
+    const x = e.clientX - r.left, y = e.clientY - r.top, pitch = side / N;
+    const s = sections.find((q) => x >= q.gx * pitch && x < (q.gx + q.gw) * pitch && y >= q.gy * pitch && y < (q.gy + q.gh) * pitch);
+    setHover(s ? { s, x: e.clientX - (screenRef.current?.getBoundingClientRect().left ?? 0), y: e.clientY - (screenRef.current?.getBoundingClientRect().top ?? 0) } : null);
+  };
+
+  const toggleFull = () => {
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void screenRef.current?.requestFullscreen?.().catch(() => {});
   };
 
   const ranked = useMemo(() => (data ? data.layers.flatMap((l) => l.blocks).filter((b) => b.score !== null).sort((a, b) => b.score! - a.score!) : []), [data]);
@@ -163,26 +189,27 @@ export function NeuralMapView() {
   return (
     <div className="flex flex-col gap-6 w-full max-w-7xl mx-auto pb-24 md:pb-6 relative z-10 text-crypto-primary font-mono text-sm tracking-wider">
       <Panel title={<span className="flex items-center gap-2"><Network className="w-5 h-5" /> Neural Map</span>}
-        right={<span className="text-[10px] tracking-widest opacity-70 normal-case">{data ? `updated ${new Date(data.ts).toLocaleTimeString()}` : ''}</span>}>
-        <p className="text-xs opacity-80 normal-case leading-relaxed mb-3">
-          Every network in the bot, top to bottom in the order information flows down to the meta-model and the traders. Each pixel is a live input or a trained weight;
-          its colour is its strength. The frame and the bar under each block show how that piece is doing: <span className="text-emerald-400">green</span> performing,
-          <span className="text-red-400"> red</span> underperforming, grey no evidence yet. Hover a block for details.
-        </p>
+        right={
+          <button onClick={toggleFull} className="flex items-center gap-1.5 text-[10px] tracking-widest crt-border px-2 py-1 hover:bg-crypto-danger hover:text-white transition-colors">
+            {full ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}{full ? 'EXIT' : 'FULL SCREEN'}
+          </button>
+        }>
         {error && <div className="text-crypto-danger text-xs mb-2">Link error: {error}</div>}
-        <div ref={wrapRef} className="relative w-full crt-border bg-black/60 overflow-hidden">
-          {!data ? <div className="p-10 text-center animate-pulse">MAPPING NETWORKS...</div> : (
-            <canvas ref={canvasRef} onMouseMove={onMove} onMouseLeave={() => setHover(null)} onClick={onMove} className="block" />
-          )}
-          {hover && (
-            <div className="absolute z-20 pointer-events-none crt-border bg-[#0a0204]/95 px-3 py-2 text-[11px] max-w-[260px] normal-case"
-              style={{ left: Math.min(hover.x + 12, width - 270), top: hover.y + 14 }}>
-              <div className="font-bold uppercase tracking-widest text-crypto-text">{hover.p.b.label}</div>
-              <div className="mt-1" style={{ color: scoreColor(hover.p.b.score) }}>{hover.p.b.score === null ? 'no evidence yet' : `performance ${hover.p.b.score >= 0 ? '+' : ''}${(hover.p.b.score * 100).toFixed(0)}`}</div>
-              <div className="opacity-80">activity {(hover.p.b.activity * 100).toFixed(0)}%</div>
-              <div className="opacity-70 mt-1">{hover.p.b.note}</div>
-            </div>
-          )}
+        <div ref={wrapRef} className="w-full flex justify-center">
+          <div ref={screenRef} className="relative bg-[#050308] flex items-center justify-center" style={full ? { width: '100vw', height: '100vh' } : { width: side, height: side }}>
+            {!data ? <div className="text-center animate-pulse">MAPPING NETWORKS...</div> : (
+              <canvas ref={canvasRef} onMouseMove={onMove} onMouseLeave={() => setHover(null)} onClick={onMove} className="block" />
+            )}
+            {hover && (
+              <div className="absolute z-20 pointer-events-none crt-border bg-[#0a0204]/95 px-3 py-2 text-[11px] w-[240px] normal-case"
+                style={{ left: Math.max(4, Math.min(hover.x + 12, (screenRef.current?.clientWidth ?? side) - 250)), top: Math.max(4, Math.min(hover.y + 14, (screenRef.current?.clientHeight ?? side) - 120)) }}>
+                <div className="font-bold uppercase tracking-widest text-crypto-text">{hover.s.b.label}</div>
+                <div className="mt-1" style={{ color: scoreColor(hover.s.b.score) }}>{hover.s.b.score === null ? 'no evidence yet' : `performance ${hover.s.b.score >= 0 ? '+' : ''}${(hover.s.b.score * 100).toFixed(0)}`}</div>
+                <div className="opacity-80">activity {(hover.s.b.activity * 100).toFixed(0)}%</div>
+                <div className="opacity-70 mt-1">{hover.s.b.note}</div>
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-4 mt-3 text-[10px] uppercase tracking-widest">
           <span className="flex items-center gap-2">weak
@@ -190,6 +217,7 @@ export function NeuralMapView() {
           <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block border-2" style={{ borderColor: scoreColor(0.8) }} />performing</span>
           <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block border-2" style={{ borderColor: scoreColor(-0.8) }} />underperforming</span>
           <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block border-2" style={{ borderColor: scoreColor(null) }} />no evidence</span>
+          <span className="normal-case tracking-normal opacity-70">Top to bottom: feeds → indicator families → TA network → spiking networks → decision models → MLP → traders. Hover a section for details.</span>
         </div>
       </Panel>
       {ranked.length > 0 && (
