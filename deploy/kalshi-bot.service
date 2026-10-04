@@ -22,7 +22,8 @@ RestartSec=10
 # A config error exits with code 2/3: do not restart-loop on it.
 RestartPreventExitStatus=2 3
 KillSignal=SIGTERM
-TimeoutStopSec=20
+# Shutdown cancels resting orders and checkpoints the SNNs: give a busy small server time to finish.
+TimeoutStopSec=60
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

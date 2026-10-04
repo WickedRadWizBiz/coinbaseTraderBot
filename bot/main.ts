@@ -324,11 +324,13 @@ async function main(): Promise<void> {
     await oms.cancelAll('startup with kill switch engaged');
   }
 
+  // The dashboard comes up first (it shows the engine warming up); loading every market takes a minute or
+  // more on a small server.
+  const app = createApi({ cfg, audit, engine, oms, kill, recon, model, tca, md, vault, autoTrain, startedAt: Date.now() });
+  const server = app.listen(cfg.port, cfg.host, () => log.info(`operator API on http://${cfg.host}:${cfg.port} (${cfg.dashboardPassword ? 'password required' : 'no login'})`));
+
   md.start();
   await engine.start();
-
-  const app = createApi({ cfg, audit, engine, oms, kill, recon, model, tca, md, vault, autoTrain, startedAt: Date.now() });
-  const server = app.listen(cfg.port, cfg.host, () => log.info(`operator API on http://${cfg.host}:${cfg.port} (token required)`));
 
   let stopping = false;
   const shutdown = async (sig: string) => {
