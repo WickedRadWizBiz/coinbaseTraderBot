@@ -51,44 +51,51 @@ export function DashboardView() {
         <div className="crt-grid-panel p-3 border border-crypto-danger bg-crypto-danger/15 text-crypto-danger font-bold uppercase text-xs">Link error: {error}</div>
       )}
 
-      {!s && <Screen size={BANNER} loading />}
+      {/* Status screen, with the kill switch as a physical key on the chassis beside it. */}
+      <div className="flex items-stretch gap-3 sm:gap-4">
+        {!s && <div className="flex-1 min-w-0"><Screen size={BANNER} loading /></div>}
 
-      {s?.kill?.engaged && (
-        <div className={`crt-grid-panel p-4 border border-crypto-danger bg-crypto-danger/15 flex flex-col md:flex-row items-center justify-between gap-4 overflow-hidden ${BANNER}`}>
-          <div className="flex items-center gap-3">
-            <ShieldAlert className="w-6 h-6 text-crypto-danger animate-pulse shrink-0" />
-            <div>
-              <div className="font-bold uppercase tracking-widest text-crypto-danger">Kill Switch Engaged ({s.kill.source})</div>
-              <div className="text-xs text-[#b0b0b0] mt-0.5">{s.kill.reason} — since {s.kill.engagedAt}</div>
-            </div>
-          </div>
-          <button onClick={reset} className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-crypto-danger text-white hover:bg-white hover:text-crypto-danger transition-colors border border-crypto-danger">
-            Reset Kill Switch
-          </button>
-        </div>
-      )}
-
-      {s && !s.kill?.engaged && (
-        <div className={`crt-grid-panel p-3 border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 overflow-hidden ${BANNER} ${
-          s.haltReasons.length ? 'border-yellow-500/50 bg-yellow-500/10 text-yellow-300' : 'border-crypto-success/50 bg-crypto-success/10 text-crypto-success'
-        }`}>
-          <div className="flex items-center gap-2.5">
-            <ShieldCheck className="w-5 h-5 shrink-0 animate-pulse" />
-            <div>
-              <div className="font-bold uppercase tracking-wider text-xs">
-                {s.mode.toUpperCase()} MODE · KALSHI {s.kalshiEnv.toUpperCase()} · {s.haltReasons.length ? 'NEW RISK HALTED' : 'ARMED'}
-              </div>
-              <div className="text-[11px] opacity-80 mt-0.5 normal-case">
-                {s.haltReasons.length ? s.haltReasons.join('; ') : 'All orders pass the fail-closed risk gateway before reaching the exchange.'}
+        {s?.kill?.engaged && (
+          <div className={`flex-1 min-w-0 crt-grid-panel p-4 border border-crypto-danger bg-crypto-danger/15 flex flex-col md:flex-row items-center justify-between gap-4 overflow-hidden ${BANNER}`}>
+            <div className="flex items-center gap-3">
+              <ShieldAlert className="w-6 h-6 text-crypto-danger animate-pulse shrink-0" />
+              <div>
+                <div className="font-bold uppercase tracking-widest text-crypto-danger">Kill Switch Engaged ({s.kill.source})</div>
+                <div className="text-xs text-[#b0b0b0] mt-0.5">{s.kill.reason} — since {s.kill.engagedAt}</div>
               </div>
             </div>
+            <button onClick={reset} className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-crypto-danger text-white hover:bg-white hover:text-crypto-danger transition-colors border border-crypto-danger">
+              Reset Kill Switch
+            </button>
           </div>
-          <button onClick={engage} className="mech-key !py-2 !px-3 !min-w-0 !flex-row">
-            <Power className="w-4 h-4 text-crypto-danger" />
-            <span className="text-[11px]">Kill Switch</span>
+        )}
+
+        {s && !s.kill?.engaged && (
+          <div className={`flex-1 min-w-0 crt-grid-panel p-3 border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 overflow-hidden ${BANNER} ${
+            s.haltReasons.length ? 'border-yellow-500/50 bg-yellow-500/10 text-yellow-300' : 'border-crypto-success/50 bg-crypto-success/10 text-crypto-success'
+          }`}>
+            <div className="flex items-center gap-2.5">
+              <ShieldCheck className="w-5 h-5 shrink-0 animate-pulse" />
+              <div>
+                <div className="font-bold uppercase tracking-wider text-xs">
+                  {s.mode.toUpperCase()} MODE · KALSHI {s.kalshiEnv.toUpperCase()} · {s.haltReasons.length ? 'NEW RISK HALTED' : 'ARMED'}
+                </div>
+                <div className="text-[11px] opacity-80 mt-0.5 normal-case">
+                  {s.haltReasons.length ? s.haltReasons.join('; ') : 'All orders pass the fail-closed risk gateway before reaching the exchange.'}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        <div className="shrink-0 flex flex-col items-center justify-center gap-1.5">
+          <span className="chassis-print text-[8px]">Emergency</span>
+          <button onClick={engage} disabled={!s || s.kill?.engaged} className={`chassis-key chassis-key-red ${s?.kill?.engaged ? 'is-active' : ''}`} title="Kill switch: cancels all orders and blocks new ones">
+            <Power className="w-4 h-4" />
+            <span>Kill</span>
           </button>
+          <span className="chassis-print text-[8px]">{s?.kill?.engaged ? 'Engaged' : 'Stop all'}</span>
         </div>
-      )}
+      </div>
 
       <Screen size="h-[230px] sm:h-[150px]" loading={!s?.session}>{s?.session && <MarketSessionCard session={s.session} />}</Screen>
 
