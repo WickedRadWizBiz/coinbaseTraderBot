@@ -43,6 +43,7 @@ export class KalshiRest implements ExchangeGateway {
   private readonly limiter: KalshiRateLimiter;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
+  private signPublic = true;
 
   constructor(private readonly opts: RestOptions) {
     this.base = opts.baseUrl.replace(/\/$/, '');
@@ -57,7 +58,10 @@ export class KalshiRest implements ExchangeGateway {
     await bucket.take(REQUEST_COST);
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
-    if (auth) {
+    // Public reads are signed too when keys exist: signed requests count against the account's limit
+    // instead of the anonymous per-IP one.
+    const signed = auth || (!!this.opts.signer && this.signPublic);
+    if (signed) {
       if (!this.opts.signer) throw new Error(`Authenticated call ${method} ${path} without credentials`);
       Object.assign(headers, this.opts.signer.headers(method, this.prefix + path));
     }
@@ -76,6 +80,16 @@ export class KalshiRest implements ExchangeGateway {
       if (Number.isFinite(d)) this.opts.onServerDate(d, sentTs, recvTs);
     }
     const text = await res.text();
+    if (res.status === 429) {
+      const ms = bucket.rateLimited();
+      log.debug('rate limited; pausing requests', { path: path.split('?')[0], pauseMs: ms });
+    } else if (res.ok) bucket.ok();
+    if (res.status === 401 && signed && !auth) {
+      // The key is refused: keep public data flowing unsigned (authenticated calls will report the key problem).
+      this.signPublic = false;
+      log.warn('signed public request refused (401); public market data continues unsigned', { path: path.split('?')[0] });
+      return this.raw(method, path, body, auth);
+    }
     if (!res.ok) throw new HttpError(res.status, text);
     return text ? JSON.parse(text) : {};
   }
@@ -209,9 +223,11 @@ export class KalshiRest implements ExchangeGateway {
 
   // ---- Market data (public) ----------------------------------------------
 
-  async getOpenMarkets(seriesTicker: string): Promise<MarketInfo[]> {
-    // Hourly ladders list many strikes per close time: page through all of them.
-    const rows = await this.paginate(`/markets?series_ticker=${encodeURIComponent(seriesTicker)}&status=open`, 'markets', 10, false);
+  async getOpenMarkets(seriesTicker: string, maxCloseTs?: number): Promise<MarketInfo[]> {
+    // Hourly ladders list many strikes per close time: page through all of them. maxCloseTs (epoch ms)
+    // leaves out far-dated events server-side, which would otherwise cost several pages per series.
+    const until = maxCloseTs ? `&max_close_ts=${Math.floor(maxCloseTs / 1000)}` : '';
+    const rows = await this.paginate(`/markets?series_ticker=${encodeURIComponent(seriesTicker)}&status=open${until}`, 'markets', 10, false);
     return rows.map(parseMarket).filter(Boolean) as MarketInfo[];
   }
 
