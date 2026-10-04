@@ -1,41 +1,82 @@
-name: Auto Deploy to AWS Lightsail
+# Deploys to the Lightsail box (static IP, systemd service `kalshi-bot`).
+#
+#  - Every push to main (i.e. when a PR is merged) tests, builds and deploys automatically.
+#  - Run manually from the Actions tab to redeploy main, or to deploy an existing release tag
+#    (v1.2.3) by entering it.
+#  - Rollback is one command on the server: `bash ~/bot/current/deploy/rollback.sh`.
+#
+# Switching to reviewed, tag-only deploys later (more secure): set the repository variable
+# AUTO_DEPLOY=false (Settings > Secrets and variables > Actions > Variables) and add required
+# reviewers to the `production` environment. See docs/DEPLOY.md.
+#
+# The server keeps its own ~/bot/bot.env (TRADING_MODE etc.); this workflow never changes trading
+# mode or credentials. A fresh server gets a paper-mode bot.env on first deploy.
+#
+# Required secrets: LIGHTSAIL_HOST, LIGHTSAIL_USERNAME, LIGHTSAIL_SSH_KEY (optional LIGHTSAIL_PORT).
+name: Deploy
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional: release tag to deploy instead of the current branch (e.g. v2.0.0)'
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
 
 jobs:
   deploy:
-    name: Build & Deploy to Lightsail Server
+    # Pushes deploy unless AUTO_DEPLOY is set to 'false'; manual runs always deploy.
+    if: github.event_name == 'workflow_dispatch' || vars.AUTO_DEPLOY != 'false'
     runs-on: ubuntu-latest
+    environment: production
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Validate tag format
+        if: inputs.tag != ''
+        run: |
+          [[ "${{ inputs.tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3"; exit 1; }
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag != '' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+
+      - name: Release name
+        id: rel
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else echo "name=main-$(date -u +%Y%m%d%H%M)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: 'npm'
 
-      - name: Install dependencies & Build
+      - name: Install (lockfile only), verify, build
         run: |
-          npm install
+          npm ci
+          npm run typecheck
+          npm test
           npm run build
+          echo "${{ steps.rel.outputs.name }}" > dist/RELEASE
 
-      - name: Copy build artifacts to Lightsail via SCP
+      - name: Upload release to server
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
           username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
-          source: "dist,package.json,package-lock.json"
-          target: "~/${{ secrets.LIGHTSAIL_APP_DIR || 'coinbaseTraderBot' }}"
+          source: "dist,web/dist,params,package.json,package-lock.json,deploy,vendor"
+          target: "~/releases/${{ steps.rel.outputs.name }}"
 
-      - name: Restart PM2 on Lightsail via SSH
+      - name: Activate release (keeps previous for rollback)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
@@ -44,15 +85,25 @@ jobs:
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
           script_stop: true
           script: |
-            cd ~/${{ secrets.LIGHTSAIL_APP_DIR || 'coinbaseTraderBot' }} || cd ~/coinbaseTraderBot
-
-            echo "=== Installing production dependencies ==="
-            npm install --omit=dev
-
-            echo "=== Restarting PM2 process ==="
-            pm2 delete crypto-bot 2>/dev/null || true
-            pm2 delete coinbaseTraderBot 2>/dev/null || true
-            NODE_ENV=production pm2 start dist/server.cjs --name "crypto-bot" --update-env
-            pm2 save
-
-            echo "=== Deployment successful and lightning fast! ==="
+            set -euo pipefail
+            cd ~/releases/${{ steps.rel.outputs.name }}
+            # Build tools for TA-Lib (compiled from vendor/talib on install) and python venv + git for
+            # tvdatafeed (deploy/tv_history.py); installed once, skipped when present.
+            if ! command -v g++ >/dev/null || ! command -v make >/dev/null || ! python3 -c 'import ensurepip' 2>/dev/null || ! command -v git >/dev/null; then
+              sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential python3 python3-venv git
+            fi
+            # Node 20+ (the bot targets 22); installed from NodeSource when missing or older.
+            if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 20 ]; then
+              curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
+            fi
+            # The previous bot ran under pm2 (crypto-bot) on the same port: stop it for good.
+            if command -v pm2 >/dev/null; then
+              pm2 delete crypto-bot 2>/dev/null || true
+              pm2 delete coinbaseTraderBot 2>/dev/null || true
+              pm2 save --force 2>/dev/null || true
+            fi
+            npm ci --omit=dev
+            bash deploy/activate.sh ~/releases/${{ steps.rel.outputs.name }}
+            # Keep the 5 newest releases (plus whatever current/previous point to).
+            keep="$(readlink ~/bot/current):$(readlink ~/bot/previous 2>/dev/null || true)"
+            ls -dt ~/releases/*/ | tail -n +6 | while read -r d; do d="${d%/}"; case ":$keep:" in *":$d:"*) ;; *) rm -rf "$d";; esac; done

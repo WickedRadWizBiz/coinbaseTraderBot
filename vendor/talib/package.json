@@ -1,0 +1,59 @@
+{
+  "author": "Mustafa Oransel",
+  "contributors": [
+    "Alfred Omega",
+    "Vedran Opacic",
+    "Kelvin Foo",
+    "Chris McGee",
+    "Marek Magdziak",
+    "hao-wang",
+    "Guido"
+  ],
+  "name": "talib",
+  "description": "Technical Analysis Library (vendored: prebuilt macOS objects removed so the TA-Lib C sources compile on install)",
+  "version": "2.0.5",
+  "funding": [
+    {
+      "type": "PayPal",
+      "url": "https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=AZDHC49PNM7MY&item_name=talib"
+    }
+  ],
+  "homepage": "https://github.com/oransel/node-talib",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oransel/node-talib.git"
+  },
+  "type": "commonjs",
+  "scripts": {
+    "install": "node ./src/lib/build.js && node-gyp configure && node-gyp build",
+    "clean": "node ./src/lib/clean.js",
+    "rebuild": "npm run clean && npm install",
+    "test": "node --test test/*.test.js",
+    "example": "node examples/adx.js"
+  },
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "import": "./index.mjs"
+    }
+  },
+  "dependencies": {
+    "nan": "^2.27.0"
+  },
+  "keywords": [
+    "talib",
+    "ta-lib",
+    "technical-analysis",
+    "stocks",
+    "stock-market",
+    "trading",
+    "indicators",
+    "finance",
+    "cryptocurrency",
+    "forex"
+  ],
+  "license": "LGPL-3.0-or-later"
+}

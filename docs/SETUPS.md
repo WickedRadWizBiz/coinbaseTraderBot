@@ -1,0 +1,238 @@
+# Setup trader: fast and slow lanes
+
+The perps trader works like a chart reader. It waits for a setup, checks the bigger picture and the time of day, and takes the trade only if the odds after costs are good. It then manages the trade: half off at the first target, stop to break-even, and the rest trailed.
+
+- **Fast lane (intraday / micro-swing):** 15-minute and 1-hour setups, held for hours. It catches one leg of a move, then flips, waits, or moves to another coin.
+- **Slow lane (days to weeks):** daily trend setups, reviewed at every daily close.
+
+Code: `bot/setups/`. Training and backtest: `research/trainSetupModel.ts`. Live: `bot/setups/setupTrader.ts`, turned on with `PERP_STRATEGY=setups` (the default).
+
+## Why it was rebuilt this way
+
+The TA network had been asked to call up or down every hour. That's not how TA makes money, and the research showed it (`docs/TA_NETWORK.md`, `research/classicTaStudy.ts`, `research/intradaySetupStudy.ts`, `research/setupMetaStudy.ts`):
+
+- The same textbook TA rules lose on hourly bars but beat buy-and-hold on daily bars.
+- TA trend trading wins only 25–45% of trades. It makes money because winners are several times larger than losers.
+- An intraday setup taken every time is break-even before costs. A model that reads the whole chart and picks which setups to take improved results in every setup type, on years it never saw. This is meta-labeling: the setup picks the side, and the model decides whether the trade is worth taking.
+
+## The setups (`bot/setups/detectors.ts`)
+
+| Lane | Setup | Bars | When | Exits |
+|---|---|---|---|---|
+| fast | **fade** | 15m, 1h | RSI overbought (≥ 70 in the last 3 bars, now turning down), the upper Bollinger band tagged, MACD histogram falling, a red bar with taker-buy share under 50% and falling → **short**. Mirror image → **long**. | Half off at the middle band (stop to break-even), the rest at the opposite band; 1.5-ATR trail after the first target; 24-bar time stop |
+| fast | **pullback** | 15m, 1h | Higher-timeframe trend up (SMA 20 > SMA 50 on 4× bars, close above SMA 50), a dip (RSI < 40 or the lower band tagged), then a green bar with buyers → **long**. Mirror → **short**. | Half off at 1R, the rest at 3R; trail after 1R; 24 bars |
+| slow | **breakout** | daily | Close beyond the prior 20-day high (low) with the 50/200-day trend agreeing | 3-ATR chandelier trail from the best close; 60-day time stop |
+| slow | **dip** | daily | Pullback in an established trend: above the 200-day SMA, 50 above 200, RSI back above 45 after dipping under it | Same trail; 60 days |
+
+Every stop sits beyond the structure: the extreme of the last 3 bars, plus 0.25 ATR for the fast lane.
+
+## Trade management (`bot/setups/exits.ts`)
+
+Inside each bar the checks run in a fixed order. When the order inside a bar can't be seen, it's resolved against us:
+
+1. **Stop.** A gap through the stop exits at the bar's open.
+2. **First target.** Half the position comes off, and the stop moves to break-even.
+3. **Final target.** The rest comes off.
+
+At each close of the trade's own timeframe:
+- the trailing stop follows the best close (it only ever tightens);
+- the time stop exits after a fixed number of bars. It also counts elapsed time, so gaps in the candles cannot keep a trade open.
+
+Costs come from the perps fees:
+- market entry: taker fee + 2 bp slippage;
+- target exits: maker fee;
+- stop and time exits: taker fee + slippage;
+- funding: charged both ways (conservative).
+
+The same code runs in the backtest (on 15-minute bars) and live (on the spot price, tick by tick).
+
+## What the model sees (`bot/setups/features.ts`, 785 inputs)
+
+- **The full TA library on 15m, 1h, 4h and daily:** RSI, MACD, ADX, Bollinger, Keltner squeeze, EMAs and SMAs, Ichimoku, Stochastic, Williams %R, OBV, CMF, MFI, volume profile, market structure, sweeps, breakouts, divergences, candle patterns, fair-value gaps, round numbers. It also sees the knowledge base's confluences and rule tallies.
+- **BTC's readings** on 15m and 1h.
+- **The market clock** (`bot/model/sessions.ts`):
+  - session: Asia, London, the London/New York overlap, New York, the after-hours gap, weekend;
+  - hours since the NYSE open, and the first 30 and 60 minutes;
+  - the 11:00 ET hour and the distance from 11:00;
+  - the last 30 minutes, and the hour after the close;
+  - pre-market and the 08:30 ET data releases;
+  - NYSE holidays and early closes;
+  - the London and Tokyo opens and the London close;
+  - the CME daily break and its weekend closure;
+  - the New York hour and weekday.
+
+  All of it is daylight-saving correct.
+- **The setup itself:** lane, type, timeframe, side, stop distance in ATRs, targets in R, and its trigger readings.
+- **Every directional reading again, multiplied by the trade's side.** "RSI high against my short" is therefore a separate signal from "RSI high".
+
+These are inputs, not rules. The model learns which times and conditions help or hurt each setup.
+
+### What the clock study found (`research/sessionStudy.ts`, 15m bars, 5 coins)
+
+Since the spot ETFs started (Jan 2024):
+
+- **US open, 09:30–10:30 ET:** volatility 1.9× the coin's normal level, the highest of the day.
+- **11:00–12:00 ET:** the next hour tends to **continue** the prior two hours (the most positive correlation of the day, +0.09). Fade setups lose there: −0.25% per trade before costs at 11:00, −0.17% at 11:30. So 11:00 matters, but as a bad time to fade, not as a reversal.
+- **15:30–16:00 ET (last 30 minutes):** only about 1.1× normal volatility in crypto, unlike stocks.
+- **17:30 ET:** the strongest reversal of the day (−0.25 correlation).
+- **Weekends:** about 0.8× normal volatility.
+
+## The lanes and the queue (`bot/setups/lanes.ts`)
+
+- **Queueing:** each detected setup the model rates at or above the lane's minimum score joins that lane's queue. A newer setup for the same coin replaces the older one. Candidates expire after 2 bars in the fast lane and 1 day in the slow lane.
+- **Re-check before entry:** when a lane has room, the queue is worked best-first, and every candidate is checked again right before entry:
+  - re-scored on fresh data;
+  - still at or above the minimum score;
+  - price not beyond the stop or the first target;
+  - not chased: no more than 0.3R (fast) or 0.5R (slow) toward the target since the signal.
+- **One position per coin.** The slow lane is served first; a fast candidate on a coin the slow lane holds waits in the queue.
+- **Sizing:** each trade risks a set share of equity between entry and stop (`SETUP_FAST_RISK` 0.4%, `SETUP_SLOW_RISK` 0.6%), or a fixed dollar amount (`SETUP_FAST_RISK_USD`, `SETUP_SLOW_RISK_USD`), scaled 0.5×–1.5× by the score. Caps: per coin (`SETUP_MAX_ASSET_LEVERAGE`), in total (`SETUP_MAX_LEVERAGE`), and half the exchange's leverage for the market (liquidation stays well beyond the stop).
+- **Worth taking:** with `SETUP_MIN_TARGET_USD`, a trade whose first target would pay less than that after the round-trip fee is skipped.
+
+## Training and validation (`npm run research:setups`)
+
+1. **History:** every setup in years of history for every coin, traded on its own with the real exits and costs. This gives about 100,000 fast-lane trades and 2,400 slow-lane trades.
+2. **Walk-forward scores:** half-year folds from 2020. Each fold's model learns only from trades that had closed before the fold started, then scores the fold.
+3. **Lane backtest** on those out-of-sample scores, with the real lane book: queues, re-checks, one position per coin, caps. Each lane's minimum score is picked from a 6-value grid on the development years only.
+4. **Validation:**
+   - The **holdout** (the 9 months before the last 3, never used for any choice) needs at least 30 trades and a mean net R above zero, with its bootstrap 5% bound also above zero.
+   - The **final window** (the last 3 months) must be net positive.
+   - The deployed model is refit on everything.
+
+A lane that fails trades at pilot size (`PERP_PILOT_MAX_NOTIONAL_USD`), or not at all with `PERP_REQUIRE_VALIDATION=true`.
+
+The automated pipeline retrains every `SETUP_RETRAIN_DAYS` (7). The live trader reloads the model when its file changes.
+
+## Results (first real-data run: Binance spot BTC/ETH/SOL/XRP/DOGE, 2017 – Oct 2026)
+
+**Costs assumed:** perps defaults, so market entry 14 bp (12 bp taker + 2 bp slippage), target exit 5 bp, stop exit 14 bp, and 1 bp funding per 8 hours. Dollar figures assume $10,000 of equity.
+
+**Setups taken every time** (no model):
+
+| Setup | Trades | Win rate | Net R per trade | Before costs | Costs in R | Median stop |
+|---|---|---|---|---|---|---|
+| 15m fade | 24,023 | 41.6% | −0.32 | −0.02 | 0.31 | 1.05% |
+| 15m pullback | 57,235 | 40.5% | −0.48 | +0.01 | 0.49 | 0.67% |
+| 1h fade | 6,494 | 43.7% | −0.23 | −0.06 | 0.17 | 1.94% |
+| 1h pullback | 15,117 | 48.1% | −0.21 | +0.02 | 0.23 | 1.40% |
+| 1d breakout | 1,453 | 39.0% | **+0.36** | +0.41 | 0.06 | 17% |
+| 1d dip | 910 | 30.2% | **+0.23** | +0.32 | 0.09 | 11% |
+
+The intraday setups are break-even before costs. With stops under 2% wide, a 0.28% round trip costs 0.2–0.5R per trade.
+
+**Lanes with the model** (walk-forward scores, the real lane book; fast threshold = the model's top 5%, slow = top 30%, both picked on 2020 – Sep 2025):
+
+| Lane | Period | Trades | Win rate | Net R per trade (90% interval) | Net $ | Sharpe |
+|---|---|---|---|---|---|---|
+| fast | 2020 – Sep 2025 | 1,995 | 53.3% | −0.05 (−0.09 to −0.02) | −$4,024 | −0.87 |
+| fast | holdout Oct 2025 – Jun 2026 | 219 | 47.5% | −0.08 (−0.17 to +0.02) | −$682 | −1.22 |
+| fast | final Jul – Sep 2026 | 100 | 46.0% | −0.19 (−0.34 to −0.05) | −$775 | −3.74 |
+| slow | 2020 – Sep 2025 | 165 | 35.8% | **+0.45 (+0.08 to +0.88)** | +$4,715 | 0.69 |
+| slow | holdout | 5 | 60% | +1.19 | +$393 | – |
+| slow | final | 4 | 0% | −0.72 | −$168 | – |
+
+- **Fast lane: not validated.** The model raises the win rate (42% → 53%) and cuts the loss per trade from −0.39R to −0.05R. That's real ranking skill, but not enough to cover costs. Limit-order entries (maker fee) didn't change the verdict (−0.07R on the holdout and final window).
+- **Slow lane: positive over 2020–2025** (daily breakouts +0.91R per trade on 64 trades). But 9 trades in a year can't pass a 30-trade holdout. It needs more coins or a longer holdout before it can validate.
+
+Both lanes therefore trade at pilot size on paper (`PERP_PILOT_MAX_NOTIONAL_USD`), which builds a live record without risking real size.
+
+
+### Update: momentum bursts and per-type selection
+
+Two changes. The fast lane gained the **momentum burst**: join a volatile move as it happens (a wide-range bar, a volume spike, one-sided taker flow, a breakout of the 20-bar range, the higher timeframe agreeing), trailed by 2.5 ATR from entry. And each setup type now gets its own on/off and score threshold, chosen on 2020 – Sep 2025 only (`research/momentumStudy.ts` has the burst study).
+
+**Chosen on the development years:**
+- Traded: **1h burst** (every one: 376 development trades, +$2,748 on $10k), **1d breakout** and **1d dip** (the model's top half).
+- Off, because even their best threshold lost in development: 15m burst, 15m fade, 15m pullback, 1h fade, 1h pullback.
+
+| Lane | Period | Trades | Win rate | Net R per trade (90% interval) | Net $ on $10k |
+|---|---|---|---|---|---|
+| fast (1h bursts) | 2020 – Sep 2025 | 228 | 41.7% | +0.11 (−0.04 to +0.29) | +$1,705 |
+| fast | holdout Oct 2025 – Jun 2026 | 53 | 39.6% | **+0.25** (−0.17 to +0.71) | +$277 |
+| fast | final Jul – Sep 2026 | 15 | 60.0% | **+0.15** (−0.25 to +0.56) | +$141 |
+| slow | 2020 – Sep 2025 | 200 | 36.5% | +0.48 (+0.09 to +0.97) | +$6,723 |
+| slow | holdout | 25 | 32.0% | +0.02 | +$167 |
+| slow | final | 5 | 0% | −0.70 | −$218 |
+
+- **Fast lane:** positive in every period, including the 12 months it never saw. With limit-order entries it's +0.28R. It isn't validated yet only because 68 trades are too few for the 5% lower bound to clear zero.
+- **Slow lane:** positive over 2020–25 but flat-to-negative over the last 12 months, on only 30 trades.
+- **At $5 risk per trade:** the fast lane's per-trade average is about +$0.55 to +$1.25. Bursts are rare, though: about one every 5–6 days across 5 coins.
+
+## Settings (`bot.env`)
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `PERP_STRATEGY` | `setups` | `setups` = this trader; `signal` = the older horizon-return trader |
+| `PERP_TRADING` | `paper` | `paper` simulates against live perp quotes; `live` sends real orders (needs `TRADING_MODE=live`); `off` disables directional trading |
+| `SETUP_MODEL_PATH` | `params/setup_model.json` | The scorer (the pipeline's promoted copy wins when present) |
+| `SETUP_FAST_RISK` / `SETUP_SLOW_RISK` | 0.004 / 0.006 | Equity at risk per trade |
+| `SETUP_FAST_MAX_POSITIONS` / `SETUP_SLOW_MAX_POSITIONS` | 3 / 3 | Open trades per lane |
+| `SETUP_MAX_LEVERAGE` / `SETUP_MAX_ASSET_LEVERAGE` | 3 / 1.5 | Notional caps as multiples of equity |
+| `SETUP_DAILY_GOAL_USD` | 100 | Shown on the dashboard next to today's realized P&L. It does not change how the bot trades: chasing a daily target makes traders overtrade. |
+| `SETUP_RETRAIN_DAYS` | 7 | Pipeline retraining interval |
+| `SETUP_FAST_RISK_USD` / `SETUP_SLOW_RISK_USD` | 0 | Fixed dollars at risk per trade (entry to stop) instead of a share of equity; 0 = use `SETUP_*_RISK` |
+| `SETUP_MIN_TARGET_USD` | 0 | Skip trades whose first target pays less than this after the round-trip fee (e.g. 2) |
+| `PERP_DAILY_LOSS_FRAC` | 0.10 | Perp daily loss stop: flatten and halt for the UTC day |
+| `PERP_PILOT_MAX_NOTIONAL_USD` | 25 | Size cap while a lane is unvalidated |
+
+The dashboard's perps panel (`trading`) shows both lanes: open trades with their stops and targets, the queues with scores, recent skips with reasons, recent trades, and today's P&L against the goal.
+
+
+### Update: per-side burst search
+
+`research/burstParamSearch.ts` searched every burst threshold and exit for longs and shorts separately: bar range, volume spike, taker flow, breakout lookback, the daily-trend rule, the ATR trail and the time stop. Each setting was ranked on 2020 – Jun 2025 and checked on Jul 2025 – Oct 2026.
+
+- **Longs:** all ten best tuning settings were also profitable on the test window (median +0.35R per trade). The bot now uses the top tuning setting: range ≥ 1.5 ATR, volume ≥ 1.5×, at least 55% of volume on the buy side, a 10-bar breakout, a 3.5-ATR trail and a 32-bar time stop. That gives 811 tuning trades at +0.23R and 221 test trades at +0.32R, against +0.13R in both windows for the old settings.
+- **Shorts:** the best tuning settings all lost on the test window (median −0.10R), so shorts keep their original thresholds plus the daily-trend rule (`BURST` in `bot/setups/detectors.ts`).
+- **Selection:** a setup type is now traded only with real evidence, meaning a development t-statistic of at least 1. With the looser long settings the 15m bursts scraped above zero (t 0.37), lost afterwards, and took position slots from the 1h bursts.
+
+| Fast lane (1h bursts) | Trades | Net R per trade (90% interval) | Net $ on $10k |
+|---|---|---|---|
+| 2020 – Sep 2025 | 560 | +0.23 (+0.07 to +0.40) | +$6,651 |
+| holdout Oct 2025 – Jun 2026 | 92 | +0.06 (−0.27 to +0.43) | +$42 |
+| final Jul – Sep 2026 | 39 | +0.90 (−0.24 to +2.35) | +$1,738 |
+
+That's about 0.3–0.4 trades a day. Across the last 12 months combined: 131 trades at about +0.31R, or +0.37R with limit-order entries. The lane is still not validated, because the holdout's 5% bound is below zero, so it trades at pilot size on paper.
+
+### Update: first sweep runs (`research/sweep.ts`)
+
+The coordinate-descent sweep tuned each burst setting in turn on 2020 – Jun 2024, checked it on Jul 2024 – Jun 2025, and kept the final window (Jul 2025 on) unseen until the end.
+
+- **Longs:** no single-setting change beat the current settings, so the sweep stopped after one pass. Final window: 221 trades at +0.32R.
+- **Shorts:** the sweep accepted a 10-bar breakout lookback instead of 20. The tuning window went from +0.27R to +0.32R and the check window from +0.13R to +0.15R. On the unseen final window, though, the result went from +0.10R (53 trades) to −0.01R (65 trades). **The change was not applied**, and shorts keep the 20-bar lookback. Tuning and check gains this small fall within the noise for about 60–80 trades.
+
+## Connected to the rest of the bot
+
+The setup trader used to stand alone. It now reads the TA network and the perps SNN, and its results feed the whole-bot replay.
+
+**TA network (history available, tested now)**
+- **Walk-forward forecasts:** the TA network's forecasts over the whole history come from a network that walks forward month by month. It trains on the trailing 12 months and forecasts the next month (`npm run research:ta-net-oos`, pipeline step `ta_net_oos`), so a setup's TA network inputs never saw the future.
+- **The same network live:** the live setup trader reads that walking network (`ta_net_wf.json`), so live inputs come from the same network the model was trained on. All three heads are passed through ungated; the setup model decides whether they count.
+- **Model inputs, only if they help:** P(up 1h), P(up 4h) and the 4h volatility forecast are setup-model inputs, plus copies oriented to the trade's side. The trainer runs the walk-forward twice, with and without them, and keeps them only if they improve the development years (t-statistic of net R per trade across both lanes). Otherwise they are blanked. The model file records the comparison (`groupChoice`), and the status page shows it under `inputs`.
+- **Volatility-scaled trail:** fast-lane trails can be multiplied by exp(k × the 4h volatility forecast), clamped to 0.67–1.5× (`VOL_ADAPT` in `bot/setups/detectors.ts`). The trail widens before an expected volatility expansion and tightens before a quiet spell. k is tuned by the `setups-vol` sweep and is off (0) unless the sweep proves it.
+
+**Perps SNN (no history, so it is measured as the recordings grow)**
+- **Journal:** every setup and trade is written to `data/setups/journal-YYYY-MM-DD.jsonl` with the SNN's 1h and 4h calls, their skill, and the TA network's forecast at that moment.
+- **Gate:** the pipeline's `setup_snn` step tests whether trades the SNN agreed with did better. Once at least 150 closed trades show that the trades it disagreed with lose money out of sample, it switches on an agreement gate, which the trader applies at entry. Until then it reports "collecting" (docs/AUTOMATION.md, section 8).
+
+**Whole-bot replay**
+- The trainer exports the last 24 months of traded setups with their walk-forward scores (`setup_oos.json`).
+- The whole-bot replay (`npm run research:whole-bot`) runs them through the lane book alongside the Kalshi backtester over the recorded days, from one pot of capital with one daily stop.
+- The `bot` sweep target tunes the shared settings on the combined daily P&L.
+
+### Update: first run with the TA network connected
+
+The walk-forward export covered May 2019 – Oct 2026: 88 months and 296,635 hourly forecasts.
+
+- **TA network inputs: kept, narrowly.** On the development years across both lanes, the model with them scored a t-statistic of 2.96 (792 trades, +0.24R) against 2.41 without (751 trades, +0.23R).
+- **Volatility trail: stays off.** The `setups-vol` sweep found no setting better than 0. With it off, tuning was +0.26R (702 trades), check +0.13R (242) and final +0.28R (274).
+- **Fast lane (1h bursts):**
+
+| Fast lane | Trades | Net R per trade (90% interval) | Net $ on $10k |
+|---|---|---|---|
+| 2020 – Sep 2025 | 671 | +0.19 (+0.06 to +0.32) | +$6,554 |
+| holdout Oct 2025 – Jun 2026 | 110 | +0.04 (−0.19 to +0.30) | +$422 |
+| final Jul – Sep 2026 | 38 | +1.06 (−0.12 to +2.58) | +$2,328 |
+
+- **What this means:** about the same as before the TA network was connected (holdout +0.06R on 92 trades, final +0.90R on 39). It is still not validated, because the holdout's lower bound is below zero, so the lane still trades at pilot size on paper. With limit-order entries, the last 12 months come to 148 trades at +0.37R (+0.02 to +0.80).
+- **Slow lane:** now trades only daily breakouts, at score ≥ 0.7. Development: 123 trades at +0.58R. Holdout and final: 13 trades, too few to judge.

@@ -1,20 +1,24 @@
-node_modules
 node_modules/
-node_modules/*
-node_modules/**
-coverage
+dist/
+build/
+web/dist/
+coverage/
 .DS_Store
 *.log
+
+# Secrets
 .env*
 !.env.example
+*.pem
+*.key
 
-# Build artifacts
-dist
-dist/
-build
-build/
+# Runtime state, recordings and audit logs never go in git
+data/
+research/out/
+params/model.candidate.json
+*.tmp
 
-# Dynamic bot states, memories, and logs
+# Legacy runtime files
 bot_memory.json
 bot_memory_db.json
 plasticity_memory.json
@@ -23,8 +27,10 @@ market-context.json
 recovery_protocol.json
 report.json
 retraining_history.json
-*.json.tmp
-*.tmp
-*.pdf
-temp.txt
-server_debug.txt
+audit_memory.json
+__pycache__/
+
+# TA-Lib native build outputs (compiled on install from vendor/talib)
+vendor/talib/build/
+vendor/talib/src/lib/temp/csr/*.o
+vendor/talib/src/lib/lib/*.a
