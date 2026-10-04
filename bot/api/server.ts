@@ -1,7 +1,7 @@
 // Operator API. Read-only by design:
 //  - Bound to loopback by default (reach it through an SSH tunnel/Tailscale).
-//  - Every /api route requires the bearer token (constant-time compare), with
-//    a lockout after repeated failures.
+//  - With DASHBOARD_PASSWORD set, every /api route requires it as the bearer (constant-time compare),
+//    with a lockout after repeated failures. Without one the dashboard is open (no login).
 //  - There is NO route to change settings, switch to live, write credentials,
 //    restart, or reset state. The only write actions are engaging the kill
 //    switch and resetting it (with an explicit confirmation phrase, and only
@@ -114,7 +114,9 @@ export function createApi(d: ApiDeps): express.Express {
   app.use(express.json({ limit: '4kb' }));
 
   const api = express.Router();
-  api.use(authMiddleware(d.cfg.dashboardToken));
+  // Unauthenticated: tells the web app whether to show the login screen.
+  api.get('/auth', (_req, res) => { res.json({ required: !!d.cfg.dashboardPassword }); });
+  if (d.cfg.dashboardPassword) api.use(authMiddleware(d.cfg.dashboardPassword));
 
   api.get('/status', (_req, res) => {
     const bankroll = d.engine.bankroll();

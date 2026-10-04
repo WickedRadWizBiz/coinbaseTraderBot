@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Brain, LayoutDashboard, LogOut, TerminalSquare } from 'lucide-react';
-import { getToken, setToken } from './api';
+import { authRequired, getToken, setToken } from './api';
 import { DashboardView } from './components/DashboardView';
 import { MetalBackground } from './components/MetalBackground';
 import { ModelView } from './components/ModelView';
@@ -58,13 +58,13 @@ function Login() {
         <div className="absolute inset-0 heavy-dither-overlay pointer-events-none" />
         <div className="relative z-10 flex flex-col gap-4">
           <h3 className="font-bold tracking-[0.2em] text-lg uppercase text-crypto-text border-b border-crypto-primary pb-2">&gt; Secure Access</h3>
-          <p className="text-xs opacity-80 normal-case">Enter the dashboard token (DASHBOARD_TOKEN). It is kept only for this browser tab.</p>
+          <p className="text-xs opacity-80 normal-case">Enter the dashboard password (DASHBOARD_PASSWORD). It is kept only for this browser tab.</p>
           <input
             type="password"
             autoComplete="off"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            placeholder="TOKEN"
+            placeholder="PASSWORD"
             className="crt-border bg-black/50 px-3 py-2 text-crypto-text outline-none focus:border-crypto-danger"
           />
           <button type="submit" className="mech-key self-start">Connect</button>
@@ -77,10 +77,15 @@ function Login() {
 export default function App() {
   const [view, setView] = useState<ViewType>('dashboard');
   const [token, setTok] = useState(getToken());
+  // null while checking; false = the bot has no password, so there is no login screen.
+  const [needLogin, setNeedLogin] = useState<boolean | null>(null);
   const isShaking = useTradeShake();
+  useEffect(() => { void authRequired().then(setNeedLogin); }, []);
+  const unlocked = needLogin === false || (needLogin === true && !!token);
 
   useEffect(() => {
-    const onChange = () => setTok(getToken());
+    // A rejected request clears the token: re-check (a password may have been set since the page loaded).
+    const onChange = () => { setTok(getToken()); void authRequired().then(setNeedLogin); };
     window.addEventListener('token_changed', onChange);
     return () => window.removeEventListener('token_changed', onChange);
   }, []);
@@ -115,7 +120,7 @@ export default function App() {
           </div>
           <nav className="flex flex-col gap-4 flex-1 mt-4" id="main-nav">
             {NAV.map((n) => navBtn(n.id, n.label, n.Icon))}
-            {token && (
+            {needLogin && token && (
               <button
                 onClick={() => setToken('')}
                 className="flex items-center gap-3 px-4 py-3 transition font-medium crt-border border border-crypto-danger/50 text-crypto-danger hover:bg-crypto-danger hover:text-white mt-auto font-bold uppercase tracking-widest text-xs"
@@ -140,7 +145,7 @@ export default function App() {
             <SystemLEDs />
           </header>
 
-          {!token ? <Login /> : (
+          {needLogin === null ? null : !unlocked ? <Login /> : (
             <>
               {view === 'dashboard' && <DashboardView />}
               {view === 'model' && <ModelView />}
@@ -150,7 +155,7 @@ export default function App() {
         </main>
       </div>
 
-      {token && (
+      {unlocked && (
         <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#121212]/95 backdrop-blur-md border-t border-crypto-primary/50 px-2 py-1.5 flex items-center justify-around shadow-[0_-4px_20px_rgba(0,0,0,0.9)]">
           {NAV.map(({ id, short, Icon }) => (
             <button

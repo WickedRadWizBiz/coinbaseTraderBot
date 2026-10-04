@@ -16,9 +16,9 @@ test('paper defaults are safe: loopback, demo, frozen', () => {
   assert.throws(() => { (c.risk as any).maxContractsPerOrder = 1e6; });
 });
 
-test('requires a strong dashboard token', () => {
-  assert.throws(() => loadConfig({}), ConfigError);
-  assert.throws(() => loadConfig({ DASHBOARD_TOKEN: 'short' }), ConfigError);
+test('dashboard login is optional (DASHBOARD_PASSWORD); no token needed', () => {
+  assert.equal(loadConfig({}).dashboardPassword, '');
+  assert.equal(loadConfig({ DASHBOARD_PASSWORD: ' pw ' }).dashboardPassword, 'pw');
 });
 
 test('refuses public bind unless explicitly allowed', () => {
