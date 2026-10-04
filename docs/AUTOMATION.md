@@ -219,6 +219,10 @@ Monday to Friday. That is six windows a day, four hours in all. The bot opens no
 - steps with their own time budgets (the TA network tournament, the walk-forward export) count paused time as
   elapsed, stop early and resume on a later run, since they save their progress.
 
+On weekends (no sessions) a due run starts at midnight New York time on Saturday or Sunday and runs
+unpaused until it finishes or the weekend ends (Tokyo opens Monday, Sunday 20:00 New York), after which the
+session-edge windows pace it again. Weekend trading is unaffected.
+
 The dashboard's auto-train status shows `paused` and the current or next window. `AUTO_TRAIN=daily` restores the
 old schedule (AUTO_TRAIN_HOUR_UTC, no pausing).
 

@@ -108,8 +108,9 @@ export function NeuralMapView() {
     return () => { ro.disconnect(); window.removeEventListener('resize', fit); document.removeEventListener('fullscreenchange', onFs); };
   }, []);
 
-  // Pixel pitch around 6 px.
-  const N = useMemo(() => Math.max(56, Math.min(160, Math.round(side / 6))), [side]);
+  // The same pixel grid on every screen: the pixels scale with the square (about 6 px on a desktop
+  // square, under 3 px on a phone).
+  const N = 128;
   const sections = useMemo(() => (data ? squareLayout(data, N) : []), [data, N]);
 
   useEffect(() => {
@@ -120,10 +121,10 @@ export function NeuralMapView() {
     cv.style.width = `${side}px`; cv.style.height = `${side}px`;
     const ctx = cv.getContext('2d');
     if (!ctx) return;
-    const pitch = side / N;
-    // Whole-pixel edges so neighbouring pixels meet exactly (no seams between them).
-    const edge = (k: number) => Math.round(k * pitch);
-    const byId = new Map(sections.map((s) => [s.b.id, s]));
+    const pitch = side / N, pitchD = pitch * dpr;
+    // Pixel edges on whole DEVICE pixels, so neighbouring pixels meet exactly (no seams) at any size.
+    const edgeD = (k: number) => Math.round(k * pitchD);
+    const edge = (k: number) => edgeD(k) / dpr;
     let raf = 0;
     const t0 = performance.now();
     // Glitch bursts: every few seconds a few horizontal strips tear sideways for a moment.
@@ -137,6 +138,7 @@ export function NeuralMapView() {
       ctx.fillStyle = '#020306'; ctx.fillRect(0, 0, side, side);
       // A pulse sweeping down the tiers (grid rows): the logic flowing toward the traders.
       const wave = ((t % 5) / 5) * (N + 20) - 10;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       for (const s of sections) {
         const { b } = s;
         let cur = shown.current.get(b.id);
@@ -157,41 +159,20 @@ export function NeuralMapView() {
             const lum = 0.55 + 0.45 * Math.sqrt(m) + pulse;
             ctx.fillStyle = `rgba(${Math.min(255, r * lum) | 0},${Math.min(255, g * lum) | 0},${Math.min(255, bl * lum) | 0},${Math.min(1, 0.2 + 0.9 * Math.sqrt(m) + pulse * 0.5)})`;
             const X = s.gx + gx, Y = s.gy + gy;
-            ctx.fillRect(edge(X), edge(Y), edge(X + 1) - edge(X), edge(Y + 1) - edge(Y));
+            ctx.fillRect(edgeD(X), edgeD(Y), edgeD(X + 1) - edgeD(X), edgeD(Y + 1) - edgeD(Y));
           }
         }
       }
-      // Signal packets travelling down each link (source section -> target section).
-      const sz = Math.max(2, pitch * 0.9);
-      for (const [a, c, st] of data.links) {
-        const A = byId.get(a), B = byId.get(c);
-        if (!A || !B) continue;
-        const x1 = (A.gx + A.gw / 2) * pitch, y1 = (A.gy + A.gh * 0.7) * pitch, x2 = (B.gx + B.gw / 2) * pitch, y2 = (B.gy + B.gh * 0.3) * pitch;
-        const k = st > 0.6 ? 2 : 1;
-        for (let j = 0; j < k; j++) {
-          const u = (t * (0.15 + 0.5 * st) + j / k + (a.length * 0.137 + c.length * 0.071)) % 1;
-          const e = u * u * (3 - 2 * u);
-          const [r, g, bl] = ramp(0.35 + 0.65 * st);
-          ctx.fillStyle = `rgba(${r | 0},${g | 0},${bl | 0},${0.45 + 0.5 * st})`;
-          ctx.fillRect(x1 + (x2 - x1) * e - sz / 2, y1 + (y2 - y1) * u - sz / 2, sz, sz);
-        }
-      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       // ---- CRT and glitch pass ----
       // Scanlines.
-      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.fillStyle = `rgba(0,0,0,${pitch < 4 ? 0.14 : 0.28})`;
       for (let y = 0; y < side; y += 3) ctx.fillRect(0, y, side, 1);
       // A slow electric-teal refresh band rolling down the screen.
       const roll = ((t * 0.18) % 1.3 - 0.15) * side;
       const rg = ctx.createLinearGradient(0, roll - 40, 0, roll + 40);
       rg.addColorStop(0, `rgba(${TEAL},0)`); rg.addColorStop(0.5, `rgba(${TEAL},0.07)`); rg.addColorStop(1, `rgba(${TEAL},0)`);
       ctx.fillStyle = rg; ctx.fillRect(0, roll - 40, side, 80);
-      // Stray pixels flashing.
-      for (let k = 0; k < 6; k++) {
-        if (Math.random() > 0.5) continue;
-        const X = Math.floor(Math.random() * N), Y = Math.floor(Math.random() * N);
-        ctx.fillStyle = Math.random() < 0.5 ? `rgba(${TEAL},0.95)` : 'rgba(255,255,255,0.9)';
-        ctx.fillRect(edge(X), edge(Y), edge(X + 1) - edge(X), edge(Y + 1) - edge(Y));
-      }
       // Tearing strips with cyan / magenta fringes.
       if (t > nextGlitch) {
         glitchUntil = t + 0.07 + Math.random() * 0.18; nextGlitch = t + 1.8 + Math.random() * 3.5;
