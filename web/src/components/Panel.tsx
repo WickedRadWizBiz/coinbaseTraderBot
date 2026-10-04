@@ -2,12 +2,13 @@ import type { ReactNode } from 'react';
 
 /**
  * CRT grid panel with dither overlay and a header rule, matching the original theme.
- * `scroll` keeps long content inside the card: it gets a fixed maximum height and its own scrollbar
- * (true = the default height; or pass a Tailwind max-height class such as "max-h-[300px]").
+ * Every card is a CRT screen of fixed size: `scroll` gives the body a fixed height (true = 420 px, or a
+ * Tailwind height class such as "h-[300px] md:h-[440px]") with its own scrollbar, so the card is the same
+ * size while loading, empty or full.
  */
 export function Panel({ title, right, children, className = '', bodyClass = '', flush = false, scroll }: { title?: ReactNode; right?: ReactNode; children: ReactNode; className?: string; bodyClass?: string; flush?: boolean; scroll?: boolean | string }) {
   return (
-    <div className={`crt-grid-panel relative overflow-hidden ${className}`}>
+    <div className={`crt-grid-panel crt-glass relative overflow-hidden ${className}`}>
       <div className="absolute inset-0 heavy-dither-overlay pointer-events-none" />
       <div className={`relative z-10 flex flex-col w-full ${bodyClass}`}>
         {title && (
@@ -16,8 +17,24 @@ export function Panel({ title, right, children, className = '', bodyClass = '', 
             {right}
           </h3>
         )}
-        {scroll ? <div className={`crt-scroll ${typeof scroll === 'string' ? scroll : 'max-h-[420px]'}`}>{children}</div> : children}
+        {scroll ? <div className={`crt-scroll ${typeof scroll === 'string' ? scroll : 'h-[420px]'}`}>{children}</div> : children}
       </div>
     </div>
   );
+}
+
+/**
+ * A fixed-size screen for cards that render their own panel: the same height before their data arrives
+ * (a CRT placeholder) and after (the card fills it and scrolls inside if needed).
+ */
+export function Screen({ size, loading, children }: { size: string; loading?: boolean; children?: ReactNode }) {
+  if (loading) {
+    return (
+      <div className={`crt-grid-panel crt-glass relative overflow-hidden flex items-center justify-center ${size}`}>
+        <div className="absolute inset-0 heavy-dither-overlay pointer-events-none" />
+        <span className="relative z-10 animate-pulse text-xs tracking-widest uppercase">Establishing link...</span>
+      </div>
+    );
+  }
+  return <div className={`screen-fill ${size}`}>{children}</div>;
 }

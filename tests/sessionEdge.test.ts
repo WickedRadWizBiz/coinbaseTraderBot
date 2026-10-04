@@ -47,7 +47,7 @@ test('entry guard: no new entries at a session edge (SESSION_EDGE_NO_ENTRY=false
 
 test('AUTO_TRAIN=windows (default): starts in the first window once a day is due, paused outside windows, resumed inside', async () => {
   const dir = tmpDir();
-  const cfg = loadConfig({ DATA_DIR: dir });
+  const cfg = loadConfig({ DATA_DIR: dir, AUTO_TRAIN_ON_MODEL_CHANGE: 'false' });
   assert.equal(cfg.autoTrain.mode, 'windows');
   const audit = tmpAudit();
   let now = at(2);
@@ -81,7 +81,7 @@ test('weekends: training starts at midnight New York time on Saturday and Sunday
   assert.equal(nextWeekendMidnight(sat(5)), Date.UTC(2026, 9, 11, 4), 'past Saturday\'s start hour -> Sunday midnight');
 
   const dir = tmpDir();
-  const cfg = loadConfig({ DATA_DIR: dir });
+  const cfg = loadConfig({ DATA_DIR: dir, AUTO_TRAIN_ON_MODEL_CHANGE: 'false' });
   const audit = tmpAudit();
   let now = Date.UTC(2026, 9, 9, 22);
   const engine = { model: { id: 'm' } } as unknown as Engine;
