@@ -26,8 +26,8 @@ fail() { echo "$1; rolling back"; diag; bash "$DIR/rollback.sh" || true; exit 1;
 echo "node $NODE_BIN ($("$NODE_BIN" -v)); unit: $(grep ^ExecStart /etc/systemd/system/kalshi-bot.service)"
 sleep 3
 # The dashboard must answer (any HTTP status, e.g. 401 without the token, means it is up).
-# Up to 90 s (a small instance loading the models can be slow); a crashed service fails at once.
-for i in $(seq 1 45); do
+# Up to 3 min (a small instance loading the models can be slow); a crashed service fails at once.
+for i in $(seq 1 90); do
   code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/status || true)"
   [ "$code" != "000" ] && break
   systemctl is-active --quiet kalshi-bot || [ "$(systemctl show -p SubState --value kalshi-bot)" = "auto-restart" ] || fail "service is not running"
