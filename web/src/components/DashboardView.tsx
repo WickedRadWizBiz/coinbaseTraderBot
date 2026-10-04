@@ -3,7 +3,7 @@ import { api, clock, pct, px, usd } from '../api';
 import { MarketSessionCard } from './MarketSessionCard';
 import { VaultCard } from './VaultCard';
 import { OrderBookMonitor } from './OrderBookMonitor';
-import { Panel } from './Panel';
+import { Panel, Screen } from './Panel';
 import { usePoll } from './usePoll';
 
 function Row({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: 'ok' | 'bad' | 'warn' }) {
@@ -18,6 +18,9 @@ function Row({ label, value, sub, tone }: { label: string; value: string; sub?: 
     </div>
   );
 }
+
+// Fixed screen sizes (phone / wider): cards keep their size while loading and when full.
+const BANNER = 'h-[164px] sm:h-[80px]';
 
 export function DashboardView() {
   const { data: s, error, refresh } = usePoll<any>('/status');
@@ -47,8 +50,10 @@ export function DashboardView() {
         <div className="crt-grid-panel p-3 border border-crypto-danger bg-crypto-danger/15 text-crypto-danger font-bold uppercase text-xs">Link error: {error}</div>
       )}
 
+      {!s && <Screen size={BANNER} loading />}
+
       {s?.kill?.engaged && (
-        <div className="crt-grid-panel p-4 border border-crypto-danger bg-crypto-danger/15 flex flex-col md:flex-row items-center justify-between gap-4">
+        <div className={`crt-grid-panel crt-glass p-4 border border-crypto-danger bg-crypto-danger/15 flex flex-col md:flex-row items-center justify-between gap-4 overflow-hidden ${BANNER}`}>
           <div className="flex items-center gap-3">
             <ShieldAlert className="w-6 h-6 text-crypto-danger animate-pulse shrink-0" />
             <div>
@@ -63,7 +68,7 @@ export function DashboardView() {
       )}
 
       {s && !s.kill?.engaged && (
-        <div className={`crt-grid-panel p-3 border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${
+        <div className={`crt-grid-panel crt-glass p-3 border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 overflow-hidden ${BANNER} ${
           s.haltReasons.length ? 'border-yellow-500/50 bg-yellow-500/10 text-yellow-300' : 'border-crypto-success/50 bg-crypto-success/10 text-crypto-success'
         }`}>
           <div className="flex items-center gap-2.5">
@@ -84,12 +89,14 @@ export function DashboardView() {
         </div>
       )}
 
-      {s?.session && <MarketSessionCard session={s.session} />}
+      <Screen size="h-[230px] sm:h-[150px]" loading={!s?.session}>{s?.session && <MarketSessionCard session={s.session} />}</Screen>
 
-      {s?.vault?.enabled && <VaultCard vault={s.vault} session={s.session} onChange={() => void refresh()} />}
+      {(!s || s.vault?.enabled) && (
+        <Screen size="h-[560px] sm:h-[390px]" loading={!s}>{s?.vault?.enabled && <VaultCard vault={s.vault} session={s.session} onChange={() => void refresh()} />}</Screen>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <Panel title="Capital & Risk" className="!p-0" bodyClass="h-full" flush>
+        <Panel title="Capital & Risk" className="!p-0" bodyClass="h-full" flush scroll="h-[300px] md:h-[440px]">
           {s ? (
             <div className="flex flex-col">
               <Row label="Daily PnL (net of fees)" value={usd(s.dailyPnl)} sub={`loss limit ${usd(-s.dailyLossLimit)}`} tone={s.dailyPnl < 0 ? 'bad' : 'ok'} />
@@ -101,7 +108,7 @@ export function DashboardView() {
           ) : <div className="p-6 animate-pulse">ESTABLISHING LINK...</div>}
         </Panel>
 
-        <Panel title="System Telemetry" className="!p-0" bodyClass="h-full" flush>
+        <Panel title="System Telemetry" className="!p-0" bodyClass="h-full" flush scroll="h-[470px] md:h-[440px]">
           {s ? (
             <div className="flex flex-col">
               <Row label="Model" value={s.model.id} sub={s.model.liveBlockers.length ? `not live-validated (${s.model.liveBlockers.length} blockers)` : 'validated for live'} tone={s.model.liveBlockers.length ? 'warn' : 'ok'} />
@@ -124,7 +131,7 @@ export function DashboardView() {
 
       <OrderBookMonitor markets={markets ?? []} orders={orders ?? []} />
 
-      <Panel title="Active Markets" scroll>
+      <Panel title="Active Markets" scroll="h-[340px]">
         <div className="overflow-x-auto">
           <table className="crt-table">
             <thead><tr><th>Ticker</th><th>Close</th><th>Spot</th><th>Strike</th><th>Fair value</th><th>Model p</th><th>Conf</th><th>Bid</th><th>Ask</th><th>Pos</th><th>State</th></tr></thead>
@@ -147,7 +154,7 @@ export function DashboardView() {
       </Panel>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <Panel title="Positions" scroll>
+        <Panel title="Positions" scroll="h-[340px]">
           <div className="overflow-x-auto">
             <table className="crt-table">
               <thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>If YES</th><th>If NO</th><th>Max loss</th></tr></thead>
@@ -177,7 +184,7 @@ export function DashboardView() {
           )}
         </Panel>
 
-        <Panel title="Order Flow" scroll>
+        <Panel title="Order Flow" scroll="h-[340px]">
           <div className="overflow-x-auto">
             <table className="crt-table">
               <thead><tr><th>Time</th><th>Ticker</th><th>Side</th><th>Px</th><th>Qty</th><th>Fill</th><th>Type</th><th>State</th></tr></thead>

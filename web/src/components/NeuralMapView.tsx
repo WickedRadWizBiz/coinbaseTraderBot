@@ -7,18 +7,12 @@ interface MapBlock { id: string; label: string; short: string; cols: number; cel
 interface MapLayer { id: string; label: string; blocks: MapBlock[] }
 interface NeuralMap { ts: number; layers: MapLayer[]; links: Array<[string, string, number]> }
 
-// Palettes (pixel colour = weight |value|, faint -> strong), switchable on the page:
-//   blend  65% the scattered-pixel palette (teal, green, yellow, orange, red, pink, magenta) and 35% the neon
-//          one (electric teal / cyan, neon green, acid yellow, amber, neon red, hot pink, magenta)
-//   soft   electric teal as the base tone, then yellow-greens, soft yellow and orange, pinks and magenta
-//   neon   full cyberpunk neon
-type PaletteId = 'blend' | 'soft' | 'neon';
-const PALETTES: Record<PaletteId, { label: string; stops: Array<[number, number, number]> }> = {
-  blend: { label: 'Blend 65/35', stops: [[13, 141, 133], [29, 222, 180], [98, 210, 146], [183, 212, 68], [244, 184, 39], [247, 113, 53], [246, 74, 111], [243, 83, 186], [217, 46, 245]] },
-  soft: { label: 'Teal + soft neon', stops: [[0, 58, 70], [0, 236, 214], [70, 238, 170], [160, 238, 80], [222, 240, 90], [255, 196, 92], [255, 128, 140], [255, 110, 196], [206, 72, 245]] },
-  neon: { label: 'Full neon', stops: [[0, 60, 72], [0, 255, 225], [0, 214, 255], [57, 255, 136], [230, 255, 0], [255, 159, 28], [255, 42, 85], [255, 46, 166], [217, 0, 255]] },
-};
-let RAMP: Array<[number, number, number]> = PALETTES.blend.stops;
+// Palette (pixel colour = weight |value|, faint -> strong): 65% "teal + soft neon" and 35% the 65/35 blend of
+// the scattered-pixel and neon palettes. Deep teal, electric teal, mint, yellow-green, soft yellow, peach,
+// coral pink, pink, magenta.
+const RAMP: Array<[number, number, number]> = [
+  [5, 87, 92], [10, 231, 202], [80, 228, 162], [168, 229, 76], [230, 220, 72], [252, 167, 78], [252, 109, 130], [251, 101, 192], [210, 63, 245],
+];
 const TEAL = '0,255,225', MAGENTA = '255,0,170';
 function ramp(x: number): [number, number, number] {
   const t = Math.max(0, Math.min(0.9999, x)) * (RAMP.length - 1);
@@ -67,19 +61,8 @@ function squareLayout(map: NeuralMap, N: number): Section[] {
   return out;
 }
 
-const PALETTE_KEY = 'neural-map-palette';
-function savedPalette(): PaletteId {
-  try { const v = localStorage.getItem(PALETTE_KEY); return v && v in PALETTES ? (v as PaletteId) : 'blend'; } catch { return 'blend'; }
-}
-
 export function NeuralMapView() {
   const { data, error } = usePoll<NeuralMap>('/neural-map', 3000);
-  const [palette, setPalette] = useState<PaletteId>(() => {
-    const q = new URLSearchParams(window.location.search).get('palette');
-    return q && q in PALETTES ? (q as PaletteId) : savedPalette();
-  });
-  RAMP = PALETTES[palette].stops;
-  const choosePalette = (p: PaletteId) => { setPalette(p); try { localStorage.setItem(PALETTE_KEY, p); } catch { /* ignore */ } };
   const screenRef = useRef<HTMLDivElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -132,6 +115,14 @@ export function NeuralMapView() {
     let bands: Array<{ y: number; h: number; dx: number }> = [];
     const vignette = ctx.createRadialGradient(side / 2, side / 2, side * 0.3, side / 2, side / 2, side * 0.75);
     vignette.addColorStop(0, 'rgba(0,0,0,0)'); vignette.addColorStop(1, 'rgba(0,0,0,0.55)');
+    // Halation (thick glass): the frame is shrunk onto two small canvases and laid back over itself with a
+    // 'screen' blend, which blurs it on the way up; every pixel's haze is proportional to its own brightness,
+    // so white labels bloom most and dark pixels barely.
+    const glowA = document.createElement('canvas'), glowB = document.createElement('canvas');
+    glowA.width = Math.max(1, Math.round(cv.width / 5)); glowA.height = Math.max(1, Math.round(cv.height / 5));
+    glowB.width = Math.max(1, Math.round(cv.width / 14)); glowB.height = Math.max(1, Math.round(cv.height / 14));
+    const ga = glowA.getContext('2d')!, gb = glowB.getContext('2d')!;
+    ga.imageSmoothingQuality = 'high'; gb.imageSmoothingQuality = 'high';
     const draw = (now: number) => {
       const t = (now - t0) / 1000;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -187,7 +178,6 @@ export function NeuralMapView() {
           ctx.fillStyle = `rgba(${MAGENTA},0.14)`; ctx.fillRect(0, g.y + g.h - 1, side, 1);
         }
       }
-      ctx.fillStyle = vignette; ctx.fillRect(0, 0, side, side);
 
       // Labels overlaid on each section.
       const font = Math.max(8, Math.min(12, pitch * 1.8));
@@ -216,6 +206,16 @@ export function NeuralMapView() {
         ctx.fillText(text, x + 9 + mk, y + 5.5, w - 16 - mk);
         if (showScore) { ctx.fillStyle = sc; ctx.fillText(scoreTxt, x + 9 + mk + tw + 8, y + 5.5); }
       }
+      // Halation, then the glass vignette.
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ga.clearRect(0, 0, glowA.width, glowA.height); ga.drawImage(cv, 0, 0, glowA.width, glowA.height);
+      gb.clearRect(0, 0, glowB.width, glowB.height); gb.drawImage(glowA, 0, 0, glowB.width, glowB.height);
+      ctx.globalCompositeOperation = 'screen';
+      ctx.globalAlpha = 0.26; ctx.drawImage(glowA, 0, 0, cv.width, cv.height);
+      ctx.globalAlpha = 0.16; ctx.drawImage(glowB, 0, 0, cv.width, cv.height);
+      ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = vignette; ctx.fillRect(0, 0, side, side);
       raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
@@ -261,17 +261,7 @@ export function NeuralMapView() {
             )}
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2 mt-3 text-[10px] uppercase tracking-widest">
-          <span className="opacity-70 mr-1">Palette</span>
-          {(Object.keys(PALETTES) as PaletteId[]).map((id) => (
-            <button key={id} onClick={() => choosePalette(id)}
-              className={`crt-border px-2 py-1 flex items-center gap-2 ${palette === id ? 'bg-crypto-danger text-white' : 'hover:bg-[#1a0208]'}`}>
-              <span className="inline-block h-2 w-10" style={{ background: `linear-gradient(90deg, ${PALETTES[id].stops.map((c) => `rgb(${c.join(',')})`).join(',')})` }} />
-              {PALETTES[id].label}
-            </button>
-          ))}
-        </div>
-        <div className="flex flex-wrap items-center gap-4 mt-2 text-[10px] uppercase tracking-widest">
+        <div className="flex flex-wrap items-center gap-4 mt-3 text-[10px] uppercase tracking-widest">
           <span className="flex items-center gap-2">weak
             <span className="inline-block h-2 w-40" style={{ background: `linear-gradient(90deg, ${RAMP.map((c) => `rgb(${c.join(',')})`).join(',')})` }} />strong</span>
           <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block" style={{ background: scoreColor(0.8) }} />performing</span>
@@ -280,13 +270,13 @@ export function NeuralMapView() {
           <span className="normal-case tracking-normal opacity-70">Top to bottom: feeds → indicator families → TA network → spiking networks → decision models → MLP → traders. Hover a section for details.</span>
         </div>
       </Panel>
-      {ranked.length > 0 && (
+      {(
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <Panel title="Leading" scroll="max-h-[260px]">
+          <Panel title="Leading" scroll="h-[260px]">
             {ranked.filter((b) => b.score! > 0).slice(0, 8).map((b) => <RankRow key={b.id} b={b} />)}
             {!ranked.some((b) => b.score! > 0) && <div className="opacity-60 text-xs">[NOTHING AHEAD YET]</div>}
           </Panel>
-          <Panel title="Lagging" scroll="max-h-[260px]">
+          <Panel title="Lagging" scroll="h-[260px]">
             {[...ranked].reverse().filter((b) => b.score! < 0).slice(0, 8).map((b) => <RankRow key={b.id} b={b} />)}
             {!ranked.some((b) => b.score! < 0) && <div className="opacity-60 text-xs">[NOTHING BEHIND]</div>}
           </Panel>

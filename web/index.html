@@ -63,6 +63,16 @@
     </style>
   </head>
   <body style="background-color: #05040a; color: #e6e0ff; margin: 0; min-height: 100vh;">
+    <!-- Halation (thick CRT glass): a blurred copy of the element, brightened by its own luminance, under the original. -->
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+      <filter id="halation" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="2.2" result="b1" />
+        <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="b2" />
+        <feComponentTransfer in="b1" result="g1"><feFuncA type="linear" slope="0.55" /></feComponentTransfer>
+        <feComponentTransfer in="b2" result="g2"><feFuncA type="linear" slope="0.3" /></feComponentTransfer>
+        <feMerge><feMergeNode in="g2" /><feMergeNode in="g1" /><feMergeNode in="SourceGraphic" /></feMerge>
+      </filter>
+    </svg>
     <div id="root">
       <div class="initial-loader">
         <div style="font-size: 14px; font-weight: 700; letter-spacing: 3px; color: #ff549a; text-transform: uppercase;">PREDICTIONS RUNNER</div>

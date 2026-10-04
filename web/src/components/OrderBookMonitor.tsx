@@ -103,7 +103,7 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
   const fmtSpot = (v: number | null | undefined) => (v === null || v === undefined ? '—' : v < 10 ? v.toFixed(4) : v.toFixed(2));
 
   return (
-    <div className="crt-grid-panel !p-0 flex flex-col overflow-hidden relative z-10 mt-2">
+    <div className="crt-grid-panel crt-glass !p-0 flex flex-col overflow-hidden relative z-10 mt-2">
       <div className="absolute inset-0 heavy-dither-overlay pointer-events-none" />
 
       {/* Market tabs (positions first) */}
@@ -138,15 +138,16 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
         )}
       </div>
 
-      <div className="p-6 flex flex-col gap-6 relative z-20">
+      {/* Fixed screen: the same size empty, loading or charting. */}
+      <div className="p-6 flex flex-col gap-6 relative z-20 h-[600px] sm:h-[480px] crt-scroll">
         {!tab ? (
-          <div className="h-40 flex flex-col items-center justify-center gap-3 border border-crypto-primary/30 bg-black/40 p-6 text-center">
+          <div className="h-full flex flex-col items-center justify-center gap-3 border border-crypto-primary/30 bg-black/40 p-6 text-center">
             <div className="w-3 h-3 bg-crypto-danger rounded-full animate-ping" />
             <span className="text-crypto-danger font-mono tracking-widest text-sm font-bold uppercase">[NOT TRADING ANY CONTRACT]</span>
             <span className="text-xs text-crypto-primary opacity-70 max-w-md">The depth monitor shows only contracts the bot holds or has an order working in. It fills in as soon as the bot trades.</span>
           </div>
         ) : loading && orderBook.length === 0 ? (
-          <div className="h-64 flex items-center justify-center">
+          <div className="h-full flex items-center justify-center">
             <span className="text-crypto-primary animate-pulse font-mono tracking-widest text-sm">INITIATING DEPTH STREAM...</span>
           </div>
         ) : (
