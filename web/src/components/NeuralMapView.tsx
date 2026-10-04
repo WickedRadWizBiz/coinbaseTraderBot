@@ -7,11 +7,18 @@ interface MapBlock { id: string; label: string; short: string; cols: number; cel
 interface MapLayer { id: string; label: string; blocks: MapBlock[] }
 interface NeuralMap { ts: number; layers: MapLayer[]; links: Array<[string, string, number]> }
 
-// Neon palette (cyberpunk / Blade Runner): pixel colour = weight (|value|), from deep teal through
-// electric teal and electric cyan (the base tone), neon green, acid yellow, amber, neon red and hot pink to magenta (strongest).
-const RAMP: Array<[number, number, number]> = [
-  [0, 60, 72], [0, 255, 225], [0, 214, 255], [57, 255, 136], [230, 255, 0], [255, 159, 28], [255, 42, 85], [255, 46, 166], [217, 0, 255],
-];
+// Palettes (pixel colour = weight |value|, faint -> strong), switchable on the page:
+//   blend  65% the scattered-pixel palette (teal, green, yellow, orange, red, pink, magenta) and 35% the neon
+//          one (electric teal / cyan, neon green, acid yellow, amber, neon red, hot pink, magenta)
+//   soft   electric teal as the base tone, then yellow-greens, soft yellow and orange, pinks and magenta
+//   neon   full cyberpunk neon
+type PaletteId = 'blend' | 'soft' | 'neon';
+const PALETTES: Record<PaletteId, { label: string; stops: Array<[number, number, number]> }> = {
+  blend: { label: 'Blend 65/35', stops: [[13, 141, 133], [29, 222, 180], [98, 210, 146], [183, 212, 68], [244, 184, 39], [247, 113, 53], [246, 74, 111], [243, 83, 186], [217, 46, 245]] },
+  soft: { label: 'Teal + soft neon', stops: [[0, 58, 70], [0, 236, 214], [70, 238, 170], [160, 238, 80], [222, 240, 90], [255, 196, 92], [255, 128, 140], [255, 110, 196], [206, 72, 245]] },
+  neon: { label: 'Full neon', stops: [[0, 60, 72], [0, 255, 225], [0, 214, 255], [57, 255, 136], [230, 255, 0], [255, 159, 28], [255, 42, 85], [255, 46, 166], [217, 0, 255]] },
+};
+let RAMP: Array<[number, number, number]> = PALETTES.blend.stops;
 const TEAL = '0,255,225', MAGENTA = '255,0,170';
 function ramp(x: number): [number, number, number] {
   const t = Math.max(0, Math.min(0.9999, x)) * (RAMP.length - 1);
@@ -60,8 +67,19 @@ function squareLayout(map: NeuralMap, N: number): Section[] {
   return out;
 }
 
+const PALETTE_KEY = 'neural-map-palette';
+function savedPalette(): PaletteId {
+  try { const v = localStorage.getItem(PALETTE_KEY); return v && v in PALETTES ? (v as PaletteId) : 'blend'; } catch { return 'blend'; }
+}
+
 export function NeuralMapView() {
   const { data, error } = usePoll<NeuralMap>('/neural-map', 3000);
+  const [palette, setPalette] = useState<PaletteId>(() => {
+    const q = new URLSearchParams(window.location.search).get('palette');
+    return q && q in PALETTES ? (q as PaletteId) : savedPalette();
+  });
+  RAMP = PALETTES[palette].stops;
+  const choosePalette = (p: PaletteId) => { setPalette(p); try { localStorage.setItem(PALETTE_KEY, p); } catch { /* ignore */ } };
   const screenRef = useRef<HTMLDivElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -262,7 +280,17 @@ export function NeuralMapView() {
             )}
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-4 mt-3 text-[10px] uppercase tracking-widest">
+        <div className="flex flex-wrap items-center gap-2 mt-3 text-[10px] uppercase tracking-widest">
+          <span className="opacity-70 mr-1">Palette</span>
+          {(Object.keys(PALETTES) as PaletteId[]).map((id) => (
+            <button key={id} onClick={() => choosePalette(id)}
+              className={`crt-border px-2 py-1 flex items-center gap-2 ${palette === id ? 'bg-crypto-danger text-white' : 'hover:bg-[#1a0208]'}`}>
+              <span className="inline-block h-2 w-10" style={{ background: `linear-gradient(90deg, ${PALETTES[id].stops.map((c) => `rgb(${c.join(',')})`).join(',')})` }} />
+              {PALETTES[id].label}
+            </button>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-4 mt-2 text-[10px] uppercase tracking-widest">
           <span className="flex items-center gap-2">weak
             <span className="inline-block h-2 w-40" style={{ background: `linear-gradient(90deg, ${RAMP.map((c) => `rgb(${c.join(',')})`).join(',')})` }} />strong</span>
           <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block" style={{ background: scoreColor(0.8) }} />performing</span>
