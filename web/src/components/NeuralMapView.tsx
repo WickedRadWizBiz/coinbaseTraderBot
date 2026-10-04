@@ -139,8 +139,7 @@ export function NeuralMapView() {
         // when it has more pixels than cells (no stretched pixels in the wide funnels).
         const n = b.cells.length;
         for (let gy = 0; gy < s.gh; gy++) {
-          const dz = (s.gy + gy - wave) / 5;
-          const pulse = Math.exp(-(dz * dz)) * (0.2 + 0.6 * b.activity);
+          const pulse = 0;
           for (let gx = 0; gx < s.gw; gx++) {
             // Scattered (stable) reuse of the cells, so repeats don't line up into stripes.
             const i = n ? ((Math.imul(gy + 1, 73856093) ^ Math.imul(gx + 1, 19349663)) >>> 0) % n : 0;
@@ -161,9 +160,22 @@ export function NeuralMapView() {
       for (let y = 0; y < side; y += 3) ctx.fillRect(0, y, side, 1);
       // A slow electric-teal refresh band rolling down the screen.
       const roll = ((t * 0.18) % 1.3 - 0.15) * side;
-      const rg = ctx.createLinearGradient(0, roll - 40, 0, roll + 40);
-      rg.addColorStop(0, `rgba(${TEAL},0)`); rg.addColorStop(0.5, `rgba(${TEAL},0.07)`); rg.addColorStop(1, `rgba(${TEAL},0)`);
-      ctx.fillStyle = rg; ctx.fillRect(0, roll - 40, side, 80);
+      // Rolling bands (the slow refresh roll and the faster pulse flowing down the tiers), about 10% opacity:
+      // a colour-burn layer across the whole band, and a colour-dodge layer masked to the centre of the
+      // gradient, so the middle of the band lifts the pixels while its edges deepen them.
+      const band = (y: number, half: number) => {
+        const burn = ctx.createLinearGradient(0, y - half, 0, y + half);
+        burn.addColorStop(0, `rgba(${TEAL},0)`); burn.addColorStop(0.5, `rgba(${TEAL},0.10)`); burn.addColorStop(1, `rgba(${TEAL},0)`);
+        ctx.globalCompositeOperation = 'color-burn';
+        ctx.fillStyle = burn; ctx.fillRect(0, y - half, side, 2 * half);
+        const dodge = ctx.createLinearGradient(0, y - half, 0, y + half);
+        dodge.addColorStop(0.32, `rgba(${TEAL},0)`); dodge.addColorStop(0.5, `rgba(${TEAL},0.10)`); dodge.addColorStop(0.68, `rgba(${TEAL},0)`);
+        ctx.globalCompositeOperation = 'color-dodge';
+        ctx.fillStyle = dodge; ctx.fillRect(0, y - half, side, 2 * half);
+        ctx.globalCompositeOperation = 'source-over';
+      };
+      band(roll, 40);
+      band((wave / N) * side, Math.max(18, side * 0.035));
       // Tearing strips with cyan / magenta fringes.
       if (t > nextGlitch) {
         glitchUntil = t + 0.07 + Math.random() * 0.18; nextGlitch = t + 1.8 + Math.random() * 3.5;
@@ -270,18 +282,20 @@ export function NeuralMapView() {
           <span className="normal-case tracking-normal opacity-70">Top to bottom: feeds → indicator families → TA network → spiking networks → decision models → MLP → traders. Hover a section for details.</span>
         </div>
       </Panel>
-      {(
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <Panel title="Leading" scroll="h-[260px]">
-            {ranked.filter((b) => b.score! > 0).slice(0, 8).map((b) => <RankRow key={b.id} b={b} />)}
+      <Panel title="Leading · Lagging">
+        <div className="grid grid-cols-2 h-[260px]">
+          <div className="crt-scroll pr-3 flex flex-col">
+            <div className="text-[10px] uppercase tracking-widest mb-1" style={{ color: scoreColor(0.8) }}>Leading</div>
+            {ranked.filter((b) => b.score! > 0).slice(0, 10).map((b) => <RankRow key={b.id} b={b} />)}
             {!ranked.some((b) => b.score! > 0) && <div className="opacity-60 text-xs">[NOTHING AHEAD YET]</div>}
-          </Panel>
-          <Panel title="Lagging" scroll="h-[260px]">
-            {[...ranked].reverse().filter((b) => b.score! < 0).slice(0, 8).map((b) => <RankRow key={b.id} b={b} />)}
+          </div>
+          <div className="crt-scroll pl-3 border-l border-crypto-primary/60 flex flex-col">
+            <div className="text-[10px] uppercase tracking-widest mb-1" style={{ color: scoreColor(-0.8) }}>Lagging</div>
+            {[...ranked].reverse().filter((b) => b.score! < 0).slice(0, 10).map((b) => <RankRow key={b.id} b={b} />)}
             {!ranked.some((b) => b.score! < 0) && <div className="opacity-60 text-xs">[NOTHING BEHIND]</div>}
-          </Panel>
+          </div>
         </div>
-      )}
+      </Panel>
     </div>
   );
 }
@@ -290,11 +304,11 @@ function RankRow({ b }: { b: MapBlock }) {
   const s = b.score ?? 0;
   return (
     <div className="flex items-center gap-2 text-[11px] py-1 border-b border-crypto-primary/20">
-      <span className="w-40 truncate text-crypto-text">{b.label}</span>
-      <div className="relative flex-1 h-2 bg-black/40 crt-border overflow-hidden">
+      <span className="flex-1 min-w-0 truncate text-crypto-text">{b.label}</span>
+      <div className="relative w-12 sm:w-24 shrink-0 h-2 bg-black/40 crt-border overflow-hidden">
         <div className="absolute h-full" style={{ width: `${Math.min(100, Math.abs(s) * 100)}%`, background: scoreColor(s) }} />
       </div>
-      <span className="w-10 text-right" style={{ color: scoreColor(s) }}>{s >= 0 ? '+' : ''}{(s * 100).toFixed(0)}</span>
+      <span className="w-9 shrink-0 text-right" style={{ color: scoreColor(s) }}>{s >= 0 ? '+' : ''}{(s * 100).toFixed(0)}</span>
     </div>
   );
 }
