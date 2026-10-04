@@ -111,7 +111,17 @@ async function main(): Promise<void> {
     }
   }
 
-  const signer = cfg.kalshiKeyId && cfg.kalshiPrivateKeyPath ? KalshiSigner.fromFile(cfg.kalshiKeyId, cfg.kalshiPrivateKeyPath) : undefined;
+  let signer: KalshiSigner | undefined;
+  if (cfg.kalshiKeyId && cfg.kalshiPrivateKeyPath) {
+    try {
+      signer = KalshiSigner.fromFile(cfg.kalshiKeyId, cfg.kalshiPrivateKeyPath);
+    } catch (e) {
+      // Paper trading does not need the key: keep running on public data rather than crash-looping.
+      if (cfg.mode === 'live') throw e;
+      log.error(`${(e as Error).message}; file ${cfg.kalshiPrivateKeyPath}. Paper trading continues without the key (anonymous REST polling, rate limited). Re-save the key file and restart the bot.`);
+      alerter.notify('warn', 'kalshi-key', `Kalshi private key at ${cfg.kalshiPrivateKeyPath} could not be read; running unsigned in paper mode`);
+    }
+  }
   const clock = new ClockSkewMonitor(cfg.clockSkewMaxMs || 2000, cfg.clockSkewWarnMs);
   const rest = new KalshiRest({ baseUrl: cfg.restBaseUrl, signer, subaccount: cfg.kalshiSubaccount, onServerDate: (d, s, r) => clock.observe(d, s, r) });
   const indexIds = Object.keys(cfg.indexIdMap);
