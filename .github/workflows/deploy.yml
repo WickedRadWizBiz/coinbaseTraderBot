@@ -78,7 +78,11 @@ jobs:
 
       - name: Activate release (keeps previous for rollback)
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          # Optional: repository secret DASHBOARD_PASSWORD turns on the dashboard login (empty = no login).
+          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
         with:
+          envs: DASHBOARD_PASSWORD
           host: ${{ secrets.LIGHTSAIL_HOST }}
           username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}

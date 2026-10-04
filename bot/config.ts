@@ -153,7 +153,8 @@ export interface Config {
   liveAllowUnvalidated: boolean;
   host: string;
   port: number;
-  dashboardToken: string;
+  /** DASHBOARD_PASSWORD: '' (default) = the dashboard opens without a login. */
+  dashboardPassword: string;
   dataDir: string;
   paramsPath: string;
   paperBankrollUsd: number;
@@ -580,10 +581,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
   const mode = oneOf<TradingMode>(env, 'TRADING_MODE', 'paper', ['paper', 'shadow', 'live']);
   const kalshiEnv = oneOf<KalshiEnv>(env, 'KALSHI_ENV', 'demo', ['demo', 'prod']);
 
-  const token = env.DASHBOARD_TOKEN ?? '';
-  if (token.length < 32) {
-    throw new ConfigError('DASHBOARD_TOKEN must be set to a random string of at least 32 characters (e.g. `openssl rand -hex 32`)');
-  }
+  // Optional dashboard password (empty = no login). DASHBOARD_TOKEN is no longer used.
+  const dashboardPassword = (env.DASHBOARD_PASSWORD ?? '').trim();
 
   const host = env.BIND_HOST ?? '127.0.0.1';
   const isLoopback = host === '127.0.0.1' || host === '::1' || host === 'localhost';
@@ -726,7 +725,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     liveAllowUnvalidated: bool(env, 'LIVE_ALLOW_UNVALIDATED_MODEL', false),
     host,
     port: num(env, 'PORT', 3000, 1, 65535),
-    dashboardToken: token,
+    dashboardPassword,
     dataDir,
     paramsPath: path.resolve(env.MODEL_PARAMS_PATH ?? './params/model.json'),
     // Starts in the aggressive tier; see SIZING_TIERS.
@@ -999,7 +998,7 @@ function checkKeyFile(p: string): void {
 
 /** Redacted view for logs and the dashboard. */
 export function publicConfig(cfg: Config): Record<string, unknown> {
-  const { dashboardToken, kalshiKeyId, kalshiPrivateKeyPath, alertTelegramToken, alertWebhookUrl, coingeckoApiKey, ...rest } = cfg;
+  const { dashboardPassword, kalshiKeyId, kalshiPrivateKeyPath, alertTelegramToken, alertWebhookUrl, coingeckoApiKey, ...rest } = cfg;
   return {
     ...rest,
     kalshiKeyId: kalshiKeyId ? `${kalshiKeyId.slice(0, 4)}…` : undefined,

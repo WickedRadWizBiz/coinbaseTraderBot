@@ -3,7 +3,7 @@
 ## How it works now (open on the static IP, auto-deploy)
 
 - **Every push to `main` deploys.** Opening a PR only runs CI (typecheck, tests, build). When the PR is merged, the **Deploy** workflow tests and builds again, uploads the release to the server and restarts the bot. No manual step.
-- The dashboard is at **http://54.145.7.203:3000/** (the Lightsail static IP). It asks for the dashboard token.
+- The dashboard is at **http://54.145.7.203:3000/** (the Lightsail static IP). It opens without a login, unless you set a dashboard password (below).
 - A bad release rolls itself back: if the service doesn't start, or the dashboard doesn't answer on port 3000 after the restart, the previous release is put back.
 - Each release lives in `~/releases/<name>` on the server (the 5 newest are kept). `~/bot/current` points at the live one.
 - Models, recordings and state are in `~/bot/data` and survive every deploy.
@@ -13,8 +13,15 @@
 1. **GitHub secrets** (repo Settings → Secrets and variables → Actions): `LIGHTSAIL_HOST` (`54.145.7.203`), `LIGHTSAIL_USERNAME` (`ubuntu`), `LIGHTSAIL_SSH_KEY` (the private key), and optionally `LIGHTSAIL_PORT`.
 2. **Lightsail firewall:** in the instance's Networking tab, add a TCP rule for port 3000 (the previous bot already had it).
 3. **Server needs** Node 22, and `ubuntu` must have passwordless `sudo` (the Lightsail default).
-4. Merge the PR. The first deploy creates `~/bot/bot.env` for you, in **paper** mode, with a fresh random dashboard token. Read it with:
-   `ssh ubuntu@54.145.7.203 grep DASHBOARD_TOKEN ~/bot/bot.env`
+4. Merge the PR. The first deploy creates `~/bot/bot.env` for you, in **paper** mode, with the dashboard open (no login).
+
+### Dashboard password (optional)
+
+Without a password, anyone who can reach port 3000 can see the dashboard and use the kill switch. To add a login, use either of these:
+- **From GitHub (no SSH):** add the repository secret `DASHBOARD_PASSWORD` (Settings → Secrets and variables → Actions). The next deploy writes it into `~/bot/bot.env`. Re-run the Deploy workflow from the Actions tab to apply it now.
+- **On the server:** add `DASHBOARD_PASSWORD=...` to `~/bot/bot.env`, then `sudo systemctl restart kalshi-bot`.
+
+To remove the login again, delete the secret *and* the line in `~/bot/bot.env`, then restart.
 
 If the old bot is running under the same `kalshi-bot` service name, the first deploy replaces it. Its `~/bot/bot.env` and `~/bot/data` are kept, and the new bot starts with them. If `~/bot/current` is a real directory instead of a link, move it aside once (`mv ~/bot/current ~/bot/old-current`) before the first deploy.
 
@@ -77,7 +84,7 @@ Each step is independent. Do as many as you like.
 2. **Restrict SSH** to your own IP in the Lightsail firewall.
 3. **Stop deploying on every push.** Set the repository **variable** `AUTO_DEPLOY` to `false`. Pushes then only run CI; deploys happen from Actions → Deploy → Run workflow with a release tag.
 4. **Require approval for deploys.** Settings → Environments → `production` → Required reviewers. Every deploy (automatic or manual) then waits for a reviewer.
-5. **Rotate the dashboard token** by editing `DASHBOARD_TOKEN` in `~/bot/bot.env` (at least 32 random characters, `openssl rand -hex 32`) and restarting.
+5. **Set a strong dashboard password** (`DASHBOARD_PASSWORD`, long and random, e.g. `openssl rand -hex 32`), see above.
 6. **Use a dedicated deploy key.** Create a separate SSH key just for deploys, and replace `LIGHTSAIL_SSH_KEY`.
 
 None of these needs a code change.

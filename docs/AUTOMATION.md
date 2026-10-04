@@ -132,7 +132,7 @@ Set `AUTO_TRAIN_PROMOTE=validated` once you want only models that passed their c
 
 | What you want | How |
 |---|---|
-| Run everything now (on the server) | `curl -X POST -H "Authorization: Bearer $DASHBOARD_TOKEN" http://127.0.0.1:3000/api/autotrain/run` |
+| Run everything now (on the server) | `curl -X POST http://127.0.0.1:3000/api/autotrain/run` (add `-H "Authorization: Bearer $DASHBOARD_PASSWORD"` when a password is set) |
 | Run just the SNN steps | same, with `-H 'Content-Type: application/json' -d '{"only":"snn"}'` (crypto and perps networks) |
 | See status, next run and last swap | `GET /api/autotrain`, or the **Auto-train** row on the Telemetry page |
 | Run it from a checkout | `npm run pipeline` (or `npm run pipeline -- --only snn,vol_model,fill`, or `--force-ablation`) |

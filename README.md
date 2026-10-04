@@ -409,7 +409,7 @@ These are rules for how much of the Kalshi cash the bot treats as its own to tra
 ```bash
 npm ci
 npm run check            # typecheck + tests
-cp .env.example .env     # set DASHBOARD_TOKEN=$(openssl rand -hex 32)
+cp .env.example .env     # optional: DASHBOARD_PASSWORD=... for a login
 npm run dev              # paper mode by default
 # dashboard: ssh -L 3000:127.0.0.1:3000 <host>, then http://localhost:3000
 ```

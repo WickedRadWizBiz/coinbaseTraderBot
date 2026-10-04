@@ -1,4 +1,5 @@
-// Authenticated API client. The token lives in sessionStorage for this tab only.
+// API client. When the bot has DASHBOARD_PASSWORD set, the password is sent as the bearer and kept in
+// sessionStorage for this tab only; without one the dashboard is open.
 const TOKEN_KEY = 'bot-console-token';
 
 export function getToken(): string {
@@ -11,6 +12,11 @@ export function setToken(t: string): void {
 }
 
 export class Unauthorized extends Error {}
+
+/** Whether the bot asks for a password (GET /api/auth needs no login). */
+export async function authRequired(): Promise<boolean> {
+  try { const r = await fetch('/api/auth'); return r.ok ? !!(await r.json()).required : true; } catch { return true; }
+}
 
 export async function api<T = any>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
