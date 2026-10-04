@@ -61,6 +61,55 @@ function squareLayout(map: NeuralMap, N: number): Section[] {
   return out;
 }
 
+// ---- Signal attraction ------------------------------------------------------------------------------
+// Pixels stay scattered, but a block's "agreeing" pixels (same sign as the block's overall reading,
+// strongest first) are pulled toward the edge point nearest the block it feeds, and the receiving
+// block's agreeing pixels gather at the matching point on its top edge, so bright seams line up along the
+// pipeline's real links. The pull is capped at PULL_CAP of the pixels right at the attractor (fading
+// with distance) and scales with the link's activity, so most of each block stays scattered.
+const PULL_CAP = 0.3;
+
+const hash01 = (a: number, b: number) => (((Math.imul(a + 7, 2654435761) ^ Math.imul(b + 13, 40503)) >>> 0) % 10007) / 10007;
+const scatterIndex = (gx: number, gy: number, n: number) => (n ? ((Math.imul(gy + 1, 73856093) ^ Math.imul(gx + 1, 19349663)) >>> 0) % n : 0);
+
+/** Slot -> cell index for every section (recomputed when the data or layout changes). */
+function attractionMaps(sections: Section[], links: NeuralMap['links']): Map<string, Int32Array> {
+  const byId = new Map(sections.map((s) => [s.b.id, s]));
+  const out = new Map<string, Int32Array>();
+  for (const s of sections) {
+    const n = s.b.cells.length, slots = s.gw * s.gh;
+    const map = new Int32Array(slots);
+    for (let gy = 0; gy < s.gh; gy++) for (let gx = 0; gx < s.gw; gx++) map[gy * s.gw + gx] = scatterIndex(gx, gy, n);
+    // Attractor points: toward the strongest block it feeds (bottom edge) and from the strongest feeding it (top edge).
+    const pts: Array<{ x: number; y: number; w: number }> = [];
+    const best = (cands: Array<[Section, number]>) => cands.sort((a, b) => b[1] - a[1])[0];
+    const down = best(links.filter(([a, c]) => a === s.b.id && (byId.get(c)?.gy ?? -1) > s.gy).map(([, c, w]) => [byId.get(c)!, w] as [Section, number]));
+    const up = best(links.filter(([a, c]) => c === s.b.id && (byId.get(a)?.gy ?? 1e9) < s.gy).map(([a, , w]) => [byId.get(a)!, w] as [Section, number]));
+    const at = (o: Section) => Math.max(0, Math.min(s.gw - 1, Math.round(o.gx + o.gw / 2 - s.gx)));
+    if (down) pts.push({ x: at(down[0]), y: s.gh - 1, w: down[1] });
+    if (up) pts.push({ x: at(up[0]), y: 0, w: up[1] });
+    if (!pts.length || !n) { out.set(s.b.id, map); continue; }
+    // Agreeing cells, strongest first.
+    const mean = s.b.cells.reduce((a, v) => a + v, 0);
+    const agree = s.b.cells.map((v, i) => [i, Math.sign(v) === Math.sign(mean) || mean === 0 ? Math.abs(v) : 0] as [number, number]).filter(([, a]) => a > 0.05).sort((a, b) => b[1] - a[1]);
+    if (!agree.length) { out.set(s.b.id, map); continue; }
+    const R = Math.max(4, Math.max(s.gw, s.gh) * 0.6);
+    const slotInfo: Array<{ k: number; d: number; w: number }> = [];
+    for (let gy = 0; gy < s.gh; gy++) for (let gx = 0; gx < s.gw; gx++) {
+      let d = Infinity, w = 0;
+      for (const p of pts) { const dd = Math.hypot(gx - p.x, (gy - p.y) * 1.4); if (dd < d) { d = dd; w = p.w; } }
+      slotInfo.push({ k: gy * s.gw + gx, d, w });
+    }
+    slotInfo.sort((a, b) => a.d - b.d);
+    slotInfo.forEach((si, rank) => {
+      const p = PULL_CAP * Math.max(0.25, Math.min(1, si.w)) * Math.max(0, 1 - si.d / R);
+      if (p > 0 && hash01(si.k, s.gx * 131 + s.gy) < p) map[si.k] = agree[rank % agree.length][0];
+    });
+    out.set(s.b.id, map);
+  }
+  return out;
+}
+
 export function NeuralMapView() {
   const { data, error } = usePoll<NeuralMap>('/neural-map', 3000);
   const screenRef = useRef<HTMLDivElement>(null);
@@ -95,6 +144,9 @@ export function NeuralMapView() {
   // square, under 3 px on a phone).
   const N = 128;
   const sections = useMemo(() => (data ? squareLayout(data, N) : []), [data, N]);
+  const pull = useMemo(() => (data ? attractionMaps(sections, data.links) : new Map<string, Int32Array>()), [sections, data]);
+  // Displayed value per screen pixel, eased, so pixels that move under the attraction fade rather than jump.
+  const slotShown = useRef(new Map<string, Float32Array>());
 
   useEffect(() => {
     const cv = canvasRef.current;
@@ -138,13 +190,19 @@ export function NeuralMapView() {
         // Every screen pixel gets its own value: the section reads the block's cells in order, wrapping
         // when it has more pixels than cells (no stretched pixels in the wide funnels).
         const n = b.cells.length;
+        const map = pull.get(b.id);
+        let ss = slotShown.current.get(b.id);
+        if (!ss || ss.length !== s.gw * s.gh) { ss = new Float32Array(s.gw * s.gh).fill(-1); slotShown.current.set(b.id, ss); }
         for (let gy = 0; gy < s.gh; gy++) {
           const pulse = 0;
           for (let gx = 0; gx < s.gw; gx++) {
-            // Scattered (stable) reuse of the cells, so repeats don't line up into stripes.
-            const i = n ? ((Math.imul(gy + 1, 73856093) ^ Math.imul(gx + 1, 19349663)) >>> 0) % n : 0;
+            // Scattered (stable) reuse of the cells, with the signal attraction mixed in (see attractionMaps).
+            const k = gy * s.gw + gx;
+            const i = map ? map[k] : scatterIndex(gx, gy, n);
             const shimmer = 1 + 0.2 * b.activity * Math.sin(t * 2.6 + (s.gx + gx) * 1.31 + (s.gy + gy) * 0.77);
-            const m = Math.min(1, Math.abs(cur[i] ?? 0) * shimmer);
+            const target = Math.min(1, Math.abs(cur[i] ?? 0) * shimmer);
+            ss[k] = ss[k] < 0 ? target : ss[k] + (target - ss[k]) * 0.08;
+            const m = ss[k];
             const [r, g, bl] = ramp(m);
             const lum = 0.55 + 0.45 * Math.sqrt(m) + pulse;
             ctx.fillStyle = `rgba(${Math.min(255, r * lum) | 0},${Math.min(255, g * lum) | 0},${Math.min(255, bl * lum) | 0},${Math.min(1, 0.2 + 0.9 * Math.sqrt(m) + pulse * 0.5)})`;
