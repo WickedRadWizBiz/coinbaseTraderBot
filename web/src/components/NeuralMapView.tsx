@@ -7,16 +7,18 @@ interface MapBlock { id: string; label: string; short: string; cols: number; cel
 interface MapLayer { id: string; label: string; blocks: MapBlock[] }
 interface NeuralMap { ts: number; layers: MapLayer[]; links: Array<[string, string, number]> }
 
-// Pixel colour = weight (|value|): teal (faint) -> green -> yellow -> orange -> red -> pink -> magenta (strongest).
+// Neon palette (cyberpunk / Blade Runner): pixel colour = weight (|value|), from deep teal through
+// electric teal and electric cyan (the base tone), neon green, acid yellow, amber, neon red and hot pink to magenta (strongest).
 const RAMP: Array<[number, number, number]> = [
-  [20, 184, 166], [52, 211, 153], [250, 204, 21], [251, 146, 60], [239, 68, 68], [244, 114, 182], [217, 70, 239],
+  [0, 60, 72], [0, 255, 225], [0, 214, 255], [57, 255, 136], [230, 255, 0], [255, 159, 28], [255, 42, 85], [255, 46, 166], [217, 0, 255],
 ];
+const TEAL = '0,255,225', MAGENTA = '255,0,170';
 function ramp(x: number): [number, number, number] {
   const t = Math.max(0, Math.min(0.9999, x)) * (RAMP.length - 1);
   const i = Math.floor(t), f = t - i, a = RAMP[i], b = RAMP[i + 1];
   return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
 }
-const scoreColor = (s: number | null) => (s === null ? 'rgba(160,160,170,0.6)' : s >= 0 ? `rgba(52,211,153,${0.5 + 0.5 * Math.min(1, s)})` : `rgba(239,68,68,${0.5 + 0.5 * Math.min(1, -s)})`);
+const scoreColor = (s: number | null) => (s === null ? 'rgba(150,160,175,0.65)' : s >= 0 ? `rgba(57,255,136,${0.55 + 0.45 * Math.min(1, s)})` : `rgba(255,42,85,${0.55 + 0.45 * Math.min(1, -s)})`);
 
 // ---- Square layout -------------------------------------------------------------------------------
 // The map is one square screen of N x N equal pixels. Tiers are horizontal bands, top to bottom in the
@@ -106,10 +108,15 @@ export function NeuralMapView() {
     const byId = new Map(sections.map((s) => [s.b.id, s]));
     let raf = 0;
     const t0 = performance.now();
+    // Glitch bursts: every few seconds a few horizontal strips tear sideways for a moment.
+    let glitchUntil = 0, nextGlitch = 1.5 + Math.random() * 2;
+    let bands: Array<{ y: number; h: number; dx: number }> = [];
+    const vignette = ctx.createRadialGradient(side / 2, side / 2, side * 0.3, side / 2, side / 2, side * 0.75);
+    vignette.addColorStop(0, 'rgba(0,0,0,0)'); vignette.addColorStop(1, 'rgba(0,0,0,0.55)');
     const draw = (now: number) => {
       const t = (now - t0) / 1000;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = '#050308'; ctx.fillRect(0, 0, side, side);
+      ctx.fillStyle = '#020306'; ctx.fillRect(0, 0, side, side);
       // A pulse sweeping down the tiers (grid rows): the logic flowing toward the traders.
       const wave = ((t % 5) / 5) * (N + 20) - 10;
       for (const s of sections) {
@@ -151,14 +158,46 @@ export function NeuralMapView() {
           ctx.fillRect(x1 + (x2 - x1) * e - sz / 2, y1 + (y2 - y1) * u - sz / 2, sz, sz);
         }
       }
-      // Frames (performance) and labels overlaid on each section.
+      // ---- CRT and glitch pass ----
+      // Scanlines.
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      for (let y = 0; y < side; y += 3) ctx.fillRect(0, y, side, 1);
+      // A slow electric-teal refresh band rolling down the screen.
+      const roll = ((t * 0.18) % 1.3 - 0.15) * side;
+      const rg = ctx.createLinearGradient(0, roll - 40, 0, roll + 40);
+      rg.addColorStop(0, `rgba(${TEAL},0)`); rg.addColorStop(0.5, `rgba(${TEAL},0.07)`); rg.addColorStop(1, `rgba(${TEAL},0)`);
+      ctx.fillStyle = rg; ctx.fillRect(0, roll - 40, side, 80);
+      // Stray pixels flashing.
+      for (let k = 0; k < 6; k++) {
+        if (Math.random() > 0.5) continue;
+        const X = Math.floor(Math.random() * N), Y = Math.floor(Math.random() * N);
+        ctx.fillStyle = Math.random() < 0.5 ? `rgba(${TEAL},0.95)` : 'rgba(255,255,255,0.9)';
+        ctx.fillRect(edge(X), edge(Y), edge(X + 1) - edge(X), edge(Y + 1) - edge(Y));
+      }
+      // Tearing strips with cyan / magenta fringes.
+      if (t > nextGlitch) {
+        glitchUntil = t + 0.07 + Math.random() * 0.18; nextGlitch = t + 1.8 + Math.random() * 3.5;
+        bands = Array.from({ length: 2 + Math.floor(Math.random() * 4) }, () => ({ y: Math.random() * side, h: 3 + Math.random() * side * 0.05, dx: (Math.random() < 0.5 ? -1 : 1) * (3 + Math.random() * 18) }));
+      }
+      if (t < glitchUntil) {
+        for (const g of bands) {
+          const sy = Math.max(0, Math.round(g.y * dpr)), sh = Math.max(1, Math.round(g.h * dpr));
+          if (sy + sh > cv.height) continue;
+          ctx.drawImage(cv, 0, sy, cv.width, sh, g.dx, g.y, side, g.h);
+          ctx.fillStyle = `rgba(${TEAL},0.16)`; ctx.fillRect(g.dx > 0 ? 0 : side + g.dx, g.y, Math.abs(g.dx), g.h);
+          ctx.fillStyle = `rgba(${MAGENTA},0.14)`; ctx.fillRect(0, g.y + g.h - 1, side, 1);
+        }
+      }
+      ctx.fillStyle = vignette; ctx.fillRect(0, 0, side, side);
+
+      // Labels overlaid on each section.
       const font = Math.max(8, Math.min(12, pitch * 1.8));
       ctx.font = `bold ${font}px monospace`; ctx.textBaseline = 'top'; ctx.textAlign = 'left';
       for (const s of sections) {
         const x = edge(s.gx), y = edge(s.gy), w = edge(s.gx + s.gw) - x, h = edge(s.gy + s.gh) - y;
         const sc = scoreColor(s.b.score);
         // No frames between sections; only the one under the pointer is outlined.
-        if (hover?.s.b.id === s.b.id) { ctx.strokeStyle = 'rgba(236,230,255,0.9)'; ctx.lineWidth = 2; ctx.strokeRect(x + 1, y + 1, w - 2, h - 2); }
+        if (hover?.s.b.id === s.b.id) { ctx.strokeStyle = `rgba(${TEAL},0.95)`; ctx.lineWidth = 2; ctx.strokeRect(x + 1, y + 1, w - 2, h - 2); }
         const long = s.b.label.toUpperCase();
         const text = ctx.measureText(long).width + 12 < w ? long : s.b.short;
         const scoreTxt = s.b.score === null ? '' : `${s.b.score >= 0 ? '+' : ''}${Math.round(s.b.score * 100)}`;
@@ -167,11 +206,14 @@ export function NeuralMapView() {
         const showScore = !!scoreTxt && tw + sw + 22 < w;
         // Label chip: a marker in the performance colour, the name, the score.
         const mk = font - 2;
-        ctx.fillStyle = 'rgba(5,3,8,0.8)';
+        ctx.fillStyle = 'rgba(2,6,10,0.82)';
         ctx.fillRect(x + 3, y + 3, mk + 6 + tw + 8 + (showScore ? sw + 8 : 0), font + 5);
         ctx.fillStyle = sc;
         ctx.fillRect(x + 6, y + 6.5, mk, mk);
-        ctx.fillStyle = 'rgba(236,230,255,0.95)';
+        // Chromatic label: magenta and cyan ghosts under teal-white text.
+        ctx.fillStyle = `rgba(${MAGENTA},0.55)`; ctx.fillText(text, x + 9 + mk - 1, y + 5.5, w - 16 - mk);
+        ctx.fillStyle = `rgba(${TEAL},0.55)`; ctx.fillText(text, x + 9 + mk + 1, y + 5.5, w - 16 - mk);
+        ctx.fillStyle = 'rgba(214,255,250,0.96)';
         ctx.fillText(text, x + 9 + mk, y + 5.5, w - 16 - mk);
         if (showScore) { ctx.fillStyle = sc; ctx.fillText(scoreTxt, x + 9 + mk + tw + 8, y + 5.5); }
       }
@@ -205,7 +247,7 @@ export function NeuralMapView() {
         }>
         {error && <div className="text-crypto-danger text-xs mb-2">Link error: {error}</div>}
         <div ref={wrapRef} className="w-full flex justify-center">
-          <div ref={screenRef} className="relative bg-[#050308] flex items-center justify-center" style={full ? { width: '100vw', height: '100vh' } : { width: side, height: side }}>
+          <div ref={screenRef} className="relative bg-[#020306] flex items-center justify-center" style={full ? { width: '100vw', height: '100vh' } : { width: side, height: side, boxShadow: '0 0 0 1px rgba(0,255,225,0.55), 0 0 24px rgba(0,255,225,0.25), 0 0 60px rgba(255,0,170,0.12)' }}>
             {!data ? <div className="text-center animate-pulse">MAPPING NETWORKS...</div> : (
               <canvas ref={canvasRef} onMouseMove={onMove} onMouseLeave={() => setHover(null)} onClick={onMove} className="block" />
             )}
