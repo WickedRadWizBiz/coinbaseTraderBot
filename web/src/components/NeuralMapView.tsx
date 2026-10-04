@@ -45,14 +45,15 @@ function squareLayout(map: NeuralMap, N: number): Section[] {
     const nRows = Math.ceil(L.blocks.length / MAX_ACROSS), per = Math.ceil(L.blocks.length / nRows);
     for (let r = 0; r < nRows; r++) rows.push({ layer: L.id, blocks: L.blocks.slice(r * per, (r + 1) * per) });
   }
-  const heights = split(N - (rows.length - 1), rows.map((r) => TIER_WEIGHT[r.layer] ?? 1));
+  // No gutters: tiers and sections butt against each other, one continuous screen of pixels.
+  const heights = split(N, rows.map((r) => TIER_WEIGHT[r.layer] ?? 1));
   const out: Section[] = [];
   let gy = 0;
   rows.forEach((r, ri) => {
-    const widths = split(N - (r.blocks.length - 1), r.blocks.map(() => 1));
+    const widths = split(N, r.blocks.map(() => 1));
     let gx = 0;
-    r.blocks.forEach((b, bi) => { out.push({ b, gx, gy, gw: widths[bi], gh: heights[ri] }); gx += widths[bi] + 1; });
-    gy += heights[ri] + 1;
+    r.blocks.forEach((b, bi) => { out.push({ b, gx, gy, gw: widths[bi], gh: heights[ri] }); gx += widths[bi]; });
+    gy += heights[ri];
   });
   return out;
 }
@@ -99,7 +100,9 @@ export function NeuralMapView() {
     cv.style.width = `${side}px`; cv.style.height = `${side}px`;
     const ctx = cv.getContext('2d');
     if (!ctx) return;
-    const pitch = side / N, gap = pitch > 4 ? 1 : 0;
+    const pitch = side / N;
+    // Whole-pixel edges so neighbouring pixels meet exactly (no seams between them).
+    const edge = (k: number) => Math.round(k * pitch);
     const byId = new Map(sections.map((s) => [s.b.id, s]));
     let raf = 0;
     const t0 = performance.now();
@@ -121,13 +124,15 @@ export function NeuralMapView() {
           const dz = (s.gy + gy - wave) / 5;
           const pulse = Math.exp(-(dz * dz)) * (0.2 + 0.6 * b.activity);
           for (let gx = 0; gx < s.gw; gx++) {
-            const i = n ? (gy * s.gw + gx + gy * 7) % n : 0;
+            // Scattered (stable) reuse of the cells, so repeats don't line up into stripes.
+            const i = n ? ((Math.imul(gy + 1, 73856093) ^ Math.imul(gx + 1, 19349663)) >>> 0) % n : 0;
             const shimmer = 1 + 0.2 * b.activity * Math.sin(t * 2.6 + (s.gx + gx) * 1.31 + (s.gy + gy) * 0.77);
             const m = Math.min(1, Math.abs(cur[i] ?? 0) * shimmer);
             const [r, g, bl] = ramp(m);
             const lum = 0.55 + 0.45 * Math.sqrt(m) + pulse;
             ctx.fillStyle = `rgba(${Math.min(255, r * lum) | 0},${Math.min(255, g * lum) | 0},${Math.min(255, bl * lum) | 0},${Math.min(1, 0.2 + 0.9 * Math.sqrt(m) + pulse * 0.5)})`;
-            ctx.fillRect((s.gx + gx) * pitch, (s.gy + gy) * pitch, pitch - gap, pitch - gap);
+            const X = s.gx + gx, Y = s.gy + gy;
+            ctx.fillRect(edge(X), edge(Y), edge(X + 1) - edge(X), edge(Y + 1) - edge(Y));
           }
         }
       }
@@ -150,21 +155,25 @@ export function NeuralMapView() {
       const font = Math.max(8, Math.min(12, pitch * 1.8));
       ctx.font = `bold ${font}px monospace`; ctx.textBaseline = 'top'; ctx.textAlign = 'left';
       for (const s of sections) {
-        const x = s.gx * pitch, y = s.gy * pitch, w = s.gw * pitch - gap, h = s.gh * pitch - gap;
+        const x = edge(s.gx), y = edge(s.gy), w = edge(s.gx + s.gw) - x, h = edge(s.gy + s.gh) - y;
         const sc = scoreColor(s.b.score);
-        ctx.strokeStyle = sc; ctx.lineWidth = hover?.s.b.id === s.b.id ? 2.5 : 1.25;
-        ctx.strokeRect(x + 0.75, y + 0.75, w - 1.5, h - 1.5);
+        // No frames between sections; only the one under the pointer is outlined.
+        if (hover?.s.b.id === s.b.id) { ctx.strokeStyle = 'rgba(236,230,255,0.9)'; ctx.lineWidth = 2; ctx.strokeRect(x + 1, y + 1, w - 2, h - 2); }
         const long = s.b.label.toUpperCase();
         const text = ctx.measureText(long).width + 12 < w ? long : s.b.short;
         const scoreTxt = s.b.score === null ? '' : `${s.b.score >= 0 ? '+' : ''}${Math.round(s.b.score * 100)}`;
         const tw = Math.min(ctx.measureText(text).width, w - 12);
         const sw = scoreTxt ? ctx.measureText(scoreTxt).width : 0;
         const showScore = !!scoreTxt && tw + sw + 22 < w;
+        // Label chip: a marker in the performance colour, the name, the score.
+        const mk = font - 2;
         ctx.fillStyle = 'rgba(5,3,8,0.8)';
-        ctx.fillRect(x + 3, y + 3, tw + 8 + (showScore ? sw + 8 : 0), font + 5);
+        ctx.fillRect(x + 3, y + 3, mk + 6 + tw + 8 + (showScore ? sw + 8 : 0), font + 5);
+        ctx.fillStyle = sc;
+        ctx.fillRect(x + 6, y + 6.5, mk, mk);
         ctx.fillStyle = 'rgba(236,230,255,0.95)';
-        ctx.fillText(text, x + 7, y + 5.5, w - 12);
-        if (showScore) { ctx.fillStyle = sc; ctx.fillText(scoreTxt, x + 7 + tw + 8, y + 5.5); }
+        ctx.fillText(text, x + 9 + mk, y + 5.5, w - 16 - mk);
+        if (showScore) { ctx.fillStyle = sc; ctx.fillText(scoreTxt, x + 9 + mk + tw + 8, y + 5.5); }
       }
       raf = requestAnimationFrame(draw);
     };
@@ -214,9 +223,9 @@ export function NeuralMapView() {
         <div className="flex flex-wrap items-center gap-4 mt-3 text-[10px] uppercase tracking-widest">
           <span className="flex items-center gap-2">weak
             <span className="inline-block h-2 w-40" style={{ background: `linear-gradient(90deg, ${RAMP.map((c) => `rgb(${c.join(',')})`).join(',')})` }} />strong</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block border-2" style={{ borderColor: scoreColor(0.8) }} />performing</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block border-2" style={{ borderColor: scoreColor(-0.8) }} />underperforming</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block border-2" style={{ borderColor: scoreColor(null) }} />no evidence</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block" style={{ background: scoreColor(0.8) }} />performing</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block" style={{ background: scoreColor(-0.8) }} />underperforming</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block" style={{ background: scoreColor(null) }} />no evidence</span>
           <span className="normal-case tracking-normal opacity-70">Top to bottom: feeds → indicator families → TA network → spiking networks → decision models → MLP → traders. Hover a section for details.</span>
         </div>
       </Panel>
