@@ -258,7 +258,17 @@ export class MarketData extends EventEmitter {
   private readonly resultChecked = new Set<string>();
 
   /** Refresh the list of open markets for each configured series (traded first, then record-only). */
+  private catalogBusy = false;
+
   async refreshCatalog(now = Date.now()): Promise<void> {
+    // One refresh at a time: when the exchange is slow or rate limiting, a 20 s timer would otherwise
+    // start new refreshes on top of unfinished ones and multiply the request rate.
+    if (this.catalogBusy) return;
+    this.catalogBusy = true;
+    try { await this.refreshCatalogOnce(now); } finally { this.catalogBusy = false; }
+  }
+
+  private async refreshCatalogOnce(now: number): Promise<void> {
     await this.refreshSeries(now);
     const entries: Array<[string, string, boolean]> = [...[...this.series].map(([s, a]) => [s, a, false] as [string, string, boolean]), ...this.recordSeriesList().map(([s, a]) => [s, a, true] as [string, string, boolean])];
     let recordCount = [...this.markets.values()].filter((m) => m.recordOnly && m.closeTime > now).length;
@@ -270,7 +280,10 @@ export class MarketData extends EventEmitter {
           this.feesFetchedAt.set(series, now);
           try { this.feeChanges.set(series, (await this.rest.getSeriesFeeChanges(series)).sort((a, b) => a.scheduledTs - b.scheduledTs)); } catch { /* optional: keep the last list */ }
         }
-        const markets = nearestStrikes(await this.rest.getOpenMarkets(series), contractKind, series, this.index.get(asset)?.latest()?.value, this.cfg.catalogStrikesPerEvent, new Set(this.markets.keys()));
+        // Crypto ladders: only events closing inside the horizon (filtered by the exchange, fewer pages).
+        // Tennis markets close long after the match starts, so they are filtered below by start time.
+        const maxClose = asset === 'TENNIS' ? undefined : now + this.cfg.catalogHorizonMin * 60_000;
+        const markets = nearestStrikes(await this.rest.getOpenMarkets(series, maxClose), contractKind, series, this.index.get(asset)?.latest()?.value, this.cfg.catalogStrikesPerEvent, new Set(this.markets.keys()));
         for (const m of markets) {
           if (m.closeTime <= now) continue;
           const kind = contractKind(series, m.strikeType);
@@ -367,7 +380,16 @@ export class MarketData extends EventEmitter {
 
   // ---- Unauthenticated fallback -------------------------------------------
 
+  private pollBusy = false;
+
   private async poll(): Promise<void> {
+    // One pass at a time (a pass over many markets can take longer than the 2 s timer).
+    if (this.pollBusy) return;
+    this.pollBusy = true;
+    try { await this.pollOnce(); } finally { this.pollBusy = false; }
+  }
+
+  private async pollOnce(): Promise<void> {
     const now = Date.now();
     for (const m of this.recordedMarkets(now)) {
       try {

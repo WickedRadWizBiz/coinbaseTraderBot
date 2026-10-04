@@ -116,6 +116,7 @@ async function main(): Promise<void> {
   const rest = new KalshiRest({ baseUrl: cfg.restBaseUrl, signer, subaccount: cfg.kalshiSubaccount, onServerDate: (d, s, r) => clock.observe(d, s, r) });
   const indexIds = Object.keys(cfg.indexIdMap);
   const ws = signer ? new KalshiWs(cfg.wsUrl, signer, indexIds) : undefined;
+  if (!signer) log.warn('no Kalshi API key (KALSHI_KEY_ID + KALSHI_PRIVATE_KEY_PATH): order books are polled over anonymous REST, which Kalshi rate limits hard; add the key even for paper trading');
   const md = new MarketData(cfg, rest, ws, new Recorder(path.join(cfg.dataDir, 'recordings')));
   // Recordings grow by a day file per day: older days are gzipped (about 10x smaller) so months of them
   // fit on disk, and a low-disk alert fires before writes would fail.
