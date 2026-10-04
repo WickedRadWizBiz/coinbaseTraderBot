@@ -343,3 +343,25 @@ export function nextSessionEdge(ts: number, minutes = 40): { start: number; end:
   while (sessionEdge(end, minutes) && end - t < 6 * 3_600_000) end += M;
   return { start: t, end, label };
 }
+
+// ---- Weekend training ------------------------------------------------------------------------------
+// On weekends (no sessions) the pipeline starts at midnight New York time on Saturday and Sunday and runs
+// unpaused until it finishes, for as long as the weekend lasts (until Tokyo opens on Monday, Sunday
+// evening in New York); after that the session-edge windows pace it again.
+
+const WEEKEND_TZ = VENUES.newYork.tz;
+
+/** Weekend free time (training may run unpaused) and the midnight start hour (a due run may start). */
+export function weekendTraining(ts: number): { free: boolean; start: boolean } {
+  const z = zoneTime(ts, WEEKEND_TZ);
+  const free = (z.weekday === 6 || z.weekday === 0) && sessionAt(ts) === 'weekend';
+  return { free, start: free && z.minutes < 60 };
+}
+
+/** The next Saturday or Sunday midnight (New York) at or after ts (within the start hour counts as now). */
+export function nextWeekendMidnight(ts: number): number | undefined {
+  const H = 3_600_000;
+  if (weekendTraining(ts).start) return ts;
+  for (let t = Math.ceil(ts / H) * H, i = 0; i < 9 * 24; i++, t += H) if (weekendTraining(t).start) return t;
+  return undefined;
+}

@@ -6,7 +6,7 @@ import { Alerter } from '../bot/alerts/alerter';
 import { AutoTrainer } from '../bot/autotrain';
 import { loadConfig } from '../bot/config';
 import { Engine } from '../bot/engine';
-import { nextSessionEdge, sessionEdge } from '../bot/model/sessions';
+import { nextSessionEdge, nextWeekendMidnight, sessionEdge, weekendTraining } from '../bot/model/sessions';
 import { tmpAudit, tmpDir } from './helpers';
 
 // Wednesday 7 October 2026 (UK on BST = UTC+1, New York on EDT = UTC-4).
@@ -67,6 +67,35 @@ test('AUTO_TRAIN=windows (default): starts in the first window once a day is due
   await t.tick();
   assert.equal(t.status().paused, false, 'next window: resumed');
   assert.equal(t.status().window!.inside, 'New York open');
+  t.stop();
+  await new Promise((r) => setTimeout(r, 200));
+});
+
+test('weekends: training starts at midnight New York time on Saturday and Sunday and runs until Tokyo opens Monday', async () => {
+  const sat = (h: number, m = 0) => Date.UTC(2026, 9, 10, h, m);     // Saturday; New York = UTC-4
+  assert.deepEqual(weekendTraining(sat(4, 30)), { free: true, start: true }, 'Saturday 00:30 New York');
+  assert.deepEqual(weekendTraining(sat(12)), { free: true, start: false });
+  assert.equal(weekendTraining(Date.UTC(2026, 9, 11, 23)).free, true, 'Sunday 19:00 New York');
+  assert.equal(weekendTraining(Date.UTC(2026, 9, 12, 0, 30)).free, false, 'Sunday 20:30 New York = Monday in Tokyo: trading again');
+  assert.equal(nextWeekendMidnight(Date.UTC(2026, 9, 9, 21)), sat(4), 'Friday evening -> Saturday midnight');
+  assert.equal(nextWeekendMidnight(sat(5)), Date.UTC(2026, 9, 11, 4), 'past Saturday\'s start hour -> Sunday midnight');
+
+  const dir = tmpDir();
+  const cfg = loadConfig({ DATA_DIR: dir });
+  const audit = tmpAudit();
+  let now = Date.UTC(2026, 9, 9, 22);
+  const engine = { model: { id: 'm' } } as unknown as Engine;
+  const t = new AutoTrainer({ cfg, engine, audit, alerter: new Alerter([], audit), now: () => now, command: { cmd: process.execPath, args: ['-e', 'setTimeout(()=>{}, 4000)'] } });
+  assert.equal(t.nextRun(), sat(4), 'due on Friday night: Saturday midnight comes before Monday\'s Tokyo open');
+  now = sat(4, 10);
+  await t.tick();
+  assert.equal(t.status().running, true, 'started at Saturday midnight');
+  now = sat(15);
+  await t.tick();
+  assert.equal(t.status().paused, false, 'weekend: runs unpaused');
+  now = Date.UTC(2026, 9, 12, 1);
+  await t.tick();
+  assert.equal(t.status().paused, true, 'Monday Asia session (outside a session edge): frozen');
   t.stop();
   await new Promise((r) => setTimeout(r, 200));
 });

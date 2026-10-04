@@ -1,6 +1,7 @@
 // In-bot automation: runs the training pipeline (research/pipeline.ts) on a schedule in a child
 // process at low CPU priority (AUTO_TRAIN=windows, the default: once a day, only inside the session-edge
-// windows, frozen with SIGSTOP the moment a window ends and resumed with SIGCONT at the next one), and hot-swaps whatever it promotes (meta-model, SNN, perp model,
+// windows or from midnight (New York) on Saturdays and Sundays, frozen with SIGSTOP whenever the bot
+// trades and resumed with SIGCONT at the next window), and hot-swaps whatever it promotes (meta-model, SNN, perp model,
 // volatility profile, tennis model) into the running engine without a restart. The MLP, perps and
 // tennis models read the SNN's outputs, so a new SNN automatically re-runs their training.
 
@@ -21,7 +22,7 @@ import type { SnnDomain } from './snn/params';
 import { VolModel } from './model/volModel';
 import { FillModel } from './tca/fillModel';
 import { TennisFairModel } from './tennis/tennisFair';
-import { nextSessionEdge, sessionEdge } from './model/sessions';
+import { nextSessionEdge, nextWeekendMidnight, sessionEdge, weekendTraining } from './model/sessions';
 import { activeTaNet, setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from './ta/taNet';
 import { logger } from './util/log';
 
@@ -102,10 +103,15 @@ export class AutoTrainer {
     try { process.kill(-pid, sig); } catch { try { this.child?.kill(sig); } catch { /* gone */ } }
   }
 
-  /** Windows mode: the pipeline runs only inside a session-edge window; frozen outside, resumed inside. */
+  /** Where training may run right now (windows mode): a session-edge window, or weekend free time. */
+  private window(): string | undefined {
+    return sessionEdge(this.now, this.d.cfg.sessionEdge.minutes) ?? (weekendTraining(this.now).free ? 'weekend' : undefined);
+  }
+
+  /** Windows mode: the pipeline runs only inside a session-edge window or on the weekend; frozen otherwise. */
   private pace(): void {
     if (!this.windows || !this.child) return;
-    const inside = sessionEdge(this.now, this.d.cfg.sessionEdge.minutes);
+    const inside = this.window();
     if (inside && this.paused) { this.signal('SIGCONT'); this.paused = false; log.info('pipeline resumed', { window: inside }); this.d.audit.write('config', { event: 'pipeline_resume', window: inside }); }
     else if (!inside && !this.paused) { this.signal('SIGSTOP'); this.paused = true; log.info('pipeline paused until the next session-edge window'); this.d.audit.write('config', { event: 'pipeline_pause' }); }
   }
@@ -115,8 +121,11 @@ export class AutoTrainer {
     if (this.windows) {
       const last = this.state().lastRun ?? 0;
       const due = Math.max(now, last + 20 * 3_600_000);
+      // The first session-edge window, or Saturday / Sunday midnight (New York), once a run is due.
       const w = nextSessionEdge(due, this.d.cfg.sessionEdge.minutes);
-      return w ? Math.max(w.start, due) : null;
+      const wk = nextWeekendMidnight(due);
+      const starts = [w ? Math.max(w.start, due) : undefined, wk].filter((x): x is number => x !== undefined);
+      return starts.length ? Math.min(...starts) : null;
     }
     if (this.d.cfg.autoTrain.mode !== 'daily') return null;
     const d = new Date(now);
@@ -133,7 +142,8 @@ export class AutoTrainer {
   async tick(): Promise<void> {
     await this.watch();
     const next = this.nextRun();
-    const inWindow = !this.windows || !!sessionEdge(this.now, this.d.cfg.sessionEdge.minutes);
+    // Starts: inside a session-edge window, or in the weekend midnight hour.
+    const inWindow = !this.windows || !!sessionEdge(this.now, this.d.cfg.sessionEdge.minutes) || weekendTraining(this.now).start;
     if (next !== null && this.now >= next && inWindow && !this.child && this.now - this.lastStart > 3_600_000) this.run([]);
     this.pace();
   }
@@ -256,7 +266,7 @@ export class AutoTrainer {
     return {
       mode: this.d.cfg.autoTrain.mode, running: Boolean(this.child), lastStart: this.lastStart || null, lastExit: this.lastExit,
       nextRun: this.nextRun(), paused: this.paused,
-      window: this.windows ? { inside: sessionEdge(this.now, this.d.cfg.sessionEdge.minutes) ?? null, next: nextSessionEdge(this.now, this.d.cfg.sessionEdge.minutes) ?? null } : null,
+      window: this.windows ? { inside: this.window() ?? null, next: nextSessionEdge(this.now, this.d.cfg.sessionEdge.minutes) ?? null } : null,
       logFile: this.logFile,
       models: Object.fromEntries(Object.entries(paths).map(([k, p]) => [k, { path: p, mtime: mtime(p), ...(k === 'mlp' ? { id: this.d.engine.model.id } : {}) }])),
       swaps: this.swaps, state: this.state(),
