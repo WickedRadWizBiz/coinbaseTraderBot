@@ -26,7 +26,7 @@ import type { Reconciler } from './recon/reconciler';
 import { decide, decisionProbability, MarketView, OrderPlan } from './strategy/fairValueStrategy';
 import { ConfluenceRatchetExit } from './strategy/exitPolicies';
 import { CadenceGate, inEntryWindow, type CadenceReason } from './strategy/cadence';
-import { kalshiMaintenance, sessionState, type SessionState } from './model/sessions';
+import { kalshiMaintenance, sessionEdge, sessionState, type SessionState } from './model/sessions';
 import type { EquityGuard } from './risk/equityGuard';
 import type { ModelHealth } from './model/modelHealth';
 import type { Tca } from './tca/tca';
@@ -356,6 +356,8 @@ export class Engine {
     if (paused) r.push(paused);
     const skew = this.d.cfg.clockSkewMaxMs > 0 ? this.d.clock?.haltReason(Date.now()) : undefined;
     if (skew) r.push(skew);
+    const edge = this.sessionEdgeBlock(now);
+    if (edge) r.push(edge);
     const h = this.d.modelHealth?.status();
     if (this.d.cfg.strategy.modelHealthHalt && h?.halt) r.push(`model log loss significantly worse than the calibrated market over ${h.windows} windows (p=${h.pWorse?.toFixed(3)})`);
     const b = this.bankroll();
@@ -369,6 +371,14 @@ export class Engine {
       if (mt.inside || mt.minutesTo <= 30) r.push(mt.inside ? 'Kalshi maintenance window' : `Kalshi maintenance in ${mt.minutesTo} min`);
     }
     return r;
+  }
+
+  /** Session edge (first/last minutes of a market session): no new entries; training runs here instead. */
+  sessionEdgeBlock(now = this.now()): string | undefined {
+    const e = this.d.cfg.sessionEdge;
+    if (!e.noEntry) return undefined;
+    const label = sessionEdge(now, e.minutes);
+    return label ? `session edge (${label}): no new entries, training window` : undefined;
   }
 
   /** Sizing tier for the current tradable high-water mark ($20 aggressive -> $50 moderate -> $100 normal). */
@@ -672,7 +682,7 @@ export class Engine {
     return (c) => {
       const f = this.d.md.perpFeed;
       const skew = this.d.cfg.clockSkewMaxMs > 0 ? this.d.clock?.haltReason(Date.now()) : undefined;
-      const noEntry = skew ?? this.d.exchangeStatus?.perpsBlock() ?? (f?.lastError ? `perps feed unavailable (${f.lastError})` : undefined);
+      const noEntry = skew ?? this.sessionEdgeBlock() ?? this.d.exchangeStatus?.perpsBlock() ?? (f?.lastError ? `perps feed unavailable (${f.lastError})` : undefined);
       return t.targets(c, { halt, noEntry, lockedFrac: this.lockedFraction() });
     };
   }

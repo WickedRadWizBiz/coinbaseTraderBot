@@ -149,7 +149,7 @@ export function createApi(d: ApiDeps): express.Express {
       perps: d.engine.perpStatus(),
       snn: d.engine.snnBrief(),
       treeModels: d.engine.treeModelStatus(),
-      autoTrain: d.autoTrain ? (() => { const a = d.autoTrain!.status(); return { mode: a.mode, running: a.running, nextRun: a.nextRun, lastExit: a.lastExit, lastSwap: a.swaps[0] ?? null }; })() : null,
+      autoTrain: d.autoTrain ? (() => { const a = d.autoTrain!.status(); return { mode: a.mode, running: a.running, paused: a.paused, window: a.window, nextRun: a.nextRun, lastExit: a.lastExit, lastSwap: a.swaps[0] ?? null }; })() : null,
       tennis: {
         enabled: d.cfg.tennis.enabled,
         trading: d.cfg.tennis.enabled && (d.cfg.mode !== 'live' || d.cfg.tennis.live),

@@ -174,6 +174,9 @@ export interface Config {
   taCandles: boolean;
   /** Clock-skew guard: halt new risk when the local clock is confidently off Kalshi's by more than this (ms); 0 disables. */
   clockSkewMaxMs: number;
+  /** Session edges (first/last N minutes of the Asia, London and New York sessions): no new entries there
+   *  (noEntry) and, with AUTO_TRAIN=windows, the only time the training pipeline runs. */
+  sessionEdge: { minutes: number; noEntry: boolean };
   clockSkewWarnMs: number;
   /** Settlement average: official = sixty one-per-second RTI values; continuous = time-weighted step average. */
   settlementAvg: 'official' | 'continuous';
@@ -253,8 +256,9 @@ export interface TaNetConfig {
 }
 
 export interface AutoTrainConfig {
-  /** off | daily (run the full pipeline once a day at hourUtc). */
-  mode: 'off' | 'daily';
+  /** off | daily (once a day at hourUtc) | windows (once a day, only inside session-edge windows, paused
+   *  outside them: training never runs while the bot trades). */
+  mode: 'off' | 'daily' | 'windows';
   hourUtc: number;
   /** Where the pipeline writes promoted models; the bot prefers these over params/ and hot-swaps them. */
   dir: string;
@@ -738,6 +742,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     dominanceFeed: bool(env, 'DOMINANCE_FEED', true),
     taCandles: bool(env, 'TA_CANDLES', true),
     clockSkewMaxMs: num(env, 'CLOCK_SKEW_MAX_MS', 2000, 0, 60_000),
+    sessionEdge: { minutes: num(env, 'SESSION_EDGE_MIN', 40, 5, 120), noEntry: bool(env, 'SESSION_EDGE_NO_ENTRY', true) },
     clockSkewWarnMs: num(env, 'CLOCK_SKEW_WARN_MS', 1000, 0, 60_000),
     settlementAvg: oneOf(env, 'SETTLEMENT_AVG', 'official', ['official', 'continuous'] as const),
     taStudyPath: path.resolve(env.TA_STUDY_PATH ?? './params/ta_study.json'),
@@ -836,7 +841,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       };
     })(),
     autoTrain: {
-      mode: oneOf(env, 'AUTO_TRAIN', 'daily', ['off', 'daily'] as const),
+      mode: oneOf(env, 'AUTO_TRAIN', 'windows', ['off', 'daily', 'windows'] as const),
       hourUtc: num(env, 'AUTO_TRAIN_HOUR_UTC', 6, 0, 23),
       dir: path.resolve(env.AUTO_TRAIN_DIR ?? path.join(dataDir, 'models')),
       recordingsDir: path.resolve(env.AUTO_TRAIN_RECORDINGS ?? path.join(dataDir, 'recordings')),
