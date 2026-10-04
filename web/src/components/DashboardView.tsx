@@ -53,7 +53,7 @@ export function DashboardView() {
       {!s && <Screen size={BANNER} loading />}
 
       {s?.kill?.engaged && (
-        <div className={`crt-grid-panel crt-glass p-4 border border-crypto-danger bg-crypto-danger/15 flex flex-col md:flex-row items-center justify-between gap-4 overflow-hidden ${BANNER}`}>
+        <div className={`crt-grid-panel p-4 border border-crypto-danger bg-crypto-danger/15 flex flex-col md:flex-row items-center justify-between gap-4 overflow-hidden ${BANNER}`}>
           <div className="flex items-center gap-3">
             <ShieldAlert className="w-6 h-6 text-crypto-danger animate-pulse shrink-0" />
             <div>
@@ -68,7 +68,7 @@ export function DashboardView() {
       )}
 
       {s && !s.kill?.engaged && (
-        <div className={`crt-grid-panel crt-glass p-3 border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 overflow-hidden ${BANNER} ${
+        <div className={`crt-grid-panel p-3 border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 overflow-hidden ${BANNER} ${
           s.haltReasons.length ? 'border-yellow-500/50 bg-yellow-500/10 text-yellow-300' : 'border-crypto-success/50 bg-crypto-success/10 text-crypto-success'
         }`}>
           <div className="flex items-center gap-2.5">

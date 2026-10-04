@@ -269,7 +269,7 @@ export class MarketData extends EventEmitter {
           this.feesFetchedAt.set(series, now);
           try { this.feeChanges.set(series, (await this.rest.getSeriesFeeChanges(series)).sort((a, b) => a.scheduledTs - b.scheduledTs)); } catch { /* optional: keep the last list */ }
         }
-        const markets = await this.rest.getOpenMarkets(series);
+        const markets = nearestStrikes(await this.rest.getOpenMarkets(series), contractKind, series, this.index.get(asset)?.latest()?.value, this.cfg.catalogStrikesPerEvent, new Set(this.markets.keys()));
         for (const m of markets) {
           if (m.closeTime <= now) continue;
           const kind = contractKind(series, m.strikeType);
@@ -436,4 +436,29 @@ export class MarketData extends EventEmitter {
     }
     connect();
   }
+}
+
+/** Strike ladders and range brackets: the `n` strikes nearest the price in each event (all when n = 0).
+ *  Markets already tracked are kept (open positions stay managed). Without a price yet, the event's median
+ *  strike stands in for it (Kalshi centres its ladders on the price). */
+export function nearestStrikes<M extends { ticker: string; eventTicker?: string; strikeType?: string; floorStrike?: number; capStrike?: number }>(
+  markets: M[], kindOf: (series: string, strikeType?: string) => string, series: string, price: number | undefined, n: number, tracked: Set<string>,
+): M[] {
+  if (!n) return markets;
+  const ref = (m: M) => (m.floorStrike !== undefined && m.capStrike !== undefined ? (m.floorStrike + m.capStrike) / 2 : m.floorStrike ?? m.capStrike);
+  const byEvent = new Map<string, M[]>();
+  const out: M[] = [];
+  for (const m of markets) {
+    const k = kindOf(series, m.strikeType);
+    if (k === 'updown' || k === 'match' || ref(m) === undefined) { out.push(m); continue; }
+    const e = m.eventTicker ?? series;
+    (byEvent.get(e) ?? byEvent.set(e, []).get(e)!).push(m);
+  }
+  for (const ms of byEvent.values()) {
+    const refs = ms.map((m) => ref(m)!).sort((a, b) => a - b);
+    const p = price ?? refs[Math.floor(refs.length / 2)];
+    const keep = new Set([...ms].sort((a, b) => Math.abs(ref(a)! - p) - Math.abs(ref(b)! - p)).slice(0, n));
+    for (const m of ms) if (keep.has(m) || tracked.has(m.ticker)) out.push(m);
+  }
+  return out;
 }
