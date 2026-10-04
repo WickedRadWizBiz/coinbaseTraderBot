@@ -64,6 +64,7 @@ import { orderFee } from './fees';
 import { activeTaNet } from './ta/taNet';
 import { applyFillModel, fillInputs, isMakerEntry, type FillModel } from './tca/fillModel';
 import { FillLog } from './tca/fillLog';
+import { recordLatency } from './util/latency';
 
 const log = logger('engine');
 
@@ -120,6 +121,8 @@ export function snnColumn(m: { asset: string; openTime: number; closeTime: numbe
 }
 
 export interface EngineDeps {
+  /** Dashboard PLAY / STOP (stopped = no new entries). */
+  control?: import('./control').RunControl;
   cfg: Readonly<Config>;
   audit: AuditLog;
   alerter: Alerter;
@@ -356,6 +359,7 @@ export class Engine {
     if (paused) r.push(paused);
     const skew = this.d.cfg.clockSkewMaxMs > 0 ? this.d.clock?.haltReason(Date.now()) : undefined;
     if (skew) r.push(skew);
+    if (this.d.control && !this.d.control.active) r.push('stopped from the dashboard (press PLAY to resume)');
     const edge = this.sessionEdgeBlock(now);
     if (edge) r.push(edge);
     const h = this.d.modelHealth?.status();
@@ -501,6 +505,7 @@ export class Engine {
   }
 
   async tick(): Promise<void> {
+    if (this.lastTickTs) recordLatency('sample', this.now() - this.lastTickTs);
     this.lastTickTs = this.now();
     this.d.vault?.tick(this.lastTickTs);
     const eq = this.equity();
@@ -682,7 +687,7 @@ export class Engine {
     return (c) => {
       const f = this.d.md.perpFeed;
       const skew = this.d.cfg.clockSkewMaxMs > 0 ? this.d.clock?.haltReason(Date.now()) : undefined;
-      const noEntry = skew ?? this.sessionEdgeBlock() ?? this.d.exchangeStatus?.perpsBlock() ?? (f?.lastError ? `perps feed unavailable (${f.lastError})` : undefined);
+      const noEntry = skew ?? (this.d.control && !this.d.control.active ? 'stopped from the dashboard' : undefined) ?? this.sessionEdgeBlock() ?? this.d.exchangeStatus?.perpsBlock() ?? (f?.lastError ? `perps feed unavailable (${f.lastError})` : undefined);
       return t.targets(c, { halt, noEntry, lockedFrac: this.lockedFraction() });
     };
   }

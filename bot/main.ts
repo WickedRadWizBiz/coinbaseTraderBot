@@ -48,6 +48,7 @@ import { TennisScoreClient } from './tennis/liveTennisApi';
 import { TennisFairModel } from './tennis/tennisFair';
 import { AutoTrainer, resolveModelPaths } from './autotrain';
 import { logger } from './util/log';
+import { RunControl } from './control';
 
 const log = logger('main');
 
@@ -286,7 +287,8 @@ async function main(): Promise<void> {
   // The exchange's own status and maintenance schedule gate new entries (exits stay allowed).
   const exchangeStatus = new ExchangeStatusMonitor(rest);
   exchangeStatus.start();
-  const engine: Engine = new Engine({ exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
+  const control = new RunControl(path.join(cfg.dataDir, 'control.json'));
+  const engine: Engine = new Engine({ control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
   engineRef = engine;
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();
@@ -326,14 +328,15 @@ async function main(): Promise<void> {
 
   // The dashboard comes up first (it shows the engine warming up); loading every market takes a minute or
   // more on a small server.
-  const app = createApi({ cfg, audit, engine, oms, kill, recon, model, tca, md, vault, autoTrain, startedAt: Date.now() });
+  const app = createApi({ cfg, audit, engine, oms, kill, recon, model, tca, md, vault, autoTrain, control, restart: () => void shutdown('restart (dashboard)', 75), startedAt: Date.now() });
   const server = app.listen(cfg.port, cfg.host, () => log.info(`operator API on http://${cfg.host}:${cfg.port} (${cfg.dashboardPassword ? 'password required' : 'no login'})`));
 
   md.start();
   await engine.start();
 
   let stopping = false;
-  const shutdown = async (sig: string) => {
+  // Exit code 75 asks systemd to start the bot again (Restart=on-failure): used by the PAPER / LIVE switch.
+  const shutdown = async (sig: string, code = 0) => {
     if (stopping) return;
     stopping = true;
     log.warn(`received ${sig}; cancelling resting orders and shutting down`);
@@ -344,8 +347,8 @@ async function main(): Promise<void> {
     try { engine.saveSnnBlender(); await Promise.all(Object.values(engine.snn?.units ?? {}).map((u) => u!.host.stop())); } catch (e) { log.error('SNN checkpoint on shutdown failed', { error: String(e) }); }
     audit.write('shutdown', { sig });
     md.stop();
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 5000).unref();
+    server.close(() => process.exit(code));
+    setTimeout(() => process.exit(code), 5000).unref();
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));

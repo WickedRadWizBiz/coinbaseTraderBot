@@ -4,6 +4,7 @@ import { MarketSessionCard } from './MarketSessionCard';
 import { VaultCard } from './VaultCard';
 import { OrderBookMonitor } from './OrderBookMonitor';
 import { Panel, Screen } from './Panel';
+import { BotControls, LatencyBadges } from './BotControls';
 import { usePoll } from './usePoll';
 
 function Row({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: 'ok' | 'bad' | 'warn' }) {
@@ -99,6 +100,7 @@ export function DashboardView() {
         <Panel title="Capital & Risk" className="!p-0" bodyClass="h-full" flush scroll="h-[300px] md:h-[440px]">
           {s ? (
             <div className="flex flex-col">
+              <BotControls s={s} onChange={() => void refresh()} />
               <Row label="Daily PnL (net of fees)" value={usd(s.dailyPnl)} sub={`loss limit ${usd(-s.dailyLossLimit)}`} tone={s.dailyPnl < 0 ? 'bad' : 'ok'} />
               <Row label="Cash balance" value={usd(s.balance)} />
               <Row label="Tradable bankroll" value={usd(s.bankroll)} sub={s.vault?.enabled ? `cash + committed − vault ${usd(s.vault.vault)} − pocket ${usd(s.vault.pocket)}` : 'cash + committed'} />
@@ -108,7 +110,7 @@ export function DashboardView() {
           ) : <div className="p-6 animate-pulse">ESTABLISHING LINK...</div>}
         </Panel>
 
-        <Panel title="System Telemetry" className="!p-0" bodyClass="h-full" flush scroll="h-[470px] md:h-[440px]">
+        <Panel title="System Telemetry" right={<LatencyBadges latency={s?.latency} />} className="!p-0" bodyClass="h-full" flush scroll="h-[470px] md:h-[440px]">
           {s ? (
             <div className="flex flex-col">
               <Row label="Model" value={s.model.id} sub={s.model.liveBlockers.length ? `not live-validated (${s.model.liveBlockers.length} blockers)` : 'validated for live'} tone={s.model.liveBlockers.length ? 'warn' : 'ok'} />

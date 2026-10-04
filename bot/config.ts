@@ -6,6 +6,7 @@ import fs from 'fs';
 import { parseSessionRisk, type SessionRiskProfile } from './model/sessionRisk';
 import { defaultTiers, validateTiers, type TierPoint } from './risk/sizingTiers';
 import type { VaultConfig } from './vault/vault';
+import os from 'os';
 import path from 'path';
 
 export type TradingMode = 'paper' | 'shadow' | 'live';
@@ -180,6 +181,8 @@ export interface Config {
   /** Session edges (first/last N minutes of the Asia, London and New York sessions): no new entries there
    *  (noEntry) and, with AUTO_TRAIN=windows, the only time the training pipeline runs. */
   sessionEdge: { minutes: number; noEntry: boolean };
+  /** The server's env file, rewritten by the dashboard's PAPER / LIVE switch (BOT_ENV_FILE, default ~/bot/bot.env). */
+  botEnvFile: string;
   clockSkewWarnMs: number;
   /** Settlement average: official = sixty one-per-second RTI values; continuous = time-weighted step average. */
   settlementAvg: 'official' | 'continuous';
@@ -747,6 +750,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     taCandles: bool(env, 'TA_CANDLES', true),
     clockSkewMaxMs: num(env, 'CLOCK_SKEW_MAX_MS', 2000, 0, 60_000),
     sessionEdge: { minutes: num(env, 'SESSION_EDGE_MIN', 40, 5, 120), noEntry: bool(env, 'SESSION_EDGE_NO_ENTRY', true) },
+    botEnvFile: path.resolve(env.BOT_ENV_FILE ?? path.join(os.homedir(), 'bot', 'bot.env')),
     clockSkewWarnMs: num(env, 'CLOCK_SKEW_WARN_MS', 1000, 0, 60_000),
     settlementAvg: oneOf(env, 'SETTLEMENT_AVG', 'official', ['official', 'continuous'] as const),
     taStudyPath: path.resolve(env.TA_STUDY_PATH ?? './params/ta_study.json'),
