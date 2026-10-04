@@ -108,18 +108,8 @@ jobs:
               pm2 delete coinbaseTraderBot 2>/dev/null || true
               pm2 save --force 2>/dev/null || true
             fi
-            # Reuse the live release's installed modules (and the compiled TA-Lib) when the lockfile and the
-            # vendored TA-Lib sources are unchanged: compiling TA-Lib on the small box takes minutes.
-            prev="$(readlink ~/bot/current 2>/dev/null || true)"
-            if [ -n "$prev" ] && [ -d "$prev/node_modules" ] && [ -d "$prev/vendor/talib/build" ] && cmp -s "$prev/package-lock.json" package-lock.json \
-               && diff -rq --exclude=build --exclude=node_modules "$prev/vendor/talib" vendor/talib >/dev/null 2>&1; then
-              cp -a "$prev/node_modules" ./node_modules
-              cp -a "$prev/vendor/talib/build" vendor/talib/build
-              echo "reused node_modules and the TA-Lib build from $prev"
-            else
-              nice -n 5 npm ci --omit=dev
-            fi
-            node -e "require('talib'); console.log('TA-Lib native module OK')" || echo 'WARNING: TA-Lib did not load; the bot uses its built-in indicators'
+            # Dependencies: reuses the live release's modules and TA-Lib build when unchanged (deploy/install.sh).
+            bash deploy/install.sh
             bash deploy/activate.sh ~/releases/${{ steps.rel.outputs.name }}
             # Keep the 5 newest releases (plus whatever current/previous point to).
             keep="$(readlink ~/bot/current):$(readlink ~/bot/previous 2>/dev/null || true)"
