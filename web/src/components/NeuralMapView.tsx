@@ -129,7 +129,7 @@ export function NeuralMapView() {
       const fs = !!document.fullscreenElement;
       const w = fs ? window.innerWidth : el.clientWidth;
       const h = fs ? window.innerHeight : window.innerHeight - 110;
-      setSide(Math.max(260, Math.floor(Math.min(w, h))));
+      setSide(Math.max(260, Math.floor(Math.min(w, h)) - (fs ? 0 : 4)));
     };
     fit();
     const ro = new ResizeObserver(fit);
@@ -307,39 +307,40 @@ export function NeuralMapView() {
   const ranked = useMemo(() => (data ? data.layers.flatMap((l) => l.blocks).filter((b) => b.score !== null).sort((a, b) => b.score! - a.score!) : []), [data]);
 
   return (
-    <div className="flex flex-col gap-6 w-full max-w-7xl mx-auto pb-24 md:pb-6 relative z-10 text-crypto-primary font-mono text-sm tracking-wider">
-      <Panel title={<span className="flex items-center gap-2"><Network className="w-5 h-5" /> Neural Map</span>}
-        right={
-          <button onClick={toggleFull} className="flex items-center gap-1.5 text-[10px] tracking-widest crt-border px-2 py-1 hover:bg-crypto-danger hover:text-white transition-colors">
-            {full ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}{full ? 'EXIT' : 'FULL SCREEN'}
-          </button>
-        }>
-        {error && <div className="text-crypto-danger text-xs mb-2">Link error: {error}</div>}
-        <div ref={wrapRef} className="w-full flex justify-center">
-          <div ref={screenRef} className="relative bg-[#020306] flex items-center justify-center" style={full ? { width: '100vw', height: '100vh' } : { width: side, height: side, boxShadow: '0 0 0 1px rgba(0,255,225,0.55), 0 0 24px rgba(0,255,225,0.25), 0 0 60px rgba(255,0,170,0.12)' }}>
-            {!data ? <div className="text-center animate-pulse">MAPPING NETWORKS...</div> : (
-              <canvas ref={canvasRef} onMouseMove={onMove} onMouseLeave={() => setHover(null)} onClick={onMove} className="block" />
-            )}
-            {hover && (
-              <div className="absolute z-20 pointer-events-none crt-border bg-[#0a0204]/95 px-3 py-2 text-[11px] w-[240px] normal-case"
-                style={{ left: Math.max(4, Math.min(hover.x + 12, (screenRef.current?.clientWidth ?? side) - 250)), top: Math.max(4, Math.min(hover.y + 14, (screenRef.current?.clientHeight ?? side) - 120)) }}>
-                <div className="font-bold uppercase tracking-widest text-crypto-text">{hover.s.b.label}</div>
-                <div className="mt-1" style={{ color: scoreColor(hover.s.b.score) }}>{hover.s.b.score === null ? 'no evidence yet' : `performance ${hover.s.b.score >= 0 ? '+' : ''}${(hover.s.b.score * 100).toFixed(0)}`}</div>
-                <div className="opacity-80">activity {(hover.s.b.activity * 100).toFixed(0)}%</div>
-                <div className="opacity-70 mt-1">{hover.s.b.note}</div>
-              </div>
-            )}
-          </div>
+    <div className="flex flex-col gap-3 w-full max-w-7xl mx-auto pb-24 md:pb-6 relative z-10 text-crypto-primary font-mono text-sm tracking-wider">
+      {/* Printed on the chassis above the screen: the label, and the full-screen key. */}
+      <div className="flex items-center justify-between gap-3">
+        <span className="chassis-label"><Network className="w-4 h-4" /><span className="chassis-print text-sm">Neural Map</span></span>
+        <button onClick={toggleFull} className="chassis-key !min-w-0 !flex-row !gap-1.5 !py-1.5 !px-2.5" title={full ? 'Exit full screen' : 'Full screen'}>
+          {full ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}<span>{full ? 'Exit' : 'Full'}</span>
+        </button>
+      </div>
+      {/* The screen: the heat map fills it edge to edge. */}
+      <div ref={wrapRef} className="w-full flex justify-center">
+        <div ref={screenRef} className="crt-grid-panel !p-0 relative bg-[#020306] flex items-center justify-center" style={full ? { width: '100vw', height: '100vh' } : { width: side + 4, height: side + 4 }}>
+          {!data ? <div className="text-center animate-pulse">{error ? `LINK ERROR: ${error}` : 'MAPPING NETWORKS...'}</div> : (
+            <canvas ref={canvasRef} onMouseMove={onMove} onMouseLeave={() => setHover(null)} onClick={onMove} className="block relative z-10" />
+          )}
+          {hover && (
+            <div className="absolute z-20 pointer-events-none crt-border bg-[#0a0204]/95 px-3 py-2 text-[11px] w-[240px] normal-case"
+              style={{ left: Math.max(4, Math.min(hover.x + 12, (screenRef.current?.clientWidth ?? side) - 250)), top: Math.max(4, Math.min(hover.y + 14, (screenRef.current?.clientHeight ?? side) - 120)) }}>
+              <div className="font-bold uppercase tracking-widest text-crypto-text">{hover.s.b.label}</div>
+              <div className="mt-1" style={{ color: scoreColor(hover.s.b.score) }}>{hover.s.b.score === null ? 'no evidence yet' : `performance ${hover.s.b.score >= 0 ? '+' : ''}${(hover.s.b.score * 100).toFixed(0)}`}</div>
+              <div className="opacity-80">activity {(hover.s.b.activity * 100).toFixed(0)}%</div>
+              <div className="opacity-70 mt-1">{hover.s.b.note}</div>
+            </div>
+          )}
         </div>
-        <div className="flex flex-wrap items-center gap-4 mt-3 text-[10px] uppercase tracking-widest">
-          <span className="flex items-center gap-2">weak
-            <span className="inline-block h-2 w-40" style={{ background: `linear-gradient(90deg, ${RAMP.map((c) => `rgb(${c.join(',')})`).join(',')})` }} />strong</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block" style={{ background: scoreColor(0.8) }} />performing</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block" style={{ background: scoreColor(-0.8) }} />underperforming</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-3 inline-block" style={{ background: scoreColor(null) }} />no evidence</span>
-          <span className="normal-case tracking-normal opacity-70">Top to bottom: feeds → indicator families → TA network → spiking networks → decision models → MLP → traders. Hover a section for details.</span>
-        </div>
-      </Panel>
+      </div>
+      {/* Legend: a screen-printed plastic sticker on the chassis below the screen. */}
+      <div className="chassis-sticker flex flex-wrap items-center gap-x-5 gap-y-2 text-[10px] uppercase tracking-widest">
+        <span className="flex items-center gap-2">weak
+          <span className="inline-block h-2 w-40" style={{ background: `linear-gradient(90deg, ${RAMP.map((c) => `rgb(${c.join(',')})`).join(',')})` }} />strong</span>
+        <span className="flex items-center gap-1.5"><span className="w-3 h-3 inline-block" style={{ background: scoreColor(0.8) }} />performing</span>
+        <span className="flex items-center gap-1.5"><span className="w-3 h-3 inline-block" style={{ background: scoreColor(-0.8) }} />underperforming</span>
+        <span className="flex items-center gap-1.5"><span className="w-3 h-3 inline-block" style={{ background: scoreColor(null) }} />no evidence</span>
+        <span className="normal-case tracking-normal opacity-75">Top to bottom: feeds → indicator families → TA network → spiking networks → decision models → MLP → traders. Hover a section for details.</span>
+      </div>
       <Panel title="Leading · Lagging">
         <div className="grid grid-cols-2 h-[260px]">
           <div className="crt-scroll pr-3 flex flex-col">

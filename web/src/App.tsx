@@ -69,7 +69,7 @@ function Login() {
             placeholder="PASSWORD"
             className="crt-border bg-black/50 px-3 py-2 text-crypto-text outline-none focus:border-crypto-danger"
           />
-          <button type="submit" className="mech-key self-start">Connect</button>
+          <button type="submit" className="flat-btn self-start">Connect</button>
         </div>
       </form>
     </div>
