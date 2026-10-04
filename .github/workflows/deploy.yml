@@ -65,6 +65,10 @@ jobs:
           npm test
           npm run build
           echo "${{ steps.rel.outputs.name }}" > dist/RELEASE
+          # Ship TA-Lib as source only (the server compiles it once and reuses the build), with a fingerprint
+          # of the lockfile and the TA-Lib sources so the server can tell when nothing changed.
+          git clean -fdxq vendor/talib
+          { sha256sum package-lock.json; git ls-files -s vendor/talib; } | sha256sum | cut -d' ' -f1 > deploy/deps.fingerprint
 
       - name: Upload release to server
         uses: appleboy/scp-action@v0.1.7

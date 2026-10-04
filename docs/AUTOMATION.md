@@ -205,3 +205,20 @@ These can't be automated, or deliberately aren't.
 | A bad model went live | Delete it from `data/models/`. The bot falls back to `params/`, or to pure fair value if there's no file there. Or set `AUTO_TRAIN_PROMOTE=validated`. |
 | A run failed | Open the log named in `/api/autotrain` (`data/models/logs/…`). The other steps still ran: each step is independent. |
 | The server feels slow during training | Move `AUTO_TRAIN_HOUR_UTC` to a quiet hour, or lower `AUTO_TRAIN_ABLATION_DAYS`. Training runs at the lowest CPU priority, but Lightsail burst credits are shared. |
+
+## Training windows (AUTO_TRAIN=windows, the default)
+
+The pipeline runs only at the session edges: the first and last 40 minutes (`SESSION_EDGE_MIN`) of the Asian
+(Tokyo open to Hong Kong close), London and New York sessions, on local exchange hours (DST-correct),
+Monday to Friday. That is six windows a day, four hours in all. The bot opens no new positions in them
+(`SESSION_EDGE_NO_ENTRY=true`; open positions are still managed and exited), and the pipeline gets the machine:
+
+- once a day is due (20 hours after the last run), it starts at the next window;
+- when a window ends it is frozen in place (SIGSTOP to its whole process group) and resumed (SIGCONT) at the
+  next window, so it never uses CPU while the bot trades. A frozen pipeline keeps its memory;
+- steps with their own time budgets (the TA network tournament, the walk-forward export) count paused time as
+  elapsed, stop early and resume on a later run, since they save their progress.
+
+The dashboard's auto-train status shows `paused` and the current or next window. `AUTO_TRAIN=daily` restores the
+old schedule (AUTO_TRAIN_HOUR_UTC, no pausing).
+

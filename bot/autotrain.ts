@@ -1,5 +1,6 @@
 // In-bot automation: runs the training pipeline (research/pipeline.ts) on a schedule in a child
-// process at low CPU priority, and hot-swaps whatever it promotes (meta-model, SNN, perp model,
+// process at low CPU priority (AUTO_TRAIN=windows, the default: once a day, only inside the session-edge
+// windows, frozen with SIGSTOP the moment a window ends and resumed with SIGCONT at the next one), and hot-swaps whatever it promotes (meta-model, SNN, perp model,
 // volatility profile, tennis model) into the running engine without a restart. The MLP, perps and
 // tennis models read the SNN's outputs, so a new SNN automatically re-runs their training.
 
@@ -20,6 +21,7 @@ import type { SnnDomain } from './snn/params';
 import { VolModel } from './model/volModel';
 import { FillModel } from './tca/fillModel';
 import { TennisFairModel } from './tennis/tennisFair';
+import { nextSessionEdge, sessionEdge } from './model/sessions';
 import { activeTaNet, setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from './ta/taNet';
 import { logger } from './util/log';
 
@@ -54,7 +56,7 @@ export function pipelineCommand(entry = process.argv[1] ?? ''): { cmd: string; a
 
 export interface AutoTrainStatus {
   mode: string; running: boolean; lastStart: number | null; lastExit: { code: number | null; ts: number; args: string[] } | null;
-  nextRun: number | null; logFile: string | null; models: Record<string, { path: string; mtime: number | null; id?: string }>;
+  nextRun: number | null; paused: boolean; window: { inside: string | null; next: { start: number; end: number; label: string } | null } | null; logFile: string | null; models: Record<string, { path: string; mtime: number | null; id?: string }>;
   swaps: { kind: string; ts: number; detail: string }[]; state: unknown;
 }
 
@@ -68,6 +70,7 @@ export class AutoTrainer {
   private readonly swaps: AutoTrainStatus['swaps'] = [];
   private readonly retrainFor = new Set<string>();
   private queued?: string[];
+  private paused = false;
 
   constructor(private readonly d: {
     cfg: Readonly<Config>; engine: Engine; audit: AuditLog; alerter: Alerter; perpTrader?: PerpTrader;
@@ -87,11 +90,34 @@ export class AutoTrainer {
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
-    this.child?.kill('SIGTERM');
+    if (this.child) { this.signal('SIGCONT'); this.signal('SIGTERM'); }
   }
 
-  /** Next scheduled run (daily at hourUtc), or null when off. */
+  private get windows(): boolean { return this.d.cfg.autoTrain.mode === 'windows'; }
+
+  /** Signal the pipeline's whole process group (it spawns its own children: downloads, TradingView). */
+  private signal(sig: NodeJS.Signals): void {
+    const pid = this.child?.pid;
+    if (!pid) return;
+    try { process.kill(-pid, sig); } catch { try { this.child?.kill(sig); } catch { /* gone */ } }
+  }
+
+  /** Windows mode: the pipeline runs only inside a session-edge window; frozen outside, resumed inside. */
+  private pace(): void {
+    if (!this.windows || !this.child) return;
+    const inside = sessionEdge(this.now, this.d.cfg.sessionEdge.minutes);
+    if (inside && this.paused) { this.signal('SIGCONT'); this.paused = false; log.info('pipeline resumed', { window: inside }); this.d.audit.write('config', { event: 'pipeline_resume', window: inside }); }
+    else if (!inside && !this.paused) { this.signal('SIGSTOP'); this.paused = true; log.info('pipeline paused until the next session-edge window'); this.d.audit.write('config', { event: 'pipeline_pause' }); }
+  }
+
+  /** Next scheduled run (daily at hourUtc; windows: the first session-edge window once a day is due), or null when off. */
   nextRun(now = this.now): number | null {
+    if (this.windows) {
+      const last = this.state().lastRun ?? 0;
+      const due = Math.max(now, last + 20 * 3_600_000);
+      const w = nextSessionEdge(due, this.d.cfg.sessionEdge.minutes);
+      return w ? Math.max(w.start, due) : null;
+    }
     if (this.d.cfg.autoTrain.mode !== 'daily') return null;
     const d = new Date(now);
     let t = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), this.d.cfg.autoTrain.hourUtc);
@@ -107,7 +133,9 @@ export class AutoTrainer {
   async tick(): Promise<void> {
     await this.watch();
     const next = this.nextRun();
-    if (next !== null && this.now >= next && !this.child && this.now - this.lastStart > 3_600_000) this.run([]);
+    const inWindow = !this.windows || !!sessionEdge(this.now, this.d.cfg.sessionEdge.minutes);
+    if (next !== null && this.now >= next && inWindow && !this.child && this.now - this.lastStart > 3_600_000) this.run([]);
+    this.pace();
   }
 
   /** Launch the pipeline (args e.g. ['--only', 'snn']). Queued if one is already running. */
@@ -119,15 +147,19 @@ export class AutoTrainer {
     this.logFile = path.join(logs, `pipeline-${new Date(this.now).toISOString().replace(/[:.]/g, '-')}.log`);
     const out = fs.openSync(this.logFile, 'a');
     this.lastStart = this.now;
-    const child = spawn(cmd, [...base, ...args], { cwd: process.cwd(), env: process.env, stdio: ['ignore', out, out] });
+    // Its own process group, so pausing/resuming reaches the pipeline's children too.
+    const child = spawn(cmd, [...base, ...args], { cwd: process.cwd(), env: process.env, stdio: ['ignore', out, out], detached: this.windows });
     this.child = child;
+    this.paused = false;
     // Training must never starve the trading loop: lowest CPU priority.
     try { if (child.pid) os.setPriority(child.pid, 19); } catch { /* not permitted: run at normal priority */ }
     this.d.audit.write('config', { event: 'pipeline_start', args, log: this.logFile });
     log.info('pipeline started', { args, log: this.logFile });
+    this.pace();
     child.on('exit', (code) => {
       fs.closeSync(out);
       this.child = undefined;
+      this.paused = false;
       this.lastExit = { code, ts: this.now, args };
       this.d.audit.write('config', { event: 'pipeline_exit', code, args, report: this.state().lastReport ?? null });
       if (code !== 0) this.d.alerter.notify('warn', 'pipeline', `Training pipeline exited with code ${code}; see ${this.logFile}`);
@@ -223,7 +255,9 @@ export class AutoTrainer {
     const paths = resolveModelPaths(this.d.cfg);
     return {
       mode: this.d.cfg.autoTrain.mode, running: Boolean(this.child), lastStart: this.lastStart || null, lastExit: this.lastExit,
-      nextRun: this.nextRun(), logFile: this.logFile,
+      nextRun: this.nextRun(), paused: this.paused,
+      window: this.windows ? { inside: sessionEdge(this.now, this.d.cfg.sessionEdge.minutes) ?? null, next: nextSessionEdge(this.now, this.d.cfg.sessionEdge.minutes) ?? null } : null,
+      logFile: this.logFile,
       models: Object.fromEntries(Object.entries(paths).map(([k, p]) => [k, { path: p, mtime: mtime(p), ...(k === 'mlp' ? { id: this.d.engine.model.id } : {}) }])),
       swaps: this.swaps, state: this.state(),
     };

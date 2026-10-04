@@ -300,3 +300,46 @@ export function marketClockFeatures(ts: number): Record<string, number> {
   out.et_dow_sin = Math.sin((2 * Math.PI * z.weekday) / 7); out.et_dow_cos = Math.cos((2 * Math.PI * z.weekday) / 7);
   return out;
 }
+
+// ---- Session edges (training windows) ------------------------------------------------------------
+// The first and last N minutes of each market session: Asia (Tokyo open .. Hong Kong close), London and
+// New York, weekdays, local exchange hours (DST-correct). The bot opens no new positions in them, and the
+// training pipeline runs only in them (paused the rest of the time), so training never competes with
+// trading for the CPU.
+
+export const SESSION_EDGES: Array<{ name: string; open: Venue; close: Venue }> = [
+  { name: 'Asia', open: VENUES.tokyo, close: VENUES.hongkong },
+  { name: 'London', open: VENUES.london, close: VENUES.london },
+  { name: 'New York', open: VENUES.newYork, close: VENUES.newYork },
+];
+
+/** The session edge an instant falls in ("London open", "New York close"), or undefined. */
+export function sessionEdge(ts: number, minutes = 40): string | undefined {
+  for (const s of SESSION_EDGES) {
+    const o = zoneTime(ts, s.open.tz);
+    if (o.weekday >= 1 && o.weekday <= 5 && o.minutes >= s.open.open && o.minutes < s.open.open + minutes) return `${s.name} open`;
+    const c = zoneTime(ts, s.close.tz);
+    if (c.weekday >= 1 && c.weekday <= 5 && c.minutes >= s.close.close - minutes && c.minutes < s.close.close) return `${s.name} close`;
+  }
+  return undefined;
+}
+
+/** The current or next session-edge window: start, end and label (scanned on a one-minute grid, up to 4 days). */
+export function nextSessionEdge(ts: number, minutes = 40): { start: number; end: number; label: string } | undefined {
+  const M = 60_000;
+  let t = Math.floor(ts / M) * M;
+  // Coarse 5-minute steps to find the next minute inside a window, then refine to its first minute.
+  let label = sessionEdge(t, minutes);
+  if (!label) {
+    const limit = t + 4 * 86_400_000;
+    while (t < limit && !(label = sessionEdge(t, minutes))) t += 5 * M;
+    if (!label) return undefined;
+    while (sessionEdge(t - M, minutes)) t -= M;
+    label = sessionEdge(t, minutes)!;
+  } else {
+    while (sessionEdge(t - M, minutes)) t -= M;
+  }
+  let end = t;
+  while (sessionEdge(end, minutes) && end - t < 6 * 3_600_000) end += M;
+  return { start: t, end, label };
+}
