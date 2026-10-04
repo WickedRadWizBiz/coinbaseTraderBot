@@ -19,7 +19,7 @@ export function TelemetryView() {
   return (
     <div className="flex flex-col gap-6 w-full max-w-7xl mx-auto pb-24 md:pb-6 relative z-10 text-crypto-primary font-mono text-sm tracking-wider">
       {g && (
-        <Panel title="Cadence, Sizing & Risk Guards">
+        <Panel title="Cadence, Sizing & Risk Guards" scroll>
           <div className="overflow-x-auto">
             <table className="crt-table">
               <tbody>
@@ -77,7 +77,7 @@ export function TelemetryView() {
           </select>
         }
       >
-        <div className="max-h-[70vh] overflow-y-auto pr-2 flex flex-col gap-2">
+        <div className="crt-scroll max-h-[480px] pr-2 flex flex-col gap-2">
           {(audit ?? []).length === 0 ? (
             <div className="h-40 flex flex-col items-center justify-center opacity-50">
               <Activity className="w-12 h-12 mb-2" />

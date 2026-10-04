@@ -357,3 +357,11 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
 .crt-table th { text-align: left; font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--color-crypto-primary); opacity: 0.75; padding: 6px 8px; border-bottom: 1px solid rgba(155, 124, 255, 0.5); white-space: nowrap; }
 .crt-table td { padding: 6px 8px; border-bottom: 1px solid rgba(155, 124, 255, 0.18); white-space: nowrap; color: var(--color-crypto-text); font-size: 12px; }
 .crt-table tr:hover td { background: rgba(143, 115, 255, 0.07); }
+
+/* Long lists scroll inside their card (themed vertical scrollbar) instead of stretching it. */
+.crt-scroll { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--color-crypto-danger) rgba(0, 0, 0, 0.45); padding-right: 4px; }
+.crt-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.crt-scroll::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.45); border-left: 1px solid rgba(155, 124, 255, 0.35); }
+.crt-scroll::-webkit-scrollbar-thumb { background: var(--color-crypto-danger); border: 1px solid #0a0204; box-shadow: 0 0 6px var(--color-crypto-danger); }
+.crt-scroll::-webkit-scrollbar-thumb:hover { background: var(--color-crypto-primary); }
+.crt-scroll .crt-table thead th { position: sticky; top: 0; z-index: 1; background: rgba(5, 4, 10, 0.96); }

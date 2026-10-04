@@ -1,7 +1,11 @@
 import type { ReactNode } from 'react';
 
-/** CRT grid panel with dither overlay and a header rule, matching the original theme. */
-export function Panel({ title, right, children, className = '', bodyClass = '', flush = false }: { title?: ReactNode; right?: ReactNode; children: ReactNode; className?: string; bodyClass?: string; flush?: boolean }) {
+/**
+ * CRT grid panel with dither overlay and a header rule, matching the original theme.
+ * `scroll` keeps long content inside the card: it gets a fixed maximum height and its own scrollbar
+ * (true = the default height; or pass a Tailwind max-height class such as "max-h-[300px]").
+ */
+export function Panel({ title, right, children, className = '', bodyClass = '', flush = false, scroll }: { title?: ReactNode; right?: ReactNode; children: ReactNode; className?: string; bodyClass?: string; flush?: boolean; scroll?: boolean | string }) {
   return (
     <div className={`crt-grid-panel relative overflow-hidden ${className}`}>
       <div className="absolute inset-0 heavy-dither-overlay pointer-events-none" />
@@ -12,7 +16,7 @@ export function Panel({ title, right, children, className = '', bodyClass = '', 
             {right}
           </h3>
         )}
-        {children}
+        {scroll ? <div className={`crt-scroll ${typeof scroll === 'string' ? scroll : 'max-h-[420px]'}`}>{children}</div> : children}
       </div>
     </div>
   );

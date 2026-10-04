@@ -27,6 +27,7 @@ function FeatureTable({ model }: { model: any }) {
       <div className="text-[11px] uppercase tracking-widest opacity-80">
         Candidate features — {model.kind === 'identity' ? 'none in use (pure fair value until a model is trained)' : `${used.size} in use${model.selected ? ` · selected set: ${model.selected.set}, ${model.selected.hidden} hidden units` : ''}`}
       </div>
+      <div className="crt-scroll max-h-[480px] flex flex-col gap-3">
       {groups.map((g) => (
         <div key={g} className="crt-border bg-black/30 p-3">
           <div className="text-xs font-bold uppercase tracking-widest text-crypto-text mb-2">{GROUP_LABEL[g] ?? g}</div>
@@ -43,6 +44,7 @@ function FeatureTable({ model }: { model: any }) {
           </table>
         </div>
       ))}
+      </div>
     </div>
   );
 }
@@ -60,7 +62,7 @@ function ConfluenceMonitor({ modelKind }: { modelKind: string }) {
   const { data: markets } = usePoll<any[]>('/markets', 2000);
   const rows = (markets ?? []).filter((m) => !m.blocked);
   return (
-    <Panel title="Confluence Monitor">
+    <Panel title="Confluence Monitor" scroll="max-h-[560px]">
       <p className="text-xs opacity-80 normal-case leading-relaxed mb-3">
         Confluence factors are signed: positive = bullish for YES, negative = bearish; agreement features are zero unless every factor points the same way.
         Their weights are learned offline and validated, and they act on trades only through the model&apos;s probability: a stronger, agreeing signal raises the edge,

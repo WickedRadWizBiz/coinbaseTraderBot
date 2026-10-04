@@ -647,6 +647,25 @@ export class TaNetRuntime {
 
   constructor(readonly net: TaNet, readonly requireValidated = true) {}
 
+  /** The latest hourly inputs for an asset, z-scored the way the network sees them (trend features and
+   *  the hourly context features, in TANET_TREND_FEATURES / TANET_CTX_FEATURES order). For the dashboard. */
+  /** Every stored hour of an asset's inputs (z-scored as in latestInputs) with its close, oldest first. */
+  inputHistory(asset: string): Array<{ ts: number; trend: number[]; ctx: number[]; close: number }> {
+    const m = this.feats.get(asset);
+    if (!m) return [];
+    const n = this.net.params.norm;
+    const z = (v: number, nm: TaNetNorm, j: number) => (Number.isFinite(v) && nm.std[j] ? Math.max(-8, Math.min(8, (v - nm.mean[j]) / nm.std[j])) : 0);
+    return [...m.entries()].sort((a, b) => a[0] - b[0]).map(([ts, r]) => ({ ts, trend: r.f.map((v, j) => z(v, n.trend, j)), ctx: r.c.map((v, j) => z(v, n.ctx, j)), close: r.close }));
+  }
+
+  latestInputs(asset: string): { ts: number; trend: number[]; ctx: number[] } | undefined {
+    const m = this.feats.get(asset);
+    if (!m?.size) return undefined;
+    const ts = Math.max(...m.keys()), r = m.get(ts)!, n = this.net.params.norm;
+    const z = (v: number, nm: TaNetNorm, j: number) => (Number.isFinite(v) && nm.std[j] ? Math.max(-8, Math.min(8, (v - nm.mean[j]) / nm.std[j])) : 0);
+    return { ts, trend: r.f.map((v, j) => z(v, n.trend, j)), ctx: r.c.map((v, j) => z(v, n.ctx, j)) };
+  }
+
   /** Live only: record the position rule's results per hour and decide after `days` days. */
   enableForwardTest(file: string, now: number, o: { days?: number; muteOnFail?: boolean } = {}): void {
     let rec: ForwardRecord | undefined;

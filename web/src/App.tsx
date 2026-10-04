@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
-import { Brain, LayoutDashboard, LogOut, TerminalSquare } from 'lucide-react';
+import { Brain, LayoutDashboard, LogOut, Network, TerminalSquare } from 'lucide-react';
 import { authRequired, getToken, setToken } from './api';
 import { DashboardView } from './components/DashboardView';
 import { MetalBackground } from './components/MetalBackground';
 import { ModelView } from './components/ModelView';
+import { NeuralMapView } from './components/NeuralMapView';
 import { TelemetryView } from './components/TelemetryView';
 import { useTradeShake } from './useTradeShake';
 
-type ViewType = 'dashboard' | 'model' | 'telemetry';
+type ViewType = 'dashboard' | 'model' | 'map' | 'telemetry';
 
 const SystemLEDs = () => {
   const [active, setActive] = useState(false);
@@ -44,6 +45,7 @@ const SystemLEDs = () => {
 const NAV: Array<{ id: ViewType; label: string; short: string; Icon: typeof LayoutDashboard }> = [
   { id: 'dashboard', label: 'Dashboard', short: 'Dash', Icon: LayoutDashboard },
   { id: 'model', label: 'Strategy Brain', short: 'Brain', Icon: Brain },
+  { id: 'map', label: 'Neural Map', short: 'Map', Icon: Network },
   { id: 'telemetry', label: 'Telemetry', short: 'Logs', Icon: TerminalSquare },
 ];
 
@@ -149,6 +151,7 @@ export default function App() {
             <>
               {view === 'dashboard' && <DashboardView />}
               {view === 'model' && <ModelView />}
+              {view === 'map' && <NeuralMapView />}
               {view === 'telemetry' && <TelemetryView />}
             </>
           )}

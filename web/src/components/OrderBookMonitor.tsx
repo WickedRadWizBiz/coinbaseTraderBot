@@ -23,14 +23,18 @@ interface Level { price: number; size: number }
 /**
  * Depth monitor: the contract's YES order book (cumulative depth areas) with
  * the matching spot USD pair's order book overlaid (dashed amber lines on
- * their own axes), plus the book imbalance meter. Markets with open
- * positions are listed first.
+ * their own axes), plus the book imbalance meter. Only the contracts the
+ * bot is trading appear: an open position or a working order (positions first).
  */
-export function OrderBookMonitor({ markets }: { markets: MarketRow[] }) {
-  const tabs = useMemo(
-    () => [...markets].sort((a, b) => Number(Math.abs(b.position) > 0) - Number(Math.abs(a.position) > 0) || a.closeTs - b.closeTs),
-    [markets],
-  );
+const WORKING = new Set(['PENDING_NEW', 'UNKNOWN', 'ACKED', 'PARTIALLY_FILLED', 'CANCEL_PENDING']);
+
+export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[]; orders?: Array<{ ticker: string; state: string }> }) {
+  const tabs = useMemo(() => {
+    const working = new Set(orders.filter((o) => WORKING.has(o.state)).map((o) => o.ticker));
+    return markets
+      .filter((m) => Math.abs(m.position) > 0 || working.has(m.ticker))
+      .sort((a, b) => Number(Math.abs(b.position) > 0) - Number(Math.abs(a.position) > 0) || a.closeTs - b.closeTs);
+  }, [markets, orders]);
   const [active, setActive] = useState<string | null>(null);
   const [book, setBook] = useState<{ bids: Level[]; asks: Level[]; usable: boolean } | null>(null);
   const [spot, setSpot] = useState<{ product: string; bids: Level[]; asks: Level[]; index: number | null; strike: number | null; error?: string } | null>(null);
@@ -107,7 +111,7 @@ export function OrderBookMonitor({ markets }: { markets: MarketRow[] }) {
         {tabs.length === 0 ? (
           <div className="px-4 py-3 text-xs font-bold tracking-widest uppercase text-crypto-primary/70 flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-crypto-danger animate-pulse" />
-            <span>[NO ACTIVE MARKETS - AWAITING DISCOVERY]</span>
+            <span>[NO CONTRACTS IN PLAY]</span>
           </div>
         ) : (
           tabs.map((t) => {
@@ -136,10 +140,10 @@ export function OrderBookMonitor({ markets }: { markets: MarketRow[] }) {
 
       <div className="p-6 flex flex-col gap-6 relative z-20">
         {!tab ? (
-          <div className="h-64 flex flex-col items-center justify-center gap-3 border border-crypto-primary/30 bg-black/40 p-6 text-center">
+          <div className="h-40 flex flex-col items-center justify-center gap-3 border border-crypto-primary/30 bg-black/40 p-6 text-center">
             <div className="w-3 h-3 bg-crypto-danger rounded-full animate-ping" />
-            <span className="text-crypto-danger font-mono tracking-widest text-sm font-bold uppercase">[NO MARKETS TO MONITOR]</span>
-            <span className="text-xs text-crypto-primary opacity-70 max-w-md">Depth monitoring binds to the active 15-minute markets as soon as they are discovered.</span>
+            <span className="text-crypto-danger font-mono tracking-widest text-sm font-bold uppercase">[NOT TRADING ANY CONTRACT]</span>
+            <span className="text-xs text-crypto-primary opacity-70 max-w-md">The depth monitor shows only contracts the bot holds or has an order working in. It fills in as soon as the bot trades.</span>
           </div>
         ) : loading && orderBook.length === 0 ? (
           <div className="h-64 flex items-center justify-center">

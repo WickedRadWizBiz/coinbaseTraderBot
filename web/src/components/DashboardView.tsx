@@ -122,9 +122,9 @@ export function DashboardView() {
         </Panel>
       </div>
 
-      <OrderBookMonitor markets={markets ?? []} />
+      <OrderBookMonitor markets={markets ?? []} orders={orders ?? []} />
 
-      <Panel title="Active Markets">
+      <Panel title="Active Markets" scroll>
         <div className="overflow-x-auto">
           <table className="crt-table">
             <thead><tr><th>Ticker</th><th>Close</th><th>Spot</th><th>Strike</th><th>Fair value</th><th>Model p</th><th>Conf</th><th>Bid</th><th>Ask</th><th>Pos</th><th>State</th></tr></thead>
@@ -147,7 +147,7 @@ export function DashboardView() {
       </Panel>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <Panel title="Positions">
+        <Panel title="Positions" scroll>
           <div className="overflow-x-auto">
             <table className="crt-table">
               <thead><tr><th>Ticker</th><th>Side</th><th>Qty</th><th>If YES</th><th>If NO</th><th>Max loss</th></tr></thead>
@@ -177,8 +177,8 @@ export function DashboardView() {
           )}
         </Panel>
 
-        <Panel title="Order Flow">
-          <div className="overflow-x-auto max-h-[360px] overflow-y-auto">
+        <Panel title="Order Flow" scroll>
+          <div className="overflow-x-auto">
             <table className="crt-table">
               <thead><tr><th>Time</th><th>Ticker</th><th>Side</th><th>Px</th><th>Qty</th><th>Fill</th><th>Type</th><th>State</th></tr></thead>
               <tbody>
