@@ -70,7 +70,7 @@ jobs:
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
-          username: ${{ secrets.LIGHTSAIL_USERNAME }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
           source: "dist,web/dist,params,package.json,package-lock.json,deploy,vendor"
@@ -80,7 +80,7 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
-          username: ${{ secrets.LIGHTSAIL_USERNAME }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
           script_stop: true
@@ -91,6 +91,16 @@ jobs:
             # tvdatafeed (deploy/tv_history.py); installed once, skipped when present.
             if ! command -v g++ >/dev/null || ! command -v make >/dev/null || ! python3 -c 'import ensurepip' 2>/dev/null || ! command -v git >/dev/null; then
               sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential python3 python3-venv git
+            fi
+            # Node 20+ (the bot targets 22); installed from NodeSource when missing or older.
+            if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 20 ]; then
+              curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
+            fi
+            # The previous bot ran under pm2 (crypto-bot) on the same port: stop it for good.
+            if command -v pm2 >/dev/null; then
+              pm2 delete crypto-bot 2>/dev/null || true
+              pm2 delete coinbaseTraderBot 2>/dev/null || true
+              pm2 save --force 2>/dev/null || true
             fi
             npm ci --omit=dev
             bash deploy/activate.sh ~/releases/${{ steps.rel.outputs.name }}
