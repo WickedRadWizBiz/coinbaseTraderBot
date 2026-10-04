@@ -103,7 +103,7 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
   const fmtSpot = (v: number | null | undefined) => (v === null || v === undefined ? '—' : v < 10 ? v.toFixed(4) : v.toFixed(2));
 
   return (
-    <div className="crt-grid-panel crt-glass !p-0 flex flex-col overflow-hidden relative z-10 mt-2">
+    <div className="crt-grid-panel !p-0 flex flex-col overflow-hidden relative z-10 mt-2">
       <div className="absolute inset-0 heavy-dither-overlay pointer-events-none" />
 
       {/* Market tabs (positions first) */}

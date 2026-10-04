@@ -8,7 +8,7 @@ import type { ReactNode } from 'react';
  */
 export function Panel({ title, right, children, className = '', bodyClass = '', flush = false, scroll }: { title?: ReactNode; right?: ReactNode; children: ReactNode; className?: string; bodyClass?: string; flush?: boolean; scroll?: boolean | string }) {
   return (
-    <div className={`crt-grid-panel crt-glass relative overflow-hidden ${className}`}>
+    <div className={`crt-grid-panel relative overflow-hidden ${className}`}>
       <div className="absolute inset-0 heavy-dither-overlay pointer-events-none" />
       <div className={`relative z-10 flex flex-col w-full ${bodyClass}`}>
         {title && (
@@ -30,7 +30,7 @@ export function Panel({ title, right, children, className = '', bodyClass = '', 
 export function Screen({ size, loading, children }: { size: string; loading?: boolean; children?: ReactNode }) {
   if (loading) {
     return (
-      <div className={`crt-grid-panel crt-glass relative overflow-hidden flex items-center justify-center ${size}`}>
+      <div className={`crt-grid-panel relative overflow-hidden flex items-center justify-center ${size}`}>
         <div className="absolute inset-0 heavy-dither-overlay pointer-events-none" />
         <span className="relative z-10 animate-pulse text-xs tracking-widest uppercase">Establishing link...</span>
       </div>
