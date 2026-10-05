@@ -64,6 +64,9 @@ test('engine places risk-checked post-only quotes through the OMS and paper exch
   }
   const st = engine.status.get(market.ticker)!;
   assert.ok(st.fairValue! > 0.5, 'spot above strike');
+  // Every entry is put to the adversary; without TA / confluence evidence it keeps its normal size.
+  assert.ok(st.adversary, 'adversary verdict recorded');
+  assert.ok(st.adversary!.multiplier >= 1);
   // Stale index: quotes are pulled (fail closed), not left resting.
   md.index.get('BTC')!.add(60000, Date.now() - 1); // no-op: out of order
   const idx = md.index.get('BTC')!;
