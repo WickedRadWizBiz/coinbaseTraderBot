@@ -27,7 +27,10 @@ test('fitness: Sortino, drawdown, costs, independent interactions, regimes, DSR'
   assert.equal(maxDrawdown([0.1, -0.5, 0.2]), 0.5);
   assert.ok(sortino([0.01, -0.005, 0.02, 0.01]) > 0);
   const f = fitnessOf(burst, { clusterMs: H });
-  assert.ok(Math.abs(f.fitness - (f.sortino - 5 * f.maxDrawdown - 5 * f.costs)) < 1e-12);
+  assert.ok(Math.abs(f.fitness - f.growth!) < 1e-12, 'default objective: log growth');
+  assert.ok(Math.abs(f.growth! - 365 * Math.log(1.015)) < 1e-9, 'one day of +1.5%');
+  const fs = fitnessOf(burst, { clusterMs: H, weights: { objective: 'sortino', ddWeight: 5, costWeight: 5 } });
+  assert.ok(Math.abs(fs.fitness - (fs.sortino - 5 * fs.maxDrawdown - 5 * fs.costs)) < 1e-12);
   assert.equal(fitnessOf([], { from: t0, to: t0 + DAY, clusterMs: H }).fitness, 0, 'no trades = cash = 0');
   assert.equal(regimeOf(Date.UTC(2022, 5, 1))!.id, 'c2-markdown');
   assert.equal(regimeOf(Date.UTC(2026, 5, 1))!.id, 'c3-distribution');

@@ -5,6 +5,9 @@
 //    net loss is ddScaleAt of the reference; as wins win the losses back it grows again, and once wins
 //    equal losses it is back to full size. Never zero: the bot keeps trading, smaller. The same rule in
 //    paper and live, with the kill-switch override on or off.
+//    Break-even moves UP with the pool (never down by P&L) when the day's profit (UTC day) reaches
+//    dailyGoalUsd, or after two losses in a row that still leave the pool above break-even: from there,
+//    further losses shrink size. Same rule in paper and live.
 //  - kellyScale (from the high-water mark) is kept for reporting.
 //  - Pause new risk for 24 h after a 7-day loss beyond weeklyLossPause (skipped by the override).
 // Equity = cash balance + premium committed to open positions (vault/pocket
@@ -19,8 +22,12 @@ export const SIZE_FLOOR = 0.25;
 
 export interface EquityGuardState {
   peak: number;
-  /** Break-even reference: starting cash, moved only by cash flows and training refills. */
+  /** Break-even reference: starting cash, moved by cash flows, training refills and the ratchet. */
   reference?: number;
+  /** Ratchet bookkeeping: consecutive losing trades; UTC day and its (flow-adjusted) starting equity. */
+  lossStreak?: number;
+  dayKey?: string;
+  dayStart?: number;
   /** High-water mark of TRADABLE bankroll (after vault/pocket): picks the sizing tier. */
   peakTradable?: number;
   /** Hourly equity samples (flow-adjusted), newest last, 8 days kept. */
@@ -32,16 +39,18 @@ export class EquityGuard {
   private st: EquityGuardState;
   private lastSave = 0;
 
-  constructor(private readonly p: { ddScaleAt: number; weeklyLossPause: number }, private readonly file?: string) {
+  constructor(private readonly p: { ddScaleAt: number; weeklyLossPause: number; dailyGoalUsd?: number }, private readonly file?: string) {
     this.st = (file && readJson<EquityGuardState>(file)) || { peak: 0, history: [], pausedUntil: 0 };
     // State saved before the break-even reference existed: the high-water mark is the best estimate.
     if (this.st.reference === undefined && this.st.peak > 0) this.st.reference = this.st.peak;
   }
 
   /** `tradable`: current tradable bankroll (tier high-water mark). `weeklyLossPause`: per-tier override. */
-  update(equity: number, now: number, tradable?: number, weeklyLossPause = this.p.weeklyLossPause): void {
-    if (!(equity > 0)) return;
+  update(equity: number, now: number, tradable?: number, weeklyLossPause = this.p.weeklyLossPause): RatchetEvent | undefined {
+    if (!(equity > 0)) return undefined;
     this.st.reference ??= equity;
+    const raised = dailyRatchet(this.st, equity, now, this.p.dailyGoalUsd);
+    if (raised) this.save(now, true);
     this.st.peak = Math.max(this.st.peak, equity);
     if (tradable !== undefined && tradable > 0) this.st.peakTradable = Math.max(this.st.peakTradable ?? 0, tradable);
     const h = this.st.history;
@@ -54,6 +63,14 @@ export class EquityGuard {
       this.save(now, true);
     }
     this.save(now);
+    return raised;
+  }
+
+  /** A closed trade (settled market): two losses in a row that leave the pool above break-even raise it. */
+  onTradeResult(win: boolean, equity: number, now: number): RatchetEvent | undefined {
+    const raised = streakRatchet(this.st, win, equity);
+    this.save(now, true);
+    return raised;
   }
 
   /** A withdrawal (negative) or deposit (positive): shift every reference level. `tradableAmount` is the
@@ -61,6 +78,7 @@ export class EquityGuard {
   onCashFlow(amount: number, now: number, tradableAmount = amount): void {
     if (this.st.peak > 0) this.st.peak = Math.max(0, this.st.peak + amount);
     if (this.st.reference !== undefined) this.st.reference = Math.max(0, this.st.reference + amount);
+    if (this.st.dayStart !== undefined) this.st.dayStart = Math.max(0, this.st.dayStart + amount);
     if (this.st.peakTradable) this.st.peakTradable = Math.max(0, this.st.peakTradable + tradableAmount);
     for (const x of this.st.history) x.equity = Math.max(0, x.equity + amount);
     this.save(now, true);
@@ -68,7 +86,7 @@ export class EquityGuard {
 
   /** New training epoch (paper refill): the refilled equity is the new high-water mark; pause cleared. */
   resetEpoch(equity: number, now: number, tradable = equity): void {
-    this.st = { peak: equity, reference: equity, peakTradable: tradable, history: [{ ts: now, equity }], pausedUntil: 0 };
+    this.st = { peak: equity, reference: equity, peakTradable: tradable, history: [{ ts: now, equity }], pausedUntil: 0, lossStreak: 0, dayKey: utcDay(now), dayStart: equity };
     this.save(now, true);
   }
 
@@ -128,14 +146,61 @@ export function breakEvenScale(reference: number | undefined, equity: number, lo
 
 /** Break-even reference for a separate account (the perps margin): set on first sight, moved by refills. */
 export class BreakEven {
-  private st: { reference?: number };
-  constructor(private readonly file?: string) { this.st = (file && readJson<{ reference?: number }>(file)) || {}; }
+  private st: RatchetState;
+  constructor(private readonly file?: string) { this.st = (file && readJson<RatchetState>(file)) || {}; }
+  /** Daily-profit ratchet (call with each equity reading). */
+  onEquity(equity: number, now: number, dailyGoalUsd?: number): RatchetEvent | undefined {
+    const r = dailyRatchet(this.st, equity, now, dailyGoalUsd);
+    if (r || this.st.dayKey === undefined) this.save();
+    return r;
+  }
+  /** Two-losses-in-a-row ratchet (call with each closed trade). */
+  onTradeResult(win: boolean, equity: number): RatchetEvent | undefined {
+    const r = streakRatchet(this.st, win, equity);
+    this.save();
+    return r;
+  }
   get reference(): number | undefined { return this.st.reference; }
   /** First equity seen becomes break-even. */
   observe(equity: number): void { if (this.st.reference === undefined && equity > 0) { this.st.reference = equity; this.save(); } }
   /** New epoch (training refill) or a deposit: break-even moves with the cash, not with P&L. */
-  reset(equity: number): void { this.st.reference = equity; this.save(); }
+  reset(equity: number): void { this.st.reference = equity; this.st.lossStreak = 0; this.st.dayStart = equity; this.save(); }
   shift(amount: number): void { if (this.st.reference !== undefined) { this.st.reference = Math.max(0, this.st.reference + amount); this.save(); } }
   scale(equity: number, lossAt: number, floor = SIZE_FLOOR): number { return breakEvenScale(this.st.reference, equity, lossAt, floor); }
   private save(): void { if (this.file) writeJsonAtomic(this.file, this.st); }
+}
+
+// ---- Break-even ratchet -------------------------------------------------------------------------------
+
+interface RatchetState { reference?: number; lossStreak?: number; dayKey?: string; dayStart?: number }
+
+/** Break-even moved up to the pool, and why. */
+export interface RatchetEvent { from: number; to: number; reason: 'daily_goal' | 'two_losses' }
+
+const utcDay = (ts: number) => new Date(ts).toISOString().slice(0, 10);
+
+/** The day's profit reached the goal: break-even moves up to the pool. */
+function dailyRatchet(st: RatchetState, equity: number, now: number, goal: number | undefined): RatchetEvent | undefined {
+  const key = utcDay(now);
+  if (st.dayKey !== key) { st.dayKey = key; st.dayStart = equity; }
+  if (!(goal! > 0) || st.reference === undefined || st.dayStart === undefined) return undefined;
+  if (equity - st.dayStart >= goal! && equity > st.reference) {
+    const from = st.reference;
+    st.reference = equity;
+    st.dayStart = equity; // the next goal counts from here
+    return { from, to: equity, reason: 'daily_goal' };
+  }
+  return undefined;
+}
+
+/** Two losing trades in a row that leave the pool above break-even: break-even moves up to the pool. */
+function streakRatchet(st: RatchetState, win: boolean, equity: number): RatchetEvent | undefined {
+  st.lossStreak = win ? 0 : (st.lossStreak ?? 0) + 1;
+  if (st.lossStreak >= 2 && st.reference !== undefined && equity > st.reference) {
+    const from = st.reference;
+    st.reference = equity;
+    st.lossStreak = 0;
+    return { from, to: equity, reason: 'two_losses' };
+  }
+  return undefined;
 }

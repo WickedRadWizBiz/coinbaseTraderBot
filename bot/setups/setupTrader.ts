@@ -216,6 +216,11 @@ export class SetupTrader {
   private record(t: OpenTrade, now: number): void {
     const res = tradeResult(t);
     if (Number.isFinite(res.r)) this.d.streak?.observe(res.r / R_SD, res.r > 0, now);
+    const tradeUsd = res.ret * (t.notional ?? 0);
+    if (tradeUsd !== 0 && this.equity) {
+      const raised = this.d.breakEven?.onTradeResult(tradeUsd > 0, this.equity.value + tradeUsd);
+      if (raised) this.d.audit?.write('training', { event: 'break_even_raised', book: 'perps', ...raised });
+    }
     const usd = res.ret * (t.notional ?? 0);
     if (this.day) this.day.realized += usd;
     this.history.push({ asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, exit: t.closed?.px ?? NaN, entryTs: t.entryTs, exitTs: t.closed?.ts ?? now, reason: t.closed?.reason ?? 'manual', r: res.r, ret: res.ret, usd, score: t.score });
@@ -287,6 +292,8 @@ export class SetupTrader {
       // Break-even scale: the risk budget of new entries shrinks with net losses (never to zero) and is
       // back to full once wins recoup them.
       this.d.breakEven?.observe(equity);
+      const raised = this.d.breakEven?.onEquity(equity, now, this.d.params.dailyGoalUsd);
+      if (raised) this.d.audit?.write('training', { event: 'break_even_raised', book: 'perps', ...raised });
       const sizeScale = this.d.breakEven?.scale(equity, this.d.lossAt ?? 0.15) ?? 1;
       const entries = this.book.select(now, equity * sizeScale, (cand) => {
         if (!assets.includes(cand.sig.asset)) return undefined;

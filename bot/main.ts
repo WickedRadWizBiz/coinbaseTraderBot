@@ -168,7 +168,7 @@ async function main(): Promise<void> {
   const balanceMonitorPath = path.join(cfg.dataDir, 'balance_monitor.json');
   const balanceMonitor = new BalanceMonitor(readJson<MonitorState>(balanceMonitorPath) ?? {});
   const tca = new Tca(path.join(cfg.dataDir, 'tca'), (t) => md.books.get(t)?.mid());
-  const equityGuard = new EquityGuard({ ddScaleAt: cfg.strategy.ddScaleAt, weeklyLossPause: cfg.strategy.weeklyLossPause }, path.join(cfg.dataDir, 'equity_guard.json'));
+  const equityGuard = new EquityGuard({ ddScaleAt: cfg.strategy.ddScaleAt, weeklyLossPause: cfg.strategy.weeklyLossPause, dailyGoalUsd: cfg.vault.dailyGoalUsd }, path.join(cfg.dataDir, 'equity_guard.json'));
   // Dashboard PLAY / STOP and the paper training override (persisted).
   const control = new RunControl(path.join(cfg.dataDir, 'control.json'));
   // Kill-switch override (paper and live): loss brakes de-risk instead of halting.

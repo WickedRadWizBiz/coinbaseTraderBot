@@ -38,10 +38,11 @@
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: history, ta_net, ta_net_oos, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill
+//   npm run pipeline -- --only mlp,perps     # steps: history, ta_net, ta_net_oos, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
 
+import { tuneSizingMain } from './tuneSizing';
 import fs from 'fs';
 import path from 'path';
 import { MODEL_FILES } from '../bot/autotrain';
@@ -83,7 +84,7 @@ import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
 import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
 
-export const STEPS = ['history', 'ta_net', 'ta_net_oos', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill'] as const;
+export const STEPS = ['history', 'ta_net', 'ta_net_oos', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -581,6 +582,15 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       fs.copyFileSync(cand, promoted('fill'));
       const m = FillModel.load(promoted('fill'));
       return { promoted: true, active: Boolean(m?.validated), validation: p.validation };
+    });
+  }
+
+  // ---- 9. sizing tuner: replays the bot's settled entries under a grid of sizing policies (PROPOSAL) ----
+  if (want('sizing')) {
+    await run('sizing', async () => {
+      const r = await tuneSizingMain(argsOf({ 'data-dir': cfg.dataDir, kelly: cfg.strategy.kellyFraction, 'loss-at': cfg.strategy.ddScaleAt, start: cfg.paperBankrollUsd, floor: cfg.strategy.minTradableBankrollUsd, out: path.join(A.dir, 'sizing_proposal.json') }));
+      if (!r.ready) throw new SkipStep(r.note);
+      return { proposal: path.join(A.dir, 'sizing_proposal.json'), note: r.note, best: r.best, current: r.current, epochs: r.epochs };
     });
   }
 

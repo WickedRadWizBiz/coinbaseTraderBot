@@ -112,6 +112,13 @@ export interface StrategyConfig {
   weeklyLossPause: number;
   /** Halt new risk when the rolling log-loss advantage vs the calibrated market is significantly negative. */
   modelHealthHalt: boolean;
+  /** Paper exploration: occasionally enter a borderline opportunity (edge within exploreBand below the
+   *  threshold, still fee-net positive) at minimum size, logged with its probability, so the fill model
+   *  and the edge threshold get data near the boundary. Paper mode only. */
+  paperExplore: boolean;
+  exploreRate: number;
+  exploreBand: number;
+  exploreMaxPerHour: number;
   modelHealthMinWindows: number;
   huntTargetMargin: number;
   huntMinConfluence: number;
@@ -702,6 +709,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     ddScaleAt: num(env, 'RISK_DD_SCALE_AT', 0.15, 0.01, 1),
     weeklyLossPause: num(env, 'RISK_WEEKLY_LOSS_PAUSE', 0.08, 0.01, 1),
     modelHealthHalt: bool(env, 'MODEL_HEALTH_HALT', true),
+    paperExplore: bool(env, 'PAPER_EXPLORE', true),
+    exploreRate: num(env, 'PAPER_EXPLORE_RATE', 0.1, 0, 1),
+    exploreBand: num(env, 'PAPER_EXPLORE_BAND', 0.02, 0, 0.1),
+    exploreMaxPerHour: num(env, 'PAPER_EXPLORE_MAX_PER_HOUR', 6, 0, 120),
     modelHealthMinWindows: num(env, 'MODEL_HEALTH_MIN_WINDOWS', 200, 20, 100000),
     huntTargetMargin: num(env, 'HUNT_TARGET_MARGIN', 0.02, 0, 0.5),
     huntMinConfluence: num(env, 'HUNT_MIN_CONFLUENCE', 2, 1, 7),

@@ -24,6 +24,7 @@
     "research:ta": "tsx research/taStudy.ts",
     "research:perp-train": "tsx research/trainPerpModel.ts",
     "research:perp-backtest": "tsx research/perpBacktest.ts",
+    "research:tune-sizing": "tsx research/tuneSizing.ts",
     "pipeline": "tsx research/pipeline.ts",
     "research:tennis-train": "tsx research/trainTennisModel.ts",
     "research:vol-model": "tsx research/trainVolModel.ts",

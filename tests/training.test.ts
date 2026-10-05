@@ -179,3 +179,52 @@ test('tournaments: a member that sits out cannot beat one that trades and loses 
   assert.ok(loser.fitness > idle.fitness, `${loser.fitness} > ${idle.fitness}`);
   assert.equal(coverageFloor(rep(1.2), 100, 1000, 0.05).fitness, 1.2, 'enough coverage: unchanged');
 });
+
+test('break-even ratchet: moves up with the pool on a $100 profit day, and after two losses that stay above break-even', () => {
+  const day = Date.UTC(2026, 9, 5, 12);
+  const g = new EquityGuard({ ddScaleAt: 0.15, weeklyLossPause: 0.08, dailyGoalUsd: 100 });
+  g.update(100, day);
+  assert.equal(g.update(180, day + 1000), undefined, '+$80: not yet');
+  const r = g.update(205, day + 2000);
+  assert.deepEqual(r && { from: r.from, to: r.to, reason: r.reason }, { from: 100, to: 205, reason: 'daily_goal' });
+  assert.ok(g.sizeScale(190) < 1, 'losses from the new break-even shrink size');
+  assert.equal(g.sizeScale(205), 1);
+  // Two losses in a row that leave the pool above break-even move it up to the pool.
+  const h = new EquityGuard({ ddScaleAt: 0.15, weeklyLossPause: 0.08, dailyGoalUsd: 100 });
+  h.update(100, day);
+  assert.equal(h.onTradeResult(false, 130, day), undefined, 'one loss');
+  const r2 = h.onTradeResult(false, 125, day);
+  assert.equal(r2?.reason, 'two_losses');
+  assert.equal(r2?.to, 125);
+  assert.equal(h.onTradeResult(true, 128, day), undefined);
+  assert.equal(h.onTradeResult(false, 126, day), undefined, 'a win resets the count');
+  // Two losses that take the pool BELOW break-even do not move it (size already shrinks).
+  const k = new EquityGuard({ ddScaleAt: 0.15, weeklyLossPause: 0.08 });
+  k.update(100, day);
+  k.onTradeResult(false, 99, day);
+  assert.equal(k.onTradeResult(false, 97, day), undefined);
+  assert.equal(k.netPnl(97), -3);
+  // Perps: the same rule on its own account.
+  const be = new BreakEven();
+  be.observe(100);
+  be.onEquity(100, day, 100);
+  assert.equal(be.onEquity(201, day + 1, 100)?.reason, 'daily_goal');
+  assert.equal(be.reference, 201);
+});
+
+import { replaySizing, tuneSizing, type TradeRecord } from '../research/tuneSizing';
+
+test('sizing tuner: oversizing loses to the right size through exhaustions, never by not trading; proposal only when enough trades', () => {
+  const r = rng(11);
+  // A modest real edge: the model says 60% on 50c contracts that win 56% of the time.
+  const trades: TradeRecord[] = Array.from({ length: 1500 }, (_, i) => ({ ts: i * 60_000, ticker: `T${i}`, book: 'crypto', q: 0.6, cost: 0.5, count: 1, won: r() < 0.56 }));
+  const small = replaySizing(trades, { kelly: 0.15, lossAt: 0.15 }, { maxOrderFrac: 1 });
+  const huge = replaySizing(trades, { kelly: 1, lossAt: 1 }, { maxOrderFrac: 1 });
+  assert.ok(small.growthPerTrade > huge.growthPerTrade, `${small.growthPerTrade} > ${huge.growthPerTrade}`);
+  assert.ok(huge.exhaustions >= small.exhaustions);
+  assert.ok(small.trades > 0, 'it keeps trading');
+  const p = tuneSizing(trades, { kelly: 0.25, lossAt: 0.15 });
+  assert.equal(p.ready, true);
+  assert.ok(p.best.growthPerTrade >= p.current.growthPerTrade);
+  assert.equal(tuneSizing(trades.slice(0, 50), { kelly: 0.25, lossAt: 0.15 }).ready, false, 'not enough trades yet');
+});
