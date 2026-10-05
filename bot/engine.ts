@@ -467,10 +467,19 @@ export class Engine {
   /** The settlement index (Kalshi's feed) if fresh; in paper, Coinbase spot stands in while Kalshi's print
    *  is late (a busy server or a reconnect), so training is not blocked by feed lag. Live never substitutes. */
   private indexPoint(asset: string, now: number) {
-    const R = this.d.cfg.risk;
-    const p = this.d.md.index.get(asset)?.fresh(now, R.maxIndexAgeMs);
-    if (p || this.d.cfg.mode !== 'paper') return p;
-    return this.d.md.spot.get(asset)?.fresh(now, R.maxIndexAgeMs);
+    return this.pricingIndex(asset, now)?.fresh(now, this.d.cfg.risk.maxIndexAgeMs);
+  }
+
+  /** The price series to price contracts from: Kalshi's settlement index when it is fresh and has enough
+   *  prints for a volatility estimate; in paper, otherwise the Coinbase spot series (same asset, small
+   *  basis), so a sparse or late Kalshi index feed does not block training with 'index stale' /
+   *  'volatility warming up'. Live always prices from the settlement index. */
+  private pricingIndex(asset: string, now: number) {
+    const md = this.d.md, R = this.d.cfg.risk;
+    const idx = md.index.get(asset);
+    if (this.d.cfg.mode !== 'paper' || (idx?.fresh(now, R.maxIndexAgeMs) && idx.vol())) return idx;
+    const spot = md.spot.get(asset);
+    return spot?.fresh(now, R.maxIndexAgeMs) && spot.vol() ? spot : idx;
   }
 
   private readonly trainTs: number[] = [];
@@ -903,7 +912,7 @@ export class Engine {
     const crypto: ColumnInput[] = [], perps: ColumnInput[] = [];
     const assets = new Set<string>([...Object.values(cfg.indexIdMap), ...md.activeMarkets(now).filter((m) => m.kind !== 'match').map((m) => m.asset)]);
     for (const asset of [...assets].sort()) {
-      const idx = md.index.get(asset);
+      const idx = this.pricingIndex(asset, now);
       const px = idx?.fresh(now, Math.max(cfg.risk.maxIndexAgeMs, 30_000))?.value;
       if (!idx || !px) continue;
       // Asset-level features every 5 s (TA is on closed candles; same cadence as research replay).
@@ -924,7 +933,7 @@ export class Engine {
     const cq: ContractQuery[] = [];
     if (snn.units.crypto) for (const m of md.activeMarkets(now)) {
       if (m.kind === 'match') continue;
-      const terms = md.termsFor(m), idx = md.index.get(m.asset);
+      const terms = md.termsFor(m), idx = this.pricingIndex(m.asset, now);
       const spot = idx?.fresh(now, cfg.risk.maxIndexAgeMs), vol = idx?.vol();
       if (!terms || !spot || !vol) continue;
       const tauSec = (m.closeTime - now) / 1000;
@@ -1206,7 +1215,7 @@ export class Engine {
     const now = this.now();
     const R = cfg.risk;
     const book = md.book(m.ticker);
-    const idx = md.index.get(m.asset);
+    const idx = this.pricingIndex(m.asset, now);
     const st: MarketStatus = { ticker: m.ticker, asset: m.asset, closeTs: m.closeTime, position: oms.positions.position(m.ticker), notes: [], updatedTs: now };
     this.status.set(m.ticker, st);
 
@@ -1218,7 +1227,7 @@ export class Engine {
 
     if (cfg.mode === 'live' && !md.hasVerifiedFees(m.seriesTicker)) return block('series fee schedule not verified');
     if (!book.isUsable(now, R.maxBookAgeMs)) return block('book not usable');
-    const spot = this.indexPoint(m.asset, now);
+    const spot = idx?.fresh(now, R.maxIndexAgeMs);
     if (!spot) return block('index stale');
     const vol = idx!.vol();
     if (!vol) return block('volatility warming up');
