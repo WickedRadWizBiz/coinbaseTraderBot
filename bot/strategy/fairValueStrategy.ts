@@ -75,6 +75,8 @@ export interface OrderPlan {
   expirationTime?: number;
   edge: number;
   why: string;
+  /** Adversarial conviction boost applied to this entry's size (1 = none); widens its per-order caps. */
+  boost?: number;
 }
 
 export interface StrategyOutput {

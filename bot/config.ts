@@ -122,6 +122,10 @@ export interface StrategyConfig {
   /** Paper only: guaranteed 1-contract training trades per hour on the side the model favours, taken when
    *  nothing qualifies on edge, so the bot always produces trades to learn from and to watch (0 = off). */
   paperTrainTrades: number;
+  /** Adversarial evaluator (bot/strategy/adversary.ts): entries it cannot break, with TA / confluence
+   *  evidence, are re-sized by Kelly with a conviction multiplier up to adversarialMaxBoost (<= 2). */
+  adversarialBoost: boolean;
+  adversarialMaxBoost: number;
   modelHealthMinWindows: number;
   huntTargetMargin: number;
   huntMinConfluence: number;
@@ -719,6 +723,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     exploreBand: num(env, 'PAPER_EXPLORE_BAND', 0.02, 0, 0.1),
     exploreMaxPerHour: num(env, 'PAPER_EXPLORE_MAX_PER_HOUR', 6, 0, 120),
     paperTrainTrades: num(env, 'PAPER_TRAINING_TRADES_PER_HOUR', 12, 0, 120),
+    adversarialBoost: bool(env, 'ADVERSARIAL_BOOST', true),
+    adversarialMaxBoost: num(env, 'ADVERSARIAL_MAX_BOOST', 2, 1, 2),
     modelHealthMinWindows: num(env, 'MODEL_HEALTH_MIN_WINDOWS', 200, 20, 100000),
     huntTargetMargin: num(env, 'HUNT_TARGET_MARGIN', 0.02, 0, 0.5),
     huntMinConfluence: num(env, 'HUNT_MIN_CONFLUENCE', 2, 1, 7),

@@ -15,7 +15,8 @@ import type { AuditLog } from './audit/auditLog';
 import type { Config, RiskLimits } from './config';
 import type { ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
-import { computeFeatureMap, FEATURE_SCHEMA_VERSION } from './model/featureEngine';
+import { computeFeatureMap, FEATURE_SCHEMA_VERSION, FEATURES } from './model/featureEngine';
+import { ADVERSARY_GROUPS, evaluateEntry, seedOf, type AdversaryVerdict } from './strategy/adversary';
 import { priceContract, SETTLEMENT_AVG_SEC } from './model/fairValue';
 import { explain, type Driver, type MetaModel } from './model/metaModel';
 import type { Oms, OrderIntent } from './oms/oms';
@@ -72,6 +73,8 @@ import { recordLatency } from './util/latency';
 const log = logger('engine');
 
 export interface MarketStatus {
+  /** Last adversarial verdict on an entry here (multiplier > 1 = it could not be broken). */
+  adversary?: { side: string; multiplier: number; broken: boolean; evidence: boolean; failed: string[]; ts: number };
   ticker: string;
   asset: string;
   closeTs: number;
@@ -1377,6 +1380,39 @@ export class Engine {
     // Quote, cross or skip each maker entry by expected value (fill model, once validated).
     const fillCtx = { q: st.q ?? pYes, book, tick: m.tickSize, tauSec, sigma: vol.sigmaPerSqrtSec, features, minEv: S.fillMinEv, takerMinEdge: strat.takerBuffer + strat.minEdge };
     applyFillModel(plan, this.d.fillModel, fillCtx);
+    // Adversarial evaluator: try to break each entry; one that survives with TA / confluence evidence is
+    // re-sized by Kelly with its conviction multiplier (at most ADVERSARIAL_MAX_BOOST x the original size).
+    if (S.adversarialBoost) {
+      const sigma1m = sigmaPricing * Math.sqrt(60);
+      const taFeatures = Object.keys(features).filter((k) => ADVERSARY_GROUPS.has(FEATURES[k]?.group ?? (k.startsWith('ta_') ? 'ta' : '')));
+      const direction = dPdS === undefined || !Number.isFinite(dPdS) || Math.abs(dPdS) < 1e-12 ? 0 : Math.sign(dPdS);
+      for (let i = 0; i < plan.place.length; i++) {
+        const p = plan.place[i];
+        if (p.purpose === 'exit' || p.reduceOnly || (p.side === 'ask' && st.position > 0) || (p.side === 'bid' && st.position < 0)) continue;
+        const side = p.side === 'bid' ? 'yes' : 'no';
+        const cost = side === 'yes' ? p.price : 1 - p.price;
+        const verdict: AdversaryVerdict = evaluateEntry({
+          side, cost, fee: orderFee(1, cost, !p.postOnly, md.feesFor(m.ticker)), q: st.q ?? pYes,
+          features, predict: (f) => model.predictDetailed(f, fv.pYes).p, taFeatures, direction,
+          fairValue: fv.pYes,
+          stressFairValue: (vm, mv) => priceContract(terms, { spot: spot.value * Math.exp(mv * sigma1m), sigmaPerSqrtSec: sigmaPricing * vm, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu })?.pYes,
+          pStd: pred.std, fastMove, imbalance: features.imbalance, seed: seedOf(`${m.ticker}:${Math.floor(now / 60_000)}:${p.side}`), maxBoost: S.adversarialMaxBoost,
+        });
+        st.adversary = { side, multiplier: verdict.multiplier, broken: verdict.broken, evidence: verdict.evidence, failed: verdict.attacks.filter((a) => a.status === 'fail').map((a) => `${a.name}: ${a.detail}`), ts: now };
+        if (verdict.multiplier <= 1) {
+          plan.notes.push(`adversary: ${verdict.broken ? `broken (${st.adversary.failed[0] ?? 'no edge'})` : 'held, but no TA/confluence evidence to back a boost'}; normal size`);
+          continue;
+        }
+        const mult = verdict.multiplier;
+        const boosted = decide({ ...view, maxOrderRiskUsd: view.maxOrderRiskUsd * mult, maxContracts: floorCount(view.maxContracts * mult) }, { ...strat, kellyFraction: strat.kellyFraction * mult }, { exits: false, blockReductions: huntMode, entries: true });
+        const match = boosted.place.find((b) => b.side === p.side && b.purpose === p.purpose && !b.reduceOnly && Math.abs(b.price - p.price) < 1e-9);
+        const count = match ? floorCount(Math.min(match.count, p.count * S.adversarialMaxBoost)) : p.count;
+        if (count > p.count) {
+          plan.place[i] = { ...p, count, boost: count / p.count, why: `${p.why} | adversary held x${mult.toFixed(2)}: ${p.count} -> ${count}` };
+          plan.notes.push(`adversary could not break the ${side.toUpperCase()} entry: Kelly x${mult.toFixed(2)}, ${p.count} -> ${count} contracts`);
+        } else plan.notes.push(`adversary held (x${mult.toFixed(2)}) but Kelly adds nothing at this price`);
+      }
+    }
     // Paper exploration: when nothing qualifies, sometimes enter the best borderline opportunity (still
     // fee-net positive, within exploreBand of the threshold) at minimum size. The logged probability lets
     // training weight these trades correctly; live mode never explores.
@@ -1528,6 +1564,11 @@ export class Engine {
       dailyLossAdvisory: this.overrideActive(),
     };
     if (training) ctx.skipEdgeCollar = true;
+    // An adversary-boosted entry may use proportionally more of the per-order caps (window / total caps unchanged).
+    if (p.boost && p.boost > 1 && !tennis) {
+      const lim = ctx.limitOverrides ?? {};
+      ctx.limitOverrides = { ...lim, maxOrderRiskFrac: (lim.maxOrderRiskFrac ?? cfg.risk.maxOrderRiskFrac) * p.boost, maxContractsPerOrder: (lim.maxContractsPerOrder ?? cfg.risk.maxContractsPerOrder) * p.boost };
+    }
     if (tennis) {
       // Rules-based, budgeted separately: 25% of the working cash pool in total, per-match and
       // per-order caps. The crypto model's live gate doesn't apply (TENNIS_LIVE does), and there is
