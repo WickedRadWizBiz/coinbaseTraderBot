@@ -1,0 +1,151 @@
+// Paper training override: kill-switch suppression, capital-exhaustion refills, losing-streak sizing,
+// and the tournament rule that sitting out must not win.
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import path from 'node:path';
+import { test } from 'node:test';
+import { Alerter } from '../bot/alerts/alerter';
+import { loadConfig } from '../bot/config';
+import { RunControl } from '../bot/control';
+import type { Engine } from '../bot/engine';
+import type { Oms } from '../bot/oms/oms';
+import { EquityGuard } from '../bot/risk/equityGuard';
+import { KillSwitch } from '../bot/risk/killSwitch';
+import { RiskGateway } from '../bot/risk/riskGateway';
+import { DEFAULT_STREAK, StreakScaler } from '../bot/risk/streakScaler';
+import { TrainingSupervisor } from '../bot/training/supervisor';
+import { coverageFloor, type FitnessReport } from '../bot/util/fitness';
+import { tmpAudit, tmpDir } from './helpers';
+
+// mulberry32: small, well-mixed PRNG for reproducible outcome sequences.
+const rng = (seed: number) => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+
+test('override is ON by default, remembered, and switchable', () => {
+  const f = path.join(tmpDir(), 'control.json');
+  const c = new RunControl(f);
+  assert.equal(c.killOverride, true);
+  c.setOverride(false);
+  assert.equal(new RunControl(f).killOverride, false, 'persisted');
+  c.set(false);
+  assert.equal(new RunControl(f).killOverride, false, 'PLAY/STOP keeps the override setting');
+  assert.equal(new RunControl(f).active, false);
+});
+
+test('kill switch: automatic trips are suppressed while vetoed; manual engagement never is', async () => {
+  const audit = tmpAudit();
+  const k = new KillSwitch(path.join(tmpDir(), 'kill.json'), audit);
+  let veto: string | undefined = 'paper training override';
+  k.setSuppressor(() => veto);
+  assert.equal(await k.engage('daily loss $4 reached limit $3', 'risk'), false);
+  assert.equal(k.engaged, false);
+  assert.equal(await k.engage('operator', 'api:127.0.0.1'), true, 'manual');
+  assert.equal(k.engaged, true);
+  k.reset('test');
+  veto = undefined;
+  assert.equal(await k.engage('daily loss', 'risk'), true, 'no veto: engages as before');
+});
+
+test('streak scaler: ordinary bad luck barely moves it; an overconfident model is cut, never to zero; it recovers', () => {
+  const calibrated = new StreakScaler();
+  const r = rng(7);
+  for (let i = 0; i < 400; i++) { const q = 0.35 + 0.3 * r(); calibrated.observeBinary(q, r() < q); }
+  assert.ok(calibrated.scale() > 0.75, `calibrated model keeps most of its size (${calibrated.scale()})`);
+
+  const over = new StreakScaler();
+  for (let i = 0; i < 120; i++) { const q = 0.7; over.observeBinary(q, r() < 0.45); } // thinks 70%, wins 45%
+  assert.ok(over.scale() <= 0.5, `overconfident model is cut (${over.scale()})`);
+  assert.ok(over.scale() >= DEFAULT_STREAK.floor, 'never below the floor');
+  for (let i = 0; i < 200; i++) { const q = 0.5; over.observeBinary(q, r() < 0.5); }
+  assert.ok(over.scale() > 0.75, `recovers once results match expectations again (${over.scale()})`);
+
+  const early = new StreakScaler();
+  for (let i = 0; i < 5; i++) early.observeBinary(0.6, false);
+  assert.equal(early.scale(), 1, 'too few observations to judge');
+});
+
+test('risk gateway: the daily loss limit is advisory in training mode (no reject, no kill trip)', () => {
+  const gw = new RiskGateway(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).risk);
+  const ctx: Parameters<RiskGateway['check']>[1] = {
+    now: Date.now(), mode: 'paper', killEngaged: false, haltReasons: [], bankroll: 100, dailyPnl: -50, bookUsable: true, bestBid: 0.4, bestAsk: 0.42,
+    indexFresh: true, marketCloseTs: Date.now() + 600_000, tickSize: 0.01, fees: { takerMultiplier: 0.07, makerMultiplier: 0 }, position: 0,
+    marketRiskNow: 0, marketRiskWith: 1, windowRisk: 0, totalRisk: 0, ordersLastMinute: 0, openOrders: 0, modelLiveBlockers: [],
+  } as never;
+  const intent = { ticker: 'KXBTC15M-X', asset: 'BTC', windowCloseTs: Date.now() + 600_000, side: 'bid', price: 0.4, count: 1, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, purpose: 'quote', fairValue: 0.6, modelId: 'm', decisionId: 'd' } as never;
+  const hard = gw.check(intent, ctx);
+  assert.ok(hard.tripKill, 'normally trips the kill switch');
+  const soft = gw.check(intent, { ...(ctx as object), dailyLossAdvisory: true } as never);
+  assert.equal(soft.tripKill, undefined);
+  assert.ok(!soft.reasons.some((x) => x.includes('daily loss')), soft.reasons.join('; '));
+});
+
+test('supervisor: an exhausted paper pool is logged as a training epoch and refilled; automatic kills are released', async () => {
+  const dir = tmpDir();
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: dir, PAPER_BANKROLL_USD: '100' });
+  const audit = tmpAudit();
+  const control = new RunControl(path.join(dir, 'control.json'));
+  const kill = new KillSwitch(path.join(dir, 'kill.json'), audit);
+  let balance = 6; // $6 left: below the $10 tradable minimum
+  const oms = Object.assign(new EventEmitter(), { cancelAll: async () => ({ canceled: 0, errors: 0 }) }) as unknown as Oms;
+  const streak = { crypto: new StreakScaler(), tennis: new StreakScaler() };
+  const engine = {
+    bankroll: () => balance, equity: () => balance, onBalance: (b: number) => { balance = b; },
+    riskScale: () => ({ scale: 1, parts: [] }), streak, noteCashFlow: () => {},
+  } as unknown as Engine;
+  const refills: number[] = [];
+  const guard = new EquityGuard({ ddScaleAt: 0.15, weeklyLossPause: 0.08 });
+  guard.update(100, Date.now());
+  const sup = new TrainingSupervisor({
+    cfg, control, kill, engine, oms, audit, alerter: new Alerter([], audit), equityGuard: guard,
+    kalshiPaper: { refill: (a) => { refills.push(a); balance += a; }, getBalance: async () => balance },
+  });
+  await kill.engage('daily loss $4.92 reached limit $3.00', 'risk'); // suppressed now
+  assert.equal(kill.engaged, false, 'automatic trip suppressed by the override');
+  await sup.tick();
+  assert.deepEqual(refills, [94]);
+  assert.equal(balance, 100);
+  assert.equal(guard.kellyScale(100), 1, 'fresh epoch: the refilled equity is the new high-water mark');
+  const epochs = fs.readFileSync(path.join(dir, 'epochs.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(epochs.length, 1);
+  assert.equal(epochs[0].cause, 'capital_exhaustion');
+  assert.equal(epochs[0].endEquity, 6);
+  assert.equal(sup.status().kalshi.epoch, 2);
+  await sup.tick();
+  assert.equal(refills.length, 1, 'no second refill while the pool is healthy');
+
+  // Override off: nothing is refilled, automatic trips engage.
+  control.setOverride(false);
+  balance = 3;
+  await sup.tick();
+  assert.equal(refills.length, 1);
+  assert.equal(await kill.engage('daily loss', 'risk'), true);
+  // Override back on: the automatic kill is released at the next pass.
+  control.setOverride(true);
+  await sup.tick();
+  assert.equal(kill.engaged, false);
+  // A kill the operator pressed stays engaged.
+  await kill.engage('operator', 'api:1.2.3.4');
+  await sup.tick();
+  assert.equal(kill.engaged, true);
+});
+
+test('supervisor: does nothing in live mode', async () => {
+  const dir = tmpDir();
+  const cfg = { ...loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: dir }), mode: 'live' } as never;
+  const audit = tmpAudit();
+  const kill = new KillSwitch(path.join(dir, 'kill.json'), audit);
+  const oms = Object.assign(new EventEmitter(), { cancelAll: async () => ({ canceled: 0, errors: 0 }) }) as unknown as Oms;
+  const engine = { bankroll: () => 1, equity: () => 1, onBalance: () => {}, riskScale: () => ({ scale: 1, parts: [] }), streak: { crypto: new StreakScaler(), tennis: new StreakScaler() } } as unknown as Engine;
+  const sup = new TrainingSupervisor({ cfg, control: new RunControl(path.join(dir, 'c.json')), kill, engine, oms, audit, alerter: new Alerter([], audit), kalshiPaper: { refill: () => assert.fail('no refill in live'), getBalance: async () => 1 } });
+  assert.equal(sup.active(), false);
+  assert.equal(await kill.engage('daily loss', 'risk'), true, 'live keeps every brake');
+  await sup.tick();
+});
+
+test('tournaments: a member that sits out cannot beat one that trades and loses a little', () => {
+  const rep = (fitness: number): FitnessReport => ({ fitness, sortino: 0, maxDrawdown: 0, costs: 0, netReturn: 0, interactions: 0, independent: 0, days: 30 });
+  const idle = coverageFloor(rep(0), 0, 1000, 0.05);
+  const loser = coverageFloor(rep(-0.8), 120, 1000, 0.05);
+  assert.ok(loser.fitness > idle.fitness, `${loser.fitness} > ${idle.fitness}`);
+  assert.equal(coverageFloor(rep(1.2), 100, 1000, 0.05).fitness, 1.2, 'enough coverage: unchanged');
+});

@@ -52,6 +52,12 @@ export class EquityGuard {
     this.save(now, true);
   }
 
+  /** New training epoch (paper refill): the refilled equity is the new high-water mark; pause cleared. */
+  resetEpoch(equity: number, now: number, tradable = equity): void {
+    this.st = { peak: equity, peakTradable: tradable, history: [{ ts: now, equity }], pausedUntil: 0 };
+    this.save(now, true);
+  }
+
   drawdown(equity: number): number {
     return this.st.peak > 0 ? Math.max(0, 1 - equity / this.st.peak) : 0;
   }

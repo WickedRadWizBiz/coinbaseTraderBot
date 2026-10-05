@@ -39,6 +39,7 @@ import {
   TANET_STRATEGY, TANET_SWING_BARS, TANET_SWING_F, TANET_TREND_FEATURES, TANET_TREND_STEPS, taNetDayVector, taNetFeatureMap, barrierResult, taNetBarrierPosition, taNetBarrierWidth, TANET_BARRIER, tripleBarrier, taNetMicro, taNetSwing, windowOk,
   taNetFamilies, type PatternReport, type TaNetHeadName, type TaNetNetworkValidation, type TaNetStrategy, type TaNetHeadValidation, type TaNetNorm, type TaNetParams, type TaNetStateCache,
 } from '../bot/ta/taNet';
+import { coverageFloor as sharedCoverageFloor } from '../bot/util/fitness';
 import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type FitnessReport, type Interaction } from './fitness';
 import { runPbt, walkForwardRounds, type Hyper, type MutationSpec, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
 import { loadIndexSeries, loadSeries, storedAssets } from './history/candles';
@@ -484,9 +485,7 @@ export function selectiveStats(D: TaNetData, f: Forecasts, strategy: TaNetStrate
  *  the Sortino floor, scaled by how far short the member fell. */
 export const TANET_MIN_COVERAGE = 0.05;
 export function coverageFloor(rep: FitnessReport, taken: number, hours: number, min = TANET_MIN_COVERAGE): FitnessReport {
-  const cov = hours > 0 ? taken / hours : 0;
-  if (cov >= min) return rep;
-  return { ...rep, fitness: Math.min(rep.fitness, 0) - 10 * (1 - cov / min) };
+  return sharedCoverageFloor(rep, taken, hours, min);
 }
 
 export function strategyInteractions(D: TaNetData, f: Forecasts, strategy: TaNetStrategy = TANET_STRATEGY): Interaction[] {

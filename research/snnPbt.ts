@@ -26,7 +26,10 @@ import { loadCalendar } from '../bot/model/calendar';
 import type { SnnCheckpoint } from '../bot/snn/network';
 import { DEFAULT_SNN, domainParams, stageFlags, versionHash, withFlags, type SnnParams, type Stage } from '../bot/snn/params';
 import { SNN_HYPER_SPEC, snnHyperOf, withSnnHyper } from '../bot/snn/population';
-import { binaryBet, fitnessOf, independentInteractions, type Hyper, type Interaction } from '../bot/util/fitness';
+import { binaryBet, coverageFloor, fitnessOf, independentInteractions, type Hyper, type Interaction } from '../bot/util/fitness';
+
+/** Least share of opportunities a tournament member must act on (sitting out must not win). */
+export const SNN_MIN_COVERAGE = 0.05;
 import { dsrOf } from './fitness';
 import { runPbt, walkForwardRounds, type PbtMember, type PbtRoundLog } from './pbt';
 import { replaySnn, type SnnRow } from './snnReplay';
@@ -133,8 +136,12 @@ export async function runSnnPbt(o: {
       train: async (s, h, r) => { await replay(s, h, r.trainFrom, r.trainTo); return s; },
       evaluate: async (s, h, r) => {
         const out = await replay(s, h, r.evalFrom, r.evalTo);
-        const xs = snnInteractions(out.rows.filter((x) => x.ts >= r.evalFrom && x.ts < r.evalTo), o.domain);
-        return { report: fitnessOf(xs, { from: r.evalFrom, to: r.evalTo, clusterMs: clusterFor(o.domain) }), interactions: independentInteractions(xs, clusterFor(o.domain)) };
+        const rows = out.rows.filter((x) => x.ts >= r.evalFrom && x.ts < r.evalTo);
+        const xs = snnInteractions(rows, o.domain);
+        // Opportunities: one per contract (crypto bets each contract at most once), one per step (perps).
+        const opportunities = o.domain === 'crypto' ? new Set(rows.map((x) => x.ticker)).size : rows.length;
+        const report = coverageFloor(fitnessOf(xs, { from: r.evalFrom, to: r.evalTo, clusterMs: clusterFor(o.domain) }), xs.length, opportunities, SNN_MIN_COVERAGE);
+        return { report, interactions: independentInteractions(xs, clusterFor(o.domain)) };
       },
     },
     onRound: ({ members, trials, log: plog, round }) => save(members, trials, plog, round.evalTo, round.index + 1),

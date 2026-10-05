@@ -20,6 +20,7 @@
 // day; an unvalidated lane trades at pilot size (or not at all with PERP_REQUIRE_VALIDATION).
 
 import fs from 'fs';
+import type { StreakScaler } from '../risk/streakScaler';
 import type { AuditLog } from '../audit/auditLog';
 import type { CandleSet } from '../ta/candleStore';
 import type { Candle } from '../ta/indicators';
@@ -64,7 +65,14 @@ export interface SetupTraderDeps {
   /** SNN gate file written by the pipeline (research/setupSnnStudy.ts) once the journal proves the SNN
    *  helps: enter only when the SNN's call agrees with the trade by at least minAgree. */
   snnGatePath?: () => string;
+  /** Paper training override (bot/control.ts): the perp daily loss halt is advisory (logged), not a halt. */
+  trainingOverride?: () => boolean;
+  /** Losing-streak scaler fed with each closed trade's R multiple; scales the risk budget of new entries. */
+  streak?: StreakScaler;
 }
+
+/** Typical spread of a setup trade's result in R (stop = -1 R, targets at +1..3 R): standardises R for the streak scaler. */
+const R_SD = 1.2;
 
 interface SnnGateFile { enabled: boolean; minAgree?: { fast: number; slow: number }; reason?: string; trades?: number; needed?: number }
 
@@ -201,6 +209,7 @@ export class SetupTrader {
 
   private record(t: OpenTrade, now: number): void {
     const res = tradeResult(t);
+    if (Number.isFinite(res.r)) this.d.streak?.observe(res.r / R_SD, res.r > 0, now);
     const usd = res.ret * (t.notional ?? 0);
     if (this.day) this.day.realized += usd;
     this.history.push({ asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, exit: t.closed?.px ?? NaN, entryTs: t.entryTs, exitTs: t.closed?.ts ?? now, reason: t.closed?.reason ?? 'manual', r: res.r, ret: res.ret, usd, score: t.score });
@@ -263,11 +272,14 @@ export class SetupTrader {
     }
 
     // 3. Entries (re-checked on fresh data), unless entries are blocked.
-    const block = guards.halt ?? this.dayHalt ?? guards.noEntry
+    // Paper training override: the daily loss halt is advisory (it still shows in the status), not a stop.
+    const dayHalt = this.d.trainingOverride?.() ? undefined : this.dayHalt;
+    const block = guards.halt ?? dayHalt ?? guards.noEntry
       ?? (equity === undefined ? 'margin equity unknown' : equity < this.d.params.minEquityUsd ? `margin equity $${equity.toFixed(2)} below $${this.d.params.minEquityUsd}` : undefined)
       ?? (!this.model ? this.modelError ?? 'no setup model' : undefined);
     if (!block && equity) {
-      const entries = this.book.select(now, equity, (cand) => {
+      // The losing-streak scale shrinks the risk budget of new entries (never to zero).
+      const entries = this.book.select(now, equity * (this.d.streak?.scale() ?? 1), (cand) => {
         if (!assets.includes(cand.sig.asset)) return undefined;
         const px = this.d.spot(cand.sig.asset, now);
         const q = this.d.hub.get(cand.sig.asset)?.latest;
@@ -296,7 +308,7 @@ export class SetupTrader {
 
     // 4. Targets per perp market.
     const out: DirTarget[] = [];
-    const flatten = guards.halt ?? this.dayHalt;
+    const flatten = guards.halt ?? dayHalt;
     for (const asset of assets) {
       const s = this.d.hub.get(asset)!, l = s.latest!;
       const t = this.book.positions.get(asset);

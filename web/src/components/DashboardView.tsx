@@ -42,6 +42,16 @@ export function DashboardView() {
     void refresh();
   };
 
+  // Kill-switch override (paper training): remembered on the server; no effect in live mode.
+  const overrideOn = s?.run?.killOverride !== false;
+  const toggleOverride = async () => {
+    const on = !overrideOn;
+    if (!on && !window.confirm('Turn the kill-switch override OFF?\n\nThe paper bot will then stop for the day at the daily loss limit (as in live), and an empty paper pool is no longer refilled.')) return;
+    await api('/override', { method: 'POST', body: JSON.stringify({ on }) }).catch((e) => alert(e.message));
+    void refresh();
+  };
+  const tr = s?.training;
+
   const openPositions = (positions ?? []).filter((p) => !p.settled && Math.abs(p.yes) > 1e-9);
   const settled = (positions ?? []).filter((p) => p.settled).slice(0, 12);
 
@@ -51,8 +61,8 @@ export function DashboardView() {
         <div className="crt-grid-panel p-3 border border-crypto-danger bg-crypto-danger/15 text-crypto-danger font-bold uppercase text-xs">Link error: {error}</div>
       )}
 
-      {/* Status screen, with the kill switch as a physical key on the chassis beside it. */}
-      <div className="flex items-stretch gap-3 sm:gap-4">
+      {/* Status screen, with the kill key and the override switch on the chassis beside it (below it on a phone). */}
+      <div className="flex flex-col sm:flex-row items-stretch gap-3 sm:gap-4">
         {!s && <div className="flex-1 min-w-0"><Screen size={BANNER} loading /></div>}
 
         {s?.kill?.engaged && (
@@ -78,22 +88,34 @@ export function DashboardView() {
               <ShieldCheck className="w-5 h-5 shrink-0 animate-pulse" />
               <div>
                 <div className="font-bold uppercase tracking-wider text-xs">
-                  {s.mode.toUpperCase()} MODE · KALSHI {s.kalshiEnv.toUpperCase()} · {s.haltReasons.length ? 'NEW RISK HALTED' : 'ARMED'}
+                  {s.mode.toUpperCase()} MODE · KALSHI {s.kalshiEnv.toUpperCase()} · {s.haltReasons.length ? 'NEW RISK HALTED' : 'ARMED'}{tr?.active ? ` · TRAINING OVERRIDE · EPOCH ${tr.kalshi?.epoch ?? 1}` : ''}
                 </div>
                 <div className="text-[11px] opacity-80 mt-0.5 normal-case">
-                  {s.haltReasons.length ? s.haltReasons.join('; ') : 'All orders pass the fail-closed risk gateway before reaching the exchange.'}
+                  {s.haltReasons.length ? s.haltReasons.join('; ')
+                    : tr?.active ? `Brakes de-risk instead of halting · risk x${(tr.risk?.crypto?.scale ?? 1).toFixed(2)}${tr.risk?.crypto?.parts?.length ? ` (${tr.risk.crypto.parts.join(', ')})` : ''}${tr.kalshi?.refills ? ` · ${tr.kalshi.refills} refill${tr.kalshi.refills > 1 ? 's' : ''}` : ''}`
+                    : 'All orders pass the fail-closed risk gateway before reaching the exchange.'}
                 </div>
               </div>
             </div>
           </div>
         )}
-        <div className="shrink-0 flex flex-col items-center justify-center gap-1.5">
-          <span className="chassis-print text-[8px]">Emergency</span>
-          <button onClick={engage} disabled={!s || s.kill?.engaged} className={`chassis-key chassis-key-red ${s?.kill?.engaged ? 'is-active' : ''}`} title="Kill switch: cancels all orders and blocks new ones">
-            <Power className="w-4 h-4" />
-            <span>Kill</span>
-          </button>
-          <span className="chassis-print text-[8px]">{s?.kill?.engaged ? 'Engaged' : 'Stop all'}</span>
+        <div className="shrink-0 flex items-center justify-center gap-6 sm:gap-4">
+          <div className="flex flex-col items-center justify-center gap-1.5">
+            <span className="chassis-print text-[9px]">Emergency</span>
+            <button onClick={engage} disabled={!s || s.kill?.engaged} className={`chassis-key chassis-key-red chassis-key-lg ${s?.kill?.engaged ? 'is-active' : ''}`} title="Kill switch: cancels all orders and blocks new ones">
+              <Power className="w-6 h-6" />
+              <span>Kill</span>
+            </button>
+            <span className="chassis-print text-[9px]">{s?.kill?.engaged ? 'Engaged' : 'Stop all'}</span>
+          </div>
+          <div className="flex flex-col items-center justify-center gap-1.5" title={s?.mode === 'live' ? 'Override has no effect in live mode: every brake stays armed' : 'Kill-switch override (paper): brakes de-risk instead of halting; an empty paper pool is refilled as a new training epoch'}>
+            <span className="chassis-print text-[9px]">Override</span>
+            <span className={`chassis-lamp ${overrideOn && s?.mode !== 'live' ? 'is-on' : ''}`} />
+            <button onClick={toggleOverride} disabled={!s} className={`chassis-toggle ${overrideOn ? 'is-on' : ''}`} aria-pressed={overrideOn} aria-label="Kill-switch override">
+              <span className="chassis-toggle-lever" />
+            </button>
+            <span className="chassis-print text-[9px]">{s?.mode === 'live' ? 'Live: off' : overrideOn ? 'On · paper' : 'Off'}</span>
+          </div>
         </div>
       </div>
 
