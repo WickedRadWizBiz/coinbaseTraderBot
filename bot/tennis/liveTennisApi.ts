@@ -100,8 +100,16 @@ export class TennisScoreClient {
         const res = await this.fetchFn(url, { headers: { 'X-API-Key': this.apiKey }, signal: AbortSignal.timeout(10_000) });
         if (res.status === 429) {
           const retryAfter = Number(res.headers.get('retry-after'));
-          this.blockedUntil = this.now() + (retryAfter > 0 ? retryAfter * 1000 : 60_000);
-          this.lastError = `429 rate limited: ${(await res.text()).slice(0, 200)}`;
+          const text = await res.text();
+          // A spent daily allowance names when it resets ("... it resets at 2026-10-05T21:00:00Z"):
+          // wait for that instead of retrying every minute, and count the day as used up.
+          const resets = Date.parse(/resets at ([0-9T:\-.]+Z)/.exec(text)?.[1] ?? '');
+          if (Number.isFinite(resets) && resets > this.now()) {
+            this.blockedUntil = resets;
+            this.callsToday = this.opts.dailyLimit;
+            this.resetHourUtc = new Date(resets).getUTCHours();
+          } else this.blockedUntil = this.now() + (retryAfter > 0 ? retryAfter * 1000 : 60_000);
+          this.lastError = `429 rate limited: ${text.slice(0, 200)}`;
           log.warn(this.lastError);
           break;
         }
@@ -141,8 +149,13 @@ export class TennisScoreClient {
     return true;
   }
 
+  /** Hour (UTC) at which the provider's daily allowance resets (21:00 for livetennisapi.com; learned from a 429). */
+  private resetHourUtc = 21;
+
   private rollDay(): void {
-    const key = new Date(this.now()).toISOString().slice(0, 10); // UTC date
+    // The provider's day, not the UTC calendar day: counting from midnight UTC would reset our counter
+    // hours before the provider's and spend calls it then refuses.
+    const key = new Date(this.now() + (24 - this.resetHourUtc) * 3_600_000).toISOString().slice(0, 10);
     if (key !== this.dayKey) { this.dayKey = key; this.callsToday = 0; }
   }
 
