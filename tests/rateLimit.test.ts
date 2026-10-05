@@ -49,7 +49,6 @@ test('a quiet book on a live feed stays usable; an invalidated one does not', ()
 
 import { CATALOG_STUCK_MS, MarketData, Recorder } from '../bot/marketdata/marketData';
 import { loadConfig } from '../bot/config';
-import type { KalshiRest } from '../bot/kalshi/rest';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -77,4 +76,18 @@ test('a hung catalog refresh does not block later refreshes forever', async () =
     assert.equal(calls, 2, 'a refresh stuck for 3 min no longer blocks the next one');
     assert.ok(md.catalogHealth.ts === t);
   } finally { Date.now = realNow; release?.(); md.stop(); }
+});
+
+test('cached (CDN) responses are not used for the clock-skew estimate', async () => {
+  const seen: number[] = [];
+  const mk = (headers: Record<string, string>) => new KalshiRest({
+    baseUrl: 'https://x.test/trade-api/v2',
+    fetchImpl: (async () => new Response('{"markets":[]}', { status: 200, headers })) as unknown as typeof fetch,
+    onServerDate: (d) => seen.push(d),
+  });
+  await mk({ date: 'Wed, 30 Sep 2026 12:00:05 GMT', age: '7' }).getOpenMarkets('KXBTC15M');
+  await mk({ date: 'Wed, 30 Sep 2026 12:00:05 GMT', 'x-cache': 'Hit from cloudfront' }).getOpenMarkets('KXBTC15M');
+  assert.equal(seen.length, 0);
+  await mk({ date: 'Wed, 30 Sep 2026 12:00:05 GMT', 'x-cache': 'Miss from cloudfront' }).getOpenMarkets('KXBTC15M');
+  assert.equal(seen.length, 1);
 });
