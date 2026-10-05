@@ -146,6 +146,7 @@ export class MarketData extends EventEmitter {
         if (!this.wsConnected || !this.ws || now - this.ws.lastMessageTs > 12_000) return; // pings every 10 s
         for (const b of this.books.values()) b.markAlive(now);
       }, 1000);
+      this.aliveTimer.unref();
     } else {
       this.pollTimer = setInterval(() => void this.poll(), 2000);
     }
