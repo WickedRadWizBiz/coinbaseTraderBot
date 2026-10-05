@@ -91,6 +91,21 @@ test('paper training trades: with no edge anywhere, 1 contract is still traded o
   assert.equal(oms.allOrders().filter((o) => o.ticker === market.ticker && o.purpose === 'entry').length, 1);
 });
 
+test('paper prices from Coinbase spot when the Kalshi index is stale or too sparse for volatility', async () => {
+  const { engine, recon, market, md } = await setup();
+  const r = await recon.run('startup');
+  engine.balance = r!.balance;
+  const now = Date.now();
+  (md.index.get('BTC') as any).points.forEach((p: { ts: number }) => { p.ts -= 120_000; });
+  const spot = md.spot.get('BTC')!;
+  let x = Math.log(60010);
+  for (let sec = 600; sec >= 0; sec--) { x += 0.0001 * Math.sin(sec); spot.add(Math.exp(x), now - sec * 1000); }
+  await engine.tick();
+  const st = engine.status.get(market.ticker)!;
+  assert.equal(st.blocked, undefined, JSON.stringify(st));
+  assert.ok(Math.abs(st.spot! - 60010) < 50);
+});
+
 test('live-style limits: paper tolerates late feed data, live does not', () => {
   const paper = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40) });
   assert.equal(paper.risk.maxIndexAgeMs, 15000);
