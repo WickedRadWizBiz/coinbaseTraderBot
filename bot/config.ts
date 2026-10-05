@@ -119,6 +119,9 @@ export interface StrategyConfig {
   exploreRate: number;
   exploreBand: number;
   exploreMaxPerHour: number;
+  /** Paper only: guaranteed 1-contract training trades per hour on the side the model favours, taken when
+   *  nothing qualifies on edge, so the bot always produces trades to learn from and to watch (0 = off). */
+  paperTrainTrades: number;
   modelHealthMinWindows: number;
   huntTargetMargin: number;
   huntMinConfluence: number;
@@ -657,8 +660,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     minSidePrice: num(env, 'RISK_MIN_SIDE_PRICE', 0.10, 0.01, 0.45),
     maxOrdersPerMinute: num(env, 'RISK_MAX_ORDERS_PER_MIN', 30, 1, 600),
     maxOpenOrders: num(env, 'RISK_MAX_OPEN_ORDERS', 12, 1, 200),
-    maxBookAgeMs: num(env, 'RISK_MAX_BOOK_AGE_MS', 5000, 250, 60000),
-    maxIndexAgeMs: num(env, 'RISK_MAX_INDEX_AGE_MS', 3000, 250, 60000),
+    // Paper tolerates older data: a busy small server delivers feed messages seconds late, and paper fills
+    // are simulated against the same book, so stale-by-a-few-seconds costs nothing but blocked training.
+    maxBookAgeMs: num(env, 'RISK_MAX_BOOK_AGE_MS', mode === 'paper' ? 30000 : 5000, 250, 120000),
+    maxIndexAgeMs: num(env, 'RISK_MAX_INDEX_AGE_MS', mode === 'paper' ? 15000 : 3000, 250, 120000),
     noEntryBeforeCloseSec: num(env, 'RISK_NO_ENTRY_BEFORE_CLOSE_SEC', 15, 0, 600),
     maxConsecutiveOrderErrors: num(env, 'RISK_MAX_CONSEC_ORDER_ERRORS', 5, 1, 100),
   };
@@ -713,6 +718,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     exploreRate: num(env, 'PAPER_EXPLORE_RATE', 0.1, 0, 1),
     exploreBand: num(env, 'PAPER_EXPLORE_BAND', 0.02, 0, 0.1),
     exploreMaxPerHour: num(env, 'PAPER_EXPLORE_MAX_PER_HOUR', 6, 0, 120),
+    paperTrainTrades: num(env, 'PAPER_TRAINING_TRADES_PER_HOUR', 12, 0, 120),
     modelHealthMinWindows: num(env, 'MODEL_HEALTH_MIN_WINDOWS', 200, 20, 100000),
     huntTargetMargin: num(env, 'HUNT_TARGET_MARGIN', 0.02, 0, 0.5),
     huntMinConfluence: num(env, 'HUNT_MIN_CONFLUENCE', 2, 1, 7),

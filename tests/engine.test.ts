@@ -17,9 +17,9 @@ import { tmpAudit, tmpDir } from './helpers';
 import { Vault } from '../bot/vault/vault';
 import { BalanceMonitor } from '../bot/vault/balanceMonitor';
 
-async function setup(opts: { dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor } = {}) {
+async function setup(opts: { dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string> } = {}) {
   const dir = tmpDir();
-  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy, STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_ENABLED: 'false' });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy, STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_ENABLED: 'false', ...opts.env });
   const now = Date.now();
   const market: MarketInfo = { ticker: 'KXBTC15M-TEST', seriesTicker: 'KXBTC15M', status: 'open', openTime: now - 300_000, closeTime: now + 600_000, floorStrike: 60000, tickSize: 0.01 };
   const rest = {
@@ -71,6 +71,30 @@ test('engine places risk-checked post-only quotes through the OMS and paper exch
   await engine.tick();
   assert.equal((await paper.getOpenOrders()).length, 0);
   assert.equal(engine.status.get(market.ticker)!.blocked, 'index stale');
+});
+
+test('paper training trades: with no edge anywhere, 1 contract is still traded on the model side, once per contract', async () => {
+  const { engine, recon, oms, market, md } = await setup({ env: { STRATEGY_MIN_EDGE: '0.5', PAPER_EXPLORE: 'false', PAPER_TRAINING_TRADES_PER_HOUR: '12' } });
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.55, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, Date.now());
+  const r = await recon.run('startup');
+  engine.balance = r!.balance;
+  await engine.tick();
+  const entries = oms.allOrders().filter((o) => o.ticker === market.ticker && o.purpose === 'entry');
+  assert.equal(entries.length, 1, `status: ${JSON.stringify(engine.status.get(market.ticker))}`);
+  assert.equal(entries[0].count, 1);
+  // Spot above the strike: the model favours YES, bought at the ask.
+  assert.equal(entries[0].side, 'bid');
+  assert.equal(entries[0].price, 0.6);
+  // One per contract: a second pass does not add another.
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.55, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, Date.now());
+  await engine.tick();
+  assert.equal(oms.allOrders().filter((o) => o.ticker === market.ticker && o.purpose === 'entry').length, 1);
+});
+
+test('live-style limits: paper tolerates late feed data, live does not', () => {
+  const paper = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40) });
+  assert.equal(paper.risk.maxIndexAgeMs, 15000);
+  assert.equal(paper.risk.maxBookAgeMs, 30000);
 });
 
 test('no orders until reconciliation is clean and balance known', async () => {
