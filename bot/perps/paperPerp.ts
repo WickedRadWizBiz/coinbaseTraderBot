@@ -43,6 +43,8 @@ export class PaperPerpExchange implements PerpGateway {
     this.st = (file && readJson<State>(file)) || { orders: [], positions: {}, lastFunding: {}, seq: 0 };
     this.st.stops ??= {};
     this.st.startBalance ??= startBalance;
+    // Raising PERP_PAPER_BALANCE_USD tops up an existing paper account by the difference.
+    if (startBalance > this.st.startBalance) this.st.startBalance = startBalance;
   }
 
   private save(): void { if (this.file) writeJsonAtomic(this.file, this.st); }

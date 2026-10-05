@@ -6,7 +6,7 @@ import { Alerter } from '../bot/alerts/alerter';
 import { AutoTrainer } from '../bot/autotrain';
 import { loadConfig } from '../bot/config';
 import { Engine } from '../bot/engine';
-import { nextSessionEdge, nextWeekendMidnight, sessionEdge, weekendTraining } from '../bot/model/sessions';
+import { nextSessionEdge, nextWeekendMidnight, sessionEdge, sessionAt, weekendTraining } from '../bot/model/sessions';
 import { tmpAudit, tmpDir } from './helpers';
 
 // Wednesday 7 October 2026 (UK on BST = UTC+1, New York on EDT = UTC-4).
@@ -71,14 +71,21 @@ test('AUTO_TRAIN=windows (default): starts in the first window once a day is due
   await new Promise((r) => setTimeout(r, 200));
 });
 
-test('weekends: training starts at midnight New York time on Saturday and Sunday and runs until Tokyo opens Monday', async () => {
+test('weekend: training starts at Friday midnight New York, holds entries until done; weekend and pre-week are their own sessions', async () => {
   const sat = (h: number, m = 0) => Date.UTC(2026, 9, 10, h, m);     // Saturday; New York = UTC-4
-  assert.deepEqual(weekendTraining(sat(4, 30)), { free: true, start: true }, 'Saturday 00:30 New York');
+  // Friday 16:00 ET (US close) -> Sunday 18:00 ET is the weekend market; then the pre-week until Monday 09:30 ET.
+  assert.equal(sessionAt(Date.UTC(2026, 9, 9, 19, 59)), 'new_york', 'Friday 15:59 New York');
+  assert.equal(sessionAt(Date.UTC(2026, 9, 9, 20)), 'weekend', 'Friday 16:00 New York');
+  assert.equal(sessionAt(Date.UTC(2026, 9, 11, 21, 59)), 'weekend', 'Sunday 17:59 New York');
+  assert.equal(sessionAt(Date.UTC(2026, 9, 11, 22)), 'pre_week', 'Sunday 18:00 New York');
+  assert.equal(sessionAt(Date.UTC(2026, 9, 12, 8)), 'pre_week', 'Monday 04:00 New York (London open)');
+  assert.equal(sessionAt(Date.UTC(2026, 9, 12, 13, 30)), 'london_ny_overlap', 'Monday 09:30 New York: the week starts');
+  assert.deepEqual(weekendTraining(sat(4, 30)), { free: true, start: true }, 'Friday midnight (Saturday 00:30 New York)');
   assert.deepEqual(weekendTraining(sat(12)), { free: true, start: false });
-  assert.equal(weekendTraining(Date.UTC(2026, 9, 11, 23)).free, true, 'Sunday 19:00 New York');
-  assert.equal(weekendTraining(Date.UTC(2026, 9, 12, 0, 30)).free, false, 'Sunday 20:30 New York = Monday in Tokyo: trading again');
-  assert.equal(nextWeekendMidnight(Date.UTC(2026, 9, 9, 21)), sat(4), 'Friday evening -> Saturday midnight');
-  assert.equal(nextWeekendMidnight(sat(5)), Date.UTC(2026, 9, 11, 4), 'past Saturday\'s start hour -> Sunday midnight');
+  assert.equal(weekendTraining(Date.UTC(2026, 9, 11, 4, 30)).start, false, 'Sunday midnight is not a start any more');
+  assert.equal(weekendTraining(Date.UTC(2026, 9, 11, 23)).free, false, 'Sunday 19:00 New York: pre-week, trading');
+  assert.equal(nextWeekendMidnight(Date.UTC(2026, 9, 9, 21)), sat(4), 'Friday evening -> Friday midnight');
+  assert.equal(nextWeekendMidnight(sat(5)), Date.UTC(2026, 9, 17, 4), 'past the start hour -> next Friday midnight');
 
   const dir = tmpDir();
   const cfg = loadConfig({ DATA_DIR: dir, AUTO_TRAIN_ON_MODEL_CHANGE: 'false' });
@@ -86,16 +93,19 @@ test('weekends: training starts at midnight New York time on Saturday and Sunday
   let now = Date.UTC(2026, 9, 9, 22);
   const engine = { model: { id: 'm' } } as unknown as Engine;
   const t = new AutoTrainer({ cfg, engine, audit, alerter: new Alerter([], audit), now: () => now, command: { cmd: process.execPath, args: ['-e', 'setTimeout(()=>{}, 4000)'] } });
-  assert.equal(t.nextRun(), sat(4), 'due on Friday night: Saturday midnight comes before Monday\'s Tokyo open');
+  t.start();
+  assert.equal(t.nextRun(), sat(4), 'due on Friday night: Friday midnight comes before Monday\'s Tokyo open');
   now = sat(4, 10);
   await t.tick();
-  assert.equal(t.status().running, true, 'started at Saturday midnight');
+  assert.equal(t.status().running, true, 'started at Friday midnight');
+  assert.match(engine.trainingGuard?.() ?? '', /weekend training run in progress/, 'no new entries while it runs');
   now = sat(15);
   await t.tick();
   assert.equal(t.status().paused, false, 'weekend: runs unpaused');
   now = Date.UTC(2026, 9, 12, 1);
   await t.tick();
-  assert.equal(t.status().paused, true, 'Monday Asia session (outside a session edge): frozen');
+  assert.equal(t.status().paused, true, 'pre-week (outside a session edge): frozen');
+  assert.equal(engine.trainingGuard?.(), undefined, 'outside the weekend the run no longer holds entries');
   t.stop();
   await new Promise((r) => setTimeout(r, 200));
 });

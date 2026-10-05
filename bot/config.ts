@@ -739,7 +739,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     dataDir,
     paramsPath: path.resolve(env.MODEL_PARAMS_PATH ?? './params/model.json'),
     // Starts in the aggressive tier; see SIZING_TIERS.
-    paperBankrollUsd: num(env, 'PAPER_BANKROLL_USD', 20, 1, 1e7),
+    paperBankrollUsd: num(env, 'PAPER_BANKROLL_USD', 100, 1, 1e7),
     indexIdMap: jsonMap(env, 'INDEX_ID_MAP', DEFAULT_INDEX_IDS),
     seriesAssetMap,
     catalogHorizonMin: num(env, 'CATALOG_HORIZON_MIN', 90, 16, 7 * 24 * 60),
@@ -811,7 +811,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         takerFeeBps: num(env, 'PERP_TAKER_FEE_BPS', 12, 0, 100),
         trading,
         modelPath: path.resolve(env.PERP_MODEL_PATH ?? './params/perp_model.json'),
-        paperBalanceUsd: num(env, 'PERP_PAPER_BALANCE_USD', 20, 1, 1e9),
+        paperBalanceUsd: num(env, 'PERP_PAPER_BALANCE_USD', 100, 1, 1e9),
         horizonMin: num(env, 'PERP_HORIZON_MIN', 240, 15, 7 * 24 * 60),
         entryEdgeBps: num(env, 'PERP_ENTRY_EDGE_BPS', 5, 0, 500),
         exitEdgeBps: num(env, 'PERP_EXIT_EDGE_BPS', 0, -500, 500),

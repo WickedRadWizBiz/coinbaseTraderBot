@@ -14,14 +14,18 @@
 //   new_york           New York open (09:30-16:00 ET), London closed
 //   twilight           weekday gap after the NY close until Asia opens
 //                      (the "US-to-Asia transition" / liquidity trough)
-//   weekend            Saturday and Sunday UTC (spreads roughly double)
+//   weekend            Friday 16:00 ET (US close) to Sunday 18:00 ET: its own thin, low-volume market
+//                      (spreads roughly double)
+//   pre_week           Sunday 18:00 ET (CME reopens) to Monday 09:30 ET (US open): the pre-week phase,
+//                      when Asia and London open into a market that has been closed for two days
 //
 // Exchange holidays are not modelled (crypto trades through them); the
 // session describes the usual liquidity regime, not an exchange calendar.
 
-export type SessionKey = 'asia' | 'london' | 'london_ny_overlap' | 'new_york' | 'twilight' | 'weekend';
+export type SessionKey = 'asia' | 'london' | 'london_ny_overlap' | 'new_york' | 'twilight' | 'weekend' | 'pre_week';
 
-export const SESSION_KEYS: SessionKey[] = ['asia', 'london', 'london_ny_overlap', 'new_york', 'twilight', 'weekend'];
+/** Order matters: model feature vectors list sess_<key> in this order (append new keys at the end). */
+export const SESSION_KEYS: SessionKey[] = ['asia', 'london', 'london_ny_overlap', 'new_york', 'twilight', 'weekend', 'pre_week'];
 
 export const SESSION_LABEL: Record<SessionKey, string> = {
   asia: 'Asian Session',
@@ -29,7 +33,8 @@ export const SESSION_LABEL: Record<SessionKey, string> = {
   london_ny_overlap: 'London / New York Overlap',
   new_york: 'New York Session',
   twilight: 'US Close → Asia Open (Twilight)',
-  weekend: 'Weekend',
+  weekend: 'Weekend (Fri US close → Sun 18:00 ET)',
+  pre_week: 'Pre-Week (Sun 18:00 ET → Mon US open)',
 };
 
 interface Venue { tz: string; open: number; close: number }
@@ -64,10 +69,22 @@ export function venueOpen(v: Venue, ts: number): boolean {
   return z.weekday >= 1 && z.weekday <= 5 && z.minutes >= v.open && z.minutes < v.close;
 }
 
+/** Weekend boundaries in New York time: Friday close, Sunday 18:00 (CME reopen), Monday US open. */
+export const WEEK_PHASES = { weekendStart: VENUES.newYork.close, preWeekStart: 18 * 60, preWeekEnd: VENUES.newYork.open };
+
+/** 'weekend' (Fri 16:00 - Sun 18:00 ET), 'pre_week' (Sun 18:00 - Mon 09:30 ET) or undefined (the trading week). */
+export function weekPhase(ts: number): 'weekend' | 'pre_week' | undefined {
+  const z = zoneTime(ts, VENUES.newYork.tz);
+  const P = WEEK_PHASES;
+  if ((z.weekday === 5 && z.minutes >= P.weekendStart) || z.weekday === 6 || (z.weekday === 0 && z.minutes < P.preWeekStart)) return 'weekend';
+  if ((z.weekday === 0 && z.minutes >= P.preWeekStart) || (z.weekday === 1 && z.minutes < P.preWeekEnd)) return 'pre_week';
+  return undefined;
+}
+
 /** Session label at an instant. */
 export function sessionAt(ts: number): SessionKey {
-  const utcDay = new Date(ts).getUTCDay();
-  if (utcDay === 0 || utcDay === 6) return 'weekend';
+  const phase = weekPhase(ts);
+  if (phase) return phase;
   const ny = venueOpen(VENUES.newYork, ts);
   const ldn = venueOpen(VENUES.london, ts);
   if (ny && ldn) return 'london_ny_overlap';
@@ -345,20 +362,21 @@ export function nextSessionEdge(ts: number, minutes = 40): { start: number; end:
 }
 
 // ---- Weekend training ------------------------------------------------------------------------------
-// On weekends (no sessions) the pipeline starts at midnight New York time on Saturday and Sunday and runs
-// unpaused until it finishes, for as long as the weekend lasts (until Tokyo opens on Monday, Sunday
-// evening in New York); after that the session-edge windows pace it again.
+// The weekly full training run starts at midnight New York time at the end of Friday (00:00 Saturday ET)
+// and runs unpaused until it finishes; the bot opens no new positions while it runs (it needs the CPU,
+// and the models it trades with are being replaced). After it finishes the bot trades the weekend
+// market as its own regime. Outside the weekend the session-edge windows pace training again.
 
 const WEEKEND_TZ = VENUES.newYork.tz;
 
-/** Weekend free time (training may run unpaused) and the midnight start hour (a due run may start). */
+/** Weekend free time (training may run unpaused) and the Friday-midnight start hour (a due run may start). */
 export function weekendTraining(ts: number): { free: boolean; start: boolean } {
   const z = zoneTime(ts, WEEKEND_TZ);
-  const free = (z.weekday === 6 || z.weekday === 0) && sessionAt(ts) === 'weekend';
-  return { free, start: free && z.minutes < 60 };
+  const free = weekPhase(ts) === 'weekend';
+  return { free, start: free && z.weekday === 6 && z.minutes < 60 };
 }
 
-/** The next Saturday or Sunday midnight (New York) at or after ts (within the start hour counts as now). */
+/** The next Friday midnight (00:00 Saturday, New York) at or after ts (within the start hour counts as now). */
 export function nextWeekendMidnight(ts: number): number | undefined {
   const H = 3_600_000;
   if (weekendTraining(ts).start) return ts;

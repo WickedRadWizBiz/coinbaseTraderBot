@@ -110,6 +110,9 @@ function attractionMaps(sections: Section[], links: NeuralMap['links']): Map<str
   return out;
 }
 
+/** Margin between the heat map and the screen's edge (clears the 12 px rounded corners). */
+const SCREEN_INSET = 10;
+
 export function NeuralMapView() {
   const { data, error } = usePoll<NeuralMap>('/neural-map', 3000);
   const screenRef = useRef<HTMLDivElement>(null);
@@ -129,7 +132,8 @@ export function NeuralMapView() {
       const fs = !!document.fullscreenElement;
       const w = fs ? window.innerWidth : el.clientWidth;
       const h = fs ? window.innerHeight : window.innerHeight - 110;
-      setSide(Math.max(260, Math.floor(Math.min(w, h)) - (fs ? 0 : 4)));
+      // Inset from the screen's rounded corners by SCREEN_INSET on every side.
+      setSide(Math.max(260, Math.floor(Math.min(w, h)) - (fs ? 0 : 4) - 2 * SCREEN_INSET));
     };
     fit();
     const ro = new ResizeObserver(fit);
@@ -315,9 +319,9 @@ export function NeuralMapView() {
           {full ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}<span>{full ? 'Exit' : 'Full'}</span>
         </button>
       </div>
-      {/* The screen: the heat map fills it edge to edge. */}
+      {/* The screen: the heat map sits inside it with an equal margin on every side, clear of the rounded corners. */}
       <div ref={wrapRef} className="w-full flex justify-center">
-        <div ref={screenRef} className="crt-grid-panel !p-0 relative bg-[#020306] flex items-center justify-center" style={full ? { width: '100vw', height: '100vh' } : { width: side + 4, height: side + 4 }}>
+        <div ref={screenRef} className="crt-grid-panel !p-0 relative bg-[#020306] flex items-center justify-center" style={full ? { width: '100vw', height: '100vh' } : { width: side + 4 + 2 * SCREEN_INSET, height: side + 4 + 2 * SCREEN_INSET }}>
           {!data ? <div className="text-center animate-pulse">{error ? `LINK ERROR: ${error}` : 'MAPPING NETWORKS...'}</div> : (
             <canvas ref={canvasRef} onMouseMove={onMove} onMouseLeave={() => setHover(null)} onClick={onMove} className="block relative z-10" />
           )}

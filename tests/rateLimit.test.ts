@@ -20,7 +20,7 @@ test('TokenBucket.rateLimited pauses every caller, doubling per consecutive 429 
   assert.equal(b.rateLimited(), 1000);
 });
 
-test('getOpenMarkets passes max_close_ts; a 429 pauses the shared read bucket', async () => {
+test('getOpenMarkets asks for open markets without close-time filters; a 429 pauses the shared read bucket', async () => {
   const urls: string[] = [];
   let calls = 0;
   const rest = new KalshiRest({
@@ -28,8 +28,8 @@ test('getOpenMarkets passes max_close_ts; a 429 pauses the shared read bucket', 
     fetchImpl: (async (u: string) => { urls.push(u); calls++; return calls === 1 ? new Response('{}', { status: 429 }) : new Response('{"markets":[]}', { status: 200 }); }) as unknown as typeof fetch,
   });
   const t0 = Date.now();
-  await rest.getOpenMarkets('KXBTCD', 1_800_000_000_000);
-  assert.ok(urls[0].includes('max_close_ts=1800000000'), urls[0]);
+  await rest.getOpenMarkets('KXBTCD');
+  assert.ok(urls[0].includes('status=open') && !urls[0].includes('close_ts'), urls[0]);
   assert.equal(calls, 2);
   assert.ok(Date.now() - t0 >= 900, 'waited out the pause before retrying');
 });

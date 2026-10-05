@@ -135,7 +135,7 @@ In the final minute, open positions ride to settlement.
   | $100+ | normal | 2% | 3% | 1/4 | 15% |
 
   - The tier comes from the **high-water mark** of tradable bankroll, not the current balance. Once the account has grown into a tier it stays there, and losses never re-escalate risk. Withdrawals from trading cash lower the mark.
-  - The **hard floor is $10** (`MIN_TRADABLE_BANKROLL_USD`): a $20 account keeps trading after a $2 loss and stops only below $10. `PAPER_BANKROLL_USD` defaults to $20.
+  - The **hard floor is $10** (`MIN_TRADABLE_BANKROLL_USD`): a $20 account keeps trading after a $2 loss and stops only below $10. `PAPER_BANKROLL_USD` defaults to $100 (raising it later tops up the existing paper account by the difference).
   - The EV target is a share (25%) of the per-order risk budget, capped at $10, so it never limits size below the tier. At $20 a typical trade (about 3.5 contracts at 56¢ with a 6.5¢ edge) expects about $0.23, winning about $1.50 or losing $2. Five losses in a row, a normal streak, takes $20 to about $12 (each loss is 10% of what is left, and the drawdown brake shrinks size further).
   - The normal tier is the configured `RISK_*` and `STRATEGY_KELLY_FRACTION` values, and `SIZING_TIERS=off` applies it at every size.
   - **The daily stop is in dollars too.** Each tier has a dollar ceiling (`dailyLossUsd`: $4, $5, and `RISK_DAILY_LOSS_USD` at the normal tier), interpolated like the other limits. The stop is the lower of the tier fraction of bankroll and that ceiling. Above $100 the ceiling grows in proportion to the high-water mark instead of staying at one flat number, so a $1,000 account is stopped at 3% ($30), not at $5. The dashboard shows the tier's actual limit.
@@ -263,7 +263,7 @@ In live trading, `ModelHealth` stops new risk if the rolling log-loss advantage 
 - **Venue and modes.** Hedging and trading share one perps account, so `PERP_HEDGE` and `PERP_TRADING` must both be `live` or both `paper`.
   - `live` needs `TRADING_MODE=live`, `KALSHI_PERPS_KEY_ID` / `KALSHI_PERPS_PRIVATE_KEY_PATH` and a funded margin account. At startup the bot checks `/margin/enabled` (perps are rolling out member by member). Transfers from the event-contract balance to margin are not available yet, so fund the margin account directly.
   - In live mode an unvalidated binary model no longer stops the process when perps or tennis trade live. The risk gateway still rejects every binary crypto order until that model validates.
-  - `paper` simulates against live perp quotes with a `PERP_PAPER_BALANCE_USD` ($20) margin account.
+  - `paper` simulates against live perp quotes with a `PERP_PAPER_BALANCE_USD` ($100) margin account.
   - `/api/status` → `perps` shows the feed, premium, funding, hedge and combined targets, resting orders, exchange stops, and the trader's equity, signal source, model gates and last decision per market. The telemetry page has a Perps row.
 
 **ATP tennis (`bot/tennis/`, series `KXATPMATCH`).** Tennis runs as a rules-based strategy driven by the order book, with its own hard budget:
