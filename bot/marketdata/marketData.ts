@@ -401,7 +401,10 @@ export class MarketData extends EventEmitter {
     if (m.strike) return m.strike;
     if (m.kind !== 'updown') return undefined;
     const idx = this.index.get(m.asset);
-    const avg = idx?.settlement(m.openTime, m.openTime);
+    let avg = idx?.settlement(m.openTime, m.openTime);
+    // Paper: when Kalshi's index feed is too sparse to cover the opening minute, use the Coinbase spot
+    // series' opening average (small basis vs CF RTI) so the contract can still be priced and traded.
+    if (!(avg && avg.n >= 60) && this.cfg.mode === 'paper') avg = this.spot.get(m.asset)?.settlement(m.openTime, m.openTime, 60, 15_000);
     if (avg && avg.n >= 60) {
       m.strike = avg.avg;
       m.strikeSource = 'computed';
