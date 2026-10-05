@@ -15,6 +15,7 @@ import type { AuditLog } from './audit/auditLog';
 import type { Config, RiskLimits } from './config';
 import type { ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
+import type { IndexTracker } from './marketdata/indexTracker';
 import { computeFeatureMap, FEATURE_SCHEMA_VERSION, FEATURES } from './model/featureEngine';
 import { ADVERSARY_GROUPS, evaluateEntry, seedOf, type AdversaryVerdict } from './strategy/adversary';
 import { priceContract, SETTLEMENT_AVG_SEC } from './model/fairValue';
@@ -482,7 +483,17 @@ export class Engine {
     const idx = md.index.get(asset);
     if (this.d.cfg.mode !== 'paper' || (idx?.fresh(now, R.maxIndexAgeMs) && idx.vol())) return idx;
     const spot = md.spot.get(asset);
-    return spot?.fresh(now, R.maxIndexAgeMs) && spot.vol() ? spot : idx;
+    // A fresh Coinbase series is used even while its volatility warms up, so the block reads
+    // 'volatility warming up' (temporary) rather than 'index stale'.
+    if (spot?.fresh(now, R.maxIndexAgeMs) && (spot.vol() || !idx?.fresh(now, R.maxIndexAgeMs))) return spot;
+    return idx;
+  }
+
+  /** Per-asset price feed health (Kalshi settlement index and Coinbase spot), for diagnostics. */
+  feedHealth(now = this.now()): Record<string, { index: ReturnType<IndexTracker['health']> | null; spot: ReturnType<IndexTracker['health']> | null }> {
+    const out: Record<string, { index: ReturnType<IndexTracker['health']> | null; spot: ReturnType<IndexTracker['health']> | null }> = {};
+    for (const [asset, idx] of this.d.md.index) out[asset] = { index: idx.health(now), spot: this.d.md.spot.get(asset)?.health(now) ?? null };
+    return out;
   }
 
   private readonly trainTs: number[] = [];
