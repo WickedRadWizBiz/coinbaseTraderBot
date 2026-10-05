@@ -18,11 +18,22 @@ export async function authRequired(): Promise<boolean> {
   try { const r = await fetch('/api/auth'); return r.ok ? !!(await r.json()).required : true; } catch { return true; }
 }
 
+/** A request the server has not answered in this long is reported as a link failure, not left spinning. */
+const TIMEOUT_MS = 15_000;
+
 export async function api<T = any>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, {
-    ...init,
-    headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  });
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(`/api${path}`, {
+      ...init,
+      signal: ctl.signal,
+      headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+    });
+  } catch (e) {
+    throw new Error(ctl.signal.aborted ? `bot server not responding (no reply in ${TIMEOUT_MS / 1000}s)` : `bot server unreachable (${(e as Error).message})`);
+  } finally { clearTimeout(timer); }
   if (res.status === 401) {
     setToken('');
     throw new Unauthorized('unauthorized');

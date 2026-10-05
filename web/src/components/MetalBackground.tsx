@@ -1,8 +1,11 @@
 import React from 'react';
 
+// Pinned to the viewport (one screen-sized layer, painted once) rather than stretched over the whole page:
+// a page-tall textured, blended layer is rasterised in tiles on phones, and tiles not painted yet showed the
+// dark page colour through as dark bands on the metal.
 export const MetalBackground = () => {
   return (
-    <div className="absolute inset-0 pointer-events-none z-[0] bg-[#a8aeb8] overflow-hidden">
+    <div className="fixed inset-0 pointer-events-none z-[0] bg-[#a8aeb8] overflow-hidden" style={{ transform: 'translateZ(0)' }}>
       {/* 1. Base brushed metal gradient */}
       <div className="absolute inset-0 bg-gradient-to-br from-[#d1d5db] via-[#9ca3af] to-[#6b7280] opacity-90" />
       

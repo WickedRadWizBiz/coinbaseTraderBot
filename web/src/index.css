@@ -21,7 +21,7 @@
 }
 
 body {
-  background-color: var(--color-crypto-bg);
+  background-color: #a8aeb8; /* chassis metal (see MetalBackground) */
   color: var(--color-crypto-text);
   font-family: 'JetBrains Mono', monospace; letter-spacing: -0.02em;
   /* Thick-glass halation: each glyph glows in its own colour, so the haze scales with how bright that colour

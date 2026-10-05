@@ -1,0 +1,38 @@
+# Read-only health report from the Lightsail box, run manually from the Actions tab (or the API).
+# Changes nothing on the server: prints the service state, load, memory, disk, the busiest processes,
+# how fast the dashboard API answers, and the bot's recent log.
+name: Server diagnostics
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Report
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+          command_timeout: 5m
+          script: |
+            echo "== release: $(cat ~/bot/current/dist/RELEASE 2>/dev/null)"
+            echo "== uptime / load"; uptime
+            echo "== memory"; free -m
+            echo "== disk"; df -h / | tail -1
+            echo "== service"; systemctl status kalshi-bot --no-pager -l | head -15
+            echo "== restarts"; systemctl show kalshi-bot -p NRestarts -p ActiveEnterTimestamp -p MemoryCurrent
+            echo "== top processes"; ps -eo pid,ppid,etime,pcpu,pmem,rss,args --sort=-pcpu | head -12 | cut -c1-200
+            echo "== dashboard API timing"
+            for p in auth status markets; do curl -s -o /dev/null -m 20 -w "/api/$p  %{http_code}  %{time_total}s\n" "http://localhost:3000/api/$p" || echo "/api/$p  no reply in 20s"; done
+            echo "== OOM / kills"; sudo dmesg -T 2>/dev/null | grep -iE "out of memory|killed process" | tail -5 || true
+            echo "== warnings and errors, last 3 h (counted)"
+            journalctl -u kalshi-bot --since "3 hours ago" --no-pager | grep -E "ERROR|WARN|Started|Stopped|exited" | sed -E 's/^.*kalshi-bot\[[0-9]+\]: //; s/^[0-9TZ:.-]+ //; s/\{.*//' | sort | uniq -c | sort -rn | head -25
+            echo "== last 60 log lines"; journalctl -u kalshi-bot -n 60 --no-pager | cut -c1-300
