@@ -1,18 +1,24 @@
-// Paper training supervisor: the kill-switch override and capital-exhaustion refills.
+// Kill-switch override and paper capital-exhaustion refills.
 //
-// With the override on (bot/control.ts, default ON) and TRADING_MODE=paper:
-//  - automatic kill-switch trips (daily loss, order errors, reconciliation) are logged, not engaged, and a
-//    switch an automatic trip left engaged is reset; the brakes de-risk instead (Engine.riskScale);
-//  - when a paper cash pool can no longer trade (the Kalshi pool's tradable bankroll below
-//    MIN_TRADABLE_BANKROLL_USD, the perps margin below PERP_MIN_EQUITY_USD) the epoch ends: it is logged as
-//    a capital-exhaustion failure (DATA_DIR/epochs.jsonl), resting orders are cancelled, and the pool is
-//    refilled to its starting amount so trading, and the data it produces, continues. Open positions are
-//    left to settle on their own.
+// Sizing is NOT this module's business: the same break-even rule sizes every trade in every mode
+// (EquityGuard.sizeScale / BreakEven: full size at or above break-even, smaller as net losses grow, full
+// again once wins recoup them). The override (bot/control.ts, default ON) only decides whether losses
+// can STOP trading:
+//  - paper: automatic kill-switch trips (daily loss, order errors, reconciliation) are logged instead of
+//    engaged, and when a pool can no longer trade (Kalshi tradable bankroll below
+//    MIN_TRADABLE_BANKROLL_USD, perps margin below PERP_MIN_EQUITY_USD) the epoch ends: logged as a
+//    capital-exhaustion failure (DATA_DIR/epochs.jsonl), resting orders cancelled, the pool refilled to
+//    its starting amount and break-even reset, so trading and the data it produces continue;
+//  - live: the loss-limit trip (source 'risk') is logged instead of engaged and the loss pauses are
+//    skipped, so trading continues at the reduced size; malfunction trips (reconciliation breaks,
+//    order-error storms) still engage, and there is no refill: an exhausted pool stops at the
+//    MIN_TRADABLE_BANKROLL_USD guard.
+// A switch an override-covered trip left engaged is released; a manual STOP ALL never is.
 //
 // How epochs are used in training: never as a penalty on individual trades (that teaches the bot that
 // not trading is safest). The price models learn from every market's outcome, traded or not; an
-// exhaustion says the SIZING was too large for the edge, so epochs are the data for tuning the risk
-// scale (Kelly fraction, streak half-life and floor) by long-run growth across epochs.
+// exhaustion says the SIZING was too large for the edge, so epochs are the data for tuning the sizing
+// (Kelly fraction, the break-even loss threshold) by long-run growth across epochs.
 
 import fs from 'fs';
 import path from 'path';
@@ -24,7 +30,7 @@ import type { Engine } from '../engine';
 import type { Oms } from '../oms/oms';
 import { KillSwitch } from '../risk/killSwitch';
 import type { StreakScaler } from '../risk/streakScaler';
-import type { EquityGuard } from '../risk/equityGuard';
+import type { BreakEven, EquityGuard } from '../risk/equityGuard';
 import { logger } from '../util/log';
 import { readJson, writeJsonAtomic } from '../util/persist';
 
@@ -54,6 +60,8 @@ export class TrainingSupervisor {
     cfg: Readonly<Config>; control: RunControl; kill: KillSwitch; engine: Engine; oms: Oms; audit: AuditLog; alerter: Alerter;
     equityGuard?: EquityGuard; kalshiPaper?: RefillableKalshi; perpsPaper?: RefillablePerps;
     cancelPerps?: (reason: string) => Promise<void>; perpsMinEquity?: number; perpsStart?: number; perpsStreak?: StreakScaler;
+    /** Perps margin break-even (reset on refill). */
+    perpsBreakEven?: BreakEven;
     /** Tell the balance monitor about cash the bot added itself (so it is not read as a deposit). */
     noteCash?: (amount: number) => void;
     now?: () => number;
@@ -61,16 +69,22 @@ export class TrainingSupervisor {
     const fresh = (equity: number): EpochState => ({ epoch: 1, startTs: this.now, startEquity: equity, peak: equity, trough: equity, fills: 0, refills: 0, refilled: 0 });
     const saved = readJson<TrainingState>(this.file);
     this.st = saved ?? { kalshi: fresh(d.cfg.paperBankrollUsd), perps: fresh(d.perpsStart ?? d.cfg.perps.paperBalanceUsd) };
-    // Automatic trips are vetoed while the override is active (manual STOP ALL still engages).
-    d.kill.setSuppressor(() => (this.active() ? 'paper training override is on: de-risking instead of halting' : undefined));
+    // Override-covered automatic trips are vetoed (manual STOP ALL always engages).
+    d.kill.setSuppressor((source) => (this.covers(source) ? (d.cfg.mode === 'paper' ? 'override (paper): trading continues; size follows the net loss' : 'override (live): the loss limit does not stop trading; size follows the net loss') : undefined));
     d.oms.on('fill', () => { this.st.kalshi.fills++; });
   }
 
   private get now(): number { return (this.d.now ?? Date.now)(); }
   private get file(): string { return path.join(this.d.cfg.dataDir, 'training.json'); }
 
-  /** Paper mode with the override on. */
+  /** Paper mode with the override on: exhausted pools are refilled. */
   active(): boolean { return this.d.cfg.mode === 'paper' && this.d.control.killOverride; }
+
+  /** Whether the override covers an automatic kill trip from `source`: all of them in paper, the loss limit ('risk') in live. */
+  covers(source: string | undefined): boolean {
+    if (!this.d.control.killOverride || KillSwitch.isManual(source)) return false;
+    return this.d.cfg.mode === 'paper' || source === 'risk';
+  }
 
   start(): void {
     this.timer = setInterval(() => void this.tick(), 5_000);
@@ -82,10 +96,11 @@ export class TrainingSupervisor {
 
   /** One supervision pass (also called by tests). */
   async tick(): Promise<void> {
-    if (this.busy || !this.active()) return;
+    if (this.busy || !this.d.control.killOverride) return;
     this.busy = true;
     try {
-      this.releaseAutomaticKill();
+      this.releaseCoveredKill();
+      if (!this.active()) return;
       await this.checkKalshi();
       await this.checkPerps();
       writeJsonAtomic(this.file, this.st);
@@ -94,11 +109,11 @@ export class TrainingSupervisor {
     } finally { this.busy = false; }
   }
 
-  /** A kill switch an automatic trip left engaged (before the override, or from a previous run) is reset. */
-  private releaseAutomaticKill(): void {
+  /** A kill switch an override-covered trip left engaged (before the override, or from a previous run) is reset. */
+  private releaseCoveredKill(): void {
     const k = this.d.kill.status();
-    if (!k.engaged || KillSwitch.isManual(k.source)) return;
-    this.d.kill.reset('training override');
+    if (!k.engaged || !this.covers(k.source)) return;
+    this.d.kill.reset('kill-switch override');
     this.d.audit.write('training', { event: 'kill_released', previous: k });
     log.info('kill switch released by the paper training override', { reason: k.reason, source: k.source });
   }
@@ -118,7 +133,7 @@ export class TrainingSupervisor {
     this.d.noteCash?.(amount);
     e.onBalance(await paper.getBalance());
     this.d.equityGuard?.resetEpoch(e.equity() ?? start, this.now, e.bankroll() ?? start);
-    this.endEpoch('kalshi', eq, amount, { crypto: e.riskScale('crypto'), tennis: e.riskScale('tennis'), streak: { crypto: e.streak.crypto.status(), tennis: e.streak.tennis.status() } });
+    this.endEpoch('kalshi', eq, amount, { size: e.riskScale('crypto'), streak: { crypto: e.streak.crypto.status(), tennis: e.streak.tennis.status() } });
   }
 
   private async checkPerps(): Promise<void> {
@@ -133,6 +148,7 @@ export class TrainingSupervisor {
     await this.d.cancelPerps?.('capital exhaustion: new training epoch');
     const amount = +(start - equity).toFixed(2);
     paper.refill(amount);
+    this.d.perpsBreakEven?.reset(equity + amount);
     this.endEpoch('perps', equity, amount);
   }
 
@@ -154,9 +170,10 @@ export class TrainingSupervisor {
   status() {
     const e = this.d.engine;
     return {
-      override: this.d.control.killOverride, active: this.active(), mode: this.d.cfg.mode,
+      override: this.d.control.killOverride, refills: this.active(), mode: this.d.cfg.mode,
       kalshi: this.st.kalshi, perps: this.st.perps, lastExhaustion: this.st.last ?? null,
-      risk: { crypto: e.riskScale('crypto'), tennis: e.riskScale('tennis') },
+      size: e.riskScale('crypto'),
+      perpsBreakEven: this.d.perpsBreakEven?.reference ?? null,
       streak: { crypto: e.streak.crypto.status(), tennis: e.streak.tennis.status(), perps: this.d.perpsStreak?.status() ?? null },
     };
   }

@@ -108,7 +108,7 @@ export function BotControls({ s, onChange }: { s: any; onChange: () => void }) {
           </span>
         </button>
       </div>
-      <LiveTradingConfirmationModal isOpen={showLive} onClose={() => setShowLive(false)} onConfirmSuccess={() => waitForRestart('live')} currentKalshiBalance={s?.balance ?? null} />
+      <LiveTradingConfirmationModal isOpen={showLive} onClose={() => setShowLive(false)} onConfirmSuccess={() => waitForRestart('live')} currentKalshiBalance={s?.balance ?? null} overrideOn={s?.run?.killOverride !== false} />
     </div>
   );
 }

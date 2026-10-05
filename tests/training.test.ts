@@ -1,5 +1,5 @@
-// Paper training override: kill-switch suppression, capital-exhaustion refills, losing-streak sizing,
-// and the tournament rule that sitting out must not win.
+// Kill-switch override (paper and live), paper capital-exhaustion refills, break-even sizing (the same in
+// every mode), the results-vs-expectation diagnostic, and the tournament rule that sitting out must not win.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
@@ -10,7 +10,7 @@ import { loadConfig } from '../bot/config';
 import { RunControl } from '../bot/control';
 import type { Engine } from '../bot/engine';
 import type { Oms } from '../bot/oms/oms';
-import { EquityGuard } from '../bot/risk/equityGuard';
+import { BreakEven, breakEvenScale, EquityGuard, SIZE_FLOOR } from '../bot/risk/equityGuard';
 import { KillSwitch } from '../bot/risk/killSwitch';
 import { RiskGateway } from '../bot/risk/riskGateway';
 import { DEFAULT_STREAK, StreakScaler } from '../bot/risk/streakScaler';
@@ -129,7 +129,35 @@ test('supervisor: an exhausted paper pool is logged as a training epoch and refi
   assert.equal(kill.engaged, true);
 });
 
-test('supervisor: does nothing in live mode', async () => {
+test('break-even sizing: shrinks with net losses, back to full size once wins recoup them; never zero', () => {
+  const g = new EquityGuard({ ddScaleAt: 0.15, weeklyLossPause: 0.08 });
+  g.update(100, Date.now());
+  assert.equal(g.sizeScale(100), 1, 'at break-even');
+  assert.equal(g.sizeScale(130), 1, 'in profit: full size');
+  assert.ok(Math.abs(g.sizeScale(92.5) - (1 - 0.75 * 0.5)) < 1e-9, 'half way to the threshold: 0.625');
+  assert.equal(g.sizeScale(85), SIZE_FLOOR, 'at the threshold: the floor');
+  assert.equal(g.sizeScale(10), SIZE_FLOOR, 'deep loss: still the floor, never zero');
+  // A run up to 130 and back to 100 is still break-even: wins equal losses -> full size (unlike the
+  // high-water-mark brake, which would read 23% drawdown).
+  g.update(130, Date.now());
+  assert.equal(g.sizeScale(100), 1);
+  assert.ok(g.kellyScale(100) < 1, 'the high-water-mark measure would still be cut');
+  // Cash flows move break-even; P&L does not.
+  g.onCashFlow(50, Date.now());
+  assert.equal(g.netPnl(150), 0, 'a $50 deposit is not profit');
+  assert.ok(g.sizeScale(140) < 1, '$10 net loss after the deposit');
+  // A new training epoch resets break-even to the refilled equity.
+  g.resetEpoch(100, Date.now());
+  assert.equal(g.sizeScale(100), 1);
+  assert.equal(breakEvenScale(undefined, 50, 0.15), 1, 'no reference yet: full size');
+  const be = new BreakEven();
+  be.observe(40);
+  assert.ok(be.scale(37, 0.15) < 1 && be.scale(40, 0.15) === 1);
+  be.reset(100);
+  assert.equal(be.scale(100, 0.15), 1);
+});
+
+test('supervisor: live mode never refills; the override covers only the loss-limit trip', async () => {
   const dir = tmpDir();
   const cfg = { ...loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: dir }), mode: 'live' } as never;
   const audit = tmpAudit();
@@ -137,9 +165,11 @@ test('supervisor: does nothing in live mode', async () => {
   const oms = Object.assign(new EventEmitter(), { cancelAll: async () => ({ canceled: 0, errors: 0 }) }) as unknown as Oms;
   const engine = { bankroll: () => 1, equity: () => 1, onBalance: () => {}, riskScale: () => ({ scale: 1, parts: [] }), streak: { crypto: new StreakScaler(), tennis: new StreakScaler() } } as unknown as Engine;
   const sup = new TrainingSupervisor({ cfg, control: new RunControl(path.join(dir, 'c.json')), kill, engine, oms, audit, alerter: new Alerter([], audit), kalshiPaper: { refill: () => assert.fail('no refill in live'), getBalance: async () => 1 } });
-  assert.equal(sup.active(), false);
-  assert.equal(await kill.engage('daily loss', 'risk'), true, 'live keeps every brake');
+  assert.equal(sup.active(), false, 'no refills in live');
+  assert.equal(await kill.engage('daily loss $4 reached limit $3', 'risk'), false, 'override on: the loss limit does not stop live trading');
+  assert.equal(await kill.engage('persistent reconciliation break', 'recon'), true, 'malfunctions still trip it');
   await sup.tick();
+  assert.equal(kill.engaged, true, 'a malfunction trip is not released by the override');
 });
 
 test('tournaments: a member that sits out cannot beat one that trades and loses a little', () => {

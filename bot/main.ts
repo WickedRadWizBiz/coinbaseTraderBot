@@ -20,7 +20,7 @@ import { loadVolProfile, type VolProfile } from './model/volSeasonality';
 import { loadCalendar } from './model/calendar';
 import { ModelHealth } from './model/modelHealth';
 import { ClockSkewMonitor } from './risk/clockSkew';
-import { EquityGuard } from './risk/equityGuard';
+import { BreakEven, EquityGuard } from './risk/equityGuard';
 import { PerpHedger } from './perps/hedger';
 import { PerpModel } from './perps/perpSignal';
 import { PerpTrader } from './perps/perpTrader';
@@ -171,8 +171,10 @@ async function main(): Promise<void> {
   const equityGuard = new EquityGuard({ ddScaleAt: cfg.strategy.ddScaleAt, weeklyLossPause: cfg.strategy.weeklyLossPause }, path.join(cfg.dataDir, 'equity_guard.json'));
   // Dashboard PLAY / STOP and the paper training override (persisted).
   const control = new RunControl(path.join(cfg.dataDir, 'control.json'));
-  const trainingOverride = () => cfg.mode === 'paper' && control.killOverride;
+  // Kill-switch override (paper and live): loss brakes de-risk instead of halting.
+  const trainingOverride = () => control.killOverride;
   const perpsStreak = new StreakScaler(DEFAULT_STREAK, path.join(cfg.dataDir, 'streak_perps.json'));
+  const perpsBreakEven = new BreakEven(path.join(cfg.dataDir, 'perps_break_even.json'));
   let perpsPaper: PaperPerpExchange | undefined;
   const modelHealth = new ModelHealth({ minWindows: cfg.strategy.modelHealthMinWindows }, path.join(cfg.dataDir, 'model_health.json'));
   const calendar = loadCalendar(path.resolve(process.env.MACRO_CALENDAR_PATH ?? './params/calendar.json'));
@@ -242,7 +244,7 @@ async function main(): Promise<void> {
         snn: (asset) => engineRef?.snnContext(asset, undefined, 'perps'),
         journal: new SetupJournal(path.join(cfg.dataDir, 'setups'), (e) => log.warn(`setup journal: ${String(e)}`)),
         snnGatePath: () => path.join(cfg.autoTrain.dir, 'setup_snn_gate.json'),
-        trainingOverride, streak: perpsStreak,
+        trainingOverride, streak: perpsStreak, breakEven: perpsBreakEven, lossAt: cfg.strategy.ddScaleAt,
       });
       const st = (directionalTrader as SetupTrader).status();
       if (st.modelError) log.warn(`setup trader: ${st.modelError}; it records setups but opens no trades until a model exists`);
@@ -313,7 +315,7 @@ async function main(): Promise<void> {
   autoTrain.start();
   // Paper training override: automatic kill trips de-risk instead of halting; exhausted pools are refilled.
   const training = new TrainingSupervisor({
-    cfg, control, kill, engine, oms, audit, alerter, equityGuard, kalshiPaper: paper, perpsPaper, perpsStreak,
+    cfg, control, kill, engine, oms, audit, alerter, equityGuard, kalshiPaper: paper, perpsPaper, perpsStreak, perpsBreakEven,
     cancelPerps: hedger ? (reason) => hedger!.cancelAll(reason) : undefined, perpsMinEquity: cfg.perps.minEquityUsd, perpsStart: cfg.perps.paperBalanceUsd,
     noteCash: (amount) => engine.noteCashFlow(amount),
   });

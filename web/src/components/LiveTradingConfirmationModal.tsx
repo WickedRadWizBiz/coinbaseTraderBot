@@ -8,8 +8,10 @@ import { api } from '../api';
  * within 4 seconds. On success the server rewrites TRADING_MODE=live in bot.env and restarts the bot; it
  * refuses (and says why) when the live settings would not start, e.g. Kalshi keys missing.
  */
-export function LiveTradingConfirmationModal({ isOpen, onClose, onConfirmSuccess, currentKalshiBalance }: {
+export function LiveTradingConfirmationModal({ isOpen, onClose, onConfirmSuccess, currentKalshiBalance, overrideOn }: {
   isOpen: boolean; onClose: () => void; onConfirmSuccess: () => void; currentKalshiBalance: number | null;
+  /** Kill-switch override state (it carries over into live). */
+  overrideOn?: boolean;
 }) {
   const [step, setStep] = useState<'IDLE' | 'ARMED' | 'CONFIRMING' | 'SUCCESS'>('IDLE');
   const [countdown, setCountdown] = useState(4);
@@ -101,6 +103,12 @@ export function LiveTradingConfirmationModal({ isOpen, onClose, onConfirmSuccess
                   <li><strong className="text-crypto-danger">Double-Tap Required:</strong> tap the confirmation button below twice within 4 seconds.</li>
                   <li><strong className="text-white">Restart:</strong> the bot restarts into live mode (resting paper orders are cancelled first). It needs Kalshi API keys in bot.env; if anything is missing it stays in paper and tells you what.</li>
                   <li><strong className="text-crypto-success">Instant Disarm:</strong> one tap on the cash pool button returns to Paper Mode at any time.</li>
+                  <li>
+                    <strong className={overrideOn ? 'text-amber-300' : 'text-white'}>Kill-switch override is {overrideOn ? 'ON' : 'OFF'}:</strong>{' '}
+                    {overrideOn
+                      ? 'the daily loss limit and loss pauses will not stop live trading (size still shrinks with net losses). Flip the chassis switch off first if you want the hard stop.'
+                      : 'the daily loss limit stops live trading for the day.'}
+                  </li>
                 </ul>
                 {error && <div className="p-2.5 border border-crypto-danger bg-crypto-danger/20 text-crypto-danger text-xs font-bold normal-case">{error}</div>}
               </div>

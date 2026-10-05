@@ -122,9 +122,6 @@ export function snnColumn(m: { asset: string; openTime: number; closeTime: numbe
   return cryptoColumnKey(m.asset, (m.closeTime - m.openTime) / 60_000 <= 20 ? 15 : 60);
 }
 
-/** Lowest risk multiplier in paper training-override mode: the bot keeps trading, only smaller. */
-export const TRAINING_RISK_FLOOR = 0.25;
-
 export interface EngineDeps {
   /** Persist the losing-streak scalers in DATA_DIR (default true; tests pass false). */
   streakFiles?: boolean;
@@ -230,8 +227,8 @@ export class Engine {
       d.balanceMonitor?.onCash(fillCashDelta(f.side, f.count, f.price, fee, positionAfter - signed));
       this.saveMonitor();
     });
-    // Losing-streak scalers: every entry fill remembers the probability it was placed on; when its market
-    // settles, outcome vs that probability is one observation (bot/risk/streakScaler.ts).
+    // Results vs expectation (diagnostic): every entry fill remembers the probability it was placed on; when
+    // its market settles, outcome vs that probability is one observation (bot/risk/streakScaler.ts).
     d.oms.on('fill', (f: { ticker: string; side: 'bid' | 'ask' }, rec: { purpose?: string; reduceOnly?: boolean; fairValue?: number } | undefined) => {
       if (!rec || rec.reduceOnly || rec.purpose === 'exit' || !(rec.fairValue! > 0 && rec.fairValue! < 1)) return;
       const q = f.side === 'bid' ? rec.fairValue! : 1 - rec.fairValue!;
@@ -395,20 +392,20 @@ export class Engine {
   /** Guards that stop NEW risk (exits stay allowed): weekly loss pause, model health, maintenance. */
   entryGuards(now = this.now()): string[] {
     const r: string[] = [];
-    const training = this.trainingOverride();
+    const override = this.overrideActive();
     const paused = this.d.equityGuard?.paused(now);
-    if (paused && !training) r.push(paused);
+    if (paused && !override) r.push(paused);
     const skew = this.skewHalt();
     if (skew) r.push(skew);
     if (this.d.control && !this.d.control.active) r.push('stopped from the dashboard (press PLAY to resume)');
     const edge = this.sessionEdgeBlock(now);
     if (edge) r.push(edge);
     const h = this.d.modelHealth?.status();
-    if (this.d.cfg.strategy.modelHealthHalt && h?.halt && !training) r.push(`model log loss significantly worse than the calibrated market over ${h.windows} windows (p=${h.pWorse?.toFixed(3)})`);
+    if (this.d.cfg.strategy.modelHealthHalt && h?.halt && !override) r.push(`model log loss significantly worse than the calibrated market over ${h.windows} windows (p=${h.pWorse?.toFixed(3)})`);
     const b = this.bankroll();
     const minB = this.d.cfg.strategy.minTradableBankrollUsd;
-    // (Training override: the supervisor refills an exhausted paper pool instead.)
-    if (b !== undefined && b > 0 && b < minB && !training) r.push(`tradable bankroll $${b.toFixed(2)} below the $${minB} minimum`);
+    // Paper with the override: the supervisor refills an exhausted pool instead. Live: an exhausted pool stops here.
+    if (b !== undefined && b > 0 && b < minB && !this.trainingOverride()) r.push(`tradable bankroll $${b.toFixed(2)} below the $${minB} minimum`);
     // The exchange's own status and schedule when reachable; the built-in weekly guess otherwise.
     const xs = this.d.exchangeStatus;
     if (xs?.scheduleKnown()) { const b = xs.entryBlock(now); if (b) r.push(b); }
@@ -435,38 +432,39 @@ export class Engine {
     return label ? `session edge (${label}): no new entries, training window` : undefined;
   }
 
-  /** Paper mode with the kill-switch override on (bot/control.ts): brakes de-risk instead of halting. */
+  /**
+   * Kill-switch override (bot/control.ts, default ON), paper and live: the loss brakes (daily loss kill,
+   * weekly pause, model-health halt, perp daily halt) no longer stop trading; sizing is unchanged by it.
+   */
+  overrideActive(): boolean {
+    return this.d.control?.killOverride === true;
+  }
+
+  /** Paper mode with the override: an exhausted paper pool is refilled (bot/training/supervisor.ts). */
   trainingOverride(): boolean {
-    return this.d.cfg.mode === 'paper' && this.d.control?.killOverride === true;
+    return this.d.cfg.mode === 'paper' && this.overrideActive();
   }
 
   private dailyBreachDay?: string;
 
-  /** Losing-streak scalers per book (bot/risk/streakScaler.ts), persisted in DATA_DIR. */
+  /** Results vs the model's expectation per book (bot/risk/streakScaler.ts): diagnostic, shown on the dashboard. */
   readonly streak: { crypto: StreakScaler; tennis: StreakScaler };
   /** Entries waiting for their market to settle: the probability the order was placed on, per fill. */
   private readonly pendingEntries = new Map<string, Array<{ q: number; side: 'bid' | 'ask'; book: 'crypto' | 'tennis' }>>();
 
   /**
-   * Size multiplier for new risk and why. Drawdown from the high-water mark (the equity guard) times the
-   * losing-streak scale (results vs the model's expectation). Live: as computed (the drawdown brake can
-   * reach zero). Paper training override: never below TRAINING_RISK_FLOOR, and the brakes that would halt
-   * trading (model-health halt, daily loss limit) halve the size instead.
+   * Size multiplier for new risk on the Kalshi pool (crypto and tennis share it), and why: the break-even
+   * scale (EquityGuard.sizeScale). Full size at or above break-even; it shrinks as net losses grow, down
+   * to SIZE_FLOOR at a net loss of the tier's ddScaleAt, and grows back as wins recoup the losses, reaching
+   * full size again when wins equal losses. The same in paper and live, override on or off.
    */
-  riskScale(book: 'crypto' | 'tennis', now = this.now()): { scale: number; parts: string[] } {
-    const parts: string[] = [];
-    const t = this.tier();
-    const dd = book === 'crypto' ? this.d.equityGuard?.kellyScale(this.equity() ?? 0, t.ddScaleAt) ?? 1 : 1;
-    if (dd < 1) parts.push(`drawdown x${dd.toFixed(2)}`);
-    const st = this.streak[book].scale();
-    if (st < 1) parts.push(`streak x${st.toFixed(2)}`);
-    let scale = dd * st;
-    if (this.trainingOverride()) {
-      const h = this.d.modelHealth?.status();
-      if (book === 'crypto' && this.d.cfg.strategy.modelHealthHalt && h?.halt) { scale *= 0.5; parts.push('model health x0.5'); }
-      if (this.dailyBreachDay === new Date(now).toISOString().slice(0, 10)) { scale *= 0.5; parts.push('daily limit x0.5'); }
-      if (scale < TRAINING_RISK_FLOOR) { scale = TRAINING_RISK_FLOOR; parts.push(`floor ${TRAINING_RISK_FLOOR}`); }
-    }
+  riskScale(_book: 'crypto' | 'tennis' = 'crypto'): { scale: number; parts: string[] } {
+    const eq = this.equity();
+    const g = this.d.equityGuard;
+    if (eq === undefined || !g) return { scale: 1, parts: [] };
+    const scale = g.sizeScale(eq, this.tier().ddScaleAt);
+    const net = g.netPnl(eq);
+    const parts = scale < 1 && net !== undefined ? [`net loss $${(-net).toFixed(2)} vs break-even`] : [];
     return { scale, parts };
   }
 
@@ -618,12 +616,13 @@ export class Engine {
     const limit = this.dailyLossLimit();
     const pnl = this.dailyPnl();
     if (pnl <= -limit) {
-      // Live (or override off): the kill switch. Paper training override: logged, and today's size halves.
+      // Override off: the kill switch. Override on (paper or live): logged once a day; sizing already
+      // shrinks with the net loss (riskScale), so nothing else changes.
       if (await kill.engage(`daily loss $${(-pnl).toFixed(2)} reached limit $${limit.toFixed(2)}`, 'risk')) return;
       const day = new Date(this.now()).toISOString().slice(0, 10);
       if (this.dailyBreachDay !== day) {
         this.dailyBreachDay = day;
-        this.d.audit.write('training', { event: 'daily_limit_breach', pnl: +pnl.toFixed(2), limit: +limit.toFixed(2), action: 'size x0.5 for the rest of the day' });
+        this.d.audit.write('training', { event: 'daily_limit_breach', pnl: +pnl.toFixed(2), limit: +limit.toFixed(2), action: 'override on: trading continues; size follows the net loss' });
       }
     }
     await this.snnTick();
@@ -779,8 +778,8 @@ export class Engine {
       this.tennisStatus.set(event, { event, phase: out.phase, fairA, pA: MatchTracker.probability(markets), progress: tracker.progress(now, markets), progressDetail: tracker.progressDetail(now, markets), score: tracker.score, scoreRaw: sc?.raw ?? sc?.error, liveSince: tracker.liveSince, notes, tickers: ms.map((m) => m.ticker), updatedTs: now, trailingStops: Object.fromEntries(tracker.stops), confluence: Object.fromEntries(tracker.signals) });
 
       // Reconcile resting tennis orders with the plan (never touch another market's orders).
-      // Entries shrink with the tennis risk scale (losing streak; training-mode floor), never below 1 contract.
-      const ts = this.riskScale('tennis', now).scale;
+      // Entries shrink with the pool's break-even scale (net losses), never below 1 contract.
+      const ts = this.riskScale('tennis').scale;
       const plans = (tradeable ? out.plans : []).map((p) => (p.reduceOnly || ts >= 1 ? p : { ...p, count: Math.max(1, Math.floor(p.count * ts)) }));
       const resting = oms.liveOrders().filter((o) => ms.some((m) => m.ticker === o.ticker) && !o.cancelRequested);
       for (const o of resting) {
@@ -1435,7 +1434,7 @@ export class Engine {
       openOrders: oms.liveOrders().length,
       modelLiveBlockers: cfg.liveAllowUnvalidated ? [] : model.liveBlockers(),
       limitOverrides: this.tierLimits(this.tier()),
-      dailyLossAdvisory: this.trainingOverride(),
+      dailyLossAdvisory: this.overrideActive(),
     };
     if (tennis) {
       // Rules-based, budgeted separately: 25% of the working cash pool in total, per-match and
