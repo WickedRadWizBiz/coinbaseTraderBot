@@ -144,6 +144,8 @@ export function decidePerp(i: PerpDecisionInput, p: PerpTraderParams): PerpDecis
 }
 
 export interface PerpTraderDeps {
+  /** Paper training override (bot/control.ts): the perp daily loss halt is advisory, not a halt. */
+  trainingOverride?: () => boolean;
   params: PerpTraderParams;
   hub: PerpHub;
   gateway: PerpGateway;
@@ -245,7 +247,7 @@ export class PerpTrader {
         current, entryPrice: current !== 0 ? c.positions.get(ticker)?.entryPrice : undefined,
         heldMin: this.heldSince.has(ticker) ? (now - this.heldSince.get(ticker)!) / 60_000 : undefined,
         equity: equity ?? 0, atrFrac, marketLeverage: l.leverage, step: l.fractional ? 0.01 : 1, otherNotional: used - mine,
-        halt: guards.halt ?? this.dayHalt, noEntry, lockedFrac: guards.lockedFrac,
+        halt: guards.halt ?? (this.d.trainingOverride?.() ? undefined : this.dayHalt), noEntry, lockedFrac: guards.lockedFrac,
       }, P);
       this.lastDecisions.set(ticker, { ...dec, muBps, sigmaHBps: sig, source, current });
       if (dec.target !== current || dec.urgent) this.d.audit?.write('perp_decision', { asset, ticker, current, target: dec.target, reason: dec.reason, muBps, sigmaHBps: sig, source, validated, equity, stop: dec.stopPrice });

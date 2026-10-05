@@ -422,6 +422,26 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
 .chassis-key:disabled { cursor: default; }
 .chassis-key-red { background: linear-gradient(#f87171, #b91c1c); color: #fff5f5; border-color: #7f1d1d; border-bottom-color: #5b1414; box-shadow: inset 0 1px 1px rgba(255,255,255,0.55), 0 4px 6px rgba(0,0,0,0.45), 0 0 0 4px rgba(0,0,0,0.15); }
 .chassis-key-red.is-active { background: linear-gradient(#b91c1c, #7f1d1d); }
+/* The emergency key: big enough to hit without looking. */
+.chassis-key-lg { min-width: 92px; min-height: 78px; padding: 0.8rem 1rem; font-size: 12px; border-radius: 9px; border-bottom-width: 8px; }
+.chassis-key-lg:active, .chassis-key-lg.is-active { transform: translateY(6px); border-bottom-width: 2px; }
+
+/* Flip toggle on the chassis (kill-switch override): a dark slot with a metal lever, up = on. */
+.chassis-toggle {
+  position: relative; width: 38px; height: 64px; border-radius: 7px; cursor: pointer;
+  background: linear-gradient(#2b2e34, #121418); border: 2px solid #9ca3af;
+  box-shadow: inset 0 3px 6px rgba(0,0,0,0.75), inset 0 -1px 1px rgba(255,255,255,0.08), 0 1px 0 rgba(255,255,255,0.45), 0 0 0 4px rgba(0,0,0,0.12);
+}
+.chassis-toggle-lever {
+  position: absolute; left: 4px; right: 4px; top: 30px; height: 26px; border-radius: 5px;
+  background: linear-gradient(#f3f4f6, #b4b9c1 55%, #8d939c); border-bottom: 3px solid #5b616a;
+  box-shadow: inset 0 1px 1px rgba(255,255,255,0.9), 0 4px 5px rgba(0,0,0,0.65); transition: top 0.12s ease-out;
+}
+.chassis-toggle.is-on .chassis-toggle-lever { top: 4px; }
+.chassis-toggle:disabled { cursor: default; opacity: 0.7; }
+/* Indicator lamp beside the toggle: dark when off, amber when the override is active. */
+.chassis-lamp { width: 10px; height: 10px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #5a4a2a, #2a2214); box-shadow: inset 0 1px 2px rgba(0,0,0,0.8), 0 1px 0 rgba(255,255,255,0.35); }
+.chassis-lamp.is-on { background: radial-gradient(circle at 35% 30%, #fff3c4, #f59e0b 55%, #b45309); box-shadow: 0 0 8px 2px rgba(245,158,11,0.75), 0 1px 0 rgba(255,255,255,0.35); }
 
 /* Printed on the metal chassis (silkscreen ink, no screen glow). */
 .chassis-print {

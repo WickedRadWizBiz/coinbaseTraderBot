@@ -29,6 +29,7 @@ import type { Vault } from '../vault/vault';
 
 import { CONFLUENCES, KNOWLEDGE, RULES } from '../ta/knowledge';
 import { buildNeuralMap } from './neuralMap';
+import type { TrainingSupervisor } from '../training/supervisor';
 import type { RunControl } from '../control';
 import { ConfigError, loadConfig } from '../config';
 import { latencySnapshot } from '../util/latency';
@@ -50,6 +51,8 @@ export interface ApiDeps {
   vault?: Vault;
   autoTrain?: AutoTrainer;
   control?: RunControl;
+  /** Paper training override and capital-exhaustion epochs (bot/training/supervisor.ts). */
+  training?: TrainingSupervisor;
   /** Restart the bot (systemd starts it again). */
   restart?: () => void;
 }
@@ -167,6 +170,7 @@ export function createApi(d: ApiDeps): express.Express {
       dominance: dominanceStatus(d.md),
       wsConnected: d.md.wsConnected,
       catalog: d.md.catalogHealth,
+      training: d.training?.status() ?? null,
       entryDiagnosis: d.engine.entryDiagnosis(),
       latency: latencySnapshot(),
       run: d.control?.status() ?? { active: true, since: null },
@@ -309,6 +313,17 @@ export function createApi(d: ApiDeps): express.Express {
     d.audit.write('config', { event: active ? 'bot_play' : 'bot_stop', by: 'dashboard' });
     if (!active) { try { await d.oms.cancelAll('stopped from the dashboard'); } catch { /* reported by the OMS */ } }
     res.json({ ok: true, run: d.control.status() });
+  });
+
+  // Kill-switch override (paper training): ON = automatic brakes de-risk instead of halting and exhausted
+  // paper pools are refilled; OFF = the kill switch behaves as in live. Persisted; no effect in live mode.
+  api.post('/override', async (req, res) => {
+    if (!d.control) return res.status(400).json({ error: 'run control not available' });
+    const on = req.body?.on === true;
+    d.control.setOverride(on);
+    d.audit.write('config', { event: on ? 'kill_override_on' : 'kill_override_off', by: 'dashboard' });
+    await d.training?.tick();
+    res.json({ ok: true, run: d.control.status(), training: d.training?.status() ?? null });
   });
 
   // PAPER / LIVE: rewrite the modes in bot.env and restart. Live needs { confirm: 'LIVE' } (the dashboard's

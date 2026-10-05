@@ -149,6 +149,13 @@ export class PaperPerpExchange implements PerpGateway {
     return p.position !== 0 && m !== undefined ? p.position * (m - p.entryPrice) : 0;
   }
 
+  /** Training refill after capital exhaustion (bot/training/supervisor.ts): raise margin equity by `amount`. */
+  refill(amount: number): void {
+    if (!(amount > 0)) return;
+    this.st.startBalance = (this.st.startBalance ?? 0) + amount;
+    this.save();
+  }
+
   async getBalance(): Promise<PerpBalance> {
     let eq = this.st.startBalance ?? 0;
     for (const [t, p] of Object.entries(this.st.positions)) eq += p.realized - p.fees + p.funding + this.unrealized(t, p);

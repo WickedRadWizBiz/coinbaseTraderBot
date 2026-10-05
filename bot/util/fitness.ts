@@ -84,6 +84,18 @@ export function fitnessOf(xs: Interaction[], o: { from?: number; to?: number; cl
 }
 
 
+/**
+ * Sitting out must not win a tournament. A member that takes fewer than `min` of its opportunities
+ * scores at most 0 minus up to 10 (no trades = -10): otherwise, while every member's edge is still weak,
+ * the ones that barely trade beat every one that trades and loses a little, and the population learns
+ * to abstain instead of learning to predict.
+ */
+export function coverageFloor(rep: FitnessReport, taken: number, opportunities: number, min: number): FitnessReport {
+  const cov = opportunities > 0 ? taken / opportunities : 0;
+  if (cov >= min) return rep;
+  return { ...rep, fitness: Math.min(rep.fitness, 0) - 10 * (1 - cov / min) };
+}
+
 // ---- Hyperparameter mutation (population-based training) ----------------------------------------
 
 export type Hyper = Record<string, number>;

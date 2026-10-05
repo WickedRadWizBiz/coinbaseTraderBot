@@ -32,6 +32,8 @@ interface PaperState {
   balance: number;
   /** Cash put into the paper account so far (raising PAPER_BANKROLL_USD tops it up by the difference). */
   funded?: number;
+  /** Cash added by training refills (capital exhaustion), total. */
+  refilled?: number;
   positions: Record<string, number>;
   fills: ExchangeFill[];
   orders: PaperOrder[];
@@ -63,6 +65,14 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
 
   /** Cash put into the paper account (the configured starting balance, after any top-ups). */
   get funded(): number { return this.st.funded ?? 0; }
+
+  /** Training refill after capital exhaustion (bot/training/supervisor.ts): add cash, tracked separately. */
+  refill(amount: number): void {
+    if (!(amount > 0)) return;
+    this.st.balance += amount;
+    this.st.refilled = (this.st.refilled ?? 0) + amount;
+    this.save();
+  }
 
   private save(): void {
     if (this.st.orders.length > 4000) {

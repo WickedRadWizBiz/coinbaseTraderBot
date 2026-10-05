@@ -20,7 +20,7 @@ import { loadVolProfile, type VolProfile } from './model/volSeasonality';
 import { loadCalendar } from './model/calendar';
 import { ModelHealth } from './model/modelHealth';
 import { ClockSkewMonitor } from './risk/clockSkew';
-import { EquityGuard } from './risk/equityGuard';
+import { BreakEven, EquityGuard } from './risk/equityGuard';
 import { PerpHedger } from './perps/hedger';
 import { PerpModel } from './perps/perpSignal';
 import { PerpTrader } from './perps/perpTrader';
@@ -49,6 +49,8 @@ import { TennisFairModel } from './tennis/tennisFair';
 import { AutoTrainer, resolveModelPaths } from './autotrain';
 import { logger } from './util/log';
 import { RunControl } from './control';
+import { TrainingSupervisor } from './training/supervisor';
+import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
 
 const log = logger('main');
 
@@ -167,6 +169,13 @@ async function main(): Promise<void> {
   const balanceMonitor = new BalanceMonitor(readJson<MonitorState>(balanceMonitorPath) ?? {});
   const tca = new Tca(path.join(cfg.dataDir, 'tca'), (t) => md.books.get(t)?.mid());
   const equityGuard = new EquityGuard({ ddScaleAt: cfg.strategy.ddScaleAt, weeklyLossPause: cfg.strategy.weeklyLossPause }, path.join(cfg.dataDir, 'equity_guard.json'));
+  // Dashboard PLAY / STOP and the paper training override (persisted).
+  const control = new RunControl(path.join(cfg.dataDir, 'control.json'));
+  // Kill-switch override (paper and live): loss brakes de-risk instead of halting.
+  const trainingOverride = () => control.killOverride;
+  const perpsStreak = new StreakScaler(DEFAULT_STREAK, path.join(cfg.dataDir, 'streak_perps.json'));
+  const perpsBreakEven = new BreakEven(path.join(cfg.dataDir, 'perps_break_even.json'));
+  let perpsPaper: PaperPerpExchange | undefined;
   const modelHealth = new ModelHealth({ minWindows: cfg.strategy.modelHealthMinWindows }, path.join(cfg.dataDir, 'model_health.json'));
   const calendar = loadCalendar(path.resolve(process.env.MACRO_CALENDAR_PATH ?? './params/calendar.json'));
   if (!calendar) log.info('no macro calendar (params/calendar.json): calendar features unavailable');
@@ -192,6 +201,7 @@ async function main(): Promise<void> {
       const sim = new PaperPerpExchange(hub, tickerAsset, { makerBps: P.makerFeeBps, takerBps: P.takerFeeBps }, path.join(cfg.dataDir, 'paper_perps.json'), Date.now, P.paperBalanceUsd);
       md.on('perp', () => sim.step());
       perpGateway = sim;
+      perpsPaper = sim;
     }
     // Underlying units per contract, from the market itself (perp prices are per contract).
     const units = (asset: string) => {
@@ -234,6 +244,7 @@ async function main(): Promise<void> {
         snn: (asset) => engineRef?.snnContext(asset, undefined, 'perps'),
         journal: new SetupJournal(path.join(cfg.dataDir, 'setups'), (e) => log.warn(`setup journal: ${String(e)}`)),
         snnGatePath: () => path.join(cfg.autoTrain.dir, 'setup_snn_gate.json'),
+        trainingOverride, streak: perpsStreak, breakEven: perpsBreakEven, lossAt: cfg.strategy.ddScaleAt,
       });
       const st = (directionalTrader as SetupTrader).status();
       if (st.modelError) log.warn(`setup trader: ${st.modelError}; it records setups but opens no trades until a model exists`);
@@ -249,7 +260,7 @@ async function main(): Promise<void> {
           dailyLossFrac: P.dailyLossFrac, cooldownMin: P.cooldownMin, pilotMaxNotionalUsd: P.pilotMaxNotionalUsd, pilotMaxLeverage: P.pilotMaxLeverage, priorIc: P.priorIc,
           makerBps: P.makerFeeBps, requireValidation: P.requireValidation, minEquityUsd: P.minEquityUsd,
         },
-        hub, gateway: perpGateway, model: perpModel, audit,
+        hub, gateway: perpGateway, model: perpModel, audit, trainingOverride,
         sources: (asset) => ({ index: md.index.get(asset), spot: md.spot.get(asset), bars: md.features.bars.get(asset), candles: md.features.candles.get(asset), usdtd: md.usdtd, btcd: md.btcd, perp: hub.get(asset), snn: engineRef?.snnContext(asset, undefined, 'perps') }),
       });
       directionalTrader = perpTrader;
@@ -298,11 +309,16 @@ async function main(): Promise<void> {
   // The exchange's own status and maintenance schedule gate new entries (exits stay allowed).
   const exchangeStatus = new ExchangeStatusMonitor(rest);
   exchangeStatus.start();
-  const control = new RunControl(path.join(cfg.dataDir, 'control.json'));
   const engine: Engine = new Engine({ control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
   engineRef = engine;
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();
+  // Paper training override: automatic kill trips de-risk instead of halting; exhausted pools are refilled.
+  const training = new TrainingSupervisor({
+    cfg, control, kill, engine, oms, audit, alerter, equityGuard, kalshiPaper: paper, perpsPaper, perpsStreak, perpsBreakEven,
+    cancelPerps: hedger ? (reason) => hedger!.cancelAll(reason) : undefined, perpsMinEquity: cfg.perps.minEquityUsd, perpsStart: cfg.perps.paperBalanceUsd,
+    noteCash: (amount) => engine.noteCashFlow(amount),
+  });
 
   // Execution events -> OMS (same path for paper and live).
   if (paper) {
@@ -339,7 +355,8 @@ async function main(): Promise<void> {
 
   // The dashboard comes up first (it shows the engine warming up); loading every market takes a minute or
   // more on a small server.
-  const app = createApi({ cfg, audit, engine, oms, kill, recon, model, tca, md, vault, autoTrain, control, restart: () => void shutdown('restart (dashboard)', 75), startedAt: Date.now() });
+  training.start();
+  const app = createApi({ cfg, audit, engine, oms, kill, recon, model, tca, md, vault, autoTrain, control, training, restart: () => void shutdown('restart (dashboard)', 75), startedAt: Date.now() });
   const server = app.listen(cfg.port, cfg.host, () => log.info(`operator API on http://${cfg.host}:${cfg.port} (${cfg.dashboardPassword ? 'password required' : 'no login'})`));
 
   md.start();

@@ -13,6 +13,8 @@ export interface RiskContext {
   now: number;
   mode: TradingMode;
   killEngaged: boolean;
+  /** Paper training override: the daily loss limit neither rejects orders nor trips the kill switch. */
+  dailyLossAdvisory?: boolean;
   /** Non-empty when new risk is halted (recon break, stale data, startup). */
   haltReasons: string[];
   /** Bankroll-tier limits that replace the configured fractions (sizing tiers). */
@@ -146,9 +148,9 @@ export class RiskGateway {
     if (c.windowRisk + addRisk > L.maxWindowRiskFrac * bank + EPS) r.push(`window risk $${(c.windowRisk + addRisk).toFixed(2)} > ${(L.maxWindowRiskFrac * 100).toFixed(1)}% cap`);
     if (c.totalRisk + addRisk > L.maxTotalRiskFrac * bank + EPS) r.push(`total risk $${(c.totalRisk + addRisk).toFixed(2)} > ${(L.maxTotalRiskFrac * 100).toFixed(1)}% cap`);
 
-    // Daily loss limit trips the kill switch.
+    // Daily loss limit trips the kill switch (paper training override: advisory, handled by the engine).
     const limit = this.dailyLossLimit(bank, c.limitOverrides);
-    if (c.dailyPnl <= -limit) {
+    if (c.dailyPnl <= -limit && !c.dailyLossAdvisory) {
       r.push(`daily loss $${(-c.dailyPnl).toFixed(2)} at limit $${limit.toFixed(2)}`);
       return { ok: false, reasons: r, tripKill: `daily loss limit $${limit.toFixed(2)} reached` };
     }
