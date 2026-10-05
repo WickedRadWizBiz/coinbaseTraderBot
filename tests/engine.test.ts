@@ -106,6 +106,18 @@ test('paper prices from Coinbase spot when the Kalshi index is stale or too spar
   assert.ok(Math.abs(st.spot! - 60010) < 50);
 });
 
+test('paper: an up/down strike comes from the Coinbase opening minute when the Kalshi index missed it', async () => {
+  const { md, market } = await setup();
+  const am = md.markets.get(market.ticker)!;
+  am.strike = undefined;
+  (md.index.get('BTC') as any).points.length = 0;
+  assert.equal(md.strikeFor(am), undefined);
+  const spot = md.spot.get('BTC')!;
+  for (let t = market.openTime - 90_000; t <= market.openTime + 5_000; t += 5_000) spot.add(60123, t);
+  assert.equal(md.strikeFor(am), 60123);
+  assert.equal(am.strikeSource, 'computed');
+});
+
 test('live-style limits: paper tolerates late feed data, live does not', () => {
   const paper = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40) });
   assert.equal(paper.risk.maxIndexAgeMs, 15000);
