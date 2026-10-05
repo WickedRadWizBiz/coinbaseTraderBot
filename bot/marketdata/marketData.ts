@@ -272,7 +272,7 @@ export class MarketData extends EventEmitter {
   /** Refresh the list of open markets for each configured series (traded first, then record-only). */
   private catalogBusy = false;
   /** Last catalog refresh: series that failed, the latest error, when (for the dashboard). */
-  catalogHealth: { ts: number; series: number; failed: number; lastError?: string } = { ts: 0, series: 0, failed: 0 };
+  catalogHealth: { ts: number; series: number; failed: number; lastError?: string; tracked?: number; recordOnly?: number; open?: number; perSeries?: Record<string, { fetched: number; nearest: number; closed: number; farDated: number; notOpenYet: number; kept: number; sample?: string }> } = { ts: 0, series: 0, failed: 0 };
 
   async refreshCatalog(now = Date.now()): Promise<void> {
     // One refresh at a time: when the exchange is slow or rate limiting, a 20 s timer would otherwise
@@ -287,6 +287,7 @@ export class MarketData extends EventEmitter {
     const entries: Array<[string, string, boolean]> = [...[...this.series].map(([s, a]) => [s, a, false] as [string, string, boolean]), ...this.recordSeriesList().map(([s, a]) => [s, a, true] as [string, string, boolean])];
     let recordCount = [...this.markets.values()].filter((m) => m.recordOnly && m.closeTime > now).length;
     let failed = 0, lastError: string | undefined;
+    const perSeries: NonNullable<MarketData['catalogHealth']['perSeries']> = {};
     for (const [series, asset, recordOnly] of entries) {
       try {
         if (!recordOnly && now - (this.feesFetchedAt.get(series) ?? 0) > 3_600_000) {
@@ -295,13 +296,19 @@ export class MarketData extends EventEmitter {
           this.feesFetchedAt.set(series, now);
           try { this.feeChanges.set(series, (await this.rest.getSeriesFeeChanges(series)).sort((a, b) => a.scheduledTs - b.scheduledTs)); } catch { /* optional: keep the last list */ }
         }
-        const markets = nearestStrikes(await this.rest.getOpenMarkets(series), contractKind, series, this.index.get(asset)?.latest()?.value, this.cfg.catalogStrikesPerEvent, new Set(this.markets.keys()));
+        const fetched = await this.rest.getOpenMarkets(series);
+        const markets = nearestStrikes(fetched, contractKind, series, this.index.get(asset)?.latest()?.value, this.cfg.catalogStrikesPerEvent, new Set(this.markets.keys()));
+        // Where markets drop out, per series (dashboard / API diagnostics).
+        const ps = { fetched: fetched.length, nearest: markets.length, closed: 0, farDated: 0, notOpenYet: 0, kept: 0, sample: fetched[0] ? `${fetched[0].ticker} open ${new Date(fetched[0].openTime).toISOString()} close ${new Date(fetched[0].closeTime).toISOString()}` : undefined };
+        perSeries[series] = ps;
         for (const m of markets) {
-          if (m.closeTime <= now) continue;
+          if (m.closeTime <= now) { ps.closed++; continue; }
           const kind = contractKind(series, m.strikeType);
           // Far-dated strikes (daily/weekly ladders) are never inside an entry window; skip them.
           const horizonMs = kind === 'match' ? this.cfg.tennis.horizonHours * 3_600_000 : this.cfg.catalogHorizonMin * 60_000;
-          if (m.closeTime > now + horizonMs && !(kind === 'match' && m.startTime !== undefined && m.startTime < now + horizonMs)) continue;
+          if (m.closeTime > now + horizonMs && !(kind === 'match' && m.startTime !== undefined && m.startTime < now + horizonMs)) { ps.farDated++; continue; }
+          if (m.openTime > now) ps.notOpenYet++;
+          ps.kept++;
           const prev = this.markets.get(m.ticker);
           if (recordOnly && !prev) {
             if (recordCount >= this.cfg.strategy.recordMaxMarkets) continue;
@@ -318,7 +325,8 @@ export class MarketData extends EventEmitter {
       }
     }
     if (entries.length && failed === entries.length) log.error('catalog refresh failed for every series: no new markets are being added', { error: lastError });
-    this.catalogHealth = { ts: now, series: entries.length, failed, lastError };
+    const all = [...this.markets.values()];
+    this.catalogHealth = { ts: now, series: entries.length, failed, lastError, perSeries, tracked: all.length, recordOnly: all.filter((m) => m.recordOnly).length, open: all.filter((m) => m.openTime <= now && now < m.closeTime).length } as MarketData['catalogHealth'];
     // Record-only markets have no position to settle, so fetch their official result once they close.
     let looked = 0;
     for (const m of this.markets.values()) {
