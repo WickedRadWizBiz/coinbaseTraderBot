@@ -104,7 +104,7 @@ export default function App() {
   );
 
   return (
-    <div className="relative min-h-screen w-full flex flex-col md:flex-row text-crypto-text overflow-x-hidden bg-[#111]">
+    <div className="relative min-h-screen w-full flex flex-col md:flex-row text-crypto-text overflow-x-hidden bg-[#a8aeb8]">
       <MetalBackground />
 
       <div className={`flex-1 flex flex-col md:flex-row w-full relative z-10 ${isShaking ? 'is-shaking' : ''}`}>

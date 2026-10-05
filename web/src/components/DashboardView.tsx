@@ -63,7 +63,7 @@ export function DashboardView() {
   return (
     <div className="flex flex-col gap-6 w-full max-w-7xl mx-auto pb-24 md:pb-6 relative z-10 text-crypto-primary font-mono text-sm tracking-wider">
       {error && (
-        <div className="crt-grid-panel p-3 border border-crypto-danger bg-crypto-danger/15 text-crypto-danger font-bold uppercase text-xs">Link error: {error}</div>
+        <div className="sticky top-2 z-50 crt-grid-panel p-3 border border-crypto-danger bg-[#2a0508] text-crypto-danger font-bold uppercase text-xs">Link error: {error}{s ? ' · showing the last good reading' : ''}</div>
       )}
 
       {/* Status screen, with the kill key and the override switch on the chassis beside it (below it on a phone). */}
