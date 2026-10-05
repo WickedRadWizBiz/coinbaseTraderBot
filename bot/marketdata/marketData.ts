@@ -112,6 +112,7 @@ export class MarketData extends EventEmitter {
     // Track every asset that has a settlement index, so discovered series can be priced at once.
     const assets = new Set([...this.series.values(), ...(cfg.strategy.seriesAuto ? Object.values(cfg.indexIdMap) : [])]);
     for (const asset of assets) {
+      if (asset === 'TENNIS') continue; // match markets: no price index or spot feed
       if (!this.index.has(asset)) this.index.set(asset, new IndexTracker(asset, undefined, undefined, cfg.settlementAvg));
       if (!this.spot.has(asset)) this.spot.set(asset, new IndexTracker(asset));
     }

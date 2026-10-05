@@ -478,13 +478,23 @@ export class Engine {
         if ((m.settledTs ?? 0) >= dayStart) pnl += m.realized ?? 0;
         continue;
       }
+      if (m.yes === 0) continue;
+      // Liquidation mark: long YES at the bid, long NO at the ask, from a usable book. A book that is
+      // momentarily unusable or one-sided (a thin market overnight, a feed reconnect) says nothing about
+      // the position's value: use the last good mark, or the cost (no gain or loss) if there never was
+      // one. Valuing it at $0 would book a phantom loss of the whole stake and trip the daily stop.
       const book = this.d.md.books.get(m.ticker);
-      // Liquidation mark: long YES at the bid, long NO at the ask; no book = worst case.
-      const mark = m.yes > 0 ? book?.bestBid()?.price ?? 0 : m.yes < 0 ? book?.bestAsk()?.price ?? 1 : 0;
-      pnl += PositionBook.markToMarket(m, mark);
+      const usable = book?.isUsable(this.now(), this.d.cfg.risk.maxBookAgeMs);
+      const live = usable ? (m.yes > 0 ? book!.bestBid()?.price : book!.bestAsk()?.price) : undefined;
+      if (live !== undefined) this.lastMark.set(m.ticker, live);
+      const mark = live ?? this.lastMark.get(m.ticker);
+      if (mark !== undefined) pnl += PositionBook.markToMarket(m, mark);
     }
     return pnl;
   }
+
+  /** Last liquidation mark seen from a usable book, per ticker (see dailyPnl). */
+  private readonly lastMark = new Map<string, number>();
 
   private resting(ticker?: string): RestingLike[] {
     return this.d.oms.liveOrders()

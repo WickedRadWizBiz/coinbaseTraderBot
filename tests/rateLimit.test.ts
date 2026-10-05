@@ -91,3 +91,20 @@ test('cached (CDN) responses are not used for the clock-skew estimate', async ()
   await mk({ date: 'Wed, 30 Sep 2026 12:00:05 GMT', 'x-cache': 'Miss from cloudfront' }).getOpenMarkets('KXBTC15M');
   assert.equal(seen.length, 1);
 });
+
+import { TennisScoreClient } from '../bot/tennis/liveTennisApi';
+
+test('live tennis: a spent daily allowance waits for the provider reset; the day follows the provider clock', async () => {
+  let t = Date.parse('2026-10-05T08:00:00Z'), calls = 0;
+  const body = '{"detail":"daily request allowance of 100 spent for the FREE tier; it resets at 2026-10-05T21:00:00Z"}';
+  const c = new TennisScoreClient({ apiKey: 'k', now: () => t, cacheTtlMs: 0, fetchFn: (async () => { calls++; return new Response(body, { status: 429 }); }) as unknown as typeof fetch });
+  assert.equal(await c.getLiveSlate('exit'), null);
+  assert.equal(calls, 1);
+  t += 3 * 3_600_000;
+  assert.equal(await c.getLiveSlate('exit'), null);
+  assert.equal(calls, 1, 'no calls before 21:00 UTC');
+  t = Date.parse('2026-10-05T21:01:00Z');
+  await c.getLiveSlate('exit');
+  assert.equal(calls, 2, 'the provider day rolled over at 21:00 UTC');
+  assert.equal(c.usage().callsToday, 1);
+});
