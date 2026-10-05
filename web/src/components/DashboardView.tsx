@@ -134,6 +134,9 @@ export function DashboardView() {
               <Row label="Active markets" value={String((markets ?? []).length)}
                 sub={s.catalog?.failed ? `market list: ${s.catalog.failed}/${s.catalog.series} series failing · ${String(s.catalog.lastError ?? '').slice(0, 80)}` : undefined}
                 tone={s.catalog?.failed ? (s.catalog.failed === s.catalog.series ? 'bad' : 'warn') : undefined} />
+              <Row label="Crypto entries" value={s.entryDiagnosis ? `${s.entryDiagnosis.quoting}/${s.entryDiagnosis.markets} QUOTING` : '—'}
+                sub={s.entryDiagnosis ? Object.entries(s.entryDiagnosis.reasons as Record<string, number>).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${v} ${k}`).join(' · ') : undefined}
+                tone={s.entryDiagnosis?.quoting ? 'ok' : 'warn'} />
               <Row label="Uptime" value={`${Math.floor(s.uptimeSec / 3600)}h ${Math.floor((s.uptimeSec % 3600) / 60)}m`} />
             </div>
           ) : <div className="p-6 animate-pulse">ESTABLISHING LINK...</div>}

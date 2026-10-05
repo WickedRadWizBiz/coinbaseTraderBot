@@ -167,6 +167,7 @@ export function createApi(d: ApiDeps): express.Express {
       dominance: dominanceStatus(d.md),
       wsConnected: d.md.wsConnected,
       catalog: d.md.catalogHealth,
+      entryDiagnosis: d.engine.entryDiagnosis(),
       latency: latencySnapshot(),
       run: d.control?.status() ?? { active: true, since: null },
       perpsMode: d.cfg.perps.trading,

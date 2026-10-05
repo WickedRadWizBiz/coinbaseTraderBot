@@ -70,7 +70,7 @@ export class KalshiWs extends EventEmitter {
       this.emit(this.everConnected ? 'reconnected' : 'connected');
       this.everConnected = true;
     });
-    ws.on('pong', () => { if (this.pingSentAt) recordLatency('kalshiWs', Date.now() - this.pingSentAt); });
+    ws.on('pong', () => { this.lastMessageTs = Date.now(); if (this.pingSentAt) recordLatency('kalshiWs', Date.now() - this.pingSentAt); });
     ws.on('message', (buf) => this.onMessage(buf.toString()));
     ws.on('close', (code) => {
       log.warn('closed', { code });
