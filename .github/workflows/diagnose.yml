@@ -32,6 +32,9 @@ jobs:
             echo "== top processes"; ps -eo pid,ppid,etime,pcpu,pmem,rss,args --sort=-pcpu | head -12 | cut -c1-200
             echo "== dashboard API timing"
             for p in auth status markets; do curl -s -o /dev/null -m 20 -w "/api/$p  %{http_code}  %{time_total}s\n" "http://localhost:3000/api/$p" || echo "/api/$p  no reply in 20s"; done
+            echo "== trading"
+            curl -s -m 20 http://localhost:3000/api/status | python3 -c 'import json,sys; s=json.load(sys.stdin); print("entries", json.dumps(s.get("entryDiagnosis"))); print("halts", s.get("haltReasons")); print("bankroll", s.get("bankroll"), "daily pnl", s.get("dailyPnl"))' || true
+            curl -s -m 20 "http://localhost:3000/api/orders?limit=300" | python3 -c 'import json,sys,collections; o=json.load(sys.stdin); print("recent orders", len(o), dict(collections.Counter((x.get("purpose"), x.get("status")) for x in o))); [print("  ", x.get("ticker"), x.get("side"), x.get("count"), x.get("price"), x.get("status")) for x in o[:10]]' || true
             echo "== OOM / kills"; sudo dmesg -T 2>/dev/null | grep -iE "out of memory|killed process" | tail -5 || true
             echo "== warnings and errors, last 3 h (counted)"
             journalctl -u kalshi-bot --since "3 hours ago" --no-pager | grep -E "ERROR|WARN|Started|Stopped|exited" | sed -E 's/^.*kalshi-bot\[[0-9]+\]: //; s/^[0-9TZ:.-]+ //; s/\{.*//' | sort | uniq -c | sort -rn | head -25

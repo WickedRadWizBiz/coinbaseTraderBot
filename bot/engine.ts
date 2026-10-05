@@ -464,6 +464,26 @@ export class Engine {
 
   private dailyBreachDay?: string;
   /** Recent exploration entries (paper), for the per-hour cap. */
+  /** The settlement index (Kalshi's feed) if fresh; in paper, Coinbase spot stands in while Kalshi's print
+   *  is late (a busy server or a reconnect), so training is not blocked by feed lag. Live never substitutes. */
+  private indexPoint(asset: string, now: number) {
+    const R = this.d.cfg.risk;
+    const p = this.d.md.index.get(asset)?.fresh(now, R.maxIndexAgeMs);
+    if (p || this.d.cfg.mode !== 'paper') return p;
+    return this.d.md.spot.get(asset)?.fresh(now, R.maxIndexAgeMs);
+  }
+
+  private readonly trainTs: number[] = [];
+  private readonly trainTicker = new Map<string, number>();
+  /** Paper training-trade budget: PAPER_TRAINING_TRADES_PER_HOUR, spread evenly (no bursts), one per contract. */
+  private trainBudget(now: number, ticker: string): boolean {
+    const perHour = this.d.cfg.strategy.paperTrainTrades;
+    if (!(perHour > 0) || this.trainTicker.has(ticker)) return false;
+    while (this.trainTs.length && this.trainTs[0] < now - 3_600_000) this.trainTs.shift();
+    const last = this.trainTs[this.trainTs.length - 1] ?? 0;
+    return this.trainTs.length < perHour && now - last >= (3_600_000 / perHour) * 0.5;
+  }
+
   private readonly exploreTs: number[] = [];
   private exploreBudget(now: number): boolean {
     while (this.exploreTs.length && this.exploreTs[0] < now - 3_600_000) this.exploreTs.shift();
@@ -1162,6 +1182,7 @@ export class Engine {
         this.lastPosition.delete(t);
         this.d.modelHealth?.forget(t);
         this.lastDecisionAudit.delete(t);
+        this.trainTicker.delete(t);
       }
     }
     for (const [k, ts] of this.lastRejectAudit) if (ts < cutoff) this.lastRejectAudit.delete(k);
@@ -1197,7 +1218,7 @@ export class Engine {
 
     if (cfg.mode === 'live' && !md.hasVerifiedFees(m.seriesTicker)) return block('series fee schedule not verified');
     if (!book.isUsable(now, R.maxBookAgeMs)) return block('book not usable');
-    const spot = idx?.fresh(now, R.maxIndexAgeMs);
+    const spot = this.indexPoint(m.asset, now);
     if (!spot) return block('index stale');
     const vol = idx!.vol();
     if (!vol) return block('volatility warming up');
@@ -1350,13 +1371,32 @@ export class Engine {
     // Paper exploration: when nothing qualifies, sometimes enter the best borderline opportunity (still
     // fee-net positive, within exploreBand of the threshold) at minimum size. The logged probability lets
     // training weight these trades correctly; live mode never explores.
-    if (cfg.mode === 'paper' && S.paperExplore && reason && entryWindowOpen && st.position === 0 && !plan.place.some((p) => p.purpose !== 'exit' && !p.reduceOnly)) {
-      const relaxed = decide(view, { ...strat, minEdge: Math.max(0, strat.minEdge - S.exploreBand) }, { exits: false, blockReductions: false, entries: true });
-      const e = relaxed.place.find((p) => p.purpose !== 'exit' && !p.reduceOnly);
+    // (A resting maker quote does not count: far from the touch it rarely fills, and blocked this before.)
+    if (cfg.mode === 'paper' && S.paperExplore && reason && entryWindowOpen && st.position === 0 && !plan.place.some((p) => p.purpose === 'entry')) {
+      const relaxed = decide(view, { ...strat, minEdge: Math.max(0, strat.minEdge - S.exploreBand), style: 'both' }, { exits: false, blockReductions: false, entries: true });
+      const e = relaxed.place.find((p) => p.purpose === 'entry');
       if (e && this.exploreBudget(now) && Math.random() < S.exploreRate) {
         this.exploreTs.push(now);
         plan.place.push({ ...e, count: Math.min(e.count, 1), why: `explore (p=${S.exploreRate}): ${e.why}` });
         plan.notes.push(`exploration entry (paper, p=${S.exploreRate})`);
+      }
+    }
+    // Paper training trades: when still nothing is entered, take 1 contract on the side the model favours
+    // (taker, at the touch) a few times an hour, spread over time and one per contract. These guarantee a
+    // steady stream of (simulated) trades to watch and learn from; tagged 'train' so their results can be
+    // separated from edge-qualified entries. Live mode never does this.
+    // A resting maker quote does not count as entering: quotes far from the touch rarely fill.
+    if (cfg.mode === 'paper' && reason && entryWindowOpen && st.position === 0 && !plan.place.some((p) => p.purpose === 'entry') && this.trainBudget(now, m.ticker)) {
+      const q = st.q ?? pYes;
+      const buyYes = q >= mid;
+      const cost = buyYes ? ask.price : Math.round((1 - bid.price) * 10000) / 10000;
+      if (cost >= R.minSidePrice && cost <= 1 - R.minSidePrice && ask.price - bid.price <= 0.08 && !fastMove && tauSec > R.noEntryBeforeCloseSec) {
+        this.trainTs.push(now);
+        this.trainTicker.set(m.ticker, m.closeTime);
+        const edge = buyYes ? q - ask.price : (1 - q) - cost;
+        plan.place.push({ side: buyYes ? 'bid' : 'ask', price: buyYes ? ask.price : bid.price, count: 1, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: false, purpose: 'entry', edge,
+          why: `train (paper): ${buyYes ? 'YES' : 'NO'} at ${cost.toFixed(2)}, model q ${q.toFixed(3)} vs mid ${mid.toFixed(3)}` });
+        plan.notes.push('training trade (paper, 1 contract)');
       }
     }
     if (this.fillLog) for (const p of plan.place) if (isMakerEntry(p)) this.fillX.set(p, fillInputs(p, fillCtx));
@@ -1435,7 +1475,9 @@ export class Engine {
     if (snapped === undefined || !(snapped > 0 && snapped < 1)) return;
     if (snapped !== p.price) p = { ...p, price: snapped };
     // Tennis orders are rules-based (no model probability to size an edge from): budgeted separately.
-    const pk = tennis ? undefined : this.portfolioCap(m, p, pYes, now);
+    // Paper training trades are 1 contract with no edge requirement (they exist to produce trades).
+    const training = cfg.mode === 'paper' && p.why.startsWith('train (paper)');
+    const pk = tennis || training ? undefined : this.portfolioCap(m, p, pYes, now);
     if (pk && pk.contracts < p.count) {
       this.d.audit.write('decision', { decisionId, ticker: m.ticker, event: 'portfolio_kelly_cap', from: p.count, to: pk.contracts, fStar: +pk.fStar.toFixed(4), edgePerDay: +pk.edgePerDay.toFixed(4) });
       if (pk.contracts <= 0) return;
@@ -1460,7 +1502,7 @@ export class Engine {
       bestBid: book.bestBid()?.price,
       bestAsk: book.bestAsk()?.price,
       // Tennis has no settlement index.
-      indexFresh: tennis ? true : Boolean(md.index.get(m.asset)?.fresh(now, cfg.risk.maxIndexAgeMs)),
+      indexFresh: tennis ? true : Boolean(this.indexPoint(m.asset, now)),
       marketCloseTs: m.closeTime,
       tickSize: m.tickSize,
       priceRanges: m.priceRanges,
@@ -1476,6 +1518,7 @@ export class Engine {
       limitOverrides: this.tierLimits(this.tier()),
       dailyLossAdvisory: this.overrideActive(),
     };
+    if (training) ctx.skipEdgeCollar = true;
     if (tennis) {
       // Rules-based, budgeted separately: 25% of the working cash pool in total, per-match and
       // per-order caps. The crypto model's live gate doesn't apply (TENNIS_LIVE does), and there is
