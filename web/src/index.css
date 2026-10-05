@@ -137,27 +137,27 @@ body {
 
 
 @keyframes crt-flicker {
-  0%   { opacity: 0; }
-  5%   { opacity: 0; }
-  10%  { opacity: 0; }
-  15%  { opacity: 0.015; }
-  20%  { opacity: 0; }
-  25%  { opacity: 0; }
-  30%  { opacity: 0.035; }
-  35%  { opacity: 0; }
-  40%  { opacity: 0; }
-  45%  { opacity: 0; }
-  50%  { opacity: 0.075; }
-  55%  { opacity: 0.035; }
-  60%  { opacity: 0; }
-  65%  { opacity: 0; }
-  70%  { opacity: 0; }
-  75%  { opacity: 0.015; }
-  80%  { opacity: 0; }
-  85%  { opacity: 0; }
-  90%  { opacity: 0; }
-  95%  { opacity: 0.075; }
-  100% { opacity: 0; }
+  0%   { background-color: rgba(0, 0, 0, 0); }
+  5%   { background-color: rgba(0, 0, 0, 0); }
+  10%  { background-color: rgba(0, 0, 0, 0); }
+  15%  { background-color: rgba(0, 0, 0, 0.015); }
+  20%  { background-color: rgba(0, 0, 0, 0); }
+  25%  { background-color: rgba(0, 0, 0, 0); }
+  30%  { background-color: rgba(0, 0, 0, 0.035); }
+  35%  { background-color: rgba(0, 0, 0, 0); }
+  40%  { background-color: rgba(0, 0, 0, 0); }
+  45%  { background-color: rgba(0, 0, 0, 0); }
+  50%  { background-color: rgba(0, 0, 0, 0.075); }
+  55%  { background-color: rgba(0, 0, 0, 0.035); }
+  60%  { background-color: rgba(0, 0, 0, 0); }
+  65%  { background-color: rgba(0, 0, 0, 0); }
+  70%  { background-color: rgba(0, 0, 0, 0); }
+  75%  { background-color: rgba(0, 0, 0, 0.015); }
+  80%  { background-color: rgba(0, 0, 0, 0); }
+  85%  { background-color: rgba(0, 0, 0, 0); }
+  90%  { background-color: rgba(0, 0, 0, 0); }
+  95%  { background-color: rgba(0, 0, 0, 0.075); }
+  100% { background-color: rgba(0, 0, 0, 0); }
 }
 
 h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
@@ -191,20 +191,30 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
   overflow: hidden;
 }
 
-/* Occasional heavy flicker */
+/* Glass on top of every screen: the tube's slight convex fall-off (the picture darkens toward the edges
+   and corners, with a soft rim) and, above it, a soft reflection haze. The occasional heavy flicker dims this layer's base colour without touching the reflection. */
 .crt-grid-panel::before {
   content: " ";
   display: block;
   position: absolute;
-  top: 0;
-  left: 0;
-  bottom: 0;
-  right: 0;
-  background: rgba(0, 0, 0, 1);
-  z-index: 9998;
+  inset: 0;
+  border-radius: inherit;
+  background-color: rgba(0, 0, 0, 0);
+  background-image:
+    /* Reflection haze: a soft window-light patch high on the left of the bulge */
+    radial-gradient(ellipse 80% 55% at 30% 6%, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.045) 45%, transparent 72%),
+    /* ...and a faint counter-glint low on the right */
+    radial-gradient(ellipse 38% 22% at 86% 96%, rgba(255, 255, 255, 0.04), transparent 70%),
+    /* The bend: brightness falls off toward the edges, most in the corners */
+    radial-gradient(ellipse 105% 105% at 50% 50%, transparent 58%, rgba(0, 0, 0, 0.30) 100%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.035), inset 0 0 28px rgba(0, 0, 0, 0.45);
+  z-index: 10000;
   pointer-events: none;
   animation: crt-flicker 3s infinite;
 }
+
+/* The screen contents bow very slightly outward (convex tube); the glass layers above stay flat. */
+.crt-grid-panel > :not(.heavy-dither-overlay) { filter: url(#crt-bulge); }
 
 .crt-grid-panel::after {
   content: " ";
@@ -215,8 +225,6 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
   bottom: 0;
   right: 0;
   background: 
-    /* Thick glass: a soft reflection across the top of the tube */
-    radial-gradient(120% 70% at 30% 0%, rgba(255, 255, 255, 0.07), transparent 55%),
     /* Scanning bar */
     linear-gradient(to bottom, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0.25) 50%, rgba(0, 0, 0, 0) 100%),
     /* Vignette */
@@ -229,8 +237,8 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
     /* Ditherpunk: Blue Noise / High Freq Noise */
     url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.2'/%3E%3C/svg%3E");
   z-index: 9999;
-  background-size: 100% 100%, 100% 20vh, 100% 100%, 100% 4px, 3px 100%, 4px 4px, 200px 200px;
-  background-repeat: no-repeat, no-repeat, no-repeat, repeat, repeat, repeat, repeat;
+  background-size: 100% 20vh, 100% 100%, 100% 4px, 3px 100%, 4px 4px, 200px 200px;
+  background-repeat: no-repeat, no-repeat, repeat, repeat, repeat, repeat;
   pointer-events: none;
   
   opacity: 0.65;
@@ -439,6 +447,15 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
   box-shadow: 0 1px 0 rgba(255,255,255,0.14), 0 1px 3px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(255,255,255,0.05);
 }
 .chassis-sticker, .chassis-sticker * { text-shadow: none !important; }
-/* Matte: a soft, even lift instead of a glossy streak. */
+/* Screen-printed ink: a warm off-white that sits in the plastic (slightly soft edges, not quite opaque),
+   and colour swatches printed in muted ink. */
+.chassis-sticker { color: rgba(214, 209, 196, 0.86); font-weight: 600; }
+.chassis-sticker * { text-shadow: 0 0 0.6px currentColor !important; }
+.chassis-sticker [style*='background'] { filter: saturate(0.72) brightness(0.9); opacity: 0.9; }
+/* Matte surface over everything printed on it: the same grain runs across ink and plastic, with a soft,
+   even lift instead of a glossy streak. */
 .chassis-sticker::after { content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
-  background: radial-gradient(120% 140% at 30% 0%, rgba(255,255,255,0.035), transparent 60%); }
+  background-image:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='g'><feTurbulence type='fractalNoise' baseFrequency='1.1' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.55 0'/></filter><rect width='100%' height='100%' filter='url(%23g)'/></svg>"),
+    radial-gradient(120% 140% at 30% 0%, rgba(255,255,255,0.03), transparent 60%);
+  mix-blend-mode: multiply; opacity: 0.55; }

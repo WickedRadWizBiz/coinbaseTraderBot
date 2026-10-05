@@ -541,6 +541,33 @@ export class Engine {
     // Perps: the hedge is reduce-only while binary risk is halted; directional trading has its own guards.
     await this.d.hedger?.tick(this.exposures(), { reduceOnly: this.haltReasons().length > 0 && !this.d.perpTrader, directional: this.perpDirectional() });
     await this.tennisTick();
+    if (this.now() - this.lastDiagnosisAudit > 300_000) {
+      this.lastDiagnosisAudit = this.now();
+      this.d.audit.write('decision', { event: 'entry_diagnosis', ...this.entryDiagnosis() });
+    }
+  }
+
+  private lastDiagnosisAudit = 0;
+
+  /**
+   * Why the crypto book is or is not entering, counted over the active markets: the first blocking
+   * check per market (book, index, volatility, strike...), the entry window / guards, or no edge.
+   */
+  entryDiagnosis(now = this.now()): { markets: number; quoting: number; reasons: Record<string, number> } {
+    const reasons: Record<string, number> = {};
+    let quoting = 0;
+    const active = this.d.md.activeMarkets(now).filter((m) => m.kind !== 'match');
+    const resting = new Set(this.d.oms.liveOrders().filter((o) => o.purpose === 'quote').map((o) => o.ticker));
+    for (const m of active) {
+      const st = this.status.get(m.ticker);
+      const why = !st ? 'not evaluated yet'
+        : st.blocked ? st.blocked
+        : resting.has(m.ticker) ? undefined
+        : !st.entryWindow ? (this.entryGuards(now)[0] ?? 'outside the entry window (time to close / price band)')
+        : 'no edge after fees';
+      if (why) reasons[why] = (reasons[why] ?? 0) + 1; else quoting++;
+    }
+    return { markets: active.length, quoting, reasons };
   }
 
   // ---- ATP tennis (bot/tennis/tennisStrategy.ts) --------------------------------------

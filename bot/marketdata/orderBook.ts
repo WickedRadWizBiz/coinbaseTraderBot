@@ -11,6 +11,8 @@ export class OrderBook {
   private readonly asks = new Map<number, number>();
   private snapshotted = false;
   lastUpdateTs = 0;
+  /** Last time the feed was known live with this book intact (a quiet book on a live feed is current). */
+  private aliveTs = 0;
 
   constructor(readonly ticker: string) {}
 
@@ -38,8 +40,13 @@ export class OrderBook {
     this.snapshotted = false;
   }
 
+  /** The sequenced feed is live and this book has had no gap: it is current even without new deltas. */
+  markAlive(ts: number): void {
+    if (this.snapshotted) this.aliveTs = ts;
+  }
+
   isUsable(now: number, maxAgeMs: number): boolean {
-    return this.snapshotted && now - this.lastUpdateTs <= maxAgeMs && !this.isCrossed();
+    return this.snapshotted && now - Math.max(this.lastUpdateTs, this.aliveTs) <= maxAgeMs && !this.isCrossed();
   }
 
   isCrossed(): boolean {

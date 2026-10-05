@@ -138,6 +138,15 @@ export class MarketData extends EventEmitter {
         this.emit('disconnected');
       });
       this.ws.connect();
+      // Kalshi sends book deltas only when a book changes; a quiet book on a live, gap-free sequenced feed
+      // is still current. While the socket is live, mark every intact book alive (a gap or disconnect
+      // invalidates books until their next snapshot, so a broken book never passes).
+      this.aliveTimer = setInterval(() => {
+        const now = Date.now();
+        if (!this.wsConnected || !this.ws || now - this.ws.lastMessageTs > 12_000) return; // pings every 10 s
+        for (const b of this.books.values()) b.markAlive(now);
+      }, 1000);
+      this.aliveTimer.unref();
     } else {
       this.pollTimer = setInterval(() => void this.poll(), 2000);
     }
@@ -184,8 +193,11 @@ export class MarketData extends EventEmitter {
     this.emit('perp', s);
   }
 
+  private aliveTimer?: NodeJS.Timeout;
+
   stop(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.aliveTimer) clearInterval(this.aliveTimer);
     if (this.indexTimer) clearInterval(this.indexTimer);
     this.ws?.close();
     this.proxyWs?.close();

@@ -33,3 +33,16 @@ test('getOpenMarkets asks for open markets without close-time filters; a 429 pau
   assert.equal(calls, 2);
   assert.ok(Date.now() - t0 >= 900, 'waited out the pause before retrying');
 });
+
+import { OrderBook } from '../bot/marketdata/orderBook';
+
+test('a quiet book on a live feed stays usable; an invalidated one does not', () => {
+  const b = new OrderBook('T');
+  b.applySnapshot({ bids: [{ price: 0.4, size: 5 }], asks: [{ price: 0.45, size: 5 }] }, 0);
+  assert.equal(b.isUsable(10_000, 5000), false, 'no deltas for 10 s and no liveness: stale');
+  b.markAlive(9_000);
+  assert.equal(b.isUsable(10_000, 5000), true, 'feed live: current');
+  b.invalidate();
+  b.markAlive(10_000);
+  assert.equal(b.isUsable(10_000, 5000), false, 'a gap/disconnect waits for the next snapshot');
+});
