@@ -72,12 +72,6 @@
         <feComponentTransfer in="b2" result="g2"><feFuncA type="linear" slope="0.3" /></feComponentTransfer>
         <feMerge><feMergeNode in="g2" /><feMergeNode in="g1" /><feMergeNode in="SourceGraphic" /></feMerge>
       </filter>
-      <!-- Convex tube: screen contents bow slightly outward (barrel distortion). The displacement map is drawn
-           in src/crtBulge.ts; units are the element's own box, so every screen bends by the same proportion. -->
-      <filter id="crt-bulge" x="0" y="0" width="1" height="1" filterUnits="objectBoundingBox" primitiveUnits="objectBoundingBox" color-interpolation-filters="sRGB">
-        <feImage id="crt-bulge-map" x="0" y="0" width="1" height="1" preserveAspectRatio="none" result="map" />
-        <feDisplacementMap in="SourceGraphic" in2="map" scale="0.05" xChannelSelector="R" yChannelSelector="G" />
-      </filter>
     </svg>
     <div id="root">
       <div class="initial-loader">

@@ -201,7 +201,7 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
   border-radius: inherit;
   background-color: rgba(0, 0, 0, 0);
   background-image:
-    /* Reflection haze: a soft window-light patch high on the left of the bulge */
+    /* Reflection haze: a soft window-light patch high on the left of the glass */
     radial-gradient(ellipse 80% 55% at 30% 6%, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.045) 45%, transparent 72%),
     /* ...and a faint counter-glint low on the right */
     radial-gradient(ellipse 38% 22% at 86% 96%, rgba(255, 255, 255, 0.04), transparent 70%),
@@ -212,9 +212,6 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
   pointer-events: none;
   animation: crt-flicker 3s infinite;
 }
-
-/* The screen contents bow very slightly outward (convex tube); the glass layers above stay flat. */
-.crt-grid-panel > :not(.heavy-dither-overlay) { filter: url(#crt-bulge); }
 
 .crt-grid-panel::after {
   content: " ";
