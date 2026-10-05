@@ -191,9 +191,8 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
   overflow: hidden;
 }
 
-/* Glass on top of every screen: the tube's slight convex bend (the picture darkens and falls away toward
-   the edges and corners, with a soft rim) and, above it, a soft light reflection that follows the same
-   curve. The occasional heavy flicker dims this layer's base colour without touching the reflection. */
+/* Glass on top of every screen: the tube's slight convex fall-off (the picture darkens toward the edges
+   and corners, with a soft rim) and, above it, a soft reflection haze. The occasional heavy flicker dims this layer's base colour without touching the reflection. */
 .crt-grid-panel::before {
   content: " ";
   display: block;
@@ -202,10 +201,8 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
   border-radius: inherit;
   background-color: rgba(0, 0, 0, 0);
   background-image:
-    /* Reflection: a soft window-light patch high on the left of the bulge */
+    /* Reflection haze: a soft window-light patch high on the left of the bulge */
     radial-gradient(ellipse 80% 55% at 30% 6%, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.045) 45%, transparent 72%),
-    /* ...the curved specular arc it leaves across the top of the glass */
-    radial-gradient(ellipse 160% 140% at 50% 150%, transparent 95.5%, rgba(255, 255, 255, 0.055) 97.2%, transparent 98.8%),
     /* ...and a faint counter-glint low on the right */
     radial-gradient(ellipse 38% 22% at 86% 96%, rgba(255, 255, 255, 0.04), transparent 70%),
     /* The bend: brightness falls off toward the edges, most in the corners */
@@ -215,6 +212,9 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
   pointer-events: none;
   animation: crt-flicker 3s infinite;
 }
+
+/* The screen contents bow very slightly outward (convex tube); the glass layers above stay flat. */
+.crt-grid-panel > :not(.heavy-dither-overlay) { filter: url(#crt-bulge); }
 
 .crt-grid-panel::after {
   content: " ";
