@@ -86,13 +86,26 @@ export interface SetupModelParams {
 
 export class SetupModel {
   private readonly mask: number[];
-  constructor(readonly params: SetupModelParams) { this.mask = maskedIndices(params.groups); }
+  /** Position in the code's feature vector of each model input (models trained before a feature was added still load). */
+  private readonly order: number[] | undefined;
+  constructor(readonly params: SetupModelParams) {
+    this.mask = maskedIndices(params.groups);
+    const same = params.features.length === SETUP_FEATURES.length && params.features.every((k, i) => k === SETUP_FEATURES[i]);
+    this.order = same ? undefined : params.features.map((k) => SETUP_FEATURES.indexOf(k));
+  }
+
+  /** Masked inputs in the model's own feature order. */
+  private input(x: number[]): number[] {
+    const v = applyMask(x, this.mask);
+    return this.order ? this.order.map((i) => v[i]) : v;
+  }
 
   static load(file: string): SetupModel | undefined {
     if (!fs.existsSync(file)) return undefined;
     const p = JSON.parse(fs.readFileSync(file, 'utf8')) as SetupModelParams;
     if (p.schema !== SETUP_SCHEMA) throw new Error(`setup model schema ${p.schema}, code expects ${SETUP_SCHEMA}: retrain (research:setups)`);
-    if (p.features.length !== SETUP_FEATURES.length || p.features.some((k, i) => k !== SETUP_FEATURES[i])) throw new Error('setup model features differ from the code: retrain (research:setups)');
+    const missing = p.features.filter((k) => !SETUP_FEATURES.includes(k));
+    if (missing.length) throw new Error(`setup model uses features the code no longer computes (${missing.slice(0, 5).join(', ')}): retrain (research:setups)`);
     for (const l of Object.values(p.lanes)) if (l?.model) validateGbdt(l.model, p.features.length);
     if (p.taEngine && p.taEngine !== taEngine()) console.warn(`[setups] ${file} was trained with the ${p.taEngine} indicator engine but ${taEngine()} is active (install TA-Lib: npm ci)`);
     return new SetupModel(p);
@@ -101,13 +114,13 @@ export class SetupModel {
   /** Percentile score of a setup in its lane (0..1; x = setupVector). */
   score(lane: Lane, x: number[]): number {
     const l = this.params.lanes[lane];
-    return l ? laneScore(l, applyMask(x, this.mask)) : NaN;
+    return l ? laneScore(l, this.input(x)) : NaN;
   }
 
   /** The model's raw expected net R (for the record). */
   expectedR(lane: Lane, x: number[]): number {
     const l = this.params.lanes[lane];
-    return l ? rawPrediction(l, applyMask(x, this.mask)) : NaN;
+    return l ? rawPrediction(l, this.input(x)) : NaN;
   }
 
   /** Whether an input group (e.g. 'tanet') is used. */

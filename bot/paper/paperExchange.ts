@@ -30,6 +30,8 @@ interface PaperOrder extends ExchangeOrder {
 
 interface PaperState {
   balance: number;
+  /** Cash put into the paper account so far (raising PAPER_BANKROLL_USD tops it up by the difference). */
+  funded?: number;
   positions: Record<string, number>;
   fills: ExchangeFill[];
   orders: PaperOrder[];
@@ -49,8 +51,18 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
     private readonly now: () => number = Date.now,
   ) {
     super();
-    this.st = (file && readJson<PaperState>(file)) || { balance: startingBalance, positions: {}, fills: [], orders: [] };
+    this.st = (file && readJson<PaperState>(file)) || { balance: startingBalance, funded: startingBalance, positions: {}, fills: [], orders: [] };
+    // Accounts created before `funded` was recorded started with the old $20 default.
+    const funded = this.st.funded ?? 20;
+    if (startingBalance > funded) {
+      this.st.balance += startingBalance - funded;
+      this.st.funded = startingBalance;
+      this.save();
+    } else this.st.funded = funded;
   }
+
+  /** Cash put into the paper account (the configured starting balance, after any top-ups). */
+  get funded(): number { return this.st.funded ?? 0; }
 
   private save(): void {
     if (this.st.orders.length > 4000) {

@@ -22,7 +22,7 @@ import { zoneTime } from './sessions';
 export const VOL_MODEL_ASSET_FEATURES = [
   'log_rv_15m', 'log_rv_1h', 'log_rv_4h', 'ewma_vol_ratio', 'vol_ratio_15m_4h', 'jump_ratio_1h', 'jump_count_4h', 'garman_klass_15m',
   'ret_5m_z', 'ret_15m_z', 'ret_1h_z', 'efficiency_ratio_15m', 'efficiency_ratio_1h', 'variance_ratio_1m_15m',
-  'sess_weekend', 'sess_min_to_transition', 'us_open_window', 'hour_sin', 'hour_cos',
+  'sess_weekend', 'sess_pre_week', 'sess_min_to_transition', 'us_open_window', 'hour_sin', 'hour_cos',
   'perp_premium_bps', 'funding_rate_bps', 'perp_oi_chg_1h',
   // TA network's forecast of the next 4 hours' realised vol vs the last 24 (NaN when not installed).
   'tanet_vol_4h',

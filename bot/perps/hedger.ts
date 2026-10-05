@@ -130,6 +130,8 @@ export class PerpHedger {
   /** Hedge component currently intended per ticker (the rest of the position is directional). */
   private hedgeHeld = new Map<string, number>();
   private stops = new Map<string, number>();
+  /** Side each stop was set for (true = long), so a flipped position starts a fresh stop. */
+  private stopSide = new Map<string, boolean>();
   private lastTick = 0;
   last: HedgeTarget[] = [];
   lastExec: ExecTarget[] = [];
@@ -270,14 +272,23 @@ export class PerpHedger {
       const prev = this.stops.get(d.ticker);
       if (pos !== 0 && d.stopPrice !== undefined && Math.sign(pos) === Math.sign(d.target || pos)) {
         const tick = this.d.hub.get(d.asset)?.latest?.tickSize ?? 0.01;
-        if (prev === undefined || Math.abs(prev - d.stopPrice) >= tick - 1e-12) {
-          await g.setStopLoss(d.ticker, d.stopPrice);
-          this.stops.set(d.ticker, d.stopPrice);
-          this.d.audit?.write('perp_order', { action: 'stop_set', ticker: d.ticker, stop: d.stopPrice, position: pos });
+        // A stop only ever tightens (up for a long, down for a short), and is re-sent only when it moves
+        // by at least 5 bps (or one tick): a trail recomputed every few seconds would otherwise loosen
+        // and re-tighten it by fractions of a tick and resend it each time.
+        const wasLong = this.stopSide.get(d.ticker);
+        const fresh = prev === undefined || wasLong !== pos > 0;
+        const tighter = fresh ? d.stopPrice : pos > 0 ? Math.max(prev!, d.stopPrice) : Math.min(prev!, d.stopPrice);
+        const minMove = Math.max(tick, Math.abs(tighter) * 5e-4) - 1e-12;
+        if (fresh || Math.abs(tighter - prev!) >= minMove) {
+          await g.setStopLoss(d.ticker, tighter);
+          this.stops.set(d.ticker, tighter);
+          this.stopSide.set(d.ticker, pos > 0);
+          this.d.audit?.write('perp_order', { action: 'stop_set', ticker: d.ticker, stop: tighter, position: pos });
         }
       } else if (pos === 0 && prev !== undefined) {
         await g.clearStopLoss(d.ticker);
         this.stops.delete(d.ticker);
+        this.stopSide.delete(d.ticker);
       }
     }
   }

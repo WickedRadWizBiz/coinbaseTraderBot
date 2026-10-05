@@ -223,11 +223,10 @@ export class KalshiRest implements ExchangeGateway {
 
   // ---- Market data (public) ----------------------------------------------
 
-  async getOpenMarkets(seriesTicker: string, maxCloseTs?: number): Promise<MarketInfo[]> {
-    // Hourly ladders list many strikes per close time: page through all of them. maxCloseTs (epoch ms)
-    // leaves out far-dated events server-side, which would otherwise cost several pages per series.
-    const until = maxCloseTs ? `&max_close_ts=${Math.floor(maxCloseTs / 1000)}` : '';
-    const rows = await this.paginate(`/markets?series_ticker=${encodeURIComponent(seriesTicker)}&status=open${until}`, 'markets', 10, false);
+  async getOpenMarkets(seriesTicker: string): Promise<MarketInfo[]> {
+    // Hourly ladders list many strikes per close time: page through all of them. (No close-time filter:
+    // Kalshi rejects min/max_close_ts combined with status=open; far-dated events are dropped by the caller.)
+    const rows = await this.paginate(`/markets?series_ticker=${encodeURIComponent(seriesTicker)}&status=open`, 'markets', 10, false);
     return rows.map(parseMarket).filter(Boolean) as MarketInfo[];
   }
 

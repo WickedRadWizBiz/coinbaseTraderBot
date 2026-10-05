@@ -259,6 +259,8 @@ export class MarketData extends EventEmitter {
 
   /** Refresh the list of open markets for each configured series (traded first, then record-only). */
   private catalogBusy = false;
+  /** Last catalog refresh: series that failed, the latest error, when (for the dashboard). */
+  catalogHealth: { ts: number; series: number; failed: number; lastError?: string } = { ts: 0, series: 0, failed: 0 };
 
   async refreshCatalog(now = Date.now()): Promise<void> {
     // One refresh at a time: when the exchange is slow or rate limiting, a 20 s timer would otherwise
@@ -272,6 +274,7 @@ export class MarketData extends EventEmitter {
     await this.refreshSeries(now);
     const entries: Array<[string, string, boolean]> = [...[...this.series].map(([s, a]) => [s, a, false] as [string, string, boolean]), ...this.recordSeriesList().map(([s, a]) => [s, a, true] as [string, string, boolean])];
     let recordCount = [...this.markets.values()].filter((m) => m.recordOnly && m.closeTime > now).length;
+    let failed = 0, lastError: string | undefined;
     for (const [series, asset, recordOnly] of entries) {
       try {
         if (!recordOnly && now - (this.feesFetchedAt.get(series) ?? 0) > 3_600_000) {
@@ -280,10 +283,7 @@ export class MarketData extends EventEmitter {
           this.feesFetchedAt.set(series, now);
           try { this.feeChanges.set(series, (await this.rest.getSeriesFeeChanges(series)).sort((a, b) => a.scheduledTs - b.scheduledTs)); } catch { /* optional: keep the last list */ }
         }
-        // Crypto ladders: only events closing inside the horizon (filtered by the exchange, fewer pages).
-        // Tennis markets close long after the match starts, so they are filtered below by start time.
-        const maxClose = asset === 'TENNIS' ? undefined : now + this.cfg.catalogHorizonMin * 60_000;
-        const markets = nearestStrikes(await this.rest.getOpenMarkets(series, maxClose), contractKind, series, this.index.get(asset)?.latest()?.value, this.cfg.catalogStrikesPerEvent, new Set(this.markets.keys()));
+        const markets = nearestStrikes(await this.rest.getOpenMarkets(series), contractKind, series, this.index.get(asset)?.latest()?.value, this.cfg.catalogStrikesPerEvent, new Set(this.markets.keys()));
         for (const m of markets) {
           if (m.closeTime <= now) continue;
           const kind = contractKind(series, m.strikeType);
@@ -301,9 +301,12 @@ export class MarketData extends EventEmitter {
           this.markets.set(m.ticker, am);
         }
       } catch (e) {
+        failed++; lastError = String(e);
         log.warn('catalog refresh failed', { series, error: String(e) });
       }
     }
+    if (entries.length && failed === entries.length) log.error('catalog refresh failed for every series: no new markets are being added', { error: lastError });
+    this.catalogHealth = { ts: now, series: entries.length, failed, lastError };
     // Record-only markets have no position to settle, so fetch their official result once they close.
     let looked = 0;
     for (const m of this.markets.values()) {

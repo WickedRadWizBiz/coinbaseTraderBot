@@ -16,7 +16,7 @@
 import { OrderBook } from '../marketdata/orderBook';
 import type { IndexTracker } from '../marketdata/indexTracker';
 import { clamp, logit, normInv, normPdf, studentTCdf } from '../util/num';
-import { kalshiMaintenance, sessionState, usMarketClock, zoneTime } from './sessions';
+import { kalshiMaintenance, sessionState, usMarketClock, weekPhase, zoneTime } from './sessions';
 import { neighborGap, violationAt, type LadderQuote } from './ladder';
 import { PerpHub, type PerpSnapshot, type PerpState } from '../perps/perpData';
 import { EWMA_LOOKBACK_SEC, seasonalVarianceRatio, type VolProfile } from './volSeasonality';
@@ -641,7 +641,8 @@ export const FEATURES: Record<string, { group: FeatureGroup; description: string
   sess_overlap: { group: 'session', description: 'London / New York overlap', fn: (c) => (sessionState(c.now).key === 'london_ny_overlap' ? 1 : 0) },
   sess_new_york: { group: 'session', description: 'New York session (London closed)', fn: (c) => (sessionState(c.now).key === 'new_york' ? 1 : 0) },
   sess_twilight: { group: 'session', description: 'US close -> Asia open transition (liquidity trough)', fn: (c) => (sessionState(c.now).key === 'twilight' ? 1 : 0) },
-  sess_weekend: { group: 'session', description: 'weekend regime (UTC Sat/Sun)', fn: (c) => (sessionState(c.now).key === 'weekend' ? 1 : 0) },
+  sess_weekend: { group: 'session', description: 'weekend market (Fri 16:00 ET US close -> Sun 18:00 ET): thin, low volume', fn: (c) => (sessionState(c.now).key === 'weekend' ? 1 : 0) },
+  sess_pre_week: { group: 'session', description: 'pre-week phase (Sun 18:00 ET CME reopen -> Mon 09:30 ET US open)', fn: (c) => (sessionState(c.now).key === 'pre_week' ? 1 : 0) },
   sess_min_to_transition: { group: 'session', description: 'log(1 + minutes until the next session change)', fn: (c) => Math.log1p(sessionState(c.now).minutesToTransition) },
   sess_min_since_transition: { group: 'session', description: 'log(1 + minutes since the session began)', fn: (c) => Math.log1p(sessionState(c.now).minutesSinceTransition) },
   us_open_window: { group: 'session', description: 'first 30 min after the NYSE open (ETF-era volatility spike)', fn: (c) => (sessionState(c.now).usOpenWindow ? 1 : 0) },
@@ -668,7 +669,8 @@ export const FEATURES: Record<string, { group: FeatureGroup; description: string
   // Time (old: hourOfDay, dayOfWeek, tradingSession).
   hour_sin: { group: 'time', description: 'sin(UTC hour)', fn: (c) => Math.sin((2 * Math.PI * (new Date(c.now).getUTCHours() + new Date(c.now).getUTCMinutes() / 60)) / 24) },
   hour_cos: { group: 'time', description: 'cos(UTC hour)', fn: (c) => Math.cos((2 * Math.PI * (new Date(c.now).getUTCHours() + new Date(c.now).getUTCMinutes() / 60)) / 24) },
-  weekend: { group: 'time', description: '1 on Saturday/Sunday UTC', fn: (c) => { const d = new Date(c.now).getUTCDay(); return d === 0 || d === 6 ? 1 : 0; } },
+  weekend: { group: 'time', description: '1 in the weekend market (Fri 16:00 -> Sun 18:00 ET)', fn: (c) => (weekPhase(c.now) === 'weekend' ? 1 : 0) },
+  pre_week: { group: 'time', description: '1 in the pre-week phase (Sun 18:00 -> Mon 09:30 ET)', fn: (c) => (weekPhase(c.now) === 'pre_week' ? 1 : 0) },
 
   // ===== Relaxed-cadence catalog (1-minute windows and slower) =====
   // A. Contract and settlement geometry.

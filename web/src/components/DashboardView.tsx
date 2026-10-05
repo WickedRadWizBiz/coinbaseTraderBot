@@ -131,7 +131,9 @@ export function DashboardView() {
               <Row label="Exit policy" value={s.exitPolicy === 'confluence_ratchet' ? 'CONFLUENCE RATCHET' : 'FAIR VALUE'}
                 sub={s.exitPolicy === 'confluence_ratchet' ? 'hunts winners only on outperformance + confluence' : 'exit when bid > fair value + fee'} />
               <Row label="Kalshi WebSocket" value={s.wsConnected ? 'CONNECTED' : 'OFFLINE'} tone={s.wsConnected ? 'ok' : 'warn'} />
-              <Row label="Active markets" value={String((markets ?? []).length)} />
+              <Row label="Active markets" value={String((markets ?? []).length)}
+                sub={s.catalog?.failed ? `market list: ${s.catalog.failed}/${s.catalog.series} series failing · ${String(s.catalog.lastError ?? '').slice(0, 80)}` : undefined}
+                tone={s.catalog?.failed ? (s.catalog.failed === s.catalog.series ? 'bad' : 'warn') : undefined} />
               <Row label="Uptime" value={`${Math.floor(s.uptimeSec / 3600)}h ${Math.floor((s.uptimeSec % 3600) / 60)}m`} />
             </div>
           ) : <div className="p-6 animate-pulse">ESTABLISHING LINK...</div>}

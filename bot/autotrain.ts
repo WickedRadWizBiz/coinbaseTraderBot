@@ -72,6 +72,8 @@ export class AutoTrainer {
   private readonly retrainFor = new Set<string>();
   private queued?: string[];
   private paused = false;
+  /** The running pipeline was started as the weekend run. */
+  private weekendRun = false;
 
   constructor(private readonly d: {
     cfg: Readonly<Config>; engine: Engine; audit: AuditLog; alerter: Alerter; perpTrader?: PerpTrader;
@@ -81,6 +83,9 @@ export class AutoTrainer {
   private get now() { return (this.d.now ?? Date.now)(); }
 
   start(): void {
+    // The weekend run (started at Friday midnight ET) holds new entries until it finishes; then the
+    // bot trades the weekend market.
+    this.d.engine.trainingGuard = () => (this.windows && this.child && this.weekendRun && weekendTraining(this.now).free ? 'weekend training run in progress (started Friday midnight ET): no new entries until it finishes' : undefined);
     // Remember what is loaded now so only later changes trigger a swap.
     for (const p of Object.values(resolveModelPaths(this.d.cfg))) this.mtimes.set(p, mtime(p));
     for (const k of Object.keys(MODEL_FILES) as Kind[]) { const p = path.join(this.d.cfg.autoTrain.dir, MODEL_FILES[k]); this.mtimes.set(p, mtime(p)); }
@@ -143,8 +148,15 @@ export class AutoTrainer {
     await this.watch();
     const next = this.nextRun();
     // Starts: inside a session-edge window, or in the weekend midnight hour.
-    const inWindow = !this.windows || !!sessionEdge(this.now, this.d.cfg.sessionEdge.minutes) || weekendTraining(this.now).start;
-    if (next !== null && this.now >= next && inWindow && !this.child && this.now - this.lastStart > 3_600_000) this.run([]);
+    const weekendStart = this.windows && weekendTraining(this.now).start;
+    const inWindow = !this.windows || !!sessionEdge(this.now, this.d.cfg.sessionEdge.minutes) || weekendStart;
+    // The weekend run is the week's full retrain (it learns the weekend and pre-week regimes): it starts at
+    // Friday midnight unless a run finished in the last 6 hours.
+    const weekendDue = weekendStart && this.now - (this.state().lastRun ?? 0) > 6 * 3_600_000;
+    if (((next !== null && this.now >= next && inWindow) || weekendDue) && !this.child && this.now - this.lastStart > 3_600_000) {
+      this.run([]);
+      this.weekendRun = Boolean(weekendStart);
+    }
     this.pace();
   }
 
@@ -170,6 +182,7 @@ export class AutoTrainer {
       fs.closeSync(out);
       this.child = undefined;
       this.paused = false;
+      this.weekendRun = false;
       this.lastExit = { code, ts: this.now, args };
       this.d.audit.write('config', { event: 'pipeline_exit', code, args, report: this.state().lastReport ?? null });
       if (code !== 0) this.d.alerter.notify('warn', 'pipeline', `Training pipeline exited with code ${code}; see ${this.logFile}`);

@@ -338,7 +338,7 @@ test('PBO treats identical variants as uninformative (0.5), not as overfit', () 
 import { evThresholds } from '../bot/sizing/kelly';
 
 test('EV target follows the risk budget, so it never caps size below the tier limit', () => {
-  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).paperBankrollUsd, 20);
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).paperBankrollUsd, 100);
   assert.equal(relaxed.minTradableBankrollUsd, 10);
   const small = evThresholds(relaxed, 20, 2); // $20 aggressive: $2 per order
   assert.ok(Math.abs(small.targetEv - 0.5) < 1e-9 && Math.abs(small.minEv - 0.0032) < 1e-9);

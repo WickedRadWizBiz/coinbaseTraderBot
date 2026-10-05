@@ -377,9 +377,17 @@ export class Engine {
     return r;
   }
 
-  /** Session edge (first/last minutes of a market session): no new entries; training runs here instead. */
+  /** Set by the auto-trainer: why new entries wait for a running training job (the weekend run), if they do. */
+  trainingGuard?: () => string | undefined;
+
+  /**
+   * Training time: no new entries in a session edge (first/last minutes of a market session, the
+   * training windows) or while the Friday-midnight weekend training run is still going.
+   */
   sessionEdgeBlock(now = this.now()): string | undefined {
     const e = this.d.cfg.sessionEdge;
+    const training = this.trainingGuard?.();
+    if (training) return training;
     if (!e.noEntry) return undefined;
     const label = sessionEdge(now, e.minutes);
     return label ? `session edge (${label}): no new entries, training window` : undefined;
