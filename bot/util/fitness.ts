@@ -1,7 +1,13 @@
 // Tournament fitness, shared by the offline tournaments (research/pbt.ts, research/fitness.ts) and
 // the live tennis population (bot/snn/population.ts):
 //
-//   Fitness = Sortino (annualised, net of costs) - ddWeight x max drawdown - costWeight x costs
+//   Fitness (default, objective 'growth') = annualised log growth of the compounded equity curve:
+//     365 x mean over days of ln(1 + daily net return)
+//   It rewards compounding: an edge traded at a sensible size grows, oversizing is punished by the log
+//   (drawdowns cost more than equal gains earn), and no trading scores 0 (coverageFloor stops sitting out
+//   from winning). The earlier objective, Sortino - ddWeight x max drawdown - costWeight x costs, is kept
+//   as objective 'sortino'; its 5 x drawdown term over a one-month window punished early, noisy members
+//   so hard that abstaining looked best.
 //
 // Trades that fire together (same group, within clusterMs) count as one independent interaction.
 
@@ -56,11 +62,19 @@ export function maxDrawdown(xs: number[]): number {
   return dd;
 }
 
-export interface FitnessWeights { ddWeight: number; costWeight: number }
-export const DEFAULT_FITNESS: FitnessWeights = { ddWeight: 5, costWeight: 5 };
+export interface FitnessWeights { objective?: 'growth' | 'sortino'; ddWeight: number; costWeight: number }
+export const DEFAULT_FITNESS: FitnessWeights = { objective: 'growth', ddWeight: 5, costWeight: 5 };
+
+/** Annualised log growth of per-day net returns (days without trades count as 0). */
+export function logGrowth(daily: number[], periodsPerYear = 365): number {
+  if (!daily.length) return 0;
+  return (periodsPerYear * daily.reduce((s, r) => s + Math.log(Math.max(1e-6, 1 + r)), 0)) / daily.length;
+}
 
 export interface FitnessReport {
   fitness: number;
+  /** Annualised log growth (the default fitness). */
+  growth?: number;
   sortino: number;
   maxDrawdown: number;
   /** Total costs over the window (fraction of capital). */
@@ -71,16 +85,16 @@ export interface FitnessReport {
   days: number;
 }
 
-/** Fitness = Sortino - ddWeight x MaxDD - costWeight x costs, on daily net returns. */
+/** Fitness on daily net returns: log growth (default) or Sortino - ddWeight x MaxDD - costWeight x costs. */
 export function fitnessOf(xs: Interaction[], o: { from?: number; to?: number; clusterMs: number; weights?: FitnessWeights }): FitnessReport {
   const w = o.weights ?? DEFAULT_FITNESS;
   const daily = dailyReturns(xs, o.from, o.to);
-  const so = sortino(daily), dd = maxDrawdown(daily);
+  const so = sortino(daily), dd = maxDrawdown(daily), growth = logGrowth(daily);
   const costs = xs.reduce((s, x) => s + x.cost, 0);
   const ind = independentInteractions(xs, o.clusterMs).length;
-  // A network that never trades scores 0 (cash): better than any losing one, worse than any winner.
-  const fitness = so - w.ddWeight * dd - w.costWeight * costs;
-  return { fitness, sortino: so, maxDrawdown: dd, costs, netReturn: daily.reduce((s, r) => s + r, 0), interactions: xs.length, independent: ind, days: daily.length };
+  // A network that never trades scores 0 (cash); coverageFloor keeps that from winning a tournament.
+  const fitness = (w.objective ?? 'growth') === 'growth' ? growth : so - w.ddWeight * dd - w.costWeight * costs;
+  return { fitness, growth, sortino: so, maxDrawdown: dd, costs, netReturn: daily.reduce((s, r) => s + r, 0), interactions: xs.length, independent: ind, days: daily.length };
 }
 
 

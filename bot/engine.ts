@@ -8,6 +8,7 @@
 import type { ExchangeStatusMonitor } from './kalshi/exchangeStatus';
 import { snapToGrid } from './kalshi/priceGrid';
 import crypto from 'crypto';
+import fs from 'fs';
 import path from 'path';
 import type { Alerter } from './alerts/alerter';
 import type { AuditLog } from './audit/auditLog';
@@ -229,18 +230,29 @@ export class Engine {
     });
     // Results vs expectation (diagnostic): every entry fill remembers the probability it was placed on; when
     // its market settles, outcome vs that probability is one observation (bot/risk/streakScaler.ts).
-    d.oms.on('fill', (f: { ticker: string; side: 'bid' | 'ask' }, rec: { purpose?: string; reduceOnly?: boolean; fairValue?: number } | undefined) => {
+    d.oms.on('fill', (f: { ticker: string; side: 'bid' | 'ask'; price: number; count: number }, rec: { purpose?: string; reduceOnly?: boolean; fairValue?: number } | undefined) => {
       if (!rec || rec.reduceOnly || rec.purpose === 'exit' || !(rec.fairValue! > 0 && rec.fairValue! < 1)) return;
       const q = f.side === 'bid' ? rec.fairValue! : 1 - rec.fairValue!;
       const list = this.pendingEntries.get(f.ticker) ?? [];
-      list.push({ q, side: f.side, book: this.isTennis(f.ticker) ? 'tennis' : 'crypto' });
+      list.push({ q, side: f.side, book: this.isTennis(f.ticker) ? 'tennis' : 'crypto', cost: f.side === 'bid' ? f.price : 1 - f.price, count: f.count });
       this.pendingEntries.set(f.ticker, list.slice(-50));
     });
-    d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no' }) => {
+    d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized?: number }) => {
+      // Break-even ratchet (two losing trades in a row): judged at the next balance read, once the payout is in.
+      if (e.realized) this.pendingResults.push(e.realized > 0);
       const list = this.pendingEntries.get(e.ticker);
       if (!list) return;
       this.pendingEntries.delete(e.ticker);
-      for (const x of list) this.streak[x.book].observeBinary(x.q, (x.side === 'bid') === (e.result === 'yes'), this.now());
+      const lines: string[] = [];
+      for (const x of list) {
+        const won = (x.side === 'bid') === (e.result === 'yes');
+        this.streak[x.book].observeBinary(x.q, won, this.now());
+        lines.push(JSON.stringify({ ts: this.now(), ticker: e.ticker, book: x.book, q: +x.q.toFixed(4), cost: x.cost, count: x.count, won }));
+      }
+      // The sizing tuner's data (research/tuneSizing.ts): every settled entry with its probability and price.
+      if (lines.length && d.cfg.dataDir && d.streakFiles !== false) {
+        try { fs.appendFileSync(path.join(d.cfg.dataDir, 'trades.jsonl'), lines.join('\n') + '\n'); } catch { /* best effort */ }
+      }
     });
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized: number; positionBefore: number }) => {
       this.lastSettleTs = this.now();
@@ -278,6 +290,11 @@ export class Engine {
   /** New balance from reconciliation: detect withdrawals/deposits, then store. */
   onBalance(balance: number): void {
     this.balance = balance;
+    const eq = this.equity();
+    if (eq !== undefined) for (const win of this.pendingResults.splice(0)) {
+      const raised = this.d.equityGuard?.onTradeResult(win, eq, this.now());
+      if (raised) this.d.audit.write('training', { event: 'break_even_raised', book: 'kalshi', ...raised });
+    }
     const { balanceMonitor: mon, vault } = this.d;
     if (!mon) return;
     const now = this.now();
@@ -446,11 +463,19 @@ export class Engine {
   }
 
   private dailyBreachDay?: string;
+  /** Recent exploration entries (paper), for the per-hour cap. */
+  private readonly exploreTs: number[] = [];
+  private exploreBudget(now: number): boolean {
+    while (this.exploreTs.length && this.exploreTs[0] < now - 3_600_000) this.exploreTs.shift();
+    return this.exploreTs.length < this.d.cfg.strategy.exploreMaxPerHour;
+  }
+  /** Settled trades (win?) waiting for the next balance read before the break-even ratchet judges them. */
+  private readonly pendingResults: boolean[] = [];
 
   /** Results vs the model's expectation per book (bot/risk/streakScaler.ts): diagnostic, shown on the dashboard. */
   readonly streak: { crypto: StreakScaler; tennis: StreakScaler };
   /** Entries waiting for their market to settle: the probability the order was placed on, per fill. */
-  private readonly pendingEntries = new Map<string, Array<{ q: number; side: 'bid' | 'ask'; book: 'crypto' | 'tennis' }>>();
+  private readonly pendingEntries = new Map<string, Array<{ q: number; side: 'bid' | 'ask'; book: 'crypto' | 'tennis'; cost: number; count: number }>>();
 
   /**
    * Size multiplier for new risk on the Kalshi pool (crypto and tennis share it), and why: the break-even
@@ -602,7 +627,10 @@ export class Engine {
     this.lastTickTs = this.now();
     this.d.vault?.tick(this.lastTickTs);
     const eq = this.equity();
-    if (eq !== undefined) this.d.equityGuard?.update(eq, this.lastTickTs, this.bankroll(), this.tier().weeklyLossPause);
+    if (eq !== undefined) {
+      const raised = this.d.equityGuard?.update(eq, this.lastTickTs, this.bankroll(), this.tier().weeklyLossPause);
+      if (raised) this.d.audit.write('training', { event: 'break_even_raised', book: 'kalshi', ...raised });
+    }
     if (this.dataHalt === 'engine heartbeat stalled') this.dataHalt = undefined;
     if (this.dataHalt === 'awaiting market data' && this.d.md.activeMarkets().length) this.dataHalt = undefined;
     const { kill, risk } = this.d;
@@ -1319,6 +1347,18 @@ export class Engine {
     // Quote, cross or skip each maker entry by expected value (fill model, once validated).
     const fillCtx = { q: st.q ?? pYes, book, tick: m.tickSize, tauSec, sigma: vol.sigmaPerSqrtSec, features, minEv: S.fillMinEv, takerMinEdge: strat.takerBuffer + strat.minEdge };
     applyFillModel(plan, this.d.fillModel, fillCtx);
+    // Paper exploration: when nothing qualifies, sometimes enter the best borderline opportunity (still
+    // fee-net positive, within exploreBand of the threshold) at minimum size. The logged probability lets
+    // training weight these trades correctly; live mode never explores.
+    if (cfg.mode === 'paper' && S.paperExplore && reason && entryWindowOpen && st.position === 0 && !plan.place.some((p) => p.purpose !== 'exit' && !p.reduceOnly)) {
+      const relaxed = decide(view, { ...strat, minEdge: Math.max(0, strat.minEdge - S.exploreBand) }, { exits: false, blockReductions: false, entries: true });
+      const e = relaxed.place.find((p) => p.purpose !== 'exit' && !p.reduceOnly);
+      if (e && this.exploreBudget(now) && Math.random() < S.exploreRate) {
+        this.exploreTs.push(now);
+        plan.place.push({ ...e, count: Math.min(e.count, 1), why: `explore (p=${S.exploreRate}): ${e.why}` });
+        plan.notes.push(`exploration entry (paper, p=${S.exploreRate})`);
+      }
+    }
     if (this.fillLog) for (const p of plan.place) if (isMakerEntry(p)) this.fillX.set(p, fillInputs(p, fillCtx));
     plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
     if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${rs.parts.join(', ')})`);
