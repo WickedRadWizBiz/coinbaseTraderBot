@@ -46,3 +46,48 @@ test('a quiet book on a live feed stays usable; an invalidated one does not', ()
   b.markAlive(10_000);
   assert.equal(b.isUsable(10_000, 5000), false, 'a gap/disconnect waits for the next snapshot');
 });
+
+import { CATALOG_STUCK_MS, MarketData, Recorder } from '../bot/marketdata/marketData';
+import { loadConfig } from '../bot/config';
+import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs';
+
+test('a hung catalog refresh does not block later refreshes forever', async () => {
+  let calls = 0, release: (() => void) | undefined;
+  const rest = {
+    getSeriesFees: async () => undefined, getSeriesFeeChanges: async () => [],
+    getOpenMarkets: async () => { calls++; if (calls === 1) await new Promise<void>((r) => { release = r; }); return []; },
+  } as unknown as KalshiRest;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cat-'));
+  const cfg = loadConfig({ DATA_DIR: dir, STRATEGY_SERIES: 'KXBTC15M', TENNIS_ENABLED: 'false', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', PERPS_FEED: 'false' });
+  const md = new MarketData(cfg, rest, undefined, new Recorder(path.join(dir, 'rec')));
+  const realNow = Date.now;
+  let t = realNow();
+  Date.now = () => t;
+  try {
+    void md.refreshCatalog(t);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(calls, 1);
+    await md.refreshCatalog(t + 20_000);
+    assert.equal(calls, 1, 'a running refresh is not doubled up');
+    t += CATALOG_STUCK_MS + 1000;
+    await md.refreshCatalog(t);
+    assert.equal(calls, 2, 'a refresh stuck for 3 min no longer blocks the next one');
+    assert.ok(md.catalogHealth.ts === t);
+  } finally { Date.now = realNow; release?.(); md.stop(); }
+});
+
+test('cached (CDN) responses are not used for the clock-skew estimate', async () => {
+  const seen: number[] = [];
+  const mk = (headers: Record<string, string>) => new KalshiRest({
+    baseUrl: 'https://x.test/trade-api/v2',
+    fetchImpl: (async () => new Response('{"markets":[]}', { status: 200, headers })) as unknown as typeof fetch,
+    onServerDate: (d) => seen.push(d),
+  });
+  await mk({ date: 'Wed, 30 Sep 2026 12:00:05 GMT', age: '7' }).getOpenMarkets('KXBTC15M');
+  await mk({ date: 'Wed, 30 Sep 2026 12:00:05 GMT', 'x-cache': 'Hit from cloudfront' }).getOpenMarkets('KXBTC15M');
+  assert.equal(seen.length, 0);
+  await mk({ date: 'Wed, 30 Sep 2026 12:00:05 GMT', 'x-cache': 'Miss from cloudfront' }).getOpenMarkets('KXBTC15M');
+  assert.equal(seen.length, 1);
+});

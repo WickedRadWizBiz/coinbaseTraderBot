@@ -272,14 +272,22 @@ export class MarketData extends EventEmitter {
   /** Refresh the list of open markets for each configured series (traded first, then record-only). */
   private catalogBusy = false;
   /** Last catalog refresh: series that failed, the latest error, when (for the dashboard). */
-  catalogHealth: { ts: number; series: number; failed: number; lastError?: string; tracked?: number; recordOnly?: number; open?: number; perSeries?: Record<string, { fetched: number; nearest: number; closed: number; farDated: number; notOpenYet: number; kept: number; sample?: string }> } = { ts: 0, series: 0, failed: 0 };
+  catalogHealth: { ts: number; series: number; failed: number; lastError?: string; durationMs?: number; tracked?: number; recordOnly?: number; open?: number; perSeries?: Record<string, { fetched: number; nearest: number; closed: number; farDated: number; notOpenYet: number; kept: number; sample?: string }> } = { ts: 0, series: 0, failed: 0 };
+
+  private catalogRun = 0;
+  private catalogBusySince = 0;
 
   async refreshCatalog(now = Date.now()): Promise<void> {
     // One refresh at a time: when the exchange is slow or rate limiting, a 20 s timer would otherwise
-    // start new refreshes on top of unfinished ones and multiply the request rate.
-    if (this.catalogBusy) return;
+    // start new refreshes on top of unfinished ones and multiply the request rate. A refresh that has
+    // not finished in CATALOG_STUCK_MS never blocks the next one (a single hung request must not stop
+    // the market list from updating: markets would expire one by one until none are left).
+    if (this.catalogBusy && Date.now() - this.catalogBusySince < CATALOG_STUCK_MS) return;
+    if (this.catalogBusy) log.warn('catalog refresh still running after 3 min: starting a new one', { since: new Date(this.catalogBusySince).toISOString() });
+    const run = ++this.catalogRun;
     this.catalogBusy = true;
-    try { await this.refreshCatalogOnce(now); } finally { this.catalogBusy = false; }
+    this.catalogBusySince = Date.now();
+    try { await this.refreshCatalogOnce(now); } finally { if (run === this.catalogRun) this.catalogBusy = false; }
   }
 
   private async refreshCatalogOnce(now: number): Promise<void> {
@@ -326,7 +334,7 @@ export class MarketData extends EventEmitter {
     }
     if (entries.length && failed === entries.length) log.error('catalog refresh failed for every series: no new markets are being added', { error: lastError });
     const all = [...this.markets.values()];
-    this.catalogHealth = { ts: now, series: entries.length, failed, lastError, perSeries, tracked: all.length, recordOnly: all.filter((m) => m.recordOnly).length, open: all.filter((m) => m.openTime <= now && now < m.closeTime).length } as MarketData['catalogHealth'];
+    this.catalogHealth = { ts: now, durationMs: Date.now() - now, series: entries.length, failed, lastError, perSeries, tracked: all.length, recordOnly: all.filter((m) => m.recordOnly).length, open: all.filter((m) => m.openTime <= now && now < m.closeTime).length } as MarketData['catalogHealth'];
     // Record-only markets have no position to settle, so fetch their official result once they close.
     let looked = 0;
     for (const m of this.markets.values()) {
@@ -488,6 +496,9 @@ export class MarketData extends EventEmitter {
 /** Strike ladders and range brackets: the `n` strikes nearest the price in each event (all when n = 0).
  *  Markets already tracked are kept (open positions stay managed). Without a price yet, the event's median
  *  strike stands in for it (Kalshi centres its ladders on the price). */
+/** A catalog refresh running longer than this no longer blocks the next one. */
+export const CATALOG_STUCK_MS = 180_000;
+
 export function nearestStrikes<M extends { ticker: string; eventTicker?: string; strikeType?: string; floorStrike?: number; capStrike?: number }>(
   markets: M[], kindOf: (series: string, strikeType?: string) => string, series: string, price: number | undefined, n: number, tracked: Set<string>,
 ): M[] {

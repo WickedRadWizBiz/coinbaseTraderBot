@@ -352,12 +352,22 @@ export class Engine {
     return r;
   }
 
+  /**
+   * Clock skew halts new risk in live mode (Kalshi rejects signed orders with a bad timestamp and entry
+   * windows would be mistimed). Paper fills are simulated against our own clock, so there it is only
+   * shown as a warning (System Telemetry) and trading continues.
+   */
+  private skewHalt(): string | undefined {
+    if (this.d.cfg.clockSkewMaxMs <= 0 || this.d.cfg.mode !== 'live') return undefined;
+    return this.d.clock?.haltReason(Date.now());
+  }
+
   /** Guards that stop NEW risk (exits stay allowed): weekly loss pause, model health, maintenance. */
   entryGuards(now = this.now()): string[] {
     const r: string[] = [];
     const paused = this.d.equityGuard?.paused(now);
     if (paused) r.push(paused);
-    const skew = this.d.cfg.clockSkewMaxMs > 0 ? this.d.clock?.haltReason(Date.now()) : undefined;
+    const skew = this.skewHalt();
     if (skew) r.push(skew);
     if (this.d.control && !this.d.control.active) r.push('stopped from the dashboard (press PLAY to resume)');
     const edge = this.sessionEdgeBlock(now);
@@ -721,7 +731,7 @@ export class Engine {
     if (!t) return undefined;
     return (c) => {
       const f = this.d.md.perpFeed;
-      const skew = this.d.cfg.clockSkewMaxMs > 0 ? this.d.clock?.haltReason(Date.now()) : undefined;
+      const skew = this.skewHalt();
       const noEntry = skew ?? (this.d.control && !this.d.control.active ? 'stopped from the dashboard' : undefined) ?? this.sessionEdgeBlock() ?? this.d.exchangeStatus?.perpsBlock() ?? (f?.lastError ? `perps feed unavailable (${f.lastError})` : undefined);
       return t.targets(c, { halt, noEntry, lockedFrac: this.lockedFraction() });
     };

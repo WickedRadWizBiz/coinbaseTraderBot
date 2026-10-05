@@ -75,7 +75,11 @@ export class KalshiRest implements ExchangeGateway {
     const recvTs = Date.now();
     recordLatency('kalshiRest', recvTs - sentTs, recvTs);
     const dateHeader = res.headers?.get?.('date');
-    if (dateHeader && this.opts.onServerDate) {
+    // A response served from a CDN cache carries the Date of when it was first generated (with an Age
+    // header): it says nothing about the exchange's clock now and would make ours look seconds ahead.
+    const h = (k: string) => res.headers?.get?.(k) ?? '';
+    const cached = Number(h('age')) > 0 || /hit/i.test(h('x-cache')) || /hit/i.test(h('cf-cache-status'));
+    if (dateHeader && this.opts.onServerDate && !cached) {
       const d = Date.parse(dateHeader);
       if (Number.isFinite(d)) this.opts.onServerDate(d, sentTs, recvTs);
     }
