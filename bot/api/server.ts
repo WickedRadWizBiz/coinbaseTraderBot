@@ -172,6 +172,7 @@ export function createApi(d: ApiDeps): express.Express {
       catalog: d.md.catalogHealth,
       training: d.training?.status() ?? null,
       entryDiagnosis: d.engine.entryDiagnosis(),
+      feeds: d.engine.feedHealth(),
       latency: latencySnapshot(),
       run: d.control?.status() ?? { active: true, since: null },
       perpsMode: d.cfg.perps.trading,

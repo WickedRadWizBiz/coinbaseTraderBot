@@ -72,6 +72,12 @@ export class IndexTracker {
     this.lastSampleValue = value;
   }
 
+  /** Feed health: age of the last print, prints held, and volatility samples (vol needs 120). */
+  health(now: number): { ageMs: number | null; points: number; volSamples: number } {
+    const p = this.latest();
+    return { ageMs: p ? now - p.ts : null, points: this.points.length, volSamples: this.volSamples };
+  }
+
   latest(): IndexPoint | undefined {
     return this.points[this.points.length - 1];
   }
