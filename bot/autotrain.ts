@@ -1,9 +1,17 @@
-// In-bot automation: runs the training pipeline (research/pipeline.ts) on a schedule in a child
-// process at low CPU priority (AUTO_TRAIN=windows, the default: once a day, only inside the session-edge
-// windows or from midnight (New York) on Saturdays and Sundays, frozen with SIGSTOP whenever the bot
-// trades and resumed with SIGCONT at the next window), and hot-swaps whatever it promotes (meta-model, SNN, perp model,
+// In-bot automation: runs the training pipeline (research/pipeline.ts) in a child process at the lowest
+// CPU priority and hot-swaps whatever it promotes (meta-model, SNN, perp model,
 // volatility profile, tennis model) into the running engine without a restart. The MLP, perps and
 // tennis models read the SNN's outputs, so a new SNN automatically re-runs their training.
+//
+// Scheduling (AUTO_TRAIN):
+//  - background (default): trains beside trading. A run starts whenever one is due (AUTO_TRAIN_EVERY_HOURS
+//    after the last completed run; at once after a restart cut one short, resuming from its checkpoints),
+//    AUTO_TRAIN_START_DELAY_MIN after the bot starts. It is frozen (SIGSTOP) only while the machine is under
+//    pressure (the trading loop lags, memory runs low, or the host throttles the burstable CPU) and resumed
+//    once it has been calm for a minute.
+//  - windows: once a day, only inside the session-edge windows or the weekend, frozen whenever the bot trades.
+//  - daily: once a day at AUTO_TRAIN_HOUR_UTC.  off: never.
+// In every mode the weekend run (Friday midnight New York) holds new entries until it finishes.
 
 import { spawn, type ChildProcess } from 'child_process';
 import fs from 'fs';
@@ -25,6 +33,7 @@ import { TennisFairModel } from './tennis/tennisFair';
 import { nextSessionEdge, nextWeekendMidnight, sessionEdge, weekendTraining } from './model/sessions';
 import { activeTaNet, setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from './ta/taNet';
 import { logger } from './util/log';
+import { SystemPressure } from './util/systemPressure';
 
 const log = logger('autotrain');
 
@@ -57,7 +66,10 @@ export function pipelineCommand(entry = process.argv[1] ?? ''): { cmd: string; a
 
 export interface AutoTrainStatus {
   mode: string; running: boolean; lastStart: number | null; lastExit: { code: number | null; ts: number; args: string[] } | null;
-  nextRun: number | null; paused: boolean; window: { inside: string | null; next: { start: number; end: number; label: string } | null } | null; logFile: string | null; models: Record<string, { path: string; mtime: number | null; id?: string }>;
+  nextRun: number | null; paused: boolean;
+  /** Background mode: why training is frozen right now (machine busy), and the latest pressure readings. */
+  pausedFor?: string | null; pressure?: { lagMs: number | null; availableMb: number | null; steal: number | null } | null;
+  window: { inside: string | null; next: { start: number; end: number; label: string } | null } | null; logFile: string | null; models: Record<string, { path: string; mtime: number | null; id?: string }>;
   swaps: { kind: string; ts: number; detail: string }[]; state: unknown;
 }
 
@@ -72,12 +84,21 @@ export class AutoTrainer {
   private readonly retrainFor = new Set<string>();
   private queued?: string[];
   private paused = false;
+  /** Why the background run is frozen (machine under pressure), and since when it has been calm. */
+  private pausedFor: string | undefined;
+  private calmSince = 0;
+  private startedAt = 0;
+  private pressureProbe?: SystemPressure;
   /** The running pipeline was started as the weekend run. */
   private weekendRun = false;
+  /** Friday midnight arrived while another run was going: the weekend run starts as soon as it ends. */
+  private weekendPending = false;
 
   constructor(private readonly d: {
     cfg: Readonly<Config>; engine: Engine; audit: AuditLog; alerter: Alerter; perpTrader?: PerpTrader;
     now?: () => number; command?: { cmd: string; args: string[] };
+    /** Background mode: why the machine is too busy for training right now (tests inject one). */
+    pressure?: () => string | undefined;
   }) {}
 
   private get now() { return (this.d.now ?? Date.now)(); }
@@ -85,7 +106,12 @@ export class AutoTrainer {
   start(): void {
     // The weekend run (started at Friday midnight ET) holds new entries until it finishes; then the
     // bot trades the weekend market.
-    this.d.engine.trainingGuard = () => (this.windows && this.child && this.weekendRun && weekendTraining(this.now).free ? 'weekend training run in progress (started Friday midnight ET): no new entries until it finishes' : undefined);
+    this.d.engine.trainingGuard = () => ((this.windows || this.background) && ((this.child && this.weekendRun) || this.weekendPending) && weekendTraining(this.now).free ? 'weekend training run in progress (started Friday midnight ET): no new entries until it finishes' : undefined);
+    this.startedAt = this.now;
+    if (this.background && !this.d.pressure) {
+      const A = this.d.cfg.autoTrain;
+      this.pressureProbe = new SystemPressure({ maxLoopLagMs: A.maxLoopLagMs, minAvailableMb: A.minAvailableMb, maxStealFrac: A.maxStealFrac });
+    }
     // Remember what is loaded now so only later changes trigger a swap.
     for (const p of Object.values(resolveModelPaths(this.d.cfg))) this.mtimes.set(p, mtime(p));
     for (const k of Object.keys(MODEL_FILES) as Kind[]) { const p = path.join(this.d.cfg.autoTrain.dir, MODEL_FILES[k]); this.mtimes.set(p, mtime(p)); }
@@ -96,10 +122,14 @@ export class AutoTrainer {
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
+    this.pressureProbe?.stop();
     if (this.child) { this.signal('SIGCONT'); this.signal('SIGTERM'); }
   }
 
   private get windows(): boolean { return this.d.cfg.autoTrain.mode === 'windows'; }
+  private get background(): boolean { return this.d.cfg.autoTrain.mode === 'background'; }
+
+  private pressure(): string | undefined { return this.d.pressure ? this.d.pressure() : this.pressureProbe?.check(); }
 
   /** Signal the pipeline's whole process group (it spawns its own children: downloads, TradingView). */
   private signal(sig: NodeJS.Signals): void {
@@ -113,8 +143,21 @@ export class AutoTrainer {
     return sessionEdge(this.now, this.d.cfg.sessionEdge.minutes) ?? (weekendTraining(this.now).free ? 'weekend' : undefined);
   }
 
-  /** Windows mode: the pipeline runs only inside a session-edge window or on the weekend; frozen otherwise. */
+  /** Windows mode: the pipeline runs only inside a session-edge window or on the weekend; frozen otherwise.
+   *  Background mode: frozen only while the machine is under pressure; resumed after a calm minute. */
   private pace(): void {
+    if (this.background && this.child) {
+      const why = this.pressure();
+      if (why) {
+        this.calmSince = 0;
+        if (!this.paused) { this.signal('SIGSTOP'); this.paused = true; this.pausedFor = why; log.info('training paused: the machine is busy', { reason: why }); this.d.audit.write('config', { event: 'pipeline_pause', reason: why }); }
+        else this.pausedFor = why;
+      } else if (this.paused) {
+        if (!this.calmSince) this.calmSince = this.now;
+        if (this.now - this.calmSince >= 60_000) { this.signal('SIGCONT'); this.paused = false; this.pausedFor = undefined; this.calmSince = 0; log.info('training resumed'); this.d.audit.write('config', { event: 'pipeline_resume', reason: 'calm' }); }
+      }
+      return;
+    }
     if (!this.windows || !this.child) return;
     const inside = this.window();
     if (inside && this.paused) { this.signal('SIGCONT'); this.paused = false; log.info('pipeline resumed', { window: inside }); this.d.audit.write('config', { event: 'pipeline_resume', window: inside }); }
@@ -132,6 +175,7 @@ export class AutoTrainer {
       const starts = [w ? Math.max(w.start, due) : undefined, wk].filter((x): x is number => x !== undefined);
       return starts.length ? Math.min(...starts) : null;
     }
+    if (this.background) return Math.max(now, (this.state().lastRun ?? 0) + this.d.cfg.autoTrain.everyHours * 3_600_000);
     if (this.d.cfg.autoTrain.mode !== 'daily') return null;
     const d = new Date(now);
     let t = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), this.d.cfg.autoTrain.hourUtc);
@@ -147,13 +191,18 @@ export class AutoTrainer {
   async tick(): Promise<void> {
     await this.watch();
     const next = this.nextRun();
-    // Starts: inside a session-edge window, or in the weekend midnight hour.
-    const weekendStart = this.windows && weekendTraining(this.now).start;
+    // Starts: inside a session-edge window, or in the weekend midnight hour (windows); whenever due (background).
+    const weekendStart = (this.windows || this.background) && weekendTraining(this.now).start;
     const inWindow = !this.windows || !!sessionEdge(this.now, this.d.cfg.sessionEdge.minutes) || weekendStart;
     // The weekend run is the week's full retrain (it learns the weekend and pre-week regimes): it starts at
-    // Friday midnight unless a run finished in the last 6 hours.
+    // Friday midnight unless a run finished in the last 6 hours; a run still going then is followed by it.
     const weekendDue = weekendStart && this.now - (this.state().lastRun ?? 0) > 6 * 3_600_000;
-    if (((next !== null && this.now >= next && inWindow) || weekendDue) && !this.child && this.now - this.lastStart > 3_600_000) {
+    if (weekendDue && this.child && !this.weekendRun && !this.weekendPending) {
+      this.weekendPending = true;
+      log.info('weekend run queued behind the run in progress (new entries held until it finishes)');
+    }
+    const warmedUp = !this.background || this.now - this.startedAt >= this.d.cfg.autoTrain.startDelayMin * 60_000;
+    if (((next !== null && this.now >= next && inWindow && warmedUp) || weekendDue) && !this.child && this.now - this.lastStart > 3_600_000) {
       this.run([]);
       this.weekendRun = Boolean(weekendStart);
     }
@@ -170,7 +219,7 @@ export class AutoTrainer {
     const out = fs.openSync(this.logFile, 'a');
     this.lastStart = this.now;
     // Its own process group, so pausing/resuming reaches the pipeline's children too.
-    const child = spawn(cmd, [...base, ...args], { cwd: process.cwd(), env: process.env, stdio: ['ignore', out, out], detached: this.windows });
+    const child = spawn(cmd, [...base, ...args], { cwd: process.cwd(), env: process.env, stdio: ['ignore', out, out], detached: this.windows || this.background });
     this.child = child;
     this.paused = false;
     // Training must never starve the trading loop: lowest CPU priority.
@@ -182,11 +231,16 @@ export class AutoTrainer {
       fs.closeSync(out);
       this.child = undefined;
       this.paused = false;
+      this.pausedFor = undefined;
       this.weekendRun = false;
       this.lastExit = { code, ts: this.now, args };
       this.d.audit.write('config', { event: 'pipeline_exit', code, args, report: this.state().lastReport ?? null });
       if (code !== 0) this.d.alerter.notify('warn', 'pipeline', `Training pipeline exited with code ${code}; see ${this.logFile}`);
       void this.watch();
+      if (this.weekendPending) {
+        this.weekendPending = false;
+        if (weekendTraining(this.now).free) { this.queued = undefined; this.run([]); this.weekendRun = true; return; }
+      }
       if (this.queued) { const q = this.queued; this.queued = undefined; this.run(q); }
     });
     return true;
@@ -279,6 +333,7 @@ export class AutoTrainer {
     return {
       mode: this.d.cfg.autoTrain.mode, running: Boolean(this.child), lastStart: this.lastStart || null, lastExit: this.lastExit,
       nextRun: this.nextRun(), paused: this.paused,
+      pausedFor: this.pausedFor ?? null, pressure: this.pressureProbe?.last ?? null,
       window: this.windows ? { inside: this.window() ?? null, next: nextSessionEdge(this.now, this.d.cfg.sessionEdge.minutes) ?? null } : null,
       logFile: this.logFile,
       models: Object.fromEntries(Object.entries(paths).map(([k, p]) => [k, { path: p, mtime: mtime(p), ...(k === 'mlp' ? { id: this.d.engine.model.id } : {}) }])),

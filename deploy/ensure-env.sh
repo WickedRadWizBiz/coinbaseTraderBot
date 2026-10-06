@@ -25,6 +25,9 @@ fi
 # Keep bot.env's permissions (600) while rewriting lines.
 edit_env() { local tmp; tmp="$(mktemp "$ENV.XXXX")"; grep -v -e "$1" "$ENV" > "$tmp" || true; [ -z "${2:-}" ] || printf '%s\n' "$2" >> "$tmp"; chmod 600 "$tmp"; mv "$tmp" "$ENV"; }
 grep -q '^DASHBOARD_TOKEN=' "$ENV" && edit_env '^DASHBOARD_TOKEN=' && echo "removed the unused DASHBOARD_TOKEN from $ENV"
+# Training now runs in the background beside trading (AUTO_TRAIN=background, the default). A bot.env that
+# still pins the old default (windows) is moved over; any other choice (daily, off) is left alone.
+if grep -qx 'AUTO_TRAIN=windows' "$ENV"; then edit_env '^AUTO_TRAIN=windows$' 'AUTO_TRAIN=background'; echo "AUTO_TRAIN: windows -> background in $ENV"; fi
 if [ -n "${DASHBOARD_PASSWORD:-}" ] && ! grep -qxF "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD" "$ENV"; then
   edit_env '^DASHBOARD_PASSWORD=' "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD"
   echo "dashboard password set from the deploy"

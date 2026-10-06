@@ -305,7 +305,7 @@ In live trading, `ModelHealth` stops new risk if the rolling log-loss advantage 
 
 ## Automated training and hot-swapping
 
-The bot retrains itself. Every day at `AUTO_TRAIN_HOUR_UTC` (06:00 UTC by default) it runs `research/pipeline.ts` as a low-priority background process. The pipeline runs in this order:
+The bot retrains itself. By default (`AUTO_TRAIN=background`) it runs `research/pipeline.ts` beside trading as a lowest-priority child process: a new run starts whenever one is due (`AUTO_TRAIN_EVERY_HOURS`, 6, after the last completed run; at once after a restart cut one short, resuming from the per-step checkpoints), `AUTO_TRAIN_START_DELAY_MIN` (10) after the bot starts. It is frozen while the machine is under pressure and resumed after a calm minute: the trading loop lagging (p99 over `AUTO_TRAIN_MAX_LAG_MS`, 500), available memory under `AUTO_TRAIN_MIN_FREE_MB` (300), or the host throttling the burstable CPU (steal over `AUTO_TRAIN_MAX_STEAL`, 15%). The Friday-midnight (New York) weekend run still holds new entries until it finishes; a run still going at midnight is followed by it. `AUTO_TRAIN=windows` keeps the old schedule (session-edge windows only), `daily` runs once at `AUTO_TRAIN_HOUR_UTC`. The pipeline runs in this order:
 1. Tests and trains the crypto and perps SNNs (the tennis SNN learns live).
 2. Backfills each network's outputs without leakage.
 3. Trains the tree volatility forecast.
