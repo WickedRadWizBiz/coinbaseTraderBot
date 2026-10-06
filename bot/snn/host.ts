@@ -14,6 +14,11 @@ import { SnnRuntime, type SnnReply, type SnnRequest, type StepReply } from './ru
 
 const log = logger('snn');
 
+
+/** Steps after a (re)start whose latency is not counted (JIT warm-up). */
+const WARMUP_STEPS = 30;
+const pct = (xs: number[], q: number) => { if (!xs.length) return 0; const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
+
 export interface SnnHostOpts {
   params: SnnParams;
   whitelist?: string[];
@@ -43,6 +48,9 @@ export interface SnnHostLike {
   latencyOk(): boolean;
   /** Share of the worker thread's time spent busy since the previous call (null without a worker). */
   utilization?(): number | null;
+  /** Worker compute time per step, p99 (ms). */
+  computeP99?(): number;
+  warmupTimeouts?: number;
   settle(ticker: string, result: 'yes' | 'no', now: number): Promise<void>;
   remove(keys: string[]): Promise<void>;
   status(): Promise<unknown>;
@@ -61,6 +69,9 @@ export class SnnHost implements SnnHostLike {
   private readonly lat: number[] = [];
   private lastCheckpoint = 0;
   timeouts = 0;
+  warmupTimeouts = 0;
+  private stepsDone = 0;
+  private readonly comp: number[] = [];
   lastError?: string;
   restoredFrom?: string | null;
   readonly version: string;
@@ -111,23 +122,27 @@ export class SnnHost implements SnnHostLike {
     try {
       const r = await this.call({ type: 'step', now, inputs, queries }, this.o.timeoutMs);
       const ms = performance.now() - t0;
-      this.lat.push(r ? ms : this.o.timeoutMs);
-      if (this.lat.length > 600) this.lat.shift();
-      if (!r) { this.timeouts++; return undefined; }
+      // The first steps after a start compile the network code (seconds on a slow box): not counted
+      // toward the latency band, or one restart would keep the vote off for the next 10 minutes.
+      const warm = ++this.stepsDone > WARMUP_STEPS;
+      if (warm) { this.lat.push(r ? ms : this.o.timeoutMs); if (this.lat.length > 600) this.lat.shift(); }
+      if (!r) { if (warm) this.timeouts++; else this.warmupTimeouts++; return undefined; }
       if (!r.ok) { this.lastError = r.error; return undefined; }
-      return r.result as StepReply;
+      const res = r.result as StepReply;
+      if (warm && Number.isFinite(res.computeMs)) { this.comp.push(res.computeMs); if (this.comp.length > 600) this.comp.shift(); }
+      return res;
     } finally {
       this.busy = false;
       if (this.o.checkpointDir && now - this.lastCheckpoint >= this.o.checkpointEveryMin * 60_000) { this.lastCheckpoint = now; void this.checkpoint(now); }
     }
   }
 
-  /** Latency p99 over the last ~10 minutes of requests (ms). */
-  p99(): number {
-    if (!this.lat.length) return 0;
-    const s = [...this.lat].sort((a, b) => a - b);
-    return s[Math.min(s.length - 1, Math.floor(0.99 * s.length))];
-  }
+  /** Latency p99 over the last ~10 minutes of requests (ms): request to reply, as the engine sees it. */
+  p99(): number { return pct(this.lat, 0.99); }
+
+  /** The worker's own compute time per step, p99 (ms). Round trip minus this is queueing: the reply
+   *  waiting for the main thread, or the worker waiting for a CPU. */
+  computeP99(): number { return pct(this.comp, 0.99); }
 
   private elu?: ReturnType<Worker['performance']['eventLoopUtilization']>;
   utilization(): number | null {

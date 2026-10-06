@@ -4,7 +4,8 @@
 //   kalshiRest  Kalshi REST request round trip
 //   coinbase    Coinbase ticker delay (exchange timestamp -> received)
 //   sample      interval between engine evaluation passes (1 s nominal; longer when the server is busy)
-//   kalshiIndex CF Benchmarks index: vendor timestamp -> received (includes any clock offset)
+//   kalshiIndex CF Benchmarks index: vendor timestamp -> handled (the index's age; includes any clock offset)
+//   kalshiTransit Kalshi's send stamp -> handled (one way: network + local queueing)
 //   loopP99/Max main-thread event-loop delay over ~10 s (local queueing every message also waits through)
 
 import { monitorEventLoopDelay } from 'perf_hooks';
@@ -29,8 +30,8 @@ export function recordLatency(channel: string, ms: number, now = Date.now()): vo
 }
 
 /** Rounded averages per channel; null when nothing measured in the last 5 minutes. */
-export function latencySnapshot(now = Date.now()): Record<'kalshiWs' | 'kalshiRest' | 'coinbase' | 'sample' | 'kalshiIndex' | 'loopP99' | 'loopMax', number | null> {
+export function latencySnapshot(now = Date.now()): Record<'kalshiWs' | 'kalshiRest' | 'coinbase' | 'sample' | 'kalshiIndex' | 'kalshiTransit' | 'loopP99' | 'loopMax', number | null> {
   const get = (k: string) => { const s = stats.get(k); return s && now - s.ts < 300_000 ? Math.round(s.ewma) : null; };
   const l = loopStats(now);
-  return { kalshiWs: get('kalshiWs'), kalshiRest: get('kalshiRest'), coinbase: get('coinbase'), sample: get('sample'), kalshiIndex: get('kalshiIndex'), loopP99: l.p99, loopMax: l.max };
+  return { kalshiWs: get('kalshiWs'), kalshiRest: get('kalshiRest'), coinbase: get('coinbase'), sample: get('sample'), kalshiIndex: get('kalshiIndex'), kalshiTransit: get('kalshiTransit'), loopP99: l.p99, loopMax: l.max };
 }

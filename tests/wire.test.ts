@@ -87,6 +87,12 @@ test('index feed: values parse across field-name variants; timestamps in s / ms 
   assert.equal(parseIndexRow({ symbol: 'ETHUSD_RTI', price: 2700 })?.indexId, 'ETHUSD_RTI');
   assert.equal(parseIndexRow({ data: { index: 'SOLUSD_RTI', index_value: 120.1 } })?.value, 120.1);
   assert.equal(parseIndexRow({ value: 1 }), undefined, 'no id: dropped (and counted)');
+  // Kalshi's actual form (captured from the live feed, October 2026): value_usd + source_ts_ms, with the
+  // vendor's own JSON as a string in `data`.
+  const live = JSON.parse('{"type":"cfbenchmarks_value_5hz","sid":3,"seq":9166,"msg":{"index_id":"BRTI","value_usd":"86526.25000000","source_ts_ms":1791300043200,"received_at":1791300043239,"data":"{\\"type\\":\\"value\\",\\"time\\":1791300043200,\\"id\\":\\"BRTI\\",\\"value\\":\\"86526.25\\"}"},"sending_ts_ms":1791300043241}');
+  assert.deepEqual(parseIndexRow(live.msg, live.msg), { indexId: 'BRTI', value: 86526.25, ts: 1791300043200 });
+  // Only the vendor JSON string: still read.
+  assert.deepEqual(parseIndexRow({ data: '{"type":"value","time":1791300043200,"id":"XRPUSD_RTI","value":"1.52160"}' }), { indexId: 'XRPUSD_RTI', value: 1.5216, ts: 1791300043200 });
   assert.equal(tsMs(1791270000123), 1791270000123);
   assert.equal(tsMs(1791270000123456), 1791270000123);
   assert.equal(tsMs(1791270000123456789), 1791270000123);
@@ -99,4 +105,21 @@ test('strike selection: Kalshi\'s own prices pick the at-the-money strikes (no o
   assert.deepEqual(kept.sort(), ['L-T2', 'L-T3']);
   const ranges = [0.02, 0.1, 0.4, 0.3, 0.05].map((p, i) => ({ ticker: `R-B${i}`, eventTicker: 'R', strikeType: 'between', floorStrike: i, capStrike: i + 1, yesMid: p }));
   assert.deepEqual(nearestStrikes(ranges, (_s, t) => (t === 'between' ? 'between' : 'greater'), 'KXBTC', undefined, 2, new Set()).map((m) => m.ticker).sort(), ['R-B2', 'R-B3']);
+});
+
+test('Kalshi index frames: parsed, counted, and the one-way transit measured from sending_ts_ms', async () => {
+  const { KalshiWs } = await import('../bot/kalshi/ws');
+  const { latencySnapshot } = await import('../bot/util/latency');
+  const ws = new KalshiWs('wss://example.invalid/trade-api/ws/v2', undefined, ['BRTI']);
+  const got: Array<{ indexId: string; value: number; ts: number }> = [];
+  ws.on('index', (p) => got.push(p));
+  const now = Date.now();
+  const frame = { type: 'cfbenchmarks_value_5hz', sid: 3, seq: 1, msg: { index_id: 'BRTI', value_usd: '86526.25000000', source_ts_ms: now - 140, received_at: now - 100, data: '{}' }, sending_ts_ms: now - 95 };
+  (ws as any).onMessage(JSON.stringify(frame));
+  assert.deepEqual(got, [{ indexId: 'BRTI', value: 86526.25, ts: now - 140 }]);
+  assert.equal(ws.indexStats.parsed, 1);
+  assert.equal(ws.indexStats.dropped, 0);
+  assert.equal(ws.indexStats.vendorMs, 40, 'vendor -> Kalshi');
+  assert.ok(ws.indexStats.transitMs! >= 95 && ws.indexStats.transitMs! < 1000, `Kalshi -> here ${ws.indexStats.transitMs}`);
+  assert.ok(latencySnapshot().kalshiTransit! >= 95);
 });

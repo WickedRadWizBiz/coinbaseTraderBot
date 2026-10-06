@@ -114,17 +114,17 @@ export function BotControls({ s, onChange }: { s: any; onChange: () => void }) {
 }
 
 /** Latency and sample-rate badges (restored): Kalshi WS / REST round trips, Coinbase feed delay, engine pass interval. */
-export function LatencyBadges({ latency }: { latency?: { kalshiWs: number | null; kalshiRest: number | null; coinbase: number | null; sample: number | null; kalshiIndex?: number | null; loopP99?: number | null } }) {
+export function LatencyBadges({ latency }: { latency?: { kalshiWs: number | null; kalshiRest: number | null; coinbase: number | null; sample: number | null; kalshiIndex?: number | null; kalshiTransit?: number | null; loopP99?: number | null } }) {
   const ms = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${v}ms`);
   return (
     <div className="flex flex-col gap-1 font-mono text-[10px] normal-case tracking-normal">
       <span
         className="px-1.5 py-0.5 border border-crypto-primary/40 bg-black/40 text-crypto-text/80 flex items-center justify-between gap-1.5 leading-none w-full"
-        title={`Measured transport latencies: Kalshi WebSocket ping (${ms(latency?.kalshiWs)}), Kalshi REST round trip (${ms(latency?.kalshiRest)}), Coinbase ticker delay (${ms(latency?.coinbase)}, recorded for the networks)`}
+        title={`Measured transport latencies: Kalshi WebSocket one way, Kalshi's send stamp to handled here (${ms(latency?.kalshiTransit)}; the ping round trip, which also waits behind every queued frame: ${ms(latency?.kalshiWs)}), Kalshi REST round trip (${ms(latency?.kalshiRest)}), Coinbase ticker delay (${ms(latency?.coinbase)}, recorded for the networks)`}
       >
         <span className="text-[#808080] font-bold">Latency:</span>
         <span className="font-bold flex items-center gap-1">
-          <span className="text-emerald-400">WS {ms(latency?.kalshiWs)}</span>
+          <span className="text-emerald-400">WS {ms(latency?.kalshiTransit ?? latency?.kalshiWs)}</span>
           <span className="text-[#606060]">/</span>
           <span className="text-crypto-primary">REST {ms(latency?.kalshiRest)}</span>
           <span className="text-[#606060]">/</span>

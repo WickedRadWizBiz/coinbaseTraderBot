@@ -370,6 +370,12 @@ test('host: a slow readout times out at the deadline (alpha = 0) and feeds laten
   await host.start(T0);
   // Simulate a worker that never answers.
   (host as any).worker = { postMessage: () => undefined, terminate: async () => 0 };
+  // A timeout during the warm-up steps (JIT compile after a start) is not held against the vote.
+  assert.equal(await host.stepAndScore(T0, [], []), undefined);
+  assert.equal(host.warmupTimeouts, 1);
+  assert.equal(host.timeouts, 0);
+  assert.equal(host.latencyOk(), true, 'warm-up does not count');
+  (host as any).stepsDone = 1000;
   const r = await host.stepAndScore(T0, [], []);
   assert.equal(r, undefined);
   assert.equal(host.timeouts, 1);
