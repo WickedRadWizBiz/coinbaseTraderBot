@@ -12,7 +12,9 @@
 // served first), each lane has its own position limit and risk per trade, and total notional is capped
 // as a multiple of equity.
 // Sizing: risk riskFrac of equity between entry and stop, scaled by the score (0.5x to 1.5x of the
-// lane's reference score), capped per asset and in total.
+// lane's reference score) and the conviction multiplier, then capped by the lane's optimal f (the
+// bootstrap 25th percentile of the growth-optimal risk on its trade history, bot/strategy/optimalF.ts)
+// and halved while its drawdown is beyond the history's 95th percentile; capped per asset and in total.
 
 import type { Lane, SetupSignal } from './detectors';
 import { TF_MS } from './detectors';
@@ -71,13 +73,20 @@ export interface Candidate { sig: SetupSignal; score: number; queuedAt: number; 
  *  optionally a conviction size multiplier (TA / confluence, altcoin risk-on rule; >= 1) and a priority. */
 export type Recheck = (c: Candidate) => { px: number; score: number; mult?: number; priority?: number; why?: string } | undefined;
 
-export interface Entry { cand: Candidate; px: number; score: number; notional: number; mult: number; why?: string }
+export interface Entry { cand: Candidate; px: number; score: number; notional: number; mult: number; why?: string; capped?: string }
+
+/** Optimal-f limit for a lane: the largest fraction of equity at risk per trade (at the stop), and the
+ *  drawdown scale (0.5 while the lane's drawdown is beyond the history's 95th percentile). */
+export interface RiskCap { cap: number; scale: number; why?: string }
 
 export class LaneBook {
   readonly queues: Record<Lane, Candidate[]> = { fast: [], slow: [] };
   readonly positions = new Map<string, OpenTrade>();
   /** Why the last candidates were dropped or skipped (status / audit). */
   readonly lastSkips: Array<{ asset: string; lane: Lane; kind: string; reason: string; ts: number }> = [];
+
+  /** Per lane optimal-f limits (set by the trader from the model's trade history and live trades). */
+  riskCaps: Partial<Record<Lane, RiskCap>> = {};
 
   constructor(public params: LaneBookParams = DEFAULT_LANES) {}
 
@@ -137,7 +146,15 @@ export class LaneBook {
         const scale = ref > 0 ? Math.max(0.5, Math.min(1.5, r.score / ref)) : 1;
         const riskDollars = (L.riskUsd && L.riskUsd > 0 ? L.riskUsd : equity * L.riskFrac) * scale;
         const mult = r.mult !== undefined && Number.isFinite(r.mult) && r.mult > 1 ? r.mult : 1;
-        let notional = (riskDollars * mult) / riskPct;
+        // Kelly-style risk (lane risk x score x conviction), never above the lane's optimal f.
+        let atRisk = riskDollars * mult, capped: string | undefined;
+        const rc = this.riskCaps[lane];
+        if (rc) {
+          if (Number.isFinite(rc.cap) && atRisk > equity * rc.cap) { atRisk = equity * rc.cap; capped = `optimal f cap ${(100 * rc.cap).toFixed(2)}% at risk`; }
+          if (rc.scale < 1) { atRisk *= rc.scale; capped = `${capped ? `${capped}; ` : ''}drawdown beyond the history's 95th percentile: x${rc.scale}`; }
+        }
+        if (!(atRisk > 0)) { this.skip(c, `optimal f: the lane's trade history supports no risk${rc?.why ? ` (${rc.why})` : ''}`, now); continue; }
+        let notional = atRisk / riskPct;
         notional = Math.min(notional, equity * this.params.maxAssetLeverage * mult, Math.max(0, equity * this.params.maxLeverage - used));
         if (!(notional > 0)) { keep.push(c); continue; }
         // Worth it? The first target (the slow lane has none: 2R, its typical first leg) must pay at least
@@ -148,7 +165,7 @@ export class LaneBook {
           const payoff = notional * (Math.abs(t1 - r.px) / r.px - (this.params.roundTripFee ?? 0));
           if (payoff < minUsd) { this.skip(c, `first target pays $${payoff.toFixed(2)} after fees at $${notional.toFixed(0)} notional (minimum $${minUsd})`, now); continue; }
         }
-        out.push({ cand: c, px: r.px, score: r.score, notional, mult, why: r.why });
+        out.push({ cand: c, px: r.px, score: r.score, notional, mult, why: r.why, capped });
         used += notional; open++; busy.add(s.asset);
       }
       this.queues[lane] = keep;

@@ -71,6 +71,7 @@ import { activeTaNetEnsemble, taNetView } from './ta/taNetEnsemble';
 import { applyFillModel, fillInputs, isMakerEntry, type FillModel } from './tca/fillModel';
 import { FillLog } from './tca/fillLog';
 import { recordLatency } from './util/latency';
+import { binaryTrades, optimalF, recencyWeight, type OptimalFReport } from './strategy/optimalF';
 import { altcoinRiskOn, confluenceBreadth, orientedSignals, selectionPriority, taDrift, taNetDirection, viewOf, type TaNetView } from './strategy/taConviction';
 
 const log = logger('engine');
@@ -562,6 +563,33 @@ export class Engine {
   readonly streak: { crypto: StreakScaler; tennis: StreakScaler };
   /** Entries waiting for their market to settle: the probability the order was placed on, per fill. */
   private readonly pendingEntries = new Map<string, Array<{ q: number; side: 'bid' | 'ask'; book: 'crypto' | 'tennis'; cost: number; count: number }>>();
+  private readonly fCaps: Partial<Record<'crypto' | 'tennis', { at: number; rep: OptimalFReport }>> = {};
+
+  /** Optimal f on the pool's settled entries (trades.jsonl, one trade per market, recency weighted),
+   *  recomputed hourly: the stake per order (fraction of bankroll) never above its bootstrap 25th
+   *  percentile once there are enough trades (OPTIMAL_F_MIN_TRADES_KALSHI); paper floors it at
+   *  paperFloor x the tier's per-order fraction. Infinity = no cap. */
+  kalshiOptimalF(book: 'crypto' | 'tennis', now = this.now()): { cap: number; rep?: OptimalFReport } {
+    const of = this.d.cfg.optimalF;
+    if (!of?.enabled || !this.d.cfg.dataDir || this.d.streakFiles === false) return { cap: Infinity };
+    let c = this.fCaps[book];
+    if (!c || now - c.at >= 3_600_000 || now < c.at) {
+      const rows: Array<{ ts: number; ticker: string; cost: number; count: number; won: boolean; book?: string }> = [];
+      try {
+        const file = path.join(this.d.cfg.dataDir, 'trades.jsonl');
+        if (fs.existsSync(file)) {
+          const text = fs.readFileSync(file, 'utf8');
+          for (const line of text.slice(Math.max(0, text.length - 4_000_000)).split('\n')) { try { if (line) rows.push(JSON.parse(line)); } catch { /* partial line */ } }
+        }
+      } catch { /* unreadable: no cap */ }
+      const trades = binaryTrades(rows, book).map((t) => ({ ...t, w: recencyWeight(t.ts, now, of.halfLifeDays) }));
+      c = { at: now, rep: optimalF(trades, { quantile: of.quantile, minTrades: of.minTradesKalshi, horizon: 100 }) };
+      this.fCaps[book] = c;
+    }
+    let cap = c.rep.cap;
+    if (this.d.cfg.mode !== 'live' && Number.isFinite(cap)) cap = Math.max(cap, of.paperFloor * this.tier().orderFrac);
+    return { cap, rep: c.rep };
+  }
 
   /**
    * Size multiplier for new risk on the Kalshi pool (crypto and tennis share it), and why: the break-even
@@ -616,6 +644,8 @@ export class Engine {
       taHealth: this.d.taHealth?.status() ?? null,
       cpu: this.cpu.status(),
       taEnsemble: activeTaNetEnsemble()?.status() ?? null,
+      // Optimal f on the Kalshi pool's settled trades (cap on the stake per order, fraction of bankroll).
+      optimalF: Object.fromEntries((['crypto', 'tennis'] as const).map((b) => { const f = this.kalshiOptimalF(b, now); const r = f.rep; return [b, r ? { trades: r.n, meanR: Number.isFinite(r.meanR) ? +r.meanR.toFixed(4) : null, gStar: +r.gStar.toFixed(4), gP25: Number.isFinite(r.gP25) ? +r.gP25.toFixed(4) : null, cap: Number.isFinite(f.cap) ? +f.cap.toFixed(4) : null, ddP95R: Number.isFinite(r.ddP95R) ? +r.ddP95R.toFixed(2) : null, note: r.note ?? null } : null]; })),
       entryGuards: this.entryGuards(now),
     };
   }
@@ -920,7 +950,14 @@ export class Engine {
       // Reconcile resting tennis orders with the plan (never touch another market's orders).
       // Entries shrink with the pool's break-even scale (net losses), never below 1 contract.
       const ts = this.riskScale('tennis').scale;
-      const plans = (tradeable ? out.plans : []).map((p) => (p.reduceOnly || ts >= 1 ? p : { ...p, count: Math.max(1, Math.floor(p.count * ts)) }));
+      // Optimal f: an entry's stake never above what the pool's settled tennis trades support.
+      const tf = this.kalshiOptimalF('tennis', now);
+      const capCount = (p: { side: 'bid' | 'ask'; price: number; count: number }) => {
+        if (!Number.isFinite(tf.cap) || !(bankroll > 0)) return p.count;
+        const cost = p.side === 'bid' ? p.price : 1 - p.price;
+        return cost > 0 ? Math.max(1, Math.min(p.count, Math.floor((tf.cap * bankroll) / cost))) : p.count;
+      };
+      const plans = (tradeable ? out.plans : []).map((p) => (p.reduceOnly ? p : { ...p, count: capCount(ts >= 1 ? p : { ...p, count: Math.max(1, Math.floor(p.count * ts)) }) }));
       const resting = oms.liveOrders().filter((o) => ms.some((m) => m.ticker === o.ticker) && !o.cancelRequested);
       for (const o of resting) {
         const keep = plans.some((p) => p.ticker === o.ticker && p.side === o.side && p.postOnly && Math.abs(p.price - o.price) < 1e-9 && Math.abs(p.count - (o.count - o.exchangeFillCount)) < 0.01 + 1e-9);
@@ -1444,12 +1481,16 @@ export class Engine {
     const tier = this.tier();
     const rs = this.riskScale('crypto');
     const kellyScale = rs.scale;
+    // Optimal f: the stake per order never above what the settled trade history supports (bootstrap 25th
+    // percentile of the growth-optimal fraction); applies to the conviction-boosted size too.
+    const fCap = this.kalshiOptimalF('crypto', now);
+    const fCapUsd = Number.isFinite(fCap.cap) ? fCap.cap * bankroll : Infinity;
     const view: MarketView = {
       ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: st.position, bankroll,
       // Session risk profile can only shrink size (sizeMult in [0, 1]).
       // The risk scale (drawdown, losing streak, training-mode de-risking) shrinks every sizing route:
       // Kelly, target-EV and the per-order caps alike.
-      maxOrderRiskUsd: tier.orderFrac * bankroll * sessRisk.sizeMult * kellyScale, maxContracts: floorCount(R.maxContractsPerOrder * sessRisk.sizeMult), minSidePrice: R.minSidePrice,
+      maxOrderRiskUsd: Math.min(tier.orderFrac * bankroll * sessRisk.sizeMult * kellyScale, fCapUsd), maxContracts: floorCount(R.maxContractsPerOrder * sessRisk.sizeMult), minSidePrice: R.minSidePrice,
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
       restingBid, restingAsk, nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
       pMarket, pStd: pred.std, makerBuffer: this.makerBuffer(), entrySidePrice: entrySidePrice !== undefined && entrySidePrice > 0 && entrySidePrice < 1 ? entrySidePrice : undefined,
@@ -1547,7 +1588,7 @@ export class Engine {
         else if (alt.active && sideDir > 0 && vetoed) plan.notes.push(`${alt.why}, but the adversary vetoed the x${S.altBoost} boost (${vetoed})`);
         const mult = Math.min(S.convictionMaxTotal, advMult * altMult);
         if (mult <= 1) continue;
-        const boosted = decide({ ...view, maxOrderRiskUsd: view.maxOrderRiskUsd * mult, maxContracts: floorCount(view.maxContracts * mult) }, { ...strat, kellyFraction: strat.kellyFraction * mult }, { exits: false, blockReductions: huntMode, entries: true });
+        const boosted = decide({ ...view, maxOrderRiskUsd: Math.min(view.maxOrderRiskUsd * mult, fCapUsd), maxContracts: floorCount(view.maxContracts * mult) }, { ...strat, kellyFraction: strat.kellyFraction * mult }, { exits: false, blockReductions: huntMode, entries: true });
         const match = boosted.place.find((b) => b.side === p.side && b.purpose === p.purpose && !b.reduceOnly && Math.abs(b.price - p.price) < 1e-9);
         const count = match ? floorCount(Math.min(match.count, p.count * mult)) : p.count;
         if (count > p.count) {
@@ -1590,6 +1631,7 @@ export class Engine {
     if (this.fillLog) for (const p of plan.place) if (isMakerEntry(p)) this.fillX.set(p, fillInputs(p, fillCtx));
     plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
     if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${rs.parts.join(', ')})`);
+    if (Number.isFinite(fCapUsd) && fCapUsd < tier.orderFrac * bankroll * sessRisk.sizeMult * kellyScale) plan.notes.push(`optimal f cap: $${fCapUsd.toFixed(2)} per order (${(100 * fCap.cap).toFixed(2)}% of bankroll, ${fCap.rep?.n ?? 0} settled trades)`);
     for (const g of guards) plan.notes.push(g);
     if (sessRisk.applied.length) plan.notes.push(`session risk ${sessRisk.applied.join('+')}: size x${sessRisk.sizeMult}, +${sessRisk.minEdgeAdd} edge`);
     if (huntPlan) plan.place.unshift(huntPlan);

@@ -19,6 +19,8 @@
 // Guards: kill switch / halts flatten urgently; the perp daily loss stop flattens and halts for the
 // day; an unvalidated lane trades at pilot size (or not at all with PERP_REQUIRE_VALIDATION).
 
+import { drawdownScale, optimalF, recencyWeight, type OptimalFReport, type WeightedTrade } from '../strategy/optimalF';
+import type { OptimalFConfig } from '../config';
 import fs from 'fs';
 import type { BreakEven } from '../risk/equityGuard';
 import type { StreakScaler } from '../risk/streakScaler';
@@ -78,6 +80,9 @@ export interface SetupTraderDeps {
   /** TA conviction for a trade direction on an asset (bot/strategy/taConviction.ts): size multiplier
    *  (TA / confluence breadth, altcoin risk-on rule), selection priority, and why. */
   conviction?: (asset: string, dir: number, now: number) => { mult: number; priority: number; why: string } | undefined;
+  /** Optimal f cap per lane (bot/strategy/optimalF.ts) from the model's out-of-sample trades and this
+   *  trader's own closed trades; `paper` floors the cap at paperFloor x the lane's risk. */
+  optimalF?: OptimalFConfig & { paper: boolean };
 }
 
 /** Typical spread of a setup trade's result in R (stop = -1 R, targets at +1..3 R): standardises R for the streak scaler. */
@@ -104,6 +109,9 @@ export class SetupTrader {
   readonly lastDecisions = new Map<string, { target: number; reason: string; stop?: number }>();
   lastError?: string;
   private gate?: { file: string; mtime: number; g?: SnnGateFile };
+  private capsKey = '';
+  private readonly ddCut: Partial<Record<Lane, boolean>> = {};
+  readonly capReports: Partial<Record<Lane, OptimalFReport & { liveTrades: number; liveDdR: number }>> = {};
 
   constructor(private readonly d: SetupTraderDeps) {
     this.book = new LaneBook(d.params.book);
@@ -302,6 +310,7 @@ export class SetupTrader {
       const raised = this.d.breakEven?.onEquity(equity, now, this.d.params.dailyGoalUsd);
       if (raised) this.d.audit?.write('training', { event: 'break_even_raised', book: 'perps', ...raised });
       const sizeScale = this.d.breakEven?.scale(equity, this.d.lossAt ?? 0.15) ?? 1;
+      this.refreshRiskCaps(now);
       const entries = this.book.select(now, equity * sizeScale, (cand) => {
         if (!assets.includes(cand.sig.asset)) return undefined;
         const px = this.d.spot(cand.sig.asset, now);
@@ -325,7 +334,7 @@ export class SetupTrader {
         this.book.add(t);
         this.lastPx.set(t.asset, e.px);
         changed = true;
-        this.d.audit?.write('setup_trade', { event: 'opened', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, stop: t.stop, target1: t.plan.target1, target2: t.plan.target2, notional: t.notional, score: e.score, pilot, conviction: e.mult, convictionWhy: e.why ?? null });
+        this.d.audit?.write('setup_trade', { event: 'opened', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, stop: t.stop, target1: t.plan.target1, target2: t.plan.target2, notional: t.notional, score: e.score, pilot, conviction: e.mult, convictionWhy: e.why ?? null, capped: e.capped ?? null });
         const tnE = this.reading(t.asset, now);
         this.d.journal?.trade({ ts: now, event: 'opened', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entryTs: t.entryTs, entry: t.entry, stop: t.stop, notional: t.notional, score: e.score, pilot, tn_up1: tnE?.up1 ?? null, tn_up4: tnE?.up4 ?? null, tn_vol: tnE?.vol ?? null, ...this.snnOf(t.asset) });
       }
@@ -364,6 +373,35 @@ export class SetupTrader {
     return out;
   }
 
+  /** Optimal f per lane: the model's out-of-sample trades (weighted by age, development years at half)
+   *  plus this trader's closed trades (liveMult each), recomputed hourly and whenever a trade closes or
+   *  the model changes. The cap limits the Kelly-style size; a drawdown beyond the history's 95th
+   *  percentile halves it until the drawdown is back under half that. */
+  private refreshRiskCaps(now: number): void {
+    const of = this.d.optimalF;
+    if (!of?.enabled) { this.book.riskCaps = {}; return; }
+    const key = `${this.model?.params.version ?? ''}|${this.history.length}|${this.history[this.history.length - 1]?.exitTs ?? 0}|${Math.floor(now / 3_600_000)}`;
+    if (key === this.capsKey) return;
+    this.capsKey = key;
+    for (const lane of ['fast', 'slow'] as const) {
+      const hist = this.model?.params.sizing?.[lane];
+      const trades: WeightedTrade[] = (hist?.trades ?? []).map(([ts, r]) => ({ ts, r, w: recencyWeight(ts, now, of.halfLifeDays) * (ts < (hist?.devUntil ?? 0) ? 0.5 : 1) }));
+      const live = this.history.filter((h) => h.lane === lane && Number.isFinite(h.r)).sort((a, b) => a.exitTs - b.exitTs);
+      for (const h of live) trades.push({ ts: h.exitTs, r: h.r, w: recencyWeight(h.exitTs, now, of.halfLifeDays, of.liveMult) });
+      const rep = optimalF(trades, { quantile: of.quantile, minTrades: of.minTradesSetups, horizon: 100 });
+      let cum = 0, pk = 0;
+      for (const h of live) { cum += h.r; pk = Math.max(pk, cum); }
+      const liveDdR = pk - cum;
+      const dd = drawdownScale(liveDdR, rep.ddP95R, this.ddCut[lane] ?? false);
+      if (dd.cut !== (this.ddCut[lane] ?? false)) this.d.audit?.write('setup_sizing', { lane, event: dd.cut ? 'drawdown_cut' : 'drawdown_cleared', liveDdR, ddP95R: rep.ddP95R });
+      this.ddCut[lane] = dd.cut;
+      let cap = rep.cap;
+      if (of.paper && Number.isFinite(cap)) cap = Math.max(cap, of.paperFloor * this.book.params[lane].riskFrac);
+      this.book.riskCaps[lane] = { cap, scale: dd.scale, why: rep.note ?? `${rep.n} trades, mean R ${rep.meanR.toFixed(3)}` };
+      this.capReports[lane] = { ...rep, liveTrades: live.length, liveDdR };
+    }
+  }
+
   status() {
     const m = this.model;
     const today = this.day ? this.day.realized : 0;
@@ -379,6 +417,9 @@ export class SetupTrader {
       equity: this.equity?.value ?? null, dayStartEquity: this.day?.start ?? null, dayHalt: this.dayHalt ?? null,
       dayHaltAdvisory: Boolean(this.dayHalt && this.d.trainingOverride?.()),
       breakEven: this.d.breakEven?.reference ?? null,
+      // Optimal f per lane: the cap on risk per trade from the bootstrap of the trade history (model's
+      // out-of-sample trades + live), the drawdown band, and whether the drawdown cut is on.
+      optimalF: Object.fromEntries((['fast', 'slow'] as const).map((l) => { const r = this.capReports[l], c = this.book.riskCaps[l]; return [l, r ? { trades: r.n, liveTrades: r.liveTrades, meanR: +r.meanR.toFixed(4), gStar: +r.gStar.toFixed(4), gP25: Number.isFinite(r.gP25) ? +r.gP25.toFixed(4) : null, cap: c && Number.isFinite(c.cap) ? +c.cap.toFixed(4) : null, riskFrac: this.book.params[l].riskFrac, ddP95R: Number.isFinite(r.ddP95R) ? +r.ddP95R.toFixed(2) : null, liveDdR: +r.liveDdR.toFixed(2), ddScale: c?.scale ?? 1, note: r.note ?? null } : null]; })),
       sizeScale: this.equity && this.d.breakEven ? +this.d.breakEven.scale(this.equity.value, this.d.lossAt ?? 0.15).toFixed(3) : null,
       today: { realizedUsd: today, goalUsd: this.d.params.dailyGoalUsd, trades: this.history.filter((h) => this.day && new Date(h.exitTs).toISOString().slice(0, 10) === this.day.key).length },
       lanes: { fast: { open: open.filter((o) => o.lane === 'fast'), queue: cand('fast'), params: this.book.params.fast }, slow: { open: open.filter((o) => o.lane === 'slow'), queue: cand('slow'), params: this.book.params.slow } },

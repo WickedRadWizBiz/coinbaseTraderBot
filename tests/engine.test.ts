@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'fs';
 import path from 'path';
 import { test } from 'node:test';
 import { Alerter } from '../bot/alerts/alerter';
@@ -295,4 +296,18 @@ test('contracts are priced on Kalshi data alone by default: a stale Kalshi index
   for (let sec = 600; sec >= 0; sec--) spot.add(60010 + Math.sin(sec), now - sec * 1000);
   await engine.tick();
   assert.equal(engine.status.get(market.ticker)!.blocked, 'index stale');
+});
+
+test('optimal f on the Kalshi pool: settled trades in trades.jsonl cap the stake per order (paper floors it)', async () => {
+  const { cfg, engine } = await setup();
+  const now = Date.now();
+  // 150 settled markets at 50c with a 30 % win rate: no edge, so the history supports no stake.
+  const lines = Array.from({ length: 150 }, (_, i) => JSON.stringify({ ts: now - (150 - i) * 3_600_000, ticker: `KXBTC15M-T${i}`, book: 'crypto', q: 0.6, cost: 0.5, count: 2, won: i % 10 < 3 }));
+  fs.writeFileSync(path.join(cfg.dataDir, 'trades.jsonl'), lines.join('\n') + '\n');
+  const f = engine.kalshiOptimalF('crypto', now);
+  assert.equal(f.rep?.n, 150);
+  assert.equal(f.rep?.cap, 0);
+  assert.ok(f.cap > 0 && Math.abs(f.cap - cfg.optimalF.paperFloor * engine.tier().orderFrac) < 1e-12, 'paper: floored at a quarter of the per-order fraction');
+  assert.equal(engine.kalshiOptimalF('tennis', now).rep?.n, 0, 'books are separate');
+  assert.equal(engine.kalshiOptimalF('tennis', now).cap, Infinity, 'too few trades: no cap');
 });

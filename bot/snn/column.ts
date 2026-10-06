@@ -85,6 +85,8 @@ export class Column {
   readonly inPtr: Int32Array; readonly inEdge: Int32Array; readonly inPre: Int32Array;
   readonly preRE: Float64Array; readonly postO1E: Float64Array; readonly postO2E: Float64Array; readonly rhoE: Float64Array;
   readonly theta0E: Float64Array;
+  /** Inhibitory thresholds (homeostasis, as theta0E). */
+  readonly theta0I: Float64Array;
   // ---- PC
   readonly U1: Float32Array; readonly U0: Float32Array; readonly z2: Float64Array; readonly z1: Float64Array;
   readonly xhat1: Float64Array; readonly err0: Float64Array;
@@ -180,6 +182,7 @@ export class Column {
     this.inEdge = Int32Array.from(inc.flat()); this.inPre = Int32Array.from(incPre.flat());
     this.preRE = f64(nE); this.postO1E = f64(nE); this.postO2E = f64(nE); this.rhoE = f64(nE).fill(p.triplet.rho0);
     this.theta0E = f64(nE).fill(p.thetaE);
+    this.theta0I = f64(this.N - nE).fill(p.thetaI);
     // PC matrices (small random init) and latents.
     this.U1 = Float32Array.from({ length: nL1 * nE }, () => rng.normal() * 0.05);
     this.U0 = Float32Array.from({ length: nL0 * nL1 }, () => rng.normal() * 0.05);
@@ -213,6 +216,7 @@ export class Column {
       prevSpikes: this.prevSpikes,
       // Per-neuron E thresholds (moved only by threshold homeostasis; old checkpoints restore the default).
       theta0E: this.theta0E,
+      theta0I: this.theta0I,
     };
     return a;
   }
@@ -378,7 +382,7 @@ export class Column {
       if (isE) { excSum += Iexc; inhSum += Iinh; if (F.lateral) I -= ctx.latInh; }
       else if (F.gapJunctions && ctx.gapV) I += p.gapCoupling * (ctx.gapV[k - nE] - this.v2[k]); // I = g_j (V_partner - V_self)
       let v = I + (this.v2[k] - I) * (isE ? d.E : d.I);
-      const th = isE ? (F.alif ? alifThreshold(this.theta0E[k], p.betaA, this.a2[k]) : this.theta0E[k]) : p.thetaI;
+      const th = isE ? (F.alif ? alifThreshold(this.theta0E[k], p.betaA, this.a2[k]) : this.theta0E[k]) : this.theta0I[k - nE];
       const s = v >= th ? 1 : 0;
       if (s) { v = 0; this.prevSpikes[this.nPrev++] = k; if (isE) spkE++; else spkI++; }
       this.v2[k] = v; this.s2[k] = s;
@@ -394,6 +398,9 @@ export class Column {
       this.ipCount = 0;
       const f = this.rateE < p.ipLow ? 1 - (p.ipStep ?? 0.02) : p.ipHigh && this.rateE > p.ipHigh ? 1 + (p.ipStep ?? 0.02) : 1;
       if (f !== 1) { const lo = (p.ipMin ?? 0.15) * p.thetaE; for (let k = 0; k < nE; k++) this.theta0E[k] = Math.max(lo, Math.min(p.thetaE, this.theta0E[k] * f)); }
+      // The same band for the inhibitory population (a silent I layer leaves the E layer unchecked).
+      const g = this.rateI < p.ipLow ? 1 - (p.ipStep ?? 0.02) : p.ipHigh && this.rateI > p.ipHigh ? 1 + (p.ipStep ?? 0.02) : 1;
+      if (g !== 1) { const lo = (p.ipMin ?? 0.15) * p.thetaI; for (let k = 0; k < this.theta0I.length; k++) this.theta0I[k] = Math.max(lo, Math.min(p.thetaI, this.theta0I[k] * g)); }
     }
     // ---- 6. traces and plasticity (S6): minimal triplet x NMDA gate x governor, two-speed weights
     const learn = F.plasticity && !ctx.frozen;
