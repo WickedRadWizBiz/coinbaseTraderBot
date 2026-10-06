@@ -519,7 +519,9 @@ export class Engine {
   private pricingIndex(asset: string, now: number) {
     const md = this.d.md, R = this.d.cfg.risk;
     const idx = md.index.get(asset);
-    if (this.d.cfg.mode !== 'paper' || (idx?.fresh(now, R.maxIndexAgeMs) && idx.vol())) return idx;
+    // Contracts are priced on Kalshi's own index. Outside prices (Coinbase, Binance) stand in only in paper
+    // with PAPER_OUTSIDE_PRICE_FALLBACK=true; otherwise they feed TA and features alone.
+    if (this.d.cfg.mode !== 'paper' || !this.d.cfg.strategy.outsidePriceFallback || (idx?.fresh(now, R.maxIndexAgeMs) && idx.vol())) return idx;
     const spot = md.spot.get(asset);
     // A fresh Coinbase series is used even while its volatility warms up, so the block reads
     // 'volatility warming up' (temporary) rather than 'index stale'.
@@ -1243,7 +1245,7 @@ export class Engine {
       const r = this.snnReplies.get(d as SnnDomain);
       units[d] = {
         stage: this.d.cfg.snn.domains[d as SnnDomain].stage,
-        host: { mode: u!.host.mode, version: u!.host.version, p99Ms: +u!.host.p99().toFixed(1), timeouts: u!.host.timeouts, lastError: u!.host.lastError ?? null, restoredFrom: u!.host.restoredFrom ?? null },
+        host: { mode: u!.host.mode, version: u!.host.version, p99Ms: +u!.host.p99().toFixed(1), workerBusy: u!.host.utilization?.() ?? null, timeouts: u!.host.timeouts, lastError: u!.host.lastError ?? null, restoredFrom: u!.host.restoredFrom ?? null },
         salience: r?.salience ?? {}, top: r?.top ?? null, shadow: r?.shadow ?? true,
         network: await u!.host.status(),
       };

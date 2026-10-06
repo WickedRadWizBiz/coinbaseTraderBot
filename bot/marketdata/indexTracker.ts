@@ -41,6 +41,7 @@ export class IndexTracker {
     if (!(value > 0) || !Number.isFinite(value)) return;
     const last = this.points[this.points.length - 1];
     if (last && ts < last.ts) return; // drop out-of-order prints
+    if (last && ts === last.ts && value === last.value) return; // the same print from a second channel
     this.points.push({ ts, value });
     this.updateVol(value, ts);
     const cutoff = ts - this.retainMs;

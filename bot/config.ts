@@ -125,6 +125,9 @@ export interface StrategyConfig {
   /** Markets with no position and no resting order are fully re-evaluated at most every idleEvalSec
    *  (1 s otherwise): most of the bot's CPU is the per-second evaluation of markets it is not in. */
   idleEvalSec: number;
+  /** Paper only: price contracts on Coinbase / Binance when Kalshi's index is stale (default off: outside
+   *  exchanges feed TA and features, never contract prices). */
+  outsidePriceFallback: boolean;
   /** Adversarial evaluator (bot/strategy/adversary.ts): entries it cannot break, with TA / confluence
    *  evidence, are re-sized by Kelly with a conviction multiplier up to adversarialMaxBoost (<= 2). */
   adversarialBoost: boolean;
@@ -759,6 +762,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     exploreMaxPerHour: num(env, 'PAPER_EXPLORE_MAX_PER_HOUR', 6, 0, 120),
     paperTrainTrades: num(env, 'PAPER_TRAINING_TRADES_PER_HOUR', 12, 0, 120),
     idleEvalSec: num(env, 'EVAL_IDLE_SEC', 5, 0, 60),
+    outsidePriceFallback: bool(env, 'PAPER_OUTSIDE_PRICE_FALLBACK', false),
     adversarialBoost: bool(env, 'ADVERSARIAL_BOOST', true),
     adversarialMaxBoost: num(env, 'ADVERSARIAL_MAX_BOOST', 2, 1, 2),
     taPricing: bool(env, 'TA_PRICING', true),

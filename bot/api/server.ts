@@ -34,6 +34,7 @@ import type { SettlementSweeper } from '../paper/settlementSweeper';
 import type { RunControl } from '../control';
 import { ConfigError, loadConfig } from '../config';
 import { latencySnapshot } from '../util/latency';
+import { cpuProfile } from '../util/profile';
 import { updateEnvFile } from '../util/envFile';
 import { studyFor, studyMeta } from '../ta/study';
 
@@ -176,6 +177,8 @@ export function createApi(d: ApiDeps): express.Express {
       training: d.training?.status() ?? null,
       entryDiagnosis: d.engine.entryDiagnosis(),
       feeds: d.engine.feedHealth(),
+      // Kalshi's own index channel: what arrived, what parsed, ids seen, raw samples, subscription acks.
+      kalshiIndexFeed: d.md.indexFeedStats(),
       settlement: d.settlement?.status() ?? null,
       latency: latencySnapshot(),
       run: d.control?.status() ?? { active: true, since: null },
@@ -198,6 +201,8 @@ export function createApi(d: ApiDeps): express.Express {
   // The neural map page: every network as a block of pixels, in the order information flows.
   api.get('/neural-map', async (_req, res) => res.json(await buildNeuralMap(d)));
 
+  // On-demand main-thread CPU profile for diagnostics (?sec=1..15; once a minute; read-only).
+  api.get('/debug/profile', async (req, res) => { res.json(await cpuProfile(Number(req.query.sec ?? 10))); });
   api.get('/markets', (_req, res) => res.json([...d.engine.status.values()].sort((a, b) => a.closeTs - b.closeTs || a.ticker.localeCompare(b.ticker))));
 
   api.get('/positions', (_req, res) => {

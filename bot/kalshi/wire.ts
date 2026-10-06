@@ -114,6 +114,36 @@ export function parseBalance(raw: Obj): number | undefined {
   return parseDollars(raw.balance_dollars) ?? parseDollars(raw.balance, true);
 }
 
+/** The strike in a ladder ticker's last segment: B = range centred there, T = threshold. */
+export function tickerStrikeOf(ticker: string): { kind: 'B' | 'T'; value: number } | undefined {
+  const r = /-([BT])(\d+(?:\.\d+)?)$/.exec(ticker);
+  const v = r ? Number(r[2]) : NaN;
+  return r && Number.isFinite(v) && v > 0 ? { kind: r[1] as 'B' | 'T', value: v } : undefined;
+}
+
+/** Fill floor / cap strikes Kalshi omitted from the tickers: a range's bounds are its centre +/- half the
+ *  spacing between neighbouring range centres in the same event; a threshold's floor is its value. */
+export function fillTickerStrikes<M extends { eventTicker?: string; strikeType?: string; floorStrike?: number; capStrike?: number; tickerStrike?: { kind: 'B' | 'T'; value: number } }>(markets: M[]): M[] {
+  const byEvent = new Map<string, M[]>();
+  for (const m of markets) if (m.tickerStrike?.kind === 'B') (byEvent.get(m.eventTicker ?? '') ?? byEvent.set(m.eventTicker ?? '', []).get(m.eventTicker ?? '')!).push(m);
+  for (const ms of byEvent.values()) {
+    const cs = [...new Set(ms.map((m) => m.tickerStrike!.value))].sort((a, b) => a - b);
+    let w = Infinity;
+    for (let i = 1; i < cs.length; i++) w = Math.min(w, cs[i] - cs[i - 1]);
+    if (!Number.isFinite(w)) continue;
+    for (const m of ms) if (m.floorStrike === undefined || m.capStrike === undefined) {
+      const c = m.tickerStrike!.value;
+      m.floorStrike ??= +(c - w / 2).toPrecision(12);
+      m.capStrike ??= +(c + w / 2).toPrecision(12);
+    }
+  }
+  for (const m of markets) {
+    if (m.tickerStrike?.kind !== 'T' || m.floorStrike !== undefined || m.capStrike !== undefined) continue;
+    if (/^less/i.test(m.strikeType ?? '')) m.capStrike = m.tickerStrike.value; else m.floorStrike = m.tickerStrike.value;
+  }
+  return markets;
+}
+
 export function parseMarket(m: Obj): MarketInfo | undefined {
   const openTime = ts(m.open_time);
   const closeTime = ts(m.close_time ?? m.expected_expiration_time);
@@ -130,7 +160,15 @@ export function parseMarket(m: Obj): MarketInfo | undefined {
     closeTime,
     floorStrike: strike !== undefined && strike > 0 ? strike : undefined,
     capStrike: cap !== undefined && cap > 0 ? cap : undefined,
-    strikeType: m.strike_type ? String(m.strike_type) : undefined,
+    strikeType: m.strike_type ? String(m.strike_type) : tickerStrikeOf(String(m.ticker))?.kind === 'B' ? 'between' : undefined,
+    tickerStrike: tickerStrikeOf(String(m.ticker)),
+    yesMid: (() => {
+      const b = parseDollars(m.yes_bid_dollars) ?? parseDollars(m.yes_bid, true);
+      const k = parseDollars(m.yes_ask_dollars) ?? parseDollars(m.yes_ask, true);
+      if (b !== undefined && k !== undefined && b > 0 && k > b && k < 1) return (b + k) / 2;
+      const l = parseDollars(m.last_price_dollars) ?? parseDollars(m.last_price, true);
+      return l !== undefined && l > 0 && l < 1 ? l : undefined;
+    })(),
     tickSize: tick && tick > 0 ? tick : 0.01,
     priceRanges: parsePriceRanges(m.price_ranges),
     result: m.result,

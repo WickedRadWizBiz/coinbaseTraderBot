@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import { test } from 'node:test';
 import { KalshiSigner } from '../bot/kalshi/auth';
-import { parseFill, parseOrder, parseOrderbook, parsePositions, toBookSide } from '../bot/kalshi/wire';
+import { parseIndexRow, tsMs } from '../bot/kalshi/ws';
+import { nearestStrikes } from '../bot/marketdata/marketData';
+import { fillTickerStrikes, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, tickerStrikeOf, toBookSide } from '../bot/kalshi/wire';
 
 test('V2 order payload with fixed-point strings', () => {
   const o = parseOrder({ order: { order_id: 'o1', client_order_id: 'c1', ticker: 'T', side: 'bid', price: '0.4500', status: 'resting', fill_count_fp: '2.00', remaining_count_fp: '3.00', average_fee_paid: '0.0100' } });
@@ -59,4 +61,42 @@ test('Ed25519 keys sign too', () => {
   const s = new KalshiSigner('kid', privateKey.export({ type: 'pkcs8', format: 'pem' }).toString());
   const h = s.headers('POST', '/trade-api/v2/portfolio/events/orders', 1);
   assert.equal(crypto.verify(null, Buffer.from('1POST/trade-api/v2/portfolio/events/orders'), publicKey, Buffer.from(h['KALSHI-ACCESS-SIGNATURE'], 'base64')), true);
+});
+
+test('ticker strikes: range bounds and thresholds are filled when Kalshi omits them', () => {
+  const ms = [
+    { ticker: 'KXDOGE-26OCT0603-B0.097', eventTicker: 'E', tickerStrike: tickerStrikeOf('KXDOGE-26OCT0603-B0.097') } as { ticker: string; eventTicker: string; strikeType?: string; floorStrike?: number; capStrike?: number; tickerStrike?: { kind: 'B' | 'T'; value: number } },
+    { ticker: 'KXDOGE-26OCT0603-B0.102', eventTicker: 'E', tickerStrike: tickerStrikeOf('KXDOGE-26OCT0603-B0.102') },
+    { ticker: 'KXDOGE-26OCT0603-B0.107', eventTicker: 'E', tickerStrike: tickerStrikeOf('KXDOGE-26OCT0603-B0.107'), floorStrike: 0.1045, capStrike: 0.1095 },
+    { ticker: 'KXBTCD-26OCT0603-T85699.99', eventTicker: 'F', tickerStrike: tickerStrikeOf('KXBTCD-26OCT0603-T85699.99') },
+    { ticker: 'KXX-1-T5', eventTicker: 'G', strikeType: 'less', tickerStrike: tickerStrikeOf('KXX-1-T5') },
+  ];
+  fillTickerStrikes(ms);
+  assert.ok(Math.abs(ms[0].floorStrike! - 0.0945) < 1e-9 && Math.abs(ms[0].capStrike! - 0.0995) < 1e-9);
+  assert.equal(ms[2].floorStrike, 0.1045, 'published bounds are kept');
+  assert.equal(ms[3].floorStrike, 85699.99);
+  assert.equal(ms[4].capStrike, 5);
+  assert.equal(tickerStrikeOf('KXBTC15M-26OCT060300-00'), undefined);
+  // A range market without strike_type is recognised from its ticker.
+  const p = parseMarket({ ticker: 'KXDOGE-26OCT0603-B0.097', open_time: '2026-10-06T06:00:00Z', close_time: '2026-10-06T07:00:00Z' });
+  assert.equal(p?.strikeType, 'between');
+});
+
+test('index feed: values parse across field-name variants; timestamps in s / ms / us / ns / ISO', () => {
+  assert.deepEqual(parseIndexRow({ index_id: 'brti', value: '65000.5', ts: 1791270000 }), { indexId: 'BRTI', value: 65000.5, ts: 1791270000000 });
+  assert.equal(parseIndexRow({ symbol: 'ETHUSD_RTI', price: 2700 })?.indexId, 'ETHUSD_RTI');
+  assert.equal(parseIndexRow({ data: { index: 'SOLUSD_RTI', index_value: 120.1 } })?.value, 120.1);
+  assert.equal(parseIndexRow({ value: 1 }), undefined, 'no id: dropped (and counted)');
+  assert.equal(tsMs(1791270000123), 1791270000123);
+  assert.equal(tsMs(1791270000123456), 1791270000123);
+  assert.equal(tsMs(1791270000123456789), 1791270000123);
+  assert.equal(tsMs('2026-10-06T07:00:00.000Z'), Date.parse('2026-10-06T07:00:00.000Z'));
+});
+
+test('strike selection: Kalshi\'s own prices pick the at-the-money strikes (no outside price)', () => {
+  const ladder = [0.95, 0.8, 0.55, 0.45, 0.2, 0.05].map((p, i) => ({ ticker: `L-T${i}`, eventTicker: 'L', floorStrike: 100 + i, yesMid: p }));
+  const kept = nearestStrikes(ladder, () => 'greater', 'KXBTCD', undefined, 2, new Set()).map((m) => m.ticker);
+  assert.deepEqual(kept.sort(), ['L-T2', 'L-T3']);
+  const ranges = [0.02, 0.1, 0.4, 0.3, 0.05].map((p, i) => ({ ticker: `R-B${i}`, eventTicker: 'R', strikeType: 'between', floorStrike: i, capStrike: i + 1, yesMid: p }));
+  assert.deepEqual(nearestStrikes(ranges, (_s, t) => (t === 'between' ? 'between' : 'greater'), 'KXBTC', undefined, 2, new Set()).map((m) => m.ticker).sort(), ['R-B2', 'R-B3']);
 });
