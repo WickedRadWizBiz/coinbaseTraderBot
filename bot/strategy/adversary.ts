@@ -11,11 +11,14 @@
 //                 by 0.5 and 1 sigma over a minute; broken if any scenario loses the edge.
 //  5. uncertainty the edge must exceed the model's own standard error (pStd), when the model reports one.
 //  6. tape        no entry into a fast move, or against strongly one-sided order-book pressure.
+//  7. ta-net      the TA network (years of historical candles; reliability-weighted, see
+//                 bot/strategy/taConviction.ts) must not call the underlying against the trade.
 //
 // An entry nothing breaks, with real TA or confluence evidence behind it (attack 1, 2 or 3 applied and
-// passed), earns a conviction multiplier in (1, maxBoost]: 1 + (maxBoost - 1) x (worst surviving edge /
-// edge), so a trade whose edge barely survives the attacks gets almost nothing extra and one whose edge is
-// untouched gets the full boost. The engine then re-sizes the entry by Kelly with the multiplier (Kelly
+// passed, or the TA network agreeing), earns a conviction multiplier in (1, maxBoost]:
+// 1 + (maxBoost - 1) x (worst surviving edge / edge) x breadth, so a trade whose edge barely survives the
+// attacks gets almost nothing extra, and the more TA / confluence signals agree with it (breadth, the
+// net share agreeing) the closer it gets to the full boost. The engine then re-sizes the entry by Kelly with the multiplier (Kelly
 // fraction and per-order caps scaled together), capped at maxBoost x the original size. A broken trade, or
 // one with no TA / confluence evidence, keeps its normal size: never smaller (that would teach the bot to
 // avoid trading), never larger.
@@ -58,6 +61,10 @@ export interface AdversaryInput {
   imbalance?: number;
   seed: number;
   maxBoost?: number;
+  /** Net share of TA / confluence signals agreeing with the trade (0..1; default 1 = not used). */
+  breadth?: number;
+  /** TA network's reliability-weighted direction for the underlying (-1..1), when it has a usable call. */
+  taDir?: number;
 }
 
 const NOISE_DRAWS = 32;
@@ -166,11 +173,22 @@ export function evaluateEntry(x: AdversaryInput): AdversaryVerdict {
     attacks.push({ name: 'tape', status: fail ? 'fail' : 'pass', detail: fail ?? 'no adverse tape' });
   }
 
+  // 7. TA network.
+  {
+    const t = x.taDir;
+    if (t === undefined || !Number.isFinite(t) || Math.abs(t) < 0.05 || sideDir === 0) attacks.push({ name: 'ta-net', status: 'na', detail: t === undefined ? 'no usable TA network call' : sideDir === 0 ? 'contract direction unclear' : 'TA network neutral' });
+    else {
+      const agrees = Math.sign(t) === Math.sign(sideDir);
+      attacks.push({ name: 'ta-net', status: agrees || Math.abs(t) < 0.2 ? 'pass' : 'fail', detail: `TA network ${t > 0 ? 'bullish' : 'bearish'} (${t.toFixed(2)}) ${agrees ? 'agrees with' : 'against'} the ${x.side.toUpperCase()} side` });
+    }
+  }
+
   const broken = edge <= 0 || attacks.some((a) => a.status === 'fail');
-  const evidence = attacks.some((a) => (a.name === 'noise' || a.name === 'leave-one' || a.name === 'confluence') && a.status === 'pass');
+  const evidence = attacks.some((a) => (a.name === 'noise' || a.name === 'leave-one' || a.name === 'confluence' || (a.name === 'ta-net' && a.detail.includes('agrees'))) && a.status === 'pass');
   const worsts = attacks.filter((a) => a.status === 'pass' && a.worstEdge !== undefined).map((a) => a.worstEdge!);
   const worstEdge = worsts.length ? Math.min(edge, ...worsts) : edge;
-  const multiplier = !broken && evidence && edge > 0 ? 1 + (maxBoost - 1) * Math.max(0, Math.min(1, worstEdge / edge)) : 1;
+  const breadth = x.breadth === undefined || !Number.isFinite(x.breadth) ? 1 : Math.max(0, Math.min(1, x.breadth));
+  const multiplier = !broken && evidence && edge > 0 ? 1 + (maxBoost - 1) * Math.max(0, Math.min(1, worstEdge / edge)) * breadth : 1;
   return { broken, evidence, multiplier: +multiplier.toFixed(3), edge, worstEdge, attacks };
 }
 

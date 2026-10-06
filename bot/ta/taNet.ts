@@ -593,6 +593,14 @@ export interface TaNetOutput {
   /** Rolling skill (1 - Brier/0.25) of the last graded calls per horizon (NaN until 24 graded). */
   skill: Partial<Record<TaNetHorizon, number>>;
   graded: Partial<Record<TaNetHorizon, number>>;
+  /** The direction heads' forecasts whether or not they validated (`up` holds only the validated ones),
+   *  and their own rolling skill on the calls graded so far: what the conviction overlay
+   *  (bot/strategy/taConviction.ts) weighs them by. */
+  raw?: Partial<Record<TaNetHorizon, number>>;
+  rawSkill?: Partial<Record<TaNetHorizon, number>>;
+  rawGraded?: Partial<Record<TaNetHorizon, number>>;
+  /** Whether each direction head is allowed to speak (validated, and not muted by a failed forward test). */
+  validated?: Partial<Record<TaNetHorizon, boolean>>;
   version: string;
   /** Grouped network: weight of each indicator family in this call (trend families, then context). */
   families?: Record<string, number>;
@@ -600,7 +608,7 @@ export interface TaNetOutput {
   forward?: { status: 'forward-testing' | 'confirmed' | 'failed'; days: number };
 }
 
-interface Call { up60: number; up240: number; vol: number; close: number; pos: number; pos4: number; width: number; families?: Record<string, number> }
+interface Call { up60: number; up240: number; raw60: number; raw240: number; vol: number; close: number; pos: number; pos4: number; width: number; families?: Record<string, number> }
 
 const ROLL = 168;
 const MIN_GRADED = 24;
@@ -641,6 +649,7 @@ export class TaNetRuntime {
   private readonly days = new Map<string, Map<number, number[]>>();
   private readonly calls = new Map<string, Map<number, Call>>();
   private readonly briers = new Map<string, Record<TaNetHorizon, number[]>>();
+  private readonly rawBriers = new Map<string, Record<TaNetHorizon, number[]>>();
   private readonly gradedTs = new Map<string, Record<TaNetHorizon, Set<number>>>();
   private readonly last = new Map<string, { lastTs: number; len: number; out: TaNetOutput }>();
   private forward?: { file: string; rec: ForwardRecord; days: number; minDays: number; mute: boolean; savedDay: number };
@@ -747,7 +756,7 @@ export class TaNetRuntime {
     if (prev && prev.lastTs === lastTs && prev.len === h1.length) return prev.out;
     // Time went backwards (a research process replaying another span): start this asset afresh, so
     // the rolling skill only ever contains calls graded before `now`, exactly as live.
-    if (prev && lastTs < prev.lastTs) for (const m of [this.feats, this.days, this.calls, this.briers, this.gradedTs]) m.delete(asset);
+    if (prev && lastTs < prev.lastTs) for (const m of [this.feats, this.days, this.calls, this.briers, this.rawBriers, this.gradedTs]) m.delete(asset);
     const feats = this.feats.get(asset) ?? new Map(); this.feats.set(asset, feats);
     const days = this.days.get(asset) ?? new Map(); this.days.set(asset, days);
     const memo = this.calls.get(asset) ?? new Map<number, Call>(); this.calls.set(asset, memo);
@@ -780,7 +789,7 @@ export class TaNetRuntime {
       const macro: number[][] = [];
       for (let k = dj - TANET_MACRO_DAYS + 1; k <= dj && k >= 0; k++) { const v = days.get(d1[k].ts); if (v) macro.push(v); }
       const fr = feats.get(ts);
-      if (trend.length < TANET_TREND_STEPS || macro.length < TANET_MACRO_DAYS || !fr) { memo.set(ts, { up60: NA, up240: NA, vol: NA, close: h1[i].c, pos: 0, pos4: 0, width: NaN }); continue; }
+      if (trend.length < TANET_TREND_STEPS || macro.length < TANET_MACRO_DAYS || !fr) { memo.set(ts, { up60: NA, up240: NA, raw60: NA, raw240: NA, vol: NA, close: h1[i].c, pos: 0, pos4: 0, width: NaN }); continue; }
       // Context vector: this hour's 15m readings and market context, then the dominance charts' TA as of
       // the last closed day (the same day the macro branch ends on).
       const ctxVec = [...fr.c, ...(ctx && dj >= 0 ? ctx.daily(asset, d1[dj].ts) : DAILY_CONTEXT_FEATURES.map(() => NA))];
@@ -788,7 +797,7 @@ export class TaNetRuntime {
       const up60 = active.includes('up_1h') && !muted ? o.up1 : NA;
       const up240 = active.includes('up_4h') && !muted ? o.up4 : NA;
       const vol = active.includes('vol_4h') ? o.vol : NA;
-      memo.set(ts, { up60, up240, vol, close: h1[i].c, pos: taNetPosition(o.up1, o.vol, fr.sig, p.strategy), pos4: taNetBarrierPosition(o.up4, o.vol, fr.sig, p.strategy), width: taNetBarrierWidth(o.vol, fr.sig), families: o.families });
+      memo.set(ts, { up60, up240, raw60: o.up1, raw240: o.up4, vol, close: h1[i].c, pos: taNetPosition(o.up1, o.vol, fr.sig, p.strategy), pos4: taNetBarrierPosition(o.up4, o.vol, fr.sig, p.strategy), width: taNetBarrierWidth(o.vol, fr.sig), families: o.families });
     }
     this.grade(asset, h1, memo);
     this.forwardStep(asset, h1, memo, now);
@@ -796,11 +805,14 @@ export class TaNetRuntime {
     for (const k of days.keys()) if (k < lastTs - 400 * DAY_MS) days.delete(k);
     const cur = memo.get(lastTs)!;
     const br = this.briers.get(asset);
-    const skillOf = (h: TaNetHorizon) => { const b = br?.[h] ?? []; return b.length >= MIN_GRADED ? 1 - b.reduce((a, x) => a + x, 0) / b.length / 0.25 : NA; };
+    const rb = this.rawBriers.get(asset);
+    const skillOf = (h: TaNetHorizon, from = br) => { const b = from?.[h] ?? []; return b.length >= MIN_GRADED ? 1 - b.reduce((a, x) => a + x, 0) / b.length / 0.25 : NA; };
     const fs_ = this.forwardStatus(now);
     const out: TaNetOutput = {
       barTs: lastTs, up: { 60: cur.up60, 240: cur.up240 }, vol4h: cur.vol,
       skill: { 60: skillOf(60), 240: skillOf(240) }, graded: { 60: br?.[60].length ?? 0, 240: br?.[240].length ?? 0 },
+      raw: { 60: cur.raw60, 240: cur.raw240 }, rawSkill: { 60: skillOf(60, rb), 240: skillOf(240, rb) }, rawGraded: { 60: rb?.[60].length ?? 0, 240: rb?.[240].length ?? 0 },
+      validated: { 60: this.net.active(true).includes('up_1h') && !muted, 240: this.net.active(true).includes('up_4h') && !muted },
       version: this.net.version, families: cur.families, forward: fs_ ? { status: fs_.status, days: fs_.days } : undefined,
     };
     this.last.set(asset, { lastTs, len: h1.length, out });
@@ -809,8 +821,9 @@ export class TaNetRuntime {
 
   private grade(asset: string, h1: Candle[], memo: Map<number, Call>): void {
     const byTs = new Map(h1.map((c) => [c.ts, c.c]));
-    let br = this.briers.get(asset), done = this.gradedTs.get(asset);
+    let br = this.briers.get(asset), rb = this.rawBriers.get(asset), done = this.gradedTs.get(asset);
     if (!br) { br = { 60: [], 240: [] }; this.briers.set(asset, br); }
+    if (!rb) { rb = { 60: [], 240: [] }; this.rawBriers.set(asset, rb); }
     if (!done) { done = { 60: new Set(), 240: new Set() }; this.gradedTs.set(asset, done); }
     for (const [t, call] of memo) {
       for (const h of TANET_HORIZONS) {
@@ -818,9 +831,12 @@ export class TaNetRuntime {
         const later = byTs.get(t + (h / 60) * H);
         if (later === undefined) continue;
         done[h].add(t);
+        const y = later > call.close ? 1 : 0;
+        const r = h === 60 ? call.raw60 : call.raw240;
+        if (Number.isFinite(r)) { rb[h].push((r - y) ** 2); if (rb[h].length > ROLL) rb[h].shift(); }
         const p = h === 60 ? call.up60 : call.up240;
         if (!Number.isFinite(p)) continue;
-        br[h].push((p - (later > call.close ? 1 : 0)) ** 2);
+        br[h].push((p - y) ** 2);
         if (br[h].length > ROLL) br[h].shift();
       }
     }

@@ -67,10 +67,11 @@ export const DEFAULT_LANES: LaneBookParams = {
 
 export interface Candidate { sig: SetupSignal; score: number; queuedAt: number; expires: number }
 
-/** What a re-check returns: the current price and the fresh score (undefined = drop the candidate). */
-export type Recheck = (c: Candidate) => { px: number; score: number } | undefined;
+/** What a re-check returns: the current price and the fresh score (undefined = drop the candidate), and
+ *  optionally a conviction size multiplier (TA / confluence, altcoin risk-on rule; >= 1) and a priority. */
+export type Recheck = (c: Candidate) => { px: number; score: number; mult?: number; priority?: number; why?: string } | undefined;
 
-export interface Entry { cand: Candidate; px: number; score: number; notional: number }
+export interface Entry { cand: Candidate; px: number; score: number; notional: number; mult: number; why?: string }
 
 export class LaneBook {
   readonly queues: Record<Lane, Candidate[]> = { fast: [], slow: [] };
@@ -108,7 +109,7 @@ export class LaneBook {
    * Choose entries now: slow lane first, then fast; per lane best score first; every candidate
    * re-checked. Chosen candidates leave the queue (the caller opens the trades and calls add()).
    */
-  select(now: number, equity: number, recheck: Recheck): Entry[] {
+  select(now: number, equity: number, recheck: Recheck, priority?: (c: Candidate) => number): Entry[] {
     this.expire(now);
     const out: Entry[] = [];
     if (!(equity > 0)) return out;
@@ -118,7 +119,9 @@ export class LaneBook {
       const L = this.params[lane];
       let open = [...this.positions.values()].filter((t) => t.lane === lane).length;
       const keep: Candidate[] = [];
-      for (const c of this.queues[lane]) {
+      // Higher selection priority first (altcoin risk-on, TA conviction), then the best score.
+      const queue = priority ? [...this.queues[lane]].map((c) => ({ c, p: priority(c) })).sort((a, b) => b.p - a.p || b.c.score - a.c.score).map((x) => x.c) : this.queues[lane];
+      for (const c of queue) {
         if (open >= L.maxPositions) { keep.push(c); continue; }
         if (busy.has(c.sig.asset)) { keep.push(c); continue; } // waits for the asset to free up
         const r = recheck(c);
@@ -133,8 +136,9 @@ export class LaneBook {
         const ref = L.minScoreByKind ? (1 + Math.max(0, th)) / 2 : L.refScore;
         const scale = ref > 0 ? Math.max(0.5, Math.min(1.5, r.score / ref)) : 1;
         const riskDollars = (L.riskUsd && L.riskUsd > 0 ? L.riskUsd : equity * L.riskFrac) * scale;
-        let notional = riskDollars / riskPct;
-        notional = Math.min(notional, equity * this.params.maxAssetLeverage, Math.max(0, equity * this.params.maxLeverage - used));
+        const mult = r.mult !== undefined && Number.isFinite(r.mult) && r.mult > 1 ? r.mult : 1;
+        let notional = (riskDollars * mult) / riskPct;
+        notional = Math.min(notional, equity * this.params.maxAssetLeverage * mult, Math.max(0, equity * this.params.maxLeverage - used));
         if (!(notional > 0)) { keep.push(c); continue; }
         // Worth it? The first target (the slow lane has none: 2R, its typical first leg) must pay at least
         // minTargetUsd after the round-trip fee at this size.
@@ -144,7 +148,7 @@ export class LaneBook {
           const payoff = notional * (Math.abs(t1 - r.px) / r.px - (this.params.roundTripFee ?? 0));
           if (payoff < minUsd) { this.skip(c, `first target pays $${payoff.toFixed(2)} after fees at $${notional.toFixed(0)} notional (minimum $${minUsd})`, now); continue; }
         }
-        out.push({ cand: c, px: r.px, score: r.score, notional });
+        out.push({ cand: c, px: r.px, score: r.score, notional, mult, why: r.why });
         used += notional; open++; busy.add(s.asset);
       }
       this.queues[lane] = keep;

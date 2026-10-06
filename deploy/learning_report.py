@@ -29,6 +29,13 @@ print('  validation', short(m.get('validation'), 400))
 g = s.get('guards') or {}
 mh = g.get('modelHealth') or g.get('health')
 if mh: print('  live pricing vs market on settled windows:', short(mh, 300))
+th = g.get('taHealth')
+print('  TA network tilt vs math alone on settled windows (advantage > 0 = TA helps):', short(th, 300) if th else 'no settled windows yet')
+mk = get('/markets') or []
+mk = mk if isinstance(mk, list) else []
+for x in mk[:12]:
+    c = x.get('conviction') or {}
+    if c: print(f"  {x.get('ticker')}: TA shift {x.get('taShift')}, taDir {c.get('taDir')}, breadth up/down {c.get('breadthUp')}/{c.get('breadthDown')}, drift {c.get('drift')}, alt {(c.get('alt') or {}).get('why')}")
 print('  tree models', short(s.get('treeModels'), 300))
 print('  snn', short(s.get('snn'), 400))
 

@@ -70,10 +70,16 @@ import { activeTaNet } from './ta/taNet';
 import { applyFillModel, fillInputs, isMakerEntry, type FillModel } from './tca/fillModel';
 import { FillLog } from './tca/fillLog';
 import { recordLatency } from './util/latency';
+import { altcoinRiskOn, confluenceBreadth, orientedSignals, selectionPriority, taDrift, taNetDirection, viewOf, type TaNetView } from './strategy/taConviction';
 
 const log = logger('engine');
 
 export interface MarketStatus {
+  /** TA conviction overlay (bot/strategy/taConviction.ts): probability before the TA network's drift,
+   *  the shift it applied, signal breadth, the altcoin risk-on rule, and the selection priority. */
+  pBeforeTa?: number;
+  taShift?: number;
+  conviction?: { taDir: number | null; drift: string[]; breadthUp: number; breadthDown: number; agree: string[]; oppose: string[]; alt: { active: boolean; why: string }; priority: number };
   /** Last adversarial verdict on an entry here (multiplier > 1 = it could not be broken). */
   adversary?: { side: string; multiplier: number; broken: boolean; evidence: boolean; failed: string[]; ts: number };
   ticker: string;
@@ -155,6 +161,8 @@ export interface EngineDeps {
   equityGuard?: EquityGuard;
   /** Rolling log-loss advantage vs the calibrated market. */
   modelHealth?: ModelHealth;
+  /** Scores the TA tilt: P with the TA network's drift vs the same P without it (advantage > 0 = it helps). */
+  taHealth?: ModelHealth;
   /** Scheduled macro releases (CPI, FOMC, NFP, PCE) for calendar features. */
   calendar?: MacroEvent[];
   /** Perp delta hedge of the binary book (stage 2). */
@@ -348,11 +356,12 @@ export class Engine {
       if ((e.result === 'yes' || e.result === 'no') && /settle|determin/i.test(e.event)) {
         oms.settle(e.ticker, e.result);
         this.d.modelHealth?.onResult(e.ticker, e.result);
+        this.d.taHealth?.onResult(e.ticker, e.result);
         this.snnSettle(e.ticker, e.result);
       }
     });
     // Official results of every scanned market (traded or not): the SNN's settlement labels.
-    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => this.snnSettle(e.ticker, e.result));
+    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => { this.d.taHealth?.onResult(e.ticker, e.result); this.snnSettle(e.ticker, e.result); });
     oms.on('order_error', (n: number, msg: string) => {
       if (n >= cfg.risk.maxConsecutiveOrderErrors) void kill.engage(`${n} consecutive order errors (last: ${msg})`, 'oms');
     });
@@ -572,6 +581,8 @@ export class Engine {
       clock: this.d.clock?.status(Date.now()) ?? null,
       equity: eq ?? null, equityGuard: this.d.equityGuard?.status(eq, now, t.ddScaleAt) ?? null,
       modelHealth: this.d.modelHealth?.status() ?? null,
+      // Does the TA network's drift improve the probabilities? (log loss with vs without it, per window)
+      taHealth: this.d.taHealth?.status() ?? null,
       entryGuards: this.entryGuards(now),
     };
   }
@@ -700,7 +711,11 @@ export class Engine {
       }
     }
     await this.snnTick();
-    await Promise.all(this.d.md.activeMarkets(this.now()).filter((m) => m.kind !== 'match').map((m) => this.evaluate(m)));
+    // Selection priority (altcoin risk-on first, then TA conviction, from each market's last evaluation):
+    // the first evaluated get the shared risk budget and the training-trade slots first.
+    const pri = (t: string) => this.status.get(t)?.conviction?.priority ?? 0;
+    const ms = this.d.md.activeMarkets(this.now()).filter((m) => m.kind !== 'match').sort((a, b) => pri(b.ticker) - pri(a.ticker));
+    await Promise.all(ms.map((m) => this.evaluate(m)));
     this.prune();
     // Stage 2: offset the binary book's net delta with perps (reduce-only when new risk is halted).
     // Perps: the hedge is reduce-only while binary risk is halted; directional trading has its own guards.
@@ -1208,11 +1223,19 @@ export class Engine {
         this.cadence.forget(t);
         this.lastPosition.delete(t);
         this.d.modelHealth?.forget(t);
+        this.d.taHealth?.forget(t);
         this.lastDecisionAudit.delete(t);
         this.trainTicker.delete(t);
       }
     }
     for (const [k, ts] of this.lastRejectAudit) if (ts < cutoff) this.lastRejectAudit.delete(k);
+  }
+
+  /** The TA network's direction readings for an asset (raw heads with their validation and graded skill). */
+  private taView(asset: string, now: number): TaNetView | undefined {
+    let o;
+    try { o = activeTaNet()?.outputFor(asset, this.d.md.features.candles.get(asset), now); } catch { return undefined; }
+    return viewOf(o);
   }
 
   private async evaluate(m: ActiveMarket): Promise<void> {
@@ -1283,7 +1306,7 @@ export class Engine {
     const pMarket = model.marketProbability(mid);
     // SNN: feed this market's encodings to the next 1 s step, then blend (alpha = 0 unless earned).
     this.snnObserve(m, { mid, spread: ask.price - bid.price, imbalance: features.imbalance, dAtm: fv.d2, tauFrac: tauSec / Math.max(1, (m.closeTime - m.openTime) / 1000) }, now);
-    const pYes = this.snnBlend(m, st, pred.p, tauSec > R.noEntryBeforeCloseSec, now);
+    const pBase = this.snnBlend(m, st, pred.p, tauSec > R.noEntryBeforeCloseSec, now);
     const why = explain(model, features, fv.pYes);
     st.modelShift = why.shiftFromFairValue;
     st.drivers = why.drivers;
@@ -1294,6 +1317,33 @@ export class Engine {
     const up = priceContract(terms, { spot: spot.value + bump, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
     const dn = priceContract(terms, { spot: spot.value - bump, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
     const dPdS = up && dn ? (up.pYes - dn.pYes) / (2 * bump) : undefined;
+    // +1 when YES gains as the underlying rises, -1 when it gains as it falls.
+    const direction = dPdS === undefined || !Number.isFinite(dPdS) || Math.abs(dPdS) < 1e-12 ? 0 : Math.sign(dPdS);
+    // TA conviction overlay: the TA network's direction forecasts add a drift to the fair value (unless
+    // the live model already reads them), and TA / confluence breadth + the altcoin rule feed sizing.
+    const S0 = cfg.strategy;
+    const liveMode = cfg.mode === 'live';
+    const taView = this.taView(m.asset, now);
+    const modelReadsTa = model.params.kind !== 'identity' && model.params.features.some((f) => f.startsWith('tanet_up'));
+    let pYes = pBase, taShift = 0;
+    const drift = S0.taPricing && S0.taPricingWeight > 0 && !modelReadsTa ? taDrift(taView, tauSec, { maxZ: S0.taPricingMaxZ, live: liveMode }) : undefined;
+    if (drift && Math.abs(drift.k) > 1e-9) {
+      const mv = S0.taPricingWeight * drift.k * sigmaPricing * Math.sqrt(tauSec);
+      const tilted = priceContract(terms, { spot: spot.value * Math.exp(mv), sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
+      if (tilted) {
+        taShift = Math.max(-S0.taPricingMaxShift, Math.min(S0.taPricingMaxShift, tilted.pYes - fv.pYes));
+        pYes = Math.max(0.001, Math.min(0.999, pBase + taShift));
+      }
+    }
+    const signals = orientedSignals(features, taView, liveMode);
+    const taDir = taNetDirection(taView, liveMode);
+    const shortContract = (m.closeTime - m.openTime) / 60_000 <= 20;
+    const rsiTrade = [shortContract ? features.ta_rsi_15m : features.ta_rsi_1h, features.rsi_14_1m].find((x) => x !== undefined && Number.isFinite(x));
+    const alt = altcoinRiskOn(m.asset, features.usdtd_ret_15m_z, rsiTrade, S0);
+    const bUp = confluenceBreadth(signals, 1), bDn = confluenceBreadth(signals, -1);
+    st.pBeforeTa = pBase;
+    st.taShift = taShift;
+    st.conviction = { taDir: taDir ?? null, drift: drift?.parts ?? [], breadthUp: +bUp.breadth.toFixed(3), breadthDown: +bDn.breadth.toFixed(3), agree: bUp.agree, oppose: bUp.oppose, alt, priority: selectionPriority(alt.active, taDir, bUp.breadth, bDn.breadth) };
     Object.assign(st, { kind: m.kind, strike: terms.strike, cap: terms.cap, strikeSource: m.strikeSource, spot: spot.value, sigma: vol.sigmaPerSqrtSec, sigmaPricing, fairValue: fv.pYes, pYes, pMarket, pStd: pred.std, bestBid: bid.price, bestAsk: ask.price, dPdS, blocked: undefined });
 
     const ret = idx!.trailingLogReturn(now, cfg.strategy.fastMoveWindowSec * 1000);
@@ -1325,6 +1375,7 @@ export class Engine {
     if (reason) st.lastEval = { reason, ts: now };
     st.entryWindow = entryWindowOpen;
     if (reason && entryWindowOpen) this.d.modelHealth?.record(m.ticker, pred.p, pMarket, m.closeTime);
+    if (reason && entryWindowOpen && taShift !== 0) this.d.taHealth?.record(m.ticker, pYes, pBase, m.closeTime);
     const pos = oms.positions.get(m.ticker);
     const entrySidePrice = pos && pos.yes > 0 ? -pos.netCash / pos.yes : pos && pos.yes < 0 ? 1 - pos.netCash / -pos.yes : undefined;
     const tier = this.tier();
@@ -1395,37 +1446,48 @@ export class Engine {
     // Quote, cross or skip each maker entry by expected value (fill model, once validated).
     const fillCtx = { q: st.q ?? pYes, book, tick: m.tickSize, tauSec, sigma: vol.sigmaPerSqrtSec, features, minEv: S.fillMinEv, takerMinEdge: strat.takerBuffer + strat.minEdge };
     applyFillModel(plan, this.d.fillModel, fillCtx);
-    // Adversarial evaluator: try to break each entry; one that survives with TA / confluence evidence is
-    // re-sized by Kelly with its conviction multiplier (at most ADVERSARIAL_MAX_BOOST x the original size).
-    if (S.adversarialBoost) {
+    // Conviction sizing. The adversarial evaluator tries to break each entry; one that survives with TA /
+    // confluence evidence earns up to ADVERSARIAL_MAX_BOOST x, scaled by how much edge survived and how many
+    // TA / confluence signals agree (breadth). The altcoin risk-on rule (USDT.D falling, RSI > 50) gives
+    // altcoin entries long the underlying ALT_RISKON_BOOST x. Combined, at most CONVICTION_MAX_TOTAL x the
+    // normal size; the entry is re-sized by Kelly with the multiplier (Kelly fraction and per-order caps).
+    {
       const sigma1m = sigmaPricing * Math.sqrt(60);
       const taFeatures = Object.keys(features).filter((k) => ADVERSARY_GROUPS.has(FEATURES[k]?.group ?? (k.startsWith('ta_') ? 'ta' : '')));
-      const direction = dPdS === undefined || !Number.isFinite(dPdS) || Math.abs(dPdS) < 1e-12 ? 0 : Math.sign(dPdS);
       for (let i = 0; i < plan.place.length; i++) {
         const p = plan.place[i];
         if (p.purpose === 'exit' || p.reduceOnly || (p.side === 'ask' && st.position > 0) || (p.side === 'bid' && st.position < 0)) continue;
         const side = p.side === 'bid' ? 'yes' : 'no';
+        const sideDir = (side === 'yes' ? 1 : -1) * direction;
         const cost = side === 'yes' ? p.price : 1 - p.price;
-        const verdict: AdversaryVerdict = evaluateEntry({
-          side, cost, fee: orderFee(1, cost, !p.postOnly, md.feesFor(m.ticker)), q: st.q ?? pYes,
-          features, predict: (f) => model.predictDetailed(f, fv.pYes).p, taFeatures, direction,
-          fairValue: fv.pYes,
-          stressFairValue: (vm, mv) => priceContract(terms, { spot: spot.value * Math.exp(mv * sigma1m), sigmaPerSqrtSec: sigmaPricing * vm, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu })?.pYes,
-          pStd: pred.std, fastMove, imbalance: features.imbalance, seed: seedOf(`${m.ticker}:${Math.floor(now / 60_000)}:${p.side}`), maxBoost: S.adversarialMaxBoost,
-        });
-        st.adversary = { side, multiplier: verdict.multiplier, broken: verdict.broken, evidence: verdict.evidence, failed: verdict.attacks.filter((a) => a.status === 'fail').map((a) => `${a.name}: ${a.detail}`), ts: now };
-        if (verdict.multiplier <= 1) {
-          plan.notes.push(`adversary: ${verdict.broken ? `broken (${st.adversary.failed[0] ?? 'no edge'})` : 'held, but no TA/confluence evidence to back a boost'}; normal size`);
-          continue;
+        const breadth = confluenceBreadth(signals, sideDir).breadth;
+        let advMult = 1;
+        if (S.adversarialBoost) {
+          const verdict: AdversaryVerdict = evaluateEntry({
+            side, cost, fee: orderFee(1, cost, !p.postOnly, md.feesFor(m.ticker)), q: st.q ?? pYes,
+            features, predict: (f) => model.predictDetailed(f, fv.pYes).p, taFeatures, direction,
+            fairValue: fv.pYes,
+            stressFairValue: (vm, mv) => priceContract(terms, { spot: spot.value * Math.exp(mv * sigma1m), sigmaPerSqrtSec: sigmaPricing * vm, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu })?.pYes,
+            pStd: pred.std, fastMove, imbalance: features.imbalance, seed: seedOf(`${m.ticker}:${Math.floor(now / 60_000)}:${p.side}`), maxBoost: S.adversarialMaxBoost,
+            breadth, taDir,
+          });
+          st.adversary = { side, multiplier: verdict.multiplier, broken: verdict.broken, evidence: verdict.evidence, failed: verdict.attacks.filter((a) => a.status === 'fail').map((a) => `${a.name}: ${a.detail}`), ts: now };
+          advMult = verdict.multiplier;
+          plan.notes.push(advMult > 1
+            ? `adversary could not break the ${side.toUpperCase()} entry: x${advMult.toFixed(2)} (breadth ${breadth.toFixed(2)})`
+            : `adversary: ${verdict.broken ? `broken (${st.adversary.failed[0] ?? 'no edge'})` : 'held, but no TA/confluence evidence to back a boost'}`);
         }
-        const mult = verdict.multiplier;
+        const altMult = alt.active && sideDir > 0 ? S.altBoost : 1;
+        if (altMult > 1) plan.notes.push(`${alt.why}: x${altMult}`);
+        const mult = Math.min(S.convictionMaxTotal, advMult * altMult);
+        if (mult <= 1) continue;
         const boosted = decide({ ...view, maxOrderRiskUsd: view.maxOrderRiskUsd * mult, maxContracts: floorCount(view.maxContracts * mult) }, { ...strat, kellyFraction: strat.kellyFraction * mult }, { exits: false, blockReductions: huntMode, entries: true });
         const match = boosted.place.find((b) => b.side === p.side && b.purpose === p.purpose && !b.reduceOnly && Math.abs(b.price - p.price) < 1e-9);
-        const count = match ? floorCount(Math.min(match.count, p.count * S.adversarialMaxBoost)) : p.count;
+        const count = match ? floorCount(Math.min(match.count, p.count * mult)) : p.count;
         if (count > p.count) {
-          plan.place[i] = { ...p, count, boost: count / p.count, why: `${p.why} | adversary held x${mult.toFixed(2)}: ${p.count} -> ${count}` };
-          plan.notes.push(`adversary could not break the ${side.toUpperCase()} entry: Kelly x${mult.toFixed(2)}, ${p.count} -> ${count} contracts`);
-        } else plan.notes.push(`adversary held (x${mult.toFixed(2)}) but Kelly adds nothing at this price`);
+          plan.place[i] = { ...p, count, boost: count / p.count, why: `${p.why} | conviction x${mult.toFixed(2)}: ${p.count} -> ${count}` };
+          plan.notes.push(`conviction x${mult.toFixed(2)} on the ${side.toUpperCase()} entry: ${p.count} -> ${count} contracts`);
+        } else plan.notes.push(`conviction x${mult.toFixed(2)} but Kelly adds nothing at this price`);
       }
     }
     // Paper exploration: when nothing qualifies, sometimes enter the best borderline opportunity (still

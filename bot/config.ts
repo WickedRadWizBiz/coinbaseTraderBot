@@ -126,6 +126,20 @@ export interface StrategyConfig {
    *  evidence, are re-sized by Kelly with a conviction multiplier up to adversarialMaxBoost (<= 2). */
   adversarialBoost: boolean;
   adversarialMaxBoost: number;
+  /** TA conviction overlay (bot/strategy/taConviction.ts): the TA network's direction forecasts add a
+   *  drift to the mathematical fair value (weight x reliability; at most taPricingMaxShift). */
+  taPricing: boolean;
+  taPricingWeight: number;
+  taPricingMaxShift: number;
+  taPricingMaxZ: number;
+  /** Altcoin risk-on rule: altcoins long the underlying while USDT.D falls and RSI > altRsiMin get
+   *  selection priority and altBoost x their Kelly size. */
+  altBoost: number;
+  altUsdtdMaxZ: number;
+  altRsiMin: number;
+  nonAlts: string[];
+  /** Largest combined size multiplier (adversary / confluence x altcoin rule) on any entry. */
+  convictionMaxTotal: number;
   modelHealthMinWindows: number;
   huntTargetMargin: number;
   huntMinConfluence: number;
@@ -736,6 +750,15 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     paperTrainTrades: num(env, 'PAPER_TRAINING_TRADES_PER_HOUR', 12, 0, 120),
     adversarialBoost: bool(env, 'ADVERSARIAL_BOOST', true),
     adversarialMaxBoost: num(env, 'ADVERSARIAL_MAX_BOOST', 2, 1, 2),
+    taPricing: bool(env, 'TA_PRICING', true),
+    taPricingWeight: num(env, 'TA_PRICING_WEIGHT', 1, 0, 2),
+    taPricingMaxShift: num(env, 'TA_PRICING_MAX_SHIFT', 0.06, 0, 0.2),
+    taPricingMaxZ: num(env, 'TA_PRICING_MAX_Z', 0.5, 0.05, 1.5),
+    altBoost: num(env, 'ALT_RISKON_BOOST', 2.5, 1, 3),
+    altUsdtdMaxZ: num(env, 'ALT_USDTD_MAX_Z', 0, -5, 5),
+    altRsiMin: num(env, 'ALT_RSI_MIN', 50, 0, 100),
+    nonAlts: (env.NON_ALTCOINS ?? 'BTC').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
+    convictionMaxTotal: num(env, 'CONVICTION_MAX_TOTAL', 2.5, 1, 5),
     modelHealthMinWindows: num(env, 'MODEL_HEALTH_MIN_WINDOWS', 200, 20, 100000),
     huntTargetMargin: num(env, 'HUNT_TARGET_MARGIN', 0.02, 0, 0.5),
     huntMinConfluence: num(env, 'HUNT_MIN_CONFLUENCE', 2, 1, 7),
