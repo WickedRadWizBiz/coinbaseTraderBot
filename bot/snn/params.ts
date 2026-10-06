@@ -56,6 +56,11 @@ export interface SnnParams {
   feedbackGain: number;
   /** L2/3. */
   tauE: number; tauA: number; betaA: number; thetaE: number; tauI: number; thetaI: number;
+  /** Intrinsic threshold homeostasis for near-silent columns (optional: absent = off, and absent keys
+   *  keep the version hash, so networks without it keep their checkpoints). Every 60 steps a column whose
+   *  layer-2 E rate is below ipLow lowers its E thresholds by ipStep (down to ipMin x thetaE); above
+   *  ipHigh it raises them back toward thetaE. */
+  ipLow?: number; ipHigh?: number; ipStep?: number; ipMin?: number;
   pFF: number; wFF: number; pRec: number; wEE: number; wEI: number; wIE: number; wII: number; wLat: number;
   /** Rate filters (s). */
   tauRateL0: number; tauRateL1: number; tauRateL23: number;
@@ -148,6 +153,9 @@ export function domainParams(domain: SnnDomain, base: SnnParams = DEFAULT_SNN): 
     return {
       ...base, tauL0: 4, branchTaus: [30, 30, 120, 120, 600, 600], tauL1: 15, tauE: 30, tauA: 1800, tauI: 8,
       tauRateL0: 15, tauRateL1: 120, tauRateL23: 600, surpriseTau: 300, dirEverySec: 300, maxTennisColumns: 0,
+      // Slow perp inputs drive layer 1 ~6x less than crypto's, and at the shared threshold layer 2 never
+      // fired (E and I rates exactly 0 live): let silent columns lower their thresholds until they speak.
+      ipLow: 1e-4, ipHigh: 5e-3, ipStep: 0.02, ipMin: 0.15,
     };
   }
   if (domain === 'tennis') {

@@ -19,7 +19,7 @@ import { SnnHealth } from '../bot/snn/health';
 import { SnnHost } from '../bot/snn/host';
 import { createSnnFleet, snnParams } from '../bot/snn';
 import { SnnNetwork, type ColumnInput, type ContractQuery } from '../bot/snn/network';
-import { DEFAULT_SNN, stageFlags, versionHash, withFlags, type SnnParams } from '../bot/snn/params';
+import { DEFAULT_SNN, domainParams, stageFlags, versionHash, withFlags, type SnnParams } from '../bot/snn/params';
 import { CRYPTO_POP, cryptoValues, l0Width, tennisValues } from '../bot/snn/inputs';
 import { exceedLabel, Readout } from '../bot/snn/readout';
 import { Xoshiro128 } from '../bot/snn/rng';
@@ -499,4 +499,40 @@ test('tennis column: P(A wins) readout trained by the match result; removed when
   assert.deepEqual(net.settle('EV1-A', 'yes', T0 + 200e3), { column: 'TEN:EV1', used: 1 });
   net.removeColumn('TEN:EV1');
   assert.equal(net.columns.has('TEN:EV1'), false);
+});
+
+test('health: the E/I reference follows a session-scale shift (no all-night freeze), firing-rate collapse still freezes', () => {
+  const h = new SnnHealth({ calibSec: 10, sustainSec: 300, recoverSec: 600, thetaDriftPerHour: 0.5, eiAdaptHours: 2, eiBand: 2 });
+  const base = { rateL0: 0.1, rateL1: 0.1, rateE: 0.02, rateI: 0.1, ei: 8, theta: 0.05, fSat: 0, divergence: 0, G: [0.1], surprise: 1, calN: 0 };
+  h.observe(T0, base); h.observe(T0 + 11_000, base);
+  // Night: E/I drifts gradually from 8 to 2.6 over 10 hours, as the live crypto network did.
+  let t = 12;
+  for (; t <= 12 + 10 * 3600; t += 60) h.observe(T0 + t * 1000, { ...base, ei: 8 * Math.pow(2.6 / 8, (t - 12) / (10 * 3600)) });
+  // An abrupt halving within minutes is still a breach.
+  const hb = new SnnHealth({ calibSec: 10, sustainSec: 300, recoverSec: 600, thetaDriftPerHour: 0.5, eiAdaptHours: 2, eiBand: 2 });
+  hb.observe(T0, base); hb.observe(T0 + 11_000, base);
+  for (let k = 12; k <= 12 + 400; k++) hb.observe(T0 + k * 1000, { ...base, ei: 3 });
+  assert.equal(hb.freezeLearning, true, 'sudden E/I shift freezes');
+  assert.equal(h.freezeLearning, false, `no freeze on a session drift: ${JSON.stringify(h.breaches)}`);
+  assert.ok(h.ref!.ei < 8, 'the reference followed');
+  // A dead layer is still caught.
+  for (let k = 0; k <= 400; k++, t++) h.observe(T0 + t * 1000, { ...base, ei: 2.6, rateE: 0.001 });
+  assert.equal(h.freezeLearning, true);
+});
+
+test('threshold homeostasis: a silent perps column lowers its E thresholds; crypto keeps its params and checkpoint hash', () => {
+  const p = { ...domainParams('perps', small()), ipStep: 0.05 };
+  assert.ok(p.ipLow! > 0);
+  assert.ok(!('ipLow' in DEFAULT_SNN) && !('ipLow' in domainParams('crypto')), 'crypto params (and so its version hash) unchanged');
+  const net = new SnnNetwork(p);
+  // A flat tape: almost no input change, so layer 2 stays silent.
+  const flat = KEYS.map((key) => ({ key, asset: key.split('-')[0], spot: 60000, mid: 0.5, spread: 0.02, imbalance: 0, dAtm: 0, tauFrac: 0.5, rsi: 50, retZ: 0 }));
+  for (let s = 0; s < 1800; s++) net.step(T0 + s * 1000, flat);
+  const c = net.columns.get('BTC-15m')!;
+  assert.ok(c.theta0E.every((x) => x < p.thetaE * 0.9), `thresholds lowered: ${c.theta0E[0]}`);
+  assert.ok(c.theta0E.every((x) => x >= p.thetaE * p.ipMin! - 1e-12), 'never below the floor');
+  // Thresholds survive a checkpoint.
+  const r = new SnnNetwork(p);
+  r.restore(JSON.parse(JSON.stringify(net.serialize())));
+  assert.equal(r.columns.get('BTC-15m')!.theta0E[0], c.theta0E[0]);
 });
