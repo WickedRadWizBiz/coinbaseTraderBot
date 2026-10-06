@@ -93,6 +93,7 @@ export class Column {
   // ---- governor and health accumulators
   G = 0;
   rateL0 = 0; rateL1 = 0; rateE = 0; rateI = 0; exc = 0; inh = 0; fSat = 0;
+  private ipCount = 0;
   // ---- deferred: Izhikevich CH burst detectors
   readonly chV: Float64Array; readonly chU: Float64Array; chBurst = 0;
   // ---- cheap proxies of the deferred mechanisms
@@ -210,6 +211,8 @@ export class Column {
       ffW: this.ffW, recW: this.recW, recWs: this.recWs, preRE: this.preRE, postO1E: this.postO1E, postO2E: this.postO2E, rhoE: this.rhoE,
       U1: this.U1, U0: this.U0, z2: this.z2, z1: this.z1, xhat1: this.xhat1, err0: this.err0, chV: this.chV, chU: this.chU,
       prevSpikes: this.prevSpikes,
+      // Per-neuron E thresholds (moved only by threshold homeostasis; old checkpoints restore the default).
+      theta0E: this.theta0E,
     };
     return a;
   }
@@ -386,6 +389,12 @@ export class Column {
     this.rateL0 = ewma(this.rateL0, spk0 / nL0, 300); this.rateL1 = ewma(this.rateL1, spk1 / nL1, 300);
     this.rateE = ewma(this.rateE, spkE / nE, 300); this.rateI = ewma(this.rateI, spkI / (N - nE), 300);
     this.exc = ewma(this.exc, excSum / nE, 300); this.inh = ewma(this.inh, inhSum / nE, 300);
+    // ---- intrinsic threshold homeostasis (silent columns; perps): see SnnParams.ipLow
+    if (p.ipLow && ++this.ipCount >= 60) {
+      this.ipCount = 0;
+      const f = this.rateE < p.ipLow ? 1 - (p.ipStep ?? 0.02) : p.ipHigh && this.rateE > p.ipHigh ? 1 + (p.ipStep ?? 0.02) : 1;
+      if (f !== 1) { const lo = (p.ipMin ?? 0.15) * p.thetaE; for (let k = 0; k < nE; k++) this.theta0E[k] = Math.max(lo, Math.min(p.thetaE, this.theta0E[k] * f)); }
+    }
     // ---- 6. traces and plasticity (S6): minimal triplet x NMDA gate x governor, two-speed weights
     const learn = F.plasticity && !ctx.frozen;
     const T = p.triplet;

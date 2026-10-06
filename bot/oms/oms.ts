@@ -72,6 +72,7 @@ export class Oms extends EventEmitter {
   lastFillTs = 0;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private saveTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly o: OmsOptions) {
     super();
@@ -144,7 +145,7 @@ export class Oms extends EventEmitter {
       fairValue: intent.fairValue,
     };
     this.orders.set(rec.clientOrderId, rec);
-    this.save(); // persisted before send
+    this.saveNow(); // persisted before send (write-ahead: the client order id is on disk before the exchange sees it)
     this.o.audit.write('order_new', rec);
     this.orderTimes.push(now);
     await this.send(rec);
@@ -375,7 +376,21 @@ export class Oms extends EventEmitter {
     if (this.seenTrades.length > 20_000) this.seenTradeSet.delete(this.seenTrades.shift()!);
   }
 
+  /** Persist soon: transitions within ~200 ms share one write (quotes churn: one synchronous write and
+   *  fsync of the whole state per transition held the main thread, and every message waited behind it).
+   *  Positions, seen trade ids and lastFillTs are written together, so a fill lost to a crash inside the
+   *  window is simply fetched and applied again on restart. Order submission writes immediately. */
   save(): void {
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => { this.saveTimer = null; this.saveNow(); }, 200);
+    this.saveTimer.unref?.();
+  }
+
+  /** Write any pending state now (shutdown). */
+  flush(): void { if (this.saveTimer) this.saveNow(); }
+
+  saveNow(): void {
+    if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
     // Keep live orders plus the most recent terminal ones.
     const orders = [...this.orders.values()];
     const terminal = orders.filter((o) => !isLive(o)).sort((a, b) => b.updatedTs - a.updatedTs);
@@ -391,6 +406,6 @@ export class Oms extends EventEmitter {
       positions: this.positions.all(),
       lastFillTs: this.lastFillTs,
     };
-    writeJsonAtomic(this.o.statePath, st);
+    writeJsonAtomic(this.o.statePath, st, { compact: true });
   }
 }

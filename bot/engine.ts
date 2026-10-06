@@ -1245,7 +1245,7 @@ export class Engine {
       const r = this.snnReplies.get(d as SnnDomain);
       units[d] = {
         stage: this.d.cfg.snn.domains[d as SnnDomain].stage,
-        host: { mode: u!.host.mode, version: u!.host.version, p99Ms: +u!.host.p99().toFixed(1), workerBusy: u!.host.utilization?.() ?? null, timeouts: u!.host.timeouts, lastError: u!.host.lastError ?? null, restoredFrom: u!.host.restoredFrom ?? null },
+        host: { mode: u!.host.mode, version: u!.host.version, p99Ms: +u!.host.p99().toFixed(1), computeP99Ms: +(u!.host.computeP99?.() ?? 0).toFixed(1), warmupTimeouts: u!.host.warmupTimeouts ?? 0, workerBusy: u!.host.utilization?.() ?? null, timeouts: u!.host.timeouts, lastError: u!.host.lastError ?? null, restoredFrom: u!.host.restoredFrom ?? null },
         salience: r?.salience ?? {}, top: r?.top ?? null, shadow: r?.shadow ?? true,
         network: await u!.host.status(),
       };

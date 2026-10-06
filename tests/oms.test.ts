@@ -93,6 +93,7 @@ test('client_order_id is persisted before the order is sent and state survives r
   const oms = mk(gw, file);
   const rec = await oms.submit(intent());
   assert.ok(persistedBeforeSend);
+  oms.flush(); // later transitions are coalesced; shutdown flushes them
   const reloaded = mk(gw, file);
   assert.equal(reloaded.get(rec.clientOrderId)?.state, 'ACKED');
 });

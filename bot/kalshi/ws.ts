@@ -26,8 +26,11 @@ export interface IndexFeedStats {
   /** Index ids Kalshi says are available (indexlist), when it answered. */
   available: string[] | null;
   lastRaw: string | null; lastDropped: string | null; lastTs: number | null;
-  /** Vendor timestamp -> received, last sample (ms; includes clock offset). */
+  /** Vendor timestamp -> handled here, last sample (ms; includes clock offset): the index's true age. */
   lagMs: number | null;
+  /** Kalshi's send stamp -> handled here (network + local queueing), and the vendor -> Kalshi part. */
+  transitMs: number | null;
+  vendorMs: number | null;
   /** Subscription acknowledgements and errors, newest last. */
   control: string[];
   unknownTypes: Record<string, number>;
@@ -59,7 +62,7 @@ export class KalshiWs extends EventEmitter {
   private pingTimer: NodeJS.Timeout | null = null;
   private pingSentAt = 0;
   lastMessageTs = 0;
-  readonly indexStats: IndexFeedStats = { received: 0, parsed: 0, dropped: 0, ids: {}, available: null, lastRaw: null, lastDropped: null, lastTs: null, lagMs: null, control: [], unknownTypes: {} };
+  readonly indexStats: IndexFeedStats = { received: 0, parsed: 0, dropped: 0, ids: {}, available: null, lastRaw: null, lastDropped: null, lastTs: null, lagMs: null, transitMs: null, vendorMs: null, control: [], unknownTypes: {} };
   private readonly listRequested = new Set<number>();
 
   constructor(
@@ -78,7 +81,10 @@ export class KalshiWs extends EventEmitter {
     this.closed = false;
     const path = new URL(this.url).pathname;
     const headers = this.signer ? this.signer.headers('GET', path) : {};
-    const ws = new WebSocket(this.url, { headers });
+    // No permessage-deflate: the ws library inflates compressed frames one at a time through the zlib
+    // thread pool, and every later frame (book deltas, the index, the pong) waits for each round trip, so
+    // a burst of compressed messages delayed everything behind it by up to a second on a busy box.
+    const ws = new WebSocket(this.url, { headers, perMessageDeflate: false });
     this.ws = ws;
 
     ws.on('open', () => {
@@ -150,6 +156,12 @@ export class KalshiWs extends EventEmitter {
     const type: string = env.type;
     const msg = env.msg ?? {};
     const sid: number | undefined = env.sid;
+    // One-way delay, Kalshi's send stamp to here (index messages carry it): the latency that matters,
+    // unlike the ping round trip, which also waits behind every frame queued ahead of the pong.
+    if (env.sending_ts_ms !== undefined) {
+      const sent = Number(env.sending_ts_ms);
+      if (Number.isFinite(sent) && sent > 0) { const t = this.lastMessageTs - sent; this.indexStats.transitMs = t; recordLatency('kalshiTransit', t); }
+    }
 
     if (sid !== undefined && typeof env.seq === 'number') {
       const prev = this.lastSeq.get(sid);
@@ -225,6 +237,8 @@ export class KalshiWs extends EventEmitter {
             st.ids[p.indexId] = (st.ids[p.indexId] ?? 0) + 1;
             st.lastTs = p.ts;
             st.lagMs = Date.now() - p.ts;
+            const kalshiAt = Number(r?.received_at);
+            if (Number.isFinite(kalshiAt) && kalshiAt > 0) st.vendorMs = tsMs(kalshiAt) - p.ts;
             recordLatency('kalshiIndex', st.lagMs);
             this.emit('index', p);
           }
@@ -296,13 +310,20 @@ const firstNum = (o: any, keys: string[]): number | undefined => {
   return undefined;
 };
 
-/** One index value from a cfbenchmarks message (field names vary by channel and version; several tried). */
+const VALUE_KEYS = ['value_usd', 'value', 'price', 'index_value', 'value_dollars', 'last', 'v', 'val'];
+
+/** One index value from a cfbenchmarks message. Kalshi's form (October 2026):
+ *    {index_id: 'BRTI', value_usd: '86526.25000000', source_ts_ms, received_at, data: '<vendor JSON string>'}
+ *  Other field names are tried too, and the vendor JSON in `data` when the outer fields are missing. */
 export function parseIndexRow(r: any, parent: any = {}): { indexId: string; value: number; ts: number } | undefined {
-  const src = r?.data && typeof r.data === 'object' ? { ...r, ...r.data } : r;
-  const value = firstNum(src, ['value', 'price', 'index_value', 'value_dollars', 'last', 'v', 'val']);
+  let src = r?.data && typeof r.data === 'object' ? { ...r, ...r.data } : r;
+  let value = firstNum(src, VALUE_KEYS);
+  if (value === undefined && typeof r?.data === 'string') {
+    try { const d = JSON.parse(r.data); if (d && typeof d === 'object') { src = { ...d, ...r }; value = firstNum(d, VALUE_KEYS); } } catch { /* not JSON */ }
+  }
   const idRaw = src?.index_id ?? src?.index ?? src?.symbol ?? src?.id ?? src?.index_name ?? src?.ticker ?? parent?.index_id ?? parent?.index;
   if (value === undefined || idRaw === undefined || idRaw === null || String(idRaw) === '') return undefined;
-  return { indexId: String(idRaw).toUpperCase(), value, ts: tsMs(src?.ts ?? src?.timestamp ?? src?.time ?? parent?.ts ?? parent?.timestamp) };
+  return { indexId: String(idRaw).toUpperCase(), value, ts: tsMs(src?.source_ts_ms ?? src?.ts ?? src?.timestamp ?? src?.time ?? parent?.ts ?? parent?.timestamp) };
 }
 
 function lv(rows: unknown, legacyCents: boolean): BookLevel[] {

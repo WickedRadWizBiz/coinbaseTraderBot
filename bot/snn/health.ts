@@ -4,7 +4,7 @@
 //
 //   metric                               band / trigger                                    action
 //   population firing rate per level     [0.2x, 5x] of reference, sustained > 5 min        freeze
-//   E/I balance (L2/3 exc vs inh input)  reference +/- 30% (sustained > 5 min)             freeze
+//   E/I balance (L2/3 exc vs inh input)  x/÷2 of a 2 h-adapting reference (> 5 min)        freeze
 //   BCM theta_M drift                    theta in [0.5x, 2x] of initial; |dtheta/dt| cap   freeze
 //   weight saturation                    fraction at bounds < 5%                           freeze
 //   fast-slow weight divergence          |w_f - w_s| / |w_s| < 0.1                          freeze
@@ -30,8 +30,17 @@ export interface HealthSample {
 
 export interface Breach { metric: string; value: number; band: string; action: 'freeze' | 'shadow' | 'alert'; since: number }
 
-export interface HealthOpts { calibSec: number; sustainSec: number; recoverSec: number; thetaDriftPerHour: number }
-export const DEFAULT_HEALTH: HealthOpts = { calibSec: 3 * 3600, sustainSec: 300, recoverSec: 1800, thetaDriftPerHour: 0.5 };
+export interface HealthOpts {
+  calibSec: number; sustainSec: number; recoverSec: number; thetaDriftPerHour: number;
+  /** E/I reference follows slow changes in input statistics (geometric EWMA, hours; 0 = fixed snapshot). */
+  eiAdaptHours?: number;
+  /** E/I band: in [1/eiBand, eiBand] x the reference. */
+  eiBand?: number;
+}
+// E/I: the network's input statistics move with the trading session (the live crypto network drifted to
+// 0.32x of a reference taken during a US afternoon and froze all night), so the reference follows a 2 h
+// geometric average (it tracks the session, not sudden instability) and the band is x/÷2; runaway or dead networks are still caught by the firing-rate bands.
+export const DEFAULT_HEALTH: HealthOpts = { calibSec: 3 * 3600, sustainSec: 300, recoverSec: 1800, thetaDriftPerHour: 0.5, eiAdaptHours: 2, eiBand: 2 };
 
 export class SnnHealth {
   ref?: HealthRef;
@@ -43,6 +52,7 @@ export class SnnHealth {
   private readonly top: string[] = [];
   private lastTheta?: { ts: number; v: number };
   private inBandSince = 0;
+  private lastObs = 0;
   freezeLearning = false;
   shadow = false;
   breaches: Breach[] = [];
@@ -70,7 +80,12 @@ export class SnnHealth {
       const x = m[k] / r[k];
       sustained(`firing_${k}`, x < 0.2 || x > 5, x, '[0.2x, 5x] of reference', 'freeze');
     }
-    if (r.ei > 0 && Number.isFinite(m.ei)) { const x = m.ei / r.ei; sustained('ei_balance', x < 0.7 || x > 1.3, x, 'reference +/-30%', 'freeze'); }
+    if (r.ei > 0 && Number.isFinite(m.ei) && m.ei > 0 && (this.o.eiAdaptHours ?? 0) > 0 && this.lastObs && now > this.lastObs) {
+      const k = Math.min(1, (now - this.lastObs) / (this.o.eiAdaptHours! * 3_600_000));
+      r.ei = Math.exp((1 - k) * Math.log(r.ei) + k * Math.log(m.ei));
+    }
+    this.lastObs = now;
+    if (r.ei > 0 && Number.isFinite(m.ei)) { const b = this.o.eiBand ?? 1.3, x = m.ei / r.ei; sustained('ei_balance', x < 1 / b || x > b, x, `x/÷${b} of the reference`, 'freeze'); }
     if (r.theta > 0) {
       const x = m.theta / r.theta;
       sustained('bcm_theta', x < 0.5 || x > 2, x, '[0.5x, 2x] of initial', 'freeze', 0);

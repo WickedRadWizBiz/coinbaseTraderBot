@@ -191,7 +191,7 @@ unless the model file ships one.
 | Metric | Threshold | What happens |
 |---|---|---|
 | Firing rate per level | outside [0.2×, 5×] of reference for more than 5 min | freeze |
-| E/I input ratio | outside reference ± 30% | freeze |
+| E/I input ratio | outside x/÷2 of a 2 h-adapting reference | freeze |
 | BCM θ_M | outside [0.5×, 2×] of initial, or drifting faster than 0.5 of reference per hour | freeze |
 | Saturated weights | 5% or more | freeze |
 | ‖w_f − w_s‖/‖w_s‖ | 0.1 or more | freeze |
@@ -236,3 +236,10 @@ These are the PDF's own limits:
 
 Expect S1–S3 to hold most of whatever value exists. If the "cortex" ends up as a well-regularised nonlinear
 feature extractor with a biologically inspired stability toolkit, that still counts as success.
+
+
+## Health fixes (October 2026)
+
+- **E/I balance no longer freezes the crypto network all night.** The reference was a single 3-hour snapshot taken at startup (a US afternoon). As activity fell overnight the excitatory/inhibitory input ratio drifted to 0.32x of it, outside the +/-30% band, and all learning froze from 03:26 UTC on; the frozen readout could not fix its calibration (slope 2.0), so the network stayed in shadow. The reference now follows a 2-hour geometric average of the measured ratio (it tracks the session) and the band is x/÷2, so a sudden imbalance within minutes still freezes learning; runaway or dead layers are still caught by the firing-rate bands.
+- **The perps network was silent.** Its slow 1h/4h inputs drive layer 1 about 6x less than crypto's, and at the shared layer-2 threshold the excitatory and inhibitory rates were exactly 0 from the start, so its readouts never updated. Perps columns now have threshold homeostasis (`ipLow` / `ipHigh` / `ipStep` / `ipMin` in `domainParams('perps')`): every minute a column whose layer-2 rate stays below 1e-4 lowers its E thresholds by 2%, down to 0.15x, and raises them back above 5e-3. The thresholds are saved in checkpoints. The crypto parameters are unchanged (the new keys are absent there), so its version hash and checkpoint are kept; the perps network restarts fresh (it had learned nothing).
+- **Timeouts.** Both networks missed the 150 ms readout deadline (p99 155-163 ms) on the CPU-throttled server; each unit now reports `workerBusy` and the bot exposes a CPU profile (`/api/debug/profile`) to find the load. Measured on the server (October 6): each worker was only 3-4 % busy (about 40 ms of compute per step); the round trip was lost to the main thread (event-loop p99 80 ms, behind one fsync'd rewrite of the whole order state per quote change and serialized WebSocket inflate) and to the JIT warm-up after every restart (the first steps took over 200 ms and held p99 at the 200 ms deadline for the next 10 minutes). Fixed at those causes: order state writes are coalesced, the Kalshi socket no longer uses permessage-deflate, the first 30 steps after a start are not counted toward the band, and each unit reports `computeP99Ms` (worker compute) next to `p99Ms` (round trip): the difference is queueing.

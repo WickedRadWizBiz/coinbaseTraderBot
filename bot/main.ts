@@ -397,6 +397,7 @@ async function main(): Promise<void> {
     log.warn(`received ${sig}; cancelling resting orders and shutting down`);
     engine.stop();
     try { await oms.cancelAll(`shutdown (${sig})`); } catch (e) { log.error('cancel on shutdown failed', { error: String(e) }); }
+    oms.flush();
     paper?.flush();
     autoTrain.stop();
     try { engine.saveSnnBlender(); await Promise.all(Object.values(engine.snn?.units ?? {}).map((u) => u!.host.stop())); } catch (e) { log.error('SNN checkpoint on shutdown failed', { error: String(e) }); }
