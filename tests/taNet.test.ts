@@ -174,7 +174,7 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
   fs.writeFileSync(file, JSON.stringify(p));
   const net = TaNet.load(file)!;
   const k = D.ts.length - 100;
-  const off = forecast(D, p.dims, p.norm, Float64Array.from(p.weights), { gMicro: p.gates.micro, gSwing: p.gates.swing, gTrend: p.gates.trend, gMacro: p.gates.macro, gCtx: p.gates.ctx }, [k]);
+  const off = forecast(D, p.dims, p.norm, Float64Array.from(p.weights), { gMicro: p.gates.micro, gSwing: p.gates.swing, gTrend: p.gates.trend, gMacro: p.gates.macro, gCtx: p.gates.ctx }, [k], undefined, p.calib);
   const barTs = D.ts[k];
   const end = H1.findIndex((c) => c.ts === barTs) + 1;
   const set = new CandleSet('TST');

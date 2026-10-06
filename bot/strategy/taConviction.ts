@@ -29,6 +29,9 @@ export interface TaNetView {
   skill1?: number; skill4?: number;
   graded1?: number; graded4?: number;
   validated1?: boolean; validated4?: boolean;
+  /** Validated volatility forecast: log(next-4h realised vol / last-24h realised vol); undefined when no
+   *  version's vol head is validated. */
+  vol4h?: number;
 }
 
 export interface ConvictionConfig {

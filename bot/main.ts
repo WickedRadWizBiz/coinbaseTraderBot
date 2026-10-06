@@ -19,7 +19,8 @@ import { MetaModel } from './model/metaModel';
 import { loadVolProfile, type VolProfile } from './model/volSeasonality';
 import { loadCalendar } from './model/calendar';
 import { ModelHealth } from './model/modelHealth';
-import { directionalConviction, viewOf } from './strategy/taConviction';
+import { directionalConviction, type TaNetView } from './strategy/taConviction';
+import { setTaNetEnsemble, TaNetEnsemble, taNetView } from './ta/taNetEnsemble';
 import { assetFeatureMap } from './model/featureEngine';
 import { ClockSkewMonitor } from './risk/clockSkew';
 import { BreakEven, EquityGuard } from './risk/equityGuard';
@@ -182,14 +183,14 @@ async function main(): Promise<void> {
   const modelHealth = new ModelHealth({ minWindows: cfg.strategy.modelHealthMinWindows }, path.join(cfg.dataDir, 'model_health.json'));
   const taHealth = new ModelHealth({ minWindows: 1e9 }, path.join(cfg.dataDir, 'ta_health.json'));
   // TA conviction for the perps (setup trader): features + the TA network's raw view, cached per asset per minute.
-  const convCache = new Map<string, { ts: number; f: Record<string, number>; v: ReturnType<typeof viewOf> }>();
+  const convCache = new Map<string, { ts: number; f: Record<string, number>; v: TaNetView | undefined }>();
   const conviction = (asset: string, dir: number, now: number) => {
     let c = convCache.get(asset);
     if (!c || now - c.ts > 60_000 || now < c.ts) {
       const candles = md.features.candles.get(asset);
       const f = assetFeatureMap(asset, now, { index: md.index.get(asset), spot: md.spot.get(asset), bars: md.features.bars.get(asset), candles, usdtd: md.usdtd, btcd: md.btcd, perp: md.features.perps.get(asset) });
-      let v: ReturnType<typeof viewOf>;
-      try { v = viewOf(activeTaNet()?.outputFor(asset, candles, now)); } catch { v = undefined; }
+      let v: TaNetView | undefined;
+      v = taNetView(asset, candles, now);
       c = { ts: now, f, v };
       convCache.set(asset, c);
     }
@@ -319,6 +320,8 @@ async function main(): Promise<void> {
   let taNet: TaNet | undefined;
   try { taNet = cfg.taNet.enabled ? TaNet.load(modelPaths.ta_net) : undefined; } catch (e) { log.warn(`TA network not loaded: ${(e as Error).message}`); }
   setTaNet(taNet, cfg.taNet.requireValidated);
+  // Performance-weighted ensemble: the live network plus the latest archived versions (research/champion.ts).
+  setTaNetEnsemble(cfg.taNet.enabled && cfg.taNet.ensemble > 1 ? new TaNetEnsemble(path.join(cfg.autoTrain.dir, 'archive', 'ta_net'), cfg.taNet.ensemble) : undefined);
   // Market-wide context for the TA network: every tracked coin's candles and the index series.
   setTaNetContextSource({ sets: () => md.features.candles, index: (asset, tf) => md.indexStore.get(asset, tf) });
   if (taNet) {

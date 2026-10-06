@@ -512,7 +512,44 @@ export interface TaNetParams {
   arch?: 'flat' | 'grouped';
   /** Grouped: family names, trend families first then context families (the attention's order). */
   familyNames?: string[];
+  /** Platt calibration of the direction heads: P = sigmoid(a x logit(P_raw) + b), fitted on an evaluation period the
+   *  network never trained on (research/trainTaNet.ts). Raw network probabilities are overconfident. */
+  calib?: Partial<Record<'up_1h' | 'up_4h', PlattParams>>;
   trainedAt: string;
+}
+
+export interface PlattParams { a: number; b: number; rows: number; before: number; after: number }
+
+/** Apply Platt calibration to a probability (identity without parameters). */
+export function calibrated(p: number, c: PlattParams | undefined): number {
+  if (!c || !Number.isFinite(p)) return p;
+  const q = Math.min(1 - 1e-9, Math.max(1e-9, p));
+  return sigmoid(c.a * Math.log(q / (1 - q)) + c.b);
+}
+
+/** Fit Platt parameters (a in [0, 1]: it only ever shrinks overconfident probabilities, never sharpens
+ *  them; |b| <= 0.2) by Newton steps on the log loss, with a light pull toward the
+ *  identity (a = 1, b = 0) so a small sample cannot produce wild values. */
+export function fitPlatt(ps: ArrayLike<number>, ys: ArrayLike<number>, l2 = 1e-3): PlattParams {
+  const z: number[] = [], y: number[] = [];
+  for (let i = 0; i < ps.length; i++) if (Number.isFinite(ps[i]) && Number.isFinite(ys[i])) { const q = Math.min(1 - 1e-9, Math.max(1e-9, ps[i])); z.push(Math.log(q / (1 - q))); y.push(ys[i]); }
+  const ll = (a: number, b: number) => { let s = 0; for (let i = 0; i < z.length; i++) { const p = Math.min(1 - 1e-12, Math.max(1e-12, sigmoid(a * z[i] + b))); s -= y[i] ? Math.log(p) : Math.log(1 - p); } return s / Math.max(1, z.length); };
+  let a = 1, b = 0;
+  if (z.length < 50) return { a, b, rows: z.length, before: ll(1, 0), after: ll(1, 0) };
+  const n = z.length;
+  for (let it = 0; it < 50; it++) {
+    let ga = l2 * (a - 1), gb = l2 * b, haa = l2, hab = 0, hbb = l2;
+    for (let i = 0; i < n; i++) {
+      const p = sigmoid(a * z[i] + b), r = (p - y[i]) / n, w = p * (1 - p) / n;
+      ga += r * z[i]; gb += r; haa += w * z[i] * z[i]; hab += w * z[i]; hbb += w;
+    }
+    const det = haa * hbb - hab * hab;
+    if (!(Math.abs(det) > 1e-18)) break;
+    const da = (hbb * ga - hab * gb) / det, db = (haa * gb - hab * ga) / det;
+    a = Math.max(0, Math.min(1, a - da)); b = Math.max(-0.2, Math.min(0.2, b - db));
+    if (Math.abs(da) + Math.abs(db) < 1e-9) break;
+  }
+  return { a, b, rows: n, before: ll(1, 0), after: ll(a, b) };
 }
 
 const sigmoid = (z: number) => 1 / (1 + Math.exp(-z));
@@ -579,7 +616,8 @@ export class TaNet {
     // Grouped network: how much each indicator family counted in this call (the family attention).
     const names = this.params.familyNames;
     const families = f.cache.pi && names?.length === f.cache.pi.length ? Object.fromEntries(names.map((n, i) => [n, +f.cache.pi![i].toFixed(3)])) : undefined;
-    return { up1: sigmoid(o[0]), up4: sigmoid(o[1]), vol: clip(o[2], 3), families };
+    const c = this.params.calib;
+    return { up1: calibrated(sigmoid(o[0]), c?.up_1h), up4: calibrated(sigmoid(o[1]), c?.up_4h), vol: clip(o[2], 3), families };
   }
 }
 
