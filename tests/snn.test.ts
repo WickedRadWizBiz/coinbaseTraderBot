@@ -526,7 +526,7 @@ test('health: the E/I reference follows a session-scale shift (no all-night free
   assert.equal(h.freezeLearning, true);
 });
 
-test('threshold homeostasis: a silent perps column lowers its E thresholds; crypto keeps its params and checkpoint hash', () => {
+test('threshold homeostasis: a silent perps column lowers its E and I thresholds; crypto keeps its params and checkpoint hash', () => {
   const p = { ...domainParams('perps', small()), ipStep: 0.05 };
   assert.ok(p.ipLow! > 0);
   assert.ok(!('ipLow' in DEFAULT_SNN) && !('ipLow' in domainParams('crypto')), 'crypto params (and so its version hash) unchanged');
@@ -537,8 +537,16 @@ test('threshold homeostasis: a silent perps column lowers its E thresholds; cryp
   const c = net.columns.get('BTC-15m')!;
   assert.ok(c.theta0E.every((x) => x < p.thetaE * 0.9), `thresholds lowered: ${c.theta0E[0]}`);
   assert.ok(c.theta0E.every((x) => x >= p.thetaE * p.ipMin! - 1e-12), 'never below the floor');
-  // Thresholds survive a checkpoint.
+  // The silent inhibitory layer is tuned by the same band (it was left at 0 Hz on the server).
+  assert.ok(c.theta0I.length > 0 && c.theta0I.every((x) => x < p.thetaI * 0.9 && x >= p.thetaI * p.ipMin! - 1e-12), `I thresholds lowered: ${c.theta0I[0]}`);
+  // Thresholds survive a checkpoint; a checkpoint without the I thresholds keeps their default.
   const r = new SnnNetwork(p);
-  r.restore(JSON.parse(JSON.stringify(net.serialize())));
+  const cp = JSON.parse(JSON.stringify(net.serialize()));
+  r.restore(cp);
   assert.equal(r.columns.get('BTC-15m')!.theta0E[0], c.theta0E[0]);
+  assert.equal(r.columns.get('BTC-15m')!.theta0I[0], c.theta0I[0]);
+  for (const col of cp.columns) delete col.arrays.theta0I;
+  const old = new SnnNetwork(p);
+  old.restore(cp);
+  assert.equal(old.columns.get('BTC-15m')!.theta0I[0], p.thetaI);
 });
