@@ -1197,8 +1197,9 @@ export class Engine {
 
   private prune(): void {
     const cutoff = this.now() - 3_600_000;
+    const staleBefore = this.now() - 10 * 60_000;
     for (const [t, st] of this.status) {
-      if (st.closeTs < cutoff) {
+      if (st.closeTs < cutoff || st.updatedTs < staleBefore) {
         this.status.delete(t);
         this.hunts.delete(t);
         this.cadence.forget(t);

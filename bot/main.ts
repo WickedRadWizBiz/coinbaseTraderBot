@@ -50,6 +50,7 @@ import { AutoTrainer, resolveModelPaths } from './autotrain';
 import { logger } from './util/log';
 import { RunControl } from './control';
 import { TrainingSupervisor } from './training/supervisor';
+import { SettlementSweeper } from './paper/settlementSweeper';
 import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
 
 const log = logger('main');
@@ -321,6 +322,7 @@ async function main(): Promise<void> {
   });
 
   // Execution events -> OMS (same path for paper and live).
+  let settlement: SettlementSweeper | undefined;
   if (paper) {
     paper.on('fill', (f) => oms.onFill(f));
     paper.on('order', (o) => oms.onExchangeOrder(o));
@@ -328,20 +330,23 @@ async function main(): Promise<void> {
     md.on('lifecycle', (e: { ticker: string; event: string; result?: string }) => {
       if ((e.result === 'yes' || e.result === 'no') && /settle|determin/i.test(e.event)) paper.settle(e.ticker, e.result);
     });
-    // Settle the paper account from the exchange's official results.
-    setInterval(async () => {
-      for (const p of await paper.getPositions()) {
-        const closeTs = md.markets.get(p.ticker)?.closeTime ?? oms.positions.get(p.ticker)?.closeTs ?? 0;
-        if (!closeTs || Date.now() < closeTs) continue;
-        try {
-          const info = await rest.getMarket(p.ticker);
-          if (info?.result === 'yes' || info?.result === 'no') {
-            paper.settle(p.ticker, info.result);
-            md.recordResult(p.ticker, info.result);
-          }
-        } catch { /* retry next interval */ }
-      }
-    }, 30_000).unref();
+    // Settle the paper account and the bot's own records from Kalshi's official results, for every
+    // contract either side still holds (bot/paper/settlementSweeper.ts).
+    settlement = new SettlementSweeper({
+      paperPositions: () => paper.getPositions(),
+      omsUnsettled: () => oms.positions.unsettled().filter((m) => Math.abs(m.yes) > 1e-9).map((m) => ({ ticker: m.ticker, closeTs: m.closeTs })),
+      getMarket: (t) => rest.getMarket(t),
+      settlePaper: (t, r) => paper.settle(t, r),
+      settleOms: (t, r) => { const m = oms.positions.get(t); if (m && !m.settled) oms.settle(t, r); },
+      recordResult: (t, r) => md.recordResult(t, r),
+      closeTsOf: (t) => md.markets.get(t)?.closeTime,
+      correctCloseTime: (t, closeTime) => { const m = md.markets.get(t); if (m && closeTime < m.closeTime) { log.warn('market close time corrected from Kalshi', { ticker: t, cached: new Date(m.closeTime).toISOString(), kalshi: new Date(closeTime).toISOString() }); m.closeTime = closeTime; } },
+      warn: (msg, meta) => log.warn(msg, meta),
+      info: (msg, meta) => log.info(msg, meta),
+    });
+    const sweeper = settlement;
+    setInterval(() => void sweeper.sweep().catch((e) => log.warn('settlement sweep failed', { error: String(e) })), 30_000).unref();
+    void sweeper.sweep().catch(() => undefined);
   } else if (ws) {
     ws.on('fill', (f) => oms.onFill(f));
     ws.on('user_order', (o) => oms.onExchangeOrder(o));
@@ -356,7 +361,7 @@ async function main(): Promise<void> {
   // The dashboard comes up first (it shows the engine warming up); loading every market takes a minute or
   // more on a small server.
   training.start();
-  const app = createApi({ cfg, audit, engine, oms, kill, recon, model, tca, md, vault, autoTrain, control, training, restart: () => void shutdown('restart (dashboard)', 75), startedAt: Date.now() });
+  const app = createApi({ cfg, audit, engine, oms, kill, recon, model, tca, md, vault, autoTrain, control, training, settlement, restart: () => void shutdown('restart (dashboard)', 75), startedAt: Date.now() });
   const server = app.listen(cfg.port, cfg.host, () => log.info(`operator API on http://${cfg.host}:${cfg.port} (${cfg.dashboardPassword ? 'password required' : 'no login'})`));
 
   md.start();

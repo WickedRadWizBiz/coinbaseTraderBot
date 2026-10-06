@@ -30,6 +30,7 @@ import type { Vault } from '../vault/vault';
 import { CONFLUENCES, KNOWLEDGE, RULES } from '../ta/knowledge';
 import { buildNeuralMap } from './neuralMap';
 import type { TrainingSupervisor } from '../training/supervisor';
+import type { SettlementSweeper } from '../paper/settlementSweeper';
 import type { RunControl } from '../control';
 import { ConfigError, loadConfig } from '../config';
 import { latencySnapshot } from '../util/latency';
@@ -53,6 +54,8 @@ export interface ApiDeps {
   control?: RunControl;
   /** Paper training override and capital-exhaustion epochs (bot/training/supervisor.ts). */
   training?: TrainingSupervisor;
+  /** Paper settlement sweeper (held contracts awaiting Kalshi's result). */
+  settlement?: SettlementSweeper;
   /** Restart the bot (systemd starts it again). */
   restart?: () => void;
 }
@@ -173,6 +176,7 @@ export function createApi(d: ApiDeps): express.Express {
       training: d.training?.status() ?? null,
       entryDiagnosis: d.engine.entryDiagnosis(),
       feeds: d.engine.feedHealth(),
+      settlement: d.settlement?.status() ?? null,
       latency: latencySnapshot(),
       run: d.control?.status() ?? { active: true, since: null },
       perpsMode: d.cfg.perps.trading,
@@ -216,6 +220,12 @@ export function createApi(d: ApiDeps): express.Express {
     const book = d.md.books.get(ticker);
     const m = d.md.markets.get(ticker);
     if (!book || !m) {
+      // A contract the bot still holds after its market closed: no book any more, awaiting Kalshi's result.
+      const pos = d.oms.positions.get(ticker);
+      if (pos && !pos.settled) {
+        res.json({ ticker, closed: true, usable: false, bids: [], asks: [], closeTs: pos.closeTs || null, position: pos.yes, reason: pos.closeTs && pos.closeTs < Date.now() ? 'market closed: awaiting settlement' : 'market not tracked' });
+        return;
+      }
       res.status(404).json({ error: 'unknown market' });
       return;
     }
