@@ -276,10 +276,21 @@ export interface TaNetConfig {
 }
 
 export interface AutoTrainConfig {
-  /** off | daily (once a day at hourUtc) | windows (once a day, only inside session-edge windows, paused
-   *  outside them: training never runs while the bot trades). */
-  mode: 'off' | 'daily' | 'windows';
+  /** background (default: trains beside trading at the lowest CPU priority, a new run whenever one is due,
+   *  frozen only while the machine is under pressure) | daily (once a day at hourUtc) | windows (once a day,
+   *  only inside session-edge windows, paused outside them) | off. */
+  mode: 'off' | 'daily' | 'windows' | 'background';
   hourUtc: number;
+  /** Background mode: start a new run this many hours after the last completed one. */
+  everyHours: number;
+  /** Background mode: wait this long after the bot starts before training (let trading warm up). */
+  startDelayMin: number;
+  /** Background mode: freeze training while the trading loop lags more than this (p99, ms)... */
+  maxLoopLagMs: number;
+  /** ...or less than this much memory is available (MB)... */
+  minAvailableMb: number;
+  /** ...or the host steals more than this share of CPU time (burstable CPU out of credits). */
+  maxStealFrac: number;
   /** Where the pipeline writes promoted models; the bot prefers these over params/ and hot-swaps them. */
   dir: string;
   recordingsDir: string;
@@ -872,8 +883,13 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       };
     })(),
     autoTrain: {
-      mode: oneOf(env, 'AUTO_TRAIN', 'windows', ['off', 'daily', 'windows'] as const),
+      mode: oneOf(env, 'AUTO_TRAIN', 'background', ['off', 'daily', 'windows', 'background'] as const),
       hourUtc: num(env, 'AUTO_TRAIN_HOUR_UTC', 6, 0, 23),
+      everyHours: num(env, 'AUTO_TRAIN_EVERY_HOURS', 6, 1, 168),
+      startDelayMin: num(env, 'AUTO_TRAIN_START_DELAY_MIN', 10, 0, 240),
+      maxLoopLagMs: num(env, 'AUTO_TRAIN_MAX_LAG_MS', 500, 50, 60_000),
+      minAvailableMb: num(env, 'AUTO_TRAIN_MIN_FREE_MB', 300, 0, 1e6),
+      maxStealFrac: num(env, 'AUTO_TRAIN_MAX_STEAL', 0.15, 0, 1),
       dir: path.resolve(env.AUTO_TRAIN_DIR ?? path.join(dataDir, 'models')),
       recordingsDir: path.resolve(env.AUTO_TRAIN_RECORDINGS ?? path.join(dataDir, 'recordings')),
       recordingsGzipAfterDays: num(env, 'RECORDINGS_GZIP_AFTER_DAYS', 2, 0, 365),

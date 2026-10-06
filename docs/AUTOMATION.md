@@ -174,8 +174,11 @@ These can't be automated, or deliberately aren't.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AUTO_TRAIN` | `daily` | `off` disables the schedule. Hot-swapping still works. |
-| `AUTO_TRAIN_HOUR_UTC` | `6` | Hour of the daily run. |
+| `AUTO_TRAIN` | `background` | `background` trains beside trading (lowest CPU priority, frozen only when the machine is busy); `windows` = session-edge windows only; `daily` = once at `AUTO_TRAIN_HOUR_UTC`; `off` disables the schedule. Hot-swapping still works. |
+| `AUTO_TRAIN_EVERY_HOURS` | `6` | Background: a new run this many hours after the last completed one. |
+| `AUTO_TRAIN_START_DELAY_MIN` | `10` | Background: wait this long after the bot starts before training. |
+| `AUTO_TRAIN_MAX_LAG_MS` / `AUTO_TRAIN_MIN_FREE_MB` / `AUTO_TRAIN_MAX_STEAL` | `500` / `300` / `0.15` | Background: training is frozen while the trading loop lags more than this (p99), less memory than this is available, or the host steals more CPU than this (burstable CPU out of credits). |
+| `AUTO_TRAIN_HOUR_UTC` | `6` | Hour of the daily run (`AUTO_TRAIN=daily`). |
 | `AUTO_TRAIN_PROMOTE` | `always` | `always` = hot-swap every new model; `validated` = only models that passed. |
 | `AUTO_TRAIN_SNN_STAGE` | `auto` | `auto` = the highest stage whose whole chain passed the ablation (otherwise `SNN_STAGE`); or force `S0`–`S6`. |
 | `AUTO_TRAIN_ABLATION_DAYS` | `7` | Days of recordings each network's ablation replays (crypto and perps, so twice). It's the slow step: roughly 5–40 minutes per recorded day per network on a small server. |
