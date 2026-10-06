@@ -327,6 +327,58 @@ export const KNOWLEDGE: KnowledgeEntry[] = [
     caveats: ['Daily/weekly valuation metric; not used for intraday contracts.'],
     evidence: { rating: 'practitioner', notes: '', sources: [PDF] }, implemented: false,
   },
+  {
+    id: 'chart_patterns', name: 'Classic chart patterns (double top/bottom, head and shoulders, flags, triangles, trendline retests)', category: 'structure', author: 'Edwards & Magee; Bulkowski',
+    formula: 'From confirmed swings: double top = two highs within 0.5 ATR, close through the trough between; H&S = head 0.5 ATR above shoulders within 1 ATR, close through the neckline; flag = >= 4 ATR impulse in <= 10 bars, 4-15 bar pause inside half of it, close out of the pause with the impulse; triangle = converging swing lines, close out of them; trendline retest = broken swing trendline revisited and rejected',
+    params: 'swings 3/3; ATR 14; signals live for 3 bars after completion', bestTimeframes: ['1h', '4h', '1d'], botTimeframes: ['15m', '1h', '4h', '1d'],
+    states: [
+      { when: 'double bottom / inverse H&S completes', meaning: 'Selling exhausted at a tested low: reversal up.', bias: 'bullish' },
+      { when: 'double top / H&S completes', meaning: 'Buying exhausted at a tested high: reversal down.', bias: 'bearish' },
+      { when: 'flag or triangle breaks with the prior move', meaning: 'Pause resolved in the trend direction: continuation.', bias: 'context' },
+      { when: 'broken trendline retested and rejected', meaning: 'Old support became resistance (or the reverse): the break is confirmed.', bias: 'context' },
+    ],
+    caveats: ['Pattern definitions are a judgement call; these are fixed and mechanical so they can be backtested, and only those that pass the walk-forward rule study (research/ruleBook.ts) count.'],
+    evidence: { rating: 'moderate', notes: 'Kernel-smoothed pattern detection carries incremental information (Lo, Mamaysky & Wang); crypto results vary by period.', sources: [LMW00, PDF] },
+    implemented: true,
+  },
+  {
+    id: 'rsi_regime', name: 'RSI regime rules: Cardwell range shift, Connors RSI(2) pullbacks', category: 'momentum', author: 'Andrew Cardwell; Larry Connors',
+    formula: 'Range shift: over 60 bars RSI holds >= 38 and reaches >= 68 (bull range) or holds <= 62 and reaches <= 32 (bear range). RSI(2): price above its 200-bar average and RSI(2) < 10 = buy the dip; below it and RSI(2) > 90 = sell the rip.',
+    params: 'RSI 14 / 60 bars; RSI 2 with SMA 200', bestTimeframes: ['1h', '4h', '1d'], botTimeframes: ['1h', '4h', '1d'],
+    states: [
+      { when: 'bull range (RSI 40-80)', meaning: 'Uptrend momentum regime: oversold is ~40, not 30.', bias: 'bullish' },
+      { when: 'bear range (RSI 20-60)', meaning: 'Downtrend momentum regime: overbought is ~60, not 70.', bias: 'bearish' },
+      { when: 'RSI(2) extreme against the 200-bar trend', meaning: 'Short-term pullback inside the trend: mean-reverts in the trend direction.', bias: 'context' },
+    ],
+    caveats: ['RSI(2) was documented on equity indices; crypto trends harder, so it only counts where the rule study shows it holds.'],
+    evidence: { rating: 'practitioner', notes: 'Widely used; tested here walk-forward by character.', sources: [WILDER, PDF] },
+    implemented: true,
+  },
+  {
+    id: 'breadth', name: 'Market breadth (coins above their 20 / 50-day averages, new highs vs lows)', category: 'macro',
+    formula: 'Share of tracked coins whose daily close is above their 20- and 50-day SMA; (new 20-day highs - new 20-day lows) / coins',
+    params: '20 / 50 days', bestTimeframes: ['1d'], botTimeframes: ['1d'],
+    states: [
+      { when: '>= 70 % above the 50-day and >= 60 % above the 20-day', meaning: 'Broad participation: trend is healthy.', bias: 'bullish' },
+      { when: '<= 30 % above the 50-day and <= 40 % above the 20-day', meaning: 'Broad weakness: rallies are suspect.', bias: 'bearish' },
+      { when: 'new highs outnumber new lows by 40 %+', meaning: 'Breadth thrust.', bias: 'bullish' },
+    ],
+    caveats: ['Crypto has few liquid coins and they are highly correlated, so breadth is closer to a market-trend gauge than in equities.'],
+    evidence: { rating: 'practitioner', notes: 'Equity-market breadth adapted; tested by the rule study.', sources: [PDF] },
+    implemented: true,
+  },
+  {
+    id: 'macro_risk', name: 'Traditional risk gauges: DXY, US 10-year yield, VIX, high-yield bonds', category: 'macro',
+    formula: '5-day log changes (TradingView daily bars); risk-on = dollar down, VIX down, HYG up, yields down (each vote beyond a dead band)',
+    params: '5 days; dead band 0.5 % (VIX 5 %)', bestTimeframes: ['1d'], botTimeframes: ['1d'],
+    states: [
+      { when: '>= 3 of 4 gauges risk-on', meaning: 'Liquidity tailwind for crypto.', bias: 'bullish' },
+      { when: '>= 3 of 4 gauges risk-off', meaning: 'Dollar / volatility headwind.', bias: 'bearish' },
+    ],
+    caveats: ['Daily data, refreshed by the training pipeline (no live feed): context for daily decisions, not for 15-minute contracts.'],
+    evidence: { rating: 'moderate', notes: 'Crypto co-moves with global risk appetite since 2020.', sources: [PDF] },
+    implemented: true,
+  },
   // ---- 9. Cross-asset macro ----
   {
     id: 'dominance_matrix', name: 'BTC.D x USDT.D liquidity rotation matrix', category: 'macro',
@@ -566,6 +618,68 @@ export const RULES: RuleDef[] = [
       if (u < 0 && b > 0) return btc ? on(1, 1) : on(0, 0.4);      // risk-on for BTC
       if (u < 0 && b < 0) return on(1, btc ? 0.4 : 1);             // altseason
       return on(u < 0 ? 1 : -1, 0.5);                              // cash moving, BTC.D flat
+    } },
+];
+
+// ---- Rule book: rules added for the directional system (research/ruleBook.ts tests every rule and
+// rule-book rule walk-forward by market character; bot/strategy/ruleBook.ts combines the ones that pass).
+// Kept out of RULES so the inputs the TA network and the models were trained on (rule nets and counts)
+// do not shift; the analyzer evaluates them into TaSnapshot.book.
+export const BOOK_RULES: RuleDef[] = [
+  // Chart patterns, RSI regime rules (bot/ta/structure.ts chartPatterns, rsiRangeShift)
+  { id: 'double_top_bottom', indicator: 'chart_patterns', timeframes: ['1h', '4h', '1d'], kind: 'reversal',
+    bullish: 'Double bottom completed: the close broke above the peak between the two lows.', bearish: 'Double top completed: the close broke below the trough between the two highs.',
+    evaluate: (s) => (s.patterns?.doubleTB ? on(s.patterns.doubleTB, 0.8) : undefined) },
+  { id: 'head_shoulders', indicator: 'chart_patterns', timeframes: ['1h', '4h', '1d'], kind: 'reversal',
+    bullish: 'Inverse head and shoulders completed: neckline broken upward.', bearish: 'Head and shoulders completed: neckline broken downward.',
+    evaluate: (s) => (s.patterns?.headShoulders ? on(s.patterns.headShoulders, 0.9) : undefined) },
+  { id: 'flag_pennant', indicator: 'chart_patterns', timeframes: ['15m', '1h', '4h'], kind: 'continuation',
+    bullish: 'Bull flag / pennant broke upward: the impulse resumes.', bearish: 'Bear flag / pennant broke downward: the impulse resumes.',
+    evaluate: (s) => (s.patterns?.flag ? on(s.patterns.flag, 0.8) : undefined) },
+  { id: 'triangle_break', indicator: 'chart_patterns', timeframes: ['1h', '4h', '1d'], kind: 'continuation',
+    bullish: 'Triangle broke upward.', bearish: 'Triangle broke downward.',
+    evaluate: (s) => (s.patterns?.triangle ? on(s.patterns.triangle, 0.7) : undefined) },
+  { id: 'trendline_retest', indicator: 'chart_patterns', timeframes: ['1h', '4h', '1d'], kind: 'reversal',
+    bullish: 'Broken down-trendline retested from above and held: old resistance is now support.', bearish: 'Broken up-trendline retested from below and rejected: old support is now resistance.',
+    evaluate: (s) => (s.patterns?.trendlineRetest ? on(s.patterns.trendlineRetest, 0.8) : undefined) },
+  { id: 'rsi_range_shift', indicator: 'rsi_regime', timeframes: ['1h', '4h', '1d'], kind: 'regime',
+    bullish: 'RSI in the bull range (holding ~40-80): uptrend momentum regime.', bearish: 'RSI in the bear range (capped ~60, reaching 20s): downtrend momentum regime.',
+    evaluate: (s) => (s.rsiRange ? on(s.rsiRange, 0.7) : undefined) },
+  { id: 'rsi2_pullback', indicator: 'rsi_regime', timeframes: ['1h', '4h', '1d'], kind: 'reversal',
+    bullish: 'RSI(2) below 10 above the 200-bar average: a dip inside an uptrend.', bearish: 'RSI(2) above 90 below the 200-bar average: a rip inside a downtrend.',
+    evaluate: (s) => {
+      if (!f(s.rsi2) || !f(s.sma200)) return undefined;
+      return s.close > s.sma200 && s.rsi2 < 10 ? on(1, Math.min(1, 0.5 + (10 - s.rsi2) / 20)) : s.close < s.sma200 && s.rsi2 > 90 ? on(-1, Math.min(1, 0.5 + (s.rsi2 - 90) / 20)) : undefined;
+    } },
+  { id: 'trend_pullback', indicator: 'moving_averages', timeframes: ['1h', '4h'], kind: 'continuation',
+    bullish: 'Uptrend pullback to the 21 EMA holding, RSI 40-60 turning up: continuation entry.', bearish: 'Downtrend rally into the 21 EMA failing, RSI 40-60 turning down: continuation entry.',
+    evaluate: (s) => {
+      if (!f(s.ema50) || !f(s.adx) || !(s.atr > 0) || !f(s.rsi)) return undefined;
+      const mid = s.rsi >= 40 && s.rsi <= 60;
+      const up = s.close > s.ema21 && s.ema21 > s.ema50 && s.adx > 20 && Math.abs(s.close - s.ema21) <= 0.6 * s.atr && mid && s.rsi > s.rsiPrev;
+      const dn = s.close < s.ema21 && s.ema21 < s.ema50 && s.adx > 20 && Math.abs(s.close - s.ema21) <= 0.6 * s.atr && mid && s.rsi < s.rsiPrev;
+      return up ? on(1, 0.7) : dn ? on(-1, 0.7) : undefined;
+    } },
+  // Breadth and traditional risk gauges (daily, from bot/ta/marketContext.ts)
+  { id: 'breadth', indicator: 'breadth', timeframes: ['1d'], kind: 'regime',
+    bullish: 'Broad participation: most coins above their 20 / 50-day averages, or a new-highs thrust.', bearish: 'Broad weakness: most coins below their 20 / 50-day averages, or new lows dominate.',
+    evaluate: (_s, _all, m) => {
+      const b = m?.breadth;
+      if (!b || !f(b.above50) || !f(b.above20)) return undefined;
+      if ((b.above50 >= 0.7 && b.above20 >= 0.6) || b.hiLo >= 0.4) return on(1, Math.min(1, 0.5 + Math.max(b.above50 - 0.5, b.hiLo)));
+      if ((b.above50 <= 0.3 && b.above20 <= 0.4) || b.hiLo <= -0.4) return on(-1, Math.min(1, 0.5 + Math.max(0.5 - b.above50, -b.hiLo)));
+      return undefined;
+    } },
+  { id: 'macro_risk', indicator: 'macro_risk', timeframes: ['1d'], kind: 'regime',
+    bullish: 'Risk-on: the dollar, VIX and yields falling, high-yield bonds rising.', bearish: 'Risk-off: the dollar, VIX and yields rising, high-yield bonds falling.',
+    evaluate: (_s, _all, m) => {
+      const r = m?.risk;
+      if (!r) return undefined;
+      const vote = (x: number | undefined, band: number, sign: 1 | -1) => (x !== undefined && f(x) ? (x > band ? sign : x < -band ? -sign : 0) : 0);
+      const n = [r.dxy, r.us10y, r.vix, r.hyg].filter((x) => x !== undefined && f(x)).length;
+      if (n < 3) return undefined;
+      const score = vote(r.dxy, 0.005, -1) + vote(r.us10y, 0.01, -1) + vote(r.vix, 0.05, -1) + vote(r.hyg, 0.005, 1);
+      return score >= 3 ? on(1, 0.8) : score <= -3 ? on(-1, 0.8) : undefined;
     } },
 ];
 

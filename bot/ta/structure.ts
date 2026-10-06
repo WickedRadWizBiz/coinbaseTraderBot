@@ -187,3 +187,126 @@ export function roundLevel(price: number): { level: number; step: number; dist: 
   const level = Math.round(price / step) * step;
   return { level, step, dist: price - level };
 }
+
+// ---- Classic chart patterns (Lo, Mamaysky & Wang 2000: they carry incremental information) ----------
+// Each fires on the bar that completes it and for the next `within` - 1 bars (so a closing pattern is
+// not missed between evaluations), from confirmed swings only. +1 bullish, -1 bearish, 0 none.
+
+export interface ChartPatterns {
+  /** Double top (-1): two highs within 0.5 ATR, the close breaks the trough between; double bottom (+1). */
+  doubleTB: -1 | 0 | 1;
+  /** Head and shoulders (-1): a head 0.5 ATR above two shoulders within 1 ATR, the close breaks the
+   *  neckline through the two troughs; inverse (+1). */
+  headShoulders: -1 | 0 | 1;
+  /** Flag / pennant: an impulse of >= 4 ATR within 10 bars, a 4-15 bar pause inside half its size, and
+   *  the close breaking the pause in the impulse's direction (continuation). */
+  flag: -1 | 0 | 1;
+  /** Triangle (falling highs and rising lows, or one flat side): the close breaks out of it. */
+  triangle: -1 | 0 | 1;
+  /** Trendline break and retest: the rising line through the last two swing lows broke, and price came
+   *  back up to it and was rejected (-1); the falling line through two swing highs broke and held as
+   *  support on the retest (+1). */
+  trendlineRetest: -1 | 0 | 1;
+}
+
+const lineAt = (a: Swing, b: Swing, i: number) => a.price + ((b.price - a.price) * (i - a.i)) / (b.i - a.i);
+
+/** Bar k (k in the last `within` bars) where the close crossed `level(k)` downward (-1) or upward (+1). */
+function crossedRecently(cs: Candle[], level: (i: number) => number, dir: 1 | -1, after: number, within: number): boolean {
+  const n = cs.length - 1;
+  for (let k = n; k > Math.max(after, n - within); k--) {
+    const now = cs[k].c - level(k), prev = cs[k - 1].c - level(k - 1);
+    if (dir < 0 ? now < 0 && prev >= 0 : now > 0 && prev <= 0) return true;
+  }
+  return false;
+}
+
+export function chartPatterns(cs: Candle[], sw = swings(cs), a = last(atr(cs, 14)), within = 3): ChartPatterns {
+  const out: ChartPatterns = { doubleTB: 0, headShoulders: 0, flag: 0, triangle: 0, trendlineRetest: 0 };
+  const n = cs.length - 1;
+  if (n < 30 || !(a > 0)) return out;
+  const highs = sw.filter((s) => s.kind === 'high'), lows = sw.filter((s) => s.kind === 'low');
+  const lowBetween = (i: number, j: number) => lows.filter((s) => s.i > i && s.i < j).sort((x, y) => x.price - y.price)[0];
+  const highBetween = (i: number, j: number) => highs.filter((s) => s.i > i && s.i < j).sort((x, y) => y.price - x.price)[0];
+
+  // Double top / bottom.
+  const [h1, h2] = highs.slice(-2);
+  if (h1 && h2 && h2.i - h1.i >= 5 && Math.abs(h1.price - h2.price) <= 0.5 * a) {
+    const t = lowBetween(h1.i, h2.i);
+    if (t && Math.max(h1.price, h2.price) - t.price >= 1.5 * a && crossedRecently(cs, () => t.price, -1, h2.i, within)) out.doubleTB = -1;
+  }
+  const [l1, l2] = lows.slice(-2);
+  if (!out.doubleTB && l1 && l2 && l2.i - l1.i >= 5 && Math.abs(l1.price - l2.price) <= 0.5 * a) {
+    const t = highBetween(l1.i, l2.i);
+    if (t && t.price - Math.min(l1.price, l2.price) >= 1.5 * a && crossedRecently(cs, () => t.price, 1, l2.i, within)) out.doubleTB = 1;
+  }
+
+  // Head and shoulders (and inverse).
+  const [ls, hd, rs] = highs.slice(-3);
+  if (ls && hd && rs && hd.price > Math.max(ls.price, rs.price) + 0.5 * a && Math.abs(ls.price - rs.price) <= a) {
+    const t1 = lowBetween(ls.i, hd.i), t2 = lowBetween(hd.i, rs.i);
+    if (t1 && t2 && crossedRecently(cs, (i) => lineAt(t1, t2, i), -1, rs.i, within)) out.headShoulders = -1;
+  }
+  const [lsI, hdI, rsI] = lows.slice(-3);
+  if (!out.headShoulders && lsI && hdI && rsI && hdI.price < Math.min(lsI.price, rsI.price) - 0.5 * a && Math.abs(lsI.price - rsI.price) <= a) {
+    const t1 = highBetween(lsI.i, hdI.i), t2 = highBetween(hdI.i, rsI.i);
+    if (t1 && t2 && crossedRecently(cs, (i) => lineAt(t1, t2, i), 1, rsI.i, within)) out.headShoulders = 1;
+  }
+
+  // Flag / pennant: impulse, tight pause, break in the impulse's direction on the last bar.
+  for (let M = 4; M <= 15 && !out.flag; M++) {
+    const s0 = n - M - 10, s1 = n - M;
+    if (s0 < 0) break;
+    const mv = cs[s1].c - cs[s0].c;
+    if (Math.abs(mv) < 4 * a) continue;
+    let hi = -Infinity, lo = Infinity;
+    for (let k = s1 + 1; k < n; k++) { hi = Math.max(hi, cs[k].h); lo = Math.min(lo, cs[k].l); }
+    if (!(hi - lo <= 0.5 * Math.abs(mv))) continue;
+    // Pullback no deeper than half the impulse.
+    if (mv > 0 ? cs[s1].c - lo > 0.5 * mv : hi - cs[s1].c > 0.5 * -mv) continue;
+    if (mv > 0 && cs[n].c > hi && cs[n - 1].c <= hi) out.flag = 1;
+    else if (mv < 0 && cs[n].c < lo && cs[n - 1].c >= lo) out.flag = -1;
+  }
+
+  // Triangle: last two highs and lows within 60 bars, converging, the close breaking out of the lines.
+  if (h1 && h2 && l1 && l2 && n - Math.min(h1.i, l1.i) <= 60 && h2.i > h1.i && l2.i > l1.i) {
+    const upSlope = (h2.price - h1.price) / (h2.i - h1.i), dnSlope = (l2.price - l1.price) / (l2.i - l1.i);
+    const flat = 0.05 * a; // per bar: a "flat" side
+    const converging = upSlope < dnSlope && (upSlope < -flat || dnSlope > flat) && upSlope <= flat && dnSlope >= -flat;
+    const after = Math.max(h2.i, l2.i);
+    if (converging && lineAt(h1, h2, n) > lineAt(l1, l2, n)) {
+      if (crossedRecently(cs, (i) => lineAt(h1, h2, i), 1, after, within)) out.triangle = 1;
+      else if (crossedRecently(cs, (i) => lineAt(l1, l2, i), -1, after, within)) out.triangle = -1;
+    }
+  }
+
+  // Trendline break and retest (rejection at the broken line on the last bar). The break itself makes a
+  // new swing, so the broken line is the newest rising (falling) pair of swing lows (highs) among the
+  // last five whose line a close went through after its second point.
+  const c = cs[n];
+  const brokenLine = (pts: Swing[], rising: boolean): ((i: number) => number) | undefined => {
+    for (let j = pts.length - 1; j >= 1; j--) {
+      const p1 = pts[j - 1], p2 = pts[j];
+      if (n - p2.i > 40 || (rising ? !(p2.price > p1.price) : !(p2.price < p1.price))) continue;
+      const line = (i: number) => lineAt(p1, p2, i);
+      for (let k = p2.i + 1; k < n; k++) if (rising ? cs[k].c < line(k) - 0.2 * a : cs[k].c > line(k) + 0.2 * a) return line;
+    }
+    return undefined;
+  };
+  const up = brokenLine(lows.slice(-5), true);
+  if (up && c.h >= up(n) - 0.3 * a && c.c < up(n) && c.c < c.o) out.trendlineRetest = -1;
+  const dn = !out.trendlineRetest ? brokenLine(highs.slice(-5), false) : undefined;
+  if (dn && c.l <= dn(n) + 0.3 * a && c.c > dn(n) && c.c > c.o) out.trendlineRetest = 1;
+  return out;
+}
+
+/** Cardwell RSI range shift over the last `n` bars: bull range (RSI holds above ~40 and reaches 70+)
+ *  = +1, bear range (stays below ~60 and reaches 30-) = -1. */
+export function rsiRangeShift(rsiS: Series, n = 60): -1 | 0 | 1 {
+  const w = rsiS.slice(-n).filter(Number.isFinite);
+  if (w.length < n * 0.8) return 0;
+  const lo = Math.min(...w), hi = Math.max(...w);
+  if (lo >= 38 && hi >= 68) return 1;
+  if (hi <= 62 && lo <= 32) return -1;
+  return 0;
+}
