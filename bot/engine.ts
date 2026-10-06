@@ -486,13 +486,16 @@ export class Engine {
     // A fresh Coinbase series is used even while its volatility warms up, so the block reads
     // 'volatility warming up' (temporary) rather than 'index stale'.
     if (spot?.fresh(now, R.maxIndexAgeMs) && (spot.vol() || !idx?.fresh(now, R.maxIndexAgeMs))) return spot;
+    // Coinbase quiet too (sparse prints, e.g. DOGE at night): Binance's per-second price.
+    const bn = md.binance.get(asset);
+    if (bn?.fresh(now, R.maxIndexAgeMs) && (bn.vol() || (!idx?.fresh(now, R.maxIndexAgeMs) && !spot?.fresh(now, R.maxIndexAgeMs)))) return bn;
     return idx;
   }
 
   /** Per-asset price feed health (Kalshi settlement index and Coinbase spot), for diagnostics. */
-  feedHealth(now = this.now()): Record<string, { index: ReturnType<IndexTracker['health']> | null; spot: ReturnType<IndexTracker['health']> | null }> {
-    const out: Record<string, { index: ReturnType<IndexTracker['health']> | null; spot: ReturnType<IndexTracker['health']> | null }> = {};
-    for (const [asset, idx] of this.d.md.index) out[asset] = { index: idx.health(now), spot: this.d.md.spot.get(asset)?.health(now) ?? null };
+  feedHealth(now = this.now()): Record<string, Record<'index' | 'spot' | 'binance', ReturnType<IndexTracker['health']> | null>> {
+    const out: Record<string, Record<'index' | 'spot' | 'binance', ReturnType<IndexTracker['health']> | null>> = {};
+    for (const [asset, idx] of this.d.md.index) out[asset] = { index: idx.health(now), spot: this.d.md.spot.get(asset)?.health(now) ?? null, binance: this.d.md.binance.get(asset)?.health(now) ?? null };
     return out;
   }
 
