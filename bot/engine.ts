@@ -74,6 +74,32 @@ import { altcoinRiskOn, confluenceBreadth, orientedSignals, selectionPriority, t
 
 const log = logger('engine');
 
+/** Wall time spent per loop section over the last minute (ms per second of clock), the share of markets
+ *  evaluated per tick, and the whole process's CPU use (1 = one full core). */
+export class CpuMeter {
+  private win: Record<string, number> = {};
+  private evalShare: number[] = [];
+  private since = Date.now();
+  private cpu0 = process.cpuUsage();
+  private last: { sections: Record<string, number>; processCores: number; evaluatedShare: number | null; windowSec: number } | null = null;
+  note(section: string, start: bigint, evaluated?: number, total?: number): void {
+    this.win[section] = (this.win[section] ?? 0) + Number(process.hrtime.bigint() - start) / 1e6;
+    if (evaluated !== undefined && total) this.evalShare.push(evaluated / total);
+    const now = Date.now();
+    if (now - this.since >= 60_000) {
+      const sec = (now - this.since) / 1000, u = process.cpuUsage(this.cpu0);
+      this.last = {
+        sections: Object.fromEntries(Object.entries(this.win).map(([k, v]) => [k, +(v / sec).toFixed(1)])),
+        processCores: +((u.user + u.system) / 1e6 / sec).toFixed(3),
+        evaluatedShare: this.evalShare.length ? +(this.evalShare.reduce((a, b) => a + b, 0) / this.evalShare.length).toFixed(3) : null,
+        windowSec: +sec.toFixed(0),
+      };
+      this.win = {}; this.evalShare = []; this.since = now; this.cpu0 = process.cpuUsage();
+    }
+  }
+  status() { return this.last; }
+}
+
 export interface MarketStatus {
   /** TA conviction overlay (bot/strategy/taConviction.ts): probability before the TA network's drift,
    *  the shift it applied, signal breadth, the altcoin risk-on rule, and the selection priority. */
@@ -583,6 +609,7 @@ export class Engine {
       modelHealth: this.d.modelHealth?.status() ?? null,
       // Does the TA network's drift improve the probabilities? (log loss with vs without it, per window)
       taHealth: this.d.taHealth?.status() ?? null,
+      cpu: this.cpu.status(),
       entryGuards: this.entryGuards(now),
     };
   }
@@ -710,16 +737,32 @@ export class Engine {
         this.d.audit.write('training', { event: 'daily_limit_breach', pnl: +pnl.toFixed(2), limit: +limit.toFixed(2), action: 'override on: trading continues; size follows the net loss' });
       }
     }
+    const s0 = process.hrtime.bigint();
     await this.snnTick();
+    this.cpu.note('snn', s0);
     // Selection priority (altcoin risk-on first, then TA conviction, from each market's last evaluation):
     // the first evaluated get the shared risk budget and the training-trade slots first.
     const pri = (t: string) => this.status.get(t)?.conviction?.priority ?? 0;
-    const ms = this.d.md.activeMarkets(this.now()).filter((m) => m.kind !== 'match').sort((a, b) => pri(b.ticker) - pri(a.ticker));
-    await Promise.all(ms.map((m) => this.evaluate(m)));
+    // A market with no position and no resting order is re-evaluated every EVAL_IDLE_SEC instead of every
+    // second (most of the CPU is spent on markets the bot is not in); any market it is in stays at 1 s.
+    const t0 = this.now();
+    const idleMs = this.d.cfg.strategy.idleEvalSec * 1000;
+    const working = new Set(this.d.oms.liveOrders().filter((o) => isLive(o)).map((o) => o.ticker));
+    const due = (t: string) => {
+      const st = this.status.get(t);
+      return idleMs <= 0 || !st || st.position !== 0 || working.has(t) || this.d.oms.positions.position(t) !== 0 || t0 - st.updatedTs >= idleMs;
+    };
+    const ms = this.d.md.activeMarkets(t0).filter((m) => m.kind !== 'match').sort((a, b) => pri(b.ticker) - pri(a.ticker));
+    const run = ms.filter((m) => due(m.ticker));
+    const c0 = process.hrtime.bigint();
+    await Promise.all(run.map((m) => this.evaluate(m)));
+    this.cpu.note('evaluate', c0, run.length, ms.length);
     this.prune();
     // Stage 2: offset the binary book's net delta with perps (reduce-only when new risk is halted).
     // Perps: the hedge is reduce-only while binary risk is halted; directional trading has its own guards.
+    const p0 = process.hrtime.bigint();
     await this.d.hedger?.tick(this.exposures(), { reduceOnly: this.haltReasons().length > 0 && !this.d.perpTrader, directional: this.perpDirectional() });
+    this.cpu.note('perps', p0);
     await this.tennisTick();
     if (this.now() - this.lastDiagnosisAudit > 300_000) {
       this.lastDiagnosisAudit = this.now();
@@ -728,6 +771,8 @@ export class Engine {
   }
 
   private lastDiagnosisAudit = 0;
+  /** Where the trading loop's time goes (status: cpu). */
+  readonly cpu = new CpuMeter();
 
   /**
    * Why the crypto book is or is not entering, counted over the active markets: the first blocking

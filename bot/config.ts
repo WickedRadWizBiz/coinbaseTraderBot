@@ -122,6 +122,9 @@ export interface StrategyConfig {
   /** Paper only: guaranteed 1-contract training trades per hour on the side the model favours, taken when
    *  nothing qualifies on edge, so the bot always produces trades to learn from and to watch (0 = off). */
   paperTrainTrades: number;
+  /** Markets with no position and no resting order are fully re-evaluated at most every idleEvalSec
+   *  (1 s otherwise): most of the bot's CPU is the per-second evaluation of markets it is not in. */
+  idleEvalSec: number;
   /** Adversarial evaluator (bot/strategy/adversary.ts): entries it cannot break, with TA / confluence
    *  evidence, are re-sized by Kelly with a conviction multiplier up to adversarialMaxBoost (<= 2). */
   adversarialBoost: boolean;
@@ -290,10 +293,11 @@ export interface TaNetConfig {
 }
 
 export interface AutoTrainConfig {
-  /** background (default: trains beside trading at the lowest CPU priority, a new run whenever one is due,
-   *  frozen only while the machine is under pressure) | daily (once a day at hourUtc) | windows (once a day,
-   *  only inside session-edge windows, paused outside them) | off. */
-  mode: 'off' | 'daily' | 'windows' | 'background';
+  /** remote (default: the pipeline runs on GitHub Actions (.github/workflows/train.yml) and copies the
+   *  models into AUTO_TRAIN_DIR; the bot never trains itself, it only hot-reloads them) | background
+   *  (trains beside trading at the lowest CPU priority, frozen while the machine is under pressure) |
+   *  daily (once a day at hourUtc) | windows (once a day, only inside session-edge windows) | off. */
+  mode: 'off' | 'daily' | 'windows' | 'background' | 'remote';
   hourUtc: number;
   /** Background mode: start a new run this many hours after the last completed one. */
   everyHours: number;
@@ -748,6 +752,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     exploreBand: num(env, 'PAPER_EXPLORE_BAND', 0.02, 0, 0.1),
     exploreMaxPerHour: num(env, 'PAPER_EXPLORE_MAX_PER_HOUR', 6, 0, 120),
     paperTrainTrades: num(env, 'PAPER_TRAINING_TRADES_PER_HOUR', 12, 0, 120),
+    idleEvalSec: num(env, 'EVAL_IDLE_SEC', 5, 0, 60),
     adversarialBoost: bool(env, 'ADVERSARIAL_BOOST', true),
     adversarialMaxBoost: num(env, 'ADVERSARIAL_MAX_BOOST', 2, 1, 2),
     taPricing: bool(env, 'TA_PRICING', true),
@@ -800,7 +805,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     indexIdMap: jsonMap(env, 'INDEX_ID_MAP', DEFAULT_INDEX_IDS),
     seriesAssetMap,
     catalogHorizonMin: num(env, 'CATALOG_HORIZON_MIN', 90, 16, 7 * 24 * 60),
-    catalogStrikesPerEvent: num(env, 'CATALOG_STRIKES_PER_EVENT', 8, 0, 1000),
+    catalogStrikesPerEvent: num(env, 'CATALOG_STRIKES_PER_EVENT', 4, 0, 1000),
     allowProxyIndex,
     spotFeed: bool(env, 'SPOT_FEED', true),
     dominanceFeed: bool(env, 'DOMINANCE_FEED', true),
@@ -906,7 +911,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       };
     })(),
     autoTrain: {
-      mode: oneOf(env, 'AUTO_TRAIN', 'background', ['off', 'daily', 'windows', 'background'] as const),
+      mode: oneOf(env, 'AUTO_TRAIN', 'remote', ['off', 'daily', 'windows', 'background', 'remote'] as const),
       hourUtc: num(env, 'AUTO_TRAIN_HOUR_UTC', 6, 0, 23),
       everyHours: num(env, 'AUTO_TRAIN_EVERY_HOURS', 6, 1, 168),
       startDelayMin: num(env, 'AUTO_TRAIN_START_DELAY_MIN', 10, 0, 240),

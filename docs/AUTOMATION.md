@@ -21,7 +21,7 @@ While the bot runs in any mode (paper, shadow or live), it writes every book upd
 
 ### 2. It runs the training pipeline every day
 
-This is `research/pipeline.ts`, run as a low-priority background process so trading isn't slowed down.
+This is `research/pipeline.ts`. By default (`AUTO_TRAIN=remote`) it runs on a GitHub-hosted runner (`.github/workflows/train.yml`): the job copies the server's last 45 days of recordings, the candle history and the models directory off the server, trains on the runner's own CPUs (up to 5 h; it checkpoints after every step and continues on the next run), and copies the models and history back, where the bot hot-swaps them. The server's `bot.env` is read with every credential line removed. Run it from the Actions tab (Remote training) for an extra run or a single step (`only`). With `AUTO_TRAIN=background` it runs on the server instead, as a low-priority background process.
 
 **History and the TA network go first**, then the SNNs. The TA network (docs/TA_NETWORK.md) learns from years of exchange candles, not from recordings, so it doesn't wait for recorded days. There are three isolated SNNs (crypto, perps, tennis; docs/SNN.md). Each decision model reads only its own network, so every network is trained before the model that reads it. The steps always run in this order:
 
@@ -174,7 +174,7 @@ These can't be automated, or deliberately aren't.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AUTO_TRAIN` | `background` | `background` trains beside trading (lowest CPU priority, frozen only when the machine is busy); `windows` = session-edge windows only; `daily` = once at `AUTO_TRAIN_HOUR_UTC`; `off` disables the schedule. Hot-swapping still works. |
+| `AUTO_TRAIN` | `remote` | `remote` = trained on GitHub Actions (`.github/workflows/train.yml`, daily at 07:17 UTC and on demand), models copied back and hot-swapped, never trained on this server; `background` trains beside trading (lowest CPU priority, frozen only when the machine is busy); `windows` = session-edge windows only; `daily` = once at `AUTO_TRAIN_HOUR_UTC`; `off` disables the schedule. Hot-swapping still works. |
 | `AUTO_TRAIN_EVERY_HOURS` | `6` | Background: a new run this many hours after the last completed one. |
 | `AUTO_TRAIN_START_DELAY_MIN` | `10` | Background: wait this long after the bot starts before training. |
 | `AUTO_TRAIN_MAX_LAG_MS` / `AUTO_TRAIN_MIN_FREE_MB` / `AUTO_TRAIN_MAX_STEAL` | `500` / `300` / `0.15` | Background: training is frozen while the trading loop lags more than this (p99), less memory than this is available, or the host steals more CPU than this (burstable CPU out of credits). |

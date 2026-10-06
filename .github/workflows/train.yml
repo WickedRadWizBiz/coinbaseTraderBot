@@ -1,0 +1,147 @@
+# Remote training: runs the training pipeline (research/pipeline.ts) on a GitHub-hosted runner instead of
+# the Lightsail box, whose burstable CPU cannot sustain the bot plus training (AUTO_TRAIN=remote on the
+# server, the default). Once a day, and manually from the Actions tab:
+#
+#   1. copies the server's data off it (read-only): the last DAYS days of recordings, the candle history,
+#      the models directory (pipeline state, tournaments in progress, journals) and the rest of ~/bot/data
+#   2. runs the pipeline here on the runner's own CPUs (no throttling; up to ~5 h, it checkpoints after
+#      every step, so a run cut short continues next time)
+#   3. copies the models directory and the refreshed history back; the running bot hot-swaps every model
+#      that changed within AUTO_TRAIN_WATCH_SEC (no restart)
+#
+# The server's bot.env is read with every credential line removed (keys, secrets, tokens, passwords) so
+# the pipeline uses the same settings; nothing secret leaves the server. This repository is public, so
+# the job prints only step names and whether each promoted a model; the full pipeline log is copied to
+# ~/bot/data/models/logs/ on the server (the learning report shows its tail).
+#
+# Required secrets (the same as Deploy): LIGHTSAIL_HOST, LIGHTSAIL_USERNAME, LIGHTSAIL_SSH_KEY (optional LIGHTSAIL_PORT).
+name: Remote training
+
+on:
+  schedule:
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Optional: pipeline steps to run, comma separated (e.g. ta_net,setups); empty = everything due'
+        required: false
+        default: ''
+      days:
+        description: 'Recorded days to copy from the server (most recent)'
+        required: false
+        default: '45'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remote-training
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 350
+    env:
+      DAYS: ${{ inputs.days || '45' }}
+      ONLY: ${{ inputs.only || '' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space (preinstalled toolchains the pipeline does not use)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h / | tail -1
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+
+      - name: Copy data from the server (read-only)
+        id: pull
+        run: |
+          set -euo pipefail
+          DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings"
+          # Everything but recordings (copied below), logs and audit trails; nice'd on the server.
+          rsync -a --rsync-path="nice -n 19 rsync" --exclude 'recordings/' --exclude 'logs/' --exclude 'audit*' --exclude '*.log' --exclude '.venv*' bot:bot/data/ "$DATA/"
+          # Recordings: the last DAYS days of market data plus every other file. Today's and yesterday's are
+          # still plain JSON lines: compressed in transit (level 1, cheap on the server's CPU).
+          ssh bot "cd ~/bot/data/recordings && find . -type f \( ! -name 'md-*' -o -mtime -$DAYS \) -printf '%P\n'" > "$RUNNER_TEMP/recordings.txt"
+          rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/"
+          echo "copied $(wc -l < "$RUNNER_TEMP/recordings.txt") recording file(s); data $(du -sh "$DATA" | cut -f1)"
+          # The server's settings without any credential, and without server paths (this runner has its own).
+          ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$RUNNER_TEMP/train.env" || true
+          echo "settings: $(wc -l < "$RUNNER_TEMP/train.env") line(s) from bot.env"
+          df -h / | tail -1
+
+      - name: Train
+        id: train
+        run: |
+          set -uo pipefail
+          DATA="$GITHUB_WORKSPACE/data"
+          set -a; . "$RUNNER_TEMP/train.env"; set +a
+          export DATA_DIR="$DATA" TRADING_MODE=paper AUTO_TRAIN=off
+          mkdir -p "$DATA/models/logs"
+          LOG="$DATA/models/logs/pipeline-remote-$(date -u +%Y-%m-%dT%H-%M-%SZ).log"
+          args=(); [ -n "$ONLY" ] && args=(--only "$ONLY")
+          # Stop after 5 h so the models still get copied back inside the job's time limit; the pipeline
+          # checkpoints after every step and continues where it stopped on the next run.
+          timeout --signal=TERM --kill-after=2m 300m node --import tsx research/pipeline.ts "${args[@]}" > "$LOG" 2>&1
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          case $code in 0) echo "pipeline finished";; 124|137) echo "pipeline stopped at the 5 h limit (progress saved; continues next run)";; *) echo "pipeline exited with $code";; esac
+
+      - name: Summary (step names and promotions only)
+        if: always() && steps.pull.outcome == 'success'
+        run: |
+          python3 - "$GITHUB_WORKSPACE/data/models/reports" <<'PY'
+          import glob, json, os, sys
+          reps = sorted(glob.glob(os.path.join(sys.argv[1], 'pipeline-*.json')))
+          if not reps: print('no pipeline report'); sys.exit(0)
+          r = json.load(open(reps[-1]))
+          print(os.path.basename(reps[-1]), '| complete:', r.get('complete'), '| recorded days:', r.get('days'))
+          for st in r.get('steps') or []:
+              d = st.get('detail') if isinstance(st.get('detail'), dict) else {}
+              state = 'skipped' if st.get('skipped') else 'error' if not st.get('ok') else 'promoted' if d.get('promoted') else 'done'
+              print(f"  {st.get('step')}: {state} ({round((st.get('ms') or 0) / 60000, 1)} min)")
+          PY
+
+      - name: Copy models and history back to the server
+        if: always() && steps.pull.outcome == 'success'
+        run: |
+          set -euo pipefail
+          DATA="$GITHUB_WORKSPACE/data"
+          # --update: never overwrite a file that is newer on the server.
+          rsync -a --update --rsync-path="nice -n 19 rsync" "$DATA/models/" bot:bot/data/models/
+          [ -d "$DATA/history" ] && rsync -a --update --rsync-path="nice -n 19 rsync" "$DATA/history/" bot:bot/data/history/ || true
+          echo "models and history copied back; the bot hot-swaps what changed"
+
+      - name: Fail on a pipeline error
+        if: steps.train.outputs.code != '' && steps.train.outputs.code != '0' && steps.train.outputs.code != '124' && steps.train.outputs.code != '137'
+        run: exit 1
