@@ -17,7 +17,7 @@ import { tmpAudit, tmpDir } from './helpers';
 import { Vault } from '../bot/vault/vault';
 import { BalanceMonitor } from '../bot/vault/balanceMonitor';
 
-async function setup(opts: { dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number } = {}) {
+async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number } = {}) {
   const dir = tmpDir();
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy, STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_ENABLED: 'false', ...opts.env });
   const now = Date.now();
@@ -31,7 +31,7 @@ async function setup(opts: { dailyLossUsd?: string; exitPolicy?: string; vault?:
   const md = new MarketData(cfg, rest, undefined, new Recorder(path.join(dir, 'rec')));
   await md.refreshCatalog(now);
   // Fresh book and a warmed-up index slightly above the strike.
-  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.45, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, now);
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.45, size: 50 }], asks: [{ price: 0.6, size: opts.askSize ?? 50 }] }, now);
   const idx = md.index.get('BTC')!;
   let seed = 1;
   const rand = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
@@ -255,4 +255,19 @@ test('conviction: every evaluation records the TA overlay; the altcoin risk-on r
   assert.ok(st.conviction!.priority >= 10, 'altcoin risk-on is selected first');
   assert.ok(st.notes.some((n) => /altcoin risk-on: .* x2\.5/.test(n)), JSON.stringify({ fv: st.fairValue, q: st.q, bid: st.bestBid, ask: st.bestAsk, blocked: st.blocked, ew: st.entryWindow, notes: st.notes }));
   assert.ok(st.notes.some((n) => /conviction x2\.50 on the YES entry: [\d.]+ -> [\d.]+ contracts/.test(n)), st.notes.join(' | '));
+});
+
+test('conviction: the adversary vetoes the altcoin boost on an entry it breaks', async () => {
+  // Ask-heavy book: the tape attack breaks a YES entry, so it keeps its normal size.
+  const alt = await setup({ trend: 0.000002, askSize: 5000, env: { NON_ALTCOINS: 'NONE', PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+  const now = Date.now();
+  let u = 5.0;
+  for (let s = 1800; s >= 0; s -= 10) { u *= 1 - 0.00002 + 0.00001 * Math.sin(s); alt.md.usdtd.add(u, now - s * 1000); }
+  const r = await alt.recon.run('startup');
+  alt.engine.balance = r!.balance;
+  await alt.engine.tick();
+  const st = alt.engine.status.get(alt.market.ticker)!;
+  assert.equal(st.conviction!.alt.active, true, JSON.stringify(st.conviction));
+  assert.ok(st.notes.some((n) => /adversary vetoed the x2\.5 boost \(tape/.test(n)), st.notes.join(' | '));
+  assert.ok(!st.notes.some((n) => /conviction x2\.50 on the YES/.test(n)), st.notes.join(' | '));
 });

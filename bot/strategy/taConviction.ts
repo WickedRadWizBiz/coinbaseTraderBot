@@ -149,11 +149,17 @@ export function directionalConviction(asset: string, dir: number, f: Record<stri
   const taDir = taNetDirection(v, c.live);
   const alt = altcoinRiskOn(asset, f.usdtd_ret_15m_z, f.ta_rsi_1h, c);
   const confMult = 1 + (Math.max(1, c.maxBoost) - 1) * b.breadth;
-  const altMult = alt.active && dir > 0 ? c.altBoost : 1;
+  // Adversarial veto (perps have no per-entry adversary run): no altcoin boost when the TA network
+  // calls the underlying against the trade, or more TA / confluence signals oppose it than agree.
+  const veto = taDir !== undefined && Math.sign(taDir) === -Math.sign(dir) && Math.abs(taDir) >= 0.2 ? `TA network against (${taDir.toFixed(2)})`
+    : b.oppose.length > b.agree.length ? `${b.oppose.length} TA / confluence signals against vs ${b.agree.length} for` : undefined;
+  const altOn = alt.active && dir > 0 && !veto;
+  const altMult = altOn ? c.altBoost : 1;
   const mult = Math.min(c.maxTotal, confMult * altMult);
-  const why = [`breadth ${b.breadth.toFixed(2)} (${b.agree.length} agree${b.oppose.length ? `, ${b.oppose.length} against` : ''}) x${confMult.toFixed(2)}`, altMult > 1 ? `${alt.why} x${altMult}` : undefined].filter(Boolean).join('; ');
+  const why = [`breadth ${b.breadth.toFixed(2)} (${b.agree.length} agree${b.oppose.length ? `, ${b.oppose.length} against` : ''}) x${confMult.toFixed(2)}`,
+    altOn ? `${alt.why} x${altMult}` : alt.active && dir > 0 ? `${alt.why}, boost vetoed: ${veto}` : undefined].filter(Boolean).join('; ');
   const up = confluenceBreadth(signals, 1).breadth, dn = confluenceBreadth(signals, -1).breadth;
-  return { mult, priority: selectionPriority(alt.active && dir > 0, taDir, up, dn), why };
+  return { mult, priority: selectionPriority(altOn, taDir, up, dn), why };
 }
 
 /** TaNetView from a TA network output (raw heads with validation and graded skill). */

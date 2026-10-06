@@ -1461,7 +1461,7 @@ export class Engine {
         const sideDir = (side === 'yes' ? 1 : -1) * direction;
         const cost = side === 'yes' ? p.price : 1 - p.price;
         const breadth = confluenceBreadth(signals, sideDir).breadth;
-        let advMult = 1;
+        let advMult = 1, vetoed: string | undefined;
         if (S.adversarialBoost) {
           const verdict: AdversaryVerdict = evaluateEntry({
             side, cost, fee: orderFee(1, cost, !p.postOnly, md.feesFor(m.ticker)), q: st.q ?? pYes,
@@ -1473,12 +1473,15 @@ export class Engine {
           });
           st.adversary = { side, multiplier: verdict.multiplier, broken: verdict.broken, evidence: verdict.evidence, failed: verdict.attacks.filter((a) => a.status === 'fail').map((a) => `${a.name}: ${a.detail}`), ts: now };
           advMult = verdict.multiplier;
+          // An entry the adversary breaks gets no altcoin boost either (normal size).
+          if (verdict.broken) vetoed = st.adversary.failed[0] ?? 'no edge after the attacks';
           plan.notes.push(advMult > 1
             ? `adversary could not break the ${side.toUpperCase()} entry: x${advMult.toFixed(2)} (breadth ${breadth.toFixed(2)})`
             : `adversary: ${verdict.broken ? `broken (${st.adversary.failed[0] ?? 'no edge'})` : 'held, but no TA/confluence evidence to back a boost'}`);
         }
-        const altMult = alt.active && sideDir > 0 ? S.altBoost : 1;
+        const altMult = alt.active && sideDir > 0 && !vetoed ? S.altBoost : 1;
         if (altMult > 1) plan.notes.push(`${alt.why}: x${altMult}`);
+        else if (alt.active && sideDir > 0 && vetoed) plan.notes.push(`${alt.why}, but the adversary vetoed the x${S.altBoost} boost (${vetoed})`);
         const mult = Math.min(S.convictionMaxTotal, advMult * altMult);
         if (mult <= 1) continue;
         const boosted = decide({ ...view, maxOrderRiskUsd: view.maxOrderRiskUsd * mult, maxContracts: floorCount(view.maxContracts * mult) }, { ...strat, kellyFraction: strat.kellyFraction * mult }, { exits: false, blockReductions: huntMode, entries: true });

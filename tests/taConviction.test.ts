@@ -80,3 +80,16 @@ test('lanes: higher-priority candidates are entered first and the multiplier sca
   assert.equal(got[0].cand.sig.asset, 'SOL', 'priority beats the higher score');
   assert.equal(got[0].mult, 2.5);
 });
+
+test('TA conviction: the altcoin boost on a perp long is vetoed when the TA network or the confluence is against it', () => {
+  const c = { ...CFG, maxBoost: 2, maxTotal: 2.5 };
+  const riskOn = { usdtd_ret_15m_z: -1, ta_rsi_1h: 0.2 };
+  const against = directionalConviction('XRP', 1, riskOn, { up1: 0.4, up4: 0.4, validated1: true, validated4: true }, c);
+  assert.equal(against.mult, 1);
+  assert.match(against.why, /boost vetoed: TA network against/);
+  assert.ok(against.priority < 10, 'a vetoed boost does not jump the queue');
+  const bearish = directionalConviction('XRP', 1, { ...riskOn, conf_count: -2, taconf_net_trend: -2, ta_ema_stack_1h: -1 }, undefined, c);
+  assert.equal(bearish.mult, 1);
+  assert.match(bearish.why, /signals against/);
+  assert.equal(directionalConviction('XRP', 1, riskOn, undefined, c).mult, 2.5, 'nothing against: boosted');
+});
