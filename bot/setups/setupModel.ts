@@ -3,6 +3,7 @@
 // decides whether it is worth taking and how big (meta-labeling). A lane without enough history for
 // its own model scores every setup at its historical average (rule-only).
 
+import type { OptimalFReport } from '../strategy/optimalF';
 import fs from 'fs';
 import { gbdtLogit, validateGbdt, type GbdtModel } from '../model/trees';
 import type { Lane } from './detectors';
@@ -80,6 +81,10 @@ export interface SetupModelParams {
   /** Equity the dollar figures in the validation assume. */
   equityUsd: number;
   validation: Partial<Record<Lane, LaneValidation>>;
+  /** Out-of-sample lane trades ([exit time, net R], walk-forward scores) for the optimal f cap
+   *  (bot/strategy/optimalF.ts): the live trader re-weights them by age and adds its own trades. Trades
+   *  before devUntil count half (the book's thresholds were chosen on them). */
+  sizing?: Partial<Record<Lane, { trades: Array<[number, number]>; devUntil: number; report?: OptimalFReport }>>;
   trainedAt: string;
   data: { assets: string[]; from: string; to: string; holdoutFrom: string; finalFrom: string; events: number };
 }

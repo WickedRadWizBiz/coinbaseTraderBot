@@ -265,7 +265,7 @@ async function main(): Promise<void> {
         journal: new SetupJournal(path.join(cfg.dataDir, 'setups'), (e) => log.warn(`setup journal: ${String(e)}`)),
         snnGatePath: () => path.join(cfg.autoTrain.dir, 'setup_snn_gate.json'),
         trainingOverride, streak: perpsStreak, breakEven: perpsBreakEven, lossAt: cfg.strategy.ddScaleAt,
-        conviction,
+        conviction, optimalF: { ...cfg.optimalF, paper: P.trading !== 'live' },
       });
       const st = (directionalTrader as SetupTrader).status();
       if (st.modelError) log.warn(`setup trader: ${st.modelError}; it records setups but opens no trades until a model exists`);

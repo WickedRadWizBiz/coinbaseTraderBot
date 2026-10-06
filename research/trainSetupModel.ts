@@ -18,6 +18,7 @@
 //    its bootstrap 5% lower bound above zero, and the frozen final window must be net positive. The
 //    deployed model is refit on every event with the same settings.
 
+import { optimalF, recencyWeight } from '../bot/strategy/optimalF';
 import { taEngine } from '../bot/ta/talib';
 import fs from 'fs';
 import path from 'path';
@@ -387,6 +388,15 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
     }
     log(`${lane} lane ${reasons.length ? `NOT validated: ${reasons.join('; ')}` : 'validated'}`);
   }
+  // Optimal f per lane on the out-of-sample trades (the live trader recomputes it with its own trades
+  // added; this report is what the history alone supports at training time).
+  const sizing: NonNullable<SetupModelParams['sizing']> = {};
+  for (const lane of ['fast', 'slow'] as const) {
+    const lt = trades.filter((t) => t.lane === lane).sort((a, b) => a.exitTs - b.exitTs);
+    const rep = optimalF(lt.map((t) => ({ ts: t.exitTs, r: t.r, w: recencyWeight(t.exitTs, end, 365) * (t.entryTs < holdoutFrom ? 0.5 : 1) })), { horizon: 100 });
+    sizing[lane] = { trades: lt.map((t) => [t.exitTs, +t.r.toFixed(4)] as [number, number]), devUntil: holdoutFrom, report: rep };
+    log(`${lane} optimal f: ${rep.n} trades, mean R ${rep.meanR.toFixed(3)}, g* ${(100 * rep.gStar).toFixed(2)}% (bootstrap p25 ${(100 * rep.gP25).toFixed(2)}% / p50 ${(100 * rep.gP50).toFixed(2)}%) at risk per trade -> cap ${Number.isFinite(rep.cap) ? `${(100 * rep.cap).toFixed(2)}%` : 'none'}; 95% of 100-trade runs draw down less than ${rep.ddP95R.toFixed(1)}R`);
+  }
   // Information only (not used for any choice): the same book with limit-order entries (maker fee,
   // no slippage) instead of market entries, from the holdout on.
   const makerCosts: CostModel = { ...costs, entry: costs.makerExit };
@@ -409,7 +419,7 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
   const lanes: SetupModelParams['lanes'] = {};
   for (const lane of ['fast', 'slow'] as const) lanes[lane] = fitLane(events.filter((e) => e.sig.lane === lane), 11, maskedIndices(groups));
   return {
-    version: `setups1-${iso(Date.now())}`, schema: SETUP_SCHEMA, features: SETUP_FEATURES, groups, groupChoice, volTrailK: VOL_ADAPT.trailK, taEngine: taEngine(), lanes, book, costs, equityUsd: equity, validation, trainedAt: new Date().toISOString(),
+    version: `setups1-${iso(Date.now())}`, schema: SETUP_SCHEMA, features: SETUP_FEATURES, groups, groupChoice, volTrailK: VOL_ADAPT.trailK, taEngine: taEngine(), lanes, book, costs, equityUsd: equity, validation, sizing, trainedAt: new Date().toISOString(),
     data: { assets: [...assets.keys()], from: iso(events[0].at), to: iso(end), holdoutFrom: iso(holdoutFrom), finalFrom: iso(finalFrom), events: events.length },
   };
 }

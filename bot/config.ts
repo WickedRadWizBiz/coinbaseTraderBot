@@ -252,6 +252,23 @@ export interface Config {
   autoTrain: AutoTrainConfig;
   /** TA network (bot/ta/taNet.ts) and the historical candle store it trains on (research/history). */
   taNet: TaNetConfig;
+  /** Optimal f cap on Kelly sizing (bot/strategy/optimalF.ts). */
+  optimalF: OptimalFConfig;
+}
+
+export interface OptimalFConfig {
+  enabled: boolean;
+  /** Bootstrap quantile of the growth-optimal fraction used as the cap (0.25 = its 25th percentile). */
+  quantile: number;
+  /** Recency half-life of a trade's weight (days). */
+  halfLifeDays: number;
+  /** A live (or paper) trade counts this many backtested ones. */
+  liveMult: number;
+  /** Trades needed before a cap applies: setup lanes (backtest + live), Kalshi (settled positions). */
+  minTradesSetups: number;
+  minTradesKalshi: number;
+  /** Paper: the cap never goes below this share of the configured risk (keeps collecting evidence). */
+  paperFloor: number;
 }
 
 export interface TaNetConfig {
@@ -921,6 +938,15 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         setupMinTargetUsd: num(env, 'SETUP_MIN_TARGET_USD', 0, 0, 1e7),
       };
     })(),
+    optimalF: {
+      enabled: bool(env, 'OPTIMAL_F', true),
+      quantile: num(env, 'OPTIMAL_F_QUANTILE', 0.25, 0.05, 0.5),
+      halfLifeDays: num(env, 'OPTIMAL_F_HALF_LIFE_DAYS', 365, 7, 3650),
+      liveMult: num(env, 'OPTIMAL_F_LIVE_MULT', 2, 0.1, 20),
+      minTradesSetups: num(env, 'OPTIMAL_F_MIN_TRADES', 50, 10, 10000),
+      minTradesKalshi: num(env, 'OPTIMAL_F_MIN_TRADES_KALSHI', 100, 10, 10000),
+      paperFloor: num(env, 'OPTIMAL_F_PAPER_FLOOR', 0.25, 0, 1),
+    },
     autoTrain: {
       mode: oneOf(env, 'AUTO_TRAIN', 'remote', ['off', 'daily', 'windows', 'background', 'remote'] as const),
       hourUtc: num(env, 'AUTO_TRAIN_HOUR_UTC', 6, 0, 23),
