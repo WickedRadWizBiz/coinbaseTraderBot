@@ -37,7 +37,7 @@ import { columnMask, columnReach, localDropMask, type FractalPlan, type JoinMask
 import {
   buildBranchInput, closedIndex, sigma24, TANET_CTX_FEATURES, TANET_CTX_HOURLY, TANET_D1_BARS, TANET_DAY_FEATURES, TANET_FEATURES, TANET_H1_BARS, TANET_MACRO_DAYS, TANET_MICRO_F, TANET_MICRO_STEPS, TANET_SCHEMA,
   TANET_STRATEGY, TANET_SWING_BARS, TANET_SWING_F, TANET_TREND_FEATURES, TANET_TREND_STEPS, taNetDayVector, taNetFeatureMap, barrierResult, taNetBarrierPosition, taNetBarrierWidth, TANET_BARRIER, tripleBarrier, taNetMicro, taNetSwing, windowOk,
-  taNetFamilies, type PatternReport, type TaNetHeadName, type TaNetNetworkValidation, type TaNetStrategy, type TaNetHeadValidation, type TaNetNorm, type TaNetParams, type TaNetStateCache,
+  taNetFamilies, calibrated, fitPlatt, type PatternReport, type TaNetHeadName, type TaNetNetworkValidation, type TaNetStrategy, type TaNetHeadValidation, type TaNetNorm, type TaNetParams, type TaNetStateCache,
 } from '../bot/ta/taNet';
 import { coverageFloor as sharedCoverageFloor } from '../bot/util/fitness';
 import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type FitnessReport, type Interaction } from './fitness';
@@ -349,13 +349,13 @@ export function trainEpoch(D: TaNetData, dims: BranchDims, norm: TaNetParams['no
 
 export interface Forecasts { idx: number[]; up1: Float64Array; up4: Float64Array; vol: Float64Array }
 
-export function forecast(D: TaNetData, dims: BranchDims, norm: TaNetParams['norm'], w: Float64Array, h: Hyper, idx: number[], drop?: BranchDrop): Forecasts {
-  const L = branchLayout(dims).layout, g = gatesOf(h);
+export function forecast(D: TaNetData, dims: BranchDims, norm: TaNetParams['norm'], w: Float64Array, h: Hyper | BranchGates, idx: number[], drop?: BranchDrop, calib?: TaNetParams['calib']): Forecasts {
+  const L = branchLayout(dims).layout, g = 'micro' in h ? (h as BranchGates) : gatesOf(h as Hyper);
   const up1 = new Float64Array(idx.length), up4 = new Float64Array(idx.length), vol = new Float64Array(idx.length);
   idx.forEach((i, k) => {
     const raw = rawInputs(D, i);
     const o = branchForward(dims, w, g, buildBranchInput(dims, norm, raw.trend, raw.macro, raw.micro, raw.swing, raw.ctx), L, drop).out;
-    up1[k] = 1 / (1 + Math.exp(-o[0])); up4[k] = 1 / (1 + Math.exp(-o[1])); vol[k] = Math.max(-3, Math.min(3, o[2]));
+    up1[k] = calibrated(1 / (1 + Math.exp(-o[0])), calib?.up_1h); up4[k] = calibrated(1 / (1 + Math.exp(-o[1])), calib?.up_4h); vol[k] = Math.max(-3, Math.min(3, o[2]));
   });
   return { idx, up1, up4, vol };
 }
@@ -568,10 +568,19 @@ export interface TaNetTrainOpts {
   catchUpEpochs?: number;
   /** Compute the per-fractal-column pattern report on the holdout (default true). */
   patterns?: boolean;
+  /** Months just before the holdout the final training pass leaves out, to fit the direction heads'
+   *  calibration on data the network never trained on (default: one evaluation period; 0 = no calibration). */
+  calibMonths?: number;
+  /** The network live now: graded on the same holdout rows as the candidate (champion / challenger),
+   *  when its inputs match and it never trained on that holdout. */
+  incumbent?: TaNetParams;
   log?: (m: string) => void;
 }
 
-export interface TaNetReport { params: TaNetParams; rounds: number; newRounds: number; /** The tournament has reached the holdout (no rounds left to run). */ complete: boolean; remaining: number }
+/** Holdout score of a network: mean over the heads of (model loss / naive loss); lower is better, 1 = naive. */
+export interface ChampionScores { candidate: number; incumbent: number | null; incumbentVersion: string | null; why?: string; rows: number }
+
+export interface TaNetReport { params: TaNetParams; rounds: number; newRounds: number; /** The tournament has reached the holdout (no rounds left to run). */ complete: boolean; remaining: number; champion?: ChampionScores }
 
 export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<TaNetReport> {
   const log = o.log ?? (() => {});
@@ -653,21 +662,32 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
   if (!rounds.length && resume) Object.assign(res, { members: resume.members, trials: resume.trials, log: resume.log, elite: resume.members.find((m) => m.id === resume.log[resume.log.length - 1]?.ranking[0]?.member) ?? resume.members[0] });
   const elite = res.elite;
 
-  // Bring the elite up to the holdout (one more pass on the block just before it), never past it.
+  // Bring the elite up to the holdout (one more pass on the block just before it), never past it. The
+  // last calibMonths before the holdout are left out of that pass: the direction heads' calibration is
+  // fitted there, on hours the network never trained on (raw probabilities are overconfident).
+  const calibMonths = o.calibMonths ?? (o.evalMonths ?? 1);
+  const calibFrom = Math.floor((holdoutFrom - calibMonths * MONTH) / DAY) * DAY;
   const finalW = elite.state.w.slice();
   const finalSt: Member = { w: finalW, m: elite.state.m.slice(), v: elite.state.v.slice(), step: elite.state.step };
-  trainEpoch(D, dims, norm, finalSt, elite.hyper, between(holdoutFrom - trainMs, holdoutFrom - emb, stride), seed + 99_991);
+  trainEpoch(D, dims, norm, finalSt, elite.hyper, between(calibFrom - trainMs, calibFrom - emb, stride), seed + 99_991);
+  let calib: TaNetParams['calib'];
+  if (calibMonths > 0) {
+    const cr = between(calibFrom, holdoutFrom - emb);
+    const raw = forecast(D, dims, norm, finalW, elite.hyper, cr);
+    calib = { up_1h: fitPlatt(raw.up1, cr.map((i) => D.y1[i])), up_4h: fitPlatt(raw.up4, cr.map((i) => D.y4[i])) };
+    for (const [k, c] of Object.entries(calib)) log(`calibration ${k}: a ${c!.a.toFixed(3)}, b ${c!.b.toFixed(3)} on ${c!.rows} rows (log loss ${c!.before.toFixed(5)} -> ${c!.after.toFixed(5)})`);
+  }
 
   // Holdout: strategy fitness and per-head grading against the naive forecast. Then the frozen final
   // window, graded the same way; it decides nothing but whether the heads also hold up there.
   const strat = strategyOf(elite.hyper);
   const ho = between(holdoutFrom, finalFrom);
-  const fc = forecast(D, dims, norm, finalW, elite.hyper, ho);
+  const fc = forecast(D, dims, norm, finalW, elite.hyper, ho, undefined, calib);
   const hoX = strategyInteractions(D, fc, strat);
   const hoFit = fitnessOf(hoX, { from: holdoutFrom, to: finalFrom, clusterMs: H });
   const hoSel = selectiveStats(D, fc, strat);
   const fi = finalFrom < tEnd ? between(finalFrom, tEnd) : [];
-  const fcF = fi.length ? forecast(D, dims, norm, finalW, elite.hyper, fi) : undefined;
+  const fcF = fi.length ? forecast(D, dims, norm, finalW, elite.hyper, fi, undefined, calib) : undefined;
   const pre = between(holdoutFrom - trainMs, holdoutFrom - emb);
   const meanOf = (a: Float32Array, idx: number[]) => { let s = 0, c = 0; for (const i of idx) if (Number.isFinite(a[i])) { s += a[i]; c++; } return c ? s / c : NaN; };
   const ll = (p: number, y: number) => { const q = Math.min(1 - 1e-9, Math.max(1e-9, p)); return y ? -Math.log(q) : -Math.log(1 - q); };
@@ -711,6 +731,25 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
   }
   const heads = { up_1h: { validation: grade('up_1h') }, up_4h: { validation: grade('up_4h') }, vol_4h: { validation: grade('vol_4h') } };
 
+  // Champion / challenger: the live network graded on the same holdout rows (mean over the heads of model
+  // loss / naive loss). Only when its inputs match and its own holdout began no later than this one's
+  // (so it never trained on these hours).
+  const scoreOf = (f: Forecasts) => (['up_1h', 'up_4h', 'vol_4h'] as const).reduce((a, k) => { const g = gradeOn(k, ho, f); return a + g.model / Math.max(1e-12, g.base); }, 0) / 3;
+  const champion: ChampionScores = { candidate: scoreOf(fc), incumbent: null, incumbentVersion: o.incumbent?.version ?? null, rows: ho.length };
+  const inc = o.incumbent;
+  if (inc) {
+    const why = inc.schema !== TANET_SCHEMA ? `incumbent has schema ${inc.schema}` : JSON.stringify(inc.dims) !== JSON.stringify(dims) ? 'incumbent has another layout'
+      : inc.trendFeatures.join() !== TANET_TREND_FEATURES.join() || inc.dayFeatures.join() !== TANET_DAY_FEATURES.join() ? 'incumbent reads other inputs'
+      : !(Date.parse(inc.data.holdoutFrom) <= holdoutFrom) ? 'incumbent trained on part of this holdout' : undefined;
+    if (why) champion.why = why;
+    else {
+      try {
+        champion.incumbent = scoreOf(forecast(D, dims, inc.norm, Float64Array.from(inc.weights), inc.gates, ho, undefined, inc.calib));
+      } catch (e) { champion.why = `incumbent could not be scored: ${(e as Error).message}`; }
+    }
+    log(`champion / challenger on ${ho.length} holdout rows: candidate ${champion.candidate.toFixed(5)}, incumbent ${inc.version} ${champion.incumbent?.toFixed(5) ?? `n/a (${champion.why})`} (model / naive loss, lower is better)`);
+  }
+
   // Network-level hurdles on the elite lineage's out-of-sample record.
   const dsr = dsrOf(elite.record, H, res.trials);
   const regimes = regimeReport(elite.record, H, minPerRegime);
@@ -745,11 +784,11 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
   for (const [k, h] of Object.entries(heads)) log(`${k}: holdout ${h.validation.metric} ${h.validation.model.toFixed(5)} vs ${h.validation.base.toFixed(5)}, CI [${h.validation.improvement.lo.toExponential(2)}, ${h.validation.improvement.hi.toExponential(2)}]${h.validation.hitRate !== undefined ? `, hit ${(h.validation.hitRate * 100).toFixed(2)}%` : ''}; speaks live: ${h.validation.validated}`);
 
   return {
-    rounds: res.log.length, newRounds: rounds.length, complete: remaining === 0, remaining,
+    rounds: res.log.length, newRounds: rounds.length, complete: remaining === 0, remaining, champion,
     params: {
       version: `tanet5-${new Date().toISOString().slice(0, 10)}-${D.assets.length}a-r${res.log.length}`,
       schema: TANET_SCHEMA, dims, gates: gatesOf(elite.hyper), weights: Array.from(finalW), norm, patterns, context: D.context,
-      trendFeatures: [...TANET_TREND_FEATURES], dayFeatures: [...TANET_DAY_FEATURES], strategy: strat, heads, taEngine: taEngine(),
+      trendFeatures: [...TANET_TREND_FEATURES], dayFeatures: [...TANET_DAY_FEATURES], strategy: strat, heads, taEngine: taEngine(), ...(calib ? { calib } : {}),
       arch: o.arch ?? 'flat', ...(dims.fam ? { familyNames: (() => { const f = taNetFamilies(); return [...f.trendNames.map((n) => `trend:${n}`), ...f.ctxNames.map((n) => `ctx:${n}`)]; })() } : {}),
       network: {
         dsr: { sharpe: dsr.sharpe, sr0: dsr.sr0, probability: dsr.probability, n: dsr.n }, trials: res.trials, regimes,
@@ -778,6 +817,8 @@ export async function trainTaNetMain(argOf: (k: string, d: string) => string = c
     stride: num('stride', '2'), epochsPerRound: num('epochs', '1'), minPerRegime: num('min-per-regime', '100'), dsrThreshold: num('dsr', '0.95'),
     statePath: argOf('state', path.join(hist, '.tanet-population.json')), fresh: argOf('fresh', '') === 'true' || process.argv.includes('--fresh'),
     maxRounds: num('max-rounds', '0') || undefined, restartEvery: num('restart-every', '0'), catchUpEpochs: num('catch-up-epochs', '3'), patterns: argOf('patterns', 'true') !== 'false', log,
+    calibMonths: argOf('calib-months', '') === '' ? undefined : num('calib-months', '1'),
+    incumbent: (() => { const f = argOf('incumbent', ''); try { return f && fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) as TaNetParams : undefined; } catch { return undefined; } })(),
   });
   const out = argOf('out', 'params/ta_net.json');
   fs.mkdirSync(path.dirname(out), { recursive: true });

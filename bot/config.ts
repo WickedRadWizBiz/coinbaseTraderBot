@@ -143,6 +143,8 @@ export interface StrategyConfig {
   nonAlts: string[];
   /** Largest combined size multiplier (adversary / confluence x altcoin rule) on any entry. */
   convictionMaxTotal: number;
+  /** Weight of the TA network's validated volatility forecast in the pricing sigma (0 = off, 1 = fully). */
+  taVolWeight: number;
   modelHealthMinWindows: number;
   huntTargetMargin: number;
   huntMinConfluence: number;
@@ -255,6 +257,8 @@ export interface TaNetConfig {
   modelPath: string;
   /** Only heads that beat the naive forecast in the blind walk-forward test speak (default true). */
   requireValidated: boolean;
+  /** Versions in the performance-weighted ensemble (bot/ta/taNetEnsemble.ts): the live network plus up to N-1 archived ones (1 = off). */
+  ensemble: number;
   /** Historical candles (data/history/<source>/<ASSET>/<tf>.csv). */
   historyDir: string;
   /** Pipeline: refresh history from Binance Vision + Coinbase before training (needs internet). */
@@ -319,6 +323,8 @@ export interface AutoTrainConfig {
   /** always = promote every freshly trained model (hot-swap mode); validated = only models whose
    *  validation passed (MLP: validation.passed; perps: validated(); SNN: its stage accepted). */
   promote: 'always' | 'validated';
+  /** Champion / challenger (research/champion.ts): a retrained model replaces the live one only if it is at least as good; replaced models are archived. */
+  champion: boolean;
   /** auto = highest stage whose whole chain S1..Sk the ablation accepted (else SNN_STAGE). */
   snnStage: 'auto' | 'S0' | 'S1' | 'S2' | 'S3' | 'S4' | 'S5' | 'S6';
   ablationDays: number;
@@ -764,6 +770,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     altRsiMin: num(env, 'ALT_RSI_MIN', 50, 0, 100),
     nonAlts: (env.NON_ALTCOINS ?? 'BTC').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
     convictionMaxTotal: num(env, 'CONVICTION_MAX_TOTAL', 2.5, 1, 5),
+    taVolWeight: num(env, 'TA_VOL_WEIGHT', 0.5, 0, 1),
     modelHealthMinWindows: num(env, 'MODEL_HEALTH_MIN_WINDOWS', 200, 20, 100000),
     huntTargetMargin: num(env, 'HUNT_TARGET_MARGIN', 0.02, 0, 0.5),
     huntMinConfluence: num(env, 'HUNT_MIN_CONFLUENCE', 2, 1, 7),
@@ -923,6 +930,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       recordingsGzipAfterDays: num(env, 'RECORDINGS_GZIP_AFTER_DAYS', 2, 0, 365),
       recordingsMinFreeGb: num(env, 'RECORDINGS_MIN_FREE_GB', 3, 0, 1e4),
       promote: oneOf(env, 'AUTO_TRAIN_PROMOTE', 'always', ['always', 'validated'] as const),
+      champion: bool(env, 'AUTO_TRAIN_CHAMPION', true),
       snnStage: oneOf(env, 'AUTO_TRAIN_SNN_STAGE', 'auto', ['auto', 'S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const),
       ablationDays: num(env, 'AUTO_TRAIN_ABLATION_DAYS', 7, 1, 365),
       ablationEveryDays: num(env, 'AUTO_TRAIN_ABLATION_EVERY_DAYS', 7, 0, 365),
@@ -1035,6 +1043,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       enabled: bool(env, 'TA_NET', true),
       modelPath: path.resolve(env.TA_NET_PATH ?? './params/ta_net.json'),
       requireValidated: bool(env, 'TA_NET_REQUIRE_VALIDATED', true),
+      ensemble: num(env, 'TA_NET_ENSEMBLE', 3, 1, 6),
       historyDir: path.resolve(env.HISTORY_DIR ?? path.join(dataDir, 'history')),
       historyUpdate: bool(env, 'HISTORY_AUTO_UPDATE', true),
       tvFill: bool(env, 'TV_FILL', true),

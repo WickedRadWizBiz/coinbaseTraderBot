@@ -350,3 +350,10 @@ npm run research:ta -- --history data/history
 ```
 
 That gives the 1h, 4h and 1d rules years of evidence instead of a few weeks.
+
+
+## Calibration, champion / challenger, ensemble (October 2026)
+
+- **Calibration.** On the October holdout the direction heads called the right side 51.2% of the time but scored worse than a coin flip on log loss (1h: 0.6938 vs 0.6932; 4h: 0.6999 vs 0.6930): the probabilities were too extreme. The final training pass now stops one evaluation period (`--calib-months`, default `--eval-months`, 1) before the holdout; Platt parameters (P = sigmoid(a x logit + b), a in [0, 1] so it only shrinks, |b| <= 0.2) are fitted on that untouched month and stored in `params.calib`. The holdout and final window are graded on calibrated probabilities, and the live network outputs them.
+- **Champion / challenger.** `--incumbent <file>` grades the live network on the same holdout rows (mean over the heads of model loss / naive loss). The pipeline promotes the candidate only if it scores at least as well; otherwise the live network stays. The incumbent is only compared when its inputs match and its own holdout began no later than the candidate's (it never trained on those hours). Replaced networks are archived in `data/models/archive/ta_net/`.
+- **Ensemble.** The bot runs the live network plus up to two archived versions and blends them by prior x exp(40 x rolling skill) (`bot/ta/taNetEnsemble.ts`). A head counts as validated when versions holding at least half the weight validated it.

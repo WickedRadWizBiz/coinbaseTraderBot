@@ -66,7 +66,8 @@ import { logger } from './util/log';
 import { VolForecaster, type VolModel } from './model/volModel';
 import { marginalKelly, timeNormalizedEdge, type BinaryBet } from './sizing/portfolioKelly';
 import { orderFee } from './fees';
-import { activeTaNet } from './ta/taNet';
+import { activeTaNet, sigma24 } from './ta/taNet';
+import { activeTaNetEnsemble, taNetView } from './ta/taNetEnsemble';
 import { applyFillModel, fillInputs, isMakerEntry, type FillModel } from './tca/fillModel';
 import { FillLog } from './tca/fillLog';
 import { recordLatency } from './util/latency';
@@ -105,6 +106,8 @@ export interface MarketStatus {
    *  the shift it applied, signal breadth, the altcoin risk-on rule, and the selection priority. */
   pBeforeTa?: number;
   taShift?: number;
+  /** Sigma multiplier from the TA network's validated volatility forecast (1 = none). */
+  taVolMult?: number;
   conviction?: { taDir: number | null; drift: string[]; breadthUp: number; breadthDown: number; agree: string[]; oppose: string[]; alt: { active: boolean; why: string }; priority: number };
   /** Last adversarial verdict on an entry here (multiplier > 1 = it could not be broken). */
   adversary?: { side: string; multiplier: number; broken: boolean; evidence: boolean; failed: string[]; ts: number };
@@ -610,6 +613,7 @@ export class Engine {
       // Does the TA network's drift improve the probabilities? (log loss with vs without it, per window)
       taHealth: this.d.taHealth?.status() ?? null,
       cpu: this.cpu.status(),
+      taEnsemble: activeTaNetEnsemble()?.status() ?? null,
       entryGuards: this.entryGuards(now),
     };
   }
@@ -1277,10 +1281,10 @@ export class Engine {
   }
 
   /** The TA network's direction readings for an asset (raw heads with their validation and graded skill). */
+  /** The TA network's readings for an asset: the performance-weighted ensemble of its versions
+   *  (bot/ta/taNetEnsemble.ts) when installed, else the live network. */
   private taView(asset: string, now: number): TaNetView | undefined {
-    let o;
-    try { o = activeTaNet()?.outputFor(asset, this.d.md.features.candles.get(asset), now); } catch { return undefined; }
-    return viewOf(o);
+    return taNetView(asset, this.d.md.features.candles.get(asset), now);
   }
 
   private async evaluate(m: ActiveMarket): Promise<void> {
@@ -1331,7 +1335,19 @@ export class Engine {
     // expected over this contract's remaining life (only with a validated profile).
     // Tree vol forecast (validated only): how far realised vol over the remaining life will differ from the EWMA.
     const volMult = this.volFc.multiplier(m.asset, now, vol.sigmaPerSqrtSec, tauSec, () => assetFeatureMap(m.asset, now, { index: idx, spot: md.spot.get(m.asset), bars: md.features.bars.get(m.asset), candles: md.features.candles.get(m.asset), usdtd: md.usdtd, btcd: md.btcd, perp: md.features.perps.get(m.asset) }));
-    const sigmaPricing = effectiveSigma(vol.sigmaPerSqrtSec, this.d.volProfile, m.asset, now, m.closeTime) * volMult;
+    // The TA network's validated volatility forecast (next 4 h vs the last 24 h, learned from years of
+    // history) scales sigma toward where volatility is heading: m = exp(forecast) x 24h realised / EWMA,
+    // in [0.5, 2], applied as m^TA_VOL_WEIGHT. Skipped while the tree vol model (which reads the same
+    // forecast) is validated and live.
+    const taView = this.taView(m.asset, now);
+    let taVolMult = 1;
+    if (cfg.strategy.taVolWeight > 0 && !this.volFc.model?.validated && taView?.vol4h !== undefined && Number.isFinite(taView.vol4h)) {
+      const h1 = md.features.candles.get(m.asset)?.bars['1h'];
+      const rv = h1 && h1.length > 25 ? sigma24(h1, h1.length - 1) : NaN;
+      const ewmaHour = vol.sigmaPerSqrtSec * 60;
+      if (rv > 0 && ewmaHour > 0) taVolMult = Math.max(0.5, Math.min(2, Math.exp(taView.vol4h) * rv / ewmaHour)) ** cfg.strategy.taVolWeight;
+    }
+    const sigmaPricing = effectiveSigma(vol.sigmaPerSqrtSec, this.d.volProfile, m.asset, now, m.closeTime) * volMult * taVolMult;
     const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
     if (!fv) return block('fair value unavailable');
     const sess = sessionState(now);
@@ -1368,7 +1384,6 @@ export class Engine {
     // the live model already reads them), and TA / confluence breadth + the altcoin rule feed sizing.
     const S0 = cfg.strategy;
     const liveMode = cfg.mode === 'live';
-    const taView = this.taView(m.asset, now);
     const modelReadsTa = model.params.kind !== 'identity' && model.params.features.some((f) => f.startsWith('tanet_up'));
     let pYes = pBase, taShift = 0;
     const drift = S0.taPricing && S0.taPricingWeight > 0 && !modelReadsTa ? taDrift(taView, tauSec, { maxZ: S0.taPricingMaxZ, live: liveMode }) : undefined;
@@ -1387,6 +1402,7 @@ export class Engine {
     const alt = altcoinRiskOn(m.asset, features.usdtd_ret_15m_z, rsiTrade, S0);
     const bUp = confluenceBreadth(signals, 1), bDn = confluenceBreadth(signals, -1);
     st.pBeforeTa = pBase;
+    st.taVolMult = +taVolMult.toFixed(3);
     st.taShift = taShift;
     st.conviction = { taDir: taDir ?? null, drift: drift?.parts ?? [], breadthUp: +bUp.breadth.toFixed(3), breadthDown: +bDn.breadth.toFixed(3), agree: bUp.agree, oppose: bUp.oppose, alt, priority: selectionPriority(alt.active, taDir, bUp.breadth, bDn.breadth) };
     Object.assign(st, { kind: m.kind, strike: terms.strike, cap: terms.cap, strikeSource: m.strikeSource, spot: spot.value, sigma: vol.sigmaPerSqrtSec, sigmaPricing, fairValue: fv.pYes, pYes, pMarket, pStd: pred.std, bestBid: bid.price, bestAsk: ask.price, dPdS, blocked: undefined });

@@ -43,6 +43,7 @@
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
 
 import { tuneSizingMain } from './tuneSizing';
+import { promoteIfChampion } from './champion';
 import fs from 'fs';
 import path from 'path';
 import { MODEL_FILES } from '../bot/autotrain';
@@ -313,6 +314,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
           history: T.historyDir, out: cand, cache: path.join(work, 'tanet-cache'), state: path.join(work, 'tanet-population.json'), fresh: o.forceTaNetFresh ? 'true' : undefined,
           'train-months': T.trainMonths, 'eval-months': T.evalMonths, 'step-months': T.stepMonths, 'holdout-months': T.holdoutMonths, 'final-months': T.finalMonths, stride: T.stride, 'min-per-regime': T.minPerRegime, dsr: T.dsrThreshold,
           'max-rounds': T.maxRoundsPerRun || undefined, 'restart-every': T.restartEvery, arch: T.arch,
+          incumbent: fs.existsSync(taNetFile) ? taNetFile : undefined,
         }));
       } catch (e) {
         if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
@@ -326,10 +328,11 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       state.taNetTrainedAt = now;
       const summary = { rounds: rep.rounds, newRounds: rep.newRounds, network: rep.params.network, heads: Object.fromEntries(Object.entries(rep.params.heads).map(([k, h]) => [k, h.validation])), elite: rep.params.pbt.elite };
       if (A.promote === 'validated' && !validated.length) return { promoted: false, version: rep.params.version, reason: 'no head passed the holdout and network hurdles', ...summary };
-      fs.copyFileSync(cand, taNetFile);
+      const champ = promoteIfChampion({ dir: A.dir, kind: 'ta_net', candidate: cand, live: taNetFile, enabled: A.champion, candidateScore: rep.champion?.candidate, incumbentScore: rep.champion?.incumbent });
+      if (!champ.promote) return { promoted: false, version: rep.params.version, reason: champ.reason, champion: rep.champion, ...summary };
       state.taNetVersion = rep.params.version;
       installTaNet();
-      return { promoted: true, version: rep.params.version, validatedHeads: validated, ...summary };
+      return { promoted: true, version: rep.params.version, validatedHeads: validated, champion: { ...rep.champion, reason: champ.reason, archived: champ.archived ?? null }, ...summary };
     }, !T.enabled ? 'TA_NET=false' : noHistory ?? (due ? undefined : `trained ${((now - state.taNetTrainedAt!) / 86_400_000).toFixed(1)} day(s) ago (TA_NET_RETRAIN_DAYS=${T.retrainEveryDays})`));
   }
 
@@ -360,11 +363,12 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const validated = (['fast', 'slow'] as const).filter((l) => p.validation[l]?.passed);
       const summary = { version: p.version, validated, holdout: Object.fromEntries((['fast', 'slow'] as const).map((l) => [l, p.validation[l]?.periods.holdout])), reasons: Object.fromEntries((['fast', 'slow'] as const).map((l) => [l, p.validation[l]?.reasons])) };
       if (A.promote === 'validated' && !validated.length) return { promoted: false, reason: 'no lane passed its holdout and final window', ...summary };
-      fs.copyFileSync(cand, file);
+      const champ = promoteIfChampion({ dir: A.dir, kind: 'setups', candidate: cand, live: file, enabled: A.champion });
+      if (!champ.promote) return { promoted: false, reason: champ.reason, ...summary };
       // Its recent out-of-sample setups, for the whole-bot replay (research/wholeBot.ts).
       if (fs.existsSync(oosCand)) fs.copyFileSync(oosCand, path.join(A.dir, 'setup_oos.json'));
       state.setupsVersion = p.version;
-      return { promoted: true, ...summary };
+      return { promoted: true, champion: champ.reason, ...summary };
     }, cfg.perps.strategy !== 'setups' ? 'PERP_STRATEGY is not setups' : noHistory ?? (due ? undefined : `trained ${((now - state.setupsTrainedAt!) / 86_400_000).toFixed(1)} day(s) ago (SETUP_RETRAIN_DAYS=${P.setupRetrainDays})`));
   }
 
@@ -500,8 +504,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         throw e;
       }
       if (A.promote === 'validated' && !p.validation.validated) return { promoted: false, validation: p.validation };
-      fs.copyFileSync(cand, promoted('vol_model'));
-      return { promoted: true, validation: p.validation };
+      const champ = promoteIfChampion({ dir: A.dir, kind: 'vol_model', candidate: cand, live: promoted('vol_model'), enabled: A.champion });
+      return { promoted: champ.promote, champion: champ.reason, validation: p.validation };
     }, tooFew);
   }
 
@@ -525,11 +529,12 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const passed = Boolean(m.params.validation?.passed);
       const usesSnn = m.params.features.some((f) => f.startsWith('snn_'));
       if (A.promote === 'validated' && !passed) return { promoted: false, id: m.id, reason: `validation not passed (${m.liveBlockers().join('; ')})` };
-      fs.copyFileSync(cand, promoted('mlp'));
+      const champ = promoteIfChampion({ dir: A.dir, kind: 'mlp', candidate: cand, live: promoted('mlp'), enabled: A.champion });
+      if (!champ.promote) return { promoted: false, id: m.id, reason: champ.reason };
       state.mlpId = m.id;
       state.trainedWithSnn!.crypto = state.snnVersions!.crypto;
       state.trainedWithTaNet = state.taNetVersion;
-      return { promoted: true, id: m.id, kind: m.params.kind, usesSnnFeatures: usesSnn, take: m.params.take?.validation ?? null, validationPassed: passed, liveBlockers: m.liveBlockers() };
+      return { promoted: true, champion: champ.reason, id: m.id, kind: m.params.kind, usesSnnFeatures: usesSnn, take: m.params.take?.validation ?? null, validationPassed: passed, liveBlockers: m.liveBlockers() };
     }, tooFew);
   }
 
@@ -556,9 +561,10 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const m = PerpModel.load(cand);
       const ok = Boolean(m?.validated());
       if (A.promote === 'validated' && !ok) return { promoted: false, reason: m?.blockers().join('; ') };
-      fs.copyFileSync(cand, promoted('perp'));
+      const champ = promoteIfChampion({ dir: A.dir, kind: 'perp', candidate: cand, live: promoted('perp'), enabled: A.champion });
+      if (!champ.promote) return { promoted: false, reason: champ.reason };
       state.trainedWithSnn!.perps = state.snnVersions!.perps;
-      return { promoted: true, validated: ok, blockers: m?.blockers() ?? [] };
+      return { promoted: true, champion: champ.reason, validated: ok, blockers: m?.blockers() ?? [] };
     }, tooFew);
   }
 
@@ -572,9 +578,10 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         throw e;
       }
       if (A.promote === 'validated' && !p.validation.validated) return { promoted: false, validation: p.validation };
-      fs.copyFileSync(cand, promoted('tennis'));
+      const champ = promoteIfChampion({ dir: A.dir, kind: 'tennis', candidate: cand, live: promoted('tennis'), enabled: A.champion });
+      if (!champ.promote) return { promoted: false, reason: champ.reason, validation: p.validation };
       state.trainedWithSnn!.tennis = state.snnVersions!.tennis;
-      return { promoted: true, validation: p.validation };
+      return { promoted: true, champion: champ.reason, validation: p.validation };
     }, tooFew);
   }
 
