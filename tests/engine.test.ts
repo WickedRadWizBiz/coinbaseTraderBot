@@ -271,3 +271,16 @@ test('conviction: the adversary vetoes the altcoin boost on an entry it breaks',
   assert.ok(st.notes.some((n) => /adversary vetoed the x2\.5 boost \(tape/.test(n)), st.notes.join(' | '));
   assert.ok(!st.notes.some((n) => /conviction x2\.50 on the YES/.test(n)), st.notes.join(' | '));
 });
+
+test('idle evaluation: a market the bot is not in is re-evaluated every EVAL_IDLE_SEC, not every tick', async () => {
+  const { engine, recon, market, oms, paper } = await setup({ env: { EVAL_IDLE_SEC: '30', STRATEGY_STYLE: 'taker', STRATEGY_MIN_EDGE: '0.5', PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+  const r = await recon.run('startup');
+  engine.balance = r!.balance;
+  await engine.tick();
+  const first = engine.status.get(market.ticker)!.updatedTs;
+  assert.equal((await paper.getOpenOrders()).length, 0, 'no order resting');
+  assert.equal(oms.positions.position(market.ticker), 0);
+  await new Promise((res) => setTimeout(res, 20));
+  await engine.tick();
+  assert.equal(engine.status.get(market.ticker)!.updatedTs, first, 'skipped: idle and evaluated moments ago');
+});

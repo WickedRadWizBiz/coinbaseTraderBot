@@ -113,9 +113,9 @@ test('weekend: training starts at Friday midnight New York, holds entries until 
   await new Promise((r) => setTimeout(r, 200));
 });
 
-test('AUTO_TRAIN=background (default): trains beside trading once warmed up, frozen only under pressure, resumed after a calm minute', async () => {
+test('AUTO_TRAIN=background: trains beside trading once warmed up, frozen only under pressure, resumed after a calm minute', async () => {
   const dir = tmpDir();
-  const cfg = loadConfig({ DATA_DIR: dir, AUTO_TRAIN_ON_MODEL_CHANGE: 'false' });
+  const cfg = loadConfig({ DATA_DIR: dir, AUTO_TRAIN: 'background', AUTO_TRAIN_ON_MODEL_CHANGE: 'false' });
   assert.equal(cfg.autoTrain.mode, 'background');
   const audit = tmpAudit();
   let now = at(2);
@@ -155,7 +155,7 @@ test('AUTO_TRAIN=background (default): trains beside trading once warmed up, fro
 test('background: Friday midnight during a run queues the weekend run behind it and holds new entries until it ends', async () => {
   const sat = (h: number, m = 0) => Date.UTC(2026, 9, 10, h, m);
   const dir = tmpDir();
-  const cfg = loadConfig({ DATA_DIR: dir, AUTO_TRAIN_ON_MODEL_CHANGE: 'false', AUTO_TRAIN_START_DELAY_MIN: '0' });
+  const cfg = loadConfig({ DATA_DIR: dir, AUTO_TRAIN: 'background', AUTO_TRAIN_ON_MODEL_CHANGE: 'false', AUTO_TRAIN_START_DELAY_MIN: '0' });
   const audit = tmpAudit();
   let now = sat(3, 30); // Friday 23:30 New York
   const engine = { model: { id: 'm' } } as unknown as Engine;

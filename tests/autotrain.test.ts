@@ -188,3 +188,24 @@ test('pipeline end to end: SNN first, backfilled SNN outputs, then the MLP train
     assert.match(String(again.steps.find((s) => s.step === `snn-${d}-train`)!.skipped), /up to date/);
   }
 });
+
+test('remote mode: models copied in by the training workflow are hot-swapped; this machine never runs the pipeline', async () => {
+  const dir = tmpDir();
+  const cfg = cfgFor(dir, { AUTO_TRAIN: 'remote', SNN_WORKER: 'false' });
+  const { engine, calls } = fakeEngine();
+  const audit = tmpAudit();
+  let now = T0;
+  const t = new AutoTrainer({ cfg, engine, audit, alerter: new Alerter([], audit), now: () => now, command: { cmd: process.execPath, args: ['-e', 'setTimeout(()=>{}, 50)'] } });
+  t.start();
+  t.stop();
+  assert.equal(t.nextRun(T0), null, 'no schedule here');
+  assert.equal(t.run([]), false, 'a run request is refused');
+  await t.tick();
+  assert.equal(t.status().running, false);
+  fs.mkdirSync(cfg.autoTrain.dir, { recursive: true });
+  fs.writeFileSync(path.join(cfg.autoTrain.dir, 'model.json'), JSON.stringify({ ...MetaModel.identity().params, version: 'mlp-remote', kind: 'identity' as const }));
+  now = Date.now() + 10_000;
+  await t.watch();
+  assert.ok(calls.some((c) => c.startsWith('model:')), `swapped: ${calls}`);
+  assert.equal(t.status().running, false);
+});

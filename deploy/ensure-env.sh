@@ -25,9 +25,13 @@ fi
 # Keep bot.env's permissions (600) while rewriting lines.
 edit_env() { local tmp; tmp="$(mktemp "$ENV.XXXX")"; grep -v -e "$1" "$ENV" > "$tmp" || true; [ -z "${2:-}" ] || printf '%s\n' "$2" >> "$tmp"; chmod 600 "$tmp"; mv "$tmp" "$ENV"; }
 grep -q '^DASHBOARD_TOKEN=' "$ENV" && edit_env '^DASHBOARD_TOKEN=' && echo "removed the unused DASHBOARD_TOKEN from $ENV"
-# Training now runs in the background beside trading (AUTO_TRAIN=background, the default). A bot.env that
-# still pins the old default (windows) is moved over; any other choice (daily, off) is left alone.
-if grep -qx 'AUTO_TRAIN=windows' "$ENV"; then edit_env '^AUTO_TRAIN=windows$' 'AUTO_TRAIN=background'; echo "AUTO_TRAIN: windows -> background in $ENV"; fi
+# Training now runs on GitHub Actions (AUTO_TRAIN=remote, the default: .github/workflows/train.yml) and this
+# server only loads the models. A bot.env that pins an old default (windows, background) is moved over; any
+# other choice (daily, off) is left alone. The old default of 8 strikes per hourly event becomes 4 (CPU).
+for old in windows background; do
+  if grep -qx "AUTO_TRAIN=$old" "$ENV"; then edit_env "^AUTO_TRAIN=$old\$" 'AUTO_TRAIN=remote'; echo "AUTO_TRAIN: $old -> remote in $ENV"; fi
+done
+if grep -qx 'CATALOG_STRIKES_PER_EVENT=8' "$ENV"; then edit_env '^CATALOG_STRIKES_PER_EVENT=8$' 'CATALOG_STRIKES_PER_EVENT=4'; echo "CATALOG_STRIKES_PER_EVENT: 8 -> 4 in $ENV"; fi
 if [ -n "${DASHBOARD_PASSWORD:-}" ] && ! grep -qxF "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD" "$ENV"; then
   edit_env '^DASHBOARD_PASSWORD=' "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD"
   echo "dashboard password set from the deploy"

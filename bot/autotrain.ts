@@ -4,14 +4,17 @@
 // tennis models read the SNN's outputs, so a new SNN automatically re-runs their training.
 //
 // Scheduling (AUTO_TRAIN):
-//  - background (default): trains beside trading. A run starts whenever one is due (AUTO_TRAIN_EVERY_HOURS
+//  - remote (default): the pipeline runs on GitHub Actions (.github/workflows/train.yml), which copies the
+//    recordings and history off this server, trains on its own CPUs and copies the models back here; this
+//    process never starts the pipeline, it only watches AUTO_TRAIN_DIR and hot-swaps what changes.
+//  - background: trains beside trading. A run starts whenever one is due (AUTO_TRAIN_EVERY_HOURS
 //    after the last completed run; at once after a restart cut one short, resuming from its checkpoints),
 //    AUTO_TRAIN_START_DELAY_MIN after the bot starts. It is frozen (SIGSTOP) only while the machine is under
 //    pressure (the trading loop lags, memory runs low, or the host throttles the burstable CPU) and resumed
 //    once it has been calm for a minute.
 //  - windows: once a day, only inside the session-edge windows or the weekend, frozen whenever the bot trades.
 //  - daily: once a day at AUTO_TRAIN_HOUR_UTC.  off: never.
-// In every mode the weekend run (Friday midnight New York) holds new entries until it finishes.
+// In windows and background modes the weekend run (Friday midnight New York) holds new entries until it finishes.
 
 import { spawn, type ChildProcess } from 'child_process';
 import fs from 'fs';
@@ -211,6 +214,8 @@ export class AutoTrainer {
 
   /** Launch the pipeline (args e.g. ['--only', 'snn']). Queued if one is already running. */
   run(args: string[]): boolean {
+    // Remote training (GitHub Actions): this machine never runs the pipeline; it only picks up the models.
+    if (this.d.cfg.autoTrain.mode === 'remote') return false;
     if (this.child) { this.queued = args; return false; }
     const { cmd, args: base } = this.d.command ?? pipelineCommand();
     const logs = path.join(this.d.cfg.autoTrain.dir, 'logs');
