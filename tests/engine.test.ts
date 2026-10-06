@@ -17,7 +17,7 @@ import { tmpAudit, tmpDir } from './helpers';
 import { Vault } from '../bot/vault/vault';
 import { BalanceMonitor } from '../bot/vault/balanceMonitor';
 
-async function setup(opts: { dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string> } = {}) {
+async function setup(opts: { dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number } = {}) {
   const dir = tmpDir();
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy, STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_ENABLED: 'false', ...opts.env });
   const now = Date.now();
@@ -36,7 +36,9 @@ async function setup(opts: { dailyLossUsd?: string; exitPolicy?: string; vault?:
   let seed = 1;
   const rand = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
   let x = Math.log(60010);
-  for (let s = 600; s >= 0; s--) { x += 0.0002 * (rand() - 0.5); idx.add(Math.exp(x), now - s * 1000); }
+  const span = opts.trend ? 1800 : 600;
+  if (opts.trend) x -= opts.trend * span; // end just above the strike, as without a trend
+  for (let s = span; s >= 0; s--) { x += (opts.trend ? 0.00004 : 0.0002) * (rand() - 0.5) + (opts.trend ?? 0); idx.add(Math.exp(x), now - s * 1000); }
 
   const paper = new PaperExchange(undefined, 200, (t) => md.books.get(t), () => ({ takerMultiplier: 1, makerMultiplier: 0 }));
   const kill = new KillSwitch(path.join(dir, 'kill.json'), audit);
@@ -226,4 +228,31 @@ test('no new risk below the $10 hard floor; $20 trades on the aggressive tier', 
   assert.equal(g.tier.name, 'aggressive');
   assert.equal(g.tier.orderRiskUsd, 2);
   assert.equal(g.tier.dailyLossLimitUsd, 4);
+});
+
+test('conviction: every evaluation records the TA overlay; the altcoin risk-on rule boosts a long entry 2.5x', async () => {
+  // NON_ALTCOINS empty: the test market (BTC) counts as an altcoin.
+  const base = await setup({ env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+  let r = await base.recon.run('startup');
+  base.engine.balance = r!.balance;
+  await base.engine.tick();
+  const st0 = base.engine.status.get(base.market.ticker)!;
+  assert.ok(st0.conviction, 'conviction recorded');
+  assert.equal(st0.taShift, 0, 'no TA network loaded: fair value untouched');
+  assert.equal(st0.conviction!.alt.active, false);
+  assert.match(st0.conviction!.alt.why, /not an altcoin|USDT\.D|RSI/);
+
+  const alt = await setup({ trend: 0.000002, env: { NON_ALTCOINS: 'NONE', PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false', ADVERSARIAL_BOOST: 'false' } });
+  const now = Date.now();
+  // USDT.D falling over the last 20 minutes (with some noise for its volatility); the index rising (RSI > 50).
+  let u = 5.0;
+  for (let s = 1800; s >= 0; s -= 10) { u *= 1 - 0.00002 + 0.00001 * Math.sin(s); alt.md.usdtd.add(u, now - s * 1000); }
+  r = await alt.recon.run('startup');
+  alt.engine.balance = r!.balance;
+  await alt.engine.tick();
+  const st = alt.engine.status.get(alt.market.ticker)!;
+  assert.equal(st.conviction!.alt.active, true, JSON.stringify(st.conviction));
+  assert.ok(st.conviction!.priority >= 10, 'altcoin risk-on is selected first');
+  assert.ok(st.notes.some((n) => /altcoin risk-on: .* x2\.5/.test(n)), JSON.stringify({ fv: st.fairValue, q: st.q, bid: st.bestBid, ask: st.bestAsk, blocked: st.blocked, ew: st.entryWindow, notes: st.notes }));
+  assert.ok(st.notes.some((n) => /conviction x2\.50 on the YES entry: [\d.]+ -> [\d.]+ contracts/.test(n)), st.notes.join(' | '));
 });

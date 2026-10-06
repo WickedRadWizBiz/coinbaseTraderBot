@@ -75,6 +75,9 @@ export interface SetupTraderDeps {
   breakEven?: BreakEven;
   /** Net loss (fraction of break-even) at which the size reaches its floor. */
   lossAt?: number;
+  /** TA conviction for a trade direction on an asset (bot/strategy/taConviction.ts): size multiplier
+   *  (TA / confluence breadth, altcoin risk-on rule), selection priority, and why. */
+  conviction?: (asset: string, dir: number, now: number) => { mult: number; priority: number; why: string } | undefined;
 }
 
 /** Typical spread of a setup trade's result in R (stop = -1 R, targets at +1..3 R): standardises R for the streak scaler. */
@@ -171,6 +174,10 @@ export class SetupTrader {
     const c = this.d.candles(asset);
     if (!c?.bars['1h']) return undefined;
     return { m15: c.bars['15m'], h1: c.bars['1h'], d1: c.bars['1d'] };
+  }
+
+  private conviction(asset: string, dir: number, now: number): { mult: number; priority: number; why: string } | undefined {
+    try { return this.d.conviction?.(asset, dir, now); } catch { return undefined; }
   }
 
   private reading(asset: string, now: number): TaNetReading | undefined {
@@ -302,8 +309,9 @@ export class SetupTrader {
         if (!(px && px > 0) || q?.bid === undefined || q.ask === undefined || q.isOpen === false) return undefined;
         if (this.d.params.requireValidation && !this.model?.validated(cand.sig.lane)) return undefined;
         if (this.snnBlocks(cand.sig)) return undefined;
-        return { px, score: this.score(cand.sig, now) };
-      });
+        const cv = this.conviction(cand.sig.asset, cand.sig.dir, now);
+        return { px, score: this.score(cand.sig, now), mult: cv?.mult, priority: cv?.priority, why: cv?.why };
+      }, (cand) => this.conviction(cand.sig.asset, cand.sig.dir, now)?.priority ?? 0);
       for (const e of entries) {
         const t = openTrade(e.cand.sig, e.px, now, this.d.params.costs);
         if (!t) continue;
@@ -311,12 +319,13 @@ export class SetupTrader {
         // Keep liquidation well beyond the stop: at most half the exchange's leverage for the market.
         const lev = this.d.hub.get(t.asset)?.latest?.leverage;
         const levCap = lev && lev > 0 ? equity * 0.5 * lev : Infinity;
-        t.notional = Math.min(pilot ? Math.min(e.notional, this.d.params.pilotMaxNotionalUsd) : e.notional, levCap);
+        // The conviction multiplier widens the pilot cap with it (never the leverage cap).
+        t.notional = Math.min(pilot ? Math.min(e.notional, this.d.params.pilotMaxNotionalUsd * e.mult) : e.notional, levCap);
         t.score = e.score;
         this.book.add(t);
         this.lastPx.set(t.asset, e.px);
         changed = true;
-        this.d.audit?.write('setup_trade', { event: 'opened', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, stop: t.stop, target1: t.plan.target1, target2: t.plan.target2, notional: t.notional, score: e.score, pilot });
+        this.d.audit?.write('setup_trade', { event: 'opened', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, stop: t.stop, target1: t.plan.target1, target2: t.plan.target2, notional: t.notional, score: e.score, pilot, conviction: e.mult, convictionWhy: e.why ?? null });
         const tnE = this.reading(t.asset, now);
         this.d.journal?.trade({ ts: now, event: 'opened', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entryTs: t.entryTs, entry: t.entry, stop: t.stop, notional: t.notional, score: e.score, pilot, tn_up1: tnE?.up1 ?? null, tn_up4: tnE?.up4 ?? null, tn_vol: tnE?.vol ?? null, ...this.snnOf(t.asset) });
       }

@@ -19,6 +19,8 @@ import { MetaModel } from './model/metaModel';
 import { loadVolProfile, type VolProfile } from './model/volSeasonality';
 import { loadCalendar } from './model/calendar';
 import { ModelHealth } from './model/modelHealth';
+import { directionalConviction, viewOf } from './strategy/taConviction';
+import { assetFeatureMap } from './model/featureEngine';
 import { ClockSkewMonitor } from './risk/clockSkew';
 import { BreakEven, EquityGuard } from './risk/equityGuard';
 import { PerpHedger } from './perps/hedger';
@@ -178,6 +180,22 @@ async function main(): Promise<void> {
   const perpsBreakEven = new BreakEven(path.join(cfg.dataDir, 'perps_break_even.json'));
   let perpsPaper: PaperPerpExchange | undefined;
   const modelHealth = new ModelHealth({ minWindows: cfg.strategy.modelHealthMinWindows }, path.join(cfg.dataDir, 'model_health.json'));
+  const taHealth = new ModelHealth({ minWindows: 1e9 }, path.join(cfg.dataDir, 'ta_health.json'));
+  // TA conviction for the perps (setup trader): features + the TA network's raw view, cached per asset per minute.
+  const convCache = new Map<string, { ts: number; f: Record<string, number>; v: ReturnType<typeof viewOf> }>();
+  const conviction = (asset: string, dir: number, now: number) => {
+    let c = convCache.get(asset);
+    if (!c || now - c.ts > 60_000 || now < c.ts) {
+      const candles = md.features.candles.get(asset);
+      const f = assetFeatureMap(asset, now, { index: md.index.get(asset), spot: md.spot.get(asset), bars: md.features.bars.get(asset), candles, usdtd: md.usdtd, btcd: md.btcd, perp: md.features.perps.get(asset) });
+      let v: ReturnType<typeof viewOf>;
+      try { v = viewOf(activeTaNet()?.outputFor(asset, candles, now)); } catch { v = undefined; }
+      c = { ts: now, f, v };
+      convCache.set(asset, c);
+    }
+    const S = cfg.strategy;
+    return directionalConviction(asset, dir, c.f, c.v, { weight: S.taPricingWeight, maxShift: S.taPricingMaxShift, maxZ: S.taPricingMaxZ, live: cfg.mode === 'live', altBoost: S.altBoost, altUsdtdMaxZ: S.altUsdtdMaxZ, altRsiMin: S.altRsiMin, nonAlts: S.nonAlts, maxBoost: S.adversarialMaxBoost, maxTotal: S.convictionMaxTotal });
+  };
   const calendar = loadCalendar(path.resolve(process.env.MACRO_CALENDAR_PATH ?? './params/calendar.json'));
   if (!calendar) log.info('no macro calendar (params/calendar.json): calendar features unavailable');
   // Perps: one executor per perps account drives each position to hedge (stage 2) + directional
@@ -246,6 +264,7 @@ async function main(): Promise<void> {
         journal: new SetupJournal(path.join(cfg.dataDir, 'setups'), (e) => log.warn(`setup journal: ${String(e)}`)),
         snnGatePath: () => path.join(cfg.autoTrain.dir, 'setup_snn_gate.json'),
         trainingOverride, streak: perpsStreak, breakEven: perpsBreakEven, lossAt: cfg.strategy.ddScaleAt,
+        conviction,
       });
       const st = (directionalTrader as SetupTrader).status();
       if (st.modelError) log.warn(`setup trader: ${st.modelError}; it records setups but opens no trades until a model exists`);
@@ -310,7 +329,7 @@ async function main(): Promise<void> {
   // The exchange's own status and maintenance schedule gate new entries (exits stay allowed).
   const exchangeStatus = new ExchangeStatusMonitor(rest);
   exchangeStatus.start();
-  const engine: Engine = new Engine({ control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
+  const engine: Engine = new Engine({ control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
   engineRef = engine;
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();
