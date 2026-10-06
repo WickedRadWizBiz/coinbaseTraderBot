@@ -145,6 +145,20 @@ test('paper hedger: maker entry fills only on trade-through; stale hedge unwinds
   assert.equal((await sim.getOpenOrders()).length, 0);
 });
 
+test('paper hedger: an order over the per-order notional cap is trimmed to fit, not dropped', async () => {
+  const hub = new PerpHub();
+  const now = 1_800_000_000_000;
+  hub.apply(snap({ ts: now }));
+  const sim = new PaperPerpExchange(hub, () => 'BTC', { makerBps: 5, takerBps: 12 }, undefined, () => now);
+  // The hedge wants 300 contracts at the 100,010 ask; the cap allows 150.
+  const h = new PerpHedger({ gateway: sim, hub, params: { ...P, maxNotionalUsd: 1e9 }, now: () => now, risk: { maxOrderNotionalUsd: 100_010 * 150 + 5 } });
+  await h.tick([{ asset: 'BTC', ticker: 'A', position: 300, dPdS: 1e-4, tauSec: 600 }]);
+  const open = await sim.getOpenOrders();
+  assert.equal(open.length, 1, 'placed, not dropped');
+  assert.deepEqual([open[0].side, open[0].remaining], ['ask', 150]);
+  assert.ok(open[0].remaining * open[0].price <= 100_010 * 150 + 5);
+});
+
 test('perps config: feed on, hedging simulated by default; live hedging needs live mode and perps keys', () => {
   const c = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) });
   assert.equal(c.perps.feed, true);

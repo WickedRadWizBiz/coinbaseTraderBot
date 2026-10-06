@@ -225,7 +225,7 @@ export class PerpHedger {
       return;
     }
     // A flip closes the existing side first.
-    const count = +(reduce ? Math.min(Math.abs(t.diff), Math.abs(t.current)) : Math.abs(t.diff)).toFixed(4);
+    let count = +(reduce ? Math.min(Math.abs(t.diff), Math.abs(t.current)) : Math.abs(t.diff)).toFixed(4);
     const mid = (l.bid + l.ask) / 2;
     const fresh = now - (l.ts ?? 0) <= this.risk.maxQuoteAgeMs;
     if (!fresh && !reduce) {
@@ -248,9 +248,17 @@ export class PerpHedger {
       return;
     }
     if (!reduce && count * price > this.risk.maxOrderNotionalUsd) {
-      if (resting) await this.cancelResting(t.ticker);
-      log.warn('perp order above the notional cap', { ticker: t.ticker, notional: count * price });
-      return;
+      // Shrink the order to fit under the cap (a target sized right at the cap rounded a cent over it and
+      // was dropped entirely); the rest follows on later ticks if the target still wants it.
+      const step = l.fractional ? 0.01 : 1;
+      const fit = +(Math.floor(this.risk.maxOrderNotionalUsd / price / step) * step).toFixed(4);
+      if (fit < step) {
+        if (resting) await this.cancelResting(t.ticker);
+        log.warn('perp order above the notional cap', { ticker: t.ticker, notional: count * price });
+        return;
+      }
+      log.debug('perp order trimmed to the notional cap', { ticker: t.ticker, from: count, to: fit });
+      count = fit;
     }
     const same = resting && resting.order.side === side && resting.order.price === price && Math.abs(resting.order.remaining - count) < 1e-9 && now - resting.placedTs < this.d.params.repriceSec * 1000;
     if (same) return;
