@@ -210,6 +210,12 @@ export class DominanceService extends EventEmitter {
     this.ws?.close();
   }
 
+  /** Latest Binance USDT price for a symbol (e.g. 'BTC') and when it was printed. */
+  priceOf(sym: string): { price: number; ts: number } | undefined {
+    const price = this.prices.get(sym), ts = this.priceTs.get(sym);
+    return price !== undefined && ts !== undefined ? { price, ts } : undefined;
+  }
+
   /** Feed Binance !miniTicker@arr payloads (also used by tests). */
   onMiniTickers(rows: Array<{ s?: string; c?: string; E?: number }>): void {
     for (const r of rows) {

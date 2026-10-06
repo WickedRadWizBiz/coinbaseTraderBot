@@ -72,6 +72,9 @@ export class MarketData extends EventEmitter {
   readonly index = new Map<string, IndexTracker>();
   /** Coinbase spot per asset (feature input only; never the settlement price). */
   readonly spot = new Map<string, IndexTracker>();
+  /** Binance USDT price per asset, sampled each second from the dominance stream (a paper-only pricing
+   *  fallback when Coinbase prints are sparse; kept separate so sources never mix in one series). */
+  readonly binance = new Map<string, IndexTracker>();
   /** USDT.D and BTC.D (percent), fed by the dominance service. */
   readonly usdtd = new IndexTracker('USDT.D', 90 * 60_000, 300);
   readonly btcd = new IndexTracker('BTC.D', 90 * 60_000, 300);
@@ -85,6 +88,17 @@ export class MarketData extends EventEmitter {
   private readonly feeChanges = new Map<string, Array<{ multiplier?: number; scheduledTs: number }>>();
   private pollTimer: NodeJS.Timeout | null = null;
   private indexTimer: NodeJS.Timeout | null = null;
+  private binanceTimer: NodeJS.Timeout | null = null;
+
+  /** Copy each asset's latest Binance price into its own series (new prints only). */
+  pullBinance(): void {
+    if (!this.dominance) return;
+    for (const [asset, tr] of this.binance) {
+      const q = this.dominance.priceOf(asset);
+      const last = tr.latest();
+      if (q && (!last || q.ts > last.ts)) tr.add(q.price, q.ts);
+    }
+  }
   /** Hourly bars of USDT.D, BTC.D and BTCDOM from the dominance feed, appended to the history store. */
   readonly indexBars: IndexBars;
   /** Index series for the TA network (history store: TradingView, Binance BTCDOM, the bot's own bars). */
@@ -115,6 +129,7 @@ export class MarketData extends EventEmitter {
       if (asset === 'TENNIS') continue; // match markets: no price index or spot feed
       if (!this.index.has(asset)) this.index.set(asset, new IndexTracker(asset, undefined, undefined, cfg.settlementAvg));
       if (!this.spot.has(asset)) this.spot.set(asset, new IndexTracker(asset));
+      if (!this.binance.has(asset)) this.binance.set(asset, new IndexTracker(asset));
     }
   }
 
@@ -161,6 +176,8 @@ export class MarketData extends EventEmitter {
       this.dominance.on('sample', (d: { usdtd: number; btcd: number; btcdom?: number; coveredShare: number; ts: number }) => this.onDominance(d));
       this.dominance.start();
       this.indexTimer = setInterval(() => this.indexBars.flush(Date.now()), 60_000);
+      this.binanceTimer = setInterval(() => this.pullBinance(), 1000);
+      this.binanceTimer.unref();
     }
     if (this.cfg.taCandles) {
       // Live order flow (Coinbase public trades) so live candles carry taker-buy volume like the history.
@@ -200,6 +217,7 @@ export class MarketData extends EventEmitter {
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.aliveTimer) clearInterval(this.aliveTimer);
     if (this.indexTimer) clearInterval(this.indexTimer);
+    if (this.binanceTimer) clearInterval(this.binanceTimer);
     this.ws?.close();
     this.proxyWs?.close();
     this.dominance?.stop();

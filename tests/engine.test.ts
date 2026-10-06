@@ -109,6 +109,35 @@ test('paper prices from Coinbase spot when the Kalshi index is stale or too spar
   assert.ok(Math.abs(st.spot! - 60010) < 50);
 });
 
+test('paper prices from Binance when both the Kalshi index and Coinbase are stale (sparse prints)', async () => {
+  const { engine, recon, market, md } = await setup();
+  const r = await recon.run('startup');
+  engine.balance = r!.balance;
+  const now = Date.now();
+  (md.index.get('BTC') as any).points.forEach((p: { ts: number }) => { p.ts -= 120_000; });
+  md.spot.get('BTC')!.add(59000, now - 90_000); // Coinbase quiet for 90 s
+  const bn = md.binance.get('BTC')!;
+  let x = Math.log(60020);
+  for (let sec = 600; sec >= 0; sec--) { x += 0.0001 * Math.cos(sec); bn.add(Math.exp(x), now - sec * 1000); }
+  await engine.tick();
+  const st = engine.status.get(market.ticker)!;
+  assert.equal(st.blocked, undefined, JSON.stringify(st));
+  assert.ok(Math.abs(st.spot! - 60020) < 60, `priced from Binance (${st.spot})`);
+  assert.ok(engine.feedHealth().BTC.binance!.points > 500);
+});
+
+test('market data: Binance prices are copied into their own series, new prints only', async () => {
+  const { md } = await setup();
+  const prices = new Map([['BTC', { price: 61000, ts: 1000 }]]);
+  (md as any).dominance = { priceOf: (s: string) => prices.get(s) };
+  md.pullBinance();
+  md.pullBinance(); // same print: not duplicated
+  assert.equal(md.binance.get('BTC')!.health(2000).points, 1);
+  prices.set('BTC', { price: 61010, ts: 2000 });
+  md.pullBinance();
+  assert.equal(md.binance.get('BTC')!.latest()!.value, 61010);
+});
+
 test('paper: an up/down strike comes from the Coinbase opening minute when the Kalshi index missed it', async () => {
   const { md, market } = await setup();
   const am = md.markets.get(market.ticker)!;
