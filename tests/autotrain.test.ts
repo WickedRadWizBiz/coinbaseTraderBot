@@ -144,7 +144,15 @@ test('pipeline end to end: SNN first, backfilled SNN outputs, then the MLP train
   assert.equal(recordingDays(rec).length, 1);
   const cfg = cfgFor(dir, { AUTO_TRAIN_ABLATION_DAYS: '1' });
   const logs: string[] = [];
-  const r = await runPipeline({ cfg, only: ['snn', 'dataset', 'mlp', 'perps', 'tennis'], ablationOnly: 'S1', log: (m) => logs.push(m), now: T0 });
+  // Progress is checkpointed after every step: by the time the backfill starts, the crypto network the
+  // training step promoted is already on disk (a run cut short by a restart keeps it).
+  let midRun: { snnVersions?: Record<string, string> } | undefined;
+  const statePath = path.join(cfg.autoTrain.dir, 'pipeline_state.json');
+  const r = await runPipeline({ cfg, only: ['snn', 'dataset', 'mlp', 'perps', 'tennis'], ablationOnly: 'S1', log: (m) => {
+    logs.push(m);
+    if (m.startsWith('snn-crypto-backfill: running') && fs.existsSync(statePath)) midRun = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  }, now: T0 });
+  assert.ok(midRun?.snnVersions?.crypto, 'state saved mid-run');
   const order = r.steps.map((s) => s.step);
   assert.deepEqual(order, ['snn-crypto-ablation', 'snn-crypto-pbt', 'snn-crypto-train', 'snn-crypto-backfill', 'snn-perps-ablation', 'snn-perps-pbt', 'snn-perps-train', 'snn-perps-backfill', 'snn-tennis', 'dataset', 'mlp', 'perps', 'tennis'], 'every network before the models that read it');
   const by = Object.fromEntries(r.steps.map((s) => [s.step, s]));
@@ -172,6 +180,7 @@ test('pipeline end to end: SNN first, backfilled SNN outputs, then the MLP train
   assert.ok(fs.existsSync(path.join(cfg.autoTrain.dir, 'snn_crypto.json')) && fs.existsSync(path.join(cfg.autoTrain.dir, 'snn_perps.json')));
   assert.notEqual(r.state.snnVersions?.crypto, r.state.snnVersions?.perps, 'separate networks with their own params');
   assert.ok(fs.existsSync(r.report));
+  assert.equal(JSON.parse(fs.readFileSync(r.report, 'utf8')).complete, true);
   // Re-running the SNN steps soon after: ablation not due, training up to date, backfill incremental.
   const again = await runPipeline({ cfg, only: ['snn'], ablationOnly: 'S1', log: () => undefined, now: T0 + 3_600_000 });
   for (const d of ['crypto', 'perps']) {
