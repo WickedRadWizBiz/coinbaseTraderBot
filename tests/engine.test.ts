@@ -96,8 +96,8 @@ test('paper training trades: with no edge anywhere, 1 contract is still traded o
   assert.equal(oms.allOrders().filter((o) => o.ticker === market.ticker && o.purpose === 'entry').length, 1);
 });
 
-test('paper prices from Coinbase spot when the Kalshi index is stale or too sparse for volatility', async () => {
-  const { engine, recon, market, md } = await setup();
+test('paper (PAPER_OUTSIDE_PRICE_FALLBACK=true) prices from Coinbase spot when the Kalshi index is stale or too sparse for volatility', async () => {
+  const { engine, recon, market, md } = await setup({ env: { PAPER_OUTSIDE_PRICE_FALLBACK: 'true' } });
   const r = await recon.run('startup');
   engine.balance = r!.balance;
   const now = Date.now();
@@ -111,8 +111,8 @@ test('paper prices from Coinbase spot when the Kalshi index is stale or too spar
   assert.ok(Math.abs(st.spot! - 60010) < 50);
 });
 
-test('paper prices from Binance when both the Kalshi index and Coinbase are stale (sparse prints)', async () => {
-  const { engine, recon, market, md } = await setup();
+test('paper (PAPER_OUTSIDE_PRICE_FALLBACK=true) prices from Binance when both the Kalshi index and Coinbase are stale (sparse prints)', async () => {
+  const { engine, recon, market, md } = await setup({ env: { PAPER_OUTSIDE_PRICE_FALLBACK: 'true' } });
   const r = await recon.run('startup');
   engine.balance = r!.balance;
   const now = Date.now();
@@ -140,8 +140,8 @@ test('market data: Binance prices are copied into their own series, new prints o
   assert.equal(md.binance.get('BTC')!.latest()!.value, 61010);
 });
 
-test('paper: an up/down strike comes from the Coinbase opening minute when the Kalshi index missed it', async () => {
-  const { md, market } = await setup();
+test('paper (PAPER_OUTSIDE_PRICE_FALLBACK=true): an up/down strike comes from the Coinbase opening minute when the Kalshi index missed it', async () => {
+  const { md, market } = await setup({ env: { PAPER_OUTSIDE_PRICE_FALLBACK: 'true' } });
   const am = md.markets.get(market.ticker)!;
   am.strike = undefined;
   (md.index.get('BTC') as any).points.length = 0;
@@ -283,4 +283,16 @@ test('idle evaluation: a market the bot is not in is re-evaluated every EVAL_IDL
   await new Promise((res) => setTimeout(res, 20));
   await engine.tick();
   assert.equal(engine.status.get(market.ticker)!.updatedTs, first, 'skipped: idle and evaluated moments ago');
+});
+
+test('contracts are priced on Kalshi data alone by default: a stale Kalshi index blocks, Coinbase does not stand in', async () => {
+  const { engine, recon, market, md } = await setup();
+  const r = await recon.run('startup');
+  engine.balance = r!.balance;
+  const now = Date.now();
+  (md.index.get('BTC') as any).points.forEach((p: { ts: number }) => { p.ts -= 120_000; });
+  const spot = md.spot.get('BTC')!;
+  for (let sec = 600; sec >= 0; sec--) spot.add(60010 + Math.sin(sec), now - sec * 1000);
+  await engine.tick();
+  assert.equal(engine.status.get(market.ticker)!.blocked, 'index stale');
 });

@@ -14,6 +14,25 @@ import { recordLatency } from '../util/latency';
 
 const log = logger('kalshi-ws');
 
+/** CF Benchmarks indices Kalshi streams at 5 Hz (200 ms vendor frames) on cfbenchmarks_value_5hz. */
+export const CF_5HZ_IDS = ['BRTI', 'ETHUSD_RTI', 'SOLUSD_RTI', 'XRPUSD_RTI', 'DOGEUSD_RTI'];
+
+/** What the index feed actually delivered (dashboard / diagnostics): every stage counted, so a feed that
+ *  connects but yields nothing shows exactly where the values are lost. */
+export interface IndexFeedStats {
+  received: number; parsed: number; dropped: number;
+  /** Index ids seen in parsed messages, with counts. */
+  ids: Record<string, number>;
+  /** Index ids Kalshi says are available (indexlist), when it answered. */
+  available: string[] | null;
+  lastRaw: string | null; lastDropped: string | null; lastTs: number | null;
+  /** Vendor timestamp -> received, last sample (ms; includes clock offset). */
+  lagMs: number | null;
+  /** Subscription acknowledgements and errors, newest last. */
+  control: string[];
+  unknownTypes: Record<string, number>;
+}
+
 export interface WsEvents {
   book_snapshot: (e: { ticker: string; bids: BookLevel[]; asks: BookLevel[]; ts: number }) => void;
   book_delta: (e: { ticker: string; side: 'bid' | 'ask'; price: number; delta: number; ts: number }) => void;
@@ -40,6 +59,8 @@ export class KalshiWs extends EventEmitter {
   private pingTimer: NodeJS.Timeout | null = null;
   private pingSentAt = 0;
   lastMessageTs = 0;
+  readonly indexStats: IndexFeedStats = { received: 0, parsed: 0, dropped: 0, ids: {}, available: null, lastRaw: null, lastDropped: null, lastTs: null, lagMs: null, control: [], unknownTypes: {} };
+  private readonly listRequested = new Set<number>();
 
   constructor(
     private readonly url: string,
@@ -103,7 +124,13 @@ export class KalshiWs extends EventEmitter {
       this.send('subscribe', { channels: ['orderbook_delta', 'trade', 'market_lifecycle_v2'], market_tickers: [...this.tickers] });
     }
     if (this.signer) this.send('subscribe', { channels: ['fill', 'user_orders'] });
-    if (this.indexIds.length) this.send('subscribe', { channels: ['cfbenchmarks_value'], index_ids: this.indexIds });
+    // The index (private channels: need the signed connection). The 5 Hz channel for the indices Kalshi
+    // publishes at 200 ms, the 1 Hz channel for every configured index (duplicates are dropped downstream).
+    if (this.indexIds.length) {
+      const fast = this.indexIds.filter((id) => CF_5HZ_IDS.includes(id.toUpperCase()));
+      if (fast.length) this.send('subscribe', { channels: ['cfbenchmarks_value_5hz'], index_ids: fast });
+      this.send('subscribe', { channels: ['cfbenchmarks_value'], index_ids: this.indexIds });
+    }
   }
 
   /** Force a fresh snapshot for one market after a gap. */
@@ -186,9 +213,47 @@ export class KalshiWs extends EventEmitter {
           break;
         case 'cfbenchmarks_value':
         case 'cfbenchmarks_value_5hz': {
-          const value = parseCount(msg.value) ?? parseCount(msg.price);
-          const indexId = String(msg.index_id ?? msg.index ?? msg.symbol ?? '');
-          if (value !== undefined && value > 0 && indexId) this.emit('index', { indexId, value, ts: tsMs(msg.ts ?? msg.timestamp) });
+          const st = this.indexStats;
+          st.received++;
+          if (st.received <= 3 || st.received % 500 === 0) st.lastRaw = text.slice(0, 600);
+          const rows = Array.isArray(msg.values) ? msg.values : Array.isArray(msg.indices) ? msg.indices : [msg];
+          let ok = 0;
+          for (const r of rows) {
+            const p = parseIndexRow(r, msg);
+            if (!p) continue;
+            ok++;
+            st.ids[p.indexId] = (st.ids[p.indexId] ?? 0) + 1;
+            st.lastTs = p.ts;
+            st.lagMs = Date.now() - p.ts;
+            recordLatency('kalshiIndex', st.lagMs);
+            this.emit('index', p);
+          }
+          if (ok) st.parsed++;
+          else {
+            st.dropped++;
+            st.lastDropped = text.slice(0, 600);
+            if (st.dropped <= 3) log.warn('index message not understood (logged for the first 3)', { raw: text.slice(0, 600) });
+          }
+          break;
+        }
+        case 'cfbenchmarks_value_indexlist':
+        case 'cfbenchmarks_value_5hz_indexlist': {
+          const ids = msg.index_ids ?? msg.indices ?? [];
+          this.indexStats.available = Array.isArray(ids) ? ids.map(String) : null;
+          log.info('index list', { type, ids: this.indexStats.available });
+          break;
+        }
+        case 'subscribed':
+        case 'ok':
+        case 'unsubscribed': {
+          this.control(`${type} ${JSON.stringify(msg).slice(0, 200)}`);
+          // Ask which indices the index channel offers (answered as *_indexlist), once per subscription.
+          const ch = String(msg.channel ?? '');
+          const sidNum = Number(msg.sid ?? sid);
+          if (type === 'subscribed' && ch.startsWith('cfbenchmarks') && Number.isFinite(sidNum) && !this.listRequested.has(sidNum)) {
+            this.listRequested.add(sidNum);
+            this.send('update_subscription', { sids: [sidNum], action: 'indexlist' });
+          }
           break;
         }
         case 'market_lifecycle_v2':
@@ -196,9 +261,11 @@ export class KalshiWs extends EventEmitter {
           this.emit('lifecycle', { ticker: String(msg.market_ticker), event: String(msg.event_type ?? msg.status), result: msg.result, ts: Date.now(), ...(msg.price_ranges ? { priceRanges: msg.price_ranges } : {}) });
           break;
         case 'error':
+          this.control(`error ${JSON.stringify(env).slice(0, 300)}`);
           log.error('server error message', env);
           break;
         default:
+          this.indexStats.unknownTypes[type] = (this.indexStats.unknownTypes[type] ?? 0) + 1;
           break;
       }
     } catch (e) {
@@ -206,12 +273,36 @@ export class KalshiWs extends EventEmitter {
       if (type === 'orderbook_delta' && msg.market_ticker) this.emit('book_gap', { ticker: String(msg.market_ticker), sid: sid ?? -1 });
     }
   }
+
+  private control(line: string): void {
+    const c = this.indexStats.control;
+    c.push(`${new Date().toISOString().slice(11, 19)} ${line}`);
+    if (c.length > 12) c.shift();
+  }
 }
 
-function tsMs(v: unknown): number {
+/** Timestamp in ms from seconds, ms, us or ns since the epoch, or an ISO string (now when missing). */
+export function tsMs(v: unknown): number {
+  if (typeof v === 'string' && !/^\d+(\.\d+)?$/.test(v)) { const t = Date.parse(v); return Number.isFinite(t) ? t : Date.now(); }
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) return Date.now();
+  if (n > 1e17) return Math.round(n / 1e6);
+  if (n > 1e14) return Math.round(n / 1e3);
   return n < 1e12 ? n * 1000 : n;
+}
+
+const firstNum = (o: any, keys: string[]): number | undefined => {
+  for (const k of keys) { const v = parseCount(o?.[k]); if (v !== undefined && v > 0) return v; }
+  return undefined;
+};
+
+/** One index value from a cfbenchmarks message (field names vary by channel and version; several tried). */
+export function parseIndexRow(r: any, parent: any = {}): { indexId: string; value: number; ts: number } | undefined {
+  const src = r?.data && typeof r.data === 'object' ? { ...r, ...r.data } : r;
+  const value = firstNum(src, ['value', 'price', 'index_value', 'value_dollars', 'last', 'v', 'val']);
+  const idRaw = src?.index_id ?? src?.index ?? src?.symbol ?? src?.id ?? src?.index_name ?? src?.ticker ?? parent?.index_id ?? parent?.index;
+  if (value === undefined || idRaw === undefined || idRaw === null || String(idRaw) === '') return undefined;
+  return { indexId: String(idRaw).toUpperCase(), value, ts: tsMs(src?.ts ?? src?.timestamp ?? src?.time ?? parent?.ts ?? parent?.timestamp) };
 }
 
 function lv(rows: unknown, legacyCents: boolean): BookLevel[] {

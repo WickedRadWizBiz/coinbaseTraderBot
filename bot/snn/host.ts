@@ -41,6 +41,8 @@ export interface SnnHostLike {
   stepAndScore(now: number, inputs: ColumnInput[], queries: ContractQuery[]): Promise<StepReply | undefined>;
   p99(): number;
   latencyOk(): boolean;
+  /** Share of the worker thread's time spent busy since the previous call (null without a worker). */
+  utilization?(): number | null;
   settle(ticker: string, result: 'yes' | 'no', now: number): Promise<void>;
   remove(keys: string[]): Promise<void>;
   status(): Promise<unknown>;
@@ -125,6 +127,15 @@ export class SnnHost implements SnnHostLike {
     if (!this.lat.length) return 0;
     const s = [...this.lat].sort((a, b) => a - b);
     return s[Math.min(s.length - 1, Math.floor(0.99 * s.length))];
+  }
+
+  private elu?: ReturnType<Worker['performance']['eventLoopUtilization']>;
+  utilization(): number | null {
+    if (!this.worker) return null;
+    const now = this.worker.performance.eventLoopUtilization();
+    const d = this.elu ? this.worker.performance.eventLoopUtilization(now, this.elu) : now;
+    this.elu = now;
+    return +d.utilization.toFixed(3);
   }
 
   /** The vote is skipped while latency p99 exceeds its band. */

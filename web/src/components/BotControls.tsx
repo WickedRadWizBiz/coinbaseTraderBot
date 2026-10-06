@@ -114,7 +114,7 @@ export function BotControls({ s, onChange }: { s: any; onChange: () => void }) {
 }
 
 /** Latency and sample-rate badges (restored): Kalshi WS / REST round trips, Coinbase feed delay, engine pass interval. */
-export function LatencyBadges({ latency }: { latency?: { kalshiWs: number | null; kalshiRest: number | null; coinbase: number | null; sample: number | null } }) {
+export function LatencyBadges({ latency }: { latency?: { kalshiWs: number | null; kalshiRest: number | null; coinbase: number | null; sample: number | null; kalshiIndex?: number | null; loopP99?: number | null } }) {
   const ms = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${v}ms`);
   return (
     <div className="flex flex-col gap-1 font-mono text-[10px] normal-case tracking-normal">
@@ -137,6 +137,13 @@ export function LatencyBadges({ latency }: { latency?: { kalshiWs: number | null
       >
         <span className="text-[#808080]">SMP RT:</span>
         <span className="text-crypto-primary font-bold">{ms(latency?.sample)}</span>
+      </span>
+      <span
+        className="px-1.5 py-0.5 border border-crypto-primary/40 bg-black/40 text-crypto-text/80 flex items-center justify-between gap-1 leading-none"
+        title={`Main-thread event-loop delay p99 (${ms(latency?.loopP99)}): how long a received message waits before the bot runs it. A WS round trip close to this number is local CPU load, not the network. IDX: Kalshi index vendor timestamp to received (${ms(latency?.kalshiIndex)}).`}
+      >
+        <span className="text-[#808080]">LOOP:</span>
+        <span className="font-bold"><span className={latency?.loopP99 !== null && latency?.loopP99 !== undefined && latency.loopP99 > 500 ? 'text-red-400' : 'text-emerald-400'}>{ms(latency?.loopP99)}</span> <span className="text-[#606060]">/ IDX</span> <span className="text-crypto-primary">{ms(latency?.kalshiIndex)}</span></span>
       </span>
     </div>
   );

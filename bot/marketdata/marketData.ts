@@ -32,6 +32,7 @@ import { TakerFlowFeed } from './takerFlow';
 import { KalshiPerpsRest } from '../perps/perpRest';
 import type { PerpSnapshot } from '../perps/perpData';
 import { contractKind, type ContractTerms, type MarketKind } from '../model/fairValue';
+import { fillTickerStrikes } from '../kalshi/wire';
 import { DominanceService } from './dominance';
 import { IndexBars, IndexStore } from './indexBars';
 import { IndexTracker } from './indexTracker';
@@ -75,6 +76,9 @@ export class MarketData extends EventEmitter {
   /** Binance USDT price per asset, sampled each second from the dominance stream (a paper-only pricing
    *  fallback when Coinbase prints are sparse; kept separate so sources never mix in one series). */
   readonly binance = new Map<string, IndexTracker>();
+  /** INDEX_ID_MAP with upper-cased keys (the channel's casing is not guaranteed). */
+  private idUpper?: Map<string, string>;
+  private get indexIdUpper(): Map<string, string> { return (this.idUpper ??= new Map(Object.entries(this.cfg.indexIdMap).map(([k, v]) => [k.toUpperCase(), v]))); }
   /** USDT.D and BTC.D (percent), fed by the dominance service. */
   readonly usdtd = new IndexTracker('USDT.D', 90 * 60_000, 300);
   readonly btcd = new IndexTracker('BTC.D', 90 * 60_000, 300);
@@ -247,8 +251,14 @@ export class MarketData extends EventEmitter {
     return this.fees.has(series);
   }
 
+  /** What Kalshi's index channels delivered (counts per stage, ids seen, raw samples, acks). */
+  indexFeedStats(): (import('../kalshi/ws').IndexFeedStats & { connected: boolean; lastMessageAgoMs: number | null }) | null {
+    if (!this.ws) return null;
+    return { ...this.ws.indexStats, connected: this.wsConnected, lastMessageAgoMs: this.ws.lastMessageTs ? Date.now() - this.ws.lastMessageTs : null };
+  }
+
   private onIndex(indexId: string, value: number, ts: number): void {
-    const asset = this.cfg.indexIdMap[indexId];
+    const asset = this.cfg.indexIdMap[indexId] ?? this.indexIdUpper.get(indexId.toUpperCase());
     if (!asset) return;
     this.index.get(asset)?.add(value, ts);
     this.features.onIndex(asset, value, ts);
@@ -323,7 +333,9 @@ export class MarketData extends EventEmitter {
           this.feesFetchedAt.set(series, now);
           try { this.feeChanges.set(series, (await this.rest.getSeriesFeeChanges(series)).sort((a, b) => a.scheduledTs - b.scheduledTs)); } catch { /* optional: keep the last list */ }
         }
-        const fetched = await this.rest.getOpenMarkets(series);
+        const fetched = fillTickerStrikes(await this.rest.getOpenMarkets(series));
+        // Which strikes to track: the ones at the money by Kalshi's own prices (nearest 50c on a ladder, the
+        // richest buckets on a range), else nearest Kalshi's index. Never an outside exchange's price.
         const markets = nearestStrikes(fetched, contractKind, series, this.index.get(asset)?.latest()?.value, this.cfg.catalogStrikesPerEvent, new Set(this.markets.keys()));
         // Where markets drop out, per series (dashboard / API diagnostics).
         const ps = { fetched: fetched.length, nearest: markets.length, closed: 0, farDated: 0, notOpenYet: 0, kept: 0, sample: fetched[0] ? `${fetched[0].ticker} open ${new Date(fetched[0].openTime).toISOString()} close ${new Date(fetched[0].closeTime).toISOString()}` : undefined };
@@ -420,9 +432,9 @@ export class MarketData extends EventEmitter {
     if (m.kind !== 'updown') return undefined;
     const idx = this.index.get(m.asset);
     let avg = idx?.settlement(m.openTime, m.openTime);
-    // Paper: when Kalshi's index feed is too sparse to cover the opening minute, use the Coinbase spot
-    // series' opening average (small basis vs CF RTI) so the contract can still be priced and traded.
-    if (!(avg && avg.n >= 60) && this.cfg.mode === 'paper') avg = this.spot.get(m.asset)?.settlement(m.openTime, m.openTime, 60, 15_000);
+    // Paper with PAPER_OUTSIDE_PRICE_FALLBACK=true only: when Kalshi's index misses the opening minute, the
+    // Coinbase opening average stands in (contracts are otherwise priced on Kalshi data alone).
+    if (!(avg && avg.n >= 60) && this.cfg.mode === 'paper' && this.cfg.strategy.outsidePriceFallback) avg = this.spot.get(m.asset)?.settlement(m.openTime, m.openTime, 60, 15_000);
     if (avg && avg.n >= 60) {
       m.strike = avg.avg;
       m.strikeSource = 'computed';
@@ -521,7 +533,7 @@ export class MarketData extends EventEmitter {
 /** A catalog refresh running longer than this no longer blocks the next one. */
 export const CATALOG_STUCK_MS = 180_000;
 
-export function nearestStrikes<M extends { ticker: string; eventTicker?: string; strikeType?: string; floorStrike?: number; capStrike?: number }>(
+export function nearestStrikes<M extends { ticker: string; eventTicker?: string; strikeType?: string; floorStrike?: number; capStrike?: number; yesMid?: number }>(
   markets: M[], kindOf: (series: string, strikeType?: string) => string, series: string, price: number | undefined, n: number, tracked: Set<string>,
 ): M[] {
   if (!n) return markets;
@@ -535,6 +547,16 @@ export function nearestStrikes<M extends { ticker: string; eventTicker?: string;
     (byEvent.get(e) ?? byEvent.set(e, []).get(e)!).push(m);
   }
   for (const ms of byEvent.values()) {
+    // Kalshi's own prices first: at the money = YES nearest 50c (above / below ladders) or the richest
+    // buckets (ranges). Needs a price on at least half the event's markets.
+    const priced = ms.filter((m) => m.yesMid !== undefined);
+    if (priced.length >= Math.max(2, ms.length / 2)) {
+      const between = kindOf(series, ms[0].strikeType) === 'between';
+      const score = (m: M) => (m.yesMid === undefined ? Infinity : between ? -m.yesMid : Math.abs(m.yesMid - 0.5));
+      const keep = new Set([...ms].sort((a, b) => score(a) - score(b)).slice(0, n));
+      for (const m of ms) if (keep.has(m) || tracked.has(m.ticker)) out.push(m);
+      continue;
+    }
     const refs = ms.map((m) => ref(m)!).sort((a, b) => a - b);
     const p = price ?? refs[Math.floor(refs.length / 2)];
     const keep = new Set([...ms].sort((a, b) => Math.abs(ref(a)! - p) - Math.abs(ref(b)! - p)).slice(0, n));

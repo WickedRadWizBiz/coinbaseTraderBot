@@ -76,6 +76,12 @@ export interface MarketInfo {
   floorStrike?: number;
   /** Upper strike for range ('between') and 'less' markets. */
   capStrike?: number;
+  /** Strike written in the ticker ("-B0.097" = a range centred there, "-T85699.99" = above it), used when
+   *  Kalshi omits floor_strike / cap_strike. */
+  tickerStrike?: { kind: 'B' | 'T'; value: number };
+  /** Kalshi's own YES price for the market in the listing (bid/ask mid, else last trade): picks the
+   *  at-the-money strikes without any outside price. */
+  yesMid?: number;
   /** Kalshi strike_type: greater, greater_or_equal, less, between, ... */
   strikeType?: string;
   tickSize: number;
