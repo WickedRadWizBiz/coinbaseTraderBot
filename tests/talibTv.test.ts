@@ -60,8 +60,8 @@ test('TradingView: spot holes within reach, index needs, fetch and import as gap
   assert.equal(holes.length, 1);
   assert.equal(holes[0].missing, 20);
   assert.equal(holes[0].first, bars[500].ts);
-  // No index series yet: all five need the full backfill.
-  assert.deepEqual(indexNeeds(dir, now).full, ['BTC.D', 'USDT.D', 'TOTAL3', 'OTHERS.D', 'RTY']);
+  // No index series yet: all nine need the full backfill.
+  assert.deepEqual(indexNeeds(dir, now).full, ['BTC.D', 'USDT.D', 'TOTAL3', 'OTHERS.D', 'RTY', 'DXY', 'US10Y', 'VIX', 'HYG']);
   const calls: string[][] = [];
   const run = async (args: string[]) => {
     calls.push(args);

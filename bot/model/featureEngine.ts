@@ -23,6 +23,7 @@ import { EWMA_LOOKBACK_SEC, seasonalVarianceRatio, type VolProfile } from './vol
 import { CandleSet, fromRow, takerImbalance, toRow, type CandleRow } from '../ta/candleStore';
 import type { Timeframe } from '../ta/knowledge';
 import { CONFLUENCES, RULES } from '../ta/knowledge';
+import { marketContext } from '../ta/marketContext';
 import type { TaSnapshot, TfState } from '../ta/analyzer';
 import { activeTaNet, type TaNetOutput } from '../ta/taNet';
 
@@ -831,7 +832,7 @@ const TF_PERIOD: Record<Timeframe, number> = { '1m': 60_000, '5m': 300_000, '15m
 
 const taOf = (c: FeatureContext, k: Cache): TaSnapshot | undefined => {
   if (k.ta === undefined) {
-    k.ta = c.candles ? c.candles.snapshot(c.now, { usdtdChg: domZ(c.usdtd, c, 900), btcdChg: domZ(c.btcd, c, 900) }) : null;
+    k.ta = c.candles ? c.candles.snapshot(c.now, { usdtdChg: domZ(c.usdtd, c, 900), btcdChg: domZ(c.btcd, c, 900), ...marketContext()?.macro() }) : null;
   }
   return k.ta ?? undefined;
 };

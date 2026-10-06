@@ -18,7 +18,7 @@ export class CandleSet {
   readonly bars: Partial<Record<Timeframe, Candle[]>> = {};
   private version = 0;
   private states?: { version: number; tf: Partial<Record<Timeframe, TfState>> };
-  private snap?: { key: string; snap: TaSnapshot };
+  private readonly snaps = new Map<string, TaSnapshot>();
 
   constructor(readonly asset: string) {}
 
@@ -55,9 +55,16 @@ export class CandleSet {
   snapshot(now: number, macro?: MacroInput): TaSnapshot {
     if (!this.states || this.states.version !== this.version) this.states = { version: this.version, tf: computeStates(this.bars) };
     const r1 = (x?: number) => (x === undefined || !Number.isFinite(x) ? 'na' : x.toFixed(1));
-    const key = `${this.version}|${r1(macro?.usdtdChg)}|${r1(macro?.btcdChg)}`;
-    if (this.snap?.key !== key) this.snap = { key, snap: evaluate(this.asset, this.states.tf, now, { ...macro, asset: this.asset }) };
-    return this.snap.snap;
+    const key = `${this.version}|${r1(macro?.usdtdChg)}|${r1(macro?.btcdChg)}|${macro?.ctx ?? ''}`;
+    // A few macro variants are in use at once (features with the dominance inputs, the engine's rule
+    // book without): keep the last four so they do not evict each other.
+    let snap = this.snaps.get(key);
+    if (!snap) {
+      snap = evaluate(this.asset, this.states.tf, now, { ...macro, asset: this.asset });
+      this.snaps.set(key, snap);
+      if (this.snaps.size > 4) this.snaps.delete(this.snaps.keys().next().value!);
+    }
+    return snap;
   }
 }
 

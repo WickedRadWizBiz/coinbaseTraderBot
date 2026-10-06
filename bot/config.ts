@@ -146,6 +146,10 @@ export interface StrategyConfig {
   nonAlts: string[];
   /** Largest combined size multiplier (adversary / confluence x altcoin rule) on any entry. */
   convictionMaxTotal: number;
+  /** No conviction boosts while the coin's character is volatile-systemic (bot/strategy/ruleBook.ts). */
+  characterStandAside: boolean;
+  /** The rule book (rules that passed research/ruleBook.ts) joins the conviction signals. */
+  ruleBook: boolean;
   /** Weight of the TA network's validated volatility forecast in the pricing sigma (0 = off, 1 = fully). */
   taVolWeight: number;
   modelHealthMinWindows: number;
@@ -791,6 +795,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     altRsiMin: num(env, 'ALT_RSI_MIN', 50, 0, 100),
     nonAlts: (env.NON_ALTCOINS ?? 'BTC').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
     convictionMaxTotal: num(env, 'CONVICTION_MAX_TOTAL', 2.5, 1, 5),
+    characterStandAside: bool(env, 'CHARACTER_STAND_ASIDE', true),
+    ruleBook: bool(env, 'RULE_BOOK', true),
     taVolWeight: num(env, 'TA_VOL_WEIGHT', 0.5, 0, 1),
     modelHealthMinWindows: num(env, 'MODEL_HEALTH_MIN_WINDOWS', 200, 20, 100000),
     huntTargetMargin: num(env, 'HUNT_TARGET_MARGIN', 0.02, 0, 0.5),

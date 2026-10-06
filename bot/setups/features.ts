@@ -13,6 +13,8 @@
 //     forecast), the "tanet" group: in research they come from its walk-forward export
 //     (research/taNetOos.ts), live from the same walking network. The trainer keeps the group only if
 //     it improves the development years; otherwise these inputs are blanked (NaN) for the model.
+//   - the coin's market character at the setup (calm / trending / volatile coin-specific / volatile
+//     market-wide, and its inputs: bot/ta/character.ts), the "character" group, kept on the same terms.
 // The states come from bot/ta/taNet.ts taNetStates on the same windows live and in research.
 
 import { evaluate } from '../ta/analyzer';
@@ -21,6 +23,7 @@ import type { Candle } from '../ta/indicators';
 import { closedIndex, KIND_OF, RULE_KINDS, taNetStates, TANET_D1_BARS, TANET_H1_BARS, TF_KEYS, TF_OPTS, tfFeatures } from '../ta/taNet';
 import { marketClockFeatures, MARKET_CLOCK_FEATURES } from '../model/sessions';
 import type { SetupSignal } from './detectors';
+import type { Character, CharacterInputs } from '../ta/character';
 import { TF_MS } from './detectors';
 
 const clip = (x: number, lim: number) => (Number.isFinite(x) ? Math.max(-lim, Math.min(lim, x)) : NaN);
@@ -41,10 +44,19 @@ const SETUP_KEYS = [
 export const SETUP_BASE_FEATURES: string[] = [...SETUP_KEYS, ...MARKET_CLOCK_FEATURES, ...TA_KEYS, ...BTC_KEYS, ...TA_KEYS.map((k) => `o_${k}`), ...BTC_KEYS.map((k) => `o_${k}`)];
 /** The TA network's forecasts (side-oriented copies: P(up) - 0.5 times the trade's side). */
 export const TANET_SETUP_KEYS = ['tn_up1', 'tn_up4', 'tn_vol', 'o_tn_up1', 'o_tn_up4'];
+/** The coin's market character at the setup (bot/ta/character.ts): class one-hot and its inputs. */
+export const CHAR_SETUP_KEYS = ['ch_calm', 'ch_trending', 'ch_vol_idio', 'ch_vol_sys', 'ch_rvpct', 'ch_corr', 'ch_hurst', 'ch_er'];
 /** Optional input groups the trainer switches on only when they help (off = blanked to NaN). */
-export const SETUP_GROUPS: Record<string, string[]> = { tanet: TANET_SETUP_KEYS };
-/** Every input, in order. */
-export const SETUP_FEATURES: string[] = [...SETUP_BASE_FEATURES, ...TANET_SETUP_KEYS];
+export const SETUP_GROUPS: Record<string, string[]> = { tanet: TANET_SETUP_KEYS, character: CHAR_SETUP_KEYS };
+/** Every input, in order (groups appended last, so models trained before a group existed still load). */
+export const SETUP_FEATURES: string[] = [...SETUP_BASE_FEATURES, ...TANET_SETUP_KEYS, ...CHAR_SETUP_KEYS];
+
+/** Fill the character inputs of a feature map (NaN when unknown). */
+export function characterFeatures(out: Record<string, number>, ch: { cls: Character; x: CharacterInputs } | undefined): void {
+  const one = (c: Character) => (ch ? (ch.cls === c ? 1 : 0) : NaN);
+  out.ch_calm = one('calm'); out.ch_trending = one('trending'); out.ch_vol_idio = one('volatile_idio'); out.ch_vol_sys = one('volatile_systemic');
+  out.ch_rvpct = ch?.x.rvPct ?? NaN; out.ch_corr = ch?.x.corr ?? NaN; out.ch_hurst = ch?.x.hurst ?? NaN; out.ch_er = ch?.x.er ?? NaN;
+}
 
 /** TA network forecast at a setup (P(up 1h), P(up 4h), 4h vol log ratio). */
 export interface TaNetReading { up1: number; up4: number; vol: number }
@@ -99,7 +111,7 @@ function taMap(prefix: string, bars: SetupBars, t: number, out: Record<string, n
 }
 
 /** Feature vector of a setup known at time `t` (= signal bar close), from the asset's and BTC's bars. */
-export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBars | undefined, t = sig.ts + TF_MS[sig.tf]!, tanet?: TaNetReading): Record<string, number> {
+export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBars | undefined, t = sig.ts + TF_MS[sig.tf]!, tanet?: TaNetReading, character?: { cls: Character; x: CharacterInputs }): Record<string, number> {
   const out: Record<string, number> = {};
   const risk = Math.abs(sig.ref - sig.stop);
   out.dir = sig.dir;
@@ -120,6 +132,7 @@ export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBar
   if (btc) taMap('btc_', btc, t, out, BTC_TFS, false);
   for (const k of [...TA_KEYS, ...BTC_KEYS]) out[`o_${k}`] = Number.isFinite(out[k]) ? sig.dir * out[k] : NaN;
   tanetFeatures(out, sig.dir, tanet);
+  characterFeatures(out, character);
   return out;
 }
 

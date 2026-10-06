@@ -96,6 +96,8 @@ export interface MacroInput {
   /** Traditional-market risk gauges, 5-day log changes: dollar index, US 10-year yield, VIX, high-yield
    *  bonds (HYG). */
   risk?: { dxy?: number; us10y?: number; vix?: number; hyg?: number };
+  /** Version of the market context the breadth / risk came from (snapshot cache key). */
+  ctx?: number;
   /** Recent USDT.D and BTC.D changes (sigma-scaled or %; only the sign and size matter). */
   usdtdChg?: number;
   btcdChg?: number;

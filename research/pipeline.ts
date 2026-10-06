@@ -42,6 +42,7 @@
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
 
+import { loadRuleBookHistory, ruleBookSummary, runRuleBook } from './ruleBook';
 import { tuneSizingMain } from './tuneSizing';
 import { promoteIfChampion } from './champion';
 import fs from 'fs';
@@ -85,7 +86,7 @@ import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
 import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
 
-export const STEPS = ['history', 'ta_net', 'ta_net_oos', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing'] as const;
+export const STEPS = ['history', 'ta_net', 'ta_net_oos', 'rule_book', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -124,6 +125,8 @@ export interface PipelineState {
   /** Promoted setup model (fast / slow lanes) and when it was trained. */
   setupsVersion?: string;
   setupsTrainedAt?: number;
+  /** Last rule-book study (research/ruleBook.ts, weekly). */
+  ruleBookAt?: number;
   /** What the recordings make testable so far (see the readiness block of each report). */
   readiness?: Readiness;
   /** Last sweep run per target. */
@@ -347,6 +350,22 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       if (r.complete && fs.existsSync(wf)) fs.copyFileSync(wf, promoted('ta_net_wf'));
       return { ...r, promoted: r.complete };
     }, cfg.perps.strategy !== 'setups' ? 'PERP_STRATEGY is not setups' : !T.enabled ? 'TA_NET=false' : noHistory);
+  }
+
+  // ---- 0c'. Rule book: every TA rule walk-forward by market character (research/ruleBook.ts) ----
+  if (want('rule_book')) {
+    const file = path.join(A.dir, 'rule_book.json');
+    const due = !fs.existsSync(file) || !state.ruleBookAt || now - state.ruleBookAt >= 7 * 86_400_000;
+    const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet`;
+    await run('rule_book', async () => {
+      const { hist, risk } = loadRuleBookHistory(T.historyDir);
+      if (!Object.keys(hist).length) throw new SkipStep('no hourly + daily history for the study coins');
+      const f = runRuleBook(hist, { risk, log });
+      writeAtomic(file, JSON.stringify(f));
+      state.ruleBookAt = now;
+      for (const l of ruleBookSummary(f)) log(`[rule-book] ${l}`);
+      return { tests: f.rows.length, passed: f.rows.filter((r) => r.pass).length, character: { accuracy: f.character.accuracy, baseline: f.character.baseline }, from: f.from, to: f.to, splitAt: f.splitAt };
+    }, noHistory ?? (due ? undefined : `ran ${((now - state.ruleBookAt!) / 86_400_000).toFixed(1)} day(s) ago (weekly)`));
   }
 
   // ---- 0d. Setup scorer for the fast / slow lane trader (years of 15m / 1h / daily candles) ----

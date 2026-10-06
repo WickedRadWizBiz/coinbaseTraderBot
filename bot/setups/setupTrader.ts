@@ -21,6 +21,7 @@
 
 import { drawdownScale, optimalF, recencyWeight, type OptimalFReport, type WeightedTrade } from '../strategy/optimalF';
 import type { OptimalFConfig } from '../config';
+import { marketContext } from '../ta/marketContext';
 import fs from 'fs';
 import type { BreakEven } from '../risk/equityGuard';
 import type { StreakScaler } from '../risk/streakScaler';
@@ -197,7 +198,7 @@ export class SetupTrader {
     if (!this.model) return NaN;
     const bars = this.bars(sig.asset);
     if (!bars) return NaN;
-    return this.model.score(sig.lane, setupVector(setupFeatureMap(sig, bars, this.bars('BTC'), t, this.reading(sig.asset, t))));
+    return this.model.score(sig.lane, setupVector(setupFeatureMap(sig, bars, this.bars('BTC'), t, this.reading(sig.asset, t), marketContext()?.character(sig.asset))));
   }
 
   /** The SNN gate (hot reload on change; off when missing). */

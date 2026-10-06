@@ -61,7 +61,7 @@ function closedUpTo(cs: Candle[], tf: Timeframe, t: number): number {
 }
 
 /** Moving-block bootstrap of the mean (blocks keep the serial correlation of overlapping signals). */
-function blockBootstrap(xs: number[], block = 8, iters = 2000, seed = 7): { lo: number; hi: number; p: number } {
+export function blockBootstrap(xs: number[], block = 8, iters = 2000, seed = 7): { lo: number; hi: number; p: number } {
   const n = xs.length;
   if (n < 2) return { lo: NaN, hi: NaN, p: 1 };
   const r = rng(seed);
