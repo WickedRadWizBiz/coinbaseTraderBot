@@ -31,12 +31,14 @@ const WORKING = new Set(['PENDING_NEW', 'UNKNOWN', 'ACKED', 'PARTIALLY_FILLED', 
 export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[]; orders?: Array<{ ticker: string; state: string }> }) {
   const tabs = useMemo(() => {
     const working = new Set(orders.filter((o) => WORKING.has(o.state)).map((o) => o.ticker));
+    const now = Date.now();
+    // Live contracts first (positions before working orders), then closed ones awaiting settlement.
     return markets
       .filter((m) => Math.abs(m.position) > 0 || working.has(m.ticker))
-      .sort((a, b) => Number(Math.abs(b.position) > 0) - Number(Math.abs(a.position) > 0) || a.closeTs - b.closeTs);
+      .sort((a, b) => Number(a.closeTs <= now) - Number(b.closeTs <= now) || Number(Math.abs(b.position) > 0) - Number(Math.abs(a.position) > 0) || a.closeTs - b.closeTs);
   }, [markets, orders]);
   const [active, setActive] = useState<string | null>(null);
-  const [book, setBook] = useState<{ bids: Level[]; asks: Level[]; usable: boolean } | null>(null);
+  const [book, setBook] = useState<{ bids: Level[]; asks: Level[]; usable: boolean; closed?: boolean; reason?: string } | null>(null);
   const [spot, setSpot] = useState<{ product: string; bids: Level[]; asks: Level[]; index: number | null; strike: number | null; error?: string } | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -46,6 +48,7 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
   }, [tabs, active]);
 
   const tab = tabs.find((t) => t.ticker === active);
+  const tabClosed = Boolean(book?.closed) || (tab !== undefined && tab.closeTs <= Date.now());
 
   useEffect(() => {
     if (!active) { setBook(null); setSpot(null); return; }
@@ -55,7 +58,7 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
       if (document.hidden) return;
       try {
         const b = await api<any>(`/order-book/${encodeURIComponent(active)}`);
-        if (alive) setBook({ bids: b.bids ?? [], asks: b.asks ?? [], usable: Boolean(b.usable) });
+        if (alive) setBook({ bids: b.bids ?? [], asks: b.asks ?? [], usable: Boolean(b.usable), closed: Boolean(b.closed), reason: b.reason });
       } catch { if (alive) setBook(null); }
       try {
         const s = await api<any>(`/spot-book/${encodeURIComponent(active)}`);
@@ -117,6 +120,7 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
           tabs.map((t) => {
             const isActive = t.ticker === active;
             const side = t.position > 0 ? 'YES' : t.position < 0 ? 'NO' : null;
+            const closed = t.closeTs <= Date.now();
             return (
               <button
                 key={t.ticker}
@@ -126,12 +130,12 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
                 }`}
               >
                 {side && (
-                  <span className={`px-1.5 py-0.5 text-[10px] font-black crt-border ${side === 'YES' ? 'bg-crypto-success/30 text-crypto-success' : 'bg-crypto-danger/30 text-crypto-danger'}`}>
+                  <span className={`px-1.5 py-0.5 text-[10px] font-black crt-border ${isActive ? 'bg-black/70 text-crypto-text' : side === 'YES' ? 'bg-crypto-success/30 text-crypto-success' : 'bg-crypto-danger/30 text-crypto-danger'}`}>
                     {side} {Math.abs(t.position)}
                   </span>
                 )}
                 <span className="truncate">[{t.ticker}]</span>
-                <span className="text-[10px] text-crypto-success">{pct(t.pYes)}</span>
+                {closed ? <span className="text-[10px] text-yellow-300">SETTLING</span> : <span className="text-[10px] text-crypto-success">{pct(t.pYes)}</span>}
               </button>
             );
           })
@@ -164,7 +168,7 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
                     </span>
                   )}
                   <span className="px-2 py-0.5 crt-border bg-black/40 font-bold text-crypto-primary max-w-full md:max-w-xl truncate">
-                    {tab.ticker} · BID {px(tab.bestBid)} / ASK {px(tab.bestAsk)}
+                    {tab.ticker} · {tabClosed ? 'CLOSED' : <>BID {px(tab.bestBid)} / ASK {px(tab.bestAsk)}</>}
                   </span>
                   <span className="px-2 py-0.5 crt-border bg-[#8f73ff15] text-[#e2d5ed] font-mono text-[11px]">
                     FAIR {pct(tab.fairValue)} · MODEL {pct(tab.pYes)}
@@ -178,10 +182,10 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
                       HUNTING · TARGET {px(tab.huntTarget)} · STOP {tab.huntStop !== undefined ? px(tab.huntStop) : 'FORMING'}
                     </span>
                   )}
-                  {book && !book.usable && (
+                  {book && !book.usable && !tabClosed && (
                     <span className="px-2 py-0.5 crt-border bg-crypto-danger/20 text-crypto-danger font-bold text-[11px]">BOOK STALE</span>
                   )}
-                  {spot?.error && (
+                  {spot?.error && !tabClosed && (
                     <span className="px-2 py-0.5 crt-border bg-black/50 text-[#808080] text-[10px]" title={spot.error}>SPOT BOOK UNAVAILABLE</span>
                   )}
                 </div>
@@ -189,8 +193,20 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
             </div>
 
             <div className="h-[250px] w-full crt-border bg-black/30 p-4 relative">
+              {orderBook.length === 0 ? (
+                <div className="h-full w-full flex flex-col items-center justify-center gap-2 text-center px-4">
+                  <span className={`font-mono font-bold tracking-widest text-xs uppercase ${tabClosed ? 'text-yellow-300' : 'text-crypto-danger'}`}>
+                    {tabClosed ? '[MARKET CLOSED · AWAITING SETTLEMENT]' : book && !book.usable ? '[WAITING FOR THE KALSHI BOOK SNAPSHOT]' : book ? '[NO RESTING ORDERS ON THIS CONTRACT]' : '[KALSHI BOOK UNAVAILABLE]'}
+                  </span>
+                  <span className="text-[11px] text-crypto-primary opacity-70 max-w-sm normal-case">
+                    {tabClosed
+                      ? `Trading has ended, so there is no order book. ${tab.position !== 0 ? `${tab.position > 0 ? 'YES' : 'NO'} x${Math.abs(tab.position)} pays $1 per contract if it wins, $0 if not, once Kalshi posts the result.` : ''}`
+                      : 'The YES order book (bids left, asks right) appears here with the spot pair overlaid in amber.'}
+                  </span>
+                </div>
+              ) : (
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
+                <ComposedChart margin={{ top: 10, right: 12, left: 4, bottom: 0 }}>
                   <defs>
                     <pattern id="ditherBid" x="0" y="0" width="4" height="4" patternUnits="userSpaceOnUse">
                       <circle cx="1" cy="1" r="1" fill="#e2d5ed" opacity="0.6" />
@@ -204,7 +220,7 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
                   <CartesianGrid strokeDasharray="2 4" stroke="#c23b5a" strokeOpacity={0.4} vertical={true} horizontal={true} />
                   <XAxis xAxisId="contract" dataKey="price" stroke="#c23b5a" tick={{ fill: '#c23b5a', fontSize: 10, fontFamily: 'monospace' }} tickLine={false} axisLine={false}
                     tickFormatter={(v: number) => (v <= 1 ? v.toFixed(2) : v.toFixed(0))} type="number" domain={['dataMin', 'dataMax']} />
-                  <YAxis yAxisId="contract" stroke="#c23b5a" tick={{ fill: '#c23b5a', fontSize: 10, fontFamily: 'monospace' }} tickLine={false} axisLine={false} />
+                  <YAxis yAxisId="contract" width={40} stroke="#c23b5a" tick={{ fill: '#c23b5a', fontSize: 10, fontFamily: 'monospace' }} tickLine={false} axisLine={false} />
                   <Tooltip
                     contentStyle={{ backgroundColor: '#0a0204', border: '1px solid #c23b5a', color: '#e2d5ed', fontSize: '12px', fontFamily: 'monospace' }}
                     labelFormatter={(v) => `Price: $${Number(v) <= 1 ? Number(v).toFixed(2) : Number(v).toFixed(2)}`}
@@ -217,17 +233,20 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
                   <Line data={spotBookAsks} xAxisId="spot" yAxisId="spot" type="stepAfter" dataKey="cumSize" name="Spot asks" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={false} isAnimationActive={false} />
                 </ComposedChart>
               </ResponsiveContainer>
+              )}
             </div>
 
             <div className="flex flex-col gap-3 crt-border-t pt-6">
               <div className="flex justify-between items-center text-xs font-bold tracking-widest uppercase gap-2 flex-wrap">
-                <span className="text-crypto-danger">Sell Wall (-100) [{Math.min(0, cumulativeImbalance).toFixed(1)}]</span>
-                <span className="text-crypto-text">Neutral (0) [Imbalance: {cumulativeImbalance > 0 ? `+${cumulativeImbalance}` : cumulativeImbalance}]</span>
-                <span className="text-crypto-primary">Buy Wall (+100) [{Math.max(0, cumulativeImbalance).toFixed(1)}]</span>
+                <span className="text-crypto-danger">Sell Wall (-100) [{totalVol > 0 ? Math.min(0, cumulativeImbalance).toFixed(1) : '—'}]</span>
+                <span className="text-crypto-text">Neutral (0) [Imbalance: {totalVol > 0 ? (cumulativeImbalance > 0 ? `+${cumulativeImbalance}` : cumulativeImbalance) : '—'}]</span>
+                <span className="text-crypto-primary">Buy Wall (+100) [{totalVol > 0 ? Math.max(0, cumulativeImbalance).toFixed(1) : '—'}]</span>
               </div>
               <div className="relative w-full h-6 crt-border bg-black/30 flex overflow-hidden">
                 <div className="absolute left-1/2 top-0 bottom-0 w-px bg-crypto-primary z-10" />
-                {cumulativeImbalance > 0 ? (
+                {totalVol === 0 ? (
+                  <span className="absolute inset-0 flex items-center justify-center text-[10px] font-bold tracking-widest text-crypto-primary/60 z-20">NO BOOK</span>
+                ) : cumulativeImbalance > 0 ? (
                   <div className="absolute left-1/2 h-full dither-bg-light transition-all duration-500 bg-crypto-primary/60" style={{ width: `${Math.min(50, (cumulativeImbalance / 100) * 50)}%` }} />
                 ) : (
                   <div className="absolute right-1/2 h-full dither-bg-dark transition-all duration-500 bg-crypto-danger/60" style={{ width: `${Math.min(50, (Math.abs(cumulativeImbalance) / 100) * 50)}%` }} />
