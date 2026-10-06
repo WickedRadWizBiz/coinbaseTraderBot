@@ -52,6 +52,19 @@ for rep in sorted(glob.glob(os.path.join(DATA, 'models', 'reports', 'pipeline-*.
         print(f"     {st.get('step'):14s} {verdict}")
     print('     readiness', short(r.get('readiness'), 300))
 
+print('== training run logs (newest last)')
+logs = sorted(glob.glob(os.path.join(DATA, 'models', 'logs', 'pipeline-*.log')))
+for lf in logs[-5:]:
+    print(f"  {os.path.basename(lf)}  {os.path.getsize(lf) // 1024} KB")
+if logs:
+    try:
+        tail = open(logs[-1], errors='replace').read().splitlines()[-15:]
+        for line in tail: print('   |', line[:200])
+    except Exception as e:  # noqa: BLE001
+        print('  unreadable', e)
+st_file = os.path.join(DATA, 'models', 'pipeline_state.json')
+print('  pipeline state:', short(json.load(open(st_file)) if os.path.exists(st_file) else 'none yet', 500))
+
 print('== settlement')
 st = s.get('settlement')
 if st: print('  sweeper', short(st, 600))

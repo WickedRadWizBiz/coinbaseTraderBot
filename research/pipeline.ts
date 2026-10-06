@@ -205,6 +205,15 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const rec = A.recordingsDir;
   const days = recordingDays(rec);
   const promoted = (name: keyof typeof MODEL_FILES) => path.join(A.dir, MODEL_FILES[name]);
+  const report = path.join(A.dir, 'reports', `pipeline-${new Date(now).toISOString().replace(/[:.]/g, '-')}.json`);
+  // Progress is saved after every step (state and a partial report), so a run cut short (a deploy restarts
+  // the bot and the pipeline with it) keeps what its finished steps produced instead of starting over.
+  const checkpoint = (complete: boolean) => {
+    try {
+      writeAtomic(report, JSON.stringify({ at: new Date(now).toISOString(), complete, recordings: rec, days: days.length, readiness: state.readiness, promote: A.promote, steps }, null, 1));
+      writeAtomic(path.join(A.dir, 'pipeline_state.json'), JSON.stringify({ ...state, lastReport: report }, null, 1));
+    } catch (e) { log(`checkpoint failed: ${(e as Error).message}`); }
+  };
   const run = async (step: string, fn: () => Promise<unknown>, skip?: string) => {
     const t0 = Date.now();
     if (skip) { steps.push({ step, ok: true, skipped: skip, ms: 0 }); log(`${step}: skipped (${skip})`); return undefined; }
@@ -213,11 +222,13 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const detail = await fn();
       steps.push({ step, ok: true, ms: Date.now() - t0, detail });
       log(`${step}: done in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
+      checkpoint(false);
       return detail;
     } catch (e) {
       if (e instanceof SkipStep) { steps.push({ step, ok: true, skipped: e.message, ms: Date.now() - t0 }); log(`${step}: skipped (${e.message})`); return undefined; }
       steps.push({ step, ok: false, ms: Date.now() - t0, error: (e as Error).stack ?? String(e) });
       log(`${step}: FAILED: ${(e as Error).message}`);
+      checkpoint(false);
       return undefined;
     }
   };
@@ -595,8 +606,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   }
 
   state.lastRun = now;
-  const report = path.join(A.dir, 'reports', `pipeline-${new Date(now).toISOString().replace(/[:.]/g, '-')}.json`);
-  writeAtomic(report, JSON.stringify({ at: new Date(now).toISOString(), recordings: rec, days: days.length, readiness: state.readiness, promote: A.promote, snnChanged, steps }, null, 1));
+  writeAtomic(report, JSON.stringify({ at: new Date(now).toISOString(), complete: true, recordings: rec, days: days.length, readiness: state.readiness, promote: A.promote, snnChanged, steps }, null, 1));
   state.lastReport = report;
   writeAtomic(path.join(A.dir, 'pipeline_state.json'), JSON.stringify(state, null, 1));
   log(`report: ${report}`);
