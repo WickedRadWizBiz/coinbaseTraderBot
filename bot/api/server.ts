@@ -83,6 +83,12 @@ export function authMiddleware(token: string, now: () => number = Date.now) {
     }
     const header = req.get('authorization') ?? '';
     const provided = header.startsWith('Bearer ') ? header.slice(7) : undefined;
+    // No password sent at all (the login screen's own polls before anything is typed): refuse, but it is
+    // not a guess, so it does not count toward the lockout.
+    if (!provided) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
     if (!tokenMatches(token, provided)) {
       const cur = f && now() - f.since < 15 * 60_000 ? f : { n: 0, since: now() };
       cur.n += 1;
@@ -120,6 +126,9 @@ function dominanceStatus(md: MarketData) {
 export function createApi(d: ApiDeps): express.Express {
   const app = express();
   app.disable('x-powered-by');
+  // Behind Caddy on this machine the socket peer is always 127.0.0.1: trust its X-Forwarded-For so each
+  // visitor has their own address (the login lockout is per address, not one shared by everyone).
+  app.set('trust proxy', 'loopback');
   app.use((_req, res, next) => {
     res.set({
       'X-Content-Type-Options': 'nosniff',
