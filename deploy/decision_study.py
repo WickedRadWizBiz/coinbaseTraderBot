@@ -57,7 +57,8 @@ R_SRC = re.compile(rb'"strikeSource":"([a-z]+)"')
 R_MODEL = re.compile(rb'"model":"([^"]*)"')
 R_DID = re.compile(rb'"decisionId":"([^"]+)"')
 R_TS = re.compile(rb'"ts":"([^"]+)"')
-R_BA = re.compile(rb'"modelShift":[^,]*,"bid":' + NUM + rb',"ask":' + NUM + rb',"position":' + NUM)
+# bid / ask / position follow modelShift (and, in records before Oct 7 03:00, the drivers list too)
+R_BA = re.compile(rb'"bid":' + NUM + rb',"ask":' + NUM + rb',"position":' + NUM + rb',"fastMove"')
 
 
 def fkey(f):
@@ -323,3 +324,25 @@ for kd in ('updown15m', 'greater', 'between', 'tennis', 'other'):
         m = f"{g['mid'] / g['nm'] - g['cost'] / c:+.3f}" if g['nm'] else '  n/a '
         print(f"   {k[0]:18s} {k[2]:14s} fills {g['n']:4d}  contracts {g['c']:7.1f}  P&L {g['pnl']:+8.2f} ({g['pnl'] / c:+.3f}/ct)  fees {g['fee']:6.2f}  won {100 * g['win'] / g['n']:3.0f}%  "
               f"avg side px {g['cost'] / c:.3f}  q-cost {q}  y-cost {g['ys'] / c - g['cost'] / c:+.3f}  mid-cost {m}")
+
+# ---- 6. markouts of maker fills
+print('\n== 6. maker (resting quote) fills on Up/Down: mid of the side bought minus the price paid, at the first decision record at or after')
+print('   fill + H seconds (per contract; negative = the market had moved through the quote: adverse selection). +0s is the market just after the fill.')
+import bisect
+for lst in dec.values(): lst.sort(key=lambda d: d.t)
+times = {t: [d.t for d in lst] for t, lst in dec.items()}
+mk = collections.defaultdict(lambda: collections.defaultdict(lambda: [0.0, 0.0]))
+for f in fills:
+    if '15M-' not in f['ticker'] or f['taker']: continue
+    lst = dec.get(f['ticker'])
+    if not lst: continue
+    ts_ = times[f['ticker']]
+    sgn = 1 if f['side'] == 'bid' else -1
+    cost = f['price'] if sgn > 0 else 1 - f['price']
+    for H in (0, 30, 60, 120, 300):
+        i = bisect.bisect_left(ts_, f['t'] + H)
+        if i >= len(lst) or lst[i].t - (f['t'] + H) > 30: continue
+        mid = (lst[i].bid + lst[i].ask) / 2
+        acc = mk[period(f['t'])][H]; acc[0] += ((mid if sgn > 0 else 1 - mid) - cost) * f['count']; acc[1] += f['count']
+for pr in PERIODS:
+    if mk[pr]: print(f"   {pr:18s} " + '  '.join(f"+{H}s: {v[0] / v[1]:+.4f} ({v[1]:.0f} ct)" for H, v in sorted(mk[pr].items()) if v[1]))
