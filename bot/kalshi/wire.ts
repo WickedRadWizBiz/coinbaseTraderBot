@@ -218,3 +218,27 @@ export function formatPrice(p: number): string {
 export function formatCount(c: number): string {
   return c.toFixed(2);
 }
+
+/** GET /portfolio/settlements row -> dollars (revenue is in cents on the wire). */
+export function parseSettlement(r: Obj): { ticker: string; result: 'yes' | 'no' | 'scalar'; yesCount: number; noCount: number; yesCost: number; noCost: number; revenue: number; fees: number; ts: number } | undefined {
+  const ts = Date.parse(String(r.settled_time ?? ''));
+  const result = r.market_result === 'yes' || r.market_result === 'no' || r.market_result === 'scalar' ? r.market_result : undefined;
+  if (!r.ticker || !result || !Number.isFinite(ts)) return undefined;
+  return {
+    ticker: String(r.ticker), result,
+    yesCount: parseCount(r.yes_count_fp) ?? parseCount(r.yes_count) ?? 0,
+    noCount: parseCount(r.no_count_fp) ?? parseCount(r.no_count) ?? 0,
+    yesCost: parseDollars(r.yes_total_cost_dollars) ?? parseDollars(r.yes_total_cost, true) ?? 0,
+    noCost: parseDollars(r.no_total_cost_dollars) ?? parseDollars(r.no_total_cost, true) ?? 0,
+    revenue: Number(r.revenue ?? 0) / 100,
+    fees: parseDollars(r.fee_cost) ?? 0,
+    ts,
+  };
+}
+
+/** GET /portfolio/deposits | withdrawals row -> dollars, ms. */
+export function parseTransfer(r: Obj, kind: 'deposit' | 'withdrawal'): { id: string; kind: 'deposit' | 'withdrawal'; amount: number; status: string; ts: number } | undefined {
+  const cents = Number(r.amount_cents), sec = Number(r.finalized_ts ?? r.created_ts);
+  if (!r.id || !Number.isFinite(cents) || !Number.isFinite(sec)) return undefined;
+  return { id: String(r.id), kind, amount: cents / 100, status: String(r.status ?? ''), ts: sec < 1e12 ? sec * 1000 : sec };
+}

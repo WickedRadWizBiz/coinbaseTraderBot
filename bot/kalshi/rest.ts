@@ -14,7 +14,7 @@ import {
   CreateOrderRequest, ExchangeFill, ExchangeGateway, ExchangeOrder, ExchangePosition,
   MarketInfo, OrderRejectedError, OrderStateUnknownError, SeriesFeeInfo, BookSnapshot,
 } from './types';
-import { formatCount, formatPrice, parseBalance, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, parseSeriesFees } from './wire';
+import { formatCount, formatPrice, parseBalance, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, parseSeriesFees, parseSettlement, parseTransfer } from './wire';
 import { recordLatency } from '../util/latency';
 
 const log = logger('kalshi-rest');
@@ -217,6 +217,19 @@ export class KalshiRest implements ExchangeGateway {
   async getPositions(): Promise<ExchangePosition[]> {
     const rows = await this.paginate('/portfolio/positions', 'market_positions');
     return parsePositions({ market_positions: rows });
+  }
+
+  /** Settlement records since `sinceTs` (the Kalshi check compares them with the bot's settlements). */
+  async getSettlements(sinceTs: number): Promise<NonNullable<ReturnType<typeof parseSettlement>>[]> {
+    const rows = await this.paginate(`/portfolio/settlements?min_ts=${Math.floor(sinceTs / 1000)}`, 'settlements', 10);
+    return rows.map(parseSettlement).filter((x): x is NonNullable<ReturnType<typeof parseSettlement>> => Boolean(x));
+  }
+
+  /** Deposits and withdrawals since `sinceTs` (newest pages first; tells a real transfer from a mismatch). */
+  async getTransfers(sinceTs: number): Promise<NonNullable<ReturnType<typeof parseTransfer>>[]> {
+    const [d, w] = await Promise.all([this.paginate('/portfolio/deposits', 'deposits', 3), this.paginate('/portfolio/withdrawals', 'withdrawals', 3)]);
+    return [...d.map((r) => parseTransfer(r, 'deposit')), ...w.map((r) => parseTransfer(r, 'withdrawal'))]
+      .filter((x): x is NonNullable<ReturnType<typeof parseTransfer>> => Boolean(x) && x!.ts >= sinceTs);
   }
 
   async getBalance(): Promise<number> {

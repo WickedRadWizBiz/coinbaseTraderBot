@@ -18,6 +18,7 @@ import type { Oms } from '../oms/oms';
 import { PositionBook } from '../oms/positions';
 import type { KillSwitch } from '../risk/killSwitch';
 import type { Reconciler } from '../recon/reconciler';
+import type { KalshiCheck } from '../recon/kalshiCheck';
 import { FEATURES } from '../model/featureEngine';
 import { ladderQuotes, scanLadder } from '../model/ladder';
 import type { MetaModel } from '../model/metaModel';
@@ -41,6 +42,7 @@ import { updateEnvFile } from '../util/envFile';
 import { studyFor, studyMeta } from '../ta/study';
 
 export interface ApiDeps {
+  kalshiCheck?: KalshiCheck;
   cfg: Readonly<Config>;
   audit: AuditLog;
   engine: Engine;
@@ -194,6 +196,7 @@ export function createApi(d: ApiDeps): express.Express {
       market: marketContext()?.status() ?? null,
       ruleBook: (() => { const rb = activeRuleBook(); const m = rb?.meta(); if (!rb || !m) return null; const p = rb.passed(); return { ...m, passed: p.length, top: p.sort((a, b) => b.weight - a.weight).slice(0, 12).map((r) => `${r.id}@${r.tf} ${r.h}h [${r.cls}] w${r.weight}`) }; })(),
       settlement: d.settlement?.status() ?? null,
+      kalshiCheck: d.kalshiCheck?.status() ?? null,
       latency: latencySnapshot(),
       run: d.control?.status() ?? { active: true, since: null },
       perpsMode: d.cfg.perps.trading,
@@ -217,6 +220,8 @@ export function createApi(d: ApiDeps): express.Express {
   // The neural map page: every network as a block of pixels, in the order information flows.
   api.get('/neural-map', async (_req, res) => res.json(await buildNeuralMap(d)));
 
+  // Kalshi check: bot vs Kalshi fills, settlements and cash; mismatches and the day-by-day comparison.
+  api.get('/kalshi-check', (_req, res) => res.json(d.kalshiCheck?.report() ?? null));
   // CPU, disk writes and memory: the last minute, and 10-minute buckets over 24 h (bot/engine.ts CpuMeter).
   api.get('/cpu', (_req, res) => res.json({ now: d.engine.cpu.status(), history: d.engine.cpu.history() }));
   // On-demand main-thread CPU profile for diagnostics (?sec=1..15; once a minute; read-only).
