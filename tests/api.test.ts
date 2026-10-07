@@ -92,12 +92,49 @@ test('kalshi history: both tiers, 1-minute candles parsed from fixed-point strin
   }) as unknown as typeof fetch;
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'kh-'));
   const r = await downloadKalshiHistory({ series: ['KXBTC15M'], days: 60, out, fetchImpl, now, log: () => {} });
-  assert.deepEqual(r, { markets: 2, skipped: 0, failed: 0 });
+  assert.deepEqual(r, { markets: 2, skipped: 0, failed: 0, noVolume: 0, rejected: 0, remaining: 0, budgetHit: false });
   assert.ok(calls.some((u) => u.includes('/historical/markets/OLD/candlesticks')), 'markets settled before the cutoff read from the historical tier');
   assert.ok(calls.some((u) => u.includes('/series/KXBTC15M/markets/NEW/candlesticks')));
   const stored = loadKalshiHistory(out, 'KXBTC15M');
   assert.deepEqual(stored.map((m) => m.ticker), ['OLD', 'NEW']);
   assert.equal(stored[1].candles[0].askC, 0.52);
   const again = await downloadKalshiHistory({ series: ['KXBTC15M'], days: 60, out, fetchImpl, now, log: () => {} });
-  assert.deepEqual(again, { markets: 0, skipped: 2, failed: 0 });
+  assert.deepEqual(again, { markets: 0, skipped: 2, failed: 0, noVolume: 0, rejected: 0, remaining: 0, budgetHit: false });
+});
+
+test('kalshi history cost control: 1-minute window clamped, untraded markets need no request, rejected ones are not retried, budget stops and resumes', async () => {
+  const now = Date.parse('2026-10-03T00:00:00Z');
+  // A daily-ladder market listed a week before its close, one that never traded, one the API rejects.
+  const mk = (t: string, volume: number) => ({ ticker: t, event_ticker: 'E', open_time: '2026-09-25T17:00:00Z', close_time: '2026-10-02T17:00:00Z', floor_strike: 60000, result: 'no', volume_fp: String(volume) });
+  const calls: string[] = [];
+  // A fake wall clock: every request takes 10 ms of it.
+  let t = 0;
+  const clock = () => t;
+  const fetchImpl = (async (url: string) => {
+    calls.push(url);
+    const u = new URL(url);
+    await new Promise((r) => setImmediate(r));
+    t += 10;
+    const json = (body: unknown, status = 200) => ({ ok: status === 200, status, json: async () => body, text: async () => JSON.stringify(body) }) as unknown as Response;
+    if (u.pathname.endsWith('/historical/cutoff')) return json({ market_settled_ts: '2026-09-01T00:00:00Z' });
+    if (u.pathname.endsWith('/historical/markets')) return json({ markets: [], cursor: '' });
+    if (u.pathname.endsWith('/markets')) return json({ markets: [mk('TRADED', 50), mk('DEAD', 0), mk('BAD', 5), ...Array.from({ length: 6 }, (_, i) => mk(`M${i}`, 9))], cursor: '' });
+    if (u.pathname.includes('/BAD/')) return json({ error: { code: 'invalid_parameters' } }, 400);
+    return json({ candlesticks: [{ end_period_ts: 1_759_424_400, yes_bid: { close_dollars: '0.1000' } }] });
+  }) as unknown as typeof fetch;
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'kh-'));
+  const r = await downloadKalshiHistory({ series: ['KXBTCD'], days: 60, out, fetchImpl, now, log: () => {}, budgetMs: 60, concurrency: 2, clock });
+  assert.equal(r.noVolume, 1, 'the untraded market is stored without a request');
+  assert.ok(!calls.some((u) => u.includes('/DEAD/')));
+  assert.ok(r.budgetHit && r.remaining > 0, `budget stops it: ${JSON.stringify(r)}`);
+  const q = new URL(calls.find((u) => u.includes('/candlesticks'))!);
+  assert.equal(Number(q.searchParams.get('end_ts')) - Number(q.searchParams.get('start_ts')), 2880 * 60, 'only the last 48 hours of 1-minute candles');
+  const r2 = await downloadKalshiHistory({ series: ['KXBTCD'], days: 60, out, fetchImpl, now, log: () => {} });
+  assert.equal(r2.remaining, 0);
+  assert.equal(r2.markets + r.markets, 7, 'every traded, accepted market (TRADED, M0-M5) stored across the two runs');
+  assert.equal(r.rejected + r2.rejected, 1);
+  const r3 = await downloadKalshiHistory({ series: ['KXBTCD'], days: 60, out, fetchImpl, now, log: () => {} });
+  assert.deepEqual([r3.markets, r3.rejected, r3.skipped], [0, 0, 9], 'nothing asked again, the rejected market included');
+  assert.equal(loadKalshiHistory(out, 'KXBTCD').length, 7, 'research reads only markets with candles');
+  assert.equal(loadKalshiHistory(out, 'KXBTCD', { includeEmpty: true }).length, 9, 'plus the untraded and the rejected one');
 });
