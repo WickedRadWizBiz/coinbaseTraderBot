@@ -373,7 +373,7 @@ async function main(): Promise<void> {
   if (paper) {
     paper.on('fill', (f) => oms.onFill(f));
     paper.on('order', (o) => oms.onExchangeOrder(o));
-    md.on('trade', (t: { ticker: string; price: number; count: number; takerSide: 'yes' | 'no' | undefined }) => paper.onTrade(t.ticker, t.price, t.count, t.takerSide));
+    md.on('trade', (t: { ticker: string; price: number; count: number; takerSide: 'yes' | 'no' | undefined; ts?: number }) => paper.onTrade(t.ticker, t.price, t.count, t.takerSide, t.ts));
     md.on('lifecycle', (e: { ticker: string; event: string; result?: string }) => {
       if ((e.result === 'yes' || e.result === 'no') && /settle|determin/i.test(e.event)) paper.settle(e.ticker, e.result);
     });

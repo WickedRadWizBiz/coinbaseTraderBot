@@ -175,6 +175,7 @@ test('REST reports each response Date header to the skew guard; responses withou
   assert.equal(seen.length, 1);
 });
 
+import fs from 'fs';
 import path from 'path';
 import { MarketData, Recorder } from '../bot/marketdata/marketData';
 import type { MarketInfo } from '../bot/kalshi/types';
@@ -251,4 +252,21 @@ test('backtest latency: orders and cancels arrive late against the later book an
   const j2 = await run({ orderMs: 800, cancelMs: 300, jitterMs: 600 });
   assert.deepEqual([j1.fills, j1.pnl, j1.latency!.cancelRaceFills], [j2.fills, j2.pnl, j2.latency!.cancelRaceFills]);
   assert.ok(Number.isFinite(j1.pnl));
+});
+
+test('recorder: messages that arrive after close() (sockets draining at shutdown) are dropped, not written to the ended stream', async () => {
+  const dir = tmpDir();
+  const rec = new Recorder(dir);
+  rec.write('index', { asset: 'BTC', value: 1 });
+  rec.close();
+  const errors: unknown[] = [];
+  const onErr = (e: unknown) => errors.push(e);
+  process.on('uncaughtException', onErr);
+  try {
+    rec.write('index', { asset: 'BTC', value: 2 }); // used to emit ERR_STREAM_WRITE_AFTER_END: exit status 1
+    await new Promise((r) => setTimeout(r, 50));
+  } finally { process.off('uncaughtException', onErr); }
+  assert.equal(errors.length, 0);
+  const lines = fs.readFileSync(path.join(dir, fs.readdirSync(dir)[0]), 'utf8').trim().split('\n');
+  assert.equal(lines.length, 1);
 });

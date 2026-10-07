@@ -311,3 +311,24 @@ test('optimal f on the Kalshi pool: settled trades in trades.jsonl cap the stake
   assert.equal(engine.kalshiOptimalF('tennis', now).rep?.n, 0, 'books are separate');
   assert.equal(engine.kalshiOptimalF('tennis', now).cap, Infinity, 'too few trades: no cap');
 });
+
+test('Kalshi data arriving late: quotes are pulled and nothing is sent until it catches up (paper and live)', async () => {
+  const { engine, recon, paper, md, market } = await setup();
+  const r = await recon.run('startup');
+  engine.balance = r!.balance;
+  await engine.tick();
+  assert.ok((await paper.getOpenOrders()).length >= 1, 'quoting while the feed is current');
+  let lag: number | undefined = 45_000;
+  (md as any).kalshiFeedLagMs = () => lag;
+  await engine.tick();
+  assert.equal((await paper.getOpenOrders()).length, 0, 'resting quotes pulled');
+  assert.match(engine.status.get(market.ticker)!.blocked!, /Kalshi data 45\.0 s behind/);
+  assert.ok(engine.haltReasons().some((x) => /behind real time/.test(x)));
+  lag = 40; // caught up
+  // Time passes: an idle market is re-evaluated every EVAL_IDLE_SEC, and entries wait for the next cadence trigger.
+  engine.status.get(market.ticker)!.updatedTs -= 10_000;
+  (engine as any).cadence.forget(market.ticker);
+  await engine.tick();
+  assert.ok((await paper.getOpenOrders()).length >= 1, 'quoting again');
+  assert.ok(!engine.haltReasons().some((x) => /behind real time/.test(x)));
+});

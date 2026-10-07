@@ -34,6 +34,8 @@ export interface RiskLimits {
   maxOpenOrders: number;
   /** Market data older than this blocks new orders. */
   maxBookAgeMs: number;
+  /** Kalshi data reaching the bot later than this (backlog, stalled event loop) blocks all orders; 0 = off. */
+  maxFeedLagMs: number;
   maxIndexAgeMs: number;
   /** No new entries this close to market close. */
   noEntryBeforeCloseSec: number;
@@ -732,6 +734,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     // Paper tolerates older data: a busy small server delivers feed messages seconds late, and paper fills
     // are simulated against the same book, so stale-by-a-few-seconds costs nothing but blocked training.
     maxBookAgeMs: num(env, 'RISK_MAX_BOOK_AGE_MS', mode === 'paper' ? 30000 : 5000, 250, 120000),
+    maxFeedLagMs: num(env, 'RISK_MAX_FEED_LAG_MS', 3000, 0, 120000),
     maxIndexAgeMs: num(env, 'RISK_MAX_INDEX_AGE_MS', mode === 'paper' ? 15000 : 3000, 250, 120000),
     noEntryBeforeCloseSec: num(env, 'RISK_NO_ENTRY_BEFORE_CLOSE_SEC', 15, 0, 600),
     maxConsecutiveOrderErrors: num(env, 'RISK_MAX_CONSEC_ORDER_ERRORS', 5, 1, 100),

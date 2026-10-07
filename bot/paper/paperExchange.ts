@@ -8,6 +8,11 @@
 //  - Resting orders fill only when public trades print: a trade at a price
 //    through ours fills us fully; a trade at our price first consumes the
 //    queue ahead. Book changes alone never fill us.
+//  - Only trades the exchange printed after the order was placed can fill it
+//    (by the trade's own time stamp). Market data can reach the bot late: on
+//    Oct 5-6 Kalshi trades arrived minutes behind, and quotes priced on live
+//    Coinbase prices were filled by those old trades - profits a real exchange
+//    could never have given.
 //  - Post-only orders that would cross are rejected, like the exchange.
 //  - No bankroll refills. Drawdowns stay visible.
 
@@ -27,7 +32,12 @@ interface PaperOrder extends ExchangeOrder {
   reduceOnly: boolean;
   expirationTime?: number;
   count: number;
+  /** When the order was placed (the paper clock); orders saved before this field fill as before. */
+  placedTs?: number;
 }
+
+/** Kalshi stamps trades in whole seconds: a trade stamped up to this long before an order may still follow it. */
+const TRADE_TS_SLACK_MS = 1000;
 
 interface PaperState {
   balance: number;
@@ -158,6 +168,7 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
       reduceOnly: req.reduceOnly,
       expirationTime: req.expirationTime,
       updatedTs: this.now(),
+      placedTs: this.now(),
     };
     const bestBid = book.bestBid();
     const bestAsk = book.bestAsk();
@@ -237,13 +248,15 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
     return this.st.balance;
   }
 
-  /** Public trade print from market data. */
-  onTrade(ticker: string, price: number, count: number, takerSide: 'yes' | 'no' | undefined): void {
+  /** Public trade print from market data; `tradeTs` is the exchange's time stamp of the trade. */
+  onTrade(ticker: string, price: number, count: number, takerSide: 'yes' | 'no' | undefined, tradeTs?: number): void {
     let changed = this.expire();
     let remaining = count;
     // A YES-taker lifts asks; a NO-taker hits YES bids. Unknown side: match by price only.
+    // A trade printed before an order existed neither fills it nor eats its queue.
+    const after = (o: PaperOrder) => tradeTs === undefined || !Number.isFinite(tradeTs) || o.placedTs === undefined || o.placedTs <= tradeTs + TRADE_TS_SLACK_MS;
     const candidates = [...this.resting.values()]
-      .filter((o) => o.ticker === ticker)
+      .filter((o) => o.ticker === ticker && after(o))
       .filter((o) => (o.side === 'bid' ? takerSide !== 'yes' && price <= o.price + 1e-9 : takerSide !== 'no' && price >= o.price - 1e-9))
       .sort((a, b) => (a.side === 'bid' ? b.price - a.price : a.price - b.price));
     for (const o of candidates) {

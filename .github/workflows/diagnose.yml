@@ -10,6 +10,10 @@ on:
         description: 'Optional: extra read-only dashboard API paths to print, space separated (e.g. /api/snn /api/autotrain)'
         required: false
         default: ''
+      pnl:
+        description: 'Also run the P&L forensics (deploy/pnl_report.py, decision_study.py, feed_delay.py, latency_study.py from the dispatched ref; read-only, a few minutes)'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
@@ -19,17 +23,30 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: Report
-        uses: appleboy/ssh-action@v1.0.3
-        env:
-          EXTRA_PATHS: ${{ inputs.paths }}
+      - uses: actions/checkout@v5
+        if: inputs.pnl == 'true'
+      - name: Upload the P&L report scripts
+        if: inputs.pnl == 'true'
+        uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
           username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
-          command_timeout: 5m
-          envs: EXTRA_PATHS
+          source: deploy/pnl_report.py,deploy/decision_study.py,deploy/feed_delay.py,deploy/latency_study.py
+          target: /tmp/diag
+      - name: Report
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          EXTRA_PATHS: ${{ inputs.paths }}
+          PNL: ${{ inputs.pnl }}
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+          command_timeout: 25m
+          envs: EXTRA_PATHS,PNL
           script: |
             echo "== release: $(cat ~/bot/current/dist/RELEASE 2>/dev/null)"
             echo "== uptime / load"; uptime
@@ -57,4 +74,10 @@ jobs:
               case "$p" in /api/*) ;; *) echo "skipping $p (only /api/... paths)"; continue;; esac
               echo "== GET $p"; curl -s -m 20 "http://localhost:3000$p" | head -c 6000; echo
             done
+            if [ "$PNL" = "true" ] && [ -d /tmp/diag/deploy ]; then
+              echo "== P&L report"; nice -n 19 python3 /tmp/diag/deploy/pnl_report.py ~/bot/data 3 || true
+              echo "== decision study"; nice -n 19 python3 /tmp/diag/deploy/decision_study.py ~/bot/data 3 || true
+              echo "== feed delay"; nice -n 19 python3 /tmp/diag/deploy/feed_delay.py ~/bot/data/recordings 1 || true
+              echo "== latency study"; nice -n 19 python3 /tmp/diag/deploy/latency_study.py ~/bot/data/recordings 2 || true
+            fi
             echo "== last 60 log lines"; journalctl -u kalshi-bot -n 60 --no-pager | cut -c1-300
