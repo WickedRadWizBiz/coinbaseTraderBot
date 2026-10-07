@@ -12,7 +12,7 @@ import { tmpAudit, tmpDir } from './helpers';
 const limits: RiskLimits = {
   maxContractsPerOrder: 10, maxOrderRiskFrac: 0.02, maxWindowRiskFrac: 0.03, maxTotalRiskFrac: 0.1,
   dailyLossLimitFrac: 0.05, dailyLossLimitUsd: 50, minSidePrice: 0.1, maxOrdersPerMinute: 30, maxOpenOrders: 10,
-  maxBookAgeMs: 5000, maxIndexAgeMs: 3000, noEntryBeforeCloseSec: 15, maxConsecutiveOrderErrors: 5,
+  maxBookAgeMs: 5000, maxFeedLagMs: 3000, maxIndexAgeMs: 3000, noEntryBeforeCloseSec: 15, maxConsecutiveOrderErrors: 5,
 };
 
 const intent = (o: Partial<OrderIntent> = {}): OrderIntent => ({

@@ -11,7 +11,7 @@ values (public markets API; the bot's settlement records as a fallback), by peri
   3. strike check: the bot's strike vs Kalshi's floor_strike
   4. realised 15-minute volatility (Kalshi's expiration value vs strike) vs the bot's sigma at the open
   5. fills: P&L to settlement by origin (train / explore / entry / quote / exit), side price, maker / taker
-Usage: decision_study.py <data dir> [days=3]
+Usage: decision_study.py <data dir> [days=3] [cut times, comma separated ISO]
 """
 import collections, glob, json, math, os, re, sys, time, urllib.request
 from datetime import datetime
@@ -26,13 +26,14 @@ def iso(s):
     return datetime.fromisoformat(s.replace('Z', '+00:00')).timestamp()
 
 
-CUTS = [  # deploys that could change trading: (label, start)
-    ('A coinbase-priced', 0),
-    ('B kalshi-index', iso('2026-10-06T15:00:00Z')),
-    ('C +optimal-f', iso('2026-10-06T22:08:00Z')),
-    ('D +rule-book', iso('2026-10-07T02:01:00Z')),
-    ('E +cpu/https', iso('2026-10-07T08:09:00Z')),
-]
+# Periods: UTC days, or split at the given times (e.g. the deploys under suspicion):
+#   decision_study.py ~/bot/data 3 2026-10-06T15:00Z,2026-10-07T08:09Z
+if len(sys.argv) > 3 and sys.argv[3]:
+    cuts = [c.strip() for c in sys.argv[3].split(',') if c.strip()]
+    CUTS = [(f'before {cuts[0][:16]}', 0)] + [(f'from {c[:16]}', iso(c)) for c in cuts]
+else:
+    day0 = int(now // 86400) * 86400
+    CUTS = [('earlier', 0)] + [(time.strftime('%m-%d UTC', time.gmtime(day0 - k * 86400)), day0 - k * 86400) for k in range(days - 1, -1, -1)]
 PERIODS = [c[0] for c in CUTS]
 
 

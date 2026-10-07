@@ -194,7 +194,7 @@ export async function runBacktest(
     while (inflight.length && inflight[0].due <= e.t) await inflight.shift()!.run();
     st.apply(e);
     if (!firstTs) firstTs = st.now;
-    if (e.k === 'trade') ex.onTrade(e.ticker, e.price, e.count, e.takerSide);
+    if (e.k === 'trade') ex.onTrade(e.ticker, e.price, e.count, e.takerSide, e.ts);
     if (st.now - lastTick < 1000) continue;
     lastTick = st.now;
 

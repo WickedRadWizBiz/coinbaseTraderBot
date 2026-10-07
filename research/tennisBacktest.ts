@@ -50,7 +50,7 @@ export async function runTennisBacktest(dir: string, cfg: TennisConfig, bankroll
   let last = 0;
   for await (const e of readRecordings(dir)) {
     st.apply(e);
-    if (e.k === 'trade') ex.onTrade(e.ticker, e.price, e.count, e.takerSide);
+    if (e.k === 'trade') ex.onTrade(e.ticker, e.price, e.count, e.takerSide, e.ts);
     if (st.now - last < 5000) continue;
     last = st.now;
     const byEvent = new Map<string, string[]>();

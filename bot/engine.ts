@@ -16,6 +16,7 @@ import type { Config, RiskLimits } from './config';
 import type { ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
 import type { IndexTracker } from './marketdata/indexTracker';
+import type { OrderBook } from './marketdata/orderBook';
 import { computeFeatureMap, FEATURE_SCHEMA_VERSION, FEATURES } from './model/featureEngine';
 import { ADVERSARY_GROUPS, evaluateEntry, seedOf, type AdversaryVerdict } from './strategy/adversary';
 import { priceContract, SETTLEMENT_AVG_SEC } from './model/fairValue';
@@ -528,6 +529,8 @@ export class Engine {
     const r: string[] = [];
     if (this.d.recon.halted) r.push('reconciliation not clean');
     if (this.dataHalt) r.push(this.dataHalt);
+    const lag = this.feedLagHalt();
+    if (lag) r.push(lag);
     if (this.balance === undefined) r.push('balance unknown');
     else if (this.bankroll() === 0) r.push('no tradable cash (vault/pocket reserved)');
     r.push(...this.entryGuards());
@@ -542,6 +545,22 @@ export class Engine {
   private skewHalt(): string | undefined {
     if (this.d.cfg.clockSkewMaxMs <= 0 || this.d.cfg.mode !== 'live') return undefined;
     return this.d.clock?.haltReason(Date.now());
+  }
+
+  /**
+   * Kalshi data reaching the bot late (frames queued behind the socket, a stalled event loop): no orders on
+   * it, paper or live. On Oct 5-6 trades and book updates arrived minutes behind; quotes priced on current
+   * prices traded against that old market (paper booked the hindsight as profit). RISK_MAX_FEED_LAG_MS.
+   */
+  feedLagHalt(): string | undefined {
+    const max = this.d.cfg.risk.maxFeedLagMs;
+    const lag = max > 0 ? this.d.md.kalshiFeedLagMs?.() : undefined;
+    return lag !== undefined && lag > max ? `Kalshi data ${(lag / 1000).toFixed(1)} s behind real time (limit ${(max / 1000).toFixed(1)} s)` : undefined;
+  }
+
+  /** A book the bot may trade on: fresh, not crossed, and the Kalshi feed behind it not lagging. */
+  private bookUsable(book: OrderBook, now: number): boolean {
+    return book.isUsable(now, this.d.cfg.risk.maxBookAgeMs) && !this.feedLagHalt();
   }
 
   /** Guards that stop NEW risk (exits stay allowed): weekly loss pause, model health, maintenance. */
@@ -1023,14 +1042,15 @@ export class Engine {
       if (!tracker) { tracker = new MatchTracker(event, T); this.matches.set(event, tracker); }
       const markets: MatchMarket[] = ms.map((m) => {
         const book = md.book(m.ticker);
-        const b = book.isUsable(now, cfg.risk.maxBookAgeMs) ? book.bestBid() : undefined;
-        const a = book.isUsable(now, cfg.risk.maxBookAgeMs) ? book.bestAsk() : undefined;
+        const usable = this.bookUsable(book, now);
+        const b = usable ? book.bestBid() : undefined;
+        const a = usable ? book.bestAsk() : undefined;
         const pos = oms.positions.get(m.ticker);
         return {
           ticker: m.ticker, title: m.title, position: pos?.yes ?? 0,
           avgEntry: pos && pos.yes > 0 ? -pos.netCash / pos.yes : undefined,
           quote: { bid: b?.price, ask: a?.price, bidSize: b?.size, askSize: a?.size },
-          book: book.isUsable(now, cfg.risk.maxBookAgeMs) ? book : undefined,
+          book: usable ? book : undefined,
           flow: (() => {
             const tr = md.features.micro.get(m.ticker)?.tradesIn(now, T.confWindowSec * 1000) ?? [];
             const tot = tr.reduce((x, y) => x + y.count, 0);
@@ -1458,6 +1478,8 @@ export class Engine {
     };
 
     if (cfg.mode === 'live' && !md.hasVerifiedFees(m.seriesTicker)) return block('series fee schedule not verified');
+    const lagHalt = this.feedLagHalt();
+    if (lagHalt) return block(lagHalt);
     if (!book.isUsable(now, R.maxBookAgeMs)) return block('book not usable');
     const spot = idx?.fresh(now, R.maxIndexAgeMs);
     if (!spot) return block('index stale');
@@ -1843,7 +1865,7 @@ export class Engine {
       haltReasons: this.haltReasons(),
       bankroll: this.bankroll(),
       dailyPnl: this.dailyPnl(),
-      bookUsable: book.isUsable(now, cfg.risk.maxBookAgeMs),
+      bookUsable: this.bookUsable(book, now),
       bestBid: book.bestBid()?.price,
       bestAsk: book.bestAsk()?.price,
       // Tennis has no settlement index.

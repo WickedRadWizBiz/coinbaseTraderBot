@@ -62,6 +62,9 @@ export class KalshiWs extends EventEmitter {
   private pingTimer: NodeJS.Timeout | null = null;
   private pingSentAt = 0;
   lastMessageTs = 0;
+  /** The newest sample of how late Kalshi's data reaches us: precise = Kalshi's own send stamp (index
+   *  messages), else a trade's exchange time (whole seconds). `at` is when it was taken. */
+  private lag?: { ms: number; at: number; precise: boolean };
   readonly indexStats: IndexFeedStats = { received: 0, parsed: 0, dropped: 0, ids: {}, available: null, lastRaw: null, lastDropped: null, lastTs: null, lagMs: null, transitMs: null, vendorMs: null, control: [], unknownTypes: {} };
   private readonly listRequested = new Set<number>();
 
@@ -149,6 +152,19 @@ export class KalshiWs extends EventEmitter {
     this.ws.send(JSON.stringify({ id: this.msgId++, cmd, params }));
   }
 
+  private noteLag(ms: number, precise: boolean): void {
+    const now = this.lastMessageTs;
+    // A precise sample from the last 5 s outranks the coarse trade-based one.
+    if (!precise && this.lag?.precise && now - this.lag.at < 5000) return;
+    this.lag = { ms: Math.max(0, ms), at: now, precise };
+  }
+
+  /** How far behind real time Kalshi's data reaches us (ms): a backlog of frames, or a stalled event loop,
+   *  shows here first. From a sample taken in the last 5 s; undefined when there is none. */
+  feedLagMs(now = Date.now()): number | undefined {
+    return this.lag && now - this.lag.at <= 5000 ? this.lag.ms : undefined;
+  }
+
   private onMessage(text: string): void {
     this.lastMessageTs = Date.now();
     let env: any;
@@ -160,7 +176,7 @@ export class KalshiWs extends EventEmitter {
     // unlike the ping round trip, which also waits behind every frame queued ahead of the pong.
     if (env.sending_ts_ms !== undefined) {
       const sent = Number(env.sending_ts_ms);
-      if (Number.isFinite(sent) && sent > 0) { const t = this.lastMessageTs - sent; this.indexStats.transitMs = t; recordLatency('kalshiTransit', t); }
+      if (Number.isFinite(sent) && sent > 0) { const t = this.lastMessageTs - sent; this.indexStats.transitMs = t; recordLatency('kalshiTransit', t); this.noteLag(t, true); }
     }
 
     if (sid !== undefined && typeof env.seq === 'number') {
@@ -213,7 +229,10 @@ export class KalshiWs extends EventEmitter {
           const price = yesPrice(msg);
           const count = parseCount(msg.count_fp) ?? parseCount(msg.count);
           if (price === undefined || count === undefined) break;
-          this.emit('trade', { ticker: String(msg.market_ticker), price, count, takerSide: msg.taker_side, ts: tsMs(msg.ts) });
+          const ts = tsMs(msg.ts);
+          // Trade times are whole seconds: the trade may have printed up to 1 s after its stamp.
+          if (msg.ts !== undefined && msg.ts !== null) this.noteLag(this.lastMessageTs - ts - 1000, false);
+          this.emit('trade', { ticker: String(msg.market_ticker), price, count, takerSide: msg.taker_side, ts });
           break;
         }
         case 'fill':

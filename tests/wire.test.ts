@@ -123,3 +123,24 @@ test('Kalshi index frames: parsed, counted, and the one-way transit measured fro
   assert.ok(ws.indexStats.transitMs! >= 95 && ws.indexStats.transitMs! < 1000, `Kalshi -> here ${ws.indexStats.transitMs}`);
   assert.ok(latencySnapshot().kalshiTransit! >= 95);
 });
+
+test('Kalshi feed lag: measured from the send stamp (index frames), else from trade times; stale samples expire', async () => {
+  const { KalshiWs } = await import('../bot/kalshi/ws');
+  const ws = new KalshiWs('wss://example.invalid/trade-api/ws/v2', undefined, ['BRTI']);
+  assert.equal(ws.feedLagMs(), undefined, 'no sample yet');
+  const now = Date.now();
+  // A backlog: Kalshi sent this index print 8 s ago and it is only being handled now.
+  (ws as any).onMessage(JSON.stringify({ type: 'cfbenchmarks_value_5hz', sid: 3, seq: 1, msg: { index_id: 'BRTI', value_usd: '86526.25', source_ts_ms: now - 8100 }, sending_ts_ms: now - 8000 }));
+  assert.ok(ws.feedLagMs()! >= 8000 && ws.feedLagMs()! < 9000, `${ws.feedLagMs()}`);
+  // A fresh trade does not overwrite a recent precise sample...
+  (ws as any).onMessage(JSON.stringify({ type: 'trade', sid: 9, seq: 1, msg: { market_ticker: 'T', yes_price_dollars: '0.45', count_fp: '1', taker_side: 'yes', ts: Math.floor(now / 1000) } }));
+  assert.ok(ws.feedLagMs()! >= 8000);
+  // ...the next index frame does.
+  (ws as any).onMessage(JSON.stringify({ type: 'cfbenchmarks_value_5hz', sid: 3, seq: 2, msg: { index_id: 'BRTI', value_usd: '86527', source_ts_ms: now - 60 }, sending_ts_ms: now - 20 }));
+  assert.ok(ws.feedLagMs()! < 1000);
+  assert.equal(ws.feedLagMs(Date.now() + 6000), undefined, 'a sample older than 5 s says nothing');
+  // Trades alone: a trade stamped two minutes ago (whole seconds) arriving now.
+  const ws2 = new KalshiWs('wss://example.invalid/trade-api/ws/v2', undefined, []);
+  (ws2 as any).onMessage(JSON.stringify({ type: 'trade', sid: 9, seq: 1, msg: { market_ticker: 'T', yes_price_dollars: '0.45', count_fp: '1', taker_side: 'yes', ts: Math.floor(now / 1000) - 120 } }));
+  assert.ok(ws2.feedLagMs()! > 118_000, `${ws2.feedLagMs()}`);
+});

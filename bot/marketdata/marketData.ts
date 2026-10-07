@@ -54,18 +54,26 @@ export interface ActiveMarket extends MarketInfo {
 export class Recorder {
   private day = '';
   private stream: fs.WriteStream | null = null;
+  private closed = false;
   constructor(private readonly dir: string) { fs.mkdirSync(dir, { recursive: true }); }
   write(kind: string, data: Record<string, unknown>): void {
+    // Sockets still draining at shutdown deliver messages after close(): dropped (writing to the ended
+    // stream raised an unhandled 'error' and the bot exited with status 1 on every deploy).
+    if (this.closed) return;
     const now = Date.now();
     const day = new Date(now).toISOString().slice(0, 10);
     if (day !== this.day) {
       this.stream?.end();
       this.day = day;
-      this.stream = fs.createWriteStream(path.join(this.dir, `md-${day}.jsonl`), { flags: 'a', mode: 0o600 });
+      const file = path.join(this.dir, `md-${day}.jsonl`);
+      this.stream = fs.createWriteStream(file, { flags: 'a', mode: 0o600 });
+      // Recording is best effort: a disk error is logged (once per file) instead of taking the bot down.
+      let warned = false;
+      this.stream.on('error', (e) => { if (!warned) { warned = true; log.warn('recording write failed', { file, error: String(e) }); } });
     }
     this.stream!.write(JSON.stringify({ t: now, k: kind, ...data }) + '\n');
   }
-  close(): void { this.stream?.end(); }
+  close(): void { this.closed = true; this.stream?.end(); }
 }
 
 export class MarketData extends EventEmitter {
@@ -249,6 +257,11 @@ export class MarketData extends EventEmitter {
 
   hasVerifiedFees(series: string): boolean {
     return this.fees.has(series);
+  }
+
+  /** How far behind real time Kalshi's data is reaching the bot (ms), undefined without a recent sample. */
+  kalshiFeedLagMs(now = Date.now()): number | undefined {
+    return this.ws?.feedLagMs(now);
   }
 
   /** What Kalshi's index channels delivered (counts per stage, ids seen, raw samples, acks). */
