@@ -41,7 +41,7 @@ test('Kalshi check: fills match on side, count, price and fee; differences and u
   assert.match(r.mismatches.find((m) => m.kind === 'fill')!.what, /fee \$0\.0300 vs \$0\.0500/);
   assert.equal(r.ok, false);
   assert.equal(r.today?.bot.fills, 2);
-  assert.equal(r.today?.kalshi.fills, 4);
+  assert.equal(r.today?.kalshi.fills, 3, 'the fill booked before a restart is in neither column');
 });
 
 test('Kalshi check: a settlement matches contracts, payout, fees and net P&L', async () => {
