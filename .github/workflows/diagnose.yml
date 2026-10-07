@@ -33,7 +33,7 @@ jobs:
           username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
-          source: deploy/pnl_report.py,deploy/price_study.py,deploy/decision_study.py,deploy/latency_study.py
+          source: deploy/pnl_report.py,deploy/price_study.py,deploy/decision_study.py,deploy/latency_study.py,deploy/feed_delay.py
           target: /tmp/diag
       - name: Report
         uses: appleboy/ssh-action@v1.0.3
@@ -74,6 +74,5 @@ jobs:
               case "$p" in /api/*) ;; *) echo "skipping $p (only /api/... paths)"; continue;; esac
               echo "== GET $p"; curl -s -m 20 "http://localhost:3000$p" | head -c 6000; echo
             done
-            if [ "$PNL" = "true" ] && [ -f /tmp/diag/deploy/decision_study.py ]; then echo "== decision study"; nice -n 19 python3 /tmp/diag/deploy/decision_study.py ~/bot/data 3 || true; fi
-            if [ "$PNL" = "true" ] && [ -f /tmp/diag/deploy/latency_study.py ]; then echo "== latency study"; nice -n 19 python3 /tmp/diag/deploy/latency_study.py ~/bot/data/recordings 4 || true; fi
+            if [ "$PNL" = "true" ] && [ -f /tmp/diag/deploy/feed_delay.py ]; then echo "== feed delay"; nice -n 19 python3 /tmp/diag/deploy/feed_delay.py ~/bot/data/recordings 3 || true; fi
             echo "== last 60 log lines"; journalctl -u kalshi-bot -n 60 --no-pager | cut -c1-300

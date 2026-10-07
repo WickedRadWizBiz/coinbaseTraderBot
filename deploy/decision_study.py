@@ -346,3 +346,29 @@ for f in fills:
         acc = mk[period(f['t'])][H]; acc[0] += ((mid if sgn > 0 else 1 - mid) - cost) * f['count']; acc[1] += f['count']
 for pr in PERIODS:
     if mk[pr]: print(f"   {pr:18s} " + '  '.join(f"+{H}s: {v[0] / v[1]:+.4f} ({v[1]:.0f} ct)" for H, v in sorted(mk[pr].items()) if v[1]))
+
+# ---- 7. TCA markouts (the bot's own per-fill record: mid at the fill and 5 / 30 / 60 s later, signed so + = our way)
+print('\n== 7. TCA (data/tca/tca.jsonl), Up/Down: count-weighted mid-at-fill minus price and markouts, by period and maker / taker')
+tca = collections.defaultdict(lambda: collections.Counter())
+try:
+    with open(os.path.join(data, 'tca', 'tca.jsonl'), 'rb') as fh:
+        for line in fh:
+            if b'15M-' not in line[:200]: continue
+            try: r = json.loads(line)
+            except Exception: continue
+            ts = (r.get('ts') or 0) / 1000
+            if ts < now - days * 86400: continue
+            sgn = 1 if r.get('side') == 'bid' else -1
+            c = r.get('count') or 0
+            g = tca[(period(ts), 'taker' if r.get('isTaker') else 'maker')]
+            g['n'] += 1; g['c'] += c
+            if r.get('midAtFill') is not None: g['m0'] += sgn * (r['midAtFill'] - r['price']) * c; g['c0'] += c
+            for h in ('5s', '30s', '60s'):
+                v = (r.get('markouts') or {}).get(h)
+                if isinstance(v, (int, float)): g['m' + h] += v * c; g['c' + h] += c
+except FileNotFoundError:
+    print('   no tca.jsonl')
+for k in sorted(tca, key=lambda k: (PERIODS.index(k[0]), k[1])):
+    g = tca[k]
+    print(f"   {k[0]:18s} {k[1]:5s} fills {g['n']:5d}  contracts {g['c']:7.1f}  at fill {g['m0'] / max(1e-9, g['c0']):+.4f}  "
+          + '  '.join(f"{h} {g['m' + h] / g['c' + h]:+.4f}" for h in ('5s', '30s', '60s') if g['c' + h]))
