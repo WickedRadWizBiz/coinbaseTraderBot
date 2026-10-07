@@ -387,6 +387,8 @@ export interface AutoTrainConfig {
   snnPbtDays: number;
   snnPbtInitDays: number;
   snnPbtMaxRounds: number;
+  /** Networks in each SNN tournament (3 = the original trio; the laptop trainer uses about one per core). */
+  snnPbtPopulation: number;
   snnPbtEveryDays: number;
   /** Exploration member: every N tournament rounds the worst SNN restarts from scratch with random
    *  knobs instead of copying the elite (0 = never). */
@@ -1000,6 +1002,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       snnPbtDays: num(env, 'AUTO_TRAIN_SNN_PBT_DAYS', 7, 2, 365),
       snnPbtInitDays: num(env, 'AUTO_TRAIN_SNN_PBT_INIT_DAYS', 3, 1, 60),
       snnPbtMaxRounds: num(env, 'AUTO_TRAIN_SNN_PBT_MAX_ROUNDS', 0, 0, 1000),
+      snnPbtPopulation: num(env, 'AUTO_TRAIN_SNN_PBT_POPULATION', 3, 2, 64),
       snnPbtEveryDays: num(env, 'AUTO_TRAIN_SNN_PBT_EVERY_DAYS', 30, 0, 365),
       snnPbtRestartEvery: num(env, 'AUTO_TRAIN_SNN_PBT_RESTART_EVERY', 4, 0, 1000),
     },

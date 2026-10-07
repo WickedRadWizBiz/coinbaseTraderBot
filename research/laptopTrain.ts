@@ -92,8 +92,10 @@ export function safeServerEnv(text: string): Record<string, string> {
 
 /** The laptop profile: bigger budgets than the server's defaults. Anything already set (your own
  *  environment, then the server's bot.env) wins over these. */
-export function laptopProfile(remainingHours: number): Record<string, string> {
+export function laptopProfile(remainingHours: number, cores = os.cpus().length): Record<string, string> {
   const h = (x: number) => String(+Math.max(0.1, x).toFixed(2));
+  // One worker thread per core but one; tournaments field about one network per worker (more candidates).
+  const workers = Math.max(1, cores - 1);
   return {
     TRADING_MODE: 'paper', AUTO_TRAIN: 'off', AUTO_TRAIN_CHAMPION: 'true',
     HISTORY_AUTO_UPDATE: 'true', TV_FILL: 'false',
@@ -104,7 +106,8 @@ export function laptopProfile(remainingHours: number): Record<string, string> {
     TA_NET_RETRAIN_DAYS: '0', TA_NET_MAX_ROUNDS_PER_RUN: '400', TA_NET_STRIDE: '1', TA_NET_TRAIN_MONTHS: '24',
     TA_NET_OOS_HOURS: h(Math.min(12, remainingHours / 4)),
     SWEEP_HOURS: h(Math.min(12, remainingHours / 4)), SWEEP_EVERY_DAYS: '1',
-    AUTO_TRAIN_SNN_PBT_EVERY_DAYS: '0', AUTO_TRAIN_SNN_TRAIN_DAYS: '45', AUTO_TRAIN_SNN_PBT_DAYS: '14',
+    AUTO_TRAIN_SNN_PBT_EVERY_DAYS: '0', AUTO_TRAIN_SNN_TRAIN_DAYS: '60', AUTO_TRAIN_SNN_PBT_DAYS: '30',
+    TRAIN_WORKERS: String(workers), AUTO_TRAIN_SNN_PBT_POPULATION: String(Math.min(32, Math.max(3, workers))),
   };
 }
 
@@ -211,7 +214,7 @@ export async function laptopTrainMain(): Promise<void> {
     rl.close();
   }
   fs.writeFileSync(settingsFile, JSON.stringify({ host: s.host ?? null, user: s.user, port: s.port, key: s.key ?? null }, null, 1));
-  console.log(`\nKalshi bot trainer: ${hours} h budget, data in ${dataDir}, ${os.cpus().length} CPU threads (one per running step; the GPU is not used).\n`);
+  console.log(`\nKalshi bot trainer: ${hours} h budget, data in ${dataDir}, ${os.cpus().length} CPU threads (tournaments run up to one network per thread at once; the GPU is not used).\n`);
 
   let server: Server | undefined;
   if (s.host && s.key && wantSync) {

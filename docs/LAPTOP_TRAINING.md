@@ -59,28 +59,55 @@ npm run train:laptop -- --hours 12 --host <server ip> --key ~/lightsail.pem
 The pipeline saves progress after every step. Stopping with Ctrl+C or closing the window loses at most
 the step in progress, and the next run picks up the tournaments where they stopped.
 
+## History replay: the bot "trading" years of history
+
+With `HISTORY_REPLAY=true` (on in the laptop profile), the pipeline turns two years of 1-minute history
+into recording files (`research/history/historyReplay.ts`, step `history_replay`). The replay code reads
+them exactly as it reads the bot's live recordings:
+
+- **Index and spot prints.** Four per minute from Binance 1-minute bars. The index is shifted onto
+  Kalshi's own level using each 15-minute contract's strike.
+- **Candles.** The live feed's timeframes; every day file is self-contained.
+- **Perp quotes.** From Binance USD-M bars, at the spread and contract specs the bot's own perp
+  recordings show, with Binance's funding rates.
+- **Kalshi's settled contracts.** Their markets, minute books, trades and results.
+
+The models replay it without knowing it isn't live:
+
+- **Perps model:** trains and backtests on the replay (years instead of days).
+- **Perps SNN:** its tournament, training and entry / exit learning on direction calls run on the
+  replay.
+- **Whole-bot and Kalshi sweeps:** the fitness of the entire pipeline together runs over the replay.
+  The result is a proposal, never auto-applied.
+- **Kalshi SNN and decision model:** stay on the bot's own recordings. A replayed Kalshi book is one
+  quote a minute with nominal size, too coarse to learn entry and exit timing honestly.
+
 ## What each module learns from
 
-| Module | Learns from | Available from day one? |
-|---|---|---|
-| TA network (direction, volatility) | years of hourly / 15-minute spot candles | yes |
-| Rule book, market character | years of candles | yes |
-| Setup scorer (perps fast / slow lanes) | years of candles | yes |
-| Volatility model, intraday profile | Kalshi's index in the bot's recordings | grows with recordings |
-| SNNs (crypto, perps) | the bot's recordings, replayed | grows with recordings |
-| Kalshi decision model (MLP + take/skip) | priced Kalshi contracts with outcomes in the recordings | grows with recordings |
-| Perps model | Kalshi perp quotes in the recordings | grows with recordings |
-| Tennis, fill model | live matches / the bot's own quotes | live only |
+| Module | Learns from |
+|---|---|
+| TA network, rule book, setup scorer | years of candles |
+| Perps model, perps SNN | the history replay (years of perp history) |
+| Whole-bot / Kalshi sweeps | the history replay |
+| Kalshi decision model, crypto SNN, volatility model | the bot's recordings (copied from the server) |
+| Tennis, fill model | live only |
 
-The candle-history modules are fully pre-trained by one long run. The Kalshi contract models still learn
-from the bot's own recordings, because their inputs (order books, Kalshi's index, contract prices) are not
-in candle history. Binance's perpetual-futures candles (`history:binance -- --markets um`) can be
-downloaded, but no model reads them yet. Years of Kalshi's settled contracts are downloaded too, as
-research material: turning them into training data for the Kalshi decision model is the next step toward
-"good from day one".
+## Many candidates at once
+
+Each SNN tournament fields a population of networks: about one per CPU thread on the laptop
+(`AUTO_TRAIN_SNN_PBT_POPULATION`). It replays them in parallel worker threads (`TRAIN_WORKERS`). Every
+round:
+
+- the best network survives untouched;
+- the worst quarter is replaced by copies of the best ones;
+- the rest have their settings mutated;
+- each is judged on days it has never seen.
+
+A 16-thread laptop runs 15 candidates at once instead of 3, one after another.
 
 ## GPU
 
-Not used. Every network is a small model written in TypeScript and trained on the CPU, one pipeline step
-at a time. A graphics card would only help after rewriting them for a GPU framework. At their size, the
-data loading and walk-forward evaluation dominate the run time anyway.
+Not used. The networks are small spiking and feed-forward models written in TypeScript. A member's time
+goes into replaying the market event by event (prices, books, features, decisions), which is branchy CPU
+work a graphics card cannot run, rather than into big matrix multiplications. The population "stacking"
+therefore happens across CPU threads, as described above.

@@ -40,7 +40,7 @@ jobs:
           $out = 'KalshiTrainer'
           New-Item -ItemType Directory -Force "$out/node", "$out/app/dist", "$out/app/deploy", "$out/app/node_modules/talib/build/Release" | Out-Null
           Copy-Item (Get-Command node).Source "$out/node/node.exe"
-          Copy-Item dist/laptopTrain.cjs, dist/pipeline.cjs "$out/app/dist/"
+          Copy-Item dist/laptopTrain.cjs, dist/pipeline.cjs, dist/snnReplayWorker.cjs "$out/app/dist/"
           Copy-Item -Recurse params "$out/app/params"
           if (Test-Path deploy/seed) { Copy-Item -Recurse deploy/seed "$out/app/deploy/seed" }
           Copy-Item vendor/talib/index.js, vendor/talib/package.json "$out/app/node_modules/talib/"

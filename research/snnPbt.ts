@@ -33,6 +33,8 @@ export const SNN_MIN_COVERAGE = 0.05;
 import { dsrOf } from './fitness';
 import { runPbt, walkForwardRounds, type PbtMember, type PbtRoundLog } from './pbt';
 import { replaySnn, type SnnRow } from './snnReplay';
+import type { SnnReplayJob, SnnReplayOut } from './snnReplayWorker';
+import { WorkerPool, workerCount, workerScript } from './workerPool';
 
 const DAY = 86_400_000;
 const H = 3_600_000;
@@ -80,6 +82,9 @@ export interface SnnPbtResult {
 export async function runSnnPbt(o: {
   recordings: string; domain: 'crypto' | 'perps'; stage: Stage; days: string[]; initDays?: number; evalDays?: number;
   model?: MetaModel; seed?: number; stateDir?: string; maxRounds?: number; restartEvery?: number; fresh?: boolean; log?: (m: string) => void;
+  /** Members in the population (default 3) and worker threads replaying them at once (default 1). With
+   *  workers > 1 each member's replay runs in its own thread; `modelPath` is then the MLP's file. */
+  population?: number; workers?: number; modelPath?: string;
 }): Promise<SnnPbtResult> {
   const log = o.log ?? (() => {});
   const initDays = o.initDays ?? 3, evalDays = o.evalDays ?? 1;
@@ -94,7 +99,7 @@ export async function runSnnPbt(o: {
   const cpFile = (id: number) => path.join(o.stateDir!, `m${id}.json`);
   let saved: Saved | undefined;
   if (stateFile && !o.fresh && fs.existsSync(stateFile)) {
-    try { saved = JSON.parse(fs.readFileSync(stateFile, 'utf8')); if (saved!.domain !== o.domain || saved!.stage !== o.stage || saved!.baseVersion !== baseVersion) saved = undefined; } catch { saved = undefined; }
+    try { saved = JSON.parse(fs.readFileSync(stateFile, 'utf8')); if (saved!.domain !== o.domain || saved!.stage !== o.stage || saved!.baseVersion !== baseVersion || saved!.members.length !== (o.population ?? 3)) saved = undefined; } catch { saved = undefined; }
   }
   let rounds = (saved ? all.filter((r) => r.evalFrom >= saved!.lastEvalTo - 1) : all).map((r, k) => ({ ...r, index: (saved?.nextIndex ?? 0) + k }));
   const pending = rounds.length;
@@ -106,13 +111,20 @@ export async function runSnnPbt(o: {
       state: { through: m.through, cp: fs.existsSync(cpFile(m.id)) ? JSON.parse(fs.readFileSync(cpFile(m.id), 'utf8')) : undefined },
     })),
   } : undefined;
-  log(`${o.domain} SNN tournament (stage ${o.stage}): ${o.days.length} recorded day(s), ${saved ? `continuing (${saved.log.length} rounds so far)` : 'fresh population of 3'}; ${rounds.length} round(s) to run`);
+  log(`${o.domain} SNN tournament (stage ${o.stage}): ${o.days.length} recorded day(s), ${saved ? `continuing (${saved.log.length} rounds so far)` : `fresh population of ${o.population ?? 3}`}; ${rounds.length} round(s) to run${(o.workers ?? 1) > 1 ? `, ${o.workers} members at a time` : ''}`);
+  const pool = (o.workers ?? 1) > 1 ? new WorkerPool<SnnReplayJob, SnnReplayOut>(workerScript('snnReplayWorker'), o.workers!) : undefined;
 
   const replay = async (s: MemberState, hyper: Hyper, from: number, to: number) => {
     if (to <= s.through) return { rows: [] as SnnRow[] };
     const a = Math.max(from, s.through);
     const params = withSnnHyper(base, hyper);
     const prevDay = o.days[o.days.indexOf(dayOf(a)) - 1];
+    if (pool) {
+      const r = await pool.run({ dir: o.recordings, params, domain: o.domain, modelPath: o.modelPath, checkpoint: s.cp, from: a, to, fromDay: prevDay ?? dayOf(a), toDay: dayOf(to - 1) });
+      s.cp = r.checkpoint;
+      s.through = to;
+      return { rows: r.rows };
+    }
     const r = await replaySnn(o.recordings, { params, domain: o.domain, model: o.model, calendar, checkpoint: s.cp, allowParamChange: true, from: a, to, fromDay: prevDay ?? dayOf(a), toDay: dayOf(to - 1) });
     s.cp = r.net.serialize();
     s.through = to;
@@ -130,6 +142,7 @@ export async function runSnnPbt(o: {
   };
   const res = await runPbt<MemberState>({
     base: snnHyperOf(base), spec: SNN_HYPER_SPEC, rounds, seed: o.seed ?? 17, resume, exploreAfterLast: true, restartEvery: o.restartEvery ?? 0, log,
+    population: o.population ?? 3, concurrency: pool ? o.workers : 1,
     hooks: {
       init: () => ({ through: start }),
       clone: (s) => ({ through: s.through, cp: s.cp ? JSON.parse(JSON.stringify(s.cp)) : undefined }),
@@ -145,7 +158,7 @@ export async function runSnnPbt(o: {
       },
     },
     onRound: ({ members, trials, log: plog, round }) => save(members, trials, plog, round.evalTo, round.index + 1),
-  });
+  }).finally(() => pool?.close());
   if (!rounds.length && resume) Object.assign(res, { members: resume.members, trials: resume.trials, log: resume.log, elite: resume.members.find((m) => m.id === resume.log[resume.log.length - 1]?.ranking[0]?.member) ?? resume.members[0] });
   const dsr = dsrOf(res.elite.record, clusterFor(o.domain), res.trials);
   log(`${o.domain} elite #${res.elite.id} (lineage ${res.elite.lineage.join('>')}); out-of-sample ${dsr.n} independent interactions, DSR probability ${Number.isFinite(dsr.probability) ? dsr.probability.toFixed(3) : 'n/a'} over ${res.trials} trials`);
@@ -166,6 +179,7 @@ export async function snnPbtMain(argOf: (k: string, d: string) => string = cliAr
     recordings: dir, domain, stage: argOf('stage', 'S5') as Stage, days: days.slice(-n), initDays: Number(argOf('init-days', '3')), evalDays: Number(argOf('eval-days', '1')),
     model: modelPath && fs.existsSync(modelPath) ? MetaModel.load(modelPath) : undefined, stateDir: argOf('state', '') || undefined,
     maxRounds: Number(argOf('max-rounds', '0')) || undefined, restartEvery: Number(argOf('restart-every', '0')), fresh: argOf('fresh', '') === 'true', log: (m) => console.log(`[snn-pbt] ${m}`),
+    population: Number(argOf('population', '3')), workers: workerCount(), modelPath: modelPath && fs.existsSync(modelPath) ? modelPath : undefined,
   });
   const out = argOf('out', '');
   if (out) { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify(res, null, 1)); }

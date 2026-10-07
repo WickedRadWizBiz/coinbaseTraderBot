@@ -193,3 +193,38 @@ test('tennis population: three live members, elite outputs, tournament after gra
   assert.match(String(again.restoredFrom), /round/);
   await again.stop(now);
 });
+
+test('tournament of 8 run 4 at a time: members overlap, the worst quarter clones the best two, same result as one at a time', async () => {
+  const rounds = walkForwardRounds(0, 10 * DAY, 2 * DAY, DAY, DAY);
+  const run = async (concurrency: number) => {
+    let active = 0, peak = 0;
+    const r = await runPbt<{ k: number }>({
+      base: { lr: 1 }, spec: { lr: { min: 0.1, max: 10, log: true } } as never, rounds, seed: 5, population: 8, concurrency,
+      hooks: {
+        init: (h) => ({ k: h.lr }), clone: (s) => ({ ...s }),
+        train: async (s, h) => { active++; peak = Math.max(peak, active); await new Promise((res) => setTimeout(res, 5)); active--; s.k = h.lr; return s; },
+        evaluate: (s, _h, rd) => { const f = -Math.abs(Math.log(s.k)) + rd.index * 0; return { report: { fitness: f, sortino: f, maxDrawdown: 0, costs: 0, independent: 1 } as never, interactions: [] }; },
+      },
+    });
+    return { r, peak };
+  };
+  const a = await run(4), b = await run(1);
+  assert.equal(a.peak, 4, 'four members in flight at once');
+  assert.equal(b.peak, 1);
+  assert.equal(a.r.members.length, 8);
+  assert.equal(a.r.trials, 8 * rounds.length);
+  const first = a.r.log[0];
+  assert.equal(first.culledAll!.length, 2, 'population of 8: the worst two are culled');
+  assert.deepEqual(a.r.log.map((x) => x.ranking.map((y) => y.member)), b.r.log.map((x) => x.ranking.map((y) => y.member)), 'concurrency does not change the outcome');
+});
+
+test('SNN tournament with worker threads: a bigger population replays in parallel and matches the in-process result', async () => {
+  const rec = tmpDir();
+  for (let d = 0; d < 3; d++) writeSyntheticRecordings(rec, { windows: 4, seed: 9 + d, start: Date.parse('2026-02-01T00:00:00Z') + d * DAY });
+  const days = ['2026-02-01', '2026-02-02', '2026-02-03'];
+  const opts = { recordings: rec, domain: 'crypto' as const, stage: 'S1' as const, days, initDays: 1, evalDays: 1, maxRounds: 1, population: 4 };
+  const inProc = await runSnnPbt({ ...opts, workers: 1 });
+  const threaded = await runSnnPbt({ ...opts, workers: 2 });
+  assert.equal(threaded.trials, 4);
+  assert.deepEqual(threaded.log[0].ranking.map((x) => +x.fitness.toFixed(9)), inProc.log[0].ranking.map((x) => +x.fitness.toFixed(9)));
+});

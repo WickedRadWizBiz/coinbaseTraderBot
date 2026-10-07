@@ -84,6 +84,7 @@ import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
 import { exportTaNetOos, oosDir } from './taNetOos';
 import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, type BinanceMarket } from './history/binanceVision';
 import { buildHistoryReplay, perpSpecsFromRecordings } from './history/historyReplay';
+import { workerCount } from './workerPool';
 import { compareIndexSources } from '../bot/marketdata/historyStore';
 import { backfillCoinbase } from './history/coinbaseBackfill';
 import { resolveAssets } from './history/assets';
@@ -436,12 +437,14 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     for (const target of A.sweepTargets) {
       const last = state.sweptAt[target];
       const due = !last || now - last >= A.sweepEveryDays * 86_400_000;
+      // The whole bot and the Kalshi settings are swept over the history replay when it has the days (a proposal, never applied).
+      const sweepSrc = (target === 'bot' || target === 'kalshi') && T.historyReplay && replayDays().length >= 20 ? replayDir : rec;
       await run(`sweep-${target}`, async () => {
         const out = path.join(A.dir, 'sweeps', `${target}.json`);
         if (fs.existsSync(out)) fs.renameSync(out, out.replace(/\.json$/, `.${new Date(now).toISOString().slice(0, 10)}.json`));
         let r;
         try {
-          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: rec, model: mlpPath(), out, 'setup-oos': path.join(A.dir, 'setup_oos.json'), 'setup-model': fs.existsSync(promoted('setups')) ? promoted('setups') : undefined }));
+          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: sweepSrc, model: mlpPath(), out, 'setup-oos': path.join(A.dir, 'setup_oos.json'), 'setup-model': fs.existsSync(promoted('setups')) ? promoted('setups') : undefined }));
         } catch (e) {
           if (/needs at least|needs the TA network|recorded day/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;
@@ -465,13 +468,21 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const due = o.forceAblation || !ds.lastAblation || (A.ablationEveryDays > 0 && now - ds.lastAblation >= A.ablationEveryDays * 86_400_000);
       let stage: Stage = A.snnStage === 'auto' ? (ds.stage ?? base) : A.snnStage;
       let stageAccepted = false;
-      const abDays = lastDays(A.ablationDays);
+      // The perps network learns on years of replayed history when the replay exists (its inputs are
+      // prices, candles and perp quotes, which the replay reproduces); the crypto network needs real
+      // second-by-second Kalshi books and stays on the bot's recordings. The backfill is always on the
+      // recordings (its outputs feed the models trained on them).
+      const src = domain === 'perps' && T.historyReplay && replayDays().length >= A.snnPbtDays + A.snnPbtInitDays ? replayDir : rec;
+      const srcDays = src === rec ? days : replayDays();
+      const lastSrc = (n: number) => srcDays.slice(-n);
+      const srcGate = src === rec ? tooFew : undefined;
+      const abDays = lastSrc(A.ablationDays);
       // The crypto network is judged on settled contracts against the MLP; perps on its own direction calls.
       const verdicts = await run(`snn-${domain}-ablation`, async () => {
-        const v = await snnAblationMain(argsOf({ recordings: rec, domain, model: domain === 'crypto' ? mlpPath() : undefined, from: abDays[0], out: path.join(work, `snn_${domain}_ablation.json`), only: o.ablationOnly }));
+        const v = await snnAblationMain(argsOf({ recordings: src, domain, model: domain === 'crypto' ? mlpPath() : undefined, from: abDays[0], out: path.join(work, `snn_${domain}_ablation.json`), only: o.ablationOnly }));
         ds.lastAblation = now;
         return v;
-      }, tooFew ?? (due ? undefined : 'not due (ablated recently)')) as Verdict[] | undefined;
+      }, srcGate ?? (due ? undefined : 'not due (ablated recently)')) as Verdict[] | undefined;
       if (verdicts) {
         const k = acceptedChain(verdicts);
         if (A.snnStage === 'auto') stage = k > 0 ? STAGES[k] : base;
@@ -480,11 +491,11 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       // Population tournament: three identical networks of this stage, knobs within +/-10%, fight
       // over the recorded days; the elite's knobs are this network's hyperparameters from now on.
       const pbtDue = o.forceSnnPbt || ds.pbtStage !== stage || !ds.pbtHyper || ds.pbtComplete === false || (A.snnPbtEveryDays > 0 && now - (ds.pbtAt ?? 0) >= A.snnPbtEveryDays * 86_400_000);
-      const pbtDays = lastDays(A.snnPbtDays);
+      const pbtDays = lastSrc(A.snnPbtDays);
       const pbt = await run(`snn-${domain}-pbt`, async () => {
         let r;
         try {
-          r = await runSnnPbt({ recordings: rec, domain, stage, days: pbtDays, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, log });
+          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), log });
         } catch (e) {
           if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;
@@ -492,17 +503,17 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         ds.pbtComplete = r.complete;
         if (!r.complete) return { complete: false, reason: `tournament in progress: ${r.rounds} round(s) done, ${r.remaining} to go`, elite: r.elite };
         ds.pbtHyper = r.elite.hyper; ds.pbtStage = stage; ds.pbtAt = now;
-        return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr };
-      }, tooFew ?? (pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`)) as { complete?: boolean } | undefined;
+        return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: src === rec ? 'recordings' : 'history replay' };
+      }, srcGate ?? (pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`)) as { complete?: boolean } | undefined;
       const hyper = ds.pbtStage === stage ? ds.pbtHyper : undefined;
       const trainNeeded = Boolean(verdicts) || Boolean(pbt?.complete) || !fs.existsSync(file) || ds.stage !== stage;
       await run(`snn-${domain}-train`, async () => {
-        const span = lastDays(A.snnTrainDays);
+        const span = lastSrc(A.snnTrainDays);
         const nEval = span.length >= 2 ? Math.max(1, Math.round(span.length * 0.2)) : 0;
         const trainSpan = span.slice(0, span.length - nEval), evalSpan = span.slice(span.length - nEval);
         const cand = path.join(work, `snn_${domain}.candidate.json`);
         const r = await trainSnnMain(argsOf({
-          recordings: rec, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined, hyper: hyper ? JSON.stringify(hyper) : undefined,
+          recordings: src, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined, hyper: hyper ? JSON.stringify(hyper) : undefined,
           from: trainSpan[0], to: evalSpan[0] ?? undefined,
           'eval-from': evalSpan[0], 'eval-to': evalSpan.length ? nextDay(evalSpan[evalSpan.length - 1]) : undefined,
         }));
@@ -513,7 +524,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         ds.version = r?.version;
         state.snnVersions![domain] = r?.version;
         return { promoted: true, stage, stageAccepted, result: r };
-      }, tooFew ?? (trainNeeded ? undefined : 'up to date'));
+      }, srcGate ?? (trainNeeded ? undefined : 'up to date'));
       // Prequential backfill, day by day from the last backfilled day (a fresh online network of the
       // promoted stage: it was never fitted offline on these days, so no output saw its own label).
       await run(`snn-${domain}-backfill`, async () => {
