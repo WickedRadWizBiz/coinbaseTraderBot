@@ -20,7 +20,8 @@ concurrency:
 
 jobs:
   package:
-    runs-on: windows-latest
+    # Windows Server 2022 ships Visual Studio 2022; the npm-bundled node-gyp does not recognise the newer image's VS 2026.
+    runs-on: windows-2022
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
