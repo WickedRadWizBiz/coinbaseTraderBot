@@ -1,8 +1,9 @@
 // TradingView in the bot's history (deploy/tv_history.py, tvdatafeed): what to fetch and importing it.
 //
-//   index series   BTC.D, USDT.D, TOTAL3, OTHERS.D (CRYPTOCAP) and RTY (US Russell 2000) for the TA
-//                  network's market context. A series with fewer than INDEX_MIN_DAILY daily bars gets
-//                  the full 5,000-bar backfill (1d, 4h, 1h); TOTAL3, OTHERS.D and RTY have no live feed in
+//   index series   BTC.D, USDT.D, TOTAL3, OTHERS.D (CRYPTOCAP), RTY (US Russell 2000) for the TA
+//                  network's market context, and DXY, US10Y, VIX, HYG for the macro_risk rule. A series
+//                  with fewer than INDEX_MIN_DAILY daily bars gets the full 5,000-bar backfill (1d, 4h,
+//                  1h); TOTAL3, OTHERS.D and the traditional-market series have no live feed in
 //                  the bot, so their last month of daily bars is refreshed when the newest is older than
 //                  STALE_DAYS (BTC.D / USDT.D are kept current by the bot's own bars).
 //   spot holes     every (asset, timeframe) of the spot store, within the last 5,000 bars (tvdatafeed's
@@ -22,14 +23,18 @@ import { loadSeries } from './candles';
 import { collectFiles, importFile, type ImportResult } from './importCsv';
 
 const DAY = 86_400_000;
-export const TV_INDEXES = ['BTC.D', 'USDT.D', 'TOTAL3', 'OTHERS.D', 'RTY'];
+export const TV_INDEXES = ['BTC.D', 'USDT.D', 'TOTAL3', 'OTHERS.D', 'RTY', 'DXY', 'US10Y', 'VIX', 'HYG'];
+/** Traditional-market series (trading days only, weekends closed): fewer daily bars, staler by design.
+ *  DXY / US10Y / VIX / HYG feed the macro_risk rule (bot/ta/marketContext.ts). */
+export const TV_TRADFI = ['RTY', 'DXY', 'US10Y', 'VIX', 'HYG'];
 /** Specs for deploy/tv_history.py --indexes, by store name. */
 export const TV_INDEX_SPECS: Record<string, string> = {
   'BTC.D': 'CRYPTOCAP:BTC.D', 'USDT.D': 'CRYPTOCAP:USDT.D', TOTAL3: 'CRYPTOCAP:TOTAL3', 'OTHERS.D': 'CRYPTOCAP:OTHERS.D',
   RTY: 'RTY=TVC:RUT|RUSSELL:RUT|CME_MINI:RTY1!|AMEX:IWM',
+  DXY: 'DXY=TVC:DXY|ICEUS:DX1!', US10Y: 'US10Y=TVC:US10Y|TVC:TNX', VIX: 'VIX=TVC:VIX|CBOE:VIX', HYG: 'HYG=AMEX:HYG|NYSEARCA:HYG',
 };
 /** Series without a live feed in the bot (kept current from TradingView). */
-export const TV_REFRESHED = ['TOTAL3', 'OTHERS.D', 'RTY'];
+export const TV_REFRESHED = ['TOTAL3', 'OTHERS.D', 'RTY', 'DXY', 'US10Y', 'VIX', 'HYG'];
 export const INDEX_MIN_DAILY = 3000;
 export const STALE_DAYS = 2;
 export const RECENT_DAYS = 3;
@@ -67,8 +72,9 @@ export function indexNeeds(dir: string, now = Date.now()): { full: string[]; ref
     try { cs = loadIndexSeries(dir, name, '1d').candles; } catch { cs = []; }
     const last = cs[cs.length - 1]?.ts;
     daily[name] = { bars: cs.length, last: last !== undefined ? new Date(last).toISOString().slice(0, 10) : null };
-    if (cs.length < (name === 'RTY' ? INDEX_MIN_DAILY * 0.6 : INDEX_MIN_DAILY)) { full.push(name); continue; }
-    const staleDays = name === 'RTY' ? STALE_DAYS + 2 : STALE_DAYS;
+    const tradfi = TV_TRADFI.includes(name);
+    if (cs.length < (tradfi ? INDEX_MIN_DAILY * 0.6 : INDEX_MIN_DAILY)) { full.push(name); continue; }
+    const staleDays = tradfi ? STALE_DAYS + 2 : STALE_DAYS;
     if (TV_REFRESHED.includes(name) && (last === undefined || today - last > staleDays * DAY)) refresh.push(name);
   }
   return { full, refresh, daily };

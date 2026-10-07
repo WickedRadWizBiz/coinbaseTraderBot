@@ -30,7 +30,8 @@ import type { Candle } from '../bot/ta/indicators';
 import type { Timeframe } from '../bot/ta/knowledge';
 import { adaptToVol, detectAt, FAST_TFS, SLOW_TFS, setupSeries, TF_MS, VOL_ADAPT, type Lane, type SetupSeries, type SetupSignal } from '../bot/setups/detectors';
 import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from '../bot/setups/exits';
-import { applyMask, maskedIndices, SETUP_BASE_FEATURES, SETUP_FEATURES, SETUP_GROUPS, setupFeatureMap, setupVector, tanetFeatures, type SetupBars } from '../bot/setups/features';
+import { applyMask, characterFeatures, maskedIndices, SETUP_BASE_FEATURES, SETUP_FEATURES, SETUP_GROUPS, setupFeatureMap, setupVector, tanetFeatures, type SetupBars } from '../bot/setups/features';
+import { characterOf } from '../bot/ta/character';
 import { loadOos, OosIndex } from './taNetOos';
 import { DEFAULT_LANES, kindKey, LaneBook, minScoreFor, type LaneBookParams } from '../bot/setups/lanes';
 import { laneScore, quantilesOf, rawPrediction, SETUP_SCHEMA, type LanePeriodStats, type LaneScorer, type SetupModelParams } from '../bot/setups/setupModel';
@@ -91,8 +92,18 @@ function cacheKey(): string {
   return crypto.createHash('sha1').update(`features-1|${taEngine()}|${SETUP_BASE_FEATURES.join(',')}`).digest('hex').slice(0, 12);
 }
 
+const HOUR = 3_600_000;
+const lastClosed = (cs: Candle[], period: number, t: number) => { let lo = 0, hi = cs.length - 1, ans = -1; while (lo <= hi) { const m = (lo + hi) >> 1; if (cs[m].ts + period <= t) { ans = m; lo = m + 1; } else hi = m - 1; } return ans; };
+/** Character of a coin at time t from bars closed by then (the same function the live bot uses). */
+function characterAtTime(A: AssetBars, others: Candle[][], t: number) {
+  const i = lastClosed(A.h1, HOUR, t), j = lastClosed(A.d1, 86_400_000, t);
+  if (i < 130 || j < 30) return undefined;
+  const os = others.map((h) => { const k = lastClosed(h, HOUR, t); return k >= 0 ? h.slice(Math.max(0, k - 159), k + 1) : []; });
+  try { return characterOf(A.h1.slice(i - 159, i + 1), A.d1.slice(Math.max(0, j - 199), j + 1), os); } catch { return undefined; }
+}
+
 /** Every setup of an asset with its standalone outcome and features (features cached on disk). */
-export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: CostModel, cacheDir: string | undefined, log: (m: string) => void, oos?: OosIndex): SetupEvent[] {
+export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: CostModel, cacheDir: string | undefined, log: (m: string) => void, oos?: OosIndex, others: Candle[][] = []): SetupEvent[] {
   const sigs: SetupSignal[] = [];
   for (const tf of [...FAST_TFS, ...SLOW_TFS]) {
     const s = A.series[tf]!;
@@ -125,6 +136,8 @@ export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: Cos
     let base = cached.get(k);
     if (!base) { base = Float32Array.from(setupVector(setupFeatureMap(g0, bars, btc), SETUP_BASE_FEATURES)); cached.set(k, base); fresh++; }
     tanetFeatures(tn, g.dir, reading);
+    // The coin's character at the setup (hourly bars closed by then, this coin and the others).
+    characterFeatures(tn, characterAtTime(A, others, at));
     const x = new Float32Array(SETUP_FEATURES.length);
     x.set(base);
     SETUP_FEATURES.slice(F).forEach((name, j) => { x[F + j] = Number.isFinite(tn[name]) ? tn[name] : NaN; });
@@ -281,7 +294,7 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
   const events: SetupEvent[] = [];
   const oos = new OosIndex(loadOos(hist));
   if (!oos.f) log(`no TA network walk-forward forecasts in ${hist}/.tanet-oos (npm run research:ta-net-oos): its inputs stay blank`);
-  for (const A of assets.values()) events.push(...assetEvents(A, btc, costs, o.cacheDir ?? path.join(hist, '.setup-cache'), log, oos));
+  for (const A of assets.values()) events.push(...assetEvents(A, btc, costs, o.cacheDir ?? path.join(hist, '.setup-cache'), log, oos, [...assets.values()].filter((x) => x !== A).map((x) => x.h1)));
   events.sort((a, b) => a.at - b.at);
   const end = Math.max(...events.map((e) => e.at)) + 1;
   const month = 30.44 * DAY;
@@ -369,6 +382,18 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
     log(`TA network inputs on the development years: with ${withT.n} trades, mean R ${withT.mean.toFixed(3)}, t ${withT.t.toFixed(2)} | without ${base.n} trades, mean R ${base.mean.toFixed(3)}, t ${base.t.toFixed(2)} -> ${kept ? 'KEPT' : 'blanked'}`);
     if (kept) { groups = ['tanet']; scores = sT; }
   } else log(`TA network inputs: walk-forward forecasts cover ${(100 * tnCover).toFixed(0)}% of the setups since ${iso(firstFold)} (need 80%; npm run research:ta-net-oos) -> blanked`);
+  // The coin's market character: kept on the same terms (it must raise the development years' t).
+  const chIdx = SETUP_FEATURES.indexOf(SETUP_GROUPS.character[0]);
+  const chCover = events.filter((e) => e.at >= firstFold && Number.isFinite(e.x[chIdx])).length / Math.max(1, events.filter((e) => e.at >= firstFold).length);
+  if (chCover > 0.8) {
+    const base = devScore(scores, chooseBook(scores, true));
+    const sC = scoresFor([...groups, 'character']);
+    const withC = devScore(sC, chooseBook(sC, true));
+    const kept = withC.t > base.t;
+    groupChoice.character = { withGroup: withC.t, without: base.t, kept };
+    log(`character inputs on the development years: with ${withC.n} trades, mean R ${withC.mean.toFixed(3)}, t ${withC.t.toFixed(2)} | without ${base.n} trades, mean R ${base.mean.toFixed(3)}, t ${base.t.toFixed(2)} -> ${kept ? 'KEPT' : 'blanked'}`);
+    if (kept) { groups = [...groups, 'character']; scores = sC; }
+  } else log(`character inputs cover ${(100 * chCover).toFixed(0)}% of the setups since ${iso(firstFold)} (need 80%) -> blanked`);
   book = chooseBook(scores);
   const validation: SetupModelParams['validation'] = {};
   // Both lanes together, every period.

@@ -27,7 +27,9 @@ import type { MarketData } from '../marketdata/marketData';
 import { SpotBookService } from '../marketdata/spotBook';
 import type { Vault } from '../vault/vault';
 
-import { CONFLUENCES, KNOWLEDGE, RULES } from '../ta/knowledge';
+import { BOOK_RULES, CONFLUENCES, KNOWLEDGE, RULES } from '../ta/knowledge';
+import { marketContext } from '../ta/marketContext';
+import { activeRuleBook } from '../strategy/ruleBook';
 import { buildNeuralMap } from './neuralMap';
 import type { TrainingSupervisor } from '../training/supervisor';
 import type { SettlementSweeper } from '../paper/settlementSweeper';
@@ -179,6 +181,9 @@ export function createApi(d: ApiDeps): express.Express {
       feeds: d.engine.feedHealth(),
       // Kalshi's own index channel: what arrived, what parsed, ids seen, raw samples, subscription acks.
       kalshiIndexFeed: d.md.indexFeedStats(),
+      // Directional system context: breadth, risk gauges, each coin's character (bot/ta/marketContext.ts).
+      market: marketContext()?.status() ?? null,
+      ruleBook: (() => { const rb = activeRuleBook(); const m = rb?.meta(); if (!rb || !m) return null; const p = rb.passed(); return { ...m, passed: p.length, top: p.sort((a, b) => b.weight - a.weight).slice(0, 12).map((r) => `${r.id}@${r.tf} ${r.h}h [${r.cls}] w${r.weight}`) }; })(),
       settlement: d.settlement?.status() ?? null,
       latency: latencySnapshot(),
       run: d.control?.status() ?? { active: true, since: null },
@@ -279,6 +284,7 @@ export function createApi(d: ApiDeps): express.Express {
     res.json({
       knowledge: KNOWLEDGE,
       rules: RULES.map(({ evaluate: _e, ...r }) => r),
+      bookRules: BOOK_RULES.map(({ evaluate: _e, ...r }) => r),
       confluences: CONFLUENCES,
       study: studyMeta(d.cfg.taStudyPath) ?? null,
     });

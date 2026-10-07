@@ -7,8 +7,8 @@
 import {
   adx, atr, bollinger, cmf, donchian, ema, ichimoku, keltner, last, macd, mfi, obv, rsi, sma, stochastic, volumeProfile, vwap, williamsR, type Candle,
 } from './indicators';
-import { candlePatterns, divergence, equalLevels, obvDivergenceStrength, fairValueGaps, liquiditySweep, marketStructure, roundLevel, swings, trueBreakout, type Trend } from './structure';
-import { CONFLUENCES, RULES, type Timeframe } from './knowledge';
+import { candlePatterns, chartPatterns, divergence, equalLevels, obvDivergenceStrength, fairValueGaps, liquiditySweep, marketStructure, roundLevel, rsiRangeShift, swings, trueBreakout, type ChartPatterns, type Trend } from './structure';
+import { BOOK_RULES, CONFLUENCES, RULES, type RuleDef, type Timeframe } from './knowledge';
 import { talibCore, talibExtras } from './talib';
 
 export const TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d'];
@@ -61,6 +61,11 @@ export interface TfState {
   round: { level: number; distAtr: number; crossed: -1 | 0 | 1 };
   /** TA-Lib-only readings and the candlestick-pattern summary (bot/ta/talib.ts TALIB_KEYS; NaN without TA-Lib). */
   tl: Record<string, number>;
+  /** Classic chart patterns completed on the last bars (structure.ts chartPatterns). */
+  patterns: ChartPatterns;
+  /** Cardwell RSI range shift (+1 bull range, -1 bear range) and Connors' RSI(2). */
+  rsiRange: -1 | 0 | 1;
+  rsi2: number;
 }
 
 export interface TaSignal {
@@ -85,6 +90,14 @@ export interface TaConfluence {
 
 export interface MacroInput {
   asset?: string;
+  /** Market breadth across the tracked coins (bot/ta/marketContext.ts): share above their 20 / 50-day
+   *  averages, and (new 20-day highs - new lows) / coins. */
+  breadth?: { above20: number; above50: number; hiLo: number };
+  /** Traditional-market risk gauges, 5-day log changes: dollar index, US 10-year yield, VIX, high-yield
+   *  bonds (HYG). */
+  risk?: { dxy?: number; us10y?: number; vix?: number; hyg?: number };
+  /** Version of the market context the breadth / risk came from (snapshot cache key). */
+  ctx?: number;
   /** Recent USDT.D and BTC.D changes (sigma-scaled or %; only the sign and size matter). */
   usdtdChg?: number;
   btcdChg?: number;
@@ -98,6 +111,9 @@ export interface TaSnapshot {
   confluences: TaConfluence[];
   /** Sum of directional signal strengths, bullish minus bearish, over all timeframes. */
   net: number;
+  /** Rule-book signals (knowledge.ts BOOK_RULES): kept apart so `signals` / `net` stay what the
+   *  trained models read. */
+  book?: TaSignal[];
 }
 
 const rank = (xs: number[], x: number) => {
@@ -201,6 +217,9 @@ export function tfState(tf: Timeframe, cs: Candle[]): TfState | undefined {
     candle: candlePatterns(cs),
     round: { level: rl.level, distAtr: a > 0 ? rl.dist / a : NaN, crossed },
     tl: talibExtras(cs, a),
+    patterns: chartPatterns(cs, sw, a),
+    rsiRange: rsiRangeShift(r),
+    rsi2: last(rsi(cl, 2)),
   };
 }
 
@@ -221,16 +240,8 @@ export function analyze(asset: string, candles: Partial<Record<Timeframe, Candle
 
 /** Rules and confluences on precomputed states. */
 export function evaluate(asset: string, tf: Partial<Record<Timeframe, TfState>>, now: number, macro?: MacroInput): TaSnapshot {
-  const signals: TaSignal[] = [];
-  for (const rule of RULES) {
-    for (const t of rule.timeframes) {
-      const s = tf[t];
-      if (!s) continue;
-      let r: { dir: -1 | 0 | 1; strength: number } | undefined;
-      try { r = rule.evaluate(s, tf, macro); } catch { r = undefined; }
-      if (r && Number.isFinite(r.strength) && r.strength > 0) signals.push({ id: rule.id, indicator: rule.indicator, tf: t, dir: r.dir, strength: Math.min(1, r.strength), meaning: r.dir > 0 ? rule.bullish : r.dir < 0 ? rule.bearish : rule.neutral ?? rule.bullish });
-    }
-  }
+  const signals = evalRules(RULES, tf, macro);
+  const book = evalRules(BOOK_RULES, tf, macro);
   const confluences: TaConfluence[] = CONFLUENCES.map((c) => {
     const found = c.members.map((mb) => signals.find((s) => s.id === mb.rule && s.tf === mb.tf && (mb.dirless || s.dir !== 0)));
     const present = found.filter((x): x is TaSignal => x !== undefined);
@@ -243,5 +254,19 @@ export function evaluate(asset: string, tf: Partial<Record<Timeframe, TfState>>,
     return { id: c.id, name: c.name, score: Math.max(-1, Math.min(1, score)), agreeing: ok ? agreeing.map((x) => `${x.id}@${x.tf}`) : [], meaning: ok ? (dir > 0 ? c.bullish : c.bearish) : '' };
   });
   const net = signals.reduce((s, x) => s + x.dir * x.strength, 0);
-  return { asset, ts: now, tf, signals, confluences, net };
+  return { asset, ts: now, tf, signals, confluences, net, book };
+}
+
+function evalRules(rules: RuleDef[], tf: Partial<Record<Timeframe, TfState>>, macro?: MacroInput): TaSignal[] {
+  const out: TaSignal[] = [];
+  for (const rule of rules) {
+    for (const t of rule.timeframes) {
+      const s = tf[t];
+      if (!s) continue;
+      let r: { dir: -1 | 0 | 1; strength: number } | undefined;
+      try { r = rule.evaluate(s, tf, macro); } catch { r = undefined; }
+      if (r && Number.isFinite(r.strength) && r.strength > 0) out.push({ id: rule.id, indicator: rule.indicator, tf: t, dir: r.dir, strength: Math.min(1, r.strength), meaning: r.dir > 0 ? rule.bullish : r.dir < 0 ? rule.bearish : rule.neutral ?? rule.bullish });
+    }
+  }
+  return out;
 }

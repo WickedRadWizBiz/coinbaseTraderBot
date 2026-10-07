@@ -20,6 +20,9 @@
 //     long the underlying (YES on up / above, a perp long): that is the setup the rule describes.
 //  5. Selection priority. Markets are evaluated (and setups entered) in priority order: altcoin
 //     risk-on first, then by TA conviction, so they get the shared risk budget first.
+//  6. Rule book and character. The rules that passed the walk-forward study for the coin's current
+//     character join the signals as one combined reading (bot/strategy/ruleBook.ts); in a volatile-
+//     systemic market (everything moving together) the conviction boosts stand aside.
 
 import { clamp, normInv } from '../util/num';
 
@@ -88,7 +91,7 @@ export function taDrift(v: TaNetView | undefined, tauSec: number, c: Pick<Convic
 }
 
 /** Signals oriented so + = bullish for the underlying. */
-export function orientedSignals(f: Record<string, number>, v: TaNetView | undefined, live: boolean): Array<[string, number]> {
+export function orientedSignals(f: Record<string, number>, v: TaNetView | undefined, live: boolean, rb?: { score: number; n: number }): Array<[string, number]> {
   const out: Array<[string, number]> = [];
   const add = (name: string, x: number | undefined, dead = 0) => { if (x !== undefined && Number.isFinite(x) && Math.abs(x) > dead) out.push([name, x]); };
   if (v) {
@@ -101,6 +104,8 @@ export function orientedSignals(f: Record<string, number>, v: TaNetView | undefi
   add('MTF momentum', f.taconf_mtf_momentum, 0.1);
   add('RSI 1h', f.ta_rsi_1h, 0.04);
   add('EMA stack 1h', f.ta_ema_stack_1h, 0.1);
+  // The rules that passed the walk-forward study for this character (bot/strategy/ruleBook.ts).
+  if (rb && rb.n > 0) add('rule book', rb.score, 0.1);
   return out;
 }
 
@@ -146,8 +151,12 @@ export function selectionPriority(altActive: boolean, taDir: number | undefined,
 /** Conviction for a directional (perp) trade: TA / confluence breadth scales the size up to maxBoost x,
  *  the altcoin risk-on rule multiplies it by altBoost for longs; at most maxTotal x overall. */
 export function directionalConviction(asset: string, dir: number, f: Record<string, number>, v: TaNetView | undefined,
-  c: ConvictionConfig & { maxBoost: number; maxTotal: number }): { mult: number; priority: number; why: string } {
-  const signals = orientedSignals(f, v, c.live);
+  c: ConvictionConfig & { maxBoost: number; maxTotal: number; ruleBook?: { score: number; n: number }; standAside?: string }): { mult: number; priority: number; why: string } {
+  const signals = orientedSignals(f, v, c.live, c.ruleBook);
+  if (c.standAside) {
+    const up0 = confluenceBreadth(signals, 1).breadth, dn0 = confluenceBreadth(signals, -1).breadth;
+    return { mult: 1, priority: selectionPriority(false, taNetDirection(v, c.live), up0, dn0), why: `stand aside (${c.standAside}): no conviction boost` };
+  }
   const b = confluenceBreadth(signals, dir);
   const taDir = taNetDirection(v, c.live);
   const alt = altcoinRiskOn(asset, f.usdtd_ret_15m_z, f.ta_rsi_1h, c);

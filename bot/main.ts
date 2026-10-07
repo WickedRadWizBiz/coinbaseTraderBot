@@ -29,6 +29,8 @@ import { PerpModel } from './perps/perpSignal';
 import { PerpTrader } from './perps/perpTrader';
 import type { DirectionalTrader } from './perps/hedger';
 import { SetupTrader } from './setups/setupTrader';
+import { MarketContext, marketContext, setMarketContext } from './ta/marketContext';
+import { activeRuleBook, RuleBook, setRuleBook, STAND_ASIDE } from './strategy/ruleBook';
 import { SetupJournal } from './setups/journal';
 import { compressOldRecordings, recordingsUsage } from './marketdata/recordingFiles';
 import { DEFAULT_LANES } from './setups/lanes';
@@ -183,7 +185,7 @@ async function main(): Promise<void> {
   const modelHealth = new ModelHealth({ minWindows: cfg.strategy.modelHealthMinWindows }, path.join(cfg.dataDir, 'model_health.json'));
   const taHealth = new ModelHealth({ minWindows: 1e9 }, path.join(cfg.dataDir, 'ta_health.json'));
   // TA conviction for the perps (setup trader): features + the TA network's raw view, cached per asset per minute.
-  const convCache = new Map<string, { ts: number; f: Record<string, number>; v: TaNetView | undefined }>();
+  const convCache = new Map<string, { ts: number; f: Record<string, number>; v: TaNetView | undefined; rb?: { score: number; n: number } }>();
   const conviction = (asset: string, dir: number, now: number) => {
     let c = convCache.get(asset);
     if (!c || now - c.ts > 60_000 || now < c.ts) {
@@ -191,11 +193,15 @@ async function main(): Promise<void> {
       const f = assetFeatureMap(asset, now, { index: md.index.get(asset), spot: md.spot.get(asset), bars: md.features.bars.get(asset), candles, usdtd: md.usdtd, btcd: md.btcd, perp: md.features.perps.get(asset) });
       let v: TaNetView | undefined;
       v = taNetView(asset, candles, now);
-      c = { ts: now, f, v };
+      // The rule book at the setups' holding horizon (a day), for the coin's character.
+      const rb = cfg.strategy.ruleBook ? activeRuleBook()?.read(candles?.snapshot(now, marketContext()?.macro()), 24, marketContext()?.character(asset)?.cls) : undefined;
+      c = { ts: now, f, v, rb };
       convCache.set(asset, c);
     }
     const S = cfg.strategy;
-    return directionalConviction(asset, dir, c.f, c.v, { weight: S.taPricingWeight, maxShift: S.taPricingMaxShift, maxZ: S.taPricingMaxZ, live: cfg.mode === 'live', altBoost: S.altBoost, altUsdtdMaxZ: S.altUsdtdMaxZ, altRsiMin: S.altRsiMin, nonAlts: S.nonAlts, maxBoost: S.adversarialMaxBoost, maxTotal: S.convictionMaxTotal });
+    const ch = marketContext()?.character(asset);
+    return directionalConviction(asset, dir, c.f, c.v, { weight: S.taPricingWeight, maxShift: S.taPricingMaxShift, maxZ: S.taPricingMaxZ, live: cfg.mode === 'live', altBoost: S.altBoost, altUsdtdMaxZ: S.altUsdtdMaxZ, altRsiMin: S.altRsiMin, nonAlts: S.nonAlts, maxBoost: S.adversarialMaxBoost, maxTotal: S.convictionMaxTotal,
+      ruleBook: c.rb, standAside: S.characterStandAside && ch && STAND_ASIDE.includes(ch.cls) ? ch.why : undefined });
   };
   const calendar = loadCalendar(path.resolve(process.env.MACRO_CALENDAR_PATH ?? './params/calendar.json'));
   if (!calendar) log.info('no macro calendar (params/calendar.json): calendar features unavailable');
@@ -322,6 +328,13 @@ async function main(): Promise<void> {
   setTaNet(taNet, cfg.taNet.requireValidated);
   // Performance-weighted ensemble: the live network plus the latest archived versions (research/champion.ts).
   setTaNetEnsemble(cfg.taNet.enabled && cfg.taNet.ensemble > 1 ? new TaNetEnsemble(path.join(cfg.autoTrain.dir, 'archive', 'ta_net'), cfg.taNet.ensemble) : undefined);
+  // Market context for the directional system: breadth, risk gauges, each coin's character
+  // (bot/ta/marketContext.ts), refreshed as hourly candles close.
+  const marketCtx = new MarketContext(cfg.taNet.historyDir);
+  setMarketContext(marketCtx);
+  setRuleBook(new RuleBook(() => path.join(cfg.autoTrain.dir, 'rule_book.json')));
+  const refreshMarketCtx = () => { try { const now = Date.now(); marketCtx.update(md.features.candles.values(), now, (a) => taNetView(a, md.features.candles.get(a), now)?.vol4h); } catch (e) { log.warn(`market context: ${String(e)}`); } };
+  setInterval(refreshMarketCtx, 60_000).unref();
   // Market-wide context for the TA network: every tracked coin's candles and the index series.
   setTaNetContextSource({ sets: () => md.features.candles, index: (asset, tf) => md.indexStore.get(asset, tf) });
   if (taNet) {

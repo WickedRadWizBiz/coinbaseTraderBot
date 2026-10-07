@@ -71,6 +71,8 @@ import { activeTaNetEnsemble, taNetView } from './ta/taNetEnsemble';
 import { applyFillModel, fillInputs, isMakerEntry, type FillModel } from './tca/fillModel';
 import { FillLog } from './tca/fillLog';
 import { recordLatency } from './util/latency';
+import { activeRuleBook, STAND_ASIDE } from './strategy/ruleBook';
+import { marketContext } from './ta/marketContext';
 import { binaryTrades, optimalF, recencyWeight, type OptimalFReport } from './strategy/optimalF';
 import { altcoinRiskOn, confluenceBreadth, orientedSignals, selectionPriority, taDrift, taNetDirection, viewOf, type TaNetView } from './strategy/taConviction';
 
@@ -109,7 +111,8 @@ export interface MarketStatus {
   taShift?: number;
   /** Sigma multiplier from the TA network's validated volatility forecast (1 = none). */
   taVolMult?: number;
-  conviction?: { taDir: number | null; drift: string[]; breadthUp: number; breadthDown: number; agree: string[]; oppose: string[]; alt: { active: boolean; why: string }; priority: number };
+  conviction?: { taDir: number | null; drift: string[]; breadthUp: number; breadthDown: number; agree: string[]; oppose: string[]; alt: { active: boolean; why: string }; priority: number;
+    character?: { cls: string; why: string } | null; ruleBook?: { score: number; n: number; agree: string[]; oppose: string[] } | null; standAside?: string | null };
   /** Last adversarial verdict on an entry here (multiplier > 1 = it could not be broken). */
   adversary?: { side: string; multiplier: number; broken: boolean; evidence: boolean; failed: string[]; ts: number };
   ticker: string;
@@ -1434,16 +1437,22 @@ export class Engine {
         pYes = Math.max(0.001, Math.min(0.999, pBase + taShift));
       }
     }
-    const signals = orientedSignals(features, taView, liveMode);
-    const taDir = taNetDirection(taView, liveMode);
     const shortContract = (m.closeTime - m.openTime) / 60_000 <= 20;
+    // Rule book (rules that passed the walk-forward study, for the coin's character) and the character
+    // gate: no conviction boosts in a volatile-systemic market.
+    const coinChar = marketContext()?.character(m.asset);
+    const rbRead = S0.ruleBook ? activeRuleBook()?.read(md.features.candles.get(m.asset)?.snapshot(now, marketContext()?.macro()), Math.max(4, tauSec / 3600), coinChar?.cls) : undefined;
+    const standAside = S0.characterStandAside && coinChar && STAND_ASIDE.includes(coinChar.cls) ? coinChar.why : undefined;
+    const signals = orientedSignals(features, taView, liveMode, rbRead);
+    const taDir = taNetDirection(taView, liveMode);
     const rsiTrade = [shortContract ? features.ta_rsi_15m : features.ta_rsi_1h, features.rsi_14_1m].find((x) => x !== undefined && Number.isFinite(x));
     const alt = altcoinRiskOn(m.asset, features.usdtd_ret_15m_z, rsiTrade, S0);
     const bUp = confluenceBreadth(signals, 1), bDn = confluenceBreadth(signals, -1);
     st.pBeforeTa = pBase;
     st.taVolMult = +taVolMult.toFixed(3);
     st.taShift = taShift;
-    st.conviction = { taDir: taDir ?? null, drift: drift?.parts ?? [], breadthUp: +bUp.breadth.toFixed(3), breadthDown: +bDn.breadth.toFixed(3), agree: bUp.agree, oppose: bUp.oppose, alt, priority: selectionPriority(alt.active, taDir, bUp.breadth, bDn.breadth) };
+    st.conviction = { taDir: taDir ?? null, drift: drift?.parts ?? [], breadthUp: +bUp.breadth.toFixed(3), breadthDown: +bDn.breadth.toFixed(3), agree: bUp.agree, oppose: bUp.oppose, alt, priority: selectionPriority(alt.active, taDir, bUp.breadth, bDn.breadth),
+      character: coinChar ? { cls: coinChar.cls, why: coinChar.why } : null, ruleBook: rbRead ? { score: +rbRead.score.toFixed(3), n: rbRead.n, agree: rbRead.agree, oppose: rbRead.oppose } : null, standAside: standAside ?? null };
     Object.assign(st, { kind: m.kind, strike: terms.strike, cap: terms.cap, strikeSource: m.strikeSource, spot: spot.value, sigma: vol.sigmaPerSqrtSec, sigmaPricing, fairValue: fv.pYes, pYes, pMarket, pStd: pred.std, bestBid: bid.price, bestAsk: ask.price, dPdS, blocked: undefined });
 
     const ret = idx!.trailingLogReturn(now, cfg.strategy.fastMoveWindowSec * 1000);
@@ -1561,6 +1570,7 @@ export class Engine {
       for (let i = 0; i < plan.place.length; i++) {
         const p = plan.place[i];
         if (p.purpose === 'exit' || p.reduceOnly || (p.side === 'ask' && st.position > 0) || (p.side === 'bid' && st.position < 0)) continue;
+        if (standAside) { plan.notes.push(`stand aside (${standAside}): no conviction boost`); break; }
         const side = p.side === 'bid' ? 'yes' : 'no';
         const sideDir = (side === 'yes' ? 1 : -1) * direction;
         const cost = side === 'yes' ? p.price : 1 - p.price;
