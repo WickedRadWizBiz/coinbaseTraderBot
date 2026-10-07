@@ -119,6 +119,9 @@ export class Oms extends EventEmitter {
     return [...this.orders.values()].sort((a, b) => b.createdTs - a.createdTs).slice(0, limit);
   }
 
+  /** Has this trade id been applied (it is still among those remembered)? */
+  hasSeenTrade(tradeId: string): boolean { return this.seenTradeSet.has(tradeId); }
+
   get(clientOrderId: string): OrderRecord | undefined {
     return this.orders.get(clientOrderId);
   }

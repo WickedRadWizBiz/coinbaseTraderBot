@@ -7,6 +7,8 @@ import fs from 'fs';
 import path from 'path';
 import { Alerter, AlertSink, TelegramSink, WebhookSink } from './alerts/alerter';
 import { createApi } from './api/server';
+import { KalshiCheck, type CheckSource } from './recon/kalshiCheck';
+import type { ExchangeFill } from './kalshi/types';
 import { AuditLog } from './audit/auditLog';
 import { ConfigError, loadConfig, publicConfig, type Config } from './config';
 import { Engine } from './engine';
@@ -163,11 +165,21 @@ async function main(): Promise<void> {
   const oms = new Oms({ gateway, audit, statePath: path.join(cfg.dataDir, 'oms_state.json'), feesFor: (t) => md.feesFor(t), subaccount: cfg.kalshiSubaccount, durableWriteAhead: cfg.mode === 'live' });
   kill.bindCancelAll((reason) => oms.cancelAll(reason));
 
+  // Kalshi check: the bot's fills, settlements and cash against Kalshi's own records (bot/recon/kalshiCheck.ts).
+  // Listeners go on before the startup reconciliation replays fills.
+  const kalshiCheck = new KalshiCheck({
+    file: path.join(cfg.dataDir, 'kalshi_check.json'), source: gateway as CheckSource, audit, alerter,
+    seenTrade: (id) => oms.hasSeenTrade(id), position: (t) => oms.positions.get(t),
+  });
+  oms.on('fill', (f: ExchangeFill, _rec: unknown, fee: number, positionAfter: number) => kalshiCheck.onBotFill(f, fee, positionAfter));
+  oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized: number; positionBefore: number }) => kalshiCheck.onBotSettle(e, oms.positions.get(e.ticker)));
+  kalshiCheck.start();
   const recon = new Reconciler({
     gateway, oms, audit, alerter,
     getMarket: (t) => rest.getMarket(t),
     onSettled: (t, r) => md.recordResult(t, r),
     onPersistentBreak: (reason) => void kill.engage(reason, 'recon'),
+    onFills: (fills) => kalshiCheck.onExchangeFills(fills),
   });
   const risk = new RiskGateway(cfg.risk);
   const vault = new Vault(cfg.vault, path.join(cfg.dataDir, 'vault.json'));
@@ -345,7 +357,7 @@ async function main(): Promise<void> {
   // The exchange's own status and maintenance schedule gate new entries (exits stay allowed).
   const exchangeStatus = new ExchangeStatusMonitor(rest);
   exchangeStatus.start();
-  const engine: Engine = new Engine({ control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
+  const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json') });
   engineRef = engine;
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();
@@ -396,7 +408,7 @@ async function main(): Promise<void> {
   // The dashboard comes up first (it shows the engine warming up); loading every market takes a minute or
   // more on a small server.
   training.start();
-  const app = createApi({ cfg, audit, engine, oms, kill, recon, model, tca, md, vault, autoTrain, control, training, settlement, restart: () => void shutdown('restart (dashboard)', 75), startedAt: Date.now() });
+  const app = createApi({ kalshiCheck, cfg, audit, engine, oms, kill, recon, model, tca, md, vault, autoTrain, control, training, settlement, restart: () => void shutdown('restart (dashboard)', 75), startedAt: Date.now() });
   const server = app.listen(cfg.port, cfg.host, () => log.info(`operator API on http://${cfg.host}:${cfg.port} (${cfg.dashboardPassword ? 'password required' : 'no login'})`));
 
   md.start();
@@ -411,6 +423,7 @@ async function main(): Promise<void> {
     engine.stop();
     try { await oms.cancelAll(`shutdown (${sig})`); } catch (e) { log.error('cancel on shutdown failed', { error: String(e) }); }
     oms.flush();
+    kalshiCheck.flush();
     paper?.flush();
     autoTrain.stop();
     try { engine.saveSnnBlender(); await Promise.all(Object.values(engine.snn?.units ?? {}).map((u) => u!.host.stop())); } catch (e) { log.error('SNN checkpoint on shutdown failed', { error: String(e) }); }

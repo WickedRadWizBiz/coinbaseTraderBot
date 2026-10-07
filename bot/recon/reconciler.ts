@@ -19,7 +19,7 @@
 
 import type { AuditLog } from '../audit/auditLog';
 import type { Alerter } from '../alerts/alerter';
-import type { ExchangeGateway, MarketInfo } from '../kalshi/types';
+import type { ExchangeFill, ExchangeGateway, MarketInfo } from '../kalshi/types';
 import type { Oms } from '../oms/oms';
 import { isLive } from '../oms/orderState';
 import { logger } from '../util/log';
@@ -45,6 +45,8 @@ export interface ReconOptions {
   onSettled?: (ticker: string, result: 'yes' | 'no') => void;
   killAfterBreaks?: number;
   onPersistentBreak: (reason: string) => void;
+  /** The fills the exchange listed this run, after any the bot missed were applied (the Kalshi check). */
+  onFills?: (fills: ExchangeFill[]) => void;
   now?: () => number;
 }
 
@@ -109,6 +111,7 @@ export class Reconciler {
     let repairedFills = 0;
     for (const f of fills) if (oms.onFill(f)) repairedFills++;
     if (repairedFills) this.o.audit.write('recon_repair', { repairedFills });
+    try { this.o.onFills?.(fills); } catch (e) { log.warn('kalshi check (fills) failed', { error: String(e) }); }
 
     // 2. Orders.
     const exchangeOpen = await gateway.getOpenOrders();

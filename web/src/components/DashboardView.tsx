@@ -6,6 +6,7 @@ import { OrderBookMonitor } from './OrderBookMonitor';
 import { Panel, Screen } from './Panel';
 import { BotControls, LatencyBadges } from './BotControls';
 import { usePoll } from './usePoll';
+import { KalshiCheckCard } from './KalshiCheckCard';
 
 function Row({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: 'ok' | 'bad' | 'warn' }) {
   const color = tone === 'ok' ? 'text-crypto-success' : tone === 'bad' ? 'text-crypto-danger' : tone === 'warn' ? 'text-yellow-300' : 'text-crypto-text';
@@ -168,6 +169,8 @@ export function DashboardView() {
           ) : <div className="p-6 animate-pulse">ESTABLISHING LINK...</div>}
         </Panel>
       </div>
+
+      <KalshiCheckCard live={s?.mode === 'live'} />
 
       <OrderBookMonitor markets={markets ?? []} orders={orders ?? []} />
 

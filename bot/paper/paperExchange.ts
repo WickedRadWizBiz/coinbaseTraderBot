@@ -19,6 +19,7 @@ import {
   CreateOrderRequest, ExchangeFill, ExchangeGateway, ExchangeOrder, ExchangePosition, OrderRejectedError,
 } from '../kalshi/types';
 import { readJson, writeJsonAtomic } from '../util/persist';
+import type { SettlementRecord } from '../recon/kalshiCheck';
 
 interface PaperOrder extends ExchangeOrder {
   queueAhead: number;
@@ -37,6 +38,10 @@ interface PaperState {
   positions: Record<string, number>;
   fills: ExchangeFill[];
   orders: PaperOrder[];
+  /** Per market: cost basis of the YES / NO contracts held and fees paid (as Kalshi reports them). */
+  basis?: Record<string, { yesCost: number; noCost: number; fees: number }>;
+  /** Settlement records in Kalshi's shape (last 2 days), for the Kalshi check. */
+  settlements?: SettlementRecord[];
 }
 
 /** Finished orders kept (state file and lookups): those updated within the hour, newest 500. */
@@ -261,9 +266,21 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
     if (changed) this.save();
   }
 
+  async getSettlements(sinceTs: number): Promise<SettlementRecord[]> {
+    return (this.st.settlements ?? []).filter((r) => r.ts >= sinceTs);
+  }
+
   /** Settle a market in the paper account. */
   settle(ticker: string, result: 'yes' | 'no'): void {
     const pos = this.st.positions[ticker] ?? 0;
+    const b = this.st.basis?.[ticker];
+    if (Math.abs(pos) > 1e-9 || b) {
+      const now = this.now();
+      const rec: SettlementRecord = { ticker, result, yesCount: Math.max(0, pos), noCount: Math.max(0, -pos), yesCost: r6(b?.yesCost ?? 0), noCost: r6(b?.noCost ?? 0),
+        revenue: pos > 0 && result === 'yes' ? pos : pos < 0 && result === 'no' ? -pos : 0, fees: r6(b?.fees ?? 0), ts: now };
+      this.st.settlements = [...(this.st.settlements ?? []).filter((r) => r.ts >= now - 2 * 86_400_000), rec];
+      if (this.st.basis) delete this.st.basis[ticker];
+    }
     if (pos > 0 && result === 'yes') this.st.balance += pos;
     if (pos < 0 && result === 'no') this.st.balance += -pos;
     delete this.st.positions[ticker];
@@ -295,6 +312,18 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
     if (n <= 0) return;
     const pos = this.st.positions[o.ticker] ?? 0;
     const fee = orderFee(n, o.side === 'bid' ? price : 1 - price, isTaker, this.feesFor(o.ticker));
+    // Cost basis as Kalshi keeps it: opening adds the side's price; closing releases its share.
+    const b = ((this.st.basis ??= {})[o.ticker] ??= { yesCost: 0, noCost: 0, fees: 0 });
+    b.fees += fee;
+    if (o.side === 'bid') {
+      const closing = Math.min(n, Math.max(0, -pos));
+      if (closing > 0) b.noCost *= (-pos - closing) / -pos;
+      b.yesCost += (n - closing) * price;
+    } else {
+      const closing = Math.min(n, Math.max(0, pos));
+      if (closing > 0) b.yesCost *= (pos - closing) / pos;
+      b.noCost += (n - closing) * (1 - price);
+    }
     // Kalshi collateral accounting: opening costs the side's price; closing releases it.
     if (o.side === 'bid') {
       const closing = Math.min(n, Math.max(0, -pos));
@@ -321,3 +350,5 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
     this.emit('order', { ...o });
   }
 }
+
+const r6 = (x: number) => Math.round(x * 1e6) / 1e6;

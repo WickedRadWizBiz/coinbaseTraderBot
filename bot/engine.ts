@@ -54,6 +54,7 @@ import type { ClockSkewMonitor } from './risk/clockSkew';
 import { BalanceMonitor, fillCashDelta, settleCashDelta } from './vault/balanceMonitor';
 import type { Vault } from './vault/vault';
 import { stateWriteStats, writeJsonAtomic } from './util/persist';
+import type { KalshiCheck } from './recon/kalshiCheck';
 import type { SnnBlender } from './snn/blender';
 import type { SnnFleet, SnnUnit } from './snn';
 import type { SnnDomain } from './snn/params';
@@ -256,6 +257,8 @@ export interface EngineDeps {
   vault?: Vault;
   /** Withdrawal/deposit detector (with its persistence file). */
   balanceMonitor?: BalanceMonitor;
+  /** Bot vs Kalshi books (fills, settlements, cash); verifies transfers before they are booked (live). */
+  kalshiCheck?: KalshiCheck;
   balanceMonitorPath?: string;
   /** Maker markouts feed the adverse-selection buffer. */
   tca?: Tca;
@@ -341,7 +344,9 @@ export class Engine {
     d.oms.on('fill', (f: { ticker: string; side: 'bid' | 'ask'; count: number; price: number; isTaker?: boolean; ts?: number }, _rec: unknown, fee: number, positionAfter: number) => {
       this.fillLog?.onFill({ ticker: f.ticker, side: f.side, price: f.price, isTaker: Boolean(f.isTaker), ts: f.ts });
       const signed = f.side === 'bid' ? f.count : -f.count;
-      d.balanceMonitor?.onCash(fillCashDelta(f.side, f.count, f.price, fee, positionAfter - signed));
+      const cash = fillCashDelta(f.side, f.count, f.price, fee, positionAfter - signed);
+      d.balanceMonitor?.onCash(cash);
+      d.kalshiCheck?.onBotCash(cash);
       this.saveMonitor();
     });
     // Results vs expectation (diagnostic): every entry fill remembers the probability it was placed on; when
@@ -373,6 +378,7 @@ export class Engine {
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized: number; positionBefore: number }) => {
       this.lastSettleTs = this.now();
       d.balanceMonitor?.onCash(settleCashDelta(e.positionBefore, e.result));
+      d.kalshiCheck?.onBotCash(settleCashDelta(e.positionBefore, e.result));
       this.saveMonitor();
       if (d.vault && e.realized > 0) {
         d.vault.onSettled(e.realized, e.ticker, this.now(), this.d.equityGuard?.tierReference(this.bankroll() ?? 0) ?? this.bankroll());
@@ -411,14 +417,29 @@ export class Engine {
       const raised = this.d.equityGuard?.onTradeResult(win, eq, this.now());
       if (raised) this.d.audit.write('training', { event: 'break_even_raised', book: 'kalshi', ...raised });
     }
-    const { balanceMonitor: mon, vault } = this.d;
+    const { balanceMonitor: mon } = this.d;
     if (!mon) return;
     const now = this.now();
+    this.d.kalshiCheck?.onBalance(balance, mon.state.expected);
     // Quiet = nothing awaiting settlement and no settlement in the last 10 minutes.
     const awaiting = this.d.oms.positions.unsettled().some((m) => m.closeTs && m.closeTs < now);
     const quiet = !awaiting && now - this.lastSettleTs > 10 * 60_000;
     const res = mon.check(balance, quiet);
     this.saveMonitor();
+    if (!res.deposit && !res.withdrawal) return;
+    // Live: a balance move is a transfer only if Kalshi's history shows one; otherwise the Kalshi check
+    // reports it as an accounting mismatch (the books are re-anchored to Kalshi's balance either way).
+    const check = this.d.kalshiCheck;
+    if (check && this.d.cfg.mode === 'live') {
+      void check.verifyTransfer(res.deposit ?? -(res.withdrawal ?? 0)).then((v) => { if (v !== 'unexplained') this.bookTransfer(res, now); });
+      return;
+    }
+    this.bookTransfer(res, now);
+  }
+
+  /** A detected deposit / withdrawal: the vault, pocket and equity guard follow the cash. */
+  private bookTransfer(res: { deposit?: number; withdrawal?: number }, now: number): void {
+    const { vault } = this.d;
     if (res.deposit) this.d.equityGuard?.onCashFlow(res.deposit, now);
     if (res.withdrawal && !vault) this.d.equityGuard?.onCashFlow(-res.withdrawal, now);
     if (res.withdrawal && vault) {
