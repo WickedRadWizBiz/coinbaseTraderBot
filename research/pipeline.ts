@@ -301,7 +301,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       // research. Time-boxed (KALSHI_HISTORY_BUDGET_MIN); the rest resumes on the next run.
       let kalshi: unknown;
       if (T.kalshiHistoryBudgetMin > 0) {
-        try { kalshi = await downloadKalshiHistory({ baseUrl: cfg.restBaseUrl, series: cfg.strategy.series, days: 60, out: path.join(T.historyDir, 'kalshi'), budgetMs: T.kalshiHistoryBudgetMin * 60_000, log: (m) => log(`kalshi: ${m}`) }); } catch (e) { kalshi = { error: String(e) }; }
+        try { kalshi = await downloadKalshiHistory({ baseUrl: cfg.restBaseUrl, series: cfg.strategy.series, days: T.kalshiHistoryDays, out: path.join(T.historyDir, 'kalshi'), budgetMs: T.kalshiHistoryBudgetMin * 60_000, log: (m) => log(`kalshi: ${m}`) }); } catch (e) { kalshi = { error: String(e) }; }
       } else kalshi = { skipped: 'KALSHI_HISTORY_BUDGET_MIN=0' };
       const reached = bin.some((b) => b.listed > 0) || cb.some((c) => c.requests > 0 && !/kept failing/.test(c.note ?? ''));
       if (!reached) throw new SkipStep('Binance Vision and Coinbase unreachable from this machine');

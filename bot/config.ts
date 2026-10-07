@@ -297,6 +297,8 @@ export interface TaNetConfig {
   /** Minutes the history step may spend on Kalshi's settled-contract candles per run (the rest resumes next
    *  run); 0 = skip them. */
   kalshiHistoryBudgetMin: number;
+  /** Days of Kalshi's settled contracts to download (the laptop trainer asks for a year). */
+  kalshiHistoryDays: number;
   /** Assets to collect: "auto" = every crypto asset Kalshi lists (binary series + perps), or a list. */
   historyAssets: string;
   /** Binance intervals to download, and Coinbase timeframes to backfill. */
@@ -1095,9 +1097,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       historyUpdate: bool(env, 'HISTORY_AUTO_UPDATE', true),
       tvFill: bool(env, 'TV_FILL', true),
       kalshiHistoryBudgetMin: num(env, 'KALSHI_HISTORY_BUDGET_MIN', 20, 0, 600),
+      kalshiHistoryDays: num(env, 'KALSHI_HISTORY_DAYS', 60, 1, 1095),
       historyAssets: env.HISTORY_ASSETS ?? 'auto',
       binanceIntervals: (env.HISTORY_BINANCE_INTERVALS ?? '1h,15m,1d').split(',').map((x) => x.trim()).filter(Boolean),
-      coinbaseTfs: (env.HISTORY_COINBASE_TFS ?? '1h,1d').split(',').map((x) => x.trim()).filter(Boolean),
+      coinbaseTfs: (env.HISTORY_COINBASE_TFS ?? '1h,1d').split(',').map((x) => x.trim()).filter((x) => x && x !== 'none'),
       retrainEveryDays: num(env, 'TA_NET_RETRAIN_DAYS', 7, 0, 365),
       arch: oneOf(env, 'TA_NET_ARCH', 'flat', ['flat', 'grouped'] as const),
       trainMonths: num(env, 'TA_NET_TRAIN_MONTHS', 12, 1, 36),

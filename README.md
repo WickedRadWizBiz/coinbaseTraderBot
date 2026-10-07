@@ -326,6 +326,8 @@ A new network retrains only the model that reads it, including when you swap one
 
 `docs/AUTOMATION.md` is the plain-language guide. It covers what runs by itself, what you still do by hand, every setting, and how to roll back.
 
+**Training on your own computer** (`research/laptopTrain.ts`, [docs/LAPTOP_TRAINING.md](docs/LAPTOP_TRAINING.md)): the same pipeline with no time cap and bigger budgets, for as many hours as you give it. Windows: download `KalshiTrainer-windows.zip` from the *Laptop trainer (Windows)* release and double-click `Train.cmd`; elsewhere `npm run train:laptop -- --hours 12 --host <ip> --key <pem>`. It copies the bot's data over SSH (credentials never leave the server), downloads years of history and a year of Kalshi's settled contracts, trains in rounds (champion vs challenger per module, the sweep on the whole bot), and sends the winners back for the bot to hot-swap.
+
 ## Historical data and the TA network (bot/ta/taNet.ts)
 
 - **History store** (`research/history`, `data/history`):
