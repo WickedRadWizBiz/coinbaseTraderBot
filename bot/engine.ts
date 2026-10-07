@@ -231,6 +231,8 @@ export class Engine {
   private timers: NodeJS.Timeout[] = [];
   private lastTickTs = 0;
   private lastDecisionAudit = new Map<string, number>();
+  /** Last decision record per market that carried the full feature map (see the decision audit below). */
+  private lastFeatureAudit = new Map<string, number>();
   private lastRejectAudit = new Map<string, number>();
   private dataHalt: string | undefined = 'awaiting market data';
   balance: number | undefined;
@@ -581,8 +583,14 @@ export class Engine {
       try {
         const file = path.join(this.d.cfg.dataDir, 'trades.jsonl');
         if (fs.existsSync(file)) {
-          const text = fs.readFileSync(file, 'utf8');
-          for (const line of text.slice(Math.max(0, text.length - 4_000_000)).split('\n')) { try { if (line) rows.push(JSON.parse(line)); } catch { /* partial line */ } }
+          // Only the newest ~4 MB is read (never the whole file: it only grows).
+          const fd = fs.openSync(file, 'r');
+          try {
+            const size = fs.fstatSync(fd).size, start = Math.max(0, size - 4_000_000);
+            const buf = Buffer.alloc(size - start);
+            fs.readSync(fd, buf, 0, buf.length, start);
+            for (const line of buf.toString('utf8').split('\n')) { try { if (line) rows.push(JSON.parse(line)); } catch { /* partial first line */ } }
+          } finally { fs.closeSync(fd); }
         }
       } catch { /* unreadable: no cap */ }
       const trades = binaryTrades(rows, book).map((t) => ({ ...t, w: recencyWeight(t.ts, now, of.halfLifeDays) }));
@@ -1316,6 +1324,7 @@ export class Engine {
         this.d.modelHealth?.forget(t);
         this.d.taHealth?.forget(t);
         this.lastDecisionAudit.delete(t);
+        this.lastFeatureAudit.delete(t);
         this.trainTicker.delete(t);
       }
     }
@@ -1653,11 +1662,16 @@ export class Engine {
     const lastAudit = this.lastDecisionAudit.get(m.ticker) ?? 0;
     if (plan.place.length || plan.cancel.length || now - lastAudit > 30_000) {
       this.lastDecisionAudit.set(m.ticker, now);
+      // The full feature map (hundreds of inputs) rides on orders that are not maker requotes and at
+      // least every 5 minutes per market; quote churn records the prices and probabilities only (with
+      // every market priced live, full records on every requote grew one day's audit file past 512 MB).
+      const full = plan.place.some((p) => p.purpose !== 'quote') || now - (this.lastFeatureAudit.get(m.ticker) ?? 0) >= 300_000;
+      if (full) this.lastFeatureAudit.set(m.ticker, now);
       this.d.audit.write('decision', {
         decisionId, ticker: m.ticker, model: model.id, spot: spot.value, strike, strikeSource: m.strikeSource, sigma: vol.sigmaPerSqrtSec, sigmaPricing,
         session: sess.key, sessionRisk: sessRisk,
         kind: m.kind, cap: terms.cap, cadence: reason ?? null, featureSchema: FEATURE_SCHEMA_VERSION, pMarket, pStd: pred.std, q: st.q,
-        tauSec, fv: fv.pYes, regime: fv.regime, pYes, features, modelShift: why.shiftFromFairValue, drivers: why.drivers, bid: bid.price, ask: ask.price, position: st.position, fastMove,
+        tauSec, fv: fv.pYes, regime: fv.regime, pYes, ...(full ? { features, drivers: why.drivers } : {}), modelShift: why.shiftFromFairValue, bid: bid.price, ask: ask.price, position: st.position, fastMove,
         place: plan.place.map((p) => ({ side: p.side, price: p.price, count: p.count, purpose: p.purpose, edge: p.edge, why: p.why })),
         cancel: plan.cancel,
       });

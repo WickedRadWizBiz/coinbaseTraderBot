@@ -197,6 +197,9 @@ export interface Config {
   /** DASHBOARD_PASSWORD: '' (default) = the dashboard opens without a login. */
   dashboardPassword: string;
   dataDir: string;
+  /** Audit log: a day's file splits into parts at this size; files older than the retention are deleted. */
+  auditMaxFileMb: number;
+  auditRetentionDays: number;
   paramsPath: string;
   paperBankrollUsd: number;
   /** Map of Kalshi CF Benchmarks index id -> asset symbol (BTC, ETH...). */
@@ -833,6 +836,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     port: num(env, 'PORT', 3000, 1, 65535),
     dashboardPassword,
     dataDir,
+    auditMaxFileMb: num(env, 'AUDIT_MAX_FILE_MB', 256, 16, 4096),
+    auditRetentionDays: num(env, 'AUDIT_RETENTION_DAYS', 30, 0, 3650),
     paramsPath: path.resolve(env.MODEL_PARAMS_PATH ?? './params/model.json'),
     // Starts in the aggressive tier; see SIZING_TIERS.
     paperBankrollUsd: num(env, 'PAPER_BANKROLL_USD', 100, 1, 1e7),

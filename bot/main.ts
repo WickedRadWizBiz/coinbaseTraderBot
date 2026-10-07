@@ -73,7 +73,7 @@ async function main(): Promise<void> {
   }
   setBalancePrecision(cfg.kalshiBalancePrecision);
   fs.mkdirSync(cfg.dataDir, { recursive: true, mode: 0o700 });
-  const audit = new AuditLog(path.join(cfg.dataDir, 'audit'));
+  const audit = new AuditLog(path.join(cfg.dataDir, 'audit'), 500, Date.now, { maxFileBytes: cfg.auditMaxFileMb * 1024 * 1024, retentionDays: cfg.auditRetentionDays });
   audit.write('startup', { pid: process.pid, node: process.version, config: publicConfig(cfg as Config) });
 
   const sinks: AlertSink[] = [];
