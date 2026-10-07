@@ -97,6 +97,8 @@ export function laptopProfile(remainingHours: number): Record<string, string> {
   return {
     TRADING_MODE: 'paper', AUTO_TRAIN: 'off', AUTO_TRAIN_CHAMPION: 'true',
     HISTORY_AUTO_UPDATE: 'true', TV_FILL: 'false',
+    // Years of 1-minute spot / perp history replayed through the recording-based steps; the memory that takes.
+    HISTORY_REPLAY: 'true', HISTORY_REPLAY_YEARS: '2', NODE_OPTIONS: '--max-old-space-size=8192',
     KALSHI_HISTORY_BUDGET_MIN: '600', KALSHI_HISTORY_DAYS: '365',
     // TA network: retrain every round, more tournament rounds per run, every hourly sample, two years of training data.
     TA_NET_RETRAIN_DAYS: '0', TA_NET_MAX_ROUNDS_PER_RUN: '400', TA_NET_STRIDE: '1', TA_NET_TRAIN_MONTHS: '24',

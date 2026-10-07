@@ -304,6 +304,12 @@ export interface TaNetConfig {
   /** Binance intervals to download, and Coinbase timeframes to backfill. */
   binanceIntervals: string[];
   coinbaseTfs: string[];
+  /** History replay (research/history/historyReplay.ts): years of 1-minute spot and perp history turned into
+   *  recordings the recording-based steps replay like live data (HISTORY_REPLAY; the laptop trainer turns it on). */
+  historyReplay: boolean;
+  historyReplayYears: number;
+  historyReplayDir: string;
+  historyReplayAssets: string[];
   /** Retrain the network at most every N days (and whenever it is missing). */
   retrainEveryDays: number;
   /** Network layout trained by the pipeline: flat, or grouped (indicator families; TA_NET_ARCH). */
@@ -1101,6 +1107,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       historyAssets: env.HISTORY_ASSETS ?? 'auto',
       binanceIntervals: (env.HISTORY_BINANCE_INTERVALS ?? '1h,15m,1d').split(',').map((x) => x.trim()).filter(Boolean),
       coinbaseTfs: (env.HISTORY_COINBASE_TFS ?? '1h,1d').split(',').map((x) => x.trim()).filter((x) => x && x !== 'none'),
+      historyReplay: bool(env, 'HISTORY_REPLAY', false),
+      historyReplayYears: num(env, 'HISTORY_REPLAY_YEARS', 2, 0.1, 8),
+      historyReplayDir: path.resolve(env.HISTORY_REPLAY_DIR ?? path.join(dataDir, 'history-replay')),
+      historyReplayAssets: (env.HISTORY_REPLAY_ASSETS ?? 'BTC,ETH,SOL,XRP,DOGE').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
       retrainEveryDays: num(env, 'TA_NET_RETRAIN_DAYS', 7, 0, 365),
       arch: oneOf(env, 'TA_NET_ARCH', 'flat', ['flat', 'grouped'] as const),
       trainMonths: num(env, 'TA_NET_TRAIN_MONTHS', 12, 1, 36),
