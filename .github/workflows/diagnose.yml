@@ -10,6 +10,10 @@ on:
         description: 'Optional: extra read-only dashboard API paths to print, space separated (e.g. /api/snn /api/autotrain)'
         required: false
         default: ''
+      pnl:
+        description: 'Also run the P&L forensics report (deploy/pnl_report.py from the dispatched ref, read-only)'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
@@ -19,17 +23,30 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
+      - uses: actions/checkout@v5
+        if: inputs.pnl == 'true'
+      - name: Upload the P&L report script
+        if: inputs.pnl == 'true'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+          source: deploy/pnl_report.py
+          target: /tmp/diag
       - name: Report
         uses: appleboy/ssh-action@v1.0.3
         env:
           EXTRA_PATHS: ${{ inputs.paths }}
+          PNL: ${{ inputs.pnl }}
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
           username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
           command_timeout: 5m
-          envs: EXTRA_PATHS
+          envs: EXTRA_PATHS,PNL
           script: |
             echo "== release: $(cat ~/bot/current/dist/RELEASE 2>/dev/null)"
             echo "== uptime / load"; uptime
@@ -57,4 +74,5 @@ jobs:
               case "$p" in /api/*) ;; *) echo "skipping $p (only /api/... paths)"; continue;; esac
               echo "== GET $p"; curl -s -m 20 "http://localhost:3000$p" | head -c 6000; echo
             done
+            if [ "$PNL" = "true" ] && [ -f /tmp/diag/deploy/pnl_report.py ]; then echo "== P&L forensics"; nice -n 19 python3 /tmp/diag/deploy/pnl_report.py ~/bot/data 3 || true; fi
             echo "== last 60 log lines"; journalctl -u kalshi-bot -n 60 --no-pager | cut -c1-300
