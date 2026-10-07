@@ -160,7 +160,7 @@ async function main(): Promise<void> {
   const gateway: ExchangeGateway = paper ?? rest;
 
   const kill = new KillSwitch(path.join(cfg.dataDir, 'kill_switch.json'), audit, alerter);
-  const oms = new Oms({ gateway, audit, statePath: path.join(cfg.dataDir, 'oms_state.json'), feesFor: (t) => md.feesFor(t), subaccount: cfg.kalshiSubaccount });
+  const oms = new Oms({ gateway, audit, statePath: path.join(cfg.dataDir, 'oms_state.json'), feesFor: (t) => md.feesFor(t), subaccount: cfg.kalshiSubaccount, durableWriteAhead: cfg.mode === 'live' });
   kill.bindCancelAll((reason) => oms.cancelAll(reason));
 
   const recon = new Reconciler({

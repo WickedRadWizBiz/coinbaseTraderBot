@@ -39,10 +39,20 @@ interface PaperState {
   orders: PaperOrder[];
 }
 
+/** Finished orders kept (state file and lookups): those updated within the hour, newest 500. */
+const KEEP_ORDERS_MS = 3_600_000, KEEP_ORDERS = 500;
+/** Fills kept: the last day, newest 2,000 (reconciliation replays from 10 minutes before the newest fill). */
+const KEEP_FILLS_MS = 86_400_000, KEEP_FILLS = 2000;
+
 export class PaperExchange extends EventEmitter implements ExchangeGateway {
   readonly name = 'paper';
   private st: PaperState;
   private saveTimer: NodeJS.Timeout | null = null;
+  /** Lookups by exchange id and client id, and the resting orders alone: every public trade print is
+   *  matched against resting orders, which used to mean a scan of every order kept (up to 4,000). */
+  private readonly byId = new Map<string, PaperOrder>();
+  private readonly byClientId = new Map<string, PaperOrder>();
+  private readonly resting = new Map<string, PaperOrder>();
 
   constructor(
     /** State file; undefined = in-memory only (backtests). */
@@ -61,6 +71,13 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
       this.st.funded = startingBalance;
       this.save();
     } else this.st.funded = funded;
+    for (const o of this.st.orders) this.index(o);
+  }
+
+  private index(o: PaperOrder): void {
+    this.byId.set(o.orderId, o);
+    if (o.clientOrderId) this.byClientId.set(o.clientOrderId, o);
+    if (o.status === 'resting') this.resting.set(o.orderId, o); else this.resting.delete(o.orderId);
   }
 
   /** Cash put into the paper account (the configured starting balance, after any top-ups). */
@@ -75,27 +92,46 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
   }
 
   private save(): void {
-    if (this.st.orders.length > 4000) {
-      this.st.orders = this.st.orders.filter((o) => o.status === 'resting' || this.now() - (o.updatedTs ?? 0) < 86_400_000).slice(-2000);
-    }
-    if (this.st.fills.length > 10_000) this.st.fills = this.st.fills.slice(-5000);
     if (!this.file || this.saveTimer) return;
-    // Debounced: the simulated exchange is not the system of record.
+    // Debounced, compact, not fsynced: the simulated exchange is not the system of record.
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
-      writeJsonAtomic(this.file!, this.st);
-    }, 250);
+      this.prune();
+      writeJsonAtomic(this.file!, this.st, { compact: true });
+    }, 1000);
     this.saveTimer.unref();
+  }
+
+  /** Drop finished orders and old fills nothing can ask for again (the state file is rewritten whole). */
+  private prune(): void {
+    const now = this.now();
+    if (this.st.orders.length > this.resting.size + 50) {
+      const keep = this.st.orders.filter((o) => o.status === 'resting' || now - (o.updatedTs ?? 0) < KEEP_ORDERS_MS);
+      const finished = keep.filter((o) => o.status !== 'resting');
+      const drop = new Set(finished.slice(0, Math.max(0, finished.length - KEEP_ORDERS)));
+      const next = keep.filter((o) => !drop.has(o));
+      if (next.length !== this.st.orders.length) {
+        const kept = new Set(next);
+        for (const o of this.st.orders) if (!kept.has(o)) { this.byId.delete(o.orderId); if (o.clientOrderId) this.byClientId.delete(o.clientOrderId); this.resting.delete(o.orderId); }
+        this.st.orders = next;
+      }
+    }
+    const f = this.st.fills;
+    if (f.length && (f.length > KEEP_FILLS || f[0].ts < now - KEEP_FILLS_MS)) {
+      let i = Math.max(0, f.length - KEEP_FILLS);
+      while (i < f.length && f[i].ts < now - KEEP_FILLS_MS) i++;
+      this.st.fills = f.slice(i);
+    }
   }
 
   /** Write pending state now (shutdown). */
   flush(): void {
     if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
-    if (this.file) writeJsonAtomic(this.file, this.st);
+    if (this.file) { this.prune(); writeJsonAtomic(this.file, this.st, { compact: true }); }
   }
 
   async createOrder(req: CreateOrderRequest): Promise<ExchangeOrder> {
-    if (this.st.orders.some((o) => o.clientOrderId === req.clientOrderId)) {
+    if (this.byClientId.has(req.clientOrderId)) {
       throw new OrderRejectedError('duplicate client_order_id', 409, 'duplicate');
     }
     const book = this.books(req.ticker);
@@ -132,6 +168,7 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
     if (!req.reduceOnly && cost > this.st.balance + 1e-9) throw new OrderRejectedError('insufficient_balance', 400, 'insufficient_balance');
 
     this.st.orders.push(o);
+    this.index(o);
     if (crosses) {
       // Taker: walk the opposite side of the visible book.
       const levels = req.side === 'bid' ? book.snapshot(50).asks : book.snapshot(50).bids;
@@ -147,6 +184,7 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
         o.queueAhead = book.sizeAt(req.side, req.price);
       } else {
         o.status = o.fillCount > 0 ? 'executed' : 'canceled';
+        this.resting.delete(o.orderId);
         if (req.timeInForce === 'fill_or_kill' && o.fillCount > 0) throw new Error('FOK partial fill in paper sim');
         o.remainingCount = 0;
       }
@@ -157,9 +195,10 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
   }
 
   async cancelOrder(orderId: string): Promise<void> {
-    const o = this.st.orders.find((x) => x.orderId === orderId);
+    const o = this.byId.get(orderId);
     if (!o || o.status !== 'resting') return;
     o.status = 'canceled';
+    this.resting.delete(orderId);
     o.remainingCount = 0;
     o.updatedTs = this.now();
     this.save();
@@ -167,18 +206,18 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
   }
 
   async getOrder(orderId: string): Promise<ExchangeOrder | undefined> {
-    const o = this.st.orders.find((x) => x.orderId === orderId);
+    const o = this.byId.get(orderId);
     return o ? { ...o } : undefined;
   }
 
   async findOrderByClientId(clientOrderId: string): Promise<ExchangeOrder | undefined> {
-    const o = this.st.orders.find((x) => x.clientOrderId === clientOrderId);
+    const o = this.byClientId.get(clientOrderId);
     return o ? { ...o } : undefined;
   }
 
   async getOpenOrders(): Promise<ExchangeOrder[]> {
     this.expire();
-    return this.st.orders.filter((o) => o.status === 'resting').map((o) => ({ ...o }));
+    return [...this.resting.values()].map((o) => ({ ...o }));
   }
 
   async getFills(sinceTs: number): Promise<ExchangeFill[]> {
@@ -198,8 +237,8 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
     let changed = this.expire();
     let remaining = count;
     // A YES-taker lifts asks; a NO-taker hits YES bids. Unknown side: match by price only.
-    const candidates = this.st.orders
-      .filter((o) => o.ticker === ticker && o.status === 'resting')
+    const candidates = [...this.resting.values()]
+      .filter((o) => o.ticker === ticker)
       .filter((o) => (o.side === 'bid' ? takerSide !== 'yes' && price <= o.price + 1e-9 : takerSide !== 'no' && price >= o.price - 1e-9))
       .sort((a, b) => (a.side === 'bid' ? b.price - a.price : a.price - b.price));
     for (const o of candidates) {
@@ -228,8 +267,8 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
     if (pos > 0 && result === 'yes') this.st.balance += pos;
     if (pos < 0 && result === 'no') this.st.balance += -pos;
     delete this.st.positions[ticker];
-    for (const o of this.st.orders) {
-      if (o.ticker === ticker && o.status === 'resting') { o.status = 'canceled'; o.remainingCount = 0; this.emit('order', { ...o }); }
+    for (const o of [...this.resting.values()]) {
+      if (o.ticker === ticker) { o.status = 'canceled'; o.remainingCount = 0; this.resting.delete(o.orderId); this.emit('order', { ...o }); }
     }
     this.save();
   }
@@ -237,9 +276,10 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
   private expire(): boolean {
     const nowSec = this.now() / 1000;
     let any = false;
-    for (const o of this.st.orders) {
-      if (o.status === 'resting' && o.expirationTime !== undefined && nowSec >= o.expirationTime) {
+    for (const o of [...this.resting.values()]) {
+      if (o.expirationTime !== undefined && nowSec >= o.expirationTime) {
         o.status = 'canceled';
+        this.resting.delete(o.orderId);
         o.lastUpdateReason = 'expired';
         o.remainingCount = 0;
         o.updatedTs = this.now();
@@ -270,7 +310,7 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
     o.remainingCount = Math.max(0, Math.round((o.remainingCount - n) * 100) / 100);
     o.feesPaid = (o.feesPaid ?? 0) + fee;
     o.averageFillPrice = price;
-    if (o.remainingCount <= 1e-9) o.status = 'executed';
+    if (o.remainingCount <= 1e-9) { o.status = 'executed'; this.resting.delete(o.orderId); }
     o.updatedTs = this.now();
     const f: ExchangeFill = {
       tradeId: crypto.randomUUID(), orderId: o.orderId, clientOrderId: o.clientOrderId, ticker: o.ticker,

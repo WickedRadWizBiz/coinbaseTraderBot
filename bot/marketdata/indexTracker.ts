@@ -23,6 +23,11 @@ export interface VolEstimate {
 
 export class IndexTracker {
   private readonly points: IndexPoint[] = [];
+  /** Bumped by every accepted print: series() results are reused until it changes. */
+  version = 0;
+  private memoNow = NaN;
+  private memoVersion = -1;
+  private readonly memo = new Map<number, number[] | undefined>();
   private ewmaVar: number | undefined;
   private volSamples = 0;
   private lastSampleSec: number | undefined;
@@ -43,6 +48,7 @@ export class IndexTracker {
     if (last && ts < last.ts) return; // drop out-of-order prints
     if (last && ts === last.ts && value === last.value) return; // the same print from a second channel
     this.points.push({ ts, value });
+    this.version++;
     this.updateVol(value, ts);
     const cutoff = ts - this.retainMs;
     while (this.points.length && this.points[0].ts < cutoff) this.points.shift();
@@ -151,6 +157,17 @@ export class IndexTracker {
    * covered or has a hole longer than `maxGapMs`.
    */
   series(now: number, seconds: number, maxGapMs = 5000): number[] | undefined {
+    // Every contract on the asset (and each feature) asks for the same windows at the same instant:
+    // reuse the result until the time or the data changes. Shared arrays: callers must not modify them.
+    if (now !== this.memoNow || this.version !== this.memoVersion) { this.memo.clear(); this.memoNow = now; this.memoVersion = this.version; }
+    const key = seconds * 1e7 + maxGapMs;
+    if (this.memo.has(key)) return this.memo.get(key);
+    const out = this.seriesUncached(now, seconds, maxGapMs);
+    this.memo.set(key, out);
+    return out;
+  }
+
+  private seriesUncached(now: number, seconds: number, maxGapMs: number): number[] | undefined {
     const pts = this.points;
     const start = now - seconds * 1000;
     let i = pts.length - 1;
@@ -176,8 +193,10 @@ export class IndexTracker {
   trailingLogReturn(now: number, windowMs: number): number | undefined {
     const last = this.latest();
     if (!last) return undefined;
-    const start = [...this.points].reverse().find((p) => p.ts <= now - windowMs);
-    if (!start) return undefined;
-    return Math.log(last.value / start.value);
+    const pts = this.points, cut = now - windowMs;
+    let i = pts.length - 1;
+    while (i >= 0 && pts[i].ts > cut) i--;
+    if (i < 0) return undefined;
+    return Math.log(last.value / pts[i].value);
   }
 }

@@ -53,7 +53,7 @@ import { tierAt, type Tier } from './risk/sizingTiers';
 import type { ClockSkewMonitor } from './risk/clockSkew';
 import { BalanceMonitor, fillCashDelta, settleCashDelta } from './vault/balanceMonitor';
 import type { Vault } from './vault/vault';
-import { writeJsonAtomic } from './util/persist';
+import { stateWriteStats, writeJsonAtomic } from './util/persist';
 import type { SnnBlender } from './snn/blender';
 import type { SnnFleet, SnnUnit } from './snn';
 import type { SnnDomain } from './snn/params';
@@ -71,6 +71,7 @@ import { activeTaNetEnsemble, taNetView } from './ta/taNetEnsemble';
 import { applyFillModel, fillInputs, isMakerEntry, type FillModel } from './tca/fillModel';
 import { FillLog } from './tca/fillLog';
 import { recordLatency } from './util/latency';
+import { performance } from 'perf_hooks';
 import { activeRuleBook, STAND_ASIDE } from './strategy/ruleBook';
 import { marketContext } from './ta/marketContext';
 import { binaryTrades, optimalF, recencyWeight, type OptimalFReport } from './strategy/optimalF';
@@ -79,29 +80,97 @@ import { altcoinRiskOn, confluenceBreadth, orientedSignals, selectionPriority, t
 const log = logger('engine');
 
 /** Wall time spent per loop section over the last minute (ms per second of clock), the share of markets
- *  evaluated per tick, and the whole process's CPU use (1 = one full core). */
+ *  evaluated per tick, the whole process's CPU use (1 = one full core), the main thread's busy share
+ *  (event-loop utilisation), what the host takes back (steal: Lightsail burst credits spent) and spends
+ *  waiting on the disk, the process's disk writes and memory; plus a 24 h history in 10-minute buckets,
+ *  so a change can be judged against the same hours of the day before. */
 export class CpuMeter {
   private win: Record<string, number> = {};
   private evalShare: number[] = [];
   private since = Date.now();
   private cpu0 = process.cpuUsage();
-  private last: { sections: Record<string, number>; processCores: number; evaluatedShare: number | null; windowSec: number } | null = null;
+  private elu0 = performance.eventLoopUtilization();
+  private sys0 = readProcStat();
+  private io0 = readProcWriteBytes();
+  private thr0 = readThreads();
+  private last: { sections: Record<string, number>; processCores: number; threads: Record<string, number> | null; mainBusy: number; stealPct: number | null; iowaitPct: number | null; writeMBps: number | null; rssMb: number; evaluatedShare: number | null; windowSec: number } | null = null;
+  private readonly hist: Array<{ ts: number; n: number; cores: number; mainBusy: number; steal: number; iowait: number; writeMBps: number; rssMb: number }> = [];
   note(section: string, start: bigint, evaluated?: number, total?: number): void {
     this.win[section] = (this.win[section] ?? 0) + Number(process.hrtime.bigint() - start) / 1e6;
     if (evaluated !== undefined && total) this.evalShare.push(evaluated / total);
     const now = Date.now();
-    if (now - this.since >= 60_000) {
-      const sec = (now - this.since) / 1000, u = process.cpuUsage(this.cpu0);
-      this.last = {
-        sections: Object.fromEntries(Object.entries(this.win).map(([k, v]) => [k, +(v / sec).toFixed(1)])),
-        processCores: +((u.user + u.system) / 1e6 / sec).toFixed(3),
-        evaluatedShare: this.evalShare.length ? +(this.evalShare.reduce((a, b) => a + b, 0) / this.evalShare.length).toFixed(3) : null,
-        windowSec: +sec.toFixed(0),
-      };
-      this.win = {}; this.evalShare = []; this.since = now; this.cpu0 = process.cpuUsage();
-    }
+    if (now - this.since >= 60_000) this.roll(now);
   }
-  status() { return this.last; }
+  private roll(now: number): void {
+    const sec = (now - this.since) / 1000, u = process.cpuUsage(this.cpu0);
+    const elu = performance.eventLoopUtilization(this.elu0);
+    const sys = readProcStat(), io = readProcWriteBytes(), thr = readThreads();
+    // CPU per thread kind (cores): the main thread, the SNN workers, libuv's pool, V8's helpers.
+    let threads: Record<string, number> | null = null;
+    if (thr && this.thr0) {
+      threads = {};
+      for (const [id, t] of thr) {
+        const name = id.slice(0, id.lastIndexOf('#'));
+        threads[name] = (threads[name] ?? 0) + (t - (this.thr0.get(id) ?? t)) / CLK_TCK / sec;
+      }
+      for (const k of Object.keys(threads)) threads[k] = +threads[k].toFixed(3);
+    }
+    const d = sys && this.sys0 ? { total: sys.total - this.sys0.total, steal: sys.steal - this.sys0.steal, iowait: sys.iowait - this.sys0.iowait } : undefined;
+    const pct = (x: number | undefined) => (d && d.total > 0 && x !== undefined ? +((100 * x) / d.total).toFixed(1) : null);
+    this.last = {
+      sections: Object.fromEntries(Object.entries(this.win).map(([k, v]) => [k, +(v / sec).toFixed(1)])),
+      processCores: +((u.user + u.system) / 1e6 / sec).toFixed(3),
+      threads,
+      mainBusy: +elu.utilization.toFixed(3),
+      stealPct: pct(d?.steal), iowaitPct: pct(d?.iowait),
+      writeMBps: io !== undefined && this.io0 !== undefined ? +((io - this.io0) / 1e6 / sec).toFixed(3) : null,
+      rssMb: Math.round(process.memoryUsage.rss() / 1e6),
+      evaluatedShare: this.evalShare.length ? +(this.evalShare.reduce((a, b) => a + b, 0) / this.evalShare.length).toFixed(3) : null,
+      windowSec: +sec.toFixed(0),
+    };
+    // 10-minute buckets, 24 h.
+    const L = this.last, b = Math.floor(now / 600_000) * 600_000;
+    let h = this.hist[this.hist.length - 1];
+    if (!h || h.ts !== b) { h = { ts: b, n: 0, cores: 0, mainBusy: 0, steal: 0, iowait: 0, writeMBps: 0, rssMb: 0 }; this.hist.push(h); if (this.hist.length > 144) this.hist.shift(); }
+    const add = (k: 'cores' | 'mainBusy' | 'steal' | 'iowait' | 'writeMBps' | 'rssMb', v: number | null) => { h![k] = (h![k] * h!.n + (v ?? 0)) / (h!.n + 1); };
+    add('cores', L.processCores); add('mainBusy', L.mainBusy); add('steal', L.stealPct); add('iowait', L.iowaitPct); add('writeMBps', L.writeMBps); add('rssMb', L.rssMb);
+    h.n++;
+    this.win = {}; this.evalShare = []; this.since = now; this.cpu0 = process.cpuUsage(); this.elu0 = performance.eventLoopUtilization(); this.sys0 = sys; this.io0 = io; this.thr0 = thr;
+  }
+  status() { return this.last ? { ...this.last, stateWrites: stateWriteStats().slice(0, 6) } : null; }
+  /** 10-minute buckets over the last 24 h (oldest first). */
+  history() { return this.hist.map((h) => ({ ts: h.ts, cores: +h.cores.toFixed(3), mainBusy: +h.mainBusy.toFixed(3), stealPct: +h.steal.toFixed(1), iowaitPct: +h.iowait.toFixed(1), writeMBps: +h.writeMBps.toFixed(3), rssMb: Math.round(h.rssMb) })); }
+}
+
+/** Host-wide CPU time counters (Linux /proc/stat, in clock ticks); undefined elsewhere. */
+function readProcStat(): { total: number; steal: number; iowait: number } | undefined {
+  try {
+    const f = fs.readFileSync('/proc/stat', 'utf8');
+    const v = f.slice(0, f.indexOf('\n')).trim().split(/\s+/).slice(1).map(Number);
+    // user nice system idle iowait irq softirq steal guest guest_nice (guest time is already in user)
+    return { total: v.slice(0, 8).reduce((a, b) => a + b, 0), iowait: v[4] ?? 0, steal: v[7] ?? 0 };
+  } catch { return undefined; }
+}
+/** Kernel clock ticks per second (USER_HZ; 100 on Linux). */
+const CLK_TCK = 100;
+/** CPU ticks (user + system) per thread, keyed "<kind>#<tid>": "main" for the main thread, else the
+ *  thread's name (SNN workers, libuv-worker, V8 helpers...). Linux only. */
+function readThreads(): Map<string, number> | undefined {
+  try {
+    const out = new Map<string, number>();
+    for (const tid of fs.readdirSync('/proc/self/task')) {
+      const st = fs.readFileSync(`/proc/self/task/${tid}/stat`, 'utf8');
+      const r = st.lastIndexOf(')');
+      const f = st.slice(r + 2).split(' ');
+      const name = tid === String(process.pid) ? 'main' : st.slice(st.indexOf('(') + 1, r).trim() || 'thread';
+      out.set(`${name}#${tid}`, Number(f[11]) + Number(f[12]));
+    }
+    return out;
+  } catch { return undefined; }
+}
+/** Bytes this process has caused to be written to storage (Linux /proc/self/io). */
+function readProcWriteBytes(): number | undefined {
+  try { const m = /write_bytes:\s*(\d+)/.exec(fs.readFileSync('/proc/self/io', 'utf8')); return m ? Number(m[1]) : undefined; } catch { return undefined; }
 }
 
 export interface MarketStatus {
@@ -802,7 +871,9 @@ export class Engine {
     const ms = this.d.md.activeMarkets(t0).filter((m) => m.kind !== 'match').sort((a, b) => pri(b.ticker) - pri(a.ticker));
     const run = ms.filter((m) => due(m.ticker));
     const c0 = process.hrtime.bigint();
-    await Promise.all(run.map((m) => this.evaluate(m)));
+    // One instant for the whole pass: contracts on the same asset then share their asset-level feature
+    // work (index series, TA snapshot, ...) instead of each rebuilding it a few milliseconds apart.
+    await Promise.all(run.map((m) => this.evaluate(m, t0)));
     this.cpu.note('evaluate', c0, run.length, ms.length);
     this.prune();
     // Stage 2: offset the binary book's net delta with perps (reduce-only when new risk is halted).
@@ -1338,11 +1409,11 @@ export class Engine {
     return taNetView(asset, this.d.md.features.candles.get(asset), now);
   }
 
-  private async evaluate(m: ActiveMarket): Promise<void> {
+  private async evaluate(m: ActiveMarket, now = this.now()): Promise<void> {
     if (this.busy.has(m.ticker)) return;
     this.busy.add(m.ticker);
     try {
-      await this.evaluateInner(m);
+      await this.evaluateInner(m, now);
     } catch (e) {
       log.error('evaluate failed', { ticker: m.ticker, error: String(e) });
       this.d.audit.write('error', { where: 'evaluate', ticker: m.ticker, error: String(e) });
@@ -1351,9 +1422,8 @@ export class Engine {
     }
   }
 
-  private async evaluateInner(m: ActiveMarket): Promise<void> {
+  private async evaluateInner(m: ActiveMarket, now: number): Promise<void> {
     const { cfg, md, oms, model } = this.d;
-    const now = this.now();
     const R = cfg.risk;
     const book = md.book(m.ticker);
     const idx = this.pricingIndex(m.asset, now);

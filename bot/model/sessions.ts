@@ -51,8 +51,22 @@ const formatters = new Map<string, Intl.DateTimeFormat>();
 
 export interface ZoneTime { weekday: number; minutes: number; ymd: string; hhmm: string }
 
-/** Local weekday (0 = Sunday), minutes since local midnight, and date in a time zone. */
+const zoneMemo = new Map<string, ZoneTime>();
+
+/** Local weekday (0 = Sunday), minutes since local midnight, and date in a time zone. Minute resolution,
+ *  so results are reused within the minute (Intl formatting is slow and every evaluation asks several
+ *  times). Shared objects: callers must not modify them. */
 export function zoneTime(ts: number, tz: string): ZoneTime {
+  const key = `${tz}|${Math.floor(ts / 60_000)}`;
+  const hit = zoneMemo.get(key);
+  if (hit) return hit;
+  const z = zoneTimeUncached(ts, tz);
+  if (zoneMemo.size > 20_000) zoneMemo.clear();
+  zoneMemo.set(key, z);
+  return z;
+}
+
+function zoneTimeUncached(ts: number, tz: string): ZoneTime {
   let f = formatters.get(tz);
   if (!f) {
     f = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });

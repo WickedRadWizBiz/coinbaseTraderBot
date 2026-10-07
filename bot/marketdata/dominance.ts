@@ -178,9 +178,24 @@ export interface DominanceOptions {
   refreshMs?: number;
   topN?: number;
   fetchImpl?: typeof fetch;
+  /** Symbols always streamed besides the market-cap leaders (the bot's own assets). */
+  extraSymbols?: string[];
 }
 
-/** Streams Binance mini-tickers, anchors to CoinGecko, emits 1 Hz samples. */
+/** Binance's all-market mini-ticker stream URL -> a combined stream of just these symbols' USDT pairs
+ *  (undefined if the configured URL is not the standard all-market one). */
+export function targetedStreamUrl(allMarketUrl: string, symbols: string[]): string | undefined {
+  const i = allMarketUrl.indexOf('/ws/!miniTicker@arr');
+  if (i < 0 || !symbols.length) return undefined;
+  return `${allMarketUrl.slice(0, i)}/stream?streams=${symbols.map((s) => `${s.toLowerCase()}usdt@miniTicker`).join('/')}`;
+}
+
+/** Streams Binance mini-tickers, anchors to CoinGecko, emits 1 Hz samples.
+ *
+ *  It starts on Binance's all-market stream (every USDT pair, ~2,000 tickers a second, a few hundred KB
+ *  of JSON to parse each second) only until the first CoinGecko snapshot names the coins that matter,
+ *  then switches to a combined stream of just those (the top coins by market cap that trade on Binance,
+ *  plus the bot's assets): the same prices for about 3% of the parsing and bandwidth. */
 export class DominanceService extends EventEmitter {
   readonly calc = new DominanceCalculator();
   readonly btcdom = new BtcDomIndex();
@@ -189,6 +204,11 @@ export class DominanceService extends EventEmitter {
   private ws: WebSocket | null = null;
   private timers: NodeJS.Timeout[] = [];
   private closed = false;
+  /** Symbols of the targeted stream in use (undefined: the all-market stream). */
+  private streaming: string[] | undefined;
+  /** Every symbol seen with a USDT price (learned on the all-market stream): what can be targeted. */
+  private readonly listed = new Set<string>();
+  private targetedFailures = 0;
   latest: DominanceSample | undefined;
   lastError: string | undefined;
 
@@ -223,6 +243,7 @@ export class DominanceService extends EventEmitter {
       const p = Number(r.c);
       if (!(p > 0)) continue;
       const sym = r.s.slice(0, -4);
+      this.listed.add(sym);
       this.prices.set(sym, p);
       this.priceTs.set(sym, r.E ?? Date.now());
     }
@@ -264,25 +285,55 @@ export class DominanceService extends EventEmitter {
       this.calc.setBaseline(coins, total, live, Date.now());
       this.btcdom.setCaps(coins, live);
       this.lastError = undefined;
+      this.retarget(coins);
     } catch (e) {
       this.lastError = `baseline: ${(e as Error).message}`;
       log.warn('dominance baseline refresh failed', { error: this.lastError });
     }
   }
 
+  /** Switch to (or update) the targeted stream: the snapshot's coins that Binance prices, plus the extras. */
+  private retarget(coins: CoinSnapshot[]): void {
+    if (this.targetedFailures >= 3) return; // the targeted stream keeps failing: stay on the all-market one
+    const want = new Set<string>(['BTC', ...(this.o.extraSymbols ?? []).map((x) => x.toUpperCase())]);
+    for (const c of coins) {
+      const sym = c.symbol.toUpperCase();
+      if (!STABLES.has(c.symbol.toLowerCase()) && this.listed.has(sym)) want.add(sym);
+    }
+    const list = [...want].sort();
+    if (this.streaming && list.length === this.streaming.length && list.every((x, i) => x === this.streaming![i])) return;
+    if (!targetedStreamUrl(this.o.binanceWsUrl, list)) return;
+    this.streaming = list;
+    for (const sym of [...this.prices.keys()]) if (!want.has(sym)) { this.prices.delete(sym); this.priceTs.delete(sym); }
+    const old = this.ws;
+    this.ws = null;
+    old?.removeAllListeners('close');
+    old?.on('error', () => undefined);
+    old?.close();
+    this.connect();
+  }
+
   private connect(): void {
     if (this.closed) return;
-    const ws = new WebSocket(this.o.binanceWsUrl);
+    const url = (this.streaming && targetedStreamUrl(this.o.binanceWsUrl, this.streaming)) || this.o.binanceWsUrl;
+    const targeted = url !== this.o.binanceWsUrl;
+    const ws = new WebSocket(url, { perMessageDeflate: !targeted });
     this.ws = ws;
+    let opened = false;
     ws.on('message', (buf) => {
       try {
         const msg = JSON.parse(buf.toString());
-        const rows = Array.isArray(msg) ? msg : Array.isArray(msg?.data) ? msg.data : null;
+        // All-market stream: an array of tickers. Combined stream: { stream, data: ticker }.
+        const rows = Array.isArray(msg) ? msg : Array.isArray(msg?.data) ? msg.data : msg?.data?.s ? [msg.data] : null;
         if (rows) this.onMiniTickers(rows);
       } catch { /* ignore */ }
     });
-    ws.on('open', () => log.info('binance stream connected', { url: this.o.binanceWsUrl }));
-    ws.on('close', () => { if (!this.closed) setTimeout(() => this.connect(), 5000); });
+    ws.on('open', () => { opened = true; if (targeted) this.targetedFailures = 0; log.info('binance stream connected', { streams: targeted ? this.streaming!.length : 'all-market' }); });
+    ws.on('close', () => {
+      if (this.closed || this.ws !== ws) return;
+      if (targeted && !opened && ++this.targetedFailures >= 3) { this.streaming = undefined; log.warn('binance targeted stream failed 3 times; back to the all-market stream'); }
+      setTimeout(() => { if (this.ws === ws) this.connect(); }, 5000);
+    });
     ws.on('error', (e) => { this.lastError = `binance: ${String(e)}`; });
   }
 }

@@ -71,7 +71,7 @@ export class KillSwitch {
     const first = !this.state.engaged;
     if (first) {
       this.state = { engaged: true, reason, source, engagedAt: new Date().toISOString() };
-      writeJsonAtomic(this.file, this.state);
+      writeJsonAtomic(this.file, this.state, { durable: true });
       this.audit.write('kill_engaged', this.state);
       this.alerter?.notify('critical', 'kill', `KILL SWITCH ENGAGED (${source}): ${reason}`);
     }
@@ -87,7 +87,7 @@ export class KillSwitch {
     if (!this.state.engaged) return;
     const prev = this.state;
     this.state = { engaged: false, resetAt: new Date().toISOString(), resetBy: by, reason: prev.reason, source: prev.source };
-    writeJsonAtomic(this.file, this.state);
+    writeJsonAtomic(this.file, this.state, { durable: true });
     this.audit.write('kill_reset', { previous: prev, by });
     this.alerter?.notify('warn', 'kill-reset', `Kill switch reset by ${by} (was: ${prev.reason})`);
   }

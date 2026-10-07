@@ -128,16 +128,25 @@ export function createApi(d: ApiDeps): express.Express {
     });
     next();
   });
+  // Browser hardening (also set by Caddy over HTTPS): no framing of the controls (clickjacking), no MIME
+  // sniffing, no referrer leaking the address, no fingerprinting header.
+  app.disable('x-powered-by');
+  app.use((_req, res, next) => { res.set({ 'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' }); next(); });
   app.use(express.json({ limit: '4kb' }));
 
   const api = express.Router();
   // Unauthenticated: tells the web app whether to show the login screen.
   api.get('/auth', (_req, res) => { res.json({ required: !!d.cfg.dashboardPassword }); });
   if (d.cfg.dashboardPassword) api.use(authMiddleware(d.cfg.dashboardPassword));
+  // /status is built at most once a second (every open dashboard tab polls it); any write action
+  // (kill switch, PLAY/STOP, mode, vault) drops the cached copy so the next poll shows its effect.
+  let statusCache: { at: number; body: unknown } | undefined;
+  api.use((req, _res, next) => { if (req.method !== 'GET') statusCache = undefined; next(); });
 
   api.get('/status', (_req, res) => {
+    if (statusCache && Date.now() - statusCache.at < 1000) return res.json(statusCache.body);
     const bankroll = d.engine.bankroll();
-    res.json({
+    const body = ({
       mode: d.cfg.mode,
       kalshiEnv: d.cfg.kalshiEnv,
       uptimeSec: Math.round((Date.now() - d.startedAt) / 1000),
@@ -190,6 +199,8 @@ export function createApi(d: ApiDeps): express.Express {
       perpsMode: d.cfg.perps.trading,
       consecutiveOrderErrors: d.oms.consecutiveErrors,
     });
+    statusCache = { at: Date.now(), body };
+    res.json(body);
   });
 
   api.get('/autotrain', (_req, res) => res.json(d.autoTrain?.status() ?? { mode: 'off' }));
@@ -206,12 +217,18 @@ export function createApi(d: ApiDeps): express.Express {
   // The neural map page: every network as a block of pixels, in the order information flows.
   api.get('/neural-map', async (_req, res) => res.json(await buildNeuralMap(d)));
 
+  // CPU, disk writes and memory: the last minute, and 10-minute buckets over 24 h (bot/engine.ts CpuMeter).
+  api.get('/cpu', (_req, res) => res.json({ now: d.engine.cpu.status(), history: d.engine.cpu.history() }));
   // On-demand main-thread CPU profile for diagnostics (?sec=1..15; once a minute; read-only).
   api.get('/debug/profile', async (req, res) => { res.json(await cpuProfile(Number(req.query.sec ?? 10))); });
   api.get('/markets', (_req, res) => res.json([...d.engine.status.values()].sort((a, b) => a.closeTs - b.closeTs || a.ticker.localeCompare(b.ticker))));
 
-  api.get('/positions', (_req, res) => {
-    res.json(d.oms.positions.all().map((m) => ({ ...m, maxLoss: PositionBook.maxLoss(m), scenario: PositionBook.scenario(m) })).sort((a, b) => b.closeTs - a.closeTs));
+  // Open positions and those settled in the last 24 h (?all=1: the three days kept). The dashboard polls
+  // this every few seconds; the full list is hundreds of settled markets.
+  api.get('/positions', (req, res) => {
+    const cut = req.query.all === '1' ? -Infinity : Date.now() - 86_400_000;
+    res.json(d.oms.positions.all().filter((m) => !m.settled || (m.settledTs ?? Infinity) >= cut)
+      .map((m) => ({ ...m, maxLoss: PositionBook.maxLoss(m), scenario: PositionBook.scenario(m) })).sort((a, b) => b.closeTs - a.closeTs));
   });
 
   api.get('/orders', (req, res) => {

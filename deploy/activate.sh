@@ -35,3 +35,5 @@ for i in $(seq 1 90); do
 done
 [ "${code:-000}" != "000" ] || fail "dashboard not answering on :3000"
 echo "activated $REL (dashboard HTTP $code)"
+# HTTPS in front of the dashboard (never fails the deploy).
+bash "$DIR/https.sh" || true
