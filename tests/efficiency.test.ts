@@ -13,6 +13,7 @@ import { Oms, type OrderIntent } from '../bot/oms/oms';
 import { PaperExchange } from '../bot/paper/paperExchange';
 import { stateWriteStats, writeJsonAtomic } from '../bot/util/persist';
 import { CpuMeter } from '../bot/engine';
+import { authMiddleware } from '../bot/api/server';
 import { FakeGateway } from './fakeGateway';
 import { tmpAudit, tmpDir } from './helpers';
 
@@ -237,4 +238,18 @@ test('CPU meter: per-minute summary with thread breakdown and a 10-minute histor
   } finally {
     Date.now = realNow;
   }
+});
+
+test('login: requests with no password do not count toward the lockout; wrong passwords do', () => {
+  const mw = authMiddleware('secret');
+  const run = (auth?: string) => {
+    let status = 200;
+    const res = { status(c: number) { status = c; return this; }, json() { return this; } } as never;
+    mw({ ip: '1.2.3.4', get: () => auth } as never, res, () => undefined);
+    return status;
+  };
+  for (let i = 0; i < 30; i++) assert.equal(run(undefined), 401);
+  assert.equal(run('Bearer secret'), 200, 'still able to log in after any number of password-less polls');
+  for (let i = 0; i < 10; i++) assert.equal(run('Bearer wrong'), 401);
+  assert.equal(run('Bearer secret'), 429, 'ten wrong passwords lock the address');
 });
