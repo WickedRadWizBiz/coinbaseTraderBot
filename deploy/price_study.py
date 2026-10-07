@@ -22,7 +22,7 @@ files = sorted(f for f in glob.glob(os.path.join(rec_dir, 'md-*.jsonl*')) if os.
 idx = collections.defaultdict(list)   # asset -> [(ts, v)] (Kalshi RTI)
 spot = collections.defaultdict(list)  # asset -> [(ts, v)] (Coinbase)
 markets, results = {}, {}
-keys = (b'"k":"index"', b'"k":"spot"', b'"k":"market"', b'"k":"result"')
+keys = (b'"k":"index"', b'"k":"spot"', b'"k":"market"', b'"k":"result"', b'"k":"lifecycle"')
 t0 = time.time()
 for f in files:
     op = gzip.open if f.endswith('.gz') else open
@@ -37,6 +37,8 @@ for f in files:
             elif k == 'spot': spot[r['asset']].append((r['ts'], r['value']))
             elif k == 'market' and r.get('kind') == 'updown': markets[r['ticker']] = r
             elif k == 'result': results[r['ticker']] = r['result']
+            # Positions settled by the live lifecycle message write no 'result' record; the message itself has it.
+            elif k == 'lifecycle' and r.get('result') in ('yes', 'no'): results.setdefault(r['ticker'], r['result'])
 print(f'files {[os.path.basename(f) for f in files]}  read in {time.time()-t0:.0f}s')
 print('index prints', {a: len(v) for a, v in idx.items()}, ' spot prints', {a: len(v) for a, v in spot.items()})
 print('updown markets', len(markets), ' with result', sum(1 for t in markets if t in results))
