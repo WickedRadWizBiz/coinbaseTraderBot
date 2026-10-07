@@ -74,6 +74,5 @@ jobs:
               case "$p" in /api/*) ;; *) echo "skipping $p (only /api/... paths)"; continue;; esac
               echo "== GET $p"; curl -s -m 20 "http://localhost:3000$p" | head -c 6000; echo
             done
-            if [ "$PNL" = "true" ] && [ -f /tmp/diag/deploy/pnl_report.py ]; then echo "== P&L forensics"; nice -n 19 python3 /tmp/diag/deploy/pnl_report.py ~/bot/data 3 || true; fi
-            if [ "$PNL" = "true" ] && [ -f /tmp/diag/deploy/price_study.py ]; then echo "== price source study"; nice -n 19 python3 /tmp/diag/deploy/price_study.py ~/bot/data/recordings 2 || true; fi
+                        if [ "$PNL" = "true" ] && [ -f /tmp/diag/deploy/price_study.py ]; then echo "== price source study"; nice -n 19 python3 /tmp/diag/deploy/price_study.py ~/bot/data/recordings 1 || true; fi
             echo "== last 60 log lines"; journalctl -u kalshi-bot -n 60 --no-pager | cut -c1-300

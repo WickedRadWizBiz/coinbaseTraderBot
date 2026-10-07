@@ -106,6 +106,16 @@ def open_avg(g, open_s):
 def phi(x): return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
 VR300 = {a: vr(grids[a][0], 300) for a in grids}
+for a, (gi, gs) in grids.items():
+    ki, ks = sorted(gi), sorted(gs)
+    print(f"grid {a}: RTI {len(ki)} s [{ki[0] if ki else None}..{ki[-1] if ki else None}]  spot {len(ks)} s [{ks[0] if ks else None}..{ks[-1] if ks else None}]")
+shown = 0
+for t, m in markets.items():
+    if results.get(t) not in ('yes', 'no') or m['asset'] not in grids or shown >= 4: continue
+    gi, gs = grids[m['asset']]
+    o, c = m['openTime'] // 1000, m['closeTime'] // 1000
+    print('debug', t, 'open', o, 'close', c, 'strike', m.get('strike'), 'RTI open avg', open_avg(gi, o), 'RTI at -300', gi.get(c - 300), 'sigma', ewma_sigma(gi, c - 300), 'spot at -300', gs.get(c - 300))
+    shown += 1
 scores = collections.defaultdict(lambda: [0, 0.0, 0.0, 0.0, 0])  # (variant, tau) -> n, logloss, brier, sum p, hits
 for t, m in markets.items():
     res = results.get(t)
