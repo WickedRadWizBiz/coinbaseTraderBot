@@ -290,15 +290,19 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const btcdomCheck = compareIndexSources(T.historyDir, 'BTCDOM', 'binance-index', 'bot-index');
       if (btcdomCheck.overlap) log(`BTCDOM: live rebuild vs Binance over ${btcdomCheck.overlap} hours: hourly return correlation ${btcdomCheck.returnCorr.toFixed(3)}, level ratio ${btcdomCheck.levelRatio.toFixed(4)}`);
       const cb = T.coinbaseTfs.length ? await backfillCoinbase({ out: T.historyDir, assets, tfs: T.coinbaseTfs as HistTf[], fromTs: Date.parse('2015-01-01T00:00:00Z'), baseUrl: cfg.coinbaseRestUrl, log: (m) => log(`coinbase: ${m}`) }) : [];
-      // Kalshi's own settled contracts (1-minute candles) for the traded series: real contract prices for research.
-      let kalshi: unknown;
-      try { kalshi = await downloadKalshiHistory({ baseUrl: cfg.restBaseUrl, series: cfg.strategy.series, days: 60, out: path.join(T.historyDir, 'kalshi'), log: (m) => log(`kalshi: ${m}`) }); } catch (e) { kalshi = { error: String(e) }; }
-      // TradingView (tvdatafeed): the index series' 5,000-bar backfill and daily refresh, and the spot holes.
+      // TradingView (tvdatafeed): the index series' 5,000-bar backfill and daily refresh, and the spot holes
+      // (before the Kalshi download: models read these; the Kalshi candles are research material).
       let tradingview: unknown;
       if (T.tvFill) {
         state.tvTried ??= {};
         try { tradingview = await tvFill({ histDir: T.historyDir, assets, log: (m) => log(`tradingview: ${m}`), tried: state.tvTried }); } catch (e) { tradingview = { error: String(e) }; }
       }
+      // Kalshi's own settled contracts (1-minute candles) for the traded series: real contract prices for
+      // research. Time-boxed (KALSHI_HISTORY_BUDGET_MIN); the rest resumes on the next run.
+      let kalshi: unknown;
+      if (T.kalshiHistoryBudgetMin > 0) {
+        try { kalshi = await downloadKalshiHistory({ baseUrl: cfg.restBaseUrl, series: cfg.strategy.series, days: 60, out: path.join(T.historyDir, 'kalshi'), budgetMs: T.kalshiHistoryBudgetMin * 60_000, log: (m) => log(`kalshi: ${m}`) }); } catch (e) { kalshi = { error: String(e) }; }
+      } else kalshi = { skipped: 'KALSHI_HISTORY_BUDGET_MIN=0' };
       const reached = bin.some((b) => b.listed > 0) || cb.some((c) => c.requests > 0 && !/kept failing/.test(c.note ?? ''));
       if (!reached) throw new SkipStep('Binance Vision and Coinbase unreachable from this machine');
       state.lastHistoryUpdate = now;
