@@ -1,0 +1,75 @@
+# Laptop trainer, Windows package: builds KalshiTrainer-windows.zip (Node, the bundled trainer and pipeline,
+# TA-Lib compiled for Windows, params and seed history, Train.cmd) on a Windows runner, smoke-tests it, and
+# publishes it as the "trainer-latest" release (and a workflow artifact). Nothing secret is in the zip.
+name: Laptop trainer (Windows package)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['research/laptopTrain.ts', 'research/pipeline.ts', 'packaging/**', 'vendor/talib/**', 'package.json', '.github/workflows/trainer-windows.yml']
+  push:
+    branches: [main]
+    paths: ['research/**', 'bot/**', 'params/**', 'deploy/seed/**', 'packaging/**', 'vendor/talib/**', 'package.json', 'package-lock.json', '.github/workflows/trainer-windows.yml']
+
+permissions:
+  contents: write  # the release; pull requests from forks get a read-only token and skip that step
+
+concurrency:
+  group: trainer-windows
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install (compiles TA-Lib for Windows)
+        run: npm ci
+      - name: Bundle the trainer and the pipeline
+        run: npm run build:trainer
+      - name: Assemble KalshiTrainer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = 'KalshiTrainer'
+          New-Item -ItemType Directory -Force "$out/node", "$out/app/dist", "$out/app/deploy", "$out/app/node_modules/talib/build/Release" | Out-Null
+          Copy-Item (Get-Command node).Source "$out/node/node.exe"
+          Copy-Item dist/laptopTrain.cjs, dist/pipeline.cjs "$out/app/dist/"
+          Copy-Item -Recurse params "$out/app/params"
+          if (Test-Path deploy/seed) { Copy-Item -Recurse deploy/seed "$out/app/deploy/seed" }
+          Copy-Item vendor/talib/index.js, vendor/talib/package.json "$out/app/node_modules/talib/"
+          Copy-Item vendor/talib/build/Release/talib.node "$out/app/node_modules/talib/build/Release/"
+          Copy-Item packaging/windows/Train.cmd, packaging/windows/README.txt "$out/"
+          "built $(Get-Date -Format u) from $env:GITHUB_SHA" | Out-File "$out/app/VERSION.txt"
+      - name: Smoke test (TA-Lib loads, the trainer runs a pipeline round)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location KalshiTrainer/app
+          ../node/node.exe -e "const t=require('talib'); if(!t.functions.length) throw new Error('no TA-Lib functions'); console.log('TA-Lib', t.version, t.functions.length, 'functions')"
+          # One small real download (BTC daily candles from Binance Vision) exercises unzip and paths on Windows.
+          $env:HISTORY_ASSETS = 'BTC'; $env:HISTORY_BINANCE_INTERVALS = '1d'; $env:HISTORY_COINBASE_TFS = 'none'; $env:KALSHI_HISTORY_BUDGET_MIN = '0'
+          ../node/node.exe dist/laptopTrain.cjs --hours 0.2 --data "$env:RUNNER_TEMP/td" --no-pull --no-push --only history,fill,sizing
+          if ($LASTEXITCODE -ne 0) { throw "trainer exited $LASTEXITCODE" }
+          Pop-Location
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path KalshiTrainer -DestinationPath KalshiTrainer-windows.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KalshiTrainer-windows
+          path: KalshiTrainer-windows.zip
+          retention-days: 30
+      - name: Publish the "trainer-latest" release
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete trainer-latest --yes --cleanup-tag 2>$null
+          gh release create trainer-latest KalshiTrainer-windows.zip --target $env:GITHUB_SHA --title "Laptop trainer (Windows)" --notes "Unzip, double-click Train.cmd. See README.txt inside. Built from $env:GITHUB_SHA."
