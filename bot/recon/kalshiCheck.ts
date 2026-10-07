@@ -137,12 +137,13 @@ export class KalshiCheck {
       this.compared.set(f.tradeId, f.ts);
       changed = true;
       this.st.checked.fills++;
+      const b = this.fills.get(f.tradeId);
+      // Booked before a restart (the OMS remembers it): nothing to compare it with, and the day table's
+      // bot column never saw it either, so it is left out of both columns.
+      if (!b && this.o.seenTrade?.(f.tradeId)) { this.st.matched.fills++; continue; }
       const d = this.day(f.ts).kalshi;
       d.fills++; d.contracts = r4(d.contracts + f.count); if (f.fee !== undefined) d.fees = r4(d.fees + f.fee);
-      const b = this.fills.get(f.tradeId);
       if (!b) {
-        // Booked before a restart (the OMS remembers it): nothing to compare it with here.
-        if (this.o.seenTrade?.(f.tradeId)) { this.st.matched.fills++; continue; }
         this.flag({ kind: 'fill_unknown', ticker: f.ticker, what: `fill ${f.tradeId} (${f.side} ${f.count} @ ${f.price}) is on Kalshi but not in the bot's books` });
         continue;
       }
