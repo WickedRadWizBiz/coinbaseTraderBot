@@ -42,6 +42,9 @@ export interface BinanceOpts {
   markets: BinanceMarket[];
   /** Skip archives before this month (YYYY-MM). */
   fromMonth?: string;
+  /** Store under this source instead of the market's default (e.g. 1-minute spot bars kept apart from the
+   *  spot store the TA steps read, so a multi-gigabyte file never joins their splice). */
+  source?: string;
   dryRun?: boolean;
   concurrency?: number;
   fetchImpl?: typeof fetch;
@@ -108,7 +111,7 @@ async function pool<T>(items: T[], n: number, fn: (x: T) => Promise<void>): Prom
 export async function downloadBinance(o: BinanceOpts): Promise<BinanceSummary[]> {
   const f = o.fetchImpl ?? fetch;
   const log = o.log ?? ((m: string) => console.log(`[binance] ${m}`));
-  const manifestFile = path.join(o.out, 'binance-manifest.json');
+  const manifestFile = path.join(o.out, o.source ? `binance-manifest-${o.source}.json` : 'binance-manifest.json');
   let manifest: Manifest = { files: {} };
   try { manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')); } catch { /* first run */ }
   if ((manifest.version ?? 1) < MANIFEST_VERSION) {
@@ -146,7 +149,7 @@ export async function downloadBinance(o: BinanceOpts): Promise<BinanceSummary[]>
             if (expect && expect !== got) throw new Error(`checksum mismatch for ${k.key}`);
             const entry = unzip(zip).find((e) => e.name.endsWith('.csv'));
             if (!entry) throw new Error(`no CSV inside ${k.key}`);
-            const p = parseCandleCsv(entry.data.toString('utf8'), entry.name, { asset, tf, source: MARKET_SOURCE[market] });
+            const p = parseCandleCsv(entry.data.toString('utf8'), entry.name, { asset, tf, source: o.source ?? MARKET_SOURCE[market] });
             const { candles } = cleanAndValidate(p.candles, tf);
             batch.push({ key: k.key, candles });
             manifest.files[k.key] = { size: k.size, bars: candles.length, at: new Date().toISOString() };
@@ -156,13 +159,57 @@ export async function downloadBinance(o: BinanceOpts): Promise<BinanceSummary[]>
             log(`${k.key}: ${(e as Error).message}`);
           }
         });
-        if (batch.length) s.bars = upsertSeries(o.out, MARKET_SOURCE[market], asset, tf, batch.flatMap((b) => b.candles));
+        if (batch.length) s.bars = upsertSeries(o.out, o.source ?? MARKET_SOURCE[market], asset, tf, batch.flatMap((b) => b.candles));
         saveManifest();
         log(`${pair} ${market} ${tf}: fetched ${s.fetched}, already had ${s.skipped}, failed ${s.failed}; ${s.bars || 'no new'} bars stored`);
       }
     }
   }
   return out;
+}
+
+/** Binance USD-M funding rates (monthly fundingRate archives: calc_time, funding_interval_hours,
+ *  last_funding_rate) -> <out>/binance-funding/<ASSET>/funding.csv ("ts,rate", ms and fraction per
+ *  interval), merged and de-duplicated. A perp-quote input of the history replay (research/history/historyReplay.ts). */
+export async function downloadBinanceFunding(o: { out: string; assets: string[]; fromMonth?: string; fetchImpl?: typeof fetch; log?: (m: string) => void }): Promise<Array<{ asset: string; fetched: number; rows: number; note?: string }>> {
+  const f = o.fetchImpl ?? fetch;
+  const log = o.log ?? ((m: string) => console.log(`[binance] ${m}`));
+  const manifestFile = path.join(o.out, 'binance-funding', 'manifest.json');
+  let manifest: Record<string, number> = {};
+  try { manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')); } catch { /* first run */ }
+  const res: Array<{ asset: string; fetched: number; rows: number; note?: string }> = [];
+  for (const asset of o.assets) {
+    const pair = `${asset}USDT`;
+    const r = { asset, fetched: 0, rows: 0 } as { asset: string; fetched: number; rows: number; note?: string };
+    res.push(r);
+    let keys: Array<{ key: string; size: number }>;
+    try { keys = (await listKeys(`data/futures/um/monthly/fundingRate/${pair}/`, f)).filter((k) => k.key.endsWith('.zip')); } catch (e) { r.note = (e as Error).message; continue; }
+    const month = (k: string) => /-(\d{4}-\d{2})\.zip$/.exec(k)?.[1] ?? '';
+    const todo = keys.filter((k) => (!o.fromMonth || month(k.key) >= o.fromMonth) && manifest[k.key] !== k.size);
+    if (!keys.length) { r.note = 'no USD-M perpetual'; continue; }
+    const file = path.join(o.out, 'binance-funding', asset, 'funding.csv');
+    const rows = new Map<number, number>();
+    if (fs.existsSync(file)) for (const l of fs.readFileSync(file, 'utf8').split('\n').slice(1)) { const [t, v] = l.split(',').map(Number); if (Number.isFinite(t) && Number.isFinite(v)) rows.set(t, v); }
+    await pool(todo, 4, async (k) => {
+      try {
+        const entry = unzip(await download(k.key, f)).find((e) => e.name.endsWith('.csv'));
+        if (!entry) throw new Error('no CSV inside');
+        for (const l of entry.data.toString('utf8').split('\n')) {
+          const c = l.split(',');
+          const t = Number(c[0]), v = Number(c[c.length - 1]);
+          if (Number.isFinite(t) && t > 1e12 && Number.isFinite(v)) rows.set(t, v);
+        }
+        manifest[k.key] = k.size;
+        r.fetched++;
+      } catch (e) { log(`${k.key}: ${(e as Error).message}`); }
+    });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'ts,rate\n' + [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([t, v]) => `${t},${v}`).join('\n') + '\n');
+    fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+    r.rows = rows.size;
+    log(`${pair} funding: fetched ${r.fetched} month(s), ${r.rows} rates stored`);
+  }
+  return res;
 }
 
 export async function binanceMain(argOf: (k: string, d: string) => string = cliArg, flags: (k: string) => boolean = (k) => process.argv.includes(`--${k}`)): Promise<BinanceSummary[]> {

@@ -8,6 +8,9 @@
 //
 //   0a. history      refresh the historical candle store (Binance Vision + Coinbase backfill) for
 //                    every crypto asset Kalshi lists (HISTORY_AUTO_UPDATE; needs internet)
+//   0a'. history_replay  (HISTORY_REPLAY) years of 1-minute spot / perp history, funding and Kalshi's settled
+//                    contracts written as recordings (research/history/historyReplay.ts) that the recording-
+//                    based steps replay like live data; the perps step trains on them when present
 //   0b. ta_net       TA network on years of hourly history (bot/ta/taNet.ts): a tournament of three
 //                    networks initialises it, later runs continue the tournament as new months
 //                    arrive (every TA_NET_RETRAIN_DAYS) -> promote ta_net.json; its forecasts are
@@ -38,7 +41,7 @@
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: history, ta_net, ta_net_oos, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing
+//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
 
@@ -79,14 +82,16 @@ import { recordingDayList, recordingsUsage } from '../bot/marketdata/recordingFi
 import { readJournalTrades } from '../bot/setups/journal';
 import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
 import { exportTaNetOos, oosDir } from './taNetOos';
-import { BINANCE_INDEXES, downloadBinance, type BinanceMarket } from './history/binanceVision';
+import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, type BinanceMarket } from './history/binanceVision';
+import { buildHistoryReplay, perpSpecsFromRecordings } from './history/historyReplay';
+import { workerCount } from './workerPool';
 import { compareIndexSources } from '../bot/marketdata/historyStore';
 import { backfillCoinbase } from './history/coinbaseBackfill';
 import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
 import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
 
-export const STEPS = ['history', 'ta_net', 'ta_net_oos', 'rule_book', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing'] as const;
+export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'rule_book', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -287,6 +292,16 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       bin.push(...await downloadBinance({ out: T.historyDir, assets: BINANCE_INDEXES, intervals: ['1h'], markets: ['um-index'], log: (m) => log(`binance: ${m}`) }));
       // The live bot rebuilds BTCDOM itself (Binance's futures API refuses US servers): check it tracks
       // Binance's own index wherever both exist.
+      // The history replay's inputs: 1-minute spot (kept apart from the TA steps' store) and perpetual bars,
+      // and funding rates, for the replayed assets and years.
+      let replayInputs: unknown;
+      if (T.historyReplay) {
+        const fromMonth = new Date(now - T.historyReplayYears * 365 * 86_400_000).toISOString().slice(0, 7);
+        const rs = await downloadBinance({ out: T.historyDir, assets: T.historyReplayAssets, intervals: ['1m'], markets: ['spot'], source: 'binance-1m', fromMonth, log: (m) => log(`binance: ${m}`) });
+        const ru = await downloadBinance({ out: T.historyDir, assets: T.historyReplayAssets, intervals: ['1m'], markets: ['um'], fromMonth, log: (m) => log(`binance: ${m}`) });
+        const fu = await downloadBinanceFunding({ out: T.historyDir, assets: T.historyReplayAssets, fromMonth, log: (m) => log(`binance: ${m}`) });
+        replayInputs = { spot1m: rs.reduce((a, b) => a + b.fetched, 0), perp1m: ru.reduce((a, b) => a + b.fetched, 0), funding: fu.map((f) => `${f.asset} ${f.rows}`) };
+      }
       const btcdomCheck = compareIndexSources(T.historyDir, 'BTCDOM', 'binance-index', 'bot-index');
       if (btcdomCheck.overlap) log(`BTCDOM: live rebuild vs Binance over ${btcdomCheck.overlap} hours: hourly return correlation ${btcdomCheck.returnCorr.toFixed(3)}, level ratio ${btcdomCheck.levelRatio.toFixed(4)}`);
       const cb = T.coinbaseTfs.length ? await backfillCoinbase({ out: T.historyDir, assets, tfs: T.coinbaseTfs as HistTf[], fromTs: Date.parse('2015-01-01T00:00:00Z'), baseUrl: cfg.coinbaseRestUrl, log: (m) => log(`coinbase: ${m}`) }) : [];
@@ -306,8 +321,21 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const reached = bin.some((b) => b.listed > 0) || cb.some((c) => c.requests > 0 && !/kept failing/.test(c.note ?? ''));
       if (!reached) throw new SkipStep('Binance Vision and Coinbase unreachable from this machine');
       state.lastHistoryUpdate = now;
-      return { tradingview, kalshi, assets, binance: { fetched: bin.reduce((a, b) => a + b.fetched, 0), failed: bin.reduce((a, b) => a + b.failed, 0) }, coinbase: { added: cb.reduce((a, c) => a + c.added, 0) }, btcdomCheck };
+      return { replayInputs, tradingview, kalshi, assets, binance: { fetched: bin.reduce((a, b) => a + b.fetched, 0), failed: bin.reduce((a, b) => a + b.failed, 0) }, coinbase: { added: cb.reduce((a, c) => a + c.added, 0) }, btcdomCheck };
     }, T.historyUpdate ? undefined : 'HISTORY_AUTO_UPDATE=false');
+  }
+  // ---- History replay: years of history as recordings (research/history/historyReplay.ts) ----
+  const replayDir = T.historyReplayDir;
+  const replayDays = () => recordingDays(replayDir);
+  if (want('history_replay')) {
+    await run('history_replay', async () => {
+      const yesterday = new Date(Math.floor(now / 86_400_000) * 86_400_000 - 86_400_000).toISOString().slice(0, 10);
+      const fromDay = new Date(now - T.historyReplayYears * 365 * 86_400_000).toISOString().slice(0, 10);
+      const perpSpecs = await perpSpecsFromRecordings(rec, T.historyReplayAssets);
+      const r = await buildHistoryReplay({ historyDir: T.historyDir, outDir: replayDir, assets: T.historyReplayAssets, fromDay, toDay: yesterday, perpSpecs, log });
+      if (!r.assets.length) throw new SkipStep(`no 1-minute history yet (${r.notes.join('; ')})`);
+      return { ...r, perpSpecs: Object.keys(perpSpecs) };
+    }, T.historyReplay ? undefined : 'HISTORY_REPLAY=false');
   }
   if (want('ta_net')) {
     const staleSchema = fs.existsSync(taNetFile) && taNetFileSchema(taNetFile) !== TANET_SCHEMA;
@@ -409,12 +437,14 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     for (const target of A.sweepTargets) {
       const last = state.sweptAt[target];
       const due = !last || now - last >= A.sweepEveryDays * 86_400_000;
+      // The whole bot and the Kalshi settings are swept over the history replay when it has the days (a proposal, never applied).
+      const sweepSrc = (target === 'bot' || target === 'kalshi') && T.historyReplay && replayDays().length >= 20 ? replayDir : rec;
       await run(`sweep-${target}`, async () => {
         const out = path.join(A.dir, 'sweeps', `${target}.json`);
         if (fs.existsSync(out)) fs.renameSync(out, out.replace(/\.json$/, `.${new Date(now).toISOString().slice(0, 10)}.json`));
         let r;
         try {
-          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: rec, model: mlpPath(), out, 'setup-oos': path.join(A.dir, 'setup_oos.json'), 'setup-model': fs.existsSync(promoted('setups')) ? promoted('setups') : undefined }));
+          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: sweepSrc, model: mlpPath(), out, 'setup-oos': path.join(A.dir, 'setup_oos.json'), 'setup-model': fs.existsSync(promoted('setups')) ? promoted('setups') : undefined }));
         } catch (e) {
           if (/needs at least|needs the TA network|recorded day/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;
@@ -438,13 +468,21 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const due = o.forceAblation || !ds.lastAblation || (A.ablationEveryDays > 0 && now - ds.lastAblation >= A.ablationEveryDays * 86_400_000);
       let stage: Stage = A.snnStage === 'auto' ? (ds.stage ?? base) : A.snnStage;
       let stageAccepted = false;
-      const abDays = lastDays(A.ablationDays);
+      // The perps network learns on years of replayed history when the replay exists (its inputs are
+      // prices, candles and perp quotes, which the replay reproduces); the crypto network needs real
+      // second-by-second Kalshi books and stays on the bot's recordings. The backfill is always on the
+      // recordings (its outputs feed the models trained on them).
+      const src = domain === 'perps' && T.historyReplay && replayDays().length >= A.snnPbtDays + A.snnPbtInitDays ? replayDir : rec;
+      const srcDays = src === rec ? days : replayDays();
+      const lastSrc = (n: number) => srcDays.slice(-n);
+      const srcGate = src === rec ? tooFew : undefined;
+      const abDays = lastSrc(A.ablationDays);
       // The crypto network is judged on settled contracts against the MLP; perps on its own direction calls.
       const verdicts = await run(`snn-${domain}-ablation`, async () => {
-        const v = await snnAblationMain(argsOf({ recordings: rec, domain, model: domain === 'crypto' ? mlpPath() : undefined, from: abDays[0], out: path.join(work, `snn_${domain}_ablation.json`), only: o.ablationOnly }));
+        const v = await snnAblationMain(argsOf({ recordings: src, domain, model: domain === 'crypto' ? mlpPath() : undefined, from: abDays[0], out: path.join(work, `snn_${domain}_ablation.json`), only: o.ablationOnly }));
         ds.lastAblation = now;
         return v;
-      }, tooFew ?? (due ? undefined : 'not due (ablated recently)')) as Verdict[] | undefined;
+      }, srcGate ?? (due ? undefined : 'not due (ablated recently)')) as Verdict[] | undefined;
       if (verdicts) {
         const k = acceptedChain(verdicts);
         if (A.snnStage === 'auto') stage = k > 0 ? STAGES[k] : base;
@@ -453,11 +491,11 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       // Population tournament: three identical networks of this stage, knobs within +/-10%, fight
       // over the recorded days; the elite's knobs are this network's hyperparameters from now on.
       const pbtDue = o.forceSnnPbt || ds.pbtStage !== stage || !ds.pbtHyper || ds.pbtComplete === false || (A.snnPbtEveryDays > 0 && now - (ds.pbtAt ?? 0) >= A.snnPbtEveryDays * 86_400_000);
-      const pbtDays = lastDays(A.snnPbtDays);
+      const pbtDays = lastSrc(A.snnPbtDays);
       const pbt = await run(`snn-${domain}-pbt`, async () => {
         let r;
         try {
-          r = await runSnnPbt({ recordings: rec, domain, stage, days: pbtDays, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, log });
+          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), log });
         } catch (e) {
           if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;
@@ -465,17 +503,17 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         ds.pbtComplete = r.complete;
         if (!r.complete) return { complete: false, reason: `tournament in progress: ${r.rounds} round(s) done, ${r.remaining} to go`, elite: r.elite };
         ds.pbtHyper = r.elite.hyper; ds.pbtStage = stage; ds.pbtAt = now;
-        return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr };
-      }, tooFew ?? (pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`)) as { complete?: boolean } | undefined;
+        return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: src === rec ? 'recordings' : 'history replay' };
+      }, srcGate ?? (pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`)) as { complete?: boolean } | undefined;
       const hyper = ds.pbtStage === stage ? ds.pbtHyper : undefined;
       const trainNeeded = Boolean(verdicts) || Boolean(pbt?.complete) || !fs.existsSync(file) || ds.stage !== stage;
       await run(`snn-${domain}-train`, async () => {
-        const span = lastDays(A.snnTrainDays);
+        const span = lastSrc(A.snnTrainDays);
         const nEval = span.length >= 2 ? Math.max(1, Math.round(span.length * 0.2)) : 0;
         const trainSpan = span.slice(0, span.length - nEval), evalSpan = span.slice(span.length - nEval);
         const cand = path.join(work, `snn_${domain}.candidate.json`);
         const r = await trainSnnMain(argsOf({
-          recordings: rec, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined, hyper: hyper ? JSON.stringify(hyper) : undefined,
+          recordings: src, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined, hyper: hyper ? JSON.stringify(hyper) : undefined,
           from: trainSpan[0], to: evalSpan[0] ?? undefined,
           'eval-from': evalSpan[0], 'eval-to': evalSpan.length ? nextDay(evalSpan[evalSpan.length - 1]) : undefined,
         }));
@@ -486,7 +524,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         ds.version = r?.version;
         state.snnVersions![domain] = r?.version;
         return { promoted: true, stage, stageAccepted, result: r };
-      }, tooFew ?? (trainNeeded ? undefined : 'up to date'));
+      }, srcGate ?? (trainNeeded ? undefined : 'up to date'));
       // Prequential backfill, day by day from the last backfilled day (a fresh online network of the
       // promoted stage: it was never fitted offline on these days, so no output saw its own label).
       await run(`snn-${domain}-backfill`, async () => {
@@ -573,22 +611,24 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
 
   // ---- 7. perps (SNN 1h/4h direction among the features) ----
   if (want('perps')) {
+    // Years of replayed perpetual history when the replay exists (HISTORY_REPLAY); else the bot's recordings.
+    const perpSrc = T.historyReplay && replayDays().length >= 30 ? replayDir : rec;
     await run('perps', async () => {
       const cand = path.join(work, 'perp_model.candidate.json');
-      try { await trainPerpMain(argsOf({ recordings: rec, out: cand })); } catch (e) {
+      try { await trainPerpMain(argsOf({ recordings: perpSrc, out: cand, every: perpSrc === rec ? undefined : 900 })); } catch (e) {
         if (/record more perp data|no perp/i.test((e as Error).message)) throw new SkipStep('no perp quotes recorded yet (PERPS_FEED=true records them)');
         throw e;
       }
       if (!fs.existsSync(cand)) throw new SkipStep('perp trainer wrote no model');
-      await perpBacktestMain(argsOf({ recordings: rec, model: cand }), true);
+      await perpBacktestMain(argsOf({ recordings: perpSrc, model: cand }), true);
       const m = PerpModel.load(cand);
       const ok = Boolean(m?.validated());
       if (A.promote === 'validated' && !ok) return { promoted: false, reason: m?.blockers().join('; ') };
       const champ = promoteIfChampion({ dir: A.dir, kind: 'perp', candidate: cand, live: promoted('perp'), enabled: A.champion });
       if (!champ.promote) return { promoted: false, reason: champ.reason };
       state.trainedWithSnn!.perps = state.snnVersions!.perps;
-      return { promoted: true, champion: champ.reason, validated: ok, blockers: m?.blockers() ?? [] };
-    }, tooFew);
+      return { promoted: true, champion: champ.reason, validated: ok, blockers: m?.blockers() ?? [], data: perpSrc === rec ? 'recordings' : `history replay (${replayDays().length} days)` };
+    }, perpSrc === rec ? tooFew : undefined);
   }
 
   // ---- 8. tennis MLP ----

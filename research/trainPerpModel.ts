@@ -42,7 +42,7 @@ export async function buildPerpDataset(dir: string, opts: { everySec?: number; h
     const mid = ps?.price(st.now, 60_000);
     if (!mid) continue;
     const arr = mids.get(asset) ?? [];
-    if (!arr.length || st.now - arr[arr.length - 1].ts >= 10_000) arr.push({ ts: st.now, mid });
+    if (!arr.length || st.now - arr[arr.length - 1].ts >= 60_000) arr.push({ ts: st.now, mid }); // label prices: one a minute (years of replay fit in memory)
     mids.set(asset, arr);
     if (st.now < (nextAt.get(asset) ?? 0)) continue;
     nextAt.set(asset, Math.floor(st.now / every + 1) * every);

@@ -60,6 +60,8 @@ export interface PbtRoundLog {
   evalFrom: string; evalTo: string;
   ranking: Array<{ member: number; fitness: number; sortino: number; maxDrawdown: number; costs: number; independent: number; hyper: Hyper }>;
   elite: number; culled: number; mutated: number[];
+  /** Every member culled this round (populations of 4+ cull their worst quarter). */
+  culledAll?: number[];
   /** Member that restarted fresh this round (exploration), if any. */
   restarted?: number;
   /** Worst-ranked member that was not culled because it is a newcomer still in its grace period. */
@@ -91,6 +93,9 @@ export async function runPbt<S>(o: {
   /** Rounds a restarted member cannot be culled (default 2): month-to-month fitness noise is larger
    *  than the gaps between members, so a newcomer needs a few evaluations before it can be judged. */
   restartGrace?: number;
+  /** Members trained and evaluated at once (their hooks must not share mutable state; e.g. each replays
+   *  in its own worker thread). 1 = one after another. */
+  concurrency?: number;
   /** Called after every round (e.g. to persist the population). */
   onRound?: (state: { members: PbtMember<S>[]; trials: number; log: PbtRoundLog[]; round: PbtRound }) => Promise<void> | void;
 }): Promise<PbtResult<S>> {
@@ -108,28 +113,35 @@ export async function runPbt<S>(o: {
   let trials = o.resume?.trials ?? 0;
   const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
   for (const round of o.rounds) {
-    const evals: PbtEval[] = [];
-    for (const m of members) {
-      m.state = await o.hooks.train(m.state, m.hyper, round);
-      const e = await o.hooks.evaluate(m.state, m.hyper, round);
-      trials++;
-      m.record.push(...e.interactions);
-      m.scores.push({ round: round.index, fitness: e.report.fitness });
-      evals.push(e);
-    }
+    // Train + evaluate every member (up to `concurrency` at once); results applied in member order.
+    const evals: PbtEval[] = new Array(members.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(o.concurrency ?? 1, members.length)) }, async () => {
+      while (next < members.length) {
+        const i = next++, m = members[i];
+        m.state = await o.hooks.train(m.state, m.hyper, round);
+        evals[i] = await o.hooks.evaluate(m.state, m.hyper, round);
+      }
+    }));
+    members.forEach((m, i) => { trials++; m.record.push(...evals[i].interactions); m.scores.push({ round: round.index, fitness: evals[i].report.fitness }); });
     const order = members.map((m, i) => ({ m, e: evals[i] })).sort((a, b) => b.e.report.fitness - a.e.report.fitness);
     const elite = order[0].m;
-    // The worst member is culled unless it is a newcomer in its grace period; then the next worst.
+    // The worst member (in a population of 4+, the worst quarter) is culled, newcomers in their grace
+    // period excepted; each culled member clones one of the best (the elite first, then the runners-up).
     const grace = o.restartGrace ?? 2;
     const inGrace = (m: PbtMember<S>) => m.bornRound !== undefined && round.index - m.bornRound <= grace;
+    const nCull = n >= 4 ? Math.floor(n / 4) : 1;
     const candidates = order.slice(1).map((x) => x.m);
-    const culled = [...candidates].reverse().find((m) => !inGrace(m)) ?? order[order.length - 1].m;
+    const cullList = [...candidates].reverse().filter((m) => !inGrace(m)).slice(0, nCull);
+    if (!cullList.length) cullList.push(order[order.length - 1].m);
+    const culled = cullList[0];
+    const donors = order.slice(0, nCull).map((x) => x.m);
     const worst = order[order.length - 1].m;
-    const middle = candidates.filter((m) => m !== culled);
+    const middle = candidates.filter((m) => !cullList.includes(m));
     const entry: PbtRoundLog = {
       round: round.index, evalFrom: iso(round.evalFrom), evalTo: iso(round.evalTo),
       ranking: order.map(({ m, e }) => ({ member: m.id, fitness: e.report.fitness, sortino: e.report.sortino, maxDrawdown: e.report.maxDrawdown, costs: e.report.costs, independent: e.report.independent, hyper: { ...m.hyper } })),
-      elite: elite.id, culled: culled.id, mutated: [],
+      elite: elite.id, culled: culled.id, ...(cullList.length > 1 ? { culledAll: cullList.map((m) => m.id) } : {}), mutated: [],
       ...(worst !== culled ? { spared: worst.id } : {}),
     };
     // Exploration (not after the last round: the elite is final).
@@ -147,15 +159,19 @@ export async function runPbt<S>(o: {
         culled.record = [];
         culled.bornRound = round.index;
         entry.restarted = culled.id;
-      } else {
-        culled.state = await o.hooks.clone(elite.state);
-        culled.hyper = { ...elite.hyper };
-        culled.lineage = [...elite.lineage, culled.id];
-        culled.record = [...elite.record];
-        delete culled.bornRound;
+      }
+      // Every other culled member (and the worst, when it does not restart) clones a donor.
+      const cloners = restart ? cullList.slice(1) : cullList;
+      for (let k = 0; k < cloners.length; k++) {
+        const c = cloners[k], d = donors[k % donors.length];
+        c.state = await o.hooks.clone(d.state);
+        c.hyper = { ...d.hyper };
+        c.lineage = [...d.lineage, c.id];
+        c.record = [...d.record];
+        delete c.bornRound;
       }
       // A newcomer in its grace period keeps its knobs (it is being judged on them).
-      for (const m of (restart ? middle : [...middle, culled]).filter((x) => !inGrace(x))) {
+      for (const m of [...middle, ...cloners].filter((x) => !inGrace(x))) {
         m.hyper = perturb(m.hyper, o.spec, r, 'explore');
         if (o.hooks.rehyper) m.state = await o.hooks.rehyper(m.state, m.hyper);
         entry.mutated.push(m.id);

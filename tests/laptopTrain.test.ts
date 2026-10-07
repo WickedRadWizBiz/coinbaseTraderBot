@@ -26,6 +26,10 @@ test('laptop trainer: the server settings it trains with carry no credentials or
   assert.equal(p.AUTO_TRAIN_CHAMPION, 'true');
   assert.equal(p.SWEEP_HOURS, '3');
   assert.ok(Number(p.KALSHI_HISTORY_DAYS) >= 365);
+  const q = laptopProfile(12, 16);
+  assert.equal(q.TRAIN_WORKERS, '15');
+  assert.equal(q.AUTO_TRAIN_SNN_PBT_POPULATION, '15');
+  assert.equal(laptopProfile(12, 2).AUTO_TRAIN_SNN_PBT_POPULATION, '3', 'never fewer than the original three');
 });
 
 test('laptop trainer: pull and push stream files through ssh + tar (fake ssh running the command locally)', async () => {

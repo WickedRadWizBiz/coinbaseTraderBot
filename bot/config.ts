@@ -304,6 +304,12 @@ export interface TaNetConfig {
   /** Binance intervals to download, and Coinbase timeframes to backfill. */
   binanceIntervals: string[];
   coinbaseTfs: string[];
+  /** History replay (research/history/historyReplay.ts): years of 1-minute spot and perp history turned into
+   *  recordings the recording-based steps replay like live data (HISTORY_REPLAY; the laptop trainer turns it on). */
+  historyReplay: boolean;
+  historyReplayYears: number;
+  historyReplayDir: string;
+  historyReplayAssets: string[];
   /** Retrain the network at most every N days (and whenever it is missing). */
   retrainEveryDays: number;
   /** Network layout trained by the pipeline: flat, or grouped (indicator families; TA_NET_ARCH). */
@@ -381,6 +387,8 @@ export interface AutoTrainConfig {
   snnPbtDays: number;
   snnPbtInitDays: number;
   snnPbtMaxRounds: number;
+  /** Networks in each SNN tournament (3 = the original trio; the laptop trainer uses about one per core). */
+  snnPbtPopulation: number;
   snnPbtEveryDays: number;
   /** Exploration member: every N tournament rounds the worst SNN restarts from scratch with random
    *  knobs instead of copying the elite (0 = never). */
@@ -994,6 +1002,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       snnPbtDays: num(env, 'AUTO_TRAIN_SNN_PBT_DAYS', 7, 2, 365),
       snnPbtInitDays: num(env, 'AUTO_TRAIN_SNN_PBT_INIT_DAYS', 3, 1, 60),
       snnPbtMaxRounds: num(env, 'AUTO_TRAIN_SNN_PBT_MAX_ROUNDS', 0, 0, 1000),
+      snnPbtPopulation: num(env, 'AUTO_TRAIN_SNN_PBT_POPULATION', 3, 2, 64),
       snnPbtEveryDays: num(env, 'AUTO_TRAIN_SNN_PBT_EVERY_DAYS', 30, 0, 365),
       snnPbtRestartEvery: num(env, 'AUTO_TRAIN_SNN_PBT_RESTART_EVERY', 4, 0, 1000),
     },
@@ -1101,6 +1110,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       historyAssets: env.HISTORY_ASSETS ?? 'auto',
       binanceIntervals: (env.HISTORY_BINANCE_INTERVALS ?? '1h,15m,1d').split(',').map((x) => x.trim()).filter(Boolean),
       coinbaseTfs: (env.HISTORY_COINBASE_TFS ?? '1h,1d').split(',').map((x) => x.trim()).filter((x) => x && x !== 'none'),
+      historyReplay: bool(env, 'HISTORY_REPLAY', false),
+      historyReplayYears: num(env, 'HISTORY_REPLAY_YEARS', 2, 0.1, 8),
+      historyReplayDir: path.resolve(env.HISTORY_REPLAY_DIR ?? path.join(dataDir, 'history-replay')),
+      historyReplayAssets: (env.HISTORY_REPLAY_ASSETS ?? 'BTC,ETH,SOL,XRP,DOGE').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
       retrainEveryDays: num(env, 'TA_NET_RETRAIN_DAYS', 7, 0, 365),
       arch: oneOf(env, 'TA_NET_ARCH', 'flat', ['flat', 'grouped'] as const),
       trainMonths: num(env, 'TA_NET_TRAIN_MONTHS', 12, 1, 36),

@@ -22,7 +22,7 @@ export {
 } from '../../bot/marketdata/historyStore';
 
 /** Sources stored but never spliced into spot series (perp futures trade at a basis to spot). */
-export const NON_SPOT_SOURCES = new Set(['binance-um']);
+export const NON_SPOT_SOURCES = new Set(['binance-um', 'binance-1m', 'binance-funding']);
 /** Spot pair sources: everything except perps and the market-wide index series. */
 export const isSpotSource = (source: string) => !NON_SPOT_SOURCES.has(source) && !INDEX_SOURCES.has(source);
 
