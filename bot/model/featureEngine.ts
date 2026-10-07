@@ -61,6 +61,10 @@ export class BarStore {
   ewmaSlow?: number;
   ewmaFast?: number;
   private n = 0;
+  /** last(n) / returns(n) results until the next bar closes (a dozen features ask for the same windows,
+   *  for every contract on the asset, every evaluation). Shared arrays: callers must not modify them. */
+  private readonly memoLast = new Map<number, Bar[] | undefined>();
+  private readonly memoRet = new Map<number, number[] | undefined>();
 
   onPrice(value: number, ts: number): void {
     const t = Math.floor(ts / 60_000) * 60_000;
@@ -87,6 +91,8 @@ export class BarStore {
     }
     this.bars.push(b);
     if (this.bars.length > 1500) this.bars.shift();
+    this.memoLast.clear();
+    this.memoRet.clear();
   }
 
   /** Per-minute volatility (slow EWMA) once 30 returns are in. */
@@ -96,18 +102,26 @@ export class BarStore {
 
   /** The last n completed bars if they are contiguous. */
   last(n: number): Bar[] | undefined {
-    if (this.bars.length < n) return undefined;
-    const out = this.bars.slice(-n);
-    for (let i = 1; i < out.length; i++) if (out[i].ts - out[i - 1].ts !== 60_000) return undefined;
+    if (this.memoLast.has(n)) return this.memoLast.get(n);
+    let out: Bar[] | undefined;
+    if (this.bars.length >= n) {
+      out = this.bars.slice(-n);
+      for (let i = 1; i < out.length; i++) if (out[i].ts - out[i - 1].ts !== 60_000) { out = undefined; break; }
+    }
+    this.memoLast.set(n, out);
     return out;
   }
 
   /** 1-minute log returns over the last n minutes (n + 1 contiguous bars). */
   returns(n: number): number[] | undefined {
+    if (this.memoRet.has(n)) return this.memoRet.get(n);
     const b = this.last(n + 1);
-    if (!b) return undefined;
-    const r: number[] = [];
-    for (let i = 1; i < b.length; i++) r.push(Math.log(b[i].c / b[i - 1].c));
+    let r: number[] | undefined;
+    if (b) {
+      r = [];
+      for (let i = 1; i < b.length; i++) r.push(Math.log(b[i].c / b[i - 1].c));
+    }
+    this.memoRet.set(n, r);
     return r;
   }
 }
@@ -402,10 +416,20 @@ export function agree(...xs: number[]): number {
   return sgn * Math.exp(xs.reduce((a, x) => a + Math.log(Math.abs(x)), 0) / xs.length);
 }
 
+/** Max and min of an array in one pass (Math.max(...xs) spreads the whole array as arguments). */
+function extent(xs: ArrayLike<number>): [number, number] {
+  let hi = -Infinity, lo = Infinity;
+  for (let i = 0; i < xs.length; i++) { const x = xs[i]; if (x > hi) hi = x; if (x < lo) lo = x; }
+  return [hi, lo];
+}
+const barHigh = (b: Bar[]) => { let hi = -Infinity; for (const x of b) if (x.h > hi) hi = x.h; return hi; };
+const barLow = (b: Bar[]) => { let lo = Infinity; for (const x of b) if (x.l < lo) lo = x.l; return lo; };
+
 const midRange = (sec: number): Fn => (c, k) => {
   const s = series(c, k, sec);
   if (!s) return NA;
-  const mid = (Math.max(...s) + Math.min(...s)) / 2;
+  const [hi, lo] = extent(s);
+  const mid = (hi + lo) / 2;
   const S = s[s.length - 1];
   return clip(Math.log(S / mid) / (c.sigmaPerSqrtSec * Math.sqrt(sec)));
 };
@@ -436,7 +460,7 @@ const rangePos = (min: number): Fn => (c) => {
   const b = c.bars?.last(min);
   const S = c.index.latest()?.value;
   if (!b || S === undefined) return NA;
-  const hi = Math.max(...b.map((x) => x.h)), lo = Math.min(...b.map((x) => x.l));
+  const hi = barHigh(b), lo = barLow(b);
   return hi > lo ? clamp((S - lo) / (hi - lo), -0.5, 1.5) : 0.5;
 };
 const distExtreme = (min: number, which: 'high' | 'low'): Fn => (c) => {
@@ -444,7 +468,7 @@ const distExtreme = (min: number, which: 'high' | 'low'): Fn => (c) => {
   const s = c.bars?.sigma1m();
   const S = c.index.latest()?.value;
   if (!b || !s || S === undefined) return NA;
-  const x = which === 'high' ? Math.max(...b.map((y) => y.h)) : Math.min(...b.map((y) => y.l));
+  const x = which === 'high' ? barHigh(b) : barLow(b);
   return clip(Math.log(S / x) / (s * Math.sqrt(min)));
 };
 /** Kalshi order flow over `sec`: signed taker contracts / (trailing 15-min volume rate x window). */
@@ -942,8 +966,31 @@ export function assetFeatureMap(asset: string, now: number, s: { index?: IndexTr
 }
 const ASSET_BOOK = new OrderBook('asset-context');
 
-export function computeFeatureMap(c: FeatureContext): Record<string, number> {
+/**
+ * Asset-level intermediate results (index and spot series, the memoised asset factors, the TA snapshot
+ * and the TA network's output) depend only on the asset's trackers, its volatility and the time, so one
+ * cache serves every contract on the asset evaluated at the same instant: a tick prices a dozen contracts
+ * on BTC alone, each of which used to rebuild all of it. Kept for the current instant only.
+ */
+let sharedNow = NaN;
+const shared = new Map<string, { key: unknown[]; cache: Cache }>();
+function cacheFor(c: FeatureContext): Cache {
+  if (c.now !== sharedNow) { shared.clear(); sharedNow = c.now; }
+  const id = c.asset ?? '';
+  // The trackers' versions too: a print that lands between two contracts' evaluations at the same
+  // instant must not be missed by the second.
+  const key = [c.index, c.index?.version, c.spot, c.spot?.version, c.usdtd, c.usdtd?.version, c.btcd, c.btcd?.version, c.candles, c.sigmaPerSqrtSec,
+    // A hot-swapped TA network or new market context (TA snapshot inputs) starts a fresh cache.
+    activeTaNet(), marketContext()?.version];
+  const hit = shared.get(id);
+  if (hit && hit.key.every((v, i) => Object.is(v, key[i]))) return hit.cache;
   const cache: Cache = { idx: new Map(), spot: new Map(), memo: new Map() };
+  shared.set(id, { key, cache });
+  return cache;
+}
+
+export function computeFeatureMap(c: FeatureContext): Record<string, number> {
+  const cache = cacheFor(c);
   const out: Record<string, number> = {};
   for (const [name, f] of Object.entries(FEATURES)) {
     let v: number;

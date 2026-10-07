@@ -80,7 +80,7 @@ The deploy never changes `TRADING_MODE`. A new server starts in `paper`. Going l
 Each step is independent. Do as many as you like.
 
 1. **Hide the dashboard from the internet.** In `~/bot/bot.env` set `BIND_HOST=127.0.0.1` and delete `ALLOW_NON_LOOPBACK_BIND=true`, restart. Reach it with `ssh -L 3000:127.0.0.1:3000 ubuntu@54.145.7.203`, then open http://127.0.0.1:3000/. Close port 3000 in the Lightsail firewall.
-   - Alternative: keep it reachable but behind HTTPS, with a reverse proxy (e.g. Caddy) in front of the loopback port, or put the box on Tailscale.
+   - Alternative: keep it reachable but over HTTPS (below).
 2. **Restrict SSH** to your own IP in the Lightsail firewall.
 3. **Stop deploying on every push.** Set the repository **variable** `AUTO_DEPLOY` to `false`. Pushes then only run CI; deploys happen from Actions → Deploy → Run workflow with a release tag.
 4. **Require approval for deploys.** Settings → Environments → `production` → Required reviewers. Every deploy (automatic or manual) then waits for a reviewer.
@@ -88,3 +88,19 @@ Each step is independent. Do as many as you like.
 6. **Use a dedicated deploy key.** Create a separate SSH key just for deploys, and replace `LIGHTSAIL_SSH_KEY`.
 
 None of these needs a code change.
+
+## HTTPS (set up by every deploy)
+
+`deploy/https.sh` installs Caddy and puts the dashboard behind TLS at **https://54-145-7-203.sslip.io**
+(the server's IP with dashes; sslip.io is a free DNS name that points at it). The certificate comes from
+Let's Encrypt and renews itself; only TLS 1.2/1.3 is accepted, with HSTS. It costs a few MB of memory and
+no noticeable CPU.
+
+To turn it on:
+1. Lightsail console -> the instance -> Networking -> IPv4 firewall: add **HTTPS (443)** and keep **HTTP (80)**
+   (Let's Encrypt checks and the redirect to HTTPS use it).
+2. Set `DASHBOARD_PASSWORD` (see above) and open the https address.
+3. Once it works, delete the **3000** rule in the same firewall: plain http is then closed to the internet.
+
+Options in `~/bot/bot.env`: `DASHBOARD_DOMAIN=bot.example.com` (a name you own, pointed at the server) instead
+of sslip.io; `HTTPS=off` to skip Caddy entirely.

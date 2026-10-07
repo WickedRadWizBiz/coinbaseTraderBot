@@ -173,7 +173,7 @@ export class MarketData extends EventEmitter {
     const proxy = this.cfg.allowProxyIndex && (!this.ws || this.cfg.mode === 'paper');
     if (proxy || this.cfg.spotFeed) this.startSpotFeed(proxy);
     if (this.cfg.dominanceFeed) {
-      this.dominance = new DominanceService({ binanceWsUrl: this.cfg.binanceWsUrl, coingeckoUrl: this.cfg.coingeckoUrl, coingeckoApiKey: this.cfg.coingeckoApiKey });
+      this.dominance = new DominanceService({ binanceWsUrl: this.cfg.binanceWsUrl, coingeckoUrl: this.cfg.coingeckoUrl, coingeckoApiKey: this.cfg.coingeckoApiKey, extraSymbols: [...this.index.keys()] });
       // Continue the BTCDOM level where the stored history (Binance's index, or our own bars) ends.
       const last = this.cfg.taNet?.enabled ? IndexBars.lastStored(this.cfg.taNet.historyDir, 'BTCDOM') : undefined;
       if (last) this.dominance.btcdom.setAnchor(last);

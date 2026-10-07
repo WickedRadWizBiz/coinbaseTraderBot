@@ -47,9 +47,17 @@ interface PersistedState {
   version: 1;
   orders: OrderRecord[];
   seenTradeIds: string[];
+  /** Fill time per seenTradeIds entry (absent in older files). */
+  seenTradeTimes?: number[];
   positions: MarketPosition[];
   lastFillTs: number;
 }
+
+/** Terminal orders kept (memory and state file): the dashboard shows the latest 40, diagnostics 300. */
+const KEEP_TERMINAL = 300;
+/** Trade ids persisted: those of fills this close to the newest fill. Reconciliation replays fills from
+ *  10 minutes before the newest one we hold, so older ids can never be delivered again. */
+const SEEN_PERSIST_MS = 6 * 3_600_000;
 
 export interface OmsOptions {
   gateway: ExchangeGateway;
@@ -59,6 +67,12 @@ export interface OmsOptions {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   subaccount?: number;
+  /** Fsync the write-ahead record of a new order before it is sent (live). Paper trades against an
+   *  in-process exchange, where a crash loses both sides alike: there the record rides the next
+   *  coalesced write. Default true. */
+  durableWriteAhead?: boolean;
+  /** Coalescing window for state writes (ms). Default 1000. */
+  saveDelayMs?: number;
 }
 
 export class Oms extends EventEmitter {
@@ -66,7 +80,12 @@ export class Oms extends EventEmitter {
   private readonly orders = new Map<string, OrderRecord>();
   private readonly byExchangeId = new Map<string, string>();
   private readonly seenTrades: string[] = [];
+  /** Fill time of each id in seenTrades (same order; 0 for ids loaded from an older state file). */
+  private readonly seenTimes: number[] = [];
   private readonly seenTradeSet = new Set<string>();
+  /** Live (non-terminal) orders, kept in step with every state change: liveOrders() is called many
+   *  times per market per second and used to scan every order kept (up to ~1000 terminal ones). */
+  private readonly live = new Map<string, OrderRecord>();
   private readonly orderTimes: number[] = [];
   consecutiveErrors = 0;
   lastFillTs = 0;
@@ -83,15 +102,17 @@ export class Oms extends EventEmitter {
     for (const rec of st?.orders ?? []) {
       this.orders.set(rec.clientOrderId, rec);
       if (rec.orderId) this.byExchangeId.set(rec.orderId, rec.clientOrderId);
+      if (isLive(rec)) this.live.set(rec.clientOrderId, rec);
     }
-    for (const t of st?.seenTradeIds ?? []) this.markSeen(t);
+    const times = st?.seenTradeTimes;
+    (st?.seenTradeIds ?? []).forEach((t, i) => this.markSeen(t, times?.[i] ?? 0));
     this.lastFillTs = st?.lastFillTs ?? 0;
   }
 
   // ---- Queries ---------------------------------------------------------------
 
   liveOrders(): OrderRecord[] {
-    return [...this.orders.values()].filter(isLive);
+    return [...this.live.values()];
   }
 
   allOrders(limit = 200): OrderRecord[] {
@@ -145,7 +166,9 @@ export class Oms extends EventEmitter {
       fairValue: intent.fairValue,
     };
     this.orders.set(rec.clientOrderId, rec);
-    this.saveNow(); // persisted before send (write-ahead: the client order id is on disk before the exchange sees it)
+    this.live.set(rec.clientOrderId, rec);
+    // Write-ahead: the client order id is on disk before the exchange sees it (fsynced in live).
+    if (this.o.durableWriteAhead ?? true) this.saveNow(true); else this.save();
     this.o.audit.write('order_new', rec);
     this.orderTimes.push(now);
     await this.send(rec);
@@ -289,7 +312,7 @@ export class Oms extends EventEmitter {
   /** Apply a fill exactly once. Returns false if it was a duplicate. */
   onFill(f: ExchangeFill, meta?: { closeTs?: number; asset?: string }): boolean {
     if (this.seenTradeSet.has(f.tradeId)) return false;
-    this.markSeen(f.tradeId);
+    this.markSeen(f.tradeId, f.ts);
     const rec = (f.clientOrderId && this.orders.get(f.clientOrderId)) || (f.orderId ? this.findByExchangeId(f.orderId) : undefined);
     const fee = f.fee ?? orderFee(f.count, f.side === 'bid' ? f.price : 1 - f.price, f.isTaker, this.o.feesFor(f.ticker));
     const pos = this.positions.applyFill(
@@ -360,6 +383,7 @@ export class Oms extends EventEmitter {
   private safeTransition(rec: OrderRecord, to: OrderState): void {
     if (canTransition(rec.state, to)) {
       transition(rec, to, this.now());
+      if (isLive(rec)) this.live.set(rec.clientOrderId, rec); else this.live.delete(rec.clientOrderId);
     } else if (!TERMINAL.has(rec.state)) {
       log.warn('ignored illegal transition', { clientOrderId: rec.clientOrderId, from: rec.state, to });
     }
@@ -370,42 +394,53 @@ export class Oms extends EventEmitter {
     this.emit('order_error', this.consecutiveErrors, msg);
   }
 
-  private markSeen(id: string): void {
+  private markSeen(id: string, ts: number): void {
     this.seenTradeSet.add(id);
     this.seenTrades.push(id);
-    if (this.seenTrades.length > 20_000) this.seenTradeSet.delete(this.seenTrades.shift()!);
+    this.seenTimes.push(ts);
+    if (this.seenTrades.length > 20_000) { this.seenTradeSet.delete(this.seenTrades.shift()!); this.seenTimes.shift(); }
   }
 
-  /** Persist soon: transitions within ~200 ms share one write (quotes churn: one synchronous write and
-   *  fsync of the whole state per transition held the main thread, and every message waited behind it).
-   *  Positions, seen trade ids and lastFillTs are written together, so a fill lost to a crash inside the
-   *  window is simply fetched and applied again on restart. Order submission writes immediately. */
+  /** Persist soon: transitions within the coalescing window (1 s) share one write. Quotes churn: a
+   *  synchronous write (and fsync) of the whole state per transition held the main thread, and every
+   *  message waited behind it. Positions, seen trade ids and lastFillTs are written together, so a fill
+   *  lost to a crash inside the window is simply fetched and applied again on restart. */
   save(): void {
     if (this.saveTimer) return;
-    this.saveTimer = setTimeout(() => { this.saveTimer = null; this.saveNow(); }, 200);
+    this.saveTimer = setTimeout(() => { this.saveTimer = null; this.saveNow(); }, this.o.saveDelayMs ?? 1000);
     this.saveTimer.unref?.();
   }
 
   /** Write any pending state now (shutdown). */
   flush(): void { if (this.saveTimer) this.saveNow(); }
 
-  saveNow(): void {
+  saveNow(durable = false): void {
     if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
     // Keep live orders plus the most recent terminal ones.
-    const orders = [...this.orders.values()];
-    const terminal = orders.filter((o) => !isLive(o)).sort((a, b) => b.updatedTs - a.updatedTs);
-    for (const old of terminal.slice(1000)) {
-      this.orders.delete(old.clientOrderId);
-      if (old.orderId) this.byExchangeId.delete(old.orderId);
+    if (this.orders.size - this.live.size > KEEP_TERMINAL + 50) {
+      const terminal = [...this.orders.values()].filter((o) => !isLive(o)).sort((a, b) => b.updatedTs - a.updatedTs);
+      for (const old of terminal.slice(KEEP_TERMINAL)) {
+        this.orders.delete(old.clientOrderId);
+        if (old.orderId) this.byExchangeId.delete(old.orderId);
+      }
     }
     this.positions.prune(this.now() - 3 * 86_400_000);
+    // Only the trade ids a replay could still deliver (see SEEN_PERSIST_MS); ids of unknown age (older
+    // files) are kept while they are among the last 2,000.
+    const cut = this.lastFillTs - SEEN_PERSIST_MS, n = this.seenTrades.length;
+    const ids: string[] = [], times: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const t = this.seenTimes[i];
+      if (t >= cut || (t === 0 && i >= n - 2000)) { ids.push(this.seenTrades[i]); times.push(t); }
+    }
     const st: PersistedState = {
       version: 1,
       orders: [...this.orders.values()],
-      seenTradeIds: this.seenTrades.slice(-20_000),
+      seenTradeIds: ids,
+      seenTradeTimes: times,
       positions: this.positions.all(),
       lastFillTs: this.lastFillTs,
     };
-    writeJsonAtomic(this.o.statePath, st, { compact: true });
+    writeJsonAtomic(this.o.statePath, st, { compact: true, durable });
   }
 }
