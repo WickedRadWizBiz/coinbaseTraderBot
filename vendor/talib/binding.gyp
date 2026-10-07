@@ -34,12 +34,17 @@
                 ]
             }],
             ['OS=="win"', {
-                "libraries": [
-                    "../src/lib/lib/ta_libc_csr.lib",
-                    "../src/lib/lib/ta_func_csr.lib",
-                    "../src/lib/lib/ta_common_csr.lib",
-                    "../src/lib/lib/ta_abstract_csr.lib"
-                ]
+                # The TA-Lib C sources compiled into the addon (no separate MSBuild solution in this vendored copy).
+                "sources": ["<!@(node src/lib/win_sources.js)"],
+                "include_dirs": [
+                    "src/lib/include",
+                    "src/lib/src/ta_common",
+                    "src/lib/src/ta_func",
+                    "src/lib/src/ta_abstract",
+                    "src/lib/src/ta_abstract/tables",
+                    "src/lib/src/ta_abstract/frames"
+                ],
+                "defines": ["TA_SINGLE_THREAD", "_CRT_SECURE_NO_WARNINGS"]
             }],
         ]
     }]
