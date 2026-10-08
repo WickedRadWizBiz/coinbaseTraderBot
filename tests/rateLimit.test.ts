@@ -18,6 +18,9 @@ test('TokenBucket.rateLimited pauses every caller, doubling per consecutive 429 
   assert.equal(b.rateLimited(), 30_000, 'capped');
   b.ok();
   assert.equal(b.rateLimited(), 1000);
+  b.ok();
+  assert.equal(b.rateLimited(5000), 5000, 'at least the server\'s Retry-After');
+  assert.equal(b.rateLimited(1e9), 120_000, 'a Retry-After is capped at two minutes');
 });
 
 test('getOpenMarkets asks for open markets without close-time filters; a 429 pauses the shared read bucket', async () => {

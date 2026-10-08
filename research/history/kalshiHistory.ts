@@ -17,11 +17,18 @@
 // market once filled a whole 5-hour training run): 1-minute candles cover at most the last
 // maxCandleMinutes of a market's life (a week of 1-minute candles is more than one request returns:
 // HTTP 400); markets that never traded are stored without a request; a market the API rejects for
-// good (400 / 404) is stored with its error so it is not asked for again; requests run `concurrency`
+// good (400, or 404 from both tiers) is stored with its error so it is not asked for again (a plain
+// 'HTTP 404' stored by older versions, which asked one tier only, is asked again once); requests run `concurrency`
 // at a time; and the whole download stops at budgetMs, the rest waiting for the next run.
+//
+// Rate limit: every request of a download shares one pace (ratePerSec, 10 a second: half of Kalshi's Basic
+// tier of 20 reads a second), so the workers together never outrun it. A 429 pauses all of them at once
+// (1 s, 2 s, 4 s ... 30 s, or the server's Retry-After when longer) and the request is tried again; a market
+// that still fails is not stored, so the next run asks for it again.
 
 import fs from 'fs';
 import path from 'path';
+import { TokenBucket } from '../../bot/kalshi/rateLimiter';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const num = (v: unknown): number | null => { if (v === null || v === undefined || v === '') return null; const x = Number(v); return Number.isFinite(x) ? x : null; };
@@ -78,6 +85,8 @@ export interface KalshiHistoryOpts {
   budgetMs?: number;
   /** Candle requests in flight at once. */
   concurrency?: number;
+  /** Requests a second, shared by every worker (default 10). */
+  ratePerSec?: number;
   /** 1-minute candles for at most this many minutes before a market's close. */
   maxCandleMinutes?: number;
   /** Wall clock for the budget (tests). */
@@ -88,24 +97,40 @@ export interface KalshiHistoryResult { markets: number; skipped: number; failed:
 
 class HttpError extends Error { constructor(msg: string, readonly status: number) { super(msg); } }
 
-/** GET with backoff on 429 / 5xx (public endpoints, no key). */
-function getter(baseUrl: string | undefined, f: typeof fetch): (p: string) => Promise<any> {
+/** Seconds (or an HTTP date) in a Retry-After header, as milliseconds; 0 when absent. */
+export function retryAfterMs(v: string | null | undefined, now = Date.now()): number {
+  if (!v) return 0;
+  const s = Number(v);
+  if (Number.isFinite(s)) return Math.max(0, s * 1000);
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? Math.max(0, t - now) : 0;
+}
+
+/** GET at a pace shared by every caller (public endpoints, no key): a 429 pauses them all (the bucket),
+ *  then this request is tried again, up to 10 times; a 5xx is retried with its own backoff. */
+export function getter(baseUrl: string | undefined, f: typeof fetch, ratePerSec = 10): { get: (p: string) => Promise<any>; limited: () => number } {
   const base = (baseUrl ?? 'https://external-api.kalshi.com/trade-api/v2').replace(/\/$/, '');
-  return async (p: string): Promise<any> => {
+  const rate = Math.max(0.5, ratePerSec);
+  const bucket = new TokenBucket(Math.max(1, Math.round(rate)), rate);
+  let limited = 0;
+  const get = async (p: string): Promise<any> => {
     let delay = 500;
     for (let attempt = 0; ; attempt++) {
+      await bucket.take(1);
       const res = await f(base + p, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15_000) });
-      if (res.ok) return res.json();
-      if ((res.status === 429 || res.status >= 500) && attempt < 5) { await sleep(delay); delay *= 2; continue; }
+      if (res.ok) { bucket.ok(); return res.json(); }
+      if (res.status === 429 && attempt < 10) { limited++; bucket.rateLimited(retryAfterMs(res.headers?.get?.('retry-after'))); continue; }
+      if (res.status >= 500 && attempt < 5) { await sleep(delay); delay *= 2; continue; }
       throw new HttpError(`GET ${p}: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`, res.status);
     }
   };
+  return { get, limited: () => limited };
 }
 
 export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<KalshiHistoryResult> {
   const f = o.fetchImpl ?? fetch, log = o.log ?? ((m: string) => console.log(`[kalshi-history] ${m}`));
   const now = o.now ?? Date.now(), from = now - o.days * 86_400_000;
-  const get = getter(o.baseUrl, f);
+  const { get, limited } = getter(o.baseUrl, f, o.ratePerSec);
   const clock = o.clock ?? Date.now;
   const deadline = o.budgetMs && o.budgetMs > 0 ? clock() + o.budgetMs : Infinity;
   const concurrency = Math.max(1, Math.floor(o.concurrency ?? 3));
@@ -118,7 +143,7 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
     const dir = path.join(o.out, series);
     fs.mkdirSync(dir, { recursive: true });
     const have = new Set<string>();
-    for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl'))) for (const line of fs.readFileSync(path.join(dir, file), 'utf8').split('\n')) { try { if (line) have.add(JSON.parse(line).ticker); } catch { /* torn */ } }
+    for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl'))) for (const line of fs.readFileSync(path.join(dir, file), 'utf8').split('\n')) { try { if (line) { const r = JSON.parse(line); if (r.error !== 'HTTP 404') have.add(r.ticker); } } catch { /* torn */ } }
     // Settled markets from both tiers, newest first, until older than `from`.
     const rows: Array<{ m: Omit<KalshiHistMarket, 'candles'>; hist: boolean }> = [];
     for (const [hist, p0] of [[false, `/markets?series_ticker=${encodeURIComponent(series)}&status=settled&limit=200`], [true, `/historical/markets?series_ticker=${encodeURIComponent(series)}&limit=200`]] as const) {
@@ -156,15 +181,18 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
         // Sports markets list days ahead: the candles that matter start an hour before the event.
         const start = Math.max(m.openTime, m.closeTime - maxMin * 60_000, m.startTime && m.startTime < m.closeTime ? m.startTime - 3_600_000 : -Infinity);
         const q = `start_ts=${Math.floor(start / 1000)}&end_ts=${Math.ceil(m.closeTime / 1000)}&period_interval=1`;
-        const p = hist || (cutoff && m.closeTime < cutoff) ? `/historical/markets/${encodeURIComponent(m.ticker)}/candlesticks?${q}` : `/series/${encodeURIComponent(series)}/markets/${encodeURIComponent(m.ticker)}/candlesticks?${q}`;
+        const histPath = `/historical/markets/${encodeURIComponent(m.ticker)}/candlesticks?${q}`, livePath = `/series/${encodeURIComponent(series)}/markets/${encodeURIComponent(m.ticker)}/candlesticks?${q}`;
+        const first = hist || (cutoff && m.closeTime < cutoff) ? histPath : livePath;
         try {
-          const d = await get(p);
+          // Markets near the cutoff can still sit in the other tier (the archive move lags the cutoff): a 404 from
+          // one tier is tried on the other before the market counts as rejected.
+          const d = await get(first).catch((e) => { if (e instanceof HttpError && e.status === 404) return get(first === histPath ? livePath : histPath); throw e; });
           const candles = (d.candlesticks ?? []).map(parseCandle).filter((c: KalshiCandle | undefined): c is KalshiCandle => Boolean(c));
           store({ ...m, candles });
           markets++; n++;
         } catch (e) {
           // A request the API rejects for good is remembered (stored with its error), not retried each run.
-          if (e instanceof HttpError && (e.status === 400 || e.status === 404)) { store({ ...m, candles: [], error: `HTTP ${e.status}` }); rejected++; }
+          if (e instanceof HttpError && (e.status === 400 || e.status === 404)) { store({ ...m, candles: [], error: e.status === 404 ? 'HTTP 404 (both tiers)' : `HTTP ${e.status}` }); rejected++; }
           else failed++;
           if (failed + rejected <= 5) log(`${m.ticker}: ${String(e)}`);
         }
@@ -174,7 +202,7 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
     const left = todo.length - next;
     if (left > 0) { remaining += left; if (clock() >= deadline) { budgetHit = true; log(`${series}: time budget used up, ${left} market(s) left for the next run`); } }
   }
-  log(`done: ${markets} new market(s), ${noVolume} never traded (stored without candles), ${skipped} already stored, ${rejected} rejected by the API, ${failed} failed${remaining ? `, ${remaining} left for the next run` : ''}`);
+  log(`done: ${markets} new market(s), ${noVolume} never traded (stored without candles), ${skipped} already stored, ${rejected} rejected by the API, ${failed} failed${remaining ? `, ${remaining} left for the next run` : ''}${limited() ? `; Kalshi asked to slow down ${limited()} time(s) (paused and retried)` : ''}`);
   return { markets, skipped, failed, noVolume, rejected, remaining, budgetHit };
 }
 
@@ -182,6 +210,8 @@ export interface KalshiTradesOpts {
   baseUrl?: string; series: string[]; out: string; fetchImpl?: typeof fetch; log?: (m: string) => void;
   /** Stop starting requests after this long (wall clock); the rest is fetched by the next run. */
   budgetMs?: number; concurrency?: number; clock?: () => number;
+  /** Requests a second, shared by every worker (default 10). */
+  ratePerSec?: number;
   /** Tape from this long before the event's start (or two days before the close) to the close. */
   leadMin?: number;
   /** Pages of 1000 trades per market and endpoint at most. */
@@ -198,7 +228,7 @@ export interface KalshiTradesResult { markets: number; trades: number; skipped: 
  */
 export async function downloadKalshiTrades(o: KalshiTradesOpts): Promise<KalshiTradesResult> {
   const f = o.fetchImpl ?? fetch, log = o.log ?? ((m: string) => console.log(`[kalshi-trades] ${m}`));
-  const get = getter(o.baseUrl, f);
+  const { get } = getter(o.baseUrl, f, o.ratePerSec);
   const clock = o.clock ?? Date.now;
   const deadline = o.budgetMs && o.budgetMs > 0 ? clock() + o.budgetMs : Infinity;
   const concurrency = Math.max(1, Math.floor(o.concurrency ?? 3));
