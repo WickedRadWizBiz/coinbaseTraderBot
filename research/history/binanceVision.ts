@@ -16,6 +16,7 @@
 //
 // Spot open times switched from milliseconds to microseconds on 2025-01-01; the parser handles both.
 
+import { progress } from '../progress';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -158,6 +159,7 @@ export async function downloadBinance(o: BinanceOpts): Promise<BinanceSummary[]>
             s.failed++;
             log(`${k.key}: ${(e as Error).message}`);
           }
+          progress(`Binance ${pair} ${market} ${tf} archives`, s.fetched + s.failed, todo.length);
         });
         if (batch.length) s.bars = upsertSeries(o.out, o.source ?? MARKET_SOURCE[market], asset, tf, batch.flatMap((b) => b.candles));
         saveManifest();

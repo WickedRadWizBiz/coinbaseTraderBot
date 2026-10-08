@@ -29,6 +29,7 @@
 import fs from 'fs';
 import path from 'path';
 import { TokenBucket } from '../../bot/kalshi/rateLimiter';
+import { progress } from '../progress';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const num = (v: unknown): number | null => { if (v === null || v === undefined || v === '') return null; const x = Number(v); return Number.isFinite(x) ? x : null; };
@@ -196,6 +197,7 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
           else failed++;
           if (failed + rejected <= 5) log(`${m.ticker}: ${String(e)}`);
         }
+        progress(`Kalshi ${series} contracts`, next, todo.length);
       }
     };
     await Promise.all(Array.from({ length: concurrency }, worker));

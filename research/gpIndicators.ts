@@ -43,6 +43,7 @@ import {
 import { loadSeries, storedAssets } from './history/candles';
 import { deflatedSharpe, probabilisticSharpe, rng } from './stats';
 import { WorkerPool, workerScript } from './workerPool';
+import { progress } from './progress';
 
 export const GP_SCHEMA = 'gp1';
 
@@ -292,6 +293,7 @@ export async function evolve(d: GpData, opts: GpOptions, scorer?: Scorer): Promi
     const s = pop.map((x) => x.score).filter((x) => x > -1e6).sort((a, b) => a - b);
     const g = { gen, best: s.length ? s[s.length - 1] : -1e6, median: s.length ? s[Math.floor(s.length / 2)] : -1e6, meanSize: pop.reduce((a, x) => a + x.t.length, 0) / pop.length, evaluated: seen.size };
     history.push(g);
+    progress(`Evolving ${d.target} formulas (generations)`, gen, o.generations);
     log(`[gp] ${d.target} gen ${gen}: best ${g.best.toFixed(3)}, median ${g.median.toFixed(3)}, mean size ${g.meanSize.toFixed(1)}, ${g.evaluated} formulas tried`);
   };
   updateHof(); stats(0);

@@ -12,6 +12,7 @@ import { fromRow, type CandleRow } from '../../bot/ta/candleStore';
 import type { Candle } from '../../bot/ta/indicators';
 import { cleanAndValidate, readSeries, seriesPath, upsertSeries, type HistTf } from './candles';
 import { resolveAssets } from './assets';
+import { progress } from '../progress';
 
 const GRANULARITY: Partial<Record<HistTf, number>> = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '1d': 86400 };
 
@@ -37,7 +38,8 @@ export async function backfillCoinbase(o: CoinbaseOpts): Promise<CoinbaseSummary
   const log = o.log ?? ((m: string) => console.log(`[coinbase] ${m}`));
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const out: CoinbaseSummary[] = [];
-  for (const asset of o.assets) {
+  for (const [ai, asset] of o.assets.entries()) {
+    progress('Coinbase candles (coins)', ai, o.assets.length);
     // Kalshi lists assets Coinbase does not sell (tokenised stocks, indices): asked once, not per timeframe.
     let noProduct = false;
     for (const tf of o.tfs) {

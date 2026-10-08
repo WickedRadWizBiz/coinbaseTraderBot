@@ -12,15 +12,47 @@ model better, it sends the models to the bot, which loads them without a restart
    *Laptop trainer (Windows package)* → *Run workflow*.
 2. Unzip it anywhere with about 40 GB free, then double-click `Train.cmd`. (The replay of all the history
    takes about 10 GB, the 1-minute history it is made from about 3 GB.)
-3. Press Enter to train until it stops by itself (0 hours), or type a number of hours to stop sooner.
+3. The **trainer window** opens (a Microsoft Edge app window, in the bot dashboard's look). Choose:
+   - **Continue where it left off** (the normal choice): only new data is downloaded, the tournaments carry
+     on, and what is due is retrained.
+   - **Sweep everything again**: the first round runs every step now, even the weekly ones (studies,
+     tournaments, ablations, sweeps; the pipeline's `--sweep-all`). Your models, history and tournaments
+     in progress are kept. It takes much longer.
+   - **Hours**: 0 trains until it stops by itself; a number stops sooner.
+   - **Server** (optional): the Lightsail public IP, user `ubuntu`, and the instance's SSH key file
+     (Lightsail console → Account → SSH keys → Download). With it the trainer copies the bot's recordings
+     and uploads the models; leave it empty to train on downloaded history only.
+
+   Press **Start**. While it runs, the window shows:
+   - two progress bars, **Downloads** and **Training**, each with the time left and the clock time it
+     should finish (from how long the same steps took in the last rounds, and, for a step that reports
+     its progress — contracts downloaded, tournament rounds, formula generations — from how fast it is
+     going);
+   - a third bar for the step in progress;
+   - below them, a short **explanation** of what that step is doing;
+   - the pipeline's output (folded away) and, after each round, the scoreboard;
+   - a **champions leaderboard**: every tournament (TA network, the spiking networks) as a bracket of its
+     last rounds' best (8 → 4 → 2 → the champion), and each coin's evolved formula, with the champion's top
+     attributes: fitness, Sortino, drawdown, rounds won, its genetic generation and parents, and the
+     settings that most set it apart from the population (▲ above, ▼ below the population's median). Best
+     first; the brackets are laid out wide and scaled to fit the window, and the list scrolls.
+
+   **Stop** ends the step in progress (finished steps and tournament rounds are kept; the next run
+   continues). Keep the console window open while it trains: closing it stops the trainer.
    `trainer-data\GUIDE.txt` says how long to train before live trading and what good scores look like;
    `trainer-data\STATUS.txt` shows the scores after every round.
-4. **First run only:** it asks for your server, so it can copy the bot's recordings and upload the
-   models.
-   - Give the Lightsail public IP, user `ubuntu`, and the instance's SSH key file (Lightsail console →
-     Account → SSH keys → Download).
-   - Leave the address empty to train on downloaded history only.
-   - To change these later, run `Train.cmd --setup`.
+4. **New versions.** The window checks the *trainer-latest* release when it starts and every 6 hours. When
+   it was built from a newer commit, the window asks whether to install it. Nothing is downloaded until
+   you say yes. Then it:
+   1. stops training;
+   2. downloads the new zip;
+   3. waits for the trainer to exit;
+   4. unpacks the zip over the install folder (`trainer-data`, your data and models, is never touched);
+   5. starts the trainer again.
+
+   *Not now* hides the offer until a newer build appears.
+5. `TrainConsole.cmd` is the old console-only way: it asks for the hours in the console (`--setup` asks for
+   the server again) and prints everything there.
 
 Nothing to install: the zip carries Node, the bundled trainer, and TA-Lib compiled for Windows.
 

@@ -328,12 +328,40 @@ function pipelineCmd(): { cmd: string; args: string[] } {
   return entry.endsWith('.cjs') ? { cmd: process.execPath, args: [path.join(path.dirname(entry), 'pipeline.cjs')] } : pipelineCommand(entry);
 }
 
-async function runRound(env: NodeJS.ProcessEnv, only: string[] | undefined, logFile: string): Promise<number> {
+/** What the trainer window (research/trainerUi.ts) hears from a run. */
+export interface TrainerHooks {
+  /** Every line the pipeline prints ([progress] lines included; they are kept out of the console and the log). */
+  line?: (l: string) => void;
+  phase?: (p: 'starting' | 'pull' | 'pipeline' | 'push' | 'done') => void;
+  roundStart?: (round: number, full: boolean, sweepAll: boolean) => void;
+  roundEnd?: (board: string[]) => void;
+  /** The pipeline process of the round in progress (undefined between rounds): the window's Stop ends it. */
+  child?: (c: ChildProcess | undefined) => void;
+  stopRequested?: () => boolean;
+}
+
+async function runRound(env: NodeJS.ProcessEnv, only: string[] | undefined, logFile: string, extra: string[] = [], hooks?: TrainerHooks): Promise<number> {
   const { cmd, args } = pipelineCmd();
-  const child = spawn(cmd, [...args, ...(only?.length ? ['--only', only.join(',')] : [])], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(cmd, [...args, ...(only?.length ? ['--only', only.join(',')] : []), ...extra], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  hooks?.child?.(child);
   const out = fs.createWriteStream(logFile, { flags: 'a' });
-  for (const s of [child.stdout!, child.stderr!]) s.on('data', (b: Buffer) => { process.stdout.write(b); out.write(b); });
+  for (const s of [child.stdout!, child.stderr!]) {
+    let buf = '';
+    s.on('data', (b: Buffer) => {
+      buf += b.toString('utf8');
+      let i: number;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const l = buf.slice(0, i + 1);
+        buf = buf.slice(i + 1);
+        hooks?.line?.(l);
+        if (l.startsWith('[progress] ')) continue;
+        process.stdout.write(l); out.write(l);
+      }
+    });
+    s.on('end', () => { if (buf) { hooks?.line?.(buf); process.stdout.write(buf); out.write(buf); } });
+  }
   const code = await exit(child);
+  hooks?.child?.(undefined);
   out.end();
   return code;
 }
@@ -363,18 +391,27 @@ function readReadiness(models: string, since: number): ReadinessFile | undefined
 
 const writeText = (file: string, text: string) => fs.writeFileSync(file, process.platform === 'win32' ? text.replace(/\r?\n/g, '\r\n') : text);
 
+/** The trainer's saved server settings (trainer-data/trainer.json). */
+export function readSettings(dataDir: string): TrainerSettings {
+  try { const j = JSON.parse(fs.readFileSync(path.join(dataDir, 'trainer.json'), 'utf8')); return { host: j.host ?? undefined, user: j.user ?? 'ubuntu', port: j.port ?? 22, key: j.key ?? undefined }; } catch { return { user: 'ubuntu', port: 22 }; }
+}
+export function writeSettings(dataDir: string, s: TrainerSettings): void {
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(path.join(dataDir, 'trainer.json'), JSON.stringify({ host: s.host ?? null, user: s.user ?? 'ubuntu', port: s.port ?? 22, key: s.key ?? null }, null, 1));
+}
+
+/** Command line: the questions in the console, then the rounds. With --ui, the trainer window instead. */
 export async function laptopTrainMain(): Promise<void> {
-  const t0 = Date.now();
+  const dataDir = path.resolve(argOf('data') ?? process.env.DATA_DIR ?? 'trainer-data');
+  if (flag('ui')) {
+    const { startTrainerUi } = await import('./trainerUi');
+    await startTrainerUi({ dataDir, port: Number(argOf('port-ui') ?? 0) || undefined, open: !flag('no-open') });
+    return;
+  }
   const hours = Number(argOf('hours') ?? 0);
   if (!(hours >= 0)) throw new Error('--hours must be 0 (train until it stops by itself) or a number of hours');
-  const continuous = hours === 0;
-  const deadline = continuous ? Infinity : t0 + hours * 3_600_000;
-  const dataDir = path.resolve(argOf('data') ?? process.env.DATA_DIR ?? 'trainer-data');
-  const models = path.join(dataDir, 'models');
-  fs.mkdirSync(path.join(models, 'logs'), { recursive: true });
   const settingsFile = path.join(dataDir, 'trainer.json');
-  let s: TrainerSettings = {};
-  try { s = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch { /* first run */ }
+  let s: TrainerSettings = readSettings(dataDir);
   s = { ...s, host: argOf('host') ?? s.host, user: argOf('user') ?? s.user ?? 'ubuntu', port: Number(argOf('port') ?? s.port ?? 22), key: argOf('key') ?? s.key };
   const wantSync = !(flag('no-pull') && flag('no-push'));
   if (wantSync && (flag('setup') || (!s.host && !fs.existsSync(settingsFile))) && process.stdin.isTTY) {
@@ -388,7 +425,24 @@ export async function laptopTrainMain(): Promise<void> {
     }
     rl.close();
   }
-  fs.writeFileSync(settingsFile, JSON.stringify({ host: s.host ?? null, user: s.user, port: s.port, key: s.key ?? null }, null, 1));
+  writeSettings(dataDir, s);
+  let stop = false;
+  process.on('SIGINT', () => { if (stop) process.exit(130); stop = true; log('stopping after the step in progress (Ctrl+C again to quit now)'); });
+  await runTrainer({ hours, dataDir, settings: s, sweepAll: flag('sweep-all'), hooks: { stopRequested: () => stop } });
+}
+
+/** The rounds (shared by the console and the window): pull, rounds of the pipeline until it stops, push. */
+export async function runTrainer(o: { hours: number; dataDir: string; settings: TrainerSettings; sweepAll?: boolean; hooks?: TrainerHooks }): Promise<{ why?: string }> {
+  const t0 = Date.now();
+  const hooks = o.hooks;
+  const { hours, dataDir } = o;
+  const s = o.settings;
+  const continuous = hours === 0;
+  const deadline = continuous ? Infinity : t0 + hours * 3_600_000;
+  const models = path.join(dataDir, 'models');
+  fs.mkdirSync(path.join(models, 'logs'), { recursive: true });
+  const wantSync = !(flag('no-pull') && flag('no-push'));
+  hooks?.phase?.('starting');
   // Your own trainer settings (the target, the plateau): over the server's and the laptop profile's.
   const userEnvFile = path.join(dataDir, 'trainer.env');
   if (!fs.existsSync(userEnvFile)) writeText(userEnvFile, TRAINER_ENV_TEMPLATE);
@@ -406,6 +460,7 @@ export async function laptopTrainMain(): Promise<void> {
   // ---- 1. pull (and the newest recordings again before every later full round) ----
   const pull = async (days: number, recordingsOnly: boolean) => {
     if (!server || flag('no-pull')) return;
+    hooks?.phase?.('pull');
     log(recordingsOnly ? `copying the bot's newest recordings (last ${days} days)...` : `copying the bot's data (recordings from the last ${days} days, history, models, state)...`);
     const what = recordingsOnly ? `-path './recordings/md-*' -mtime -${days}` : `\\( ! -path './recordings/md-*' -o -mtime -${days} \\) ! -path './audit*' ! -path './logs/*' ! -name '*.log' ! -path './.venv*'`;
     const m = server.run(`cd ~/bot/data && find . -type f ${what} ! -name '*.tmp' -printf '%P\\t%s\\t%T@\\n'`);
@@ -426,6 +481,7 @@ export async function laptopTrainMain(): Promise<void> {
   // ---- 4. push: after every round that made a model better, and at the end ----
   const push = async (why: string) => {
     if (!server || flag('no-push')) return;
+    hooks?.phase?.('push');
     const m = server.run(`mkdir -p ~/bot/data/models && cd ~/bot/data/models && find . -type f -printf '%P\\t%s\\t%T@\\n'`);
     if (!m.ok) { log(`listing the server's models failed: ${m.err.trim().slice(0, 300)}`); return; }
     const send = filesToPush(localManifest(models), parseManifest(m.out));
@@ -437,7 +493,7 @@ export async function laptopTrainMain(): Promise<void> {
 
   // The server's settings, then the laptop's bigger budgets over them, then trainer.env, then anything set in
   // the environment.
-  const envFor = (leftHours: number): NodeJS.ProcessEnv => ({ ...serverEnv, ...laptopProfile(leftHours, os.cpus().length, continuous), ...userEnv, ...process.env, DATA_DIR: dataDir, AUTO_TRAIN: 'off', TRADING_MODE: 'paper', DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32) });
+  const envFor = (leftHours: number): NodeJS.ProcessEnv => ({ ...serverEnv, ...laptopProfile(leftHours, os.cpus().length, continuous), ...userEnv, ...process.env, DATA_DIR: dataDir, AUTO_TRAIN: 'off', TRADING_MODE: 'paper', TRAINER_PROGRESS: '1', DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32) });
   const A = loadConfig(envFor(continuous ? 24 : hours)).autoTrain;
   const guide = guideText({ poolUsd: A.targetPoolUsd, dailyPct: A.targetDailyPct, maxDdPct: A.targetMaxDdPct, plateauRounds: A.plateauRounds });
   writeText(path.join(dataDir, 'GUIDE.txt'), guide);
@@ -445,11 +501,11 @@ export async function laptopTrainMain(): Promise<void> {
 
   // ---- 2-3. rounds ----
   const only = argOf('only')?.split(',').filter(Boolean);
-  let stop = false, why: string | undefined;
-  process.on('SIGINT', () => { if (stop) process.exit(130); stop = true; why = 'stopped with Ctrl+C'; log('stopping after the step in progress (Ctrl+C again to quit now)'); });
+  let why: string | undefined;
+  const stopped = () => !!hooks?.stopRequested?.();
   const logFile = path.join(models, 'logs', `pipeline-laptop-${new Date(t0).toISOString().replace(/[:.]/g, '-')}.log`);
   let round = 0, lastMs = 0, lastFull = 0, plateau = 0;
-  while (!stop) {
+  while (!stopped()) {
     const left = deadline - Date.now();
     if (round > 0 && (left < 15 * 60_000 || left < 0.6 * lastMs)) { why = `the ${hours} h budget is used up`; break; }
     round++;
@@ -459,8 +515,12 @@ export async function laptopTrainMain(): Promise<void> {
     if (full) lastFull = Date.now();
     const steps = only ?? (full ? undefined : CONTINUE_STEPS);
     log(`round ${round}: ${steps ? steps.join(', ') : 'every step'} (${continuous ? 'until it stops by itself' : `${(left / 3_600_000).toFixed(1)} h left`})`);
+    const sweepAll = !!o.sweepAll && round === 1;
+    hooks?.roundStart?.(round, full, sweepAll);
+    hooks?.phase?.('pipeline');
     const r0 = Date.now();
-    const code = await runRound(envFor(continuous ? 24 : left / 3_600_000), steps, logFile);
+    const code = await runRound(envFor(continuous ? 24 : left / 3_600_000), steps, logFile, sweepAll ? ['--sweep-all'] : [], hooks);
+    if (stopped()) { why = 'stopped'; log(`round ${round} stopped`); break; }
     lastMs = Date.now() - r0;
     process.exitCode = code === 0 ? 0 : 1;
     log(`round ${round} finished in ${(lastMs / 60_000).toFixed(0)} min (exit ${code})`);
@@ -474,6 +534,7 @@ export async function laptopTrainMain(): Promise<void> {
     console.log('');
     for (const l of board) console.log(`   ${l}`);
     console.log('');
+    hooks?.roundEnd?.(board);
     try {
       writeText(path.join(dataDir, 'STATUS.txt'), [`Kalshi bot trainer, ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC`, '', ...board, '', 'Steps this round:', ...reportSummary(rep).map((l) => `  ${l}`), '', 'What these numbers should look like: GUIDE.txt', ''].join('\n'));
       const w = readiness?.wholeBot;
@@ -485,8 +546,10 @@ export async function laptopTrainMain(): Promise<void> {
   }
 
   await push('end of the run');
-  if (!server) log(`models are in ${models}${s.host ? '' : ' (no server set: run with --setup to add one)'}`);
+  if (!server) log(`models are in ${models}${s.host ? '' : ' (no server set: add one to send models to your bot)'}`);
   log(`done in ${((Date.now() - t0) / 3_600_000).toFixed(1)} h${why ? `: ${why}` : ''}`);
+  hooks?.phase?.('done');
+  return { why };
 }
 
 if (process.argv[1] && /laptopTrain\.(ts|cjs|js)$/.test(process.argv[1])) {

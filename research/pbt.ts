@@ -23,6 +23,7 @@
 // offspring take the slots of the worst; the champion parents and the best runners-up carry on. Optionally
 // the population is split into islands whose winners are the parents.
 
+import { progress } from './progress';
 import { rng } from './stats';
 import { perturb, type FitnessReport, type Hyper, type Interaction, type MutationSpec } from '../bot/util/fitness';
 import { crossoverGenes, geneScale, geneTraits, GENE_WINDOW, islandCount, newGaState, parentCount, planBreeding, roundRanks, type GaGeneration, type GaState, type GeneTrait } from './genetic';
@@ -330,6 +331,7 @@ export async function runPbt<S>(o: {
     }
     out.push(entry);
     await o.onRound?.({ members, trials, log: out, round, ga });
+    progress('Tournament rounds', o.rounds.indexOf(round) + 1, o.rounds.length);
     log(`round ${round.index} (${entry.evalFrom}..${entry.evalTo}): ${entry.ranking.map((x) => `#${x.member} ${x.fitness.toFixed(2)}`).join(', ')}; elite #${elite.id}, ${note}`);
   }
   const lastRank = out[out.length - 1]?.ranking[0]?.member ?? 0;

@@ -2,15 +2,25 @@ Kalshi bot trainer (Windows)
 ============================
 
 1. Unzip this folder anywhere (it needs ~40 GB free for history, its replay and the bot's recordings).
-2. Double-click Train.cmd and press Enter (0 hours = keep training until the bot stops improving or
-   reaches the target), or type a number of hours to stop sooner.
-3. First run only: it asks for your server. To copy the bot's recorded market data from it and send the
-   trained models back, give:
-     - the Lightsail instance's public IP
-     - the SSH user (ubuntu)
-     - the instance's SSH key file: Lightsail console > Account > SSH keys > Download (a .pem file)
-   Leave the address empty to train on downloaded history only (models then stay in trainer-data\models).
-   Change these later with:  Train.cmd --setup
+2. Double-click Train.cmd. The trainer window opens (a Microsoft Edge app window, in the bot dashboard's
+   look). In it:
+     - choose how this run trains: "Continue where it left off" (the normal choice: only new data is
+       downloaded, the tournaments carry on) or "Sweep everything again" (the first round runs every step
+       now, even the weekly ones; your models and history are kept);
+     - the hours to train (0 = keep training until the bot stops improving or reaches the target);
+     - optionally your server, to copy the bot's recorded market data from it and send the trained models
+       back: the Lightsail instance's public IP, the SSH user (ubuntu) and the instance's SSH key file
+       (Lightsail console > Account > SSH keys > Download, a .pem file). Leave it empty to train on
+       downloaded history only (models then stay in trainer-data\models).
+   Press Start. Two progress bars show the downloads and the training with the time left (from how long the
+   last rounds took and how fast the current step is going), a third the step in progress, and below them
+   a short explanation of what the trainer is doing right now. Below, a champions leaderboard shows every
+   tournament as a bracket narrowing to its champion, with the champion's top attributes. Keep the console window open while it
+   trains; closing it stops the trainer (finished steps are kept, the next run continues).
+3. New versions: the window checks for a newer trainer when it starts and every 6 hours, and asks before
+   installing one. If you say yes it stops training (finished steps are kept), downloads the new version,
+   installs it over this folder (trainer-data is never touched) and opens again by itself.
+   TrainConsole.cmd is the old console-only way (asks for the hours in the console; --setup for the server).
 
 What it does: downloads years of crypto history (Binance spot, perpetuals, funding and open interest;
 Coinbase) and a year of Kalshi's settled contracts, copies the bot's own recordings, then runs the bot's

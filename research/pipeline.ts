@@ -54,6 +54,7 @@
 //   npm run pipeline                         # everything
 //   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, rule_book, gp, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, readiness
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
+//   npm run pipeline -- --sweep-all          # every step due now (weekly studies, tournaments, ablations, sweeps)
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
 
 import { loadRuleBookHistory, ruleBookSummary, runRuleBook } from './ruleBook';
@@ -218,6 +219,9 @@ export interface PipelineOpts {
   forceTaNetFresh?: boolean;
   /** Re-run the SNN population tournaments even if not due. */
   forceSnnPbt?: boolean;
+  /** Every step due now (the laptop trainer's "sweep everything again"): weekly studies, retrains, sweeps,
+   *  ablations and tournaments run whatever their schedule says. Models and tournaments in progress are kept. */
+  forceAll?: boolean;
 }
 
 export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepResult[]; state: PipelineState; report: string }> {
@@ -234,6 +238,11 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const fillDir = (d: SnnDomain) => path.join(fillRoot, d);
   for (const d of REPLAYABLE) fs.mkdirSync(fillDir(d), { recursive: true });
   const state = readState(A.dir);
+  if (o.forceAll) {
+    delete state.ruleBookAt; delete state.gpAt; delete state.setupsTrainedAt; delete state.taNetTrainedAt; state.sweptAt = {};
+    o = { ...o, forceAblation: true, forceSnnPbt: true, forceTaNet: true };
+    log('sweeping everything: every step is due this run');
+  }
   const steps: StepResult[] = [];
   const want = (s: Step) => !o.only?.length || o.only.includes(s);
   const rec = A.recordingsDir;
@@ -933,7 +942,7 @@ async function main() {
   const i = process.argv.indexOf('--only');
   const only = i >= 0 ? (process.argv[i + 1] ?? '').split(',').filter(Boolean) as Step[] : undefined;
   for (const s of only ?? []) if (!STEPS.includes(s)) throw new Error(`unknown step ${s} (steps: ${STEPS.join(', ')})`);
-  const r = await runPipeline({ only, forceAblation: process.argv.includes('--force-ablation'), forceTaNet: process.argv.includes('--force-ta-net') || process.argv.includes('--fresh-ta-net'), forceTaNetFresh: process.argv.includes('--fresh-ta-net'), forceSnnPbt: process.argv.includes('--force-snn-pbt') });
+  const r = await runPipeline({ only, forceAblation: process.argv.includes('--force-ablation'), forceTaNet: process.argv.includes('--force-ta-net') || process.argv.includes('--fresh-ta-net'), forceTaNetFresh: process.argv.includes('--fresh-ta-net'), forceSnnPbt: process.argv.includes('--force-snn-pbt'), forceAll: process.argv.includes('--sweep-all') });
   const failed = r.steps.filter((s) => !s.ok);
   console.log(`[pipeline] ${r.steps.length - failed.length}/${r.steps.length} steps ok${failed.length ? `; failed: ${failed.map((f) => f.step).join(', ')}` : ''}`);
   process.exitCode = failed.length ? 1 : 0;
