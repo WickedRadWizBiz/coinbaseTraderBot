@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import { test } from 'node:test';
+import { loadConfig } from '../bot/config';
 import { filesToPull, filesToPush, laptopProfile, localManifest, parseManifest, safeServerEnv, Server } from '../research/laptopTrain';
 import { tmpDir } from './helpers';
 
@@ -26,6 +27,8 @@ test('laptop trainer: the server settings it trains with carry no credentials or
   assert.equal(p.AUTO_TRAIN_CHAMPION, 'true');
   assert.equal(p.SWEEP_HOURS, '3');
   assert.ok(Number(p.KALSHI_HISTORY_DAYS) >= 365);
+  assert.equal(p.HISTORY_REPLAY_YEARS, '0', 'the replay covers all of the history');
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), HISTORY_REPLAY_YEARS: '0' } as NodeJS.ProcessEnv).taNet.historyReplayYears, 0);
   const q = laptopProfile(12, 16);
   assert.equal(q.TRAIN_WORKERS, '15');
   assert.equal(q.AUTO_TRAIN_SNN_PBT_POPULATION, '15');

@@ -14,9 +14,17 @@ import { FeatureHub } from '../bot/model/featureEngine';
 import { contractKind, type ContractTerms, type MarketKind } from '../bot/model/fairValue';
 import type { SnnConf, SnnContext } from '../bot/model/featureEngine';
 import type { TennisScore } from '../bot/tennis/tennisModel';
+import { hashStr, normals } from './history/historyReplay';
 
 /** Settlement averaging in research, matching the bot's SETTLEMENT_AVG (default official). */
 const AVG_MODE: AvgMode = process.env.SETTLEMENT_AVG === 'continuous' ? 'continuous' : 'official';
+/** The history replay's prints (records marked `hist`) sit on a 15 s grid (research/history/historyReplay.ts). */
+const HIST_GRID_MS = 15_000;
+/** Longest gap between two such prints that is filled (a longer one stays a gap, as a stalled feed's would). */
+const FILL_MAX_MS = 20_000;
+/** A series being filled: its last value and time, its last print's time, the bridge's seed key, and the
+ *  asset whose bars it also feeds (the settlement index). */
+interface Fill { key: string; v: number; ts: number; print: number; bars?: string }
 
 export interface RecMarket {
   ticker: string;
@@ -110,9 +118,55 @@ export class ReplayState {
   /** Live tennis scores (Live Tennis API), latest per event. */
   readonly tennisScores = new Map<string, TennisScore & { ts: number; tiebreak?: boolean; breaksTotal?: [number, number] | null }>();
   now = 0;
+  /** History replay: the seconds between a series' 15 s prints, filled as the live feed's one value a second
+   *  fills them -- a Brownian bridge from print to print at the series' own volatility, the last print held
+   *  until the next one is read -- so every window the live features read one value a second from (5 s gap
+   *  limits, Kalshi's 60 one-second settlement marks, the dominance trackers' 10 s limit, per-second
+   *  volatility and path shape) is filled as live data fills it. Only seconds before the record being
+   *  applied are filled: nothing is known early. Live recordings (no `hist` mark) are left as recorded. */
+  private readonly fill = new Map<IndexTracker, Fill>();
+
+  /** Hold every filled series' last value through the second marks up to `t`. Off the print grid only: on
+   *  it, the series' own print may still come in this instant, and the bridge needs those seconds. */
+  private holdUntil(t: number): void {
+    if (t % HIST_GRID_MS === 0) return;
+    for (const [tr, f] of this.fill) {
+      const end = Math.min(t, f.print + FILL_MAX_MS);
+      for (let m = Math.floor(f.ts / 1000) * 1000 + 1000; m <= end; m += 1000) this.addFilled(tr, f, f.v, m);
+    }
+  }
+
+  private addFilled(tr: IndexTracker, f: Fill, v: number, ts: number): void {
+    tr.add(v, ts);
+    if (f.bars) this.features.onIndex(f.bars, v, ts);
+    f.ts = ts;
+  }
+
+  /** A history replay print: the seconds since the series' last value bridged toward it, then the print. */
+  private histPrint(tr: IndexTracker, key: string, v: number, ts: number, bars?: string): void {
+    const f = this.fill.get(tr);
+    if (f && ts > f.ts && ts - f.ts <= FILL_MAX_MS && v > 0 && f.v > 0) {
+      const first = Math.floor(f.ts / 1000) * 1000 + 1000, n = Math.ceil((ts - first) / 1000);
+      if (n > 0) {
+        const x1 = Math.log(v);
+        let tc = f.ts, x = Math.log(f.v);
+        const sig = tr.vol(0)?.sigmaPerSqrtSec ?? Math.abs(x1 - x) / Math.sqrt((ts - tc) / 1000);
+        const z = normals(hashStr(key) ^ Math.floor(ts / 1000), n);
+        for (let m = first, i = 0; m < ts; m += 1000, i++) {
+          const dt = (m - tc) / 1000, span = (ts - tc) / 1000;
+          x += ((x1 - x) * dt) / span + sig * Math.sqrt((dt * (span - dt)) / span) * z[i];
+          tc = m;
+          this.addFilled(tr, f, Math.exp(x), m);
+        }
+      }
+    }
+    tr.add(v, ts);
+    this.fill.set(tr, { key, v, ts, print: ts, bars });
+  }
 
   apply(e: RecEvent): void {
     this.now = e.t;
+    if (this.fill.size) this.holdUntil(e.t);
     switch (e.k) {
       case 'market':
         this.markets.set(e.ticker, {
@@ -124,18 +178,26 @@ export class ReplayState {
       case 'index': {
         let tr = this.index.get(e.asset);
         if (!tr) { tr = new IndexTracker(e.asset, undefined, undefined, AVG_MODE); this.index.set(e.asset, tr); }
-        tr.add(e.value, e.ts ?? e.t);
+        if (e.hist) this.histPrint(tr, e.asset, e.value, e.ts ?? e.t, e.asset);
+        else tr.add(e.value, e.ts ?? e.t);
         this.features.onIndex(e.asset, e.value, e.ts ?? e.t);
         break;
       }
       case 'dominance':
+        if (e.hist) {
+          if (e.usdtd > 0) this.histPrint(this.usdtd, 'USDT.D', e.usdtd, e.ts ?? e.t);
+          if (e.btcd > 0) this.histPrint(this.btcd, 'BTC.D', e.btcd, e.ts ?? e.t);
+          break;
+        }
         this.usdtd.add(e.usdtd, e.ts ?? e.t);
         this.btcd.add(e.btcd, e.ts ?? e.t);
         break;
       case 'spot': {
         let tr = this.spot.get(e.asset);
         if (!tr) { tr = new IndexTracker(e.asset); this.spot.set(e.asset, tr); }
-        tr.add(e.value, e.ts ?? e.t);
+        // The same bridge draws as the asset's index (one market, one path).
+        if (e.hist) this.histPrint(tr, e.asset, e.value, e.ts ?? e.t);
+        else tr.add(e.value, e.ts ?? e.t);
         break;
       }
       case 'book': {

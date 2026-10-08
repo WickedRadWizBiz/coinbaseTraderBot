@@ -75,7 +75,7 @@ import { replaySnn } from './snnReplay';
 import { trainMetaModelMain } from './trainMetaModel';
 import { trainPerpMain } from './trainPerpModel';
 import { trainSnnMain } from './trainSnn';
-import { runSnnPbt } from './snnPbt';
+import { eraDays, runSnnPbt } from './snnPbt';
 import { withSnnHyper } from '../bot/snn/population';
 import { versionHash } from '../bot/snn/params';
 import { trainTennisMain } from './trainTennisModel';
@@ -90,7 +90,7 @@ import { readJournalTrades } from '../bot/setups/journal';
 import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
 import { exportTaNetOos, oosDir } from './taNetOos';
 import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, type BinanceMarket } from './history/binanceVision';
-import { buildHistoryReplay, perpSpecsFromRecordings, replayKalshiDays, replayTennisDays } from './history/historyReplay';
+import { buildHistoryReplay, historyStart, perpSpecsFromRecordings, replayKalshiDays, replayPerpDays, replayTennisDays } from './history/historyReplay';
 import { workerCount } from './workerPool';
 import { compareIndexSources } from '../bot/marketdata/historyStore';
 import { backfillCoinbase } from './history/coinbaseBackfill';
@@ -116,6 +116,8 @@ export interface SnnDomainState {
   pbtStage?: Stage;
   pbtAt?: number;
   pbtComplete?: boolean;
+  /** How the tournament's days were chosen (the latest days, or blocks across the replay's years). */
+  pbtLayout?: string;
 }
 
 export const REPLAYABLE: Exclude<SnnDomain, 'tennis'>[] = ['crypto', 'perps'];
@@ -300,10 +302,11 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       // The live bot rebuilds BTCDOM itself (Binance's futures API refuses US servers): check it tracks
       // Binance's own index wherever both exist.
       // The history replay's inputs: 1-minute spot (kept apart from the TA steps' store) and perpetual bars,
-      // and funding rates, for the replayed assets and years.
+      // and funding rates, for the replayed assets and years (HISTORY_REPLAY_YEARS=0: everything Binance
+      // has, from each coin's first month).
       let replayInputs: unknown;
       if (T.historyReplay) {
-        const fromMonth = new Date(now - T.historyReplayYears * 365 * 86_400_000).toISOString().slice(0, 7);
+        const fromMonth = T.historyReplayYears > 0 ? new Date(now - T.historyReplayYears * 365 * 86_400_000).toISOString().slice(0, 7) : undefined;
         const rs = await downloadBinance({ out: T.historyDir, assets: T.historyReplayAssets, intervals: ['1m'], markets: ['spot'], source: 'binance-1m', fromMonth, log: (m) => log(`binance: ${m}`) });
         const ru = await downloadBinance({ out: T.historyDir, assets: T.historyReplayAssets, intervals: ['1m'], markets: ['um'], fromMonth, log: (m) => log(`binance: ${m}`) });
         const fu = await downloadBinanceFunding({ out: T.historyDir, assets: T.historyReplayAssets, fromMonth, log: (m) => log(`binance: ${m}`) });
@@ -345,7 +348,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   if (want('history_replay')) {
     await run('history_replay', async () => {
       const yesterday = new Date(Math.floor(now / 86_400_000) * 86_400_000 - 86_400_000).toISOString().slice(0, 10);
-      const fromDay = new Date(now - T.historyReplayYears * 365 * 86_400_000).toISOString().slice(0, 10);
+      // From the first day of 1-minute history (HISTORY_REPLAY_YEARS=0), else the last N years.
+      const fromDay = T.historyReplayYears > 0 ? new Date(now - T.historyReplayYears * 365 * 86_400_000).toISOString().slice(0, 10) : historyStart(T.historyDir, T.historyReplayAssets) ?? yesterday;
       const perpSpecs = await perpSpecsFromRecordings(rec, T.historyReplayAssets);
       const r = await buildHistoryReplay({ historyDir: T.historyDir, outDir: replayDir, assets: T.historyReplayAssets, fromDay, toDay: yesterday, perpSpecs, tennisSeries: cfg.tennis.enabled ? cfg.tennis.series : [], log });
       if (!r.assets.length) throw new SkipStep(`no 1-minute history yet (${r.notes.join('; ')})`);
@@ -559,22 +563,27 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         if (A.snnStage === 'auto') stage = k > 0 ? STAGES[k] : base;
         stageAccepted = k > 0 && STAGES.indexOf(stage) <= k;
       }
-      // Population tournament: three identical networks of this stage, knobs within +/-10%, fight
-      // over the recorded days; the elite's knobs are this network's hyperparameters from now on.
-      const pbtDue = o.forceSnnPbt || ds.pbtStage !== stage || !ds.pbtHyper || ds.pbtComplete === false || (A.snnPbtEveryDays > 0 && now - (ds.pbtAt ?? 0) >= A.snnPbtEveryDays * 86_400_000);
-      const pbtDays = lastSrc(A.snnPbtDays);
+      // Population tournament: identical networks of this stage, knobs within +/-10%, fight over the days;
+      // the elite's knobs are this network's hyperparameters from now on. On the history replay the days
+      // are blocks spread over all its years (perps: from Binance's first perpetual), so the knobs must
+      // hold up in every kind of market; on the recordings, the latest days.
+      const block = 2 * A.snnPbtInitDays + 1;
+      const layout = src === rec ? 'latest' : `era:${block}`;
+      const pbtDue = o.forceSnnPbt || ds.pbtStage !== stage || !ds.pbtHyper || ds.pbtComplete === false || (ds.pbtLayout ?? 'latest') !== layout || (A.snnPbtEveryDays > 0 && now - (ds.pbtAt ?? 0) >= A.snnPbtEveryDays * 86_400_000);
+      const pbtDays = src === rec ? lastSrc(A.snnPbtDays) : eraDays(domain === 'perps' ? replayPerpDays(replayDir) : srcDays, A.snnPbtDays, block);
       const pbt = await run(`snn-${domain}-pbt`, async () => {
         let r;
         try {
-          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), log });
+          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, allDays: srcDays, layout, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), log });
         } catch (e) {
           if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;
         }
         ds.pbtComplete = r.complete;
+        ds.pbtLayout = layout;
         if (!r.complete) return { complete: false, reason: `tournament in progress: ${r.rounds} round(s) done, ${r.remaining} to go`, elite: r.elite };
         ds.pbtHyper = r.elite.hyper; ds.pbtStage = stage; ds.pbtAt = now;
-        return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: src === rec ? 'recordings' : 'history replay' };
+        return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: src === rec ? 'recordings' : `history replay, ${pbtDays.length} days from ${pbtDays[0]} to ${pbtDays[pbtDays.length - 1]}` };
       }, srcGate ?? (pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`)) as { complete?: boolean } | undefined;
       const hyper = ds.pbtStage === stage ? ds.pbtHyper : undefined;
       const trainNeeded = Boolean(verdicts) || Boolean(pbt?.complete) || !fs.existsSync(file) || ds.stage !== stage;
@@ -689,16 +698,25 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
 
   // ---- 7. perps (SNN 1h/4h direction among the features) ----
   if (want('perps')) {
-    // Years of replayed perpetual history when the replay exists (HISTORY_REPLAY); else the bot's recordings.
+    // Every day of replayed perpetual history when the replay exists (HISTORY_REPLAY: from Binance's first
+    // perpetual, September 2019); else the bot's recordings. Each day's rows are cached, so a run only
+    // computes the new days (all cores at once on the first run).
     const perpSrc = T.historyReplay && replayDays().length >= 30 ? replayDir : rec;
     await run('perps', async () => {
       const cand = path.join(work, 'perp_model.candidate.json');
-      try { await trainPerpMain(argsOf({ recordings: perpSrc, out: cand, every: perpSrc === rec ? undefined : 900 })); } catch (e) {
+      try { await trainPerpMain(argsOf({ recordings: perpSrc, out: cand, every: perpSrc === rec ? undefined : 900, cache: path.join(work, perpSrc === rec ? 'perp-dataset-rec' : 'perp-dataset'), workers: workerCount() })); } catch (e) {
         if (/record more perp data|no perp/i.test((e as Error).message)) throw new SkipStep('no perp quotes recorded yet (PERPS_FEED=true records them)');
         throw e;
       }
       if (!fs.existsSync(cand)) throw new SkipStep('perp trainer wrote no model');
-      await perpBacktestMain(argsOf({ recordings: perpSrc, model: cand }), true);
+      // The execution backtest: the replay's latest year of perpetual quotes (the market as it trades now).
+      let btSrc = perpSrc;
+      if (perpSrc === replayDir) {
+        btSrc = path.join(work, 'perp-backtest-days');
+        fs.rmSync(btSrc, { recursive: true, force: true });
+        linkDays(replayPerpDays(replayDir).slice(-365).map((d) => ({ day: d, file: path.join(replayDir, `md-${d}.jsonl.gz`) })), btSrc);
+      }
+      await perpBacktestMain(argsOf({ recordings: btSrc, model: cand }), true);
       const m = PerpModel.load(cand);
       const ok = Boolean(m?.validated());
       if (A.promote === 'validated' && !ok) return { promoted: false, reason: m?.blockers().join('; ') };
