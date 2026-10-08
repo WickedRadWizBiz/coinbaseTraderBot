@@ -26,10 +26,11 @@ export class TokenBucket {
   /**
    * The exchange answered 429: the real limit is lower than this bucket thinks (another client on the
    * same IP or account, or a stricter tier). Pause all callers, doubling per consecutive 429
-   * (1 s, 2 s, 4 s ... 30 s), and empty the bucket so the restart is gradual.
+   * (1 s, 2 s, 4 s ... 30 s), at least `minMs` (the server's Retry-After), and empty the bucket so the
+   * restart is gradual.
    */
-  rateLimited(): number {
-    const ms = Math.min(30_000, 1000 * 2 ** Math.min(this.strikes, 5));
+  rateLimited(minMs = 0): number {
+    const ms = Math.max(Math.min(minMs, 120_000), Math.min(30_000, 1000 * 2 ** Math.min(this.strikes, 5)));
     this.strikes++;
     this.pausedUntil = Math.max(this.pausedUntil, this.now() + ms);
     this.tokens = 0;

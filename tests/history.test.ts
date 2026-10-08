@@ -228,6 +228,17 @@ test('Coinbase backfill: walks back to the listing, then forward on the next run
   assert.equal(r2[0].added, 500, 'forward fill of the missing tail');
 });
 
+test('Coinbase backfill: an asset Coinbase does not sell is asked for once, not once per timeframe', async () => {
+  const dir = tmpDir();
+  let reqs = 0;
+  const logs: string[] = [];
+  const fetchImpl = (async () => { reqs++; return new Response('{"message":"NotFound"}', { status: 404 }); }) as unknown as typeof fetch;
+  const r = await backfillCoinbase({ out: dir, assets: ['US500'], tfs: ['15m', '1h', '1d'], fromTs: T0 - 400 * 86_400_000, fetchImpl, delayMs: 0, now: () => T0, log: (m) => logs.push(m) });
+  assert.equal(reqs, 1);
+  assert.ok(r.every((s) => s.note === 'no US500-USD product on Coinbase' && s.stored === 0));
+  assert.deepEqual(logs, ['US500: not sold on Coinbase (no US500-USD product), skipped']);
+});
+
 test('asset discovery from Kalshi listings', () => {
   assert.deepEqual(assetsFromSeries([{ ticker: 'KXBTC15M' }, { ticker: 'KXETHD', frequency: 'hourly' }, { ticker: 'KXSOL' }, { ticker: 'KXBTCMAXY', frequency: 'annual' }, { ticker: 'KXHYPE15M', frequency: 'fifteen_min' }]), ['BTC', 'ETH', 'HYPE', 'SOL']);
   assert.deepEqual(assetsFromPerps([{ ticker: 'KXBTCPERP' }, { ticker: 'ETH-PERP' }, { ticker: 'X', title: 'Solana Perpetual' }, { underlying: 'DOGE' }]), ['BTC', 'DOGE', 'ETH', 'SOL']);

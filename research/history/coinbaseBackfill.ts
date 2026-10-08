@@ -38,6 +38,8 @@ export async function backfillCoinbase(o: CoinbaseOpts): Promise<CoinbaseSummary
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const out: CoinbaseSummary[] = [];
   for (const asset of o.assets) {
+    // Kalshi lists assets Coinbase does not sell (tokenised stocks, indices): asked once, not per timeframe.
+    let noProduct = false;
     for (const tf of o.tfs) {
       const g = GRANULARITY[tf];
       const s: CoinbaseSummary = { asset, tf, requests: 0, added: 0, stored: 0 };
@@ -45,6 +47,7 @@ export async function backfillCoinbase(o: CoinbaseOpts): Promise<CoinbaseSummary
       if (!g) { s.note = `Coinbase has no ${tf} candles`; continue; }
       const ms = g * 1000, span = 300 * ms;
       const have = readSeries(seriesPath(o.out, 'coinbase', asset, tf));
+      if (noProduct) { s.note = `no ${asset}-USD product on Coinbase`; s.stored = have.length; continue; }
       const got: Candle[] = [];
       const fetchWindow = async (start: number, end: number): Promise<Candle[] | 'missing'> => {
         for (let attempt = 0; attempt < 5; attempt++) {
@@ -76,7 +79,7 @@ export async function backfillCoinbase(o: CoinbaseOpts): Promise<CoinbaseSummary
         let empty = 0;
         for (let end = have.length ? have[0].ts : lastClosed + ms; end > o.fromTs && empty < 6; end -= span) {
           const w = await fetchWindow(Math.max(o.fromTs, end - span), end);
-          if (w === 'missing') { s.note = `no ${asset}-USD product on Coinbase`; break; }
+          if (w === 'missing') { s.note = `no ${asset}-USD product on Coinbase`; noProduct = !have.length && !got.length; break; }
           if (!w.length) empty++; else empty = 0;
           got.push(...w);
         }
@@ -87,7 +90,7 @@ export async function backfillCoinbase(o: CoinbaseOpts): Promise<CoinbaseSummary
         s.stored = upsertSeries(o.out, 'coinbase', asset, tf, candles);
         s.added = s.stored - before;
       } else s.stored = have.length;
-      log(`${asset} ${tf}: ${s.requests} requests, +${s.added} bars (${s.stored} stored)${s.note ? `; ${s.note}` : ''}`);
+      log(noProduct ? `${asset}: not sold on Coinbase (no ${asset}-USD product), skipped` : `${asset} ${tf}: ${s.requests} requests, +${s.added} bars (${s.stored} stored)${s.note ? `; ${s.note}` : ''}`);
     }
   }
   return out;

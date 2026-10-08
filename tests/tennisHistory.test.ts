@@ -8,7 +8,7 @@ import { DEFAULT_SNN, domainParams, stageFlags, withFlags } from '../bot/snn/par
 import { SnnNetwork } from '../bot/snn/network';
 import { tennisColumnKey } from '../bot/snn/inputs';
 import { buildHistoryReplay, replayTennisDays } from '../research/history/historyReplay';
-import { downloadKalshiHistory, downloadKalshiTrades, loadKalshiHistory, loadKalshiTrades, parseTrade } from '../research/history/kalshiHistory';
+import { downloadKalshiHistory, downloadKalshiTrades, loadKalshiHistory, loadKalshiTrades, parseTrade, retryAfterMs } from '../research/history/kalshiHistory';
 import { readRecordings, ReplayState } from '../research/replay';
 import { replaySnn } from '../research/snnReplay';
 import { snnInteractions } from '../research/snnPbt';
@@ -156,4 +156,40 @@ test('tennis template: a new match starts from what earlier matches learned; it 
   assert.deepEqual(Array.from(back.tennisTemplate!.wf), Array.from(learned));
   const fromFile = new SnnNetwork(params, { model: JSON.parse(JSON.stringify(net.exportModel())) });
   assert.deepEqual(Array.from(fromFile.tennisTemplate!.arrays.w1), Array.from(net.tennisTemplate!.arrays.w1));
+});
+
+test('kalshi history: one pace for every worker; a 429 pauses them all, then the market is fetched (not failed)', async () => {
+  assert.equal(retryAfterMs('2'), 2000);
+  assert.equal(retryAfterMs(new Date(10_000).toUTCString(), 7_000), 3000);
+  assert.equal(retryAfterMs(null), 0);
+  assert.equal(retryAfterMs('soon'), 0);
+  const now = Date.parse('2026-03-10T00:00:00Z');
+  const markets = Array.from({ length: 12 }, (_, i) => ({ ticker: `KXBTC15M-M${i}`, event_ticker: 'KXBTC15M-E', open_time: '2026-03-09T00:00:00Z', close_time: `2026-03-09T${String(10 + i).padStart(2, '0')}:00:00Z`, result: 'yes', volume_fp: '50' }));
+  const starts: Array<{ t: number; limited: boolean }> = [];
+  let candleCalls = 0;
+  const fetchImpl = (async (url: string) => {
+    const p = new URL(url).pathname;
+    if (p.endsWith('/candlesticks')) {
+      candleCalls++;
+      const limited = candleCalls === 4;
+      starts.push({ t: Date.now(), limited });
+      if (limited) return { ok: false, status: 429, headers: new Headers(), json: async () => ({}), text: async () => '{"error":{"code":"too_many_requests"}}' } as unknown as Response;
+    }
+    const body = p.endsWith('/historical/cutoff') ? { market_settled_ts: '2026-01-01T00:00:00Z' }
+      : p.endsWith('/historical/markets') ? { markets: [], cursor: '' }
+        : p.endsWith('/markets') ? { markets, cursor: '' }
+          : { candlesticks: [{ end_period_ts: now / 1000 - 86_400, yes_bid: { close_dollars: '0.5' }, yes_ask: { close_dollars: '0.52' } }] };
+    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) } as unknown as Response;
+  }) as unknown as typeof fetch;
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'kh-'));
+  const logs: string[] = [];
+  const r = await downloadKalshiHistory({ series: ['KXBTC15M'], days: 30, out, fetchImpl, now, concurrency: 3, ratePerSec: 50, log: (m) => logs.push(m) });
+  assert.equal(r.markets, 12);
+  assert.equal(r.failed, 0, 'the rate-limited market was retried, not failed');
+  const hit = starts.find((s) => s.limited)!;
+  const after = starts.filter((s) => s.t > hit.t);
+  // Only requests the other two workers already had under way may start before the pause ends.
+  const during = after.filter((s) => s.t - hit.t < 900);
+  assert.ok(after.length >= 8 && during.length <= 2, `every new request waited out the pause: ${after.map((s) => s.t - hit.t).join(', ')}`);
+  assert.ok(logs.some((l) => /slow down 1 time/.test(l)));
 });
