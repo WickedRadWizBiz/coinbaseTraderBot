@@ -9,7 +9,8 @@ then sends the winning models to the bot, which loads them without a restart.
 1. GitHub → **Releases** → **Laptop trainer (Windows)** → download `KalshiTrainer-windows.zip`. The
    zip is rebuilt on every change to the training code. You can also build it now from Actions →
    *Laptop trainer (Windows package)* → *Run workflow*.
-2. Unzip it anywhere with about 30 GB free, then double-click `Train.cmd`.
+2. Unzip it anywhere with about 40 GB free, then double-click `Train.cmd`. (The replay of all the history
+   takes about 10 GB, the 1-minute history it is made from about 3 GB.)
 3. Type how many hours to train: 12 for a first run, 48 or more for a long one.
 4. **First run only:** it asks for your server, so it can copy the bot's recordings and upload the
    models.
@@ -45,8 +46,8 @@ npm run train:laptop -- --hours 12 --host <server ip> --key ~/lightsail.pem
    - the rest of `~/bot/data`, except audit trails and logs;
    - `bot.env`, without any line holding a key, secret, token or password.
 2. **History.** Downloads years of spot candles for every crypto asset Kalshi lists (Binance Vision,
-   Coinbase) and a year of Kalshi's settled contracts, tennis matches with every trade. Each later run
-   downloads only what is new.
+   Coinbase), the replay's 1-minute spot and perpetual bars and funding rates from 2017, and a year of
+   Kalshi's settled contracts, tennis matches with every trade. Each later run downloads only what is new.
 3. **Rounds.**
    - Round 1 runs every step.
    - Later rounds continue the tournaments (TA network, SNNs, setups, sweeps) and retrain the models
@@ -62,13 +63,20 @@ the step in progress, and the next run picks up the tournaments where they stopp
 
 ## History replay: the bot "trading" years of history
 
-With `HISTORY_REPLAY=true` (on in the laptop profile), the pipeline turns two years of 1-minute history
-into recording files (`research/history/historyReplay.ts`, step `history_replay`). The replay code reads
-them exactly as it reads the bot's live recordings:
+With `HISTORY_REPLAY=true` (on in the laptop profile), the pipeline turns all of the 1-minute history into
+recording files (`research/history/historyReplay.ts`, step `history_replay`): from August 2017 for BTC and
+ETH, each other coin from its own listing (`HISTORY_REPLAY_YEARS=0`; a number of years limits it). The
+replay code reads them exactly as it reads the bot's live recordings:
 
 - **Index and spot prices.** Four a minute from Binance 1-minute bars: the bar's open, then a path toward
   its close drawn at the bars' own volatility. Each one tells the bot no more about the coming close than a
   real price at that moment would. Shifted onto Kalshi's level using each real 15-minute contract's strike.
+  - Live, the features read one price a second (returns over 10 s to 5 minutes, RSI, efficiency ratios,
+    Kalshi's 60 one-second settlement marks). The replay reader fills the seconds between two prints with
+    a random path toward the next print at the market's own volatility, so those features read the same
+    kind of path they read live. A second is filled only once its time has passed: nothing is known early.
+- **BTC.D and USDT.D.** At every print, rebuilt the way the live bot rebuilds them (see
+  [BTC.D and USDT.D](#btcd-and-usdtd) below).
 - **Candles.** The live feed's timeframes; every day file is self-contained.
 - **Perp quotes.** From Binance USD-M bars, at the spread and contract specs the bot's own perp
   recordings show, with Binance's funding rates.
@@ -83,7 +91,10 @@ them exactly as it reads the bot's live recordings:
 
 The models replay it without knowing it isn't live:
 
-- **Perps model:** trains and backtests on the replay (years instead of days).
+- **Perps model:** trains on every day of perpetual history (Binance's perpetuals start in September
+  2019), one sample per coin every 15 minutes. Each day's samples are kept, so a run computes only the new
+  days; the first run computes all of them on every core at once. Its execution backtest runs on the
+  latest year (the market as it trades now).
 - **Perps SNN:** its tournament, training and entry / exit learning on direction calls run on the
   replay.
 - **Kalshi SNN (price-prediction contracts):** its tournament and training run on the replay's 15-minute
@@ -98,20 +109,59 @@ The models replay it without knowing it isn't live:
   trades the synthetic ones, whose price is its own model's. The result is a proposal, never auto-applied.
 - **Kalshi decision model:** stays on the bot's own recordings (it learns how real Kalshi prices differ
   from fair value, which synthetic quotes cannot show).
+- **SNN tournaments span every era.** A tournament's days are blocks of a week spread from the first year
+  of history to the latest days (bull and bear markets, crashes, quiet years), so the winning settings
+  have to hold up in every kind of market. The network that goes live then trains on the latest days.
+
+The first run downloads Binance's archives from 2017 (about 1 GB) and builds every replay day (an hour or
+two). Later runs add only the new days. A day is rebuilt only when something it read changed: Kalshi's
+files for it, the 1-minute history or funding rates reaching further into it (a day first built before
+its data was published), or new dominance readings near it.
+
+## BTC.D and USDT.D
+
+Every part of the bot that reads BTC dominance (BTC.D) or USDT dominance (USDT.D) gets them in training
+too:
+
+| Part | Live | In training |
+|---|---|---|
+| Kalshi SNN and perps SNN (USDT.D 15-minute change input) | the live rebuild, every second | the replay's rebuild |
+| Perps model (USDT.D change, BTC.D change by coin) | the live rebuild | the replay's rebuild, every perpetual day since 2019 |
+| Kalshi decision features, the TA snapshot's dominance quadrant, the alt-coin risk-on rule | the live rebuild | the replay's rebuild in the backtests and sweeps |
+| TA network | BTC.D / USDT.D daily charts; hourly, Binance's BTC dominance index and the market basket | the same series: TradingView's daily charts back to 2013 plus the bot's own bars |
+
+How the replay rebuilds them, as the live bot does (live, CoinGecko's market caps anchor Binance's
+prices):
+
+- **Anchors.** Real dominance readings from the history store: TradingView's BTC.D and USDT.D plus the
+  bot's own hourly bars. Hourly where they reach (the last ~200 days and the bot's own bars), else
+  4-hourly (~2 years), else daily (back to 2013). Each reading is used from its time on, never before.
+- **Between readings.** BTC's market cap moves with BTC's price, USDT's stays put, and every other coin's
+  moves with the replayed alts (ETH, XRP, SOL, DOGE by size). So BTC.D rises when BTC beats the alts, and
+  USDT.D falls when crypto rises.
+- **Seams.** A new reading rarely lands exactly where the moved value drifted to; the gap is closed over
+  an hour, so the features never see a jump that did not happen.
+- **No reading.** Before the series start, or after a hole of more than 2.5 days, there is no value, as
+  live when the feed is stale.
+
+The rule book is the one exception. Live, its dominance-quadrant rule reads 15-minute dominance changes.
+The rule study walks years of hourly candles, and minute-level dominance exists only in the replay, so the
+rule cannot be tested at the scale it is used. It is left out of the study rather than tested on a
+different signal. The TA network covers dominance at the hourly and daily scale.
 
 ## Does it run in real time?
 
 No. The replay runs as fast as the processor allows: its clock is the data's own timestamps, so nothing
 waits for the market. The Kalshi network still steps once per market second, as it does live.
 
-- **One network:** a replayed day of all five coins (about 960 contracts) took about 7.5 minutes on one
-  core of a 2.8 GHz cloud server. That is about 190 times faster than real time; a recent laptop core is
+- **One network:** a replayed day of all five coins (about 960 contracts) took 4 to 7.5 minutes on one
+  core of a 2.8 GHz cloud server, about 190 to 370 times faster than real time. A recent laptop core is
   usually faster.
 - **The tournament:** runs one network per thread at the same time, so a 16-thread laptop puts 15
   networks through each day in that same time.
 
-A 12-hour run covers about 30 tournament days and 14 training days per network. The windows grow with
-the hours you give it, up to a year of tournament days.
+A 12-hour run covers about 30 tournament days (four week-long blocks across the years) and 14 training
+days per network. The windows grow with the hours you give it, up to a year of tournament days (52 blocks).
 
 ## Tennis on Kalshi's match history
 
@@ -158,8 +208,8 @@ What trains on it:
 | Module | Learns from |
 |---|---|
 | TA network, rule book, setup scorer | years of candles, walked forward and graded on entries and exits |
-| Perps model, perps SNN | the history replay (years of perp history) |
-| Kalshi SNN | the history replay's 15-minute / hourly contracts (real and synthetic); its live gate on the bot's recordings |
+| Perps model, perps SNN | the history replay: every day of perpetual history since September 2019 |
+| Kalshi SNN | the history replay's 15-minute / hourly contracts (real and synthetic) since 2017; its live gate on the bot's recordings |
 | Tennis SNN, tennis model | Kalshi's tennis history (real prices and trades) + the bot's recorded matches |
 | Intraday volatility profile | the replay's last 180 days |
 | Whole-bot / Kalshi sweeps | the history replay's days with real Kalshi contracts |

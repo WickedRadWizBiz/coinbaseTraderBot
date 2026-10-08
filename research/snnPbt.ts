@@ -71,6 +71,8 @@ interface MemberState { cp?: SnnCheckpoint; through: number }
 
 interface Saved {
   domain: string; stage: string; baseVersion: string; trials: number; nextIndex: number; lastEvalTo: number; log: PbtRoundLog[];
+  /** How the days were chosen (a different choice starts a fresh tournament). */
+  layout?: string;
   members: Array<{ id: number; hyper: Hyper; lineage: number[]; through: number; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }>; bornRound?: number }>;
 }
 
@@ -81,8 +83,34 @@ export interface SnnPbtResult {
   log: PbtRoundLog[];
 }
 
+/** `n` of the sorted days `all` for a tournament: blocks of `block` consecutive days spread evenly from the
+ *  first day to the last (the last block ends at the latest day), so every era of the history -- bull and
+ *  bear markets, crashes, quiet years -- weighs in, not only the latest weeks. */
+export function eraDays(all: string[], n: number, block: number): string[] {
+  if (all.length <= n) return all;
+  const k = Math.floor(n / block);
+  if (k <= 1) return all.slice(-n);
+  const out: string[] = [];
+  for (let i = 0; i < k; i++) { const s = Math.round((i * (all.length - block)) / (k - 1)); out.push(...all.slice(s, s + block)); }
+  return out;
+}
+
+/** Runs of consecutive calendar days. */
+function segments(days: string[]): string[][] {
+  const out: string[][] = [];
+  for (const d of days) {
+    const cur = out[out.length - 1];
+    if (cur && Date.parse(d) - Date.parse(cur[cur.length - 1]) === DAY) cur.push(d); else out.push([d]);
+  }
+  return out;
+}
+
 export async function runSnnPbt(o: {
   recordings: string; domain: 'crypto' | 'perps' | 'tennis'; stage: Stage; days: string[]; initDays?: number; evalDays?: number;
+  /** Every recorded day (the warm-up day before a block is the calendar day before it, when recorded). */
+  allDays?: string[];
+  /** How `days` were chosen (eraDays vs the latest days): a change starts a fresh tournament. */
+  layout?: string;
   /** The tennis config (required for the tennis domain: the engine's match inputs). */
   tennis?: TennisConfig;
   model?: MetaModel; seed?: number; stateDir?: string; maxRounds?: number; restartEvery?: number; fresh?: boolean; log?: (m: string) => void;
@@ -95,15 +123,19 @@ export async function runSnnPbt(o: {
   if (o.days.length < initDays + evalDays) throw new Error(`need at least ${initDays + evalDays} days of recordings for an SNN tournament (have ${o.days.length})`);
   const base: SnnParams = domainParams(o.domain, withFlags({ ...DEFAULT_SNN, seed: o.seed ?? DEFAULT_SNN.seed }, stageFlags(o.stage)));
   const baseVersion = versionHash(base);
-  const start = Date.parse(`${o.days[0]}T00:00:00Z`), end = Date.parse(`${o.days[o.days.length - 1]}T00:00:00Z`) + DAY;
-  const all = walkForwardRounds(start, end, initDays * DAY, evalDays * DAY, evalDays * DAY);
+  const start = Date.parse(`${o.days[0]}T00:00:00Z`);
+  // Blocks across the years (eraDays): each run of consecutive days is walked forward on its own (its first
+  // days train, the rest are judged), the members carrying their state from one run to the next. The latest
+  // days: one walk from the first to the last (a missing day is just a round with nothing to judge).
+  const spans = o.layout?.startsWith('era') ? segments(o.days) : [o.days];
+  const all = spans.flatMap((seg) => walkForwardRounds(Date.parse(seg[0]), Date.parse(seg[seg.length - 1]) + DAY, initDays * DAY, evalDays * DAY, evalDays * DAY)).map((r, i) => ({ ...r, index: i }));
   const calendar = loadCalendar(path.resolve('params/calendar.json'));
   const dayOf = (t: number) => iso(t);
   const stateFile = o.stateDir ? path.join(o.stateDir, 'state.json') : undefined;
   const cpFile = (id: number) => path.join(o.stateDir!, `m${id}.json`);
   let saved: Saved | undefined;
   if (stateFile && !o.fresh && fs.existsSync(stateFile)) {
-    try { saved = JSON.parse(fs.readFileSync(stateFile, 'utf8')); if (saved!.domain !== o.domain || saved!.stage !== o.stage || saved!.baseVersion !== baseVersion || saved!.members.length !== (o.population ?? 3)) saved = undefined; } catch { saved = undefined; }
+    try { saved = JSON.parse(fs.readFileSync(stateFile, 'utf8')); if (saved!.domain !== o.domain || saved!.stage !== o.stage || saved!.baseVersion !== baseVersion || saved!.members.length !== (o.population ?? 3) || (saved!.layout ?? 'latest') !== (o.layout ?? 'latest')) saved = undefined; } catch { saved = undefined; }
   }
   let rounds = (saved ? all.filter((r) => r.evalFrom >= saved!.lastEvalTo - 1) : all).map((r, k) => ({ ...r, index: (saved?.nextIndex ?? 0) + k }));
   const pending = rounds.length;
@@ -122,7 +154,8 @@ export async function runSnnPbt(o: {
     if (to <= s.through) return { rows: [] as SnnRow[] };
     const a = Math.max(from, s.through);
     const params = withSnnHyper(base, hyper);
-    const prevDay = o.days[o.days.indexOf(dayOf(a)) - 1];
+    const known = o.allDays ?? o.days;
+    const prevDay = known[known.indexOf(dayOf(a)) - 1];
     if (pool) {
       const r = await pool.run({ dir: o.recordings, params, domain: o.domain, modelPath: o.modelPath, checkpoint: s.cp, from: a, to, fromDay: prevDay ?? dayOf(a), toDay: dayOf(to - 1), skipModel: true, tennis: o.tennis });
       s.cp = r.checkpoint;
@@ -140,7 +173,7 @@ export async function runSnnPbt(o: {
     fs.mkdirSync(o.stateDir, { recursive: true });
     for (const m of members) if (m.state.cp) fs.writeFileSync(cpFile(m.id), JSON.stringify(m.state.cp));
     const st: Saved = {
-      domain: o.domain, stage: o.stage, baseVersion, trials, nextIndex, lastEvalTo, log: plog,
+      domain: o.domain, stage: o.stage, baseVersion, trials, nextIndex, lastEvalTo, log: plog, layout: o.layout,
       members: members.map((m) => ({ id: m.id, hyper: m.hyper, lineage: m.lineage, through: m.state.through, scores: m.scores, bornRound: m.bornRound, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]) })),
     };
     fs.writeFileSync(stateFile!, JSON.stringify(st));

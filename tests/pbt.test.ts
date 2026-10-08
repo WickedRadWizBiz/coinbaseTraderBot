@@ -157,6 +157,23 @@ test('SNN replay tournament: crypto rows -> bets, rounds over recorded days, sav
   await assert.rejects(runSnnPbt({ recordings: rec, domain: 'perps', stage: 'S1', days: days.slice(0, 1), initDays: 1, evalDays: 1 }), /need at least/);
 });
 
+test('SNN tournament over blocks across the years: each block walked on its own (its first day trains), the members carried across', async () => {
+  const rec = tmpDir();
+  for (let d = 0; d < 5; d++) writeSyntheticRecordings(rec, { windows: 1, seed: 9 + d, start: Date.parse('2026-02-01T00:00:00Z') + d * DAY });
+  const all = ['2026-02-01', '2026-02-02', '2026-02-03', '2026-02-04', '2026-02-05'];
+  const days = ['2026-02-01', '2026-02-02', '2026-02-04', '2026-02-05'];
+  const era = await runSnnPbt({ recordings: rec, domain: 'crypto', stage: 'S1', days, allDays: all, layout: 'era:2', initDays: 1, evalDays: 1, stateDir: path.join(tmpDir(), 'pbt') });
+  assert.equal(era.rounds, 2, 'two blocks, one judged day each');
+  assert.deepEqual(era.log.map((r) => new Date(r.evalFrom).toISOString().slice(0, 10)), ['2026-02-02', '2026-02-05']);
+  const latest = await runSnnPbt({ recordings: rec, domain: 'crypto', stage: 'S1', days, initDays: 1, evalDays: 1 });
+  assert.equal(latest.rounds, 4, 'the latest days: one walk from the first day to the last');
+  // A tournament saved under another way of choosing its days starts afresh.
+  const state = path.join(tmpDir(), 'pbt2');
+  await runSnnPbt({ recordings: rec, domain: 'crypto', stage: 'S1', days: all.slice(0, 2), initDays: 1, evalDays: 1, stateDir: state });
+  const switched = await runSnnPbt({ recordings: rec, domain: 'crypto', stage: 'S1', days, allDays: all, layout: 'era:2', initDays: 1, evalDays: 1, stateDir: state });
+  assert.equal(switched.rounds, 2);
+});
+
 test('tennis population: three live members, elite outputs, tournament after graded matches, restarts, persisted', async () => {
   const dir = tmpDir();
   const base: SnnParams = domainParams('tennis', withFlags({ ...DEFAULT_SNN, nE: 32, nI: 8, nL1: 12 }, {}));

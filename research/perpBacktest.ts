@@ -54,12 +54,16 @@ export async function runPerpBacktest(dir: string, P: PerpsConfig, model: PerpMo
     sources: (asset) => ({ index: st.index.get(asset), spot: st.spot.get(asset), bars: st.features.bars.get(asset), candles: st.features.candles.get(asset), usdtd: st.usdtd, btcd: st.btcd, perp: hub.get(asset), snn: st.snnContext(asset, undefined, 'perps') }),
   });
   const daily: number[] = [];
-  let dayKey = '', dayStart = start, first = 0, lastTick = 0, trades = 0;
+  let dayKey = '', dayStart = start, first = 0, lastTick = 0, trades = 0, quoted = false;
   const lastPos = new Map<string, number>();
   for await (const e of readRecordings(dir)) {
     st.apply(e);
     if (!first) first = st.now;
-    if (e.k !== 'perp') continue;
+    if (e.k === 'perp') quoted = true;
+    // After a quote, once its whole instant is in (the history replay writes every asset's prices and the
+    // dominance of an instant as one burst of same-time records).
+    if (e.tie || !quoted) continue;
+    quoted = false;
     sim.step();
     // Decide right after a quote arrives (live polls every ~2 s, so decisions always see a fresh quote).
     if (st.now - lastTick < 5_000) continue;

@@ -40,13 +40,26 @@
 //                  only by calling the direction better than a coin flip on a random walk. The networks learn
 //                  on them; the strategy backtest and the decision model's dataset skip them (they would be
 //                  grading the bot's pricing against itself).
+//   dominance      BTC.D and USDT.D at every print, rebuilt as the live bot rebuilds them: anchored to the
+//                  stored real series (TradingView's history and the bot's own hourly bars; hourly, 4-hourly
+//                  or daily, the finest there is) and moved between anchors by BTC's and the alts' prints
+//                  (research/history/dominanceReplay.ts).
+//
+// Prints are 15 s apart. The live features read one value a second (5 s gap limits, Kalshi's 60 one-second
+// marks): the replay reader fills the seconds in between with a Brownian bridge at the series' own
+// volatility (research/replay.ts), from the records marked `hist`.
+//
+// The replay can start at the first day of the 1-minute history (HISTORY_REPLAY_YEARS=0: August 2017 for
+// BTC and ETH; each coin from its own listing). A day is rebuilt when an input it read changes: Kalshi's
+// files for it, the 1-minute spot / perp history or the funding rates reaching further into it (a day
+// built before its data arrived), dominance anchors added near it.
 //
 // Every record of an instant shares its timestamp; replays apply the whole instant before acting on it
 // (research/replay.ts readRecordings: `tie`).
 //
-// What it cannot reproduce: real second-by-second paths inside a minute, order-book depth, the side of
-// each trade. Fill simulation on replayed contracts is therefore coarse; the perps model and the networks'
-// direction calls depend on prices, not on those.
+// What it cannot reproduce: the real second-by-second path inside a minute (the reader's bridge stands in
+// for it), order-book depth, the side of each crypto contract trade. Fill simulation on replayed contracts
+// is therefore coarse; the perps model and the networks' direction calls depend on prices, not on those.
 //
 //   npm run history:replay -- --history data/history --out data/history-replay --assets BTC,ETH --from 2024-01-01
 
@@ -57,9 +70,10 @@ import zlib from 'zlib';
 import { contractKind, priceContract, SETTLEMENT_AVG_SEC } from '../../bot/model/fairValue';
 import { loadSeries } from './candles';
 import { loadKalshiTrades, type KalshiHistMarket, type KalshiTrade } from './kalshiHistory';
+import { anchorsIn, dominanceAnchors, DominanceReplay, type DomState } from './dominanceReplay';
 import type { Candle } from '../../bot/ta/indicators';
 
-export const REPLAY_VERSION = 3;
+export const REPLAY_VERSION = 4;
 const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
 const TFS: Array<{ tf: string; ms: number }> = [{ tf: '1m', ms: MIN }, { tf: '5m', ms: 5 * MIN }, { tf: '15m', ms: 15 * MIN }, { tf: '1h', ms: HOUR }, { tf: '1d', ms: DAY }];
 const BACKFILL = 300;
@@ -72,6 +86,8 @@ export const MARKET_NU = 5;
 /** Hourly ladder: grid offsets from the price at the hour (two strikes below, two above), grid = 0.25% of price. */
 const LADDER = [-1, 0, 1, 2];
 const LADDER_STEP = 0.0025;
+/** Print slots a day (TICKS.length a minute). */
+const SLOTS = 1440 * TICKS.length;
 
 export interface PerpSpec { ticker?: string; contractSize?: number; tickSize?: number; fractional?: boolean; leverage?: number; halfSpreadBps?: number }
 export interface ReplayOpts {
@@ -121,7 +137,7 @@ export function normals(seed: number, n: number): number[] {
   while (out.length < n) { const r = Math.sqrt(-2 * Math.log(Math.max(u(), 1e-12))), th = 2 * Math.PI * u(); out.push(r * Math.cos(th), r * Math.sin(th)); }
   return out.slice(0, n);
 }
-const hashStr = (s: string) => { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; };
+export const hashStr = (s: string) => { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; };
 
 /** Kalshi's official 60 s average ending at `windowEnd` (one sample a second: the last print at or before
  *  each mark), from what has printed by `now`. Undefined when a mark has no print within 20 s. */
@@ -255,19 +271,61 @@ interface AssetState {
 
 type Ev = Record<string, unknown> & { t: number };
 
-interface ReplayManifest { version?: number; days: Record<string, string>; /** Real Kalshi contracts opening each day. */ kalshi?: Record<string, number>; /** Tennis match markets each day. */ tennis?: Record<string, number> }
-/** The builder's state at the end of each of the last days it wrote: the next build starts from the one
- *  before its first day to build instead of going over every earlier day again (same output either way).
- *  Several days are kept because new Kalshi data for a day also rebuilds the day before it. */
-interface DayState { carry: Ev[]; assets: Record<string, Pick<AssetState, 'recent' | 'basis' | 'vPath' | 'vMkt' | 'prints' | 'open'>> }
-interface ReplayStates { version: number; sig: string; days: Record<string, DayState> }
+interface ReplayManifest {
+  version?: number;
+  /** Each built day's input signature. */
+  days: Record<string, string>;
+  /** Records written each day (0: nothing to replay that day, no file). */
+  n?: Record<string, number>;
+  /** Real Kalshi contracts opening each day. */
+  kalshi?: Record<string, number>;
+  /** Tennis match markets each day. */
+  tennis?: Record<string, number>;
+  /** Assets with perpetual quotes each day (Binance's USD-M perps start in September 2019). */
+  perps?: Record<string, number>;
+}
+/** The builder's state at the end of a day: the next build starts from the latest one before its first
+ *  day to build instead of going over every earlier day again (same output either way). Kept for the last
+ *  KEEP_STATES days (new Kalshi data for a day also rebuilds the day before it) and for each month's last
+ *  day (a late input deep in the history, such as a month of funding rates, rebuilds from there). */
+interface DayState { carry: Ev[]; assets: Record<string, Pick<AssetState, 'recent' | 'basis' | 'vPath' | 'vMkt' | 'prints' | 'open'>>; dom?: DomState }
+interface StateFile { version: number; sig: string; day: string; state: DayState }
 const KEEP_STATES = 3;
+
+/** First and last bar time of a sorted candle CSV (`ts,...` lines; a torn last line is ignored). */
+export function csvRange(file: string): { first: number; last: number } | undefined {
+  let fd: number;
+  try { fd = fs.openSync(file, 'r'); } catch { return undefined; }
+  try {
+    const size = fs.fstatSync(fd).size;
+    const read = (pos: number, len: number) => { const b = Buffer.alloc(len); fs.readSync(fd, b, 0, len, pos); return b.toString('utf8'); };
+    const tsOf = (l: string) => { const x = Number(l.slice(0, l.indexOf(','))); return l.includes(',') && x > 0 ? x : undefined; };
+    const head = read(0, Math.min(size, 4096)).split('\n');
+    if (size > 4096) head.pop();
+    const first = head.map(tsOf).find((x) => x !== undefined);
+    const tailStart = Math.max(0, size - 4096);
+    const tail = read(tailStart, size - tailStart).split('\n');
+    tail.pop(); // after the last newline: '' or a torn line
+    if (tailStart > 0) tail.shift(); // the chunk may start mid-line
+    let last: number | undefined;
+    for (let i = tail.length - 1; i >= 0 && last === undefined; i--) last = tsOf(tail[i]);
+    return first !== undefined && last !== undefined ? { first, last } : undefined;
+  } finally { fs.closeSync(fd); }
+}
+
+/** The first day of 1-minute spot history among `assets` (the replay's start for "all of it"). */
+export function historyStart(historyDir: string, assets: string[]): string | undefined {
+  const firsts = assets.map((a) => csvRange(path.join(historyDir, 'binance-1m', a, '1m.csv'))?.first).filter((x): x is number => x !== undefined);
+  return firsts.length ? new Date(Math.floor(Math.min(...firsts) / DAY) * DAY).toISOString().slice(0, 10) : undefined;
+}
 
 /** Replay days holding Kalshi's real contracts (the strategy backtest and its sweep trade only those). */
 export function replayKalshiDays(outDir: string): string[] { return manifestDays(outDir, 'kalshi'); }
 /** Replay days holding Kalshi tennis matches. */
 export function replayTennisDays(outDir: string): string[] { return manifestDays(outDir, 'tennis'); }
-function manifestDays(outDir: string, field: 'kalshi' | 'tennis'): string[] {
+/** Replay days with perpetual quotes. */
+export function replayPerpDays(outDir: string): string[] { return manifestDays(outDir, 'perps'); }
+function manifestDays(outDir: string, field: 'kalshi' | 'tennis' | 'perps'): string[] {
   try {
     const m = JSON.parse(fs.readFileSync(path.join(outDir, 'replay-manifest.json'), 'utf8')) as ReplayManifest;
     if (m.version !== REPLAY_VERSION) return [];
@@ -275,15 +333,18 @@ function manifestDays(outDir: string, field: 'kalshi' | 'tennis'): string[] {
   } catch { return []; }
 }
 
-export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number; written: number; skipped: number; assets: string[]; notes: string[]; synthetic: number; tennis?: number }> {
+export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number; written: number; skipped: number; assets: string[]; notes: string[]; synthetic: number; tennis?: number; dominance: number; resumed?: string }> {
   const log = o.log ?? ((m: string) => console.log(`[replay] ${m}`));
   fs.mkdirSync(o.outDir, { recursive: true });
   const manifestFile = path.join(o.outDir, 'replay-manifest.json');
   let manifest: ReplayManifest = { days: {} };
   try { manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')); } catch { /* first build */ }
   if (manifest.version !== REPLAY_VERSION) manifest = { version: REPLAY_VERSION, days: {} };
+  manifest.n ??= {};
   manifest.kalshi ??= {};
   manifest.tennis ??= {};
+  manifest.perps ??= {};
+  const saveManifest = () => { fs.writeFileSync(`${manifestFile}.tmp`, JSON.stringify(manifest)); fs.renameSync(`${manifestFile}.tmp`, manifestFile); };
   const notes: string[] = [];
   const assets = o.assets.filter((a) => {
     const ok = fs.existsSync(path.join(o.historyDir, 'binance-1m', a, '1m.csv'));
@@ -296,57 +357,72 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
   const from = Date.parse(o.fromDay), to = Date.parse(o.toDay);
   const aPath = 1 - Math.pow(0.5, 1 / PATH_HALF_LIFE), aMkt = 1 - Math.pow(0.5, 1 / MARKET_HALF_LIFE);
   const st = new Map<string, AssetState>();
+  // How far each input reaches (spot and perp minutes, funding rates): a day built before its data arrived
+  // is built again once the data covers it.
+  const cover = new Map<string, Array<[{ first: number; last: number } | undefined, number]>>();
   for (const a of assets) {
     const tfs = new Map<string, Candle[]>();
     for (const t of ['15m', '1h', '1d'] as const) tfs.set(t, loadSeries(o.historyDir, a, t).candles);
-    st.set(a, {
-      spot: new CsvStream(path.join(o.historyDir, 'binance-1m', a, '1m.csv')), perp: new CsvStream(path.join(o.historyDir, 'binance-um', a, '1m.csv')),
-      tfs, recent: [], funding: readFunding(path.join(o.historyDir, 'binance-funding', a, 'funding.csv')), basis: 1, prints: [], open: [],
-    });
+    const spotFile = path.join(o.historyDir, 'binance-1m', a, '1m.csv'), perpFile = path.join(o.historyDir, 'binance-um', a, '1m.csv'), fundFile = path.join(o.historyDir, 'binance-funding', a, 'funding.csv');
+    st.set(a, { spot: new CsvStream(spotFile), perp: new CsvStream(perpFile), tfs, recent: [], funding: readFunding(fundFile), basis: 1, prints: [], open: [] });
+    cover.set(a, [[csvRange(spotFile), MIN], [csvRange(perpFile), MIN], [csvRange(fundFile), 8 * HOUR]]);
   }
-  let written = 0, skipped = 0, days = 0, synthCount = 0, tennisCount = 0;
+  const anchors = dominanceAnchors(o.historyDir);
+  if (!anchors.length) notes.push('no BTC.D history (TradingView / the bot\'s own bars): no dominance records');
+  const dom = new DominanceReplay(anchors);
+  let written = 0, skipped = 0, days = 0, synthCount = 0, tennisCount = 0, domCount = 0;
   // Events past midnight (a real contract running into the next day, the last 1m bar's close) go into the
   // next day's file, so every file stays in time order.
   let carry: Ev[] = [];
   const tennisSeries = o.tennisSeries ?? [];
   const base = `${REPLAY_VERSION}:${assets.join(',')}:${synthetic ? 'synth' : 'real'}:${tennisSeries.join(',')}`;
   const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
-  // A day is rebuilt when the Kalshi history it reads grows (a later download reached it).
+  // A day's inputs: the Kalshi history it reads (a later download reached it), how far the 1-minute
+  // history and funding rates reach into it, and the dominance anchors near it.
   const seriesDirs = fs.existsSync(kalshiDir) ? fs.readdirSync(kalshiDir).filter((x) => fs.statSync(path.join(kalshiDir, x)).isDirectory()) : [];
   const sigOf = (day: string) => {
-    const next = iso(Date.parse(day) + DAY);
+    const d0 = Date.parse(day), d1 = d0 + DAY, next = iso(d1);
     let bytes = 0;
     for (const sd of seriesDirs) for (const f of [`${day}.jsonl`, `${next}.jsonl`, `trades/${day}.jsonl`, `trades/${next}.jsonl`]) { try { bytes += fs.statSync(path.join(kalshiDir, sd, f)).size; } catch { /* none */ } }
-    return `${base}:${bytes}`;
+    const cov = assets.map((a) => cover.get(a)!.map(([r, len]) => (!r ? 'n' : r.first >= d1 || r.last + len >= d1 ? '' : String(r.last))).join('/')).join(',');
+    return `${base}:${bytes}:${cov}:${anchorsIn(anchors, d0 - DAY, d1)}`;
   };
   const fileOf = (day: string) => path.join(o.outDir, `md-${day}.jsonl.gz`);
-  const needs = (day: string) => Boolean(o.force) || manifest.days[day] !== sigOf(day) || !fs.existsSync(fileOf(day));
-  // The bridge, the volatility estimates and the open contracts carry from day to day, so every day from
-  // the start is processed (the writing skipped for days already built) -- unless the saved end state of
-  // the day before the first one to build lets the build start there.
-  const stateFile = path.join(o.outDir, 'replay-state.json');
+  const needs = (day: string) => Boolean(o.force) || manifest.days[day] !== sigOf(day) || (manifest.n![day] !== 0 && !fs.existsSync(fileOf(day)));
+  // The bridge, the volatility estimates, the open contracts and the dominance rebuild carry from day to
+  // day, so every day from the start is processed (the writing skipped for days already built) -- unless a
+  // kept end-of-day state before the first day to build lets the build start after it.
+  const stateDir = path.join(o.outDir, 'replay-states');
+  const stateFileOf = (day: string) => path.join(stateDir, `${day}.json.gz`);
+  fs.rmSync(path.join(o.outDir, 'replay-state.json'), { force: true }); // format 3's single state file
   let start = from;
   while (start <= to && !needs(iso(start))) start += DAY;
   if (start > to) {
     log(`history replay: all ${Math.round((to - from) / DAY) + 1} day(s) already built`);
-    return { days: Math.round((to - from) / DAY) + 1, written: 0, skipped: Math.round((to - from) / DAY) + 1, assets, notes, synthetic: 0, tennis: 0 };
+    return { days: Math.round((to - from) / DAY) + 1, written: 0, skipped: Math.round((to - from) / DAY) + 1, assets, notes, synthetic: 0, tennis: 0, dominance: 0 };
   }
-  try {
-    const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as ReplayStates;
-    const x0 = saved.days?.[iso(start - DAY)];
-    if (start > from && saved.version === REPLAY_VERSION && saved.sig === base && x0) {
-      for (const [a, s] of st) {
-        const x = x0.assets[a];
-        if (!x) throw new Error('asset missing');
-        await s.spot.skip(start); await s.perp.skip(start);
-        Object.assign(s, x);
-      }
-      carry = x0.carry;
-      days = skipped = Math.round((start - from) / DAY);
-    } else start = from;
-  } catch { start = from; }
-  // End states of the last KEEP_STATES days processed (snapshots), written once the build ends.
-  const states: Array<[string, string]> = [];
+  let resumedFrom: string | undefined;
+  if (start > from) {
+    const kept = fs.existsSync(stateDir) ? fs.readdirSync(stateDir).map((f) => /^(\d{4}-\d{2}-\d{2})\.json\.gz$/.exec(f)?.[1]).filter((d): d is string => !!d && d < iso(start) && d >= iso(from - DAY)).sort().reverse() : [];
+    let resumed = false;
+    for (const d of kept) {
+      try {
+        const f = JSON.parse(zlib.gunzipSync(fs.readFileSync(stateFileOf(d))).toString('utf8')) as StateFile;
+        if (f.version !== REPLAY_VERSION || f.sig !== base || !assets.every((a) => f.state.assets[a])) continue;
+        const at = Date.parse(d) + DAY;
+        for (const [a, s] of st) { await s.spot.skip(at); await s.perp.skip(at); Object.assign(s, f.state.assets[a]); }
+        carry = f.state.carry;
+        dom.state = f.state.dom;
+        start = at;
+        days = skipped = Math.round((start - from) / DAY);
+        resumed = true;
+        resumedFrom = d;
+        break;
+      } catch { /* unreadable: an older one */ }
+    }
+    if (!resumed) start = from;
+  }
+  fs.mkdirSync(stateDir, { recursive: true });
   for (let d0 = start; d0 <= to; d0 += DAY) {
     days++;
     const day = iso(d0);
@@ -360,12 +436,18 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
     // Windows Kalshi's own history covers: no synthetic contract there.
     const real15 = new Set(kAll.filter((m) => /15M$/.test(m.series)).map((m) => `${m.asset}:${m.openTime}`));
     const realHour = new Set(kAll.filter((m) => /D$/.test(m.series)).map((m) => `${m.asset}:${m.closeTime}`));
+    // Every asset's spot print at each slot of the day (the dominance rebuild reads them all at once).
+    const slotPx = new Map<string, Float64Array>();
+    let perpAssets = 0;
     for (const [a, s] of st) {
       const pre = await s.spot.until(d0);
       s.recent.push(...pre.slice(-5 * BACKFILL));
       if (s.recent.length > 5 * BACKFILL) s.recent.splice(0, s.recent.length - 5 * BACKFILL);
       await s.perp.until(d0);
       const spotBars = await s.spot.until(d1), perpBars = await s.perp.until(d1);
+      if (perpBars.length) perpAssets++;
+      const px = spotBars.length ? new Float64Array(SLOTS).fill(NaN) : undefined;
+      if (px) slotPx.set(a, px);
       if (spotBars.length) {
         // Backfill: the last 300 closed bars of every timeframe before the day starts.
         const r5 = aggregate(s.recent.slice(-5 * BACKFILL), 5 * MIN);
@@ -399,11 +481,13 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
         while (p && fi < fund.length && fund[fi][0] <= bar.ts) fi++;
         const rate = fi > 0 ? fund[fi - 1][1] : undefined;
         const next = Math.ceil((bar.ts + 1) / (8 * HOUR)) * 8 * HOUR;
+        const slot0 = ((bar.ts - d0) / MIN) * TICKS.length;
         for (let k = 0; k < TICKS.length; k++) {
           const t = bar.ts + TICKS[k], v = prints[k][1];
           const iv = +(v * s.basis).toPrecision(10);
           ev.push({ t, k: 'index', asset: a, value: iv, ts: t, src: 'kalshi', hist: 1 });
-          ev.push({ t, k: 'spot', asset: a, value: v, ts: t });
+          ev.push({ t, k: 'spot', asset: a, value: v, ts: t, hist: 1 });
+          if (px) px[slot0 + k] = v;
           if (pprints) {
             const pv = pprints[k][1];
             ev.push({ t, k: 'perp', ticker: spec.ticker ?? `${a}-PERP`, asset: a, ts: t, bid: roundTo(pv * (1 - half), spec.tickSize, -1), ask: roundTo(pv * (1 + half), spec.tickSize, 1), last: pv, mark: pv,
@@ -436,6 +520,20 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
         }
       }
     }
+    // BTC.D / USDT.D at every print slot, from every asset's print there.
+    let domToday = 0;
+    if (anchors.length && slotPx.size) {
+      for (let i = 0; i < SLOTS; i++) {
+        const px: Record<string, number> = {};
+        for (const [a, arr] of slotPx) if (arr[i] > 0) px[a] = arr[i];
+        const t = d0 + Math.floor(i / TICKS.length) * MIN + TICKS[i % TICKS.length];
+        const r = dom.at(t, px);
+        if (!r) continue;
+        ev.push({ t, k: 'dominance', usdtd: r.usdtd === null ? null : +r.usdtd.toPrecision(8), btcd: +r.btcd.toPrecision(8), hist: 1 });
+        domToday++;
+      }
+    }
+    domCount += domToday;
     const alive = new Map<number, string[]>();
     for (const m of kms) {
       const kind = contractKind(m.series, m.strikeType);
@@ -459,28 +557,35 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
     ev.sort((x, y) => x.t - y.t);
     const cut = ev.findIndex((e) => e.t >= d1);
     if (cut >= 0) carry = ev.splice(cut);
-    if (to - d0 < KEEP_STATES * DAY) {
-      const snap: DayState = { carry, assets: Object.fromEntries([...st].map(([a, x]) => [a, { recent: x.recent, basis: x.basis, vPath: x.vPath, vMkt: x.vMkt, prints: x.prints, open: x.open }])) };
-      states.push([day, JSON.stringify(snap)]);
+    if (to - d0 < KEEP_STATES * DAY || iso(d1).endsWith('-01')) {
+      const state: DayState = { carry, assets: Object.fromEntries([...st].map(([a, x]) => [a, { recent: x.recent, basis: x.basis, vPath: x.vPath, vMkt: x.vMkt, prints: x.prints, open: x.open }])), dom: dom.state };
+      const sf: StateFile = { version: REPLAY_VERSION, sig: base, day, state };
+      fs.writeFileSync(`${stateFileOf(day)}.tmp`, zlib.gzipSync(JSON.stringify(sf), { level: 6 }));
+      fs.renameSync(`${stateFileOf(day)}.tmp`, stateFileOf(day));
     }
     if (!build) { skipped++; continue; }
-    if (!ev.length) continue;
-    const tmp = `${file}.tmp`;
-    fs.writeFileSync(tmp, zlib.gzipSync(ev.map((e) => JSON.stringify(e)).join('\n') + '\n', { level: 6 }));
-    fs.renameSync(tmp, file);
-    manifest.days[day] = sigOf(day);
     manifest.kalshi![day] = kms.length;
     manifest.tennis![day] = tennisToday;
-    fs.writeFileSync(manifestFile, JSON.stringify(manifest));
-    written++;
-    if (written % 30 === 1) log(`${day}: ${ev.length} records (${kms.length} Kalshi contracts)`);
+    manifest.perps![day] = perpAssets;
+    manifest.n![day] = ev.length;
+    if (ev.length) {
+      const tmp = `${file}.tmp`;
+      fs.writeFileSync(tmp, zlib.gzipSync(ev.map((e) => JSON.stringify(e)).join('\n') + '\n', { level: 6 }));
+      fs.renameSync(tmp, file);
+      written++;
+      if (written % 30 === 1) log(`${day}: ${ev.length} records (${kms.length} Kalshi contracts${domToday ? `, dominance at ${domToday} prints` : ''})`);
+    } else fs.rmSync(file, { force: true });
+    manifest.days[day] = sigOf(day);
+    saveManifest();
   }
-  if (states.length) {
-    fs.writeFileSync(`${stateFile}.tmp`, `{"version":${REPLAY_VERSION},"sig":${JSON.stringify(base)},"days":{${states.map(([d, j]) => `${JSON.stringify(d)}:${j}`).join(',')}}}`);
-    fs.renameSync(`${stateFile}.tmp`, stateFile);
+  // Kept states: the last KEEP_STATES days and every month's last day.
+  const keepFrom = iso(to - (KEEP_STATES - 1) * DAY);
+  for (const f of fs.readdirSync(stateDir)) {
+    const d = /^(\d{4}-\d{2}-\d{2})\.json\.gz$/.exec(f)?.[1];
+    if (d && d < keepFrom && !iso(Date.parse(d) + DAY).endsWith('-01')) fs.rmSync(path.join(stateDir, f), { force: true });
   }
-  log(`history replay: ${written} day(s) written, ${skipped} already built, ${assets.length} asset(s)${synthetic ? `, ${synthCount} synthetic contract(s)` : ''}${tennisSeries.length ? `, ${tennisCount} tennis match market(s)` : ''}`);
-  return { days, written, skipped, assets, notes, synthetic: synthCount, tennis: tennisCount };
+  log(`history replay: ${written} day(s) written, ${skipped} already built${resumedFrom ? ` (continued from the end of ${resumedFrom})` : ''}, ${assets.length} asset(s)${synthetic ? `, ${synthCount} synthetic contract(s)` : ''}${tennisSeries.length ? `, ${tennisCount} tennis match market(s)` : ''}${anchors.length ? `, dominance at ${domCount} prints` : ''}`);
+  return { days, written, skipped, assets, notes, synthetic: synthCount, tennis: tennisCount, dominance: domCount, resumed: resumedFrom };
 }
 
 /** One print of an asset's synthetic contracts: settle the ones that closed (their 60 s average is

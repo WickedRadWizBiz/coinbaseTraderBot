@@ -3,6 +3,9 @@
 //  1. Dataset: replay recordings; every `--every` seconds per perp market, the SAME feature
 //     function production uses (perpFeatures) and the perp mid; the label is the perp's log return
 //     over the horizon H (bps), read from later recorded quotes (never from the future at decision time).
+//     With --cache, each day's rows are kept and only days whose recordings (or neighbours) changed are
+//     computed again, runs of them on --workers threads at once: years of history replay cost minutes a
+//     run instead of hours.
 //  2. Model: ridge regression on standardized features, lambda over a small grid.
 //  3. Walk-forward: expanding-window folds in time order with an H embargo before each test block.
 //     Every lambda is scored out of sample and counts as a trial for the deflated Sharpe.
@@ -17,37 +20,56 @@
 
 import fs from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 import { loadConfig } from '../bot/config';
+import { recordingFiles } from '../bot/marketdata/recordingFiles';
 import { PERP_FEATURES, perpFeatures, type PerpModelParams } from '../bot/perps/perpSignal';
 import { readRecordings, ReplayState } from './replay';
+import { hashStr, replayPerpDays } from './history/historyReplay';
+import { WorkerPool, workerCount, workerScript } from './workerPool';
+import type { PerpDatasetJob } from './perpDatasetWorker';
 import { deflatedSharpe, rng } from './stats';
 import { gbdtLogit, type GbdtModel } from '../bot/model/trees';
 import { trainGbdt } from './gbdt';
 
 export interface PerpRow { ts: number; asset: string; x: number[]; y: number; fundingBps: number }
 
-/** Replay -> feature rows with forward-return labels. */
-export async function buildPerpDataset(dir: string, opts: { everySec?: number; horizonMin?: number } = {}): Promise<PerpRow[]> {
+const DAY = 86_400_000;
+/** Bumped when the rows change for the same recordings (the cache keys carry it). */
+const PERP_DATASET_VERSION = 1;
+
+/** Feature rows with forward-return labels for a run of consecutive recorded days (`days`, in order). The
+ *  replay starts with `warm` (the recorded day before: the trackers warm up) and reads on into `tail` (the
+ *  day after) only as far as the last samples' labels need. A sample is taken once its whole instant is in
+ *  (the history replay writes every asset's prices and the dominance of an instant as one burst). */
+export async function perpRowsForDays(dir: string, days: string[], warm: string | undefined, tail: string | undefined, opts: { everySec?: number; horizonMin?: number } = {}): Promise<PerpRow[]> {
+  if (!days.length) return [];
   const every = (opts.everySec ?? 300) * 1000;
   const H = (opts.horizonMin ?? 240) * 60_000;
+  const from = Date.parse(days[0]), to = Date.parse(days[days.length - 1]) + DAY;
   const st = new ReplayState();
   const samples: Array<{ ts: number; asset: string; x: number[]; mid: number; fundingBps: number }> = [];
   const mids = new Map<string, Array<{ ts: number; mid: number }>>();
   const nextAt = new Map<string, number>();
-  for await (const e of readRecordings(dir)) {
+  const quoted = new Set<string>();
+  for await (const e of readRecordings(dir, undefined, warm ?? days[0], tail ?? days[days.length - 1])) {
+    if (e.t >= to + H + 300_000) break;
     st.apply(e);
-    if (e.k !== 'perp') continue;
-    const asset = (e as any).asset as string;
-    const ps = st.features.perps.get(asset);
-    const mid = ps?.price(st.now, 60_000);
-    if (!mid) continue;
-    const arr = mids.get(asset) ?? [];
-    if (!arr.length || st.now - arr[arr.length - 1].ts >= 60_000) arr.push({ ts: st.now, mid }); // label prices: one a minute (years of replay fit in memory)
-    mids.set(asset, arr);
-    if (st.now < (nextAt.get(asset) ?? 0)) continue;
-    nextAt.set(asset, Math.floor(st.now / every + 1) * every);
-    const f = perpFeatures(asset, st.now, { index: st.index.get(asset), spot: st.spot.get(asset), bars: st.features.bars.get(asset), candles: st.features.candles.get(asset), usdtd: st.usdtd, btcd: st.btcd, perp: ps, snn: st.snnContext(asset, undefined, 'perps') });
-    samples.push({ ts: st.now, asset, x: PERP_FEATURES.map((n) => f[n]), mid, fundingBps: Number.isFinite(f.funding_rate_bps) ? f.funding_rate_bps : 0 });
+    if (e.k === 'perp') quoted.add((e as any).asset as string);
+    if (e.tie || !quoted.size) continue;
+    for (const asset of quoted) {
+      const ps = st.features.perps.get(asset);
+      const mid = ps?.price(st.now, 60_000);
+      if (!mid) continue;
+      const arr = mids.get(asset) ?? [];
+      if (!arr.length || st.now - arr[arr.length - 1].ts >= 60_000) arr.push({ ts: st.now, mid }); // label prices: one a minute (years of replay fit in memory)
+      mids.set(asset, arr);
+      if (st.now < from || st.now >= to || st.now < (nextAt.get(asset) ?? 0)) continue;
+      nextAt.set(asset, Math.floor(st.now / every + 1) * every);
+      const f = perpFeatures(asset, st.now, { index: st.index.get(asset), spot: st.spot.get(asset), bars: st.features.bars.get(asset), candles: st.features.candles.get(asset), usdtd: st.usdtd, btcd: st.btcd, perp: ps, snn: st.snnContext(asset, undefined, 'perps') });
+      samples.push({ ts: st.now, asset, x: PERP_FEATURES.map((n) => f[n]), mid, fundingBps: Number.isFinite(f.funding_rate_bps) ? f.funding_rate_bps : 0 });
+    }
+    quoted.clear();
   }
   const rows: PerpRow[] = [];
   for (const s of samples) {
@@ -59,6 +81,80 @@ export async function buildPerpDataset(dir: string, opts: { everySec?: number; h
     rows.push({ ts: s.ts, asset: s.asset, x: s.x, y: 1e4 * Math.log(arr[j].mid / s.mid), fundingBps: s.fundingBps });
   }
   return rows.sort((a, b) => a.ts - b.ts);
+}
+
+export interface PerpDatasetOpts {
+  everySec?: number; horizonMin?: number;
+  /** Keep each day's rows here; a day is computed again only when its recording, a neighbour's (warm-up,
+   *  labels) or its SNN backfill changed. */
+  cacheDir?: string;
+  /** Worker threads computing runs of uncached days at once (default 1). */
+  workers?: number;
+  log?: (m: string) => void;
+}
+interface PerpCacheFile { sig: string; assets: string[]; rows: Array<Array<number | null>> }
+
+/** Replay -> feature rows with forward-return labels (history replay: the days with perp quotes). */
+export async function buildPerpDataset(dir: string, opts: PerpDatasetOpts = {}): Promise<PerpRow[]> {
+  const files = recordingFiles(dir);
+  const all = files.map((f) => f.day);
+  if (!all.length) return [];
+  if (!opts.cacheDir) return perpRowsForDays(dir, all, undefined, undefined, opts);
+  const log = opts.log ?? (() => {});
+  const every = (opts.everySec ?? 300) * 1000, H = (opts.horizonMin ?? 240) * 60_000;
+  const perpDays = new Set(replayPerpDays(dir));
+  const days = perpDays.size ? all.filter((d) => perpDays.has(d)) : all;
+  const pos = new Map(all.map((d, i) => [d, i]));
+  const fileOf = new Map(files.map((f) => [f.day, f.file]));
+  const stat = (d: string | undefined) => { const f = d && fileOf.get(d); if (!f) return '-'; try { const x = fs.statSync(f); return `${x.size}.${Math.round(x.mtimeMs)}`; } catch { return '-'; } };
+  const sides = (process.env.SNN_BACKFILL_DIR ?? '').split(path.delimiter).filter(Boolean);
+  const sideStat = (d: string) => sides.map((x) => { try { return fs.statSync(path.join(x, `snnfill-${d}.jsonl`)).size; } catch { return 0; } }).join('.');
+  const head = `${PERP_DATASET_VERSION}|${every}|${H}|${hashStr(PERP_FEATURES.join(','))}`;
+  const sigOf = (d: string) => { const i = pos.get(d)!; return `${head}|${stat(all[i - 1])}|${stat(d)}|${stat(all[i + 1])}|${sideStat(d)}`; };
+  const cacheFile = (d: string) => path.join(opts.cacheDir!, `${d}.json.gz`);
+  fs.mkdirSync(opts.cacheDir, { recursive: true });
+  const byDay = new Map<string, PerpRow[]>();
+  const todo: string[] = [];
+  for (const d of days) {
+    try {
+      const c = JSON.parse(zlib.gunzipSync(fs.readFileSync(cacheFile(d))).toString('utf8')) as PerpCacheFile;
+      if (c.sig === sigOf(d)) {
+        byDay.set(d, c.rows.map((r) => ({ ts: r[0] as number, asset: c.assets[r[1] as number], y: r[2] as number, fundingBps: r[3] as number, x: r.slice(4).map((v) => (v === null ? NaN : v)) })));
+        continue;
+      }
+    } catch { /* not cached yet */ }
+    todo.push(d);
+  }
+  // Runs of consecutive recorded days, cut into chunks a few per worker (each chunk replays one extra
+  // day to warm up and part of the next for its labels).
+  const workers = Math.max(1, opts.workers ?? 1);
+  const size = Math.max(7, Math.ceil(todo.length / (workers * 3)));
+  const jobs: PerpDatasetJob[] = [];
+  for (let i = 0; i < todo.length;) {
+    let j = i;
+    while (j + 1 < todo.length && j + 1 - i < size && pos.get(todo[j + 1]) === pos.get(todo[j])! + 1) j++;
+    const run = todo.slice(i, j + 1);
+    jobs.push({ dir, days: run, warm: all[pos.get(run[0])! - 1], tail: all[pos.get(run[run.length - 1])! + 1], everySec: opts.everySec, horizonMin: opts.horizonMin });
+    i = j + 1;
+  }
+  if (jobs.length) log(`perp dataset: ${byDay.size} day(s) cached, ${todo.length} to compute in ${jobs.length} run(s)${workers > 1 ? ` on ${workers} threads` : ''}`);
+  const pool = workers > 1 && jobs.length > 1 ? new WorkerPool<PerpDatasetJob, PerpRow[]>(workerScript('perpDatasetWorker'), workers) : undefined;
+  const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
+  try {
+    await Promise.all(jobs.map(async (job) => {
+      const rows = pool ? await pool.run(job) : await perpRowsForDays(job.dir, job.days, job.warm, job.tail, job);
+      const got = new Map<string, PerpRow[]>(job.days.map((d) => [d, []]));
+      for (const r of rows) got.get(iso(r.ts))?.push(r);
+      for (const [d, rs] of got) {
+        byDay.set(d, rs);
+        const assets = [...new Set(rs.map((r) => r.asset))];
+        const c: PerpCacheFile = { sig: sigOf(d), assets, rows: rs.map((r) => [r.ts, assets.indexOf(r.asset), r.y, r.fundingBps, ...r.x.map((v) => (Number.isFinite(v) ? v : null))]) };
+        fs.writeFileSync(`${cacheFile(d)}.tmp`, zlib.gzipSync(JSON.stringify(c)));
+        fs.renameSync(`${cacheFile(d)}.tmp`, cacheFile(d));
+      }
+    }));
+  } finally { await pool?.close(); }
+  return days.flatMap((d) => byDay.get(d) ?? []).sort((a, b) => a.ts - b.ts);
 }
 
 /** Solve A x = b (Gaussian elimination with partial pivoting). */
@@ -226,7 +322,7 @@ export async function trainPerpMain(argOf: (k: string, d: string) => string = cl
   const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
   const horizonMin = Number(argOf('horizon', String(cfg.perps.horizonMin)));
   const everySec = Number(argOf('every', '300'));
-  const rows = await buildPerpDataset(argOf('recordings', 'data/recordings'), { everySec, horizonMin });
+  const rows = await buildPerpDataset(argOf('recordings', 'data/recordings'), { everySec, horizonMin, cacheDir: argOf('cache', '') || undefined, workers: Number(argOf('workers', String(workerCount()))), log: (m) => console.log(m) });
   console.log(`${rows.length} labelled rows`);
   const res = trainPerp(rows, { horizonMin, everySec, makerBps: cfg.perps.makerFeeBps, entryEdgeBps: cfg.perps.entryEdgeBps });
   console.table(res.oos);

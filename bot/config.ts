@@ -307,6 +307,7 @@ export interface TaNetConfig {
   /** History replay (research/history/historyReplay.ts): years of 1-minute spot and perp history turned into
    *  recordings the recording-based steps replay like live data (HISTORY_REPLAY; the laptop trainer turns it on). */
   historyReplay: boolean;
+  /** Years of history to replay, back from yesterday (0 = all of it: from each coin's first Binance minute). */
   historyReplayYears: number;
   historyReplayDir: string;
   historyReplayAssets: string[];
@@ -1111,7 +1112,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       binanceIntervals: (env.HISTORY_BINANCE_INTERVALS ?? '1h,15m,1d').split(',').map((x) => x.trim()).filter(Boolean),
       coinbaseTfs: (env.HISTORY_COINBASE_TFS ?? '1h,1d').split(',').map((x) => x.trim()).filter((x) => x && x !== 'none'),
       historyReplay: bool(env, 'HISTORY_REPLAY', false),
-      historyReplayYears: num(env, 'HISTORY_REPLAY_YEARS', 2, 0.1, 8),
+      historyReplayYears: num(env, 'HISTORY_REPLAY_YEARS', 0, 0, 20),
       historyReplayDir: path.resolve(env.HISTORY_REPLAY_DIR ?? path.join(dataDir, 'history-replay')),
       historyReplayAssets: (env.HISTORY_REPLAY_ASSETS ?? 'BTC,ETH,SOL,XRP,DOGE').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
       retrainEveryDays: num(env, 'TA_NET_RETRAIN_DAYS', 7, 0, 365),
