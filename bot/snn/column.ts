@@ -121,7 +121,9 @@ export class Column {
     this.N = nE + nI;
     this.nSyn = nL1 * B * K;
     this.nFeat = N_BASE + Math.max(nE + nL1 + N_POOL + N_EXTRA, nL0);
-    const rng = new Xoshiro128((p.seed ^ fnv1a(key)) >>> 0);
+    // Tennis columns (one per match) share one wiring: every match is the same kind of input, so the
+    // weights one match learned connect to the same inputs in the next (the network's tennis template).
+    const rng = new Xoshiro128((p.seed ^ fnv1a(this.kind === 'tennis' ? 'TEN:' : key)) >>> 0);
     const f64 = (n: number) => new Float64Array(n);
     this.I0 = f64(nL0); this.v0 = f64(nL0); this.s0 = new Uint8Array(nL0); this.rate0 = f64(nL0);
     this.deltaAcc = f64(this.deltaThr.length);

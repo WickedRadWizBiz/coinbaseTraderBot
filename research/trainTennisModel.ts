@@ -31,6 +31,7 @@ export async function buildTennisDataset(dir: string, cfg: TennisConfig, everySe
   const trackers = new Map<string, MatchTracker>();
   const pending = new Map<string, Omit<TennisRow, 'y'>[]>();
   const lastSample = new Map<string, number>();
+  const playerA = new Map<string, string>();
   const rows: TennisRow[] = [];
   const eventOf = (t: string) => st.markets.get(t)?.event ?? t.slice(0, t.lastIndexOf('-'));
   let last = 0;
@@ -69,7 +70,13 @@ export async function buildTennisDataset(dir: string, cfg: TennisConfig, everySe
       const dFresh = snnD && st.now - snnD.ts < 180_000 ? snnD : undefined;
       const f = tennisFairInputs(v, { p: snnP && st.now - snnP.ts < 180_000 && snnP.domain !== 'crypto' && snnP.domain !== 'perps' ? snnP.p : undefined, up: dFresh?.pUp, skill: dFresh?.conf.skill, calConf: dFresh?.conf.calConf });
       pending.set(event, [...(pending.get(event) ?? []), { event, t: st.now, f, pA: v.mid }]);
+      playerA.set(event, ms[0].ticker);
     }
+  }
+  // Matches whose result came with the last records (a replay can end right after one).
+  for (const [event, ps] of pending) {
+    const rA = st.results.get(playerA.get(event) ?? '');
+    if (rA) for (const r of ps) rows.push({ ...r, y: rA === 'yes' ? 1 : 0 });
   }
   return rows;
 }
@@ -112,9 +119,14 @@ export function trainTennisModel(rows: TennisRow[], seed = 7): TennisFairParams 
 
 export async function trainTennisMain(argOf: (k: string, d: string) => string = cliArg) {
   const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
-  const rows = await buildTennisDataset(argOf('recordings', 'data/recordings'), cfg.tennis, Number(argOf('every', '60')));
+  // --history: Kalshi's settled matches replayed from its history (research/history/historyReplay.ts):
+  // real prices and tape, no score. Matches are split in time order, so the newest ones (the bot's own
+  // recordings, with the live score) are the holdout the model must beat the market on.
+  const every = Number(argOf('every', '60'));
+  const dirs = [argOf('history', ''), argOf('recordings', 'data/recordings')].filter((d) => d && fs.existsSync(d));
+  const rows = (await Promise.all(dirs.map((d) => buildTennisDataset(d, cfg.tennis, every)))).flat();
   const matches = new Set(rows.map((r) => r.event)).size;
-  console.log(`${rows.length} tennis rows over ${matches} settled matches`);
+  console.log(`${rows.length} tennis rows over ${matches} settled matches (${dirs.join(' + ')})`);
   const params = trainTennisModel(rows);
   console.log('tennis model validation:', params.validation);
   const out = argOf('out', 'params/tennis_model.candidate.json');

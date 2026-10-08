@@ -99,9 +99,19 @@ export interface SnnModelFile {
   readouts?: Record<string, number[]>;
   dirReadouts?: Record<string, number[]>;
   healthRef?: HealthRef;
+  /** What tennis match columns learned, carried from match to match (SnnNetwork.tennisTemplate). */
+  tennisTemplate?: TennisTemplateFile;
   trainedAt?: string;
   notes?: string;
 }
+
+/** Serialized tennis template: the learned arrays (base64, as in `columns`), both readouts' weights, matches folded in. */
+export interface TennisTemplateFile { arrays: Record<string, string>; wf: string; dirWf: string; n: number }
+
+/** Learned (not transient) column arrays: the offline export's set, and what the tennis template carries. */
+const TRAINED_ARRAYS = ['w1', 'w1s', 'theta1', 'alpha1', 'U1', 'U0'];
+/** The tennis template is the running mean of about this many most recent matches. */
+const TEMPLATE_MATCHES = 100;
 
 const DT_MS = 1000;
 
@@ -136,6 +146,11 @@ export class SnnNetwork {
   private lastGood?: string;
   private lastGoodTs = 0;
   nanRestores = 0;
+  /** Each tennis match gets a column of its own, which used to start from nothing every match. The
+   *  template carries what matches learned: a new match column starts from it, and an ended match's
+   *  column is folded back in (running mean over the last ~TEMPLATE_MATCHES matches). Replaying years of
+   *  Kalshi tennis history grows it offline; live matches keep growing it. */
+  tennisTemplate?: { arrays: Record<string, TypedArr>; wf: Float64Array; dirWf: Float64Array; n: number };
   /** Offline training only: accumulate e-prop eligibility in columns that carry an `elig` array. */
   training = false;
   /** Research only: every graded direction call (ablation of direction-only domains such as perps). */
@@ -148,6 +163,7 @@ export class SnnNetwork {
     this.preset = opts.model;
     this.health = new SnnHealth(opts.health ?? DEFAULT_HEALTH);
     if (opts.model?.healthRef) this.health.ref = opts.model.healthRef;
+    if (opts.model?.tennisTemplate) this.tennisTemplate = this.decodeTemplate(opts.model.tennisTemplate);
   }
 
   /** Get or create a column (whitelist-only; at most maxColumns). The SNN can never add assets. */
@@ -161,20 +177,55 @@ export class SnnNetwork {
     c = new Column(key, asset, this.p, this.columns.size);
     const pre = this.preset?.columns?.[key];
     if (pre) for (const [name, b64] of Object.entries(pre)) copyInto(c.arrays()[name], decodeArr(b64, c.arrays()[name]));
+    // A new tennis match starts from what earlier matches learned.
+    const tpl = tennis && !pre ? this.tennisTemplate : undefined;
+    if (tpl) for (const [name, a] of Object.entries(tpl.arrays)) copyInto(c.arrays()[name], a);
     this.columns.set(key, c);
     const ro = new Readout(c.nFeat, { eta: this.p.readoutEta, cap: this.p.readoutCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: this.p.tagsPerContract, maxTagged: this.p.maxTaggedContracts, traceTauSec: this.p.traceTauSec, useTags: this.p.flags.tags },
-      this.preset?.readouts?.[key] ?? priorWeights(c.nFeat, this.p.priorSlope));
+      this.preset?.readouts?.[key] ?? tpl?.wf ?? priorWeights(c.nFeat, this.p.priorSlope));
     this.readouts.set(key, ro);
     const dir = new Readout(c.nFeat, { eta: this.p.dirEta, cap: this.p.dirCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: 1, maxTagged: 1, traceTauSec: this.p.traceTauSec, useTags: true },
-      (this.preset as { dirReadouts?: Record<string, number[]> } | undefined)?.dirReadouts?.[key]);
+      (this.preset as { dirReadouts?: Record<string, number[]> } | undefined)?.dirReadouts?.[key] ?? tpl?.dirWf);
     this.dirReadouts.set(key, dir);
     this.dirTags.set(key, []);
     return c;
   }
 
-  /** Drop a column (a tennis match that ended): its state, readouts and pending tags. */
+  /** Drop a column (a tennis match that ended): its state, readouts and pending tags. A tennis column
+   *  that learned anything is folded into the tennis template first. */
   removeColumn(key: string): void {
+    const c = this.columns.get(key), ro = this.readouts.get(key), dr = this.dirReadouts.get(key);
+    if (key.startsWith('TEN:') && c && ro && dr && (ro.updates > 0 || dr.updates > 0)) this.foldTennis(c, ro, dr);
     this.columns.delete(key); this.readouts.delete(key); this.dirReadouts.delete(key); this.dirTags.delete(key); this.dirStats.delete(key); this.inputs.delete(key);
+  }
+
+  /** Running mean of the learned arrays and readouts over the most recent ~TEMPLATE_MATCHES matches. */
+  private foldTennis(c: Column, ro: Readout, dr: Readout): void {
+    const T = this.tennisTemplate;
+    if (!T) {
+      this.tennisTemplate = { arrays: Object.fromEntries(TRAINED_ARRAYS.map((k) => [k, c.arrays()[k].slice()])), wf: Float64Array.from(ro.wf), dirWf: Float64Array.from(dr.wf), n: 1 };
+      return;
+    }
+    const r = 1 / Math.min(T.n + 1, TEMPLATE_MATCHES);
+    const mix = (t: TypedArr | Float64Array, x: ArrayLike<number>) => { for (let i = 0; i < t.length; i++) { const v = t[i] + r * (x[i] - t[i]); if (Number.isFinite(v)) t[i] = v; } };
+    for (const k of TRAINED_ARRAYS) mix(T.arrays[k], c.arrays()[k]);
+    mix(T.wf, ro.wf);
+    mix(T.dirWf, dr.wf);
+    T.n++;
+  }
+
+  private encodeTemplate(): TennisTemplateFile | undefined {
+    const T = this.tennisTemplate;
+    return T ? { arrays: Object.fromEntries(Object.entries(T.arrays).map(([k, a]) => [k, encodeArr(a)])), wf: encodeArr(T.wf), dirWf: encodeArr(T.dirWf), n: T.n } : undefined;
+  }
+
+  private decodeTemplate(f: TennisTemplateFile): SnnNetwork['tennisTemplate'] {
+    const like = new Column('TEN:template', 'TENNIS', this.p, 0);
+    const arrays: Record<string, TypedArr> = {};
+    for (const k of TRAINED_ARRAYS) if (f.arrays[k]) { const a = like.arrays()[k].slice(); copyInto(a, decodeArr(f.arrays[k], a)); arrays[k] = a; }
+    const wf = new Float64Array(like.nFeat), dirWf = new Float64Array(like.nFeat);
+    copyInto(wf, decodeArr(f.wf, wf)); copyInto(dirWf, decodeArr(f.dirWf, dirWf));
+    return { arrays, wf, dirWf, n: f.n };
   }
 
   /** Direction calls of every column (state-only features: d = 0, no contract). */
@@ -435,7 +486,7 @@ export class SnnNetwork {
   serialize(): SnnCheckpoint {
     return {
       version: this.version, lastTs: this.lastTs, steps: this.steps, salience: this.salience, top: this.top ?? null,
-      wc: [...this.wc], corr: [...this.corr], health: this.health.state(), lastTag: [...this.lastTag], nanRestores: this.nanRestores,
+      wc: [...this.wc], corr: [...this.corr], health: this.health.state(), lastTag: [...this.lastTag], nanRestores: this.nanRestores, tennisTemplate: this.encodeTemplate(),
       columns: this.sortedColumns().map((c) => ({
         key: c.key, asset: c.asset,
         arrays: Object.fromEntries(Object.entries(c.arrays()).map(([k, a]) => [k, encodeArr(a)])),
@@ -495,17 +546,18 @@ export class SnnNetwork {
     this.health.restore(cp.health);
     this.lastTag.clear(); for (const [k, v] of cp.lastTag) this.lastTag.set(k, v);
     this.nanRestores = cp.nanRestores ?? 0;
+    this.tennisTemplate = cp.tennisTemplate ? this.decodeTemplate(cp.tennisTemplate) : undefined;
   }
 
   /** Offline-trained weights for the model file (research/trainSnn.ts). */
   exportModel(notes?: string): SnnModelFile {
-    const trained = ['w1', 'w1s', 'theta1', 'alpha1', 'U1', 'U0'];
     return {
       version: this.version, params: this.p, trainedAt: new Date().toISOString(), notes,
-      columns: Object.fromEntries(this.sortedColumns().map((c) => [c.key, Object.fromEntries(trained.map((k) => [k, encodeArr(c.arrays()[k])]))])),
+      columns: Object.fromEntries(this.sortedColumns().map((c) => [c.key, Object.fromEntries(TRAINED_ARRAYS.map((k) => [k, encodeArr(c.arrays()[k])]))])),
       readouts: Object.fromEntries([...this.readouts].map(([k, r]) => [k, Array.from(r.wf)])),
       dirReadouts: Object.fromEntries([...this.dirReadouts].map(([k, r]) => [k, Array.from(r.wf)])),
       healthRef: this.health.ref,
+      tennisTemplate: this.encodeTemplate(),
     };
   }
 
@@ -516,6 +568,7 @@ export class SnnNetwork {
 export interface SnnCheckpoint {
   version: string; lastTs: number; steps: number; salience: Record<string, number>; top: string | null;
   wc: [string, { E: number; I: number }][]; corr?: [string, { ab: number; aa: number; bb: number }][]; health: ReturnType<SnnHealth['state']>; lastTag: [string, number][]; nanRestores?: number;
+  tennisTemplate?: TennisTemplateFile;
   columns: {
     key: string; asset: string; arrays: Record<string, string>; scalars: Record<string, number | boolean>; inputs: ColumnInput | null;
     dir?: { wf: string; ws: string; brierFast: number | null; brierSlow: number | null; updates: number; history: { p: number; y: number; ts: number }[]; tags: { ts: number; phi: string; p: number; price0: number }[]; stats: { absMove: number; n: number } | null };

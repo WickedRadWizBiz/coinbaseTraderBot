@@ -30,13 +30,16 @@
 //                    snn_<domain>.json -> prequential backfill (work/snnfill/<domain>). Tournament and
 //                    training on the history replay when it has the days; the crypto network's ablation
 //                    (its gate for live use) always on the bot's recordings, against real Kalshi prices.
-//                    The tennis network learns live only (no recorded score feed to replay).
+//                    The tennis network: tournament + an online run through Kalshi's tennis history in the
+//                    replay (every match's real prices and tape), its tennis template carrying what each
+//                    match learned to the next; without tennis history it learns live only.
 //   2. vol_model     tree-based volatility forecast (sigma multiplier for fair value) -> promote
 //   3. dataset       research:dataset (with the crypto network's logged/backfilled outputs)
 //   4. mlp           research:train (MLP fair value + take/skip head, tree candidates) -> backtest -> promote
-//   5. vol           intraday volatility profile -> promote
+//   5. vol           intraday volatility profile (the replay's last 180 days when it exists) -> promote
 //   6. perps         perp-train (perps network's 1h/4h calls; MLP/tree candidates) -> perp-backtest -> promote
-//   7. tennis        tennis model (4 signals, score, book, tennis network; MLP vs trees) -> promote
+//   7. tennis        tennis model (4 signals, score, book, tennis network; MLP vs trees) on Kalshi's tennis
+//                    history + the bot's recorded matches (the newest, with the live score, are the holdout)
 //   8. fill          fill / adverse-selection model from the bot's own maker quotes: skipped until
 //                    enough quotes and fills exist, promoted once it beats the base rate on holdout;
 //                    the engine starts using it the moment a validated file appears.
@@ -80,14 +83,14 @@ import { trainTaNetMain } from './trainTaNet';
 import { trainSetupMain } from './trainSetupModel';
 import { sweepMain } from './sweep';
 import { collectFiles, importFile } from './history/importCsv';
-import { downloadKalshiHistory } from './history/kalshiHistory';
+import { downloadKalshiHistory, downloadKalshiTrades } from './history/kalshiHistory';
 import { tvFill } from './history/tradingview';
 import { linkDays, recordingDayList, recordingsUsage } from '../bot/marketdata/recordingFiles';
 import { readJournalTrades } from '../bot/setups/journal';
 import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
 import { exportTaNetOos, oosDir } from './taNetOos';
 import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, type BinanceMarket } from './history/binanceVision';
-import { buildHistoryReplay, perpSpecsFromRecordings, replayKalshiDays } from './history/historyReplay';
+import { buildHistoryReplay, perpSpecsFromRecordings, replayKalshiDays, replayTennisDays } from './history/historyReplay';
 import { workerCount } from './workerPool';
 import { compareIndexSources } from '../bot/marketdata/historyStore';
 import { backfillCoinbase } from './history/coinbaseBackfill';
@@ -318,9 +321,17 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       }
       // Kalshi's own settled contracts (1-minute candles) for the traded series: real contract prices for
       // research. Time-boxed (KALSHI_HISTORY_BUDGET_MIN); the rest resumes on the next run.
+      // Tennis: the match markets too, then every match's trade tape (real price swings, trade by trade).
       let kalshi: unknown;
       if (T.kalshiHistoryBudgetMin > 0) {
-        try { kalshi = await downloadKalshiHistory({ baseUrl: cfg.restBaseUrl, series: cfg.strategy.series, days: T.kalshiHistoryDays, out: path.join(T.historyDir, 'kalshi'), budgetMs: T.kalshiHistoryBudgetMin * 60_000, log: (m) => log(`kalshi: ${m}`) }); } catch (e) { kalshi = { error: String(e) }; }
+        const kStart = Date.now(), budget = T.kalshiHistoryBudgetMin * 60_000;
+        const tennisSeries = cfg.tennis.enabled ? cfg.tennis.series : [];
+        try {
+          const markets = await downloadKalshiHistory({ baseUrl: cfg.restBaseUrl, series: [...cfg.strategy.series, ...tennisSeries], days: T.kalshiHistoryDays, out: path.join(T.historyDir, 'kalshi'), budgetMs: budget, log: (m) => log(`kalshi: ${m}`) });
+          const left = budget - (Date.now() - kStart);
+          const tapes = tennisSeries.length && left > 60_000 ? await downloadKalshiTrades({ baseUrl: cfg.restBaseUrl, series: tennisSeries, out: path.join(T.historyDir, 'kalshi'), budgetMs: left, log: (m) => log(`kalshi trades: ${m}`) }) : undefined;
+          kalshi = { markets, tennisTapes: tapes ?? (tennisSeries.length ? { skipped: 'no time left in KALSHI_HISTORY_BUDGET_MIN' } : undefined) };
+        } catch (e) { kalshi = { error: String(e) }; }
       } else kalshi = { skipped: 'KALSHI_HISTORY_BUDGET_MIN=0' };
       const reached = bin.some((b) => b.listed > 0) || cb.some((c) => c.requests > 0 && !/kept failing/.test(c.note ?? ''));
       if (!reached) throw new SkipStep('Binance Vision and Coinbase unreachable from this machine');
@@ -336,7 +347,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const yesterday = new Date(Math.floor(now / 86_400_000) * 86_400_000 - 86_400_000).toISOString().slice(0, 10);
       const fromDay = new Date(now - T.historyReplayYears * 365 * 86_400_000).toISOString().slice(0, 10);
       const perpSpecs = await perpSpecsFromRecordings(rec, T.historyReplayAssets);
-      const r = await buildHistoryReplay({ historyDir: T.historyDir, outDir: replayDir, assets: T.historyReplayAssets, fromDay, toDay: yesterday, perpSpecs, log });
+      const r = await buildHistoryReplay({ historyDir: T.historyDir, outDir: replayDir, assets: T.historyReplayAssets, fromDay, toDay: yesterday, perpSpecs, tennisSeries: cfg.tennis.enabled ? cfg.tennis.series : [], log });
       if (!r.assets.length) throw new SkipStep(`no 1-minute history yet (${r.notes.join('; ')})`);
       return { ...r, perpSpecs: Object.keys(perpSpecs) };
     }, T.historyReplay ? undefined : 'HISTORY_REPLAY=false');
@@ -467,6 +478,51 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     }
   }
 
+  // ---- 1'. The tennis network on Kalshi's tennis history: every settled match replayed with its real
+  // prices and tape (no score: Kalshi keeps none). Tournament over the most recent replayed days (members
+  // judged on simulated bets against the market, settled by the result), then one network run online
+  // through the training days: each match column starts from the tennis template and folds back into it,
+  // so what it learns carries from match to match. Without tennis history it keeps learning live only.
+  const tennisNetwork = async () => {
+    const tennisDays = T.historyReplay ? replayTennisDays(replayDir) : [];
+    if (!cfg.snn.domains.tennis.enabled) { await run('snn-tennis', async () => undefined, 'SNN_TENNIS=false'); return; }
+    if (tennisDays.length < A.snnPbtInitDays + 2) { await run('snn-tennis', async () => undefined, `learns live only: ${tennisDays.length} replayed day(s) of Kalshi tennis history (HISTORY_REPLAY with TENNIS_ENABLED downloads it)`); return; }
+    const ds: SnnDomainState = (state.snn!.tennis ??= {});
+    const stage: Stage = A.snnStage === 'auto' ? (ds.stage ?? cfg.snn.domains.tennis.stage) : A.snnStage;
+    const file = promoted('snn_tennis');
+    const pbtDue = o.forceSnnPbt || ds.pbtStage !== stage || !ds.pbtHyper || ds.pbtComplete === false || (A.snnPbtEveryDays > 0 && now - (ds.pbtAt ?? 0) >= A.snnPbtEveryDays * 86_400_000);
+    const pbt = await run('snn-tennis-pbt', async () => {
+      let r;
+      try {
+        r = await runSnnPbt({ recordings: replayDir, domain: 'tennis', stage, days: tennisDays.slice(-A.snnPbtDays), initDays: A.snnPbtInitDays, evalDays: 1, stateDir: path.join(work, 'snnpbt', 'tennis'), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), tennis: cfg.tennis, log });
+      } catch (e) {
+        if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
+        throw e;
+      }
+      ds.pbtComplete = r.complete;
+      if (!r.complete) return { complete: false, reason: `tournament in progress: ${r.rounds} round(s) done, ${r.remaining} to go`, elite: r.elite };
+      ds.pbtHyper = r.elite.hyper; ds.pbtStage = stage; ds.pbtAt = now;
+      return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: `history replay (${tennisDays.length} day(s) with tennis)` };
+    }, pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`) as { complete?: boolean } | undefined;
+    const hyper = ds.pbtStage === stage ? ds.pbtHyper : undefined;
+    const trainNeeded = Boolean(pbt?.complete) || !fs.existsSync(file) || ds.stage !== stage;
+    await run('snn-tennis-train', async () => {
+      const span = tennisDays.slice(-A.snnTrainDays);
+      const params = withSnnHyper(domainParams('tennis', { ...DEFAULT_SNN, flags: { ...stageFlags(stage), ...cfg.snn.deferred }, seed: cfg.snn.seed, maxColumns: cfg.snn.maxColumns, readoutEta: cfg.snn.readoutEta }), hyper);
+      const r = await replaySnn(replayDir, { params, domain: 'tennis', tennis: cfg.tennis, skipModel: true, from: dayMs(span[0]), to: dayMs(nextDay(span[span.length - 1])), fromDay: span[0], toDay: span[span.length - 1] });
+      const matches = r.net.tennisTemplate?.n ?? 0;
+      if (!matches) throw new SkipStep('no tennis match settled in the replayed days');
+      const cand = path.join(work, 'snn_tennis.candidate.json');
+      writeAtomic(cand, JSON.stringify(r.net.exportModel(`tennis stage ${stage}; online over ${span.length} replayed day(s) of Kalshi tennis history; template of ${matches} match(es)`)));
+      const b = (f: (x: { pSnn: number; mid: number }) => number) => r.rows.reduce((a, x) => a + (f(x) - x.y) ** 2, 0) / Math.max(1, r.rows.length);
+      fs.copyFileSync(cand, file);
+      ds.stage = stage; ds.version = versionHash(params);
+      if (state.snnVersions!.tennis !== ds.version) snnChanged.push('tennis');
+      state.snnVersions!.tennis = ds.version;
+      return { promoted: true, stage, matches, rows: r.rows.length, brier: { snn: b((x) => x.pSnn), market: b((x) => x.mid) } };
+    }, trainNeeded ? undefined : 'up to date');
+  };
+
   // ---- 1. The networks first, each alone: ablation (when due) -> train -> backfill ----
   const snnChanged: SnnDomain[] = [];
   state.snn ??= {}; state.snnVersions ??= {}; state.trainedWithSnn ??= {};
@@ -564,7 +620,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         return { days: filled, through: ds.backfillThrough ?? null };
       }, tooFew);
     }
-    await run('snn-tennis', async () => undefined, 'the tennis network learns live only (no recorded score feed to replay); its checkpoints persist in data/snn/tennis');
+    await tennisNetwork();
   }
   // Every later step reads the logged + backfilled outputs (each consumer picks its own network's).
   process.env.SNN_BACKFILL_DIR = REPLAYABLE.map(fillDir).join(path.delimiter);
@@ -614,14 +670,21 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     }, tooFew);
   }
 
-  // ---- 6. intraday volatility profile ----
+  // ---- 6. intraday volatility profile: the replay's last 180 days of 1-minute history when it exists ----
   if (want('vol')) {
+    const recent = T.historyReplay ? replayDays().slice(-180) : [];
     await run('vol', async () => {
       const out = path.join(work, 'vol_profile.json');
-      await sessionsMain(argsOf({ recordings: rec, out, 'no-backtest': 1 }));
+      let src = rec;
+      if (recent.length >= 30) {
+        src = path.join(work, 'vol-replay');
+        fs.rmSync(src, { recursive: true, force: true });
+        linkDays(recent.map((d) => ({ day: d, file: path.join(replayDir, `md-${d}.jsonl.gz`) })), src);
+      }
+      await sessionsMain(argsOf({ recordings: src, out, 'no-backtest': 1 }));
       fs.copyFileSync(out, promoted('vol'));
-      return { promoted: true, improved: JSON.parse(fs.readFileSync(out, 'utf8')).validation?.improved ?? false };
-    }, tooFew);
+      return { promoted: true, improved: JSON.parse(fs.readFileSync(out, 'utf8')).validation?.improved ?? false, data: src === rec ? 'recordings' : `history replay (${recent.length} days)` };
+    }, recent.length >= 30 ? undefined : tooFew);
   }
 
   // ---- 7. perps (SNN 1h/4h direction among the features) ----
@@ -646,12 +709,13 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     }, perpSrc === rec ? tooFew : undefined);
   }
 
-  // ---- 8. tennis MLP ----
+  // ---- 8. tennis MLP: Kalshi's tennis history (replay) + the bot's own recorded matches (the holdout) ----
+  const tennisHistory = T.historyReplay && replayTennisDays(replayDir).length > 0;
   if (want('tennis')) {
     await run('tennis', async () => {
       const cand = path.join(work, 'tennis_model.candidate.json');
       let p;
-      try { p = await trainTennisMain(argsOf({ recordings: rec, out: cand })); } catch (e) {
+      try { p = await trainTennisMain(argsOf({ recordings: rec, history: tennisHistory ? replayDir : undefined, out: cand })); } catch (e) {
         if (/need at least \d+ matches/.test((e as Error).message)) throw new SkipStep(`not enough settled tennis matches recorded yet (${(e as Error).message})`);
         throw e;
       }
@@ -659,8 +723,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const champ = promoteIfChampion({ dir: A.dir, kind: 'tennis', candidate: cand, live: promoted('tennis'), enabled: A.champion });
       if (!champ.promote) return { promoted: false, reason: champ.reason, validation: p.validation };
       state.trainedWithSnn!.tennis = state.snnVersions!.tennis;
-      return { promoted: true, champion: champ.reason, validation: p.validation };
-    }, tooFew);
+      return { promoted: true, champion: champ.reason, validation: p.validation, data: tennisHistory ? 'Kalshi tennis history + recordings' : 'recordings' };
+    }, tennisHistory ? undefined : tooFew);
   }
 
   // ---- 8. fill / adverse-selection model: brings itself online once it validates ----

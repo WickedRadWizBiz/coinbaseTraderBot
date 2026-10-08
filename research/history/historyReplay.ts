@@ -23,6 +23,13 @@
 //                  a minute before it opens, a book snapshot each minute (nominal 100 contracts a side),
 //                  marked alive at the prints in between while it is near the money, the minute's volume as
 //                  one trade at its last price, the result one second after the close
+//   tennis (tennisSeries)
+//                  Kalshi's settled tennis match markets (history/kalshi/<SERIES>, with their trade tapes in
+//                  <SERIES>/trades): the market half an hour before the match, the real tape trade by trade
+//                  (price, size, taker side) with the book following it (the side the taker hit moves to the
+//                  trade price, the minute candles' spread on the other side), the minute quotes, alive
+//                  marks every 5 s, the result after the close. No score: Kalshi keeps no score history
+//                  (the bot's own recordings carry the real live score).
 //   synthetic contracts (synth: 1)
 //                  Wherever Kalshi's history has no contract, the same contracts built from the price path:
 //                  a 15-minute Up/Down every quarter hour and an hourly "above" ladder (4 strikes around the
@@ -49,9 +56,10 @@ import readline from 'readline';
 import zlib from 'zlib';
 import { contractKind, priceContract, SETTLEMENT_AVG_SEC } from '../../bot/model/fairValue';
 import { loadSeries } from './candles';
+import { loadKalshiTrades, type KalshiHistMarket, type KalshiTrade } from './kalshiHistory';
 import type { Candle } from '../../bot/ta/indicators';
 
-export const REPLAY_VERSION = 2;
+export const REPLAY_VERSION = 3;
 const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
 const TFS: Array<{ tf: string; ms: number }> = [{ tf: '1m', ms: MIN }, { tf: '5m', ms: 5 * MIN }, { tf: '15m', ms: 15 * MIN }, { tf: '1h', ms: HOUR }, { tf: '1d', ms: DAY }];
 const BACKFILL = 300;
@@ -74,6 +82,8 @@ export interface ReplayOpts {
   toDay: string;
   /** Kalshi settled contracts (download: research/history/kalshiHistory.ts); default <historyDir>/kalshi. */
   kalshiDir?: string;
+  /** Kalshi tennis series to replay (match markets from <kalshiDir>/<SERIES>, tapes from <SERIES>/trades). */
+  tennisSeries?: string[];
   perpSpecs?: Record<string, PerpSpec>;
   /** Synthetic 15-minute and hourly contracts where Kalshi's history has none (default on). */
   synthetic?: boolean;
@@ -245,21 +255,27 @@ interface AssetState {
 
 type Ev = Record<string, unknown> & { t: number };
 
-interface ReplayManifest { version?: number; days: Record<string, string>; /** Real Kalshi contracts opening each day. */ kalshi?: Record<string, number> }
-/** The builder's state at the end of the last day it wrote: the next build starts from there instead of
- *  going over every earlier day again (same output either way). */
-interface ReplayState { version: number; sig: string; day: string; carry: Ev[]; assets: Record<string, Pick<AssetState, 'recent' | 'basis' | 'vPath' | 'vMkt' | 'prints' | 'open'>> }
+interface ReplayManifest { version?: number; days: Record<string, string>; /** Real Kalshi contracts opening each day. */ kalshi?: Record<string, number>; /** Tennis match markets each day. */ tennis?: Record<string, number> }
+/** The builder's state at the end of each of the last days it wrote: the next build starts from the one
+ *  before its first day to build instead of going over every earlier day again (same output either way).
+ *  Several days are kept because new Kalshi data for a day also rebuilds the day before it. */
+interface DayState { carry: Ev[]; assets: Record<string, Pick<AssetState, 'recent' | 'basis' | 'vPath' | 'vMkt' | 'prints' | 'open'>> }
+interface ReplayStates { version: number; sig: string; days: Record<string, DayState> }
+const KEEP_STATES = 3;
 
 /** Replay days holding Kalshi's real contracts (the strategy backtest and its sweep trade only those). */
-export function replayKalshiDays(outDir: string): string[] {
+export function replayKalshiDays(outDir: string): string[] { return manifestDays(outDir, 'kalshi'); }
+/** Replay days holding Kalshi tennis matches. */
+export function replayTennisDays(outDir: string): string[] { return manifestDays(outDir, 'tennis'); }
+function manifestDays(outDir: string, field: 'kalshi' | 'tennis'): string[] {
   try {
     const m = JSON.parse(fs.readFileSync(path.join(outDir, 'replay-manifest.json'), 'utf8')) as ReplayManifest;
     if (m.version !== REPLAY_VERSION) return [];
-    return Object.entries(m.kalshi ?? {}).filter(([d, n]) => n > 0 && fs.existsSync(path.join(outDir, `md-${d}.jsonl.gz`))).map(([d]) => d).sort();
+    return Object.entries(m[field] ?? {}).filter(([d, n]) => n > 0 && fs.existsSync(path.join(outDir, `md-${d}.jsonl.gz`))).map(([d]) => d).sort();
   } catch { return []; }
 }
 
-export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number; written: number; skipped: number; assets: string[]; notes: string[]; synthetic: number }> {
+export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number; written: number; skipped: number; assets: string[]; notes: string[]; synthetic: number; tennis?: number }> {
   const log = o.log ?? ((m: string) => console.log(`[replay] ${m}`));
   fs.mkdirSync(o.outDir, { recursive: true });
   const manifestFile = path.join(o.outDir, 'replay-manifest.json');
@@ -267,6 +283,7 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
   try { manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')); } catch { /* first build */ }
   if (manifest.version !== REPLAY_VERSION) manifest = { version: REPLAY_VERSION, days: {} };
   manifest.kalshi ??= {};
+  manifest.tennis ??= {};
   const notes: string[] = [];
   const assets = o.assets.filter((a) => {
     const ok = fs.existsSync(path.join(o.historyDir, 'binance-1m', a, '1m.csv'));
@@ -287,14 +304,23 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
       tfs, recent: [], funding: readFunding(path.join(o.historyDir, 'binance-funding', a, 'funding.csv')), basis: 1, prints: [], open: [],
     });
   }
-  let written = 0, skipped = 0, days = 0, synthCount = 0;
+  let written = 0, skipped = 0, days = 0, synthCount = 0, tennisCount = 0;
   // Events past midnight (a real contract running into the next day, the last 1m bar's close) go into the
   // next day's file, so every file stays in time order.
   let carry: Ev[] = [];
-  const sig = `${REPLAY_VERSION}:${assets.join(',')}:${synthetic ? 'synth' : 'real'}`;
+  const tennisSeries = o.tennisSeries ?? [];
+  const base = `${REPLAY_VERSION}:${assets.join(',')}:${synthetic ? 'synth' : 'real'}:${tennisSeries.join(',')}`;
   const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
+  // A day is rebuilt when the Kalshi history it reads grows (a later download reached it).
+  const seriesDirs = fs.existsSync(kalshiDir) ? fs.readdirSync(kalshiDir).filter((x) => fs.statSync(path.join(kalshiDir, x)).isDirectory()) : [];
+  const sigOf = (day: string) => {
+    const next = iso(Date.parse(day) + DAY);
+    let bytes = 0;
+    for (const sd of seriesDirs) for (const f of [`${day}.jsonl`, `${next}.jsonl`, `trades/${day}.jsonl`, `trades/${next}.jsonl`]) { try { bytes += fs.statSync(path.join(kalshiDir, sd, f)).size; } catch { /* none */ } }
+    return `${base}:${bytes}`;
+  };
   const fileOf = (day: string) => path.join(o.outDir, `md-${day}.jsonl.gz`);
-  const needs = (day: string) => Boolean(o.force) || manifest.days[day] !== sig || !fs.existsSync(fileOf(day));
+  const needs = (day: string) => Boolean(o.force) || manifest.days[day] !== sigOf(day) || !fs.existsSync(fileOf(day));
   // The bridge, the volatility estimates and the open contracts carry from day to day, so every day from
   // the start is processed (the writing skipped for days already built) -- unless the saved end state of
   // the day before the first one to build lets the build start there.
@@ -303,21 +329,24 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
   while (start <= to && !needs(iso(start))) start += DAY;
   if (start > to) {
     log(`history replay: all ${Math.round((to - from) / DAY) + 1} day(s) already built`);
-    return { days: Math.round((to - from) / DAY) + 1, written: 0, skipped: Math.round((to - from) / DAY) + 1, assets, notes, synthetic: 0 };
+    return { days: Math.round((to - from) / DAY) + 1, written: 0, skipped: Math.round((to - from) / DAY) + 1, assets, notes, synthetic: 0, tennis: 0 };
   }
   try {
-    const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as ReplayState;
-    if (start > from && saved.version === REPLAY_VERSION && saved.sig === sig && saved.day === iso(start - DAY)) {
+    const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as ReplayStates;
+    const x0 = saved.days?.[iso(start - DAY)];
+    if (start > from && saved.version === REPLAY_VERSION && saved.sig === base && x0) {
       for (const [a, s] of st) {
-        const x = saved.assets[a];
+        const x = x0.assets[a];
         if (!x) throw new Error('asset missing');
         await s.spot.skip(start); await s.perp.skip(start);
         Object.assign(s, x);
       }
-      carry = saved.carry;
+      carry = x0.carry;
       days = skipped = Math.round((start - from) / DAY);
     } else start = from;
   } catch { start = from; }
+  // End states of the last KEEP_STATES days processed (snapshots), written once the build ends.
+  const states: Array<[string, string]> = [];
   for (let d0 = start; d0 <= to; d0 += DAY) {
     days++;
     const day = iso(d0);
@@ -424,26 +453,34 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
       }
       ev.push({ t: m.closeTime + 1000, k: 'result', ticker: m.ticker, result: m.result });
     }
+    const tennisToday = tennisSeries.length ? tennisEvents(kalshiDir, tennisSeries, day, d0, d1, ev, alive) : 0;
+    tennisCount += tennisToday;
     for (const [t, tickers] of alive) ev.push({ t, k: 'alive', tickers });
     ev.sort((x, y) => x.t - y.t);
     const cut = ev.findIndex((e) => e.t >= d1);
     if (cut >= 0) carry = ev.splice(cut);
+    if (to - d0 < KEEP_STATES * DAY) {
+      const snap: DayState = { carry, assets: Object.fromEntries([...st].map(([a, x]) => [a, { recent: x.recent, basis: x.basis, vPath: x.vPath, vMkt: x.vMkt, prints: x.prints, open: x.open }])) };
+      states.push([day, JSON.stringify(snap)]);
+    }
     if (!build) { skipped++; continue; }
     if (!ev.length) continue;
     const tmp = `${file}.tmp`;
     fs.writeFileSync(tmp, zlib.gzipSync(ev.map((e) => JSON.stringify(e)).join('\n') + '\n', { level: 6 }));
     fs.renameSync(tmp, file);
-    manifest.days[day] = sig;
+    manifest.days[day] = sigOf(day);
     manifest.kalshi![day] = kms.length;
+    manifest.tennis![day] = tennisToday;
     fs.writeFileSync(manifestFile, JSON.stringify(manifest));
-    const state: ReplayState = { version: REPLAY_VERSION, sig, day, carry, assets: Object.fromEntries([...st].map(([a, x]) => [a, { recent: x.recent, basis: x.basis, vPath: x.vPath, vMkt: x.vMkt, prints: x.prints, open: x.open }])) };
-    fs.writeFileSync(`${stateFile}.tmp`, JSON.stringify(state));
-    fs.renameSync(`${stateFile}.tmp`, stateFile);
     written++;
     if (written % 30 === 1) log(`${day}: ${ev.length} records (${kms.length} Kalshi contracts)`);
   }
-  log(`history replay: ${written} day(s) written, ${skipped} already built, ${assets.length} asset(s)${synthetic ? `, ${synthCount} synthetic contract(s)` : ''}`);
-  return { days, written, skipped, assets, notes, synthetic: synthCount };
+  if (states.length) {
+    fs.writeFileSync(`${stateFile}.tmp`, `{"version":${REPLAY_VERSION},"sig":${JSON.stringify(base)},"days":{${states.map(([d, j]) => `${JSON.stringify(d)}:${j}`).join(',')}}}`);
+    fs.renameSync(`${stateFile}.tmp`, stateFile);
+  }
+  log(`history replay: ${written} day(s) written, ${skipped} already built, ${assets.length} asset(s)${synthetic ? `, ${synthCount} synthetic contract(s)` : ''}${tennisSeries.length ? `, ${tennisCount} tennis match market(s)` : ''}`);
+  return { days, written, skipped, assets, notes, synthetic: synthCount, tennis: tennisCount };
 }
 
 /** One print of an asset's synthetic contracts: settle the ones that closed (their 60 s average is
@@ -487,6 +524,58 @@ function synthTick(a: string, s: AssetState, t: number, iv: number, ev: Ev[], re
     ev.push({ t, k: 'book', ticker: c.ticker, bids: [{ price: bid, size: 100 }], asks: [{ price: ask, size: 100 }] });
   }
   return listed;
+}
+
+/** Kalshi's settled tennis match markets whose match starts on this day, as the live feed would show them:
+ *  the market half an hour before, the real tape trade by trade with the book following it, the minute
+ *  quotes, alive marks every 5 s (the quotes stand between trades), the result after the close. */
+function tennisEvents(kalshiDir: string, series: string[], day: string, d0: number, d1: number, ev: Ev[], alive: Map<number, string[]>): number {
+  const next = new Date(d0 + DAY).toISOString().slice(0, 10);
+  let n = 0;
+  for (const s of series) {
+    const tapes = loadKalshiTrades(kalshiDir, s, [day, next]);
+    for (const d of [day, next]) {
+      const f = path.join(kalshiDir, s, `${d}.jsonl`);
+      if (!fs.existsSync(f)) continue;
+      for (const l of fs.readFileSync(f, 'utf8').split('\n')) {
+        let m: KalshiHistMarket;
+        try { if (!l) continue; m = JSON.parse(l); } catch { continue; }
+        if ((m.result !== 'yes' && m.result !== 'no') || !m.candles?.length) continue;
+        const first = m.candles[0].ts;
+        const begin = Math.max(m.openTime, (m.startTime && m.startTime < m.closeTime ? m.startTime : first) - 30 * MIN);
+        if (begin < d0 || begin >= d1) continue;
+        n++;
+        ev.push({ t: Math.max(d0, begin - 1000), k: 'market', ticker: m.ticker, series: s, asset: 'TENNIS', openTime: m.openTime, closeTime: m.closeTime, strike: null, cap: null, kind: 'match', event: m.event, title: m.title, startTime: m.startTime, tickSize: 0.01, hist: 1 });
+        // The candles' quotes and the tape, merged in time; the book follows each trade.
+        type Step = { t: number; c?: KalshiHistMarket['candles'][number]; tr?: KalshiTrade };
+        const steps: Step[] = [
+          ...m.candles.filter((c) => c.ts >= begin && c.ts <= m.closeTime).map((c): Step => ({ t: c.ts, c })),
+          ...(tapes.get(m.ticker) ?? []).filter((x) => x[0] >= begin && x[0] <= m.closeTime).map((x): Step => ({ t: x[0], tr: x })),
+        ].sort((a, b) => a.t - b.t || (a.c ? 0 : 1) - (b.c ? 0 : 1));
+        let spread = 0.02, booked = 0;
+        const book = (t: number, bid: number, ask: number) => {
+          const b = Math.round(bid * 100) / 100, a = Math.round(ask * 100) / 100;
+          if (!(b >= 0.01 && a <= 0.99 && a > b)) return;
+          ev.push({ t, k: 'book', ticker: m.ticker, bids: [{ price: b, size: 100 }], asks: [{ price: a, size: 100 }] });
+          booked = booked || t;
+        };
+        for (const st of steps) {
+          if (st.c) {
+            const { bidC, askC } = st.c;
+            if (bidC !== null && askC !== null && askC > bidC) { spread = Math.max(0.01, askC - bidC); book(st.t, bidC, askC); }
+            continue;
+          }
+          const [t, price, count, side] = st.tr!;
+          ev.push({ t, k: 'trade', ticker: m.ticker, price, count, takerSide: side ? 'yes' : 'no', ts: t });
+          // A YES taker lifted the ask at this price, a NO taker hit the bid.
+          if (side) book(t, Math.max(0.01, price - spread), price); else book(t, price, Math.min(0.99, price + spread));
+        }
+        if (booked) for (let at = Math.ceil(booked / 5000) * 5000; at < m.closeTime; at += 5000) { const x = alive.get(at); if (x) x.push(m.ticker); else alive.set(at, [m.ticker]); }
+        ev.push({ t: m.closeTime + 1000, k: 'result', ticker: m.ticker, result: m.result });
+      }
+    }
+  }
+  return n;
 }
 
 function lowerBound(arr: Array<{ ts: number }>, ts: number): number {
