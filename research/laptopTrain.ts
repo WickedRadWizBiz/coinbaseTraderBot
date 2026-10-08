@@ -51,7 +51,7 @@ export interface TrainerSettings { host?: string; user?: string; port?: number; 
 export interface RemoteFile { path: string; size: number; mtime: number }
 
 /** Steps that continue a tournament or depend on one: what rounds after the first repeat. */
-export const CONTINUE_STEPS = ['ta_net', 'ta_net_oos', 'rule_book', 'setups', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'perps', 'readiness'];
+export const CONTINUE_STEPS = ['ta_net', 'ta_net_oos', 'rule_book', 'gp', 'setups', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'perps', 'readiness'];
 
 /** Never sent to the server: links to replay days, caches it rebuilds, backfills, logs, partial writes. */
 const NO_PUSH = /^(work\/(snnfill|perp-dataset[^/]*|perp-backtest-days|sweep-replay|vol-replay|readiness-days|tanet-cache)\/|logs\/)|\.tmp$/;
@@ -134,6 +134,8 @@ export function laptopProfile(remainingHours: number, cores = os.cpus().length, 
     SWEEP_HOURS: h(Math.min(12, remainingHours / 4)), SWEEP_EVERY_DAYS: '1',
     AUTO_TRAIN_SNN_PBT_EVERY_DAYS: '0', AUTO_TRAIN_SNN_TRAIN_DAYS: String(trainDays), AUTO_TRAIN_SNN_PBT_DAYS: String(pbtDays),
     TRAIN_WORKERS: String(workers), AUTO_TRAIN_SNN_PBT_POPULATION: String(Math.min(32, Math.max(3, workers))),
+    // Genetic programming every round, with the video's population (15,000 formulas) on a machine with the cores for it.
+    GP_EVERY_DAYS: '0', GP_POPULATION: String(Math.min(15000, Math.max(2000, 2000 * workers))),
   };
 }
 

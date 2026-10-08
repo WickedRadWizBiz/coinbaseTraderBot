@@ -31,6 +31,7 @@ import type { Vault } from '../vault/vault';
 import { BOOK_RULES, CONFLUENCES, KNOWLEDGE, RULES } from '../ta/knowledge';
 import { marketContext } from '../ta/marketContext';
 import { activeRuleBook } from '../strategy/ruleBook';
+import { activeGpSignals } from '../gp/gpSignals';
 import { buildNeuralMap } from './neuralMap';
 import type { TrainingSupervisor } from '../training/supervisor';
 import type { SettlementSweeper } from '../paper/settlementSweeper';
@@ -203,6 +204,8 @@ export function createApi(d: ApiDeps): express.Express {
       kalshiIndexFeed: d.md.indexFeedStats(),
       // Directional system context: breadth, risk gauges, each coin's character (bot/ta/marketContext.ts).
       market: marketContext()?.status() ?? null,
+      // Evolved formulas (research/gpIndicators.ts): each coin's champion, whether it is validated, its test record.
+      gp: (() => { const g = activeGpSignals(); const cs = g?.champions(); if (!g || !cs || !Object.keys(cs).length) return null; return { version: g.version() ?? null, champions: Object.fromEntries(Object.entries(cs).map(([a, c]) => [a, { formula: c.formula, validated: c.validated, why: c.why ?? null, test: c.test ?? null }])) }; })(),
       ruleBook: (() => { const rb = activeRuleBook(); const m = rb?.meta(); if (!rb || !m) return null; const p = rb.passed(); return { ...m, passed: p.length, top: p.sort((a, b) => b.weight - a.weight).slice(0, 12).map((r) => `${r.id}@${r.tf} ${r.h}h [${r.cls}] w${r.weight}`) }; })(),
       settlement: d.settlement?.status() ?? null,
       kalshiCheck: d.kalshiCheck?.status() ?? null,

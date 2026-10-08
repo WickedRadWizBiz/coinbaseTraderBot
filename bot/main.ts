@@ -33,6 +33,7 @@ import type { DirectionalTrader } from './perps/hedger';
 import { SetupTrader } from './setups/setupTrader';
 import { MarketContext, marketContext, setMarketContext } from './ta/marketContext';
 import { activeRuleBook, RuleBook, setRuleBook, STAND_ASIDE } from './strategy/ruleBook';
+import { activeGpSignals, GpSignals, setGpSignals } from './gp/gpSignals';
 import { SetupJournal } from './setups/journal';
 import { compressOldRecordings, recordingsUsage } from './marketdata/recordingFiles';
 import { DEFAULT_LANES } from './setups/lanes';
@@ -197,7 +198,7 @@ async function main(): Promise<void> {
   const modelHealth = new ModelHealth({ minWindows: cfg.strategy.modelHealthMinWindows }, path.join(cfg.dataDir, 'model_health.json'));
   const taHealth = new ModelHealth({ minWindows: 1e9 }, path.join(cfg.dataDir, 'ta_health.json'));
   // TA conviction for the perps (setup trader): features + the TA network's raw view, cached per asset per minute.
-  const convCache = new Map<string, { ts: number; f: Record<string, number>; v: TaNetView | undefined; rb?: { score: number; n: number } }>();
+  const convCache = new Map<string, { ts: number; f: Record<string, number>; v: TaNetView | undefined; rb?: { score: number; n: number }; gp?: { exposure: number } }>();
   const conviction = (asset: string, dir: number, now: number) => {
     let c = convCache.get(asset);
     if (!c || now - c.ts > 60_000 || now < c.ts) {
@@ -207,13 +208,16 @@ async function main(): Promise<void> {
       v = taNetView(asset, candles, now);
       // The rule book at the setups' holding horizon (a day), for the coin's character.
       const rb = cfg.strategy.ruleBook ? activeRuleBook()?.read(candles?.snapshot(now, marketContext()?.macro()), 24, marketContext()?.character(asset)?.cls) : undefined;
-      c = { ts: now, f, v, rb };
+      // The coin's evolved formula (validated only in live mode).
+      const g = cfg.strategy.gp ? activeGpSignals()?.read(asset, (a) => md.features.candles.get(a)?.bars['1h']) : undefined;
+      const gp = g?.speaks && (g.validated || cfg.mode !== 'live') ? g : undefined;
+      c = { ts: now, f, v, rb, gp };
       convCache.set(asset, c);
     }
     const S = cfg.strategy;
     const ch = marketContext()?.character(asset);
     return directionalConviction(asset, dir, c.f, c.v, { weight: S.taPricingWeight, maxShift: S.taPricingMaxShift, maxZ: S.taPricingMaxZ, live: cfg.mode === 'live', altBoost: S.altBoost, altUsdtdMaxZ: S.altUsdtdMaxZ, altRsiMin: S.altRsiMin, nonAlts: S.nonAlts, maxBoost: S.adversarialMaxBoost, maxTotal: S.convictionMaxTotal,
-      ruleBook: c.rb, standAside: S.characterStandAside && ch && STAND_ASIDE.includes(ch.cls) ? ch.why : undefined });
+      ruleBook: c.rb, gp: c.gp, standAside: S.characterStandAside && ch && STAND_ASIDE.includes(ch.cls) ? ch.why : undefined });
   };
   const calendar = loadCalendar(path.resolve(process.env.MACRO_CALENDAR_PATH ?? './params/calendar.json'));
   if (!calendar) log.info('no macro calendar (params/calendar.json): calendar features unavailable');
@@ -345,6 +349,8 @@ async function main(): Promise<void> {
   const marketCtx = new MarketContext(cfg.taNet.historyDir);
   setMarketContext(marketCtx);
   setRuleBook(new RuleBook(() => path.join(cfg.autoTrain.dir, 'rule_book.json')));
+  // Evolved formulas (research/gpIndicators.ts): re-read when the pipeline promotes a new champion.
+  setGpSignals(new GpSignals(() => path.join(cfg.autoTrain.dir, 'gp_indicators.json'), () => !cfg.strategy.gpRequireValidated && cfg.mode !== 'live'));
   const refreshMarketCtx = () => { try { const now = Date.now(); marketCtx.update(md.features.candles.values(), now, (a) => taNetView(a, md.features.candles.get(a), now)?.vol4h); } catch (e) { log.warn(`market context: ${String(e)}`); } };
   setInterval(refreshMarketCtx, 60_000).unref();
   // Market-wide context for the TA network: every tracked coin's candles and the index series.
