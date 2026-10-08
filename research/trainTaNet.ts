@@ -41,7 +41,8 @@ import {
 } from '../bot/ta/taNet';
 import { coverageFloor as sharedCoverageFloor } from '../bot/util/fitness';
 import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type FitnessReport, type Interaction } from './fitness';
-import { runPbt, walkForwardRounds, type Hyper, type MutationSpec, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
+import { runPbt, walkForwardRounds, type GeneticOpts, type Hyper, type MutationSpec, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
+import type { GaGeneration, GaState } from './genetic';
 import { loadIndexSeries, loadSeries, storedAssets } from './history/candles';
 import { DAILY_CONTEXT_FEATURES, SLOW_INDEXES, TaNetContext } from '../bot/ta/taNetContext';
 import { rng } from './stats';
@@ -515,7 +516,9 @@ interface SavedState {
   contextSig?: string;
   /** Optimizer the population trained with ('adamw'); members trained otherwise start over. */
   optimizer?: string;
-  log: PbtRoundLog[]; members: Array<{ id: number; hyper: Hyper; w: string; m: string; v: string; step: number; lineage: number[]; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }>; bornRound?: number }>;
+  log: PbtRoundLog[]; members: Array<{ id: number; hyper: Hyper; w: string; m: string; v: string; step: number; lineage: number[]; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }>; bornRound?: number; island?: number; parents?: [number, number] }>;
+  /** The genetic layer's state (islands breeding: research/genetic.ts). */
+  ga?: GaState;
 }
 
 /** Day-block bootstrap of the mean of per-row differences (rows grouped by UTC day). */
@@ -574,13 +577,22 @@ export interface TaNetTrainOpts {
   /** The network live now: graded on the same holdout rows as the candidate (champion / challenger),
    *  when its inputs match and it never trained on that holdout. */
   incumbent?: TaNetParams;
+  /** Networks in the tournament (default 3; all start from the same weights). */
+  population?: number;
+  /** Breeding every few rounds (research/genetic.ts; populations of 6+). An offspring starts from the fitter
+   *  parent's weights with knobs crossed from both. */
+  genetic?: GeneticOpts;
   log?: (m: string) => void;
 }
 
 /** Holdout score of a network: mean over the heads of (model loss / naive loss); lower is better, 1 = naive. */
 export interface ChampionScores { candidate: number; incumbent: number | null; incumbentVersion: string | null; why?: string; rows: number }
 
-export interface TaNetReport { params: TaNetParams; rounds: number; newRounds: number; /** The tournament has reached the holdout (no rounds left to run). */ complete: boolean; remaining: number; champion?: ChampionScores }
+export interface TaNetReport {
+  params: TaNetParams; rounds: number; newRounds: number; /** The tournament has reached the holdout (no rounds left to run). */ complete: boolean; remaining: number; champion?: ChampionScores;
+  /** Genetic layer: generations bred, the last one, generations since an offspring won its island. */
+  ga?: { generation: number; sinceOffspringWon: number; last?: GaGeneration };
+}
 
 export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<TaNetReport> {
   const log = o.log ?? (() => {});
@@ -610,6 +622,7 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
       if (saved.schema !== TANET_SCHEMA || JSON.stringify(saved.dims) !== JSON.stringify(dims) || saved.assets.join() !== D.assets.map((a) => a.asset).join()) { log('saved population is for other inputs; starting a fresh tournament'); saved = undefined; }
       else if (saved.optimizer !== 'adamw') { log('saved population trained with Adam + L2; starting a fresh tournament with AdamW'); saved = undefined; }
       else if ((saved.contextSig ?? '') !== contextSig) { log(`market context changed (${saved.contextSig || 'none'} -> ${contextSig || 'none'}); starting a fresh tournament`); saved = undefined; }
+      else if (saved.members.length !== (o.population ?? 3)) { log(`saved population has ${saved.members.length} networks, ${o.population ?? 3} wanted; starting a fresh tournament`); saved = undefined; }
     } catch { saved = undefined; }
   }
   const norm = saved?.norm ?? fitNorms(D, between(allRounds[0].trainFrom, allRounds[0].trainTo));
@@ -620,15 +633,17 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
   const remaining = pending - rounds.length;
   const resume = saved ? {
     trials: saved.trials, log: saved.log,
-    members: saved.members.map((m): PbtMember<Member> => ({ id: m.id, hyper: m.hyper, state: { w: unb64(m.w), m: unb64(m.m), v: unb64(m.v), step: m.step }, lineage: m.lineage, scores: m.scores, bornRound: m.bornRound, record: m.record.map(([ts, ret, cost, group]) => ({ ts, ret, cost, group })) })),
+    members: saved.members.map((m): PbtMember<Member> => ({ id: m.id, hyper: m.hyper, state: { w: unb64(m.w), m: unb64(m.m), v: unb64(m.v), step: m.step }, lineage: m.lineage, scores: m.scores, bornRound: m.bornRound, record: m.record.map(([ts, ret, cost, group]) => ({ ts, ret, cost, group })), ...(m.island !== undefined ? { island: m.island } : {}), ...(m.parents ? { parents: m.parents } : {}) })),
+    ga: saved.ga,
   } : undefined;
-  log(`${n} samples over ${D.assets.map((a) => a.asset).join(', ')}; 15m input on ${(D.microShare * 100).toFixed(0)}% of them; ${saved ? `continuing a saved population (${saved.log.length} rounds so far)` : 'fresh population of 3'}; ${rounds.length} round(s) to run; holdout from ${new Date(holdoutFrom).toISOString().slice(0, 10)}`);
+  const population = o.population ?? 3;
+  log(`${n} samples over ${D.assets.map((a) => a.asset).join(', ')}; 15m input on ${(D.microShare * 100).toFixed(0)}% of them; ${saved ? `continuing a saved population (${saved.log.length} rounds so far)` : `fresh population of ${population}`}; ${rounds.length} round(s) to run; holdout from ${new Date(holdoutFrom).toISOString().slice(0, 10)}`);
 
-  const save = (members: PbtMember<Member>[], trials: number, plog: PbtRoundLog[], lastEvalTo: number, nextIndex: number) => {
+  const save = (members: PbtMember<Member>[], trials: number, plog: PbtRoundLog[], lastEvalTo: number, nextIndex: number, ga?: GaState) => {
     if (!o.statePath) return;
     const st: SavedState = {
-      schema: TANET_SCHEMA, dims, assets: D.assets.map((a) => a.asset), norm, trials, lastEvalTo, nextIndex, contextSig, optimizer: 'adamw', log: plog,
-      members: members.map((m) => ({ id: m.id, hyper: m.hyper, w: b64(m.state.w), m: b64(m.state.m), v: b64(m.state.v), step: m.state.step, lineage: m.lineage, scores: m.scores, bornRound: m.bornRound, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]) })),
+      schema: TANET_SCHEMA, dims, assets: D.assets.map((a) => a.asset), norm, trials, lastEvalTo, nextIndex, contextSig, optimizer: 'adamw', log: plog, ...(ga ? { ga } : {}),
+      members: members.map((m) => ({ id: m.id, hyper: m.hyper, w: b64(m.state.w), m: b64(m.state.m), v: b64(m.state.v), step: m.state.step, lineage: m.lineage, scores: m.scores, bornRound: m.bornRound, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]), ...(m.island !== undefined ? { island: m.island } : {}), ...(m.parents ? { parents: m.parents } : {}) })),
     };
     fs.mkdirSync(path.dirname(o.statePath), { recursive: true });
     const tmp = `${o.statePath}.${process.pid}.tmp`;
@@ -640,10 +655,11 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
   let inits = 0;
   const res = await runPbt<Member>({
     base: { ...BASE_HYPER, ...o.baseHyper } as Hyper, spec: HYPER_SPEC, rounds, seed, resume, exploreAfterLast: true, restartEvery: o.restartEvery ?? 0, log,
+    population, genetic: o.genetic,
     hooks: {
-      // Three identical networks: same seed, same weights; only the hyperparameters differ. A later
-      // init is an exploration restart and gets fresh weights from a new seed.
-      init: () => { const restart = resume !== undefined || inits >= 3; inits++; return { w: initBranchParams(dims, restart ? seed + 7919 * inits : seed), m: new Float64Array(size), v: new Float64Array(size), step: 0 }; },
+      // Identical networks: same seed, same weights; only the hyperparameters differ. A later init is an
+      // exploration restart and gets fresh weights from a new seed.
+      init: () => { const restart = resume !== undefined || inits >= population; inits++; return { w: initBranchParams(dims, restart ? seed + 7919 * inits : seed), m: new Float64Array(size), v: new Float64Array(size), step: 0 }; },
       clone: (s) => ({ w: s.w.slice(), m: s.m.slice(), v: s.v.slice(), step: s.step }),
       train: (s, h, r: PbtRound) => {
         const idx = between(r.trainFrom, r.trainTo - emb, stride);
@@ -657,7 +673,7 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
         return { report: coverageFloor(fitnessOf(xs, { from: r.evalFrom, to: r.evalTo, clusterMs: H }), xs.length, idx.length), interactions: independentInteractions(xs, H) };
       },
     },
-    onRound: ({ members, trials, log: plog, round }) => save(members, trials, plog, round.evalTo, round.index + 1),
+    onRound: ({ members, trials, log: plog, round, ga }) => save(members, trials, plog, round.evalTo, round.index + 1, ga),
   });
   if (!rounds.length && resume) Object.assign(res, { members: resume.members, trials: resume.trials, log: resume.log, elite: resume.members.find((m) => m.id === resume.log[resume.log.length - 1]?.ranking[0]?.member) ?? resume.members[0] });
   const elite = res.elite;
@@ -785,6 +801,7 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
 
   return {
     rounds: res.log.length, newRounds: rounds.length, complete: remaining === 0, remaining, champion,
+    ...(res.ga ? { ga: { generation: res.ga.generation, sinceOffspringWon: res.ga.sinceOffspringWon, last: res.ga.history[res.ga.history.length - 1] } } : {}),
     params: {
       version: `tanet5-${new Date().toISOString().slice(0, 10)}-${D.assets.length}a-r${res.log.length}`,
       schema: TANET_SCHEMA, dims, gates: gatesOf(elite.hyper), weights: Array.from(finalW), norm, patterns, context: D.context,
@@ -818,6 +835,8 @@ export async function trainTaNetMain(argOf: (k: string, d: string) => string = c
     statePath: argOf('state', path.join(hist, '.tanet-population.json')), fresh: argOf('fresh', '') === 'true' || process.argv.includes('--fresh'),
     maxRounds: num('max-rounds', '0') || undefined, restartEvery: num('restart-every', '0'), catchUpEpochs: num('catch-up-epochs', '3'), patterns: argOf('patterns', 'true') !== 'false', log,
     calibMonths: argOf('calib-months', '') === '' ? undefined : num('calib-months', '1'),
+    population: num('population', '3'),
+    genetic: { parents: num('parents', '3'), islands: num('islands', '1'), breedEvery: num('breed-every', '4'), mutation: num('mutation', '0.03') },
     incumbent: (() => { const f = argOf('incumbent', ''); try { return f && fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) as TaNetParams : undefined; } catch { return undefined; } })(),
   });
   const out = argOf('out', 'params/ta_net.json');

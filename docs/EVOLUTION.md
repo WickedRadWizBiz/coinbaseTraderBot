@@ -8,6 +8,10 @@ Every network in the bot starts the same way: as **three identical networks** th
 
 This page maps each part of the evolutionary protocol to the code, and says where it had to be adapted.
 
+On the laptop trainer the SNN tournaments field about one network per CPU thread (15 on a 16-thread laptop).
+On top of the tournament, those populations **breed** every few rounds (see
+[Genetic breeding](#genetic-breeding-researchgeneticts) below).
+
 ## Phase 3: the tournament (`research/pbt.ts`)
 
 The tournament follows DeepMind's population-based training, adapted to time series. It is not a classic genetic algorithm.
@@ -49,6 +53,42 @@ Every member keeps a record of its evaluation windows. A copy inherits the elite
 **The tournament is an initialisation followed by continual evolution:**
 - The population is saved after every round, and later runs continue it as new months (TA) or new days (SNNs) arrive.
 - A long first tournament is spread over several daily pipeline runs (`TA_NET_MAX_ROUNDS_PER_RUN`, `AUTO_TRAIN_SNN_PBT_MAX_ROUNDS`). Nothing is promoted until it reaches the present.
+
+## Genetic breeding (`research/genetic.ts`)
+
+On top of the tournament's selection, every population of 6 or more networks breeds. The SNN tournaments
+on the laptop qualify (about 15 networks); the server's three-network tournaments and the TA network
+(3 by default, `TA_NET_POPULATION`) run as before.
+
+| Step | What happens |
+|---|---|
+| Select parents | Every round the usual selection goes on. Every `TOURNAMENT_BREED_EVERY` rounds (4: for an SNN, the four judged days of one week of history) a generation ends. The `TOURNAMENT_PARENTS` (3) networks with the best **mean fitness over the generation** are the parents. A mean over the generation, not one day's score, so a lucky day does not make a parent. |
+| Crossover | Every pair of parents has **one offspring**: 3 parents make 3 offspring. Each knob comes mostly from one parent, the fitter one slightly favoured, blended a little with the other parent's value. |
+| Pass down winning traits | **Knobs:** a trait memory follows every evaluation of every network. For each knob it records where the values of the networks that ranked in the top quarter of their round lie, and how strongly the knob relates to rank. Where it is confident, crossover favours the parent whose value sits in that winning region. **Learned strategies (SNNs):** each column is one asset and horizon, a strategy of its own. An offspring takes every column from the parent whose column made more money over the generation; the rest of the network comes from the fitter parent. A tennis network's columns are its matches, so a tennis offspring starts from the fitter parent's network. A TA network offspring starts from the fitter parent's weights. |
+| Mutate slightly | Every knob of an offspring is then nudged by about ±3% (`TOURNAMENT_MUTATION`, a log-normal sd), within its limits. |
+| Next generation | The offspring take the slots of the networks with the worst mean over the generation; the round's elite is never one of them. The champion parents and the best runners-up carry on, with the offspring, into the next generation. Each offspring is judged on its own knobs the next round, then takes part in the selection like any other network. |
+| Iterate | The population and its trait memory are saved after every round and carry on across runs, so the generations keep counting. On the laptop a round of the trainer runs about 5 generations (a 5-week tournament of fresh history), so 4 to 10 trainer rounds make 20 to 50 generations. The trainer stops when progress does: rounds in a row where no challenger beat the network in use (docs/LAPTOP_TRAINING.md). |
+
+Every round's log shows the generation, its parents, each offspring's parents (for example `#7=#3x#11`) and
+the knob values the trait memory is confident about. The pipeline report carries the generation count.
+
+### Why one population, three parents, and islands off
+
+The design was measured before it was switched on. The test: a toy landscape with 6 knobs and a hidden
+optimum (one peak, or two), 15 networks, 48 or 96 rounds, and every evaluation noisy, with noise
+comparable to the gaps between networks, as tournament days are. The score is how far the final elite's
+knobs ended from the optimum.
+
+| Variant | Beat the plain tournament | Notes |
+|---|---|---|
+| Breeding, 3 parents (the default) | 56% of 320 runs | Closer to the optimum in all 4 settings with 96 rounds (for example 1.99 vs 2.22) |
+| Breeding, 4 parents (6 offspring per generation) | 41% of 320 runs | Replacing 40% of the population every generation is too much on noisy scores |
+| 4 islands of about 4 networks, their winners breeding | 34% of 160 runs | Better only on long runs with low noise (0.41 vs 0.54); with noisy scores each small island picks its winner on noise |
+
+**Islands** (`TOURNAMENT_ISLANDS`, default 1): the population is split into separate tournaments run side
+by side; each island's winner is a parent; the next islands are dealt from the champions (one each), the
+offspring and the best runners-up. They are available, but off: on noisy scores they converged more slowly
+than one population.
 
 ## Phase 2: multi-timeframe network (`bot/ta/branchNet.ts`, TA network)
 
@@ -111,6 +151,9 @@ Each report shows results per regime. History before the Binance data starts (Au
 | `AUTO_TRAIN_SNN_PBT_DAYS` / `AUTO_TRAIN_SNN_PBT_INIT_DAYS` | `7` / `3` | SNN tournament span and initial learning block |
 | `AUTO_TRAIN_SNN_PBT_EVERY_DAYS` / `AUTO_TRAIN_SNN_PBT_MAX_ROUNDS` | `30` / `0` | re-run the SNN tournaments monthly; rounds per run |
 | `TA_NET_RESTART_EVERY` / `AUTO_TRAIN_SNN_PBT_RESTART_EVERY` | `6` / `4` | exploration member: every N rounds the worst network restarts from scratch (0 = never) |
+| `TOURNAMENT_PARENTS` / `TOURNAMENT_BREED_EVERY` / `TOURNAMENT_MUTATION` | `3` / `4` / `0.03` | genetic breeding in populations of 6+: parents per generation (one offspring per pair; 0 = off), rounds per generation, the offspring's knob mutation (log-normal sd) |
+| `TOURNAMENT_ISLANDS` | `1` | split the population into this many island tournaments whose winners breed (each island at least 3 networks) |
+| `TA_NET_POPULATION` | `3` | networks in the TA tournament (6+ breed; each round costs one network's training per member) |
 | `SNN_TENNIS_POPULATION` / `SNN_TENNIS_POPULATION_SETTLES` | `true` / `30` | live tennis tournament |
 | `PORTFOLIO_KELLY` / `PORTFOLIO_KELLY_SHRINK` | `true` / `0.5` | portfolio cap on crypto orders |
 | `PERP_LOCKED_VOL_MULT` | `1` | perp volatility inflation per unit of locked capital |

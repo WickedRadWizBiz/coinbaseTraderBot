@@ -137,7 +137,7 @@ export function laptopProfile(remainingHours: number, cores = os.cpus().length, 
   };
 }
 
-interface ReportStep { step: string; ok: boolean; skipped?: string; ms?: number; detail?: { promoted?: boolean; improved?: boolean; complete?: boolean } }
+interface ReportStep { step: string; ok: boolean; skipped?: string; ms?: number; detail?: { promoted?: boolean; improved?: boolean; complete?: boolean; ga?: { generation: number; sinceOffspringWon: number } } }
 export interface RoundOutcome { improved: string[]; inProgress: string[]; failed: string[] }
 
 /** What a round's pipeline report says: the steps whose model got better (a challenger that beat the one in
@@ -347,7 +347,8 @@ function lastReport(models: string, since = 0): { steps?: ReportStep[] } | undef
 }
 
 function reportSummary(r: { steps?: ReportStep[] } | undefined): string[] {
-  return (r?.steps ?? []).map((s) => `${s.step}: ${s.skipped ? `skipped (${s.skipped.slice(0, 90)})` : !s.ok ? 'FAILED' : s.detail?.improved ? 'IMPROVED' : s.detail?.promoted ? 'promoted (no better than the model in use)' : 'done'} ${s.ms ? `${(s.ms / 60000).toFixed(1)} min` : ''}`);
+  const gen = (s: ReportStep) => (s.detail?.ga ? ` (genetic generation ${s.detail.ga.generation}${s.detail.ga.sinceOffspringWon ? `, ${s.detail.ga.sinceOffspringWon} since an offspring won` : ''})` : '');
+  return (r?.steps ?? []).map((s) => `${s.step}: ${s.skipped ? `skipped (${s.skipped.slice(0, 90)})` : !s.ok ? 'FAILED' : s.detail?.improved ? 'IMPROVED' : s.detail?.promoted ? 'promoted (no better than the model in use)' : 'done'}${gen(s)} ${s.ms ? `${(s.ms / 60000).toFixed(1)} min` : ''}`);
 }
 
 /** models/readiness.json when this round's pipeline wrote it. */

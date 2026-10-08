@@ -20,6 +20,8 @@ export interface Interaction {
   cost: number;
   /** Trades sharing a group (asset, event, column) and firing within clusterMs are one interaction. */
   group?: string;
+  /** The part of the network that made the call (an SNN column): the tournaments' genetic layer credits it. */
+  trait?: string;
 }
 
 /** Cluster trades into independent interactions (summed returns). Sorted by time. */

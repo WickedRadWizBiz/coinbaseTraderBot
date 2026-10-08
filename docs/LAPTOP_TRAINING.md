@@ -353,6 +353,17 @@ round:
 
 A 16-thread laptop runs 15 candidates at once instead of 3, one after another.
 
+**Breeding.** Every week of history (4 judged days) is a generation. The 3 networks with the best mean over
+it breed: every pair has one offspring.
+- **Knobs:** mixed from both parents, leaning towards the values that have kept winning (a trait memory of
+  every evaluation), then nudged by about ±3%.
+- **Columns:** taken from whichever parent's column made more. Each column is one asset and horizon.
+- **Who makes room:** the offspring replace the worst networks; the parents and the best runners-up carry
+  on.
+
+A round of the trainer runs about 5 generations, so a run that goes until it stops covers 20 to 50 of
+them. docs/EVOLUTION.md has the details and the measurements behind the settings.
+
 ## GPU
 
 Not used. The networks are small spiking and feed-forward models written in TypeScript. A member's time

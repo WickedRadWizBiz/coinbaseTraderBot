@@ -204,6 +204,7 @@ These can't be automated, or deliberately aren't.
 | `RECORDINGS_GZIP_AFTER_DAYS` | `2` | Gzip recorded days older than this (0 = never). |
 | `RECORDINGS_MIN_FREE_GB` | `3` | Send a low-disk alert below this much free space. |
 | `AUTO_TRAIN_SNN_PBT_DAYS` / `AUTO_TRAIN_SNN_PBT_EVERY_DAYS` | `7` / `30` | SNN tournaments: days replayed, how often they rerun (docs/EVOLUTION.md has every tournament setting). On the history replay, a generation is that many days of weeks the network has never trained on (docs/LAPTOP_TRAINING.md, history ledger). |
+| `TOURNAMENT_PARENTS` / `TOURNAMENT_BREED_EVERY` / `TOURNAMENT_MUTATION` / `TOURNAMENT_ISLANDS` | `3` / `4` / `0.03` / `1` | Genetic breeding in tournaments of 6+ networks (the laptop's): parents per generation (0 = off), rounds per generation, offspring mutation, islands (docs/EVOLUTION.md). |
 | `AUTO_TRAIN_CONTEST_WEEKS` | `2` | History replay: held-out weeks a new SNN replays against the network in use. It replaces that network only if it scores better there. |
 | `TRAIN_TARGET_POOL_USD` / `TRAIN_TARGET_DAILY_PCT` / `TRAIN_TARGET_MAX_DD_PCT` | `200` / `50` / `10` | The readiness step's target: the whole bot on held-out days earning this % of the pool a day (the lower end of the 95% interval) with at most this drawdown. The continuous laptop trainer stops when it is met. 50% a day is far beyond any real system; see docs/LAPTOP_TRAINING.md. |
 | `TRAIN_PLATEAU_ROUNDS` | `3` | Continuous laptop trainer: stop after this many rounds in a row that improve no model. |
