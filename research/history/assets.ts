@@ -15,17 +15,38 @@ export interface DiscoverOpts {
   log?: (m: string) => void;
 }
 
-/** Asset candidates from Kalshi's crypto series list (pattern + frequency filter). */
-export function assetsFromSeries(rows: Array<{ ticker: string; frequency?: string }>): string[] {
+/** Kalshi series named after the coin rather than its ticker. */
+export const ASSET_ALIASES: Record<string, string> = { BITCOIN: 'BTC', ETHEREUM: 'ETH', SOLANA: 'SOL', RIPPLE: 'XRP', DOGECOIN: 'DOGE', SHIBA: 'SHIB', SHIBAINU: 'SHIB', CARDANO: 'ADA', LITECOIN: 'LTC', POLKADOT: 'DOT', CHAINLINK: 'LINK', AVALANCHE: 'AVAX' };
+/** Kalshi's crypto category also lists metals and stock indices: no coin to download. */
+export const NOT_CRYPTO = new Set(['GOLD', 'SILVER', 'PLATINUM', 'PALLADIUM', 'COPPER', 'OIL', 'WTI', 'BRENT', 'NATGAS', 'US500', 'SPX', 'SP500', 'NASDAQ', 'NDX', 'DOW', 'INX']);
+/** Letters Kalshi appends to a coin for a series' frequency or kind (KXNEARH hourly, KXSOLE, KXTONH). */
+const SUFFIXES = ['H', 'D', 'E', 'W', 'M', 'Y'];
+
+/** Coin tickers from raw candidates: aliases mapped (RIPPLE -> XRP), metals and indices dropped, and a coin with a
+ *  frequency letter stuck on (NEARH, TONH, SOLE) folded into the coin when that coin is listed too or is a known one. */
+export function normalizeAssets(candidates: string[]): string[] {
+  const raw = new Set(candidates.map((a) => ASSET_ALIASES[a] ?? a).filter((a) => !NOT_CRYPTO.has(a)));
+  const known = new Set([...raw, ...FALLBACK_ASSETS, ...Object.values(ASSET_ALIASES)]);
   const out = new Set<string>();
+  for (const a of raw) {
+    const stem = a.slice(0, -1);
+    const folds = stem.length >= 2 && SUFFIXES.includes(a.slice(-1)) && known.has(stem) && !FALLBACK_ASSETS.includes(a);
+    out.add(folds ? stem : a);
+  }
+  return [...out].sort();
+}
+
+/** Asset candidates from Kalshi's crypto series list (pattern + frequency filter), normalised to coin tickers. */
+export function assetsFromSeries(rows: Array<{ ticker: string; frequency?: string }>): string[] {
+  const raw: string[] = [];
   for (const r of rows) {
     const m = /^KX([A-Z0-9]{2,10}?)(15M|D)?$/.exec(r.ticker.toUpperCase());
     if (!m) continue;
     const f = r.frequency?.toLowerCase();
     if (f && !FREQUENCIES.has(f)) continue;
-    out.add(m[1]);
+    raw.push(m[1]);
   }
-  return [...out].sort();
+  return normalizeAssets(raw);
 }
 
 /** Asset candidates from perp market tickers/titles (KXBTCPERP, BTC-PERP, BTCUSD-PERP, "Bitcoin Perpetual"). */
@@ -59,7 +80,7 @@ export async function discoverKalshiAssets(o: DiscoverOpts = {}): Promise<{ asse
   catch (e) { errors.push(`Kalshi series list: ${(e as Error).message}`); }
   try { const raw = await get(`${perps}/margin/markets?status=active`); perp = assetsFromPerps(Array.isArray(raw) ? raw : raw.markets ?? []); }
   catch (e) { errors.push(`Kalshi perps list: ${(e as Error).message}`); }
-  const assets = [...new Set([...binary, ...perp])].sort();
+  const assets = normalizeAssets([...binary, ...perp]);
   for (const e of errors) o.log?.(`asset discovery: ${e}`);
   return { assets: assets.length ? assets : FALLBACK_ASSETS, binary, perps: perp, errors };
 }
