@@ -49,6 +49,7 @@ export function validatedParts(kind: string, file: string): number | undefined {
     case 'setups': return (['fast', 'slow'] as const).filter((l) => p.validation?.[l]?.passed).length;
     case 'mlp': return p.validation?.passed ? 1 : 0;
     case 'perp': return p.validation?.passed && p.validation?.backtest?.ok ? 1 : 0;
+    case 'gp': return Object.values(p.champions ?? {}).filter((c: any) => c?.validated).length;
     default: return p.validation?.validated ? 1 : 0;
   }
 }

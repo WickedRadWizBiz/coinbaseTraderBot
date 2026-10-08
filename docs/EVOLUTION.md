@@ -90,6 +90,49 @@ by side; each island's winner is a parent; the next islands are dealt from the c
 offspring and the best runners-up. They are available, but off: on noisy scores they converged more slowly
 than one population.
 
+## Genetic programming: evolved formulas (`research/gpIndicators.ts`)
+
+The tournaments above evolve the *settings* of networks someone designed. Genetic programming evolves the
+*indicator itself*: a mathematical formula, machine-made, that turns the coins' hourly bars into a position.
+It follows the video "I let genetic programming design trading indicators" and its code
+(ZiadFrancis/Genetics_Trading_Part_1: DEAP plus vectorbt), rebuilt in TypeScript for the bot's coins. The
+formula language is shared with the live bot (`bot/gp/expr.ts`).
+
+| Step | The video | The bot |
+|---|---|---|
+| Inputs | 5-minute OHLC of 4 forex pairs to predict one (cross-market) | Hourly bars of the coin plus BTC and ETH (`GP_CROSS`). Per coin: the bar's log return, open / high / low against the close, and volume against its 24-hour mean. These are scale-free, so a formula means the same at $3,000 and at $100,000 BTC. |
+| Building blocks | + - × ÷ (protected), sin, cos, tan, tanh, a > b ? 100 : -100, random constants | The same, plus functions over the last *w* hours: lag, delta, mean, std, max, min, sum, z-score (w = 1..96). Without them a formula only sees the current bar. |
+| 1. Population | 15,000 random formulas (the code's default is 1,000) | `GP_POPULATION`: 1,000 on the server; on the laptop 2,000 per worker thread, up to 15,000. Ramped half-and-half trees, depth 1–5, plus the formula in use. |
+| 2. Fitness | Backtest; e^(-total return), minimised; under 20 trades or a wiped-out account scores 1e6 | Backtest on the training years. The formula's value is the target exposure, clipped to -100%..+100%. A **10% dead band** (`GP_BAND`) means the position only moves when the formula asks for 10 points more or less. Each unit of exposure traded costs `GP_COST_BPS` (5 bps). Score: annualised **Sharpe** (`GP_FITNESS=sharpe`, the default) or the video's **-e^(-return)** (`GP_FITNESS=return`). A little is taken off per token against bloat. Under 20 trades, a wiped-out account or a broken formula scores worst. |
+| 3. Selection | Top 10% kept | The best **10% pass unchanged**. The rest are bred from parents picked by tournament (best of 3). |
+| 4. Breeding | Subtree crossover plus mutation | **One-point subtree crossover** (90%): a random branch of one formula swapped with a random branch of the other. **Mutation** (15%): a branch regrown, one node swapped for another of its kind, or a branch hoisted up. A child deeper than 8, longer than 60 tokens or looking back more than 240 hours is replaced by its parent. |
+| 5. Generations | 15–20; champion tested on unseen data | `GP_GENERATIONS` (15) with a hall of fame of the 10 best formulas. The **champion** is the hall-of-fame formula that scores best on the **validation** years (the 20% after training). It is then tested **once** on the newest 20%, which neither the evolution nor the choice has seen. |
+| Saved champion | `best_individual.dill`, loaded for fast inference | `data/models/gp_indicators.json`: one champion per coin, as tokens plus the readable formula, with its train / validation / test record. The live bot re-reads it when it changes and computes each formula once per new hourly bar. |
+
+**What a champion must show before it speaks live (validated).**
+- Test Sharpe above 0.
+- A **probabilistic Sharpe** of at least `GP_MIN_PSR` (0.9) on the test's daily returns. This is deflated by every champion ever compared on a test window for that coin, so repeated runs make it harder, not easier.
+- At least 20 test trades.
+- Test drawdown within 35%.
+- Validation Sharpe above 0.
+
+A validated formula joins the TA conviction signals as `evolved formula`, with the exposure it holds now (`bot/strategy/taConviction.ts`). That signal counts towards breadth and boosts for Kalshi entries and perp setups, like the rule book. Unvalidated formulas are shown but never speak, except in paper mode with `GP_REQUIRE_VALIDATED=false`.
+
+**Promotion.** Champions are kept per coin. A new champion replaces the one in use only when it scores higher on the new test years, with both judged on the same years. The formula in use is also seeded into each new population, so evolution carries on from it across runs.
+
+**Measured** (synthetic markets; the real-history run happens in the daily remote training):
+
+| Check | Result |
+|---|---|
+| BTC repeats a quarter of ETH's last hourly return (a planted cross-market lead) | The champion reads ETH (for example `z48(ETH.c)`). Validated, test Sharpe about 17, in 4 s. |
+| Pure noise, 1,000 formulas × 15 generations, 3 seeds | Evolution finds training Sharpes above 1, but none validates. Test Sharpes were -1.4, -1.9 and 0.9. The last one, on 8 trades, missed the probabilistic-Sharpe bar, and 20 test trades are now required too. |
+| Live bot vs research | 0 of 2,998 random formulas differ between the live bot's 320 hourly bars and the full history. Every window function looks back a fixed number of bars, and constant or near-constant windows are computed exactly. |
+| Cost | About 5 ms per formula on 80,000 hourly bars (BTC since 2017): about a minute per coin at the server's 1,000 formulas × 15 generations. On the laptop, 15,000 formulas are spread over the worker threads. |
+
+The video's own sample result (46% return, Sharpe 1.1, max drawdown -12% on a year of test) would roughly
+meet the bar with more than a year of test data. Expect most coins' champions not to validate: hourly crypto
+direction is hard, and the gate is there so that only a formula that held up on unseen years gets a say.
+
 ## Phase 2: multi-timeframe network (`bot/ta/branchNet.ts`, TA network)
 
 The granularities feed four separate branches. They are never flattened into one vector.
@@ -153,6 +196,10 @@ Each report shows results per regime. History before the Binance data starts (Au
 | `TA_NET_RESTART_EVERY` / `AUTO_TRAIN_SNN_PBT_RESTART_EVERY` | `6` / `4` | exploration member: every N rounds the worst network restarts from scratch (0 = never) |
 | `TOURNAMENT_PARENTS` / `TOURNAMENT_BREED_EVERY` / `TOURNAMENT_MUTATION` | `3` / `4` / `0.03` | genetic breeding in populations of 6+: parents per generation (one offspring per pair; 0 = off), rounds per generation, the offspring's knob mutation (log-normal sd) |
 | `TOURNAMENT_ISLANDS` | `1` | split the population into this many island tournaments whose winners breed (each island at least 3 networks) |
+| `GP_EVERY_DAYS` / `GP_POPULATION` / `GP_GENERATIONS` | `7` / `1000` / `15` | genetic programming of formulas: how often (0 = every run; the laptop trainer runs it every round with up to 15,000 formulas), formulas per coin, generations |
+| `GP_ASSETS` / `GP_CROSS` | all of BTC, ETH, SOL, XRP, DOGE with history / `BTC,ETH` | coins that get a formula; the cross-market coins every formula may read |
+| `GP_FITNESS` / `GP_COST_BPS` / `GP_BAND` / `GP_MIN_PSR` | `sharpe` / `5` / `0.1` / `0.9` | score (`return` = the video's e^(-return)); cost per unit of exposure traded; dead band; the test's probabilistic Sharpe a champion needs |
+| `GP_SIGNAL` / `GP_REQUIRE_VALIDATED` | `true` / `true` | the evolved formulas join the conviction signals; only validated ones (`false` lets unvalidated ones speak in paper mode) |
 | `TA_NET_POPULATION` | `3` | networks in the TA tournament (6+ breed; each round costs one network's training per member) |
 | `SNN_TENNIS_POPULATION` / `SNN_TENNIS_POPULATION_SETTLES` | `true` / `30` | live tennis tournament |
 | `PORTFOLIO_KELLY` / `PORTFOLIO_KELLY_SHRINK` | `true` / `0.5` | portfolio cap on crypto orders |
@@ -162,3 +209,4 @@ Commands:
 - `npm run pipeline -- --fresh-ta-net`: restart the TA tournament from scratch.
 - `npm run pipeline -- --force-snn-pbt`: rerun the SNN tournaments.
 - `npm run research:ta-net` / `npm run research:snn-pbt -- --domain crypto`: run a tournament by hand.
+- `npm run research:gp -- --assets BTC --population 15000 --generations 20`: evolve formulas by hand (`--fitness return` for the video's fitness).

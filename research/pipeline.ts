@@ -52,13 +52,14 @@
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, rule_book, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, readiness
+//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, rule_book, gp, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, readiness
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
 
 import { loadRuleBookHistory, ruleBookSummary, runRuleBook } from './ruleBook';
+import { gpAssets, gpSummary, readGpFile, runGp } from './gpIndicators';
 import { tuneSizingMain } from './tuneSizing';
-import { promoteIfChampion } from './champion';
+import { archiveModel, promoteIfChampion } from './champion';
 import fs from 'fs';
 import path from 'path';
 import { MODEL_FILES } from '../bot/autotrain';
@@ -107,7 +108,7 @@ import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
 import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
 
-export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'rule_book', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'readiness'] as const;
+export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'rule_book', 'gp', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'readiness'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -150,6 +151,8 @@ export interface PipelineState {
   setupsTrainedAt?: number;
   /** Last rule-book study (research/ruleBook.ts, weekly). */
   ruleBookAt?: number;
+  /** Last genetic-programming run (research/gpIndicators.ts, every GP_EVERY_DAYS). */
+  gpAt?: number;
   /** What the recordings make testable so far (see the readiness block of each report). */
   readiness?: Readiness;
   /** Last sweep run per target. */
@@ -436,6 +439,30 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       for (const l of ruleBookSummary(f)) log(`[rule-book] ${l}`);
       return { tests: f.rows.length, passed: f.rows.filter((r) => r.pass).length, character: { accuracy: f.character.accuracy, baseline: f.character.baseline }, from: f.from, to: f.to, splitAt: f.splitAt };
     }, noHistory ?? (due ? undefined : `ran ${((now - state.ruleBookAt!) / 86_400_000).toFixed(1)} day(s) ago (weekly)`));
+  }
+
+  // ---- 0c''. Evolved formulas: genetic programming on years of hourly bars (research/gpIndicators.ts) ----
+  if (want('gp')) {
+    const file = path.join(A.dir, 'gp_indicators.json');
+    const due = !fs.existsSync(file) || !state.gpAt || now - state.gpAt >= A.gpEveryDays * 86_400_000;
+    const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet`;
+    await run('gp', async () => {
+      const assets = gpAssets(T.historyDir, A.gpAssets);
+      if (!assets.length) throw new SkipStep(`no hourly history for ${A.gpAssets.join(', ') || 'BTC, ETH, SOL, XRP, DOGE'}`);
+      const incumbent = readGpFile(file);
+      const r = await runGp({ dir: T.historyDir, assets, cross: A.gpCross, incumbent, log,
+        opts: { population: A.gpPopulation, generations: A.gpGenerations, fitness: A.gpFitness, costBps: A.gpCostBps, band: A.gpBand, minPsr: A.gpMinPsr, workers: workerCount() } });
+      if (!Object.keys(r.file.champions).length) throw new SkipStep(`no coin has enough hourly history (${Object.entries(r.skipped).map(([a, w]) => `${a}: ${w}`).join('; ')})`);
+      // The champions per coin: a new one only where it beat the one in use on the same test years.
+      const archived = incumbent && r.improved.length ? archiveModel(A.dir, 'gp', file) : undefined;
+      writeAtomic(file, JSON.stringify(r.file));
+      state.gpAt = now;
+      for (const l of gpSummary(r.file)) log(`[gp] ${l}`);
+      return {
+        promoted: r.improved.length > 0, improved: r.improved.length > 0, improvedAssets: r.improved, kept: r.kept, skipped: r.skipped, archived,
+        champions: Object.fromEntries(Object.values(r.file.champions).map((c) => [c.asset, { formula: c.formula, validated: c.validated, testSharpe: c.test.sharpe, testReturn: c.test.totalReturn, buyHoldTest: c.buyHoldTest, maxDd: c.test.maxDd, why: c.why }])),
+      };
+    }, noHistory ?? (due ? undefined : `ran ${((now - state.gpAt!) / 86_400_000).toFixed(1)} day(s) ago (every ${A.gpEveryDays} day(s))`));
   }
 
   // ---- 0d. Setup scorer for the fast / slow lane trader (years of 15m / 1h / daily candles) ----
@@ -855,7 +882,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     await run('readiness', async () => {
       const target: ReadinessTarget = { poolUsd: A.targetPoolUsd, dailyPct: A.targetDailyPct, maxDdPct: A.targetMaxDdPct, minDays: SOLID.minDays };
       const kinds: Array<[keyof typeof MODEL_FILES, string]> = [['ta_net', 'ta_net'], ['setups', 'setups'], ['mlp', 'mlp'], ['perp', 'perp'], ['vol_model', 'vol_model'], ['tennis', 'tennis'], ['snn_crypto', 'snn'], ['snn_perps', 'snn'], ['snn_tennis', 'snn']];
-      const components = componentStatus(A.dir, Object.fromEntries(kinds.map(([k, kind]) => [k, { kind, file: promoted(k) }])));
+      const components = componentStatus(A.dir, { ...Object.fromEntries(kinds.map(([k, kind]) => [k, { kind, file: promoted(k) }])), gp: { kind: 'gp', file: path.join(A.dir, 'gp_indicators.json') } });
       const rDays = T.historyReplay ? replayDays() : [], pDays = T.historyReplay ? replayPerpDays(replayDir) : [];
       const ledgerInfo = ledgerStatus(ledger, { 'snn-crypto': weekBlocks(rDays), 'snn-perps': weekBlocks(pDays), 'perp-model': weekBlocks(pDays), 'snn-tennis': weekBlocks(T.historyReplay ? replayTennisDays(replayDir) : [], 1) }, rDays[rDays.length - 1] ?? days[days.length - 1] ?? '1970-01-01');
       // The days: the sweep's (the replay's days that hold Kalshi's real contracts, else the recordings), their

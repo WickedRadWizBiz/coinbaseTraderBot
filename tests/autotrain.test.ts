@@ -209,7 +209,7 @@ test('pipeline readiness: the whole bot on its held-out days in % of the pool, e
   assert.ok(Number.isFinite(f.wholeBot.meanPct) && Number.isFinite(f.wholeBot.maxDdPct));
   assert.equal(f.met, false);
   assert.ok(f.why.some((w: string) => /2 held-out day\(s\), need 30/.test(w)));
-  assert.deepEqual(f.components.map((c: { name: string }) => c.name), ['ta_net', 'setups', 'mlp', 'perp', 'vol_model', 'tennis', 'snn_crypto', 'snn_perps', 'snn_tennis']);
+  assert.deepEqual(f.components.map((c: { name: string }) => c.name), ['ta_net', 'setups', 'mlp', 'perp', 'vol_model', 'tennis', 'snn_crypto', 'snn_perps', 'snn_tennis', 'gp']);
   assert.ok(f.components.every((c: { present: boolean }) => !c.present), 'nothing trained in this folder yet');
   assert.deepEqual(f.ledger, []);
   assert.ok(!fs.existsSync(path.join(cfg.autoTrain.dir, 'work', 'readiness-days')), 'the day links are removed');

@@ -152,6 +152,10 @@ export interface StrategyConfig {
   characterStandAside: boolean;
   /** The rule book (rules that passed research/ruleBook.ts) joins the conviction signals. */
   ruleBook: boolean;
+  /** The evolved formulas (research/gpIndicators.ts champions) join the conviction signals; only validated
+   *  ones unless gpRequireValidated is false (paper mode only). */
+  gp: boolean;
+  gpRequireValidated: boolean;
   /** Weight of the TA network's validated volatility forecast in the pricing sigma (0 = off, 1 = fully). */
   taVolWeight: number;
   modelHealthMinWindows: number;
@@ -415,6 +419,20 @@ export interface AutoTrainConfig {
   gaIslands: number;
   gaBreedEvery: number;
   gaMutation: number;
+  /** Genetic programming of trading formulas (research/gpIndicators.ts): every gpEveryDays (0 = every run) a
+   *  population of gpPopulation random formulas per coin (gpAssets; empty = BTC, ETH, SOL, XRP, DOGE) over the
+   *  coin's and the cross-market coins' (gpCross) hourly bars evolves for gpGenerations generations; fitness
+   *  gpFitness (sharpe, or return: the video's e^(-return)) after gpCostBps per unit of exposure traded and a
+   *  gpBand dead band; a champion is validated when its test probabilistic Sharpe is at least gpMinPsr. */
+  gpEveryDays: number;
+  gpPopulation: number;
+  gpGenerations: number;
+  gpAssets: string[];
+  gpCross: string[];
+  gpFitness: 'sharpe' | 'return';
+  gpCostBps: number;
+  gpBand: number;
+  gpMinPsr: number;
 }
 
 export interface SnnConfig {
@@ -838,6 +856,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     convictionMaxTotal: num(env, 'CONVICTION_MAX_TOTAL', 2.5, 1, 5),
     characterStandAside: bool(env, 'CHARACTER_STAND_ASIDE', true),
     ruleBook: bool(env, 'RULE_BOOK', true),
+    gp: bool(env, 'GP_SIGNAL', true),
+    gpRequireValidated: bool(env, 'GP_REQUIRE_VALIDATED', true),
     taVolWeight: num(env, 'TA_VOL_WEIGHT', 0.5, 0, 1),
     modelHealthMinWindows: num(env, 'MODEL_HEALTH_MIN_WINDOWS', 200, 20, 100000),
     huntTargetMargin: num(env, 'HUNT_TARGET_MARGIN', 0.02, 0, 0.5),
@@ -1036,6 +1056,15 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       gaIslands: num(env, 'TOURNAMENT_ISLANDS', 1, 1, 16),
       gaBreedEvery: num(env, 'TOURNAMENT_BREED_EVERY', 4, 1, 1000),
       gaMutation: num(env, 'TOURNAMENT_MUTATION', 0.03, 0, 0.5),
+      gpEveryDays: num(env, 'GP_EVERY_DAYS', 7, 0, 365),
+      gpPopulation: num(env, 'GP_POPULATION', 1000, 20, 200_000),
+      gpGenerations: num(env, 'GP_GENERATIONS', 15, 1, 500),
+      gpAssets: (env.GP_ASSETS ?? '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
+      gpCross: (env.GP_CROSS ?? 'BTC,ETH').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
+      gpFitness: oneOf(env, 'GP_FITNESS', 'sharpe', ['sharpe', 'return'] as const),
+      gpCostBps: num(env, 'GP_COST_BPS', 5, 0, 100),
+      gpBand: num(env, 'GP_BAND', 0.1, 0, 1),
+      gpMinPsr: num(env, 'GP_MIN_PSR', 0.9, 0.5, 0.9999),
     },
     snn: {
       mode: oneOf(env, 'SNN_MODE', 'shadow', ['off', 'shadow', 'blend'] as const),

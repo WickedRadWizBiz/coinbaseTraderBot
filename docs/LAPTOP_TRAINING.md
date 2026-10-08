@@ -332,6 +332,7 @@ What trains on it:
 | Module | Learns from |
 |---|---|
 | TA network, rule book, setup scorer | years of candles, walked forward and graded on entries and exits |
+| Evolved formulas (genetic programming) | years of hourly candles of the coin plus BTC and ETH: trained on the oldest 60%, chosen on the next 20%, tested on the newest 20% |
 | Perps model, perps SNN | the history replay: every day of perpetual history since September 2019 (open interest from September 2020), except the holdout weeks |
 | Kalshi SNN | the history replay's 15-minute / hourly contracts (real and synthetic) since 2017; its live gate on the bot's recordings |
 | Tennis SNN, tennis model | Kalshi's tennis history (real prices and trades) + the bot's recorded matches |
@@ -363,6 +364,11 @@ it breed: every pair has one offspring.
 
 A round of the trainer runs about 5 generations, so a run that goes until it stops covers 20 to 50 of
 them. docs/EVOLUTION.md has the details and the measurements behind the settings.
+
+**Evolved formulas.** Every round also runs the genetic programming of trading formulas (`gp`). Per coin,
+it evolves 2,000 random formulas per worker thread (up to 15,000, the video's population) for 15
+generations, scored in parallel on every thread. A coin's formula is replaced when a new champion beats it
+on the newest years. On an 8-thread laptop a round's `gp` step takes about 10 minutes for the five coins.
 
 ## GPU
 

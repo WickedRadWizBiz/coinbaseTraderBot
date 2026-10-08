@@ -83,6 +83,7 @@ export function componentStatus(dir: string, files: Record<string, { kind: strin
       case 'setups': detail = `${parts} of 2 lanes validated`; break;
       case 'mlp': detail = `log loss ${num(v.logLossModel, 4)} vs the market's ${num(v.logLossMarketCal, 4)} (DM p ${num(v.dmPValue, 3)}) over ${v.nWindows ?? 0} windows`; break;
       case 'tennis': detail = `Brier ${num(v.brierModel, 4)} vs the market's ${num(v.brierMarket, 4)} on ${v.holdoutMatches ?? 0} held-out matches`; break;
+      case 'gp': detail = Object.values(p.champions ?? {}).map((c: any) => `${c.asset} ${c.validated ? 'validated' : 'not validated'} (test Sharpe ${num(c.test?.sharpe, 2)})`).join(', ') || 'no champion'; break;
       case 'snn': detail = `${p.notes?.split(';')[0] ?? 'trained'}, trained ${String(p.trainedAt ?? '').slice(0, 10)}`; break;
       default: detail = parts ? 'validated' : 'not validated';
     }
