@@ -14,7 +14,8 @@ Kalshi bot trainer (Windows)
        downloaded history only (models then stay in trainer-data\models).
    Press Start. Two progress bars show the downloads and the training with the time left (from how long the
    last rounds took and how fast the current step is going), a third the step in progress, and below them
-   a short explanation of what the trainer is doing right now. Keep the console window open while it
+   a short explanation of what the trainer is doing right now. Below, a champions leaderboard shows every
+   tournament as a bracket narrowing to its champion, with the champion's top attributes. Keep the console window open while it
    trains; closing it stops the trainer (finished steps are kept, the next run continues).
 3. New versions: the window checks for a newer trainer when it starts and every 6 hours, and asks before
    installing one. If you say yes it stops training (finished steps are kept), downloads the new version,

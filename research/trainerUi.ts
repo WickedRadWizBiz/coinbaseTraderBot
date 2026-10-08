@@ -3,7 +3,8 @@
 // elsewhere). From it you choose how the run trains (continue, or sweep everything again), how long, and your
 // server; it shows the downloads and the training as progress bars with time estimates
 // (research/trainerProgress.ts), says what the step in progress is doing, and offers new versions of the
-// trainer (research/trainerUpdate.ts), installing one only when you say yes.
+// trainer (research/trainerUpdate.ts), installing one only when you say yes. Below, a leaderboard of every
+// tournament's champion on its bracket (research/trainerLeaderboard.ts).
 //
 // Only this computer can reach it, and only through the window it opened: every request carries a random token
 // made at start (and the Host header must be the loopback address), so a web page elsewhere cannot drive it.
@@ -17,6 +18,7 @@ import { readSettings, runTrainer, writeSettings, type TrainerSettings } from '.
 import { readRounds, RoundProgress, type ProgressView } from './trainerProgress';
 import { checkForUpdate, currentVersion, downloadAndStage, RELEASE_PAGE, runApplyScript, type UpdateInfo } from './trainerUpdate';
 import { TRAINER_PAGE } from './trainerUiPage';
+import { leaderboard, type Bracket } from './trainerLeaderboard';
 import path from 'path';
 
 export interface UiState {
@@ -35,6 +37,7 @@ export class TrainerUi {
   private child: ChildProcess | undefined;
   private stopFlag = false;
   private server?: http.Server;
+  private board?: { at: number; brackets: Bracket[] };
 
   constructor(private readonly o: { dataDir: string; check?: () => Promise<UpdateInfo>; install?: (u: UpdateInfo) => Promise<void>; run?: typeof runTrainer }) {
     this.state = { phase: 'idle', mode: 'continue', hours: 0, round: 0, progress: null, board: [], lastStop: null, lastError: null, settings: readSettings(o.dataDir), version: currentVersion(), update: null };
@@ -77,6 +80,16 @@ export class TrainerUi {
     return { ok: true };
   }
 
+  /** The champions brackets (the tournament files can be large: read at most every 30 s). */
+  leaderboard(now = Date.now()): Bracket[] {
+    if (!this.board || now - this.board.at > 30_000 || now < this.board.at) {
+      let brackets: Bracket[] = [];
+      try { brackets = leaderboard(path.join(this.o.dataDir, 'models')); } catch { /* unreadable: none */ }
+      this.board = { at: now, brackets };
+    }
+    return this.board.brackets;
+  }
+
   snapshot(): UiState {
     return { ...this.state, progress: this.state.phase === 'idle' ? null : this.tracker?.view() ?? null };
   }
@@ -116,6 +129,7 @@ export class TrainerUi {
     if (req.method === 'GET' && url.pathname === '/') return url.searchParams.get('t') === this.token ? send(200, TRAINER_PAGE, 'text/html; charset=utf-8') : send(403, 'Open the trainer from its own window (Train.cmd).', 'text/plain');
     if (req.headers['x-trainer-token'] !== this.token) return send(403, { error: 'token' });
     if (req.method === 'GET' && url.pathname === '/api/state') return send(200, this.snapshot());
+    if (req.method === 'GET' && url.pathname === '/api/leaderboard') return send(200, this.leaderboard());
     if (req.method !== 'POST') return send(404, { error: 'not found' });
     let body: Record<string, unknown> = {};
     try { const raw = await new Promise<string>((r, j) => { let b = ''; req.on('data', (c) => { b += c; if (b.length > 65_536) j(new Error('too large')); }); req.on('end', () => r(b)); req.on('error', j); }); body = raw ? JSON.parse(raw) : {}; } catch { return send(400, { error: 'bad request' }); }

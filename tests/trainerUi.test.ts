@@ -164,3 +164,27 @@ test('pipeline --sweep-all: a step that is not due runs anyway', async () => {
   const swept = await runPipeline({ cfg, only: ['rule_book'], log: () => undefined, now, forceAll: true });
   assert.ok(!/weekly/.test(swept.steps[0].skipped ?? ''), `ran (or found nothing to study), not skipped as not due: ${swept.steps[0].skipped}`);
 });
+
+test('leaderboard: each tournament as a bracket narrowing to its champion, with its distinctive settings; formulas by test Sharpe', async () => {
+  const { leaderboard, distinctive } = await import('../research/trainerLeaderboard');
+  const models = path.join(tmpDir(), 'models');
+  fs.mkdirSync(path.join(models, 'work', 'snnpbt', 'crypto'), { recursive: true });
+  const members = [0, 1, 2, 3, 4, 5].map((id) => ({ id, hyper: { lr: id === 2 ? 0.05 : 0.001, tau: 10 } }));
+  const log = Array.from({ length: 6 }, (_, r) => ({ round: r, evalFrom: '2025-01-01', evalTo: '2025-01-07', elite: 2, ranking: [2, 0, 1, 3, 4, 5].map((member, j) => ({ member, fitness: 1 - j / 10, sortino: 2, maxDrawdown: 0.05 })) }));
+  fs.writeFileSync(path.join(models, 'work', 'snnpbt', 'crypto', 'state.json'), JSON.stringify({ log, members, ga: { generation: 2 } }));
+  fs.writeFileSync(path.join(models, 'work', 'tanet-population.json'), JSON.stringify({ log: log.slice(0, 2), members }));
+  fs.writeFileSync(path.join(models, 'gp_indicators.json'), JSON.stringify({ champions: {
+    BTC: { asset: 'BTC', formula: 'z48(ETH.c)', validated: true, test: { sharpe: 1.2, totalReturn: 0.4, maxDd: 0.1, trades: 50 }, history: [{ gen: 0, best: 0.1 }, { gen: 1, best: 0.3 }] },
+    SOL: { asset: 'SOL', formula: 'SOL.c', validated: false, test: { sharpe: 0.2 }, history: [] } } }));
+  const b = leaderboard(models);
+  assert.deepEqual(b.map((x) => x.id), ['snn-crypto', 'ta_net', 'gp-BTC', 'gp-SOL'], 'most rounds won first, then formulas by test Sharpe');
+  const snn = b[0];
+  assert.deepEqual(snn.columns.map((c) => c.entrants.length), [8, 4, 2, 1].map((n) => Math.min(n, 6)), 'best 8 (of 6) -> 4 -> 2 -> champion');
+  assert.equal(snn.champion.name, '#2');
+  assert.equal(snn.champion.headline, 'won 6 of 6 rounds');
+  assert.ok(snn.champion.attrs.some(([k, v]) => k === 'lr' && v.includes('▲')), 'its learning rate sets it apart');
+  assert.deepEqual(b[1].columns.length, 2, 'a tournament with two rounds shows two columns');
+  assert.equal(b[2].champion.validated, true);
+  assert.deepEqual(distinctive({ a: 10, b: 1 }, [{ a: 1, b: 1 }, { a: 1, b: 1 }], 1), [['a', '10 ▲']]);
+  assert.deepEqual(leaderboard(path.join(tmpDir(), 'none')), [], 'nothing trained yet: no brackets');
+});

@@ -88,6 +88,37 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
   .hidden { display: none !important; }
   .muted { color: var(--dim); font-size: 12px; }
   .err { color: var(--danger); font-size: 12px; margin-top: 8px; }
+  /* Champions: every tournament as a bracket narrowing to its champion. The canvas is laid out wide and scaled
+     down to the window's width; the list scrolls vertically. */
+  .chassis.wide { max-width: 1240px; }
+  .lb-view { max-height: 72vh; overflow-y: auto; overflow-x: hidden; margin-top: 8px; padding-right: 4px; }
+  .lb-sizer { position: relative; }
+  .lb-canvas { width: 1180px; transform-origin: 0 0; position: absolute; top: 0; left: 0; }
+  .bk { border: 1px solid rgba(155,124,255,.35); border-radius: 8px; padding: 12px 14px 14px; margin-bottom: 14px; background: rgba(155,124,255,.035); }
+  .bk-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+  .bk-head b { font-size: 14px; letter-spacing: .14em; text-transform: uppercase; }
+  .bk-head span { font-size: 11px; color: var(--dim); }
+  .bk-rank { color: var(--warn); margin-right: 10px; }
+  .bk-grid { display: flex; align-items: stretch; gap: 0; }
+  .bk-col { width: 150px; display: flex; flex-direction: column; }
+  .bk-lab { font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--dim); height: 18px; }
+  .bk-slots { height: 296px; display: flex; flex-direction: column; justify-content: space-around; }
+  .bk-pair { flex: 1; display: flex; flex-direction: column; justify-content: space-around; position: relative; margin-right: 22px; }
+  .bk-pair.joined::after { content: ""; position: absolute; right: -12px; top: 25%; bottom: 25%; border: 1px solid rgba(155,124,255,.55); border-left: none; }
+  .bk-pair.joined::before { content: ""; position: absolute; right: -22px; top: 50%; width: 10px; border-top: 1px solid rgba(155,124,255,.55); }
+  .bk-slot { position: relative; height: 26px; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 8px; font-size: 11px;
+    border: 1px solid rgba(155,124,255,.35); border-radius: 3px; background: rgba(0,0,0,.45); color: var(--dim); }
+  .bk-slot::after { content: ""; position: absolute; right: -13px; top: 50%; width: 12px; border-top: 1px solid rgba(155,124,255,.4); }
+  .bk-slot.won { border-color: var(--primary); color: var(--text); background: rgba(155,124,255,.16); box-shadow: 0 0 8px rgba(155,124,255,.35); }
+  .bk-slot.empty { opacity: .25; }
+  .bk-champ { flex: 1; margin-left: 6px; border: 1px solid var(--primary); border-radius: 6px; padding: 10px 12px; background: rgba(155,124,255,.10); box-shadow: 0 0 16px rgba(155,124,255,.35); align-self: center; }
+  .bk-champ.ok { border-color: var(--success); }
+  .bk-champ .crown { font-size: 10px; letter-spacing: .2em; color: var(--warn); text-transform: uppercase; }
+  .bk-champ h4 { margin: 2px 0 2px; font-size: 18px; letter-spacing: .1em; }
+  .bk-champ .hl { font-size: 11px; color: var(--success); margin-bottom: 8px; }
+  .bk-attrs { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 11px; }
+  .bk-attrs dt { color: var(--dim); white-space: nowrap; }
+  .bk-attrs dd { margin: 0; color: var(--text); word-break: break-word; }
 </style>
 </head>
 <body>
@@ -139,6 +170,11 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
       <div class="explain" id="explain"></div>
       <div class="btns"><button id="stop" class="danger">Stop</button></div>
       <details><summary>Pipeline output</summary><div class="log" id="log"></div></details>
+    </div>
+
+    <div id="lbBox" class="section hidden">
+      <div class="label"><span>Champions leaderboard</span><span id="lbNote"></span></div>
+      <div class="lb-view" id="lbView"><div class="lb-sizer" id="lbSizer"><div class="lb-canvas" id="lbCanvas"></div></div></div>
     </div>
 
     <div id="boardBox" class="section hidden">
@@ -211,7 +247,40 @@ async function tick() {
   $('board').textContent = (s.board || []).join('\n');
   renderUpdate(s.update, s.phase);
 }
+const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const sc = (x) => x == null || !isFinite(x) ? '' : Math.abs(x) >= 100 ? x.toFixed(0) : x.toFixed(3);
+function fitBoard() {
+  const view = $('lbView'), canvas = $('lbCanvas');
+  const s = Math.min(1, (view.clientWidth - 6) / canvas.offsetWidth);
+  canvas.style.transform = 'scale(' + s + ')';
+  $('lbSizer').style.height = Math.ceil(canvas.offsetHeight * s) + 'px';
+}
+function renderBoard(list) {
+  $('lbBox').classList.toggle('hidden', !list.length);
+  document.querySelector('.chassis').classList.toggle('wide', list.length > 0);
+  if (!list.length) return;
+  $('lbNote').textContent = list.length + ' champion' + (list.length > 1 ? 's' : '') + ' · each column: that round\'s best, narrowing to the champion';
+  $('lbCanvas').innerHTML = list.map((b, bi) => {
+    const cols = b.columns.map((c, ci) => {
+      const per = c.entrants.length >= 2 ? 2 : 1;
+      let pairs = '';
+      for (let i = 0; i < Math.max(1, c.entrants.length); i += per) {
+        const slots = c.entrants.slice(i, i + per).map((e) => '<div class="bk-slot' + (e.won ? ' won' : '') + (!e.name ? ' empty' : '') + '"><span>' + esc(e.name || '-') + '</span><span>' + sc(e.score) + '</span></div>').join('');
+        pairs += '<div class="bk-pair' + (per === 2 ? ' joined' : '') + '">' + slots + '</div>';
+      }
+      return '<div class="bk-col"><div class="bk-lab">' + esc(c.label) + '</div><div class="bk-slots">' + pairs + '</div></div>';
+    }).join('');
+    const ch = b.champion;
+    const attrs = ch.attrs.map((a) => '<dt>' + esc(a[0]) + '</dt><dd>' + esc(a[1]) + '</dd>').join('');
+    return '<div class="bk"><div class="bk-head"><b><span class="bk-rank">#' + (bi + 1) + '</span>' + esc(b.title) + '</b><span>' + esc(b.subtitle) + '</span></div>'
+      + '<div class="bk-grid">' + cols + '<div class="bk-champ' + (ch.validated ? ' ok' : '') + '"><div class="crown">Champion</div><h4>' + esc(ch.name) + '</h4><div class="hl">' + esc(ch.headline) + '</div><dl class="bk-attrs">' + attrs + '</dl></div></div></div>';
+  }).join('');
+  fitBoard();
+}
+async function loadBoard() { try { renderBoard(await fetch('/api/leaderboard', { headers: { 'X-Trainer-Token': token } }).then((r) => r.json())); } catch { /* trainer closed */ } }
+window.addEventListener('resize', fitBoard);
 tick(); setInterval(tick, 1000);
+loadBoard(); setInterval(loadBoard, 30000);
 </script>
 </body>
 </html>`;

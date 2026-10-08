@@ -30,7 +30,12 @@ model better, it sends the models to the bot, which loads them without a restart
      going);
    - a third bar for the step in progress;
    - below them, a short **explanation** of what that step is doing;
-   - the pipeline's output (folded away) and, after each round, the scoreboard.
+   - the pipeline's output (folded away) and, after each round, the scoreboard;
+   - a **champions leaderboard**: every tournament (TA network, the spiking networks) as a bracket of its
+     last rounds' best (8 → 4 → 2 → the champion), and each coin's evolved formula, with the champion's top
+     attributes: fitness, Sortino, drawdown, rounds won, its genetic generation and parents, and the
+     settings that most set it apart from the population (▲ above, ▼ below the population's median). Best
+     first; the brackets are laid out wide and scaled to fit the window, and the list scrolls.
 
    **Stop** ends the step in progress (finished steps and tournament rounds are kept; the next run
    continues). Keep the console window open while it trains: closing it stops the trainer.
