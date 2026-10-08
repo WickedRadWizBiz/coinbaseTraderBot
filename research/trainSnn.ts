@@ -62,7 +62,9 @@ export async function trainSnnMain(argOf: (k: string, d: string) => string = cli
   // --hyper: knobs chosen by the population tournament (research/snnPbt.ts).
   const hyperArg = argOf('hyper', '');
   const params: SnnParams = withSnnHyper(domainParams(domain, withFlags({ ...DEFAULT_SNN, seed: Number(argOf('seed', String(DEFAULT_SNN.seed))) }, stageFlags(stage))), hyperArg ? JSON.parse(hyperArg) : undefined);
-  const win = { from: date('from'), to: date('to'), domain };
+  // --skip-model true: p_model is the fair value (synthetic contracts of the history replay, where the
+  // decision model's view of a market quoted at the fair value is moot).
+  const win = { from: date('from'), to: date('to'), domain, skipModel: argOf('skip-model', '') === 'true' };
 
   // 1. PC pretraining (U0, U1, precisions), only for stages with the PC pathway.
   let preset: SnnModelFile | undefined;
@@ -97,7 +99,7 @@ export async function trainSnnMain(argOf: (k: string, d: string) => string = cli
   console.log('train window (in-sample, prequential):', trainStats);
   let evalStats: ReturnType<typeof b> | undefined;
   // Out-of-sample evaluation on the next window with the frozen export.
-  const ev = { from: date('eval-from'), to: date('eval-to') };
+  const ev = { from: date('eval-from'), to: date('eval-to'), skipModel: win.skipModel };
   if (ev.from) {
     const res = await replaySnn(dir, { params, model, snnModel: file, ...ev, calendar });
     evalStats = b(res.rows);

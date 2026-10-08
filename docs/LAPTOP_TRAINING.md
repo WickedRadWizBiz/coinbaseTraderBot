@@ -65,22 +65,52 @@ With `HISTORY_REPLAY=true` (on in the laptop profile), the pipeline turns two ye
 into recording files (`research/history/historyReplay.ts`, step `history_replay`). The replay code reads
 them exactly as it reads the bot's live recordings:
 
-- **Index and spot prints.** Four per minute from Binance 1-minute bars. The index is shifted onto
-  Kalshi's own level using each 15-minute contract's strike.
+- **Index and spot prices.** Four a minute from Binance 1-minute bars: the bar's open, then a path toward
+  its close drawn at the bars' own volatility. Each one tells the bot no more about the coming close than a
+  real price at that moment would. Shifted onto Kalshi's level using each real 15-minute contract's strike.
 - **Candles.** The live feed's timeframes; every day file is self-contained.
 - **Perp quotes.** From Binance USD-M bars, at the spread and contract specs the bot's own perp
   recordings show, with Binance's funding rates.
-- **Kalshi's settled contracts.** Their markets, minute books, trades and results.
+- **Kalshi's settled contracts.** The real ones where Kalshi's history reaches (about a year): their
+  markets, minute quotes, trades and results.
+- **Synthetic price-prediction contracts everywhere else.** For each coin, a 15-minute Up/Down every
+  quarter hour and an hourly "above" ladder (4 strikes around the price).
+  - They settle by Kalshi's rules on the real price: the strike is the 60-second average before the open;
+    the result compares the 60-second average before the close to it.
+  - Their quotes are a no-skill price (a random walk at the recent volatility) with a 1-2 cent spread.
+    A network profits only by calling the direction better than chance.
 
 The models replay it without knowing it isn't live:
 
 - **Perps model:** trains and backtests on the replay (years instead of days).
 - **Perps SNN:** its tournament, training and entry / exit learning on direction calls run on the
   replay.
-- **Whole-bot and Kalshi sweeps:** the fitness of the entire pipeline together runs over the replay.
-  The result is a proposal, never auto-applied.
-- **Kalshi SNN and decision model:** stay on the bot's own recordings. A replayed Kalshi book is one
-  quote a minute with nominal size, too coarse to learn entry and exit timing honestly.
+- **Kalshi SNN (price-prediction contracts):** its tournament and training run on the replay's 15-minute
+  and hourly contracts.
+  - A network takes Up or Down on a contract when its own probability differs from the price by more
+    than 3 cents.
+  - The history then plays the contract out to its result.
+  - The networks whose calls made money on days they had not seen win the round, as in the other
+    tournaments.
+  - Its gate for live use stays on the bot's recordings, against real Kalshi prices.
+- **Whole-bot and Kalshi sweeps:** the replay days that hold Kalshi's real contracts. The strategy never
+  trades the synthetic ones, whose price is its own model's. The result is a proposal, never auto-applied.
+- **Kalshi decision model:** stays on the bot's own recordings (it learns how real Kalshi prices differ
+  from fair value, which synthetic quotes cannot show).
+
+## Does it run in real time?
+
+No. The replay runs as fast as the processor allows: its clock is the data's own timestamps, so nothing
+waits for the market. The Kalshi network still steps once per market second, as it does live.
+
+- **One network:** a replayed day of all five coins (about 960 contracts) took about 7.5 minutes on one
+  core of a 2.8 GHz cloud server. That is about 190 times faster than real time; a recent laptop core is
+  usually faster.
+- **The tournament:** runs one network per thread at the same time, so a 16-thread laptop puts 15
+  networks through each day in that same time.
+
+A 12-hour run covers about 30 tournament days and 14 training days per network. The windows grow with
+the hours you give it, up to a year of tournament days.
 
 ## What each module learns from
 
@@ -88,8 +118,9 @@ The models replay it without knowing it isn't live:
 |---|---|
 | TA network, rule book, setup scorer | years of candles |
 | Perps model, perps SNN | the history replay (years of perp history) |
-| Whole-bot / Kalshi sweeps | the history replay |
-| Kalshi decision model, crypto SNN, volatility model | the bot's recordings (copied from the server) |
+| Kalshi SNN | the history replay's 15-minute / hourly contracts (real and synthetic); its live gate on the bot's recordings |
+| Whole-bot / Kalshi sweeps | the history replay's days with real Kalshi contracts |
+| Kalshi decision model, volatility model | the bot's recordings (copied from the server) |
 | Tennis, fill model | live only |
 
 ## Many candidates at once

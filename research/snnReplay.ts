@@ -61,6 +61,9 @@ export interface SnnReplayOpts {
   /** Only read recording files in this day range (YYYY-MM-DD, inclusive; warm-up included by the caller). */
   fromDay?: string;
   toDay?: string;
+  /** p_model = the fair value itself, without the decision model's feature map: for tournaments, which
+   *  grade p_snn against the market only (and for synthetic contracts, where the model's view is moot). */
+  skipModel?: boolean;
   /** Which isolated network to replay (params should come from domainParams(domain, ...)):
    *  crypto = 15m/60m columns with contract channels, scored against settlements;
    *  perps = 1h/4h columns from asset-level data only, no contracts (perps never settle), graded on
@@ -155,6 +158,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     if (e.k === 'snn') lastLive = e.t;
     if (o.to && e.t >= o.to) break;
     st.apply(e);
+    if (e.tie) continue; // the rest of this instant first
     if (o.from && st.now < o.from) continue;
     if (st.now < nextSec) continue;
     const T = Math.floor(st.now / 1000) * 1000;
@@ -219,7 +223,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     for (const s of scores) {
       const m = st.markets.get(s.ticker)!, x = priced.get(s.ticker)!, q = queries.find((qq) => qq.ticker === s.ticker)!;
       if (!q.tag) continue;
-      const pModel = model.predictDetailed(featureMap(m, T, x), x.fv.pYes).p;
+      const pModel = o.skipModel ? x.fv.pYes : model.predictDetailed(featureMap(m, T, x), x.fv.pYes).p;
       const ref = volRef.get(m.asset) ?? x.vol.sigmaPerSqrtSec;
       volRef.set(m.asset, ref + (1 - Math.exp(-1 / 1440)) * (x.vol.sigmaPerSqrtSec - ref));
       const arr = pending.get(s.ticker) ?? [];

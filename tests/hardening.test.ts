@@ -239,7 +239,9 @@ test('backtest latency: orders and cancels arrive late against the later book an
   const base = await run();
   assert.equal(base.latency!.sent, 0, 'no latency by default: nothing is queued');
   assert.equal(base.latency!.cancelRaceFills, 0);
-  const slow = await run({ orderMs: 500 });
+  // The synthetic tape prints once a second with that second's book (one instant, applied whole before the
+  // bot acts): a cancel has to be in flight past the next second's print to lose the race.
+  const slow = await run({ orderMs: 1500 });
   assert.ok(slow.latency!.sent > 100);
   assert.ok(slow.latency!.cancelRaceFills > 0, 'a quote the bot already cancelled still filled while the cancel was in flight');
   assert.ok(slow.latency!.cancelRaceContracts > 0);

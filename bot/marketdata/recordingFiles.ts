@@ -36,7 +36,11 @@ export function recordingLines(file: string): readline.Interface {
 /** Link the given days into `dest` under their own names (for tools that take a folder). */
 export function linkDays(days: RecordingDay[], dest: string): void {
   fs.mkdirSync(dest, { recursive: true });
-  for (const d of days) fs.symlinkSync(path.resolve(d.file), path.join(dest, path.basename(d.file)));
+  for (const d of days) {
+    const src = path.resolve(d.file), to = path.join(dest, path.basename(d.file));
+    // Windows refuses symlinks without developer mode: a hard link, else a copy.
+    try { fs.symlinkSync(src, to); } catch { try { fs.linkSync(src, to); } catch { fs.copyFileSync(src, to); } }
+  }
 }
 
 /** Gzip every plain day file older than `keepPlainDays` days (never today's). Returns the days compressed. */
