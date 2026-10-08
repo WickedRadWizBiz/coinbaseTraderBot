@@ -7,7 +7,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { test } from 'node:test';
 import type { Candle } from '../bot/ta/indicators';
-import { assetsFromPerps, assetsFromSeries } from '../research/history/assets';
+import { assetsFromPerps, assetsFromSeries, normalizeAssets } from '../research/history/assets';
 import { downloadBinance, parseChecksum } from '../research/history/binanceVision';
 import { aggregateCandles, alignmentCheck, cleanAndValidate, loadSeries, readSeries, seriesPath, shiftCandles, spliceSources, upsertSeries } from '../research/history/candles';
 import { backfillCoinbase } from '../research/history/coinbaseBackfill';
@@ -240,6 +240,9 @@ test('Coinbase backfill: an asset Coinbase does not sell is asked for once, not 
 });
 
 test('asset discovery from Kalshi listings', () => {
+  assert.deepEqual(normalizeAssets(['TONH', 'TON', 'SILVER', 'SHIBA']), ['SHIB', 'TON'], 'folded against coins from the perps list too');
+  assert.deepEqual(assetsFromSeries(['KXNEAR', 'KXNEARH', 'KXSOL15M', 'KXSOLE', 'KXTONH', 'KXRIPPLE', 'KXSHIBA', 'KXSILVER', 'KXPLATINUM', 'KXPALLADIUM', 'KXUS500', 'KXETH', 'KXETHD'].map((ticker) => ({ ticker }))),
+    ['ETH', 'NEAR', 'SHIB', 'SOL', 'TONH', 'XRP'], 'frequency letters folded (NEARH, SOLE; TONH stays without a TON listing), names mapped (RIPPLE, SHIBA), metals and indices dropped; ETH untouched');
   assert.deepEqual(assetsFromSeries([{ ticker: 'KXBTC15M' }, { ticker: 'KXETHD', frequency: 'hourly' }, { ticker: 'KXSOL' }, { ticker: 'KXBTCMAXY', frequency: 'annual' }, { ticker: 'KXHYPE15M', frequency: 'fifteen_min' }]), ['BTC', 'ETH', 'HYPE', 'SOL']);
   assert.deepEqual(assetsFromPerps([{ ticker: 'KXBTCPERP' }, { ticker: 'ETH-PERP' }, { ticker: 'X', title: 'Solana Perpetual' }, { underlying: 'DOGE' }]), ['BTC', 'DOGE', 'ETH', 'SOL']);
 });
