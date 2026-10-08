@@ -335,6 +335,8 @@ export interface TaNetConfig {
   maxRoundsPerRun: number;
   /** Exploration member: every N rounds the worst network restarts from scratch (0 = never). */
   restartEvery: number;
+  /** Networks in the tournament (6+ split into islands that breed: AUTO_TRAIN gaIslands). */
+  population: number;
 }
 
 export interface AutoTrainConfig {
@@ -405,6 +407,14 @@ export interface AutoTrainConfig {
   targetDailyPct: number;
   targetMaxDdPct: number;
   plateauRounds: number;
+  /** Genetic layer of every tournament with 6+ networks (research/genetic.ts): every gaBreedEvery rounds the
+   *  gaParents best survivors over the generation breed (one offspring per pair, knobs crossed and mutated
+   *  by gaMutation, a log-normal sd: 0.03 is about +/-3%) and the offspring replace the worst. gaIslands > 1
+   *  splits the population into separate tournaments whose winners breed instead (slower on noisy scores). */
+  gaParents: number;
+  gaIslands: number;
+  gaBreedEvery: number;
+  gaMutation: number;
 }
 
 export interface SnnConfig {
@@ -1022,6 +1032,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       targetDailyPct: num(env, 'TRAIN_TARGET_DAILY_PCT', 50, 0.01, 1000),
       targetMaxDdPct: num(env, 'TRAIN_TARGET_MAX_DD_PCT', 10, 0.1, 100),
       plateauRounds: num(env, 'TRAIN_PLATEAU_ROUNDS', 3, 1, 100),
+      gaParents: num(env, 'TOURNAMENT_PARENTS', 3, 0, 16),
+      gaIslands: num(env, 'TOURNAMENT_ISLANDS', 1, 1, 16),
+      gaBreedEvery: num(env, 'TOURNAMENT_BREED_EVERY', 4, 1, 1000),
+      gaMutation: num(env, 'TOURNAMENT_MUTATION', 0.03, 0, 0.5),
     },
     snn: {
       mode: oneOf(env, 'SNN_MODE', 'shadow', ['off', 'shadow', 'blend'] as const),
@@ -1145,6 +1159,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       muteOnForwardFail: bool(env, 'TA_NET_MUTE_ON_FORWARD_FAIL', true),
       maxRoundsPerRun: num(env, 'TA_NET_MAX_ROUNDS_PER_RUN', 36, 0, 10_000),
       restartEvery: num(env, 'TA_NET_RESTART_EVERY', 6, 0, 1000),
+      population: num(env, 'TA_NET_POPULATION', 3, 2, 64),
     },
   };
   return deepFreeze(cfg);

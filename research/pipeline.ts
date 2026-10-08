@@ -225,6 +225,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const work = path.join(A.dir, 'work');
   // Which weeks of the history replay each network has trained on and been judged on.
   const ledger = new HistoryLedger(path.join(work, 'history-ledger.json'));
+  // Every tournament's genetic layer: the best survivors breed every few rounds (research/genetic.ts).
+  const genetic = { parents: A.gaParents, islands: A.gaIslands, breedEvery: A.gaBreedEvery, mutation: A.gaMutation };
   const fillRoot = path.join(work, 'snnfill');
   const fillDir = (d: SnnDomain) => path.join(fillRoot, d);
   for (const d of REPLAYABLE) fs.mkdirSync(fillDir(d), { recursive: true });
@@ -381,6 +383,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
           history: T.historyDir, out: cand, cache: path.join(work, 'tanet-cache'), state: path.join(work, 'tanet-population.json'), fresh: o.forceTaNetFresh ? 'true' : undefined,
           'train-months': T.trainMonths, 'eval-months': T.evalMonths, 'step-months': T.stepMonths, 'holdout-months': T.holdoutMonths, 'final-months': T.finalMonths, stride: T.stride, 'min-per-regime': T.minPerRegime, dsr: T.dsrThreshold,
           'max-rounds': T.maxRoundsPerRun || undefined, 'restart-every': T.restartEvery, arch: T.arch,
+          population: T.population, parents: A.gaParents, islands: A.gaIslands, 'breed-every': A.gaBreedEvery, mutation: A.gaMutation,
           incumbent: fs.existsSync(taNetFile) ? taNetFile : undefined,
         }));
       } catch (e) {
@@ -391,9 +394,9 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       state.taNetComplete = rep.complete;
       // The initialisation runs in chunks of rounds (one chunk per daily run); nothing is promoted
       // until the tournament has reached the present.
-      if (!rep.complete) return { promoted: false, complete: false, reason: `tournament in progress: ${rep.rounds} round(s) done, ${rep.remaining} to go (continues on the next run)` };
+      if (!rep.complete) return { promoted: false, complete: false, reason: `tournament in progress: ${rep.rounds} round(s) done, ${rep.remaining} to go (continues on the next run)`, ...(rep.ga ? { ga: rep.ga } : {}) };
       state.taNetTrainedAt = now;
-      const summary = { rounds: rep.rounds, newRounds: rep.newRounds, network: rep.params.network, heads: Object.fromEntries(Object.entries(rep.params.heads).map(([k, h]) => [k, h.validation])), elite: rep.params.pbt.elite };
+      const summary = { rounds: rep.rounds, newRounds: rep.newRounds, network: rep.params.network, heads: Object.fromEntries(Object.entries(rep.params.heads).map(([k, h]) => [k, h.validation])), elite: rep.params.pbt.elite, ...(rep.ga ? { ga: rep.ga } : {}) };
       if (A.promote === 'validated' && !validated.length) return { promoted: false, version: rep.params.version, reason: 'no head passed the holdout and network hurdles', ...summary };
       // No new tournament round since the network in use was trained: the same elite retrained on the same
       // months scores the same. It stays (re-promoting it would only fill the ensemble's archive with copies).
@@ -514,7 +517,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     const pbt = await run('snn-tennis-pbt', async () => {
       let r;
       try {
-        r = await runSnnPbt({ recordings: replayDir, domain: 'tennis', stage, days: tennisDays.slice(-A.snnPbtDays), initDays: A.snnPbtInitDays, evalDays: 1, stateDir: path.join(work, 'snnpbt', 'tennis'), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), tennis: cfg.tennis, log });
+        r = await runSnnPbt({ recordings: replayDir, domain: 'tennis', stage, days: tennisDays.slice(-A.snnPbtDays), initDays: A.snnPbtInitDays, evalDays: 1, stateDir: path.join(work, 'snnpbt', 'tennis'), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), genetic, tennis: cfg.tennis, log });
       } catch (e) {
         if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
         throw e;
@@ -525,7 +528,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const tw = [...new Set(tennisDays.slice(-A.snnPbtDays).map(isoWeek))];
       const g = ledger.begin('snn-tennis', 'tournament', tw.map((id) => ({ id, days: [] })));
       ledger.markTrained('snn-tennis', tw); ledger.finish('snn-tennis', g.id, `elite #${r.elite.member}`); ledger.save();
-      return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: `history replay (${tennisDays.length} day(s) with tennis)` };
+      return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: `history replay (${tennisDays.length} day(s) with tennis)`, ...(r.ga ? { ga: r.ga } : {}) };
     }, pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`) as { complete?: boolean } | undefined;
     const hyper = ds.pbtStage === stage ? ds.pbtHyper : undefined;
     const trainNeeded = Boolean(pbt?.complete) || !fs.existsSync(file) || ds.stage !== stage;
@@ -610,7 +613,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const pbt = await run(`snn-${domain}-pbt`, async () => {
         let r;
         try {
-          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, allDays: srcDays, layout, generation: gen?.id, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), log });
+          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, allDays: srcDays, layout, generation: gen?.id, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), genetic, log });
         } catch (e) {
           if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;
@@ -618,7 +621,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         ds.pbtComplete = r.complete;
         ds.pbtLayout = layout;
         if (gen && r.complete) { ledger.markTrained(ledgerNet, gen.blocks); ledger.finish(ledgerNet, gen.id, `elite #${r.elite.member}`); ledger.save(); }
-        const genInfo = gen ? { generation: gen.id, weeks: gen.blocks, freshWeeksLeft: ledger.summary(ledgerNet, weeks, latestDay).fresh } : {};
+        const genInfo = { ...(gen ? { generation: gen.id, weeks: gen.blocks, freshWeeksLeft: ledger.summary(ledgerNet, weeks, latestDay).fresh } : {}), ...(r.ga ? { ga: r.ga } : {}) };
         if (!r.complete) return { complete: false, reason: `tournament in progress: ${r.rounds} round(s) done, ${r.remaining} to go`, elite: r.elite, ...genInfo };
         ds.pbtHyper = r.elite.hyper; ds.pbtStage = stage; ds.pbtAt = now;
         return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: src === rec ? 'recordings' : `history replay, ${pbtDays.length} days from ${pbtDays[0]} to ${pbtDays[pbtDays.length - 1]}`, ...genInfo };
