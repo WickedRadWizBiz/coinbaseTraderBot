@@ -40,12 +40,12 @@ jobs:
           $out = 'KalshiTrainer'
           New-Item -ItemType Directory -Force "$out/node", "$out/app/dist", "$out/app/deploy", "$out/app/node_modules/talib/build/Release" | Out-Null
           Copy-Item (Get-Command node).Source "$out/node/node.exe"
-          Copy-Item dist/laptopTrain.cjs, dist/pipeline.cjs, dist/snnReplayWorker.cjs, dist/perpDatasetWorker.cjs "$out/app/dist/"
+          Copy-Item dist/laptopTrain.cjs, dist/pipeline.cjs, dist/snnReplayWorker.cjs, dist/perpDatasetWorker.cjs, dist/gpWorker.cjs "$out/app/dist/"
           Copy-Item -Recurse params "$out/app/params"
           if (Test-Path deploy/seed) { Copy-Item -Recurse deploy/seed "$out/app/deploy/seed" }
           Copy-Item vendor/talib/index.js, vendor/talib/package.json "$out/app/node_modules/talib/"
           Copy-Item vendor/talib/build/Release/talib.node "$out/app/node_modules/talib/build/Release/"
-          Copy-Item packaging/windows/Train.cmd, packaging/windows/README.txt "$out/"
+          Copy-Item packaging/windows/Train.cmd, packaging/windows/TrainConsole.cmd, packaging/windows/README.txt "$out/"
           "built $(Get-Date -Format u) from $env:GITHUB_SHA" | Out-File "$out/app/VERSION.txt"
       - name: Smoke test (TA-Lib loads, the trainer runs a pipeline round)
         shell: pwsh
@@ -57,6 +57,14 @@ jobs:
           $env:HISTORY_ASSETS = 'BTC'; $env:HISTORY_BINANCE_INTERVALS = '1d'; $env:HISTORY_COINBASE_TFS = 'none'; $env:KALSHI_HISTORY_BUDGET_MIN = '0'
           ../node/node.exe dist/laptopTrain.cjs --hours 0.2 --data "$env:RUNNER_TEMP/td" --no-pull --no-push --only history,fill,sizing
           if ($LASTEXITCODE -ne 0) { throw "trainer exited $LASTEXITCODE" }
+          # The trainer window starts and answers on this computer only (no browser on the runner).
+          $p = Start-Process -FilePath ../node/node.exe -ArgumentList 'dist/laptopTrain.cjs','--ui','--no-open','--port-ui','47123','--data',"$env:RUNNER_TEMP/td" -PassThru -NoNewWindow -RedirectStandardOutput "$env:RUNNER_TEMP/ui.txt"
+          Start-Sleep -Seconds 5
+          $url = (Select-String -Path "$env:RUNNER_TEMP/ui.txt" -Pattern 'http://127\.0\.0\.1:47123/\?t=\w+').Matches[0].Value
+          if (-not $url) { throw 'the trainer window did not start' }
+          $page = Invoke-WebRequest -UseBasicParsing $url
+          if ($page.Content -notmatch 'KALSHI TRAINER') { throw 'the trainer window page is wrong' }
+          Stop-Process -Id $p.Id -Force
           Pop-Location
       - name: Zip
         shell: pwsh
