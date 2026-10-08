@@ -193,3 +193,30 @@ test('kalshi history: one pace for every worker; a 429 pauses them all, then the
   assert.ok(after.length >= 8 && during.length <= 2, `every new request waited out the pause: ${after.map((s) => s.t - hit.t).join(', ')}`);
   assert.ok(logs.some((l) => /slow down 1 time/.test(l)));
 });
+
+test('kalshi history: a market near the cutoff missing from the archive is fetched from the live tier; old one-tier 404s are asked again', async () => {
+  const now = Date.parse('2026-08-20T00:00:00Z');
+  const mk = (t: string) => ({ ticker: t, event_ticker: 'KXBTC15M-E', open_time: '2026-08-08T07:45:00Z', close_time: '2026-08-08T08:00:00Z', result: 'yes', volume_fp: '50' });
+  const notFound = { ok: false, status: 404, headers: new Headers(), json: async () => ({}), text: async () => '{"error":{"code":"not_found"}}' } as unknown as Response;
+  const fetchImpl = (async (url: string) => {
+    const p = new URL(url).pathname;
+    if (p.endsWith('/candlesticks') && (p.startsWith('/historical/') || p.includes('GONE'))) return notFound;
+    const body = p.endsWith('/historical/cutoff') ? { market_settled_ts: '2026-08-09T00:00:00Z' }
+      : p.endsWith('/historical/markets') ? { markets: [], cursor: '' }
+        : p.endsWith('/markets') ? { markets: [mk('KXBTC15M-OK'), mk('KXBTC15M-OLD'), mk('KXBTC15M-GONE')], cursor: '' }
+          : { candlesticks: [{ end_period_ts: Date.parse('2026-08-08T07:59:00Z') / 1000, yes_bid: { close_dollars: '0.5' }, yes_ask: { close_dollars: '0.52' } }] };
+    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) } as unknown as Response;
+  }) as unknown as typeof fetch;
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'kc-'));
+  fs.mkdirSync(path.join(out, 'KXBTC15M'), { recursive: true });
+  fs.writeFileSync(path.join(out, 'KXBTC15M', '2026-08-08.jsonl'), `${JSON.stringify({ ticker: 'KXBTC15M-OLD', closeTime: Date.parse('2026-08-08T08:00:00Z'), candles: [], error: 'HTTP 404' })}\n`);
+  const r = await downloadKalshiHistory({ series: ['KXBTC15M'], days: 30, out, fetchImpl, now, ratePerSec: 100, log: () => {} });
+  assert.equal(r.markets, 2, 'OK and the earlier one-tier 404 both fetched from the live tier');
+  assert.equal(r.rejected, 1);
+  const stored = loadKalshiHistory(out, 'KXBTC15M', { includeEmpty: true }) as unknown as Array<{ ticker: string; candles: unknown[]; error?: string }>;
+  assert.equal(stored.find((m) => m.ticker === 'KXBTC15M-OK')!.candles.length, 1);
+  assert.ok(stored.some((m) => m.ticker === 'KXBTC15M-OLD' && m.candles.length === 1));
+  assert.equal(stored.find((m) => m.ticker === 'KXBTC15M-GONE')!.error, 'HTTP 404 (both tiers)');
+  const again = await downloadKalshiHistory({ series: ['KXBTC15M'], days: 30, out, fetchImpl, now, ratePerSec: 100, log: () => {} });
+  assert.equal(again.markets + again.rejected, 0, 'nothing asked twice');
+});

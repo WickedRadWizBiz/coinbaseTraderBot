@@ -17,7 +17,8 @@
 // market once filled a whole 5-hour training run): 1-minute candles cover at most the last
 // maxCandleMinutes of a market's life (a week of 1-minute candles is more than one request returns:
 // HTTP 400); markets that never traded are stored without a request; a market the API rejects for
-// good (400 / 404) is stored with its error so it is not asked for again; requests run `concurrency`
+// good (400, or 404 from both tiers) is stored with its error so it is not asked for again (a plain
+// 'HTTP 404' stored by older versions, which asked one tier only, is asked again once); requests run `concurrency`
 // at a time; and the whole download stops at budgetMs, the rest waiting for the next run.
 //
 // Rate limit: every request of a download shares one pace (ratePerSec, 10 a second: half of Kalshi's Basic
@@ -142,7 +143,7 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
     const dir = path.join(o.out, series);
     fs.mkdirSync(dir, { recursive: true });
     const have = new Set<string>();
-    for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl'))) for (const line of fs.readFileSync(path.join(dir, file), 'utf8').split('\n')) { try { if (line) have.add(JSON.parse(line).ticker); } catch { /* torn */ } }
+    for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl'))) for (const line of fs.readFileSync(path.join(dir, file), 'utf8').split('\n')) { try { if (line) { const r = JSON.parse(line); if (r.error !== 'HTTP 404') have.add(r.ticker); } } catch { /* torn */ } }
     // Settled markets from both tiers, newest first, until older than `from`.
     const rows: Array<{ m: Omit<KalshiHistMarket, 'candles'>; hist: boolean }> = [];
     for (const [hist, p0] of [[false, `/markets?series_ticker=${encodeURIComponent(series)}&status=settled&limit=200`], [true, `/historical/markets?series_ticker=${encodeURIComponent(series)}&limit=200`]] as const) {
@@ -180,15 +181,18 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
         // Sports markets list days ahead: the candles that matter start an hour before the event.
         const start = Math.max(m.openTime, m.closeTime - maxMin * 60_000, m.startTime && m.startTime < m.closeTime ? m.startTime - 3_600_000 : -Infinity);
         const q = `start_ts=${Math.floor(start / 1000)}&end_ts=${Math.ceil(m.closeTime / 1000)}&period_interval=1`;
-        const p = hist || (cutoff && m.closeTime < cutoff) ? `/historical/markets/${encodeURIComponent(m.ticker)}/candlesticks?${q}` : `/series/${encodeURIComponent(series)}/markets/${encodeURIComponent(m.ticker)}/candlesticks?${q}`;
+        const histPath = `/historical/markets/${encodeURIComponent(m.ticker)}/candlesticks?${q}`, livePath = `/series/${encodeURIComponent(series)}/markets/${encodeURIComponent(m.ticker)}/candlesticks?${q}`;
+        const first = hist || (cutoff && m.closeTime < cutoff) ? histPath : livePath;
         try {
-          const d = await get(p);
+          // Markets near the cutoff can still sit in the other tier (the archive move lags the cutoff): a 404 from
+          // one tier is tried on the other before the market counts as rejected.
+          const d = await get(first).catch((e) => { if (e instanceof HttpError && e.status === 404) return get(first === histPath ? livePath : histPath); throw e; });
           const candles = (d.candlesticks ?? []).map(parseCandle).filter((c: KalshiCandle | undefined): c is KalshiCandle => Boolean(c));
           store({ ...m, candles });
           markets++; n++;
         } catch (e) {
           // A request the API rejects for good is remembered (stored with its error), not retried each run.
-          if (e instanceof HttpError && (e.status === 400 || e.status === 404)) { store({ ...m, candles: [], error: `HTTP ${e.status}` }); rejected++; }
+          if (e instanceof HttpError && (e.status === 400 || e.status === 404)) { store({ ...m, candles: [], error: e.status === 404 ? 'HTTP 404 (both tiers)' : `HTTP ${e.status}` }); rejected++; }
           else failed++;
           if (failed + rejected <= 5) log(`${m.ticker}: ${String(e)}`);
         }
