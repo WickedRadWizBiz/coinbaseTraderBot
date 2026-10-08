@@ -14,20 +14,27 @@ import fs from 'fs';
 import path from 'path';
 
 export interface Contender { validatedParts: number; score?: number | null; version?: string }
-export interface ChampionDecision { promote: boolean; reason: string }
+export interface ChampionDecision {
+  promote: boolean; reason: string;
+  /** A real gain: the first model, a strictly better score on the same held-out data, or more validated parts.
+   *  A tie is promoted (fresher data) but is not one (the continuous laptop trainer counts only these). */
+  improved: boolean;
+}
 
 export function championDecision(incumbent: Contender | undefined, candidate: Contender): ChampionDecision {
-  if (!incumbent) return { promote: true, reason: 'no live model' };
+  if (!incumbent) return { promote: true, improved: true, reason: 'no live model' };
   const sc = candidate.score, si = incumbent.score;
   if (sc !== undefined && sc !== null && Number.isFinite(sc) && si !== undefined && si !== null && Number.isFinite(si)) {
-    return sc <= si
-      ? { promote: true, reason: `beats the live model on the same held-out data (${sc.toFixed(5)} vs ${si.toFixed(5)})` }
-      : { promote: false, reason: `worse than the live model ${incumbent.version ?? ''} on the same held-out data (${sc.toFixed(5)} vs ${si.toFixed(5)}): kept the live model`.replace('  ', ' ') };
+    if (sc < si) return { promote: true, improved: true, reason: `beats the live model on the same held-out data (${sc.toFixed(5)} vs ${si.toFixed(5)})` };
+    return sc === si
+      ? { promote: true, improved: false, reason: `ties the live model on the same held-out data (${sc.toFixed(5)}); fresher data` }
+      : { promote: false, improved: false, reason: `worse than the live model ${incumbent.version ?? ''} on the same held-out data (${sc.toFixed(5)} vs ${si.toFixed(5)}): kept the live model`.replace('  ', ' ') };
   }
   if (candidate.validatedParts < incumbent.validatedParts) {
-    return { promote: false, reason: `validates ${candidate.validatedParts} part(s), the live model ${incumbent.validatedParts}: kept the live model` };
+    return { promote: false, improved: false, reason: `validates ${candidate.validatedParts} part(s), the live model ${incumbent.validatedParts}: kept the live model` };
   }
-  return { promote: true, reason: candidate.validatedParts > incumbent.validatedParts ? `validates more parts (${candidate.validatedParts} vs ${incumbent.validatedParts})` : `validates as many parts (${candidate.validatedParts}); fresher data` };
+  const more = candidate.validatedParts > incumbent.validatedParts;
+  return { promote: true, improved: more, reason: more ? `validates more parts (${candidate.validatedParts} vs ${incumbent.validatedParts})` : `validates as many parts (${candidate.validatedParts}); fresher data` };
 }
 
 const readJson = (file: string): Record<string, unknown> | undefined => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return undefined; } };
@@ -65,7 +72,7 @@ export function promoteIfChampion(o: { dir: string; kind: string; candidate: str
   const candParts = validatedParts(o.kind, o.candidate) ?? 0;
   const incParts = validatedParts(o.kind, o.live);
   const inc = incParts === undefined ? undefined : { validatedParts: incParts, score: o.incumbentScore, version: String((readJson(o.live) as any)?.version ?? (readJson(o.live) as any)?.id ?? '') };
-  const d = o.enabled ? championDecision(inc, { validatedParts: candParts, score: o.candidateScore }) : { promote: true, reason: 'champion gate off (AUTO_TRAIN_CHAMPION=false)' };
+  const d = o.enabled ? championDecision(inc, { validatedParts: candParts, score: o.candidateScore }) : { promote: true, improved: false, reason: 'champion gate off (AUTO_TRAIN_CHAMPION=false)' };
   if (!d.promote) return d;
   const archived = inc ? archiveModel(o.dir, o.kind, o.live, o.keep) : undefined;
   fs.copyFileSync(o.candidate, o.live);

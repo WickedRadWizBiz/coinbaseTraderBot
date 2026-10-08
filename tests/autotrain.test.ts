@@ -189,6 +189,32 @@ test('pipeline end to end: SNN first, backfilled SNN outputs, then the MLP train
   }
 });
 
+test('pipeline readiness: the whole bot on its held-out days in % of the pool, every model\'s state, the target', async () => {
+  const dir = tmpDir();
+  const rec = path.join(dir, 'recordings');
+  for (let d = 0; d < 7; d++) {
+    writeSyntheticRecordings(rec, { windows: 4, seed: 40 + d, start: T0 + d * 86_400_000 });
+    // Each day its own contracts (the synthetic writer names them SYN-0.. every day).
+    const f = path.join(rec, `md-${new Date(T0 + d * 86_400_000).toISOString().slice(0, 10)}.jsonl`);
+    fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replaceAll('"SYN-', `"SYN${d}-`));
+  }
+  const cfg = cfgFor(dir, { TRAIN_TARGET_DAILY_PCT: '0.5' });
+  const r = await runPipeline({ cfg, only: ['readiness'], log: () => undefined, now: T0 + 8 * 86_400_000 });
+  const step = r.steps.find((s) => s.step === 'readiness')!;
+  assert.ok(step.ok && !step.skipped, JSON.stringify(step).slice(0, 600));
+  const f = JSON.parse(fs.readFileSync(path.join(cfg.autoTrain.dir, 'readiness.json'), 'utf8'));
+  assert.deepEqual(f.target, { poolUsd: 200, dailyPct: 0.5, maxDdPct: 10, minDays: 30 });
+  assert.equal(f.wholeBot.days, 2, 'the newest 15% of 7 recorded days');
+  assert.match(f.wholeBot.window, /^recordings: 2 day\(s\) 2026-06-06\.\.2026-06-07/);
+  assert.ok(Number.isFinite(f.wholeBot.meanPct) && Number.isFinite(f.wholeBot.maxDdPct));
+  assert.equal(f.met, false);
+  assert.ok(f.why.some((w: string) => /2 held-out day\(s\), need 30/.test(w)));
+  assert.deepEqual(f.components.map((c: { name: string }) => c.name), ['ta_net', 'setups', 'mlp', 'perp', 'vol_model', 'tennis', 'snn_crypto', 'snn_perps', 'snn_tennis']);
+  assert.ok(f.components.every((c: { present: boolean }) => !c.present), 'nothing trained in this folder yet');
+  assert.deepEqual(f.ledger, []);
+  assert.ok(!fs.existsSync(path.join(cfg.autoTrain.dir, 'work', 'readiness-days')), 'the day links are removed');
+});
+
 test('remote mode: models copied in by the training workflow are hot-swapped; this machine never runs the pipeline', async () => {
   const dir = tmpDir();
   const cfg = cfgFor(dir, { AUTO_TRAIN: 'remote', SNN_WORKER: 'false' });

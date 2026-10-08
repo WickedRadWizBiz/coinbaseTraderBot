@@ -75,6 +75,27 @@ test('determinism: the same tick log gives bit-identical outputs; checkpoint/res
   assert.throws(() => new SnnNetwork(small({ lateral: false })).restore(cp), /version/);
 });
 
+test('rewind: a network moved to an earlier time keeps what it learned and drops what belonged to the later time', () => {
+  const tp = tape(300);
+  const net = new SnnNetwork(small({ plasticity: true }));
+  const later = T0 + 30 * 86_400_000;
+  for (let s = 0; s < 300; s++) net.step(later + s * 1000, tp[s]);
+  net.score([query('A', 59900), query('B', 60100)], later + 300e3);
+  const col = net.columns.get('BTC-15m')!;
+  const w1 = Array.from(col.w1), readout = Array.from(net.readouts.get('BTC-15m')!.wf);
+  assert.ok(net.lastTs >= later && col.v2.some((x) => x !== 0));
+  assert.ok([...net.readouts.values()].some((r) => r.tags.size > 0), 'contracts tagged at the later time');
+  net.rewind();
+  assert.equal(net.lastTs, 0);
+  assert.ok(col.v2.every((x) => x === 0), 'neuron state cleared');
+  assert.ok([...net.readouts.values()].every((r) => r.tags.size === 0), 'no pending tag graded on another era');
+  assert.deepEqual(Array.from(col.w1), w1, 'weights kept');
+  assert.deepEqual(Array.from(net.readouts.get('BTC-15m')!.wf), readout, 'readout kept');
+  for (let s = 0; s < 100; s++) net.step(T0 + s * 1000, tp[s]);
+  assert.equal(net.lastTs, T0 + 99_000, 'the earlier days run on their own clock');
+  assert.ok(net.score([query('C', 60000)], T0 + 100e3).every((x) => Number.isFinite(x.p)));
+});
+
 test('architecture sizes match the design (per column) and the step order runs all levels', () => {
   const net = new SnnNetwork(DEFAULT_SNN);
   net.step(T0, [tape(1)[0][0]]);

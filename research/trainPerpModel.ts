@@ -23,7 +23,8 @@ import path from 'path';
 import zlib from 'zlib';
 import { loadConfig } from '../bot/config';
 import { recordingFiles } from '../bot/marketdata/recordingFiles';
-import { PERP_FEATURES, perpFeatures, type PerpModelParams } from '../bot/perps/perpSignal';
+import { PERP_FEATURES, perpFeatures, PerpModel, type PerpModelParams } from '../bot/perps/perpSignal';
+import { HOLDOUT_RULE, isHoldout, weekBlocks } from './historyLedger';
 import { readRecordings, ReplayState } from './replay';
 import { hashStr, replayPerpDays } from './history/historyReplay';
 import { WorkerPool, workerCount, workerScript } from './workerPool';
@@ -238,6 +239,41 @@ function fitTrees(train: PerpRow[], H: number): GbdtModel | undefined {
   return { ...g.model, baseScore: ybar };
 }
 
+/** The live trading rule on rows in time order with forecasts `p(i)` (bps): one decision per horizon per
+ *  asset, taken when the better side's forecast, after maker fees both ways and the funding over the
+ *  horizon, clears the entry edge. Each trade's net P&L (bps). */
+export function ruleTrades(rows: PerpRow[], p: (i: number) => number, idx: Iterable<number>, o: { horizonMin: number; makerBps: number; entryEdgeBps: number }): number[] {
+  const H = o.horizonMin * 60_000, maker = o.makerBps;
+  const trades: number[] = [];
+  const lastTs = new Map<string, number>();
+  for (const i of idx) {
+    const r = rows[i];
+    if (r.ts - (lastTs.get(r.asset) ?? -Infinity) < H) continue;
+    lastTs.set(r.asset, r.ts);
+    const fund = (dir: number) => dir * r.fundingBps * (o.horizonMin / 480);
+    const net = (dir: number) => dir * p(i) - 2 * maker - fund(dir);
+    const dir = net(1) >= net(-1) ? 1 : -1;
+    if (net(dir) < o.entryEdgeBps) continue;
+    trades.push(dir * r.y - 2 * maker - fund(dir));
+  }
+  return trades;
+}
+
+/** A trained model's record on rows it never saw (a champion contest on the held-out weeks): the live
+ *  rule's trades and their mean net P&L (bps), and the forecasts' information coefficient. */
+export function perpRuleRecord(model: PerpModel, rows: PerpRow[], o: { horizonMin: number; makerBps: number; entryEdgeBps: number }): { trades: number; meanBps: number; ic: number } {
+  const sorted = [...rows].sort((a, b) => a.ts - b.ts);
+  const preds = sorted.map((r) => model.predict(Object.fromEntries(PERP_FEATURES.map((n, k) => [n, r.x[k]]))).muBps);
+  const t = ruleTrades(sorted, (i) => preds[i], sorted.keys(), o);
+  return { trades: t.length, meanBps: t.length ? t.reduce((a, x) => a + x, 0) / t.length : NaN, ic: pearson(preds, sorted.map((r) => r.y)) };
+}
+
+/** Days of the history-ledger holdout weeks among the recorded days (research/historyLedger.ts). */
+export function holdoutDays(days: string[]): Set<string> {
+  const latest = days[days.length - 1];
+  return new Set(weekBlocks(days).filter((b) => isHoldout(b, latest)).flatMap((b) => b.days));
+}
+
 export function trainPerp(rows: PerpRow[], o: TrainPerpOpts): { params: PerpModelParams; oos: { lambda: Cand; ic: number }[] } {
   if (rows.length < 50) throw new Error(`only ${rows.length} labelled rows: record more perp data first`);
   const folds = o.folds ?? 5, lambdas = o.lambdas ?? [0.1, 1, 10, 100];
@@ -276,18 +312,7 @@ export function trainPerp(rows: PerpRow[], o: TrainPerpOpts): { params: PerpMode
   const idx = best.idx;
   const icCi = blockCi(idx.length, stride, (s) => pearson(s.map((j) => p[idx[j]]), s.map((j) => rows[idx[j]].y)));
   // The live trading rule on non-overlapping out-of-sample rows (one decision per horizon per asset).
-  const trades: number[] = [];
-  const lastTs = new Map<string, number>();
-  for (const i of idx) {
-    const r = rows[i];
-    if (r.ts - (lastTs.get(r.asset) ?? -Infinity) < H) continue;
-    lastTs.set(r.asset, r.ts);
-    const fund = (dir: number) => dir * r.fundingBps * (o.horizonMin / 480);
-    const net = (dir: number) => dir * p[i] - 2 * maker - fund(dir);
-    const dir = net(1) >= net(-1) ? 1 : -1;
-    if (net(dir) < edge) continue;
-    trades.push(dir * r.y - 2 * maker - fund(dir));
-  }
+  const trades = ruleTrades(rows, (i) => p[i], idx, { horizonMin: o.horizonMin, makerBps: maker, entryEdgeBps: edge });
   const mean = trades.length ? trades.reduce((s, x) => s + x, 0) / trades.length : NaN;
   const pnlCi = trades.length >= 10 ? blockCi(trades.length, 1, (s) => s.reduce((a, j) => a + trades[j], 0) / s.length) : { lo: NaN, hi: NaN };
   const dsr = trades.length >= 10 ? deflatedSharpe(trades, cands.length).probability : 0;
@@ -322,9 +347,16 @@ export async function trainPerpMain(argOf: (k: string, d: string) => string = cl
   const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
   const horizonMin = Number(argOf('horizon', String(cfg.perps.horizonMin)));
   const everySec = Number(argOf('every', '300'));
-  const rows = await buildPerpDataset(argOf('recordings', 'data/recordings'), { everySec, horizonMin, cacheDir: argOf('cache', '') || undefined, workers: Number(argOf('workers', String(workerCount()))), log: (m) => console.log(m) });
+  const dir = argOf('recordings', 'data/recordings');
+  let rows = await buildPerpDataset(dir, { everySec, horizonMin, cacheDir: argOf('cache', '') || undefined, workers: Number(argOf('workers', String(workerCount()))), log: (m) => console.log(m) });
+  // --holdout ledger: the history ledger's held-out weeks are left out (champion contests are run there), and
+  // so are the rows just before them whose label (the return over the horizon) ends inside one.
+  const held = argOf('holdout', '') === 'ledger' ? holdoutDays(recordingFiles(dir).map((f) => f.day)) : undefined;
+  const dayOf = (t: number) => new Date(t).toISOString().slice(0, 10);
+  if (held) { const n = rows.length; rows = rows.filter((r) => !held.has(dayOf(r.ts)) && !held.has(dayOf(r.ts + horizonMin * 60_000))); console.log(`held out ${n - rows.length} rows of ${held.size / 7} holdout week(s)`); }
   console.log(`${rows.length} labelled rows`);
   const res = trainPerp(rows, { horizonMin, everySec, makerBps: cfg.perps.makerFeeBps, entryEdgeBps: cfg.perps.entryEdgeBps });
+  if (held) res.params.holdout = HOLDOUT_RULE;
   console.table(res.oos);
   console.log(JSON.stringify(res.params.validation, null, 1));
   const out = argOf('out', 'params/perp_model.candidate.json');

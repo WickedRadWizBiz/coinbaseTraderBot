@@ -252,6 +252,15 @@ test('pipeline: ta_net runs the tournament in chunks and promotes only when it r
   assert.equal(r2.state.taNetComplete, true);
   const r3 = await runPipeline({ cfg: cfgAll, only: ['ta_net'], log: () => undefined, now: now + 2 * H });
   assert.match(r3.steps[0].skipped ?? '', /trained 0\.0 day/);
+  // Due again with nothing new (no new month, no new round): the network in use stays, the archive does not grow.
+  const archive = path.join(cfgAll.autoTrain.dir, 'archive', 'ta_net');
+  const archived = () => (fs.existsSync(archive) ? fs.readdirSync(archive).length : 0);
+  const before = archived();
+  const r4 = await runPipeline({ cfg: loadConfig({ ...env, TA_NET_MAX_ROUNDS_PER_RUN: '0', TA_NET_RETRAIN_DAYS: '0' }), only: ['ta_net'], log: () => undefined, now: now + 3 * H });
+  const d4 = step(r4, 'ta_net').detail as { promoted?: boolean; reason?: string };
+  assert.equal(d4.promoted, false, JSON.stringify(d4).slice(0, 300));
+  assert.match(String(d4.reason), /no new tournament round/);
+  assert.equal(archived(), before);
   setTaNet(undefined);
 });
 

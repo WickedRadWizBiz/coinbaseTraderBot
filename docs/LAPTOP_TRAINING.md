@@ -1,8 +1,9 @@
 # Training on your own computer
 
-The laptop trainer runs the bot's own training pipeline (`research/pipeline.ts`) on your computer. It
-has no time cap and uses bigger budgets than the server's background job or the daily remote job. It
-then sends the winning models to the bot, which loads them without a restart.
+The laptop trainer runs the bot's own training pipeline (`research/pipeline.ts`) on your computer. By
+default it keeps going, round after round, until the bot stops improving or reaches the target. It uses
+bigger budgets than the server's background job or the daily remote job. After every round that makes a
+model better, it sends the models to the bot, which loads them without a restart.
 
 ## Windows: download and double-click
 
@@ -11,7 +12,9 @@ then sends the winning models to the bot, which loads them without a restart.
    *Laptop trainer (Windows package)* → *Run workflow*.
 2. Unzip it anywhere with about 40 GB free, then double-click `Train.cmd`. (The replay of all the history
    takes about 10 GB, the 1-minute history it is made from about 3 GB.)
-3. Type how many hours to train: 12 for a first run, 48 or more for a long one.
+3. Press Enter to train until it stops by itself (0 hours), or type a number of hours to stop sooner.
+   `trainer-data\GUIDE.txt` says how long to train before live trading and what good scores look like;
+   `trainer-data\STATUS.txt` shows the scores after every round.
 4. **First run only:** it asks for your server, so it can copy the bot's recordings and upload the
    models.
    - Give the Lightsail public IP, user `ubuntu`, and the instance's SSH key file (Lightsail console →
@@ -25,12 +28,13 @@ Nothing to install: the zip carries Node, the bundled trainer, and TA-Lib compil
 
 ```bash
 npm ci
-npm run train:laptop -- --hours 12 --host <server ip> --key ~/lightsail.pem
+npm run train:laptop -- --host <server ip> --key ~/lightsail.pem            # until it stops by itself
+npm run train:laptop -- --hours 12 --host <server ip> --key ~/lightsail.pem # or at most 12 hours
 ```
 
 | Option | Meaning |
 |---|---|
-| `--hours N` | Training budget (default 12) |
+| `--hours N` | 0 (default): until it stops by itself (see [When it stops](#when-it-stops)); N > 0: also stop after N hours |
 | `--data DIR` | Data, history and models, kept between runs (default `./trainer-data`) |
 | `--days N` | Recorded days to copy (default 45) |
 | `--no-pull` / `--no-push` | Skip copying data down / sending models up |
@@ -46,20 +50,135 @@ npm run train:laptop -- --hours 12 --host <server ip> --key ~/lightsail.pem
    - the rest of `~/bot/data`, except audit trails and logs;
    - `bot.env`, without any line holding a key, secret, token or password.
 2. **History.** Downloads years of spot candles for every crypto asset Kalshi lists (Binance Vision,
-   Coinbase), the replay's 1-minute spot and perpetual bars and funding rates from 2017, and a year of
-   Kalshi's settled contracts, tennis matches with every trade. Each later run downloads only what is new.
+   Coinbase), the replay's 1-minute spot and perpetual bars, funding rates and open interest (5-minute,
+   from September 2020), and a year of Kalshi's settled contracts, tennis matches with every trade. Each
+   later run downloads only what is new.
 3. **Rounds.**
    - Round 1 runs every step.
-   - Later rounds continue the tournaments (TA network, SNNs, setups, sweeps) and retrain the models
-     that read them, until the time is up.
+   - Each later round runs one tournament generation per network, on weeks of history that network has
+     never trained on (see [History ledger](#history-ledger-which-weeks-each-network-has-trained-on)).
+   - Then a contest on held-out weeks against the network in use, a retrain of the models that read the
+     networks (and the TA network's tournament where it left off), and the readiness check.
+   - Every 24 hours a round runs every step again: new history and new recordings from the server, so
+     new weeks to train on.
    - Each module is trained and judged on its own. It replaces the model in use only when it beats it
      (`AUTO_TRAIN_CHAMPION`).
-   - The sweep then tunes the bot as a whole.
-4. **Push (SSH).** Copies the models directory back, newer files only. The running bot hot-swaps every
-   model that changed.
+   - The sweep tunes the bot as a whole (a proposal, weekly in a long run).
+4. **Push (SSH).** After every round that made a model better, and at the end: the models directory to the
+   server, newer files only (not the caches or the links to replay days). The running bot hot-swaps every
+   model that changed. A file changed here is never overwritten by an older copy from the server.
 
 The pipeline saves progress after every step. Stopping with Ctrl+C or closing the window loses at most
 the step in progress, and the next run picks up the tournaments where they stopped.
+
+## When it stops
+
+After every round it reads the readiness check (`models/readiness.json`, below) and stops when:
+
+- **The target is reached.** On days nothing was trained or tuned on, the whole bot earns at least
+  `TRAIN_TARGET_DAILY_PCT` of `TRAIN_TARGET_POOL_USD` a day. The defaults are 50% of $200, that is $100
+  a day. The lower end of the 95% interval must reach it, so it has to hold consistently, not just on
+  average. The drawdown must stay within `TRAIN_TARGET_MAX_DD_PCT` (default 10%), over 30 days or more.
+- **It stops making progress.** `TRAIN_PLATEAU_ROUNDS` rounds in a row (default 3) improve nothing: no
+  challenger beat the model in use, and no tournament is still running. A promotion that only ties (the
+  same score, or as many validated parts, kept for its fresher data) is not progress.
+- **No fresh history is left.** Every replayed network has trained on every week, and the round improved
+  nothing. New weeks arrive with time, so run it again later.
+- **Or** the hours you gave it are up, or you press Ctrl+C.
+
+Set these in `trainer-data/trainer.env` (written on the first run, `KEY=VALUE` lines; credentials and
+paths are ignored there). After each round the trainer writes the scoreboard to `trainer-data/STATUS.txt`
+and appends a line to `trainer-data/rounds.jsonl`.
+
+### About the default target
+
+$100 a day on $200 is +50% a day. Compounded, that is about 190,000x in 30 days. No trading system keeps
+that up: the best funds make 20-40% a *year*, and a genuinely good bot on a small account might make 0.2%
+to 1% a day. The trainer is built to aim at the target you set, but expect it to stop on "no progress"
+long before it gets there. That stop is still a useful answer: the models are as good as this history can
+make them. Set `TRAIN_TARGET_DAILY_PCT=0.5` to stop at a realistic bar instead.
+
+## Getting the bot ready for live trading
+
+`trainer-data/GUIDE.txt` (also printed at the start of every run) says the same as this section:
+
+1. **Let the trainer run until it stops by itself.** Round 1 can take a day or more on a 16-thread laptop,
+   since it downloads years of history first. Each later round takes several hours. Give it at least 3 rounds. Round 1 makes the first models;
+   round 2 is the first where challengers must beat them; the scores mean something only after that.
+2. **Paper-trade on the server for 2 to 4 weeks** with the trained models. The dashboard's paper P&L
+   should look like the readiness check: same sign, similar size, drawdown no worse.
+3. **Only then consider real money,** and start small. The server's daily training keeps the models
+   current. Run the trainer again every week or two: it continues where it stopped, and only weeks no
+   network has trained on count as fresh.
+
+What good scores look like (after fees, on held-out days):
+
+| Part | Good |
+|---|---|
+| Whole bot | mean daily return above 0 with the whole 95% interval above 0. 0.2% to 1% a day is very good (0.5% a day compounds to about 6x in a year). Sharpe 2 or more, max drawdown within 10-15%, 55% or more winning days, over 30+ days. STATUS.txt then shows `solid: YES` |
+| Perps model | IC 0.02 to 0.05 or more with its lower bound above 0, net bps per trade above 0 after fees, DSR 0.95 or more, the execution backtest passed |
+| TA network | heads validated on the holdout, network DSR 0.95 or more |
+| Setup scorer | both lanes validated (holdout and final window) |
+| Kalshi decision model | log loss below the calibrated market's, Diebold-Mariano p below 0.05 |
+| SNNs | challengers that win their contests on held-out weeks |
+
+Live results are usually worse than any backtest.
+
+## Readiness: the whole bot on days nothing was trained on
+
+The pipeline's last step, `readiness` (`research/readiness.ts`), writes `models/readiness.json`:
+
+- **The whole bot.** Kalshi's contracts through the production backtester and the perps setup lanes, from
+  one pot of capital under one daily loss stop (`research/wholeBot.ts`), on a pool of
+  `TRAIN_TARGET_POOL_USD`, with the live settings.
+- **Its days.** The replay's days with Kalshi's real contracts (else the bot's recordings), with three
+  limits:
+  - the newest 15%, which is the sweep's final window, so it was never tuned on;
+  - minus the days the Kalshi decision model was fitted on (its own holdout stays in);
+  - at most the newest 90.
+- **Out of sample throughout.** The setup scores on those days come from models that never saw them, and
+  the SNN outputs are prequential.
+- **Per day, in percent of the pool:** the mean and its 95% bootstrap interval, the median, the share of
+  winning days, the worst day, the largest drawdown of the equity curve, the annualised Sharpe. Then
+  whether it meets the target and whether it looks solid.
+- **Every model's state:** present, validated, and the key numbers.
+- **Each network's place in the history ledger:** weeks used, fresh weeks left, contests run.
+
+## History ledger: which weeks each network has trained on
+
+`research/historyLedger.ts` keeps `models/work/history-ledger.json`. The replay's days are cut into ISO
+weeks, Monday to Sunday UTC, labelled like `2021-W19`. For every network the ledger records which weeks it
+has trained on and been judged on, and each tournament generation and contest with its weeks.
+
+- **Holdout weeks.** Every 8th week older than half a year. No network ever trains on them. They are where
+  a challenger must beat the model in use before it may replace it, so a champion is never crowned on data
+  it learned from. The set is fixed: weeks are counted from a fixed Monday, so it never shifts as history
+  grows.
+- **Training weeks.** All the others. Each tournament generation takes weeks the network has never trained
+  on, spread over all the years (`AUTO_TRAIN_SNN_PBT_DAYS` / 7 weeks a generation). Tournaments that keep
+  running never grind the same weeks again. The population carries on from one generation to the next,
+  and a network replaying an earlier week starts that day fresh (its learning kept, the market state
+  cleared).
+- **No fresh week left.** The tournament is skipped until new weeks complete. A tournament that must run
+  anyway (a new stage, no settings yet) takes the weeks used least.
+- **Contests** use the holdout weeks the network has been judged on least (`AUTO_TRAIN_CONTEST_WEEKS`,
+  default 2), so repeated contests do not keep reusing the same few weeks either.
+
+What uses it:
+
+- **Kalshi SNN and perps SNN.** The tournament runs on the generation's fresh weeks. The network that goes
+  live then trains on the latest weeks, since it must know today's market. Those are never holdout weeks.
+  Then the contest:
+  - the new network and the one in use replay the same held-out weeks from their own model files,
+    learning online as they would live;
+  - each is scored like a tournament member;
+  - the challenger is promoted only if it scores better.
+- **Perps model.** It trains without the holdout weeks, and its execution backtest runs on them. Before it
+  replaces the model in use, both are scored on the holdout weeks by the live rule's net P&L per trade.
+  This happens only when the model in use was also trained without them (marked in its file), with at
+  least 20 trades each.
+- **Tennis network.** It trains on the newest tennis days once, then learns live. The ledger records the
+  weeks it used.
 
 ## History replay: the bot "trading" years of history
 
@@ -79,7 +198,9 @@ replay code reads them exactly as it reads the bot's live recordings:
   [BTC.D and USDT.D](#btcd-and-usdtd) below).
 - **Candles.** The live feed's timeframes; every day file is self-contained.
 - **Perp quotes.** From Binance USD-M bars, at the spread and contract specs the bot's own perp
-  recordings show, with Binance's funding rates.
+  recordings show, with Binance's funding rates and open interest. Open interest is Binance's 5-minute
+  reading, carried for at most 10 minutes. Where Binance has none (before September 2020, or a gap), the
+  quote has none, as live when the feed is down. The perps model's open-interest features read it.
 - **Kalshi's settled contracts.** The real ones where Kalshi's history reaches (about a year): their
   markets, minute quotes, trades and results.
 - **Synthetic price-prediction contracts everywhere else.** For each coin, a 15-minute Up/Down every
@@ -92,9 +213,9 @@ replay code reads them exactly as it reads the bot's live recordings:
 The models replay it without knowing it isn't live:
 
 - **Perps model:** trains on every day of perpetual history (Binance's perpetuals start in September
-  2019), one sample per coin every 15 minutes. Each day's samples are kept, so a run computes only the new
-  days; the first run computes all of them on every core at once. Its execution backtest runs on the
-  latest year (the market as it trades now).
+  2019) except the ledger's holdout weeks, one sample per coin every 15 minutes. Each day's samples are
+  kept, so a run computes only the new days; the first run computes all of them on every core at once. Its
+  execution backtest and its contest run on the holdout weeks.
 - **Perps SNN:** its tournament, training and entry / exit learning on direction calls run on the
   replay.
 - **Kalshi SNN (price-prediction contracts):** its tournament and training run on the replay's 15-minute
@@ -109,9 +230,10 @@ The models replay it without knowing it isn't live:
   trades the synthetic ones, whose price is its own model's. The result is a proposal, never auto-applied.
 - **Kalshi decision model:** stays on the bot's own recordings (it learns how real Kalshi prices differ
   from fair value, which synthetic quotes cannot show).
-- **SNN tournaments span every era.** A tournament's days are blocks of a week spread from the first year
+- **SNN tournaments span every era.** Each generation's weeks are fresh weeks spread from the first year
   of history to the latest days (bull and bear markets, crashes, quiet years), so the winning settings
-  have to hold up in every kind of market. The network that goes live then trains on the latest days.
+  have to hold up in every kind of market. The network that goes live then trains on the latest days, and
+  must beat the one in use on held-out weeks.
 
 The first run downloads Binance's archives from 2017 (about 1 GB) and builds every replay day (an hour or
 two). Later runs add only the new days. A day is rebuilt only when something it read changed: Kalshi's
@@ -160,8 +282,10 @@ waits for the market. The Kalshi network still steps once per market second, as 
 - **The tournament:** runs one network per thread at the same time, so a 16-thread laptop puts 15
   networks through each day in that same time.
 
-A 12-hour run covers about 30 tournament days (four week-long blocks across the years) and 14 training
-days per network. The windows grow with the hours you give it, up to a year of tournament days (52 blocks).
+A run that goes until it stops gives each tournament generation about 5 weeks and trains each network on
+its latest 24 days. A run with a budget sizes them by the hours: 12 hours covers about 30 tournament days
+(four weeks across the years) and 14 training days per network, up to a year of tournament days
+(52 weeks).
 
 ## Tennis on Kalshi's match history
 
@@ -208,7 +332,7 @@ What trains on it:
 | Module | Learns from |
 |---|---|
 | TA network, rule book, setup scorer | years of candles, walked forward and graded on entries and exits |
-| Perps model, perps SNN | the history replay: every day of perpetual history since September 2019 |
+| Perps model, perps SNN | the history replay: every day of perpetual history since September 2019 (open interest from September 2020), except the holdout weeks |
 | Kalshi SNN | the history replay's 15-minute / hourly contracts (real and synthetic) since 2017; its live gate on the bot's recordings |
 | Tennis SNN, tennis model | Kalshi's tennis history (real prices and trades) + the bot's recorded matches |
 | Intraday volatility profile | the replay's last 180 days |
