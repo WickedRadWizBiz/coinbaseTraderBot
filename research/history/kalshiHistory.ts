@@ -27,7 +27,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const num = (v: unknown): number | null => { if (v === null || v === undefined || v === '') return null; const x = Number(v); return Number.isFinite(x) ? x : null; };
 
 export interface KalshiCandle { ts: number; bidO: number | null; bidH: number | null; bidL: number | null; bidC: number | null; askO: number | null; askH: number | null; askL: number | null; askC: number | null; last: number | null; volume: number | null; oi: number | null }
-export interface KalshiHistMarket { ticker: string; series: string; event?: string; openTime: number; closeTime: number; strike: number | null; cap: number | null; strikeType?: string; result?: string; settlement?: number | null; volume?: number | null; candles: KalshiCandle[]; noVolume?: boolean; error?: string }
+export interface KalshiHistMarket {
+  ticker: string; series: string; event?: string; openTime: number; closeTime: number; strike: number | null; cap: number | null; strikeType?: string; result?: string; settlement?: number | null; volume?: number | null;
+  /** Market title (tennis: the players and the tournament) and the event's start (tennis: the match). */
+  title?: string; startTime?: number;
+  candles: KalshiCandle[]; noVolume?: boolean; error?: string;
+}
 
 /** One candlestick (fixed-point dollar strings, legacy cents tolerated). */
 export function parseCandle(c: Record<string, any>): KalshiCandle | undefined {
@@ -45,10 +50,26 @@ export function parseCandle(c: Record<string, any>): KalshiCandle | undefined {
 export function parseHistMarket(m: Record<string, any>, series: string): Omit<KalshiHistMarket, 'candles'> | undefined {
   const openTime = Date.parse(String(m.open_time ?? '')), closeTime = Date.parse(String(m.close_time ?? m.expiration_time ?? ''));
   if (!m.ticker || !Number.isFinite(openTime) || !Number.isFinite(closeTime)) return undefined;
+  const start = Date.parse(String(m.occurrence_datetime ?? m.expected_start_time ?? m.event_start_time ?? m.start_time ?? ''));
   return {
     ticker: String(m.ticker), series, event: m.event_ticker, openTime, closeTime, strike: num(m.floor_strike), cap: num(m.cap_strike), strikeType: m.strike_type,
     result: m.result || undefined, settlement: num(m.settlement_value_dollars) ?? num(m.expiration_value), volume: num(m.volume_fp ?? m.volume),
+    ...(m.title ? { title: String(m.title) } : {}), ...(Number.isFinite(start) ? { startTime: start } : {}),
   };
+}
+
+/** One trade of the tape: [time ms, YES price, contracts, taker side (1 = bought YES, 0 = bought NO)]. */
+export type KalshiTrade = [number, number, number, 0 | 1];
+
+/** A trade from GET /markets/trades or /historical/trades (fixed-point dollar strings, legacy cents tolerated). */
+export function parseTrade(t: Record<string, any>): KalshiTrade | undefined {
+  const ts = Date.parse(String(t.created_time ?? ''));
+  const cents = num(t.yes_price);
+  const price = num(t.yes_price_dollars) ?? (cents !== null ? (cents > 1 ? cents / 100 : cents) : null);
+  const count = num(t.count_fp) ?? num(t.count);
+  const side = t.taker_side === 'yes' ? 1 : t.taker_side === 'no' ? 0 : undefined;
+  if (!Number.isFinite(ts) || price === null || !(price > 0 && price < 1) || !(count! > 0) || side === undefined) return undefined;
+  return [ts, +price.toFixed(4), count!, side];
 }
 
 export interface KalshiHistoryOpts {
@@ -67,11 +88,10 @@ export interface KalshiHistoryResult { markets: number; skipped: number; failed:
 
 class HttpError extends Error { constructor(msg: string, readonly status: number) { super(msg); } }
 
-export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<KalshiHistoryResult> {
-  const base = (o.baseUrl ?? 'https://external-api.kalshi.com/trade-api/v2').replace(/\/$/, '');
-  const f = o.fetchImpl ?? fetch, log = o.log ?? ((m: string) => console.log(`[kalshi-history] ${m}`));
-  const now = o.now ?? Date.now(), from = now - o.days * 86_400_000;
-  const get = async (p: string): Promise<any> => {
+/** GET with backoff on 429 / 5xx (public endpoints, no key). */
+function getter(baseUrl: string | undefined, f: typeof fetch): (p: string) => Promise<any> {
+  const base = (baseUrl ?? 'https://external-api.kalshi.com/trade-api/v2').replace(/\/$/, '');
+  return async (p: string): Promise<any> => {
     let delay = 500;
     for (let attempt = 0; ; attempt++) {
       const res = await f(base + p, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15_000) });
@@ -80,6 +100,12 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
       throw new HttpError(`GET ${p}: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`, res.status);
     }
   };
+}
+
+export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<KalshiHistoryResult> {
+  const f = o.fetchImpl ?? fetch, log = o.log ?? ((m: string) => console.log(`[kalshi-history] ${m}`));
+  const now = o.now ?? Date.now(), from = now - o.days * 86_400_000;
+  const get = getter(o.baseUrl, f);
   const clock = o.clock ?? Date.now;
   const deadline = o.budgetMs && o.budgetMs > 0 ? clock() + o.budgetMs : Infinity;
   const concurrency = Math.max(1, Math.floor(o.concurrency ?? 3));
@@ -127,7 +153,8 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
     const worker = async () => {
       while (next < todo.length && clock() < deadline && !(o.maxMarkets && n >= o.maxMarkets)) {
         const { m, hist } = todo[next++];
-        const start = Math.max(m.openTime, m.closeTime - maxMin * 60_000);
+        // Sports markets list days ahead: the candles that matter start an hour before the event.
+        const start = Math.max(m.openTime, m.closeTime - maxMin * 60_000, m.startTime && m.startTime < m.closeTime ? m.startTime - 3_600_000 : -Infinity);
         const q = `start_ts=${Math.floor(start / 1000)}&end_ts=${Math.ceil(m.closeTime / 1000)}&period_interval=1`;
         const p = hist || (cutoff && m.closeTime < cutoff) ? `/historical/markets/${encodeURIComponent(m.ticker)}/candlesticks?${q}` : `/series/${encodeURIComponent(series)}/markets/${encodeURIComponent(m.ticker)}/candlesticks?${q}`;
         try {
@@ -149,6 +176,88 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
   }
   log(`done: ${markets} new market(s), ${noVolume} never traded (stored without candles), ${skipped} already stored, ${rejected} rejected by the API, ${failed} failed${remaining ? `, ${remaining} left for the next run` : ''}`);
   return { markets, skipped, failed, noVolume, rejected, remaining, budgetHit };
+}
+
+export interface KalshiTradesOpts {
+  baseUrl?: string; series: string[]; out: string; fetchImpl?: typeof fetch; log?: (m: string) => void;
+  /** Stop starting requests after this long (wall clock); the rest is fetched by the next run. */
+  budgetMs?: number; concurrency?: number; clock?: () => number;
+  /** Tape from this long before the event's start (or two days before the close) to the close. */
+  leadMin?: number;
+  /** Pages of 1000 trades per market and endpoint at most. */
+  maxPages?: number;
+}
+export interface KalshiTradesResult { markets: number; trades: number; skipped: number; failed: number; remaining: number; budgetHit: boolean }
+
+/**
+ * The trade tape of every market stored by downloadKalshiHistory for these series (it must run first):
+ * every fill with its price, size and taker side, from GET /historical/trades (trades older than the
+ * archive's trades_created_ts cutoff) and GET /markets/trades (newer ones), cursor-paginated, deduplicated
+ * by trade id. One line per market in <out>/<SERIES>/trades/<close day>.jsonl: {ticker, trades: [[ts,
+ * price, count, side]]}. Markets already stored are skipped; budgeted and resumable like the market download.
+ */
+export async function downloadKalshiTrades(o: KalshiTradesOpts): Promise<KalshiTradesResult> {
+  const f = o.fetchImpl ?? fetch, log = o.log ?? ((m: string) => console.log(`[kalshi-trades] ${m}`));
+  const get = getter(o.baseUrl, f);
+  const clock = o.clock ?? Date.now;
+  const deadline = o.budgetMs && o.budgetMs > 0 ? clock() + o.budgetMs : Infinity;
+  const concurrency = Math.max(1, Math.floor(o.concurrency ?? 3));
+  const lead = (o.leadMin ?? 120) * 60_000, maxPages = o.maxPages ?? 50;
+  const cutoffRaw = await get('/historical/cutoff').catch(() => ({}));
+  const cutoff = Date.parse(String(cutoffRaw?.trades_created_ts ?? '')) || 0;
+  let markets = 0, trades = 0, skipped = 0, failed = 0, remaining = 0, budgetHit = false;
+  for (const series of o.series) {
+    const dir = path.join(o.out, series, 'trades');
+    fs.mkdirSync(dir, { recursive: true });
+    const have = new Set<string>();
+    for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl'))) for (const line of fs.readFileSync(path.join(dir, file), 'utf8').split('\n')) { try { if (line) have.add(JSON.parse(line).ticker); } catch { /* torn */ } }
+    const all = loadKalshiHistory(o.out, series);
+    const todo = all.filter((m) => !have.has(m.ticker) && !m.noVolume && !m.error);
+    skipped += all.length - todo.length;
+    let next = 0;
+    const worker = async () => {
+      while (next < todo.length && clock() < deadline) {
+        const m = todo[next++];
+        const from = Math.max(m.openTime, (m.startTime && m.startTime < m.closeTime ? m.startTime : m.closeTime - 2 * 86_400_000) - lead);
+        const q = `ticker=${encodeURIComponent(m.ticker)}&min_ts=${Math.floor(from / 1000)}&max_ts=${Math.ceil(m.closeTime / 1000)}&limit=1000`;
+        const byId = new Map<string, KalshiTrade>();
+        try {
+          for (const [use, p0] of [[!cutoff || from < cutoff, '/historical/trades'], [!cutoff || m.closeTime >= cutoff, '/markets/trades']] as const) {
+            if (!use) continue;
+            let cursor = '';
+            for (let page = 0; page < maxPages; page++) {
+              const d = await get(`${p0}?${q}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+              for (const raw of d.trades ?? []) { const t = parseTrade(raw); if (t) byId.set(String(raw.trade_id ?? `${t[0]}:${t[1]}:${t[2]}:${t[3]}`), t); }
+              cursor = d.cursor ?? '';
+              if (!cursor || !(d.trades ?? []).length) break;
+            }
+          }
+          const tape = [...byId.values()].sort((a, b) => a[0] - b[0]);
+          fs.appendFileSync(path.join(dir, `${new Date(m.closeTime).toISOString().slice(0, 10)}.jsonl`), `${JSON.stringify({ ticker: m.ticker, trades: tape })}\n`);
+          markets++; trades += tape.length;
+        } catch (e) {
+          failed++;
+          if (failed <= 5) log(`${m.ticker}: ${String(e)}`);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: concurrency }, worker));
+    const left = todo.length - next;
+    if (left > 0) { remaining += left; if (clock() >= deadline) { budgetHit = true; log(`${series}: time budget used up, ${left} tape(s) left for the next run`); } }
+  }
+  log(`done: ${markets} tape(s), ${trades} trade(s), ${skipped} already stored or untraded, ${failed} failed${remaining ? `, ${remaining} left for the next run` : ''}`);
+  return { markets, trades, skipped, failed, remaining, budgetHit };
+}
+
+/** Stored trade tapes of a series for markets closing on the given days, by ticker. */
+export function loadKalshiTrades(out: string, series: string, days: string[]): Map<string, KalshiTrade[]> {
+  const res = new Map<string, KalshiTrade[]>();
+  for (const d of days) {
+    const f = path.join(out, series, 'trades', `${d}.jsonl`);
+    if (!fs.existsSync(f)) continue;
+    for (const line of fs.readFileSync(f, 'utf8').split('\n')) { try { if (line) { const r = JSON.parse(line); res.set(r.ticker, r.trades); } } catch { /* torn */ } }
+  }
+  return res;
 }
 
 /** Every stored market of a series with candles (for research); includeEmpty adds the markets stored

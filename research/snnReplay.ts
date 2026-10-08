@@ -7,7 +7,9 @@
 import fs from 'fs';
 import path from 'path';
 import { assetFeatureMap, computeFeatureMap, type MacroEvent } from '../bot/model/featureEngine';
-import { cryptoColumnKey, cryptoValues, DOMAIN_HORIZONS, type CryptoHorizon } from '../bot/snn/inputs';
+import { cryptoColumnKey, cryptoValues, DOMAIN_HORIZONS, tennisColumnKey, tennisSnapshotValues, type CryptoHorizon } from '../bot/snn/inputs';
+import type { TennisConfig } from '../bot/config';
+import { MatchTracker, type MatchMarket } from '../bot/tennis/tennisStrategy';
 import { priceContract, SETTLEMENT_AVG_SEC } from '../bot/model/fairValue';
 import { ladderQuotes } from '../bot/model/ladder';
 import { MetaModel } from '../bot/model/metaModel';
@@ -67,8 +69,12 @@ export interface SnnReplayOpts {
   /** Which isolated network to replay (params should come from domainParams(domain, ...)):
    *  crypto = 15m/60m columns with contract channels, scored against settlements;
    *  perps = 1h/4h columns from asset-level data only, no contracts (perps never settle), graded on
-   *  their direction calls alone. Tennis is not replayable (no recorded score feed) and learns live. */
-  domain?: Exclude<SnnDomain, 'tennis'>;
+   *  their direction calls alone;
+   *  tennis = one column per match fed the engine's own match inputs every 5 s (books, tape flow, the
+   *  score when recorded), P(player A wins) scored against the market and settled by the result; each
+   *  ended match folds into the network's tennis template (needs `tennis`, the tennis config). */
+  domain?: SnnDomain;
+  tennis?: TennisConfig;
 }
 
 /** Same mapping as the engine's snnColumn: 15-minute contracts -> asset-15m, hourly -> asset-60m. */
@@ -77,8 +83,14 @@ export const columnOf = (m: { asset: string; openTime: number; closeTime: number
 export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnReplayResult> {
   const st = new ReplayState();
   const domain = o.domain ?? 'crypto';
-  const horizons = DOMAIN_HORIZONS[domain];
+  const tennisDomain = domain === 'tennis';
+  if (tennisDomain && !o.tennis) throw new Error('replaySnn: the tennis domain needs the tennis config (o.tennis)');
+  const horizons: CryptoHorizon[] = tennisDomain ? [] : DOMAIN_HORIZONS[domain];
   const contracts = domain === 'crypto';
+  // Tennis: a match tracker per event and each match's latest column input / contract query (as the engine keeps them).
+  const trackers = new Map<string, MatchTracker>();
+  const tennisIn = new Map<string, { input: ColumnInput; query: ContractQuery; ts: number }>();
+  const eventOf = (m: RecMarket) => m.event ?? m.ticker.slice(0, m.ticker.lastIndexOf('-'));
   const net = new SnnNetwork(o.params, { whitelist: o.whitelist, model: o.snnModel });
   net.dirLog = [];
   net.training = Boolean(o.training?.eprop);
@@ -149,6 +161,48 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     rankRefs.delete(m.ticker);
   };
 
+  /** One tennis tick: end the matches that settled (label their rows, settle the network, drop the
+   *  column into the template), then every 5 s recompute each live match's inputs exactly as the engine
+   *  does (bot/engine.ts snnTennisObserve). */
+  const tennisStep = (T: number) => {
+    const byEvent = new Map<string, RecMarket[]>();
+    for (const m of st.markets.values()) if (m.kind === 'match' && !m.recordOnly) { const ev = eventOf(m); byEvent.set(ev, [...(byEvent.get(ev) ?? []), m]); }
+    for (const [event, ms] of byEvent) {
+      ms.sort((a, b) => (a.ticker < b.ticker ? -1 : 1));
+      const a = ms[0];
+      const res = st.results.get(a.ticker);
+      if (res || st.now >= Math.min(...ms.map((m) => m.closeTime)) + 90_000) {
+        const ps = pending.get(a.ticker) ?? [];
+        pending.delete(a.ticker);
+        if (res) { for (const r of ps) rows.push({ ...r, y: res === 'yes' ? 1 : 0 }); net.settle(a.ticker, res, st.now); }
+        net.removeColumn(tennisColumnKey(event));
+        trackers.delete(event); tennisIn.delete(event);
+        for (const m of ms) st.markets.delete(m.ticker);
+        continue;
+      }
+      if (T % 5000 !== 0 || st.now < Math.min(...ms.map((m) => m.openTime))) continue;
+      let tr = trackers.get(event);
+      if (!tr) { tr = new MatchTracker(event, o.tennis!); trackers.set(event, tr); }
+      const markets: MatchMarket[] = ms.map((m) => {
+        const b = st.books.get(m.ticker);
+        const usable = b?.isUsable(st.now, 10_000);
+        const trades = st.features.micro.get(m.ticker)?.tradesIn(st.now, o.tennis!.confWindowSec * 1000) ?? [];
+        const tot = trades.reduce((x, y) => x + y.count, 0);
+        return { ticker: m.ticker, title: m.title, position: 0, quote: { bid: usable ? b!.bestBid()?.price : undefined, ask: usable ? b!.bestAsk()?.price : undefined }, book: usable ? b : undefined, flow: tot > 0 ? trades.reduce((x, y) => x + y.signed, 0) / tot : undefined };
+      });
+      const sc = st.tennisScores.get(event);
+      const score = sc && st.now - sc.ts <= 10 * 60_000 ? sc : undefined;
+      tr.observe({ event, now: st.now, startTime: ms.find((m) => m.startTime)?.startTime, markets, closeTime: Math.min(...ms.map((m) => m.closeTime)), score });
+      const v = tennisSnapshotValues(tr, markets, st.now, o.tennis!, { tiebreak: score?.tiebreak, breaksTotal: score?.breaksTotal ?? undefined });
+      if (!v || v.mid === undefined) continue;
+      const key = tennisColumnKey(event), pA = v.mid, dP = Math.min(0.99, Math.max(0.01, v.modelPA ?? pA));
+      tennisIn.set(event, {
+        input: { key, asset: 'TENNIS', price: pA, values: v }, ts: st.now,
+        query: { ticker: a.ticker, mid: pA, column: key, kind: 'match', d: Math.log(dP / (1 - dP)), lifeFrac: 1 - (v.progress ?? 0), spot: 0, sigma: 0, tauSec: 0, lifeSec: 0, eventKey: a.ticker, tag: true },
+      });
+    }
+  };
+
   const assetCache = new Map<string, { ts: number; f: Record<string, number> }>();
   const assetEvery = (o.assetEverySec ?? 5) * 1000;
   let lastLive = -Infinity;
@@ -167,8 +221,9 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     for (const m of [...st.markets.values()]) {
       if (st.now >= m.closeTime + 90_000) { if (!m.recordOnly && m.kind !== 'match') settleMarket(m); st.markets.delete(m.ticker); }
     }
+    if (tennisDomain) tennisStep(T);
     // L0 inputs: the closest-to-the-money Up/Down or "greater" contract per column.
-    const active = [...st.markets.values()].filter((m) => !m.recordOnly && m.kind !== 'match' && st.now >= m.openTime && st.now < m.closeTime);
+    const active = tennisDomain ? [] : [...st.markets.values()].filter((m) => !m.recordOnly && m.kind !== 'match' && st.now >= m.openTime && st.now < m.closeTime);
     const priced = new Map<string, NonNullable<ReturnType<typeof fx>>>();
     for (const m of active) { const x = fx(m, st.now); if (x) priced.set(m.ticker, x); }
     const atm = new Map<string, RecMarket>();
@@ -180,7 +235,8 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     }
     // Every crypto column (asset x 15m/60m/240m) is fed every second from asset-level data, as live.
     const inputs: ColumnInput[] = [];
-    for (const [asset, idx] of [...st.index].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    for (const x of tennisIn.values()) if (st.now - x.ts < 15_000) inputs.push(x.input);
+    if (horizons.length) for (const [asset, idx] of [...st.index].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
       const px = idx.fresh(st.now, 30_000)?.value;
       if (!px) continue;
       let ac = assetCache.get(asset);
@@ -209,6 +265,16 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
       queries.push({ ticker: m.ticker, column: columnOf(m), kind: x.terms.kind, strike: x.terms.strike, cap: x.terms.cap, spot: x.spot.value, sigma: x.vol.sigmaPerSqrtSec, tauSec: x.tauSec, lifeSec: (m.closeTime - m.openTime) / 1000, eventKey: `${m.asset}:${m.closeTime}`, tag: m.closeTime - st.now > noEntry });
     }
     const scores = net.score(queries, T);
+    if (tennisDomain) {
+      const tq = [...tennisIn.values()].filter((x) => st.now - x.ts < 15_000).map((x) => x.query);
+      const day = new Date(T).toISOString().slice(0, 10);
+      for (const sc of net.score(tq, T)) {
+        const q = tq.find((x) => x.ticker === sc.ticker)!;
+        const arr = pending.get(sc.ticker) ?? [];
+        arr.push({ ticker: sc.ticker, eventKey: sc.eventKey, column: sc.column, ts: T, day, kind: 'match', pModel: q.mid!, pSnn: sc.p, mid: q.mid!, surprise: sc.surprise, surprise0: sc.surprise0, G: sc.G, volRatio: 1 });
+        pending.set(sc.ticker, arr);
+      }
+    }
     stepMs.push(performance.now() - t0);
     if (o.backfillDir && T - lastLive > 300_000) {
       const day = new Date(T).toISOString().slice(0, 10);
@@ -268,7 +334,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     if (Number.isFinite(a) && Number.isFinite(b)) ranking.push({ ts: pr.ts, bySalience: a, byEdge: b });
   }
   // Perps never settle: grade the network on its own direction calls (each logged before its label).
-  if (!contracts) rows.push(...directionRows(net.dirLog));
+  if (domain === 'perps') rows.push(...directionRows(net.dirLog));
   return { rows, net, stepMs, frozenSteps, steps, ranking, collected };
 }
 

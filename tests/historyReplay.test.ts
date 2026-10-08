@@ -173,8 +173,16 @@ test('history replay: a build that adds days continues from the saved state (sam
   const more = await buildHistoryReplay({ ...opts, outDir: a, toDay: '2026-03-04' });
   assert.deepEqual([more.written, more.skipped], [2, 2]);
   await buildHistoryReplay({ ...opts, outDir: b, toDay: '2026-03-04' });
-  for (const d of ['2026-03-02', '2026-03-03', '2026-03-04']) {
-    const read = (dir: string) => zlib.gunzipSync(fs.readFileSync(path.join(dir, `md-${d}.jsonl.gz`))).toString();
-    assert.ok(read(a) === read(b), `${d}: identical`);
-  }
+  const read = (dir: string, d: string) => zlib.gunzipSync(fs.readFileSync(path.join(dir, `md-${d}.jsonl.gz`))).toString();
+  for (const d of ['2026-03-02', '2026-03-03', '2026-03-04']) assert.ok(read(a, d) === read(b, d), `${d}: identical`);
+  // Kalshi data arriving later for a day rebuilds it and the day before (whose contracts can close on it),
+  // from the kept end state of the day before that.
+  const open = Date.parse('2026-03-03T23:45:00Z');
+  fs.writeFileSync(path.join(hist, 'kalshi', 'KXBTC15M', '2026-03-04.jsonl'), JSON.stringify({ ticker: 'KXBTC15M-LATE', series: 'KXBTC15M', openTime: open, closeTime: open + 15 * MIN, strike: 60000, cap: null, result: 'yes', candles: [{ ts: open + MIN, bidC: 0.4, askC: 0.43, last: 0.41, volume: 2 }] }) + '\n');
+  const late = await buildHistoryReplay({ ...opts, outDir: a, toDay: '2026-03-04' });
+  assert.deepEqual([late.written, late.skipped], [2, 2], 'days 3 and 4 rebuilt, days 1 and 2 not');
+  const c = path.join(tmpDir(), 'c');
+  await buildHistoryReplay({ ...opts, outDir: c, toDay: '2026-03-04' });
+  for (const d of ['2026-03-03', '2026-03-04']) assert.ok(read(a, d) === read(c, d), `${d}: identical after the late data`);
+  assert.match(read(a, '2026-03-03'), /KXBTC15M-LATE/);
 });

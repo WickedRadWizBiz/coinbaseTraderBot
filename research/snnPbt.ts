@@ -19,6 +19,7 @@
 //   npm run research:snn-pbt -- --recordings data/recordings --domain crypto --stage S5 [--days 7]
 
 import { recordingDayList } from '../bot/marketdata/recordingFiles';
+import type { TennisConfig } from '../bot/config';
 import fs from 'fs';
 import path from 'path';
 import { MetaModel } from '../bot/model/metaModel';
@@ -41,9 +42,10 @@ const H = 3_600_000;
 const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
 
 /** Simulated trades of one replay's rows (see the header). */
-export function snnInteractions(rows: SnnRow[], domain: 'crypto' | 'perps'): Interaction[] {
+export function snnInteractions(rows: SnnRow[], domain: 'crypto' | 'perps' | 'tennis'): Interaction[] {
   const out: Interaction[] = [];
-  if (domain === 'crypto') {
+  // Contracts (crypto) and match markets (tennis): one bet per contract against its mid, settled by the result.
+  if (domain !== 'perps') {
     const seen = new Set<string>();
     for (const r of [...rows].sort((a, b) => a.ts - b.ts)) {
       if (seen.has(r.ticker)) continue;
@@ -63,7 +65,7 @@ export function snnInteractions(rows: SnnRow[], domain: 'crypto' | 'perps'): Int
   return out;
 }
 
-const clusterFor = (domain: 'crypto' | 'perps') => (domain === 'crypto' ? H : 4 * H);
+const clusterFor = (domain: 'crypto' | 'perps' | 'tennis') => (domain === 'perps' ? 4 * H : H);
 
 interface MemberState { cp?: SnnCheckpoint; through: number }
 
@@ -73,14 +75,16 @@ interface Saved {
 }
 
 export interface SnnPbtResult {
-  domain: 'crypto' | 'perps'; stage: Stage; complete: boolean; remaining: number; rounds: number; trials: number;
+  domain: 'crypto' | 'perps' | 'tennis'; stage: Stage; complete: boolean; remaining: number; rounds: number; trials: number;
   elite: { member: number; hyper: Hyper; lineage: number[] };
   dsr: { sharpe: number; sr0: number; probability: number; n: number };
   log: PbtRoundLog[];
 }
 
 export async function runSnnPbt(o: {
-  recordings: string; domain: 'crypto' | 'perps'; stage: Stage; days: string[]; initDays?: number; evalDays?: number;
+  recordings: string; domain: 'crypto' | 'perps' | 'tennis'; stage: Stage; days: string[]; initDays?: number; evalDays?: number;
+  /** The tennis config (required for the tennis domain: the engine's match inputs). */
+  tennis?: TennisConfig;
   model?: MetaModel; seed?: number; stateDir?: string; maxRounds?: number; restartEvery?: number; fresh?: boolean; log?: (m: string) => void;
   /** Members in the population (default 3) and worker threads replaying them at once (default 1). With
    *  workers > 1 each member's replay runs in its own thread; `modelPath` is then the MLP's file. */
@@ -120,13 +124,13 @@ export async function runSnnPbt(o: {
     const params = withSnnHyper(base, hyper);
     const prevDay = o.days[o.days.indexOf(dayOf(a)) - 1];
     if (pool) {
-      const r = await pool.run({ dir: o.recordings, params, domain: o.domain, modelPath: o.modelPath, checkpoint: s.cp, from: a, to, fromDay: prevDay ?? dayOf(a), toDay: dayOf(to - 1), skipModel: true });
+      const r = await pool.run({ dir: o.recordings, params, domain: o.domain, modelPath: o.modelPath, checkpoint: s.cp, from: a, to, fromDay: prevDay ?? dayOf(a), toDay: dayOf(to - 1), skipModel: true, tennis: o.tennis });
       s.cp = r.checkpoint;
       s.through = to;
       return { rows: r.rows };
     }
     // Fitness reads p_snn against the market only: the decision model's p_model is not computed.
-    const r = await replaySnn(o.recordings, { params, domain: o.domain, model: o.model, calendar, checkpoint: s.cp, allowParamChange: true, from: a, to, fromDay: prevDay ?? dayOf(a), toDay: dayOf(to - 1), skipModel: true });
+    const r = await replaySnn(o.recordings, { params, domain: o.domain, model: o.model, calendar, checkpoint: s.cp, allowParamChange: true, from: a, to, fromDay: prevDay ?? dayOf(a), toDay: dayOf(to - 1), skipModel: true, tennis: o.tennis });
     s.cp = r.net.serialize();
     s.through = to;
     return r;
@@ -152,8 +156,8 @@ export async function runSnnPbt(o: {
         const out = await replay(s, h, r.evalFrom, r.evalTo);
         const rows = out.rows.filter((x) => x.ts >= r.evalFrom && x.ts < r.evalTo);
         const xs = snnInteractions(rows, o.domain);
-        // Opportunities: one per contract (crypto bets each contract at most once), one per step (perps).
-        const opportunities = o.domain === 'crypto' ? new Set(rows.map((x) => x.ticker)).size : rows.length;
+        // Opportunities: one per contract (crypto and tennis bet each contract at most once), one per step (perps).
+        const opportunities = o.domain !== 'perps' ? new Set(rows.map((x) => x.ticker)).size : rows.length;
         const report = coverageFloor(fitnessOf(xs, { from: r.evalFrom, to: r.evalTo, clusterMs: clusterFor(o.domain) }), xs.length, opportunities, SNN_MIN_COVERAGE);
         return { report, interactions: independentInteractions(xs, clusterFor(o.domain)) };
       },
@@ -172,7 +176,7 @@ export async function runSnnPbt(o: {
 
 export async function snnPbtMain(argOf: (k: string, d: string) => string = cliArg): Promise<SnnPbtResult> {
   const dir = argOf('recordings', 'data/recordings');
-  const domain = argOf('domain', 'crypto') as 'crypto' | 'perps';
+  const domain = argOf('domain', 'crypto') as 'crypto' | 'perps' | 'tennis';
   const days = recordingDayList(dir);
   const n = Number(argOf('days', '7'));
   const modelPath = argOf('model', '');
@@ -181,6 +185,7 @@ export async function snnPbtMain(argOf: (k: string, d: string) => string = cliAr
     model: modelPath && fs.existsSync(modelPath) ? MetaModel.load(modelPath) : undefined, stateDir: argOf('state', '') || undefined,
     maxRounds: Number(argOf('max-rounds', '0')) || undefined, restartEvery: Number(argOf('restart-every', '0')), fresh: argOf('fresh', '') === 'true', log: (m) => console.log(`[snn-pbt] ${m}`),
     population: Number(argOf('population', '3')), workers: workerCount(), modelPath: modelPath && fs.existsSync(modelPath) ? modelPath : undefined,
+    tennis: domain === 'tennis' ? (await import('../bot/config')).loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' }).tennis : undefined,
   });
   const out = argOf('out', '');
   if (out) { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify(res, null, 1)); }
