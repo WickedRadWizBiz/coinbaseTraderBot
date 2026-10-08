@@ -30,6 +30,11 @@ test('laptop trainer: the server settings it trains with carry no credentials or
   assert.equal(q.TRAIN_WORKERS, '15');
   assert.equal(q.AUTO_TRAIN_SNN_PBT_POPULATION, '15');
   assert.equal(laptopProfile(12, 2).AUTO_TRAIN_SNN_PBT_POPULATION, '3', 'never fewer than the original three');
+  // The networks' tournament and training windows grow with the budget.
+  assert.deepEqual([p.AUTO_TRAIN_SNN_PBT_DAYS, p.AUTO_TRAIN_SNN_TRAIN_DAYS], ['30', '14']);
+  const long = laptopProfile(96);
+  assert.deepEqual([long.AUTO_TRAIN_SNN_PBT_DAYS, long.AUTO_TRAIN_SNN_TRAIN_DAYS], ['144', '96']);
+  assert.equal(laptopProfile(1000).AUTO_TRAIN_SNN_PBT_DAYS, '365');
 });
 
 test('laptop trainer: pull and push stream files through ssh + tar (fake ssh running the command locally)', async () => {

@@ -80,10 +80,12 @@ export async function buildDataset(
 
   for await (const e of readRecordings(dir)) {
     st.apply(e);
+    if (e.tie) continue; // the rest of this instant first
     if (st.now < nextSample) continue;
     nextSample = Math.floor(st.now / 1000 / everySec + 1) * everySec * 1000;
     for (const m of st.markets.values()) {
-      if (m.recordOnly) { if (st.now >= m.closeTime + 90_000) st.markets.delete(m.ticker); continue; } // recorded for research, never priced
+      // Recorded for research, or synthesized from price history (its mid is the fair value itself): no rows.
+      if (m.recordOnly || m.synthetic) { if (st.now >= m.closeTime + 90_000) st.markets.delete(m.ticker); continue; }
       if (st.now >= m.closeTime + 90_000) { flush(m); st.markets.delete(m.ticker); continue; }
       if (st.now < m.openTime || st.now >= m.closeTime) continue;
       const book = st.books.get(m.ticker);
@@ -121,7 +123,7 @@ export async function buildDataset(
       pending.set(m.ticker, arr);
     }
   }
-  for (const m of st.markets.values()) if (!m.recordOnly && st.now >= m.closeTime + 60_000) flush(m);
+  for (const m of st.markets.values()) if (!m.recordOnly && !m.synthetic && st.now >= m.closeTime + 60_000) flush(m);
   return rows;
 }
 

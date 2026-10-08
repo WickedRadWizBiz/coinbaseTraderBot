@@ -96,6 +96,11 @@ export function laptopProfile(remainingHours: number, cores = os.cpus().length):
   const h = (x: number) => String(+Math.max(0.1, x).toFixed(2));
   // One worker thread per core but one; tournaments field about one network per worker (more candidates).
   const workers = Math.max(1, cores - 1);
+  // A replayed day costs a network a few minutes (it steps every market second): a tournament round is one
+  // day per member, all members at once; training is one network going over its window about twice. Both
+  // windows grow with the budget (a 12-hour run: 30 tournament days, 14 training days).
+  const pbtDays = Math.round(Math.min(365, Math.max(30, 1.5 * remainingHours)));
+  const trainDays = Math.round(Math.min(120, Math.max(14, remainingHours)));
   return {
     TRADING_MODE: 'paper', AUTO_TRAIN: 'off', AUTO_TRAIN_CHAMPION: 'true',
     HISTORY_AUTO_UPDATE: 'true', TV_FILL: 'false',
@@ -106,7 +111,7 @@ export function laptopProfile(remainingHours: number, cores = os.cpus().length):
     TA_NET_RETRAIN_DAYS: '0', TA_NET_MAX_ROUNDS_PER_RUN: '400', TA_NET_STRIDE: '1', TA_NET_TRAIN_MONTHS: '24',
     TA_NET_OOS_HOURS: h(Math.min(12, remainingHours / 4)),
     SWEEP_HOURS: h(Math.min(12, remainingHours / 4)), SWEEP_EVERY_DAYS: '1',
-    AUTO_TRAIN_SNN_PBT_EVERY_DAYS: '0', AUTO_TRAIN_SNN_TRAIN_DAYS: '60', AUTO_TRAIN_SNN_PBT_DAYS: '30',
+    AUTO_TRAIN_SNN_PBT_EVERY_DAYS: '0', AUTO_TRAIN_SNN_TRAIN_DAYS: String(trainDays), AUTO_TRAIN_SNN_PBT_DAYS: String(pbtDays),
     TRAIN_WORKERS: String(workers), AUTO_TRAIN_SNN_PBT_POPULATION: String(Math.min(32, Math.max(3, workers))),
   };
 }

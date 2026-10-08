@@ -4,7 +4,7 @@
 // arrival: a candle only counts once its period has ended (no look-ahead). 4h candles are built
 // from complete groups of four 1h candles aligned to 00/04/08/12/16/20 UTC.
 
-import { computeStates, evaluate, TF_MS, type MacroInput, type TaSnapshot, type TfState } from './analyzer';
+import { evaluate, TF_MS, tfState, TIMEFRAMES, type MacroInput, type TaSnapshot, type TfState } from './analyzer';
 import type { Candle } from './indicators';
 import type { Timeframe } from './knowledge';
 
@@ -18,6 +18,10 @@ export class CandleSet {
   readonly bars: Partial<Record<Timeframe, Candle[]>> = {};
   private version = 0;
   private states?: { version: number; tf: Partial<Record<Timeframe, TfState>> };
+  /** Per timeframe: a version bumped when its bars change, and its indicator state at that version
+   *  (a new 1-minute bar recomputes the 1-minute state only, not the 1-day one). */
+  private readonly tfVersion: Partial<Record<Timeframe, number>> = {};
+  private readonly tfStates = new Map<Timeframe, { version: number; state: TfState | undefined }>();
   private readonly snaps = new Map<string, TaSnapshot>();
 
   constructor(readonly asset: string) {}
@@ -40,7 +44,8 @@ export class CandleSet {
     if (!fresh.length) return [];
     const merged = [...byTs.values()].sort((a, b) => a.ts - b.ts).slice(-MAX_BARS);
     this.bars[tf] = merged;
-    if (tf === '1h') this.bars['4h'] = aggregate(merged, TF_MS['4h']);
+    this.tfVersion[tf] = (this.tfVersion[tf] ?? 0) + 1;
+    if (tf === '1h') { this.bars['4h'] = aggregate(merged, TF_MS['4h']); this.tfVersion['4h'] = (this.tfVersion['4h'] ?? 0) + 1; }
     this.version++;
     return fresh;
   }
@@ -53,7 +58,19 @@ export class CandleSet {
 
   /** TA snapshot (indicators cached per candle update; rules re-evaluated when the macro input moves). */
   snapshot(now: number, macro?: MacroInput): TaSnapshot {
-    if (!this.states || this.states.version !== this.version) this.states = { version: this.version, tf: computeStates(this.bars) };
+    if (!this.states || this.states.version !== this.version) {
+      // Same as computeStates(this.bars), recomputing only the timeframes whose bars changed.
+      const tf: Partial<Record<Timeframe, TfState>> = {};
+      for (const t of TIMEFRAMES) {
+        const cs = this.bars[t];
+        if (!cs?.length) continue;
+        const v = this.tfVersion[t] ?? 0;
+        let c = this.tfStates.get(t);
+        if (!c || c.version !== v) { c = { version: v, state: tfState(t, cs) }; this.tfStates.set(t, c); }
+        if (c.state) tf[t] = c.state;
+      }
+      this.states = { version: this.version, tf };
+    }
     const r1 = (x?: number) => (x === undefined || !Number.isFinite(x) ? 'na' : x.toFixed(1));
     const key = `${this.version}|${r1(macro?.usdtdChg)}|${r1(macro?.btcdChg)}|${macro?.ctx ?? ''}`;
     // A few macro variants are in use at once (features with the dominance inputs, the engine's rule

@@ -120,12 +120,13 @@ export async function runSnnPbt(o: {
     const params = withSnnHyper(base, hyper);
     const prevDay = o.days[o.days.indexOf(dayOf(a)) - 1];
     if (pool) {
-      const r = await pool.run({ dir: o.recordings, params, domain: o.domain, modelPath: o.modelPath, checkpoint: s.cp, from: a, to, fromDay: prevDay ?? dayOf(a), toDay: dayOf(to - 1) });
+      const r = await pool.run({ dir: o.recordings, params, domain: o.domain, modelPath: o.modelPath, checkpoint: s.cp, from: a, to, fromDay: prevDay ?? dayOf(a), toDay: dayOf(to - 1), skipModel: true });
       s.cp = r.checkpoint;
       s.through = to;
       return { rows: r.rows };
     }
-    const r = await replaySnn(o.recordings, { params, domain: o.domain, model: o.model, calendar, checkpoint: s.cp, allowParamChange: true, from: a, to, fromDay: prevDay ?? dayOf(a), toDay: dayOf(to - 1) });
+    // Fitness reads p_snn against the market only: the decision model's p_model is not computed.
+    const r = await replaySnn(o.recordings, { params, domain: o.domain, model: o.model, calendar, checkpoint: s.cp, allowParamChange: true, from: a, to, fromDay: prevDay ?? dayOf(a), toDay: dayOf(to - 1), skipModel: true });
     s.cp = r.net.serialize();
     s.through = to;
     return r;

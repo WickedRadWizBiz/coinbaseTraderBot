@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 import { test } from 'node:test';
-import { aggregate, barPath, buildHistoryReplay } from '../research/history/historyReplay';
-import { readRecordings, ReplayState } from '../research/replay';
+import { aggregate, barPath, buildHistoryReplay, gkVariance, niceStep, normals, synthQuote, windowAverage } from '../research/history/historyReplay';
+import { readRecordings, ReplayState, type RecEvent } from '../research/replay';
+import { replaySnn } from '../research/snnReplay';
+import { snnInteractions } from '../research/snnPbt';
 import { buildPerpDataset } from '../research/trainPerpModel';
+import { DEFAULT_SNN, domainParams, stageFlags, withFlags } from '../bot/snn/params';
 import { tmpDir } from './helpers';
 
 const D0 = Date.parse('2026-03-01T00:00:00Z');
@@ -39,9 +43,45 @@ function writeHistory(dir: string) {
   fs.writeFileSync(path.join(dir, 'kalshi', 'KXBTC15M', '2026-03-01.jsonl'), ms.join('\n') + '\n');
 }
 
-test('history replay: bar paths and aggregation', () => {
-  assert.deepEqual(barPath({ o: 10, h: 12, l: 9, c: 11 }).map((p) => p[1]), [10, 9, 12, 11], 'up bar: low before high');
-  assert.deepEqual(barPath({ o: 10, h: 12, l: 9, c: 9.5 }).map((p) => p[1]), [10, 12, 9, 9.5]);
+test('history replay: bar paths, 60 s averages, quotes and aggregation', () => {
+  // Without noise the bridge is the straight (log) line from the open toward the close at +60 s.
+  assert.deepEqual(barPath({ o: 100, c: 100 }, 0, [0, 0, 0]).map((p) => p[1]), [100, 100, 100, 100]);
+  const line = barPath({ o: 100, c: 110 }, 0, [0, 0, 0]);
+  assert.deepEqual(line.map((p) => p[0]), [0, 15_000, 30_000, 45_000]);
+  line.forEach(([t, v]) => assert.ok(Math.abs(v - 100 * Math.pow(1.1, t / 60_000)) < 1e-9));
+  // On a random walk the bridge's 15 s returns add up to the real variance, and the +15 s print knows
+  // the close exactly as well as a real price would (correlation sqrt(15 / 60) = 0.5), no better.
+  const sigma = 1e-4;
+  let seed = 3, qv = 0, gk = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+  const N = 4000;
+  for (let i = 0; i < N; i++) {
+    const z = normals(seed++, 60);
+    let x = 0, h = 0, l = 0;
+    for (const w of z) { x += sigma * w; h = Math.max(h, x); l = Math.min(l, x); }
+    const bar = { o: 1, h: Math.exp(h), l: Math.exp(l), c: Math.exp(x) };
+    gk += gkVariance(bar);
+    const p = barPath(bar, sigma * sigma, normals(1e6 + i, 3)).map((q) => Math.log(q[1]));
+    p.push(x);
+    for (let k = 1; k < p.length; k++) qv += (p[k] - p[k - 1]) ** 2;
+    const a = p[1], b = x;
+    sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b;
+  }
+  const true60 = 60 * sigma * sigma;
+  assert.ok(Math.abs(qv / N / true60 - 1) < 0.06, `bridge variance ${qv / N / true60}`);
+  assert.ok(gk / N / true60 > 0.75 && gk / N / true60 < 1.05, `Garman-Klass ${gk / N / true60}`);
+  const corr = (N * sxy - sx * sy) / Math.sqrt((N * sxx - sx * sx) * (N * syy - sy * sy));
+  assert.ok(Math.abs(corr - 0.5) < 0.05, `+15 s print vs close: correlation ${corr}`);
+  // Kalshi's 60 s average: one sample a second, each the last print at or before it.
+  const prints: Array<[number, number]> = [[0, 10], [15_000, 11], [30_000, 12], [45_000, 13], [60_000, 14]];
+  assert.ok(Math.abs(windowAverage(prints, 60_000)!.avg - (14 * 10 + 15 * 11 + 15 * 12 + 15 * 13 + 14) / 60) < 1e-12);
+  assert.deepEqual(windowAverage(prints, 60_000, 30_000), { avg: (14 * 10 + 15 * 11 + 12) / 30, n: 30 }, 'observed so far');
+  assert.equal(windowAverage([[0, 10]], 60_000), undefined, 'a print older than 20 s does not count');
+  assert.deepEqual(synthQuote(0.5), [0.49, 0.51]);
+  assert.deepEqual(synthQuote(0.995), [0.98, 0.99]);
+  assert.deepEqual(synthQuote(0.0001), [0.01, 0.02]);
+  assert.equal(niceStep(250), 250);
+  assert.equal(niceStep(160), 200);
+  assert.equal(niceStep(0.0005), 0.0005);
   const bars = Array.from({ length: 12 }, (_, i) => ({ ts: D0 + i * MIN, o: i, h: i + 1, l: i - 1, c: i + 0.5, v: 1 }));
   const five = aggregate(bars, 5 * MIN);
   assert.equal(five.length, 2, 'the incomplete third group is dropped');
@@ -58,18 +98,41 @@ test('history replay: day files the replay reads like live recordings; the perps
   assert.equal(again.skipped, 4, 'built days are not rebuilt');
 
   const st = new ReplayState();
-  let last = 0, perps = 0, results = 0, books = 0;
-  let firstPerp: any;
+  let last = 0, perps = 0, results = 0, books = 0, aliveOk = 0;
+  let firstPerp: any, prev: RecEvent | undefined;
+  const prints: Array<[number, number]> = [];
+  const synth = new Map<string, { strike: number; openTime: number; closeTime: number; kind: string; open?: number }>();
+  const synthResults: Array<{ ticker: string; result: string }> = [];
   for await (const e of readRecordings(out)) {
     assert.ok(e.t >= last, 'time order across days');
+    if (prev) assert.equal(Boolean(prev.tie), prev.t === e.t, 'tie: another record of the same instant follows');
+    prev = e;
     last = e.t;
     st.apply(e);
     if (e.k === 'perp') { perps++; firstPerp ??= e; }
-    if (e.k === 'result') results++;
-    if (e.k === 'book') books++;
+    if (e.k === 'result' && !e.synth) results++;
+    if (e.k === 'book' && !e.ticker.includes('-SYN')) books++;
+    if (e.k === 'index' && e.asset === 'BTC') prints.push([e.t, e.value]);
+    if (e.k === 'market' && e.synth) synth.set(e.ticker, { strike: e.strike, openTime: e.openTime, closeTime: e.closeTime, kind: e.kind });
+    if (e.k === 'book' && synth.has(e.ticker) && synth.get(e.ticker)!.open === undefined) synth.get(e.ticker)!.open = (e.bids[0].price + e.asks[0].price) / 2;
+    if (e.k === 'result' && e.synth) synthResults.push({ ticker: e.ticker, result: e.result });
+    if (e.k === 'alive' && st.books.get(e.tickers[0])?.isUsable(e.t, 5000)) aliveOk++;
   }
   assert.equal(results, 24);
   assert.ok(books >= 24 * 14);
+  assert.ok(aliveOk > 24 * 14 * 2, 'real minute quotes stand at the prints in between');
+  // Synthetic contracts wherever Kalshi's history has none: every quarter hour and hourly ladders, settled by the replayed index.
+  const m15 = [...synth.values()].filter((m) => m.kind === 'updown'), ladder = [...synth.values()].filter((m) => m.kind === 'greater');
+  assert.equal(m15.filter((m) => m.openTime < D0 + 86_400_000).length, 96 - 24, 'day 1: the 15-minute windows Kalshi\'s history lacks');
+  assert.ok(m15.length >= 96 * 4 - 24 - 1);
+  assert.ok(ladder.length >= 4 * 24 * 4 - 4, `hourly ladder contracts ${ladder.length}`);
+  for (const m of m15) assert.ok(Math.abs(m.strike - windowAverage(prints, m.openTime)!.avg) < 1e-6 * m.strike, 'strike: the 60 s average before the open');
+  assert.ok(m15.every((m) => m.open !== undefined && m.open > 0.3 && m.open < 0.7), 'an Up/Down opens near 50c');
+  assert.ok(synthResults.length > 700, `synthetic results ${synthResults.length}`);
+  for (const r of synthResults) {
+    const m = synth.get(r.ticker)!;
+    assert.equal(r.result, windowAverage(prints, m.closeTime)!.avg >= m.strike ? 'yes' : 'no', 'settled by the real price path');
+  }
   assert.equal(firstPerp.ticker, 'KXBTCPERP');
   assert.ok(firstPerp.ask > firstPerp.bid && firstPerp.bid % 0.5 === 0, 'quoted at the spread, on the tick');
   assert.equal(firstPerp.fundingRate, 0.0001);
@@ -83,4 +146,35 @@ test('history replay: day files the replay reads like live recordings; the perps
   const rows = await buildPerpDataset(out, { everySec: 600, horizonMin: 60 });
   assert.ok(rows.length > 300, `perp rows ${rows.length}`);
   assert.ok(rows.every((x) => Number.isFinite(x.y)));
+});
+
+test('history replay: the crypto network trades the synthetic contracts', async () => {
+  const hist = tmpDir(), out = path.join(tmpDir(), 'replay');
+  writeHistory(hist);
+  await buildHistoryReplay({ historyDir: hist, outDir: out, assets: ['BTC'], fromDay: '2026-03-01', toDay: '2026-03-02', log: () => {} });
+  const params = domainParams('crypto', withFlags({ ...DEFAULT_SNN }, stageFlags('S5')));
+  const from = D0 + 86_400_000 + 6 * 3_600_000;
+  const r = await replaySnn(out, { params, domain: 'crypto', from, to: from + 2.5 * 3_600_000, fromDay: '2026-03-01', toDay: '2026-03-02', skipModel: true });
+  const kinds = new Set(r.rows.map((x) => x.kind));
+  assert.ok(kinds.has('updown') && kinds.has('greater'), `kinds ${[...kinds]}`);
+  assert.ok(new Set(r.rows.map((x) => x.ticker)).size >= 8 + 4 * 2, 'every 15-minute and hourly contract of the window is scored');
+  assert.ok(r.rows.every((x) => x.mid > 0 && x.mid < 1 && (x.y === 0 || x.y === 1)));
+  assert.ok(r.rows.every((x) => x.pModel > 0 && x.pModel < 1), 'skipModel: p_model is the fair value');
+  // The tournament's fitness: at most one bet per contract, each settled by the replayed price.
+  const bets = snnInteractions(r.rows, 'crypto');
+  assert.ok(bets.length <= new Set(r.rows.map((x) => x.ticker)).size);
+});
+
+test('history replay: a build that adds days continues from the saved state (same files as one build)', async () => {
+  const hist = tmpDir(), a = path.join(tmpDir(), 'a'), b = path.join(tmpDir(), 'b');
+  writeHistory(hist);
+  const opts = { historyDir: hist, assets: ['BTC'], fromDay: '2026-03-01', log: () => {} };
+  await buildHistoryReplay({ ...opts, outDir: a, toDay: '2026-03-02' });
+  const more = await buildHistoryReplay({ ...opts, outDir: a, toDay: '2026-03-04' });
+  assert.deepEqual([more.written, more.skipped], [2, 2]);
+  await buildHistoryReplay({ ...opts, outDir: b, toDay: '2026-03-04' });
+  for (const d of ['2026-03-02', '2026-03-03', '2026-03-04']) {
+    const read = (dir: string) => zlib.gunzipSync(fs.readFileSync(path.join(dir, `md-${d}.jsonl.gz`))).toString();
+    assert.ok(read(a) === read(b), `${d}: identical`);
+  }
 });

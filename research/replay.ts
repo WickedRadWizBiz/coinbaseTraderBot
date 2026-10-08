@@ -33,6 +33,10 @@ export interface RecMarket {
   startTime?: number;
   /** Recorded for research only (RECORD_SERIES): not priced or traded by the bot. */
   recordOnly?: boolean;
+  /** Built from price history by research/history/historyReplay.ts where Kalshi lists no real contract:
+   *  quoted at a no-skill fair value. The networks learn direction on it; anything that grades the bot's
+   *  pricing against the market (strategy backtest, decision-model dataset) skips it. */
+  synthetic?: boolean;
 }
 
 export interface RecEvent { t: number; k: string; [key: string]: any }
@@ -45,26 +49,37 @@ async function* lines(file: string): AsyncGenerator<RecEvent> {
   }
 }
 
+/** k-way merge by time; ties go to the first file, then the others in order. */
+async function* mergeByTime(files: string[]): AsyncGenerator<RecEvent> {
+  const its = files.map((x) => lines(x));
+  const heads = await Promise.all(its.map((it) => it.next()));
+  for (;;) {
+    let best = -1;
+    for (let i = 0; i < heads.length; i++) if (!heads[i].done && (best < 0 || (heads[i].value as RecEvent).t < (heads[best].value as RecEvent).t)) best = i;
+    if (best < 0) break;
+    yield heads[best].value as RecEvent;
+    heads[best] = await its[best].next();
+  }
+}
+
 /** Recordings in time order. `sidecar` (default: env SNN_BACKFILL_DIR) is one or more directories
  *  (path.delimiter-separated, one per SNN domain) of snnfill-YYYY-MM-DD.jsonl files; each day's
- *  sidecar events (prequential SNN outputs) are merged in by time. */
+ *  sidecar events (prequential SNN outputs) are merged in by time.
+ *  An event followed by another with the same timestamp carries `tie: true`: a replay applies a whole
+ *  instant before acting on it (the history replay writes each instant's prices and books as one burst
+ *  of same-time records; in live recordings exact ties are rare). */
 export async function* readRecordings(dir: string, sidecar = process.env.SNN_BACKFILL_DIR, fromDay?: string, toDay?: string): AsyncGenerator<RecEvent> {
   const files = recordingFiles(dir).filter((f) => (!fromDay || f.day >= fromDay) && (!toDay || f.day <= toDay));
   const sides = (sidecar ?? '').split(path.delimiter).filter(Boolean);
+  let prev: RecEvent | undefined;
   for (const f of files) {
     const extra = sides.map((d) => path.join(d, `snnfill-${f.day}.jsonl`)).filter((x) => fs.existsSync(x));
-    if (!extra.length) { yield* lines(f.file); continue; }
-    // k-way merge by time; ties go to the recording first, then the sidecars in order.
-    const its = [f.file, ...extra].map((x) => lines(x));
-    const heads = await Promise.all(its.map((it) => it.next()));
-    for (;;) {
-      let best = -1;
-      for (let i = 0; i < heads.length; i++) if (!heads[i].done && (best < 0 || (heads[i].value as RecEvent).t < (heads[best].value as RecEvent).t)) best = i;
-      if (best < 0) break;
-      yield heads[best].value as RecEvent;
-      heads[best] = await its[best].next();
+    for await (const e of extra.length ? mergeByTime([f.file, ...extra]) : lines(f.file)) {
+      if (prev) { if (e.t === prev.t) prev.tie = true; yield prev; }
+      prev = e;
     }
   }
+  if (prev) yield prev;
 }
 
 /** The history store's index series (BTCDOM, BTC.D, USDT.D) for the TA network's context in replays:
@@ -103,7 +118,7 @@ export class ReplayState {
         this.markets.set(e.ticker, {
           ticker: e.ticker, series: e.series, asset: e.asset, openTime: e.openTime, closeTime: e.closeTime, strike: e.strike ?? undefined, cap: e.cap ?? undefined,
           kind: e.kind ?? contractKind(e.series ?? ''), event: e.event ?? undefined, tickSize: e.tickSize ?? 0.01,
-          title: e.title ?? undefined, startTime: e.startTime ?? undefined, recordOnly: e.recordOnly ? true : undefined,
+          title: e.title ?? undefined, startTime: e.startTime ?? undefined, recordOnly: e.recordOnly ? true : undefined, synthetic: e.synth ? true : undefined,
         });
         break;
       case 'index': {
@@ -137,6 +152,10 @@ export class ReplayState {
       }
       case 'trade':
         this.features.onTrade(e.ticker, e.count, e.takerSide, e.ts ?? e.t);
+        break;
+      case 'alive':
+        // History replay: Kalshi's minute quotes still stand at the prints in between.
+        for (const t of (e.tickers ?? []) as string[]) this.books.get(t)?.markAlive(e.t);
         break;
       case 'candles':
         this.features.onCandles(e.asset, e.tf, e.rows ?? [], e.ts ?? e.t);

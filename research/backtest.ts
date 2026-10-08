@@ -195,11 +195,13 @@ export async function runBacktest(
     st.apply(e);
     if (!firstTs) firstTs = st.now;
     if (e.k === 'trade') ex.onTrade(e.ticker, e.price, e.count, e.takerSide, e.ts);
+    if (e.tie) continue; // the rest of this instant first
     if (st.now - lastTick < 1000) continue;
     lastTick = st.now;
 
     for (const m of [...st.markets.values()]) {
-      if (m.recordOnly) { if (st.now >= m.closeTime + 90_000) st.markets.delete(m.ticker); continue; } // recorded for research, never traded
+      // Recorded for research, or synthesized from price history (quoted at the model's own fair value): never traded.
+      if (m.recordOnly || m.synthetic) { if (st.now >= m.closeTime + 90_000) st.markets.delete(m.ticker); continue; }
       closeOf.set(m.ticker, m.closeTime);
       // Settle closed markets.
       if (st.now >= m.closeTime + 60_000) {

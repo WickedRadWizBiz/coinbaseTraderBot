@@ -10,7 +10,9 @@
 //                    every crypto asset Kalshi lists (HISTORY_AUTO_UPDATE; needs internet)
 //   0a'. history_replay  (HISTORY_REPLAY) years of 1-minute spot / perp history, funding and Kalshi's settled
 //                    contracts written as recordings (research/history/historyReplay.ts) that the recording-
-//                    based steps replay like live data; the perps step trains on them when present
+//                    based steps replay like live data, with synthetic 15-minute / hourly contracts built
+//                    from the price path where Kalshi's history has none; the perps step, both networks'
+//                    tournaments and training, and the sweeps (on the days with real contracts) use them
 //   0b. ta_net       TA network on years of hourly history (bot/ta/taNet.ts): a tournament of three
 //                    networks initialises it, later runs continue the tournament as new months
 //                    arrive (every TA_NET_RETRAIN_DAYS) -> promote ta_net.json; its forecasts are
@@ -23,9 +25,11 @@
 //                    (research/setupSnnStudy.ts); writes setup_snn_gate.json, on only once proven
 //   0f. sweep        sweep optimizer proposals (setups per side, the volatility trail, kalshi, the whole bot)
 //   1. snn           per replayable network (crypto: 15m/1h with contracts; perps: 1h/4h, graded on
-//                    direction calls): ablation when due -> population tournament of three identical
-//                    networks (snnPbt.ts; the elite's knobs) -> train at the best accepted stage ->
-//                    promote snn_<domain>.json -> prequential backfill (work/snnfill/<domain>).
+//                    direction calls): ablation when due -> population tournament of identical networks
+//                    (snnPbt.ts; the elite's knobs) -> train at the best accepted stage -> promote
+//                    snn_<domain>.json -> prequential backfill (work/snnfill/<domain>). Tournament and
+//                    training on the history replay when it has the days; the crypto network's ablation
+//                    (its gate for live use) always on the bot's recordings, against real Kalshi prices.
 //                    The tennis network learns live only (no recorded score feed to replay).
 //   2. vol_model     tree-based volatility forecast (sigma multiplier for fair value) -> promote
 //   3. dataset       research:dataset (with the crypto network's logged/backfilled outputs)
@@ -78,12 +82,12 @@ import { sweepMain } from './sweep';
 import { collectFiles, importFile } from './history/importCsv';
 import { downloadKalshiHistory } from './history/kalshiHistory';
 import { tvFill } from './history/tradingview';
-import { recordingDayList, recordingsUsage } from '../bot/marketdata/recordingFiles';
+import { linkDays, recordingDayList, recordingsUsage } from '../bot/marketdata/recordingFiles';
 import { readJournalTrades } from '../bot/setups/journal';
 import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
 import { exportTaNetOos, oosDir } from './taNetOos';
 import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, type BinanceMarket } from './history/binanceVision';
-import { buildHistoryReplay, perpSpecsFromRecordings } from './history/historyReplay';
+import { buildHistoryReplay, perpSpecsFromRecordings, replayKalshiDays } from './history/historyReplay';
 import { workerCount } from './workerPool';
 import { compareIndexSources } from '../bot/marketdata/historyStore';
 import { backfillCoinbase } from './history/coinbaseBackfill';
@@ -437,9 +441,17 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     for (const target of A.sweepTargets) {
       const last = state.sweptAt[target];
       const due = !last || now - last >= A.sweepEveryDays * 86_400_000;
-      // The whole bot and the Kalshi settings are swept over the history replay when it has the days (a proposal, never applied).
-      const sweepSrc = (target === 'bot' || target === 'kalshi') && T.historyReplay && replayDays().length >= 20 ? replayDir : rec;
+      // The whole bot and the Kalshi settings are swept over the history replay's days that hold Kalshi's
+      // real contracts, when there are enough of them (the strategy never trades the synthetic ones: they are
+      // quoted at its own fair value). A proposal, never applied.
+      const kDays = (target === 'bot' || target === 'kalshi') && T.historyReplay ? replayKalshiDays(replayDir) : [];
       await run(`sweep-${target}`, async () => {
+        let sweepSrc = rec;
+        if (kDays.length >= 20 && kDays.length > days.length) {
+          sweepSrc = path.join(work, 'sweep-replay');
+          fs.rmSync(sweepSrc, { recursive: true, force: true });
+          linkDays(kDays.map((d) => ({ day: d, file: path.join(replayDir, `md-${d}.jsonl.gz`) })), sweepSrc);
+        }
         const out = path.join(A.dir, 'sweeps', `${target}.json`);
         if (fs.existsSync(out)) fs.renameSync(out, out.replace(/\.json$/, `.${new Date(now).toISOString().slice(0, 10)}.json`));
         let r;
@@ -450,7 +462,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
           throw e;
         }
         state.sweptAt![target] = now;
-        return { proposal: out, plateau: r.plateau, passes: r.passes, evaluations: r.evaluations, start: r.start, end: r.end, changed: r.steps.filter((x) => x.accepted).map((x) => `${x.param}: ${x.from} -> ${x.to}`) };
+        return { proposal: out, data: sweepSrc === rec ? 'recordings' : `history replay: ${kDays.length} day(s) with real Kalshi contracts`, plateau: r.plateau, passes: r.passes, evaluations: r.evaluations, start: r.start, end: r.end, changed: r.steps.filter((x) => x.accepted).map((x) => `${x.param}: ${x.from} -> ${x.to}`) };
       }, due ? undefined : `swept ${((now - last!) / 86_400_000).toFixed(1)} day(s) ago (SWEEP_EVERY_DAYS=${A.sweepEveryDays})`);
     }
   }
@@ -468,21 +480,24 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const due = o.forceAblation || !ds.lastAblation || (A.ablationEveryDays > 0 && now - ds.lastAblation >= A.ablationEveryDays * 86_400_000);
       let stage: Stage = A.snnStage === 'auto' ? (ds.stage ?? base) : A.snnStage;
       let stageAccepted = false;
-      // The perps network learns on years of replayed history when the replay exists (its inputs are
-      // prices, candles and perp quotes, which the replay reproduces); the crypto network needs real
-      // second-by-second Kalshi books and stays on the bot's recordings. The backfill is always on the
-      // recordings (its outputs feed the models trained on them).
-      const src = domain === 'perps' && T.historyReplay && replayDays().length >= A.snnPbtDays + A.snnPbtInitDays ? replayDir : rec;
+      // Both networks' tournaments and training run on years of replayed history when the replay exists:
+      // perps on its prices, candles and perp quotes; crypto on its 15-minute / hourly contracts (Kalshi's
+      // real ones where its history reaches, synthetic ones built from the price path elsewhere, settled by
+      // the real price). The crypto network's ablation, the gate for live use, stays on the bot's
+      // recordings: it must beat real Kalshi prices. The backfill is always on the recordings (its outputs
+      // feed the models trained on them).
+      const src = T.historyReplay && replayDays().length >= A.snnPbtDays + A.snnPbtInitDays ? replayDir : rec;
       const srcDays = src === rec ? days : replayDays();
       const lastSrc = (n: number) => srcDays.slice(-n);
       const srcGate = src === rec ? tooFew : undefined;
-      const abDays = lastSrc(A.ablationDays);
+      const abSrc = domain === 'crypto' ? rec : src;
+      const abDays = (abSrc === rec ? days : replayDays()).slice(-A.ablationDays);
       // The crypto network is judged on settled contracts against the MLP; perps on its own direction calls.
       const verdicts = await run(`snn-${domain}-ablation`, async () => {
-        const v = await snnAblationMain(argsOf({ recordings: src, domain, model: domain === 'crypto' ? mlpPath() : undefined, from: abDays[0], out: path.join(work, `snn_${domain}_ablation.json`), only: o.ablationOnly }));
+        const v = await snnAblationMain(argsOf({ recordings: abSrc, domain, model: domain === 'crypto' ? mlpPath() : undefined, from: abDays[0], out: path.join(work, `snn_${domain}_ablation.json`), only: o.ablationOnly }));
         ds.lastAblation = now;
         return v;
-      }, srcGate ?? (due ? undefined : 'not due (ablated recently)')) as Verdict[] | undefined;
+      }, (abSrc === rec ? tooFew : undefined) ?? (due ? undefined : 'not due (ablated recently)')) as Verdict[] | undefined;
       if (verdicts) {
         const k = acceptedChain(verdicts);
         if (A.snnStage === 'auto') stage = k > 0 ? STAGES[k] : base;
@@ -513,7 +528,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         const trainSpan = span.slice(0, span.length - nEval), evalSpan = span.slice(span.length - nEval);
         const cand = path.join(work, `snn_${domain}.candidate.json`);
         const r = await trainSnnMain(argsOf({
-          recordings: src, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined, hyper: hyper ? JSON.stringify(hyper) : undefined,
+          recordings: src, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined, hyper: hyper ? JSON.stringify(hyper) : undefined, 'skip-model': src === rec ? undefined : 'true',
           from: trainSpan[0], to: evalSpan[0] ?? undefined,
           'eval-from': evalSpan[0], 'eval-to': evalSpan.length ? nextDay(evalSpan[evalSpan.length - 1]) : undefined,
         }));

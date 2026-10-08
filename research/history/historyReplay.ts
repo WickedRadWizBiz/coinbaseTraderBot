@@ -1,26 +1,44 @@
 // History replay: years of exchange history turned into recording files (md-YYYY-MM-DD.jsonl.gz) that
 // research/replay.ts reads exactly like the bot's own live recordings. Every recording-based step (the
-// perps model, the SNN tournaments, the whole-bot replay and sweep, the Kalshi dataset) can then "trade"
-// years of history through the same code paths it uses on live data, without knowing the difference.
+// perps model, the SNN tournaments, the whole-bot replay and sweep) can then "trade" years of history
+// through the same code paths it uses on live data, without knowing the difference.
 //
 // From the candle store (research/history/*):
-//   index / spot   1-minute Binance spot bars (source binance-1m) as four prints a minute: open, the first
-//                  extreme, the second, close (at +0 / +15 / +30 / +45 s; low before high on an up bar).
-//                  The index prints are scaled by the Binance -> Kalshi basis: each 15-minute contract's
+//   index / spot   1-minute Binance spot bars (source binance-1m) as four prints a minute (+0 / +15 / +30 /
+//                  +45 s): the bar's open, then a Brownian bridge toward its close at +60 s (where the next
+//                  bar's open takes over), spread by the recent Garman-Klass volatility of the bars. Each
+//                  print says as much about the coming close as a real price at that moment would, and the
+//                  15 s returns add up to the bars' real variance. (Printing the bar's extremes instead
+//                  told the replay the bar's direction 30 s early and doubled the measured volatility.)
+//                  The index prints are scaled by the Binance -> Kalshi basis: each real 15-minute contract's
 //                  strike is Kalshi's own 60 s index average, so strike / Binance price at its open is a
 //                  causal basis reading (it applies from that open on, forward-filled).
 //   candles        the live candle feed's timeframes (1m, 5m, 15m, 1h, 1d): each day file starts with the
 //                  last 300 closed bars of each, then every bar as it closes (so any day can start a replay)
-//   perp           1-minute Binance USD-M perpetual bars (binance-um) as the same four prints, quoted at
+//   perp           1-minute Binance USD-M perpetual bars (binance-um) along the same bridge draws, quoted at
 //                  the spread and contract specs the bot's own perp recordings show (defaults otherwise),
 //                  with Binance's last settled funding rate (binance-funding) and the next funding time
-//   market / book / trade / result
+//   market / book / trade / result / alive
 //                  Kalshi's settled contracts (history/kalshi, 1-minute YES bid / ask candles): the market
-//                  a minute before it opens, a book snapshot each minute (nominal 100 contracts a side), the
-//                  minute's volume as one trade at its last price, the result one second after the close
+//                  a minute before it opens, a book snapshot each minute (nominal 100 contracts a side),
+//                  marked alive at the prints in between while it is near the money, the minute's volume as
+//                  one trade at its last price, the result one second after the close
+//   synthetic contracts (synth: 1)
+//                  Wherever Kalshi's history has no contract, the same contracts built from the price path:
+//                  a 15-minute Up/Down every quarter hour and an hourly "above" ladder (4 strikes around the
+//                  price at the hour), per asset. Kalshi's rules: the strike of an Up/Down is the index's
+//                  60 s average before the open, the result is the 60 s average before the close against
+//                  the strike. Quoted at every print around a no-skill fair value (a random walk at the bars'
+//                  recent volatility, Student-t tails) with a 1-2 cent spread: a network beats these quotes
+//                  only by calling the direction better than a coin flip on a random walk. The networks learn
+//                  on them; the strategy backtest and the decision model's dataset skip them (they would be
+//                  grading the bot's pricing against itself).
 //
-// What it cannot reproduce: second-by-second paths inside a minute, order-book depth, the side of each
-// trade. Fill simulation on replayed contracts is therefore coarse; the perps model and the networks'
+// Every record of an instant shares its timestamp; replays apply the whole instant before acting on it
+// (research/replay.ts readRecordings: `tie`).
+//
+// What it cannot reproduce: real second-by-second paths inside a minute, order-book depth, the side of
+// each trade. Fill simulation on replayed contracts is therefore coarse; the perps model and the networks'
 // direction calls depend on prices, not on those.
 //
 //   npm run history:replay -- --history data/history --out data/history-replay --assets BTC,ETH --from 2024-01-01
@@ -29,14 +47,23 @@ import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
 import zlib from 'zlib';
-import { contractKind } from '../../bot/model/fairValue';
+import { contractKind, priceContract, SETTLEMENT_AVG_SEC } from '../../bot/model/fairValue';
 import { loadSeries } from './candles';
 import type { Candle } from '../../bot/ta/indicators';
 
-export const REPLAY_VERSION = 1;
-const MIN = 60_000, DAY = 86_400_000;
-const TFS: Array<{ tf: string; ms: number }> = [{ tf: '1m', ms: MIN }, { tf: '5m', ms: 5 * MIN }, { tf: '15m', ms: 15 * MIN }, { tf: '1h', ms: 60 * MIN }, { tf: '1d', ms: DAY }];
+export const REPLAY_VERSION = 2;
+const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
+const TFS: Array<{ tf: string; ms: number }> = [{ tf: '1m', ms: MIN }, { tf: '5m', ms: 5 * MIN }, { tf: '15m', ms: 15 * MIN }, { tf: '1h', ms: HOUR }, { tf: '1d', ms: DAY }];
 const BACKFILL = 300;
+/** Print offsets inside a minute. */
+const TICKS = [0, 15_000, 30_000, 45_000];
+/** EWMA half-lives (in 1-minute bars) of the bar variance: the bridge's spread, the synthetic market's volatility. */
+const PATH_HALF_LIFE = 10, MARKET_HALF_LIFE = 60;
+/** Tails of the synthetic market's random walk (Student-t degrees of freedom). */
+export const MARKET_NU = 5;
+/** Hourly ladder: grid offsets from the price at the hour (two strikes below, two above), grid = 0.25% of price. */
+const LADDER = [-1, 0, 1, 2];
+const LADDER_STEP = 0.0025;
 
 export interface PerpSpec { ticker?: string; contractSize?: number; tickSize?: number; fractional?: boolean; leverage?: number; halfSpreadBps?: number }
 export interface ReplayOpts {
@@ -48,17 +75,75 @@ export interface ReplayOpts {
   /** Kalshi settled contracts (download: research/history/kalshiHistory.ts); default <historyDir>/kalshi. */
   kalshiDir?: string;
   perpSpecs?: Record<string, PerpSpec>;
+  /** Synthetic 15-minute and hourly contracts where Kalshi's history has none (default on). */
+  synthetic?: boolean;
   /** Rebuild days already written (default: skip them unless the format version changed). */
   force?: boolean;
   log?: (m: string) => void;
 }
 
-/** The four prints of a bar (open, first extreme, second extreme, close) and their offsets. */
-export function barPath(b: { o: number; h: number; l: number; c: number }): Array<[number, number]> {
-  const up = b.c >= b.o;
-  return [[0, b.o], [15_000, up ? b.l : b.h], [30_000, up ? b.h : b.l], [45_000, b.c]];
+/** Garman-Klass variance of a bar's log price over its minute (unbiased for a driftless random walk). */
+export function gkVariance(b: { o: number; h: number; l: number; c: number }): number {
+  const hl = Math.log(b.h / b.l), co = Math.log(b.c / b.o);
+  return Number.isFinite(hl) && Number.isFinite(co) ? Math.max(0, 0.5 * hl * hl - (2 * Math.LN2 - 1) * co * co) : 0;
 }
 
+/** The four prints of a 1-minute bar (+0, +15, +30, +45 s): the open, then a Brownian bridge (log price)
+ *  toward the close at +60 s with variance `varPerSec` per second, driven by three standard normals `z`. */
+export function barPath(b: { o: number; c: number }, varPerSec: number, z: readonly number[]): Array<[number, number]> {
+  const S = Math.log(b.c / b.o), T = 60;
+  const out: Array<[number, number]> = [[0, b.o]];
+  let B = 0, t0 = 0;
+  for (let k = 0; k < 3; k++) {
+    const t = (k + 1) * 15;
+    B = (B * (T - t)) / (T - t0) + Math.sqrt((Math.max(0, varPerSec) * (t - t0) * (T - t)) / (T - t0)) * (z[k] ?? 0);
+    out.push([t * 1000, b.o * Math.exp((S * t) / T + B)]);
+    t0 = t;
+  }
+  return out;
+}
+
+/** Deterministic standard normals (mulberry32 + Box-Muller): the same bar always gets the same path. */
+export function normals(seed: number, n: number): number[] {
+  let a = seed >>> 0;
+  const u = () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const out: number[] = [];
+  while (out.length < n) { const r = Math.sqrt(-2 * Math.log(Math.max(u(), 1e-12))), th = 2 * Math.PI * u(); out.push(r * Math.cos(th), r * Math.sin(th)); }
+  return out.slice(0, n);
+}
+const hashStr = (s: string) => { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; };
+
+/** Kalshi's official 60 s average ending at `windowEnd` (one sample a second: the last print at or before
+ *  each mark), from what has printed by `now`. Undefined when a mark has no print within 20 s. */
+export function windowAverage(prints: ReadonlyArray<readonly [number, number]>, windowEnd: number, now = windowEnd, windowSec = SETTLEMENT_AVG_SEC): { avg: number; n: number } | undefined {
+  let sum = 0, n = 0, j = -1;
+  for (let k = 1; k <= windowSec; k++) {
+    const mark = windowEnd - (windowSec - k) * 1000;
+    if (mark > now) break;
+    while (j + 1 < prints.length && prints[j + 1][0] <= mark) j++;
+    if (j < 0 || mark - prints[j][0] > 20_000) return undefined;
+    sum += prints[j][1];
+    n++;
+  }
+  return n ? { avg: sum / n, n } : undefined;
+}
+
+/** YES bid / ask around a fair value: 2 cents wide between 10c and 90c, 1 cent outside, on the cent grid. */
+export function synthQuote(p: number): [number, number] {
+  const w = p >= 0.1 && p <= 0.9 ? 2 : 1;
+  const bid = Math.min(99 - w, Math.max(1, Math.round(p * 100 - w / 2)));
+  return [bid / 100, (bid + w) / 100];
+}
+
+/** A "round" grid step near x: 1, 2, 2.5 or 5 times a power of ten. */
+export function niceStep(x: number): number {
+  const e = Math.pow(10, Math.floor(Math.log10(x)));
+  let best = 1;
+  for (const m of [1, 2, 2.5, 5, 10]) if (Math.abs(Math.log(x / e / m)) < Math.abs(Math.log(x / e / best))) best = m;
+  return best * e;
+}
+
+const stamp = (t: number) => new Date(t).toISOString().replace(/[-:T]/g, '').slice(2, 12); // yymmddHHMM (UTC)
 const row = (c: Candle): number[] => (c.tb !== undefined ? [c.ts / 1000, c.l, c.h, c.o, c.c, c.v, c.tb] : [c.ts / 1000, c.l, c.h, c.o, c.c, c.v]);
 
 /** Sequential reader of a sorted candle CSV (ts,o,h,l,c,v[,tb]): hands out bars in time order. */
@@ -85,6 +170,11 @@ class CsvStream {
     while (this.head && this.head.ts < bound) { out.push(this.head); this.head = await this.next(); }
     return out;
   }
+  /** Drop the bars before `bound`. */
+  async skip(bound: number): Promise<void> {
+    if (this.head === undefined) this.head = await this.next();
+    while (this.head && this.head.ts < bound) this.head = await this.next();
+  }
 }
 
 function readFunding(file: string): Array<[number, number]> {
@@ -94,19 +184,19 @@ function readFunding(file: string): Array<[number, number]> {
 
 interface KMarket { ticker: string; series: string; event?: string; openTime: number; closeTime: number; strike: number | null; cap: number | null; strikeType?: string; result?: string; candles: Array<{ ts: number; bidC: number | null; askC: number | null; last: number | null; volume: number | null }> }
 
+/** Settled Kalshi contracts of the replayed assets in the day files of `day` and the next (files are by close day). */
 function kalshiMarkets(dir: string, day: string, assets: Set<string>): Array<KMarket & { asset: string }> {
   const out: Array<KMarket & { asset: string }> = [];
   if (!fs.existsSync(dir)) return out;
   for (const series of fs.readdirSync(dir)) {
     const asset = /^KX([A-Z]+?)(15M|D)?$/.exec(series)?.[1];
     if (!asset || !assets.has(asset)) continue;
-    // A contract closing tomorrow may open today: read both days' files.
     for (const d of [day, new Date(Date.parse(day) + DAY).toISOString().slice(0, 10)]) {
       const f = path.join(dir, series, `${d}.jsonl`);
       if (!fs.existsSync(f)) continue;
       for (const l of fs.readFileSync(f, 'utf8').split('\n')) {
         if (!l) continue;
-        try { const m = JSON.parse(l) as KMarket; if (m.openTime >= Date.parse(day) && m.openTime < Date.parse(day) + DAY && (m.result === 'yes' || m.result === 'no')) out.push({ ...m, asset }); } catch { /* torn line */ }
+        try { const m = JSON.parse(l) as KMarket; if (m.result === 'yes' || m.result === 'no') out.push({ ...m, asset }); } catch { /* torn line */ }
       }
     }
   }
@@ -144,13 +234,39 @@ function roundTo(x: number, tick: number | undefined, dir: -1 | 1): number {
   return (dir < 0 ? Math.floor(x / tick) : Math.ceil(x / tick)) * tick;
 }
 
-export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number; written: number; skipped: number; assets: string[]; notes: string[] }> {
+interface SynthContract { ticker: string; strike: number; kind: 'updown' | 'greater'; closeTime: number }
+interface AssetState {
+  spot: CsvStream; perp: CsvStream; tfs: Map<string, Candle[]>; recent: Candle[]; funding: Array<[number, number]>; basis: number;
+  /** EWMA bar variance per second: the bridge's spread and the synthetic market's volatility. */
+  vPath?: number; vMkt?: number;
+  /** Recent index prints [ts, value] for the 60 s averages, and the open synthetic contracts. */
+  prints: Array<[number, number]>; open: SynthContract[];
+}
+
+type Ev = Record<string, unknown> & { t: number };
+
+interface ReplayManifest { version?: number; days: Record<string, string>; /** Real Kalshi contracts opening each day. */ kalshi?: Record<string, number> }
+/** The builder's state at the end of the last day it wrote: the next build starts from there instead of
+ *  going over every earlier day again (same output either way). */
+interface ReplayState { version: number; sig: string; day: string; carry: Ev[]; assets: Record<string, Pick<AssetState, 'recent' | 'basis' | 'vPath' | 'vMkt' | 'prints' | 'open'>> }
+
+/** Replay days holding Kalshi's real contracts (the strategy backtest and its sweep trade only those). */
+export function replayKalshiDays(outDir: string): string[] {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(outDir, 'replay-manifest.json'), 'utf8')) as ReplayManifest;
+    if (m.version !== REPLAY_VERSION) return [];
+    return Object.entries(m.kalshi ?? {}).filter(([d, n]) => n > 0 && fs.existsSync(path.join(outDir, `md-${d}.jsonl.gz`))).map(([d]) => d).sort();
+  } catch { return []; }
+}
+
+export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number; written: number; skipped: number; assets: string[]; notes: string[]; synthetic: number }> {
   const log = o.log ?? ((m: string) => console.log(`[replay] ${m}`));
   fs.mkdirSync(o.outDir, { recursive: true });
   const manifestFile = path.join(o.outDir, 'replay-manifest.json');
-  let manifest: { version?: number; days: Record<string, string> } = { days: {} };
+  let manifest: ReplayManifest = { days: {} };
   try { manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')); } catch { /* first build */ }
   if (manifest.version !== REPLAY_VERSION) manifest = { version: REPLAY_VERSION, days: {} };
+  manifest.kalshi ??= {};
   const notes: string[] = [];
   const assets = o.assets.filter((a) => {
     const ok = fs.existsSync(path.join(o.historyDir, 'binance-1m', a, '1m.csv'));
@@ -158,84 +274,120 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
     return ok;
   });
   const kalshiDir = o.kalshiDir ?? path.join(o.historyDir, 'kalshi');
+  const synthetic = o.synthetic !== false;
   const assetSet = new Set(assets);
   const from = Date.parse(o.fromDay), to = Date.parse(o.toDay);
-  // Per asset: streams for 1m spot and perps, stored higher timeframes, funding.
-  const st = new Map<string, { spot: CsvStream; perp: CsvStream; hasPerp: boolean; tfs: Map<string, Candle[]>; recent: Candle[]; funding: Array<[number, number]>; basis: number }>();
+  const aPath = 1 - Math.pow(0.5, 1 / PATH_HALF_LIFE), aMkt = 1 - Math.pow(0.5, 1 / MARKET_HALF_LIFE);
+  const st = new Map<string, AssetState>();
   for (const a of assets) {
     const tfs = new Map<string, Candle[]>();
     for (const t of ['15m', '1h', '1d'] as const) tfs.set(t, loadSeries(o.historyDir, a, t).candles);
-    const perpFile = path.join(o.historyDir, 'binance-um', a, '1m.csv');
-    st.set(a, { spot: new CsvStream(path.join(o.historyDir, 'binance-1m', a, '1m.csv')), perp: new CsvStream(perpFile), hasPerp: fs.existsSync(perpFile), tfs, recent: [], funding: readFunding(path.join(o.historyDir, 'binance-funding', a, 'funding.csv')), basis: 1 });
+    st.set(a, {
+      spot: new CsvStream(path.join(o.historyDir, 'binance-1m', a, '1m.csv')), perp: new CsvStream(path.join(o.historyDir, 'binance-um', a, '1m.csv')),
+      tfs, recent: [], funding: readFunding(path.join(o.historyDir, 'binance-funding', a, 'funding.csv')), basis: 1, prints: [], open: [],
+    });
   }
-  let written = 0, skipped = 0, days = 0;
-  // Events of a contract that opened today but runs past midnight go into the next day's file (time order).
-  let carry: Array<Record<string, unknown> & { t: number }> = [];
-  for (let d0 = from; d0 <= to; d0 += DAY) {
+  let written = 0, skipped = 0, days = 0, synthCount = 0;
+  // Events past midnight (a real contract running into the next day, the last 1m bar's close) go into the
+  // next day's file, so every file stays in time order.
+  let carry: Ev[] = [];
+  const sig = `${REPLAY_VERSION}:${assets.join(',')}:${synthetic ? 'synth' : 'real'}`;
+  const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
+  const fileOf = (day: string) => path.join(o.outDir, `md-${day}.jsonl.gz`);
+  const needs = (day: string) => Boolean(o.force) || manifest.days[day] !== sig || !fs.existsSync(fileOf(day));
+  // The bridge, the volatility estimates and the open contracts carry from day to day, so every day from
+  // the start is processed (the writing skipped for days already built) -- unless the saved end state of
+  // the day before the first one to build lets the build start there.
+  const stateFile = path.join(o.outDir, 'replay-state.json');
+  let start = from;
+  while (start <= to && !needs(iso(start))) start += DAY;
+  if (start > to) {
+    log(`history replay: all ${Math.round((to - from) / DAY) + 1} day(s) already built`);
+    return { days: Math.round((to - from) / DAY) + 1, written: 0, skipped: Math.round((to - from) / DAY) + 1, assets, notes, synthetic: 0 };
+  }
+  try {
+    const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as ReplayState;
+    if (start > from && saved.version === REPLAY_VERSION && saved.sig === sig && saved.day === iso(start - DAY)) {
+      for (const [a, s] of st) {
+        const x = saved.assets[a];
+        if (!x) throw new Error('asset missing');
+        await s.spot.skip(start); await s.perp.skip(start);
+        Object.assign(s, x);
+      }
+      carry = saved.carry;
+      days = skipped = Math.round((start - from) / DAY);
+    } else start = from;
+  } catch { start = from; }
+  for (let d0 = start; d0 <= to; d0 += DAY) {
     days++;
-    const day = new Date(d0).toISOString().slice(0, 10);
-    const file = path.join(o.outDir, `md-${day}.jsonl.gz`);
-    const sig = `${REPLAY_VERSION}:${assets.join(',')}`;
+    const day = iso(d0);
+    const file = fileOf(day);
+    const build = needs(day);
     const d1 = d0 + DAY;
-    // Keep the streams moving even for days already built (they are sequential).
-    const bars = new Map<string, { spot: Candle[]; perp: Candle[] }>();
+    const ev: Ev[] = carry;
+    carry = [];
+    const kAll = kalshiMarkets(kalshiDir, day, assetSet);
+    const kms = kAll.filter((m) => m.openTime >= d0 && m.openTime < d1);
+    // Windows Kalshi's own history covers: no synthetic contract there.
+    const real15 = new Set(kAll.filter((m) => /15M$/.test(m.series)).map((m) => `${m.asset}:${m.openTime}`));
+    const realHour = new Set(kAll.filter((m) => /D$/.test(m.series)).map((m) => `${m.asset}:${m.closeTime}`));
     for (const [a, s] of st) {
       const pre = await s.spot.until(d0);
-      s.recent.push(...pre); if (s.recent.length > 5 * BACKFILL) s.recent.splice(0, s.recent.length - 5 * BACKFILL);
+      s.recent.push(...pre.slice(-5 * BACKFILL));
+      if (s.recent.length > 5 * BACKFILL) s.recent.splice(0, s.recent.length - 5 * BACKFILL);
       await s.perp.until(d0);
-      bars.set(a, { spot: await s.spot.until(d1), perp: await s.perp.until(d1) });
-    }
-    if (!o.force && manifest.days[day] === sig && fs.existsSync(file)) {
-      skipped++;
-      carry = [];
-      for (const [a, s] of st) { s.recent.push(...bars.get(a)!.spot); if (s.recent.length > 5 * BACKFILL) s.recent.splice(0, s.recent.length - 5 * BACKFILL); }
-      continue;
-    }
-    const ev: Array<Record<string, unknown> & { t: number }> = carry;
-    carry = [];
-    const kms = kalshiMarkets(kalshiDir, day, assetSet);
-    for (const [a, s] of st) {
-      const b = bars.get(a)!;
-      if (!b.spot.length) continue;
-      // Backfill: the last 300 closed bars of every timeframe before the day starts.
-      const r5 = aggregate(s.recent, 5 * MIN);
-      const back: Record<string, Candle[]> = { '1m': s.recent.slice(-BACKFILL), '5m': r5.slice(-BACKFILL) };
-      for (const t of ['15m', '1h', '1d']) {
-        const arr = s.tfs.get(t)!, ms = TFS.find((x) => x.tf === t)!.ms;
-        const hi = lowerBound(arr, d0 - ms + 1); // bars that closed by d0
-        back[t] = arr.slice(Math.max(0, hi - BACKFILL), hi);
+      const spotBars = await s.spot.until(d1), perpBars = await s.perp.until(d1);
+      if (spotBars.length) {
+        // Backfill: the last 300 closed bars of every timeframe before the day starts.
+        const r5 = aggregate(s.recent.slice(-5 * BACKFILL), 5 * MIN);
+        const back: Record<string, Candle[]> = { '1m': s.recent.slice(-BACKFILL), '5m': r5.slice(-BACKFILL) };
+        for (const t of ['15m', '1h', '1d']) {
+          const arr = s.tfs.get(t)!, ms = TFS.find((x) => x.tf === t)!.ms;
+          const hi = lowerBound(arr, d0 - ms + 1); // bars that closed by d0
+          back[t] = arr.slice(Math.max(0, hi - BACKFILL), hi);
+        }
+        for (const [tf, cs] of Object.entries(back)) if (cs.length) ev.push({ t: d0, k: 'candles', asset: a, tf, rows: cs.map(row), ts: d0, hist: 1 });
       }
-      for (const [tf, cs] of Object.entries(back)) if (cs.length) ev.push({ t: d0, k: 'candles', asset: a, tf, rows: cs.map(row), ts: d0, hist: 1 });
-      // Kalshi strikes of this asset's 15-minute contracts opening today: the basis readings.
+      // Kalshi strikes of this asset's real 15-minute contracts opening today: the basis readings.
       const opens = kms.filter((m) => m.asset === a && /15M$/.test(m.series) && m.strike).map((m) => ({ t: m.openTime, k: m.strike! })).sort((x, y) => x.t - y.t);
       let oi = 0, last: Candle | undefined = s.recent[s.recent.length - 1];
       const fund = s.funding;
       let fi = 0;
       const spec = o.perpSpecs?.[a] ?? {};
       const half = (spec.halfSpreadBps ?? 1) / 1e4;
-      const perpBy = new Map(b.perp.map((c) => [c.ts, c]));
+      const perpBy = new Map(perpBars.map((c) => [c.ts, c]));
+      const seed = hashStr(a);
       let m5: Candle[] = [];
-      for (const bar of b.spot) {
+      for (const bar of spotBars) {
         while (oi < opens.length && opens[oi].t <= bar.ts) {
           if (last) { const ratio = opens[oi].k / last.c; if (Math.abs(ratio - 1) < 0.005) s.basis = ratio; }
           oi++;
         }
-        for (const [off, v] of barPath(bar)) {
-          const t = bar.ts + off;
-          ev.push({ t, k: 'index', asset: a, value: +(v * s.basis).toPrecision(10), ts: t, src: 'kalshi', hist: 1 });
-          ev.push({ t, k: 'spot', asset: a, value: v, ts: t });
-        }
+        const z = normals(seed ^ Math.floor(bar.ts / MIN), 3);
+        const prints = barPath(bar, s.vPath ?? 0, z);
         const p = perpBy.get(bar.ts);
-        if (p) {
-          while (fi < fund.length && fund[fi][0] <= bar.ts) fi++;
-          const rate = fi > 0 ? fund[fi - 1][1] : undefined;
-          const next = Math.ceil((bar.ts + 1) / (8 * 3_600_000)) * 8 * 3_600_000;
-          for (const [off, v] of barPath(p)) {
-            const t = bar.ts + off;
-            ev.push({ t, k: 'perp', ticker: spec.ticker ?? `${a}-PERP`, asset: a, ts: t, bid: roundTo(v * (1 - half), spec.tickSize, -1), ask: roundTo(v * (1 + half), spec.tickSize, 1), last: v, mark: v,
+        const pprints = p ? barPath(p, s.vPath ?? 0, z) : undefined;
+        while (p && fi < fund.length && fund[fi][0] <= bar.ts) fi++;
+        const rate = fi > 0 ? fund[fi - 1][1] : undefined;
+        const next = Math.ceil((bar.ts + 1) / (8 * HOUR)) * 8 * HOUR;
+        for (let k = 0; k < TICKS.length; k++) {
+          const t = bar.ts + TICKS[k], v = prints[k][1];
+          const iv = +(v * s.basis).toPrecision(10);
+          ev.push({ t, k: 'index', asset: a, value: iv, ts: t, src: 'kalshi', hist: 1 });
+          ev.push({ t, k: 'spot', asset: a, value: v, ts: t });
+          if (pprints) {
+            const pv = pprints[k][1];
+            ev.push({ t, k: 'perp', ticker: spec.ticker ?? `${a}-PERP`, asset: a, ts: t, bid: roundTo(pv * (1 - half), spec.tickSize, -1), ask: roundTo(pv * (1 + half), spec.tickSize, 1), last: pv, mark: pv,
               fundingRate: rate, nextFundingTs: next, contractSize: spec.contractSize ?? 0.001, tickSize: spec.tickSize, fractional: spec.fractional ?? true, leverage: spec.leverage ?? 10, hist: 1 });
           }
+          s.prints.push([t, iv]);
+          if (s.prints.length > 80) s.prints.splice(0, s.prints.length - 64);
+          if (synthetic) synthCount += synthTick(a, s, t, iv, ev, real15, realHour);
         }
+        // This bar's variance feeds the estimates used from the next bar on (causal).
+        const g = gkVariance(bar) / 60;
+        s.vPath = s.vPath === undefined ? g : s.vPath + aPath * (g - s.vPath);
+        s.vMkt = s.vMkt === undefined ? g : s.vMkt + aMkt * (g - s.vMkt);
         // Closed bars as the live candle feed would deliver them.
         const close = bar.ts + MIN;
         ev.push({ t: close, k: 'candles', asset: a, tf: '1m', rows: [row(bar)], ts: close, hist: 1 });
@@ -245,38 +397,96 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
         s.recent.push(bar);
       }
       if (s.recent.length > 5 * BACKFILL) s.recent.splice(0, s.recent.length - 5 * BACKFILL);
-      for (const t of ['15m', '1h', '1d']) {
-        const arr = s.tfs.get(t)!, ms = TFS.find((x) => x.tf === t)!.ms;
-        for (let i = lowerBound(arr, d0 - ms); i < arr.length && arr[i].ts + ms <= d1; i++) {
-          const close = arr[i].ts + ms;
-          if (close > d0) ev.push({ t: close, k: 'candles', asset: a, tf: t, rows: [row(arr[i])], ts: close, hist: 1 });
+      if (spotBars.length) {
+        for (const t of ['15m', '1h', '1d']) {
+          const arr = s.tfs.get(t)!, ms = TFS.find((x) => x.tf === t)!.ms;
+          for (let i = lowerBound(arr, d0 - ms); i < arr.length && arr[i].ts + ms <= d1; i++) {
+            const close = arr[i].ts + ms;
+            if (close > d0) ev.push({ t: close, k: 'candles', asset: a, tf: t, rows: [row(arr[i])], ts: close, hist: 1 });
+          }
         }
       }
     }
+    const alive = new Map<number, string[]>();
     for (const m of kms) {
       const kind = contractKind(m.series, m.strikeType);
       ev.push({ t: m.openTime - MIN, k: 'market', ticker: m.ticker, series: m.series, asset: m.asset, openTime: m.openTime, closeTime: m.closeTime, strike: m.strike, cap: m.cap, kind, event: m.event, tickSize: 0.01, hist: 1 });
-      for (const c of m.candles ?? []) {
-        if (c.ts < m.openTime || c.ts > m.closeTime) continue;
-        if (c.bidC !== null && c.askC !== null && c.askC > c.bidC) ev.push({ t: c.ts, k: 'book', ticker: m.ticker, bids: [{ price: c.bidC, size: 100 }], asks: [{ price: c.askC, size: 100 }], ts: c.ts });
+      const cs = (m.candles ?? []).filter((c) => c.ts >= m.openTime && c.ts <= m.closeTime);
+      for (let i = 0; i < cs.length; i++) {
+        const c = cs[i];
+        if (c.bidC !== null && c.askC !== null && c.askC > c.bidC) {
+          ev.push({ t: c.ts, k: 'book', ticker: m.ticker, bids: [{ price: c.bidC, size: 100 }], asks: [{ price: c.askC, size: 100 }], ts: c.ts });
+          // The minute's last quote stands until the next one (near the money, where a network would use it).
+          const mid = (c.bidC + c.askC) / 2, until = Math.min(cs[i + 1]?.ts ?? m.closeTime, m.closeTime);
+          if (mid >= 0.03 && mid <= 0.97) for (let at = c.ts + 15_000; at < until; at += 15_000) { const l = alive.get(at); if (l) l.push(m.ticker); else alive.set(at, [m.ticker]); }
+        }
         if (c.volume && c.volume > 0 && c.last !== null) ev.push({ t: c.ts, k: 'trade', ticker: m.ticker, price: c.last, count: c.volume, ts: c.ts - 1 });
       }
       ev.push({ t: m.closeTime + 1000, k: 'result', ticker: m.ticker, result: m.result });
     }
+    for (const [t, tickers] of alive) ev.push({ t, k: 'alive', tickers });
     ev.sort((x, y) => x.t - y.t);
     const cut = ev.findIndex((e) => e.t >= d1);
     if (cut >= 0) carry = ev.splice(cut);
+    if (!build) { skipped++; continue; }
     if (!ev.length) continue;
     const tmp = `${file}.tmp`;
     fs.writeFileSync(tmp, zlib.gzipSync(ev.map((e) => JSON.stringify(e)).join('\n') + '\n', { level: 6 }));
     fs.renameSync(tmp, file);
     manifest.days[day] = sig;
+    manifest.kalshi![day] = kms.length;
     fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+    const state: ReplayState = { version: REPLAY_VERSION, sig, day, carry, assets: Object.fromEntries([...st].map(([a, x]) => [a, { recent: x.recent, basis: x.basis, vPath: x.vPath, vMkt: x.vMkt, prints: x.prints, open: x.open }])) };
+    fs.writeFileSync(`${stateFile}.tmp`, JSON.stringify(state));
+    fs.renameSync(`${stateFile}.tmp`, stateFile);
     written++;
     if (written % 30 === 1) log(`${day}: ${ev.length} records (${kms.length} Kalshi contracts)`);
   }
-  log(`history replay: ${written} day(s) written, ${skipped} already built, ${assets.length} asset(s)`);
-  return { days, written, skipped, assets, notes };
+  log(`history replay: ${written} day(s) written, ${skipped} already built, ${assets.length} asset(s)${synthetic ? `, ${synthCount} synthetic contract(s)` : ''}`);
+  return { days, written, skipped, assets, notes, synthetic: synthCount };
+}
+
+/** One print of an asset's synthetic contracts: settle the ones that closed (their 60 s average is
+ *  complete with this print), list the new ones (a 15-minute Up/Down each quarter hour, the hourly
+ *  ladder each hour, where Kalshi's history has none), then quote every open one. Returns how many
+ *  contracts it listed. */
+function synthTick(a: string, s: AssetState, t: number, iv: number, ev: Ev[], real15: Set<string>, realHour: Set<string>): number {
+  let listed = 0;
+  for (let i = s.open.length - 1; i >= 0; i--) {
+    const c = s.open[i];
+    if (t < c.closeTime) continue;
+    s.open.splice(i, 1);
+    const A = windowAverage(s.prints, c.closeTime);
+    if (A) ev.push({ t: Math.max(c.closeTime + 1000, t + 1), k: 'result', ticker: c.ticker, result: A.avg >= c.strike ? 'yes' : 'no', synth: 1 });
+  }
+  const list = (c: SynthContract, series: string, event: string) => {
+    s.open.push(c);
+    ev.push({ t, k: 'market', ticker: c.ticker, series, asset: a, openTime: t, closeTime: c.closeTime, strike: c.strike, cap: null, kind: c.kind, event, tickSize: 0.01, synth: 1, hist: 1 });
+    listed++;
+  };
+  if (t % (15 * MIN) === 0 && !real15.has(`${a}:${t}`)) {
+    const K = windowAverage(s.prints, t);
+    if (K) { const ticker = `KX${a}15M-SYN${stamp(t)}`; list({ ticker, strike: +K.avg.toPrecision(10), kind: 'updown', closeTime: t + 15 * MIN }, `KX${a}15M`, ticker); }
+  }
+  if (t % HOUR === 0 && !realHour.has(`${a}:${t + HOUR}`)) {
+    const step = niceStep(LADDER_STEP * iv), base = Math.floor(iv / step), event = `KX${a}D-SYN${stamp(t + HOUR).slice(0, 8)}`;
+    for (const off of LADDER) {
+      const K = +((base + off) * step).toPrecision(10);
+      if (K > 0) list({ ticker: `${event}-T${K}`, strike: K, kind: 'greater', closeTime: t + HOUR }, `KX${a}D`, event);
+    }
+  }
+  const sigma = s.vMkt && s.vMkt > 0 ? Math.sqrt(s.vMkt) : undefined;
+  if (!sigma) return listed;
+  for (const c of s.open) {
+    const tau = (c.closeTime - t) / 1000;
+    const obs = tau <= SETTLEMENT_AVG_SEC ? windowAverage(s.prints, c.closeTime, t) : undefined;
+    if (tau <= SETTLEMENT_AVG_SEC && !obs) continue;
+    const fv = priceContract({ kind: c.kind, strike: c.strike }, { spot: iv, sigmaPerSqrtSec: sigma, tauSec: tau, observedAvg: obs?.avg, observedCount: obs?.n, nu: MARKET_NU });
+    if (!fv) continue;
+    const [bid, ask] = synthQuote(fv.pYes);
+    ev.push({ t, k: 'book', ticker: c.ticker, bids: [{ price: bid, size: 100 }], asks: [{ price: ask, size: 100 }] });
+  }
+  return listed;
 }
 
 function lowerBound(arr: Array<{ ts: number }>, ts: number): number {
@@ -304,6 +514,7 @@ if (process.argv[1] && /historyReplay\.(ts|cjs|js)$/.test(process.argv[1])) {
   const today = new Date().toISOString().slice(0, 10);
   void buildHistoryReplay({
     historyDir: arg('history', 'data/history'), outDir: arg('out', 'data/history-replay'), assets: arg('assets', 'BTC,ETH,SOL,XRP,DOGE').split(','),
-    fromDay: arg('from', new Date(Date.now() - 365 * DAY).toISOString().slice(0, 10)), toDay: arg('to', new Date(Date.parse(today) - DAY).toISOString().slice(0, 10)), force: process.argv.includes('--force'),
+    fromDay: arg('from', new Date(Date.now() - 365 * DAY).toISOString().slice(0, 10)), toDay: arg('to', new Date(Date.parse(today) - DAY).toISOString().slice(0, 10)),
+    force: process.argv.includes('--force'), synthetic: !process.argv.includes('--no-synthetic'),
   });
 }
