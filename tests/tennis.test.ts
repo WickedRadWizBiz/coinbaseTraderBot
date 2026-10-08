@@ -16,7 +16,7 @@ import { KillSwitch } from '../bot/risk/killSwitch';
 import { RiskGateway } from '../bot/risk/riskGateway';
 import { Reconciler } from '../bot/recon/reconciler';
 import { decideMatch, MatchTracker, tennisSize, type MatchMarket } from '../bot/tennis/tennisStrategy';
-import { tmpAudit, tmpDir } from './helpers';
+import { openExchange, tmpAudit, tmpDir } from './helpers';
 
 const T = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).tennis;
 const t0 = 1_800_000_000_000;
@@ -174,7 +174,7 @@ test('engine trades tennis inside its own 25% budget and keeps it out of the cry
   paper.on('fill', (f) => oms.onFill(f));
   paper.on('order', (o) => oms.onExchangeOrder(o));
   const recon = new Reconciler({ gateway: paper, oms, audit, getMarket: rest.getMarket, onPersistentBreak: () => undefined });
-  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity() });
+  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), exchangeStatus: openExchange() });
   const r = await recon.run('startup');
   engine.balance = r!.balance;
   await engine.tick();

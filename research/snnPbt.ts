@@ -65,7 +65,8 @@ export function snnInteractions(rows: SnnRow[], domain: 'crypto' | 'perps' | 'te
   return out;
 }
 
-const clusterFor = (domain: 'crypto' | 'perps' | 'tennis') => (domain === 'perps' ? 4 * H : H);
+/** Interactions closer than this are one bet for the fitness's independence count. */
+export const clusterFor = (domain: 'crypto' | 'perps' | 'tennis') => (domain === 'perps' ? 4 * H : H);
 
 interface MemberState { cp?: SnnCheckpoint; through: number }
 
@@ -73,6 +74,8 @@ interface Saved {
   domain: string; stage: string; baseVersion: string; trials: number; nextIndex: number; lastEvalTo: number; log: PbtRoundLog[];
   /** How the days were chosen (a different choice starts a fresh tournament). */
   layout?: string;
+  /** The history-ledger generation these rounds belong to (research/historyLedger.ts). */
+  generation?: string;
   members: Array<{ id: number; hyper: Hyper; lineage: number[]; through: number; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }>; bornRound?: number }>;
 }
 
@@ -111,6 +114,10 @@ export async function runSnnPbt(o: {
   allDays?: string[];
   /** How `days` were chosen (eraDays vs the latest days): a change starts a fresh tournament. */
   layout?: string;
+  /** A history-ledger generation (research/historyLedger.ts): weeks the population has never trained on.
+   *  A new id continues the saved population on its days -- every member keeps its knobs and its network
+   *  -- with the rounds of those days only (they may lie before the weeks it last replayed). */
+  generation?: string;
   /** The tennis config (required for the tennis domain: the engine's match inputs). */
   tennis?: TennisConfig;
   model?: MetaModel; seed?: number; stateDir?: string; maxRounds?: number; restartEvery?: number; fresh?: boolean; log?: (m: string) => void;
@@ -127,7 +134,7 @@ export async function runSnnPbt(o: {
   // Blocks across the years (eraDays): each run of consecutive days is walked forward on its own (its first
   // days train, the rest are judged), the members carrying their state from one run to the next. The latest
   // days: one walk from the first to the last (a missing day is just a round with nothing to judge).
-  const spans = o.layout?.startsWith('era') ? segments(o.days) : [o.days];
+  const spans = o.layout?.startsWith('era') || o.layout === 'ledger' ? segments(o.days) : [o.days];
   const all = spans.flatMap((seg) => walkForwardRounds(Date.parse(seg[0]), Date.parse(seg[seg.length - 1]) + DAY, initDays * DAY, evalDays * DAY, evalDays * DAY)).map((r, i) => ({ ...r, index: i }));
   const calendar = loadCalendar(path.resolve('params/calendar.json'));
   const dayOf = (t: number) => iso(t);
@@ -137,14 +144,17 @@ export async function runSnnPbt(o: {
   if (stateFile && !o.fresh && fs.existsSync(stateFile)) {
     try { saved = JSON.parse(fs.readFileSync(stateFile, 'utf8')); if (saved!.domain !== o.domain || saved!.stage !== o.stage || saved!.baseVersion !== baseVersion || saved!.members.length !== (o.population ?? 3) || (saved!.layout ?? 'latest') !== (o.layout ?? 'latest')) saved = undefined; } catch { saved = undefined; }
   }
-  let rounds = (saved ? all.filter((r) => r.evalFrom >= saved!.lastEvalTo - 1) : all).map((r, k) => ({ ...r, index: (saved?.nextIndex ?? 0) + k }));
+  // A new ledger generation: the saved population moves on to new weeks (all their rounds to run).
+  const newGen = Boolean(saved && o.generation && saved.generation !== o.generation);
+  if (newGen) log(`${o.domain} SNN tournament: generation ${o.generation} on ${o.days.length} day(s) the population has never trained on (${saved!.log.length} rounds so far)`);
+  let rounds = (saved && !newGen ? all.filter((r) => r.evalFrom >= saved!.lastEvalTo - 1) : all).map((r, k) => ({ ...r, index: (saved?.nextIndex ?? 0) + k }));
   const pending = rounds.length;
   if (o.maxRounds && o.maxRounds > 0) rounds = rounds.slice(0, o.maxRounds);
   const resume = saved ? {
     trials: saved.trials, log: saved.log,
     members: saved.members.map((m): PbtMember<MemberState> => ({
       id: m.id, hyper: m.hyper, lineage: m.lineage, scores: m.scores, bornRound: m.bornRound, record: m.record.map(([ts, ret, cost, group]) => ({ ts, ret, cost, group })),
-      state: { through: m.through, cp: fs.existsSync(cpFile(m.id)) ? JSON.parse(fs.readFileSync(cpFile(m.id), 'utf8')) : undefined },
+      state: { through: newGen ? start : m.through, cp: fs.existsSync(cpFile(m.id)) ? JSON.parse(fs.readFileSync(cpFile(m.id), 'utf8')) : undefined },
     })),
   } : undefined;
   log(`${o.domain} SNN tournament (stage ${o.stage}): ${o.days.length} recorded day(s), ${saved ? `continuing (${saved.log.length} rounds so far)` : `fresh population of ${o.population ?? 3}`}; ${rounds.length} round(s) to run${(o.workers ?? 1) > 1 ? `, ${o.workers} members at a time` : ''}`);
@@ -173,7 +183,7 @@ export async function runSnnPbt(o: {
     fs.mkdirSync(o.stateDir, { recursive: true });
     for (const m of members) if (m.state.cp) fs.writeFileSync(cpFile(m.id), JSON.stringify(m.state.cp));
     const st: Saved = {
-      domain: o.domain, stage: o.stage, baseVersion, trials, nextIndex, lastEvalTo, log: plog, layout: o.layout,
+      domain: o.domain, stage: o.stage, baseVersion, trials, nextIndex, lastEvalTo, log: plog, layout: o.layout, generation: o.generation,
       members: members.map((m) => ({ id: m.id, hyper: m.hyper, lineage: m.lineage, through: m.state.through, scores: m.scores, bornRound: m.bornRound, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]) })),
     };
     fs.writeFileSync(stateFile!, JSON.stringify(st));

@@ -7,12 +7,13 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { SnnHost } from '../bot/snn/host';
 import { SnnNetwork } from '../bot/snn/network';
-import { DEFAULT_SNN, domainParams, versionHash, withFlags, type SnnParams } from '../bot/snn/params';
+import { DEFAULT_SNN, domainParams, stageFlags, versionHash, withFlags, type SnnParams } from '../bot/snn/params';
 import { SNN_HYPER_SPEC, SnnPopulationHost, snnHyperOf, withSnnHyper } from '../bot/snn/population';
 import { binaryBet, fitnessOf, independentInteractions, maxDrawdown, perturb, sortino } from '../bot/util/fitness';
 import { dsrOf, regimeOf, regimeReport, REGIMES } from '../research/fitness';
 import { runPbt, walkForwardRounds } from '../research/pbt';
 import { runSnnPbt, snnInteractions } from '../research/snnPbt';
+import { snnContest } from '../research/snnContest';
 import { writeSyntheticRecordings } from '../research/synthetic';
 import { tmpDir } from './helpers';
 
@@ -172,6 +173,35 @@ test('SNN tournament over blocks across the years: each block walked on its own 
   await runSnnPbt({ recordings: rec, domain: 'crypto', stage: 'S1', days: all.slice(0, 2), initDays: 1, evalDays: 1, stateDir: state });
   const switched = await runSnnPbt({ recordings: rec, domain: 'crypto', stage: 'S1', days, allDays: all, layout: 'era:2', initDays: 1, evalDays: 1, stateDir: state });
   assert.equal(switched.rounds, 2);
+});
+
+test('SNN tournament generations (history ledger): a new generation carries the population on to earlier weeks; a contest between two model files', async () => {
+  const rec = tmpDir();
+  for (let d = 0; d < 6; d++) writeSyntheticRecordings(rec, { windows: 1, seed: 31 + d, start: Date.parse('2026-02-01T00:00:00Z') + d * DAY });
+  const all = ['2026-02-01', '2026-02-02', '2026-02-03', '2026-02-04', '2026-02-05', '2026-02-06'];
+  const state = path.join(tmpDir(), 'pbt');
+  const o = { recordings: rec, domain: 'crypto' as const, stage: 'S1' as const, allDays: all, layout: 'ledger', initDays: 1, evalDays: 1, stateDir: state };
+  const g1 = await runSnnPbt({ ...o, days: all.slice(3, 5), generation: 't1' });
+  assert.deepEqual([g1.complete, g1.rounds], [true, 1]);
+  // The next generation's weeks lie before the ones the population last replayed: all its rounds run.
+  const g2 = await runSnnPbt({ ...o, days: all.slice(0, 2), generation: 't2' });
+  assert.deepEqual([g2.complete, g2.rounds], [true, 2], 'the population carried on (1 + 1 rounds)');
+  assert.deepEqual(g2.log.map((r) => new Date(r.evalFrom).toISOString().slice(0, 10)), ['2026-02-05', '2026-02-02']);
+  const cp = JSON.parse(fs.readFileSync(path.join(state, 'm0.json'), 'utf8'));
+  assert.ok(cp.lastTs > Date.parse('2026-02-02T00:00:00Z') && cp.lastTs < Date.parse('2026-02-03T00:00:00Z'), 'its network walked the earlier days after the later ones');
+  const again = await runSnnPbt({ ...o, days: all.slice(0, 2), generation: 't2' });
+  assert.deepEqual([again.complete, again.rounds], [true, 2], 'a finished generation has nothing left to run');
+  // Contest: replayed from each model file on held-out days; a challenger identical to the champion does not replace it.
+  const base = domainParams('crypto', withFlags({ ...DEFAULT_SNN }, stageFlags('S1')));
+  const a = new SnnNetwork(base).exportModel('a'), b = new SnnNetwork({ ...base, seed: base.seed + 1 }).exportModel('b');
+  const tie = await snnContest({ recordings: rec, domain: 'crypto', candidate: a, incumbent: a, days: ['2026-02-03', '2026-02-04'], allDays: all });
+  assert.equal(tie.candidate.fitness, tie.incumbent.fitness);
+  assert.equal(tie.winner, 'incumbent');
+  assert.match(tie.reason, /does not beat the network in use on held-out weeks/);
+  assert.deepEqual(tie.days, ['2026-02-03', '2026-02-04']);
+  const c = await snnContest({ recordings: rec, domain: 'crypto', candidate: b, incumbent: a, days: ['2026-02-04', '2026-02-03'], allDays: all });
+  assert.equal(c.winner, c.candidate.fitness > c.incumbent.fitness ? 'candidate' : 'incumbent');
+  assert.ok(Number.isFinite(c.candidate.fitness) && Number.isFinite(c.incumbent.fitness) && c.candidate.days === 2);
 });
 
 test('tennis population: three live members, elite outputs, tournament after graded matches, restarts, persisted', async () => {

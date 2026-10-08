@@ -326,7 +326,13 @@ A new network retrains only the model that reads it, including when you swap one
 
 `docs/AUTOMATION.md` is the plain-language guide. It covers what runs by itself, what you still do by hand, every setting, and how to roll back.
 
-**Training on your own computer** (`research/laptopTrain.ts`, [docs/LAPTOP_TRAINING.md](docs/LAPTOP_TRAINING.md)): the same pipeline with no time cap and bigger budgets, for as many hours as you give it. Windows: download `KalshiTrainer-windows.zip` from the *Laptop trainer (Windows)* release and double-click `Train.cmd`; elsewhere `npm run train:laptop -- --hours 12 --host <ip> --key <pem>`. It copies the bot's data over SSH (credentials never leave the server), downloads years of history and a year of Kalshi's settled contracts, trains in rounds (champion vs challenger per module, the sweep on the whole bot), and sends the winners back for the bot to hot-swap.
+**Training on your own computer** (`research/laptopTrain.ts`, [docs/LAPTOP_TRAINING.md](docs/LAPTOP_TRAINING.md)): the same pipeline with bigger budgets, in rounds until the bot stops improving or reaches the target (or for as many hours as you give it). Windows: download `KalshiTrainer-windows.zip` from the *Laptop trainer (Windows)* release and double-click `Train.cmd`; elsewhere `npm run train:laptop -- --host <ip> --key <pem>`. It copies the bot's data over SSH (credentials never leave the server) and downloads years of history and a year of Kalshi's settled contracts. Then it trains in rounds:
+
+- each network's tournaments run on weeks of history it has never trained on (the history ledger, `research/historyLedger.ts`);
+- a challenger must beat the model in use on held-out weeks before it replaces it;
+- the whole bot is scored on days nothing was trained or tuned on, in % of a $200 pool (`research/readiness.ts`).
+
+After every round that improves a model, it sends the models back for the bot to hot-swap. `trainer-data/GUIDE.txt` says how long to train before live trading and what good scores look like.
 
 ## Historical data and the TA network (bot/ta/taNet.ts)
 

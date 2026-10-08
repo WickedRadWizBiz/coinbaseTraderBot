@@ -95,6 +95,9 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
   net.dirLog = [];
   net.training = Boolean(o.training?.eprop);
   if (o.checkpoint) net.restore(o.checkpoint, { allowParamChange: o.allowParamChange });
+  // A checkpoint from later in time (a tournament generation moving back to earlier weeks): start over the
+  // network's clock and time-bound state, keep what it learned.
+  if (o.from && net.lastTs > o.from) net.rewind();
   const model = o.model ?? MetaModel.identity();
   const scoreEvery = (o.scoreEverySec ?? 60) * 1000;
   const noEntry = (o.noEntryBeforeCloseSec ?? 60) * 1000;

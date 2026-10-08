@@ -549,6 +549,19 @@ export class SnnNetwork {
     this.tennisTemplate = cp.tennisTemplate ? this.decodeTemplate(cp.tennisTemplate) : undefined;
   }
 
+  /** Research: continue at an EARLIER time than the network's clock (a tournament generation moving to
+   *  weeks before the ones it last replayed). The weights, readouts, direction heads and templates are kept;
+   *  everything bound to the old time goes: neuron state, pending contract tags and direction calls (they
+   *  would otherwise be graded on another era's prices), the inputs and the clock. */
+  rewind(): void {
+    for (const c of this.columns.values()) c.resetTransient();
+    for (const ro of this.readouts.values()) ro.tags.clear();
+    for (const k of this.dirTags.keys()) this.dirTags.set(k, []);
+    this.lastTag.clear();
+    this.inputs.clear();
+    this.lastTs = 0;
+  }
+
   /** Offline-trained weights for the model file (research/trainSnn.ts). */
   exportModel(notes?: string): SnnModelFile {
     return {

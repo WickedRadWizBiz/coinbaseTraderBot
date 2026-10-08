@@ -17,7 +17,9 @@
 //                  last 300 closed bars of each, then every bar as it closes (so any day can start a replay)
 //   perp           1-minute Binance USD-M perpetual bars (binance-um) along the same bridge draws, quoted at
 //                  the spread and contract specs the bot's own perp recordings show (defaults otherwise),
-//                  with Binance's last settled funding rate (binance-funding) and the next funding time
+//                  with Binance's last settled funding rate (binance-funding), the next funding time and
+//                  Binance's open interest (binance-oi: every 5 minutes from September 2020; a reading is
+//                  carried at most 10 minutes)
 //   market / book / trade / result / alive
 //                  Kalshi's settled contracts (history/kalshi, 1-minute YES bid / ask candles): the market
 //                  a minute before it opens, a book snapshot each minute (nominal 100 contracts a side),
@@ -73,7 +75,7 @@ import { loadKalshiTrades, type KalshiHistMarket, type KalshiTrade } from './kal
 import { anchorsIn, dominanceAnchors, DominanceReplay, type DomState } from './dominanceReplay';
 import type { Candle } from '../../bot/ta/indicators';
 
-export const REPLAY_VERSION = 4;
+export const REPLAY_VERSION = 5;
 const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
 const TFS: Array<{ tf: string; ms: number }> = [{ tf: '1m', ms: MIN }, { tf: '5m', ms: 5 * MIN }, { tf: '15m', ms: 15 * MIN }, { tf: '1h', ms: HOUR }, { tf: '1d', ms: DAY }];
 const BACKFILL = 300;
@@ -203,6 +205,19 @@ class CsvStream {
   }
 }
 
+/** Open interest readings of binance-oi/<ASSET>/oi.csv ("ts,oi,oi_usd"), in time order. */
+function readOpenInterest(file: string): AssetState['oi'] {
+  const ts: number[] = [], v: number[] = [];
+  if (fs.existsSync(file)) for (const l of fs.readFileSync(file, 'utf8').split('\n')) { const c = l.split(','); const t = Number(c[0]), x = Number(c[1]); if (t > 0 && x > 0 && (!ts.length || t > ts[ts.length - 1])) { ts.push(t); v.push(x); } }
+  return { ts: Float64Array.from(ts), v: Float64Array.from(v), at: -1 };
+}
+/** The open interest reading at `t` (the latest at or before it, if at most 10 minutes old). */
+function openInterestAt(o: AssetState['oi'], t: number): number | undefined {
+  if (o.at >= 0 && o.ts[o.at] > t) o.at = -1; // a new build going back in time
+  while (o.at + 1 < o.ts.length && o.ts[o.at + 1] <= t) o.at++;
+  return o.at >= 0 && t - o.ts[o.at] <= 10 * MIN ? o.v[o.at] : undefined;
+}
+
 function readFunding(file: string): Array<[number, number]> {
   if (!fs.existsSync(file)) return [];
   return fs.readFileSync(file, 'utf8').split('\n').slice(1).map((l) => l.split(',').map(Number) as [number, number]).filter(([t, v]) => Number.isFinite(t) && Number.isFinite(v));
@@ -263,6 +278,8 @@ function roundTo(x: number, tick: number | undefined, dir: -1 | 1): number {
 interface SynthContract { ticker: string; strike: number; kind: 'updown' | 'greater'; closeTime: number }
 interface AssetState {
   spot: CsvStream; perp: CsvStream; tfs: Map<string, Candle[]>; recent: Candle[]; funding: Array<[number, number]>; basis: number;
+  /** Open interest readings (times, values) and the reading in use. */
+  oi: { ts: Float64Array; v: Float64Array; at: number };
   /** EWMA bar variance per second: the bridge's spread and the synthetic market's volatility. */
   vPath?: number; vMkt?: number;
   /** Recent index prints [ts, value] for the 60 s averages, and the open synthetic contracts. */
@@ -363,9 +380,9 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
   for (const a of assets) {
     const tfs = new Map<string, Candle[]>();
     for (const t of ['15m', '1h', '1d'] as const) tfs.set(t, loadSeries(o.historyDir, a, t).candles);
-    const spotFile = path.join(o.historyDir, 'binance-1m', a, '1m.csv'), perpFile = path.join(o.historyDir, 'binance-um', a, '1m.csv'), fundFile = path.join(o.historyDir, 'binance-funding', a, 'funding.csv');
-    st.set(a, { spot: new CsvStream(spotFile), perp: new CsvStream(perpFile), tfs, recent: [], funding: readFunding(fundFile), basis: 1, prints: [], open: [] });
-    cover.set(a, [[csvRange(spotFile), MIN], [csvRange(perpFile), MIN], [csvRange(fundFile), 8 * HOUR]]);
+    const spotFile = path.join(o.historyDir, 'binance-1m', a, '1m.csv'), perpFile = path.join(o.historyDir, 'binance-um', a, '1m.csv'), fundFile = path.join(o.historyDir, 'binance-funding', a, 'funding.csv'), oiFile = path.join(o.historyDir, 'binance-oi', a, 'oi.csv');
+    st.set(a, { spot: new CsvStream(spotFile), perp: new CsvStream(perpFile), tfs, recent: [], funding: readFunding(fundFile), oi: readOpenInterest(oiFile), basis: 1, prints: [], open: [] });
+    cover.set(a, [[csvRange(spotFile), MIN], [csvRange(perpFile), MIN], [csvRange(fundFile), 8 * HOUR], [csvRange(oiFile), 5 * MIN]]);
   }
   const anchors = dominanceAnchors(o.historyDir);
   if (!anchors.length) notes.push('no BTC.D history (TradingView / the bot\'s own bars): no dominance records');
@@ -491,7 +508,7 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
           if (pprints) {
             const pv = pprints[k][1];
             ev.push({ t, k: 'perp', ticker: spec.ticker ?? `${a}-PERP`, asset: a, ts: t, bid: roundTo(pv * (1 - half), spec.tickSize, -1), ask: roundTo(pv * (1 + half), spec.tickSize, 1), last: pv, mark: pv,
-              fundingRate: rate, nextFundingTs: next, contractSize: spec.contractSize ?? 0.001, tickSize: spec.tickSize, fractional: spec.fractional ?? true, leverage: spec.leverage ?? 10, hist: 1 });
+              fundingRate: rate, nextFundingTs: next, openInterest: openInterestAt(s.oi, t), contractSize: spec.contractSize ?? 0.001, tickSize: spec.tickSize, fractional: spec.fractional ?? true, leverage: spec.leverage ?? 10, hist: 1 });
           }
           s.prints.push([t, iv]);
           if (s.prints.length > 80) s.prints.splice(0, s.prints.length - 64);

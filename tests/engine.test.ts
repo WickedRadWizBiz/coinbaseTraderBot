@@ -14,7 +14,7 @@ import { PaperExchange } from '../bot/paper/paperExchange';
 import { KillSwitch } from '../bot/risk/killSwitch';
 import { RiskGateway } from '../bot/risk/riskGateway';
 import { Reconciler } from '../bot/recon/reconciler';
-import { tmpAudit, tmpDir } from './helpers';
+import { openExchange, tmpAudit, tmpDir } from './helpers';
 import { Vault } from '../bot/vault/vault';
 import { BalanceMonitor } from '../bot/vault/balanceMonitor';
 
@@ -48,7 +48,7 @@ async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy
   paper.on('fill', (f) => oms.onFill(f));
   paper.on('order', (o) => oms.onExchangeOrder(o));
   const recon = new Reconciler({ gateway: paper, oms, audit, getMarket: rest.getMarket, onPersistentBreak: (r) => void kill.engage(r, 'recon') });
-  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor });
+  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange() });
   return { cfg, md, paper, oms, kill, recon, engine, market, audit };
 }
 

@@ -86,6 +86,9 @@ export interface PerpModelParams {
   lambda: number;
   trainedAt: string;
   validation?: PerpModelValidation;
+  /** Trained without the history ledger's held-out weeks (their rule, research/historyLedger.ts): a contest
+   *  there is fair only between models trained under the same rule. */
+  holdout?: string;
 }
 
 export class PerpModel {

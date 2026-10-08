@@ -212,6 +212,64 @@ export async function downloadBinanceFunding(o: { out: string; assets: string[];
   return res;
 }
 
+/** Rows of a Binance USD-M daily metrics CSV (create_time, symbol, sum_open_interest, sum_open_interest_value,
+ *  ...; one row per 5 minutes, UTC): [ts ms, open interest in coins, in USD]. Header, duplicate and broken
+ *  lines are dropped. */
+export function parseMetricsCsv(text: string): Array<[number, number, number]> {
+  const out: Array<[number, number, number]> = [];
+  for (const l of text.split('\n')) {
+    const c = l.split(',');
+    if (c.length < 4) continue;
+    const ts = Date.parse(`${c[0].trim().replace(' ', 'T')}Z`), oi = Number(c[2]), usd = Number(c[3]);
+    if (Number.isFinite(ts) && oi > 0 && Number.isFinite(usd)) out.push([ts, oi, usd]);
+  }
+  return out;
+}
+
+/** Binance USD-M open interest from the daily metrics archives (every 5 minutes, from September 2020) ->
+ *  <out>/binance-oi/<ASSET>/oi.csv ("ts,oi,oi_usd": ms, coins, USD), merged and de-duplicated. The history
+ *  replay puts it on its perp quotes (the perps model's open-interest inputs). Daily files only: Binance
+ *  publishes no monthly metrics archive. */
+export async function downloadBinanceOpenInterest(o: { out: string; assets: string[]; fromDay?: string; concurrency?: number; fetchImpl?: typeof fetch; log?: (m: string) => void }): Promise<Array<{ asset: string; fetched: number; rows: number; note?: string }>> {
+  const f = o.fetchImpl ?? fetch;
+  const log = o.log ?? ((m: string) => console.log(`[binance] ${m}`));
+  const manifestFile = path.join(o.out, 'binance-oi', 'manifest.json');
+  let manifest: Record<string, number> = {};
+  try { manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')); } catch { /* first run */ }
+  const res: Array<{ asset: string; fetched: number; rows: number; note?: string }> = [];
+  for (const asset of o.assets) {
+    const pair = `${asset}USDT`;
+    const r = { asset, fetched: 0, rows: 0 } as { asset: string; fetched: number; rows: number; note?: string };
+    res.push(r);
+    let keys: Array<{ key: string; size: number }>;
+    try { keys = (await listKeys(`data/futures/um/daily/metrics/${pair}/`, f)).filter((k) => k.key.endsWith('.zip')); } catch (e) { r.note = (e as Error).message; continue; }
+    if (!keys.length) { r.note = 'no USD-M perpetual metrics'; continue; }
+    const day = (k: string) => /-(\d{4}-\d{2}-\d{2})\.zip$/.exec(k)?.[1] ?? '';
+    const todo = keys.filter((k) => (!o.fromDay || day(k.key) >= o.fromDay) && manifest[k.key] !== k.size);
+    const file = path.join(o.out, 'binance-oi', asset, 'oi.csv');
+    const rows = new Map<number, [number, number]>();
+    if (fs.existsSync(file)) for (const l of fs.readFileSync(file, 'utf8').split('\n').slice(1)) { const [t, v, u] = l.split(',').map(Number); if (Number.isFinite(t) && v > 0) rows.set(t, [v, u]); }
+    await pool(todo, o.concurrency ?? 8, async (k) => {
+      try {
+        const entry = unzip(await download(k.key, f)).find((e) => e.name.endsWith('.csv'));
+        if (!entry) throw new Error('no CSV inside');
+        for (const [t, v, u] of parseMetricsCsv(entry.data.toString('utf8'))) rows.set(t, [v, u]);
+        manifest[k.key] = k.size;
+        r.fetched++;
+      } catch (e) { log(`${k.key}: ${(e as Error).message}`); }
+    });
+    if (r.fetched) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(`${file}.tmp`, 'ts,oi,oi_usd\n' + [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([t, [v, u]]) => `${t},${v},${u}`).join('\n') + '\n');
+      fs.renameSync(`${file}.tmp`, file);
+      fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+    }
+    r.rows = rows.size;
+    log(`${pair} open interest: fetched ${r.fetched} day(s), ${r.rows} readings stored`);
+  }
+  return res;
+}
+
 export async function binanceMain(argOf: (k: string, d: string) => string = cliArg, flags: (k: string) => boolean = (k) => process.argv.includes(`--${k}`)): Promise<BinanceSummary[]> {
   const log = (m: string) => console.log(`[binance] ${m}`);
   const assets = await resolveAssets(argOf('assets', 'auto'), { kalshiUrl: process.env.KALSHI_REST_URL, perpsUrl: process.env.KALSHI_PERPS_REST_URL, log });

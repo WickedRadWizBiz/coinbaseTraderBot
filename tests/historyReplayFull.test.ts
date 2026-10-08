@@ -9,7 +9,8 @@ import { readRecordings, ReplayState, type RecEvent } from '../research/replay';
 import { assetFeatureMap } from '../bot/model/featureEngine';
 import { upsertSeries } from '../bot/marketdata/historyStore';
 import { buildPerpDataset, type PerpRow } from '../research/trainPerpModel';
-import { PERP_FEATURES } from '../bot/perps/perpSignal';
+import { PERP_FEATURES, perpFeatures } from '../bot/perps/perpSignal';
+import { parseMetricsCsv } from '../research/history/binanceVision';
 import { eraDays } from '../research/snnPbt';
 import { tmpDir } from './helpers';
 
@@ -176,6 +177,37 @@ test('history replay: a day built before its data arrived is built again, an emp
   writeDominance(hist, D0 + DAY, D0 + 2 * DAY);
   const dom = await buildHistoryReplay({ ...opts, outDir: a, toDay: '2026-03-03' });
   assert.ok(dom.written >= 2 && read(a, '2026-03-02').includes('"k":"dominance"'));
+});
+
+test('open interest: Binance metrics parsed, carried on the replay\'s perp quotes for at most 10 minutes, the open-interest features defined', async () => {
+  assert.deepEqual(parseMetricsCsv('create_time,symbol,sum_open_interest,sum_open_interest_value\n2026-03-01 00:05:00,BTCUSDT,95676.373,7982126717.19\nbad,line\n'), [[D0 + 5 * MIN, 95676.373, 7982126717.19]]);
+  const hist = tmpDir(), out = path.join(tmpDir(), 'replay');
+  writeBars(hist, D0 - 2 * DAY, D0);
+  // Readings every 5 minutes, with a half-hour hole at 12:00 on the second day.
+  const hole = [D0 - DAY + 12 * H, D0 - DAY + 12.5 * H];
+  const rows: string[] = [];
+  for (let t = D0 - 2 * DAY, k = 0; t < D0; t += 5 * MIN, k++) if (t < hole[0] || t >= hole[1]) rows.push(`${t},${90000 + 10 * Math.sin(k / 7)},${9e9}`);
+  fs.mkdirSync(path.join(hist, 'binance-oi', 'BTC'), { recursive: true });
+  fs.writeFileSync(path.join(hist, 'binance-oi', 'BTC', 'oi.csv'), `ts,oi,oi_usd\n${rows.join('\n')}\n`);
+  await buildHistoryReplay({ historyDir: hist, outDir: out, assets: ['BTC', 'ETH'], fromDay: '2026-02-27', toDay: '2026-02-28', log: () => {} });
+  const st = new ReplayState();
+  let withOi = 0, inHole = 0, ethOi = 0, early: number | undefined, late: number | undefined;
+  for await (const e of readRecordings(out)) {
+    st.apply(e);
+    if (e.k === 'perp' && e.asset === 'BTC') {
+      if (e.openInterest > 0) withOi++;
+      if (e.t >= hole[0] + 10 * MIN + 1000 && e.t < hole[1]) { assert.equal(e.openInterest, undefined, 'a reading older than 10 minutes is not carried'); inHole++; }
+    }
+    if (e.k === 'perp' && e.asset === 'ETH' && e.openInterest !== undefined) ethOi++;
+    if (e.tie) continue;
+    const f = () => perpFeatures('BTC', st.now, { index: st.index.get('BTC'), spot: st.spot.get('BTC'), bars: st.features.bars.get('BTC'), candles: st.features.candles.get('BTC'), perp: st.features.perps.get('BTC') });
+    if (e.t === D0 - DAY + 6 * H) early = f().perp_oi_chg_1h;
+    if (e.t === hole[0] + 20 * MIN) late = f().perp_oi_chg_1h;
+  }
+  assert.ok(withOi > 2 * 5760 * 0.9 && inHole > 50, `quotes with open interest ${withOi}, in the hole ${inHole}`);
+  assert.equal(ethOi, 0, 'no readings: none made up');
+  assert.ok(Number.isFinite(early), 'the hourly open-interest change is defined');
+  assert.ok(late !== undefined && !Number.isFinite(late), 'and missing in the hole, as with a stale live feed');
 });
 
 test('history replay helpers: the first and last bar of a CSV (a torn last line ignored)', () => {

@@ -394,6 +394,17 @@ export interface AutoTrainConfig {
   /** Exploration member: every N tournament rounds the worst SNN restarts from scratch with random
    *  knobs instead of copying the elite (0 = never). */
   snnPbtRestartEvery: number;
+  /** Held-out weeks a challenger SNN replays against the network in use before it may replace it (history
+   *  replay; research/historyLedger.ts). */
+  contestWeeks: number;
+  /** Where the continuous trainer stops (research/readiness.ts): the whole bot, on held-out days and a pool of
+   *  targetPoolUsd, earning at least targetDailyPct of the pool a day (the 95% interval's lower end, not
+   *  just the mean) with a drawdown of at most targetMaxDdPct; or plateauRounds rounds in a row without
+   *  progress (no model promoted, no better readiness). */
+  targetPoolUsd: number;
+  targetDailyPct: number;
+  targetMaxDdPct: number;
+  plateauRounds: number;
 }
 
 export interface SnnConfig {
@@ -1006,6 +1017,11 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       snnPbtPopulation: num(env, 'AUTO_TRAIN_SNN_PBT_POPULATION', 3, 2, 64),
       snnPbtEveryDays: num(env, 'AUTO_TRAIN_SNN_PBT_EVERY_DAYS', 30, 0, 365),
       snnPbtRestartEvery: num(env, 'AUTO_TRAIN_SNN_PBT_RESTART_EVERY', 4, 0, 1000),
+      contestWeeks: num(env, 'AUTO_TRAIN_CONTEST_WEEKS', 2, 1, 12),
+      targetPoolUsd: num(env, 'TRAIN_TARGET_POOL_USD', 200, 1, 1e9),
+      targetDailyPct: num(env, 'TRAIN_TARGET_DAILY_PCT', 50, 0.01, 1000),
+      targetMaxDdPct: num(env, 'TRAIN_TARGET_MAX_DD_PCT', 10, 0.1, 100),
+      plateauRounds: num(env, 'TRAIN_PLATEAU_ROUNDS', 3, 1, 100),
     },
     snn: {
       mode: oneOf(env, 'SNN_MODE', 'shadow', ['off', 'shadow', 'blend'] as const),

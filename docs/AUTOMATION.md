@@ -107,7 +107,11 @@ Once a week (`SWEEP_EVERY_DAYS`), the pipeline runs the sweep optimizer (`resear
 
 The search runs as a background process, so a long sweep (`npm run research:sweep -- --target setups-long --hours 24`) costs nothing while it grinds. If a sweep stops partway, it resumes from its ledger.
 
-### 8. It reports what the recordings make testable, and switches on what they prove
+### 8. It scores the whole bot against a target (readiness)
+
+The last step, `readiness`, replays the whole bot (Kalshi contracts and perps setup lanes, one pot of capital) on days nothing was fitted or tuned on. It reports the daily return in % of `TRAIN_TARGET_POOL_USD` with its 95% interval, the drawdown, the Sharpe and the share of winning days. It says whether that meets the target and whether it looks solid, and writes every model's state and each network's history-ledger position to `AUTO_TRAIN_DIR/readiness.json`. The continuous laptop trainer stops when the target is met (docs/LAPTOP_TRAINING.md).
+
+### 9. It reports what the recordings make testable, and switches on what they prove
 
 Some parts of the bot can be tested on years of exchange history. Others exist only in the bot's own recordings: the SNNs' live states, Kalshi order books, perps funding, and the SNN's calls on setup trades. Each daily report (and `pipeline_state.json`) has a **readiness** block. It shows how many recorded days there are, how much disk they use and how much is free, and for each step that needs recordings, how much it has against how much it needs. For example: `sweep bot (whole-bot replay) 12/20`, `setup_snn gate 37/150`.
 
@@ -199,7 +203,10 @@ These can't be automated, or deliberately aren't.
 | `SWEEP_TARGETS` | `setups-long,setups-short,setups-vol,kalshi,bot` | Sweep targets run weekly. |
 | `RECORDINGS_GZIP_AFTER_DAYS` | `2` | Gzip recorded days older than this (0 = never). |
 | `RECORDINGS_MIN_FREE_GB` | `3` | Send a low-disk alert below this much free space. |
-| `AUTO_TRAIN_SNN_PBT_DAYS` / `AUTO_TRAIN_SNN_PBT_EVERY_DAYS` | `7` / `30` | SNN tournaments: days replayed, how often they rerun (docs/EVOLUTION.md has every tournament setting). |
+| `AUTO_TRAIN_SNN_PBT_DAYS` / `AUTO_TRAIN_SNN_PBT_EVERY_DAYS` | `7` / `30` | SNN tournaments: days replayed, how often they rerun (docs/EVOLUTION.md has every tournament setting). On the history replay, a generation is that many days of weeks the network has never trained on (docs/LAPTOP_TRAINING.md, history ledger). |
+| `AUTO_TRAIN_CONTEST_WEEKS` | `2` | History replay: held-out weeks a new SNN replays against the network in use. It replaces that network only if it scores better there. |
+| `TRAIN_TARGET_POOL_USD` / `TRAIN_TARGET_DAILY_PCT` / `TRAIN_TARGET_MAX_DD_PCT` | `200` / `50` / `10` | The readiness step's target: the whole bot on held-out days earning this % of the pool a day (the lower end of the 95% interval) with at most this drawdown. The continuous laptop trainer stops when it is met. 50% a day is far beyond any real system; see docs/LAPTOP_TRAINING.md. |
+| `TRAIN_PLATEAU_ROUNDS` | `3` | Continuous laptop trainer: stop after this many rounds in a row that improve no model. |
 
 ## If something goes wrong
 

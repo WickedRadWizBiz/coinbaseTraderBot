@@ -43,12 +43,16 @@
 //   8. fill          fill / adverse-selection model from the bot's own maker quotes: skipped until
 //                    enough quotes and fills exist, promoted once it beats the base rate on holdout;
 //                    the engine starts using it the moment a validated file appears.
+//   10. readiness    the whole bot (Kalshi + perps setups, one pot) replayed on days nothing was fitted or tuned
+//                    on, in % of TRAIN_TARGET_POOL_USD, against the target the continuous laptop trainer stops
+//                    at; every model's state; each network's weeks in the history ledger -> readiness.json
+//                    (research/readiness.ts)
 //
 // A new network triggers the retrain of its own consumer only (the bot watches snn_<domain>.json,
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing
+//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, rule_book, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, readiness
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
 
@@ -73,9 +77,14 @@ import { sessionsMain } from './sessions';
 import { snnAblationMain, type Verdict } from './snnAblation';
 import { replaySnn } from './snnReplay';
 import { trainMetaModelMain } from './trainMetaModel';
-import { trainPerpMain } from './trainPerpModel';
+import { buildPerpDataset, perpRuleRecord, trainPerpMain } from './trainPerpModel';
 import { trainSnnMain } from './trainSnn';
-import { eraDays, runSnnPbt } from './snnPbt';
+import { runSnnPbt } from './snnPbt';
+import { snnContest, type ContestResult } from './snnContest';
+import { daysOf, HistoryLedger, HOLDOUT_RULE, isHoldout, isoWeek, weekBlocks } from './historyLedger';
+import { componentStatus, dailyStats, ledgerStatus, SOLID, solidWholeBot, targetMet, writeReadiness, type ReadinessFile, type ReadinessTarget } from './readiness';
+import { loadWholeBot, runWholeBot, settingsFromConfig } from './wholeBot';
+import { SetupModel } from '../bot/setups/setupModel';
 import { withSnnHyper } from '../bot/snn/population';
 import { versionHash } from '../bot/snn/params';
 import { trainTennisMain } from './trainTennisModel';
@@ -85,11 +94,11 @@ import { sweepMain } from './sweep';
 import { collectFiles, importFile } from './history/importCsv';
 import { downloadKalshiHistory, downloadKalshiTrades } from './history/kalshiHistory';
 import { tvFill } from './history/tradingview';
-import { linkDays, recordingDayList, recordingsUsage } from '../bot/marketdata/recordingFiles';
+import { linkDays, recordingDayList, recordingFiles, recordingsUsage } from '../bot/marketdata/recordingFiles';
 import { readJournalTrades } from '../bot/setups/journal';
 import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
 import { exportTaNetOos, oosDir } from './taNetOos';
-import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, type BinanceMarket } from './history/binanceVision';
+import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, downloadBinanceOpenInterest, type BinanceMarket } from './history/binanceVision';
 import { buildHistoryReplay, historyStart, perpSpecsFromRecordings, replayKalshiDays, replayPerpDays, replayTennisDays } from './history/historyReplay';
 import { workerCount } from './workerPool';
 import { compareIndexSources } from '../bot/marketdata/historyStore';
@@ -98,7 +107,7 @@ import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
 import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
 
-export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'rule_book', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing'] as const;
+export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'rule_book', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'readiness'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -214,6 +223,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const log = o.log ?? ((m: string) => console.log(`[pipeline] ${m}`));
   const now = o.now ?? Date.now();
   const work = path.join(A.dir, 'work');
+  // Which weeks of the history replay each network has trained on and been judged on.
+  const ledger = new HistoryLedger(path.join(work, 'history-ledger.json'));
   const fillRoot = path.join(work, 'snnfill');
   const fillDir = (d: SnnDomain) => path.join(fillRoot, d);
   for (const d of REPLAYABLE) fs.mkdirSync(fillDir(d), { recursive: true });
@@ -310,7 +321,9 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         const rs = await downloadBinance({ out: T.historyDir, assets: T.historyReplayAssets, intervals: ['1m'], markets: ['spot'], source: 'binance-1m', fromMonth, log: (m) => log(`binance: ${m}`) });
         const ru = await downloadBinance({ out: T.historyDir, assets: T.historyReplayAssets, intervals: ['1m'], markets: ['um'], fromMonth, log: (m) => log(`binance: ${m}`) });
         const fu = await downloadBinanceFunding({ out: T.historyDir, assets: T.historyReplayAssets, fromMonth, log: (m) => log(`binance: ${m}`) });
-        replayInputs = { spot1m: rs.reduce((a, b) => a + b.fetched, 0), perp1m: ru.reduce((a, b) => a + b.fetched, 0), funding: fu.map((f) => `${f.asset} ${f.rows}`) };
+        // Open interest every 5 minutes (from September 2020): the perps model's open-interest inputs.
+        const oi = await downloadBinanceOpenInterest({ out: T.historyDir, assets: T.historyReplayAssets, fromDay: fromMonth ? `${fromMonth}-01` : undefined, log: (m) => log(`binance: ${m}`) });
+        replayInputs = { spot1m: rs.reduce((a, b) => a + b.fetched, 0), perp1m: ru.reduce((a, b) => a + b.fetched, 0), funding: fu.map((f) => `${f.asset} ${f.rows}`), openInterest: oi.map((f) => `${f.asset} ${f.rows}`) };
       }
       const btcdomCheck = compareIndexSources(T.historyDir, 'BTCDOM', 'binance-index', 'bot-index');
       if (btcdomCheck.overlap) log(`BTCDOM: live rebuild vs Binance over ${btcdomCheck.overlap} hours: hourly return correlation ${btcdomCheck.returnCorr.toFixed(3)}, level ratio ${btcdomCheck.levelRatio.toFixed(4)}`);
@@ -378,15 +391,18 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       state.taNetComplete = rep.complete;
       // The initialisation runs in chunks of rounds (one chunk per daily run); nothing is promoted
       // until the tournament has reached the present.
-      if (!rep.complete) return { promoted: false, reason: `tournament in progress: ${rep.rounds} round(s) done, ${rep.remaining} to go (continues on the next run)` };
+      if (!rep.complete) return { promoted: false, complete: false, reason: `tournament in progress: ${rep.rounds} round(s) done, ${rep.remaining} to go (continues on the next run)` };
       state.taNetTrainedAt = now;
       const summary = { rounds: rep.rounds, newRounds: rep.newRounds, network: rep.params.network, heads: Object.fromEntries(Object.entries(rep.params.heads).map(([k, h]) => [k, h.validation])), elite: rep.params.pbt.elite };
       if (A.promote === 'validated' && !validated.length) return { promoted: false, version: rep.params.version, reason: 'no head passed the holdout and network hurdles', ...summary };
+      // No new tournament round since the network in use was trained: the same elite retrained on the same
+      // months scores the same. It stays (re-promoting it would only fill the ensemble's archive with copies).
+      if (rep.newRounds === 0 && rep.champion?.incumbent != null && !(rep.champion.candidate < rep.champion.incumbent)) return { promoted: false, version: rep.params.version, reason: 'no new tournament round since the network in use: it stays', champion: rep.champion, ...summary };
       const champ = promoteIfChampion({ dir: A.dir, kind: 'ta_net', candidate: cand, live: taNetFile, enabled: A.champion, candidateScore: rep.champion?.candidate, incumbentScore: rep.champion?.incumbent });
       if (!champ.promote) return { promoted: false, version: rep.params.version, reason: champ.reason, champion: rep.champion, ...summary };
       state.taNetVersion = rep.params.version;
       installTaNet();
-      return { promoted: true, version: rep.params.version, validatedHeads: validated, champion: { ...rep.champion, reason: champ.reason, archived: champ.archived ?? null }, ...summary };
+      return { promoted: true, improved: champ.improved, version: rep.params.version, validatedHeads: validated, champion: { ...rep.champion, reason: champ.reason, archived: champ.archived ?? null }, ...summary };
     }, !T.enabled ? 'TA_NET=false' : noHistory ?? (due ? undefined : `trained ${((now - state.taNetTrainedAt!) / 86_400_000).toFixed(1)} day(s) ago (TA_NET_RETRAIN_DAYS=${T.retrainEveryDays})`));
   }
 
@@ -438,7 +454,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       // Its recent out-of-sample setups, for the whole-bot replay (research/wholeBot.ts).
       if (fs.existsSync(oosCand)) fs.copyFileSync(oosCand, path.join(A.dir, 'setup_oos.json'));
       state.setupsVersion = p.version;
-      return { promoted: true, champion: champ.reason, ...summary };
+      return { promoted: true, improved: champ.improved, champion: champ.reason, ...summary };
     }, cfg.perps.strategy !== 'setups' ? 'PERP_STRATEGY is not setups' : noHistory ?? (due ? undefined : `trained ${((now - state.setupsTrainedAt!) / 86_400_000).toFixed(1)} day(s) ago (SETUP_RETRAIN_DAYS=${P.setupRetrainDays})`));
   }
 
@@ -506,6 +522,9 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       ds.pbtComplete = r.complete;
       if (!r.complete) return { complete: false, reason: `tournament in progress: ${r.rounds} round(s) done, ${r.remaining} to go`, elite: r.elite };
       ds.pbtHyper = r.elite.hyper; ds.pbtStage = stage; ds.pbtAt = now;
+      const tw = [...new Set(tennisDays.slice(-A.snnPbtDays).map(isoWeek))];
+      const g = ledger.begin('snn-tennis', 'tournament', tw.map((id) => ({ id, days: [] })));
+      ledger.markTrained('snn-tennis', tw); ledger.finish('snn-tennis', g.id, `elite #${r.elite.member}`); ledger.save();
       return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: `history replay (${tennisDays.length} day(s) with tennis)` };
     }, pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`) as { complete?: boolean } | undefined;
     const hyper = ds.pbtStage === stage ? ds.pbtHyper : undefined;
@@ -519,11 +538,13 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const cand = path.join(work, 'snn_tennis.candidate.json');
       writeAtomic(cand, JSON.stringify(r.net.exportModel(`tennis stage ${stage}; online over ${span.length} replayed day(s) of Kalshi tennis history; template of ${matches} match(es)`)));
       const b = (f: (x: { pSnn: number; mid: number }) => number) => r.rows.reduce((a, x) => a + (f(x) - x.y) ** 2, 0) / Math.max(1, r.rows.length);
+      const first = !fs.existsSync(file);
       fs.copyFileSync(cand, file);
+      ledger.markTrained('snn-tennis', [...new Set(span.map(isoWeek))]); ledger.save();
       ds.stage = stage; ds.version = versionHash(params);
       if (state.snnVersions!.tennis !== ds.version) snnChanged.push('tennis');
       state.snnVersions!.tennis = ds.version;
-      return { promoted: true, stage, matches, rows: r.rows.length, brier: { snn: b((x) => x.pSnn), market: b((x) => x.mid) } };
+      return { promoted: true, improved: first, stage, matches, rows: r.rows.length, brier: { snn: b((x) => x.pSnn), market: b((x) => x.mid) } };
     }, trainNeeded ? undefined : 'up to date');
   };
 
@@ -567,24 +588,41 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       // the elite's knobs are this network's hyperparameters from now on. On the history replay the days
       // are blocks spread over all its years (perps: from Binance's first perpetual), so the knobs must
       // hold up in every kind of market; on the recordings, the latest days.
-      const block = 2 * A.snnPbtInitDays + 1;
-      const layout = src === rec ? 'latest' : `era:${block}`;
-      const pbtDue = o.forceSnnPbt || ds.pbtStage !== stage || !ds.pbtHyper || ds.pbtComplete === false || (ds.pbtLayout ?? 'latest') !== layout || (A.snnPbtEveryDays > 0 && now - (ds.pbtAt ?? 0) >= A.snnPbtEveryDays * 86_400_000);
-      const pbtDays = src === rec ? lastSrc(A.snnPbtDays) : eraDays(domain === 'perps' ? replayPerpDays(replayDir) : srcDays, A.snnPbtDays, block);
+      // On the history replay the history ledger (research/historyLedger.ts) picks the tournament's days:
+      // each generation is weeks this network has never trained on, spread over all the years, and the
+      // population carries on from one generation to the next (every round of the laptop trainer runs one).
+      // Holdout weeks are never trained on: the contest below is run there.
+      const ledgerNet = `snn-${domain}`;
+      const weeks = src === rec ? [] : weekBlocks(domain === 'perps' ? replayPerpDays(replayDir) : srcDays);
+      const latestDay = srcDays[srcDays.length - 1];
+      let gen = src === rec ? undefined : ledger.current(ledgerNet, 'tournament');
+      if (src !== rec && !gen) {
+        // A new stage (or no knobs yet, or a forced re-run) needs its tournament even with no fresh week left:
+        // it then takes the weeks this network has trained on least.
+        const reuse = Boolean(o.forceSnnPbt) || ds.pbtStage !== stage || !ds.pbtHyper;
+        const pick = ledger.pickTrain(ledgerNet, weeks, Math.max(1, Math.round(A.snnPbtDays / 7)), latestDay, reuse);
+        if (pick.length) { gen = ledger.begin(ledgerNet, 'tournament', pick, reuse && pick.some((b) => ledger.use(ledgerNet, b.id).trained > 0) ? 're-run on the least-used weeks' : undefined); ledger.save(); }
+      }
+      const layout = src === rec ? 'latest' : 'ledger';
+      const pbtDue = o.forceSnnPbt || ds.pbtStage !== stage || !ds.pbtHyper || ds.pbtComplete === false || (ds.pbtLayout ?? 'latest') !== layout || gen !== undefined || (A.snnPbtEveryDays > 0 && now - (ds.pbtAt ?? 0) >= A.snnPbtEveryDays * 86_400_000);
+      const pbtDays = src === rec ? lastSrc(A.snnPbtDays) : gen ? daysOf(weeks, gen.blocks) : [];
+      const noFresh = src !== rec && !gen ? `every training week has been used by this network (${weeks.length} weeks): no fresh history until new weeks complete` : undefined;
       const pbt = await run(`snn-${domain}-pbt`, async () => {
         let r;
         try {
-          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, allDays: srcDays, layout, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), log });
+          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, allDays: srcDays, layout, generation: gen?.id, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), log });
         } catch (e) {
           if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;
         }
         ds.pbtComplete = r.complete;
         ds.pbtLayout = layout;
-        if (!r.complete) return { complete: false, reason: `tournament in progress: ${r.rounds} round(s) done, ${r.remaining} to go`, elite: r.elite };
+        if (gen && r.complete) { ledger.markTrained(ledgerNet, gen.blocks); ledger.finish(ledgerNet, gen.id, `elite #${r.elite.member}`); ledger.save(); }
+        const genInfo = gen ? { generation: gen.id, weeks: gen.blocks, freshWeeksLeft: ledger.summary(ledgerNet, weeks, latestDay).fresh } : {};
+        if (!r.complete) return { complete: false, reason: `tournament in progress: ${r.rounds} round(s) done, ${r.remaining} to go`, elite: r.elite, ...genInfo };
         ds.pbtHyper = r.elite.hyper; ds.pbtStage = stage; ds.pbtAt = now;
-        return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: src === rec ? 'recordings' : `history replay, ${pbtDays.length} days from ${pbtDays[0]} to ${pbtDays[pbtDays.length - 1]}` };
-      }, srcGate ?? (pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`)) as { complete?: boolean } | undefined;
+        return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: src === rec ? 'recordings' : `history replay, ${pbtDays.length} days from ${pbtDays[0]} to ${pbtDays[pbtDays.length - 1]}`, ...genInfo };
+      }, srcGate ?? noFresh ?? (pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`)) as { complete?: boolean } | undefined;
       const hyper = ds.pbtStage === stage ? ds.pbtHyper : undefined;
       const trainNeeded = Boolean(verdicts) || Boolean(pbt?.complete) || !fs.existsSync(file) || ds.stage !== stage;
       await run(`snn-${domain}-train`, async () => {
@@ -597,13 +635,30 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
           from: trainSpan[0], to: evalSpan[0] ?? undefined,
           'eval-from': evalSpan[0], 'eval-to': evalSpan.length ? nextDay(evalSpan[evalSpan.length - 1]) : undefined,
         }));
+        if (src !== rec) { ledger.markTrained(ledgerNet, weekBlocks(span).map((b) => b.id)); ledger.save(); }
         if (A.promote === 'validated' && !stageAccepted) return { promoted: false, stage, reason: 'stage not accepted by the ablation', result: r };
+        // Contest (history replay): the new network replaces the one in use only if it beats it on held-out
+        // weeks neither has trained on (the least-judged ones), replayed as live. Its own training days are
+        // the latest ones, younger than any held-out week unless AUTO_TRAIN_SNN_TRAIN_DAYS reaches past half a
+        // year; a held-out week inside them is then left out of the contest.
+        let contest: ContestResult | undefined;
+        if (src !== rec && A.champion && fs.existsSync(file)) {
+          const unseen = weeks.filter((b) => b.days[b.days.length - 1] < span[0] || b.days[0] > span[span.length - 1]);
+          const cw = ledger.pickContest(ledgerNet, unseen, A.contestWeeks, latestDay);
+          if (cw.length) {
+            contest = await snnContest({ recordings: replayDir, domain, candidate: JSON.parse(fs.readFileSync(cand, 'utf8')), incumbent: JSON.parse(fs.readFileSync(file, 'utf8')), days: cw.flatMap((b) => b.days), allDays: srcDays, workers: workerCount(), log });
+            const g = ledger.begin(ledgerNet, 'contest', cw, contest.winner);
+            ledger.markJudged(ledgerNet, g.blocks); ledger.finish(ledgerNet, g.id); ledger.save();
+            if (contest.winner !== 'candidate') return { promoted: false, stage, reason: `contest: challenger ${contest.reason}`, contest, result: r };
+          }
+        }
+        const first = !fs.existsSync(file);
         fs.copyFileSync(cand, file);
         if (state.snnVersions![domain] !== r?.version) snnChanged.push(domain);
         ds.stage = stage;
         ds.version = r?.version;
         state.snnVersions![domain] = r?.version;
-        return { promoted: true, stage, stageAccepted, result: r };
+        return { promoted: true, improved: first || contest?.winner === 'candidate', stage, stageAccepted, contest, result: r };
       }, srcGate ?? (trainNeeded ? undefined : 'up to date'));
       // Prequential backfill, day by day from the last backfilled day (a fresh online network of the
       // promoted stage: it was never fitted offline on these days, so no output saw its own label).
@@ -646,7 +701,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       }
       if (A.promote === 'validated' && !p.validation.validated) return { promoted: false, validation: p.validation };
       const champ = promoteIfChampion({ dir: A.dir, kind: 'vol_model', candidate: cand, live: promoted('vol_model'), enabled: A.champion });
-      return { promoted: champ.promote, champion: champ.reason, validation: p.validation };
+      return { promoted: champ.promote, improved: champ.promote && champ.improved, champion: champ.reason, validation: p.validation };
     }, tooFew);
   }
 
@@ -675,7 +730,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       state.mlpId = m.id;
       state.trainedWithSnn!.crypto = state.snnVersions!.crypto;
       state.trainedWithTaNet = state.taNetVersion;
-      return { promoted: true, champion: champ.reason, id: m.id, kind: m.params.kind, usesSnnFeatures: usesSnn, take: m.params.take?.validation ?? null, validationPassed: passed, liveBlockers: m.liveBlockers() };
+      return { promoted: true, improved: champ.improved, champion: champ.reason, id: m.id, kind: m.params.kind, usesSnnFeatures: usesSnn, take: m.params.take?.validation ?? null, validationPassed: passed, liveBlockers: m.liveBlockers() };
     }, tooFew);
   }
 
@@ -704,26 +759,45 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     const perpSrc = T.historyReplay && replayDays().length >= 30 ? replayDir : rec;
     await run('perps', async () => {
       const cand = path.join(work, 'perp_model.candidate.json');
-      try { await trainPerpMain(argsOf({ recordings: perpSrc, out: cand, every: perpSrc === rec ? undefined : 900, cache: path.join(work, perpSrc === rec ? 'perp-dataset-rec' : 'perp-dataset'), workers: workerCount() })); } catch (e) {
+      const cache = path.join(work, perpSrc === rec ? 'perp-dataset-rec' : 'perp-dataset');
+      // On the replay the history ledger's held-out weeks are left out of training: the contest and the
+      // execution backtest run there, on weeks the model has never seen.
+      const perpDays = perpSrc === replayDir ? replayPerpDays(replayDir) : [];
+      const held = perpDays.length ? weekBlocks(perpDays).filter((b) => isHoldout(b, replayDays().slice(-1)[0])) : [];
+      try { await trainPerpMain(argsOf({ recordings: perpSrc, out: cand, every: perpSrc === rec ? undefined : 900, cache, workers: workerCount(), holdout: held.length ? 'ledger' : undefined })); } catch (e) {
         if (/record more perp data|no perp/i.test((e as Error).message)) throw new SkipStep('no perp quotes recorded yet (PERPS_FEED=true records them)');
         throw e;
       }
       if (!fs.existsSync(cand)) throw new SkipStep('perp trainer wrote no model');
-      // The execution backtest: the replay's latest year of perpetual quotes (the market as it trades now).
+      // The execution backtest: the held-out weeks on the replay, else the recordings.
       let btSrc = perpSrc;
-      if (perpSrc === replayDir) {
+      if (held.length) {
         btSrc = path.join(work, 'perp-backtest-days');
         fs.rmSync(btSrc, { recursive: true, force: true });
-        linkDays(replayPerpDays(replayDir).slice(-365).map((d) => ({ day: d, file: path.join(replayDir, `md-${d}.jsonl.gz`) })), btSrc);
+        linkDays(held.flatMap((b) => b.days).map((d) => ({ day: d, file: path.join(replayDir, `md-${d}.jsonl.gz`) })), btSrc);
       }
       await perpBacktestMain(argsOf({ recordings: btSrc, model: cand }), true);
       const m = PerpModel.load(cand);
       const ok = Boolean(m?.validated());
       if (A.promote === 'validated' && !ok) return { promoted: false, reason: m?.blockers().join('; ') };
-      const champ = promoteIfChampion({ dir: A.dir, kind: 'perp', candidate: cand, live: promoted('perp'), enabled: A.champion });
-      if (!champ.promote) return { promoted: false, reason: champ.reason };
+      // Contest: the live rule's net P&L per trade on the held-out weeks, challenger vs the model in use --
+      // only when the model in use was also trained without them (else the contest would favour it).
+      const live = PerpModel.load(promoted('perp'));
+      let contest: { candidate: ReturnType<typeof perpRuleRecord>; incumbent: ReturnType<typeof perpRuleRecord>; weeks: number } | undefined;
+      if (m && live && held.length && live.params.holdout === HOLDOUT_RULE) {
+        const heldDays = new Set(held.flatMap((b) => b.days));
+        const rows = (await buildPerpDataset(perpSrc, { everySec: 900, horizonMin: cfg.perps.horizonMin, cacheDir: cache, workers: workerCount() })).filter((r) => heldDays.has(new Date(r.ts).toISOString().slice(0, 10)));
+        const ro = { horizonMin: cfg.perps.horizonMin, makerBps: cfg.perps.makerFeeBps, entryEdgeBps: cfg.perps.entryEdgeBps };
+        contest = { candidate: perpRuleRecord(m, rows, ro), incumbent: perpRuleRecord(live, rows, ro), weeks: held.length };
+        const g = ledger.begin('perp-model', 'contest', held, `${contest.candidate.meanBps.toFixed(2)} vs ${contest.incumbent.meanBps.toFixed(2)} bps/trade`);
+        ledger.markJudged('perp-model', g.blocks); ledger.finish('perp-model', g.id);
+      }
+      if (held.length) { const ids = new Set(held.map((b) => b.id)); ledger.markTrained('perp-model', weekBlocks(perpDays).filter((b) => !ids.has(b.id)).map((b) => b.id)); ledger.save(); }
+      const scored = contest && contest.candidate.trades >= 20 && contest.incumbent.trades >= 20;
+      const champ = promoteIfChampion({ dir: A.dir, kind: 'perp', candidate: cand, live: promoted('perp'), enabled: A.champion, candidateScore: scored ? -contest!.candidate.meanBps : undefined, incumbentScore: scored ? -contest!.incumbent.meanBps : undefined });
+      if (!champ.promote) return { promoted: false, reason: champ.reason, contest };
       state.trainedWithSnn!.perps = state.snnVersions!.perps;
-      return { promoted: true, champion: champ.reason, validated: ok, blockers: m?.blockers() ?? [], data: perpSrc === rec ? 'recordings' : `history replay (${replayDays().length} days)` };
+      return { promoted: true, improved: champ.improved, champion: champ.reason, validated: ok, blockers: m?.blockers() ?? [], contest, data: perpSrc === rec ? 'recordings' : `history replay (${replayDays().length} days, ${held.length} held-out weeks)` };
     }, perpSrc === rec ? tooFew : undefined);
   }
 
@@ -741,7 +815,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const champ = promoteIfChampion({ dir: A.dir, kind: 'tennis', candidate: cand, live: promoted('tennis'), enabled: A.champion });
       if (!champ.promote) return { promoted: false, reason: champ.reason, validation: p.validation };
       state.trainedWithSnn!.tennis = state.snnVersions!.tennis;
-      return { promoted: true, champion: champ.reason, validation: p.validation, data: tennisHistory ? 'Kalshi tennis history + recordings' : 'recordings' };
+      return { promoted: true, improved: champ.improved, champion: champ.reason, validation: p.validation, data: tennisHistory ? 'Kalshi tennis history + recordings' : 'recordings' };
     }, tennisHistory ? undefined : tooFew);
   }
 
@@ -769,6 +843,51 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const r = await tuneSizingMain(argsOf({ 'data-dir': cfg.dataDir, kelly: cfg.strategy.kellyFraction, 'loss-at': cfg.strategy.ddScaleAt, start: cfg.paperBankrollUsd, floor: cfg.strategy.minTradableBankrollUsd, out: path.join(A.dir, 'sizing_proposal.json') }));
       if (!r.ready) throw new SkipStep(r.note);
       return { proposal: path.join(A.dir, 'sizing_proposal.json'), note: r.note, best: r.best, current: r.current, epochs: r.epochs };
+    });
+  }
+
+  // ---- 10. readiness: the whole bot on days nothing was fitted or tuned on, against the target the continuous
+  // trainer stops at; every model's state; each network's weeks in the history ledger (research/readiness.ts) ----
+  if (want('readiness')) {
+    await run('readiness', async () => {
+      const target: ReadinessTarget = { poolUsd: A.targetPoolUsd, dailyPct: A.targetDailyPct, maxDdPct: A.targetMaxDdPct, minDays: SOLID.minDays };
+      const kinds: Array<[keyof typeof MODEL_FILES, string]> = [['ta_net', 'ta_net'], ['setups', 'setups'], ['mlp', 'mlp'], ['perp', 'perp'], ['vol_model', 'vol_model'], ['tennis', 'tennis'], ['snn_crypto', 'snn'], ['snn_perps', 'snn'], ['snn_tennis', 'snn']];
+      const components = componentStatus(A.dir, Object.fromEntries(kinds.map(([k, kind]) => [k, { kind, file: promoted(k) }])));
+      const rDays = T.historyReplay ? replayDays() : [], pDays = T.historyReplay ? replayPerpDays(replayDir) : [];
+      const ledgerInfo = ledgerStatus(ledger, { 'snn-crypto': weekBlocks(rDays), 'snn-perps': weekBlocks(pDays), 'perp-model': weekBlocks(pDays), 'snn-tennis': weekBlocks(T.historyReplay ? replayTennisDays(replayDir) : [], 1) }, rDays[rDays.length - 1] ?? days[days.length - 1] ?? '1970-01-01');
+      // The days: the sweep's (the replay's days that hold Kalshi's real contracts, else the recordings), their
+      // newest 15% (the sweep's final window: never tuned on), without the days the MLP was fitted on (its
+      // development span; its own holdout stays in), at most the newest 90.
+      const kDays = T.historyReplay ? replayKalshiDays(replayDir) : [];
+      const useReplay = kDays.length >= 20 && kDays.length > days.length;
+      const all = useReplay ? kDays : days;
+      const fit = mlpPath() ? (MetaModel.load(mlpPath()!).params.training as { firstWindow?: string; holdoutStart?: string } | undefined) : undefined;
+      const fitted = (d: string) => Boolean(fit?.firstWindow && fit.holdoutStart && d >= fit.firstWindow.slice(0, 10) && d < fit.holdoutStart.slice(0, 10));
+      const held = all.slice(Math.floor(all.length * 0.85)).filter((d) => !fitted(d)).slice(-90);
+      let wholeBot: ReadinessFile['wholeBot'];
+      let note: string | undefined;
+      if (held.length) {
+        const src = path.join(work, 'readiness-days');
+        fs.rmSync(src, { recursive: true, force: true });
+        const set = new Set(held);
+        linkDays(useReplay ? held.map((d) => ({ day: d, file: path.join(replayDir, `md-${d}.jsonl.gz`) })) : recordingFiles(rec).filter((f) => set.has(f.day)), src);
+        const D = await loadWholeBot({ recordings: src, history: T.historyDir, setupOos: path.join(A.dir, 'setup_oos.json'), modelPath: mlpPath(), split: { held: [0, 1] }, log });
+        try {
+          let book;
+          try { book = SetupModel.load(fs.existsSync(promoted('setups')) ? promoted('setups') : cfg.perps.setupModelPath)?.params.book; } catch { book = undefined; }
+          const r = await runWholeBot(D, 'held', { ...settingsFromConfig(cfg, book), totalUsd: target.poolUsd });
+          const st = dailyStats(r.days.map((x) => x.total), target.poolUsd, r.days.map((x) => x.day));
+          const sw = solidWholeBot(st);
+          wholeBot = { ...st, window: `${useReplay ? 'history replay (real Kalshi contracts)' : 'recordings'}: ${held.length} day(s) ${held[0]}..${held[held.length - 1]}`, kalshiUsd: r.kalshiUsd, perpsUsd: r.perpsUsd, solid: sw.solid, solidWhy: sw.why };
+        } finally {
+          for (const d of Object.values(D.dirs)) fs.rmSync(d, { recursive: true, force: true });
+          fs.rmSync(src, { recursive: true, force: true });
+        }
+      } else note = 'no day the bot was neither fitted nor tuned on yet';
+      const t = wholeBot ? targetMet(wholeBot, target) : { met: false, why: [note ?? 'no whole-bot result'] };
+      writeReadiness(A.dir, { at: new Date(now).toISOString(), target, wholeBot, met: t.met, why: t.why, components, ledger: ledgerInfo, note });
+      const f2 = (x: number) => (Number.isFinite(x) ? +x.toFixed(3) : null);
+      return { met: t.met, why: t.why, solid: wholeBot?.solid ?? false, wholeBot: wholeBot ? { window: wholeBot.window, meanPct: f2(wholeBot.meanPct), ciLoPct: f2(wholeBot.ciLoPct), maxDdPct: f2(wholeBot.maxDdPct), sharpe: f2(wholeBot.sharpe), perDayUsd: f2(wholeBot.perDayUsd) } : null, ledger: ledgerInfo };
     });
   }
 
