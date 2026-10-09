@@ -184,7 +184,7 @@ export interface MarketStatus {
   /** Sigma multiplier from the TA network's validated volatility forecast (1 = none). */
   taVolMult?: number;
   conviction?: { taDir: number | null; drift: string[]; breadthUp: number; breadthDown: number; agree: string[]; oppose: string[]; alt: { active: boolean; why: string }; priority: number;
-    character?: { cls: string; why: string } | null; ruleBook?: { score: number; n: number; agree: string[]; oppose: string[] } | null; standAside?: string | null;
+    character?: { cls: string; why: string } | null; ruleBook?: { score: number; n: number; agree: string[]; oppose: string[]; /** Present but silenced by a breaking condition, or invalidated by another signal present now. */ silenced?: string[]; invalidated?: string[] } | null; standAside?: string | null;
     /** The coin's evolved formula (bot/gp/gpSignals.ts): exposure held now, validated, counted among the signals. */
     gp?: { exposure: number; desired: number; validated: boolean; speaks: boolean; formula: string } | null };
   /** Last adversarial verdict on an entry here (multiplier > 1 = it could not be broken). */
@@ -1566,7 +1566,7 @@ export class Engine {
     // Rule book (rules that passed the walk-forward study, for the coin's character) and the character
     // gate: no conviction boosts in a volatile-systemic market.
     const coinChar = marketContext()?.character(m.asset);
-    const rbRead = S0.ruleBook ? activeRuleBook()?.read(md.features.candles.get(m.asset)?.snapshot(now, marketContext()?.macro()), Math.max(4, tauSec / 3600), coinChar?.cls) : undefined;
+    const rbRead = S0.ruleBook ? activeRuleBook()?.read(md.features.candles.get(m.asset)?.snapshot(now, marketContext()?.macro()), Math.max(1, tauSec / 3600), coinChar?.cls) : undefined;
     const standAside = S0.characterStandAside && coinChar && STAND_ASIDE.includes(coinChar.cls) ? coinChar.why : undefined;
     // The coin's evolved formula on the latest hourly bars (unvalidated ones never speak live).
     const gpRead = S0.gp ? activeGpSignals()?.read(m.asset, (a) => md.features.candles.get(a)?.bars['1h']) : undefined;
@@ -1580,7 +1580,7 @@ export class Engine {
     st.taVolMult = +taVolMult.toFixed(3);
     st.taShift = taShift;
     st.conviction = { taDir: taDir ?? null, drift: drift?.parts ?? [], breadthUp: +bUp.breadth.toFixed(3), breadthDown: +bDn.breadth.toFixed(3), agree: bUp.agree, oppose: bUp.oppose, alt, priority: selectionPriority(alt.active, taDir, bUp.breadth, bDn.breadth),
-      character: coinChar ? { cls: coinChar.cls, why: coinChar.why } : null, ruleBook: rbRead ? { score: +rbRead.score.toFixed(3), n: rbRead.n, agree: rbRead.agree, oppose: rbRead.oppose } : null, standAside: standAside ?? null,
+      character: coinChar ? { cls: coinChar.cls, why: coinChar.why } : null, ruleBook: rbRead ? { score: +rbRead.score.toFixed(3), n: rbRead.n, agree: rbRead.agree, oppose: rbRead.oppose, silenced: rbRead.silenced ?? [], invalidated: rbRead.invalidated ?? [] } : null, standAside: standAside ?? null,
       gp: gpRead ? { exposure: +gpRead.exposure.toFixed(3), desired: +gpRead.desired.toFixed(3), validated: gpRead.validated, speaks: !!gpSpeaks, formula: gpRead.formula } : null };
     Object.assign(st, { kind: m.kind, strike: terms.strike, cap: terms.cap, strikeSource: m.strikeSource, spot: spot.value, sigma: vol.sigmaPerSqrtSec, sigmaPricing, fairValue: fv.pYes, pYes, pMarket, pStd: pred.std, bestBid: bid.price, bestAsk: ask.price, dPdS, blocked: undefined });
 

@@ -58,7 +58,8 @@ const sd = (xs: number[]) => { const m = mean(xs); return Math.sqrt(xs.reduce((a
 interface Obs { ts: number; r: number }
 
 export function runRuleBook(hist: Record<string, Hist>, o: RuleBookOptions = {}): RuleBookFile {
-  const horizons = o.horizons ?? [4, 24];
+  // 1h for the 15-minute and hourly contracts, 4h and 24h for the longer ones and the perps.
+  const horizons = o.horizons ?? [1, 4, 24];
   const stride = o.stride ?? 6, cost = (o.costBps ?? 10) / 1e4, minN = o.minN ?? 50, minConf = o.minConf ?? 20, q = o.fdr ?? 0.1;
   const log = o.log ?? (() => {});
   const assets = Object.keys(hist).filter((a) => hist[a].h1.length > 400);
