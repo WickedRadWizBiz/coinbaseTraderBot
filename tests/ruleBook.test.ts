@@ -5,6 +5,8 @@ import path from 'path';
 import os from 'os';
 import { runRuleBook } from '../research/ruleBook';
 import { bracketReturn, signed, studyCombos, type Step } from '../research/confluenceBook';
+import { buckets, conditionText, studyConditions } from '../research/conditionBook';
+import { CONTEXT_PARAMS, contextOf, oriented } from '../bot/strategy/ruleContext';
 import { RuleBook, type RuleBookFile, type RuleRow } from '../bot/strategy/ruleBook';
 import { breadthOf, riskOf } from '../bot/ta/marketContext';
 import { directionalConviction, orientedSignals } from '../bot/strategy/taConviction';
@@ -35,6 +37,7 @@ test('rule-book study: planted momentum is found and confirmed on the later year
   assert.ok(f.splitAt > f.from && f.splitAt < f.to);
   assert.ok(Array.isArray(f.combos) && f.combos.length > 0, 'pairs of co-active signals are logged');
   for (const c of f.combos!) assert.ok(c.parts[0] !== c.parts[1] && c.n >= 50);
+  assert.ok(Array.isArray(f.conditions) && f.conditions.length > 0, 'every rule\'s record is split by the context it fired in');
 });
 
 const row = (o: Partial<RuleRow>): RuleRow => ({ id: 'ema_stack', kind: 'rule', tf: '1h', h: 4, cls: 'all', n: 100, hit: 0.6, payoff: 1.2, expBps: 20, p: 0.001, fdr: true, nConf: 50, hitConf: 0.58, expConfBps: 15, pass: true, weight: 0.8, ...o });
@@ -135,4 +138,57 @@ test('live rule book: a passing pair counts when both of its signals are present
   assert.equal(rb.read(snap([{ id: 'ema_stack', tf: '1h', dir: 1, strength: 1 }, { id: 'rsi_extreme', tf: '4h', dir: -1, strength: 1 }]), 4)?.n, 0, 'disagreeing: the pair does not count');
   assert.equal(rb.read(snap([{ id: 'ema_stack', tf: '1h', dir: 1, strength: 1 }]), 4)?.n, 0, 'one of the two: nothing');
   assert.equal(rb.passedCombos().length, 1);
+});
+
+test('context: the parameters a signal fired in, directional ones read towards the signal', () => {
+  const tf = (o: object) => ({ rsi: 70, adx: 32, atrRank: 0.8, volRatio: 1.5, bbBandwidthRank: 0.2, chg20Atr: 3, cmf: 0.1, ema12: 102, ema26: 100, close: 110, sma200: 100, ...o });
+  const s = { asset: 'BTC', ts: Date.UTC(2026, 0, 3, 14), tf: { '1h': tf({}), '4h': tf({ rsi: 40 }), '1d': tf({ ema12: 99 }) }, signals: [], confluences: [], net: 0 } as unknown as TaSnapshot;
+  const ctx = contextOf(s, s.ts);
+  const at = (name: string, dir = 1) => oriented(ctx, CONTEXT_PARAMS.findIndex((p) => p.name === name), dir);
+  assert.equal(at('rsi_1h'), 20); assert.equal(at('rsi_1h', -1), -20, 'RSI 70 is against a bearish signal');
+  assert.equal(at('adx_1h', -1), 32, 'trend strength has no side');
+  assert.ok(at('trend_4h') > 0 && at('trend_1d') < 0 && at('trend_1d', -1) > 0);
+  assert.ok(Math.abs(at('vs_sma200_1d') - 0.1) < 1e-6);
+  assert.equal(at('hour_utc'), 14); assert.equal(at('weekend'), 1, '3 January 2026 is a Saturday');
+  assert.deepEqual(buckets([1, 0, 1, 0, 0]), [[null, 1], [1, null]], 'a flag splits by value');
+  assert.equal(buckets([1, 2, 3, 4, 5, 6, 7, 8, 9]).length, 3);
+});
+
+test('conditions: a rule that works in calm trends and fails in strong ones; both learned, the hour of day is not', () => {
+  const r = rng(11);
+  const keys = ['rule|rsi_extreme|1h'];
+  const adx = CONTEXT_PARAMS.findIndex((p) => p.name === 'adx_1h');
+  const steps: Step[] = [];
+  for (let k = 0; k < 9000; k++) {
+    const dir = r() < 0.5 ? 1 : -1;
+    const ctx = new Float32Array(CONTEXT_PARAMS.length).fill(NaN);
+    ctx[adx] = 10 + 40 * r();
+    ctx[CONTEXT_PARAMS.findIndex((p) => p.name === 'hour_utc')] = k % 24;
+    // In the signal's direction by 30 bps when ADX < 20, against it by 30 bps when ADX > 37.
+    const edge = ctx[adx] < 20 ? 0.003 : ctx[adx] > 37 ? -0.003 : 0;
+    steps.push({ asset: 0, i: k, t: T0 + k * H, fwd: [dir * edge + 0.006 * gauss(r)], active: Int32Array.from([signed(0, dir)]), ctx });
+  }
+  const rows = studyConditions(steps, keys, { horizons: [1], splitAt: T0 + 6000 * H, stride: 1, costBps: 0 });
+  const pass = rows.filter((x) => x.pass);
+  const makes = pass.find((x) => x.param === 'adx_1h' && x.effect === 'makes'), breaks = pass.find((x) => x.param === 'adx_1h' && x.effect === 'breaks');
+  assert.ok(makes && makes.lo === null && makes.hi! < 25, `works below ~20: ${JSON.stringify(makes)}`);
+  assert.ok(breaks && breaks.hi === null && breaks.lo! > 33, `fails above ~37: ${JSON.stringify(breaks)}`);
+  assert.ok(!pass.some((x) => x.param === 'hour_utc'), 'the hour carries nothing here');
+  assert.match(conditionText(makes!), /rsi_extreme\|1h works 1h when trend strength ADX \(1h\) is below/);
+});
+
+test('live rule book: a condition under which a rule fails silences it; one under which it works lets it count', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rbk-'));
+  const file = path.join(dir, 'rule_book.json');
+  const cond = (o: object) => ({ key: 'rule|rsi_extreme|1h', h: 4, param: 'adx_1h', lo: null, hi: 20, effect: 'makes', n: 90, hit: 0.6, expBps: 25, baseBps: 2, p: 0.001, fdr: true, nConf: 40, hitConf: 0.6, expConfBps: 15, baseConfBps: 1, pass: true, weight: 0.7, ...o });
+  fs.writeFileSync(file, JSON.stringify({ schema: 'rulebook1', generatedAt: '', assets: [], from: '', to: '', splitAt: '', stride: 6, costBps: 10, horizons: [4], character: { n: 1, accuracy: 0.7, baseline: 0.5, confusion: {}, share: {} },
+    rows: [row({ id: 'ema_stack', weight: 0.5 })], conditions: [cond({}), cond({ key: 'rule|ema_stack|1h', lo: 37, hi: null, effect: 'breaks', expBps: -20, expConfBps: -12 })] }));
+  const rb = new RuleBook(() => file);
+  const at = (adx: number) => ({ ...snap([{ id: 'rsi_extreme', tf: '1h', dir: 1, strength: 1 }, { id: 'ema_stack', tf: '1h', dir: 1, strength: 1 }]), ts: T0, tf: { '1h': { adx } } }) as unknown as TaSnapshot;
+  const calm = rb.read(at(15), 4)!;
+  assert.deepEqual(calm.agree.sort(), ['ema_stack@1h', 'rsi_extreme@1h'], 'rsi_extreme counts in a calm trend though it did not pass alone');
+  const strong = rb.read(at(45), 4)!;
+  assert.deepEqual(strong.agree, [], 'in a strong trend: rsi_extreme has no condition, ema_stack is silenced');
+  assert.deepEqual(strong.silenced, ['ema_stack@1h']);
+  assert.equal(rb.passedConditions().length, 2);
 });
