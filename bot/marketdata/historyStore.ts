@@ -68,9 +68,50 @@ export function mergeCandles(existing: Candle[], incoming: Candle[]): Candle[] {
   return [...m.values()].sort((a, b) => a.ts - b.ts);
 }
 
-/** Merge `incoming` into the stored series and write it back; returns the stored length. */
+/** The header and the last bar's timestamp of a stored series, from its first and last few KB (undefined
+ *  when there is no file, or no bar). */
+export function seriesEnds(file: string): { header: string; lastTs: number; endsWithNewline: boolean } | undefined {
+  if (!fs.existsSync(file)) return undefined;
+  const fd = fs.openSync(file, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (!size) return undefined;
+    const head = Buffer.alloc(Math.min(256, size));
+    fs.readSync(fd, head, 0, head.length, 0);
+    const tailLen = Math.min(8192, size), tail = Buffer.alloc(tailLen);
+    fs.readSync(fd, tail, 0, tailLen, size - tailLen);
+    const header = head.toString('utf8').split('\n')[0];
+    const lines = tail.toString('utf8').split('\n').filter((l) => l && !l.startsWith('ts'));
+    const lastTs = Number(lines[lines.length - 1]?.split(',')[0]);
+    return Number.isFinite(lastTs) ? { header, lastTs, endsWithNewline: tail[tailLen - 1] === 10 } : undefined;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Rows in a stored series (newlines counted in chunks; the file is not parsed). */
+function countRows(file: string): number {
+  const fd = fs.openSync(file, 'r'), buf = Buffer.alloc(1 << 20);
+  let n = 0, k: number;
+  try { while ((k = fs.readSync(fd, buf, 0, buf.length, null)) > 0) for (let i = 0; i < k; i++) if (buf[i] === 10) n++; } finally { fs.closeSync(fd); }
+  return Math.max(0, n - 1); // the header
+}
+
+/** Merge `incoming` into the stored series and write it back; returns the stored length. When every incoming
+ *  bar is newer than the stored series (a download adding the latest days), the bars are appended instead:
+ *  rewriting years of 1-minute bars for one new day took half a minute per series. */
 export function upsertSeries(dir: string, source: string, asset: string, tf: HistTf, incoming: Candle[]): number {
   const file = seriesPath(dir, source, asset, tf);
+  const ends = seriesEnds(file);
+  if (ends && incoming.length) {
+    const add = mergeCandles([], incoming); // sorted, one bar per timestamp
+    const tbCol = ends.header === 'ts,o,h,l,c,v,tb';
+    if (add[0].ts > ends.lastTs && (tbCol || !add.some((c) => c.tb !== undefined)) && /^ts,o,h,l,c,v(,tb)?$/.test(ends.header)) {
+      const rows = add.map((c) => `${c.ts},${fmt(c.o)},${fmt(c.h)},${fmt(c.l)},${fmt(c.c)},${fmt(c.v)}${tbCol ? `,${c.tb !== undefined ? fmt(c.tb) : ''}` : ''}`);
+      fs.appendFileSync(file, `${ends.endsWithNewline ? '' : '\n'}${rows.join('\n')}\n`);
+      return countRows(file);
+    }
+  }
   const merged = mergeCandles(readSeries(file), incoming);
   writeSeries(file, merged);
   return merged.length;

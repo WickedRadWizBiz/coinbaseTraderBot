@@ -226,6 +226,10 @@ test('Coinbase backfill: walks back to the listing, then forward on the next run
   fs.writeFileSync(seriesPath(dir, 'coinbase', 'ETH', '1h'), `ts,o,h,l,c,v\n${stored.slice(0, 1500).map((c) => `${c.ts},${c.o},${c.h},${c.l},${c.c},${c.v}`).join('\n')}\n`);
   const r2 = await backfillCoinbase({ out: dir, assets: ['ETH'], tfs: ['1h'], fromTs: T0 - 400 * 86_400_000, fetchImpl, delayMs: 0, now: () => now, log: () => undefined });
   assert.equal(r2[0].added, 500, 'forward fill of the missing tail');
+  reqs = 0;
+  const r3 = await backfillCoinbase({ out: dir, assets: ['ETH'], tfs: ['1h'], fromTs: T0 - 400 * 86_400_000, fetchImpl, delayMs: 0, now: () => now, log: () => undefined });
+  assert.equal(r3[0].added, 0);
+  assert.ok(reqs <= 1, `the listing found once is remembered: no empty windows asked again (${reqs} requests)`);
 });
 
 test('Coinbase backfill: an asset Coinbase does not sell is asked for once, not once per timeframe', async () => {
