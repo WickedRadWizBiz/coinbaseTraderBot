@@ -128,6 +128,64 @@ export function getter(baseUrl: string | undefined, f: typeof fetch, ratePerSec 
   return { get, limited: () => limited };
 }
 
+/** A stored market without its candles: what the downloaders need to know a market is already there. */
+export interface StoredMarket { ticker: string; openTime: number; closeTime: number; startTime?: number; noVolume?: boolean; error?: string }
+
+/** The stored-market index of a series (<dir>/.index.json): per day file, its size when indexed and its markets
+ *  without candles, plus the close-time range a past run listed completely. Re-reading every stored market
+ *  with its candles to learn which ones are there took seconds per GB at the start of every run; only day files
+ *  whose size changed since (new markets appended, or written by hand) are read again. */
+interface SeriesIndex { v: 1; files: Record<string, { size: number; rows: StoredMarket[] }>; listed?: { from: number; to: number } }
+const INDEX = '.index.json';
+
+/** A stored line without parsing its candles: the fields before "candles" and the flags after the array. */
+function storedOf(line: string): StoredMarket | undefined {
+  const at = line.indexOf(',"candles":[');
+  try {
+    if (at < 0) { const r = JSON.parse(line); return { ticker: r.ticker, openTime: r.openTime, closeTime: r.closeTime, startTime: r.startTime, noVolume: r.noVolume, error: r.error }; }
+    const head = JSON.parse(`${line.slice(0, at)}}`);
+    const end = line.indexOf(']', at); // candles are objects of numbers: the first ']' closes the array
+    const tail = line.slice(end + 1);
+    const flags = tail.startsWith(',') ? JSON.parse(`{${tail.slice(1)}`) : {};
+    if (!head.ticker) return undefined;
+    return { ticker: head.ticker, openTime: head.openTime, closeTime: head.closeTime, ...(head.startTime ? { startTime: head.startTime } : {}), ...(flags.noVolume ? { noVolume: true } : {}), ...(flags.error ? { error: flags.error } : {}) };
+  } catch { return undefined; } // torn
+}
+
+function readIndex(dir: string): SeriesIndex {
+  try { const x = JSON.parse(fs.readFileSync(path.join(dir, INDEX), 'utf8')); if (x?.v === 1 && x.files) return x; } catch { /* missing or damaged: rebuilt */ }
+  return { v: 1, files: {} };
+}
+
+/** The index brought up to date with the day files on disk (only changed files are read) and saved. */
+export function storedMarkets(dir: string): { rows: StoredMarket[]; index: SeriesIndex } {
+  const index = readIndex(dir);
+  if (!fs.existsSync(dir)) return { rows: [], index };
+  const names = fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl'));
+  let changed = false;
+  for (const name of names) {
+    const size = fs.statSync(path.join(dir, name)).size;
+    if (index.files[name]?.size === size) continue;
+    const rows: StoredMarket[] = [];
+    for (const line of fs.readFileSync(path.join(dir, name), 'utf8').split('\n')) { if (line) { const r = storedOf(line); if (r) rows.push(r); } }
+    index.files[name] = { size, rows };
+    changed = true;
+  }
+  for (const name of Object.keys(index.files)) if (!names.includes(name)) { delete index.files[name]; changed = true; }
+  if (changed) saveIndex(dir, index);
+  return { rows: Object.values(index.files).flatMap((f) => f.rows), index };
+}
+
+function saveIndex(dir: string, index: SeriesIndex): void {
+  const tmp = path.join(dir, `${INDEX}.${process.pid}.tmp`);
+  fs.writeFileSync(tmp, JSON.stringify(index));
+  fs.renameSync(tmp, path.join(dir, INDEX));
+}
+
+/** Settled markets are listed newest first; a past run that listed and stored a close-time range completely
+ *  lets the listing stop this far inside it (markets that settle late, or move to the archive tier late). */
+const LISTED_OVERLAP_MS = 3 * 86_400_000;
+
 export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<KalshiHistoryResult> {
   const f = o.fetchImpl ?? fetch, log = o.log ?? ((m: string) => console.log(`[kalshi-history] ${m}`));
   const now = o.now ?? Date.now(), from = now - o.days * 86_400_000;
@@ -143,27 +201,33 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
     if (clock() >= deadline) { budgetHit = true; log(`${series}: time budget used up; left for the next run`); continue; }
     const dir = path.join(o.out, series);
     fs.mkdirSync(dir, { recursive: true });
-    const have = new Set<string>();
-    for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl'))) for (const line of fs.readFileSync(path.join(dir, file), 'utf8').split('\n')) { try { if (line) { const r = JSON.parse(line); if (r.error !== 'HTTP 404') have.add(r.ticker); } } catch { /* torn */ } }
-    // Settled markets from both tiers, newest first, until older than `from`.
+    const failedBefore = failed;
+    const stored = storedMarkets(dir);
+    const have = new Set(stored.rows.filter((r) => r.error !== 'HTTP 404').map((r) => r.ticker));
+    // Settled markets from both tiers, newest first, until older than `from` -- or, when a past run listed
+    // [from, to] completely and this run wants no older markets, until a few days inside that range.
+    const listed = stored.index.listed;
+    const stopAt = listed && listed.from <= from ? Math.max(from, listed.to - LISTED_OVERLAP_MS) : from;
+    let complete = true;
     const rows: Array<{ m: Omit<KalshiHistMarket, 'candles'>; hist: boolean }> = [];
     for (const [hist, p0] of [[false, `/markets?series_ticker=${encodeURIComponent(series)}&status=settled&limit=200`], [true, `/historical/markets?series_ticker=${encodeURIComponent(series)}&limit=200`]] as const) {
       let cursor = '';
       for (let page = 0; page < 500 && clock() < deadline; page++) {
         const d = await get(`${p0}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`).catch((e) => { log(`${series}: ${String(e)}`); return undefined; });
-        if (!d) break;
+        if (!d) { complete = false; break; }
         let older = false;
         for (const raw of d.markets ?? []) {
           const m = parseHistMarket(raw, series);
           if (!m) continue;
-          if (m.closeTime < from) { older = true; continue; }
+          if (m.closeTime < stopAt) { older = true; continue; }
           if (m.closeTime <= now) rows.push({ m, hist });
         }
         cursor = d.cursor ?? '';
         if (!cursor || older) break;
+        if (page === 499 || clock() >= deadline) complete = false;
       }
     }
-    log(`${series}: ${rows.length} settled market(s) in the last ${o.days} days (historical cutoff ${cutoff ? new Date(cutoff).toISOString().slice(0, 10) : 'unknown'}), ${rows.filter((r) => have.has(r.m.ticker)).length} already stored`);
+    log(`${series}: ${rows.length} settled market(s) ${stopAt > from ? `since ${new Date(stopAt).toISOString().slice(0, 10)} (older days listed by an earlier run)` : `in the last ${o.days} days`} (historical cutoff ${cutoff ? new Date(cutoff).toISOString().slice(0, 10) : 'unknown'}), ${rows.filter((r) => have.has(r.m.ticker)).length} already stored`);
     const store = (rec: KalshiHistMarket) => {
       fs.appendFileSync(path.join(dir, `${new Date(rec.closeTime).toISOString().slice(0, 10)}.jsonl`), `${JSON.stringify(rec)}\n`);
       have.add(rec.ticker);
@@ -203,6 +267,14 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
     await Promise.all(Array.from({ length: concurrency }, worker));
     const left = todo.length - next;
     if (left > 0) { remaining += left; if (clock() >= deadline) { budgetHit = true; log(`${series}: time budget used up, ${left} market(s) left for the next run`); } }
+    // Index the markets stored this run, and remember the range listed and stored completely (every market
+    // stored, or kept back only after a failure the next run asks again: those are listed again anyway).
+    const after = storedMarkets(dir);
+    if (complete && left === 0 && failed === failedBefore) {
+      const prev = after.index.listed;
+      after.index.listed = { from: prev && prev.from <= from && prev.to >= stopAt ? prev.from : from, to: now };
+      saveIndex(dir, after.index);
+    }
   }
   log(`done: ${markets} new market(s), ${noVolume} never traded (stored without candles), ${skipped} already stored, ${rejected} rejected by the API, ${failed} failed${remaining ? `, ${remaining} left for the next run` : ''}${limited() ? `; Kalshi asked to slow down ${limited()} time(s) (paused and retried)` : ''}`);
   return { markets, skipped, failed, noVolume, rejected, remaining, budgetHit };
@@ -242,8 +314,11 @@ export async function downloadKalshiTrades(o: KalshiTradesOpts): Promise<KalshiT
     const dir = path.join(o.out, series, 'trades');
     fs.mkdirSync(dir, { recursive: true });
     const have = new Set<string>();
-    for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl'))) for (const line of fs.readFileSync(path.join(dir, file), 'utf8').split('\n')) { try { if (line) have.add(JSON.parse(line).ticker); } catch { /* torn */ } }
-    const all = loadKalshiHistory(o.out, series);
+    // Tape lines start {"ticker":"...": the ticker is read without parsing the tape.
+    for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl'))) for (const line of fs.readFileSync(path.join(dir, file), 'utf8').split('\n')) {
+      if (line.startsWith('{"ticker":"') && line.endsWith('}')) { const e = line.indexOf('"', 11); if (e > 11) have.add(line.slice(11, e)); }
+    }
+    const all = storedMarkets(path.join(o.out, series)).rows;
     const todo = all.filter((m) => !have.has(m.ticker) && !m.noVolume && !m.error);
     skipped += all.length - todo.length;
     let next = 0;

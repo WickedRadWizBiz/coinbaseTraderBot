@@ -98,8 +98,13 @@ test('kalshi history: both tiers, 1-minute candles parsed from fixed-point strin
   const stored = loadKalshiHistory(out, 'KXBTC15M');
   assert.deepEqual(stored.map((m) => m.ticker), ['OLD', 'NEW']);
   assert.equal(stored[1].candles[0].askC, 0.52);
+  // The next run lists only the last few days: older ones were listed and stored completely.
   const again = await downloadKalshiHistory({ series: ['KXBTC15M'], days: 60, out, fetchImpl, now, log: () => {} });
-  assert.deepEqual(again, { markets: 0, skipped: 2, failed: 0, noVolume: 0, rejected: 0, remaining: 0, budgetHit: false });
+  assert.deepEqual(again, { markets: 0, skipped: 1, failed: 0, noVolume: 0, rejected: 0, remaining: 0, budgetHit: false });
+  // Asking for older days than were ever listed lists the whole window again (nothing new to fetch).
+  const wider = await downloadKalshiHistory({ series: ['KXBTC15M'], days: 90, out, fetchImpl, now, log: () => {} });
+  assert.deepEqual([wider.markets, wider.skipped], [0, 2]);
+  assert.equal(calls.filter((u) => u.includes('/candlesticks')).length, 2, 'no market asked twice');
 });
 
 test('kalshi history cost control: 1-minute window clamped, untraded markets need no request, rejected ones are not retried, budget stops and resumes', async () => {

@@ -8,6 +8,8 @@
 // 300 candles per request at ~4 requests/second (public limit is higher); a 15-minute backfill
 // since 2017 is roughly 1,000 requests (~5 minutes) per asset.
 
+import fs from 'fs';
+import path from 'path';
 import { fromRow, type CandleRow } from '../../bot/ta/candleStore';
 import type { Candle } from '../../bot/ta/indicators';
 import { cleanAndValidate, readSeries, seriesPath, upsertSeries, type HistTf } from './candles';
@@ -77,13 +79,22 @@ export async function backfillCoinbase(o: CoinbaseOpts): Promise<CoinbaseSummary
           }
         }
         // Backward: from the first stored bar (or now) to fromTs, stopping after 6 empty windows
-        // (before the product listed).
+        // (before the product listed). Once that is found, the start is remembered next to the series
+        // (<tf>.start) and later runs do not ask those empty windows again.
+        const startFile = `${seriesPath(o.out, 'coinbase', asset, tf)}.start`;
+        const knownStart = fs.existsSync(startFile) ? Number(fs.readFileSync(startFile, 'utf8')) : NaN;
         let empty = 0;
-        for (let end = have.length ? have[0].ts : lastClosed + ms; end > o.fromTs && empty < 6; end -= span) {
+        const from0 = have.length ? have[0].ts : lastClosed + ms;
+        if (have.length && knownStart === have[0].ts) empty = 6;
+        for (let end = from0; end > o.fromTs && empty < 6; end -= span) {
           const w = await fetchWindow(Math.max(o.fromTs, end - span), end);
           if (w === 'missing') { s.note = `no ${asset}-USD product on Coinbase`; noProduct = !have.length && !got.length; break; }
           if (!w.length) empty++; else empty = 0;
           got.push(...w);
+        }
+        if (empty >= 6) {
+          const first = Math.min(have.length ? have[0].ts : Infinity, ...got.map((c) => c.ts));
+          if (Number.isFinite(first) && knownStart !== first) { fs.mkdirSync(path.dirname(startFile), { recursive: true }); fs.writeFileSync(startFile, String(first)); }
         }
       } catch (e) { s.note = (e as Error).message; }
       if (got.length) {
