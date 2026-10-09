@@ -188,3 +188,37 @@ test('leaderboard: each tournament as a bracket narrowing to its champion, with 
   assert.deepEqual(distinctive({ a: 10, b: 1 }, [{ a: 1, b: 1 }, { a: 1, b: 1 }], 1), [['a', '10 ▲']]);
   assert.deepEqual(leaderboard(path.join(tmpDir(), 'none')), [], 'nothing trained yet: no brackets');
 });
+
+import { conditioningView } from '../research/trainerUi';
+import { conditioningBracket } from '../research/trainerLeaderboard';
+
+test('conditioning mode: greyed out until a normal training run finished since the last conditioning run; it runs only the conditioning step', async () => {
+  const dataDir = tmpDir();
+  const models = path.join(dataDir, 'models');
+  fs.mkdirSync(models, { recursive: true });
+  assert.equal(conditioningView(models).ready, false, 'never trained');
+  const trainedAt = Date.parse('2026-10-09T10:00:00Z');
+  fs.writeFileSync(path.join(models, 'pipeline_state.json'), JSON.stringify({ lastRun: trainedAt }));
+  assert.equal(conditioningView(models).ready, true);
+  let only: string[] | undefined;
+  const ui = new TrainerUi({ dataDir, check: async () => ({ current: null, latest: null, publishedAt: null, available: false, canInstall: false, downloadUrl: null, checkedAt: null }), run: async (o) => { only = o.only; return { why: 'finished' }; } });
+  assert.deepEqual(ui.start({ mode: 'conditioning' }), { ok: true });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(only, ['conditioning']);
+  fs.writeFileSync(path.join(models, 'conditioning_report.json'), JSON.stringify({ at: '2026-10-09T12:00:00Z', best: { id: 't0-3', passed: 4 }, elite: null, trials: [{ stages: new Array(21) }] }));
+  const v = conditioningView(models);
+  assert.equal(v.ready, false, 'conditioned since the last training');
+  assert.deepEqual(v.last, { at: '2026-10-09T12:00:00Z', elite: null, best: 't0-3', bestPassed: 4, windows: 21 });
+  assert.match(ui.start({ mode: 'conditioning' }).error!, /train again the normal way first/);
+});
+
+test('conditioning bracket: one column per tier reached, the Elite Champion (or the best) on the card', () => {
+  const tiers = [{ name: '1', cash: 1000 }, { name: '2', cash: 500 }, { name: '3', cash: 200 }, { name: 'C', cash: 100, regime: 'calm' }];
+  const stages = tiers.flatMap((_, ti) => [0, 1, 2].map((wi) => ({ index: ti * 3 + wi, tier: ti, win: wi })));
+  const inst = (id: string, n: number) => ({ id, origin: 'random', passed: n, wins: n, totalUsd: n * 100, worstUsd: -20, params: { tierScale: n }, played: stages.slice(0, n + 1).map((s, k) => ({ stage: s.index, passed: k < n, pnl: 100, minPnl: 0 })) });
+  const b = conditioningBracket({ at: '2026-10-09T12:00:00Z', unseenDays: 300, tiers, windowDays: [3, 2, 1], elite: null, best: inst('a', 7), trials: [{ stages, instances: [inst('a', 7), inst('b', 2)] }] })!;
+  assert.deepEqual(b.columns.map((c) => c.label), ['Tier 1 $1000', 'Tier 2 $500', 'Tier 3 $200']);
+  assert.deepEqual(b.columns[0].entrants.map((e) => [e.name, e.won]), [['a', true], ['b', false]]);
+  assert.match(b.champion.headline, /Best so far: 7 of 12 windows/);
+  assert.equal(b.champion.validated, false);
+});

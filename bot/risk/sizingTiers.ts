@@ -104,3 +104,17 @@ export function tierAt(tiers: TierPoint[], reference: number): Tier {
     reference: ref,
   };
 }
+
+/** Tiers with the Kelly fraction and per-order / per-window risk scaled by k, kept inside the bounds validateTiers
+ *  enforces (and order <= window <= total): the aggression scale conditioning tests (research/conditioningRun.ts) and
+ *  the live overlay applies, so the replay never tests a ladder the bot would refuse. */
+export function scaledTiers<T extends Pick<TierPoint, 'kellyFraction' | 'orderFrac' | 'windowFrac' | 'totalFrac'>>(tiers: T[], k: number): T[] {
+  if (!(k > 0) || k === 1) return tiers;
+  const cap = (key: 'kellyFraction' | 'orderFrac' | 'windowFrac' | 'totalFrac', v: number) => Math.min(BOUNDS[key][1], Math.max(BOUNDS[key][0], v));
+  return tiers.map((t) => {
+    const totalFrac = cap('totalFrac', Math.max(t.totalFrac, t.windowFrac * k));
+    const windowFrac = Math.min(totalFrac, cap('windowFrac', t.windowFrac * k));
+    const orderFrac = Math.min(windowFrac, cap('orderFrac', t.orderFrac * k));
+    return { ...t, kellyFraction: cap('kellyFraction', t.kellyFraction * k), orderFrac, windowFrac, totalFrac };
+  });
+}

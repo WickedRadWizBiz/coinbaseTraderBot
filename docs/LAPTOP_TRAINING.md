@@ -176,6 +176,10 @@ The pipeline's last step, `readiness` (`research/readiness.ts`), writes `models/
 - **Every model's state:** present, validated, and the key numbers.
 - **Each network's place in the history ledger:** weeks used, fresh weeks left, contests run.
 
+## Conditioning mode
+
+The trainer window has a second button, **Start conditioning**. It is greyed out until a normal run has finished since the last conditioning run. It runs one pressure-test tournament of the freshly trained bot on unseen history days, with tiers from $1000 down to $100 and a 35% cull, then sends the results to the server like a normal round. An Elite Champion replaces the live bot's trading settings, and the dashboard can roll it back. The rules are in docs/AUTOMATION.md §10.
+
 ## History ledger: which weeks each network has trained on
 
 `research/historyLedger.ts` keeps `models/work/history-ledger.json`. The replay's days are cut into ISO

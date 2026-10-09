@@ -87,11 +87,23 @@ export function filesToPull(remote: RemoteFile[], local: Map<string, RemoteFile>
   return remote.filter((f) => { const l = local.get(f.path); return !l || f.mtime > l.mtime + 2000; });
 }
 
-/** Local model files to send up: newer than the server's copy (never overwrite a newer server file). */
-export function filesToPush(local: Map<string, RemoteFile>, remote: RemoteFile[]): RemoteFile[] {
+/** The conditioning champion and its rollback copy (bot/strategy/conditioningOverlay.ts). The server is their
+ *  source of truth: a dashboard rollback replaces or removes them there, so they are sent up only when this trainer
+ *  wrote them (conditioning mode in this session), and a copy the server no longer has is removed here. */
+const CHAMPION = /^(models\/)?conditioning_champion(\.prev)?\.json$/;
+
+/** Local model files to send up: newer than the server's copy (never overwrite a newer server file). The
+ *  conditioning champion only when written since `since` (the trainer's start). */
+export function filesToPush(local: Map<string, RemoteFile>, remote: RemoteFile[], since = 0): RemoteFile[] {
   const r = new Map(remote.map((f) => [f.path, f]));
   return [...local.values()].filter((f) => { const s = r.get(f.path); return !s || f.mtime > s.mtime + 2000; })
-    .filter((f) => !NO_PUSH.test(f.path));
+    .filter((f) => !NO_PUSH.test(f.path) && (!CHAMPION.test(f.path) || f.mtime >= since));
+}
+
+/** Local conditioning champion files the server no longer has (rolled back there): to remove here. */
+export function championsGone(remote: RemoteFile[], local: Map<string, RemoteFile>): string[] {
+  const r = new Set(remote.map((f) => f.path));
+  return [...local.keys()].filter((p) => CHAMPION.test(p) && !r.has(p));
 }
 
 /** bot.env lines safe to train with: no credentials, no server paths or network settings. */
@@ -432,7 +444,7 @@ export async function laptopTrainMain(): Promise<void> {
 }
 
 /** The rounds (shared by the console and the window): pull, rounds of the pipeline until it stops, push. */
-export async function runTrainer(o: { hours: number; dataDir: string; settings: TrainerSettings; sweepAll?: boolean; hooks?: TrainerHooks }): Promise<{ why?: string }> {
+export async function runTrainer(o: { hours: number; dataDir: string; settings: TrainerSettings; sweepAll?: boolean; hooks?: TrainerHooks; only?: string[] }): Promise<{ why?: string }> {
   const t0 = Date.now();
   const hooks = o.hooks;
   const { hours, dataDir } = o;
@@ -465,7 +477,9 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     const what = recordingsOnly ? `-path './recordings/md-*' -mtime -${days}` : `\\( ! -path './recordings/md-*' -o -mtime -${days} \\) ! -path './audit*' ! -path './logs/*' ! -name '*.log' ! -path './.venv*'`;
     const m = server.run(`cd ~/bot/data && find . -type f ${what} ! -name '*.tmp' -printf '%P\\t%s\\t%T@\\n'`);
     if (!m.ok) { log(`listing the server's data failed: ${m.err.trim().slice(0, 300)}`); return; }
-    const need = filesToPull(parseManifest(m.out), localManifest(dataDir));
+    const remote = parseManifest(m.out), here = localManifest(dataDir);
+    if (!recordingsOnly) for (const p of championsGone(remote, here)) { fs.rmSync(path.join(dataDir, p), { force: true }); here.delete(p); log(`${p}: rolled back on the server, removed here`); }
+    const need = filesToPull(remote, here);
     log(`${need.length} new or changed file(s), ${(need.reduce((a, f) => a + f.size, 0) / 1e6).toFixed(0)} MB`);
     for (let i = 0; i < need.length; i += 2000) {
       if (!(await server.pull('~/bot/data', need.slice(i, i + 2000).map((f) => f.path), dataDir))) { log('copy failed part-way; training with what arrived'); break; }
@@ -484,7 +498,7 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     hooks?.phase?.('push');
     const m = server.run(`mkdir -p ~/bot/data/models && cd ~/bot/data/models && find . -type f -printf '%P\\t%s\\t%T@\\n'`);
     if (!m.ok) { log(`listing the server's models failed: ${m.err.trim().slice(0, 300)}`); return; }
-    const send = filesToPush(localManifest(models), parseManifest(m.out));
+    const send = filesToPush(localManifest(models), parseManifest(m.out), t0);
     if (!send.length) { log('no model newer than the server\'s'); return; }
     log(`${why}: sending ${send.length} file(s), ${(send.reduce((a, f) => a + f.size, 0) / 1e6).toFixed(1)} MB, to the server...`);
     const ok = await server.push(models, send.map((f) => f.path), '~/bot/data/models');
@@ -500,7 +514,8 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   console.log(guide);
 
   // ---- 2-3. rounds ----
-  const only = argOf('only')?.split(',').filter(Boolean);
+  // Steps of a single round (--only, or conditioning mode from the window): one round, then the push.
+  const only = o.only ?? argOf('only')?.split(',').filter(Boolean);
   let why: string | undefined;
   const stopped = () => !!hooks?.stopRequested?.();
   const logFile = path.join(models, 'logs', `pipeline-laptop-${new Date(t0).toISOString().replace(/[:.]/g, '-')}.log`);

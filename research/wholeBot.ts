@@ -26,6 +26,8 @@ import type { MetaModel } from '../bot/model/metaModel';
 import { DEFAULT_LANES, type LaneBookParams } from '../bot/setups/lanes';
 import type { SetupOosFile } from './trainSetupModel';
 import { linkDays, recordingFiles, type RecordingDay } from '../bot/marketdata/recordingFiles';
+import { scaledTiers } from '../bot/risk/sizingTiers';
+export { scaledTiers };
 
 const DAY = 86_400_000;
 const M15 = 900_000;
@@ -39,10 +41,24 @@ export interface WholeBotSettings {
   dailyLossFrac: number;
   strategy: StrategyConfig;
   book: LaneBookParams;
+  /** Scale on the Kalshi sizing tiers' Kelly fraction and per-order / per-window risk (1 = as configured). */
+  tierScale?: number;
 }
 
 export interface DayPnl { day: string; kalshi: number; perps: number; total: number; stopped: boolean; kalshiTrades: number; perpsTrades: number }
-export interface WholeBotResult { days: DayPnl[]; kalshiUsd: number; perpsUsd: number; totalUsd: number; dropped: number }
+export interface WholeBotResult {
+  days: DayPnl[]; kalshiUsd: number; perpsUsd: number; totalUsd: number; dropped: number;
+  /** The lowest the running realised P&L of the whole window went (0 when it never went below). */
+  minTotal: number;
+}
+
+/** Add a window of the given days (any set, not only a split of the recordings) to loaded data. */
+export function addWindow(D: WholeBotData, name: string, files: RecordingDay[]): void {
+  if (D.dirs[name]) fs.rmSync(D.dirs[name], { recursive: true, force: true });
+  D.days[name] = files.slice().sort((a, b) => (a.day < b.day ? -1 : 1));
+  D.dirs[name] = fs.mkdtempSync(path.join(os.tmpdir(), 'wholebot-w-'));
+  linkDays(D.days[name], D.dirs[name]);
+}
 
 /** Everything that stays the same across runs with different settings (loaded once). */
 export interface WholeBotData {
@@ -87,7 +103,7 @@ export async function loadWholeBot(o: { recordings: string; history: string; set
 
 export async function runWholeBot(D: WholeBotData, window: string, s: WholeBotSettings, cache?: Map<string, unknown>): Promise<WholeBotResult> {
   const files = D.days[window] ?? [];
-  if (!files.length) return { days: [], kalshiUsd: 0, perpsUsd: 0, totalUsd: 0, dropped: 0 };
+  if (!files.length) return { days: [], kalshiUsd: 0, perpsUsd: 0, totalUsd: 0, dropped: 0, minTotal: 0 };
   const from = Date.parse(`${dayOf(files[0])}T00:00:00Z`), to = Date.parse(`${dayOf(files[files.length - 1])}T00:00:00Z`) + DAY;
   const kalshiUsd0 = s.totalUsd * (1 - s.perpsShare), perpsUsd0 = s.totalUsd * s.perpsShare;
   // Each part's realised P&L events: [time it lands, usd, time the trade opened, part].
@@ -96,14 +112,14 @@ export async function runWholeBot(D: WholeBotData, window: string, s: WholeBotSe
 
   // Kalshi through the production backtester (cached per strategy settings and bankroll).
   if (kalshiUsd0 > 0) {
-    const key = `k|${window}|${kalshiUsd0.toFixed(2)}|${JSON.stringify(s.strategy)}`;
+    const key = `k|${window}|${kalshiUsd0.toFixed(2)}|${s.tierScale ?? 1}|${JSON.stringify(s.strategy)}`;
     let wins = cache?.get(key) as Array<[number, number]> | undefined;
     if (!wins) {
       const { runBacktest } = await import('./backtest');
       const S = s.strategy;
       const res = await runBacktest(D.dirs[window], D.model, { ...S }, D.cfg.risk, kalshiUsd0, {
         sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
-        vault: D.cfg.vault.enabled ? D.cfg.vault : undefined, sizingTiers: D.cfg.sizingTiers,
+        vault: D.cfg.vault.enabled ? D.cfg.vault : undefined, sizingTiers: s.tierScale && s.tierScale !== 1 && D.cfg.sizingTiers ? scaledTiers(D.cfg.sizingTiers, s.tierScale) : D.cfg.sizingTiers,
       });
       wins = [...res.windows.entries()].filter(([, w]) => w.contracts > 0).map(([ts, w]) => [ts, w.pnl]);
       cache?.set(key, wins);
@@ -131,7 +147,7 @@ export async function runWholeBot(D: WholeBotData, window: string, s: WholeBotSe
   evs.sort((a, b) => a.ts - b.ts);
   const byDay = new Map<string, DayPnl>();
   const stopAt = new Map<string, number>();
-  let dropped = 0;
+  let dropped = 0, run = 0, minTotal = 0;
   for (const f of files) byDay.set(dayOf(f), { day: dayOf(f), kalshi: 0, perps: 0, total: 0, stopped: false, kalshiTrades: 0, perpsTrades: 0 });
   for (const e of evs) {
     const d = new Date(e.open).toISOString().slice(0, 10);
@@ -140,11 +156,12 @@ export async function runWholeBot(D: WholeBotData, window: string, s: WholeBotSe
     const stop = stopAt.get(d);
     if (stop !== undefined && e.open > stop) { dropped++; continue; }
     row[e.part] += e.usd; row.total += e.usd;
+    run += e.usd; minTotal = Math.min(minTotal, run);
     if (e.part === 'kalshi') row.kalshiTrades++; else row.perpsTrades++;
     if (stop === undefined && s.dailyLossFrac > 0 && row.total <= -s.dailyLossFrac * s.totalUsd) { stopAt.set(d, e.ts); row.stopped = true; }
   }
   const days = [...byDay.values()];
-  return { days, kalshiUsd: days.reduce((a, r) => a + r.kalshi, 0), perpsUsd: days.reduce((a, r) => a + r.perps, 0), totalUsd: days.reduce((a, r) => a + r.total, 0), dropped };
+  return { days, kalshiUsd: days.reduce((a, r) => a + r.kalshi, 0), perpsUsd: days.reduce((a, r) => a + r.perps, 0), totalUsd: days.reduce((a, r) => a + r.total, 0), dropped, minTotal };
 }
 
 /** The live settings as a whole-bot setting set. */

@@ -124,6 +124,34 @@ The SNN gate for the setup trader brings itself online like the fill model:
 3. It then picks an agreement level on the earlier 70% of trades. Agreement is the trade's side × (P(up) − 0.5), at 1h for the fast lane and 4h for the slow lane. On the later 30%, the trades that level would have blocked must have lost money, with the bootstrap 90% upper bound of their mean below zero.
 4. If so, `setup_snn_gate.json` turns on and the setup trader picks it up immediately: an entry is skipped when the SNN's call disagrees by more than that level. If not, the gate stays off and the file says why. It is re-tested every run, so it can also switch off again.
 
+### 10. Conditioning mode (Windows trainer, by hand)
+
+A pressure test of the freshly trained bot, started with the **Start conditioning** button in the Windows trainer. The button stays greyed out until a normal training run has finished since the last conditioning run. It never runs in the daily pipeline (`--only conditioning` runs it from the command line).
+
+Many instances of the whole bot (Kalshi contracts and perps setups, one pot of cash) trade the same days of history that no network trained on and that the MLP was not fitted on. They run in parallel on every CPU core. Each instance is the trained bot with different trading settings: edge and fill thresholds, the sizing aggression (`tierScale`), setup-lane risk and positions, the perps daily stop. Trial 0 also includes the live settings unchanged.
+
+| Tier | Cash | Windows |
+|---|---|---|
+| 1 | $1000 | 3 days, 2 days, 1 day |
+| 2 | $500 | 3, 2, 1 |
+| 3 | $200 | 3, 2, 1 |
+| C | $100 | calm days: 3, 2, 1 |
+| B | $100 | trending days: 3, 2, 1 |
+| A | $100 | volatile days (the coin alone): 3, 2, 1 |
+| S | $100 | volatile days (market-wide): 3, 2, 1 |
+
+- Every window starts with the tier's cash and always plays out in full. It passes only if at least $100 of profit is still held at its end, and P&L never fell below 35% of the starting cash at any point.
+- An instance is culled at its first failed window.
+- If fewer than 4 instances pass Tier 3, the best of those that reached Tier 3 enter Tier C as wildcards. Every instance that reached Tier 3 is saved in the report. A wildcard can never become the Elite.
+- **Elite Champion**: passed all 21 windows AND made more over them than the live settings did on the same days. With no Elite, up to 3 retrials run on new days, with new random instances plus variations of the best so far.
+- A fixed $100 at $100 of cash asks for a doubling in a day, so most runs end with no Elite. The best instance of every run is still reported (ranked by windows passed, then profit held, then shallowest drawdown).
+
+Results go to `AUTO_TRAIN_DIR/conditioning_report.json` and the trainer's leaderboard (one column per tier). The days played are marked judged in the history ledger under `conditioning`.
+
+An Elite is written to `conditioning_champion.json` and sent to the server with the models. The bot checks for it every minute, restarts once, and runs with those settings on top of `.env`. Only the known setting names are read, each clamped to the range conditioning tested. The champion it replaced is kept as `conditioning_champion.prev.json`.
+
+**Rollback:** the dashboard's *Conditioning* row (under Status) shows the champion in use. **Rollback** puts the previous champion back, or the `.env` settings when there is none, and restarts the bot. `CONDITIONING_APPLY=false` ignores champions altogether.
+
 ## Promotion policy
 
 `AUTO_TRAIN_PROMOTE=always` is the default, and it is hot-swap mode: every freshly trained model goes live in the bot straight away.
@@ -212,6 +240,9 @@ These can't be automated, or deliberately aren't.
 | `GP_EVERY_DAYS` / `GP_POPULATION` / `GP_GENERATIONS` / `GP_ASSETS` / `GP_CROSS` | `7` / `1000` / `15` / five coins / `BTC,ETH` | Genetic programming of formulas (docs/EVOLUTION.md has the fitness, dead band and gate settings). |
 | `AUTO_TRAIN_CONTEST_WEEKS` | `2` | History replay: held-out weeks a new SNN replays against the network in use. It replaces that network only if it scores better there. |
 | `TRAIN_TARGET_POOL_USD` / `TRAIN_TARGET_DAILY_PCT` / `TRAIN_TARGET_MAX_DD_PCT` | `200` / `50` / `10` | The readiness step's target: the whole bot on held-out days earning this % of the pool a day (the lower end of the 95% interval) with at most this drawdown. The continuous laptop trainer stops when it is met. 50% a day is far beyond any real system; see docs/LAPTOP_TRAINING.md. |
+| `COND_INSTANCES` | `24` | Conditioning mode: instances per trial. |
+| `COND_TARGET_USD` / `COND_CULL_FRAC` / `COND_MIN_TIER_C` / `COND_RETRIALS` | `100` / `0.35` / `4` / `3` | Conditioning mode: profit to hold at the end of each window, the cull (fraction of the window's starting cash), the Tier C fill, and the retrials when there is no Elite. |
+| `CONDITIONING_APPLY` | `true` | The live bot runs on the conditioning Elite Champion's settings (`false` = ignore it). |
 | `TRAIN_PLATEAU_ROUNDS` | `3` | Continuous laptop trainer: stop after this many rounds in a row that improve no model. |
 
 ## If something goes wrong

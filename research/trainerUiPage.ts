@@ -119,6 +119,8 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
   .bk-attrs { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 11px; }
   .bk-attrs dt { color: var(--dim); white-space: nowrap; }
   .bk-attrs dd { margin: 0; color: var(--text); word-break: break-word; }
+  .cond { margin-top: 18px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 12px; }
+  .cond .muted { line-height: 1.45; }
 </style>
 </head>
 <body>
@@ -149,6 +151,18 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
       </details>
       <div class="btns"><button id="start">Start training</button></div>
       <div id="startErr" class="err"></div>
+
+      <div class="section cond" id="condBox">
+        <div class="label"><span>Conditioning mode</span><span id="condState" class="muted"></span></div>
+        <div class="muted">A pressure test of the freshly trained bot on days it has never seen, as live. Many instances trade the
+          same windows: Tier 1 with $1000, Tier 2 $500, Tier 3 $200, then $100 on calm, trending, coin-volatile and market-wide
+          volatile days (Tiers C, B, A, S), each 3 days, 2 days, 1 day. A window passes with $100 of profit still held at its
+          end, never 35% down; the rest are culled. One that passes all 21 and beats the live settings is the Elite Champion
+          and replaces them on the bot (the previous settings are kept for rollback). Up to 3 retrials on new days.</div>
+        <div class="btns"><button id="condStart" disabled>Start conditioning</button></div>
+        <div id="condWhy" class="muted"></div>
+        <div id="condLast" class="muted"></div>
+      </div>
     </div>
 
     <div id="run" class="hidden">
@@ -198,6 +212,12 @@ $('start').addEventListener('click', async () => {
   const r = await post('/api/start', { mode, hours: Number($('hours').value) || 0, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim() });
   if (!r.ok) $('startErr').textContent = r.error || 'could not start';
 });
+$('condStart').addEventListener('click', async () => {
+  $('startErr').textContent = '';
+  if (!confirm('Start conditioning mode? It runs until a champion is found or the trials are used up (hours on most computers).')) return;
+  const r = await post('/api/start', { mode: 'conditioning', hours: 0, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim() });
+  if (!r.ok) $('startErr').textContent = r.error || 'could not start';
+});
 $('stop').addEventListener('click', async () => { if (confirm('Stop training now? Finished steps and tournament rounds are kept; the step in progress starts again next time.')) await post('/api/stop'); });
 function setBar(p, b, cls) {
   $(p + 'Fill').style.width = Math.max(0, Math.min(100, b.pct)).toFixed(1) + '%';
@@ -226,7 +246,12 @@ async function tick() {
   $('idle').classList.toggle('hidden', running);
   $('run').classList.toggle('hidden', !running);
   $('led').className = 'led ' + (s.phase === 'running' ? 'on' : s.phase === 'stopping' ? 'warn' : s.lastError ? 'err' : '');
-  $('title').textContent = s.phase === 'running' ? 'Training' : s.phase === 'stopping' ? 'Stopping...' : s.lastStop ? 'Stopped: ' + s.lastStop : 'Ready';
+  const c = s.conditioning || { ready: false, why: '', last: null };
+  $('condStart').disabled = running || !c.ready;
+  $('condState').textContent = c.ready ? 'ready' : 'not yet';
+  $('condWhy').textContent = c.why || '';
+  $('condLast').textContent = c.last ? 'Last run ' + new Date(c.last.at).toLocaleString() + ': ' + (c.last.elite ? 'Elite Champion ' + c.last.elite : 'no Elite; best ' + (c.last.best || 'none') + ', ' + c.last.bestPassed + ' of ' + c.last.windows + ' windows') : '';
+  $('title').textContent = s.phase === 'running' ? (s.mode === 'conditioning' ? 'Conditioning' : 'Training') : s.phase === 'stopping' ? 'Stopping...' : s.lastStop ? 'Stopped: ' + s.lastStop : 'Ready';
   if (!filled && s.settings) { $('host').value = s.settings.host || ''; $('user').value = s.settings.user || ''; $('key').value = s.settings.key || ''; if (s.settings.host) $('srv').open = false; filled = true; }
   if (running && s.progress) {
     const p = s.progress;

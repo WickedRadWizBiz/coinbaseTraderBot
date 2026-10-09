@@ -109,7 +109,7 @@ import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
 import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
 
-export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'rule_book', 'gp', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'readiness'] as const;
+export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'rule_book', 'gp', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'readiness', 'conditioning'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -244,7 +244,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     log('sweeping everything: every step is due this run');
   }
   const steps: StepResult[] = [];
-  const want = (s: Step) => !o.only?.length || o.only.includes(s);
+  // Conditioning runs only when asked for by name (the trainer window's conditioning mode), never in a normal run.
+  const want = (s: Step) => (s === 'conditioning' ? !!o.only?.includes(s) : !o.only?.length || o.only.includes(s));
   const rec = A.recordingsDir;
   const days = recordingDays(rec);
   const promoted = (name: keyof typeof MODEL_FILES) => path.join(A.dir, MODEL_FILES[name]);
@@ -930,7 +931,30 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     });
   }
 
-  state.lastRun = now;
+  // ---- 11. conditioning (only on request): the freshly trained bot's settings pressure-tested on unseen days of the
+  // history replay, tier by tier (research/conditioning.ts, research/conditioningRun.ts) ----
+  if (want('conditioning')) {
+    await run('conditioning', async () => {
+      if (!T.historyReplay || !replayDays().length) throw new SkipStep('no history replay to condition on (HISTORY_REPLAY=false or not built yet: run the normal training first)');
+      const { conditioningStep } = await import('./conditioningRun');
+      let book;
+      try { book = SetupModel.load(fs.existsSync(promoted('setups')) ? promoted('setups') : cfg.perps.setupModelPath)?.params.book; } catch { book = undefined; }
+      const fit = mlpPath() ? (MetaModel.load(mlpPath()!).params.training as { firstWindow?: string; holdoutStart?: string } | undefined) : undefined;
+      const env = (k: string, d: number) => { const v = Number(process.env[k]); return Number.isFinite(v) && process.env[k] !== '' && process.env[k] !== undefined ? v : d; };
+      return conditioningStep({
+        replayDir, historyDir: T.historyDir, modelsDir: A.dir, setupOos: path.join(A.dir, 'setup_oos.json'), modelPath: mlpPath(),
+        live: settingsFromConfig(cfg, book), ledger,
+        fitted: (d) => Boolean(fit?.firstWindow && fit.holdoutStart && d >= fit.firstWindow.slice(0, 10) && d < fit.holdoutStart.slice(0, 10)),
+        instances: Math.max(2, Math.round(env('COND_INSTANCES', 24))), workers: workerCount(),
+        rules: { targetUsd: env('COND_TARGET_USD', 100), cullFrac: env('COND_CULL_FRAC', 0.35), minTierC: Math.round(env('COND_MIN_TIER_C', 4)), retrials: Math.round(env('COND_RETRIALS', 3)) },
+        log: (m) => log(`conditioning: ${m}`), now,
+      });
+    });
+  }
+
+  // A conditioning-only run is not a normal training run (the trainer greys conditioning out until there is a fresh one).
+  const conditioningOnly = o.only?.length === 1 && o.only[0] === 'conditioning';
+  if (!conditioningOnly) state.lastRun = now;
   writeAtomic(report, JSON.stringify({ at: new Date(now).toISOString(), complete: true, recordings: rec, days: days.length, readiness: state.readiness, promote: A.promote, snnChanged, steps }, null, 1));
   state.lastReport = report;
   writeAtomic(path.join(A.dir, 'pipeline_state.json'), JSON.stringify(state, null, 1));
