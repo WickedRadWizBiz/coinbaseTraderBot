@@ -6,6 +6,7 @@ import os from 'os';
 import { runRuleBook } from '../research/ruleBook';
 import { bracketReturn, signed, studyCombos, type Step } from '../research/confluenceBook';
 import { buckets, conditionText, studyConditions } from '../research/conditionBook';
+import { invalidationText, studyInvalidations } from '../research/invalidationBook';
 import { CONTEXT_PARAMS, contextOf, oriented } from '../bot/strategy/ruleContext';
 import { RuleBook, type RuleBookFile, type RuleRow } from '../bot/strategy/ruleBook';
 import { breadthOf, riskOf } from '../bot/ta/marketContext';
@@ -38,6 +39,7 @@ test('rule-book study: planted momentum is found and confirmed on the later year
   assert.ok(Array.isArray(f.combos) && f.combos.length > 0, 'pairs of co-active signals are logged');
   for (const c of f.combos!) assert.ok(c.parts[0] !== c.parts[1] && c.n >= 50);
   assert.ok(Array.isArray(f.conditions) && f.conditions.length > 0, 'every rule\'s record is split by the context it fired in');
+  assert.ok(Array.isArray(f.invalidations), 'what other signals did to each call is logged');
 });
 
 const row = (o: Partial<RuleRow>): RuleRow => ({ id: 'ema_stack', kind: 'rule', tf: '1h', h: 4, cls: 'all', n: 100, hit: 0.6, payoff: 1.2, expBps: 20, p: 0.001, fdr: true, nConf: 50, hitConf: 0.58, expConfBps: 15, pass: true, weight: 0.8, ...o });
@@ -191,4 +193,59 @@ test('live rule book: a condition under which a rule fails silences it; one unde
   assert.deepEqual(strong.agree, [], 'in a strong trend: rsi_extreme has no condition, ema_stack is silenced');
   assert.deepEqual(strong.silenced, ['ema_stack@1h']);
   assert.equal(rb.passedConditions().length, 2);
+});
+
+test('invalidations: a pattern against the call turns it around and is learned; a random companion is not', () => {
+  const r = rng(5);
+  const keys = ['rule|ema_stack|1h', 'book|double_top|1h', 'rule|noise|1h'];
+  const steps: Step[] = [];
+  for (let k = 0; k < 9000; k++) {
+    const dir = r() < 0.5 ? 1 : -1;
+    const active = [signed(0, dir)];
+    const blocker = r() < 0.25, noise = r() < 0.3;
+    if (blocker) active.push(signed(1, -dir));
+    if (noise) active.push(signed(2, r() < 0.5 ? 1 : -1));
+    // ema_stack is right by 25 bps, but wrong by 25 bps when the double top points against it.
+    steps.push({ asset: 0, i: k, t: T0 + k * H, fwd: [dir * (blocker ? -0.0025 : 0.0025) + 0.006 * gauss(r)], active: Int32Array.from(active) });
+  }
+  const rows = studyInvalidations(steps, keys, { horizons: [1], splitAt: T0 + 6000 * H, stride: 1, costBps: 0 });
+  const pass = rows.filter((x) => x.pass);
+  const hit = pass.find((x) => x.key === 'rule|ema_stack|1h' && x.by === 'book|double_top|1h');
+  assert.ok(hit && hit.rel === 'against' && hit.expBps < 0 && hit.aloneBps > 0 && hit.expConfBps < 0, JSON.stringify(hit));
+  assert.ok(pass.some((x) => x.key === 'rule|ema_stack|1h' && x.by === 'against>=1'), 'one or more signals against it is also logged');
+  assert.ok(!pass.some((x) => x.by === 'rule|noise|1h'), 'the random companion carries nothing');
+  assert.match(invalidationText(hit!), /ema_stack\|1h is invalidated 1h by book\|double_top\|1h pointing against it/);
+});
+
+test('invalidations: several signals against the call turn it around though no one of them does', () => {
+  const r = rng(8);
+  const keys = ['rule|rsi_extreme|1h', ...Array.from({ length: 8 }, (_, i) => `rule|o${i}|1h`)];
+  const steps: Step[] = [];
+  for (let k = 0; k < 12000; k++) {
+    const dir = r() < 0.5 ? 1 : -1;
+    const active = [signed(0, dir)];
+    let against = 0;
+    for (let j = 1; j <= 8; j++) if (r() < 0.12) { const d = r() < 0.5 ? 1 : -1; active.push(signed(j, d)); if (d !== dir) against++; }
+    steps.push({ asset: 0, i: k, t: T0 + k * H, fwd: [dir * (against >= 2 ? -0.003 : 0.002) + 0.006 * gauss(r)], active: Int32Array.from(active) });
+  }
+  const pass = studyInvalidations(steps, keys, { horizons: [1], splitAt: T0 + 8000 * H, stride: 1, costBps: 0 }).filter((x) => x.pass);
+  assert.ok(pass.some((x) => x.key === 'rule|rsi_extreme|1h' && x.by === 'against>=2'), JSON.stringify(pass.map((x) => x.by)));
+});
+
+test('live rule book: a signal whose invalidator is present now is silenced', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rbi-'));
+  const file = path.join(dir, 'rule_book.json');
+  const inv = (o: object) => ({ key: 'rule|ema_stack|1h', by: 'book|double_top|1h', rel: 'against', h: 4, n: 90, hit: 0.4, expBps: -20, aloneBps: 15, p: 0.001, fdr: true, nConf: 40, hitConf: 0.4, expConfBps: -12, aloneConfBps: 10, pass: true, weight: 0.6, ...o });
+  fs.writeFileSync(file, JSON.stringify({ schema: 'rulebook1', generatedAt: '', assets: [], from: '', to: '', splitAt: '', stride: 6, costBps: 10, horizons: [4], character: { n: 1, accuracy: 0.7, baseline: 0.5, confusion: {}, share: {} },
+    rows: [row({ id: 'ema_stack', weight: 0.5 }), row({ id: 'macd_cross', weight: 0.5 })], invalidations: [inv({}), inv({ key: 'rule|macd_cross|1h', by: 'against>=2' })] }));
+  const rb = new RuleBook(() => file);
+  const at = (book: Array<{ id: string; dir: -1 | 1 }>, extra: Array<{ id: string; dir: -1 | 1 }> = []) => ({ ...snap([{ id: 'ema_stack', tf: '1h', dir: 1, strength: 1 }, { id: 'macd_cross', tf: '1h', dir: 1, strength: 1 }, ...extra.map((e) => ({ ...e, tf: '1h', strength: 1 }))]), book: book.map((b) => ({ ...b, tf: '1h', strength: 1 })), ts: T0 }) as unknown as TaSnapshot;
+  assert.deepEqual(rb.read(at([]), 4)!.agree.sort(), ['ema_stack@1h', 'macd_cross@1h']);
+  const top = rb.read(at([{ id: 'double_top', dir: -1 }]), 4)!;
+  assert.deepEqual(top.agree, ['macd_cross@1h'], 'the double top against it invalidates ema_stack; one signal against macd_cross is not enough');
+  assert.deepEqual(top.invalidated, ['ema_stack@1h by book|double_top|1h']);
+  assert.deepEqual(rb.read(at([{ id: 'double_top', dir: 1 }]), 4)!.invalidated, [], 'pointing the same way it does not');
+  const two = rb.read(at([{ id: 'double_top', dir: -1 }], [{ id: 'rsi_div', dir: -1 }]), 4)!;
+  assert.deepEqual(two.invalidated!.sort(), ['ema_stack@1h by book|double_top|1h', 'macd_cross@1h by against>=2']);
+  assert.equal(rb.passedInvalidations().length, 2);
 });

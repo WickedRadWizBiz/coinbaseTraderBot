@@ -10,6 +10,9 @@
 // periods silences it while the condition holds; one under which it worked lets a rule that did not pass on its
 // own count. The context comes from the same snapshot (bot/strategy/ruleContext.ts).
 //
+// What invalidates a call (research/invalidationBook.ts): a signal whose call lost money and did worse when
+// another signal (or several pointing against it) was present, on both periods, is silenced while that holds.
+//
 // Pairs of signals seen active together that did better than either alone, on years of history and again on
 // later years (the confluence logbook, research/confluenceBook.ts), count the same way when both are present
 // now and agree (strength: the mean of the two).
@@ -54,6 +57,14 @@ export interface ConditionRow {
   nConf: number; hitConf: number; expConfBps: number; baseConfBps: number; pass: boolean; weight: number;
 }
 
+/** A signal or several whose presence turned a rule's call around (research/invalidationBook.ts): `by` is the
+ *  other signal's key ('kind|id|tf') or a count ('against>=2': two or more others pointing against it). */
+export interface InvalidationRow {
+  key: string; by: string; rel: 'with' | 'against'; h: number;
+  n: number; hit: number; expBps: number; aloneBps: number; p: number; fdr: boolean;
+  nConf: number; hitConf: number; expConfBps: number; aloneConfBps: number; pass: boolean; weight: number;
+}
+
 export interface RuleBookFile {
   schema: string;
   generatedAt: string;
@@ -68,12 +79,14 @@ export interface RuleBookFile {
   combos?: ComboRow[];
   /** What makes or breaks each rule: its record split by the context it fired in (the passing ones apply live). */
   conditions?: ConditionRow[];
+  /** What invalidates each rule's call: other signals present at the same time (the passing ones apply live). */
+  invalidations?: InvalidationRow[];
 }
 
-export interface RuleBookReading { score: number; n: number; agree: string[]; oppose: string[]; cls?: Character; /** Signals present but silenced by a condition under which they fail. */ silenced?: string[] }
+export interface RuleBookReading { score: number; n: number; agree: string[]; oppose: string[]; cls?: Character; /** Signals present but silenced by a condition under which they fail. */ silenced?: string[]; /** Signals present but invalidated by another signal (or several) present now: 'id@tf by ...'. */ invalidated?: string[] }
 
 export class RuleBook {
-  private file?: { mtime: number; f?: RuleBookFile; idx: Map<string, RuleRow>; combos: ComboRow[]; conds: Map<string, ConditionRow[]> };
+  private file?: { mtime: number; f?: RuleBookFile; idx: Map<string, RuleRow>; combos: ComboRow[]; conds: Map<string, ConditionRow[]>; inval: Map<string, InvalidationRow[]> };
 
   constructor(private readonly path: () => string) {}
 
@@ -90,8 +103,10 @@ export class RuleBook {
         for (const r of f.rows ?? []) if (r.pass && r.weight > 0) idx.set(`${r.kind}|${r.id}|${r.tf}|${r.h}|${r.cls}`, r);
         const conds = new Map<string, ConditionRow[]>();
         for (const c of f.conditions ?? []) if (c.pass) { const k = `${c.key}|${c.h}`; const l = conds.get(k); if (l) l.push(c); else conds.set(k, [c]); }
-        this.file = { mtime, f, idx, combos: (f.combos ?? []).filter((c) => c.pass && c.weight > 0), conds };
-      } catch { this.file = { mtime, idx: new Map(), combos: [], conds: new Map() }; }
+        const inval = new Map<string, InvalidationRow[]>();
+        for (const v of f.invalidations ?? []) if (v.pass) { const k = `${v.key}|${v.h}`; const l = inval.get(k); if (l) l.push(v); else inval.set(k, [v]); }
+        this.file = { mtime, f, idx, combos: (f.combos ?? []).filter((c) => c.pass && c.weight > 0), conds, inval };
+      } catch { this.file = { mtime, idx: new Map(), combos: [], conds: new Map(), inval: new Map() }; }
     }
     return this.file.idx;
   }
@@ -102,18 +117,38 @@ export class RuleBook {
   passedCombos(): ComboRow[] { this.load(); return this.file?.combos ?? []; }
   /** Passing make-or-break conditions (for status). */
   passedConditions(): ConditionRow[] { this.load(); return [...(this.file?.conds.values() ?? [])].flat(); }
+  /** Passing invalidations (for status). */
+  passedInvalidations(): InvalidationRow[] { this.load(); return [...(this.file?.inval.values() ?? [])].flat(); }
   meta(): Pick<RuleBookFile, 'generatedAt' | 'from' | 'to' | 'splitAt' | 'character'> | undefined { this.load(); const f = this.file?.f; return f ? { generatedAt: f.generatedAt, from: f.from, to: f.to, splitAt: f.splitAt, character: f.character } : undefined; }
 
   /** Combined direction of the passing rules present in `snap` for horizon h (hours) and character cls. */
   read(snap: TaSnapshot | undefined, h: number, cls?: Character): RuleBookReading | undefined {
     const idx = this.load();
-    const combos = this.file?.combos ?? [], conds = this.file?.conds ?? new Map<string, ConditionRow[]>();
-    if ((!idx?.size && !combos.length && !conds.size) || !idx || !snap) return undefined;
-    const horizons = [...new Set([...idx.values(), ...combos, ...[...conds.values()].flat()].map((r) => r.h))].sort((a, b) => Math.abs(a - h) - Math.abs(b - h));
+    const combos = this.file?.combos ?? [], conds = this.file?.conds ?? new Map<string, ConditionRow[]>(), inval = this.file?.inval ?? new Map<string, InvalidationRow[]>();
+    if ((!idx?.size && !combos.length && !conds.size && !inval.size) || !idx || !snap) return undefined;
+    const horizons = [...new Set([...idx.values(), ...combos, ...[...conds.values()].flat(), ...[...inval.values()].flat()].map((r) => r.h))].sort((a, b) => Math.abs(a - h) - Math.abs(b - h));
     const hh = horizons[0];
     if (hh === undefined) return undefined;
     let num = 0, den = 0;
-    const agree: string[] = [], oppose: string[] = [], silenced: string[] = [];
+    const agree: string[] = [], oppose: string[] = [], silenced: string[] = [], invalidated: string[] = [];
+    // What is active now, as 'kind|id|tf' -> direction and strength (the pairs and invalidations are keyed the same way).
+    const present = new Map<string, { dir: number; strength: number }>();
+    for (const s of snap.signals) if (s.dir) present.set(`rule|${s.id}|${s.tf}`, s);
+    for (const s of snap.book ?? []) if (s.dir) present.set(`book|${s.id}|${s.tf}`, s);
+    for (const c of snap.confluences) if (c.score) present.set(`confluence|${c.id}|multi`, { dir: Math.sign(c.score), strength: Math.abs(c.score) });
+    /** The passing invalidation of this signal that holds now, if any. */
+    const invalidator = (key: string, dir: number) => {
+      const vs = inval.get(`${key}|${hh}`);
+      if (!vs) return undefined;
+      let withA = 0, against = 0;
+      for (const [k, o] of present) if (k !== key) { if (Math.sign(o.dir) === Math.sign(dir)) withA++; else against++; }
+      return vs.find((v) => {
+        const m = /^(with|against)>=(\d+)$/.exec(v.by);
+        if (m) return (m[1] === 'with' ? withA : against) >= Number(m[2]);
+        const o = present.get(v.by);
+        return !!o && (Math.sign(o.dir) === Math.sign(dir) ? 'with' : 'against') === v.rel;
+      });
+    };
     let ctx: Float32Array | undefined;
     const holds = (c: ConditionRow, dir: number) => {
       const i = CONTEXT_PARAMS.findIndex((p) => p.name === c.param);
@@ -125,6 +160,9 @@ export class RuleBook {
       if (!s.dir) return;
       // What makes or breaks this rule (research/conditionBook.ts): a condition under which it failed on both
       // periods silences it; one under which it worked lets it count even if it did not pass on its own.
+      // A signal (or several) present now that turned this rule's call around on both periods silences it.
+      const v = invalidator(`${kind}|${s.id}|${s.tf}`, s.dir);
+      if (v) { invalidated.push(`${s.id}@${s.tf} by ${v.by}`); return; }
       const cs = conds.get(`${kind}|${s.id}|${s.tf}|${hh}`) ?? [];
       if (cs.some((c) => c.effect === 'breaks' && holds(c, s.dir))) { silenced.push(`${s.id}@${s.tf}`); return; }
       const row = (cls && idx.get(`${kind}|${s.id}|${s.tf}|${hh}|${cls}`)) || idx.get(`${kind}|${s.id}|${s.tf}|${hh}|all`);
@@ -133,11 +171,9 @@ export class RuleBook {
       num += s.dir * s.strength * weight; den += weight;
       (s.dir > 0 ? agree : oppose).push(`${s.id}@${s.tf}`);
     };
-    // What is active now, as 'kind|id|tf' -> direction and strength (the pairs are keyed the same way).
-    const present = new Map<string, { dir: number; strength: number }>();
-    for (const s of snap.signals) { add('rule', s); if (s.dir) present.set(`rule|${s.id}|${s.tf}`, s); }
-    for (const s of snap.book ?? []) { add('book', s); if (s.dir) present.set(`book|${s.id}|${s.tf}`, s); }
-    for (const c of snap.confluences) if (c.score) { const s = { id: c.id, tf: 'multi', dir: Math.sign(c.score) as -1 | 1, strength: Math.abs(c.score) }; add('confluence', s); present.set(`confluence|${c.id}|multi`, s); }
+    for (const s of snap.signals) add('rule', s);
+    for (const s of snap.book ?? []) add('book', s);
+    for (const c of snap.confluences) if (c.score) add('confluence', { id: c.id, tf: 'multi', dir: Math.sign(c.score) as -1 | 1, strength: Math.abs(c.score) });
     // Pairs seen together on years of history that did better than either alone (research/confluenceBook.ts).
     for (const c of combos) {
       if (c.h !== hh) continue;
@@ -146,8 +182,8 @@ export class RuleBook {
       num += Math.sign(a.dir) * ((a.strength + b.strength) / 2) * c.weight; den += c.weight;
       (a.dir > 0 ? agree : oppose).push(`${c.parts[0].split('|')[1]}+${c.parts[1].split('|')[1]}`);
     }
-    if (!(den > 0)) return { score: 0, n: 0, agree, oppose, cls, silenced };
-    return { score: Math.max(-1, Math.min(1, num / den)), n: agree.length + oppose.length, agree, oppose, cls, silenced };
+    if (!(den > 0)) return { score: 0, n: 0, agree, oppose, cls, silenced, invalidated };
+    return { score: Math.max(-1, Math.min(1, num / den)), n: agree.length + oppose.length, agree, oppose, cls, silenced, invalidated };
   }
 }
 
