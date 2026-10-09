@@ -206,7 +206,7 @@ export function createApi(d: ApiDeps): express.Express {
       market: marketContext()?.status() ?? null,
       // Evolved formulas (research/gpIndicators.ts): each coin's champion, whether it is validated, its test record.
       gp: (() => { const g = activeGpSignals(); const cs = g?.champions(); if (!g || !cs || !Object.keys(cs).length) return null; return { version: g.version() ?? null, champions: Object.fromEntries(Object.entries(cs).map(([a, c]) => [a, { formula: c.formula, validated: c.validated, why: c.why ?? null, test: c.test ?? null }])) }; })(),
-      ruleBook: (() => { const rb = activeRuleBook(); const m = rb?.meta(); if (!rb || !m) return null; const p = rb.passed(); return { ...m, passed: p.length, top: p.sort((a, b) => b.weight - a.weight).slice(0, 12).map((r) => `${r.id}@${r.tf} ${r.h}h [${r.cls}] w${r.weight}`) }; })(),
+      ruleBook: (() => { const rb = activeRuleBook(); const m = rb?.meta(); if (!rb || !m) return null; const p = rb.passed(); const pc = rb.passedCombos(); return { ...m, passed: p.length, top: p.sort((a, b) => b.weight - a.weight).slice(0, 12).map((r) => `${r.id}@${r.tf} ${r.h}h [${r.cls}] w${r.weight}`), pairs: pc.length, topPairs: [...pc].sort((a, b) => b.weight - a.weight).slice(0, 12).map((c) => `${c.parts[0]} + ${c.parts[1]} ${c.h}h w${c.weight}${c.bracket?.ok ? ` (TP ${100 * c.bracket.tp}% / SL ${100 * c.bracket.sl}%)` : ''}`) }; })(),
       settlement: d.settlement?.status() ?? null,
       kalshiCheck: d.kalshiCheck?.status() ?? null,
       latency: latencySnapshot(),

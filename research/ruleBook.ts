@@ -34,6 +34,7 @@ import { loadIndexSeries } from '../bot/marketdata/historyStore';
 import { benjaminiHochberg, blockBootstrap } from './taStudy';
 import { loadHistory, storedAssets } from './history/candles';
 import type { RuleBookFile, RuleRow } from '../bot/strategy/ruleBook';
+import { bestBracket, signed, studyCombos, type Step } from './confluenceBook';
 export type { RuleBookFile, RuleRow };
 
 const H = 3_600_000;
@@ -68,12 +69,16 @@ export function runRuleBook(hist: Record<string, Hist>, o: RuleBookOptions = {})
   let charN = 0, charHit = 0;
   const realisedCount: Record<string, number> = {};
   const d1All = assets.map((a) => hist[a].d1);
-  for (const asset of assets) {
+  // The confluence logbook: every step's set of active signals (research/confluenceBook.ts).
+  const keys: string[] = [], keyIdx = new Map<string, number>();
+  const keyOf = (k: string) => { let i = keyIdx.get(k); if (i === undefined) { i = keys.length; keys.push(k); keyIdx.set(k, i); } return i; };
+  const steps: Step[] = [];
+  for (const [ai, asset] of assets.entries()) {
     const { h1, d1 } = hist[asset];
     const others = assets.filter((x) => x !== asset).map((x) => hist[x].h1);
     const h4cache: { j: number; s?: TfState } = { j: -1 };
     const d1cache: { j: number; s?: TfState } = { j: -1 };
-    let steps = 0;
+    let nSteps = 0;
     for (let i = 300; i + maxH < h1.length; i += stride) {
       const t = h1[i].ts + H;
       // A gap in the hourly series (missing bars) would mislabel the horizon: skip such steps.
@@ -97,8 +102,10 @@ export function runRuleBook(hist: Record<string, Hist>, o: RuleBookOptions = {})
       realisedCount[real] = (realisedCount[real] ?? 0) + 1;
       charN++; if (real === ch.cls) charHit++;
       const fwd = horizons.map((hh) => Math.log(h1[i + hh].c / h1[i].c));
+      const active: number[] = [];
       const record = (id: string, kind: RuleRow['kind'], tf: string, dir: number) => {
         if (!dir) return;
+        active.push(signed(keyOf(`${kind}|${id}|${tf}`), dir));
         horizons.forEach((hh, k) => {
           const r = Math.sign(dir) * fwd[k] - cost;
           push(`${kind}|${id}|${tf}|${hh}|${ch.cls}`, { ts: t, r });
@@ -108,9 +115,10 @@ export function runRuleBook(hist: Record<string, Hist>, o: RuleBookOptions = {})
       for (const s of snap.signals) record(s.id, 'rule', s.tf, s.dir);
       for (const s of snap.book ?? []) record(s.id, 'book', s.tf, s.dir);
       for (const c of snap.confluences) record(c.id, 'confluence', 'multi', Math.sign(c.score));
-      steps++;
+      if (active.length >= 2) steps.push({ asset: ai, i, t, fwd, active: Int32Array.from(active) });
+      nSteps++;
     }
-    log(`[rule-book] ${asset}: ${steps} steps`);
+    log(`[rule-book] ${asset}: ${nSteps} steps`);
   }
   // Statistics per key, discovery vs confirmation.
   const rows: RuleRow[] = [];
@@ -146,10 +154,14 @@ export function runRuleBook(hist: Record<string, Hist>, o: RuleBookOptions = {})
   rows.sort((a, b) => Number(b.pass) - Number(a.pass) || b.weight - a.weight || a.p - b.p);
   const share = Object.fromEntries(CHARACTERS.map((c) => [c, +((realisedCount[c] ?? 0) / Math.max(1, charN)).toFixed(4)]));
   const iso = (x: number) => new Date(x).toISOString().slice(0, 10);
+  // Pairs seen together, and a small take-profit / stop-loss grid for the ones that passed.
+  const combos = studyCombos(steps, keys, { horizons, splitAt, stride, minN, minConf, fdr: q, costBps: cost * 1e4 });
+  for (const c of combos.filter((x) => x.pass)) c.bracket = bestBracket(steps, keys, c.parts, assets.map((a) => hist[a].h1), { splitAt, costBps: cost * 1e4 });
+  log(`[rule-book] confluence logbook: ${steps.length} steps with 2+ signals, ${combos.length} pairs logged, ${combos.filter((x) => x.pass).length} passed`);
   return {
     schema: RULEBOOK_SCHEMA, generatedAt: new Date().toISOString(), assets, from: iso(t0), to: iso(t1), splitAt: iso(splitAt), stride, costBps: cost * 1e4, horizons,
     character: { n: charN, accuracy: +(charHit / Math.max(1, charN)).toFixed(4), baseline: Math.max(0, ...Object.values(share)), confusion, share },
-    rows,
+    rows, combos,
   };
 }
 
@@ -167,6 +179,9 @@ export function ruleBookSummary(f: RuleBookFile): string[] {
   const passed = f.rows.filter((r) => r.pass);
   const out = [`${f.rows.length} rule x timeframe x horizon x character tests on ${f.assets.join(', ')} ${f.from}..${f.to} (confirmation from ${f.splitAt}), cost ${f.costBps} bps: ${passed.length} passed`,
     `character: ${(100 * f.character.accuracy).toFixed(1)} % of next-24h characters called right (most-common-class baseline ${(100 * f.character.baseline).toFixed(1)} %), shares ${JSON.stringify(f.character.share)}`];
+  const combos = f.combos ?? [], cp = combos.filter((c) => c.pass);
+  out.push(`confluence logbook: ${combos.length} pairs of signals seen together logged, ${cp.length} did better than either alone on both periods`);
+  for (const c of cp.slice(0, 15)) out.push(`  PAIR ${c.parts[0]} + ${c.parts[1]} ${c.h}h: n ${c.n}, hit ${(100 * c.hit).toFixed(1)} %, ${c.expBps} bps (lift ${c.liftBps}) | later years n ${c.nConf}, ${c.expConfBps} bps (lift ${c.liftConfBps}) -> weight ${c.weight}${c.bracket ? `; bracket TP ${100 * c.bracket.tp}% / SL ${100 * c.bracket.sl}%: ${c.bracket.expBps} bps, later ${c.bracket.expConfBps} bps${c.bracket.ok ? '' : ' (not confirmed)'}` : ''}`);
   for (const r of passed.slice(0, 25)) out.push(`  PASS ${r.kind} ${r.id} ${r.tf} ${r.h}h [${r.cls}]: n ${r.n}, hit ${(100 * r.hit).toFixed(1)} %, payoff ${r.payoff}, ${r.expBps} bps | later years n ${r.nConf}, hit ${(100 * r.hitConf).toFixed(1)} %, ${r.expConfBps} bps -> weight ${r.weight}`);
   return out;
 }
