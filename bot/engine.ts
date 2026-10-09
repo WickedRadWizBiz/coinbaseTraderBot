@@ -431,6 +431,13 @@ export class Engine {
     const res = mon.check(balance, quiet);
     this.saveMonitor();
     if (!res.deposit && !res.withdrawal) return;
+    // Paper: nobody moves money in or out of a paper book (the bot's own refills are noted as they
+    // happen), so an unexplained balance move is the paper book itself changing, for example started
+    // fresh after its file was damaged. The books re-anchor to it; the vault and pocket are not drawn.
+    if (this.d.cfg.mode !== 'live') {
+      this.d.audit.write('vault', { event: 'paper_rebase', deposit: res.deposit, withdrawal: res.withdrawal, balance });
+      return;
+    }
     // Live: a balance move is a transfer only if Kalshi's history shows one; otherwise the Kalshi check
     // reports it as an accounting mismatch (the books are re-anchored to Kalshi's balance either way).
     const check = this.d.kalshiCheck;
