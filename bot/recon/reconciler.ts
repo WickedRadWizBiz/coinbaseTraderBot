@@ -47,6 +47,9 @@ export interface ReconOptions {
   onPersistentBreak: (reason: string) => void;
   /** The fills the exchange listed this run, after any the bot missed were applied (the Kalshi check). */
   onFills?: (fills: ExchangeFill[]) => void;
+  /** Paper mode: an order the (paper) exchange does not know is closed locally as canceled instead of
+   *  being reported as a break every run (a paper book started fresh forgets its resting orders). */
+  closeUnknownOrders?: boolean;
   now?: () => number;
 }
 
@@ -135,7 +138,10 @@ export class Reconciler {
       // Re-query: the order may have been placed or finished since the listing.
       const ex = await gateway.getOrder(rec.orderId);
       if (ex) oms.onExchangeOrder(ex);
-      if (!ex) breaks.push(`order ${rec.clientOrderId} (${rec.orderId}) unknown to exchange`);
+      if (!ex && this.o.closeUnknownOrders) {
+        oms.onExchangeOrder({ orderId: rec.orderId, clientOrderId: rec.clientOrderId, ticker: rec.ticker, side: rec.side, price: rec.price, status: 'canceled', fillCount: rec.exchangeFillCount, remainingCount: 0, lastUpdateReason: 'unknown to the paper exchange' });
+        this.o.audit.write('recon_repair', { closedUnknownOrder: rec.clientOrderId, orderId: rec.orderId });
+      } else if (!ex) breaks.push(`order ${rec.clientOrderId} (${rec.orderId}) unknown to exchange`);
       else if (isLive(rec) && ex.status !== 'resting' && rec.state !== 'CANCEL_PENDING') breaks.push(`order ${rec.clientOrderId} live internally but ${ex.status} on exchange`);
     }
 

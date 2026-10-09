@@ -193,6 +193,7 @@ async function main(): Promise<void> {
     onSettled: (t, r) => md.recordResult(t, r),
     onPersistentBreak: (reason) => void kill.engage(reason, 'recon'),
     onFills: (fills) => kalshiCheck.onExchangeFills(fills),
+    closeUnknownOrders: cfg.mode !== 'live',
   });
   const risk = new RiskGateway(cfg.risk);
   const vault = new Vault(cfg.vault, path.join(cfg.dataDir, 'vault.json'));
