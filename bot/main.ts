@@ -35,13 +35,13 @@ import { MarketContext, marketContext, setMarketContext } from './ta/marketConte
 import { activeRuleBook, RuleBook, setRuleBook, STAND_ASIDE } from './strategy/ruleBook';
 import { activeGpSignals, GpSignals, setGpSignals } from './gp/gpSignals';
 import { SetupJournal } from './setups/journal';
-import { compressOldRecordings, recordingsUsage } from './marketdata/recordingFiles';
+import { compressOldRecordings, freeBytesAt, pruneRecordings, recordingsUsage } from './marketdata/recordingFiles';
 import { DEFAULT_LANES } from './setups/lanes';
 import { PaperPerpExchange } from './perps/paperPerp';
 import { KalshiPerpsRest, type PerpGateway } from './perps/perpRest';
 import { BalanceMonitor, type MonitorState } from './vault/balanceMonitor';
 import { Vault } from './vault/vault';
-import { readJson } from './util/persist';
+import { readJson, setQuarantineAll } from './util/persist';
 import { Oms } from './oms/oms';
 import { PaperExchange } from './paper/paperExchange';
 import { KillSwitch } from './risk/killSwitch';
@@ -67,6 +67,8 @@ async function main(): Promise<void> {
   let cfg: Readonly<Config>;
   try {
     cfg = loadConfig();
+    // Paper mode: a damaged state file is moved aside and rebuilt instead of stopping the bot.
+    setQuarantineAll(cfg.mode !== 'live');
   } catch (e) {
     if (e instanceof ConfigError) {
       log.error(`configuration invalid: ${e.message}`);
@@ -144,10 +146,19 @@ async function main(): Promise<void> {
   const recDir = path.join(cfg.dataDir, 'recordings');
   const maintainRecordings = async () => {
     try {
+      // Below the floor, the oldest days go first (the gzip below also needs room to write).
+      const floor = cfg.autoTrain.recordingsMinFreeGb * 1e9;
+      const prune = () => {
+        if (!cfg.autoTrain.recordingsPrune) return;
+        const gone = pruneRecordings(recDir, 2 * floor);
+        if (gone.length) alerter.notify('warn', 'recordings-pruned', `Disk below ${cfg.autoTrain.recordingsMinFreeGb} GB free: deleted the oldest recorded days ${gone[0]}..${gone[gone.length - 1]} (${gone.length})`);
+      };
+      if ((freeBytesAt(recDir) ?? Infinity) < floor) prune();
       if (cfg.autoTrain.recordingsGzipAfterDays > 0) {
         const done = await compressOldRecordings(recDir, cfg.autoTrain.recordingsGzipAfterDays);
         if (done.length) log.info('recordings compressed', { days: done });
       }
+      if ((freeBytesAt(recDir) ?? Infinity) < floor) prune();
       const u = recordingsUsage(recDir);
       if (u.freeBytes !== undefined && u.freeBytes < cfg.autoTrain.recordingsMinFreeGb * 1e9) {
         alerter.notify('warn', 'recordings-disk', `Low disk: ${(u.freeBytes / 1e9).toFixed(1)} GB free; recordings use ${(u.bytes / 1e9).toFixed(1)} GB over ${u.days} days (RECORDINGS_MIN_FREE_GB=${cfg.autoTrain.recordingsMinFreeGb})`);
@@ -155,7 +166,8 @@ async function main(): Promise<void> {
     } catch (e) { log.warn('recordings maintenance failed', { error: String(e) }); }
   };
   void maintainRecordings();
-  setInterval(() => void maintainRecordings(), 3_600_000).unref();
+  // Every 10 minutes: a busy day writes several GB, an hour is too long to wait near a full disk.
+  setInterval(() => void maintainRecordings(), 600_000).unref();
 
   const paper = cfg.mode === 'live'
     ? undefined
@@ -185,7 +197,7 @@ async function main(): Promise<void> {
   const risk = new RiskGateway(cfg.risk);
   const vault = new Vault(cfg.vault, path.join(cfg.dataDir, 'vault.json'));
   const balanceMonitorPath = path.join(cfg.dataDir, 'balance_monitor.json');
-  const balanceMonitor = new BalanceMonitor(readJson<MonitorState>(balanceMonitorPath) ?? {});
+  const balanceMonitor = new BalanceMonitor(readJson<MonitorState>(balanceMonitorPath, { quarantine: true }) ?? {});
   const tca = new Tca(path.join(cfg.dataDir, 'tca'), (t) => md.books.get(t)?.mid());
   const equityGuard = new EquityGuard({ ddScaleAt: cfg.strategy.ddScaleAt, weeklyLossPause: cfg.strategy.weeklyLossPause, dailyGoalUsd: cfg.vault.dailyGoalUsd }, path.join(cfg.dataDir, 'equity_guard.json'));
   // Dashboard PLAY / STOP and the paper training override (persisted).

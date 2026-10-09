@@ -365,8 +365,11 @@ export interface AutoTrainConfig {
   recordingsDir: string;
   /** Gzip recorded days older than this many days (0 = never); readers handle both forms. */
   recordingsGzipAfterDays: number;
-  /** Alert when free disk space where the recordings live drops below this (GB). */
+  /** Alert when free disk space where the recordings live drops below this (GB); with recordingsPrune the
+   *  oldest recorded days are then deleted until twice this is free. */
   recordingsMinFreeGb: number;
+  /** Delete the oldest recorded days when the disk runs low (the newest two days are always kept). */
+  recordingsPrune: boolean;
   /** always = promote every freshly trained model (hot-swap mode); validated = only models whose
    *  validation passed (MLP: validation.passed; perps: validated(); SNN: its stage accepted). */
   promote: 'always' | 'validated';
@@ -1027,7 +1030,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       dir: path.resolve(env.AUTO_TRAIN_DIR ?? path.join(dataDir, 'models')),
       recordingsDir: path.resolve(env.AUTO_TRAIN_RECORDINGS ?? path.join(dataDir, 'recordings')),
       recordingsGzipAfterDays: num(env, 'RECORDINGS_GZIP_AFTER_DAYS', 2, 0, 365),
-      recordingsMinFreeGb: num(env, 'RECORDINGS_MIN_FREE_GB', 3, 0, 1e4),
+      recordingsMinFreeGb: num(env, 'RECORDINGS_MIN_FREE_GB', 5, 0, 1e4),
+      recordingsPrune: bool(env, 'RECORDINGS_PRUNE', true),
       promote: oneOf(env, 'AUTO_TRAIN_PROMOTE', 'always', ['always', 'validated'] as const),
       champion: bool(env, 'AUTO_TRAIN_CHAMPION', true),
       snnStage: oneOf(env, 'AUTO_TRAIN_SNN_STAGE', 'auto', ['auto', 'S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const),

@@ -61,12 +61,33 @@ export async function compressOldRecordings(dir: string, keepPlainDays: number, 
   return done;
 }
 
+/** Free bytes on the disk holding `dir` (undefined when unknown). */
+export function freeBytesAt(dir: string): number | undefined {
+  try { const s = fs.statfsSync(fs.existsSync(dir) ? dir : '.'); return s.bavail * s.bsize; } catch { return undefined; }
+}
+
+/** Delete the oldest recorded days until `targetFreeBytes` are free on the disk, never touching the newest
+ *  `keepDays` days. A full disk stops the bot from writing its state and from starting at all; losing the
+ *  oldest training days is the lesser harm. Returns the days deleted. */
+export function pruneRecordings(dir: string, targetFreeBytes: number, keepDays = 2, free: () => number | undefined = () => freeBytesAt(dir)): string[] {
+  const deleted: string[] = [];
+  const days = recordingFiles(dir).slice(0, -Math.max(1, keepDays));
+  for (const d of days) {
+    const f = free();
+    if (f === undefined || f >= targetFreeBytes) break;
+    // Both forms of the day, if both exist (a half-finished gzip).
+    for (const file of [d.file, d.file.endsWith('.gz') ? d.file.slice(0, -3) : `${d.file}.gz`, `${d.file.replace(/\.gz$/, '')}.gz.tmp`]) {
+      try { fs.rmSync(file); } catch { /* not there */ }
+    }
+    deleted.push(d.day);
+  }
+  return deleted;
+}
+
 /** Disk use of the recordings and free space where they live (free is undefined when unknown). */
 export function recordingsUsage(dir: string): { days: number; bytes: number; freeBytes?: number } {
   const files = recordingFiles(dir);
   let bytes = 0;
   for (const d of files) { try { bytes += fs.statSync(d.file).size; } catch { /* raced */ } }
-  let freeBytes: number | undefined;
-  try { const s = fs.statfsSync(fs.existsSync(dir) ? dir : '.'); freeBytes = s.bavail * s.bsize; } catch { freeBytes = undefined; }
-  return { days: files.length, bytes, freeBytes };
+  return { days: files.length, bytes, freeBytes: freeBytesAt(dir) };
 }

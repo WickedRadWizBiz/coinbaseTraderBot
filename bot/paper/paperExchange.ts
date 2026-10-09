@@ -78,7 +78,7 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
     private readonly now: () => number = Date.now,
   ) {
     super();
-    this.st = (file && readJson<PaperState>(file)) || { balance: startingBalance, funded: startingBalance, positions: {}, fills: [], orders: [] };
+    this.st = (file && readJson<PaperState>(file, { quarantine: true })) || { balance: startingBalance, funded: startingBalance, positions: {}, fills: [], orders: [] };
     // Accounts created before `funded` was recorded started with the old $20 default.
     const funded = this.st.funded ?? 20;
     if (startingBalance > funded) {

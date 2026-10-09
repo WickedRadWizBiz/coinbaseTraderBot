@@ -40,7 +40,7 @@ export class PaperPerpExchange implements PerpGateway {
     private readonly now: () => number = Date.now,
     startBalance = 20,
   ) {
-    this.st = (file && readJson<State>(file)) || { orders: [], positions: {}, lastFunding: {}, seq: 0 };
+    this.st = (file && readJson<State>(file, { quarantine: true })) || { orders: [], positions: {}, lastFunding: {}, seq: 0 };
     this.st.stops ??= {};
     this.st.startBalance ??= startBalance;
     // Raising PERP_PAPER_BALANCE_USD tops up an existing paper account by the difference.
