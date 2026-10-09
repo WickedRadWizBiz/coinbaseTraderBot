@@ -332,3 +332,14 @@ test('Kalshi data arriving late: quotes are pulled and nothing is sent until it 
   assert.ok((await paper.getOpenOrders()).length >= 1, 'quoting again');
   assert.ok(!engine.haltReasons().some((x) => /behind real time/.test(x)));
 });
+
+test('paper: a balance move nobody made (a paper book started fresh) re-anchors the books without drawing the vault', async () => {
+  const vault = new Vault({ enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session', dailyGoalUsd: 100 });
+  const monitor = new BalanceMonitor();
+  const { engine } = await setup({ vault, monitor });
+  engine.onBalance(210.48);
+  engine.onBalance(100);
+  engine.onBalance(100);
+  assert.equal(vault.status().withdrawnTotal, 0, 'not booked as a withdrawal');
+  assert.equal(monitor.state.expected, 100, 'expected balance re-anchored');
+});

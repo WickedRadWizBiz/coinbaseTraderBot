@@ -67,3 +67,23 @@ test('closed market is settled from the exchange result before comparing', async
   assert.equal(r!.ok, true, r!.breaks.join('; '));
   assert.ok(Math.abs(oms.positions.get('OLD')!.realized! - 1) < 1e-9);
 });
+
+test('an order the exchange no longer knows: a break in live, closed locally in paper (a paper book started fresh)', async () => {
+  for (const paper of [false, true]) {
+    const gw = new FakeGateway();
+    const audit = tmpAudit();
+    const oms = new Oms({ gateway: gw, audit, statePath: path.join(tmpDir(), 'o.json'), feesFor: () => DEFAULT_FEES, sleep: async () => undefined });
+    const rec = await oms.submit({ ticker: 'T', asset: 'BTC', windowCloseTs: Date.now() + 600_000, side: 'bid', price: 0.4, count: 3, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, purpose: 'quote', fairValue: 0.5, modelId: 'm', decisionId: 'd' });
+    gw.orders.length = 0; // the exchange forgot it
+    const recon = new Reconciler({ gateway: gw, oms, audit, getMarket: async () => undefined, onPersistentBreak: () => undefined, closeUnknownOrders: paper });
+    const r = await recon.run('interval');
+    if (paper) {
+      assert.equal(r!.ok, true, r!.breaks.join('; '));
+      assert.equal(rec.state, 'CANCELED');
+      assert.equal((await recon.run('interval'))!.ok, true, 'and stays clean');
+    } else {
+      assert.equal(r!.ok, false);
+      assert.match(r!.breaks.join('; '), /unknown to exchange/);
+    }
+  }
+});
