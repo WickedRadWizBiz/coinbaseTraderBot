@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { runRuleBook } from '../research/ruleBook';
+import { bracketReturn, signed, studyCombos, type Step } from '../research/confluenceBook';
 import { RuleBook, type RuleBookFile, type RuleRow } from '../bot/strategy/ruleBook';
 import { breadthOf, riskOf } from '../bot/ta/marketContext';
 import { directionalConviction, orientedSignals } from '../bot/strategy/taConviction';
@@ -32,6 +33,8 @@ test('rule-book study: planted momentum is found and confirmed on the later year
   for (const r of pass) { assert.ok(r.fdr && r.expBps > 0 && r.expConfBps > 0 && r.hitConf >= 0.5 && r.weight > 0 && r.weight <= 1); }
   assert.ok(f.character.n > 0 && f.character.accuracy >= 0 && f.character.accuracy <= 1);
   assert.ok(f.splitAt > f.from && f.splitAt < f.to);
+  assert.ok(Array.isArray(f.combos) && f.combos.length > 0, 'pairs of co-active signals are logged');
+  for (const c of f.combos!) assert.ok(c.parts[0] !== c.parts[1] && c.n >= 50);
 });
 
 const row = (o: Partial<RuleRow>): RuleRow => ({ id: 'ema_stack', kind: 'rule', tf: '1h', h: 4, cls: 'all', n: 100, hit: 0.6, payoff: 1.2, expBps: 20, p: 0.001, fdr: true, nConf: 50, hitConf: 0.58, expConfBps: 15, pass: true, weight: 0.8, ...o });
@@ -80,4 +83,56 @@ test('breadth and risk gauges from daily bars (bars closed by t only)', () => {
   const r = riskOf({ dxy: dn, vix: dn, hyg: up, us10y: dn }, T0 + 40 * D)!;
   assert.ok(r.dxy! < 0 && r.hyg! > 0 && Math.abs(r.dxy! - -0.01) < 1e-9);
   assert.equal(riskOf({ dxy: dn }, T0 + 60 * D), undefined, 'stale series ignored');
+});
+
+test('confluence logbook: a pair that only works together passes; a pair no better than its parts does not', () => {
+  const r = rng(5);
+  const keys = ['rule|a|1h', 'rule|b|4h', 'rule|c|1h', 'rule|d|1h'];
+  const steps: Step[] = [];
+  const split = T0 + 3000 * H;
+  for (let k = 0; k < 6000; k++) {
+    const t = T0 + k * H;
+    const aOn = r() < 0.4, bOn = r() < 0.4, cOn = r() < 0.5;
+    const act: number[] = [];
+    if (aOn) act.push(signed(0, 1)); if (bOn) act.push(signed(1, 1)); if (cOn) act.push(signed(2, 1)); act.push(signed(3, 1));
+    // Up 40 bps only when a and b are both on; otherwise noise around zero (c, d add nothing).
+    const drift = aOn && bOn ? 0.004 : 0;
+    const ret = drift + 0.006 * gauss(r);
+    if (act.length >= 2) steps.push({ asset: 0, i: k, t, fwd: [ret], active: Int32Array.from(act) });
+  }
+  const rows = studyCombos(steps, keys, { horizons: [1], splitAt: split, stride: 1, costBps: 2 });
+  const ab = rows.find((x) => x.parts.join() === 'rule|a|1h,rule|b|4h')!;
+  assert.ok(ab.pass, JSON.stringify(ab));
+  assert.ok(ab.liftBps > 10 && ab.liftConfBps > 10 && ab.weight > 0, 'it beat both of its parts on both periods');
+  const cd = rows.find((x) => x.parts.join() === 'rule|c|1h,rule|d|1h')!;
+  assert.equal(cd.pass, false, 'two signals with no edge together');
+  assert.ok(rows.filter((x) => x.pass).every((x) => x.parts.includes('rule|a|1h') || x.parts.includes('rule|b|4h')));
+  // A short pays the cost too (the direction flips the move, never the fee).
+  const short = studyCombos([{ asset: 0, i: 0, t: T0, fwd: [0], active: Int32Array.from([signed(0, -1), signed(1, -1)]) }], keys, { horizons: [1], splitAt: split, stride: 1, minN: 1, costBps: 10 });
+  assert.equal(short[0].expBps, -10);
+});
+
+test('bracket: the target or the stop, whichever the hourly bars reach first; both in one bar counts as the stop', () => {
+  const bars = (moves: Array<[number, number, number]>): Candle[] => moves.map(([l, h, c], i) => ({ ts: T0 + i * H, o: 100, h, l, c, v: 1 }));
+  const up = bars([[99, 100, 100], [99.5, 101, 100.5], [100, 102.5, 102]]);
+  assert.equal(bracketReturn(up, 0, 1, 0.02, 0.01, 48, 0), 0.02);
+  assert.equal(bracketReturn(up, 0, -1, 0.02, 0.01, 48, 0), -0.01, 'a short is stopped by the rise');
+  const both = bars([[100, 100, 100], [98, 103, 100]]);
+  assert.equal(bracketReturn(both, 0, 1, 0.02, 0.01, 48, 0), -0.01);
+  const flat = bars([[100, 100, 100], [99.8, 100.4, 100.3]]);
+  assert.ok(Math.abs(bracketReturn(flat, 0, 1, 0.02, 0.01, 48, 0.001) - (0.003 - 0.001)) < 1e-12, 'neither hit: out at the last close, less the cost');
+});
+
+test('live rule book: a passing pair counts when both of its signals are present and agree', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rbc-'));
+  const file = path.join(dir, 'rule_book.json');
+  const combo = { parts: ['rule|ema_stack|1h', 'rule|rsi_extreme|4h'] as [string, string], h: 4, n: 80, hit: 0.6, expBps: 30, liftBps: 12, p: 0.001, fdr: true, nConf: 40, hitConf: 0.58, expConfBps: 20, liftConfBps: 8, pass: true, weight: 0.6 };
+  fs.writeFileSync(file, JSON.stringify({ schema: 'rulebook1', generatedAt: '', assets: [], from: '', to: '', splitAt: '', stride: 6, costBps: 10, horizons: [4], character: { n: 1, accuracy: 0.7, baseline: 0.5, confusion: {}, share: {} }, rows: [], combos: [combo, { ...combo, parts: ['rule|macd_cross|1h', 'rule|ema_stack|1h'], pass: false }] }));
+  const rb = new RuleBook(() => file);
+  const both = rb.read(snap([{ id: 'ema_stack', tf: '1h', dir: -1, strength: 1 }, { id: 'rsi_extreme', tf: '4h', dir: -1, strength: 0.6 }]), 4)!;
+  assert.ok(Math.abs(both.score - -0.8) < 1e-9, `bearish pair, strength (1 + 0.6) / 2: ${both.score}`);
+  assert.deepEqual(both.oppose, ['ema_stack+rsi_extreme']);
+  assert.equal(rb.read(snap([{ id: 'ema_stack', tf: '1h', dir: 1, strength: 1 }, { id: 'rsi_extreme', tf: '4h', dir: -1, strength: 1 }]), 4)?.n, 0, 'disagreeing: the pair does not count');
+  assert.equal(rb.read(snap([{ id: 'ema_stack', tf: '1h', dir: 1, strength: 1 }]), 4)?.n, 0, 'one of the two: nothing');
+  assert.equal(rb.passedCombos().length, 1);
 });
