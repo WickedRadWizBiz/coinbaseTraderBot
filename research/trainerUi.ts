@@ -12,6 +12,7 @@
 import type { ChildProcess } from 'child_process';
 import { spawn } from 'child_process';
 import crypto from 'crypto';
+import fs from 'fs';
 import http from 'http';
 import type { AddressInfo } from 'net';
 import { readSettings, runTrainer, writeSettings, type TrainerSettings } from './laptopTrain';
@@ -23,11 +24,41 @@ import path from 'path';
 
 export interface UiState {
   phase: 'idle' | 'running' | 'stopping';
-  mode: 'continue' | 'full'; hours: number; round: number;
+  mode: 'continue' | 'full' | 'conditioning'; hours: number; round: number;
+  /** Conditioning mode: whether it may start (a normal training run finished since the last conditioning run), and
+   *  the last result. */
+  conditioning: ConditioningView;
   progress: ProgressView | null; board: string[];
   lastStop: string | null; lastError: string | null;
   settings: TrainerSettings; version: string | null;
   update: (UpdateInfo & { dismissed?: boolean; installing?: string; page: string }) | null;
+}
+
+export interface ConditioningView { ready: boolean; why: string; last: { at: string; elite: string | null; best: string | null; bestPassed: number; windows: number } | null }
+
+const readJsonFile = (f: string): any => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return undefined; } };
+
+/** Conditioning may start once a normal run (continue or sweep everything) has finished since the last conditioning
+ *  run: it pressure-tests the freshly trained bot. */
+let viewCache: { key: string; v: ConditioningView } | undefined;
+export function conditioningView(models: string): ConditioningView {
+  const mt = (f: string) => { try { return fs.statSync(path.join(models, f)).mtimeMs; } catch { return 0; } };
+  const key = `${models}|${mt('pipeline_state.json')}|${mt('conditioning_report.json')}`;
+  if (viewCache?.key === key) return viewCache.v;
+  const v = conditioningViewNow(models);
+  viewCache = { key, v };
+  return v;
+}
+
+function conditioningViewNow(models: string): ConditioningView {
+  const state = readJsonFile(path.join(models, 'pipeline_state.json'));
+  const rep = readJsonFile(path.join(models, 'conditioning_report.json'));
+  const lastRun = Number(state?.lastRun) || 0;
+  const lastCond = rep?.at ? Date.parse(rep.at) : 0;
+  const last = rep ? { at: rep.at, elite: rep.elite?.id ?? null, best: rep.best?.id ?? null, bestPassed: rep.best?.passed ?? 0, windows: rep.trials?.[0]?.stages?.length ?? 0 } : null;
+  if (!lastRun) return { ready: false, why: 'train the bot the normal way first (Start): conditioning tests a freshly trained bot', last };
+  if (lastCond && lastCond >= lastRun) return { ready: false, why: 'conditioned since the last training: train again the normal way first', last };
+  return { ready: true, why: `ready: trained ${new Date(lastRun).toISOString().slice(0, 16).replace('T', ' ')} UTC`, last };
 }
 
 export class TrainerUi {
@@ -40,7 +71,7 @@ export class TrainerUi {
   private board?: { at: number; brackets: Bracket[] };
 
   constructor(private readonly o: { dataDir: string; check?: () => Promise<UpdateInfo>; install?: (u: UpdateInfo) => Promise<void>; run?: typeof runTrainer }) {
-    this.state = { phase: 'idle', mode: 'continue', hours: 0, round: 0, progress: null, board: [], lastStop: null, lastError: null, settings: readSettings(o.dataDir), version: currentVersion(), update: null };
+    this.state = { phase: 'idle', mode: 'continue', hours: 0, round: 0, progress: null, board: [], lastStop: null, lastError: null, settings: readSettings(o.dataDir), version: currentVersion(), update: null, conditioning: conditioningView(path.join(o.dataDir, 'models')) };
   }
 
   /** Start a run (the window's Start button). */
@@ -50,13 +81,18 @@ export class TrainerUi {
     if (!(hours >= 0) || hours > 24 * 365) return { ok: false, error: 'hours must be 0 (until it stops by itself) or a number of hours' };
     const settings: TrainerSettings = { ...this.state.settings, host: req.host?.trim() || undefined, user: req.user?.trim() || 'ubuntu', key: req.key?.trim() || undefined };
     if (settings.host && !settings.key) return { ok: false, error: 'a server needs its SSH key file' };
+    const conditioning = req.mode === 'conditioning';
+    if (conditioning) {
+      const c = conditioningView(path.join(this.o.dataDir, 'models'));
+      if (!c.ready) return { ok: false, error: c.why };
+    }
     writeSettings(this.o.dataDir, settings);
-    Object.assign(this.state, { phase: 'running', mode: req.mode === 'full' ? 'full' : 'continue', hours, round: 0, settings, lastStop: null, lastError: null, board: [] });
+    Object.assign(this.state, { phase: 'running', mode: conditioning ? 'conditioning' : req.mode === 'full' ? 'full' : 'continue', hours, round: 0, settings, lastStop: null, lastError: null, board: [] });
     this.stopFlag = false;
     const models = path.join(this.o.dataDir, 'models');
     const run = this.o.run ?? runTrainer;
     void run({
-      hours, dataDir: this.o.dataDir, settings, sweepAll: this.state.mode === 'full',
+      hours, dataDir: this.o.dataDir, settings, sweepAll: this.state.mode === 'full', only: conditioning ? ['conditioning'] : undefined,
       hooks: {
         roundStart: (round, full) => { this.state.round = round; this.tracker = new RoundProgress(readRounds(models), full); },
         phase: (p) => { this.tracker ??= new RoundProgress(readRounds(models), true); this.tracker.setPhase(p); },
@@ -67,7 +103,7 @@ export class TrainerUi {
       },
     }).then((r) => { this.state.lastStop = this.stopFlag ? 'stopped by you' : r.why ?? 'finished'; })
       .catch((e) => { this.state.lastError = (e as Error).message; this.state.lastStop = `error: ${(e as Error).message}`; })
-      .finally(() => { this.state.phase = 'idle'; this.child = undefined; });
+      .finally(() => { this.state.phase = 'idle'; this.child = undefined; this.board = undefined; this.state.conditioning = conditioningView(models); });
     return { ok: true };
   }
 
@@ -91,6 +127,7 @@ export class TrainerUi {
   }
 
   snapshot(): UiState {
+    if (this.state.phase === 'idle') this.state.conditioning = conditioningView(path.join(this.o.dataDir, 'models'));
     return { ...this.state, progress: this.state.phase === 'idle' ? null : this.tracker?.view() ?? null };
   }
 

@@ -148,3 +148,53 @@ export function LatencyBadges({ latency }: { latency?: { kalshiWs: number | null
     </div>
   );
 }
+
+/**
+ * Conditioning champion row: which conditioning settings the bot runs on (research/conditioningRun.ts, an Elite
+ * Champion of the trainer's conditioning mode) and a ROLLBACK button that puts the previous champion back (or,
+ * with none, the configured settings) and restarts the bot. Hidden until a champion has ever been applied.
+ */
+export function ConditioningRow({ s, onChange }: { s: any; onChange: () => void }) {
+  const c = s?.conditioning as { applied: { version: string; params: Record<string, number>; skipped: string[] } | null; available: string | null; previous: string | null } | undefined;
+  const [restarting, setRestarting] = useState(false);
+  if (!c || (!c.applied && !c.available)) return null;
+
+  const rollback = async () => {
+    const to = c.previous ? `the previous champion (${c.previous})` : 'the configured settings';
+    if (!confirm(`Roll back the conditioning champion to ${to}? The bot restarts.`)) return;
+    setRestarting(true);
+    try {
+      const r = await api<{ to: string | null }>('/conditioning/rollback', { method: 'POST' });
+      const started = Date.now();
+      const poll = async () => {
+        try {
+          const st = await api<any>('/status');
+          if ((st.conditioning?.applied?.version ?? null) === r.to) { setRestarting(false); onChange(); return; }
+        } catch { /* restarting */ }
+        if (Date.now() - started < 180_000) setTimeout(poll, 2000); else { setRestarting(false); onChange(); }
+      };
+      setTimeout(poll, 3000);
+    } catch (e) { alert((e as Error).message); setRestarting(false); }
+  };
+
+  const params = c.applied ? Object.entries(c.applied.params).map(([k, v]) => `${k}=${+v.toFixed(4)}`).join(', ') : '';
+  return (
+    <div className="flex border-b border-crypto-primary border-opacity-50 px-4 py-2 justify-between items-center gap-3">
+      <div className="flex flex-col min-w-0">
+        <span className="text-[11px] uppercase tracking-widest text-crypto-primary font-bold">Conditioning</span>
+        <span className="text-[10px] opacity-70 normal-case truncate" title={params}>
+          {restarting ? 'rolling back, restarting...'
+            : c.applied ? `Elite Champion ${c.applied.version}${c.available && c.available !== c.applied.version ? ` (new: ${c.available}, applying)` : ''}`
+            : `champion ${c.available} not applied (CONDITIONING_APPLY=false or invalid)`}
+        </span>
+      </div>
+      <button
+        type="button" onClick={rollback} disabled={restarting || !c.available}
+        title={c.previous ? `Restore ${c.previous} and restart` : 'Return to the configured settings and restart'}
+        className="text-[10px] px-2 py-0.5 border font-bold uppercase border-crypto-danger/70 text-crypto-danger bg-crypto-danger/10 hover:bg-crypto-danger/25 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        Rollback
+      </button>
+    </div>
+  );
+}

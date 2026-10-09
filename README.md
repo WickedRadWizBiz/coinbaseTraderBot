@@ -334,6 +334,8 @@ A new network retrains only the model that reads it, including when you swap one
 
 After every round that improves a model, it sends the models back for the bot to hot-swap. `trainer-data/GUIDE.txt` says how long to train before live trading and what good scores look like.
 
+**Conditioning mode** (the trainer's second button, greyed out until a fresh normal run): instances of the whole bot with different trading settings play days no network trained on. The tiers are $1000, $500 and $200, then $100 on calm, trending and two kinds of volatile days, with 3-, 2- and 1-day windows each. A window passes only if at least $100 of profit is held at its end and P&L never falls 35% below the starting cash. An instance that passes all 21 windows and beats the live settings becomes the Elite Champion. The bot then restarts on its settings, and the dashboard can roll it back (`research/conditioning.ts`, docs/AUTOMATION.md §10).
+
 ## Historical data and the TA network (bot/ta/taNet.ts)
 
 - **History store** (`research/history`, `data/history`):

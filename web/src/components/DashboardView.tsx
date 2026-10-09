@@ -4,7 +4,7 @@ import { MarketSessionCard } from './MarketSessionCard';
 import { VaultCard } from './VaultCard';
 import { OrderBookMonitor } from './OrderBookMonitor';
 import { Panel, Screen } from './Panel';
-import { BotControls, LatencyBadges } from './BotControls';
+import { BotControls, ConditioningRow, LatencyBadges } from './BotControls';
 import { usePoll } from './usePoll';
 import { KalshiCheckCard } from './KalshiCheckCard';
 
@@ -135,6 +135,7 @@ export function DashboardView() {
           {s ? (
             <div className="flex flex-col">
               <BotControls s={s} onChange={() => void refresh()} />
+              <ConditioningRow s={s} onChange={() => void refresh()} />
               <Row label="Daily PnL (net of fees)" value={usd(s.dailyPnl)} sub={`loss limit ${usd(-s.dailyLossLimit)}`} tone={s.dailyPnl < 0 ? 'bad' : 'ok'} />
               <Row label="Cash balance" value={usd(s.balance)} />
               <Row label="Tradable bankroll" value={usd(s.bankroll)} sub={s.vault?.enabled ? `cash + committed − vault ${usd(s.vault.vault)} − pocket ${usd(s.vault.pocket)}` : 'cash + committed'} />

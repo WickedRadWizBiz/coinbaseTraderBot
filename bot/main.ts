@@ -42,6 +42,7 @@ import { KalshiPerpsRest, type PerpGateway } from './perps/perpRest';
 import { BalanceMonitor, type MonitorState } from './vault/balanceMonitor';
 import { Vault } from './vault/vault';
 import { readJson, setQuarantineAll } from './util/persist';
+import { championEnv, championPath, markApplied, readChampion, watchChampion } from './strategy/conditioningOverlay';
 import { Oms } from './oms/oms';
 import { PaperExchange } from './paper/paperExchange';
 import { KillSwitch } from './risk/killSwitch';
@@ -69,6 +70,16 @@ async function main(): Promise<void> {
     cfg = loadConfig();
     // Paper mode: a damaged state file is moved aside and rebuilt instead of stopping the bot.
     setQuarantineAll(cfg.mode !== 'live');
+    // The conditioning champion's settings, before anything reads the configuration.
+    const champ = cfg.conditioningApply ? readChampion(championPath(cfg.autoTrain.dir)) : undefined;
+    if (champ) {
+      const c = championEnv(champ, cfg);
+      try {
+        cfg = loadConfig({ ...process.env, ...c.env });
+        markApplied(champ, c.params, c.skipped);
+        log.info('conditioning champion applied', { version: champ.version, params: c.params, skipped: c.skipped });
+      } catch (e) { log.error('conditioning champion not applied: its settings do not pass the configuration checks; the configured settings stay', { version: champ.version, error: String(e) }); }
+    }
   } catch (e) {
     if (e instanceof ConfigError) {
       log.error(`configuration invalid: ${e.message}`);
@@ -451,6 +462,8 @@ async function main(): Promise<void> {
     server.close(() => process.exit(code));
     setTimeout(() => process.exit(code), 5000).unref();
   };
+  // A new (or rolled back) conditioning champion: restart once to apply it everywhere.
+  if (cfg.conditioningApply) watchChampion(cfg.autoTrain.dir, (v) => { audit.write('config', { event: 'conditioning_champion', version: v }); log.warn('conditioning champion changed: restarting to apply it', { version: v }); void shutdown(`conditioning champion ${v ?? 'removed'}`, 75); });
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('unhandledRejection', (e) => {

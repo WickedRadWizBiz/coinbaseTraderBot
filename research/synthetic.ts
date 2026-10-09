@@ -8,7 +8,7 @@ import path from 'path';
 import { fairValue } from '../bot/model/fairValue';
 import { rng } from './stats';
 
-export function writeSyntheticRecordings(dir: string, opts: { windows: number; seed?: number; sigma?: number; marketNoise?: number; start?: number; dominanceLeadSec?: number }): void {
+export function writeSyntheticRecordings(dir: string, opts: { windows: number; seed?: number; sigma?: number; marketNoise?: number; start?: number; dominanceLeadSec?: number; tickerPrefix?: string }): void {
   fs.mkdirSync(dir, { recursive: true });
   const r = rng(opts.seed ?? 11);
   const gauss = () => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 * Math.PI * r());
@@ -44,7 +44,7 @@ export function writeSyntheticRecordings(dir: string, opts: { windows: number; s
     if (rel >= 0 && rel % W === 0 && rel / W < opts.windows) {
       const open = t, close = t + W * 1000;
       const strike = hist.slice(-60).reduce((a, b) => a + b, 0) / 60;
-      lines.push(JSON.stringify({ t, k: 'market', ticker: `SYN-${rel / W}`, series: 'KXBTC15M', asset: 'BTC', openTime: open, closeTime: close, strike, tickSize: 0.01 }));
+      lines.push(JSON.stringify({ t, k: 'market', ticker: `${opts.tickerPrefix ?? 'SYN'}-${rel / W}`, series: 'KXBTC15M', asset: 'BTC', openTime: open, closeTime: close, strike, tickSize: 0.01 }));
     }
     if (rel >= 0 && rel % 5 === 0) {
       const w = Math.floor(rel / W);
@@ -58,7 +58,7 @@ export function writeSyntheticRecordings(dir: string, opts: { windows: number; s
       const m = Math.min(0.97, Math.max(0.03, fv + noise * gauss()));
       const bid = Math.max(0.01, Math.floor((m - 0.02) * 100) / 100);
       const ask = Math.min(0.99, Math.ceil((m + 0.02) * 100) / 100);
-      const ticker = `SYN-${w}`;
+      const ticker = `${opts.tickerPrefix ?? 'SYN'}-${w}`;
       // Five levels a side with uneven sizes, so some levels are "walls".
       const lvls = (p0: number, dir: number) => Array.from({ length: 5 }, (_, i) => ({ price: Math.round((p0 + dir * i * 0.01) * 100) / 100, size: Math.round(3 + r() * 37) }))
         .filter((l) => l.price >= 0.01 && l.price <= 0.99);

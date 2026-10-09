@@ -255,6 +255,8 @@ export interface Config {
   vault: VaultConfig;
   /** Bankroll-scaled risk ladder ($20 aggressive -> $50 moderate -> $100 normal); see risk/sizingTiers.ts. */
   sizingTiers: TierPoint[];
+  /** Apply the conditioning champion's settings (<AUTO_TRAIN_DIR>/conditioning_champion.json) at startup. */
+  conditioningApply: boolean;
   /** Kalshi perpetuals: market data as features (stage 1) and delta-hedging the binary book (stage 2). */
   perps: PerpsConfig;
   /** ATP tennis match-winner markets (bot/tennis). */
@@ -941,6 +943,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       rampFullUsd: num(env, 'VAULT_RAMP_FULL_USD', 100, 0, 1e7),
     },
     sizingTiers: parseSizingTiers(env.SIZING_TIERS, { risk, strategy }),
+    conditioningApply: bool(env, 'CONDITIONING_APPLY', true),
     perps: (() => {
       const hedge = oneOf(env, 'PERP_HEDGE', 'paper', ['off', 'paper', 'live'] as const);
       const trading = oneOf(env, 'PERP_TRADING', 'paper', ['off', 'paper', 'live'] as const);

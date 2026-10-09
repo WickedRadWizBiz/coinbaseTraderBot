@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
-import { afterRound, CONTINUE_STEPS, filesToPull, filesToPush, guideText, laptopProfile, localManifest, parseManifest, roundOutcome, safeServerEnv, scoreboard, Server } from '../research/laptopTrain';
+import { afterRound, championsGone, CONTINUE_STEPS, filesToPull, filesToPush, guideText, laptopProfile, localManifest, parseManifest, roundOutcome, safeServerEnv, scoreboard, Server } from '../research/laptopTrain';
 import { dailyStats, type ReadinessFile } from '../research/readiness';
 import { tmpDir } from './helpers';
 
@@ -28,6 +28,12 @@ test('laptop trainer: manifests, what to copy down and what to send back', () =>
     'logs/pipeline-laptop.log', 'x.json.tmp', 'work/history-ledger.json', 'readiness.json', 'work/snnpbt/perps/state.json', 'archive/ta_net/v1.json'];
   const all = new Map(files.map((f) => [f, { path: f, size: 1, mtime: 9_000_000 }]));
   assert.deepEqual(filesToPush(all, []).map((f) => f.path).sort(), ['archive/ta_net/v1.json', 'readiness.json', 'work/history-ledger.json', 'work/snnpbt/perps/state.json']);
+  // The conditioning champion: sent only when written in this session; a copy rolled back on the server goes here too.
+  const champ = new Map([['conditioning_champion.json', { path: 'conditioning_champion.json', size: 1, mtime: 5_000 }], ['conditioning_champion.prev.json', { path: 'conditioning_champion.prev.json', size: 1, mtime: 9_000 }]]);
+  assert.deepEqual(filesToPush(champ, [], 8_000).map((f) => f.path), ['conditioning_champion.prev.json'], 'an older champion is not resurrected after a rollback');
+  const here = new Map([['models/conditioning_champion.json', { path: 'models/conditioning_champion.json', size: 1, mtime: 5_000 }], ['models/a.json', { path: 'models/a.json', size: 1, mtime: 5_000 }]]);
+  assert.deepEqual(championsGone([{ path: 'models/conditioning_champion.prev.json', size: 1, mtime: 1 }], here), ['models/conditioning_champion.json']);
+  assert.deepEqual(championsGone([{ path: 'models/conditioning_champion.json', size: 1, mtime: 1 }], here), []);
 });
 
 test('laptop trainer: what counts as progress, when it stops by itself, the scoreboard, the guide', () => {
