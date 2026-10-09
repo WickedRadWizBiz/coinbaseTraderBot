@@ -446,7 +446,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       writeAtomic(file, JSON.stringify(f));
       state.ruleBookAt = now;
       for (const l of ruleBookSummary(f)) log(`[rule-book] ${l}`);
-      return { tests: f.rows.length, passed: f.rows.filter((r) => r.pass).length, pairsLogged: f.combos?.length ?? 0, pairsPassed: f.combos?.filter((c) => c.pass).length ?? 0, conditionsPassed: f.conditions?.filter((c) => c.pass).length ?? 0, character: { accuracy: f.character.accuracy, baseline: f.character.baseline }, from: f.from, to: f.to, splitAt: f.splitAt };
+      return { tests: f.rows.length, passed: f.rows.filter((r) => r.pass).length, pairsLogged: f.combos?.length ?? 0, pairsPassed: f.combos?.filter((c) => c.pass).length ?? 0, conditionsPassed: f.conditions?.filter((c) => c.pass).length ?? 0, invalidationsPassed: f.invalidations?.filter((v) => v.pass).length ?? 0, character: { accuracy: f.character.accuracy, baseline: f.character.baseline }, from: f.from, to: f.to, splitAt: f.splitAt };
     }, noHistory ?? (due ? undefined : `ran ${((now - state.ruleBookAt!) / 86_400_000).toFixed(1)} day(s) ago (weekly)`));
   }
 

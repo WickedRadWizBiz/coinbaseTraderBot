@@ -37,6 +37,7 @@ import type { RuleBookFile, RuleRow } from '../bot/strategy/ruleBook';
 import { bestBracket, signed, studyCombos, type Step } from './confluenceBook';
 import { conditionText, studyConditions } from './conditionBook';
 import { contextOf } from '../bot/strategy/ruleContext';
+import { invalidationText, studyInvalidations } from './invalidationBook';
 export type { RuleBookFile, RuleRow };
 
 const H = 3_600_000;
@@ -163,10 +164,13 @@ export function runRuleBook(hist: Record<string, Hist>, o: RuleBookOptions = {})
   // What makes or breaks each rule: its record split by the context it fired in.
   const conditions = studyConditions(steps, keys, { horizons, splitAt, stride, costBps: cost * 1e4, fdr: q });
   log(`[rule-book] conditions: ${conditions.length} rule x context ranges logged, ${conditions.filter((x) => x.pass && x.effect === 'makes').length} make a rule work, ${conditions.filter((x) => x.pass && x.effect === 'breaks').length} make one fail`);
+  // What turned each rule's call around: other signals active at the same time.
+  const invalidations = studyInvalidations(steps, keys, { horizons, splitAt, stride, costBps: cost * 1e4, fdr: q });
+  log(`[rule-book] invalidations: ${invalidations.length} rule x other-signal rows logged, ${invalidations.filter((x) => x.pass).length} turned a call around on both periods`);
   return {
     schema: RULEBOOK_SCHEMA, generatedAt: new Date().toISOString(), assets, from: iso(t0), to: iso(t1), splitAt: iso(splitAt), stride, costBps: cost * 1e4, horizons,
     character: { n: charN, accuracy: +(charHit / Math.max(1, charN)).toFixed(4), baseline: Math.max(0, ...Object.values(share)), confusion, share },
-    rows, combos, conditions,
+    rows, combos, conditions, invalidations,
   };
 }
 
@@ -190,6 +194,9 @@ export function ruleBookSummary(f: RuleBookFile): string[] {
   const cond = (f.conditions ?? []).filter((c) => c.pass);
   out.push(`conditions: ${cond.filter((c) => c.effect === 'makes').length} ranges make a rule work, ${cond.filter((c) => c.effect === 'breaks').length} make one fail (both periods)`);
   for (const c of cond.slice(0, 20)) out.push(`  ${c.effect === 'makes' ? 'MAKES' : 'BREAKS'} ${conditionText(c)}: ${c.expBps} bps vs ${c.baseBps} overall (n ${c.n}) | later ${c.expConfBps} vs ${c.baseConfBps} (n ${c.nConf})`);
+  const inv = (f.invalidations ?? []).filter((v) => v.pass);
+  out.push(`invalidations: ${inv.length} cases where another signal (or several) turned a rule's call around (both periods)`);
+  for (const v of inv.slice(0, 20)) out.push(`  INVALIDATED ${invalidationText(v)}: ${v.expBps} bps vs ${v.aloneBps} without (n ${v.n}, hit ${(100 * v.hit).toFixed(1)} %) | later ${v.expConfBps} vs ${v.aloneConfBps} (n ${v.nConf})`);
   for (const r of passed.slice(0, 25)) out.push(`  PASS ${r.kind} ${r.id} ${r.tf} ${r.h}h [${r.cls}]: n ${r.n}, hit ${(100 * r.hit).toFixed(1)} %, payoff ${r.payoff}, ${r.expBps} bps | later years n ${r.nConf}, hit ${(100 * r.hitConf).toFixed(1)} %, ${r.expConfBps} bps -> weight ${r.weight}`);
   return out;
 }
