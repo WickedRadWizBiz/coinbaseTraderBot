@@ -35,6 +35,8 @@ import { benjaminiHochberg, blockBootstrap } from './taStudy';
 import { loadHistory, storedAssets } from './history/candles';
 import type { RuleBookFile, RuleRow } from '../bot/strategy/ruleBook';
 import { bestBracket, signed, studyCombos, type Step } from './confluenceBook';
+import { conditionText, studyConditions } from './conditionBook';
+import { contextOf } from '../bot/strategy/ruleContext';
 export type { RuleBookFile, RuleRow };
 
 const H = 3_600_000;
@@ -115,7 +117,7 @@ export function runRuleBook(hist: Record<string, Hist>, o: RuleBookOptions = {})
       for (const s of snap.signals) record(s.id, 'rule', s.tf, s.dir);
       for (const s of snap.book ?? []) record(s.id, 'book', s.tf, s.dir);
       for (const c of snap.confluences) record(c.id, 'confluence', 'multi', Math.sign(c.score));
-      if (active.length >= 2) steps.push({ asset: ai, i, t, fwd, active: Int32Array.from(active) });
+      if (active.length) steps.push({ asset: ai, i, t, fwd, active: Int32Array.from(active), ctx: contextOf(snap, t) });
       nSteps++;
     }
     log(`[rule-book] ${asset}: ${nSteps} steps`);
@@ -157,11 +159,14 @@ export function runRuleBook(hist: Record<string, Hist>, o: RuleBookOptions = {})
   // Pairs seen together, and a small take-profit / stop-loss grid for the ones that passed.
   const combos = studyCombos(steps, keys, { horizons, splitAt, stride, minN, minConf, fdr: q, costBps: cost * 1e4 });
   for (const c of combos.filter((x) => x.pass)) c.bracket = bestBracket(steps, keys, c.parts, assets.map((a) => hist[a].h1), { splitAt, costBps: cost * 1e4 });
-  log(`[rule-book] confluence logbook: ${steps.length} steps with 2+ signals, ${combos.length} pairs logged, ${combos.filter((x) => x.pass).length} passed`);
+  log(`[rule-book] confluence logbook: ${steps.length} steps with signals, ${combos.length} pairs logged, ${combos.filter((x) => x.pass).length} passed`);
+  // What makes or breaks each rule: its record split by the context it fired in.
+  const conditions = studyConditions(steps, keys, { horizons, splitAt, stride, costBps: cost * 1e4, fdr: q });
+  log(`[rule-book] conditions: ${conditions.length} rule x context ranges logged, ${conditions.filter((x) => x.pass && x.effect === 'makes').length} make a rule work, ${conditions.filter((x) => x.pass && x.effect === 'breaks').length} make one fail`);
   return {
     schema: RULEBOOK_SCHEMA, generatedAt: new Date().toISOString(), assets, from: iso(t0), to: iso(t1), splitAt: iso(splitAt), stride, costBps: cost * 1e4, horizons,
     character: { n: charN, accuracy: +(charHit / Math.max(1, charN)).toFixed(4), baseline: Math.max(0, ...Object.values(share)), confusion, share },
-    rows, combos,
+    rows, combos, conditions,
   };
 }
 
@@ -182,6 +187,9 @@ export function ruleBookSummary(f: RuleBookFile): string[] {
   const combos = f.combos ?? [], cp = combos.filter((c) => c.pass);
   out.push(`confluence logbook: ${combos.length} pairs of signals seen together logged, ${cp.length} did better than either alone on both periods`);
   for (const c of cp.slice(0, 15)) out.push(`  PAIR ${c.parts[0]} + ${c.parts[1]} ${c.h}h: n ${c.n}, hit ${(100 * c.hit).toFixed(1)} %, ${c.expBps} bps (lift ${c.liftBps}) | later years n ${c.nConf}, ${c.expConfBps} bps (lift ${c.liftConfBps}) -> weight ${c.weight}${c.bracket ? `; bracket TP ${100 * c.bracket.tp}% / SL ${100 * c.bracket.sl}%: ${c.bracket.expBps} bps, later ${c.bracket.expConfBps} bps${c.bracket.ok ? '' : ' (not confirmed)'}` : ''}`);
+  const cond = (f.conditions ?? []).filter((c) => c.pass);
+  out.push(`conditions: ${cond.filter((c) => c.effect === 'makes').length} ranges make a rule work, ${cond.filter((c) => c.effect === 'breaks').length} make one fail (both periods)`);
+  for (const c of cond.slice(0, 20)) out.push(`  ${c.effect === 'makes' ? 'MAKES' : 'BREAKS'} ${conditionText(c)}: ${c.expBps} bps vs ${c.baseBps} overall (n ${c.n}) | later ${c.expConfBps} vs ${c.baseConfBps} (n ${c.nConf})`);
   for (const r of passed.slice(0, 25)) out.push(`  PASS ${r.kind} ${r.id} ${r.tf} ${r.h}h [${r.cls}]: n ${r.n}, hit ${(100 * r.hit).toFixed(1)} %, payoff ${r.payoff}, ${r.expBps} bps | later years n ${r.nConf}, hit ${(100 * r.hitConf).toFixed(1)} %, ${r.expConfBps} bps -> weight ${r.weight}`);
   return out;
 }

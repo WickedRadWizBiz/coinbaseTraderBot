@@ -24,7 +24,7 @@ export type { Bracket, ComboRow };
 import { normCdf } from '../bot/util/num';
 
 /** One walk step: the asset, its bar, the time, the raw log return over each horizon, the signed active signals. */
-export interface Step { asset: number; i: number; t: number; fwd: number[]; active: Int32Array }
+export interface Step { asset: number; i: number; t: number; fwd: number[]; active: Int32Array; /** The context (bot/strategy/ruleContext.ts). */ ctx?: Float32Array }
 export interface ComboOptions { horizons: number[]; splitAt: number; stride: number; minN?: number; minConf?: number; fdr?: number; maxLog?: number; costBps?: number }
 
 /** Signed signal id: (index + 1) x direction. */
