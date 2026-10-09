@@ -38,7 +38,7 @@ export class StreakScaler {
   private readonly alpha: number;
 
   constructor(private readonly p: StreakParams = DEFAULT_STREAK, private readonly file?: string) {
-    this.st = (file && readJson<StreakState>(file)) || { mean: 0, n: 0, lastTs: 0, wins: 0, losses: 0, streak: 0 };
+    this.st = (file && readJson<StreakState>(file, { quarantine: true })) || { mean: 0, n: 0, lastTs: 0, wins: 0, losses: 0, streak: 0 };
     this.alpha = 1 - Math.pow(2, -1 / Math.max(1, p.halfLife));
   }
 

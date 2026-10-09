@@ -70,6 +70,34 @@ jobs:
           git clean -fdxq vendor/talib
           { sha256sum package-lock.json; git ls-files -s vendor/talib; } | sha256sum | cut -d' ' -f1 > deploy/deps.fingerprint
 
+      # A full disk stops the upload and the bot alike. Recordings (one file per day in ~/bot/data/recordings)
+      # are almost all of the disk: below 5 GB free, the oldest days go (never the newest two) until 10 GB is
+      # free. The bot does the same every 10 minutes (RECORDINGS_MIN_FREE_GB / RECORDINGS_PRUNE).
+      - name: Make room on the server disk
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+          script: |
+            free_gb() { df -P -BG ~ | awk 'NR==2 {gsub("G","",$4); print $4}'; }
+            echo "free before: $(free_gb) GB"
+            if [ "$(free_gb)" -lt 5 ] && grep -qs '^RECORDINGS_PRUNE=false' ~/bot/bot.env; then
+              echo "RECORDINGS_PRUNE=false in bot.env: not deleting recordings"; exit 0
+            fi
+            if [ "$(free_gb)" -lt 5 ]; then
+              days=$(ls ~/bot/data/recordings 2>/dev/null | sed -nE 's/^md-([0-9]{4}-[0-9]{2}-[0-9]{2})\.jsonl(\.gz)?$/\1/p' | sort -u)
+              keep=$(echo "$days" | tail -n 2)
+              for d in $days; do
+                [ "$(free_gb)" -ge 10 ] && break
+                echo "$keep" | grep -qx "$d" && break
+                echo "deleting recorded day $d"
+                rm -f ~/bot/data/recordings/md-$d.jsonl ~/bot/data/recordings/md-$d.jsonl.gz ~/bot/data/recordings/md-$d.jsonl.gz.tmp
+              done
+            fi
+            echo "free after: $(free_gb) GB"
+
       - name: Upload release to server
         uses: appleboy/scp-action@v0.1.7
         with:

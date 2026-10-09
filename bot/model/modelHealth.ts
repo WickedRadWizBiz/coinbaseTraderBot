@@ -25,7 +25,7 @@ export class ModelHealth {
   private st: ModelHealthState;
 
   constructor(private readonly p: { minWindows: number; keep?: number }, private readonly file?: string) {
-    this.st = (file && readJson<ModelHealthState>(file)) || { windows: [] };
+    this.st = (file && readJson<ModelHealthState>(file, { quarantine: true })) || { windows: [] };
   }
 
   record(ticker: string, pModel: number, pMarket: number, closeTs: number): void {

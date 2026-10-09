@@ -67,7 +67,7 @@ export class TrainingSupervisor {
     now?: () => number;
   }) {
     const fresh = (equity: number): EpochState => ({ epoch: 1, startTs: this.now, startEquity: equity, peak: equity, trough: equity, fills: 0, refills: 0, refilled: 0 });
-    const saved = readJson<TrainingState>(this.file);
+    const saved = readJson<TrainingState>(this.file, { quarantine: true });
     this.st = saved ?? { kalshi: fresh(d.cfg.paperBankrollUsd), perps: fresh(d.perpsStart ?? d.cfg.perps.paperBalanceUsd) };
     // Override-covered automatic trips are vetoed (manual STOP ALL always engages).
     d.kill.setSuppressor((source) => (this.covers(source) ? (d.cfg.mode === 'paper' ? 'override (paper): trading continues; size follows the net loss' : 'override (live): the loss limit does not stop trading; size follows the net loss') : undefined));

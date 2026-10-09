@@ -100,7 +100,7 @@ export class KalshiCheck {
 
   constructor(private readonly o: KalshiCheckOpts) {
     this.now = o.now ?? Date.now;
-    this.st = (o.file && readJson<State>(o.file)) || { mismatches: [], days: [], checked: { fills: 0, settlements: 0, transfers: 0 }, matched: { fills: 0, settlements: 0 }, settlementsSince: this.now() - DAY, transfersBooked: [] };
+    this.st = (o.file && readJson<State>(o.file, { quarantine: true })) || { mismatches: [], days: [], checked: { fills: 0, settlements: 0, transfers: 0 }, matched: { fills: 0, settlements: 0 }, settlementsSince: this.now() - DAY, transfersBooked: [] };
     this.st.transfersBooked ??= [];
   }
 

@@ -16,7 +16,7 @@ You only need to do the things in **"What you still do by hand"** below.
 While the bot runs in any mode (paper, shadow or live), it writes every book update, trade, index tick and settlement to `data/recordings/md-YYYY-MM-DD.jsonl`. This is what everything below learns from, and the longer the bot runs, the more of the whole system becomes testable (see 8 below).
 
 - **Compression:** days older than `RECORDINGS_GZIP_AFTER_DAYS` (2) are gzipped to `md-YYYY-MM-DD.jsonl.gz`, about a tenth of the size, so months of recordings fit on the server. Every replay, trainer and sweep reads both forms.
-- **Disk alert:** if free space where the recordings live drops below `RECORDINGS_MIN_FREE_GB` (3), the bot sends a warning alert. Nothing is ever deleted automatically.
+- **Disk floor:** if free space where the recordings live drops below `RECORDINGS_MIN_FREE_GB` (5), the bot deletes the oldest recorded days (never the newest two) until twice that is free, and sends an alert naming the days. A full disk stops the bot from saving its state and from starting at all, which is worse than losing the oldest training days. `RECORDINGS_PRUNE=false` turns the deletion off (alert only). The check runs every 10 minutes.
 - **Setup journal:** the perps setup trader also writes `data/setups/journal-YYYY-MM-DD.jsonl`. Every setup it sees and every trade it opens and closes is logged there, together with what the TA network and the perps SNN said at that moment.
 
 ### 2. It runs the training pipeline every day
@@ -205,7 +205,8 @@ These can't be automated, or deliberately aren't.
 | `SETUP_TA_NET_PATH` | `params/ta_net_wf.json` | The walking TA network the setup trader reads when `data/models/ta_net_wf.json` doesn't exist yet. |
 | `SWEEP_TARGETS` | `setups-long,setups-short,setups-vol,kalshi,bot` | Sweep targets run weekly. |
 | `RECORDINGS_GZIP_AFTER_DAYS` | `2` | Gzip recorded days older than this (0 = never). |
-| `RECORDINGS_MIN_FREE_GB` | `3` | Send a low-disk alert below this much free space. |
+| `RECORDINGS_MIN_FREE_GB` | `5` | Below this much free space: alert, and delete the oldest recorded days until twice this is free. |
+| `RECORDINGS_PRUNE` | `true` | `false` = alert only, never delete recordings. |
 | `AUTO_TRAIN_SNN_PBT_DAYS` / `AUTO_TRAIN_SNN_PBT_EVERY_DAYS` | `7` / `30` | SNN tournaments: days replayed, how often they rerun (docs/EVOLUTION.md has every tournament setting). On the history replay, a generation is that many days of weeks the network has never trained on (docs/LAPTOP_TRAINING.md, history ledger). |
 | `TOURNAMENT_PARENTS` / `TOURNAMENT_BREED_EVERY` / `TOURNAMENT_MUTATION` / `TOURNAMENT_ISLANDS` | `3` / `4` / `0.03` / `1` | Genetic breeding in tournaments of 6+ networks (the laptop's): parents per generation (0 = off), rounds per generation, offspring mutation, islands (docs/EVOLUTION.md). |
 | `GP_EVERY_DAYS` / `GP_POPULATION` / `GP_GENERATIONS` / `GP_ASSETS` / `GP_CROSS` | `7` / `1000` / `15` / five coins / `BTC,ETH` | Genetic programming of formulas (docs/EVOLUTION.md has the fitness, dead band and gate settings). |

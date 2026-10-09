@@ -53,6 +53,9 @@ jobs:
             echo "== cpu over 5 s (us = bot, st = taken back by the host when burst credits run out)"; vmstat 1 5
             echo "== memory"; free -m
             echo "== disk"; df -h / | tail -1
+            echo "== largest folders (read-only)"; du -xh --max-depth=3 ~ 2>/dev/null | sort -rh | head -25
+            echo "== recordings by day"; for d in ~/bot/data/recordings/*/; do [ -d "$d" ] && echo "$(du -sh "$d" 2>/dev/null | cut -f1) $(basename "$d")"; done | head -40
+            echo "== journal / tmp"; sudo journalctl --disk-usage 2>/dev/null; du -sh /tmp /var/log 2>/dev/null
             echo "== audit log (newest files; a day splits into parts at AUDIT_MAX_FILE_MB)"; du -sh ~/bot/data/audit 2>/dev/null; ls -la ~/bot/data/audit 2>/dev/null | tail -4
             echo "== service"; systemctl status kalshi-bot --no-pager -l | head -15
             echo "== restarts"; systemctl show kalshi-bot -p NRestarts -p ActiveEnterTimestamp -p MemoryCurrent
