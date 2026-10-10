@@ -45,6 +45,7 @@ import { diffScore, findMatch, toTennisScore, type LiveTennisMatch, type TennisS
 import { tennisFairInputs, type TennisFairModel } from './tennis/tennisFair';
 import type { TennisScore } from './tennis/tennisModel';
 import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
+import { playbook } from './strategy/playbook';
 import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
 import { applyTakeGate } from './model/takeModel';
 import { effectiveSigma, type VolProfile } from './model/volSeasonality';
@@ -1526,6 +1527,9 @@ export class Engine {
     if (!fv) return block('fair value unavailable');
     const sess = sessionState(now);
     const sessRisk = sessionRiskFor(cfg.strategy.sessionRisk, sess);
+    // Strategy playbook (bot/strategy/playbook.ts): the Kalshi family's weight in this coin's confirmed regime.
+    const pbW = playbook()?.weights(marketContext()?.regimeOf(m.asset), now);
+    const sizeMult = sessRisk.sizeMult * (pbW?.kalshi ?? 1);
     const mid = (bid.price + ask.price) / 2;
     const features = computeFeatureMap({
       now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma,
@@ -1635,7 +1639,7 @@ export class Engine {
       // Session risk profile can only shrink size (sizeMult in [0, 1]).
       // The risk scale (drawdown, losing streak, training-mode de-risking) shrinks every sizing route:
       // Kelly, target-EV and the per-order caps alike.
-      maxOrderRiskUsd: Math.min(tier.orderFrac * bankroll * sessRisk.sizeMult * kellyScale, fCapUsd), maxContracts: floorCount(R.maxContractsPerOrder * sessRisk.sizeMult), minSidePrice: R.minSidePrice,
+      maxOrderRiskUsd: Math.min(tier.orderFrac * bankroll * sizeMult * kellyScale, fCapUsd), maxContracts: floorCount(R.maxContractsPerOrder * sizeMult), minSidePrice: R.minSidePrice,
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
       restingBid, restingAsk, nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
       pMarket, pStd: pred.std, makerBuffer: this.makerBuffer(), entrySidePrice: entrySidePrice !== undefined && entrySidePrice > 0 && entrySidePrice < 1 ? entrySidePrice : undefined,
@@ -1777,8 +1781,9 @@ export class Engine {
     if (this.fillLog) for (const p of plan.place) if (isMakerEntry(p)) this.fillX.set(p, fillInputs(p, fillCtx));
     plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
     if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${rs.parts.join(', ')})`);
-    if (Number.isFinite(fCapUsd) && fCapUsd < tier.orderFrac * bankroll * sessRisk.sizeMult * kellyScale) plan.notes.push(`optimal f cap: $${fCapUsd.toFixed(2)} per order (${(100 * fCap.cap).toFixed(2)}% of bankroll, ${fCap.rep?.n ?? 0} settled trades)`);
+    if (Number.isFinite(fCapUsd) && fCapUsd < tier.orderFrac * bankroll * sizeMult * kellyScale) plan.notes.push(`optimal f cap: $${fCapUsd.toFixed(2)} per order (${(100 * fCap.cap).toFixed(2)}% of bankroll, ${fCap.rep?.n ?? 0} settled trades)`);
     for (const g of guards) plan.notes.push(g);
+    if (pbW && pbW.kalshi !== 1) plan.notes.push(`playbook ${pbW.source}: Kalshi size x${pbW.kalshi}`);
     if (sessRisk.applied.length) plan.notes.push(`session risk ${sessRisk.applied.join('+')}: size x${sessRisk.sizeMult}, +${sessRisk.minEdgeAdd} edge`);
     if (huntPlan) plan.place.unshift(huntPlan);
     if (huntMode) plan.notes.push(`hunting: stop ${st.huntStop ?? 'forming'}`);

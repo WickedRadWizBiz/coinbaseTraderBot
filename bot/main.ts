@@ -43,6 +43,7 @@ import { BalanceMonitor, type MonitorState } from './vault/balanceMonitor';
 import { Vault } from './vault/vault';
 import { readJson, setQuarantineAll } from './util/persist';
 import { championEnv, championPath, markApplied, readChampion, watchChampion } from './strategy/conditioningOverlay';
+import { Playbook, setPlaybook } from './strategy/playbook';
 import { Oms } from './oms/oms';
 import { PaperExchange } from './paper/paperExchange';
 import { KillSwitch } from './risk/killSwitch';
@@ -372,6 +373,8 @@ async function main(): Promise<void> {
   // (bot/ta/marketContext.ts), refreshed as hourly candles close.
   const marketCtx = new MarketContext(cfg.taNet.historyDir);
   setMarketContext(marketCtx);
+  // Strategy playbook: per coin regime, the weight of the Kalshi and perps families (re-read when the trainer sends a new one).
+  setPlaybook(new Playbook(cfg.autoTrain.dir, cfg.playbookApply));
   setRuleBook(new RuleBook(() => path.join(cfg.autoTrain.dir, 'rule_book.json')));
   // Evolved formulas (research/gpIndicators.ts): re-read when the pipeline promotes a new champion.
   setGpSignals(new GpSignals(() => path.join(cfg.autoTrain.dir, 'gp_indicators.json'), () => !cfg.strategy.gpRequireValidated && cfg.mode !== 'live'));

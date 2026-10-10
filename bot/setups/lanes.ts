@@ -71,7 +71,8 @@ export interface Candidate { sig: SetupSignal; score: number; queuedAt: number; 
 
 /** What a re-check returns: the current price and the fresh score (undefined = drop the candidate), and
  *  optionally a conviction size multiplier (TA / confluence, altcoin risk-on rule; >= 1) and a priority. */
-export type Recheck = (c: Candidate) => { px: number; score: number; mult?: number; priority?: number; why?: string } | undefined;
+/** weight: the strategy playbook's weight for the asset's regime (bot/strategy/playbook.ts; 0 = skip, default 1). */
+export type Recheck = (c: Candidate) => { px: number; score: number; mult?: number; priority?: number; why?: string; weight?: number } | undefined;
 
 export interface Entry { cand: Candidate; px: number; score: number; notional: number; mult: number; why?: string; capped?: string }
 
@@ -147,7 +148,9 @@ export class LaneBook {
         const riskDollars = (L.riskUsd && L.riskUsd > 0 ? L.riskUsd : equity * L.riskFrac) * scale;
         const mult = r.mult !== undefined && Number.isFinite(r.mult) && r.mult > 1 ? r.mult : 1;
         // Kelly-style risk (lane risk x score x conviction), never above the lane's optimal f.
-        let atRisk = riskDollars * mult, capped: string | undefined;
+        const w = r.weight !== undefined && Number.isFinite(r.weight) ? Math.max(0, r.weight) : 1;
+        if (w === 0) { this.skip(c, 'playbook: no perps risk in this regime', now); continue; }
+        let atRisk = riskDollars * mult * w, capped: string | undefined;
         const rc = this.riskCaps[lane];
         if (rc) {
           if (Number.isFinite(rc.cap) && atRisk > equity * rc.cap) { atRisk = equity * rc.cap; capped = `optimal f cap ${(100 * rc.cap).toFixed(2)}% at risk`; }
