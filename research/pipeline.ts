@@ -244,6 +244,11 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     log('sweeping everything: every step is due this run');
   }
   const steps: StepResult[] = [];
+  let stopRequested = false;
+  const onStop = () => { if (stopRequested) return; stopRequested = true; log('stop requested (SIGINT/SIGTERM), finishing the current step...'); };
+  process.on('SIGINT', onStop);
+  process.on('SIGTERM', onStop);
+
   // Conditioning runs only when asked for by name (the trainer window's conditioning mode), never in a normal run.
   const want = (s: Step) => (s === 'conditioning' ? !!o.only?.includes(s) : !o.only?.length || o.only.includes(s));
   const rec = A.recordingsDir;
@@ -260,6 +265,11 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   };
   const run = async (step: string, fn: () => Promise<unknown>, skip?: string) => {
     const t0 = Date.now();
+    if (stopRequested) {
+      steps.push({ step, ok: true, skipped: 'stop requested', ms: 0 });
+      log(`${step}: skipped (stop requested)`);
+      return undefined;
+    }
     if (skip) { steps.push({ step, ok: true, skipped: skip, ms: 0 }); log(`${step}: skipped (${skip})`); return undefined; }
     log(`${step}: running...`);
     try {
@@ -996,6 +1006,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   state.lastReport = report;
   writeAtomic(path.join(A.dir, 'pipeline_state.json'), JSON.stringify(state, null, 1));
   log(`report: ${report}`);
+  process.removeListener('SIGINT', onStop);
+  process.removeListener('SIGTERM', onStop);
   return { steps, state, report };
 }
 
