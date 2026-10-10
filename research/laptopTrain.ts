@@ -444,7 +444,7 @@ export async function laptopTrainMain(): Promise<void> {
 }
 
 /** The rounds (shared by the console and the window): pull, rounds of the pipeline until it stops, push. */
-export async function runTrainer(o: { hours: number; dataDir: string; settings: TrainerSettings; sweepAll?: boolean; hooks?: TrainerHooks; only?: string[] }): Promise<{ why?: string }> {
+export async function runTrainer(o: { hours: number; dataDir: string; settings: TrainerSettings; sweepAll?: boolean; hooks?: TrainerHooks; only?: string[]; skipDataDownload?: boolean }): Promise<{ why?: string }> {
   const t0 = Date.now();
   const hooks = o.hooks;
   const { hours, dataDir } = o;
@@ -471,7 +471,7 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
 
   // ---- 1. pull (and the newest recordings again before every later full round) ----
   const pull = async (days: number, recordingsOnly: boolean) => {
-    if (!server || flag('no-pull')) return;
+    if (!server || flag('no-pull') || o.skipDataDownload) return;
     hooks?.phase?.('pull');
     log(recordingsOnly ? `copying the bot's newest recordings (last ${days} days)...` : `copying the bot's data (recordings from the last ${days} days, history, models, state)...`);
     const what = recordingsOnly ? `-path './recordings/md-*' -mtime -${days}` : `\\( ! -path './recordings/md-*' -o -mtime -${days} \\) ! -path './audit*' ! -path './logs/*' ! -name '*.log' ! -path './.venv*'`;
@@ -528,7 +528,14 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     const full = !only && (round === 1 || Date.now() - lastFull >= 24 * 3_600_000);
     if (full && round > 1) await pull(2, true);
     if (full) lastFull = Date.now();
-    const steps = only ?? (full ? undefined : CONTINUE_STEPS);
+    let steps = only ?? (full ? undefined : CONTINUE_STEPS);
+    if (o.skipDataDownload && (!steps || steps.includes('history'))) {
+      if (!steps) {
+        const { STEPS } = await import('./pipeline');
+        steps = [...STEPS];
+      }
+      steps = steps.filter((s) => s !== 'history');
+    }
     log(`round ${round}: ${steps ? steps.join(', ') : 'every step'} (${continuous ? 'until it stops by itself' : `${(left / 3_600_000).toFixed(1)} h left`})`);
     const sweepAll = !!o.sweepAll && round === 1;
     hooks?.roundStart?.(round, full, sweepAll);
