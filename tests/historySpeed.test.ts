@@ -59,4 +59,12 @@ test('kalshi stored-market index: only changed day files are read again; a marke
   assert.deepEqual([b.markets, b.skipped], [1, 1], 'the failed market (closed 13 days ago) is listed and fetched again');
   const c = await downloadKalshiHistory({ series: ['KXSOL15M'], days: 30, out, fetchImpl, now, log: () => {} });
   assert.deepEqual([c.markets, c.skipped], [0, 0], 'once every market is stored, the old days are not listed again');
+  // Listed completely within HISTORY_RECHECK_HOURS: the series is not listed at all.
+  let listings = 0;
+  const counting = (async (url: string) => { if (new URL(url).pathname.endsWith('/markets')) listings++; return fetchImpl(url); }) as unknown as typeof fetch;
+  const d = await downloadKalshiHistory({ series: ['KXSOL15M'], days: 30, out, fetchImpl: counting, now: now + 3_600_000, recheckMs: 24 * 3_600_000, log: () => {} });
+  assert.deepEqual([d.fresh, listings], [1, 0]);
+  const e = await downloadKalshiHistory({ series: ['KXSOL15M'], days: 30, out, fetchImpl: counting, now: now + 25 * 3_600_000, recheckMs: 24 * 3_600_000, log: () => {} });
+  assert.equal(e.fresh, undefined);
+  assert.ok(listings > 0, 'a day later it is listed again');
 });

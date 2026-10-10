@@ -205,6 +205,53 @@ test('Binance Vision: lists, verifies checksums, imports, and skips archives it 
   assert.equal(parseChecksum('ABC'), undefined);
 });
 
+test('Binance Vision: a series checked within HISTORY_RECHECK_HOURS is skipped; later checks list only newer archives', async () => {
+  const dir = tmpDir();
+  const d = (day: number) => walk(24, T0 + day * 24 * H, 20 + day);
+  const files: Record<string, Buffer> = {};
+  const addDay = (day: number) => { files[`data/spot/daily/klines/BTCUSDT/1h/BTCUSDT-1h-2021-01-${String(day + 1).padStart(2, '0')}.zip`] = makeZip('x.csv', binanceCsv(d(day))); };
+  for (let i = 0; i < 5; i++) addDay(i);
+  const lists: string[] = [], downloads: string[] = [];
+  const fetchImpl = (async (u: string | URL) => {
+    const url = String(u);
+    if (url.includes('?delimiter=')) {
+      lists.push(url);
+      const prefix = decodeURIComponent(/prefix=([^&]+)/.exec(url)![1]);
+      const marker = decodeURIComponent(/marker=([^&]+)/.exec(url)?.[1] ?? '');
+      // S3 semantics: keys sort lexicographically; marker = list only keys after it.
+      const keys = Object.keys(files).flatMap((k) => [k, `${k}.CHECKSUM`]).sort().filter((k) => k.startsWith(prefix) && k > marker);
+      return new Response(`<ListBucketResult><IsTruncated>false</IsTruncated>${keys.map((k) => `<Contents><Key>${k}</Key><Size>${k.endsWith('.CHECKSUM') ? 100 : files[k].length}</Size></Contents>`).join('')}</ListBucketResult>`);
+    }
+    const key = url.replace(/^https:\/\/[^/]+\/(data\.binance\.vision\/)?/, '');
+    downloads.push(key);
+    if (key.endsWith('.CHECKSUM')) return new Response(`${crypto.createHash('sha256').update(files[key.slice(0, -9)]).digest('hex')}  x\n`);
+    return files[key] ? new Response(new Uint8Array(files[key])) : new Response('nope', { status: 404 });
+  }) as typeof fetch;
+  let now = T0 + 10 * 24 * H;
+  const run = () => downloadBinance({ out: dir, assets: ['BTC', 'ETH'], intervals: ['1h'], markets: ['spot'], recheckMs: 24 * H, now: () => now, fetchImpl, log: () => undefined });
+  const a = await run();
+  assert.equal(a.find((x) => x.pair === 'BTCUSDT')!.fetched, 5);
+  assert.equal(a.find((x) => x.pair === 'ETHUSDT')!.note, 'not listed on Binance');
+  // Within 24 h: no request at all, for the series with archives and for the one Binance doesn't list.
+  lists.length = 0; downloads.length = 0; now += 3 * H;
+  const b = await run();
+  assert.deepEqual([lists.length, downloads.length], [0, 0]);
+  assert.ok(b.every((x) => x.fresh));
+  // A day later: one new daily archive; the listing starts after the newest stored archive.
+  addDay(5);
+  lists.length = 0; downloads.length = 0; now += 24 * H;
+  const c = await run();
+  const btc = c.find((x) => x.pair === 'BTCUSDT')!;
+  assert.deepEqual([btc.fetched, btc.skipped, btc.listed], [1, 5, 6]);
+  assert.ok(lists.some((l) => /daily.*marker=.*2021-01-05\.zip/.test(decodeURIComponent(l))), 'daily listing resumes after the newest stored archive');
+  assert.deepEqual(downloads.filter((k) => k.endsWith('.zip')), ['data/spot/daily/klines/BTCUSDT/1h/BTCUSDT-1h-2021-01-06.zip']);
+  assert.equal(readSeries(seriesPath(dir, 'binance', 'BTC', '1h')).length, 6 * 24);
+  // recheckMs 0: always listed.
+  lists.length = 0;
+  await downloadBinance({ out: dir, assets: ['BTC'], intervals: ['1h'], markets: ['spot'], recheckMs: 0, now: () => now, fetchImpl, log: () => undefined });
+  assert.equal(lists.length, 2);
+});
+
 test('Coinbase backfill: walks back to the listing, then forward on the next run', async () => {
   const dir = tmpDir();
   const listing = T0, now = T0 + 2000 * H + 30 * 60_000;
@@ -230,6 +277,12 @@ test('Coinbase backfill: walks back to the listing, then forward on the next run
   const r3 = await backfillCoinbase({ out: dir, assets: ['ETH'], tfs: ['1h'], fromTs: T0 - 400 * 86_400_000, fetchImpl, delayMs: 0, now: () => now, log: () => undefined });
   assert.equal(r3[0].added, 0);
   assert.ok(reqs <= 1, `the listing found once is remembered: no empty windows asked again (${reqs} requests)`);
+  // Checked within HISTORY_RECHECK_HOURS: not asked at all.
+  reqs = 0;
+  const r4 = await backfillCoinbase({ out: dir, assets: ['ETH'], tfs: ['1h'], fromTs: T0 - 400 * 86_400_000, fetchImpl, delayMs: 0, now: () => now + H, recheckMs: 24 * H, log: () => undefined });
+  assert.deepEqual([reqs, r4[0].fresh], [0, true]);
+  const r5 = await backfillCoinbase({ out: dir, assets: ['ETH'], tfs: ['1h'], fromTs: T0 - 400 * 86_400_000, fetchImpl, delayMs: 0, now: () => now + 25 * H, recheckMs: 24 * H, log: () => undefined });
+  assert.ok(!r5[0].fresh && reqs > 0, 'a day later it is asked again');
 });
 
 test('Coinbase backfill: an asset Coinbase does not sell is asked for once, not once per timeframe', async () => {

@@ -337,6 +337,7 @@ This model ships as `params/ta_net.json`. The server's pipeline continues the to
 | `COINBASE_WS_URL` | `wss://ws-feed.exchange.coinbase.com` | Coinbase Exchange public WebSocket. |
 | `HISTORY_DIR` | `data/history` | The candle store. |
 | `HISTORY_AUTO_UPDATE` | `true` | Refresh Binance and Coinbase data in the daily pipeline. |
+| `HISTORY_RECHECK_HOURS` | `24` | Sources checked completely within this many hours are skipped (0 = always check). |
 | `HISTORY_ASSETS` | `auto` | `auto` = every crypto asset Kalshi lists; or a list like `BTC,ETH,SOL`. |
 | `HISTORY_BINANCE_INTERVALS` | `1h,15m,1d` | Binance intervals to keep up to date. |
 | `HISTORY_COINBASE_TFS` | `1h,1d` | Coinbase timeframes to backfill (add `15m` if you want it; about 1,000 requests per asset the first time). |

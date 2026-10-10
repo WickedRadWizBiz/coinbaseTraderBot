@@ -75,7 +75,7 @@ export class TrainerUi {
   }
 
   /** Start a run (the window's Start button). */
-  start(req: { mode?: string; hours?: number; host?: string; user?: string; key?: string }): { ok: boolean; error?: string } {
+  start(req: { mode?: string; hours?: number; host?: string; user?: string; key?: string; /** Conditioning before it is recommended (the window asked "are you sure?"). */ force?: boolean }): { ok: boolean; error?: string } {
     if (this.state.phase !== 'idle') return { ok: false, error: 'already training' };
     const hours = Number(req.hours ?? 0);
     if (!(hours >= 0) || hours > 24 * 365) return { ok: false, error: 'hours must be 0 (until it stops by itself) or a number of hours' };
@@ -84,7 +84,8 @@ export class TrainerUi {
     const conditioning = req.mode === 'conditioning';
     if (conditioning) {
       const c = conditioningView(path.join(this.o.dataDir, 'models'));
-      if (!c.ready) return { ok: false, error: c.why };
+      // Not recommended yet: started only when the window confirmed it (force).
+      if (!c.ready && req.force !== true) return { ok: false, error: c.why };
     }
     writeSettings(this.o.dataDir, settings);
     Object.assign(this.state, { phase: 'running', mode: conditioning ? 'conditioning' : req.mode === 'full' ? 'full' : 'continue', hours, round: 0, settings, lastStop: null, lastError: null, board: [] });

@@ -322,9 +322,10 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   if (want('history')) {
     await run('history', async () => {
       const assets = await resolveAssets(T.historyAssets, { log });
-      const bin = await downloadBinance({ out: T.historyDir, assets, intervals: T.binanceIntervals as HistTf[], markets: ['spot' as BinanceMarket], log: (m) => log(`binance: ${m}`) });
+      const recheckMs = T.historyRecheckHours * 3_600_000;
+      const bin = await downloadBinance({ out: T.historyDir, assets, intervals: T.binanceIntervals as HistTf[], markets: ['spot' as BinanceMarket], recheckMs, log: (m) => log(`binance: ${m}`) });
       // Binance's BTC dominance index (BTC vs the top-20 alts): an input of the TA network.
-      bin.push(...await downloadBinance({ out: T.historyDir, assets: BINANCE_INDEXES, intervals: ['1h'], markets: ['um-index'], log: (m) => log(`binance: ${m}`) }));
+      bin.push(...await downloadBinance({ out: T.historyDir, assets: BINANCE_INDEXES, intervals: ['1h'], markets: ['um-index'], recheckMs, log: (m) => log(`binance: ${m}`) }));
       // The live bot rebuilds BTCDOM itself (Binance's futures API refuses US servers): check it tracks
       // Binance's own index wherever both exist.
       // The history replay's inputs: 1-minute spot (kept apart from the TA steps' store) and perpetual bars,
@@ -333,16 +334,16 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       let replayInputs: unknown;
       if (T.historyReplay) {
         const fromMonth = T.historyReplayYears > 0 ? new Date(now - T.historyReplayYears * 365 * 86_400_000).toISOString().slice(0, 7) : undefined;
-        const rs = await downloadBinance({ out: T.historyDir, assets: T.historyReplayAssets, intervals: ['1m'], markets: ['spot'], source: 'binance-1m', fromMonth, log: (m) => log(`binance: ${m}`) });
-        const ru = await downloadBinance({ out: T.historyDir, assets: T.historyReplayAssets, intervals: ['1m'], markets: ['um'], fromMonth, log: (m) => log(`binance: ${m}`) });
-        const fu = await downloadBinanceFunding({ out: T.historyDir, assets: T.historyReplayAssets, fromMonth, log: (m) => log(`binance: ${m}`) });
+        const rs = await downloadBinance({ out: T.historyDir, assets: T.historyReplayAssets, intervals: ['1m'], markets: ['spot'], source: 'binance-1m', fromMonth, recheckMs, log: (m) => log(`binance: ${m}`) });
+        const ru = await downloadBinance({ out: T.historyDir, assets: T.historyReplayAssets, intervals: ['1m'], markets: ['um'], fromMonth, recheckMs, log: (m) => log(`binance: ${m}`) });
+        const fu = await downloadBinanceFunding({ out: T.historyDir, assets: T.historyReplayAssets, fromMonth, recheckMs, log: (m) => log(`binance: ${m}`) });
         // Open interest every 5 minutes (from September 2020): the perps model's open-interest inputs.
-        const oi = await downloadBinanceOpenInterest({ out: T.historyDir, assets: T.historyReplayAssets, fromDay: fromMonth ? `${fromMonth}-01` : undefined, log: (m) => log(`binance: ${m}`) });
+        const oi = await downloadBinanceOpenInterest({ out: T.historyDir, assets: T.historyReplayAssets, fromDay: fromMonth ? `${fromMonth}-01` : undefined, recheckMs, log: (m) => log(`binance: ${m}`) });
         replayInputs = { spot1m: rs.reduce((a, b) => a + b.fetched, 0), perp1m: ru.reduce((a, b) => a + b.fetched, 0), funding: fu.map((f) => `${f.asset} ${f.rows}`), openInterest: oi.map((f) => `${f.asset} ${f.rows}`) };
       }
       const btcdomCheck = compareIndexSources(T.historyDir, 'BTCDOM', 'binance-index', 'bot-index');
       if (btcdomCheck.overlap) log(`BTCDOM: live rebuild vs Binance over ${btcdomCheck.overlap} hours: hourly return correlation ${btcdomCheck.returnCorr.toFixed(3)}, level ratio ${btcdomCheck.levelRatio.toFixed(4)}`);
-      const cb = T.coinbaseTfs.length ? await backfillCoinbase({ out: T.historyDir, assets, tfs: T.coinbaseTfs as HistTf[], fromTs: Date.parse('2015-01-01T00:00:00Z'), baseUrl: cfg.coinbaseRestUrl, log: (m) => log(`coinbase: ${m}`) }) : [];
+      const cb = T.coinbaseTfs.length ? await backfillCoinbase({ out: T.historyDir, assets, tfs: T.coinbaseTfs as HistTf[], fromTs: Date.parse('2015-01-01T00:00:00Z'), baseUrl: cfg.coinbaseRestUrl, recheckMs, log: (m) => log(`coinbase: ${m}`) }) : [];
       // TradingView (tvdatafeed): the index series' 5,000-bar backfill and daily refresh, and the spot holes
       // (before the Kalshi download: models read these; the Kalshi candles are research material).
       let tradingview: unknown;
@@ -358,13 +359,14 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         const kStart = Date.now(), budget = T.kalshiHistoryBudgetMin * 60_000;
         const tennisSeries = cfg.tennis.enabled ? cfg.tennis.series : [];
         try {
-          const markets = await downloadKalshiHistory({ baseUrl: cfg.restBaseUrl, series: [...cfg.strategy.series, ...tennisSeries], days: T.kalshiHistoryDays, out: path.join(T.historyDir, 'kalshi'), budgetMs: budget, log: (m) => log(`kalshi: ${m}`) });
+          const markets = await downloadKalshiHistory({ baseUrl: cfg.restBaseUrl, series: [...cfg.strategy.series, ...tennisSeries], days: T.kalshiHistoryDays, out: path.join(T.historyDir, 'kalshi'), budgetMs: budget, recheckMs, log: (m) => log(`kalshi: ${m}`) });
           const left = budget - (Date.now() - kStart);
           const tapes = tennisSeries.length && left > 60_000 ? await downloadKalshiTrades({ baseUrl: cfg.restBaseUrl, series: tennisSeries, out: path.join(T.historyDir, 'kalshi'), budgetMs: left, log: (m) => log(`kalshi trades: ${m}`) }) : undefined;
           kalshi = { markets, tennisTapes: tapes ?? (tennisSeries.length ? { skipped: 'no time left in KALSHI_HISTORY_BUDGET_MIN' } : undefined) };
         } catch (e) { kalshi = { error: String(e) }; }
       } else kalshi = { skipped: 'KALSHI_HISTORY_BUDGET_MIN=0' };
-      const reached = bin.some((b) => b.listed > 0) || cb.some((c) => c.requests > 0 && !/kept failing/.test(c.note ?? ''));
+      // Reached: listed something this run, or checked it completely within HISTORY_RECHECK_HOURS.
+      const reached = bin.some((b) => b.listed > 0 || b.fresh) || cb.some((c) => c.fresh || (c.requests > 0 && !/kept failing/.test(c.note ?? '')));
       if (!reached) throw new SkipStep('Binance Vision and Coinbase unreachable from this machine');
       state.lastHistoryUpdate = now;
       return { replayInputs, tradingview, kalshi, assets, binance: { fetched: bin.reduce((a, b) => a + b.fetched, 0), failed: bin.reduce((a, b) => a + b.failed, 0) }, coinbase: { added: cb.reduce((a, c) => a + c.added, 0) }, btcdomCheck };
