@@ -81,6 +81,7 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
   button.ghost { background: transparent; color: var(--text); box-shadow: none; text-shadow: var(--halation); }
   button.danger { background: transparent; color: var(--danger); border-color: var(--danger); box-shadow: 0 0 10px rgba(255,84,154,.35); }
   button:disabled { opacity: .45; cursor: default; }
+  button.soft { opacity: .45; }
   .update { border: 1px solid var(--warn); color: #ffe0b8; border-radius: 6px; padding: 12px 14px; margin-bottom: 16px; font-size: 13px; line-height: 1.5; box-shadow: 0 0 12px rgba(255,179,92,.3); }
   .update .btns { margin-top: 10px; }
   .board { font-size: 12px; line-height: 1.6; white-space: pre-wrap; color: var(--text); }
@@ -212,10 +213,14 @@ $('start').addEventListener('click', async () => {
   const r = await post('/api/start', { mode, hours: Number($('hours').value) || 0, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim() });
   if (!r.ok) $('startErr').textContent = r.error || 'could not start';
 });
+let lastCond = null;
 $('condStart').addEventListener('click', async () => {
   $('startErr').textContent = '';
+  // Greyed out = not recommended (the bot wasn't freshly trained since the last conditioning run), not locked.
+  const c = lastCond || { ready: false, why: '' };
+  if (!c.ready && !confirm('Conditioning is not recommended right now: ' + (c.why || 'the bot was not freshly trained') + '.\n\nAre you sure you want to start it anyway?')) return;
   if (!confirm('Start conditioning mode? It runs until a champion is found or the trials are used up (hours on most computers).')) return;
-  const r = await post('/api/start', { mode: 'conditioning', hours: 0, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim() });
+  const r = await post('/api/start', { mode: 'conditioning', hours: 0, force: !c.ready, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim() });
   if (!r.ok) $('startErr').textContent = r.error || 'could not start';
 });
 $('stop').addEventListener('click', async () => { if (confirm('Stop training now? Finished steps and tournament rounds are kept; the step in progress starts again next time.')) await post('/api/stop'); });
@@ -247,7 +252,10 @@ async function tick() {
   $('run').classList.toggle('hidden', !running);
   $('led').className = 'led ' + (s.phase === 'running' ? 'on' : s.phase === 'stopping' ? 'warn' : s.lastError ? 'err' : '');
   const c = s.conditioning || { ready: false, why: '', last: null };
-  $('condStart').disabled = running || !c.ready;
+  lastCond = c;
+  $('condStart').disabled = running;
+  $('condStart').classList.toggle('soft', !c.ready);
+  $('condStart').title = c.ready ? '' : 'Not recommended yet (you will be asked to confirm)';
   $('condState').textContent = c.ready ? 'ready' : 'not yet';
   $('condWhy').textContent = c.why || '';
   $('condLast').textContent = c.last ? 'Last run ' + new Date(c.last.at).toLocaleString() + ': ' + (c.last.elite ? 'Elite Champion ' + c.last.elite : 'no Elite; best ' + (c.last.best || 'none') + ', ' + c.last.bestPassed + ' of ' + c.last.windows + ' windows') : '';

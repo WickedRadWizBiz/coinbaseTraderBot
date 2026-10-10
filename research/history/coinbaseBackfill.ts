@@ -9,6 +9,7 @@
 // since 2017 is roughly 1,000 requests (~5 minutes) per asset.
 
 import fs from 'fs';
+import { checkedStore } from './recheck';
 import path from 'path';
 import { fromRow, type CandleRow } from '../../bot/ta/candleStore';
 import type { Candle } from '../../bot/ta/indicators';
@@ -26,12 +27,14 @@ export interface CoinbaseOpts {
   fromTs: number;
   baseUrl?: string;
   delayMs?: number;
+  /** A series checked completely within this many ms is not asked again (HISTORY_RECHECK_HOURS; 0 = always). */
+  recheckMs?: number;
   fetchImpl?: typeof fetch;
   now?: () => number;
   log?: (m: string) => void;
 }
 
-export interface CoinbaseSummary { asset: string; tf: HistTf; requests: number; added: number; stored: number; note?: string }
+export interface CoinbaseSummary { asset: string; tf: HistTf; requests: number; added: number; stored: number; note?: string; /** Checked within recheckMs: not asked this run. */ fresh?: boolean }
 
 export async function backfillCoinbase(o: CoinbaseOpts): Promise<CoinbaseSummary[]> {
   const f = o.fetchImpl ?? fetch;
@@ -40,6 +43,7 @@ export async function backfillCoinbase(o: CoinbaseOpts): Promise<CoinbaseSummary
   const log = o.log ?? ((m: string) => console.log(`[coinbase] ${m}`));
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const out: CoinbaseSummary[] = [];
+  const checked = checkedStore(path.join(o.out, 'coinbase', 'checked.json'));
   for (const [ai, asset] of o.assets.entries()) {
     progress('Coinbase candles (coins)', ai, o.assets.length);
     // Kalshi lists assets Coinbase does not sell (tokenised stocks, indices): asked once, not per timeframe.
@@ -49,6 +53,7 @@ export async function backfillCoinbase(o: CoinbaseOpts): Promise<CoinbaseSummary
       const s: CoinbaseSummary = { asset, tf, requests: 0, added: 0, stored: 0 };
       out.push(s);
       if (!g) { s.note = `Coinbase has no ${tf} candles`; continue; }
+      if (checked.fresh(`${asset}|${tf}`, now, o.recheckMs)) { s.fresh = true; continue; }
       const ms = g * 1000, span = 300 * ms;
       const have = readSeries(seriesPath(o.out, 'coinbase', asset, tf));
       if (noProduct) { s.note = `no ${asset}-USD product on Coinbase`; s.stored = have.length; continue; }
@@ -103,9 +108,14 @@ export async function backfillCoinbase(o: CoinbaseOpts): Promise<CoinbaseSummary
         s.stored = upsertSeries(o.out, 'coinbase', asset, tf, candles);
         s.added = s.stored - before;
       } else s.stored = have.length;
+      // Checked completely (up to the last closed bar, or no such product): not asked again within recheckMs.
+      if (!s.note || noProduct || /no .*-USD product/.test(s.note)) checked.mark(`${asset}|${tf}`, now); else checked.forget(`${asset}|${tf}`);
+      checked.save();
       log(noProduct ? `${asset}: not sold on Coinbase (no ${asset}-USD product), skipped` : `${asset} ${tf}: ${s.requests} requests, +${s.added} bars (${s.stored} stored)${s.note ? `; ${s.note}` : ''}`);
     }
   }
+  const fresh = out.filter((x) => x.fresh).length;
+  if (fresh) log(`${fresh} of ${out.length} series checked within the last ${Math.round((o.recheckMs ?? 0) / 3_600_000)} h, skipped`);
   return out;
 }
 

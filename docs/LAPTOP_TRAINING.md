@@ -178,7 +178,7 @@ The pipeline's last step, `readiness` (`research/readiness.ts`), writes `models/
 
 ## Conditioning mode
 
-The trainer window has a second button, **Start conditioning**. It is greyed out until a normal run has finished since the last conditioning run. It runs one pressure-test tournament of the freshly trained bot on unseen history days, with tiers from $1000 down to $100 and a 35% cull, then sends the results to the server like a normal round. An Elite Champion replaces the live bot's trading settings, and the dashboard can roll it back. The rules are in docs/AUTOMATION.md §10.
+The trainer window has a second button, **Start conditioning**. It is greyed out until a normal run has finished since the last conditioning run. You can still press it; it asks "are you sure?" first. It runs one pressure-test tournament of the freshly trained bot on unseen history days, with tiers from $1000 down to $100 and a 35% cull, then sends the results to the server like a normal round. An Elite Champion replaces the live bot's trading settings, and the dashboard can roll it back. The rules are in docs/AUTOMATION.md §10.
 
 ## History ledger: which weeks each network has trained on
 

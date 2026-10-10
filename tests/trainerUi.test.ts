@@ -210,6 +210,11 @@ test('conditioning mode: greyed out until a normal training run finished since t
   assert.equal(v.ready, false, 'conditioned since the last training');
   assert.deepEqual(v.last, { at: '2026-10-09T12:00:00Z', elite: null, best: 't0-3', bestPassed: 4, windows: 21 });
   assert.match(ui.start({ mode: 'conditioning' }).error!, /train again the normal way first/);
+  // Greyed out is a recommendation: confirmed in the window (force), it starts anyway.
+  only = undefined;
+  assert.deepEqual(ui.start({ mode: 'conditioning', force: true }), { ok: true });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(only, ['conditioning']);
 });
 
 test('conditioning bracket: one column per tier reached, the Elite Champion (or the best) on the card', () => {

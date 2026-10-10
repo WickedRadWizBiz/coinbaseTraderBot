@@ -92,9 +92,12 @@ export interface KalshiHistoryOpts {
   maxCandleMinutes?: number;
   /** Wall clock for the budget (tests). */
   clock?: () => number;
+  /** A series a past run listed and stored completely within this many ms is not listed again
+   *  (HISTORY_RECHECK_HOURS; 0 = always). */
+  recheckMs?: number;
 }
 
-export interface KalshiHistoryResult { markets: number; skipped: number; failed: number; noVolume: number; rejected: number; remaining: number; budgetHit: boolean }
+export interface KalshiHistoryResult { markets: number; skipped: number; failed: number; noVolume: number; rejected: number; remaining: number; budgetHit: boolean; /** Series checked within recheckMs, not listed. */ fresh?: number }
 
 class HttpError extends Error { constructor(msg: string, readonly status: number) { super(msg); } }
 
@@ -196,7 +199,7 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
   const maxMin = o.maxCandleMinutes ?? 2880;
   const cutoffRaw = await get('/historical/cutoff').catch(() => ({}));
   const cutoff = Date.parse(String(cutoffRaw?.market_settled_ts ?? '')) || 0;
-  let markets = 0, skipped = 0, failed = 0, noVolume = 0, rejected = 0, remaining = 0, budgetHit = false;
+  let markets = 0, skipped = 0, failed = 0, noVolume = 0, rejected = 0, remaining = 0, budgetHit = false, fresh = 0;
   for (const series of o.series) {
     if (clock() >= deadline) { budgetHit = true; log(`${series}: time budget used up; left for the next run`); continue; }
     const dir = path.join(o.out, series);
@@ -207,6 +210,7 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
     // Settled markets from both tiers, newest first, until older than `from` -- or, when a past run listed
     // [from, to] completely and this run wants no older markets, until a few days inside that range.
     const listed = stored.index.listed;
+    if (o.recheckMs && o.recheckMs > 0 && listed && listed.from <= from && now - listed.to >= 0 && now - listed.to < o.recheckMs) { fresh++; continue; }
     const stopAt = listed && listed.from <= from ? Math.max(from, listed.to - LISTED_OVERLAP_MS) : from;
     let complete = true;
     const rows: Array<{ m: Omit<KalshiHistMarket, 'candles'>; hist: boolean }> = [];
@@ -277,7 +281,8 @@ export async function downloadKalshiHistory(o: KalshiHistoryOpts): Promise<Kalsh
     }
   }
   log(`done: ${markets} new market(s), ${noVolume} never traded (stored without candles), ${skipped} already stored, ${rejected} rejected by the API, ${failed} failed${remaining ? `, ${remaining} left for the next run` : ''}${limited() ? `; Kalshi asked to slow down ${limited()} time(s) (paused and retried)` : ''}`);
-  return { markets, skipped, failed, noVolume, rejected, remaining, budgetHit };
+  if (fresh) log(`${fresh} of ${o.series.length} series listed completely within the last ${Math.round((o.recheckMs ?? 0) / 3_600_000)} h, skipped`);
+  return { markets, skipped, failed, noVolume, rejected, remaining, budgetHit, ...(fresh ? { fresh } : {}) };
 }
 
 export interface KalshiTradesOpts {

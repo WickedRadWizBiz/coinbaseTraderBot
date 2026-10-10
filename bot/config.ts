@@ -310,6 +310,9 @@ export interface TaNetConfig {
   /** Binance intervals to download, and Coinbase timeframes to backfill. */
   binanceIntervals: string[];
   coinbaseTfs: string[];
+  /** A history source (Binance series, Coinbase series, Kalshi contract series) checked completely within this
+   *  many hours is not asked again (0 = check everything every run). */
+  historyRecheckHours: number;
   /** History replay (research/history/historyReplay.ts): years of 1-minute spot and perp history turned into
    *  recordings the recording-based steps replay like live data (HISTORY_REPLAY; the laptop trainer turns it on). */
   historyReplay: boolean;
@@ -1177,6 +1180,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       historyAssets: env.HISTORY_ASSETS ?? 'auto',
       binanceIntervals: (env.HISTORY_BINANCE_INTERVALS ?? '1h,15m,1d').split(',').map((x) => x.trim()).filter(Boolean),
       coinbaseTfs: (env.HISTORY_COINBASE_TFS ?? '1h,1d').split(',').map((x) => x.trim()).filter((x) => x && x !== 'none'),
+      historyRecheckHours: num(env, 'HISTORY_RECHECK_HOURS', 24, 0, 720),
       historyReplay: bool(env, 'HISTORY_REPLAY', false),
       historyReplayYears: num(env, 'HISTORY_REPLAY_YEARS', 0, 0, 20),
       historyReplayDir: path.resolve(env.HISTORY_REPLAY_DIR ?? path.join(dataDir, 'history-replay')),
