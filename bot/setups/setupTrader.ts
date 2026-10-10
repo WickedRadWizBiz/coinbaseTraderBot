@@ -36,6 +36,7 @@ import { adaptToVol, detectLast, FAST_TFS, SLOW_TFS, SETUP_MIN_BARS, TF_MS, type
 import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from './exits';
 import { setupFeatureMap, setupVector, type SetupBars, type TaNetReading } from './features';
 import type { SnnContext } from '../model/featureEngine';
+import { playbook } from '../strategy/playbook';
 import { DEFAULT_LANES, LaneBook, type Candidate, type LaneBookParams } from './lanes';
 import { SetupModel } from './setupModel';
 
@@ -320,7 +321,9 @@ export class SetupTrader {
         if (this.d.params.requireValidation && !this.model?.validated(cand.sig.lane)) return undefined;
         if (this.snnBlocks(cand.sig)) return undefined;
         const cv = this.conviction(cand.sig.asset, cand.sig.dir, now);
-        return { px, score: this.score(cand.sig, now), mult: cv?.mult, priority: cv?.priority, why: cv?.why };
+        // Strategy playbook (bot/strategy/playbook.ts): the perps family's weight in this coin's confirmed regime.
+        const weight = playbook()?.weights(marketContext()?.regimeOf(cand.sig.asset), now).perps;
+        return { px, score: this.score(cand.sig, now), mult: cv?.mult, priority: cv?.priority, why: cv?.why, weight };
       }, (cand) => this.conviction(cand.sig.asset, cand.sig.dir, now)?.priority ?? 0);
       for (const e of entries) {
         const t = openTrade(e.cand.sig, e.px, now, this.d.params.costs);

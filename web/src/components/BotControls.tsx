@@ -198,3 +198,33 @@ export function ConditioningRow({ s, onChange }: { s: any; onChange: () => void 
     </div>
   );
 }
+
+/**
+ * Strategy playbook row: per coin, its confirmed regime (character : Hilbert trend/cycle) and the weight each
+ * strategy family carries there (bot/strategy/playbook.ts). Hidden until the trainer has sent a playbook.
+ */
+export function PlaybookRow({ s }: { s: any }) {
+  const p = s?.playbook as { apply: boolean; version: string | null; enabled: boolean; validation: { why: string } | null; coins: Record<string, { regime: string | null; kalshi: number; perps: number; source: string }> } | null | undefined;
+  if (!p || !p.version) return null;
+  const coins = Object.entries(p.coins ?? {});
+  const state = !p.apply ? 'ignored (PLAYBOOK_APPLY=false)' : p.enabled ? `on (${p.version})` : 'off: failed validation';
+  return (
+    <div className="flex flex-col border-b border-crypto-primary border-opacity-50 px-4 py-2 gap-1">
+      <div className="flex justify-between items-center gap-3">
+        <span className="text-[11px] uppercase tracking-widest text-crypto-primary font-bold">Playbook</span>
+        <span className="text-[10px] opacity-70 normal-case truncate" title={p.validation?.why ?? ''}>{state}</span>
+      </div>
+      {coins.length > 0 && (
+        <div className="grid grid-cols-[auto_1fr_auto] gap-x-3 text-[10px] font-mono">
+          {coins.map(([a, c]) => (
+            <div key={a} className="contents">
+              <span className="font-bold">{a}</span>
+              <span className="opacity-70 truncate">{c.regime ?? 'reading...'}</span>
+              <span className={c.kalshi < 1 || c.perps !== 1 ? 'text-crypto-primary' : 'opacity-60'}>K x{c.kalshi} · P x{c.perps}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

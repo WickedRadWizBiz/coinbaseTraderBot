@@ -11,7 +11,8 @@ import fs from 'fs';
 import type { Candle } from './indicators';
 import type { CandleSet } from './candleStore';
 import type { MacroInput } from './analyzer';
-import { characterOf, type Character, type CharacterInputs } from './character';
+import type { Character, CharacterInputs } from './character';
+import { regimeOf, RegimeTracker, type CycleMode } from './regime';
 import { loadIndexSeries } from '../marketdata/historyStore';
 
 const D = 86_400_000;
@@ -55,7 +56,7 @@ export function riskOf(series: Partial<Record<RiskKey, Candle[]>>, t = Infinity,
   return any ? out : undefined;
 }
 
-export interface CoinCharacter { cls: Character; why: string; x: CharacterInputs; ts: number }
+export interface CoinCharacter { cls: Character; why: string; x: CharacterInputs; ts: number; mode?: CycleMode; period?: number; key: string }
 
 /** Live holder: recomputed when a new hourly candle closes on any coin (at most every 5 minutes). */
 export class MarketContext {
@@ -65,6 +66,9 @@ export class MarketContext {
   private riskAt = 0;
   private key = '';
   private at = 0;
+  /** Each coin's regime with hysteresis (bot/ta/regime.ts): what the playbook switches on, per coin (an altcoin
+   *  can trend on its own while BTC ranges). */
+  private regimes = new Map<string, RegimeTracker>();
   version = 0;
 
   constructor(private readonly histDir?: string) {}
@@ -77,7 +81,13 @@ export class MarketContext {
     const h1 = new Map(list.map((s) => [s.asset, s.bars['1h']!]));
     for (const s of list) {
       const others = list.filter((o) => o !== s).map((o) => h1.get(o.asset)!);
-      try { this.chars.set(s.asset, { ...characterOf(s.bars['1h']!, s.bars['1d'] ?? [], others, volFc?.(s.asset)), ts: now }); } catch { /* skipped */ }
+      try {
+        const r = regimeOf(s.bars['1h']!, s.bars['1d'] ?? [], others, volFc?.(s.asset));
+        this.chars.set(s.asset, { cls: r.character, why: r.why, x: r.x, ts: now, mode: r.mode, period: r.period, key: r.key });
+        const a = s.asset.toUpperCase();
+        if (!this.regimes.has(a)) this.regimes.set(a, new RegimeTracker(2));
+        this.regimes.get(a)!.update(r.key, now);
+      } catch { /* skipped */ }
     }
     this.breadth = breadthOf(list.map((s) => s.bars['1d'] ?? []));
     if (this.histDir && now - this.riskAt >= 3_600_000 && fs.existsSync(this.histDir)) {
@@ -94,11 +104,13 @@ export class MarketContext {
   /** Breadth and risk for the analyzer's macro rules. */
   macro(): Pick<MacroInput, 'breadth' | 'risk'> & { ctx: number } { return { breadth: this.breadth, risk: this.risk, ctx: this.version }; }
   character(asset: string): CoinCharacter | undefined { return this.chars.get(asset.toUpperCase()) ?? this.chars.get(asset); }
+  /** A coin's confirmed regime, or undefined before its first hourly update. */
+  regimeOf(asset: string): string | undefined { return this.regimes.get(asset.toUpperCase())?.confirmed; }
 
   status() {
     return {
-      breadth: this.breadth ?? null, risk: this.risk ?? null,
-      characters: Object.fromEntries([...this.chars].map(([a, c]) => [a, { cls: c.cls, why: c.why, rvPct: round(c.x.rvPct), corr: round(c.x.corr), hurst: round(c.x.hurst), er: round(c.x.er), adx: round(c.x.adx, 1) }])),
+      breadth: this.breadth ?? null, risk: this.risk ?? null, regimes: Object.fromEntries([...this.regimes].map(([a, t]) => [a, t.status()])),
+      characters: Object.fromEntries([...this.chars].map(([a, c]) => [a, { cls: c.cls, mode: c.mode ?? null, period: c.period ?? null, why: c.why, rvPct: round(c.x.rvPct), corr: round(c.x.corr), hurst: round(c.x.hurst), er: round(c.x.er), adx: round(c.x.adx, 1) }])),
     };
   }
 }

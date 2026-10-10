@@ -52,7 +52,7 @@
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, rule_book, gp, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, readiness
+//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, rule_book, gp, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, playbook, readiness
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --sweep-all          # every step due now (weekly studies, tournaments, ablations, sweeps)
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
@@ -109,7 +109,7 @@ import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
 import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
 
-export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'rule_book', 'gp', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'readiness', 'conditioning'] as const;
+export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'rule_book', 'gp', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -885,6 +885,41 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const r = await tuneSizingMain(argsOf({ 'data-dir': cfg.dataDir, kelly: cfg.strategy.kellyFraction, 'loss-at': cfg.strategy.ddScaleAt, start: cfg.paperBankrollUsd, floor: cfg.strategy.minTradableBankrollUsd, out: path.join(A.dir, 'sizing_proposal.json') }));
       if (!r.ready) throw new SkipStep(r.note);
       return { proposal: path.join(A.dir, 'sizing_proposal.json'), note: r.note, best: r.best, current: r.current, epochs: r.epochs };
+    });
+  }
+
+  // ---- 9b. strategy playbook: which strategy family carries the risk in which coin regime, learned from whole-bot
+  // replay days and switched on only if it beat the static bot on later days (research/playbook.ts) ----
+  if (want('playbook')) {
+    await run('playbook', async () => {
+      const kDays = T.historyReplay ? replayKalshiDays(replayDir) : [];
+      if (kDays.length < 30) throw new SkipStep(`${kDays.length} history replay day(s) with Kalshi's real contracts, need 30`);
+      const fit = mlpPath() ? (MetaModel.load(mlpPath()!).params.training as { firstWindow?: string; holdoutStart?: string } | undefined) : undefined;
+      const fitted = (d: string) => Boolean(fit?.firstWindow && fit.holdoutStart && d >= fit.firstWindow.slice(0, 10) && d < fit.holdoutStart.slice(0, 10));
+      // Not the readiness step's held-out newest 15%, not the MLP's fitting span; the newest 240 of the rest.
+      const pool = kDays.slice(0, Math.floor(kDays.length * 0.85)).filter((d) => !fitted(d)).slice(-240);
+      if (pool.length < 30) throw new SkipStep(`${pool.length} replay day(s) outside the MLP's fitting span and the readiness days, need 30`);
+      const { dayRegimes, coinDays, buildPlaybook } = await import('./playbook');
+      const src = path.join(work, 'playbook-days');
+      fs.rmSync(src, { recursive: true, force: true });
+      linkDays(pool.map((d) => ({ day: d, file: path.join(replayDir, `md-${d}.jsonl.gz`) })), src);
+      const D = await loadWholeBot({ recordings: src, history: T.historyDir, setupOos: path.join(A.dir, 'setup_oos.json'), modelPath: mlpPath(), split: { all: [0, 1] }, log });
+      try {
+        let book;
+        try { book = SetupModel.load(fs.existsSync(promoted('setups')) ? promoted('setups') : cfg.perps.setupModelPath)?.params.book; } catch { book = undefined; }
+        const r = await runWholeBot(D, 'all', { ...settingsFromConfig(cfg, book), totalUsd: A.targetPoolUsd });
+        const assets = [...new Set([...T.historyReplayAssets, ...Object.values(r.byAsset).flatMap((x) => Object.keys(x))])].filter((a) => a !== 'OTHER');
+        const samples = coinDays(r.byAsset, dayRegimes(T.historyDir, pool, assets));
+        const pb = buildPlaybook(samples, { version: new Date(now).toISOString().replace(/[-:]/g, '').slice(0, 15), at: new Date(now).toISOString() });
+        const file = path.join(A.dir, 'playbook.json');
+        fs.writeFileSync(`${file}.tmp`, JSON.stringify(pb, null, 1));
+        fs.renameSync(`${file}.tmp`, file);
+        log(`playbook ${pb.enabled ? 'ON' : 'off'}: ${pb.validation?.why}`);
+        return { enabled: pb.enabled, days: pool.length, coinDays: samples.length, regimes: Object.keys(pb.entries).length, validation: pb.validation, entries: Object.fromEntries(Object.entries(pb.entries).map(([k, e]) => [k, `kalshi x${e.kalshi}, perps x${e.perps} (${e.days} coin-days)`])) };
+      } finally {
+        for (const d of Object.values(D.dirs)) fs.rmSync(d, { recursive: true, force: true });
+        fs.rmSync(src, { recursive: true, force: true });
+      }
     });
   }
 

@@ -152,6 +152,22 @@ An Elite is written to `conditioning_champion.json` and sent to the server with 
 
 **Rollback:** the dashboard's *Conditioning* row (under Status) shows the champion in use. **Rollback** puts the previous champion back, or the `.env` settings when there is none, and restarts the bot. `CONDITIONING_APPLY=false` ignores champions altogether.
 
+### 11. It learns which strategy to lean on in which market (the playbook)
+
+The bot makes money two independent ways from one pot of capital: **Kalshi** contracts (fair-value trading) and **perps** setups (the fast and slow lanes). Neither earns in every market. The **playbook** step learns, for each market regime, how much weight each family should carry. The live bot then switches between them as regimes change.
+
+- **Regime, per coin.** The coin's character (calm, trending, volatile on its own, volatile with the whole market) crossed with Ehlers' Hilbert trend-vs-cycle mode (TA-Lib's `HT_TRENDMODE` on log closes, so the same rule holds at any price). Example: `trending:trend`, `calm:cycle`. Each coin has its own regime, because an altcoin can trend while BTC ranges. A Kalshi contract or perps setup on a coin uses that coin's regime.
+- **Hysteresis.** A coin's new regime is adopted only after it holds for 2 hourly updates in a row, so one odd hour doesn't flip the strategy.
+- **Learning.** The whole bot replays up to 240 history days that hold Kalshi's real contracts. It excludes the readiness step's held-out days and the MLP's fitting span. Each coin-day is labelled with the regime the bot would have seen at midnight (no look-ahead). Per regime and family, the mean coin-day P&L and its bootstrap 90% interval set the weight:
+  - clearly losing: 0 (no new risk);
+  - probably losing: 0.5;
+  - clearly earning, and better there than overall: the family's maximum (Kalshi 1, perps 1.5);
+  - otherwise: 1.
+  A regime with fewer than 8 coin-days keeps 1, falling back to its character's entry.
+- **Gate.** Weights learned on the earlier 70% of the days are applied to the later 30%. The playbook switches on only if that beats the static bot: more profit, a drawdown at most 10% deeper, and at least 10 validation days. Otherwise `playbook.json` is written with `enabled: false` and the bot ignores it.
+- **Live.** The Kalshi weight scales the per-order size cap; the sizing tier stays the ceiling and 0 means no new Kalshi entries. The perps weight scales each setup's risk; the perps daily stop, optimal-f and margin caps still bind. Only new entries change: open positions keep their exits. The bot re-reads `AUTO_TRAIN_DIR/playbook.json` within a minute of a new one arriving, with no restart.
+- **Dashboard.** The *Playbook* row shows whether it is on, and each coin's regime with its Kalshi (K) and perps (P) weights. `PLAYBOOK_APPLY=false` ignores it.
+
 ## Promotion policy
 
 `AUTO_TRAIN_PROMOTE=always` is the default, and it is hot-swap mode: every freshly trained model goes live in the bot straight away.
@@ -243,6 +259,7 @@ These can't be automated, or deliberately aren't.
 | `TRAIN_TARGET_POOL_USD` / `TRAIN_TARGET_DAILY_PCT` / `TRAIN_TARGET_MAX_DD_PCT` | `200` / `50` / `10` | The readiness step's target: the whole bot on held-out days earning this % of the pool a day (the lower end of the 95% interval) with at most this drawdown. The continuous laptop trainer stops when it is met. 50% a day is far beyond any real system; see docs/LAPTOP_TRAINING.md. |
 | `COND_INSTANCES` | `24` | Conditioning mode: instances per trial. |
 | `COND_TARGET_USD` / `COND_CULL_FRAC` / `COND_MIN_TIER_C` / `COND_RETRIALS` | `100` / `0.35` / `4` / `3` | Conditioning mode: profit to hold at the end of each window, the cull (fraction of the window's starting cash), the Tier C fill, and the retrials when there is no Elite. |
+| `PLAYBOOK_APPLY` | `true` | The live bot weights the Kalshi and perps families by each coin's regime when the playbook passed validation (`false` = ignore it). |
 | `CONDITIONING_APPLY` | `true` | The live bot runs on the conditioning Elite Champion's settings (`false` = ignore it). |
 | `TRAIN_PLATEAU_ROUNDS` | `3` | Continuous laptop trainer: stop after this many rounds in a row that improve no model. |
 

@@ -32,6 +32,7 @@ import { BOOK_RULES, CONFLUENCES, KNOWLEDGE, RULES } from '../ta/knowledge';
 import { marketContext } from '../ta/marketContext';
 import { activeRuleBook } from '../strategy/ruleBook';
 import { conditioningStatus, rollbackChampion } from '../strategy/conditioningOverlay';
+import { playbook } from '../strategy/playbook';
 import { activeGpSignals } from '../gp/gpSignals';
 import { buildNeuralMap } from './neuralMap';
 import type { TrainingSupervisor } from '../training/supervisor';
@@ -208,6 +209,7 @@ export function createApi(d: ApiDeps): express.Express {
       // Evolved formulas (research/gpIndicators.ts): each coin's champion, whether it is validated, its test record.
       gp: (() => { const g = activeGpSignals(); const cs = g?.champions(); if (!g || !cs || !Object.keys(cs).length) return null; return { version: g.version() ?? null, champions: Object.fromEntries(Object.entries(cs).map(([a, c]) => [a, { formula: c.formula, validated: c.validated, why: c.why ?? null, test: c.test ?? null }])) }; })(),
       conditioning: conditioningStatus(d.cfg.autoTrain.dir),
+      playbook: playbookStatus(),
       ruleBook: (() => { const rb = activeRuleBook(); const m = rb?.meta(); if (!rb || !m) return null; const p = rb.passed(); const pc = rb.passedCombos(), cd = rb.passedConditions(), iv = rb.passedInvalidations(); return { ...m, invalidations: iv.length, topInvalidations: iv.slice(0, 12).map((v) => `${v.key} ${v.h}h invalidated by ${v.by}${/>=/.test(v.by) ? '' : ` (${v.rel})`}`), conditions: { makes: cd.filter((c) => c.effect === 'makes').length, breaks: cd.filter((c) => c.effect === 'breaks').length }, topConditions: cd.slice(0, 12).map((c) => `${c.key} ${c.effect} ${c.h}h when ${c.param} in [${c.lo ?? '-inf'}, ${c.hi ?? 'inf'})`), passed: p.length, top: p.sort((a, b) => b.weight - a.weight).slice(0, 12).map((r) => `${r.id}@${r.tf} ${r.h}h [${r.cls}] w${r.weight}`), pairs: pc.length, topPairs: [...pc].sort((a, b) => b.weight - a.weight).slice(0, 12).map((c) => `${c.parts[0]} + ${c.parts[1]} ${c.h}h w${c.weight}${c.bracket?.ok ? ` (TP ${100 * c.bracket.tp}% / SL ${100 * c.bracket.sl}%)` : ''}`) }; })(),
       settlement: d.settlement?.status() ?? null,
       kalshiCheck: d.kalshiCheck?.status() ?? null,
@@ -445,4 +447,13 @@ export function createApi(d: ApiDeps): express.Express {
     app.use(express.static(webDist, { index: 'index.html' }));
   }
   return app;
+}
+
+/** The strategy playbook for the dashboard: whether it is on, and each coin's confirmed regime and weights. */
+function playbookStatus() {
+  const pb = playbook(), ctx = marketContext();
+  if (!pb) return null;
+  const f = pb.current();
+  const coins = Object.fromEntries(Object.keys((ctx?.status().regimes ?? {}) as Record<string, unknown>).map((a) => { const key = ctx?.regimeOf(a); return [a, { regime: key ?? null, ...pb.weights(key) }]; }));
+  return { apply: pb.status(undefined).apply, version: f?.version ?? null, enabled: f?.enabled ?? false, validation: f?.validation ?? null, coins };
 }
