@@ -75,7 +75,7 @@ export class TrainerUi {
   }
 
   /** Start a run (the window's Start button). */
-  start(req: { mode?: string; hours?: number; host?: string; user?: string; key?: string; /** Conditioning before it is recommended (the window asked "are you sure?"). */ force?: boolean }): { ok: boolean; error?: string } {
+  start(req: { mode?: string; hours?: number; host?: string; user?: string; key?: string; skipDataDownload?: boolean; /** Conditioning before it is recommended (the window asked "are you sure?"). */ force?: boolean }): { ok: boolean; error?: string } {
     if (this.state.phase !== 'idle') return { ok: false, error: 'already training' };
     const hours = Number(req.hours ?? 0);
     if (!(hours >= 0) || hours > 24 * 365) return { ok: false, error: 'hours must be 0 (until it stops by itself) or a number of hours' };
@@ -94,6 +94,7 @@ export class TrainerUi {
     const run = this.o.run ?? runTrainer;
     void run({
       hours, dataDir: this.o.dataDir, settings, sweepAll: this.state.mode === 'full', only: conditioning ? ['conditioning'] : undefined,
+      skipDataDownload: req.skipDataDownload,
       hooks: {
         roundStart: (round, full) => { this.state.round = round; this.tracker = new RoundProgress(readRounds(models), full); },
         phase: (p) => { this.tracker ??= new RoundProgress(readRounds(models), true); this.tracker.setPhase(p); },

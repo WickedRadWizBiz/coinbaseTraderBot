@@ -151,6 +151,12 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
         </div>
       </details>
       <div class="btns"><button id="start">Start training</button></div>
+      <div class="field" style="margin-top: 10px;">
+        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text); font-size: 13px; text-transform: none; letter-spacing: normal;">
+          <input type="checkbox" id="skipDataDownload" style="width: auto; margin: 0;" />
+          Skip data download
+        </label>
+      </div>
       <div id="startErr" class="err"></div>
 
       <div class="section cond" id="condBox">
@@ -210,7 +216,8 @@ $('hours').addEventListener('input', () => { const h = Number($('hours').value);
 $('start').addEventListener('click', async () => {
   $('startErr').textContent = '';
   const mode = document.querySelector('input[name=mode]:checked').value;
-  const r = await post('/api/start', { mode, hours: Number($('hours').value) || 0, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim() });
+  const skipDataDownload = $('skipDataDownload').checked;
+  const r = await post('/api/start', { mode, hours: Number($('hours').value) || 0, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim(), skipDataDownload });
   if (!r.ok) $('startErr').textContent = r.error || 'could not start';
 });
 let lastCond = null;
