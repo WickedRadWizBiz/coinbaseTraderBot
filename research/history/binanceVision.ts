@@ -230,7 +230,22 @@ export async function downloadBinanceFunding(o: { out: string; assets: string[];
     if (!keys.length) { r.note = 'no USD-M perpetual'; continue; }
     const file = path.join(o.out, 'binance-funding', asset, 'funding.csv');
     const rows = new Map<number, number>();
-    if (fs.existsSync(file)) for (const l of fs.readFileSync(file, 'utf8').split('\n').slice(1)) { const [t, v] = l.split(',').map(Number); if (Number.isFinite(t) && Number.isFinite(v)) rows.set(t, v); }
+    if (fs.existsSync(file)) {
+      const text = fs.readFileSync(file, 'utf8');
+      let start = 0;
+      let first = true;
+      while (start < text.length) {
+        let end = text.indexOf('\n', start);
+        if (end === -1) end = text.length;
+        if (end > start) {
+          if (first) { first = false; } else {
+            const l = text.slice(start, end);
+            const [t, v] = l.split(',').map(Number); if (Number.isFinite(t) && Number.isFinite(v)) rows.set(t, v);
+          }
+        }
+        start = end + 1;
+      }
+    }
     await pool(todo, 4, async (k) => {
       try {
         const entry = unzip(await download(k.key, f)).find((e) => e.name.endsWith('.csv'));
@@ -299,7 +314,22 @@ export async function downloadBinanceOpenInterest(o: { out: string; assets: stri
     const todo = keys.filter((k) => (!o.fromDay || day(k.key) >= o.fromDay) && manifest[k.key] !== k.size);
     const file = path.join(o.out, 'binance-oi', asset, 'oi.csv');
     const rows = new Map<number, [number, number]>();
-    if (todo.length && fs.existsSync(file)) for (const l of fs.readFileSync(file, 'utf8').split('\n').slice(1)) { const [t, v, u] = l.split(',').map(Number); if (Number.isFinite(t) && v > 0) rows.set(t, [v, u]); }
+    if (todo.length && fs.existsSync(file)) {
+      const text = fs.readFileSync(file, 'utf8');
+      let start = 0;
+      let first = true;
+      while (start < text.length) {
+        let end = text.indexOf('\n', start);
+        if (end === -1) end = text.length;
+        if (end > start) {
+          if (first) { first = false; } else {
+            const l = text.slice(start, end);
+            const [t, v, u] = l.split(',').map(Number); if (Number.isFinite(t) && v > 0) rows.set(t, [v, u]);
+          }
+        }
+        start = end + 1;
+      }
+    }
     await pool(todo, o.concurrency ?? 8, async (k) => {
       try {
         const entry = unzip(await download(k.key, f)).find((e) => e.name.endsWith('.csv'));

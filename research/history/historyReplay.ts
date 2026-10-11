@@ -208,7 +208,21 @@ class CsvStream {
 /** Open interest readings of binance-oi/<ASSET>/oi.csv ("ts,oi,oi_usd"), in time order. */
 function readOpenInterest(file: string): AssetState['oi'] {
   const ts: number[] = [], v: number[] = [];
-  if (fs.existsSync(file)) for (const l of fs.readFileSync(file, 'utf8').split('\n')) { const c = l.split(','); const t = Number(c[0]), x = Number(c[1]); if (t > 0 && x > 0 && (!ts.length || t > ts[ts.length - 1])) { ts.push(t); v.push(x); } }
+  if (fs.existsSync(file)) {
+    const text = fs.readFileSync(file, 'utf8');
+    let start = 0;
+    while (start < text.length) {
+      let end = text.indexOf('\n', start);
+      if (end === -1) end = text.length;
+      if (end > start) {
+        const l = text.slice(start, end);
+        const c = l.split(',');
+        const t = Number(c[0]), x = Number(c[1]);
+        if (t > 0 && x > 0 && (!ts.length || t > ts[ts.length - 1])) { ts.push(t); v.push(x); }
+      }
+      start = end + 1;
+    }
+  }
   return { ts: Float64Array.from(ts), v: Float64Array.from(v), at: -1 };
 }
 /** The open interest reading at `t` (the latest at or before it, if at most 10 minutes old). */
@@ -220,7 +234,24 @@ function openInterestAt(o: AssetState['oi'], t: number): number | undefined {
 
 function readFunding(file: string): Array<[number, number]> {
   if (!fs.existsSync(file)) return [];
-  return fs.readFileSync(file, 'utf8').split('\n').slice(1).map((l) => l.split(',').map(Number) as [number, number]).filter(([t, v]) => Number.isFinite(t) && Number.isFinite(v));
+  const res: Array<[number, number]> = [];
+  const text = fs.readFileSync(file, 'utf8');
+  let start = 0;
+  let first = true;
+  while (start < text.length) {
+    let end = text.indexOf('\n', start);
+    if (end === -1) end = text.length;
+    if (end > start) {
+      if (first) { first = false; } else {
+        const l = text.slice(start, end);
+        const parts = l.split(',');
+        const t = Number(parts[0]), v = Number(parts[1]);
+        if (Number.isFinite(t) && Number.isFinite(v)) res.push([t, v]);
+      }
+    }
+    start = end + 1;
+  }
+  return res;
 }
 
 interface KMarket { ticker: string; series: string; event?: string; openTime: number; closeTime: number; strike: number | null; cap: number | null; strikeType?: string; result?: string; candles: Array<{ ts: number; bidC: number | null; askC: number | null; last: number | null; volume: number | null }> }
@@ -235,9 +266,18 @@ function kalshiMarkets(dir: string, day: string, assets: Set<string>): Array<KMa
     for (const d of [day, new Date(Date.parse(day) + DAY).toISOString().slice(0, 10)]) {
       const f = path.join(dir, series, `${d}.jsonl`);
       if (!fs.existsSync(f)) continue;
-      for (const l of fs.readFileSync(f, 'utf8').split('\n')) {
-        if (!l) continue;
-        try { const m = JSON.parse(l) as KMarket; if (m.result === 'yes' || m.result === 'no') out.push({ ...m, asset }); } catch { /* torn line */ }
+      const text = fs.readFileSync(f, 'utf8');
+      let start = 0;
+      while (start < text.length) {
+        let end = text.indexOf('\n', start);
+        if (end === -1) end = text.length;
+        if (end > start) {
+          const l = text.slice(start, end);
+          if (l) {
+            try { const m = JSON.parse(l) as KMarket; if (m.result === 'yes' || m.result === 'no') out.push({ ...m, asset }); } catch { /* torn line */ }
+          }
+        }
+        start = end + 1;
       }
     }
   }
@@ -659,14 +699,20 @@ function tennisEvents(kalshiDir: string, series: string[], day: string, d0: numb
     for (const d of [day, next]) {
       const f = path.join(kalshiDir, s, `${d}.jsonl`);
       if (!fs.existsSync(f)) continue;
-      for (const l of fs.readFileSync(f, 'utf8').split('\n')) {
-        let m: KalshiHistMarket;
-        try { if (!l) continue; m = JSON.parse(l); } catch { continue; }
-        if ((m.result !== 'yes' && m.result !== 'no') || !m.candles?.length) continue;
-        const first = m.candles[0].ts;
-        const begin = Math.max(m.openTime, (m.startTime && m.startTime < m.closeTime ? m.startTime : first) - 30 * MIN);
-        if (begin < d0 || begin >= d1) continue;
-        n++;
+      const text = fs.readFileSync(f, 'utf8');
+      let start = 0;
+      while (start < text.length) {
+        let end = text.indexOf('\n', start);
+        if (end === -1) end = text.length;
+        if (end > start) {
+          const l = text.slice(start, end);
+          let m: KalshiHistMarket;
+          try { if (!l) { start = end + 1; continue; } m = JSON.parse(l); } catch { start = end + 1; continue; }
+          if ((m.result !== 'yes' && m.result !== 'no') || !m.candles?.length) { start = end + 1; continue; }
+          const first = m.candles[0].ts;
+          const begin = Math.max(m.openTime, (m.startTime && m.startTime < m.closeTime ? m.startTime : first) - 30 * MIN);
+          if (begin < d0 || begin >= d1) { start = end + 1; continue; }
+          n++;
         ev.push({ t: Math.max(d0, begin - 1000), k: 'market', ticker: m.ticker, series: s, asset: 'TENNIS', openTime: m.openTime, closeTime: m.closeTime, strike: null, cap: null, kind: 'match', event: m.event, title: m.title, startTime: m.startTime, tickSize: 0.01, hist: 1 });
         // The candles' quotes and the tape, merged in time; the book follows each trade.
         type Step = { t: number; c?: KalshiHistMarket['candles'][number]; tr?: KalshiTrade };
@@ -694,6 +740,8 @@ function tennisEvents(kalshiDir: string, series: string[], day: string, d0: numb
         }
         if (booked) for (let at = Math.ceil(booked / 5000) * 5000; at < m.closeTime; at += 5000) { const x = alive.get(at); if (x) x.push(m.ticker); else alive.set(at, [m.ticker]); }
         ev.push({ t: m.closeTime + 1000, k: 'result', ticker: m.ticker, result: m.result });
+        }
+        start = end + 1;
       }
     }
   }

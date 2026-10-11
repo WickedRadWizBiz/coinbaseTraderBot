@@ -53,8 +53,8 @@
   },
   "dependencies": {
     "dotenv": "^17.2.3",
-    "talib": "file:vendor/talib",
     "express": "^4.21.2",
+    "talib": "file:vendor/talib",
     "ws": "^8.18.3"
   },
   "devDependencies": {
@@ -71,7 +71,7 @@
     "react-dom": "^19.0.1",
     "recharts": "^3.10.1",
     "tailwindcss": "^4.3.3",
-    "tsx": "^4.21.0",
+    "tsx": "^4.23.15",
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
   }
