@@ -115,7 +115,7 @@ jobs:
           timeout --signal=TERM --kill-after=2m 300m node --import tsx research/pipeline.ts "${args[@]}" > "$LOG" 2>&1
           code=$?
           echo "code=$code" >> "$GITHUB_OUTPUT"
-          case $code in 0) echo "pipeline finished";; 124|137) echo "pipeline stopped at the 5 h limit (progress saved; continues next run)";; *) echo "pipeline exited with $code";; esac
+          case $code in 0) echo "pipeline finished";; 124|137|143) echo "pipeline stopped at the 5 h limit (progress saved; continues next run)";; *) echo "pipeline exited with $code";; esac
 
       - name: Summary (step names and promotions only)
         if: always() && steps.pull.outcome == 'success'
@@ -143,5 +143,5 @@ jobs:
           echo "models and history copied back; the bot hot-swaps what changed"
 
       - name: Fail on a pipeline error
-        if: steps.train.outputs.code != '' && steps.train.outputs.code != '0' && steps.train.outputs.code != '124' && steps.train.outputs.code != '137'
+        if: steps.train.outputs.code != '' && steps.train.outputs.code != '0' && steps.train.outputs.code != '124' && steps.train.outputs.code != '137' && steps.train.outputs.code != '143'
         run: exit 1
