@@ -170,7 +170,19 @@ export function storedMarkets(dir: string): { rows: StoredMarket[]; index: Serie
     const size = fs.statSync(path.join(dir, name)).size;
     if (index.files[name]?.size === size) continue;
     const rows: StoredMarket[] = [];
-    for (const line of fs.readFileSync(path.join(dir, name), 'utf8').split('\n')) { if (line) { const r = storedOf(line); if (r) rows.push(r); } }
+    // Convert to manual chunked reading
+    const text = fs.readFileSync(path.join(dir, name), 'utf8');
+    let start = 0;
+    while (start < text.length) {
+      let end = text.indexOf('\n', start);
+      if (end === -1) end = text.length;
+      if (end > start) {
+        const line = text.slice(start, end);
+        const r = storedOf(line);
+        if (r) rows.push(r);
+      }
+      start = end + 1;
+    }
     index.files[name] = { size, rows };
     changed = true;
   }
@@ -320,8 +332,18 @@ export async function downloadKalshiTrades(o: KalshiTradesOpts): Promise<KalshiT
     fs.mkdirSync(dir, { recursive: true });
     const have = new Set<string>();
     // Tape lines start {"ticker":"...": the ticker is read without parsing the tape.
-    for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl'))) for (const line of fs.readFileSync(path.join(dir, file), 'utf8').split('\n')) {
-      if (line.startsWith('{"ticker":"') && line.endsWith('}')) { const e = line.indexOf('"', 11); if (e > 11) have.add(line.slice(11, e)); }
+    for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl'))) {
+      const text = fs.readFileSync(path.join(dir, file), 'utf8');
+      let start = 0;
+      while (start < text.length) {
+        let end = text.indexOf('\n', start);
+        if (end === -1) end = text.length;
+        if (end > start) {
+          const line = text.slice(start, end);
+          if (line.startsWith('{"ticker":"') && line.endsWith('}')) { const e = line.indexOf('"', 11); if (e > 11) have.add(line.slice(11, e)); }
+        }
+        start = end + 1;
+      }
     }
     const all = storedMarkets(path.join(o.out, series)).rows;
     const todo = all.filter((m) => !have.has(m.ticker) && !m.noVolume && !m.error);
@@ -367,7 +389,17 @@ export function loadKalshiTrades(out: string, series: string, days: string[]): M
   for (const d of days) {
     const f = path.join(out, series, 'trades', `${d}.jsonl`);
     if (!fs.existsSync(f)) continue;
-    for (const line of fs.readFileSync(f, 'utf8').split('\n')) { try { if (line) { const r = JSON.parse(line); res.set(r.ticker, r.trades); } } catch { /* torn */ } }
+    const text = fs.readFileSync(f, 'utf8');
+    let start = 0;
+    while (start < text.length) {
+      let end = text.indexOf('\n', start);
+      if (end === -1) end = text.length;
+      if (end > start) {
+        const line = text.slice(start, end);
+        try { const r = JSON.parse(line); res.set(r.ticker, r.trades); } catch { /* torn */ }
+      }
+      start = end + 1;
+    }
   }
   return res;
 }
@@ -378,7 +410,19 @@ export function loadKalshiHistory(out: string, series: string, o: { includeEmpty
   const dir = path.join(out, series);
   if (!fs.existsSync(dir)) return [];
   const all: KalshiHistMarket[] = [];
-  for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl')).sort()) for (const line of fs.readFileSync(path.join(dir, file), 'utf8').split('\n')) { try { if (line) all.push(JSON.parse(line)); } catch { /* torn */ } }
+  for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl')).sort()) {
+    const text = fs.readFileSync(path.join(dir, file), 'utf8');
+    let start = 0;
+    while (start < text.length) {
+      let end = text.indexOf('\n', start);
+      if (end === -1) end = text.length;
+      if (end > start) {
+        const line = text.slice(start, end);
+        try { all.push(JSON.parse(line)); } catch { /* torn */ }
+      }
+      start = end + 1;
+    }
+  }
   return all.filter((m) => o.includeEmpty || m.candles?.length).sort((a, b) => a.closeTime - b.closeTime);
 }
 

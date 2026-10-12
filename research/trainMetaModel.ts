@@ -463,11 +463,22 @@ export function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts = {}): Trai
 export async function trainMetaModelMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
   const data = argOf('data', 'research/out/dataset.jsonl');
   const out = argOf('out', 'params/model.candidate.json');
-  const rows = fs.readFileSync(data, 'utf8').split('\n').filter(Boolean).map((l) => {
-    const r = JSON.parse(l) as DatasetRow;
-    for (const k of Object.keys(r.fx)) if (r.fx[k] === null) r.fx[k] = NaN;
-    return r;
-  });
+  const rows: DatasetRow[] = [];
+  const text = fs.readFileSync(data, 'utf8');
+  let start = 0;
+  while (start < text.length) {
+    let end = text.indexOf('\n', start);
+    if (end === -1) end = text.length;
+    if (end > start) {
+      const l = text.slice(start, end);
+      if (l) {
+        const r = JSON.parse(l) as DatasetRow;
+        for (const k of Object.keys(r.fx)) if (r.fx[k] === null) r.fx[k] = NaN;
+        rows.push(r);
+      }
+    }
+    start = end + 1;
+  }
   const rep = trainMetaModel(rows, {
     maxEpochs: Number(argOf('epochs', '400')),
     sets: argOf('sets', DEFAULT_SETS.join(',')).split(','),
