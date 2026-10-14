@@ -94,7 +94,7 @@ export class TrainerUi {
     const run = this.o.run ?? runTrainer;
     void run({
       hours, dataDir: this.o.dataDir, settings, sweepAll: this.state.mode === 'full', only: conditioning ? ['conditioning'] : undefined,
-      skipDataDownload: req.skipDataDownload,
+      skipDataDownload: req.skipDataDownload === true,
       hooks: {
         roundStart: (round, full) => { this.state.round = round; this.tracker = new RoundProgress(readRounds(models), full); },
         phase: (p) => { this.tracker ??= new RoundProgress(readRounds(models), true); this.tracker.setPhase(p); },

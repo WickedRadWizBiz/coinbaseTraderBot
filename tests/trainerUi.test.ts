@@ -165,6 +165,30 @@ test('pipeline --sweep-all: a step that is not due runs anyway', async () => {
   assert.ok(!/weekly/.test(swept.steps[0].skipped ?? ''), `ran (or found nothing to study), not skipped as not due: ${swept.steps[0].skipped}`);
 });
 
+test('pipeline --skip leaves a step out; a run stopped part-way is not recorded as a fresh training run', async () => {
+  const dir = tmpDir();
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: dir });
+  fs.mkdirSync(cfg.autoTrain.dir, { recursive: true });
+  const now = Date.UTC(2026, 9, 1);
+  fs.writeFileSync(path.join(cfg.autoTrain.dir, 'pipeline_state.json'), JSON.stringify({ ruleBookAt: now - 86_400_000 }));
+  const skipped = await runPipeline({ cfg, only: ['rule_book', 'sizing'], skip: ['rule_book'], log: () => undefined, now });
+  assert.deepEqual(skipped.steps.map((s) => s.step), ['sizing'], 'rule_book left out');
+  assert.equal(skipped.state.lastRun, now);
+  // A stop signal while the first step runs: the next step is skipped, the run is not a fresh one.
+  const before = process.env.PIPELINE_STOP_GRACE_SEC;
+  process.env.PIPELINE_STOP_GRACE_SEC = '3600';
+  try {
+    let sent = false;
+    const stopped = await runPipeline({ cfg, only: ['sizing', 'readiness'], now: now + 1, log: (m) => { if (!sent && /^sizing: running/.test(m)) { sent = true; process.emit('SIGTERM', 'SIGTERM'); } } });
+    assert.ok(sent);
+    assert.match(stopped.steps.find((s) => s.step === 'readiness')?.skipped ?? '', /stop requested/);
+    assert.equal(stopped.state.lastRun, now, 'lastRun kept from the complete run');
+    assert.equal(JSON.parse(fs.readFileSync(stopped.report, 'utf8')).complete, false);
+  } finally {
+    if (before === undefined) delete process.env.PIPELINE_STOP_GRACE_SEC; else process.env.PIPELINE_STOP_GRACE_SEC = before;
+  }
+});
+
 test('leaderboard: each tournament as a bracket narrowing to its champion, with its distinctive settings; formulas by test Sharpe', async () => {
   const { leaderboard, distinctive } = await import('../research/trainerLeaderboard');
   const models = path.join(tmpDir(), 'models');

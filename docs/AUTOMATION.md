@@ -261,6 +261,7 @@ These can't be automated, or deliberately aren't.
 | `COND_TARGET_USD` / `COND_CULL_FRAC` / `COND_MIN_TIER_C` / `COND_RETRIALS` | `100` / `0.35` / `4` / `3` | Conditioning mode: profit to hold at the end of each window, the cull (fraction of the window's starting cash), the Tier C fill, and the retrials when there is no Elite. |
 | `PLAYBOOK_APPLY` | `true` | The live bot weights the Kalshi and perps families by each coin's regime when the playbook passed validation (`false` = ignore it). |
 | `CONDITIONING_APPLY` | `true` | The live bot runs on the conditioning Elite Champion's settings (`false` = ignore it). |
+| `PIPELINE_STOP_GRACE_SEC` | `45` | On a stop signal (the remote job's time limit, a bot restart, the trainer's Stop) no new step starts, and the step in progress gets this long to finish before the pipeline exits; a second signal exits at once. Finished steps are always saved. A stopped run is not counted as a complete training run. |
 | `TRAIN_PLATEAU_ROUNDS` | `3` | Continuous laptop trainer: stop after this many rounds in a row that improve no model. |
 
 ## If something goes wrong

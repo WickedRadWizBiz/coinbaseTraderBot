@@ -211,6 +211,8 @@ export function acceptedChain(verdicts: Verdict[]): number {
 
 export interface PipelineOpts {
   cfg?: Readonly<Config>; only?: Step[]; forceAblation?: boolean; now?: number; log?: (m: string) => void;
+  /** Steps left out of this run (the trainer's "skip data download": history). */
+  skip?: Step[];
   /** Restrict the SNN ablation to mechanisms whose name starts with this (testing). */
   ablationOnly?: string;
   /** Retrain the TA network even if it is not due. */
@@ -244,13 +246,23 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     log('sweeping everything: every step is due this run');
   }
   const steps: StepResult[] = [];
+  // A stop signal (the remote job's time limit, the bot restarting, the trainer's Stop): no new step starts, and the
+  // step in progress gets PIPELINE_STOP_GRACE_SEC (45: inside the remote job's 2-minute kill-after and systemd's
+  // 60-second stop timeout) to finish before the process exits. Finished steps are already saved; a second signal
+  // exits at once.
   let stopRequested = false;
-  const onStop = () => { if (stopRequested) return; stopRequested = true; log('stop requested (SIGINT/SIGTERM), finishing the current step...'); };
+  const graceSec = Math.max(0, Number(process.env.PIPELINE_STOP_GRACE_SEC ?? 45) || 0);
+  const onStop = (sig: NodeJS.Signals) => {
+    if (stopRequested) { log(`${sig} again: exiting now`); process.exit(143); }
+    stopRequested = true;
+    log(`stop requested (${sig}): no new step starts; the step in progress has ${graceSec} s to finish`);
+    setTimeout(() => { log('stop: the step in progress did not finish in time; exiting (finished steps are saved)'); process.exit(143); }, graceSec * 1000).unref();
+  };
   process.on('SIGINT', onStop);
   process.on('SIGTERM', onStop);
 
   // Conditioning runs only when asked for by name (the trainer window's conditioning mode), never in a normal run.
-  const want = (s: Step) => (s === 'conditioning' ? !!o.only?.includes(s) : !o.only?.length || o.only.includes(s));
+  const want = (s: Step) => !o.skip?.includes(s) && (s === 'conditioning' ? !!o.only?.includes(s) : !o.only?.length || o.only.includes(s));
   const rec = A.recordingsDir;
   const days = recordingDays(rec);
   const promoted = (name: keyof typeof MODEL_FILES) => path.join(A.dir, MODEL_FILES[name]);
@@ -1001,8 +1013,9 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
 
   // A conditioning-only run is not a normal training run (the trainer greys conditioning out until there is a fresh one).
   const conditioningOnly = o.only?.length === 1 && o.only[0] === 'conditioning';
-  if (!conditioningOnly) state.lastRun = now;
-  writeAtomic(report, JSON.stringify({ at: new Date(now).toISOString(), complete: true, recordings: rec, days: days.length, readiness: state.readiness, promote: A.promote, snnChanged, steps }, null, 1));
+  // A run stopped part-way is not a fresh training run either (its remaining steps never ran).
+  if (!conditioningOnly && !stopRequested) state.lastRun = now;
+  writeAtomic(report, JSON.stringify({ at: new Date(now).toISOString(), complete: !stopRequested, recordings: rec, days: days.length, readiness: state.readiness, promote: A.promote, snnChanged, steps }, null, 1));
   state.lastReport = report;
   writeAtomic(path.join(A.dir, 'pipeline_state.json'), JSON.stringify(state, null, 1));
   log(`report: ${report}`);
@@ -1014,8 +1027,10 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
 async function main() {
   const i = process.argv.indexOf('--only');
   const only = i >= 0 ? (process.argv[i + 1] ?? '').split(',').filter(Boolean) as Step[] : undefined;
-  for (const s of only ?? []) if (!STEPS.includes(s)) throw new Error(`unknown step ${s} (steps: ${STEPS.join(', ')})`);
-  const r = await runPipeline({ only, forceAblation: process.argv.includes('--force-ablation'), forceTaNet: process.argv.includes('--force-ta-net') || process.argv.includes('--fresh-ta-net'), forceTaNetFresh: process.argv.includes('--fresh-ta-net'), forceSnnPbt: process.argv.includes('--force-snn-pbt'), forceAll: process.argv.includes('--sweep-all') });
+  const j = process.argv.indexOf('--skip');
+  const skip = j >= 0 ? (process.argv[j + 1] ?? '').split(',').filter(Boolean) as Step[] : undefined;
+  for (const s of [...(only ?? []), ...(skip ?? [])]) if (!STEPS.includes(s)) throw new Error(`unknown step ${s} (steps: ${STEPS.join(', ')})`);
+  const r = await runPipeline({ only, skip, forceAblation: process.argv.includes('--force-ablation'), forceTaNet: process.argv.includes('--force-ta-net') || process.argv.includes('--fresh-ta-net'), forceTaNetFresh: process.argv.includes('--fresh-ta-net'), forceSnnPbt: process.argv.includes('--force-snn-pbt'), forceAll: process.argv.includes('--sweep-all') });
   const failed = r.steps.filter((s) => !s.ok);
   console.log(`[pipeline] ${r.steps.length - failed.length}/${r.steps.length} steps ok${failed.length ? `; failed: ${failed.map((f) => f.step).join(', ')}` : ''}`);
   process.exitCode = failed.length ? 1 : 0;

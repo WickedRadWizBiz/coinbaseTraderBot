@@ -18,6 +18,10 @@ model better, it sends the models to the bot, which loads them without a restart
    - **Sweep everything again**: the first round runs every step now, even the weekly ones (studies,
      tournaments, ablations, sweeps; the pipeline's `--sweep-all`). Your models, history and tournaments
      in progress are kept. It takes much longer.
+
+   **Skip data download** (under Start, also used by Start conditioning): nothing is copied from the server and
+   no history is downloaded (the pipeline runs with `--skip history`); training starts at once on the data
+   already here. The models are still sent back to the server afterwards. It is not remembered between sessions.
    - **Hours**: 0 trains until it stops by itself; a number stops sooner.
    - **Server** (optional): the Lightsail public IP, user `ubuntu`, and the instance's SSH key file
      (Lightsail console → Account → SSH keys → Download). With it the trainer copies the bot's recordings

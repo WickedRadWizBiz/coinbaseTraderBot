@@ -88,12 +88,14 @@ jobs:
         run: |
           set -euo pipefail
           DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings"
+          # rsync exit 24: a file vanished during the copy (the live bot rotates its SNN checkpoints): not an error.
+          vanished_ok() { local c=$?; [ $c -eq 24 ] && { echo "a few files changed on the server during the copy (rotated checkpoints): continuing"; return 0; }; return $c; }
           # Everything but recordings (copied below), logs and audit trails; nice'd on the server.
-          rsync -a --rsync-path="nice -n 19 rsync" --exclude 'recordings/' --exclude 'logs/' --exclude 'audit*' --exclude '*.log' --exclude '.venv*' bot:bot/data/ "$DATA/"
+          rsync -a --rsync-path="nice -n 19 rsync" --exclude 'recordings/' --exclude 'logs/' --exclude 'audit*' --exclude '*.log' --exclude '.venv*' --exclude '*.tmp' bot:bot/data/ "$DATA/" || vanished_ok
           # Recordings: the last DAYS days of market data plus every other file. Today's and yesterday's are
           # still plain JSON lines: compressed in transit (level 1, cheap on the server's CPU).
           ssh bot "cd ~/bot/data/recordings && find . -type f \( ! -name 'md-*' -o -mtime -$DAYS \) -printf '%P\n'" > "$RUNNER_TEMP/recordings.txt"
-          rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/"
+          rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/" || vanished_ok
           echo "copied $(wc -l < "$RUNNER_TEMP/recordings.txt") recording file(s); data $(du -sh "$DATA" | cut -f1)"
           # The server's settings without any credential, and without server paths (this runner has its own).
           ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$RUNNER_TEMP/train.env" || true
@@ -110,12 +112,21 @@ jobs:
           mkdir -p "$DATA/models/logs"
           LOG="$DATA/models/logs/pipeline-remote-$(date -u +%Y-%m-%dT%H-%M-%SZ).log"
           args=(); [ -n "$ONLY" ] && args=(--only "$ONLY")
+          # GitHub has shut this runner down mid-training (after 3.5-4 h on Oct 9 and 11), and then the copy-back
+          # below never runs and the day's training is lost. So: free disk and memory are logged every 10 minutes
+          # (to see what runs out), and the models are copied back to the server every 45 minutes while training
+          # (tournaments resume from those checkpoints; rebuildable caches stay here).
+          ( while sleep 600; do echo "resources $(date -u +%H:%M): disk $(df -h / | awk 'NR==2{print $4}') free, memory $(free -m | awk '/^Mem:/{print $7}') MB available, swap used $(free -m | awk '/^Swap:/{print $3}') MB, largest $(ps -eo rss=,comm= --sort=-rss | head -1 | awk '{printf "%s %d MB", $2, $1/1024}')"; done ) &
+          MON=$!
+          ( while sleep 2700; do rsync -a --update --rsync-path="nice -n 19 rsync" --exclude '*.tmp' --exclude 'logs/' --exclude 'work/snnfill/' --exclude 'work/perp-dataset*/' --exclude 'work/perp-backtest-days/' --exclude 'work/sweep-replay/' --exclude 'work/vol-replay/' --exclude 'work/readiness-days/' --exclude 'work/playbook-days/' --exclude 'work/tanet-cache/' "$DATA/models/" bot:bot/data/models/ >/dev/null 2>&1; c=$?; case $c in 0|23|24) echo "checkpoint $(date -u +%H:%M): models copied to the server";; *) echo "checkpoint $(date -u +%H:%M): copy failed ($c), retried in 45 min";; esac; done ) &
+          SYNC=$!
           # Stop after 5 h so the models still get copied back inside the job's time limit; the pipeline
           # checkpoints after every step and continues where it stopped on the next run.
           timeout --signal=TERM --kill-after=2m 300m node --import tsx research/pipeline.ts "${args[@]}" > "$LOG" 2>&1
           code=$?
+          kill $MON $SYNC 2>/dev/null || true
           echo "code=$code" >> "$GITHUB_OUTPUT"
-          case $code in 0) echo "pipeline finished";; 124|137|143) echo "pipeline stopped at the 5 h limit (progress saved; continues next run)";; *) echo "pipeline exited with $code";; esac
+          case $code in 0) echo "pipeline finished";; 124|137|143) echo "pipeline stopped by its time limit or a stop signal (progress saved; continues next run)";; *) echo "pipeline exited with $code";; esac
 
       - name: Summary (step names and promotions only)
         if: always() && steps.pull.outcome == 'success'

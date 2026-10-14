@@ -227,7 +227,7 @@ $('condStart').addEventListener('click', async () => {
   const c = lastCond || { ready: false, why: '' };
   if (!c.ready && !confirm('Conditioning is not recommended right now: ' + (c.why || 'the bot was not freshly trained') + '.\n\nAre you sure you want to start it anyway?')) return;
   if (!confirm('Start conditioning mode? It runs until a champion is found or the trials are used up (hours on most computers).')) return;
-  const r = await post('/api/start', { mode: 'conditioning', hours: 0, force: !c.ready, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim() });
+  const r = await post('/api/start', { mode: 'conditioning', hours: 0, force: !c.ready, skipDataDownload: $('skipDataDownload').checked, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim() });
   if (!r.ok) $('startErr').textContent = r.error || 'could not start';
 });
 $('stop').addEventListener('click', async () => { if (confirm('Stop training now? Finished steps and tournament rounds are kept; the step in progress starts again next time.')) await post('/api/stop'); });
