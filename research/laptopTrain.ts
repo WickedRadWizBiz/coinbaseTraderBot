@@ -84,8 +84,13 @@ export function localManifest(root: string): Map<string, RemoteFile> {
 /** Server files to copy down: missing here, or newer on the server (2 s slack for file systems). A file
  *  changed here since (a model, the ledger, a tournament's state) is never overwritten by an older copy. */
 export function filesToPull(remote: RemoteFile[], local: Map<string, RemoteFile>): RemoteFile[] {
-  return remote.filter((f) => { const l = local.get(f.path); return !l || f.mtime > l.mtime + 2000; });
+  return remote.filter((f) => { const l = local.get(f.path); return !l || (f.mtime > l.mtime + 2000 && !KEEP_LOCAL.test(f.path)); });
 }
+
+/** Kept from this machine once it has its own: a Kalshi series' stored-market index records which close-time range
+ *  this machine listed completely, and the server's (60 days of contracts) would make the laptop (365) list the whole
+ *  year again on every run. The day files themselves still come down; the index catches up with them by size. */
+const KEEP_LOCAL = /(^|\/)history\/kalshi\/[^/]+\/\.index\.json$/;
 
 /** The conditioning champion and its rollback copy (bot/strategy/conditioningOverlay.ts). The server is their
  *  source of truth: a dashboard rollback replaces or removes them there, so they are sent up only when this trainer
@@ -140,8 +145,9 @@ export function laptopProfile(remainingHours: number, cores = os.cpus().length, 
     // recording-based steps; the memory that takes.
     HISTORY_REPLAY: 'true', HISTORY_REPLAY_YEARS: '0', NODE_OPTIONS: '--max-old-space-size=8192',
     KALSHI_HISTORY_BUDGET_MIN: '600', KALSHI_HISTORY_DAYS: '365',
-    // TA network: retrain every round, more tournament rounds per run, every hourly sample, two years of training data.
-    TA_NET_RETRAIN_DAYS: '0', TA_NET_MAX_ROUNDS_PER_RUN: '400', TA_NET_STRIDE: '1', TA_NET_TRAIN_MONTHS: '24',
+    // TA network: retrain every round, more tournament rounds per run, every 2nd hourly sample (adjacent hours are
+    // nearly the same example; every hour doubled each round's time for little), two years of training data.
+    TA_NET_RETRAIN_DAYS: '0', TA_NET_MAX_ROUNDS_PER_RUN: '400', TA_NET_STRIDE: '2', TA_NET_TRAIN_MONTHS: '24',
     TA_NET_OOS_HOURS: h(Math.min(12, remainingHours / 4)),
     SWEEP_HOURS: h(Math.min(12, remainingHours / 4)), SWEEP_EVERY_DAYS: '1',
     AUTO_TRAIN_SNN_PBT_EVERY_DAYS: '0', AUTO_TRAIN_SNN_TRAIN_DAYS: String(trainDays), AUTO_TRAIN_SNN_PBT_DAYS: String(pbtDays),

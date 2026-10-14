@@ -14,6 +14,10 @@ on:
         description: 'Also run the P&L forensics (deploy/pnl_report.py, decision_study.py, feed_delay.py, latency_study.py from the dispatched ref; read-only, a few minutes)'
         required: false
         default: 'false'
+      timings:
+        description: 'Also print where training time goes (deploy/step_timings.py from the dispatched ref: minutes per pipeline step from the reports; read-only)'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
@@ -24,29 +28,30 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v5
-        if: inputs.pnl == 'true'
-      - name: Upload the P&L report scripts
-        if: inputs.pnl == 'true'
+        if: inputs.pnl == 'true' || inputs.timings == 'true'
+      - name: Upload the report scripts
+        if: inputs.pnl == 'true' || inputs.timings == 'true'
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
           username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
-          source: deploy/pnl_report.py,deploy/decision_study.py,deploy/feed_delay.py,deploy/latency_study.py
+          source: deploy/pnl_report.py,deploy/decision_study.py,deploy/feed_delay.py,deploy/latency_study.py,deploy/step_timings.py
           target: /tmp/diag
       - name: Report
         uses: appleboy/ssh-action@v1.0.3
         env:
           EXTRA_PATHS: ${{ inputs.paths }}
           PNL: ${{ inputs.pnl }}
+          TIMINGS: ${{ inputs.timings }}
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
           username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
           command_timeout: 25m
-          envs: EXTRA_PATHS,PNL
+          envs: EXTRA_PATHS,PNL,TIMINGS
           script: |
             echo "== release: $(cat ~/bot/current/dist/RELEASE 2>/dev/null)"
             echo "== uptime / load"; uptime
@@ -82,5 +87,8 @@ jobs:
               echo "== decision study"; nice -n 19 python3 /tmp/diag/deploy/decision_study.py ~/bot/data 3 || true
               echo "== feed delay"; nice -n 19 python3 /tmp/diag/deploy/feed_delay.py ~/bot/data/recordings 1 || true
               echo "== latency study"; nice -n 19 python3 /tmp/diag/deploy/latency_study.py ~/bot/data/recordings 2 || true
+            fi
+            if [ "$TIMINGS" = "true" ] && [ -f /tmp/diag/deploy/step_timings.py ]; then
+              echo "== training step timings"; nice -n 19 python3 /tmp/diag/deploy/step_timings.py ~/bot/data 30 || true
             fi
             echo "== last 60 log lines"; journalctl -u kalshi-bot -n 60 --no-pager | cut -c1-300

@@ -303,3 +303,28 @@ test('asset discovery from Kalshi listings', () => {
   assert.deepEqual(assetsFromSeries([{ ticker: 'KXBTC15M' }, { ticker: 'KXETHD', frequency: 'hourly' }, { ticker: 'KXSOL' }, { ticker: 'KXBTCMAXY', frequency: 'annual' }, { ticker: 'KXHYPE15M', frequency: 'fifteen_min' }]), ['BTC', 'ETH', 'HYPE', 'SOL']);
   assert.deepEqual(assetsFromPerps([{ ticker: 'KXBTCPERP' }, { ticker: 'ETH-PERP' }, { ticker: 'X', title: 'Solana Perpetual' }, { underlying: 'DOGE' }]), ['BTC', 'DOGE', 'ETH', 'SOL']);
 });
+
+test('history replay seek: the byte offset found starts a whole line just before the first bar at or after the bound', async () => {
+  const { csvOffsetAt } = await import('../research/history/historyReplay');
+  const dir = tmpDir();
+  const file = path.join(dir, '1m.csv');
+  const t0 = Date.UTC(2017, 0, 1), M = 60_000;
+  const rows = ['ts,o,h,l,c,v'];
+  for (let i = 0; i < 60_000; i++) rows.push(`${t0 + i * M},${100 + i % 7},${101 + i % 7},${99 + i % 7},${100.5 + i % 7},${i % 13}`);
+  fs.writeFileSync(file, rows.join('\n') + '\n');
+  const text = fs.readFileSync(file, 'latin1');
+  for (const k of [1, 5_000, 31_337, 59_999, 70_000]) {
+    const bound = t0 + k * M;
+    const at = csvOffsetAt(file, bound);
+    assert.ok(at === 0 || text[at - 1] === '\n', 'a line start');
+    const ts = Number(text.slice(at, text.indexOf(',', at)));
+    if (at > 0) assert.ok(ts < bound, 'never past the bound');
+    // Close to it: the first bar at or after the bound is at most ~64 KB further.
+    const first = text.indexOf(`\n${bound},`);
+    if (first >= 0) assert.ok(first + 1 - at <= 70_000, `within the last search step (${first + 1 - at} bytes)`);
+  }
+  assert.equal(csvOffsetAt(file, t0 - M), 0, 'before the first bar: from the start');
+  assert.equal(csvOffsetAt(path.join(dir, 'missing.csv'), t0), 0);
+  fs.writeFileSync(path.join(dir, 'small.csv'), rows.slice(0, 100).join('\n'));
+  assert.equal(csvOffsetAt(path.join(dir, 'small.csv'), t0 + 50 * M), 0, 'small files are read from the start');
+});
