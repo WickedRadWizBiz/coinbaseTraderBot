@@ -145,8 +145,9 @@ export function laptopProfile(remainingHours: number, cores = os.cpus().length, 
     // recording-based steps; the memory that takes.
     HISTORY_REPLAY: 'true', HISTORY_REPLAY_YEARS: '0', NODE_OPTIONS: '--max-old-space-size=8192',
     KALSHI_HISTORY_BUDGET_MIN: '600', KALSHI_HISTORY_DAYS: '365',
-    // TA network: retrain every round, more tournament rounds per run, every hourly sample, two years of training data.
-    TA_NET_RETRAIN_DAYS: '0', TA_NET_MAX_ROUNDS_PER_RUN: '400', TA_NET_STRIDE: '1', TA_NET_TRAIN_MONTHS: '24',
+    // TA network: retrain every round, more tournament rounds per run, every 2nd hourly sample (adjacent hours are
+    // nearly the same example; every hour doubled each round's time for little), two years of training data.
+    TA_NET_RETRAIN_DAYS: '0', TA_NET_MAX_ROUNDS_PER_RUN: '400', TA_NET_STRIDE: '2', TA_NET_TRAIN_MONTHS: '24',
     TA_NET_OOS_HOURS: h(Math.min(12, remainingHours / 4)),
     SWEEP_HOURS: h(Math.min(12, remainingHours / 4)), SWEEP_EVERY_DAYS: '1',
     AUTO_TRAIN_SNN_PBT_EVERY_DAYS: '0', AUTO_TRAIN_SNN_TRAIN_DAYS: String(trainDays), AUTO_TRAIN_SNN_PBT_DAYS: String(pbtDays),
