@@ -5,6 +5,7 @@
 //   npm run research:ta-net                                   # every asset in data/history
 //   npm run research:ta-net -- --assets BTC,ETH,SOL --out params/ta_net.json
 //   npm run research:ta-net -- --train-months 12 --eval-months 1 --holdout-months 3 --stride 2
+//   npm run research:ta-net -- --engine auto        # train in PyTorch (GPU when there is one; research/taNetTorch.ts)
 //
 // 1. Inputs per closed hourly bar (cached per asset; only new bars are computed on re-runs): the last
 //    12 hourly TA steps (GRU branch), the last 30 daily TA steps (attention branch), the last 32
@@ -30,6 +31,7 @@
 import { taEngine } from '../bot/ta/talib';
 import crypto from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import type { Candle } from '../bot/ta/indicators';
 import { branchBackward, branchForward, branchLayout, branchLoss, fractalPlan, fractalSpecs, initBranchParams, type BranchDims, type BranchDrop, type BranchGates } from '../bot/ta/branchNet';
@@ -46,6 +48,7 @@ import type { GaGeneration, GaState } from './genetic';
 import { loadIndexSeries, loadSeries, storedAssets } from './history/candles';
 import { DAILY_CONTEXT_FEATURES, SLOW_INDEXES, TaNetContext } from '../bot/ta/taNetContext';
 import { rng } from './stats';
+import { TaNetTorch, type TaNetEngine } from './taNetTorch';
 
 const H = 3_600_000;
 const DAY = 86_400_000;
@@ -235,6 +238,97 @@ export function rawInputs(D: TaNetData, i: number): { trend: Float32Array[]; mac
   const row = A.X.subarray(r * F, (r + 1) * F);
   const ctx = [...CTX_IDX.map((j) => row[j]), ...(dj >= 0 ? A.dayDom.get(A.d1[dj].ts) ?? NO_DOM : NO_DOM)];
   return { trend, macro, micro: taNetMicro(A.m15, t + H), swing: taNetSwing(A.h1, A.h1Idx.get(t)!), ctx };
+}
+
+// ---- Training pack for the PyTorch engine (python/tanet) -------------------------------------------
+// The torch trainer rebuilds every sample's branch inputs on the GPU from compact tables instead of a second
+// copy of the data: per hourly row its trend readings (TREND_IDX) and hourly context readings (CTX_IDX); per
+// daily bar its day vector and its dominance-chart TA; per sample the row and day it reads (global indexes into
+// those tables), its 15-minute and swing windows (computed here by the same functions as live), and its targets.
+// rawInputs(D, i) == the pack's sample i (tests/taNetTorch.test.ts).
+
+export interface TaNetPack { dir: string; n: number; rows: number; days: number; sig: string }
+
+const PACK_FILES = ['rows_trend.f32', 'rows_ctx.f32', 'days_vec.f32', 'days_dom.f32', 's_gr.i32', 's_gd.i32', 's_micro.f32', 's_swing.f32', 's_y.f32'] as const;
+
+/** Write (or reuse, when the data has not changed) the training pack for D. */
+export function writeTaNetPack(D: TaNetData, dir: string, log: (m: string) => void = () => undefined): TaNetPack {
+  const F = TANET_FEATURES.length;
+  const sigH = crypto.createHash('sha1');
+  sigH.update(`${TANET_SCHEMA}|${D.ts.length}|${D.ts[0]}|${D.ts[D.ts.length - 1]}|`);
+  for (const A of D.assets) {
+    sigH.update(`${A.asset}:${A.rowTs.length}:${A.rowTs[A.rowTs.length - 1] ?? 0}:${A.d1.length}:${A.m15?.length ?? 0}:${A.m15?.[A.m15.length - 1]?.c ?? ''}|`);
+    // A strided sample of the rows (a revised bar changes the readings around it) and every target.
+    const smp = new Float32Array(Math.ceil(A.X.length / 101));
+    for (let k = 0; k < smp.length; k++) smp[k] = A.X[k * 101];
+    sigH.update(Buffer.from(smp.buffer));
+  }
+  for (const a of [D.y1, D.y4, D.yv, D.sr]) sigH.update(Buffer.from(a.buffer, a.byteOffset, a.byteLength));
+  const sig = sigH.digest('hex');
+  const metaFile = path.join(dir, 'meta.json');
+  try {
+    const m = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as TaNetPack & { files: string[] };
+    if (m.sig === sig && PACK_FILES.every((f) => fs.existsSync(path.join(dir, f)))) return { dir, n: m.n, rows: m.rows, days: m.days, sig };
+  } catch { /* none yet */ }
+  fs.mkdirSync(dir, { recursive: true });
+  fs.rmSync(metaFile, { force: true });
+  const t0 = Date.now();
+  const rowOff: number[] = [], dayOff: number[] = [];
+  let R = 0, Dn = 0;
+  for (const A of D.assets) { rowOff.push(R); dayOff.push(Dn); R += A.X.length / F; Dn += A.d1.length; }
+  const tF = TREND_IDX.length, cI = CTX_IDX.length, dF = TANET_DAY_FEATURES.length, nDom = NO_DOM.length;
+  // Written in chunks (years of hourly samples over many coins are gigabytes; host memory stays small).
+  const fds = new Map<string, number>();
+  const put = (name: string, a: Float32Array | Int32Array) => {
+    let fd = fds.get(name);
+    if (fd === undefined) { fd = fs.openSync(path.join(dir, name), 'w'); fds.set(name, fd); }
+    fs.writeSync(fd, Buffer.from(a.buffer, a.byteOffset, a.byteLength));
+  };
+  try {
+    for (const f of PACK_FILES) put(f, new Float32Array(0));
+    // Row tables.
+    D.assets.forEach((A) => {
+      const rows = A.X.length / F;
+      const rt = new Float32Array(rows * tF), rc = new Float32Array(rows * cI);
+      for (let r = 0; r < rows; r++) {
+        const x = r * F;
+        for (let j = 0; j < tF; j++) rt[r * tF + j] = A.X[x + TREND_IDX[j]];
+        for (let j = 0; j < cI; j++) rc[r * cI + j] = A.X[x + CTX_IDX[j]];
+      }
+      put('rows_trend.f32', rt); put('rows_ctx.f32', rc);
+    });
+    // Day tables (a day without a vector / dominance reading: NaN, as rawInputs would read it).
+    D.assets.forEach((A) => {
+      const dv = new Float32Array(A.d1.length * dF).fill(NaN), dd = new Float32Array(A.d1.length * nDom).fill(NaN);
+      A.d1.forEach((c, k) => {
+        const v = A.dayVec.get(c.ts), m = A.dayDom.get(c.ts);
+        if (v) for (let j = 0; j < dF; j++) dv[k * dF + j] = v[j];
+        if (m) for (let j = 0; j < nDom; j++) dd[k * nDom + j] = m[j];
+      });
+      put('days_vec.f32', dv); put('days_dom.f32', dd);
+    });
+    // Samples.
+    const n = D.ts.length, CH = 20_000, MI = TANET_MICRO_STEPS * TANET_MICRO_F, SW = TANET_SWING_BARS * TANET_SWING_F;
+    for (let c0 = 0; c0 < n; c0 += CH) {
+      const c1 = Math.min(n, c0 + CH), k = c1 - c0;
+      const gr = new Int32Array(k), gd = new Int32Array(k), mi = new Float32Array(k * MI), sw = new Float32Array(k * SW), y = new Float32Array(k * 3);
+      for (let i = c0; i < c1; i++) {
+        const a = D.sa[i], A = D.assets[a], r = D.sr[i], t = D.ts[i], q = i - c0;
+        const dj = closedIndex(A.d1, DAY, t + H);
+        if (r < TANET_TREND_STEPS - 1 || dj < TANET_MACRO_DAYS - 1) throw new Error(`sample ${i} lacks a full trend / macro window`);
+        gr[q] = rowOff[a] + r; gd[q] = dayOff[a] + dj;
+        mi.set(taNetMicro(A.m15, t + H), q * MI);
+        sw.set(taNetSwing(A.h1, A.h1Idx.get(t)!), q * SW);
+        y[q * 3] = D.y1[i]; y[q * 3 + 1] = D.y4[i]; y[q * 3 + 2] = D.yv[i];
+      }
+      put('s_gr.i32', gr); put('s_gd.i32', gd); put('s_micro.f32', mi); put('s_swing.f32', sw); put('s_y.f32', y);
+    }
+  } finally { for (const fd of fds.values()) fs.closeSync(fd); }
+  const n = D.ts.length;
+  const meta = { dir, n, rows: R, days: Dn, sig, files: [...PACK_FILES], tF, cI, dF, nDom, tT: TANET_TREND_STEPS, dT: TANET_MACRO_DAYS, mT: TANET_MICRO_STEPS, mF: TANET_MICRO_F, sT: TANET_SWING_BARS, sF: TANET_SWING_F };
+  fs.writeFileSync(metaFile, JSON.stringify(meta));
+  log(`torch training pack: ${n} samples, ${R} rows, ${Dn} days (${((Date.now() - t0) / 1000).toFixed(0)} s)`);
+  return { dir, n, rows: R, days: Dn, sig };
 }
 
 export function fitNorms(D: TaNetData, idx: ArrayLike<number>, maxSamples = 20_000): TaNetParams['norm'] {
@@ -582,6 +676,16 @@ export interface TaNetTrainOpts {
   /** Breeding every few rounds (research/genetic.ts; populations of 6+). An offspring starts from the fitter
    *  parent's weights with knobs crossed from both. */
   genetic?: GeneticOpts;
+  /** Training engine: 'ts' (default), 'torch' (python/tanet: PyTorch on the GPU when there is one; research/taNetTorch.ts)
+   *  or 'auto' (torch when a Python with PyTorch starts, else TypeScript; a failure mid-run continues in TypeScript).
+   *  Only the flat network trains in torch. Weights move unchanged between the two, so a saved tournament continues. */
+  engine?: TaNetEngine;
+  /** Python interpreter for the torch engine (default TA_NET_PYTHON, else python3 / python). */
+  python?: string;
+  /** The torch engine's training pack (default: a temporary directory). */
+  packDir?: string;
+  /** Torch device (default auto: CUDA when available). */
+  device?: 'auto' | 'cpu' | 'cuda';
   log?: (m: string) => void;
 }
 
@@ -594,11 +698,101 @@ export interface TaNetReport {
   ga?: { generation: number; sinceOffspringWon: number; last?: GaGeneration };
 }
 
+const lastLine = (e: unknown) => String((e as Error)?.message ?? e).trim().split('\n').filter(Boolean).pop() ?? String(e);
+
+/** A run's training engine: TypeScript, or the PyTorch trainer (research/taNetTorch.ts) with TypeScript as the
+ *  fallback. Training epochs and forecasts go through it; everything else (the tournament, fitness, the holdout,
+ *  the pattern report) stays in TypeScript. */
+export class TaNetTrainEngine {
+  private torch?: TaNetTorch;
+  /** Since the last `took()`: samples trained in torch and the seconds that took. */
+  private samples = 0;
+  private secs = 0;
+  private graph = false;
+  private tried = false;
+  constructor(private readonly D: TaNetData, private readonly dims: BranchDims, private readonly o: Pick<TaNetTrainOpts, 'engine' | 'python' | 'packDir' | 'device'>, private readonly log: (m: string) => void) {}
+
+  get name(): 'ts' | 'torch' { return this.torch ? 'torch' : 'ts'; }
+
+  async start(norm: TaNetParams['norm']): Promise<void> {
+    const want = this.o.engine ?? 'ts';
+    if (want === 'ts' || this.tried) return;
+    this.tried = true;
+    if (this.dims.fam) { this.log('training engine: TypeScript (the grouped network trains in TypeScript only)'); return; }
+    let t: TaNetTorch | undefined;
+    try {
+      const pack = writeTaNetPack(this.D, this.o.packDir ?? path.join(os.tmpdir(), `tanet-pack-${process.pid}`), this.log);
+      t = TaNetTorch.start({ python: this.o.python, log: this.log });
+      await t.init({ dims: this.dims, norm, pack: pack.dir, device: this.o.device ?? 'auto', graphs: process.env.TA_NET_CUDA_GRAPHS !== 'false' });
+      this.torch = t;
+      this.log(`training engine: PyTorch ${t.info.torch} on ${t.info.device === 'cuda' ? `the GPU (${t.info.name})` : 'the CPU'}`);
+    } catch (e) {
+      await t?.close();
+      if (want === 'torch') throw e;
+      this.log(`training engine: TypeScript (PyTorch unavailable: ${lastLine(e)})`);
+    }
+  }
+
+  private async fallback(e: unknown): Promise<void> {
+    if ((this.o.engine ?? 'ts') === 'torch') throw e;
+    this.log(`PyTorch trainer failed (${lastLine(e)}); continuing in TypeScript`);
+    const t = this.torch;
+    this.torch = undefined;
+    await t?.close();
+  }
+
+  /** `epochs` epochs over `idx` (seeds seed, seed + 1, ... in TypeScript; one stream from `seed` in torch). */
+  async train(norm: TaNetParams['norm'], st: Member, h: Hyper, idx: number[], seed: number, epochs: number): Promise<void> {
+    if (this.torch && idx.length) {
+      try {
+        const r = await this.torch.train(st, h as Record<string, number>, idx, seed, epochs);
+        if (!r.w.every(Number.isFinite)) throw new Error('non-finite weights');
+        st.w.set(r.w); st.m.set(r.m); st.v.set(r.v); st.step = r.step;
+        this.samples += r.samples; this.secs += r.secs; this.graph ||= r.graph;
+        return;
+      } catch (e) { await this.fallback(e); }
+    }
+    for (let e = 0; e < epochs; e++) trainEpoch(this.D, this.dims, norm, st, h, idx, seed + e);
+  }
+
+  async forecast(norm: TaNetParams['norm'], w: Float64Array, h: Hyper, idx: number[], calib?: TaNetParams['calib']): Promise<Forecasts> {
+    if (this.torch && idx.length) {
+      try {
+        const g = gatesOf(h);
+        const raw = await this.torch.forecast(w, [g.micro, g.swing, g.trend, g.macro, g.ctx], idx);
+        const up1 = new Float64Array(idx.length), up4 = new Float64Array(idx.length), vol = new Float64Array(idx.length);
+        for (let k = 0; k < idx.length; k++) {
+          up1[k] = calibrated(1 / (1 + Math.exp(-raw[k * 3])), calib?.up_1h); up4[k] = calibrated(1 / (1 + Math.exp(-raw[k * 3 + 1])), calib?.up_4h);
+          vol[k] = Math.max(-3, Math.min(3, raw[k * 3 + 2]));
+        }
+        for (let k = 0; k < idx.length; k++) if (!Number.isFinite(up1[k] + up4[k] + vol[k])) throw new Error('non-finite forecasts');
+        return { idx, up1, up4, vol };
+      } catch (e) { await this.fallback(e); }
+    }
+    return forecast(this.D, this.dims, norm, w, h, idx, undefined, calib);
+  }
+
+  /** Torch throughput since the last call ('' when nothing trained in torch). */
+  took(): string {
+    if (!this.samples) return '';
+    const out = `PyTorch trained ${this.samples} samples in ${this.secs.toFixed(0)} s (${Math.round(this.samples / Math.max(1e-6, this.secs))}/s${this.graph ? ', CUDA graph' : ''})`;
+    this.samples = 0; this.secs = 0;
+    return out;
+  }
+
+  async close(): Promise<void> { const t = this.torch; this.torch = undefined; await t?.close(); }
+}
+
 export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<TaNetReport> {
+  const dims = taNetDims(o.arch ?? 'flat', o.famK ?? 4);
+  const eng = new TaNetTrainEngine(D, dims, o, o.log ?? (() => {}));
+  try { return await runTaNet(D, o, dims, eng); } finally { await eng.close(); }
+}
+
+async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: TaNetTrainEngine): Promise<TaNetReport> {
   const log = o.log ?? (() => {});
   const n = D.ts.length;
   if (n < 2000) throw new Error(`need at least 2000 hourly samples with full inputs (have ${n}): add more history`);
-  const dims = taNetDims(o.arch ?? 'flat', o.famK ?? 4);
   const trainMs = (o.trainMonths ?? 12) * MONTH, evalMs = (o.evalMonths ?? 1) * MONTH, stepMs = (o.stepMonths ?? 1) * MONTH;
   const t0 = D.ts[0], tEnd = D.ts[n - 1] + H;
   const finalMonths = o.finalMonths ?? 2;
@@ -637,6 +831,7 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
     ga: saved.ga,
   } : undefined;
   const population = o.population ?? 3;
+  if (rounds.length || !resume) await eng.start(norm);
   log(`${n} samples over ${D.assets.map((a) => a.asset).join(', ')}; 15m input on ${(D.microShare * 100).toFixed(0)}% of them; ${saved ? `continuing a saved population (${saved.log.length} rounds so far)` : `fresh population of ${population}`}; ${rounds.length} round(s) to run; holdout from ${new Date(holdoutFrom).toISOString().slice(0, 10)}`);
 
   const save = (members: PbtMember<Member>[], trials: number, plog: PbtRoundLog[], lastEvalTo: number, nextIndex: number, ga?: GaState) => {
@@ -661,19 +856,18 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
       // exploration restart and gets fresh weights from a new seed.
       init: () => { const restart = resume !== undefined || inits >= population; inits++; return { w: initBranchParams(dims, restart ? seed + 7919 * inits : seed), m: new Float64Array(size), v: new Float64Array(size), step: 0 }; },
       clone: (s) => ({ w: s.w.slice(), m: s.m.slice(), v: s.v.slice(), step: s.step }),
-      train: (s, h, r: PbtRound) => {
+      train: async (s, h, r: PbtRound) => {
         const idx = between(r.trainFrom, r.trainTo - emb, stride);
-        const nEpochs = epochs + (s.step === 0 ? catchUp : 0);
-        for (let e = 0; e < nEpochs; e++) trainEpoch(D, dims, norm, s, h, idx, seed + r.index * 131 + e);
+        await eng.train(norm, s, h, idx, seed + r.index * 131, epochs + (s.step === 0 ? catchUp : 0));
         return s;
       },
-      evaluate: (s, h, r: PbtRound) => {
+      evaluate: async (s, h, r: PbtRound) => {
         const idx = between(r.evalFrom, r.evalTo);
-        const xs = strategyInteractions(D, forecast(D, dims, norm, s.w, h, idx), strategyOf(h));
+        const xs = strategyInteractions(D, await eng.forecast(norm, s.w, h, idx), strategyOf(h));
         return { report: coverageFloor(fitnessOf(xs, { from: r.evalFrom, to: r.evalTo, clusterMs: H }), xs.length, idx.length), interactions: independentInteractions(xs, H) };
       },
     },
-    onRound: ({ members, trials, log: plog, round, ga }) => save(members, trials, plog, round.evalTo, round.index + 1, ga),
+    onRound: ({ members, trials, log: plog, round, ga }) => { const t = eng.took(); if (t) log(`round ${round.index + 1}: ${t}`); save(members, trials, plog, round.evalTo, round.index + 1, ga); },
   });
   if (!rounds.length && resume) Object.assign(res, { members: resume.members, trials: resume.trials, log: resume.log, elite: resume.members.find((m) => m.id === resume.log[resume.log.length - 1]?.ranking[0]?.member) ?? resume.members[0] });
   const elite = res.elite;
@@ -685,11 +879,12 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
   const calibFrom = Math.floor((holdoutFrom - calibMonths * MONTH) / DAY) * DAY;
   const finalW = elite.state.w.slice();
   const finalSt: Member = { w: finalW, m: elite.state.m.slice(), v: elite.state.v.slice(), step: elite.state.step };
-  trainEpoch(D, dims, norm, finalSt, elite.hyper, between(calibFrom - trainMs, calibFrom - emb, stride), seed + 99_991);
+  await eng.start(norm);
+  await eng.train(norm, finalSt, elite.hyper, between(calibFrom - trainMs, calibFrom - emb, stride), seed + 99_991, 1);
   let calib: TaNetParams['calib'];
   if (calibMonths > 0) {
     const cr = between(calibFrom, holdoutFrom - emb);
-    const raw = forecast(D, dims, norm, finalW, elite.hyper, cr);
+    const raw = await eng.forecast(norm, finalW, elite.hyper, cr);
     calib = { up_1h: fitPlatt(raw.up1, cr.map((i) => D.y1[i])), up_4h: fitPlatt(raw.up4, cr.map((i) => D.y4[i])) };
     for (const [k, c] of Object.entries(calib)) log(`calibration ${k}: a ${c!.a.toFixed(3)}, b ${c!.b.toFixed(3)} on ${c!.rows} rows (log loss ${c!.before.toFixed(5)} -> ${c!.after.toFixed(5)})`);
   }
@@ -698,12 +893,12 @@ export async function trainTaNet(D: TaNetData, o: TaNetTrainOpts = {}): Promise<
   // window, graded the same way; it decides nothing but whether the heads also hold up there.
   const strat = strategyOf(elite.hyper);
   const ho = between(holdoutFrom, finalFrom);
-  const fc = forecast(D, dims, norm, finalW, elite.hyper, ho, undefined, calib);
+  const fc = await eng.forecast(norm, finalW, elite.hyper, ho, calib);
   const hoX = strategyInteractions(D, fc, strat);
   const hoFit = fitnessOf(hoX, { from: holdoutFrom, to: finalFrom, clusterMs: H });
   const hoSel = selectiveStats(D, fc, strat);
   const fi = finalFrom < tEnd ? between(finalFrom, tEnd) : [];
-  const fcF = fi.length ? forecast(D, dims, norm, finalW, elite.hyper, fi, undefined, calib) : undefined;
+  const fcF = fi.length ? await eng.forecast(norm, finalW, elite.hyper, fi, calib) : undefined;
   const pre = between(holdoutFrom - trainMs, holdoutFrom - emb);
   const meanOf = (a: Float32Array, idx: number[]) => { let s = 0, c = 0; for (const i of idx) if (Number.isFinite(a[i])) { s += a[i]; c++; } return c ? s / c : NaN; };
   const ll = (p: number, y: number) => { const q = Math.min(1 - 1e-9, Math.max(1e-9, p)); return y ? -Math.log(q) : -Math.log(1 - q); };
@@ -826,7 +1021,8 @@ export async function trainTaNetMain(argOf: (k: string, d: string) => string = c
   const spec = argOf('assets', 'all');
   const assets = spec === 'all' ? storedAssets(hist) : spec.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
   if (!assets.length) throw new Error(`need at least one asset with hourly history in ${hist} (npm run history:binance / history:import)`);
-  const D = buildData(hist, assets, argOf('cache', path.join(hist, '.tanet-cache')), log);
+  const cache = argOf('cache', path.join(hist, '.tanet-cache'));
+  const D = buildData(hist, assets, cache, log);
   const num = (k: string, d: string) => Number(argOf(k, d));
   const rep = await trainTaNet(D, {
     trainMonths: num('train-months', '12'), evalMonths: num('eval-months', '1'), stepMonths: num('step-months', '1'), holdoutMonths: num('holdout-months', '3'), finalMonths: num('final-months', '2'),
@@ -836,6 +1032,8 @@ export async function trainTaNetMain(argOf: (k: string, d: string) => string = c
     maxRounds: num('max-rounds', '0') || undefined, restartEvery: num('restart-every', '0'), catchUpEpochs: num('catch-up-epochs', '3'), patterns: argOf('patterns', 'true') !== 'false', log,
     calibMonths: argOf('calib-months', '') === '' ? undefined : num('calib-months', '1'),
     population: num('population', '3'),
+    engine: (['ts', 'torch', 'auto'] as const).find((e) => e === argOf('engine', process.env.TA_NET_ENGINE ?? 'ts')) ?? 'ts',
+    python: argOf('python', '') || undefined, packDir: path.join(cache, 'torch-pack'),
     genetic: { parents: num('parents', '3'), islands: num('islands', '1'), breedEvery: num('breed-every', '4'), mutation: num('mutation', '0.03') },
     incumbent: (() => { const f = argOf('incumbent', ''); try { return f && fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) as TaNetParams : undefined; } catch { return undefined; } })(),
   });

@@ -71,6 +71,16 @@ jobs:
         if: steps.deps.outputs.cache-hit != 'true'
         run: npm ci
 
+      # The TA network's tournament trains in PyTorch (CPU build: several times faster than the TypeScript trainer;
+      # research/taNetTorch.ts). If this fails it trains in TypeScript (TA_NET_ENGINE=auto).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: PyTorch (CPU)
+        run: |
+          python -m pip install --quiet numpy && python -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu \
+            && python -c "import torch; print('torch', torch.__version__)" || echo "PyTorch unavailable: the TA network trains in TypeScript"
+
       - name: SSH to the server
         env:
           SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
@@ -109,6 +119,7 @@ jobs:
           DATA="$GITHUB_WORKSPACE/data"
           set -a; . "$RUNNER_TEMP/train.env"; set +a
           export DATA_DIR="$DATA" TRADING_MODE=paper AUTO_TRAIN=off
+          export TA_NET_ENGINE="${TA_NET_ENGINE:-auto}" TA_NET_PYTHON="$(command -v python)"
           mkdir -p "$DATA/models/logs"
           LOG="$DATA/models/logs/pipeline-remote-$(date -u +%Y-%m-%dT%H-%M-%SZ).log"
           args=(); [ -n "$ONLY" ] && args=(--only "$ONLY")
@@ -149,7 +160,7 @@ jobs:
           set -euo pipefail
           DATA="$GITHUB_WORKSPACE/data"
           # --update: never overwrite a file that is newer on the server.
-          rsync -a --update --rsync-path="nice -n 19 rsync" "$DATA/models/" bot:bot/data/models/
+          rsync -a --update --rsync-path="nice -n 19 rsync" --exclude 'work/tanet-cache/torch-pack/' "$DATA/models/" bot:bot/data/models/
           [ -d "$DATA/history" ] && rsync -a --update --rsync-path="nice -n 19 rsync" "$DATA/history/" bot:bot/data/history/ || true
           echo "models and history copied back; the bot hot-swaps what changed"
 

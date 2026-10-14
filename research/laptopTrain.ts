@@ -34,9 +34,12 @@
 //   --days N       recorded days to copy (default 45)      --no-pull / --no-push      --only a,b (steps)
 //   --setup        ask the questions again (server, key)
 //
-// CPU only: the networks are small TypeScript models (no GPU framework); the pipeline runs on one core
-// per step. A long run is checkpointed after every step, so stopping (Ctrl+C) loses at most the step in
+// The TA network's tournament trains in PyTorch, on the GPU when there is an NVIDIA one (research/torchSetup.ts sets
+// up Python and PyTorch once in trainer-data; TA_NET_ENGINE=ts in trainer.env keeps it in TypeScript); everything
+// else runs on the CPU. A long run is checkpointed after every step, so stopping (Ctrl+C) loses at most the step in
 // progress; the next run continues the tournaments where they stopped.
+//
+//   --torch-check  set up / check PyTorch and the TA network's torch trainer, then exit (0 = ready)
 
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import fs from 'fs';
@@ -46,6 +49,8 @@ import readline from 'readline';
 import { pipelineCommand } from '../bot/autotrain';
 import { loadConfig } from '../bot/config';
 import type { ReadinessFile } from './readiness';
+import { torchSelfTest } from './taNetTorch';
+import { ensureTorch } from './torchSetup';
 
 export interface TrainerSettings { host?: string; user?: string; port?: number; key?: string }
 export interface RemoteFile { path: string; size: number; mtime: number }
@@ -65,15 +70,18 @@ export function parseManifest(text: string): RemoteFile[] {
   });
 }
 
+/** The trainer's own Python and PyTorch (research/torchSetup.ts): never compared with the server's files. */
+export const LOCAL_ONLY_DIRS = new Set(['python-env', 'python-dist', 'uv-cache']);
+
 /** Local files under `root` with the same shape (forward-slash relative paths). */
-export function localManifest(root: string): Map<string, RemoteFile> {
+export function localManifest(root: string, skipDirs: ReadonlySet<string> = new Set()): Map<string, RemoteFile> {
   const out = new Map<string, RemoteFile>();
   const walk = (dir: string, rel: string) => {
     let ents: fs.Dirent[] = [];
     try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of ents) {
       const r = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) walk(path.join(dir, e.name), r);
+      if (e.isDirectory()) { if (!(rel === '' && skipDirs.has(e.name))) walk(path.join(dir, e.name), r); }
       else if (e.isFile()) { const st = fs.statSync(path.join(dir, e.name)); out.set(r, { path: r, size: st.size, mtime: Math.round(st.mtimeMs) }); }
     }
   };
@@ -426,6 +434,7 @@ export async function laptopTrainMain(): Promise<void> {
     await startTrainerUi({ dataDir, port: Number(argOf('port-ui') ?? 0) || undefined, open: !flag('no-open') });
     return;
   }
+  if (flag('torch-check')) { process.exitCode = (await torchFor(dataDir, log)).TA_NET_ENGINE === 'auto' ? 0 : 1; return; }
   const hours = Number(argOf('hours') ?? 0);
   if (!(hours >= 0)) throw new Error('--hours must be 0 (train until it stops by itself) or a number of hours');
   const settingsFile = path.join(dataDir, 'trainer.json');
@@ -449,6 +458,22 @@ export async function laptopTrainMain(): Promise<void> {
   await runTrainer({ hours, dataDir, settings: s, sweepAll: flag('sweep-all'), hooks: { stopRequested: () => stop } });
 }
 
+/** PyTorch for the TA network's tournament (set up once), checked against the TypeScript network: the pipeline's
+ *  settings for it (TA_NET_ENGINE=ts when it is not there or not working). */
+export async function torchFor(dataDir: string, say: (m: string) => void, python?: string): Promise<Record<string, string>> {
+  const env = await ensureTorch(dataDir, say, { python });
+  if (!env) return { TA_NET_ENGINE: 'ts' };
+  try {
+    const t = await torchSelfTest({ python: env.python });
+    if (!(t.maxDiff < 1e-3)) throw new Error(`outputs differ from the TypeScript network by ${t.maxDiff}`);
+    say(`TA network trains in PyTorch ${t.torch} on ${t.device === 'cuda' ? `the GPU (${t.name})` : 'the CPU'} (checked against the TypeScript network)`);
+    return { TA_NET_ENGINE: 'auto', TA_NET_PYTHON: env.python };
+  } catch (e) {
+    say(`the PyTorch trainer did not pass its check (${(e as Error).message.trim().split('\n').pop()}): the TA network trains in TypeScript`);
+    return { TA_NET_ENGINE: 'ts' };
+  }
+}
+
 /** The rounds (shared by the console and the window): pull, rounds of the pipeline until it stops, push. */
 export async function runTrainer(o: { hours: number; dataDir: string; settings: TrainerSettings; sweepAll?: boolean; hooks?: TrainerHooks; only?: string[]; skipDataDownload?: boolean }): Promise<{ why?: string }> {
   const t0 = Date.now();
@@ -465,7 +490,7 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   const userEnvFile = path.join(dataDir, 'trainer.env');
   if (!fs.existsSync(userEnvFile)) writeText(userEnvFile, TRAINER_ENV_TEMPLATE);
   const userEnv = safeServerEnv(fs.readFileSync(userEnvFile, 'utf8').replace(/\r/g, ''));
-  console.log(`\nKalshi bot trainer: ${continuous ? 'until it stops by itself' : `${hours} h budget`}, data in ${dataDir}, ${os.cpus().length} CPU threads (tournaments run up to one network per thread at once; the GPU is not used).\n`);
+  console.log(`\nKalshi bot trainer: ${continuous ? 'until it stops by itself' : `${hours} h budget`}, data in ${dataDir}, ${os.cpus().length} CPU threads (tournaments run up to one network per thread at once; the TA network trains in PyTorch, on the GPU when there is one).\n`);
 
   let server: Server | undefined;
   if (s.host && s.key && wantSync) {
@@ -483,7 +508,7 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     const what = recordingsOnly ? `-path './recordings/md-*' -mtime -${days}` : `\\( ! -path './recordings/md-*' -o -mtime -${days} \\) ! -path './audit*' ! -path './logs/*' ! -name '*.log' ! -path './.venv*'`;
     const m = server.run(`cd ~/bot/data && find . -type f ${what} ! -name '*.tmp' -printf '%P\\t%s\\t%T@\\n'`);
     if (!m.ok) { log(`listing the server's data failed: ${m.err.trim().slice(0, 300)}`); return; }
-    const remote = parseManifest(m.out), here = localManifest(dataDir);
+    const remote = parseManifest(m.out), here = localManifest(dataDir, LOCAL_ONLY_DIRS);
     if (!recordingsOnly) for (const p of championsGone(remote, here)) { fs.rmSync(path.join(dataDir, p), { force: true }); here.delete(p); log(`${p}: rolled back on the server, removed here`); }
     const need = filesToPull(remote, here);
     log(`${need.length} new or changed file(s), ${(need.reduce((a, f) => a + f.size, 0) / 1e6).toFixed(0)} MB`);
@@ -511,9 +536,10 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     log(ok ? 'models sent; the bot loads the ones that changed within a minute (no restart)' : 'sending failed; it is tried again after the next round that improves a model, and at the end');
   };
 
-  // The server's settings, then the laptop's bigger budgets over them, then trainer.env, then anything set in
-  // the environment.
-  const envFor = (leftHours: number): NodeJS.ProcessEnv => ({ ...serverEnv, ...laptopProfile(leftHours, os.cpus().length, continuous), ...userEnv, ...process.env, DATA_DIR: dataDir, AUTO_TRAIN: 'off', TRADING_MODE: 'paper', TRAINER_PROGRESS: '1', DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32) });
+  // The server's settings, then the laptop's bigger budgets and PyTorch over them, then trainer.env, then anything
+  // set in the environment.
+  let torchEnv: Record<string, string> = { TA_NET_ENGINE: 'ts' };
+  const envFor = (leftHours: number): NodeJS.ProcessEnv => ({ ...serverEnv, ...laptopProfile(leftHours, os.cpus().length, continuous), ...torchEnv, ...userEnv, ...process.env, DATA_DIR: dataDir, AUTO_TRAIN: 'off', TRADING_MODE: 'paper', TRAINER_PROGRESS: '1', DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32) });
   const A = loadConfig(envFor(continuous ? 24 : hours)).autoTrain;
   const guide = guideText({ poolUsd: A.targetPoolUsd, dailyPct: A.targetDailyPct, maxDdPct: A.targetMaxDdPct, plateauRounds: A.plateauRounds });
   writeText(path.join(dataDir, 'GUIDE.txt'), guide);
@@ -522,6 +548,9 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   // ---- 2-3. rounds ----
   // Steps of a single round (--only, or conditioning mode from the window): one round, then the push.
   const only = o.only ?? argOf('only')?.split(',').filter(Boolean);
+  if ((userEnv.TA_NET_ENGINE ?? process.env.TA_NET_ENGINE) !== 'ts' && (!only || only.includes('ta_net'))) {
+    torchEnv = await torchFor(dataDir, (m) => { log(m); hooks?.line?.(`[trainer] ${m}`); }, userEnv.TA_NET_PYTHON || undefined);
+  }
   let why: string | undefined;
   const stopped = () => !!hooks?.stopRequested?.();
   const logFile = path.join(models, 'logs', `pipeline-laptop-${new Date(t0).toISOString().replace(/[:.]/g, '-')}.log`);

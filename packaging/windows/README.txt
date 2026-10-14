@@ -34,5 +34,7 @@ Read trainer-data\GUIDE.txt (written on the first run): how many rounds to run b
 what good scores look like, and why the default target ($100 a day on $200) is out of reach.
 trainer-data\STATUS.txt shows the scores after every round. Change the target in trainer-data\trainer.env.
 
-It uses the CPU (all models are small networks written in TypeScript); the graphics card is not used.
+The TA network trains on the graphics card (NVIDIA): the first run sets up Python and PyTorch in
+trainer-data (a one-time download of about 3 GB; without an NVIDIA card, the CPU build, about 300 MB).
+Everything else uses the CPU. To keep it all on the CPU in TypeScript: TA_NET_ENGINE=ts in trainer.env.
 Your bot's passwords and API keys are never copied to this computer.

@@ -210,6 +210,27 @@ What it does:
 
 Live, every forecast is also graded against the candles that follow. `tanet_skill_1h` and `tanet_skill_4h` are the network's rolling skill over its last 168 graded calls.
 
+### Training engine: TypeScript or PyTorch (October 2026)
+
+The tournament's training epochs and forecasts can run in PyTorch (`python/tanet`), on an NVIDIA GPU when there is one. Everything else stays in TypeScript: the tournament (`research/pbt.ts`), fitness, hurdles, the holdout and the pattern report. So does the live bot, which keeps running the network in `bot/ta/branchNet.ts`.
+
+- **Same network, same weights.** PyTorch holds the weights as one flat tensor with the TypeScript layout. The layout and the fractal trees are sent from TypeScript and never re-derived in Python. A member's weights and AdamW moments move between the two engines unchanged, so a saved tournament continues in either one (round 70 of 96 continues where it stopped). `tests/taNetTorch.test.ts` checks, in float64:
+  - outputs and gradients equal `branchForward` / `branchBackward`, with the same drop-path masks and branch scales;
+  - the training pack rebuilds exactly what `rawInputs` builds;
+  - forecasts through the pack equal the TypeScript forecast.
+- **The training pack.** Once per step, the dataset is written to `work/tanet-cache/torch-pack`:
+  - the hourly trend and context rows, and the daily rows, once per asset;
+  - per sample, its row and day index plus the raw 15-minute and hourly windows.
+
+  Python gathers each batch's windows itself. On the GPU, the tables sit in device memory, normalised once. On the CPU, they stay memory-mapped. The pack is reused while the data is unchanged, and it is never copied to the server.
+- **Speed.** On a 4-core cloud CPU, TypeScript trains at 1.7 ms per sample; PyTorch on the same CPU takes 0.39 ms. On a GPU, each training step (gather, forward, backward, AdamW) is recorded once as a CUDA graph and replayed per batch, which is checked against the plain step first. The batch stays 64, as in TypeScript, so the tuned learning rates still apply. The log reports the speed after every round: `round N: PyTorch trained ... samples in ... s (.../s, CUDA graph)`.
+- **Fallback.** With `auto`, any problem means the run continues in TypeScript, and the log says why. Problems include no Python, no PyTorch, a failed install, a crash mid-run, or non-finite weights. Only the flat network trains in PyTorch; the grouped challenger stays in TypeScript.
+
+Where it is on:
+- **The laptop trainer** sets PyTorch up by itself (see docs/LAPTOP_TRAINING.md, "GPU").
+- **The remote training job** installs the CPU build.
+- **The server** keeps `ts`.
+
 ## 3. Real results: AdamW, OBV divergence, triple-barrier fitness, confidence threshold (schema 5; Binance spot + BTCDOM, BTC/ETH/SOL/XRP/DOGE, Aug 2017 – Oct 2026)
 
 **Setup:** 83 monthly rounds (249 member evaluations), AdamW, continuous OBV divergence, triple-barrier trades as the fitness, the confidence threshold `minEdge` evolved by the tournament. Untouched holdout 2026-05-02 to 2026-08-02; frozen final window 2026-08-02 to 2026-10-02, evaluated once.
@@ -329,6 +350,9 @@ This model ships as `params/ta_net.json`. The server's pipeline continues the to
 | `TA_NET_HOLDOUT_MONTHS` | `3` | Never touched by the tournament. |
 | `TA_NET_FINAL_MONTHS` | `2` | Frozen final window after the holdout; every head must also hold up there (0 = off). |
 | `TA_NET_STRIDE` | `2` | Train on every 2nd hourly sample. |
+| `TA_NET_ENGINE` | `ts` | Training engine: `ts`, `torch` (PyTorch; fails if it cannot start), or `auto` (PyTorch when it starts, else TypeScript). The laptop trainer and the remote job use `auto`. |
+| `TA_NET_PYTHON` | `python3` / `python` | The Python with PyTorch for the torch engine. The laptop trainer sets its own. |
+| `TA_NET_CUDA_GRAPHS` | `true` | Record the GPU training step as a CUDA graph (`false`: plain PyTorch). |
 | `TA_NET_MIN_PER_REGIME` / `TA_NET_DSR` | `100` / `0.95` | Statistical hurdles for the direction heads. |
 | `TA_NET_FORWARD_DAYS` / `TA_NET_MUTE_ON_FORWARD_FAIL` | `90` / `true` | Live forward test. |
 | `TA_NET_MAX_ROUNDS_PER_RUN` | `36` | Rounds per pipeline run while the first tournament runs (0 = all at once). |

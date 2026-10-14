@@ -1,15 +1,16 @@
 # Laptop trainer, Windows package: builds KalshiTrainer-windows.zip (Node, the bundled trainer and pipeline,
-# TA-Lib compiled for Windows, params and seed history, Train.cmd) on a Windows runner, smoke-tests it, and
-# publishes it as the "trainer-latest" release (and a workflow artifact). Nothing secret is in the zip.
+# TA-Lib compiled for Windows, the PyTorch TA network trainer (python/tanet) and uv to set up its Python, params and
+# seed history, Train.cmd) on a Windows runner, smoke-tests it, and publishes it as the "trainer-latest" release
+# (and a workflow artifact). Nothing secret is in the zip.
 name: Laptop trainer (Windows package)
 
 on:
   workflow_dispatch:
   pull_request:
-    paths: ['research/laptopTrain.ts', 'research/pipeline.ts', 'packaging/**', 'vendor/talib/**', 'package.json', '.github/workflows/trainer-windows.yml']
+    paths: ['research/laptopTrain.ts', 'research/pipeline.ts', 'research/torchSetup.ts', 'research/taNetTorch.ts', 'python/**', 'packaging/**', 'vendor/talib/**', 'package.json', '.github/workflows/trainer-windows.yml']
   push:
     branches: [main]
-    paths: ['research/**', 'bot/**', 'params/**', 'deploy/seed/**', 'packaging/**', 'vendor/talib/**', 'package.json', 'package-lock.json', '.github/workflows/trainer-windows.yml']
+    paths: ['research/**', 'bot/**', 'python/**', 'params/**', 'deploy/seed/**', 'packaging/**', 'vendor/talib/**', 'package.json', 'package-lock.json', '.github/workflows/trainer-windows.yml']
 
 permissions:
   contents: write  # the release; pull requests from forks get a read-only token and skip that step
@@ -46,6 +47,18 @@ jobs:
           Copy-Item vendor/talib/index.js, vendor/talib/package.json "$out/app/node_modules/talib/"
           Copy-Item vendor/talib/build/Release/talib.node "$out/app/node_modules/talib/build/Release/"
           Copy-Item packaging/windows/Train.cmd, packaging/windows/TrainConsole.cmd, packaging/windows/README.txt "$out/"
+          # The PyTorch TA network trainer, and uv (pinned, checksum-verified) to set up its Python on first use.
+          New-Item -ItemType Directory -Force "$out/app/python/tanet", "$out/uv" | Out-Null
+          Copy-Item python/tanet/net.py, python/tanet/server.py "$out/app/python/tanet/"
+          $uvVer = '0.8.17'; $uvZip = 'uv-x86_64-pc-windows-msvc.zip'
+          Invoke-WebRequest -UseBasicParsing "https://github.com/astral-sh/uv/releases/download/$uvVer/$uvZip" -OutFile "$env:RUNNER_TEMP/$uvZip"
+          Invoke-WebRequest -UseBasicParsing "https://github.com/astral-sh/uv/releases/download/$uvVer/$uvZip.sha256" -OutFile "$env:RUNNER_TEMP/$uvZip.sha256"
+          $want = ((Get-Content "$env:RUNNER_TEMP/$uvZip.sha256" -Raw).Trim() -split '\s+')[0].ToLower()
+          $got = (Get-FileHash -Algorithm SHA256 "$env:RUNNER_TEMP/$uvZip").Hash.ToLower()
+          if ($want -ne $got) { throw "uv checksum mismatch ($got, expected $want)" }
+          Expand-Archive "$env:RUNNER_TEMP/$uvZip" -DestinationPath "$env:RUNNER_TEMP/uv" -Force
+          Copy-Item (Get-ChildItem -Recurse "$env:RUNNER_TEMP/uv" -Filter uv.exe | Select-Object -First 1).FullName "$out/uv/uv.exe"
+          & "$out/uv/uv.exe" --version
           "built $(Get-Date -Format u) from $env:GITHUB_SHA" | Out-File "$out/app/VERSION.txt"
       - name: Smoke test (TA-Lib loads, the trainer runs a pipeline round)
         shell: pwsh
@@ -65,6 +78,19 @@ jobs:
           $page = Invoke-WebRequest -UseBasicParsing $url
           if ($page.Content -notmatch 'KALSHI TRAINER') { throw 'the trainer window page is wrong' }
           Stop-Process -Id $p.Id -Force
+          Pop-Location
+      - name: Smoke test (PyTorch set up with the bundled uv; the torch trainer matches the TypeScript network)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location KalshiTrainer/app
+          # No NVIDIA GPU on the runner: the CPU build (the GPU build is the same path with the CUDA 12.8 wheel index).
+          ../node/node.exe dist/laptopTrain.cjs --torch-check --data "$env:RUNNER_TEMP/tc"
+          if ($LASTEXITCODE -ne 0) { throw "torch check exited $LASTEXITCODE" }
+          # A second run finds the environment ready (no download).
+          $o = ../node/node.exe dist/laptopTrain.cjs --torch-check --data "$env:RUNNER_TEMP/tc" | Out-String
+          Write-Output $o
+          if ($o -notmatch 'PyTorch \S+ ready') { throw 'the second run set PyTorch up again' }
           Pop-Location
       - name: Zip
         shell: pwsh
