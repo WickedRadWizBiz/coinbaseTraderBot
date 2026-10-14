@@ -92,13 +92,21 @@ export function localManifest(root: string, skipDirs: ReadonlySet<string> = new 
 /** Server files to copy down: missing here, or newer on the server (2 s slack for file systems). A file
  *  changed here since (a model, the ledger, a tournament's state) is never overwritten by an older copy. */
 export function filesToPull(remote: RemoteFile[], local: Map<string, RemoteFile>): RemoteFile[] {
-  return remote.filter((f) => { const l = local.get(f.path); return !l || (f.mtime > l.mtime + 2000 && !KEEP_LOCAL.test(f.path)); });
+  return remote.filter((f) => { if (NO_PULL.test(f.path)) return false; const l = local.get(f.path); return !l || (f.mtime > l.mtime + 2000 && !KEEP_LOCAL.test(f.path)); });
 }
 
-/** Kept from this machine once it has its own: a Kalshi series' stored-market index records which close-time range
- *  this machine listed completely, and the server's (60 days of contracts) would make the laptop (365) list the whole
- *  year again on every run. The day files themselves still come down; the index catches up with them by size. */
-const KEEP_LOCAL = /(^|\/)history\/kalshi\/[^/]+\/\.index\.json$/;
+/** Kept from this machine once it has its own:
+ *  - a Kalshi series' stored-market index records which close-time range this machine listed completely, and the
+ *    server's (60 days of contracts) would make the laptop (365) list the whole year again on every run. The day files
+ *    themselves still come down; the index catches up with them by size.
+ *  - the TA network's tournament: the server's daily remote training writes its own (other settings, other history),
+ *    and copying it over the laptop's would throw away the laptop's rounds (a tournament with other inputs starts
+ *    over). */
+const KEEP_LOCAL = /(^|\/)history\/kalshi\/[^/]+\/\.index\.json$|(^|\/)work\/tanet-population\.json$/;
+
+/** Never copied down: the TA network's row cache and training pack are built from this machine's own history (the
+ *  server's never match it, and a copy over the laptop's made it recompute every coin's years of rows). */
+const NO_PULL = /(^|\/)work\/tanet-cache\//;
 
 /** The conditioning champion and its rollback copy (bot/strategy/conditioningOverlay.ts). The server is their
  *  source of truth: a dashboard rollback replaces or removes them there, so they are sent up only when this trainer

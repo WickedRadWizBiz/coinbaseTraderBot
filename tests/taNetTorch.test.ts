@@ -11,7 +11,7 @@ import type { Candle } from '../bot/ta/indicators';
 import { branchBackward, branchForward, branchLayout, branchLoss, fractalPlan, fractalSpecs, initBranchParams, type BranchDrop } from '../bot/ta/branchNet';
 import { columnMask, localDropMask, type JoinMask } from '../bot/ta/fractal';
 import { aggregateCandles, upsertSeries } from '../research/history/candles';
-import { buildData, fitNorms, forecast, rawInputs, taNetDims, trainTaNet, writeTaNetPack } from '../research/trainTaNet';
+import { buildData, buildDataParallel, fitNorms, forecast, rawInputs, taNetDims, trainTaNet, writeTaNetPack } from '../research/trainTaNet';
 import { TaNetTorch, torchSelfTest } from '../research/taNetTorch';
 import { ensureTorch, envPython } from '../research/torchSetup';
 import { tmpDir } from './helpers';
@@ -236,4 +236,19 @@ test('torch setup: no PyTorch and no working uv -> undefined (TypeScript), with 
   assert.match(logs.join('\n'), /creating the Python environment failed: the TA network trains in TypeScript/);
   assert.equal(envPython('E', true), path.join('E', 'Scripts', 'python.exe'));
   assert.equal(envPython('E', false), path.join('E', 'bin', 'python'));
+});
+
+test('rows on worker threads: the same dataset as one thread; a second build finds every row cached', async () => {
+  const { D, dir } = history();
+  const cache = path.join(dir, '.cache-par');
+  const logs: string[] = [];
+  const P = await buildDataParallel(dir, ['TST', 'BTC'], cache, (m) => logs.push(m), 2, { freeGb: 64 });
+  assert.match(logs.join('\n'), /computing \d+ hourly rows for 2 coins on 2 threads/);
+  assert.match(logs.join('\n'), /rows: 2\/2 coins ready/);
+  const a = D.assets.find((x) => x.asset === 'TST')!, b = P.assets.find((x) => x.asset === 'TST')!;
+  assert.deepEqual(b.rowTs, a.rowTs);
+  assert.ok(b.X.every((v, i) => Object.is(v, a.X[i])), 'worker rows = rows computed here');
+  const logs2: string[] = [];
+  await buildDataParallel(dir, ['TST', 'BTC'], cache, (m) => logs2.push(m), 2, { freeGb: 64 });
+  assert.ok(!logs2.some((m) => /computing|computed/.test(m)), logs2.join('\n'));
 });

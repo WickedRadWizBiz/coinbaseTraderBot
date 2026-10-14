@@ -49,43 +49,121 @@ import { loadIndexSeries, loadSeries, storedAssets } from './history/candles';
 import { DAILY_CONTEXT_FEATURES, SLOW_INDEXES, TaNetContext } from '../bot/ta/taNetContext';
 import { rng } from './stats';
 import { TaNetTorch, type TaNetEngine } from './taNetTorch';
+import { progress } from './progress';
+import { WorkerPool, workerCount, workerScript } from './workerPool';
 
 const H = 3_600_000;
 const DAY = 86_400_000;
 const MONTH = 30.44 * DAY;
 
-const hashBars = (h: crypto.Hash, cs: Candle[]) => { for (const c of cs) h.update(`${c.ts},${c.o},${c.h},${c.l},${c.c},${c.v},${c.tb ?? ''};`); };
+const barStr = (c: Candle) => `${c.ts},${c.o},${c.h},${c.l},${c.c},${c.v},${c.tb ?? ''};`;
+const hashBars = (h: crypto.Hash, cs: Candle[]) => { for (const c of cs) h.update(barStr(c)); };
 
 /** Everything a cached feature row depends on besides the asset's own hourly / daily bars: its 15m bars,
- *  every basket coin's hourly bars and BTCDOM, up to `through` (rows only ever look backwards). */
-export interface RowInputs { m15?: Candle[]; basket: Record<string, Candle[]>; btcdom?: Candle[] }
-function contextHash(h: crypto.Hash, inp: RowInputs | undefined, through: number): void {
-  if (!inp) return;
-  hashBars(h, (inp.m15 ?? []).filter((c) => c.ts <= through));
-  for (const a of Object.keys(inp.basket).sort()) { h.update(`|${a}|`); hashBars(h, inp.basket[a].filter((c) => c.ts <= through)); }
-  h.update('|BTCDOM|');
-  hashBars(h, (inp.btcdom ?? []).filter((c) => c.ts <= through));
+ *  every basket coin's hourly bars, BTCDOM and the daily index charts, up to the row's hour (rows only ever look
+ *  backwards). */
+export interface RowInputs { m15?: Candle[]; basket: Record<string, Candle[]>; btcdom?: Candle[]; daily?: Record<string, Candle[]> }
+
+/** The cache signature before monthly checkpoints (caches written by earlier versions are still accepted). */
+export function legacySig(h1: Candle[], d1: Candle[], inp: RowInputs | undefined, through: number): string {
+  const h = crypto.createHash('sha1');
+  hashBars(h, h1.filter((c) => c.ts <= through));
+  hashBars(h, d1.filter((c) => c.ts + DAY <= through + H));
+  if (inp) {
+    hashBars(h, (inp.m15 ?? []).filter((c) => c.ts <= through));
+    for (const a of Object.keys(inp.basket).sort()) { h.update(`|${a}|`); hashBars(h, inp.basket[a].filter((c) => c.ts <= through)); }
+    h.update('|BTCDOM|');
+    hashBars(h, (inp.btcdom ?? []).filter((c) => c.ts <= through));
+  }
+  return h.digest('hex');
 }
 
-/** Feature rows for one asset, reusing the cache for bars it already holds. */
-export function assetRows(asset: string, h1: Candle[], d1: Candle[], cacheDir: string | undefined, log: (m: string) => void, ctx?: TaNetContext, inputs?: RowInputs): { ts: number[]; X: Float32Array } {
+const monthOf = (ts: number) => { const d = new Date(ts); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1); };
+const monthCache = new WeakMap<Candle[], { n: number; last: number; m: Map<number, string> }>();
+/** sha1 of each calendar month's bars (UTC) of one series; computed once per series (the basket coins are shared
+ *  by every asset). */
+function monthDigests(cs: Candle[]): Map<number, string> {
+  const hit = monthCache.get(cs);
+  if (hit && hit.n === cs.length && hit.last === (cs[cs.length - 1]?.ts ?? 0)) return hit.m;
+  const m = new Map<number, string>();
+  for (let i = 0; i < cs.length;) {
+    const k = monthOf(cs[i].ts), h = crypto.createHash('sha1');
+    let j = i;
+    for (; j < cs.length && monthOf(cs[j].ts) === k; j++) h.update(barStr(cs[j]));
+    m.set(k, (m.get(k) ?? '') + h.digest('hex'));
+    i = j;
+  }
+  monthCache.set(cs, { n: cs.length, last: cs[cs.length - 1]?.ts ?? 0, m });
+  return m;
+}
+
+/** Cumulative signatures of a row's inputs: one per complete calendar month before `through`'s month (everything
+ *  up to that month's end), and `tail` (everything up to `through`). A row at hour t reads bars up to t only, so
+ *  when the first differing month is k, the cached rows before month k still hold. */
+export function rowCheckpoints(h1: Candle[], d1: Candle[], inp: RowInputs | undefined, through: number): { months: Array<[number, string]>; tail: string } {
+  const src: Array<[string, Candle[], (c: Candle) => boolean]> = [['h1', h1, (c) => c.ts <= through], ['d1', d1, (c) => c.ts + DAY <= through + H]];
+  if (inp) {
+    src.push(['m15', inp.m15 ?? [], (c) => c.ts <= through]);
+    for (const a of Object.keys(inp.basket).sort()) src.push([`b:${a}`, inp.basket[a], (c) => c.ts <= through]);
+    src.push(['dom', inp.btcdom ?? [], (c) => c.ts <= through]);
+    for (const k of Object.keys(inp.daily ?? {}).sort()) src.push([`ix:${k}`, inp.daily![k], (c) => c.ts + DAY <= through + H]);
+  }
+  const cur = monthOf(through);
+  const digests = src.map(([name, cs]) => [name, monthDigests(cs)] as const);
+  const keys = [...new Set(digests.flatMap(([, m]) => [...m.keys()]))].filter((k) => k < cur).sort((x, y) => x - y);
+  const run = crypto.createHash('sha1');
+  const months: Array<[number, string]> = [];
+  for (const k of keys) {
+    for (const [name, m] of digests) { const d = m.get(k); if (d) run.update(`${name}=${d};`); }
+    months.push([k, run.copy().digest('hex')]);
+  }
+  const tail = run.copy();
+  for (const [name, cs, ok] of src) {
+    let started = false;
+    for (let i = lowerBound(cs, cur); i < cs.length && cs[i].ts <= through; i++) if (ok(cs[i])) { if (!started) { tail.update(`${name}:`); started = true; } tail.update(barStr(cs[i])); }
+  }
+  return { months, tail: tail.digest('hex') };
+}
+
+function lowerBound(cs: Candle[], ts: number): number {
+  let lo = 0, hi = cs.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (cs[mid].ts < ts) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+
+/** Cached rows from this hour on are recomputed: the first month whose inputs differ (a day early: margin), or
+ *  Infinity when every input up to the cache's last hour is unchanged. */
+export function keepRowsBefore(stored: { months: Array<[number, string]>; tail: string }, now: { months: Array<[number, string]>; tail: string }, through: number): number {
+  const a = new Map(stored.months), b = new Map(now.months);
+  for (const k of [...new Set([...a.keys(), ...b.keys()])].sort((x, y) => x - y)) if (a.get(k) !== b.get(k)) return k - DAY;
+  return stored.tail === now.tail ? Infinity : monthOf(through) - DAY;
+}
+
+interface RowCacheMeta { schema: string; d: number; through: number; ts: number[]; sig?: string; v?: number; months?: Array<[number, string]>; tail?: string }
+
+/** Feature rows for one asset, reusing the cache for the hours whose inputs have not changed. */
+export function assetRows(asset: string, h1: Candle[], d1: Candle[], cacheDir: string | undefined, log: (m: string) => void, ctx?: TaNetContext, inputs?: RowInputs): { ts: number[]; X: Float32Array; computed: number } {
   const d = TANET_FEATURES.length;
   let cachedTs: number[] = [], cachedX = new Float32Array(0);
+  let upgrade = false;
   const meta = cacheDir ? path.join(cacheDir, `${asset}.json`) : undefined, bin = cacheDir ? path.join(cacheDir, `${asset}.f32`) : undefined;
   if (meta && bin && fs.existsSync(meta) && fs.existsSync(bin)) {
     try {
-      const m = JSON.parse(fs.readFileSync(meta, 'utf8')) as { schema: string; d: number; through: number; sig: string; ts: number[] };
-      const through = m.through;
-      const h = crypto.createHash('sha1');
-      hashBars(h, h1.filter((c) => c.ts <= through));
-      hashBars(h, d1.filter((c) => c.ts + DAY <= through + H));
-      contextHash(h, inputs, through);
-      if (m.schema === TANET_SCHEMA && m.d === d && m.sig === h.digest('hex')) {
+      const m = JSON.parse(fs.readFileSync(meta, 'utf8')) as RowCacheMeta;
+      if (m.schema === TANET_SCHEMA && m.d === d) {
+        let keep: number;
+        if (m.v === 2 && m.months && m.tail) keep = keepRowsBefore({ months: m.months, tail: m.tail }, rowCheckpoints(h1, d1, inputs, m.through), m.through);
+        else { keep = m.sig === legacySig(h1, d1, inputs, m.through) ? Infinity : -Infinity; upgrade = keep === Infinity; }
         const buf = fs.readFileSync(bin);
-        cachedX = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4).slice();
-        cachedTs = m.ts;
-      } else log(`${asset}: history or features changed since the cache was written; rebuilding its rows`);
-    } catch { /* rebuild */ }
+        const all = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+        let n = 0;
+        while (n < m.ts.length && m.ts[n] < keep) n++;
+        cachedTs = m.ts.slice(0, n);
+        cachedX = all.slice(0, n * d);
+        if (n === 0 && m.ts.length) log(`${asset}: history or features changed since the cache was written; rebuilding its rows`);
+        else if (n < m.ts.length) log(`${asset}: inputs changed from ${new Date(m.ts[n]).toISOString().slice(0, 10)}; recomputing ${m.ts.length - n} cached rows from there (${n} kept)`);
+      } else log(`${asset}: the cache is for other features; rebuilding its rows`);
+    } catch { cachedTs = []; cachedX = new Float32Array(0); }
   }
   const have = new Set(cachedTs);
   const newTs: number[] = [];
@@ -105,17 +183,16 @@ export function assetRows(asset: string, h1: Candle[], d1: Candle[], cacheDir: s
   const X = new Float32Array(ts.length * d);
   X.set(cachedX.subarray(0, cachedTs.length * d), 0);
   newX.forEach((row, k) => X.set(row, (cachedTs.length + k) * d));
-  if (meta && bin && newTs.length && ts.length) {
+  if (meta && bin && (newTs.length || upgrade) && ts.length) {
     fs.mkdirSync(cacheDir!, { recursive: true });
     const through = h1[h1.length - 1].ts;
-    const h = crypto.createHash('sha1');
-    hashBars(h, h1.filter((c) => c.ts <= through));
-    hashBars(h, d1.filter((c) => c.ts + DAY <= through + H));
-    contextHash(h, inputs, through);
-    fs.writeFileSync(bin, Buffer.from(X.buffer, X.byteOffset, X.byteLength));
-    fs.writeFileSync(meta, JSON.stringify({ schema: TANET_SCHEMA, d, through, sig: h.digest('hex'), ts }));
+    const cp = rowCheckpoints(h1, d1, inputs, through);
+    const tmp = `${bin}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, Buffer.from(X.buffer, X.byteOffset, X.byteLength));
+    fs.renameSync(tmp, bin);
+    fs.writeFileSync(meta, JSON.stringify({ schema: TANET_SCHEMA, d, through, v: 2, months: cp.months, tail: cp.tail, ts } satisfies RowCacheMeta));
   }
-  return { ts, X };
+  return { ts, X, computed: newTs.length };
 }
 
 /** Targets for the bar at `ts` from the hourly series. */
@@ -169,28 +246,118 @@ export interface TaNetData {
   context: { indexes: Record<string, { from: string; to: string; bars: number }>; basket: string[] };
 }
 
-export function buildData(histDir: string, assets: string[], cacheDir: string | undefined, log: (m: string) => void): TaNetData {
+/** Everything the rows read: each trained asset's hourly / daily / 15-minute series, the basket (every stored coin's
+ *  hourly bars, in name order), BTCDOM and the daily index charts, and the market context built from them. `light`:
+ *  the trained assets' daily and 15-minute series are left out (the row workers load one asset's at a time). */
+export interface TaNetInputs {
+  loaded: Array<{ asset: string; s1: ReturnType<typeof loadSeries>; s24?: ReturnType<typeof loadSeries>; s15?: ReturnType<typeof loadSeries> }>;
+  basket: Record<string, Candle[]>; btcdom: Candle[]; daily: Record<string, Candle[]>; ctx: TaNetContext;
+}
+export function loadTaNetInputs(histDir: string, assets: string[], light = false): TaNetInputs {
+  const loaded = assets.map((asset) => ({ asset, s1: loadSeries(histDir, asset, '1h'), ...(light ? {} : { s24: loadSeries(histDir, asset, '1d'), s15: loadSeries(histDir, asset, '15m') }) }));
+  // The market basket is every coin in the store with hourly history (live: every tracked coin), also
+  // when only some of them are trained here and when one is too short to train on.
+  const h1 = new Map<string, Candle[]>(loaded.filter((x) => x.s1.candles.length).map((x) => [x.asset, x.s1.candles]));
+  for (const a of storedAssets(histDir)) if (!h1.has(a)) { const c = loadSeries(histDir, a, '1h').candles; if (c.length) h1.set(a, c); }
+  const basket: Record<string, Candle[]> = Object.fromEntries([...h1.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  const btcdom = loadIndexSeries(histDir, 'BTCDOM', '1h').candles;
+  const daily: Record<string, Candle[]> = { 'BTC.D': loadIndexSeries(histDir, 'BTC.D', '1d').candles, 'USDT.D': loadIndexSeries(histDir, 'USDT.D', '1d').candles };
+  for (const { asset } of SLOW_INDEXES) daily[asset] = loadIndexSeries(histDir, asset, '1d').candles;
+  const ctx = new TaNetContext({
+    h1: basket, btcdom1h: btcdom, btcd1d: daily['BTC.D'], usdtd1d: daily['USDT.D'],
+    slow1d: Object.fromEntries(SLOW_INDEXES.map(({ asset }) => [asset, daily[asset]])),
+  });
+  return { loaded, basket, btcdom, daily, ctx };
+}
+
+const trainable = (h1: Candle[], d1: Candle[]) => h1.length >= TANET_H1_BARS + 200 && d1.length >= TANET_D1_BARS + TANET_MACRO_DAYS;
+
+/** Hourly rows of `asset` its cache does not hold yet (cheap: the cache's month signatures, no feature math). */
+export function rowsToCompute(asset: string, h1: Candle[], d1: Candle[], cacheDir: string, inputs: RowInputs): number {
+  const total = Math.max(0, h1.length - TANET_H1_BARS + 1);
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(cacheDir, `${asset}.json`), 'utf8')) as RowCacheMeta;
+    if (m.schema !== TANET_SCHEMA || m.d !== TANET_FEATURES.length || !fs.existsSync(path.join(cacheDir, `${asset}.f32`))) return total;
+    const keep = m.v === 2 && m.months && m.tail ? keepRowsBefore({ months: m.months, tail: m.tail }, rowCheckpoints(h1, d1, inputs, m.through), m.through) : m.sig === legacySig(h1, d1, inputs, m.through) ? Infinity : -Infinity;
+    const from = Math.min(keep, m.through + 1);
+    return h1.filter((c) => c.ts >= from).length;
+  } catch { return total; }
+}
+
+/** Rows to (re)compute are spread over worker threads, one asset each (research/taNetRowsWorker.ts): years of hourly
+ *  rows for many coins take hours on one core. Workers write the row caches; buildData then reads them. Assets with
+ *  only a few new hours are left to buildData. At most as many workers as memory allows (each holds the basket). */
+export async function computeRowsInWorkers(histDir: string, assets: string[], cacheDir: string, inp: TaNetInputs, log: (m: string) => void, workers: number, o: { minRows?: number; freeGb?: number } = {}): Promise<number> {
+  const minRows = o.minRows ?? 2000;
+  const jobs: Array<{ asset: string; rows: number }> = [];
+  for (const { asset, s1, s24, s15 } of inp.loaded) {
+    const h1 = s1.candles, d1 = s24?.candles ?? loadSeries(histDir, asset, '1d').candles;
+    if (!trainable(h1, d1)) continue;
+    const rows = rowsToCompute(asset, h1, d1, cacheDir, { m15: s15?.candles ?? loadSeries(histDir, asset, '15m').candles, basket: inp.basket, btcdom: inp.btcdom, daily: inp.daily });
+    if (rows >= minRows) jobs.push({ asset, rows });
+  }
+  const freeGb = o.freeGb ?? os.freemem() / 2 ** 30;
+  const n = Math.max(1, Math.min(workers, jobs.length, Math.floor((freeGb - 1.5) / 0.75)));
+  if (jobs.length < 2 || n < 2) return 0;
+  jobs.sort((a, b) => b.rows - a.rows);
+  const total = jobs.reduce((s, j) => s + j.rows, 0);
+  log(`computing ${total} hourly rows for ${jobs.length} coins on ${n} threads (${freeGb.toFixed(1)} GB free memory): ${jobs.map((j) => j.asset).join(', ')}`);
+  const pool = new WorkerPool<TaNetRowsJob, TaNetRowsOut>(workerScript('taNetRowsWorker'), n);
+  const t0 = Date.now();
+  let done = 0, rowsDone = 0;
+  progress('TA network rows', 0, total);
+  // A coin takes minutes to tens of minutes: a line every 5 minutes so the log shows it working.
+  const beat = setInterval(() => log(`rows: ${done}/${jobs.length} coins ready, ${((Date.now() - t0) / 60_000).toFixed(0)} min so far (${n} threads working)`), 5 * 60_000);
+  beat.unref?.();
+  try {
+    await Promise.all(jobs.map(async (j) => {
+      try {
+        const r = await pool.run({ histDir, assets, asset: j.asset, cacheDir });
+        for (const l of r.logs) log(l);
+        rowsDone += j.rows;
+        progress('TA network rows', rowsDone, total);
+      } catch (e) { log(`${j.asset}: the row worker failed (${(e as Error).message.split('\n')[0]}); computed here instead`); }
+      done++;
+      const mins = (Date.now() - t0) / 60_000;
+      log(`rows: ${done}/${jobs.length} coins ready after ${mins.toFixed(0)} min${done < jobs.length && rowsDone ? `, about ${Math.max(1, Math.round(mins * (total - rowsDone) / rowsDone))} min left` : ''}`);
+    }));
+  } finally { clearInterval(beat); await pool.close(); }
+  return jobs.length;
+}
+
+export interface TaNetRowsJob { histDir: string; assets: string[]; asset: string; cacheDir: string }
+export interface TaNetRowsOut { computed: number; logs: string[] }
+
+/** One asset's rows in a worker: the same inputs buildData gives assetRows, the cache written for buildData. */
+export function rowsJob(j: TaNetRowsJob, inp: TaNetInputs): TaNetRowsOut {
+  const logs: string[] = [];
+  const h1 = inp.basket[j.asset] ?? [], d1 = loadSeries(j.histDir, j.asset, '1d').candles;
+  if (!trainable(h1, d1)) return { computed: 0, logs };
+  const r = assetRows(j.asset, h1, d1, j.cacheDir, (m) => logs.push(m), inp.ctx, { m15: loadSeries(j.histDir, j.asset, '15m').candles, basket: inp.basket, btcdom: inp.btcdom, daily: inp.daily });
+  return { computed: r.computed, logs };
+}
+
+/** buildData with the row (re)computation spread over `workers` threads first. */
+export async function buildDataParallel(histDir: string, assets: string[], cacheDir: string | undefined, log: (m: string) => void, workers: number, o: { minRows?: number; freeGb?: number } = {}): Promise<TaNetData> {
+  const inp = loadTaNetInputs(histDir, assets);
+  if (cacheDir && workers > 1) await computeRowsInWorkers(histDir, assets, cacheDir, inp, log, workers, o);
+  return buildData(histDir, assets, cacheDir, log, inp);
+}
+
+export function buildData(histDir: string, assets: string[], cacheDir: string | undefined, log: (m: string) => void, inp: TaNetInputs = loadTaNetInputs(histDir, assets)): TaNetData {
   const out: AssetData[] = [];
   const sources: Record<string, string[]> = {};
   const S: Array<[number, number, number, number, number, number, number, number]> = [];
   let micro = 0;
-  // The market basket is every coin in the store with hourly history (live: every tracked coin), also
-  // when only some of them are trained here and when one is too short to train on.
-  const loaded = assets.map((asset) => ({ asset, s1: loadSeries(histDir, asset, '1h'), s24: loadSeries(histDir, asset, '1d'), s15: loadSeries(histDir, asset, '15m') }));
-  const basket: Record<string, Candle[]> = Object.fromEntries(loaded.filter((x) => x.s1.candles.length).map((x) => [x.asset, x.s1.candles]));
-  for (const a of storedAssets(histDir)) if (!(a in basket)) { const c = loadSeries(histDir, a, '1h').candles; if (c.length) basket[a] = c; }
-  const btcdom = loadIndexSeries(histDir, 'BTCDOM', '1h').candles;
-  const ctx = new TaNetContext({
-    h1: basket, btcdom1h: btcdom, btcd1d: loadIndexSeries(histDir, 'BTC.D', '1d').candles, usdtd1d: loadIndexSeries(histDir, 'USDT.D', '1d').candles,
-    slow1d: Object.fromEntries(SLOW_INDEXES.map(({ asset }) => [asset, loadIndexSeries(histDir, asset, '1d').candles])),
-  });
+  const { basket, btcdom, daily, ctx } = inp;
+  const loaded = inp.loaded.map((x) => ({ asset: x.asset, s1: x.s1, s24: x.s24 ?? loadSeries(histDir, x.asset, '1d'), s15: x.s15 ?? loadSeries(histDir, x.asset, '15m') }));
   const cov = ctx.coverage();
   log(`market context: basket ${ctx.basket.join(', ') || 'none'}; ${Object.entries(cov).map(([k, v]) => `${k} ${v.from}..${v.to}`).join(', ') || 'no index series (BTCDOM: history.sh binance; BTC.D / USDT.D: history.sh tradingview)'}`);
   for (const { asset, s1, s24, s15 } of loaded) {
     const h1 = s1.candles, d1 = s24.candles;
-    if (h1.length < TANET_H1_BARS + 200 || d1.length < TANET_D1_BARS + TANET_MACRO_DAYS) { log(`${asset}: only ${h1.length} hourly / ${d1.length} daily bars, skipped`); continue; }
+    if (!trainable(h1, d1)) { log(`${asset}: only ${h1.length} hourly / ${d1.length} daily bars, skipped`); continue; }
     sources[asset] = [...new Set([...s1.segments, ...s24.segments, ...s15.segments].map((s) => s.source))];
-    const { ts, X } = assetRows(asset, h1, d1, cacheDir, log, ctx, { m15: s15.candles, basket, btcdom });
+    const { ts, X } = assetRows(asset, h1, d1, cacheDir, log, ctx, { m15: s15.candles, basket, btcdom, daily });
     const dayVec = new Map<number, number[]>(), dayDom = new Map<number, number[]>();
     for (let j = TANET_D1_BARS - 1; j < d1.length; j++) { const v = taNetDayVector(d1, j); if (v) dayVec.set(d1[j].ts, v); dayDom.set(d1[j].ts, ctx.daily(asset, d1[j].ts)); }
     const a = out.length;
@@ -1022,7 +1189,7 @@ export async function trainTaNetMain(argOf: (k: string, d: string) => string = c
   const assets = spec === 'all' ? storedAssets(hist) : spec.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
   if (!assets.length) throw new Error(`need at least one asset with hourly history in ${hist} (npm run history:binance / history:import)`);
   const cache = argOf('cache', path.join(hist, '.tanet-cache'));
-  const D = buildData(hist, assets, cache, log);
+  const D = await buildDataParallel(hist, assets, cache, log, workerCount());
   const num = (k: string, d: string) => Number(argOf(k, d));
   const rep = await trainTaNet(D, {
     trainMonths: num('train-months', '12'), evalMonths: num('eval-months', '1'), stepMonths: num('step-months', '1'), holdoutMonths: num('holdout-months', '3'), finalMonths: num('final-months', '2'),
