@@ -326,6 +326,11 @@ export interface TaNetConfig {
   retrainEveryDays: number;
   /** Network layout trained by the pipeline: flat, or grouped (indicator families; TA_NET_ARCH). */
   arch: 'flat' | 'grouped';
+  /** Training engine (TA_NET_ENGINE): ts, torch (PyTorch, on the GPU when there is one: python/tanet) or auto (torch
+   *  when a Python with PyTorch starts, else ts). The live bot always runs the network in TypeScript. */
+  engine: 'ts' | 'torch' | 'auto';
+  /** Python interpreter for the torch engine (TA_NET_PYTHON; default python3 / python). */
+  python: string;
   /** Population tournament: rolling training block, evaluation window, untouched holdout (months). */
   trainMonths: number;
   evalMonths: number;
@@ -1190,6 +1195,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       historyReplayAssets: (env.HISTORY_REPLAY_ASSETS ?? 'BTC,ETH,SOL,XRP,DOGE').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
       retrainEveryDays: num(env, 'TA_NET_RETRAIN_DAYS', 7, 0, 365),
       arch: oneOf(env, 'TA_NET_ARCH', 'flat', ['flat', 'grouped'] as const),
+      engine: oneOf(env, 'TA_NET_ENGINE', 'ts', ['ts', 'torch', 'auto'] as const),
+      python: env.TA_NET_PYTHON ?? '',
       trainMonths: num(env, 'TA_NET_TRAIN_MONTHS', 12, 1, 36),
       evalMonths: num(env, 'TA_NET_EVAL_MONTHS', 1, 0.25, 6),
       stepMonths: num(env, 'TA_NET_STEP_MONTHS', 1, 0.25, 6),

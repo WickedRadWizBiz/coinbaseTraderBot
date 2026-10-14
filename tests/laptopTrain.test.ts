@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
-import { afterRound, championsGone, CONTINUE_STEPS, filesToPull, filesToPush, guideText, laptopProfile, localManifest, parseManifest, roundOutcome, safeServerEnv, scoreboard, Server } from '../research/laptopTrain';
+import { afterRound, championsGone, CONTINUE_STEPS, filesToPull, filesToPush, guideText, laptopProfile, LOCAL_ONLY_DIRS, localManifest, parseManifest, roundOutcome, safeServerEnv, scoreboard, Server } from '../research/laptopTrain';
 import { dailyStats, type ReadinessFile } from '../research/readiness';
 import { tmpDir } from './helpers';
 
@@ -137,4 +137,14 @@ test('laptop trainer: pull and push stream files through ssh + tar (fake ssh run
     assert.equal(fs.readFileSync(path.join(home, 'bot/data/models/archive/ta_net/v1.json'), 'utf8'), '{"v":1}');
     assert.equal(filesToPull(parseManifest(srv.run(`cd ~/bot/data && find . -type f -printf '%P\\t%s\\t%T@\\n'`).out), localManifest(here)).length, 0, 'a pushed file keeps its time: the next pull does not copy it back');
   } finally { process.env.PATH = oldPath; }
+});
+
+test('the trainer\'s own Python and PyTorch are never compared with the server\'s files', () => {
+  const d = tmpDir();
+  for (const f of ['python-env/Lib/x.py', 'python-dist/cpython/python.exe', 'uv-cache/w.whl', 'models/python-env/y', 'a.txt']) {
+    fs.mkdirSync(path.dirname(path.join(d, f)), { recursive: true });
+    fs.writeFileSync(path.join(d, f), '');
+  }
+  assert.deepEqual([...localManifest(d, LOCAL_ONLY_DIRS).keys()].sort(), ['a.txt', 'models/python-env/y']);
+  assert.equal(localManifest(d).size, 5);
 });

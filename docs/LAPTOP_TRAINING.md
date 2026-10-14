@@ -412,7 +412,24 @@ on the newest years. On an 8-thread laptop a round's `gp` step takes about 10 mi
 
 ## GPU
 
-Not used. The networks are small spiking and feed-forward models written in TypeScript. A member's time
-goes into replaying the market event by event (prices, books, features, decisions), which is branchy CPU
-work a graphics card cannot run, rather than into big matrix multiplications. The population "stacking"
-therefore happens across CPU threads, as described above.
+The TA network's tournament (`ta_net`) trains on the GPU. Everything else runs on the CPU, because those members' time goes into replaying the market event by event. That is branchy work a graphics card cannot run, and population "stacking" there happens across CPU threads (above).
+
+**Setup is automatic, on the first run that trains the TA network:**
+1. The trainer finds the NVIDIA GPU (`nvidia-smi`).
+2. With the bundled `uv\uv.exe`, it creates `trainer-data\python-env` (Python 3.12, downloaded into `trainer-data\python-dist`).
+3. It installs the CUDA 12.8 build of PyTorch there. RTX 50xx (Blackwell) cards need CUDA 12.8. This is a one-time download of about 3 GB.
+4. It runs a small network through PyTorch and through TypeScript, and checks that they agree.
+
+The window's log shows each step, and then: `TA network trains in PyTorch ... on the GPU (NVIDIA GeForce RTX 5060 Laptop GPU)`. Later runs only check the environment, which takes a few seconds.
+
+- **No NVIDIA GPU:** it installs the CPU build instead (about 300 MB), which is still about 4 times faster than the TypeScript trainer.
+- **Anything fails** (no internet, an old driver, a failed check): the TA network trains in TypeScript as before. The log says why, and the next run tries again.
+- **Driver:** CUDA 12.8 needs NVIDIA driver 570 or newer. If the log says the GPU does not answer, update the driver from nvidia.com or the Lenovo Vantage app.
+
+**The tournament in progress continues.** Weights move between TypeScript and PyTorch unchanged, so a saved tournament (say, round 70 of 96) carries on from where it stopped. After every tournament round, the log shows the speed: `round N: PyTorch trained ... samples in ... s (.../s, CUDA graph)`.
+
+To check or set up PyTorch without training, run `node\node.exe app\dist\laptopTrain.cjs --torch-check --data trainer-data` from the KalshiTrainer folder. Exit code 0 means it is ready.
+
+To keep the TA network in TypeScript, put `TA_NET_ENGINE=ts` in `trainer-data\trainer.env`. To use a Python you already have that includes PyTorch, put `TA_NET_PYTHON=C:\path\to\python.exe` there.
+
+To free the disk space PyTorch takes, delete `trainer-data\python-env`, `python-dist` and `uv-cache`. They are set up again on the next run (TypeScript if not).
