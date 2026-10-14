@@ -11,7 +11,7 @@ import type { Candle } from '../bot/ta/indicators';
 import { branchBackward, branchForward, branchLayout, branchLoss, fractalPlan, fractalSpecs, initBranchParams, type BranchDrop } from '../bot/ta/branchNet';
 import { columnMask, localDropMask, type JoinMask } from '../bot/ta/fractal';
 import { aggregateCandles, upsertSeries } from '../research/history/candles';
-import { buildData, buildDataParallel, fitNorms, forecast, rawInputs, taNetDims, trainTaNet, writeTaNetPack } from '../research/trainTaNet';
+import { buildData, buildDataParallel, computeRowsInWorkers, fitNorms, forecast, loadTaNetInputs, oneThreadReason, rawInputs, taNetDims, trainTaNet, writeTaNetPack } from '../research/trainTaNet';
 import { TaNetTorch, torchSelfTest } from '../research/taNetTorch';
 import { ensureTorch, envPython } from '../research/torchSetup';
 import { tmpDir } from './helpers';
@@ -251,4 +251,16 @@ test('rows on worker threads: the same dataset as one thread; a second build fin
   const logs2: string[] = [];
   await buildDataParallel(dir, ['TST', 'BTC'], cache, (m) => logs2.push(m), 2, { freeGb: 64 });
   assert.ok(!logs2.some((m) => /computing|computed/.test(m)), logs2.join('\n'));
+});
+
+test('rows on one thread: the log says why (memory, TRAIN_WORKERS, a single coin)', async () => {
+  const { dir } = history();
+  const inp = loadTaNetInputs(dir, ['TST', 'BTC']);
+  const logs: string[] = [];
+  const n = await computeRowsInWorkers(dir, ['TST', 'BTC'], path.join(dir, '.cache-none'), inp, (m) => logs.push(m), 8, { freeGb: 2.4 });
+  assert.equal(n, 0);
+  assert.match(logs.join('\n'), /computing \d+ hourly rows for TST, BTC on one thread: only 2\.4 GB of memory is free, and each extra thread needs about 0\.75 GB/);
+  assert.match(oneThreadReason(2, 1, 32, 1), /TRAIN_WORKERS is 1/);
+  assert.match(oneThreadReason(1, 8, 32, 1), /only one coin needs them/);
+  assert.equal(oneThreadReason(3, 8, 32, 3), '');
 });

@@ -296,9 +296,15 @@ export async function computeRowsInWorkers(histDir: string, assets: string[], ca
     const rows = rowsToCompute(asset, h1, d1, cacheDir, { m15: s15?.candles ?? loadSeries(histDir, asset, '15m').candles, basket: inp.basket, btcdom: inp.btcdom, daily: inp.daily });
     if (rows >= minRows) jobs.push({ asset, rows });
   }
+  if (!jobs.length) return 0;
   const freeGb = o.freeGb ?? os.freemem() / 2 ** 30;
   const n = Math.max(1, Math.min(workers, jobs.length, Math.floor((freeGb - 1.5) / 0.75)));
-  if (jobs.length < 2 || n < 2) return 0;
+  const why = oneThreadReason(jobs.length, workers, freeGb, n);
+  if (why) {
+    const total = jobs.reduce((s, j) => s + j.rows, 0);
+    log(`computing ${total} hourly rows for ${jobs.map((j) => j.asset).join(', ')} on one thread: ${why} (about ${Math.max(1, Math.round(total / 3500))} min)`);
+    return 0;
+  }
   jobs.sort((a, b) => b.rows - a.rows);
   const total = jobs.reduce((s, j) => s + j.rows, 0);
   log(`computing ${total} hourly rows for ${jobs.length} coins on ${n} threads (${freeGb.toFixed(1)} GB free memory): ${jobs.map((j) => j.asset).join(', ')}`);
@@ -325,6 +331,15 @@ export async function computeRowsInWorkers(histDir: string, assets: string[], ca
   return jobs.length;
 }
 
+/** Why a rebuild runs on one thread ('' when it runs on several). Each extra thread holds the whole basket (about
+ *  0.75 GB), with 1.5 GB kept free for the rest of the computer. */
+export function oneThreadReason(coins: number, workers: number, freeGb: number, n: number): string {
+  if (coins < 2) return 'only one coin needs them, and one coin cannot be split over threads';
+  if (workers < 2) return 'TRAIN_WORKERS is 1 (set it to the number of CPU threads to use more)';
+  if (n < 2) return `only ${freeGb.toFixed(1)} GB of memory is free, and each extra thread needs about 0.75 GB on top of 1.5 GB kept free; closing other programs frees memory for the next rebuild`;
+  return '';
+}
+
 export interface TaNetRowsJob { histDir: string; assets: string[]; asset: string; cacheDir: string }
 export interface TaNetRowsOut { computed: number; logs: string[] }
 
@@ -340,7 +355,7 @@ export function rowsJob(j: TaNetRowsJob, inp: TaNetInputs): TaNetRowsOut {
 /** buildData with the row (re)computation spread over `workers` threads first. */
 export async function buildDataParallel(histDir: string, assets: string[], cacheDir: string | undefined, log: (m: string) => void, workers: number, o: { minRows?: number; freeGb?: number } = {}): Promise<TaNetData> {
   const inp = loadTaNetInputs(histDir, assets);
-  if (cacheDir && workers > 1) await computeRowsInWorkers(histDir, assets, cacheDir, inp, log, workers, o);
+  if (cacheDir) await computeRowsInWorkers(histDir, assets, cacheDir, inp, log, workers, o);
   return buildData(histDir, assets, cacheDir, log, inp);
 }
 
