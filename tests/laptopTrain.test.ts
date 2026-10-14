@@ -23,6 +23,12 @@ test('laptop trainer: manifests, what to copy down and what to send back', () =>
   const srv = [{ path: 'models/a.json', size: 5, mtime: 10_000 }, { path: 'models/b.json', size: 7, mtime: 50_000 }];
   const loc = new Map([['models/a.json', { path: 'models/a.json', size: 9, mtime: 20_000 }], ['models/b.json', { path: 'models/b.json', size: 9, mtime: 20_000 }]]);
   assert.deepEqual(filesToPull(srv, loc).map((f) => f.path), ['models/b.json']);
+  // A Kalshi series' index stays this machine's once it has one (the server lists 60 days, the laptop 365); new
+  // day files still come down, and a missing index is still pulled.
+  const kIdx = 'history/kalshi/KXBTC15M/.index.json', kDay = 'history/kalshi/KXBTC15M/2026-10-01.jsonl';
+  const srvK = [{ path: kIdx, size: 9, mtime: 90_000 }, { path: kDay, size: 9, mtime: 90_000 }];
+  assert.deepEqual(filesToPull(srvK, new Map([[kIdx, { path: kIdx, size: 5, mtime: 10_000 }]])).map((f) => f.path), [kDay]);
+  assert.deepEqual(filesToPull(srvK, new Map()).map((f) => f.path), [kIdx, kDay]);
   // Never sent: links to replay days, caches the server rebuilds, logs, partial writes.
   const files = ['work/perp-dataset/2021-01-01.json.gz', 'work/perp-dataset-rec/x.gz', 'work/perp-backtest-days/md-2021-01-01.jsonl.gz', 'work/sweep-replay/md-2021-01-01.jsonl.gz', 'work/vol-replay/a', 'work/readiness-days/b', 'work/tanet-cache/BTC.bin',
     'logs/pipeline-laptop.log', 'x.json.tmp', 'work/history-ledger.json', 'readiness.json', 'work/snnpbt/perps/state.json', 'archive/ta_net/v1.json'];

@@ -175,13 +175,47 @@ const stamp = (t: number) => new Date(t).toISOString().replace(/[-:T]/g, '').sli
 const row = (c: Candle): number[] => (c.tb !== undefined ? [c.ts / 1000, c.l, c.h, c.o, c.c, c.v, c.tb] : [c.ts / 1000, c.l, c.h, c.o, c.c, c.v]);
 
 /** Sequential reader of a sorted candle CSV (ts,o,h,l,c,v[,tb]): hands out bars in time order. */
+/** Byte offset of a line start at or shortly before the first bar with ts >= bound, in a CSV of bars sorted by time
+ *  (binary search on the file: resuming a replay in year 9 reads from there, not years of 1-minute bars from the
+ *  first line). 0 for small files; a line that does not parse counts as "too far" (reading starts earlier, never
+ *  later, than the bound). */
+export function csvOffsetAt(file: string, bound: number, minSize = 1 << 20): number {
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch { return 0; }
+  if (size < minSize) return 0;
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(4096);
+    // The first whole line starting after byte `pos`: its time and where it starts.
+    const lineAfter = (pos: number): { ts: number; at: number } | undefined => {
+      const n = fs.readSync(fd, buf, 0, buf.length, pos);
+      const nl = buf.indexOf(10);
+      if (nl < 0 || nl >= n - 1) return undefined;
+      const end = buf.indexOf(10, nl + 1);
+      const line = buf.toString('latin1', nl + 1, end < 0 || end > n ? n : end);
+      return { ts: Number(line.slice(0, line.indexOf(','))), at: pos + nl + 1 };
+    };
+    let lo = 0, loAt = 0, hi = size;
+    while (hi - lo > 65_536) {
+      const mid = Math.floor((lo + hi) / 2);
+      const r = lineAfter(mid);
+      if (r && Number.isFinite(r.ts) && r.ts > 0 && r.ts < bound) { lo = mid; loAt = r.at; } else hi = mid;
+    }
+    return loAt;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 class CsvStream {
   private it?: AsyncIterator<string>;
   private head?: Candle | null;
+  /** Where reading starts (a resume seeks there instead of reading from the first line). */
+  private startAt = 0;
   constructor(private readonly file: string) {}
   private async next(): Promise<Candle | null> {
     if (!fs.existsSync(this.file)) return null;
-    this.it ??= readline.createInterface({ input: fs.createReadStream(this.file), crlfDelay: Infinity })[Symbol.asyncIterator]();
+    this.it ??= readline.createInterface({ input: fs.createReadStream(this.file, { start: this.startAt }), crlfDelay: Infinity })[Symbol.asyncIterator]();
     for (;;) {
       const r = await this.it.next();
       if (r.done) return null;
@@ -198,8 +232,9 @@ class CsvStream {
     while (this.head && this.head.ts < bound) { out.push(this.head); this.head = await this.next(); }
     return out;
   }
-  /** Drop the bars before `bound`. */
+  /** Drop the bars before `bound` (before reading has started: seek close to it first). */
   async skip(bound: number): Promise<void> {
+    if (this.head === undefined && !this.it) this.startAt = csvOffsetAt(this.file, bound);
     if (this.head === undefined) this.head = await this.next();
     while (this.head && this.head.ts < bound) this.head = await this.next();
   }

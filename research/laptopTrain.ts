@@ -84,8 +84,13 @@ export function localManifest(root: string): Map<string, RemoteFile> {
 /** Server files to copy down: missing here, or newer on the server (2 s slack for file systems). A file
  *  changed here since (a model, the ledger, a tournament's state) is never overwritten by an older copy. */
 export function filesToPull(remote: RemoteFile[], local: Map<string, RemoteFile>): RemoteFile[] {
-  return remote.filter((f) => { const l = local.get(f.path); return !l || f.mtime > l.mtime + 2000; });
+  return remote.filter((f) => { const l = local.get(f.path); return !l || (f.mtime > l.mtime + 2000 && !KEEP_LOCAL.test(f.path)); });
 }
+
+/** Kept from this machine once it has its own: a Kalshi series' stored-market index records which close-time range
+ *  this machine listed completely, and the server's (60 days of contracts) would make the laptop (365) list the whole
+ *  year again on every run. The day files themselves still come down; the index catches up with them by size. */
+const KEEP_LOCAL = /(^|\/)history\/kalshi\/[^/]+\/\.index\.json$/;
 
 /** The conditioning champion and its rollback copy (bot/strategy/conditioningOverlay.ts). The server is their
  *  source of truth: a dashboard rollback replaces or removes them there, so they are sent up only when this trainer
