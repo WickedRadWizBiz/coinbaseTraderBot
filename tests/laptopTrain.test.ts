@@ -148,3 +148,10 @@ test('the trainer\'s own Python and PyTorch are never compared with the server\'
   assert.deepEqual([...localManifest(d, LOCAL_ONLY_DIRS).keys()].sort(), ['a.txt', 'models/python-env/y']);
   assert.equal(localManifest(d).size, 5);
 });
+
+test('the TA network\'s row cache is never copied down; the laptop\'s own tournament is kept once it has one', () => {
+  const srv = parseManifest(['models/work/tanet-cache/BTC.json\t10\t2000', 'models/work/tanet-cache/BTC.f32\t99\t2000', 'models/work/tanet-cache/torch-pack/meta.json\t5\t2000', 'models/work/tanet-population.json\t50\t2000', 'models/ta_net.json\t7\t2000'].join('\n'));
+  const older = (p: string) => [p, { path: p, size: 1, mtime: 1_000_000 }] as const;
+  assert.deepEqual(filesToPull(srv, new Map([older('models/work/tanet-population.json'), older('models/ta_net.json')])).map((f) => f.path), ['models/ta_net.json'], 'server copies are newer, but the cache and the laptop\'s tournament stay');
+  assert.deepEqual(filesToPull(srv, new Map()).map((f) => f.path), ['models/work/tanet-population.json', 'models/ta_net.json'], 'a laptop without a tournament starts from the server\'s');
+});
