@@ -528,20 +528,16 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     const full = !only && (round === 1 || Date.now() - lastFull >= 24 * 3_600_000);
     if (full && round > 1) await pull(2, true);
     if (full) lastFull = Date.now();
-    let steps = only ?? (full ? undefined : CONTINUE_STEPS);
-    if (o.skipDataDownload && (!steps || steps.includes('history'))) {
-      if (!steps) {
-        const { STEPS } = await import('./pipeline');
-        steps = [...STEPS];
-      }
-      steps = steps.filter((s) => s !== 'history');
-    }
-    log(`round ${round}: ${steps ? steps.join(', ') : 'every step'} (${continuous ? 'until it stops by itself' : `${(left / 3_600_000).toFixed(1)} h left`})`);
+    const steps = only ?? (full ? undefined : CONTINUE_STEPS);
+    // Skip data download: no history step either (the pipeline leaves it out with --skip; listing every step with
+    // --only instead would also run conditioning, which runs only when named).
+    const skip = o.skipDataDownload ? ['--skip', 'history'] : [];
+    log(`round ${round}: ${steps ? steps.join(', ') : 'every step'}${o.skipDataDownload ? ' (no history download)' : ''} (${continuous ? 'until it stops by itself' : `${(left / 3_600_000).toFixed(1)} h left`})`);
     const sweepAll = !!o.sweepAll && round === 1;
     hooks?.roundStart?.(round, full, sweepAll);
     hooks?.phase?.('pipeline');
     const r0 = Date.now();
-    const code = await runRound(envFor(continuous ? 24 : left / 3_600_000), steps, logFile, sweepAll ? ['--sweep-all'] : [], hooks);
+    const code = await runRound(envFor(continuous ? 24 : left / 3_600_000), steps, logFile, [...(sweepAll ? ['--sweep-all'] : []), ...skip], hooks);
     if (stopped()) { why = 'stopped'; log(`round ${round} stopped`); break; }
     lastMs = Date.now() - r0;
     process.exitCode = code === 0 ? 0 : 1;
