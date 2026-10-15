@@ -131,7 +131,7 @@ export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: Cos
   for (const g0 of sigs) {
     const at = g0.ts + TF_MS[g0.tf]!;
     const reading = oos?.at(A.asset, at);
-    const g = applyRatchet(adaptToVol(g0, reading?.vol), atr4hAt(A.h1, at), costs.entry + costs.takerExit);
+    const g = applyRatchet(adaptToVol(g0, reading?.vol), atr4hAt(A.h1, at), costs.entry + costs.takerExit, RATCHET, reading?.vol);
     const tr = simulateSetup(A, g, costs);
     if (!tr?.closed) continue;
     const k = key(g0);
@@ -480,6 +480,7 @@ export async function trainSetupMain(argOf: (k: string, d: string) => string = c
   Object.assign(RATCHET, {
     lanes: (['off', 'slow', 'fast', 'both'] as const).find((x) => x === lanes) ?? 'slow',
     stopAtr: num('ratchet-stop-atr', 3.5), beAtr: num('ratchet-be-atr', 2), trailStartAtr: num('ratchet-trail-start-atr', 3.5), trailAtr: num('ratchet-trail-atr', 3),
+    volK: (() => { const v = Number(argOf('ratchet-vol-k', process.env.SETUP_RATCHET_VOL_K ?? '0')); return Number.isFinite(v) ? v : 0; })(),
   });
   const p = await trainSetupModel(hist, { oosOut: argOf('oos-out', '') || undefined, assets: assets ? assets.split(',') : undefined, equityUsd: Number(argOf('equity', '10000')), holdoutMonths: Number(argOf('holdout-months', '9')), finalMonths: Number(argOf('final-months', '3')) });
   fs.mkdirSync(path.dirname(out), { recursive: true });

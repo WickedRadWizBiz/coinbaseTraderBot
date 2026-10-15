@@ -514,7 +514,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const oosCand = path.join(work, 'setup_oos.candidate.json');
       const p = await trainSetupMain(argsOf({
         history: T.historyDir, out: cand, 'oos-out': oosCand, equity: P.paperBalanceUsd > 100 ? P.paperBalanceUsd : 10_000,
-        ratchet: P.setupRatchet, 'ratchet-stop-atr': P.setupRatchetStopAtr, 'ratchet-be-atr': P.setupRatchetBeAtr, 'ratchet-trail-start-atr': P.setupRatchetTrailStartAtr, 'ratchet-trail-atr': P.setupRatchetTrailAtr,
+        ratchet: P.setupRatchet, 'ratchet-stop-atr': P.setupRatchetStopAtr, 'ratchet-be-atr': P.setupRatchetBeAtr, 'ratchet-trail-start-atr': P.setupRatchetTrailStartAtr, 'ratchet-trail-atr': P.setupRatchetTrailAtr, 'ratchet-vol-k': P.setupRatchetVolK,
       }));
       state.setupsTrainedAt = now;
       const validated = (['fast', 'slow'] as const).filter((l) => p.validation[l]?.passed);

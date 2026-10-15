@@ -655,6 +655,8 @@ export interface PerpsConfig {
   setupRatchetBeAtr: number;
   setupRatchetTrailStartAtr: number;
   setupRatchetTrailAtr: number;
+  /** SETUP_RATCHET_VOL_K: the unit is ATR(4h) x exp(k x the TA network's 4h volatility forecast); 0 = plain ATR(4h). */
+  setupRatchetVolK: number;
 }
 
 export class ConfigError extends Error {}
@@ -1079,6 +1081,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         setupRatchetBeAtr: num(env, 'SETUP_RATCHET_BE_ATR', 2, 0.25, 20),
         setupRatchetTrailStartAtr: num(env, 'SETUP_RATCHET_TRAIL_START_ATR', 3.5, 0.25, 30),
         setupRatchetTrailAtr: num(env, 'SETUP_RATCHET_TRAIL_ATR', 3, 0.25, 20),
+        setupRatchetVolK: num(env, 'SETUP_RATCHET_VOL_K', 0, -2, 2),
       };
     })(),
     macro: macroConfig(env),

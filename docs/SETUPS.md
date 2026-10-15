@@ -56,6 +56,8 @@ For the lanes it covers, the ratchet replaces the break-even and trailing rules 
 
 The stop only ever tightens, and the stop on the exchange moves with it (it only ever tightens too). The lanes size by stop distance, so a wider stop means a smaller position, with the same dollars at risk. That makes the sizing volatility-scaled: when 4h volatility doubles, the position halves.
 
+**The volatility unit.** By default the unit is ATR(4h). With `SETUP_RATCHET_VOL_K` = k, it becomes ATR(4h) × exp(k × the TA network's validated 4h volatility forecast), clamped to 0.67–1.5×. A positive k widens the stops before an expected volatility expansion and tightens them before a quiet spell. The `setups-ratchet` sweep tests k against plain ATR (k = 0) on the TA network's walk-forward forecasts, and it stays 0 unless the sweep shows the forecast is the better unit.
+
 The settings the model was trained with are recorded in the setup model (`ratchet`), and the live trader manages trades with exactly those, so a change to `SETUP_RATCHET` takes effect at the next retraining. The `setups-ratchet` sweep tunes it.
 
 ### Liquidation beyond the stop (`bot/risk/liquidation.ts`)
@@ -198,6 +200,7 @@ Two changes. The fast lane gained the **momentum burst**: join a volatile move a
 | `PERP_PILOT_MAX_NOTIONAL_USD` | 25 | Size cap while a lane is unvalidated |
 | `SETUP_RATCHET` | `slow` | The 4h ATR ratchet exit: `off`, `slow`, `fast` or `both` (takes effect at the next retraining) |
 | `SETUP_RATCHET_STOP_ATR` / `_BE_ATR` / `_TRAIL_START_ATR` / `_TRAIL_ATR` | 3.5 / 2 / 3.5 / 3 | Initial stop, break-even plus fees, trail start and trail distance, all in 4h ATRs |
+| `SETUP_RATCHET_VOL_K` | 0 | Scale the unit by exp(k × the TA network's 4h volatility forecast), clamped 0.67–1.5× (0 = ATR(4h) alone) |
 | `PERP_LIQ_BUFFER` | 0.2 | The stop may use at most 1 − buffer of the room to liquidation |
 | `PERP_MAINT_MARGIN` | 0 | Maintenance margin rate; 0 = half the initial margin implied by the exchange's leverage estimate (else 5%) |
 
