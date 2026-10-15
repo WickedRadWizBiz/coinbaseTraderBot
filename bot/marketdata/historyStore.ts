@@ -90,7 +90,7 @@ export function seriesEnds(file: string): { header: string; lastTs: number; ends
 }
 
 /** Rows in a stored series (newlines counted in chunks; the file is not parsed). */
-function countRows(file: string): number {
+export function countRows(file: string): number {
   const fd = fs.openSync(file, 'r'), buf = Buffer.alloc(1 << 20);
   let n = 0, k: number;
   try { while ((k = fs.readSync(fd, buf, 0, buf.length, null)) > 0) for (let i = 0; i < k; i++) if (buf[i] === 10) n++; } finally { fs.closeSync(fd); }
@@ -99,8 +99,9 @@ function countRows(file: string): number {
 
 /** Merge `incoming` into the stored series and write it back; returns the stored length. When every incoming
  *  bar is newer than the stored series (a download adding the latest days), the bars are appended instead:
- *  rewriting years of 1-minute bars for one new day took half a minute per series. */
-export function upsertSeries(dir: string, source: string, asset: string, tf: HistTf, incoming: Candle[]): number {
+ *  rewriting years of 1-minute bars for one new day took half a minute per series. `count`: false skips counting
+ *  the stored rows after an append (returns 0; a download storing many chunks counts once, at the end). */
+export function upsertSeries(dir: string, source: string, asset: string, tf: HistTf, incoming: Candle[], count = true): number {
   const file = seriesPath(dir, source, asset, tf);
   const ends = seriesEnds(file);
   if (ends && incoming.length) {
@@ -109,7 +110,7 @@ export function upsertSeries(dir: string, source: string, asset: string, tf: His
     if (add[0].ts > ends.lastTs && (tbCol || !add.some((c) => c.tb !== undefined)) && /^ts,o,h,l,c,v(,tb)?$/.test(ends.header)) {
       const rows = add.map((c) => `${c.ts},${fmt(c.o)},${fmt(c.h)},${fmt(c.l)},${fmt(c.c)},${fmt(c.v)}${tbCol ? `,${c.tb !== undefined ? fmt(c.tb) : ''}` : ''}`);
       fs.appendFileSync(file, `${ends.endsWithNewline ? '' : '\n'}${rows.join('\n')}\n`);
-      return countRows(file);
+      return count ? countRows(file) : 0;
     }
   }
   const merged = mergeCandles(readSeries(file), incoming);

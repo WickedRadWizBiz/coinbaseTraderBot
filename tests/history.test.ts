@@ -328,3 +328,42 @@ test('history replay seek: the byte offset found starts a whole line just before
   fs.writeFileSync(path.join(dir, 'small.csv'), rows.slice(0, 100).join('\n'));
   assert.equal(csvOffsetAt(path.join(dir, 'small.csv'), t0 + 50 * M), 0, 'small files are read from the start');
 });
+
+test('Binance Vision: 1-minute series are fetched and stored a year at a time, oldest first; a re-published archive is merged', async () => {
+  const dir = tmpDir();
+  const M = 60_000;
+  const monthStart = (i: number) => Date.UTC(2021, i, 1);
+  const bars = (i: number, n = 5) => walk(n, T0, 30 + i).map((c, j) => ({ ...c, ts: monthStart(i) + j * M }));
+  const key = (i: number) => { const d = new Date(monthStart(i)); return `data/spot/monthly/klines/BTCUSDT/1m/BTCUSDT-1m-${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}.zip`; };
+  const files: Record<string, Buffer> = {};
+  for (let i = 0; i < 30; i++) files[key(i)] = makeZip('x.csv', binanceCsv(bars(i)));
+  const file = seriesPath(dir, 'binance', 'BTC', '1m');
+  let storedWhenLaterFetched = Infinity;
+  const fetchImpl = (async (u: string | URL) => {
+    const url = String(u);
+    if (url.includes('?delimiter=')) {
+      const prefix = decodeURIComponent(/prefix=([^&]+)/.exec(url)![1]);
+      // Listed newest first: the order they are fetched in must not depend on it.
+      const keys = Object.keys(files).filter((k) => k.startsWith(prefix)).reverse();
+      return new Response(`<ListBucketResult><IsTruncated>false</IsTruncated>${keys.map((k) => `<Contents><Key>${k}</Key><Size>${files[k].length}</Size></Contents>`).join('')}</ListBucketResult>`);
+    }
+    const k = url.replace(/^https:\/\/[^/]+\/(data\.binance\.vision\/)?/, '');
+    if (k.endsWith('.CHECKSUM')) return new Response('nope', { status: 404 });
+    // An archive of the second year: the first year is already on disk.
+    if (k >= key(12)) storedWhenLaterFetched = Math.min(storedWhenLaterFetched, readSeries(file).length);
+    return files[k] ? new Response(new Uint8Array(files[k])) : new Response('nope', { status: 404 });
+  }) as typeof fetch;
+  const r = await downloadBinance({ out: dir, assets: ['BTC'], intervals: ['1m'], markets: ['spot'], fetchImpl, log: () => undefined });
+  assert.deepEqual([r[0].fetched, r[0].failed, r[0].bars], [30, 0, 150]);
+  assert.equal(storedWhenLaterFetched, 60, 'the first 12 months were stored before the next ones were fetched');
+  const stored = readSeries(file);
+  assert.equal(stored.length, 150);
+  assert.ok(stored.every((c, i) => i === 0 || c.ts > stored[i - 1].ts), 'ascending, no duplicates');
+  // Binance re-publishes one month with a bar more: only it is fetched, and merged into the stored series.
+  files[key(5)] = makeZip('x.csv', binanceCsv(bars(5, 6)));
+  const again = await downloadBinance({ out: dir, assets: ['BTC'], intervals: ['1m'], markets: ['spot'], fetchImpl, log: () => undefined });
+  assert.deepEqual([again[0].fetched, again[0].bars], [1, 151]);
+  const after = readSeries(file);
+  assert.equal(after.length, 151);
+  assert.ok(after.every((c, i) => i === 0 || c.ts > after[i - 1].ts));
+});

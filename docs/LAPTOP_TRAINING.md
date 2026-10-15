@@ -83,6 +83,10 @@ The trainer now sizes itself to the computer (`research/trainerResources.ts`):
 
   Memory can lower these. A 16-thread laptop with 16 GB runs 5 workers (Gentle: 4); with 32 GB, Balanced
   runs 8. The tournaments field one network per worker, and the evolved formulas 2,000 per worker.
+- **The history download.** Years of 1-minute bars are fetched and stored a year at a time, oldest first.
+  It used to hold all of a coin's archives in memory before storing them: several GB per coin, six coins at
+  once on a first download. Measured on 3 coins × 4 years: a peak of 2.5 GB instead of 5.4 GB, and a little
+  faster.
 - **Priority.** The trainer, the pipeline, PyTorch and every worker run below normal priority (Gentle: the
   idle class), so whatever you do comes first. The trainer window itself runs at normal priority.
 - **Memory caps that hold.**
