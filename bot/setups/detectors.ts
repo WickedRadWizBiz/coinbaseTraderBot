@@ -48,6 +48,8 @@ export interface ExitPlan {
   /** Profit lock: once price has gone this many R in our favour, trail by tightTrailAtr instead. */
   tightenAfterR?: number;
   tightTrailAtr?: number;
+  /** The 4h ATR ratchet (applyRatchet): replaces the break-even and trailing rules above; ATR(4h) at entry. */
+  ratchet?: { atr: number; beAtr: number; trailStartAtr: number; trailAtr: number; fee: number };
 }
 
 export interface SetupSignal {
@@ -207,6 +209,37 @@ export function detectLast(asset: string, tf: Timeframe, cs: Candle[], daily?: C
  *  widens before an expected volatility expansion and tightens before a quiet spell. trailK = 0 turns it
  *  off; the sweep optimizer tunes it (research/sweep.ts, target setups-vol). */
 export const VOL_ADAPT = { trailK: 0 };
+
+/** The 4h ATR ratchet exit (off by default; SETUP_RATCHET, recorded in the setup model so live trades are
+ *  managed exactly as they were trained). The initial stop sits stopAtr ATR(4h) from the entry (the lanes size
+ *  by stop distance, so a wider stop means a smaller position, the same dollars at risk). Once the trade has
+ *  gone beAtr ATRs in its favour the stop moves to break-even plus round-trip fees; from trailStartAtr ATRs it
+ *  trails the best price by trailAtr ATRs. It only ever tightens, and the exchange-side stop with it. */
+export const RATCHET: RatchetSettings = { lanes: 'off', stopAtr: 3.5, beAtr: 2, trailStartAtr: 3.5, trailAtr: 3 };
+export interface RatchetSettings { lanes: 'off' | 'slow' | 'fast' | 'both'; stopAtr: number; beAtr: number; trailStartAtr: number; trailAtr: number }
+
+/** Hourly bars behind the 4h ATR: 70 4h bars (Wilder smoothing settles to ~2%), within the 320 the live candle store
+ *  keeps, so the research simulation and the live bot compute the same number. */
+export const ATR4H_WINDOW_H1 = 280;
+
+/** 14-period ATR of the 4h bars built from the last ATR4H_WINDOW_H1 hourly bars closed by `at` (complete 4h bars only). */
+export function atr4hAt(h1: Candle[] | undefined, at: number, n = 14): number | undefined {
+  if (!h1?.length) return undefined;
+  let lo = 0, hi = h1.length - 1, k = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (h1[m].ts + 3_600_000 <= at) { k = m; lo = m + 1; } else hi = m - 1; }
+  if (k < 1) return undefined;
+  const bars = aggregate(h1.slice(Math.max(0, k + 1 - ATR4H_WINDOW_H1), k + 1), 14_400_000);
+  if (bars.length < n + 1) return undefined;
+  const a = atr(bars, n)[bars.length - 1];
+  return Number.isFinite(a) && a > 0 ? a : undefined;
+}
+
+/** The signal managed by the 4h ATR ratchet (unchanged when off, for another lane, or without a 4h ATR).
+ *  `fee`: round-trip cost as a fraction of price (the break-even stop covers it). */
+export function applyRatchet(sig: SetupSignal, atr4h: number | undefined, fee: number, r: RatchetSettings = RATCHET): SetupSignal {
+  if (r.lanes === 'off' || !(atr4h !== undefined && atr4h > 0) || !(r.lanes === 'both' || r.lanes === sig.lane)) return sig;
+  return { ...sig, stop: sig.ref - sig.dir * r.stopAtr * atr4h, plan: { ...sig.plan, ratchet: { atr: atr4h, beAtr: r.beAtr, trailStartAtr: r.trailStartAtr, trailAtr: r.trailAtr, fee } } };
+}
 
 /** The signal with its trail scaled by the volatility forecast (unchanged when off or without one). */
 export function adaptToVol(sig: SetupSignal, vol: number | undefined, k = VOL_ADAPT.trailK): SetupSignal {

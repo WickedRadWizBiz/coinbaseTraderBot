@@ -22,6 +22,8 @@
 //   setups-vol                   the volatility-adapted trail (bot/setups/detectors.ts VOL_ADAPT): how
 //                                much the TA network's 4h volatility forecast (walk-forward export,
 //                                research/taNetOos.ts) widens / tightens fast-lane trails; both sides
+//   setups-ratchet               the 4h ATR ratchet exit on the slow lane (bot/setups/detectors.ts RATCHET): on /
+//                                off and its distances, by the t-statistic of net R per trade on the daily setups
 //   kalshi                       the Kalshi contract strategy (edge thresholds, buffers, exit margin,
 //                                Kelly fraction, per-trade EV target), scored by the t-statistic of net
 //                                P&L per 15-minute window in the production backtester over the bot's
@@ -180,6 +182,52 @@ export async function setupsTarget(hist: string, side: 1 | -1 | 0): Promise<Swee
   };
 }
 
+/** The 4h ATR ratchet exit (bot/setups/detectors.ts RATCHET) on the slow lane's daily setups, every coin with history:
+ *  on / off, the initial stop, break-even and trail distances, scored by the t-statistic of net R per trade (the
+ *  lanes size by stop distance, so R is what the account feels). Same windows as the setup sweeps. */
+export async function ratchetTarget(hist: string): Promise<SweepTarget> {
+  const { loadAssetBars, simulateSetup } = await import('./trainSetupModel');
+  const { RATCHET, applyRatchet, atr4hAt, detectAt, TF_MS } = await import('../bot/setups/detectors');
+  const { DEFAULT_COSTS, tradeResult } = await import('../bot/setups/exits');
+  const { storedAssets } = await import('./history/candles');
+  const assets = storedAssets(hist).map((a) => loadAssetBars(hist, a)).filter((A): A is NonNullable<typeof A> => Boolean(A));
+  const WIN: Record<SweepWindow, [number, number]> = { tune: [Date.UTC(2020, 0, 1), Date.UTC(2024, 6, 1)], check: [Date.UTC(2024, 6, 1), Date.UTC(2025, 6, 1)], final: [Date.UTC(2025, 6, 1), Infinity] };
+  if (RATCHET.lanes === 'off') RATCHET.lanes = 'slow';
+  const on = { v: 1 };
+  const p = (name: keyof typeof RATCHET, values: number[]): SweepParam => ({ name: `ratchet.${name}`, values, get: () => Number(RATCHET[name]), set: (v) => { (RATCHET as unknown as Record<string, number>)[name] = v; } });
+  const fee = DEFAULT_COSTS.entry + DEFAULT_COSTS.takerExit;
+  return {
+    name: 'setups-ratchet',
+    minN: 30,
+    params: [
+      { name: 'ratchet.on', values: [0, 1], get: () => on.v, set: (v) => { on.v = v; } },
+      p('stopAtr', [2.5, 3, 3.5, 4.5]), p('beAtr', [1.5, 2, 3]), p('trailStartAtr', [2.5, 3.5, 5]), p('trailAtr', [2, 3, 4]),
+    ],
+    snapshot: () => ({ 'ratchet.on': on.v, 'ratchet.stopAtr': RATCHET.stopAtr, 'ratchet.beAtr': RATCHET.beAtr, 'ratchet.trailStartAtr': RATCHET.trailStartAtr, 'ratchet.trailAtr': RATCHET.trailAtr }),
+    async fitness(w) {
+      const [from, to] = WIN[w];
+      const rs: number[] = [];
+      const settings = { ...RATCHET, lanes: on.v ? ('slow' as const) : ('off' as const) };
+      for (const A of assets) {
+        const s = A.series['1d'];
+        if (!s) continue;
+        let busyUntil = 0;
+        for (let i = 60; i < s.cs.length; i++) {
+          const ts = s.cs[i].ts;
+          if (ts < from || ts >= to || ts < busyUntil) continue;
+          const g = detectAt(A.asset, '1d', s, i, s);
+          if (!g || g.lane !== 'slow') continue;
+          const t = simulateSetup(A, applyRatchet(g, atr4hAt(A.h1, ts + TF_MS['1d']!), fee, settings), DEFAULT_COSTS);
+          if (!t?.closed) continue;
+          busyUntil = t.closed.ts;
+          rs.push(tradeResult(t).r);
+        }
+      }
+      return tStat(rs);
+    },
+  };
+}
+
 /** Kalshi contracts through the production backtester. Windows: the recorded days split 70 / 15 / 15. */
 export async function kalshiTarget(recordings: string, modelPath: string): Promise<SweepTarget> {
   const { runBacktest } = await import('./backtest');
@@ -258,6 +306,7 @@ export async function sweepMain(argOf: (k: string, d: string) => string = cliArg
   const target = argOf('target', 'setups-long');
   const t = target === 'kalshi' ? await kalshiTarget(argOf('recordings', 'data/recordings'), argOf('model', 'params/model.json'))
     : target === 'bot' ? await botTarget(argOf('recordings', 'data/recordings'), argOf('history', 'data/history'), argOf('model', 'params/model.json'), argOf('setup-oos', 'data/models/setup_oos.json'), argOf('setup-model', '') || undefined)
+    : target === 'setups-ratchet' ? await ratchetTarget(argOf('history', 'data/history'))
     : await setupsTarget(argOf('history', 'data/history'), target === 'setups-short' ? -1 : target === 'setups-vol' ? 0 : 1);
   const out = argOf('out', path.join('data', 'sweeps', `${target}.json`));
   return runSweep(t, { hours: Number(argOf('hours', '2')), epsilon: Number(argOf('epsilon', '0.05')), tolerance: Number(argOf('tolerance', '0.1')), maxPasses: Number(argOf('passes', '6')), ledgerPath: out });

@@ -32,13 +32,15 @@ import type { Timeframe } from '../ta/knowledge';
 import type { DirTarget, DirectionalContext } from '../perps/hedger';
 import type { PerpHub } from '../perps/perpData';
 import type { PerpGateway } from '../perps/perpRest';
-import { adaptToVol, detectLast, FAST_TFS, SLOW_TFS, SETUP_MIN_BARS, TF_MS, type Lane, type SetupSignal } from './detectors';
+import { adaptToVol, applyRatchet, atr4hAt, detectLast, FAST_TFS, SLOW_TFS, SETUP_MIN_BARS, TF_MS, type Lane, type SetupSignal } from './detectors';
 import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from './exits';
 import { setupFeatureMap, setupVector, type SetupBars, type TaNetReading } from './features';
 import type { SnnContext } from '../model/featureEngine';
 import { playbook } from '../strategy/playbook';
 import { DEFAULT_LANES, LaneBook, type Candidate, type LaneBookParams } from './lanes';
 import { SetupModel } from './setupModel';
+import { maintenanceRate, maxSafeNotional, reservedFor, safeShare } from '../risk/liquidation';
+import type { PerpRiskPosition } from '../perps/perpRest';
 
 export interface SetupTraderParams {
   book: LaneBookParams;
@@ -48,6 +50,10 @@ export interface SetupTraderParams {
   pilotMaxNotionalUsd: number;
   requireValidation: boolean;
   dailyGoalUsd: number;
+  /** Liquidation beyond the stop (bot/risk/liquidation.ts): buffer, and the maintenance margin rate (0 / unset =
+   *  half the initial margin implied by the exchange's leverage estimate). */
+  liqBuffer?: number;
+  maintMargin?: number;
 }
 
 export interface SetupTraderDeps {
@@ -161,6 +167,23 @@ export class SetupTrader {
       fs.renameSync(tmp, this.d.statePath);
     } catch (e) { this.lastError = `save: ${String(e)}`; }
   }
+
+  /** The exchange's liquidation estimates per ticker (refreshed at most once a minute). */
+  private risk?: { ts: number; byTicker: Map<string, PerpRiskPosition> };
+  private async refreshRisk(now: number): Promise<Map<string, PerpRiskPosition> | undefined> {
+    if (this.risk && now - this.risk.ts < 60_000) return this.risk.byTicker;
+    if (!this.d.gateway.getRisk) return undefined;
+    try {
+      const r = await this.d.gateway.getRisk();
+      this.risk = { ts: now, byTicker: new Map(r.map((p) => [p.ticker, p])) };
+      return this.risk.byTicker;
+    } catch (e) {
+      this.lastError = `risk: ${String(e)}`;
+      return this.risk?.byTicker;
+    }
+  }
+
+  private mmrOf(asset: string): number { return maintenanceRate(this.d.hub.get(asset)?.latest?.leverage, this.d.params.maintMargin); }
 
   private async refreshEquity(now: number): Promise<number | undefined> {
     if (this.equity && now - this.equity.ts < 30_000) return this.equity.value;
@@ -291,7 +314,9 @@ export class SetupTrader {
         if (!raw) continue;
         const at = last.ts + TF_MS[tf]!;
         const tn = this.reading(asset, at);
-        const sig = adaptToVol(raw, tn?.vol, this.model?.params.volTrailK ?? 0);
+        const ratchet = this.model?.params.ratchet;
+        const costs = this.d.params.costs;
+        const sig = applyRatchet(adaptToVol(raw, tn?.vol, this.model?.params.volTrailK ?? 0), atr4hAt(set.bars['1h'], at), costs.entry + costs.takerExit, ratchet ?? { lanes: 'off', stopAtr: 0, beAtr: 0, trailStartAtr: 0, trailAtr: 0 });
         const score = this.score(sig, at);
         const queued = Number.isFinite(score) && this.book.offer(sig, score, now);
         this.d.audit?.write('setup_signal', { asset, lane: sig.lane, kind: sig.kind, tf, dir: sig.dir, ref: sig.ref, stop: sig.stop, score, queued });
@@ -329,11 +354,19 @@ export class SetupTrader {
         const t = openTrade(e.cand.sig, e.px, now, this.d.params.costs);
         if (!t) continue;
         const pilot = !this.model?.validated(t.lane);
-        // Keep liquidation well beyond the stop: at most half the exchange's leverage for the market.
+        // Liquidation beyond the stop (bot/risk/liquidation.ts): the equity left after the open trades' losses at
+        // their stops and their maintenance margin must carry this one to its stop with the buffer to spare. Also at
+        // most half the exchange's leverage for the market.
         const lev = this.d.hub.get(t.asset)?.latest?.leverage;
         const levCap = lev && lev > 0 ? equity * 0.5 * lev : Infinity;
-        // The conviction multiplier widens the pilot cap with it (never the leverage cap).
-        t.notional = Math.min(pilot ? Math.min(e.notional, this.d.params.pilotMaxNotionalUsd * e.mult) : e.notional, levCap);
+        const reserved = [...this.book.positions.values()].reduce((sum, o) => sum + reservedFor({ notional: (o.notional ?? 0) * o.frac, entry: o.entry, stop: o.stop, dir: o.dir, mmr: this.mmrOf(o.asset) }), 0);
+        const liqCap = maxSafeNotional({ equity, reserved, stopFrac: Math.abs(t.entry - t.stop) / t.entry, mmr: this.mmrOf(t.asset), buffer: this.d.params.liqBuffer ?? 0.2 });
+        // The conviction multiplier widens the pilot cap with it (never the leverage or liquidation caps).
+        t.notional = Math.min(pilot ? Math.min(e.notional, this.d.params.pilotMaxNotionalUsd * e.mult) : e.notional, levCap, liqCap);
+        if (!(t.notional > 0)) {
+          this.d.audit?.write('setup_skip', { asset: t.asset, lane: t.lane, kind: t.kind, reason: `liquidation would fall inside the stop (equity $${equity.toFixed(2)}, $${reserved.toFixed(2)} tied up by open trades)` });
+          continue;
+        }
         t.score = e.score;
         this.book.add(t);
         this.lastPx.set(t.asset, e.px);
@@ -341,6 +374,28 @@ export class SetupTrader {
         this.d.audit?.write('setup_trade', { event: 'opened', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, stop: t.stop, target1: t.plan.target1, target2: t.plan.target2, notional: t.notional, score: e.score, pilot, conviction: e.mult, convictionWhy: e.why ?? null, capped: e.capped ?? null });
         const tnE = this.reading(t.asset, now);
         this.d.journal?.trade({ ts: now, event: 'opened', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entryTs: t.entryTs, entry: t.entry, stop: t.stop, notional: t.notional, score: e.score, pilot, tn_up1: tnE?.up1 ?? null, tn_up4: tnE?.up4 ?? null, tn_vol: tnE?.vol ?? null, ...this.snnOf(t.asset) });
+      }
+    }
+
+    // 3b. Liquidation guard on open positions: when the exchange's liquidation estimate is not far enough beyond the
+    // stop (other positions moved, funding, a thin account), cut the trade until it is. The estimate belongs to the
+    // position the exchange holds, so the cut is a share of that, and nothing is judged while an earlier cut is
+    // still on its way (the exchange holds more than the trade wants: the estimate predates the cut).
+    const risk = this.book.positions.size ? await this.refreshRisk(now) : undefined;
+    const guarded = new Set<string>();
+    if (risk) for (const [asset, t] of this.book.positions) {
+      const l = this.d.hub.get(asset)?.latest, r = l?.ticker ? risk.get(l.ticker) : undefined, spot = this.d.spot(asset, now);
+      const perpPx = l?.bid !== undefined && l?.ask !== undefined ? (l.bid + l.ask) / 2 : undefined;
+      if (!r?.liquidationPrice || !(perpPx && spot && spot > 0) || Math.sign(r.position) !== t.dir || !(t.frac > 0)) continue;
+      const held = Math.abs(r.position) * perpPx, want = (t.notional ?? 0) * t.frac;
+      if (held > want * 1.001 + (l!.fractional ? 0.01 : 1) * perpPx) continue;
+      const ratio = perpPx / spot;
+      const share = safeShare({ dir: t.dir, entry: t.entry * ratio, stop: t.stop * ratio, liquidation: r.liquidationPrice, mmr: this.mmrOf(asset), buffer: this.d.params.liqBuffer ?? 0.2 });
+      if (share < 0.999) {
+        const from = t.notional ?? 0;
+        t.notional = Math.min(from, (held * share) / t.frac);
+        guarded.add(asset); changed = true;
+        this.d.audit?.write('liquidation_guard', { asset, ticker: l!.ticker, liquidation: r.liquidationPrice, stop: +(t.stop * ratio).toFixed(4), entry: +(t.entry * ratio).toFixed(4), notionalFrom: from, notionalTo: t.notional });
       }
     }
 
@@ -370,7 +425,7 @@ export class SetupTrader {
       const contracts = Math.sign(t.dir) * Math.floor(((t.notional ?? 0) * t.frac) / perpPx / step + 1e-9) * step;
       const stopPrice = +(t.stop * ratio).toFixed(4);
       const reason = `${t.lane} ${t.tf} ${t.kind} ${t.dir > 0 ? 'long' : 'short'} from ${t.entry.toFixed(4)}: stop ${t.stop.toFixed(4)}${t.partialDone ? ' (half off, stop at break-even or trailing)' : ''}${t.plan.target1 !== undefined && !t.partialDone ? `, target ${t.plan.target1.toFixed(4)}` : ''}${t.plan.target2 !== undefined ? ` then ${t.plan.target2.toFixed(4)}` : ', trailing'}`;
-      out.push({ asset, ticker: l.ticker, target: +contracts.toFixed(4), urgent: false, reason, stopPrice });
+      out.push({ asset, ticker: l.ticker, target: +contracts.toFixed(4), urgent: guarded.has(asset), reason: guarded.has(asset) ? `liquidation guard: cut so the liquidation sits beyond the stop; ${reason}` : reason, stopPrice });
       this.lastDecisions.set(l.ticker, { target: contracts, reason, stop: stopPrice });
     }
     if (changed) this.save();

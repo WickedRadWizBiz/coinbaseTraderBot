@@ -243,6 +243,7 @@ In live trading, `ModelHealth` stops new risk if the rolling log-loss advantage 
   - **Size.** Fractional Kelly for a continuous bet: `leverage = PERP_KELLY_FRACTION × net ÷ σ_H²`, capped by:
     - `PERP_MAX_LEVERAGE` (3) and half the exchange's leverage estimate;
     - `0.5 ÷ stop distance`, so the stop always sits well inside the liquidation distance;
+    - the liquidation cap (`bot/risk/liquidation.ts`): `(1 − PERP_LIQ_BUFFER) ÷ (stop distance + maintenance rate)`, reduced by what the other open positions tie up, so the liquidation sits at least 25% beyond the stop (the setup trader uses the same cap and also cuts open trades when the exchange's liquidation estimate drifts inside it; docs/SETUPS.md);
     - `PERP_MAX_NOTIONAL_USD` per market and `PERP_MAX_TOTAL_NOTIONAL_USD` overall.
   - **Stops on the exchange.** Each directional position gets a Kalshi exit trigger (`PUT /margin/cross/positions/{ticker}/exit_trigger`, stop-loss on the liquidation mark) at `max(PERP_STOP_ATR_MULT × 1h ATR, PERP_MIN_STOP_BPS)` from the entry. It protects the position even while the bot is down. The bot also flattens itself if the touch crosses the stop, then cools down for `PERP_COOLDOWN_MIN`.
   - **Account guards.**

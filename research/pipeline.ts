@@ -508,7 +508,10 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     await run('setups', async () => {
       const cand = path.join(work, 'setup_model.candidate.json');
       const oosCand = path.join(work, 'setup_oos.candidate.json');
-      const p = await trainSetupMain(argsOf({ history: T.historyDir, out: cand, 'oos-out': oosCand, equity: P.paperBalanceUsd > 100 ? P.paperBalanceUsd : 10_000 }));
+      const p = await trainSetupMain(argsOf({
+        history: T.historyDir, out: cand, 'oos-out': oosCand, equity: P.paperBalanceUsd > 100 ? P.paperBalanceUsd : 10_000,
+        ratchet: P.setupRatchet, 'ratchet-stop-atr': P.setupRatchetStopAtr, 'ratchet-be-atr': P.setupRatchetBeAtr, 'ratchet-trail-start-atr': P.setupRatchetTrailStartAtr, 'ratchet-trail-atr': P.setupRatchetTrailAtr,
+      }));
       state.setupsTrainedAt = now;
       const validated = (['fast', 'slow'] as const).filter((l) => p.validation[l]?.passed);
       const summary = { version: p.version, validated, holdout: Object.fromEntries((['fast', 'slow'] as const).map((l) => [l, p.validation[l]?.periods.holdout])), reasons: Object.fromEntries((['fast', 'slow'] as const).map((l) => [l, p.validation[l]?.reasons])) };

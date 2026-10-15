@@ -631,6 +631,19 @@ export interface PerpsConfig {
   setupSlowRiskUsd: number;
   /** Skip trades whose first target pays less than this after fees (0 = off). */
   setupMinTargetUsd: number;
+  /** Liquidation beyond the stop (bot/risk/liquidation.ts): the stop may use at most (1 - buffer) of the room to
+   *  liquidation (PERP_LIQ_BUFFER), and the maintenance margin rate (PERP_MAINT_MARGIN; 0 = half the initial margin
+   *  implied by the exchange's leverage estimate). */
+  liqBuffer: number;
+  maintMargin: number;
+  /** The 4h ATR ratchet exit for setup trades (bot/setups/detectors.ts RATCHET; recorded in the setup model, so the
+   *  live trader manages trades exactly as they were trained): SETUP_RATCHET (off | slow (default) | fast | both), the initial
+   *  stop, break-even plus fees, and the trail, all in 4h ATRs. */
+  setupRatchet: 'off' | 'slow' | 'fast' | 'both';
+  setupRatchetStopAtr: number;
+  setupRatchetBeAtr: number;
+  setupRatchetTrailStartAtr: number;
+  setupRatchetTrailAtr: number;
 }
 
 export class ConfigError extends Error {}
@@ -1022,6 +1035,13 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         setupFastRiskUsd: num(env, 'SETUP_FAST_RISK_USD', 0, 0, 1e7),
         setupSlowRiskUsd: num(env, 'SETUP_SLOW_RISK_USD', 0, 0, 1e7),
         setupMinTargetUsd: num(env, 'SETUP_MIN_TARGET_USD', 0, 0, 1e7),
+        liqBuffer: num(env, 'PERP_LIQ_BUFFER', 0.2, 0, 0.9),
+        maintMargin: num(env, 'PERP_MAINT_MARGIN', 0, 0, 0.5),
+        setupRatchet: oneOf(env, 'SETUP_RATCHET', 'slow', ['off', 'slow', 'fast', 'both'] as const),
+        setupRatchetStopAtr: num(env, 'SETUP_RATCHET_STOP_ATR', 3.5, 0.5, 20),
+        setupRatchetBeAtr: num(env, 'SETUP_RATCHET_BE_ATR', 2, 0.25, 20),
+        setupRatchetTrailStartAtr: num(env, 'SETUP_RATCHET_TRAIL_START_ATR', 3.5, 0.25, 30),
+        setupRatchetTrailAtr: num(env, 'SETUP_RATCHET_TRAIL_ATR', 3, 0.25, 20),
       };
     })(),
     optimalF: {
@@ -1053,7 +1073,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       ablationEveryDays: num(env, 'AUTO_TRAIN_ABLATION_EVERY_DAYS', 7, 0, 365),
       snnTrainDays: num(env, 'AUTO_TRAIN_SNN_TRAIN_DAYS', 21, 1, 365),
       onModelChange: bool(env, 'AUTO_TRAIN_ON_MODEL_CHANGE', true),
-      sweepTargets: (env.SWEEP_TARGETS ?? 'setups-long,setups-short,setups-vol,kalshi,bot').split(',').map((x) => x.trim()).filter(Boolean),
+      sweepTargets: (env.SWEEP_TARGETS ?? 'setups-long,setups-short,setups-vol,setups-ratchet,kalshi,bot').split(',').map((x) => x.trim()).filter(Boolean),
       sweepHours: num(env, 'SWEEP_HOURS', 2, 0.05, 48),
       taNetOosHours: num(env, 'TA_NET_OOS_HOURS', 3, 0.05, 48),
       sweepEveryDays: num(env, 'SWEEP_EVERY_DAYS', 7, 1, 365),

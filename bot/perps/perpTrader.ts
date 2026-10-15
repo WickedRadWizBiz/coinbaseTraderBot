@@ -10,8 +10,9 @@
 //   hold      while dir x mu - maker(exit) - funding >= exitEdgeBps and the hold is not older than
 //             maxHoldMin without a fresh entry-strength signal (hysteresis: no churn on small moves)
 //   size      fractional Kelly for a continuous bet: leverage = kelly x net / sigma_H^2, capped by
-//               maxLeverage, half the exchange's leverage estimate, 0.5 / stop distance (the stop
-//               must sit well inside the liquidation distance), per-asset and total notional caps;
+//               maxLeverage, half the exchange's leverage estimate, 0.5 / stop distance, the liquidation
+//               cap (bot/risk/liquidation.ts: the liquidation sits beyond the stop with a buffer, after the
+//               other positions), per-asset and total notional caps;
 //               an unvalidated signal is capped at the pilot limits
 //   stop      max(stopAtrMult x 1h ATR, minStopBps) from the entry, placed ON THE EXCHANGE
 //             (Kalshi exit trigger on the liquidation mark) so it protects the position even if the
@@ -27,8 +28,13 @@ import type { DirTarget, DirectionalContext } from './hedger';
 import type { PerpHub } from './perpData';
 import type { PerpGateway } from './perpRest';
 import { perpFeatures, priorMuBps, type PerpFeatureSources, type PerpModel } from './perpSignal';
+import { liquidationLeverageCap, maintenanceRate } from '../risk/liquidation';
 
 export interface PerpTraderParams {
+  /** Liquidation beyond the stop (bot/risk/liquidation.ts): buffer and maintenance margin rate (0 / unset = from
+   *  the exchange's leverage estimate). */
+  liqBuffer?: number;
+  maintMargin?: number;
   /** Perp sigma inflation per unit of capital locked in binaries (sigma x (1 + k x locked)). */
   lockedVolMult?: number;
   horizonMin: number;
@@ -125,10 +131,15 @@ export function decidePerp(i: PerpDecisionInput, p: PerpTraderParams): PerpDecis
   // margin, so the perp's assumed volatility is inflated by that share (smaller perp size).
   const sigma = (i.sigmaHBps / 1e4) * (1 + (p.lockedVolMult ?? 1) * Math.max(0, Math.min(1, i.lockedFrac ?? 0)));
   const kellyLev = (p.kellyFraction * Math.max(0, net) / 1e4) / (sigma * sigma);
+  // Liquidation beyond the stop: the equity left after the other positions (their stop losses and maintenance,
+  // estimated at this stop distance) must carry this one to its stop with the buffer to spare.
+  const mmr = maintenanceRate(i.marketLeverage, p.maintMargin);
+  const reservedFrac = i.equity > 0 ? (i.otherNotional * (stopFrac + mmr)) / i.equity : 1;
   const caps = [
     p.maxLeverage,
     i.marketLeverage && i.marketLeverage > 0 ? 0.5 * i.marketLeverage : Infinity,
     0.5 / stopFrac,
+    Math.max(0, 1 - reservedFrac) * liquidationLeverageCap(stopFrac, mmr, p.liqBuffer ?? 0.2),
     i.validated ? Infinity : p.pilotMaxLeverage,
   ];
   const lev = Math.min(kellyLev, ...caps);
