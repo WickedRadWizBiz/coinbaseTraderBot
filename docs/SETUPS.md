@@ -60,6 +60,36 @@ The stop only ever tightens, and the stop on the exchange moves with it (it only
 
 The settings the model was trained with are recorded in the setup model (`ratchet`), and the live trader manages trades with exactly those, so a change to `SETUP_RATCHET` takes effect at the next retraining. The `setups-ratchet` sweep tunes it.
 
+### Spot-led setups: the lead-lag study and the spot pullback (`SETUP_SPOT_PB`, off until proven)
+
+The setups are drawn on Coinbase spot candles and traded on the Kalshi perp. The 4th-generation spec's 5.2 asks whether spot *leads* the perp. If it does, spot-chart pullback rules would be worth adding. That is measured before anything is built on it:
+
+- **The study** (`research/leadLag.ts`, the weekly `lead_lag` pipeline step, `npm run research:lead-lag`): from the recordings' real prints, each coin's spot price and perp mid on a one-second grid.
+  - It measures the cross-correlation of their returns at -60..60 s.
+  - It computes a lead score over lags beyond two of the perp feed's poll intervals, against the reverse score. The perp is polled every `PERPS_POLL_MS` (2 s), and anything shorter is the polling.
+  - **The tradeable test:** at fresh perp quotes only, how far the perp moves in the direction of the largest 10% of spot-perp gaps over the next 5–60 s, against the cost of trading it (10 bps). Polling and API latency leave gaps too small to pay for themselves.
+  - A coin's verdict is "spot leads" only when the lead score's 95% lower bound is above 0 and above the reverse, and a big-gap move's lower bound clears the cost. The verdicts go to `data/models/lead_lag.json`.
+- **The spot pullback** (`spotpb`, fast lane, `bot/setups/detectors.ts`):
+  - **Long:** in an uptrend (higher timeframe), RSI dipped under 40 in the last 5 bars, price came back into a recent bullish fair value gap (a 3-bar gap) without closing through it, and the bar reclaims the 21 EMA in green. The short is the mirror image.
+  - The stop goes under the gap and the last 3 bars, with targets at 1R (half off) then 3R and an ATR trail.
+  - It runs only for coins whose verdict is "spot leads", and ahead of the plain pullback there.
+- **How it is proven:** the `setups-spotpb` sweep compares those coins' fast lanes with and without it, by the t-statistic of net R per trade on the tuning, check and final years. It stays a proposal until you set `SETUP_SPOT_PB=on`.
+- **Recorded in the model:** the coins it ran for are recorded in the setup model (`spotPullback`), so the live trader detects exactly the setups the model was trained with. The model sees them through a `kind_spotpb` flag.
+
+### Scale-out exits (`SETUP_SCALE_OUT`, off until proven)
+
+A generic scale-out policy (the 4th-generation spec's 5.1): partial take-profits at R multiples, with the remainder trailed. For the lanes it covers, it replaces the two targets:
+- **First step:** once price has gone `SETUP_SCALE_R1` R in the trade's favour, `SETUP_SCALE_F1` of the original position comes off at that level (a resting maker exit). A bar that opens beyond the level fills at the open. The stop then moves to break-even, unless the ratchet manages the stop.
+- **Second step:** the same at `SETUP_SCALE_R2` R for `SETUP_SCALE_F2` of the position. Set `SETUP_SCALE_F2` to 0 for a single step.
+- **The remainder:** at least 5% of the position always stays on. It trails the best close by `SETUP_SCALE_TRAIL_ATR` ATRs of the setup's timeframe, and it only ever tightens.
+- **Before the first step:** the lane manages the trade as it normally would.
+- **Conservative fills:** a bar that touches both the stop and a step is resolved against the trade (the stop first).
+
+**How it is proven.**
+- The `setups-scale` sweep backtests it on every coin's history across both lanes against each lane's own exits (`scale.on` = 0 is the baseline). It tunes the steps and the trail on the tuning years, and accepts a change only if it holds on the check and final windows (t-statistic of net R per trade, real fees).
+- It stays a proposal: `SETUP_SCALE_OUT` is `off` until you adopt it.
+- Once on, the settings are recorded in the setup model (`scaleOut`), and the live trader takes the same partial exits through the same reconciliation it uses for the half-off at the first target.
+
 ### Liquidation beyond the stop (`bot/risk/liquidation.ts`)
 
 Under cross margin, a position is liquidated when the account's equity, after the move, falls to its maintenance margin. If the liquidation price sat inside the stop, the exchange would close the trade at a worse price before the stop could fire. So:
@@ -201,6 +231,9 @@ Two changes. The fast lane gained the **momentum burst**: join a volatile move a
 | `SETUP_RATCHET` | `slow` | The 4h ATR ratchet exit: `off`, `slow`, `fast` or `both` (takes effect at the next retraining) |
 | `SETUP_RATCHET_STOP_ATR` / `_BE_ATR` / `_TRAIL_START_ATR` / `_TRAIL_ATR` | 3.5 / 2 / 3.5 / 3 | Initial stop, break-even plus fees, trail start and trail distance, all in 4h ATRs |
 | `SETUP_RATCHET_VOL_K` | 0 | Scale the unit by exp(k × the TA network's 4h volatility forecast), clamped 0.67–1.5× (0 = ATR(4h) alone) |
+| `SETUP_SPOT_PB` | `off` | The spot pullback setups for the coins where spot leads the perp (`lead_lag.json`); adopt from the `setups-spotpb` sweep (takes effect at the next retraining) |
+| `SETUP_SCALE_OUT` | `off` | Scale-out exits: `off`, `slow`, `fast` or `both` (adopt from the `setups-scale` sweep; takes effect at the next retraining) |
+| `SETUP_SCALE_R1` / `_F1` / `_R2` / `_F2` / `_TRAIL_ATR` | 1 / 0.33 / 2 / 0.33 / 2.5 | The two steps (R multiple, share of the original position; F2 = 0: one step) and the remainder's trail in ATRs |
 | `PERP_LIQ_BUFFER` | 0.2 | The stop may use at most 1 − buffer of the room to liquidation |
 | `PERP_MAINT_MARGIN` | 0 | Maintenance margin rate; 0 = half the initial margin implied by the exchange's leverage estimate (else 5%) |
 

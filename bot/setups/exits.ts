@@ -4,6 +4,8 @@
 //   1. stop (a gap through it exits at the bar's open)
 //   2. first target: half off at the target (maker), stop moved to break-even
 //   3. final target: the rest off at the target (maker)
+//   (scale-out plans instead: each step's share off at its R multiple (maker), stop to break-even after the first,
+//   the rest trailed)
 // At the close of a bar of the trade's own timeframe: the trailing stop follows the best close by
 // trailAtr ATRs (fast lane after the first target, slow lane from the start; it only ever tightens),
 // and the time stop exits at the close after maxBars.
@@ -41,9 +43,11 @@ export interface OpenTrade {
   initialStop: number;
   stop: number;
   plan: ExitPlan;
-  /** Remaining share of the position (1, then 0.5 after the first target). */
+  /** Remaining share of the position (1, then 0.5 after the first target, or less after each scale-out step). */
   frac: number;
   partialDone: boolean;
+  /** Scale-out steps taken. */
+  scaled?: number;
   /** Best close since entry (in the trade's direction). */
   best: number;
   bars: number;
@@ -104,6 +108,23 @@ export function stepTrade(t: OpenTrade, bar: Candle, barMs: number, costs: CostM
     return true;
   }
   const p = t.plan;
+  if (p.scaleOut) {
+    // Scale-out: each step's share off at its level, stop to break-even after the first (the ratchet's own
+    // break-even, when it manages the stop, is left to it).
+    const risk = Math.abs(t.entry - t.initialStop);
+    for (let k = t.scaled ?? 0; k < p.scaleOut.steps.length; k++) {
+      const st = p.scaleOut.steps[k], level = t.entry + d * st.r * risk;
+      if (!(risk > 0) || !(d > 0 ? bar.h >= level : bar.l <= level)) break;
+      const px = d > 0 ? Math.max(level, bar.o) : Math.min(level, bar.o), f = Math.min(st.frac, t.frac);
+      t.realized += f * ret(t, px);
+      t.costs += f * costs.makerExit;
+      t.frac -= f;
+      t.scaled = k + 1;
+      t.partialDone = true;
+      if (!p.ratchet) t.stop = d > 0 ? Math.max(t.stop, t.entry) : Math.min(t.stop, t.entry);
+    }
+    if (t.frac <= 1e-9) { t.frac = 0; t.closed = { ts: bar.ts + barMs, px: t.entry + d * (p.scaleOut.steps[p.scaleOut.steps.length - 1]?.r ?? 0) * risk, reason: 'target' }; return true; }
+  }
   if (!t.partialDone && p.target1 !== undefined && (d > 0 ? bar.h >= p.target1 : bar.l <= p.target1)) {
     const px = d > 0 ? Math.max(p.target1, bar.o) : Math.min(p.target1, bar.o);
     t.realized += 0.5 * ret(t, px);
@@ -131,7 +152,10 @@ export function stepTrade(t: OpenTrade, bar: Candle, barMs: number, costs: CostM
   if (tfClose) {
     t.bars++;
     if (d * (tfClose.close - t.best) > 0) t.best = tfClose.close;
-    if (!p.ratchet && (t.lane === 'slow' || t.partialDone || p.trailFromStart) && tfClose.atr > 0) {
+    if (!p.ratchet && p.scaleOut && t.partialDone && tfClose.atr > 0) {
+      const trail = t.best - d * p.scaleOut.trailAtr * tfClose.atr;
+      if (d * (trail - t.stop) > 0) t.stop = trail;
+    } else if (!p.ratchet && (t.lane === 'slow' || t.partialDone || p.trailFromStart) && tfClose.atr > 0) {
       const locked = p.tightenAfterR !== undefined && p.tightTrailAtr !== undefined && t.maxFav !== undefined && d * (t.maxFav - t.entry) >= p.tightenAfterR * Math.abs(t.entry - t.initialStop);
       const trail = t.best - d * (locked ? p.tightTrailAtr! : p.trailAtr) * tfClose.atr;
       if (d * (trail - t.stop) > 0) t.stop = trail;

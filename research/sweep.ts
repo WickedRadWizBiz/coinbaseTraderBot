@@ -24,6 +24,12 @@
 //                                research/taNetOos.ts) widens / tightens fast-lane trails; both sides
 //   setups-ratchet               the 4h ATR ratchet exit on the slow lane (bot/setups/detectors.ts RATCHET): on /
 //                                off and its distances, by the t-statistic of net R per trade on the daily setups
+//   setups-scale                 scale-out exits (bot/setups/detectors.ts SCALE_OUT): partial take-profits at R
+//                                multiples, the rest trailed, against each lane's own exits (on / off, the steps, the
+//                                trail), by the t-statistic of net R per trade on both lanes' setups
+//   setups-spotpb                the spot pullback (bot/setups/detectors.ts spotpb) for the coins where Coinbase spot
+//                                leads the Kalshi perp (the latest research/leadLag.ts study): on / off, by the
+//                                t-statistic of net R per trade over those coins' fast-lane setups
 //   kalshi                       the Kalshi contract strategy (edge thresholds, buffers, exit margin,
 //                                Kelly fraction, per-trade EV target), scored by the t-statistic of net
 //                                P&L per 15-minute window in the production backtester over the bot's
@@ -234,6 +240,90 @@ export async function ratchetTarget(hist: string): Promise<SweepTarget> {
   };
 }
 
+/** Scale-out exits (bot/setups/detectors.ts SCALE_OUT, the 4th-generation spec's 5.1) on both lanes' setups, every coin
+ *  with history: on / off (off = each lane's own targets and trail, the baseline), the two steps and the trail, scored
+ *  by the t-statistic of net R per trade. A proposal like the others: SETUP_SCALE_OUT stays off until it is adopted. */
+export async function scaleTarget(hist: string): Promise<SweepTarget> {
+  const { loadAssetBars, simulateSetup } = await import('./trainSetupModel');
+  const { SCALE_OUT, applyScaleOut, detectAt, FAST_TFS, SLOW_TFS } = await import('../bot/setups/detectors');
+  const { DEFAULT_COSTS, tradeResult } = await import('../bot/setups/exits');
+  const { storedAssets } = await import('./history/candles');
+  const assets = storedAssets(hist).map((a) => loadAssetBars(hist, a)).filter((A): A is NonNullable<typeof A> => Boolean(A));
+  const WIN: Record<SweepWindow, [number, number]> = { tune: [Date.UTC(2020, 0, 1), Date.UTC(2024, 6, 1)], check: [Date.UTC(2024, 6, 1), Date.UTC(2025, 6, 1)], final: [Date.UTC(2025, 6, 1), Infinity] };
+  const on = { v: SCALE_OUT.lanes === 'off' ? 0 : 1 };
+  const p = (name: Exclude<keyof typeof SCALE_OUT, 'lanes'>, values: number[]): SweepParam => ({ name: `scale.${name}`, values, get: () => SCALE_OUT[name], set: (v) => { SCALE_OUT[name] = v; } });
+  return {
+    name: 'setups-scale',
+    minN: 30,
+    params: [
+      { name: 'scale.on', values: [0, 1], get: () => on.v, set: (v) => { on.v = v; } },
+      p('r1', [0.75, 1, 1.5]), p('f1', [0.25, 0.33, 0.5]), p('r2', [1.5, 2, 3]), p('f2', [0, 0.25, 0.33]), p('trailAtr', [1.5, 2.5, 3.5]),
+    ],
+    snapshot: () => ({ 'scale.on': on.v, 'scale.r1': SCALE_OUT.r1, 'scale.f1': SCALE_OUT.f1, 'scale.r2': SCALE_OUT.r2, 'scale.f2': SCALE_OUT.f2, 'scale.trailAtr': SCALE_OUT.trailAtr }),
+    async fitness(w) {
+      const [from, to] = WIN[w];
+      const rs: number[] = [];
+      const settings = { ...SCALE_OUT, lanes: on.v ? ('both' as const) : ('off' as const) };
+      for (const A of assets) for (const tf of [...FAST_TFS, ...SLOW_TFS]) {
+        const s = A.series[tf];
+        if (!s) continue;
+        let busyUntil = 0;
+        for (let i = 60; i < s.cs.length; i++) {
+          const ts = s.cs[i].ts;
+          if (ts < from || ts >= to || ts < busyUntil) continue;
+          const g = detectAt(A.asset, tf, s, i, A.series['1d']);
+          if (!g) continue;
+          const t = simulateSetup(A, applyScaleOut(g, settings), DEFAULT_COSTS);
+          if (!t?.closed) continue;
+          busyUntil = t.closed.ts;
+          rs.push(tradeResult(t).r);
+        }
+      }
+      return tStat(rs);
+    },
+  };
+}
+
+/** The spot pullback on / off over the fast-lane setups of the coins where spot leads (the lead-lag study's verdict).
+ *  With it on, those coins' fast lane also takes spot pullbacks (and takes them ahead of plain pullbacks). */
+export async function spotPbTarget(hist: string, leadLagFile: string): Promise<SweepTarget> {
+  const { loadAssetBars, simulateSetup } = await import('./trainSetupModel');
+  const { detectAt, FAST_TFS } = await import('../bot/setups/detectors');
+  const { DEFAULT_COSTS, tradeResult } = await import('../bot/setups/exits');
+  const { spotLeads } = await import('./leadLag');
+  const coins = spotLeads(leadLagFile);
+  if (!coins.length) throw new Error(`setups-spotpb needs at least one coin where spot leads the perp (${leadLagFile}: run the lead_lag step on the recordings)`);
+  const assets = coins.map((a) => loadAssetBars(hist, a)).filter((A): A is NonNullable<typeof A> => Boolean(A));
+  const WIN: Record<SweepWindow, [number, number]> = { tune: [Date.UTC(2020, 0, 1), Date.UTC(2024, 6, 1)], check: [Date.UTC(2024, 6, 1), Date.UTC(2025, 6, 1)], final: [Date.UTC(2025, 6, 1), Infinity] };
+  const on = { v: 0 };
+  return {
+    name: 'setups-spotpb',
+    minN: 30,
+    params: [{ name: 'spotpb.on', values: [0, 1], get: () => on.v, set: (v) => { on.v = v; } }],
+    snapshot: () => ({ 'spotpb.on': on.v, coins: coins.length }),
+    async fitness(w) {
+      const [from, to] = WIN[w];
+      const rs: number[] = [];
+      for (const A of assets) for (const tf of FAST_TFS) {
+        const s = A.series[tf];
+        if (!s) continue;
+        let busyUntil = 0;
+        for (let i = 60; i < s.cs.length; i++) {
+          const ts = s.cs[i].ts;
+          if (ts < from || ts >= to || ts < busyUntil) continue;
+          const g = detectAt(A.asset, tf, s, i, A.series['1d'], { spotPb: on.v === 1 });
+          if (!g) continue;
+          const t = simulateSetup(A, g, DEFAULT_COSTS);
+          if (!t?.closed) continue;
+          busyUntil = t.closed.ts;
+          rs.push(tradeResult(t).r);
+        }
+      }
+      return tStat(rs);
+    },
+  };
+}
+
 /** Kalshi contracts through the production backtester. Windows: the recorded days split 70 / 15 / 15. */
 export async function kalshiTarget(recordings: string, modelPath: string): Promise<SweepTarget> {
   const { runBacktest } = await import('./backtest');
@@ -313,6 +403,8 @@ export async function sweepMain(argOf: (k: string, d: string) => string = cliArg
   const t = target === 'kalshi' ? await kalshiTarget(argOf('recordings', 'data/recordings'), argOf('model', 'params/model.json'))
     : target === 'bot' ? await botTarget(argOf('recordings', 'data/recordings'), argOf('history', 'data/history'), argOf('model', 'params/model.json'), argOf('setup-oos', 'data/models/setup_oos.json'), argOf('setup-model', '') || undefined)
     : target === 'setups-ratchet' ? await ratchetTarget(argOf('history', 'data/history'))
+    : target === 'setups-scale' ? await scaleTarget(argOf('history', 'data/history'))
+    : target === 'setups-spotpb' ? await spotPbTarget(argOf('history', 'data/history'), argOf('lead-lag', 'data/models/lead_lag.json'))
     : await setupsTarget(argOf('history', 'data/history'), target === 'setups-short' ? -1 : target === 'setups-vol' ? 0 : 1);
   const out = argOf('out', path.join('data', 'sweeps', `${target}.json`));
   return runSweep(t, { hours: Number(argOf('hours', '2')), epsilon: Number(argOf('epsilon', '0.05')), tolerance: Number(argOf('tolerance', '0.1')), maxPasses: Number(argOf('passes', '6')), ledgerPath: out });

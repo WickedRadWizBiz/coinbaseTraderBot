@@ -37,6 +37,7 @@
     "research:setups": "tsx research/trainSetupModel.ts",
     "research:ta-net-oos": "tsx research/taNetOos.ts",
     "research:librarian": "tsx research/librarian.ts",
+    "research:lead-lag": "tsx research/leadLag.ts",
     "history:kalshi": "tsx research/history/kalshiHistory.ts",
     "research:sweep": "tsx research/sweep.ts",
     "research:whole-bot": "tsx research/wholeBot.ts",

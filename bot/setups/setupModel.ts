@@ -6,7 +6,7 @@
 import type { OptimalFReport } from '../strategy/optimalF';
 import fs from 'fs';
 import { gbdtLogit, validateGbdt, type GbdtModel } from '../model/trees';
-import type { Lane, RatchetSettings } from './detectors';
+import type { Lane, RatchetSettings, ScaleOutSettings } from './detectors';
 import type { CostModel } from './exits';
 import type { LaneBookParams } from './lanes';
 import { applyMask, maskedIndices, SETUP_FEATURES } from './features';
@@ -77,6 +77,10 @@ export interface SetupModelParams {
   volTrailK?: number;
   /** The 4h ATR ratchet the events were simulated with (bot/setups/detectors.ts RATCHET; unset = off). */
   ratchet?: RatchetSettings;
+  /** Scale-out exits the events were simulated with (bot/setups/detectors.ts SCALE_OUT; unset = off). */
+  scaleOut?: ScaleOutSettings;
+  /** Coins the spot pullback was detected for (bot/setups/detectors.ts SPOT_PB; unset = none). */
+  spotPullback?: string[];
   lanes: Partial<Record<Lane, LaneScorer>>;
   book: LaneBookParams;
   costs: CostModel;

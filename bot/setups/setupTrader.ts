@@ -32,7 +32,7 @@ import type { Timeframe } from '../ta/knowledge';
 import type { DirTarget, DirectionalContext } from '../perps/hedger';
 import type { PerpHub } from '../perps/perpData';
 import type { PerpGateway } from '../perps/perpRest';
-import { adaptToVol, applyRatchet, atr4hAt, detectLast, FAST_TFS, SLOW_TFS, SETUP_MIN_BARS, TF_MS, type Lane, type SetupSignal } from './detectors';
+import { adaptToVol, applyRatchet, applyScaleOut, atr4hAt, detectLast, FAST_TFS, SLOW_TFS, SETUP_MIN_BARS, TF_MS, type Lane, type SetupSignal } from './detectors';
 import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from './exits';
 import type { LibrarianReading } from '../ta/librarian';
 import { setupFeatureMap, setupVector, type SetupBars, type TaNetReading } from './features';
@@ -301,9 +301,9 @@ export class SetupTrader {
         if (atr > 0) tfClose = { close: lastBar.c, atr };
       }
       const bar: Candle = { ts: now, o: prev, h: Math.max(prev, px), l: Math.min(prev, px), c: px, v: 0 };
-      const was = t.partialDone;
+      const was = t.partialDone, wasFrac = t.frac;
       if (stepTrade(t, bar, 0, this.d.params.costs, tfClose)) { this.record(t, now); this.book.remove(asset); changed = true; if (t.closed?.reason !== 'target') exitNow.add(asset); }
-      else if (t.partialDone !== was || tfClose) changed = true;
+      else if (t.partialDone !== was || t.frac !== wasFrac || tfClose) changed = true;
     }
 
     // 2. New setups on newly closed candles.
@@ -318,13 +318,16 @@ export class SetupTrader {
         if ((this.seen.get(key) ?? 0) >= last.ts) continue;
         this.seen.set(key, last.ts); changed = true;
         if (now - (last.ts + TF_MS[tf]!) > TF_MS[tf]!) continue; // stale candles (feed catching up)
-        const raw = detectLast(asset, tf, cs, set.bars['1d']);
+        const raw = detectLast(asset, tf, cs, set.bars['1d'], { spotPb: this.model?.params.spotPullback?.includes(asset) ?? false });
         if (!raw) continue;
         const at = last.ts + TF_MS[tf]!;
         const tn = this.reading(asset, at);
         const ratchet = this.model?.params.ratchet;
         const costs = this.d.params.costs;
-        const sig = applyRatchet(adaptToVol(raw, tn?.vol, this.model?.params.volTrailK ?? 0), atr4hAt(set.bars['1h'], at), costs.entry + costs.takerExit, ratchet ?? { lanes: 'off', stopAtr: 0, beAtr: 0, trailStartAtr: 0, trailAtr: 0 }, tn?.vol);
+        const sig0 = applyRatchet(adaptToVol(raw, tn?.vol, this.model?.params.volTrailK ?? 0), atr4hAt(set.bars['1h'], at), costs.entry + costs.takerExit, ratchet ?? { lanes: 'off', stopAtr: 0, beAtr: 0, trailStartAtr: 0, trailAtr: 0 }, tn?.vol);
+        // Scale-out exits exactly as the model was trained with them (off unless it was).
+        const sc = this.model?.params.scaleOut;
+        const sig = sc ? applyScaleOut(sig0, sc) : sig0;
         const score = this.score(sig, at);
         const queued = Number.isFinite(score) && this.book.offer(sig, score, now);
         this.d.audit?.write('setup_signal', { asset, lane: sig.lane, kind: sig.kind, tf, dir: sig.dir, ref: sig.ref, stop: sig.stop, score, queued });
@@ -438,7 +441,7 @@ export class SetupTrader {
       const ratio = perpPx / spotPx;
       const contracts = Math.sign(t.dir) * Math.floor(((t.notional ?? 0) * t.frac) / perpPx / step + 1e-9) * step;
       const stopPrice = +(t.stop * ratio).toFixed(4);
-      const reason = `${t.lane} ${t.tf} ${t.kind} ${t.dir > 0 ? 'long' : 'short'} from ${t.entry.toFixed(4)}: stop ${t.stop.toFixed(4)}${t.partialDone ? ' (half off, stop at break-even or trailing)' : ''}${t.plan.target1 !== undefined && !t.partialDone ? `, target ${t.plan.target1.toFixed(4)}` : ''}${t.plan.target2 !== undefined ? ` then ${t.plan.target2.toFixed(4)}` : ', trailing'}`;
+      const reason = `${t.lane} ${t.tf} ${t.kind} ${t.dir > 0 ? 'long' : 'short'} from ${t.entry.toFixed(4)}: stop ${t.stop.toFixed(4)}${t.partialDone ? (t.plan.scaleOut ? ` (${Math.round(100 * (1 - t.frac))}% taken off, stop at break-even or trailing)` : ' (half off, stop at break-even or trailing)') : ''}${t.plan.target1 !== undefined && !t.partialDone ? `, target ${t.plan.target1.toFixed(4)}` : ''}${t.plan.target2 !== undefined ? ` then ${t.plan.target2.toFixed(4)}` : ', trailing'}`;
       out.push({ asset, ticker: l.ticker, target: +contracts.toFixed(4), urgent: guarded.has(asset), reason: guarded.has(asset) ? `liquidation guard: cut so the liquidation sits beyond the stop; ${reason}` : reason, stopPrice });
       this.lastDecisions.set(l.ticker, { target: contracts, reason, stop: stopPrice });
     }
@@ -478,7 +481,7 @@ export class SetupTrader {
   status() {
     const m = this.model;
     const today = this.day ? this.day.realized : 0;
-    const open = [...this.book.positions.values()].map((t) => ({ asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, stop: t.stop, target1: t.plan.target1 ?? null, target2: t.plan.target2 ?? null, half_off: t.partialDone, bars: t.bars, notional: t.notional ?? null, score: t.score ?? null, open_r: tradeResult(t, this.lastPx.get(t.asset)).r, usd_at_stop: -(t.notional ?? 0) * Math.abs(t.entry - t.initialStop) / t.entry, usd_at_target1: t.plan.target1 !== undefined ? (t.notional ?? 0) * Math.abs(t.plan.target1 - t.entry) / t.entry : null, open_usd: tradeResult(t, this.lastPx.get(t.asset)).ret * (t.notional ?? 0) }));
+    const open = [...this.book.positions.values()].map((t) => ({ asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, stop: t.stop, target1: t.plan.target1 ?? null, target2: t.plan.target2 ?? null, half_off: t.partialDone, left: +t.frac.toFixed(2), bars: t.bars, notional: t.notional ?? null, score: t.score ?? null, open_r: tradeResult(t, this.lastPx.get(t.asset)).r, usd_at_stop: -(t.notional ?? 0) * Math.abs(t.entry - t.initialStop) / t.entry, usd_at_target1: t.plan.target1 !== undefined ? (t.notional ?? 0) * Math.abs(t.plan.target1 - t.entry) / t.entry : null, open_usd: tradeResult(t, this.lastPx.get(t.asset)).ret * (t.notional ?? 0) }));
     const cand = (lane: Lane) => this.book.queues[lane].map((c) => ({ asset: c.sig.asset, kind: c.sig.kind, tf: c.sig.tf, dir: c.sig.dir, score: c.score, expires: c.expires }));
     return {
       strategy: 'setups',
