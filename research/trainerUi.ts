@@ -16,6 +16,7 @@ import fs from 'fs';
 import http from 'http';
 import type { AddressInfo } from 'net';
 import { readSettings, runTrainer, writeSettings, type TrainerSettings } from './laptopTrain';
+import { asIntensity, type GovernorStatus, type ResourceGovernor } from './trainerResources';
 import { readRounds, RoundProgress, type ProgressView } from './trainerProgress';
 import { checkForUpdate, currentVersion, downloadAndStage, RELEASE_PAGE, runApplyScript, type UpdateInfo } from './trainerUpdate';
 import { TRAINER_PAGE } from './trainerUiPage';
@@ -31,6 +32,10 @@ export interface UiState {
   progress: ProgressView | null; board: string[];
   lastStop: string | null; lastError: string | null;
   settings: TrainerSettings; version: string | null;
+  /** What the resource governor is doing (while a run is in progress). */
+  resources: GovernorStatus | null;
+  /** Told once: the previous run ended without stopping (a freeze, a crash, power loss). */
+  notice: string | null;
   update: (UpdateInfo & { dismissed?: boolean; installing?: string; page: string }) | null;
 }
 
@@ -69,17 +74,18 @@ export class TrainerUi {
   private stopFlag = false;
   private server?: http.Server;
   private board?: { at: number; brackets: Bracket[] };
+  private governor?: ResourceGovernor;
 
   constructor(private readonly o: { dataDir: string; check?: () => Promise<UpdateInfo>; install?: (u: UpdateInfo) => Promise<void>; run?: typeof runTrainer }) {
-    this.state = { phase: 'idle', mode: 'continue', hours: 0, round: 0, progress: null, board: [], lastStop: null, lastError: null, settings: readSettings(o.dataDir), version: currentVersion(), update: null, conditioning: conditioningView(path.join(o.dataDir, 'models')) };
+    this.state = { phase: 'idle', mode: 'continue', hours: 0, round: 0, progress: null, board: [], lastStop: null, lastError: null, settings: readSettings(o.dataDir), version: currentVersion(), update: null, conditioning: conditioningView(path.join(o.dataDir, 'models')), resources: null, notice: null };
   }
 
   /** Start a run (the window's Start button). */
-  start(req: { mode?: string; hours?: number; host?: string; user?: string; key?: string; skipDataDownload?: boolean; /** Conditioning before it is recommended (the window asked "are you sure?"). */ force?: boolean }): { ok: boolean; error?: string } {
+  start(req: { mode?: string; hours?: number; host?: string; user?: string; key?: string; intensity?: string; skipDataDownload?: boolean; /** Conditioning before it is recommended (the window asked "are you sure?"). */ force?: boolean }): { ok: boolean; error?: string } {
     if (this.state.phase !== 'idle') return { ok: false, error: 'already training' };
     const hours = Number(req.hours ?? 0);
     if (!(hours >= 0) || hours > 24 * 365) return { ok: false, error: 'hours must be 0 (until it stops by itself) or a number of hours' };
-    const settings: TrainerSettings = { ...this.state.settings, host: req.host?.trim() || undefined, user: req.user?.trim() || 'ubuntu', key: req.key?.trim() || undefined };
+    const settings: TrainerSettings = { ...this.state.settings, host: req.host?.trim() || undefined, user: req.user?.trim() || 'ubuntu', key: req.key?.trim() || undefined, intensity: asIntensity(req.intensity ?? this.state.settings.intensity) };
     if (settings.host && !settings.key) return { ok: false, error: 'a server needs its SSH key file' };
     const conditioning = req.mode === 'conditioning';
     if (conditioning) {
@@ -102,6 +108,8 @@ export class TrainerUi {
         roundEnd: (board) => { this.state.board = board; },
         child: (c) => { this.child = c; },
         stopRequested: () => this.stopFlag,
+        governor: (g) => { this.governor = g; },
+        notice: (m) => { this.state.notice = m; },
       },
     }).then((r) => { this.state.lastStop = this.stopFlag ? 'stopped by you' : r.why ?? 'finished'; })
       .catch((e) => { this.state.lastError = (e as Error).message; this.state.lastStop = `error: ${(e as Error).message}`; })
@@ -130,7 +138,7 @@ export class TrainerUi {
 
   snapshot(): UiState {
     if (this.state.phase === 'idle') this.state.conditioning = conditioningView(path.join(this.o.dataDir, 'models'));
-    return { ...this.state, progress: this.state.phase === 'idle' ? null : this.tracker?.view() ?? null };
+    return { ...this.state, progress: this.state.phase === 'idle' ? null : this.tracker?.view() ?? null, resources: this.governor?.status ?? null };
   }
 
   async checkUpdate(): Promise<void> {
@@ -193,7 +201,8 @@ export class TrainerUi {
 /** Open the window: Edge's app mode on Windows (no address bar), the default browser elsewhere. */
 export function openWindow(url: string): void {
   try {
-    if (process.platform === 'win32') spawn('cmd.exe', ['/c', 'start', '""', 'msedge', `--app=${url}`], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true }).unref();
+    // /NORMAL: the window runs at normal priority (the trainer itself runs below normal and would pass that on).
+    if (process.platform === 'win32') spawn('cmd.exe', ['/c', 'start', '""', '/NORMAL', 'msedge', `--app=${url}`], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true }).unref();
     else spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
   } catch { /* the address is printed in the console */ }
 }

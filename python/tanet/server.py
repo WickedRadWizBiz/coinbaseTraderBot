@@ -50,6 +50,48 @@ class State:
 S = State()
 
 
+class Pace:
+    """Keeps the computer usable while it trains (research/trainerResources.ts): every `sync_every` steps the GPU's
+    queue is drained (torch.cuda.synchronize: no long command buffers, which the desktop waits behind and which can
+    trip Windows' GPU timeout) and the trainer pauses `yield_ms` so the desktop and other programs get the GPU and CPU.
+    The laptop trainer's governor changes both through its throttle file (more pause while you use the computer);
+    TA_NET_GPU_SYNC_EVERY / TA_NET_GPU_YIELD_MS are the defaults (unset: no pacing, as before)."""
+
+    def __init__(self) -> None:
+        self.sync_every = int(os.environ.get('TA_NET_GPU_SYNC_EVERY') or 0)
+        self.yield_ms = float(os.environ.get('TA_NET_GPU_YIELD_MS') or 0)
+        self.file = os.environ.get('TRAIN_THROTTLE_FILE') or ''
+        self.read_at = 0.0
+        self.n = 0
+
+    def refresh(self) -> None:
+        now = time.time()
+        if not self.file or now - self.read_at < 2.0:
+            return
+        self.read_at = now
+        try:
+            with open(self.file) as f:
+                t = json.load(f)
+            if now * 1000 - float(t.get('at', 0)) < 120_000:  # a governor that is gone does not hold training back
+                self.sync_every = int(t.get('gpuSyncEvery') or self.sync_every)
+                self.yield_ms = float(t.get('gpuYieldMs') or 0)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def step(self) -> None:
+        self.n += 1
+        if self.n % 50 == 0:
+            self.refresh()
+        if self.sync_every > 0 and self.n % self.sync_every == 0:
+            if S.dev.type == 'cuda':
+                torch.cuda.synchronize()
+            if self.yield_ms > 0:
+                time.sleep(self.yield_ms / 1000.0)
+
+
+PACE = Pace()
+
+
 def normalise(t: torch.Tensor, m: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
     """research/trainTaNet.ts buildBranchInput: clamp((v - mean) / std, +-8), missing -> 0."""
     z = torch.clamp((t - m) / s, -8, 8)
@@ -110,7 +152,13 @@ def setup(req: dict) -> dict:
     torch.backends.cuda.matmul.allow_tf32 = False
     S.dt = torch.float64 if req.get('dtype') == 'float64' else torch.float32
     if S.dev.type == 'cpu':
-        torch.set_num_threads(max(1, int(req.get('threads') or os.cpu_count() or 1)))
+        torch.set_num_threads(max(1, int(req.get('threads') or os.environ.get('TA_NET_TORCH_THREADS') or os.cpu_count() or 1)))
+    else:
+        # The GPU's memory is shared with the display: take at most this share of it (over it, an allocation fails and
+        # the pack falls back to the CPU, see init) instead of filling it and freezing the desktop.
+        frac = float(os.environ.get('TA_NET_GPU_MEM_FRACTION') or 0)
+        if 0 < frac < 1:
+            torch.cuda.set_per_process_memory_fraction(frac, 0)
     S.net = TaNet(req['dims'], req['layout'], req['plans'], S.dev, S.dt)
     S.W = torch.zeros(S.net.size, dtype=S.dt, device=S.dev, requires_grad=True)
     S.m = torch.zeros(S.net.size, dtype=S.dt, device=S.dev)
@@ -322,6 +370,7 @@ def train(req: dict) -> dict:
             else:
                 train_step(ids, scale, mm, sm, B)
             count += B
+            PACE.step()
     loss = float(S.loss)  # the one host sync of the call
     secs = time.time() - t0
     W = S.W.detach()
@@ -339,6 +388,7 @@ def forecast(req: dict) -> dict:
         for s in range(0, idx.numel(), 4096):
             ids = idx[s:s + 4096]
             outs.append(net.forward(w, batch_inputs(ids), gt.expand(ids.numel(), 5)))
+            PACE.step()
     out = torch.cat(outs) if outs else torch.zeros((0, 3), dtype=S.dt, device=S.dev)
     return {'out': b64(out.float().cpu().numpy())}
 

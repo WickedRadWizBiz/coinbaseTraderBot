@@ -130,6 +130,7 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
   <div class="screen">
     <div id="update" class="update hidden"></div>
     <h2><span><span id="led" class="led"></span><span id="title">Connecting...</span></span><span id="clock" class="muted"></span></h2>
+    <div id="notice" class="err hidden"></div>
 
     <div id="idle" class="hidden">
       <div class="label">How should this run train?</div>
@@ -140,6 +141,13 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
           <b>Sweep everything again</b>The first round runs every step now, even the weekly ones: studies, tournaments, ablations, sweeps. Your models and history are kept. Takes much longer.</label>
       </div>
       <div class="fields">
+        <div class="field"><label for="intensity">How hard should it work?</label>
+          <select id="intensity">
+            <option value="gentle">Gentle: a quarter of the CPU, pauses for the desktop (use the computer freely)</option>
+            <option value="balanced" selected>Balanced: half the CPU, backs off while you use the computer</option>
+            <option value="full">Full speed: all but two CPU threads (when you are not using the computer)</option>
+          </select></div>
+        <div class="field"><label>&nbsp;</label><div class="muted">It always runs below normal priority and keeps a quarter of the memory free for you.</div></div>
         <div class="field"><label for="hours">Hours to train (0 = until it stops by itself)</label><input id="hours" type="number" min="0" step="0.5" value="0" /></div>
         <div class="field"><label>&nbsp;</label><div class="muted" id="stopsby">It stops when the bot reaches your target or stops improving.</div></div>
       </div>
@@ -189,6 +197,7 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
         <div class="row"><span id="curTask" class="muted"></span><span class="eta" id="curEta"></span></div>
       </div>
       <div class="explain" id="explain"></div>
+      <div class="row"><span id="resNote" class="muted"></span></div>
       <div class="btns"><button id="stop" class="danger">Stop</button></div>
       <details><summary>Pipeline output</summary><div class="log" id="log"></div></details>
     </div>
@@ -217,7 +226,7 @@ $('start').addEventListener('click', async () => {
   $('startErr').textContent = '';
   const mode = document.querySelector('input[name=mode]:checked').value;
   const skipDataDownload = $('skipDataDownload').checked;
-  const r = await post('/api/start', { mode, hours: Number($('hours').value) || 0, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim(), skipDataDownload });
+  const r = await post('/api/start', { mode, hours: Number($('hours').value) || 0, intensity: $('intensity').value, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim(), skipDataDownload });
   if (!r.ok) $('startErr').textContent = r.error || 'could not start';
 });
 let lastCond = null;
@@ -227,7 +236,7 @@ $('condStart').addEventListener('click', async () => {
   const c = lastCond || { ready: false, why: '' };
   if (!c.ready && !confirm('Conditioning is not recommended right now: ' + (c.why || 'the bot was not freshly trained') + '.\n\nAre you sure you want to start it anyway?')) return;
   if (!confirm('Start conditioning mode? It runs until a champion is found or the trials are used up (hours on most computers).')) return;
-  const r = await post('/api/start', { mode: 'conditioning', hours: 0, force: !c.ready, skipDataDownload: $('skipDataDownload').checked, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim() });
+  const r = await post('/api/start', { mode: 'conditioning', hours: 0, force: !c.ready, intensity: $('intensity').value, skipDataDownload: $('skipDataDownload').checked, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim() });
   if (!r.ok) $('startErr').textContent = r.error || 'could not start';
 });
 $('stop').addEventListener('click', async () => { if (confirm('Stop training now? Finished steps and tournament rounds are kept; the step in progress starts again next time.')) await post('/api/stop'); });
@@ -267,7 +276,11 @@ async function tick() {
   $('condWhy').textContent = c.why || '';
   $('condLast').textContent = c.last ? 'Last run ' + new Date(c.last.at).toLocaleString() + ': ' + (c.last.elite ? 'Elite Champion ' + c.last.elite : 'no Elite; best ' + (c.last.best || 'none') + ', ' + c.last.bestPassed + ' of ' + c.last.windows + ' windows') : '';
   $('title').textContent = s.phase === 'running' ? (s.mode === 'conditioning' ? 'Conditioning' : 'Training') : s.phase === 'stopping' ? 'Stopping...' : s.lastStop ? 'Stopped: ' + s.lastStop : 'Ready';
-  if (!filled && s.settings) { $('host').value = s.settings.host || ''; $('user').value = s.settings.user || ''; $('key').value = s.settings.key || ''; if (s.settings.host) $('srv').open = false; filled = true; }
+  if (!filled && s.settings) { $('host').value = s.settings.host || ''; $('user').value = s.settings.user || ''; $('key').value = s.settings.key || ''; $('intensity').value = s.settings.intensity || 'balanced'; if (s.settings.host) $('srv').open = false; filled = true; }
+  $('notice').classList.toggle('hidden', !s.notice);
+  $('notice').textContent = s.notice ? 'Last time: ' + s.notice + ' If the computer froze, choose Gentle (or Balanced) and close other heavy programs while it trains.' : '';
+  const rs = s.resources;
+  $('resNote').textContent = rs ? rs.intensity + ': ' + rs.workers + ' of ' + rs.maxWorkers + ' threads · ' + rs.reason + ' · ' + (rs.freeMb / 1024).toFixed(1) + ' of ' + (rs.totalMb / 1024).toFixed(1) + ' GB memory free' : '';
   if (running && s.progress) {
     const p = s.progress;
     setBar('dl', p.downloads); setBar('tr', p.training);

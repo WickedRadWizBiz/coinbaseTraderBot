@@ -38,3 +38,10 @@ The TA network trains on the graphics card (NVIDIA): the first run sets up Pytho
 trainer-data (a one-time download of about 3 GB; without an NVIDIA card, the CPU build, about 300 MB).
 Everything else uses the CPU. To keep it all on the CPU in TypeScript: TA_NET_ENGINE=ts in trainer.env.
 Your bot's passwords and API keys are never copied to this computer.
+
+Using the computer while it trains: choose how hard it works in the window (Gentle, Balanced or Full speed;
+Balanced by default). It always runs below normal priority and leaves a quarter of the memory free. It
+uses fewer threads while you use the keyboard or mouse and when memory runs short, and the graphics card
+pauses regularly for the desktop. trainer-data\resources.log records the memory and threads it used, once a
+minute. If the computer ever freezes or crashes during a run, the next start says so. Then choose Gentle,
+and see "Keeping the computer usable" in docs/LAPTOP_TRAINING.md on GitHub.

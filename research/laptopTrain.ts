@@ -40,6 +40,13 @@
 // progress; the next run continues the tournaments where they stopped.
 //
 //   --torch-check  set up / check PyTorch and the TA network's torch trainer, then exit (0 = ready)
+//   --intensity gentle|balanced|full   how hard it works (default balanced, or the window's last choice)
+//
+// It keeps the computer usable (research/trainerResources.ts): it and everything it starts run below normal priority;
+// worker threads, memory per process and PyTorch's threads come from a plan sized to this machine and the intensity
+// (balanced: half the CPU threads, a quarter of the memory left free); a governor checks free memory and whether you
+// are using the computer every 15 s and the worker pools and the GPU trainer follow it; and trainer-data/resources.log
+// records what it used, so a freeze can be traced (the next start says when a run ended without stopping).
 
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import fs from 'fs';
@@ -51,8 +58,9 @@ import { loadConfig } from '../bot/config';
 import type { ReadinessFile } from './readiness';
 import { torchSelfTest } from './taNetTorch';
 import { ensureTorch } from './torchSetup';
+import { asIntensity, lowerPriority, markRunEnd, markRunIntensity, markRunStart, planEnv, ResourceGovernor, resourcePlan, type GovernorStatus, type Intensity, type ResourcePlan } from './trainerResources';
 
-export interface TrainerSettings { host?: string; user?: string; port?: number; key?: string }
+export interface TrainerSettings { host?: string; user?: string; port?: number; key?: string; /** How hard it works (research/trainerResources.ts). */ intensity?: Intensity }
 export interface RemoteFile { path: string; size: number; mtime: number }
 
 /** Steps that continue a tournament or depend on one: what rounds after the first repeat. */
@@ -144,11 +152,9 @@ export function safeServerEnv(text: string): Record<string, string> {
  *  environment, then the server's bot.env) wins over these. `continuous`: rounds until the trainer stops by
  *  itself, each sized like a day's budget (a tournament generation of about 5 weeks), the sweep weekly (a
  *  proposal: it improves no model). */
-export function laptopProfile(remainingHours: number, cores = os.cpus().length, continuous = false): Record<string, string> {
-  if (continuous) return { ...laptopProfile(24, cores), SWEEP_HOURS: '2', SWEEP_EVERY_DAYS: '7' };
+export function laptopProfile(remainingHours: number, cores = os.cpus().length, continuous = false, plan: ResourcePlan = resourcePlan('balanced', cores)): Record<string, string> {
+  if (continuous) return { ...laptopProfile(24, cores, false, plan), SWEEP_HOURS: '2', SWEEP_EVERY_DAYS: '7' };
   const h = (x: number) => String(+Math.max(0.1, x).toFixed(2));
-  // One worker thread per core but one; tournaments field about one network per worker (more candidates).
-  const workers = Math.max(1, cores - 1);
   // A replayed day costs a network a few minutes (it steps every market second): a tournament round is one
   // day per member, all members at once; training is one network going over its window about twice. Both
   // windows grow with the budget (a 12-hour run: 30 tournament days, 14 training days).
@@ -159,7 +165,7 @@ export function laptopProfile(remainingHours: number, cores = os.cpus().length, 
     HISTORY_AUTO_UPDATE: 'true', TV_FILL: 'false',
     // All of the 1-minute spot / perp history (from each coin's first Binance month) replayed through the
     // recording-based steps; the memory that takes.
-    HISTORY_REPLAY: 'true', HISTORY_REPLAY_YEARS: '0', NODE_OPTIONS: '--max-old-space-size=8192',
+    HISTORY_REPLAY: 'true', HISTORY_REPLAY_YEARS: '0',
     KALSHI_HISTORY_BUDGET_MIN: '600', KALSHI_HISTORY_DAYS: '365',
     // TA network: retrain every round, more tournament rounds per run, every 2nd hourly sample (adjacent hours are
     // nearly the same example; every hour doubled each round's time for little), two years of training data.
@@ -167,9 +173,10 @@ export function laptopProfile(remainingHours: number, cores = os.cpus().length, 
     TA_NET_OOS_HOURS: h(Math.min(12, remainingHours / 4)),
     SWEEP_HOURS: h(Math.min(12, remainingHours / 4)), SWEEP_EVERY_DAYS: '1',
     AUTO_TRAIN_SNN_PBT_EVERY_DAYS: '0', AUTO_TRAIN_SNN_TRAIN_DAYS: String(trainDays), AUTO_TRAIN_SNN_PBT_DAYS: String(pbtDays),
-    TRAIN_WORKERS: String(workers), AUTO_TRAIN_SNN_PBT_POPULATION: String(Math.min(32, Math.max(3, workers))),
-    // Genetic programming every round, with the video's population (15,000 formulas) on a machine with the cores for it.
-    GP_EVERY_DAYS: '0', GP_POPULATION: String(Math.min(15000, Math.max(2000, 2000 * workers))),
+    // Genetic programming every round (its population, like the threads and the memory, comes from the plan).
+    GP_EVERY_DAYS: '0',
+    // Threads, memory per process and worker, PyTorch's threads and GPU share: sized to this machine (the plan).
+    ...planEnv(plan),
   };
 }
 
@@ -324,7 +331,7 @@ function usableKey(key: string, dataDir: string): string {
 }
 
 export class Server {
-  constructor(private readonly s: Required<TrainerSettings>) {}
+  constructor(private readonly s: Required<Omit<TrainerSettings, 'intensity'>>) {}
   private base(): string[] { return ['-i', this.s.key, '-p', String(this.s.port), '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ServerAliveInterval=30', '-o', 'BatchMode=yes', `${this.s.user}@${this.s.host}`]; }
   run(cmd: string): { ok: boolean; out: string; err: string } {
     const r = spawnSync('ssh', [...this.base(), cmd], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
@@ -372,13 +379,21 @@ export interface TrainerHooks {
   /** The pipeline process of the round in progress (undefined between rounds): the window's Stop ends it. */
   child?: (c: ChildProcess | undefined) => void;
   stopRequested?: () => boolean;
+  /** The resource governor of the run (undefined after it): its status is what the window shows. */
+  governor?: (g: ResourceGovernor | undefined) => void;
+  /** Things to tell you once (the previous run ended without stopping). */
+  notice?: (m: string) => void;
 }
 
-async function runRound(env: NodeJS.ProcessEnv, only: string[] | undefined, logFile: string, extra: string[] = [], hooks?: TrainerHooks): Promise<number> {
+/** A round of the pipeline; `heapOom`: it ran out of its memory cap (NODE_OPTIONS) and crashed. */
+async function runRound(env: NodeJS.ProcessEnv, only: string[] | undefined, logFile: string, extra: string[] = [], hooks?: TrainerHooks): Promise<{ code: number; heapOom: boolean }> {
   const { cmd, args } = pipelineCmd();
   const child = spawn(cmd, [...args, ...(only?.length ? ['--only', only.join(',')] : []), ...extra], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  // Inherited from this process already; set again in case it was started at another priority.
+  if (child.pid && (env.TRAINER_PRIORITY === 'low' || env.TRAINER_PRIORITY === 'below_normal')) lowerPriority(env.TRAINER_PRIORITY, child.pid);
   hooks?.child?.(child);
   const out = fs.createWriteStream(logFile, { flags: 'a' });
+  let heapOom = false;
   for (const s of [child.stdout!, child.stderr!]) {
     let buf = '';
     s.on('data', (b: Buffer) => {
@@ -387,6 +402,7 @@ async function runRound(env: NodeJS.ProcessEnv, only: string[] | undefined, logF
       while ((i = buf.indexOf('\n')) >= 0) {
         const l = buf.slice(0, i + 1);
         buf = buf.slice(i + 1);
+        if (/JavaScript heap out of memory|Reached heap limit/.test(l)) heapOom = true;
         hooks?.line?.(l);
         if (l.startsWith('[progress] ')) continue;
         process.stdout.write(l); out.write(l);
@@ -397,7 +413,7 @@ async function runRound(env: NodeJS.ProcessEnv, only: string[] | undefined, logF
   const code = await exit(child);
   hooks?.child?.(undefined);
   out.end();
-  return code;
+  return { code, heapOom };
 }
 
 /** The newest pipeline report written since `since` (one per round). */
@@ -427,11 +443,11 @@ const writeText = (file: string, text: string) => fs.writeFileSync(file, process
 
 /** The trainer's saved server settings (trainer-data/trainer.json). */
 export function readSettings(dataDir: string): TrainerSettings {
-  try { const j = JSON.parse(fs.readFileSync(path.join(dataDir, 'trainer.json'), 'utf8')); return { host: j.host ?? undefined, user: j.user ?? 'ubuntu', port: j.port ?? 22, key: j.key ?? undefined }; } catch { return { user: 'ubuntu', port: 22 }; }
+  try { const j = JSON.parse(fs.readFileSync(path.join(dataDir, 'trainer.json'), 'utf8')); return { host: j.host ?? undefined, user: j.user ?? 'ubuntu', port: j.port ?? 22, key: j.key ?? undefined, intensity: asIntensity(j.intensity) }; } catch { return { user: 'ubuntu', port: 22, intensity: 'balanced' }; }
 }
 export function writeSettings(dataDir: string, s: TrainerSettings): void {
   fs.mkdirSync(dataDir, { recursive: true });
-  fs.writeFileSync(path.join(dataDir, 'trainer.json'), JSON.stringify({ host: s.host ?? null, user: s.user ?? 'ubuntu', port: s.port ?? 22, key: s.key ?? null }, null, 1));
+  fs.writeFileSync(path.join(dataDir, 'trainer.json'), JSON.stringify({ host: s.host ?? null, user: s.user ?? 'ubuntu', port: s.port ?? 22, key: s.key ?? null, intensity: asIntensity(s.intensity) }, null, 1));
 }
 
 /** Command line: the questions in the console, then the rounds. With --ui, the trainer window instead. */
@@ -447,7 +463,7 @@ export async function laptopTrainMain(): Promise<void> {
   if (!(hours >= 0)) throw new Error('--hours must be 0 (train until it stops by itself) or a number of hours');
   const settingsFile = path.join(dataDir, 'trainer.json');
   let s: TrainerSettings = readSettings(dataDir);
-  s = { ...s, host: argOf('host') ?? s.host, user: argOf('user') ?? s.user ?? 'ubuntu', port: Number(argOf('port') ?? s.port ?? 22), key: argOf('key') ?? s.key };
+  s = { ...s, host: argOf('host') ?? s.host, user: argOf('user') ?? s.user ?? 'ubuntu', port: Number(argOf('port') ?? s.port ?? 22), key: argOf('key') ?? s.key, intensity: asIntensity(argOf('intensity') ?? process.env.TRAINER_INTENSITY ?? s.intensity) };
   const wantSync = !(flag('no-pull') && flag('no-push'));
   if (wantSync && (flag('setup') || (!s.host && !fs.existsSync(settingsFile))) && process.stdin.isTTY) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -494,11 +510,41 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   fs.mkdirSync(path.join(models, 'logs'), { recursive: true });
   const wantSync = !(flag('no-pull') && flag('no-push'));
   hooks?.phase?.('starting');
+  // Keep the computer usable: the plan for this machine, below-normal priority for everything the run starts, the
+  // governor, and the record (a marker while the run is in progress; resources.log).
   // Your own trainer settings (the target, the plateau): over the server's and the laptop profile's.
   const userEnvFile = path.join(dataDir, 'trainer.env');
   if (!fs.existsSync(userEnvFile)) writeText(userEnvFile, TRAINER_ENV_TEMPLATE);
   const userEnv = safeServerEnv(fs.readFileSync(userEnvFile, 'utf8').replace(/\r/g, ''));
-  console.log(`\nKalshi bot trainer: ${continuous ? 'until it stops by itself' : `${hours} h budget`}, data in ${dataDir}, ${os.cpus().length} CPU threads (tournaments run up to one network per thread at once; the TA network trains in PyTorch, on the GPU when there is one).\n`);
+  const plan = resourcePlan(asIntensity(o.settings.intensity ?? process.env.TRAINER_INTENSITY));
+  // TRAIN_WORKERS set by hand (the environment, then trainer.env): the governor counts from it.
+  const forced = Math.floor(Number(process.env.TRAIN_WORKERS ?? userEnv.TRAIN_WORKERS));
+  if (forced >= 1) { plan.workers = forced; plan.activeWorkers = Math.min(plan.activeWorkers, forced); }
+  const prioOk = lowerPriority(plan.priority);
+  const lastRun = markRunStart(dataDir);
+  markRunIntensity(dataDir, plan.intensity);
+  if (lastRun) { log(lastRun); hooks?.notice?.(lastRun); }
+  // Closing the console (SIGHUP on Windows) or quitting with Ctrl+C twice is a stop, not a freeze.
+  const endMark = () => markRunEnd(dataDir);
+  const onHup = () => { endMark(); process.exit(129); };
+  process.on('exit', endMark);
+  process.once('SIGHUP', onHup);
+  const governor = new ResourceGovernor(plan, { throttleFile: path.join(dataDir, 'throttle.json'), logFile: path.join(dataDir, 'resources.log') });
+  governor.start();
+  hooks?.governor?.(governor);
+  log(`resources (${plan.intensity}): ${plan.workers} of ${plan.cores} CPU threads (${plan.activeWorkers} while you use the computer), ${plan.mainHeapMb} MB per process and ${plan.workerHeapMb} MB per worker of ${plan.totalMb} MB, PyTorch ${plan.torchThreads} threads and at most ${Math.round(plan.gpuMemFraction * 100)}% of the GPU's memory; ${prioOk ? `${plan.priority === 'low' ? 'idle' : 'below normal'} priority` : 'priority unchanged (not permitted)'}`);
+  try {
+    return await runRounds();
+  } finally {
+    governor.stop();
+    hooks?.governor?.(undefined);
+    endMark();
+    process.off('exit', endMark);
+    process.off('SIGHUP', onHup);
+  }
+
+  async function runRounds(): Promise<{ why?: string }> {
+  console.log(`\nKalshi bot trainer: ${continuous ? 'until it stops by itself' : `${hours} h budget`}, data in ${dataDir}, ${plan.intensity}: ${plan.workers} of ${os.cpus().length} CPU threads (the TA network trains in PyTorch, on the GPU when there is one).\n`);
 
   let server: Server | undefined;
   if (s.host && s.key && wantSync) {
@@ -547,7 +593,9 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   // The server's settings, then the laptop's bigger budgets and PyTorch over them, then trainer.env, then anything
   // set in the environment.
   let torchEnv: Record<string, string> = { TA_NET_ENGINE: 'ts' };
-  const envFor = (leftHours: number): NodeJS.ProcessEnv => ({ ...serverEnv, ...laptopProfile(leftHours, os.cpus().length, continuous), ...torchEnv, ...userEnv, ...process.env, DATA_DIR: dataDir, AUTO_TRAIN: 'off', TRADING_MODE: 'paper', TRAINER_PROGRESS: '1', DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32) });
+  // The pipeline's memory cap: the plan's, doubled (up to 8 GB) after a round that ran out of it.
+  let mainHeapMb = plan.mainHeapMb;
+  const envFor = (leftHours: number): NodeJS.ProcessEnv => ({ ...serverEnv, ...laptopProfile(leftHours, os.cpus().length, continuous, { ...plan, mainHeapMb }), ...torchEnv, ...userEnv, ...process.env, DATA_DIR: dataDir, AUTO_TRAIN: 'off', TRADING_MODE: 'paper', TRAINER_PROGRESS: '1', DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRAIN_THROTTLE_FILE: path.join(dataDir, 'throttle.json'), TRAINER_PRIORITY: plan.priority });
   const A = loadConfig(envFor(continuous ? 24 : hours)).autoTrain;
   const guide = guideText({ poolUsd: A.targetPoolUsd, dailyPct: A.targetDailyPct, maxDdPct: A.targetMaxDdPct, plateauRounds: A.plateauRounds });
   writeText(path.join(dataDir, 'GUIDE.txt'), guide);
@@ -580,11 +628,16 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     hooks?.roundStart?.(round, full, sweepAll);
     hooks?.phase?.('pipeline');
     const r0 = Date.now();
-    const code = await runRound(envFor(continuous ? 24 : left / 3_600_000), steps, logFile, [...(sweepAll ? ['--sweep-all'] : []), ...skip], hooks);
+    const { code, heapOom } = await runRound(envFor(continuous ? 24 : left / 3_600_000), steps, logFile, [...(sweepAll ? ['--sweep-all'] : []), ...skip], hooks);
     if (stopped()) { why = 'stopped'; log(`round ${round} stopped`); break; }
     lastMs = Date.now() - r0;
     process.exitCode = code === 0 ? 0 : 1;
     log(`round ${round} finished in ${(lastMs / 60_000).toFixed(0)} min (exit ${code})`);
+    if (heapOom && mainHeapMb < 8192) {
+      const was = mainHeapMb;
+      mainHeapMb = Math.min(8192, 2 * mainHeapMb);
+      log(`the pipeline ran out of its ${was} MB of memory; the next rounds give it ${mainHeapMb} MB (finished steps are kept)`);
+    }
     const rep = lastReport(models, r0);
     for (const l of reportSummary(rep)) console.log(`   ${l}`);
     const outcome = roundOutcome(rep?.steps ?? []);
@@ -611,6 +664,7 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   log(`done in ${((Date.now() - t0) / 3_600_000).toFixed(1)} h${why ? `: ${why}` : ''}`);
   hooks?.phase?.('done');
   return { why };
+  }
 }
 
 if (process.argv[1] && /laptopTrain\.(ts|cjs|js)$/.test(process.argv[1])) {
