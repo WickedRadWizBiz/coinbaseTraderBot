@@ -346,6 +346,7 @@ This model ships as `params/ta_net.json`. The server's pipeline continues the to
 |---|---|---|
 | `TA_NET` | `true` | Compute the network's forecasts as features. |
 | `TA_NET_PATH` | `params/ta_net.json` | Fallback model file (the pipeline's `data/models/ta_net.json` is preferred). |
+| `LIBRARIAN_PATH` | `params/librarian.json` | Fallback Librarian file (the pipeline's `data/models/librarian.json` is preferred). |
 | `TA_NET_REQUIRE_VALIDATED` | `true` | Only heads that passed the blind test speak. |
 | `TA_NET_RETRAIN_DAYS` | `7` | Continue the tournament at most this often (daily while the first one is still running). |
 | `TA_NET_TRAIN_MONTHS` / `TA_NET_EVAL_MONTHS` / `TA_NET_STEP_MONTHS` | `12` / `1` / `1` | Tournament blocks. |
@@ -378,6 +379,38 @@ npm run research:ta -- --history data/history
 
 That gives the 1h, 4h and 1d rules years of evidence instead of a few weeks.
 
+
+## The Librarian: oracle strategy and regime-transition heads (October 2026)
+
+The Librarian (the 4th-generation spec's 3.1; the name for the adversary with full access to the TA library, trained on the oracle) reads the same row the TA network reads at each closed hourly bar: every TA library reading on 15m / 1h / 4h / 1d, the rules, the confluences and the market context (`TANET_FEATURES`). It answers two questions the direction heads do not (`bot/ta/librarian.ts`, trained by `research/librarian.ts`).
+
+- **Strategy head.** Which of the bot's strategy families would have paid over the next 24 hours:
+  - trend: rides the 4h EMA stack, the trend-pullback setups' side;
+  - revert: fades the 1h Bollinger extremes or RSI beyond 70 / 30, the fade and dip setups' side;
+  - breakout: follows a 20-bar Donchian break or a squeeze releasing, the burst and breakout setups;
+  - flat.
+
+  The oracle label is a softmax of what each family's position earned over the day, net of a 10 bps round trip, in units of the coin's volatility. It is soft: families that earned about the same share it. The model is multinomial logistic on the z-scored readings.
+- **Transition head.** P(the coin's confirmed daily regime, `bot/ta/regime.ts` with the playbook's two-day confirmation, changes within 72 hours).
+- **Outputs.** The weights, a continuous playbook position (weights × each family's position, −1..1), its disagreement with the knowledge base's rule tally (`net_all`), and the transition probability.
+
+**Training and grading.**
+- Rows are every third hour of every coin with a TA row, from the TA network's row cache.
+- The first fit uses two years. Then every quarter it refits (warm start) on every row whose labels had closed, and forecasts every hour of the next quarter unseen.
+- The strategy head is graded on those forecasts at one decision a day per coin, with a turnover cost. It competes at equal risk (Sharpe ratio) against two persistence playbooks:
+  - the mean oracle weights of the coin's current regime in the rows the fit saw (the regime persists);
+  - the family that paid over the last day (the winner persists).
+- The strategy head validates when it beats both, and its vol-matched edge over the regime playbook has a daily bootstrap 95% lower bound above 0 on 60+ days.
+- The transition head validates when its log loss beats the hazard by days since the last change, with a 95% lower bound above 0 on 500+ rows.
+
+**Where it is used.**
+- **Decision models.** The features `lib_trend`, `lib_revert`, `lib_breakout`, `lib_flat`, `lib_net`, `lib_vs_book` and `lib_trans` are offered to the decision models trained on the recordings. Each is NaN unless its head validated. A model keeps them only if its own validation improves.
+- **Setup scorer.** It reads both heads, ungated, as its `librarian` input group, from the walk's forecasts in research and from the same model on the walking TA network's row live. The group is kept only if it raises the development years.
+
+**Running it.**
+- The pipeline runs it weekly (step `librarian`, `data/models/librarian.json`); the bot reloads the file when it changes.
+- By hand: `npm run research:librarian -- --history data/history`.
+- `LIBRARIAN_PATH` is the fallback model file.
 
 ## Calibration, champion / challenger, ensemble (October 2026)
 
