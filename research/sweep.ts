@@ -183,16 +183,20 @@ export async function setupsTarget(hist: string, side: 1 | -1 | 0): Promise<Swee
 }
 
 /** The 4h ATR ratchet exit (bot/setups/detectors.ts RATCHET) on the slow lane's daily setups, every coin with history:
- *  on / off, the initial stop, break-even and trail distances, scored by the t-statistic of net R per trade (the
+ *  on / off, the initial stop, break-even and trail distances, and (with the TA network's walk-forward forecasts)
+ *  whether its 4h volatility forecast makes a better unit than ATR(4h) alone (volK; 0 = ATR alone), scored by the t-statistic of net R per trade (the
  *  lanes size by stop distance, so R is what the account feels). Same windows as the setup sweeps. */
 export async function ratchetTarget(hist: string): Promise<SweepTarget> {
   const { loadAssetBars, simulateSetup } = await import('./trainSetupModel');
   const { RATCHET, applyRatchet, atr4hAt, detectAt, TF_MS } = await import('../bot/setups/detectors');
   const { DEFAULT_COSTS, tradeResult } = await import('../bot/setups/exits');
   const { storedAssets } = await import('./history/candles');
+  const { loadOos, OosIndex } = await import('./taNetOos');
   const assets = storedAssets(hist).map((a) => loadAssetBars(hist, a)).filter((A): A is NonNullable<typeof A> => Boolean(A));
   const WIN: Record<SweepWindow, [number, number]> = { tune: [Date.UTC(2020, 0, 1), Date.UTC(2024, 6, 1)], check: [Date.UTC(2024, 6, 1), Date.UTC(2025, 6, 1)], final: [Date.UTC(2025, 6, 1), Infinity] };
   if (RATCHET.lanes === 'off') RATCHET.lanes = 'slow';
+  // The TA network's walk-forward 4h volatility forecasts: with them, the unit can be scaled by the forecast (volK).
+  const oos = new OosIndex(loadOos(hist));
   const on = { v: 1 };
   const p = (name: keyof typeof RATCHET, values: number[]): SweepParam => ({ name: `ratchet.${name}`, values, get: () => Number(RATCHET[name]), set: (v) => { (RATCHET as unknown as Record<string, number>)[name] = v; } });
   const fee = DEFAULT_COSTS.entry + DEFAULT_COSTS.takerExit;
@@ -202,8 +206,9 @@ export async function ratchetTarget(hist: string): Promise<SweepTarget> {
     params: [
       { name: 'ratchet.on', values: [0, 1], get: () => on.v, set: (v) => { on.v = v; } },
       p('stopAtr', [2.5, 3, 3.5, 4.5]), p('beAtr', [1.5, 2, 3]), p('trailStartAtr', [2.5, 3.5, 5]), p('trailAtr', [2, 3, 4]),
+      ...(oos.f ? [p('volK', [-0.5, 0, 0.5, 1])] : []),
     ],
-    snapshot: () => ({ 'ratchet.on': on.v, 'ratchet.stopAtr': RATCHET.stopAtr, 'ratchet.beAtr': RATCHET.beAtr, 'ratchet.trailStartAtr': RATCHET.trailStartAtr, 'ratchet.trailAtr': RATCHET.trailAtr }),
+    snapshot: () => ({ 'ratchet.on': on.v, 'ratchet.stopAtr': RATCHET.stopAtr, 'ratchet.beAtr': RATCHET.beAtr, 'ratchet.trailStartAtr': RATCHET.trailStartAtr, 'ratchet.trailAtr': RATCHET.trailAtr, 'ratchet.volK': RATCHET.volK ?? 0 }),
     async fitness(w) {
       const [from, to] = WIN[w];
       const rs: number[] = [];
@@ -217,7 +222,8 @@ export async function ratchetTarget(hist: string): Promise<SweepTarget> {
           if (ts < from || ts >= to || ts < busyUntil) continue;
           const g = detectAt(A.asset, '1d', s, i, s);
           if (!g || g.lane !== 'slow') continue;
-          const t = simulateSetup(A, applyRatchet(g, atr4hAt(A.h1, ts + TF_MS['1d']!), fee, settings), DEFAULT_COSTS);
+          const at = ts + TF_MS['1d']!;
+          const t = simulateSetup(A, applyRatchet(g, atr4hAt(A.h1, at), fee, settings, oos.at(A.asset, at)?.vol), DEFAULT_COSTS);
           if (!t?.closed) continue;
           busyUntil = t.closed.ts;
           rs.push(tradeResult(t).r);

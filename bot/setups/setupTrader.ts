@@ -317,7 +317,7 @@ export class SetupTrader {
         const tn = this.reading(asset, at);
         const ratchet = this.model?.params.ratchet;
         const costs = this.d.params.costs;
-        const sig = applyRatchet(adaptToVol(raw, tn?.vol, this.model?.params.volTrailK ?? 0), atr4hAt(set.bars['1h'], at), costs.entry + costs.takerExit, ratchet ?? { lanes: 'off', stopAtr: 0, beAtr: 0, trailStartAtr: 0, trailAtr: 0 });
+        const sig = applyRatchet(adaptToVol(raw, tn?.vol, this.model?.params.volTrailK ?? 0), atr4hAt(set.bars['1h'], at), costs.entry + costs.takerExit, ratchet ?? { lanes: 'off', stopAtr: 0, beAtr: 0, trailStartAtr: 0, trailAtr: 0 }, tn?.vol);
         const score = this.score(sig, at);
         const queued = Number.isFinite(score) && this.book.offer(sig, score, now);
         this.d.audit?.write('setup_signal', { asset, lane: sig.lane, kind: sig.kind, tf, dir: sig.dir, ref: sig.ref, stop: sig.stop, score, queued });

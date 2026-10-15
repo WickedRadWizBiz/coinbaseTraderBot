@@ -223,3 +223,15 @@ test('live setup trader: entry capped so the liquidation sits beyond the stop; t
   assert.equal(audits.filter((a) => a.kind === 'liquidation_guard').length, 1);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('4h ATR ratchet: the unit can be scaled by the TA network volatility forecast (volK), clamped; 0 = ATR alone', () => {
+  const sig: SetupSignal = { asset: 'BTC', lane: 'slow', kind: 'breakout', tf: '1d', dir: 1, ts: 0, ref: 100, stop: 95, atr: 2, plan: { trailAtr: 2, maxBars: 10 }, info: {} as never };
+  const r: RatchetSettings = { lanes: 'slow', stopAtr: 3.5, beAtr: 2, trailStartAtr: 3.5, trailAtr: 3, volK: 0.5 };
+  const g = applyRatchet(sig, 1, 0.003, r, 0.4);
+  assert.ok(Math.abs(g.plan.ratchet!.atr - Math.exp(0.2)) < 1e-12);
+  assert.ok(Math.abs(g.stop - (100 - 3.5 * Math.exp(0.2))) < 1e-12);
+  assert.equal(applyRatchet(sig, 1, 0.003, r, 5).plan.ratchet!.atr, 1.5, 'clamped at 1.5x');
+  assert.equal(applyRatchet(sig, 1, 0.003, r, -5).plan.ratchet!.atr, 0.67, 'clamped at 0.67x');
+  assert.equal(applyRatchet(sig, 1, 0.003, r).plan.ratchet!.atr, 1, 'no forecast: ATR alone');
+  assert.equal(applyRatchet(sig, 1, 0.003, { ...r, volK: 0 }, 0.4).plan.ratchet!.atr, 1, 'volK 0: ATR alone');
+});
