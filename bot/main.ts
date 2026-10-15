@@ -56,6 +56,7 @@ import { createSnnFleet } from './snn';
 import { VolModel } from './model/volModel';
 import { activeTaNet, setTaNet, setTaNetContextSource, TaNet, TaNetRuntime } from './ta/taNet';
 import { Librarian, setLibrarianPath } from './ta/librarian';
+import { CrossGraph, setCrossGraphPath, XgMemo } from './ta/crossGraph';
 import { FillModel } from './tca/fillModel';
 import { TennisScoreClient } from './tennis/liveTennisApi';
 import { TennisFairModel } from './tennis/tennisFair';
@@ -328,6 +329,17 @@ async function main(): Promise<void> {
             return lib && row ? lib.predict(row) : undefined;
           };
         })(),
+        // The cross-asset graph network on every coin's hourly candles (ungated: the setup model's "xgraph" group decides).
+        crossGraph: (() => {
+          let g: CrossGraph | undefined, mt = -1, at = '';
+          const memo = new XgMemo();
+          return (asset: string, now: number) => {
+            const file = resolveModelPaths(cfg).cross_graph;
+            const m = fs.existsSync(file) ? fs.statSync(file).mtimeMs : 0;
+            if (m !== mt || file !== at) { mt = m; at = file; try { g = m ? CrossGraph.load(file) : undefined; } catch (e) { g = undefined; log.warn(`setup trader: cross graph ${file} not loaded: ${(e as Error).message}`); } }
+            return g ? memo.get(g, [...md.features.candles.entries()].map(([a, s]) => [a, s.bars['1h']]), now, asset) : undefined;
+          };
+        })(),
         snn: (asset) => engineRef?.snnContext(asset, undefined, 'perps'),
         journal: new SetupJournal(path.join(cfg.dataDir, 'setups'), (e) => log.warn(`setup journal: ${String(e)}`)),
         snnGatePath: () => path.join(cfg.autoTrain.dir, 'setup_snn_gate.json'),
@@ -389,6 +401,7 @@ async function main(): Promise<void> {
   setTaNet(taNet, cfg.taNet.requireValidated);
   // The Librarian the general features read (validated heads only; reloaded when the pipeline promotes a new one).
   setLibrarianPath(cfg.taNet.enabled ? () => resolveModelPaths(cfg).librarian : undefined);
+  setCrossGraphPath(cfg.taNet.enabled ? () => resolveModelPaths(cfg).cross_graph : undefined);
   // Performance-weighted ensemble: the live network plus the latest archived versions (research/champion.ts).
   setTaNetEnsemble(cfg.taNet.enabled && cfg.taNet.ensemble > 1 ? new TaNetEnsemble(path.join(cfg.autoTrain.dir, 'archive', 'ta_net'), cfg.taNet.ensemble) : undefined);
   // Market context for the directional system: breadth, risk gauges, each coin's character

@@ -25,7 +25,9 @@ import type { Timeframe } from '../ta/knowledge';
 import { CONFLUENCES, RULES } from '../ta/knowledge';
 import { marketContext } from '../ta/marketContext';
 import type { TaSnapshot, TfState } from '../ta/analyzer';
-import { activeTaNet, type TaNetOutput } from '../ta/taNet';
+import { activeTaNet, marketCandleSets, type TaNetOutput } from '../ta/taNet';
+import { xgLiveReading, type XgReading } from '../ta/crossGraph';
+import type { Candle } from '../ta/indicators';
 import { activeLibrarian, LIB_STRATEGIES, type LibrarianReading } from '../ta/librarian';
 
 export type FeatureGroup = 'base' | 'micro' | 'momentum' | 'spot' | 'macro' | 'confluence' | 'session' | 'time'
@@ -340,7 +342,7 @@ const snnMoveZ = (c: FeatureContext, h: 15 | 60 | 240) => {
 };
 
 type Fn = (c: FeatureContext, cache: Cache) => number;
-interface Cache { idx: Map<number, number[] | undefined>; spot: Map<number, number[] | undefined>; memo: Map<string, number>; ta?: TaSnapshot | null; tanet?: TaNetOutput | null; lib?: LibrarianReading | null }
+interface Cache { idx: Map<number, number[] | undefined>; spot: Map<number, number[] | undefined>; memo: Map<string, number>; ta?: TaSnapshot | null; tanet?: TaNetOutput | null; lib?: LibrarianReading | null; xg?: XgReading | null }
 
 const NA = NaN;
 const clip = (x: number, lim = 10) => (Number.isFinite(x) ? clamp(x, -lim, lim) : NA);
@@ -968,6 +970,17 @@ Object.assign(FEATURES, {
   lib_net: { group: 'tanet', tier: 'T2', description: "Librarian: continuous playbook position (weights x the families' positions, -1..1)", fn: (c, k) => libS(c, k, (r) => r.net) },
   lib_vs_book: { group: 'tanet', tier: 'T2', description: "Librarian: its position minus the knowledge base's rule tally (tanh(net / 3)); size = disagreement", fn: (c, k) => libS(c, k, (r) => r.vsBook) },
   lib_trans: { group: 'tanet', tier: 'T2', description: 'Librarian: P(the coin\'s regime changes within 72 hours)', fn: (c, k) => { const r = libOf(c, k); return r?.validated.transition ? r.transition : NA; } },
+} satisfies typeof FEATURES);
+
+// ---- The cross-asset graph network (bot/ta/crossGraph.ts): NaN unless it beat momentum / reversal out of sample ----
+const xgOf = (c: FeatureContext, k: Cache): XgReading | undefined => {
+  if (k.xg === undefined) k.xg = (c.asset ? xgLiveReading(c.asset, c.now, () => [...(marketCandleSets() ?? new Map()).entries()].map(([a, s]) => [a, s.bars['1h']] as [string, Candle[] | undefined])) : undefined) ?? null;
+  return k.xg ?? undefined;
+};
+Object.assign(FEATURES, {
+  xg_rel4: { group: 'tanet', tier: 'T2', description: "Cross-asset graph: the coin's forecast return relative to the basket over the next 4 hours (volatility units)", fn: (c, k) => xgOf(c, k)?.rel4 ?? NA },
+  xg_rel24: { group: 'tanet', tier: 'T2', description: "Cross-asset graph: the coin's forecast return relative to the basket over the next 24 hours (volatility units)", fn: (c, k) => xgOf(c, k)?.rel24 ?? NA },
+  xg_rank: { group: 'tanet', tier: 'T2', description: 'Cross-asset graph: the coin\'s rank among the coins by the 24-hour forecast (-1 weakest .. 1 strongest)', fn: (c, k) => xgOf(c, k)?.rank ?? NA },
 } satisfies typeof FEATURES);
 
 export const ALL_FEATURES = Object.keys(FEATURES);

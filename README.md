@@ -368,6 +368,10 @@ It keeps the computer usable while it trains (`research/trainerResources.ts`):
   - A transition head gives P(the coin's regime changes within 72 hours).
   - Both are trained walk-forward and graded against persistence (the current regime's playbook, the last winner, the days-since hazard). Each speaks to the decision models only if it beat persistence out of sample.
   - The setup scorer reads both as an optional input group.
+- **The cross-asset graph network** (`bot/ta/crossGraph.ts`, `research/trainCrossGraph.ts`, `python/xgraph`): the coins as a graph whose edges are their return correlations.
+  - It learns from each coin's return relative to the basket, and forecasts which coins outrun the others over the next 4 and 24 hours.
+  - It trains walk-forward on PyTorch, with a TypeScript mirror for live use.
+  - It is graded against momentum / reversal and a long-short book after costs.
 
 `docs/TA_NETWORK.md` covers the commands, the training, and the first real results.
 

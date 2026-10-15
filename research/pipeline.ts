@@ -23,6 +23,8 @@
 //   0c+ librarian    the Librarian (research/librarian.ts): oracle strategy and regime-transition heads on the TA
 //                    network's inputs, walk-forward and graded against persistence (weekly) -> librarian.json (its
 //                    validated heads are features of the decision models) and the walk's forecasts for the setups
+//   0c~ cross_graph  the cross-asset graph network on relative returns (research/trainCrossGraph.ts, weekly; PyTorch when
+//                    XG_ENGINE finds it) -> cross_graph.json and the walk's forecasts for the setups
 //   0c* lead_lag     does Coinbase spot lead the Kalshi perp? (research/leadLag.ts, weekly, on the recordings) ->
 //                    lead_lag.json, the verdict per coin the spot-led setups wait for
 //   0d. setups       setup scorer for the fast / slow lanes (TA network inputs kept only if they help)
@@ -57,7 +59,7 @@
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, librarian, rule_book, gp, lead_lag, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, playbook, readiness
+//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, librarian, cross_graph, rule_book, gp, lead_lag, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, playbook, readiness
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --sweep-all          # every step due now (weekly studies, tournaments, ablations, sweeps)
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
@@ -107,6 +109,8 @@ import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
 import { exportTaNetOos, oosDir } from './taNetOos';
 import { trainLibrarian } from './librarian';
 import { leadLagStudy } from './leadLag';
+import { trainCrossGraph } from './trainCrossGraph';
+import { setCrossGraphPath, XG_SCHEMA } from '../bot/ta/crossGraph';
 import { LIB_SCHEMA, setLibrarianPath } from '../bot/ta/librarian';
 
 const readLibSchema = (f: string): string | undefined => { try { return (JSON.parse(fs.readFileSync(f, 'utf8')) as { schema?: string }).schema; } catch { return undefined; } };
@@ -123,7 +127,7 @@ import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet'
 /** Coins with Kalshi crypto contracts: the SNN tournaments' transition penalty reads their regime changes. */
 const SNN_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
 
-export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'librarian', 'rule_book', 'gp', 'lead_lag', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
+export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'rule_book', 'gp', 'lead_lag', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -170,6 +174,8 @@ export interface PipelineState {
   librarianAt?: number;
   /** Last spot vs perp lead-lag study (research/leadLag.ts, weekly). */
   leadLagAt?: number;
+  /** Last cross-asset graph network training (research/trainCrossGraph.ts, weekly). */
+  crossGraphAt?: number;
   /** Last genetic-programming run (research/gpIndicators.ts, every GP_EVERY_DAYS). */
   gpAt?: number;
   /** What the recordings make testable so far (see the readiness block of each report). */
@@ -259,7 +265,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   for (const d of REPLAYABLE) fs.mkdirSync(fillDir(d), { recursive: true });
   const state = readState(A.dir);
   if (o.forceAll) {
-    delete state.ruleBookAt; delete state.librarianAt; delete state.leadLagAt; delete state.gpAt; delete state.setupsTrainedAt; delete state.taNetTrainedAt; state.sweptAt = {};
+    delete state.ruleBookAt; delete state.librarianAt; delete state.leadLagAt; delete state.crossGraphAt; delete state.gpAt; delete state.setupsTrainedAt; delete state.taNetTrainedAt; state.sweptAt = {};
     o = { ...o, forceAblation: true, forceSnnPbt: true, forceTaNet: true };
     log('sweeping everything: every step is due this run');
   }
@@ -347,6 +353,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   installTaNet();
   // The Librarian the datasets' features read (its validated heads; the promoted file, else the shipped one).
   setLibrarianPath(T.enabled ? () => (fs.existsSync(promoted('librarian')) ? promoted('librarian') : cfg.taNet.librarianPath) : undefined);
+  setCrossGraphPath(T.enabled ? () => (fs.existsSync(promoted('cross_graph')) ? promoted('cross_graph') : cfg.taNet.crossGraphPath) : undefined);
   // Seed history shipped with the release (deploy/seed/history: Yahoo daily bars from before Binance's
   // archives start), imported once per file version; lowest source priority, so it only fills gaps.
   if (want('history')) {
@@ -490,6 +497,19 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       state.librarianAt = now;
       return { promoted: true, version: r.params.version, rows: r.rows, refits: r.refits, from: r.from, forecastHours: r.forecastHours, strategy: r.params.strategy.validation, transition: r.params.transition.validation };
     }, !T.enabled ? 'TA_NET=false' : noHistory ?? (due ? undefined : `trained ${((now - state.librarianAt!) / 86_400_000).toFixed(1)} day(s) ago (weekly)`));
+  }
+
+  // ---- 0c~. The cross-asset graph network on relative returns (research/trainCrossGraph.ts) ----
+  if (want('cross_graph')) {
+    const file = promoted('cross_graph');
+    const due = !fs.existsSync(file) || !state.crossGraphAt || now - state.crossGraphAt >= 7 * 86_400_000 || readLibSchema(file) !== XG_SCHEMA;
+    const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet`;
+    await run('cross_graph', async () => {
+      const r = await trainCrossGraph(T.historyDir, { engine: cfg.taNet.xgEngine, python: T.python || undefined, log });
+      writeAtomic(file, JSON.stringify(r.params));
+      state.crossGraphAt = now;
+      return { promoted: true, version: r.params.version, engine: r.params.engine, samples: r.samples, refits: r.refits, from: r.from, forecastHours: r.forecastHours, validation: r.params.validation };
+    }, !T.enabled ? 'TA_NET=false' : noHistory ?? (due ? undefined : `trained ${((now - state.crossGraphAt!) / 86_400_000).toFixed(1)} day(s) ago (weekly)`));
   }
 
   // ---- 0c'. Rule book: every TA rule walk-forward by market character (research/ruleBook.ts) ----

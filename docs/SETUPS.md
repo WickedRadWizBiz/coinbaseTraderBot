@@ -276,6 +276,9 @@ The setup trader used to stand alone. It now reads the TA network and the perps 
 **The Librarian (docs/TA_NETWORK.md, "The Librarian")**
 - **Model inputs, only if they help:** at the last closed hour, each strategy family's weight (trend, mean-revert, breakout, flat), the continuous playbook position and its disagreement with the knowledge base's rule tally (with copies oriented to the trade's side), and P(regime change within 72 h). In research they come from the Librarian's walk-forward forecasts, live from the same model on the walking TA network's TA row. The `librarian` group is kept on the same terms as the TA network inputs (`groupChoice.librarian`).
 
+**The cross-asset graph network (docs/TA_NETWORK.md, "The cross-asset graph network")**
+- **Model inputs, only if they help:** the coin's forecast return relative to the basket over the next 4 and 24 hours and its rank among the coins at the last closed hour (with copies oriented to the trade's side). In research they come from the network's walk-forward forecasts, and live from the same model on every coin's candles. The `xgraph` group is kept on the same terms as the TA network inputs (`groupChoice.xgraph`).
+
 **Fractal Alignment Engine and waterfall mode (docs/FRACTAL.md)**
 - **Model inputs, only if they help:** where the 2018-to-now BTC.D cycle stands on its 2016–2017 parent (progress, phase, time dilation, fit, the projected BTC.D change, weeks to the next parent waterfall) and the waterfall legs (BTC.D against the 55% gate, a USDT.D breakdown, SHIB volume velocity). They are computed point in time for every setup, as the `fractal` group, kept on the same terms as the TA network inputs (`groupChoice.fractal`).
 - **Waterfall mode:** once armed and triggered, the lanes take alt longs at 1.5× risk, skip alt shorts and take BTC at 0.5×. These weights multiply the playbook's, capped at 2× in total, inside the lanes' own caps and the liquidation cap.

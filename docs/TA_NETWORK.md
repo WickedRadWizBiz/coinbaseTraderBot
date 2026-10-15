@@ -347,6 +347,8 @@ This model ships as `params/ta_net.json`. The server's pipeline continues the to
 | `TA_NET` | `true` | Compute the network's forecasts as features. |
 | `TA_NET_PATH` | `params/ta_net.json` | Fallback model file (the pipeline's `data/models/ta_net.json` is preferred). |
 | `LIBRARIAN_PATH` | `params/librarian.json` | Fallback Librarian file (the pipeline's `data/models/librarian.json` is preferred). |
+| `CROSS_GRAPH_PATH` | `params/cross_graph.json` | Fallback cross-asset graph network file (the pipeline's `data/models/cross_graph.json` is preferred). |
+| `XG_ENGINE` | `auto` | The cross-asset graph network's training engine: `ts`, `torch` or `auto` (PyTorch when a Python with it and numpy is found). |
 | `TA_NET_REQUIRE_VALIDATED` | `true` | Only heads that passed the blind test speak. |
 | `TA_NET_RETRAIN_DAYS` | `7` | Continue the tournament at most this often (daily while the first one is still running). |
 | `TA_NET_TRAIN_MONTHS` / `TA_NET_EVAL_MONTHS` / `TA_NET_STEP_MONTHS` | `12` / `1` / `1` | Tournament blocks. |
@@ -411,6 +413,39 @@ The Librarian (the 4th-generation spec's 3.1; the name for the adversary with fu
 - The pipeline runs it weekly (step `librarian`, `data/models/librarian.json`); the bot reloads the file when it changes.
 - By hand: `npm run research:librarian -- --history data/history`.
 - `LIBRARIAN_PATH` is the fallback model file.
+
+## The cross-asset graph network (October 2026)
+
+The 4th-generation spec's item 2, as reviewed: a graph network over the coins, learning from **relative** returns. Each coin is measured against the basket, so it forecasts which coins will outrun the others. Where the market as a whole goes is the TA network's job. The model is in `bot/ta/crossGraph.ts`; training is in `research/trainCrossGraph.ts` and `python/xgraph/train.py`.
+
+**Inputs (nodes).** Every coin with hourly bars, at the close of each hour, all in units of the coin's own hourly volatility, so BTC and DOGE are comparable:
+- its return relative to the basket over 1, 4, 24 and 168 hours;
+- its volatility regime (24 h vs 168 h);
+- its taker-buy share and its volume against their norms;
+- the basket's own 24 h move, the same for every node: the tide the relative moves happen in.
+
+**Edges.** The correlation of each pair's hourly returns over the last 168 hours.
+
+**Network.**
+- **Encoder:** `h = tanh(W1 x + b1)`.
+- **Message:** a weighted mean of the other coins' encodings. The weights are a softmax of β × correlation; β is learned, and sets how much the closest-moving coins speak compared with all coins alike.
+- **Update:** `z = tanh(W2 h + U2 m + b2)`.
+- **Two heads:** the coin's relative return over the next 4 and 24 hours, in volatility units. The rank across coins is also exported.
+
+**Training and grading.**
+- **Walk-forward:** samples every 4th hour. The first fit uses two years; then a warm-started refit every quarter on every sample whose 24 h label had closed, each fit forecasting every hour of the next quarter unseen.
+- **Grading:** one decision a day, on those forecasts only.
+  - The cross-sectional correlation (IC) of the 24 h forecast with what happened, against the better of momentum and reversal of the 24 h relative return. Its sign is chosen on the rows each fit saw.
+  - A long-short book: the top quarter of coins long, the bottom quarter short, 10 bps per name changed.
+- **Validation:** it validates when the IC edge has a daily bootstrap 95% lower bound above 0 on 120+ days, and the book made money after costs.
+
+**Engines.** Training runs on PyTorch when `XG_ENGINE` is `torch`, or `auto` (the default) and a Python with PyTorch and numpy is found. Otherwise it runs in TypeScript. Either way it is the same network with the same flat weights, and the live bot runs the TypeScript forward pass. CI checks the two engines agree on identical weights.
+
+**Where it is used.**
+- **Decision models:** `xg_rel4`, `xg_rel24` and `xg_rank` are offered as features, NaN unless the model validated.
+- **Setup scorer:** it reads the forecasts as its `xgraph` input group (with copies oriented to the trade's side), kept only if they raise the development years.
+
+**Running it.** The pipeline runs it weekly (step `cross_graph`, `data/models/cross_graph.json`; forecasts in `data/history/.xgraph/`). By hand: `npm run research:xgraph -- --history data/history`.
 
 ## Calibration, champion / challenger, ensemble (October 2026)
 
