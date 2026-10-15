@@ -303,6 +303,8 @@ export interface TaNetConfig {
   /** Compute the TA network's forecasts as features (they are only used by models that validated them). */
   enabled: boolean;
   modelPath: string;
+  /** The Librarian (bot/ta/librarian.ts: oracle strategy and regime-transition heads on the TA network's inputs). */
+  librarianPath: string;
   /** Only heads that beat the naive forecast in the blind walk-forward test speak (default true). */
   requireValidated: boolean;
   /** Versions in the performance-weighted ensemble (bot/ta/taNetEnsemble.ts): the live network plus up to N-1 archived ones (1 = off). */
@@ -1239,6 +1241,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     taNet: {
       enabled: bool(env, 'TA_NET', true),
       modelPath: path.resolve(env.TA_NET_PATH ?? './params/ta_net.json'),
+      librarianPath: path.resolve(env.LIBRARIAN_PATH ?? './params/librarian.json'),
       requireValidated: bool(env, 'TA_NET_REQUIRE_VALIDATED', true),
       ensemble: num(env, 'TA_NET_ENSEMBLE', 3, 1, 6),
       historyDir: path.resolve(env.HISTORY_DIR ?? path.join(dataDir, 'history')),

@@ -692,6 +692,8 @@ export class TaNetRuntime {
   private readonly rawBriers = new Map<string, Record<TaNetHorizon, number[]>>();
   private readonly gradedTs = new Map<string, Record<TaNetHorizon, Set<number>>>();
   private readonly last = new Map<string, { lastTs: number; len: number; out: TaNetOutput }>();
+  /** The full TA row (TANET_FEATURES order) of each coin's latest computed hours: what the Librarian reads. */
+  private readonly rows = new Map<string, Map<number, number[]>>();
   private forward?: { file: string; rec: ForwardRecord; days: number; minDays: number; mute: boolean; savedDay: number };
 
   constructor(readonly net: TaNet, readonly requireValidated = true) {}
@@ -706,6 +708,9 @@ export class TaNetRuntime {
     const z = (v: number, nm: TaNetNorm, j: number) => (Number.isFinite(v) && nm.std[j] ? Math.max(-8, Math.min(8, (v - nm.mean[j]) / nm.std[j])) : 0);
     return [...m.entries()].sort((a, b) => a[0] - b[0]).map(([ts, r]) => ({ ts, trend: r.f.map((v, j) => z(v, n.trend, j)), ctx: r.c.map((v, j) => z(v, n.ctx, j)), close: r.close }));
   }
+
+  /** The full TA row of an asset's hourly bar `barTs` (TANET_FEATURES order), if computed recently (call outputFor first). */
+  row(asset: string, barTs: number): number[] | undefined { return this.rows.get(asset)?.get(barTs); }
 
   latestInputs(asset: string): { ts: number; trend: number[]; ctx: number[] } | undefined {
     const m = this.feats.get(asset);
@@ -796,7 +801,7 @@ export class TaNetRuntime {
     if (prev && prev.lastTs === lastTs && prev.len === h1.length) return prev.out;
     // Time went backwards (a research process replaying another span): start this asset afresh, so
     // the rolling skill only ever contains calls graded before `now`, exactly as live.
-    if (prev && lastTs < prev.lastTs) for (const m of [this.feats, this.days, this.calls, this.briers, this.rawBriers, this.gradedTs]) m.delete(asset);
+    if (prev && lastTs < prev.lastTs) for (const m of [this.feats, this.days, this.calls, this.briers, this.rawBriers, this.gradedTs, this.rows]) m.delete(asset);
     const feats = this.feats.get(asset) ?? new Map(); this.feats.set(asset, feats);
     const days = this.days.get(asset) ?? new Map(); this.days.set(asset, days);
     const memo = this.calls.get(asset) ?? new Map<number, Call>(); this.calls.set(asset, memo);
@@ -814,6 +819,7 @@ export class TaNetRuntime {
       const fm = taNetFeatureMap(asset, w, set!.bars['1d'], undefined, { ctx, m15: set!.bars['15m'] });
       const all = TANET_FEATURES.map((k) => fin(fm[k]));
       feats.set(h1[i].ts, { f: trendIdx.map((j) => all[j]), c: ctxIdx.map((j) => all[j]), close: h1[i].c, sig: sigma24(h1, i) });
+      if (i >= h1.length - 3) { const rm = this.rows.get(asset) ?? new Map<number, number[]>(); rm.set(h1[i].ts, all); for (const k of rm.keys()) if (k < lastTs - 3 * H) rm.delete(k); this.rows.set(asset, rm); }
     }
     const d1 = set!.bars['1d'] ?? [];
     for (let j = TANET_D1_BARS - 1; j < d1.length; j++) if (!days.has(d1[j].ts)) { const v = taNetDayVector(d1, j); if (v) days.set(d1[j].ts, v); }

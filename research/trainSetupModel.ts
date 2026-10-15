@@ -30,6 +30,8 @@ import type { Candle } from '../bot/ta/indicators';
 import type { Timeframe } from '../bot/ta/knowledge';
 import { adaptToVol, applyRatchet, atr4hAt, detectAt, FAST_TFS, RATCHET, SLOW_TFS, setupSeries, TF_MS, VOL_ADAPT, type Lane, type SetupSeries, type SetupSignal } from '../bot/setups/detectors';
 import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from '../bot/setups/exits';
+import { LibIndex, loadLibForecasts } from './librarian';
+import { libSetupFeatures } from '../bot/ta/librarian';
 import { applyMask, characterFeatures, fractalFeatures, maskedIndices, SETUP_BASE_FEATURES, SETUP_FEATURES, SETUP_GROUPS, setupFeatureMap, setupVector, tanetFeatures, type SetupBars } from '../bot/setups/features';
 import { loadMacroDaily, MacroSeries, macroSettings } from '../bot/macro/macroSeries';
 import { macroConfig } from '../bot/config';
@@ -105,7 +107,7 @@ function characterAtTime(A: AssetBars, others: Candle[][], t: number) {
 }
 
 /** Every setup of an asset with its standalone outcome and features (features cached on disk). */
-export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: CostModel, cacheDir: string | undefined, log: (m: string) => void, oos?: OosIndex, others: Candle[][] = [], macro?: MacroSeries): SetupEvent[] {
+export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: CostModel, cacheDir: string | undefined, log: (m: string) => void, oos?: OosIndex, others: Candle[][] = [], macro?: MacroSeries, lib?: LibIndex): SetupEvent[] {
   const sigs: SetupSignal[] = [];
   for (const tf of [...FAST_TFS, ...SLOW_TFS]) {
     const s = A.series[tf]!;
@@ -142,6 +144,8 @@ export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: Cos
     characterFeatures(tn, characterAtTime(A, others, at));
     // Where the BTC dominance cycle stands on its 2016-2017 parent, and the waterfall legs (point in time).
     fractalFeatures(tn, A.asset, g.dir, macro?.at(at));
+    // The Librarian's walk-forward reading at the last closed hour.
+    libSetupFeatures(tn, g.dir, lib?.at(A.asset, at));
     const x = new Float32Array(SETUP_FEATURES.length);
     x.set(base);
     SETUP_FEATURES.slice(F).forEach((name, j) => { x[F + j] = Number.isFinite(tn[name]) ? tn[name] : NaN; });
@@ -301,7 +305,9 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
   const ms = macroSettings(macroConfig(process.env));
   const macro = new MacroSeries(loadMacroDaily(hist), ms.params, ms.fractal);
   if (!macro.hasParent()) log('no BTC.D daily history for 2016-2017 (TradingView CRYPTOCAP:BTC.D): the fractal inputs stay blank');
-  for (const A of assets.values()) events.push(...assetEvents(A, btc, costs, o.cacheDir ?? path.join(hist, '.setup-cache'), log, oos, [...assets.values()].filter((x) => x !== A).map((x) => x.h1), macro));
+  const lib = new LibIndex(loadLibForecasts(hist));
+  if (!lib.f) log(`no Librarian walk-forward forecasts in ${hist}/.librarian (npm run research:librarian): its inputs stay blank`);
+  for (const A of assets.values()) events.push(...assetEvents(A, btc, costs, o.cacheDir ?? path.join(hist, '.setup-cache'), log, oos, [...assets.values()].filter((x) => x !== A).map((x) => x.h1), macro, lib));
   events.sort((a, b) => a.at - b.at);
   const end = Math.max(...events.map((e) => e.at)) + 1;
   const month = 30.44 * DAY;
@@ -413,6 +419,18 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
     log(`fractal inputs on the development years: with ${withF.n} trades, mean R ${withF.mean.toFixed(3)}, t ${withF.t.toFixed(2)} | without ${base.n} trades, mean R ${base.mean.toFixed(3)}, t ${base.t.toFixed(2)} -> ${kept ? 'KEPT' : 'blanked'}`);
     if (kept) { groups = [...groups, 'fractal']; scores = sF; }
   } else log(`fractal inputs cover ${(100 * faCover).toFixed(0)}% of the setups since ${iso(firstFold)} (need 80%; BTC.D 2016-2017 history) -> blanked`);
+  // The Librarian: kept on the same terms.
+  const lbIdx = SETUP_FEATURES.indexOf(SETUP_GROUPS.librarian[0]);
+  const lbCover = events.filter((e) => e.at >= firstFold && Number.isFinite(e.x[lbIdx])).length / Math.max(1, events.filter((e) => e.at >= firstFold).length);
+  if (lbCover > 0.8) {
+    const base = devScore(scores, chooseBook(scores, true));
+    const sL = scoresFor([...groups, 'librarian']);
+    const withL = devScore(sL, chooseBook(sL, true));
+    const kept = withL.t > base.t;
+    groupChoice.librarian = { withGroup: withL.t, without: base.t, kept };
+    log(`Librarian inputs on the development years: with ${withL.n} trades, mean R ${withL.mean.toFixed(3)}, t ${withL.t.toFixed(2)} | without ${base.n} trades, mean R ${base.mean.toFixed(3)}, t ${base.t.toFixed(2)} -> ${kept ? 'KEPT' : 'blanked'}`);
+    if (kept) { groups = [...groups, 'librarian']; scores = sL; }
+  } else log(`Librarian inputs: walk-forward forecasts cover ${(100 * lbCover).toFixed(0)}% of the setups since ${iso(firstFold)} (need 80%; npm run research:librarian) -> blanked`);
   book = chooseBook(scores);
   const validation: SetupModelParams['validation'] = {};
   // Both lanes together, every period.

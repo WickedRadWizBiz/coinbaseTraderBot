@@ -55,6 +55,7 @@ import { Tca } from './tca/tca';
 import { createSnnFleet } from './snn';
 import { VolModel } from './model/volModel';
 import { activeTaNet, setTaNet, setTaNetContextSource, TaNet, TaNetRuntime } from './ta/taNet';
+import { Librarian, setLibrarianPath } from './ta/librarian';
 import { FillModel } from './tca/fillModel';
 import { TennisScoreClient } from './tennis/liveTennisApi';
 import { TennisFairModel } from './tennis/tennisFair';
@@ -283,6 +284,17 @@ async function main(): Promise<void> {
       risk: { maxOrderNotionalUsd: P.maxOrderNotionalUsd, collarBps: P.collarBps },
     });
     if (P.trading !== 'off' && P.strategy === 'setups') {
+      // The walking TA network (the one whose forecasts trained the setup model), all heads ungated: the setup model
+      // itself decides whether they count. Reloaded when the pipeline promotes a newer one.
+      const wfTaNet = (() => {
+        let rt: TaNetRuntime | undefined, mt = -1;
+        return () => {
+          const file = resolveModelPaths(cfg).ta_net_wf;
+          const m = fs.existsSync(file) ? fs.statSync(file).mtimeMs : 0;
+          if (m !== mt) { mt = m; try { const n = m ? TaNet.load(file) : undefined; rt = n ? new TaNetRuntime(n, false) : undefined; } catch (e) { rt = undefined; log.warn(`setup trader: TA network ${file} not loaded: ${(e as Error).message}`); } }
+          return rt;
+        };
+      })();
       // Fast / slow lane setup trader (bot/setups): levels from spot candles, orders on the perps.
       directionalTrader = new SetupTrader({
         params: {
@@ -299,16 +311,21 @@ async function main(): Promise<void> {
         hub, gateway: perpGateway, audit, modelPath: () => resolveModelPaths(cfg).setups, statePath: path.join(cfg.dataDir, 'setups_state.json'),
         candles: (asset) => md.features.candles.get(asset),
         spot: (asset, now) => md.spot.get(asset)?.fresh(now, 15_000)?.value ?? md.index.get(asset)?.fresh(now, 15_000)?.value,
-        // The walking TA network (the one whose forecasts trained the setup model), all heads ungated:
-        // the setup model itself decides whether they count. Reloaded when the pipeline promotes a newer one.
-        taNet: (() => {
-          let rt: TaNetRuntime | undefined, mt = -1;
+        taNet: (asset: string, now: number) => {
+          const o = wfTaNet()?.outputFor(asset, md.features.candles.get(asset), now);
+          return o ? { up1: o.up[60] ?? NaN, up4: o.up[240] ?? NaN, vol: o.vol4h ?? NaN } : undefined;
+        },
+        // The Librarian on the same TA row (ungated: the setup model's "librarian" group decides).
+        librarian: (() => {
+          let lib: Librarian | undefined, mt = -1, at = '';
           return (asset: string, now: number) => {
-            const file = resolveModelPaths(cfg).ta_net_wf;
+            const file = resolveModelPaths(cfg).librarian;
             const m = fs.existsSync(file) ? fs.statSync(file).mtimeMs : 0;
-            if (m !== mt) { mt = m; try { const n = m ? TaNet.load(file) : undefined; rt = n ? new TaNetRuntime(n, false) : undefined; } catch (e) { rt = undefined; log.warn(`setup trader: TA network ${file} not loaded: ${(e as Error).message}`); } }
+            if (m !== mt || file !== at) { mt = m; at = file; try { lib = m ? Librarian.load(file) : undefined; } catch (e) { lib = undefined; log.warn(`setup trader: Librarian ${file} not loaded: ${(e as Error).message}`); } }
+            const rt = lib ? wfTaNet() : undefined;
             const o = rt?.outputFor(asset, md.features.candles.get(asset), now);
-            return o ? { up1: o.up[60] ?? NaN, up4: o.up[240] ?? NaN, vol: o.vol4h ?? NaN } : undefined;
+            const row = o ? rt!.row(asset, o.barTs) : undefined;
+            return lib && row ? lib.predict(row) : undefined;
           };
         })(),
         snn: (asset) => engineRef?.snnContext(asset, undefined, 'perps'),
@@ -370,6 +387,8 @@ async function main(): Promise<void> {
   let taNet: TaNet | undefined;
   try { taNet = cfg.taNet.enabled ? TaNet.load(modelPaths.ta_net) : undefined; } catch (e) { log.warn(`TA network not loaded: ${(e as Error).message}`); }
   setTaNet(taNet, cfg.taNet.requireValidated);
+  // The Librarian the general features read (validated heads only; reloaded when the pipeline promotes a new one).
+  setLibrarianPath(cfg.taNet.enabled ? () => resolveModelPaths(cfg).librarian : undefined);
   // Performance-weighted ensemble: the live network plus the latest archived versions (research/champion.ts).
   setTaNetEnsemble(cfg.taNet.enabled && cfg.taNet.ensemble > 1 ? new TaNetEnsemble(path.join(cfg.autoTrain.dir, 'archive', 'ta_net'), cfg.taNet.ensemble) : undefined);
   // Market context for the directional system: breadth, risk gauges, each coin's character

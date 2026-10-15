@@ -19,6 +19,10 @@
 //     progress, the parent's phase, time dilation, fit, the projected BTC.D path and the next waterfall) and
 //     the waterfall legs (BTC.D against the 55% gate, a USDT.D breakdown, SHIB volume velocity), the "fractal"
 //     group, kept on the same terms. Blank before the child cycle has a year (2019) or without the parent.
+//   - the Librarian's reading at the last closed hour (bot/ta/librarian.ts: each strategy family's weight, the
+//     continuous playbook position and its disagreement with the rule tally, P(regime change within 72 h)), the
+//     "librarian" group: in research from its walk-forward export (research/librarian.ts), live from the same model.
+//     Kept on the same terms.
 // The states come from bot/ta/taNet.ts taNetStates on the same windows live and in research.
 
 import { evaluate } from '../ta/analyzer';
@@ -30,6 +34,7 @@ import type { SetupSignal } from './detectors';
 import type { Character, CharacterInputs } from '../ta/character';
 import { TF_MS } from './detectors';
 import type { MacroInputs } from '../macro/macroSeries';
+import { LIB_SETUP_KEYS, libSetupFeatures, type LibrarianReading } from '../ta/librarian';
 
 const clip = (x: number, lim: number) => (Number.isFinite(x) ? Math.max(-lim, Math.min(lim, x)) : NaN);
 
@@ -57,9 +62,9 @@ export const FRACTAL_SETUP_KEYS = [
   'fae_proj30', 'fae_proj90', 'fae_wf_weeks', 'fae_alt', 'o_fae_proj90', 'mac_gate', 'mac_usdt_brk', 'mac_shib_vel',
 ];
 /** Optional input groups the trainer switches on only when they help (off = blanked to NaN). */
-export const SETUP_GROUPS: Record<string, string[]> = { tanet: TANET_SETUP_KEYS, character: CHAR_SETUP_KEYS, fractal: FRACTAL_SETUP_KEYS };
+export const SETUP_GROUPS: Record<string, string[]> = { tanet: TANET_SETUP_KEYS, character: CHAR_SETUP_KEYS, fractal: FRACTAL_SETUP_KEYS, librarian: LIB_SETUP_KEYS };
 /** Every input, in order (groups appended last, so models trained before a group existed still load). */
-export const SETUP_FEATURES: string[] = [...SETUP_BASE_FEATURES, ...TANET_SETUP_KEYS, ...CHAR_SETUP_KEYS, ...FRACTAL_SETUP_KEYS];
+export const SETUP_FEATURES: string[] = [...SETUP_BASE_FEATURES, ...TANET_SETUP_KEYS, ...CHAR_SETUP_KEYS, ...FRACTAL_SETUP_KEYS, ...LIB_SETUP_KEYS];
 
 /** Fill the fractal inputs: the engine's state and the waterfall legs (NaN when unknown). For an altcoin a falling
  *  BTC.D is the tailwind, for BTC the reverse, so the oriented copy flips with the asset. */
@@ -151,7 +156,7 @@ function taMap(prefix: string, bars: SetupBars, t: number, out: Record<string, n
 }
 
 /** Feature vector of a setup known at time `t` (= signal bar close), from the asset's and BTC's bars. */
-export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBars | undefined, t = sig.ts + TF_MS[sig.tf]!, tanet?: TaNetReading, character?: { cls: Character; x: CharacterInputs }, macro?: MacroInputs): Record<string, number> {
+export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBars | undefined, t = sig.ts + TF_MS[sig.tf]!, tanet?: TaNetReading, character?: { cls: Character; x: CharacterInputs }, macro?: MacroInputs, lib?: Pick<LibrarianReading, 'w' | 'net' | 'vsBook' | 'transition'>): Record<string, number> {
   const out: Record<string, number> = {};
   const risk = Math.abs(sig.ref - sig.stop);
   out.dir = sig.dir;
@@ -174,6 +179,7 @@ export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBar
   tanetFeatures(out, sig.dir, tanet);
   characterFeatures(out, character);
   fractalFeatures(out, sig.asset, sig.dir, macro);
+  libSetupFeatures(out, sig.dir, lib);
   return out;
 }
 

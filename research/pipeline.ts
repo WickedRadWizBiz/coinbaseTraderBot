@@ -20,6 +20,9 @@
 //   0c. ta_net_oos   walk-forward forecasts of that network over all history (research/taNetOos.ts),
 //                    extended month by month -> inputs of the setup scorer; promote ta_net_wf.json (the
 //                    walking network, read live by the setup trader)
+//   0c+ librarian    the Librarian (research/librarian.ts): oracle strategy and regime-transition heads on the TA
+//                    network's inputs, walk-forward and graded against persistence (weekly) -> librarian.json (its
+//                    validated heads are features of the decision models) and the walk's forecasts for the setups
 //   0d. setups       setup scorer for the fast / slow lanes (TA network inputs kept only if they help)
 //   0e. setup_snn    does the perps SNN help the setup trader? Tested on the bot's own setup journal
 //                    (research/setupSnnStudy.ts); writes setup_snn_gate.json, on only once proven
@@ -52,7 +55,7 @@
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, rule_book, gp, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, playbook, readiness
+//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, librarian, rule_book, gp, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, playbook, readiness
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --sweep-all          # every step due now (weekly studies, tournaments, ablations, sweeps)
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
@@ -100,6 +103,10 @@ import { linkDays, recordingDayList, recordingFiles, recordingsUsage } from '../
 import { readJournalTrades } from '../bot/setups/journal';
 import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
 import { exportTaNetOos, oosDir } from './taNetOos';
+import { trainLibrarian } from './librarian';
+import { LIB_SCHEMA, setLibrarianPath } from '../bot/ta/librarian';
+
+const readLibSchema = (f: string): string | undefined => { try { return (JSON.parse(fs.readFileSync(f, 'utf8')) as { schema?: string }).schema; } catch { return undefined; } };
 import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, downloadBinanceOpenInterest, type BinanceMarket } from './history/binanceVision';
 import { buildHistoryReplay, historyStart, perpSpecsFromRecordings, replayKalshiDays, replayPerpDays, replayTennisDays } from './history/historyReplay';
 import { workerCount } from './workerPool';
@@ -113,7 +120,7 @@ import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet'
 /** Coins with Kalshi crypto contracts: the SNN tournaments' transition penalty reads their regime changes. */
 const SNN_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
 
-export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'rule_book', 'gp', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
+export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'librarian', 'rule_book', 'gp', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -156,6 +163,8 @@ export interface PipelineState {
   setupsTrainedAt?: number;
   /** Last rule-book study (research/ruleBook.ts, weekly). */
   ruleBookAt?: number;
+  /** Last Librarian training (research/librarian.ts, weekly). */
+  librarianAt?: number;
   /** Last genetic-programming run (research/gpIndicators.ts, every GP_EVERY_DAYS). */
   gpAt?: number;
   /** What the recordings make testable so far (see the readiness block of each report). */
@@ -245,7 +254,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   for (const d of REPLAYABLE) fs.mkdirSync(fillDir(d), { recursive: true });
   const state = readState(A.dir);
   if (o.forceAll) {
-    delete state.ruleBookAt; delete state.gpAt; delete state.setupsTrainedAt; delete state.taNetTrainedAt; state.sweptAt = {};
+    delete state.ruleBookAt; delete state.librarianAt; delete state.gpAt; delete state.setupsTrainedAt; delete state.taNetTrainedAt; state.sweptAt = {};
     o = { ...o, forceAblation: true, forceSnnPbt: true, forceTaNet: true };
     log('sweeping everything: every step is due this run');
   }
@@ -331,6 +340,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     try { setTaNet(file ? TaNet.load(file) : undefined, T.requireValidated); } catch (e) { log(`TA network not loaded: ${(e as Error).message}`); setTaNet(undefined); }
   };
   installTaNet();
+  // The Librarian the datasets' features read (its validated heads; the promoted file, else the shipped one).
+  setLibrarianPath(T.enabled ? () => (fs.existsSync(promoted('librarian')) ? promoted('librarian') : cfg.taNet.librarianPath) : undefined);
   // Seed history shipped with the release (deploy/seed/history: Yahoo daily bars from before Binance's
   // archives start), imported once per file version; lowest source priority, so it only fills gaps.
   if (want('history')) {
@@ -461,6 +472,19 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       if (r.complete && fs.existsSync(wf)) fs.copyFileSync(wf, promoted('ta_net_wf'));
       return { ...r, promoted: r.complete };
     }, cfg.perps.strategy !== 'setups' ? 'PERP_STRATEGY is not setups' : !T.enabled ? 'TA_NET=false' : noHistory);
+  }
+
+  // ---- 0c+. The Librarian: oracle strategy + regime-transition heads on the TA network's inputs (research/librarian.ts) ----
+  if (want('librarian')) {
+    const file = promoted('librarian');
+    const due = !fs.existsSync(file) || !state.librarianAt || now - state.librarianAt >= 7 * 86_400_000 || readLibSchema(file) !== LIB_SCHEMA;
+    const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet`;
+    await run('librarian', async () => {
+      const r = await trainLibrarian(T.historyDir, { cacheDir: path.join(work, 'tanet-cache'), log });
+      writeAtomic(file, JSON.stringify(r.params));
+      state.librarianAt = now;
+      return { promoted: true, version: r.params.version, rows: r.rows, refits: r.refits, from: r.from, forecastHours: r.forecastHours, strategy: r.params.strategy.validation, transition: r.params.transition.validation };
+    }, !T.enabled ? 'TA_NET=false' : noHistory ?? (due ? undefined : `trained ${((now - state.librarianAt!) / 86_400_000).toFixed(1)} day(s) ago (weekly)`));
   }
 
   // ---- 0c'. Rule book: every TA rule walk-forward by market character (research/ruleBook.ts) ----

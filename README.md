@@ -356,6 +356,11 @@ After every round that improves a model, it sends the models back for the bot to
 - **TA network:** a five-branch neural network (fractal blocks over 15m and hourly bars, hourly GRU over the TA library, daily attention, and a market-context branch: BTC, market breadth, Binance's BTC dominance index, the BTC.D × USDT.D quadrant, TA on the daily dominance charts). It forecasts P(up) over 1h and 4h, plus the next 4 hours' volatility.
 - **Training and validation:** chosen by a tournament of three over years of pooled hourly history. It must pass an untouched holdout, a deflated-Sharpe and per-regime hurdle, and a live forward test. Every live call is graded (`tanet_skill_*`).
 - **Who uses it:** its forecasts are features for the MLP, the perps model and the vol forecast, each of which keeps them only if its own validation improves.
+- **The Librarian** (`bot/ta/librarian.ts`, `research/librarian.ts`): oracle-trained heads on the same TA row.
+  - A strategy head gives soft weights on which strategy family (trend, mean-revert, breakout, flat) would have paid over the next day after fees.
+  - A transition head gives P(the coin's regime changes within 72 hours).
+  - Both are trained walk-forward and graded against persistence (the current regime's playbook, the last winner, the days-since hazard). Each speaks to the decision models only if it beat persistence out of sample.
+  - The setup scorer reads both as an optional input group.
 
 `docs/TA_NETWORK.md` covers the commands, the training, and the first real results.
 

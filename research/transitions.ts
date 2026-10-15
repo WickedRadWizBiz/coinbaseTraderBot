@@ -13,9 +13,10 @@ const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
 
 interface Cache { v: 1; labels: Record<string, Record<string, string>> }
 
-/** Confirmed regime transitions of `assets` between `from` and `to` (UTC ms). `assets` empty or no history: none. */
-export function regimeTransitions(historyDir: string, assets: string[], from: number, to: number, log: (m: string) => void = () => {}): Transition[] {
-  if (!assets.length || !(to > from)) return [];
+/** Each coin's regime label per day ('YYYY-MM-DD' -> key; days without one are left out) between `from` and `to`. */
+export function regimeDayLabels(historyDir: string, assets: string[], from: number, to: number, log: (m: string) => void = () => {}): Map<string, Map<string, string>> {
+  const out = new Map<string, Map<string, string>>();
+  if (!assets.length || !(to > from)) return out;
   const file = path.join(historyDir, '.regime-days.json');
   let cache: Cache = { v: 1, labels: {} };
   try { const j = JSON.parse(fs.readFileSync(file, 'utf8')) as Cache; if (j?.v === 1 && j.labels) cache = j; } catch { /* first run */ }
@@ -32,11 +33,14 @@ export function regimeTransitions(historyDir: string, assets: string[], from: nu
     try { const tmp = `${file}.${process.pid}.tmp`; fs.writeFileSync(tmp, JSON.stringify(cache)); fs.renameSync(tmp, file); } catch { /* read-only: recomputed next time */ }
     log(`regime labels for ${missing.length} day(s) x ${assets.length} coin(s) in ${((Date.now() - t0) / 1000).toFixed(0)} s (cached in ${path.basename(file)})`);
   }
+  for (const a of assets) out.set(a, new Map(days.map((d) => [d, cache.labels[a]?.[d] ?? '']).filter(([, k]) => k) as Array<[string, string]>));
+  return out;
+}
+
+/** Confirmed regime transitions of `assets` between `from` and `to` (UTC ms). `assets` empty or no history: none. */
+export function regimeTransitions(historyDir: string, assets: string[], from: number, to: number, log: (m: string) => void = () => {}): Transition[] {
   const out: Transition[] = [];
-  for (const a of assets) {
-    const labels = days.map((d) => ({ ts: Date.parse(`${d}T00:00:00Z`), key: cache.labels[a]?.[d] ?? '' })).filter((l) => l.key);
-    out.push(...transitionsOf(labels, a));
-  }
+  for (const [a, m] of regimeDayLabels(historyDir, assets, from, to, log)) out.push(...transitionsOf([...m].map(([d, key]) => ({ ts: Date.parse(`${d}T00:00:00Z`), key })), a));
   return out.sort((x, y) => x.ts - y.ts);
 }
 

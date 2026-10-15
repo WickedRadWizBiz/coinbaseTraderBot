@@ -26,6 +26,7 @@ import { CONFLUENCES, RULES } from '../ta/knowledge';
 import { marketContext } from '../ta/marketContext';
 import type { TaSnapshot, TfState } from '../ta/analyzer';
 import { activeTaNet, type TaNetOutput } from '../ta/taNet';
+import { activeLibrarian, LIB_STRATEGIES, type LibrarianReading } from '../ta/librarian';
 
 export type FeatureGroup = 'base' | 'micro' | 'momentum' | 'spot' | 'macro' | 'confluence' | 'session' | 'time'
   // Relaxed-cadence catalog (minute windows and slower).
@@ -339,7 +340,7 @@ const snnMoveZ = (c: FeatureContext, h: 15 | 60 | 240) => {
 };
 
 type Fn = (c: FeatureContext, cache: Cache) => number;
-interface Cache { idx: Map<number, number[] | undefined>; spot: Map<number, number[] | undefined>; memo: Map<string, number>; ta?: TaSnapshot | null; tanet?: TaNetOutput | null }
+interface Cache { idx: Map<number, number[] | undefined>; spot: Map<number, number[] | undefined>; memo: Map<string, number>; ta?: TaSnapshot | null; tanet?: TaNetOutput | null; lib?: LibrarianReading | null }
 
 const NA = NaN;
 const clip = (x: number, lim = 10) => (Number.isFinite(x) ? clamp(x, -lim, lim) : NA);
@@ -950,6 +951,23 @@ Object.assign(FEATURES, {
   tanet_skill_1h: { group: 'tanet', tier: 'T2', description: 'TA network 1-hour skill over its last graded calls (1 - Brier/0.25; NaN until 24 graded)', fn: (c, k) => { const v = tanetOf(c, k)?.skill[60]; return v === undefined || !Number.isFinite(v) ? NA : clip(v, 1); } },
   tanet_skill_4h: { group: 'tanet', tier: 'T2', description: 'TA network 4-hour skill over its last graded calls', fn: (c, k) => { const v = tanetOf(c, k)?.skill[240]; return v === undefined || !Number.isFinite(v) ? NA : clip(v, 1); } },
   tanet_dir_agree: { group: 'tanet', tier: 'T2', description: "+1 when the TA network's 1-hour direction agrees with the fair value's side, -1 when it disagrees", fn: (c, k) => { const u = tanetOf(c, k)?.up[60]; return u === undefined || !Number.isFinite(u) ? NA : Math.sign(u - 0.5) * Math.sign(c.fairValue - 0.5); } },
+} satisfies typeof FEATURES);
+
+// ---- The Librarian (bot/ta/librarian.ts) on the same TA row: NaN unless its head beat persistence out of sample ----
+const libOf = (c: FeatureContext, k: Cache): LibrarianReading | undefined => {
+  if (k.lib === undefined) {
+    const lib = activeLibrarian(), o = lib ? tanetOf(c, k) : undefined;
+    const row = o && c.asset ? activeTaNet()?.row(c.asset, o.barTs) : undefined;
+    k.lib = (lib && row ? lib.predict(row) : undefined) ?? null;
+  }
+  return k.lib ?? undefined;
+};
+const libS = (c: FeatureContext, k: Cache, f: (r: LibrarianReading) => number) => { const r = libOf(c, k); return r?.validated.strategy ? f(r) : NA; };
+Object.assign(FEATURES, {
+  ...Object.fromEntries(LIB_STRATEGIES.map((s, j) => [`lib_${s}`, { group: 'tanet', tier: 'T2', description: `Librarian: weight of the ${s} family over the next day (oracle-trained on the TA library)`, fn: (c: FeatureContext, k: Cache) => libS(c, k, (r) => r.w[j]) }])),
+  lib_net: { group: 'tanet', tier: 'T2', description: "Librarian: continuous playbook position (weights x the families' positions, -1..1)", fn: (c, k) => libS(c, k, (r) => r.net) },
+  lib_vs_book: { group: 'tanet', tier: 'T2', description: "Librarian: its position minus the knowledge base's rule tally (tanh(net / 3)); size = disagreement", fn: (c, k) => libS(c, k, (r) => r.vsBook) },
+  lib_trans: { group: 'tanet', tier: 'T2', description: 'Librarian: P(the coin\'s regime changes within 72 hours)', fn: (c, k) => { const r = libOf(c, k); return r?.validated.transition ? r.transition : NA; } },
 } satisfies typeof FEATURES);
 
 export const ALL_FEATURES = Object.keys(FEATURES);
