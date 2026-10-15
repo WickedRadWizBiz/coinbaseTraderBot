@@ -17,6 +17,10 @@
 // the final elite's record is the out-of-sample history of its lineage. Every evaluation of every
 // member counts as a trial for the deflated Sharpe ratio.
 //
+// Ranking is era-robust (research/selection.ts): each member is ranked on its lineage's last few evaluation
+// blocks, mean - lambda x spread (or the mean of its worst k), not on the latest block alone, so a member that
+// shines in one era and fails the next ranks below one that is steadily good.
+//
 // Genetic layer (`genetic`, research/genetic.ts), on top of that selection: with a population of 6+, every
 // few rounds (a generation) the best survivors over the generation breed -- one offspring per pair, its
 // knobs crossed from both parents and very slightly mutated, its learned state from the parents -- and the
@@ -27,6 +31,7 @@ import { progress } from './progress';
 import { rng } from './stats';
 import { perturb, type FitnessReport, type Hyper, type Interaction, type MutationSpec } from '../bot/util/fitness';
 import { crossoverGenes, geneScale, geneTraits, GENE_WINDOW, islandCount, newGaState, parentCount, planBreeding, roundRanks, type GaGeneration, type GaState, type GeneTrait } from './genetic';
+import { DEFAULT_ROBUST, populationVariance, robustScore, type RobustOpts } from './selection';
 
 export { perturb, type Hyper, type MutationSpec } from '../bot/util/fitness';
 export interface PbtRound {
@@ -85,6 +90,9 @@ export interface PbtMember<S> {
   /** Out-of-sample record: interactions from every evaluation window of this lineage. */
   record: Interaction[];
   scores: Array<{ round: number; fitness: number }>;
+  /** The lineage's fitness per evaluation block, oldest first (a clone or offspring inherits it with the record):
+   *  what the era-robust ranking reads. Rebuilt from `scores` for populations saved before it existed. */
+  blocks?: number[];
   /** Round after which this member restarted fresh (exploration): protected from culling for a while. */
   bornRound?: number;
   /** Genetic layer: the island this member fights in, what its parts made since the last breeding, and an
@@ -98,7 +106,7 @@ export interface PbtMember<S> {
 export interface PbtRoundLog {
   round: number;
   evalFrom: string; evalTo: string;
-  ranking: Array<{ member: number; fitness: number; sortino: number; maxDrawdown: number; costs: number; independent: number; hyper: Hyper }>;
+  ranking: Array<{ member: number; fitness: number; sortino: number; maxDrawdown: number; costs: number; independent: number; hyper: Hyper; robust?: number }>;
   elite: number; culled: number; mutated: number[];
   /** Every member culled this round (populations of 4+ cull their worst quarter). */
   culledAll?: number[];
@@ -143,6 +151,8 @@ export async function runPbt<S>(o: {
   /** Members trained and evaluated at once (their hooks must not share mutable state; e.g. each replays
    *  in its own worker thread). 1 = one after another. */
   concurrency?: number;
+  /** Era-robust ranking over the lineage's recent blocks (research/selection.ts); false = rank on the round alone. */
+  robust?: RobustOpts | false;
   /** Called after every round (e.g. to persist the population). */
   onRound?: (state: { members: PbtMember<S>[]; trials: number; log: PbtRoundLog[]; round: PbtRound; ga?: GaState }) => Promise<void> | void;
 }): Promise<PbtResult<S>> {
@@ -193,6 +203,7 @@ export async function runPbt<S>(o: {
         culled.state = await o.hooks.init(culled.hyper, culled.id);
         culled.lineage = [culled.id];
         culled.record = [];
+        culled.blocks = [];
         culled.bornRound = round.index;
         if (ga) { culled.traits = {}; delete culled.parents; delete culled.bornGen; }
         restarted = culled.id;
@@ -205,6 +216,7 @@ export async function runPbt<S>(o: {
         c.hyper = { ...d.hyper };
         c.lineage = [...d.lineage, c.id];
         c.record = [...d.record];
+        c.blocks = [...(d.blocks ?? [])];
         delete c.bornRound;
         if (ga) { c.traits = { ...(d.traits ?? {}) }; delete c.parents; delete c.bornGen; }
       }
@@ -241,7 +253,7 @@ export async function runPbt<S>(o: {
     const generation = ga!.generation + 1;
     for (const k of kids) {
       const c = byId.get(k.slot)!;
-      c.state = k.state; c.hyper = k.hyper; c.lineage = [...k.a.lineage, c.id]; c.record = [...k.a.record];
+      c.state = k.state; c.hyper = k.hyper; c.lineage = [...k.a.lineage, c.id]; c.record = [...k.a.record]; c.blocks = [...(k.a.blocks ?? [])];
       c.parents = [k.a.id, k.b.id]; c.bornGen = generation;
       delete c.bornRound;
     }
@@ -272,7 +284,10 @@ export async function runPbt<S>(o: {
         evals[i] = await o.hooks.evaluate(m.state, m.hyper, round);
       }
     }));
-    members.forEach((m, i) => { trials++; m.record.push(...evals[i].interactions); m.scores.push({ round: round.index, fitness: evals[i].report.fitness }); });
+    members.forEach((m, i) => {
+      trials++; m.record.push(...evals[i].interactions); m.scores.push({ round: round.index, fitness: evals[i].report.fitness });
+      m.blocks = [...(m.blocks ?? m.scores.slice(0, -1).map((x) => x.fitness)), evals[i].report.fitness].slice(-64);
+    });
     if (ga) {
       // What each member's parts made, and the trait memory (knobs vs rank within this round).
       members.forEach((m, i) => { for (const [k, v] of Object.entries(evals[i].traits ?? {})) { const t = (m.traits ??= {}); t[k] = (t[k] ?? 0) + v; } });
@@ -280,11 +295,15 @@ export async function runPbt<S>(o: {
       members.forEach((m, i) => ga.genes.push({ g: geneScale(o.spec, m.hyper), f: ranks[i] }));
       if (ga.genes.length > GENE_WINDOW) ga.genes.splice(0, ga.genes.length - GENE_WINDOW);
     }
-    let order = members.map((m, i) => ({ m, e: evals[i] })).sort((a, b) => b.e.report.fitness - a.e.report.fitness);
+    // Era-robust: ranked on the lineage's recent blocks (the round's own fitness breaks ties).
+    const robust = o.robust === false ? undefined : o.robust ?? DEFAULT_ROBUST;
+    const popVar = robust ? populationVariance(members.map((m) => m.blocks ?? []), robust.window) : 0;
+    const rs = new Map(members.map((m, i) => [m.id, robust ? robustScore(m.blocks ?? [], popVar, robust) : evals[i].report.fitness]));
+    let order = members.map((m, i) => ({ m, e: evals[i] })).sort((a, b) => (rs.get(b.m.id)! - rs.get(a.m.id)!) || (b.e.report.fitness - a.e.report.fitness));
     const elite = order[0].m;
     const entry: PbtRoundLog = {
       round: round.index, evalFrom: iso(round.evalFrom), evalTo: iso(round.evalTo),
-      ranking: order.map(({ m, e }) => ({ member: m.id, fitness: e.report.fitness, sortino: e.report.sortino, maxDrawdown: e.report.maxDrawdown, costs: e.report.costs, independent: e.report.independent, hyper: { ...m.hyper } })),
+      ranking: order.map(({ m, e }) => ({ member: m.id, fitness: e.report.fitness, sortino: e.report.sortino, maxDrawdown: e.report.maxDrawdown, costs: e.report.costs, independent: e.report.independent, hyper: { ...m.hyper }, ...(robust ? { robust: rs.get(m.id) } : {}) })),
       elite: elite.id, culled: elite.id, mutated: [],
     };
     // Exploration after every round except the final one; a resumed tournament explores between calls
@@ -332,7 +351,7 @@ export async function runPbt<S>(o: {
     out.push(entry);
     await o.onRound?.({ members, trials, log: out, round, ga });
     progress('Tournament rounds', o.rounds.indexOf(round) + 1, o.rounds.length);
-    log(`round ${round.index} (${entry.evalFrom}..${entry.evalTo}): ${entry.ranking.map((x) => `#${x.member} ${x.fitness.toFixed(2)}`).join(', ')}; elite #${elite.id}, ${note}`);
+    log(`round ${round.index} (${entry.evalFrom}..${entry.evalTo}): ${entry.ranking.map((x) => `#${x.member} ${x.fitness.toFixed(2)}${x.robust !== undefined ? ` (robust ${x.robust.toFixed(2)})` : ''}`).join(', ')}; elite #${elite.id}, ${note}`);
   }
   const lastRank = out[out.length - 1]?.ranking[0]?.member ?? 0;
   return { elite: members.find((m) => m.id === lastRank) ?? members[0], members, log: out, trials, ...(ga ? { ga } : {}) };

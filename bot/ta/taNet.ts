@@ -470,7 +470,9 @@ export interface TaNetNetworkValidation {
   final?: { from: string; to: string; fitness: number; sortino: number; maxDrawdown: number; netReturn: number; selective: TaNetSelective; views: number };
   minIndependentPerRegime: number;
   dsrThreshold: number;
-  /** DSR probability >= threshold AND every covered regime has enough independent interactions. */
+  /** Probability of backtest overfitting of the tournament's selection (research/selection.ts; NaN = too few rounds). */
+  pbo?: { pbo: number; rounds: number; members: number; ok: boolean; why: string };
+  /** DSR probability >= threshold AND every covered regime has enough independent interactions AND PBO < 0.2. */
   validated: boolean;
 }
 

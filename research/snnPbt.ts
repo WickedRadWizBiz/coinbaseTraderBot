@@ -39,6 +39,8 @@ import { binaryBet, coverageFloor, fitnessOf, independentInteractions, type Hype
 export const SNN_MIN_COVERAGE = 0.05;
 import { dsrOf } from './fitness';
 import { runPbt, walkForwardRounds, type GeneticOpts, type PbtMember, type PbtRoundLog } from './pbt';
+import { DEFAULT_TRANSITION, pboGate, tournamentPbo, transitionPenalty, type Transition } from './selection';
+import { assetOfGroup } from './transitions';
 import { geneTraits, type GaGeneration, type GaState } from './genetic';
 import { replaySnn, type SnnRow } from './snnReplay';
 import type { SnnReplayJob, SnnReplayOut } from './snnReplayWorker';
@@ -108,13 +110,16 @@ interface Saved {
   generation?: string;
   /** The genetic layer's state (islands breeding). */
   ga?: GaState;
-  members: Array<{ id: number; hyper: Hyper; lineage: number[]; through: number; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }>; bornRound?: number; island?: number; traits?: Record<string, number>; parents?: [number, number] }>;
+  members: Array<{ id: number; hyper: Hyper; lineage: number[]; through: number; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }>; blocks?: number[]; bornRound?: number; island?: number; traits?: Record<string, number>; parents?: [number, number] }>;
 }
 
 export interface SnnPbtResult {
   domain: 'crypto' | 'perps' | 'tennis'; stage: Stage; complete: boolean; remaining: number; rounds: number; trials: number;
   elite: { member: number; hyper: Hyper; lineage: number[]; parents?: [number, number] };
   dsr: { sharpe: number; sr0: number; probability: number; n: number };
+  /** Probability of backtest overfitting of the selection (research/selection.ts): the pipeline adopts the elite's
+   *  knobs only when ok. */
+  pbo: { pbo: number; rounds: number; members: number; ok: boolean; why: string };
   log: PbtRoundLog[];
   /** Genetic layer: generations bred so far, the last one, generations since an offspring won its island,
    *  and the knob values that have kept winning (the trait memory, where it is confident). */
@@ -145,6 +150,9 @@ function segments(days: string[]): string[][] {
 
 export async function runSnnPbt(o: {
   recordings: string; domain: 'crypto' | 'perps' | 'tennis'; stage: Stage; days: string[]; initDays?: number; evalDays?: number;
+  /** Real regime transitions (research/transitions.ts): each round pays for drawdown and turnover in the 24 hours
+   *  after them. Crypto contracts map to their coin; the perps columns trade the market, so BTC's apply to them. */
+  transitions?: Transition[];
   /** Every recorded day (the warm-up day before a block is the calendar day before it, when recorded). */
   allDays?: string[];
   /** How `days` were chosen (eraDays vs the latest days): a change starts a fresh tournament. */
@@ -190,7 +198,7 @@ export async function runSnnPbt(o: {
   const resume = saved ? {
     trials: saved.trials, log: saved.log,
     members: saved.members.map((m): PbtMember<MemberState> => ({
-      id: m.id, hyper: m.hyper, lineage: m.lineage, scores: m.scores, bornRound: m.bornRound, record: m.record.map(([ts, ret, cost, group]) => ({ ts, ret, cost, group })),
+      id: m.id, hyper: m.hyper, lineage: m.lineage, scores: m.scores, ...(m.blocks ? { blocks: m.blocks } : {}), bornRound: m.bornRound, record: m.record.map(([ts, ret, cost, group]) => ({ ts, ret, cost, group })),
       state: { through: newGen ? start : m.through, cp: fs.existsSync(cpFile(m.id)) ? JSON.parse(fs.readFileSync(cpFile(m.id), 'utf8')) : undefined },
       ...(m.island !== undefined ? { island: m.island } : {}), ...(m.traits ? { traits: m.traits } : {}), ...(m.parents ? { parents: m.parents } : {}),
     })),
@@ -223,10 +231,14 @@ export async function runSnnPbt(o: {
     for (const m of members) if (m.state.cp) fs.writeFileSync(cpFile(m.id), JSON.stringify(m.state.cp));
     const st: Saved = {
       domain: o.domain, stage: o.stage, baseVersion, trials, nextIndex, lastEvalTo, log: plog, layout: o.layout, generation: o.generation, ...(ga ? { ga } : {}),
-      members: members.map((m) => ({ id: m.id, hyper: m.hyper, lineage: m.lineage, through: m.state.through, scores: m.scores, bornRound: m.bornRound, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]), ...(m.island !== undefined ? { island: m.island } : {}), ...(m.traits ? { traits: m.traits } : {}), ...(m.parents ? { parents: m.parents } : {}) })),
+      members: members.map((m) => ({ id: m.id, hyper: m.hyper, lineage: m.lineage, through: m.state.through, scores: m.scores, ...(m.blocks ? { blocks: m.blocks } : {}), bornRound: m.bornRound, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]), ...(m.island !== undefined ? { island: m.island } : {}), ...(m.traits ? { traits: m.traits } : {}), ...(m.parents ? { parents: m.parents } : {}) })),
     };
     fs.writeFileSync(stateFile!, JSON.stringify(st));
   };
+  // Transitions this domain's interactions answer to: crypto contracts by coin; perps columns (no coin) and tennis to
+  // the market's (BTC's, made market-wide); tennis has none.
+  const transitions: Transition[] = o.domain === 'tennis' || !o.transitions ? [] : o.domain === 'perps' ? o.transitions.filter((t) => t.asset === 'BTC').map((t) => ({ ...t, asset: undefined })) : o.transitions;
+  const assetOf = assetOfGroup([...new Set(transitions.map((t) => t.asset).filter((a): a is string => !!a))]);
   const res = await runPbt<MemberState>({
     base: snnHyperOf(base), spec: SNN_HYPER_SPEC, rounds, seed: o.seed ?? 17, resume, exploreAfterLast: true, restartEvery: o.restartEvery ?? 0, log,
     population: o.population ?? 3, concurrency: pool ? o.workers : 1, genetic: o.genetic,
@@ -248,20 +260,23 @@ export async function runSnnPbt(o: {
         // Opportunities: one per contract (crypto and tennis bet each contract at most once), one per step (perps).
         const opportunities = o.domain !== 'perps' ? new Set(rows.map((x) => x.ticker)).size : rows.length;
         const report = coverageFloor(fitnessOf(xs, { from: r.evalFrom, to: r.evalTo, clusterMs: clusterFor(o.domain) }), xs.length, opportunities, SNN_MIN_COVERAGE);
-        return { report, interactions: independentInteractions(xs, clusterFor(o.domain)), traits: columnTraits(xs) };
+        const tp = transitions.length ? transitionPenalty(xs, transitions, { ...DEFAULT_TRANSITION, from: r.evalFrom, to: r.evalTo, assetOf }) : undefined;
+        return { report: tp ? { ...report, fitness: report.fitness - tp.penalty } : report, interactions: independentInteractions(xs, clusterFor(o.domain)), traits: columnTraits(xs), ...(tp ? { extra: { transitionPenalty: tp.penalty, transitions: tp.transitions } } : {}) };
       },
     },
     onRound: ({ members, trials, log: plog, round, ga }) => save(members, trials, plog, round.evalTo, round.index + 1, ga),
   }).finally(() => pool?.close());
   if (!rounds.length && resume) Object.assign(res, { members: resume.members, trials: resume.trials, log: resume.log, elite: resume.members.find((m) => m.id === resume.log[resume.log.length - 1]?.ranking[0]?.member) ?? resume.members[0] });
   const dsr = dsrOf(res.elite.record, clusterFor(o.domain), res.trials);
+  const pboR = tournamentPbo(res.log), pboOk = pboGate(pboR);
+  log(`${o.domain} tournament selection: ${pboOk.why}`);
   log(`${o.domain} elite #${res.elite.id} (lineage ${res.elite.lineage.join('>')}); out-of-sample ${dsr.n} independent interactions, DSR probability ${Number.isFinite(dsr.probability) ? dsr.probability.toFixed(3) : 'n/a'} over ${res.trials} trials`);
   const ga = res.ga ?? (resume?.ga && o.genetic ? resume.ga : undefined);
   const traits = ga ? Object.fromEntries(Object.entries(geneTraits(ga.genes, SNN_HYPER_SPEC)).filter(([, t]) => t.conf > 0).map(([k, t]) => [k, { best: t.best, rho: t.rho, conf: t.conf }])) : {};
   return {
     domain: o.domain, stage: o.stage, complete: pending - rounds.length === 0, remaining: pending - rounds.length, rounds: res.log.length, trials: res.trials,
     elite: { member: res.elite.id, hyper: res.elite.hyper, lineage: res.elite.lineage, ...(res.elite.parents ? { parents: res.elite.parents } : {}) },
-    dsr: { sharpe: dsr.sharpe, sr0: dsr.sr0, probability: dsr.probability, n: dsr.n }, log: res.log,
+    dsr: { sharpe: dsr.sharpe, sr0: dsr.sr0, probability: dsr.probability, n: dsr.n }, pbo: { pbo: pboR.pbo, rounds: pboR.rounds, members: pboR.members, ok: pboOk.ok, why: pboOk.why }, log: res.log,
     ...(ga ? { ga: { islands: new Set(res.members.map((m) => m.island ?? 0)).size, generation: ga.generation, sinceOffspringWon: ga.sinceOffspringWon, last: ga.history[ga.history.length - 1], traits } } : {}),
   };
 }

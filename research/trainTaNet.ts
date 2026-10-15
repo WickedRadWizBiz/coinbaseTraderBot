@@ -44,6 +44,8 @@ import {
 import { coverageFloor as sharedCoverageFloor } from '../bot/util/fitness';
 import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type FitnessReport, type Interaction } from './fitness';
 import { runPbt, walkForwardRounds, type GeneticOpts, type Hyper, type MutationSpec, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
+import { DEFAULT_TRANSITION, pboGate, tournamentPbo, transitionPenalty, type Transition } from './selection';
+import { regimeTransitions } from './transitions';
 import type { GaGeneration, GaState } from './genetic';
 import { loadIndexSeries, loadSeries, storedAssets } from './history/candles';
 import { DAILY_CONTEXT_FEATURES, SLOW_INDEXES, TaNetContext } from '../bot/ta/taNetContext';
@@ -792,7 +794,7 @@ interface SavedState {
   contextSig?: string;
   /** Optimizer the population trained with ('adamw'); members trained otherwise start over. */
   optimizer?: string;
-  log: PbtRoundLog[]; members: Array<{ id: number; hyper: Hyper; w: string; m: string; v: string; step: number; lineage: number[]; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }>; bornRound?: number; island?: number; parents?: [number, number] }>;
+  log: PbtRoundLog[]; members: Array<{ id: number; hyper: Hyper; w: string; m: string; v: string; step: number; lineage: number[]; record: Array<[number, number, number, string]>; scores: Array<{ round: number; fitness: number }>; blocks?: number[]; bornRound?: number; island?: number; parents?: [number, number] }>;
   /** The genetic layer's state (islands breeding: research/genetic.ts). */
   ga?: GaState;
 }
@@ -855,6 +857,11 @@ export interface TaNetTrainOpts {
   incumbent?: TaNetParams;
   /** Networks in the tournament (default 3; all start from the same weights). */
   population?: number;
+  /** Real regime transitions (research/transitions.ts): each round's fitness pays for drawdown and turnover in
+   *  the 24 hours after them (research/selection.ts). None = no penalty. */
+  transitions?: Transition[];
+  /** Promotion gate: the tournament's PBO must be below this (default 0.2). */
+  pboMax?: number;
   /** Breeding every few rounds (research/genetic.ts; populations of 6+). An offspring starts from the fitter
    *  parent's weights with knobs crossed from both. */
   genetic?: GeneticOpts;
@@ -1009,7 +1016,7 @@ async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: 
   const remaining = pending - rounds.length;
   const resume = saved ? {
     trials: saved.trials, log: saved.log,
-    members: saved.members.map((m): PbtMember<Member> => ({ id: m.id, hyper: m.hyper, state: { w: unb64(m.w), m: unb64(m.m), v: unb64(m.v), step: m.step }, lineage: m.lineage, scores: m.scores, bornRound: m.bornRound, record: m.record.map(([ts, ret, cost, group]) => ({ ts, ret, cost, group })), ...(m.island !== undefined ? { island: m.island } : {}), ...(m.parents ? { parents: m.parents } : {}) })),
+    members: saved.members.map((m): PbtMember<Member> => ({ id: m.id, hyper: m.hyper, state: { w: unb64(m.w), m: unb64(m.m), v: unb64(m.v), step: m.step }, lineage: m.lineage, scores: m.scores, ...(m.blocks ? { blocks: m.blocks } : {}), bornRound: m.bornRound, record: m.record.map(([ts, ret, cost, group]) => ({ ts, ret, cost, group })), ...(m.island !== undefined ? { island: m.island } : {}), ...(m.parents ? { parents: m.parents } : {}) })),
     ga: saved.ga,
   } : undefined;
   const population = o.population ?? 3;
@@ -1020,7 +1027,7 @@ async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: 
     if (!o.statePath) return;
     const st: SavedState = {
       schema: TANET_SCHEMA, dims, assets: D.assets.map((a) => a.asset), norm, trials, lastEvalTo, nextIndex, contextSig, optimizer: 'adamw', log: plog, ...(ga ? { ga } : {}),
-      members: members.map((m) => ({ id: m.id, hyper: m.hyper, w: b64(m.state.w), m: b64(m.state.m), v: b64(m.state.v), step: m.state.step, lineage: m.lineage, scores: m.scores, bornRound: m.bornRound, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]), ...(m.island !== undefined ? { island: m.island } : {}), ...(m.parents ? { parents: m.parents } : {}) })),
+      members: members.map((m) => ({ id: m.id, hyper: m.hyper, w: b64(m.state.w), m: b64(m.state.m), v: b64(m.state.v), step: m.state.step, lineage: m.lineage, scores: m.scores, ...(m.blocks ? { blocks: m.blocks } : {}), bornRound: m.bornRound, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]), ...(m.island !== undefined ? { island: m.island } : {}), ...(m.parents ? { parents: m.parents } : {}) })),
     };
     fs.mkdirSync(path.dirname(o.statePath), { recursive: true });
     const tmp = `${o.statePath}.${process.pid}.tmp`;
@@ -1046,7 +1053,10 @@ async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: 
       evaluate: async (s, h, r: PbtRound) => {
         const idx = between(r.evalFrom, r.evalTo);
         const xs = strategyInteractions(D, await eng.forecast(norm, s.w, h, idx), strategyOf(h));
-        return { report: coverageFloor(fitnessOf(xs, { from: r.evalFrom, to: r.evalTo, clusterMs: H }), xs.length, idx.length), interactions: independentInteractions(xs, H) };
+        const report = coverageFloor(fitnessOf(xs, { from: r.evalFrom, to: r.evalTo, clusterMs: H }), xs.length, idx.length);
+        // Inertia and whipsaw: drawdown and turnover in the hours after each coin's real regime transitions.
+        const tp = o.transitions?.length ? transitionPenalty(xs, o.transitions, { ...DEFAULT_TRANSITION, from: r.evalFrom, to: r.evalTo, assetOf: (x) => x.group }) : undefined;
+        return { report: tp ? { ...report, fitness: report.fitness - tp.penalty } : report, interactions: independentInteractions(xs, H), ...(tp ? { extra: { transitionPenalty: tp.penalty, transitions: tp.transitions } } : {}) };
       },
     },
     onRound: ({ members, trials, log: plog, round, ga }) => { const t = eng.took(); if (t) log(`round ${round.index + 1}: ${t}`); save(members, trials, plog, round.evalTo, round.index + 1, ga); },
@@ -1150,7 +1160,11 @@ async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: 
     const def = elite.record.filter((x) => regimesIn(x.ts, x.ts + 1).includes(g.regime));
     return def.length && (Math.max(...def.map((x) => x.ts)) - Math.min(...def.map((x) => x.ts))) >= 60 * DAY;
   });
-  const netOk = Number.isFinite(dsr.probability) && dsr.probability >= dsrThreshold && covered.every((g) => g.enough);
+  // Probability of backtest overfitting on the member x round fitness matrix: the tournament's selection must carry
+  // out of sample (PBO < pboMax), on top of the DSR and regime hurdles.
+  const pboR = tournamentPbo(res.log), pboOk = pboGate(pboR, o.pboMax ?? 0.2);
+  log(`tournament selection: ${pboOk.why} (${pboR.rounds} rounds x ${pboR.members} networks, ${pboR.splits} splits)`);
+  const netOk = Number.isFinite(dsr.probability) && dsr.probability >= dsrThreshold && covered.every((g) => g.enough) && pboOk.ok;
   const finalOk = (v: TaNetHeadValidation) => !v.final || v.final.passed;
   heads.vol_4h.validation.validated = heads.vol_4h.validation.holdoutPassed && finalOk(heads.vol_4h.validation);
   heads.up_1h.validation.validated = heads.up_1h.validation.holdoutPassed && finalOk(heads.up_1h.validation) && netOk;
@@ -1188,7 +1202,7 @@ async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: 
         dsr: { sharpe: dsr.sharpe, sr0: dsr.sr0, probability: dsr.probability, n: dsr.n }, trials: res.trials, regimes,
         holdout: { fitness: hoFit.fitness, sortino: hoFit.sortino, maxDrawdown: hoFit.maxDrawdown, costs: hoFit.costs, netReturn: hoFit.netReturn, independent: hoFit.independent, days: hoFit.days, selective: hoSel },
         final: finalNet,
-        minIndependentPerRegime: minPerRegime, dsrThreshold, validated: netOk,
+        minIndependentPerRegime: minPerRegime, dsrThreshold, validated: netOk, pbo: { pbo: pboR.pbo, rounds: pboR.rounds, members: pboR.members, ok: pboOk.ok, why: pboOk.why },
       },
       pbt: { rounds: res.log.length, trials: res.trials, elite: { member: elite.id, hyper: elite.hyper, lineage: elite.lineage }, recent: res.log.slice(-12) },
       data: { assets: D.assets.map((a) => a.asset), from: iso(t0), to: iso(tEnd), rows: n, sources: D.sources, holdoutFrom: iso(holdoutFrom), finalFrom: iso(finalFrom) },
@@ -1206,7 +1220,10 @@ export async function trainTaNetMain(argOf: (k: string, d: string) => string = c
   const cache = argOf('cache', path.join(hist, '.tanet-cache'));
   const D = await buildDataParallel(hist, assets, cache, log, workerCount());
   const num = (k: string, d: string) => Number(argOf(k, d));
+  // Real regime transitions over the history the tournament evaluates (each round's transition penalty).
+  const transitions = argOf('transitions', 'true') === 'false' ? [] : regimeTransitions(hist, D.assets.map((a) => a.asset), D.ts[0], D.ts[D.ts.length - 1] + H, log);
   const rep = await trainTaNet(D, {
+    transitions,
     trainMonths: num('train-months', '12'), evalMonths: num('eval-months', '1'), stepMonths: num('step-months', '1'), holdoutMonths: num('holdout-months', '3'), finalMonths: num('final-months', '2'),
     arch: argOf('arch', 'flat') === 'grouped' ? 'grouped' : 'flat', famK: num('fam-k', '4'),
     stride: num('stride', '2'), epochsPerRound: num('epochs', '1'), minPerRegime: num('min-per-regime', '100'), dsrThreshold: num('dsr', '0.95'),

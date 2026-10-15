@@ -21,13 +21,36 @@ The tournament follows DeepMind's population-based training, adapted to time ser
 | Initialise | Three members with the same seed and the same starting weights. Member 0 has the base hyperparameters; members 1 and 2 are within ±10% of them. |
 | Exploit | Each member trains on the round's training block (past data only). |
 | Evaluate | Each member is scored on the **next** block, which none of them has seen. |
-| Explore | **Elite** (best fitness) survives untouched. **Culled** (worst) throws away its weights and becomes an exact copy of the elite. The **middle** member and the new copy get mutated: each knob is multiplied by 0.8 or 1.25, within its limits. |
+| Explore | **Elite** (best era-robust score, below) survives untouched. **Culled** (worst) throws away its weights and becomes an exact copy of the elite. The **middle** member and the new copy get mutated: each knob is multiplied by 0.8 or 1.25, within its limits. |
 | Explore (exploration member) | Every N rounds (`TA_NET_RESTART_EVERY` 6, `AUTO_TRAIN_SNN_PBT_RESTART_EVERY` 4) the culled member does **not** copy the elite. It restarts from scratch: new weights, every knob drawn at random (log-uniform) within its limits, its own lineage and an empty record. Only the middle member is mutated that round. Without this, all three members soon descend from one ancestor and the population can get stuck in that ancestor's local optimum. The elite still survives, so a restart costs nothing if the newcomer is worse. To give the newcomer a fair trial: it trains extra epochs on its first block to catch up with members that have trained on every earlier block (TA network: 3), and it cannot be culled for its first 2 rounds (the next-worst member is culled instead, and the newcomer keeps its knobs). Month-to-month fitness noise is larger than the gaps between members; in the first 34 rounds of the first real run, without the grace period, all five newcomers were culled within one or two rounds, one of them right after ranking first. |
 | Roll forward | The blocks advance and the round repeats. |
 
 Every member keeps a record of its evaluation windows. A copy inherits the elite's record, so the final elite's record is the out-of-sample history of its whole lineage. Every evaluation of every member counts as a **trial** for the deflated Sharpe ratio (Phase 5).
 
 **Fitness** = Sortino ratio (annualised, after costs) − 5 × maximum drawdown − 5 × costs (`bot/util/fitness.ts`). A network that never trades scores 0, as if it held cash: better than any losing network, worse than any winning one.
+
+### Selection that is harder to fool (`research/selection.ts`)
+
+- **Era-robust ranking.**
+  - Members are ranked on their lineage's last 6 evaluation blocks (about 6 months for the TA network, 6 days for the SNNs), not on the latest block alone.
+  - The score is mean − 0.5 × spread of those block fitnesses.
+  - A member with few blocks has its spread shrunk toward the population's (3 pseudo-blocks), so a newcomer is not favoured just for having no history to vary.
+  - A copy inherits its donor's blocks along with its record.
+  - The result: a member that shines in one era and fails the next ranks below one that is steadily good.
+- **Real regime transitions.**
+  - Each round's fitness pays for the drawdown and the turnover cost in the 24 hours after every real regime transition in its window: each coin's confirmed regime (bot/ta/regime.ts) changing from one day to the next.
+  - The weights are 2 × the mean drawdown and 2 × the mean cost per transition.
+  - This is the inertia-and-whipsaw test, run on history that happened.
+  - Scope: the TA network answers per coin. The crypto SNN answers per contract's coin. The perps SNN answers to BTC's transitions, market-wide.
+  - Labels are cached in `<history>/.regime-days.json`.
+- **PBO gate.**
+  - The probability of backtest overfitting (CSCV over the member × round fitness matrix, up to the last 32 rounds) must be below 0.2.
+  - The TA network's direction heads need it to speak.
+  - An SNN tournament's elite knobs are adopted only with it; otherwise the network keeps its knobs.
+  - With too few rounds to measure, PBO is reported, not blocking.
+- **Not done, on purpose:**
+  - No splicing of separate periods. That creates price jumps that never happened, and models learn the seam.
+  - No hard "Sortino ≥ 1 in the post-shock window" guillotine. One short window is too small a sample, and the gate would reject good candidates at random. The transition penalty aggregates over many transitions instead.
 
 ### Per network
 
@@ -165,6 +188,7 @@ Each report shows results per regime. History before the Binance data starts (Au
 
 - **Independent interactions:** trades that fire together count as **one** interaction. That means the same asset (or settlement window, or column) within an hour, so 15 trades in one volatility spike are one. Each regime the record covers must hold at least `TA_NET_MIN_PER_REGIME` (100) of them.
 - **Deflated Sharpe ratio:** computed on the elite lineage's independent interactions, with every member evaluation counted as a trial. The TA network's direction heads need a probability of at least `TA_NET_DSR` (0.95) to speak.
+- **Probability of backtest overfitting:** below 0.2 on the tournament's member × round fitness matrix (see "Selection that is harder to fool").
 - **Unseen holdout:** the last `TA_NET_HOLDOUT_MONTHS` (3) are never touched by the tournament. Each head is graded there against the naive forecast with a day-block bootstrap. The volatility head speaks if it passes. The direction heads also need the deflated Sharpe and regime hurdles.
 - **Live forward test (out-of-sample finality):**
   - The live bot trades the elite's triple-barrier rule on paper, hour by hour, for `TA_NET_FORWARD_DAYS` (90).

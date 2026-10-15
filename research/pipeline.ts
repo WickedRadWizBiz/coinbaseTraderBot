@@ -107,7 +107,11 @@ import { compareIndexSources } from '../bot/marketdata/historyStore';
 import { backfillCoinbase } from './history/coinbaseBackfill';
 import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
+import { regimeTransitions } from './transitions';
 import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
+
+/** Coins with Kalshi crypto contracts: the SNN tournaments' transition penalty reads their regime changes. */
+const SNN_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
 
 export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'rule_book', 'gp', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
 export type Step = typeof STEPS[number];
@@ -677,7 +681,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const pbt = await run(`snn-${domain}-pbt`, async () => {
         let r;
         try {
-          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, allDays: srcDays, layout, generation: gen?.id, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), genetic, log });
+          const transitions = pbtDays.length ? regimeTransitions(T.historyDir, SNN_COINS.filter((a) => storedAssets(T.historyDir).includes(a)), Date.parse(`${pbtDays[0]}T00:00:00Z`), Date.parse(`${pbtDays[pbtDays.length - 1]}T00:00:00Z`) + 86_400_000, log) : [];
+          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, allDays: srcDays, layout, generation: gen?.id, transitions, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), genetic, log });
         } catch (e) {
           if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;
@@ -687,8 +692,10 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         if (gen && r.complete) { ledger.markTrained(ledgerNet, gen.blocks); ledger.finish(ledgerNet, gen.id, `elite #${r.elite.member}`); ledger.save(); }
         const genInfo = { ...(gen ? { generation: gen.id, weeks: gen.blocks, freshWeeksLeft: ledger.summary(ledgerNet, weeks, latestDay).fresh } : {}), ...(r.ga ? { ga: r.ga } : {}) };
         if (!r.complete) return { complete: false, reason: `tournament in progress: ${r.rounds} round(s) done, ${r.remaining} to go`, elite: r.elite, ...genInfo };
+        // The elite's knobs are adopted only when the tournament's selection carries out of sample (PBO < 0.2).
+        if (!r.pbo.ok) { ds.pbtAt = now; return { complete: true, adopted: false, reason: `knobs kept: ${r.pbo.why}`, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, pbo: r.pbo, ...genInfo }; }
         ds.pbtHyper = r.elite.hyper; ds.pbtStage = stage; ds.pbtAt = now;
-        return { complete: true, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: src === rec ? 'recordings' : `history replay, ${pbtDays.length} days from ${pbtDays[0]} to ${pbtDays[pbtDays.length - 1]}`, ...genInfo };
+        return { complete: true, adopted: true, pbo: r.pbo, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: src === rec ? 'recordings' : `history replay, ${pbtDays.length} days from ${pbtDays[0]} to ${pbtDays[pbtDays.length - 1]}`, ...genInfo };
       }, srcGate ?? noFresh ?? (pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`)) as { complete?: boolean } | undefined;
       const hyper = ds.pbtStage === stage ? ds.pbtHyper : undefined;
       const trainNeeded = Boolean(verdicts) || Boolean(pbt?.complete) || !fs.existsSync(file) || ds.stage !== stage;
