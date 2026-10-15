@@ -7,7 +7,7 @@ name: Laptop trainer (Windows package)
 on:
   workflow_dispatch:
   pull_request:
-    paths: ['research/laptopTrain.ts', 'research/pipeline.ts', 'research/trainTaNet.ts', 'research/taNetRowsWorker.ts', 'research/torchSetup.ts', 'research/taNetTorch.ts', 'research/trainCrossGraph.ts', 'python/**', 'packaging/**', 'vendor/talib/**', 'package.json', '.github/workflows/trainer-windows.yml']
+    paths: ['research/laptopTrain.ts', 'research/trainerResources.ts', 'research/trainerUi.ts', 'research/trainerUiPage.ts', 'research/workerPool.ts', 'research/pipeline.ts', 'research/history/**', 'bot/marketdata/historyStore.ts', 'research/trainTaNet.ts', 'research/taNetRowsWorker.ts', 'research/torchSetup.ts', 'research/taNetTorch.ts', 'research/trainCrossGraph.ts', 'python/**', 'packaging/**', 'vendor/talib/**', 'package.json', '.github/workflows/trainer-windows.yml']
   push:
     branches: [main]
     paths: ['research/**', 'bot/**', 'python/**', 'params/**', 'deploy/seed/**', 'packaging/**', 'vendor/talib/**', 'package.json', 'package-lock.json', '.github/workflows/trainer-windows.yml']
@@ -15,8 +15,10 @@ on:
 permissions:
   contents: write  # the release; pull requests from forks get a read-only token and skip that step
 
+# One run per branch at a time: a newer push replaces the run in progress, but a pull request's run never cancels the
+# main branch's build (the published release).
 concurrency:
-  group: trainer-windows
+  group: trainer-windows-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
