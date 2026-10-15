@@ -46,6 +46,7 @@ import { tennisFairInputs, type TennisFairModel } from './tennis/tennisFair';
 import type { TennisScore } from './tennis/tennisModel';
 import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
 import { playbook } from './strategy/playbook';
+import { macro } from './macro/macroService';
 import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
 import { applyTakeGate } from './model/takeModel';
 import { effectiveSigma, type VolProfile } from './model/volSeasonality';
@@ -1917,6 +1918,20 @@ export class Engine {
       ctx.modelLiveBlockers = [];
       ctx.skipEdgeCollar = true;
       ctx.limitOverrides = { maxOrderRiskFrac: T.orderFrac, maxWindowRiskFrac: T.maxMatchFrac, maxTotalRiskFrac: T.maxTotalFrac, minSidePrice: Math.min(T.underdogMin, cfg.risk.minSidePrice) };
+    }
+    // Waterfall mode (bot/macro/waterfall.ts), new exposure only (exits and reduce-only orders pass): armed pauses
+    // tennis and holds Kalshi binaries to a share of the bank; triggered pauses Kalshi binaries as well.
+    const wf = !p.reduceOnly && p.purpose !== 'exit' ? macro()?.policy() : undefined;
+    if (wf && wf.level !== 'off') {
+      if (tennis ? wf.tennisBlocked : wf.kalshiBlocked) {
+        const key = `${m.ticker}:waterfall:${wf.level}`;
+        if (now - (this.lastRejectAudit.get(key) ?? 0) > 60_000) { this.lastRejectAudit.set(key, now); this.d.audit.write('risk_reject', { decisionId, intent, reasons: [`waterfall mode: ${wf.why}`] }); }
+        return;
+      }
+      if (!tennis && wf.kalshiMaxFrac !== undefined) {
+        const lim = ctx.limitOverrides ?? {};
+        ctx.limitOverrides = { ...lim, maxTotalRiskFrac: Math.min(lim.maxTotalRiskFrac ?? cfg.risk.maxTotalRiskFrac, wf.kalshiMaxFrac) };
+      }
     }
     const decision = risk.check(intent, ctx);
     if (decision.tripKill && await kill.engage(decision.tripKill, 'risk')) return;

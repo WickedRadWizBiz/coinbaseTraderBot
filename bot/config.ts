@@ -271,6 +271,17 @@ export interface Config {
   taNet: TaNetConfig;
   /** Optimal f cap on Kelly sizing (bot/strategy/optimalF.ts). */
   optimalF: OptimalFConfig;
+  /** Fractal Alignment Engine and waterfall mode (bot/macro). */
+  macro: MacroConfig;
+}
+
+export interface MacroConfig {
+  /** The parent window [from, to) and the child's start (UTC ms; FAE_PARENT_FROM / FAE_PARENT_TO / FAE_CHILD_FROM). */
+  parentFrom: number;
+  parentTo: number;
+  childFrom: number;
+  /** Waterfall mode (bot/macro/waterfall.ts). */
+  waterfall: { gate: number; minFit: number; leadWeeks: number; shibVelocity: number; kalshiMaxFrac: number; altLongMult: number; btcMult: number; lowBufferPts: number };
 }
 
 export interface OptimalFConfig {
@@ -746,6 +757,32 @@ function deepFreeze<T>(o: T): T {
   return o;
 }
 
+function isoDate(env: Env, key: string, def: string): number {
+  const raw = env[key] || def;
+  const t = Date.parse(`${raw}T00:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw) || !Number.isFinite(t)) throw new ConfigError(`${key}=${raw} must be a date YYYY-MM-DD`);
+  return t;
+}
+
+/** The Fractal Alignment Engine and waterfall settings (also read by the setup trainer, so both agree). */
+export function macroConfig(env: Env = process.env): MacroConfig {
+  const parentFrom = isoDate(env, 'FAE_PARENT_FROM', '2016-01-01'), parentTo = isoDate(env, 'FAE_PARENT_TO', '2018-01-01'), childFrom = isoDate(env, 'FAE_CHILD_FROM', '2018-01-01');
+  if (!(parentTo - parentFrom >= 180 * 86_400_000) || childFrom < parentTo) throw new ConfigError('FAE_PARENT_FROM < FAE_PARENT_TO (at least 180 days) <= FAE_CHILD_FROM');
+  return {
+    parentFrom, parentTo, childFrom,
+    waterfall: {
+      gate: num(env, 'WATERFALL_GATE', 55, 20, 90),
+      minFit: num(env, 'WATERFALL_MIN_FIT', 0.8, 0, 1),
+      leadWeeks: num(env, 'WATERFALL_LEAD_WEEKS', 8, 0, 104),
+      shibVelocity: num(env, 'WATERFALL_SHIB_VELOCITY', 2, 1, 50),
+      kalshiMaxFrac: num(env, 'WATERFALL_KALSHI_MAX_FRAC', 0.125, 0, 0.25),
+      altLongMult: num(env, 'WATERFALL_ALT_LONG_MULT', 1.5, 1, 2),
+      btcMult: num(env, 'WATERFALL_BTC_MULT', 0.5, 0, 1),
+      lowBufferPts: num(env, 'WATERFALL_LOW_BUFFER_PTS', 3, 0, 20),
+    },
+  };
+}
+
 export function loadConfig(env: Env = process.env): Readonly<Config> {
   const mode = oneOf<TradingMode>(env, 'TRADING_MODE', 'paper', ['paper', 'shadow', 'live']);
   const kalshiEnv = oneOf<KalshiEnv>(env, 'KALSHI_ENV', 'demo', ['demo', 'prod']);
@@ -1044,6 +1081,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         setupRatchetTrailAtr: num(env, 'SETUP_RATCHET_TRAIL_ATR', 3, 0.25, 20),
       };
     })(),
+    macro: macroConfig(env),
     optimalF: {
       enabled: bool(env, 'OPTIMAL_F', true),
       quantile: num(env, 'OPTIMAL_F_QUANTILE', 0.25, 0.05, 0.5),

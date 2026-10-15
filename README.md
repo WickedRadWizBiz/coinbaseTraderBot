@@ -352,6 +352,16 @@ After every round that improves a model, it sends the models back for the bot to
 
 `docs/TA_NETWORK.md` covers the commands, the training, and the first real results.
 
+## Fractal Alignment Engine and waterfall mode (bot/macro)
+
+The engine places the 2018-to-now BTC dominance cycle on its 2016–2017 parent with time-warped alignment, point in time. It reports the parent date matched to now, the phase, time dilation, fit, and the projected BTC.D path and next waterfall. Its readings are setup-model inputs, kept only if they help.
+
+Waterfall mode can be armed on the dashboard only after BTC.D first closes at or below 55%:
+- **Armed:** tennis pauses and Kalshi binaries are held to 12.5% of the bank.
+- **Triggered** (gate + fractal + a USDT.D breakdown or SHIB volume velocity): Kalshi binaries pause too, and the perps lanes lean into alt longs.
+
+`npm run research:fractal` prints the alignment and scores the projection walk-forward. The full guide is [`docs/FRACTAL.md`](docs/FRACTAL.md).
+
 ## Setup trader: fast and slow lanes (bot/setups)
 
 The perps trader trades chart setups the way a discretionary trader does. The full guide is [`docs/SETUPS.md`](docs/SETUPS.md).

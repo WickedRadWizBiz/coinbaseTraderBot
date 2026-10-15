@@ -267,3 +267,36 @@ export function loadIndexSeries(dir: string, asset: string, tf: HistTf, minOverl
   }
   return { ...spliceSources(done, INDEX_SOURCE_PRIORITY), scale };
 }
+
+/** Sources stored but never spliced into spot series (perp futures trade at a basis to spot). */
+export const NON_SPOT_SOURCES = new Set(['binance-um', 'binance-1m', 'binance-funding']);
+/** Spot pair sources: everything except perps and the market-wide index series. */
+export const isSpotSource = (source: string) => !NON_SPOT_SOURCES.has(source) && !INDEX_SOURCES.has(source);
+
+/** One spot series for (asset, tf): stored sources at that tf, plus each source's finer data
+ *  aggregated up (a real file wins over an aggregate from the same source). */
+export function loadSpotSeries(dir: string, asset: string, tf: HistTf, priority = DEFAULT_SOURCE_PRIORITY): { candles: Candle[]; segments: Array<{ source: string; from: number; to: number; bars: number }> } {
+  const all = listSeries(dir, asset).filter((s) => isSpotSource(s.source));
+  const parts: Array<{ source: string; candles: Candle[] }> = [];
+  for (const source of [...new Set(all.map((s) => s.source))]) {
+    const mine = all.filter((s) => s.source === source);
+    const exact = mine.find((s) => s.tf === tf);
+    let cs = exact ? readSeries(exact.file) : [];
+    // Fill time the real file does not cover from this source's finer bars.
+    const finer = mine.filter((s) => HIST_TF_MS[s.tf] < HIST_TF_MS[tf] && HIST_TF_MS[tf] % HIST_TF_MS[s.tf] === 0).sort((a, b) => HIST_TF_MS[b.tf] - HIST_TF_MS[a.tf]);
+    for (const f of finer) {
+      const agg = aggregateCandles(readSeries(f.file), HIST_TF_MS[f.tf], HIST_TF_MS[tf]);
+      if (!cs.length) { cs = agg; continue; }
+      const a = cs[0].ts, b = cs[cs.length - 1].ts;
+      cs = mergeCandles(agg.filter((c) => c.ts < a || c.ts > b), cs);
+    }
+    if (cs.length) parts.push({ source, candles: cs });
+  }
+  const spliced = spliceSources(parts, priority);
+  // Order flow: a bar from a source without the taker split (Coinbase REST, Bittrex, Yahoo) borrows
+  // the taker-buy SHARE of the same bar from any source that has it (tb = v x donor tb / donor v).
+  const donors = parts.flatMap((p) => p.candles.filter((c) => c.tb !== undefined && c.v > 0)).reduce((m, c) => (m.has(c.ts) ? m : m.set(c.ts, c.tb! / c.v)), new Map<number, number>());
+  if (donors.size) spliced.candles = spliced.candles.map((c) => (c.tb === undefined && donors.has(c.ts) ? { ...c, tb: c.v * donors.get(c.ts)! } : c));
+  return spliced;
+}
+
