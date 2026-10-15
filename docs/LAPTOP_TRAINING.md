@@ -22,6 +22,8 @@ model better, it sends the models to the bot, which loads them without a restart
    **Skip data download** (under Start, also used by Start conditioning): nothing is copied from the server and
    no history is downloaded (the pipeline runs with `--skip history`); training starts at once on the data
    already here. The models are still sent back to the server afterwards. It is not remembered between sessions.
+   - **How hard should it work?** Gentle, Balanced (the default) or Full speed; see *Keeping the computer
+     usable* below. The choice is remembered.
    - **Hours**: 0 trains until it stops by itself; a number stops sooner.
    - **Server** (optional): the Lightsail public IP, user `ubuntu`, and the instance's SSH key file
      (Lightsail console → Account → SSH keys → Download). With it the trainer copies the bot's recordings
@@ -59,6 +61,65 @@ model better, it sends the models to the bot, which loads them without a restart
    the server again) and prints everything there.
 
 Nothing to install: the zip carries Node, the bundled trainer, and TA-Lib compiled for Windows.
+
+## Keeping the computer usable
+
+Earlier versions could freeze the laptop when it was used for anything else during training. Each process was
+allowed 8 GB of memory, and so was every worker thread: a process-wide memory limit overrides a worker's own. One
+worker ran per CPU thread but one, at normal priority. The GPU trainer queued a whole epoch of work at once and
+could fill the graphics card's memory, which the display shares. Together, they could push Windows into swapping
+or into resetting the graphics driver.
+
+The trainer now sizes itself to the computer (`research/trainerResources.ts`):
+
+- **A plan per intensity.** A quarter of the memory (at least 3 GB) is always left for you and Windows. The
+  rest is shared between the pipeline and its worker threads, at about 1.5 GB a worker.
+
+  | | CPU threads used | while you use the computer | GPU memory | GPU pauses |
+  |---|---|---|---|---|
+  | Gentle | a quarter | one | 60% | a sync every 10 steps, 20 ms (40 ms while you use it) |
+  | Balanced | half | a quarter of the threads | 75% | every 25 steps, 5 ms (20 ms) |
+  | Full speed | all but two | the same | 90% | every 100 steps, none |
+
+  Memory can lower these. A 16-thread laptop with 16 GB runs 5 workers (Gentle: 4); with 32 GB, Balanced
+  runs 8. The tournaments field one network per worker, and the evolved formulas 2,000 per worker.
+- **Priority.** The trainer, the pipeline, PyTorch and every worker run below normal priority (Gentle: the
+  idle class), so whatever you do comes first. The trainer window itself runs at normal priority.
+- **Memory caps that hold.**
+  - The pipeline's own process keeps up to 8 GB where the computer has it: its history step holds years of
+    1-minute bars, about 5.5 GB.
+  - Each worker thread has its own, smaller cap. The trainer clears the process-wide limit that used to give
+    every worker the pipeline's 8 GB.
+  - A job that runs out is run again with twice the room, up to 8 GB, so the cap stops a runaway job without
+    failing a step.
+  - On a small machine, after a round in which the pipeline ran out of memory, the next rounds give it twice
+    as much, up to 8 GB.
+- **The governor.** Every 15 s it checks free memory and, on Windows, whether you used the keyboard or mouse
+  in the last 90 s.
+  - Low on memory: the worker pools start no new work and let idle workers go.
+  - You are using the computer: they run fewer jobs at once and the GPU trainer pauses longer.
+
+  It tells the pools and the GPU trainer through `trainer-data\throttle.json`. The window shows what it is
+  doing under the progress bars, for example `balanced: 4 of 8 threads · you are using the computer · 9.1 of
+  16.0 GB memory free`.
+- **The GPU.** The PyTorch trainer:
+  - drains the GPU's queue every few steps and pauses after it, so the desktop is never stuck behind a long
+    queue (the cause of Windows' "display driver stopped responding");
+  - takes at most the plan's share of the GPU's memory. A training pack that does not fit trains on the CPU.
+  - uses only the plan's CPU threads (`TA_NET_TORCH_THREADS`; the math libraries under it get the same).
+- **A record.** Once a minute, `trainer-data\resources.log` records free memory, the trainer's own memory, the
+  threads in use and why. If the computer freezes, crashes or loses power during a run, the next start says
+  so in the window, with the last readings before it happened.
+
+**If it still freezes:** choose Gentle, and look at the last lines of `resources.log` from before the freeze.
+- Free memory falling to a few hundred MB: memory is the cause. Close other heavy programs, or lower
+  `TRAIN_WORKERS` in `trainer.env`.
+- Plenty of memory free: the cause is elsewhere, most likely the graphics driver. Update it from nvidia.com
+  or Lenovo Vantage.
+
+The console version takes `--intensity gentle|balanced|full`. Any of the plan's settings can be set in
+`trainer.env`: `TRAIN_WORKERS`, `TRAIN_WORKER_HEAP_MB`, `TRAIN_MIN_FREE_MB`, `NODE_OPTIONS`,
+`TA_NET_TORCH_THREADS`, `TA_NET_GPU_MEM_FRACTION`, `TA_NET_GPU_SYNC_EVERY`, `TA_NET_GPU_YIELD_MS`.
 
 ## Any computer with Node 20+
 
@@ -319,8 +380,8 @@ waits for the market. The Kalshi network still steps once per market second, as 
 - **One network:** a replayed day of all five coins (about 960 contracts) took 4 to 7.5 minutes on one
   core of a 2.8 GHz cloud server, about 190 to 370 times faster than real time. A recent laptop core is
   usually faster.
-- **The tournament:** runs one network per thread at the same time, so a 16-thread laptop puts 15
-  networks through each day in that same time.
+- **The tournament:** runs one network per worker thread at the same time. A 16-thread laptop with 32 GB
+  on Balanced puts 8 networks through each day in that same time (see *Keeping the computer usable*).
 
 A run that goes until it stops gives each tournament generation about 5 weeks and trains each network on
 its latest 24 days. A run with a budget sizes them by the hours: 12 hours covers about 30 tournament days
@@ -383,7 +444,7 @@ What trains on it:
 
 ## Many candidates at once
 
-Each SNN tournament fields a population of networks: about one per CPU thread on the laptop
+Each SNN tournament fields a population of networks: one per worker thread of the resource plan on the laptop
 (`AUTO_TRAIN_SNN_PBT_POPULATION`). It replays them in parallel worker threads (`TRAIN_WORKERS`). Every
 round:
 
@@ -392,7 +453,8 @@ round:
 - the rest have their settings mutated;
 - each is judged on days it has never seen.
 
-A 16-thread laptop runs 15 candidates at once instead of 3, one after another.
+A 16-thread laptop with 32 GB on Balanced runs 8 candidates at once instead of 3, one after another (Full speed:
+up to 14, as memory allows).
 
 **Breeding.** Every week of history (4 judged days) is a generation. The 3 networks with the best mean over
 it breed: every pair has one offspring.

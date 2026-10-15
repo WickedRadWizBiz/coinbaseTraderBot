@@ -251,3 +251,38 @@ test('conditioning bracket: one column per tier reached, the Elite Champion (or 
   assert.match(b.champion.headline, /Best so far: 7 of 12 windows/);
   assert.equal(b.champion.validated, false);
 });
+
+test('intensity: chosen in the window, kept for the next run; the window shows what the governor is doing and a run that never stopped', async () => {
+  const dataDir = tmpDir();
+  let seen: string | undefined;
+  let release!: () => void;
+  const ui = new TrainerUi({
+    dataDir,
+    check: async () => ({ current: null, latest: null, publishedAt: null, available: false, canInstall: false, downloadUrl: null, checkedAt: null }),
+    run: async (o) => {
+      seen = o.settings.intensity;
+      o.hooks!.notice!('the previous run ended without stopping');
+      o.hooks!.governor!({ status: { intensity: 'gentle', workers: 1, maxWorkers: 4, reason: 'you are using the computer: fewer threads', freeMb: 9000, totalMb: 16384, idleSec: 3 } } as never);
+      await new Promise<void>((r) => { release = r; });
+      o.hooks!.governor!(undefined);
+      return { why: 'finished' };
+    },
+  });
+  assert.equal(ui.state.settings.intensity, 'balanced', 'balanced until you choose');
+  assert.deepEqual(ui.start({ intensity: 'gentle' }), { ok: true });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(seen, 'gentle');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, 'trainer.json'), 'utf8')).intensity, 'gentle');
+  const s = ui.snapshot();
+  assert.deepEqual([s.resources?.workers, s.resources?.maxWorkers], [1, 4]);
+  assert.match(s.notice!, /ended without stopping/);
+  release();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(ui.snapshot().resources, null, 'nothing to show between runs');
+  // The next start keeps the last choice; anything unknown is balanced.
+  assert.deepEqual(new TrainerUi({ dataDir }).state.settings.intensity, 'gentle');
+  assert.deepEqual(ui.start({ intensity: 'turbo' }), { ok: true });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(seen, 'balanced');
+  release();
+});

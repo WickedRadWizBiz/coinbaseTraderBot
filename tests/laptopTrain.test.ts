@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
 import { afterRound, championsGone, CONTINUE_STEPS, filesToPull, filesToPush, guideText, laptopProfile, LOCAL_ONLY_DIRS, localManifest, parseManifest, roundOutcome, safeServerEnv, scoreboard, Server } from '../research/laptopTrain';
 import { dailyStats, type ReadinessFile } from '../research/readiness';
+import { resourcePlan } from '../research/trainerResources';
 import { tmpDir } from './helpers';
 
 test('laptop trainer: manifests, what to copy down and what to send back', () => {
@@ -89,8 +90,8 @@ test('laptop trainer: what counts as progress, when it stops by itself, the scor
   assert.match(g2, /\$1\.00\)/);
   assert.match(g2, /1\.16x in 30 days/);
   // Until it stops: each round sized like a day's budget, the sweep (a proposal) weekly.
-  const c = laptopProfile(0, 16, true);
-  assert.deepEqual([c.AUTO_TRAIN_SNN_PBT_DAYS, c.AUTO_TRAIN_SNN_TRAIN_DAYS, c.SWEEP_EVERY_DAYS, c.SWEEP_HOURS, c.TRAIN_WORKERS], ['36', '24', '7', '2', '15']);
+  const c = laptopProfile(0, 16, true, resourcePlan('balanced', 16, 32768));
+  assert.deepEqual([c.AUTO_TRAIN_SNN_PBT_DAYS, c.AUTO_TRAIN_SNN_TRAIN_DAYS, c.SWEEP_EVERY_DAYS, c.SWEEP_HOURS, c.TRAIN_WORKERS], ['36', '24', '7', '2', '8']);
 });
 
 test('laptop trainer: the server settings it trains with carry no credentials or server paths; budgets grow', () => {
@@ -102,9 +103,10 @@ test('laptop trainer: the server settings it trains with carry no credentials or
   assert.ok(Number(p.KALSHI_HISTORY_DAYS) >= 365);
   assert.equal(p.HISTORY_REPLAY_YEARS, '0', 'the replay covers all of the history');
   assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), HISTORY_REPLAY_YEARS: '0' } as NodeJS.ProcessEnv).taNet.historyReplayYears, 0);
-  const q = laptopProfile(12, 16);
-  assert.equal(q.TRAIN_WORKERS, '15');
-  assert.equal(q.AUTO_TRAIN_SNN_PBT_POPULATION, '15');
+  // Threads and populations from the resource plan (balanced, 16 threads, 32 GB: half the threads).
+  const q = laptopProfile(12, 16, false, resourcePlan('balanced', 16, 32768));
+  assert.equal(q.TRAIN_WORKERS, '8');
+  assert.equal(q.AUTO_TRAIN_SNN_PBT_POPULATION, '8');
   assert.equal(laptopProfile(12, 2).AUTO_TRAIN_SNN_PBT_POPULATION, '3', 'never fewer than the original three');
   // The networks' tournament and training windows grow with the budget.
   assert.deepEqual([p.AUTO_TRAIN_SNN_PBT_DAYS, p.AUTO_TRAIN_SNN_TRAIN_DAYS], ['30', '14']);
