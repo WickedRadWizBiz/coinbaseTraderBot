@@ -452,7 +452,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     await run('ta_net_oos', async () => {
       const params = fs.existsSync(taNetFile) && taNetFileSchema(taNetFile) === TANET_SCHEMA ? taNetFile : T.modelPath;
       if (!fs.existsSync(params)) throw new SkipStep('no TA network yet');
-      const r = await exportTaNetOos(T.historyDir, { paramsPath: params, cacheDir: path.join(work, 'tanet-cache'), hours: A.taNetOosHours, log });
+      const r = await exportTaNetOos(T.historyDir, { paramsPath: params, cacheDir: path.join(work, 'tanet-cache'), hours: A.taNetOosHours, engine: T.engine, python: T.python || undefined, log });
       const wf = path.join(oosDir(T.historyDir), 'ta_net_wf.json');
       if (r.complete && fs.existsSync(wf)) fs.copyFileSync(wf, promoted('ta_net_wf'));
       return { ...r, promoted: r.complete };

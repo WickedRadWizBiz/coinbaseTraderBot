@@ -2,13 +2,15 @@
 // inputs (the setup scorer). A forecast at hour t comes from a network that only trained on data that
 // had closed before t's month started, so a backtest reading these forecasts doesn't cheat.
 //
-//   npm run research:ta-net-oos -- --history data/history [--params params/ta_net.json] [--hours 2]
+//   npm run research:ta-net-oos -- --history data/history [--params params/ta_net.json] [--hours 2] [--engine auto]
 //
 // One network with the tournament winner's settings (params/ta_net.json: hyperparameters, branch gates,
 // input scaling) walks forward month by month: train one epoch on the trailing 12 months (stride 2,
 // three catch-up epochs on the first block), forecast every hour of the next month, roll on. The
 // state (weights, optimizer) and the forecasts are saved after every month, so the export resumes,
 // and later runs only add the new months. The tail month is forecast from the latest weights too.
+// Training and forecasts run on the tournament's engine (TA_NET_ENGINE: PyTorch on the GPU when there is one,
+// with the tournament's training pack; TypeScript otherwise).
 //
 // Output (in <history>/.tanet-oos/): forecasts.json ({asset: [[barTs, up1h, up4h, vol4h], ...]}) and
 // ta_net_wf.json, the walking network's latest weights as a TA network file. The live setup trader
@@ -20,7 +22,9 @@ import { initBranchParams, branchLayout } from '../bot/ta/branchNet';
 import { TANET_SCHEMA, type TaNetParams } from '../bot/ta/taNet';
 import type { Hyper } from './pbt';
 import { storedAssets } from './history/candles';
-import { buildData, forecast, taNetDims, trainEpoch, type Member, type TaNetData } from './trainTaNet';
+import type { TaNetEngine } from './taNetTorch';
+import { buildDataParallel, TaNetTrainEngine, taNetDims, type Member, type TaNetData } from './trainTaNet';
+import { workerCount } from './workerPool';
 
 const H = 3_600_000;
 const DAY = 86_400_000;
@@ -63,9 +67,19 @@ export class OosIndex {
   }
 }
 
-export interface OosOpts { paramsPath: string; cacheDir?: string; hours?: number; trainMonths?: number; stride?: number; catchUp?: number; log?: (m: string) => void; data?: TaNetData }
+export interface OosOpts {
+  paramsPath: string; cacheDir?: string; hours?: number; trainMonths?: number; stride?: number; catchUp?: number; log?: (m: string) => void; data?: TaNetData;
+  /** The training engine (research/trainTaNet.ts TaNetTrainEngine): ts (default), torch or auto; its Python, training
+   *  pack (default: <cacheDir>/torch-pack, the tournament's) and device. */
+  engine?: TaNetEngine; python?: string; packDir?: string; device?: 'auto' | 'cpu' | 'cuda';
+}
 
 export async function exportTaNetOos(hist: string, o: OosOpts): Promise<{ rounds: number; complete: boolean; rows: number }> {
+  let eng: TaNetTrainEngine | undefined;
+  try { return await walk(hist, o, (e) => { eng = e; }); } finally { await eng?.close(); }
+}
+
+async function walk(hist: string, o: OosOpts, hold: (e: TaNetTrainEngine) => void): Promise<{ rounds: number; complete: boolean; rows: number }> {
   const log = o.log ?? ((m: string) => console.log(`[ta-net-oos] ${m}`));
   const deadline = Date.now() + (o.hours ?? 6) * H;
   const P = JSON.parse(fs.readFileSync(o.paramsPath, 'utf8')) as TaNetParams & { pbt?: { elite?: { hyper?: Hyper } } };
@@ -75,12 +89,15 @@ export async function exportTaNetOos(hist: string, o: OosOpts): Promise<{ rounds
   const source = `${P.version}|${JSON.stringify(hyper)}`;
   const dir = oosDir(hist);
   fs.mkdirSync(dir, { recursive: true });
-  const D = o.data ?? buildData(hist, storedAssets(hist), o.cacheDir ?? path.join(hist, '.tanet-cache'), log);
+  const cacheDir = o.cacheDir ?? path.join(hist, '.tanet-cache');
+  const D = o.data ?? await buildDataParallel(hist, storedAssets(hist), cacheDir, log, workerCount());
   // The params' own layout (flat or grouped), checked against the code's input sizes.
   const dims = P.dims;
   const want = taNetDims(P.arch ?? (P.dims.fam ? 'grouped' : 'flat'), P.dims.fam?.k ?? 4);
   if (JSON.stringify(dims) !== JSON.stringify(want)) throw new Error('network layout in the params differs from the code');
   const norm = P.norm;
+  const eng = new TaNetTrainEngine(D, dims, { engine: o.engine, python: o.python, packDir: o.packDir ?? path.join(cacheDir, 'torch-pack'), device: o.device }, log);
+  hold(eng);
   const n = D.ts.length;
   const t0 = D.ts[0], tEnd = D.ts[n - 1] + H;
   const trainMs = (o.trainMonths ?? 12) * MONTH, stride = o.stride ?? 2, catchUp = o.catchUp ?? 3, emb = 5 * H;
@@ -102,12 +119,12 @@ export async function exportTaNetOos(hist: string, o: OosOpts): Promise<{ rounds
     const wf = { ...P, version: `${P.version}-wf${rounds}`, weights: Array.from(mem.w), trainedAt: new Date().toISOString() };
     const tmp = path.join(dir, 'ta_net_wf.json.tmp'); fs.writeFileSync(tmp, JSON.stringify(wf)); fs.renameSync(tmp, path.join(dir, 'ta_net_wf.json'));
   };
-  const put = (from: number, to: number) => {
+  const put = async (from: number, to: number) => {
     // Drop anything already stored in [from, to) (the tail month is re-forecast as it fills in).
     for (const a of Object.keys(fc.assets)) fc.assets[a] = fc.assets[a].filter((r) => r[0] < from || r[0] >= to);
     const idx = between(from, to);
     if (!idx.length) return 0;
-    const f = forecast(D, dims, norm, mem.w, hyper, idx);
+    const f = await eng.forecast(norm, mem.w, hyper, idx);
     idx.forEach((i, k) => {
       const a = D.assets[D.sa[i]].asset;
       (fc.assets[a] ??= []).push([D.ts[i], +f.up1[k].toFixed(5), +f.up4[k].toFixed(5), +f.vol[k].toFixed(5)]);
@@ -117,18 +134,19 @@ export async function exportTaNetOos(hist: string, o: OosOpts): Promise<{ rounds
     return idx.length;
   };
   log(`${n} hourly rows ${new Date(t0).toISOString().slice(0, 10)}..${new Date(tEnd).toISOString().slice(0, 10)}; ${st ? `resuming at ${new Date(next).toISOString().slice(0, 10)} (${rounds} months done)` : 'fresh walk'}`);
+  if (next < tEnd) await eng.start(norm);
   while (next + MONTH <= tEnd && Date.now() < deadline) {
     const t1 = Date.now();
     const idx = between(next - trainMs, next - emb, stride);
     const epochs = 1 + (mem.step === 0 ? catchUp : 0);
-    for (let e = 0; e < epochs; e++) trainEpoch(D, dims, norm, mem, hyper, idx, 7 + rounds * 131 + e);
-    const rows = put(next, next + MONTH);
+    await eng.train(norm, mem, hyper, idx, 7 + rounds * 131, epochs);
+    const rows = await put(next, next + MONTH);
     next += MONTH; rounds++;
     save();
-    log(`month ${rounds} -> ${new Date(next).toISOString().slice(0, 10)}: trained on ${idx.length} rows (${epochs} epoch${epochs > 1 ? 's' : ''}), forecast ${rows} rows in ${((Date.now() - t1) / 1000).toFixed(0)} s`);
+    log(`month ${rounds} -> ${new Date(next).toISOString().slice(0, 10)}: trained on ${idx.length} rows (${epochs} epoch${epochs > 1 ? 's' : ''}, ${eng.name === 'torch' ? 'PyTorch' : 'TypeScript'}), forecast ${rows} rows in ${((Date.now() - t1) / 1000).toFixed(0)} s`);
   }
   const complete = next + MONTH > tEnd;
-  if (complete) { const rows = put(next, tEnd); save(); log(`tail ${new Date(next).toISOString().slice(0, 10)}..: ${rows} rows from the latest weights`); }
+  if (complete) { const rows = await put(next, tEnd); save(); log(`tail ${new Date(next).toISOString().slice(0, 10)}..: ${rows} rows from the latest weights`); }
   const total = Object.values(fc.assets).reduce((a, r) => a + r.length, 0);
   log(`${complete ? 'complete' : 'time budget reached; run again to continue'}: ${total} forecasts through ${new Date(fc.through).toISOString().slice(0, 16)}`);
   return { rounds, complete, rows: total };
@@ -137,5 +155,8 @@ export async function exportTaNetOos(hist: string, o: OosOpts): Promise<{ rounds
 function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith('--') ? process.argv[i + 1] : d; }
 
 if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) {
-  void exportTaNetOos(cliArg('history', 'data/history'), { paramsPath: cliArg('params', 'params/ta_net.json'), hours: Number(cliArg('hours', '6')) }).catch((e) => { console.error(e); process.exitCode = 1; });
+  void exportTaNetOos(cliArg('history', 'data/history'), {
+    paramsPath: cliArg('params', 'params/ta_net.json'), hours: Number(cliArg('hours', '6')),
+    engine: (['ts', 'torch', 'auto'] as const).find((e) => e === cliArg('engine', process.env.TA_NET_ENGINE ?? 'ts')) ?? 'ts', python: cliArg('python', '') || undefined,
+  }).catch((e) => { console.error(e); process.exitCode = 1; });
 }

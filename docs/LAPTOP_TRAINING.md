@@ -412,7 +412,7 @@ on the newest years. On an 8-thread laptop a round's `gp` step takes about 10 mi
 
 ## GPU
 
-The TA network's tournament (`ta_net`) trains on the GPU. Everything else runs on the CPU, because those members' time goes into replaying the market event by event. That is branchy work a graphics card cannot run, and population "stacking" there happens across CPU threads (above).
+The TA network's tournament (`ta_net`) and its walk-forward export for the setup scorer (`ta_net_oos`) train on the GPU. Everything else runs on the CPU, because those members' time goes into replaying the market event by event. That is branchy work a graphics card cannot run, and population "stacking" there happens across CPU threads (above).
 
 **Setup is automatic, on the first run that trains the TA network:**
 1. The trainer finds the NVIDIA GPU (`nvidia-smi`).
