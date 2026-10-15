@@ -6,9 +6,10 @@
 //     With --cache, each day's rows are kept and only days whose recordings (or neighbours) changed are
 //     computed again, runs of them on --workers threads at once: years of history replay cost minutes a
 //     run instead of hours.
-//  2. Model: ridge regression on standardized features, lambda over a small grid.
+//  2. Model: ridge regression on standardized features, lambda over a small grid; boosted regression trees; and
+//     the gated pair of experts (trend vs leverage flow, mixed by a gate on volatility change: bot/model/gatedExperts.ts).
 //  3. Walk-forward: expanding-window folds in time order with an H embargo before each test block.
-//     Every lambda is scored out of sample and counts as a trial for the deflated Sharpe.
+//     Every candidate is scored out of sample and counts as a trial for the deflated Sharpe.
 //  4. Validation (all must hold): effective (non-overlapping) sample >= minEff; out-of-sample
 //     information coefficient CI lower bound > 0 (moving-block bootstrap); the trading rule the live
 //     trader uses (net of maker fees both ways and funding) has a positive per-trade P&L CI lower bound;
@@ -23,7 +24,8 @@ import path from 'path';
 import zlib from 'zlib';
 import { loadConfig } from '../bot/config';
 import { recordingFiles } from '../bot/marketdata/recordingFiles';
-import { PERP_FEATURES, perpFeatures, PerpModel, type PerpModelParams } from '../bot/perps/perpSignal';
+import { PERP_FEATURES, perpFeatures, perpGatedLayout, PerpModel, type PerpModelParams } from '../bot/perps/perpSignal';
+import { fitGatedExperts, gatedPredict, type GatedExperts } from '../bot/model/gatedExperts';
 import { HOLDOUT_RULE, isHoldout, weekBlocks } from './historyLedger';
 import { readRecordings, ReplayState } from './replay';
 import { hashStr, replayPerpDays } from './history/historyReplay';
@@ -220,9 +222,9 @@ function blockCi(n: number, block: number, stat: (idx: number[]) => number, iter
   return { lo: vals[Math.floor(0.025 * iters)], hi: vals[Math.floor(0.975 * iters)] };
 }
 
-export interface TrainPerpOpts { horizonMin: number; everySec: number; folds?: number; lambdas?: number[]; makerBps?: number; entryEdgeBps?: number; minEff?: number; trees?: boolean }
+export interface TrainPerpOpts { horizonMin: number; everySec: number; folds?: number; lambdas?: number[]; makerBps?: number; entryEdgeBps?: number; minEff?: number; trees?: boolean; gated?: boolean }
 
-type Cand = number | 'gbdt';
+type Cand = number | 'gbdt' | 'gated';
 
 /** Boosted regression trees on the raw features (missing values routed by the trees); early
  *  stopping on the last 20% of the training rows by time, with a horizon-long embargo. */
@@ -237,6 +239,19 @@ function fitTrees(train: PerpRow[], H: number): GbdtModel | undefined {
   const g = trainGbdt(tr.map((r) => r.x), tr.map((r) => r.y), ones(tr.length), base(tr.length), va.map((r) => r.x), va.map((r) => r.y), ones(va.length), base(va.length),
     { loss: 'squared', nTrees: 200, learningRate: 0.05, maxDepth: 2, minLeafWeight: 20, seed: 7 });
   return { ...g.model, baseScore: ybar };
+}
+
+/** The gated pair of experts (bot/model/gatedExperts.ts), early stopping on the last 20% of the training rows by
+ *  time with a horizon-long embargo, as the trees. */
+function fitGated(train: PerpRow[], H: number): GatedExperts | undefined {
+  if (train.length < 60) return undefined;
+  const lay = perpGatedLayout();
+  if (!lay.trend.length || !lay.micro.length || !lay.drivers.length) return undefined;
+  const vi = Math.floor(train.length * 0.8);
+  const vStart = train[vi].ts;
+  const tr = train.filter((r) => r.ts <= vStart - H), va = train.slice(vi);
+  if (tr.length < 50 || va.length < 10) return undefined;
+  return fitGatedExperts(tr.map((r) => r.x), tr.map((r) => r.y), { loss: 'squared', ...lay, val: { X: va.map((r) => r.x), y: va.map((r) => r.y) } });
 }
 
 /** The live trading rule on rows in time order with forecasts `p(i)` (bps): one decision per horizon per
@@ -284,9 +299,9 @@ export function trainPerp(rows: PerpRow[], o: TrainPerpOpts): { params: PerpMode
   const start = Math.floor(n / (folds + 1));
   const blocks: Array<[number, number]> = [];
   for (let k = 0; k < folds; k++) blocks.push([start + Math.floor((k * (n - start)) / folds), start + Math.floor(((k + 1) * (n - start)) / folds)]);
-  // Candidates: ridge at each lambda, and boosted regression trees (squared loss), all walked
+  // Candidates: ridge at each lambda, boosted regression trees (squared loss) and the gated experts, all walked
   // forward on the same folds and judged on the same out-of-sample IC.
-  const cands: Cand[] = [...lambdas, ...(o.trees === false ? [] : ['gbdt' as const])];
+  const cands: Cand[] = [...lambdas, ...(o.trees === false ? [] : ['gbdt' as const]), ...(o.gated === false ? [] : ['gated' as const])];
   const oosPred = new Map<Cand, number[]>(cands.map((l) => [l, new Array(n).fill(NaN)]));
   for (const [a, b] of blocks) {
     const cut = rows[a].ts - H; // embargo: labels of training rows must end before the test block starts
@@ -296,6 +311,11 @@ export function trainPerp(rows: PerpRow[], o: TrainPerpOpts): { params: PerpMode
       if (l === 'gbdt') {
         const g = fitTrees(train, H);
         for (let i = a; i < b; i++) oosPred.get(l)![i] = g ? gbdtLogit(g, rows[i].x) : NaN;
+        continue;
+      }
+      if (l === 'gated') {
+        const g = fitGated(train, H);
+        for (let i = a; i < b; i++) oosPred.get(l)![i] = g ? gatedPredict(g, rows[i].x).y : NaN;
         continue;
       }
       const f = fitRidge(train, l);
@@ -332,6 +352,14 @@ export function trainPerp(rows: PerpRow[], o: TrainPerpOpts): { params: PerpMode
     const d = PERP_FEATURES.length;
     return {
       params: { ...common, version: `perp-gbdt-${new Date().toISOString().slice(0, 10)}`, kind: 'gbdt', gbdt: trees, mean: new Array(d).fill(0), std: new Array(d).fill(1), weights: [], bias: 0, lambda: NaN },
+      oos: scored.map((s) => ({ lambda: s.lambda, ic: s.ic })),
+    };
+  }
+  const gated = best.lambda === 'gated' ? fitGated(rows, H) : undefined;
+  if (gated) {
+    const d = PERP_FEATURES.length;
+    return {
+      params: { ...common, version: `perp-gated-${new Date().toISOString().slice(0, 10)}`, kind: 'gated', gated, mean: new Array(d).fill(0), std: new Array(d).fill(1), weights: [], bias: 0, lambda: NaN },
       oos: scored.map((s) => ({ lambda: s.lambda, ic: s.ic })),
     };
   }

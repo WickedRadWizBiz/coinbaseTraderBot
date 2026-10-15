@@ -25,6 +25,7 @@ bot/
     fairValue.ts         settlement-exact pricer: 60 s average, martingale drift, Student-t tails, Up/Down, ladders, brackets
     metaModel.ts         frozen, versioned residual model (MLP or gradient-boosted trees, deep ensemble) + go-live gates
     trees.ts             GBDT inference (missing values follow learned default directions)
+    gatedExperts.ts      trend vs microstructure experts mixed by a gate on volatility change (take head, perps candidate)
     featureEngine.ts     one feature engine shared by production and research (~120 candidates, tiered, schema-versioned)
     calibration.ts       Brier, log loss, reliability, Platt, beta calibration, calibration slices
     ladder.ts            strike-ladder monotonicity, isotonic projection, ladder arbitrage scan
@@ -324,6 +325,12 @@ A new network retrains only the model that reads it, including when you swap one
 - **Vol forecast** (`bot/model/volModel.ts`): predicts how far realised volatility over a contract's remaining life will differ from the backward-looking EWMA, and multiplies fair value's sigma by it (clamped to 0.5–2×). Applied only after its held-out QLIKE check passes (`VOL_MODEL`).
 - **Fill / adverse-selection model** (`bot/tca/fillModel.ts`): from the bot's own logged maker quotes, P(fill within 60 s) and the expected markout given a fill. Per maker entry the bot then quotes, crosses or skips by expected value. It brings itself online: it collects quotes from day one, trains once 500 quotes / 100 fills exist, and is promoted and used only after it beats the base rate on held-out days.
 - **Candidates** for the take/skip head, the perps model and the tennis model, compared with the existing MLP / ridge on the same validation data; the better one is kept.
+
+**Gated experts** (`bot/model/gatedExperts.ts`, the 4th-generation spec's 6.3): one more candidate for the take/skip head and the perps model. A trend expert (momentum, the TA library, the TA network) and a microstructure expert (order-flow imbalance, microprice drift, book depth, VPIN, trade bursts; for perps the premium, funding and open-interest changes and taker imbalance) are mixed by a smooth weight
+
+    gamma(t) = sigmoid(g0 + g . drivers)      output = base + (1 - gamma) x trend + gamma x micro
+
+whose drivers are how fast volatility is changing (`vol_ratio_15m_4h`, `ewma_vol_ratio`) and, for the take head, the SNN governor level. When volatility turns abruptly the weight moves from the lagging trend readings to the real-time order flow. Both experts and the gate are fitted jointly (full-batch Adam, L2, early stopping). It lives here, in the recordings-trained decision layer, and not in the 9-year TA network, because the microstructure inputs exist only in the recordings. It is compared with the others on the same validation data and is used only when it wins there and then passes the held-out check (take head: log loss below the fair value alone; perps: the walk-forward IC, P&L and deflated-Sharpe gates, with each candidate counted as a trial).
 
 `docs/AUTOMATION.md` is the plain-language guide. It covers what runs by itself, what you still do by hand, every setting, and how to roll back.
 

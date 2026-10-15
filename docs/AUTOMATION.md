@@ -43,9 +43,9 @@ This is `research/pipeline.ts`. By default (`AUTO_TRAIN=remote`) it runs on a Gi
 | snn-tennis | Always skipped: the tennis network can't be replayed (no recorded score feed), so it learns live and keeps its checkpoints in `data/snn/tennis/` | — |
 | vol_model | Trains the tree volatility forecast (how far realised vol over a contract's life will differ from the EWMA) and checks it on held-out days | `vol_model.json` |
 | dataset | Turns the recordings, plus the crypto network's logged and backfilled outputs, into labelled training rows. Priced with the vol forecast when it is validated | `work/dataset.jsonl` |
-| mlp | Trains the MLP fair value and its take/skip head (MLP vs trees, the better one kept), backtests it after fees, records the result in the model file | `model.json` |
+| mlp | Trains the MLP fair value and its take/skip head (MLP vs trees vs gated experts, the best one kept), backtests it after fees, records the result in the model file | `model.json` |
 | vol | Fits the intraday volatility profile | `vol_profile.json` |
-| perps | Trains the perps model (ridge vs trees, on the perps network's 1h/4h calls and skill), then runs its execution backtest | `perp_model.json` |
+| perps | Trains the perps model (ridge vs trees vs gated experts, on the perps network's 1h/4h calls and skill), then runs its execution backtest | `perp_model.json` |
 | tennis | Trains the tennis model (MLP vs trees; 4 signals, score, book, tennis network) | `tennis_model.json` |
 | fill | Trains the fill / adverse-selection model from the bot's own maker quotes. Skipped ("collecting") until 500 quotes and 100 fills exist; promoted only once it beats the base rate on held-out days | `fill_model.json` |
 

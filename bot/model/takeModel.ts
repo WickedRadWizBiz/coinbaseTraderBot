@@ -11,21 +11,52 @@
 import { takerFee } from '../fees';
 import type { DenseLayer } from './metaModel';
 import { gbdtLogit, type GbdtModel } from './trees';
+import { gatedPredict, type GatedExperts } from './gatedExperts';
 import type { OrderPlan } from '../strategy/fairValueStrategy';
 
 export const TAKE_FEATURES = ['edge', 'logit_p_side', 'price_side', 'spread', 'tau_min', 'snn_up_side', 'snn_bias_side', 'snn_agree_side', 'p_std', 'snn_skill_h', 'snn_cal_h'] as const;
 /** Index of logit_p_side: the tree candidate learns a residual on the fair-value probability. */
 export const TAKE_RESIDUAL = 1;
 
+/** The gated candidate's inputs (bot/model/gatedExperts.ts): [name, centre, oriented to the trade's side]. Trend:
+ *  momentum, the TA library and the TA network; micro: the contract's order flow and book; drivers of the gate: how
+ *  fast volatility is changing and the SNN governor level. */
+export const TAKE_GATED_TREND: Array<[string, number, boolean]> = [
+  ['ret_60s_z', 0, true], ['ret_300s_z', 0, true], ['macd_hist_z', 0, true], ['rsi_60', 50, true], ['bb_pctb_300', 0.5, true], ['kaufman_er_120', 0, false],
+  ['tanet_up_1h', 0.5, true], ['tanet_up_4h', 0.5, true],
+];
+export const TAKE_GATED_MICRO: Array<[string, number, boolean]> = [
+  ['ofi_30s', 0, true], ['microprice_drift', 0, true], ['depth_imbalance_5', 0, true], ['tfi_60s', 0, true], ['vpin_300s', 0, false], ['trade_intensity_60s', 0, false], ['hawkes_excitation', 0, false],
+];
+export const TAKE_GATED_DRIVERS = ['vol_ratio_15m_4h', 'ewma_vol_ratio', 'snn_gov_h'];
+export const TAKE_GATED_FEATURES = [...TAKE_GATED_TREND.map(([n]) => `${n}_side`), ...TAKE_GATED_MICRO.map(([n]) => `${n}_side`), ...TAKE_GATED_DRIVERS];
+
+/** The gated candidate's input vector for a trade on `side`, from the feature map. */
+export function takeGatedInputs(side: 'yes' | 'no', f: Record<string, number>): number[] {
+  const s = side === 'yes' ? 1 : -1;
+  const o = ([n, c, oriented]: [string, number, boolean]) => { const v = f[n]; return Number.isFinite(v) ? (oriented ? s * (v - c) : v) : NaN; };
+  return [...TAKE_GATED_TREND.map(o), ...TAKE_GATED_MICRO.map(o), ...TAKE_GATED_DRIVERS.map((n) => (Number.isFinite(f[n]) ? f[n] : NaN))];
+}
+
+/** Indices of the gated candidate's experts and drivers in takeGatedInputs. */
+export const TAKE_GATED_LAYOUT = {
+  trend: TAKE_GATED_TREND.map((_, i) => i),
+  micro: TAKE_GATED_MICRO.map((_, i) => TAKE_GATED_TREND.length + i),
+  drivers: TAKE_GATED_DRIVERS.map((_, i) => TAKE_GATED_TREND.length + TAKE_GATED_MICRO.length + i),
+};
+
 export interface TakeModelParams {
   features: string[];
-  /** mlp (default for older files) or gbdt (boosted trees on the logit of the fair-value side probability). */
-  kind?: 'mlp' | 'gbdt';
+  /** mlp (default for older files), gbdt (boosted trees on the logit of the fair-value side probability), or gated
+   *  (a trend expert and a microstructure expert on that logit, mixed by a gate on volatility change and the SNN
+   *  governor: bot/model/gatedExperts.ts). */
+  kind?: 'mlp' | 'gbdt' | 'gated';
+  gated?: GatedExperts & { features: string[] };
   normalization?: { mean: number[]; std: number[] };
   layers?: DenseLayer[];
   gbdt?: GbdtModel;
   /** Candidates compared on the inner validation split (log loss); the lower one was kept. */
-  candidates?: { kind: 'mlp' | 'gbdt'; valLogLoss: number }[];
+  candidates?: { kind: 'mlp' | 'gbdt' | 'gated'; valLogLoss: number }[];
   /** Held-out check (last 30% of OOF trade windows): log loss of P(win) vs the fair-value probability. */
   validation: { trades: number; windows: number; logLossBase: number; logLossTake: number; validated: boolean };
 }
@@ -59,11 +90,13 @@ function forward(layer: DenseLayer, x: number[]): number[] {
   return layer.activation === 'tanh' ? out.map(Math.tanh) : layer.activation === 'relu' ? out.map((v) => Math.max(0, v)) : out;
 }
 
-/** P(trade wins). MLP: missing inputs are imputed as the training mean; trees route them by learned defaults. */
-export function takeProbability(p: TakeModelParams, x: number[]): number {
+/** P(trade wins). MLP: missing inputs are imputed as the training mean; trees route them by learned defaults; the gated
+ *  model needs `gx` (takeGatedInputs) and reads the fair-value probability alone without it. */
+export function takeProbability(p: TakeModelParams, x: number[], gx?: number[]): number {
   // Older files were trained on fewer inputs: use the leading ones.
   x = x.slice(0, p.features.length);
   if (p.kind === 'gbdt' && p.gbdt) return 1 / (1 + Math.exp(-(gbdtLogit(p.gbdt, x) + x[TAKE_RESIDUAL])));
+  if (p.kind === 'gated') return 1 / (1 + Math.exp(-(p.gated && gx ? gatedPredict(p.gated, gx, x[TAKE_RESIDUAL]).y : x[TAKE_RESIDUAL])));
   let h = x.map((v, i) => (Number.isFinite(v) ? (v - p.normalization!.mean[i]) / p.normalization!.std[i] : 0));
   for (const l of p.layers!) h = forward(l, h);
   return 1 / (1 + Math.exp(-h[0]));
@@ -79,7 +112,7 @@ export function applyTakeGate(plan: { place: OrderPlan[]; notes: string[] }, tak
     if (o.reduceOnly || o.purpose === 'exit') return true;
     const side = o.side === 'bid' ? 'yes' : 'no';
     const price = side === 'yes' ? o.price : 1 - o.price;
-    const q = takeProbability(take, takeInputs(side, c.pYes, price, c.ask - c.bid, c.tauSec, c.features, c.pStd));
+    const q = takeProbability(take, takeInputs(side, c.pYes, price, c.ask - c.bid, c.tauSec, c.features, c.pStd), takeGatedInputs(side, c.features));
     const breakeven = price + (o.postOnly ? 0 : takerFee(1, price));
     if (q >= breakeven + c.margin) return true;
     skipped++;

@@ -48,6 +48,7 @@ checkpoints persist across restarts.
 
 **Crypto.** The fair-value MLP and its take/skip head (`bot/model/takeModel.ts`) read the crypto network's calls.
 - **Take/skip head:** for every entry the edge would place, it estimates P(trade wins). The trade is taken only if that clears the side's break-even (price + fee).
+- **Its candidates:** an MLP, boosted trees, and gated experts (a trend expert and an order-flow expert mixed by a gate on volatility change and the governor level, `bot/model/gatedExperts.ts`); the best on validation is kept.
 - **Validation gate:** the gate switches on only after its out-of-fold held-out check beats the fair value alone.
 
 **Perps** read the perps network's `snn_up_1h`, `snn_up_4h`, `snn_skill_1h` and `snn_skill_4h`.
