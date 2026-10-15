@@ -20,16 +20,22 @@
 //   dip       daily pullback in an established trend (close above SMA 200, SMA 50 above SMA 200, RSI
 //             back above 45 after dipping under it).
 //   Exits: no fixed target; a 3-ATR chandelier trail from the best close, 60-day time limit.
+// Spot-led (fast lane, only for coins where Coinbase spot leads the Kalshi perp: research/leadLag.ts, and only once
+// adopted from the setups-spotpb sweep; SPOT_PB):
+//   spotpb    the spot pullback: higher-timeframe trend up, RSI dipped under 40 in the last 5 bars, price tested a
+//             recent bullish fair value gap (a 3-bar gap: low above the high two bars earlier) and reclaims the
+//             21 EMA on a green bar -> long; mirror -> short. Stop under the gap / the last 3 bars; 1R (half off)
+//             then 3R; ATR trail. Checked before the plain pullback for those coins.
 //
 // The higher-timeframe trend uses simple averages (exact over a finite window), so the live candle
 // store's 320 bars give the same values as the full history.
 
-import { atr, bollinger, macd, rsi, sma, type Candle } from '../ta/indicators';
+import { atr, bollinger, ema, macd, rsi, sma, type Candle } from '../ta/indicators';
 import { aggregate } from '../ta/candleStore';
 import type { Timeframe } from '../ta/knowledge';
 
 export type Lane = 'fast' | 'slow';
-export type SetupKind = 'fade' | 'pullback' | 'burst' | 'breakout' | 'dip';
+export type SetupKind = 'fade' | 'pullback' | 'burst' | 'breakout' | 'dip' | 'spotpb';
 
 export interface ExitPlan {
   /** First target: half the position off, stop to break-even. */
@@ -50,6 +56,10 @@ export interface ExitPlan {
   tightTrailAtr?: number;
   /** The 4h ATR ratchet (applyRatchet): replaces the break-even and trailing rules above; ATR(4h) at entry. */
   ratchet?: { atr: number; beAtr: number; trailStartAtr: number; trailAtr: number; fee: number };
+  /** Scale-out (applyScaleOut): replaces the two targets. Each step takes `frac` of the original position off (maker)
+   *  once price has gone `r` R in the trade's favour; after the first, the stop goes to break-even and the rest trails
+   *  the best close by trailAtr ATRs of the setup's timeframe. */
+  scaleOut?: { steps: Array<{ r: number; frac: number }>; trailAtr: number };
 }
 
 export interface SetupSignal {
@@ -91,6 +101,7 @@ export interface SetupSeries {
   rsi: number[]; mid: number[]; upper: number[]; lower: number[]; pctB: number[]; bandwidth: number[];
   hist: number[]; atr: number[]; share: number[]; volAvg: number[];
   sma50: number[]; sma200: number[];
+  ema21: number[];
   /** Higher timeframe (4 bars; daily: none): closes at each bar's index, SMA 20 / 50 of HTF closes. */
   htf?: { closeAt: number[]; s20: number[]; s50: number[] };
 }
@@ -101,7 +112,7 @@ export function setupSeries(cs: Candle[], tf: Timeframe): SetupSeries {
   const share = cs.map((x) => (x.tb !== undefined && x.v > 0 ? x.tb / x.v : NaN));
   const s: SetupSeries = {
     cs, rsi: rsi(c, 14), mid: bb.mid, upper: bb.upper, lower: bb.lower, pctB: bb.pctB, bandwidth: bb.bandwidth,
-    hist: macd(c).hist, atr: atr(cs, 14), share, volAvg: sma(cs.map((x) => x.v), 20), sma50: sma(c, 50), sma200: sma(c, 200),
+    hist: macd(c).hist, atr: atr(cs, 14), share, volAvg: sma(cs.map((x) => x.v), 20), sma50: sma(c, 50), sma200: sma(c, 200), ema21: ema(c, 21),
   };
   if (tf !== '1d') {
     // Higher timeframe = 4 of these bars (15m -> 1h, 1h -> 4h), aligned to its own clock; at bar i the
@@ -136,7 +147,7 @@ export function dailyTrendAt(daily: SetupSeries | undefined, t: number): -1 | 0 
 /** Setup at bar i. `daily` (the asset's daily series) lets burst shorts require the daily trend down
  *  (close below its 50-day average): in the trade-anatomy study that rule improved shorts in both the
  *  tuning years and the unseen test months, while it hurt longs, so longs do not use it. */
-export function detectAt(asset: string, tf: Timeframe, s: SetupSeries, i: number, daily?: SetupSeries): SetupSignal | undefined {
+export function detectAt(asset: string, tf: Timeframe, s: SetupSeries, i: number, daily?: SetupSeries, o: { spotPb?: boolean } = {}): SetupSignal | undefined {
   if (i < 60 || i >= s.cs.length) return undefined;
   const cs = s.cs, b = cs[i], a = s.atr[i];
   if (!(a > 0) || !fin(s.upper[i]) || !fin(s.rsi[i])) return undefined;
@@ -189,6 +200,11 @@ export function detectAt(asset: string, tf: Timeframe, s: SetupSeries, i: number
   const H = s.htf;
   if (!H || !fin(H.s50[i])) return undefined;
   const up = H.s20[i] > H.s50[i] && H.closeAt[i] > H.s50[i], dn = H.s20[i] < H.s50[i] && H.closeAt[i] < H.s50[i];
+  // The spot pullback (spot-led coins only): RSI dip + a tested fair value gap + the 21 EMA reclaimed.
+  if (o.spotPb && fin(s.ema21[i]) && fin(s.ema21[i - 1])) {
+    const sp = spotPullbackAt(s, i, up ? 1 : dn ? -1 : 0);
+    if (sp) { const r = Math.abs(b.c - sp.stop); return mk('spotpb', 'fast', sp.dir, sp.stop, { target1: b.c + sp.dir * r, target2: b.c + sp.dir * 3 * r, trailAtr: 1.5, maxBars: 24 }); }
+  }
   const dipped = Math.min(s.rsi[i - 1], s.rsi[i - 2]) < 40 || cs[i - 1].l <= s.lower[i - 1];
   const popped = Math.max(s.rsi[i - 1], s.rsi[i - 2]) > 60 || cs[i - 1].h >= s.upper[i - 1];
   const rPlan = (dir: 1 | -1, stop: number): ExitPlan => { const r = Math.abs(b.c - stop); return { target1: b.c + dir * r, target2: b.c + dir * 3 * r, trailAtr: 1.5, maxBars: 24 }; };
@@ -197,10 +213,40 @@ export function detectAt(asset: string, tf: Timeframe, s: SetupSeries, i: number
   return undefined;
 }
 
+/** The spot pullback at bar i in the trend's direction (`trend` +1 / -1; 0 = none): the side and the stop, or undefined. */
+export function spotPullbackAt(s: SetupSeries, i: number, trend: -1 | 0 | 1): { dir: 1 | -1; stop: number } | undefined {
+  if (!trend || i < 15) return undefined;
+  const cs = s.cs, b = cs[i], a = s.atr[i], d = trend;
+  // RSI dipped (popped, for shorts) in the last 5 bars.
+  let ext = d > 0 ? Infinity : -Infinity;
+  for (let k = i - 5; k < i; k++) ext = d > 0 ? Math.min(ext, s.rsi[k]) : Math.max(ext, s.rsi[k]);
+  if (!(d > 0 ? ext < 40 : ext > 60)) return undefined;
+  // The 21 EMA reclaimed on this bar, on a bar of the trade's colour.
+  if (!(d > 0 ? cs[i - 1].c < s.ema21[i - 1] && b.c > s.ema21[i] && b.c > b.o : cs[i - 1].c > s.ema21[i - 1] && b.c < s.ema21[i] && b.c < b.o)) return undefined;
+  // A fair value gap in the trend's direction in the last 12 bars that price came back into and held.
+  for (let k = i - 1; k >= Math.max(2, i - 12); k--) {
+    const lo = d > 0 ? cs[k - 2].h : cs[k].h, hi = d > 0 ? cs[k].l : cs[k - 2].l; // gap zone [lo, hi]
+    if (!(hi > lo)) continue;
+    let touched = false, broke = false;
+    for (let j = k + 1; j <= i; j++) {
+      if (d > 0 ? cs[j].l <= hi : cs[j].h >= lo) touched = true;
+      if (d > 0 ? cs[j].c < lo : cs[j].c > hi) broke = true;
+    }
+    if (!touched || broke) continue;
+    const lo3 = Math.min(b.l, cs[i - 1].l, cs[i - 2].l), hi3 = Math.max(b.h, cs[i - 1].h, cs[i - 2].h);
+    return { dir: d, stop: d > 0 ? Math.min(lo3, lo) - 0.25 * a : Math.max(hi3, hi) + 0.25 * a };
+  }
+  return undefined;
+}
+
+/** Which coins the spot pullback runs for (empty = none). Set from the setup model live and from the trainer's
+ *  settings in research (SETUP_SPOT_PB, intersected with the coins where research/leadLag.ts found spot leading). */
+export const SPOT_PB: { assets: string[] } = { assets: [] };
+
 /** Setup on the last closed bar of `cs` (live). */
-export function detectLast(asset: string, tf: Timeframe, cs: Candle[], daily?: Candle[]): SetupSignal | undefined {
+export function detectLast(asset: string, tf: Timeframe, cs: Candle[], daily?: Candle[], o: { spotPb?: boolean } = {}): SetupSignal | undefined {
   if (cs.length < SETUP_MIN_BARS) return undefined;
-  return detectAt(asset, tf, setupSeries(cs, tf), cs.length - 1, daily && daily.length >= 60 ? setupSeries(daily, '1d') : undefined);
+  return detectAt(asset, tf, setupSeries(cs, tf), cs.length - 1, daily && daily.length >= 60 ? setupSeries(daily, '1d') : undefined, o);
 }
 
 /** Volatility-adapted trail for fast-lane setups: the trail distance in ATRs is multiplied by
@@ -243,6 +289,26 @@ export function applyRatchet(sig: SetupSignal, atr4h: number | undefined, fee: n
   if (r.lanes === 'off' || !(atr4h !== undefined && atr4h > 0) || !(r.lanes === 'both' || r.lanes === sig.lane)) return sig;
   const unit = atr4h * (r.volK && vol !== undefined && Number.isFinite(vol) ? Math.max(0.67, Math.min(1.5, Math.exp(r.volK * vol))) : 1);
   return { ...sig, stop: sig.ref - sig.dir * r.stopAtr * unit, plan: { ...sig.plan, ratchet: { atr: unit, beAtr: r.beAtr, trailStartAtr: r.trailStartAtr, trailAtr: r.trailAtr, fee } } };
+}
+
+/** Scale-out exits (the 4th-generation spec's 5.1, as reviewed): partial take-profits at R multiples, the remainder
+ *  trailed. Off by default (SETUP_SCALE_OUT, recorded in the setup model so live trades are managed exactly as they were
+ *  trained); the setups-scale sweep (research/sweep.ts) turns it on only when it beats the lane's own exits on all of
+ *  history's windows. r1 / f1: the first step (R multiple, share of the original position), r2 / f2 the second (f2 = 0:
+ *  one step); the rest trails by trailAtr ATRs. */
+export const SCALE_OUT: ScaleOutSettings = { lanes: 'off', r1: 1, f1: 0.33, r2: 2, f2: 0.33, trailAtr: 2.5 };
+export interface ScaleOutSettings { lanes: 'off' | 'slow' | 'fast' | 'both'; r1: number; f1: number; r2: number; f2: number; trailAtr: number }
+
+/** The signal managed by scale-out exits (unchanged when off or for another lane). */
+export function applyScaleOut(sig: SetupSignal, s: ScaleOutSettings = SCALE_OUT): SetupSignal {
+  if (s.lanes === 'off' || !(s.lanes === 'both' || s.lanes === sig.lane)) return sig;
+  const steps = [{ r: s.r1, frac: s.f1 }, ...(s.f2 > 0 ? [{ r: Math.max(s.r2, s.r1), frac: s.f2 }] : [])]
+    .filter((x) => x.r > 0 && x.frac > 0);
+  let left = 0.95;
+  const capped = steps.map((x) => { const f = Math.min(x.frac, left); left -= f; return { r: x.r, frac: f }; }).filter((x) => x.frac > 0);
+  if (!capped.length) return sig;
+  const { target1: _t1, target2: _t2, ...plan } = sig.plan;
+  return { ...sig, plan: { ...plan, scaleOut: { steps: capped, trailAtr: s.trailAtr } } };
 }
 
 /** The signal with its trail scaled by the volatility forecast (unchanged when off or without one). */

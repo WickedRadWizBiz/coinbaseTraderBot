@@ -23,6 +23,8 @@
 //   0c+ librarian    the Librarian (research/librarian.ts): oracle strategy and regime-transition heads on the TA
 //                    network's inputs, walk-forward and graded against persistence (weekly) -> librarian.json (its
 //                    validated heads are features of the decision models) and the walk's forecasts for the setups
+//   0c* lead_lag     does Coinbase spot lead the Kalshi perp? (research/leadLag.ts, weekly, on the recordings) ->
+//                    lead_lag.json, the verdict per coin the spot-led setups wait for
 //   0d. setups       setup scorer for the fast / slow lanes (TA network inputs kept only if they help)
 //   0e. setup_snn    does the perps SNN help the setup trader? Tested on the bot's own setup journal
 //                    (research/setupSnnStudy.ts); writes setup_snn_gate.json, on only once proven
@@ -55,7 +57,7 @@
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, librarian, rule_book, gp, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, playbook, readiness
+//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, librarian, rule_book, gp, lead_lag, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, playbook, readiness
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --sweep-all          # every step due now (weekly studies, tournaments, ablations, sweeps)
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
@@ -104,6 +106,7 @@ import { readJournalTrades } from '../bot/setups/journal';
 import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
 import { exportTaNetOos, oosDir } from './taNetOos';
 import { trainLibrarian } from './librarian';
+import { leadLagStudy } from './leadLag';
 import { LIB_SCHEMA, setLibrarianPath } from '../bot/ta/librarian';
 
 const readLibSchema = (f: string): string | undefined => { try { return (JSON.parse(fs.readFileSync(f, 'utf8')) as { schema?: string }).schema; } catch { return undefined; } };
@@ -120,7 +123,7 @@ import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet'
 /** Coins with Kalshi crypto contracts: the SNN tournaments' transition penalty reads their regime changes. */
 const SNN_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
 
-export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'librarian', 'rule_book', 'gp', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
+export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'librarian', 'rule_book', 'gp', 'lead_lag', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -165,6 +168,8 @@ export interface PipelineState {
   ruleBookAt?: number;
   /** Last Librarian training (research/librarian.ts, weekly). */
   librarianAt?: number;
+  /** Last spot vs perp lead-lag study (research/leadLag.ts, weekly). */
+  leadLagAt?: number;
   /** Last genetic-programming run (research/gpIndicators.ts, every GP_EVERY_DAYS). */
   gpAt?: number;
   /** What the recordings make testable so far (see the readiness block of each report). */
@@ -254,7 +259,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   for (const d of REPLAYABLE) fs.mkdirSync(fillDir(d), { recursive: true });
   const state = readState(A.dir);
   if (o.forceAll) {
-    delete state.ruleBookAt; delete state.librarianAt; delete state.gpAt; delete state.setupsTrainedAt; delete state.taNetTrainedAt; state.sweptAt = {};
+    delete state.ruleBookAt; delete state.librarianAt; delete state.leadLagAt; delete state.gpAt; delete state.setupsTrainedAt; delete state.taNetTrainedAt; state.sweptAt = {};
     o = { ...o, forceAblation: true, forceSnnPbt: true, forceTaNet: true };
     log('sweeping everything: every step is due this run');
   }
@@ -539,6 +544,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const p = await trainSetupMain(argsOf({
         history: T.historyDir, out: cand, 'oos-out': oosCand, equity: P.paperBalanceUsd > 100 ? P.paperBalanceUsd : 10_000,
         ratchet: P.setupRatchet, 'ratchet-stop-atr': P.setupRatchetStopAtr, 'ratchet-be-atr': P.setupRatchetBeAtr, 'ratchet-trail-start-atr': P.setupRatchetTrailStartAtr, 'ratchet-trail-atr': P.setupRatchetTrailAtr, 'ratchet-vol-k': P.setupRatchetVolK,
+        'scale-out': P.setupScaleOut, 'scale-r1': P.setupScaleR1, 'scale-f1': P.setupScaleF1, 'scale-r2': P.setupScaleR2, 'scale-f2': P.setupScaleF2, 'scale-trail-atr': P.setupScaleTrailAtr,
+        'spot-pb': P.setupSpotPb, 'lead-lag': path.join(A.dir, 'lead_lag.json'),
       }));
       state.setupsTrainedAt = now;
       const validated = (['fast', 'slow'] as const).filter((l) => p.validation[l]?.passed);
@@ -559,6 +566,19 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const g = setupSnnMain(argsOf({ journal: path.join(cfg.dataDir, 'setups'), out: path.join(A.dir, 'setup_snn_gate.json') }));
       return g;
     }, cfg.perps.strategy !== 'setups' ? 'PERP_STRATEGY is not setups' : undefined);
+  }
+
+  // ---- 0c*. Does Coinbase spot lead the Kalshi perp? (research/leadLag.ts, on the recordings) ----
+  if (want('lead_lag')) {
+    const file = path.join(A.dir, 'lead_lag.json');
+    const due = !fs.existsSync(file) || !state.leadLagAt || now - state.leadLagAt >= 7 * 86_400_000;
+    await run('lead_lag', async () => {
+      const f = await leadLagStudy(rec, { log });
+      if (!Object.keys(f.assets).length) throw new SkipStep('no coin has both Coinbase spot prints and Kalshi perp quotes in the recordings');
+      writeAtomic(file, JSON.stringify(f));
+      state.leadLagAt = now;
+      return { days: f.days.length, verdicts: Object.fromEntries(Object.values(f.assets).map((a) => [a.asset, a.verdict])), why: Object.fromEntries(Object.values(f.assets).map((a) => [a.asset, a.why])) };
+    }, !fs.existsSync(rec) ? `no recordings in ${rec}` : due ? undefined : `ran ${((now - state.leadLagAt!) / 86_400_000).toFixed(1)} day(s) ago (weekly)`);
   }
 
   // ---- 0f. Sweep optimizer: setting by setting until a plateau, as a PROPOSAL (never auto-applied) ----
@@ -582,7 +602,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         if (fs.existsSync(out)) fs.renameSync(out, out.replace(/\.json$/, `.${new Date(now).toISOString().slice(0, 10)}.json`));
         let r;
         try {
-          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: sweepSrc, model: mlpPath(), out, 'setup-oos': path.join(A.dir, 'setup_oos.json'), 'setup-model': fs.existsSync(promoted('setups')) ? promoted('setups') : undefined }));
+          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: sweepSrc, model: mlpPath(), out, 'setup-oos': path.join(A.dir, 'setup_oos.json'), 'setup-model': fs.existsSync(promoted('setups')) ? promoted('setups') : undefined, 'lead-lag': path.join(A.dir, 'lead_lag.json') }));
         } catch (e) {
           if (/needs at least|needs the TA network|recorded day/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;

@@ -383,6 +383,9 @@ The perps trader trades chart setups the way a discretionary trader does. The fu
 - **Scoring:** a walk-forward model over the whole TA library on 4 timeframes, BTC, and a DST-correct market clock (NYSE open and close, holidays, the 11:00 ET hour, the last 30 minutes, the London and Tokyo opens, the CME break) decides which setups to take and how big.
 - **Queues:** candidates wait in their lane's queue and are re-checked on fresh data right before entry.
 - **Trade management:** half off at the first target, stop to break-even, the rest trailed.
+- **Proposals, off until proven by their sweeps:**
+  - Scale-out exits: partial take-profits at R multiples, the rest trailed (`SETUP_SCALE_OUT`, sweep `setups-scale`).
+  - The spot pullback: an RSI dip into a fair value gap, then the 21 EMA reclaimed (`SETUP_SPOT_PB`, sweep `setups-spotpb`). It runs only for coins where the weekly `lead_lag` study (`research/leadLag.ts`) finds that Coinbase spot leads the Kalshi perp by more than the perp feed's polling, by enough to pay for a trade.
 - **Commands:** `npm run research:setups` trains and backtests. `PERP_STRATEGY=setups` (the default) runs it live, on paper by default (`PERP_TRADING=paper`).
 
 ## Evolutionary initialisation and portfolio Kelly

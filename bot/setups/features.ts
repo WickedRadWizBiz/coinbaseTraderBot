@@ -64,7 +64,9 @@ export const FRACTAL_SETUP_KEYS = [
 /** Optional input groups the trainer switches on only when they help (off = blanked to NaN). */
 export const SETUP_GROUPS: Record<string, string[]> = { tanet: TANET_SETUP_KEYS, character: CHAR_SETUP_KEYS, fractal: FRACTAL_SETUP_KEYS, librarian: LIB_SETUP_KEYS };
 /** Every input, in order (groups appended last, so models trained before a group existed still load). */
-export const SETUP_FEATURES: string[] = [...SETUP_BASE_FEATURES, ...TANET_SETUP_KEYS, ...CHAR_SETUP_KEYS, ...FRACTAL_SETUP_KEYS, ...LIB_SETUP_KEYS];
+/** The spot pullback's kind flag (kept outside the cached candle inputs, so adding the kind did not invalidate them). */
+export const SPOT_PB_SETUP_KEYS = ['kind_spotpb'];
+export const SETUP_FEATURES: string[] = [...SETUP_BASE_FEATURES, ...TANET_SETUP_KEYS, ...CHAR_SETUP_KEYS, ...FRACTAL_SETUP_KEYS, ...LIB_SETUP_KEYS, ...SPOT_PB_SETUP_KEYS];
 
 /** Fill the fractal inputs: the engine's state and the waterfall legs (NaN when unknown). For an altcoin a falling
  *  BTC.D is the tailwind, for BTC the reverse, so the oriented copy flips with the asset. */
@@ -180,6 +182,7 @@ export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBar
   characterFeatures(out, character);
   fractalFeatures(out, sig.asset, sig.dir, macro);
   libSetupFeatures(out, sig.dir, lib);
+  out.kind_spotpb = sig.kind === 'spotpb' ? 1 : 0;
   return out;
 }
 

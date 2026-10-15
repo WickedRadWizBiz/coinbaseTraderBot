@@ -19,7 +19,7 @@ const H = 3_600_000;
 const sig = (o: Partial<SetupSignal> = {}): SetupSignal => ({ asset: 'BTC', lane: 'fast', kind: 'burst', tf: '1h', dir: 1, ts: 0, ref: 100, stop: 98, atr: 1, plan: { trailAtr: 3, maxBars: 16, trailFromStart: true }, info: { rsi: 60, pctB: 0.8, flow: 0.6, bandwidth: 0.05, volRatio: 2 }, ...o });
 
 test('setup features: TA network, character, fractal and Librarian inputs sit after the candle inputs and are blanked unless their group is on', () => {
-  assert.deepEqual(SETUP_FEATURES.slice(SETUP_BASE_FEATURES.length), [...TANET_SETUP_KEYS, ...CHAR_SETUP_KEYS, ...FRACTAL_SETUP_KEYS, ...LIB_SETUP_KEYS]);
+  assert.deepEqual(SETUP_FEATURES.slice(SETUP_BASE_FEATURES.length), [...TANET_SETUP_KEYS, ...CHAR_SETUP_KEYS, ...FRACTAL_SETUP_KEYS, ...LIB_SETUP_KEYS, 'kind_spotpb']);
   const m: Record<string, number> = {};
   tanetFeatures(m, -1, { up1: 0.6, up4: 0.3, vol: 0.2 });
   assert.ok(Math.abs(m.tn_up1 - 0.1) < 1e-12 && Math.abs(m.o_tn_up1 + 0.1) < 1e-12, 'oriented by the side');

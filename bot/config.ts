@@ -659,6 +659,14 @@ export interface PerpsConfig {
   setupRatchetTrailAtr: number;
   /** SETUP_RATCHET_VOL_K: the unit is ATR(4h) x exp(k x the TA network's 4h volatility forecast); 0 = plain ATR(4h). */
   setupRatchetVolK: number;
+  /** Scale-out exits for setup trades (bot/setups/detectors.ts SCALE_OUT; recorded in the setup model): SETUP_SCALE_OUT
+   *  (off (default) | slow | fast | both), then the two steps (R multiple, share of the original position; f2 = 0: one
+   *  step) and the trail of the rest in ATRs. Adopt it from the setups-scale sweep's proposal. */
+  setupScaleOut: 'off' | 'slow' | 'fast' | 'both';
+  setupScaleR1: number; setupScaleF1: number; setupScaleR2: number; setupScaleF2: number; setupScaleTrailAtr: number;
+  /** SETUP_SPOT_PB: the spot pullback setups (bot/setups/detectors.ts spotpb), for the coins where Coinbase spot leads
+   *  the Kalshi perp by the weekly lead-lag study; off until adopted from the setups-spotpb sweep. */
+  setupSpotPb: 'off' | 'on';
 }
 
 export class ConfigError extends Error {}
@@ -1084,6 +1092,13 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         setupRatchetTrailStartAtr: num(env, 'SETUP_RATCHET_TRAIL_START_ATR', 3.5, 0.25, 30),
         setupRatchetTrailAtr: num(env, 'SETUP_RATCHET_TRAIL_ATR', 3, 0.25, 20),
         setupRatchetVolK: num(env, 'SETUP_RATCHET_VOL_K', 0, -2, 2),
+        setupScaleOut: oneOf(env, 'SETUP_SCALE_OUT', 'off', ['off', 'slow', 'fast', 'both'] as const),
+        setupScaleR1: num(env, 'SETUP_SCALE_R1', 1, 0.25, 10),
+        setupScaleF1: num(env, 'SETUP_SCALE_F1', 0.33, 0.05, 0.95),
+        setupScaleR2: num(env, 'SETUP_SCALE_R2', 2, 0.25, 20),
+        setupScaleF2: num(env, 'SETUP_SCALE_F2', 0.33, 0, 0.9),
+        setupScaleTrailAtr: num(env, 'SETUP_SCALE_TRAIL_ATR', 2.5, 0.25, 20),
+        setupSpotPb: oneOf(env, 'SETUP_SPOT_PB', 'off', ['off', 'on'] as const),
       };
     })(),
     macro: macroConfig(env),
@@ -1116,7 +1131,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       ablationEveryDays: num(env, 'AUTO_TRAIN_ABLATION_EVERY_DAYS', 7, 0, 365),
       snnTrainDays: num(env, 'AUTO_TRAIN_SNN_TRAIN_DAYS', 21, 1, 365),
       onModelChange: bool(env, 'AUTO_TRAIN_ON_MODEL_CHANGE', true),
-      sweepTargets: (env.SWEEP_TARGETS ?? 'setups-long,setups-short,setups-vol,setups-ratchet,kalshi,bot').split(',').map((x) => x.trim()).filter(Boolean),
+      sweepTargets: (env.SWEEP_TARGETS ?? 'setups-long,setups-short,setups-vol,setups-ratchet,setups-scale,setups-spotpb,kalshi,bot').split(',').map((x) => x.trim()).filter(Boolean),
       sweepHours: num(env, 'SWEEP_HOURS', 2, 0.05, 48),
       taNetOosHours: num(env, 'TA_NET_OOS_HOURS', 3, 0.05, 48),
       sweepEveryDays: num(env, 'SWEEP_EVERY_DAYS', 7, 1, 365),

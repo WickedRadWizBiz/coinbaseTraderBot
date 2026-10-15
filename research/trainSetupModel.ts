@@ -28,9 +28,10 @@ import { trainGbdt } from './gbdt';
 import { gbdtLogit, type GbdtModel } from '../bot/model/trees';
 import type { Candle } from '../bot/ta/indicators';
 import type { Timeframe } from '../bot/ta/knowledge';
-import { adaptToVol, applyRatchet, atr4hAt, detectAt, FAST_TFS, RATCHET, SLOW_TFS, setupSeries, TF_MS, VOL_ADAPT, type Lane, type SetupSeries, type SetupSignal } from '../bot/setups/detectors';
+import { adaptToVol, applyRatchet, applyScaleOut, atr4hAt, detectAt, FAST_TFS, RATCHET, SCALE_OUT, SLOW_TFS, SPOT_PB, setupSeries, TF_MS, VOL_ADAPT, type Lane, type SetupSeries, type SetupSignal } from '../bot/setups/detectors';
 import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from '../bot/setups/exits';
 import { LibIndex, loadLibForecasts } from './librarian';
+import { spotLeads } from './leadLag';
 import { libSetupFeatures } from '../bot/ta/librarian';
 import { applyMask, characterFeatures, fractalFeatures, maskedIndices, SETUP_BASE_FEATURES, SETUP_FEATURES, SETUP_GROUPS, setupFeatureMap, setupVector, tanetFeatures, type SetupBars } from '../bot/setups/features';
 import { loadMacroDaily, MacroSeries, macroSettings } from '../bot/macro/macroSeries';
@@ -111,7 +112,8 @@ export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: Cos
   const sigs: SetupSignal[] = [];
   for (const tf of [...FAST_TFS, ...SLOW_TFS]) {
     const s = A.series[tf]!;
-    for (let i = 60; i < s.cs.length; i++) { const g = detectAt(A.asset, tf, s, i, A.series['1d']); if (g) sigs.push(g); }
+    const spotPb = SPOT_PB.assets.includes(A.asset);
+    for (let i = 60; i < s.cs.length; i++) { const g = detectAt(A.asset, tf, s, i, A.series['1d'], { spotPb }); if (g) sigs.push(g); }
   }
   const key = (g: SetupSignal) => `${g.tf}|${g.ts}|${g.kind}|${g.dir}`;
   const F = SETUP_BASE_FEATURES.length;
@@ -133,7 +135,7 @@ export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: Cos
   for (const g0 of sigs) {
     const at = g0.ts + TF_MS[g0.tf]!;
     const reading = oos?.at(A.asset, at);
-    const g = applyRatchet(adaptToVol(g0, reading?.vol), atr4hAt(A.h1, at), costs.entry + costs.takerExit, RATCHET, reading?.vol);
+    const g = applyScaleOut(applyRatchet(adaptToVol(g0, reading?.vol), atr4hAt(A.h1, at), costs.entry + costs.takerExit, RATCHET, reading?.vol), SCALE_OUT);
     const tr = simulateSetup(A, g, costs);
     if (!tr?.closed) continue;
     const k = key(g0);
@@ -146,6 +148,7 @@ export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: Cos
     fractalFeatures(tn, A.asset, g.dir, macro?.at(at));
     // The Librarian's walk-forward reading at the last closed hour.
     libSetupFeatures(tn, g.dir, lib?.at(A.asset, at));
+    tn.kind_spotpb = g.kind === 'spotpb' ? 1 : 0;
     const x = new Float32Array(SETUP_FEATURES.length);
     x.set(base);
     SETUP_FEATURES.slice(F).forEach((name, j) => { x[F + j] = Number.isFinite(tn[name]) ? tn[name] : NaN; });
@@ -481,7 +484,7 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
   const lanes: SetupModelParams['lanes'] = {};
   for (const lane of ['fast', 'slow'] as const) lanes[lane] = fitLane(events.filter((e) => e.sig.lane === lane), 11, maskedIndices(groups));
   return {
-    version: `setups1-${iso(Date.now())}`, schema: SETUP_SCHEMA, features: SETUP_FEATURES, groups, groupChoice, volTrailK: VOL_ADAPT.trailK, ...(RATCHET.lanes !== 'off' ? { ratchet: { ...RATCHET } } : {}), taEngine: taEngine(), lanes, book, costs, equityUsd: equity, validation, sizing, trainedAt: new Date().toISOString(),
+    version: `setups1-${iso(Date.now())}`, schema: SETUP_SCHEMA, features: SETUP_FEATURES, groups, groupChoice, volTrailK: VOL_ADAPT.trailK, ...(RATCHET.lanes !== 'off' ? { ratchet: { ...RATCHET } } : {}), ...(SCALE_OUT.lanes !== 'off' ? { scaleOut: { ...SCALE_OUT } } : {}), ...(SPOT_PB.assets.length ? { spotPullback: [...SPOT_PB.assets] } : {}), taEngine: taEngine(), lanes, book, costs, equityUsd: equity, validation, sizing, trainedAt: new Date().toISOString(),
     data: { assets: [...assets.keys()], from: iso(events[0].at), to: iso(end), holdoutFrom: iso(holdoutFrom), finalFrom: iso(finalFrom), events: events.length },
   };
 }
@@ -500,6 +503,17 @@ export async function trainSetupMain(argOf: (k: string, d: string) => string = c
     stopAtr: num('ratchet-stop-atr', 3.5), beAtr: num('ratchet-be-atr', 2), trailStartAtr: num('ratchet-trail-start-atr', 3.5), trailAtr: num('ratchet-trail-atr', 3),
     volK: (() => { const v = Number(argOf('ratchet-vol-k', process.env.SETUP_RATCHET_VOL_K ?? '0')); return Number.isFinite(v) ? v : 0; })(),
   });
+  // Scale-out exits (off unless adopted from the setups-scale sweep), recorded in the model the same way.
+  const scale = argOf('scale-out', process.env.SETUP_SCALE_OUT ?? 'off');
+  const frac = (k: string, d: number) => { const v = Number(argOf(k, String(d))); return Number.isFinite(v) && v >= 0 ? v : d; };
+  Object.assign(SCALE_OUT, {
+    lanes: (['off', 'slow', 'fast', 'both'] as const).find((x) => x === scale) ?? 'off',
+    r1: num('scale-r1', 1), f1: frac('scale-f1', 0.33), r2: num('scale-r2', 2), f2: frac('scale-f2', 0.33), trailAtr: num('scale-trail-atr', 2.5),
+  });
+  // The spot pullback: only once adopted (SETUP_SPOT_PB=on) and only for the coins where spot leads the perp by the
+  // latest lead-lag study (research/leadLag.ts); recorded in the model so the live trader detects the same setups.
+  const leadFile = argOf('lead-lag', '');
+  SPOT_PB.assets = argOf('spot-pb', process.env.SETUP_SPOT_PB ?? 'off') === 'on' && leadFile ? spotLeads(leadFile) : [];
   const p = await trainSetupModel(hist, { oosOut: argOf('oos-out', '') || undefined, assets: assets ? assets.split(',') : undefined, equityUsd: Number(argOf('equity', '10000')), holdoutMonths: Number(argOf('holdout-months', '9')), finalMonths: Number(argOf('final-months', '3')) });
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(p));
