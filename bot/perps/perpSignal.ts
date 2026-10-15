@@ -16,6 +16,7 @@
 import fs from 'fs';
 import type { IndexTracker } from '../marketdata/indexTracker';
 import { assetFeatureMap, type BarStore, type SnnContext } from '../model/featureEngine';
+import { gatedPredict, type GatedExperts } from '../model/gatedExperts';
 import type { CandleSet } from '../ta/candleStore';
 import type { PerpState } from './perpData';
 import { gbdtLogit, validateGbdt, type GbdtModel } from '../model/trees';
@@ -35,6 +36,19 @@ export const PERP_FEATURES = [
   // The TA network's 1h / 4h forecasts (years of hourly history), its vol forecast and live skill.
   'tanet_up_1h', 'tanet_up_4h', 'tanet_vol_4h', 'tanet_skill_4h',
 ];
+
+/** The gated candidate (bot/model/gatedExperts.ts): trend expert, microstructure / leverage-flow expert, and the gate's
+ *  driver, how fast volatility is changing (the perps inputs carry no SNN governor level). */
+export const PERP_GATED = {
+  trend: ['ret_15m_z', 'ret_1h_z', 'ret_4h_z', 'efficiency_ratio_1h', 'ta_rsi_1h', 'ta_rsi_4h', 'ta_macd_hist_1h', 'ta_di_diff_1h', 'ta_ema_stack_1h', 'ta_ema_stack_4h', 'ta_bb_pctb_1h', 'taconf_trend_alignment', 'taconf_mtf_momentum', 'taconf_net_trend', 'taconf_net_reversal', 'tanet_up_1h', 'tanet_up_4h'],
+  micro: ['perp_premium_bps', 'perp_premium_chg_5m', 'perp_ret_diff_5m_z', 'funding_rate_bps', 'funding_delta_4h', 'perp_oi_chg_1h', 'perp_oi_accel_1h', 'ta_taker_imb_1h', 'ta_taker_imb_4h'],
+  drivers: ['vol_ratio_15m_4h'],
+};
+export const perpGatedLayout = (features: string[] = PERP_FEATURES) => ({
+  trend: PERP_GATED.trend.map((n) => features.indexOf(n)).filter((i) => i >= 0),
+  micro: PERP_GATED.micro.map((n) => features.indexOf(n)).filter((i) => i >= 0),
+  drivers: PERP_GATED.drivers.map((n) => features.indexOf(n)).filter((i) => i >= 0),
+});
 
 export interface PerpFeatureSources {
   index?: IndexTracker;
@@ -73,9 +87,11 @@ export interface PerpModelValidation {
 
 export interface PerpModelParams {
   version: string;
-  /** linear = ridge on standardised features; gbdt = boosted regression trees (squared loss). */
-  kind: 'linear' | 'gbdt';
+  /** linear = ridge on standardised features; gbdt = boosted regression trees (squared loss); gated = a trend and a
+   *  microstructure expert mixed by a gate on volatility change (bot/model/gatedExperts.ts). */
+  kind: 'linear' | 'gbdt' | 'gated';
   gbdt?: GbdtModel;
+  gated?: GatedExperts;
   horizonMin: number;
   features: string[];
   mean: number[];
@@ -99,6 +115,7 @@ export class PerpModel {
       if (!fs.existsSync(path)) return undefined;
       const p = JSON.parse(fs.readFileSync(path, 'utf8')) as PerpModelParams;
       if (p.kind === 'gbdt') { if (!p.gbdt) return undefined; validateGbdt(p.gbdt, p.features.length); return new PerpModel(p); }
+      if (p.kind === 'gated') return p.gated && p.gated.mean.length === p.features.length ? new PerpModel(p) : undefined;
       if (p.kind !== 'linear' || p.features.length !== p.weights.length) return undefined;
       return new PerpModel(p);
     } catch {
@@ -125,6 +142,11 @@ export class PerpModel {
   /** Expected return over the horizon (bps) and residual std (bps). */
   predict(f: Record<string, number>): { muBps: number; sigmaBps: number } {
     const p = this.params;
+    if (p.kind === 'gated' && p.gated) {
+      const cap = 3 * p.residStdBps;
+      const mu = gatedPredict(p.gated, p.features.map((n) => (Number.isFinite(f[n]) ? f[n] : NaN))).y;
+      return { muBps: Math.max(-cap, Math.min(cap, Number.isFinite(mu) ? mu : 0)), sigmaBps: p.residStdBps };
+    }
     if (p.kind === 'gbdt' && p.gbdt) {
       const cap = 3 * p.residStdBps;
       const mu = gbdtLogit(p.gbdt, p.features.map((n) => (Number.isFinite(f[n]) ? f[n] : NaN)));

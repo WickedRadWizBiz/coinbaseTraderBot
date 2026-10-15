@@ -47,7 +47,8 @@ import { eventOf } from './buildDataset';
 import { predictGbdtLogits, trainGbdt } from './gbdt';
 import { predictLogits, train } from './mlp';
 import { takerFee } from '../bot/fees';
-import { TAKE_FEATURES, TAKE_RESIDUAL, takeInputs, type TakeModelParams } from '../bot/model/takeModel';
+import { TAKE_FEATURES, TAKE_GATED_FEATURES, TAKE_GATED_LAYOUT, TAKE_RESIDUAL, takeGatedInputs, takeInputs, type TakeModelParams } from '../bot/model/takeModel';
+import { fitGatedExperts, gatedPredict } from '../bot/model/gatedExperts';
 import { dieboldMariano, rng } from './stats';
 
 function arg(name: string, def: string): string {
@@ -509,7 +510,7 @@ function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`
  *  probability vs the touch (edge after taker fees >= minEdge), label = the trade won. Validated on
  *  the last 30% of trade windows against the fair-value probability alone; refit on all trades. */
 export function fitTakeModel(rows: DatasetRow[], p: number[], minEdge: number, seed: number): TakeModelParams | undefined {
-  const X: number[][] = [], Y: number[] = [], win: number[] = [], base: number[] = [];
+  const X: number[][] = [], G: number[][] = [], Y: number[] = [], win: number[] = [], base: number[] = [];
   rows.forEach((r, i) => {
     const pY = p[i];
     if (!(r.ask > 0 && r.ask < 1 && r.bid > 0 && r.bid < 1)) return;
@@ -518,6 +519,7 @@ export function fitTakeModel(rows: DatasetRow[], p: number[], minEdge: number, s
     if (!side) return;
     const price = side === 'yes' ? r.ask : 1 - r.bid;
     X.push(takeInputs(side, pY, price, r.ask - r.bid, r.tauSec, r.fx));
+    G.push(takeGatedInputs(side, r.fx));
     Y.push(side === 'yes' ? r.label : 1 - r.label);
     win.push(r.window);
     base.push(side === 'yes' ? pY : 1 - pY);
@@ -526,36 +528,40 @@ export function fitTakeModel(rows: DatasetRow[], p: number[], minEdge: number, s
   const wins = [...new Set(win)].sort((a, b) => a - b);
   const cut = wins[Math.floor(wins.length * 0.7)];
   const idx = (f: (w: number) => boolean) => win.map((w, i) => (f(w) ? i : -1)).filter((i) => i >= 0);
-  // Two candidates on the same trades: a logistic MLP head and boosted trees on the residual of the
-  // fair-value side probability. The one with the lower inner-validation log loss is kept, then
-  // judged once on the untouched last 30% of trade windows.
-  type Fit = { kind: 'mlp' | 'gbdt'; valLogLoss: number; prob: (xs: number[][]) => number[]; params: Partial<TakeModelParams> };
+  // Three candidates on the same trades: a logistic MLP head, boosted trees on the residual of the fair-value side
+  // probability, and the gated pair of experts on that residual (trend vs order flow, mixed by a gate on volatility
+  // change and the SNN governor: bot/model/gatedExperts.ts). The one with the lower inner-validation log loss is
+  // kept, then judged once on the untouched last 30% of trade windows.
+  type Fit = { kind: 'mlp' | 'gbdt' | 'gated'; valLogLoss: number; prob: (ids: number[]) => number[]; params: Partial<TakeModelParams> };
   const fitOn = (ids: number[]): Fit[] => {
     const ws = [...new Set(ids.map((i) => win[i]))].sort((a, b) => a - b);
     const vcut = ws[Math.floor(ws.length * 0.8)];
     const tr = ids.filter((i) => win[i] < vcut), va = ids.filter((i) => win[i] >= vcut);
     const m = train(tr.map((i) => X[i]), tr.map((i) => Y[i]), va.map((i) => X[i]), va.map((i) => Y[i]), { hidden: 0, l2: 1e-2, lr: 0.01, maxEpochs: 300, patience: 40, seed, residual: -1 });
-    const mlpProb = (xs: number[][]) => predictLogits(m.layers, m.norm, xs, -1).map(sigmoid);
+    const mlpProb = (ids: number[]) => predictLogits(m.layers, m.norm, ids.map((i) => X[i]), -1).map(sigmoid);
     const init = (xs: number[][]) => xs.map((x) => x[TAKE_RESIDUAL]);
     const ones = (n: number) => new Array(n).fill(1);
     const Xtr = tr.map((i) => X[i]), Xva = va.map((i) => X[i]);
     const g = trainGbdt(Xtr, tr.map((i) => Y[i]), ones(tr.length), init(Xtr), Xva, va.map((i) => Y[i]), ones(va.length), init(Xva), { nTrees: 200, learningRate: 0.05, maxDepth: 2, minLeafWeight: 30, seed });
-    const gbdtProb = (xs: number[][]) => predictGbdtLogits(g.model, xs, TAKE_RESIDUAL).map(sigmoid);
+    const gbdtProb = (ids: number[]) => predictGbdtLogits(g.model, ids.map((i) => X[i]), TAKE_RESIDUAL).map(sigmoid);
     const yv = va.map((i) => Y[i]);
+    const ge = fitGatedExperts(tr.map((i) => G[i]), tr.map((i) => Y[i]), { loss: 'logistic', ...TAKE_GATED_LAYOUT, base: tr.map((i) => X[i][TAKE_RESIDUAL]), val: { X: va.map((i) => G[i]), y: yv, base: va.map((i) => X[i][TAKE_RESIDUAL]) } });
+    const gatedProb = (ids: number[]) => ids.map((i) => sigmoid(gatedPredict(ge!, G[i], X[i][TAKE_RESIDUAL]).y));
     return [
-      { kind: 'mlp', valLogLoss: ll(mlpProb(Xva), yv), prob: mlpProb, params: { kind: 'mlp', normalization: m.norm, layers: m.layers } },
-      { kind: 'gbdt', valLogLoss: g.trees > 0 ? ll(gbdtProb(Xva), yv) : Infinity, prob: gbdtProb, params: { kind: 'gbdt', gbdt: g.model } },
+      { kind: 'mlp', valLogLoss: ll(mlpProb(va), yv), prob: mlpProb, params: { kind: 'mlp', normalization: m.norm, layers: m.layers } },
+      { kind: 'gbdt', valLogLoss: g.trees > 0 ? ll(gbdtProb(va), yv) : Infinity, prob: gbdtProb, params: { kind: 'gbdt', gbdt: g.model } },
+      { kind: 'gated', valLogLoss: ge ? ll(gatedProb(va), yv) : Infinity, prob: gatedProb, params: ge ? { kind: 'gated', gated: { ...ge, features: TAKE_GATED_FEATURES } } : {} },
     ];
   };
   const pick = (cands: Fit[]) => cands.reduce((a, b) => (b.valLogLoss < a.valLogLoss ? b : a));
   const ll = (q: number[], y: number[]) => q.reduce((s, v, i) => s - (y[i] ? Math.log(Math.max(1e-6, v)) : Math.log(Math.max(1e-6, 1 - v))), 0) / Math.max(1, q.length);
   const trIds = idx((w) => w < cut), teIds = idx((w) => w >= cut);
   let validation = { trades: X.length, windows: wins.length, logLossBase: NaN, logLossTake: NaN, validated: false };
-  let kind: 'mlp' | 'gbdt' = 'mlp';
+  let kind: 'mlp' | 'gbdt' | 'gated' = 'mlp';
   if (trIds.length >= 200 && teIds.length >= 100) {
     const best = pick(fitOn(trIds));
     kind = best.kind;
-    const q = best.prob(teIds.map((i) => X[i]));
+    const q = best.prob(teIds);
     const yb = teIds.map((i) => Y[i]);
     const lb = ll(teIds.map((i) => base[i]), yb), lt = ll(q, yb);
     validation = { trades: X.length, windows: wins.length, logLossBase: lb, logLossTake: lt, validated: lt < lb - 0.002 };

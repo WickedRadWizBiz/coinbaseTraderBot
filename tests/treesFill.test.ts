@@ -239,7 +239,7 @@ test('perps: tree candidate walked forward with the ridge lambdas; a gbdt PerpMo
   }
   const res = trainPerp(rows as never, { horizonMin: 60, everySec: 300, minEff: 10 });
   assert.ok(res.oos.some((o) => o.lambda === 'gbdt'));
-  assert.equal(res.params.validation!.trials, 5);
+  assert.equal(res.params.validation!.trials, 6, 'four ridge lambdas, the trees and the gated experts each count as a trial');
   assert.equal(res.params.kind, 'gbdt', `step function: trees win (${JSON.stringify(res.oos)})`);
   const dir = tmpDir();
   fs.writeFileSync(path.join(dir, 'p.json'), JSON.stringify(res.params));
