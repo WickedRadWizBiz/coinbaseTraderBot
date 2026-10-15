@@ -13,6 +13,9 @@
 // alts, stablecoins excluded) comes along by default, from the futures index-price klines, as the
 // index series binance-index/BTCDOM/1h.csv (hourly since June 2021).
 // A manifest remembers what was fetched, so re-running only downloads what is new.
+// A series is fetched in chronological chunks (a year of monthly archives), each stored before the next: a first
+// download of years of 1-minute bars holds one chunk in memory, not all of them (that took several GB a series and
+// ran the laptop trainer out of memory).
 //
 // Spot open times switched from milliseconds to microseconds on 2025-01-01; the parser handles both.
 
@@ -20,7 +23,8 @@ import { progress } from '../progress';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { cleanAndValidate, upsertSeries, type HistTf } from './candles';
+import { countRows, seriesEnds } from '../../bot/marketdata/historyStore';
+import { cleanAndValidate, seriesPath, upsertSeries, type HistTf } from './candles';
 import { parseCandleCsv } from './csvFormats';
 import { resolveAssets } from './assets';
 import { unzip } from './zip';
@@ -64,6 +68,8 @@ interface Manifest { version?: number; files: Record<string, { size: number; bar
 const FULL_RELIST_MS = 30 * 86_400_000;
 /** Series listed at once: S3 listing pages take ~2 s each, so they are asked in parallel. */
 const SERIES_CONCURRENCY = 6;
+/** Monthly archives of a 1- or 5-minute series fetched and stored together (a year: about 525,000 1-minute bars). */
+const CHUNK_ARCHIVES = 12;
 /** 2: bars carry taker-buy volume (tb); files fetched before that are fetched again once. */
 const MANIFEST_VERSION = 2;
 
@@ -172,8 +178,20 @@ export async function downloadBinance(o: BinanceOpts): Promise<BinanceSummary[]>
     const todo = want.filter((k) => manifest.files[k.key]?.size !== k.size);
     s.skipped = want.length - todo.length;
     if (o.dryRun) { log(`${pair} ${market} ${tf}: ${todo.length} archive(s) to fetch (${s.skipped} already fetched)`); return; }
-    const batch: Array<{ key: string; candles: ReturnType<typeof cleanAndValidate>['candles'] }> = [];
-    await pool(todo, o.concurrency ?? 4, async (k) => {
+    type Bars = ReturnType<typeof cleanAndValidate>['candles'];
+    const source = o.source ?? MARKET_SOURCE[market];
+    const file = seriesPath(o.out, source, asset, tf);
+    // Oldest first, a chunk at a time: a chunk newer than everything stored is appended at once (a new series is
+    // created by its first chunk); one that overlaps what is stored (a re-published archive) waits and is merged
+    // with the others like it at the end, in one rewrite.
+    const day = (k: string) => /-(\d{4}-\d{2}(?:-\d{2})?)\.zip$/.exec(k)?.[1] ?? '';
+    todo.sort((a, b) => (day(a.key) < day(b.key) ? -1 : day(a.key) > day(b.key) ? 1 : 0));
+    const chunkSize = tf === '1m' || tf === '5m' ? CHUNK_ARCHIVES : Math.max(1, todo.length);
+    const deferred: Bars[] = [];
+    let stored = false;
+    for (let c0 = 0; c0 < todo.length; c0 += chunkSize) {
+    const batch: Array<{ key: string; candles: Bars }> = [];
+    await pool(todo.slice(c0, c0 + chunkSize), o.concurrency ?? 4, async (k) => {
       try {
         const [zip, sum] = await Promise.all([download(k.key, f), download(`${k.key}.CHECKSUM`, f).then((b) => b.toString('utf8')).catch(() => '')]);
         const expect = parseChecksum(sum);
@@ -192,7 +210,20 @@ export async function downloadBinance(o: BinanceOpts): Promise<BinanceSummary[]>
       }
       progress(`Binance ${pair} ${market} ${tf} archives`, s.fetched + s.failed, todo.length);
     });
-    if (batch.length) s.bars = upsertSeries(o.out, o.source ?? MARKET_SOURCE[market], asset, tf, batch.flatMap((b) => b.candles));
+    const bars = batch.flatMap((b) => b.candles);
+    batch.length = 0;
+    if (bars.length) {
+      const ends = seriesEnds(file);
+      if (!ends || bars.reduce((m, b) => Math.min(m, b.ts), Infinity) > ends.lastTs) {
+        upsertSeries(o.out, source, asset, tf, bars, false);
+        stored = true;
+        // Stored: a run that stops now continues after this chunk (not while an earlier chunk still waits).
+        if (!deferred.length) saveManifest();
+      } else deferred.push(bars);
+    }
+    }
+    if (deferred.length) { s.bars = upsertSeries(o.out, source, asset, tf, deferred.flat()); deferred.length = 0; }
+    else if (stored) s.bars = countRows(file);
     // A clean check is remembered (a failure is asked again next run, with a full listing).
     if (!s.failed) checked[ck] = { at: now, full: incremental ? last!.full : now, from: o.fromMonth };
     else delete checked[ck];
