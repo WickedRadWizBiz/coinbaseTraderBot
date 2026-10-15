@@ -11,8 +11,10 @@ import type { Candle } from '../bot/ta/indicators';
 import { branchBackward, branchForward, branchLayout, branchLoss, fractalPlan, fractalSpecs, initBranchParams, type BranchDrop } from '../bot/ta/branchNet';
 import { columnMask, localDropMask, type JoinMask } from '../bot/ta/fractal';
 import { aggregateCandles, upsertSeries } from '../research/history/candles';
-import { buildData, buildDataParallel, computeRowsInWorkers, fitNorms, forecast, loadTaNetInputs, oneThreadReason, rawInputs, taNetDims, trainTaNet, writeTaNetPack } from '../research/trainTaNet';
+import { BASE_HYPER, buildData, buildDataParallel, computeRowsInWorkers, fitNorms, forecast, loadTaNetInputs, oneThreadReason, rawInputs, taNetDims, trainTaNet, writeTaNetPack } from '../research/trainTaNet';
 import { TaNetTorch, torchSelfTest } from '../research/taNetTorch';
+import { exportTaNetOos, loadOos } from '../research/taNetOos';
+import { TANET_SCHEMA } from '../bot/ta/taNet';
 import { ensureTorch, envPython } from '../research/torchSetup';
 import { tmpDir } from './helpers';
 
@@ -263,4 +265,27 @@ test('rows on one thread: the log says why (memory, TRAIN_WORKERS, a single coin
   assert.match(oneThreadReason(2, 1, 32, 1), /TRAIN_WORKERS is 1/);
   assert.match(oneThreadReason(1, 8, 32, 1), /only one coin needs them/);
   assert.equal(oneThreadReason(3, 8, 32, 3), '');
+});
+
+test('walk-forward export (ta_net_oos) on the torch engine: every month trains and forecasts in PyTorch; a second run only checks', { skip }, async () => {
+  const { D, dir } = history();
+  const dims = taNetDims('flat');
+  const params = path.join(dir, 'oos-params.json');
+  fs.writeFileSync(params, JSON.stringify({ schema: TANET_SCHEMA, version: 'oos-test', arch: 'flat', dims, norm: fitNorms(D, Array.from({ length: D.ts.length }, (_, i) => i)), weights: [], pbt: { elite: { hyper: { ...BASE_HYPER, lr: 3e-3 } } } }));
+  const logs: string[] = [];
+  // The fixture's samples span about three months: half a month of training, then month by month.
+  const opts = { paramsPath: params, data: D, hours: 1, trainMonths: 0.5, engine: 'torch' as const, python: PY, device: 'cpu' as const, packDir: path.join(dir, 'pack') };
+  fs.rmSync(path.join(dir, '.tanet-oos'), { recursive: true, force: true });
+  const r = await exportTaNetOos(dir, { ...opts, log: (m) => logs.push(m) });
+  assert.ok(r.complete && r.rounds >= 2, JSON.stringify(r));
+  assert.ok(logs.some((m) => /^training engine: PyTorch .* on the CPU$/.test(m)), logs.join('\n'));
+  assert.equal(logs.filter((m) => /^month \d+ -> .*\(\d epochs?, PyTorch\)/.test(m)).length, r.rounds, logs.join('\n'));
+  const fc = loadOos(dir)!;
+  const rows = fc.assets.TST;
+  assert.ok(rows.length > 1500 && rows.every((x) => x.slice(1).every(Number.isFinite)), `forecasts for every walked hour (${rows.length})`);
+  assert.ok(rows.every((x, k) => k === 0 || x[0] > rows[k - 1][0]), 'in time order, no duplicates');
+  const logs2: string[] = [];
+  const r2 = await exportTaNetOos(dir, { ...opts, log: (m) => logs2.push(m) });
+  assert.equal(r2.rounds, r.rounds);
+  assert.ok(logs2.some((m) => /resuming at/.test(m)) && !logs2.some((m) => /^month /.test(m)), logs2.join('\n'));
 });

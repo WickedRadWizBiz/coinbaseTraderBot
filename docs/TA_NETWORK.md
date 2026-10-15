@@ -226,6 +226,8 @@ The tournament's training epochs and forecasts can run in PyTorch (`python/tanet
 - **Speed.** On a 4-core cloud CPU, TypeScript trains at 1.7 ms per sample; PyTorch on the same CPU takes 0.39 ms. On a GPU, each training step (gather, forward, backward, AdamW) is recorded once as a CUDA graph and replayed per batch, which is checked against the plain step first. The batch stays 64, as in TypeScript, so the tuned learning rates still apply. The log reports the speed after every round: `round N: PyTorch trained ... samples in ... s (.../s, CUDA graph)`.
 - **Fallback.** With `auto`, any problem means the run continues in TypeScript, and the log says why. Problems include no Python, no PyTorch, a failed install, a crash mid-run, or non-finite weights. Only the flat network trains in PyTorch; the grouped challenger stays in TypeScript.
 
+The walk-forward export for the setup scorer (`ta_net_oos`, `research/taNetOos.ts`) uses the same engine and the same training pack.
+
 Where it is on:
 - **The laptop trainer** sets PyTorch up by itself (see docs/LAPTOP_TRAINING.md, "GPU").
 - **The remote training job** installs the CPU build.
