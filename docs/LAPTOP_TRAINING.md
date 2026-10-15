@@ -81,15 +81,19 @@ The trainer now sizes itself to the computer (`research/trainerResources.ts`):
   | Balanced | half | a quarter of the threads | 75% | every 25 steps, 5 ms (20 ms) |
   | Full speed | all but two | the same | 90% | every 100 steps, none |
 
-  Memory can lower these. A 16-thread laptop with 16 GB runs 4 workers at any intensity; with 32 GB,
-  Balanced runs 8. The tournaments field one network per worker, and the evolved formulas 2,000 per
-  worker.
+  Memory can lower these. A 16-thread laptop with 16 GB runs 5 workers (Gentle: 4); with 32 GB, Balanced
+  runs 8. The tournaments field one network per worker, and the evolved formulas 2,000 per worker.
 - **Priority.** The trainer, the pipeline, PyTorch and every worker run below normal priority (Gentle: the
   idle class), so whatever you do comes first. The trainer window itself runs at normal priority.
-- **Memory caps that hold.** Each worker thread has its own memory cap; the trainer clears the process-wide
-  limit that used to override it. A job that runs out is run again with twice the room, up to 8 GB, so the
-  cap stops a runaway job without failing a step. The same goes for the pipeline: after a round that ran out
-  of memory, the next rounds give it twice as much, up to 8 GB.
+- **Memory caps that hold.**
+  - The pipeline's own process keeps up to 8 GB where the computer has it: its history step holds years of
+    1-minute bars, about 5.5 GB.
+  - Each worker thread has its own, smaller cap. The trainer clears the process-wide limit that used to give
+    every worker the pipeline's 8 GB.
+  - A job that runs out is run again with twice the room, up to 8 GB, so the cap stops a runaway job without
+    failing a step.
+  - On a small machine, after a round in which the pipeline ran out of memory, the next rounds give it twice
+    as much, up to 8 GB.
 - **The governor.** Every 15 s it checks free memory and, on Windows, whether you used the keyboard or mouse
   in the last 90 s.
   - Low on memory: the worker pools start no new work and let idle workers go.

@@ -12,15 +12,16 @@ test('resource plan: threads and memory sized to the machine and the intensity, 
   const b = resourcePlan('balanced', 16, 32768);
   assert.deepEqual([b.workers, b.activeWorkers, b.mainHeapMb, b.workerHeapMb, b.minFreeMb, b.torchThreads, b.priority], [8, 4, 8192, 2048, 3932, 8, 'below_normal']);
   assert.deepEqual([b.snnPopulation, b.gpPopulation], [8, 15000]);
-  // 16 GB: memory decides (4 workers whatever the intensity); gentle drops to one while you use the computer.
+  // 16 GB: memory decides (5 workers; gentle 4, and one while you use the computer). The pipeline keeps up to 8 GB:
+  // its history step needs about 5.5 GB.
   const m = resourcePlan('balanced', 16, 16384);
-  assert.deepEqual([m.workers, m.mainHeapMb, m.workerHeapMb, m.minFreeMb], [4, 5530, 2048, 1966]);
+  assert.deepEqual([m.workers, m.mainHeapMb, m.workerHeapMb, m.minFreeMb], [5, 8192, 2048, 1966]);
   const g = resourcePlan('gentle', 16, 16384);
   assert.deepEqual([g.workers, g.activeWorkers, g.priority, g.gpuMemFraction], [4, 1, 'low', 0.6]);
-  assert.equal(resourcePlan('full', 16, 16384).workers, 4);
+  assert.equal(resourcePlan('full', 16, 16384).workers, 5);
   assert.equal(resourcePlan('full', 16, 65536).workers, 14, 'full: all threads but two when memory allows');
   // 8 GB and 4 GB laptops: one worker, never none.
-  assert.equal(resourcePlan('balanced', 8, 8192).workers, 1);
+  assert.deepEqual([resourcePlan('balanced', 8, 8192).workers, resourcePlan('balanced', 8, 8192).mainHeapMb], [2, 3584]);
   assert.equal(resourcePlan('full', 4, 4096).workers, 1);
   for (const cores of [2, 4, 8, 12, 16, 24, 32]) {
     for (const mb of [8192, 16384, 32768, 65536]) {
@@ -28,7 +29,8 @@ test('resource plan: threads and memory sized to the machine and the intensity, 
       for (const p of ps) {
         assert.ok(p.workers >= 1 && p.workers <= Math.max(1, cores - 1), `${p.intensity} ${cores}/${mb}: ${p.workers} workers`);
         assert.ok(p.activeWorkers >= 1 && p.activeWorkers <= p.workers);
-        assert.ok(p.mainHeapMb + 1536 * p.workers <= mb - Math.max(3072, 0.25 * mb), `${p.intensity} ${cores}/${mb}: expected use within the budget`);
+        const budget = mb - Math.max(3072, 0.25 * mb);
+        assert.ok(Math.min(p.mainHeapMb, 0.35 * budget) + 1536 * p.workers <= budget, `${p.intensity} ${cores}/${mb}: expected use within the budget`);
         assert.ok(p.mainHeapMb <= 8192 && p.workerHeapMb <= 4096 && p.torchThreads >= 1 && p.torchThreads <= Math.max(1, cores / 2));
         assert.ok(p.minFreeMb >= 1536);
       }
@@ -41,16 +43,16 @@ test('resource plan: threads and memory sized to the machine and the intensity, 
 test('resource plan: the settings the pipeline, its workers and PyTorch read; the laptop profile carries them', () => {
   const p = resourcePlan('balanced', 16, 16384);
   const e = planEnv(p, '/x/throttle.json');
-  assert.equal(e.NODE_OPTIONS, '--max-old-space-size=5530');
-  assert.deepEqual([e.TRAIN_WORKERS, e.TRAIN_WORKER_HEAP_MB, e.TRAIN_MIN_FREE_MB, e.TRAIN_THROTTLE_FILE], ['4', '2048', '1966', '/x/throttle.json']);
+  assert.equal(e.NODE_OPTIONS, '--max-old-space-size=8192');
+  assert.deepEqual([e.TRAIN_WORKERS, e.TRAIN_WORKER_HEAP_MB, e.TRAIN_MIN_FREE_MB, e.TRAIN_THROTTLE_FILE], ['5', '2048', '1966', '/x/throttle.json']);
   // PyTorch's threads follow the CPU (half of them), not the memory that limits the worker threads.
   assert.deepEqual([e.TA_NET_TORCH_THREADS, e.OMP_NUM_THREADS, e.MKL_NUM_THREADS, e.OPENBLAS_NUM_THREADS], ['8', '8', '8', '8']);
   assert.deepEqual([e.TA_NET_GPU_MEM_FRACTION, e.TA_NET_GPU_SYNC_EVERY, e.TA_NET_GPU_YIELD_MS], ['0.75', '25', '5']);
   assert.equal(planEnv(p).TRAIN_THROTTLE_FILE, undefined);
-  const prof = laptopProfile(12, 16, false, p);
-  assert.equal(prof.NODE_OPTIONS, '--max-old-space-size=5530', 'no fixed 8 GB per process any more');
-  assert.equal(prof.TRAIN_WORKERS, '4');
-  assert.equal(laptopProfile(0, 16, true, p).TRAIN_WORKERS, '4', 'continuous runs use the same plan');
+  const prof = laptopProfile(12, 16, false, resourcePlan('balanced', 8, 8192));
+  assert.equal(prof.NODE_OPTIONS, '--max-old-space-size=3584', 'the pipeline\'s cap follows the machine');
+  assert.equal(prof.TRAIN_WORKERS, '2');
+  assert.equal(laptopProfile(0, 16, true, p).TRAIN_WORKERS, '5', 'continuous runs use the same plan');
 });
 
 test('throttle: fewer threads while you use the computer or memory is short; the GPU pauses more', () => {

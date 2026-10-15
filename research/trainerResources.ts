@@ -49,10 +49,13 @@ export function resourcePlan(intensity: Intensity = 'balanced', cores = os.cpus(
   const reserveMb = Math.max(3072, Math.round(0.25 * totalMb));
   const budgetMb = Math.max(1024, totalMb - reserveMb);
   const byCpu = intensity === 'gentle' ? Math.floor(cores / 4) : intensity === 'balanced' ? Math.floor(cores / 2) : cores - 2;
-  const mainHeapMb = Math.round(clamp(0.45 * budgetMb, 1536, 8192));
-  // About 1.5 GB a worker in practice; the heap cap above that only stops one that runs away.
-  const workers = Math.max(1, Math.min(Math.max(1, byCpu), Math.floor((budgetMb - mainHeapMb) / 1536)));
-  const workerHeapMb = Math.round(clamp((budgetMb - mainHeapMb) / workers, 2048, 4096));
+  // The pipeline's own process: its history step holds years of 1-minute bars (about 5.5 GB measured), so up to 8 GB
+  // when the machine has it. The workers are sized on what it typically holds while they run (a third of the budget at
+  // most), about 1.5 GB each; a worker's cap above that only stops one that runs away.
+  const mainHeapMb = Math.round(clamp(budgetMb - 1536, 2048, 8192));
+  const mainTypMb = Math.min(mainHeapMb, 0.35 * budgetMb);
+  const workers = Math.max(1, Math.min(Math.max(1, byCpu), Math.floor((budgetMb - mainTypMb) / 1536)));
+  const workerHeapMb = Math.round(clamp((budgetMb - mainTypMb) / workers, 2048, 4096));
   const activeWorkers = intensity === 'full' ? workers : Math.max(1, Math.min(workers, intensity === 'gentle' ? 1 : Math.floor(cores / 4)));
   // GPU: share of its memory (the rest stays with the display; too tight and training falls back to TypeScript
   // part-way), a sync every N steps and the pauses (ms) after it, idle and while you use the computer.
