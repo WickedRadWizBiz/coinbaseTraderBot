@@ -102,6 +102,7 @@ Once a week (`SWEEP_EVERY_DAYS`), the pipeline runs the sweep optimizer (`resear
 - **Targets:**
   - `setups-long` and `setups-short`: the momentum-burst entry thresholds and exits for each side, scored on years of candle history.
   - `setups-vol`: how strongly the TA network's 4-hour volatility forecast widens or tightens fast-lane trails (`VOL_ADAPT.trailK`; 0 = off). It needs the walk-forward forecasts from `ta_net_oos`.
+  - `setups-ratchet`: the 4h ATR ratchet exit on the slow lane's daily setups, every coin with history (on / off, the initial stop, the break-even and trail distances in 4h ATRs; docs/SETUPS.md), scored by the t-statistic of net R per trade.
   - `kalshi`: the contract strategy's edge thresholds, buffers, exit margin, Kelly fraction and per-trade EV target, scored in the production backtester over the bot's own recordings. It needs at least 20 recorded days.
   - `bot`: the **whole bot** over the recordings (`research/wholeBot.ts`). Kalshi contracts go through the production backtester and the perps setup lanes run on their walk-forward scores, trading from one pot of capital under one combined daily loss stop. It tunes the shared settings: the capital split between Kalshi and perps, risk per fast and slow lane trade, lane sizes, the minimum target, the daily stop, and Kalshi's minimum edge and Kelly fraction. It scores them by the t-statistic of the combined profit per day, and needs at least 20 recorded days. To see the whole bot's day-by-day result with the current settings, run `npm run research:whole-bot`.
 - **How it searches:** it tries every value of one setting while the others stay fixed, keeps the best, then moves to the next setting, and repeats until a full pass changes nothing.
@@ -248,7 +249,7 @@ These can't be automated, or deliberately aren't.
 | `TA_NET_RETRAIN_DAYS` | `7` | Continue the TA network's tournament at most this often. |
 | `TA_NET_OOS_HOURS` | `3` | Time budget per run for the TA network's walk-forward export (it resumes on the next run). |
 | `SETUP_TA_NET_PATH` | `params/ta_net_wf.json` | The walking TA network the setup trader reads when `data/models/ta_net_wf.json` doesn't exist yet. |
-| `SWEEP_TARGETS` | `setups-long,setups-short,setups-vol,kalshi,bot` | Sweep targets run weekly. |
+| `SWEEP_TARGETS` | `setups-long,setups-short,setups-vol,setups-ratchet,kalshi,bot` | Sweep targets run weekly. |
 | `RECORDINGS_GZIP_AFTER_DAYS` | `2` | Gzip recorded days older than this (0 = never). |
 | `RECORDINGS_MIN_FREE_GB` | `5` | Below this much free space: alert, and delete the oldest recorded days until twice this is free. |
 | `RECORDINGS_PRUNE` | `true` | `false` = alert only, never delete recordings. |

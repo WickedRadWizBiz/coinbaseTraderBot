@@ -97,7 +97,9 @@ export function stepTrade(t: OpenTrade, bar: Candle, barMs: number, costs: CostM
   const stopHit = d > 0 ? bar.l <= t.stop : bar.h >= t.stop;
   if (stopHit) {
     const px = d > 0 ? Math.min(t.stop, bar.o) : Math.max(t.stop, bar.o);
-    const reason: ExitReason = t.stop === t.initialStop ? 'stop' : t.partialDone && Math.abs(t.stop - t.entry) < 1e-12 ? 'breakeven' : 'trail';
+    const R = t.plan.ratchet;
+    const atBe = R ? Math.abs(t.stop - t.entry * (1 + d * R.fee)) < 1e-9 * t.entry : t.partialDone && Math.abs(t.stop - t.entry) < 1e-12;
+    const reason: ExitReason = t.stop === t.initialStop ? 'stop' : atBe ? 'breakeven' : 'trail';
     close(t, px, bar.ts + barMs, reason, costs.takerExit);
     return true;
   }
@@ -114,14 +116,22 @@ export function stepTrade(t: OpenTrade, bar: Candle, barMs: number, costs: CostM
     close(t, d > 0 ? Math.max(p.target2, bar.o) : Math.min(p.target2, bar.o), bar.ts + barMs, 'target', costs.makerExit);
     return true;
   }
-  // Break-even: once price has gone breakevenR in our favour, the stop moves to the entry (from the next bar).
-  if (p.breakevenR !== undefined && d * (fav - t.entry) >= p.breakevenR * Math.abs(t.entry - t.initialStop) && d * (t.entry - t.stop) > 0) t.stop = t.entry;
+  if (p.ratchet) {
+    // The 4h ATR ratchet (from the next bar): break-even plus fees after beAtr ATRs, then a trail of trailAtr ATRs
+    // behind the best price after trailStartAtr ATRs; it only ever tightens.
+    const R = p.ratchet, gain = t.maxFav !== undefined ? d * (t.maxFav - t.entry) : 0;
+    if (gain >= R.beAtr * R.atr) { const be = t.entry * (1 + d * R.fee); if (d * (be - t.stop) > 0) t.stop = be; }
+    if (gain >= R.trailStartAtr * R.atr) { const tr = t.maxFav! - d * R.trailAtr * R.atr; if (d * (tr - t.stop) > 0) t.stop = tr; }
+  } else if (p.breakevenR !== undefined && d * (fav - t.entry) >= p.breakevenR * Math.abs(t.entry - t.initialStop) && d * (t.entry - t.stop) > 0) {
+    // Break-even: once price has gone breakevenR in our favour, the stop moves to the entry (from the next bar).
+    t.stop = t.entry;
+  }
   // Hard age limit: the time stop also fires on elapsed time (missing candles cannot keep a trade open).
   if (bar.ts + barMs - t.entryTs > (p.maxBars + 2) * (TF_MS[t.tf] ?? 0)) { close(t, bar.c, bar.ts + barMs, 'time', costs.takerExit); return true; }
   if (tfClose) {
     t.bars++;
     if (d * (tfClose.close - t.best) > 0) t.best = tfClose.close;
-    if ((t.lane === 'slow' || t.partialDone || p.trailFromStart) && tfClose.atr > 0) {
+    if (!p.ratchet && (t.lane === 'slow' || t.partialDone || p.trailFromStart) && tfClose.atr > 0) {
       const locked = p.tightenAfterR !== undefined && p.tightTrailAtr !== undefined && t.maxFav !== undefined && d * (t.maxFav - t.entry) >= p.tightenAfterR * Math.abs(t.entry - t.initialStop);
       const trail = t.best - d * (locked ? p.tightTrailAtr! : p.trailAtr) * tfClose.atr;
       if (d * (trail - t.stop) > 0) t.stop = trail;

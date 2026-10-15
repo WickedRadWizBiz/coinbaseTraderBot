@@ -6,7 +6,7 @@
 import type { OptimalFReport } from '../strategy/optimalF';
 import fs from 'fs';
 import { gbdtLogit, validateGbdt, type GbdtModel } from '../model/trees';
-import type { Lane } from './detectors';
+import type { Lane, RatchetSettings } from './detectors';
 import type { CostModel } from './exits';
 import type { LaneBookParams } from './lanes';
 import { applyMask, maskedIndices, SETUP_FEATURES } from './features';
@@ -75,6 +75,8 @@ export interface SetupModelParams {
   taEngine?: string;
   /** VOL_ADAPT.trailK the events were simulated with (the trail scaling by the TA network's vol forecast). */
   volTrailK?: number;
+  /** The 4h ATR ratchet the events were simulated with (bot/setups/detectors.ts RATCHET; unset = off). */
+  ratchet?: RatchetSettings;
   lanes: Partial<Record<Lane, LaneScorer>>;
   book: LaneBookParams;
   costs: CostModel;

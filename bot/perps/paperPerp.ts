@@ -15,7 +15,7 @@
 
 import { readJson, writeJsonAtomic } from '../util/persist';
 import { nextFundingTime, type PerpHub } from './perpData';
-import { assertReduceOnlyRule, type PerpBalance, type PerpGateway, type PerpOrder, type PerpOrderRequest, type PerpPosition } from './perpRest';
+import { assertReduceOnlyRule, type PerpBalance, type PerpGateway, type PerpOrder, type PerpOrderRequest, type PerpPosition, type PerpRiskPosition } from './perpRest';
 
 /** Most recent funding time at or before `now`. */
 export function lastFundingTime(now: number): number {
@@ -160,6 +160,25 @@ export class PaperPerpExchange implements PerpGateway {
     let eq = this.st.startBalance ?? 0;
     for (const [t, p] of Object.entries(this.st.positions)) eq += p.realized - p.fees + p.funding + this.unrealized(t, p);
     return { equity: eq };
+  }
+
+  /** Liquidation estimates like the exchange's (cross margin): a position is liquidated when the account's equity,
+   *  after its move, falls to the maintenance margin of all open positions (rate: half the initial margin implied
+   *  by the market's leverage estimate, else 5%). */
+  async getRisk(): Promise<PerpRiskPosition[]> {
+    const { equity } = await this.getBalance();
+    const open = Object.entries(this.st.positions).filter(([, p]) => p.position !== 0).map(([ticker, p]) => {
+      const asset = this.tickerAsset(ticker);
+      const mark = asset ? this.book(asset).mark : undefined;
+      const lev = asset ? this.hub.get(asset)?.latest?.leverage : undefined;
+      return { ticker, p, mark, mmr: lev && lev > 0 ? 0.5 / lev : 0.05 };
+    });
+    const mm = open.reduce((s, o) => s + (o.mark !== undefined ? Math.abs(o.p.position) * o.mark * o.mmr : 0), 0);
+    return open.filter((o) => o.mark !== undefined && o.mark > 0).map((o) => {
+      const notional = Math.abs(o.p.position) * o.mark!;
+      const liq = o.mark! - (equity - mm) / o.p.position;
+      return { ticker: o.ticker, position: o.p.position, mark: o.mark, notional, leverage: equity > 0 ? notional / equity : undefined, liquidationPrice: liq > 0 ? liq : undefined };
+    });
   }
 
   async setStopLoss(ticker: string, stopPrice: number): Promise<void> { this.st.stops![ticker] = stopPrice; this.save(); }

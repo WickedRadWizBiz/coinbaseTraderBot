@@ -46,6 +46,28 @@ Costs come from the perps fees:
 
 The same code runs in the backtest (on 15-minute bars) and live (on the spot price, tick by tick).
 
+### The 4h ATR ratchet (`SETUP_RATCHET`, on for the slow lane)
+
+For the lanes it covers, the ratchet replaces the break-even and trailing rules above:
+
+1. **Initial stop:** 3.5 ATR(4h) from the entry. The 4h bars are built from the closed hourly bars (the last 280 hours, so the research simulation and the live bot compute the same number).
+2. **Break-even:** once the trade has gone 2 ATRs in its favour, the stop moves to the entry plus the round-trip fees, so a trade that has run that far can no longer lose money.
+3. **Trail:** from 3.5 ATRs in favour, the stop trails the best price by 3 ATRs.
+
+The stop only ever tightens, and the stop on the exchange moves with it (it only ever tightens too). The lanes size by stop distance, so a wider stop means a smaller position, with the same dollars at risk. That makes the sizing volatility-scaled: when 4h volatility doubles, the position halves.
+
+The settings the model was trained with are recorded in the setup model (`ratchet`), and the live trader manages trades with exactly those, so a change to `SETUP_RATCHET` takes effect at the next retraining. The `setups-ratchet` sweep tunes it.
+
+### Liquidation beyond the stop (`bot/risk/liquidation.ts`)
+
+Under cross margin, a position is liquidated when the account's equity, after the move, falls to its maintenance margin. If the liquidation price sat inside the stop, the exchange would close the trade at a worse price before the stop could fire. So:
+
+- **At entry**, the notional is capped at `(1 − PERP_LIQ_BUFFER) × (equity − reserved) / (stop distance + maintenance rate)`. Reserved is what the open trades tie up: their loss if they ran to their stops (zero once a stop locks a profit), plus their maintenance margin. With the default buffer of 0.2, the liquidation sits at least 25% farther away than the stop. A trade with nothing left to size is skipped (`setup_skip` in the audit log).
+- **While a trade is open**, the bot reads the exchange's liquidation estimate once a minute. If it has drifted inside the required distance (other positions moved, funding, a thin account), the trade is cut until it is not: an urgent reduction, logged as `liquidation_guard`. Nothing more is cut until the exchange shows the reduction.
+- The maintenance rate is `PERP_MAINT_MARGIN`, or, when that is 0, half the initial margin implied by the exchange's leverage estimate (5% without one). The paper exchange estimates liquidation the same way.
+
+The perps signal trader (`PERP_STRATEGY=signal`) uses the same cap, with its other open positions reserved at its stop distance.
+
 ## What the model sees (`bot/setups/features.ts`, 785 inputs)
 
 - **The full TA library on 15m, 1h, 4h and daily:** RSI, MACD, ADX, Bollinger, Keltner squeeze, EMAs and SMAs, Ichimoku, Stochastic, Williams %R, OBV, CMF, MFI, volume profile, market structure, sweeps, breakouts, divergences, candle patterns, fair-value gaps, round numbers. It also sees the knowledge base's confluences and rule tallies.
@@ -86,7 +108,7 @@ Since the spot ETFs started (Jan 2024):
   - price not beyond the stop or the first target;
   - not chased: no more than 0.3R (fast) or 0.5R (slow) toward the target since the signal.
 - **One position per coin.** The slow lane is served first; a fast candidate on a coin the slow lane holds waits in the queue.
-- **Sizing:** each trade risks a set share of equity between entry and stop (`SETUP_FAST_RISK` 0.4%, `SETUP_SLOW_RISK` 0.6%), or a fixed dollar amount (`SETUP_FAST_RISK_USD`, `SETUP_SLOW_RISK_USD`), scaled 0.5×–1.5× by the score. Caps: per coin (`SETUP_MAX_ASSET_LEVERAGE`), in total (`SETUP_MAX_LEVERAGE`), and half the exchange's leverage for the market (liquidation stays well beyond the stop).
+- **Sizing:** each trade risks a set share of equity between entry and stop (`SETUP_FAST_RISK` 0.4%, `SETUP_SLOW_RISK` 0.6%), or a fixed dollar amount (`SETUP_FAST_RISK_USD`, `SETUP_SLOW_RISK_USD`), scaled 0.5×–1.5× by the score. Caps: per coin (`SETUP_MAX_ASSET_LEVERAGE`), in total (`SETUP_MAX_LEVERAGE`), half the exchange's leverage for the market, and the liquidation cap (the liquidation sits beyond the stop with a buffer, after the other open trades; see Trade management).
 - **Worth taking:** with `SETUP_MIN_TARGET_USD`, a trade whose first target would pay less than that after the round-trip fee is skipped.
 
 ## Training and validation (`npm run research:setups`)
@@ -174,6 +196,10 @@ Two changes. The fast lane gained the **momentum burst**: join a volatile move a
 | `SETUP_MIN_TARGET_USD` | 0 | Skip trades whose first target pays less than this after the round-trip fee (e.g. 2) |
 | `PERP_DAILY_LOSS_FRAC` | 0.10 | Perp daily loss stop: flatten and halt for the UTC day |
 | `PERP_PILOT_MAX_NOTIONAL_USD` | 25 | Size cap while a lane is unvalidated |
+| `SETUP_RATCHET` | `slow` | The 4h ATR ratchet exit: `off`, `slow`, `fast` or `both` (takes effect at the next retraining) |
+| `SETUP_RATCHET_STOP_ATR` / `_BE_ATR` / `_TRAIL_START_ATR` / `_TRAIL_ATR` | 3.5 / 2 / 3.5 / 3 | Initial stop, break-even plus fees, trail start and trail distance, all in 4h ATRs |
+| `PERP_LIQ_BUFFER` | 0.2 | The stop may use at most 1 − buffer of the room to liquidation |
+| `PERP_MAINT_MARGIN` | 0 | Maintenance margin rate; 0 = half the initial margin implied by the exchange's leverage estimate (else 5%) |
 
 The dashboard's perps panel (`trading`) shows both lanes: open trades with their stops and targets, the queues with scores, recent skips with reasons, recent trades, and today's P&L against the goal.
 

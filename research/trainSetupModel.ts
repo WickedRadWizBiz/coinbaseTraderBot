@@ -28,7 +28,7 @@ import { trainGbdt } from './gbdt';
 import { gbdtLogit, type GbdtModel } from '../bot/model/trees';
 import type { Candle } from '../bot/ta/indicators';
 import type { Timeframe } from '../bot/ta/knowledge';
-import { adaptToVol, detectAt, FAST_TFS, SLOW_TFS, setupSeries, TF_MS, VOL_ADAPT, type Lane, type SetupSeries, type SetupSignal } from '../bot/setups/detectors';
+import { adaptToVol, applyRatchet, atr4hAt, detectAt, FAST_TFS, RATCHET, SLOW_TFS, setupSeries, TF_MS, VOL_ADAPT, type Lane, type SetupSeries, type SetupSignal } from '../bot/setups/detectors';
 import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from '../bot/setups/exits';
 import { applyMask, characterFeatures, maskedIndices, SETUP_BASE_FEATURES, SETUP_FEATURES, SETUP_GROUPS, setupFeatureMap, setupVector, tanetFeatures, type SetupBars } from '../bot/setups/features';
 import { characterOf } from '../bot/ta/character';
@@ -129,7 +129,7 @@ export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: Cos
   for (const g0 of sigs) {
     const at = g0.ts + TF_MS[g0.tf]!;
     const reading = oos?.at(A.asset, at);
-    const g = adaptToVol(g0, reading?.vol);
+    const g = applyRatchet(adaptToVol(g0, reading?.vol), atr4hAt(A.h1, at), costs.entry + costs.takerExit);
     const tr = simulateSetup(A, g, costs);
     if (!tr?.closed) continue;
     const k = key(g0);
@@ -444,7 +444,7 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
   const lanes: SetupModelParams['lanes'] = {};
   for (const lane of ['fast', 'slow'] as const) lanes[lane] = fitLane(events.filter((e) => e.sig.lane === lane), 11, maskedIndices(groups));
   return {
-    version: `setups1-${iso(Date.now())}`, schema: SETUP_SCHEMA, features: SETUP_FEATURES, groups, groupChoice, volTrailK: VOL_ADAPT.trailK, taEngine: taEngine(), lanes, book, costs, equityUsd: equity, validation, sizing, trainedAt: new Date().toISOString(),
+    version: `setups1-${iso(Date.now())}`, schema: SETUP_SCHEMA, features: SETUP_FEATURES, groups, groupChoice, volTrailK: VOL_ADAPT.trailK, ...(RATCHET.lanes !== 'off' ? { ratchet: { ...RATCHET } } : {}), taEngine: taEngine(), lanes, book, costs, equityUsd: equity, validation, sizing, trainedAt: new Date().toISOString(),
     data: { assets: [...assets.keys()], from: iso(events[0].at), to: iso(end), holdoutFrom: iso(holdoutFrom), finalFrom: iso(finalFrom), events: events.length },
   };
 }
@@ -455,6 +455,13 @@ export async function trainSetupMain(argOf: (k: string, d: string) => string = c
   const hist = argOf('history', 'data/history');
   const out = argOf('out', 'params/setup_model.json');
   const assets = argOf('assets', '');
+  // The 4h ATR ratchet the events are simulated with (and recorded in the model for the live trader).
+  const lanes = argOf('ratchet', process.env.SETUP_RATCHET ?? 'slow');
+  const num = (k: string, d: number) => { const v = Number(argOf(k, String(d))); return Number.isFinite(v) && v > 0 ? v : d; };
+  Object.assign(RATCHET, {
+    lanes: (['off', 'slow', 'fast', 'both'] as const).find((x) => x === lanes) ?? 'slow',
+    stopAtr: num('ratchet-stop-atr', 3.5), beAtr: num('ratchet-be-atr', 2), trailStartAtr: num('ratchet-trail-start-atr', 3.5), trailAtr: num('ratchet-trail-atr', 3),
+  });
   const p = await trainSetupModel(hist, { oosOut: argOf('oos-out', '') || undefined, assets: assets ? assets.split(',') : undefined, equityUsd: Number(argOf('equity', '10000')), holdoutMonths: Number(argOf('holdout-months', '9')), finalMonths: Number(argOf('final-months', '3')) });
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(p));
