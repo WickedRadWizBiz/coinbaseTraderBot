@@ -680,6 +680,8 @@ export interface TaNetContextSource {
 }
 let contextSource: TaNetContextSource | undefined;
 export function setTaNetContextSource(s: TaNetContextSource | undefined): void { contextSource = s; }
+/** Every tracked coin's candles (the context source's), for models that read the whole market. */
+export function marketCandleSets(): Map<string, CandleSet> | undefined { return contextSource?.sets(); }
 
 /** Per-asset forecasts from a CandleSet, memoised per closed hourly bar, graded as later bars close,
  *  and (live only) forward-tested with the position rule. */

@@ -35,6 +35,7 @@ import type { PerpGateway } from '../perps/perpRest';
 import { adaptToVol, applyRatchet, applyScaleOut, atr4hAt, detectLast, FAST_TFS, SLOW_TFS, SETUP_MIN_BARS, TF_MS, type Lane, type SetupSignal } from './detectors';
 import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from './exits';
 import type { LibrarianReading } from '../ta/librarian';
+import type { XgReading } from '../ta/crossGraph';
 import { setupFeatureMap, setupVector, type SetupBars, type TaNetReading } from './features';
 import type { SnnContext } from '../model/featureEngine';
 import { playbook } from '../strategy/playbook';
@@ -73,6 +74,8 @@ export interface SetupTraderDeps {
   taNet?: (asset: string, now: number) => TaNetReading | undefined;
   /** The Librarian's reading for an asset at its last closed hour (ungated: the model's "librarian" group decides). */
   librarian?: (asset: string, now: number) => Pick<LibrarianReading, 'w' | 'net' | 'vsBook' | 'transition'> | undefined;
+  /** The cross-asset graph network's forecast for an asset at its last closed hour (ungated: the "xgraph" group decides). */
+  crossGraph?: (asset: string, now: number) => Pick<XgReading, 'rel4' | 'rel24' | 'rank'> | undefined;
   /** Perps SNN's calls for an asset. */
   snn?: (asset: string) => SnnContext | undefined;
   /** Journal of every setup with these readings and its outcome (bot/setups/journal.ts). */
@@ -225,12 +228,16 @@ export class SetupTrader {
     try { return this.model?.uses('librarian') ? this.d.librarian?.(asset, now) : undefined; } catch { return undefined; }
   }
 
+  private xgReading(asset: string, now: number): Pick<XgReading, 'rel4' | 'rel24' | 'rank'> | undefined {
+    try { return this.model?.uses('xgraph') ? this.d.crossGraph?.(asset, now) : undefined; } catch { return undefined; }
+  }
+
   /** Model score of a setup as of `t` (fresh features), NaN without a model. */
   private score(sig: SetupSignal, t: number): number {
     if (!this.model) return NaN;
     const bars = this.bars(sig.asset);
     if (!bars) return NaN;
-    return this.model.score(sig.lane, setupVector(setupFeatureMap(sig, bars, this.bars('BTC'), t, this.reading(sig.asset, t), marketContext()?.character(sig.asset), macro()?.inputs(), this.libReading(sig.asset, t))));
+    return this.model.score(sig.lane, setupVector(setupFeatureMap(sig, bars, this.bars('BTC'), t, this.reading(sig.asset, t), marketContext()?.character(sig.asset), macro()?.inputs(), this.libReading(sig.asset, t), this.xgReading(sig.asset, t))));
   }
 
   /** The SNN gate (hot reload on change; off when missing). */

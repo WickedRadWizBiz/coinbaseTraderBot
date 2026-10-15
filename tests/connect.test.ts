@@ -14,22 +14,23 @@ import { OosIndex } from '../research/taNetOos';
 import { studySnnGate, SNN_GATE_MIN_TRADES } from '../research/setupSnnStudy';
 import { readRecordings } from '../research/replay';
 import { LIB_SETUP_KEYS } from '../bot/ta/librarian';
+import { XG_SETUP_KEYS } from '../bot/ta/crossGraph';
 
 const H = 3_600_000;
 const sig = (o: Partial<SetupSignal> = {}): SetupSignal => ({ asset: 'BTC', lane: 'fast', kind: 'burst', tf: '1h', dir: 1, ts: 0, ref: 100, stop: 98, atr: 1, plan: { trailAtr: 3, maxBars: 16, trailFromStart: true }, info: { rsi: 60, pctB: 0.8, flow: 0.6, bandwidth: 0.05, volRatio: 2 }, ...o });
 
-test('setup features: TA network, character, fractal and Librarian inputs sit after the candle inputs and are blanked unless their group is on', () => {
-  assert.deepEqual(SETUP_FEATURES.slice(SETUP_BASE_FEATURES.length), [...TANET_SETUP_KEYS, ...CHAR_SETUP_KEYS, ...FRACTAL_SETUP_KEYS, ...LIB_SETUP_KEYS, 'kind_spotpb']);
+test('setup features: TA network, character, fractal, Librarian and cross-graph inputs sit after the candle inputs and are blanked unless their group is on', () => {
+  assert.deepEqual(SETUP_FEATURES.slice(SETUP_BASE_FEATURES.length), [...TANET_SETUP_KEYS, ...CHAR_SETUP_KEYS, ...FRACTAL_SETUP_KEYS, ...LIB_SETUP_KEYS, ...XG_SETUP_KEYS, 'kind_spotpb']);
   const m: Record<string, number> = {};
   tanetFeatures(m, -1, { up1: 0.6, up4: 0.3, vol: 0.2 });
   assert.ok(Math.abs(m.tn_up1 - 0.1) < 1e-12 && Math.abs(m.o_tn_up1 + 0.1) < 1e-12, 'oriented by the side');
   assert.ok(Math.abs(m.o_tn_up4 - 0.2) < 1e-12);
   tanetFeatures(m, 1, undefined);
   assert.ok(Number.isNaN(m.tn_vol) && Number.isNaN(m.o_tn_up1));
-  const off = maskedIndices([]), on = maskedIndices(['tanet', 'character', 'fractal', 'librarian']);
-  assert.equal(off.length, TANET_SETUP_KEYS.length + CHAR_SETUP_KEYS.length + FRACTAL_SETUP_KEYS.length + LIB_SETUP_KEYS.length);
+  const off = maskedIndices([]), on = maskedIndices(['tanet', 'character', 'fractal', 'librarian', 'xgraph']);
+  assert.equal(off.length, TANET_SETUP_KEYS.length + CHAR_SETUP_KEYS.length + FRACTAL_SETUP_KEYS.length + LIB_SETUP_KEYS.length + XG_SETUP_KEYS.length);
   assert.equal(on.length, 0);
-  assert.equal(maskedIndices(['tanet', 'fractal', 'librarian']).length, CHAR_SETUP_KEYS.length, 'tanet, fractal and librarian on: only the character group blanked');
+  assert.equal(maskedIndices(['tanet', 'fractal', 'librarian', 'xgraph']).length, CHAR_SETUP_KEYS.length, 'every group but character on: only the character group blanked');
   characterFeatures(m, { cls: 'trending', x: { rvPct: 0.4, corr: 0.5, hurst: 0.6, er: 0.35, adx: 28, bbRank: 0.5 } });
   assert.equal(m.ch_trending, 1); assert.equal(m.ch_calm, 0); assert.equal(m.ch_er, 0.35);
   characterFeatures(m, undefined);

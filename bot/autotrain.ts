@@ -40,7 +40,7 @@ import { SystemPressure } from './util/systemPressure';
 
 const log = logger('autotrain');
 
-export const MODEL_FILES = { mlp: 'model.json', perp: 'perp_model.json', snn_crypto: 'snn_crypto.json', snn_perps: 'snn_perps.json', snn_tennis: 'snn_tennis.json', vol: 'vol_profile.json', vol_model: 'vol_model.json', tennis: 'tennis_model.json', fill: 'fill_model.json', ta_net: 'ta_net.json', ta_net_wf: 'ta_net_wf.json', setups: 'setup_model.json', librarian: 'librarian.json' } as const;
+export const MODEL_FILES = { mlp: 'model.json', perp: 'perp_model.json', snn_crypto: 'snn_crypto.json', snn_perps: 'snn_perps.json', snn_tennis: 'snn_tennis.json', vol: 'vol_profile.json', vol_model: 'vol_model.json', tennis: 'tennis_model.json', fill: 'fill_model.json', ta_net: 'ta_net.json', ta_net_wf: 'ta_net_wf.json', setups: 'setup_model.json', librarian: 'librarian.json', cross_graph: 'cross_graph.json' } as const;
 type Kind = keyof typeof MODEL_FILES;
 
 /** The file the bot should load for each model: the pipeline's promoted copy in AUTO_TRAIN_DIR
@@ -57,7 +57,7 @@ export function resolveModelPaths(cfg: Readonly<Config>): Record<Kind, string> {
     mlp: pick('mlp', cfg.paramsPath), perp: pick('perp', cfg.perps.modelPath),
     snn_crypto: pick('snn_crypto', cfg.snn.domains.crypto.modelPath), snn_perps: pick('snn_perps', cfg.snn.domains.perps.modelPath), snn_tennis: pick('snn_tennis', cfg.snn.domains.tennis.modelPath),
     vol: pick('vol', cfg.strategy.volProfilePath), vol_model: pick('vol_model', cfg.strategy.volModelPath), tennis: pick('tennis', cfg.tennis.modelPath), fill: pick('fill', cfg.strategy.fillModelPath), ta_net: pick('ta_net', cfg.taNet.modelPath),
-    setups: pick('setups', cfg.perps.setupModelPath), ta_net_wf: pick('ta_net_wf', cfg.perps.setupTaNetPath), librarian: pick('librarian', cfg.taNet.librarianPath),
+    setups: pick('setups', cfg.perps.setupModelPath), ta_net_wf: pick('ta_net_wf', cfg.perps.setupTaNetPath), librarian: pick('librarian', cfg.taNet.librarianPath), cross_graph: pick('cross_graph', cfg.taNet.crossGraphPath),
   };
 }
 

@@ -33,6 +33,8 @@ import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type 
 import { LibIndex, loadLibForecasts } from './librarian';
 import { spotLeads } from './leadLag';
 import { libSetupFeatures } from '../bot/ta/librarian';
+import { xgSetupFeatures } from '../bot/ta/crossGraph';
+import { loadXgForecasts, XgIndex } from './trainCrossGraph';
 import { applyMask, characterFeatures, fractalFeatures, maskedIndices, SETUP_BASE_FEATURES, SETUP_FEATURES, SETUP_GROUPS, setupFeatureMap, setupVector, tanetFeatures, type SetupBars } from '../bot/setups/features';
 import { loadMacroDaily, MacroSeries, macroSettings } from '../bot/macro/macroSeries';
 import { macroConfig } from '../bot/config';
@@ -108,7 +110,7 @@ function characterAtTime(A: AssetBars, others: Candle[][], t: number) {
 }
 
 /** Every setup of an asset with its standalone outcome and features (features cached on disk). */
-export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: CostModel, cacheDir: string | undefined, log: (m: string) => void, oos?: OosIndex, others: Candle[][] = [], macro?: MacroSeries, lib?: LibIndex): SetupEvent[] {
+export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: CostModel, cacheDir: string | undefined, log: (m: string) => void, oos?: OosIndex, others: Candle[][] = [], macro?: MacroSeries, lib?: LibIndex, xg?: XgIndex): SetupEvent[] {
   const sigs: SetupSignal[] = [];
   for (const tf of [...FAST_TFS, ...SLOW_TFS]) {
     const s = A.series[tf]!;
@@ -148,6 +150,8 @@ export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: Cos
     fractalFeatures(tn, A.asset, g.dir, macro?.at(at));
     // The Librarian's walk-forward reading at the last closed hour.
     libSetupFeatures(tn, g.dir, lib?.at(A.asset, at));
+    // The cross-asset graph network's walk-forward forecast at the last closed hour.
+    xgSetupFeatures(tn, g.dir, xg?.at(A.asset, at));
     tn.kind_spotpb = g.kind === 'spotpb' ? 1 : 0;
     const x = new Float32Array(SETUP_FEATURES.length);
     x.set(base);
@@ -310,7 +314,9 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
   if (!macro.hasParent()) log('no BTC.D daily history for 2016-2017 (TradingView CRYPTOCAP:BTC.D): the fractal inputs stay blank');
   const lib = new LibIndex(loadLibForecasts(hist));
   if (!lib.f) log(`no Librarian walk-forward forecasts in ${hist}/.librarian (npm run research:librarian): its inputs stay blank`);
-  for (const A of assets.values()) events.push(...assetEvents(A, btc, costs, o.cacheDir ?? path.join(hist, '.setup-cache'), log, oos, [...assets.values()].filter((x) => x !== A).map((x) => x.h1), macro, lib));
+  const xg = new XgIndex(loadXgForecasts(hist));
+  if (!xg.f) log(`no cross-graph walk-forward forecasts in ${hist}/.xgraph (npm run research:xgraph): its inputs stay blank`);
+  for (const A of assets.values()) events.push(...assetEvents(A, btc, costs, o.cacheDir ?? path.join(hist, '.setup-cache'), log, oos, [...assets.values()].filter((x) => x !== A).map((x) => x.h1), macro, lib, xg));
   events.sort((a, b) => a.at - b.at);
   const end = Math.max(...events.map((e) => e.at)) + 1;
   const month = 30.44 * DAY;
@@ -434,6 +440,18 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
     log(`Librarian inputs on the development years: with ${withL.n} trades, mean R ${withL.mean.toFixed(3)}, t ${withL.t.toFixed(2)} | without ${base.n} trades, mean R ${base.mean.toFixed(3)}, t ${base.t.toFixed(2)} -> ${kept ? 'KEPT' : 'blanked'}`);
     if (kept) { groups = [...groups, 'librarian']; scores = sL; }
   } else log(`Librarian inputs: walk-forward forecasts cover ${(100 * lbCover).toFixed(0)}% of the setups since ${iso(firstFold)} (need 80%; npm run research:librarian) -> blanked`);
+  // The cross-asset graph network: kept on the same terms.
+  const xgIdx = SETUP_FEATURES.indexOf(SETUP_GROUPS.xgraph[0]);
+  const xgCover = events.filter((e) => e.at >= firstFold && Number.isFinite(e.x[xgIdx])).length / Math.max(1, events.filter((e) => e.at >= firstFold).length);
+  if (xgCover > 0.8) {
+    const base = devScore(scores, chooseBook(scores, true));
+    const sX = scoresFor([...groups, 'xgraph']);
+    const withX = devScore(sX, chooseBook(sX, true));
+    const kept = withX.t > base.t;
+    groupChoice.xgraph = { withGroup: withX.t, without: base.t, kept };
+    log(`cross-graph inputs on the development years: with ${withX.n} trades, mean R ${withX.mean.toFixed(3)}, t ${withX.t.toFixed(2)} | without ${base.n} trades, mean R ${base.mean.toFixed(3)}, t ${base.t.toFixed(2)} -> ${kept ? 'KEPT' : 'blanked'}`);
+    if (kept) { groups = [...groups, 'xgraph']; scores = sX; }
+  } else log(`cross-graph inputs: walk-forward forecasts cover ${(100 * xgCover).toFixed(0)}% of the setups since ${iso(firstFold)} (need 80%; npm run research:xgraph) -> blanked`);
   book = chooseBook(scores);
   const validation: SetupModelParams['validation'] = {};
   // Both lanes together, every period.
