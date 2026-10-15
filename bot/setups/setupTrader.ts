@@ -40,6 +40,7 @@ import { playbook } from '../strategy/playbook';
 import { DEFAULT_LANES, LaneBook, type Candidate, type LaneBookParams } from './lanes';
 import { SetupModel } from './setupModel';
 import { maintenanceRate, maxSafeNotional, reservedFor, safeShare } from '../risk/liquidation';
+import { macro } from '../macro/macroService';
 import type { PerpRiskPosition } from '../perps/perpRest';
 
 export interface SetupTraderParams {
@@ -222,7 +223,7 @@ export class SetupTrader {
     if (!this.model) return NaN;
     const bars = this.bars(sig.asset);
     if (!bars) return NaN;
-    return this.model.score(sig.lane, setupVector(setupFeatureMap(sig, bars, this.bars('BTC'), t, this.reading(sig.asset, t), marketContext()?.character(sig.asset))));
+    return this.model.score(sig.lane, setupVector(setupFeatureMap(sig, bars, this.bars('BTC'), t, this.reading(sig.asset, t), marketContext()?.character(sig.asset), macro()?.inputs())));
   }
 
   /** The SNN gate (hot reload on change; off when missing). */
@@ -346,9 +347,15 @@ export class SetupTrader {
         if (this.d.params.requireValidation && !this.model?.validated(cand.sig.lane)) return undefined;
         if (this.snnBlocks(cand.sig)) return undefined;
         const cv = this.conviction(cand.sig.asset, cand.sig.dir, now);
-        // Strategy playbook (bot/strategy/playbook.ts): the perps family's weight in this coin's confirmed regime.
-        const weight = playbook()?.weights(marketContext()?.regimeOf(cand.sig.asset), now).perps;
-        return { px, score: this.score(cand.sig, now), mult: cv?.mult, priority: cv?.priority, why: cv?.why, weight };
+        // Strategy playbook (bot/strategy/playbook.ts): the perps family's weight in this coin's confirmed regime;
+        // waterfall mode (bot/macro/waterfall.ts) leans into alt longs, drops alt shorts and lightens BTC. Together at
+        // most 2x; the lanes' notional caps and the liquidation cap still bind.
+        const pbW = playbook()?.weights(marketContext()?.regimeOf(cand.sig.asset), now).perps;
+        const wf = macro()?.policy();
+        const wfW = wf ? wf.perpMult(cand.sig.asset, cand.sig.dir) : 1;
+        const weight = Math.min(2, (pbW ?? 1) * wfW);
+        const weightWhy = wfW === 0 ? `waterfall mode: ${wf!.why}` : undefined;
+        return { px, score: this.score(cand.sig, now), mult: cv?.mult, priority: cv?.priority, why: cv?.why, weight, weightWhy };
       }, (cand) => this.conviction(cand.sig.asset, cand.sig.dir, now)?.priority ?? 0);
       for (const e of entries) {
         const t = openTrade(e.cand.sig, e.px, now, this.d.params.costs);

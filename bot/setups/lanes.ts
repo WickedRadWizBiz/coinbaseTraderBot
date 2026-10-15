@@ -71,8 +71,9 @@ export interface Candidate { sig: SetupSignal; score: number; queuedAt: number; 
 
 /** What a re-check returns: the current price and the fresh score (undefined = drop the candidate), and
  *  optionally a conviction size multiplier (TA / confluence, altcoin risk-on rule; >= 1) and a priority. */
-/** weight: the strategy playbook's weight for the asset's regime (bot/strategy/playbook.ts; 0 = skip, default 1). */
-export type Recheck = (c: Candidate) => { px: number; score: number; mult?: number; priority?: number; why?: string; weight?: number } | undefined;
+/** weight: the strategy playbook's weight for the asset's regime (bot/strategy/playbook.ts) times waterfall mode's
+ *  (bot/macro/waterfall.ts); 0 = skip (weightWhy says why), default 1. */
+export type Recheck = (c: Candidate) => { px: number; score: number; mult?: number; priority?: number; why?: string; weight?: number; weightWhy?: string } | undefined;
 
 export interface Entry { cand: Candidate; px: number; score: number; notional: number; mult: number; why?: string; capped?: string }
 
@@ -149,7 +150,7 @@ export class LaneBook {
         const mult = r.mult !== undefined && Number.isFinite(r.mult) && r.mult > 1 ? r.mult : 1;
         // Kelly-style risk (lane risk x score x conviction), never above the lane's optimal f.
         const w = r.weight !== undefined && Number.isFinite(r.weight) ? Math.max(0, r.weight) : 1;
-        if (w === 0) { this.skip(c, 'playbook: no perps risk in this regime', now); continue; }
+        if (w === 0) { this.skip(c, r.weightWhy ?? 'playbook: no perps risk in this regime', now); continue; }
         let atRisk = riskDollars * mult * w, capped: string | undefined;
         const rc = this.riskCaps[lane];
         if (rc) {

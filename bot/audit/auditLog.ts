@@ -23,6 +23,7 @@ export type AuditKind =
   | 'data_stale' | 'data_gap'
   | 'vault'
   | 'snn'
+  | 'waterfall'
   | 'alert' | 'error';
 
 export interface AuditRecord {

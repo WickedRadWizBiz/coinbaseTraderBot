@@ -5,6 +5,7 @@ import { VaultCard } from './VaultCard';
 import { OrderBookMonitor } from './OrderBookMonitor';
 import { Panel, Screen } from './Panel';
 import { BotControls, ConditioningRow, LatencyBadges, PlaybookRow } from './BotControls';
+import { WaterfallRow } from './WaterfallRow';
 import { usePoll } from './usePoll';
 import { KalshiCheckCard } from './KalshiCheckCard';
 
@@ -137,6 +138,7 @@ export function DashboardView() {
               <BotControls s={s} onChange={() => void refresh()} />
               <ConditioningRow s={s} onChange={() => void refresh()} />
               <PlaybookRow s={s} />
+              <WaterfallRow s={s} onChange={() => void refresh()} />
               <Row label="Daily PnL (net of fees)" value={usd(s.dailyPnl)} sub={`loss limit ${usd(-s.dailyLossLimit)}`} tone={s.dailyPnl < 0 ? 'bad' : 'ok'} />
               <Row label="Cash balance" value={usd(s.balance)} />
               <Row label="Tradable bankroll" value={usd(s.bankroll)} sub={s.vault?.enabled ? `cash + committed − vault ${usd(s.vault.vault)} − pocket ${usd(s.vault.pocket)}` : 'cash + committed'} />

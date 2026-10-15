@@ -15,6 +15,10 @@
 //     it improves the development years; otherwise these inputs are blanked (NaN) for the model.
 //   - the coin's market character at the setup (calm / trending / volatile coin-specific / volatile
 //     market-wide, and its inputs: bot/ta/character.ts), the "character" group, kept on the same terms.
+//   - where the 2018-to-now BTC dominance cycle stands on its 2016-2017 parent (bot/macro/fractalEngine.ts:
+//     progress, the parent's phase, time dilation, fit, the projected BTC.D path and the next waterfall) and
+//     the waterfall legs (BTC.D against the 55% gate, a USDT.D breakdown, SHIB volume velocity), the "fractal"
+//     group, kept on the same terms. Blank before the child cycle has a year (2019) or without the parent.
 // The states come from bot/ta/taNet.ts taNetStates on the same windows live and in research.
 
 import { evaluate } from '../ta/analyzer';
@@ -25,6 +29,7 @@ import { marketClockFeatures, MARKET_CLOCK_FEATURES } from '../model/sessions';
 import type { SetupSignal } from './detectors';
 import type { Character, CharacterInputs } from '../ta/character';
 import { TF_MS } from './detectors';
+import type { MacroInputs } from '../macro/macroSeries';
 
 const clip = (x: number, lim: number) => (Number.isFinite(x) ? Math.max(-lim, Math.min(lim, x)) : NaN);
 
@@ -46,10 +51,45 @@ export const SETUP_BASE_FEATURES: string[] = [...SETUP_KEYS, ...MARKET_CLOCK_FEA
 export const TANET_SETUP_KEYS = ['tn_up1', 'tn_up4', 'tn_vol', 'o_tn_up1', 'o_tn_up4'];
 /** The coin's market character at the setup (bot/ta/character.ts): class one-hot and its inputs. */
 export const CHAR_SETUP_KEYS = ['ch_calm', 'ch_trending', 'ch_vol_idio', 'ch_vol_sys', 'ch_rvpct', 'ch_corr', 'ch_hurst', 'ch_er'];
+/** The Fractal Alignment Engine and the waterfall legs (bot/macro): fractalFeatures. */
+export const FRACTAL_SETUP_KEYS = [
+  'fae_progress', 'fae_base', 'fae_fall', 'fae_waterfall', 'fae_swing_frac', 'fae_log_dil', 'fae_log_ldil', 'fae_fit', 'fae_recent_fit', 'fae_mae',
+  'fae_proj30', 'fae_proj90', 'fae_wf_weeks', 'fae_alt', 'o_fae_proj90', 'mac_gate', 'mac_usdt_brk', 'mac_shib_vel',
+];
 /** Optional input groups the trainer switches on only when they help (off = blanked to NaN). */
-export const SETUP_GROUPS: Record<string, string[]> = { tanet: TANET_SETUP_KEYS, character: CHAR_SETUP_KEYS };
+export const SETUP_GROUPS: Record<string, string[]> = { tanet: TANET_SETUP_KEYS, character: CHAR_SETUP_KEYS, fractal: FRACTAL_SETUP_KEYS };
 /** Every input, in order (groups appended last, so models trained before a group existed still load). */
-export const SETUP_FEATURES: string[] = [...SETUP_BASE_FEATURES, ...TANET_SETUP_KEYS, ...CHAR_SETUP_KEYS];
+export const SETUP_FEATURES: string[] = [...SETUP_BASE_FEATURES, ...TANET_SETUP_KEYS, ...CHAR_SETUP_KEYS, ...FRACTAL_SETUP_KEYS];
+
+/** Fill the fractal inputs: the engine's state and the waterfall legs (NaN when unknown). For an altcoin a falling
+ *  BTC.D is the tailwind, for BTC the reverse, so the oriented copy flips with the asset. */
+export function fractalFeatures(out: Record<string, number>, asset: string, dir: number, m: MacroInputs | undefined): void {
+  for (const k of FRACTAL_SETUP_KEYS) out[k] = NaN;
+  const f = m?.fractal, w = m?.wf;
+  const alt = asset !== 'BTC' ? 1 : 0;
+  if (f) {
+    out.fae_progress = f.progress;
+    out.fae_base = f.swing.base ? 1 : 0;
+    out.fae_fall = f.swing.dir < 0 ? 1 : 0;
+    out.fae_waterfall = f.swing.waterfall && !f.swing.base ? 1 : 0;
+    out.fae_swing_frac = f.swing.frac;
+    out.fae_log_dil = Math.log(Math.max(0.1, f.dilation));
+    out.fae_log_ldil = Math.log(Math.max(0.1, f.localDilation));
+    out.fae_fit = f.fit.r;
+    out.fae_recent_fit = f.fit.recentR;
+    out.fae_mae = clip(f.fit.recentMaePts / 10, 10);
+    out.fae_proj30 = clip((f.proj.d30 - f.btcd) / 10, 10);
+    out.fae_proj90 = clip((f.proj.d90 - f.btcd) / 10, 10);
+    out.fae_wf_weeks = f.nextWaterfall ? (f.nextWaterfall.inside ? 0 : Math.min(156, f.nextWaterfall.weeksAway) / 52) : NaN;
+    out.fae_alt = alt;
+    out.o_fae_proj90 = Number.isFinite(out.fae_proj90) ? dir * out.fae_proj90 * (alt ? -1 : 1) : NaN;
+  }
+  if (w) {
+    out.mac_gate = w.btcd !== undefined && m ? clip((w.btcd - m.gate) / 10, 10) : NaN;
+    out.mac_usdt_brk = w.why.some((x) => x.startsWith('usdt: under')) ? NaN : w.legs.usdt ? 1 : 0;
+    out.mac_shib_vel = w.shibVelocity !== undefined && w.shibVelocity > 0 ? clip(Math.log(w.shibVelocity), 5) : NaN;
+  }
+}
 
 /** Fill the character inputs of a feature map (NaN when unknown). */
 export function characterFeatures(out: Record<string, number>, ch: { cls: Character; x: CharacterInputs } | undefined): void {
@@ -111,7 +151,7 @@ function taMap(prefix: string, bars: SetupBars, t: number, out: Record<string, n
 }
 
 /** Feature vector of a setup known at time `t` (= signal bar close), from the asset's and BTC's bars. */
-export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBars | undefined, t = sig.ts + TF_MS[sig.tf]!, tanet?: TaNetReading, character?: { cls: Character; x: CharacterInputs }): Record<string, number> {
+export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBars | undefined, t = sig.ts + TF_MS[sig.tf]!, tanet?: TaNetReading, character?: { cls: Character; x: CharacterInputs }, macro?: MacroInputs): Record<string, number> {
   const out: Record<string, number> = {};
   const risk = Math.abs(sig.ref - sig.stop);
   out.dir = sig.dir;
@@ -133,6 +173,7 @@ export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBar
   for (const k of [...TA_KEYS, ...BTC_KEYS]) out[`o_${k}`] = Number.isFinite(out[k]) ? sig.dir * out[k] : NaN;
   tanetFeatures(out, sig.dir, tanet);
   characterFeatures(out, character);
+  fractalFeatures(out, sig.asset, sig.dir, macro);
   return out;
 }
 
