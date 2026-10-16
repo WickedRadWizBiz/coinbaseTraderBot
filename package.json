@@ -39,6 +39,7 @@
     "research:librarian": "tsx research/librarian.ts",
     "research:lead-lag": "tsx research/leadLag.ts",
     "research:xgraph": "tsx research/trainCrossGraph.ts",
+    "research:cross-lead": "tsx research/crossLead.ts",
     "history:kalshi": "tsx research/history/kalshiHistory.ts",
     "research:sweep": "tsx research/sweep.ts",
     "research:whole-bot": "tsx research/wholeBot.ts",

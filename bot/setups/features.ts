@@ -25,6 +25,9 @@
 //     Kept on the same terms.
 //   - the cross-asset graph network's forecast for the coin at the last closed hour (bot/ta/crossGraph.ts: its relative
 //     return over the next 4 and 24 hours against the basket, and its rank), the "xgraph" group, kept on the same terms.
+//   - cross-coin lead-lag at the setup's close (bot/ta/crossLead.ts): the coin's expected move over the next 15 and 60
+//     minutes from the part of the leaders' (BTC, ETH) recent move it has not made yet, in its own volatility units, for
+//     the leader / horizon pairs that were predictive out of sample; the "crosslead" group, kept on the same terms.
 // The states come from bot/ta/taNet.ts taNetStates on the same windows live and in research.
 
 import { evaluate } from '../ta/analyzer';
@@ -38,6 +41,7 @@ import { TF_MS } from './detectors';
 import type { MacroInputs } from '../macro/macroSeries';
 import { LIB_SETUP_KEYS, libSetupFeatures, type LibrarianReading } from '../ta/librarian';
 import { XG_SETUP_KEYS, xgSetupFeatures, type XgReading } from '../ta/crossGraph';
+import { CL_SETUP_KEYS, crossLeadSetupFeatures, type CrossLeadReading } from '../ta/crossLead';
 
 const clip = (x: number, lim: number) => (Number.isFinite(x) ? Math.max(-lim, Math.min(lim, x)) : NaN);
 
@@ -65,11 +69,11 @@ export const FRACTAL_SETUP_KEYS = [
   'fae_proj30', 'fae_proj90', 'fae_wf_weeks', 'fae_alt', 'o_fae_proj90', 'mac_gate', 'mac_usdt_brk', 'mac_shib_vel',
 ];
 /** Optional input groups the trainer switches on only when they help (off = blanked to NaN). */
-export const SETUP_GROUPS: Record<string, string[]> = { tanet: TANET_SETUP_KEYS, character: CHAR_SETUP_KEYS, fractal: FRACTAL_SETUP_KEYS, librarian: LIB_SETUP_KEYS, xgraph: XG_SETUP_KEYS };
+export const SETUP_GROUPS: Record<string, string[]> = { tanet: TANET_SETUP_KEYS, character: CHAR_SETUP_KEYS, fractal: FRACTAL_SETUP_KEYS, librarian: LIB_SETUP_KEYS, xgraph: XG_SETUP_KEYS, crosslead: CL_SETUP_KEYS };
 /** Every input, in order (groups appended last, so models trained before a group existed still load). */
 /** The spot pullback's kind flag (kept outside the cached candle inputs, so adding the kind did not invalidate them). */
 export const SPOT_PB_SETUP_KEYS = ['kind_spotpb'];
-export const SETUP_FEATURES: string[] = [...SETUP_BASE_FEATURES, ...TANET_SETUP_KEYS, ...CHAR_SETUP_KEYS, ...FRACTAL_SETUP_KEYS, ...LIB_SETUP_KEYS, ...XG_SETUP_KEYS, ...SPOT_PB_SETUP_KEYS];
+export const SETUP_FEATURES: string[] = [...SETUP_BASE_FEATURES, ...TANET_SETUP_KEYS, ...CHAR_SETUP_KEYS, ...FRACTAL_SETUP_KEYS, ...LIB_SETUP_KEYS, ...XG_SETUP_KEYS, ...SPOT_PB_SETUP_KEYS, ...CL_SETUP_KEYS];
 
 /** Fill the fractal inputs: the engine's state and the waterfall legs (NaN when unknown). For an altcoin a falling
  *  BTC.D is the tailwind, for BTC the reverse, so the oriented copy flips with the asset. */
@@ -161,7 +165,7 @@ function taMap(prefix: string, bars: SetupBars, t: number, out: Record<string, n
 }
 
 /** Feature vector of a setup known at time `t` (= signal bar close), from the asset's and BTC's bars. */
-export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBars | undefined, t = sig.ts + TF_MS[sig.tf]!, tanet?: TaNetReading, character?: { cls: Character; x: CharacterInputs }, macro?: MacroInputs, lib?: Pick<LibrarianReading, 'w' | 'net' | 'vsBook' | 'transition'>, xg?: Pick<XgReading, 'rel4' | 'rel24' | 'rank'>): Record<string, number> {
+export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBars | undefined, t = sig.ts + TF_MS[sig.tf]!, tanet?: TaNetReading, character?: { cls: Character; x: CharacterInputs }, macro?: MacroInputs, lib?: Pick<LibrarianReading, 'w' | 'net' | 'vsBook' | 'transition'>, xg?: Pick<XgReading, 'rel4' | 'rel24' | 'rank'>, cl?: CrossLeadReading): Record<string, number> {
   const out: Record<string, number> = {};
   const risk = Math.abs(sig.ref - sig.stop);
   out.dir = sig.dir;
@@ -186,6 +190,7 @@ export function setupFeatureMap(sig: SetupSignal, bars: SetupBars, btc: SetupBar
   fractalFeatures(out, sig.asset, sig.dir, macro);
   libSetupFeatures(out, sig.dir, lib);
   xgSetupFeatures(out, sig.dir, xg);
+  crossLeadSetupFeatures(out, sig.dir, cl);
   out.kind_spotpb = sig.kind === 'spotpb' ? 1 : 0;
   return out;
 }

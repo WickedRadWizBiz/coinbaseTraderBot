@@ -110,7 +110,7 @@ export async function buildDataset(
         book, micro: st.features.micro.get(m.ticker), index: idx!, spot: st.spot.get(m.asset), asset: m.asset, usdtd: st.usdtd, btcd: st.btcd,
         closeTs: m.closeTime, volProfile, asiaRange: st.features.asiaRange.get(m.asset),
         kind: m.kind, strike: terms.strike, cap: terms.cap, d2: fv.d2, vEff: fv.vEff, sigmaPricing: sigmaFv,
-        bars: st.features.bars.get(m.asset), openTime: m.openTime, calendar: opts.calendar,
+        bars: st.features.bars.get(m.asset), peerBars: st.features.bars, openTime: m.openTime, calendar: opts.calendar,
         ticker: m.ticker, siblings: m.kind === 'updown' ? undefined : ladderQuotes(st.markets.values(), (t) => st.books.get(t), m.asset, m.closeTime),
         perp: st.features.perps.get(m.asset), candles: st.features.candles.get(m.asset), snn: st.snnContext(m.asset, m.ticker),
       });

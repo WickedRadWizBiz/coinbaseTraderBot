@@ -29,7 +29,8 @@ import { gbdtLogit, type GbdtModel } from '../bot/model/trees';
 import type { Candle } from '../bot/ta/indicators';
 import type { Timeframe } from '../bot/ta/knowledge';
 import { adaptToVol, applyRatchet, applyScaleOut, atr4hAt, detectAt, FAST_TFS, RATCHET, SCALE_OUT, SLOW_TFS, SPOT_PB, setupSeries, TF_MS, VOL_ADAPT, type Lane, type SetupSeries, type SetupSignal } from '../bot/setups/detectors';
-import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from '../bot/setups/exits';
+import { DEFAULT_COSTS, exitTrade, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from '../bot/setups/exits';
+import { CL_SCHEMA, CL_SETUP_HORIZONS, CrossLead, crossLeadSetupFeatures, crossLeadSetupReading, crossLeadSum, type CrossLeadParams } from '../bot/ta/crossLead';
 import { libDir, LibIndex, loadLibForecasts } from './librarian';
 import { spotLeads } from './leadLag';
 import { LIB_SCHEMA, libSetupFeatures } from '../bot/ta/librarian';
@@ -84,16 +85,122 @@ export function stepOn15m(A: AssetBars, t: OpenTrade, k: number, costs: CostMode
   return stepTrade(t, b, M15, costs, tfClose);
 }
 
+/** An exit decided at a 15-minute close outside the trade's plan (the cross-coin lead-lag exit): true closes the trade at
+ *  that bar's close. */
+export type SetupExitHook = (t: OpenTrade, closeTs: number) => boolean;
+
 /** Trade one setup on its own from the first 15m bar after it is known; undefined if it never fills or never ends in the data. */
-export function simulateSetup(A: AssetBars, sig: SetupSignal, costs: CostModel): OpenTrade | undefined {
+export function simulateSetup(A: AssetBars, sig: SetupSignal, costs: CostModel, exit?: SetupExitHook): OpenTrade | undefined {
   const at = sig.ts + TF_MS[sig.tf]!;
   let k = m15At(A, at);
   if (k >= A.m15.length || A.m15[k].ts - at > 2 * TF_MS[sig.tf]!) return undefined;
   const t = openTrade(sig, A.m15[k].o, A.m15[k].ts, costs);
   if (!t) return undefined;
   const limit = at + (sig.plan.maxBars + 2) * TF_MS[sig.tf]!;
-  for (; k < A.m15.length && A.m15[k].ts < limit; k++) if (stepOn15m(A, t, k, costs)) return t;
+  for (; k < A.m15.length && A.m15[k].ts < limit; k++) {
+    if (stepOn15m(A, t, k, costs)) return t;
+    const close = A.m15[k].ts + M15;
+    if (exit?.(t, close)) { exitTrade(t, A.m15[k].c, close, 'leadlag', costs); return t; }
+  }
   return undefined;
+}
+
+/** The leaders' expected pull on a coin at a 15-minute close (both horizons, in the coin's volatility units; the
+ *  walk-forward fit before that time), remembered per close: every trade and every k reads the same closes. */
+export function crossLeadPull(cl: CrossLead, asset: string, m15Of: (asset: string) => Candle[] | undefined): (ts: number) => number | undefined {
+  const memo = new Map<number, number | undefined>();
+  return (ts) => {
+    if (memo.has(ts)) return memo.get(ts);
+    const e = crossLeadSum(crossLeadSetupReading(cl, asset, ts, m15Of));
+    memo.set(ts, e);
+    return e;
+  };
+}
+
+/** The cross-coin lead-lag exit: at a 15-minute close, the leaders' pull against the trade by more than k. */
+export function crossLeadExitHook(pull: (ts: number) => number | undefined, k: number): SetupExitHook {
+  return (t, ts) => { const e = pull(ts); return e !== undefined && t.dir * e < -k; };
+}
+
+/** The plan a setup is traded with (volatility-adapted stop and trail, ratchet, scale-out): what the scorer's events and
+ *  the live trader use. */
+export function setupPlan(A: AssetBars, g0: SetupSignal, costs: CostModel, oos?: OosIndex): SetupSignal {
+  const at = g0.ts + TF_MS[g0.tf]!;
+  const reading = oos?.at(A.asset, at);
+  return applyScaleOut(applyRatchet(adaptToVol(g0, reading?.vol), atr4hAt(A.h1, at), costs.entry + costs.takerExit, RATCHET, reading?.vol), SCALE_OUT);
+}
+
+export const CL_EXIT_KS = [0.5, 1, 1.5, 2];
+
+/** Whether the lead-lag exit pays: every setup with a lead-lag reading at its entry, traded on its own with and without the
+ *  exit at each k. Kept (the k with the best gain) only if its net R gain per trade on the development years has a
+ *  month-block bootstrap lower bound above 0 (Bonferroni over the ks), and it gains on the holdout too. The final window
+ *  is not looked at. */
+export function chooseCrossLeadExit(assets: Map<string, AssetBars>, cl: CrossLead, costs: CostModel, o: { devTo: number; holdTo: number; log?: (m: string) => void; ks?: number[]; boots?: number; oos?: OosIndex }): SetupModelParams['crossLeadExit'] {
+  const log = o.log ?? (() => {});
+  const m15Of = (a: string) => assets.get(a)?.m15;
+  const ks = o.ks ?? CL_EXIT_KS;
+  const rows: Array<{ at: number; d: number[] }> = [];
+  for (const A of assets.values()) {
+    if (!cl.any(A.asset)) continue;
+    const pull = crossLeadPull(cl, A.asset, m15Of);
+    const hooks = ks.map((k) => crossLeadExitHook(pull, k));
+    const spotPb = SPOT_PB.assets.includes(A.asset);
+    for (const tf of [...FAST_TFS, ...SLOW_TFS]) {
+      const s = A.series[tf];
+      if (!s) continue;
+      for (let i = 60; i < s.cs.length; i++) {
+        const g0 = detectAt(A.asset, tf, s, i, A.series['1d'], { spotPb });
+        if (!g0) continue;
+        const at = g0.ts + TF_MS[g0.tf]!;
+        if (at >= o.holdTo || !crossLeadSetupReading(cl, A.asset, at, m15Of)) continue;
+        const g = setupPlan(A, g0, costs, o.oos);
+        const base = simulateSetup(A, g, costs);
+        if (!base?.closed) continue;
+        const r0 = tradeResult(base).r;
+        const d = hooks.map((h) => { const t = simulateSetup(A, g, costs, h); return t?.closed ? tradeResult(t).r - r0 : 0; });
+        rows.push({ at, d });
+      }
+    }
+  }
+  return crossLeadExitGate(rows, { ks, devTo: o.devTo, boots: o.boots, log });
+}
+
+/** The lead-lag exit's gate on the setups' outcomes (`d[j]`: the net R the exit at ks[j] added to a trade): the k with the
+ *  best development-years gain among those whose month-block bootstrap lower bound is above 0 (Bonferroni over the ks),
+ *  kept only if it gains on the holdout too; undefined (off) otherwise. */
+export function crossLeadExitGate(rows: Array<{ at: number; d: number[] }>, o: { ks: number[]; devTo: number; boots?: number; minDev?: number; log?: (m: string) => void }): SetupModelParams['crossLeadExit'] {
+  const log = o.log ?? (() => {});
+  const ks = o.ks;
+  const dev = rows.filter((x) => x.at < o.devTo), hold = rows.filter((x) => x.at >= o.devTo);
+  const minDev = o.minDev ?? 200;
+  if (dev.length < minDev) { log(`lead-lag exit: only ${dev.length} development setups with a lead-lag reading (< ${minDev}): off`); return undefined; }
+  const month = (t: number) => Math.floor(t / (30.44 * DAY));
+  const months = [...new Set(dev.map((x) => month(x.at)))];
+  const byMonth = new Map<number, number[]>();
+  dev.forEach((x, i) => { const m = month(x.at); (byMonth.get(m) ?? byMonth.set(m, []).get(m)!).push(i); });
+  let s = 1;
+  const r = () => { s = (s * 16807) % 2147483647; return s / 2147483647; };
+  const alpha = 0.05 / ks.length, B = o.boots ?? 400;
+  let best: { j: number; gain: number; lo: number } | undefined;
+  for (let j = 0; j < ks.length; j++) {
+    const gain = dev.reduce((a, x) => a + x.d[j], 0) / dev.length;
+    const bs: number[] = [];
+    for (let b = 0; b < B; b++) {
+      let sum = 0, n = 0;
+      for (let q = 0; q < months.length; q++) for (const i of byMonth.get(months[Math.floor(r() * months.length)])!) { sum += dev[i].d[j]; n++; }
+      bs.push(n ? sum / n : 0);
+    }
+    bs.sort((a, b) => a - b);
+    const lo = bs[Math.max(0, Math.floor(alpha * B))];
+    log(`lead-lag exit k=${ks[j]}: ${(gain >= 0 ? '+' : '') + gain.toFixed(4)} R per trade on ${dev.length} development setups (lower bound ${lo.toFixed(4)})`);
+    if (lo > 0 && (!best || gain > best.gain)) best = { j, gain, lo };
+  }
+  if (!best) { log('lead-lag exit: no k raised the development years\' net R with confidence: off'); return undefined; }
+  const holdGain = hold.length ? hold.reduce((a, x) => a + x.d[best!.j], 0) / hold.length : NaN;
+  if (!(holdGain > 0)) { log(`lead-lag exit k=${ks[best.j]}: ${hold.length ? `${holdGain.toFixed(4)} R per trade on ${hold.length} holdout setups` : 'no holdout setups'}: off`); return undefined; }
+  log(`lead-lag exit ON at k=${ks[best.j]}: +${best.gain.toFixed(4)} R per trade on the development years, +${holdGain.toFixed(4)} on the holdout`);
+  return { k: ks[best.j], devGainR: best.gain, devLoR: best.lo, holdGainR: holdGain, trades: dev.length + hold.length };
 }
 
 function cacheKey(): string {
@@ -111,7 +218,8 @@ function characterAtTime(A: AssetBars, others: Candle[][], t: number) {
 }
 
 /** Every setup of an asset with its standalone outcome and features (features cached on disk). */
-export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: CostModel, cacheDir: string | undefined, log: (m: string) => void, oos?: OosIndex, others: Candle[][] = [], macro?: MacroSeries, lib?: LibIndex, xg?: XgIndex): SetupEvent[] {
+export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: CostModel, cacheDir: string | undefined, log: (m: string) => void, oos?: OosIndex, others: Candle[][] = [], macro?: MacroSeries, lib?: LibIndex, xg?: XgIndex, cl?: { lead: CrossLead; m15Of: (asset: string) => Candle[] | undefined; exitK?: number }): SetupEvent[] {
+  const exitHook = cl?.exitK !== undefined && cl.lead.any(A.asset) ? crossLeadExitHook(crossLeadPull(cl.lead, A.asset, cl.m15Of), cl.exitK) : undefined;
   const sigs: SetupSignal[] = [];
   for (const tf of [...FAST_TFS, ...SLOW_TFS]) {
     const s = A.series[tf]!;
@@ -138,8 +246,8 @@ export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: Cos
   for (const g0 of sigs) {
     const at = g0.ts + TF_MS[g0.tf]!;
     const reading = oos?.at(A.asset, at);
-    const g = applyScaleOut(applyRatchet(adaptToVol(g0, reading?.vol), atr4hAt(A.h1, at), costs.entry + costs.takerExit, RATCHET, reading?.vol), SCALE_OUT);
-    const tr = simulateSetup(A, g, costs);
+    const g = setupPlan(A, g0, costs, oos);
+    const tr = simulateSetup(A, g, costs, exitHook);
     if (!tr?.closed) continue;
     const k = key(g0);
     let base = cached.get(k);
@@ -153,6 +261,8 @@ export function assetEvents(A: AssetBars, btc: SetupBars | undefined, costs: Cos
     libSetupFeatures(tn, g.dir, lib?.at(A.asset, at));
     // The cross-asset graph network's walk-forward forecast at the last closed hour.
     xgSetupFeatures(tn, g.dir, xg?.at(A.asset, at));
+    // Cross-coin lead-lag at the setup's close (the walk-forward fit before it).
+    crossLeadSetupFeatures(tn, g.dir, cl ? crossLeadSetupReading(cl.lead, A.asset, at, cl.m15Of) : undefined);
     tn.kind_spotpb = g.kind === 'spotpb' ? 1 : 0;
     const x = new Float32Array(SETUP_FEATURES.length);
     x.set(base);
@@ -309,9 +419,20 @@ export function forecastSchema(file: string): string | undefined {
 
 export interface SetupInputStatus { name: string; ok: boolean; producer: string; detail?: string }
 
+/** The cross-coin lead-lag study as a setup input: there when it validated a leader / coin pair at the horizons the
+ *  setup scorer reads (15 and 60 minutes). */
+function crossLeadInput(file: string): SetupInputStatus {
+  const s = { name: 'cross-coin lead-lag (15 / 60 min)', ok: false, producer: 'cross_lead' };
+  let p: CrossLeadParams;
+  try { p = JSON.parse(fs.readFileSync(file, 'utf8')) as CrossLeadParams; } catch { return { ...s, detail: `no study at ${file}` }; }
+  if (p.schema !== CL_SCHEMA) return { ...s, detail: `${file} has schema ${p.schema}, not ${CL_SCHEMA}` };
+  const used = p.pairs.filter((x) => x.validated && (CL_SETUP_HORIZONS as readonly number[]).includes(x.h)).map((x) => `${x.leader}->${x.follower} ${x.h}m`);
+  return used.length ? { ...s, ok: true, detail: used.join(', ') } : { ...s, detail: `the study (${p.pairs.length} pairs tested) found no leader / coin pair predictive at 15 or 60 minutes` };
+}
+
 /** Each optional input group of the setup scorer, whether its source is there for a history folder, and which
- *  pipeline step (or download) produces it. */
-export function setupInputStatus(hist: string, macro = macroConfig(process.env)): SetupInputStatus[] {
+ *  pipeline step (or download) produces it (`crossLeadFile`: the cross-coin lead-lag study, when one is expected). */
+export function setupInputStatus(hist: string, macro = macroConfig(process.env), crossLeadFile?: string): SetupInputStatus[] {
   const ms = macroSettings(macro);
   const daily = loadMacroDaily(hist);
   const btcd = daily.btcd;
@@ -321,6 +442,7 @@ export function setupInputStatus(hist: string, macro = macroConfig(process.env))
     { name: `fractal (BTC.D daily ${day(ms.fractal.parentFrom)}..${day(ms.fractal.parentTo - DAY)})`, ok: new MacroSeries(daily, ms.params, ms.fractal).hasParent(), producer: 'history (TradingView, TV_FILL)', detail: btcd.length ? `BTC.D daily ${day(btcd[0].ts)}..${day(btcd[btcd.length - 1].ts)}` : 'no BTC.D daily' },
     { name: 'Librarian walk-forward', ok: forecastSchema(path.join(libDir(hist), 'forecasts.json')) === LIB_SCHEMA, producer: 'librarian' },
     { name: 'cross-graph walk-forward', ok: forecastSchema(path.join(xgDir(hist), 'forecasts.json')) === XG_SCHEMA, producer: 'cross_graph' },
+    ...(crossLeadFile === undefined ? [] : [crossLeadInput(crossLeadFile)]),
   ];
 }
 
@@ -329,7 +451,9 @@ export function setupInputStatus(hist: string, macro = macroConfig(process.env))
 /** Out-of-sample setups (walk-forward scores) for replays of recent days (research/wholeBot.ts). */
 export interface SetupOosFile { version: string; from: string; to: string; events: Array<{ asset: string; sig: SetupSignal; at: number; exitAt: number; r: number; ret: number; score: number }> }
 
-export interface TrainSetupOpts { oosOut?: string; oosMonths?: number; assets?: string[]; equityUsd?: number; costs?: CostModel; holdoutMonths?: number; finalMonths?: number; firstFold?: number; foldMonths?: number; cacheDir?: string; log?: (m: string) => void }
+export interface TrainSetupOpts { oosOut?: string; oosMonths?: number; assets?: string[]; equityUsd?: number; costs?: CostModel; holdoutMonths?: number; finalMonths?: number; firstFold?: number; foldMonths?: number; cacheDir?: string; log?: (m: string) => void;
+  /** The cross-coin lead-lag study (research/crossLead.ts): its inputs, and the lead-lag exit when it pays. */
+  crossLead?: CrossLead }
 
 export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Promise<SetupModelParams> {
   const log = o.log ?? ((m: string) => console.log(`[setups] ${m}`));
@@ -350,7 +474,20 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
   if (!lib.f) log(`no Librarian walk-forward forecasts in ${hist}/.librarian (pipeline step librarian; by hand npm run research:librarian): its inputs stay blank`);
   const xg = new XgIndex(loadXgForecasts(hist));
   if (!xg.f) log(`no cross-graph walk-forward forecasts in ${hist}/.xgraph (pipeline step cross_graph; by hand npm run research:xgraph): its inputs stay blank`);
-  for (const A of assets.values()) events.push(...assetEvents(A, btc, costs, o.cacheDir ?? path.join(hist, '.setup-cache'), log, oos, [...assets.values()].filter((x) => x !== A).map((x) => x.h1), macro, lib, xg));
+  // Cross-coin lead-lag: its inputs, and its exit if it raises the setups' net R out of sample (decided before the events
+  // are simulated, so the scorer and the lane validation see the exits the live trader will make). Its windows end two
+  // weeks short of the trainer's (which end at the last setup, a few days before the data does): the final window stays
+  // unseen.
+  const month0 = 30.44 * DAY, margin = 14 * DAY;
+  const dataEnd = Math.max(...[...assets.values()].map((A) => A.m15[A.m15.length - 1]?.ts ?? 0)) + 1;
+  const finalFrom0 = dataEnd - (o.finalMonths ?? 3) * month0 - margin, holdFrom0 = finalFrom0 - (o.holdoutMonths ?? 9) * month0;
+  const m15Of = (a: string) => assets.get(a)?.m15;
+  let crossLeadExit: SetupModelParams['crossLeadExit'];
+  if (!o.crossLead) log('no cross-coin lead-lag study (pipeline step cross_lead; by hand npm run research:cross-lead): its inputs stay blank');
+  else if (![...assets.keys()].some((a) => o.crossLead!.any(a))) log('cross-coin lead-lag: no leader / coin pair was predictive out of sample: its inputs stay blank, no lead-lag exit');
+  else crossLeadExit = chooseCrossLeadExit(assets, o.crossLead, costs, { devTo: holdFrom0, holdTo: finalFrom0, log, oos });
+  const cl = o.crossLead ? { lead: o.crossLead, m15Of, exitK: crossLeadExit?.k } : undefined;
+  for (const A of assets.values()) events.push(...assetEvents(A, btc, costs, o.cacheDir ?? path.join(hist, '.setup-cache'), log, oos, [...assets.values()].filter((x) => x !== A).map((x) => x.h1), macro, lib, xg, cl));
   events.sort((a, b) => a.at - b.at);
   const end = Math.max(...events.map((e) => e.at)) + 1;
   const month = 30.44 * DAY;
@@ -486,6 +623,19 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
     log(`cross-graph inputs on the development years: with ${withX.n} trades, mean R ${withX.mean.toFixed(3)}, t ${withX.t.toFixed(2)} | without ${base.n} trades, mean R ${base.mean.toFixed(3)}, t ${base.t.toFixed(2)} -> ${kept ? 'KEPT' : 'blanked'}`);
     if (kept) { groups = [...groups, 'xgraph']; scores = sX; }
   } else log(`cross-graph inputs: walk-forward forecasts cover ${(100 * xgCover).toFixed(0)}% of the setups since ${iso(firstFold)} (need 80%; npm run research:xgraph) -> blanked`);
+  // Cross-coin lead-lag: kept on the same terms. Only the coins with a validated leader have a reading, and only over the
+  // study's years after its first fit, so it needs 300 development setups with a reading rather than 80% coverage.
+  const clIdx = SETUP_GROUPS.crosslead.map((k) => SETUP_FEATURES.indexOf(k));
+  const clN = events.filter((e) => e.at >= firstFold && e.at < holdoutFrom && clIdx.some((j) => Number.isFinite(e.x[j]))).length;
+  if (clN >= 300) {
+    const base = devScore(scores, chooseBook(scores, true));
+    const sCl = scoresFor([...groups, 'crosslead']);
+    const withCl = devScore(sCl, chooseBook(sCl, true));
+    const kept = withCl.t > base.t;
+    groupChoice.crosslead = { withGroup: withCl.t, without: base.t, kept };
+    log(`cross-coin lead-lag inputs (${clN} development setups with a reading): with ${withCl.n} trades, mean R ${withCl.mean.toFixed(3)}, t ${withCl.t.toFixed(2)} | without ${base.n} trades, mean R ${base.mean.toFixed(3)}, t ${base.t.toFixed(2)} -> ${kept ? 'KEPT' : 'blanked'}`);
+    if (kept) { groups = [...groups, 'crosslead']; scores = sCl; }
+  } else log(`cross-coin lead-lag inputs: ${clN} development setups with a reading (need 300; pipeline step cross_lead) -> blanked`);
   book = chooseBook(scores);
   const validation: SetupModelParams['validation'] = {};
   // Both lanes together, every period.
@@ -536,7 +686,7 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
   const lanes: SetupModelParams['lanes'] = {};
   for (const lane of ['fast', 'slow'] as const) lanes[lane] = fitLane(events.filter((e) => e.sig.lane === lane), 11, maskedIndices(groups));
   return {
-    version: `setups1-${iso(Date.now())}`, schema: SETUP_SCHEMA, features: SETUP_FEATURES, groups, groupChoice, volTrailK: VOL_ADAPT.trailK, ...(RATCHET.lanes !== 'off' ? { ratchet: { ...RATCHET } } : {}), ...(SCALE_OUT.lanes !== 'off' ? { scaleOut: { ...SCALE_OUT } } : {}), ...(SPOT_PB.assets.length ? { spotPullback: [...SPOT_PB.assets] } : {}), taEngine: taEngine(), lanes, book, costs, equityUsd: equity, validation, sizing, trainedAt: new Date().toISOString(),
+    version: `setups1-${iso(Date.now())}`, schema: SETUP_SCHEMA, features: SETUP_FEATURES, groups, groupChoice, volTrailK: VOL_ADAPT.trailK, ...(RATCHET.lanes !== 'off' ? { ratchet: { ...RATCHET } } : {}), ...(SCALE_OUT.lanes !== 'off' ? { scaleOut: { ...SCALE_OUT } } : {}), ...(SPOT_PB.assets.length ? { spotPullback: [...SPOT_PB.assets] } : {}), ...(crossLeadExit ? { crossLeadExit } : {}), taEngine: taEngine(), lanes, book, costs, equityUsd: equity, validation, sizing, trainedAt: new Date().toISOString(),
     data: { assets: [...assets.keys()], from: iso(events[0].at), to: iso(end), holdoutFrom: iso(holdoutFrom), finalFrom: iso(finalFrom), events: events.length },
   };
 }
@@ -566,7 +716,11 @@ export async function trainSetupMain(argOf: (k: string, d: string) => string = c
   // latest lead-lag study (research/leadLag.ts); recorded in the model so the live trader detects the same setups.
   const leadFile = argOf('lead-lag', '');
   SPOT_PB.assets = argOf('spot-pb', process.env.SETUP_SPOT_PB ?? 'off') === 'on' && leadFile ? spotLeads(leadFile) : [];
-  const p = await trainSetupModel(hist, { oosOut: argOf('oos-out', '') || undefined, assets: assets ? assets.split(',') : undefined, equityUsd: Number(argOf('equity', '10000')), holdoutMonths: Number(argOf('holdout-months', '9')), finalMonths: Number(argOf('final-months', '3')) });
+  // The cross-coin lead-lag study (research/crossLead.ts), when there is one.
+  const clFile = argOf('cross-lead', process.env.CROSS_LEAD_PATH ?? '');
+  let crossLead: CrossLead | undefined;
+  if (clFile && fs.existsSync(clFile)) { try { crossLead = CrossLead.load(clFile); } catch (e) { console.log(`[setups] ${clFile}: ${(e as Error).message}`); } }
+  const p = await trainSetupModel(hist, { oosOut: argOf('oos-out', '') || undefined, assets: assets ? assets.split(',') : undefined, equityUsd: Number(argOf('equity', '10000')), holdoutMonths: Number(argOf('holdout-months', '9')), finalMonths: Number(argOf('final-months', '3')), crossLead });
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(p));
   console.log(`[setups] wrote ${out} (fast ${p.validation.fast?.passed ? 'validated' : 'not validated'}, slow ${p.validation.slow?.passed ? 'validated' : 'not validated'})`);

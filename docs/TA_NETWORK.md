@@ -350,6 +350,7 @@ This model ships as `params/ta_net.json`. The server's pipeline continues the to
 | `TA_NET_PATH` | `params/ta_net.json` | Fallback model file (the pipeline's `data/models/ta_net.json` is preferred). |
 | `LIBRARIAN_PATH` | `params/librarian.json` | Fallback Librarian file (the pipeline's `data/models/librarian.json` is preferred). |
 | `CROSS_GRAPH_PATH` | `params/cross_graph.json` | Fallback cross-asset graph network file (the pipeline's `data/models/cross_graph.json` is preferred). |
+| `CROSS_LEAD_PATH` | `params/cross_lead.json` | Fallback cross-coin lead-lag study (the pipeline's `data/models/cross_lead.json` is preferred). |
 | `XG_ENGINE` | `auto` | The cross-asset graph network's training engine: `ts`, `torch` or `auto` (PyTorch when a Python with it and numpy is found). |
 | `TA_NET_REQUIRE_VALIDATED` | `true` | Only heads that passed the blind test speak. |
 | `TA_NET_RETRAIN_DAYS` | `7` | Continue the tournament at most this often (daily while the first one is still running). |
@@ -448,6 +449,28 @@ The 4th-generation spec's item 2, as reviewed: a graph network over the coins, l
 - **Setup scorer:** it reads the forecasts as its `xgraph` input group (with copies oriented to the trade's side), kept only if they raise the development years.
 
 **Running it.** The pipeline runs it weekly (step `cross_graph`, `data/models/cross_graph.json`; forecasts in `data/history/.xgraph/`). By hand: `npm run research:xgraph -- --history data/history`.
+
+## Cross-coin lead-lag (October 2026)
+
+Does the bot look for one coin following another? This study asks it directly: when a leader (BTC, ETH) moves, does a follower make up the part of that move it has not made yet over the next 1, 5, 15 or 60 minutes? The study is `research/crossLead.ts`; the reading the bot uses is `bot/ta/crossLead.ts`.
+
+**What it measures.** The data is four years of 1-minute spot history (the history replay's `binance-1m` store), sampled every h minutes without overlap.
+- **The gap:** beta × the leader's return over the last h minutes − the follower's return over the same minutes.
+- **beta:** how much the follower moves with the leader in full, fitted on 60-minute returns (240 for the hourly horizon). A beta from the same short span would absorb the lag it is meant to measure.
+- **The catch-up slope a:** the follower's next-h-minute return regressed on the gap. The expected move is a × gap.
+
+**Walk-forward.** Each quarter is fitted on the two years before it and tested on the quarter itself. Every graded number is out of sample, and the folds are stored (`walk`) so training reads, at each time, the fit made before it.
+
+**Verdicts.**
+- **Validated (predictive):** the pooled out-of-sample information coefficient of a × gap with the next move has a day-block bootstrap lower bound above 0. That bound is one-sided, with Bonferroni over every pair and horizon tested. The IC must also be positive in at least 60% of the quarters, on 120+ days.
+- **Tradable:** the largest 10% of gaps also paid for a perp round trip (28 bps) on their own. This is reported only; nothing trades the gap by itself. A gap of a few basis points is expected to be predictive but not tradable.
+
+**Where it is used.** A pair is used only once validated, and each use must pay on its own terms:
+- **Decision models (Kalshi):** `cl_exp1`, `cl_exp5`, `cl_exp15` and `cl_exp60` are the coin's expected move from its validated leaders' 1-minute index bars over the same minutes, in units of its per-minute volatility × √h. They are NaN otherwise, and feature selection decides whether they stay. Exits follow the model's fair value, so they move with it.
+- **Setup scorer:** the `crosslead` input group (15 and 60 minutes, from 15-minute candles) is kept only if it raises the development years.
+- **Setup exit:** the lead-lag exit is switched on only if it raises the setups' net R out of sample (docs/SETUPS.md, "The cross-coin lead-lag exit").
+
+**Running it.** The pipeline runs it weekly (step `cross_lead`, `data/models/cross_lead.json`, after `cross_graph`). It is skipped without the 1-minute store (`HISTORY_REPLAY=true` downloads it). By hand: `npm run research:cross-lead -- --history data/history [--years 4]`. Each pair's verdict and reason are in the log and the file (`why`).
 
 ## Calibration, champion / challenger, ensemble (October 2026)
 

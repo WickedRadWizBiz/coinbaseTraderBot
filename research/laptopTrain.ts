@@ -65,7 +65,7 @@ export interface TrainerSettings { host?: string; user?: string; port?: number; 
 export interface RemoteFile { path: string; size: number; mtime: number }
 
 /** Steps that continue a tournament or depend on one: what rounds after the first repeat. */
-export const CONTINUE_STEPS = ['ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'rule_book', 'gp', 'setups', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'perps', 'playbook', 'readiness'];
+export const CONTINUE_STEPS = ['ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'cross_lead', 'rule_book', 'gp', 'setups', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'perps', 'playbook', 'readiness'];
 
 /** Never sent to the server: links to replay days, caches it rebuilds, backfills, logs, partial writes. */
 const NO_PUSH = /^(work\/(snnfill|perp-dataset[^/]*|perp-backtest-days|sweep-replay|vol-replay|readiness-days|playbook-days|tanet-cache)\/|logs\/)|\.tmp$/;

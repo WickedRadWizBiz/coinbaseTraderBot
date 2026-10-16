@@ -9,6 +9,7 @@ import { LIB_SCHEMA } from '../bot/ta/librarian';
 import { XG_SCHEMA } from '../bot/ta/crossGraph';
 import { TANET_SCHEMA } from '../bot/ta/taNet';
 import { macroConfig } from '../bot/config';
+import { CL_SCHEMA } from '../bot/ta/crossLead';
 import { forecastSchema, setupInputStatus } from '../research/trainSetupModel';
 import { tmpDir } from './helpers';
 
@@ -30,6 +31,17 @@ test('setup inputs: each source found (or not) where its producing step writes i
   assert.match(st[1].name, /2016-01-01\.\.2017-12-31/);
   write('.xgraph', XG_SCHEMA);
   assert.ok(setupInputStatus(hist, macro).every((x) => x.ok));
+  // The cross-coin lead-lag study: there only with a pair validated at 15 or 60 minutes (what the setup scorer reads).
+  const clFile = path.join(hist, 'cross_lead.json');
+  const lead = (pairs: Array<{ h: number; validated: boolean }>) => fs.writeFileSync(clFile, JSON.stringify({ schema: CL_SCHEMA, pairs: pairs.map((x) => ({ leader: 'BTC', follower: 'SOL', ...x })) }));
+  assert.match(setupInputStatus(hist, macro, clFile)[4].detail!, /no study/);
+  lead([{ h: 1, validated: true }, { h: 15, validated: false }]);
+  let cl = setupInputStatus(hist, macro, clFile)[4];
+  assert.deepEqual([cl.producer, cl.ok], ['cross_lead', false]);
+  assert.match(cl.detail!, /no leader \/ coin pair predictive at 15 or 60 minutes/);
+  lead([{ h: 60, validated: true }]);
+  cl = setupInputStatus(hist, macro, clFile)[4];
+  assert.deepEqual([cl.ok, cl.detail], [true, 'BTC->SOL 60m']);
   // Only from 2018: the fractal window is not covered.
   const late = tmpDir();
   upsertSeries(late, 'tradingview', 'BTC.D', '1d', Array.from({ length: 3000 }, (_, i) => ({ ts: Date.UTC(2018, 0, 1) + i * DAY, o: 50, h: 51, l: 49, c: 50, v: 0 })));

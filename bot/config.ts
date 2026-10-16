@@ -308,6 +308,8 @@ export interface TaNetConfig {
   /** The cross-asset graph network (bot/ta/crossGraph.ts) and its training engine (XG_ENGINE: ts | torch | auto). */
   crossGraphPath: string;
   xgEngine: 'ts' | 'torch' | 'auto';
+  /** The cross-coin lead-lag study (bot/ta/crossLead.ts): the Kalshi features', the setup scorer's and its exit's source. */
+  crossLeadPath: string;
   /** Only heads that beat the naive forecast in the blind walk-forward test speak (default true). */
   requireValidated: boolean;
   /** Versions in the performance-weighted ensemble (bot/ta/taNetEnsemble.ts): the live network plus up to N-1 archived ones (1 = off). */
@@ -1261,6 +1263,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       modelPath: path.resolve(env.TA_NET_PATH ?? './params/ta_net.json'),
       librarianPath: path.resolve(env.LIBRARIAN_PATH ?? './params/librarian.json'),
       crossGraphPath: path.resolve(env.CROSS_GRAPH_PATH ?? './params/cross_graph.json'),
+      crossLeadPath: path.resolve(env.CROSS_LEAD_PATH ?? './params/cross_lead.json'),
       xgEngine: oneOf(env, 'XG_ENGINE', 'auto', ['ts', 'torch', 'auto'] as const),
       requireValidated: bool(env, 'TA_NET_REQUIRE_VALIDATED', true),
       ensemble: num(env, 'TA_NET_ENSEMBLE', 3, 1, 6),

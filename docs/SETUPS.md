@@ -90,6 +90,17 @@ A generic scale-out policy (the 4th-generation spec's 5.1): partial take-profits
 - It stays a proposal: `SETUP_SCALE_OUT` is `off` until you adopt it.
 - Once on, the settings are recorded in the setup model (`scaleOut`), and the live trader takes the same partial exits through the same reconciliation it uses for the half-off at the first target.
 
+### The cross-coin lead-lag exit (on only when it pays)
+
+When BTC or ETH moves and a coin has not followed yet, does the coin make up the gap over the next 15 to 60 minutes? The weekly `cross_lead` study measures it (docs/TA_NETWORK.md, "Cross-coin lead-lag"). If a coin has a predictive leader, the exit works like this:
+- **The reading:** at each 15-minute close, the coin's expected move over the next 15 and 60 minutes from the part of the leaders' move it has not made yet, in units of its own volatility over that span (both horizons summed).
+- **The rule:** a trade is closed at that close (taker exit) when the reading points against it by more than k.
+- **How it is chosen:** the trainer replays every setup with a lead-lag reading at its entry, with the same plans the lanes trade, with and without the exit at k = 0.5, 1, 1.5 and 2. Training reads the study's walk-forward fits, each made before the time it is used. The exit is switched on, at the k with the best gain, only if both hold:
+  - its net R gain per trade on the development years has a month-block bootstrap lower bound above 0 (Bonferroni over the four ks);
+  - it gains on the holdout too.
+  The final window is not looked at. Otherwise it stays off, and the log says why (`lead-lag exit ...`).
+- **Recorded in the model:** when on, the k and the gains are recorded in the setup model (`crossLeadExit`). The scorer and the lane validation are then trained on trades with that exit, and the live trader makes the same exit from the study's final fit, from the close of the 15-minute bar the trade entered in.
+
 ### Liquidation beyond the stop (`bot/risk/liquidation.ts`)
 
 Under cross margin, a position is liquidated when the account's equity, after the move, falls to its maintenance margin. If the liquidation price sat inside the stop, the exchange would close the trade at a worse price before the stop could fire. So:
@@ -278,6 +289,10 @@ The setup trader used to stand alone. It now reads the TA network and the perps 
 
 **The cross-asset graph network (docs/TA_NETWORK.md, "The cross-asset graph network")**
 - **Model inputs, only if they help:** the coin's forecast return relative to the basket over the next 4 and 24 hours and its rank among the coins at the last closed hour (with copies oriented to the trade's side). In research they come from the network's walk-forward forecasts, and live from the same model on every coin's candles. The `xgraph` group is kept on the same terms as the TA network inputs (`groupChoice.xgraph`).
+
+**Cross-coin lead-lag (docs/TA_NETWORK.md, "Cross-coin lead-lag")**
+- **Model inputs, only if they help:** the coin's expected move over the next 15 and 60 minutes from the part of BTC's and ETH's recent move it has not made yet, in its own volatility units, for the leader / horizon pairs the study validated (with copies oriented to the trade's side). In research they come from the study's walk-forward fits, and live from its final fit on every coin's 15-minute candles. The `crosslead` group is kept on the same terms as the TA network inputs (`groupChoice.crosslead`). Only coins with a validated leader have a reading, so instead of 80% coverage it needs 300 development setups with one.
+- **Exit, only if it pays:** see "The cross-coin lead-lag exit" above.
 
 **Fractal Alignment Engine and waterfall mode (docs/FRACTAL.md)**
 - **Model inputs, only if they help:** where the 2018-to-now BTC.D cycle stands on its 2016–2017 parent (progress, phase, time dilation, fit, the projected BTC.D change, weeks to the next parent waterfall) and the waterfall legs (BTC.D against the 55% gate, a USDT.D breakdown, SHIB volume velocity). They are computed point in time for every setup, as the `fractal` group, kept on the same terms as the TA network inputs (`groupChoice.fractal`).

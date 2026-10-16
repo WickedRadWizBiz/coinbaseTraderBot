@@ -81,6 +81,11 @@ export interface SetupModelParams {
   scaleOut?: ScaleOutSettings;
   /** Coins the spot pullback was detected for (bot/setups/detectors.ts SPOT_PB; unset = none). */
   spotPullback?: string[];
+  /** The cross-coin lead-lag exit the events were simulated with (bot/ta/crossLead.ts; unset = off): close a trade at a
+   *  15-minute close when the coin's expected move from the leaders, against the trade, exceeds k of its own volatility.
+   *  Set by the trainer only when it raised the setups' net R on the development years and did not lower it on the
+   *  holdout. */
+  crossLeadExit?: { k: number; devGainR: number; devLoR: number; holdGainR: number; trades: number };
   lanes: Partial<Record<Lane, LaneScorer>>;
   book: LaneBookParams;
   costs: CostModel;
