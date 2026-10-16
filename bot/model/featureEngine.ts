@@ -27,6 +27,7 @@ import { marketContext } from '../ta/marketContext';
 import type { TaSnapshot, TfState } from '../ta/analyzer';
 import { activeTaNet, marketCandleSets, type TaNetOutput } from '../ta/taNet';
 import { xgLiveReading, type XgReading } from '../ta/crossGraph';
+import { activeCrossLead, CL_HORIZONS } from '../ta/crossLead';
 import type { Candle } from '../ta/indicators';
 import { activeLibrarian, LIB_STRATEGIES, type LibrarianReading } from '../ta/librarian';
 
@@ -299,6 +300,8 @@ export interface FeatureContext {
   openTime?: number;
   /** One-minute bars of the settlement index for this asset. */
   bars?: BarStore;
+  /** Every asset's one-minute bars (the cross-coin lead-lag features read the leaders'). */
+  peerBars?: Map<string, BarStore>;
   /** Scheduled macro releases. */
   calendar?: MacroEvent[];
   /** This contract's ticker and the other strikes/brackets settling with it (hourly events). */
@@ -982,6 +985,22 @@ Object.assign(FEATURES, {
   xg_rel24: { group: 'tanet', tier: 'T2', description: "Cross-asset graph: the coin's forecast return relative to the basket over the next 24 hours (volatility units)", fn: (c, k) => xgOf(c, k)?.rel24 ?? NA },
   xg_rank: { group: 'tanet', tier: 'T2', description: 'Cross-asset graph: the coin\'s rank among the coins by the 24-hour forecast (-1 weakest .. 1 strongest)', fn: (c, k) => xgOf(c, k)?.rank ?? NA },
 } satisfies typeof FEATURES);
+
+// ---- Cross-coin lead-lag (bot/ta/crossLead.ts): NaN unless the leader / coin pair was predictive out of sample ----
+/** The coin's expected move over the next h minutes from the part of the leaders' last-h-minutes move it has not made yet,
+ *  in units of its own volatility over h (the per-minute volatility of its settlement-index bars). */
+const clExp = (c: FeatureContext, h: number): number => {
+  const cl = activeCrossLead(c.now);
+  if (!cl || !c.asset || !c.bars || !c.peerBars) return NA;
+  const sd = c.bars.sigma1m();
+  if (!sd) return NA;
+  // Every coin over the same minutes: the coin's last completed bar (a leader whose bar for that minute is not in is left out).
+  const end = c.bars.bars[c.bars.bars.length - 1]?.ts;
+  const ret = (a: string) => { const xs = (a === c.asset ? c.bars : c.peerBars!.get(a))?.last(h + 1); return xs && xs[xs.length - 1].ts === end ? Math.log(xs[xs.length - 1].c / xs[0].c) : undefined; };
+  const e = cl.expected(c.asset, h, ret, c.now);
+  return e === undefined || !Number.isFinite(e) ? NA : Math.max(-10, Math.min(10, e / (sd * Math.sqrt(h))));
+};
+Object.assign(FEATURES, Object.fromEntries(CL_HORIZONS.map((h) => [`cl_exp${h}`, { group: 'returns', tier: 'T2', description: `Cross-coin lead-lag: the coin's expected move over the next ${h} minute(s) from the leaders' (BTC, ETH) move it has not made yet (volatility units; validated pairs only)`, fn: (c: FeatureContext) => clExp(c, h) }])) satisfies typeof FEATURES);
 
 export const ALL_FEATURES = Object.keys(FEATURES);
 export const featuresInGroups = (groups: FeatureGroup[]) => ALL_FEATURES.filter((n) => groups.includes(FEATURES[n].group));

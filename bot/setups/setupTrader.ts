@@ -33,7 +33,8 @@ import type { DirTarget, DirectionalContext } from '../perps/hedger';
 import type { PerpHub } from '../perps/perpData';
 import type { PerpGateway } from '../perps/perpRest';
 import { adaptToVol, applyRatchet, applyScaleOut, atr4hAt, detectLast, FAST_TFS, SLOW_TFS, SETUP_MIN_BARS, TF_MS, type Lane, type SetupSignal } from './detectors';
-import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from './exits';
+import { DEFAULT_COSTS, exitTrade, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from './exits';
+import { activeCrossLead, crossLeadSetupReading, crossLeadSum, type CrossLeadReading } from '../ta/crossLead';
 import type { LibrarianReading } from '../ta/librarian';
 import type { XgReading } from '../ta/crossGraph';
 import { setupFeatureMap, setupVector, type SetupBars, type TaNetReading } from './features';
@@ -232,12 +233,19 @@ export class SetupTrader {
     try { return this.model?.uses('xgraph') ? this.d.crossGraph?.(asset, now) : undefined; } catch { return undefined; }
   }
 
+  /** Cross-coin lead-lag for an asset now (the study's final fit, 15-minute bars of every coin): for the model's
+   *  "crosslead" inputs, or (`forExit`) for the lead-lag exit the model was trained with. */
+  private clReading(asset: string, now: number, forExit = false): CrossLeadReading | undefined {
+    if (!(forExit ? this.model?.params.crossLeadExit : this.model?.uses('crosslead'))) return undefined;
+    try { return crossLeadSetupReading(activeCrossLead(now), asset, now, (a) => this.d.candles(a)?.bars['15m'], true); } catch { return undefined; }
+  }
+
   /** Model score of a setup as of `t` (fresh features), NaN without a model. */
   private score(sig: SetupSignal, t: number): number {
     if (!this.model) return NaN;
     const bars = this.bars(sig.asset);
     if (!bars) return NaN;
-    return this.model.score(sig.lane, setupVector(setupFeatureMap(sig, bars, this.bars('BTC'), t, this.reading(sig.asset, t), marketContext()?.character(sig.asset), macro()?.inputs(), this.libReading(sig.asset, t), this.xgReading(sig.asset, t))));
+    return this.model.score(sig.lane, setupVector(setupFeatureMap(sig, bars, this.bars('BTC'), t, this.reading(sig.asset, t), marketContext()?.character(sig.asset), macro()?.inputs(), this.libReading(sig.asset, t), this.xgReading(sig.asset, t), this.clReading(sig.asset, t))));
   }
 
   /** The SNN gate (hot reload on change; off when missing). */
@@ -309,8 +317,19 @@ export class SetupTrader {
       }
       const bar: Candle = { ts: now, o: prev, h: Math.max(prev, px), l: Math.min(prev, px), c: px, v: 0 };
       const was = t.partialDone, wasFrac = t.frac;
-      if (stepTrade(t, bar, 0, this.d.params.costs, tfClose)) { this.record(t, now); this.book.remove(asset); changed = true; if (t.closed?.reason !== 'target') exitNow.add(asset); }
+      if (stepTrade(t, bar, 0, this.d.params.costs, tfClose)) { this.record(t, now); this.book.remove(asset); changed = true; if (t.closed?.reason !== 'target') exitNow.add(asset); continue; }
       else if (t.partialDone !== was || t.frac !== wasFrac || tfClose) changed = true;
+      // The cross-coin lead-lag exit (only when the model was trained with it): at each 15-minute close, the leaders'
+      // expected pull on this coin against the trade by more than k of its volatility closes it.
+      const ex = this.model?.params.crossLeadExit;
+      const m15 = ex ? this.d.candles(asset)?.bars['15m'] : undefined;
+      const last15 = m15?.[m15.length - 1];
+      // From the close of the bar the trade entered in (as in training, which enters at a bar's open).
+      if (ex && last15 && last15.ts + TF_MS['15m']! > t.entryTs && (this.seen.get(`cl|${asset}`) ?? 0) < last15.ts) {
+        this.seen.set(`cl|${asset}`, last15.ts);
+        const e = crossLeadSum(this.clReading(asset, now, true));
+        if (e !== undefined && t.dir * e < -ex.k) { exitTrade(t, px, now, 'leadlag', this.d.params.costs); this.record(t, now); this.book.remove(asset); changed = true; exitNow.add(asset); }
+      }
     }
 
     // 2. New setups on newly closed candles.

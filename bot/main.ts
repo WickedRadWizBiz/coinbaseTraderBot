@@ -57,6 +57,7 @@ import { VolModel } from './model/volModel';
 import { activeTaNet, setTaNet, setTaNetContextSource, TaNet, TaNetRuntime } from './ta/taNet';
 import { Librarian, setLibrarianPath } from './ta/librarian';
 import { CrossGraph, setCrossGraphPath, XgMemo } from './ta/crossGraph';
+import { setCrossLeadPath } from './ta/crossLead';
 import { FillModel } from './tca/fillModel';
 import { TennisScoreClient } from './tennis/liveTennisApi';
 import { TennisFairModel } from './tennis/tennisFair';
@@ -402,6 +403,8 @@ async function main(): Promise<void> {
   // The Librarian the general features read (validated heads only; reloaded when the pipeline promotes a new one).
   setLibrarianPath(cfg.taNet.enabled ? () => resolveModelPaths(cfg).librarian : undefined);
   setCrossGraphPath(cfg.taNet.enabled ? () => resolveModelPaths(cfg).cross_graph : undefined);
+  // Cross-coin lead-lag (validated pairs only): the Kalshi features, the setup scorer's inputs and its exit read it.
+  setCrossLeadPath(() => resolveModelPaths(cfg).cross_lead);
   // Performance-weighted ensemble: the live network plus the latest archived versions (research/champion.ts).
   setTaNetEnsemble(cfg.taNet.enabled && cfg.taNet.ensemble > 1 ? new TaNetEnsemble(path.join(cfg.autoTrain.dir, 'archive', 'ta_net'), cfg.taNet.ensemble) : undefined);
   // Market context for the directional system: breadth, risk gauges, each coin's character

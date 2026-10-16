@@ -372,6 +372,9 @@ It keeps the computer usable while it trains (`research/trainerResources.ts`):
   - It learns from each coin's return relative to the basket, and forecasts which coins outrun the others over the next 4 and 24 hours.
   - It trains walk-forward on PyTorch, with a TypeScript mirror for live use.
   - It is graded against momentum / reversal and a long-short book after costs.
+- **Cross-coin lead-lag** (`bot/ta/crossLead.ts`, `research/crossLead.ts`): when BTC or ETH moves, does another coin make up the part of the move it has not made yet over the next 1–60 minutes?
+  - It is measured walk-forward on the 1-minute history, and a pair is used only if it was predictive out of sample.
+  - The Kalshi models get it as features. The setup scorer gets it as an optional input group, and as an exit that is switched on only if it raises the trades' net R out of sample.
 
 `docs/TA_NETWORK.md` covers the commands, the training, and the first real results.
 

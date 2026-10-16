@@ -1537,7 +1537,7 @@ export class Engine {
       inWindow: fv.regime !== 'pre_window', book, micro: md.features.micro.get(m.ticker), index: idx!, spot: md.spot.get(m.asset), asset: m.asset, usdtd: md.usdtd, btcd: md.btcd,
       closeTs: m.closeTime, volProfile: this.d.volProfile, asiaRange: md.features.asiaRange.get(m.asset),
       kind: m.kind, strike: terms.strike, cap: terms.cap, d2: fv.d2, vEff: fv.vEff, sigmaPricing, tNu: model.params.tNu,
-      bars: md.features.bars.get(m.asset), openTime: m.openTime, calendar: this.d.calendar,
+      bars: md.features.bars.get(m.asset), peerBars: md.features.bars, openTime: m.openTime, calendar: this.d.calendar,
       ticker: m.ticker, siblings: m.kind === 'updown' ? undefined : ladderQuotes(md.markets.values(), (t) => md.books.get(t), m.asset, m.closeTime),
       perp: md.features.perps.get(m.asset), candles: md.features.candles.get(m.asset),
       snn: this.snnContext(m.asset, m.ticker),

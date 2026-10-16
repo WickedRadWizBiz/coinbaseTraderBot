@@ -29,7 +29,7 @@ export interface CostModel {
 
 export const DEFAULT_COSTS: CostModel = { entry: 0.0014, makerExit: 0.0005, takerExit: 0.0014, fundingPer8h: 0.0001 };
 
-export type ExitReason = 'stop' | 'breakeven' | 'trail' | 'target' | 'time' | 'manual';
+export type ExitReason = 'stop' | 'breakeven' | 'trail' | 'target' | 'time' | 'manual' | 'leadlag';
 
 export interface OpenTrade {
   asset: string;
@@ -83,6 +83,11 @@ function close(t: OpenTrade, px: number, ts: number, reason: ExitReason, cost: n
   t.costs += t.frac * cost;
   t.frac = 0;
   t.closed = { ts, px, reason };
+}
+
+/** Close what is left of a trade now at `px` (taker exit): an exit decided outside the plan (bot/ta/crossLead.ts). */
+export function exitTrade(t: OpenTrade, px: number, ts: number, reason: ExitReason, costs: CostModel = DEFAULT_COSTS): void {
+  if (!t.closed) close(t, px, ts, reason, costs.takerExit);
 }
 
 /**

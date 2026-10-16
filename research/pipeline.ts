@@ -25,6 +25,9 @@
 //                    validated heads are features of the decision models) and the walk's forecasts for the setups
 //   0c~ cross_graph  the cross-asset graph network on relative returns (research/trainCrossGraph.ts, weekly; PyTorch when
 //                    XG_ENGINE finds it) -> cross_graph.json and the walk's forecasts for the setups
+//   0c` cross_lead   cross-coin lead-lag on the 1-minute history (research/crossLead.ts, weekly): which leader / coin pairs
+//                    are predictive out of sample -> cross_lead.json (the Kalshi features, the setup scorer's inputs and
+//                    the lead-lag exit, each used only where it pays)
 //   0c* lead_lag     does Coinbase spot lead the Kalshi perp? (research/leadLag.ts, weekly, on the recordings) ->
 //                    lead_lag.json, the verdict per coin the spot-led setups wait for
 //   0d. setups       setup scorer for the fast / slow lanes (TA network inputs kept only if they help)
@@ -110,6 +113,8 @@ import { exportTaNetOos, oosDir } from './taNetOos';
 import { libDir, trainLibrarian } from './librarian';
 import { leadLagStudy } from './leadLag';
 import { trainCrossGraph, xgDir } from './trainCrossGraph';
+import { trainCrossLead } from './crossLead';
+import { CL_SCHEMA, setCrossLeadPath } from '../bot/ta/crossLead';
 import { setCrossGraphPath, XG_SCHEMA } from '../bot/ta/crossGraph';
 import { LIB_SCHEMA, setLibrarianPath } from '../bot/ta/librarian';
 
@@ -127,7 +132,7 @@ import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet'
 /** Coins with Kalshi crypto contracts: the SNN tournaments' transition penalty reads their regime changes. */
 const SNN_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
 
-export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'rule_book', 'gp', 'lead_lag', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
+export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'cross_lead', 'rule_book', 'gp', 'lead_lag', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -172,6 +177,8 @@ export interface PipelineState {
   setupInputs?: string[];
   /** Last rule-book study (research/ruleBook.ts, weekly). */
   ruleBookAt?: number;
+  /** Last cross-coin lead-lag study (research/crossLead.ts, weekly). */
+  crossLeadAt?: number;
   /** Last Librarian training (research/librarian.ts, weekly). */
   librarianAt?: number;
   /** Last spot vs perp lead-lag study (research/leadLag.ts, weekly). */
@@ -267,7 +274,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   for (const d of REPLAYABLE) fs.mkdirSync(fillDir(d), { recursive: true });
   const state = readState(A.dir);
   if (o.forceAll) {
-    delete state.ruleBookAt; delete state.librarianAt; delete state.leadLagAt; delete state.crossGraphAt; delete state.gpAt; delete state.setupsTrainedAt; delete state.taNetTrainedAt; state.sweptAt = {};
+    delete state.ruleBookAt; delete state.librarianAt; delete state.leadLagAt; delete state.crossGraphAt; delete state.crossLeadAt; delete state.gpAt; delete state.setupsTrainedAt; delete state.taNetTrainedAt; state.sweptAt = {};
     o = { ...o, forceAblation: true, forceSnnPbt: true, forceTaNet: true };
     log('sweeping everything: every step is due this run');
   }
@@ -356,6 +363,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   // The Librarian the datasets' features read (its validated heads; the promoted file, else the shipped one).
   setLibrarianPath(T.enabled ? () => (fs.existsSync(promoted('librarian')) ? promoted('librarian') : cfg.taNet.librarianPath) : undefined);
   setCrossGraphPath(T.enabled ? () => (fs.existsSync(promoted('cross_graph')) ? promoted('cross_graph') : cfg.taNet.crossGraphPath) : undefined);
+  setCrossLeadPath(() => (fs.existsSync(promoted('cross_lead')) ? promoted('cross_lead') : cfg.taNet.crossLeadPath));
   // Seed history shipped with the release (deploy/seed/history: Yahoo daily bars from before Binance's
   // archives start), imported once per file version; lowest source priority, so it only fills gaps.
   if (want('history')) {
@@ -559,14 +567,29 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     }, noHistory ?? (due ? undefined : `ran ${((now - state.gpAt!) / 86_400_000).toFixed(1)} day(s) ago (every ${A.gpEveryDays} day(s))`));
   }
 
+  // ---- 0c`. Cross-coin lead-lag on the 1-minute history (research/crossLead.ts) ----
+  if (want('cross_lead')) {
+    const file = promoted('cross_lead');
+    const due = !fs.existsSync(file) || !state.crossLeadAt || now - state.crossLeadAt >= 7 * 86_400_000 || readLibSchema(file) !== CL_SCHEMA;
+    const noMinutes = fs.existsSync(path.join(T.historyDir, 'binance-1m')) ? undefined : `no 1-minute history in ${T.historyDir}/binance-1m (the history step downloads it with HISTORY_REPLAY=true)`;
+    await run('cross_lead', async () => {
+      const p = await trainCrossLead(T.historyDir, { log });
+      writeAtomic(file, JSON.stringify(p));
+      state.crossLeadAt = now;
+      return { promoted: true, version: p.version, from: p.from, tests: p.tests, validated: p.pairs.filter((x) => x.validated).map((x) => `${x.leader}->${x.follower} ${x.h}m`), tradable: p.pairs.filter((x) => x.tradable).map((x) => `${x.leader}->${x.follower} ${x.h}m`) };
+    }, noMinutes ?? (due ? undefined : `ran ${((now - state.crossLeadAt!) / 86_400_000).toFixed(1)} day(s) ago (weekly)`));
+  }
+
   // ---- 0d. Setup scorer for the fast / slow lane trader (years of 15m / 1h / daily candles) ----
   if (want('setups')) {
     const file = promoted('setups');
     const P = cfg.perps;
     const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet`;
-    // An optional input that has arrived since the last training (BTC.D's early years, the Librarian's forecasts)
+    // An optional input that has arrived since the last training (BTC.D's early years, the Librarian's forecasts, a
+    // lead-lag study with a validated pair)
     // makes it due now instead of after SETUP_RETRAIN_DAYS.
-    const inputs = noHistory ? [] : setupInputStatus(T.historyDir, cfg.macro);
+    const clFile = fs.existsSync(promoted('cross_lead')) ? promoted('cross_lead') : cfg.taNet.crossLeadPath;
+    const inputs = noHistory ? [] : setupInputStatus(T.historyDir, cfg.macro, clFile);
     const arrived = inputs.filter((x) => x.ok && !(state.setupInputs ?? []).includes(x.name)).map((x) => x.name);
     const due = !fs.existsSync(file) || !state.setupsTrainedAt || now - state.setupsTrainedAt >= P.setupRetrainDays * 86_400_000 || arrived.length > 0;
     await run('setups', async () => {
@@ -575,7 +598,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         const st = steps.find((x) => x.step === name || x.step.startsWith(`${name} `));
         return !st ? 'did not run this round' : st.error ? `FAILED this round: ${st.error.split('\n')[0].slice(0, 200)}` : st.skipped ? `skipped this round (${st.skipped})` : 'ran this round';
       };
-      log(`setups: inputs: ${inputs.map((x) => (x.ok ? `${x.name}: yes` : `${x.name}: MISSING (${x.producer.split(' ')[0] === 'history' ? `${x.detail}; TradingView fill ${T.tvFill ? 'on' : 'off'}, history ${stepNow('history')}` : `${x.producer} ${stepNow(x.producer)}`})`)).join('; ')}${arrived.length && state.setupsTrainedAt ? ` (new since the last training: ${arrived.join(', ')})` : ''}`);
+      log(`setups: inputs: ${inputs.map((x) => (x.ok ? `${x.name}: yes` : `${x.name}: MISSING (${x.producer.split(' ')[0] === 'history' ? `${x.detail}; TradingView fill ${T.tvFill ? 'on' : 'off'}, history ${stepNow('history')}` : `${x.detail ? `${x.detail}; ` : ''}${x.producer} ${stepNow(x.producer)}`})`)).join('; ')}${arrived.length && state.setupsTrainedAt ? ` (new since the last training: ${arrived.join(', ')})` : ''}`);
       const cand = path.join(work, 'setup_model.candidate.json');
       const oosCand = path.join(work, 'setup_oos.candidate.json');
       const p = await trainSetupMain(argsOf({
@@ -583,6 +606,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         ratchet: P.setupRatchet, 'ratchet-stop-atr': P.setupRatchetStopAtr, 'ratchet-be-atr': P.setupRatchetBeAtr, 'ratchet-trail-start-atr': P.setupRatchetTrailStartAtr, 'ratchet-trail-atr': P.setupRatchetTrailAtr, 'ratchet-vol-k': P.setupRatchetVolK,
         'scale-out': P.setupScaleOut, 'scale-r1': P.setupScaleR1, 'scale-f1': P.setupScaleF1, 'scale-r2': P.setupScaleR2, 'scale-f2': P.setupScaleF2, 'scale-trail-atr': P.setupScaleTrailAtr,
         'spot-pb': P.setupSpotPb, 'lead-lag': path.join(A.dir, 'lead_lag.json'),
+        'cross-lead': clFile,
       }));
       state.setupsTrainedAt = now;
       state.setupInputs = inputs.filter((x) => x.ok).map((x) => x.name);

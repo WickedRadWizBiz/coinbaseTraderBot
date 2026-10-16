@@ -129,7 +129,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     now, fairValue: x.fv.pYes, mid: x.mid, tauSec: x.tauSec, sigmaPerSqrtSec: x.vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma, inWindow: x.fv.regime !== 'pre_window',
     book: x.book, micro: st.features.micro.get(m.ticker), index: x.idx, spot: st.spot.get(m.asset), asset: m.asset, usdtd: st.usdtd, btcd: st.btcd,
     closeTs: m.closeTime, asiaRange: st.features.asiaRange.get(m.asset), kind: m.kind, strike: x.terms.strike, cap: x.terms.cap, d2: x.fv.d2, vEff: x.fv.vEff,
-    sigmaPricing: x.vol.sigmaPerSqrtSec, tNu: model.params.tNu, bars: st.features.bars.get(m.asset), openTime: m.openTime, calendar: o.calendar, ticker: m.ticker,
+    sigmaPricing: x.vol.sigmaPerSqrtSec, tNu: model.params.tNu, bars: st.features.bars.get(m.asset), peerBars: st.features.bars, openTime: m.openTime, calendar: o.calendar, ticker: m.ticker,
     siblings: m.kind === 'updown' ? undefined : ladderQuotes(st.markets.values(), (t) => st.books.get(t), m.asset, m.closeTime),
     perp: st.features.perps.get(m.asset), candles: st.features.candles.get(m.asset),
   });
