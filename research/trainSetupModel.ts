@@ -435,11 +435,13 @@ function crossLeadInput(file: string): SetupInputStatus {
 export function setupInputStatus(hist: string, macro = macroConfig(process.env), crossLeadFile?: string): SetupInputStatus[] {
   const ms = macroSettings(macro);
   const daily = loadMacroDaily(hist);
-  const btcd = daily.btcd;
+  const btcd = daily.btcd, usdtd = daily.usdtd ?? [];
   const day = (t: number) => new Date(t).toISOString().slice(0, 10);
   return [
     { name: 'TA network walk-forward', ok: forecastSchema(path.join(oosDir(hist), 'forecasts.json')) === TANET_SCHEMA, producer: 'ta_net_oos' },
     { name: `fractal (BTC.D daily ${day(ms.fractal.parentFrom)}..${day(ms.fractal.parentTo - DAY)})`, ok: new MacroSeries(daily, ms.params, ms.fractal).hasParent(), producer: 'history (TradingView, TV_FILL)', detail: btcd.length ? `BTC.D daily ${day(btcd[0].ts)}..${day(btcd[btcd.length - 1].ts)}` : 'no BTC.D daily' },
+    // The waterfall's USDT.D leg (a fractal input), over the same years.
+    { name: `waterfall USDT.D leg (USDT.D daily from ${day(ms.fractal.parentFrom)})`, ok: usdtd.length > 0 && usdtd[0].ts <= ms.fractal.parentFrom + 7 * DAY, producer: 'history (TradingView, TV_FILL)', detail: usdtd.length ? `USDT.D daily ${day(usdtd[0].ts)}..${day(usdtd[usdtd.length - 1].ts)}` : 'no USDT.D daily' },
     { name: 'Librarian walk-forward', ok: forecastSchema(path.join(libDir(hist), 'forecasts.json')) === LIB_SCHEMA, producer: 'librarian' },
     { name: 'cross-graph walk-forward', ok: forecastSchema(path.join(xgDir(hist), 'forecasts.json')) === XG_SCHEMA, producer: 'cross_graph' },
     ...(crossLeadFile === undefined ? [] : [crossLeadInput(crossLeadFile)]),
@@ -470,6 +472,8 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
   const ms = macroSettings(macroConfig(process.env));
   const macro = new MacroSeries(loadMacroDaily(hist), ms.params, ms.fractal);
   if (!macro.hasParent()) log(`no BTC.D daily history for the fractal parent window (TradingView CRYPTOCAP:BTC.D, fetched by the history step's TradingView fill, TV_FILL): the fractal inputs stay blank`);
+  const usdtd0 = macro.daily.usdtd?.[0]?.ts;
+  if (usdtd0 === undefined || usdtd0 > ms.fractal.parentFrom + 7 * DAY) log(`${usdtd0 === undefined ? 'no USDT.D daily history' : `USDT.D daily history starts ${iso(usdtd0)}`} (TradingView CRYPTOCAP:USDT.D, fetched by the history step's TradingView fill, TV_FILL): the waterfall's USDT.D leg stays blank before ${usdtd0 === undefined ? 'it arrives' : iso(usdtd0 + 37 * DAY)}`);
   const lib = new LibIndex(loadLibForecasts(hist));
   if (!lib.f) log(`no Librarian walk-forward forecasts in ${hist}/.librarian (pipeline step librarian; by hand npm run research:librarian): its inputs stay blank`);
   const xg = new XgIndex(loadXgForecasts(hist));

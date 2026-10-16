@@ -105,7 +105,7 @@ import { forecastSchema, setupInputStatus, trainSetupMain } from './trainSetupMo
 import { sweepMain } from './sweep';
 import { collectFiles, importFile } from './history/importCsv';
 import { downloadKalshiHistory, downloadKalshiTrades } from './history/kalshiHistory';
-import { tvFill } from './history/tradingview';
+import { dominanceNeedFrom, tvFill } from './history/tradingview';
 import { linkDays, recordingDayList, recordingFiles, recordingsUsage } from '../bot/marketdata/recordingFiles';
 import { readJournalTrades } from '../bot/setups/journal';
 import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
@@ -408,8 +408,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       let tradingview: unknown;
       if (T.tvFill) {
         state.tvTried ??= {};
-        // BTC.D must reach back to the Fractal Alignment Engine's parent window (2016-2017 by default).
-        try { tradingview = await tvFill({ histDir: T.historyDir, assets, log: (m) => log(`tradingview: ${m}`), tried: state.tvTried, needFrom: { 'BTC.D': cfg.macro.parentFrom } }); } catch (e) { tradingview = { error: String(e) }; }
+        // BTC.D and USDT.D must reach back to the Fractal Alignment Engine's parent window (2016-2017 by default).
+        try { tradingview = await tvFill({ histDir: T.historyDir, assets, log: (m) => log(`tradingview: ${m}`), tried: state.tvTried, needFrom: dominanceNeedFrom(cfg.macro.parentFrom) }); } catch (e) { tradingview = { error: String(e) }; }
       }
       // Kalshi's own settled contracts (1-minute candles) for the traded series: real contract prices for
       // research. Time-boxed (KALSHI_HISTORY_BUDGET_MIN); the rest resumes on the next run.

@@ -10,7 +10,7 @@ import { KEY_PATTERNS, TALIB_KEYS, taEngine, talibCore, talibExtras, tl } from '
 import { tfState } from '../bot/ta/analyzer';
 import { atr, rsi, type Candle } from '../bot/ta/indicators';
 import { upsertSeries } from '../bot/marketdata/historyStore';
-import { findSpotHoles, indexNeeds, runTvFetch, tvFill } from '../research/history/tradingview';
+import { dominanceNeedFrom, findSpotHoles, indexNeeds, runTvFetch, tvFill } from '../research/history/tradingview';
 import { ensureTvDatafeed, TV_DATAFEED_SPEC } from '../research/tvSetup';
 import { loadSeries } from '../research/history/candles';
 import { DAILY_CONTEXT_FEATURES, SLOW_INDEXES, TaNetContext } from '../bot/ta/taNetContext';
@@ -131,6 +131,13 @@ test('TradingView: BTC.D that does not reach the fractal window gets the full 5,
   // After the backfill (daily back to 2013), the window is covered: nothing more to ask.
   upsertSeries(dir, 'tradingview', 'BTC.D', '1d', walk(5000, DAY, now - 5000 * DAY, 5));
   assert.ok(!indexNeeds(dir, now + 9 * DAY, { needFrom: { 'BTC.D': from }, tried: {} }).full.includes('BTC.D'));
+  // USDT.D under the same rule (the pipeline's dominanceNeedFrom): its 3,500 bars start in 2017, so it gets the full
+  // backfill too; TradingView's USDT.D, from 2015, covers the window.
+  assert.deepEqual(dominanceNeedFrom(from), { 'BTC.D': from, 'USDT.D': from });
+  need = indexNeeds(dir, now + 9 * DAY, { needFrom: dominanceNeedFrom(from), tried: {} });
+  assert.ok(need.full.includes('USDT.D') && !need.full.includes('BTC.D'), 'USDT.D from 2017: the full backfill');
+  upsertSeries(dir, 'tradingview', 'USDT.D', '1d', walk(4241, DAY, now - 4241 * DAY, 8));
+  assert.ok(!indexNeeds(dir, now + 9 * DAY, { needFrom: dominanceNeedFrom(from), tried: {} }).full.includes('USDT.D'));
   // tvFill asks for it with 5,000 bars at 1d / 4h / 1h.
   const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-test-'));
   for (const n of ['BTC.D', 'USDT.D', 'TOTAL3', 'OTHERS.D']) upsertSeries(dir2, 'tradingview', n, '1d', walk(n === 'BTC.D' ? 3200 : 4000, DAY, now - (n === 'BTC.D' ? 3200 : 4000) * DAY + DAY, 6));

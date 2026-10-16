@@ -348,10 +348,11 @@ its data was published), or new dominance readings near it.
 ## Are all the setup scorer's inputs there?
 
 Before each setups training, the log gives one line on the scorer's optional inputs. It names each input and what its producer did this round, for example:
-`setups: inputs: TA network walk-forward: yes; fractal (BTC.D daily 2016-01-01..2017-12-31): yes; Librarian walk-forward: MISSING (librarian FAILED this round: ...); cross-graph walk-forward: yes; cross-coin lead-lag (15 / 60 min): yes`
+`setups: inputs: TA network walk-forward: yes; fractal (BTC.D daily 2016-01-01..2017-12-31): yes; waterfall USDT.D leg (USDT.D daily from 2016-01-01): yes; Librarian walk-forward: MISSING (librarian FAILED this round: ...); cross-graph walk-forward: yes; cross-coin lead-lag (15 / 60 min): yes`
 
 - **TA network walk-forward:** step `ta_net_oos`.
 - **Fractal inputs:** BTC.D daily history covering 2016-2017. The history step's TradingView fill fetches it (tvdatafeed, set up once in `trainer-data\tv-env`): 5,000 daily bars of CRYPTOCAP:BTC.D, back to 2013, in one request.
+- **Waterfall USDT.D leg:** USDT.D daily history from 2016, fetched the same way. One request returns CRYPTOCAP:USDT.D back to 2015.
 - **Librarian:** step `librarian`, weekly. It also runs whenever its forecasts file is missing, for example when its model was copied from the server without them.
 - **Cross-asset graph:** step `cross_graph`, weekly, with the same rule.
 - **Cross-coin lead-lag:** step `cross_lead`, weekly, on the 1-minute history the history step downloads for the replay. It counts as there only when the study validated a leader / coin pair at 15 or 60 minutes (the horizons the scorer reads). Otherwise the line says what the study found, for example `MISSING (the study (40 pairs tested) found no leader / coin pair predictive at 15 or 60 minutes; cross_lead ran this round)`. That is a finding, not a fault.
@@ -368,7 +369,13 @@ too:
 | Kalshi SNN and perps SNN (USDT.D 15-minute change input) | the live rebuild, every second | the replay's rebuild |
 | Perps model (USDT.D change, BTC.D change by coin) | the live rebuild | the replay's rebuild, every perpetual day since 2019 |
 | Kalshi decision features, the TA snapshot's dominance quadrant, the alt-coin risk-on rule | the live rebuild | the replay's rebuild in the backtests and sweeps |
-| TA network | BTC.D / USDT.D daily charts; hourly, Binance's BTC dominance index and the market basket | the same series: TradingView's daily charts back to 2013 plus the bot's own bars |
+| TA network | BTC.D / USDT.D daily charts; hourly, Binance's BTC dominance index and the market basket | the same series: TradingView's daily charts (BTC.D back to 2013, USDT.D to 2015) plus the bot's own bars |
+| Fractal Alignment Engine and waterfall mode (BTC.D's 2016-2017 parent, the 55% gate, the USDT.D breakdown leg), and the setup scorer's fractal inputs | BTC.D / USDT.D daily from the server's history store (TradingView plus the bot's own bars, reloaded hourly) | the same daily series, read point in time for every setup |
+
+**Where the daily history comes from.**
+- **Fetching:** the history step's TradingView fill (tvdatafeed) gets 5,000 daily bars per series in one request: BTC.D back to 2013 and USDT.D back to 2015.
+- **Coverage rule:** both must reach back to 2016 (the Fractal Alignment Engine's parent window, and the same years for the USDT.D leg). A store that starts later, for example one imported from 2018, gets the full backfill. That backfill is asked at most weekly, in case TradingView itself starts later.
+- **Where they're kept:** on the laptop, in `trainer-data\history\tradingview\`. The server's daily training runs the same fill with its own tvdatafeed and keeps its own copy, which the live bot reads. Nothing is copied between them.
 
 How the replay rebuilds them, as the live bot does (live, CoinGecko's market caps anchor Binance's
 prices):
