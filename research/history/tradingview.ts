@@ -4,7 +4,8 @@
 //                  network's market context, and DXY, US10Y, VIX, HYG for the macro_risk rule. A series
 //                  gets the full 5,000-bar backfill (1d, 4h, 1h: daily back to 2013 in one request) when it
 //                  has fewer than INDEX_MIN_DAILY daily bars, or when it does not reach back to a date the
-//                  bot needs (BTC.D: the Fractal Alignment Engine's 2016-2017 parent window), at most weekly.
+//                  bot needs (BTC.D and USDT.D: the Fractal Alignment Engine's 2016-2017 parent window, see
+//                  dominanceNeedFrom), at most weekly.
 //                  A series whose newest daily bar is older than STALE_DAYS has its last month refreshed:
 //                  TOTAL3, OTHERS.D and the traditional-market series always (the bot has no live feed for
 //                  them), BTC.D / USDT.D too when the bot's own bars are not there (the laptop trainer).
@@ -38,6 +39,11 @@ export const TV_INDEX_SPECS: Record<string, string> = {
 /** Series without a live feed in the bot (kept current from TradingView). */
 export const TV_REFRESHED = ['TOTAL3', 'OTHERS.D', 'RTY', 'DXY', 'US10Y', 'VIX', 'HYG'];
 export const INDEX_MIN_DAILY = 3000;
+/** The first day each dominance series must reach back to: the Fractal Alignment Engine's parent window
+ *  (bot/macro/fractalEngine.ts, 2016-2017 by default) for BTC.D, and the same years for USDT.D (the waterfall's
+ *  USDT.D leg, the TA network's daily dominance context and the history replay's dominance anchors). TradingView's
+ *  BTC.D starts in 2013 and USDT.D in 2015, so one 5,000-bar request covers both. */
+export const dominanceNeedFrom = (parentFrom: number): Record<string, number> => ({ 'BTC.D': parentFrom, 'USDT.D': parentFrom });
 export const STALE_DAYS = 2;
 export const RECENT_DAYS = 3;
 export const TV_MAX_BARS = 5000;
