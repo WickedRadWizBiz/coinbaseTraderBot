@@ -59,7 +59,8 @@ export function findUv(entry = process.argv[1] ?? ''): string | undefined {
   return spawnSync('uv', ['--version'], { encoding: 'utf8', windowsHide: true }).status === 0 ? 'uv' : undefined;
 }
 
-function run(cmd: string, args: string[], env: NodeJS.ProcessEnv, log: (m: string) => void, timeoutMs: number): Promise<number> {
+/** A command with its output relayed to `log` (uv's per-package lines at most every few seconds); its exit code. */
+export function runLogged(cmd: string, args: string[], env: NodeJS.ProcessEnv, log: (m: string) => void, timeoutMs: number): Promise<number> {
   return new Promise((resolve) => {
     const c = spawn(cmd, args, { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let last = 0;
@@ -101,10 +102,10 @@ export async function ensureTorch(dataDir: string, log: (m: string) => void, o: 
   const t0 = Date.now(), limit = o.timeoutMs ?? 90 * 60_000;
   if (!have) {
     fs.rmSync(envDir, { recursive: true, force: true });
-    if (await run(uv, ['venv', envDir, '--python', PYTHON_VERSION], env, log, limit) !== 0) { log('creating the Python environment failed: the TA network trains in TypeScript'); return undefined; }
+    if (await runLogged(uv, ['venv', envDir, '--python', PYTHON_VERSION], env, log, limit) !== 0) { log('creating the Python environment failed: the TA network trains in TypeScript'); return undefined; }
   }
-  if (await run(uv, ['pip', 'install', '--python', python, 'numpy'], env, log, limit) !== 0
-    || await run(uv, ['pip', 'install', '--python', python, '--reinstall-package', 'torch', TORCH_SPEC, '--index-url', gpu ? TORCH_INDEX.cuda : TORCH_INDEX.cpu], env, log, Math.max(60_000, limit - (Date.now() - t0))) !== 0) {
+  if (await runLogged(uv, ['pip', 'install', '--python', python, 'numpy'], env, log, limit) !== 0
+    || await runLogged(uv, ['pip', 'install', '--python', python, '--reinstall-package', 'torch', TORCH_SPEC, '--index-url', gpu ? TORCH_INDEX.cuda : TORCH_INDEX.cpu], env, log, Math.max(60_000, limit - (Date.now() - t0))) !== 0) {
     log('installing PyTorch failed (it is tried again on the next run): the TA network trains in TypeScript');
     return undefined;
   }

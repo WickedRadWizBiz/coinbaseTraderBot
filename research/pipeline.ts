@@ -98,7 +98,7 @@ import { withSnnHyper } from '../bot/snn/population';
 import { versionHash } from '../bot/snn/params';
 import { trainTennisMain } from './trainTennisModel';
 import { trainTaNetMain } from './trainTaNet';
-import { trainSetupMain } from './trainSetupModel';
+import { forecastSchema, setupInputStatus, trainSetupMain } from './trainSetupModel';
 import { sweepMain } from './sweep';
 import { collectFiles, importFile } from './history/importCsv';
 import { downloadKalshiHistory, downloadKalshiTrades } from './history/kalshiHistory';
@@ -107,9 +107,9 @@ import { linkDays, recordingDayList, recordingFiles, recordingsUsage } from '../
 import { readJournalTrades } from '../bot/setups/journal';
 import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
 import { exportTaNetOos, oosDir } from './taNetOos';
-import { trainLibrarian } from './librarian';
+import { libDir, trainLibrarian } from './librarian';
 import { leadLagStudy } from './leadLag';
-import { trainCrossGraph } from './trainCrossGraph';
+import { trainCrossGraph, xgDir } from './trainCrossGraph';
 import { setCrossGraphPath, XG_SCHEMA } from '../bot/ta/crossGraph';
 import { LIB_SCHEMA, setLibrarianPath } from '../bot/ta/librarian';
 
@@ -168,6 +168,8 @@ export interface PipelineState {
   /** Promoted setup model (fast / slow lanes) and when it was trained. */
   setupsVersion?: string;
   setupsTrainedAt?: number;
+  /** The setup scorer's optional inputs that were there when it last trained (a new one makes it due). */
+  setupInputs?: string[];
   /** Last rule-book study (research/ruleBook.ts, weekly). */
   ruleBookAt?: number;
   /** Last Librarian training (research/librarian.ts, weekly). */
@@ -398,7 +400,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       let tradingview: unknown;
       if (T.tvFill) {
         state.tvTried ??= {};
-        try { tradingview = await tvFill({ histDir: T.historyDir, assets, log: (m) => log(`tradingview: ${m}`), tried: state.tvTried }); } catch (e) { tradingview = { error: String(e) }; }
+        // BTC.D must reach back to the Fractal Alignment Engine's parent window (2016-2017 by default).
+        try { tradingview = await tvFill({ histDir: T.historyDir, assets, log: (m) => log(`tradingview: ${m}`), tried: state.tvTried, needFrom: { 'BTC.D': cfg.macro.parentFrom } }); } catch (e) { tradingview = { error: String(e) }; }
       }
       // Kalshi's own settled contracts (1-minute candles) for the traded series: real contract prices for
       // research. Time-boxed (KALSHI_HISTORY_BUDGET_MIN); the rest resumes on the next run.
@@ -489,7 +492,10 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   // ---- 0c+. The Librarian: oracle strategy + regime-transition heads on the TA network's inputs (research/librarian.ts) ----
   if (want('librarian')) {
     const file = promoted('librarian');
-    const due = !fs.existsSync(file) || !state.librarianAt || now - state.librarianAt >= 7 * 86_400_000 || readLibSchema(file) !== LIB_SCHEMA;
+    // Also due when the walk-forward forecasts the setup scorer reads are missing (a model file copied from elsewhere,
+    // or a run that stopped before writing them): otherwise the setups would train without them for a week.
+    const due = !fs.existsSync(file) || !state.librarianAt || now - state.librarianAt >= 7 * 86_400_000 || readLibSchema(file) !== LIB_SCHEMA
+      || forecastSchema(path.join(libDir(T.historyDir), 'forecasts.json')) !== LIB_SCHEMA;
     const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet`;
     await run('librarian', async () => {
       const r = await trainLibrarian(T.historyDir, { cacheDir: path.join(work, 'tanet-cache'), log });
@@ -502,7 +508,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   // ---- 0c~. The cross-asset graph network on relative returns (research/trainCrossGraph.ts) ----
   if (want('cross_graph')) {
     const file = promoted('cross_graph');
-    const due = !fs.existsSync(file) || !state.crossGraphAt || now - state.crossGraphAt >= 7 * 86_400_000 || readLibSchema(file) !== XG_SCHEMA;
+    const due = !fs.existsSync(file) || !state.crossGraphAt || now - state.crossGraphAt >= 7 * 86_400_000 || readLibSchema(file) !== XG_SCHEMA
+      || forecastSchema(path.join(xgDir(T.historyDir), 'forecasts.json')) !== XG_SCHEMA;
     const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet`;
     await run('cross_graph', async () => {
       const r = await trainCrossGraph(T.historyDir, { engine: cfg.taNet.xgEngine, python: T.python || undefined, log });
@@ -556,9 +563,19 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   if (want('setups')) {
     const file = promoted('setups');
     const P = cfg.perps;
-    const due = !fs.existsSync(file) || !state.setupsTrainedAt || now - state.setupsTrainedAt >= P.setupRetrainDays * 86_400_000;
     const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet`;
+    // An optional input that has arrived since the last training (BTC.D's early years, the Librarian's forecasts)
+    // makes it due now instead of after SETUP_RETRAIN_DAYS.
+    const inputs = noHistory ? [] : setupInputStatus(T.historyDir, cfg.macro);
+    const arrived = inputs.filter((x) => x.ok && !(state.setupInputs ?? []).includes(x.name)).map((x) => x.name);
+    const due = !fs.existsSync(file) || !state.setupsTrainedAt || now - state.setupsTrainedAt >= P.setupRetrainDays * 86_400_000 || arrived.length > 0;
     await run('setups', async () => {
+      // Which optional inputs are plugged in, and for a missing one what its producing step did this round.
+      const stepNow = (name: string) => {
+        const st = steps.find((x) => x.step === name || x.step.startsWith(`${name} `));
+        return !st ? 'did not run this round' : st.error ? `FAILED this round: ${st.error.split('\n')[0].slice(0, 200)}` : st.skipped ? `skipped this round (${st.skipped})` : 'ran this round';
+      };
+      log(`setups: inputs: ${inputs.map((x) => (x.ok ? `${x.name}: yes` : `${x.name}: MISSING (${x.producer.split(' ')[0] === 'history' ? `${x.detail}; TradingView fill ${T.tvFill ? 'on' : 'off'}, history ${stepNow('history')}` : `${x.producer} ${stepNow(x.producer)}`})`)).join('; ')}${arrived.length && state.setupsTrainedAt ? ` (new since the last training: ${arrived.join(', ')})` : ''}`);
       const cand = path.join(work, 'setup_model.candidate.json');
       const oosCand = path.join(work, 'setup_oos.candidate.json');
       const p = await trainSetupMain(argsOf({
@@ -568,6 +585,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         'spot-pb': P.setupSpotPb, 'lead-lag': path.join(A.dir, 'lead_lag.json'),
       }));
       state.setupsTrainedAt = now;
+      state.setupInputs = inputs.filter((x) => x.ok).map((x) => x.name);
       const validated = (['fast', 'slow'] as const).filter((l) => p.validation[l]?.passed);
       const summary = { version: p.version, validated, holdout: Object.fromEntries((['fast', 'slow'] as const).map((l) => [l, p.validation[l]?.periods.holdout])), reasons: Object.fromEntries((['fast', 'slow'] as const).map((l) => [l, p.validation[l]?.reasons])) };
       if (A.promote === 'validated' && !validated.length) return { promoted: false, reason: 'no lane passed its holdout and final window', ...summary };

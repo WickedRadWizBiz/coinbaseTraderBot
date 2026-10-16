@@ -10,7 +10,8 @@ import { KEY_PATTERNS, TALIB_KEYS, taEngine, talibCore, talibExtras, tl } from '
 import { tfState } from '../bot/ta/analyzer';
 import { atr, rsi, type Candle } from '../bot/ta/indicators';
 import { upsertSeries } from '../bot/marketdata/historyStore';
-import { findSpotHoles, indexNeeds, tvFill } from '../research/history/tradingview';
+import { findSpotHoles, indexNeeds, runTvFetch, tvFill } from '../research/history/tradingview';
+import { ensureTvDatafeed, TV_DATAFEED_SPEC } from '../research/tvSetup';
 import { loadSeries } from '../research/history/candles';
 import { DAILY_CONTEXT_FEATURES, SLOW_INDEXES, TaNetContext } from '../bot/ta/taNetContext';
 import { TF_KEYS } from '../bot/ta/taNet';
@@ -110,4 +111,74 @@ test('slow context: TOTAL3 / OTHERS.D / RTY one day behind, RTY carried over the
   assert.ok(Number.isFinite(ctx.daily('ETH', mon)[base + 2 * per + 3]), 'RTY carried from Friday');
   const late = new TaNetContext({ h1: {}, slow1d: { RTY: rty.slice(0, 200) } }).daily('ETH', rty[199].ts + 6 * DAY);
   assert.ok(Number.isNaN(late[base + 2 * per]), 'stale beyond 4 days');
+});
+
+test('TradingView: BTC.D that does not reach the fractal window gets the full 5,000-bar backfill (at most weekly); stale dominance is refreshed', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-test-'));
+  const now = Date.UTC(2026, 9, 16), from = Date.UTC(2016, 0, 1);
+  // 3,200 daily bars from 2018 on (enough bars, but no 2016-2017), current to yesterday; USDT.D 3,500 bars, 5 days stale.
+  upsertSeries(dir, 'tradingview', 'BTC.D', '1d', walk(3200, DAY, now - 3200 * DAY, 3));
+  upsertSeries(dir, 'tradingview', 'USDT.D', '1d', walk(3500, DAY, now - 3505 * DAY, 4));
+  const tried: Record<string, number> = {};
+  let need = indexNeeds(dir, now, { needFrom: { 'BTC.D': from }, tried });
+  assert.ok(need.full.includes('BTC.D'), 'no 2016-2017: the full backfill');
+  assert.ok(!need.full.includes('USDT.D') && need.refresh.includes('USDT.D'), 'USDT.D only refreshed (stale, no bot bars)');
+  assert.ok(!need.refresh.includes('BTC.D'));
+  assert.ok(need.daily['BTC.D'].first! > '2017-12-31');
+  need = indexNeeds(dir, now + DAY, { needFrom: { 'BTC.D': from }, tried });
+  assert.ok(!need.full.includes('BTC.D'), 'asked yesterday: not again within a week (TradingView may start later)');
+  assert.ok(indexNeeds(dir, now + 8 * DAY, { needFrom: { 'BTC.D': from }, tried }).full.includes('BTC.D'));
+  // After the backfill (daily back to 2013), the window is covered: nothing more to ask.
+  upsertSeries(dir, 'tradingview', 'BTC.D', '1d', walk(5000, DAY, now - 5000 * DAY, 5));
+  assert.ok(!indexNeeds(dir, now + 9 * DAY, { needFrom: { 'BTC.D': from }, tried: {} }).full.includes('BTC.D'));
+  // tvFill asks for it with 5,000 bars at 1d / 4h / 1h.
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-test-'));
+  for (const n of ['BTC.D', 'USDT.D', 'TOTAL3', 'OTHERS.D']) upsertSeries(dir2, 'tradingview', n, '1d', walk(n === 'BTC.D' ? 3200 : 4000, DAY, now - (n === 'BTC.D' ? 3200 : 4000) * DAY + DAY, 6));
+  for (const n of ['RTY', 'DXY', 'US10Y', 'VIX', 'HYG']) upsertSeries(dir2, 'tradingview', n, '1d', walk(2500, DAY, now - 2500 * DAY + DAY, 7));
+  const calls: string[][] = [];
+  await tvFill({ histDir: dir2, assets: [], now, log: () => {}, run: async (a) => { calls.push(a); return 0; }, needFrom: { 'BTC.D': from } });
+  const full = calls.find((a) => a.includes('--bars') && a[a.indexOf('--bars') + 1] === '5000' && a.includes('--indexes'));
+  assert.ok(full, JSON.stringify(calls));
+  assert.equal(full![full!.indexOf('--indexes') + 1], 'CRYPTOCAP:BTC.D');
+  assert.equal(full![full!.indexOf('--intervals') + 1], '1d,4h,1h');
+});
+
+test('TradingView on the laptop: tv_history.py runs in TV_PYTHON; tvdatafeed is set up once with uv from its archive', async (t) => {
+  if (process.platform === 'win32') return t.skip('shell-script fakes');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-test-'));
+  const argsFile = path.join(dir, 'args.txt');
+  const py = path.join(dir, 'python');
+  fs.writeFileSync(py, `#!/bin/sh\necho "$@" > ${argsFile}\nexit 0\n`, { mode: 0o755 });
+  const prev = process.env.TV_PYTHON;
+  process.env.TV_PYTHON = py;
+  try {
+    assert.equal(await runTvFetch(['--out', dir, '--indexes', 'CRYPTOCAP:BTC.D'], () => {}), 0);
+    const got = fs.readFileSync(argsFile, 'utf8').trim().split(' ');
+    assert.ok(got[0].endsWith(path.join('deploy', 'tv_history.py')), got[0]);
+    assert.deepEqual(got.slice(1), ['--out', dir, '--indexes', 'CRYPTOCAP:BTC.D']);
+  } finally { if (prev === undefined) delete process.env.TV_PYTHON; else process.env.TV_PYTHON = prev; }
+  // The trainer's own environment: uv makes trainer-data/tv-env and installs tvdatafeed from its archive.
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-test-'));
+  const uvLog = path.join(data, 'uv.txt');
+  const uv = path.join(data, 'uv');
+  fs.writeFileSync(uv, [
+    '#!/bin/sh',
+    `echo "$@" >> ${uvLog}`,
+    'if [ "$1" = venv ]; then mkdir -p "$2/bin"; printf \'#!/bin/sh\\n[ -f "$(dirname "$0")/tv-ok" ]\\n\' > "$2/bin/python"; chmod +x "$2/bin/python"; fi',
+    'if [ "$1" = pip ]; then touch "$(dirname "$4")/tv-ok"; fi',
+    'exit 0',
+  ].join('\n'), { mode: 0o755 });
+  const logs: string[] = [];
+  const got = await ensureTvDatafeed(data, (m) => logs.push(m), { uv, python: '' });
+  assert.equal(got, path.join(data, 'tv-env', 'bin', 'python'), logs.join('\n'));
+  const uvCalls = fs.readFileSync(uvLog, 'utf8').trim().split('\n');
+  assert.match(uvCalls[0], /^venv .*tv-env --python 3\.12$/);
+  assert.ok(uvCalls[1].endsWith(TV_DATAFEED_SPEC), uvCalls[1]);
+  // Second run: ready, nothing installed again.
+  assert.equal(await ensureTvDatafeed(data, () => {}, { uv, python: '' }), got);
+  assert.equal(fs.readFileSync(uvLog, 'utf8').trim().split('\n').length, 2);
+  // No uv, no Python: undefined, with the reason.
+  const none: string[] = [];
+  assert.equal(await ensureTvDatafeed(fs.mkdtempSync(path.join(os.tmpdir(), 'bot-test-')), (m) => none.push(m), { uv: path.join(dir, 'no-uv'), python: '' }), undefined);
+  assert.ok(none.length > 0);
 });

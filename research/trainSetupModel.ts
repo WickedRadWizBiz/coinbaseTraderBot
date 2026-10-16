@@ -30,16 +30,17 @@ import type { Candle } from '../bot/ta/indicators';
 import type { Timeframe } from '../bot/ta/knowledge';
 import { adaptToVol, applyRatchet, applyScaleOut, atr4hAt, detectAt, FAST_TFS, RATCHET, SCALE_OUT, SLOW_TFS, SPOT_PB, setupSeries, TF_MS, VOL_ADAPT, type Lane, type SetupSeries, type SetupSignal } from '../bot/setups/detectors';
 import { DEFAULT_COSTS, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from '../bot/setups/exits';
-import { LibIndex, loadLibForecasts } from './librarian';
+import { libDir, LibIndex, loadLibForecasts } from './librarian';
 import { spotLeads } from './leadLag';
-import { libSetupFeatures } from '../bot/ta/librarian';
-import { xgSetupFeatures } from '../bot/ta/crossGraph';
-import { loadXgForecasts, XgIndex } from './trainCrossGraph';
+import { LIB_SCHEMA, libSetupFeatures } from '../bot/ta/librarian';
+import { XG_SCHEMA, xgSetupFeatures } from '../bot/ta/crossGraph';
+import { loadXgForecasts, xgDir, XgIndex } from './trainCrossGraph';
 import { applyMask, characterFeatures, fractalFeatures, maskedIndices, SETUP_BASE_FEATURES, SETUP_FEATURES, SETUP_GROUPS, setupFeatureMap, setupVector, tanetFeatures, type SetupBars } from '../bot/setups/features';
 import { loadMacroDaily, MacroSeries, macroSettings } from '../bot/macro/macroSeries';
 import { macroConfig } from '../bot/config';
 import { characterOf } from '../bot/ta/character';
-import { loadOos, OosIndex } from './taNetOos';
+import { loadOos, oosDir, OosIndex } from './taNetOos';
+import { TANET_SCHEMA } from '../bot/ta/taNet';
 import { DEFAULT_LANES, kindKey, LaneBook, minScoreFor, type LaneBookParams } from '../bot/setups/lanes';
 import { laneScore, quantilesOf, rawPrediction, SETUP_SCHEMA, type LanePeriodStats, type LaneScorer, type SetupModelParams } from '../bot/setups/setupModel';
 
@@ -290,6 +291,39 @@ export function periodStats(ts: ClosedTrade[], from: number, to: number): LanePe
   };
 }
 
+// ---- The optional inputs: are they plugged in? ------------------------------------------------------
+
+/** The `schema` of a JSON forecasts file, read from its first few KB (the writers put it first; the files run to
+ *  tens of MB), else from the whole file; undefined when missing or unreadable. */
+export function forecastSchema(file: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(file, 'r');
+    const head = Buffer.alloc(4096);
+    const n = fs.readSync(fd, head, 0, head.length, 0);
+    const m = /"schema"\s*:\s*"([^"]*)"/.exec(head.subarray(0, n).toString('utf8'));
+    if (m) return m[1];
+  } catch { return undefined; } finally { if (fd !== undefined) fs.closeSync(fd); }
+  try { return (JSON.parse(fs.readFileSync(file, 'utf8')) as { schema?: string }).schema; } catch { return undefined; }
+}
+
+export interface SetupInputStatus { name: string; ok: boolean; producer: string; detail?: string }
+
+/** Each optional input group of the setup scorer, whether its source is there for a history folder, and which
+ *  pipeline step (or download) produces it. */
+export function setupInputStatus(hist: string, macro = macroConfig(process.env)): SetupInputStatus[] {
+  const ms = macroSettings(macro);
+  const daily = loadMacroDaily(hist);
+  const btcd = daily.btcd;
+  const day = (t: number) => new Date(t).toISOString().slice(0, 10);
+  return [
+    { name: 'TA network walk-forward', ok: forecastSchema(path.join(oosDir(hist), 'forecasts.json')) === TANET_SCHEMA, producer: 'ta_net_oos' },
+    { name: `fractal (BTC.D daily ${day(ms.fractal.parentFrom)}..${day(ms.fractal.parentTo - DAY)})`, ok: new MacroSeries(daily, ms.params, ms.fractal).hasParent(), producer: 'history (TradingView, TV_FILL)', detail: btcd.length ? `BTC.D daily ${day(btcd[0].ts)}..${day(btcd[btcd.length - 1].ts)}` : 'no BTC.D daily' },
+    { name: 'Librarian walk-forward', ok: forecastSchema(path.join(libDir(hist), 'forecasts.json')) === LIB_SCHEMA, producer: 'librarian' },
+    { name: 'cross-graph walk-forward', ok: forecastSchema(path.join(xgDir(hist), 'forecasts.json')) === XG_SCHEMA, producer: 'cross_graph' },
+  ];
+}
+
 // ---- Main -------------------------------------------------------------------------------------------
 
 /** Out-of-sample setups (walk-forward scores) for replays of recent days (research/wholeBot.ts). */
@@ -308,14 +342,14 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
   const btc: SetupBars | undefined = btcA ? { m15: btcA.m15, h1: btcA.h1 } : undefined;
   const events: SetupEvent[] = [];
   const oos = new OosIndex(loadOos(hist));
-  if (!oos.f) log(`no TA network walk-forward forecasts in ${hist}/.tanet-oos (npm run research:ta-net-oos): its inputs stay blank`);
+  if (!oos.f) log(`no TA network walk-forward forecasts in ${hist}/.tanet-oos (pipeline step ta_net_oos; by hand npm run research:ta-net-oos): its inputs stay blank`);
   const ms = macroSettings(macroConfig(process.env));
   const macro = new MacroSeries(loadMacroDaily(hist), ms.params, ms.fractal);
-  if (!macro.hasParent()) log('no BTC.D daily history for 2016-2017 (TradingView CRYPTOCAP:BTC.D): the fractal inputs stay blank');
+  if (!macro.hasParent()) log(`no BTC.D daily history for the fractal parent window (TradingView CRYPTOCAP:BTC.D, fetched by the history step's TradingView fill, TV_FILL): the fractal inputs stay blank`);
   const lib = new LibIndex(loadLibForecasts(hist));
-  if (!lib.f) log(`no Librarian walk-forward forecasts in ${hist}/.librarian (npm run research:librarian): its inputs stay blank`);
+  if (!lib.f) log(`no Librarian walk-forward forecasts in ${hist}/.librarian (pipeline step librarian; by hand npm run research:librarian): its inputs stay blank`);
   const xg = new XgIndex(loadXgForecasts(hist));
-  if (!xg.f) log(`no cross-graph walk-forward forecasts in ${hist}/.xgraph (npm run research:xgraph): its inputs stay blank`);
+  if (!xg.f) log(`no cross-graph walk-forward forecasts in ${hist}/.xgraph (pipeline step cross_graph; by hand npm run research:xgraph): its inputs stay blank`);
   for (const A of assets.values()) events.push(...assetEvents(A, btc, costs, o.cacheDir ?? path.join(hist, '.setup-cache'), log, oos, [...assets.values()].filter((x) => x !== A).map((x) => x.h1), macro, lib, xg));
   events.sort((a, b) => a.at - b.at);
   const end = Math.max(...events.map((e) => e.at)) + 1;

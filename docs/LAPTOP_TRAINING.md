@@ -345,6 +345,18 @@ two). Later runs add only the new days. A day is rebuilt only when something it 
 files for it, the 1-minute history or funding rates reaching further into it (a day first built before
 its data was published), or new dominance readings near it.
 
+## Are all the setup scorer's inputs there?
+
+Before each setups training, the log gives one line on the scorer's optional inputs. It names each input and what its producer did this round, for example:
+`setups: inputs: TA network walk-forward: yes; fractal (BTC.D daily 2016-01-01..2017-12-31): yes; Librarian walk-forward: MISSING (librarian FAILED this round: ...); cross-graph walk-forward: yes`
+
+- **TA network walk-forward:** step `ta_net_oos`.
+- **Fractal inputs:** BTC.D daily history covering 2016-2017. The history step's TradingView fill fetches it (tvdatafeed, set up once in `trainer-data\tv-env`): 5,000 daily bars of CRYPTOCAP:BTC.D, back to 2013, in one request.
+- **Librarian:** step `librarian`, weekly. It also runs whenever its forecasts file is missing, for example when its model was copied from the server without them.
+- **Cross-asset graph:** step `cross_graph`, weekly, with the same rule.
+
+When an input that was missing at the last setups training arrives, the scorer is retrained in that round. It doesn't wait for `SETUP_RETRAIN_DAYS`.
+
 ## BTC.D and USDT.D
 
 Every part of the bot that reads BTC dominance (BTC.D) or USDT dominance (USDT.D) gets them in training
