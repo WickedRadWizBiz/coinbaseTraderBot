@@ -58,6 +58,7 @@ import { loadConfig } from '../bot/config';
 import type { ReadinessFile } from './readiness';
 import { torchSelfTest } from './taNetTorch';
 import { ensureTorch } from './torchSetup';
+import { ensureTvDatafeed } from './tvSetup';
 import { asIntensity, lowerPriority, markRunEnd, markRunIntensity, markRunStart, planEnv, ResourceGovernor, resourcePlan, type GovernorStatus, type Intensity, type ResourcePlan } from './trainerResources';
 
 export interface TrainerSettings { host?: string; user?: string; port?: number; key?: string; /** How hard it works (research/trainerResources.ts). */ intensity?: Intensity }
@@ -79,7 +80,7 @@ export function parseManifest(text: string): RemoteFile[] {
 }
 
 /** The trainer's own Python and PyTorch (research/torchSetup.ts): never compared with the server's files. */
-export const LOCAL_ONLY_DIRS = new Set(['python-env', 'python-dist', 'uv-cache']);
+export const LOCAL_ONLY_DIRS = new Set(['python-env', 'python-dist', 'uv-cache', 'tv-env']);
 
 /** Local files under `root` with the same shape (forward-slash relative paths). */
 export function localManifest(root: string, skipDirs: ReadonlySet<string> = new Set()): Map<string, RemoteFile> {
@@ -162,6 +163,7 @@ export function laptopProfile(remainingHours: number, cores = os.cpus().length, 
   const trainDays = Math.round(Math.min(120, Math.max(14, remainingHours)));
   return {
     TRADING_MODE: 'paper', AUTO_TRAIN: 'off', AUTO_TRAIN_CHAMPION: 'true',
+    // TradingView (tvdatafeed): on once its Python is set up (runTrainer, research/tvSetup.ts).
     HISTORY_AUTO_UPDATE: 'true', TV_FILL: 'false',
     // All of the 1-minute spot / perp history (from each coin's first Binance month) replayed through the
     // recording-based steps; the memory that takes.
@@ -593,9 +595,11 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   // The server's settings, then the laptop's bigger budgets and PyTorch over them, then trainer.env, then anything
   // set in the environment.
   let torchEnv: Record<string, string> = { TA_NET_ENGINE: 'ts' };
+  // TradingView history (tvdatafeed in trainer-data/tv-env): BTC.D's full daily history for the fractal inputs.
+  let tvEnv: Record<string, string> = {};
   // The pipeline's memory cap: the plan's, doubled (up to 8 GB) after a round that ran out of it.
   let mainHeapMb = plan.mainHeapMb;
-  const envFor = (leftHours: number): NodeJS.ProcessEnv => ({ ...serverEnv, ...laptopProfile(leftHours, os.cpus().length, continuous, { ...plan, mainHeapMb }), ...torchEnv, ...userEnv, ...process.env, DATA_DIR: dataDir, AUTO_TRAIN: 'off', TRADING_MODE: 'paper', TRAINER_PROGRESS: '1', DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRAIN_THROTTLE_FILE: path.join(dataDir, 'throttle.json'), TRAINER_PRIORITY: plan.priority });
+  const envFor = (leftHours: number): NodeJS.ProcessEnv => ({ ...serverEnv, ...laptopProfile(leftHours, os.cpus().length, continuous, { ...plan, mainHeapMb }), ...torchEnv, ...tvEnv, ...userEnv, ...process.env, DATA_DIR: dataDir, AUTO_TRAIN: 'off', TRADING_MODE: 'paper', TRAINER_PROGRESS: '1', DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRAIN_THROTTLE_FILE: path.join(dataDir, 'throttle.json'), TRAINER_PRIORITY: plan.priority });
   const A = loadConfig(envFor(continuous ? 24 : hours)).autoTrain;
   const guide = guideText({ poolUsd: A.targetPoolUsd, dailyPct: A.targetDailyPct, maxDdPct: A.targetMaxDdPct, plateauRounds: A.plateauRounds });
   writeText(path.join(dataDir, 'GUIDE.txt'), guide);
@@ -606,6 +610,10 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   const only = o.only ?? argOf('only')?.split(',').filter(Boolean);
   if ((userEnv.TA_NET_ENGINE ?? process.env.TA_NET_ENGINE) !== 'ts' && (!only || only.includes('ta_net'))) {
     torchEnv = await torchFor(dataDir, (m) => { log(m); hooks?.line?.(`[trainer] ${m}`); }, userEnv.TA_NET_PYTHON || undefined);
+  }
+  if ((userEnv.TV_FILL ?? process.env.TV_FILL) !== 'false' && !o.skipDataDownload && (!only || only.includes('history'))) {
+    const py = await ensureTvDatafeed(dataDir, (m) => { log(m); hooks?.line?.(`[trainer] ${m}`); }, { python: userEnv.TV_PYTHON || undefined });
+    if (py) tvEnv = { TV_FILL: 'true', TV_PYTHON: py };
   }
   let why: string | undefined;
   const stopped = () => !!hooks?.stopRequested?.();
