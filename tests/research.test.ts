@@ -44,7 +44,7 @@ test('research pipeline runs end to end on synthetic recordings', async () => {
   assert.ok(rows.length > 300, `rows=${rows.length}`);
   assert.ok(new Set(rows.map((r) => r.window)).size >= 12);
 
-  const rep = trainMetaModel(rows, { folds: 3, maxEpochs: 40 });
+  const rep = await trainMetaModel(rows, { folds: 3, maxEpochs: 40 });
   const model = MetaModel.fromJson(JSON.stringify(rep.params));
   // Default search is MLP-only with a hidden layer: a real neural network.
   assert.equal(rep.params.kind, 'mlp');

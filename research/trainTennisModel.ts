@@ -13,7 +13,8 @@ import { tennisSnapshotValues } from '../bot/snn/inputs';
 import { TENNIS_FAIR_FEATURES, tennisFairInputs, type TennisFairParams } from '../bot/tennis/tennisFair';
 import { MatchTracker, type MatchMarket } from '../bot/tennis/tennisStrategy';
 import { sigmoid } from '../bot/util/num';
-import { predictLogits, train } from './mlp';
+import { predictLogits } from './mlp';
+import { MlpTorch, trainMlp } from './mlpTorch';
 import { predictGbdtLogits, trainGbdt } from './gbdt';
 import { readRecordings, ReplayState } from './replay';
 
@@ -81,7 +82,7 @@ export async function buildTennisDataset(dir: string, cfg: TennisConfig, everySe
   return rows;
 }
 
-export function trainTennisModel(rows: TennisRow[], seed = 7): TennisFairParams {
+export async function trainTennisModel(rows: TennisRow[], seed = 7, torch?: MlpTorch): Promise<TennisFairParams> {
   const names = [...TENNIS_FAIR_FEATURES];
   const residual = names.indexOf('logit_pA');
   const byMatch = [...new Set(rows.map((r) => r.event))].map((ev) => ({ ev, t: Math.min(...rows.filter((r) => r.event === ev).map((r) => r.t)) })).sort((a, b) => a.t - b.t).map((x) => x.ev);
@@ -97,7 +98,7 @@ export function trainTennisModel(rows: TennisRow[], seed = 7): TennisFairParams 
   const vcut = new Set(devMatches.slice(Math.floor(devMatches.length * 0.8)));
   const tr = dev.filter((r) => !vcut.has(r.event)), va = dev.filter((r) => vcut.has(r.event));
   const trv = va.length ? va : tr;
-  const m = train(X(tr), tr.map((r) => r.y), X(trv), trv.map((r) => r.y), { hidden: 8, l2: 1e-2, lr: 0.01, maxEpochs: 400, patience: 60, seed, residual }, w(tr), w(trv));
+  const m = await trainMlp(torch, X(tr), tr.map((r) => r.y), X(trv), trv.map((r) => r.y), { hidden: 8, l2: 1e-2, lr: 0.01, maxEpochs: 400, patience: 60, seed, residual }, w(tr), w(trv));
   // Tree candidate: boosted trees on the residual of the market's log-odds (missing inputs routed natively).
   const init = (rs: TennisRow[]) => rs.map((r) => (Number.isFinite(r.f.logit_pA) ? r.f.logit_pA : 0));
   const g = trainGbdt(X(tr), tr.map((r) => r.y), w(tr), init(tr), X(trv), trv.map((r) => r.y), w(trv), init(trv), { nTrees: 200, learningRate: 0.05, maxDepth: 2, minLeafWeight: 2, seed });
@@ -127,7 +128,8 @@ export async function trainTennisMain(argOf: (k: string, d: string) => string = 
   const rows = (await Promise.all(dirs.map((d) => buildTennisDataset(d, cfg.tennis, every)))).flat();
   const matches = new Set(rows.map((r) => r.event)).size;
   console.log(`${rows.length} tennis rows over ${matches} settled matches (${dirs.join(' + ')})`);
-  const params = trainTennisModel(rows);
+  const torch = await MlpTorch.start({ log: (m) => console.log(m) });
+  const params = await trainTennisModel(rows, 7, torch).finally(() => torch?.close());
   console.log('tennis model validation:', params.validation);
   const out = argOf('out', 'params/tennis_model.candidate.json');
   fs.mkdirSync(path.dirname(out), { recursive: true });

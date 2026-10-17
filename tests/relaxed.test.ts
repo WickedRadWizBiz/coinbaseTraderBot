@@ -292,7 +292,7 @@ test('trainer: GBDT family, ensemble, market calibration and relaxed gates on sy
   const dir = path.join(tmpDir(), 'rec');
   writeSyntheticRecordings(dir, { windows: 14, seed: 6 });
   const rows = await buildDataset(dir, 15);
-  const rep = trainMetaModel(rows, { folds: 3, maxEpochs: 30, families: ['gbdt'], depths: [2], ensemble: 2, sets: ['base', 'base+geometry+vol+kalshi'] });
+  const rep = await trainMetaModel(rows, { folds: 3, maxEpochs: 30, families: ['gbdt'], depths: [2], ensemble: 2, sets: ['base', 'base+geometry+vol+kalshi'] });
   assert.equal(rep.params.kind, 'gbdt');
   assert.equal(rep.params.ensemble?.length, 1);
   assert.ok(rep.params.marketCalibration);

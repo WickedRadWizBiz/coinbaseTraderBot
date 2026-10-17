@@ -44,7 +44,7 @@ export function predictLogits(layers: DenseLayer[], norm: Normalization, X: numb
   });
 }
 
-function initLayers(d: number, hidden: number, seed: number): DenseLayer[] {
+export function initLayers(d: number, hidden: number, seed: number): DenseLayer[] {
   const r = rng(seed);
   const g = (scale: number) => (r() * 2 - 1) * scale;
   if (hidden === 0) return [{ weights: [new Array(d).fill(0)], bias: [0], activation: 'linear' }];

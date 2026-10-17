@@ -45,7 +45,8 @@ import { clamp, logit, sigmoid } from '../bot/util/num';
 import type { DatasetRow } from './buildDataset';
 import { eventOf } from './buildDataset';
 import { predictGbdtLogits, trainGbdt } from './gbdt';
-import { predictLogits, train } from './mlp';
+import { initLayers, predictLogits, train } from './mlp';
+import { MlpTorch } from './mlpTorch';
 import { takerFee } from '../bot/fees';
 import { TAKE_FEATURES, TAKE_GATED_FEATURES, TAKE_GATED_LAYOUT, TAKE_RESIDUAL, takeGatedInputs, takeInputs, type TakeModelParams } from '../bot/model/takeModel';
 import { fitGatedExperts, gatedPredict } from '../bot/model/gatedExperts';
@@ -199,7 +200,8 @@ function meanSe(xs: number[]): { mean: number; se: number } {
   return { mean: m, se: Math.sqrt(v / n) };
 }
 
-export function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts = {}): TrainReport {
+/** `torch`: fit the MLPs in PyTorch (research/mlpTorch.ts, the GPU when there is one); the same algorithm and output. */
+export async function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts & { torch?: MlpTorch; log?: (m: string) => void } = {}): Promise<TrainReport> {
   const rows = rowsIn.map((r) => ({ ...r, fx: { ...r.fx } }));
   const folds = opts.folds ?? 5;
   const windows = [...new Set(rows.map((r) => r.window))].sort((a, b) => a - b);
@@ -292,18 +294,57 @@ export function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts = {}): Trai
     return { member: { normalization: m.norm, layers: m.layers } as EnsembleMember, logits: (xs: number[][]) => predictLogits(m.layers, m.norm, xs, residual), residual, size: m.epochs };
   };
 
+  // Every fit of a phase at once: the MLPs in one PyTorch batch when it is on (on the GPU when there is one), the rest
+  // (trees, or every fit without PyTorch) here. The rows go to PyTorch once, every candidate's features as columns.
+  type Job = { model: ModelSpec; names: string[]; tr: DatasetRow[]; va: DatasetRow[]; wTr: number[]; s: number };
+  let torch = opts.torch;
+  const allNames = [...new Set(sets.flatMap((st) => st.names))];
+  const colOf = new Map(allNames.map((n, i) => [n, i]));
+  const rowIdx = new Map(rows.map((r, i) => [r, i]));
+  if (torch && families.includes('mlp')) {
+    try { await torch.setData(X(rows, allNames), Y(rows), rows.map((r) => wOf.get(r) ?? 0)); } catch (e) { opts.log?.(`PyTorch MLP fits off (${(e as Error).message}): TypeScript`); torch = undefined; }
+  }
+  const fitMany = async (jobs: Job[]): Promise<Array<ReturnType<typeof fit>>> => {
+    const out: Array<ReturnType<typeof fit> | undefined> = new Array(jobs.length);
+    const tj = torch ? jobs.map((j, i) => [j, i] as const).filter(([j]) => j.model.family === 'mlp') : [];
+    if (tj.length) {
+      try {
+        const res = await torch!.fit(tj.map(([j]) => {
+          const m = j.model as Extract<ModelSpec, { family: 'mlp' }>;
+          return {
+            train: j.tr.map((r) => rowIdx.get(r)!), val: j.va.map((r) => rowIdx.get(r)!), cols: j.names.map((n) => colOf.get(n)!), residual: j.names.indexOf('logit_fv'),
+            hidden: m.hidden, l2: m.l2, lr: mlpBase.lr, maxEpochs: mlpBase.maxEpochs, patience: mlpBase.patience, wTrain: j.wTr,
+            init: m.hidden > 0 ? Float64Array.from(initLayers(j.names.length, m.hidden, j.s)[0].weights.flat()) : undefined,
+          };
+        }));
+        tj.forEach(([j, i], k) => {
+          const m = res[k], residual = j.names.indexOf('logit_fv');
+          out[i] = { member: { normalization: m.norm, layers: m.layers } as EnsembleMember, logits: (xs: number[][]) => predictLogits(m.layers, m.norm, xs, residual), residual, size: m.epochs };
+        });
+      } catch (e) { opts.log?.(`PyTorch MLP fits failed (${(e as Error).message}): TypeScript from here`); torch = undefined; }
+    }
+    return jobs.map((j, i) => out[i] ?? fit(j.model, j.names, j.tr, j.va, j.wTr, j.s));
+  };
+
   // ---- Purged walk-forward CV over the grid. ----
   const cv: CvRow[] = [];
-  const results = grid.map((g) => {
-    const oofRows: DatasetRow[] = [];
-    const oofZ: number[] = [];
+  const cvJobs: Array<{ gi: number; va: DatasetRow[]; job: Job }> = [];
+  grid.forEach((g, gi) => {
     for (let k = 0; k < folds; k++) {
       const { tr, va } = foldSplit(k);
       if (tr.length < 50 || va.length < 10) continue;
-      const f = fit(g.model, g.set.names, tr, va, W(tr), seed);
-      oofZ.push(...f.logits(X(va, g.set.names)));
-      oofRows.push(...va);
+      cvJobs.push({ gi, va, job: { model: g.model, names: g.set.names, tr, va, wTr: W(tr), s: seed } });
     }
+  });
+  const cvFits = await fitMany(cvJobs.map((c) => c.job));
+  const results = grid.map((g, gi) => {
+    const oofRows: DatasetRow[] = [];
+    const oofZ: number[] = [];
+    cvJobs.forEach((c, ci) => {
+      if (c.gi !== gi) return;
+      oofZ.push(...cvFits[ci].logits(X(c.va, g.set.names)));
+      oofRows.push(...c.va);
+    });
     const pw = [...perWindow(oofRows, W(oofRows), oofRows.map((r, i) => rowLoss(sigmoid(oofZ[i]), r.label))).values()];
     const ms = meanSe(pw);
     cv.push({ set: g.set.spec, model: specName(g.model), features: g.set.names.length, oosLogLoss: ms.mean, se: ms.se, windows: pw.length });
@@ -322,8 +363,7 @@ export function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts = {}): Trai
   // ---- Final fit (+ ensemble of window-bootstrap members), early-stopped on the last fold. ----
   const { va: lastVa } = foldSplit(folds - 1);
   const finalTrain = dev.filter((r) => r.window < (lastVa[0]?.window ?? cut) - EMBARGO_MS);
-  const primary = fit(model, names, finalTrain, lastVa, W(finalTrain), seed);
-  const extra: EnsembleMember[] = [];
+  const finalJobs: Job[] = [{ model, names, tr: finalTrain, va: lastVa, wTr: W(finalTrain), s: seed }];
   const nMembers = Math.max(1, opts.ensemble ?? 5);
   const trWindows = [...new Set(finalTrain.map((r) => r.window))];
   for (let k = 1; k < nMembers; k++) {
@@ -332,8 +372,10 @@ export function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts = {}): Trai
     for (let i = 0; i < trWindows.length; i++) { const wdw = trWindows[Math.floor(r() * trWindows.length)]; counts.set(wdw, (counts.get(wdw) ?? 0) + 1); }
     const bs = finalTrain.filter((x) => counts.has(x.window));
     const wBs = bs.map((x) => wOf.get(x)! * counts.get(x.window)!);
-    extra.push(fit(model, names, bs, lastVa, wBs, seed + k).member);
+    finalJobs.push({ model, names, tr: bs, va: lastVa, wTr: wBs, s: seed + k });
   }
+  const [primary, ...extraFits] = await fitMany(finalJobs);
+  const extra: EnsembleMember[] = extraFits.map((f) => f.member);
 
   // ---- Market calibration (favourite-longshot bias of the mid), dev rows only. ----
   const marketCalibration: BetaCal = fitBeta(dev.map((r) => r.mid), Y(dev), wDev);
@@ -358,13 +400,18 @@ export function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts = {}): Trai
   const N = opts.cpcvGroups ?? 0;
   if (N >= 3 && devWindows.length >= N * 3) {
     const adv: number[] = [];
+    const splits: Array<{ te: DatasetRow[]; job: Job }> = [];
     for (const sp of cpcvSplits(devWindows, N, opts.cpcvK ?? 2)) {
       const testW = [...sp.test];
       const nearTest = (w: number) => testW.some((t) => Math.abs(t - w) < EMBARGO_MS);
       const te = dev.filter((r) => sp.test.has(r.window));
       const tr = dev.filter((r) => !sp.test.has(r.window) && !nearTest(r.window));
       if (tr.length < 50 || te.length < 10) continue;
-      const f = fit(model, names, tr, te, W(tr), seed);
+      splits.push({ te, job: { model, names, tr, va: te, wTr: W(tr), s: seed } });
+    }
+    const cpcvFits = await fitMany(splits.map((x) => x.job));
+    for (const [si, { te }] of splits.entries()) {
+      const f = cpcvFits[si];
       const pz = f.logits(X(te, names)).map(sigmoid);
       const pm = te.map((r) => applyBeta(r.mid, marketCalibration));
       const d = [...perWindow(te, W(te), te.map((r, i) => rowLoss(pm[i], r.label) - rowLoss(pz[i], r.label))).values()];
@@ -480,7 +527,11 @@ export async function trainMetaModelMain(argOf: (k: string, d: string) => string
     }
     start = end + 1;
   }
-  const rep = trainMetaModel(rows, {
+  // The MLP fits in PyTorch when a Python with it is found (MLP_ENGINE, research/mlpTorch.ts): on the GPU when there is one.
+  const torch = await MlpTorch.start({ log: (m) => console.log(`[train] ${m}`) });
+  if (torch) console.log(`[train] MLP fits in PyTorch on ${torch.device}`);
+  const rep = await trainMetaModel(rows, {
+    torch, log: (m) => console.log(`[train] ${m}`),
     maxEpochs: Number(argOf('epochs', '400')),
     sets: argOf('sets', DEFAULT_SETS.join(',')).split(','),
     families: argOf('families', DEFAULT_FAMILIES.join(',')).split(',') as Array<'mlp' | 'gbdt'>,
@@ -488,7 +539,7 @@ export async function trainMetaModelMain(argOf: (k: string, d: string) => string
     depths: argOf('depths', '2,3').split(',').map(Number),
     ensemble: Number(argOf('ensemble', '5')),
     cpcvGroups: Number(argOf('cpcv', '10')),
-  });
+  }).finally(() => torch?.close());
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(rep.params, null, 2) + '\n');
   console.table(rep.cv);
