@@ -500,6 +500,14 @@ shares each day's tape between the two networks. Tapes are reused while their re
 history store and the trainer's code are unchanged; the least recently used are deleted past
 `SNN_TAPE_CACHE_GB` (default 10). `SNN_TAPES=false` turns them off.
 
+**GPU check for the SNN (prototype).** `SnnGpuBench.cmd` (next to `Train.cmd`; close the trainer first) tests whether
+the SNN tournaments could run on your GPU without changing a single result. It records a few hours of the crypto
+network's column steps from your replay, runs them on the GPU as 1 to 64 tournament members at once
+(`python/snn/column.cu`: one thread per member and column, the TypeScript's operations in the same order, V8's own
+exp/log/tanh, fused multiply-add off), checks every member bit for bit against the TypeScript network and prints
+the time per step next to the TypeScript's. The report is `trainer-data\snn-gpu-bench.json`. It needs only the
+trainer's PyTorch (no CUDA toolkit). It changes nothing in training.
+
 A 16-thread laptop with 32 GB on Balanced runs 8 candidates at once instead of 3, one after another (Full speed:
 up to 14, as memory allows).
 

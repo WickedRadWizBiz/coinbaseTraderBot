@@ -40,6 +40,7 @@
 // progress; the next run continues the tournaments where they stopped.
 //
 //   --torch-check  set up / check PyTorch and the TA network's torch trainer, then exit (0 = ready)
+//   --snn-gpu-bench  the SNN GPU prototype's parity and speed check on this computer (SnnGpuBench.cmd)
 //   --intensity gentle|balanced|full   how hard it works (default balanced, or the window's last choice)
 //
 // It keeps the computer usable (research/trainerResources.ts): it and everything it starts run below normal priority;
@@ -474,6 +475,15 @@ export async function laptopTrainMain(): Promise<void> {
     return;
   }
   if (flag('torch-check')) { process.exitCode = (await torchFor(dataDir, log)).TA_NET_ENGINE === 'auto' ? 0 : 1; return; }
+  if (flag('snn-gpu-bench')) {
+    const py = (await torchFor(dataDir, log)).TA_NET_PYTHON;
+    if (!py) { log('PyTorch is not set up on this computer: no GPU check'); process.exitCode = 1; return; }
+    const { snnKernelBench } = await import('./snnKernel');
+    const rec = [argOf('recordings'), path.join(dataDir, 'history-replay'), path.join(dataDir, 'recordings')].find((d) => d && fs.existsSync(d));
+    const r = await snnKernelBench({ recordings: rec ?? path.join(dataDir, 'history-replay'), outDir: dataDir, python: py, hours: Number(argOf('hours') ?? 4), members: argOf('members'), log });
+    process.exitCode = r.ok ? 0 : 1;
+    return;
+  }
   const hours = Number(argOf('hours') ?? 0);
   if (!(hours >= 0)) throw new Error('--hours must be 0 (train until it stops by itself) or a number of hours');
   const settingsFile = path.join(dataDir, 'trainer.json');

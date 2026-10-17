@@ -21,6 +21,9 @@ Kalshi bot trainer (Windows)
    installing one. If you say yes it stops training (finished steps are kept), downloads the new version,
    installs it over this folder (trainer-data is never touched) and opens again by itself.
    TrainConsole.cmd is the old console-only way (asks for the hours in the console; --setup for the server).
+   SnnGpuBench.cmd checks whether the SNN tournaments can run on your GPU: it runs a few hours of the
+   crypto network on the GPU for several population sizes, checks every result bit for bit against the
+   bot's own network and times it (a few minutes; close the trainer first; report: trainer-data\snn-gpu-bench.json).
 
 What it does: downloads years of crypto history (Binance spot, perpetuals, funding and open interest;
 Coinbase) and a year of Kalshi's settled contracts, copies the bot's own recordings, then runs the bot's
