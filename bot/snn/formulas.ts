@@ -266,8 +266,10 @@ export function clipNorm(e: Float64Array | number[], eMax: number): number {
   return n;
 }
 
-export interface PcScratch { u: Float64Array; e: Float64Array; fe: Float64Array; r0: Float64Array }
-export const pcScratch = (nx: number, nr: number): PcScratch => ({ u: new Float64Array(nx), e: new Float64Array(nx), fe: new Float64Array(nx), r0: new Float64Array(nr) });
+/** Scratch for a PC step: u = U r, t = tanh(u) (kept from the prediction for f'(u) = 1 - t^2), e, f'.e, r before the
+ *  update, and the U^T (f'.e) accumulator. */
+export interface PcScratch { u: Float64Array; t: Float64Array; e: Float64Array; fe: Float64Array; r0: Float64Array; acc: Float64Array }
+export const pcScratch = (nx: number, nr: number): PcScratch => ({ u: new Float64Array(nx), t: new Float64Array(nx), e: new Float64Array(nx), fe: new Float64Array(nx), r0: new Float64Array(nr), acc: new Float64Array(nr) });
 
 /** Prediction half of a Rao-Ballard step. U row-major (nx x nr): u = U r, xhat = f(u), e = x - xhat.
  *  Returns the UNCLIPPED error norm (the caller decides the clip, e.g. tighter at error z > 6). */
@@ -279,7 +281,9 @@ export function pcPredict(U: ArrayLike<number>, r: ArrayLike<number>, x: ArrayLi
     const row = i * nr;
     for (let j = 0; j < nr; j++) v += U[row + j] * r[j];
     s.u[i] = v;
-    const e = x[i] - pcF(v);
+    const t = pcF(v);
+    s.t[i] = t;
+    const e = x[i] - t;
     s.e[i] = e;
     n2 += e * e;
   }
@@ -292,22 +296,26 @@ export function pcPredict(U: ArrayLike<number>, r: ArrayLike<number>, x: ArrayLi
 export function pcUpdate(U: Float32Array | Float64Array, r: Float64Array, rTd: ArrayLike<number> | undefined, s: PcScratch, p: PcParams, learnU: boolean, eMax = p.eMax): void {
   const nx = s.e.length, nr = r.length;
   clipNorm(s.e, eMax);
-  for (let i = 0; i < nx; i++) s.fe[i] = pcFPrime(s.u[i]) * s.e[i];
+  // f'(u) = 1 - tanh(u)^2 from the prediction's tanh (the same value pcFPrime would compute).
+  for (let i = 0; i < nx; i++) { const t = s.t[i]; s.fe[i] = (1 - t * t) * s.e[i]; }
   const a = p.k1 / p.sigma2, b = p.k1 / p.sigmaTd2;
-  const r0 = s.r0;
+  const r0 = s.r0, acc = s.acc;
   r0.set(r);
-  for (let j = 0; j < nr; j++) {
-    let v = 0;
-    for (let i = 0; i < nx; i++) v += U[i * nr + j] * s.fe[i];
-    const td = rTd ? b * (rTd[j] - r0[j]) : 0;
-    r[j] = r0[j] + a * v + td - (p.k1 / 2) * (2 * p.priorL2 * r0[j]);
-  }
+  acc.fill(0);
+  // One row-major pass over U: acc = U^T (f'.e), each acc[j] summed over i in ascending order as before (the same
+  // result to the bit), and U updated from its old value in the same pass.
   if (learnU) {
     const c = p.k2 / p.sigma2, dec = 1 - p.k2 * p.lambda;
     for (let i = 0; i < nx; i++) {
-      const row = i * nr, g = c * s.fe[i];
-      for (let j = 0; j < nr; j++) U[row + j] = U[row + j] * dec + g * r0[j];
+      const row = i * nr, f = s.fe[i], g = c * f;
+      for (let j = 0; j < nr; j++) { const u = U[row + j]; acc[j] += u * f; U[row + j] = u * dec + g * r0[j]; }
     }
+  } else {
+    for (let i = 0; i < nx; i++) { const row = i * nr, f = s.fe[i]; for (let j = 0; j < nr; j++) acc[j] += U[row + j] * f; }
+  }
+  for (let j = 0; j < nr; j++) {
+    const td = rTd ? b * (rTd[j] - r0[j]) : 0;
+    r[j] = r0[j] + a * acc[j] + td - (p.k1 / 2) * (2 * p.priorL2 * r0[j]);
   }
 }
 

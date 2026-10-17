@@ -885,7 +885,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
           const unseen = weeks.filter((b) => b.days[b.days.length - 1] < span[0] || b.days[0] > span[span.length - 1]);
           const cw = ledger.pickContest(ledgerNet, unseen, A.contestWeeks, latestDay);
           if (cw.length) {
-            contest = await snnContest({ recordings: replayDir, domain, candidate: JSON.parse(fs.readFileSync(cand, 'utf8')), incumbent: JSON.parse(fs.readFileSync(file, 'utf8')), days: cw.flatMap((b) => b.days), allDays: srcDays, workers: workerCount(), log });
+            contest = await snnContest({ recordings: replayDir, domain, candidate: JSON.parse(fs.readFileSync(cand, 'utf8')), incumbent: JSON.parse(fs.readFileSync(file, 'utf8')), days: cw.flatMap((b) => b.days), allDays: srcDays, workers: workerCount(), log, tapeDir: path.join(work, 'snn-tape', domain) });
             const g = ledger.begin(ledgerNet, 'contest', cw, contest.winner);
             ledger.markJudged(ledgerNet, g.blocks); ledger.finish(ledgerNet, g.id); ledger.save();
             if (contest.winner !== 'candidate') return { promoted: false, stage, reason: `contest: challenger ${contest.reason}`, contest, result: r };
