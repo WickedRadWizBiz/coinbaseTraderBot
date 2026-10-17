@@ -21,6 +21,7 @@ import {
   twoSpeedStep, type PcParams, type PcScratch,
 } from './formulas';
 import { columnHorizonSec, columnKind, CRYPTO_DELTA_BPS, l0Width, popSpec, TENNIS_DELTA_CENTS, type ColumnKind, type PopSpec } from './inputs';
+import { ColumnKernel } from './kernel';
 import type { SnnParams } from './params';
 import { Xoshiro128 } from './rng';
 
@@ -108,6 +109,8 @@ export class Column {
   private readonly Ka: number; private readonly Kn: number; private readonly Kg: number;
   private readonly decBranch: Float64Array;
   private stepsSinceSlow = 0;
+  /** The column step in WebAssembly (bot/snn/kernel.ts; the same bits), unless off or unported. */
+  private kernel?: ColumnKernel;
 
   constructor(readonly key: string, readonly asset: string, p: SnnParams, readonly index: number) {
     this.p = p;
@@ -204,6 +207,7 @@ export class Column {
     this.Kn = dexpNorm(SYN_CLASSES.nmda.tauR, SYN_CLASSES.nmda.tauD);
     this.Kg = single ? 1 : dexpNorm(SYN_CLASSES.gaba.tauR, SYN_CLASSES.gaba.tauD);
     this.decBranch = Float64Array.from({ length: B }, (_, j) => decay(1, p.branchTaus[j % p.branchTaus.length]));
+    this.kernel = ColumnKernel.attach(this);
   }
 
   /** All persistent typed-array state (checkpointing). */
@@ -245,6 +249,8 @@ export class Column {
   /** One 1 s step. `first` applies the price deltas (inputs are piecewise-constant across catch-up
    *  steps); `latInh` is the cross-column lateral inhibition; `gapV` the partner column's I voltages. */
   step(inp: ColumnInput, first: boolean, ctx: { latInh: number; gapV?: Float64Array; dBrier: number; refRateE?: number; frozen: boolean; training?: boolean }): void {
+    // WebAssembly (the same bits, about twice as fast); the e-prop training step stays here.
+    if (this.kernel && !ctx.training) { this.kernel.step(this, inp, first, ctx); return; }
     const p = this.p, F = p.flags, d = this.dec;
     const nL0 = this.nL0;
     const { nL1, branches: B, synPerBranch: K, nE } = p;

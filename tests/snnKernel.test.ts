@@ -8,6 +8,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_SNN, domainParams, stageFlags, withFlags, type Stage } from '../bot/snn/params';
+import { kernelModule, kernelSwitch } from '../bot/snn/kernel';
+import { kernelSourceHash } from '../bot/snn/kernelSource';
+import { KERNEL_SOURCE_HASH } from '../bot/snn/kernelWasm';
 import { recordKernelTrace } from '../research/snnKernel';
 import { replaySnn } from '../research/snnReplay';
 import { writeSyntheticRecordings } from '../research/synthetic';
@@ -54,5 +57,31 @@ test('the column kernel replays the TypeScript network bit for bit (crypto S2-S6
     const r = spawnSync(numpy, [path.resolve('python/snn/bench.py'), path.join(dir, 'crypto-S6.bin'), '--cpu', '--members', '1,3'], { encoding: 'utf8', env: { ...process.env, CC: cc } });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.equal((r.stdout.match(/every member bit-identical/g) ?? []).length, 2);
+  }
+});
+
+test('the embedded WebAssembly kernel is built from the C sources in the repository (npm run build:snn-wasm)', () => {
+  assert.equal(KERNEL_SOURCE_HASH, kernelSourceHash(path.resolve('.')));
+});
+
+test('columns stepped in WebAssembly give the TypeScript network\'s rows and state to the bit (crypto S5/S6, perps S6, from a checkpoint)', async () => {
+  assert.ok(kernelModule(), 'WebAssembly kernel loads');
+  const rec = tmpDir();
+  writeSyntheticRecordings(rec, { windows: 3, seed: 8 });
+  const run = async (off: boolean, domain: 'crypto' | 'perps', stage: Stage, checkpoint?: ReturnType<Awaited<ReturnType<typeof replaySnn>>['net']['serialize']>) => {
+    kernelSwitch.off = off;
+    try {
+      const r = await replaySnn(rec, { params: domainParams(domain, withFlags(DEFAULT_SNN, stageFlags(stage))), domain, skipModel: true, checkpoint, allowParamChange: true });
+      return { rows: JSON.stringify(r.rows), net: JSON.stringify(r.net.serialize()), cp: r.net.serialize() };
+    } finally { kernelSwitch.off = false; }
+  };
+  for (const [domain, stage] of [['crypto', 'S5'], ['crypto', 'S6'], ['perps', 'S6']] as const) {
+    const ts = await run(true, domain, stage), wasm = await run(false, domain, stage);
+    if (domain === 'crypto') assert.ok(ts.rows.length > 2);
+    assert.equal(wasm.rows, ts.rows, `${domain} ${stage} rows`);
+    assert.equal(wasm.net, ts.net, `${domain} ${stage} network`);
+    // Continuing from a saved network (the columns' arrays restored into WebAssembly memory).
+    const ts2 = await run(true, domain, stage, ts.cp), wasm2 = await run(false, domain, stage, ts.cp);
+    assert.equal(wasm2.net, ts2.net, `${domain} ${stage} from a checkpoint`);
   }
 });

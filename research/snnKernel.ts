@@ -7,101 +7,11 @@
 import { spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { Column, type ColumnInput, type TypedArr } from '../bot/snn/column';
-import { DEFAULT_SNN, domainParams, stageFlags, withFlags, type SnnParams, type Stage } from '../bot/snn/params';
+import { Column, type TypedArr } from '../bot/snn/column';
+import { kernelArrays, kernelInput, kernelParams, kernelUnsupported } from '../bot/snn/kernel';
+import { DEFAULT_SNN, domainParams, stageFlags, withFlags, type Stage } from '../bot/snn/params';
 import { recordingDayList } from '../bot/marketdata/recordingFiles';
 import { replaySnn } from './snnReplay';
-
-/** SnnP's int fields, then its double fields, in the struct's order. */
-export const KERNEL_INTS = ['nL0', 'nL1', 'B', 'K', 'nE', 'N', 'nSyn', 'nThr', 'nPop', 'kindTennis', 'synClasses', 'dendrites', 'pc', 'lateral', 'gapJunctions', 'alif', 'plasticity', 'pcLearn', 'slowEverySec', 'pad_'] as const;
-export const KERNEL_DOUBLES = [
-  'deltaGain', 'midDelta', 'popGain', 'thetaL0', 'tauRateL0', 'nmdaWeight', 'mg', 'thetaL1', 'l1Gain', 'feedbackGain', 'tauRateL1',
-  'govDeltaP', 'thetaE', 'thetaI', 'gapCoupling', 'betaA', 'tauRateL23', 'ipLow', 'ipHigh', 'ipStep', 'ipMin',
-  'eta', 'govDelta', 'kappa', 'wMin', 'wMax', 'tauRho', 'A3plus', 'A2minus', 'rho0', 'tripP', 'tauC', 'eps',
-  'govK0', 'govK1', 'govK2', 'govK3', 'tauG',
-  'pcK1', 'pcK2', 'pcSigmaTd2', 'pcLambda', 'pcEMax', 'pcPriorL2', 'errZTau', 'surpriseTau', 'pcSigma2Max', 'pcSigma2Min', 'pcSigmaLearnTau',
-  'dL0', 'dL1', 'dE', 'dI', 'dA', 'daR', 'daD', 'dnR', 'dnD', 'dgR', 'dgD', 'dtp', 'dtm', 'dty', 'Ka', 'Kn', 'Kg',
-] as const;
-
-/** Col's pointer fields in order (scalars last: Column.SCALARS doubles, then the int counters). */
-export const KERNEL_F64 = [
-  'thr', 'popLo', 'popHi', 'decBranch', 'I0', 'v0', 'rate0', 'deltaAcc', 'aR0', 'aD0', 'nR0', 'nD0', 'gA0', 'gN0',
-  'theta1', 'alpha1', 'u1', 'b1', 'bbar', 'v1', 'rate1', 'gate1', 'preR1', 'postO1', 'postO2', 'rho1',
-  'v2', 'a2', 'rate2', 'aR2', 'aD2', 'nR2', 'nD2', 'gR2', 'gD2', 'preRE', 'postO1E', 'postO2E', 'rhoE', 'theta0E', 'theta0I',
-  'z2', 'z1', 'xhat1', 'err0', 's1u', 's1t', 's1e', 's1fe', 's1r0', 's1acc', 's0u', 's0t', 's0e', 's0fe', 's0r0', 's0acc',
-] as const;
-export const KERNEL_U8 = ['s0', 's1', 's2'] as const;
-export const KERNEL_F32 = ['w1', 'w1s', 'ffW', 'recW', 'recWs', 'U1', 'U0'] as const;
-export const KERNEL_I32 = ['src', 'ffPtr', 'ffCol', 'recPtr', 'recCol', 'inPtr', 'inEdge', 'inPre', 'revPtr', 'revSyn', 'prevSpikes'] as const;
-const SC = ['midAcc', 'lastSpot', 'lastMid', 'sigma2_1', 'sigma2_0', 'surprise', 'surpriseInst', 'errMean', 'errVar', 'errN', 'errZ',
-  'zHighRun', 'pcNormalRun', 'G', 'rateL0', 'rateL1', 'rateE', 'rateI', 'exc', 'inh', 'fSat', 'chBurst', 'deltaFast', 'deltaSlow', 'lastRetBp'] as const;
-const SI = ['pcFrozen', 'nPrev', 'stepsSinceSlow', 'ipCount'] as const;
-
-type Priv = Record<string, unknown> & {
-  p: SnnParams; pop: { name: string; lo: number; hi: number }[]; deltaThr: number[]; dec: Record<string, number>;
-  Ka: number; Kn: number; Kg: number; decBranch: Float64Array;
-  sc1: Scratch; sc0: Scratch;
-};
-type Scratch = { u: Float64Array; t: Float64Array; e: Float64Array; fe: Float64Array; r0: Float64Array; acc: Float64Array };
-const priv = (c: Column) => c as unknown as Priv;
-
-/** Flags the kernel does not implement. */
-export function kernelUnsupported(p: SnnParams): string[] {
-  const out: string[] = [];
-  if (p.flags.dcaap) out.push('dcaap');
-  if (p.flags.izhikevichCH) out.push('izhikevichCH');
-  if (p.flags.plasticity && p.triplet.p !== 1 && p.triplet.p !== 2) out.push('triplet.p other than 1 or 2');
-  return out;
-}
-
-export function kernelParams(c: Column): { ints: Int32Array; dbls: Float64Array } {
-  const x = priv(c), p = x.p, d = x.dec, F = p.flags;
-  const ints: Record<(typeof KERNEL_INTS)[number], number> = {
-    nL0: c.nL0, nL1: p.nL1, B: p.branches, K: p.synPerBranch, nE: p.nE, N: c.N, nSyn: c.nSyn, nThr: x.deltaThr.length, nPop: x.pop.length, kindTennis: c.kind === 'tennis' ? 1 : 0,
-    synClasses: +F.synClasses, dendrites: +F.dendrites, pc: +F.pc, lateral: +F.lateral, gapJunctions: +F.gapJunctions, alif: +F.alif, plasticity: +F.plasticity, pcLearn: +F.pcLearn,
-    slowEverySec: p.slowEverySec, pad_: 0,
-  };
-  const dbls: Record<(typeof KERNEL_DOUBLES)[number], number> = {
-    deltaGain: p.deltaGain, midDelta: p.midDelta, popGain: p.popGain, thetaL0: p.thetaL0, tauRateL0: p.tauRateL0,
-    nmdaWeight: p.nmdaWeight, mg: p.mg, thetaL1: p.thetaL1, l1Gain: p.l1Gain, feedbackGain: p.feedbackGain, tauRateL1: p.tauRateL1,
-    govDeltaP: p.govDeltaP, thetaE: p.thetaE, thetaI: p.thetaI, gapCoupling: p.gapCoupling, betaA: p.betaA, tauRateL23: p.tauRateL23,
-    ipLow: p.ipLow || 0, ipHigh: p.ipHigh || 0, ipStep: p.ipStep ?? 0.02, ipMin: p.ipMin ?? 0.15,
-    eta: p.eta, govDelta: p.govDelta, kappa: p.kappa, wMin: p.wMin, wMax: p.wMax, tauRho: p.tauRho,
-    A3plus: p.triplet.A3plus, A2minus: p.triplet.A2minus, rho0: p.triplet.rho0, tripP: p.triplet.p, tauC: p.tauC, eps: p.eps,
-    govK0: p.govK[0], govK1: p.govK[1], govK2: p.govK[2], govK3: p.govK[3], tauG: p.tauG,
-    pcK1: p.pcK1, pcK2: p.pcK2, pcSigmaTd2: p.pcSigmaTd2, pcLambda: p.pcLambda, pcEMax: p.pcEMax, pcPriorL2: p.pcPriorL2, errZTau: p.errZTau,
-    surpriseTau: p.surpriseTau, pcSigma2Max: p.pcSigma2Max, pcSigma2Min: p.pcSigma2Min, pcSigmaLearnTau: p.pcSigmaLearnTau,
-    dL0: d.L0, dL1: d.L1, dE: d.E, dI: d.I, dA: d.A, daR: d.aR, daD: d.aD, dnR: d.nR, dnD: d.nD, dgR: d.gR, dgD: d.gD, dtp: d.tp, dtm: d.tm, dty: d.ty,
-    Ka: x.Ka, Kn: x.Kn, Kg: x.Kg,
-  };
-  return { ints: Int32Array.from(KERNEL_INTS.map((k) => ints[k])), dbls: Float64Array.from(KERNEL_DOUBLES.map((k) => dbls[k])) };
-}
-
-/** The column's state as the kernel's arrays, in Col's pointer order (live views where the column has the array). */
-export function kernelArrays(c: Column): TypedArr[] {
-  const x = priv(c);
-  const named: Record<string, TypedArr> = {
-    thr: Float64Array.from(x.deltaThr), popLo: Float64Array.from(x.pop.map((f) => f.lo)), popHi: Float64Array.from(x.pop.map((f) => f.hi)), decBranch: x.decBranch,
-    s1u: x.sc1.u, s1t: x.sc1.t, s1e: x.sc1.e, s1fe: x.sc1.fe, s1r0: x.sc1.r0, s1acc: x.sc1.acc,
-    s0u: x.sc0.u, s0t: x.sc0.t, s0e: x.sc0.e, s0fe: x.sc0.fe, s0r0: x.sc0.r0, s0acc: x.sc0.acc,
-  };
-  const get = (k: string) => named[k] ?? (x[k] as TypedArr);
-  return [
-    ...KERNEL_F64.map(get), ...KERNEL_U8.map(get), ...KERNEL_F32.map(get), ...KERNEL_I32.map(get),
-    Float64Array.from(SC.map((k) => { const v = x[k]; return typeof v === 'boolean' ? +v : (v as number); })),
-    Int32Array.from(SI.map((k) => { const v = x[k]; return typeof v === 'boolean' ? +v : (v as number); })),
-  ];
-}
-
-/** One call's inputs as the kernel reads them (StepIn): absent values are NaN, an absent reference rate 0. */
-export function kernelInput(c: Column, inp: ColumnInput, first: boolean, ctx: { latInh: number; gapV?: Float64Array; dBrier: number; refRateE?: number; frozen: boolean }) {
-  const x = priv(c);
-  const vals = inp.values ?? { dAtm: inp.dAtm, tauFrac: inp.tauFrac, mid: inp.mid, spread: inp.spread, imbalance: inp.imbalance };
-  return {
-    price: inp.price ?? inp.spot ?? NaN, mid: inp.mid ?? NaN, latInh: ctx.latInh, dBrier: ctx.dBrier, refRateE: ctx.refRateE || 0, first: first ? 1 : 0, frozen: ctx.frozen ? 1 : 0,
-    vals: Float64Array.from(x.pop.map((f) => vals[f.name] ?? NaN)), gapV: ctx.gapV ? Float64Array.from(ctx.gapV) : undefined,
-  };
-}
 
 const DT = (a: TypedArr) => (a instanceof Float64Array ? 0 : a instanceof Float32Array ? 1 : a instanceof Int32Array ? 2 : 3);
 
@@ -125,7 +35,7 @@ export async function recordKernelTrace(file: string, run: () => Promise<unknown
   const idOf = (c: Column) => {
     let id = ids.get(c);
     if (id === undefined) {
-      const bad = kernelUnsupported(priv(c).p);
+      const bad = kernelUnsupported((c as unknown as { p: Parameters<typeof kernelUnsupported>[0] }).p);
       if (bad.length) throw new Error(`snn kernel: unsupported flags ${bad.join(', ')}`);
       id = ids.size; ids.set(c, id);
       const kp = kernelParams(c);

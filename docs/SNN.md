@@ -141,6 +141,12 @@ settlement, G, PC precisions, the PRNG state and the version hash. After a gap l
 state (voltages, traces) is reset while weights are kept. Replay of missed ticks is not implemented: the
 network warms up again from live data.
 
+## The column step in WebAssembly
+
+Each column's 1 s step runs as WebAssembly (`bot/snn/kernel.ts`), built from the C kernel in `python/snn/column.cu` (`npm run build:snn-wasm` embeds it in `bot/snn/kernelWasm.ts`). The C follows `Column.step` operation for operation, rounds to float32 where the TypeScript keeps Float32Arrays, and uses V8's own exp, log and tanh (`python/snn/fdlibm.h`). Its results are therefore the TypeScript's to the bit: the same rows, the same checkpoints and the same live outputs (`tests/snnKernel.test.ts`). The column step runs about 2.3 times faster, and a replay about 30% faster.
+
+Each column keeps its state in its own WebAssembly memory (about 380 KB), and its arrays are views into it. Checkpoints, readouts, health and the e-prop training step, which stays in TypeScript, therefore all work on the same state. `SNN_WASM=false` keeps every column in TypeScript. The same kernel builds as CUDA for the GPU check (`SnnGpuBench.cmd`, docs/LAPTOP_TRAINING.md).
+
 ## Staging and ablations
 
 `SNN_STAGE` S0…S6 sets which mechanisms run. Each stage adds one mechanism to the one before.
