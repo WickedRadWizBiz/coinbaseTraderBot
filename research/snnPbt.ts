@@ -43,6 +43,7 @@ import { DEFAULT_TRANSITION, pboGate, tournamentPbo, transitionPenalty, type Tra
 import { assetOfGroup } from './transitions';
 import { geneTraits, type GaGeneration, type GaState } from './genetic';
 import { replaySnn, type SnnRow } from './snnReplay';
+import { playSnnTape, recordSnnTape, TapeCache, tapeEnvSig, tapesEnabled, type TapeSpan } from './snnTape';
 import type { SnnReplayJob, SnnReplayOut } from './snnReplayWorker';
 import { WorkerPool, workerCount, workerScript } from './workerPool';
 
@@ -169,6 +170,9 @@ export async function runSnnPbt(o: {
   population?: number; workers?: number; modelPath?: string;
   /** Breeding every few rounds (research/genetic.ts; populations of 6+). */
   genetic?: GeneticOpts;
+  /** Where the members' shared input tapes are kept (research/snnTape.ts; default work/snn-tape/<domain>
+   *  next to the state folder; crypto and perps; off with SNN_TAPES=false). */
+  tapeDir?: string;
 }): Promise<SnnPbtResult> {
   const log = o.log ?? (() => {});
   const initDays = o.initDays ?? 3, evalDays = o.evalDays ?? 1;
@@ -207,24 +211,40 @@ export async function runSnnPbt(o: {
   log(`${o.domain} SNN tournament (stage ${o.stage}): ${o.days.length} recorded day(s), ${saved ? `continuing (${saved.log.length} rounds so far)` : `fresh population of ${o.population ?? 3}`}; ${rounds.length} round(s) to run${(o.workers ?? 1) > 1 ? `, ${o.workers} members at a time` : ''}`);
   const pool = (o.workers ?? 1) > 1 ? new WorkerPool<SnnReplayJob, SnnReplayOut>(workerScript('snnReplayWorker'), o.workers!) : undefined;
 
-  const replay = async (s: MemberState, hyper: Hyper, from: number, to: number) => {
+  const known = o.allDays ?? o.days;
+  const spanOf = (a: number, to: number): TapeSpan => ({ domain: o.domain, from: a, to, fromDay: known[known.indexOf(dayOf(a)) - 1] ?? dayOf(a), toDay: dayOf(to - 1) });
+  // Every member replays the same span: its inputs are recorded once (a tape) and each member plays them on its own network.
+  const tapeDir = o.tapeDir ?? (o.stateDir ? path.resolve(o.stateDir, '..', '..', 'snn-tape', o.domain) : undefined);
+  const tapes = tapeDir && o.domain !== 'tennis' && tapesEnabled() ? new TapeCache({
+    dir: tapeDir, recordings: o.recordings, envSig: tapeEnvSig({ modelPath: o.modelPath }), log,
+    build: async (sp, file) => {
+      if (pool) await pool.run({ dir: o.recordings, params: base, domain: o.domain, modelPath: o.modelPath, from: sp.from, to: sp.to, fromDay: sp.fromDay, toDay: sp.toDay, skipModel: true, recordTape: file });
+      else await recordSnnTape(o.recordings, file, { params: base, domain: o.domain, model: o.model, calendar, from: sp.from, to: sp.to, fromDay: sp.fromDay, toDay: sp.toDay, skipModel: true });
+    },
+  }) : undefined;
+
+  const replay = async (s: MemberState, hyper: Hyper, from: number, to: number, next?: { from: number; to: number }) => {
     if (to <= s.through) return { rows: [] as SnnRow[] };
     const a = Math.max(from, s.through);
     const params = withSnnHyper(base, hyper);
-    const known = o.allDays ?? o.days;
-    const prevDay = known[known.indexOf(dayOf(a)) - 1];
+    const span = spanOf(a, to);
+    const tape = tapes ? await tapes.get(span) : undefined;
+    // The next round's tape is recorded while this round's members play (on a free worker).
+    if (tapes && pool && next) setImmediate(() => void tapes.get(spanOf(next.from, next.to)));
     if (pool) {
-      const r = await pool.run({ dir: o.recordings, params, domain: o.domain, modelPath: o.modelPath, checkpoint: s.cp, from: a, to, fromDay: prevDay ?? dayOf(a), toDay: dayOf(to - 1), skipModel: true, tennis: o.tennis });
+      const r = await pool.run({ dir: o.recordings, params, domain: o.domain, modelPath: o.modelPath, checkpoint: s.cp, from: a, to, fromDay: span.fromDay, toDay: span.toDay, skipModel: true, tennis: o.tennis, playTape: tape });
       s.cp = r.checkpoint;
       s.through = to;
       return { rows: r.rows };
     }
     // Fitness reads p_snn against the market only: the decision model's p_model is not computed.
-    const r = await replaySnn(o.recordings, { params, domain: o.domain, model: o.model, calendar, checkpoint: s.cp, allowParamChange: true, from: a, to, fromDay: prevDay ?? dayOf(a), toDay: dayOf(to - 1), skipModel: true, tennis: o.tennis });
+    const r = tape ? playSnnTape(tape, { params, domain: o.domain, checkpoint: s.cp, allowParamChange: true, from: a })
+      : await replaySnn(o.recordings, { params, domain: o.domain, model: o.model, calendar, checkpoint: s.cp, allowParamChange: true, from: a, to, fromDay: span.fromDay, toDay: span.toDay, skipModel: true, tennis: o.tennis });
     s.cp = r.net.serialize();
     s.through = to;
     return r;
   };
+  const nextRound = (r: { index: number }) => { const n = rounds.find((x) => x.index === r.index + 1); return n ? { from: n.evalFrom, to: n.evalTo } : undefined; };
   const save = (members: PbtMember<MemberState>[], trials: number, plog: PbtRoundLog[], lastEvalTo: number, nextIndex: number, ga?: GaState) => {
     if (!o.stateDir) return;
     fs.mkdirSync(o.stateDir, { recursive: true });
@@ -256,7 +276,7 @@ export async function runSnnPbt(o: {
       },
       train: async (s, h, r) => { await replay(s, h, r.trainFrom, r.trainTo); return s; },
       evaluate: async (s, h, r) => {
-        const out = await replay(s, h, r.evalFrom, r.evalTo);
+        const out = await replay(s, h, r.evalFrom, r.evalTo, nextRound(r));
         const rows = out.rows.filter((x) => x.ts >= r.evalFrom && x.ts < r.evalTo);
         const xs = snnInteractions(rows, o.domain);
         // Opportunities: one per contract (crypto and tennis bet each contract at most once), one per step (perps).

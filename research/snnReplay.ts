@@ -19,6 +19,7 @@ import { SnnNetwork, type ColumnInput, type ContractQuery, type SnnCheckpoint, t
 import type { SnnDomain, SnnParams } from '../bot/snn/params';
 import { exceedLabel } from '../bot/snn/readout';
 import { readRecordings, ReplayState, type RecMarket } from './replay';
+import type { SnnTapeSink } from './snnTape';
 
 export interface SnnRow {
   ticker: string; eventKey: string; column: string; ts: number; day: string; kind: string;
@@ -75,6 +76,10 @@ export interface SnnReplayOpts {
    *  ended match folds into the network's tennis template (needs `tennis`, the tennis config). */
   domain?: SnnDomain;
   tennis?: TennisConfig;
+  /** Record every call the replay makes to the network (research/snnTape.ts): crypto and perps only. */
+  tape?: SnnTapeSink;
+  /** Record the tape without running the network (the rows and the network come back empty). */
+  tapeOnly?: boolean;
 }
 
 /** Same mapping as the engine's snnColumn: 15-minute contracts -> asset-15m, hourly -> asset-60m. */
@@ -85,6 +90,8 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
   const domain = o.domain ?? 'crypto';
   const tennisDomain = domain === 'tennis';
   if (tennisDomain && !o.tennis) throw new Error('replaySnn: the tennis domain needs the tennis config (o.tennis)');
+  if (o.tape && tennisDomain) throw new Error('replaySnn: tapes cover the crypto and perps networks only');
+  if (o.tapeOnly && !o.tape) throw new Error('replaySnn: tapeOnly needs a tape');
   const horizons: CryptoHorizon[] = tennisDomain ? [] : DOMAIN_HORIZONS[domain];
   const contracts = domain === 'crypto';
   // Tennis: a match tracker per event and each match's latest column input / contract query (as the engine keeps them).
@@ -136,6 +143,8 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
 
   const settleMarket = (m: RecMarket) => {
     const out = st.outcome(m);
+    o.tape?.settle(m.ticker, out?.label, st.now);
+    if (o.tapeOnly) return;
     const ps = pending.get(m.ticker) ?? [];
     pending.delete(m.ticker);
     if (!out) { eprop.delete(m.ticker); pendingPhi.delete(m.ticker); return; }
@@ -206,6 +215,19 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     }
   };
 
+  /** The contracts scored this second, and what a tape needs to build their rows (skipModel's p_model, the mid, the coin). */
+  const scoreQueries = (active: RecMarket[], priced: Map<string, NonNullable<ReturnType<typeof fx>>>) => {
+    const queries: ContractQuery[] = [];
+    const ctx: { pYes: number; mid: number; asset: string }[] = [];
+    for (const m of contracts ? active : []) {
+      const x = priced.get(m.ticker);
+      if (!x) continue;
+      queries.push({ ticker: m.ticker, column: columnOf(m), kind: x.terms.kind, strike: x.terms.strike, cap: x.terms.cap, spot: x.spot.value, sigma: x.vol.sigmaPerSqrtSec, tauSec: x.tauSec, lifeSec: (m.closeTime - m.openTime) / 1000, eventKey: `${m.asset}:${m.closeTime}`, tag: m.closeTime - st.now > noEntry });
+      ctx.push({ pYes: x.fv.pYes, mid: x.mid, asset: m.asset });
+    }
+    return { queries, ctx };
+  };
+
   const assetCache = new Map<string, { ts: number; f: Record<string, number> }>();
   const assetEvery = (o.assetEverySec ?? 5) * 1000;
   let lastLive = -Infinity;
@@ -254,6 +276,11 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
         inputs.push({ key, asset, price: px, mid: contract?.mid, values: cryptoValues(h as CryptoHorizon, ac.f, contract) });
       }
     }
+    o.tape?.step(T, inputs);
+    if (o.tapeOnly) {
+      if (T % scoreEvery === 0) { const q = scoreQueries(active, priced); o.tape!.score(T, q.queries, q.ctx); }
+      continue;
+    }
     const t0 = performance.now();
     net.step(T, inputs);
     if (o.training?.eprop) for (const c of net.columns.values()) if (!c.elig) c.elig = new Float32Array(c.nSyn);
@@ -261,12 +288,8 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     if (net.health.freezeLearning) frozenSteps++;
     if (T % scoreEvery !== 0) { stepMs.push(performance.now() - t0); continue; }
     // Score every open contract.
-    const queries: ContractQuery[] = [];
-    for (const m of contracts ? active : []) {
-      const x = priced.get(m.ticker);
-      if (!x) continue;
-      queries.push({ ticker: m.ticker, column: columnOf(m), kind: x.terms.kind, strike: x.terms.strike, cap: x.terms.cap, spot: x.spot.value, sigma: x.vol.sigmaPerSqrtSec, tauSec: x.tauSec, lifeSec: (m.closeTime - m.openTime) / 1000, eventKey: `${m.asset}:${m.closeTime}`, tag: m.closeTime - st.now > noEntry });
-    }
+    const sq = scoreQueries(active, priced), queries = sq.queries;
+    o.tape?.score(T, queries, sq.ctx);
     const scores = net.score(queries, T);
     if (tennisDomain) {
       const tq = [...tennisIn.values()].filter((x) => st.now - x.ts < 15_000).map((x) => x.query);
@@ -327,6 +350,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
   }
   // Remaining markets that closed inside the recording.
   for (const m of [...st.markets.values()]) if (!m.recordOnly && m.kind !== 'match' && st.now >= m.closeTime + 60_000) settleMarket(m);
+  if (o.tapeOnly) return { rows, net, stepMs, frozenSteps, steps, ranking, collected };
   // Captured mispricing of a column choice: mean over its contracts of (y - mid) * sign(p_snn - mid).
   for (const pr of pendingRank) {
     const cap = (col: string) => {

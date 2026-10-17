@@ -11,6 +11,7 @@ import type { SnnModelFile } from '../bot/snn/network';
 import { coverageFloor, fitnessOf } from '../bot/util/fitness';
 import { clusterFor, SNN_MIN_COVERAGE, snnInteractions } from './snnPbt';
 import { replaySnn, type SnnRow } from './snnReplay';
+import { playSnnTape, recordSnnTape, TapeCache, tapeEnvSig, tapesEnabled } from './snnTape';
 import type { SnnReplayJob, SnnReplayOut } from './snnReplayWorker';
 import { WorkerPool, workerScript } from './workerPool';
 
@@ -32,6 +33,8 @@ export async function snnContest(o: {
   recordings: string; domain: 'crypto' | 'perps'; candidate: SnnModelFile; incumbent: SnnModelFile;
   /** The held-out days; `allDays` every recorded day (for each day's warm-up day). */
   days: string[]; allDays: string[]; workers?: number; log?: (m: string) => void;
+  /** The shared input tapes (research/snnTape.ts): each day is recorded once for both networks. */
+  tapeDir?: string;
 }): Promise<ContestResult> {
   const log = o.log ?? (() => {});
   const days = [...o.days].sort();
@@ -47,13 +50,26 @@ export async function snnContest(o: {
   log(`${o.domain} SNN contest: challenger vs champion on ${days.length} held-out day(s) (${days[0]}..${days[days.length - 1]}), ${jobs.length} replays`);
   const rows = { candidate: [] as SnnRow[], incumbent: [] as SnnRow[] };
   const workers = Math.max(1, o.workers ?? 1);
-  if (workers > 1) {
-    const pool = new WorkerPool<SnnReplayJob, SnnReplayOut>(workerScript('snnReplayWorker'), workers);
-    try { await Promise.all(jobs.map(async ({ side, job }) => { rows[side].push(...(await pool.run(job)).rows); })); } finally { await pool.close(); }
-  } else {
-    const calendar = loadCalendar(path.resolve('params/calendar.json'));
-    for (const { side, job } of jobs) rows[side].push(...(await replaySnn(job.dir, { ...job, calendar, allowParamChange: true })).rows);
-  }
+  const calendar = loadCalendar(path.resolve('params/calendar.json'));
+  const pool = workers > 1 ? new WorkerPool<SnnReplayJob, SnnReplayOut>(workerScript('snnReplayWorker'), workers) : undefined;
+  const tapes = o.tapeDir && tapesEnabled() ? new TapeCache({
+    dir: o.tapeDir, recordings: o.recordings, envSig: tapeEnvSig(), log,
+    build: async (sp, file) => {
+      const job = { dir: o.recordings, params: o.incumbent.params, domain: o.domain, from: sp.from, to: sp.to, fromDay: sp.fromDay, toDay: sp.toDay, skipModel: true };
+      if (pool) await pool.run({ ...job, recordTape: file });
+      else await recordSnnTape(o.recordings, file, { ...job, calendar });
+    },
+  }) : undefined;
+  const tapeOf = (job: SnnReplayJob) => tapes?.get({ domain: o.domain, from: job.from, to: job.to, fromDay: job.fromDay, toDay: job.toDay });
+  try {
+    if (pool) await Promise.all(jobs.map(async ({ side, job }) => { rows[side].push(...(await pool.run({ ...job, playTape: await tapeOf(job) })).rows); }));
+    else {
+      for (const { side, job } of jobs) {
+        const tape = await tapeOf(job);
+        rows[side].push(...(tape ? playSnnTape(tape, { ...job, allowParamChange: true }) : await replaySnn(job.dir, { ...job, calendar, allowParamChange: true })).rows);
+      }
+    }
+  } finally { await pool?.close(); }
   const candidate = contestScore(rows.candidate, o.domain, days), incumbent = contestScore(rows.incumbent, o.domain, days);
   const winner = candidate.fitness > incumbent.fitness ? 'candidate' : 'incumbent';
   const fmt = (s: ContestScore) => `fitness ${s.fitness.toFixed(4)} (${s.interactions} bets, net ${(100 * s.netReturn).toFixed(2)}%, max drawdown ${(100 * s.maxDrawdown).toFixed(1)}%)`;

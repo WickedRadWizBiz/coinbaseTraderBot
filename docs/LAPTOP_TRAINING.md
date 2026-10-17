@@ -491,6 +491,15 @@ round:
 - the rest have their settings mutated;
 - each is judged on days it has never seen.
 
+All members of a round replay the same days, so the work that does not depend on the network (reading the
+recordings, the order books, the feature maps, pricing every contract) is done once: the first request for a
+span records its **input tape** (`work/snn-tape/<domain>`), and every member plays that tape on its own network.
+A member's results are bit for bit what its own replay of the recordings gives; it runs about 1.8 times faster,
+and the next round's tape is recorded on a free worker while the current round plays. The champion contest
+shares each day's tape between the two networks. Tapes are reused while their recordings, the TA network, the
+history store and the trainer's code are unchanged; the least recently used are deleted past
+`SNN_TAPE_CACHE_GB` (default 10). `SNN_TAPES=false` turns them off.
+
 A 16-thread laptop with 32 GB on Balanced runs 8 candidates at once instead of 3, one after another (Full speed:
 up to 14, as memory allows).
 
