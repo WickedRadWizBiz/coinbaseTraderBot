@@ -43,7 +43,7 @@ import {
 } from '../bot/ta/taNet';
 import { coverageFloor as sharedCoverageFloor } from '../bot/util/fitness';
 import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type FitnessReport, type Interaction } from './fitness';
-import { runPbt, walkForwardRounds, type GeneticOpts, type Hyper, type MutationSpec, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
+import { fileMemberProgress, runPbt, walkForwardRounds, type GeneticOpts, type Hyper, type MutationSpec, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
 import { DEFAULT_TRANSITION, pboGate, tournamentPbo, transitionPenalty, type Transition } from './selection';
 import { regimeTransitions } from './transitions';
 import type { GaGeneration, GaState } from './genetic';
@@ -1040,6 +1040,11 @@ async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: 
   const res = await runPbt<Member>({
     base: { ...BASE_HYPER, ...o.baseHyper } as Hyper, spec: HYPER_SPEC, rounds, seed, resume, exploreAfterLast: true, restartEvery: o.restartEvery ?? 0, log,
     population, genetic: o.genetic,
+    // A member that finished the round before a stop keeps its training and score when the round resumes.
+    ...(o.statePath ? { memberProgress: fileMemberProgress<Member>(`${o.statePath}.round`, {
+      encode: (s) => ({ w: b64(s.w), m: b64(s.m), v: b64(s.v), step: s.step }),
+      decode: (x) => { const y = x as { w: string; m: string; v: string; step: number }; return { w: unb64(y.w), m: unb64(y.m), v: unb64(y.v), step: y.step }; },
+    }) } : {}),
     hooks: {
       // Identical networks: same seed, same weights; only the hyperparameters differ. A later init is an
       // exploration restart and gets fresh weights from a new seed.

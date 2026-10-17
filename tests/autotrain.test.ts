@@ -187,6 +187,18 @@ test('pipeline end to end: SNN first, backfilled SNN outputs, then the MLP train
     assert.match(String(again.steps.find((s) => s.step === `snn-${d}-ablation`)!.skipped), /not due/);
     assert.match(String(again.steps.find((s) => s.step === `snn-${d}-train`)!.skipped), /up to date/);
   }
+  // Nothing new since the last dataset and MLP: neither is rebuilt (a round after a stop, or one whose networks were not
+  // replaced); a new recording makes both due again.
+  await runPipeline({ cfg, only: ['dataset', 'mlp'], log: () => undefined, now: T0 + 2 * 3_600_000 });
+  const same = await runPipeline({ cfg, only: ['dataset', 'mlp'], log: () => undefined, now: T0 + 3 * 3_600_000 });
+  for (const s of ['dataset', 'mlp']) assert.match(String(same.steps.find((x) => x.step === s)!.skipped), /nothing it reads changed/, s);
+  const recFile = path.join(rec, fs.readdirSync(rec).find((f) => f.startsWith('md-'))!);
+  fs.appendFileSync(recFile, '\n');
+  const changed = await runPipeline({ cfg, only: ['dataset'], log: () => undefined, now: T0 + 4 * 3_600_000 });
+  assert.equal(changed.steps.find((x) => x.step === 'dataset')!.skipped, undefined, 'a changed recording: rebuilt');
+  // AUTO_TRAIN_SKIP_UNCHANGED=false: always run.
+  const off = await runPipeline({ cfg: cfgFor(dir, { AUTO_TRAIN_ABLATION_DAYS: '1', AUTO_TRAIN_SKIP_UNCHANGED: 'false' }), only: ['dataset'], log: () => undefined, now: T0 + 5 * 3_600_000 });
+  assert.equal(off.steps.find((x) => x.step === 'dataset')!.skipped, undefined);
 });
 
 test('pipeline readiness: the whole bot on its held-out days in % of the pool, every model\'s state, the target', async () => {
@@ -213,6 +225,11 @@ test('pipeline readiness: the whole bot on its held-out days in % of the pool, e
   assert.ok(f.components.every((c: { present: boolean }) => !c.present), 'nothing trained in this folder yet');
   assert.deepEqual(f.ledger, []);
   assert.ok(!fs.existsSync(path.join(cfg.autoTrain.dir, 'work', 'readiness-days')), 'the day links are removed');
+  // Again with nothing changed: the whole-bot replay is reused, the models' status written afresh.
+  const logs: string[] = [];
+  await runPipeline({ cfg, only: ['readiness'], log: (m) => logs.push(m), now: T0 + 9 * 86_400_000 });
+  assert.ok(logs.some((m) => /whole-bot replay from .* reused/.test(m)), logs.join('\n').slice(-600));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(cfg.autoTrain.dir, 'readiness.json'), 'utf8')).wholeBot, f.wholeBot);
 });
 
 test('remote mode: models copied in by the training workflow are hot-swapped; this machine never runs the pipeline', async () => {

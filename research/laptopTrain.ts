@@ -187,6 +187,19 @@ export interface RoundOutcome { improved: string[]; inProgress: string[]; failed
 
 /** What a round's pipeline report says: the steps whose model got better (a challenger that beat the one in
  *  use, or the first of its kind: the pipeline's `improved`), the tournaments still running, the failures. */
+/** The steps only a full round runs (the new history and the replay extended to yesterday): a full round whose
+ *  report shows them finished counts as done, even when it was stopped later on. */
+export const FULL_ROUND_STEPS = ['history', 'history_replay'];
+export function fullRoundDone(steps: ReportStep[], need = FULL_ROUND_STEPS): boolean {
+  return need.every((s) => steps.some((x) => x.step === s && x.ok && x.skipped !== 'stop requested'));
+}
+
+/** What the trainer remembers between runs (trainer-data/trainer-state.json): when the last full round's history and
+ *  replay finished, so a run started again within a day goes straight on with the training instead of repeating them. */
+export interface TrainerState { lastFullAt?: number }
+export const readTrainerState = (dataDir: string): TrainerState => { try { return JSON.parse(fs.readFileSync(path.join(dataDir, 'trainer-state.json'), 'utf8')) as TrainerState; } catch { return {}; } };
+export const writeTrainerState = (dataDir: string, st: TrainerState) => { try { fs.writeFileSync(path.join(dataDir, 'trainer-state.json'), JSON.stringify(st)); } catch { /* not essential */ } };
+
 export function roundOutcome(steps: ReportStep[]): RoundOutcome {
   const ran = steps.filter((s) => s.ok && !s.skipped);
   return {
@@ -618,15 +631,19 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   let why: string | undefined;
   const stopped = () => !!hooks?.stopRequested?.();
   const logFile = path.join(models, 'logs', `pipeline-laptop-${new Date(t0).toISOString().replace(/[:.]/g, '-')}.log`);
-  let round = 0, lastMs = 0, lastFull = 0, plateau = 0;
+  let round = 0, lastMs = 0, plateau = 0;
+  // The last full round (new history, the replay extended): remembered between runs, so starting again after a stop
+  // continues with the training (the pipeline skips the steps it already finished) instead of repeating them.
+  const tstate = readTrainerState(dataDir);
+  let lastFull = only ? 0 : tstate.lastFullAt ?? 0;
+  if (lastFull && Date.now() - lastFull < 24 * 3_600_000) log(`the last full round's history and replay finished ${((Date.now() - lastFull) / 3_600_000).toFixed(1)} h ago: continuing with the training (the next full round in ${(24 - (Date.now() - lastFull) / 3_600_000).toFixed(1)} h)`);
   while (!stopped()) {
     const left = deadline - Date.now();
     if (round > 0 && (left < 15 * 60_000 || left < 0.6 * lastMs)) { why = `the ${hours} h budget is used up`; break; }
     round++;
     // Round 1 and then once a day: every step (new history, the replay extended, new recordings: new weeks).
-    const full = !only && (round === 1 || Date.now() - lastFull >= 24 * 3_600_000);
+    const full = !only && Date.now() - lastFull >= 24 * 3_600_000;
     if (full && round > 1) await pull(2, true);
-    if (full) lastFull = Date.now();
     const steps = only ?? (full ? undefined : CONTINUE_STEPS);
     // Skip data download: no history step either (the pipeline leaves it out with --skip; listing every step with
     // --only instead would also run conditioning, which runs only when named).
@@ -637,6 +654,9 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     hooks?.phase?.('pipeline');
     const r0 = Date.now();
     const { code, heapOom } = await runRound(envFor(continuous ? 24 : left / 3_600_000), steps, logFile, [...(sweepAll ? ['--sweep-all'] : []), ...skip], hooks);
+    // A full round counts once its history and replay finished (also when stopped after them), or when it ran to the
+    // end (a history step that failed is tried again in a day, not every round).
+    if (full && (!stopped() || fullRoundDone(lastReport(models, r0)?.steps ?? [], o.skipDataDownload ? ['history_replay'] : FULL_ROUND_STEPS))) { lastFull = r0; writeTrainerState(dataDir, { ...readTrainerState(dataDir), lastFullAt: r0 }); }
     if (stopped()) { why = 'stopped'; log(`round ${round} stopped`); break; }
     lastMs = Date.now() - r0;
     process.exitCode = code === 0 ? 0 : 1;

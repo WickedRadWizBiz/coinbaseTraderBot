@@ -27,6 +27,8 @@
 // offspring take the slots of the worst; the champion parents and the best runners-up carry on. Optionally
 // the population is split into islands whose winners are the parents.
 
+import fs from 'fs';
+import path from 'path';
 import { progress } from './progress';
 import { rng } from './stats';
 import { perturb, type FitnessReport, type Hyper, type Interaction, type MutationSpec } from '../bot/util/fitness';
@@ -45,6 +47,48 @@ export interface PbtEval {
   /** What each of the member's parts made this round (e.g. per SNN column): summed until the next breeding,
    *  where an offspring takes each part from the parent whose part did better (genetic layer). */
   traits?: Record<string, number>;
+}
+
+/** Members that finished a round (trained and judged) before a stop: kept, so the resumed round only runs the rest.
+ *  The key names the round, the trials before it, the member and its knobs: a resumed round starts from the same
+ *  saved population (selection runs only after every member is judged), so a matching key means the same work. */
+export interface MemberProgress<S> {
+  load(key: string, round: PbtRound, member: PbtMember<S>): { state: S; eval: PbtEval } | undefined;
+  save(key: string, round: PbtRound, member: PbtMember<S>, state: S, ev: PbtEval): void;
+  /** The round is saved with the population: its member files go. */
+  clear(round: PbtRound): void;
+}
+
+// JSON that keeps non-finite numbers (a fitness of -Infinity, a NaN statistic).
+const jsonOut = (x: unknown) => JSON.stringify(x, (_k, v) => (typeof v === 'number' && !Number.isFinite(v) ? { $n: String(v) } : v));
+const jsonIn = (s: string) => JSON.parse(s, (_k, v) => (v && typeof v === 'object' && Object.keys(v).length === 1 && typeof v.$n === 'string' ? Number(v.$n) : v));
+
+/** Member progress in files (<dir>/r<round>-m<member>.json), the state through `codec`. */
+export function fileMemberProgress<S>(dir: string, codec: { encode(s: S): unknown; decode(x: unknown): S }): MemberProgress<S> {
+  const file = (round: PbtRound, id: number) => path.join(dir, `r${round.index}-m${id}.json`);
+  return {
+    load(key, round, m) {
+      try {
+        const f = file(round, m.id);
+        if (!fs.existsSync(f)) return undefined;
+        const x = jsonIn(fs.readFileSync(f, 'utf8')) as { key: string; state: unknown; eval: PbtEval };
+        return x.key === key ? { state: codec.decode(x.state), eval: x.eval } : undefined;
+      } catch { return undefined; }
+    },
+    save(key, round, m, state, ev) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        const f = file(round, m.id), tmp = `${f}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, jsonOut({ key, state: codec.encode(state), eval: ev }));
+        fs.renameSync(tmp, f);
+      } catch { /* progress is an optimisation */ }
+    },
+    clear(round) {
+      let names: string[] = [];
+      try { names = fs.readdirSync(dir); } catch { return; }
+      for (const n of names) { const r = /^r(\d+)-m\d+\.json/.exec(n); if (r && Number(r[1]) <= round.index) fs.rmSync(path.join(dir, n), { force: true }); }
+    },
+  };
 }
 
 export interface PbtHooks<S> {
@@ -153,6 +197,8 @@ export async function runPbt<S>(o: {
   concurrency?: number;
   /** Era-robust ranking over the lineage's recent blocks (research/selection.ts); false = rank on the round alone. */
   robust?: RobustOpts | false;
+  /** Keep members that finished the round in progress when the run stopped (see MemberProgress). */
+  memberProgress?: MemberProgress<S>;
   /** Called after every round (e.g. to persist the population). */
   onRound?: (state: { members: PbtMember<S>[]; trials: number; log: PbtRoundLog[]; round: PbtRound; ga?: GaState }) => Promise<void> | void;
 }): Promise<PbtResult<S>> {
@@ -277,13 +323,19 @@ export async function runPbt<S>(o: {
     // Train + evaluate every member (up to `concurrency` at once); results applied in member order.
     const evals: PbtEval[] = new Array(members.length);
     let next = 0;
+    const keyOf = (m: PbtMember<S>) => `${round.index}|${trials}|${m.id}|${JSON.stringify(m.hyper)}`;
+    const kept: number[] = [];
     await Promise.all(Array.from({ length: Math.max(1, Math.min(o.concurrency ?? 1, members.length)) }, async () => {
       while (next < members.length) {
-        const i = next++, m = members[i];
+        const i = next++, m = members[i], key = keyOf(m);
+        const done = o.memberProgress?.load(key, round, m);
+        if (done) { m.state = done.state; evals[i] = done.eval; kept.push(m.id); continue; }
         m.state = await o.hooks.train(m.state, m.hyper, round);
         evals[i] = await o.hooks.evaluate(m.state, m.hyper, round);
+        o.memberProgress?.save(key, round, m, m.state, evals[i]);
       }
     }));
+    if (kept.length) log(`round ${round.index}: member(s) ${kept.sort((a, b) => a - b).map((x) => `#${x}`).join(', ')} finished before the stop: kept`);
     members.forEach((m, i) => {
       trials++; m.record.push(...evals[i].interactions); m.scores.push({ round: round.index, fitness: evals[i].report.fitness });
       m.blocks = [...(m.blocks ?? m.scores.slice(0, -1).map((x) => x.fitness)), evals[i].report.fitness].slice(-64);
@@ -350,6 +402,7 @@ export async function runPbt<S>(o: {
     }
     out.push(entry);
     await o.onRound?.({ members, trials, log: out, round, ga });
+    o.memberProgress?.clear(round);
     progress('Tournament rounds', o.rounds.indexOf(round) + 1, o.rounds.length);
     log(`round ${round.index} (${entry.evalFrom}..${entry.evalTo}): ${entry.ranking.map((x) => `#${x.member} ${x.fitness.toFixed(2)}${x.robust !== undefined ? ` (robust ${x.robust.toFixed(2)})` : ''}`).join(', ')}; elite #${elite.id}, ${note}`);
   }

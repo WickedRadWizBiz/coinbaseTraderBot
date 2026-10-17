@@ -243,6 +243,7 @@ These can't be automated, or deliberately aren't.
 | `AUTO_TRAIN_ABLATION_EVERY_DAYS` | `7` | Re-run the ablation this often even if the MLP didn't change. |
 | `AUTO_TRAIN_SNN_TRAIN_DAYS` | `21` | Days the SNN trains on. The last 20% is held out for an out-of-sample check. |
 | `AUTO_TRAIN_ON_MODEL_CHANGE` | `true` | Retrain a network's consumer when that network's file changes outside the pipeline. |
+| `AUTO_TRAIN_SKIP_UNCHANGED` | `true` | Skip a retrain step (vol model, dataset, MLP, vol profile, perps, tennis, playbook; readiness's whole-bot replay) when nothing it reads changed since its last completed run: the same code and settings, no new recordings, replay days or SNN outputs, no model it reads replaced. |
 | `SNN_CROSS_FEED` | `false` | Let each decision model also read the other crypto-side network (only for horizons its own lacks). |
 | `VOL_MODEL` | `true` | Apply the tree volatility forecast to fair value (only if validated). |
 | `FILL_MIN_EV` | `0` | Minimum expected value per contract ($) for a maker quote or a cross once the fill model is active. |
