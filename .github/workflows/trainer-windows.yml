@@ -7,7 +7,7 @@ name: Laptop trainer (Windows package)
 on:
   workflow_dispatch:
   pull_request:
-    paths: ['research/laptopTrain.ts', 'research/trainerResources.ts', 'research/trainerUi.ts', 'research/trainerUiPage.ts', 'research/workerPool.ts', 'research/pipeline.ts', 'research/history/**', 'bot/marketdata/historyStore.ts', 'research/tvSetup.ts', 'deploy/tv_history.py', 'research/trainTaNet.ts', 'research/taNetRowsWorker.ts', 'research/torchSetup.ts', 'research/taNetTorch.ts', 'research/trainCrossGraph.ts', 'research/mlpTorch.ts', 'research/trainMetaModel.ts', 'research/trainTennisModel.ts', 'research/sweep.ts', 'research/sweepWorker.ts', 'python/**', 'packaging/**', 'vendor/talib/**', 'package.json', '.github/workflows/trainer-windows.yml']
+    paths: ['research/laptopTrain.ts', 'research/trainerResources.ts', 'research/trainerUi.ts', 'research/trainerUiPage.ts', 'research/workerPool.ts', 'research/pipeline.ts', 'research/history/**', 'bot/marketdata/historyStore.ts', 'research/tvSetup.ts', 'deploy/tv_history.py', 'research/trainTaNet.ts', 'research/taNetRowsWorker.ts', 'research/torchSetup.ts', 'research/taNetTorch.ts', 'research/trainCrossGraph.ts', 'research/mlpTorch.ts', 'research/trainMetaModel.ts', 'research/trainTennisModel.ts', 'research/sweep.ts', 'research/sweepWorker.ts', 'research/snnKernel.ts', 'python/**', 'packaging/**', 'vendor/talib/**', 'package.json', '.github/workflows/trainer-windows.yml']
   push:
     branches: [main]
     paths: ['research/**', 'bot/**', 'python/**', 'params/**', 'deploy/seed/**', 'deploy/tv_history.py', 'packaging/**', 'vendor/talib/**', 'package.json', 'package-lock.json', '.github/workflows/trainer-windows.yml']
@@ -50,12 +50,13 @@ jobs:
           Copy-Item deploy/tv_history.py "$out/app/deploy/"
           Copy-Item vendor/talib/index.js, vendor/talib/package.json "$out/app/node_modules/talib/"
           Copy-Item vendor/talib/build/Release/talib.node "$out/app/node_modules/talib/build/Release/"
-          Copy-Item packaging/windows/Train.cmd, packaging/windows/TrainConsole.cmd, packaging/windows/README.txt "$out/"
+          Copy-Item packaging/windows/Train.cmd, packaging/windows/TrainConsole.cmd, packaging/windows/SnnGpuBench.cmd, packaging/windows/README.txt "$out/"
           # The PyTorch TA network trainer, and uv (pinned, checksum-verified) to set up its Python on first use.
-          New-Item -ItemType Directory -Force "$out/app/python/tanet", "$out/app/python/xgraph", "$out/app/python/mlp", "$out/uv" | Out-Null
+          New-Item -ItemType Directory -Force "$out/app/python/tanet", "$out/app/python/xgraph", "$out/app/python/mlp", "$out/app/python/snn", "$out/uv" | Out-Null
           Copy-Item python/tanet/net.py, python/tanet/server.py "$out/app/python/tanet/"
           Copy-Item python/xgraph/train.py "$out/app/python/xgraph/"
           Copy-Item python/mlp/fit.py "$out/app/python/mlp/"
+          Copy-Item python/snn/bench.py, python/snn/column.cu, python/snn/fdlibm.h "$out/app/python/snn/"
           $uvVer = '0.8.17'; $uvZip = 'uv-x86_64-pc-windows-msvc.zip'
           Invoke-WebRequest -UseBasicParsing "https://github.com/astral-sh/uv/releases/download/$uvVer/$uvZip" -OutFile "$env:RUNNER_TEMP/$uvZip"
           Invoke-WebRequest -UseBasicParsing "https://github.com/astral-sh/uv/releases/download/$uvVer/$uvZip.sha256" -OutFile "$env:RUNNER_TEMP/$uvZip.sha256"
