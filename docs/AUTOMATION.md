@@ -115,7 +115,9 @@ Once a week (`SWEEP_EVERY_DAYS`), the pipeline runs the sweep optimizer (`resear
 - **What counts as an improvement:** a change is kept only if it raises the tuning-window score by at least 0.05 and doesn't lower the check-window score by more than 0.1. A final window is scored only once, at the end.
 - **What it produces:** a proposal in `AUTO_TRAIN_DIR/sweeps/<target>.json` (start and end settings, every step, all three window scores). It never changes the live configuration. Apply a proposal by setting its values, after reading the final-window result.
 
-The search runs as a background process, so a long sweep (`npm run research:sweep -- --target setups-long --hours 24`) costs nothing while it grinds. If a sweep stops partway, it resumes from its ledger.
+The search runs as a background process, so a long sweep (`npm run research:sweep -- --target setups-long --hours 24`) costs nothing while it grinds.
+
+**Stopping and resuming.** Every evaluation is written to the ledger (`sweeps/<target>.json`) the moment it finishes, together with a signature of the data it was made on (the days and their files, the model, the settings the sweep does not move). A sweep stopped part way (the trainer closed, the machine slept, its `SWEEP_HOURS` used up) is continued by the next pipeline run straight away, whatever `SWEEP_EVERY_DAYS` says. It works on exactly the same days, pinned in the ledger, so new recordings do not throw its results away. It walks the same path again from the same start, takes every result it already has from the ledger, and starts with the evaluation that was interrupted. Only a finished sweep (plateau or last pass) is archived to `sweeps/<target>.YYYY-MM-DD.json` and started afresh a week later. The Kalshi target evaluates the values of a setting at once, one production backtest per worker thread (`TRAIN_WORKERS`). The choice among them is the same as evaluating them one by one.
 
 ### 8. It scores the whole bot against a target (readiness)
 

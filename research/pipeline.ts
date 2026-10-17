@@ -703,33 +703,49 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   }
 
   // ---- 0f. Sweep optimizer: setting by setting until a plateau, as a PROPOSAL (never auto-applied) ----
+  // A sweep stopped part way (the trainer closed, its time budget used) is continued by the next run on exactly the
+  // same days, every evaluation it already made taken from its ledger; only a finished sweep is archived and, once
+  // SWEEP_EVERY_DAYS have passed, started again.
   if (want('sweep')) {
     state.sweptAt ??= {};
     for (const target of A.sweepTargets) {
       const last = state.sweptAt[target];
-      const due = !last || now - last >= A.sweepEveryDays * 86_400_000;
+      const out = path.join(A.dir, 'sweeps', `${target}.json`);
+      let ledger: { complete?: boolean; meta?: { days?: string[]; source?: string } } | undefined;
+      try { ledger = fs.existsSync(out) ? JSON.parse(fs.readFileSync(out, 'utf8')) : undefined; } catch { ledger = undefined; }
+      const unfinished = ledger?.complete === false;
+      const due = unfinished || !last || now - last >= A.sweepEveryDays * 86_400_000;
       // The whole bot and the Kalshi settings are swept over the history replay's days that hold Kalshi's
       // real contracts, when there are enough of them (the strategy never trades the synthetic ones: they are
       // quoted at its own fair value). A proposal, never applied.
       const kDays = (target === 'bot' || target === 'kalshi') && T.historyReplay ? replayKalshiDays(replayDir) : [];
       await run(`sweep-${target}`, async () => {
         let sweepSrc = rec;
-        if (kDays.length >= 20 && kDays.length > days.length) {
+        const recorded = target === 'bot' || target === 'kalshi';
+        let source: 'replay' | 'recordings' = kDays.length >= 20 && kDays.length > days.length ? 'replay' : 'recordings';
+        // An unfinished sweep keeps its days (new days would change every score it has).
+        let pinned = unfinished && ledger?.meta?.days?.length ? ledger.meta.days : undefined;
+        if (pinned && ledger?.meta?.source === 'replay') source = 'replay';
+        else if (pinned) source = 'recordings';
+        if (recorded) {
+          const files = new Map(recordingFiles(source === 'replay' ? replayDir : rec).map((f) => [f.day, f.file]));
+          if (pinned && !pinned.every((d) => files.has(d))) { log(`sweep-${target}: some of the unfinished sweep's days are gone: starting over`); pinned = undefined; }
+          const use = pinned ?? (source === 'replay' ? kDays.filter((d) => files.has(d)) : [...files.keys()]);
           sweepSrc = path.join(work, 'sweep-replay');
           fs.rmSync(sweepSrc, { recursive: true, force: true });
-          linkDays(kDays.map((d) => ({ day: d, file: path.join(replayDir, `md-${d}.jsonl.gz`) })), sweepSrc);
+          linkDays(use.map((d) => ({ day: d, file: files.get(d)! })), sweepSrc);
+          pinned = use;
         }
-        const out = path.join(A.dir, 'sweeps', `${target}.json`);
-        if (fs.existsSync(out)) fs.renameSync(out, out.replace(/\.json$/, `.${new Date(now).toISOString().slice(0, 10)}.json`));
+        if (!unfinished && fs.existsSync(out)) fs.renameSync(out, out.replace(/\.json$/, `.${new Date(now).toISOString().slice(0, 10)}.json`));
         let r;
         try {
-          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: sweepSrc, model: mlpPath(), out, 'setup-oos': path.join(A.dir, 'setup_oos.json'), 'setup-model': fs.existsSync(promoted('setups')) ? promoted('setups') : undefined, 'lead-lag': path.join(A.dir, 'lead_lag.json') }));
+          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: sweepSrc, model: mlpPath(), out, 'setup-oos': path.join(A.dir, 'setup_oos.json'), 'setup-model': fs.existsSync(promoted('setups')) ? promoted('setups') : undefined, 'lead-lag': path.join(A.dir, 'lead_lag.json') }), { meta: pinned ? { days: pinned, source } : undefined, log: (m) => log(`sweep-${target}: ${m}`) });
         } catch (e) {
           if (/needs at least|needs the TA network|recorded day/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;
         }
-        state.sweptAt![target] = now;
-        return { proposal: out, data: sweepSrc === rec ? 'recordings' : `history replay: ${kDays.length} day(s) with real Kalshi contracts`, plateau: r.plateau, passes: r.passes, evaluations: r.evaluations, start: r.start, end: r.end, changed: r.steps.filter((x) => x.accepted).map((x) => `${x.param}: ${x.from} -> ${x.to}`) };
+        if (r.complete) state.sweptAt![target] = now;
+        return { proposal: out, complete: r.complete, data: !recorded ? 'history' : source === 'recordings' ? `recordings: ${pinned!.length} day(s)` : `history replay: ${pinned!.length} day(s) with real Kalshi contracts`, plateau: r.plateau, passes: r.passes, evaluations: r.evaluations, start: r.start, end: r.end, changed: r.steps.filter((x) => x.accepted).map((x) => `${x.param}: ${x.from} -> ${x.to}`) };
       }, due ? undefined : `swept ${((now - last!) / 86_400_000).toFixed(1)} day(s) ago (SWEEP_EVERY_DAYS=${A.sweepEveryDays})`);
     }
   }

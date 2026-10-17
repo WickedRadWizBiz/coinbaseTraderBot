@@ -7,7 +7,7 @@ name: Laptop trainer (Windows package)
 on:
   workflow_dispatch:
   pull_request:
-    paths: ['research/laptopTrain.ts', 'research/trainerResources.ts', 'research/trainerUi.ts', 'research/trainerUiPage.ts', 'research/workerPool.ts', 'research/pipeline.ts', 'research/history/**', 'bot/marketdata/historyStore.ts', 'research/tvSetup.ts', 'deploy/tv_history.py', 'research/trainTaNet.ts', 'research/taNetRowsWorker.ts', 'research/torchSetup.ts', 'research/taNetTorch.ts', 'research/trainCrossGraph.ts', 'research/mlpTorch.ts', 'research/trainMetaModel.ts', 'research/trainTennisModel.ts', 'python/**', 'packaging/**', 'vendor/talib/**', 'package.json', '.github/workflows/trainer-windows.yml']
+    paths: ['research/laptopTrain.ts', 'research/trainerResources.ts', 'research/trainerUi.ts', 'research/trainerUiPage.ts', 'research/workerPool.ts', 'research/pipeline.ts', 'research/history/**', 'bot/marketdata/historyStore.ts', 'research/tvSetup.ts', 'deploy/tv_history.py', 'research/trainTaNet.ts', 'research/taNetRowsWorker.ts', 'research/torchSetup.ts', 'research/taNetTorch.ts', 'research/trainCrossGraph.ts', 'research/mlpTorch.ts', 'research/trainMetaModel.ts', 'research/trainTennisModel.ts', 'research/sweep.ts', 'research/sweepWorker.ts', 'python/**', 'packaging/**', 'vendor/talib/**', 'package.json', '.github/workflows/trainer-windows.yml']
   push:
     branches: [main]
     paths: ['research/**', 'bot/**', 'python/**', 'params/**', 'deploy/seed/**', 'deploy/tv_history.py', 'packaging/**', 'vendor/talib/**', 'package.json', 'package-lock.json', '.github/workflows/trainer-windows.yml']
@@ -43,7 +43,7 @@ jobs:
           $out = 'KalshiTrainer'
           New-Item -ItemType Directory -Force "$out/node", "$out/app/dist", "$out/app/deploy", "$out/app/node_modules/talib/build/Release" | Out-Null
           Copy-Item (Get-Command node).Source "$out/node/node.exe"
-          Copy-Item dist/laptopTrain.cjs, dist/pipeline.cjs, dist/snnReplayWorker.cjs, dist/perpDatasetWorker.cjs, dist/gpWorker.cjs, dist/conditioningWorker.cjs, dist/taNetRowsWorker.cjs "$out/app/dist/"
+          Copy-Item dist/laptopTrain.cjs, dist/pipeline.cjs, dist/snnReplayWorker.cjs, dist/sweepWorker.cjs, dist/perpDatasetWorker.cjs, dist/gpWorker.cjs, dist/conditioningWorker.cjs, dist/taNetRowsWorker.cjs "$out/app/dist/"
           Copy-Item -Recurse params "$out/app/params"
           if (Test-Path deploy/seed) { Copy-Item -Recurse deploy/seed "$out/app/deploy/seed" }
           # TradingView history (tvdatafeed, set up by the trainer in trainer-data/tv-env on first use).
