@@ -1,7 +1,7 @@
 // fdlibm exp, log, expm1 and tanh exactly as V8 computes Math.exp, Math.log and Math.tanh (V8 12.4
 // src/base/ieee754.cc, from FreeBSD msun / Sun fdlibm). Ported mechanically (casts, statics) so the
 // SNN kernel (python/snn/column.cu) gets the same bits as the TypeScript network, compiled as C on the
-// CPU or as CUDA with fused multiply-add off. Do not edit by hand; tests/snnKernel.test.ts checks every
+// CPU, as WebAssembly or as CUDA with fused multiply-add off. Do not edit by hand; tests/snnKernel.test.ts checks every
 // function against Node bit for bit.
 //
 // ====================================================
@@ -16,6 +16,17 @@
 #define SNN_FN __device__ static inline
 #define SNN_BITS(d) ((uint64_t)__double_as_longlong(d))
 #define SNN_DBL(b) __longlong_as_double((long long)(b))
+#elif defined(__wasm__)
+// WebAssembly (bot/snn/kernelWasm.ts): freestanding, no C library; floor/fabs/sqrt are single IEEE instructions.
+#include <stdint.h>
+#define SNN_FN static inline
+#define fabs __builtin_fabs
+#define floor __builtin_floor
+#define sqrt __builtin_sqrt
+static inline uint64_t snn_bits(double d) { uint64_t b; __builtin_memcpy(&b, &d, 8); return b; }
+static inline double snn_dbl(uint64_t b) { double d; __builtin_memcpy(&d, &b, 8); return d; }
+#define SNN_BITS(d) snn_bits(d)
+#define SNN_DBL(b) snn_dbl(b)
 #else
 #include <stdint.h>
 #include <string.h>

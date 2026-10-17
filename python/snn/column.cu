@@ -424,7 +424,7 @@ extern "C" __global__ void snn_columns_run(const SnnP *params, const int *pIdx, 
 }
 #endif
 
-#ifndef __CUDACC__
+#if !defined(__CUDACC__) && !defined(__wasm__)
 /** The batch kernel's loop on the CPU (python/snn/bench.py --cpu, the test of the GPU path's data layout). */
 void snn_columns_run_cpu(const SnnP *params, const int *pIdx, Col *cols, const StepIn *ins, const int *colOf, int n, int nCols, int r0, int rounds) {
   for (int t = 0; t < n; t++) {
@@ -437,4 +437,10 @@ void snn_columns_run_cpu(const SnnP *params, const int *pIdx, Col *cols, const S
     }
   }
 }
+#endif
+
+#ifdef __wasm__
+/** The live and training networks' column step in WebAssembly (bot/snn/kernel.ts). */
+__attribute__((export_name("col_step"))) void col_step(const SnnP *p, Col *c, const StepIn *in) { colStep(p, c, in); }
+__attribute__((export_name("col_reset"))) void col_reset(const SnnP *p, Col *c) { colReset(p, c); }
 #endif
