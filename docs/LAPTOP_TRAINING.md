@@ -512,7 +512,20 @@ on the newest years. On an 8-thread laptop a round's `gp` step takes about 10 mi
 
 ## GPU
 
-The TA network's tournament (`ta_net`) and its walk-forward export for the setup scorer (`ta_net_oos`) train on the GPU. Everything else runs on the CPU, because those members' time goes into replaying the market event by event. That is branchy work a graphics card cannot run, and population "stacking" there happens across CPU threads (above).
+Everything that trains a neural network in batches runs in PyTorch, on the GPU:
+
+| Step | What trains on the GPU |
+|---|---|
+| `ta_net`, `ta_net_oos` | The TA network's tournament and its walk-forward export for the setup scorer |
+| `cross_graph` | The cross-asset graph network (`XG_ENGINE=auto`) |
+| `mlp` | The Kalshi decision model: every fold of every candidate network is sent as one batch, then the final network and its ensemble, then the CPCV splits (`MLP_ENGINE=auto`) |
+| `tennis` | The tennis model's network |
+
+The MLPs train with the same algorithm and from the same starting weights as the TypeScript trainer, so they come out the same network (CI checks this). The live bot runs them unchanged.
+
+What stays on the CPU, and why:
+- **The SNN tournaments.** A member's time goes into replaying the market event by event, which is branchy work a graphics card can't run. Population "stacking" there happens across CPU threads (above).
+- **The gradient-boosted trees.** These are the setup scorer, the perps and vol models, and the GBDT candidates. Trees are built split by split.
 
 **Setup is automatic, on the first run that trains the TA network:**
 1. The trainer finds the NVIDIA GPU (`nvidia-smi`).
@@ -530,6 +543,6 @@ The window's log shows each step, and then: `TA network trains in PyTorch ... on
 
 To check or set up PyTorch without training, run `node\node.exe app\dist\laptopTrain.cjs --torch-check --data trainer-data` from the KalshiTrainer folder. Exit code 0 means it is ready.
 
-To keep the TA network in TypeScript, put `TA_NET_ENGINE=ts` in `trainer-data\trainer.env`. To use a Python you already have that includes PyTorch, put `TA_NET_PYTHON=C:\path\to\python.exe` there.
+To keep the TA network in TypeScript, put `TA_NET_ENGINE=ts` in `trainer-data\trainer.env` (`MLP_ENGINE=ts` for the MLPs, `XG_ENGINE=ts` for the graph network). To use a Python you already have that includes PyTorch, put `TA_NET_PYTHON=C:\path\to\python.exe` there.
 
 To free the disk space PyTorch takes, delete `trainer-data\python-env`, `python-dist` and `uv-cache`. They are set up again on the next run (TypeScript if not).
