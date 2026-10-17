@@ -13,7 +13,11 @@
 //     score does not drop by more than `tolerance`
 //   - every evaluation is counted (trials) and reported, with the final-window result next to the
 //     starting point's, so the gain can be judged out of sample
-// The ledger is saved after every step, so a stopped sweep resumes where it left off.
+// Every evaluation is saved in the ledger the moment it finishes (with the data it was made on), so a stopped
+// sweep resumes exactly where it was: it walks the same path again from the same start, every result it already
+// has taken from the ledger, and the first new evaluation is the one that was interrupted. The values of one
+// setting are evaluated at once on worker threads when the target can (fitnessMany; the choice among them is the
+// same as evaluating them one by one).
 //
 // Targets:
 //   setups-long / setups-short   the 1h momentum burst per side (bot/setups/detectors.ts BURST): entry
@@ -41,6 +45,7 @@
 //                                target, daily stop, Kalshi edge and Kelly) by the t-statistic of the
 //                                combined P&L per day
 
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -54,17 +59,34 @@ export interface SweepTarget {
   /** Fewest trades / windows for a score to count. */
   minN: number;
   fitness(w: SweepWindow): Promise<Fitness>;
+  /** Several settings at once (worker threads): the same results as fitness() with each applied. */
+  fitnessMany?(jobs: { w: SweepWindow; settings: Record<string, number> }[]): Promise<Fitness[]>;
+  /** Everything the scores depend on besides the swept settings (the data, the model, the other settings): a ledger
+   *  made on other data starts over. */
+  signature?: string;
+  /** Releases what fitnessMany started (worker threads). */
+  close?(): Promise<void>;
   /** Current settings (for the proposal). */
   snapshot(): Record<string, number>;
 }
 
-export interface SweepOpts { hours: number; epsilon: number; tolerance: number; maxPasses: number; ledgerPath?: string; log?: (m: string) => void }
+export interface SweepOpts {
+  hours: number; epsilon: number; tolerance: number; maxPasses: number; ledgerPath?: string; log?: (m: string) => void;
+  /** Kept in the ledger for the caller (the pipeline pins the sweep's days there). */
+  meta?: Record<string, unknown>;
+}
 export interface SweepStep { pass: number; param: string; from: number; to: number; tune: Fitness; check: Fitness; accepted: boolean; ts: string }
 export interface SweepReport {
   target: string; started: string; finished: string; passes: number; evaluations: number; plateau: boolean;
   start: { settings: Record<string, number>; tune: Fitness; check: Fitness; final: Fitness };
   end: { settings: Record<string, number>; tune: Fitness; check: Fitness; final: Fitness };
   steps: SweepStep[];
+  /** Ran to a plateau or its last pass (not cut by the time budget). */
+  complete?: boolean;
+  signature?: string;
+  meta?: Record<string, unknown>;
+  /** Every evaluation so far: "window|settings" -> [score, n, mean] (non-finite numbers as strings). */
+  evals?: Record<string, [number | string, number, number | string | null]>;
 }
 
 const fmt = (f: Fitness) => `score ${f.score.toFixed(3)} (n ${f.n}${f.mean !== undefined ? `, mean ${f.mean.toFixed(3)}` : ''})`;
@@ -77,68 +99,116 @@ export function tStat(xs: number[]): Fitness {
   return { score: sd > 0 ? m / (sd / Math.sqrt(n)) : 0, n, mean: m };
 }
 
+const num = (x: number) => (Number.isFinite(x) ? x : String(x));
+const unnum = (x: number | string | null | undefined) => (typeof x === 'string' ? Number(x) : x ?? undefined);
+
 export async function runSweep(t: SweepTarget, o: SweepOpts): Promise<SweepReport> {
+  try { return await sweepLoop(t, o); } finally { await t.close?.(); }
+}
+
+async function sweepLoop(t: SweepTarget, o: SweepOpts): Promise<SweepReport> {
   const log = o.log ?? ((m: string) => console.log(`[sweep] ${m}`));
   const deadline = Date.now() + o.hours * 3_600_000;
   const valid = (f: Fitness) => f.n >= t.minN && Number.isFinite(f.score);
-  let evaluations = 0;
-  const ev = async (w: SweepWindow) => { evaluations++; return t.fitness(w); };
-  // Resume: re-apply the accepted settings of a previous run with the same target.
+  // Resume: the same start and every evaluation already made, when the ledger is this target's on the same data.
   let prior: SweepReport | undefined;
   if (o.ledgerPath && fs.existsSync(o.ledgerPath)) {
     try { prior = JSON.parse(fs.readFileSync(o.ledgerPath, 'utf8')) as SweepReport; } catch { prior = undefined; }
-    if (prior?.target === t.name) { for (const p of t.params) if (prior.end.settings[p.name] !== undefined) p.set(prior.end.settings[p.name]); log(`resuming ${o.ledgerPath} (${prior.steps.length} steps so far)`); }
-    else prior = undefined;
+    if (prior && (prior.target !== t.name || !prior.evals || (prior.signature ?? '') !== (t.signature ?? ''))) {
+      if (prior.target === t.name) log(`${o.ledgerPath} was made on other data or by an older version: starting over`);
+      prior = undefined;
+    }
   }
+  const cache = new Map<string, Fitness>(Object.entries(prior?.evals ?? {}).map(([k, [sc, n, m]]) => [k, { score: unnum(sc)!, n, ...(m !== null ? { mean: unnum(m) } : {}) }]));
+  if (prior) log(`resuming ${o.ledgerPath}: ${cache.size} evaluation(s) already made`);
   const startSettings = prior?.start.settings ?? t.snapshot();
-  const startScores = prior?.start ?? await (async () => {
-    const snap = t.snapshot();
-    for (const p of t.params) p.set(startSettings[p.name]);
-    const s = { tune: await ev('tune'), check: await ev('check'), final: await ev('final') };
-    for (const p of t.params) p.set(snap[p.name]);
-    return s;
-  })();
-  let tune = await ev('tune'), check = await ev('check');
-  log(`start: tune ${fmt(tune)} | check ${fmt(check)}`);
-  const steps: SweepStep[] = prior?.steps ?? [];
+  for (const p of t.params) if (startSettings[p.name] !== undefined) p.set(startSettings[p.name]);
+  const key = (w: SweepWindow, settings: Record<string, number>) => `${w}|${JSON.stringify(settings)}`;
+  let evaluations = 0;
+  const steps: SweepStep[] = [];
   const started = prior?.started ?? new Date().toISOString();
-  let pass = prior?.passes ?? 0, plateau = false;
+  let pass = 0, plateau = false, complete = false;
+  let tune: Fitness = { score: NaN, n: 0 }, check: Fitness = { score: NaN, n: 0 }, startScores = { tune, check, final: tune };
   const save = (final?: Fitness): SweepReport => {
     const r: SweepReport = {
-      target: t.name, started, finished: new Date().toISOString(), passes: pass, evaluations: (prior?.evaluations ?? 0) + evaluations, plateau,
+      target: t.name, started, finished: new Date().toISOString(), passes: pass, evaluations: cache.size, plateau, complete, signature: t.signature, meta: o.meta ?? prior?.meta,
       start: { settings: startSettings, tune: startScores.tune, check: startScores.check, final: startScores.final },
       end: { settings: t.snapshot(), tune, check, final: final ?? { score: NaN, n: 0 } },
       steps,
+      evals: Object.fromEntries([...cache].map(([k, f]) => [k, [num(f.score), f.n, f.mean === undefined ? null : num(f.mean)]])),
     };
-    if (o.ledgerPath) { fs.mkdirSync(path.dirname(o.ledgerPath), { recursive: true }); fs.writeFileSync(o.ledgerPath, JSON.stringify(r, null, 1)); }
+    if (o.ledgerPath) {
+      fs.mkdirSync(path.dirname(o.ledgerPath), { recursive: true });
+      const tmp = `${o.ledgerPath}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(r, null, 1));
+      fs.renameSync(tmp, o.ledgerPath);
+    }
     return r;
   };
-  while (pass < o.maxPasses && Date.now() < deadline) {
+  /** Scores of several settings: from the ledger when already made, the rest at once (fitnessMany) or one by one,
+   *  each saved as soon as the batch finishes. */
+  const many = async (jobs: { w: SweepWindow; settings: Record<string, number> }[]): Promise<Fitness[]> => {
+    const todo = [...new Map(jobs.filter((j) => !cache.has(key(j.w, j.settings))).map((j) => [key(j.w, j.settings), j])).values()];
+    // Each result is in the ledger the moment it is made, so a stop loses only the evaluations still running.
+    const keep1 = (j: { w: SweepWindow; settings: Record<string, number> }, f: Fitness) => { cache.set(key(j.w, j.settings), f); evaluations++; save(); };
+    if (t.fitnessMany && todo.length > 1) {
+      const many1 = t.fitnessMany.bind(t);
+      await Promise.all(todo.map(async (j) => keep1(j, (await many1([j]))[0])));
+    } else {
+      const keep = t.snapshot();
+      try {
+        for (const j of todo) {
+          for (const p of t.params) if (j.settings[p.name] !== undefined) p.set(j.settings[p.name]);
+          keep1(j, await t.fitness(j.w));
+        }
+      } finally { for (const p of t.params) p.set(keep[p.name]); }
+    }
+    return jobs.map((j) => cache.get(key(j.w, j.settings))!);
+  };
+  [startScores.tune, startScores.check, startScores.final] = await many((['tune', 'check', 'final'] as const).map((w) => ({ w, settings: startSettings })));
+  startScores = { ...startScores };
+  tune = startScores.tune; check = startScores.check;
+  log(`start: tune ${fmt(tune)} | check ${fmt(check)}`);
+  let cut = false;
+  while (pass < o.maxPasses) {
+    if (Date.now() >= deadline) { cut = true; break; }
     pass++;
     let changed = 0;
     for (const p of t.params) {
-      if (Date.now() >= deadline) break;
-      const cur = p.get();
+      if (Date.now() >= deadline) { cut = true; break; }
+      const cur = p.get(), base = t.snapshot();
+      const cands = p.values.filter((v) => v !== cur);
+      const at = (v: number) => ({ ...base, [p.name]: v });
+      const tunes = await many(cands.map((v) => ({ w: 'tune' as const, settings: at(v) })));
+      // The check window of every value that could clear the first bar (a superset of what the choice below reads).
+      const pre = cands.filter((_, i) => valid(tunes[i]) && tunes[i].score >= tune.score + o.epsilon);
+      const checks = new Map(pre.map((v, i) => [v, i]));
+      const preChecks = await many(pre.map((v) => ({ w: 'check' as const, settings: at(v) })));
       let best: { v: number; tune: Fitness; check: Fitness } | undefined;
-      for (const v of p.values) {
-        if (v === cur || Date.now() >= deadline) continue;
-        p.set(v);
-        const ft = await ev('tune');
-        if (!valid(ft) || ft.score < (best?.tune.score ?? tune.score) + o.epsilon) continue;
-        const fc = await ev('check');
-        if (!valid(fc) || fc.score < check.score - o.tolerance) continue;
+      cands.forEach((v, i) => {
+        const ft = tunes[i];
+        if (!valid(ft) || ft.score < (best?.tune.score ?? tune.score) + o.epsilon) return;
+        const fc = preChecks[checks.get(v)!];
+        if (!valid(fc) || fc.score < check.score - o.tolerance) return;
         best = { v, tune: ft, check: fc };
-      }
+      });
       p.set(best ? best.v : cur);
       steps.push({ pass, param: p.name, from: cur, to: best?.v ?? cur, tune: best?.tune ?? tune, check: best?.check ?? check, accepted: Boolean(best), ts: new Date().toISOString() });
       if (best) { changed++; tune = best.tune; check = best.check; log(`pass ${pass}: ${p.name} ${cur} -> ${best.v}: tune ${fmt(tune)} | check ${fmt(check)}`); }
       save();
     }
+    if (cut) break;
     if (!changed) { plateau = true; log(`pass ${pass}: no change accepted - plateau`); break; }
   }
-  const final = await ev('final');
+  complete = !cut;
+  if (cut) {
+    const r = save();
+    log(`time budget used after ${pass} pass(es), ${r.evaluations} evaluations: the next run continues from here (tune ${fmt(tune)} | check ${fmt(check)})`);
+    return r;
+  }
+  const [final] = await many([{ w: 'final', settings: t.snapshot() }]);
   const r = save(final);
-  log(`end after ${pass} pass(es), ${r.evaluations} evaluations${plateau ? ' (plateau)' : ' (budget)'}: tune ${fmt(tune)} | check ${fmt(check)} | FINAL ${fmt(final)} (start: final ${fmt(startScores.final)})`);
+  log(`end after ${pass} pass(es), ${r.evaluations} evaluations (${evaluations} this run)${plateau ? ' (plateau)' : ' (last pass)'}: tune ${fmt(tune)} | check ${fmt(check)} | FINAL ${fmt(final)} (start: final ${fmt(startScores.final)})`);
   return r;
 }
 
@@ -325,12 +395,27 @@ export async function spotPbTarget(hist: string, leadLagFile: string): Promise<S
 }
 
 /** Kalshi contracts through the production backtester. Windows: the recorded days split 70 / 15 / 15. */
-export async function kalshiTarget(recordings: string, modelPath: string): Promise<SweepTarget> {
+/** One Kalshi sweep evaluation: the production backtester over a window's days with these strategy settings, scored
+ *  by the t-statistic of net P&L per traded 15-minute window (the same in the sweep and its worker threads). */
+export async function kalshiScore(dir: string, modelPath: string, strategy: Record<string, unknown>): Promise<Fitness> {
   const { runBacktest } = await import('./backtest');
   const { loadConfig } = await import('../bot/config');
   const { MetaModel } = await import('../bot/model/metaModel');
   const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
-  const model = fs.existsSync(modelPath) ? MetaModel.load(modelPath) : MetaModel.identity();
+  const model = kalshiModels.get(modelPath) ?? (fs.existsSync(modelPath) ? MetaModel.load(modelPath) : MetaModel.identity());
+  kalshiModels.set(modelPath, model);
+  const S = { ...cfg.strategy, ...strategy } as typeof cfg.strategy;
+  const res = await runBacktest(dir, model, S, cfg.risk, cfg.paperBankrollUsd, {
+    sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
+    vault: cfg.vault.enabled ? cfg.vault : undefined, sizingTiers: cfg.sizingTiers,
+  });
+  return tStat([...res.windows.values()].filter((x) => x.contracts > 0).map((x) => x.pnl));
+}
+const kalshiModels = new Map<string, import('../bot/model/metaModel').MetaModel>();
+
+export async function kalshiTarget(recordings: string, modelPath: string, workers = 1): Promise<SweepTarget> {
+  const { loadConfig } = await import('../bot/config');
+  const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
   const { recordingFiles, linkDays } = await import('../bot/marketdata/recordingFiles');
   const days = recordingFiles(recordings);
   if (days.length < 20) throw new Error(`only ${days.length} recorded day(s) in ${recordings}: the kalshi sweep needs at least 20`);
@@ -342,22 +427,32 @@ export async function kalshiTarget(recordings: string, modelPath: string): Promi
     linkDays(split[w], dirs[w]);
   }
   const S = { ...cfg.strategy };
-  const num = (k: 'minEdge' | 'takerBuffer' | 'makerBuffer' | 'exitMargin' | 'kellyFraction' | 'targetEvUsd' | 'targetEvOfRisk', values: number[]): SweepParam => ({ name: `strategy.${k}`, values, get: () => S[k], set: (v) => { S[k] = v; } });
+  const KEYS = ['minEdge', 'takerBuffer', 'makerBuffer', 'exitMargin', 'kellyFraction', 'targetEvUsd', 'targetEvOfRisk'] as const;
+  const num = (k: (typeof KEYS)[number], values: number[]): SweepParam => ({ name: `strategy.${k}`, values, get: () => S[k], set: (v) => { S[k] = v; } });
+  // Day files by name and size (a replay rebuilt with the same content keeps its sweep); the model by size and time.
+  const stat = (f: string, time = false) => { try { const st = fs.statSync(f); return [path.basename(f), st.size, time ? Math.floor(st.mtimeMs) : 0]; } catch { return [path.basename(f), 0, 0]; } };
+  // The scores depend on the days (and their files), the model, and every setting the sweep does not move.
+  const fixed = Object.fromEntries(Object.entries(cfg.strategy).filter(([k]) => !(KEYS as readonly string[]).includes(k)));
+  const signature = crypto.createHash('sha1').update(JSON.stringify([days.map((d) => stat(d.file)), stat(modelPath, true), fixed, cfg.risk, cfg.paperBankrollUsd, cfg.vault, cfg.sizingTiers])).digest('hex');
+  const strategyOf = (settings: Record<string, number>) => Object.fromEntries(KEYS.map((k) => [k, settings[`strategy.${k}`] ?? S[k]]));
+  let pool: import('./workerPool').WorkerPool<{ dir: string; modelPath: string; strategy: Record<string, unknown> }, Fitness> | undefined;
   return {
     name: 'kalshi',
     minN: 30,
+    signature,
     params: [
       num('minEdge', [0.01, 0.015, 0.02, 0.03, 0.04, 0.05]), num('takerBuffer', [0, 0.005, 0.01, 0.02, 0.03]), num('makerBuffer', [0, 0.005, 0.01, 0.015, 0.02]),
       num('exitMargin', [0, 0.005, 0.01, 0.02, 0.03]), num('kellyFraction', [0.1, 0.15, 0.25, 0.35, 0.5]), num('targetEvOfRisk', [0.1, 0.25, 0.5, 0.75]),
     ],
-    snapshot: () => ({ 'strategy.minEdge': S.minEdge, 'strategy.takerBuffer': S.takerBuffer, 'strategy.makerBuffer': S.makerBuffer, 'strategy.exitMargin': S.exitMargin, 'strategy.kellyFraction': S.kellyFraction, 'strategy.targetEvUsd': S.targetEvUsd, 'strategy.targetEvOfRisk': S.targetEvOfRisk }),
-    async fitness(w) {
-      const res = await runBacktest(dirs[w], model, { ...S }, cfg.risk, cfg.paperBankrollUsd, {
-        sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
-        vault: cfg.vault.enabled ? cfg.vault : undefined, sizingTiers: cfg.sizingTiers,
-      });
-      return tStat([...res.windows.values()].filter((x) => x.contracts > 0).map((x) => x.pnl));
-    },
+    snapshot: () => Object.fromEntries(KEYS.map((k) => [`strategy.${k}`, S[k]])),
+    fitness: (w) => kalshiScore(dirs[w], modelPath, { ...S }),
+    // Several settings at once, one backtest per worker thread (TRAIN_WORKERS).
+    fitnessMany: workers > 1 ? async (jobs) => {
+      const { WorkerPool, workerScript } = await import('./workerPool');
+      pool ??= new WorkerPool(workerScript('sweepWorker'), workers);
+      return Promise.all(jobs.map((j) => pool!.run({ dir: dirs[j.w], modelPath, strategy: strategyOf(j.settings) })));
+    } : undefined,
+    close: async () => { await pool?.close(); pool = undefined; },
   };
 }
 
@@ -398,16 +493,17 @@ export async function botTarget(recordings: string, history: string, modelPath: 
 
 function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith('--') ? process.argv[i + 1] : d; }
 
-export async function sweepMain(argOf: (k: string, d: string) => string = cliArg): Promise<SweepReport> {
+export async function sweepMain(argOf: (k: string, d: string) => string = cliArg, extra: { meta?: Record<string, unknown>; log?: (m: string) => void } = {}): Promise<SweepReport> {
   const target = argOf('target', 'setups-long');
-  const t = target === 'kalshi' ? await kalshiTarget(argOf('recordings', 'data/recordings'), argOf('model', 'params/model.json'))
+  const { workerCount } = await import('./workerPool');
+  const t = target === 'kalshi' ? await kalshiTarget(argOf('recordings', 'data/recordings'), argOf('model', 'params/model.json'), workerCount())
     : target === 'bot' ? await botTarget(argOf('recordings', 'data/recordings'), argOf('history', 'data/history'), argOf('model', 'params/model.json'), argOf('setup-oos', 'data/models/setup_oos.json'), argOf('setup-model', '') || undefined)
     : target === 'setups-ratchet' ? await ratchetTarget(argOf('history', 'data/history'))
     : target === 'setups-scale' ? await scaleTarget(argOf('history', 'data/history'))
     : target === 'setups-spotpb' ? await spotPbTarget(argOf('history', 'data/history'), argOf('lead-lag', 'data/models/lead_lag.json'))
     : await setupsTarget(argOf('history', 'data/history'), target === 'setups-short' ? -1 : target === 'setups-vol' ? 0 : 1);
   const out = argOf('out', path.join('data', 'sweeps', `${target}.json`));
-  return runSweep(t, { hours: Number(argOf('hours', '2')), epsilon: Number(argOf('epsilon', '0.05')), tolerance: Number(argOf('tolerance', '0.1')), maxPasses: Number(argOf('passes', '6')), ledgerPath: out });
+  return runSweep(t, { hours: Number(argOf('hours', '2')), epsilon: Number(argOf('epsilon', '0.05')), tolerance: Number(argOf('tolerance', '0.1')), maxPasses: Number(argOf('passes', '6')), ledgerPath: out, meta: extra.meta, log: extra.log });
 }
 
 if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void sweepMain();
