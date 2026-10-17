@@ -412,6 +412,8 @@ export interface AutoTrainConfig {
   snnTrainDays: number;
   /** Re-run the SNN steps automatically whenever the meta-model changes (e.g. a manual swap). */
   onModelChange: boolean;
+  /** Skip a retrain step when nothing it reads changed since its last completed run (AUTO_TRAIN_SKIP_UNCHANGED). */
+  skipUnchanged: boolean;
   /** Sweep optimizer (research/sweep.ts): targets run by the pipeline, hours per target, and how often. */
   sweepTargets: string[];
   sweepHours: number;
@@ -1136,6 +1138,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       ablationEveryDays: num(env, 'AUTO_TRAIN_ABLATION_EVERY_DAYS', 7, 0, 365),
       snnTrainDays: num(env, 'AUTO_TRAIN_SNN_TRAIN_DAYS', 21, 1, 365),
       onModelChange: bool(env, 'AUTO_TRAIN_ON_MODEL_CHANGE', true),
+      skipUnchanged: bool(env, 'AUTO_TRAIN_SKIP_UNCHANGED', true),
       sweepTargets: (env.SWEEP_TARGETS ?? 'setups-long,setups-short,setups-vol,setups-ratchet,setups-scale,setups-spotpb,kalshi,bot').split(',').map((x) => x.trim()).filter(Boolean),
       sweepHours: num(env, 'SWEEP_HOURS', 2, 0.05, 48),
       taNetOosHours: num(env, 'TA_NET_OOS_HOURS', 3, 0.05, 48),

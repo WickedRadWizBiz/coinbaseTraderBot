@@ -11,7 +11,7 @@ import { DEFAULT_SNN, domainParams, stageFlags, versionHash, withFlags, type Snn
 import { SNN_HYPER_SPEC, SnnPopulationHost, snnHyperOf, withSnnHyper } from '../bot/snn/population';
 import { binaryBet, fitnessOf, independentInteractions, maxDrawdown, perturb, sortino } from '../bot/util/fitness';
 import { dsrOf, regimeOf, regimeReport, REGIMES } from '../research/fitness';
-import { runPbt, walkForwardRounds } from '../research/pbt';
+import { fileMemberProgress, runPbt, walkForwardRounds } from '../research/pbt';
 import { runSnnPbt, snnInteractions } from '../research/snnPbt';
 import { snnContest } from '../research/snnContest';
 import { writeSyntheticRecordings } from '../research/synthetic';
@@ -80,6 +80,52 @@ test('tournament: identical start, elite survives, worst clones elite, middle + 
   assert.equal(rest.log.length, 8);
   assert.ok(Math.abs(rest.elite.hyper.target - 1) > 0.15, `evolution moved the knob toward 3 (target ${rest.elite.hyper.target})`);
   assert.ok(rest.elite.record.length >= rest.log.length, 'out-of-sample record of the lineage');
+});
+
+test('tournament: a round stopped part-way keeps the members that finished it; the resumed round runs only the rest', async () => {
+  const rounds = walkForwardRounds(0, 10 * DAY, 2 * DAY, DAY, DAY).slice(0, 3);
+  const spec = { target: { min: 0.1, max: 10 } };
+  const trained: string[] = [];
+  let failAt: string | undefined;
+  const hooks = {
+    init: () => ({ x: 0 }),
+    clone: (s: { x: number }) => ({ x: s.x }),
+    train: (s: { x: number }, h: Record<string, number>, r: { index: number }) => {
+      const key = `${r.index}:${h.target.toFixed(6)}`;
+      if (key === failAt) { failAt = undefined; throw new Error('stopped'); }
+      trained.push(key);
+      s.x += 0.5 * (h.target - s.x);
+      return s;
+    },
+    evaluate: (s: { x: number }, _h: Record<string, number>, r: { evalFrom: number }) => {
+      const fit = -Math.abs(s.x - 3);
+      return { report: { fitness: fit, sortino: fit, maxDrawdown: 0, costs: 0, netReturn: 0, interactions: 1, independent: 1, days: 1 }, interactions: [{ ts: r.evalFrom, ret: fit, cost: 0 }] };
+    },
+  };
+  const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x));
+  // Round 0, saved as the pipeline saves it (after selection).
+  const first = await runPbt({ base: { target: 1 }, spec, rounds: rounds.slice(0, 1), hooks, seed: 5, exploreAfterLast: true });
+  const saved = clone({ members: first.members, trials: first.trials, log: first.log });
+  // Without a stop: rounds 1-2 from the saved population.
+  const ref = await runPbt({ base: { target: 1 }, spec, rounds: rounds.slice(1), hooks, seed: 5, exploreAfterLast: true, resume: clone(saved) });
+  // With a stop in round 1 at the third member: the first two are kept and only the third is redone.
+  const dir = tmpDir(), progress = fileMemberProgress<{ x: number }>(dir, { encode: (s) => s, decode: (x) => x as { x: number } });
+  const third = saved.members[2].hyper.target.toFixed(6);
+  failAt = `1:${third}`;
+  trained.length = 0;
+  await assert.rejects(runPbt({ base: { target: 1 }, spec, rounds: rounds.slice(1), hooks, seed: 5, exploreAfterLast: true, resume: clone(saved), memberProgress: progress }));
+  assert.equal(trained.length, 2, 'two members finished round 1 before the stop');
+  assert.equal(fs.readdirSync(dir).length, 2);
+  trained.length = 0;
+  const logs: string[] = [];
+  const res = await runPbt({ base: { target: 1 }, spec, rounds: rounds.slice(1), hooks, seed: 5, exploreAfterLast: true, resume: clone(saved), memberProgress: progress, log: (m) => logs.push(m) });
+  assert.deepEqual(trained.filter((k) => k.startsWith('1:')), [`1:${third}`], 'round 1: only the member that did not finish trains again');
+  assert.ok(logs.some((m) => /finished before the stop: kept/.test(m)));
+  assert.deepEqual(res.log.map((l) => l.ranking.map((x) => [x.member, x.fitness])), ref.log.map((l) => l.ranking.map((x) => [x.member, x.fitness])), 'the same tournament as without the stop');
+  assert.equal(fs.readdirSync(dir).length, 0, 'the round files go once the round is saved');
+  // A member file for other knobs (or another round) is not used.
+  progress.save('other-key', rounds[1], res.members[0], { x: 99 }, { report: res.log[0].ranking[0] as never, interactions: [] });
+  assert.equal(progress.load('the-key', rounds[1], res.members[0]), undefined);
 });
 
 test('exploration member: every N rounds the worst network restarts fresh with random knobs', async () => {

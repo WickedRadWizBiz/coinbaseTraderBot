@@ -71,6 +71,7 @@ import { loadRuleBookHistory, ruleBookSummary, runRuleBook } from './ruleBook';
 import { gpAssets, gpSummary, readGpFile, runGp } from './gpIndicators';
 import { tuneSizingMain } from './tuneSizing';
 import { archiveModel, promoteIfChampion } from './champion';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { MODEL_FILES } from '../bot/autotrain';
@@ -192,6 +193,10 @@ export interface PipelineState {
   /** Last sweep run per target. */
   sweptAt?: Record<string, number>;
   lastHistoryUpdate?: number;
+  /** What each retrain step read at its last completed run (inputsSignature), to skip it when nothing changed. */
+  stepInputs?: Record<string, { sig: string; at: number }>;
+  /** The readiness step's whole-bot result, reused while nothing it reads changes. */
+  readinessWholeBot?: { sig: string; at: number; wholeBot?: ReadinessFile['wholeBot']; note?: string };
   /** Spot holes already sent to TradingView (asset|tf|missing -> when), retried weekly. */
   tvTried?: Record<string, number>;
   /** Seed history files already imported (name:size list). */
@@ -213,6 +218,32 @@ export interface StepResult { step: string; ok: boolean; skipped?: string; ms: n
 
 export function readState(dir: string): PipelineState {
   try { return JSON.parse(fs.readFileSync(path.join(dir, 'pipeline_state.json'), 'utf8')); } catch { return {}; }
+}
+
+/** A file's size and modification time ('' when missing). */
+const statSig = (f: string) => { try { const s = fs.statSync(f); return `${s.size}:${Math.round(s.mtimeMs)}`; } catch { return ''; } };
+
+/** Every file in a folder (and `depth - 1` levels of subfolders): name, size and time, hashed. */
+export function dirSignature(dir: string, depth = 2): string {
+  const h = crypto.createHash('sha1');
+  const walk = (d: string, left: number) => {
+    let es: fs.Dirent[];
+    try { es = fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)); } catch { return; }
+    for (const e of es) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { if (left > 1) { h.update(`${e.name}/\n`); walk(p, left - 1); } }
+      else if (!e.name.endsWith('.tmp')) h.update(`${e.name}\t${statSig(p)}\n`);
+    }
+  };
+  walk(dir, depth);
+  return h.digest('hex');
+}
+
+/** What a retrain step reads, as one hash: the code that runs, the settings (the per-round time budgets left out),
+ *  the folders and files it reads, and anything else given. The same hash as at the step's last completed run means
+ *  the run would give the same result. */
+export function inputsSignature(o: { code: string; settings: unknown; dirs: string[]; files: string[]; extra?: unknown }): string {
+  return crypto.createHash('sha1').update(JSON.stringify([statSig(o.code), o.settings, o.dirs.map((d) => dirSignature(d)), o.files.map((f) => [path.basename(f), statSig(f)]), o.extra ?? null])).digest('hex');
 }
 
 function writeAtomic(file: string, text: string): void {
@@ -274,6 +305,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   for (const d of REPLAYABLE) fs.mkdirSync(fillDir(d), { recursive: true });
   const state = readState(A.dir);
   if (o.forceAll) {
+    delete state.stepInputs; delete state.readinessWholeBot;
     delete state.ruleBookAt; delete state.librarianAt; delete state.leadLagAt; delete state.crossGraphAt; delete state.crossLeadAt; delete state.gpAt; delete state.setupsTrainedAt; delete state.taNetTrainedAt; state.sweptAt = {};
     o = { ...o, forceAblation: true, forceSnnPbt: true, forceTaNet: true };
     log('sweeping everything: every step is due this run');
@@ -330,6 +362,33 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       checkpoint(false);
       return undefined;
     }
+  };
+  // Retrain steps that would give the same result are skipped: nothing they read changed since their last completed
+  // run (the same code and settings, no new recordings, replay days or SNN outputs, no model replaced). Common on the
+  // laptop trainer: a round after a stop, or a round whose tournaments promoted nothing.
+  const settingsSig = crypto.createHash('sha1').update(JSON.stringify({ ...cfg, autoTrain: { ...A, sweepHours: 0, taNetOosHours: 0 } })).digest('hex');
+  // What the steps read: the networks and studies the features come from, then each step's own upstream models (a
+  // step's own output is not among them, or a promotion would make it due again next round).
+  const MF = MODEL_FILES;
+  const UPSTREAM = [MF.ta_net, MF.ta_net_wf, MF.librarian, MF.cross_graph, MF.cross_lead, MF.snn_crypto, MF.snn_perps, MF.snn_tennis, MF.setups, 'rule_book.json', 'gp_indicators.json', 'lead_lag.json', 'setup_snn_gate.json'];
+  const READS: Record<string, string[]> = {
+    vol_model: UPSTREAM, vol: UPSTREAM, perps: UPSTREAM, tennis: UPSTREAM,
+    dataset: [...UPSTREAM, MF.vol_model],
+    mlp: [...UPSTREAM, MF.vol_model, MF.fill, 'work/dataset.jsonl'],
+    playbook: [...UPSTREAM, MF.vol_model, MF.fill, MF.mlp, MF.perp, MF.vol, MF.tennis, 'setup_oos.json'],
+    readiness: [...UPSTREAM, MF.vol_model, MF.fill, MF.mlp, MF.perp, MF.vol, MF.tennis, 'setup_oos.json', 'playbook.json'],
+  };
+  const inputsNow = (step: string) => inputsSignature({
+    code: process.argv[1] ?? '', settings: settingsSig, extra: state.lastHistoryUpdate ?? 0,
+    dirs: [rec, T.historyReplayDir, fillRoot], files: [...(READS[step] ?? UPSTREAM).map((f) => path.join(A.dir, f)), path.resolve('params', 'calendar.json')],
+  });
+  const ifChanged = (step: string, fn: () => Promise<unknown>) => async () => {
+    const prev = state.stepInputs?.[step];
+    if (A.skipUnchanged && prev && prev.sig === inputsNow(step)) throw new SkipStep(`nothing it reads changed since its run at ${new Date(prev.at).toISOString().slice(0, 16).replace('T', ' ')} UTC (no new recordings, replay days or models)`);
+    const r = await fn();
+    // Taken after the run: what it wrote is part of what the next run would read.
+    (state.stepInputs ??= {})[step] = { sig: inputsNow(step), at: Date.now() };
+    return r;
   };
   const tooFew = days.length < A.minDays ? `only ${days.length} day(s) of recordings in ${rec} (< AUTO_TRAIN_MIN_DAYS=${A.minDays})` : undefined;
   const lastDays = (n: number) => (days.length ? days.slice(-n) : []);
@@ -872,7 +931,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
 
   // ---- 2. tree volatility forecast (fair value's sigma multiplier) ----
   if (want('vol_model')) {
-    await run('vol_model', async () => {
+    await run('vol_model', ifChanged('vol_model', async () => {
       const cand = path.join(work, 'vol_model.candidate.json');
       let p;
       try { p = await trainVolModelMain(argsOf({ recordings: rec, out: cand })); } catch (e) {
@@ -882,7 +941,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       if (A.promote === 'validated' && !p.validation.validated) return { promoted: false, validation: p.validation };
       const champ = promoteIfChampion({ dir: A.dir, kind: 'vol_model', candidate: cand, live: promoted('vol_model'), enabled: A.champion });
       return { promoted: champ.promote, improved: champ.promote && champ.improved, champion: champ.reason, validation: p.validation };
-    }, tooFew);
+    }), tooFew);
   }
 
   // ---- 4-5. dataset -> MLP (fair value + take/skip head) -> backtest -> promote ----
@@ -891,10 +950,10 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   // and the fill model (each is applied only if validated).
   const volModelArg = cfg.strategy.volModel && fs.existsSync(promoted('vol_model')) ? promoted('vol_model') : undefined;
   const fillModelArg = fs.existsSync(promoted('fill')) ? promoted('fill') : undefined;
-  if (want('dataset') || want('mlp')) await run('dataset', () => buildDatasetMain(argsOf({ recordings: rec, out: dataset, every: 60, 'vol-model': volModelArg })), tooFew);
+  if (want('dataset') || want('mlp')) await run('dataset', ifChanged('dataset', () => buildDatasetMain(argsOf({ recordings: rec, out: dataset, every: 60, 'vol-model': volModelArg }))), tooFew);
   if (want('mlp')) {
     const cand = path.join(work, 'model.candidate.json');
-    await run('mlp', async () => {
+    await run('mlp', ifChanged('mlp', async () => {
       if (!fs.existsSync(dataset) || fs.statSync(dataset).size === 0) throw new SkipStep('empty dataset: no priced contracts with outcomes in the recordings yet');
       try { await trainMetaModelMain(argsOf({ data: dataset, out: cand })); } catch (e) {
         if (/need at least \d+ windows/.test((e as Error).message)) throw new SkipStep(`not enough settlement windows yet: ${(e as Error).message}`);
@@ -911,13 +970,13 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       state.trainedWithSnn!.crypto = state.snnVersions!.crypto;
       state.trainedWithTaNet = state.taNetVersion;
       return { promoted: true, improved: champ.improved, champion: champ.reason, id: m.id, kind: m.params.kind, usesSnnFeatures: usesSnn, take: m.params.take?.validation ?? null, validationPassed: passed, liveBlockers: m.liveBlockers() };
-    }, tooFew);
+    }), tooFew);
   }
 
   // ---- 6. intraday volatility profile: the replay's last 180 days of 1-minute history when it exists ----
   if (want('vol')) {
     const recent = T.historyReplay ? replayDays().slice(-180) : [];
-    await run('vol', async () => {
+    await run('vol', ifChanged('vol', async () => {
       const out = path.join(work, 'vol_profile.json');
       let src = rec;
       if (recent.length >= 30) {
@@ -928,7 +987,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       await sessionsMain(argsOf({ recordings: src, out, 'no-backtest': 1 }));
       fs.copyFileSync(out, promoted('vol'));
       return { promoted: true, improved: JSON.parse(fs.readFileSync(out, 'utf8')).validation?.improved ?? false, data: src === rec ? 'recordings' : `history replay (${recent.length} days)` };
-    }, recent.length >= 30 ? undefined : tooFew);
+    }), recent.length >= 30 ? undefined : tooFew);
   }
 
   // ---- 7. perps (SNN 1h/4h direction among the features) ----
@@ -937,7 +996,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     // perpetual, September 2019); else the bot's recordings. Each day's rows are cached, so a run only
     // computes the new days (all cores at once on the first run).
     const perpSrc = T.historyReplay && replayDays().length >= 30 ? replayDir : rec;
-    await run('perps', async () => {
+    await run('perps', ifChanged('perps', async () => {
       const cand = path.join(work, 'perp_model.candidate.json');
       const cache = path.join(work, perpSrc === rec ? 'perp-dataset-rec' : 'perp-dataset');
       // On the replay the history ledger's held-out weeks are left out of training: the contest and the
@@ -978,13 +1037,13 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       if (!champ.promote) return { promoted: false, reason: champ.reason, contest };
       state.trainedWithSnn!.perps = state.snnVersions!.perps;
       return { promoted: true, improved: champ.improved, champion: champ.reason, validated: ok, blockers: m?.blockers() ?? [], contest, data: perpSrc === rec ? 'recordings' : `history replay (${replayDays().length} days, ${held.length} held-out weeks)` };
-    }, perpSrc === rec ? tooFew : undefined);
+    }), perpSrc === rec ? tooFew : undefined);
   }
 
   // ---- 8. tennis MLP: Kalshi's tennis history (replay) + the bot's own recorded matches (the holdout) ----
   const tennisHistory = T.historyReplay && replayTennisDays(replayDir).length > 0;
   if (want('tennis')) {
-    await run('tennis', async () => {
+    await run('tennis', ifChanged('tennis', async () => {
       const cand = path.join(work, 'tennis_model.candidate.json');
       let p;
       try { p = await trainTennisMain(argsOf({ recordings: rec, history: tennisHistory ? replayDir : undefined, out: cand })); } catch (e) {
@@ -996,7 +1055,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       if (!champ.promote) return { promoted: false, reason: champ.reason, validation: p.validation };
       state.trainedWithSnn!.tennis = state.snnVersions!.tennis;
       return { promoted: true, improved: champ.improved, champion: champ.reason, validation: p.validation, data: tennisHistory ? 'Kalshi tennis history + recordings' : 'recordings' };
-    }, tennisHistory ? undefined : tooFew);
+    }), tennisHistory ? undefined : tooFew);
   }
 
   // ---- 8. fill / adverse-selection model: brings itself online once it validates ----
@@ -1029,7 +1088,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   // ---- 9b. strategy playbook: which strategy family carries the risk in which coin regime, learned from whole-bot
   // replay days and switched on only if it beat the static bot on later days (research/playbook.ts) ----
   if (want('playbook')) {
-    await run('playbook', async () => {
+    await run('playbook', ifChanged('playbook', async () => {
       const kDays = T.historyReplay ? replayKalshiDays(replayDir) : [];
       if (kDays.length < 30) throw new SkipStep(`${kDays.length} history replay day(s) with Kalshi's real contracts, need 30`);
       const fit = mlpPath() ? (MetaModel.load(mlpPath()!).params.training as { firstWindow?: string; holdoutStart?: string } | undefined) : undefined;
@@ -1058,7 +1117,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         for (const d of Object.values(D.dirs)) fs.rmSync(d, { recursive: true, force: true });
         fs.rmSync(src, { recursive: true, force: true });
       }
-    });
+    }));
   }
 
   // ---- 10. readiness: the whole bot on days nothing was fitted or tuned on, against the target the continuous
@@ -1081,7 +1140,13 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const held = all.slice(Math.floor(all.length * 0.85)).filter((d) => !fitted(d)).slice(-90);
       let wholeBot: ReadinessFile['wholeBot'];
       let note: string | undefined;
-      if (held.length) {
+      // The whole-bot replay is reused while nothing it reads changed (the models' and ledger's status is refreshed).
+      const wbSig = crypto.createHash('sha1').update(`${inputsNow('readiness')}|${held.join(',')}|${target.poolUsd}`).digest('hex');
+      const reuse = A.skipUnchanged && state.readinessWholeBot?.sig === wbSig ? state.readinessWholeBot : undefined;
+      if (reuse) {
+        wholeBot = reuse.wholeBot; note = reuse.note;
+        log(`readiness: the whole-bot replay from ${new Date(reuse.at).toISOString().slice(0, 16).replace('T', ' ')} UTC reused (nothing it reads changed)`);
+      } else if (held.length) {
         const src = path.join(work, 'readiness-days');
         fs.rmSync(src, { recursive: true, force: true });
         const set = new Set(held);
@@ -1099,6 +1164,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
           fs.rmSync(src, { recursive: true, force: true });
         }
       } else note = 'no day the bot was neither fitted nor tuned on yet';
+      if (!reuse) state.readinessWholeBot = { sig: wbSig, at: Date.now(), wholeBot, note };
       const t = wholeBot ? targetMet(wholeBot, target) : { met: false, why: [note ?? 'no whole-bot result'] };
       writeReadiness(A.dir, { at: new Date(now).toISOString(), target, wholeBot, met: t.met, why: t.why, components, ledger: ledgerInfo, note });
       const f2 = (x: number) => (Number.isFinite(x) ? +x.toFixed(3) : null);

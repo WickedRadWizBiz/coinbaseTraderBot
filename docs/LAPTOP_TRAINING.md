@@ -43,8 +43,8 @@ model better, it sends the models to the bot, which loads them without a restart
      settings that most set it apart from the population (▲ above, ▼ below the population's median). Best
      first; the brackets are laid out wide and scaled to fit the window, and the list scrolls.
 
-   **Stop** ends the step in progress (finished steps and tournament rounds are kept; the next run
-   continues). Keep the console window open while it trains: closing it stops the trainer.
+   **Stop** ends the step in progress (finished steps, tournament rounds and the networks that finished a round
+   are kept; the next run continues, see "Stopping and starting again" below). Keep the console window open while it trains: closing it stops the trainer.
    `trainer-data\GUIDE.txt` says how long to train before live trading and what good scores look like;
    `trainer-data\STATUS.txt` shows the scores after every round.
 4. **New versions.** The window checks the *trainer-latest* release when it starts and every 6 hours. When
@@ -155,7 +155,8 @@ npm run train:laptop -- --hours 12 --host <server ip> --key ~/lightsail.pem # or
    from September 2020), and a year of Kalshi's settled contracts, tennis matches with every trade. Each
    later run downloads only what is new.
 3. **Rounds.**
-   - Round 1 runs every step.
+   - The first round runs every step, unless a run in the last 24 hours already finished the history and the
+     replay (`trainer-data\trainer-state.json`): then it goes straight on with the training.
    - Each later round runs one tournament generation per network, on weeks of history that network has
      never trained on (see [History ledger](#history-ledger-which-weeks-each-network-has-trained-on)).
    - Then a contest on held-out weeks against the network in use, a retrain of the models that read the
@@ -169,8 +170,21 @@ npm run train:laptop -- --hours 12 --host <server ip> --key ~/lightsail.pem # or
    server, newer files only (not the caches or the links to replay days). The running bot hot-swaps every
    model that changed. A file changed here is never overwritten by an older copy from the server.
 
-The pipeline saves progress after every step. Stopping with Ctrl+C or closing the window loses at most
-the step in progress, and the next run picks up the tournaments where they stopped.
+**Stopping and starting again.** Press Stop, Ctrl+C, or close the window, and the next run picks up where this one
+stopped:
+- **Finished steps are saved** after each one, and aren't run again until they're due.
+- **No repeat of the day's history.** A run started within 24 hours of the last full round doesn't download
+  the history or rebuild the replay again.
+- **Tournaments keep finished members.** A tournament round is every network training and being judged over
+  several days. Each network that finished the round before the stop is kept, so the resumed round only runs
+  the rest. This applies to the SNN tournaments and the TA network's.
+- **Unchanged retrain steps are skipped.** These are the vol model, the dataset, the Kalshi MLP, the vol
+  profile, the perps and tennis models, and the playbook. One is skipped when nothing it reads has changed
+  since its last run: the same code and settings, no new recordings, replay days or SNN outputs, and no model
+  it reads replaced. Readiness reuses its whole-bot replay on the same terms and still refreshes the models'
+  status. The log says which steps were skipped and why. `AUTO_TRAIN_SKIP_UNCHANGED=false` turns this off.
+
+What can still be lost: the step in progress when you stop, minus the members a tournament already finished.
 
 ## When it stops
 

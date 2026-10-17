@@ -38,7 +38,7 @@ import { binaryBet, coverageFloor, fitnessOf, independentInteractions, type Hype
 /** Least share of opportunities a tournament member must act on (sitting out must not win). */
 export const SNN_MIN_COVERAGE = 0.05;
 import { dsrOf } from './fitness';
-import { runPbt, walkForwardRounds, type GeneticOpts, type PbtMember, type PbtRoundLog } from './pbt';
+import { fileMemberProgress, runPbt, walkForwardRounds, type GeneticOpts, type PbtMember, type PbtRoundLog } from './pbt';
 import { DEFAULT_TRANSITION, pboGate, tournamentPbo, transitionPenalty, type Transition } from './selection';
 import { assetOfGroup } from './transitions';
 import { geneTraits, type GaGeneration, type GaState } from './genetic';
@@ -242,6 +242,8 @@ export async function runSnnPbt(o: {
   const res = await runPbt<MemberState>({
     base: snnHyperOf(base), spec: SNN_HYPER_SPEC, rounds, seed: o.seed ?? 17, resume, exploreAfterLast: true, restartEvery: o.restartEvery ?? 0, log,
     population: o.population ?? 3, concurrency: pool ? o.workers : 1, genetic: o.genetic,
+    // A member that finished the round before a stop is not replayed again when the round resumes.
+    ...(o.stateDir ? { memberProgress: fileMemberProgress<MemberState>(path.join(o.stateDir, 'round'), { encode: (s) => s, decode: (x) => x as MemberState }) } : {}),
     hooks: {
       init: () => ({ through: start }),
       clone: (s) => ({ through: s.through, cp: s.cp ? JSON.parse(JSON.stringify(s.cp)) : undefined }),

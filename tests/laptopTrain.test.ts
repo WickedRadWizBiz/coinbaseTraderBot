@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
-import { afterRound, championsGone, CONTINUE_STEPS, filesToPull, filesToPush, guideText, laptopProfile, LOCAL_ONLY_DIRS, localManifest, parseManifest, roundOutcome, safeServerEnv, scoreboard, Server } from '../research/laptopTrain';
+import { afterRound, championsGone, CONTINUE_STEPS, fullRoundDone, readTrainerState, writeTrainerState, filesToPull, filesToPush, guideText, laptopProfile, LOCAL_ONLY_DIRS, localManifest, parseManifest, roundOutcome, safeServerEnv, scoreboard, Server } from '../research/laptopTrain';
 import { dailyStats, type ReadinessFile } from '../research/readiness';
 import { resourcePlan } from '../research/trainerResources';
 import { tmpDir } from './helpers';
@@ -156,4 +156,17 @@ test('the TA network\'s row cache is never copied down; the laptop\'s own tourna
   const older = (p: string) => [p, { path: p, size: 1, mtime: 1_000_000 }] as const;
   assert.deepEqual(filesToPull(srv, new Map([older('models/work/tanet-population.json'), older('models/ta_net.json')])).map((f) => f.path), ['models/ta_net.json'], 'server copies are newer, but the cache and the laptop\'s tournament stay');
   assert.deepEqual(filesToPull(srv, new Map()).map((f) => f.path), ['models/work/tanet-population.json', 'models/ta_net.json'], 'a laptop without a tournament starts from the server\'s');
+});
+
+test('trainer state: a full round counts once its history and replay finished (also when stopped later); remembered between runs', () => {
+  const done = (step: string, skipped?: string) => ({ step, ok: true, ...(skipped ? { skipped } : {}) });
+  assert.equal(fullRoundDone([done('history'), done('history_replay'), done('snn', 'stop requested')]), true, 'stopped after the replay');
+  assert.equal(fullRoundDone([done('history'), done('history_replay', 'stop requested')]), false, 'stopped before the replay');
+  assert.equal(fullRoundDone([done('history', 'HISTORY_AUTO_UPDATE=false'), done('history_replay', 'HISTORY_REPLAY=false')]), true, 'turned off counts as done');
+  assert.equal(fullRoundDone([{ step: 'history', ok: false }, done('history_replay')]), false);
+  assert.equal(fullRoundDone([done('history_replay')], ['history_replay']), true, 'no-download mode needs the replay only');
+  const dir = tmpDir();
+  assert.deepEqual(readTrainerState(dir), {});
+  writeTrainerState(dir, { lastFullAt: 123 });
+  assert.equal(readTrainerState(dir).lastFullAt, 123);
 });
