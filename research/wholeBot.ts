@@ -73,6 +73,8 @@ export interface WholeBotData {
   dirs: Record<string, string>;
   days: Record<string, RecordingDay[]>;
   setups?: { file: SetupOosFile; assets: Map<string, unknown> };
+  /** Model-call tapes for the Kalshi backtests (research/callTape.ts): `sig` covers the days, the model and the risk limits. */
+  tape?: { dir: string; sig: string };
 }
 
 /** Recorded days in a folder, sorted (plain or gzipped day files). */
@@ -134,6 +136,7 @@ export async function runWholeBot(D: WholeBotData, window: string, s: WholeBotSe
       const res = await runBacktest(D.dirs[window], D.model, { ...S }, D.cfg.risk, kalshiUsd0, {
         sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
         vault: D.cfg.vault.enabled ? D.cfg.vault : undefined, sizingTiers: s.tierScale && s.tierScale !== 1 && D.cfg.sizingTiers ? scaledTiers(D.cfg.sizingTiers, s.tierScale) : D.cfg.sizingTiers,
+        tape: D.tape ? { file: path.join(D.tape.dir, `bot-${window}-${D.tape.sig.slice(0, 16)}.tape`), sig: `${D.tape.sig}|${window}|${D.days[window]?.map(dayOf).join(',')}` } : undefined,
       });
       wins = [...res.windows.entries()].filter(([, w]) => w.contracts > 0).map(([ts, w]) => [ts, w.pnl]);
       perTrade = res.trades.map((t) => [t.closeTs, t.pnl, seriesAsset(t.ticker)]);

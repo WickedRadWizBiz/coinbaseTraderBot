@@ -758,7 +758,10 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         if (recorded) {
           const files = new Map(recordingFiles(source === 'replay' ? replayDir : rec).map((f) => [f.day, f.file]));
           if (pinned && !pinned.every((d) => files.has(d))) { log(`sweep-${target}: some of the unfinished sweep's days are gone: starting over`); pinned = undefined; }
-          const use = pinned ?? (source === 'replay' ? kDays.filter((d) => files.has(d)) : [...files.keys()]);
+          // The most recent SWEEP_KALSHI_DAYS days (every setting tried replays all of them); an unfinished sweep on more
+          // days than that (from before the cap) starts over on the recent ones.
+          if (pinned && pinned.length > A.sweepKalshiDays) { log(`sweep-${target}: the unfinished sweep is on ${pinned.length} days, over SWEEP_KALSHI_DAYS=${A.sweepKalshiDays}: starting over on the recent ones`); pinned = undefined; }
+          const use = pinned ?? (source === 'replay' ? kDays.filter((d) => files.has(d)) : [...files.keys()]).slice(-A.sweepKalshiDays);
           sweepSrc = path.join(work, 'sweep-replay');
           fs.rmSync(sweepSrc, { recursive: true, force: true });
           linkDays(use.map((d) => ({ day: d, file: files.get(d)! })), sweepSrc);
@@ -767,12 +770,16 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         if (!unfinished && fs.existsSync(out)) fs.renameSync(out, out.replace(/\.json$/, `.${new Date(now).toISOString().slice(0, 10)}.json`));
         let r;
         try {
-          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: sweepSrc, model: mlpPath(), out, 'setup-oos': path.join(A.dir, 'setup_oos.json'), 'setup-model': fs.existsSync(promoted('setups')) ? promoted('setups') : undefined, 'lead-lag': path.join(A.dir, 'lead_lag.json') }), { meta: pinned ? { days: pinned, source } : undefined, log: (m) => log(`sweep-${target}: ${m}`) });
+          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: sweepSrc, model: mlpPath(), out, 'setup-oos': path.join(A.dir, 'setup_oos.json'), 'setup-model': fs.existsSync(promoted('setups')) ? promoted('setups') : undefined, 'lead-lag': path.join(A.dir, 'lead_lag.json'), 'tape-dir': recorded ? path.join(work, 'kalshi-tape') : '' }), { meta: pinned ? { days: pinned, source } : undefined, log: (m) => log(`sweep-${target}: ${m}`) });
         } catch (e) {
           if (/needs at least|needs the TA network|recorded day/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;
         }
-        if (r.complete) state.sweptAt![target] = now;
+        if (r.complete) {
+          state.sweptAt![target] = now;
+          // Its model-call tapes are of no use to the next sweep (other days, another model).
+          for (const f of fs.existsSync(path.join(work, 'kalshi-tape')) ? fs.readdirSync(path.join(work, 'kalshi-tape')) : []) if (f.startsWith(`${target}-`)) fs.rmSync(path.join(work, 'kalshi-tape', f), { force: true });
+        }
         return { proposal: out, complete: r.complete, data: !recorded ? 'history' : source === 'recordings' ? `recordings: ${pinned!.length} day(s)` : `history replay: ${pinned!.length} day(s) with real Kalshi contracts`, plateau: r.plateau, passes: r.passes, evaluations: r.evaluations, start: r.start, end: r.end, changed: r.steps.filter((x) => x.accepted).map((x) => `${x.param}: ${x.from} -> ${x.to}`) };
       }, due ? undefined : `swept ${((now - last!) / 86_400_000).toFixed(1)} day(s) ago (SWEEP_EVERY_DAYS=${A.sweepEveryDays})`);
     }

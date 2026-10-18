@@ -120,6 +120,17 @@ The search runs as a background process, so a long sweep (`npm run research:swee
 
 **Stopping and resuming.** Every evaluation is written to the ledger (`sweeps/<target>.json`) the moment it finishes, together with a signature of the data it was made on (the days and their files, the model, the settings the sweep does not move). A sweep stopped part way (the trainer closed, the machine slept, its `SWEEP_HOURS` used up) is continued by the next pipeline run straight away, whatever `SWEEP_EVERY_DAYS` says. It works on exactly the same days, pinned in the ledger, so new recordings do not throw its results away. It walks the same path again from the same start, takes every result it already has from the ledger, and starts with the evaluation that was interrupted. Only a finished sweep (plateau or last pass) is archived to `sweeps/<target>.YYYY-MM-DD.json` and started afresh a week later. The Kalshi target evaluates the values of a setting at once, one production backtest per worker thread (`TRAIN_WORKERS`). The choice among them is the same as evaluating them one by one.
 
+**Speed (the Kalshi and whole-bot sweeps).** These replay Kalshi's contracts for every setting they try, so two things keep them short:
+
+- **Recent days only.** They run on the most recent `SWEEP_KALSHI_DAYS` (60) days. An unfinished sweep on more days than that starts over on the recent ones.
+- **Model-call tapes** (`research/callTape.ts`). About three quarters of a Kalshi backtest is the model's work: every second, each open contract's full feature map and the model's probability. None of it depends on the settings a sweep moves.
+  - The first backtest of a window records each call's answer to `work/kalshi-tape/`, about 1 MB per day.
+  - Every later backtest of that window plays them back, about 25 times faster, and ends on exactly the same result.
+  - Each call's time, contract and fair value are checked against the tape. At the first mismatch the backtest starts over without it.
+  - Tapes are kept within `SWEEP_TAPE_GB` (4), least recently used first out. A finished sweep deletes its own tapes.
+
+In the laptop trainer both sweeps are behind the *Kalshi sweeps* checkbox, which is off by default.
+
 ### 8. It scores the whole bot against a target (readiness)
 
 The last step, `readiness`, replays the whole bot (Kalshi contracts and perps setup lanes, one pot of capital) on days nothing was fitted or tuned on. It reports the daily return in % of `TRAIN_TARGET_POOL_USD` with its 95% interval, the drawdown, the Sharpe and the share of winning days. It says whether that meets the target and whether it looks solid, and writes every model's state and each network's history-ledger position to `AUTO_TRAIN_DIR/readiness.json`. The continuous laptop trainer stops when the target is met (docs/LAPTOP_TRAINING.md).

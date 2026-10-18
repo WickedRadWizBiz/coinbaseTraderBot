@@ -27,7 +27,8 @@ import { DEFAULT_FEES } from '../bot/fees';
 import { assetFeatureMap, computeFeatureMap } from '../bot/model/featureEngine';
 import { VolForecaster, VolModel } from '../bot/model/volModel';
 import { applyFillModel, FillModel } from '../bot/tca/fillModel';
-import { applyTakeGate } from '../bot/model/takeModel';
+import { applyTakeGate, TAKE_GATED_DRIVERS, TAKE_GATED_MICRO, TAKE_GATED_TREND } from '../bot/model/takeModel';
+import { dropTape, openTape, TapeMiss, tickerHash, type TapeReader, type TapeWriter } from './callTape';
 import { effectiveSigma, loadVolProfile, type VolProfile } from '../bot/model/volSeasonality';
 import { sessionRiskFor, huntBlockedBySession, type SessionRiskProfile } from '../bot/model/sessionRisk';
 import { sessionState } from '../bot/model/sessions';
@@ -120,10 +121,43 @@ export interface BacktestResult {
  */
 export interface BacktestLatency { orderMs: number; cancelMs?: number; jitterMs?: number }
 
-export async function runBacktest(
-  dir: string, model: MetaModel, strategy: StrategyConfig, limits: RiskLimits, bankroll0: number,
-  opts: { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams; hunt?: HuntParams; volProfile?: VolProfile; applyVolSeasonality?: boolean; volModel?: VolModel; fillModel?: FillModel; sessionRisk?: SessionRiskProfile; huntSessionGuard?: boolean; huntTransitionBufferMin?: number; vault?: VaultConfig; calendar?: MacroEvent[]; sizingTiers?: TierPoint[]; latency?: BacktestLatency } = {},
-): Promise<BacktestResult> {
+export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetParams; hunt?: HuntParams; volProfile?: VolProfile; applyVolSeasonality?: boolean; volModel?: VolModel; fillModel?: FillModel; sessionRisk?: SessionRiskProfile; huntSessionGuard?: boolean; huntTransitionBufferMin?: number; vault?: VaultConfig; calendar?: MacroEvent[]; sizingTiers?: TierPoint[]; latency?: BacktestLatency;
+  /** Record the model calls to this tape on the first run, play them back on later ones (research/callTape.ts). `sig`
+   *  must change with anything the calls depend on (the days, the model, the vol settings, the risk limits). Not used
+   *  with a fill model (it reads features the tape does not keep). */
+  tape?: { file: string; sig: string } }
+
+/** The features read after the model call, kept on the tape: confluence for its exit, the take gate's inputs. */
+export const TAKE_TAPE_KEYS = ['snn_up_h', 'snn_bias', 'snn_skill_h', 'snn_cal_h', ...TAKE_GATED_TREND.map(([n]) => n), ...TAKE_GATED_MICRO.map(([n]) => n), ...TAKE_GATED_DRIVERS];
+const tapeKeys = (policy: ExitPolicyName, strategy: StrategyConfig, model: MetaModel) => [
+  ...(policy === 'confluence_ratchet' ? ['conf_count'] : []),
+  ...(strategy.takeGate === 'validated' && model.params.take?.validation.validated ? TAKE_TAPE_KEYS : []),
+];
+/** A feature map with only the taped keys; reading any other is a miss (the run starts over without the tape). */
+const tapedMap = (keys: string[], x: Float64Array): Record<string, number> => new Proxy({} as Record<string, number>, {
+  get: (_, k) => { if (typeof k !== 'string') return undefined; const i = keys.indexOf(k); if (i < 0) throw new TapeMiss(`feature ${k} is not on the tape`); return x[i]; },
+  has: (_, k) => typeof k === 'string' && keys.includes(k),
+});
+
+export async function runBacktest(dir: string, model: MetaModel, strategy: StrategyConfig, limits: RiskLimits, bankroll0: number, opts: BacktestOpts = {}): Promise<BacktestResult> {
+  const t = opts.tape;
+  if (!t || opts.fillModel) return runBacktestOnce(dir, model, strategy, limits, bankroll0, opts);
+  const keys = tapeKeys(opts.exitPolicy ?? 'fair_value', strategy, model);
+  for (let attempt = 0; ; attempt++) {
+    const tape = openTape(t.file, t.sig, keys);
+    try {
+      const r = await runBacktestOnce(dir, model, strategy, limits, bankroll0, opts, tape);
+      tape.finish();
+      return r;
+    } catch (e) {
+      tape.abort();
+      if (!(e instanceof TapeMiss) || attempt > 0) throw e;
+      dropTape(t.file);
+    }
+  }
+}
+
+async function runBacktestOnce(dir: string, model: MetaModel, strategy: StrategyConfig, limits: RiskLimits, bankroll0: number, opts: BacktestOpts, tape?: TapeReader | TapeWriter): Promise<BacktestResult> {
   const policy = opts.exitPolicy ?? 'fair_value';
   const st = new ReplayState();
   const volFc = new VolForecaster(opts.volModel);
@@ -260,13 +294,21 @@ export async function runBacktest(
       const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaFv, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
       if (!fv) continue;
       const mid = (bid.price + ask.price) / 2;
-      const fmap = computeFeatureMap({
-        now: st.now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma, inWindow: fv.regime !== 'pre_window', book, micro: st.features.micro.get(m.ticker), index: idx!, spot: st.spot.get(m.asset), asset: m.asset, usdtd: st.usdtd, btcd: st.btcd, closeTs: m.closeTime, volProfile: opts.volProfile, asiaRange: st.features.asiaRange.get(m.asset),
-        kind: m.kind, strike: terms.strike, cap: terms.cap, d2: fv.d2, vEff: fv.vEff, sigmaPricing: sigmaFv, tNu: model.params.tNu, bars: st.features.bars.get(m.asset), peerBars: st.features.bars, openTime: m.openTime, calendar: opts.calendar,
-        ticker: m.ticker, siblings: m.kind === 'updown' ? undefined : ladderQuotes(st.markets.values(), (t) => st.books.get(t), m.asset, m.closeTime),
-        perp: st.features.perps.get(m.asset), candles: st.features.candles.get(m.asset), snn: st.snnContext(m.asset, m.ticker),
-      });
-      const pred = model.predictDetailed(fmap, fv.pYes);
+      let fmap: Record<string, number>, pred: { p: number; std?: number };
+      if (tape?.mode === 'replay') {
+        const c = tape.next(st.now, tickerHash(m.ticker), fv.pYes);
+        pred = { p: c.p, std: c.std };
+        fmap = tapedMap(tape.keys, c.x);
+      } else {
+        fmap = computeFeatureMap({
+          now: st.now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma, inWindow: fv.regime !== 'pre_window', book, micro: st.features.micro.get(m.ticker), index: idx!, spot: st.spot.get(m.asset), asset: m.asset, usdtd: st.usdtd, btcd: st.btcd, closeTs: m.closeTime, volProfile: opts.volProfile, asiaRange: st.features.asiaRange.get(m.asset),
+          kind: m.kind, strike: terms.strike, cap: terms.cap, d2: fv.d2, vEff: fv.vEff, sigmaPricing: sigmaFv, tNu: model.params.tNu, bars: st.features.bars.get(m.asset), peerBars: st.features.bars, openTime: m.openTime, calendar: opts.calendar,
+          ticker: m.ticker, siblings: m.kind === 'updown' ? undefined : ladderQuotes(st.markets.values(), (t) => st.books.get(t), m.asset, m.closeTime),
+          perp: st.features.perps.get(m.asset), candles: st.features.candles.get(m.asset), snn: st.snnContext(m.asset, m.ticker),
+        });
+        pred = model.predictDetailed(fmap, fv.pYes);
+        tape?.push(st.now, tickerHash(m.ticker), fv.pYes, pred.p, pred.std, tape.keys.map((k) => fmap[k]));
+      }
       const pYes = pred.p;
       const pMarket = model.marketProbability(mid);
       const ret = idx!.trailingLogReturn(st.now, strategy.fastMoveWindowSec * 1000);

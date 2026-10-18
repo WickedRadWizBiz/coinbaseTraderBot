@@ -5,9 +5,9 @@
 import { parentPort } from 'worker_threads';
 import { kalshiScore } from './sweep';
 
-parentPort?.on('message', async (j: { dir: string; modelPath: string; strategy: Record<string, unknown> }) => {
+parentPort?.on('message', async (j: { dir: string; modelPath: string; strategy: Record<string, unknown>; tape?: { file: string; sig: string } }) => {
   try {
-    parentPort!.postMessage({ ok: true, out: await kalshiScore(j.dir, j.modelPath, j.strategy) });
+    parentPort!.postMessage({ ok: true, out: await kalshiScore(j.dir, j.modelPath, j.strategy, j.tape) });
   } catch (e) {
     parentPort!.postMessage({ ok: false, error: (e as Error).stack ?? String(e) });
   }
