@@ -422,6 +422,8 @@ export interface AutoTrainConfig {
   /** Time budget per run for the TA network's walk-forward export (it resumes on the next run). */
   taNetOosHours: number;
   sweepEveryDays: number;
+  /** The Kalshi and whole-bot sweeps run on the most recent this many replay (or recorded) days. */
+  sweepKalshiDays: number;
   /** Minimum days of recordings before anything is trained. */
   minDays: number;
   /** Poll interval for model-file changes (hot reload). */
@@ -1146,6 +1148,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       sweepHours: num(env, 'SWEEP_HOURS', 2, 0.05, 48),
       taNetOosHours: num(env, 'TA_NET_OOS_HOURS', 3, 0.05, 48),
       sweepEveryDays: num(env, 'SWEEP_EVERY_DAYS', 7, 1, 365),
+      sweepKalshiDays: num(env, 'SWEEP_KALSHI_DAYS', 60, 20, 2000),
       minDays: num(env, 'AUTO_TRAIN_MIN_DAYS', 1, 0, 365),
       watchSec: num(env, 'AUTO_TRAIN_WATCH_SEC', 30, 5, 3600),
       snnPbtDays: num(env, 'AUTO_TRAIN_SNN_PBT_DAYS', 7, 2, 365),

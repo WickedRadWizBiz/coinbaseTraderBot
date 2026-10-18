@@ -49,6 +49,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { pruneTapes } from './callTape';
 
 export interface SweepParam { name: string; values: number[]; get(): number; set(v: number): void }
 export interface Fitness { score: number; n: number; mean?: number }
@@ -397,7 +398,7 @@ export async function spotPbTarget(hist: string, leadLagFile: string): Promise<S
 /** Kalshi contracts through the production backtester. Windows: the recorded days split 70 / 15 / 15. */
 /** One Kalshi sweep evaluation: the production backtester over a window's days with these strategy settings, scored
  *  by the t-statistic of net P&L per traded 15-minute window (the same in the sweep and its worker threads). */
-export async function kalshiScore(dir: string, modelPath: string, strategy: Record<string, unknown>): Promise<Fitness> {
+export async function kalshiScore(dir: string, modelPath: string, strategy: Record<string, unknown>, tape?: { file: string; sig: string }): Promise<Fitness> {
   const { runBacktest } = await import('./backtest');
   const { loadConfig } = await import('../bot/config');
   const { MetaModel } = await import('../bot/model/metaModel');
@@ -407,13 +408,16 @@ export async function kalshiScore(dir: string, modelPath: string, strategy: Reco
   const S = { ...cfg.strategy, ...strategy } as typeof cfg.strategy;
   const res = await runBacktest(dir, model, S, cfg.risk, cfg.paperBankrollUsd, {
     sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
-    vault: cfg.vault.enabled ? cfg.vault : undefined, sizingTiers: cfg.sizingTiers,
+    vault: cfg.vault.enabled ? cfg.vault : undefined, sizingTiers: cfg.sizingTiers, tape,
   });
   return tStat([...res.windows.values()].filter((x) => x.contracts > 0).map((x) => x.pnl));
 }
 const kalshiModels = new Map<string, import('../bot/model/metaModel').MetaModel>();
 
-export async function kalshiTarget(recordings: string, modelPath: string, workers = 1): Promise<SweepTarget> {
+/** Model-call tapes (research/callTape.ts) kept within SWEEP_TAPE_GB (default 4), least recently used out. */
+export const sweepTapeBytes = () => Math.max(0.1, Number(process.env.SWEEP_TAPE_GB ?? 4) || 4) * 1e9;
+
+export async function kalshiTarget(recordings: string, modelPath: string, workers = 1, tapeDir?: string): Promise<SweepTarget> {
   const { loadConfig } = await import('../bot/config');
   const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
   const { recordingFiles, linkDays } = await import('../bot/marketdata/recordingFiles');
@@ -435,7 +439,10 @@ export async function kalshiTarget(recordings: string, modelPath: string, worker
   const fixed = Object.fromEntries(Object.entries(cfg.strategy).filter(([k]) => !(KEYS as readonly string[]).includes(k)));
   const signature = crypto.createHash('sha1').update(JSON.stringify([days.map((d) => stat(d.file)), stat(modelPath, true), fixed, cfg.risk, cfg.paperBankrollUsd, cfg.vault, cfg.sizingTiers])).digest('hex');
   const strategyOf = (settings: Record<string, number>) => Object.fromEntries(KEYS.map((k) => [k, settings[`strategy.${k}`] ?? S[k]]));
-  let pool: import('./workerPool').WorkerPool<{ dir: string; modelPath: string; strategy: Record<string, unknown> }, Fitness> | undefined;
+  // Each window's model calls are the same whatever the settings: recorded on its first backtest, played back after.
+  if (tapeDir) pruneTapes(tapeDir, sweepTapeBytes());
+  const tapeOf = (w: SweepWindow) => (tapeDir ? { file: path.join(tapeDir, `kalshi-${w}-${signature.slice(0, 16)}.tape`), sig: `${signature}|${w}` } : undefined);
+  let pool: import('./workerPool').WorkerPool<{ dir: string; modelPath: string; strategy: Record<string, unknown>; tape?: { file: string; sig: string } }, Fitness> | undefined;
   return {
     name: 'kalshi',
     minN: 30,
@@ -445,23 +452,28 @@ export async function kalshiTarget(recordings: string, modelPath: string, worker
       num('exitMargin', [0, 0.005, 0.01, 0.02, 0.03]), num('kellyFraction', [0.1, 0.15, 0.25, 0.35, 0.5]), num('targetEvOfRisk', [0.1, 0.25, 0.5, 0.75]),
     ],
     snapshot: () => Object.fromEntries(KEYS.map((k) => [`strategy.${k}`, S[k]])),
-    fitness: (w) => kalshiScore(dirs[w], modelPath, { ...S }),
+    fitness: (w) => kalshiScore(dirs[w], modelPath, { ...S }, tapeOf(w)),
     // Several settings at once, one backtest per worker thread (TRAIN_WORKERS).
     fitnessMany: workers > 1 ? async (jobs) => {
       const { WorkerPool, workerScript } = await import('./workerPool');
       pool ??= new WorkerPool(workerScript('sweepWorker'), workers);
-      return Promise.all(jobs.map((j) => pool!.run({ dir: dirs[j.w], modelPath, strategy: strategyOf(j.settings) })));
+      return Promise.all(jobs.map((j) => pool!.run({ dir: dirs[j.w], modelPath, strategy: strategyOf(j.settings), tape: tapeOf(j.w) })));
     } : undefined,
     close: async () => { await pool?.close(); pool = undefined; },
   };
 }
 
 /** The whole bot over the recordings. Windows: the recorded days split 70 / 15 / 15. */
-export async function botTarget(recordings: string, history: string, modelPath: string, setupOos: string, setupModelPath?: string): Promise<SweepTarget> {
+export async function botTarget(recordings: string, history: string, modelPath: string, setupOos: string, setupModelPath?: string, tapeDir?: string): Promise<SweepTarget> {
   const { loadWholeBot, runWholeBot, settingsFromConfig, recordedDays } = await import('./wholeBot');
   const n = recordedDays(recordings).length;
   if (n < 20) throw new Error(`only ${n} recorded day(s) in ${recordings}: the whole-bot sweep needs at least 20`);
   const D = await loadWholeBot({ recordings, history, setupOos, modelPath, split: { tune: [0, 0.7], check: [0.7, 0.85], final: [0.85, 1] } });
+  if (tapeDir) {
+    pruneTapes(tapeDir, sweepTapeBytes());
+    const stat = (f: string) => { try { const st = fs.statSync(f); return [path.basename(f), st.size, Math.floor(st.mtimeMs)]; } catch { return [path.basename(f), 0, 0]; } };
+    D.tape = { dir: tapeDir, sig: crypto.createHash('sha1').update(JSON.stringify([recordedDays(recordings).map((d) => stat(d.file)), stat(modelPath), D.cfg.risk])).digest('hex') };
+  }
   const { SetupModel } = await import('../bot/setups/setupModel');
   let book;
   try { book = SetupModel.load(setupModelPath ?? D.cfg.perps.setupModelPath)?.params.book; } catch { book = undefined; }
@@ -496,8 +508,9 @@ function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`
 export async function sweepMain(argOf: (k: string, d: string) => string = cliArg, extra: { meta?: Record<string, unknown>; log?: (m: string) => void } = {}): Promise<SweepReport> {
   const target = argOf('target', 'setups-long');
   const { workerCount } = await import('./workerPool');
-  const t = target === 'kalshi' ? await kalshiTarget(argOf('recordings', 'data/recordings'), argOf('model', 'params/model.json'), workerCount())
-    : target === 'bot' ? await botTarget(argOf('recordings', 'data/recordings'), argOf('history', 'data/history'), argOf('model', 'params/model.json'), argOf('setup-oos', 'data/models/setup_oos.json'), argOf('setup-model', '') || undefined)
+  const tapeDir = argOf('tape-dir', '') || undefined;
+  const t = target === 'kalshi' ? await kalshiTarget(argOf('recordings', 'data/recordings'), argOf('model', 'params/model.json'), workerCount(), tapeDir)
+    : target === 'bot' ? await botTarget(argOf('recordings', 'data/recordings'), argOf('history', 'data/history'), argOf('model', 'params/model.json'), argOf('setup-oos', 'data/models/setup_oos.json'), argOf('setup-model', '') || undefined, tapeDir)
     : target === 'setups-ratchet' ? await ratchetTarget(argOf('history', 'data/history'))
     : target === 'setups-scale' ? await scaleTarget(argOf('history', 'data/history'))
     : target === 'setups-spotpb' ? await spotPbTarget(argOf('history', 'data/history'), argOf('lead-lag', 'data/models/lead_lag.json'))
