@@ -417,6 +417,33 @@ The Librarian (the 4th-generation spec's 3.1; the name for the adversary with fu
 - By hand: `npm run research:librarian -- --history data/history`.
 - `LIBRARIAN_PATH` is the fallback model file.
 
+## The Oracle cull: every TA reading against hindsight (October 2026)
+
+The Librarian learns from the oracle; the Oracle cull uses the same oracle to judge the inputs. Every reading the TA network and the Librarian read is tested: each indicator on 15m / 1h / 4h / 1d, the rule tallies, the confluences, the candle patterns, and the cross-asset and order-flow readings (`TANET_FEATURES`, 468 of them). The test asks whether the reading tells anything about the hindsight-best strategy (`research/oracleCull.ts`).
+
+**The test.**
+- The oracle is the Librarian's soft label: which family (trend, mean-revert, breakout, flat) earned most over the next day after a round trip, every third hour of every coin.
+- Each reading's values are cut into quantile bins on the first two years.
+- Walking forward through time, each later row is forecast by the average oracle label of the rows in its bin whose outcome was already known, against the overall average alone.
+- The gain is how much better that forecast was against what actually paid, out of sample.
+
+**The verdict** (from daily gains, weekly-block bootstrap):
+- **proven:** the gain passes Benjamini-Hochberg at q = 0.1 over all 468 readings, so a reading does not pass on luck;
+- **kept:** the gain is positive but not proven;
+- **culled:** the reading forecast the oracle worse than not reading it.
+
+`ORACLE_CULL_LEVEL=unproven` culls everything that is not proven.
+
+**The effect.**
+- **TA network.** It reads a culled input as absent. The input's normalisation scale is set to 1e300, which makes it 0 in the TypeScript trainer, the PyTorch trainer (where float32 turns it to infinity) and the live bot. The saved population keeps the raw statistics, so a reading a later cull keeps comes back. The network file lists the culled readings (`cull`).
+- **Librarian.** It fits and forecasts without the culled inputs (their spread is zero).
+- **Gates.** Both keep their own gates: the TA network's champion contest and the Librarian's grading decide whether the culled model is used. The cull never ships a worse model by itself.
+
+**Running it.**
+- The pipeline runs it weekly before the TA network (step `oracle_cull`, `data/models/oracle_cull.json`, with every reading's gain, interval, p-value, its correlation with the oracle's position, and a per-indicator summary).
+- By hand: `npm run research:oracle-cull -- --history data/history`.
+- `ORACLE_CULL=false` turns it off.
+
 ## The cross-asset graph network (October 2026)
 
 The 4th-generation spec's item 2, as reviewed: a graph network over the coins, learning from **relative** returns. Each coin is measured against the basket, so it forecasts which coins will outrun the others. Where the market as a whole goes is the TA network's job. The model is in `bot/ta/crossGraph.ts`; training is in `research/trainCrossGraph.ts` and `python/xgraph/train.py`.

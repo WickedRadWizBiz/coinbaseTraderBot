@@ -20,6 +20,9 @@
 //   0c. ta_net_oos   walk-forward forecasts of that network over all history (research/taNetOos.ts),
 //                    extended month by month -> inputs of the setup scorer; promote ta_net_wf.json (the
 //                    walking network, read live by the setup trader)
+//   0b' oracle_cull  every TA reading against the oracle (research/oracleCull.ts, weekly) -> oracle_cull.json: the
+//                    readings that told nothing about the hindsight-best strategy are switched off in the TA network
+//                    and the Librarian
 //   0c+ librarian    the Librarian (research/librarian.ts): oracle strategy and regime-transition heads on the TA
 //                    network's inputs, walk-forward and graded against persistence (weekly) -> librarian.json (its
 //                    validated heads are features of the decision models) and the walk's forecasts for the setups
@@ -112,6 +115,7 @@ import { readJournalTrades } from '../bot/setups/journal';
 import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
 import { exportTaNetOos, oosDir } from './taNetOos';
 import { libDir, trainLibrarian } from './librarian';
+import { cullSummary, readCull, trainOracleCull } from './oracleCull';
 import { leadLagStudy } from './leadLag';
 import { trainCrossGraph, xgDir } from './trainCrossGraph';
 import { trainCrossLead } from './crossLead';
@@ -133,7 +137,7 @@ import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet'
 /** Coins with Kalshi crypto contracts: the SNN tournaments' transition penalty reads their regime changes. */
 const SNN_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
 
-export const STEPS = ['history', 'history_replay', 'ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'cross_lead', 'rule_book', 'gp', 'lead_lag', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
+export const STEPS = ['history', 'history_replay', 'oracle_cull', 'ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'cross_lead', 'rule_book', 'gp', 'lead_lag', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -182,6 +186,7 @@ export interface PipelineState {
   crossLeadAt?: number;
   /** Last Librarian training (research/librarian.ts, weekly). */
   librarianAt?: number;
+  oracleCullAt?: number;
   /** Last spot vs perp lead-lag study (research/leadLag.ts, weekly). */
   leadLagAt?: number;
   /** Last cross-asset graph network training (research/trainCrossGraph.ts, weekly). */
@@ -306,7 +311,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const state = readState(A.dir);
   if (o.forceAll) {
     delete state.stepInputs; delete state.readinessWholeBot;
-    delete state.ruleBookAt; delete state.librarianAt; delete state.leadLagAt; delete state.crossGraphAt; delete state.crossLeadAt; delete state.gpAt; delete state.setupsTrainedAt; delete state.taNetTrainedAt; state.sweptAt = {};
+    delete state.ruleBookAt; delete state.librarianAt; delete state.oracleCullAt; delete state.leadLagAt; delete state.crossGraphAt; delete state.crossLeadAt; delete state.gpAt; delete state.setupsTrainedAt; delete state.taNetTrainedAt; state.sweptAt = {};
     o = { ...o, forceAblation: true, forceSnnPbt: true, forceTaNet: true };
     log('sweeping everything: every step is due this run');
   }
@@ -505,6 +510,29 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       return { ...r, perpSpecs: Object.keys(perpSpecs) };
     }, T.historyReplay ? undefined : 'HISTORY_REPLAY=false');
   }
+  // ---- 0b'. The oracle cull: every TA reading against what paid in hindsight (research/oracleCull.ts) ----
+  const cullFile = path.join(A.dir, 'oracle_cull.json');
+  const cullOn = process.env.ORACLE_CULL !== 'false';
+  if (want('oracle_cull')) {
+    const due = !fs.existsSync(cullFile) || !state.oracleCullAt || now - state.oracleCullAt >= 7 * 86_400_000;
+    const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet`;
+    await run('oracle_cull', async () => {
+      let f;
+      try {
+        f = await trainOracleCull(T.historyDir, { cacheDir: path.join(work, 'tanet-cache'), level: process.env.ORACLE_CULL_LEVEL === 'unproven' ? 'unproven' : 'noise', log });
+      } catch (e) {
+        if (/needs years|needs \d+ days/.test((e as Error).message)) throw new SkipStep((e as Error).message);
+        throw e;
+      }
+      writeAtomic(cullFile, JSON.stringify(f, null, 1));
+      state.oracleCullAt = now;
+      for (const l of cullSummary(f)) log(`[oracle-cull] ${l}`);
+      return { file: cullFile, readings: f.items.length, proven: f.proven.length, culled: f.culled.length, level: f.level, judged: `${f.from}..${f.to}`, days: f.days };
+    }, !cullOn ? 'ORACLE_CULL=false' : !T.enabled ? 'TA_NET=false' : noHistory ?? (due ? undefined : `ran ${((now - state.oracleCullAt!) / 86_400_000).toFixed(1)} day(s) ago (weekly)`));
+  }
+  // The TA network and the Librarian read every TA reading the cull kept.
+  const cullArg = cullOn && fs.existsSync(cullFile) ? cullFile : undefined;
+
   if (want('ta_net')) {
     const staleSchema = fs.existsSync(taNetFile) && taNetFileSchema(taNetFile) !== TANET_SCHEMA;
     const due = o.forceTaNet || staleSchema || state.taNetComplete === false || !fs.existsSync(taNetFile) || !state.taNetTrainedAt || now - state.taNetTrainedAt >= T.retrainEveryDays * 86_400_000;
@@ -518,7 +546,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
           'train-months': T.trainMonths, 'eval-months': T.evalMonths, 'step-months': T.stepMonths, 'holdout-months': T.holdoutMonths, 'final-months': T.finalMonths, stride: T.stride, 'min-per-regime': T.minPerRegime, dsr: T.dsrThreshold,
           'max-rounds': T.maxRoundsPerRun || undefined, 'restart-every': T.restartEvery, arch: T.arch, engine: T.engine, python: T.python || undefined,
           population: T.population, parents: A.gaParents, islands: A.gaIslands, 'breed-every': A.gaBreedEvery, mutation: A.gaMutation,
-          incumbent: fs.existsSync(taNetFile) ? taNetFile : undefined,
+          incumbent: fs.existsSync(taNetFile) ? taNetFile : undefined, cull: cullArg,
         }));
       } catch (e) {
         if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
@@ -565,7 +593,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       || forecastSchema(path.join(libDir(T.historyDir), 'forecasts.json')) !== LIB_SCHEMA;
     const noHistory = storedAssets(T.historyDir).length ? undefined : `no history in ${T.historyDir} yet`;
     await run('librarian', async () => {
-      const r = await trainLibrarian(T.historyDir, { cacheDir: path.join(work, 'tanet-cache'), log });
+      const r = await trainLibrarian(T.historyDir, { cacheDir: path.join(work, 'tanet-cache'), cull: readCull(cullArg), log });
       writeAtomic(file, JSON.stringify(r.params));
       state.librarianAt = now;
       return { promoted: true, version: r.params.version, rows: r.rows, refits: r.refits, from: r.from, forecastHours: r.forecastHours, strategy: r.params.strategy.validation, transition: r.params.transition.validation };

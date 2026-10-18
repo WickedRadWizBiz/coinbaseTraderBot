@@ -38,6 +38,7 @@
     "research:setups": "tsx research/trainSetupModel.ts",
     "research:ta-net-oos": "tsx research/taNetOos.ts",
     "research:librarian": "tsx research/librarian.ts",
+    "research:oracle-cull": "tsx research/oracleCull.ts",
     "research:lead-lag": "tsx research/leadLag.ts",
     "research:xgraph": "tsx research/trainCrossGraph.ts",
     "research:cross-lead": "tsx research/crossLead.ts",

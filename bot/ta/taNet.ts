@@ -438,6 +438,22 @@ export function tripleBarrier(entry: number, next: Candle[], dir: 1 | -1, width:
 
 export interface TaNetNorm { mean: number[]; std: number[] }
 
+/** A culled reading's normalisation scale (research/oracleCull.ts): (v - 0) / 1e300 is ~0 in TypeScript and exactly 0 in
+ *  PyTorch's float32 (1e300 overflows to infinity), so the network reads a culled input as absent everywhere. */
+export const CULLED_STD = 1e300;
+
+/** The normalisation with the culled readings (TA row names) switched off; the raw statistics are not changed. */
+export function cullNorm(norm: TaNetParams['norm'], cull: Iterable<string>): TaNetParams['norm'] {
+  const out = set(cull);
+  if (!out.size) return norm;
+  const apply = (n: TaNetNorm, names: readonly string[]): TaNetNorm => ({
+    mean: n.mean.map((m, j) => (out.has(names[j]) ? 0 : m)),
+    std: n.std.map((s, j) => (out.has(names[j]) ? CULLED_STD : s)),
+  });
+  return { ...norm, trend: apply(norm.trend, TANET_TREND_FEATURES), macro: apply(norm.macro, TANET_DAY_FEATURES), ctx: apply(norm.ctx, TANET_CTX_FEATURES) };
+}
+const set = (xs: Iterable<string>) => new Set(xs);
+
 export interface TaNetHeadValidation {
   metric: 'logloss' | 'mse';
   rows: number;
@@ -497,6 +513,8 @@ export interface TaNetParams {
   gates: BranchGates;
   weights: number[];
   norm: { trend: TaNetNorm; macro: TaNetNorm; micro: TaNetNorm; swing: TaNetNorm; ctx: TaNetNorm };
+  /** TA readings the oracle cull switched off when this network was trained (research/oracleCull.ts; already applied in norm). */
+  cull?: string[];
   /** Which fractal depth carries which kind of TA pattern (research/trainTaNet.ts patternReport). */
   patterns?: PatternReport;
   /** Market-wide context the network was trained with: index series coverage and the coin basket. */

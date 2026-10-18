@@ -104,7 +104,7 @@ const inputsOf = (Dt: TaNetData, a: number, r: number, out: Float64Array): Float
 
 interface Fit { mean: Float64Array; std: Float64Array; W: Float64Array; b: Float64Array; wt: Float64Array; bt: number }
 
-function norms(Dt: TaNetData, rows: LibRow[], ids: number[]): { mean: Float64Array; std: Float64Array } {
+function norms(Dt: TaNetData, rows: LibRow[], ids: number[], cull?: ReadonlySet<number>): { mean: Float64Array; std: Float64Array } {
   const mean = new Float64Array(NIN), m2 = new Float64Array(NIN), cnt = new Float64Array(NIN), x = new Float64Array(NIN);
   const step = Math.max(1, Math.floor(ids.length / 20_000));
   for (let q = 0; q < ids.length; q += step) {
@@ -113,7 +113,8 @@ function norms(Dt: TaNetData, rows: LibRow[], ids: number[]): { mean: Float64Arr
     for (let f = 0; f < NIN; f++) { const v = x[f]; if (!Number.isFinite(v)) continue; cnt[f]++; const d = v - mean[f]; mean[f] += d / cnt[f]; m2[f] += d * (v - mean[f]); }
   }
   const std = new Float64Array(NIN);
-  for (let f = 0; f < NIN; f++) { const sd = cnt[f] > 10 ? Math.sqrt(m2[f] / (cnt[f] - 1)) : 0; std[f] = sd > 1e-9 ? sd : 0; }
+  // A culled input (research/oracleCull.ts) gets no spread: z = 0 in the fit and in every forecast, live too.
+  for (let f = 0; f < NIN; f++) { const sd = cnt[f] > 10 ? Math.sqrt(m2[f] / (cnt[f] - 1)) : 0; std[f] = sd > 1e-9 && !cull?.has(f) ? sd : 0; }
   return { mean, std };
 }
 
@@ -121,8 +122,8 @@ const zInto = (x: Float64Array, mean: Float64Array, std: Float64Array, z: Float6
 const sigm = (v: number) => 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, v))));
 
 /** Minibatch Adam on both heads (soft cross-entropy and log loss, L2), warm-started from `init`. */
-export function fitLibrarian(Dt: TaNetData, rows: LibRow[], ids: number[], o: { epochs: number; init?: Fit; lr?: number; l2?: number; batch?: number; seed?: number }): Fit {
-  const { mean, std } = norms(Dt, rows, ids);
+export function fitLibrarian(Dt: TaNetData, rows: LibRow[], ids: number[], o: { epochs: number; init?: Fit; lr?: number; l2?: number; batch?: number; seed?: number; cull?: ReadonlySet<number> }): Fit {
+  const { mean, std } = norms(Dt, rows, ids, o.cull);
   const W = o.init ? Float64Array.from(o.init.W) : new Float64Array(K * NIN), b = o.init ? Float64Array.from(o.init.b) : new Float64Array(K);
   const wt = o.init ? Float64Array.from(o.init.wt) : new Float64Array(NIN);
   let bt = o.init?.bt ?? 0;
@@ -178,6 +179,7 @@ const toParams = (f: Fit, extra: Partial<LibrarianParams>): LibrarianParams => (
   strategy: { W: Array.from({ length: K }, (_, k) => Array.from(f.W.subarray(k * NIN, (k + 1) * NIN))), b: Array.from(f.b), validation: extra.strategy?.validation ?? { validated: false, why: 'not graded', rows: 0, days: 0 } },
   transition: { w: Array.from(f.wt), b: f.bt, validation: extra.transition?.validation ?? { validated: false, why: 'not graded', rows: 0, days: 0 } },
   regimeTable: extra.regimeTable,
+  ...(extra.cull?.length ? { cull: extra.cull } : {}),
 });
 
 /** Mean oracle weights per regime key (keys with 30+ rows) and overall. */
@@ -213,7 +215,7 @@ export interface LibWalk {
 }
 
 /** The walk: first fit on `firstDays`, refit every `stepDays` (labels must have closed before each refit). */
-export function walkLibrarian(Dt: TaNetData, rows: LibRow[], o: { firstDays?: number; stepDays?: number; epochsFirst?: number; epochsStep?: number; log?: (m: string) => void } = {}): LibWalk {
+export function walkLibrarian(Dt: TaNetData, rows: LibRow[], o: { firstDays?: number; stepDays?: number; epochsFirst?: number; epochsStep?: number; cull?: ReadonlySet<number>; log?: (m: string) => void } = {}): LibWalk {
   const log = o.log ?? (() => {});
   const forecasts = Dt.assets.map(() => new Map<number, LibForecast>());
   const tables = new Map<number, { regime: Record<string, number[]>; hazard: number[] }>();
@@ -228,7 +230,7 @@ export function walkLibrarian(Dt: TaNetData, rows: LibRow[], o: { firstDays?: nu
     for (let i = 0; i < rows.length && rows[i].ts < cut; i++) if (rows[i].ts + embargo <= cut) ids.push(i);
     if (ids.length < 500) continue;
     const started = Date.now();
-    fit = fitLibrarian(Dt, rows, ids, { epochs: fit ? (o.epochsStep ?? 2) : (o.epochsFirst ?? 6), init: fit, seed: refits + 1 });
+    fit = fitLibrarian(Dt, rows, ids, { epochs: fit ? (o.epochsStep ?? 2) : (o.epochsFirst ?? 6), init: fit, seed: refits + 1, cull: o.cull });
     refits++;
     const p = toParams(fit, {});
     const tab = { regime: regimeTable(rows, ids), hazard: hazardTable(rows, ids) };
@@ -354,22 +356,25 @@ export class LibIndex {
 export interface LibReport { params: LibrarianParams; grade: LibGrade; rows: number; refits: number; from: string; forecastHours: number }
 
 /** Rows, walk, grade, final fit; writes the forecasts file. */
-export function trainLibrarianOn(Dt: TaNetData, labels: Map<string, Map<string, string>>, o: { hist?: string; log?: (m: string) => void; firstDays?: number; stepDays?: number; epochsFirst?: number; epochsStep?: number; epochsFinal?: number; minDays?: number; minRows?: number; strideH?: number } = {}): LibReport {
+export function trainLibrarianOn(Dt: TaNetData, labels: Map<string, Map<string, string>>, o: { hist?: string; cull?: string[]; log?: (m: string) => void; firstDays?: number; stepDays?: number; epochsFirst?: number; epochsStep?: number; epochsFinal?: number; minDays?: number; minRows?: number; strideH?: number } = {}): LibReport {
   const log = o.log ?? (() => {});
   const rows = libRows(Dt, labels, { strideH: o.strideH });
   if (rows.length < 1000) throw new Error(`only ${rows.length} labelled rows: the Librarian needs years of hourly history`);
   log(`[librarian] ${rows.length} labelled rows over ${Dt.assets.length} coin(s), ${iso(rows[0].ts)}..${iso(rows[rows.length - 1].ts)}; oracle weights ${LIB_STRATEGIES.map((s, k) => `${s} ${(rows.reduce((a, r) => a + r.y[k], 0) / rows.length).toFixed(2)}`).join(', ')}`);
-  const walk = walkLibrarian(Dt, rows, { ...o, log });
+  const cullNames = (o.cull ?? []).filter((k) => LIB_INPUTS.includes(k));
+  const cull = new Set(cullNames.map((k) => LIB_INPUTS.indexOf(k)));
+  if (cull.size) log(`[librarian] oracle cull: ${cull.size} input(s) switched off`);
+  const walk = walkLibrarian(Dt, rows, { ...o, cull, log });
   const grade = gradeLibrarian(rows, walk, o);
   log(`[librarian] strategy head: ${grade.strategy.validated ? 'VALIDATED' : 'not validated'} (${grade.strategy.why})`);
   log(`[librarian] transition head: ${grade.transition.validated ? 'VALIDATED' : 'not validated'} (${grade.transition.why})`);
   const all = rows.map((_, i) => i);
-  const final = fitLibrarian(Dt, rows, all, { epochs: o.epochsFinal ?? 4, init: walk.last, seed: 99 });
+  const final = fitLibrarian(Dt, rows, all, { epochs: o.epochsFinal ?? 4, init: walk.last, seed: 99, cull });
   const version = `lib-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}`;
   const { why: sw, validated: sv, rows: sr, days: sd, ...sRest } = grade.strategy;
   const { why: tw, validated: tv, rows: tr, days: td, ...tRest } = grade.transition;
   const params = toParams(final, {
-    version, regimeTable: regimeTable(rows, all),
+    version, regimeTable: regimeTable(rows, all), ...(cullNames.length ? { cull: cullNames } : {}),
     strategy: { W: [], b: [], validation: { validated: sv, why: sw, rows: sr, days: sd, ...sRest } },
     transition: { w: [], b: 0, validation: { validated: tv, why: tw, rows: tr, days: td, ...tRest } },
   });
@@ -386,14 +391,14 @@ export function trainLibrarianOn(Dt: TaNetData, labels: Map<string, Map<string, 
 }
 
 /** The whole job from a history directory: the TA network's rows (cached), the day regime labels (cached), train. */
-export async function trainLibrarian(hist: string, o: { cacheDir?: string; assets?: string[]; log?: (m: string) => void } = {}): Promise<LibReport> {
+export async function trainLibrarian(hist: string, o: { cacheDir?: string; assets?: string[]; cull?: string[]; log?: (m: string) => void } = {}): Promise<LibReport> {
   const log = o.log ?? console.log;
   const assets = o.assets?.length ? o.assets : storedAssets(hist);
   const Dt = await buildDataParallel(hist, assets, o.cacheDir ?? path.join(hist, '.tanet-cache'), log, workerCount());
   if (!Dt.assets.length) throw new Error('no coin has enough hourly and daily history for TA rows');
   const t0 = Math.min(...Dt.assets.map((a) => a.rowTs[0] ?? Infinity)), t1 = Math.max(...Dt.assets.map((a) => a.rowTs[a.rowTs.length - 1] ?? 0)) + D;
   const labels = regimeDayLabels(hist, Dt.assets.map((a) => a.asset), t0, t1, log);
-  return trainLibrarianOn(Dt, labels, { hist, log });
+  return trainLibrarianOn(Dt, labels, { hist, cull: o.cull, log });
 }
 
 export async function trainLibrarianMain(): Promise<void> {

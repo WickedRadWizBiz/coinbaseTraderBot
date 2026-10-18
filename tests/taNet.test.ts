@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { CULLED_STD } from '../bot/ta/taNet';
 import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
 import { assetFeatureMap } from '../bot/model/featureEngine';
@@ -276,8 +277,13 @@ test('grouped network: indicator families, learns the planted signal, reports fa
   assert.ok(fams.trendNames.length >= 6 && fams.ctxNames.includes('slow') && fams.ctxNames.includes('dominance'));
   const dir = historyDir();
   const D = buildData(dir, ['TST'], path.join(dir, '.cache'), () => undefined);
-  const rep = await trainTaNet(D, { ...OPTS, arch: 'grouped', statePath: path.join(dir, 'popg.json'), log: () => undefined });
+  // With an oracle cull (research/oracleCull.ts): the culled reading reaches the network as absent, the population keeps the raw statistics.
+  const culled = TANET_TREND_FEATURES[3];
+  const rep = await trainTaNet(D, { ...OPTS, arch: 'grouped', statePath: path.join(dir, 'popg.json'), cull: [culled, 'not_a_reading'], log: () => undefined });
   const p = rep.params;
+  assert.deepEqual(p.cull, [culled]);
+  assert.equal(p.norm.trend.std[3], CULLED_STD);
+  assert.notEqual(JSON.parse(fs.readFileSync(path.join(dir, 'popg.json'), 'utf8')).norm.trend.std[3], CULLED_STD);
   assert.equal(p.arch, 'grouped');
   assert.ok(p.dims.fam && p.familyNames && p.familyNames.length === p.dims.fam.nT + p.dims.fam.nC);
   assert.ok(p.heads.up_1h.validation.hitRate! > 0.52, `planted autocorrelation (grouped): ${JSON.stringify(p.heads.up_1h.validation)}`);
