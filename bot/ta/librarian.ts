@@ -77,6 +77,8 @@ export interface LibrarianParams {
   transition: { w: number[]; b: number; validation: LibHeadValidation };
   /** Mean oracle weights per regime key in the training rows (the regime-persistence baseline; shown). */
   regimeTable?: Record<string, number[]>;
+  /** Inputs the oracle cull switched off (research/oracleCull.ts): trained and forecast with zero spread, i.e. absent. */
+  cull?: string[];
 }
 
 export interface LibrarianReading {

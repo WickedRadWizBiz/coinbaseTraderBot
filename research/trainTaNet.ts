@@ -40,12 +40,14 @@ import {
   buildBranchInput, closedIndex, sigma24, TANET_CTX_FEATURES, TANET_CTX_HOURLY, TANET_D1_BARS, TANET_DAY_FEATURES, TANET_FEATURES, TANET_H1_BARS, TANET_MACRO_DAYS, TANET_MICRO_F, TANET_MICRO_STEPS, TANET_SCHEMA,
   TANET_STRATEGY, TANET_SWING_BARS, TANET_SWING_F, TANET_TREND_FEATURES, TANET_TREND_STEPS, taNetDayVector, taNetFeatureMap, barrierResult, taNetBarrierPosition, taNetBarrierWidth, TANET_BARRIER, tripleBarrier, taNetMicro, taNetSwing, windowOk,
   taNetFamilies, calibrated, fitPlatt, type PatternReport, type TaNetHeadName, type TaNetNetworkValidation, type TaNetStrategy, type TaNetHeadValidation, type TaNetNorm, type TaNetParams, type TaNetStateCache,
+  cullNorm,
 } from '../bot/ta/taNet';
 import { coverageFloor as sharedCoverageFloor } from '../bot/util/fitness';
 import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type FitnessReport, type Interaction } from './fitness';
 import { fileMemberProgress, runPbt, walkForwardRounds, type GeneticOpts, type Hyper, type MutationSpec, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
 import { DEFAULT_TRANSITION, pboGate, tournamentPbo, transitionPenalty, type Transition } from './selection';
 import { regimeTransitions } from './transitions';
+import { readCull } from './cullFile';
 import type { GaGeneration, GaState } from './genetic';
 import { loadIndexSeries, loadSeries, storedAssets } from './history/candles';
 import { DAILY_CONTEXT_FEATURES, SLOW_INDEXES, TaNetContext } from '../bot/ta/taNetContext';
@@ -818,6 +820,8 @@ export function dayBootstrap(diff: number[], ts: number[], iters = 1000, seed = 
 }
 
 export interface TaNetTrainOpts {
+  /** TA readings the oracle cull switched off (research/oracleCull.ts): read as absent; the population keeps the raw statistics. */
+  cull?: string[];
   /** 'flat' (default) or 'grouped' (indicator families, bot/ta/branchNet.ts), and units per family. */
   arch?: 'flat' | 'grouped';
   famK?: number;
@@ -1008,7 +1012,11 @@ async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: 
       else if (saved.members.length !== (o.population ?? 3)) { log(`saved population has ${saved.members.length} networks, ${o.population ?? 3} wanted; starting a fresh tournament`); saved = undefined; }
     } catch { saved = undefined; }
   }
-  const norm = saved?.norm ?? fitNorms(D, between(allRounds[0].trainFrom, allRounds[0].trainTo));
+  const normRaw = saved?.norm ?? fitNorms(D, between(allRounds[0].trainFrom, allRounds[0].trainTo));
+  // The oracle cull on top (the saved population keeps the raw statistics, so a reading a later cull keeps comes back).
+  const cull = (o.cull ?? []).filter((k) => TANET_FEATURES.includes(k));
+  const norm = cullNorm(normRaw, cull);
+  if (cull.length) log(`oracle cull: ${cull.length} TA reading(s) switched off`);
   let rounds = saved ? allRounds.filter((r) => r.evalFrom >= saved!.lastEvalTo - 1) : allRounds;
   rounds = rounds.map((r, k) => ({ ...r, index: (saved?.nextIndex ?? 0) + k }));
   const pending = rounds.length;
@@ -1026,7 +1034,7 @@ async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: 
   const save = (members: PbtMember<Member>[], trials: number, plog: PbtRoundLog[], lastEvalTo: number, nextIndex: number, ga?: GaState) => {
     if (!o.statePath) return;
     const st: SavedState = {
-      schema: TANET_SCHEMA, dims, assets: D.assets.map((a) => a.asset), norm, trials, lastEvalTo, nextIndex, contextSig, optimizer: 'adamw', log: plog, ...(ga ? { ga } : {}),
+      schema: TANET_SCHEMA, dims, assets: D.assets.map((a) => a.asset), norm: normRaw, trials, lastEvalTo, nextIndex, contextSig, optimizer: 'adamw', log: plog, ...(ga ? { ga } : {}),
       members: members.map((m) => ({ id: m.id, hyper: m.hyper, w: b64(m.state.w), m: b64(m.state.m), v: b64(m.state.v), step: m.state.step, lineage: m.lineage, scores: m.scores, ...(m.blocks ? { blocks: m.blocks } : {}), bornRound: m.bornRound, record: m.record.map((x) => [x.ts, x.ret, x.cost, x.group ?? ''] as [number, number, number, string]), ...(m.island !== undefined ? { island: m.island } : {}), ...(m.parents ? { parents: m.parents } : {}) })),
     };
     fs.mkdirSync(path.dirname(o.statePath), { recursive: true });
@@ -1200,7 +1208,7 @@ async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: 
     ...(res.ga ? { ga: { generation: res.ga.generation, sinceOffspringWon: res.ga.sinceOffspringWon, last: res.ga.history[res.ga.history.length - 1] } } : {}),
     params: {
       version: `tanet5-${new Date().toISOString().slice(0, 10)}-${D.assets.length}a-r${res.log.length}`,
-      schema: TANET_SCHEMA, dims, gates: gatesOf(elite.hyper), weights: Array.from(finalW), norm, patterns, context: D.context,
+      schema: TANET_SCHEMA, dims, gates: gatesOf(elite.hyper), weights: Array.from(finalW), norm, ...(cull.length ? { cull } : {}), patterns, context: D.context,
       trendFeatures: [...TANET_TREND_FEATURES], dayFeatures: [...TANET_DAY_FEATURES], strategy: strat, heads, taEngine: taEngine(), ...(calib ? { calib } : {}),
       arch: o.arch ?? 'flat', ...(dims.fam ? { familyNames: (() => { const f = taNetFamilies(); return [...f.trendNames.map((n) => `trend:${n}`), ...f.ctxNames.map((n) => `ctx:${n}`)]; })() } : {}),
       network: {
@@ -1239,6 +1247,7 @@ export async function trainTaNetMain(argOf: (k: string, d: string) => string = c
     engine: (['ts', 'torch', 'auto'] as const).find((e) => e === argOf('engine', process.env.TA_NET_ENGINE ?? 'ts')) ?? 'ts',
     python: argOf('python', '') || undefined, packDir: path.join(cache, 'torch-pack'),
     genetic: { parents: num('parents', '3'), islands: num('islands', '1'), breedEvery: num('breed-every', '4'), mutation: num('mutation', '0.03') },
+    cull: (() => { const f = argOf('cull', ''); return f ? readCull(f) : []; })(),
     incumbent: (() => { const f = argOf('incumbent', ''); try { return f && fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) as TaNetParams : undefined; } catch { return undefined; } })(),
   });
   const out = argOf('out', 'params/ta_net.json');
