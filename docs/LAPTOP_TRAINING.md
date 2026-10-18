@@ -22,6 +22,11 @@ model better, it sends the models to the bot, which loads them without a restart
    **Skip data download** (under Start, also used by Start conditioning): nothing is copied from the server and
    no history is downloaded (the pipeline runs with `--skip history`); training starts at once on the data
    already here. The models are still sent back to the server afterwards. It is not remembered between sessions.
+
+   **Kalshi sweeps** (under Start, off by default, remembered): runs the sweeps that replay Kalshi's contracts,
+   `sweep-kalshi` and `sweep-bot`. Every setting they try is a full Kalshi backtest over the replay days, so they
+   take hours. Unticked, they are skipped and the other sweeps (the setup lanes) still run. They only ever write
+   proposals, never change the bot. From the console: `--kalshi-sweep` / `--no-kalshi-sweep`.
    - **How hard should it work?** Gentle, Balanced (the default) or Full speed; see *Keeping the computer
      usable* below. The choice is remembered.
    - **Hours**: 0 trains until it stops by itself; a number stops sooner.

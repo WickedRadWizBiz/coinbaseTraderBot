@@ -62,7 +62,7 @@ import { ensureTorch } from './torchSetup';
 import { ensureTvDatafeed } from './tvSetup';
 import { asIntensity, lowerPriority, markRunEnd, markRunIntensity, markRunStart, planEnv, ResourceGovernor, resourcePlan, type GovernorStatus, type Intensity, type ResourcePlan } from './trainerResources';
 
-export interface TrainerSettings { host?: string; user?: string; port?: number; key?: string; /** How hard it works (research/trainerResources.ts). */ intensity?: Intensity }
+export interface TrainerSettings { host?: string; user?: string; port?: number; key?: string; /** How hard it works (research/trainerResources.ts). */ intensity?: Intensity; /** Run the sweeps that replay Kalshi's contracts (the `kalshi` and `bot` targets: slow). Off by default. */ kalshiSweep?: boolean }
 export interface RemoteFile { path: string; size: number; mtime: number }
 
 /** Steps that continue a tournament or depend on one: what rounds after the first repeat. */
@@ -347,7 +347,7 @@ function usableKey(key: string, dataDir: string): string {
 }
 
 export class Server {
-  constructor(private readonly s: Required<Omit<TrainerSettings, 'intensity'>>) {}
+  constructor(private readonly s: Required<Omit<TrainerSettings, 'intensity' | 'kalshiSweep'>>) {}
   private base(): string[] { return ['-i', this.s.key, '-p', String(this.s.port), '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ServerAliveInterval=30', '-o', 'BatchMode=yes', `${this.s.user}@${this.s.host}`]; }
   run(cmd: string): { ok: boolean; out: string; err: string } {
     const r = spawnSync('ssh', [...this.base(), cmd], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
@@ -457,13 +457,23 @@ function readReadiness(models: string, since: number): ReadinessFile | undefined
 
 const writeText = (file: string, text: string) => fs.writeFileSync(file, process.platform === 'win32' ? text.replace(/\r?\n/g, '\r\n') : text);
 
+/** The sweeps that replay Kalshi's contracts: every setting tried is a full Kalshi backtest over the replay days. */
+export const KALSHI_SWEEP_TARGETS = ['kalshi', 'bot'];
+
+/** The run's environment with the Kalshi sweeps taken out of SWEEP_TARGETS unless they are wanted. */
+export function kalshiSweeps(env: NodeJS.ProcessEnv, on: boolean): NodeJS.ProcessEnv {
+  if (on) return env;
+  const targets = loadConfig({ ...env, DASHBOARD_TOKEN: env.DASHBOARD_TOKEN ?? 'x'.repeat(32) }).autoTrain.sweepTargets;
+  return { ...env, SWEEP_TARGETS: targets.filter((t) => !KALSHI_SWEEP_TARGETS.includes(t)).join(',') };
+}
+
 /** The trainer's saved server settings (trainer-data/trainer.json). */
 export function readSettings(dataDir: string): TrainerSettings {
-  try { const j = JSON.parse(fs.readFileSync(path.join(dataDir, 'trainer.json'), 'utf8')); return { host: j.host ?? undefined, user: j.user ?? 'ubuntu', port: j.port ?? 22, key: j.key ?? undefined, intensity: asIntensity(j.intensity) }; } catch { return { user: 'ubuntu', port: 22, intensity: 'balanced' }; }
+  try { const j = JSON.parse(fs.readFileSync(path.join(dataDir, 'trainer.json'), 'utf8')); return { host: j.host ?? undefined, user: j.user ?? 'ubuntu', port: j.port ?? 22, key: j.key ?? undefined, intensity: asIntensity(j.intensity), kalshiSweep: j.kalshiSweep === true }; } catch { return { user: 'ubuntu', port: 22, intensity: 'balanced', kalshiSweep: false }; }
 }
 export function writeSettings(dataDir: string, s: TrainerSettings): void {
   fs.mkdirSync(dataDir, { recursive: true });
-  fs.writeFileSync(path.join(dataDir, 'trainer.json'), JSON.stringify({ host: s.host ?? null, user: s.user ?? 'ubuntu', port: s.port ?? 22, key: s.key ?? null, intensity: asIntensity(s.intensity) }, null, 1));
+  fs.writeFileSync(path.join(dataDir, 'trainer.json'), JSON.stringify({ host: s.host ?? null, user: s.user ?? 'ubuntu', port: s.port ?? 22, key: s.key ?? null, intensity: asIntensity(s.intensity), kalshiSweep: s.kalshiSweep === true }, null, 1));
 }
 
 /** Command line: the questions in the console, then the rounds. With --ui, the trainer window instead. */
@@ -488,7 +498,7 @@ export async function laptopTrainMain(): Promise<void> {
   if (!(hours >= 0)) throw new Error('--hours must be 0 (train until it stops by itself) or a number of hours');
   const settingsFile = path.join(dataDir, 'trainer.json');
   let s: TrainerSettings = readSettings(dataDir);
-  s = { ...s, host: argOf('host') ?? s.host, user: argOf('user') ?? s.user ?? 'ubuntu', port: Number(argOf('port') ?? s.port ?? 22), key: argOf('key') ?? s.key, intensity: asIntensity(argOf('intensity') ?? process.env.TRAINER_INTENSITY ?? s.intensity) };
+  s = { ...s, host: argOf('host') ?? s.host, user: argOf('user') ?? s.user ?? 'ubuntu', port: Number(argOf('port') ?? s.port ?? 22), key: argOf('key') ?? s.key, intensity: asIntensity(argOf('intensity') ?? process.env.TRAINER_INTENSITY ?? s.intensity), kalshiSweep: flag('kalshi-sweep') || (flag('no-kalshi-sweep') ? false : s.kalshiSweep) };
   const wantSync = !(flag('no-pull') && flag('no-push'));
   if (wantSync && (flag('setup') || (!s.host && !fs.existsSync(settingsFile))) && process.stdin.isTTY) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -622,7 +632,8 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   let tvEnv: Record<string, string> = {};
   // The pipeline's memory cap: the plan's, doubled (up to 8 GB) after a round that ran out of it.
   let mainHeapMb = plan.mainHeapMb;
-  const envFor = (leftHours: number): NodeJS.ProcessEnv => ({ ...serverEnv, ...laptopProfile(leftHours, os.cpus().length, continuous, { ...plan, mainHeapMb }), ...torchEnv, ...tvEnv, ...userEnv, ...process.env, DATA_DIR: dataDir, AUTO_TRAIN: 'off', TRADING_MODE: 'paper', TRAINER_PROGRESS: '1', DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRAIN_THROTTLE_FILE: path.join(dataDir, 'throttle.json'), TRAINER_PRIORITY: plan.priority });
+  const envFor = (leftHours: number): NodeJS.ProcessEnv => kalshiSweeps({ ...serverEnv, ...laptopProfile(leftHours, os.cpus().length, continuous, { ...plan, mainHeapMb }), ...torchEnv, ...tvEnv, ...userEnv, ...process.env, DATA_DIR: dataDir, AUTO_TRAIN: 'off', TRADING_MODE: 'paper', TRAINER_PROGRESS: '1', DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRAIN_THROTTLE_FILE: path.join(dataDir, 'throttle.json'), TRAINER_PRIORITY: plan.priority }, s.kalshiSweep === true);
+  if (s.kalshiSweep !== true) log('the Kalshi sweeps (sweep-kalshi, sweep-bot) are off: tick "Kalshi sweeps" in the window (or --kalshi-sweep) to run them');
   const A = loadConfig(envFor(continuous ? 24 : hours)).autoTrain;
   const guide = guideText({ poolUsd: A.targetPoolUsd, dailyPct: A.targetDailyPct, maxDdPct: A.targetMaxDdPct, plateauRounds: A.plateauRounds });
   writeText(path.join(dataDir, 'GUIDE.txt'), guide);

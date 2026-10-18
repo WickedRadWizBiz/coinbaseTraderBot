@@ -164,6 +164,10 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
           <input type="checkbox" id="skipDataDownload" style="width: auto; margin: 0;" />
           Skip data download
         </label>
+        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text); font-size: 13px; text-transform: none; letter-spacing: normal; margin-top: 6px;">
+          <input type="checkbox" id="kalshiSweep" style="width: auto; margin: 0;" />
+          Kalshi sweeps <span class="muted">(slow: every setting tried replays every Kalshi contract; off = skipped)</span>
+        </label>
       </div>
       <div id="startErr" class="err"></div>
 
@@ -226,7 +230,7 @@ $('start').addEventListener('click', async () => {
   $('startErr').textContent = '';
   const mode = document.querySelector('input[name=mode]:checked').value;
   const skipDataDownload = $('skipDataDownload').checked;
-  const r = await post('/api/start', { mode, hours: Number($('hours').value) || 0, intensity: $('intensity').value, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim(), skipDataDownload });
+  const r = await post('/api/start', { mode, hours: Number($('hours').value) || 0, intensity: $('intensity').value, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim(), skipDataDownload, kalshiSweep: $('kalshiSweep').checked });
   if (!r.ok) $('startErr').textContent = r.error || 'could not start';
 });
 let lastCond = null;
@@ -236,7 +240,7 @@ $('condStart').addEventListener('click', async () => {
   const c = lastCond || { ready: false, why: '' };
   if (!c.ready && !confirm('Conditioning is not recommended right now: ' + (c.why || 'the bot was not freshly trained') + '.\n\nAre you sure you want to start it anyway?')) return;
   if (!confirm('Start conditioning mode? It runs until a champion is found or the trials are used up (hours on most computers).')) return;
-  const r = await post('/api/start', { mode: 'conditioning', hours: 0, force: !c.ready, intensity: $('intensity').value, skipDataDownload: $('skipDataDownload').checked, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim() });
+  const r = await post('/api/start', { mode: 'conditioning', hours: 0, force: !c.ready, intensity: $('intensity').value, skipDataDownload: $('skipDataDownload').checked, kalshiSweep: $('kalshiSweep').checked, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim() });
   if (!r.ok) $('startErr').textContent = r.error || 'could not start';
 });
 $('stop').addEventListener('click', async () => { if (confirm('Stop training now? Finished steps and tournament rounds are kept; the step in progress starts again next time.')) await post('/api/stop'); });
@@ -276,7 +280,7 @@ async function tick() {
   $('condWhy').textContent = c.why || '';
   $('condLast').textContent = c.last ? 'Last run ' + new Date(c.last.at).toLocaleString() + ': ' + (c.last.elite ? 'Elite Champion ' + c.last.elite : 'no Elite; best ' + (c.last.best || 'none') + ', ' + c.last.bestPassed + ' of ' + c.last.windows + ' windows') : '';
   $('title').textContent = s.phase === 'running' ? (s.mode === 'conditioning' ? 'Conditioning' : 'Training') : s.phase === 'stopping' ? 'Stopping...' : s.lastStop ? 'Stopped: ' + s.lastStop : 'Ready';
-  if (!filled && s.settings) { $('host').value = s.settings.host || ''; $('user').value = s.settings.user || ''; $('key').value = s.settings.key || ''; $('intensity').value = s.settings.intensity || 'balanced'; if (s.settings.host) $('srv').open = false; filled = true; }
+  if (!filled && s.settings) { $('host').value = s.settings.host || ''; $('user').value = s.settings.user || ''; $('key').value = s.settings.key || ''; $('intensity').value = s.settings.intensity || 'balanced'; $('kalshiSweep').checked = s.settings.kalshiSweep === true; if (s.settings.host) $('srv').open = false; filled = true; }
   $('notice').classList.toggle('hidden', !s.notice);
   $('notice').textContent = s.notice ? 'Last time: ' + s.notice + ' If the computer froze, choose Gentle (or Balanced) and close other heavy programs while it trains.' : '';
   const rs = s.resources;
