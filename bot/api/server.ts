@@ -33,6 +33,7 @@ import { marketContext } from '../ta/marketContext';
 import { activeRuleBook } from '../strategy/ruleBook';
 import { conditioningStatus, rollbackChampion } from '../strategy/conditioningOverlay';
 import { playbook } from '../strategy/playbook';
+import { compensator } from '../strategy/compensator';
 import { macro } from '../macro/macroService';
 import { activeGpSignals } from '../gp/gpSignals';
 import { buildNeuralMap } from './neuralMap';
@@ -211,6 +212,7 @@ export function createApi(d: ApiDeps): express.Express {
       gp: (() => { const g = activeGpSignals(); const cs = g?.champions(); if (!g || !cs || !Object.keys(cs).length) return null; return { version: g.version() ?? null, champions: Object.fromEntries(Object.entries(cs).map(([a, c]) => [a, { formula: c.formula, validated: c.validated, why: c.why ?? null, test: c.test ?? null }])) }; })(),
       conditioning: conditioningStatus(d.cfg.autoTrain.dir),
       playbook: playbookStatus(),
+      compensator: compensator()?.status() ?? null,
       // Fractal Alignment Engine and waterfall mode (bot/macro): the cycle on its parent, the legs, the gate, the switch.
       waterfall: macro()?.status() ?? null,
       ruleBook: (() => { const rb = activeRuleBook(); const m = rb?.meta(); if (!rb || !m) return null; const p = rb.passed(); const pc = rb.passedCombos(), cd = rb.passedConditions(), iv = rb.passedInvalidations(); return { ...m, invalidations: iv.length, topInvalidations: iv.slice(0, 12).map((v) => `${v.key} ${v.h}h invalidated by ${v.by}${/>=/.test(v.by) ? '' : ` (${v.rel})`}`), conditions: { makes: cd.filter((c) => c.effect === 'makes').length, breaks: cd.filter((c) => c.effect === 'breaks').length }, topConditions: cd.slice(0, 12).map((c) => `${c.key} ${c.effect} ${c.h}h when ${c.param} in [${c.lo ?? '-inf'}, ${c.hi ?? 'inf'})`), passed: p.length, top: p.sort((a, b) => b.weight - a.weight).slice(0, 12).map((r) => `${r.id}@${r.tf} ${r.h}h [${r.cls}] w${r.weight}`), pairs: pc.length, topPairs: [...pc].sort((a, b) => b.weight - a.weight).slice(0, 12).map((c) => `${c.parts[0]} + ${c.parts[1]} ${c.h}h w${c.weight}${c.bracket?.ok ? ` (TP ${100 * c.bracket.tp}% / SL ${100 * c.bracket.sl}%)` : ''}`) }; })(),

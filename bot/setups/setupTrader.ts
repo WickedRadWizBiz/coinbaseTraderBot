@@ -40,6 +40,7 @@ import type { XgReading } from '../ta/crossGraph';
 import { setupFeatureMap, setupVector, type SetupBars, type TaNetReading } from './features';
 import type { SnnContext } from '../model/featureEngine';
 import { playbook } from '../strategy/playbook';
+import { compensator } from '../strategy/compensator';
 import { DEFAULT_LANES, LaneBook, type Candidate, type LaneBookParams } from './lanes';
 import { SetupModel } from './setupModel';
 import { maintenanceRate, maxSafeNotional, reservedFor, safeShare } from '../risk/liquidation';
@@ -383,10 +384,11 @@ export class SetupTrader {
         if (this.d.params.requireValidation && !this.model?.validated(cand.sig.lane)) return undefined;
         if (this.snnBlocks(cand.sig)) return undefined;
         const cv = this.conviction(cand.sig.asset, cand.sig.dir, now);
-        // Strategy playbook (bot/strategy/playbook.ts): the perps family's weight in this coin's confirmed regime;
-        // waterfall mode (bot/macro/waterfall.ts) leans into alt longs, drops alt shorts and lightens BTC. Together at
-        // most 2x; the lanes' notional caps and the liquidation cap still bind.
-        const pbW = playbook()?.weights(marketContext()?.regimeOf(cand.sig.asset), now).perps;
+        // Strategy weight: the Compensator's ramp for this setup kind on the coin's Librarian reading
+        // (bot/strategy/compensator.ts) when it is on, else the playbook's perps weight in this coin's confirmed regime
+        // (bot/strategy/playbook.ts); waterfall mode (bot/macro/waterfall.ts) leans into alt longs, drops alt shorts and
+        // lightens BTC. Together at most 2x; the lanes' notional caps and the liquidation cap still bind.
+        const pbW = compensator()?.weight(cand.sig.asset, `setup:${cand.sig.kind}`, now)?.w ?? playbook()?.weights(marketContext()?.regimeOf(cand.sig.asset), now).perps;
         const wf = macro()?.policy();
         const wfW = wf ? wf.perpMult(cand.sig.asset, cand.sig.dir) : 1;
         const weight = Math.min(2, (pbW ?? 1) * wfW);

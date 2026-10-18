@@ -44,6 +44,7 @@ import { Vault } from './vault/vault';
 import { readJson, setQuarantineAll } from './util/persist';
 import { championEnv, championPath, markApplied, readChampion, watchChampion } from './strategy/conditioningOverlay';
 import { Playbook, setPlaybook } from './strategy/playbook';
+import { Compensator, setCompensator } from './strategy/compensator';
 import { MacroService, setMacro } from './macro/macroService';
 import { macroSettings } from './macro/macroSeries';
 import { Oms } from './oms/oms';
@@ -413,6 +414,8 @@ async function main(): Promise<void> {
   setMarketContext(marketCtx);
   // Strategy playbook: per coin regime, the weight of the Kalshi and perps families (re-read when the trainer sends a new one).
   setPlaybook(new Playbook(cfg.autoTrain.dir, cfg.playbookApply));
+  // The Compensator: per strategy, a learned ramp on each coin's Librarian reading; replaces the playbook's weight when on.
+  setCompensator(new Compensator(cfg.autoTrain.dir, cfg.compensatorApply));
   // Fractal Alignment Engine and waterfall mode (bot/macro): the 2018-to-now BTC.D cycle on its 2016-2017 parent, the
   // gate latch and the operator's arming switch (DATA_DIR/waterfall.json), and the policy the strategies read.
   const ms = macroSettings(cfg.macro);
