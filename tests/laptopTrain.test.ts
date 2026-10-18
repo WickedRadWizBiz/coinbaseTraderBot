@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
-import { afterRound, championsGone, CONTINUE_STEPS, fullRoundDone, readTrainerState, writeTrainerState, filesToPull, filesToPush, guideText, laptopProfile, LOCAL_ONLY_DIRS, localManifest, parseManifest, roundOutcome, safeServerEnv, scoreboard, Server } from '../research/laptopTrain';
+import { afterRound, championsGone, CONTINUE_STEPS, fullRoundDone, readTrainerState, writeTrainerState, filesToPull, filesToPush, guideText, kalshiSweeps, laptopProfile, readSettings, writeSettings, LOCAL_ONLY_DIRS, localManifest, parseManifest, roundOutcome, safeServerEnv, scoreboard, Server } from '../research/laptopTrain';
 import { dailyStats, type ReadinessFile } from '../research/readiness';
 import { resourcePlan } from '../research/trainerResources';
 import { tmpDir } from './helpers';
@@ -169,4 +169,16 @@ test('trainer state: a full round counts once its history and replay finished (a
   assert.deepEqual(readTrainerState(dir), {});
   writeTrainerState(dir, { lastFullAt: 123 });
   assert.equal(readTrainerState(dir).lastFullAt, 123);
+});
+
+test('Kalshi sweeps: off unless ticked (the kalshi and bot targets leave SWEEP_TARGETS; the others stay)', () => {
+  const off = kalshiSweeps({ SWEEP_TARGETS: 'setups-long,kalshi,bot,setups-vol' }, false);
+  assert.equal(off.SWEEP_TARGETS, 'setups-long,setups-vol');
+  assert.equal(kalshiSweeps({ SWEEP_TARGETS: 'setups-long,kalshi' }, true).SWEEP_TARGETS, 'setups-long,kalshi');
+  const dflt = kalshiSweeps({}, false).SWEEP_TARGETS!.split(',');
+  assert.ok(dflt.length > 0 && !dflt.includes('kalshi') && !dflt.includes('bot') && dflt.includes('setups-long'));
+  const dataDir = tmpDir();
+  assert.equal(readSettings(dataDir).kalshiSweep, false, 'off by default');
+  writeSettings(dataDir, { ...readSettings(dataDir), kalshiSweep: true });
+  assert.equal(readSettings(dataDir).kalshiSweep, true, 'kept for the next run');
 });

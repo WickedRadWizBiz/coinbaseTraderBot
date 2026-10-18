@@ -81,11 +81,11 @@ export class TrainerUi {
   }
 
   /** Start a run (the window's Start button). */
-  start(req: { mode?: string; hours?: number; host?: string; user?: string; key?: string; intensity?: string; skipDataDownload?: boolean; /** Conditioning before it is recommended (the window asked "are you sure?"). */ force?: boolean }): { ok: boolean; error?: string } {
+  start(req: { mode?: string; hours?: number; host?: string; user?: string; key?: string; intensity?: string; skipDataDownload?: boolean; kalshiSweep?: boolean; /** Conditioning before it is recommended (the window asked "are you sure?"). */ force?: boolean }): { ok: boolean; error?: string } {
     if (this.state.phase !== 'idle') return { ok: false, error: 'already training' };
     const hours = Number(req.hours ?? 0);
     if (!(hours >= 0) || hours > 24 * 365) return { ok: false, error: 'hours must be 0 (until it stops by itself) or a number of hours' };
-    const settings: TrainerSettings = { ...this.state.settings, host: req.host?.trim() || undefined, user: req.user?.trim() || 'ubuntu', key: req.key?.trim() || undefined, intensity: asIntensity(req.intensity ?? this.state.settings.intensity) };
+    const settings: TrainerSettings = { ...this.state.settings, host: req.host?.trim() || undefined, user: req.user?.trim() || 'ubuntu', key: req.key?.trim() || undefined, intensity: asIntensity(req.intensity ?? this.state.settings.intensity), kalshiSweep: req.kalshiSweep ?? this.state.settings.kalshiSweep ?? false };
     if (settings.host && !settings.key) return { ok: false, error: 'a server needs its SSH key file' };
     const conditioning = req.mode === 'conditioning';
     if (conditioning) {
