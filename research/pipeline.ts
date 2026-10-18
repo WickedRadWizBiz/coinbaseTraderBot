@@ -1156,7 +1156,20 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         fs.writeFileSync(`${file}.tmp`, JSON.stringify(pb, null, 1));
         fs.renameSync(`${file}.tmp`, file);
         log(`playbook ${pb.enabled ? 'ON' : 'off'}: ${pb.validation?.why}`);
-        return { enabled: pb.enabled, days: pool.length, coinDays: samples.length, regimes: Object.keys(pb.entries).length, validation: pb.validation, entries: Object.fromEntries(Object.entries(pb.entries).map(([k, e]) => [k, `kalshi x${e.kalshi}, perps x${e.perps} (${e.days} coin-days)`])) };
+        // The Compensator (research/compensator.ts): per strategy, a ramp on the Librarian's day-start reading, on the
+        // same coin-days; switched on only if it beats both the static bot and the step playbook on later days.
+        let comp: Record<string, unknown> | string = 'COMPENSATOR=false';
+        if (process.env.COMPENSATOR !== 'false') {
+          const { compSamples, buildCompensator } = await import('./compensator');
+          const { LibIndex, loadLibForecasts } = await import('./librarian');
+          const cf = buildCompensator(compSamples(samples, r.bySetup, new LibIndex(loadLibForecasts(T.historyDir))), samples, { version: pb.version, at: pb.at });
+          const cfile = path.join(A.dir, 'compensator.json');
+          fs.writeFileSync(`${cfile}.tmp`, JSON.stringify(cf, null, 1));
+          fs.renameSync(`${cfile}.tmp`, cfile);
+          log(`compensator ${cf.enabled ? 'ON' : 'off'}: ${cf.validation?.why}`);
+          comp = { enabled: cf.enabled, validation: cf.validation, ramps: Object.fromEntries(Object.entries(cf.ramps).map(([k, e]) => [k, e.why])) };
+        }
+        return { enabled: pb.enabled, days: pool.length, coinDays: samples.length, regimes: Object.keys(pb.entries).length, validation: pb.validation, entries: Object.fromEntries(Object.entries(pb.entries).map(([k, e]) => [k, `kalshi x${e.kalshi}, perps x${e.perps} (${e.days} coin-days)`])), compensator: comp };
       } finally {
         for (const d of Object.values(D.dirs)) fs.rmSync(d, { recursive: true, force: true });
         fs.rmSync(src, { recursive: true, force: true });

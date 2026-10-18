@@ -46,6 +46,7 @@ import { tennisFairInputs, type TennisFairModel } from './tennis/tennisFair';
 import type { TennisScore } from './tennis/tennisModel';
 import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
 import { playbook } from './strategy/playbook';
+import { compensator } from './strategy/compensator';
 import { macro } from './macro/macroService';
 import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
 import { applyTakeGate } from './model/takeModel';
@@ -1528,9 +1529,11 @@ export class Engine {
     if (!fv) return block('fair value unavailable');
     const sess = sessionState(now);
     const sessRisk = sessionRiskFor(cfg.strategy.sessionRisk, sess);
-    // Strategy playbook (bot/strategy/playbook.ts): the Kalshi family's weight in this coin's confirmed regime.
-    const pbW = playbook()?.weights(marketContext()?.regimeOf(m.asset), now);
-    const sizeMult = sessRisk.sizeMult * (pbW?.kalshi ?? 1);
+    // Strategy weight: the Compensator's ramp on the coin's Librarian reading (bot/strategy/compensator.ts) when it is
+    // on, else the playbook's Kalshi weight in this coin's confirmed regime (bot/strategy/playbook.ts).
+    const cmpW = compensator()?.weight(m.asset, 'kalshi', now);
+    const pbW = cmpW ? undefined : playbook()?.weights(marketContext()?.regimeOf(m.asset), now);
+    const sizeMult = sessRisk.sizeMult * (cmpW?.w ?? pbW?.kalshi ?? 1);
     const mid = (bid.price + ask.price) / 2;
     const features = computeFeatureMap({
       now, fairValue: fv.pYes, mid, tauSec, sigmaPerSqrtSec: vol.sigmaPerSqrtSec, referenceSigma: model.params.referenceSigma,
@@ -1785,6 +1788,7 @@ export class Engine {
     if (Number.isFinite(fCapUsd) && fCapUsd < tier.orderFrac * bankroll * sizeMult * kellyScale) plan.notes.push(`optimal f cap: $${fCapUsd.toFixed(2)} per order (${(100 * fCap.cap).toFixed(2)}% of bankroll, ${fCap.rep?.n ?? 0} settled trades)`);
     for (const g of guards) plan.notes.push(g);
     if (pbW && pbW.kalshi !== 1) plan.notes.push(`playbook ${pbW.source}: Kalshi size x${pbW.kalshi}`);
+    if (cmpW && cmpW.w !== 1) plan.notes.push(`compensator ${cmpW.source}: Kalshi size x${cmpW.w.toFixed(2)}`);
     if (sessRisk.applied.length) plan.notes.push(`session risk ${sessRisk.applied.join('+')}: size x${sessRisk.sizeMult}, +${sessRisk.minEdgeAdd} edge`);
     if (huntPlan) plan.place.unshift(huntPlan);
     if (huntMode) plan.notes.push(`hunting: stop ${st.huntStop ?? 'forming'}`);

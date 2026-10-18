@@ -228,3 +228,33 @@ export function PlaybookRow({ s }: { s: any }) {
     </div>
   );
 }
+
+/**
+ * Compensator row: per coin, today's weight of each strategy from its learned ramp on the coin's Librarian reading
+ * (bot/strategy/compensator.ts). Hidden until the trainer has sent one.
+ */
+export function CompensatorRow({ s }: { s: any }) {
+  const c = s?.compensator as { apply: boolean; version: string | null; enabled: boolean; validation: { why: string } | null; coins: Record<string, Record<string, number>> } | null | undefined;
+  if (!c || !c.version) return null;
+  const coins = Object.entries(c.coins ?? {});
+  const state = !c.apply ? 'ignored (COMPENSATOR_APPLY=false)' : c.enabled ? `on (${c.version})` : 'off: failed validation';
+  const short = (k: string) => (k === 'kalshi' ? 'K' : k.replace('setup:', ''));
+  return (
+    <div className="flex flex-col border-b border-crypto-primary border-opacity-50 px-4 py-2 gap-1">
+      <div className="flex justify-between items-center gap-3">
+        <span className="text-[11px] uppercase tracking-widest text-crypto-primary font-bold">Compensator</span>
+        <span className="text-[10px] opacity-70 normal-case truncate" title={c.validation?.why ?? ''}>{state}</span>
+      </div>
+      {c.enabled && coins.length > 0 && (
+        <div className="grid grid-cols-[auto_1fr] gap-x-3 text-[10px] font-mono">
+          {coins.map(([a, w]) => (
+            <div key={a} className="contents">
+              <span className="font-bold">{a}</span>
+              <span className="opacity-80 truncate">{Object.entries(w).map(([k, v]) => `${short(k)} x${v.toFixed(2)}`).join(' · ')}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

@@ -53,6 +53,8 @@ export interface WholeBotResult {
   /** Realised P&L per day, coin and strategy family (by trade, the day it opened; before the combined daily
    *  stop: what each family earned in that coin's regime, for the strategy playbook, research/playbook.ts). */
   byAsset: Record<string, Record<string, { kalshi: number; perps: number }>>;
+  /** The perps part of byAsset split by setup kind (day -> coin -> kind -> usd), for the Compensator (research/compensator.ts). */
+  bySetup: Record<string, Record<string, Record<string, number>>>;
 }
 
 /** Add a window of the given days (any set, not only a split of the recordings) to loaded data. */
@@ -106,13 +108,14 @@ export async function loadWholeBot(o: { recordings: string; history: string; set
 
 export async function runWholeBot(D: WholeBotData, window: string, s: WholeBotSettings, cache?: Map<string, unknown>): Promise<WholeBotResult> {
   const files = D.days[window] ?? [];
-  if (!files.length) return { days: [], kalshiUsd: 0, perpsUsd: 0, totalUsd: 0, dropped: 0, minTotal: 0, byAsset: {} };
+  if (!files.length) return { days: [], kalshiUsd: 0, perpsUsd: 0, totalUsd: 0, dropped: 0, minTotal: 0, byAsset: {}, bySetup: {} };
   const from = Date.parse(`${dayOf(files[0])}T00:00:00Z`), to = Date.parse(`${dayOf(files[files.length - 1])}T00:00:00Z`) + DAY;
   const kalshiUsd0 = s.totalUsd * (1 - s.perpsShare), perpsUsd0 = s.totalUsd * s.perpsShare;
   // Each part's realised P&L events: [time it lands, usd, time the trade opened, part].
   type Ev = { ts: number; usd: number; open: number; part: 'kalshi' | 'perps' };
   const evs: Ev[] = [];
   const byAsset: WholeBotResult['byAsset'] = {};
+  const bySetup: WholeBotResult['bySetup'] = {};
   const addAsset = (open: number, asset: string, part: 'kalshi' | 'perps', usd: number) => {
     const d = new Date(open).toISOString().slice(0, 10);
     const row = ((byAsset[d] ??= {})[asset] ??= { kalshi: 0, perps: 0 });
@@ -144,17 +147,21 @@ export async function runWholeBot(D: WholeBotData, window: string, s: WholeBotSe
   // Perps setup lanes on the walk-forward scores.
   if (perpsUsd0 > 0 && D.setups) {
     const key = `p|${window}|${perpsUsd0.toFixed(2)}|${JSON.stringify(s.book)}`;
-    let trades = cache?.get(key) as Array<[number, number, number, string]> | undefined;
+    let trades = cache?.get(key) as Array<[number, number, number, string, string]> | undefined;
     if (!trades) {
       const { backtestLanes } = await import('./trainSetupModel');
       const { DEFAULT_COSTS } = await import('../bot/setups/exits');
       const ev = D.setups.file.events.filter((e) => e.at >= from && e.at < to).map((e) => ({ ...e, x: new Float32Array(0) }));
       const scores = Float64Array.from(ev, (e) => e.score);
       const out = backtestLanes(D.setups.assets as Parameters<typeof backtestLanes>[0], ev, scores, s.book, DEFAULT_COSTS, perpsUsd0, from, to);
-      trades = out.map((t) => [t.exitTs, t.usd, t.entryTs, t.asset]);
+      trades = out.map((t) => [t.exitTs, t.usd, t.entryTs, t.asset, t.kind.split(' ').pop()!]);
       cache?.set(key, trades);
     }
-    for (const [ts, usd, open, asset] of trades) { evs.push({ ts, usd, open, part: 'perps' }); addAsset(open, asset, 'perps', usd); }
+    for (const [ts, usd, open, asset, kind] of trades) {
+      evs.push({ ts, usd, open, part: 'perps' }); addAsset(open, asset, 'perps', usd);
+      const row = ((bySetup[new Date(open).toISOString().slice(0, 10)] ??= {})[asset] ??= {});
+      row[kind] = (row[kind] ?? 0) + usd;
+    }
   }
 
   // Combined daily loss stop, in time order.
@@ -175,7 +182,7 @@ export async function runWholeBot(D: WholeBotData, window: string, s: WholeBotSe
     if (stop === undefined && s.dailyLossFrac > 0 && row.total <= -s.dailyLossFrac * s.totalUsd) { stopAt.set(d, e.ts); row.stopped = true; }
   }
   const days = [...byDay.values()];
-  return { days, kalshiUsd: days.reduce((a, r) => a + r.kalshi, 0), perpsUsd: days.reduce((a, r) => a + r.perps, 0), totalUsd: days.reduce((a, r) => a + r.total, 0), dropped, minTotal, byAsset };
+  return { days, kalshiUsd: days.reduce((a, r) => a + r.kalshi, 0), perpsUsd: days.reduce((a, r) => a + r.perps, 0), totalUsd: days.reduce((a, r) => a + r.total, 0), dropped, minTotal, byAsset, bySetup };
 }
 
 /** The live settings as a whole-bot setting set. */

@@ -178,6 +178,23 @@ The bot makes money two independent ways from one pot of capital: **Kalshi** con
 - **Live.** The Kalshi weight scales the per-order size cap; the sizing tier stays the ceiling and 0 means no new Kalshi entries. The perps weight scales each setup's risk; the perps daily stop, optimal-f and margin caps still bind. Only new entries change: open positions keep their exits. The bot re-reads `AUTO_TRAIN_DIR/playbook.json` within a minute of a new one arriving, with no restart.
 - **Dashboard.** The *Playbook* row shows whether it is on, and each coin's regime with its Kalshi (K) and perps (P) weights. `PLAYBOOK_APPLY=false` ignores it.
 
+### 12. The Compensator: smooth, learned strategy switching
+
+The playbook switches in steps: one weight per regime. The **Compensator**, built in the same step on the same replay coin-days, gives each strategy its own **ramp** on the Librarian's reading of the coin (`research/compensator.ts`, `bot/strategy/compensator.ts`). The strategies are Kalshi's contracts and each perps setup kind (fade, pullback, burst, breakout, dip, spot pullback), so it also learns which setups work under which TA reading.
+
+- **Readings.** The Librarian's walk-forward forecast at the start of each coin's day: the weights of the trend, revert, breakout and flat families, its net position (signed and its size) and P(regime change). Each forecast comes from a Librarian fitted only on earlier rows.
+- **Hindsight.** For each strategy and coin-day, the label is whether the strategy paid, weighted by how much it made or lost. This is the bar the top-performing allocation sets: ceiling on the paying days, floor on the rest.
+- **Ramp.** A weighted, ridge-shrunk logistic fit gives each strategy's slope `k` and threshold `θ`: `p = sigmoid(k (reading − θ))`. The weight is 1 at even odds (`p = ½`) and moves linearly toward the floor (0) as `p → 0` and toward the ceiling (Kalshi 1, setups 1.5) as `p → 1`.
+  - Each strategy keeps the one reading with the largest deviance drop over its base rate, and only if that drop beats the BIC price `ln n`.
+  - Otherwise the weight stays flat at the shrunk base rate's.
+  - A strategy with fewer than 20 traded coin-days stays at 1.
+- **Gate.** Ramps fitted on the earlier 70% of the days are applied to the later 30%. The Compensator switches on only if that beats **both** the static bot and the step playbook (learned on the same 70%), with a drawdown at most 10% deeper than static and at least 10 validation days. Otherwise `compensator.json` is written with `enabled: false`.
+- **Live.** A coin's reading is taken once per UTC day: the first one after the hourly bar that closed at midnight, as in training. So weights don't flap inside the day.
+  - When the Compensator is on and the coin has today's reading, its weight **replaces** the playbook's: the Kalshi ramp scales the Kalshi size cap, and each setup kind's ramp scales that setup's risk (waterfall mode still multiplies, at most 2x in all).
+  - Otherwise the playbook applies.
+  - `AUTO_TRAIN_DIR/compensator.json` is re-read within a minute; `COMPENSATOR=false` skips fitting it and `COMPENSATOR_APPLY=false` ignores it.
+- **Dashboard.** The *Compensator* row shows whether it is on and, when on, each coin's weights for today.
+
 ## Promotion policy
 
 `AUTO_TRAIN_PROMOTE=always` is the default, and it is hot-swap mode: every freshly trained model goes live in the bot straight away.
@@ -271,6 +288,8 @@ These can't be automated, or deliberately aren't.
 | `COND_INSTANCES` | `24` | Conditioning mode: instances per trial. |
 | `COND_TARGET_USD` / `COND_CULL_FRAC` / `COND_MIN_TIER_C` / `COND_RETRIALS` | `100` / `0.35` / `4` / `3` | Conditioning mode: profit to hold at the end of each window, the cull (fraction of the window's starting cash), the Tier C fill, and the retrials when there is no Elite. |
 | `PLAYBOOK_APPLY` | `true` | The live bot weights the Kalshi and perps families by each coin's regime when the playbook passed validation (`false` = ignore it). |
+| `COMPENSATOR` | `true` | The playbook step also fits the Compensator: per strategy, a ramp on the coin's Librarian reading (`false` = skip it). |
+| `COMPENSATOR_APPLY` | `true` | When the Compensator passed validation, its weights replace the playbook's (`false` = ignore it). |
 | `CONDITIONING_APPLY` | `true` | The live bot runs on the conditioning Elite Champion's settings (`false` = ignore it). |
 | `PIPELINE_STOP_GRACE_SEC` | `45` | On a stop signal (the remote job's time limit, a bot restart, the trainer's Stop) no new step starts, and the step in progress gets this long to finish before the pipeline exits; a second signal exits at once. Finished steps are always saved. A stopped run is not counted as a complete training run. |
 | `TRAIN_PLATEAU_ROUNDS` | `3` | Continuous laptop trainer: stop after this many rounds in a row that improve no model. |
