@@ -56,7 +56,7 @@ jobs:
           Copy-Item python/tanet/net.py, python/tanet/server.py "$out/app/python/tanet/"
           Copy-Item python/xgraph/train.py "$out/app/python/xgraph/"
           Copy-Item python/mlp/fit.py "$out/app/python/mlp/"
-          Copy-Item python/snn/bench.py, python/snn/column.cu, python/snn/column_par.cuh, python/snn/fdlibm.h "$out/app/python/snn/"
+          Copy-Item python/snn/bench.py, python/snn/pool.py, python/snn/column.cu, python/snn/column_par.cuh, python/snn/group.cuh, python/snn/fdlibm.h "$out/app/python/snn/"
           $uvVer = '0.8.17'; $uvZip = 'uv-x86_64-pc-windows-msvc.zip'
           Invoke-WebRequest -UseBasicParsing "https://github.com/astral-sh/uv/releases/download/$uvVer/$uvZip" -OutFile "$env:RUNNER_TEMP/$uvZip"
           Invoke-WebRequest -UseBasicParsing "https://github.com/astral-sh/uv/releases/download/$uvVer/$uvZip.sha256" -OutFile "$env:RUNNER_TEMP/$uvZip.sha256"

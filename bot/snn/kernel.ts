@@ -33,9 +33,10 @@ export const KERNEL_F64 = [
 export const KERNEL_U8 = ['s0', 's1', 's2'] as const;
 export const KERNEL_F32 = ['w1', 'w1s', 'ffW', 'recW', 'recWs', 'U1', 'U0'] as const;
 export const KERNEL_I32 = ['src', 'ffPtr', 'ffCol', 'recPtr', 'recCol', 'inPtr', 'inEdge', 'inPre', 'revPtr', 'revSyn', 'prevSpikes'] as const;
-const SC = ['midAcc', 'lastSpot', 'lastMid', 'sigma2_1', 'sigma2_0', 'surprise', 'surpriseInst', 'errMean', 'errVar', 'errN', 'errZ',
+export const KERNEL_SC = ['midAcc', 'lastSpot', 'lastMid', 'sigma2_1', 'sigma2_0', 'surprise', 'surpriseInst', 'errMean', 'errVar', 'errN', 'errZ',
   'zHighRun', 'pcNormalRun', 'G', 'rateL0', 'rateL1', 'rateE', 'rateI', 'exc', 'inh', 'fSat', 'chBurst', 'deltaFast', 'deltaSlow', 'lastRetBp'] as const;
-const SI = ['pcFrozen', 'nPrev', 'stepsSinceSlow', 'ipCount'] as const;
+export const KERNEL_SI = ['pcFrozen', 'nPrev', 'stepsSinceSlow', 'ipCount'] as const;
+const SC = KERNEL_SC, SI = KERNEL_SI;
 
 type Priv = Record<string, unknown> & {
   p: SnnParams; pop: { name: string; lo: number; hi: number }[]; deltaThr: number[]; dec: Record<string, number>;
@@ -91,6 +92,31 @@ export function kernelArrays(c: Column): TypedArr[] {
     Float64Array.from(SC.map((k) => { const v = x[k]; return typeof v === 'boolean' ? +v : (v as number); })),
     Int32Array.from(SI.map((k) => { const v = x[k]; return typeof v === 'boolean' ? +v : (v as number); })),
   ];
+}
+
+/** The kernel's arrays (kernelArrays' order) back into the column: its fields, scratch and scalars (the GPU pool's state
+ *  of the column, research/snnGpu.ts). */
+export function kernelLoad(c: Column, arrs: TypedArr[]): void {
+  const x = priv(c);
+  const scratch: Record<string, [Scratch, keyof Scratch]> = {
+    s1u: [x.sc1, 'u'], s1t: [x.sc1, 't'], s1e: [x.sc1, 'e'], s1fe: [x.sc1, 'fe'], s1r0: [x.sc1, 'r0'], s1acc: [x.sc1, 'acc'],
+    s0u: [x.sc0, 'u'], s0t: [x.sc0, 't'], s0e: [x.sc0, 'e'], s0fe: [x.sc0, 'fe'], s0r0: [x.sc0, 'r0'], s0acc: [x.sc0, 'acc'],
+  };
+  const names = [...KERNEL_F64, ...KERNEL_U8, ...KERNEL_F32, ...KERNEL_I32];
+  names.forEach((n, i) => {
+    if (n === 'thr' || n === 'popLo' || n === 'popHi') return;
+    const s = scratch[n];
+    const dst = (s ? (s[0] as Record<string, unknown>)[s[1]] : x[n]) as TypedArr;
+    dst.set(arrs[i] as never);
+  });
+  kernelScalars(c, arrs[names.length] as Float64Array, arrs[names.length + 1] as Int32Array);
+}
+
+/** The kernel's scalars (sc, si) into the column's fields. */
+export function kernelScalars(c: Column, sc: ArrayLike<number>, si: ArrayLike<number>): void {
+  const x = priv(c);
+  for (let i = 0; i < SC.length; i++) x[SC[i]] = sc[i];
+  x.pcFrozen = si[0] !== 0; x.nPrev = si[1]; x.stepsSinceSlow = si[2]; x.ipCount = si[3];
 }
 
 /** One call's inputs as the kernel reads them (StepIn): absent values are NaN, an absent reference rate 0. */

@@ -121,3 +121,55 @@ export async function snnKernelBench(o: { recordings: string; outDir: string; py
   o.log(`report: ${json}`);
   return { ok: r.status === 0, report };
 }
+
+/** The GPU tournament engine's check on this computer (research/snnGpu.ts): one member plays a tape of the first `hours` of
+ *  the latest recorded day on the CPU, then groups of members (knobs spread by up to 10%) play it with their columns on the
+ *  GPU; the first two members of each group are checked bit for bit against the CPU. Adds `engine` to the report. */
+export async function snnEngineBench(o: { recordings: string; outDir: string; python: string; hours?: number; stage?: Stage; groups?: number[]; cpu?: boolean; log: (m: string) => void }): Promise<{ ok: boolean; engine?: unknown }> {
+  const days = recordingDayList(o.recordings);
+  if (!days.length) return { ok: false };
+  const { recordSnnTape, playSnnTape } = await import('./snnTape');
+  const { GpuPool, playSnnTapeGpu } = await import('./snnGpu');
+  const { snnHyperOf, withSnnHyper } = await import('../bot/snn/population');
+  const day = days[days.length - 1], prev = days[days.length - 2];
+  const from = Date.parse(`${day}T00:00:00Z`), to = from + (o.hours ?? 2) * 3_600_000;
+  const base = domainParams('crypto', withFlags(DEFAULT_SNN, stageFlags(o.stage ?? 'S5')));
+  const tape = path.join(o.outDir, 'snn-engine-bench.tape');
+  o.log(`GPU tournament engine: recording ${o.hours ?? 2} h of ${day} as a tape...`);
+  await recordSnnTape(o.recordings, tape, { params: base, domain: 'crypto', skipModel: true, from, to, fromDay: prev ?? day, toDay: day });
+  const member = (i: number) => {
+    let s = (i + 1) * 2654435761 >>> 0;
+    const r = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 2 ** 32; };
+    return { params: i === 0 ? base : withSnnHyper(base, Object.fromEntries(Object.entries(snnHyperOf(base)).map(([k, v]) => [k, v * (0.9 + 0.2 * r())]))), domain: 'crypto' as const };
+  };
+  const t0 = performance.now();
+  const ref0 = playSnnTape(tape, member(0));
+  const cpuSec = (performance.now() - t0) / 1000;
+  const ref1 = playSnnTape(tape, member(1));
+  const columns = ref0.net.columns.size, steps = ref0.steps;
+  o.log(`one member on one CPU core: ${cpuSec.toFixed(1)} s (${columns} columns, ${steps} steps)`);
+  const pool = await GpuPool.start({ python: o.python, cpu: o.cpu });
+  const runs: { members: number; seconds: number; memberSecondsPerCpuMember: number; vsOneCore: number; identical: boolean }[] = [];
+  try {
+    o.log(`pool: ${JSON.stringify(await pool.info())}`);
+    for (const m of o.groups ?? [8, 16, 32]) {
+      const members = Array.from({ length: m }, (_, i) => member(i));
+      const g0 = performance.now();
+      const out = await playSnnTapeGpu(tape, members, pool);
+      const sec = (performance.now() - g0) / 1000;
+      const same = (a: typeof ref0, b: typeof ref0) => JSON.stringify(a.rows) === JSON.stringify(b.rows) && JSON.stringify(a.net.serialize()) === JSON.stringify(b.net.serialize());
+      const identical = same(out[0], ref0) && same(out[1], ref1);
+      runs.push({ members: m, seconds: sec, memberSecondsPerCpuMember: sec / m / cpuSec, vsOneCore: (m * cpuSec) / sec, identical });
+      o.log(`${m} members on the GPU: ${sec.toFixed(1)} s, ${((m * cpuSec) / sec).toFixed(1)}x one CPU core${identical ? ', bit-identical to the CPU' : ' -- NOT bit-identical'}`);
+    }
+  } finally {
+    await pool.close();
+    fs.rmSync(tape, { force: true });
+  }
+  const engine = { day, hours: o.hours ?? 2, columns, steps, cpuSecondsPerMember: cpuSec, runs };
+  const json = path.join(o.outDir, 'snn-gpu-bench.json');
+  let report: Record<string, unknown> = {};
+  try { report = JSON.parse(fs.readFileSync(json, 'utf8')); } catch { /* the kernel check did not run */ }
+  fs.writeFileSync(json, JSON.stringify({ ...report, engine }, null, 1));
+  return { ok: runs.every((r) => r.identical), engine };
+}

@@ -182,6 +182,11 @@ NVRTC_OPTIONS = ['--fmad=false', '-prec-div=true', '-prec-sqrt=true', '-ftz=fals
 def nvrtc_compile(arch):
     """column.cu -> (CUBIN, PTX) for sm_<arch> with PyTorch's own NVRTC library. The kernel uses no CUDA headers, so
     unlike torch.cuda._compile_kernel this needs no CUDA toolkit (CUDA_HOME) on the computer."""
+    return nvrtc_compile_source(source(), arch)
+
+
+def nvrtc_compile_source(src, arch):
+    """A CUDA source -> (CUBIN, PTX) for sm_<arch> (the GPU pool compiles column.cu + column_par.cuh + group.cuh)."""
     from torch.cuda._utils import _get_gpu_rtc_library
     lib = _get_gpu_rtc_library()
 
@@ -194,7 +199,7 @@ def nvrtc_compile(arch):
             raise RuntimeError(f'NVRTC error {res}: {msg}')
 
     prog = ctypes.c_void_p()
-    ok(lib.nvrtcCreateProgram(ctypes.byref(prog), source().encode(), b'column.cu', 0, None, None))
+    ok(lib.nvrtcCreateProgram(ctypes.byref(prog), src.encode(), b'column.cu', 0, None, None))
     opts = [f'--gpu-architecture=sm_{arch}'.encode()] + [o.encode() for o in NVRTC_OPTIONS]
     ok(lib.nvrtcCompileProgram(prog, len(opts), (ctypes.c_char_p * len(opts))(*opts)), prog)
     n = ctypes.c_size_t()

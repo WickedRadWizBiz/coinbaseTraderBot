@@ -488,10 +488,13 @@ export async function laptopTrainMain(): Promise<void> {
   if (flag('snn-gpu-bench')) {
     const py = (await torchFor(dataDir, log)).TA_NET_PYTHON;
     if (!py) { log('PyTorch is not set up on this computer: no GPU check'); process.exitCode = 1; return; }
-    const { snnKernelBench } = await import('./snnKernel');
+    const { snnKernelBench, snnEngineBench } = await import('./snnKernel');
     const rec = [argOf('recordings'), path.join(dataDir, 'history-replay'), path.join(dataDir, 'recordings')].find((d) => d && fs.existsSync(d));
-    const r = await snnKernelBench({ recordings: rec ?? path.join(dataDir, 'history-replay'), outDir: dataDir, python: py, hours: Number(argOf('hours') ?? 4), members: argOf('members'), log });
-    process.exitCode = r.ok ? 0 : 1;
+    const recordings = rec ?? path.join(dataDir, 'history-replay');
+    const r = await snnKernelBench({ recordings, outDir: dataDir, python: py, hours: Number(argOf('hours') ?? 4), members: argOf('members'), log });
+    // Then the tournament engine: groups of members playing one tape with their columns on the GPU.
+    const e = await snnEngineBench({ recordings, outDir: dataDir, python: py, hours: 2, log });
+    process.exitCode = r.ok && e.ok ? 0 : 1;
     return;
   }
   const hours = Number(argOf('hours') ?? 0);

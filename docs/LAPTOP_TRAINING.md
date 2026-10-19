@@ -522,6 +522,15 @@ threads and barriers) is checked the same way by the tests. The run prints the t
 next to the tournaments' CPU threads. The report is `trainer-data\snn-gpu-bench.json`. It needs only the trainer's
 PyTorch (no CUDA toolkit). It changes nothing in training.
 
+It then checks the **tournament engine** (`research/snnGpu.ts`): groups of 8, 16 and 32 crypto members (one unchanged,
+the rest with mutated knobs) play two hours of the tape together. Their columns live on the GPU (`python/snn/pool.py`, a
+helper process holding every column's state; `python/snn/group.cuh`, the block kernel for one step of every column of
+the group). Each member's network-level logic (inputs, cross-column terms, readouts, health, the NaN guard) stays in
+TypeScript: per step it sends one small record per column and gets back the column's scalars, mean rates and, when a
+readout or score needs them, its rate vectors. Members 0 and 1 are checked bit for bit (rows and the full saved network)
+against the same members played on the CPU, and the run prints each group's time next to one CPU core. The results go
+under `engine` in the same report. Members with gap junctions, or a mechanism the GPU kernel lacks, stay on the CPU.
+
 A 16-thread laptop with 32 GB on Balanced runs 8 candidates at once instead of 3, one after another (Full speed:
 up to 14, as memory allows).
 
