@@ -9,7 +9,7 @@ exactly the TypeScript network's bits. Then times it for several population size
     block    one thread block per member x column (column_par.cuh snn_columns_run_par): its neurons, branches and
              synapses spread over the block's threads
 
-    python bench.py <trace> [--members 1,8,32,64,128,256] [--threads 128] [--cpu] [--json out.json]
+    python bench.py <trace> [--members 1,8,32,64,128,256] [--threads 64] [--cpu] [--json out.json]
 
 The GPU build uses PyTorch's runtime CUDA compiler (torch.cuda._compile_kernel, NVRTC) with fused multiply-add
 off, so nothing beyond the trainer's PyTorch is needed. --cpu runs the same C source through a shared library
@@ -284,7 +284,7 @@ def main(argv):
     trace = argv[0]
     cpu = '--cpu' in argv
     members = [1, 8, 32, 64, 128, 256]
-    threads = 7 if cpu else 128  # the CPU twin: an odd team, so every loop's split is uneven
+    threads = 7 if cpu else 64  # the CPU twin: an odd team, so every loop's split is uneven; the GPU: 64 measured fastest
     out_json = None
     if '--members' in argv:
         members = [int(x) for x in argv[argv.index('--members') + 1].split(',')]
@@ -319,7 +319,7 @@ def main(argv):
         report['blockRuns'].append(one(m, threads, 'block'))
     if not cpu:
         m = 64 if 64 in members else members[-1]
-        report['blockSizes'] = [dict(one(m, t, f'b{t}'), threads=t) for t in (64, 256) if t != threads]
+        report['blockSizes'] = [dict(one(m, t, f'b{t}'), threads=t) for t in (32, 128) if t != threads]
     if out_json:
         with open(out_json, 'w') as f:
             json.dump(report, f, indent=1)
