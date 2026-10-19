@@ -50,11 +50,15 @@ export class GpuPool {
   private constructor(private readonly proc: ChildProcessWithoutNullStreams) {
     proc.stdout.on('data', (d: Buffer) => { this.buf = Buffer.concat([this.buf, d]); this.drain(); });
     proc.stderr.on('data', (d: Buffer) => { this.err = (this.err + d.toString()).slice(-4000); });
-    proc.on('exit', (code) => {
-      this.dead = new Error(`SNN GPU pool exited (${code}): ${this.err.trim()}`);
+    const gone = (e: Error) => {
+      this.dead ??= e;
       this.waiting?.reject(this.dead);
       this.waiting = undefined;
-    });
+    };
+    proc.on('exit', (code) => gone(new Error(`SNN GPU pool exited (${code}): ${this.err.trim().split('\n').pop() ?? ''}\n${this.err.trim()}`)));
+    // No such Python (spawn fails): the start's first request fails instead of the process.
+    proc.on('error', (e) => gone(new Error(`SNN GPU pool did not start: ${e.message}`)));
+    proc.stdin.on('error', () => { /* the exit above reports it */ });
   }
 
   /** Starts a pool: `python` with PyTorch for the GPU; `cpu` for the C build (tests): serial, or with `threads` the GPU's

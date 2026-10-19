@@ -48,8 +48,8 @@ SNN_FN void parCarve(ParScr *x, char *base, int N, int nFF, int nRec, int T) {
 /** Shared by the team: the decay constants, and the scalars thread 0 hands to the others within a step. */
 typedef struct {
   double kL0, kL1, kL23, k60, k3600, k300, kRho, kSur, kSig, gNmdaE;
-  double n1, n0, s, e1, e0, clip, dt;
-  int learnU, doClip, doSlow, pad_;
+  double n1, n0, s, e1, e0, clip;
+  int learnU, doClip;
 } ParSh;
 
 SNN_FN double ewk(double m, double x, double k) { return m + k * (x - m); }
@@ -72,6 +72,8 @@ SNN_FN void parSetup(const SnnP *p, const Col *c, ParSh *S, ParScr *x) {
   parTranspose(p->N, p->N, c->recPtr, c->recCol, x->recTPtr, x->recTSrc, x->recTEdge, x->tmp);
 }
 
+/** No barrier at the end: each row's r0/acc/r are one thread's, the next call's first barrier orders its
+ *  clip scalar after this call's readers, and colStepPar waits after the predictive-coding step. */
 SNN_FN void pcUpdatePar(float *U, double *r, const double *rTd, int nx, int nr, double *st, double *se, double *sfe, double *r0, double *acc,
     double k1, double k2, double sigma2, double sigmaTd2, double lambda, double priorL2, int learnU, double eMax, ParSh *S, Tc *tc) {
   ONE {
@@ -100,7 +102,6 @@ SNN_FN void pcUpdatePar(float *U, double *r, const double *rTd, int nx, int nr, 
     double td = b * (rTd[j] - r0[j]);
     r[j] = r0[j] + a * acc[j] + td - (k1 / 2) * (2 * priorL2 * r0[j]);
   }
-  pbar(tc);
 }
 
 SNN_FN void pcStepPar(const SnnP *p, Col *c, int frozen, ParSh *S, Tc *tc) {
@@ -170,6 +171,8 @@ SNN_FN void colStepPar(const SnnP *p, Col *c, const StepIn *in, ParSh *S, ParScr
   double *sc = c->sc; int *si = c->si;
   const int nL0 = p->nL0, nL1 = p->nL1, B = p->B, K = p->K, nE = p->nE, N = p->N, nb1 = p->nL1 * p->B, nsyn1 = p->nL1 * p->B * p->K;
   double *I0 = c->I0;
+  // The slow step's counter, read by every thread here (thread 0 writes it only after several barriers).
+  const int slowN = si[SI_stepsSinceSlow] + 1, doSlow = slowN >= p->slowEverySec;
   // ---- 1. inputs -> L0 encoder currents (and the previous step's L2/3 spikes as flags, for the recurrent gather)
   PFOR(i, nL0) I0[i] = 0;
   PFOR(k, N) x->flag[k] = 0;
@@ -200,9 +203,11 @@ SNN_FN void colStepPar(const SnnP *p, Col *c, const StepIn *in, ParSh *S, ParScr
       }
     }
   }
-  PFOR(f, p->nPop) popCode(in->vals[f], c->popLo[f], c->popHi[f], I0 + 8 + f * 8);
-  pbar(tc);
-  PFOR(q, nL0 - 8) I0[8 + q] *= p->popGain;
+  PFOR(f, p->nPop) {
+    double *o = I0 + 8 + f * 8;
+    popCode(in->vals[f], c->popLo[f], c->popHi[f], o);
+    for (int q = 0; q < 8; q++) o[q] *= p->popGain;
+  }
   pbar(tc);
   ONE {
     double deltas = 0;
@@ -333,7 +338,7 @@ SNN_FN void colStepPar(const SnnP *p, Col *c, const StepIn *in, ParSh *S, ParScr
       if (!c->s1[n]) continue;
       c->w1[s] = (float)gatedUpdate(c->w1[s], p->A3plus * c->preR1[c->src[s]] * c->postO2[n], 0, eta, c->gate1[n], p->kappa, p->wMin, p->wMax);
     }
-    pbar(tc);
+    // Each synapse's depression follows its potentiation on the same thread (the same PFOR): no barrier.
     // Each synapse whose source spiked (column.cu walks them source by source through revPtr/revSyn: each once).
     PFOR(s, nsyn1) {
       if (!c->s0[c->src[s]]) continue;
@@ -361,13 +366,10 @@ SNN_FN void colStepPar(const SnnP *p, Col *c, const StepIn *in, ParSh *S, ParScr
   }
   PFOR(n, nL1) { c->postO1[n] += c->s1[n]; c->postO2[n] += c->s1[n]; c->rho1[n] = ewk(c->rho1[n], c->s1[n], S->kRho); }
   PFOR(n, nE) { c->postO1E[n] += c->s2[n]; c->postO2E[n] += c->s2[n]; c->rhoE[n] = ewk(c->rhoE[n], c->s2[n], S->kRho); }
-  ONE {
-    S->doSlow = ++si[SI_stepsSinceSlow] >= p->slowEverySec;
-    if (S->doSlow) { S->dt = si[SI_stepsSinceSlow]; si[SI_stepsSinceSlow] = 0; }
-  }
-  pbar(tc);
-  if (S->doSlow) {
-    double dt = S->dt;
+  ONE si[SI_stepsSinceSlow] = doSlow ? 0 : slowN;
+  // No barrier: the two-speed consolidation touches only weights last written before a barrier (or by this thread).
+  if (doSlow) {
+    double dt = slowN;
     if (p->plasticity) {
       PFOR(s, p->nSyn) twoSpeed(&c->w1[s], &c->w1s[s], p->tauC, p->eps, dt);
       PFOR(i, nE) for (int e = c->recPtr[i]; e < c->recPtr[i + 1]; e++) {
@@ -399,8 +401,7 @@ SNN_FN void colStepPar(const SnnP *p, Col *c, const StepIn *in, ParSh *S, ParScr
   }
   pbar(tc);
   // ---- 8. predictive coding
-  if (p->pc) pcStepPar(p, c, in->frozen, S, tc);
-  pbar(tc);
+  if (p->pc) { pcStepPar(p, c, in->frozen, S, tc); pbar(tc); }
 }
 
 SNN_FN void colResetPar(const SnnP *p, Col *c, Tc *tc) {

@@ -4,11 +4,15 @@
 // C compiler.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_SNN, domainParams, stageFlags, withFlags, type Stage } from '../bot/snn/params';
 import { snnHyperOf, withSnnHyper } from '../bot/snn/population';
 import { GpuPool, gpuUnsupported, playSnnTapeGpu } from '../research/snnGpu';
+import { MemberScheduler } from '../research/snnGpuSched';
+import { runSnnPbt } from '../research/snnPbt';
+import type { SnnReplayJob } from '../research/snnReplayWorker';
 import { playSnnTape, recordSnnTape, type PlayOpts } from '../research/snnTape';
 import { writeSyntheticRecordings } from '../research/synthetic';
 import { tmpDir } from './helpers';
@@ -72,6 +76,59 @@ test("the GPU's own group kernel (every column on a team of threads, persistent 
   } finally {
     await pool.close();
   }
+});
+
+test('a tournament with a GPU group next to its CPU workers ranks and keeps its members exactly as on the CPU', { skip }, async () => {
+  const rec = tmpDir();
+  for (let d = 0; d < 3; d++) writeSyntheticRecordings(rec, { windows: 3, seed: 21 + d, start: Date.parse('2026-02-01T00:00:00Z') + d * 86_400_000 });
+  const opts = { recordings: rec, domain: 'crypto' as const, stage: 'S5' as const, days: ['2026-02-01', '2026-02-02', '2026-02-03'], initDays: 1, evalDays: 1, population: 5 };
+  const ranks = (r: Awaited<ReturnType<typeof runSnnPbt>>) => r.log.map((x) => x.ranking.map((y) => `${y.member}:${y.fitness}`));
+  const cpuState = tmpDir(), gpuState = tmpDir();
+  const cpu = await runSnnPbt({ ...opts, tapeDir: tmpDir(), stateDir: cpuState, workers: 2, gpu: false });
+  const logs: string[] = [];
+  const cc0 = process.env.CC;
+  process.env.CC = cc;
+  try {
+    const gpu = await runSnnPbt({ ...opts, tapeDir: tmpDir(), stateDir: gpuState, workers: 3, gpu: { python: python!, cpu: true }, log: (m) => logs.push(m) });
+    assert.deepEqual(ranks(gpu), ranks(cpu));
+  } finally {
+    if (cc0 === undefined) delete process.env.CC; else process.env.CC = cc0;
+  }
+  assert.ok(logs.some((m) => /SNN GPU group: \d+ member/.test(m)), logs.join('\n'));
+  // The members' saved networks too.
+  for (const f of fs.readdirSync(cpuState).filter((x) => /^m\d+\.json$/.test(x))) assert.equal(fs.readFileSync(path.join(gpuState, f), 'utf8'), fs.readFileSync(path.join(cpuState, f), 'utf8'), f);
+});
+
+test('the scheduler gives a GPU group its share of the waiting members, and falls back to the CPU when the GPU fails', async () => {
+  const job = (i: number, tape = 'a.tape'): SnnReplayJob => ({ dir: '', params: params('crypto', 'S6'), domain: 'crypto', from: 0, to: 1000, fromDay: '', toDay: '', playTape: tape, checkpoint: { i } as never });
+  const ran: string[] = [];
+  const cpuRun = async (j: SnnReplayJob) => { ran.push(`cpu ${(j.checkpoint as never as { i: number }).i}`); return { rows: [], ms: 1000 }; };
+  let fail = false, groups = 0;
+  const gpuRun = async (j: Parameters<MemberScheduler['run']>[0] | { gpuGroup: { members: unknown[] } } | { gpuProbe: unknown }) => {
+    if (fail) throw new Error('device lost');
+    const n = 'gpuGroup' in j ? j.gpuGroup.members.length : 0;
+    groups++;
+    ran.push(`gpu ${n}`);
+    return { outs: Array.from({ length: n }, () => ({ rows: [] })), ms: 250 * n };
+  };
+  const logs: string[] = [];
+  const s = new MemberScheduler({ cpu: { run: cpuRun }, gpu: { run: gpuRun as never }, spec: { python: 'x' }, group: 16, groups: 1, cpuWorkers: 4, speedup: 4, log: (m) => logs.push(m) });
+  // 16 members, 4 CPU workers, a GPU group worth 4 cores: half go to the GPU.
+  await Promise.all(Array.from({ length: 16 }, (_, i) => s.run(job(i))));
+  assert.equal(groups, 1);
+  assert.ok(ran.includes('gpu 8'), ran.join(', '));
+  assert.equal(ran.filter((x) => x.startsWith('cpu')).length, 8);
+  // Measured: a CPU member 1 s, a GPU member 0.25 s -> 4 cores.
+  assert.equal(s.speed(), 4);
+  // Members the GPU cannot run, and a failing GPU: the CPU.
+  ran.length = 0;
+  const gap = params('crypto', 'S5');
+  await s.run({ ...job(99), params: { ...gap, flags: { ...gap.flags, gapJunctions: true } } });
+  assert.deepEqual(ran, ['cpu 99']);
+  fail = true; ran.length = 0;
+  await Promise.all(Array.from({ length: 4 }, (_, i) => s.run(job(i))));
+  assert.equal(ran.length, 4);
+  assert.ok(logs.some((m) => /GPU group failed/.test(m)));
 });
 
 test('members the GPU cannot run are refused (gap junctions, unported mechanisms)', () => {
