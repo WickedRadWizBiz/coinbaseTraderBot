@@ -163,6 +163,8 @@ export class TapeWriter implements SnnTapeSink {
   }
 }
 
+export const TAPE_OP = { STEP: OP_STEP, SCORE: OP_SCORE, SETTLE: OP_SETTLE } as const;
+export type TapeOp = Op;
 type Op =
   | { op: typeof OP_STEP; T: number; inputs: ColumnInput[] }
   | { op: typeof OP_SCORE; T: number; queries: ContractQuery[]; ctx: { pYes: number; mid: number; asset: string }[] }
@@ -252,43 +254,69 @@ export interface PlayOpts {
 /** A replay from its tape: the same network calls and rows as replaySnn with skipModel (p_model = the
  *  fair value). The asset-choice ranking and the training hooks are not on tapes. */
 export function playSnnTape(file: string, o: PlayOpts): SnnReplayResult {
-  const net = new SnnNetwork(o.params, { whitelist: o.whitelist, model: o.snnModel });
-  net.dirLog = [];
-  if (o.checkpoint) net.restore(o.checkpoint, { allowParamChange: o.allowParamChange });
-  if (o.from && net.lastTs > o.from) net.rewind();
-  const pending = new Map<string, Omit<SnnRow, 'y'>[]>();
-  const rows: SnnRow[] = [], stepMs: number[] = [];
-  const volRef = new Map<string, number>();
-  let steps = 0, frozenSteps = 0;
+  const m = new TapeMember(o);
   for (const x of readTape(file)) {
-    if (x.op === OP_SETTLE) {
-      const ps = pending.get(x.ticker) ?? [];
-      pending.delete(x.ticker);
-      if (x.label === undefined) continue;
-      for (const r of ps) rows.push({ ...r, y: x.label });
-      net.settle(x.ticker, x.label ? 'yes' : 'no', x.now);
-    } else if (x.op === OP_STEP) {
+    if (x.op === OP_SETTLE) m.settle(x);
+    else if (x.op === OP_STEP) {
       const t0 = performance.now();
-      net.step(x.T, x.inputs);
-      steps++;
-      if (net.health.freezeLearning) frozenSteps++;
-      stepMs.push(performance.now() - t0);
-    } else {
-      const T = x.T, day = new Date(T).toISOString().slice(0, 10);
-      const at = new Map(x.queries.map((q, i) => [q.ticker, i]));
-      for (const s of net.score(x.queries, T)) {
-        const i = at.get(s.ticker)!, q = x.queries[i], c = x.ctx[i];
-        if (!q.tag) continue;
-        const ref = volRef.get(c.asset) ?? q.sigma;
-        volRef.set(c.asset, ref + (1 - Math.exp(-1 / 1440)) * (q.sigma - ref));
-        const arr = pending.get(s.ticker) ?? [];
-        arr.push({ ticker: s.ticker, eventKey: s.eventKey, column: s.column, ts: T, day, kind: q.kind, pModel: c.pYes, pSnn: s.p, mid: c.mid, surprise: s.surprise, surprise0: s.surprise0, G: s.G, volRatio: q.sigma / ref });
-        pending.set(s.ticker, arr);
-      }
+      m.net.step(x.T, x.inputs);
+      m.stepped(performance.now() - t0);
+    } else m.score(x);
+  }
+  return m.result();
+}
+
+/** One member playing a tape: its network, and the rows it scores (shared by the CPU player and the GPU group,
+ *  research/snnGpu.ts, which steps the networks itself). */
+export class TapeMember {
+  readonly net: SnnNetwork;
+  private readonly pending = new Map<string, Omit<SnnRow, 'y'>[]>();
+  private readonly rows: SnnRow[] = [];
+  private readonly stepMs: number[] = [];
+  private readonly volRef = new Map<string, number>();
+  private steps = 0;
+  private frozenSteps = 0;
+
+  constructor(private readonly o: PlayOpts, net?: SnnNetwork) {
+    this.net = net ?? new SnnNetwork(o.params, { whitelist: o.whitelist, model: o.snnModel });
+    this.net.dirLog = [];
+    if (o.checkpoint) this.net.restore(o.checkpoint, { allowParamChange: o.allowParamChange });
+    if (o.from && this.net.lastTs > o.from) this.net.rewind();
+  }
+
+  settle(x: Extract<Op, { op: typeof OP_SETTLE }>): void {
+    const ps = this.pending.get(x.ticker) ?? [];
+    this.pending.delete(x.ticker);
+    if (x.label === undefined) return;
+    for (const r of ps) this.rows.push({ ...r, y: x.label });
+    this.net.settle(x.ticker, x.label ? 'yes' : 'no', x.now);
+  }
+
+  stepped(ms: number): void {
+    this.steps++;
+    if (this.net.health.freezeLearning) this.frozenSteps++;
+    this.stepMs.push(ms);
+  }
+
+  score(x: Extract<Op, { op: typeof OP_SCORE }>): void {
+    const T = x.T, day = new Date(T).toISOString().slice(0, 10);
+    const at = new Map(x.queries.map((q, i) => [q.ticker, i]));
+    for (const s of this.net.score(x.queries, T)) {
+      const i = at.get(s.ticker)!, q = x.queries[i], c = x.ctx[i];
+      if (!q.tag) continue;
+      const ref = this.volRef.get(c.asset) ?? q.sigma;
+      this.volRef.set(c.asset, ref + (1 - Math.exp(-1 / 1440)) * (q.sigma - ref));
+      const arr = this.pending.get(s.ticker) ?? [];
+      arr.push({ ticker: s.ticker, eventKey: s.eventKey, column: s.column, ts: T, day, kind: q.kind, pModel: c.pYes, pSnn: s.p, mid: c.mid, surprise: s.surprise, surprise0: s.surprise0, G: s.G, volRatio: q.sigma / ref });
+      this.pending.set(s.ticker, arr);
     }
   }
-  if ((o.domain ?? 'crypto') === 'perps') rows.push(...directionRows(net.dirLog));
-  return { rows, net, stepMs, frozenSteps, steps, ranking: [], collected: [] };
+
+  result(): SnnReplayResult {
+    const rows = this.rows.slice();
+    if ((this.o.domain ?? 'crypto') === 'perps') rows.push(...directionRows(this.net.dirLog));
+    return { rows, net: this.net, stepMs: this.stepMs, frozenSteps: this.frozenSteps, steps: this.steps, ranking: [], collected: [] };
+  }
 }
 
 // ---- cache --------------------------------------------------------------------------------------

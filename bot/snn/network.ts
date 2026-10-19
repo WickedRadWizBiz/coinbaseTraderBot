@@ -273,47 +273,68 @@ export class SnnNetwork {
     }
   }
 
-  private sortedColumns(): Column[] {
+  sortedColumns(): Column[] {
     return [...this.columns.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   }
 
   /** Advance the 1 s clock to `now` with the latest inputs (piecewise-constant within the gap). */
   step(now: number, inputs: ColumnInput[]): SnnStepResult {
+    const pl = this.plan(now, inputs);
+    if (pl.n <= 0) return { salience: this.salience, top: this.top, steps: 0 };
+    // Long gap (restart, stall): transient state is stale; weights and tags are kept.
+    if (pl.reset) for (const c of this.columns.values()) c.resetTransient();
+    for (let k = 0; k < pl.n; k++) this.stepOnce(pl.t - (pl.n - 1 - k) * DT_MS, k === 0);
+    this.lastTs = pl.t;
+    return { salience: this.salience, top: this.top, steps: pl.n };
+  }
+
+  /** What step() will do: take the inputs (creating their columns), then the 1 s steps up to `now` (n, ending at t) and
+   *  whether the gap is long enough to reset the columns' transient state first (then one step). */
+  plan(now: number, inputs: ColumnInput[]): { t: number; n: number; reset: boolean } {
     for (const inp of [...inputs].sort((a, b) => (a.key < b.key ? -1 : 1))) if (this.column(inp.key, inp.asset)) this.inputs.set(inp.key, inp);
     const t = Math.floor(now / DT_MS) * DT_MS;
     if (!this.lastTs) this.lastTs = t - DT_MS;
-    let n = Math.floor((t - this.lastTs) / DT_MS);
-    if (n <= 0) return { salience: this.salience, top: this.top, steps: 0 };
-    if (n > this.p.maxCatchUpSteps) {
-      // Long gap (restart, stall): transient state is stale; weights and tags are kept.
-      for (const c of this.columns.values()) c.resetTransient();
-      n = 1;
-    }
-    for (let k = 0; k < n; k++) this.stepOnce(t - (n - 1 - k) * DT_MS, k === 0);
-    this.lastTs = t;
-    return { salience: this.salience, top: this.top, steps: n };
+    const n = Math.floor((t - this.lastTs) / DT_MS);
+    if (n <= 0) return { t, n: 0, reset: false };
+    return n > this.p.maxCatchUpSteps ? { t, n: 1, reset: true } : { t, n, reset: false };
   }
 
   private stepOnce(ts: number, first: boolean): void {
     const cols = this.sortedColumns();
+    const ctx = this.stepContexts(cols);
+    cols.forEach((c, i) => c.step(this.inputOf(c), first, ctx[i]));
+    this.afterColumns(ts, cols);
+    this.nanGuard(ts, cols);
+  }
+
+  /** A column's latest inputs (none yet: its key and asset only). */
+  inputOf(c: Column): ColumnInput { return this.inputs.get(c.key) ?? { key: c.key, asset: c.asset }; }
+
+  /** Each column's cross-column inputs for this step: lateral inhibition from the other columns' mean I rates (previous
+   *  step), the gap partner, the readout's Brier drift, the health reference, the learning freeze. */
+  stepContexts(cols: Column[]): { latInh: number; gapV?: Float64Array; dBrier: number; refRateE?: number; frozen: boolean; training: boolean }[] {
     const F = this.p.flags;
-    // Lateral inhibition source: other columns' mean I rate (previous step), and gap partners.
     const rateI = cols.map((c) => c.meanRateI());
     const totalI = rateI.reduce((a, b) => a + b, 0);
     const byKey = new Map(cols.map((c) => [c.key, c]));
     const frozen = this.health.freezeLearning;
-    cols.forEach((c, i) => {
-      const inp = this.inputs.get(c.key) ?? { key: c.key, asset: c.asset };
+    return cols.map((c, i) => {
       const partner = F.gapJunctions ? byKey.get(gapPartner(c.key)) : undefined;
-      c.step(inp, first, {
+      return {
         latInh: F.lateral ? this.p.wLat * (totalI - rateI[i]) : 0,
         gapV: partner?.v2.subarray(this.p.nE),
         dBrier: this.readouts.get(c.key)!.brierDeterioration(),
         refRateE: this.health.ref?.rateE,
         frozen,
         training: this.training,
-      });
+      };
     });
+  }
+
+  /** Everything after the columns stepped: Wilson-Cowan, proxies, salience, direction heads, readout relaxation, the
+   *  step count and the health monitor. */
+  afterColumns(ts: number, cols: Column[]): void {
+    const F = this.p.flags;
     // Deferred Wilson-Cowan regime pair per asset group, driven by aggregate L0 activity.
     if (F.wilsonCowan) {
       const byAsset = new Map<string, number[]>();
@@ -324,6 +345,7 @@ export class SnnNetwork {
       }
     }
     if (F.proxies) {
+      const byKey = new Map(cols.map((c) => [c.key, c]));
       for (const c of cols) {
         if (!c.key.startsWith('BTC-')) continue;
         const e = byKey.get(gapPartner(c.key));
@@ -346,14 +368,23 @@ export class SnnNetwork {
     if ((this.steps + 1) % this.p.slowEverySec === 0) for (const r of [...this.readouts.values(), ...this.dirReadouts.values()]) r.relax(this.p.slowEverySec);
     this.steps++;
     this.observeHealth(ts, cols);
-    // NaN/Inf anywhere -> restore the last good in-memory checkpoint.
-    if (this.steps % 10 === 0 && cols.some((c) => c.hasNaN())) {
-      if (this.lastGood) { this.restore(JSON.parse(this.lastGood)); this.nanRestores++; }
-      else for (const c of cols) c.resetTransient();
-    } else if (ts - this.lastGoodTs >= 10 * 60_000) {
-      this.lastGood = JSON.stringify(this.serialize());
-      this.lastGoodTs = ts;
-    }
+  }
+
+  /** What the NaN guard does after this step: check every 10th step for NaN/Inf (restore the last good in-memory
+   *  checkpoint, or reset the columns' transient state without one); otherwise snapshot every 10 minutes. */
+  nanAction(ts: number, hasNaN: () => boolean): 'restore' | 'reset' | 'snapshot' | undefined {
+    if (this.steps % 10 === 0 && hasNaN()) return this.lastGood ? 'restore' : 'reset';
+    return ts - this.lastGoodTs >= 10 * 60_000 ? 'snapshot' : undefined;
+  }
+
+  restoreLastGood(): void { this.restore(JSON.parse(this.lastGood!)); this.nanRestores++; }
+  snapshotGood(ts: number): void { this.lastGood = JSON.stringify(this.serialize()); this.lastGoodTs = ts; }
+
+  private nanGuard(ts: number, cols: Column[]): void {
+    const a = this.nanAction(ts, () => cols.some((c) => c.hasNaN()));
+    if (a === 'restore') this.restoreLastGood();
+    else if (a === 'reset') for (const c of cols) c.resetTransient();
+    else if (a === 'snapshot') this.snapshotGood(ts);
   }
 
   /** The calibration slope over the readouts' recent settled pairs, recomputed only when a history changed (a settlement
@@ -628,4 +659,5 @@ function copyInto(dst: TypedArr | undefined, src: TypedArr): void {
 }
 
 export const FEATURE_BASE = N_BASE;
+export const SNN_DT_MS = DT_MS;
 export { logit, sigmoid };
