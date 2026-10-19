@@ -356,11 +356,25 @@ export class SnnNetwork {
     }
   }
 
+  /** The calibration slope over the readouts' recent settled pairs, recomputed only when a history changed (a settlement
+   *  appends, a restore replaces): the same pairs give the same slope, without a 25-iteration fit every second. */
+  private calCache?: { sig: unknown[]; n: number; slope?: number };
+  private calibration(): { n: number; slope?: number } {
+    const ros = [...this.readouts.values()];
+    const sig = ros.flatMap((r) => [r, r.history.length, r.history[r.history.length - 1]]);
+    const c = this.calCache;
+    if (c && c.sig.length === sig.length && c.sig.every((v, i) => v === sig[i])) return c;
+    const hist = ros.flatMap((r) => r.history.slice(-300));
+    const fresh = { sig, n: hist.length, slope: hist.length >= 100 ? calibrationSlope(hist.map((h) => h.p), hist.map((h) => h.y)) : undefined };
+    this.calCache = fresh;
+    return fresh;
+  }
+
   private observeHealth(ts: number, cols: Column[]): void {
     if (!cols.length) return;
     const avg = (f: (c: Column) => number) => cols.reduce((s, c) => s + f(c), 0) / cols.length;
     const inh = avg((c) => c.inh);
-    const hist = [...this.readouts.values()].flatMap((r) => r.history.slice(-300));
+    const cal = this.calibration();
     this.health.observe(ts, {
       rateL0: avg((c) => c.rateL0), rateL1: avg((c) => c.rateL1), rateE: avg((c) => c.rateE), rateI: avg((c) => c.rateI),
       ei: inh > 1e-9 ? avg((c) => c.exc) / inh : NaN,
@@ -370,8 +384,8 @@ export class SnnNetwork {
       G: cols.map((c) => c.G),
       surprise: avg((c) => c.surprise),
       topSalience: this.p.flags.lateral ? this.top : undefined,
-      calSlope: hist.length >= 100 ? calibrationSlope(hist.map((h) => h.p), hist.map((h) => h.y)) : undefined,
-      calN: hist.length,
+      calSlope: cal.slope,
+      calN: cal.n,
     });
   }
 

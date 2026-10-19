@@ -64,6 +64,8 @@ SNN_FN double s_min(double a, double b) { return a < b ? a : b; } // Math.min/Ma
 SNN_FN double s_max(double a, double b) { return a > b ? a : b; }
 SNN_FN int s_finite(double x) { return x == x && x - x == 0.0; }
 SNN_FN double ewma(double m, double x, double tau) { return m + (1 - fd_exp(-1.0 / tau)) * (x - m); }
+/** ewma with its decay constant k = 1 - exp(-1/tau) taken once per step: the same expression, so the same bits. */
+SNN_FN double ewmaK(double m, double x, double k) { return m + k * (x - m); }
 SNN_FN double sigmoid(double x) { return x >= 0 ? 1 / (1 + fd_exp(-x)) : fd_exp(x) / (1 + fd_exp(x)); }
 SNN_FN double nmdaGate(double V, double mg) { return 1 / (1 + (mg / 3.57) * fd_exp(-0.062 * V)); }
 SNN_FN double toMv(double v, double theta) { return -65 + ((v - 0) / (theta - 0)) * (-50 - -65); }
@@ -190,6 +192,7 @@ SNN_FN void colStep(const SnnP *p, Col *c, const StepIn *in) {
   double *sc = c->sc; int *si = c->si;
   const int nL0 = p->nL0, nL1 = p->nL1, B = p->B, K = p->K, nE = p->nE, N = p->N;
   double *I0 = c->I0;
+  const double kL0 = 1 - fd_exp(-1.0 / p->tauRateL0), kL1 = 1 - fd_exp(-1.0 / p->tauRateL1), kL23 = 1 - fd_exp(-1.0 / p->tauRateL23), kRho = 1 - fd_exp(-1.0 / p->tauRho);
   // ---- 1. inputs -> L0 encoder currents
   for (int i = 0; i < nL0; i++) I0[i] = 0;
   sc[SC_lastRetBp] = 0;
@@ -228,7 +231,7 @@ SNN_FN void colStep(const SnnP *p, Col *c, const StepIn *in) {
     int s = v >= p->thetaL0 ? 1 : 0;
     if (s) { v = 0; spk0++; }
     c->v0[i] = v; c->s0[i] = (unsigned char)s;
-    c->rate0[i] = ewma(c->rate0[i], s, p->tauRateL0);
+    c->rate0[i] = ewmaK(c->rate0[i], s, kL0);
   }
   // ---- 3. synaptic currents from L0
   for (int i = 0; i < nL0; i++) {
@@ -271,7 +274,7 @@ SNN_FN void colStep(const SnnP *p, Col *c, const StepIn *in) {
     int s = v >= p->thetaL1 ? 1 : 0;
     if (s) { v = 0; spk1++; }
     c->v1[n] = v; c->s1[n] = (unsigned char)s;
-    c->rate1[n] = ewma(c->rate1[n], s, p->tauRateL1);
+    c->rate1[n] = ewmaK(c->rate1[n], s, kL1);
   }
   // ---- 5. L2/3
   for (int k = 0; k < N; k++) {
@@ -314,7 +317,7 @@ SNN_FN void colStep(const SnnP *p, Col *c, const StepIn *in) {
     if (s) { v = 0; c->prevSpikes[si[SI_nPrev]++] = k; if (isE) spkE++; else spkI++; }
     c->v2[k] = v; c->s2[k] = (unsigned char)s;
     if (isE) c->a2[k] = c->a2[k] * p->dA + s;
-    c->rate2[k] = ewma(c->rate2[k], s, p->tauRateL23);
+    c->rate2[k] = ewmaK(c->rate2[k], s, kL23);
   }
   sc[SC_rateL0] = ewma(sc[SC_rateL0], (double)spk0 / nL0, 300); sc[SC_rateL1] = ewma(sc[SC_rateL1], (double)spk1 / nL1, 300);
   sc[SC_rateE] = ewma(sc[SC_rateE], (double)spkE / nE, 300); sc[SC_rateI] = ewma(sc[SC_rateI], (double)spkI / (N - nE), 300);
@@ -365,8 +368,8 @@ SNN_FN void colStep(const SnnP *p, Col *c, const StepIn *in) {
       }
     }
   }
-  for (int n = 0; n < nL1; n++) { c->postO1[n] += c->s1[n]; c->postO2[n] += c->s1[n]; c->rho1[n] = ewma(c->rho1[n], c->s1[n], p->tauRho); }
-  for (int n = 0; n < nE; n++) { c->postO1E[n] += c->s2[n]; c->postO2E[n] += c->s2[n]; c->rhoE[n] = ewma(c->rhoE[n], c->s2[n], p->tauRho); }
+  for (int n = 0; n < nL1; n++) { c->postO1[n] += c->s1[n]; c->postO2[n] += c->s1[n]; c->rho1[n] = ewmaK(c->rho1[n], c->s1[n], kRho); }
+  for (int n = 0; n < nE; n++) { c->postO1E[n] += c->s2[n]; c->postO2E[n] += c->s2[n]; c->rhoE[n] = ewmaK(c->rhoE[n], c->s2[n], kRho); }
   if (++si[SI_stepsSinceSlow] >= p->slowEverySec) {
     double dt = si[SI_stepsSinceSlow];
     si[SI_stepsSinceSlow] = 0;

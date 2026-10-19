@@ -513,7 +513,7 @@ network's column steps from your replay and runs them on the GPU as many tournam
   column alone, in 64-bit floating point, which a laptop GPU computes at about 1/64 of its 32-bit speed. The first
   report (RTX 5060 laptop) had it at about 1.4 times one CPU core with 64 members, far behind the CPU's threads.
 - **block** (`python/snn/column_par.cuh`, 1 to 256 members): one thread block per member and column. The column's
-  neurons, dendritic branches, synapses and predictive-coding rows are spread over the block's 128 threads, and the
+  neurons, dendritic branches, synapses and predictive-coding rows are spread over the block's 64 threads, and the
   synaptic scatters become gathers in the same order. Sums whose order matters stay on one thread.
 
 Both use the TypeScript's operations in the same order, V8's own exp/log/tanh and no fused multiply-add. Every member
