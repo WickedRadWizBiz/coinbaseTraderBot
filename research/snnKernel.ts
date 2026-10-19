@@ -12,6 +12,7 @@ import { kernelArrays, kernelInput, kernelParams, kernelUnsupported } from '../b
 import { DEFAULT_SNN, domainParams, stageFlags, withFlags, type Stage } from '../bot/snn/params';
 import { recordingDayList } from '../bot/marketdata/recordingFiles';
 import { replaySnn } from './snnReplay';
+import { workerCount } from './workerPool';
 
 const DT = (a: TypedArr) => (a instanceof Float64Array ? 0 : a instanceof Float32Array ? 1 : a instanceof Int32Array ? 2 : 3);
 
@@ -101,15 +102,21 @@ export async function snnKernelBench(o: { recordings: string; outDir: string; py
   const t = await recordKernelTrace(trace, () => replaySnn(o.recordings, { params, domain: 'crypto', skipModel: true, from, to, fromDay: prev ?? day, toDay: day }));
   o.log(`${t.calls} column steps over ${t.columns} columns; TypeScript: ${t.tsUsPerColumnStep.toFixed(1)} us per column step`);
   const json = path.join(o.outDir, 'snn-gpu-bench.json');
-  const r = spawnSync(o.python, [script, trace, '--members', o.members ?? '1,4,8,16,32,64', '--json', json], { stdio: 'inherit', windowsHide: true });
+  const r = spawnSync(o.python, [script, trace, '--members', o.members ?? '1,8,32,64,128,256', '--json', json], { stdio: 'inherit', windowsHide: true });
   fs.rmSync(trace, { force: true });
   if (!fs.existsSync(json)) { o.log(`the GPU check did not finish (exit ${r.status})`); return { ok: false }; }
   const report = { ...JSON.parse(fs.readFileSync(json, 'utf8')), day, hours: o.hours ?? 4, tsUsPerColumnStep: t.tsUsPerColumnStep };
   fs.writeFileSync(json, JSON.stringify(report, null, 1));
-  const runs = (report.runs ?? []) as { members: number; usPerStep: number; identical: boolean }[];
-  for (const x of runs) {
-    const cpu = x.members * t.columns * t.tsUsPerColumnStep;
-    o.log(`${x.members} member(s): GPU ${x.usPerStep.toFixed(0)} us per step vs TypeScript ${cpu.toFixed(0)} us on one core (${(cpu / x.usPerStep).toFixed(1)}x)${x.identical ? '' : ' -- NOT bit-identical'}`);
+  // Against the CPU: one core, and every thread the tournaments use (TRAIN_WORKERS; an estimate: members split evenly).
+  const cores = Math.max(1, workerCount());
+  type Run = { members: number; usPerStep: number; identical: boolean };
+  for (const [kind, runs] of [['thread-per-column kernel', report.runs], [`block kernel (${report.blockThreads} threads per column)`, report.blockRuns]] as const) {
+    if (!runs?.length) continue;
+    o.log(kind + ':');
+    for (const x of runs as Run[]) {
+      const cpu = x.members * t.columns * t.tsUsPerColumnStep, all = cpu / Math.min(cores, x.members);
+      o.log(`  ${x.members} member(s): GPU ${x.usPerStep.toFixed(0)} us per step; CPU ${cpu.toFixed(0)} us on one core (${(cpu / x.usPerStep).toFixed(1)}x), ~${all.toFixed(0)} us on ${Math.min(cores, x.members)} thread(s) (${(all / x.usPerStep).toFixed(1)}x)${x.identical ? '' : ' -- NOT bit-identical'}`);
+    }
   }
   o.log(`report: ${json}`);
   return { ok: r.status === 0, report };
