@@ -56,26 +56,67 @@ SNN_FN StepIn gStepIn(const GRec *r, const double *vals) {
   return in;
 }
 
+/** gSummary for a team: the four sums each on its own thread, each in gSummary's order (so the same bits), and the NaN
+ *  check spread over every thread (whether any value is not finite does not depend on the order). The team's state must be
+ *  complete (after a barrier); x->cnt is free by then. */
+SNN_FN void gSummaryPar(const SnnP *p, const Col *c, int want, double *out, ParScr *x, Tc *tc) {
+  const int nE = p->nE, N = p->N, nL0 = p->nL0, nL1 = p->nL1;
+  for (int j = tc->tid; j < 4; j += tc->T) {
+    double s = 0;
+    if (j == 0) { for (int i = 0; i < nE; i++) s += c->rate2[i]; out[29] = s / nE; }
+    else if (j == 1) { for (int i = nE; i < N; i++) s += c->rate2[i]; out[30] = s / (N - nE); }
+    else if (j == 2) { for (int i = 0; i < nL0; i++) s += c->rate0[i]; out[31] = s / nL0; }
+    else {
+      for (int i = 0; i < nL1; i++) { double y = c->rho1[i] / p->rho0; s += (p->tripP == 2 ? y * y : y) * c->rho1[i]; }
+      for (int i = 0; i < nE; i++) { double y = c->rhoE[i] / p->rho0; s += (p->tripP == 2 ? y * y : y) * c->rhoE[i]; }
+      out[32] = (nL1 + nE) ? s / (nL1 + nE) : 0;
+    }
+  }
+  PFOR(i, SC_COUNT) out[i] = c->sc[i];
+  PFOR(i, SI_COUNT) out[SC_COUNT + i] = c->si[i];
+  if (!(want & WANT_NAN)) { ONE out[33] = -1; return; }
+  int bad = tc->tid == 0 && (!s_finite(c->sc[SC_G]) || !s_finite(c->sc[SC_surprise]));
+#define GNANP(a, n) for (int i = tc->tid; !bad && i < (n); i += tc->T) if (!s_finite((double)(a)[i])) bad = 1;
+  GNANP(c->v0, nL0) GNANP(c->v1, nL1) GNANP(c->v2, N) GNANP(c->w1, p->nSyn) GNANP(c->recW, c->recPtr[N]) GNANP(c->U1, nL1 * nE) GNANP(c->U0, nL0 * nL1) GNANP(c->z1, nL1) GNANP(c->z2, nE)
+#undef GNANP
+  x->cnt[tc->tid] = bad;
+  pbar(tc);
+  ONE {
+    int any = 0;
+    for (int t = 0; t < tc->T; t++) any |= x->cnt[t];
+    out[33] = any;
+  }
+}
+
+/** The column's constants (the running averages' decay constants and the NMDA gate at threshold), kept after its scratch:
+ *  computed once, on the column's first launch, by the same expressions (so the same bits as computing them every step). */
+#define GK 10
+SNN_FN double *gConstsAt(const SnnP *P, const Col *C, char *scratch, int T) {
+  return (double *)(scratch + parScrBytes(P->N, C->ffPtr[P->nL1], C->recPtr[P->N], T));
+}
+
 /** A record's work for a team (a CUDA block, or POSIX threads in group_cpu.c): the column's block-kernel scratch (its
- *  transposed indexes built on first use, `built`), the step or reset spread over the team, then the summary (and the rate
- *  vectors). P, C, S and R are shared by the team. */
+ *  transposed indexes and constants made on first use, `built`), the step or reset spread over the team, then the summary
+ *  (and the rate vectors). P, C, S and R are shared by the team. */
 SNN_FN void gBlock(const SnnP *P, Col *C, ParSh *S, const GRec *R, char *scratch, int *built, const double *vals, double *sum, double *feat, Tc *tc) {
   ParScr x;
   parCarve(&x, scratch, P->N, C->ffPtr[P->nL1], C->recPtr[P->N], tc->T);
   if (tc->tid == 0) {
-    S->kL0 = kOf(P->tauRateL0); S->kL1 = kOf(P->tauRateL1); S->kL23 = kOf(P->tauRateL23);
-    S->k60 = kOf(60); S->k3600 = kOf(3600); S->k300 = kOf(300); S->kRho = kOf(P->tauRho); S->kSur = kOf(P->surpriseTau); S->kSig = kOf(P->pcSigmaLearnTau);
-    S->gNmdaE = nmdaGate(toMv(P->thetaE, P->thetaE), P->mg);
+    double *K = gConstsAt(P, C, scratch, tc->T);
     if (!*built) {
+      K[0] = kOf(P->tauRateL0); K[1] = kOf(P->tauRateL1); K[2] = kOf(P->tauRateL23);
+      K[3] = kOf(60); K[4] = kOf(3600); K[5] = kOf(300); K[6] = kOf(P->tauRho); K[7] = kOf(P->surpriseTau); K[8] = kOf(P->pcSigmaLearnTau);
+      K[9] = nmdaGate(toMv(P->thetaE, P->thetaE), P->mg);
       parTranspose(P->nL1, P->N, C->ffPtr, C->ffCol, x.ffTPtr, x.ffTSrc, x.ffTEdge, x.tmp);
       parTranspose(P->N, P->N, C->recPtr, C->recCol, x.recTPtr, x.recTSrc, x.recTEdge, x.tmp);
       *built = 1;
     }
+    S->kL0 = K[0]; S->kL1 = K[1]; S->kL23 = K[2]; S->k60 = K[3]; S->k3600 = K[4]; S->k300 = K[5]; S->kRho = K[6]; S->kSur = K[7]; S->kSig = K[8]; S->gNmdaE = K[9];
   }
   pbar(tc);
   if (R->kind == 1) { StepIn in = gStepIn(R, vals); colStepPar(P, C, &in, S, &x, tc); }
   else if (R->kind == 2) colResetPar(P, C, tc);
-  if (tc->tid == 0) gSummary(P, C, R->want, sum);
+  gSummaryPar(P, C, R->want, sum, &x, tc);
   if (R->want & WANT_FEAT) {
     PFOR(i, P->nE) feat[i] = C->rate2[i];
     PFOR(i, P->nL1) feat[P->nE + i] = C->rate1[i];
@@ -84,6 +125,7 @@ SNN_FN void gBlock(const SnnP *P, Col *C, ParSh *S, const GRec *R, char *scratch
 }
 
 #ifdef __CUDACC__
+typedef char gWords_[(sizeof(SnnP) % 4 == 0 && sizeof(Col) % 4 == 0 && sizeof(GRec) % 4 == 0) ? 1 : -1];
 /** One block per record: params[r.col], cols[r.col], scratch[r.col], built[r.col]. */
 extern "C" __global__ void snn_group_step(const SnnP *params, Col *cols, char *const *scratch, int *built, const GRec *recs, const double *vals,
     double *sum, double *feat, int featStride, int n) {
@@ -93,7 +135,12 @@ extern "C" __global__ void snn_group_step(const SnnP *params, Col *cols, char *c
   __shared__ GRec R;
   int t = blockIdx.x;
   if (t >= n) return;
-  if (threadIdx.x == 0) { R = recs[t]; P = params[R.col]; C = cols[R.col]; }
+  // The record, then its column's params and state struct, copied word by word by the whole block.
+  for (int i = threadIdx.x; i < (int)(sizeof(GRec) / 4); i += blockDim.x) ((int *)&R)[i] = ((const int *)&recs[t])[i];
+  __syncthreads();
+  const int *ps = (const int *)&params[R.col], *cs = (const int *)&cols[R.col];
+  for (int i = threadIdx.x; i < (int)(sizeof(SnnP) / 4); i += blockDim.x) ((int *)&P)[i] = ps[i];
+  for (int i = threadIdx.x; i < (int)(sizeof(Col) / 4); i += blockDim.x) ((int *)&C)[i] = cs[i];
   __syncthreads();
   Tc tc = { (int)threadIdx.x, (int)blockDim.x, 0 };
   gBlock(&P, &C, &S, &R, scratch[R.col], &built[R.col], vals, sum + (size_t)t * GSUM, feat + (size_t)t * featStride, &tc);

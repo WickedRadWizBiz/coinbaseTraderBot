@@ -118,7 +118,7 @@ class CpuPool:
         for k, o in enumerate(col.offs):
             self.slots[cid * N_SLOTS + k] = base + o
         if self.threads:
-            scr = ctypes.create_string_buffer(scr_bytes(col.N, col.nff, col.nrec, self.threads) + 64)
+            scr = ctypes.create_string_buffer(scr_bytes(col.N, col.nff, col.nrec, self.threads) + 128)
             self.scrs[cid] = scr
             self.scrptrs[cid] = ctypes.addressof(scr)
             self.built[cid] = 0
@@ -188,7 +188,7 @@ class GpuPool:
                 built[:self.cap] = self.d_built
             self.h_params, self.h_slots, self.h_scr, self.d_built, self.cap = hp, hs, hc, built, cap
         mem = t.frombuffer(bytearray(col.blob), dtype=t.uint8).cuda()
-        scr = t.zeros(scr_bytes(col.N, col.nff, col.nrec, self.threads) + 64, dtype=t.uint8, device='cuda')
+        scr = t.zeros(scr_bytes(col.N, col.nff, col.nrec, self.threads) + 128, dtype=t.uint8, device='cuda')
         self.cols[cid], self.mem[cid], self.scr[cid] = col, mem, scr
         self.h_params[cid * self.psize:(cid + 1) * self.psize] = col.params
         base = mem.data_ptr()
@@ -204,23 +204,40 @@ class GpuPool:
             setattr(self, name, b)
         return b
 
+    def _pinned(self, name, nbytes):
+        b = getattr(self, name, None)
+        if b is None or b.numel() < nbytes:
+            b = self.torch.empty(max(64, nbytes * 2), dtype=self.torch.uint8, pin_memory=True)
+            setattr(self, name, b)
+        return b
+
     def step(self, n, recs, vals, stride, feat_wanted=True):
+        # One upload (records and vals staged together in pinned memory), the kernel, one download of the summaries and,
+        # when asked, the rate vectors (laid out right after them), then one wait.
         t = self.torch
-        d_recs = self._buf('_recs', len(recs), t.uint8)
-        d_recs[:len(recs)].copy_(t.frombuffer(bytearray(recs), dtype=t.uint8))
         v = vals or b'\0' * 8
-        d_vals = self._buf('_vals', len(v), t.uint8)
-        d_vals[:len(v)].copy_(t.frombuffer(bytearray(v), dtype=t.uint8))
-        sums = self._buf('_sums', n * GSUM, t.float64)
-        feat = self._buf('_feat', n * stride, t.float64)
+        voff = (len(recs) + 15) & ~15
+        nin = voff + len(v)
+        h_in = self._pinned('_h_in', nin)
+        ctypes.memmove(h_in.data_ptr(), recs, len(recs))
+        ctypes.memmove(h_in.data_ptr() + voff, v, len(v))
+        d_in = self._buf('_d_in', nin, t.uint8)
+        d_in[:nin].copy_(h_in[:nin], non_blocking=True)
+        nsum = n * GSUM
+        d_out = self._buf('_d_out', nsum + n * stride, t.float64)
         t1 = time.perf_counter()
         self.kernel(grid=(n, 1, 1), block=(self.threads, 1, 1),
-                    args=[self.d_params, self.d_slots, self.d_scr, self.d_built, d_recs, d_vals, sums, feat, stride, n])
-        t.cuda.synchronize()
+                    args=[self.d_params, self.d_slots, self.d_scr, self.d_built, d_in[:len(recs)], d_in[voff:nin], d_out[:nsum], d_out[nsum:], stride, n])
+        nout = nsum + (n * stride if feat_wanted else 0)
+        h_out = self._pinned('_h_out', nout * 8)
+        h_out[:nout * 8].copy_(d_out[:nout].view(t.uint8), non_blocking=True)
+        t.cuda.current_stream().synchronize()
         t2 = time.perf_counter()
-        out = host_bytes(sums, n * GSUM * 8), host_bytes(feat, n * stride * 8) if feat_wanted else b''
+        b = ctypes.string_at(h_out.data_ptr(), nout * 8)
+        # upload = staging and queueing the copy; kernel = from the launch to the results in host memory (the transfers
+        # included); download = taking them out of pinned memory.
         self.split = (t1, t2)
-        return out
+        return b[:nsum * 8], b[nsum * 8:]
 
     def get(self, cid):
         return self.cols[cid].arrays_from(host_bytes(self.mem[cid], self.cols[cid].size))
