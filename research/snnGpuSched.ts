@@ -9,9 +9,12 @@
 //
 //   SNN_GPU          auto (default: on when the laptop trainer's PyTorch sees a CUDA GPU), true, or false
 //   SNN_GPU_GROUP    most members in one GPU group (default 16)
-//   SNN_GPU_GROUPS   GPU groups at once, each with its own worker thread and device pool (default 1)
-//   SNN_GPU_SPEEDUP  a GPU group member's speed in CPU cores before one is measured (default 2)
+//   SNN_GPU_GROUPS   GPU groups at once, each with its own worker thread and device pool (default: what SnnGpuBench.cmd
+//                    found best on this computer, trainer-data/snn-gpu-bench.json; else 1)
+//   SNN_GPU_SPEEDUP  a GPU group member's speed in CPU cores before one is measured (default: the bench's, else 2)
 
+import fs from 'fs';
+import path from 'path';
 import { gpuUnsupported } from './snnGpu';
 import type { SnnGpuJob, SnnGpuOut, SnnGpuSpec, SnnReplayJob, SnnReplayOut } from './snnReplayWorker';
 
@@ -25,10 +28,14 @@ export function snnGpuSpec(env: NodeJS.ProcessEnv = process.env): SnnGpuSpec | u
   return python ? { python } : undefined;
 }
 
-/** Group size and how many groups at once (SNN_GPU_GROUP, SNN_GPU_GROUPS). */
-export function snnGpuShape(env: NodeJS.ProcessEnv = process.env): { group: number; groups: number } {
-  const n = (v: string | undefined, d: number) => { const x = Math.floor(Number(v)); return x >= 1 ? x : d; };
-  return { group: n(env.SNN_GPU_GROUP, 16), groups: n(env.SNN_GPU_GROUPS, 1) };
+/** Group size, how many groups at once and the first guess of a GPU member's speed: SNN_GPU_GROUP / SNN_GPU_GROUPS /
+ *  SNN_GPU_SPEEDUP, else what SnnGpuBench.cmd recommended on this computer (DATA_DIR/snn-gpu-bench.json), else 16 / 1 / 2. */
+export function snnGpuShape(env: NodeJS.ProcessEnv = process.env): { group: number; groups: number; speedup: number } {
+  let rec: { groups?: number; group?: number; speedup?: number } = {};
+  try { rec = JSON.parse(fs.readFileSync(path.join(env.DATA_DIR ?? 'data', 'snn-gpu-bench.json'), 'utf8')).engine?.recommend ?? {}; } catch { /* no bench run */ }
+  const n = (v: unknown, d: number) => { const x = Math.floor(Number(v)); return x >= 1 ? x : d; };
+  const sp = Number(env.SNN_GPU_SPEEDUP) || Number(rec.speedup);
+  return { group: n(env.SNN_GPU_GROUP ?? rec.group, 16), groups: n(env.SNN_GPU_GROUPS ?? rec.groups, 1), speedup: sp > 0 ? sp : 2 };
 }
 
 interface Waiting { job: SnnReplayJob; resolve: (o: SnnReplayOut) => void; reject: (e: Error) => void }

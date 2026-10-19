@@ -215,7 +215,9 @@ export async function runSnnPbt(o: {
   log(`${o.domain} SNN tournament (stage ${o.stage}): ${o.days.length} recorded day(s), ${saved ? `continuing (${saved.log.length} rounds so far)` : `fresh population of ${o.population ?? 3}`}; ${rounds.length} round(s) to run${(o.workers ?? 1) > 1 ? `, ${o.workers} members at a time` : ''}`);
   // GPU groups (crypto and perps on tapes): each group's worker thread takes one of the CPU workers' cores.
   const gpuSpec = o.gpu === false || o.domain === 'tennis' || !tapesEnabled() ? undefined : o.gpu ?? snnGpuSpec();
-  const shape = snnGpuShape();
+  // At least one CPU worker stays (the bench's group count may come from a run with more workers).
+  const shape0 = snnGpuShape();
+  const shape = { ...shape0, groups: Math.min(shape0.groups, Math.max(1, (o.workers ?? 1) - 1)) };
   // A group holds several members' networks and rows: its worker gets a bigger heap than one member's (up to 8 GB).
   const heap = Number(process.env.TRAIN_WORKER_HEAP_MB);
   const gpuEnv = heap > 0 ? { ...process.env, TRAIN_WORKER_HEAP_MB: String(Math.min(8192, heap * Math.ceil(shape.group / 4))) } : process.env;
@@ -232,7 +234,7 @@ export async function runSnnPbt(o: {
   }
   const cpuWorkers = gpuPool ? Math.max(1, (o.workers ?? 1) - shape.groups) : o.workers ?? 1;
   const pool = cpuWorkers > 1 || gpuPool ? new WorkerPool<SnnReplayJob, SnnReplayOut>(workerScript('snnReplayWorker'), cpuWorkers) : undefined;
-  const sched = gpuPool && pool ? new MemberScheduler({ cpu: pool, gpu: gpuPool, spec: gpuSpec!, ...shape, cpuWorkers, speedup: Number(process.env.SNN_GPU_SPEEDUP) || undefined, log }) : undefined;
+  const sched = gpuPool && pool ? new MemberScheduler({ cpu: pool, gpu: gpuPool, spec: gpuSpec!, ...shape, cpuWorkers, log }) : undefined;
 
   const known = o.allDays ?? o.days;
   const spanOf = (a: number, to: number): TapeSpan => ({ domain: o.domain, from: a, to, fromDay: known[known.indexOf(dayOf(a)) - 1] ?? dayOf(a), toDay: dayOf(to - 1) });
