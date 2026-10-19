@@ -181,9 +181,10 @@ export async function snnEngineBench(o: { recordings: string; outDir: string; py
       const sec = (performance.now() - g0) / 1000;
       const identical = outs.every((x) => JSON.stringify(x.outs[0].rows) === JSON.stringify(ref0.rows) && JSON.stringify(x.outs[0].checkpoint) === JSON.stringify(ref0.net.serialize()));
       const cpuCores = (k * size * cpuSec) / sec;
-      // Per round, averaged over the groups (µs): the host's network logic, its wait on the pool, and inside the pool the
-      // wait for the host, unpacking, upload, kernel (to its end), download and reply; 'pipe' is the wait the pool's own
-      // work does not explain (the transport, and the processes sharing the CPU and the GPU).
+      // Per round, averaged over the groups (µs): the host's network logic, its wait on the pool, and inside the pool
+      // unpacking, upload (staging the records in pinned memory), kernel (from the launch to the results in host memory,
+      // both transfers included), download (out of pinned memory) and reply; 'pipe' is the wait the pool's own work does
+      // not explain (the transport, and the processes sharing the CPU and the GPU).
       const ps = outs.map((x) => x.prof).filter((x): x is NonNullable<typeof x> => !!x);
       const per = (f: (p: (typeof ps)[number]) => number) => ps.reduce((a, p) => a + f(p) / Math.max(1, p.rounds), 0) / Math.max(1, ps.length);
       const perRoundUs = ps.length ? {
