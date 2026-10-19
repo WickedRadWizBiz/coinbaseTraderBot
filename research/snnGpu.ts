@@ -21,7 +21,10 @@ import type { SnnParams } from '../bot/snn/params';
 import type { SnnReplayResult } from './snnReplay';
 import { readTape, TAPE_OP, TapeMember, type PlayOpts, type TapeOp } from './snnTape';
 
-const OP_ADD = 1, OP_STEP = 2, OP_GET = 3, OP_FREE = 4, OP_INFO = 5, OP_QUIT = 9;
+const OP_ADD = 1, OP_STEP = 2, OP_GET = 3, OP_FREE = 4, OP_INFO = 5, OP_STATS = 6, OP_QUIT = 9;
+
+/** Where the pool's rounds spent their time, in seconds (python/snn/pool.py op 6). */
+export interface PoolStats { rounds: number; idle: number; parse: number; upload: number; kernel: number; download: number; reply: number }
 const GSUM = 34, REC = 64, WANT_NAN = 1, WANT_FEAT = 2;
 const NSC = KERNEL_SC.length, NSI = KERNEL_SI.length;
 
@@ -94,6 +97,9 @@ export class GpuPool {
   }
 
   async info(): Promise<{ backend: string; device: string; threads: number }> { return JSON.parse((await this.request(OP_INFO, Buffer.alloc(0))).toString()); }
+  async stats(): Promise<PoolStats> { return JSON.parse((await this.request(OP_STATS, Buffer.alloc(0))).toString()); }
+  /** The host's side of the rounds: how many, and the ms from sending each to having its reply. */
+  readonly prof = { steps: 0, stepMs: 0 };
 
   /** Uploads a column (its kernel params and arrays); returns its id in the pool. */
   async add(c: Column): Promise<number> {
@@ -112,7 +118,11 @@ export class GpuPool {
   step(n: number, recs: Buffer, vals: Float64Array): Promise<Buffer> {
     const head = Buffer.alloc(4); head.writeUInt32LE(n);
     const nv = Buffer.alloc(4); nv.writeUInt32LE(vals.length);
-    return this.request(OP_STEP, Buffer.concat([head, recs, nv, Buffer.from(vals.buffer, vals.byteOffset, vals.byteLength)]));
+    const t0 = performance.now();
+    return this.request(OP_STEP, Buffer.concat([head, recs, nv, Buffer.from(vals.buffer, vals.byteOffset, vals.byteLength)])).then((b) => {
+      this.prof.steps++; this.prof.stepMs += performance.now() - t0;
+      return b;
+    });
   }
 
   /** A column's arrays in the pool, in kernelArrays' order. */

@@ -169,7 +169,7 @@ export async function snnEngineBench(o: { recordings: string; outDir: string; py
   // group is held back by its thread (every member's network logic), not by the GPU.
   const { WorkerPool, workerScript } = await import('./workerPool');
   const size = 16;
-  const concurrent: { groups: number; members: number; seconds: number; cpuCores: number; netCores: number; identical: boolean }[] = [];
+  const concurrent: { groups: number; members: number; seconds: number; cpuCores: number; netCores: number; identical: boolean; perRoundUs?: Record<string, number> }[] = [];
   for (const k of o.concurrent ?? [1, 2, 3, 4]) {
     const wp = new WorkerPool<import('./snnReplayWorker').SnnGpuJob, import('./snnReplayWorker').SnnGpuOut>(workerScript('snnReplayWorker'), k);
     try {
@@ -181,8 +181,20 @@ export async function snnEngineBench(o: { recordings: string; outDir: string; py
       const sec = (performance.now() - g0) / 1000;
       const identical = outs.every((x) => JSON.stringify(x.outs[0].rows) === JSON.stringify(ref0.rows) && JSON.stringify(x.outs[0].checkpoint) === JSON.stringify(ref0.net.serialize()));
       const cpuCores = (k * size * cpuSec) / sec;
-      concurrent.push({ groups: k, members: k * size, seconds: sec, cpuCores, netCores: cpuCores - k, identical });
+      // Per round, averaged over the groups (µs): the host's network logic, its wait on the pool, and inside the pool the
+      // wait for the host, unpacking, upload, kernel (to its end), download and reply; 'pipe' is the wait the pool's own
+      // work does not explain (the transport, and the processes sharing the CPU and the GPU).
+      const ps = outs.map((x) => x.prof).filter((x): x is NonNullable<typeof x> => !!x);
+      const per = (f: (p: (typeof ps)[number]) => number) => ps.reduce((a, p) => a + f(p) / Math.max(1, p.rounds), 0) / Math.max(1, ps.length);
+      const perRoundUs = ps.length ? {
+        host: per((p) => p.hostMs * 1000), wait: per((p) => p.waitMs * 1000),
+        poolParse: per((p) => p.pool.parse * 1e6), poolUpload: per((p) => p.pool.upload * 1e6), poolKernel: per((p) => p.pool.kernel * 1e6),
+        poolDownload: per((p) => p.pool.download * 1e6), poolReply: per((p) => p.pool.reply * 1e6),
+        pipe: per((p) => p.waitMs * 1000 - (p.pool.parse + p.pool.upload + p.pool.kernel + p.pool.download + p.pool.reply) * 1e6),
+      } : undefined;
+      concurrent.push({ groups: k, members: k * size, seconds: sec, cpuCores, netCores: cpuCores - k, identical, ...(perRoundUs ? { perRoundUs } : {}) });
       o.log(`${k} GPU group(s) of ${size} at once: ${sec.toFixed(1)} s, worth ${cpuCores.toFixed(1)} CPU cores for ${k} thread(s)${identical ? ', bit-identical to the CPU' : ' -- NOT bit-identical'}`);
+      if (perRoundUs) o.log(`  per round (µs): ${Object.entries(perRoundUs).map(([n, v]) => `${n} ${v.toFixed(0)}`).join(', ')}`);
     } catch (e) {
       o.log(`${k} GPU group(s) at once failed: ${(e as Error).message.split('\n')[0]}`);
       break;
