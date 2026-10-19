@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import { DEFAULT_SNN, domainParams, stageFlags, withFlags, type Stage } from '../bot/snn/params';
 import { snnHyperOf, withSnnHyper } from '../bot/snn/population';
 import { GpuPool, gpuUnsupported, playSnnTapeGpu } from '../research/snnGpu';
-import { MemberScheduler } from '../research/snnGpuSched';
+import { MemberScheduler, snnGpuShape } from '../research/snnGpuSched';
 import { runSnnPbt } from '../research/snnPbt';
 import type { SnnReplayJob } from '../research/snnReplayWorker';
 import { playSnnTape, recordSnnTape, type PlayOpts } from '../research/snnTape';
@@ -129,6 +129,14 @@ test('the scheduler gives a GPU group its share of the waiting members, and fall
   await Promise.all(Array.from({ length: 4 }, (_, i) => s.run(job(i))));
   assert.equal(ran.length, 4);
   assert.ok(logs.some((m) => /GPU group failed/.test(m)));
+});
+
+test("the tournaments take their GPU group count from this computer's bench run, unless set", () => {
+  const dir = tmpDir();
+  assert.deepEqual(snnGpuShape({ DATA_DIR: dir }), { group: 16, groups: 1, speedup: 2 });
+  fs.writeFileSync(path.join(dir, 'snn-gpu-bench.json'), JSON.stringify({ engine: { recommend: { groups: 3, group: 16, speedup: 2.9 } } }));
+  assert.deepEqual(snnGpuShape({ DATA_DIR: dir }), { group: 16, groups: 3, speedup: 2.9 });
+  assert.deepEqual(snnGpuShape({ DATA_DIR: dir, SNN_GPU_GROUPS: '2', SNN_GPU_GROUP: '8', SNN_GPU_SPEEDUP: '4' }), { group: 8, groups: 2, speedup: 4 });
 });
 
 test('members the GPU cannot run are refused (gap junctions, unported mechanisms)', () => {

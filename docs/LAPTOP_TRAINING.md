@@ -515,8 +515,9 @@ The group's worker thread takes one of the CPU workers' places. Every member's r
 wherever it played, so the GPU changes how long a round takes, never its result. If the GPU fails, the members go back
 to the CPU for the rest of the tournament. Members with gap junctions, or a mechanism the GPU kernel lacks, always play
 on the CPU. Settings: `SNN_GPU=false` turns it off; `SNN_GPU_GROUP` is the most members in a group (default 16);
-`SNN_GPU_GROUPS` is how many groups run at once, each with its own worker thread (default 1); `SNN_GPU_SPEEDUP` is the
-guess for r before the first group is measured (default 2). The GPU kernels take microseconds and the trainer waits for
+`SNN_GPU_GROUPS` is how many groups run at once, each with its own worker thread (default: what `SnnGpuBench.cmd` found
+best on this computer, else 1); `SNN_GPU_SPEEDUP` is the guess for r before the first group is measured (default: the
+bench's, else 2). The GPU kernels take microseconds and the trainer waits for
 each step's results, so they never queue long work in front of the desktop.
 
 **GPU check for the SNN (prototype).** `SnnGpuBench.cmd` (next to `Train.cmd`; close the trainer first) tests whether
@@ -544,6 +545,12 @@ TypeScript: per step it sends one small record per column and gets back the colu
 readout or score needs them, its rate vectors. Members 0 and 1 are checked bit for bit (rows and the full saved network)
 against the same members played on the CPU, and the run prints each group's time next to one CPU core. The results go
 under `engine` in the same report. Members with gap junctions, or a mechanism the GPU kernel lacks, stay on the CPU.
+
+One group is held back by its own thread, which runs every member's network logic, not by the GPU. On the RTX 5060
+laptop, a group of 16 or 32 members was worth about 3.1 CPU cores, and the GPU was busy only about a quarter of the
+time. So the bench then runs 1, 2, 3 and 4 groups of 16 at once, each in its own worker thread with its own device pool,
+as the tournaments do, and checks them bit for bit too. The tournaments then run the most groups whose last one still
+adds more than a core net of the thread it takes (`engine.recommend` in the report; `SNN_GPU_GROUPS` overrides it).
 
 A 16-thread laptop with 32 GB on Balanced runs 8 candidates at once instead of 3, one after another (Full speed:
 up to 14, as memory allows).

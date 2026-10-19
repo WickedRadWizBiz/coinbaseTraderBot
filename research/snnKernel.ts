@@ -125,7 +125,7 @@ export async function snnKernelBench(o: { recordings: string; outDir: string; py
 /** The GPU tournament engine's check on this computer (research/snnGpu.ts): one member plays a tape of the first `hours` of
  *  the latest recorded day on the CPU, then groups of members (knobs spread by up to 10%) play it with their columns on the
  *  GPU; the first two members of each group are checked bit for bit against the CPU. Adds `engine` to the report. */
-export async function snnEngineBench(o: { recordings: string; outDir: string; python: string; hours?: number; stage?: Stage; groups?: number[]; cpu?: boolean; log: (m: string) => void }): Promise<{ ok: boolean; engine?: unknown }> {
+export async function snnEngineBench(o: { recordings: string; outDir: string; python: string; hours?: number; stage?: Stage; groups?: number[]; concurrent?: number[]; cpu?: boolean; log: (m: string) => void }): Promise<{ ok: boolean; engine?: unknown }> {
   const days = recordingDayList(o.recordings);
   if (!days.length) return { ok: false };
   const { recordSnnTape, playSnnTape } = await import('./snnTape');
@@ -164,12 +164,43 @@ export async function snnEngineBench(o: { recordings: string; outDir: string; py
     }
   } finally {
     await pool.close();
-    fs.rmSync(tape, { force: true });
   }
-  const engine = { day, hours: o.hours ?? 2, columns, steps, cpuSecondsPerMember: cpuSec, runs };
+  // Several groups at once, each in its own worker thread with its own device pool (as the tournaments run them): one
+  // group is held back by its thread (every member's network logic), not by the GPU.
+  const { WorkerPool, workerScript } = await import('./workerPool');
+  const size = 16;
+  const concurrent: { groups: number; members: number; seconds: number; cpuCores: number; netCores: number; identical: boolean }[] = [];
+  for (const k of o.concurrent ?? [1, 2, 3, 4]) {
+    const wp = new WorkerPool<import('./snnReplayWorker').SnnGpuJob, import('./snnReplayWorker').SnnGpuOut>(workerScript('snnReplayWorker'), k);
+    try {
+      const spec = { python: o.python, ...(o.cpu ? { cpu: true } : {}) };
+      // Each worker starts its pool first, so the timing is the groups' play only.
+      await Promise.all(Array.from({ length: k }, () => wp.run({ gpuProbe: spec })));
+      const g0 = performance.now();
+      const outs = await Promise.all(Array.from({ length: k }, () => wp.run({ gpuGroup: { spec, tape, domain: 'crypto', members: Array.from({ length: size }, (_, i) => ({ params: member(i).params, from })) } })));
+      const sec = (performance.now() - g0) / 1000;
+      const identical = outs.every((x) => JSON.stringify(x.outs[0].rows) === JSON.stringify(ref0.rows) && JSON.stringify(x.outs[0].checkpoint) === JSON.stringify(ref0.net.serialize()));
+      const cpuCores = (k * size * cpuSec) / sec;
+      concurrent.push({ groups: k, members: k * size, seconds: sec, cpuCores, netCores: cpuCores - k, identical });
+      o.log(`${k} GPU group(s) of ${size} at once: ${sec.toFixed(1)} s, worth ${cpuCores.toFixed(1)} CPU cores for ${k} thread(s)${identical ? ', bit-identical to the CPU' : ' -- NOT bit-identical'}`);
+    } catch (e) {
+      o.log(`${k} GPU group(s) at once failed: ${(e as Error).message.split('\n')[0]}`);
+      break;
+    } finally {
+      await wp.close();
+    }
+  }
+  fs.rmSync(tape, { force: true });
+  // The tournaments' choice (research/snnGpuSched.ts reads it): the most groups whose last one still adds a core net of the
+  // thread it takes.
+  let best = concurrent[0];
+  for (const c of concurrent.slice(1)) if (best && c.identical && c.netCores > best.netCores + 1) best = c;
+  const recommend = best?.identical ? { groups: best.groups, group: size, speedup: best.cpuCores / best.groups } : undefined;
+  if (recommend) o.log(`tournaments will run ${recommend.groups} GPU group(s) of up to ${size} (a GPU member ≈ ${recommend.speedup.toFixed(1)} CPU cores); SNN_GPU_GROUPS overrides`);
+  const engine = { day, hours: o.hours ?? 2, columns, steps, cpuSecondsPerMember: cpuSec, runs, concurrent, ...(recommend ? { recommend } : {}) };
   const json = path.join(o.outDir, 'snn-gpu-bench.json');
   let report: Record<string, unknown> = {};
   try { report = JSON.parse(fs.readFileSync(json, 'utf8')); } catch { /* the kernel check did not run */ }
   fs.writeFileSync(json, JSON.stringify({ ...report, engine }, null, 1));
-  return { ok: runs.every((r) => r.identical), engine };
+  return { ok: runs.every((r) => r.identical) && concurrent.every((c) => c.identical), engine };
 }
