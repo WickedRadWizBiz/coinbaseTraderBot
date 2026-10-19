@@ -44,7 +44,8 @@ import { assetOfGroup } from './transitions';
 import { geneTraits, type GaGeneration, type GaState } from './genetic';
 import { replaySnn, type SnnRow } from './snnReplay';
 import { playSnnTape, recordSnnTape, TapeCache, tapeEnvSig, tapesEnabled, type TapeSpan } from './snnTape';
-import type { SnnReplayJob, SnnReplayOut } from './snnReplayWorker';
+import { MemberScheduler, snnGpuShape, snnGpuSpec } from './snnGpuSched';
+import type { SnnGpuJob, SnnGpuOut, SnnGpuSpec, SnnReplayJob, SnnReplayOut } from './snnReplayWorker';
 import { WorkerPool, workerCount, workerScript } from './workerPool';
 
 const DAY = 86_400_000;
@@ -173,6 +174,9 @@ export async function runSnnPbt(o: {
   /** Where the members' shared input tapes are kept (research/snnTape.ts; default work/snn-tape/<domain>
    *  next to the state folder; crypto and perps; off with SNN_TAPES=false). */
   tapeDir?: string;
+  /** GPU groups next to the CPU workers (research/snnGpuSched.ts): the device pool to use, false for none (default
+   *  snnGpuSpec: the laptop trainer's PyTorch, when it sees a CUDA GPU). Members on tapes only. */
+  gpu?: SnnGpuSpec | false;
 }): Promise<SnnPbtResult> {
   const log = o.log ?? (() => {});
   const initDays = o.initDays ?? 3, evalDays = o.evalDays ?? 1;
@@ -209,7 +213,26 @@ export async function runSnnPbt(o: {
     ga: saved.ga,
   } : undefined;
   log(`${o.domain} SNN tournament (stage ${o.stage}): ${o.days.length} recorded day(s), ${saved ? `continuing (${saved.log.length} rounds so far)` : `fresh population of ${o.population ?? 3}`}; ${rounds.length} round(s) to run${(o.workers ?? 1) > 1 ? `, ${o.workers} members at a time` : ''}`);
-  const pool = (o.workers ?? 1) > 1 ? new WorkerPool<SnnReplayJob, SnnReplayOut>(workerScript('snnReplayWorker'), o.workers!) : undefined;
+  // GPU groups (crypto and perps on tapes): each group's worker thread takes one of the CPU workers' cores.
+  const gpuSpec = o.gpu === false || o.domain === 'tennis' || !tapesEnabled() ? undefined : o.gpu ?? snnGpuSpec();
+  const shape = snnGpuShape();
+  // A group holds several members' networks and rows: its worker gets a bigger heap than one member's (up to 8 GB).
+  const heap = Number(process.env.TRAIN_WORKER_HEAP_MB);
+  const gpuEnv = heap > 0 ? { ...process.env, TRAIN_WORKER_HEAP_MB: String(Math.min(8192, heap * Math.ceil(shape.group / 4))) } : process.env;
+  let gpuPool = gpuSpec ? new WorkerPool<SnnGpuJob, SnnGpuOut>(workerScript('snnReplayWorker'), shape.groups, gpuEnv) : undefined;
+  if (gpuPool) {
+    try {
+      const { backend } = await gpuPool.run({ gpuProbe: gpuSpec! });
+      log(`${o.domain} SNN tournament: GPU groups of up to ${shape.group} member(s) (${shape.groups} at once, device pool: ${backend}) next to the CPU workers`);
+    } catch (e) {
+      log(`${o.domain} SNN tournament: no GPU groups (${(e as Error).message.split('\n')[0]})`);
+      await gpuPool.close();
+      gpuPool = undefined;
+    }
+  }
+  const cpuWorkers = gpuPool ? Math.max(1, (o.workers ?? 1) - shape.groups) : o.workers ?? 1;
+  const pool = cpuWorkers > 1 || gpuPool ? new WorkerPool<SnnReplayJob, SnnReplayOut>(workerScript('snnReplayWorker'), cpuWorkers) : undefined;
+  const sched = gpuPool && pool ? new MemberScheduler({ cpu: pool, gpu: gpuPool, spec: gpuSpec!, ...shape, cpuWorkers, speedup: Number(process.env.SNN_GPU_SPEEDUP) || undefined, log }) : undefined;
 
   const known = o.allDays ?? o.days;
   const spanOf = (a: number, to: number): TapeSpan => ({ domain: o.domain, from: a, to, fromDay: known[known.indexOf(dayOf(a)) - 1] ?? dayOf(a), toDay: dayOf(to - 1) });
@@ -232,7 +255,8 @@ export async function runSnnPbt(o: {
     // The next round's tape is recorded while this round's members play (on a free worker).
     if (tapes && pool && next) setImmediate(() => void tapes.get(spanOf(next.from, next.to)));
     if (pool) {
-      const r = await pool.run({ dir: o.recordings, params, domain: o.domain, modelPath: o.modelPath, checkpoint: s.cp, from: a, to, fromDay: span.fromDay, toDay: span.toDay, skipModel: true, tennis: o.tennis, playTape: tape });
+      const job: SnnReplayJob = { dir: o.recordings, params, domain: o.domain, modelPath: o.modelPath, checkpoint: s.cp, from: a, to, fromDay: span.fromDay, toDay: span.toDay, skipModel: true, tennis: o.tennis, playTape: tape };
+      const r = sched ? await sched.run(job) : await pool.run(job);
       s.cp = r.checkpoint;
       s.through = to;
       return { rows: r.rows };
@@ -261,7 +285,8 @@ export async function runSnnPbt(o: {
   const assetOf = assetOfGroup([...new Set(transitions.map((t) => t.asset).filter((a): a is string => !!a))]);
   const res = await runPbt<MemberState>({
     base: snnHyperOf(base), spec: SNN_HYPER_SPEC, rounds, seed: o.seed ?? 17, resume, exploreAfterLast: true, restartEvery: o.restartEvery ?? 0, log,
-    population: o.population ?? 3, concurrency: pool ? o.workers : 1, genetic: o.genetic,
+    // With GPU groups every member is handed out at once (the scheduler shares them between the GPU and the CPU workers).
+    population: o.population ?? 3, concurrency: sched ? o.population ?? 3 : pool ? cpuWorkers : 1, genetic: o.genetic,
     // A member that finished the round before a stop is not replayed again when the round resumes.
     ...(o.stateDir ? { memberProgress: fileMemberProgress<MemberState>(path.join(o.stateDir, 'round'), { encode: (s) => s, decode: (x) => x as MemberState }) } : {}),
     hooks: {
@@ -287,7 +312,7 @@ export async function runSnnPbt(o: {
       },
     },
     onRound: ({ members, trials, log: plog, round, ga }) => save(members, trials, plog, round.evalTo, round.index + 1, ga),
-  }).finally(() => pool?.close());
+  }).finally(() => Promise.all([pool?.close(), gpuPool?.close()]));
   if (!rounds.length && resume) Object.assign(res, { members: resume.members, trials: resume.trials, log: resume.log, elite: resume.members.find((m) => m.id === resume.log[resume.log.length - 1]?.ranking[0]?.member) ?? resume.members[0] });
   const dsr = dsrOf(res.elite.record, clusterFor(o.domain), res.trials);
   const pboR = tournamentPbo(res.log), pboOk = pboGate(pboR);

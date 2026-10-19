@@ -505,6 +505,20 @@ shares each day's tape between the two networks. Tapes are reused while their re
 history store and the trainer's code are unchanged; the least recently used are deleted past
 `SNN_TAPE_CACHE_GB` (default 10). `SNN_TAPES=false` turns them off.
 
+**GPU groups in the tournaments.** When the trainer's PyTorch sees a CUDA GPU, the crypto and perps tournaments also
+play members on it (`research/snnGpuSched.ts`). Each round, a group of the members waiting on the round's tape plays it
+together with their columns on the GPU (the tournament engine below), in a worker thread of its own, while the others
+play it one per CPU worker as before. The group takes the share that lets both sides finish together: with Q members
+waiting, C CPU workers and a GPU member worth r CPU cores, about Q·r/(C+r). r is measured on every round (the log
+prints it: `SNN GPU group: 6 member(s) in 41.0 s next to 10 on 7 CPU worker(s); a GPU member ≈ 2.4 CPU core(s)`).
+The group's worker thread takes one of the CPU workers' places. Every member's rows and saved network are the same bits
+wherever it played, so the GPU changes how long a round takes, never its result. If the GPU fails, the members go back
+to the CPU for the rest of the tournament. Members with gap junctions, or a mechanism the GPU kernel lacks, always play
+on the CPU. Settings: `SNN_GPU=false` turns it off; `SNN_GPU_GROUP` is the most members in a group (default 16);
+`SNN_GPU_GROUPS` is how many groups run at once, each with its own worker thread (default 1); `SNN_GPU_SPEEDUP` is the
+guess for r before the first group is measured (default 2). The GPU kernels take microseconds and the trainer waits for
+each step's results, so they never queue long work in front of the desktop.
+
 **GPU check for the SNN (prototype).** `SnnGpuBench.cmd` (next to `Train.cmd`; close the trainer first) tests whether
 the SNN tournaments could run on your GPU without changing a single result. It records a few hours of the crypto
 network's column steps from your replay and runs them on the GPU as many tournament members at once, with two kernels:
