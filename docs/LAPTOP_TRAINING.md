@@ -507,11 +507,20 @@ history store and the trainer's code are unchanged; the least recently used are 
 
 **GPU check for the SNN (prototype).** `SnnGpuBench.cmd` (next to `Train.cmd`; close the trainer first) tests whether
 the SNN tournaments could run on your GPU without changing a single result. It records a few hours of the crypto
-network's column steps from your replay, runs them on the GPU as 1 to 64 tournament members at once
-(`python/snn/column.cu`: one thread per member and column, the TypeScript's operations in the same order, V8's own
-exp/log/tanh, fused multiply-add off), checks every member bit for bit against the TypeScript network and prints
-the time per step next to the TypeScript's. The report is `trainer-data\snn-gpu-bench.json`. It needs only the
-trainer's PyTorch (no CUDA toolkit). It changes nothing in training.
+network's column steps from your replay and runs them on the GPU as many tournament members at once, with two kernels:
+
+- **thread** (`python/snn/column.cu`, up to 64 members): one GPU thread per member and column. Each thread runs a whole
+  column alone, in 64-bit floating point, which a laptop GPU computes at about 1/64 of its 32-bit speed. The first
+  report (RTX 5060 laptop) had it at about 1.4 times one CPU core with 64 members, far behind the CPU's threads.
+- **block** (`python/snn/column_par.cuh`, 1 to 256 members): one thread block per member and column. The column's
+  neurons, dendritic branches, synapses and predictive-coding rows are spread over the block's 128 threads, and the
+  synaptic scatters become gathers in the same order. Sums whose order matters stay on one thread.
+
+Both use the TypeScript's operations in the same order, V8's own exp/log/tanh and no fused multiply-add. Every member
+is checked bit for bit against the TypeScript network; the CPU twin of the block kernel (`python/snn/par_cpu.c`, real
+threads and barriers) is checked the same way by the tests. The run prints the time per step next to one CPU core and
+next to the tournaments' CPU threads. The report is `trainer-data\snn-gpu-bench.json`. It needs only the trainer's
+PyTorch (no CUDA toolkit). It changes nothing in training.
 
 A 16-thread laptop with 32 GB on Balanced runs 8 candidates at once instead of 3, one after another (Full speed:
 up to 14, as memory allows).

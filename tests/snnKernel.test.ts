@@ -1,6 +1,7 @@
 // SNN column kernel (python/snn/column.cu, the GPU prototype): its exp/log/tanh are V8's to the bit, and replaying
 // the TypeScript network's recorded column steps through the kernel (built as C here) ends on exactly the
-// TypeScript state, stage by stage; the GPU benchmark's data layout is checked through the same C (bench.py --cpu).
+// TypeScript state, stage by stage; so does the GPU's team-of-threads kernel (column_par.cuh) on real POSIX threads;
+// the GPU benchmark's data layout is checked through the same C (bench.py --cpu).
 // Skipped where no C compiler (or, for the layout, no Python with numpy) is installed.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -18,7 +19,7 @@ import { tmpDir } from './helpers';
 
 const cc = ['cc', 'gcc', 'clang'].find((c) => spawnSync(c, ['--version']).status === 0);
 const build = (src: string, out: string, extra: string[] = []) => {
-  const r = spawnSync(cc!, ['-O2', '-ffp-contract=off', '-fno-fast-math', ...extra, src, '-o', out, '-lm'], { encoding: 'utf8' });
+  const r = spawnSync(cc!, ['-O2', '-ffp-contract=off', '-fno-fast-math', '-pthread', ...extra, src, '-o', out, '-lm'], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
 };
 
@@ -38,7 +39,7 @@ test('fdlibm.h computes exp, log and tanh exactly as V8 does', { skip: !cc && 'n
   assert.equal(bad, 0);
 });
 
-test('the column kernel replays the TypeScript network bit for bit (crypto S2-S6, perps S6), and so does the GPU layout', { skip: !cc && 'no C compiler' }, async () => {
+test('the column kernel replays the TypeScript network bit for bit (crypto S2-S6, perps S6), and so do the team-of-threads kernel and the GPU layout', { skip: !cc && 'no C compiler' }, async () => {
   const dir = tmpDir(), rec = path.join(dir, 'rec'), bin = path.join(dir, 'parity');
   build(path.resolve('python/snn/parity.c'), bin);
   writeSyntheticRecordings(rec, { windows: 3, seed: 3 });
@@ -51,12 +52,18 @@ test('the column kernel replays the TypeScript network bit for bit (crypto S2-S6
     const r = spawnSync(bin, [trace], { encoding: 'utf8' });
     assert.equal(r.status, 0, `${domain} ${stage}: ${r.stdout}${r.stderr}`);
     assert.match(r.stdout, /bit-identical/);
+    if (stage === 'S6') {
+      // Every neuron, branch and synapse on its own thread (3, so each loop splits unevenly), barriers between phases.
+      const p = spawnSync(bin, [trace, '3'], { encoding: 'utf8' });
+      assert.equal(p.status, 0, `${domain} ${stage} on threads: ${p.stdout}${p.stderr}`);
+      assert.match(p.stdout, /bit-identical/);
+    }
   }
   const numpy = ['python3', 'python'].find((p) => spawnSync(p, ['-c', 'import numpy'], { encoding: 'utf8' }).status === 0);
   if (numpy) {
-    const r = spawnSync(numpy, [path.resolve('python/snn/bench.py'), path.join(dir, 'crypto-S6.bin'), '--cpu', '--members', '1,3'], { encoding: 'utf8', env: { ...process.env, CC: cc } });
+    const r = spawnSync(numpy, [path.resolve('python/snn/bench.py'), path.join(dir, 'crypto-S6.bin'), '--cpu', '--members', '1,3', '--threads', '2'], { encoding: 'utf8', env: { ...process.env, CC: cc } });
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.equal((r.stdout.match(/every member bit-identical/g) ?? []).length, 2);
+    assert.equal((r.stdout.match(/every member bit-identical/g) ?? []).length, 4, 'both kernels, both population sizes');
   }
 });
 

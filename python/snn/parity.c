@@ -1,12 +1,13 @@
 // CPU parity harness for the SNN column kernel: replays a trace written by research/snnKernel.ts
 // (recordKernelTrace) through column.cu compiled as C, then compares every column's final state with the
-// TypeScript network's bit for bit. Build: cc -O2 -ffp-contract=off -fno-fast-math parity.c -lm
-// Usage: parity <trace>   (exit 0 = identical; otherwise prints the first differing array and index)
+// TypeScript network's bit for bit. Build: cc -O2 -ffp-contract=off -fno-fast-math -pthread parity.c -lm
+// Usage: parity <trace> [threads]   (exit 0 = identical; otherwise prints the first differing array and index). With a
+// thread count, every column runs through the GPU's team-of-threads kernel (column_par.cuh) on that many POSIX threads.
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
-#include "column.cu"
+#include "par_cpu.c"
 
 static FILE *f;
 static uint32_t u32(void) { uint32_t x; if (fread(&x, 4, 1, f) != 1) { fprintf(stderr, "trace ends early\n"); exit(2); } return x; }
@@ -19,7 +20,8 @@ static Arr typed(void) { Arr a; a.dt = u32(); a.n = u32(); a.p = malloc(a.n * ES
 #define NSLOTS (sizeof(Col) / sizeof(void *))
 
 int main(int argc, char **argv) {
-  if (argc < 2 || !(f = fopen(argv[1], "rb"))) { fprintf(stderr, "usage: parity <trace>\n"); return 2; }
+  if (argc < 2 || !(f = fopen(argv[1], "rb"))) { fprintf(stderr, "usage: parity <trace> [threads]\n"); return 2; }
+  int T = argc > 2 ? atoi(argv[2]) : 0;
   char magic[4]; if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "SNNK", 4)) { fprintf(stderr, "not a kernel trace\n"); return 2; }
   if (u32() != 1) { fprintf(stderr, "trace version\n"); return 2; }
   uint32_t nc = u32();
@@ -35,19 +37,29 @@ int main(int argc, char **argv) {
   }
   uint32_t calls = u32();
   long spikes[3] = {0, 0, 0};
+  // Threads: each column's calls in order (the columns do not interact: their cross-column inputs are recorded).
+  StepIn **ops = T > 0 ? calloc(nc, sizeof(StepIn *)) : 0;
+  int *nOps = T > 0 ? calloc(nc, sizeof(int)) : 0;
   for (uint32_t q = 0; q < calls; q++) {
     uint32_t op = u32(), c = u32();
-    if (op == 1) { colReset(&P[c], &C[c]); continue; }
-    StepIn in; in.kind = 1; in.pad_ = 0; in.first = i32(); in.frozen = i32();
-    in.price = f64(); in.mid = f64(); in.latInh = f64(); in.dBrier = f64(); in.refRateE = f64();
-    Arr v = typed(); in.vals = (const double *)v.p;
-    Arr g = {0, 0, 0}; if (u32()) g = typed(); in.gapV = (const double *)g.p;
+    StepIn in; memset(&in, 0, sizeof in);
+    if (op == 1) {
+      if (!T) { colReset(&P[c], &C[c]); continue; }
+      in.kind = 2;
+    } else {
+      in.kind = 1; in.first = i32(); in.frozen = i32();
+      in.price = f64(); in.mid = f64(); in.latInh = f64(); in.dBrier = f64(); in.refRateE = f64();
+      Arr v = typed(); in.vals = (const double *)v.p;
+      Arr g = {0, 0, 0}; if (u32()) g = typed(); in.gapV = (const double *)g.p;
+    }
+    if (T) { ops[c] = realloc(ops[c], sizeof(StepIn) * (nOps[c] + 1)); ops[c][nOps[c]++] = in; continue; }
     colStep(&P[c], &C[c], &in);
     for (int i = 0; i < P[c].nL0; i++) spikes[0] += C[c].s0[i];
     for (int i = 0; i < P[c].nL1; i++) spikes[1] += C[c].s1[i];
     for (int i = 0; i < P[c].N; i++) spikes[2] += C[c].s2[i];
-    free(v.p); free(g.p);
+    free((void *)in.vals); free((void *)in.gapV);
   }
+  for (uint32_t c = 0; T && c < nc; c++) par_run_one(&P[c], &C[c], ops[c], 1, 0, 0, nOps[c], T);
   int bad = 0;
   for (uint32_t c = 0; c < nc; c++) {
     void **slot = (void **)&C[c];
