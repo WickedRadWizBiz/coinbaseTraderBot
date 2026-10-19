@@ -23,6 +23,7 @@ import ctypes
 import json
 import os
 import struct
+import time
 import subprocess
 import sys
 import tempfile
@@ -212,9 +213,14 @@ class GpuPool:
         d_vals[:len(v)].copy_(t.frombuffer(bytearray(v), dtype=t.uint8))
         sums = self._buf('_sums', n * GSUM, t.float64)
         feat = self._buf('_feat', n * stride, t.float64)
+        t1 = time.perf_counter()
         self.kernel(grid=(n, 1, 1), block=(self.threads, 1, 1),
                     args=[self.d_params, self.d_slots, self.d_scr, self.d_built, d_recs, d_vals, sums, feat, stride, n])
-        return host_bytes(sums, n * GSUM * 8), host_bytes(feat, n * stride * 8) if feat_wanted else b''
+        t.cuda.synchronize()
+        t2 = time.perf_counter()
+        out = host_bytes(sums, n * GSUM * 8), host_bytes(feat, n * stride * 8) if feat_wanted else b''
+        self.split = (t1, t2)
+        return out
 
     def get(self, cid):
         return self.cols[cid].arrays_from(host_bytes(self.mem[cid], self.cols[cid].size))
@@ -266,6 +272,8 @@ def main(argv):
     pool = CpuPool(threads) if '--cpu' in argv else GpuPool(threads or int(os.environ.get('SNN_GPU_THREADS', '64')))
     fin, fout = sys.stdin.buffer, sys.stdout.buffer
     next_id, stride = 0, 1
+    # Where a round's time goes (op 6): waiting for the host, reading/unpacking, uploading, the kernel, downloading, replying.
+    st = {'rounds': 0, 'idle': 0.0, 'parse': 0.0, 'upload': 0.0, 'kernel': 0.0, 'download': 0.0, 'reply': 0.0}
 
     def reply(b):
         fout.write(struct.pack('<I', len(b)))
@@ -273,10 +281,12 @@ def main(argv):
         fout.flush()
 
     while True:
+        t0 = time.perf_counter()
         try:
             head = read_exact(fin, 5)
         except EOFError:
             return 0
+        ta = time.perf_counter()
         length, op = struct.unpack('<IB', head)
         p = read_exact(fin, length)
         if op == 1:
@@ -300,7 +310,10 @@ def main(argv):
             vals = p[i:i + 8 * nv]
             stride = max(stride, 1)
             wants = [struct.unpack_from('<i', recs, k * REC + 16)[0] for k in range(n)]
+            tb = time.perf_counter()
+            pool.split = None
             sums, feat = pool.step(n, recs, vals, stride, any(w & 2 for w in wants))
+            tc = time.perf_counter()
             out = [sums]
             for k in range(n):
                 cid = struct.unpack_from('<i', recs, k * REC)[0]
@@ -308,6 +321,10 @@ def main(argv):
                     nf = pool.cols[cid].nfeat
                     out.append(feat[k * stride * 8:(k * stride + nf) * 8])
             reply(b''.join(out))
+            td = time.perf_counter()
+            k1, k2 = pool.split or (tb, tc)
+            st['rounds'] += 1; st['idle'] += ta - t0; st['parse'] += tb - ta
+            st['upload'] += k1 - tb; st['kernel'] += k2 - k1; st['download'] += tc - k2; st['reply'] += td - tc
         elif op == 3:
             cid = struct.unpack_from('<i', p, 0)[0]
             reply(pack_arrays(pool.get(cid)))
@@ -316,6 +333,8 @@ def main(argv):
             reply(b'')
         elif op == 5:
             reply(json.dumps({'backend': pool.name, 'device': pool.device, 'threads': pool.threads}).encode())
+        elif op == 6:
+            reply(json.dumps(st).encode())
         elif op == 9:
             reply(b'')
             return 0

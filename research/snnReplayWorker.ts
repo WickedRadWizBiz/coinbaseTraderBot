@@ -13,7 +13,7 @@ import type { SnnCheckpoint, SnnModelFile } from '../bot/snn/network';
 import type { SnnParams } from '../bot/snn/params';
 import type { TennisConfig } from '../bot/config';
 import { replaySnn, type SnnRow } from './snnReplay';
-import { GpuPool, playSnnTapeGpu } from './snnGpu';
+import { GpuPool, playSnnTapeGpu, type PoolStats } from './snnGpu';
 import { playSnnTape, recordSnnTape } from './snnTape';
 
 export interface SnnReplayJob {
@@ -37,7 +37,9 @@ export type SnnGpuJob =
   | { gpuGroup: { spec: SnnGpuSpec; tape: string; domain: 'crypto' | 'perps'; members: { params: SnnParams; checkpoint?: SnnCheckpoint; from: number }[] } }
   | { gpuProbe: SnnGpuSpec };
 /** `ms`: the group's time, the pool's start excluded. */
-export interface SnnGpuOut { outs: SnnReplayOut[]; ms: number; backend?: string }
+export interface SnnGpuOut { outs: SnnReplayOut[]; ms: number; backend?: string; prof?: GroupProf }
+/** A group's time split: the host's (its members' network logic), waiting on the pool, and the pool's own split. */
+export interface GroupProf { rounds: number; hostMs: number; waitMs: number; pool: PoolStats }
 
 const calendar = loadCalendar(path.resolve('params/calendar.json'));
 const models = new Map<string, MetaModel>();
@@ -56,9 +58,14 @@ async function gpuJob(j: SnnGpuJob): Promise<SnnGpuOut> {
   if ('gpuProbe' in j) return { outs: [], ms: 0, backend: (await (await gpuPool(j.gpuProbe)).info()).backend };
   const g = j.gpuGroup;
   const pool = await gpuPool(g.spec);
+  const s0 = await pool.stats(), p0 = { ...pool.prof };
   const t0 = performance.now();
   const rs = await playSnnTapeGpu(g.tape, g.members.map((m) => ({ params: m.params, domain: g.domain, checkpoint: m.checkpoint, allowParamChange: true, from: m.from })), pool);
-  return { outs: rs.map((r) => ({ rows: r.rows, checkpoint: r.net.serialize() })), ms: performance.now() - t0 };
+  const ms = performance.now() - t0;
+  const s1 = await pool.stats();
+  const waitMs = pool.prof.stepMs - p0.stepMs;
+  const d = Object.fromEntries(Object.keys(s1).map((k) => [k, s1[k as keyof PoolStats] - s0[k as keyof PoolStats]])) as unknown as PoolStats;
+  return { outs: rs.map((r) => ({ rows: r.rows, checkpoint: r.net.serialize() })), ms, prof: { rounds: pool.prof.steps - p0.steps, hostMs: ms - waitMs, waitMs, pool: d } };
 }
 
 parentPort?.on('message', async (j: SnnReplayJob | SnnGpuJob) => {
