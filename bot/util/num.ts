@@ -96,6 +96,29 @@ export function stdev(xs: number[]): number {
   return Math.sqrt(xs.reduce((a, b) => a + (b - m) ** 2, 0) / (xs.length - 1));
 }
 
+// Math.max(...xs) and dst.push(...xs) pass every element as a call argument: past about 100k elements that
+// overflows the call stack ("Maximum call stack size exceeded"). These loop instead.
+
+/** Largest f(x) over xs (-Infinity when empty, NaN values skipped). */
+export function maxOf<T>(xs: Iterable<T>, f: (x: T) => number): number {
+  let m = -Infinity;
+  for (const x of xs) { const v = f(x); if (v > m) m = v; }
+  return m;
+}
+
+/** Smallest f(x) over xs (Infinity when empty, NaN values skipped). */
+export function minOf<T>(xs: Iterable<T>, f: (x: T) => number): number {
+  let m = Infinity;
+  for (const x of xs) { const v = f(x); if (v < m) m = v; }
+  return m;
+}
+
+/** Appends every element of src to dst (any length) and returns dst. */
+export function pushAll<T>(dst: T[], src: Iterable<T>): T[] {
+  for (const x of src) dst.push(x);
+  return dst;
+}
+
 /** Standard normal density. */
 export function normPdf(x: number): number {
   return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);

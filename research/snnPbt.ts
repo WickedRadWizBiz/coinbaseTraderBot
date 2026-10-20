@@ -213,8 +213,13 @@ export async function runSnnPbt(o: {
     ga: saved.ga,
   } : undefined;
   log(`${o.domain} SNN tournament (stage ${o.stage}): ${o.days.length} recorded day(s), ${saved ? `continuing (${saved.log.length} rounds so far)` : `fresh population of ${o.population ?? 3}`}; ${rounds.length} round(s) to run${(o.workers ?? 1) > 1 ? `, ${o.workers} members at a time` : ''}`);
-  // GPU groups (crypto and perps on tapes): each group's worker thread takes one of the CPU workers' cores.
-  const gpuSpec = o.gpu === false || o.domain === 'tennis' || !tapesEnabled() ? undefined : o.gpu ?? snnGpuSpec();
+  // GPU groups (crypto and perps on tapes): each group's worker thread takes one of the CPU workers' cores. Chosen by
+  // itself (no `gpu` given), a group needs a population of SNN_GPU_MIN_MEMBERS (default 8): beside the CPU workers a
+  // smaller one gets 1-2 members, worth about the one core it takes (the laptop's 5-member tournaments).
+  const minGpu = Math.max(1, Math.floor(Number(process.env.SNN_GPU_MIN_MEMBERS)) || 8), pop = o.population ?? 3;
+  const autoGpu = o.gpu === undefined ? snnGpuSpec() : undefined;
+  const gpuSpec = o.gpu === false || o.domain === 'tennis' || !tapesEnabled() ? undefined : o.gpu ?? (pop >= minGpu ? autoGpu : undefined);
+  if (autoGpu && !gpuSpec && pop < minGpu && o.domain !== 'tennis' && tapesEnabled()) log(`${o.domain} SNN tournament: no GPU groups (${pop} members; a group pays for its core from ${minGpu}, SNN_GPU_MIN_MEMBERS): every member on the CPU workers`);
   // At least one CPU worker stays (the bench's group count may come from a run with more workers).
   const shape0 = snnGpuShape();
   const shape = { ...shape0, groups: Math.min(shape0.groups, Math.max(1, (o.workers ?? 1) - 1)) };

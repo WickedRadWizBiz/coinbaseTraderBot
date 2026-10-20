@@ -11,6 +11,8 @@
 //
 // Trades that fire together (same group, within clusterMs) count as one independent interaction.
 
+import { maxOf, minOf } from './num';
+
 const DAY = 86_400_000;
 
 /** One trade or position-period result: return as a fraction of capital, cost already subtracted. */
@@ -43,7 +45,7 @@ export function independentInteractions(xs: Interaction[], clusterMs: number): I
 /** Sum of returns per UTC day (days with no trade count as 0 between first and last day). */
 export function dailyReturns(xs: Interaction[], from?: number, to?: number): number[] {
   if (!xs.length && from === undefined) return [];
-  const a = Math.floor((from ?? Math.min(...xs.map((x) => x.ts))) / DAY), b = Math.floor(((to ?? Math.max(...xs.map((x) => x.ts)) + 1) - 1) / DAY);
+  const a = Math.floor((from ?? minOf(xs, (x) => x.ts)) / DAY), b = Math.floor(((to ?? maxOf(xs, (x) => x.ts) + 1) - 1) / DAY);
   const days = new Array(Math.max(0, b - a + 1)).fill(0);
   for (const x of xs) { const k = Math.floor(x.ts / DAY) - a; if (k >= 0 && k < days.length) days[k] += x.ret; }
   return days;

@@ -11,7 +11,7 @@
 import fs from 'fs';
 import path from 'path';
 
-export const DOWNLOAD_STEPS = new Set(['history-seed', 'history', 'history_replay']);
+export const DOWNLOAD_STEPS = new Set(['history-seed', 'history', 'history-index', 'history_replay']);
 
 /** One line on what each step does (the trainer's own phases too). */
 export function explain(step: string): string {
@@ -22,6 +22,7 @@ export function explain(step: string): string {
   if (step === 'starting') return 'Getting ready: reading your settings and the last rounds\' timings.';
   if (step === 'history-seed') return 'Importing the seed price history that ships with the trainer (only once per version).';
   if (step === 'history') return 'Downloading what is missing: Binance price archives, Coinbase candles, the TradingView index series and Kalshi\'s settled contracts. Data already on disk is never downloaded again.';
+  if (step === 'history-index') return 'Fetching the TradingView index series (BTC.D, USDT.D and a few others) that are missing or out of date: a few small requests, also when data downloads are skipped.';
   if (step === 'history_replay') return 'Building the history replay: years of 1-minute prices turned into day-by-day market recordings the networks can trade through.';
   if (step === 'ta_net') return 'TA network tournament: several networks learn from years of hourly candles; the best one\'s settings survive and the winners breed.';
   if (step === 'ta_net_oos') return 'Walking the TA network forward month by month, so the setup scorer trains on honest forecasts it never saw the answers to.';

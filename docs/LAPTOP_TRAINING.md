@@ -19,9 +19,13 @@ model better, it sends the models to the bot, which loads them without a restart
      tournaments, ablations, sweeps; the pipeline's `--sweep-all`). Your models, history and tournaments
      in progress are kept. It takes much longer.
 
-   **Skip data download** (under Start, also used by Start conditioning): nothing is copied from the server and
-   no history is downloaded (the pipeline runs with `--skip history`); training starts at once on the data
-   already here. The models are still sent back to the server afterwards. It is not remembered between sessions.
+   **Skip data download** (under Start, also used by Start conditioning): the server's recordings are not copied
+   and no history is downloaded (the pipeline runs with `--skip history`); training starts at once on the data
+   already here. Two things still happen, because training needs them and they are small: the index series saved
+   on the server (BTC.D, USDT.D and the rest, a few files) are copied, and a series still missing from disk after
+   that is fetched once from TradingView (the `history-index` step; nothing is refreshed, so after the first time
+   training never fetches it). The models are still sent back to the server afterwards. It is not remembered
+   between sessions.
 
    **Kalshi sweeps** (under Start, off by default, remembered): runs the sweeps that replay Kalshi's contracts,
    `sweep-kalshi` and `sweep-bot`. Every setting they try is a full Kalshi backtest over the replay days, so they
@@ -118,7 +122,9 @@ The trainer now sizes itself to the computer (`research/trainerResources.ts`):
   - uses only the plan's CPU threads (`TA_NET_TORCH_THREADS`; the math libraries under it get the same).
 - **A record.** Once a minute, `trainer-data\resources.log` records free memory, the trainer's own memory, the
   threads in use and why. If the computer freezes, crashes or loses power during a run, the next start says
-  so in the window, with the last readings before it happened.
+  so in the window, with the last readings before it happened. The run's own log,
+  `trainer-data\models\logs\pipeline-laptop-<start>.log`, has every step's output and the trainer's own lines
+  (`[trainer ...]`: copies from and to the server, the PyTorch and TradingView setup, round results).
 
 **If it still freezes:** choose Gentle, and look at the last lines of `resources.log` from before the freeze.
 - Free memory falling to a few hundred MB: memory is the cause. Close other heavy programs, or lower
@@ -394,7 +400,7 @@ too:
 **Where the daily history comes from.**
 - **Fetching:** the history step's TradingView fill (tvdatafeed) gets 5,000 daily bars per series in one request: BTC.D back to 2013 and USDT.D back to 2015.
 - **Coverage rule:** both must reach back to 2016 (the Fractal Alignment Engine's parent window, and the same years for the USDT.D leg). A store that starts later, for example one imported from 2018, gets the full backfill. That backfill is asked at most weekly, in case TradingView itself starts later.
-- **Where they're kept:** on the laptop, in `trainer-data\history\tradingview\`. The server's daily training runs the same fill with its own tvdatafeed and keeps its own copy, which the live bot reads. Nothing is copied between them.
+- **Where they're kept:** on the laptop, in `trainer-data\history\tradingview\`. The server's daily training runs the same fill with its own tvdatafeed and keeps its own copy, which the live bot reads. The trainer copies the server's copy down with the rest of its history (also with *Skip data download*: the index series alone), so a laptop connected to the server never has to fetch them; nothing goes from the laptop to the server.
 
 How the replay rebuilds them, as the live bot does (live, CoinGecko's market caps anchor Binance's
 prices):
@@ -514,7 +520,9 @@ prints it: `SNN GPU group: 6 member(s) in 41.0 s next to 10 on 7 CPU worker(s); 
 The group's worker thread takes one of the CPU workers' places. Every member's rows and saved network are the same bits
 wherever it played, so the GPU changes how long a round takes, never its result. If the GPU fails, the members go back
 to the CPU for the rest of the tournament. Members with gap junctions, or a mechanism the GPU kernel lacks, always play
-on the CPU. Settings: `SNN_GPU=false` turns it off; `SNN_GPU_GROUP` is the most members in a group (default 16);
+on the CPU. A tournament of fewer than `SNN_GPU_MIN_MEMBERS` members (default 8) plays every member on the CPU: beside
+the CPU workers its group would get 1-2 members, worth about the one core its worker thread takes (your laptop's
+5-member tournaments). Settings: `SNN_GPU=false` turns it off; `SNN_GPU_GROUP` is the most members in a group (default 16);
 `SNN_GPU_GROUPS` is how many groups run at once, each with its own worker thread (default: what `SnnGpuBench.cmd` found
 best on this computer, else 1); `SNN_GPU_SPEEDUP` is the guess for r before the first group is measured (default: the
 bench's, else 2). The GPU kernels take microseconds and the trainer waits for

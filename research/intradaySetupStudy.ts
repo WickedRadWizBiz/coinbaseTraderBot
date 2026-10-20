@@ -15,6 +15,7 @@
 import path from 'path';
 import { loadSeries } from './history/candles';
 import { atr, bollinger, ema, macd, rsi, type Candle } from '../bot/ta/indicators';
+import { pushAll } from '../bot/util/num';
 
 const ASSETS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
 const COST = 0.0007; // per side: 5 bp fee + 2 bp slippage
@@ -119,8 +120,8 @@ function main(HIST: string): void {
       const all: Trade[] = [], ctl: Trade[] = [];
       data.forEach((cs, k) => {
         const sg = signals(cs, kind);
-        all.push(...simulate(cs, sg));
-        ctl.push(...simulate(cs, randomControl(cs, sg, kind, 17 + k)));
+        pushAll(all, simulate(cs, sg));
+        pushAll(ctl, simulate(cs, randomControl(cs, sg, kind, 17 + k)));
       });
       console.log(`\n=== ${tf} ${kind} (costs ${(COST * 1e4).toFixed(0)} bp a side) ===`);
       console.log(`  setup   2017-23: ${stats(all.filter((t) => t.ts < SPLIT))}`);

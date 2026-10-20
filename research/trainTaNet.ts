@@ -43,6 +43,7 @@ import {
   cullNorm,
 } from '../bot/ta/taNet';
 import { coverageFloor as sharedCoverageFloor } from '../bot/util/fitness';
+import { maxOf, minOf } from '../bot/util/num';
 import { dsrOf, fitnessOf, independentInteractions, regimeReport, regimesIn, type FitnessReport, type Interaction } from './fitness';
 import { fileMemberProgress, runPbt, walkForwardRounds, type GeneticOpts, type Hyper, type MutationSpec, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
 import { DEFAULT_TRANSITION, pboGate, tournamentPbo, transitionPenalty, type Transition } from './selection';
@@ -1171,7 +1172,7 @@ async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: 
   const regimes = regimeReport(elite.record, H, minPerRegime);
   const covered = regimes.filter((g) => {
     const def = elite.record.filter((x) => regimesIn(x.ts, x.ts + 1).includes(g.regime));
-    return def.length && (Math.max(...def.map((x) => x.ts)) - Math.min(...def.map((x) => x.ts))) >= 60 * DAY;
+    return def.length && (maxOf(def, (x) => x.ts) - minOf(def, (x) => x.ts)) >= 60 * DAY;
   });
   // Probability of backtest overfitting on the member x round fitness matrix: the tournament's selection must carry
   // out of sample (PBO < pboMax), on top of the DSR and regime hurdles.

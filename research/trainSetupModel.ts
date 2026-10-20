@@ -19,6 +19,7 @@
 //    deployed model is refit on every event with the same settings.
 
 import { optimalF, recencyWeight } from '../bot/strategy/optimalF';
+import { maxOf, pushAll } from '../bot/util/num';
 import { taEngine } from '../bot/ta/talib';
 import fs from 'fs';
 import path from 'path';
@@ -311,7 +312,7 @@ export const scoreWith = (f: LaneFit, x: ArrayLike<number>) => laneScore(f, x);
 /** Walk-forward out-of-sample scores (NaN before the first fold). */
 export function walkForward(events: SetupEvent[], lane: Lane, firstFold: number, foldMs: number, log: (m: string) => void, mask: number[] = []): Float64Array {
   const sc = new Float64Array(events.length).fill(NaN);
-  const end = Math.max(...events.map((e) => e.at)) + 1;
+  const end = maxOf(events, (e) => e.at) + 1;
   for (let a = firstFold; a < end; a += foldMs) {
     const b = a + foldMs;
     const train = events.filter((e) => e.sig.lane === lane && e.exitAt < a);
@@ -491,9 +492,9 @@ export async function trainSetupModel(hist: string, o: TrainSetupOpts = {}): Pro
   else if (![...assets.keys()].some((a) => o.crossLead!.any(a))) log('cross-coin lead-lag: no leader / coin pair was predictive out of sample: its inputs stay blank, no lead-lag exit');
   else crossLeadExit = chooseCrossLeadExit(assets, o.crossLead, costs, { devTo: holdFrom0, holdTo: finalFrom0, log, oos });
   const cl = o.crossLead ? { lead: o.crossLead, m15Of, exitK: crossLeadExit?.k } : undefined;
-  for (const A of assets.values()) events.push(...assetEvents(A, btc, costs, o.cacheDir ?? path.join(hist, '.setup-cache'), log, oos, [...assets.values()].filter((x) => x !== A).map((x) => x.h1), macro, lib, xg, cl));
+  for (const A of assets.values()) pushAll(events, assetEvents(A, btc, costs, o.cacheDir ?? path.join(hist, '.setup-cache'), log, oos, [...assets.values()].filter((x) => x !== A).map((x) => x.h1), macro, lib, xg, cl));
   events.sort((a, b) => a.at - b.at);
-  const end = Math.max(...events.map((e) => e.at)) + 1;
+  const end = maxOf(events, (e) => e.at) + 1;
   const month = 30.44 * DAY;
   const finalFrom = end - (o.finalMonths ?? 3) * month, holdoutFrom = finalFrom - (o.holdoutMonths ?? 9) * month;
   const firstFold = o.firstFold ?? Date.UTC(2020, 0, 1), foldMs = (o.foldMonths ?? 6) * month;

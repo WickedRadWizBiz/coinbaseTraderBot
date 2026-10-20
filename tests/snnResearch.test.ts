@@ -9,7 +9,7 @@ import { loadSnnModel } from '../bot/snn';
 import { SnnNetwork } from '../bot/snn/network';
 import { DEFAULT_SNN, stageFlags, versionHash, withFlags } from '../bot/snn/params';
 import { blendGain, judge, MAX_GRID, MECHANISMS, pairedEvent, paperPnl, summarize } from '../research/snnAblation';
-import { replaySnn } from '../research/snnReplay';
+import { replaySnn, scoreOf } from '../research/snnReplay';
 import { writeSyntheticRecordings } from '../research/synthetic';
 import { fitLogistic } from '../research/trainSnn';
 import { tmpDir } from './helpers';
@@ -65,4 +65,34 @@ test('offline training: logistic fit, e-prop L1 update and an export the live ne
   assert.deepEqual(Array.from(live.readouts.get('BTC-15m')!.wf), Array.from(tr.net.readouts.get('BTC-15m')!.wf));
   fs.writeFileSync(file, JSON.stringify({ ...model, version: 'tampered' }));
   assert.throws(() => loadSnnModel(file), /version hash/);
+});
+
+test('lean training replay: the same network and Brier sums with no rows kept; readout snapshots capped per column, the same each run', async () => {
+  const dir = tmpDir();
+  writeSyntheticRecordings(dir, { windows: 4, seed: 6 });
+  const p = small('S5');
+  const training = { eprop: { eta: 0.05 }, collect: true };
+  const full = await replaySnn(dir, { params: p, training });
+  const lean = await replaySnn(dir, { params: p, training, lean: true });
+  assert.ok(full.rows.length > 10);
+  assert.deepEqual(full.score, scoreOf(full.rows));
+  assert.deepEqual(lean.score, full.score, 'Brier sums without the rows');
+  assert.deepEqual([lean.rows.length, lean.stepMs.length, lean.ranking.length], [0, 0, 0]);
+  assert.deepEqual(lean.net.serialize(), full.net.serialize(), 'the network learns the same either way');
+  assert.equal(lean.collected.length, full.collected.length, 'no cap: every snapshot');
+  // A cap keeps at most that many per column: a sample of all of them (not the first ones), the same on a re-run.
+  const max = 5;
+  const byCol = (cs: typeof full.collected) => { const m = new Map<string, string[]>(); for (const c of cs) m.set(c.column, [...(m.get(c.column) ?? []), JSON.stringify([...c.phi, c.y])]); return m; };
+  const all = byCol(full.collected);
+  const capped = await replaySnn(dir, { params: p, training: { ...training, collectMax: max }, lean: true });
+  const again = await replaySnn(dir, { params: p, training: { ...training, collectMax: max }, lean: true });
+  const got = byCol(capped.collected);
+  assert.deepEqual(byCol(again.collected), got, 'seeded: the same sample each run');
+  assert.ok([...all.values()].some((v) => v.length > max), 'more snapshots than the cap');
+  for (const [col, v] of all) {
+    const g = got.get(col) ?? [];
+    assert.equal(g.length, Math.min(max, v.length), col);
+    assert.ok(g.every((x) => v.includes(x)), `${col}: only real snapshots`);
+  }
+  assert.ok([...got].some(([col, g]) => g.some((x) => all.get(col)!.indexOf(x) >= max)), 'later snapshots are sampled too');
 });

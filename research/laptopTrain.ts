@@ -330,7 +330,14 @@ function argOf(name: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 const flag = (name: string) => process.argv.includes(`--${name}`);
-const log = (m: string) => console.log(`[trainer ${new Date().toISOString().slice(11, 19)}] ${m}`);
+/** The run's log file (the pipeline's output goes there too): the trainer's own lines (pulls, pushes, the PyTorch and
+ *  TradingView setup, round results) are kept with them, not only shown in the console. */
+let trainerLogFile: string | undefined;
+const log = (m: string) => {
+  const line = `[trainer ${new Date().toISOString().slice(11, 19)}] ${m}`;
+  console.log(line);
+  if (trainerLogFile) try { fs.appendFileSync(trainerLogFile, `${line}\n`); } catch { /* the console has it */ }
+};
 
 async function ask(rl: readline.Interface, q: string, def?: string): Promise<string> {
   const a = await new Promise<string>((res) => rl.question(def ? `${q} [${def}]: ` : `${q}: `, res));
@@ -546,6 +553,8 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   const deadline = continuous ? Infinity : t0 + hours * 3_600_000;
   const models = path.join(dataDir, 'models');
   fs.mkdirSync(path.join(models, 'logs'), { recursive: true });
+  const logFile = path.join(models, 'logs', `pipeline-laptop-${new Date(t0).toISOString().replace(/[:.]/g, '-')}.log`);
+  trainerLogFile = logFile;
   const wantSync = !(flag('no-pull') && flag('no-push'));
   hooks?.phase?.('starting');
   // Keep the computer usable: the plan for this machine, below-normal priority for everything the run starts, the
@@ -593,15 +602,18 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   }
 
   // ---- 1. pull (and the newest recordings again before every later full round) ----
-  const pull = async (days: number, recordingsOnly: boolean) => {
-    if (!server || flag('no-pull') || o.skipDataDownload) return;
+  // 'all': recordings of the last `days` days, history, models, state; 'recordings': the newest recordings; 'index': the
+  // index series saved on the server (BTC.D, USDT.D and the rest, from TradingView and the bot's own dominance bars: a
+  // few small files), copied even with "Skip data download" so training finds them on disk and never fetches them.
+  const pull = async (days: number, what: 'all' | 'recordings' | 'index') => {
+    if (!server || flag('no-pull') || (o.skipDataDownload && what !== 'index')) return;
     hooks?.phase?.('pull');
-    log(recordingsOnly ? `copying the bot's newest recordings (last ${days} days)...` : `copying the bot's data (recordings from the last ${days} days, history, models, state)...`);
-    const what = recordingsOnly ? `-path './recordings/md-*' -mtime -${days}` : `\\( ! -path './recordings/md-*' -o -mtime -${days} \\) ! -path './audit*' ! -path './logs/*' ! -name '*.log' ! -path './.venv*'`;
-    const m = server.run(`cd ~/bot/data && find . -type f ${what} ! -name '*.tmp' -printf '%P\\t%s\\t%T@\\n'`);
+    log(what === 'recordings' ? `copying the bot's newest recordings (last ${days} days)...` : what === 'index' ? 'copying the index series saved on the server (BTC.D, USDT.D and the rest)...' : `copying the bot's data (recordings from the last ${days} days, history, models, state)...`);
+    const filter = what === 'recordings' ? `-path './recordings/md-*' -mtime -${days}` : what === 'index' ? `\\( -path './history/tradingview/*' -o -path './history/bot-index/*' \\)` : `\\( ! -path './recordings/md-*' -o -mtime -${days} \\) ! -path './audit*' ! -path './logs/*' ! -name '*.log' ! -path './.venv*'`;
+    const m = server.run(`cd ~/bot/data && find . -type f ${filter} ! -name '*.tmp' -printf '%P\\t%s\\t%T@\\n'`);
     if (!m.ok) { log(`listing the server's data failed: ${m.err.trim().slice(0, 300)}`); return; }
     const remote = parseManifest(m.out), here = localManifest(dataDir, LOCAL_ONLY_DIRS);
-    if (!recordingsOnly) for (const p of championsGone(remote, here)) { fs.rmSync(path.join(dataDir, p), { force: true }); here.delete(p); log(`${p}: rolled back on the server, removed here`); }
+    if (what === 'all') for (const p of championsGone(remote, here)) { fs.rmSync(path.join(dataDir, p), { force: true }); here.delete(p); log(`${p}: rolled back on the server, removed here`); }
     const need = filesToPull(remote, here);
     log(`${need.length} new or changed file(s), ${(need.reduce((a, f) => a + f.size, 0) / 1e6).toFixed(0)} MB`);
     for (let i = 0; i < need.length; i += 2000) {
@@ -610,7 +622,7 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   };
   let serverEnv: Record<string, string> = {};
   if (server && !flag('no-pull')) {
-    await pull(Number(argOf('days') ?? 45), false);
+    await pull(Number(argOf('days') ?? 45), o.skipDataDownload ? 'index' : 'all');
     const env = server.run("grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env");
     if (env.ok) { serverEnv = safeServerEnv(env.out); log(`using ${Object.keys(serverEnv).length} non-secret setting(s) from the server's bot.env`); }
   }
@@ -648,13 +660,14 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   if ((userEnv.TA_NET_ENGINE ?? process.env.TA_NET_ENGINE) !== 'ts' && (!only || only.includes('ta_net'))) {
     torchEnv = await torchFor(dataDir, (m) => { log(m); hooks?.line?.(`[trainer] ${m}`); }, userEnv.TA_NET_PYTHON || undefined);
   }
-  if ((userEnv.TV_FILL ?? process.env.TV_FILL) !== 'false' && !o.skipDataDownload && (!only || only.includes('history'))) {
+  // TradingView's Python (tvdatafeed), also with "Skip data download": the pipeline then still fetches the index series
+  // (BTC.D, USDT.D: a few small requests the setups and the replay read) when they are missing or stale.
+  if ((userEnv.TV_FILL ?? process.env.TV_FILL) !== 'false' && (!only || only.some((s) => ['history', 'history_replay', 'ta_net', 'setups'].includes(s)))) {
     const py = await ensureTvDatafeed(dataDir, (m) => { log(m); hooks?.line?.(`[trainer] ${m}`); }, { python: userEnv.TV_PYTHON || undefined });
     if (py) tvEnv = { TV_FILL: 'true', TV_PYTHON: py };
   }
   let why: string | undefined;
   const stopped = () => !!hooks?.stopRequested?.();
-  const logFile = path.join(models, 'logs', `pipeline-laptop-${new Date(t0).toISOString().replace(/[:.]/g, '-')}.log`);
   let round = 0, lastMs = 0, plateau = 0;
   // The last full round (new history, the replay extended): remembered between runs, so starting again after a stop
   // continues with the training (the pipeline skips the steps it already finished) instead of repeating them.
@@ -667,7 +680,7 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     round++;
     // Round 1 and then once a day: every step (new history, the replay extended, new recordings: new weeks).
     const full = !only && Date.now() - lastFull >= 24 * 3_600_000;
-    if (full && round > 1) await pull(2, true);
+    if (full && round > 1) await pull(2, 'recordings');
     const steps = only ?? (full ? undefined : CONTINUE_STEPS);
     // Skip data download: no history step either (the pipeline leaves it out with --skip; listing every step with
     // --only instead would also run conditioning, which runs only when named).

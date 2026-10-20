@@ -14,7 +14,9 @@
 //                  for missing bars; the worst MAX_SPOT get that window from TradingView, stored as source
 //                  "tvspot", which ranks below every exchange archive, so it only fills the holes.
 //
-// The daily pipeline runs tvFill in its history step (TV_FILL=false turns it off). Downloading through
+// The daily pipeline runs tvFill in its history step (TV_FILL=false turns it off). When that step is left out (the
+// laptop trainer's "Skip data download", or a round continuing the training) only index series missing from disk are
+// fetched, once; nothing is refreshed then. Downloading through
 // an unofficial client is against TradingView's terms; the calls are kept to what is missing.
 
 import { spawn } from 'child_process';
@@ -115,20 +117,21 @@ export const runTvFetch: TvRunner = (args, log) => new Promise((resolve) => {
 export interface TvFillReport { indexesFull: string[]; indexesRefreshed: string[]; spotHoles: SpotHole[]; fetched: string[]; imported: Array<{ file: string; ok: boolean; asset?: string; tf?: string; stored?: number; error?: string }>; exitCodes: number[]; skipped?: string }
 
 /** Find what is missing, fetch it from TradingView and import it. */
-export async function tvFill(o: { histDir: string; assets: string[]; now?: number; log?: (m: string) => void; run?: TvRunner; maxSpot?: number; workDir?: string; tried?: Record<string, number>; needFrom?: Record<string, number> }): Promise<TvFillReport> {
+export async function tvFill(o: { histDir: string; assets: string[]; now?: number; log?: (m: string) => void; run?: TvRunner; maxSpot?: number; workDir?: string; tried?: Record<string, number>; needFrom?: Record<string, number>; /** false: the index series only (no spot-hole scan or fill). */ spot?: boolean; /** false: only series missing or short of their history, never a refresh of recent days. */ refresh?: boolean }): Promise<TvFillReport> {
   const log = o.log ?? ((m: string) => console.log(`[tradingview] ${m}`));
   const run = o.run ?? runTvFetch;
   const now = o.now ?? Date.now();
   const tried = o.tried ?? {};
   const need = indexNeeds(o.histDir, now, { needFrom: o.needFrom, tried });
-  const holes = findSpotHoles(o.histDir, o.assets, undefined, { now });
+  if (o.refresh === false) need.refresh = [];
+  const holes = o.spot === false ? [] : findSpotHoles(o.histDir, o.assets, undefined, { now });
   // A hole TradingView couldn't fill either (an exchange outage on every venue) is retried weekly, not daily.
   const key = (h: SpotHole) => `${h.asset}|${h.tf}|${h.missing}`;
   const spot = holes.filter((h) => !(now - (tried[key(h)] ?? 0) < 7 * DAY)).slice(0, o.maxSpot ?? 20);
   for (const h of spot) tried[key(h)] = now;
   for (const k of Object.keys(tried)) if (now - tried[k] > 30 * DAY) delete tried[k];
   const report: TvFillReport = { indexesFull: need.full, indexesRefreshed: need.refresh, spotHoles: holes, fetched: [], imported: [], exitCodes: [] };
-  log(`index series: ${Object.entries(need.daily).map(([k, v]) => `${k} ${v.bars} daily bars${v.first ? ` ${v.first}..${v.last}` : ''}`).join(', ')}; full backfill: ${need.full.join(', ') || 'none'}; refresh: ${need.refresh.join(', ') || 'none'}; spot holes: ${holes.length ? holes.map((h) => `${h.asset} ${h.tf} ${h.missing}`).join(', ') : 'none'}`);
+  log(`index series: ${Object.entries(need.daily).map(([k, v]) => `${k} ${v.bars} daily bars${v.first ? ` ${v.first}..${v.last}` : ''}`).join(', ')}; full backfill: ${need.full.join(', ') || 'none'}; refresh: ${need.refresh.join(', ') || 'none'}; spot holes: ${o.spot === false ? 'not checked' : holes.length ? holes.map((h) => `${h.asset} ${h.tf} ${h.missing}`).join(', ') : 'none'}`);
   if (!need.full.length && !need.refresh.length && !spot.length) { report.skipped = 'nothing missing'; return report; }
   const out = o.workDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'tvfill-'));
   fs.mkdirSync(out, { recursive: true });

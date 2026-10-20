@@ -4,6 +4,9 @@
 //
 // It also plays a group of members on one tape with their columns on the GPU (research/snnGpu.ts; snnGpuSched.ts
 // hands it the groups). The device pool process it starts for that stays up between groups.
+//
+// And it runs a network's offline training (research/trainSnn.ts) for the pipeline's snn-*-train step, on a heap of
+// its own (research/pipeline.ts trainSnnApart).
 
 import path from 'path';
 import { parentPort } from 'worker_threads';
@@ -15,6 +18,7 @@ import type { TennisConfig } from '../bot/config';
 import { replaySnn, type SnnRow } from './snnReplay';
 import { GpuPool, playSnnTapeGpu, type PoolStats } from './snnGpu';
 import { playSnnTape, recordSnnTape } from './snnTape';
+import { trainSnnMain } from './trainSnn';
 
 export interface SnnReplayJob {
   dir: string; params: SnnParams; domain: 'crypto' | 'perps' | 'tennis'; modelPath?: string; checkpoint?: SnnCheckpoint;
@@ -28,6 +32,10 @@ export interface SnnReplayJob {
 }
 /** `ms`: the replay's own time (not the wait for a free worker). */
 export interface SnnReplayOut { rows: SnnRow[]; checkpoint?: SnnCheckpoint; ms?: number }
+
+/** research/trainSnn.ts with these arguments (its command-line flags without the dashes). */
+export interface SnnTrainJob { train: Record<string, string | number | undefined> }
+export type SnnTrainOut = Awaited<ReturnType<typeof trainSnnMain>>;
 
 /** The device pool to use: `python` with PyTorch for the GPU; `cpu` for its C build (tests). */
 export interface SnnGpuSpec { python: string; cpu?: boolean; threads?: number }
@@ -68,9 +76,15 @@ async function gpuJob(j: SnnGpuJob): Promise<SnnGpuOut> {
   return { outs: rs.map((r) => ({ rows: r.rows, checkpoint: r.net.serialize() })), ms, prof: { rounds: pool.prof.steps - p0.steps, hostMs: ms - waitMs, waitMs, pool: d } };
 }
 
-parentPort?.on('message', async (j: SnnReplayJob | SnnGpuJob) => {
+parentPort?.on('message', async (j: SnnReplayJob | SnnGpuJob | SnnTrainJob) => {
   try {
     if ('gpuGroup' in j || 'gpuProbe' in j) { parentPort!.postMessage({ ok: true, out: await gpuJob(j) }); return; }
+    if ('train' in j) {
+      const a = j.train;
+      const out: SnnTrainOut = await trainSnnMain((k, d) => (a[k] === undefined || a[k] === '' ? d : String(a[k])), false);
+      parentPort!.postMessage({ ok: true, out });
+      return;
+    }
     const t0 = performance.now();
     let model: MetaModel | undefined;
     if (j.modelPath) { model = models.get(j.modelPath) ?? MetaModel.load(j.modelPath); models.set(j.modelPath, model); }

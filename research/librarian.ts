@@ -27,6 +27,7 @@ import fs from 'fs';
 import path from 'path';
 import { LIB_FEE_RT, LIB_HORIZON_H, LIB_INPUTS, LIB_SCHEMA, LIB_STRATEGIES, LIB_TRANSITION_H, librarianPredict, rowPositions, softmax, type LibrarianParams } from '../bot/ta/librarian';
 import { TANET_FEATURES } from '../bot/ta/taNet';
+import { maxOf } from '../bot/util/num';
 import { storedAssets } from './history/candles';
 import { transitionsOf } from './selection';
 import { regimeDayLabels } from './transitions';
@@ -384,7 +385,7 @@ export function trainLibrarianOn(Dt: TaNetData, labels: Map<string, Map<string, 
     Dt.assets.forEach((ad, a) => { const m = walk.forecasts[a]; if (m.size) { assets[ad.asset] = [...m].sort((x, y) => x[0] - y[0]).map(([t, v]) => [t, ...v]); hours += m.size; } });
     fs.mkdirSync(libDir(o.hist), { recursive: true });
     const file = path.join(libDir(o.hist), 'forecasts.json'), tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ schema: LIB_SCHEMA, version, through: Math.max(...rows.map((r) => r.ts)), assets } satisfies LibForecastFile));
+    fs.writeFileSync(tmp, JSON.stringify({ schema: LIB_SCHEMA, version, through: maxOf(rows, (r) => r.ts), assets } satisfies LibForecastFile));
     fs.renameSync(tmp, file);
   }
   return { params, grade, rows: rows.length, refits: walk.refits, from: Number.isFinite(walk.from) ? iso(walk.from) : '', forecastHours: hours };
