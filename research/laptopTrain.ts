@@ -647,7 +647,7 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   let tvEnv: Record<string, string> = {};
   // The pipeline's memory cap: the plan's, doubled (up to 8 GB) after a round that ran out of it.
   let mainHeapMb = plan.mainHeapMb;
-  const envFor = (leftHours: number): NodeJS.ProcessEnv => kalshiSweeps({ ...serverEnv, ...laptopProfile(leftHours, os.cpus().length, continuous, { ...plan, mainHeapMb }), ...torchEnv, ...tvEnv, ...userEnv, ...process.env, DATA_DIR: dataDir, AUTO_TRAIN: 'off', TRADING_MODE: 'paper', TRAINER_PROGRESS: '1', DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRAIN_THROTTLE_FILE: path.join(dataDir, 'throttle.json'), TRAINER_PRIORITY: plan.priority }, s.kalshiSweep === true);
+  const envFor = (leftHours: number): NodeJS.ProcessEnv => kalshiSweeps({ ...serverEnv, ...laptopProfile(leftHours, os.cpus().length, continuous, { ...plan, mainHeapMb }), ...torchEnv, ...tvEnv, ...userEnv, ...process.env, DATA_DIR: dataDir, AUTO_TRAIN: 'off', TRADING_MODE: 'paper', TRAINER_PROGRESS: '1', HISTORY_INDEX_FILL: 'true', DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRAIN_THROTTLE_FILE: path.join(dataDir, 'throttle.json'), TRAINER_PRIORITY: plan.priority }, s.kalshiSweep === true);
   if (s.kalshiSweep !== true) log('the Kalshi sweeps (sweep-kalshi, sweep-bot) are off: tick "Kalshi sweeps" in the window (or --kalshi-sweep) to run them');
   const A = loadConfig(envFor(continuous ? 24 : hours)).autoTrain;
   const guide = guideText({ poolUsd: A.targetPoolUsd, dailyPct: A.targetDailyPct, maxDdPct: A.targetMaxDdPct, plateauRounds: A.plateauRounds });

@@ -510,8 +510,9 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   // "Skip data download", or a round that continues the training. Training reads them from disk: only a series missing
   // there (or short of its history) is fetched, once, and nothing is refreshed (the history step and the laptop
   // trainer's copy from the server keep them current). The setups' fractal and waterfall inputs, the TA network's
-  // dominance context and the replay's dominance events read them. Its log line gives each series' first and last day.
-  if (!want('history') && (['history_replay', 'ta_net', 'setups'] as const).some((s) => want(s))) {
+  // dominance context and the replay's dominance events read them. Its log line gives each series' first and last day. Only where
+  // HISTORY_INDEX_FILL=true: the laptop trainer sets it; the server's own runs keep the history step.
+  if (process.env.HISTORY_INDEX_FILL === 'true' && !want('history') && (['history_replay', 'ta_net', 'setups'] as const).some((s) => want(s))) {
     const onDisk = () => {
       const daily = indexNeeds(T.historyDir, Date.now()).daily;
       const cover = (k: string) => (daily[k]?.first ? `${k} ${daily[k].first}..${daily[k].last}` : `${k} none`);
