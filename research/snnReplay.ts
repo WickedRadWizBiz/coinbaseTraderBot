@@ -275,9 +275,10 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     if (st.now < nextSec) continue;
     const T = Math.floor(st.now / 1000) * 1000;
     nextSec = T + 1000;
-    // Settle closed markets (90 s after close, when the official average is fully observed).
+    // Settle closed markets (90 s after close, when the official average is fully observed). Their book and trade
+    // tracker go with them: over weeks of replay they would pile up (thousands of contracts a day).
     for (const m of [...st.markets.values()]) {
-      if (st.now >= m.closeTime + 90_000) { if (!m.recordOnly && m.kind !== 'match') settleMarket(m); st.markets.delete(m.ticker); }
+      if (st.now >= m.closeTime + 90_000) { if (!m.recordOnly && m.kind !== 'match') settleMarket(m); st.markets.delete(m.ticker); st.books.delete(m.ticker); st.features.micro.delete(m.ticker); }
     }
     if (tennisDomain) tennisStep(T);
     // L0 inputs: the closest-to-the-money Up/Down or "greater" contract per column.
