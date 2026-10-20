@@ -41,7 +41,7 @@ import {
 import { FeatureGroup, featuresInGroups, FEATURES, vectorFor, type FeatureTier } from '../bot/model/featureEngine';
 import { priceContract } from '../bot/model/fairValue';
 import { GO_LIVE_GATES, MetaModel, type EnsembleMember, type MetaModelParams } from '../bot/model/metaModel';
-import { clamp, logit, sigmoid } from '../bot/util/num';
+import { clamp, logit, pushAll, sigmoid } from '../bot/util/num';
 import type { DatasetRow } from './buildDataset';
 import { eventOf } from './buildDataset';
 import { predictGbdtLogits, trainGbdt } from './gbdt';
@@ -342,8 +342,8 @@ export async function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts & { t
     const oofZ: number[] = [];
     cvJobs.forEach((c, ci) => {
       if (c.gi !== gi) return;
-      oofZ.push(...cvFits[ci].logits(X(c.va, g.set.names)));
-      oofRows.push(...c.va);
+      pushAll(oofZ, cvFits[ci].logits(X(c.va, g.set.names)));
+      pushAll(oofRows, c.va);
     });
     const pw = [...perWindow(oofRows, W(oofRows), oofRows.map((r, i) => rowLoss(sigmoid(oofZ[i]), r.label))).values()];
     const ms = meanSe(pw);

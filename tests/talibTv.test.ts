@@ -90,6 +90,18 @@ test('TradingView: spot holes within reach, index needs, fetch and import as gap
   assert.ok(!need.full.includes('TOTAL3') && !need.full.includes('RTY'));
   // Holes sent this run are remembered (retried weekly, not daily, if TradingView can't fill them either).
   assert.ok(Object.keys(tried).some((k) => k.startsWith('BTC|1h|')));
+  // Training rounds without the history step: index series missing from disk only, never a refresh or a spot fill.
+  calls.length = 0;
+  const idx = await tvFill({ histDir: dir, assets: ['BTC'], now, run, log: () => {}, tried: {}, spot: false, refresh: false });
+  assert.deepEqual(idx.spotHoles, [], 'no spot scan');
+  assert.ok(!calls.some((a) => a.includes('--spot')), 'no spot request');
+  assert.ok(calls.length === 1 && calls[0].includes('--indexes') && calls[0][calls[0].indexOf('--bars') + 1] === '5000', 'the missing series, whole');
+  assert.ok(!calls[0][calls[0].indexOf('--indexes') + 1].includes('TOTAL3'), 'a series already on disk is not fetched');
+  calls.length = 0;
+  const later = await tvFill({ histDir: dir, assets: ['BTC'], now: now + 10 * DAY, run, log: () => {}, tried: {}, spot: false, refresh: false });
+  assert.ok(indexNeeds(dir, now + 10 * DAY).refresh.includes('TOTAL3'), 'stale by then');
+  assert.ok(!calls.some((a) => a[a.indexOf('--indexes') + 1]?.includes('TOTAL3')), 'stale series are not refreshed');
+  assert.deepEqual(later.indexesRefreshed, []);
 });
 
 test('slow context: TOTAL3 / OTHERS.D / RTY one day behind, RTY carried over the weekend, signed per coin', () => {

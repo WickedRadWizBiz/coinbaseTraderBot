@@ -18,7 +18,9 @@ import { brier, sigmoid } from '../bot/snn/formulas';
 import { SnnNetwork, type ColumnInput, type ContractQuery, type SnnCheckpoint, type SnnModelFile } from '../bot/snn/network';
 import type { SnnDomain, SnnParams } from '../bot/snn/params';
 import { exceedLabel } from '../bot/snn/readout';
+import { pushAll } from '../bot/util/num';
 import { readRecordings, ReplayState, type RecMarket } from './replay';
+import { rng } from './stats';
 import type { SnnTapeSink } from './snnTape';
 
 export interface SnnRow {
@@ -27,8 +29,18 @@ export interface SnnRow {
   surprise: number; surprise0: number; G: number; volRatio: number;
 }
 
+/** Brier sums over the graded rows (p_snn and p_model against the label), added in row order. */
+export interface SnnScore { n: number; snn: number; model: number }
+export function scoreOf(rows: SnnRow[]): SnnScore {
+  const s: SnnScore = { n: 0, snn: 0, model: 0 };
+  for (const r of rows) { s.n++; s.snn += brier(r.pSnn, r.y); s.model += brier(r.pModel, r.y); }
+  return s;
+}
+
 export interface SnnReplayResult {
   rows: SnnRow[];
+  /** The rows' Brier sums (also with `lean`, which keeps no rows). */
+  score: SnnScore;
   net: SnnNetwork;
   stepMs: number[];
   frozenSteps: number;
@@ -47,8 +59,12 @@ export interface SnnReplayOpts {
   to?: number;
   scoreEverySec?: number;
   noEntryBeforeCloseSec?: number;
-  /** Offline training hooks (research/trainSnn.ts). */
-  training?: { eprop?: { eta: number }; collect?: boolean };
+  /** Offline training hooks (research/trainSnn.ts). `collectMax`: keep at most this many readout snapshots per
+   *  column, an even random sample of all of them (a seeded reservoir), so weeks of history fit in memory. */
+  training?: { eprop?: { eta: number }; collect?: boolean; collectMax?: number };
+  /** Keep only the network and the Brier sums (`score`): no rows, column rankings, step times or (crypto) direction
+   *  log. A training pass over weeks of history (research/trainSnn.ts) would otherwise hold every scored contract. */
+  lean?: boolean;
   calendar?: MacroEvent[];
   onProgress?: (ts: number) => void;
   /** Write the SNN's per-minute outputs (direction calls, p_snn per contract) as recording-format
@@ -99,7 +115,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
   const tennisIn = new Map<string, { input: ColumnInput; query: ContractQuery; ts: number }>();
   const eventOf = (m: RecMarket) => m.event ?? m.ticker.slice(0, m.ticker.lastIndexOf('-'));
   const net = new SnnNetwork(o.params, { whitelist: o.whitelist, model: o.snnModel });
-  net.dirLog = [];
+  net.dirLog = o.lean && domain !== 'perps' ? undefined : [];
   net.training = Boolean(o.training?.eprop);
   if (o.checkpoint) net.restore(o.checkpoint, { allowParamChange: o.allowParamChange });
   // A checkpoint from later in time (a tournament generation moving back to earlier weeks): start over the
@@ -110,12 +126,29 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
   const noEntry = (o.noEntryBeforeCloseSec ?? 60) * 1000;
   const pending = new Map<string, Omit<SnnRow, 'y'>[]>();
   const rows: SnnRow[] = [];
+  const score: SnnScore = { n: 0, snn: 0, model: 0 };
+  const addRow = (r: SnnRow) => {
+    score.n++; score.snn += brier(r.pSnn, r.y); score.model += brier(r.pModel, r.y);
+    if (!o.lean) rows.push(r);
+  };
   const stepMs: number[] = [];
   const ranking: SnnReplayResult['ranking'] = [];
   type Mid = { col: string; mid: number; p: number; y?: number };
   const pendingRank: { ts: number; sal: string; edge: string; mids: Map<string, Mid> }[] = [];
   const rankRefs = new Map<string, Mid[]>();
   const collected: SnnReplayResult['collected'] = [];
+  // collectMax: per column, a reservoir of snapshots (each of the n seen so far is kept with probability max / n).
+  const reservoir = new Map<string, { seen: number; kept: SnnReplayResult['collected'] }>();
+  const pick = rng(o.params.seed + 7);
+  const collect = (c: SnnReplayResult['collected'][number]) => {
+    const max = o.training?.collectMax;
+    if (!max) { collected.push(c); return; }
+    let r = reservoir.get(c.column);
+    if (!r) reservoir.set(c.column, (r = { seen: 0, kept: [] }));
+    r.seen++;
+    if (r.kept.length < max) r.kept.push(c);
+    else { const j = Math.floor(pick() * r.seen); if (j < max) r.kept[j] = c; }
+  };
   const eprop = new Map<string, { column: string; elig: Float32Array; p: number; kind: string }>();
   const pendingPhi = new Map<string, { column: string; phi: Float64Array; kind: string; role: 'strike' | 'cap' }[]>();
   let nextSec = 0, frozenSteps = 0, steps = 0;
@@ -148,7 +181,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     const ps = pending.get(m.ticker) ?? [];
     pending.delete(m.ticker);
     if (!out) { eprop.delete(m.ticker); pendingPhi.delete(m.ticker); return; }
-    for (const r of ps) rows.push({ ...r, y: out.label });
+    for (const r of ps) addRow({ ...r, y: out.label });
     const result = out.label ? 'yes' : 'no';
     // e-prop: truncated surrogate gradient for the L1 branch weights through the L1-rate readout features.
     const ep = eprop.get(m.ticker);
@@ -166,7 +199,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
       }
     }
     eprop.delete(m.ticker);
-    for (const t of pendingPhi.get(m.ticker) ?? []) { const y = exceedLabel(t.kind, t.role, result); if (y !== undefined) collected.push({ column: t.column, phi: t.phi, y }); }
+    for (const t of pendingPhi.get(m.ticker) ?? []) { const y = exceedLabel(t.kind, t.role, result); if (y !== undefined) collect({ column: t.column, phi: t.phi, y }); }
     pendingPhi.delete(m.ticker);
     net.settle(m.ticker, result, st.now);
     for (const v of rankRefs.get(m.ticker) ?? []) v.y = out.label;
@@ -186,7 +219,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
       if (res || st.now >= Math.min(...ms.map((m) => m.closeTime)) + 90_000) {
         const ps = pending.get(a.ticker) ?? [];
         pending.delete(a.ticker);
-        if (res) { for (const r of ps) rows.push({ ...r, y: res === 'yes' ? 1 : 0 }); net.settle(a.ticker, res, st.now); }
+        if (res) { for (const r of ps) addRow({ ...r, y: res === 'yes' ? 1 : 0 }); net.settle(a.ticker, res, st.now); }
         net.removeColumn(tennisColumnKey(event));
         trackers.delete(event); tennisIn.delete(event);
         for (const m of ms) st.markets.delete(m.ticker);
@@ -242,9 +275,10 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     if (st.now < nextSec) continue;
     const T = Math.floor(st.now / 1000) * 1000;
     nextSec = T + 1000;
-    // Settle closed markets (90 s after close, when the official average is fully observed).
+    // Settle closed markets (90 s after close, when the official average is fully observed). Their book and trade
+    // tracker go with them: over weeks of replay they would pile up (thousands of contracts a day).
     for (const m of [...st.markets.values()]) {
-      if (st.now >= m.closeTime + 90_000) { if (!m.recordOnly && m.kind !== 'match') settleMarket(m); st.markets.delete(m.ticker); }
+      if (st.now >= m.closeTime + 90_000) { if (!m.recordOnly && m.kind !== 'match') settleMarket(m); st.markets.delete(m.ticker); st.books.delete(m.ticker); st.features.micro.delete(m.ticker); }
     }
     if (tennisDomain) tennisStep(T);
     // L0 inputs: the closest-to-the-money Up/Down or "greater" contract per column.
@@ -286,7 +320,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     if (o.training?.eprop) for (const c of net.columns.values()) if (!c.elig) c.elig = new Float32Array(c.nSyn);
     steps++;
     if (net.health.freezeLearning) frozenSteps++;
-    if (T % scoreEvery !== 0) { stepMs.push(performance.now() - t0); continue; }
+    if (T % scoreEvery !== 0) { if (!o.lean) stepMs.push(performance.now() - t0); continue; }
     // Score every open contract.
     const sq = scoreQueries(active, priced), queries = sq.queries;
     o.tape?.score(T, queries, sq.ctx);
@@ -301,7 +335,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
         pending.set(sc.ticker, arr);
       }
     }
-    stepMs.push(performance.now() - t0);
+    if (!o.lean) stepMs.push(performance.now() - t0);
     if (o.backfillDir && T - lastLive > 300_000) {
       const day = new Date(T).toISOString().slice(0, 10);
       const file = path.join(o.backfillDir, `snnfill-${day}.jsonl`);
@@ -321,8 +355,10 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
       const arr = pending.get(s.ticker) ?? [];
       arr.push({ ticker: s.ticker, eventKey: s.eventKey, column: s.column, ts: T, day, kind: x.terms.kind, pModel, pSnn: s.p, mid: x.mid, surprise: s.surprise, surprise0: s.surprise0, G: s.G, volRatio: x.vol.sigmaPerSqrtSec / ref });
       pending.set(s.ticker, arr);
-      edgeByCol.set(s.column, [...(edgeByCol.get(s.column) ?? []), Math.abs(s.p - x.mid)]);
-      mids.set(s.ticker, { col: s.column, mid: x.mid, p: s.p });
+      if (!o.lean) {
+        edgeByCol.set(s.column, [...(edgeByCol.get(s.column) ?? []), Math.abs(s.p - x.mid)]);
+        mids.set(s.ticker, { col: s.column, mid: x.mid, p: s.p });
+      }
       const c = net.columns.get(s.column)!;
       if (o.training?.collect) {
         const roles: ['strike' | 'cap', number | undefined][] = q.kind === 'less' ? [['cap', q.cap]] : q.kind === 'between' ? [['strike', q.strike], ['cap', q.cap]] : [['strike', q.strike]];
@@ -350,7 +386,8 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
   }
   // Remaining markets that closed inside the recording.
   for (const m of [...st.markets.values()]) if (!m.recordOnly && m.kind !== 'match' && st.now >= m.closeTime + 60_000) settleMarket(m);
-  if (o.tapeOnly) return { rows, net, stepMs, frozenSteps, steps, ranking, collected };
+  for (const r of reservoir.values()) pushAll(collected, r.kept);
+  if (o.tapeOnly) return { rows, score, net, stepMs, frozenSteps, steps, ranking, collected };
   // Captured mispricing of a column choice: mean over its contracts of (y - mid) * sign(p_snn - mid).
   for (const pr of pendingRank) {
     const cap = (col: string) => {
@@ -361,8 +398,8 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     if (Number.isFinite(a) && Number.isFinite(b)) ranking.push({ ts: pr.ts, bySalience: a, byEdge: b });
   }
   // Perps never settle: grade the network on its own direction calls (each logged before its label).
-  if (domain === 'perps') rows.push(...directionRows(net.dirLog));
-  return { rows, net, stepMs, frozenSteps, steps, ranking, collected };
+  if (domain === 'perps') for (const r of directionRows(net.dirLog)) addRow(r);
+  return { rows, score, net, stepMs, frozenSteps, steps, ranking, collected };
 }
 
 const r5 = (x: number) => (Number.isFinite(x) ? +x.toFixed(5) : null);

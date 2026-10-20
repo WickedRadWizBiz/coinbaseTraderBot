@@ -73,6 +73,10 @@ jobs:
             echo "== cpu (last minute; cores: 1 = one full core; the plan sustains about 0.4) and 10-minute history"
             curl -s -m 20 http://localhost:3000/api/cpu | python3 -c 'import json,sys,time; d=json.load(sys.stdin); n=d.get("now") or {}; print("now", json.dumps({k: n.get(k) for k in ("processCores","threads","mainBusy","stealPct","iowaitPct","writeMBps","rssMb","sections")})); print("state file writes since start", json.dumps(n.get("stateWrites"))); [print("  ", time.strftime("%H:%M", time.gmtime(h["ts"]/1000)), "cores", h["cores"], "main", h["mainBusy"], "steal%", h["stealPct"], "iowait%", h["iowaitPct"], "writeMB/s", h["writeMBps"], "rssMB", h["rssMb"]) for h in (d.get("history") or [])[-18:]]' || true
             echo "== state files"; ls -la ~/bot/data/*.json 2>/dev/null | awk '{print $5, $9}' | sort -rn | head -8
+            echo "== trained model files (modified UTC, bytes, name; files the laptop trainer sends keep the laptop's times)"
+            find ~/bot/data/models -maxdepth 1 -type f -printf '%TY-%Tm-%TdT%TH:%TM %s %f\n' 2>/dev/null | sort | tail -60
+            echo "== models the bot hot-swapped in the last 5 days (UTC, model, file)"
+            find ~/bot/data/audit -name 'audit-*.jsonl' -mtime -5 2>/dev/null | sort | while read -r f; do LC_ALL=C nice -n 19 grep -hF '"hot_swap"' "$f"; done | python3 -c 'import json,sys; [print(r["ts"][:16], (r.get("data") or {}).get("kind"), str((r.get("data") or {}).get("file") or "").split("/")[-1]) for r in (json.loads(l) for l in sys.stdin if l.strip())]' | tail -60 || true
             echo "== OOM / kills"; sudo dmesg -T 2>/dev/null | grep -iE "out of memory|killed process" | tail -5 || true
             echo "== warnings and errors, last 3 h (counted)"
             journalctl -u kalshi-bot --since "3 hours ago" --no-pager | grep -E "ERROR|WARN|Started|Stopped|exited" | sed -E 's/^.*kalshi-bot\[[0-9]+\]: //; s/^[0-9TZ:.-]+ //; s/\{.*//' | sort | uniq -c | sort -rn | head -25

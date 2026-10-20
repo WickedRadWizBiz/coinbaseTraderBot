@@ -32,6 +32,7 @@ import path from 'path';
 import { progress } from './progress';
 import { rng } from './stats';
 import { perturb, type FitnessReport, type Hyper, type Interaction, type MutationSpec } from '../bot/util/fitness';
+import { pushAll } from '../bot/util/num';
 import { crossoverGenes, geneScale, geneTraits, GENE_WINDOW, islandCount, newGaState, parentCount, planBreeding, roundRanks, type GaGeneration, type GaState, type GeneTrait } from './genetic';
 import { DEFAULT_ROBUST, populationVariance, robustScore, type RobustOpts } from './selection';
 
@@ -337,7 +338,7 @@ export async function runPbt<S>(o: {
     }));
     if (kept.length) log(`round ${round.index}: member(s) ${kept.sort((a, b) => a - b).map((x) => `#${x}`).join(', ')} finished before the stop: kept`);
     members.forEach((m, i) => {
-      trials++; m.record.push(...evals[i].interactions); m.scores.push({ round: round.index, fitness: evals[i].report.fitness });
+      trials++; pushAll(m.record, evals[i].interactions); m.scores.push({ round: round.index, fitness: evals[i].report.fitness });
       m.blocks = [...(m.blocks ?? m.scores.slice(0, -1).map((x) => x.fitness)), evals[i].report.fitness].slice(-64);
     });
     if (ga) {

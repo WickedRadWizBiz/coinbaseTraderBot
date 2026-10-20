@@ -76,6 +76,7 @@ import { tuneSizingMain } from './tuneSizing';
 import { archiveModel, promoteIfChampion } from './champion';
 import crypto from 'crypto';
 import fs from 'fs';
+import v8 from 'v8';
 import path from 'path';
 import { MODEL_FILES } from '../bot/autotrain';
 import { loadConfig, type Config } from '../bot/config';
@@ -94,7 +95,6 @@ import { snnAblationMain, type Verdict } from './snnAblation';
 import { replaySnn } from './snnReplay';
 import { trainMetaModelMain } from './trainMetaModel';
 import { buildPerpDataset, perpRuleRecord, trainPerpMain } from './trainPerpModel';
-import { trainSnnMain } from './trainSnn';
 import { runSnnPbt } from './snnPbt';
 import { snnContest, type ContestResult } from './snnContest';
 import { daysOf, HistoryLedger, HOLDOUT_RULE, isHoldout, isoWeek, weekBlocks } from './historyLedger';
@@ -109,7 +109,7 @@ import { forecastSchema, setupInputStatus, trainSetupMain } from './trainSetupMo
 import { sweepMain } from './sweep';
 import { collectFiles, importFile } from './history/importCsv';
 import { downloadKalshiHistory, downloadKalshiTrades } from './history/kalshiHistory';
-import { dominanceNeedFrom, tvFill } from './history/tradingview';
+import { dominanceNeedFrom, indexNeeds, tvFill } from './history/tradingview';
 import { linkDays, recordingDayList, recordingFiles, recordingsUsage } from '../bot/marketdata/recordingFiles';
 import { readJournalTrades } from '../bot/setups/journal';
 import { setupSnnMain, SNN_GATE_MIN_TRADES } from './setupSnnStudy';
@@ -126,7 +126,8 @@ import { LIB_SCHEMA, setLibrarianPath } from '../bot/ta/librarian';
 const readLibSchema = (f: string): string | undefined => { try { return (JSON.parse(fs.readFileSync(f, 'utf8')) as { schema?: string }).schema; } catch { return undefined; } };
 import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, downloadBinanceOpenInterest, type BinanceMarket } from './history/binanceVision';
 import { buildHistoryReplay, historyStart, perpSpecsFromRecordings, replayKalshiDays, replayPerpDays, replayTennisDays } from './history/historyReplay';
-import { workerCount } from './workerPool';
+import { WorkerPool, workerCount, workerScript } from './workerPool';
+import type { SnnTrainJob, SnnTrainOut } from './snnReplayWorker';
 import { compareIndexSources } from '../bot/marketdata/historyStore';
 import { backfillCoinbase } from './history/coinbaseBackfill';
 import { resolveAssets } from './history/assets';
@@ -266,6 +267,15 @@ export function recordingDays(dir: string): string[] {
 const dayMs = (d: string) => Date.parse(`${d}T00:00:00Z`);
 const nextDay = (d: string) => new Date(dayMs(d) + 86_400_000).toISOString().slice(0, 10);
 const argsOf = (o: Record<string, string | number | undefined>) => (k: string, d: string) => (o[k] === undefined || o[k] === '' ? d : String(o[k]));
+
+/** research/trainSnn.ts on a worker thread (dist/snnReplayWorker.cjs) with a heap of its own, as large as this
+ *  process's: what earlier steps left in the pipeline's memory does not count against it, and a training that runs
+ *  out of memory fails this step only (the pool retries it with twice the room while that stays within 8 GB). */
+async function trainSnnApart(args: Record<string, string | number | undefined>): Promise<SnnTrainOut> {
+  const heapMb = Math.round(v8.getHeapStatistics().heap_size_limit / 1048576);
+  const pool = new WorkerPool<SnnTrainJob, SnnTrainOut>(workerScript('snnReplayWorker'), 1, { ...process.env, TRAIN_WORKER_HEAP_MB: String(heapMb) });
+  try { return await pool.run({ train: args }); } finally { await pool.close(); }
+}
 
 /** Highest stage k such that S1..Sk were all accepted; 0 if S1 failed. */
 export function acceptedChain(verdicts: Verdict[]): number {
@@ -495,6 +505,29 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       state.lastHistoryUpdate = now;
       return { replayInputs, tradingview, kalshi, assets, binance: { fetched: bin.reduce((a, b) => a + b.fetched, 0), failed: bin.reduce((a, b) => a + b.failed, 0) }, coinbase: { added: cb.reduce((a, c) => a + c.added, 0) }, btcdomCheck };
     }, T.historyUpdate ? undefined : 'HISTORY_AUTO_UPDATE=false');
+  }
+  // The index series (BTC.D, USDT.D and the rest of TV_INDEXES) when the history step is left out: the trainer's
+  // "Skip data download", or a round that continues the training. Training reads them from disk: only a series missing
+  // there (or short of its history) is fetched, once, and nothing is refreshed (the history step and the laptop
+  // trainer's copy from the server keep them current). The setups' fractal and waterfall inputs, the TA network's
+  // dominance context and the replay's dominance events read them. Its log line gives each series' first and last day. Only where
+  // HISTORY_INDEX_FILL=true: the laptop trainer sets it; the server's own runs keep the history step.
+  if (process.env.HISTORY_INDEX_FILL === 'true' && !want('history') && (['history_replay', 'ta_net', 'setups'] as const).some((s) => want(s))) {
+    const onDisk = () => {
+      const daily = indexNeeds(T.historyDir, Date.now()).daily;
+      const cover = (k: string) => (daily[k]?.first ? `${k} ${daily[k].first}..${daily[k].last}` : `${k} none`);
+      return { daily, text: `${cover('BTC.D')}, ${cover('USDT.D')}`, missing: ['BTC.D', 'USDT.D'].filter((k) => !daily[k]?.first) };
+    };
+    const before = onDisk();
+    await run('history-index', async () => {
+      state.tvTried ??= {};
+      const r = await tvFill({ histDir: T.historyDir, assets: [], spot: false, refresh: false, log: (m) => log(`tradingview: ${m}`), tried: state.tvTried, needFrom: dominanceNeedFrom(cfg.macro.parentFrom) });
+      const after = onDisk();
+      log(`index series on disk: ${after.text}`);
+      if (after.missing.length) throw new Error(`${after.missing.join(' and ')} still missing after the TradingView fill (exit codes: ${r.exitCodes.join(', ') || 'none'})`);
+      if (r.skipped) throw new SkipStep(`on disk: ${after.text}`);
+      return { ...r, coverage: { 'BTC.D': after.daily['BTC.D'], 'USDT.D': after.daily['USDT.D'] } };
+    }, T.tvFill ? undefined : `TradingView fill off (TV_FILL=false, or its Python is not set up); on disk: ${before.text}`);
   }
   // ---- History replay: years of history as recordings (research/history/historyReplay.ts) ----
   const replayDir = T.historyReplayDir;
@@ -920,11 +953,11 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         const nEval = span.length >= 2 ? Math.max(1, Math.round(span.length * 0.2)) : 0;
         const trainSpan = span.slice(0, span.length - nEval), evalSpan = span.slice(span.length - nEval);
         const cand = path.join(work, `snn_${domain}.candidate.json`);
-        const r = await trainSnnMain(argsOf({
+        const r = await trainSnnApart({
           recordings: src, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined, hyper: hyper ? JSON.stringify(hyper) : undefined, 'skip-model': src === rec ? undefined : 'true',
           from: trainSpan[0], to: evalSpan[0] ?? undefined,
           'eval-from': evalSpan[0], 'eval-to': evalSpan.length ? nextDay(evalSpan[evalSpan.length - 1]) : undefined,
-        }));
+        });
         if (src !== rec) { ledger.markTrained(ledgerNet, weekBlocks(span).map((b) => b.id)); ledger.save(); }
         if (A.promote === 'validated' && !stageAccepted) return { promoted: false, stage, reason: 'stage not accepted by the ablation', result: r };
         // Contest (history replay): the new network replaces the one in use only if it beats it on held-out

@@ -4,6 +4,8 @@
 //      the fast-sigmoid surrogate, k = 25) through the L1-rate readout features, with settlement labels.
 //   3. Readout fit: L2-regularised logistic regression of the settlement labels on the collected
 //      per-contract feature snapshots, one readout per column.
+// Each pass keeps only what it uses (replaySnn's lean mode): the network, the Brier sums and, for the readout, at
+// most --readout-max snapshots per column (an even random sample), so weeks of history fit in memory.
 // One network at a time (--domain crypto|perps; tennis learns live). Exports frozen weights
 // (params/snn_<domain>.candidate.json) with the health reference measured on
 // the training window. Evaluate out-of-sample on the NEXT window (--eval-from/--eval-to) before use.
@@ -14,11 +16,14 @@ import fs from 'fs';
 import path from 'path';
 import { loadCalendar } from '../bot/model/calendar';
 import { MetaModel } from '../bot/model/metaModel';
-import { brier, sigmoid } from '../bot/snn/formulas';
+import { sigmoid } from '../bot/snn/formulas';
 import { encodeArr, type SnnModelFile } from '../bot/snn/network';
 import { DEFAULT_SNN, domainParams, stageFlags, versionHash, withFlags, type SnnParams, type Stage } from '../bot/snn/params';
-import { replaySnn } from './snnReplay';
+import { replaySnn, type SnnScore } from './snnReplay';
 import { withSnnHyper } from '../bot/snn/population';
+
+/** Readout snapshots kept per column (each is a ~200-number feature vector; 19 days of contracts are millions). */
+export const READOUT_MAX = 20_000;
 
 /** L2-regularised logistic regression by gradient descent with backtracking (full batch). */
 export function fitLogistic(X: Float64Array[], y: number[], w0: Float64Array, l2 = 1e-3, iters = 300): { w: Float64Array; loss: number } {
@@ -70,12 +75,12 @@ export async function trainSnnMain(argOf: (k: string, d: string) => string = cli
   let preset: SnnModelFile | undefined;
   if (params.flags.pc) {
     process.stderr.write('PC pretraining...\n');
-    const pre = await replaySnn(dir, { params: withFlags(params, { pcLearn: true }), model, ...win, calendar });
+    const pre = await replaySnn(dir, { params: withFlags(params, { pcLearn: true }), model, ...win, calendar, lean: true });
     preset = { version: versionHash(params), params, columns: Object.fromEntries([...pre.net.columns].map(([k, c]) => [k, { U1: encodeArr(c.U1), U0: encodeArr(c.U0) }])) };
   }
   // 2. e-prop L1 training + feature collection for the readout.
   process.stderr.write('surrogate-gradient L1 training + readout data...\n');
-  const tr = await replaySnn(dir, { params, model, snnModel: preset, ...win, calendar, training: { eprop: { eta: Number(argOf('eprop-eta', '1e-3')) }, collect: true } });
+  const tr = await replaySnn(dir, { params, model, snnModel: preset, ...win, calendar, lean: true, training: { eprop: { eta: Number(argOf('eprop-eta', '1e-3')) }, collect: true, collectMax: Number(argOf('readout-max', String(READOUT_MAX))) } });
   // 3. Readout fit per column.
   const readouts: Record<string, number[]> = {};
   for (const [k, ro] of tr.net.readouts) {
@@ -94,15 +99,15 @@ export async function trainSnnMain(argOf: (k: string, d: string) => string = cli
   };
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(file));
-  const b = (rows: { pSnn: number; pModel: number; y: 0 | 1 }[]) => ({ n: rows.length, snn: rows.reduce((a, r) => a + brier(r.pSnn, r.y), 0) / Math.max(1, rows.length), model: rows.reduce((a, r) => a + brier(r.pModel, r.y), 0) / Math.max(1, rows.length) });
-  const trainStats = b(tr.rows);
+  const b = (s: SnnScore) => ({ n: s.n, snn: s.snn / Math.max(1, s.n), model: s.model / Math.max(1, s.n) });
+  const trainStats = b(tr.score);
   console.log('train window (in-sample, prequential):', trainStats);
   let evalStats: ReturnType<typeof b> | undefined;
   // Out-of-sample evaluation on the next window with the frozen export.
-  const ev = { from: date('eval-from'), to: date('eval-to'), skipModel: win.skipModel };
+  const ev = { from: date('eval-from'), to: date('eval-to'), domain, skipModel: win.skipModel };
   if (ev.from) {
-    const res = await replaySnn(dir, { params, model, snnModel: file, ...ev, calendar });
-    evalStats = b(res.rows);
+    const res = await replaySnn(dir, { params, model, snnModel: file, ...ev, calendar, lean: true });
+    evalStats = b(res.score);
     console.log('eval window (out-of-sample):', evalStats);
   }
   console.log(`wrote ${out} (version ${file.version}); copy to params/snn_${domain}.json only after research:snn-ablation --domain ${domain} accepts the stage`);

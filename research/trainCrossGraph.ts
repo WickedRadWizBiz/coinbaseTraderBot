@@ -22,6 +22,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { CrossGraph, XG_DIMS, XG_F, XG_HORIZONS, XG_INPUTS, XG_LOOKBACK_H, XG_SCHEMA, xgBackward, xgCorr, xgForward, xgGraph, xgInit, xgLayout, xgRawInputs, xgSeries, xgTargets, type XgParams, type XgSeries } from '../bot/ta/crossGraph';
+import { maxOf } from '../bot/util/num';
 import { loadHistory, storedAssets } from './history/candles';
 import { dayBootstrap } from './trainTaNet';
 
@@ -122,7 +123,7 @@ export function torchPython(python?: string): string | undefined {
 
 /** Samples padded to the largest graph as float64 binaries in `dir` (the torch trainer's input). */
 function packTorch(dir: string, samples: XgSample[], norm: XgFit['norm'], w: Float64Array): { S: number; N: number } {
-  const N = Math.max(...samples.map((q) => q.assets.length)), S = samples.length, F = XG_F, O = XG_DIMS.O;
+  const N = maxOf(samples, (q) => q.assets.length), S = samples.length, F = XG_F, O = XG_DIMS.O;
   const X = new Float64Array(S * N * F), C = new Float64Array(S * N * N), Y = new Float64Array(S * N * O).fill(NaN), M = new Float64Array(S * N);
   samples.forEach((q, s) => {
     const gph = xgGraph({ norm }, q.x, q.corr), n = q.assets.length;

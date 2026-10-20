@@ -22,7 +22,8 @@ import { threadId } from 'worker_threads';
 import { recordingFiles } from '../bot/marketdata/recordingFiles';
 import { SnnNetwork, type ColumnInput, type ContractQuery, type SnnCheckpoint, type SnnModelFile } from '../bot/snn/network';
 import type { SnnDomain, SnnParams } from '../bot/snn/params';
-import { directionRows, replaySnn, type SnnReplayOpts, type SnnReplayResult, type SnnRow } from './snnReplay';
+import { pushAll } from '../bot/util/num';
+import { directionRows, replaySnn, scoreOf, type SnnReplayOpts, type SnnReplayResult, type SnnRow } from './snnReplay';
 
 export const TAPE_VERSION = 1;
 const MAGIC = Buffer.from('SNNTAPE');
@@ -314,8 +315,8 @@ export class TapeMember {
 
   result(): SnnReplayResult {
     const rows = this.rows.slice();
-    if ((this.o.domain ?? 'crypto') === 'perps') rows.push(...directionRows(this.net.dirLog));
-    return { rows, net: this.net, stepMs: this.stepMs, frozenSteps: this.frozenSteps, steps: this.steps, ranking: [], collected: [] };
+    if ((this.o.domain ?? 'crypto') === 'perps') pushAll(rows, directionRows(this.net.dirLog));
+    return { rows, score: scoreOf(rows), net: this.net, stepMs: this.stepMs, frozenSteps: this.frozenSteps, steps: this.steps, ranking: [], collected: [] };
   }
 }
 

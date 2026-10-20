@@ -9,6 +9,7 @@ import path from 'path';
 import { loadCalendar } from '../bot/model/calendar';
 import type { SnnModelFile } from '../bot/snn/network';
 import { coverageFloor, fitnessOf } from '../bot/util/fitness';
+import { pushAll } from '../bot/util/num';
 import { clusterFor, SNN_MIN_COVERAGE, snnInteractions } from './snnPbt';
 import { replaySnn, type SnnRow } from './snnReplay';
 import { playSnnTape, recordSnnTape, TapeCache, tapeEnvSig, tapesEnabled } from './snnTape';
@@ -62,11 +63,11 @@ export async function snnContest(o: {
   }) : undefined;
   const tapeOf = (job: SnnReplayJob) => tapes?.get({ domain: o.domain, from: job.from, to: job.to, fromDay: job.fromDay, toDay: job.toDay });
   try {
-    if (pool) await Promise.all(jobs.map(async ({ side, job }) => { rows[side].push(...(await pool.run({ ...job, playTape: await tapeOf(job) })).rows); }));
+    if (pool) await Promise.all(jobs.map(async ({ side, job }) => { pushAll(rows[side], (await pool.run({ ...job, playTape: await tapeOf(job) })).rows); }));
     else {
       for (const { side, job } of jobs) {
         const tape = await tapeOf(job);
-        rows[side].push(...(tape ? playSnnTape(tape, { ...job, allowParamChange: true }) : await replaySnn(job.dir, { ...job, calendar, allowParamChange: true })).rows);
+        pushAll(rows[side], (tape ? playSnnTape(tape, { ...job, allowParamChange: true }) : await replaySnn(job.dir, { ...job, calendar, allowParamChange: true })).rows);
       }
     }
   } finally { await pool?.close(); }

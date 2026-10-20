@@ -184,6 +184,12 @@ The design expects most mechanisms to fail, and that is the system working.
 2. Truncated surrogate-gradient (e-prop) training of the L1 branches.
 3. An L2 logistic readout fit on a training window, then out-of-sample evaluation on the next window.
 
+Each pass keeps only what it uses (`replaySnn`'s `lean` mode: the network and running Brier sums, no per-contract
+rows), and the readout fit takes at most `--readout-max` snapshots per column (default 20,000), an even seeded sample
+of all of them: a snapshot is a ~200-number feature vector and 19 days of contracts are millions of them. The pipeline
+runs the training on a worker thread with a heap of its own, as large as the pipeline's; a training that still runs out
+of memory fails its step only, and the round goes on.
+
 Both scripts take `--domain crypto|perps`. The crypto network is judged on settled contracts as above. The
 perps network is judged on its own graded direction calls: the baseline is the column's prequential
 up-rate (a no-skill forecaster), and calls are clustered per column-hour so overlapping horizons are not
