@@ -151,13 +151,14 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
         <div class="field"><label for="hours">Hours to train (0 = until it stops by itself)</label><input id="hours" type="number" min="0" step="0.5" value="0" /></div>
         <div class="field"><label>&nbsp;</label><div class="muted" id="stopsby">It stops when the bot reaches your target or stops improving.</div></div>
       </div>
-      <details id="srv"><summary>Server (optional): copy recordings in, send better models back</summary>
+      <details id="srv" open><summary>Server: where the trained models go (copies recordings in, sends better models back)</summary>
         <div class="fields">
-          <div class="field"><label for="host">Server address</label><input id="host" type="text" placeholder="leave empty to train on history only" /></div>
+          <div class="field"><label for="host">Server address</label><input id="host" type="text" placeholder="your Lightsail address" /></div>
           <div class="field"><label for="user">SSH user</label><input id="user" type="text" placeholder="ubuntu" /></div>
           <div class="field" style="grid-column: 1 / -1"><label for="key">SSH key file (.pem)</label><input id="key" type="text" placeholder="C:\Users\you\Downloads\lightsail.pem" /></div>
         </div>
       </details>
+      <div id="srvWarn" class="err">No server set: the models this trains stay on this laptop and never reach your bot.</div>
       <div class="btns"><button id="start">Start training</button></div>
       <div class="field" style="margin-top: 10px;">
         <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text); font-size: 13px; text-transform: none; letter-spacing: normal;">
@@ -249,6 +250,10 @@ function setBar(p, b, cls) {
   $(p + 'Pct').textContent = Math.round(b.pct) + '%';
   $(p + 'Eta').textContent = eta(b.etaSec) + (b.etaSec > 0 ? at(b.etaSec) : '');
 }
+/** The warning above Start while the server address is empty. */
+function srvWarn() { $('srvWarn').style.display = $('host').value.trim() ? 'none' : 'block'; }
+$('host').addEventListener('input', srvWarn);
+srvWarn();
 function renderUpdate(u, phase) {
   const el = $('update');
   if (!u || !u.available || u.dismissed) { el.classList.add('hidden'); return; }
@@ -280,7 +285,7 @@ async function tick() {
   $('condWhy').textContent = c.why || '';
   $('condLast').textContent = c.last ? 'Last run ' + new Date(c.last.at).toLocaleString() + ': ' + (c.last.elite ? 'Elite Champion ' + c.last.elite : 'no Elite; best ' + (c.last.best || 'none') + ', ' + c.last.bestPassed + ' of ' + c.last.windows + ' windows') : '';
   $('title').textContent = s.phase === 'running' ? (s.mode === 'conditioning' ? 'Conditioning' : 'Training') : s.phase === 'stopping' ? 'Stopping...' : s.lastStop ? 'Stopped: ' + s.lastStop : 'Ready';
-  if (!filled && s.settings) { $('host').value = s.settings.host || ''; $('user').value = s.settings.user || ''; $('key').value = s.settings.key || ''; $('intensity').value = s.settings.intensity || 'balanced'; $('kalshiSweep').checked = s.settings.kalshiSweep === true; if (s.settings.host) $('srv').open = false; filled = true; }
+  if (!filled && s.settings) { $('host').value = s.settings.host || ''; $('user').value = s.settings.user || ''; $('key').value = s.settings.key || ''; $('intensity').value = s.settings.intensity || 'balanced'; $('kalshiSweep').checked = s.settings.kalshiSweep === true; if (s.settings.host) $('srv').open = false; filled = true; srvWarn(); }
   $('notice').classList.toggle('hidden', !s.notice);
   $('notice').textContent = s.notice ? 'Last time: ' + s.notice + ' If the computer froze, choose Gentle (or Balanced) and close other heavy programs while it trains.' : '';
   const rs = s.resources;

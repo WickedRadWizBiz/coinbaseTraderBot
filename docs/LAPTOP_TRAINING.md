@@ -180,6 +180,13 @@ npm run train:laptop -- --hours 12 --host <server ip> --key ~/lightsail.pem # or
 4. **Push (SSH).** After every round that made a model better, and at the end: the models directory to the
    server, newer files only (not the caches or the links to replay days). The running bot hot-swaps every
    model that changed. A file changed here is never overwritten by an older copy from the server.
+   - **At the start of each run** too: any model newer than the server's copy goes up first, so models from a run that
+     was closed before its last send (or had no server set) still arrive.
+   - **Every send is checked:** the server's models are listed again and each file must be there with its size and
+     time. Each send is recorded in `trainer-data\pushes.jsonl`, and STATUS.txt's first line says where the models went
+     (`Server: ... Last send ...: 7 file(s), 7 confirmed on the server`, or `Server: NOT SET`).
+   - **No server set:** the window warns above Start, and the models stay on the laptop. The Server section needs your
+     Lightsail address, the user (`ubuntu`) and the path to its SSH key (.pem).
 
 **Stopping and starting again.** Press Stop, Ctrl+C, or close the window, and the next run picks up where this one
 stopped:

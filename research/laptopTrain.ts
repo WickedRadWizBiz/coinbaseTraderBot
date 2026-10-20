@@ -131,6 +131,31 @@ export function filesToPush(local: Map<string, RemoteFile>, remote: RemoteFile[]
     .filter((f) => !NO_PUSH.test(f.path) && (!CHAMPION.test(f.path) || f.mtime >= since));
 }
 
+/** Which sent files the server's listing after the send shows with the same size and time (2 s slack). */
+export function confirmPushed(sent: RemoteFile[], after: RemoteFile[]): { confirmed: number; missing: string[] } {
+  const r = new Map(after.map((f) => [f.path, f]));
+  const missing = sent.filter((f) => { const s = r.get(f.path); return !s || s.size !== f.size || Math.abs(s.mtime - f.mtime) > 2000; }).map((f) => f.path);
+  return { confirmed: sent.length - missing.length, missing };
+}
+
+/** One send of models to the server (trainer-data/pushes.jsonl). */
+export interface PushRecord { at: number; why: string; files: number; mb: number; confirmed: number; missing: string[]; error?: string }
+
+export function readPushes(dataDir: string): PushRecord[] {
+  try { return fs.readFileSync(path.join(dataDir, 'pushes.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as PushRecord); } catch { return []; }
+}
+
+/** Where this run's models go, for STATUS.txt and the console. */
+export function serverLine(o: { host?: string; connected: boolean; last?: PushRecord }): string {
+  if (!o.host) return 'Server: NOT SET. The models this trains stay on this laptop; fill in the window\'s Server section so they reach your bot.';
+  if (!o.connected) return `Server: ${o.host} did not answer over SSH. The models stay here until a run reaches it.`;
+  const l = o.last;
+  if (!l) return `Server: ${o.host}. Nothing sent yet (no model newer than the server's).`;
+  const when = new Date(l.at).toISOString().slice(0, 16).replace('T', ' ');
+  if (l.error) return `Server: ${o.host}. Last send ${when} UTC FAILED (${l.error}); tried again after the next round that improves a model, and at the end.`;
+  return `Server: ${o.host}. Last send ${when} UTC: ${l.files} file(s), ${l.confirmed} confirmed on the server${l.missing.length ? `, NOT confirmed: ${l.missing.slice(0, 5).join(', ')}${l.missing.length > 5 ? ', ...' : ''}` : ''}.`;
+}
+
 /** Local conditioning champion files the server no longer has (rolled back there): to remove here. */
 export function championsGone(remote: RemoteFile[], local: Map<string, RemoteFile>): string[] {
   const r = new Set(remote.map((f) => f.path));
@@ -628,17 +653,40 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   }
 
   // ---- 4. push: after every round that made a model better, and at the end ----
+  // Every send is checked: the server's models are listed again and each file must be there with its size and time.
+  // Each send is recorded (trainer-data/pushes.jsonl) and the last one is in STATUS.txt.
+  let lastPush: PushRecord | undefined = readPushes(dataDir).at(-1);
+  const listModels = () => server!.run(`mkdir -p ~/bot/data/models && cd ~/bot/data/models && find . -type f -printf '%P\\t%s\\t%T@\\n'`);
+  const record = (r: PushRecord) => {
+    lastPush = r;
+    try { fs.appendFileSync(path.join(dataDir, 'pushes.jsonl'), JSON.stringify(r) + '\n'); } catch { /* the log has it */ }
+    // STATUS.txt (written before the round's send) shows this send too.
+    try {
+      const f = path.join(dataDir, 'STATUS.txt');
+      if (fs.existsSync(f)) writeText(f, fs.readFileSync(f, 'utf8').split('\n').map((l) => (l.startsWith('Server: ') ? where() : l)).join('\n'));
+    } catch { /* the next round writes it */ }
+  };
   const push = async (why: string) => {
     if (!server || flag('no-push')) return;
     hooks?.phase?.('push');
-    const m = server.run(`mkdir -p ~/bot/data/models && cd ~/bot/data/models && find . -type f -printf '%P\\t%s\\t%T@\\n'`);
-    if (!m.ok) { log(`listing the server's models failed: ${m.err.trim().slice(0, 300)}`); return; }
+    const m = listModels();
+    if (!m.ok) { log(`listing the server's models failed: ${m.err.trim().slice(0, 300)}`); record({ at: Date.now(), why, files: 0, mb: 0, confirmed: 0, missing: [], error: 'could not list the server\'s models' }); return; }
     const send = filesToPush(localManifest(models), parseManifest(m.out), t0);
     if (!send.length) { log('no model newer than the server\'s'); return; }
-    log(`${why}: sending ${send.length} file(s), ${(send.reduce((a, f) => a + f.size, 0) / 1e6).toFixed(1)} MB, to the server...`);
+    const mb = +(send.reduce((a, f) => a + f.size, 0) / 1e6).toFixed(1);
+    log(`${why}: sending ${send.length} file(s), ${mb} MB, to the server...`);
     const ok = await server.push(models, send.map((f) => f.path), '~/bot/data/models');
-    log(ok ? 'models sent; the bot loads the ones that changed within a minute (no restart)' : 'sending failed; it is tried again after the next round that improves a model, and at the end');
+    const after = listModels();
+    const check = after.ok ? confirmPushed(send, parseManifest(after.out)) : { confirmed: 0, missing: send.map((f) => f.path) };
+    record({ at: Date.now(), why, files: send.length, mb, confirmed: check.confirmed, missing: check.missing, ...(ok ? {} : { error: 'the copy did not finish' }) });
+    if (ok && !check.missing.length) log(`models sent and confirmed on the server (${check.confirmed} file(s)); the bot loads the ones that changed within a minute (no restart)`);
+    else log(`sending ${ok ? 'finished but' : 'failed;'} ${check.missing.length} file(s) not confirmed on the server (${check.missing.slice(0, 5).join(', ')}); tried again after the next round that improves a model, and at the end`);
   };
+  const where = () => serverLine({ host: s.host, connected: Boolean(server), last: lastPush });
+  log(where());
+  if (!s.host) hooks?.notice?.('No server set: the models this run trains stay on this laptop. Fill in the Server section so they reach your bot.');
+  // Models from earlier runs that never reached the server (a run closed before its last send, or no server then).
+  await push('models from earlier runs');
 
   // The server's settings, then the laptop's bigger budgets and PyTorch over them, then trainer.env, then anything
   // set in the environment.
@@ -715,7 +763,7 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     console.log('');
     hooks?.roundEnd?.(board);
     try {
-      writeText(path.join(dataDir, 'STATUS.txt'), [`Kalshi bot trainer, ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC`, '', ...board, '', 'Steps this round:', ...reportSummary(rep).map((l) => `  ${l}`), '', 'What these numbers should look like: GUIDE.txt', ''].join('\n'));
+      writeText(path.join(dataDir, 'STATUS.txt'), [`Kalshi bot trainer, ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC`, '', where(), '', ...board, '', 'Steps this round:', ...reportSummary(rep).map((l) => `  ${l}`), '', 'What these numbers should look like: GUIDE.txt', ''].join('\n'));
       const w = readiness?.wholeBot;
       fs.appendFileSync(path.join(dataDir, 'rounds.jsonl'), JSON.stringify({ at: new Date().toISOString(), round, full, minutes: Math.round(lastMs / 60_000), ...outcome, met: readiness?.met ?? null, wholeBot: w ? { days: w.days, meanPct: w.meanPct, ciLoPct: w.ciLoPct, maxDdPct: w.maxDdPct, sharpe: w.sharpe, perDayUsd: w.perDayUsd, solid: w.solid } : null, plateau, stop: next.stop ?? null }) + '\n');
     } catch (e) { log(`could not write the status files: ${(e as Error).message}`); }
