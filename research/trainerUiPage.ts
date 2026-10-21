@@ -160,7 +160,7 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
         </div>
       </details>
       <div id="srvWarn" class="err">No server set: the models this trains stay on this laptop and never reach your bot.</div>
-      <div class="btns"><button id="start">Start training</button></div>
+      <div class="btns"><button id="start">Start training</button><button id="send" class="ghost" title="Sends every model this computer trained that is newer than the server's copy, checks each arrived, and trains nothing">Send to server now</button></div>
       <div class="field" style="margin-top: 10px;">
         <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text); font-size: 13px; text-transform: none; letter-spacing: normal;">
           <input type="checkbox" id="skipDataDownload" style="width: auto; margin: 0;" />
@@ -235,6 +235,11 @@ $('start').addEventListener('click', async () => {
   const r = await post('/api/start', { mode, hours: (Number($('minutes').value) || 60) / 60, intensity: $('intensity').value, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim(), skipDataDownload, kalshiSweep: $('kalshiSweep').checked });
   if (!r.ok) $('startErr').textContent = r.error || 'could not start';
 });
+$('send').addEventListener('click', async () => {
+  $('startErr').textContent = '';
+  const r = await post('/api/start', { mode: 'send', intensity: $('intensity').value, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim() });
+  if (!r.ok) $('startErr').textContent = r.error || 'could not send';
+});
 let lastCond = null;
 $('condStart').addEventListener('click', async () => {
   $('startErr').textContent = '';
@@ -285,7 +290,7 @@ async function tick() {
   $('condState').textContent = c.ready ? 'ready' : 'not yet';
   $('condWhy').textContent = c.why || '';
   $('condLast').textContent = c.last ? 'Last run ' + new Date(c.last.at).toLocaleString() + ': ' + (c.last.elite ? 'Elite Champion ' + c.last.elite : 'no Elite; best ' + (c.last.best || 'none') + ', ' + c.last.bestPassed + ' of ' + c.last.windows + ' windows') : '';
-  $('title').textContent = s.phase === 'running' ? (s.mode === 'conditioning' ? 'Conditioning' : 'Training') : s.phase === 'stopping' ? 'Stopping...' : s.lastStop ? 'Stopped: ' + s.lastStop : 'Ready';
+  $('title').textContent = s.phase === 'running' ? (s.mode === 'conditioning' ? 'Conditioning' : s.mode === 'send' ? 'Sending models to the server' : 'Training') : s.phase === 'stopping' ? 'Stopping...' : s.lastStop ? (s.mode === 'send' ? 'Done: ' : 'Stopped: ') + s.lastStop : 'Ready';
   if (!filled && s.settings) { $('host').value = s.settings.host || ''; $('user').value = s.settings.user || ''; $('key').value = s.settings.key || ''; $('intensity').value = s.settings.intensity || 'balanced'; $('kalshiSweep').checked = s.settings.kalshiSweep === true; if (s.settings.host) $('srv').open = false; filled = true; srvWarn(); }
   $('notice').classList.toggle('hidden', !s.notice);
   $('notice').textContent = s.notice ? 'Last time: ' + s.notice + ' If the computer froze, choose Gentle (or Balanced) and close other heavy programs while it trains.' : '';

@@ -25,7 +25,7 @@ import path from 'path';
 
 export interface UiState {
   phase: 'idle' | 'running' | 'stopping';
-  mode: 'continue' | 'full' | 'conditioning'; hours: number; round: number;
+  mode: 'continue' | 'full' | 'conditioning' | 'send'; hours: number; round: number;
   /** Conditioning mode: whether it may start (a normal training run finished since the last conditioning run), and
    *  the last result. */
   conditioning: ConditioningView;
@@ -89,19 +89,22 @@ export class TrainerUi {
     const settings: TrainerSettings = { ...this.state.settings, host: req.host?.trim() || undefined, user: req.user?.trim() || 'ubuntu', key: req.key?.trim() || undefined, intensity: asIntensity(req.intensity ?? this.state.settings.intensity), kalshiSweep: req.kalshiSweep ?? this.state.settings.kalshiSweep ?? false };
     if (settings.host && !settings.key) return { ok: false, error: 'a server needs its SSH key file' };
     const conditioning = req.mode === 'conditioning';
+    // "Send to server now": the models from earlier runs go to the server; nothing trains.
+    const send = req.mode === 'send';
+    if (send && !settings.host) return { ok: false, error: 'fill in the Server section first (address, user, SSH key file)' };
     if (conditioning) {
       const c = conditioningView(path.join(this.o.dataDir, 'models'));
       // Not recommended yet: started only when the window confirmed it (force).
       if (!c.ready && req.force !== true) return { ok: false, error: c.why };
     }
     writeSettings(this.o.dataDir, settings);
-    Object.assign(this.state, { phase: 'running', mode: conditioning ? 'conditioning' : req.mode === 'full' ? 'full' : 'continue', hours, round: 0, settings, lastStop: null, lastError: null, board: [] });
+    Object.assign(this.state, { phase: 'running', mode: send ? 'send' : conditioning ? 'conditioning' : req.mode === 'full' ? 'full' : 'continue', hours: send ? 0 : hours, round: 0, settings, lastStop: null, lastError: null, board: [] });
     this.stopFlag = false;
     const models = path.join(this.o.dataDir, 'models');
     const run = this.o.run ?? runTrainer;
     void run({
-      hours, dataDir: this.o.dataDir, settings, sweepAll: this.state.mode === 'full', only: conditioning ? ['conditioning'] : undefined,
-      skipDataDownload: req.skipDataDownload === true,
+      hours: send ? 0 : hours, dataDir: this.o.dataDir, settings, sweepAll: this.state.mode === 'full', only: conditioning ? ['conditioning'] : undefined,
+      skipDataDownload: req.skipDataDownload === true, sendOnly: send,
       hooks: {
         roundStart: (round, full) => { this.state.round = round; this.tracker = new RoundProgress(readRounds(models), full); },
         phase: (p) => { this.tracker ??= new RoundProgress(readRounds(models), true); this.tracker.setPhase(p); },

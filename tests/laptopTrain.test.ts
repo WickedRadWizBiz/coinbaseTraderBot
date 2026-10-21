@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
-import { afterRound, championsGone, confirmPushed, CONTINUE_STEPS, finishedStep, fullRoundDone, modelsChangedSince, readTrainerState, writeTrainerState, filesToPull, filesToPush, guideText, kalshiSweeps, laptopProfile, readSettings, writeSettings, LOCAL_ONLY_DIRS, localManifest, parseManifest, readPushes, roundOutcome, safeServerEnv, scoreboard, Server, serverLine } from '../research/laptopTrain';
+import { afterRound, championsGone, confirmPushed, CONTINUE_STEPS, finishedStep, fullRoundDone, modelsChangedSince, readTrainerState, writeTrainerState, filesToPull, filesToPush, guideText, kalshiSweeps, laptopProfile, readSettings, writeSettings, LOCAL_ONLY_DIRS, localManifest, parseManifest, readPushes, roundOutcome, runTrainer, safeServerEnv, scoreboard, Server, serverLine } from '../research/laptopTrain';
 import { dailyStats, type ReadinessFile } from '../research/readiness';
 import { resourcePlan } from '../research/trainerResources';
 import { tmpDir } from './helpers';
@@ -186,6 +186,15 @@ test('the TA network\'s row cache is never copied down; the laptop\'s own tourna
   assert.deepEqual(filesToPull(srv, new Map()).map((f) => f.path), ['models/work/tanet-population.json', 'models/ta_net.json'], 'a laptop without a tournament starts from the server\'s');
 });
 
+test('connecting the server keeps the laptop\'s training progress: its state, history ledger and SNN tournaments', () => {
+  // The server's daily run writes its own on other data; newer there must not replace the laptop's days of rounds.
+  const progress = ['models/pipeline_state.json', 'models/work/history-ledger.json', 'models/work/snnpbt/crypto/state.json', 'models/work/snnpbt/crypto/m3.json'];
+  const srv = parseManifest([...progress, 'models/model.json'].map((p) => `${p}\t10\t5000`).join('\n'));
+  const mine = new Map(progress.map((p) => [p, { path: p, size: 1, mtime: 1_000_000 }] as const));
+  assert.deepEqual(filesToPull(srv, mine).map((f) => f.path), ['models/model.json'], 'only the model the laptop does not have comes down');
+  assert.deepEqual(filesToPull(srv, new Map()).map((f) => f.path).sort(), [...progress, 'models/model.json'].sort(), 'a laptop with none starts from the server\'s');
+});
+
 test('trainer state: a full round counts once its history and replay finished (also when stopped later); remembered between runs', () => {
   const done = (step: string, skipped?: string) => ({ step, ok: true, ...(skipped ? { skipped } : {}) });
   assert.equal(fullRoundDone([done('history'), done('history_replay'), done('snn', 'stop requested')]), true, 'stopped after the replay');
@@ -231,4 +240,36 @@ test('laptop trainer: a finished step with a new model the bot loads is sent at 
   assert.deepEqual(modelsChangedSince(d, t, t + 20_000), []);
   assert.deepEqual(modelsChangedSince(d, t, t + 30_000), ['model.json']);
   assert.deepEqual(modelsChangedSince(path.join(d, 'missing'), t), []);
+});
+
+test('send only: the laptop\'s earlier models go to the server and are confirmed there; nothing is copied down, nothing trains', async () => {
+  const root = tmpDir();
+  const bin = path.join(root, 'bin'), home = path.join(root, 'server-home'), here = path.join(root, 'laptop');
+  fs.mkdirSync(bin); fs.mkdirSync(path.join(home, 'bot/data/models'), { recursive: true }); fs.mkdirSync(path.join(home, 'bot/data/recordings'), { recursive: true });
+  fs.writeFileSync(path.join(bin, 'ssh'), `#!/bin/bash\nfor a; do cmd="$a"; done\nHOME="${home}" exec bash -c "$cmd"\n`, { mode: 0o755 });
+  // The server: its own (newer) progress file and a recording; the laptop: days of training.
+  fs.writeFileSync(path.join(home, 'bot/data/models/pipeline_state.json'), '{"server":true}');
+  fs.writeFileSync(path.join(home, 'bot/data/recordings/md-2026-10-20.jsonl'), 'r\n');
+  const mine = { 'models/ta_net.json': '{"net":1}', 'models/gp_indicators.json': '{"gp":1}', 'models/work/snnpbt/crypto/state.json': '{"rounds":40}', 'models/pipeline_state.json': '{"laptop":true}' };
+  for (const [f, body] of Object.entries(mine)) {
+    fs.mkdirSync(path.dirname(path.join(here, f)), { recursive: true });
+    fs.writeFileSync(path.join(here, f), body);
+  }
+  fs.utimesSync(path.join(here, 'models/pipeline_state.json'), new Date(Date.now() - 86_400_000), new Date(Date.now() - 86_400_000));
+  const key = path.join(root, 'k.pem');
+  fs.writeFileSync(key, 'not a real key');
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    const r = await runTrainer({ hours: 0, dataDir: here, sendOnly: true, settings: { host: 'h', user: 'u', port: 22, key } });
+    assert.equal(r.why, 'models from earlier runs sent');
+    for (const f of ['ta_net.json', 'gp_indicators.json', 'work/snnpbt/crypto/state.json']) assert.equal(fs.readFileSync(path.join(home, 'bot/data/models', f), 'utf8'), mine[`models/${f}` as keyof typeof mine], f);
+    assert.equal(fs.readFileSync(path.join(home, 'bot/data/models/pipeline_state.json'), 'utf8'), '{"server":true}', 'the server\'s newer progress file stays');
+    assert.equal(fs.readFileSync(path.join(here, 'models/pipeline_state.json'), 'utf8'), '{"laptop":true}', 'nothing copied down over the laptop\'s');
+    assert.ok(!fs.existsSync(path.join(here, 'recordings')), 'no recordings copied down');
+    const last = readPushes(here).at(-1)!;
+    assert.equal(last.files, 3);
+    assert.equal(last.confirmed, 3);
+    assert.deepEqual(last.missing, []);
+  } finally { process.env.PATH = oldPath; }
 });
