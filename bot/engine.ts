@@ -340,7 +340,7 @@ export class Engine {
 
   constructor(private readonly d: EngineDeps) {
     this.now = d.now ?? Date.now;
-    const sf = (k: string) => (d.cfg.dataDir && d.streakFiles !== false ? path.join(d.cfg.dataDir, `streak_${k}.json`) : undefined);
+    const sf = (k: string) => (d.cfg.dataDir && d.streakFiles !== false ? path.join(d.cfg.bookDir ?? d.cfg.dataDir, `streak_${k}.json`) : undefined);
     this.streak = { crypto: new StreakScaler(DEFAULT_STREAK, sf('crypto')), tennis: new StreakScaler(DEFAULT_STREAK, sf('tennis')) };
     this.cadence = new CadenceGate(d.cfg.strategy);
     this.volFc = new VolForecaster(d.cfg.strategy.volModel ? d.volModel : undefined);
@@ -379,7 +379,7 @@ export class Engine {
       }
       // The sizing tuner's data (research/tuneSizing.ts): every settled entry with its probability and price.
       if (lines.length && d.cfg.dataDir && d.streakFiles !== false) {
-        try { fs.appendFileSync(path.join(d.cfg.dataDir, 'trades.jsonl'), lines.join('\n') + '\n'); } catch { /* best effort */ }
+        try { fs.appendFileSync(path.join(d.cfg.bookDir ?? d.cfg.dataDir, 'trades.jsonl'), lines.join('\n') + '\n'); } catch { /* best effort */ }
       }
     });
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized: number; positionBefore: number }) => {
@@ -703,7 +703,7 @@ export class Engine {
     if (!c || now - c.at >= 3_600_000 || now < c.at) {
       const rows: Array<{ ts: number; ticker: string; cost: number; count: number; won: boolean; book?: string }> = [];
       try {
-        const file = path.join(this.d.cfg.dataDir, 'trades.jsonl');
+        const file = path.join(this.d.cfg.bookDir ?? this.d.cfg.dataDir, 'trades.jsonl');
         if (fs.existsSync(file)) {
           // Only the newest ~4 MB is read (never the whole file: it only grows).
           const fd = fs.openSync(file, 'r');

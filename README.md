@@ -137,6 +137,10 @@ In the final minute, open positions ride to settlement.
 
   - The tier comes from the **high-water mark** of tradable bankroll, not the current balance. Once the account has grown into a tier it stays there, and losses never re-escalate risk. Withdrawals from trading cash lower the mark.
   - The **hard floor is $10** (`MIN_TRADABLE_BANKROLL_USD`): a $20 account keeps trading after a $2 loss and stops only below $10. `PAPER_BANKROLL_USD` defaults to $100 (raising it later tops up the existing paper account by the difference).
+  - The paper pool exists only in paper mode. In live mode the bot shows and trades only the Kalshi cash pool:
+    - its orders, positions, vault, break-even, balance history, perps trades and Kalshi check live in `DATA_DIR/live`, apart from the paper books;
+    - a perps setting of `paper` is off in live.
+    - Switching back to paper finds the paper books as they were.
   - The EV target is a share (25%) of the per-order risk budget, capped at $10, so it never limits size below the tier. At $20 a typical trade (about 3.5 contracts at 56¢ with a 6.5¢ edge) expects about $0.23, winning about $1.50 or losing $2. Five losses in a row, a normal streak, takes $20 to about $12 (each loss is 10% of what is left, and the drawdown brake shrinks size further).
   - The normal tier is the configured `RISK_*` and `STRATEGY_KELLY_FRACTION` values, and `SIZING_TIERS=off` applies it at every size.
   - **The daily stop is in dollars too.** Each tier has a dollar ceiling (`dailyLossUsd`: $4, $5, and `RISK_DAILY_LOSS_USD` at the normal tier), interpolated like the other limits. The stop is the lower of the tier fraction of bankroll and that ceiling. Above $100 the ceiling grows in proportion to the high-water mark instead of staying at one flat number, so a $1,000 account is stopped at 3% ($30), not at $5. The dashboard shows the tier's actual limit.

@@ -35,6 +35,12 @@ test('live mode needs prod, credentials, a deploy-time acknowledgement, and no p
   assert.throws(() => loadConfig({ ...base, KALSHI_ENV: 'prod' }), /LIVE_TRADING_ACKNOWLEDGED/);
   const ok = { ...base, KALSHI_ENV: 'prod', LIVE_TRADING_ACKNOWLEDGED: 'I_ACCEPT_REAL_MONEY_RISK' };
   assert.equal(loadConfig(ok).mode, 'live');
+  // The paper pool never shows in live: its own books folder, and no simulated perps pool next to the real money.
+  const live = loadConfig({ ...ok, DATA_DIR: dir });
+  assert.equal(live.bookDir, path.join(path.resolve(dir), 'live'));
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: token, DATA_DIR: dir }).bookDir, path.resolve(dir), 'paper keeps its books in DATA_DIR');
+  assert.equal(live.perps.trading, 'off', 'PERP_TRADING=paper (the default) is off in live');
+  assert.equal(live.perps.hedge, 'off');
   assert.throws(() => loadConfig({ ...ok, ALLOW_PROXY_INDEX: 'true' }), /PROXY/);
   fs.chmodSync(key, 0o644);
   assert.throws(() => loadConfig(ok), /chmod 600/);
