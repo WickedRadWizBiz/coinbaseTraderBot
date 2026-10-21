@@ -114,6 +114,7 @@ test('window server: only this computer, only with the token; start, progress, s
     assert.equal((await call(port, 'GET', '/api/state')).status, 403, 'no token, no state');
     assert.equal((await call(port, 'GET', `/?t=${token}`, { host: 'evil.example' })).status, 403, 'another host name (DNS rebinding) is refused');
     assert.equal(JSON.parse((await call(port, 'POST', '/api/start', { token, body: { host: '1.2.3.4' } })).body).error, 'a server needs its SSH key file');
+    assert.match(JSON.parse((await call(port, 'POST', '/api/start', { token, body: { mode: 'send' } })).body).error, /fill in the Server section/, 'nothing to send to without a server');
     const started = JSON.parse((await call(port, 'POST', '/api/start', { token, body: { mode: 'full', hours: 3 } })).body);
     assert.equal(started.ok, true);
     assert.deepEqual(seen, { hours: 3, sweepAll: true, host: undefined });
@@ -285,4 +286,22 @@ test('intensity: chosen in the window, kept for the next run; the window shows w
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(seen, 'balanced');
   release();
+});
+
+test('"Send to server now": the models from earlier runs go to the server; nothing is copied down and nothing trains', async () => {
+  const dataDir = tmpDir();
+  let seen: { hours: number; sendOnly?: boolean; only?: string[] } | undefined;
+  const ui = new TrainerUi({
+    dataDir,
+    check: async () => ({ current: 'a', latest: 'a', publishedAt: null, available: false, canInstall: false, downloadUrl: null, checkedAt: null }),
+    install: async () => undefined,
+    run: async (o) => { seen = { hours: o.hours, sendOnly: o.sendOnly, only: o.only }; return { why: '3 file(s) sent and confirmed on the server' }; },
+  });
+  assert.match(ui.start({ mode: 'send' }).error ?? '', /fill in the Server section/);
+  assert.equal(ui.start({ mode: 'send', hours: 2, host: '1.2.3.4', user: 'ubuntu', key: 'k.pem' }).ok, true);
+  assert.equal(ui.state.mode, 'send');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(seen, { hours: 0, sendOnly: true, only: undefined }, 'no session clock, the send-only run');
+  assert.equal(ui.state.phase, 'idle');
+  assert.equal(ui.state.lastStop, '3 file(s) sent and confirmed on the server');
 });

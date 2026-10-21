@@ -38,6 +38,11 @@ model better, it sends the models to the bot, which loads them without a restart
      (Lightsail console → Account → SSH keys → Download). With it the trainer copies the bot's recordings
      and uploads the models; leave it empty to train on downloaded history only.
 
+   **Send to server now** (next to Start) sends every model this computer has trained that is newer than the server's
+   copy, checks each one arrived, and trains nothing. Nothing is copied from the server first. Use it to send what
+   earlier runs made, for example the first time you fill in the Server section after training without one.
+   From the console: `--send-only`.
+
    Press **Start**. While it runs, the window shows:
    - two progress bars, **Downloads** and **Training**, each with the time left and the clock time it
      should finish (from how long the same steps took in the last rounds, and, for a step that reports
@@ -217,6 +222,9 @@ A run with `--hours 0` has no clock: rounds until it stops by itself, each sized
      time the step reported done goes: a file the next step is still writing waits for that step's send.
    - **At the start of each run** too: any model newer than the server's copy goes up first, so models from a run that
      was closed before its last send (or had no server set) still arrive.
+   - **The laptop's own progress is kept.** The copy from the server never replaces the laptop's pipeline state, history
+     ledger, TA-network tournament or SNN tournaments once the laptop has its own: the server's daily run writes its own
+     on other data, and a newer copy from there would restart the laptop's tournaments.
    - **Every send is checked:** the server's models are listed again and each file must be there with its size and
      time. Each send is recorded in `trainer-data\pushes.jsonl`, and STATUS.txt's first line says where the models went
      (`Server: ... Last send ...: 7 file(s), 7 confirmed on the server`, or `Server: NOT SET`).

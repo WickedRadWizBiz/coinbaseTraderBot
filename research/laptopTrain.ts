@@ -35,6 +35,7 @@
 //   --host H --user U --port P --key FILE    the server and its SSH key (Lightsail: the instance's .pem)
 //   --days N       recorded days to copy (default 45)      --no-pull / --no-push      --only a,b (steps)
 //   --setup        ask the questions again (server, key)
+//   --send-only    only send the models from earlier runs to the server (no copy from it, no training)
 //
 // The TA network's tournament trains in PyTorch, on the GPU when there is an NVIDIA one (research/torchSetup.ts sets
 // up Python and PyTorch once in trainer-data; TA_NET_ENGINE=ts in trainer.env keeps it in TypeScript); everything
@@ -114,8 +115,11 @@ export function filesToPull(remote: RemoteFile[], local: Map<string, RemoteFile>
  *    themselves still come down; the index catches up with them by size.
  *  - the TA network's tournament: the server's daily remote training writes its own (other settings, other history),
  *    and copying it over the laptop's would throw away the laptop's rounds (a tournament with other inputs starts
- *    over). */
-const KEEP_LOCAL = /(^|\/)history\/kalshi\/[^/]+\/\.index\.json$|(^|\/)work\/tanet-population\.json$/;
+ *    over).
+ *  - the rest of the laptop's training progress: the pipeline's state (which tournaments are running, on which knobs),
+ *    the history ledger (which weeks each network has trained on) and the SNN tournaments. The server's daily run writes
+ *    its own on other data; a copy over the laptop's would restart the laptop's tournaments. */
+const KEEP_LOCAL = /(^|\/)history\/kalshi\/[^/]+\/\.index\.json$|(^|\/)work\/tanet-population\.json$|(^|\/)models\/pipeline_state\.json$|(^|\/)work\/history-ledger\.json$|(^|\/)work\/snnpbt\//;
 
 /** Never copied down: the TA network's row cache and training pack are built from this machine's own history (the
  *  server's never match it, and a copy over the laptop's made it recompute every coin's years of rows). */
@@ -574,7 +578,7 @@ export async function laptopTrainMain(): Promise<void> {
   writeSettings(dataDir, s);
   let stop = false;
   process.on('SIGINT', () => { if (stop) process.exit(130); stop = true; log('stopping after the step in progress (Ctrl+C again to quit now)'); });
-  await runTrainer({ hours, dataDir, settings: s, sweepAll: flag('sweep-all'), hooks: { stopRequested: () => stop } });
+  await runTrainer({ hours, dataDir, settings: s, sweepAll: flag('sweep-all'), sendOnly: flag('send-only'), hooks: { stopRequested: () => stop } });
 }
 
 /** PyTorch for the TA network's tournament (set up once), checked against the TypeScript network: the pipeline's
@@ -594,7 +598,9 @@ export async function torchFor(dataDir: string, say: (m: string) => void, python
 }
 
 /** The rounds (shared by the console and the window): pull, rounds of the pipeline until it stops, push. */
-export async function runTrainer(o: { hours: number; dataDir: string; settings: TrainerSettings; sweepAll?: boolean; hooks?: TrainerHooks; only?: string[]; skipDataDownload?: boolean }): Promise<{ why?: string }> {
+/** `sendOnly`: only send the models from earlier runs to the server (the window's "Send to server now"): nothing is copied
+ *  from the server and nothing trains. */
+export async function runTrainer(o: { hours: number; dataDir: string; settings: TrainerSettings; sweepAll?: boolean; hooks?: TrainerHooks; only?: string[]; skipDataDownload?: boolean; sendOnly?: boolean }): Promise<{ why?: string }> {
   const t0 = Date.now();
   const hooks = o.hooks;
   const { hours, dataDir } = o;
@@ -642,7 +648,7 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   }
 
   async function runRounds(): Promise<{ why?: string }> {
-  console.log(`\nKalshi bot trainer: ${continuous ? 'until it stops by itself' : `a ${Math.round(hours * 60)}-minute session`}, data in ${dataDir}, ${plan.intensity}: ${plan.workers} of ${os.cpus().length} CPU threads (the TA network trains in PyTorch, on the GPU when there is one).\n`);
+  console.log(`\nKalshi bot trainer: ${o.sendOnly ? 'sending the models from earlier runs to the server' : continuous ? 'until it stops by itself' : `a ${Math.round(hours * 60)}-minute session`}, data in ${dataDir}, ${plan.intensity}: ${plan.workers} of ${os.cpus().length} CPU threads (the TA network trains in PyTorch, on the GPU when there is one).\n`);
 
   let server: Server | undefined;
   if (s.host && s.key && wantSync) {
@@ -672,7 +678,7 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     }
   };
   let serverEnv: Record<string, string> = {};
-  if (server && !flag('no-pull')) {
+  if (server && !flag('no-pull') && !o.sendOnly) {
     await pull(Number(argOf('days') ?? 45), o.skipDataDownload ? 'index' : 'all');
     const env = server.run("grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env");
     if (env.ok) { serverEnv = safeServerEnv(env.out); log(`using ${Object.keys(serverEnv).length} non-secret setting(s) from the server's bot.env`); }
@@ -717,7 +723,19 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   log(where());
   if (!s.host) hooks?.notice?.('No server set: the models this run trains stay on this laptop. Fill in the Server section so they reach your bot.');
   // Models from earlier runs that never reached the server (a run closed before its last send, or no server then).
+  const before = lastPush;
   await push('models from earlier runs');
+  if (o.sendOnly) {
+    hooks?.phase?.('done');
+    if (!server) { log('nothing sent: no server reachable (fill in the Server section: address, user, SSH key)'); return { why: 'no server to send to' }; }
+    log(where());
+    // This send's record (none: the server already had everything).
+    const r = lastPush !== before ? lastPush : undefined;
+    return { why: !r ? 'nothing to send: the server already has every model this computer trained'
+      : r.error ? `sending failed: ${r.error}`
+      : r.missing.length ? `${r.confirmed} of ${r.files} file(s) confirmed on the server (not confirmed: ${r.missing.slice(0, 3).join(', ')})`
+      : `${r.files} file(s) sent and confirmed on the server` };
+  }
   // Each finished step's models go at once, so a session closed or crashed part-way keeps what it finished. Only what a
   // step promoted triggers a send (a tournament stopped mid-round replaces no live model); its progress files go along.
   // `at`: when the step reported done; what it wrote by then is complete.
