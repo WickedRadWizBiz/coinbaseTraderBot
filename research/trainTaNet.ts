@@ -56,6 +56,7 @@ import { rng } from './stats';
 import { TaNetTorch, type TaNetEngine } from './taNetTorch';
 import { progress } from './progress';
 import { WorkerPool, workerCount, workerScript } from './workerPool';
+import { sessionTimeUp } from './sessionClock';
 
 const H = 3_600_000;
 const DAY = 86_400_000;
@@ -845,6 +846,8 @@ export interface TaNetTrainOpts {
   fresh?: boolean;
   /** Stop after this many rounds in this call (testing / time budget). */
   maxRounds?: number;
+  /** Asked before each round: true ends this call there (the training session's time is up: research/sessionClock.ts). */
+  stop?: () => boolean;
   /** Override base hyperparameters (member 0; the others start within +/-10% of it). */
   baseHyper?: Partial<Hyper>;
   /** Every N rounds the culled member restarts from scratch with random knobs (0 = never). */
@@ -1022,7 +1025,7 @@ async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: 
   rounds = rounds.map((r, k) => ({ ...r, index: (saved?.nextIndex ?? 0) + k }));
   const pending = rounds.length;
   if (o.maxRounds !== undefined && o.maxRounds > 0) rounds = rounds.slice(0, o.maxRounds);
-  const remaining = pending - rounds.length;
+  let remaining = pending - rounds.length;
   const resume = saved ? {
     trials: saved.trials, log: saved.log,
     members: saved.members.map((m): PbtMember<Member> => ({ id: m.id, hyper: m.hyper, state: { w: unb64(m.w), m: unb64(m.m), v: unb64(m.v), step: m.step }, lineage: m.lineage, scores: m.scores, ...(m.blocks ? { blocks: m.blocks } : {}), bornRound: m.bornRound, record: m.record.map(([ts, ret, cost, group]) => ({ ts, ret, cost, group })), ...(m.island !== undefined ? { island: m.island } : {}), ...(m.parents ? { parents: m.parents } : {}) })),
@@ -1074,8 +1077,11 @@ async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: 
       },
     },
     onRound: ({ members, trials, log: plog, round, ga }) => { const t = eng.took(); if (t) log(`round ${round.index + 1}: ${t}`); save(members, trials, plog, round.evalTo, round.index + 1, ga); },
+    stop: o.stop,
   });
   if (!rounds.length && resume) Object.assign(res, { members: resume.members, trials: resume.trials, log: resume.log, elite: resume.members.find((m) => m.id === resume.log[resume.log.length - 1]?.ranking[0]?.member) ?? resume.members[0] });
+  // Rounds the session's clock left for the next call.
+  remaining = pending - res.ran;
   const elite = res.elite;
 
   // Bring the elite up to the holdout (one more pass on the block just before it), never past it. The
@@ -1205,7 +1211,7 @@ async function runTaNet(D: TaNetData, o: TaNetTrainOpts, dims: BranchDims, eng: 
   for (const [k, h] of Object.entries(heads)) log(`${k}: holdout ${h.validation.metric} ${h.validation.model.toFixed(5)} vs ${h.validation.base.toFixed(5)}, CI [${h.validation.improvement.lo.toExponential(2)}, ${h.validation.improvement.hi.toExponential(2)}]${h.validation.hitRate !== undefined ? `, hit ${(h.validation.hitRate * 100).toFixed(2)}%` : ''}; speaks live: ${h.validation.validated}`);
 
   return {
-    rounds: res.log.length, newRounds: rounds.length, complete: remaining === 0, remaining, champion,
+    rounds: res.log.length, newRounds: res.ran, complete: remaining === 0, remaining, champion,
     ...(res.ga ? { ga: { generation: res.ga.generation, sinceOffspringWon: res.ga.sinceOffspringWon, last: res.ga.history[res.ga.history.length - 1] } } : {}),
     params: {
       version: `tanet5-${new Date().toISOString().slice(0, 10)}-${D.assets.length}a-r${res.log.length}`,
@@ -1242,7 +1248,7 @@ export async function trainTaNetMain(argOf: (k: string, d: string) => string = c
     arch: argOf('arch', 'flat') === 'grouped' ? 'grouped' : 'flat', famK: num('fam-k', '4'),
     stride: num('stride', '2'), epochsPerRound: num('epochs', '1'), minPerRegime: num('min-per-regime', '100'), dsrThreshold: num('dsr', '0.95'),
     statePath: argOf('state', path.join(hist, '.tanet-population.json')), fresh: argOf('fresh', '') === 'true' || process.argv.includes('--fresh'),
-    maxRounds: num('max-rounds', '0') || undefined, restartEvery: num('restart-every', '0'), catchUpEpochs: num('catch-up-epochs', '3'), patterns: argOf('patterns', 'true') !== 'false', log,
+    maxRounds: num('max-rounds', '0') || undefined, stop: sessionTimeUp, restartEvery: num('restart-every', '0'), catchUpEpochs: num('catch-up-epochs', '3'), patterns: argOf('patterns', 'true') !== 'false', log,
     calibMonths: argOf('calib-months', '') === '' ? undefined : num('calib-months', '1'),
     population: num('population', '3'),
     engine: (['ts', 'torch', 'auto'] as const).find((e) => e === argOf('engine', process.env.TA_NET_ENGINE ?? 'ts')) ?? 'ts',

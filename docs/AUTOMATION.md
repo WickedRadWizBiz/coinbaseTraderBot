@@ -286,6 +286,8 @@ These can't be automated, or deliberately aren't.
 | `HISTORY_RECHECK_HOURS` | `24` | A history source checked completely within this many hours is not asked again (0 = check everything every run). |
 | `TA_NET_RETRAIN_DAYS` | `7` | Continue the TA network's tournament at most this often. |
 | `TA_NET_OOS_HOURS` | `3` | Time budget per run for the TA network's walk-forward export (it resumes on the next run). |
+| `TRAIN_SESSION_MIN` | `0` | The training session's clock in minutes (0 = none; the laptop trainer sets its session length, 60 by default). It starts with the first training step; no step starts once its part is used up, and tournaments, GP and the sweeps stop at their next unit (research/sessionClock.ts, docs/LAPTOP_TRAINING.md#sessions). |
+| `SESSION_DECISION_SHARE` | `0.3` | The part of a session kept for the models that read the networks (vol model, dataset, MLP, perps, tennis, fill, sizing, playbook, readiness). |
 | `SETUP_TA_NET_PATH` | `params/ta_net_wf.json` | The walking TA network the setup trader reads when `data/models/ta_net_wf.json` doesn't exist yet. |
 | `SWEEP_TARGETS` | `setups-long,setups-short,setups-vol,setups-ratchet,setups-scale,setups-spotpb,kalshi,bot` | Sweep targets run weekly. |
 | `RECORDINGS_GZIP_AFTER_DAYS` | `2` | Gzip recorded days older than this (0 = never). |

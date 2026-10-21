@@ -170,6 +170,8 @@ export interface PbtResult<S> {
   log: PbtRoundLog[];
   /** Total evaluations (members x rounds): the trial count for the deflated Sharpe ratio. */
   trials: number;
+  /** Rounds this call ran (fewer than given when `stop` ended it early). */
+  ran: number;
   /** Genetic layer state (when breeding runs). */
   ga?: GaState;
 }
@@ -202,6 +204,9 @@ export async function runPbt<S>(o: {
   memberProgress?: MemberProgress<S>;
   /** Called after every round (e.g. to persist the population). */
   onRound?: (state: { members: PbtMember<S>[]; trials: number; log: PbtRoundLog[]; round: PbtRound; ga?: GaState }) => Promise<void> | void;
+  /** Asked before each round: true ends the call there (the training session's time is up); the rounds left are run
+   *  by a later call that resumes the population. */
+  stop?: () => boolean;
 }): Promise<PbtResult<S>> {
   const r = rng((o.seed ?? 17) + (o.resume ? o.resume.trials : 0));
   const n = o.resume?.members.length ?? o.population ?? 3;
@@ -320,7 +325,10 @@ export async function runPbt<S>(o: {
     return { gen, traits, slots: new Set(kids.map((k) => k.slot)) };
   };
 
+  let ran = 0;
   for (const round of o.rounds) {
+    if (o.stop?.()) { log(`stopping before round ${round.index}: the session's time is up (${o.rounds.length - ran} round(s) left for the next one)`); break; }
+    ran++;
     // Train + evaluate every member (up to `concurrency` at once); results applied in member order.
     const evals: PbtEval[] = new Array(members.length);
     let next = 0;
@@ -408,7 +416,7 @@ export async function runPbt<S>(o: {
     log(`round ${round.index} (${entry.evalFrom}..${entry.evalTo}): ${entry.ranking.map((x) => `#${x.member} ${x.fitness.toFixed(2)}${x.robust !== undefined ? ` (robust ${x.robust.toFixed(2)})` : ''}`).join(', ')}; elite #${elite.id}, ${note}`);
   }
   const lastRank = out[out.length - 1]?.ranking[0]?.member ?? 0;
-  return { elite: members.find((m) => m.id === lastRank) ?? members[0], members, log: out, trials, ...(ga ? { ga } : {}) };
+  return { elite: members.find((m) => m.id === lastRank) ?? members[0], members, log: out, trials, ran, ...(ga ? { ga } : {}) };
 }
 
 /** Random knobs: log-uniform within each range (knobs outside the spec keep the base value). */

@@ -69,6 +69,9 @@ export interface GpOptions {
   contests?: number;
   workers?: number;
   log?: (m: string) => void;
+  /** Asked before each generation and each coin: true ends the evolution there (the training session's time is up:
+   *  research/sessionClock.ts); a coin not evolved keeps its formula in use. */
+  stop?: () => boolean;
 }
 
 const DEFAULTS = {
@@ -299,6 +302,7 @@ export async function evolve(d: GpData, opts: GpOptions, scorer?: Scorer): Promi
   updateHof(); stats(0);
   const tourn = () => { let best = pop[Math.floor(r() * pop.length)]; for (let k = 1; k < o.tournament; k++) { const c = pop[Math.floor(r() * pop.length)]; if (c.score > best.score) best = c; } return best; };
   for (let gen = 1; gen <= o.generations; gen++) {
+    if (o.stop?.()) { log(`[gp] ${d.target}: stopping after generation ${gen - 1} of ${o.generations}: the session's time is up`); break; }
     const ranked = [...pop].sort((a, b) => b.score - a.score || a.t.length - b.t.length);
     const elite: Ind[] = [];
     const ek = new Set<string>();
@@ -423,6 +427,7 @@ export async function runGp(o: { dir: string; assets: string[]; cross: string[];
   const datas = new Map<string, GpData>();
   try {
     for (const target of o.assets) {
+      if (opts.stop?.()) { skipped[target] = "the session's time is up (the formula in use stays)"; continue; }
       const inputs = inputsFor(o.dir, target, o.cross);
       let d: GpData;
       try { d = loadGpData(o.dir, target, inputs, opts.split); } catch (e) { skipped[target] = (e as Error).message; continue; }
@@ -433,7 +438,7 @@ export async function runGp(o: { dir: string; assets: string[]; cross: string[];
       const scorer: Scorer | undefined = pool ? async (fs) => {
         const chunk = Math.max(8, Math.ceil(fs.length / (workers * 4)));
         const parts: Promise<number[]>[] = [];
-        for (let i = 0; i < fs.length; i += chunk) parts.push(pool.run({ dir: o.dir, target, inputs, split: opts.split, opts: { ...o.opts, log: undefined }, formulas: fs.slice(i, i + chunk) }));
+        for (let i = 0; i < fs.length; i += chunk) parts.push(pool.run({ dir: o.dir, target, inputs, split: opts.split, opts: { ...o.opts, log: undefined, stop: undefined }, formulas: fs.slice(i, i + chunk) }));
         return (await Promise.all(parts)).flat();
       } : undefined;
       champions[target] = await evolveChampion(d, { ...opts, seeds: inc ? [inc.tokens] : [], contests: (inc?.contests ?? 0) + 1 }, scorer);

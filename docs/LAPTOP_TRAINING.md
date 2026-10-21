@@ -33,7 +33,7 @@ model better, it sends the models to the bot, which loads them without a restart
    proposals, never change the bot. From the console: `--kalshi-sweep` / `--no-kalshi-sweep`.
    - **How hard should it work?** Gentle, Balanced (the default) or Full speed; see *Keeping the computer
      usable* below. The choice is remembered.
-   - **Hours**: 0 trains until it stops by itself; a number stops sooner.
+   - **Session length**: a slider from 30 to 120 minutes, 60 by default. See [Sessions](#sessions) below.
    - **Server** (optional): the Lightsail public IP, user `ubuntu`, and the instance's SSH key file
      (Lightsail console → Account → SSH keys → Download). With it the trainer copies the bot's recordings
      and uploads the models; leave it empty to train on downloaded history only.
@@ -140,18 +140,47 @@ The console version takes `--intensity gentle|balanced|full`. Any of the plan's 
 
 ```bash
 npm ci
-npm run train:laptop -- --host <server ip> --key ~/lightsail.pem            # until it stops by itself
-npm run train:laptop -- --hours 12 --host <server ip> --key ~/lightsail.pem # or at most 12 hours
+npm run train:laptop -- --host <server ip> --key ~/lightsail.pem              # a 60-minute session
+npm run train:laptop -- --minutes 120 --host <server ip> --key ~/lightsail.pem # a 2-hour session
+npm run train:laptop -- --hours 0 --host <server ip> --key ~/lightsail.pem     # no clock: until it stops by itself
 ```
 
 | Option | Meaning |
 |---|---|
-| `--hours N` | 0 (default): until it stops by itself (see [When it stops](#when-it-stops)); N > 0: also stop after N hours |
+| `--minutes N` | The session's length (default 60); see [Sessions](#sessions) |
+| `--hours N` | The same in hours; 0: no session clock, rounds until it stops by itself (see [When it stops](#when-it-stops)) |
 | `--data DIR` | Data, history and models, kept between runs (default `./trainer-data`) |
 | `--days N` | Recorded days to copy (default 45) |
 | `--no-pull` / `--no-push` | Skip copying data down / sending models up |
 | `--only a,b` | Run only these pipeline steps |
 | `--setup` | Ask for the server details again |
+
+## Sessions
+
+A run is a **session** of a set length: 60 minutes by default, 30 to 120 on the window's slider (`--minutes` in the
+console). The pipeline keeps to it (`TRAIN_SESSION_MIN`, research/sessionClock.ts):
+
+- **The clock starts with the first training step.** The copy from the server and the data steps (the history
+  download, the replay build, the TradingView index fill) come before it and aren't counted.
+- **The networks get the first 70%** (the TA network, the walk-forward export, the formulas, the SNN tournaments and
+  training). **The models that read them get the rest** (`SESSION_DECISION_SHARE`, 0.3): the vol model, the dataset,
+  the Kalshi MLP, the perps, tennis and fill models, sizing, the playbook and the readiness check. Their part starts
+  with the first of them, so time the networks didn't use goes to them.
+- **No step starts once its part is used up.** The log says `skipped (the networks' part of the 60-minute session is
+  used up ...: it runs next session)`.
+- **The long steps stop at their next unit.** A tournament (TA network, SNNs) stops before its next round and
+  carries on next session; GP stops before its next generation (a coin it didn't reach keeps its formula); the
+  sweeps and the walk-forward export get at most what is left of the part. A step that can't stop part-way (an SNN's
+  training, a weekly study) finishes once started.
+- **Its budgets are sized to it.** An hour gives each SNN tournament generation a week of history (it takes a few
+  sessions), an SNN 4 training days, and Kalshi's contract history 6 minutes of downloading (it resumes). Two hours
+  give the same; longer sessions grow them (24 hours: 36 tournament days, 24 training days). The sweeps, which only
+  write proposals, run weekly.
+- **The SNN whose tournament ran longest ago goes first,** so a session that ends inside one network's tournament
+  leaves the other one for the next session.
+- **At the end, the models go to your server** (and the bot swaps them in).
+
+A run with `--hours 0` has no clock: rounds until it stops by itself, each sized like a day.
 
 ## What a run does
 
@@ -217,7 +246,7 @@ After every round it reads the readiness check (`models/readiness.json`, below) 
   same score, or as many validated parts, kept for its fresher data) is not progress.
 - **No fresh history is left.** Every replayed network has trained on every week, and the round improved
   nothing. New weeks arrive with time, so run it again later.
-- **Or** the hours you gave it are up, or you press Ctrl+C.
+- **Or** the session is over, or you press Ctrl+C.
 
 Set these in `trainer-data/trainer.env` (written on the first run, `KEY=VALUE` lines; credentials and
 paths are ignored there). After each round the trainer writes the scoreboard to `trainer-data/STATUS.txt`
@@ -235,9 +264,10 @@ make them. Set `TRAIN_TARGET_DAILY_PCT=0.5` to stop at a realistic bar instead.
 
 `trainer-data/GUIDE.txt` (also printed at the start of every run) says the same as this section:
 
-1. **Let the trainer run until it stops by itself.** Round 1 can take a day or more on a 16-thread laptop,
-   since it downloads years of history first. Each later round takes several hours. Give it at least 3 rounds. Round 1 makes the first models;
-   round 2 is the first where challengers must beat them; the scores mean something only after that.
+1. **Train a session a day for the first week or two.** The first session can take longer, since it downloads
+   years of history before the clock starts. Each network's tournament runs a few rounds a session and finishes a
+   generation every few sessions; then the network is retrained and must beat the one in use. The first sessions
+   make the first models, the later ones must beat them; the scores mean something only after that.
 2. **Paper-trade on the server for 2 to 4 weeks** with the trained models. The dashboard's paper P&L
    should look like the readiness check: same sign, similar size, drawdown no worse.
 3. **Only then consider real money,** and start small. The server's daily training keeps the models
