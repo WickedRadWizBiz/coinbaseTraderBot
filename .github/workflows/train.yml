@@ -116,7 +116,9 @@ jobs:
       - name: Train
         id: train
         run: |
-          set -uo pipefail
+          # No -e (GitHub runs this with bash -e): a pipeline stopped by its time limit or the memory watchdog, a
+          # failed step, or a failed checkpoint copy must not end the step before the next phase and the copy-back.
+          set +e -uo pipefail
           DATA="$GITHUB_WORKSPACE/data"
           set -a; . "$RUNNER_TEMP/train.env"; set +a
           export DATA_DIR="$DATA" TRADING_MODE=paper AUTO_TRAIN=off
@@ -155,13 +157,16 @@ jobs:
             run_pipeline 300 --only "$ONLY"; code=$?
           else
             # 1. The models trained on the bot's own recordings first (minutes), copied back at once.
-            run_pipeline 90 --only vol_model,dataset,mlp,perps,tennis,fill,sizing; code=$?
-            echo "quick phase: exit $code"; sync_models
+            run_pipeline 90 --only vol_model,dataset,mlp,perps,tennis,fill,sizing; quick=$?
+            echo "quick phase: exit $quick"; sync_models
+            code=$quick
             # 2. Everything else in the time left (5 h in all). The oracle cull is left to the laptop trainer: it builds TA
             # rows for every coin over all of history (over 14 GB here) and runs weekly there; the TA network and the
             # Librarian read the oracle_cull.json the laptop sends.
             left=$(( 300 - ($(date +%s) - T0) / 60 ))
             if [ "$left" -gt 20 ]; then run_pipeline "$left" --skip oracle_cull; code=$?; fi
+            # A failed step in the quick phase is not hidden by a second phase that finished.
+            case $code in 0|124|137|143) case $quick in 0|124|137|143) ;; *) code=$quick;; esac;; esac
           fi
           kill $MON $SYNC 2>/dev/null || true
           echo "code=$code" >> "$GITHUB_OUTPUT"
