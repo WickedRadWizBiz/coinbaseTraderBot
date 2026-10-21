@@ -30,7 +30,12 @@ Code: `bot/macro/fractalEngine.ts` (the engine), `bot/macro/waterfall.ts` (trigg
 - **Time dilation:** child time per parent time, since 2018 and over the last 26 weeks.
 - **Fit:** correlation and mean error after the map, over the whole path and the last year. Fit is the engine's own reliability signal: low on flat stretches, high once the cycle has shown its structure.
 
-**Projection.** The parent's remaining path, mapped onto the child's scale and anchored at today's level. Time is stretched by the geometric mean of the overall and recent dilation. From it the engine reports:
+**Projection.** The parent's remaining path, mapped onto the child's scale and anchored at today's level.
+
+- **The drift and the rallies** are stretched in time by the geometric mean of the overall and recent dilation.
+- **Each waterfall's steep part** is not stretched: it runs start to finish in `waterfallDays` (90 days by default). A waterfall is a fast capitulation, whatever pace the cycle around it keeps. Inside a waterfall, only what is left of the 90 days remains. `waterfallDays: 0` stretches waterfalls like the rest.
+
+From it the engine reports:
 
 - BTC.D in 30, 90 and 180 days;
 - the next waterfall's projected start, end and depth;

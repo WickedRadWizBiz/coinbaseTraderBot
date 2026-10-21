@@ -83,6 +83,24 @@ test('fractal state: progress, phase, dilation, fit and projection on a warped, 
   assert.equal(fractalState(daily.filter((c) => c.ts >= C0), at1), undefined);
 });
 
+test('projection: a waterfall runs start to finish in waterfallDays, only the drift and rallies are dilated', () => {
+  const daily = synth(CHILD_DAYS);
+  const at = C0 + Math.floor(CHILD_DAYS * 0.95) * DAY; // late in the relief rally, the final waterfall ahead
+  const fast = fractalState(daily, at)!;
+  const wf = fast.nextWaterfall!;
+  assert.ok(!wf.inside);
+  assert.ok(Math.abs((wf.endTs - wf.startTs) / DAY - 90) < 1, `the waterfall takes ${(wf.endTs - wf.startTs) / DAY} days`);
+  const slow = fractalState(daily, at, { ...DEFAULT_FRACTAL, waterfallDays: 0 })!;
+  assert.ok((slow.nextWaterfall!.endTs - slow.nextWaterfall!.startTs) / DAY > 150, 'stretched by the dilation when switched off');
+  assert.ok(Math.abs(slow.nextWaterfall!.startTs - wf.startTs) < DAY, 'the rally before it is dilated the same either way');
+  assert.ok(fast.low!.ts < slow.low!.ts, 'the low comes sooner');
+  assert.ok(Math.abs(fast.low!.btcd - slow.low!.btcd) < 1e-9, 'same levels, only the timing changes');
+  // Inside a waterfall: only what is left of the 90 days.
+  const d2 = Math.floor(knots[1][0] + 0.5 * (knots[2][0] - knots[1][0]));
+  const w = fractalState(daily, C0 + d2 * DAY)!;
+  if (w.nextWaterfall?.inside) assert.ok((w.nextWaterfall.endTs - w.asOf) / DAY <= 90 + 1e-6, `${(w.nextWaterfall.endTs - w.asOf) / DAY} days left`);
+});
+
 test('fractal state is point in time: later data does not change it; the cache keys by week', () => {
   const daily = synth(CHILD_DAYS);
   const at = C0 + 1500 * DAY + 3 * 3_600_000;
