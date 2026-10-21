@@ -707,6 +707,8 @@ export class TaNetRuntime {
   private ctxCache?: { key: string; ctx: TaNetContext };
   private readonly feats = new Map<string, Map<number, { f: number[]; c: number[]; close: number; sig: number }>>();
   private readonly days = new Map<string, Map<number, number[]>>();
+  /** Each asset's daily context readings (the dominance charts and the slow indexes, as of the last closed day) for its latest hour. */
+  private readonly dailyCtx = new Map<string, { ts: number; v: number[] }>();
   private readonly calls = new Map<string, Map<number, Call>>();
   private readonly briers = new Map<string, Record<TaNetHorizon, number[]>>();
   private readonly rawBriers = new Map<string, Record<TaNetHorizon, number[]>>();
@@ -737,7 +739,10 @@ export class TaNetRuntime {
     if (!m?.size) return undefined;
     const ts = Math.max(...m.keys()), r = m.get(ts)!, n = this.net.params.norm;
     const z = (v: number, nm: TaNetNorm, j: number) => (Number.isFinite(v) && nm.std[j] ? Math.max(-8, Math.min(8, (v - nm.mean[j]) / nm.std[j])) : 0);
-    return { ts, trend: r.f.map((v, j) => z(v, n.trend, j)), ctx: r.c.map((v, j) => z(v, n.ctx, j)) };
+    // The daily context readings follow the hourly ones, in TANET_CTX_FEATURES order.
+    const d = this.dailyCtx.get(asset);
+    const c = d && d.ts === ts ? [...r.c, ...d.v] : r.c;
+    return { ts, trend: r.f.map((v, j) => z(v, n.trend, j)), ctx: c.map((v, j) => z(v, n.ctx, j)) };
   }
 
   /** Live only: record the position rule's results per hour and decide after `days` days. */
@@ -821,7 +826,7 @@ export class TaNetRuntime {
     if (prev && prev.lastTs === lastTs && prev.len === h1.length) return prev.out;
     // Time went backwards (a research process replaying another span): start this asset afresh, so
     // the rolling skill only ever contains calls graded before `now`, exactly as live.
-    if (prev && lastTs < prev.lastTs) for (const m of [this.feats, this.days, this.calls, this.briers, this.rawBriers, this.gradedTs, this.rows]) m.delete(asset);
+    if (prev && lastTs < prev.lastTs) for (const m of [this.feats, this.days, this.calls, this.briers, this.rawBriers, this.gradedTs, this.rows, this.dailyCtx]) m.delete(asset);
     const feats = this.feats.get(asset) ?? new Map(); this.feats.set(asset, feats);
     const days = this.days.get(asset) ?? new Map(); this.days.set(asset, days);
     const memo = this.calls.get(asset) ?? new Map<number, Call>(); this.calls.set(asset, memo);
@@ -859,6 +864,7 @@ export class TaNetRuntime {
       // Context vector: this hour's 15m readings and market context, then the dominance charts' TA as of
       // the last closed day (the same day the macro branch ends on).
       const ctxVec = [...fr.c, ...(ctx && dj >= 0 ? ctx.daily(asset, d1[dj].ts) : DAILY_CONTEXT_FEATURES.map(() => NA))];
+      if (i === h1.length - 1) this.dailyCtx.set(asset, { ts, v: ctxVec.slice(fr.c.length) });
       const o = this.net.predict(trend, macro, taNetMicro(set!.bars['15m'], t), taNetSwing(h1, i), ctxVec);
       const up60 = active.includes('up_1h') && !muted ? o.up1 : NA;
       const up240 = active.includes('up_4h') && !muted ? o.up4 : NA;

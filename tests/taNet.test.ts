@@ -11,7 +11,7 @@ import { assetFeatureMap } from '../bot/model/featureEngine';
 import { CandleSet } from '../bot/ta/candleStore';
 import type { Candle } from '../bot/ta/indicators';
 import {
-  activeTaNet, familyOf, setTaNet, taNetFamilies, TANET_CTX_FEATURES, TANET_MACRO_DAYS, TANET_MICRO_F, TANET_MICRO_STEPS, TANET_SWING_BARS, TANET_SWING_F, TANET_TREND_FEATURES, setTaNetContextSource, TANET_D1_BARS, TANET_DAY_FEATURES, TANET_FEATURES, TANET_H1_BARS, TANET_SCHEMA, TANET_TREND_STEPS, TaNet, TaNetRuntime, taNetDayVector, taNetFeatureMap, taNetMicro, taNetPosition, windowOk, type TaNetStateCache,
+  activeTaNet, familyOf, setTaNet, taNetFamilies, TANET_CTX_FEATURES, TANET_CTX_HOURLY, TANET_MACRO_DAYS, TANET_MICRO_F, TANET_MICRO_STEPS, TANET_SWING_BARS, TANET_SWING_F, TANET_TREND_FEATURES, setTaNetContextSource, TANET_D1_BARS, TANET_DAY_FEATURES, TANET_FEATURES, TANET_H1_BARS, TANET_SCHEMA, TANET_TREND_STEPS, TaNet, TaNetRuntime, taNetDayVector, taNetFeatureMap, taNetMicro, taNetPosition, windowOk, type TaNetStateCache,
 } from '../bot/ta/taNet';
 import { CONTEXT_FEATURES, DAILY_CONTEXT_FEATURES, domMatrixScore, TaNetContext } from '../bot/ta/taNetContext';
 import { IndexStore } from '../bot/marketdata/indexBars';
@@ -197,6 +197,10 @@ test('tournament: 3 identical networks, elite/cull/mutate, hurdles, holdout, con
   assert.ok(Math.abs(o.up[60]! - off.up1[0]) < 1e-4, `live ${o.up[60]} vs offline ${off.up1[0]}`);
   assert.ok(Math.abs(o.vol4h! - off.vol[0]) < 1e-3);
   assert.equal(rt.outputFor('TST', set, now), o, 'reused until a new bar arrives');
+  // The neural map's input readings carry the daily context too (dominance charts, slow indexes), not only the hourly part.
+  const inp = rt.latestInputs('TST')!;
+  assert.equal(inp.ctx.length, TANET_CTX_FEATURES.length, 'hourly and daily context readings');
+  assert.ok(inp.ctx.slice(TANET_CTX_HOURLY.length).some((v) => v !== 0), 'the daily dominance readings are there');
   assert.equal(rt.outputFor('TST', set, now + 10 * H), undefined, 'stale candles: no forecast');
 
   // Forward test: results recorded per hour; a failed test mutes the direction heads.
