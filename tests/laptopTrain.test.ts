@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
-import { afterRound, championsGone, CONTINUE_STEPS, fullRoundDone, readTrainerState, writeTrainerState, filesToPull, filesToPush, guideText, kalshiSweeps, laptopProfile, readSettings, writeSettings, LOCAL_ONLY_DIRS, localManifest, parseManifest, roundOutcome, safeServerEnv, scoreboard, Server } from '../research/laptopTrain';
+import { afterRound, championsGone, confirmPushed, CONTINUE_STEPS, fullRoundDone, readTrainerState, writeTrainerState, filesToPull, filesToPush, guideText, kalshiSweeps, laptopProfile, readSettings, writeSettings, LOCAL_ONLY_DIRS, localManifest, parseManifest, readPushes, roundOutcome, safeServerEnv, scoreboard, Server, serverLine } from '../research/laptopTrain';
 import { dailyStats, type ReadinessFile } from '../research/readiness';
 import { resourcePlan } from '../research/trainerResources';
 import { tmpDir } from './helpers';
@@ -41,6 +41,23 @@ test('laptop trainer: manifests, what to copy down and what to send back', () =>
   const here = new Map([['models/conditioning_champion.json', { path: 'models/conditioning_champion.json', size: 1, mtime: 5_000 }], ['models/a.json', { path: 'models/a.json', size: 1, mtime: 5_000 }]]);
   assert.deepEqual(championsGone([{ path: 'models/conditioning_champion.prev.json', size: 1, mtime: 1 }], here), ['models/conditioning_champion.json']);
   assert.deepEqual(championsGone([{ path: 'models/conditioning_champion.json', size: 1, mtime: 1 }], here), []);
+});
+
+test('laptop trainer: every send is confirmed on the server and recorded; STATUS says where the models went', () => {
+  const sent = [{ path: 'ta_net.json', size: 9, mtime: 2_000_000 }, { path: 'gp.json', size: 5, mtime: 2_000_000 }, { path: 'setups.json', size: 7, mtime: 2_000_000 }];
+  const after = [{ path: 'ta_net.json', size: 9, mtime: 2_001_000 }, { path: 'gp.json', size: 4, mtime: 2_000_000 }, { path: 'rule_book.json', size: 3, mtime: 1 }];
+  assert.deepEqual(confirmPushed(sent, after), { confirmed: 1, missing: ['gp.json', 'setups.json'] }, 'same size and time (2 s slack) or not confirmed');
+  assert.match(serverLine({ connected: false }), /NOT SET.*stay on this laptop/);
+  assert.match(serverLine({ host: '1.2.3.4', connected: false }), /did not answer/);
+  assert.match(serverLine({ host: '1.2.3.4', connected: true }), /Nothing sent yet/);
+  const at = Date.UTC(2026, 9, 21, 1, 10);
+  assert.equal(serverLine({ host: '1.2.3.4', connected: true, last: { at, why: 'x', files: 3, mb: 1, confirmed: 3, missing: [] } }), 'Server: 1.2.3.4. Last send 2026-10-21 01:10 UTC: 3 file(s), 3 confirmed on the server.');
+  assert.match(serverLine({ host: '1.2.3.4', connected: true, last: { at, why: 'x', files: 3, mb: 1, confirmed: 1, missing: ['gp.json', 'setups.json'] } }), /NOT confirmed: gp\.json, setups\.json/);
+  assert.match(serverLine({ host: '1.2.3.4', connected: true, last: { at, why: 'x', files: 3, mb: 1, confirmed: 0, missing: [], error: 'the copy did not finish' } }), /FAILED/);
+  const dir = tmpDir();
+  assert.deepEqual(readPushes(dir), []);
+  fs.writeFileSync(path.join(dir, 'pushes.jsonl'), JSON.stringify({ at, why: 'x', files: 1, mb: 0, confirmed: 1, missing: [] }) + '\n');
+  assert.equal(readPushes(dir).at(-1)?.confirmed, 1);
 });
 
 test('laptop trainer: what counts as progress, when it stops by itself, the scoreboard, the guide', () => {
