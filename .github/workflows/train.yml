@@ -123,6 +123,9 @@ jobs:
           set -a; . "$RUNNER_TEMP/train.env"; set +a
           export DATA_DIR="$DATA" TRADING_MODE=paper AUTO_TRAIN=off
           export TA_NET_ENGINE="${TA_NET_ENGINE:-auto}" TA_NET_PYTHON="$(command -v python)"
+          # The pipeline's heap: 8 GB of the runner's 16 (Node's default is about 4 GB: the quick run on Oct 21 ran out of
+          # it, exit 134, before any step finished). The memory watchdog below still stops it before the runner runs out.
+          export NODE_OPTIONS="--max-old-space-size=${PIPELINE_HEAP_MB:-8192}"
           mkdir -p "$DATA/models/logs"
           LOG="$DATA/models/logs/pipeline-remote-$(date -u +%Y-%m-%dT%H-%M-%SZ).log"
           T0=$(date +%s)
@@ -147,6 +150,8 @@ jobs:
             local wd=$!
             wait $pid; local c=$?
             kill $wd 2>/dev/null || true
+            # A crash, not a planned stop: the step it was in and the fatal error (step names and errors only: public repo).
+            case $c in 0|124|137|143) ;; *) echo "pipeline exited with $c; its last steps:"; grep -E '^\[pipeline\] [A-Za-z0-9_-]+: (running|done in|skipped|FAILED)|FATAL ERROR|heap out of memory' "$LOG" | tail -12 | cut -c1-160;; esac
             return $c
           }
           ( while sleep 600; do echo "resources $(date -u +%H:%M): disk $(df -h / | awk 'NR==2{print $4}') free, memory $(free -m | awk '/^Mem:/{print $7}') MB available, swap used $(free -m | awk '/^Swap:/{print $3}') MB, largest $(ps -eo rss=,comm= --sort=-rss | head -1 | awk '{printf "%s %d MB", $2, $1/1024}')"; done ) &
