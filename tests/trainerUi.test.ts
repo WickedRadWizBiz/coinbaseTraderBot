@@ -8,7 +8,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { explain, formatEta, planFrom, RoundProgress, type StepTiming } from '../research/trainerProgress';
 import { applyScript, checkForUpdate, shaOf } from '../research/trainerUpdate';
-import { TrainerUi } from '../research/trainerUi';
+import { TrainerUi, unquote } from '../research/trainerUi';
 import { progress } from '../research/progress';
 import { loadConfig } from '../bot/config';
 import { runPipeline } from '../research/pipeline';
@@ -304,4 +304,12 @@ test('"Send to server now": the models from earlier runs go to the server; nothi
   assert.deepEqual(seen, { hours: 0, sendOnly: true, only: undefined }, 'no session clock, the send-only run');
   assert.equal(ui.state.phase, 'idle');
   assert.equal(ui.state.lastStop, '3 file(s) sent and confirmed on the server');
+});
+
+test('server fields: a path pasted with Windows "Copy as path" quotes is used without them', () => {
+  assert.equal(unquote('"C:\\Users\\you\\Downloads\\LightsailDefaultKey-us-east-1.pem"'), 'C:\\Users\\you\\Downloads\\LightsailDefaultKey-us-east-1.pem');
+  assert.equal(unquote("  '54.145.7.203' "), '54.145.7.203');
+  assert.equal(unquote('C:\\plain\\key.pem'), 'C:\\plain\\key.pem');
+  assert.equal(unquote('"half'), '"half', 'an unmatched quote is left alone');
+  assert.equal(unquote(undefined), '');
 });

@@ -45,6 +45,9 @@ const readJsonFile = (f: string): any => { try { return JSON.parse(fs.readFileSy
 
 /** Conditioning may start once a normal run (continue or sweep everything) has finished since the last conditioning
  *  run: it pressure-tests the freshly trained bot. */
+/** A pasted value without its surrounding quotes: Windows' "Copy as path" puts the path in double quotes. */
+export const unquote = (v: string | undefined): string => (v ?? '').trim().replace(/^(["'])(.*)\1$/, '$2').trim();
+
 let viewCache: { key: string; v: ConditioningView } | undefined;
 export function conditioningView(models: string): ConditioningView {
   const mt = (f: string) => { try { return fs.statSync(path.join(models, f)).mtimeMs; } catch { return 0; } };
@@ -86,7 +89,7 @@ export class TrainerUi {
     // The session's length (the window's slider, in hours; 1 when not given); 0 = no clock (conditioning).
     const hours = Number(req.hours ?? 1);
     if (!(hours >= 0) || hours > 24 * 365) return { ok: false, error: 'the session length must be a number of hours (0: until it stops by itself)' };
-    const settings: TrainerSettings = { ...this.state.settings, host: req.host?.trim() || undefined, user: req.user?.trim() || 'ubuntu', key: req.key?.trim() || undefined, intensity: asIntensity(req.intensity ?? this.state.settings.intensity), kalshiSweep: req.kalshiSweep ?? this.state.settings.kalshiSweep ?? false };
+    const settings: TrainerSettings = { ...this.state.settings, host: unquote(req.host) || undefined, user: unquote(req.user) || 'ubuntu', key: unquote(req.key) || undefined, intensity: asIntensity(req.intensity ?? this.state.settings.intensity), kalshiSweep: req.kalshiSweep ?? this.state.settings.kalshiSweep ?? false };
     if (settings.host && !settings.key) return { ok: false, error: 'a server needs its SSH key file' };
     const conditioning = req.mode === 'conditioning';
     // "Send to server now": the models from earlier runs go to the server; nothing trains.
