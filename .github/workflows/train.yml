@@ -116,11 +116,16 @@ jobs:
       - name: Train
         id: train
         run: |
-          set -uo pipefail
+          # No -e (GitHub runs this with bash -e): a pipeline stopped by its time limit or the memory watchdog, a
+          # failed step, or a failed checkpoint copy must not end the step before the next phase and the copy-back.
+          set +e -uo pipefail
           DATA="$GITHUB_WORKSPACE/data"
           set -a; . "$RUNNER_TEMP/train.env"; set +a
           export DATA_DIR="$DATA" TRADING_MODE=paper AUTO_TRAIN=off
           export TA_NET_ENGINE="${TA_NET_ENGINE:-auto}" TA_NET_PYTHON="$(command -v python)"
+          # The pipeline's heap: 8 GB of the runner's 16 (Node's default is about 4 GB: the quick run on Oct 21 ran out of
+          # it, exit 134, before any step finished). The memory watchdog below still stops it before the runner runs out.
+          export NODE_OPTIONS="--max-old-space-size=${PIPELINE_HEAP_MB:-8192}"
           mkdir -p "$DATA/models/logs"
           LOG="$DATA/models/logs/pipeline-remote-$(date -u +%Y-%m-%dT%H-%M-%SZ).log"
           T0=$(date +%s)
@@ -145,6 +150,8 @@ jobs:
             local wd=$!
             wait $pid; local c=$?
             kill $wd 2>/dev/null || true
+            # A crash, not a planned stop: the step it was in and the fatal error (step names and errors only: public repo).
+            case $c in 0|124|137|143) ;; *) echo "pipeline exited with $c; its last steps:"; grep -E '^\[pipeline\] [A-Za-z0-9_-]+: (running|done in|skipped|FAILED)|FATAL ERROR|heap out of memory' "$LOG" | tail -12 | cut -c1-160;; esac
             return $c
           }
           ( while sleep 600; do echo "resources $(date -u +%H:%M): disk $(df -h / | awk 'NR==2{print $4}') free, memory $(free -m | awk '/^Mem:/{print $7}') MB available, swap used $(free -m | awk '/^Swap:/{print $3}') MB, largest $(ps -eo rss=,comm= --sort=-rss | head -1 | awk '{printf "%s %d MB", $2, $1/1024}')"; done ) &
@@ -155,13 +162,16 @@ jobs:
             run_pipeline 300 --only "$ONLY"; code=$?
           else
             # 1. The models trained on the bot's own recordings first (minutes), copied back at once.
-            run_pipeline 90 --only vol_model,dataset,mlp,perps,tennis,fill,sizing; code=$?
-            echo "quick phase: exit $code"; sync_models
+            run_pipeline 90 --only vol_model,dataset,mlp,perps,tennis,fill,sizing; quick=$?
+            echo "quick phase: exit $quick"; sync_models
+            code=$quick
             # 2. Everything else in the time left (5 h in all). The oracle cull is left to the laptop trainer: it builds TA
             # rows for every coin over all of history (over 14 GB here) and runs weekly there; the TA network and the
             # Librarian read the oracle_cull.json the laptop sends.
             left=$(( 300 - ($(date +%s) - T0) / 60 ))
             if [ "$left" -gt 20 ]; then run_pipeline "$left" --skip oracle_cull; code=$?; fi
+            # A failed step in the quick phase is not hidden by a second phase that finished.
+            case $code in 0|124|137|143) case $quick in 0|124|137|143) ;; *) code=$quick;; esac;; esac
           fi
           kill $MON $SYNC 2>/dev/null || true
           echo "code=$code" >> "$GITHUB_OUTPUT"
