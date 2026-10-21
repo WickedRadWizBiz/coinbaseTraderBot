@@ -1005,13 +1005,15 @@ export class Engine {
 
   /** Live Tennis API (free tier: 100 calls/day): one slate call covers every match, so it is only
    *  refreshed when this match's price moved >= liveMoveCents since its last score, after
-   *  scoreIdleMin, or (exit priority) every 5 min while we hold a position. Never throws. */
-  private async pollLiveTennis(event: string, now: number, ms: { title?: string }[], pA: number | undefined, holding: boolean) {
+   *  scoreIdleMin, or (exit priority) every 5 min while we hold a position. A match that has not
+   *  started (and isn't held) spends no calls. Never throws. */
+  private async pollLiveTennis(event: string, now: number, ms: { title?: string }[], pA: number | undefined, holding: boolean, started = true) {
     const T = this.d.cfg.tennis;
     const client = this.d.tennisScores;
     let st = this.scores.get(event);
     if (!st) { st = { polledTs: 0 }; this.scores.set(event, st); }
     if (!client) { st.error = 'TENNIS_SCORE_FEED=livetennis but LIVE_TENNIS_API_KEY is not set'; return st; }
+    if (!started && !holding) { st.error = 'live tennis: no score before the start'; return st; }
     const moved = pA !== undefined && st.pAtPoll !== undefined && Math.abs(pA - st.pAtPoll) >= T.liveMoveCents - 1e-9;
     const idle = now - st.polledTs >= T.scoreIdleMin * 60_000;
     const exitDue = holding && now - st.polledTs >= 5 * 60_000;
@@ -1073,7 +1075,7 @@ export class Engine {
       });
       const totals = this.riskTotals(0, event);
       const sc = T.scoreFeed === 'kalshi' ? await this.pollScore(event, now)
-        : T.scoreFeed === 'livetennis' ? await this.pollLiveTennis(event, now, ms, MatchTracker.probability(markets), markets.some((x) => x.position !== 0))
+        : T.scoreFeed === 'livetennis' ? await this.pollLiveTennis(event, now, ms, MatchTracker.probability(markets), markets.some((x) => x.position !== 0), tracker.liveSince !== undefined || (ms.find((m) => m.startTime)?.startTime ?? Infinity) - now <= 10 * 60_000)
         : undefined;
       // Tennis SNN column inputs and the tennis MLP's fair value (it decides whether an entry is worth taking).
       const tv = this.snnTennisObserve(event, ms, markets, tracker, sc, now);

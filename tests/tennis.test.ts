@@ -289,3 +289,33 @@ test('underdogs lose late: past 35% of the match take any profit, past 60% sell 
   // The cut can be switched off.
   assert.equal(run(0.65, 0.10, { ...T, underdogCutProgress: 0 }).plans.length, 0);
 });
+
+test('live tennis scores: a match that has not started spends no calls of the daily budget', async () => {
+  const { TennisScoreClient } = await import('../bot/tennis/liveTennisApi');
+  const run = async (startInMin: number) => {
+    const dir = tmpDir();
+    const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, DOMINANCE_FEED: 'false', SPOT_FEED: 'false', PERPS_FEED: 'false', STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_SCORE_FEED: 'livetennis' });
+    const now = Date.now();
+    const m = (ticker: string, title: string): MarketInfo => ({ ticker, seriesTicker: 'KXATPMATCH', eventTicker: 'KXATPMATCH-E1', status: 'open', openTime: now - 3_600_000, closeTime: now + 6 * 3_600_000, tickSize: 0.01, title, startTime: now + startInMin * 60_000 });
+    const markets = [m('KXATPMATCH-E1-FAV', 'Will Fav win?'), m('KXATPMATCH-E1-DOG', 'Will Dog win?')];
+    const rest = { getSeriesFees: async () => ({ takerMultiplier: 1, makerMultiplier: 1 }), getOpenMarkets: async (s: string) => (s === 'KXATPMATCH' ? markets : []), getMarket: async () => undefined } as unknown as KalshiRest;
+    const audit = tmpAudit();
+    const md = new MarketData(cfg, rest, undefined, new Recorder(path.join(dir, 'rec')));
+    await md.refreshCatalog(now);
+    md.book('KXATPMATCH-E1-FAV').applySnapshot({ bids: [{ price: 0.84, size: 100 }], asks: [{ price: 0.86, size: 100 }] }, Date.now());
+    md.book('KXATPMATCH-E1-DOG').applySnapshot({ bids: [{ price: 0.14, size: 300 }], asks: [{ price: 0.17, size: 100 }] }, Date.now());
+    const paper = new PaperExchange(undefined, 200, (t) => md.books.get(t), () => ({ takerMultiplier: 1, makerMultiplier: 1 }));
+    const oms = new Oms({ gateway: paper, audit, statePath: path.join(dir, 'oms.json'), feesFor: (t) => md.feesFor(t), sleep: async () => undefined });
+    const recon = new Reconciler({ gateway: paper, oms, audit, getMarket: rest.getMarket, onPersistentBreak: () => undefined });
+    let calls = 0;
+    const tennisScores = new TennisScoreClient({ apiKey: 'k', fetchFn: (async () => { calls++; return new Response(JSON.stringify({ data: [], meta: { offset: 0, limit: 200, has_more: false } }), { status: 200 }); }) as unknown as typeof fetch });
+    const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill: new KillSwitch(path.join(dir, 'kill.json'), audit), recon, model: MetaModel.identity(), exchangeStatus: openExchange(), tennisScores });
+    engine.balance = (await recon.run('startup'))!.balance;
+    await engine.tick();
+    return { calls, raw: engine.tennisStatus.get('KXATPMATCH-E1')?.scoreRaw };
+  };
+  const later = await run(120);
+  assert.equal(later.calls, 0, 'starts in 2 hours: no call');
+  assert.match(String(later.raw), /no score before the start/);
+  assert.equal((await run(5)).calls, 1, 'about to start: the slate is read');
+});

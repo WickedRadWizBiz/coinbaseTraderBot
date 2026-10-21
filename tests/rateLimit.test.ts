@@ -111,3 +111,19 @@ test('live tennis: a spent daily allowance waits for the provider reset; the day
   assert.equal(calls, 2, 'the provider day rolled over at 21:00 UTC');
   assert.equal(c.usage().callsToday, 1);
 });
+
+test('live tennis: normal calls are spread over the provider day; exit calls keep their reserve', async () => {
+  let t = Date.parse('2026-10-05T21:00:00Z'), calls = 0;
+  const ok = () => new Response(JSON.stringify({ data: [{ id: 1 }], meta: { offset: 0, limit: 200, has_more: false } }), { status: 200 });
+  const c = new TennisScoreClient({ apiKey: 'k', now: () => t, cacheTtlMs: 0, fetchFn: (async () => { calls++; return ok(); }) as unknown as typeof fetch });
+  for (let i = 0; i < 15; i++) { await c.getLiveSlate(); t += 1_000; }
+  assert.equal(calls, 10, 'the burst at the start of the day');
+  assert.match(String(c.lastError), /calls spread over the day: 10 of 90 used, the next at 2[12]:\d\d UTC/);
+  assert.ok(await c.getLiveSlate('exit'), 'an exit decision is not held back');
+  t = Date.parse('2026-10-06T03:00:00Z'); // a quarter of the day: 10 + 80/4 = 30 normal calls
+  for (let i = 0; i < 40; i++) { await c.getLiveSlate(); t += 1_000; }
+  assert.equal(calls, 30, 'paced to the share of the day gone (the exit call counts toward the day)');
+  const free = new TennisScoreClient({ apiKey: 'k', now: () => t, cacheTtlMs: 0, paceBurst: 0, stateFile: undefined, fetchFn: (async () => ok()) as unknown as typeof fetch });
+  for (let i = 0; i < 95; i++) { await free.getLiveSlate(); t += 2_100; }
+  assert.equal(free.usage().callsToday, 90, 'paceBurst 0: the whole normal budget at once');
+});
