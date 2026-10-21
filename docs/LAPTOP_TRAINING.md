@@ -178,7 +178,8 @@ console). The pipeline keeps to it (`TRAIN_SESSION_MIN`, research/sessionClock.t
   write proposals, run weekly.
 - **The SNN whose tournament ran longest ago goes first,** so a session that ends inside one network's tournament
   leaves the other one for the next session.
-- **At the end, the models go to your server** (and the bot swaps them in).
+- **Each model goes to your server as soon as its step finishes** (and the bot swaps it in), so a session closed or
+  crashed part-way keeps what it finished. What is left (tournament progress) goes at the end.
 
 A run with `--hours 0` has no clock: rounds until it stops by itself, each sized like a day.
 
@@ -206,9 +207,14 @@ A run with `--hours 0` has no clock: rounds until it stops by itself, each sized
    - Each module is trained and judged on its own. It replaces the model in use only when it beats it
      (`AUTO_TRAIN_CHAMPION`).
    - The sweep tunes the bot as a whole (a proposal, weekly in a long run).
-4. **Push (SSH).** After every round that made a model better, and at the end: the models directory to the
-   server, newer files only (not the caches or the links to replay days). The running bot hot-swaps every
+4. **Push (SSH).** As soon as a step finishes with a new model the bot loads, after every round that made a model
+   better, and at the end: the models directory to the server, newer files only (not the caches or the links to
+   replay days). The running bot hot-swaps every
    model that changed. A file changed here is never overwritten by an older copy from the server.
+   - **As each step finishes:** when a step leaves a new file at the top of the models folder (a model it promoted),
+     the trainer sends it while the next step runs. Work in progress never triggers a send (a tournament stopped
+     mid-round replaces no live model); its progress files go along with the next send. Only what was written by the
+     time the step reported done goes: a file the next step is still writing waits for that step's send.
    - **At the start of each run** too: any model newer than the server's copy goes up first, so models from a run that
      was closed before its last send (or had no server set) still arrive.
    - **Every send is checked:** the server's models are listed again and each file must be there with its size and

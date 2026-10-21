@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
-import { afterRound, championsGone, confirmPushed, CONTINUE_STEPS, fullRoundDone, readTrainerState, writeTrainerState, filesToPull, filesToPush, guideText, kalshiSweeps, laptopProfile, readSettings, writeSettings, LOCAL_ONLY_DIRS, localManifest, parseManifest, readPushes, roundOutcome, safeServerEnv, scoreboard, Server, serverLine } from '../research/laptopTrain';
+import { afterRound, championsGone, confirmPushed, CONTINUE_STEPS, finishedStep, fullRoundDone, modelsChangedSince, readTrainerState, writeTrainerState, filesToPull, filesToPush, guideText, kalshiSweeps, laptopProfile, readSettings, writeSettings, LOCAL_ONLY_DIRS, localManifest, parseManifest, readPushes, roundOutcome, safeServerEnv, scoreboard, Server, serverLine } from '../research/laptopTrain';
 import { dailyStats, type ReadinessFile } from '../research/readiness';
 import { resourcePlan } from '../research/trainerResources';
 import { tmpDir } from './helpers';
@@ -209,4 +209,26 @@ test('Kalshi sweeps: off unless ticked (the kalshi and bot targets leave SWEEP_T
   assert.equal(readSettings(dataDir).kalshiSweep, false, 'off by default');
   writeSettings(dataDir, { ...readSettings(dataDir), kalshiSweep: true });
   assert.equal(readSettings(dataDir).kalshiSweep, true, 'kept for the next run');
+});
+
+test('laptop trainer: a finished step with a new model the bot loads is sent at once', () => {
+  // The pipeline's "done" line names the step; nothing else does.
+  assert.equal(finishedStep('[pipeline] vol_model: done in 40 s\n'), 'vol_model');
+  assert.equal(finishedStep('[pipeline] snn-crypto-pbt: done in 7696 s'), 'snn-crypto-pbt');
+  assert.equal(finishedStep('[pipeline] mlp: running...'), undefined);
+  assert.equal(finishedStep('[pipeline] mlp: skipped (nothing it reads changed)'), undefined);
+  assert.equal(finishedStep('[trainer] models sent: done in 3 s'), undefined);
+  // Only the files at the top of the models folder count (what the bot loads), not the pipeline's progress file, a
+  // file still being written (.tmp) or the work in progress below it.
+  const d = tmpDir(), t = Date.now() - 60_000;
+  fs.mkdirSync(path.join(d, 'work', 'snnpbt'), { recursive: true });
+  for (const f of ['model.json', 'pipeline_state.json', 'perp_model.json.tmp', 'work/snnpbt/state.json', 'old.json']) fs.writeFileSync(path.join(d, f), '{}');
+  fs.utimesSync(path.join(d, 'old.json'), new Date(t - 60_000), new Date(t - 60_000));
+  assert.deepEqual(modelsChangedSince(d, t), ['model.json']);
+  assert.deepEqual(modelsChangedSince(d, Date.now() + 1000), []);
+  // Up to when the step reported done: a file the next step wrote after that waits for its own send.
+  fs.utimesSync(path.join(d, 'model.json'), new Date(t + 30_000), new Date(t + 30_000));
+  assert.deepEqual(modelsChangedSince(d, t, t + 20_000), []);
+  assert.deepEqual(modelsChangedSince(d, t, t + 30_000), ['model.json']);
+  assert.deepEqual(modelsChangedSince(path.join(d, 'missing'), t), []);
 });
