@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import path from 'path';
 import { test } from 'node:test';
 import { Alerter } from '../bot/alerts/alerter';
+import { buildNeuralMap } from '../bot/api/neuralMap';
+import type { ApiDeps } from '../bot/api/server';
 import { loadConfig } from '../bot/config';
 import { Engine } from '../bot/engine';
 import type { KalshiRest } from '../bot/kalshi/rest';
@@ -187,6 +189,12 @@ test('engine trades tennis inside its own 25% budget and keeps it out of the cry
   assert.ok(b.used > 0 && b.used <= b.cap, JSON.stringify(b));
   assert.equal(b.cap, 50);
   assert.equal(engine.status.has('KXATPMATCH-E1-DOG'), false, 'tennis never goes through the crypto pricer');
+  // The neural map's tennis trader block: lit by the match, active with its resting order.
+  const map = await buildNeuralMap({ cfg, md, engine, oms } as unknown as ApiDeps);
+  const blk = map.layers.find((l) => l.id === 'bots')!.blocks.find((x) => x.id === 'bot_tennis')!;
+  assert.ok(blk.cells.some((x) => x !== 0), 'the tracked match lights the block');
+  assert.match(blk.note, /1 matches · 0 held · 1 resting/);
+  assert.ok(blk.activity > 0.1);
 });
 
 import fs from 'fs';

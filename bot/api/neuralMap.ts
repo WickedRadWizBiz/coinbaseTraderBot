@@ -211,6 +211,23 @@ export function tennisTraderCells(matches: any[]): number[] {
   }));
 }
 
+/** The tennis trader block: activity from its held positions and resting orders, score from the last 24 h of settled
+ *  tennis P&L against the tennis budget. */
+function tennisTraderBlock(d: ApiDeps, now: number): MapBlock {
+  const e = d.engine;
+  const isTennis = (ticker: string) => d.cfg.tennis.series.some((s) => ticker.startsWith(`${s}-`));
+  const held = d.oms.positions.unsettled().filter((p) => p.yes !== 0 && isTennis(p.ticker)).length;
+  const resting = d.oms.liveOrders().filter((o) => isTennis(o.ticker)).length;
+  const settled = d.oms.positions.all().filter((p) => p.settled && (p.settledTs ?? 0) >= now - 24 * H && isTennis(p.ticker));
+  const cap = e.tennisBudget().cap;
+  const pnl = settled.reduce((a, p) => a + (p.realized ?? 0), 0);
+  return {
+    id: 'bot_tennis', label: 'Tennis trader', short: 'TENNIS', cols: COLS, cells: tennisTraderCells([...e.tennisStatus.values()]),
+    score: settled.length && cap > 0 ? clamp(pnl / cap) : null, activity: clamp(0.1 + (held + resting / 2) / 3, 0.1, 1),
+    note: `${e.tennisStatus.size} matches · ${held} held · ${resting} resting${settled.length ? ` · last 24 h ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : ''}`,
+  };
+}
+
 export async function buildNeuralMap(d: ApiDeps): Promise<NeuralMap> {
   const now = Date.now();
   const e = d.engine;
@@ -266,15 +283,7 @@ export async function buildNeuralMap(d: ApiDeps): Promise<NeuralMap> {
     { id: 'bot_kalshi', label: 'Kalshi trader', short: 'KALSHI', cols: COLS, cells: grid([markets.map((m: any) => clamp(((m.pYes ?? 0.5) - ((m.bestBid ?? 0.5) + (m.bestAsk ?? 0.5)) / 2) * 8))]), score: lossLim ? clamp(dayPnl / lossLim) : null, activity: clamp(open.length / 5, 0.1, 1), note: `${open.length} open positions · today ${dayPnl >= 0 ? '+' : ''}$${dayPnl.toFixed(2)}` },
     { id: 'bot_setups', label: 'Perps setup trader', short: 'SETUPS', cols: COLS, cells: setupTraderCells(trading), score: trading.today?.goalUsd ? clamp((trading.today.realizedUsd ?? 0) / trading.today.goalUsd) : null, activity: clamp((setupOpen.length + setupQueued / 2) / 3, 0.05, 1), note: trading.strategy === 'setups' ? `${setupOpen.length} open · ${setupQueued} queued · today $${(trading.today?.realizedUsd ?? 0).toFixed(2)}${!setupOpen.length && lastSetup ? ` · last trade ${new Date(lastSetup).toISOString().slice(5, 16).replace('T', ' ')} UTC` : ''}` : `mode ${trading.mode ?? 'off'}` },
   ];
-  if (d.cfg.tennis.enabled) {
-    const isTennis = (ticker: string) => d.cfg.tennis.series.some((s) => ticker.startsWith(`${s}-`));
-    const held = open.filter((p) => p.yes !== 0 && isTennis(p.ticker)).length;
-    const resting = d.oms.liveOrders().filter((o) => isTennis(o.ticker)).length;
-    const settled = d.oms.positions.all().filter((p) => p.settled && (p.settledTs ?? 0) >= now - 24 * H && isTennis(p.ticker));
-    const cap = e.tennisBudget().cap;
-    const tennisPnl = settled.reduce((a, p) => a + (p.realized ?? 0), 0);
-    bots.push({ id: 'bot_tennis', label: 'Tennis trader', short: 'TENNIS', cols: COLS, cells: tennisTraderCells([...e.tennisStatus.values()]), score: settled.length && cap > 0 ? clamp(tennisPnl / cap) : null, activity: clamp(0.1 + (held + resting / 2) / 3, 0.1, 1), note: `${e.tennisStatus.size} matches · ${held} held · ${resting} resting${settled.length ? ` · last 24 h ${tennisPnl >= 0 ? '+' : ''}$${tennisPnl.toFixed(2)}` : ''}` });
-  }
+  if (d.cfg.tennis.enabled) bots.push(tennisTraderBlock(d, now));
 
   const layers: MapLayer[] = [
     { id: 'feeds', label: 'Data feeds', blocks: feeds },
