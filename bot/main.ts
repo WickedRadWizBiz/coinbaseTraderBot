@@ -35,7 +35,7 @@ import { MarketContext, marketContext, setMarketContext } from './ta/marketConte
 import { activeRuleBook, RuleBook, setRuleBook, STAND_ASIDE } from './strategy/ruleBook';
 import { activeGpSignals, GpSignals, setGpSignals } from './gp/gpSignals';
 import { SetupJournal } from './setups/journal';
-import { compressOldRecordings, freeBytesAt, pruneRecordings, recordingsUsage } from './marketdata/recordingFiles';
+import { compressOldRecordings, freeBytesAt, makeRecordingsRoom, recordingsUsage } from './marketdata/recordingFiles';
 import { DEFAULT_LANES } from './setups/lanes';
 import { PaperPerpExchange } from './perps/paperPerp';
 import { KalshiPerpsRest, type PerpGateway } from './perps/perpRest';
@@ -96,6 +96,9 @@ async function main(): Promise<void> {
   }
   setBalancePrecision(cfg.kalshiBalancePrecision);
   fs.mkdirSync(cfg.dataDir, { recursive: true, mode: 0o700 });
+  // A full disk stops the bot at its first write: make room before anything is written (the regular check runs later).
+  const startupPruned = cfg.autoTrain.recordingsPrune ? makeRecordingsRoom(path.join(cfg.dataDir, 'recordings'), cfg.autoTrain.recordingsMinFreeGb * 1e9) : [];
+  if (startupPruned.length) log.warn('disk full at startup: deleted recorded days', { days: startupPruned });
   const audit = new AuditLog(path.join(cfg.dataDir, 'audit'), 500, Date.now, { maxFileBytes: cfg.auditMaxFileMb * 1024 * 1024, retentionDays: cfg.auditRetentionDays });
   audit.write('startup', { pid: process.pid, node: process.version, config: publicConfig(cfg as Config) });
 
@@ -168,7 +171,7 @@ async function main(): Promise<void> {
       const floor = cfg.autoTrain.recordingsMinFreeGb * 1e9;
       const prune = () => {
         if (!cfg.autoTrain.recordingsPrune) return;
-        const gone = pruneRecordings(recDir, 2 * floor);
+        const gone = makeRecordingsRoom(recDir, floor);
         if (gone.length) alerter.notify('warn', 'recordings-pruned', `Disk below ${cfg.autoTrain.recordingsMinFreeGb} GB free: deleted the oldest recorded days ${gone[0]}..${gone[gone.length - 1]} (${gone.length})`);
       };
       if ((freeBytesAt(recDir) ?? Infinity) < floor) prune();

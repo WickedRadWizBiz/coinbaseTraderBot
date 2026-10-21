@@ -115,4 +115,6 @@ test('recordings: old days are gzipped; listing, lines and replay read both form
   for await (const e of readRecordings(dir, '')) { n++; assert.ok(e.t >= last); last = e.t; }
   assert.equal(n, 6);
   assert.deepEqual(await compressOldRecordings(dir, 2, now), [], 'idempotent');
+  assert.deepEqual(await compressOldRecordings(dir, 1, now), ['2026-10-09'], '1: only today stays plain, yesterday is gzipped');
+  assert.ok(fs.existsSync(path.join(dir, 'md-2026-10-10.jsonl')), 'never today');
 });
