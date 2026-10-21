@@ -14,7 +14,8 @@
 //               days nothing was fitted or tuned on (research/readiness.ts). Each module is promoted only
 //               when it beats the one in use (AUTO_TRAIN_CHAMPION). Every 24 hours a round runs every step
 //               again (new history, new recordings from the server: new weeks to train on).
-//   4. push     (optional, SSH) after every round that made a model better, and at the end: the models
+//   4. push     (optional, SSH) as soon as a step finishes with a model the bot loads, after every round that made a
+//               model better, and at the end: the models
 //               directory to the server, newer files only; the running bot hot-swaps every model that
 //               changed (no restart)
 //
@@ -144,6 +145,19 @@ export interface PushRecord { at: number; why: string; files: number; mb: number
 
 export function readPushes(dataDir: string): PushRecord[] {
   try { return fs.readFileSync(path.join(dataDir, 'pushes.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as PushRecord); } catch { return []; }
+}
+
+/** The pipeline step a log line says just finished ("[pipeline] <step>: done in N s"), if any. */
+export const finishedStep = (line: string): string | undefined => /^\[pipeline\] ([\w-]+): done in /.exec(line)?.[1];
+
+/** The files at the top of the models folder (the ones the bot loads, not the pipeline's own progress file) written
+ *  after `t`. */
+export function modelsChangedSince(models: string, t: number): string[] {
+  try {
+    return fs.readdirSync(models, { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name !== 'pipeline_state.json' && !e.name.endsWith('.tmp') && fs.statSync(path.join(models, e.name)).mtimeMs > t)
+      .map((e) => e.name).sort();
+  } catch { return []; }
 }
 
 /** Where this run's models go, for STATUS.txt and the console. */
@@ -292,7 +306,7 @@ export function guideText(t: { poolUsd: number; dailyPct: number; maxDdPct: numb
     '  Train in sessions (60 minutes by default; the length is the slider in the window). The networks get the',
     '  first 70% of a session, the models that read them the rest; a step that runs out of time stops at its',
     '  next round, and the next session carries on from there. Downloading new history comes before the clock',
-    '  starts. At the end of every session the models go to your server, and the bot swaps them in within a',
+    '  starts. Each model goes to your server as soon as its step finishes, and the bot swaps it in within a',
     '  minute (no restart). A model is promoted only when it beats the one in use.',
     '  Each network\'s tournament runs over weeks of history it has never trained on, a few rounds a session; when',
     '  a generation finishes, the network is retrained and must beat the one in use on held-out weeks. Run a',
@@ -662,7 +676,8 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     if (env.ok) { serverEnv = safeServerEnv(env.out); log(`using ${Object.keys(serverEnv).length} non-secret setting(s) from the server's bot.env`); }
   }
 
-  // ---- 4. push: after every round that made a model better, and at the end ----
+  // ---- 4. push: as soon as a step finishes with a model the bot loads, after every round that made a model better, and
+  // at the end ----
   // Every send is checked: the server's models are listed again and each file must be there with its size and time.
   // Each send is recorded (trainer-data/pushes.jsonl) and the last one is in STATUS.txt.
   let lastPush: PushRecord | undefined = readPushes(dataDir).at(-1);
@@ -676,13 +691,17 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
       if (fs.existsSync(f)) writeText(f, fs.readFileSync(f, 'utf8').split('\n').map((l) => (l.startsWith('Server: ') ? where() : l)).join('\n'));
     } catch { /* the next round writes it */ }
   };
-  const push = async (why: string) => {
+  // `during`: sent while the round goes on (the window stays on the training).
+  const push = async (why: string, during = false) => {
     if (!server || flag('no-push')) return;
-    hooks?.phase?.('push');
+    if (!during) hooks?.phase?.('push');
     const m = listModels();
     if (!m.ok) { log(`listing the server's models failed: ${m.err.trim().slice(0, 300)}`); record({ at: Date.now(), why, files: 0, mb: 0, confirmed: 0, missing: [], error: 'could not list the server\'s models' }); return; }
-    const send = filesToPush(localManifest(models), parseManifest(m.out), t0);
-    if (!send.length) { log('no model newer than the server\'s'); return; }
+    // While the round goes on, a file written in the last 2 s may still be being written (the bot waits as long before it
+    // loads one): it goes with the next send.
+    const now = Date.now();
+    const send = filesToPush(localManifest(models), parseManifest(m.out), t0).filter((f) => !during || now - f.mtime >= 2000);
+    if (!send.length) { if (!during) log('no model newer than the server\'s'); return; }
     const mb = +(send.reduce((a, f) => a + f.size, 0) / 1e6).toFixed(1);
     log(`${why}: sending ${send.length} file(s), ${mb} MB, to the server...`);
     const ok = await server.push(models, send.map((f) => f.path), '~/bot/data/models');
@@ -697,6 +716,24 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   if (!s.host) hooks?.notice?.('No server set: the models this run trains stay on this laptop. Fill in the Server section so they reach your bot.');
   // Models from earlier runs that never reached the server (a run closed before its last send, or no server then).
   await push('models from earlier runs');
+  // Each finished step's models go at once, so a session closed or crashed part-way keeps what it finished. Only what a
+  // step promoted triggers a send (a tournament stopped mid-round replaces no live model); its progress files go along.
+  let sentAt = t0, pendingStep: string | undefined;
+  let sending: Promise<void> | undefined;
+  const sendFinished = (step: string) => {
+    if (!server || flag('no-push')) return;
+    if (sending) { pendingStep = step; return; }
+    const changed = modelsChangedSince(models, sentAt);
+    if (!changed.length) return;
+    sentAt = Date.now();
+    sending = push(`${step} finished (${changed.join(', ')})`, true).finally(() => {
+      sending = undefined;
+      const next = pendingStep;
+      pendingStep = undefined;
+      if (next) sendFinished(next);
+    });
+  };
+  const roundHooks: TrainerHooks = { ...hooks, line: (l) => { hooks?.line?.(l); const st = finishedStep(l); if (st) sendFinished(st); } };
 
   // The server's settings, then the laptop's bigger budgets and PyTorch over them, then trainer.env, then anything
   // set in the environment.
@@ -749,7 +786,8 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     hooks?.roundStart?.(round, full, sweepAll);
     hooks?.phase?.('pipeline');
     const r0 = Date.now();
-    const { code, heapOom } = await runRound(envFor(continuous ? 24 : left / 3_600_000), steps, logFile, [...(sweepAll ? ['--sweep-all'] : []), ...skip], hooks);
+    const { code, heapOom } = await runRound(envFor(continuous ? 24 : left / 3_600_000), steps, logFile, [...(sweepAll ? ['--sweep-all'] : []), ...skip], roundHooks);
+    while (sending) await sending;
     // A full round counts once its history and replay finished (also when stopped after them), or when it ran to the
     // end (a history step that failed is tried again in a day, not every round).
     if (full && (!stopped() || fullRoundDone(lastReport(models, r0)?.steps ?? [], o.skipDataDownload ? ['history_replay'] : FULL_ROUND_STEPS))) { lastFull = r0; writeTrainerState(dataDir, { ...readTrainerState(dataDir), lastFullAt: r0 }); }
