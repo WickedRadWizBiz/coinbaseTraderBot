@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
-import { afterRound, championsGone, confirmPushed, CONTINUE_STEPS, finishedStep, fullRoundDone, modelsChangedSince, readTrainerState, writeTrainerState, filesToPull, filesToPush, guideText, kalshiSweeps, laptopProfile, readSettings, writeSettings, LOCAL_ONLY_DIRS, localManifest, parseManifest, readPushes, roundOutcome, runTrainer, safeServerEnv, scoreboard, Server, serverLine } from '../research/laptopTrain';
+import { afterRound, championsGone, confirmPushed, CONTINUE_STEPS, finishedStep, fullRoundDone, modelsChangedSince, readTrainerState, writeTrainerState, filesToPull, filesToPush, guideText, kalshiSweeps, laptopProfile, readSettings, writeSettings, LOCAL_ONLY_DIRS, localManifest, parseManifest, readPushes, roundOutcome, runTrainer, safeServerEnv, scoreboard, Server, serverLine, usableKey } from '../research/laptopTrain';
 import { dailyStats, type ReadinessFile } from '../research/readiness';
 import { resourcePlan } from '../research/trainerResources';
 import { tmpDir } from './helpers';
@@ -275,4 +275,16 @@ test('send only: the laptop\'s earlier models go to the server and are confirmed
     const again = await runTrainer({ hours: 0, dataDir: here, sendOnly: true, settings: { host: 'h', user: 'u', port: 22, key } });
     assert.equal(again.why, 'nothing to send: the server already has every model this computer trained');
   } finally { process.env.PATH = oldPath; }
+});
+
+test('windows key copy: a read-only copy from an earlier run is reused for the same key and replaced for a new one', () => {
+  const dir = tmpDir();
+  const key = path.join(dir, 'k.pem');
+  fs.writeFileSync(key, 'KEY-1');
+  const copy = usableKey(key, dir, 'win32');
+  assert.equal(fs.readFileSync(copy, 'utf8'), 'KEY-1');
+  fs.chmodSync(copy, 0o400); // what icacls leaves: read-only for the user
+  assert.equal(usableKey(key, dir, 'win32'), copy, 'the same key: no copy over the read-only file');
+  fs.writeFileSync(key, 'KEY-2');
+  assert.equal(fs.readFileSync(usableKey(key, dir, 'win32'), 'utf8'), 'KEY-2', 'a different key replaces it');
 });

@@ -397,11 +397,19 @@ async function ask(rl: readline.Interface, q: string, def?: string): Promise<str
 }
 
 /** On Windows, OpenSSH refuses a key other users can read: keep a private copy readable by you only. */
-function usableKey(key: string, dataDir: string): string {
-  if (process.platform !== 'win32') { try { fs.chmodSync(key, 0o600); } catch { /* read-only medium */ } return key; }
+export function usableKey(key: string, dataDir: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== 'win32') { try { fs.chmodSync(key, 0o600); } catch { /* read-only medium */ } return key; }
   const copy = path.join(dataDir, 'ssh_key.pem');
+  const user = os.userInfo().username;
+  // The copy from an earlier run is read-only (OpenSSH refuses a key others can read): reuse it when it is the
+  // same key, else give write access back before replacing it.
+  if (fs.existsSync(copy)) {
+    try { if (fs.readFileSync(copy).equals(fs.readFileSync(key))) return copy; } catch { /* unreadable: replace it */ }
+    spawnSync('icacls', [copy, '/grant:r', `${user}:F`], { stdio: 'ignore' });
+    try { fs.chmodSync(copy, 0o600); fs.rmSync(copy, { force: true }); } catch { /* copyFileSync below reports it */ }
+  }
   fs.copyFileSync(key, copy);
-  spawnSync('icacls', [copy, '/inheritance:r', '/grant:r', `${os.userInfo().username}:R`], { stdio: 'ignore' });
+  spawnSync('icacls', [copy, '/inheritance:r', '/grant:r', `${user}:R`], { stdio: 'ignore' });
   return copy;
 }
 
