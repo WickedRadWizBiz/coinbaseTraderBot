@@ -15,8 +15,12 @@ You only need to do the things in **"What you still do by hand"** below.
 
 While the bot runs in any mode (paper, shadow or live), it writes every book update, trade, index tick and settlement to `data/recordings/md-YYYY-MM-DD.jsonl`. This is what everything below learns from, and the longer the bot runs, the more of the whole system becomes testable (see 8 below).
 
-- **Compression:** days older than `RECORDINGS_GZIP_AFTER_DAYS` (2) are gzipped to `md-YYYY-MM-DD.jsonl.gz`, about a tenth of the size, so months of recordings fit on the server. Every replay, trainer and sweep reads both forms.
-- **Disk floor:** if free space where the recordings live drops below `RECORDINGS_MIN_FREE_GB` (5), the bot deletes the oldest recorded days (never the newest two) until twice that is free, and sends an alert naming the days. A full disk stops the bot from saving its state and from starting at all, which is worse than losing the oldest training days. `RECORDINGS_PRUNE=false` turns the deletion off (alert only). The check runs every 10 minutes.
+- **Compression:** only the newest `RECORDINGS_GZIP_AFTER_DAYS` days (1: today) stay plain. Yesterday is gzipped to `md-YYYY-MM-DD.jsonl.gz` right after midnight, about a tenth of the size, so months of recordings fit on the server; a plain day can pass 20 GB. Every replay, trainer and sweep reads both forms.
+- **Disk floor:** if free space where the recordings live drops below `RECORDINGS_MIN_FREE_GB` (5), the bot deletes the oldest recorded days until twice that is free, and sends an alert naming the days.
+  - The newest two days are kept, unless the disk is still below a quarter of the floor. Then yesterday goes too, and only today is kept.
+  - A full disk stops the bot from saving its state and from starting at all, which is worse than losing training days.
+  - The check runs at startup, before anything is written, and every 10 minutes. The deploy does the same before uploading a release.
+  - `RECORDINGS_PRUNE=false` turns the deletion off (alert only).
 - **Setup journal:** the perps setup trader also writes `data/setups/journal-YYYY-MM-DD.jsonl`. Every setup it sees and every trade it opens and closes is logged there, together with what the TA network and the perps SNN said at that moment.
 
 ### 2. It runs the training pipeline every day
@@ -290,7 +294,7 @@ These can't be automated, or deliberately aren't.
 | `SESSION_DECISION_SHARE` | `0.3` | The part of a session kept for the models that read the networks (vol model, dataset, MLP, perps, tennis, fill, sizing, playbook, readiness). |
 | `SETUP_TA_NET_PATH` | `params/ta_net_wf.json` | The walking TA network the setup trader reads when `data/models/ta_net_wf.json` doesn't exist yet. |
 | `SWEEP_TARGETS` | `setups-long,setups-short,setups-vol,setups-ratchet,setups-scale,setups-spotpb,kalshi,bot` | Sweep targets run weekly. |
-| `RECORDINGS_GZIP_AFTER_DAYS` | `2` | Gzip recorded days older than this (0 = never). |
+| `RECORDINGS_GZIP_AFTER_DAYS` | `1` | Recorded days kept plain, today included; older days are gzipped (0 = never). |
 | `RECORDINGS_MIN_FREE_GB` | `5` | Below this much free space: alert, and delete the oldest recorded days until twice this is free. |
 | `RECORDINGS_PRUNE` | `true` | `false` = alert only, never delete recordings. |
 | `AUTO_TRAIN_SNN_PBT_DAYS` / `AUTO_TRAIN_SNN_PBT_EVERY_DAYS` | `7` / `30` | SNN tournaments: days replayed, how often they rerun (docs/EVOLUTION.md has every tournament setting). On the history replay, a generation is that many days of weeks the network has never trained on (docs/LAPTOP_TRAINING.md, history ledger). |

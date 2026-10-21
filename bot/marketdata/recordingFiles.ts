@@ -43,9 +43,10 @@ export function linkDays(days: RecordingDay[], dest: string): void {
   }
 }
 
-/** Gzip every plain day file older than `keepPlainDays` days (never today's). Returns the days compressed. */
+/** Gzip every plain day file except the newest `keepPlainDays` days, today included (1 = only today stays plain:
+ *  yesterday is compressed right after midnight). Never today's. Returns the days compressed. */
 export async function compressOldRecordings(dir: string, keepPlainDays: number, now = Date.now()): Promise<string[]> {
-  const cutoff = new Date(now - keepPlainDays * 86_400_000).toISOString().slice(0, 10);
+  const cutoff = new Date(now - Math.max(0, keepPlainDays - 1) * 86_400_000).toISOString().slice(0, 10);
   const today = new Date(now).toISOString().slice(0, 10);
   const done: string[] = [];
   if (!fs.existsSync(dir)) return done;
@@ -82,6 +83,16 @@ export function pruneRecordings(dir: string, targetFreeBytes: number, keepDays =
     deleted.push(d.day);
   }
   return deleted;
+}
+
+/** Below `floorBytes` free: the oldest days go until twice that is free, never the newest two; still below a quarter
+ *  of the floor, yesterday goes too (only today is kept). The bot cannot start or save its state on a full disk, which
+ *  is worse than losing a recorded day. Returns the days deleted. */
+export function makeRecordingsRoom(dir: string, floorBytes: number, free: () => number | undefined = () => freeBytesAt(dir)): string[] {
+  if ((free() ?? Infinity) >= floorBytes) return [];
+  const gone = pruneRecordings(dir, 2 * floorBytes, 2, free);
+  if ((free() ?? Infinity) < floorBytes / 4) gone.push(...pruneRecordings(dir, 2 * floorBytes, 1, free));
+  return gone;
 }
 
 /** Disk use of the recordings and free space where they live (free is undefined when unknown). */

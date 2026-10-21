@@ -72,7 +72,8 @@ jobs:
 
       # A full disk stops the upload and the bot alike. Recordings (one file per day in ~/bot/data/recordings)
       # are almost all of the disk: below 5 GB free, the oldest days go (never the newest two) until 10 GB is
-      # free. The bot does the same every 10 minutes (RECORDINGS_MIN_FREE_GB / RECORDINGS_PRUNE).
+      # free; below 2 GB, yesterday goes too. The bot does the same at startup and every 10 minutes
+      # (RECORDINGS_MIN_FREE_GB / RECORDINGS_PRUNE).
       - name: Make room on the server disk
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -93,6 +94,18 @@ jobs:
                 [ "$(free_gb)" -ge 10 ] && break
                 echo "$keep" | grep -qx "$d" && break
                 echo "deleting recorded day $d"
+                rm -f ~/bot/data/recordings/md-$d.jsonl ~/bot/data/recordings/md-$d.jsonl.gz ~/bot/data/recordings/md-$d.jsonl.gz.tmp
+              done
+            fi
+            # Nearly full with only the newest two days left (a plain day can pass 20 GB): yesterday goes too, only
+            # today stays. The bot cannot start on a full disk.
+            if [ "$(free_gb)" -lt 2 ]; then
+              days=$(ls ~/bot/data/recordings 2>/dev/null | sed -nE 's/^md-([0-9]{4}-[0-9]{2}-[0-9]{2})\.jsonl(\.gz)?$/\1/p' | sort -u)
+              newest=$(echo "$days" | tail -n 1)
+              for d in $days; do
+                [ "$(free_gb)" -ge 10 ] && break
+                [ "$d" = "$newest" ] && break
+                echo "disk nearly full: deleting recorded day $d"
                 rm -f ~/bot/data/recordings/md-$d.jsonl ~/bot/data/recordings/md-$d.jsonl.gz ~/bot/data/recordings/md-$d.jsonl.gz.tmp
               done
             fi

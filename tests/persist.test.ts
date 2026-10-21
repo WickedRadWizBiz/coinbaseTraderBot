@@ -6,7 +6,7 @@ import os from 'os';
 import { readJson, setQuarantineAll, writeJsonAtomic } from '../bot/util/persist';
 import { PaperExchange } from '../bot/paper/paperExchange';
 import { DEFAULT_FEES } from '../bot/fees';
-import { pruneRecordings } from '../bot/marketdata/recordingFiles';
+import { makeRecordingsRoom, pruneRecordings } from '../bot/marketdata/recordingFiles';
 
 test('a truncated state file: rebuildable state is moved aside and starts fresh; risk state still refuses to start', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'persist-'));
@@ -44,6 +44,16 @@ test('a low disk deletes the oldest recorded days first and never the newest two
   assert.deepEqual(fs.readdirSync(dir).sort(), ['md-2026-10-03.jsonl.gz', 'md-2026-10-04.jsonl', 'md-2026-10-05.jsonl']);
   assert.deepEqual(pruneRecordings(dir, 100, 2, () => 0), ['2026-10-03'], 'however low the disk, the newest two days stay');
   assert.deepEqual(pruneRecordings(dir, 100, 2, () => undefined), [], 'nothing is deleted when free space is unknown');
+});
+
+test('a nearly full disk with only two (huge) days left deletes yesterday too, never today', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'recroom-'));
+  for (const d of ['2026-10-20', '2026-10-21']) fs.writeFileSync(path.join(dir, `md-${d}.jsonl`), 'x');
+  assert.deepEqual(makeRecordingsRoom(dir, 100, () => 200), [], 'enough free: nothing deleted');
+  assert.deepEqual(makeRecordingsRoom(dir, 100, () => 60), [], 'below the floor but not nearly full: the newest two stay');
+  assert.deepEqual(makeRecordingsRoom(dir, 100, () => 0), ['2026-10-20'], 'nearly full: yesterday goes');
+  assert.deepEqual(fs.readdirSync(dir), ['md-2026-10-21.jsonl'], 'today stays');
+  assert.deepEqual(makeRecordingsRoom(dir, 100, () => 0), [], 'today is never deleted');
 });
 
 test('paper mode: even risk state that does not parse is moved aside; live mode keeps it strict', () => {
