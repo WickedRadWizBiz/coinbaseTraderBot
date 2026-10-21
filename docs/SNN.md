@@ -57,6 +57,8 @@ checkpoints persist across restarts.
 - The tennis model (`bot/tennis/tennisFair.ts`, an MLP or boosted trees, whichever validates better) learns fair P(A wins) from the 4 signals, the score, the book and the tennis network (its P(A), direction call and confidence).
 - Once validated (100+ matches, held-out Brier better than the market's), an entry needs fair − price ≥ `TENNIS_FAIR_MIN_EDGE`.
 - Live scores come from the Live Tennis API (`TENNIS_SCORE_FEED=livetennis`, key in `LIVE_TENNIS_API_KEY`). The free tier allows 100 calls a day: one slate call covers every match, and it is only refreshed on a price move, an exit, or after `TENNIS_SCORE_IDLE_MIN`.
+  - The day's calls are spread over the provider's day, which resets at 21:00 UTC. The first 10 are available at once, and the rest accrue evenly through the day; time without live matches carries its share forward. 10 calls are kept for exits.
+  - A match that hasn't started, and isn't held, spends no calls.
 
 **Logging and the legacy blend.**
 - Each network's calls are written to the recordings every minute as `snn` events tagged with the network (`d: crypto | perps | tennis`), each call as `[key, pUp, expSignedMove, labelled, skill, calConf, contractSkill, surpriseRatio, G]`. That is what the decision models train on. Events logged before the split (no `d`) are read as: 15m → crypto, 4h → perps, 1h → both.

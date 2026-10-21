@@ -12,6 +12,8 @@
 // - When the daily allowance resets (assumed midnight UTC).
 // - The exact 429 response (the body is logged and Retry-After honoured if present).
 // The call counter is persisted (optional file) so a restart does not reset the daily budget.
+// Normal calls are paced over the provider's day (a small burst, then an even share of the rest as the day goes on):
+// a busy night of live matches can no longer spend the day's calls before the afternoon's matches start.
 
 import fs from 'fs';
 import path from 'path';
@@ -43,6 +45,9 @@ export interface ScoreClientOptions {
   perMinuteLimit?: number; // provider's burst cap (free tier: 30)
   cacheTtlMs?: number;     // requests within this window share one snapshot
   maxPages?: number;       // never read more pages than this per refresh
+  /** Normal calls allowed at the start of the provider's day; the rest of the budget accrues evenly over it. 0 = no
+   *  pacing (the whole budget at once). */
+  paceBurst?: number;
   /** Persist the daily call counter here (survives restarts). */
   stateFile?: string;
   apiKey?: string;
@@ -69,7 +74,7 @@ export class TennisScoreClient {
     this.apiKey = key;
     this.fetchFn = options.fetchFn ?? fetch;
     this.now = options.now ?? Date.now;
-    this.opts = { dailyLimit: 100, exitReserve: 10, perMinuteLimit: 30, cacheTtlMs: 20_000, maxPages: 2, ...stripUndef(options) };
+    this.opts = { dailyLimit: 100, exitReserve: 10, perMinuteLimit: 30, cacheTtlMs: 20_000, maxPages: 2, paceBurst: 10, ...stripUndef(options) };
     this.loadState();
   }
 
@@ -120,6 +125,7 @@ export class TennisScoreClient {
           break;
         }
         const body = (await res.json()) as SlatePage;
+        this.lastError = undefined;
         matches.push(...(body.data ?? []));
         if (!body.meta?.has_more) break;
         offset = body.meta.offset + body.meta.limit;
@@ -144,6 +150,14 @@ export class TennisScoreClient {
     if (this.recentCalls.length >= this.opts.perMinuteLimit) return false;
     const cap = priority === 'exit' ? this.opts.dailyLimit : this.opts.dailyLimit - this.opts.exitReserve;
     if (this.callsToday >= cap) return false;
+    if (priority === 'normal') {
+      const paced = this.pacedAllowance(now, cap);
+      if (this.callsToday >= paced) {
+        const next = this.dayStart(now) + Math.ceil(((this.callsToday + 1 - this.opts.paceBurst) / (cap - this.opts.paceBurst)) * 86_400_000);
+        this.lastError = `calls spread over the day: ${this.callsToday} of ${cap} used, the next at ${new Date(next).toISOString().slice(11, 16)} UTC`;
+        return false;
+      }
+    }
     this.callsToday++;
     this.recentCalls.push(now);
     return true;
@@ -151,6 +165,19 @@ export class TennisScoreClient {
 
   /** Hour (UTC) at which the provider's daily allowance resets (21:00 for livetennisapi.com; learned from a 429). */
   private resetHourUtc = 21;
+
+  /** Start of the provider's current day. */
+  private dayStart(now: number): number {
+    const r = this.resetHourUtc * 3_600_000;
+    return Math.floor((now - r) / 86_400_000) * 86_400_000 + r;
+  }
+
+  /** Normal calls allowed by `now`: the burst, plus the rest of `cap` in proportion to the share of the day gone. */
+  private pacedAllowance(now: number, cap: number): number {
+    const burst = Math.max(0, this.opts.paceBurst);
+    if (!burst || burst >= cap) return cap;
+    return Math.min(cap, Math.floor(burst + ((cap - burst) * (now - this.dayStart(now))) / 86_400_000));
+  }
 
   private rollDay(): void {
     // The provider's day, not the UTC calendar day: counting from midnight UTC would reset our counter
