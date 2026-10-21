@@ -295,7 +295,7 @@ test('"Send to server now": the models from earlier runs go to the server; nothi
     dataDir,
     check: async () => ({ current: 'a', latest: 'a', publishedAt: null, available: false, canInstall: false, downloadUrl: null, checkedAt: null }),
     install: async () => undefined,
-    run: async (o) => { seen = { hours: o.hours, sendOnly: o.sendOnly, only: o.only }; return { why: 'models from earlier runs sent' }; },
+    run: async (o) => { seen = { hours: o.hours, sendOnly: o.sendOnly, only: o.only }; return { why: '3 file(s) sent and confirmed on the server' }; },
   });
   assert.match(ui.start({ mode: 'send' }).error ?? '', /fill in the Server section/);
   assert.equal(ui.start({ mode: 'send', hours: 2, host: '1.2.3.4', user: 'ubuntu', key: 'k.pem' }).ok, true);
@@ -303,5 +303,5 @@ test('"Send to server now": the models from earlier runs go to the server; nothi
   await new Promise((r) => setTimeout(r, 20));
   assert.deepEqual(seen, { hours: 0, sendOnly: true, only: undefined }, 'no session clock, the send-only run');
   assert.equal(ui.state.phase, 'idle');
-  assert.equal(ui.state.lastStop, 'models from earlier runs sent');
+  assert.equal(ui.state.lastStop, '3 file(s) sent and confirmed on the server');
 });

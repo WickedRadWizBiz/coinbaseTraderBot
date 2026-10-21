@@ -723,12 +723,18 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   log(where());
   if (!s.host) hooks?.notice?.('No server set: the models this run trains stay on this laptop. Fill in the Server section so they reach your bot.');
   // Models from earlier runs that never reached the server (a run closed before its last send, or no server then).
+  const before = lastPush;
   await push('models from earlier runs');
   if (o.sendOnly) {
     hooks?.phase?.('done');
     if (!server) { log('nothing sent: no server reachable (fill in the Server section: address, user, SSH key)'); return { why: 'no server to send to' }; }
     log(where());
-    return { why: lastPush?.error ? `sending failed: ${lastPush.error}` : 'models from earlier runs sent' };
+    // This send's record (none: the server already had everything).
+    const r = lastPush !== before ? lastPush : undefined;
+    return { why: !r ? 'nothing to send: the server already has every model this computer trained'
+      : r.error ? `sending failed: ${r.error}`
+      : r.missing.length ? `${r.confirmed} of ${r.files} file(s) confirmed on the server (not confirmed: ${r.missing.slice(0, 3).join(', ')})`
+      : `${r.files} file(s) sent and confirmed on the server` };
   }
   // Each finished step's models go at once, so a session closed or crashed part-way keeps what it finished. Only what a
   // step promoted triggers a send (a tournament stopped mid-round replaces no live model); its progress files go along.

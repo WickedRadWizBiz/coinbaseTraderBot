@@ -262,7 +262,7 @@ test('send only: the laptop\'s earlier models go to the server and are confirmed
   process.env.PATH = `${bin}:${oldPath}`;
   try {
     const r = await runTrainer({ hours: 0, dataDir: here, sendOnly: true, settings: { host: 'h', user: 'u', port: 22, key } });
-    assert.equal(r.why, 'models from earlier runs sent');
+    assert.equal(r.why, '3 file(s) sent and confirmed on the server');
     for (const f of ['ta_net.json', 'gp_indicators.json', 'work/snnpbt/crypto/state.json']) assert.equal(fs.readFileSync(path.join(home, 'bot/data/models', f), 'utf8'), mine[`models/${f}` as keyof typeof mine], f);
     assert.equal(fs.readFileSync(path.join(home, 'bot/data/models/pipeline_state.json'), 'utf8'), '{"server":true}', 'the server\'s newer progress file stays');
     assert.equal(fs.readFileSync(path.join(here, 'models/pipeline_state.json'), 'utf8'), '{"laptop":true}', 'nothing copied down over the laptop\'s');
@@ -271,5 +271,8 @@ test('send only: the laptop\'s earlier models go to the server and are confirmed
     assert.equal(last.files, 3);
     assert.equal(last.confirmed, 3);
     assert.deepEqual(last.missing, []);
+    // Again: the server has them all now, and the earlier send is not reported as this one.
+    const again = await runTrainer({ hours: 0, dataDir: here, sendOnly: true, settings: { host: 'h', user: 'u', port: 22, key } });
+    assert.equal(again.why, 'nothing to send: the server already has every model this computer trained');
   } finally { process.env.PATH = oldPath; }
 });
