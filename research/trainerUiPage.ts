@@ -73,6 +73,7 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
   .fields { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; margin-top: 10px; }
   @media (max-width: 640px) { .fields { grid-template-columns: 1fr; } }
   .field label { display: block; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); margin-bottom: 4px; }
+  input[type=range] { width: 100%; accent-color: var(--primary); margin: 10px 0 4px; }
   input[type=text], input[type=number] { width: 100%; background: rgba(0,0,0,.6); border: 1px solid rgba(155,124,255,.5); color: var(--text); font: inherit; font-size: 13px; padding: 8px 10px; border-radius: 4px; text-shadow: var(--halation); }
   input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 10px rgba(155,124,255,.45); }
   .btns { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
@@ -148,8 +149,8 @@ export const TRAINER_PAGE = String.raw`<!doctype html>
             <option value="full">Full speed: all but two CPU threads (when you are not using the computer)</option>
           </select></div>
         <div class="field"><label>&nbsp;</label><div class="muted">It always runs below normal priority and keeps a quarter of the memory free for you.</div></div>
-        <div class="field"><label for="hours">Hours to train (0 = until it stops by itself)</label><input id="hours" type="number" min="0" step="0.5" value="0" /></div>
-        <div class="field"><label>&nbsp;</label><div class="muted" id="stopsby">It stops when the bot reaches your target or stops improving.</div></div>
+        <div class="field"><label for="minutes">Session length: <b id="minVal">60 min</b></label><input id="minutes" type="range" min="30" max="120" step="15" value="60" /></div>
+        <div class="field"><label>&nbsp;</label><div class="muted" id="stopsby">Training stops after 60 minutes (downloading new history comes first, outside the clock); then the models go to your server. The next session carries on where this one stopped.</div></div>
       </div>
       <details id="srv" open><summary>Server: where the trained models go (copies recordings in, sends better models back)</summary>
         <div class="fields">
@@ -226,12 +227,12 @@ const eta = (s) => s === null || s === undefined ? 'estimating...' : s <= 0 ? 'd
 const at = (s) => s > 0 ? ' · around ' + new Date(Date.now() + s * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 let filled = false;
 for (const m of ['continue', 'full']) $('opt-' + m).addEventListener('click', () => { for (const n of ['continue', 'full']) $('opt-' + n).classList.toggle('sel', n === m); $('opt-' + m).querySelector('input').checked = true; });
-$('hours').addEventListener('input', () => { const h = Number($('hours').value); $('stopsby').textContent = h > 0 ? 'It stops after ' + h + ' h, or earlier if the bot reaches your target or stops improving.' : 'It stops when the bot reaches your target or stops improving.'; });
+$('minutes').addEventListener('input', () => { const m = Number($('minutes').value); $('minVal').textContent = m + ' min'; $('stopsby').textContent = 'Training stops after ' + m + ' minutes (downloading new history comes first, outside the clock); then the models go to your server. The next session carries on where this one stopped.'; });
 $('start').addEventListener('click', async () => {
   $('startErr').textContent = '';
   const mode = document.querySelector('input[name=mode]:checked').value;
   const skipDataDownload = $('skipDataDownload').checked;
-  const r = await post('/api/start', { mode, hours: Number($('hours').value) || 0, intensity: $('intensity').value, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim(), skipDataDownload, kalshiSweep: $('kalshiSweep').checked });
+  const r = await post('/api/start', { mode, hours: (Number($('minutes').value) || 60) / 60, intensity: $('intensity').value, host: $('host').value.trim(), user: $('user').value.trim(), key: $('key').value.trim(), skipDataDownload, kalshiSweep: $('kalshiSweep').checked });
   if (!r.ok) $('startErr').textContent = r.error || 'could not start';
 });
 let lastCond = null;
@@ -294,7 +295,7 @@ async function tick() {
     const p = s.progress;
     setBar('dl', p.downloads); setBar('tr', p.training);
     $('dlNote').textContent = p.downloads.pct >= 100 ? 'all data up to date' : 'only what is missing is downloaded';
-    $('trNote').textContent = 'this round' + (s.hours ? ' · ' + s.hours + ' h budget' : ' · runs until it stops by itself');
+    $('trNote').textContent = 'this round' + (s.hours ? ' · ' + Math.round(s.hours * 60) + '-minute session' : ' · runs until it stops by itself');
     $('curName').textContent = p.step ? 'Now: ' + p.step : 'Now: ' + p.phase;
     $('curFill').style.width = (p.current.pct || 0).toFixed(1) + '%';
     $('curPct').textContent = p.current.pct ? Math.round(p.current.pct) + '%' : '';

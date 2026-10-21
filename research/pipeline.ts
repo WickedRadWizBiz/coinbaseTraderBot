@@ -134,6 +134,7 @@ import { resolveAssets } from './history/assets';
 import { storedAssets, type HistTf } from './history/candles';
 import { regimeTransitions } from './transitions';
 import { setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from '../bot/ta/taNet';
+import { capHours, enterDecisionPhase, resetSession, sessionActive, sessionTimeUp, startSession } from './sessionClock';
 
 /** Coins with Kalshi crypto contracts: the SNN tournaments' transition penalty reads their regime changes. */
 const SNN_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
@@ -155,6 +156,8 @@ export interface SnnDomainState {
   pbtHyper?: Record<string, number>;
   pbtStage?: Stage;
   pbtAt?: number;
+  /** When its tournament last ran (with the session clock, the network whose turn is oldest goes first). */
+  turnAt?: number;
   pbtComplete?: boolean;
   /** How the tournament's days were chosen (the latest days, or blocks across the replay's years). */
   pbtLayout?: string;
@@ -355,6 +358,13 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       writeAtomic(path.join(A.dir, 'pipeline_state.json'), JSON.stringify({ ...state, lastReport: report }, null, 1));
     } catch (e) { log(`checkpoint failed: ${(e as Error).message}`); }
   };
+  // The training session's clock (TRAIN_SESSION_MIN, the laptop trainer's session length; research/sessionClock.ts):
+  // started by the first training step (the data steps are outside it); the networks get its first part, the decision
+  // models the rest, from the first of them on. A step whose part is used up does not start; it runs next session.
+  const sessionMin = Number(process.env.TRAIN_SESSION_MIN) || 0;
+  resetSession();
+  const DATA_STEPS = ['history-seed', 'history', 'history-index', 'history_replay', 'conditioning'];
+  const DECISION_STEPS = ['vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness'];
   const run = async (step: string, fn: () => Promise<unknown>, skip?: string) => {
     const t0 = Date.now();
     if (stopRequested) {
@@ -363,6 +373,17 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       return undefined;
     }
     if (skip) { steps.push({ step, ok: true, skipped: skip, ms: 0 }); log(`${step}: skipped (${skip})`); return undefined; }
+    if (sessionMin > 0 && !DATA_STEPS.includes(step)) {
+      if (!sessionActive()) { startSession(sessionMin); log(`session clock: ${sessionMin} min from now; the networks stop at their next round once their part is used up, the rest is the decision models'`); }
+      const decision = DECISION_STEPS.includes(step);
+      if (decision) enterDecisionPhase();
+      if (sessionTimeUp()) {
+        const why = decision ? `the ${sessionMin}-minute session is used up: it runs next session` : `the networks' part of the ${sessionMin}-minute session is used up (the rest is the decision models'): it runs next session`;
+        steps.push({ step, ok: true, skipped: why, ms: 0 });
+        log(`${step}: skipped (${why})`);
+        return undefined;
+      }
+    }
     log(`${step}: running...`);
     try {
       const detail = await fn();
@@ -381,7 +402,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   // Retrain steps that would give the same result are skipped: nothing they read changed since their last completed
   // run (the same code and settings, no new recordings, replay days or SNN outputs, no model replaced). Common on the
   // laptop trainer: a round after a stop, or a round whose tournaments promoted nothing.
-  const settingsSig = crypto.createHash('sha1').update(JSON.stringify({ ...cfg, autoTrain: { ...A, sweepHours: 0, taNetOosHours: 0 } })).digest('hex');
+  // Time budgets (the laptop trainer sizes them to the session) are left out: they change no decision model's inputs.
+  const settingsSig = crypto.createHash('sha1').update(JSON.stringify({ ...cfg, taNet: { ...cfg.taNet, kalshiHistoryBudgetMin: 0 }, autoTrain: { ...A, sweepHours: 0, taNetOosHours: 0, snnPbtDays: 0, snnTrainDays: 0 } })).digest('hex');
   // What the steps read: the networks and studies the features come from, then each step's own upstream models (a
   // step's own output is not among them, or a promotion would make it due again next round).
   const MF = MODEL_FILES;
@@ -610,7 +632,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     await run('ta_net_oos', async () => {
       const params = fs.existsSync(taNetFile) && taNetFileSchema(taNetFile) === TANET_SCHEMA ? taNetFile : T.modelPath;
       if (!fs.existsSync(params)) throw new SkipStep('no TA network yet');
-      const r = await exportTaNetOos(T.historyDir, { paramsPath: params, cacheDir: path.join(work, 'tanet-cache'), hours: A.taNetOosHours, engine: T.engine, python: T.python || undefined, log });
+      const r = await exportTaNetOos(T.historyDir, { paramsPath: params, cacheDir: path.join(work, 'tanet-cache'), hours: capHours(A.taNetOosHours), engine: T.engine, python: T.python || undefined, log });
       const wf = path.join(oosDir(T.historyDir), 'ta_net_wf.json');
       if (r.complete && fs.existsSync(wf)) fs.copyFileSync(wf, promoted('ta_net_wf'));
       return { ...r, promoted: r.complete };
@@ -673,7 +695,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       if (!assets.length) throw new SkipStep(`no hourly history for ${A.gpAssets.join(', ') || 'BTC, ETH, SOL, XRP, DOGE'}`);
       const incumbent = readGpFile(file);
       const r = await runGp({ dir: T.historyDir, assets, cross: A.gpCross, incumbent, log,
-        opts: { population: A.gpPopulation, generations: A.gpGenerations, fitness: A.gpFitness, costBps: A.gpCostBps, band: A.gpBand, minPsr: A.gpMinPsr, workers: workerCount() } });
+        opts: { population: A.gpPopulation, generations: A.gpGenerations, fitness: A.gpFitness, costBps: A.gpCostBps, band: A.gpBand, minPsr: A.gpMinPsr, workers: workerCount(), stop: sessionTimeUp } });
       if (!Object.keys(r.file.champions).length) throw new SkipStep(`no coin has enough hourly history (${Object.entries(r.skipped).map(([a, w]) => `${a}: ${w}`).join('; ')})`);
       // The champions per coin: a new one only where it beat the one in use on the same test years.
       const archived = incumbent && r.improved.length ? archiveModel(A.dir, 'gp', file) : undefined;
@@ -803,7 +825,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         if (!unfinished && fs.existsSync(out)) fs.renameSync(out, out.replace(/\.json$/, `.${new Date(now).toISOString().slice(0, 10)}.json`));
         let r;
         try {
-          r = await sweepMain(argsOf({ target, hours: A.sweepHours, history: T.historyDir, recordings: sweepSrc, model: mlpPath(), out, 'setup-oos': path.join(A.dir, 'setup_oos.json'), 'setup-model': fs.existsSync(promoted('setups')) ? promoted('setups') : undefined, 'lead-lag': path.join(A.dir, 'lead_lag.json'), 'tape-dir': recorded ? path.join(work, 'kalshi-tape') : '' }), { meta: pinned ? { days: pinned, source } : undefined, log: (m) => log(`sweep-${target}: ${m}`) });
+          r = await sweepMain(argsOf({ target, hours: capHours(A.sweepHours), history: T.historyDir, recordings: sweepSrc, model: mlpPath(), out, 'setup-oos': path.join(A.dir, 'setup_oos.json'), 'setup-model': fs.existsSync(promoted('setups')) ? promoted('setups') : undefined, 'lead-lag': path.join(A.dir, 'lead_lag.json'), 'tape-dir': recorded ? path.join(work, 'kalshi-tape') : '' }), { meta: pinned ? { days: pinned, source } : undefined, log: (m) => log(`sweep-${target}: ${m}`) });
         } catch (e) {
           if (/needs at least|needs the TA network|recorded day/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;
@@ -834,7 +856,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     const pbt = await run('snn-tennis-pbt', async () => {
       let r;
       try {
-        r = await runSnnPbt({ recordings: replayDir, domain: 'tennis', stage, days: tennisDays.slice(-A.snnPbtDays), initDays: A.snnPbtInitDays, evalDays: 1, stateDir: path.join(work, 'snnpbt', 'tennis'), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), genetic, tennis: cfg.tennis, log });
+        r = await runSnnPbt({ recordings: replayDir, domain: 'tennis', stage, days: tennisDays.slice(-A.snnPbtDays), initDays: A.snnPbtInitDays, evalDays: 1, stateDir: path.join(work, 'snnpbt', 'tennis'), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), genetic, tennis: cfg.tennis, log, stop: sessionTimeUp });
       } catch (e) {
         if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
         throw e;
@@ -872,7 +894,10 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const snnChanged: SnnDomain[] = [];
   state.snn ??= {}; state.snnVersions ??= {}; state.trainedWithSnn ??= {};
   if (want('snn')) {
-    for (const domain of REPLAYABLE) {
+    // With the session clock the network whose tournament ran longest ago goes first: a session that ends part-way
+    // through one network's tournament leaves the other for the next session instead of never reaching it.
+    const snnOrder = sessionMin > 0 ? [...REPLAYABLE].sort((a, b) => (state.snn![a]?.turnAt ?? 0) - (state.snn![b]?.turnAt ?? 0)) : REPLAYABLE;
+    for (const domain of snnOrder) {
       if (!cfg.snn.domains[domain].enabled) { await run(`snn-${domain}`, async () => undefined, `SNN_${domain.toUpperCase()}=false`); continue; }
       const ds: SnnDomainState = (state.snn[domain] ??= {});
       const fill = fillDir(domain);
@@ -931,7 +956,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         let r;
         try {
           const transitions = pbtDays.length ? regimeTransitions(T.historyDir, SNN_COINS.filter((a) => storedAssets(T.historyDir).includes(a)), Date.parse(`${pbtDays[0]}T00:00:00Z`), Date.parse(`${pbtDays[pbtDays.length - 1]}T00:00:00Z`) + 86_400_000, log) : [];
-          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, allDays: srcDays, layout, generation: gen?.id, transitions, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), genetic, log });
+          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, allDays: srcDays, layout, generation: gen?.id, transitions, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), genetic, log, stop: sessionTimeUp });
+          ds.turnAt = Date.now();
         } catch (e) {
           if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
           throw e;

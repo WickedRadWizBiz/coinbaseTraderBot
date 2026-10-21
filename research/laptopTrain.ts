@@ -1,6 +1,6 @@
-// Laptop trainer: the full training pipeline (research/pipeline.ts) on your own computer, until it stops
-// improving or reaches the target (or for as many hours as you give it), with bigger budgets than the server
-// or the daily remote job can afford. Nothing here trains a model itself: every module is trained, judged
+// Laptop trainer: the full training pipeline (research/pipeline.ts) on your own computer, in sessions of a set
+// length (60 minutes by default; research/sessionClock.ts keeps the pipeline to it), or until it stops improving or
+// reaches the target. Nothing here trains a model itself: every module is trained, judged
 // and promoted (champion vs challenger) by the pipeline's own steps, in the pipeline's order.
 //
 //   1. pull     (optional, SSH) the bot's data from the server, like the remote-training workflow: the
@@ -25,10 +25,11 @@
 //   is in trainer-data/STATUS.txt (and rounds.jsonl); trainer-data/GUIDE.txt says what good scores look like.
 //
 //   Windows:  double-click Train.cmd (the release zip ships Node and the bundled trainer)
-//   anywhere: node --import tsx research/laptopTrain.ts [--hours 0] [--host 1.2.3.4 --key C:\keys\lightsail.pem]
+//   anywhere: node --import tsx research/laptopTrain.ts [--minutes 60] [--host 1.2.3.4 --key C:\keys\lightsail.pem]
 //
-//   --hours N      0 (default) = until it stops by itself; N > 0 = also stop after N hours (the last round
-//                  is not started if it would overrun much)
+//   --minutes N    the session's length (default 60): the training steps stop at their next round once it is used
+//                  up (the data downloads before them are outside it), then the models go to the server
+//   --hours N      the same in hours; 0 = no session clock, rounds until it stops by itself
 //   --data DIR     where data, history and models live (default ./trainer-data, kept between runs)
 //   --host H --user U --port P --key FILE    the server and its SSH key (Lightsail: the instance's .pem)
 //   --days N       recorded days to copy (default 45)      --no-pull / --no-push      --only a,b (steps)
@@ -175,31 +176,36 @@ export function safeServerEnv(text: string): Record<string, string> {
   return out;
 }
 
-/** The laptop profile: bigger budgets than the server's defaults. Anything already set (your own
- *  environment, then the server's bot.env) wins over these. `continuous`: rounds until the trainer stops by
- *  itself, each sized like a day's budget (a tournament generation of about 5 weeks), the sweep weekly (a
- *  proposal: it improves no model). */
+/** The laptop profile: budgets sized to the session (`remainingHours`: the run's time left), bigger than the
+ *  server's defaults for long ones. Anything already set (your own environment, then the server's bot.env) wins
+ *  over these. The session's clock (TRAIN_SESSION_MIN) keeps the pipeline to it. `continuous`: no clock, rounds
+ *  until the trainer stops by itself, each sized like a day's budget (a tournament generation of about 5 weeks). */
 export function laptopProfile(remainingHours: number, cores = os.cpus().length, continuous = false, plan: ResourcePlan = resourcePlan('balanced', cores)): Record<string, string> {
-  if (continuous) return { ...laptopProfile(24, cores, false, plan), SWEEP_HOURS: '2', SWEEP_EVERY_DAYS: '7' };
+  if (continuous) return { ...laptopProfile(24, cores, false, plan), TRAIN_SESSION_MIN: '0', SWEEP_HOURS: '2' };
   const h = (x: number) => String(+Math.max(0.1, x).toFixed(2));
   // A replayed day costs a network a few minutes (it steps every market second): a tournament round is one
   // day per member, all members at once; training is one network going over its window about twice. Both
-  // windows grow with the budget (a 12-hour run: 30 tournament days, 14 training days).
-  const pbtDays = Math.round(Math.min(365, Math.max(30, 1.5 * remainingHours)));
-  const trainDays = Math.round(Math.min(120, Math.max(14, remainingHours)));
+  // windows grow with the session (an hour: a week of tournament days, 4 training days; 24 hours: 36 and 24). A
+  // tournament stopped by the clock carries on next session; the training does not stop part-way, so its window
+  // is what fits in one.
+  const pbtDays = Math.round(Math.min(365, Math.max(7, 1.5 * remainingHours)));
+  const trainDays = Math.round(Math.min(120, Math.max(4, remainingHours)));
   return {
     TRADING_MODE: 'paper', AUTO_TRAIN: 'off', AUTO_TRAIN_CHAMPION: 'true',
+    TRAIN_SESSION_MIN: String(Math.max(5, Math.round(remainingHours * 60))),
     // TradingView (tvdatafeed): on once its Python is set up (runTrainer, research/tvSetup.ts).
     HISTORY_AUTO_UPDATE: 'true', TV_FILL: 'false',
     // All of the 1-minute spot / perp history (from each coin's first Binance month) replayed through the
     // recording-based steps; the memory that takes.
     HISTORY_REPLAY: 'true', HISTORY_REPLAY_YEARS: '0',
-    KALSHI_HISTORY_BUDGET_MIN: '600', KALSHI_HISTORY_DAYS: '365',
+    // Kalshi's settled contracts: a few minutes a session (6 an hour; the download resumes where it stopped).
+    KALSHI_HISTORY_BUDGET_MIN: String(Math.round(Math.min(600, Math.max(5, 6 * remainingHours)))), KALSHI_HISTORY_DAYS: '365',
     // TA network: retrain every round, more tournament rounds per run, every 2nd hourly sample (adjacent hours are
     // nearly the same example; every hour doubled each round's time for little), two years of training data.
     TA_NET_RETRAIN_DAYS: '0', TA_NET_MAX_ROUNDS_PER_RUN: '400', TA_NET_STRIDE: '2', TA_NET_TRAIN_MONTHS: '24',
     TA_NET_OOS_HOURS: h(Math.min(12, remainingHours / 4)),
-    SWEEP_HOURS: h(Math.min(12, remainingHours / 4)), SWEEP_EVERY_DAYS: '1',
+    // The sweeps are proposals (they improve no model): weekly, so the sessions go to the models.
+    SWEEP_HOURS: h(Math.min(12, remainingHours / 4)), SWEEP_EVERY_DAYS: '7',
     AUTO_TRAIN_SNN_PBT_EVERY_DAYS: '0', AUTO_TRAIN_SNN_TRAIN_DAYS: String(trainDays), AUTO_TRAIN_SNN_PBT_DAYS: String(pbtDays),
     // Genetic programming every round (its population, like the threads and the memory, comes from the plan).
     GP_EVERY_DAYS: '0',
@@ -283,21 +289,22 @@ export function guideText(t: { poolUsd: number; dailyPct: number; maxDdPct: numb
     'KALSHI BOT TRAINER: GUIDE',
     '',
     'Getting the bot ready for live trading',
-    '  Let the trainer run until it stops by itself (Train.cmd: hours 0). Round 1 runs every step: it downloads',
-    '  the history, replays all of it and trains every model once (a day or more on a 16-thread laptop). Every',
-    '  later round runs one tournament generation per network on weeks of history that network has never',
-    '  trained on. Then a contest on held-out weeks against the network in use, then a retrain of the models',
-    '  that read the networks, then the readiness check (several hours a round). Give it at least 3 rounds.',
-    '  Round 1 makes the first models; round 2 is the first where challengers must beat them; the scores mean',
-    '  something only after that. Every round that makes a model better sends the models to your server, and',
-    '  the bot swaps them in within a minute (no restart). A model is promoted only when it beats the one in use.',
+    '  Train in sessions (60 minutes by default; the length is the slider in the window). The networks get the',
+    '  first 70% of a session, the models that read them the rest; a step that runs out of time stops at its',
+    '  next round, and the next session carries on from there. Downloading new history comes before the clock',
+    '  starts. At the end of every session the models go to your server, and the bot swaps them in within a',
+    '  minute (no restart). A model is promoted only when it beats the one in use.',
+    '  Each network\'s tournament runs over weeks of history it has never trained on, a few rounds a session; when',
+    '  a generation finishes, the network is retrained and must beat the one in use on held-out weeks. Run a',
+    '  session a day for the first week or two: the first sessions make the first models, the later ones must',
+    '  beat them, and the scores mean something only after that.',
     '  Then paper-trade on the server for 2 to 4 weeks. The dashboard\'s paper P&L should look like the',
     '  readiness check (same sign, similar size, drawdown no worse). Only then consider real money, and start',
     '  small.',
     '  After that the server\'s daily training keeps the models current. Run the trainer again every week or two:',
     '  it continues where it stopped, and only weeks no network has trained on count as fresh.',
     '',
-    'When it stops by itself',
+    'When it stops before the session ends (or, with --hours 0, at all)',
     `  - target reached: on days nothing was trained or tuned on, the whole bot makes at least ${t.dailyPct}% of`,
     `    $${t.poolUsd} a day ($${goal}). That is the lower end of the 95% interval, so it must hold consistently,`,
     `    not just on average. The drawdown must stay within ${t.maxDdPct}%, over 30 days or more.`,
@@ -529,8 +536,10 @@ export async function laptopTrainMain(): Promise<void> {
     process.exitCode = r.ok && e.ok ? 0 : 1;
     return;
   }
-  const hours = Number(argOf('hours') ?? 0);
-  if (!(hours >= 0)) throw new Error('--hours must be 0 (train until it stops by itself) or a number of hours');
+  // A session of --minutes (default 60), or --hours (0: no session clock, until it stops by itself).
+  const minutes = argOf('minutes');
+  const hours = minutes !== undefined ? Number(minutes) / 60 : Number(argOf('hours') ?? 1);
+  if (!(hours >= 0)) throw new Error('--minutes must be a number of minutes (--hours: 0 to train until it stops by itself, or a number of hours)');
   const settingsFile = path.join(dataDir, 'trainer.json');
   let s: TrainerSettings = readSettings(dataDir);
   s = { ...s, host: argOf('host') ?? s.host, user: argOf('user') ?? s.user ?? 'ubuntu', port: Number(argOf('port') ?? s.port ?? 22), key: argOf('key') ?? s.key, intensity: asIntensity(argOf('intensity') ?? process.env.TRAINER_INTENSITY ?? s.intensity), kalshiSweep: flag('kalshi-sweep') || (flag('no-kalshi-sweep') ? false : s.kalshiSweep) };
@@ -575,7 +584,8 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   const { hours, dataDir } = o;
   const s = o.settings;
   const continuous = hours === 0;
-  const deadline = continuous ? Infinity : t0 + hours * 3_600_000;
+  // The session's clock starts with the first round (the copy from the server and the setup before it are outside it).
+  let deadline = Infinity;
   const models = path.join(dataDir, 'models');
   fs.mkdirSync(path.join(models, 'logs'), { recursive: true });
   const logFile = path.join(models, 'logs', `pipeline-laptop-${new Date(t0).toISOString().replace(/[:.]/g, '-')}.log`);
@@ -616,7 +626,7 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   }
 
   async function runRounds(): Promise<{ why?: string }> {
-  console.log(`\nKalshi bot trainer: ${continuous ? 'until it stops by itself' : `${hours} h budget`}, data in ${dataDir}, ${plan.intensity}: ${plan.workers} of ${os.cpus().length} CPU threads (the TA network trains in PyTorch, on the GPU when there is one).\n`);
+  console.log(`\nKalshi bot trainer: ${continuous ? 'until it stops by itself' : `a ${Math.round(hours * 60)}-minute session`}, data in ${dataDir}, ${plan.intensity}: ${plan.workers} of ${os.cpus().length} CPU threads (the TA network trains in PyTorch, on the GPU when there is one).\n`);
 
   let server: Server | undefined;
   if (s.host && s.key && wantSync) {
@@ -722,9 +732,10 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   const tstate = readTrainerState(dataDir);
   let lastFull = only ? 0 : tstate.lastFullAt ?? 0;
   if (lastFull && Date.now() - lastFull < 24 * 3_600_000) log(`the last full round's history and replay finished ${((Date.now() - lastFull) / 3_600_000).toFixed(1)} h ago: continuing with the training (the next full round in ${(24 - (Date.now() - lastFull) / 3_600_000).toFixed(1)} h)`);
+  if (!continuous) deadline = Date.now() + hours * 3_600_000;
   while (!stopped()) {
     const left = deadline - Date.now();
-    if (round > 0 && (left < 15 * 60_000 || left < 0.6 * lastMs)) { why = `the ${hours} h budget is used up`; break; }
+    if (round > 0 && (left < 15 * 60_000 || left < 0.6 * lastMs)) { why = `the ${Math.round(hours * 60)}-minute session is used up`; break; }
     round++;
     // Round 1 and then once a day: every step (new history, the replay extended, new recordings: new weeks).
     const full = !only && Date.now() - lastFull >= 24 * 3_600_000;
@@ -733,7 +744,7 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
     // Skip data download: no history step either (the pipeline leaves it out with --skip; listing every step with
     // --only instead would also run conditioning, which runs only when named).
     const skip = o.skipDataDownload ? ['--skip', 'history'] : [];
-    log(`round ${round}: ${steps ? steps.join(', ') : 'every step'}${o.skipDataDownload ? ' (no history download)' : ''} (${continuous ? 'until it stops by itself' : `${(left / 3_600_000).toFixed(1)} h left`})`);
+    log(`round ${round}: ${steps ? steps.join(', ') : 'every step'}${o.skipDataDownload ? ' (no history download)' : ''} (${continuous ? 'until it stops by itself' : `${Math.round(left / 60_000)} min of the session left`})`);
     const sweepAll = !!o.sweepAll && round === 1;
     hooks?.roundStart?.(round, full, sweepAll);
     hooks?.phase?.('pipeline');

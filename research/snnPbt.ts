@@ -177,6 +177,8 @@ export async function runSnnPbt(o: {
   /** GPU groups next to the CPU workers (research/snnGpuSched.ts): the device pool to use, false for none (default
    *  snnGpuSpec: the laptop trainer's PyTorch, when it sees a CUDA GPU). Members on tapes only. */
   gpu?: SnnGpuSpec | false;
+  /** Ends the tournament before its next round (the training session's time is up: research/sessionClock.ts). */
+  stop?: () => boolean;
 }): Promise<SnnPbtResult> {
   const log = o.log ?? (() => {});
   const initDays = o.initDays ?? 3, evalDays = o.evalDays ?? 1;
@@ -319,6 +321,7 @@ export async function runSnnPbt(o: {
       },
     },
     onRound: ({ members, trials, log: plog, round, ga }) => save(members, trials, plog, round.evalTo, round.index + 1, ga),
+    stop: o.stop,
   }).finally(() => Promise.all([pool?.close(), gpuPool?.close()]));
   if (!rounds.length && resume) Object.assign(res, { members: resume.members, trials: resume.trials, log: resume.log, elite: resume.members.find((m) => m.id === resume.log[resume.log.length - 1]?.ranking[0]?.member) ?? resume.members[0] });
   const dsr = dsrOf(res.elite.record, clusterFor(o.domain), res.trials);
@@ -328,7 +331,7 @@ export async function runSnnPbt(o: {
   const ga = res.ga ?? (resume?.ga && o.genetic ? resume.ga : undefined);
   const traits = ga ? Object.fromEntries(Object.entries(geneTraits(ga.genes, SNN_HYPER_SPEC)).filter(([, t]) => t.conf > 0).map(([k, t]) => [k, { best: t.best, rho: t.rho, conf: t.conf }])) : {};
   return {
-    domain: o.domain, stage: o.stage, complete: pending - rounds.length === 0, remaining: pending - rounds.length, rounds: res.log.length, trials: res.trials,
+    domain: o.domain, stage: o.stage, complete: pending - res.ran === 0, remaining: pending - res.ran, rounds: res.log.length, trials: res.trials,
     elite: { member: res.elite.id, hyper: res.elite.hyper, lineage: res.elite.lineage, ...(res.elite.parents ? { parents: res.elite.parents } : {}) },
     dsr: { sharpe: dsr.sharpe, sr0: dsr.sr0, probability: dsr.probability, n: dsr.n }, pbo: { pbo: pboR.pbo, rounds: pboR.rounds, members: pboR.members, ok: pboOk.ok, why: pboOk.why }, log: res.log,
     ...(ga ? { ga: { islands: new Set(res.members.map((m) => m.island ?? 0)).size, generation: ga.generation, sinceOffspringWon: ga.sinceOffspringWon, last: ga.history[ga.history.length - 1], traits } } : {}),

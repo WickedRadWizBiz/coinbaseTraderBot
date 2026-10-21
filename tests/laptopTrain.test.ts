@@ -100,7 +100,8 @@ test('laptop trainer: what counts as progress, when it stops by itself, the scor
   assert.match(g, /\$100\.00/);
   assert.match(g, /191,751x in 30 days/);
   assert.match(g, /No trading system keeps that up/);
-  assert.match(g, /at least 3 rounds/);
+  assert.match(g, /Train in sessions \(60 minutes by default/);
+  assert.match(g, /session a day for the first week or two/);
   assert.match(g, /2 to 4 weeks/);
   const g2 = guideText({ poolUsd: 200, dailyPct: 0.5, maxDdPct: 10, plateauRounds: 3 });
   assert.doesNotMatch(g2, /No trading system/);
@@ -108,7 +109,17 @@ test('laptop trainer: what counts as progress, when it stops by itself, the scor
   assert.match(g2, /1\.16x in 30 days/);
   // Until it stops: each round sized like a day's budget, the sweep (a proposal) weekly.
   const c = laptopProfile(0, 16, true, resourcePlan('balanced', 16, 32768));
-  assert.deepEqual([c.AUTO_TRAIN_SNN_PBT_DAYS, c.AUTO_TRAIN_SNN_TRAIN_DAYS, c.SWEEP_EVERY_DAYS, c.SWEEP_HOURS, c.TRAIN_WORKERS], ['36', '24', '7', '2', '8']);
+  assert.deepEqual([c.AUTO_TRAIN_SNN_PBT_DAYS, c.AUTO_TRAIN_SNN_TRAIN_DAYS, c.SWEEP_EVERY_DAYS, c.SWEEP_HOURS, c.TRAIN_WORKERS, c.TRAIN_SESSION_MIN], ['36', '24', '7', '2', '8', '0']);
+});
+
+test('laptop trainer: a session sizes its budgets to the clock', () => {
+  // The default hour: a week of tournament days (it carries on next session), training that fits in one, a few
+  // minutes of Kalshi history, the sweeps weekly; the pipeline's clock is the session.
+  const s = laptopProfile(1);
+  assert.deepEqual([s.TRAIN_SESSION_MIN, s.AUTO_TRAIN_SNN_PBT_DAYS, s.AUTO_TRAIN_SNN_TRAIN_DAYS, s.KALSHI_HISTORY_BUDGET_MIN, s.SWEEP_EVERY_DAYS], ['60', '7', '4', '6', '7']);
+  assert.equal(laptopProfile(0.5).TRAIN_SESSION_MIN, '30');
+  assert.equal(laptopProfile(2).TRAIN_SESSION_MIN, '120');
+  assert.equal(laptopProfile(0.01).TRAIN_SESSION_MIN, '5', 'never under 5 minutes');
 });
 
 test('laptop trainer: the server settings it trains with carry no credentials or server paths; budgets grow', () => {
@@ -126,7 +137,7 @@ test('laptop trainer: the server settings it trains with carry no credentials or
   assert.equal(q.AUTO_TRAIN_SNN_PBT_POPULATION, '8');
   assert.equal(laptopProfile(12, 2).AUTO_TRAIN_SNN_PBT_POPULATION, '3', 'never fewer than the original three');
   // The networks' tournament and training windows grow with the budget.
-  assert.deepEqual([p.AUTO_TRAIN_SNN_PBT_DAYS, p.AUTO_TRAIN_SNN_TRAIN_DAYS], ['30', '14']);
+  assert.deepEqual([p.AUTO_TRAIN_SNN_PBT_DAYS, p.AUTO_TRAIN_SNN_TRAIN_DAYS], ['18', '12']);
   const long = laptopProfile(96);
   assert.deepEqual([long.AUTO_TRAIN_SNN_PBT_DAYS, long.AUTO_TRAIN_SNN_TRAIN_DAYS], ['144', '96']);
   assert.equal(laptopProfile(1000).AUTO_TRAIN_SNN_PBT_DAYS, '365');
