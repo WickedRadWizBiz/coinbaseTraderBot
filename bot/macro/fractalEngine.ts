@@ -50,12 +50,16 @@ export interface FractalConfig {
   waterfallPts: number;
   /** Weight of the shape term (trend per parent bar, points) against the level term (points). */
   slopeWeight: number;
+  /** How long a waterfall's steep part lasts in the projection, start to finish (days). Waterfalls are fast
+   *  capitulations, not slowed down with the rest of the cycle: only the drift and the rallies between them are
+   *  stretched by the dilation. 0 = stretch the waterfalls too. */
+  waterfallDays: number;
 }
 
 export const DEFAULT_FRACTAL: FractalConfig = {
   parentFrom: Date.UTC(2016, 0, 1), parentTo: Date.UTC(2018, 0, 1), childFrom: Date.UTC(2018, 0, 1),
   barMs: 7 * DAY, maxStall: 16, startSlack: 0.15, minChildBars: 52, localBars: 26, recentBars: 52, iterations: 3,
-  swingPts: 6, waterfallPts: 15, slopeWeight: 2,
+  swingPts: 6, waterfallPts: 15, slopeWeight: 2, waterfallDays: 90,
 };
 
 /** A parent swing between two extremes (bar indices); `move`: where its steep part starts (the drift before it,
@@ -292,8 +296,17 @@ export function fractalState(btcdDaily: Candle[], at: number, cfg: FractalConfig
   const asOf = child[n - 1].ts, btcd = c[n - 1];
   const projDil = Math.max(0.5, Math.min(cfg.maxStall, Math.sqrt(Math.max(0.5, localDilation) * Math.max(0.5, dilation))));
   const offset = btcd - (map.a + map.b * p[jStar]);
+  // Child time of each parent bar ahead: a parent bar inside a waterfall's steep part takes its share of
+  // waterfallDays, every other bar projDil bars (a waterfall already under way keeps only what is left of it).
+  const stepMs = (j: number) => {
+    const w = cfg.waterfallDays > 0 ? sw.find((s_) => s_.waterfall && j >= s_.move && j < s_.to) : undefined;
+    return w ? (cfg.waterfallDays * DAY) / Math.max(1, w.to - w.move) : cfg.barMs * projDil;
+  };
+  const tsOf: number[] = new Array(m).fill(NaN);
+  tsOf[jStar] = asOf;
+  for (let j = jStar + 1; j < m; j++) tsOf[j] = tsOf[j - 1] + stepMs(j - 1);
   const projection: FractalProjectionPoint[] = [];
-  for (let k = 1; jStar + k < m; k++) projection.push({ ts: asOf + k * cfg.barMs * projDil, btcd: map.a + map.b * p[jStar + k] + offset, parentTs: parent[jStar + k].ts });
+  for (let k = 1; jStar + k < m; k++) projection.push({ ts: tsOf[jStar + k], btcd: map.a + map.b * p[jStar + k] + offset, parentTs: parent[jStar + k].ts });
   const at_ = (days: number) => {
     const ts = asOf + days * DAY;
     if (!projection.length || ts > projection[projection.length - 1].ts) return NaN;
@@ -301,12 +314,12 @@ export function fractalState(btcdDaily: Candle[], at: number, cfg: FractalConfig
     for (const q of projection) { if (q.ts >= ts) return y0 + ((q.btcd - y0) * (ts - x0)) / (q.ts - x0); x0 = q.ts; y0 = q.btcd; }
     return NaN;
   };
-  const toChild = (j: number) => asOf + (j - jStar) * cfg.barMs * projDil;
+  const toChild = (j: number) => tsOf[Math.max(j, jStar)];
   const lvl = (j: number) => map.a + map.b * p[j] + offset;
   const wf = sw.find((s) => s.waterfall && s.to > jStar);
   const wfIn = !!wf && wf === cs && inMove;
   const nextWaterfall = wf
-    ? { startTs: toChild(Math.max(wf.move, jStar)), endTs: toChild(wf.to), fromBtcd: lvl(Math.max(wf.move, jStar)), toBtcd: lvl(wf.to), weeksAway: Math.max(0, (wf.move - jStar) * projDil), inside: wfIn }
+    ? { startTs: toChild(Math.max(wf.move, jStar)), endTs: toChild(wf.to), fromBtcd: lvl(Math.max(wf.move, jStar)), toBtcd: lvl(wf.to), weeksAway: Math.max(0, (toChild(wf.move) - asOf) / (7 * DAY)), inside: wfIn }
     : undefined;
   let low: FractalState['low'];
   for (const q of projection) if (!low || q.btcd < low.btcd) low = { ts: q.ts, btcd: q.btcd };
