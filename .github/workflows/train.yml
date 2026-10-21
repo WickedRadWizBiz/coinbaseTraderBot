@@ -5,7 +5,8 @@
 #   1. copies the server's data off it (read-only): the last DAYS days of recordings, the candle history,
 #      the models directory (pipeline state, tournaments in progress, journals) and the rest of ~/bot/data
 #   2. runs the pipeline here on the runner's own CPUs (no throttling; up to ~5 h, it checkpoints after
-#      every step, so a run cut short continues next time)
+#      every step, so a run cut short continues next time): first the models trained on the bot's own
+#      recordings (copied back at once), then everything else, under a memory watchdog
 #   3. copies the models directory and the refreshed history back; the running bot hot-swaps every model
 #      that changed within AUTO_TRAIN_WATCH_SEC (no restart)
 #
@@ -122,22 +123,49 @@ jobs:
           export TA_NET_ENGINE="${TA_NET_ENGINE:-auto}" TA_NET_PYTHON="$(command -v python)"
           mkdir -p "$DATA/models/logs"
           LOG="$DATA/models/logs/pipeline-remote-$(date -u +%Y-%m-%dT%H-%M-%SZ).log"
-          args=(); [ -n "$ONLY" ] && args=(--only "$ONLY")
-          # GitHub has shut this runner down mid-training (after 3.5-4 h on Oct 9 and 11), and then the copy-back
-          # below never runs and the day's training is lost. So: free disk and memory are logged every 10 minutes
-          # (to see what runs out), and the models are copied back to the server every 45 minutes while training
-          # (tournaments resume from those checkpoints; rebuildable caches stay here).
+          T0=$(date +%s)
+          # Copies the models (and this run's log) to the server: every 45 minutes while training, and after the
+          # quick phase. Tournaments resume from these checkpoints; rebuildable caches stay here.
+          sync_models() {
+            rsync -a --update --rsync-path="nice -n 19 rsync" --exclude '*.tmp' --exclude 'logs/' --exclude 'work/snnfill/' --exclude 'work/perp-dataset*/' --exclude 'work/perp-backtest-days/' --exclude 'work/sweep-replay/' --exclude 'work/vol-replay/' --exclude 'work/readiness-days/' --exclude 'work/playbook-days/' --exclude 'work/tanet-cache/' "$DATA/models/" bot:bot/data/models/ >/dev/null 2>&1; local c=$?
+            rsync -a --rsync-path="nice -n 19 rsync" "$LOG" bot:bot/data/models/logs/ >/dev/null 2>&1 || true
+            case $c in 0|23|24) echo "checkpoint $(date -u +%H:%M): models copied to the server";; *) echo "checkpoint $(date -u +%H:%M): copy failed ($c), retried later";; esac
+          }
+          # One pipeline run under a time limit (minutes) and a memory watchdog. The runner has 16 GB; when the pipeline
+          # used it all (Oct 13-20), GitHub shut the runner down and no later step ran, so nothing was copied back. Now
+          # the pipeline is stopped (SIGTERM: it saves its progress) when less than 1.5 GB is left, and the job goes on.
+          run_pipeline() {
+            local minutes=$1; shift
+            timeout --signal=TERM --kill-after=2m "${minutes}m" node --import tsx research/pipeline.ts "$@" >> "$LOG" 2>&1 &
+            local pid=$!
+            ( while sleep 20; do
+                avail=$(free -m | awk '/^Mem:/{print $7}')
+                if [ "$avail" -lt 1500 ]; then echo "memory $(date -u +%H:%M): only $avail MB left, stopping the pipeline (progress saved) so the models get copied back"; kill -TERM $pid 2>/dev/null; break; fi
+              done ) &
+            local wd=$!
+            wait $pid; local c=$?
+            kill $wd 2>/dev/null || true
+            return $c
+          }
           ( while sleep 600; do echo "resources $(date -u +%H:%M): disk $(df -h / | awk 'NR==2{print $4}') free, memory $(free -m | awk '/^Mem:/{print $7}') MB available, swap used $(free -m | awk '/^Swap:/{print $3}') MB, largest $(ps -eo rss=,comm= --sort=-rss | head -1 | awk '{printf "%s %d MB", $2, $1/1024}')"; done ) &
           MON=$!
-          ( while sleep 2700; do rsync -a --update --rsync-path="nice -n 19 rsync" --exclude '*.tmp' --exclude 'logs/' --exclude 'work/snnfill/' --exclude 'work/perp-dataset*/' --exclude 'work/perp-backtest-days/' --exclude 'work/sweep-replay/' --exclude 'work/vol-replay/' --exclude 'work/readiness-days/' --exclude 'work/playbook-days/' --exclude 'work/tanet-cache/' "$DATA/models/" bot:bot/data/models/ >/dev/null 2>&1; c=$?; case $c in 0|23|24) echo "checkpoint $(date -u +%H:%M): models copied to the server";; *) echo "checkpoint $(date -u +%H:%M): copy failed ($c), retried in 45 min";; esac; done ) &
+          ( while sleep 2700; do sync_models; done ) &
           SYNC=$!
-          # Stop after 5 h so the models still get copied back inside the job's time limit; the pipeline
-          # checkpoints after every step and continues where it stopped on the next run.
-          timeout --signal=TERM --kill-after=2m 300m node --import tsx research/pipeline.ts "${args[@]}" > "$LOG" 2>&1
-          code=$?
+          if [ -n "$ONLY" ]; then
+            run_pipeline 300 --only "$ONLY"; code=$?
+          else
+            # 1. The models trained on the bot's own recordings first (minutes), copied back at once.
+            run_pipeline 90 --only vol_model,dataset,mlp,perps,tennis,fill,sizing; code=$?
+            echo "quick phase: exit $code"; sync_models
+            # 2. Everything else in the time left (5 h in all). The oracle cull is left to the laptop trainer: it builds TA
+            # rows for every coin over all of history (over 14 GB here) and runs weekly there; the TA network and the
+            # Librarian read the oracle_cull.json the laptop sends.
+            left=$(( 300 - ($(date +%s) - T0) / 60 ))
+            if [ "$left" -gt 20 ]; then run_pipeline "$left" --skip oracle_cull; code=$?; fi
+          fi
           kill $MON $SYNC 2>/dev/null || true
           echo "code=$code" >> "$GITHUB_OUTPUT"
-          case $code in 0) echo "pipeline finished";; 124|137|143) echo "pipeline stopped by its time limit or a stop signal (progress saved; continues next run)";; *) echo "pipeline exited with $code";; esac
+          case $code in 0) echo "pipeline finished";; 124|137|143) echo "pipeline stopped by its time limit, the memory watchdog or a stop signal (progress saved; continues next run)";; *) echo "pipeline exited with $code";; esac
 
       - name: Summary (step names and promotions only)
         if: always() && steps.pull.outcome == 'success'
