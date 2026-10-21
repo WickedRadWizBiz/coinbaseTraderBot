@@ -213,8 +213,8 @@ A run with `--hours 0` has no clock: rounds until it stops by itself, each sized
    model that changed. A file changed here is never overwritten by an older copy from the server.
    - **As each step finishes:** when a step leaves a new file at the top of the models folder (a model it promoted),
      the trainer sends it while the next step runs. Work in progress never triggers a send (a tournament stopped
-     mid-round replaces no live model); its progress files go along with the next send. A file written in the last
-     2 seconds waits for the next send, as the bot itself waits before it loads one.
+     mid-round replaces no live model); its progress files go along with the next send. Only what was written by the
+     time the step reported done goes: a file the next step is still writing waits for that step's send.
    - **At the start of each run** too: any model newer than the server's copy goes up first, so models from a run that
      was closed before its last send (or had no server set) still arrive.
    - **Every send is checked:** the server's models are listed again and each file must be there with its size and

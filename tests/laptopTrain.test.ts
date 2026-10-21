@@ -226,5 +226,9 @@ test('laptop trainer: a finished step with a new model the bot loads is sent at 
   fs.utimesSync(path.join(d, 'old.json'), new Date(t - 60_000), new Date(t - 60_000));
   assert.deepEqual(modelsChangedSince(d, t), ['model.json']);
   assert.deepEqual(modelsChangedSince(d, Date.now() + 1000), []);
+  // Up to when the step reported done: a file the next step wrote after that waits for its own send.
+  fs.utimesSync(path.join(d, 'model.json'), new Date(t + 30_000), new Date(t + 30_000));
+  assert.deepEqual(modelsChangedSince(d, t, t + 20_000), []);
+  assert.deepEqual(modelsChangedSince(d, t, t + 30_000), ['model.json']);
   assert.deepEqual(modelsChangedSince(path.join(d, 'missing'), t), []);
 });

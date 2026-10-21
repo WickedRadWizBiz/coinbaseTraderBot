@@ -94,7 +94,8 @@ export function localManifest(root: string, skipDirs: ReadonlySet<string> = new 
     for (const e of ents) {
       const r = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) { if (!(rel === '' && skipDirs.has(e.name))) walk(path.join(dir, e.name), r); }
-      else if (e.isFile()) { const st = fs.statSync(path.join(dir, e.name)); out.set(r, { path: r, size: st.size, mtime: Math.round(st.mtimeMs) }); }
+      // A file gone since the listing (a temp file the running pipeline renamed) is skipped.
+      else if (e.isFile()) { try { const st = fs.statSync(path.join(dir, e.name)); out.set(r, { path: r, size: st.size, mtime: Math.round(st.mtimeMs) }); } catch { /* gone */ } }
     }
   };
   walk(root, '');
@@ -151,11 +152,12 @@ export function readPushes(dataDir: string): PushRecord[] {
 export const finishedStep = (line: string): string | undefined => /^\[pipeline\] ([\w-]+): done in /.exec(line)?.[1];
 
 /** The files at the top of the models folder (the ones the bot loads, not the pipeline's own progress file) written
- *  after `t`. */
-export function modelsChangedSince(models: string, t: number): string[] {
+ *  after `t` (and at or before `upTo`). */
+export function modelsChangedSince(models: string, t: number, upTo = Infinity): string[] {
+  const at = (f: string) => { try { return fs.statSync(path.join(models, f)).mtimeMs; } catch { return -Infinity; } };
   try {
     return fs.readdirSync(models, { withFileTypes: true })
-      .filter((e) => e.isFile() && e.name !== 'pipeline_state.json' && !e.name.endsWith('.tmp') && fs.statSync(path.join(models, e.name)).mtimeMs > t)
+      .filter((e) => { if (!e.isFile() || e.name === 'pipeline_state.json' || e.name.endsWith('.tmp')) return false; const m = at(e.name); return m > t && m <= upTo; })
       .map((e) => e.name).sort();
   } catch { return []; }
 }
@@ -691,16 +693,16 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
       if (fs.existsSync(f)) writeText(f, fs.readFileSync(f, 'utf8').split('\n').map((l) => (l.startsWith('Server: ') ? where() : l)).join('\n'));
     } catch { /* the next round writes it */ }
   };
-  // `during`: sent while the round goes on (the window stays on the training).
-  const push = async (why: string, during = false) => {
+  // `upTo`: sent while the round goes on (the window stays on the training), only files written by then.
+  const push = async (why: string, upTo?: number) => {
+    const during = upTo !== undefined;
     if (!server || flag('no-push')) return;
     if (!during) hooks?.phase?.('push');
     const m = listModels();
     if (!m.ok) { log(`listing the server's models failed: ${m.err.trim().slice(0, 300)}`); record({ at: Date.now(), why, files: 0, mb: 0, confirmed: 0, missing: [], error: 'could not list the server\'s models' }); return; }
-    // While the round goes on, a file written in the last 2 s may still be being written (the bot waits as long before it
-    // loads one): it goes with the next send.
-    const now = Date.now();
-    const send = filesToPush(localManifest(models), parseManifest(m.out), t0).filter((f) => !during || now - f.mtime >= 2000);
+    // While the round goes on, a file written after the step reported done is the next step's (maybe still being
+    // written): it goes with that step's send.
+    const send = filesToPush(localManifest(models), parseManifest(m.out), t0).filter((f) => !during || f.mtime <= upTo);
     if (!send.length) { if (!during) log('no model newer than the server\'s'); return; }
     const mb = +(send.reduce((a, f) => a + f.size, 0) / 1e6).toFixed(1);
     log(`${why}: sending ${send.length} file(s), ${mb} MB, to the server...`);
@@ -718,22 +720,25 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   await push('models from earlier runs');
   // Each finished step's models go at once, so a session closed or crashed part-way keeps what it finished. Only what a
   // step promoted triggers a send (a tournament stopped mid-round replaces no live model); its progress files go along.
-  let sentAt = t0, pendingStep: string | undefined;
+  // `at`: when the step reported done; what it wrote by then is complete.
+  let sentAt = t0, pending: { step: string; at: number } | undefined;
   let sending: Promise<void> | undefined;
-  const sendFinished = (step: string) => {
+  const sendFinished = (step: string, at: number) => {
     if (!server || flag('no-push')) return;
-    if (sending) { pendingStep = step; return; }
-    const changed = modelsChangedSince(models, sentAt);
+    if (sending) { pending = { step, at }; return; }
+    const changed = modelsChangedSince(models, sentAt, at);
     if (!changed.length) return;
-    sentAt = Date.now();
-    sending = push(`${step} finished (${changed.join(', ')})`, true).finally(() => {
-      sending = undefined;
-      const next = pendingStep;
-      pendingStep = undefined;
-      if (next) sendFinished(next);
-    });
+    sentAt = at;
+    sending = push(`${step} finished (${changed.join(', ')})`, at)
+      .catch((e) => log(`sending the models after ${step} failed (${(e as Error).message}); they go with the next send`))
+      .finally(() => {
+        sending = undefined;
+        const next = pending;
+        pending = undefined;
+        if (next) sendFinished(next.step, next.at);
+      });
   };
-  const roundHooks: TrainerHooks = { ...hooks, line: (l) => { hooks?.line?.(l); const st = finishedStep(l); if (st) sendFinished(st); } };
+  const roundHooks: TrainerHooks = { ...hooks, line: (l) => { hooks?.line?.(l); const st = finishedStep(l); if (st) sendFinished(st, Date.now()); } };
 
   // The server's settings, then the laptop's bigger budgets and PyTorch over them, then trainer.env, then anything
   // set in the environment.
