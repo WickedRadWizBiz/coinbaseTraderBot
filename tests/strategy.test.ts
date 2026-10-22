@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { loadConfig, type StrategyConfig } from '../bot/config';
 import { DEFAULT_FEES } from '../bot/fees';
 import { decide, MarketView } from '../bot/strategy/fairValueStrategy';
+import { ProfitPeaks } from '../bot/strategy/profitPeaks';
 
 // Continuous cadence + Kelly sizing (the pre-relaxed behaviour these tests pin down).
 const base = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_CADENCE: 'continuous' }).strategy;
@@ -81,8 +82,8 @@ test('blockReductions (hunt mode) removes the fair-value exit, the opposite quot
   assert.deepEqual(withAsk.cancel.map((c) => c.clientOrderId), ['a']);
 });
 
-test('profit target: a winner is sold at the bid once that banks the target net of both fees, even though the model values it higher', () => {
-  const pt = { ...cfg, profitTarget: 0.02, profitTargetPct: 0 };
+test('PROFIT_GIVE_BACK=0: a winner is sold at the bid once that banks the floor net of both fees, even though the model values it higher', () => {
+  const pt = { ...cfg, profitTarget: 0.02, profitTargetPct: 0, profitGiveBack: 0 };
   // Bought 10 YES at 0.40 as a maker (no fee); the model now says 0.70, so the fair-value exit would hold.
   const long = (bid: number) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: bid, size: 50 }, bestAsk: { price: bid + 0.02, size: 50 } });
   // 0.43: +3c gross, minus the taker fee (18c on the order, rounded up to the cent) = +1.2c net: under the target.
@@ -90,7 +91,8 @@ test('profit target: a winner is sold at the bid once that banks the target net 
   // 0.44: +4c - 1.8c = +2.2c net.
   const exit = decide(long(0.44), pt).place.find((p) => p.purpose === 'exit')!;
   assert.deepEqual([exit.side, exit.price, exit.count, exit.reduceOnly, exit.timeInForce], ['ask', 0.44, 10, true, 'immediate_or_cancel']);
-  assert.match(exit.why, /^profit target: \+0\.02\d a contract net of fees >= 0\.020/);
+  assert.match(exit.why, /^take-profit: \+0\.02\d a contract net of fees \(best \+0\.02\d, floor \+0\.020\)/);
+  assert.equal(exit.protective, undefined, 'the curve still times it');
   // Fees already paid on the entry count against the gain.
   assert.equal(decide({ ...long(0.44), entryFeePerContract: 0.01 }, pt).place.filter((p) => p.purpose === 'exit').length, 0);
   // Off: the model's exit alone, which holds a contract it values at 0.70.
@@ -100,35 +102,85 @@ test('profit target: a winner is sold at the bid once that banks the target net 
   assert.equal(decide(long(0.46), { ...pt, profitTargetPct: 0.1 }).place.filter((p) => p.purpose === 'exit').length, 1);
 });
 
-test('profit target on a NO position: bought back at the ask, priced on the NO side', () => {
-  const pt = { ...cfg, profitTarget: 0.02, profitTargetPct: 0 };
+test('take-profit on a NO position (PROFIT_GIVE_BACK=0): bought back at the ask, priced on the NO side', () => {
+  const pt = { ...cfg, profitTarget: 0.02, profitTargetPct: 0, profitGiveBack: 0 };
   // Holding 10 NO bought at 0.40 (YES sold at 0.60); the model wants to keep it (P(YES) 0.30).
   const short = (yesAsk: number) => view({ position: -10, pYes: 0.3, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: yesAsk - 0.02, size: 50 }, bestAsk: { price: yesAsk, size: 50 } });
   assert.equal(decide(short(0.57), pt).place.filter((p) => p.purpose === 'exit').length, 0, 'NO bid 0.43: +1.2c net');
   const exit = decide(short(0.56), pt).place.find((p) => p.purpose === 'exit')!;
   assert.deepEqual([exit.side, exit.price, exit.count, exit.reduceOnly], ['bid', 0.56, 10, true]);
-  assert.match(exit.why, /^profit target: NO \+0\.02/);
+  assert.match(exit.why, /^take-profit NO: \+0\.02/);
 });
 
-test('profit target: no exits in the final minute or while hunting (the hunt\'s trailing stop has it)', () => {
-  const pt = { ...cfg, profitTarget: 0.02, profitTargetPct: 0 };
+test('take-profit: no exits in the final minute or while hunting (the hunt\'s trailing stop has it)', () => {
+  const pt = { ...cfg, profitTarget: 0.02, profitTargetPct: 0, profitGiveBack: 0 };
   const long = view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: 0.5, size: 50 }, bestAsk: { price: 0.52, size: 50 } });
   assert.equal(decide({ ...long, exitWindowOpen: false }, pt).place.filter((p) => p.purpose === 'exit').length, 0);
   assert.equal(decide(long, pt, { exits: false, blockReductions: true }).place.filter((p) => p.purpose === 'exit').length, 0);
 });
 
-test('profit target default: at least 10% of what a contract cost (price plus the entry fee), and at least 2c', () => {
+test('take-profit default: armed at 10% of what a contract cost (price plus the entry fee) and at least 2c, then trails', () => {
   assert.equal(cfg.profitTargetPct, 0.1);
   assert.equal(cfg.profitTarget, 0.02);
-  // Bought at 0.40 with a 1c fee: cost 0.41, so the target is 4.1c net.
-  const long = (bid: number) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0.01, bestBid: { price: bid, size: 50 }, bestAsk: { price: bid + 0.02, size: 50 } });
-  assert.equal(decide(long(0.46), cfg).place.filter((p) => p.purpose === 'exit').length, 0, '+6c - 1c - 1.8c = +3.2c');
-  const exit = decide(long(0.47), cfg).place.find((p) => p.purpose === 'exit')!;
-  assert.match(exit.why, /^profit target: \+0\.042 a contract net of fees >= 0\.041/);
-  // A cheap contract: 10% of 0.12 is 1.2c, so the 2c floor applies.
-  const cheap = (bid: number) => view({ position: 10, pYes: 0.3, entrySidePrice: 0.12, entryFeePerContract: 0, bestBid: { price: bid, size: 50 }, bestAsk: { price: bid + 0.02, size: 50 } });
-  assert.equal(decide(cheap(0.14), cfg).place.filter((p) => p.purpose === 'exit').length, 0, '+2c - 0.9c fee < 2c');
-  assert.match(decide(cheap(0.15), cfg).place.find((p) => p.purpose === 'exit')!.why, />= 0\.020/);
+  assert.equal(cfg.profitGiveBack, 1 / 3);
+  // Bought at 0.40 with a 1c fee: cost 0.41, so the floor is 4.1c net.
+  const long = (bid: number, peak = bid) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0.01, profitPeakSidePrice: peak, bestBid: { price: bid, size: 50 }, bestAsk: { price: bid + 0.02, size: 50 } });
+  const at46 = decide(long(0.46), cfg);
+  assert.equal(at46.place.filter((p) => p.purpose === 'exit').length, 0, '+6c - 1c - 1.8c = +3.2c: under the floor');
+  assert.ok(!at46.notes.some((n) => n.startsWith('take-profit armed')));
+  // 0.47 is +4.2c, over the floor: armed, but a winner at its best is not sold.
+  const at47 = decide(long(0.47), cfg);
+  assert.equal(at47.place.filter((p) => p.purpose === 'exit').length, 0);
+  assert.ok(at47.notes.some((n) => /^take-profit armed: \+0\.042 now, best \+0\.042/.test(n)), at47.notes.join(' | '));
+  // Back at 0.47 after a 0.48 best (+5.2c): into the last tick above the floor, sold to lock it in (protective).
+  const lock = decide(long(0.47, 0.48), cfg).place.find((p) => p.purpose === 'exit')!;
+  assert.deepEqual([lock.side, lock.price, lock.count, lock.protective], ['ask', 0.47, 10, true]);
+  assert.match(lock.why, /^take-profit: \+0\.042 a contract net of fees \(best \+0\.052, floor \+0\.041\)/);
+  // A cheap contract: 10% of 0.12 is 1.2c, so the 2c minimum is the floor.
+  const cheap = (bid: number, peak = bid) => view({ position: 10, pYes: 0.3, entrySidePrice: 0.12, entryFeePerContract: 0, profitPeakSidePrice: peak, bestBid: { price: bid, size: 50 }, bestAsk: { price: bid + 0.02, size: 50 } });
+  assert.equal(decide(cheap(0.14, 0.16), cfg).place.filter((p) => p.purpose === 'exit').length, 0, '+2c - 0.9c fee < 2c');
+  assert.match(decide(cheap(0.15, 0.16), cfg).place.find((p) => p.purpose === 'exit')!.why, /floor \+0\.020\)/);
+});
+
+test('take-profit: a winner runs and is sold once it gives back a third of its best gain, never below the floor', () => {
+  // Bought 10 YES at 0.40 as a maker (no fee): floor 4c. The model values it at 0.70, so its own exit holds.
+  const long = (bid: number, peak: number) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0, profitPeakSidePrice: peak, bestBid: { price: bid, size: 50 }, bestAsk: { price: bid + 0.02, size: 50 } });
+  const exitOf = (bid: number, peak: number) => decide(long(bid, peak), cfg).place.find((p) => p.purpose === 'exit');
+  // Best 0.60: +20c less the 1.7c taker fee = +18.3c. A third given back leaves +12.2c.
+  assert.equal(exitOf(0.6, 0.6), undefined, 'at its best: runs');
+  assert.equal(exitOf(0.55, 0.6), undefined, '+13.2c: less than a third given back');
+  const out = exitOf(0.53, 0.6)!;
+  assert.deepEqual([out.side, out.price, out.count, out.protective], ['ask', 0.53, 10, undefined]);
+  assert.match(out.why, /^take-profit: \+0\.112 a contract net of fees \(best \+0\.183, floor \+0\.040\)/);
+  // A best of 0.48 (+6.2c): back at 0.46 (+4.2c, the last tick above the floor) it is sold, protective.
+  const lock = exitOf(0.46, 0.48)!;
+  assert.deepEqual([lock.price, lock.protective], [0.46, true]);
+  // Gapped through the floor to 0.45 (+3.2c): no sale below the floor; the model exit has the position.
+  assert.equal(exitOf(0.45, 0.48), undefined);
+  // Without a high-water mark the current bid is the best seen: not sold at its best.
+  assert.equal(decide({ ...long(0.6, 0.6), profitPeakSidePrice: undefined }, cfg).place.filter((p) => p.purpose === 'exit').length, 0);
+});
+
+test('take-profit on a NO position: trails the NO bid and buys back at the YES ask', () => {
+  // Holding 10 NO bought at 0.40; the model wants to keep it (P(YES) 0.30). Best NO bid 0.60, now 0.53 (YES ask 0.47).
+  const short = (yesAsk: number, peakNo: number) => view({ position: -10, pYes: 0.3, entrySidePrice: 0.4, entryFeePerContract: 0, profitPeakSidePrice: peakNo, bestBid: { price: yesAsk - 0.02, size: 50 }, bestAsk: { price: yesAsk, size: 50 } });
+  assert.equal(decide(short(0.45, 0.6), cfg).place.filter((p) => p.purpose === 'exit').length, 0, 'NO bid 0.55: +13.2c, runs');
+  const exit = decide(short(0.47, 0.6), cfg).place.find((p) => p.purpose === 'exit')!;
+  assert.deepEqual([exit.side, exit.price, exit.count], ['bid', 0.47, 10]);
+  assert.match(exit.why, /^take-profit NO: \+0\.112/);
+});
+
+test('take-profit high-water mark: the best side price since the position was opened or added to; a sale keeps it', () => {
+  const pk = new ProfitPeaks();
+  assert.equal(pk.update('T', 10, 0.45), 0.45, 'opened');
+  assert.equal(pk.update('T', 10, 0.52), 0.52);
+  assert.equal(pk.update('T', 10, 0.49), 0.52, 'a lower bid keeps the best');
+  assert.equal(pk.update('T', 10, undefined), 0.52, 'no book this tick');
+  assert.equal(pk.update('T', 4, 0.5), 0.52, 'partly sold: the rest keeps the mark');
+  assert.equal(pk.update('T', 8, 0.47), 0.47, 'added to: a new mark from the current bid');
+  assert.equal(pk.update('T', -5, 0.6), 0.6, 'reversed to NO: the NO bid');
+  assert.equal(pk.update('T', 0, 0.6), undefined, 'flat');
+  assert.equal(pk.update('T', 3, 0.3), 0.3, 'a new position starts again');
 });
 
 test('the 10% minimum only adds a reason to sell: the model exit still sells a loser and a small winner', () => {

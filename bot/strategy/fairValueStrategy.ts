@@ -10,11 +10,15 @@
 //     exchange is placed again.
 //  2. TAKER (optional): cross only when q beats the touch by the taker fee
 //     plus minEdge plus takerBuffer (5c in the relaxed spec), then hold.
-//  3. EXIT: never a percentage stop. Profit target: sell at the bid as soon as
-//     that banks profitTargetPct of what a contract cost (price plus entry fee;
-//     10% by default) and at least profitTarget a contract, net of the entry's
-//     fees and this exit's taker fee, whatever the model thinks the contract is
-//     worth: gains banked as they come. Model exit: sell at the bid when the bid minus
+//  3. EXIT: never a percentage stop. Take-profit: a winner runs. Its floor is
+//     profitTargetPct of what a contract cost (price plus entry fee; 10% by
+//     default), at least profitTarget a contract, net of the entry's fees and
+//     this exit's taker fee. Once selling would bank the floor the position is
+//     armed, and it is sold at the bid when it falls back from its best (the
+//     best price its side could have been sold at since it was opened or added
+//     to): profitGiveBack of the best gain given back (a third by default), or
+//     into the last tick above the floor. Never below the floor, whatever the
+//     model thinks the contract is worth. Model exit: sell at the bid when the bid minus
 //     the taker fee beats q + exitMargin (the market overpays, or the model
 //     turned against the position). Mode B adds a resting maker take-profit at
 //     entry + TP, never offered below what the model thinks the position is
@@ -73,6 +77,9 @@ export interface MarketView {
   entrySidePrice?: number;
   /** Fees already paid, a contract held (the profit target nets them out). */
   entryFeePerContract?: number;
+  /** Best price the held side could have been sold at (its bid) since the position was opened, reversed or added to:
+   *  the take-profit's high-water mark (ProfitPeaks). Without it the current bid is the best seen. */
+  profitPeakSidePrice?: number;
   /** Entry window open (contract kind, time to close, maintenance). Default: tau >= noEntryBeforeCloseSec. */
   entryWindowOpen?: boolean;
   /** Exits allowed (false in the final minute: ride to settlement). Default true. */
@@ -92,6 +99,8 @@ export interface OrderPlan {
   why: string;
   /** Adversarial conviction boost applied to this entry's size (1 = none); widens its per-order caps. */
   boost?: number;
+  /** A protective exit (the take-profit's last tick above its floor): the exit-in-profit curve never holds it. */
+  protective?: boolean;
 }
 
 export interface StrategyOutput {
@@ -143,30 +152,49 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
   if (!exitWindow && v.position !== 0) out.notes.push('final minute: riding to settlement');
   const exits = opts.exits !== false && exitWindow;
   const margin = cfg.exitMargin ?? cfg.takerBuffer;
-  // Profit target: what selling the held side at its touch banks a contract over its cost, net of every fee, against
-  // the larger of the cents floor and the percentage of what a contract cost (price plus the entry fee).
-  const target = v.entrySidePrice === undefined ? 0 : Math.max(cfg.profitTarget ?? 0, (cfg.profitTargetPct ?? 0) * (v.entrySidePrice + (v.entryFeePerContract ?? 0)));
-  const banked = (sidePx: number, exitFee: number) => (target > 0 ? sidePx - v.entrySidePrice! - (v.entryFeePerContract ?? 0) - exitFee : -Infinity);
+  // Take-profit: what selling the held side at its touch banks a contract over its cost, net of every fee. The floor is
+  // the larger of the cents minimum and the percentage of what a contract cost (price plus the entry fee). A winner
+  // runs: once the best gain since the position was opened reached the floor it is sold when the gain falls back,
+  // either by profitGiveBack of the best or into the last tick above the floor (protective: the curve never holds
+  // it), never below the floor. A price that gaps through the floor leaves the position to the model exit until it
+  // is back above it. profitGiveBack 0: sold as soon as the floor is reached.
+  const floor = v.entrySidePrice === undefined ? 0 : Math.max(cfg.profitTarget ?? 0, (cfg.profitTargetPct ?? 0) * (v.entrySidePrice + (v.entryFeePerContract ?? 0)));
+  const banked = (sidePx: number, exitFee: number) => (floor > 0 ? sidePx - v.entrySidePrice! - (v.entryFeePerContract ?? 0) - exitFee : -Infinity);
+  const giveBack = cfg.profitGiveBack ?? 0;
+  const takeProfit = (n: number, sidePx: number, exitFee: number, label: string) => {
+    const net = banked(sidePx, exitFee);
+    const peak = v.profitPeakSidePrice;
+    const best = peak !== undefined && peak > sidePx ? Math.max(net, banked(peak, orderFee(n, peak, true, v.fees) / n)) : net;
+    if (!(best >= floor - 1e-9)) return { sell: false, protective: false, why: '' };
+    const sellBelow = Math.max(best * (1 - giveBack), floor + tick);
+    const lastTick = net <= floor + tick + 1e-9;
+    const sell = net >= floor - 1e-9 && (giveBack <= 0 || (net < best - 1e-9 && (lastTick || net <= best * (1 - giveBack) + 1e-9)));
+    if (!sell) {
+      out.notes.push(`take-profit armed${label}: +${net.toFixed(3)} now, best +${best.toFixed(3)}; sells at or below +${Math.min(sellBelow, best).toFixed(3)}, never under the +${floor.toFixed(3)} floor`);
+      return { sell: false, protective: false, why: '' };
+    }
+    return { sell, protective: lastTick && giveBack > 0, why: `take-profit${label}: +${net.toFixed(3)} a contract net of fees (best +${best.toFixed(3)}, floor +${floor.toFixed(3)})` };
+  };
   if (exits && v.position > 0 && bid) {
     const n = Math.min(v.position, bid.size);
     const fee = n > 0 ? orderFee(n, bid.price, true, v.fees) / n : 0;
     const edge = bid.price - q - fee;
-    const net = banked(bid.price, fee);
-    const tp = net >= target - 1e-9;
-    if (n > 0 && (edge >= margin || tp)) {
+    const tp = n > 0 ? takeProfit(n, bid.price, fee, '') : undefined;
+    if (n > 0 && (edge >= margin || tp?.sell)) {
       out.place.push({ side: 'ask', price: bid.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge,
-        why: tp ? `profit target: +${net.toFixed(3)} a contract net of fees >= ${target.toFixed(3)}` : `bid ${bid.price} - fee > q ${q.toFixed(3)} + ${margin}` });
+        ...(tp?.sell && tp.protective ? { protective: true } : {}),
+        why: tp?.sell ? tp.why : `bid ${bid.price} - fee > q ${q.toFixed(3)} + ${margin}` });
     }
   } else if (exits && v.position < 0 && ask) {
     const n = Math.min(-v.position, ask.size);
     const noBid = round(1 - ask.price, 4);
     const fee = n > 0 ? orderFee(n, noBid, true, v.fees) / n : 0;
     const edge = q - ask.price - fee;
-    const net = banked(noBid, fee);
-    const tp = net >= target - 1e-9;
-    if (n > 0 && (edge >= margin || tp)) {
+    const tp = n > 0 ? takeProfit(n, noBid, fee, ' NO') : undefined;
+    if (n > 0 && (edge >= margin || tp?.sell)) {
       out.place.push({ side: 'bid', price: ask.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge,
-        why: tp ? `profit target: NO +${net.toFixed(3)} a contract net of fees >= ${target.toFixed(3)}` : `NO bid ${noBid.toFixed(2)} - fee > q + ${margin}` });
+        ...(tp?.sell && tp.protective ? { protective: true } : {}),
+        why: tp?.sell ? tp.why : `NO bid ${noBid.toFixed(2)} - fee > q + ${margin}` });
     }
   }
 
