@@ -68,6 +68,7 @@ import { RunControl } from './control';
 import { TrainingSupervisor } from './training/supervisor';
 import { SettlementSweeper } from './paper/settlementSweeper';
 import { gatePasses, Probation, setProbation } from './risk/probation';
+import { SinuousEntryGate } from './strategy/sinuousEntry';
 import { SinuousExitGate } from './strategy/sinuousExit';
 import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
 
@@ -121,6 +122,9 @@ async function main(): Promise<void> {
     audit.write('curve_exit', e);
     if (e.event === 'benched') alerter.notify('warn', 'curve-exit', `Exit curve benched (profit exits go out without waiting for it until a reset): ${String(e.reason)}`);
   });
+  // Entry curve (SINUOUS_ENTRY, bot/strategy/sinuousEntry.ts): monitor scores maker entries by the book's curve at the
+  // fill; gate also holds back quotes the curve is running against.
+  const curveEntry = cfg.sinuousEntry.mode === 'off' ? undefined : new SinuousEntryGate(cfg.sinuousEntry, path.join(cfg.bookDir, 'curve-entry.json'));
 
   // Model: frozen, versioned, validated offline. Identity (pure fair value) if no file. The
   // automated pipeline's promoted copies (AUTO_TRAIN_DIR) win over params/ and are hot-swapped.
@@ -456,7 +460,7 @@ async function main(): Promise<void> {
   // The exchange's own status and maintenance schedule gate new entries (exits stay allowed).
   const exchangeStatus = new ExchangeStatusMonitor(rest);
   exchangeStatus.start();
-  const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json'), curveExit });
+  const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json'), curveExit, curveEntry });
   engineRef = engine;
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();
