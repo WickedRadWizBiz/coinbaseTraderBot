@@ -22,7 +22,7 @@
 import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
-import { loadConfig } from '../bot/config';
+import { loadConfig, paperEnv } from '../bot/config';
 import { recordingFiles } from '../bot/marketdata/recordingFiles';
 import { PERP_FEATURES, perpFeatures, perpGatedLayout, PerpModel, type PerpModelParams } from '../bot/perps/perpSignal';
 import { fitGatedExperts, gatedPredict, type GatedExperts } from '../bot/model/gatedExperts';
@@ -372,7 +372,7 @@ export function trainPerp(rows: PerpRow[], o: TrainPerpOpts): { params: PerpMode
 }
 
 export async function trainPerpMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
-  const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
+  const cfg = loadConfig(paperEnv(process.env));
   const horizonMin = Number(argOf('horizon', String(cfg.perps.horizonMin)));
   const everySec = Number(argOf('every', '300'));
   const dir = argOf('recordings', 'data/recordings');

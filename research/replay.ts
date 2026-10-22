@@ -268,6 +268,15 @@ export class ReplayState {
     return any || pContract !== undefined ? { up, move, conf, pContract } : undefined;
   }
 
+  /** A market that is over: drop it with its book and microstructure state (and its logged SNN contract call), as the
+   *  live bot drops them after the close, so a replay of many days holds only the markets still trading. Results stay. */
+  forget(ticker: string): void {
+    this.markets.delete(ticker);
+    this.books.delete(ticker);
+    this.features.forget(ticker);
+    this.snnContract.delete(ticker);
+  }
+
   book(t: string): OrderBook {
     let b = this.books.get(t);
     if (!b) { b = new OrderBook(t); this.books.set(t, b); }

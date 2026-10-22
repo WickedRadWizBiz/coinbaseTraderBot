@@ -834,6 +834,14 @@ export function macroConfig(env: Env = process.env): MacroConfig {
   };
 }
 
+/** Settings for research and training runs, which always simulate: paper mode, and live-only settings (live perps) turned
+ *  into their paper twins, so a copy of a live server's bot.env trains instead of failing to load. */
+export function paperEnv(env: Env): Env {
+  const out: Env = { ...env, TRADING_MODE: 'paper', DASHBOARD_TOKEN: env.DASHBOARD_TOKEN ?? 'x'.repeat(32) };
+  for (const k of ['PERP_HEDGE', 'PERP_TRADING']) if (out[k] === 'live') out[k] = 'paper';
+  return out;
+}
+
 export function loadConfig(env: Env = process.env): Readonly<Config> {
   const mode = oneOf<TradingMode>(env, 'TRADING_MODE', 'paper', ['paper', 'shadow', 'live']);
   const kalshiEnv = oneOf<KalshiEnv>(env, 'KALSHI_ENV', 'demo', ['demo', 'prod']);

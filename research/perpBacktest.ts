@@ -9,7 +9,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { loadConfig, type PerpsConfig } from '../bot/config';
+import { loadConfig, paperEnv, type PerpsConfig } from '../bot/config';
 import { PerpHedger } from '../bot/perps/hedger';
 import { PaperPerpExchange } from '../bot/perps/paperPerp';
 import { PerpModel } from '../bot/perps/perpSignal';
@@ -95,7 +95,7 @@ export async function runPerpBacktest(dir: string, P: PerpsConfig, model: PerpMo
 }
 
 export async function perpBacktestMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
-  const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
+  const cfg = loadConfig(paperEnv(process.env));
   const modelPath = argOf('model', cfg.perps.modelPath);
   const model = PerpModel.load(modelPath);
   if (!model) console.warn(`no model at ${modelPath}: backtesting the momentum prior at pilot size`);

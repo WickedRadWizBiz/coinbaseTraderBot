@@ -400,9 +400,9 @@ export async function spotPbTarget(hist: string, leadLagFile: string): Promise<S
  *  by the t-statistic of net P&L per traded 15-minute window (the same in the sweep and its worker threads). */
 export async function kalshiScore(dir: string, modelPath: string, strategy: Record<string, unknown>, tape?: { file: string; sig: string }): Promise<Fitness> {
   const { runBacktest } = await import('./backtest');
-  const { loadConfig } = await import('../bot/config');
+  const { loadConfig, paperEnv } = await import('../bot/config');
   const { MetaModel } = await import('../bot/model/metaModel');
-  const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
+  const cfg = loadConfig(paperEnv(process.env));
   const model = kalshiModels.get(modelPath) ?? (fs.existsSync(modelPath) ? MetaModel.load(modelPath) : MetaModel.identity());
   kalshiModels.set(modelPath, model);
   const S = { ...cfg.strategy, ...strategy } as typeof cfg.strategy;
@@ -418,8 +418,8 @@ const kalshiModels = new Map<string, import('../bot/model/metaModel').MetaModel>
 export const sweepTapeBytes = () => Math.max(0.1, Number(process.env.SWEEP_TAPE_GB ?? 4) || 4) * 1e9;
 
 export async function kalshiTarget(recordings: string, modelPath: string, workers = 1, tapeDir?: string): Promise<SweepTarget> {
-  const { loadConfig } = await import('../bot/config');
-  const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
+  const { loadConfig, paperEnv } = await import('../bot/config');
+  const cfg = loadConfig(paperEnv(process.env));
   const { recordingFiles, linkDays } = await import('../bot/marketdata/recordingFiles');
   const days = recordingFiles(recordings);
   if (days.length < 20) throw new Error(`only ${days.length} recorded day(s) in ${recordings}: the kalshi sweep needs at least 20`);

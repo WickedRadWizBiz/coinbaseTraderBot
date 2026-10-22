@@ -6,7 +6,7 @@
 //   npm run research:tennis -- --recordings data/recordings [--bankroll 200]
 
 import path from 'path';
-import { loadConfig, type TennisConfig } from '../bot/config';
+import { loadConfig, paperEnv, type TennisConfig } from '../bot/config';
 import { PositionBook } from '../bot/oms/positions';
 import { PaperExchange } from '../bot/paper/paperExchange';
 import { marketWorstLoss } from '../bot/risk/exposure';
@@ -73,7 +73,7 @@ export async function runTennisBacktest(dir: string, cfg: TennisConfig, bankroll
           ex.settle(m.ticker, r);
           const p = pos.get(m.ticker);
           if (p && !p.settled) { pos.settle(m.ticker, r, st.now); pnl += p.realized ?? 0; }
-          st.markets.delete(m.ticker);
+          st.forget(m.ticker);
         }
         if (trackers.has(event)) { res.matches++; res.perMatchPnl.push(pnl); res.pnl += pnl; }
         trackers.delete(event);
@@ -109,7 +109,7 @@ export async function runTennisBacktest(dir: string, cfg: TennisConfig, bankroll
 
 async function main() {
   const arg = (n: string, d: string) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
-  const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
+  const cfg = loadConfig(paperEnv(process.env));
   const r = await runTennisBacktest(arg('recordings', 'data/recordings'), cfg.tennis, Number(arg('bankroll', String(cfg.paperBankrollUsd))));
   const ci = bootstrapMeanCi(r.perMatchPnl);
   console.table([{ matches: r.matches, pnl: +r.pnl.toFixed(2), fees: +r.fees.toFixed(2), pnlPerMatch: ci.mean, ciLo: ci.lo, ciHi: ci.hi, maxTennisRisk: +r.maxTennisRisk.toFixed(2) }]);

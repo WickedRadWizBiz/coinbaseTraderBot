@@ -350,7 +350,7 @@ export async function snnPbtMain(argOf: (k: string, d: string) => string = cliAr
     maxRounds: Number(argOf('max-rounds', '0')) || undefined, restartEvery: Number(argOf('restart-every', '0')), fresh: argOf('fresh', '') === 'true', log: (m) => console.log(`[snn-pbt] ${m}`),
     population: Number(argOf('population', '3')), workers: workerCount(), modelPath: modelPath && fs.existsSync(modelPath) ? modelPath : undefined,
     genetic: { parents: Number(argOf('parents', '3')), islands: Number(argOf('islands', '1')), breedEvery: Number(argOf('breed-every', '4')), mutation: Number(argOf('mutation', '0.03')) },
-    tennis: domain === 'tennis' ? (await import('../bot/config')).loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' }).tennis : undefined,
+    tennis: domain === 'tennis' ? await import('../bot/config').then((c) => c.loadConfig(c.paperEnv(process.env)).tennis) : undefined,
   });
   const out = argOf('out', '');
   if (out) { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify(res, null, 1)); }

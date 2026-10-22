@@ -22,7 +22,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { loadConfig, type StrategyConfig, type RiskLimits } from '../bot/config';
+import { loadConfig, paperEnv, type StrategyConfig, type RiskLimits } from '../bot/config';
 import { DEFAULT_FEES } from '../bot/fees';
 import { assetFeatureMap, computeFeatureMap } from '../bot/model/featureEngine';
 import { VolForecaster, VolModel } from '../bot/model/volModel';
@@ -235,7 +235,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
 
     for (const m of [...st.markets.values()]) {
       // Recorded for research, or synthesized from price history (quoted at the model's own fair value): never traded.
-      if (m.recordOnly || m.synthetic) { if (st.now >= m.closeTime + 90_000) st.markets.delete(m.ticker); continue; }
+      if (m.recordOnly || m.synthetic) { if (st.now >= m.closeTime + 90_000) st.forget(m.ticker); continue; }
       closeOf.set(m.ticker, m.closeTime);
       // Settle closed markets.
       if (st.now >= m.closeTime + 60_000) {
@@ -269,7 +269,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
             res.bySession[sk] = sb;
           }
         }
-        st.markets.delete(m.ticker);
+        st.forget(m.ticker);
         continue;
       }
       if (st.now < m.openTime || st.now >= m.closeTime) continue;
@@ -503,7 +503,7 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
   const dir = argOf('recordings', 'data/recordings');
   const modelPath = argOf('model', 'params/model.json');
   const model = fs.existsSync(modelPath) ? MetaModel.load(modelPath) : MetaModel.identity();
-  const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
+  const cfg = loadConfig(paperEnv(process.env));
   const grid = argOf('grid', String(cfg.strategy.minEdge)).split(',').map(Number);
   const bankroll = Number(argOf('bankroll', String(cfg.paperBankrollUsd)));
   const priorTrials = Number(argOf('trials', String((model.params.validation?.variantsTried ?? 1))));

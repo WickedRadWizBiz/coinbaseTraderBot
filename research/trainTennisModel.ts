@@ -8,7 +8,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { loadConfig, type TennisConfig } from '../bot/config';
+import { loadConfig, paperEnv, type TennisConfig } from '../bot/config';
 import { tennisSnapshotValues } from '../bot/snn/inputs';
 import { TENNIS_FAIR_FEATURES, tennisFairInputs, type TennisFairParams } from '../bot/tennis/tennisFair';
 import { MatchTracker, type MatchMarket } from '../bot/tennis/tennisStrategy';
@@ -49,7 +49,7 @@ export async function buildTennisDataset(dir: string, cfg: TennisConfig, everySe
       if (rA || st.now >= Math.min(...ms.map((m) => m.closeTime)) + 60_000) {
         if (rA) for (const r of pending.get(event) ?? []) rows.push({ ...r, y: rA === 'yes' ? 1 : 0 });
         pending.delete(event); trackers.delete(event);
-        for (const m of ms) st.markets.delete(m.ticker);
+        for (const m of ms) st.forget(m.ticker);
         continue;
       }
       let tr = trackers.get(event);
@@ -119,7 +119,7 @@ export async function trainTennisModel(rows: TennisRow[], seed = 7, torch?: MlpT
 }
 
 export async function trainTennisMain(argOf: (k: string, d: string) => string = cliArg) {
-  const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
+  const cfg = loadConfig(paperEnv(process.env));
   // --history: Kalshi's settled matches replayed from its history (research/history/historyReplay.ts):
   // real prices and tape, no score. Matches are split in time order, so the newest ones (the bot's own
   // recordings, with the live score) are the holdout the model must beat the market on.

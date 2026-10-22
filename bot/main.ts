@@ -242,7 +242,7 @@ async function main(): Promise<void> {
   const vault = new Vault(cfg.vault, path.join(cfg.bookDir, 'vault.json'));
   const balanceMonitorPath = path.join(cfg.bookDir, 'balance_monitor.json');
   const balanceMonitor = new BalanceMonitor(readJson<MonitorState>(balanceMonitorPath, { quarantine: true }) ?? {});
-  const tca = new Tca(path.join(cfg.dataDir, 'tca'), (t) => md.books.get(t)?.mid());
+  const tca = new Tca(path.join(cfg.dataDir, 'tca'), (t) => md.books.get(t)?.mid(), cfg.mode);
   const equityGuard = new EquityGuard({ ddScaleAt: cfg.strategy.ddScaleAt, weeklyLossPause: cfg.strategy.weeklyLossPause, dailyGoalUsd: cfg.vault.dailyGoalUsd }, path.join(cfg.bookDir, 'equity_guard.json'));
   // Dashboard PLAY / STOP and the paper training override (persisted).
   const control = new RunControl(path.join(cfg.dataDir, 'control.json'));

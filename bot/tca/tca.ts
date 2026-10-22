@@ -2,7 +2,9 @@
 // limit price, fill price, fee, and the market mid 5 s / 30 s / 60 s later
 // (markouts). Markouts are signed so positive = the market moved our way;
 // consistently negative maker markouts mean we are being picked off
-// (adverse selection).
+// (adverse selection). The recent records are reloaded from tca.jsonl at start
+// (same trading mode, last 7 days), so the maker buffer learned from them
+// survives restarts and deploys.
 
 import fs from 'fs';
 import path from 'path';
@@ -26,17 +28,47 @@ export interface TcaRecord {
   midAtFill?: number;
   markouts: Record<string, number | null>;
   ts: number;
+  /** paper or live: a restart reloads only the current mode's fills. */
+  mode?: string;
 }
 
 const HORIZONS = [5, 30, 60];
+/** Records kept in memory, and how far back a restart reloads them from the file. */
+const KEEP = 2000;
+const RELOAD_MS = 7 * 86_400_000;
+const RELOAD_BYTES = 4_000_000;
+
+/** The newest completed records of `mode` from the log (only its tail is read: the file only grows). */
+function reload(file: string, mode: string | undefined, now: number): TcaRecord[] {
+  if (!mode) return [];
+  let text = '';
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const size = fs.fstatSync(fd).size, start = Math.max(0, size - RELOAD_BYTES);
+      const buf = Buffer.alloc(size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      text = buf.toString('utf8');
+    } finally { fs.closeSync(fd); }
+  } catch { return []; }
+  const out: TcaRecord[] = [];
+  for (const line of text.split('\n')) {
+    try {
+      const r = JSON.parse(line) as TcaRecord;
+      if (r && r.mode === mode && typeof r.ts === 'number' && now - r.ts <= RELOAD_MS && r.markouts) out.push(r);
+    } catch { /* a partial first line */ }
+  }
+  return out.slice(-KEEP);
+}
 
 export class Tca {
   private readonly recent: TcaRecord[] = [];
   private readonly file: string;
 
-  constructor(dir: string, private readonly midOf: (ticker: string) => number | undefined) {
+  constructor(dir: string, private readonly midOf: (ticker: string) => number | undefined, private readonly mode?: string, now = Date.now()) {
     fs.mkdirSync(dir, { recursive: true });
     this.file = path.join(dir, 'tca.jsonl');
+    this.recent.push(...reload(this.file, mode, now));
   }
 
   onFill(f: ExchangeFill, order: OrderRecord | undefined, fee: number): void {
@@ -59,9 +91,10 @@ export class Tca {
       midAtFill: this.midOf(f.ticker),
       markouts: {},
       ts: f.ts,
+      mode: this.mode,
     };
     this.recent.push(rec);
-    if (this.recent.length > 2000) this.recent.shift();
+    if (this.recent.length > KEEP) this.recent.shift();
     let pending = HORIZONS.length;
     for (const h of HORIZONS) {
       setTimeout(() => {

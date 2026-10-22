@@ -15,7 +15,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { loadConfig } from '../bot/config';
+import { loadConfig, paperEnv } from '../bot/config';
 import { brier, logLoss } from '../bot/model/calibration';
 import { fairValue } from '../bot/model/fairValue';
 import { MetaModel } from '../bot/model/metaModel';
@@ -199,7 +199,7 @@ export async function sessionsMain(argOf: (k: string, d: string) => string = cli
   console.log(`wrote ${out} — production applies it only because validation.improved=${profile.validation?.improved}`);
 
   if (!process.argv.includes('--no-backtest') && argOf('no-backtest', '') !== '1') {
-    const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
+    const cfg = loadConfig(paperEnv(process.env));
     const modelPath = argOf('model', 'params/model.json');
     const model = fs.existsSync(modelPath) ? MetaModel.load(modelPath) : MetaModel.identity();
     const bt = await runBacktest(dir, model, cfg.strategy, cfg.risk, cfg.paperBankrollUsd, {

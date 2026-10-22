@@ -89,8 +89,8 @@ export async function buildDataset(
     nextSample = Math.floor(st.now / 1000 / everySec + 1) * everySec * 1000;
     for (const m of st.markets.values()) {
       // Recorded for research, or synthesized from price history (its mid is the fair value itself): no rows.
-      if (m.recordOnly || m.synthetic) { if (st.now >= m.closeTime + 90_000) st.markets.delete(m.ticker); continue; }
-      if (st.now >= m.closeTime + 90_000) { flush(m); st.markets.delete(m.ticker); continue; }
+      if (m.recordOnly || m.synthetic) { if (st.now >= m.closeTime + 90_000) st.forget(m.ticker); continue; }
+      if (st.now >= m.closeTime + 90_000) { flush(m); st.forget(m.ticker); continue; }
       if (st.now < m.openTime || st.now >= m.closeTime) continue;
       const book = st.books.get(m.ticker);
       const idx = st.index.get(m.asset);
