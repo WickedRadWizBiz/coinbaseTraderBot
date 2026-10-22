@@ -43,7 +43,7 @@ import { priceContract } from '../bot/model/fairValue';
 import { GO_LIVE_GATES, MetaModel, type EnsembleMember, type MetaModelParams } from '../bot/model/metaModel';
 import { clamp, logit, pushAll, sigmoid } from '../bot/util/num';
 import type { DatasetRow } from './buildDataset';
-import { eventOf } from './buildDataset';
+import { eventOf, readDataset } from './buildDataset';
 import { predictGbdtLogits, trainGbdt } from './gbdt';
 import { initLayers, predictLogits, train } from './mlp';
 import { MlpTorch } from './mlpTorch';
@@ -508,25 +508,16 @@ export async function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts & { t
   };
 }
 
+/** Rows the trainer holds by default: about 3 GB of the remote run's 8 GB heap. */
+export const DATASET_MAX_ROWS = 200_000;
+
 export async function trainMetaModelMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
   const data = argOf('data', 'research/out/dataset.jsonl');
   const out = argOf('out', 'params/model.candidate.json');
-  const rows: DatasetRow[] = [];
-  const text = fs.readFileSync(data, 'utf8');
-  let start = 0;
-  while (start < text.length) {
-    let end = text.indexOf('\n', start);
-    if (end === -1) end = text.length;
-    if (end > start) {
-      const l = text.slice(start, end);
-      if (l) {
-        const r = JSON.parse(l) as DatasetRow;
-        for (const k of Object.keys(r.fx)) if (r.fx[k] === null) r.fx[k] = NaN;
-        rows.push(r);
-      }
-    }
-    start = end + 1;
-  }
+  // At most DATASET_MAX_ROWS rows in memory (about 14 KB each): past it, each contract's snapshots are thinned evenly.
+  const maxRows = Number(argOf('max-rows', process.env.DATASET_MAX_ROWS || String(DATASET_MAX_ROWS)));
+  const { rows, total } = await readDataset(data, maxRows > 0 ? maxRows : Infinity);
+  if (rows.length < total) console.log(`[train] ${total} dataset rows: training on ${rows.length} (each contract's snapshots thinned evenly; DATASET_MAX_ROWS=${maxRows})`);
   // The MLP fits in PyTorch when a Python with it is found (MLP_ENGINE, research/mlpTorch.ts): on the GPU when there is one.
   const torch = await MlpTorch.start({ log: (m) => console.log(`[train] ${m}`) });
   if (torch) console.log(`[train] MLP fits in PyTorch on ${torch.device}`);
