@@ -14,7 +14,7 @@ import {
   CreateOrderRequest, ExchangeFill, ExchangeGateway, ExchangeOrder, ExchangePosition,
   MarketInfo, OrderRejectedError, OrderStateUnknownError, SeriesFeeInfo, BookSnapshot,
 } from './types';
-import { formatCount, formatPrice, parseBalance, parseBalanceBreakdown, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, parseSeriesFees, parseSettlement, parseTransfer } from './wire';
+import { formatCount, formatPrice, parseBalance, parseBalanceBreakdown, parseCreatedOrder, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, parseSeriesFees, parseSettlement, parseTransfer } from './wire';
 import { recordLatency } from '../util/latency';
 
 const log = logger('kalshi-rest');
@@ -154,7 +154,7 @@ export class KalshiRest implements ExchangeGateway {
 
     try {
       const data = await this.raw('POST', '/portfolio/events/orders', payload);
-      return parseOrder(data);
+      return parseCreatedOrder(data, req);
     } catch (e) {
       if (e instanceof HttpError && e.status >= 400 && e.status < 500) {
         let code: string | undefined;
@@ -167,9 +167,11 @@ export class KalshiRest implements ExchangeGateway {
     }
   }
 
-  async cancelOrder(orderId: string): Promise<void> {
+  /** `ticker` routes the cancel to the market's exchange shard: without it Kalshi looks on shard 0 only, where an order
+   *  on another shard (crypto: 2, tennis: 3) is not found. */
+  async cancelOrder(orderId: string, ticker?: string): Promise<void> {
     try {
-      await this.raw('DELETE', `/portfolio/events/orders/${encodeURIComponent(orderId)}`);
+      await this.raw('DELETE', `/portfolio/events/orders/${encodeURIComponent(orderId)}${ticker ? `?market_ticker=${encodeURIComponent(ticker)}` : ''}`);
     } catch (e) {
       if (e instanceof HttpError && e.status === 404) {
         // Older orders may live only on the legacy path; a 404 there too means

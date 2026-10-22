@@ -120,7 +120,8 @@ export interface ExchangeGateway {
   /** When the exchange last validated balance / orders / fills / positions (GET /exchange/user_data_timestamp). */
   getUserDataTimestamp?(): Promise<number | undefined>;
   createOrder(req: CreateOrderRequest): Promise<ExchangeOrder>;
-  cancelOrder(orderId: string): Promise<void>;
+  /** `ticker` routes the cancel to the market's exchange shard (Kalshi needs it for orders off shard 0). */
+  cancelOrder(orderId: string, ticker?: string): Promise<void>;
   getOrder(orderId: string): Promise<ExchangeOrder | undefined>;
   findOrderByClientId(clientOrderId: string, ticker: string): Promise<ExchangeOrder | undefined>;
   getOpenOrders(): Promise<ExchangeOrder[]>;

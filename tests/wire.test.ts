@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import { test } from 'node:test';
 import { KalshiSigner } from '../bot/kalshi/auth';
+import { KalshiRest } from '../bot/kalshi/rest';
 import { parseIndexRow, tsMs } from '../bot/kalshi/ws';
 import { nearestStrikes } from '../bot/marketdata/marketData';
-import { fillTickerStrikes, parseBalanceBreakdown, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, tickerStrikeOf, toBookSide } from '../bot/kalshi/wire';
+import { fillTickerStrikes, parseBalanceBreakdown, parseCreatedOrder, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, tickerStrikeOf, toBookSide } from '../bot/kalshi/wire';
 
 test('exchange shards: cash per shard from the balance breakdown, and each market\'s shard', () => {
   assert.deepEqual(parseBalanceBreakdown({ balance: 3000, balance_breakdown: [{ exchange_index: 0, balance: '30.0000' }, { exchange_index: 2, balance: '0.0000' }] }), { 0: 30, 2: 0 });
@@ -21,6 +22,46 @@ test('V2 order payload with fixed-point strings', () => {
   assert.equal(o.fillCount, 2);
   assert.equal(o.remainingCount, 3);
   assert.ok(Math.abs(o.feesPaid! - 0.02) < 1e-12);
+});
+
+test('Create Order V2 reply (outcome only): ticker, side and price come from the request', () => {
+  const req = { ticker: 'KXBTC15M-26OCT221430-30', side: 'bid' as const, price: 0.43, count: 10, clientOrderId: '719ea35f' };
+  // The reply that tripped the kill switch on Oct 22: a resting GTC order.
+  const resting = parseCreatedOrder({ client_order_id: '719ea35f', fill_count: '0.00', order_id: '01a163f2', remaining_count: '10.00', ts_ms: 1792678203049 }, req);
+  assert.deepEqual([resting.orderId, resting.clientOrderId, resting.ticker, resting.side, resting.price, resting.status, resting.fillCount, resting.remainingCount, resting.initialCount, resting.updatedTs],
+    ['01a163f2', '719ea35f', req.ticker, 'bid', 0.43, 'resting', 0, 10, 10, 1792678203049]);
+  // IOC: remaining_count is already final.
+  const filled = parseCreatedOrder({ order_id: 'o2', fill_count: '10.00', remaining_count: '0.00', average_fill_price: '0.4200', average_fee_paid: '0.0150', ts_ms: 1 }, req);
+  assert.equal(filled.status, 'executed');
+  assert.equal(filled.averageFillPrice, 0.42);
+  assert.ok(Math.abs(filled.feesPaid! - 0.15) < 1e-12);
+  assert.equal(parseCreatedOrder({ order_id: 'o3', fill_count: '0.00', remaining_count: '0.00', ts_ms: 1 }, req).status, 'canceled');
+  // A full order object still parses as one.
+  assert.equal(parseCreatedOrder({ order: { order_id: 'o4', ticker: 'T', side: 'ask', price: '0.6000', status: 'resting', fill_count_fp: '0.00', remaining_count_fp: '5.00' } }, req).ticker, 'T');
+  assert.throws(() => parseCreatedOrder({ order_id: 'o5' }, req), /Unparseable/);
+  // Orders listed with only the current direction field (book_side), no deprecated side/action.
+  const listed = parseOrder({ order_id: 'o6', ticker: 'T', book_side: 'ask', outcome_side: 'no', yes_price_dollars: '0.5500', status: 'resting', fill_count_fp: '0.00', remaining_count_fp: '3.00' });
+  assert.equal(listed.side, 'ask');
+  assert.equal(listed.price, 0.55);
+});
+
+test('REST: an order Kalshi accepts is an acknowledged order; a cancel names the market so it reaches the right shard', async () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const calls: string[] = [];
+  const rest = new KalshiRest({
+    baseUrl: 'https://x.test/trade-api/v2',
+    signer: new KalshiSigner('kid', privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()),
+    fetchImpl: (async (url: string, init: { method: string }) => {
+      calls.push(`${init.method} ${url}`);
+      if (init.method === 'POST') return new Response('{"client_order_id":"c1","fill_count":"0.00","order_id":"ex1","remaining_count":"10.00","ts_ms":1792678203049}', { status: 201 });
+      return new Response('{"order_id":"ex1","client_order_id":"c1","reduced_by":"10.00","ts_ms":1792678204000}', { status: 200 });
+    }) as unknown as typeof fetch,
+  });
+  const o = await rest.createOrder({ ticker: 'KXBTC15M-26OCT221430-30', side: 'bid', count: 10, price: 0.43, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, selfTradePrevention: 'taker_at_cross', clientOrderId: 'c1' });
+  assert.equal(o.status, 'resting');
+  assert.equal(o.ticker, 'KXBTC15M-26OCT221430-30');
+  await rest.cancelOrder('ex1', 'KXBTC15M-26OCT221430-30');
+  assert.equal(calls[1], 'DELETE https://x.test/trade-api/v2/portfolio/events/orders/ex1?market_ticker=KXBTC15M-26OCT221430-30');
 });
 
 test('legacy order payload (yes/no + action, cents)', () => {

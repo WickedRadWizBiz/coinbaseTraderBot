@@ -270,7 +270,7 @@ export class Oms extends EventEmitter {
     if (rec.state !== 'CANCEL_PENDING') this.safeTransition(rec, 'CANCEL_PENDING');
     this.save();
     try {
-      await this.o.gateway.cancelOrder(rec.orderId);
+      await this.o.gateway.cancelOrder(rec.orderId, rec.ticker);
       const ex = await this.o.gateway.getOrder(rec.orderId);
       if (ex) this.applyExchangeOrder(rec, ex);
     } catch (e) {
@@ -291,7 +291,7 @@ export class Oms extends EventEmitter {
     try {
       const resting = await this.o.gateway.getOpenOrders();
       for (const ex of resting) {
-        try { await this.o.gateway.cancelOrder(ex.orderId); canceled++; } catch { errors++; }
+        try { await this.o.gateway.cancelOrder(ex.orderId, ex.ticker); canceled++; } catch { errors++; }
       }
     } catch (e) {
       errors++;

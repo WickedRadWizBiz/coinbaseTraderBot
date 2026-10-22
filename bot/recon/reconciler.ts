@@ -123,7 +123,7 @@ export class Reconciler {
       const rec = (ex.clientOrderId && oms.get(ex.clientOrderId)) || oms.findByExchangeId(ex.orderId);
       if (!rec) {
         breaks.push(`orphan resting order ${ex.orderId} on ${ex.ticker}`);
-        try { await gateway.cancelOrder(ex.orderId); orphanOrdersCanceled++; } catch (e) { breaks.push(`failed to cancel orphan ${ex.orderId}: ${String(e)}`); }
+        try { await gateway.cancelOrder(ex.orderId, ex.ticker); orphanOrdersCanceled++; } catch (e) { breaks.push(`failed to cancel orphan ${ex.orderId}: ${String(e)}`); }
         continue;
       }
       oms.onExchangeOrder(ex);
