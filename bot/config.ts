@@ -5,6 +5,7 @@
 import fs from 'fs';
 import { parseSessionRisk, type SessionRiskProfile } from './model/sessionRisk';
 import { DEFAULT_PROBATION, type ProbationParams } from './risk/probation';
+import { DEFAULT_SINUOUS_EXIT, type SinuousExitParams } from './strategy/sinuousExit';
 import { defaultTiers, validateTiers, type TierPoint } from './risk/sizingTiers';
 import type { VaultConfig } from './vault/vault';
 import os from 'os';
@@ -202,6 +203,9 @@ export interface Config {
   /** VALIDATION_GATES=monitor (default): models that have not passed validation trade anyway, on probation; a book whose
    *  results are unacceptable is benched (bot/risk/probation.ts). enforce: every validation gate blocks as before. */
   probation: ProbationParams;
+  /** SINUOUS_EXIT=gate (default): a profit-taking exit on a binary contract also needs the exit-in-profit curve's
+   *  signal (bot/strategy/sinuousExit.ts); monitor shows the curve without holding exits; off. */
+  sinuousExit: SinuousExitParams;
   host: string;
   port: number;
   /** DASHBOARD_PASSWORD: '' (default) = the dashboard opens without a login. */
@@ -995,6 +999,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       t: num(env, 'PROBATION_T', DEFAULT_PROBATION.t, 0, 10),
       maxLossUsd: num(env, 'PROBATION_MAX_LOSS_USD', DEFAULT_PROBATION.maxLossUsd, 0, 1e9),
       window: num(env, 'PROBATION_WINDOW', DEFAULT_PROBATION.window, 10, 100_000),
+    },
+    sinuousExit: {
+      mode: oneOf(env, 'SINUOUS_EXIT', DEFAULT_SINUOUS_EXIT.mode, ['gate', 'monitor', 'off'] as const),
+      minNetProfit: num(env, 'SINUOUS_MIN_PROFIT_CENTS', DEFAULT_SINUOUS_EXIT.minNetProfit * 100, 0, 50) / 100,
     },
     host,
     port: num(env, 'PORT', 3000, 1, 65535),

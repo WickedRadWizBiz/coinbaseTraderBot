@@ -30,6 +30,7 @@ import { RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
 import { decide, decisionProbability, MarketView, OrderPlan } from './strategy/fairValueStrategy';
 import { ConfluenceRatchetExit } from './strategy/exitPolicies';
+import { tennisHighLeverage, type CurveReading, type SinuousExitGate } from './strategy/sinuousExit';
 import { CadenceGate, inEntryWindow, type CadenceReason } from './strategy/cadence';
 import { kalshiMaintenance, sessionEdge, sessionState, type SessionState } from './model/sessions';
 import type { EquityGuard } from './risk/equityGuard';
@@ -227,6 +228,8 @@ export interface MarketStatus {
   exitMode?: 'fair_value' | 'hunt';
   huntTarget?: number;
   huntStop?: number;
+  /** Exit-in-profit curve of the held position (bot/strategy/sinuousExit.ts). */
+  curve?: CurveReading;
   /** Current values of the macro/confluence inputs for display. */
   macro?: Record<string, number | null>;
   /** SNN: model-only probability, p_snn, confidence c, alpha applied, and why it is not voting. */
@@ -288,6 +291,8 @@ export interface EngineDeps {
   tennisScores?: TennisScoreClient;
   /** Tennis MLP (fair P(A wins)); gates tennis entries once validated. */
   tennisFair?: TennisFairModel;
+  /** Exit-in-profit curve: profit-taking exits on binary contracts also need its signal (SINUOUS_EXIT). */
+  curveExit?: SinuousExitGate;
   /** Cortex-like SNN (bot/snn): worker host, blender with earned alpha, conservative target scaler. */
   snn?: SnnFleet;
   /** Where the blender's settled (p_model, p_snn) history is saved (survives restarts). */
@@ -395,6 +400,8 @@ export class Engine {
         try { fs.appendFileSync(path.join(d.cfg.bookDir ?? d.cfg.dataDir, 'trades.jsonl'), lines.join('\n') + '\n'); } catch { /* best effort */ }
       }
     });
+    // Exit-in-profit curve: a profit exit it was holding when the market settled is scored at the payout.
+    d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no' }) => d.curveExit?.settled(e.ticker, e.result, this.now()));
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized: number; positionBefore: number }) => {
       this.lastSettleTs = this.now();
       // One probation result per settled market that traded (VALIDATION_GATES=monitor: bot/risk/probation.ts).
@@ -592,6 +599,16 @@ export class Engine {
       this.d.alerter.notify('critical', 'heartbeat', 'Engine heartbeat stalled; cancelling all orders');
       void this.d.oms.cancelAll('heartbeat stalled');
     }
+  }
+
+  /** The exit-in-profit curve's mode and scoreboard (null when SINUOUS_EXIT=off). */
+  curveExitStatus() { return this.d.curveExit?.status() ?? null; }
+
+  /** Clear the exit curve's scoreboard (and a bench); false when it is off. */
+  resetCurveExit(): boolean {
+    if (!this.d.curveExit) return false;
+    this.d.curveExit.reset(this.now());
+    return true;
   }
 
   /** Current market session, its risk multipliers and the hunt guard, for the dashboard. */
@@ -1222,6 +1239,36 @@ export class Engine {
       const fairA = this.tennisFairFor(event, tv, ms[0].ticker);
       const out = decideMatch(tracker, { event, now, startTime: ms.find((m) => m.startTime)?.startTime, markets, closeTime: Math.min(...ms.map((m) => m.closeTime)), score: sc?.score, fairA }, T,
         { bankroll, tennisRisk: totals.total, matchRisk: totals.window }, ms[0].tickSize);
+      // Exit-in-profit curve (strategy/sinuousExit.ts) on each held player market: a take-profit (the target, the
+      // late-match profit, a hunt's confluence fade or time limit) also needs the curve's signal; a broken trailing
+      // stop, a stop and the late-match salvage never wait.
+      const curve = this.d.curveExit;
+      if (curve) {
+        const lev = tennisHighLeverage(tracker.score);
+        const entryFeePer = (t: string, n: number) => { const p = oms.positions.get(t); return p && n > 0 ? p.fees / n : 0; };
+        for (const mk of markets) {
+          const b = mk.book?.bestBid(), a = mk.book?.bestAsk();
+          if (mk.position > 0 && mk.avgEntry !== undefined && b) {
+            curve.observe(mk.ticker, 'tennis', {
+              now, sign: 1, bid: b, ask: a, entrySidePrice: mk.avgEntry, entryFeePer: entryFeePer(mk.ticker, mk.position),
+              exitFeePer: orderFee(mk.position, b.price, true, md.feesFor(mk.ticker)) / mk.position, highLeverage: lev,
+            });
+          } else if (!(mk.position > 0)) curve.flat(mk.ticker, now);
+        }
+        out.plans = out.plans.filter((p) => {
+          const mk = markets.find((x) => x.ticker === p.ticker);
+          if (!p.reduceOnly || p.timeInForce !== 'immediate_or_cancel' || !mk || mk.avgEntry === undefined || !(p.count > 0)) return true;
+          const stop = tracker.stops.get(p.ticker);
+          const trailBroken = (p.leg === 'underdog_trail' || p.leg === 'fav_trail') && stop !== undefined && mk.quote.bid !== undefined && mk.quote.bid < stop - 1e-9;
+          const g = curve.check(p.ticker, {
+            sidePrice: p.price, count: p.count, exitFeePer: orderFee(p.count, p.price, true, md.feesFor(p.ticker)) / p.count,
+            entrySidePrice: mk.avgEntry, entryFeePer: entryFeePer(p.ticker, mk.position),
+            protective: trailBroken || p.leg === 'underdog_cut' || p.leg === 'underdog_stop' || p.leg === 'fav_stop',
+          }, now);
+          if (g.note) out.notes.push(g.note);
+          return g.allow;
+        });
+      }
       const notes = [...out.notes, ...(tradeable ? [] : ['tracking only: set TENNIS_LIVE=true to trade tennis with real money'])];
       this.tennisStatus.set(event, { event, phase: out.phase, fairA, pA: MatchTracker.probability(markets), progress: tracker.progress(now, markets), progressDetail: tracker.progressDetail(now, markets), score: tracker.score, scoreRaw: sc?.raw ?? sc?.error, liveSince: tracker.liveSince, notes, tickers: ms.map((m) => m.ticker), updatedTs: now, trailingStops: Object.fromEntries(tracker.stops), confluence: Object.fromEntries(tracker.signals) });
 
@@ -1797,6 +1844,7 @@ export class Engine {
     // its entry fair value AND confluence agrees with the position.
     let huntMode = false;
     let huntPlan: OrderPlan | undefined;
+    let huntProtective = false;
     // Hunt mode is evaluated by research:backtest --annotate. With a passing evaluation the winning
     // parameters are used; in live mode an unevaluated (or losing) hunt falls back to the fair-value exit.
     const vh = model.validatedHunt();
@@ -1829,6 +1877,7 @@ export class Engine {
       }
       if (d.plan) {
         huntPlan = { side: d.plan.side, price: d.plan.price, count: d.plan.count, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge: 0, why: `confluence ratchet stop ${d.plan.stop}` };
+        huntProtective = d.event === 'triggered' || d.event === 'profit_take_gap';
       }
     } else {
       st.exitMode = 'fair_value';
@@ -1934,6 +1983,30 @@ export class Engine {
     if (cmpW && cmpW.w !== 1) plan.notes.push(`compensator ${cmpW.source}: Kalshi size x${cmpW.w.toFixed(2)}`);
     if (sessRisk.applied.length) plan.notes.push(`session risk ${sessRisk.applied.join('+')}: size x${sessRisk.sizeMult}, +${sessRisk.minEdgeAdd} edge`);
     if (huntPlan) plan.place.unshift(huntPlan);
+    // Exit-in-profit curve (strategy/sinuousExit.ts): a profit-taking exit also needs the curve's signal (a spike above
+    // it, or a roll-over below its projection). The hunt's trailing stop, a gap through it and loss cuts never wait.
+    const curve = this.d.curveExit;
+    if (curve && st.position !== 0 && view.entrySidePrice !== undefined) {
+      const sign = st.position > 0 ? 1 : -1;
+      const fees = md.feesFor(m.ticker);
+      const held = Math.abs(st.position);
+      const entrySide = view.entrySidePrice;
+      const entryFeePer = pos && Math.abs(pos.yes) > 1e-9 ? pos.fees / Math.abs(pos.yes) : 0;
+      const sideBid = sign > 0 ? bid.price : Math.round((1 - ask.price) * 1e4) / 1e4;
+      st.curve = curve.observe(m.ticker, shortContract ? 'crypto_15m' : 'crypto_1h', {
+        now, sign, bid, ask, entrySidePrice: entrySide, entryFeePer, exitFeePer: orderFee(held, sideBid, true, fees) / held, tauSec,
+      });
+      plan.place = plan.place.filter((p) => {
+        if (!p.reduceOnly || p.timeInForce !== 'immediate_or_cancel' || !(p.count > 0)) return true;
+        const sidePrice = sign > 0 ? p.price : Math.round((1 - p.price) * 1e4) / 1e4;
+        const g = curve.check(m.ticker, {
+          sidePrice, count: p.count, exitFeePer: orderFee(p.count, sidePrice, true, fees) / p.count,
+          entrySidePrice: entrySide, entryFeePer, protective: p === huntPlan && huntProtective,
+        }, now);
+        if (g.note) plan.notes.push(g.note);
+        return g.allow;
+      });
+    } else curve?.flat(m.ticker, now);
     if (huntMode) plan.notes.push(`hunting: stop ${st.huntStop ?? 'forming'}`);
     if (huntNote) plan.notes.push(huntNote);
     st.notes = plan.notes;

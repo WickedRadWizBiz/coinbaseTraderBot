@@ -192,6 +192,7 @@ export function createApi(d: ApiDeps): express.Express {
       snn: d.engine.snnBrief(),
       treeModels: d.engine.treeModelStatus(),
       probation: probation()?.status() ?? null,
+      curveExit: d.engine.curveExitStatus(),
       kalshiAccount: d.engine.kalshiAccountStatus(),
       autoTrain: d.autoTrain ? (() => { const a = d.autoTrain!.status(); return { mode: a.mode, running: a.running, paused: a.paused, window: a.window, nextRun: a.nextRun, lastExit: a.lastExit, lastSwap: a.swaps[0] ?? null, lastReport: a.lastReport }; })() : null,
       tennis: {
@@ -392,6 +393,13 @@ export function createApi(d: ApiDeps): express.Express {
     d.audit.write('config', { event: on ? 'kill_override_on' : 'kill_override_off', by: 'dashboard' });
     await d.training?.tick();
     res.json({ ok: true, run: d.control.status(), training: d.training?.status() ?? null });
+  });
+
+  // Exit-in-profit curve (SINUOUS_EXIT, bot/strategy/sinuousExit.ts): clear its scoreboard and lift a bench.
+  api.post('/curve-exit/reset', (_req, res) => {
+    if (!d.engine.resetCurveExit()) return res.status(400).json({ error: 'exit curve is off (SINUOUS_EXIT=off)' });
+    d.audit.write('curve_exit', { event: 'reset', by: 'dashboard' });
+    res.json({ ok: true, curveExit: d.engine.curveExitStatus() });
   });
 
   // Probation (VALIDATION_GATES=monitor, bot/risk/probation.ts): a fresh probation for a benched book.

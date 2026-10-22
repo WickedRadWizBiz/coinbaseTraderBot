@@ -1,0 +1,182 @@
+import assert from 'node:assert/strict';
+import path from 'path';
+import { test } from 'node:test';
+import {
+  CURVE_PROFILES, dynamicKnobs, fromLogit, logit, microPrice, SinuousExitGate, SinuousExitTracker, tennisHighLeverage,
+  type CurveEvent, type CurveObservation,
+} from '../bot/strategy/sinuousExit';
+import { tmpDir } from './helpers';
+
+const BENCH = { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 };
+
+/** A YES book whose micro-price is `p`: a 1c spread with equal sizes around it. */
+const book = (p: number, size = 50) => ({ bid: { price: +(p - 0.005).toFixed(4), size }, ask: { price: +(p + 0.005).toFixed(4), size } });
+
+const obs = (now: number, p: number, extra: Partial<CurveObservation> = {}): CurveObservation => ({
+  now, sign: 1, ...book(p), entrySidePrice: 0.4, entryFeePer: 0.01, exitFeePer: 0.01, minNetProfit: 0.015, ...extra,
+});
+
+test('logit and micro-price: bounded prices map to unbounded log-odds; the micro-price leans toward the thin side', () => {
+  assert.ok(Math.abs(fromLogit(logit(0.37)) - 0.37) < 1e-12);
+  assert.equal(logit(0), logit(0.005), 'clamped at 0.5c');
+  assert.equal(logit(1), logit(0.995), 'clamped at 99.5c');
+  // Three times the size bidding: the price the book points to is close to the ask.
+  assert.ok(Math.abs(microPrice({ price: 0.5, size: 30 }, { price: 0.52, size: 10 })! - 0.515) < 1e-12);
+  assert.equal(microPrice({ price: 0.5, size: 0 }, { price: 0.52, size: 0 }), 0.51, 'no sizes: the mid');
+  assert.equal(microPrice(undefined, { price: 0.52, size: 5 }), 0.52, 'one side: that side');
+  assert.equal(microPrice(), undefined);
+});
+
+test('knobs shift with the spread, the time to close and the tennis score', () => {
+  const c = CURVE_PROFILES.crypto_15m;
+  assert.deepEqual(dynamicKnobs('crypto_15m', { spread: 0.01, sidePrice: 0.5 }), { R: c.R, kappa: c.kappa, z: c.z });
+  // A 6c spread: R x (1 + 0.25 x 4^2) = 5x.
+  assert.ok(Math.abs(dynamicKnobs('crypto_15m', { spread: 0.06, sidePrice: 0.5 }).R - 5 * c.R) < 1e-12);
+  // 60-180 s to close: take the profit sooner near 50c, flatten the curve above 85c.
+  assert.ok(Math.abs(dynamicKnobs('crypto_15m', { spread: 0.01, sidePrice: 0.5, tauSec: 120 }).z - 0.75 * c.z) < 1e-12);
+  assert.ok(Math.abs(dynamicKnobs('crypto_15m', { spread: 0.01, sidePrice: 0.9, tauSec: 120 }).kappa - 0.2 * c.kappa) < 1e-12);
+  // The settlement-average minute: z falls with the time left (never below 1.1), kappa doubles.
+  const last = dynamicKnobs('crypto_1h', { spread: 0.01, sidePrice: 0.5, tauSec: 30 });
+  assert.ok(Math.abs(last.z - Math.max(1.1, CURVE_PROFILES.crypto_1h.z * 0.5)) < 1e-12);
+  assert.ok(Math.abs(last.kappa - 2 * CURVE_PROFILES.crypto_1h.kappa) < 1e-12);
+  assert.equal(dynamicKnobs('crypto_1h', { spread: 0.01, sidePrice: 0.5, tauSec: 1 }).z, 1.1);
+  // Tennis: a break point follows the jump; routine games scalp the wiggle; no score keeps the baseline.
+  const t = CURVE_PROFILES.tennis;
+  assert.deepEqual(dynamicKnobs('tennis', { spread: 0.01, sidePrice: 0.5, highLeverage: true }), { R: t.R * 0.5, kappa: t.kappa, z: 1.6 });
+  assert.deepEqual(dynamicKnobs('tennis', { spread: 0.01, sidePrice: 0.5, highLeverage: false }), { R: t.R, kappa: 0.35, z: 1.4 });
+  assert.deepEqual(dynamicKnobs('tennis', { spread: 0.01, sidePrice: 0.5 }), { R: t.R, kappa: t.kappa, z: t.z });
+});
+
+test('tennis leverage: break points and tiebreaks', () => {
+  const s = (pointsA: number, pointsB: number, serverA: boolean | undefined, gamesA = 3, gamesB = 2) => ({ setsA: 0, setsB: 0, gamesA, gamesB, pointsA, pointsB, serverA });
+  assert.equal(tennisHighLeverage(s(2, 3, true)), true, '30-40 on A\'s serve');
+  assert.equal(tennisHighLeverage(s(3, 4, true)), true, 'advantage receiver');
+  assert.equal(tennisHighLeverage(s(3, 3, true)), false, 'deuce');
+  assert.equal(tennisHighLeverage(s(3, 2, true)), false, 'game point for the server');
+  assert.equal(tennisHighLeverage(s(0, 3, false)), false, 'B serving, A has 0, B 40: not a break point');
+  assert.equal(tennisHighLeverage(s(3, 1, false)), true, 'B serving at 15-40');
+  assert.equal(tennisHighLeverage(s(1, 1, undefined, 6, 6)), true, 'tiebreak');
+  assert.equal(tennisHighLeverage(s(1, 1, undefined)), undefined, 'unknown server');
+  assert.equal(tennisHighLeverage(undefined), undefined);
+});
+
+test('curve: a jump in our favour is a DEVIATION_SPIKE once the exit clears the fees', () => {
+  const tr = new SinuousExitTracker('crypto_15m');
+  let now = 0;
+  for (let i = 0; i < 20; i++) { const r = tr.update(obs((now += 1000), 0.6)); assert.equal(r.signal, false, `calm tick ${i}: ${r.reason}`); }
+  const r = tr.update(obs((now += 1000), 0.72, { bid: { price: 0.71, size: 400 }, ask: { price: 0.73, size: 10 } }));
+  assert.equal(r.reason, 'DEVIATION_SPIKE');
+  assert.equal(r.signal, true);
+  assert.ok(r.z! >= CURVE_PROFILES.crypto_15m.z);
+  // The same jump without enough profit (entered at 0.70): no signal.
+  const tr2 = new SinuousExitTracker('crypto_15m');
+  now = 0;
+  for (let i = 0; i < 20; i++) tr2.update(obs((now += 1000), 0.6, { entrySidePrice: 0.7 }));
+  const r2 = tr2.update(obs((now += 1000), 0.72, { entrySidePrice: 0.7, bid: { price: 0.71, size: 400 }, ask: { price: 0.73, size: 10 } }));
+  assert.equal(r2.reason, 'BELOW_PROFIT_FLOOR');
+  assert.equal(r2.signal, false);
+});
+
+test('curve: a steady climb holds; the roll-over after it is a SINUOUS_CROSS', () => {
+  const tr = new SinuousExitTracker('crypto_15m');
+  let now = 0, p = 0.5;
+  const seen: string[] = [];
+  for (let i = 0; i < 40; i++) { p += 0.004; const r = tr.update(obs((now += 1000), p)); seen.push(r.reason); if (i > 8) assert.equal(r.signal, false, `climbing tick ${i}: ${r.reason} z ${r.z}`); }
+  assert.ok(seen.includes('WARMING_UP') && seen.includes('HOLD'));
+  // The climb stalls and turns: the curve falls under the projection made a few seconds ago, velocity <= 0.
+  let crossed = false;
+  for (let i = 0; i < 20 && !crossed; i++) { p -= 0.006; const r = tr.update(obs((now += 1000), p)); crossed = r.reason === 'SINUOUS_CROSS' && r.signal; if (crossed) assert.ok(r.velocity! <= 0 && r.curve! < r.projected!); }
+  assert.ok(crossed, 'the roll-over signals');
+});
+
+test('curve: a NO position is mirrored (profit when YES falls), and a long gap restarts the curve', () => {
+  const tr = new SinuousExitTracker('crypto_1h');
+  let now = 0;
+  // Holding NO bought at 0.40 (YES at 0.60): YES at 0.45 means NO at 0.55.
+  for (let i = 0; i < 15; i++) tr.update(obs((now += 1000), 0.45, { sign: -1 }));
+  const r = tr.update(obs((now += 1000), 0.45, { sign: -1 }));
+  assert.ok(Math.abs(r.micro! - 0.55) < 1e-9);
+  assert.ok(r.netProfit! > 0.1, 'NO bid 0.545 - 0.40 - fees');
+  const after = tr.update(obs((now += 120_000), 0.45, { sign: -1 }));
+  assert.equal(after.reason, 'WARMING_UP', 'restarted after a 2-minute gap');
+});
+
+test('gate: a profit exit waits for the curve; stops, small gains and losses never do', () => {
+  const events: CurveEvent[] = [];
+  const g = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, BENCH, undefined, (e) => events.push(e), 0);
+  let now = 0;
+  for (let i = 0; i < 20; i++) g.observe('T', 'crypto_15m', obs((now += 1000), 0.6));
+  const exit = { sidePrice: 0.595, count: 10, exitFeePer: 0.01, entrySidePrice: 0.4, entryFeePer: 0.01 };
+  const held = g.check('T', { ...exit, protective: false }, now);
+  assert.equal(held.allow, false);
+  assert.match(held.note!, /holding the profit exit at 0.595/);
+  assert.deepEqual(g.status().holding, ['T']);
+  assert.equal(events.at(-1)?.event, 'held');
+  // Protective exits and exits below the profit floor go out (and score the held exit).
+  assert.equal(g.check('T', { ...exit, protective: true }, now).allow, true);
+  assert.equal(g.status().scored, 1, 'held exit scored against the stop price');
+  assert.equal(g.check('T', { ...exit, sidePrice: 0.42, protective: false }, now).allow, true, 'net below 1.5c: not a profit exit');
+  assert.equal(g.check('T', { ...exit, sidePrice: 0.35, protective: false }, now).allow, true, 'a loss cut');
+  // A spike releases the profit exit.
+  g.check('T', { ...exit, protective: false }, now);
+  g.observe('T', 'crypto_15m', obs((now += 1000), 0.72, { bid: { price: 0.71, size: 400 }, ask: { price: 0.73, size: 10 } }));
+  const go = g.check('T', { ...exit, sidePrice: 0.71, protective: false }, now);
+  assert.equal(go.allow, true);
+  assert.match(go.note!, /DEVIATION_SPIKE/);
+  assert.ok(events.some((e) => e.event === 'released'));
+  // Holding from 0.595 to 0.71 earned (0.71 - 0.595) x 10 = $1.15.
+  const last = events.filter((e) => e.event === 'scored').at(-1)!;
+  assert.ok(Math.abs((last.usd as number) - 1.15) < 1e-9);
+});
+
+test('gate: monitor mode never holds; a settlement scores a held exit at the payout', () => {
+  const m = new SinuousExitGate({ mode: 'monitor', minNetProfit: 0.015 }, BENCH, undefined, undefined, 0);
+  let now = 0;
+  for (let i = 0; i < 20; i++) m.observe('T', 'crypto_15m', obs((now += 1000), 0.6));
+  const exit = { sidePrice: 0.595, count: 10, exitFeePer: 0.01, entrySidePrice: 0.4, entryFeePer: 0.01, protective: false };
+  const v = m.check('T', exit, now);
+  assert.equal(v.allow, true);
+  assert.match(v.note!, /monitor\) would hold/);
+  const events: CurveEvent[] = [];
+  const g = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, BENCH, undefined, (e) => events.push(e), 0);
+  for (let i = 0; i < 20; i++) g.observe('T', 'crypto_15m', obs((now += 1000), 0.6));
+  assert.equal(g.check('T', exit, now).allow, false);
+  g.settled('T', 'yes', now);
+  // Held at 0.585 net of the exit fee, settled at $1: +$4.15.
+  assert.ok(Math.abs((events.find((e) => e.event === 'scored')!.usd as number) - 4.15) < 1e-9);
+  // A position closed some other way is scored at the last bid seen (net of the exit fee).
+  for (let i = 0; i < 20; i++) g.observe('U', 'crypto_15m', obs((now += 1000), 0.6));
+  assert.equal(g.check('U', exit, now).allow, false);
+  g.flat('U', now);
+  const u = events.filter((e) => e.event === 'scored' && e.ticker === 'U').at(-1)!;
+  assert.ok(Math.abs((u.usd as number) - 0) < 1e-9, 'bid 0.595 net 0.585, the same as when held');
+});
+
+test('gate: benched by the probation rules when holding costs money, and the bench survives a restart', () => {
+  const file = path.join(tmpDir(), 'curve-exit.json');
+  const events: CurveEvent[] = [];
+  const g = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { ...BENCH, maxLossUsd: 3 }, file, (e) => events.push(e), 0);
+  let now = 0;
+  const exit = { sidePrice: 0.595, count: 10, exitFeePer: 0.01, entrySidePrice: 0.4, entryFeePer: 0.01 };
+  for (let k = 0; k < 3; k++) {
+    const t = `T${k}`;
+    for (let i = 0; i < 20; i++) g.observe(t, 'crypto_15m', obs((now += 1000), 0.6));
+    assert.equal(g.check(t, { ...exit, protective: false }, now).allow, false);
+    // The trailing stop sells 12c lower: holding cost $1.20.
+    g.check(t, { ...exit, sidePrice: 0.475, protective: true }, now);
+  }
+  assert.ok(g.status().benched, 'net -$3.60 reached the $3 limit');
+  assert.equal(g.active, false);
+  assert.ok(events.some((e) => e.event === 'benched'));
+  // Benched: profit exits go out (with a note).
+  for (let i = 0; i < 20; i++) g.observe('V', 'crypto_15m', obs((now += 1000), 0.6));
+  const v = g.check('V', { ...exit, protective: false }, now);
+  assert.equal(v.allow, true);
+  assert.match(v.note!, /benched/);
+  const again = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { ...BENCH, maxLossUsd: 3 }, file, undefined, 0);
+  assert.ok(again.status().benched);
+  again.reset(now);
+  assert.equal(again.status().benched, null);
+  assert.equal(again.status().scored, 0);
+  assert.equal(again.active, true);
+});
