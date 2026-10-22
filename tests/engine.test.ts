@@ -269,6 +269,43 @@ test('exit curve: an exit at a loss goes out at once', async () => {
   assert.deepEqual(curveExit.status().holding, []);
 });
 
+test('profit target: a winner the model would keep is sold once it banks the target net of fees', async () => {
+  const { engine, recon, market, md, oms, audit } = await setup();
+  const r = await recon.run('startup');
+  engine.balance = r!.balance;
+  // Long 10 YES bought at 0.40 as a maker. The model values YES near 0.55, so its own exit would hold at a 0.45 bid;
+  // the profit target sells: +5c, less the 1.8c taker fee, is +3.2c net, over the 2c target.
+  oms.onFill({ tradeId: 'p1', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.4, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.45, size: 50 }], asks: [{ price: 0.47, size: 50 }] }, Date.now());
+  await engine.tick();
+  const exits = oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly);
+  assert.equal(exits.length, 1, engine.status.get(market.ticker)!.notes.join(' | '));
+  assert.deepEqual([exits[0].side, exits[0].price, exits[0].count], ['ask', 0.45, 10]);
+  const why = audit.tail(50, 'decision').flatMap((d) => ((d.data as { place?: Array<{ why: string }> }).place ?? []).map((p) => p.why));
+  assert.ok(why.some((w) => /^profit target: \+0\.032 a contract net of fees >= 0\.020/.test(w)), why.join(' | '));
+});
+
+test('an exit never trades against the bot\'s own resting quote (self-trade prevention would cancel it): the quote is pulled first', async () => {
+  const { engine, recon, market, md, oms, audit } = await setup();
+  const r = await recon.run('startup');
+  engine.balance = r!.balance;
+  oms.onFill({ tradeId: 'p2', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.5, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.45, size: 50 }], asks: [{ price: 0.65, size: 50 }] }, Date.now());
+  await engine.tick(); // the new position is evaluated: no exit at a loss of 5c
+  // One of our quotes rests at 0.63, above where the exit will sell.
+  const own = await oms.submit({ ticker: market.ticker, asset: 'BTC', windowCloseTs: market.closeTime, side: 'bid', price: 0.63, count: 2, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, purpose: 'quote', fairValue: 0.55, modelId: 'm', decisionId: 'd' });
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.62, size: 50 }], asks: [{ price: 0.65, size: 50 }] }, Date.now());
+  await engine.tick();
+  const exit = oms.allOrders(500).find((o) => o.ticker === market.ticker && o.reduceOnly);
+  assert.ok(exit, engine.status.get(market.ticker)!.notes.join(' | '));
+  assert.deepEqual([exit.side, exit.price], ['ask', 0.62]);
+  const cancels = audit.tail(200, 'order_cancel_req').map((c) => c.data as { clientOrderId: string; reason: string });
+  assert.ok(cancels.some((c) => c.clientOrderId === own.clientOrderId), `our 0.63 bid was pulled: ${JSON.stringify(cancels)}`);
+  assert.ok(!['ACKED', 'PARTIALLY_FILLED'].includes(oms.get(own.clientOrderId)!.state), oms.get(own.clientOrderId)!.state);
+  const seqOf = (kind: 'order_cancel_req' | 'order_new', pred: (d: Record<string, unknown>) => boolean) => audit.tail(400, kind).find((x) => pred(x.data as Record<string, unknown>))!.seq;
+  assert.ok(seqOf('order_cancel_req', (d) => d.clientOrderId === own.clientOrderId) < seqOf('order_new', (d) => d.clientOrderId === exit.clientOrderId), 'pulled before the exit was sent');
+});
+
 test('vault and pocket are excluded from the tradable bankroll; wins feed the vault', async () => {
   const vault = new Vault({ enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session', dailyGoalUsd: 100 });
   const { engine, recon, oms } = await setup({ vault, monitor: new BalanceMonitor() });
