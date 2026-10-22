@@ -495,6 +495,61 @@ With `VALIDATION_GATES=monitor` (the default) every model that has not passed it
 - **The dashboard** shows each book's results, net, t and state on the Probation row. Every other limit (daily loss stop, drawdown scaling, kill switch, exposure caps, the losing-streak scaler) applies as before.
 - `VALIDATION_GATES=enforce` restores every gate.
 
+### Exit-in-profit curve (`SINUOUS_EXIT`)
+
+Every binary contract the bot holds (15-minute and hourly crypto, tennis) has its order book followed as a smooth curve from the moment the position opens (`bot/strategy/sinuousExit.ts`). When the bot's own exit logic wants to take a profit, the exit goes out only when the curve agrees too:
+- **DEVIATION_SPIKE:** the live micro-price jumped well above the curve (a buying sweep in our favour to sell into), or
+- **SINUOUS_CROSS:** the curve rolled over: it is below where its projection a few seconds ago said it would be, and still falling or flat.
+
+Otherwise the profit exit waits for a later tick. How the curve is built, all in the price of the side held:
+1. **Micro-price:** the top of the book, weighted by size: (bid size × ask + ask size × bid) / (bid size + ask size). A YES ask is 1 − the best NO bid.
+2. **Logit:** ln(p / (1 − p)), so the 0–1 price range becomes unbounded and symmetric.
+3. **Kalman filter:** tracks the curve's level and velocity without moving-average lag. Momentum decays like an Ornstein-Uhlenbeck process.
+4. **Projection:** each tick projects a few seconds ahead with that decaying momentum.
+
+The knobs are set by market and adjusted every tick:
+
+| Market | R (book noise) | κ (momentum decay) | z (spike threshold) | Look-ahead |
+|---|---|---|---|---|
+| Crypto 15m | 0.015 | 0.35 | 1.65 | 3 s |
+| Crypto hourly | 0.030 | 0.15 | 2.10 | 6 s |
+| Tennis | 0.065 | 0.08 | 1.80 | 2 s |
+
+- **Spread:** a wide spread raises R (×5 at 6¢), so book flicker does not read as momentum.
+- **Crypto near the close:**
+  - 60–180 s left: z × 0.75 near 50¢; κ × 0.2 above 85¢;
+  - last minute: z falls toward 1.1 and κ doubles.
+- **Tennis with a live score:**
+  - break point or tiebreak: R halves and z is 1.6;
+  - routine games: κ 0.35, z 1.4.
+
+**What it gates:** take-profits sent to cross the book. That covers:
+- the fair-value exit when it would sell at a profit;
+- the hunt's early profit takes (confluence flipped, unsafe session);
+- the tennis take-profit at the target;
+- the late-match profit;
+- the hunt's confluence-fade and time-limit exits.
+
+**What never waits:**
+- stops;
+- the hunt's trailing stop and a gap through it;
+- the tennis trailing stop once broken;
+- cutting a loser, and the late-match salvage;
+- any exit worth less than `SINUOUS_MIN_PROFIT_CENTS` (1.5¢) a contract after fees;
+- resting take-profit quotes;
+- the final minute's ride to settlement.
+
+Nothing in the existing strategies changed: the engine filters their exit orders.
+
+**The scoreboard** scores each held profit exit when the position finally exits: (exit price then − exit price when first held) × contracts, net of the exit fee; a settlement counts at $1 or $0. The gate is benched, with an alert, under the probation rules: a net cost of `PROBATION_MAX_LOSS_USD`, or after `PROBATION_MIN_TRADES` held exits a negative net with t ≤ −`PROBATION_T`. Benched, profit exits go out without waiting until `POST /api/curve-exit/reset`.
+
+**On the dashboard:**
+- the depth monitor shows a CURVE badge for each held contract: its state, the curve, the projection and z;
+- the Telemetry tab's Exit curve row shows the scoreboard;
+- every hold, release, score and bench is in the audit log (`curve_exit`).
+
+**Modes:** `SINUOUS_EXIT=monitor` shows the curve and notes what it would hold, without holding anything. `off` removes it.
+
 ### Research loop
 
 ```bash

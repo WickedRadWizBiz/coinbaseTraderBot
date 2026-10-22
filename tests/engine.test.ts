@@ -17,8 +17,9 @@ import { Reconciler } from '../bot/recon/reconciler';
 import { openExchange, tmpAudit, tmpDir } from './helpers';
 import { Vault } from '../bot/vault/vault';
 import { BalanceMonitor } from '../bot/vault/balanceMonitor';
+import { SinuousExitGate } from '../bot/strategy/sinuousExit';
 
-async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number } = {}) {
+async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate } = {}) {
   const dir = tmpDir();
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy, STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_ENABLED: 'false', ...opts.env });
   const now = Date.now();
@@ -48,7 +49,7 @@ async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy
   paper.on('fill', (f) => oms.onFill(f));
   paper.on('order', (o) => oms.onExchangeOrder(o));
   const recon = new Reconciler({ gateway: paper, oms, audit, getMarket: rest.getMarket, onPersistentBreak: (r) => void kill.engage(r, 'recon') });
-  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange() });
+  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange(), curveExit: opts.curveExit });
   return { cfg, md, paper, oms, kill, recon, engine, market, audit };
 }
 
@@ -225,6 +226,47 @@ test('opt-in confluence ratchet runs in the engine and starts in fair-value mode
   await engine.tick();
   // No position and no confluence data: normal fair-value behaviour, quotes still placed.
   assert.equal(engine.status.get(market.ticker)!.exitMode, 'fair_value');
+});
+
+test('exit curve: a profitable fair-value exit waits for a spike above the curve', async () => {
+  const curveExit = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
+  const { engine, recon, market, md, oms } = await setup({ curveExit });
+  const r = await recon.run('startup');
+  engine.balance = r!.balance;
+  // Long 10 NO bought at 0.05 (YES sold at 0.95). The model values NO near 0.01 while the market bids it 0.20:
+  // the fair-value exit wants out, at a profit, so it waits for the curve.
+  oms.onFill({ tradeId: 'e1', orderId: '', ticker: market.ticker, side: 'ask', count: 10, price: 0.95, isTaker: true, fee: 0.04, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.78, size: 50 }], asks: [{ price: 0.8, size: 50 }] }, Date.now());
+  const exits = () => oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly);
+  await engine.tick();
+  const st = engine.status.get(market.ticker)!;
+  assert.equal(st.position, -10);
+  assert.equal(exits().length, 0, `held: ${st.notes.join(' | ')}`);
+  assert.equal(st.curve?.signal, false);
+  assert.ok(st.notes.some((n) => /curve: holding the profit exit at 0.2 /.test(n)), st.notes.join(' | '));
+  assert.deepEqual(curveExit.status().holding, [market.ticker]);
+  // A sweep into NO (YES offered heavily lower): the NO micro-price jumps well above the curve, and the exit goes out.
+  await new Promise((res) => setTimeout(res, 20));
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.6, size: 10 }], asks: [{ price: 0.62, size: 500 }] }, Date.now());
+  await engine.tick();
+  const st2 = engine.status.get(market.ticker)!;
+  assert.equal(st2.curve?.reason, 'DEVIATION_SPIKE', JSON.stringify(st2.curve));
+  assert.equal(exits().length, 1, st2.notes.join(' | '));
+  assert.ok(st2.notes.some((n) => /curve DEVIATION_SPIKE: profit exit at 0.38/.test(n)), st2.notes.join(' | '));
+  assert.deepEqual(curveExit.status().holding, []);
+});
+
+test('exit curve: an exit at a loss goes out at once', async () => {
+  const curveExit = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
+  const { engine, recon, market, md, oms } = await setup({ curveExit });
+  const r = await recon.run('startup');
+  engine.balance = r!.balance;
+  // Long 10 NO bought at 0.40; the market bids NO 0.20, still above the model's value: cutting the loser never waits.
+  oms.onFill({ tradeId: 'e2', orderId: '', ticker: market.ticker, side: 'ask', count: 10, price: 0.6, isTaker: true, fee: 0.17, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.78, size: 50 }], asks: [{ price: 0.8, size: 50 }] }, Date.now());
+  await engine.tick();
+  assert.equal(oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly).length, 1, engine.status.get(market.ticker)!.notes.join(' | '));
+  assert.deepEqual(curveExit.status().holding, []);
 });
 
 test('vault and pocket are excluded from the tradable bankroll; wins feed the vault', async () => {

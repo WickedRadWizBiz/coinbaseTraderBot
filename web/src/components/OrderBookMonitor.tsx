@@ -17,6 +17,8 @@ interface MarketRow {
   exitMode?: 'fair_value' | 'hunt';
   huntTarget?: number;
   huntStop?: number;
+  /** Exit-in-profit curve of the held position (bot/strategy/sinuousExit.ts). */
+  curve?: { signal: boolean; reason: string; curve?: number; projected?: number; z?: number; netProfit?: number };
 }
 
 interface Level { price: number; size: number }
@@ -181,6 +183,13 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
                     <span className="px-2 py-0.5 crt-border bg-crypto-success/20 text-crypto-success font-bold flex items-center gap-1.5 text-[11px]">
                       <span className="w-1.5 h-1.5 rounded-full bg-crypto-success animate-pulse" />
                       HUNTING · TARGET {px(tab.huntTarget)} · STOP {tab.huntStop !== undefined ? px(tab.huntStop) : 'FORMING'}
+                    </span>
+                  )}
+                  {tab.curve && tab.position !== 0 && (
+                    <span className={`px-2 py-0.5 crt-border font-bold text-[11px] ${tab.curve.signal ? 'bg-crypto-success/20 text-crypto-success' : 'bg-black/40 text-crypto-primary'}`}
+                      title="Exit-in-profit curve: a profit-taking exit goes out only on a spike above the curve or a roll-over below its projection">
+                      CURVE {tab.curve.signal ? `${tab.curve.reason.replace(/_/g, ' ')} · EXIT OK` : tab.curve.reason.replace(/_/g, ' ')}
+                      {tab.curve.curve !== undefined && ` · ${px(tab.curve.curve)}`}{tab.curve.projected !== undefined && ` → ${px(tab.curve.projected)}`}{tab.curve.z !== undefined && ` · z ${tab.curve.z.toFixed(1)}`}
                     </span>
                   )}
                   {book && !book.usable && !tabClosed && (
