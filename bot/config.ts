@@ -203,6 +203,10 @@ export interface Config {
   /** DASHBOARD_PASSWORD: '' (default) = the dashboard opens without a login. */
   dashboardPassword: string;
   dataDir: string;
+  /** Where the money state lives (orders and positions, vault, break-even, balance history, perps trades, the
+   *  Kalshi check): DATA_DIR in paper, DATA_DIR/live in live, so the paper pool and its positions never show or
+   *  count in live mode, and a switch back to paper finds the paper books as they were. */
+  bookDir: string;
   /** Audit log: a day's file splits into parts at this size; files older than the retention are deleted. */
   auditMaxFileMb: number;
   auditRetentionDays: number;
@@ -984,6 +988,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     port: num(env, 'PORT', 3000, 1, 65535),
     dashboardPassword,
     dataDir,
+    bookDir: mode === 'live' ? path.join(dataDir, 'live') : dataDir,
     auditMaxFileMb: num(env, 'AUDIT_MAX_FILE_MB', 256, 16, 4096),
     auditRetentionDays: num(env, 'AUDIT_RETENTION_DAYS', 30, 0, 3650),
     paramsPath: path.resolve(env.MODEL_PARAMS_PATH ?? './params/model.json'),
@@ -1032,8 +1037,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     playbookApply: bool(env, 'PLAYBOOK_APPLY', true),
     compensatorApply: bool(env, 'COMPENSATOR_APPLY', true),
     perps: (() => {
-      const hedge = oneOf(env, 'PERP_HEDGE', 'paper', ['off', 'paper', 'live'] as const);
-      const trading = oneOf(env, 'PERP_TRADING', 'paper', ['off', 'paper', 'live'] as const);
+      // Live mode never runs a simulated perps pool next to the real money: a paper setting is off there.
+      const noPaperInLive = <T extends string>(v: T): T | 'off' => (mode === 'live' && v === 'paper' ? 'off' : v);
+      const hedge = noPaperInLive(oneOf(env, 'PERP_HEDGE', 'paper', ['off', 'paper', 'live'] as const));
+      const trading = noPaperInLive(oneOf(env, 'PERP_TRADING', 'paper', ['off', 'paper', 'live'] as const));
       // The perps REST API uses the same authentication as event contracts: without a separate perps key
       // the main Kalshi key is used (separate keys are only required for FIX).
       const keyId = env.KALSHI_PERPS_KEY_ID || env.KALSHI_KEY_ID || undefined;

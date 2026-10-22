@@ -96,6 +96,7 @@ async function main(): Promise<void> {
   }
   setBalancePrecision(cfg.kalshiBalancePrecision);
   fs.mkdirSync(cfg.dataDir, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(cfg.bookDir, { recursive: true, mode: 0o700 });
   // A full disk stops the bot at its first write: make room before anything is written (the regular check runs later).
   const startupPruned = cfg.autoTrain.recordingsPrune ? makeRecordingsRoom(path.join(cfg.dataDir, 'recordings'), cfg.autoTrain.recordingsMinFreeGb * 1e9) : [];
   if (startupPruned.length) log.warn('disk full at startup: deleted recorded days', { days: startupPruned });
@@ -196,13 +197,13 @@ async function main(): Promise<void> {
   const gateway: ExchangeGateway = paper ?? rest;
 
   const kill = new KillSwitch(path.join(cfg.dataDir, 'kill_switch.json'), audit, alerter);
-  const oms = new Oms({ gateway, audit, statePath: path.join(cfg.dataDir, 'oms_state.json'), feesFor: (t) => md.feesFor(t), subaccount: cfg.kalshiSubaccount, durableWriteAhead: cfg.mode === 'live' });
+  const oms = new Oms({ gateway, audit, statePath: path.join(cfg.bookDir, 'oms_state.json'), feesFor: (t) => md.feesFor(t), subaccount: cfg.kalshiSubaccount, durableWriteAhead: cfg.mode === 'live' });
   kill.bindCancelAll((reason) => oms.cancelAll(reason));
 
   // Kalshi check: the bot's fills, settlements and cash against Kalshi's own records (bot/recon/kalshiCheck.ts).
   // Listeners go on before the startup reconciliation replays fills.
   const kalshiCheck = new KalshiCheck({
-    file: path.join(cfg.dataDir, 'kalshi_check.json'), source: gateway as CheckSource, audit, alerter,
+    file: path.join(cfg.bookDir, 'kalshi_check.json'), source: gateway as CheckSource, audit, alerter,
     seenTrade: (id) => oms.hasSeenTrade(id), position: (t) => oms.positions.get(t),
   });
   oms.on('fill', (f: ExchangeFill, _rec: unknown, fee: number, positionAfter: number) => kalshiCheck.onBotFill(f, fee, positionAfter));
@@ -217,17 +218,17 @@ async function main(): Promise<void> {
     closeUnknownOrders: cfg.mode !== 'live',
   });
   const risk = new RiskGateway(cfg.risk);
-  const vault = new Vault(cfg.vault, path.join(cfg.dataDir, 'vault.json'));
-  const balanceMonitorPath = path.join(cfg.dataDir, 'balance_monitor.json');
+  const vault = new Vault(cfg.vault, path.join(cfg.bookDir, 'vault.json'));
+  const balanceMonitorPath = path.join(cfg.bookDir, 'balance_monitor.json');
   const balanceMonitor = new BalanceMonitor(readJson<MonitorState>(balanceMonitorPath, { quarantine: true }) ?? {});
   const tca = new Tca(path.join(cfg.dataDir, 'tca'), (t) => md.books.get(t)?.mid());
-  const equityGuard = new EquityGuard({ ddScaleAt: cfg.strategy.ddScaleAt, weeklyLossPause: cfg.strategy.weeklyLossPause, dailyGoalUsd: cfg.vault.dailyGoalUsd }, path.join(cfg.dataDir, 'equity_guard.json'));
+  const equityGuard = new EquityGuard({ ddScaleAt: cfg.strategy.ddScaleAt, weeklyLossPause: cfg.strategy.weeklyLossPause, dailyGoalUsd: cfg.vault.dailyGoalUsd }, path.join(cfg.bookDir, 'equity_guard.json'));
   // Dashboard PLAY / STOP and the paper training override (persisted).
   const control = new RunControl(path.join(cfg.dataDir, 'control.json'));
   // Kill-switch override (paper and live): loss brakes de-risk instead of halting.
   const trainingOverride = () => control.killOverride;
-  const perpsStreak = new StreakScaler(DEFAULT_STREAK, path.join(cfg.dataDir, 'streak_perps.json'));
-  const perpsBreakEven = new BreakEven(path.join(cfg.dataDir, 'perps_break_even.json'));
+  const perpsStreak = new StreakScaler(DEFAULT_STREAK, path.join(cfg.bookDir, 'streak_perps.json'));
+  const perpsBreakEven = new BreakEven(path.join(cfg.bookDir, 'perps_break_even.json'));
   let perpsPaper: PaperPerpExchange | undefined;
   const modelHealth = new ModelHealth({ minWindows: cfg.strategy.modelHealthMinWindows }, path.join(cfg.dataDir, 'model_health.json'));
   const taHealth = new ModelHealth({ minWindows: 1e9 }, path.join(cfg.dataDir, 'ta_health.json'));
@@ -314,7 +315,7 @@ async function main(): Promise<void> {
           dailyLossFrac: P.dailyLossFrac, minEquityUsd: P.minEquityUsd, pilotMaxNotionalUsd: P.pilotMaxNotionalUsd, requireValidation: P.requireValidation, dailyGoalUsd: P.setupDailyGoalUsd,
           liqBuffer: P.liqBuffer, maintMargin: P.maintMargin,
         },
-        hub, gateway: perpGateway, audit, modelPath: () => resolveModelPaths(cfg).setups, statePath: path.join(cfg.dataDir, 'setups_state.json'),
+        hub, gateway: perpGateway, audit, modelPath: () => resolveModelPaths(cfg).setups, statePath: path.join(cfg.bookDir, 'setups_state.json'),
         candles: (asset) => md.features.candles.get(asset),
         spot: (asset, now) => md.spot.get(asset)?.fresh(now, 15_000)?.value ?? md.index.get(asset)?.fresh(now, 15_000)?.value,
         taNet: (asset: string, now: number) => {
