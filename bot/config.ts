@@ -83,7 +83,7 @@ export interface StrategyConfig {
   /** Profit target: sell at the touch once that banks this much a contract (dollars) over what the position cost,
    *  net of the entry's fees and the exit's taker fee, whatever the model thinks the contract is worth. 0 = off. */
   profitTarget: number;
-  /** ...or this fraction of the entry price, when that is more. */
+  /** ...or this fraction of what a contract cost (its price plus the entry fee), when that is more. */
   profitTargetPct: number;
   /** relaxed = decide on each 1-minute bar close or on a trigger (spec cadence); continuous = every tick. */
   cadence: 'relaxed' | 'continuous';
@@ -922,9 +922,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     exitPolicy: oneOf(env, 'EXIT_POLICY', 'confluence_ratchet', ['hold', 'fair_value', 'take_profit', 'confluence_ratchet'] as const),
     exitMargin: num(env, 'STRATEGY_EXIT_MARGIN', 0.01, 0, 0.5),
     takeProfit: num(env, 'STRATEGY_TAKE_PROFIT', 0.08, 0.01, 0.5),
-    // Bank small gains as they come (owner's spec): 2c a contract net of every fee by default.
+    // Bank gains as they come (owner's spec): at least 10% of what the contract cost, and at least 2c, net of every fee.
     profitTarget: num(env, 'PROFIT_TARGET_CENTS', 2, 0, 50) / 100,
-    profitTargetPct: num(env, 'PROFIT_TARGET_PCT', 0, 0, 1),
+    profitTargetPct: num(env, 'PROFIT_TARGET_PCT', 0.10, 0, 1),
     cadence,
     evalBarSec: num(env, 'STRATEGY_EVAL_BAR_SEC', 60, 5, 600),
     evalFvMove: num(env, 'STRATEGY_EVAL_FV_MOVE', 0.015, 0.001, 0.2),
