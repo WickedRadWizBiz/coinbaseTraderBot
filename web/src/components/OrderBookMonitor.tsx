@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Area, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { api, pct, px } from '../api';
+import { everyAligned } from './usePoll';
 
 interface MarketRow {
   ticker: string;
@@ -69,8 +70,8 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
       if (alive) setLoading(false);
     };
     void load();
-    const id = setInterval(load, 3000);
-    return () => { alive = false; clearInterval(id); };
+    const stop = everyAligned(3000, () => void load());
+    return () => { alive = false; stop(); };
   }, [active]);
 
   // Cumulative contract depth (same construction as the original monitor).

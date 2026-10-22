@@ -159,7 +159,7 @@ export default function App() {
       </div>
 
       {unlocked && (
-        <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#121212]/95 backdrop-blur-md border-t border-crypto-primary/50 px-2 py-1.5 flex items-center justify-around shadow-[0_-4px_20px_rgba(0,0,0,0.9)]">
+        <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#121212] border-t border-crypto-primary/50 px-2 py-1.5 flex items-center justify-around shadow-[0_-4px_20px_rgba(0,0,0,0.9)]">
           {NAV.map(({ id, short, Icon }) => (
             <button
               key={id}
