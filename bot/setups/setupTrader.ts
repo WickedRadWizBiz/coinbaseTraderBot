@@ -45,6 +45,7 @@ import { DEFAULT_LANES, LaneBook, type Candidate, type LaneBookParams } from './
 import { SetupModel } from './setupModel';
 import { maintenanceRate, maxSafeNotional, reservedFor, safeShare } from '../risk/liquidation';
 import { macro } from '../macro/macroService';
+import { gatePasses, probation } from '../risk/probation';
 import type { PerpRiskPosition } from '../perps/perpRest';
 
 export interface SetupTraderParams {
@@ -144,6 +145,8 @@ export class SetupTrader {
       const m = fs.statSync(file).mtimeMs + file.length;
       if (m === this.modelMtime) return;
       this.model = SetupModel.load(file);
+      // A new model (not the one loaded at startup) starts a fresh probation for the setups book.
+      if (this.modelMtime !== 0 && probation()?.status().setups.benched) { probation()!.reset('setups'); this.d.audit?.write('probation', { event: 'reset', book: 'setups', reason: `new setup model ${this.model?.params.version}` }); }
       this.modelMtime = m;
       this.modelError = undefined;
       const P = this.d.params.book, M = this.model?.params.book;
@@ -287,6 +290,7 @@ export class SetupTrader {
     }
     const usd = res.ret * (t.notional ?? 0);
     if (this.day) this.day.realized += usd;
+    probation()?.record('setups', usd, now);
     this.history.push({ asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, exit: t.closed?.px ?? NaN, entryTs: t.entryTs, exitTs: t.closed?.ts ?? now, reason: t.closed?.reason ?? 'manual', r: res.r, ret: res.ret, usd, score: t.score });
     this.d.audit?.write('setup_trade', { event: 'closed', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, exit: t.closed?.px, reason: t.closed?.reason, r: res.r, usd });
     this.d.journal?.trade({ ts: now, event: 'closed', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entryTs: t.entryTs, entry: t.entry, exit: t.closed?.px ?? null, reason: t.closed?.reason ?? 'manual', r: res.r, ret: res.ret, usd, score: t.score ?? null });
@@ -334,6 +338,8 @@ export class SetupTrader {
     }
 
     // 2. New setups on newly closed candles.
+    // On probation the setup types the model has not proven are queued and traded too, at the lane's own minimum score.
+    for (const lane of ['fast', 'slow'] as const) this.book.params[lane].unlistedMinScore = this.model && gatePasses('setups', false) ? this.d.params.book[lane].minScore : undefined;
     for (const asset of assets) {
       const set = this.d.candles(asset);
       if (!set) continue;
@@ -381,7 +387,7 @@ export class SetupTrader {
         const px = this.d.spot(cand.sig.asset, now);
         const q = this.d.hub.get(cand.sig.asset)?.latest;
         if (!(px && px > 0) || q?.bid === undefined || q.ask === undefined || q.isOpen === false) return undefined;
-        if (this.d.params.requireValidation && !this.model?.validated(cand.sig.lane)) return undefined;
+        if (this.d.params.requireValidation && !gatePasses('setups', Boolean(this.model?.validated(cand.sig.lane)))) return undefined;
         if (this.snnBlocks(cand.sig)) return undefined;
         const cv = this.conviction(cand.sig.asset, cand.sig.dir, now);
         // Strategy weight: the Compensator's ramp for this setup kind on the coin's Librarian reading
@@ -398,7 +404,8 @@ export class SetupTrader {
       for (const e of entries) {
         const t = openTrade(e.cand.sig, e.px, now, this.d.params.costs);
         if (!t) continue;
-        const pilot = !this.model?.validated(t.lane);
+        // On probation (VALIDATION_GATES=monitor) an unvalidated lane trades at full size.
+        const pilot = !gatePasses('setups', Boolean(this.model?.validated(t.lane)));
         // Liquidation beyond the stop (bot/risk/liquidation.ts): the equity left after the open trades' losses at
         // their stops and their maintenance margin must carry this one to its stop with the buffer to spare. Also at
         // most half the exchange's leverage for the market.

@@ -45,6 +45,7 @@ import { latencySnapshot } from '../util/latency';
 import { cpuProfile } from '../util/profile';
 import { updateEnvFile } from '../util/envFile';
 import { studyFor, studyMeta } from '../ta/study';
+import { probation, PROBATION_BOOKS, type ProbationBook } from '../risk/probation';
 
 export interface ApiDeps {
   kalshiCheck?: KalshiCheck;
@@ -190,6 +191,7 @@ export function createApi(d: ApiDeps): express.Express {
       perps: d.engine.perpStatus(),
       snn: d.engine.snnBrief(),
       treeModels: d.engine.treeModelStatus(),
+      probation: probation()?.status() ?? null,
       autoTrain: d.autoTrain ? (() => { const a = d.autoTrain!.status(); return { mode: a.mode, running: a.running, paused: a.paused, window: a.window, nextRun: a.nextRun, lastExit: a.lastExit, lastSwap: a.swaps[0] ?? null, lastReport: a.lastReport }; })() : null,
       tennis: {
         enabled: d.cfg.tennis.enabled,
@@ -389,6 +391,16 @@ export function createApi(d: ApiDeps): express.Express {
     d.audit.write('config', { event: on ? 'kill_override_on' : 'kill_override_off', by: 'dashboard' });
     await d.training?.tick();
     res.json({ ok: true, run: d.control.status(), training: d.training?.status() ?? null });
+  });
+
+  // Probation (VALIDATION_GATES=monitor, bot/risk/probation.ts): a fresh probation for a benched book.
+  api.post('/probation/reset', (req, res) => {
+    const p = probation(), book = req.body?.book as ProbationBook;
+    if (!p) return res.status(400).json({ error: 'probation not available' });
+    if (!PROBATION_BOOKS.includes(book)) return res.status(400).json({ error: `book must be one of ${PROBATION_BOOKS.join(', ')}` });
+    p.reset(book);
+    d.audit.write('probation', { event: 'reset', book, by: 'dashboard' });
+    res.json({ ok: true, probation: p.status() });
   });
 
   // Waterfall mode (bot/macro/waterfall.ts): arm / disarm. Arming is refused until BTC.D's first close at or below

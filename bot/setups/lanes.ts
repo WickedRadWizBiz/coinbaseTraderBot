@@ -37,6 +37,8 @@ export interface LaneParams {
   /** Per setup type ("1h burst"): its own minimum score; types missing from the map are not traded.
    *  Unset = every type with minScore. */
   minScoreByKind?: Record<string, number>;
+  /** Minimum score for the types missing from minScoreByKind (set while they trade on probation; unset = not traded). */
+  unlistedMinScore?: number;
 }
 
 /** Setup type key ("15m fade", "1d breakout"). */
@@ -44,7 +46,7 @@ export const kindKey = (s: { tf: string; kind: string }) => `${s.tf} ${s.kind}`;
 
 /** Minimum score for a setup in its lane (undefined = this type is not traded). */
 export function minScoreFor(L: LaneParams, s: { tf: string; kind: string }): number | undefined {
-  return L.minScoreByKind ? L.minScoreByKind[kindKey(s)] : L.minScore;
+  return L.minScoreByKind ? L.minScoreByKind[kindKey(s)] ?? L.unlistedMinScore : L.minScore;
 }
 
 export interface LaneBookParams {

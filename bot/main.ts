@@ -67,6 +67,7 @@ import { logger } from './util/log';
 import { RunControl } from './control';
 import { TrainingSupervisor } from './training/supervisor';
 import { SettlementSweeper } from './paper/settlementSweeper';
+import { gatePasses, Probation, setProbation } from './risk/probation';
 import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
 
 const log = logger('main');
@@ -107,6 +108,12 @@ async function main(): Promise<void> {
   if (cfg.alertTelegramToken && cfg.alertTelegramChatId) sinks.push(new TelegramSink(cfg.alertTelegramToken, cfg.alertTelegramChatId));
   if (cfg.alertWebhookUrl) sinks.push(new WebhookSink(cfg.alertWebhookUrl));
   const alerter = new Alerter(sinks, audit);
+  // Probation (VALIDATION_GATES=monitor): unvalidated models trade, and a book whose results are unacceptable is benched.
+  setProbation(new Probation(cfg.probation, path.join(cfg.bookDir, 'probation.json'), (book, reason) => {
+    audit.write('probation', { event: 'benched', book, reason });
+    alerter.notify('warn', `probation-${book}`, `Probation: ${book} benched (its unvalidated models stop trading until the next model or a reset): ${reason}`);
+  }));
+  if (cfg.probation.mode === 'monitor') log.info('validation gates: monitor (unvalidated models trade on probation)', { ...cfg.probation });
 
   // Model: frozen, versioned, validated offline. Identity (pure fair value) if no file. The
   // automated pipeline's promoted copies (AUTO_TRAIN_DIR) win over params/ and are hot-swapped.
@@ -120,7 +127,8 @@ async function main(): Promise<void> {
     model = MetaModel.identity();
   }
   if (cfg.mode === 'live') {
-    const blockers = cfg.liveAllowUnvalidated ? [] : model.liveBlockers();
+    const blockers = cfg.liveAllowUnvalidated || gatePasses('kalshi', false) ? [] : model.liveBlockers();
+    if (!cfg.liveAllowUnvalidated && gatePasses('kalshi', false) && model.liveBlockers().length) log.warn(`VALIDATION_GATES=monitor: trading binary contracts live with model ${model.id} on probation although it is not validated (${model.liveBlockers().join('; ')})`);
     if (cfg.liveAllowUnvalidated && model.liveBlockers().length) log.warn(`LIVE_ALLOW_UNVALIDATED_MODEL=true: trading binary contracts live with model ${model.id} although it is not validated (${model.liveBlockers().join('; ')})`);
     // Other live books (perps, tennis) run on their own gates; the risk gateway keeps rejecting every
     // binary crypto order while the model is unvalidated, so the process only refuses to start when
@@ -245,7 +253,7 @@ async function main(): Promise<void> {
       const rb = cfg.strategy.ruleBook ? activeRuleBook()?.read(candles?.snapshot(now, marketContext()?.macro()), 24, marketContext()?.character(asset)?.cls) : undefined;
       // The coin's evolved formula (validated only in live mode).
       const g = cfg.strategy.gp ? activeGpSignals()?.read(asset, (a) => md.features.candles.get(a)?.bars['1h']) : undefined;
-      const gp = g?.speaks && (g.validated || cfg.mode !== 'live') ? g : undefined;
+      const gp = g && (g.validated || (g.speaks && cfg.mode !== 'live') || gatePasses('setups', false)) ? g : undefined;
       c = { ts: now, f, v, rb, gp };
       convCache.set(asset, c);
     }

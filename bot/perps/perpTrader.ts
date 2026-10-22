@@ -29,6 +29,7 @@ import type { PerpHub } from './perpData';
 import type { PerpGateway } from './perpRest';
 import { perpFeatures, priorMuBps, type PerpFeatureSources, type PerpModel } from './perpSignal';
 import { liquidationLeverageCap, maintenanceRate } from '../risk/liquidation';
+import { gatePasses, probation } from '../risk/probation';
 
 export interface PerpTraderParams {
   /** Liquidation beyond the stop (bot/risk/liquidation.ts): buffer and maintenance margin rate (0 / unset = from
@@ -173,6 +174,8 @@ export class PerpTrader {
   private dayHalt?: string;
   private readonly cooldownUntil = new Map<string, number>();
   private readonly heldSince = new Map<string, number>();
+  /** Margin equity when each position opened (its probation result at close). */
+  private readonly equityAtOpen = new Map<string, number>();
   private readonly lastDir = new Map<string, number>();
   /** Features are recomputed at most every featureEverySec per asset (they move on minute bars). */
   private readonly featCache = new Map<string, { ts: number; f: Record<string, number>; sigma1m?: number; atrFrac?: number }>();
@@ -217,7 +220,13 @@ export class PerpTrader {
       const px = s.price(now, 60_000);
       // Track hold time and detect exchange-side stop-outs (position vanished while we wanted it).
       const prev = this.lastDir.get(ticker) ?? 0;
-      if (current !== 0 && Math.sign(current) !== Math.sign(prev)) this.heldSince.set(ticker, now);
+      // A closed (or flipped) position is one probation result: the margin equity's change while it was open, funding
+      // and fees in (other open positions move it too: an approximation, per asset).
+      if (prev !== 0 && Math.sign(current) !== Math.sign(prev) && this.equityAtOpen.has(ticker)) {
+        if (equity !== undefined) probation()?.record('perps', equity - this.equityAtOpen.get(ticker)!, now);
+        this.equityAtOpen.delete(ticker);
+      }
+      if (current !== 0 && Math.sign(current) !== Math.sign(prev)) { this.heldSince.set(ticker, now); if (equity !== undefined) this.equityAtOpen.set(ticker, equity); }
       if (current === 0) this.heldSince.delete(ticker);
       const last = this.lastDecisions.get(ticker);
       if (prev !== 0 && current === 0 && last && last.target !== 0 && Math.sign(last.target) === Math.sign(prev)) {
@@ -237,7 +246,8 @@ export class PerpTrader {
       const { f, sigma1m, atrFrac } = fc;
       const sigmaHBps = sigma1m ? sigma1m * Math.sqrt(P.horizonMin) * 1e4 : atrFrac ? atrFrac * Math.sqrt(P.horizonMin / 60) * 1e4 : undefined;
       const model = this.d.model;
-      const validated = Boolean(model?.validated());
+      // On probation (VALIDATION_GATES=monitor) an unvalidated model trades at full size; the prior stays at pilot size.
+      const validated = Boolean(model && gatePasses('perps', model.validated()));
       let muBps: number | undefined, source: 'model' | 'prior' | 'none' = 'none', sig = sigmaHBps;
       if (model) {
         const pr = model.predict(f);

@@ -35,6 +35,7 @@ import { FillModel } from './tca/fillModel';
 import { TennisFairModel } from './tennis/tennisFair';
 import { nextSessionEdge, nextWeekendMidnight, sessionEdge, weekendTraining } from './model/sessions';
 import { activeTaNet, setTaNet, TaNet, taNetFileSchema, TANET_SCHEMA } from './ta/taNet';
+import { probation } from './risk/probation';
 import { logger } from './util/log';
 import { SystemPressure } from './util/systemPressure';
 
@@ -287,6 +288,12 @@ export class AutoTrainer {
   private record(kind: string, detail: string): void {
     this.swaps.unshift({ kind, ts: this.now, detail });
     this.swaps.length = Math.min(this.swaps.length, 20);
+    // A new model for a book starts a fresh probation (VALIDATION_GATES=monitor: bot/risk/probation.ts).
+    const book = ({ mlp: 'kalshi', fill: 'kalshi', perp: 'perps', tennis: 'tennis' } as const)[kind as 'mlp'];
+    if (book && probation()?.status()[book].benched) {
+      probation()!.reset(book, this.now);
+      this.d.audit.write('probation', { event: 'reset', book, reason: `new ${kind} model: ${detail}` });
+    }
   }
 
   private async swap(kind: Kind, file: string): Promise<void> {

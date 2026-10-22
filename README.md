@@ -116,9 +116,10 @@ In the final minute, open positions ride to settlement.
 - **Taker entries** need at least 5¢ of net edge after the taker fee.
 - **Model exit.** Sell at the bid only when the bid minus the taker fee exceeds q_adj + 1¢.
 - **`EXIT_POLICY`:**
-  - `hold` (Mode A, the default) has no exit fee.
+  - `confluence_ratchet` (the default) sells for profit with the model exit, and lets a winner run on the order-book ratchet (below) while confluence agrees.
+  - `fair_value` is the model exit alone.
   - `take_profit` (Mode B) rests a maker take-profit at entry + 8¢. It never offers below what the model thinks the position is worth.
-  - `fair_value` and `confluence_ratchet` work as before.
+  - `hold` (Mode A) rides every contract to settlement: no exit fee, and no selling for profit.
 
 **Sizing (`STRATEGY_SIZING=target_ev`).**
 - The decision probability is `q_adj = p_mkt_cal + κ(p_model − p_mkt_cal)`, with κ = 0.5. It shrinks the model toward the market after the market's own favourite-longshot bias has been removed.
@@ -479,8 +480,18 @@ npm run dev              # paper mode by default
   - `TRADING_MODE=live`
   - `KALSHI_ENV=prod`
   - `LIVE_TRADING_ACKNOWLEDGED=I_ACCEPT_REAL_MONEY_RISK`
-  - a validated `params/model.json`, unless `LIVE_ALLOW_UNVALIDATED_MODEL=true` (trade anyway, at your risk)
+  - a validated `params/model.json`, unless the model trades on probation (`VALIDATION_GATES=monitor`, the default, below) or `LIVE_ALLOW_UNVALIDATED_MODEL=true` (trade anyway, at your risk)
   - step by step, for both APIs: docs/DEPLOY.md, "Connecting the prediction and perps APIs"
+
+### Probation: unvalidated models trade, and their results decide (`VALIDATION_GATES`)
+
+With `VALIDATION_GATES=monitor` (the default) every model that has not passed its validation trades as soon as it exists, on probation (`bot/risk/probation.ts`):
+- **What opens:** the Kalshi MLP's go-live gates, the take/skip head, the fill model, hunt mode in live, the perps model's full size, the setup types the setup model has not proven (traded at the lane's own minimum score), the setup lanes' full size, the tennis model, and the evolved GP formulas in live.
+- **What stays gated:** inputs to other models (the TA network's heads, the Librarian, the cross-asset graph and leads, the vol forecast's sigma multiplier). The models that read them were trained with those gates, so opening them only in live would feed those models numbers they never saw.
+- **How it is judged:** each book (`kalshi`, `perps`, `setups`, `tennis`) counts its realized results: every settled Kalshi market, closed setup trade, closed perps position and settled tennis market. The book is benched, with an alert, when its net loss reaches `PROBATION_MAX_LOSS_USD` ($25), or when after `PROBATION_MIN_TRADES` (20) results it is losing with t ≤ −`PROBATION_T` (−1), more than luck explains. Only the last `PROBATION_WINDOW` (200) results count.
+- **Benched:** the book's unvalidated parts go back behind their gates; validated parts keep trading. A new model for the book (the trainer's next promotion) or `POST /api/probation/reset {book}` starts a fresh probation.
+- **The dashboard** shows each book's results, net, t and state on the Probation row. Every other limit (daily loss stop, drawdown scaling, kill switch, exposure caps, the losing-streak scaler) applies as before.
+- `VALIDATION_GATES=enforce` restores every gate.
 
 ### Research loop
 
@@ -516,7 +527,7 @@ The backtest mirrors the engine: cadence-gated entries, entry windows, target-EV
   - A gap through the stop sells at the bid while that is still above the entry fair value. Below it, hunt mode ends and the fair-value exit takes over.
   - **Evaluated in research.** `research:backtest` runs hunt mode over a grid of target margins (`--hunt-grid`, default 1/2/4¢) and wall fill ratios (`--ratchet-fill-grid`, default 1×/2×). Every variant counts toward the Deflated Sharpe. The best variant is compared with the fair-value exit window by window, and `--annotate` writes the result into the model file as `validation.exitEvaluation`. `huntOk` requires at least 300 windows, a paired bootstrap CI lower bound above 0, and a deflated probability above 0.95.
   - With a passing evaluation the engine uses the winning parameters. In live mode an unevaluated or losing hunt mode falls back to the fair-value exit, and the dashboard says so.
-  - It is available as the opt-in `EXIT_POLICY=confluence_ratchet`, and the dashboard shows HUNTING with the target and stop.
+  - It is the default (`EXIT_POLICY=confluence_ratchet`), and the dashboard shows HUNTING with the target and stop.
 
 Every exit executes one tick after it triggers. The exit policy governs all active reductions, so taker entries against a position are blocked under hold and ratchet. The diagnostics report:
 - exit regret: settlement value of the exited contracts minus exit proceeds

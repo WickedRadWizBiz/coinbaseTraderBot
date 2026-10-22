@@ -13,6 +13,7 @@ import type { DenseLayer } from './metaModel';
 import { gbdtLogit, type GbdtModel } from './trees';
 import { gatedPredict, type GatedExperts } from './gatedExperts';
 import type { OrderPlan } from '../strategy/fairValueStrategy';
+import { gatePasses } from '../risk/probation';
 
 export const TAKE_FEATURES = ['edge', 'logit_p_side', 'price_side', 'spread', 'tau_min', 'snn_up_side', 'snn_bias_side', 'snn_agree_side', 'p_std', 'snn_skill_h', 'snn_cal_h'] as const;
 /** Index of logit_p_side: the tree candidate learns a residual on the fair-value probability. */
@@ -106,7 +107,7 @@ export interface TakeGateCtx { pYes: number; features: Record<string, number>; t
 
 /** Drop entry orders the take model says to skip. Exits and reduce-only orders always pass. */
 export function applyTakeGate(plan: { place: OrderPlan[]; notes: string[] }, take: TakeModelParams | undefined, c: TakeGateCtx): number {
-  if (!take?.validation.validated) return 0;
+  if (!take || !gatePasses('kalshi', take.validation.validated)) return 0;
   let skipped = 0;
   plan.place = plan.place.filter((o) => {
     if (o.reduceOnly || o.purpose === 'exit') return true;

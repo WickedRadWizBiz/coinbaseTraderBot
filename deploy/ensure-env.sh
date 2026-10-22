@@ -31,6 +31,8 @@ grep -q '^DASHBOARD_TOKEN=' "$ENV" && edit_env '^DASHBOARD_TOKEN=' && echo "remo
 for old in windows background; do
   if grep -qx "AUTO_TRAIN=$old" "$ENV"; then edit_env "^AUTO_TRAIN=$old\$" 'AUTO_TRAIN=remote'; echo "AUTO_TRAIN: $old -> remote in $ENV"; fi
 done
+# The old default exit (hold: every contract rode to settlement, never sold for profit) becomes the ratchet exit.
+if grep -qx 'EXIT_POLICY=hold' "$ENV"; then edit_env '^EXIT_POLICY=hold$' 'EXIT_POLICY=confluence_ratchet'; echo "EXIT_POLICY: hold -> confluence_ratchet in $ENV"; fi
 if grep -qx 'CATALOG_STRIKES_PER_EVENT=8' "$ENV"; then edit_env '^CATALOG_STRIKES_PER_EVENT=8$' 'CATALOG_STRIKES_PER_EVENT=4'; echo "CATALOG_STRIKES_PER_EVENT: 8 -> 4 in $ENV"; fi
 if [ -n "${DASHBOARD_PASSWORD:-}" ] && ! grep -qxF "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD" "$ENV"; then
   edit_env '^DASHBOARD_PASSWORD=' "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD"
