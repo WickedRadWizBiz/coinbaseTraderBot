@@ -22,7 +22,8 @@ def hour(ts_iso):
 
 files = sorted(f for f in glob.glob(os.path.join(data, 'audit', 'audit-*.jsonl')) if os.path.basename(f)[6:16] >= since_day)
 fills, settles, orders, starts, other = [], [], {}, [], collections.Counter()
-want = ('"kind":"fill"', '"kind":"settlement"', '"kind":"order_new"', '"kind":"startup"', '"kind":"training"', '"kind":"kill_')
+want = ('"kind":"fill"', '"kind":"settlement"', '"kind":"order_new"', '"kind":"startup"', '"kind":"training"', '"kind":"kill_', '"kind":"risk_reject"')
+rate_rejects = collections.Counter()
 for f in files:
     with open(f, 'rb') as fh:
         for raw in fh:
@@ -40,6 +41,9 @@ for f in files:
                 orders[d.get('clientOrderId')] = {'ts': ts, 'purpose': d.get('purpose'), 'fv': d.get('fairValue'), 'price': d.get('price'), 'side': d.get('side'), 'count': d.get('count'), 'ticker': d.get('ticker', ''), 'tif': d.get('timeInForce'), 'post': d.get('postOnly'), 'decision': d.get('decisionId')}
             elif k == 'startup':
                 starts.append(ts)
+            elif k == 'risk_reject':
+                rs = d.get('reasons') or []
+                if any('order rate' in str(x) for x in rs): rate_rejects[((d.get('intent') or {}).get('purpose') or '?', ts[:13])] += 1
             else:
                 ev = d.get('event') if isinstance(d, dict) else None
                 other[f"{k}:{ev}"] += 1
@@ -93,6 +97,21 @@ for h in sorted(fh_)[-30:]:
     cost = sum((f['price'] if f['side'] == 'bid' else 1 - f['price']) * f['count'] for f in L)
     edges = [((o['fv'] - f['price']) if f['side'] == 'bid' else (f['price'] - o['fv'])) for f in L for o in [orders.get(f['coid'])] if o and o.get('fv') is not None]
     print(f"{h}  n={len(L):3d}  contracts={sum(f['count'] for f in L):7.1f}  cost=${cost:7.2f}  taker={100*sum(1 for f in L if f['taker'])/max(1,len(L)):3.0f}%  edge={sum(edges)/max(1,len(edges)):+.4f}")
+
+# Order traffic: the risk gateway allows RISK_MAX_ORDERS_PER_MIN (30) submissions a minute; new risk stops short of
+# that so exits always have room. Rejections are audited at most once a minute per market, side and purpose.
+print('\n== order submissions per minute, last 24 h (minutes with at least one order): p50 / p90 / p99 / max, by purpose')
+cut = time.strftime('%Y-%m-%dT%H:%M', time.gmtime(now - 86400))
+pm = collections.defaultdict(collections.Counter)
+for o in orders.values():
+    if o['ts'][:16] >= cut: pm[o['ts'][:16]][o['purpose'] or '?'] += 1
+def pct(xs, q): return sorted(xs)[min(len(xs) - 1, int(q * len(xs)))] if xs else 0
+tot = [sum(c.values()) for c in pm.values()]
+print(f"  all: minutes {len(tot)}  p50 {pct(tot, .5)}  p90 {pct(tot, .9)}  p99 {pct(tot, .99)}  max {max(tot, default=0)}  minutes >= 24: {sum(1 for x in tot if x >= 24)}  >= 30: {sum(1 for x in tot if x >= 30)}")
+for pu in sorted({k for c in pm.values() for k in c}):
+    xs = [c[pu] for c in pm.values() if c[pu]]
+    print(f"  {pu}: orders {sum(xs)}  p50 {pct(xs, .5)}  p90 {pct(xs, .9)}  max {max(xs, default=0)}")
+print('  order-rate rejections (audited, by purpose):', dict(collections.Counter(k[0] for k in rate_rejects.elements())) or 'none')
 
 # Worst settlements in the last day
 print('\n== 25 worst settlements in the last 24 h')

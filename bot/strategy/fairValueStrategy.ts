@@ -3,7 +3,11 @@
 //     q, fee-free on series with a zero maker multiplier, skewed against
 //     inventory, pulled on fast index moves and outside the entry window.
 //     Relaxed spec: bid at floor(q_adj - e_min - buffer), where the buffer is
-//     the adverse-selection haircut measured from 60 s markouts.
+//     the adverse-selection haircut measured from 60 s markouts. A quote sizing
+//     wants is at least minQuoteContracts (within the per-order caps and the
+//     risk room left): Kalshi rounds each order's fee up to the cent, so a small
+//     position pays more a contract to sell. A quote due to expire on the
+//     exchange is placed again.
 //  2. TAKER (optional): cross only when q beats the touch by the taker fee
 //     plus minEdge plus takerBuffer (5c in the relaxed spec), then hold.
 //  3. EXIT: never a percentage stop. Profit target: sell at the bid as soon as
@@ -26,12 +30,14 @@ import { orderFee, type FeeSchedule } from '../fees';
 import type { BookSide, TimeInForce } from '../kalshi/types';
 import type { OrderPurpose } from '../oms/orderState';
 import { evThresholds, kellySize, targetEvSize } from '../sizing/kelly';
-import { ceilToTick, floorToTick, round } from '../util/num';
+import { ceilToTick, floorCount, floorToTick, round } from '../util/num';
 
 export interface RestingQuote {
   clientOrderId: string;
   price: number;
   remaining: number;
+  /** When the exchange expires it (unix seconds). */
+  expiresSec?: number;
 }
 
 export interface MarketView {
@@ -43,6 +49,9 @@ export interface MarketView {
   bankroll: number;
   /** Remaining room under the per-order risk cap (dollars). */
   maxOrderRiskUsd: number;
+  /** Risk room left under the window and total caps and in free cash (dollars): a quote is only raised to the
+   *  minimum size inside it. Unbounded when not given. */
+  newRiskRoomUsd?: number;
   maxContracts: number;
   minSidePrice: number;
   tauSec: number;
@@ -120,6 +129,14 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     }
     return kellySize({ q: side === 'yes' ? q : 1 - q, cost, feePerContract: fee, bankroll: v.bankroll, kellyFraction: cfg.kellyFraction, maxRiskUsd: v.maxOrderRiskUsd, maxContracts });
   };
+  // A maker quote sizing wants (contracts > 0) is at least minQuoteContracts, as far as the per-order caps and the risk
+  // room left allow; never smaller than sizing asked for.
+  const quoteSize = (contracts: number, cost: number, fee: number) => {
+    const min = cfg.minQuoteContracts ?? 0;
+    if (!(contracts > 0) || contracts >= min) return contracts;
+    const room = Math.min(v.maxOrderRiskUsd, v.newRiskRoomUsd ?? Infinity);
+    return Math.max(contracts, floorCount(Math.min(min, v.maxContracts, room / (cost + fee))));
+  };
 
   // ---- Exits (risk-reducing, allowed in every style) ------------------------
   const exitWindow = v.exitWindowOpen !== false;
@@ -180,7 +197,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
       const fee = orderFee(1, bp, false, v.fees);
       const k = size('yes', bp, fee, v.maxContracts);
       const unwind = Math.max(0, -v.position);
-      const count = round(Math.min(v.maxContracts, k.contracts + unwind), 2);
+      const count = round(Math.min(v.maxContracts, quoteSize(k.contracts, bp, fee) + unwind), 2);
       if (count > 0) desiredBid = { side: 'bid', price: bp, count, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, purpose: 'quote', expirationTime: expiry, edge: q - bp - fee, why: 'maker bid' };
     }
     // YES ask (= NO bid at 1 - ap).
@@ -191,7 +208,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
       const fee = orderFee(1, noCost, false, v.fees);
       const k = size('no', noCost, fee, v.maxContracts);
       const unwind = Math.max(0, v.position);
-      const count = round(Math.min(v.maxContracts, k.contracts + unwind), 2);
+      const count = round(Math.min(v.maxContracts, quoteSize(k.contracts, noCost, fee) + unwind), 2);
       if (count > 0) desiredAsk = { side: 'ask', price: ap, count, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, purpose: 'quote', expirationTime: expiry, edge: (1 - q) - noCost - fee, why: 'maker ask' };
     }
   }
@@ -216,8 +233,8 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     if (v.position > 0) desiredAsk = undefined;
     if (v.position < 0) desiredBid = undefined;
   }
-  reconcileQuote(v.restingBid, desiredBid, cfg.requoteThreshold, out);
-  reconcileQuote(v.restingAsk, desiredAsk, cfg.requoteThreshold, out);
+  reconcileQuote(v.restingBid, desiredBid, cfg.requoteThreshold, v.nowSec, out);
+  reconcileQuote(v.restingAsk, desiredAsk, cfg.requoteThreshold, v.nowSec, out);
 
   // ---- Selective taking -------------------------------------------------------
   if ((cfg.style === 'taker' || cfg.style === 'both') && newRisk && !v.fastMove && out.place.every((p) => p.purpose !== 'exit')) {
@@ -250,7 +267,10 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
   return out;
 }
 
-function reconcileQuote(resting: RestingQuote | undefined, desired: OrderPlan | undefined, threshold: number, out: StrategyOutput): void {
+/** A resting quote this close to its exchange expiry (seconds) is replaced rather than left to lapse. */
+const EXPIRY_LEAD_SEC = 1;
+
+function reconcileQuote(resting: RestingQuote | undefined, desired: OrderPlan | undefined, threshold: number, nowSec: number, out: StrategyOutput): void {
   if (resting && !desired) {
     out.cancel.push({ clientOrderId: resting.clientOrderId, reason: 'quote no longer wanted' });
     return;
@@ -263,8 +283,10 @@ function reconcileQuote(resting: RestingQuote | undefined, desired: OrderPlan | 
   const moved = Math.abs(resting.price - desired.price) >= threshold - 1e-9;
   // Only requote size when it shrinks materially (never chase size up and lose queue priority).
   const shrink = desired.count < resting.remaining * 0.5;
-  if (moved || shrink) {
-    out.cancel.push({ clientOrderId: resting.clientOrderId, reason: moved ? `requote ${resting.price} -> ${desired.price}` : 'size shrink' });
+  // A quote at its exchange expiry is placed again, when the replacement would outlive it (not at the close, where both end together).
+  const expiring = resting.expiresSec !== undefined && resting.expiresSec - nowSec <= EXPIRY_LEAD_SEC && (desired.expirationTime ?? Infinity) > resting.expiresSec;
+  if (moved || shrink || expiring) {
+    out.cancel.push({ clientOrderId: resting.clientOrderId, reason: moved ? `requote ${resting.price} -> ${desired.price}` : shrink ? 'size shrink' : 'quote expiring' });
     out.place.push(desired);
   }
 }

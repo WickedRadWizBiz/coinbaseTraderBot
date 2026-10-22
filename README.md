@@ -103,16 +103,24 @@ v3 implements *Institutional-Grade ML Trading for Kalshi Crypto Binaries and Per
 - the book moves through a resting quote
 - a fill changes the position, so a take-profit rests at once
 - the entry window opens or closes
-- a resting quote is due for its 30-second re-price
+- a resting quote is due for its 10-second re-price (`STRATEGY_REPRICE_SEC`), or the quote the last decision saw has gone since (expired, filled or pulled), so a quote still wanted comes back without waiting for the next bar
 
 Decisions are never closer than 10 seconds apart. Exits are checked every tick. Entry windows:
-- 15-minute Up/Down: from 14 down to 2 minutes before close. The final minutes are a latency race.
-- Hourly strikes: from 55 down to 5 minutes before close, and only while the mid is between 10¢ and 90¢.
+- 15-minute Up/Down: from 14 down to 5 minutes before close (`ENTRY_WINDOW_15M=840,300`).
+- Hourly strikes: from 55 down to 10 minutes before close (`ENTRY_WINDOW_HOURLY=3300,600`), and only while the mid is between 10¢ and 90¢.
 
-In the final minute, open positions ride to settlement.
+Entries stop well before the close so a position has time to reach its profit target: in the final minute, open positions ride to settlement.
+
+**Fresh quotes.** A stale resting bid is the one that gets picked off, so quotes are kept close to the current price:
+- re-priced every 10 seconds (`STRATEGY_REPRICE_SEC`), moved when the price they should sit at changes by 1¢;
+- pulled when the index moves more than 2 sigmas in 5 seconds (`STRATEGY_FAST_MOVE_SIGMAS=2`);
+- gone from the exchange 60 seconds after they were placed (`STRATEGY_ORDER_TTL_SEC`, the dead-man switch if the bot stops). A quote still wanted is placed again when it expires.
+
+Every placement and re-price is an order. The risk gateway allows `RISK_MAX_ORDERS_PER_MIN` (30) a minute, and new risk stops at 80% of that (24) so the rest is always there for exits. Before that reserve, a busy minute could use all 30 on quotes and refuse an exit. Server diagnostics with the P&L report show orders per minute by purpose and how often the limit refused one. On Oct 20–22 the limit was reached in busy minutes, which is why quotes keep a 60-second life: a shorter one spends the minute's budget re-placing quotes that have not changed.
 
 **Entries and exits.**
-- **Maker entries** bid at `floor(q_adj − e_min − buffer)`, with e_min = 3¢. The adverse-selection buffer is estimated from 60-second maker markouts and clamped to 0.5–1.5¢.
+- **Maker entries** bid at `floor(q_adj − e_min − buffer)`, with e_min = 3¢. The adverse-selection buffer is the measured move against the bot a minute after its maker fills (60-second markouts), clamped to 1.5–3¢ (`STRATEGY_MAKER_BUFFER_RANGE`; 2¢ until 30 maker fills exist). Fewer fills, but they start closer to break-even.
+- **Minimum quote size (`STRATEGY_MIN_QUOTE_CONTRACTS`, default 3).** A maker quote that sizing wants is at least 3 contracts, as far as the per-order cap and the risk left under the window and total caps and in free cash allow (never smaller than sizing asked for, and never a quote sizing didn't want). Kalshi rounds each order's fee up to the cent, so selling a 0.4-contract position costs about 2.5¢ a contract against 2¢ for 3 contracts.
 - **Taker entries** need at least 5¢ of net edge after the taker fee.
 - **Profit target (`PROFIT_TARGET_PCT`, default 0.10, and `PROFIT_TARGET_CENTS`, default 2).** Sell at the touch as soon as the gain is at least 10% of what a contract cost (its price plus the entry fee) and at least 2¢ a contract, whatever the model thinks the contract is worth. Bought at 40¢, that is about +4¢ net; bought at 80¢, about +8¢. The gain is counted net of every fee: those paid on the entry, plus this exit's taker fee. Setting both to 0 turns the target off. Small gains are banked as they come and the cash goes back into new entries. Before this, a winner was only sold when the market paid more than the model's own value, so a contract the model still liked rode to settlement however far it was in profit. Like every profit-taking exit it goes through the exit-in-profit curve (`SINUOUS_EXIT`): it waits for a spike or a roll-over, never below the curve's profit floor. In the final minute, and while a hunt's trailing stop runs a winner, the target does not apply.
 - **Fees.** Kalshi's quoted prices exclude fees. The taker fee is 0.07 × C × P × (1 − P), the maker fee 0.0175 × C × P × (1 − P) on series that charge one, and each order's fee is rounded up to the cent (a hundredth of a cent for direct members). The bot prices every entry and exit net of them (`bot/fees.ts`); Kalshi's own `fee_cost` on each fill is booked when it is reported.
@@ -330,7 +338,7 @@ Promoted models land in `data/models/`, and the running bot hot-swaps them witho
 A new network retrains only the model that reads it, including when you swap one in by hand. The blend history is saved across restarts and cleared when the MLP changes.
 
 **Tree models.** Gradient-boosted trees (`research/gbdt.ts`, logistic or squared loss, missing values routed natively) fill three gaps:
-- **Vol forecast** (`bot/model/volModel.ts`): predicts how far realised volatility over a contract's remaining life will differ from the backward-looking EWMA, and multiplies fair value's sigma by it (clamped to 0.5–2×). Applied only after its held-out QLIKE check passes (`VOL_MODEL`).
+- **Vol forecast** (`bot/model/volModel.ts`): predicts how far realised volatility over a contract's remaining life will differ from the backward-looking EWMA, and multiplies fair value's sigma by it (clamped to 0.5–2×). Applied only after its held-out QLIKE check passes (`VOL_MODEL`). Until then fair value's sigma is multiplied by `VOL_FALLBACK_MULT` (1.15; 1 = off): the 5-minute EWMA lags, and on the live Oct 20–22 log loss 1.15 scored best overall (1.3 helped on Oct 21–22 but hurt Oct 20). The backtester does the same. `guards.volFallbackMult` in `/api/status` shows it while it applies.
 - **Fill / adverse-selection model** (`bot/tca/fillModel.ts`): from the bot's own logged maker quotes, P(fill within 60 s) and the expected markout given a fill. Per maker entry the bot then quotes, crosses or skips by expected value. It brings itself online: it collects quotes from day one, trains once 500 quotes / 100 fills exist, and is promoted and used only after it beats the base rate on held-out days.
 - **Candidates** for the take/skip head, the perps model and the tennis model, compared with the existing MLP / ridge on the same validation data; the better one is kept.
 

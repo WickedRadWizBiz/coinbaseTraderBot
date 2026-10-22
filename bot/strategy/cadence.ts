@@ -2,7 +2,9 @@
 // are decided on each 1-minute bar close of the index, or earlier when fair
 // value moves >= evalFvMove since the last evaluation, the book moves through
 // a resting quote, the entry window opens/closes, or a resting quote is due
-// for its re-price. Never more than once per contract per minIntervalSec
+// for its re-price (also when the quote the last evaluation saw has gone since:
+// expired on the exchange, filled or pulled, so a quote still wanted is placed
+// again without waiting for the next bar). Never more than once per contract per minIntervalSec
 // (except when the entry window closes, which must pull quotes at once).
 // Exits are checked every tick regardless: a cadence is for entries, not for
 // risk reduction. Shared by the engine and the backtester.
@@ -29,7 +31,7 @@ export interface CadenceInput {
 
 export type CadenceReason = 'first' | 'bar' | 'fv_move' | 'window' | 'position' | 'book' | 'reprice' | 'continuous';
 
-interface Last { ts: number; fv: number; bar: number; window: boolean }
+interface Last { ts: number; fv: number; bar: number; window: boolean; resting: boolean }
 
 export class CadenceGate {
   private readonly last = new Map<string, Last>();
@@ -48,10 +50,10 @@ export class CadenceGate {
       if (bar > l.bar) return 'bar';
       if (Math.abs(i.fairValue - l.fv) >= this.p.evalFvMove - 1e-12) return 'fv_move';
       if (i.bookThroughQuote) return 'book';
-      if (i.hasResting && i.now - l.ts >= this.p.repriceSec * 1000) return 'reprice';
+      if ((i.hasResting || l.resting) && i.now - l.ts >= this.p.repriceSec * 1000) return 'reprice';
       return undefined;
     })();
-    if (reason) this.last.set(ticker, { ts: i.now, fv: i.fairValue, bar, window: i.entryWindowOpen });
+    if (reason) this.last.set(ticker, { ts: i.now, fv: i.fairValue, bar, window: i.entryWindowOpen, resting: i.hasResting });
     return reason;
   }
 

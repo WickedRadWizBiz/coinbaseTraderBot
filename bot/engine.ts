@@ -862,7 +862,9 @@ export class Engine {
       minTradableBankrollUsd: S.minTradableBankrollUsd,
       tier: { ...t, orderRiskUsd: +(t.orderFrac * b).toFixed(2), dailyLossLimitUsd: +this.d.risk.dailyLossLimit(b, this.tierLimits(t)).toFixed(2) },
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
-      makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null,
+      makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null, minQuoteContracts: S.minQuoteContracts,
+      // The flat sigma multiplier in use until a validated vol forecast takes over (null once one does).
+      volFallbackMult: this.volFc.model?.validated ? null : S.volFallbackMult,
       clock: this.d.clock?.status(Date.now()) ?? null,
       equity: eq ?? null, equityGuard: this.d.equityGuard?.status(eq, now, t.ddScaleAt) ?? null,
       modelHealth: this.d.modelHealth?.status() ?? null,
@@ -1018,6 +1020,13 @@ export class Engine {
   isTennis(ticker: string): boolean {
     const m = this.d.md.markets.get(ticker);
     return m ? m.kind === 'match' : this.d.cfg.tennis.series.some((s) => ticker.startsWith(`${s}-`));
+  }
+
+  /** Risk a new crypto order could still add: room under the tier's window and total caps and in the shard's free cash. */
+  private newRiskRoom(m: ActiveMarket, bankroll: number, tier: Tier): number {
+    const totals = this.riskTotals(m.closeTime);
+    const free = this.freeCash(this.shardOf(m.ticker));
+    return Math.max(0, Math.min(tier.windowFrac * bankroll - totals.window, tier.totalFrac * bankroll - totals.total, free ?? Infinity));
   }
 
   /** Crypto: window = markets closing together. Tennis (`tennisEvent`): window = the match, total = all tennis. */
@@ -1721,7 +1730,9 @@ export class Engine {
       const ewmaHour = vol.sigmaPerSqrtSec * 60;
       if (rv > 0 && ewmaHour > 0) taVolMult = Math.max(0.5, Math.min(2, Math.exp(taView.vol4h) * rv / ewmaHour)) ** cfg.strategy.taVolWeight;
     }
-    const sigmaPricing = effectiveSigma(vol.sigmaPerSqrtSec, this.d.volProfile, m.asset, now, m.closeTime) * volMult * taVolMult;
+    // Until a validated vol forecast is in use, a flat multiplier corrects the EWMA's lag (VOL_FALLBACK_MULT).
+    const volFallback = this.volFc.model?.validated ? 1 : cfg.strategy.volFallbackMult;
+    const sigmaPricing = effectiveSigma(vol.sigmaPerSqrtSec, this.d.volProfile, m.asset, now, m.closeTime) * volMult * taVolMult * volFallback;
     const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
     if (!fv) return block('fair value unavailable');
     const sess = sessionState(now);
@@ -1806,7 +1817,7 @@ export class Engine {
       // Extra same-side quotes (should not happen) are cancelled.
       for (const extra of o.slice(1)) void oms.cancel(extra.clientOrderId, 'duplicate quote');
       const q = o[0];
-      return q ? { clientOrderId: q.clientOrderId, price: q.price, remaining: Math.max(0, q.count - q.exchangeFillCount) } : undefined;
+      return q ? { clientOrderId: q.clientOrderId, price: q.price, remaining: Math.max(0, q.count - q.exchangeFillCount), expiresSec: q.expirationTime } : undefined;
     };
     const bankroll = this.bankroll() ?? 0;
     const S = cfg.strategy;
@@ -1842,6 +1853,7 @@ export class Engine {
       // The risk scale (drawdown, losing streak, training-mode de-risking) shrinks every sizing route:
       // Kelly, target-EV and the per-order caps alike.
       maxOrderRiskUsd: Math.min(tier.orderFrac * bankroll * sizeMult * kellyScale, fCapUsd), maxContracts: floorCount(R.maxContractsPerOrder * sizeMult), minSidePrice: R.minSidePrice,
+      newRiskRoomUsd: reason ? this.newRiskRoom(m, bankroll, tier) : undefined,
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
       restingBid, restingAsk, nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
       pMarket, pStd: pred.std, makerBuffer: this.makerBuffer(), entrySidePrice: entrySidePrice !== undefined && entrySidePrice > 0 && entrySidePrice < 1 ? entrySidePrice : undefined,

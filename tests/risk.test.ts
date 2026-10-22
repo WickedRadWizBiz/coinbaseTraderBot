@@ -135,3 +135,15 @@ test('kill switch persists across restarts and cancels orders on engage', async 
   k2.reset('tester');
   assert.equal(new KillSwitch(file, audit).engaged, false);
 });
+
+test('order rate: new risk stops at 80% of the per-minute limit, exits may use all of it', () => {
+  const exit = intent({ side: 'ask', reduceOnly: true, purpose: 'exit', timeInForce: 'immediate_or_cancel', postOnly: false, price: 0.44, count: 1 });
+  assert.ok(gw.check(intent(), ctx({ ordersLastMinute: 23 })).ok);
+  const d = gw.check(intent(), ctx({ ordersLastMinute: 24 }));
+  assert.equal(d.ok, false);
+  assert.match(d.reasons.join(';'), /order rate 24\/min at limit for new risk \(24; the rest is kept for exits\)/);
+  assert.ok(gw.check(exit, ctx({ ordersLastMinute: 29, position: 2 })).ok, 'the reserve is there for the exit');
+  assert.equal(gw.check(exit, ctx({ ordersLastMinute: 30, position: 2 })).ok, false, 'the limit itself still holds');
+  // A limit too small to split keeps one order for new risk.
+  assert.ok(new RiskGateway({ ...limits, maxOrdersPerMinute: 1 }).check(intent(), ctx()).ok);
+});

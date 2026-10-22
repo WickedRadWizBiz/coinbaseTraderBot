@@ -46,12 +46,29 @@ test('relaxed cadence: bar closes, fair-value triggers, 10 s floor, window chang
   assert.equal(c.check('T', { ...base, now: t0 + 1 }), 'continuous');
 });
 
+test('relaxed cadence: a quote that has gone (expired, filled or pulled) is looked at again on the re-price schedule', () => {
+  const g = new CadenceGate(relaxed);
+  const t0 = 1_800_000_000_000 - (1_800_000_000_000 % 60_000) + 5_000;
+  const base = { fairValue: 0.5, entryWindowOpen: true, hasResting: false, bookThroughQuote: false };
+  assert.equal(relaxed.repriceSec, 10);
+  assert.equal(g.check('T', { ...base, now: t0 }), 'first');
+  assert.equal(g.check('T', { ...base, now: t0 + 11_000, hasResting: true }), 'reprice');
+  assert.equal(g.check('T', { ...base, now: t0 + 16_000 }), undefined, 'within the re-price period');
+  assert.equal(g.check('T', { ...base, now: t0 + 22_000 }), 'reprice', 'the quote expired: placed again without waiting for the bar');
+  assert.equal(g.check('T', { ...base, now: t0 + 33_000 }), undefined, 'nothing was resting at the last look: wait for the bar');
+});
+
 test('entry windows by contract kind', () => {
   assert.ok(inEntryWindow('updown', 600, [840, 120], [3300, 300]));
   assert.ok(!inEntryWindow('updown', 100, [840, 120], [3300, 300]), 'last 2 minutes are a latency race');
   assert.ok(!inEntryWindow('updown', 880, [840, 120], [3300, 300]));
   assert.ok(inEntryWindow('greater', 3000, [840, 120], [3300, 300]));
   assert.ok(!inEntryWindow('greater', 200, [840, 120], [3300, 300]));
+  // Defaults: no new 15-minute entries in the last 5 minutes, no hourly ones in the last 10 (time to sell first).
+  assert.deepEqual([relaxed.entryWindowUpdown, relaxed.entryWindowHourly], [[840, 300], [3300, 600]]);
+  assert.ok(inEntryWindow('updown', 300, relaxed.entryWindowUpdown, relaxed.entryWindowHourly));
+  assert.ok(!inEntryWindow('updown', 299, relaxed.entryWindowUpdown, relaxed.entryWindowHourly));
+  assert.ok(!inEntryWindow('greater', 599, relaxed.entryWindowUpdown, relaxed.entryWindowHourly));
 });
 
 // ---- Sizing --------------------------------------------------------------------

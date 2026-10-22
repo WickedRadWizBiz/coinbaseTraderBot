@@ -34,6 +34,14 @@ done
 # The old default exit (hold: every contract rode to settlement, never sold for profit) becomes the ratchet exit.
 if grep -qx 'EXIT_POLICY=hold' "$ENV"; then edit_env '^EXIT_POLICY=hold$' 'EXIT_POLICY=confluence_ratchet'; echo "EXIT_POLICY: hold -> confluence_ratchet in $ENV"; fi
 if grep -qx 'CATALOG_STRIKES_PER_EVENT=8' "$ENV"; then edit_env '^CATALOG_STRIKES_PER_EVENT=8$' 'CATALOG_STRIKES_PER_EVENT=4'; echo "CATALOG_STRIKES_PER_EVENT: 8 -> 4 in $ENV"; fi
+# Entries tuned for quick exits (fresher quotes, a bigger maker discount, time to sell before the close): a bot.env
+# that pins the old default of one of these gets the new one; any other value is left alone.
+for pair in 'STRATEGY_REPRICE_SEC=30>10' 'STRATEGY_FAST_MOVE_SIGMAS=3>2' \
+  'STRATEGY_MAKER_BUFFER=0.01>0.02' 'STRATEGY_MAKER_BUFFER_RANGE=0.005,0.015>0.015,0.03' \
+  'ENTRY_WINDOW_15M=840,120>840,300' 'ENTRY_WINDOW_HOURLY=3300,300>3300,600'; do
+  old=${pair%%>*}; key=${old%%=*}; new="$key=${pair#*>}"
+  if grep -qxF "$old" "$ENV"; then edit_env "^${old//./\\.}\$" "$new"; echo "$key: ${old#*=} -> ${new#*=} in $ENV"; fi
+done
 if [ -n "${DASHBOARD_PASSWORD:-}" ] && ! grep -qxF "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD" "$ENV"; then
   edit_env '^DASHBOARD_PASSWORD=' "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD"
   echo "dashboard password set from the deploy"

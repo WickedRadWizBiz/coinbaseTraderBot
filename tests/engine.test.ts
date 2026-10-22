@@ -80,6 +80,18 @@ test('engine places risk-checked post-only quotes through the OMS and paper exch
   assert.equal(engine.status.get(market.ticker)!.blocked, 'index stale');
 });
 
+test('until a vol forecast is validated, fair value prices with the EWMA sigma x VOL_FALLBACK_MULT (1.15 by default)', async () => {
+  for (const [env, mult] of [[{}, 1.15], [{ VOL_FALLBACK_MULT: '1' }, 1]] as const) {
+    const { engine, recon, market } = await setup({ env });
+    const r = await recon.run('startup');
+    engine.balance = r!.balance;
+    await engine.tick();
+    const st = engine.status.get(market.ticker)!;
+    assert.ok(Math.abs(st.sigmaPricing! / st.sigma! - mult) < 1e-9, `sigma ${st.sigma} priced at ${st.sigmaPricing}`);
+    assert.equal(engine.guardStatus().volFallbackMult, mult);
+  }
+});
+
 test('an order is funded from its market\'s exchange shard: no cash there, no order, and the refusal says where the cash is', async () => {
   const { engine, recon, paper, market, md, audit } = await setup();
   const r = await recon.run('startup');

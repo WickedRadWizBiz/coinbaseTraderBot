@@ -71,7 +71,7 @@ export interface StrategyConfig {
   /** Pull quotes if |index move| over `fastMoveWindowSec` exceeds this many sigmas. */
   fastMoveSigmas: number;
   fastMoveWindowSec: number;
-  /** Resting orders expire on the exchange after this many seconds (dead-man switch). */
+  /** Resting orders expire on the exchange after this many seconds (dead-man switch); a quote still wanted is placed again. */
   orderTtlSec: number;
   /** Exit mode. hold = Mode A (ride to settlement, no exit fee); fair_value = model exit only;
    * take_profit = Mode B (resting maker take-profit + model exit); confluence_ratchet = hunt winners. */
@@ -102,6 +102,9 @@ export interface StrategyConfig {
   /** Maker adverse-selection buffer: default, and clamp range when estimated from 60 s markouts. */
   makerBuffer: number;
   makerBufferRange: [number, number];
+  /** Smallest maker quote, in contracts, when sizing wants a smaller one (within the per-order caps and the risk room
+   *  left): Kalshi rounds each order's fee up to the cent, so a small position pays more a contract to sell. 0 = off. */
+  minQuoteContracts: number;
   /** kelly = fractional Kelly on the model probability; target_ev = spec sizing (shrink to market, $ target, min EV). */
   sizing: 'kelly' | 'target_ev';
   kappa: number;
@@ -182,6 +185,8 @@ export interface StrategyConfig {
   /** Tree-based volatility forecast (research:vol-train): applied to fair value once validated. */
   volModel: boolean;
   volModelPath: string;
+  /** Sigma multiplier for fair value while no validated vol forecast is in use (1 = off). */
+  volFallbackMult: number;
   /** Fill / adverse-selection model (research:fill-train): brings itself online once validated. */
   fillModelPath: string;
   /** Maker quotes need expected value (P(fill) x (edge - expected markout)) of at least this per contract. */
@@ -915,8 +920,11 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     takerBuffer: num(env, 'STRATEGY_TAKER_BUFFER', relaxed ? 0.02 : 0.01, 0.0, 0.5),
     inventorySkewPerContract: num(env, 'STRATEGY_INVENTORY_SKEW', 0.002, 0, 0.05),
     requoteThreshold: num(env, 'STRATEGY_REQUOTE_THRESHOLD', 0.01, 0.01, 0.2),
-    fastMoveSigmas: num(env, 'STRATEGY_FAST_MOVE_SIGMAS', 3, 0.5, 20),
+    // Quotes stay fresh (a stale bid is the one that gets picked off): pulled on a 2-sigma move, re-priced every 10 s.
+    fastMoveSigmas: num(env, 'STRATEGY_FAST_MOVE_SIGMAS', 2, 0.5, 20),
     fastMoveWindowSec: num(env, 'STRATEGY_FAST_MOVE_WINDOW_SEC', 5, 1, 120),
+    // 60 s, not shorter, while RISK_MAX_ORDERS_PER_MIN binds: re-placing unchanged quotes would spend the minute's
+    // order budget that moving the stale ones needs.
     orderTtlSec: num(env, 'STRATEGY_ORDER_TTL_SEC', 60, 10, 900),
     // Sell for profit once the bid beats the model's value, and let winners run on the confluence ratchet.
     exitPolicy: oneOf(env, 'EXIT_POLICY', 'confluence_ratchet', ['hold', 'fair_value', 'take_profit', 'confluence_ratchet'] as const),
@@ -928,14 +936,17 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     cadence,
     evalBarSec: num(env, 'STRATEGY_EVAL_BAR_SEC', 60, 5, 600),
     evalFvMove: num(env, 'STRATEGY_EVAL_FV_MOVE', 0.015, 0.001, 0.2),
-    repriceSec: num(env, 'STRATEGY_REPRICE_SEC', 30, 5, 600),
+    repriceSec: num(env, 'STRATEGY_REPRICE_SEC', 10, 5, 600),
     minEvalIntervalSec: num(env, 'STRATEGY_MIN_EVAL_INTERVAL_SEC', 10, 0, 120),
-    entryWindowUpdown: window(env, 'ENTRY_WINDOW_15M', relaxed ? [840, 120] : [900, 15]),
-    entryWindowHourly: window(env, 'ENTRY_WINDOW_HOURLY', relaxed ? [3300, 300] : [3600, 15]),
+    // No new entries in a 15-minute contract's last 5 minutes or an hourly one's last 10: time to sell before the final minute.
+    entryWindowUpdown: window(env, 'ENTRY_WINDOW_15M', relaxed ? [840, 300] : [900, 15]),
+    entryWindowHourly: window(env, 'ENTRY_WINDOW_HOURLY', relaxed ? [3300, 600] : [3600, 15]),
     hourlyMidBand: band(env, 'HOURLY_MID_BAND', [0.1, 0.9]),
     noExitBeforeCloseSec: num(env, 'STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC', relaxed ? 60 : 0, 0, 600),
-    makerBuffer: num(env, 'STRATEGY_MAKER_BUFFER', relaxed ? 0.01 : 0, 0, 0.1),
-    makerBufferRange: band(env, 'STRATEGY_MAKER_BUFFER_RANGE', relaxed ? [0.005, 0.015] : [0, 0]),
+    // Maker discount for the measured adverse move a minute after a fill: at least 1.5c, up to 3c.
+    makerBuffer: num(env, 'STRATEGY_MAKER_BUFFER', relaxed ? 0.02 : 0, 0, 0.1),
+    makerBufferRange: band(env, 'STRATEGY_MAKER_BUFFER_RANGE', relaxed ? [0.015, 0.03] : [0, 0]),
+    minQuoteContracts: num(env, 'STRATEGY_MIN_QUOTE_CONTRACTS', 3, 0, 100),
     sizing: oneOf(env, 'STRATEGY_SIZING', relaxed ? 'target_ev' : 'kelly', ['kelly', 'target_ev'] as const),
     kappa: num(env, 'STRATEGY_KAPPA', 0.5, 0, 1),
     targetEvUsd: num(env, 'STRATEGY_TARGET_EV_USD', 10, 0, 10000),
@@ -983,6 +994,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     volProfilePath: path.resolve(env.VOL_PROFILE_PATH ?? './params/vol_profile.json'),
     volModel: bool(env, 'VOL_MODEL', true),
     volModelPath: path.resolve(env.VOL_MODEL_PATH ?? './params/vol_model.json'),
+    // Until the vol forecast trains: the live EWMA sigma ran 1.3-2x low on volatile days; 1.15 scored best over Oct 20-22.
+    volFallbackMult: num(env, 'VOL_FALLBACK_MULT', 1.15, 0.5, 2),
     fillModelPath: path.resolve(env.FILL_MODEL_PATH ?? './params/fill_model.json'),
     fillMinEv: num(env, 'FILL_MIN_EV', 0, -0.5, 0.5),
     takeGate: oneOf(env, 'TAKE_GATE', 'validated', ['validated', 'off'] as const),
