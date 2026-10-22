@@ -80,3 +80,39 @@ test('blockReductions (hunt mode) removes the fair-value exit, the opposite quot
   const withAsk = decide({ ...long, restingAsk: { clientOrderId: 'a', price: 0.62, remaining: 5 } }, cfg, { exits: false, blockReductions: true });
   assert.deepEqual(withAsk.cancel.map((c) => c.clientOrderId), ['a']);
 });
+
+test('profit target: a winner is sold at the bid once that banks the target net of both fees, even though the model values it higher', () => {
+  const pt = { ...cfg, profitTarget: 0.02, profitTargetPct: 0 };
+  // Bought 10 YES at 0.40 as a maker (no fee); the model now says 0.70, so the fair-value exit would hold.
+  const long = (bid: number) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: bid, size: 50 }, bestAsk: { price: bid + 0.02, size: 50 } });
+  // 0.43: +3c gross, minus the taker fee (18c on the order, rounded up to the cent) = +1.2c net: under the target.
+  assert.equal(decide(long(0.43), pt).place.filter((p) => p.purpose === 'exit').length, 0);
+  // 0.44: +4c - 1.8c = +2.2c net.
+  const exit = decide(long(0.44), pt).place.find((p) => p.purpose === 'exit')!;
+  assert.deepEqual([exit.side, exit.price, exit.count, exit.reduceOnly, exit.timeInForce], ['ask', 0.44, 10, true, 'immediate_or_cancel']);
+  assert.match(exit.why, /^profit target: \+0\.02\d a contract net of fees >= 0\.020/);
+  // Fees already paid on the entry count against the gain.
+  assert.equal(decide({ ...long(0.44), entryFeePerContract: 0.01 }, pt).place.filter((p) => p.purpose === 'exit').length, 0);
+  // Off: the model's exit alone, which holds a contract it values at 0.70.
+  assert.equal(decide(long(0.5), { ...pt, profitTarget: 0 }).place.filter((p) => p.purpose === 'exit').length, 0);
+  // A percentage target, when larger: 10% of 0.40 = 4c net.
+  assert.equal(decide(long(0.44), { ...pt, profitTargetPct: 0.1 }).place.filter((p) => p.purpose === 'exit').length, 0);
+  assert.equal(decide(long(0.46), { ...pt, profitTargetPct: 0.1 }).place.filter((p) => p.purpose === 'exit').length, 1);
+});
+
+test('profit target on a NO position: bought back at the ask, priced on the NO side', () => {
+  const pt = { ...cfg, profitTarget: 0.02, profitTargetPct: 0 };
+  // Holding 10 NO bought at 0.40 (YES sold at 0.60); the model wants to keep it (P(YES) 0.30).
+  const short = (yesAsk: number) => view({ position: -10, pYes: 0.3, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: yesAsk - 0.02, size: 50 }, bestAsk: { price: yesAsk, size: 50 } });
+  assert.equal(decide(short(0.57), pt).place.filter((p) => p.purpose === 'exit').length, 0, 'NO bid 0.43: +1.2c net');
+  const exit = decide(short(0.56), pt).place.find((p) => p.purpose === 'exit')!;
+  assert.deepEqual([exit.side, exit.price, exit.count, exit.reduceOnly], ['bid', 0.56, 10, true]);
+  assert.match(exit.why, /^profit target: NO \+0\.02/);
+});
+
+test('profit target: no exits in the final minute or while hunting (the hunt\'s trailing stop has it)', () => {
+  const pt = { ...cfg, profitTarget: 0.02, profitTargetPct: 0 };
+  const long = view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: 0.5, size: 50 }, bestAsk: { price: 0.52, size: 50 } });
+  assert.equal(decide({ ...long, exitWindowOpen: false }, pt).place.filter((p) => p.purpose === 'exit').length, 0);
+  assert.equal(decide(long, pt, { exits: false, blockReductions: true }).place.filter((p) => p.purpose === 'exit').length, 0);
+});

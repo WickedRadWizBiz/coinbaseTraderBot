@@ -1308,6 +1308,8 @@ export class Engine {
         };
         const decisionId = crypto.randomUUID();
         this.d.audit.write('decision', { decisionId, ticker: m.ticker, strategy: 'tennis', event, leg: p.leg, phase: out.phase, why: p.why, price: p.price, count: p.count, side: p.side, pA: MatchTracker.probability(markets) });
+        // Self-trade prevention would cancel an exit that meets one of our own resting orders: pull those first.
+        if (p.reduceOnly && p.timeInForce === 'immediate_or_cancel') await Promise.all(this.crossingOwnOrders(m.ticker, p.side, p.price).map((o) => oms.cancel(o.clientOrderId, 'would cross our own exit')));
         await this.placeChecked(m, plan, fairValue, decisionId, { event });
       }
     }
@@ -1843,6 +1845,7 @@ export class Engine {
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
       restingBid, restingAsk, nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
       pMarket, pStd: pred.std, makerBuffer: this.makerBuffer(), entrySidePrice: entrySidePrice !== undefined && entrySidePrice > 0 && entrySidePrice < 1 ? entrySidePrice : undefined,
+      entryFeePerContract: pos && Math.abs(pos.yes) > 1e-9 ? pos.fees / Math.abs(pos.yes) : undefined,
       entryWindowOpen, exitWindowOpen: tauSec > S.noExitBeforeCloseSec,
     };
     // Exit policy. confluence_ratchet: fair-value exit normally; "hunt" mode (liquidity ratchet
@@ -2036,6 +2039,14 @@ export class Engine {
       });
     }
 
+    // An exit must not trade against one of the bot's own resting quotes: Kalshi's self-trade prevention cancels the
+    // exit instead (taker_at_cross), and a stale quote at the touch would turn every tick's exit into one more cancel.
+    for (const p of plan.place) {
+      if (!p.reduceOnly || p.timeInForce !== 'immediate_or_cancel') continue;
+      for (const o of this.crossingOwnOrders(m.ticker, p.side, p.price)) {
+        if (!plan.cancel.some((c) => c.clientOrderId === o.clientOrderId)) plan.cancel.push({ clientOrderId: o.clientOrderId, reason: 'would cross our own exit' });
+      }
+    }
     await Promise.all(plan.cancel.map((c) => oms.cancel(c.clientOrderId, c.reason)));
     // Orders carry the decision probability (q_adj under target-EV sizing): the gateway's fee-net
     // edge collar and TCA's edge-at-decision then judge the same number the strategy traded on.
@@ -2177,6 +2188,12 @@ export class Engine {
     await oms.submit(intent);
     const fx = this.fillX.get(p);
     if (fx && !tennis) this.fillLog?.onQuote({ ticker: m.ticker, side: p.side, price: p.price, count: p.count, x: fx });
+  }
+
+  /** The bot's resting orders an immediate order at `price` on `side` would trade against. */
+  private crossingOwnOrders(ticker: string, side: 'bid' | 'ask', price: number) {
+    return this.d.oms.liveOrders().filter((o) => o.ticker === ticker && !o.cancelRequested && o.side !== side
+      && (side === 'bid' ? o.price <= price + 1e-9 : o.price >= price - 1e-9));
   }
 
   private async cancelMarketQuotes(ticker: string, reason: string): Promise<void> {

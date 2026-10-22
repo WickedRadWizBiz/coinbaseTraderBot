@@ -6,11 +6,15 @@
 //     the adverse-selection haircut measured from 60 s markouts.
 //  2. TAKER (optional): cross only when q beats the touch by the taker fee
 //     plus minEdge plus takerBuffer (5c in the relaxed spec), then hold.
-//  3. EXIT: never a percentage stop. Model exit: sell at the bid only when the
-//     bid minus the taker fee beats q + exitMargin (covers profit-taking and
-//     cutting losers). Mode B adds a resting maker take-profit at entry + TP,
-//     never offered below what the model thinks the position is worth.
-//     Inside the final minute positions ride to settlement.
+//  3. EXIT: never a percentage stop. Profit target: sell at the bid as soon as
+//     that banks profitTarget a contract (or profitTargetPct of the entry
+//     price) over what the position cost, net of the entry's fees and this
+//     exit's taker fee, whatever the model thinks the contract is worth: small
+//     gains banked as they come. Model exit: sell at the bid when the bid minus
+//     the taker fee beats q + exitMargin (the market overpays, or the model
+//     turned against the position). Mode B adds a resting maker take-profit at
+//     entry + TP, never offered below what the model thinks the position is
+//     worth. Inside the final minute positions ride to settlement.
 //
 // q is the model probability, or with target-EV sizing q_adj = p_mkt_cal +
 // kappa * (p_model - p_mkt_cal): the model shrunk toward the calibrated market.
@@ -56,8 +60,10 @@ export interface MarketView {
   pStd?: number;
   /** Maker adverse-selection buffer in dollars (added to minEdge for quotes). */
   makerBuffer?: number;
-  /** Average entry price of the side currently held (Mode B take-profit). */
+  /** Average entry price of the side currently held (profit target, Mode B take-profit). */
   entrySidePrice?: number;
+  /** Fees already paid, a contract held (the profit target nets them out). */
+  entryFeePerContract?: number;
   /** Entry window open (contract kind, time to close, maintenance). Default: tau >= noEntryBeforeCloseSec. */
   entryWindowOpen?: boolean;
   /** Exits allowed (false in the final minute: ride to settlement). Default true. */
@@ -120,19 +126,29 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
   if (!exitWindow && v.position !== 0) out.notes.push('final minute: riding to settlement');
   const exits = opts.exits !== false && exitWindow;
   const margin = cfg.exitMargin ?? cfg.takerBuffer;
+  // Profit target: what selling the held side at its touch banks a contract over its cost, net of every fee.
+  const target = v.entrySidePrice === undefined ? 0 : Math.max(cfg.profitTarget ?? 0, (cfg.profitTargetPct ?? 0) * v.entrySidePrice);
+  const banked = (sidePx: number, exitFee: number) => (target > 0 ? sidePx - v.entrySidePrice! - (v.entryFeePerContract ?? 0) - exitFee : -Infinity);
   if (exits && v.position > 0 && bid) {
     const n = Math.min(v.position, bid.size);
     const fee = n > 0 ? orderFee(n, bid.price, true, v.fees) / n : 0;
     const edge = bid.price - q - fee;
-    if (n > 0 && edge >= margin) {
-      out.place.push({ side: 'ask', price: bid.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge, why: `bid ${bid.price} - fee > q ${q.toFixed(3)} + ${margin}` });
+    const net = banked(bid.price, fee);
+    const tp = net >= target - 1e-9;
+    if (n > 0 && (edge >= margin || tp)) {
+      out.place.push({ side: 'ask', price: bid.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge,
+        why: tp ? `profit target: +${net.toFixed(3)} a contract net of fees >= ${target.toFixed(3)}` : `bid ${bid.price} - fee > q ${q.toFixed(3)} + ${margin}` });
     }
   } else if (exits && v.position < 0 && ask) {
     const n = Math.min(-v.position, ask.size);
-    const fee = n > 0 ? orderFee(n, 1 - ask.price, true, v.fees) / n : 0;
+    const noBid = round(1 - ask.price, 4);
+    const fee = n > 0 ? orderFee(n, noBid, true, v.fees) / n : 0;
     const edge = q - ask.price - fee;
-    if (n > 0 && edge >= margin) {
-      out.place.push({ side: 'bid', price: ask.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge, why: `NO bid ${(1 - ask.price).toFixed(2)} - fee > q + ${margin}` });
+    const net = banked(noBid, fee);
+    const tp = net >= target - 1e-9;
+    if (n > 0 && (edge >= margin || tp)) {
+      out.place.push({ side: 'bid', price: ask.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge,
+        why: tp ? `profit target: NO +${net.toFixed(3)} a contract net of fees >= ${target.toFixed(3)}` : `NO bid ${noBid.toFixed(2)} - fee > q + ${margin}` });
     }
   }
 
