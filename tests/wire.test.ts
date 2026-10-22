@@ -64,6 +64,22 @@ test('REST: an order Kalshi accepts is an acknowledged order; a cancel names the
   assert.equal(calls[1], 'DELETE https://x.test/trade-api/v2/portfolio/events/orders/ex1?market_ticker=KXBTC15M-26OCT221430-30');
 });
 
+test('REST: cancelling an order that is already gone (404) succeeds without touching the retired legacy endpoint', async () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const calls: string[] = [];
+  const rest = new KalshiRest({
+    baseUrl: 'https://x.test/trade-api/v2',
+    signer: new KalshiSigner('kid', privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()),
+    fetchImpl: (async (url: string, init: { method: string }) => {
+      calls.push(`${init.method} ${url}`);
+      if (url.includes('/portfolio/events/orders/')) return new Response('{"error":{"code":"not_found","message":"order not found"}}', { status: 404 });
+      return new Response('{"error":{"code":"deprecated_v1_order_endpoint","message":"Please switch to the V2 endpoints"}}', { status: 410 });
+    }) as unknown as typeof fetch,
+  });
+  await rest.cancelOrder('gone', 'KXBTC15M-26OCT221430-30');
+  assert.deepEqual(calls, ['DELETE https://x.test/trade-api/v2/portfolio/events/orders/gone?market_ticker=KXBTC15M-26OCT221430-30']);
+});
+
 test('legacy order payload (yes/no + action, cents)', () => {
   const o = parseOrder({ order_id: 'o2', ticker: 'T', side: 'no', action: 'buy', yes_price: 40, status: 'executed', fill_count: 1, remaining_count: 0 });
   assert.equal(o.side, 'ask');
