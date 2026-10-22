@@ -13,7 +13,7 @@ import path from 'path';
 import type { Alerter } from './alerts/alerter';
 import type { AuditLog } from './audit/auditLog';
 import type { Config, RiskLimits } from './config';
-import type { ExchangeGateway } from './kalshi/types';
+import type { ExchangeFill, ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
 import type { IndexTracker } from './marketdata/indexTracker';
 import type { OrderBook } from './marketdata/orderBook';
@@ -579,7 +579,13 @@ export class Engine {
         this.d.alerter.notify('critical', sports ? 'kalshi-location-sports' : 'kalshi-location', `${block.reason}. ${sports ? 'Tennis orders are' : 'New orders are'} paused and retried every 10 minutes.`);
       }
     });
-    oms.on('orphan_fill', (f) => this.d.alerter.notify('critical', 'orphan-fill', `Fill for unknown order on ${f.ticker} (${f.count} @ ${f.price})`));
+    // Live, a fill for an order the bot never sent is a trade made by hand on Kalshi: booked into the position like any
+    // fill (Kalshi keeps one net position per market). In paper nobody else trades, so it is a fault.
+    oms.on('orphan_fill', (f: ExchangeFill) => {
+      const what = `${f.side === 'bid' ? 'bought YES / sold NO' : 'sold YES / bought NO'} ${f.count} @ ${f.price.toFixed(2)} on ${f.ticker}`;
+      if (cfg.mode === 'live') this.d.alerter.notify('warn', 'manual-trade', `Trade the bot did not place (made on Kalshi by hand?): ${what}. Booked into the bot's position; position now ${oms.positions.position(f.ticker)}.`);
+      else this.d.alerter.notify('critical', 'orphan-fill', `Fill for unknown order: ${what}`);
+    });
     log.info('engine started', { mode: cfg.mode, model: this.d.model.id, markets: md.activeMarkets().length });
   }
 

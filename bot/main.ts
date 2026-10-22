@@ -212,7 +212,7 @@ async function main(): Promise<void> {
   const gateway: ExchangeGateway = paper ?? rest;
 
   const kill = new KillSwitch(path.join(cfg.dataDir, 'kill_switch.json'), audit, alerter);
-  const oms = new Oms({ gateway, audit, statePath: path.join(cfg.bookDir, 'oms_state.json'), feesFor: (t) => md.feesFor(t), subaccount: cfg.kalshiSubaccount, durableWriteAhead: cfg.mode === 'live' });
+  const oms = new Oms({ gateway, audit, statePath: path.join(cfg.bookDir, 'oms_state.json'), feesFor: (t) => md.feesFor(t), subaccount: cfg.kalshiSubaccount, durableWriteAhead: cfg.mode === 'live', leaveExternalOrders: cfg.mode === 'live' });
   kill.bindCancelAll((reason) => oms.cancelAll(reason));
 
   // Kalshi check: the bot's fills, settlements and cash against Kalshi's own records (bot/recon/kalshiCheck.ts).
@@ -231,6 +231,8 @@ async function main(): Promise<void> {
     onPersistentBreak: (reason) => void kill.engage(reason, 'recon'),
     onFills: (fills) => kalshiCheck.onExchangeFills(fills),
     closeUnknownOrders: cfg.mode !== 'live',
+    // Live: an order the bot did not send is the operator's own (placed on Kalshi by hand), not an orphan to cancel.
+    leaveExternalOrders: cfg.mode === 'live',
   });
   const risk = new RiskGateway(cfg.risk);
   const vault = new Vault(cfg.vault, path.join(cfg.bookDir, 'vault.json'));

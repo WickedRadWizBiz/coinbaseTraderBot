@@ -134,6 +134,17 @@ test('cancelAll also cancels exchange orders the OMS does not know', async () =>
   assert.ok(gw.cancels.includes('ex-1'));
 });
 
+test('live (leaveExternalOrders): cancelAll cancels the bot\'s own orders and leaves the operator\'s alone', async () => {
+  const gw = new FakeGateway();
+  const oms = new Oms({ gateway: gw, audit: tmpAudit(), statePath: path.join(tmpDir(), 'oms.json'), feesFor: () => DEFAULT_FEES, sleep: async () => undefined, leaveExternalOrders: true });
+  gw.accept({ ticker: 'X', side: 'ask', count: 4, price: 0.7, timeInForce: 'good_till_canceled', postOnly: false, reduceOnly: false, selfTradePrevention: 'taker_at_cross', clientOrderId: 'placed-on-kalshi' });
+  const ours = await oms.submit(intent());
+  await oms.cancelAll('shutdown (SIGTERM)');
+  assert.deepEqual(gw.cancels.filter((id) => id === 'ex-1'), [], 'the operator\'s order stays');
+  assert.ok(gw.cancels.includes(ours.orderId!));
+  assert.equal(gw.orders.find((o) => o.orderId === 'ex-1')!.status, 'resting');
+});
+
 test('settlement realizes fee-inclusive PnL', async () => {
   const gw = new FakeGateway();
   const oms = mk(gw);

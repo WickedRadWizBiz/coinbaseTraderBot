@@ -129,8 +129,11 @@ export function parseFill(raw: Obj): ExchangeFill {
     isTaker: Boolean(f.is_taker),
     fee: parseDollars(f.fee_cost_dollars) ?? parseDollars(f.fee_dollars) ?? parseDollars(f.fee_cost),
     ts: ts(f.created_time ?? f.ts) ?? Date.now(),
+    wire: Object.fromEntries(FILL_WIRE_KEYS.filter((k) => f[k] !== undefined).map((k) => [k, f[k]])),
   };
 }
+
+const FILL_WIRE_KEYS = ['book_side', 'outcome_side', 'side', 'action', 'purchased_side', 'yes_price_dollars', 'no_price_dollars', 'price_dollars', 'count_fp', 'post_position_fp', 'subaccount', 'subaccount_number'];
 
 export function parsePositions(raw: Obj): ExchangePosition[] {
   const rows: Obj[] = raw.market_positions ?? raw.positions ?? [];

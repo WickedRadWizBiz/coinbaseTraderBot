@@ -550,6 +550,17 @@ Nothing in the existing strategies changed: the engine filters their exit orders
 
 **Modes:** `SINUOUS_EXIT=monitor` shows the curve and notes what it would hold, without holding anything. `off` removes it.
 
+### Trading by hand on Kalshi alongside the bot
+
+The reconciler (`bot/recon/reconciler.ts`, every 45 s) treats Kalshi as the truth and expects you to trade on the same account:
+
+- **Your fills** (bought or sold in the Kalshi app or website) are booked like the bot's own. Kalshi keeps one net position per market, and so do the bot's books, so a contract you sell by hand simply leaves the bot's position. The bot keeps managing whatever is left with its normal exits. A `manual-trade` alert says what was booked.
+- **Your resting orders** are left alone in live mode and listed on the dashboard's Reconciliation row. The OMS writes every order it sends to disk first, so an order it does not know is yours. That holds for the reconciler, and also for a restart or deploy, the dashboard's STOP and the kill switch: all of these cancel only the bot's own orders. (Paper still cancels unknown orders: nobody else trades the paper exchange.)
+- **Markets you trade that the bot does not** have their close time looked up, and they are settled from Kalshi's result like the rest.
+- **Results before payouts.** Kalshi publishes a market's result some time before it pays the market out (minutes for 15-minute contracts, longer for some daily ones), and lists the position until then. A market the bot has settled is not a mismatch while Kalshi reports the same result for it.
+- **Mismatches nothing explains.** First the market's own fill history is searched, as far back as the bot remembers trade ids, so nothing is booked twice. If the same mismatch is still there on the next run, Kalshi's position is adopted: the difference is priced at Kalshi's mid, audit kind `recon_adopt`, `recon-adopt` alert. At most 3 positions are adopted automatically per hour. Past that the mismatch stays a break, because something keeps disagreeing.
+- **Resolve.** The Reconciliation row's **Resolve** button, or `POST /api/recon/resolve` with `{"confirm": "ADOPT KALSHI POSITIONS"}`, re-checks now, adopts every remaining mismatch and lifts the reconciliation halt at once. Resetting the kill switch while reconciliation is not clean offers the same step first.
+
 ### Research loop
 
 ```bash
@@ -617,7 +628,7 @@ The backtest reports per-window results. Correlated BTC, ETH and SOL markets tha
 | Legacy `/portfolio/orders` | Orders go to `POST /portfolio/events/orders` (V2) with `post_only`, `self_trade_prevention_type`, `expiration_time` and `cancel_order_on_pause`. |
 | Risk gateway (fail closed) | `bot/risk/riskGateway.ts`. It checks: per-order, per-window (correlated, no netting), total and daily-loss limits; price collar vs fair value and vs the touch; longshot guard; stale book and index; throttles; time to close. |
 | OMS state machine and idempotency | `bot/oms/`. The id is persisted before send. Acceptance is not a fill. Fills are de-duplicated. Exits stay tracked until confirmed. |
-| Reconciliation | `bot/recon/reconciler.ts`. Runs every 45 s and on reconnect. Missed fills are repaired, orphans cancelled, and a break halts new risk (and trips the kill switch if it persists). |
+| Reconciliation | `bot/recon/reconciler.ts`. Runs every 45 s and on reconnect. Missed fills are repaired. Trades and orders made by hand on Kalshi are booked or left alone, not treated as faults (see "Trading by hand on Kalshi alongside the bot"). A position nothing explains is adopted from Kalshi after two runs. A remaining break halts new risk, and trips the kill switch if it persists. |
 | Kill switch | Persists on disk, survives restart, auto-trips on loss limit, repeated order errors, persistent break or a stalled heartbeat. Resting orders also carry an exchange-side `expiration_time` as a dead-man switch. |
 | Sizing vs break-even | One rule in every mode, override on or off (`EquityGuard.sizeScale`; perps: `BreakEven`): full size at or above break-even (the starting cash, moved only by deposits, withdrawals and training refills); as net losses grow the size shrinks linearly, to a quarter (`SIZE_FLOOR`) at a net loss of `RISK_DD_SCALE_AT` (15% on the normal tier); as wins win the losses back it grows again, and once wins equal losses it is back to full size. Never zero. Break-even moves UP with the pool (never down by P&L) when the day's profit (UTC) reaches `VAULT_DAILY_GOAL_USD` (perps: `SETUP_DAILY_GOAL_USD`), or after two losing trades in a row that still leave the pool above break-even (audit `break_even_raised`). |
 | Paper exploration | Paper mode only (`PAPER_EXPLORE`, default on): when no entry qualifies, the best borderline one (fee-net positive, within `PAPER_EXPLORE_BAND` = 2c of the edge threshold) is entered at one contract with probability `PAPER_EXPLORE_RATE` (10%), at most `PAPER_EXPLORE_MAX_PER_HOUR` (6) an hour, tagged `explore (p=…)` in the decision log, so the fill model and the edge threshold get data near the boundary. |

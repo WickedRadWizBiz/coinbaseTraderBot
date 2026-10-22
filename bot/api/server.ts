@@ -470,11 +470,29 @@ export function createApi(d: ApiDeps): express.Express {
       return;
     }
     if (d.recon.halted) {
-      res.status(409).json({ error: 'reconciliation is not clean; resolve breaks first', recon: d.recon.lastResult });
+      res.status(409).json({ error: 'reconciliation is not clean; resolve breaks first (POST /api/recon/resolve adopts Kalshi\'s positions)', recon: d.recon.lastResult, resolve: '/api/recon/resolve' });
       return;
     }
     d.kill.reset(`api:${req.ip}`);
     res.json(d.kill.status());
+  });
+
+  // Resolve reconciliation breaks: reconcile now, and wherever the bot's position disagrees with Kalshi's (a trade made
+  // by hand, a fill the bot could not read), take Kalshi's. A clean run lifts the reconciliation halt at once.
+  api.post('/recon/resolve', async (req, res) => {
+    if (req.body?.confirm !== 'ADOPT KALSHI POSITIONS') {
+      res.status(400).json({ error: 'body must include {"confirm": "ADOPT KALSHI POSITIONS"}' });
+      return;
+    }
+    d.audit.write('config', { event: 'recon_resolve', by: `api:${req.ip}` });
+    // A scheduled run may be in progress: let it finish (up to 30 s) instead of reporting nothing.
+    for (let i = 0; i < 60 && d.recon.busy; i++) await new Promise((ok) => setTimeout(ok, 500));
+    const r = await d.recon.run('operator', { adopt: true });
+    if (!r) {
+      res.status(503).json({ error: d.recon.busy ? 'a reconciliation is still running; try again in a moment' : 'reconciliation failed (Kalshi unreachable?); see the alerts and try again', recon: d.recon.lastResult });
+      return;
+    }
+    res.status(r.ok ? 200 : 409).json({ ok: r.ok, halted: d.recon.halted, recon: r, ...(r.ok ? {} : { error: `still not clean: ${r.breaks.join('; ')}` }) });
   });
 
   app.use('/api', api);

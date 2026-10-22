@@ -41,6 +41,7 @@ export class FakeGateway implements ExchangeGateway {
   async findOrderByClientId(id: string) { const o = this.orders.find((x) => x.clientOrderId === id); return o ? { ...o } : undefined; }
   async getOpenOrders() { return this.orders.filter((o) => o.status === 'resting').map((o) => ({ ...o })); }
   async getFills(since: number) { return this.fills.filter((f) => f.ts >= since); }
+  async getFillsForTicker(ticker: string, since: number) { return this.fills.filter((f) => f.ticker === ticker && f.ts >= since); }
   async getPositions() { return this.positions.map((p) => ({ ...p })); }
   async getBalance() { return this.balance; }
 }

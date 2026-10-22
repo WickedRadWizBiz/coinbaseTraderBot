@@ -75,3 +75,31 @@ test('latency registry: smoothed per channel, null when stale', () => {
   assert.equal(latencySnapshot(3000).kalshiWs, 120);
   assert.equal(latencySnapshot(1000 + 400_000).kalshiWs, null);
 });
+
+test('reconciliation breaks: the kill-switch reset says how to resolve them; Resolve adopts Kalshi\'s positions and the reset then goes through', async () => {
+  const runs: Array<{ trigger: string; adopt?: boolean }> = [];
+  const recon = {
+    halted: true, busy: false, lastResult: { ok: false, breaks: ['position mismatch T: internal 0 vs exchange 2 (Kalshi\'s position is adopted if this persists)'] },
+    async run(trigger: string, opts: { adopt?: boolean } = {}) {
+      runs.push({ trigger, ...opts });
+      if (opts.adopt) this.halted = false;
+      return { ok: !!opts.adopt, breaks: [], adopted: ['T: internal 0 vs exchange 2: adopted Kalshi\'s 2 at 0.50 (operator)'], externalOrders: [], repairedFills: 0, orphanOrdersCanceled: 0, ts: 1 };
+    },
+  };
+  let resets = 0;
+  const kill = { reset: () => { resets++; }, status: () => ({ engaged: resets === 0 }) };
+  const s = await serve({}, { recon: recon as never, kill: kill as never });
+  try {
+    const blocked = await s.post('/kill/reset', { confirm: 'RESET KILL SWITCH' });
+    assert.equal(blocked.status, 409);
+    assert.match(blocked.json.error, /reconciliation is not clean/);
+    assert.equal(blocked.json.resolve, '/api/recon/resolve');
+    assert.equal((await s.post('/recon/resolve', {})).status, 400, 'needs the confirm phrase');
+    const resolved = await s.post('/recon/resolve', { confirm: 'ADOPT KALSHI POSITIONS' });
+    assert.equal(resolved.status, 200);
+    assert.deepEqual(runs, [{ trigger: 'operator', adopt: true }]);
+    assert.equal(resolved.json.halted, false);
+    assert.equal((await s.post('/kill/reset', { confirm: 'RESET KILL SWITCH' })).status, 200);
+    assert.equal(resets, 1);
+  } finally { s.close(); }
+});

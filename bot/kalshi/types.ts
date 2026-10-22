@@ -57,6 +57,8 @@ export interface ExchangeFill {
   /** Fee for this fill in dollars, when the exchange reports it. */
   fee?: number;
   ts: number;
+  /** Kalshi's direction and price fields as sent (the audit keeps them for fills the bot did not place). */
+  wire?: Record<string, unknown>;
 }
 
 export interface ExchangePosition {
@@ -126,6 +128,8 @@ export interface ExchangeGateway {
   findOrderByClientId(clientOrderId: string, ticker: string): Promise<ExchangeOrder | undefined>;
   getOpenOrders(): Promise<ExchangeOrder[]>;
   getFills(sinceTs: number): Promise<ExchangeFill[]>;
+  /** One market's fills since `sinceTs` (reconciliation looks further back on a market whose position disagrees). */
+  getFillsForTicker?(ticker: string, sinceTs: number): Promise<ExchangeFill[]>;
   getPositions(): Promise<ExchangePosition[]>;
   getBalance(): Promise<number>;
   /** Cash per exchange shard from the last getBalance() (live Kalshi only; undefined when not reported). */
