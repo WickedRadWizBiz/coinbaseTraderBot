@@ -96,6 +96,39 @@ jobs:
             echo "== OOM / kills"; sudo dmesg -T 2>/dev/null | grep -iE "out of memory|killed process" | tail -5 || true
             echo "== warnings and errors, last 3 h (counted)"
             journalctl -u kalshi-bot --since "3 hours ago" --no-pager | grep -E "ERROR|WARN|Started|Stopped|exited" | sed -E 's/^.*kalshi-bot\[[0-9]+\]: //; s/^[0-9TZ:.-]+ //; s/\{.*//' | sort | uniq -c | sort -rn | head -25
+            echo "== live learning (does the running bot adapt to its results?)"
+            api /api/status | python3 -c '
+            import json, sys
+            s = json.load(sys.stdin); g = s.get("guards") or {}
+            J = lambda v, n=360: (json.dumps(v, default=str)[:n] if v is not None else "none")
+            m = s.get("model") or {}
+            print("model", m.get("id"), "| kind", m.get("kind"), "| live blockers", J(m.get("liveBlockers"), 200))
+            print("model vs market on settled windows (advantage > 0 = model better):", J(g.get("modelHealth")))
+            print("TA tilt vs math alone on settled windows:", J(g.get("taHealth")))
+            eg = g.get("equityGuard") or {}
+            print("size vs break-even: net P&L", eg.get("netPnl"), "| size x", eg.get("sizeScale"), "| break-even", eg.get("breakEven"))
+            print("optimal f from settled trades:", J(g.get("optimalF"), 300))
+            print("maker discount from 60 s markouts: buffer", g.get("makerBuffer"), "| markout", J(g.get("makerMarkout60")))
+            print("probation:", J(s.get("probation"), 500))
+            print("exit curve:", J(s.get("curveExit"), 300))
+            print("entry curve:", J(s.get("curveEntry"), 400))
+            print("tree models:", J(s.get("treeModels"), 400))
+            print("snn brief:", J(s.get("snn"), 500))' || true
+            api /api/snn | python3 -c '
+            import json, sys
+            s = json.load(sys.stdin)
+            for d, u in (s.get("units") or {}).items():
+                print("snn", d, "| stage", u.get("stage"), "| shadow", u.get("shadow"), "| keys", sorted(u.keys())[:24])
+                print("   health", json.dumps(u.get("health"), default=str)[:500])
+                net = u.get("network") or {}
+                print("   network keys", sorted(net.keys())[:24])' || true
+            api /api/autotrain | python3 -c '
+            import json, sys, time
+            a = json.load(sys.stdin)
+            print("auto-train mode", a.get("mode"), "| running", a.get("running"), "| last exit", json.dumps(a.get("lastExit")), "| next", a.get("nextRun"))
+            for k, v in sorted((a.get("models") or {}).items()):
+                print("  model file", k, "|", (str(round((time.time() * 1000 - v["mtime"]) / 3.6e6, 1)) + " h old") if v.get("mtime") else "missing", "|", v.get("id") or "")
+            print("  hot swaps", json.dumps(a.get("swaps"), default=str)[:400])' || true
             echo "== learning and settlement report"
             if [ -f ~/bot/current/deploy/learning_report.py ]; then python3 ~/bot/current/deploy/learning_report.py ~/bot/data || true; else echo "(learning report ships with the next release)"; fi
             for p in $EXTRA_PATHS; do

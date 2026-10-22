@@ -9,9 +9,24 @@ import glob, json, os, sys, time, urllib.request
 API = 'http://localhost:3000/api'
 DATA = os.path.expanduser(sys.argv[1] if len(sys.argv) > 1 else '~/bot/data')
 
+def dashboard_password():
+    # The dashboard API needs the dashboard password when one is set: read from bot.env on this server and only ever
+    # sent to localhost in a header (never printed, never on a command line).
+    pw = ''
+    try:
+        for line in open(os.path.expanduser('~/bot/bot.env'), encoding='utf8'):
+            if line.startswith('DASHBOARD_PASSWORD='):
+                pw = line.split('=', 1)[1].strip()  # the last one wins, as in the diagnostics script
+    except OSError:
+        return ''
+    return pw[1:-1] if len(pw) >= 2 and pw[0] == pw[-1] and pw[0] in '"\'' else pw
+
+PW = dashboard_password()
+
 def get(path):
     try:
-        return json.load(urllib.request.urlopen(API + path, timeout=20))
+        req = urllib.request.Request(API + path, headers={'Authorization': 'Bearer ' + PW} if PW else {})
+        return json.load(urllib.request.urlopen(req, timeout=20))
     except Exception as e:  # noqa: BLE001
         return {'_error': str(e)}
 
