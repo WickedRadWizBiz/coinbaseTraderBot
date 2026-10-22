@@ -74,6 +74,26 @@ export interface AutoTrainStatus {
   pausedFor?: string | null; pressure?: { lagMs: number | null; availableMb: number | null; steal: number | null } | null;
   window: { inside: string | null; next: { start: number; end: number; label: string } | null } | null; logFile: string | null; models: Record<string, { path: string; mtime: number | null; id?: string }>;
   swaps: { kind: string; ts: number; detail: string }[]; state: unknown;
+  /** The newest pipeline report in AUTO_TRAIN_DIR/reports: this machine's run, or (remote mode) the GitHub run's,
+   *  copied back with the models. Survives restarts, unlike lastExit and swaps. */
+  lastReport: PipelineReportSummary | null;
+}
+
+export interface PipelineReportSummary { at: string; complete: boolean; steps: number; promoted: string[]; failed: string[] }
+
+/** The newest reports/pipeline-*.json under dir, summarized (the file name sorts by time). */
+export function latestPipelineReport(dir: string): PipelineReportSummary | null {
+  try {
+    const names = fs.readdirSync(path.join(dir, 'reports')).filter((n) => /^pipeline-.*\.json$/.test(n)).sort();
+    if (!names.length) return null;
+    const r = JSON.parse(fs.readFileSync(path.join(dir, 'reports', names[names.length - 1]), 'utf8')) as { at?: string; complete?: boolean; steps?: Array<{ step: string; ok?: boolean; skipped?: unknown; detail?: { promoted?: boolean } }> };
+    const steps = r.steps ?? [];
+    return {
+      at: r.at ?? '', complete: Boolean(r.complete), steps: steps.length,
+      promoted: steps.filter((x) => x.detail?.promoted).map((x) => x.step),
+      failed: steps.filter((x) => !x.ok && !x.skipped).map((x) => x.step),
+    };
+  } catch { return null; }
 }
 
 export class AutoTrainer {
@@ -342,7 +362,7 @@ export class AutoTrainer {
       window: this.windows ? { inside: this.window() ?? null, next: nextSessionEdge(this.now, this.d.cfg.sessionEdge.minutes) ?? null } : null,
       logFile: this.logFile,
       models: Object.fromEntries(Object.entries(paths).map(([k, p]) => [k, { path: p, mtime: mtime(p), ...(k === 'mlp' ? { id: this.d.engine.model.id } : {}) }])),
-      swaps: this.swaps, state: this.state(),
+      swaps: this.swaps, state: this.state(), lastReport: latestPipelineReport(this.d.cfg.autoTrain.dir),
     };
   }
 }

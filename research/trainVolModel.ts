@@ -89,9 +89,12 @@ export async function volRows(dir: string, opts: { everySec?: number; fromDay?: 
   return rows;
 }
 
+/** Days of recordings the vol forecast needs: at least one for its holdout and two to train on. */
+export const VOL_MODEL_MIN_DAYS = 3;
+
 export function trainVolModel(rows: VolRow[], seed = 7): VolModelParams {
   const days = [...new Set(rows.map((r) => r.day))].sort();
-  if (rows.length < 2000 || days.length < 3) throw new Error(`need at least 2000 rows over 3 days, have ${rows.length} over ${days.length}`);
+  if (rows.length < 2000 || days.length < VOL_MODEL_MIN_DAYS) throw new Error(`need at least 2000 rows over ${VOL_MODEL_MIN_DAYS} days, have ${rows.length} over ${days.length}`);
   const nHold = Math.max(1, Math.round(days.length * 0.2));
   const holdDays = new Set(days.slice(-nHold));
   const devDays = days.slice(0, -nHold);

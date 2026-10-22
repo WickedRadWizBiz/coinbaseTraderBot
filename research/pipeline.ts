@@ -86,7 +86,7 @@ import type { SnnCheckpoint } from '../bot/snn/network';
 import { DEFAULT_SNN, domainParams, STAGES, stageFlags, type SnnDomain, type Stage } from '../bot/snn/params';
 import { FillModel } from '../bot/tca/fillModel';
 import { trainFillMain } from './trainFillModel';
-import { trainVolModelMain } from './trainVolModel';
+import { trainVolModelMain, VOL_MODEL_MIN_DAYS } from './trainVolModel';
 import { backtestMain } from './backtest';
 import { buildDatasetMain } from './buildDataset';
 import { perpBacktestMain } from './perpBacktest';
@@ -1042,6 +1042,9 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   // ---- 2. tree volatility forecast (fair value's sigma multiplier) ----
   if (want('vol_model')) {
     await run('vol_model', ifChanged('vol_model', async () => {
+      // Counted from the file names first: reading two days of recordings only to find too few took 13-40 minutes.
+      const recDays = recordingDays(rec).length;
+      if (recDays < VOL_MODEL_MIN_DAYS) throw new SkipStep(`not enough index history yet (needs ${VOL_MODEL_MIN_DAYS} days of recordings, have ${recDays})`);
       const cand = path.join(work, 'vol_model.candidate.json');
       let p;
       try { p = await trainVolModelMain(argsOf({ recordings: rec, out: cand })); } catch (e) {

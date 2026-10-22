@@ -11,6 +11,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import readline from 'readline';
 import { assetFeatureMap, computeFeatureMap } from '../bot/model/featureEngine';
 import { VolForecaster, VolModel } from '../bot/model/volModel';
 import { effectiveSigma, loadVolProfile, type VolProfile } from '../bot/model/volSeasonality';
@@ -63,18 +64,21 @@ export function eventOf(ticker: string, event?: string): string {
 
 export async function buildDataset(
   dir: string, everySec: number, referenceSigma = 5e-5,
-  opts: { volProfile?: VolProfile; applyVolSeasonality?: boolean; volModel?: VolModel; entryWindowOnly?: boolean; calendar?: MacroEvent[]; entryWindowUpdown?: [number, number]; entryWindowHourly?: [number, number] } = {},
+  opts: { volProfile?: VolProfile; applyVolSeasonality?: boolean; volModel?: VolModel; entryWindowOnly?: boolean; calendar?: MacroEvent[]; entryWindowUpdown?: [number, number]; entryWindowHourly?: [number, number]; onRow?: (r: DatasetRow) => void } = {},
 ): Promise<DatasetRow[]> {
   const volProfile = opts.volProfile;
   const st = new ReplayState();
   const volFc = new VolForecaster(opts.volModel);
   const pending = new Map<string, Omit<DatasetRow, 'label' | 'labelSource'>[]>();
   const rows: DatasetRow[] = [];
+  // With onRow, each labelled row goes there as its contract settles and none is kept: memory holds only the
+  // open contracts' rows (a day of recordings is about 400k rows at 14 KB each in memory).
+  const emit = opts.onRow ?? ((r: DatasetRow) => { rows.push(r); });
   let nextSample = 0;
 
   const flush = (m: RecMarket) => {
     const out = st.outcome(m);
-    for (const r of pending.get(m.ticker) ?? []) if (out) rows.push({ ...r, label: out.label, labelSource: out.source });
+    for (const r of pending.get(m.ticker) ?? []) if (out) emit({ ...r, label: out.label, labelSource: out.source });
     pending.delete(m.ticker);
   };
 
@@ -138,12 +142,51 @@ export async function buildDatasetMain(argOf: (k: string, d: string) => string =
   // ...and --vol-model when production applies the tree vol forecast (used only if validated).
   const vm = argOf('vol-model', '');
   const volModel = vm ? VolModel.load(vm) : undefined;
-  const rows = await buildDataset(dir, every, 5e-5, { volProfile, applyVolSeasonality: Boolean(volProfile), volModel, entryWindowOnly: process.argv.includes('--entry-window-only'), calendar: loadCalendar(cal) });
+  // Rows stream to a temporary file as contracts settle (none held in memory), renamed into place at the end.
   fs.mkdirSync(path.dirname(out), { recursive: true });
-  fs.writeFileSync(out, rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''));
-  const windows = new Set(rows.map((r) => r.window)).size;
-  const official = rows.filter((r) => r.labelSource === 'official').length;
-  console.log(`wrote ${rows.length} rows over ${windows} windows (${official} with official labels) to ${out}`);
+  const tmp = `${out}.${process.pid}.tmp`;
+  const fd = fs.openSync(tmp, 'w');
+  let buf: string[] = [], n = 0, official = 0;
+  const windows = new Set<number>();
+  const drain = () => { if (buf.length) { fs.writeSync(fd, buf.join('')); buf = []; } };
+  try {
+    await buildDataset(dir, every, 5e-5, {
+      volProfile, applyVolSeasonality: Boolean(volProfile), volModel, entryWindowOnly: process.argv.includes('--entry-window-only'), calendar: loadCalendar(cal),
+      onRow: (r) => { buf.push(JSON.stringify(r) + '\n'); n++; windows.add(r.window); if (r.labelSource === 'official') official++; if (buf.length >= 2000) drain(); },
+    });
+    drain();
+  } catch (e) { fs.closeSync(fd); fs.rmSync(tmp, { force: true }); throw e; }
+  fs.closeSync(fd);
+  fs.renameSync(tmp, out);
+  console.log(`wrote ${n} rows over ${windows.size} windows (${official} with official labels) to ${out}`);
+}
+
+/** The dataset's rows, read line by line (a file of several GB is never one string). Over maxRows, every contract
+ *  keeps an evenly spaced share of its snapshots (at least one): all contracts and their outcomes stay, only
+ *  snapshots seconds apart are thinned, and the trainer's 1 / snapshots weights keep each contract's total weight. */
+export async function readDataset(file: string, maxRows = Infinity): Promise<{ rows: DatasetRow[]; total: number }> {
+  const lines = () => readline.createInterface({ input: fs.createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
+  const tickerOf = (l: string) => /"ticker":"([^"]*)"/.exec(l)?.[1] ?? '';
+  const perTicker = new Map<string, number>();
+  let total = 0;
+  for await (const l of lines()) if (l) { total++; const t = tickerOf(l); perTicker.set(t, (perTicker.get(t) ?? 0) + 1); }
+  const rate = total > maxRows ? maxRows / total : 1;
+  const seen = new Map<string, number>();
+  const rows: DatasetRow[] = [];
+  for await (const l of lines()) {
+    if (!l) continue;
+    if (rate < 1) {
+      const t = tickerOf(l), nT = perTicker.get(t)!, i = seen.get(t) ?? 0;
+      seen.set(t, i + 1);
+      // Rounded down: the total stays within maxRows, past it only by contracts too short to keep any (one each).
+      const k = Math.max(1, Math.floor(nT * rate));
+      if (Math.floor(((i + 1) * k) / nT) === Math.floor((i * k) / nT)) continue;
+    }
+    const r = JSON.parse(l) as DatasetRow;
+    for (const k of Object.keys(r.fx)) if (r.fx[k] === null) r.fx[k] = NaN;
+    rows.push(r);
+  }
+  return { rows, total };
 }
 
 if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void buildDatasetMain();
