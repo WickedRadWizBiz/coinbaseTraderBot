@@ -48,6 +48,7 @@ import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
 import { playbook } from './strategy/playbook';
 import { compensator } from './strategy/compensator';
 import { macro } from './macro/macroService';
+import { gatePasses, probation } from './risk/probation';
 import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
 import { applyTakeGate } from './model/takeModel';
 import { effectiveSigma, type VolProfile } from './model/volSeasonality';
@@ -384,6 +385,8 @@ export class Engine {
     });
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized: number; positionBefore: number }) => {
       this.lastSettleTs = this.now();
+      // One probation result per settled market that traded (VALIDATION_GATES=monitor: bot/risk/probation.ts).
+      if (e.realized) probation()?.record(this.isTennis(e.ticker) ? 'tennis' : 'kalshi', e.realized, this.now());
       d.balanceMonitor?.onCash(settleCashDelta(e.positionBefore, e.result));
       d.kalshiCheck?.onBotCash(settleCashDelta(e.positionBefore, e.result));
       this.saveMonitor();
@@ -1251,7 +1254,7 @@ export class Engine {
   /** Tennis MLP fair P(A wins) (validated models only; otherwise undefined and the rules decide). */
   private tennisFairFor(event: string, tv: Record<string, number | undefined> | undefined, tickerA: string): number | undefined {
     const m = this.d.tennisFair;
-    if (!m?.validated || !tv) return undefined;
+    if (!m || !gatePasses('tennis', m.validated) || !tv) return undefined;
     const dir = this.snnDirs.get(`tennis:${tennisColumnKey(event)}`);
     const s = this.snnScores.get(tickerA);
     const p = m.predict(tennisFairInputs(tv, { p: s?.domain === 'tennis' ? s.p : undefined, up: dir?.pUp, skill: dir?.skill, calConf: dir?.calConf }));
@@ -1349,7 +1352,7 @@ export class Engine {
   setVolModel(m: VolModel | undefined): void { this.volFc.setModel(this.d.cfg.strategy.volModel ? m : undefined); this.d.volModel = m; }
   /** Hot-swap the fill model: it takes effect the moment a validated file appears. */
   setFillModel(m: FillModel | undefined): void { this.d.fillModel = m; }
-  get fillModelActive(): boolean { return Boolean(this.d.fillModel?.validated); }
+  get fillModelActive(): boolean { return Boolean(this.d.fillModel && gatePasses('kalshi', this.d.fillModel.validated)); }
 
   /** Hot-swap the validated intraday volatility profile (undefined removes it). */
   setVolProfile(vp: VolProfile | undefined): void {
@@ -1386,7 +1389,7 @@ export class Engine {
     const v = this.d.volModel, f = this.d.fillModel;
     return {
       volModel: v ? { version: v.params.version, validated: v.validated, applied: Boolean(v.validated && this.d.cfg.strategy.volModel), improvement: v.params.validation.improvement.mean } : null,
-      fill: f ? { version: f.params.version, validated: f.validated, active: f.validated, quotes: f.params.validation.quotes, fills: f.params.validation.fills } : null,
+      fill: f ? { version: f.params.version, validated: f.validated, active: gatePasses('kalshi', f.validated), quotes: f.params.validation.quotes, fills: f.params.validation.fills } : null,
       fillLogging: Boolean(this.fillLog),
       taNet: this.taNetStatus(),
     };
@@ -1587,7 +1590,8 @@ export class Engine {
     const standAside = S0.characterStandAside && coinChar && STAND_ASIDE.includes(coinChar.cls) ? coinChar.why : undefined;
     // The coin's evolved formula on the latest hourly bars (unvalidated ones never speak live).
     const gpRead = S0.gp ? activeGpSignals()?.read(m.asset, (a) => md.features.candles.get(a)?.bars['1h']) : undefined;
-    const gpSpeaks = gpRead?.speaks && (gpRead.validated || !liveMode) ? gpRead : undefined;
+    // On probation (VALIDATION_GATES=monitor) an unvalidated formula speaks too, live included.
+    const gpSpeaks = gpRead && (gpRead.validated || (gpRead.speaks && !liveMode) || gatePasses('kalshi', false)) ? gpRead : undefined;
     const signals = orientedSignals(features, taView, liveMode, rbRead, gpSpeaks);
     const taDir = taNetDirection(taView, liveMode);
     const rsiTrade = [shortContract ? features.ta_rsi_15m : features.ta_rsi_1h, features.rsi_14_1m].find((x) => x !== undefined && Number.isFinite(x));
@@ -1659,7 +1663,7 @@ export class Engine {
     // Hunt mode is evaluated by research:backtest --annotate. With a passing evaluation the winning
     // parameters are used; in live mode an unevaluated (or losing) hunt falls back to the fair-value exit.
     const vh = model.validatedHunt();
-    const huntAllowed = cfg.strategy.exitPolicy === 'confluence_ratchet' && (cfg.mode !== 'live' || vh !== undefined);
+    const huntAllowed = cfg.strategy.exitPolicy === 'confluence_ratchet' && (cfg.mode !== 'live' || vh !== undefined || gatePasses('kalshi', false));
     const huntNote = cfg.strategy.exitPolicy === 'confluence_ratchet' && !huntAllowed ? 'hunt mode not validated by the backtest: fair-value exit in live' : undefined;
     if (huntAllowed) {
       let h = this.hunts.get(m.ticker);
@@ -1907,7 +1911,7 @@ export class Engine {
       totalRisk: totals.total,
       ordersLastMinute: oms.ordersSentInLast(60_000),
       openOrders: oms.liveOrders().length,
-      modelLiveBlockers: cfg.liveAllowUnvalidated ? [] : model.liveBlockers(),
+      modelLiveBlockers: cfg.liveAllowUnvalidated || gatePasses('kalshi', false) ? [] : model.liveBlockers(),
       limitOverrides: this.tierLimits(this.tier()),
       dailyLossAdvisory: this.overrideActive(),
     };

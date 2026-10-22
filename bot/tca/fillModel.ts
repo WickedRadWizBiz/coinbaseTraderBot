@@ -22,6 +22,7 @@ import type { OrderBook } from '../marketdata/orderBook';
 import type { OrderPlan } from '../strategy/fairValueStrategy';
 import { takerFee } from '../fees';
 import { gbdtLogit, validateGbdt, type GbdtModel } from '../model/trees';
+import { gatePasses } from '../risk/probation';
 
 export const FILL_FEATURES = [
   'side_price', 'dist_ticks', 'queue_ahead_log', 'touch_size_log', 'opp_touch_size_log', 'spread_ticks', 'imbalance_side',
@@ -115,7 +116,7 @@ export const isMakerEntry = (o: OrderPlan) => o.purpose === 'quote' && o.postOnl
  *  Returns what it changed (for notes / tests). */
 export function applyFillModel(plan: { place: OrderPlan[]; notes: string[] }, fm: FillModel | undefined, c: FillDecisionCtx): { crossed: number; skipped: number } {
   const res = { crossed: 0, skipped: 0 };
-  if (!fm?.validated) return res;
+  if (!fm || !gatePasses('kalshi', fm.validated)) return res;
   const bb = c.book.bestBid(), ba = c.book.bestAsk();
   const next: OrderPlan[] = [];
   for (const o of plan.place) {

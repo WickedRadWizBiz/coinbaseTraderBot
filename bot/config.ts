@@ -4,6 +4,7 @@
 
 import fs from 'fs';
 import { parseSessionRisk, type SessionRiskProfile } from './model/sessionRisk';
+import { DEFAULT_PROBATION, type ProbationParams } from './risk/probation';
 import { defaultTiers, validateTiers, type TierPoint } from './risk/sizingTiers';
 import type { VaultConfig } from './vault/vault';
 import os from 'os';
@@ -198,6 +199,9 @@ export interface Config {
   /** LIVE_ALLOW_UNVALIDATED_MODEL=true: trade binary contracts live even when the model failed validation
    *  (the operator accepts the risk; every other limit still applies). */
   liveAllowUnvalidated: boolean;
+  /** VALIDATION_GATES=monitor (default): models that have not passed validation trade anyway, on probation; a book whose
+   *  results are unacceptable is benched (bot/risk/probation.ts). enforce: every validation gate blocks as before. */
+  probation: ProbationParams;
   host: string;
   port: number;
   /** DASHBOARD_PASSWORD: '' (default) = the dashboard opens without a login. */
@@ -905,7 +909,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     fastMoveSigmas: num(env, 'STRATEGY_FAST_MOVE_SIGMAS', 3, 0.5, 20),
     fastMoveWindowSec: num(env, 'STRATEGY_FAST_MOVE_WINDOW_SEC', 5, 1, 120),
     orderTtlSec: num(env, 'STRATEGY_ORDER_TTL_SEC', 60, 10, 900),
-    exitPolicy: oneOf(env, 'EXIT_POLICY', relaxed ? 'hold' : 'fair_value', ['hold', 'fair_value', 'take_profit', 'confluence_ratchet'] as const),
+    // Sell for profit once the bid beats the model's value, and let winners run on the confluence ratchet.
+    exitPolicy: oneOf(env, 'EXIT_POLICY', 'confluence_ratchet', ['hold', 'fair_value', 'take_profit', 'confluence_ratchet'] as const),
     exitMargin: num(env, 'STRATEGY_EXIT_MARGIN', 0.01, 0, 0.5),
     takeProfit: num(env, 'STRATEGY_TAKE_PROFIT', 0.08, 0.01, 0.5),
     cadence,
@@ -984,6 +989,13 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     kalshiSubaccount: env.KALSHI_SUBACCOUNT ? num(env, 'KALSHI_SUBACCOUNT', 0, 0, 1000) : undefined,
     kalshiBalancePrecision: env.KALSHI_BALANCE_PRECISION === '0.0001' ? 0.0001 : 0.01,
     liveAllowUnvalidated: bool(env, 'LIVE_ALLOW_UNVALIDATED_MODEL', false),
+    probation: {
+      mode: oneOf(env, 'VALIDATION_GATES', 'monitor', ['monitor', 'enforce'] as const),
+      minTrades: num(env, 'PROBATION_MIN_TRADES', DEFAULT_PROBATION.minTrades, 2, 10_000),
+      t: num(env, 'PROBATION_T', DEFAULT_PROBATION.t, 0, 10),
+      maxLossUsd: num(env, 'PROBATION_MAX_LOSS_USD', DEFAULT_PROBATION.maxLossUsd, 0, 1e9),
+      window: num(env, 'PROBATION_WINDOW', DEFAULT_PROBATION.window, 10, 100_000),
+    },
     host,
     port: num(env, 'PORT', 3000, 1, 65535),
     dashboardPassword,
