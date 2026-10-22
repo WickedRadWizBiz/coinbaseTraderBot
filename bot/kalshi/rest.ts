@@ -14,7 +14,7 @@ import {
   CreateOrderRequest, ExchangeFill, ExchangeGateway, ExchangeOrder, ExchangePosition,
   MarketInfo, OrderRejectedError, OrderStateUnknownError, SeriesFeeInfo, BookSnapshot,
 } from './types';
-import { formatCount, formatPrice, parseBalance, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, parseSeriesFees, parseSettlement, parseTransfer } from './wire';
+import { formatCount, formatPrice, parseBalance, parseBalanceBreakdown, parseCreatedOrder, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, parseSeriesFees, parseSettlement, parseTransfer } from './wire';
 import { recordLatency } from '../util/latency';
 
 const log = logger('kalshi-rest');
@@ -44,6 +44,7 @@ export class KalshiRest implements ExchangeGateway {
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
   private signPublic = true;
+  private lastShardCash: Record<number, number> | undefined;
 
   constructor(private readonly opts: RestOptions) {
     this.base = opts.baseUrl.replace(/\/$/, '');
@@ -153,7 +154,7 @@ export class KalshiRest implements ExchangeGateway {
 
     try {
       const data = await this.raw('POST', '/portfolio/events/orders', payload);
-      return parseOrder(data);
+      return parseCreatedOrder(data, req);
     } catch (e) {
       if (e instanceof HttpError && e.status >= 400 && e.status < 500) {
         let code: string | undefined;
@@ -166,9 +167,11 @@ export class KalshiRest implements ExchangeGateway {
     }
   }
 
-  async cancelOrder(orderId: string): Promise<void> {
+  /** `ticker` routes the cancel to the market's exchange shard: without it Kalshi looks on shard 0 only, where an order
+   *  on another shard (crypto: 2, tennis: 3) is not found. */
+  async cancelOrder(orderId: string, ticker?: string): Promise<void> {
     try {
-      await this.raw('DELETE', `/portfolio/events/orders/${encodeURIComponent(orderId)}`);
+      await this.raw('DELETE', `/portfolio/events/orders/${encodeURIComponent(orderId)}${ticker ? `?market_ticker=${encodeURIComponent(ticker)}` : ''}`);
     } catch (e) {
       if (e instanceof HttpError && e.status === 404) {
         // Older orders may live only on the legacy path; a 404 there too means
@@ -233,9 +236,22 @@ export class KalshiRest implements ExchangeGateway {
   }
 
   async getBalance(): Promise<number> {
-    const b = parseBalance(await this.read('/portfolio/balance'));
+    const raw = await this.read('/portfolio/balance');
+    const b = parseBalance(raw);
     if (b === undefined) throw new Error('balance missing from response');
+    this.lastShardCash = parseBalanceBreakdown(raw);
     return b;
+  }
+
+  /** Cash per exchange shard from the last balance read (the aggregate hides which engine the cash sits on). */
+  shardBalances(): Record<number, number> | undefined { return this.lastShardCash; }
+
+  /** GET /api_keys `api_key_region_expiration_ts`: the account's location attestation for API trading. */
+  async getLocationAttestation(): Promise<number | null | undefined> {
+    const raw = await this.read('/api_keys');
+    if (!raw || typeof raw !== 'object') return undefined;
+    const v = raw.api_key_region_expiration_ts;
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
   }
 
   // ---- Market data (public) ----------------------------------------------

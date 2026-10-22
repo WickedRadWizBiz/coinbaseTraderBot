@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react';
 import { Power, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { api, clock, pct, px, usd } from '../api';
 import { MarketSessionCard } from './MarketSessionCard';
@@ -37,10 +38,19 @@ export function DashboardView() {
     await api('/kill', { method: 'POST', body: JSON.stringify({ reason: reason || 'manual' }) }).catch((e) => alert(e.message));
     void refresh();
   };
+  // Reset is a double tap: the first tap arms the button for 1.5 s, the second resets. (The API itself still requires
+  // its confirm phrase, which the dashboard sends.)
+  const [resetArmed, setResetArmed] = useState(false);
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reset = async () => {
-    const confirm = prompt('Type RESET KILL SWITCH to re-enable trading.');
-    if (confirm === null) return;
-    await api('/kill/reset', { method: 'POST', body: JSON.stringify({ confirm }) }).catch((e) => alert(e.message));
+    if (resetTimer.current) clearTimeout(resetTimer.current);
+    if (!resetArmed) {
+      setResetArmed(true);
+      resetTimer.current = setTimeout(() => setResetArmed(false), 1500);
+      return;
+    }
+    setResetArmed(false);
+    await api('/kill/reset', { method: 'POST', body: JSON.stringify({ confirm: 'RESET KILL SWITCH' }) }).catch((e) => alert(e.message));
     void refresh();
   };
 
@@ -81,8 +91,14 @@ export function DashboardView() {
                 <div className="text-xs text-[#b0b0b0] mt-0.5">{s.kill.reason} — since {s.kill.engagedAt}</div>
               </div>
             </div>
-            <button onClick={reset} className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-crypto-danger text-white hover:bg-white hover:text-crypto-danger transition-colors border border-crypto-danger">
-              Reset Kill Switch
+            <button
+              type="button" onClick={reset} title="Double-tap to reset the kill switch"
+              className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-colors border border-crypto-danger select-none active:scale-95 flex flex-col items-center leading-tight ${
+                resetArmed ? 'bg-white text-crypto-danger animate-pulse shadow-[0_0_15px_rgba(255,59,48,0.5)]' : 'bg-crypto-danger text-white hover:bg-white hover:text-crypto-danger'
+              }`}
+            >
+              <span>{resetArmed ? 'Tap again (2/2)' : 'Reset Kill Switch'}</span>
+              <span className="text-[8px] opacity-75 font-mono tracking-tighter">{resetArmed ? 'confirm reset' : '(double-tap)'}</span>
             </button>
           </div>
         )}

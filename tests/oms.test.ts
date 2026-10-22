@@ -82,6 +82,25 @@ test('definitive rejection moves to REJECTED and counts consecutive errors', asy
   assert.equal(errs, 2);
 });
 
+test('not enough cash and a missing location attestation are reported apart, never counted toward the kill switch', async () => {
+  const gw = new FakeGateway();
+  const replies = [
+    new OrderRejectedError('HTTP 400: {"error":{"code":"insufficient_balance","message":"insufficient balance"}}', 400, 'insufficient_balance'),
+    new OrderRejectedError('HTTP 403: {"error":{"code":"Your_location_attestation_for_API_trading_is_missing_or_expired."}}', 403, 'Your_location_attestation_for_API_trading_is_missing_or_expired.'),
+  ];
+  let n = 0;
+  gw.onCreate = () => replies[n++ % 2];
+  const oms = mk(gw);
+  let errs = 0, cash = 0, blocked = 0;
+  oms.on('order_error', () => { errs++; });
+  oms.on('insufficient_balance', () => { cash++; });
+  oms.on('account_blocked', () => { blocked++; });
+  for (let i = 0; i < 6; i++) await oms.submit(intent());
+  assert.equal(errs, 0);
+  assert.equal(cash, 3);
+  assert.equal(blocked, 3);
+});
+
 test('client_order_id is persisted before the order is sent and state survives restart', async () => {
   const gw = new FakeGateway();
   const file = path.join(tmpDir(), 'oms.json');

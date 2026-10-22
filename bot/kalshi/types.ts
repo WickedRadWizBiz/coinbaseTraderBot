@@ -92,6 +92,8 @@ export interface MarketInfo {
   title?: string;
   /** Scheduled event start, when published (sports). */
   startTime?: number;
+  /** The exchange shard (matching engine) the market trades on: its orders are collateralized from that shard's cash. */
+  exchangeIndex?: number;
 }
 
 export interface SeriesFeeInfo {
@@ -118,13 +120,19 @@ export interface ExchangeGateway {
   /** When the exchange last validated balance / orders / fills / positions (GET /exchange/user_data_timestamp). */
   getUserDataTimestamp?(): Promise<number | undefined>;
   createOrder(req: CreateOrderRequest): Promise<ExchangeOrder>;
-  cancelOrder(orderId: string): Promise<void>;
+  /** `ticker` routes the cancel to the market's exchange shard (Kalshi needs it for orders off shard 0). */
+  cancelOrder(orderId: string, ticker?: string): Promise<void>;
   getOrder(orderId: string): Promise<ExchangeOrder | undefined>;
   findOrderByClientId(clientOrderId: string, ticker: string): Promise<ExchangeOrder | undefined>;
   getOpenOrders(): Promise<ExchangeOrder[]>;
   getFills(sinceTs: number): Promise<ExchangeFill[]>;
   getPositions(): Promise<ExchangePosition[]>;
   getBalance(): Promise<number>;
+  /** Cash per exchange shard from the last getBalance() (live Kalshi only; undefined when not reported). */
+  shardBalances?(): Record<number, number> | undefined;
+  /** When the account's location attestation for API trading expires (unix seconds): null = never attested,
+   *  undefined = unknown. Without it Kalshi refuses API orders on Sports, Elections and Entertainment markets. */
+  getLocationAttestation?(): Promise<number | null | undefined>;
 }
 
 /** Order submit failed in a way where the order may or may not exist. */

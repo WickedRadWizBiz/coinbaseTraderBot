@@ -204,8 +204,11 @@ export class Oms extends EventEmitter {
         rec.lastError = e.message;
         this.safeTransition(rec, 'REJECTED');
         this.o.audit.write('order_reject', { clientOrderId: rec.clientOrderId, status: e.status, code: e.code, error: e.message });
-        // Post-only crosses and rate limits are expected; count everything else.
-        if (e.code !== 'post_only_cross' && !/post.?only/i.test(e.message)) this.bumpError(e.message);
+        // Post-only crosses are expected. Not enough cash and a missing location attestation are account states,
+        // not a broken bot: the engine waits for cash / alerts instead of counting them toward the kill switch.
+        if (e.code === 'insufficient_balance' || /insufficient.?balance/i.test(e.message)) this.emit('insufficient_balance', rec);
+        else if (isAccountBlock(e)) this.emit('account_blocked', e.message, rec);
+        else if (e.code !== 'post_only_cross' && !/post.?only/i.test(e.message)) this.bumpError(e.message);
       } else if (e instanceof OrderStateUnknownError) {
         rec.lastError = e.message;
         this.safeTransition(rec, 'UNKNOWN');
@@ -267,7 +270,7 @@ export class Oms extends EventEmitter {
     if (rec.state !== 'CANCEL_PENDING') this.safeTransition(rec, 'CANCEL_PENDING');
     this.save();
     try {
-      await this.o.gateway.cancelOrder(rec.orderId);
+      await this.o.gateway.cancelOrder(rec.orderId, rec.ticker);
       const ex = await this.o.gateway.getOrder(rec.orderId);
       if (ex) this.applyExchangeOrder(rec, ex);
     } catch (e) {
@@ -288,7 +291,7 @@ export class Oms extends EventEmitter {
     try {
       const resting = await this.o.gateway.getOpenOrders();
       for (const ex of resting) {
-        try { await this.o.gateway.cancelOrder(ex.orderId); canceled++; } catch { errors++; }
+        try { await this.o.gateway.cancelOrder(ex.orderId, ex.ticker); canceled++; } catch { errors++; }
       }
     } catch (e) {
       errors++;
@@ -446,4 +449,10 @@ export class Oms extends EventEmitter {
     };
     writeJsonAtomic(this.o.statePath, st, { compact: true, durable });
   }
+}
+
+/** Kalshi refuses API orders until the account's location is re-verified in the Kalshi app or website (HTTP 403,
+ *  "location attestation ... missing or expired"). Nothing the bot does fixes it, and every order fails until then. */
+export function isAccountBlock(e: { code?: string; message: string; status?: number }): boolean {
+  return /location.?attestation/i.test(`${e.code ?? ''} ${e.message}`);
 }

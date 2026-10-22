@@ -482,6 +482,8 @@ npm run dev              # paper mode by default
   - `LIVE_TRADING_ACKNOWLEDGED=I_ACCEPT_REAL_MONEY_RISK`
   - a validated `params/model.json`, unless the model trades on probation (`VALIDATION_GATES=monitor`, the default, below) or `LIVE_ALLOW_UNVALIDATED_MODEL=true` (trade anyway, at your risk)
   - step by step, for both APIs: docs/DEPLOY.md, "Connecting the prediction and perps APIs"
+  - **cash on the right exchange shard.** Kalshi runs each category on its own matching engine (shard 2: crypto and commodities; shard 3: tennis, baseball, basketball; shard 0: everything else) and checks an order's collateral on its market's shard only. Orders in the Kalshi app move cash between shards on their own; API orders do not. Move cash to the crypto shard (and the tennis shard, for tennis) at kalshi.com/account/exchange-indexes. The bot reads the cash per shard, refuses an order its shard cannot fund (saying where the cash is), warns when a shard it trades on is empty, and shows the split on the dashboard (Kalshi cash by shard).
+  - **for tennis: the location attestation.** Kalshi refuses API orders on Sports, Elections and Entertainment markets while the account's location attestation is missing or expired (`api_key_region_expiration_ts` on GET /api_keys; it belongs to the account, not to an API key). The bot checks it every 30 minutes and pauses tennis while it is missing; a refusal pauses tennis only. Crypto contracts do not need it.
 
 ### Probation: unvalidated models trade, and their results decide (`VALIDATION_GATES`)
 

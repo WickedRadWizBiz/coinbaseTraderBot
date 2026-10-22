@@ -52,7 +52,8 @@ function status(v: unknown): ExchangeOrderStatus {
 
 export function parseOrder(raw: Obj): ExchangeOrder {
   const o: Obj = raw.order ?? raw;
-  const side = toBookSide(o.side, o.action);
+  // `book_side` (bid/ask) is the current field; `side` + `action` are the deprecated ones.
+  const side = toBookSide(o.book_side ?? o.side, o.action);
   const price = yesPrice(o);
   const orderId = o.order_id ?? o.id;
   if (!orderId || !side || price === undefined) {
@@ -80,9 +81,37 @@ export function parseOrder(raw: Obj): ExchangeOrder {
   };
 }
 
+/** POST /portfolio/events/orders (Create Order V2) replies with the outcome only: {order_id, client_order_id,
+ *  fill_count, remaining_count, average_fill_price?, average_fee_paid?, ts_ms}. The ticker, side and price are the
+ *  request's. For IOC orders remaining_count is already the final state (the unfilled rest canceled). A full order
+ *  object (older servers) is parsed as before. */
+export function parseCreatedOrder(raw: Obj, req: { ticker: string; side: BookSide; price: number; count: number; clientOrderId?: string }): ExchangeOrder {
+  const o: Obj = raw.order ?? raw;
+  if (o.ticker !== undefined && (o.book_side !== undefined || o.side !== undefined)) return parseOrder(raw);
+  const orderId = o.order_id ?? o.id;
+  const fillCount = parseCount(o.fill_count_fp) ?? parseCount(o.fill_count);
+  const remaining = parseCount(o.remaining_count_fp) ?? parseCount(o.remaining_count);
+  if (!orderId || fillCount === undefined || remaining === undefined) throw new Error(`Unparseable order payload: ${JSON.stringify(o).slice(0, 300)}`);
+  const avgFee = parseDollars(o.average_fee_paid_dollars) ?? parseDollars(o.average_fee_paid);
+  return {
+    orderId: String(orderId),
+    clientOrderId: o.client_order_id ? String(o.client_order_id) : req.clientOrderId,
+    ticker: req.ticker,
+    side: req.side,
+    price: req.price,
+    status: remaining > 1e-9 ? 'resting' : fillCount > 1e-9 ? 'executed' : 'canceled',
+    fillCount,
+    remainingCount: remaining,
+    initialCount: req.count,
+    averageFillPrice: parseDollars(o.average_fill_price_dollars) ?? parseDollars(o.average_fill_price),
+    feesPaid: avgFee !== undefined ? avgFee * fillCount : undefined,
+    updatedTs: ts(o.ts_ms),
+  };
+}
+
 export function parseFill(raw: Obj): ExchangeFill {
   const f: Obj = raw.fill ?? raw;
-  const side = toBookSide(f.side, f.action);
+  const side = toBookSide(f.book_side ?? f.side, f.action);
   const price = yesPrice(f);
   const count = parseCount(f.count_fp) ?? parseCount(f.count);
   const tradeId = f.trade_id ?? f.fill_id;
@@ -112,6 +141,19 @@ export function parsePositions(raw: Obj): ExchangePosition[] {
 
 export function parseBalance(raw: Obj): number | undefined {
   return parseDollars(raw.balance_dollars) ?? parseDollars(raw.balance, true);
+}
+
+/** Available cash per exchange shard (GET /portfolio/balance `balance_breakdown`): Kalshi runs each market category
+ *  on its own matching engine (shard 2 crypto, 3 tennis/baseball/basketball, 0 everything else) and checks an order's
+ *  collateral on its shard only. Undefined when the response has no breakdown. */
+export function parseBalanceBreakdown(raw: Obj): Record<number, number> | undefined {
+  if (!Array.isArray(raw.balance_breakdown)) return undefined;
+  const out: Record<number, number> = {};
+  for (const b of raw.balance_breakdown as Obj[]) {
+    const i = Number(b?.exchange_index), v = parseDollars(b?.balance);
+    if (Number.isInteger(i) && i >= 0 && v !== undefined) out[i] = (out[i] ?? 0) + v;
+  }
+  return out;
 }
 
 /** The strike in a ladder ticker's last segment: B = range centred there, T = threshold. */
@@ -171,6 +213,7 @@ export function parseMarket(m: Obj): MarketInfo | undefined {
     })(),
     tickSize: tick && tick > 0 ? tick : 0.01,
     priceRanges: parsePriceRanges(m.price_ranges),
+    exchangeIndex: Number.isInteger(m.exchange_index) && m.exchange_index >= 0 ? m.exchange_index : undefined,
     result: m.result,
     title: m.title ?? m.yes_sub_title ?? undefined,
     // Sports: scheduled start when the exchange publishes one (field name unverified; several tried).

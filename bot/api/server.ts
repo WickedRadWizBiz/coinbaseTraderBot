@@ -192,6 +192,7 @@ export function createApi(d: ApiDeps): express.Express {
       snn: d.engine.snnBrief(),
       treeModels: d.engine.treeModelStatus(),
       probation: probation()?.status() ?? null,
+      kalshiAccount: d.engine.kalshiAccountStatus(),
       autoTrain: d.autoTrain ? (() => { const a = d.autoTrain!.status(); return { mode: a.mode, running: a.running, paused: a.paused, window: a.window, nextRun: a.nextRun, lastExit: a.lastExit, lastSwap: a.swaps[0] ?? null, lastReport: a.lastReport }; })() : null,
       tennis: {
         enabled: d.cfg.tennis.enabled,
