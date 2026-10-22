@@ -84,8 +84,12 @@ export interface StrategyConfig {
   /** Profit target: sell at the touch once that banks this much a contract (dollars) over what the position cost,
    *  net of the entry's fees and the exit's taker fee, whatever the model thinks the contract is worth. 0 = off. */
   profitTarget: number;
-  /** ...or this fraction of what a contract cost (its price plus the entry fee), when that is more. */
+  /** ...or this fraction of what a contract cost (its price plus the entry fee), when that is more. Together: the
+   *  take-profit's floor, which arms it. */
   profitTargetPct: number;
+  /** Take-profit: once armed, sell when the gain falls back by this fraction of its best (never below the floor).
+   *  0 = sell as soon as the floor is reached. */
+  profitGiveBack: number;
   /** relaxed = decide on each 1-minute bar close or on a trigger (spec cadence); continuous = every tick. */
   cadence: 'relaxed' | 'continuous';
   /** Scheduled evaluation period, fair-value move that triggers an evaluation, re-price period, and the floor between evaluations. */
@@ -942,9 +946,11 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     exitPolicy: oneOf(env, 'EXIT_POLICY', 'confluence_ratchet', ['hold', 'fair_value', 'take_profit', 'confluence_ratchet'] as const),
     exitMargin: num(env, 'STRATEGY_EXIT_MARGIN', 0.01, 0, 0.5),
     takeProfit: num(env, 'STRATEGY_TAKE_PROFIT', 0.08, 0.01, 0.5),
-    // Bank gains as they come (owner's spec): at least 10% of what the contract cost, and at least 2c, net of every fee.
+    // Take-profit (owner's spec, Oct 22): winners run. Armed at 10% of what the contract cost (at least 2c) net of every
+    // fee, then sold when a third of the best gain is given back, never below that floor.
     profitTarget: num(env, 'PROFIT_TARGET_CENTS', 2, 0, 50) / 100,
     profitTargetPct: num(env, 'PROFIT_TARGET_PCT', 0.10, 0, 1),
+    profitGiveBack: num(env, 'PROFIT_GIVE_BACK', 1 / 3, 0, 1),
     cadence,
     evalBarSec: num(env, 'STRATEGY_EVAL_BAR_SEC', 60, 5, 600),
     evalFvMove: num(env, 'STRATEGY_EVAL_FV_MOVE', 0.015, 0.001, 0.2),

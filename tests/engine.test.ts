@@ -312,24 +312,50 @@ test('exit curve: an exit at a loss goes out at once', async () => {
   assert.deepEqual(curveExit.status().holding, []);
 });
 
-test('profit target: a winner the model would keep is sold once it banks the target net of fees', async () => {
+test('take-profit: a winner runs, then is sold once it gives back a third of its best gain', async () => {
   const { engine, recon, market, md, oms, audit } = await setup();
   const r = await recon.run('startup');
   engine.balance = r!.balance;
-  // Long 10 YES bought at 0.40 as a maker. The model values YES near 0.55, so its own exit would hold at a 0.46 bid;
-  // the profit target (10% of the 0.40 cost = 4c) sells: +6c, less the 1.8c taker fee, is +4.2c net.
+  // Long 10 YES bought at 0.40 as a maker: the floor is 10% of the 0.40 cost, 4c. At a 0.56 bid it is +16c less the
+  // 1.8c taker fee, +14.2c net: armed, and a winner at its best runs. Back at 0.50 (+8.2c, more than a third of the best
+  // given back) it is sold.
   oms.onFill({ tradeId: 'p1', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.4, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+  const exits = () => oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly);
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.56, size: 50 }], asks: [{ price: 0.58, size: 50 }] }, Date.now());
+  await engine.tick();
+  const st = engine.status.get(market.ticker)!;
+  assert.equal(exits().length, 0, st.notes.join(' | '));
+  assert.ok(st.notes.some((n) => /^take-profit armed: \+0\.142 now, best \+0\.142/.test(n)), st.notes.join(' | '));
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.5, size: 50 }], asks: [{ price: 0.52, size: 50 }] }, Date.now());
+  await engine.tick();
+  assert.equal(exits().length, 1, engine.status.get(market.ticker)!.notes.join(' | '));
+  assert.deepEqual([exits()[0].side, exits()[0].price, exits()[0].count], ['ask', 0.5, 10]);
+  const why = audit.tail(50, 'decision').flatMap((d) => ((d.data as { place?: Array<{ why: string }> }).place ?? []).map((p) => p.why));
+  assert.ok(why.some((w) => /^take-profit: \+0\.082 a contract net of fees \(best \+0\.142, floor \+0\.040\)/.test(w)), why.join(' | '));
+});
+
+test('take-profit: the last tick above the floor goes out at once, the exit curve never holds it', async () => {
+  const curveExit = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
+  const { engine, recon, market, md, oms } = await setup({ curveExit });
+  const r = await recon.run('startup');
+  engine.balance = r!.balance;
+  // Long 10 YES at 0.40 (floor 4c). Best 0.48 (+6.2c), then 0.46 (+4.2c): within a tick of the floor, sold to lock it in.
+  oms.onFill({ tradeId: 'p3', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.4, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+  const exits = () => oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly);
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.48, size: 50 }], asks: [{ price: 0.5, size: 50 }] }, Date.now());
+  await engine.tick();
+  assert.equal(exits().length, 0, engine.status.get(market.ticker)!.notes.join(' | '));
+  await new Promise((res) => setTimeout(res, 20));
   md.book(market.ticker).applySnapshot({ bids: [{ price: 0.46, size: 50 }], asks: [{ price: 0.48, size: 50 }] }, Date.now());
   await engine.tick();
-  const exits = oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly);
-  assert.equal(exits.length, 1, engine.status.get(market.ticker)!.notes.join(' | '));
-  assert.deepEqual([exits[0].side, exits[0].price, exits[0].count], ['ask', 0.46, 10]);
-  const why = audit.tail(50, 'decision').flatMap((d) => ((d.data as { place?: Array<{ why: string }> }).place ?? []).map((p) => p.why));
-  assert.ok(why.some((w) => /^profit target: \+0\.042 a contract net of fees >= 0\.040/.test(w)), why.join(' | '));
+  assert.equal(exits().length, 1, engine.status.get(market.ticker)!.notes.join(' | '));
+  assert.equal(exits()[0].price, 0.46);
+  assert.deepEqual(curveExit.status().holding, []);
 });
 
 test('an exit never trades against the bot\'s own resting quote (self-trade prevention would cancel it): the quote is pulled first', async () => {
-  const { engine, recon, market, md, oms, audit } = await setup();
+  // PROFIT_GIVE_BACK=0: the take-profit sells as soon as the floor is reached, so the exit is due on the tick under test.
+  const { engine, recon, market, md, oms, audit } = await setup({ env: { PROFIT_GIVE_BACK: '0' } });
   const r = await recon.run('startup');
   engine.balance = r!.balance;
   oms.onFill({ tradeId: 'p2', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.5, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });

@@ -29,6 +29,7 @@ import type { KillSwitch } from './risk/killSwitch';
 import { RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
 import { decide, decisionProbability, MarketView, OrderPlan } from './strategy/fairValueStrategy';
+import { ProfitPeaks } from './strategy/profitPeaks';
 import { ConfluenceRatchetExit } from './strategy/exitPolicies';
 import type { SinuousEntryGate } from './strategy/sinuousEntry';
 import { tennisHighLeverage, type CurveReading, type SinuousExitGate } from './strategy/sinuousExit';
@@ -314,6 +315,8 @@ export interface EngineDeps {
 export class Engine {
   private readonly busy = new Set<string>();
   private readonly hunts = new Map<string, ConfluenceRatchetExit>();
+  /** Take-profit high-water marks: the best price each held side could have been sold at since it was opened or added to. */
+  private readonly profitPeaks = new ProfitPeaks();
   private readonly cadence: CadenceGate;
   private readonly lastPosition = new Map<string, number>();
   private timers: NodeJS.Timeout[] = [];
@@ -877,6 +880,7 @@ export class Engine {
       tier: { ...t, orderRiskUsd: +(t.orderFrac * b).toFixed(2), dailyLossLimitUsd: +this.d.risk.dailyLossLimit(b, this.tierLimits(t)).toFixed(2) },
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null, minQuoteContracts: S.minQuoteContracts,
+      takeProfit: { floorPct: S.profitTargetPct, floorCents: +(S.profitTarget * 100).toFixed(2), giveBack: +S.profitGiveBack.toFixed(3) },
       // The flat sigma multiplier in use until a validated vol forecast takes over (null once one does).
       volFallbackMult: this.volFc.model?.validated ? null : S.volFallbackMult,
       clock: this.d.clock?.status(Date.now()) ?? null,
@@ -1664,6 +1668,7 @@ export class Engine {
       if (st.closeTs < cutoff || st.updatedTs < staleBefore) {
         this.status.delete(t);
         this.hunts.delete(t);
+        this.profitPeaks.forget(t);
         this.cadence.forget(t);
         this.lastPosition.delete(t);
         this.d.modelHealth?.forget(t);
@@ -1874,6 +1879,7 @@ export class Engine {
       restingBid, restingAsk, nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
       pMarket, pStd: pred.std, makerBuffer: this.makerBuffer(), entrySidePrice: entrySidePrice !== undefined && entrySidePrice > 0 && entrySidePrice < 1 ? entrySidePrice : undefined,
       entryFeePerContract: pos && Math.abs(pos.yes) > 1e-9 ? pos.fees / Math.abs(pos.yes) : undefined,
+      profitPeakSidePrice: this.profitPeaks.update(m.ticker, st.position, st.position > 0 ? bid.price : st.position < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
       entryWindowOpen, exitWindowOpen: tauSec > S.noExitBeforeCloseSec,
     };
     // Exit policy. confluence_ratchet: fair-value exit normally; "hunt" mode (liquidity ratchet
@@ -2061,7 +2067,7 @@ export class Engine {
         const sidePrice = sign > 0 ? p.price : Math.round((1 - p.price) * 1e4) / 1e4;
         const g = curve.check(m.ticker, {
           sidePrice, count: p.count, exitFeePer: orderFee(p.count, sidePrice, true, fees) / p.count,
-          entrySidePrice: entrySide, entryFeePer, protective: p === huntPlan && huntProtective,
+          entrySidePrice: entrySide, entryFeePer, protective: (p === huntPlan && huntProtective) || p.protective === true,
         }, now);
         if (g.note) plan.notes.push(g.note);
         return g.allow;

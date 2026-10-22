@@ -47,6 +47,7 @@ import { PaperExchange } from '../bot/paper/paperExchange';
 import { marketWorstLoss } from '../bot/risk/exposure';
 import { RiskGateway } from '../bot/risk/riskGateway';
 import { decide } from '../bot/strategy/fairValueStrategy';
+import { ProfitPeaks } from '../bot/strategy/profitPeaks';
 import { ConfluenceRatchetExit, DEFAULT_HUNT, DEFAULT_RATCHET, EXIT_POLICIES, ExitPolicyName, HuntParams, LiquidityRatchet, RatchetParams } from '../bot/strategy/exitPolicies';
 import { readRecordings, ReplayState } from './replay';
 import { bootstrapMeanCi, deflatedSharpe, pbo, rng, sharpe } from './stats';
@@ -169,6 +170,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const res: BacktestResult = { exitPolicy: policy, label: policy === 'confluence_ratchet' ? `confluence_ratchet[m=${(opts.hunt ?? DEFAULT_HUNT).targetMargin},f=${(opts.ratchet ?? DEFAULT_RATCHET).minFillRatio}]` : policy, huntParams: policy === 'confluence_ratchet' ? { hunt: opts.hunt ?? DEFAULT_HUNT, ratchet: opts.ratchet ?? DEFAULT_RATCHET } : undefined, vaultEnd: 0, pocketEnd: 0, bySession: {}, exits, trades: [], takeProfitFills: 0, latency: { orderMs: opts.latency?.orderMs ?? 0, cancelMs: opts.latency?.cancelMs ?? opts.latency?.orderMs ?? 0, jitterMs: opts.latency?.jitterMs ?? 0, sent: 0, cancelRaceFills: 0, cancelRaceContracts: 0, lateKills: 0 }, entryEvaluations: 0, days: 0, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
   const cadence = new CadenceGate(strategy);
   const lastPos = new Map<string, number>();
+  const peaks = new ProfitPeaks();
   // Bankroll tiers from the tradable high-water mark, with the tier's drawdown brake (mirrors the engine).
   const tiers = opts.sizingTiers ?? defaultTiers({ risk: limits, strategy });
   let peakBank = 0;
@@ -405,6 +407,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,
         restingBid: rb, restingAsk: ra, nowSec: Math.floor(st.now / 1000), closeSec: Math.floor(m.closeTime / 1000),
         pMarket, pStd: pred.std, makerBuffer: strategy.makerBuffer, entrySidePrice: entrySide !== undefined && entrySide > 0 && entrySide < 1 ? entrySide : undefined,
+        entryFeePerContract: pNow && Math.abs(pNow.yes) > 1e-9 ? pNow.fees / Math.abs(pNow.yes) : undefined,
+        profitPeakSidePrice: peaks.update(m.ticker, posC, posC > 0 ? bid.price : posC < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
         entryWindowOpen, exitWindowOpen: tauSec > strategy.noExitBeforeCloseSec,
       }, { ...stratRun, kellyFraction: tier.kellyFraction * ddScale, minEdge: strategy.minEdge + sessRisk.minEdgeAdd, inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult }, {
         exits: policy === 'fair_value' || policy === 'take_profit' || policy === 'hybrid' || (policy === 'confluence_ratchet' && !huntMode),
