@@ -36,6 +36,9 @@ test('over maxRows each contract keeps an evenly spaced share of its snapshots, 
   const per = new Map<string, number[]>();
   for (const r of thin.rows) per.set(r.ticker, [...(per.get(r.ticker) ?? []), r.t]);
   assert.equal(per.size, 20, 'every contract kept');
+  // Shares are rounded down: never over the cap.
+  const uneven = await readDataset(file, 333);
+  assert.ok(uneven.rows.length <= 333, `rows=${uneven.rows.length}`);
   for (const ts of per.values()) {
     assert.equal(ts.length, 10);
     const gaps = ts.slice(1).map((t, i) => t - ts[i]);

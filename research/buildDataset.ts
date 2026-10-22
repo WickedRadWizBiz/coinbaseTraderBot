@@ -178,7 +178,8 @@ export async function readDataset(file: string, maxRows = Infinity): Promise<{ r
     if (rate < 1) {
       const t = tickerOf(l), nT = perTicker.get(t)!, i = seen.get(t) ?? 0;
       seen.set(t, i + 1);
-      const k = Math.max(1, Math.round(nT * rate));
+      // Rounded down: the total stays within maxRows, past it only by contracts too short to keep any (one each).
+      const k = Math.max(1, Math.floor(nT * rate));
       if (Math.floor(((i + 1) * k) / nT) === Math.floor((i * k) / nT)) continue;
     }
     const r = JSON.parse(l) as DatasetRow;
