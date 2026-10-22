@@ -73,6 +73,9 @@ export interface OmsOptions {
   durableWriteAhead?: boolean;
   /** Coalescing window for state writes (ms). Default 1000. */
   saveDelayMs?: number;
+  /** Live: cancelAll leaves resting orders the bot did not send (the operator's own, placed on Kalshi by hand) alone.
+   *  Every order the bot sends is on disk first, so an unknown one is not the bot's. */
+  leaveExternalOrders?: boolean;
 }
 
 export class Oms extends EventEmitter {
@@ -282,7 +285,8 @@ export class Oms extends EventEmitter {
     }
   }
 
-  /** Cancel every live order we know of AND every resting order on the exchange. */
+  /** Cancel every live order we know of AND every resting order on the exchange (with leaveExternalOrders, only
+   *  those the bot sent: a shutdown, a STOP or the kill switch never cancels the operator's own orders). */
   async cancelAll(reason: string): Promise<{ canceled: number; errors: number }> {
     let canceled = 0, errors = 0;
     await Promise.all(this.liveOrders().map(async (r) => {
@@ -291,6 +295,8 @@ export class Oms extends EventEmitter {
     try {
       const resting = await this.o.gateway.getOpenOrders();
       for (const ex of resting) {
+        const ours = (ex.clientOrderId !== undefined && this.orders.has(ex.clientOrderId)) || this.byExchangeId.has(ex.orderId);
+        if (!ours && this.o.leaveExternalOrders) continue;
         try { await this.o.gateway.cancelOrder(ex.orderId, ex.ticker); canceled++; } catch { errors++; }
       }
     } catch (e) {

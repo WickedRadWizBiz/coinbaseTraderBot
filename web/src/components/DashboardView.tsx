@@ -34,7 +34,7 @@ export function DashboardView() {
   const { data: orders } = usePoll<any[]>('/orders?limit=40', 3000);
 
   const engage = async () => {
-    const reason = prompt('ENGAGE KILL SWITCH: cancels all orders and blocks new ones. Reason?');
+    const reason = prompt('ENGAGE KILL SWITCH: cancels all of the bot\'s orders and blocks new ones. Reason?');
     if (reason === null) return;
     await api('/kill', { method: 'POST', body: JSON.stringify({ reason: reason || 'manual' }) }).catch((e) => alert(e.message));
     void refresh();
