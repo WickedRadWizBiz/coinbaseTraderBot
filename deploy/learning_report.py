@@ -87,6 +87,25 @@ if logs:
 st_file = os.path.join(DATA, 'models', 'pipeline_state.json')
 print('  pipeline state:', short(json.load(open(st_file)) if os.path.exists(st_file) else 'none yet', 500))
 
+print('== what each book has learned from its results (files on disk: paper in data/, live in data/live/)')
+def load(path):
+    try:
+        return json.load(open(path))
+    except Exception:  # noqa: BLE001
+        return None
+for name, d in (('paper', DATA), ('live', os.path.join(DATA, 'live'))):
+    if not os.path.isdir(d): print(f"  {name}: no book yet"); continue
+    pr = load(os.path.join(d, 'probation.json')) or {}
+    for book, b in sorted(pr.items()):
+        r = b.get('results') or []
+        bench = b.get('benched')
+        print(f"  {name} probation {book:7s} {len(r)} results, net ${sum(r):.2f}" + (f" | BENCHED {time.strftime('%Y-%m-%d %H:%M', time.gmtime(bench['at'] / 1000))} UTC: {bench.get('reason')}" if bench else ' | open'))
+    eg = load(os.path.join(d, 'equity_guard.json')) or {}
+    h = eg.get('history') or []
+    if eg.get('reference') is not None and h: print(f"  {name} size vs break-even: break-even ${eg['reference']:.2f}, last hourly equity ${h[-1]['equity']:.2f} ({time.strftime('%m-%d %H:%M', time.gmtime(h[-1]['ts'] / 1000))} UTC)")
+    ce = load(os.path.join(d, 'curve-exit.json'))
+    if ce: print(f"  {name} exit curve: {len(ce.get('results') or [])} held exits scored, net ${sum(ce.get('results') or []):.2f} | benched {short(ce.get('benched'), 160)}")
+
 print('== settlement')
 st = s.get('settlement')
 if st: print('  sweeper', short(st, 600))
