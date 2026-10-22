@@ -23,6 +23,8 @@ export interface RiskContext {
   skipEdgeCollar?: boolean;
   /** Bankroll used for fractional limits; undefined = unknown = reject. */
   bankroll: number | undefined;
+  /** Cash left for new orders (the engine's freeCash()); an entry costing more is refused before Kalshi refuses it. */
+  freeCash?: number;
   /** Today's PnL, realized + mark-to-market, net of fees. */
   dailyPnl: number;
   bookUsable: boolean;
@@ -144,6 +146,7 @@ export class RiskGateway {
     const bank = c.bankroll;
     const addRisk = Math.max(0, c.marketRiskWith - c.marketRiskNow);
     const orderRisk = i.count * (sideCost + feePer);
+    if (c.freeCash !== undefined && !onlyReduces && orderRisk > c.freeCash + EPS) r.push(`order cost $${orderRisk.toFixed(2)} > free cash $${Math.max(0, c.freeCash).toFixed(2)}`);
     if (orderRisk > L.maxOrderRiskFrac * bank + EPS) r.push(`order risk $${orderRisk.toFixed(2)} > ${(L.maxOrderRiskFrac * 100).toFixed(1)}% of $${bank.toFixed(2)}`);
     if (c.windowRisk + addRisk > L.maxWindowRiskFrac * bank + EPS) r.push(`window risk $${(c.windowRisk + addRisk).toFixed(2)} > ${(L.maxWindowRiskFrac * 100).toFixed(1)}% cap`);
     if (c.totalRisk + addRisk > L.maxTotalRiskFrac * bank + EPS) r.push(`total risk $${(c.totalRisk + addRisk).toFixed(2)} > ${(L.maxTotalRiskFrac * 100).toFixed(1)}% cap`);

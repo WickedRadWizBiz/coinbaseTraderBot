@@ -36,6 +36,16 @@ test('accepts a sane, positive-edge maker order', () => {
   assert.equal(d.ok, true);
 });
 
+test('an entry costing more than the free cash is refused; exits are not', () => {
+  const i = intent();
+  const cost = i.count * (i.side === 'bid' ? i.price : 1 - i.price);
+  assert.ok(gw.check(i, ctx({ freeCash: cost + 1 })).ok);
+  const d = gw.check(i, ctx({ freeCash: cost / 2 }));
+  assert.equal(d.ok, false);
+  assert.match(d.reasons.join(';'), /free cash/);
+  assert.ok(gw.check(intent({ side: 'ask', reduceOnly: true, purpose: 'exit', timeInForce: 'immediate_or_cancel', postOnly: false, price: 0.4, count: 1 }), ctx({ freeCash: 0, position: 2 })).ok);
+});
+
 test('fails closed on unknown bankroll, stale data, halts and kill switch', () => {
   assert.equal(gw.check(intent(), ctx({ bankroll: undefined })).ok, false);
   assert.equal(gw.check(intent(), ctx({ bookUsable: false })).ok, false);

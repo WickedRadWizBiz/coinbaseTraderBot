@@ -316,6 +316,12 @@ export class Engine {
   private lastRejectAudit = new Map<string, number>();
   private dataHalt: string | undefined = 'awaiting market data';
   balance: number | undefined;
+  /** When the balance was last read, and when Kalshi last refused an order for want of cash. */
+  private balanceTs = 0;
+  private cashShortAt = 0;
+  private lastCashRecon = 0;
+  /** Kalshi refusing every API order until the account's location is re-verified (bot/oms/oms.ts isAccountBlock). */
+  private accountBlock: { until: number; reason: string } | undefined;
   readonly status = new Map<string, MarketStatus>();
   private readonly now: () => number;
 
@@ -422,6 +428,7 @@ export class Engine {
   /** New balance from reconciliation: detect withdrawals/deposits, then store. */
   onBalance(balance: number): void {
     this.balance = balance;
+    this.balanceTs = this.now();
     const eq = this.equity();
     if (eq !== undefined) for (const win of this.pendingResults.splice(0)) {
       const raised = this.d.equityGuard?.onTradeResult(win, eq, this.now());
@@ -507,6 +514,27 @@ export class Engine {
     oms.on('order_error', (n: number, msg: string) => {
       if (n >= cfg.risk.maxConsecutiveOrderErrors) void kill.engage(`${n} consecutive order errors (last: ${msg})`, 'oms');
     });
+    // Not enough cash for an order (resting orders hold cash on Kalshi): no new entries until a fresh balance read,
+    // fetched now (at most every 15 s). Exits and reduce-only orders are unaffected.
+    oms.on('insufficient_balance', (rec: { ticker: string; side: string; price: number; count: number }) => {
+      const now = this.now();
+      this.cashShortAt = now;
+      this.d.audit.write('risk_reject', { reasons: ['exchange: insufficient balance'], ticker: rec.ticker, side: rec.side, price: rec.price, count: rec.count, balance: this.balance, freeCash: this.freeCash() });
+      if (now - this.lastCashRecon >= 15_000) {
+        this.lastCashRecon = now;
+        void recon.run('insufficient_balance').then((r) => { if (r?.balance !== undefined) this.onBalance(r.balance); }).catch(() => undefined);
+      }
+    });
+    // Kalshi refuses every API order until the location is re-verified: pause new orders for 10 minutes at a time and
+    // say what to do, instead of tripping the kill switch on a run of identical refusals.
+    oms.on('account_blocked', (msg: string) => {
+      const first = !this.accountBlock || this.accountBlock.until <= this.now();
+      this.accountBlock = { until: this.now() + 10 * 60_000, reason: 'Kalshi API trading blocked: location attestation missing or expired (verify your location in the Kalshi app or website)' };
+      if (first) {
+        this.d.audit.write('risk_reject', { reasons: [this.accountBlock.reason], error: msg });
+        this.d.alerter.notify('critical', 'kalshi-location', `${this.accountBlock.reason}. New orders are paused and retried every 10 minutes.`);
+      }
+    });
     oms.on('orphan_fill', (f) => this.d.alerter.notify('critical', 'orphan-fill', `Fill for unknown order on ${f.ticker} (${f.count} @ ${f.price})`));
     log.info('engine started', { mode: cfg.mode, model: this.d.model.id, markets: md.activeMarkets().length });
   }
@@ -549,6 +577,8 @@ export class Engine {
     if (lag) r.push(lag);
     if (this.balance === undefined) r.push('balance unknown');
     else if (this.bankroll() === 0) r.push('no tradable cash (vault/pocket reserved)');
+    if (this.cashShortAt > this.balanceTs) r.push('Kalshi refused an order for insufficient balance: waiting for the next balance read');
+    if (this.accountBlock && this.accountBlock.until > this.now()) r.push(this.accountBlock.reason);
     r.push(...this.entryGuards());
     return r;
   }
@@ -808,6 +838,18 @@ export class Engine {
   }
 
   /** Bankroll for fractional limits: cash + premium committed to open positions. */
+  /** Cash left for new orders: the last balance read, less what the entry orders placed since then hold (Kalshi holds
+   *  a resting buy's cost; orders placed before the read are already out of it). */
+  freeCash(): number | undefined {
+    if (this.balance === undefined) return undefined;
+    let held = 0;
+    for (const o of this.d.oms.liveOrders()) {
+      if (o.reduceOnly || o.purpose === 'exit' || o.createdTs <= this.balanceTs) continue;
+      held += (o.side === 'bid' ? o.price : 1 - o.price) * Math.max(0, o.remainingCount);
+    }
+    return this.balance - held;
+  }
+
   bankroll(): number | undefined {
     if (this.balance === undefined) return undefined;
     const committed = this.d.oms.positions.open().reduce((s, m) => s + PositionBook.maxLoss(m), 0);
@@ -1909,6 +1951,7 @@ export class Engine {
       marketRiskWith: p.reduceOnly ? this.marketRisk(m.ticker) : this.marketRisk(m.ticker, extra),
       windowRisk: totals.window,
       totalRisk: totals.total,
+      freeCash: this.freeCash(),
       ordersLastMinute: oms.ordersSentInLast(60_000),
       openOrders: oms.liveOrders().length,
       modelLiveBlockers: cfg.liveAllowUnvalidated || gatePasses('kalshi', false) ? [] : model.liveBlockers(),
