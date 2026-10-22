@@ -79,7 +79,7 @@ import fs from 'fs';
 import v8 from 'v8';
 import path from 'path';
 import { MODEL_FILES } from '../bot/autotrain';
-import { loadConfig, type Config } from '../bot/config';
+import { loadConfig, paperEnv, type Config } from '../bot/config';
 import { MetaModel } from '../bot/model/metaModel';
 import { PerpModel } from '../bot/perps/perpSignal';
 import type { SnnCheckpoint } from '../bot/snn/network';
@@ -309,7 +309,7 @@ export interface PipelineOpts {
 }
 
 export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepResult[]; state: PipelineState; report: string }> {
-  const cfg = o.cfg ?? loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
+  const cfg = o.cfg ?? loadConfig(paperEnv(process.env));
   const A = cfg.autoTrain;
   const log = o.log ?? ((m: string) => console.log(`[pipeline] ${m}`));
   const now = o.now ?? Date.now();

@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { test } from 'node:test';
-import { ConfigError, loadConfig, publicConfig } from '../bot/config';
+import { ConfigError, loadConfig, paperEnv, publicConfig } from '../bot/config';
 
 const token = 'x'.repeat(40);
 
@@ -56,4 +56,15 @@ test('public config redacts secrets', () => {
   const pc = JSON.stringify(publicConfig(loadConfig({ DASHBOARD_TOKEN: token, ALERT_TELEGRAM_TOKEN: 'secret-telegram' }) as any));
   assert.ok(!pc.includes(token));
   assert.ok(!pc.includes('secret-telegram'));
+});
+
+test('training runs load a live server\'s settings in paper mode: live perps become paper instead of failing to load', () => {
+  const live = { TRADING_MODE: 'live', PERP_HEDGE: 'live', PERP_TRADING: 'live', EXIT_POLICY: 'confluence_ratchet' };
+  assert.throws(() => loadConfig({ ...live, TRADING_MODE: 'paper' }), /PERP_HEDGE=live requires TRADING_MODE=live/, 'the live check itself stays');
+  const cfg = loadConfig(paperEnv(live));
+  assert.equal(cfg.mode, 'paper');
+  assert.equal(cfg.perps.hedge, 'paper');
+  assert.equal(cfg.perps.trading, 'paper');
+  assert.equal(cfg.strategy.exitPolicy, 'confluence_ratchet', 'every other setting is kept');
+  assert.deepEqual(paperEnv({ PERP_HEDGE: 'off' }).PERP_HEDGE, 'off');
 });

@@ -83,9 +83,9 @@ const dayOf = (f: RecordingDay) => f.day;
 
 export async function loadWholeBot(o: { recordings: string; history: string; setupOos?: string; modelPath?: string; split?: Record<string, [number, number]>; log?: (m: string) => void }): Promise<WholeBotData> {
   const log = o.log ?? ((m: string) => console.log(`[whole-bot] ${m}`));
-  const { loadConfig } = await import('../bot/config');
+  const { loadConfig, paperEnv } = await import('../bot/config');
   const { MetaModel } = await import('../bot/model/metaModel');
-  const cfg = loadConfig({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), TRADING_MODE: 'paper' });
+  const cfg = loadConfig(paperEnv(process.env));
   const model = o.modelPath && fs.existsSync(o.modelPath) ? MetaModel.load(o.modelPath) : MetaModel.identity();
   const all = recordedDays(o.recordings);
   const split = o.split ?? { all: [0, 1] };

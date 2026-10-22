@@ -222,7 +222,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
         if (res) { for (const r of ps) addRow({ ...r, y: res === 'yes' ? 1 : 0 }); net.settle(a.ticker, res, st.now); }
         net.removeColumn(tennisColumnKey(event));
         trackers.delete(event); tennisIn.delete(event);
-        for (const m of ms) st.markets.delete(m.ticker);
+        for (const m of ms) st.forget(m.ticker);
         continue;
       }
       if (T % 5000 !== 0 || st.now < Math.min(...ms.map((m) => m.openTime))) continue;
@@ -278,7 +278,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     // Settle closed markets (90 s after close, when the official average is fully observed). Their book and trade
     // tracker go with them: over weeks of replay they would pile up (thousands of contracts a day).
     for (const m of [...st.markets.values()]) {
-      if (st.now >= m.closeTime + 90_000) { if (!m.recordOnly && m.kind !== 'match') settleMarket(m); st.markets.delete(m.ticker); st.books.delete(m.ticker); st.features.micro.delete(m.ticker); }
+      if (st.now >= m.closeTime + 90_000) { if (!m.recordOnly && m.kind !== 'match') settleMarket(m); st.forget(m.ticker); }
     }
     if (tennisDomain) tennisStep(T);
     // L0 inputs: the closest-to-the-money Up/Down or "greater" contract per column.
