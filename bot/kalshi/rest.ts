@@ -168,22 +168,14 @@ export class KalshiRest implements ExchangeGateway {
   }
 
   /** `ticker` routes the cancel to the market's exchange shard: without it Kalshi looks on shard 0 only, where an order
-   *  on another shard (crypto: 2, tennis: 3) is not found. */
+   *  on another shard (crypto: 2, tennis: 3) is not found. A 404 means the order is already gone (filled, canceled or
+   *  expired), which the OMS confirms via getOrder. There is no fallback to the legacy DELETE /portfolio/orders/{id}:
+   *  Kalshi retired it (HTTP 410 deprecated_v1_order_endpoint). */
   async cancelOrder(orderId: string, ticker?: string): Promise<void> {
     try {
       await this.raw('DELETE', `/portfolio/events/orders/${encodeURIComponent(orderId)}${ticker ? `?market_ticker=${encodeURIComponent(ticker)}` : ''}`);
     } catch (e) {
-      if (e instanceof HttpError && e.status === 404) {
-        // Older orders may live only on the legacy path; a 404 there too means
-        // the order is already gone, which the OMS confirms via getOrder.
-        try {
-          await this.raw('DELETE', `/portfolio/orders/${encodeURIComponent(orderId)}`);
-        } catch (e2) {
-          if (e2 instanceof HttpError && e2.status === 404) return;
-          throw e2;
-        }
-        return;
-      }
+      if (e instanceof HttpError && e.status === 404) return;
       throw e;
     }
   }
