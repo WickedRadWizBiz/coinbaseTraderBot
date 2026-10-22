@@ -1,7 +1,10 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
+import { capAnimationFrameRate } from './frameRate';
 import './index.css';
+
+capAnimationFrameRate(20);
 
 // Purge service workers/caches left by the previous PWA build.
 try {

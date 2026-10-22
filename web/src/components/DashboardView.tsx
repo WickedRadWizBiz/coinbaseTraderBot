@@ -27,8 +27,8 @@ function Row({ label, value, sub, tone }: { label: string; value: string; sub?: 
 const BANNER = 'h-[164px] sm:h-[80px]';
 
 export function DashboardView() {
-  const { data: s, error, refresh } = usePoll<any>('/status');
-  const { data: markets } = usePoll<any[]>('/markets');
+  const { data: s, error, refresh } = usePoll<any>('/status', 3000);
+  const { data: markets } = usePoll<any[]>('/markets', 3000);
   const { data: positions } = usePoll<any[]>('/positions', 3000);
   const { data: orders } = usePoll<any[]>('/orders?limit=40', 3000);
 

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Maximize2, Minimize2, Network } from 'lucide-react';
+import { onAnimationStep } from '../frameRate';
 import { Panel } from './Panel';
 import { usePoll } from './usePoll';
 
@@ -164,8 +165,8 @@ export function NeuralMapView() {
     // Pixel edges on whole DEVICE pixels, so neighbouring pixels meet exactly (no seams) at any size.
     const edgeD = (k: number) => Math.round(k * pitchD);
     const edge = (k: number) => edgeD(k) / dpr;
-    let raf = 0;
-    const t0 = performance.now();
+    let last = performance.now();
+    const t0 = last;
     // Glitch bursts: every few seconds a few horizontal strips tear sideways for a moment.
     let glitchUntil = 0, nextGlitch = 1.5 + Math.random() * 2;
     let bands: Array<{ y: number; h: number; dx: number }> = [];
@@ -179,18 +180,27 @@ export function NeuralMapView() {
     glowB.width = Math.max(1, Math.round(cv.width / 14)); glowB.height = Math.max(1, Math.round(cv.height / 14));
     const ga = glowA.getContext('2d')!, gb = glowB.getContext('2d')!;
     ga.imageSmoothingQuality = 'high'; gb.imageSmoothingQuality = 'high';
+    // The pixel grid goes into an N x N image (one image pixel per grid pixel) that is scaled onto the canvas
+    // without smoothing: one draw a frame instead of N*N rectangles. Nearest-neighbour scaling puts the pixel
+    // edges on whole device pixels, as the rectangles did. Where no section is, the background shows.
+    const grid = document.createElement('canvas');
+    grid.width = N; grid.height = N;
+    const gctx = grid.getContext('2d')!;
+    const img = gctx.createImageData(N, N), px = img.data;
+    for (let o = 0; o < px.length; o += 4) { px[o] = 2; px[o + 1] = 3; px[o + 2] = 6; px[o + 3] = 255; }
     const draw = (now: number) => {
       const t = (now - t0) / 1000;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = '#020306'; ctx.fillRect(0, 0, side, side);
+      // The easing rates are per 60 Hz frame: apply as many of them as fit in the time since the last frame.
+      const steps = Math.max(0, Math.min(15, (now - last) / (1000 / 60)));
+      last = now;
+      const easeCell = 1 - Math.pow(1 - 0.06, steps), easeSlot = 1 - Math.pow(1 - 0.08, steps);
       // A pulse sweeping down the tiers (grid rows): the logic flowing toward the traders.
       const wave = ((t % 5) / 5) * (N + 20) - 10;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
       for (const s of sections) {
         const { b } = s;
         let cur = shown.current.get(b.id);
         if (!cur || cur.length !== b.cells.length) { cur = Float32Array.from(b.cells); shown.current.set(b.id, cur); }
-        for (let i = 0; i < b.cells.length; i++) cur[i] += (b.cells[i] - cur[i]) * 0.06;
+        for (let i = 0; i < b.cells.length; i++) cur[i] += (b.cells[i] - cur[i]) * easeCell;
         // Every screen pixel gets its own value: the section reads the block's cells in order, wrapping
         // when it has more pixels than cells (no stretched pixels in the wide funnels).
         const n = b.cells.length;
@@ -205,16 +215,24 @@ export function NeuralMapView() {
             const i = map ? map[k] : scatterIndex(gx, gy, n);
             const shimmer = 1 + 0.2 * b.activity * Math.sin(t * 2.6 + (s.gx + gx) * 1.31 + (s.gy + gy) * 0.77);
             const target = Math.min(1, Math.abs(cur[i] ?? 0) * shimmer);
-            ss[k] = ss[k] < 0 ? target : ss[k] + (target - ss[k]) * 0.08;
+            ss[k] = ss[k] < 0 ? target : ss[k] + (target - ss[k]) * easeSlot;
             const m = ss[k];
             const [r, g, bl] = ramp(m);
             const lum = 0.55 + 0.45 * Math.sqrt(m) + pulse;
-            ctx.fillStyle = `rgba(${Math.min(255, r * lum) | 0},${Math.min(255, g * lum) | 0},${Math.min(255, bl * lum) | 0},${Math.min(1, 0.2 + 0.9 * Math.sqrt(m) + pulse * 0.5)})`;
-            const X = s.gx + gx, Y = s.gy + gy;
-            ctx.fillRect(edgeD(X), edgeD(Y), edgeD(X + 1) - edgeD(X), edgeD(Y + 1) - edgeD(Y));
+            const a = Math.min(1, 0.2 + 0.9 * Math.sqrt(m) + pulse * 0.5);
+            // The colour at that opacity over the background (#020306).
+            const o = ((s.gy + gy) * N + s.gx + gx) * 4;
+            px[o] = 2 + ((Math.min(255, r * lum) | 0) - 2) * a;
+            px[o + 1] = 3 + ((Math.min(255, g * lum) | 0) - 3) * a;
+            px[o + 2] = 6 + ((Math.min(255, bl * lum) | 0) - 6) * a;
           }
         }
       }
+      gctx.putImageData(img, 0, 0);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(grid, 0, 0, cv.width, cv.height);
+      ctx.imageSmoothingEnabled = true;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       // ---- CRT and glitch pass ----
       // Scanlines.
@@ -290,10 +308,10 @@ export function NeuralMapView() {
       ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.fillStyle = vignette; ctx.fillRect(0, 0, side, side);
-      raf = requestAnimationFrame(draw);
     };
-    raf = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(raf);
+    // One frame per step of the page's 20 fps animation clock (not every display refresh: 60-120 Hz on a phone), in the
+    // same screen update as the stepped CSS animations. A hidden tab draws nothing.
+    return onAnimationStep(draw);
   }, [sections, data, side, N, hover]);
 
   const onMove = (e: React.MouseEvent<HTMLCanvasElement>) => {

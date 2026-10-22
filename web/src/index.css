@@ -173,8 +173,9 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
 /* Bottom-left / Bottom-right */
 
 .crt-grid-panel {
-  background: rgba(2, 2, 4, 0.70);
-  backdrop-filter: blur(12px) brightness(0.55) contrast(1.2);
+  /* The colour the glass used to get by blurring and darkening the metal behind it (backdrop-filter: blur(12px)
+     brightness(0.55) contrast(1.2) over 70% black): the same look without re-blurring the backdrop on every frame. */
+  background: rgb(30, 31, 35);
   border-top: 2px solid #555;
   border-left: 2px solid #555;
   border-bottom: 2px solid #ccc;
@@ -187,6 +188,9 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
   position: relative;
   padding: 1rem;
   animation: screen-flicker 0.15s infinite;
+  /* Its own compositor layer: each flicker step (stepped 20 times a second, see frameRate.ts) re-blends the finished
+     screen instead of repainting its text and glow. */
+  will-change: opacity;
   border-radius: 12px;
   overflow: hidden;
 }
@@ -241,6 +245,8 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
   opacity: 0.65;
   mix-blend-mode: multiply;
   animation: crt-scan-overlay 8s linear infinite;
+  /* Its own layer: a scan-bar step repaints only this overlay, never the panel's text and glow. */
+  will-change: transform;
 }
 
 @keyframes screen-flicker {
