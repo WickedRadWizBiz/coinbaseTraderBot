@@ -426,9 +426,10 @@ export class Engine {
   }
 
   /** New balance from reconciliation: detect withdrawals/deposits, then store. */
-  onBalance(balance: number): void {
+  /** A balance read; readAt = when the read began (default now). */
+  onBalance(balance: number, readAt = this.now()): void {
     this.balance = balance;
-    this.balanceTs = this.now();
+    this.balanceTs = readAt;
     const eq = this.equity();
     if (eq !== undefined) for (const win of this.pendingResults.splice(0)) {
       const raised = this.d.equityGuard?.onTradeResult(win, eq, this.now());
@@ -481,21 +482,26 @@ export class Engine {
   async start(): Promise<void> {
     const { cfg, md, recon, oms, kill } = this.d;
     await md.refreshCatalog();
+    // Each balance is stamped with the time its read began: entry orders placed while the reconciliation runs are not
+    // in it and stay counted against the free cash.
+    const t0 = this.now();
     const first = await recon.run('startup');
-    if (first?.balance !== undefined) this.onBalance(first.balance);
+    if (first?.balance !== undefined) this.onBalance(first.balance, t0);
 
     this.timers.push(setInterval(() => void this.tick(), 1000));
     this.timers.push(setInterval(() => void md.refreshCatalog(), 20_000));
     this.timers.push(setInterval(async () => {
+      const t = this.now();
       const r = await recon.run('interval');
-      if (r?.balance !== undefined) this.onBalance(r.balance);
+      if (r?.balance !== undefined) this.onBalance(r.balance, t);
     }, cfg.reconcileIntervalMs));
     this.timers.push(setInterval(() => this.watchdog(), 1000));
 
     md.on('reconnected', async () => {
       this.dataHalt = undefined;
+      const t = this.now();
       const r = await recon.run('ws_reconnect');
-      if (r?.balance !== undefined) this.onBalance(r.balance);
+      if (r?.balance !== undefined) this.onBalance(r.balance, t);
     });
     md.on('disconnected', () => {
       this.dataHalt = 'market data disconnected';
@@ -522,7 +528,7 @@ export class Engine {
       this.d.audit.write('risk_reject', { reasons: ['exchange: insufficient balance'], ticker: rec.ticker, side: rec.side, price: rec.price, count: rec.count, balance: this.balance, freeCash: this.freeCash() });
       if (now - this.lastCashRecon >= 15_000) {
         this.lastCashRecon = now;
-        void recon.run('insufficient_balance').then((r) => { if (r?.balance !== undefined) this.onBalance(r.balance); }).catch(() => undefined);
+        void recon.run('insufficient_balance').then((r) => { if (r?.balance !== undefined) this.onBalance(r.balance, now); }).catch(() => undefined);
       }
     });
     // Kalshi refuses every API order until the location is re-verified: pause new orders for 10 minutes at a time and
