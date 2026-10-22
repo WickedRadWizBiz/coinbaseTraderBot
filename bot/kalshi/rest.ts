@@ -201,12 +201,11 @@ export class KalshiRest implements ExchangeGateway {
   }
 
   async getFills(sinceTs: number): Promise<ExchangeFill[]> {
-    const rows = await this.paginate(`/portfolio/fills?min_ts=${Math.floor(sinceTs / 1000)}`, 'fills');
-    const out: ExchangeFill[] = [];
-    for (const r of rows) {
-      try { out.push(parseFill(r)); } catch (e) { log.error('skipping unparseable fill', { error: String(e) }); }
-    }
-    return out;
+    return parseFills(await this.paginate(`/portfolio/fills?min_ts=${Math.floor(sinceTs / 1000)}`, 'fills'));
+  }
+
+  async getFillsForTicker(ticker: string, sinceTs: number): Promise<ExchangeFill[]> {
+    return parseFills(await this.paginate(`/portfolio/fills?ticker=${encodeURIComponent(ticker)}&min_ts=${Math.floor(sinceTs / 1000)}`, 'fills', 10));
   }
 
   async getPositions(): Promise<ExchangePosition[]> {
@@ -314,4 +313,13 @@ export class KalshiRest implements ExchangeGateway {
     const data = await this.read(`/markets/${encodeURIComponent(ticker)}/orderbook`, false);
     return { ticker, ...parseOrderbook(data), ts: Date.now() };
   }
+}
+
+/** Fills from a listing; one Kalshi sends in a shape we cannot read is logged and skipped. */
+function parseFills(rows: any[]): ExchangeFill[] {
+  const out: ExchangeFill[] = [];
+  for (const r of rows) {
+    try { out.push(parseFill(r)); } catch (e) { log.error('skipping unparseable fill', { error: String(e) }); }
+  }
+  return out;
 }

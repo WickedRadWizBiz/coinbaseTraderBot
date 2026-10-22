@@ -18,7 +18,7 @@ export type AuditKind =
   | 'decision' | 'risk_reject'
   | 'order_new' | 'order_ack' | 'order_update' | 'order_reject' | 'order_cancel_req' | 'order_unknown'
   | 'fill' | 'settlement' | 'perp_hedge' | 'perp_order' | 'perp_decision' | 'setup_model' | 'probation' | 'curve_exit' | 'setup_signal' | 'setup_trade' | 'setup_sizing' | 'setup_skip' | 'liquidation_guard'
-  | 'recon_ok' | 'recon_break' | 'recon_repair' | 'recon_pending'
+  | 'recon_ok' | 'recon_break' | 'recon_repair' | 'recon_pending' | 'recon_adopt'
   | 'kill_engaged' | 'kill_reset' | 'kill_suppressed' | 'training'
   | 'data_stale' | 'data_gap'
   | 'vault'

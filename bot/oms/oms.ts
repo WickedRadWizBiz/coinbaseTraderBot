@@ -334,11 +334,30 @@ export class Oms extends EventEmitter {
       if (rec.filledCount >= rec.count - 1e-9) this.safeTransition(rec, 'FILLED');
       else if (rec.state === 'ACKED' || rec.state === 'PENDING_NEW' || rec.state === 'UNKNOWN') this.safeTransition(rec, 'PARTIALLY_FILLED');
     }
-    this.o.audit.write('fill', { fill: f, fee, feeEstimated: f.fee === undefined, clientOrderId: rec?.clientOrderId, orphan: !rec, position: pos.yes });
+    // Kalshi's raw direction fields ride along only for fills the bot did not place (trades made by hand on Kalshi).
+    this.o.audit.write('fill', { fill: rec ? { ...f, wire: undefined } : f, fee, feeEstimated: f.fee === undefined, clientOrderId: rec?.clientOrderId, orphan: !rec, position: pos.yes });
     this.save();
     this.emit('fill', f, rec, fee, pos.yes);
     if (!rec) this.emit('orphan_fill', f);
     return true;
+  }
+
+  /** Fills at or after this time are recognized if already booked (their trade ids are still remembered, across a
+   *  restart too): a replay reaching no further back cannot book anything twice. */
+  rememberedSince(): number {
+    return this.lastFillTs ? this.lastFillTs - SEEN_PERSIST_MS + 60_000 : 0;
+  }
+
+  /** Reconciliation's last resort: set a market's position to what the exchange holds when no fill explains the
+   *  difference, as one fee-free synthetic fill for the difference at `yesPrice`. It is not a trade: no fill event,
+   *  lastFillTs unchanged (the reconciler audits it as recon_adopt), so the Kalshi check's cash line still shows what
+   *  the books could not explain. */
+  adoptPosition(ticker: string, target: number, yesPrice: number, meta?: { closeTs?: number; asset?: string }): MarketPosition {
+    const delta = Math.round((target - this.positions.position(ticker)) * 100) / 100;
+    if (Math.abs(delta) < 1e-9) return this.positions.ensure(ticker, meta);
+    const pos = this.positions.applyFill({ ticker, side: delta > 0 ? 'bid' : 'ask', count: Math.abs(delta), price: yesPrice, fee: 0 }, meta);
+    this.save();
+    return pos;
   }
 
   settle(ticker: string, result: 'yes' | 'no'): MarketPosition | undefined {

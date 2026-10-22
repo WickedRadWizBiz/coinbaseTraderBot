@@ -231,6 +231,8 @@ async function main(): Promise<void> {
     onPersistentBreak: (reason) => void kill.engage(reason, 'recon'),
     onFills: (fills) => kalshiCheck.onExchangeFills(fills),
     closeUnknownOrders: cfg.mode !== 'live',
+    // Live: an order the bot did not send is the operator's own (placed on Kalshi by hand), not an orphan to cancel.
+    leaveExternalOrders: cfg.mode === 'live',
   });
   const risk = new RiskGateway(cfg.risk);
   const vault = new Vault(cfg.vault, path.join(cfg.bookDir, 'vault.json'));

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import { Power, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { api, clock, pct, px, usd } from '../api';
 import { MarketSessionCard } from './MarketSessionCard';
@@ -10,7 +10,7 @@ import { WaterfallRow } from './WaterfallRow';
 import { usePoll } from './usePoll';
 import { KalshiCheckCard } from './KalshiCheckCard';
 
-function Row({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: 'ok' | 'bad' | 'warn' }) {
+function Row({ label, value, sub, tone, action }: { label: string; value: string; sub?: string; tone?: 'ok' | 'bad' | 'warn'; action?: ReactNode }) {
   const color = tone === 'ok' ? 'text-crypto-success' : tone === 'bad' ? 'text-crypto-danger' : tone === 'warn' ? 'text-yellow-300' : 'text-crypto-text';
   return (
     <div className="flex border-b border-crypto-primary border-opacity-50 px-4 py-3 justify-between items-center bg-[#8f73ff08] gap-3">
@@ -18,6 +18,7 @@ function Row({ label, value, sub, tone }: { label: string; value: string; sub?: 
       <span className="flex flex-col items-end">
         <span className={`font-bold ${color}`}>{value}</span>
         {sub && <span className="text-[10px] opacity-60">{sub}</span>}
+        {action}
       </span>
     </div>
   );
@@ -50,8 +51,33 @@ export function DashboardView() {
       return;
     }
     setResetArmed(false);
-    await api('/kill/reset', { method: 'POST', body: JSON.stringify({ confirm: 'RESET KILL SWITCH' }) }).catch((e) => alert(e.message));
+    const resetKill = () => api('/kill/reset', { method: 'POST', body: JSON.stringify({ confirm: 'RESET KILL SWITCH' }) });
+    try {
+      await resetKill();
+    } catch (e) {
+      // Blocked by reconciliation breaks: offer to resolve them, then reset.
+      const msg = (e as Error).message;
+      if (!/reconciliation is not clean/.test(msg)) alert(msg);
+      else if (await resolveRecon()) await resetKill().catch((e2) => alert(e2.message));
+    }
     void refresh();
+  };
+
+  // Reconciliation breaks (say, a trade made by hand on Kalshi that no fill explains): re-check now and take Kalshi's
+  // positions as the truth wherever the bot's books differ. Resolves to whether reconciliation is clean afterwards.
+  const resolveRecon = async (): Promise<boolean> => {
+    const breaks: string[] = s?.recon?.breaks ?? [];
+    const ok = window.confirm(`Resolve the reconciliation breaks?\n\n${breaks.slice(0, 6).join('\n') || 'Reconciliation is not clean.'}\n\nThe bot re-checks Kalshi now and, wherever its books differ from your Kalshi account, takes Kalshi's position as the truth (trades you made on Kalshi included).`);
+    if (!ok) return false;
+    try {
+      const r = await api<{ ok: boolean }>('/recon/resolve', { method: 'POST', body: JSON.stringify({ confirm: 'ADOPT KALSHI POSITIONS' }) });
+      return r.ok;
+    } catch (e) {
+      alert((e as Error).message);
+      return false;
+    } finally {
+      void refresh();
+    }
   };
 
   // Kill-switch override, remembered on the server. Sizing is the same either way (it follows the net
@@ -159,7 +185,19 @@ export function DashboardView() {
               <Row label="Daily PnL (net of fees)" value={usd(s.dailyPnl)} sub={`loss limit ${usd(-s.dailyLossLimit)}`} tone={s.dailyPnl < 0 ? 'bad' : 'ok'} />
               <Row label="Cash balance" value={usd(s.balance)} />
               <Row label="Tradable bankroll" value={usd(s.bankroll)} sub={s.vault?.enabled ? `cash + committed − vault ${usd(s.vault.vault)} − pocket ${usd(s.vault.pocket)}` : 'cash + committed'} />
-              <Row label="Reconciliation" value={s.recon ? (s.recon.ok ? 'CLEAN' : 'BREAK') : '—'} sub={s.recon ? `${clock(s.recon.ts)}${s.recon.breaks?.length ? ' · ' + s.recon.breaks[0] : ''}` : undefined} tone={s.recon?.ok ? 'ok' : 'bad'} />
+              <Row
+                label="Reconciliation" value={s.recon ? (s.recon.ok ? 'CLEAN' : 'BREAK') : '—'} tone={s.recon?.ok ? 'ok' : 'bad'}
+                sub={s.recon ? [
+                  clock(s.recon.ts), s.recon.breaks?.[0], s.recon.adopted?.[0],
+                  s.recon.externalOrders?.length ? `${s.recon.externalOrders.length} of your own order${s.recon.externalOrders.length > 1 ? 's' : ''} resting on Kalshi (left alone)` : '',
+                ].filter(Boolean).join(' · ') : undefined}
+                action={s.recon && !s.recon.ok ? (
+                  <button
+                    type="button" onClick={() => void resolveRecon()} title="Re-check now and take Kalshi's positions as the truth"
+                    className="mt-1 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider border border-crypto-danger text-crypto-danger hover:bg-crypto-danger hover:text-white active:scale-95 select-none"
+                  >Resolve</button>
+                ) : undefined}
+              />
               <Row label="Order errors (consecutive)" value={String(s.consecutiveOrderErrors)} tone={s.consecutiveOrderErrors ? 'warn' : undefined} />
             </div>
           ) : <div className="p-6 animate-pulse">ESTABLISHING LINK...</div>}
