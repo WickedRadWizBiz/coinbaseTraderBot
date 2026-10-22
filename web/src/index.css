@@ -31,6 +31,10 @@ body {
   min-height: 100vh;
 }
 
+/* Battery: an endless animation makes a phone composite (and here, blur and blend) every frame for as long
+   as the page is open. Pulses run a few times when they appear or their state changes, then hold still. */
+.animate-pulse, .animate-ping { animation-iteration-count: 3; }
+
 
 
 
@@ -136,30 +140,6 @@ body {
 }
 
 
-@keyframes crt-flicker {
-  0%   { background-color: rgba(0, 0, 0, 0); }
-  5%   { background-color: rgba(0, 0, 0, 0); }
-  10%  { background-color: rgba(0, 0, 0, 0); }
-  15%  { background-color: rgba(0, 0, 0, 0.015); }
-  20%  { background-color: rgba(0, 0, 0, 0); }
-  25%  { background-color: rgba(0, 0, 0, 0); }
-  30%  { background-color: rgba(0, 0, 0, 0.035); }
-  35%  { background-color: rgba(0, 0, 0, 0); }
-  40%  { background-color: rgba(0, 0, 0, 0); }
-  45%  { background-color: rgba(0, 0, 0, 0); }
-  50%  { background-color: rgba(0, 0, 0, 0.075); }
-  55%  { background-color: rgba(0, 0, 0, 0.035); }
-  60%  { background-color: rgba(0, 0, 0, 0); }
-  65%  { background-color: rgba(0, 0, 0, 0); }
-  70%  { background-color: rgba(0, 0, 0, 0); }
-  75%  { background-color: rgba(0, 0, 0, 0.015); }
-  80%  { background-color: rgba(0, 0, 0, 0); }
-  85%  { background-color: rgba(0, 0, 0, 0); }
-  90%  { background-color: rgba(0, 0, 0, 0); }
-  95%  { background-color: rgba(0, 0, 0, 0.075); }
-  100% { background-color: rgba(0, 0, 0, 0); }
-}
-
 h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
   font-family: 'JetBrains Mono', monospace;
   text-transform: uppercase;
@@ -173,8 +153,7 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
 /* Bottom-left / Bottom-right */
 
 .crt-grid-panel {
-  background: rgba(2, 2, 4, 0.70);
-  backdrop-filter: blur(12px) brightness(0.55) contrast(1.2);
+  background: rgb(30, 31, 35);
   border-top: 2px solid #555;
   border-left: 2px solid #555;
   border-bottom: 2px solid #ccc;
@@ -186,13 +165,12 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
     0 1px 1px rgba(255, 255, 255, 0.1);
   position: relative;
   padding: 1rem;
-  animation: screen-flicker 0.15s infinite;
   border-radius: 12px;
   overflow: hidden;
 }
 
 /* Glass on top of every screen: the tube's slight convex fall-off (the picture darkens toward the edges
-   and corners, with a soft rim) and, above it, a soft reflection haze. The occasional heavy flicker dims this layer's base colour without touching the reflection. */
+   and corners, with a soft rim) and, above it, a soft reflection haze. */
 .crt-grid-panel::before {
   content: " ";
   display: block;
@@ -210,7 +188,6 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.035), inset 0 0 28px rgba(0, 0, 0, 0.45);
   z-index: 10000;
   pointer-events: none;
-  animation: crt-flicker 3s infinite;
 }
 
 .crt-grid-panel::after {
@@ -222,8 +199,6 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
   bottom: 0;
   right: 0;
   background: 
-    /* Scanning bar */
-    linear-gradient(to bottom, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0.25) 50%, rgba(0, 0, 0, 0) 100%),
     /* Vignette */
     radial-gradient(ellipse 80% 100% at 50% 50%, rgba(0, 0, 0, 0) 65%, rgba(0, 0, 0, 0.6) 100%),
     /* Heavy Scanlines */
@@ -234,19 +209,12 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
     /* Ditherpunk: Blue Noise / High Freq Noise */
     url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.2'/%3E%3C/svg%3E");
   z-index: 9999;
-  background-size: 100% 20vh, 100% 100%, 100% 4px, 3px 100%, 4px 4px, 200px 200px;
-  background-repeat: no-repeat, no-repeat, repeat, repeat, repeat, repeat;
+  background-size: 100% 100%, 100% 4px, 3px 100%, 4px 4px, 200px 200px;
+  background-repeat: no-repeat, repeat, repeat, repeat, repeat;
   pointer-events: none;
   
   opacity: 0.65;
   mix-blend-mode: multiply;
-  animation: crt-scan-overlay 8s linear infinite;
-}
-
-@keyframes screen-flicker {
-  0% { opacity: 0.98; }
-  50% { opacity: 1; }
-  100% { opacity: 0.99; }
 }
 
 @keyframes led-flicker {
@@ -357,11 +325,6 @@ h1, h2, h3, h4, h5, h6, .uppercase, .font-bold, button {
 
 .no-glow {
   text-shadow: none !important;
-}
-
-@keyframes crt-scan-overlay {
-  0% { background-position: 0 -20vh, 0 0, 0 0, 0 0, 0 0, 0 0; }
-  100% { background-position: 0 120vh, 0 0, 0 0, 0 0, 0 0, 0 0; }
 }
 
 .scrollbar-hide::-webkit-scrollbar {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api';
+import { everyAligned } from './components/usePoll';
 
 /** Shakes the panels and flashes the LEDs when a new fill lands. */
 export function useTradeShake() {
@@ -22,8 +23,8 @@ export function useTradeShake() {
       } catch { /* ignore */ }
     };
     void check();
-    const id = setInterval(check, 3000);
-    return () => { alive = false; clearInterval(id); };
+    const stop = everyAligned(3000, () => void check());
+    return () => { alive = false; stop(); };
   }, []);
   return shake;
 }
