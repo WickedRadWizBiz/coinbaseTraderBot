@@ -130,3 +130,17 @@ test('profit target default: at least 10% of what a contract cost (price plus th
   assert.equal(decide(cheap(0.14), cfg).place.filter((p) => p.purpose === 'exit').length, 0, '+2c - 0.9c fee < 2c');
   assert.match(decide(cheap(0.15), cfg).place.find((p) => p.purpose === 'exit')!.why, />= 0\.020/);
 });
+
+test('the 10% minimum only adds a reason to sell: the model exit still sells a loser and a small winner', () => {
+  assert.equal(cfg.profitTargetPct, 0.1);
+  // Long 10 YES bought at 0.50; the model now says 0.30: at a 0.40 bid (a loss) the model exit sells.
+  const loser = decide(view({ position: 10, pYes: 0.3, entrySidePrice: 0.5, entryFeePerContract: 0, bestBid: { price: 0.4, size: 50 }, bestAsk: { price: 0.42, size: 50 } }), cfg).place.find((p) => p.purpose === 'exit')!;
+  assert.deepEqual([loser.side, loser.price, loser.count], ['ask', 0.4, 10]);
+  assert.match(loser.why, /^bid 0\.4 - fee > q 0\.300/);
+  // Bought at 0.40, bid 0.42: +2c gross is under the 10% target, but the model (0.30) wants out: it sells.
+  const small = decide(view({ position: 10, pYes: 0.3, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: 0.42, size: 50 }, bestAsk: { price: 0.44, size: 50 } }), cfg).place.find((p) => p.purpose === 'exit')!;
+  assert.match(small.why, /^bid 0\.42 - fee > q/);
+  // The NO side: holding NO bought at 0.40 while the model turns to YES 0.75: bought back at a loss.
+  const noLoser = decide(view({ position: -10, pYes: 0.75, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: 0.62, size: 50 }, bestAsk: { price: 0.64, size: 50 } }), cfg).place.find((p) => p.purpose === 'exit')!;
+  assert.deepEqual([noLoser.side, noLoser.price], ['bid', 0.64]);
+});
