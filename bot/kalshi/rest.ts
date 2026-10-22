@@ -14,7 +14,7 @@ import {
   CreateOrderRequest, ExchangeFill, ExchangeGateway, ExchangeOrder, ExchangePosition,
   MarketInfo, OrderRejectedError, OrderStateUnknownError, SeriesFeeInfo, BookSnapshot,
 } from './types';
-import { formatCount, formatPrice, parseBalance, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, parseSeriesFees, parseSettlement, parseTransfer } from './wire';
+import { formatCount, formatPrice, parseBalance, parseBalanceBreakdown, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, parseSeriesFees, parseSettlement, parseTransfer } from './wire';
 import { recordLatency } from '../util/latency';
 
 const log = logger('kalshi-rest');
@@ -44,6 +44,7 @@ export class KalshiRest implements ExchangeGateway {
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
   private signPublic = true;
+  private lastShardCash: Record<number, number> | undefined;
 
   constructor(private readonly opts: RestOptions) {
     this.base = opts.baseUrl.replace(/\/$/, '');
@@ -233,9 +234,22 @@ export class KalshiRest implements ExchangeGateway {
   }
 
   async getBalance(): Promise<number> {
-    const b = parseBalance(await this.read('/portfolio/balance'));
+    const raw = await this.read('/portfolio/balance');
+    const b = parseBalance(raw);
     if (b === undefined) throw new Error('balance missing from response');
+    this.lastShardCash = parseBalanceBreakdown(raw);
     return b;
+  }
+
+  /** Cash per exchange shard from the last balance read (the aggregate hides which engine the cash sits on). */
+  shardBalances(): Record<number, number> | undefined { return this.lastShardCash; }
+
+  /** GET /api_keys `api_key_region_expiration_ts`: the account's location attestation for API trading. */
+  async getLocationAttestation(): Promise<number | null | undefined> {
+    const raw = await this.read('/api_keys');
+    if (!raw || typeof raw !== 'object') return undefined;
+    const v = raw.api_key_region_expiration_ts;
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
   }
 
   // ---- Market data (public) ----------------------------------------------

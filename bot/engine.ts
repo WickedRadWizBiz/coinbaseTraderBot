@@ -320,8 +320,14 @@ export class Engine {
   private balanceTs = 0;
   private cashShortAt = 0;
   private lastCashRecon = 0;
-  /** Kalshi refusing every API order until the account's location is re-verified (bot/oms/oms.ts isAccountBlock). */
+  /** Kalshi refusing API orders until the account's location is re-verified (bot/oms/oms.ts isAccountBlock): on a
+   *  Sports (tennis) order it pauses tennis only, the markets the attestation covers; on any other order, everything. */
   private accountBlock: { until: number; reason: string } | undefined;
+  private sportsBlock: { until: number; reason: string } | undefined;
+  /** Last "this shard is out of cash" alert per shard (at most hourly). */
+  private readonly shardAlertAt = new Map<number, number>();
+  /** The account's location attestation for API trading (GET /api_keys; live only): unix seconds, null = never. */
+  private attestation: { expiresTs: number | null; checkedAt: number } | undefined;
   readonly status = new Map<string, MarketStatus>();
   private readonly now: () => number;
 
@@ -430,6 +436,7 @@ export class Engine {
   onBalance(balance: number, readAt = this.now()): void {
     this.balance = balance;
     this.balanceTs = readAt;
+    this.checkShardCash();
     const eq = this.equity();
     if (eq !== undefined) for (const win of this.pendingResults.splice(0)) {
       const raised = this.d.equityGuard?.onTradeResult(win, eq, this.now());
@@ -496,6 +503,21 @@ export class Engine {
       if (r?.balance !== undefined) this.onBalance(r.balance, t);
     }, cfg.reconcileIntervalMs));
     this.timers.push(setInterval(() => this.watchdog(), 1000));
+    // Location attestation (live): Kalshi refuses Sports orders over the API without it, so tennis waits while it is
+    // missing or expired instead of sending orders that fail.
+    if (cfg.mode === 'live' && this.d.gateway.getLocationAttestation) {
+      const check = async () => {
+        try {
+          const v = await this.d.gateway.getLocationAttestation!();
+          if (v === undefined) return;
+          this.attestation = { expiresTs: v, checkedAt: this.now() };
+          const why = this.attestationHalt();
+          if (why && cfg.tennis.enabled && cfg.tennis.live) this.d.alerter.notify('warn', 'kalshi-attestation', `${why}. Crypto contracts are not affected.`);
+        } catch (e) { log.warn('location attestation check failed', { error: String(e) }); }
+      };
+      void check();
+      this.timers.push(setInterval(() => void check(), 30 * 60_000));
+    }
 
     md.on('reconnected', async () => {
       this.dataHalt = undefined;
@@ -525,7 +547,7 @@ export class Engine {
     oms.on('insufficient_balance', (rec: { ticker: string; side: string; price: number; count: number }) => {
       const now = this.now();
       this.cashShortAt = now;
-      this.d.audit.write('risk_reject', { reasons: ['exchange: insufficient balance'], ticker: rec.ticker, side: rec.side, price: rec.price, count: rec.count, balance: this.balance, freeCash: this.freeCash() });
+      this.d.audit.write('risk_reject', { reasons: ['exchange: insufficient balance'], ticker: rec.ticker, side: rec.side, price: rec.price, count: rec.count, balance: this.balance, shard: this.shardOf(rec.ticker), freeCash: this.freeCash(this.shardOf(rec.ticker)), shards: this.d.gateway.shardBalances?.() });
       if (now - this.lastCashRecon >= 15_000) {
         this.lastCashRecon = now;
         void recon.run('insufficient_balance').then((r) => { if (r?.balance !== undefined) this.onBalance(r.balance, now); }).catch(() => undefined);
@@ -533,12 +555,21 @@ export class Engine {
     });
     // Kalshi refuses every API order until the location is re-verified: pause new orders for 10 minutes at a time and
     // say what to do, instead of tripping the kill switch on a run of identical refusals.
-    oms.on('account_blocked', (msg: string) => {
-      const first = !this.accountBlock || this.accountBlock.until <= this.now();
-      this.accountBlock = { until: this.now() + 10 * 60_000, reason: 'Kalshi API trading blocked: location attestation missing or expired (verify your location in the Kalshi app or website)' };
-      if (first) {
-        this.d.audit.write('risk_reject', { reasons: [this.accountBlock.reason], error: msg });
-        this.d.alerter.notify('critical', 'kalshi-location', `${this.accountBlock.reason}. New orders are paused and retried every 10 minutes.`);
+    oms.on('account_blocked', (msg: string, rec?: { ticker: string }) => {
+      const now = this.now();
+      // The attestation covers Sports, Elections and Entertainment markets: a tennis refusal pauses tennis only.
+      const sports = rec ? this.isTennis(rec.ticker) : false;
+      const prev = sports ? this.sportsBlock : this.accountBlock;
+      const block = {
+        until: now + 10 * 60_000,
+        reason: sports
+          ? 'Kalshi refuses Sports (tennis) orders over the API: location attestation missing or expired'
+          : 'Kalshi API trading blocked: location attestation missing or expired (verify your location in the Kalshi app or website)',
+      };
+      if (sports) this.sportsBlock = block; else this.accountBlock = block;
+      if (!prev || prev.until <= now) {
+        this.d.audit.write('risk_reject', { reasons: [block.reason], error: msg, ticker: rec?.ticker });
+        this.d.alerter.notify('critical', sports ? 'kalshi-location-sports' : 'kalshi-location', `${block.reason}. ${sports ? 'Tennis orders are' : 'New orders are'} paused and retried every 10 minutes.`);
       }
     });
     oms.on('orphan_fill', (f) => this.d.alerter.notify('critical', 'orphan-fill', `Fill for unknown order on ${f.ticker} (${f.count} @ ${f.price})`));
@@ -843,19 +874,77 @@ export class Engine {
     return Math.min(S.makerBufferRange[1], Math.max(S.makerBufferRange[0], -m.avg));
   }
 
-  /** Bankroll for fractional limits: cash + premium committed to open positions. */
+  /** Live: warn when a shard the bot trades on is out of cash while the account's cash sits on other shards (orders in the
+   *  Kalshi app move cash between shards on their own; API orders do not). */
+  private checkShardCash(): void {
+    if (this.d.cfg.mode !== 'live') return;
+    const by = this.d.gateway.shardBalances?.();
+    if (!by || !Object.keys(by).length) return;
+    const traded = new Set<number>();
+    for (const m of this.d.md.markets.values()) if (!m.recordOnly && m.exchangeIndex !== undefined && (m.kind !== 'match' || (this.d.cfg.tennis.enabled && this.d.cfg.tennis.live))) traded.add(m.exchangeIndex);
+    const total = Object.values(by).reduce((s, v) => s + v, 0);
+    for (const s of traded) {
+      const here = by[s] ?? 0;
+      if (here >= 1 || total - here < 1 || this.now() - (this.shardAlertAt.get(s) ?? 0) < 3_600_000) continue;
+      this.shardAlertAt.set(s, this.now());
+      this.d.alerter.notify('warn', `kalshi-shard-${s}`, `Kalshi cash: $${here.toFixed(2)} on exchange shard ${s} (${shardLabel(s)}), where the bot trades, and $${(total - here).toFixed(2)} on other shards. API orders only use the cash on their market's shard: move cash at https://kalshi.com/account/exchange-indexes`);
+    }
+  }
+
   /** Cash left for new orders: the last balance read, less what the entry orders placed since then hold (Kalshi holds
    *  a resting buy's cost; orders placed before the read are already out of it). */
-  freeCash(): number | undefined {
+  freeCash(shard?: number): number | undefined {
     if (this.balance === undefined) return undefined;
+    // Kalshi checks an order's collateral on its market's exchange shard only: with a per-shard breakdown, the cash on
+    // that shard counts, not the account total.
+    const byShard = shard !== undefined ? this.d.gateway.shardBalances?.() : undefined;
+    const perShard = Boolean(byShard && Object.keys(byShard).length);
     let held = 0;
     for (const o of this.d.oms.liveOrders()) {
       if (o.reduceOnly || o.purpose === 'exit' || o.createdTs <= this.balanceTs) continue;
+      if (perShard && this.shardOf(o.ticker) !== shard) continue;
       held += (o.side === 'bid' ? o.price : 1 - o.price) * Math.max(0, o.remainingCount);
     }
-    return this.balance - held;
+    return (perShard ? byShard![shard!] ?? 0 : this.balance) - held;
   }
 
+  /** Where the free cash for an order on this market was counted (the risk gateway's refusal text). */
+  private freeCashWhere(ticker: string): string | undefined {
+    const shard = this.shardOf(ticker), by = shard !== undefined ? this.d.gateway.shardBalances?.() : undefined;
+    if (!by || !Object.keys(by).length) return undefined;
+    const elsewhere = Object.entries(by).reduce((s, [k, v]) => (Number(k) === shard ? s : s + v), 0);
+    return `on Kalshi exchange shard ${shard} (${shardLabel(shard!)})${elsewhere >= 0.01 ? `; $${elsewhere.toFixed(2)} sits on other shards: move it at kalshi.com/account/exchange-indexes` : ''}`;
+  }
+
+  /** The exchange shard a market trades on (GET /markets `exchange_index`), when Kalshi published it. */
+  shardOf(ticker: string): number | undefined {
+    return this.d.md.markets.get(ticker)?.exchangeIndex;
+  }
+
+  /** Why tennis (Sports) orders wait: a recent attestation refusal, or the attestation missing or expired (live). */
+  private sportsHalt(): string | undefined {
+    if (this.sportsBlock && this.sportsBlock.until > this.now()) return this.sportsBlock.reason;
+    return this.attestationHalt();
+  }
+
+  private attestationHalt(): string | undefined {
+    const a = this.attestation;
+    if (!a || this.d.cfg.mode !== 'live') return undefined;
+    if (a.expiresTs === null) return 'Kalshi location attestation for API trading never completed: tennis (Sports) orders paused';
+    if (a.expiresTs * 1000 <= this.now()) return `Kalshi location attestation for API trading expired ${new Date(a.expiresTs * 1000).toISOString().slice(0, 16)}Z: tennis (Sports) orders paused`;
+    return undefined;
+  }
+
+  /** The dashboard's Kalshi account row: cash per exchange shard, and the location attestation. */
+  kalshiAccountStatus() {
+    return {
+      shards: this.d.gateway.shardBalances?.() ?? null,
+      attestation: this.attestation ? { expiresTs: this.attestation.expiresTs, checkedAt: this.attestation.checkedAt } : null,
+      sportsHalt: this.sportsHalt() ?? null,
+    };
+  }
+
+  /** Bankroll for fractional limits: cash + premium committed to open positions. */
   bankroll(): number | undefined {
     if (this.balance === undefined) return undefined;
     const committed = this.d.oms.positions.open().reduce((s, m) => s + PositionBook.maxLoss(m), 0);
@@ -1957,7 +2046,8 @@ export class Engine {
       marketRiskWith: p.reduceOnly ? this.marketRisk(m.ticker) : this.marketRisk(m.ticker, extra),
       windowRisk: totals.window,
       totalRisk: totals.total,
-      freeCash: this.freeCash(),
+      freeCash: this.freeCash(this.shardOf(m.ticker)),
+      freeCashWhere: this.freeCashWhere(m.ticker),
       ordersLastMinute: oms.ordersSentInLast(60_000),
       openOrders: oms.liveOrders().length,
       modelLiveBlockers: cfg.liveAllowUnvalidated || gatePasses('kalshi', false) ? [] : model.liveBlockers(),
@@ -1976,6 +2066,8 @@ export class Engine {
       // no model fair value to require an edge against.
       ctx.modelLiveBlockers = [];
       ctx.skipEdgeCollar = true;
+      const sh = this.sportsHalt();
+      if (sh) ctx.haltReasons = [...ctx.haltReasons, sh];
       ctx.limitOverrides = { maxOrderRiskFrac: T.orderFrac, maxWindowRiskFrac: T.maxMatchFrac, maxTotalRiskFrac: T.maxTotalFrac, minSidePrice: Math.min(T.underdogMin, cfg.risk.minSidePrice) };
     }
     // Waterfall mode (bot/macro/waterfall.ts), new exposure only (exits and reduce-only orders pass): armed pauses
@@ -2027,4 +2119,9 @@ function dirRow(d: DirectionPred): (string | number | null)[] {
 
 function dirConf(d: DirectionPred): SnnConf {
   return { skill: d.skill, calConf: d.calConf, contractSkill: d.contractSkill, surpriseRatio: d.surpriseRatio, G: d.G, labelled: d.labelled };
+}
+
+/** Kalshi's exchange shards (docs.kalshi.com, Exchange Sharding): new events by category. */
+export function shardLabel(i: number): string {
+  return ({ 0: 'default', 1: 'combos', 2: 'crypto & commodities', 3: 'tennis, baseball, basketball' } as Record<number, string>)[i] ?? `shard ${i}`;
 }

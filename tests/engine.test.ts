@@ -79,6 +79,43 @@ test('engine places risk-checked post-only quotes through the OMS and paper exch
   assert.equal(engine.status.get(market.ticker)!.blocked, 'index stale');
 });
 
+test('an order is funded from its market\'s exchange shard: no cash there, no order, and the refusal says where the cash is', async () => {
+  const { engine, recon, paper, market, md, audit } = await setup();
+  const r = await recon.run('startup');
+  engine.balance = r!.balance;
+  // Crypto markets trade on shard 2; the account's cash sits on shard 0 (the Kalshi app moves it per order, the API does not).
+  md.markets.get(market.ticker)!.exchangeIndex = 2;
+  (paper as unknown as { shardBalances: () => Record<number, number> }).shardBalances = () => ({ 0: r!.balance!, 2: 0 });
+  assert.equal(engine.freeCash(2), 0);
+  assert.equal(engine.freeCash(), r!.balance);
+  await engine.tick();
+  assert.equal((await paper.getOpenOrders()).length, 0);
+  const why = audit.tail(200, 'risk_reject').map((x) => JSON.stringify(x.data)).join('\n');
+  assert.match(why, /free cash \$0\.00 on Kalshi exchange shard 2/);
+  assert.match(why, /kalshi\.com\/account\/exchange-indexes/);
+  // Cash on the market's shard: the quote goes out.
+  const f = await setup();
+  const r2 = await f.recon.run('startup');
+  f.engine.balance = r2!.balance;
+  f.md.markets.get(f.market.ticker)!.exchangeIndex = 2;
+  (f.paper as unknown as { shardBalances: () => Record<number, number> }).shardBalances = () => ({ 0: 0, 2: r2!.balance! });
+  await f.engine.tick();
+  assert.ok((await f.paper.getOpenOrders()).length >= 1);
+});
+
+test('a location-attestation refusal on a tennis order pauses tennis only; on any other order, all new orders', async () => {
+  const { engine, oms, cfg } = await setup();
+  await engine.start();
+  try {
+    const msg = 'HTTP 403: {"error":{"code":"Your_location_attestation_for_API_trading_is_missing_or_expired."}}';
+    oms.emit('account_blocked', msg, { ticker: `${cfg.tennis.series[0]}-26OCT22ABCDEF-ABC` });
+    assert.match(engine.kalshiAccountStatus().sportsHalt ?? '', /tennis/);
+    assert.ok(!engine.haltReasons().some((r) => /location/.test(r)), 'crypto keeps trading');
+    oms.emit('account_blocked', msg, { ticker: 'KXBTC15M-TEST' });
+    assert.ok(engine.haltReasons().some((r) => /location attestation/.test(r)));
+  } finally { engine.stop(); }
+});
+
 test('paper training trades: with no edge anywhere, 1 contract is still traded on the model side, once per contract', async () => {
   const { engine, recon, oms, market, md } = await setup({ env: { STRATEGY_MIN_EDGE: '0.5', PAPER_EXPLORE: 'false', PAPER_TRAINING_TRADES_PER_HOUR: '12' } });
   md.book(market.ticker).applySnapshot({ bids: [{ price: 0.55, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, Date.now());

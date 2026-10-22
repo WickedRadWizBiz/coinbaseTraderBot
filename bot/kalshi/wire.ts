@@ -114,6 +114,19 @@ export function parseBalance(raw: Obj): number | undefined {
   return parseDollars(raw.balance_dollars) ?? parseDollars(raw.balance, true);
 }
 
+/** Available cash per exchange shard (GET /portfolio/balance `balance_breakdown`): Kalshi runs each market category
+ *  on its own matching engine (shard 2 crypto, 3 tennis/baseball/basketball, 0 everything else) and checks an order's
+ *  collateral on its shard only. Undefined when the response has no breakdown. */
+export function parseBalanceBreakdown(raw: Obj): Record<number, number> | undefined {
+  if (!Array.isArray(raw.balance_breakdown)) return undefined;
+  const out: Record<number, number> = {};
+  for (const b of raw.balance_breakdown as Obj[]) {
+    const i = Number(b?.exchange_index), v = parseDollars(b?.balance);
+    if (Number.isInteger(i) && i >= 0 && v !== undefined) out[i] = (out[i] ?? 0) + v;
+  }
+  return out;
+}
+
 /** The strike in a ladder ticker's last segment: B = range centred there, T = threshold. */
 export function tickerStrikeOf(ticker: string): { kind: 'B' | 'T'; value: number } | undefined {
   const r = /-([BT])(\d+(?:\.\d+)?)$/.exec(ticker);
@@ -171,6 +184,7 @@ export function parseMarket(m: Obj): MarketInfo | undefined {
     })(),
     tickSize: tick && tick > 0 ? tick : 0.01,
     priceRanges: parsePriceRanges(m.price_ranges),
+    exchangeIndex: Number.isInteger(m.exchange_index) && m.exchange_index >= 0 ? m.exchange_index : undefined,
     result: m.result,
     title: m.title ?? m.yes_sub_title ?? undefined,
     // Sports: scheduled start when the exchange publishes one (field name unverified; several tried).

@@ -207,7 +207,7 @@ export class Oms extends EventEmitter {
         // Post-only crosses are expected. Not enough cash and a missing location attestation are account states,
         // not a broken bot: the engine waits for cash / alerts instead of counting them toward the kill switch.
         if (e.code === 'insufficient_balance' || /insufficient.?balance/i.test(e.message)) this.emit('insufficient_balance', rec);
-        else if (isAccountBlock(e)) this.emit('account_blocked', e.message);
+        else if (isAccountBlock(e)) this.emit('account_blocked', e.message, rec);
         else if (e.code !== 'post_only_cross' && !/post.?only/i.test(e.message)) this.bumpError(e.message);
       } else if (e instanceof OrderStateUnknownError) {
         rec.lastError = e.message;

@@ -4,7 +4,15 @@ import { test } from 'node:test';
 import { KalshiSigner } from '../bot/kalshi/auth';
 import { parseIndexRow, tsMs } from '../bot/kalshi/ws';
 import { nearestStrikes } from '../bot/marketdata/marketData';
-import { fillTickerStrikes, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, tickerStrikeOf, toBookSide } from '../bot/kalshi/wire';
+import { fillTickerStrikes, parseBalanceBreakdown, parseFill, parseMarket, parseOrder, parseOrderbook, parsePositions, tickerStrikeOf, toBookSide } from '../bot/kalshi/wire';
+
+test('exchange shards: cash per shard from the balance breakdown, and each market\'s shard', () => {
+  assert.deepEqual(parseBalanceBreakdown({ balance: 3000, balance_breakdown: [{ exchange_index: 0, balance: '30.0000' }, { exchange_index: 2, balance: '0.0000' }] }), { 0: 30, 2: 0 });
+  assert.equal(parseBalanceBreakdown({ balance: 3000 }), undefined);
+  const m = parseMarket({ ticker: 'KXBTC15M-26OCT221330-30', open_time: '2026-10-22T13:15:00Z', close_time: '2026-10-22T13:30:00Z', exchange_index: 2 })!;
+  assert.equal(m.exchangeIndex, 2);
+  assert.equal(parseMarket({ ticker: 'X', open_time: '2026-10-22T13:15:00Z', close_time: '2026-10-22T13:30:00Z' })!.exchangeIndex, undefined);
+});
 
 test('V2 order payload with fixed-point strings', () => {
   const o = parseOrder({ order: { order_id: 'o1', client_order_id: 'c1', ticker: 'T', side: 'bid', price: '0.4500', status: 'resting', fill_count_fp: '2.00', remaining_count_fp: '3.00', average_fee_paid: '0.0100' } });
