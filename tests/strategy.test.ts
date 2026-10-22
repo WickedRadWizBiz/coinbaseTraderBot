@@ -116,3 +116,17 @@ test('profit target: no exits in the final minute or while hunting (the hunt\'s 
   assert.equal(decide({ ...long, exitWindowOpen: false }, pt).place.filter((p) => p.purpose === 'exit').length, 0);
   assert.equal(decide(long, pt, { exits: false, blockReductions: true }).place.filter((p) => p.purpose === 'exit').length, 0);
 });
+
+test('profit target default: at least 10% of what a contract cost (price plus the entry fee), and at least 2c', () => {
+  assert.equal(cfg.profitTargetPct, 0.1);
+  assert.equal(cfg.profitTarget, 0.02);
+  // Bought at 0.40 with a 1c fee: cost 0.41, so the target is 4.1c net.
+  const long = (bid: number) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0.01, bestBid: { price: bid, size: 50 }, bestAsk: { price: bid + 0.02, size: 50 } });
+  assert.equal(decide(long(0.46), cfg).place.filter((p) => p.purpose === 'exit').length, 0, '+6c - 1c - 1.8c = +3.2c');
+  const exit = decide(long(0.47), cfg).place.find((p) => p.purpose === 'exit')!;
+  assert.match(exit.why, /^profit target: \+0\.042 a contract net of fees >= 0\.041/);
+  // A cheap contract: 10% of 0.12 is 1.2c, so the 2c floor applies.
+  const cheap = (bid: number) => view({ position: 10, pYes: 0.3, entrySidePrice: 0.12, entryFeePerContract: 0, bestBid: { price: bid, size: 50 }, bestAsk: { price: bid + 0.02, size: 50 } });
+  assert.equal(decide(cheap(0.14), cfg).place.filter((p) => p.purpose === 'exit').length, 0, '+2c - 0.9c fee < 2c');
+  assert.match(decide(cheap(0.15), cfg).place.find((p) => p.purpose === 'exit')!.why, />= 0\.020/);
+});

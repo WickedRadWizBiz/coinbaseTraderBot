@@ -7,10 +7,10 @@
 //  2. TAKER (optional): cross only when q beats the touch by the taker fee
 //     plus minEdge plus takerBuffer (5c in the relaxed spec), then hold.
 //  3. EXIT: never a percentage stop. Profit target: sell at the bid as soon as
-//     that banks profitTarget a contract (or profitTargetPct of the entry
-//     price) over what the position cost, net of the entry's fees and this
-//     exit's taker fee, whatever the model thinks the contract is worth: small
-//     gains banked as they come. Model exit: sell at the bid when the bid minus
+//     that banks profitTargetPct of what a contract cost (price plus entry fee;
+//     10% by default) and at least profitTarget a contract, net of the entry's
+//     fees and this exit's taker fee, whatever the model thinks the contract is
+//     worth: gains banked as they come. Model exit: sell at the bid when the bid minus
 //     the taker fee beats q + exitMargin (the market overpays, or the model
 //     turned against the position). Mode B adds a resting maker take-profit at
 //     entry + TP, never offered below what the model thinks the position is
@@ -126,8 +126,9 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
   if (!exitWindow && v.position !== 0) out.notes.push('final minute: riding to settlement');
   const exits = opts.exits !== false && exitWindow;
   const margin = cfg.exitMargin ?? cfg.takerBuffer;
-  // Profit target: what selling the held side at its touch banks a contract over its cost, net of every fee.
-  const target = v.entrySidePrice === undefined ? 0 : Math.max(cfg.profitTarget ?? 0, (cfg.profitTargetPct ?? 0) * v.entrySidePrice);
+  // Profit target: what selling the held side at its touch banks a contract over its cost, net of every fee, against
+  // the larger of the cents floor and the percentage of what a contract cost (price plus the entry fee).
+  const target = v.entrySidePrice === undefined ? 0 : Math.max(cfg.profitTarget ?? 0, (cfg.profitTargetPct ?? 0) * (v.entrySidePrice + (v.entryFeePerContract ?? 0)));
   const banked = (sidePx: number, exitFee: number) => (target > 0 ? sidePx - v.entrySidePrice! - (v.entryFeePerContract ?? 0) - exitFee : -Infinity);
   if (exits && v.position > 0 && bid) {
     const n = Math.min(v.position, bid.size);

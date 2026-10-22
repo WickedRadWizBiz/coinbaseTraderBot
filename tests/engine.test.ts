@@ -273,16 +273,16 @@ test('profit target: a winner the model would keep is sold once it banks the tar
   const { engine, recon, market, md, oms, audit } = await setup();
   const r = await recon.run('startup');
   engine.balance = r!.balance;
-  // Long 10 YES bought at 0.40 as a maker. The model values YES near 0.55, so its own exit would hold at a 0.45 bid;
-  // the profit target sells: +5c, less the 1.8c taker fee, is +3.2c net, over the 2c target.
+  // Long 10 YES bought at 0.40 as a maker. The model values YES near 0.55, so its own exit would hold at a 0.46 bid;
+  // the profit target (10% of the 0.40 cost = 4c) sells: +6c, less the 1.8c taker fee, is +4.2c net.
   oms.onFill({ tradeId: 'p1', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.4, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
-  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.45, size: 50 }], asks: [{ price: 0.47, size: 50 }] }, Date.now());
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.46, size: 50 }], asks: [{ price: 0.48, size: 50 }] }, Date.now());
   await engine.tick();
   const exits = oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly);
   assert.equal(exits.length, 1, engine.status.get(market.ticker)!.notes.join(' | '));
-  assert.deepEqual([exits[0].side, exits[0].price, exits[0].count], ['ask', 0.45, 10]);
+  assert.deepEqual([exits[0].side, exits[0].price, exits[0].count], ['ask', 0.46, 10]);
   const why = audit.tail(50, 'decision').flatMap((d) => ((d.data as { place?: Array<{ why: string }> }).place ?? []).map((p) => p.why));
-  assert.ok(why.some((w) => /^profit target: \+0\.032 a contract net of fees >= 0\.020/.test(w)), why.join(' | '));
+  assert.ok(why.some((w) => /^profit target: \+0\.042 a contract net of fees >= 0\.040/.test(w)), why.join(' | '));
 });
 
 test('an exit never trades against the bot\'s own resting quote (self-trade prevention would cancel it): the quote is pulled first', async () => {
