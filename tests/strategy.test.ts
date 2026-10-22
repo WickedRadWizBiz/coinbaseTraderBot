@@ -144,3 +144,38 @@ test('the 10% minimum only adds a reason to sell: the model exit still sells a l
   const noLoser = decide(view({ position: -10, pYes: 0.75, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: 0.62, size: 50 }, bestAsk: { price: 0.64, size: 50 } }), cfg).place.find((p) => p.purpose === 'exit')!;
   assert.deepEqual([noLoser.side, noLoser.price], ['bid', 0.64]);
 });
+
+test('minimum quote: a quote sizing wants is at least 3 contracts, inside the per-order cap and the risk room left', () => {
+  assert.equal(base.minQuoteContracts, 3);
+  const bidOf = (v: MarketView, c = cfg) => decide(v, c).place.find((p) => p.side === 'bid');
+  const askOf = (v: MarketView, c = cfg) => decide(v, c).place.find((p) => p.side === 'ask');
+  const small = view({ bankroll: 20 });
+  const plain = bidOf(small, { ...cfg, minQuoteContracts: 0 })!;
+  assert.ok(plain.count > 0 && plain.count < 1, `Kelly alone quotes ${plain.count}`);
+  assert.equal(bidOf(small)!.count, 3);
+  assert.equal(askOf(small)!.count, 3);
+  // Bounded by the per-order cap ($1 at 53c: 1.88) and by the risk room left; never below what sizing asked for.
+  assert.equal(bidOf(view({ bankroll: 20, maxOrderRiskUsd: 1 }))!.count, 1.88);
+  assert.equal(bidOf(view({ bankroll: 20, newRiskRoomUsd: 0.8 }))!.count, 1.5);
+  assert.equal(bidOf(view({ bankroll: 20, newRiskRoomUsd: 0 }))!.count, plain.count);
+  assert.equal(bidOf(view({ bankroll: 20, maxContracts: 2 }))!.count, 2);
+  // Larger quotes are left as sized; no quote appears where sizing wants none; unwinding rides on top.
+  const big = bidOf(view(), { ...cfg, minQuoteContracts: 0 })!;
+  assert.ok(big.count > 3);
+  assert.equal(bidOf(view())!.count, big.count);
+  assert.equal(decide(view({ bankroll: 0 }), cfg).place.length, 0);
+  assert.equal(bidOf(view({ bankroll: 20, position: -2 }))!.count, 5, '3 new YES plus the 2 NO it buys back');
+});
+
+test('a resting quote due to expire on the exchange is placed again, unless the replacement would end no later', () => {
+  const first = decide(view(), cfg).place.find((p) => p.side === 'bid')!;
+  const resting = { clientOrderId: 'b', price: first.price, remaining: first.count };
+  const early = decide(view({ restingBid: { ...resting, expiresSec: 1010 } }), cfg);
+  assert.equal(early.cancel.length + early.place.filter((p) => p.side === 'bid').length, 0, '10 s left: kept');
+  const due = decide(view({ restingBid: { ...resting, expiresSec: 1001 } }), cfg);
+  assert.deepEqual(due.cancel.map((c) => [c.clientOrderId, c.reason]), [['b', 'quote expiring']]);
+  assert.equal(due.place.filter((p) => p.side === 'bid').length, 1);
+  // Close at 1016: a new quote would also expire at 1001 (15 s before the close), so the old one is left to lapse.
+  const atClose = decide(view({ closeSec: 1016, restingBid: { ...resting, expiresSec: 1001 } }), cfg);
+  assert.equal(atClose.cancel.length, 0);
+});

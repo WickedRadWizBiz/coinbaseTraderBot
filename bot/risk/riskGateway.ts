@@ -60,6 +60,8 @@ export interface RiskDecision {
 }
 
 const MAX_DISTANCE_FROM_TOUCH = 0.25;
+/** Share of the per-minute order budget kept for orders that reduce a position: quote traffic never crowds out an exit. */
+export const EXIT_RATE_RESERVE = 0.2;
 
 export class RiskGateway {
   constructor(private readonly limits: RiskLimits) {}
@@ -95,8 +97,9 @@ export class RiskGateway {
     if (i.reduceOnly && i.timeInForce !== 'immediate_or_cancel') r.push('reduce_only requires immediate_or_cancel');
     if (!Number.isFinite(i.fairValue) || i.fairValue <= 0 || i.fairValue >= 1) r.push('missing fair value');
 
-    // Throttles.
-    if (c.ordersLastMinute >= L.maxOrdersPerMinute) r.push(`order rate ${c.ordersLastMinute}/min at limit`);
+    // Throttles. New risk stops short of the limit; the rest of the minute's budget is kept for exits.
+    const rateLimit = reduces ? L.maxOrdersPerMinute : Math.max(1, Math.floor(L.maxOrdersPerMinute * (1 - EXIT_RATE_RESERVE)));
+    if (c.ordersLastMinute >= rateLimit) r.push(`order rate ${c.ordersLastMinute}/min at limit${reduces ? '' : ` for new risk (${rateLimit}; the rest is kept for exits)`}`);
     if (!reduces && c.openOrders >= L.maxOpenOrders) r.push(`open orders ${c.openOrders} at limit`);
 
     // Market data must be live; never trade on invented or stale prices.

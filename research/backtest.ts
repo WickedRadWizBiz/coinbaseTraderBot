@@ -289,8 +289,11 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const tauSec = (m.closeTime - st.now) / 1000;
       const settle = tauSec <= SETTLEMENT_AVG_SEC ? idx!.settlement(m.closeTime, st.now, SETTLEMENT_AVG_SEC) : undefined;
       const observed = settle?.avg, observedCount = settle?.n;
+      // As live: the vol forecast once validated, else the flat fallback multiplier.
       const sigmaFv = (opts.applyVolSeasonality ? effectiveSigma(vol.sigmaPerSqrtSec, opts.volProfile, m.asset, st.now, m.closeTime) : vol.sigmaPerSqrtSec)
-        * volFc.multiplier(m.asset, st.now, vol.sigmaPerSqrtSec, tauSec, () => assetFeatureMap(m.asset, st.now, { index: idx, spot: st.spot.get(m.asset), bars: st.features.bars.get(m.asset), candles: st.features.candles.get(m.asset), usdtd: st.usdtd, btcd: st.btcd, perp: st.features.perps.get(m.asset) }));
+        * (volFc.model?.validated
+          ? volFc.multiplier(m.asset, st.now, vol.sigmaPerSqrtSec, tauSec, () => assetFeatureMap(m.asset, st.now, { index: idx, spot: st.spot.get(m.asset), bars: st.features.bars.get(m.asset), candles: st.features.candles.get(m.asset), usdtd: st.usdtd, btcd: st.btcd, perp: st.features.perps.get(m.asset) }))
+          : strategy.volFallbackMult ?? 1);
       const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaFv, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
       if (!fv) continue;
       const mid = (bid.price + ask.price) / 2;
