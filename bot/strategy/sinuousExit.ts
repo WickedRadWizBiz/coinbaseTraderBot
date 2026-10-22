@@ -159,6 +159,14 @@ export class SinuousExitTracker {
 
   constructor(readonly profile: CurveProfile) {}
 
+  /** The curve's slope in the side's price terms, per second (positive = rising): undefined while it warms up (no
+   *  projection has matured yet). */
+  slope(): number | undefined {
+    if (this.last === undefined || this.matured === undefined) return undefined;
+    const p = fromLogit(this.x);
+    return this.v * p * (1 - p);
+  }
+
   private restart(obs: number, now: number): void {
     this.x = obs; this.v = 0;
     this.p00 = P0; this.p01 = 0; this.p10 = 0; this.p11 = P0;

@@ -30,6 +30,7 @@ import { RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
 import { decide, decisionProbability, MarketView, OrderPlan } from './strategy/fairValueStrategy';
 import { ConfluenceRatchetExit } from './strategy/exitPolicies';
+import type { SinuousEntryGate } from './strategy/sinuousEntry';
 import { tennisHighLeverage, type CurveReading, type SinuousExitGate } from './strategy/sinuousExit';
 import { CadenceGate, inEntryWindow, type CadenceReason } from './strategy/cadence';
 import { kalshiMaintenance, sessionEdge, sessionState, type SessionState } from './model/sessions';
@@ -293,6 +294,8 @@ export interface EngineDeps {
   tennisFair?: TennisFairModel;
   /** Exit-in-profit curve: profit-taking exits on binary contracts also need its signal (SINUOUS_EXIT). */
   curveExit?: SinuousExitGate;
+  /** Entry curve: scores maker entries by the order-book curve at the fill; in gate mode it also holds quotes back (SINUOUS_ENTRY). */
+  curveEntry?: SinuousEntryGate;
   /** Cortex-like SNN (bot/snn): worker host, blender with earned alpha, conservative target scaler. */
   snn?: SnnFleet;
   /** Where the blender's settled (p_model, p_snn) history is saved (survives restarts). */
@@ -382,6 +385,14 @@ export class Engine {
       const list = this.pendingEntries.get(f.ticker) ?? [];
       list.push({ q, side: f.side, book: this.isTennis(f.ticker) ? 'tennis' : 'crypto', cost: f.side === 'bid' ? f.price : 1 - f.price, count: f.count });
       this.pendingEntries.set(f.ticker, list.slice(-50));
+    });
+    // Entry curve (bot/strategy/sinuousEntry.ts): a maker fill that adds to a crypto position is scored by its 60 s
+    // markout against what the curve said when it filled.
+    d.oms.on('fill', (f: { ticker: string; side: 'bid' | 'ask'; price: number; count: number; isTaker?: boolean }, rec: { purpose?: string } | undefined, _fee: number, positionAfter: number) => {
+      if (!d.curveEntry || f.isTaker || rec?.purpose !== 'quote' || this.isTennis(f.ticker)) return;
+      const before = positionAfter - (f.side === 'bid' ? f.count : -f.count);
+      if (f.side === 'bid' ? before < -1e-9 : before > 1e-9) return;
+      d.curveEntry.onEntryFill({ ticker: f.ticker, side: f.side, price: f.price, count: f.count, ts: this.now() });
     });
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized?: number }) => {
       // Break-even ratchet (two losing trades in a row): judged at the next balance read, once the payout is in.
@@ -609,6 +620,9 @@ export class Engine {
 
   /** The exit-in-profit curve's mode and scoreboard (null when SINUOUS_EXIT=off). */
   curveExitStatus() { return this.d.curveExit?.status() ?? null; }
+
+  /** The entry curve's mode and scoreboard (null when SINUOUS_ENTRY=off). */
+  curveEntryStatus() { return this.d.curveEntry?.status() ?? null; }
 
   /** Clear the exit curve's scoreboard (and a bench); false when it is off. */
   resetCurveExit(): boolean {
@@ -1712,6 +1726,8 @@ export class Engine {
     if (!bid || !ask) return block('one-sided book');
 
     const tauSec = (m.closeTime - now) / 1000;
+    // The entry curve follows every crypto market's book, quoted or not (bot/strategy/sinuousEntry.ts).
+    this.d.curveEntry?.observe(m.ticker, (m.closeTime - m.openTime) / 60_000 <= 20 ? 'crypto_15m' : 'crypto_1h', { now, bid, ask, tauSec });
     const settle = tauSec <= SETTLEMENT_AVG_SEC ? idx!.settlement(m.closeTime, now, SETTLEMENT_AVG_SEC) : undefined;
     const observed = settle?.avg, observedCount = settle?.n;
     // Intraday volatility periodicity: scale the backward-looking EWMA sigma to the variance
@@ -2004,6 +2020,29 @@ export class Engine {
     if (cmpW && cmpW.w !== 1) plan.notes.push(`compensator ${cmpW.source}: Kalshi size x${cmpW.w.toFixed(2)}`);
     if (sessRisk.applied.length) plan.notes.push(`session risk ${sessRisk.applied.join('+')}: size x${sessRisk.sizeMult}, +${sessRisk.minEdgeAdd} edge`);
     if (huntPlan) plan.place.unshift(huntPlan);
+    // Entry curve (strategy/sinuousEntry.ts): a quote that adds to the position is against the curve when the book's
+    // projection runs against the side it buys. Monitor mode notes it; gate mode does not place it and pulls a resting one.
+    const entryCurve = this.d.curveEntry;
+    if (entryCurve && entryCurve.p.mode !== 'off') {
+      const adds = (side: 'bid' | 'ask') => (side === 'bid' ? st.position >= 0 : st.position <= 0);
+      const against = (side: 'bid' | 'ask') => {
+        const v = entryCurve.verdict(m.ticker, side);
+        return v.against ? `entry curve ${entryCurve.active ? 'holds' : 'would hold'} the ${side === 'bid' ? 'YES' : 'NO'} bid: the book runs ${(Math.abs(v.slope!) * 100).toFixed(2)}c a 10 s against it` : undefined;
+      };
+      plan.place = plan.place.filter((p) => {
+        if (p.purpose !== 'quote' || p.reduceOnly || !adds(p.side)) return true;
+        const why = against(p.side);
+        if (why) plan.notes.push(why);
+        return !(why && entryCurve.active);
+      });
+      if (entryCurve.active) {
+        for (const [side, r] of [['bid', view.restingBid], ['ask', view.restingAsk]] as const) {
+          if (!r || !adds(side) || plan.cancel.some((c) => c.clientOrderId === r.clientOrderId)) continue;
+          const why = against(side);
+          if (why) { plan.cancel.push({ clientOrderId: r.clientOrderId, reason: why }); plan.notes.push(why); }
+        }
+      }
+    }
     // Exit-in-profit curve (strategy/sinuousExit.ts): a profit-taking exit also needs the curve's signal (a spike above
     // it, or a roll-over below its projection). The hunt's trailing stop, a gap through it and loss cuts never wait.
     const curve = this.d.curveExit;

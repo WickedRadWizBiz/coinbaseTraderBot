@@ -5,6 +5,7 @@
 import fs from 'fs';
 import { parseSessionRisk, type SessionRiskProfile } from './model/sessionRisk';
 import { DEFAULT_PROBATION, type ProbationParams } from './risk/probation';
+import { DEFAULT_SINUOUS_ENTRY, type SinuousEntryParams } from './strategy/sinuousEntry';
 import { DEFAULT_SINUOUS_EXIT, type SinuousExitParams } from './strategy/sinuousExit';
 import { defaultTiers, validateTiers, type TierPoint } from './risk/sizingTiers';
 import type { VaultConfig } from './vault/vault';
@@ -216,6 +217,9 @@ export interface Config {
   /** SINUOUS_EXIT=gate (default): a profit-taking exit on a binary contract also needs the exit-in-profit curve's
    *  signal (bot/strategy/sinuousExit.ts); monitor shows the curve without holding exits; off. */
   sinuousExit: SinuousExitParams;
+  /** SINUOUS_ENTRY=monitor (default): score maker entry fills by whether the order-book curve was moving against the side
+   *  bought (bot/strategy/sinuousEntry.ts), blocking nothing; gate: no quote that adds to a position while it is; off. */
+  sinuousEntry: SinuousEntryParams;
   host: string;
   port: number;
   /** DASHBOARD_PASSWORD: '' (default) = the dashboard opens without a login. */
@@ -1024,6 +1028,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     sinuousExit: {
       mode: oneOf(env, 'SINUOUS_EXIT', DEFAULT_SINUOUS_EXIT.mode, ['gate', 'monitor', 'off'] as const),
       minNetProfit: num(env, 'SINUOUS_MIN_PROFIT_CENTS', DEFAULT_SINUOUS_EXIT.minNetProfit * 100, 0, 50) / 100,
+    },
+    sinuousEntry: {
+      mode: oneOf(env, 'SINUOUS_ENTRY', DEFAULT_SINUOUS_ENTRY.mode, ['gate', 'monitor', 'off'] as const),
+      slope: num(env, 'SINUOUS_ENTRY_SLOPE_CENTS', DEFAULT_SINUOUS_ENTRY.slope * 100, 0, 10) / 100,
     },
     host,
     port: num(env, 'PORT', 3000, 1, 65535),

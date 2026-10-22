@@ -17,9 +17,10 @@ import { Reconciler } from '../bot/recon/reconciler';
 import { openExchange, tmpAudit, tmpDir } from './helpers';
 import { Vault } from '../bot/vault/vault';
 import { BalanceMonitor } from '../bot/vault/balanceMonitor';
+import { SinuousEntryGate, type EntryVerdict } from '../bot/strategy/sinuousEntry';
 import { SinuousExitGate } from '../bot/strategy/sinuousExit';
 
-async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate } = {}) {
+async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate; curveEntry?: SinuousEntryGate } = {}) {
   const dir = tmpDir();
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy, STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_ENABLED: 'false', ...opts.env });
   const now = Date.now();
@@ -49,7 +50,7 @@ async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy
   paper.on('fill', (f) => oms.onFill(f));
   paper.on('order', (o) => oms.onExchangeOrder(o));
   const recon = new Reconciler({ gateway: paper, oms, audit, getMarket: rest.getMarket, onPersistentBreak: (r) => void kill.engage(r, 'recon') });
-  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange(), curveExit: opts.curveExit });
+  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange(), curveExit: opts.curveExit, curveEntry: opts.curveEntry });
   return { cfg, md, paper, oms, kill, recon, engine, market, audit };
 }
 
@@ -78,6 +79,36 @@ test('engine places risk-checked post-only quotes through the OMS and paper exch
   await engine.tick();
   assert.equal((await paper.getOpenOrders()).length, 0);
   assert.equal(engine.status.get(market.ticker)!.blocked, 'index stale');
+});
+
+/** An entry curve whose verdict the test sets: YES bids against it or not. */
+class StubCurve extends SinuousEntryGate {
+  againstYes = false;
+  override verdict(_ticker: string, side: 'bid' | 'ask'): EntryVerdict {
+    return side === 'bid' && this.againstYes ? { against: true, slope: -0.012 } : { against: false, slope: 0 };
+  }
+}
+
+test('entry curve gate: no YES bid while the book runs against it, and a resting one is pulled; monitor only notes it', async () => {
+  const quotes = (oms: Oms, ticker: string, side: 'bid' | 'ask') => oms.liveOrders().filter((o) => o.ticker === ticker && o.side === side && o.purpose === 'quote' && !o.cancelRequested);
+  const gate = new StubCurve({ mode: 'gate', slope: 0.005 });
+  const g = await setup({ curveEntry: gate });
+  g.engine.balance = (await g.recon.run('startup'))!.balance;
+  await g.engine.tick();
+  assert.equal(quotes(g.oms, g.market.ticker, 'bid').length, 1, `with the curve the bid rests: ${JSON.stringify(g.engine.status.get(g.market.ticker)?.notes)}`);
+  gate.againstYes = true;
+  await g.engine.tick();
+  assert.equal(quotes(g.oms, g.market.ticker, 'bid').length, 0, 'against it: pulled');
+  assert.match(g.engine.status.get(g.market.ticker)!.notes.join(' | '), /entry curve holds the YES bid: the book runs 1\.20c a 10 s against it/);
+  // Monitor mode: the same verdict is only a note; the bid goes out.
+  const watch = new StubCurve({ mode: 'monitor', slope: 0.005 });
+  watch.againstYes = true;
+  const m = await setup({ curveEntry: watch });
+  m.engine.balance = (await m.recon.run('startup'))!.balance;
+  await m.engine.tick();
+  assert.equal(quotes(m.oms, m.market.ticker, 'bid').length, 1);
+  assert.match(m.engine.status.get(m.market.ticker)!.notes.join(' | '), /entry curve would hold the YES bid/);
+  assert.equal(m.engine.curveEntryStatus()!.mode, 'monitor');
 });
 
 test('until a vol forecast is validated, fair value prices with the EWMA sigma x VOL_FALLBACK_MULT (1.15 by default)', async () => {

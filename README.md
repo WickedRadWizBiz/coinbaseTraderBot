@@ -561,6 +561,19 @@ Nothing in the existing strategies changed: the engine filters their exit orders
 
 **Modes:** `SINUOUS_EXIT=monitor` shows the curve and notes what it would hold, without holding anything. `off` removes it.
 
+### Entry curve (`SINUOUS_ENTRY`)
+
+A resting maker bid fills when the price moves through it, so the fills that come fastest are the ones the market is moving against. On Oct 20–22, a minute after a maker fill the market sat about 1.5¢ below the price paid. The entry curve (`bot/strategy/sinuousEntry.ts`) follows every crypto market's book with the same filter as the exit curve and reads its slope:
+- a bid for YES is **against the curve** when the curve falls faster than `SINUOUS_ENTRY_SLOPE_CENTS` (0.5¢) every 10 seconds;
+- a bid for NO (a YES ask) is against it when the curve rises faster than that;
+- slower, or while the curve warms up, nothing is against it.
+
+The filter damps its slope against book noise: a steady slide of 1¢ every 10 seconds reads about 0.4¢ on a 15-minute contract and 0.6¢ on an hourly one.
+
+**Monitor first (`SINUOUS_ENTRY=monitor`, the default).** Nothing is blocked. Every maker fill that adds to a position is tagged with the curve's slope when it filled, and scored by its 60-second markout: the mid a minute later, in the terms of the side bought, minus the price paid. The Telemetry tab's Entry curve row compares the fills the gate would have blocked with the ones it would have kept, at the configured slope and at 0.25, 0.5, 1 and 2¢. The scoreboard is kept in `curve-entry.json` and survives restarts.
+
+**Turning it on.** Set `SINUOUS_ENTRY=gate` once the blocked fills' markout is clearly worse than the kept ones'. Then a quote that adds to a position is not placed while the curve runs against its side, and a resting one is pulled. A quote that reduces a position, such as a take-profit, is never held. `off` removes the curve.
+
 ### Trading by hand on Kalshi alongside the bot
 
 The reconciler (`bot/recon/reconciler.ts`, every 45 s) treats Kalshi as the truth and expects you to trade on the same account:
