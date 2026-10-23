@@ -68,3 +68,34 @@ test('the gates open for unvalidated models only while their book is on probatio
   assert.equal(minScoreFor({ ...L, unlistedMinScore: 0 }, { tf: '15m', kind: 'burst' }), 0);
   assert.equal(minScoreFor({ ...L, unlistedMinScore: 0 }, { tf: '1h', kind: 'burst' }), 0.7);
 });
+
+test('the loss limit follows the account: the smaller of $25 and 15% of the book\'s break-even, applied at start too', () => {
+  assert.deepEqual([DEFAULT_PROBATION.maxLossUsd, DEFAULT_PROBATION.maxLossPct], [25, 0.15]);
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).probation.maxLossPct, 0.15);
+  const file = path.join(tmpDir(), 'probation.json');
+  const p = new Probation(DEFAULT_PROBATION, file);
+  // A $41.20 live account: 13 settled markets losing $14.51 (the live book on Oct 22), under the old $25 limit.
+  for (let i = 0; i < 13; i++) p.record('kalshi', i === 0 ? -2.51 : -1);
+  assert.ok(p.open('kalshi'), 'no break-even known yet: $25');
+  assert.equal(p.status().kalshi.maxLossUsd, 25);
+  // At the next start the break-even is known: 15% of $41.20 is $6.18, and the book is past it.
+  const benched: string[] = [];
+  const again = new Probation(DEFAULT_PROBATION, file, (b) => benched.push(b));
+  again.setBreakEven((book) => (book === 'perps' || book === 'setups' ? 100 : 41.2));
+  assert.equal(again.status().kalshi.maxLossUsd, 6.18);
+  assert.equal(again.status().perps.maxLossUsd, 15, '15% of a $100 perps account');
+  assert.ok(again.open('kalshi'), 'not judged before the review');
+  again.review();
+  assert.deepEqual(benched, ['kalshi']);
+  assert.equal(again.open('kalshi'), false);
+  assert.match(again.status().kalshi.benched!.reason, /^net loss \$14\.51 over 13 results reached PROBATION_MAX_LOSS_PCT \(15% of the \$41\.20 break-even: \$6\.18\)/);
+  assert.ok(again.open('tennis') && again.open('perps'), 'books within their limit stay on');
+  // A big account keeps the dollar limit: 15% of $400 is $60, so $25 applies.
+  const big = new Probation(DEFAULT_PROBATION);
+  big.setBreakEven(() => 400);
+  assert.equal(big.status().kalshi.maxLossUsd, 25);
+  // PROBATION_MAX_LOSS_PCT=0: the dollar limit alone.
+  const usdOnly = new Probation({ ...DEFAULT_PROBATION, maxLossPct: 0 });
+  usdOnly.setBreakEven(() => 41.2);
+  assert.equal(usdOnly.status().kalshi.maxLossUsd, 25);
+});

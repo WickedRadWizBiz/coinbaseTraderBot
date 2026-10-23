@@ -42,6 +42,12 @@ for pair in 'STRATEGY_REPRICE_SEC=30>10' 'STRATEGY_FAST_MOVE_SIGMAS=3>2' \
   old=${pair%%>*}; key=${old%%=*}; new="$key=${pair#*>}"
   if grep -qxF "$old" "$ENV"; then edit_env "^${old//./\\.}\$" "$new"; echo "$key: ${old#*=} -> ${new#*=} in $ENV"; fi
 done
+# Order budget (owner-approved Oct 22, a fifth of Kalshi's Basic-tier write budget) and the 20 s quote life it makes room
+# for: a bot.env pinned to the old values gets the new ones; any other value is left alone.
+for pair in 'RISK_MAX_ORDERS_PER_MIN=30>120' 'STRATEGY_ORDER_TTL_SEC=60>20'; do
+  old=${pair%%>*}; key=${old%%=*}; new="$key=${pair#*>}"
+  if grep -qxF "$old" "$ENV"; then edit_env "^${old//./\\.}\$" "$new"; echo "$key: ${old#*=} -> ${new#*=} in $ENV"; fi
+done
 if [ -n "${DASHBOARD_PASSWORD:-}" ] && ! grep -qxF "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD" "$ENV"; then
   edit_env '^DASHBOARD_PASSWORD=' "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD"
   echo "dashboard password set from the deploy"

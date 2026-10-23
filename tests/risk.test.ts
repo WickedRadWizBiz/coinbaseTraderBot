@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import path from 'path';
 import { test } from 'node:test';
 import { DEFAULT_FEES } from '../bot/fees';
-import type { RiskLimits } from '../bot/config';
+import { loadConfig, type RiskLimits } from '../bot/config';
 import type { OrderIntent } from '../bot/oms/oms';
 import { marketWorstLoss } from '../bot/risk/exposure';
 import { KillSwitch } from '../bot/risk/killSwitch';
@@ -146,4 +146,15 @@ test('order rate: new risk stops at 80% of the per-minute limit, exits may use a
   assert.equal(gw.check(exit, ctx({ ordersLastMinute: 30, position: 2 })).ok, false, 'the limit itself still holds');
   // A limit too small to split keeps one order for new risk.
   assert.ok(new RiskGateway({ ...limits, maxOrdersPerMinute: 1 }).check(intent(), ctx()).ok);
+});
+
+test('order budget default: 120 a minute (96 for new risk), a fifth of Kalshi\'s Basic write budget; quotes live 20 s', () => {
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) });
+  assert.equal(cfg.risk.maxOrdersPerMinute, 120);
+  assert.equal(cfg.strategy.orderTtlSec, 20);
+  const def = new RiskGateway({ ...limits, maxOrdersPerMinute: cfg.risk.maxOrdersPerMinute });
+  assert.ok(def.check(intent(), ctx({ ordersLastMinute: 95 })).ok);
+  assert.match(def.check(intent(), ctx({ ordersLastMinute: 96 })).reasons.join(';'), /at limit for new risk \(96;/);
+  // Kalshi Basic: 100 write tokens a second at 10 a write = 600 writes a minute; creates plus as many cancels fit 2.5 times over.
+  assert.ok(2 * cfg.risk.maxOrdersPerMinute <= (100 / 10) * 60 / 2.5);
 });

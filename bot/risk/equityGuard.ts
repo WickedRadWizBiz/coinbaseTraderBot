@@ -94,6 +94,9 @@ export class EquityGuard {
     return this.st.peak > 0 ? Math.max(0, 1 - equity / this.st.peak) : 0;
   }
 
+  /** Break-even reference: the starting cash, moved by cash flows, training refills and the ratchet. */
+  get reference(): number | undefined { return this.st.reference; }
+
   /** Net P&L against the break-even reference (negative = net loss). */
   netPnl(equity: number): number | undefined {
     return this.st.reference !== undefined ? equity - this.st.reference : undefined;

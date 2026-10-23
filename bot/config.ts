@@ -907,7 +907,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     dailyLossLimitFrac: num(env, 'RISK_DAILY_LOSS_FRAC', 0.03, 0.001, 0.2),
     dailyLossLimitUsd: num(env, 'RISK_DAILY_LOSS_USD', 5, 0.01, 100000),
     minSidePrice: num(env, 'RISK_MIN_SIDE_PRICE', 0.10, 0.01, 0.45),
-    maxOrdersPerMinute: num(env, 'RISK_MAX_ORDERS_PER_MIN', 30, 1, 600),
+    // Order submissions a minute (cancels apart). 120, owner-approved Oct 22: a fifth of Kalshi's Basic-tier write budget
+    // (100 tokens a second at 10 a write: 600 writes a minute), so creates plus the cancels that go with them stay well
+    // inside it; the REST client's own limiter holds every write to that budget anyway (bot/kalshi/rateLimiter.ts).
+    maxOrdersPerMinute: num(env, 'RISK_MAX_ORDERS_PER_MIN', 120, 1, 600),
     maxOpenOrders: num(env, 'RISK_MAX_OPEN_ORDERS', 12, 1, 200),
     // Paper tolerates older data: a busy small server delivers feed messages seconds late, and paper fills
     // are simulated against the same book, so stale-by-a-few-seconds costs nothing but blocked training.
@@ -939,9 +942,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     // Quotes stay fresh (a stale bid is the one that gets picked off): pulled on a 2-sigma move, re-priced every 10 s.
     fastMoveSigmas: num(env, 'STRATEGY_FAST_MOVE_SIGMAS', 2, 0.5, 20),
     fastMoveWindowSec: num(env, 'STRATEGY_FAST_MOVE_WINDOW_SEC', 5, 1, 120),
-    // 60 s, not shorter, while RISK_MAX_ORDERS_PER_MIN binds: re-placing unchanged quotes would spend the minute's
-    // order budget that moving the stale ones needs.
-    orderTtlSec: num(env, 'STRATEGY_ORDER_TTL_SEC', 60, 10, 900),
+    // 20 s: a quote the bot stops tending is gone from the exchange within 20 s. Re-placing the ones still wanted costs
+    // orders, which RISK_MAX_ORDERS_PER_MIN (120) now has room for.
+    orderTtlSec: num(env, 'STRATEGY_ORDER_TTL_SEC', 20, 10, 900),
     // Sell for profit once the bid beats the model's value, and let winners run on the confluence ratchet.
     exitPolicy: oneOf(env, 'EXIT_POLICY', 'confluence_ratchet', ['hold', 'fair_value', 'take_profit', 'confluence_ratchet'] as const),
     exitMargin: num(env, 'STRATEGY_EXIT_MARGIN', 0.01, 0, 0.5),
@@ -1037,6 +1040,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       minTrades: num(env, 'PROBATION_MIN_TRADES', DEFAULT_PROBATION.minTrades, 2, 10_000),
       t: num(env, 'PROBATION_T', DEFAULT_PROBATION.t, 0, 10),
       maxLossUsd: num(env, 'PROBATION_MAX_LOSS_USD', DEFAULT_PROBATION.maxLossUsd, 0, 1e9),
+      maxLossPct: num(env, 'PROBATION_MAX_LOSS_PCT', DEFAULT_PROBATION.maxLossPct, 0, 1),
       window: num(env, 'PROBATION_WINDOW', DEFAULT_PROBATION.window, 10, 100_000),
     },
     sinuousExit: {
