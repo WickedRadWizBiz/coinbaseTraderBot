@@ -231,6 +231,11 @@ export interface SinuousExitParams {
   mode: 'gate' | 'monitor' | 'off';
   /** Net profit a contract (dollars) an exit must clear to count as a profit exit. */
   minNetProfit: number;
+  /** Paper bench rule in place of the probation's (the owner turned the curve back on on Oct 23 to see whether it
+   *  pays): benched when holding loses beyond luck at t <= -paperBenchT after paperBenchMinExits held exits, or costs
+   *  the probation's dollar limit. */
+  paperBenchT?: number;
+  paperBenchMinExits?: number;
 }
 
 export const DEFAULT_SINUOUS_EXIT: SinuousExitParams = { mode: 'gate', minNetProfit: 0.015 };
@@ -253,7 +258,7 @@ export interface CurveEvent {
 }
 
 interface Held { sign: 1 | -1; heldNet: number; count: number; ts: number }
-interface SavedState { results: number[]; since: number; benched?: { at: number; reason: string } }
+interface SavedState { results: number[]; since: number; benched?: { at: number; reason: string }; restartTag?: string }
 
 export interface SinuousExitStatus {
   mode: SinuousExitParams['mode'];
@@ -263,6 +268,8 @@ export interface SinuousExitStatus {
   netUsd: number;
   t: number | null;
   since: number;
+  /** When it benches itself: t at or below -t after minExits held exits, or a net cost of maxLossUsd. */
+  benchRule: { t: number; minExits: number; maxLossUsd: number };
   holding: string[];
   tracking: number;
 }
@@ -283,9 +290,19 @@ export class SinuousExitGate {
     private readonly file?: string,
     private readonly onEvent?: (e: CurveEvent) => void,
     now = Date.now(),
+    /** A scoreboard saved under another tag starts over once (bench lifted): how a book is turned back on. */
+    restartTag?: string,
   ) {
     const saved = file ? readJson<SavedState>(file, { quarantine: true }) : undefined;
-    this.st = saved && Array.isArray(saved.results) ? saved : { results: [], since: now };
+    const usable = saved && Array.isArray(saved.results) ? saved : undefined;
+    if (usable && (restartTag === undefined || usable.restartTag === restartTag)) this.st = usable;
+    else {
+      this.st = { results: [], since: now, ...(restartTag !== undefined ? { restartTag } : {}) };
+      if (usable) {
+        this.save();
+        this.onEvent?.({ event: 'reset', reason: `started over (${restartTag})`, before: { scored: usable.results.length, benched: usable.benched?.reason ?? null } });
+      }
+    }
   }
 
   /** Holding exits now: gate mode and not benched. */
@@ -355,7 +372,7 @@ export class SinuousExitGate {
   }
 
   reset(now = Date.now()): void {
-    this.st = { results: [], since: now };
+    this.st = { results: [], since: now, ...(this.st.restartTag !== undefined ? { restartTag: this.st.restartTag } : {}) };
     this.held.clear();
     this.save();
     this.onEvent?.({ event: 'reset' });
@@ -366,6 +383,7 @@ export class SinuousExitGate {
     return {
       mode: this.p.mode, minNetProfitCents: +(this.p.minNetProfit * 100).toFixed(2), benched: this.st.benched ?? null,
       scored: this.st.results.length, netUsd: +s.sum.toFixed(2), t: s.t === null ? null : +s.t.toFixed(2), since: this.st.since,
+      benchRule: { t: this.bench.t, minExits: this.bench.minTrades, maxLossUsd: this.bench.maxLossUsd },
       holding: [...this.held.keys()], tracking: this.trackers.size,
     };
   }

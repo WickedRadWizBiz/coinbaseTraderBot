@@ -110,7 +110,7 @@ jobs:
             print("optimal f from settled trades:", J(g.get("optimalF"), 300))
             print("maker discount from 60 s markouts: buffer", g.get("makerBuffer"), "| markout", J(g.get("makerMarkout60")))
             print("probation:", J(s.get("probation"), 500))
-            print("exit curve:", J(s.get("curveExit"), 300))
+            print("exit curve:", J(s.get("curveExit"), 450))
             print("entry curve:", J(s.get("curveEntry"), 400))
             print("tree models:", J(s.get("treeModels"), 400))
             print("snn brief:", J(s.get("snn"), 500))' || true

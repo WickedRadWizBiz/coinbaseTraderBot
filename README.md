@@ -568,7 +568,9 @@ The knobs are set by market and adjusted every tick:
 
 Nothing in the existing strategies changed: the engine filters their exit orders.
 
-**The scoreboard** scores each held profit exit when the position finally exits: (exit price then − exit price when first held) × contracts, net of the exit fee; a settlement counts at $1 or $0. The gate is benched, with an alert, under the probation rules: a net cost of `PROBATION_MAX_LOSS_USD`, or after `PROBATION_MIN_TRADES` held exits a negative net with t ≤ −`PROBATION_T`. Benched, profit exits go out without waiting until `POST /api/curve-exit/reset`.
+**The scoreboard** scores each held profit exit when the position finally exits: (exit price then − exit price when first held) × contracts, net of the exit fee; a settlement counts at $1 or $0. The gate is benched, with an alert, under the probation rules: a net cost of `PROBATION_MAX_LOSS_USD`, or after `PROBATION_MIN_TRADES` held exits a negative net with t ≤ −`PROBATION_T`. Benched, profit exits go out without waiting until a reset (the Reset button on the Telemetry tab's Exit curve row, or `POST /api/curve-exit/reset`).
+
+**Paper (since Oct 23).** The paper curve had benched itself that morning (−$0.57 over 80 held exits, t −1.19, under the loose probation rule t ≤ −1). The owner turned it back on to see whether it pays at the $10 paper size: its scoreboard started over once at that deploy, and in paper it is benched only when holding loses beyond luck at t ≤ −`SINUOUS_PAPER_BENCH_T` (2) after `SINUOUS_PAPER_BENCH_MIN_EXITS` (30) held exits, or costs `PROBATION_MAX_LOSS_USD`. Live keeps the probation rules and its scoreboard.
 
 **On the dashboard:**
 - the depth monitor shows a CURVE badge for each held contract: its state, the curve, the projection and z;

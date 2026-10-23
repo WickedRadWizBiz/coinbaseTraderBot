@@ -1060,6 +1060,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     sinuousExit: {
       mode: oneOf(env, 'SINUOUS_EXIT', DEFAULT_SINUOUS_EXIT.mode, ['gate', 'monitor', 'off'] as const),
       minNetProfit: num(env, 'SINUOUS_MIN_PROFIT_CENTS', DEFAULT_SINUOUS_EXIT.minNetProfit * 100, 0, 50) / 100,
+      paperBenchT: num(env, 'SINUOUS_PAPER_BENCH_T', 2, 0.5, 10),
+      paperBenchMinExits: num(env, 'SINUOUS_PAPER_BENCH_MIN_EXITS', 30, 5, 10_000),
     },
     sinuousEntry: {
       mode: oneOf(env, 'SINUOUS_ENTRY', DEFAULT_SINUOUS_ENTRY.mode, ['gate', 'monitor', 'off'] as const),

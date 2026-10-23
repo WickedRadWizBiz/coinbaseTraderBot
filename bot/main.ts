@@ -119,11 +119,16 @@ async function main(): Promise<void> {
   setProbation(probationBooks);
   if (cfg.probation.mode === 'monitor') log.info('validation gates: monitor (unvalidated models trade on probation)', { ...cfg.probation });
   // Exit-in-profit curve (SINUOUS_EXIT, bot/strategy/sinuousExit.ts): profit-taking exits on binary contracts also need
-  // its signal; its scoreboard benches it under the probation rules when holding profit exits costs money.
-  const curveExit = cfg.sinuousExit.mode === 'off' ? undefined : new SinuousExitGate(cfg.sinuousExit, cfg.probation, path.join(cfg.bookDir, 'curve-exit.json'), (e) => {
+  // its signal; its scoreboard benches it under the probation rules when holding profit exits costs money. Paper: the
+  // owner turned it back on on Oct 23 to see whether it pays (its scoreboard starts over once), and it is benched only
+  // when holding loses beyond luck at t <= -SINUOUS_PAPER_BENCH_T after SINUOUS_PAPER_BENCH_MIN_EXITS held exits, or
+  // costs PROBATION_MAX_LOSS_USD. Live keeps the probation rules and its scoreboard.
+  const paperCurve = cfg.mode === 'paper';
+  const curveBench = paperCurve ? { ...cfg.probation, t: cfg.sinuousExit.paperBenchT ?? cfg.probation.t, minTrades: cfg.sinuousExit.paperBenchMinExits ?? cfg.probation.minTrades } : cfg.probation;
+  const curveExit = cfg.sinuousExit.mode === 'off' ? undefined : new SinuousExitGate(cfg.sinuousExit, curveBench, path.join(cfg.bookDir, 'curve-exit.json'), (e) => {
     audit.write('curve_exit', e);
     if (e.event === 'benched') alerter.notify('warn', 'curve-exit', `Exit curve benched (profit exits go out without waiting for it until a reset): ${String(e.reason)}`);
-  });
+  }, Date.now(), paperCurve ? 'owner-on-2026-10-23' : undefined);
   // Entry curve (SINUOUS_ENTRY, bot/strategy/sinuousEntry.ts): monitor scores maker entries by the book's curve at the
   // fill; gate also holds back quotes the curve is running against.
   const curveEntry = cfg.sinuousEntry.mode === 'off' ? undefined : new SinuousEntryGate(cfg.sinuousEntry, path.join(cfg.bookDir, 'curve-entry.json'));
