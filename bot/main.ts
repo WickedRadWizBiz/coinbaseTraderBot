@@ -129,7 +129,9 @@ async function main(): Promise<void> {
   const curveBench = paperCurve ? { ...cfg.probation, t: cfg.sinuousExit.paperBenchT ?? cfg.probation.t, minTrades: cfg.sinuousExit.paperBenchMinExits ?? cfg.probation.minTrades } : cfg.probation;
   const curveExit = curveParams.mode === 'off' ? undefined : new SinuousExitGate(curveParams, curveBench, path.join(cfg.bookDir, 'curve-exit.json'), (e) => {
     audit.write('curve_exit', e);
-    if (e.event === 'benched') alerter.notify('warn', 'curve-exit', `Exit curve benched (profit exits go out without waiting for it until a reset): ${String(e.reason)}`);
+    if (e.event === 'benched') alerter.notify('warn', 'curve-exit', curveParams.mode === 'rest'
+      ? `Exit curve's cross benched (it stops selling on the cross until a reset; the resting sells go on): ${String(e.reason)}`
+      : `Exit curve benched (profit exits go out without waiting for it until a reset): ${String(e.reason)}`);
   }, Date.now(), paperCurve ? 'owner-on-2026-10-23' : undefined);
   // Entry curve (SINUOUS_ENTRY, bot/strategy/sinuousEntry.ts): monitor scores maker entries by the book's curve at the
   // fill; gate also holds back quotes the curve is running against.

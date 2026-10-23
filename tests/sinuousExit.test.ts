@@ -255,3 +255,76 @@ test('rest mode: the swing-top estimate rides the curve\'s momentum; no exit is 
   assert.equal(rest.check('F', { sidePrice: 0.595, count: 10, exitFeePer: 0.01, entrySidePrice: 0.4, entryFeePer: 0.01, protective: false }, now).allow, true);
   assert.deepEqual(rest.status().holding, []);
 });
+
+/** Feeds a curve that rises to 0.695 and then falls a cent a second for six seconds: a roll-over below its projection. */
+function rollOver(g: SinuousExitGate, ticker: string, now: number): number {
+  for (let i = 0; i < 30; i++) g.observe(ticker, 'crypto_15m', obs((now += 1000), 0.55 + 0.005 * i));
+  for (let i = 1; i <= 6; i++) g.observe(ticker, 'crypto_15m', obs((now += 1000), 0.695 - 0.01 * i));
+  return now;
+}
+
+const CROSS = { sidePrice: 0.63, count: 10, exitFeePer: 0.0165, entrySidePrice: 0.4, entryFeePer: 0.01, floor: 0.041, tauSec: 400, spot: 'against' as const };
+
+test('rest mode, the cross: a roll-over by half the fee with spot turned and the floor cleared sells at once; scored against holding to settlement', () => {
+  const file = path.join(tmpDir(), 'curve.json');
+  const g = new SinuousExitGate({ mode: 'rest', minNetProfit: 0.015, restBandSigmas: 0 }, BENCH, file, undefined, 0);
+  const now = rollOver(g, 'T', 0);
+  const r = g.reading('T')!;
+  assert.ok(r.curve! < r.projected! && r.velocity! <= 0, JSON.stringify(r));
+  // Spot has not turned against the side: no sale, the resting sell stays.
+  const w = g.cross('T', { ...CROSS, spot: 'with' }, now);
+  assert.equal(w.sell, false);
+  assert.match(w.note ?? '', /spot has not turned \(with\)/);
+  assert.equal(g.cross('T', { ...CROSS, spot: 'flat' }, now).sell, false);
+  // Below the take-profit floor, or inside the stand-down before the close: no sale (and no resting sell there).
+  assert.equal(g.cross('T', { ...CROSS, floor: 0.3 }, now).sell, false);
+  assert.equal(g.cross('T', { ...CROSS, tauSec: 100 }, now).sell, false);
+  assert.equal(g.restTarget('T', 100), undefined);
+  assert.notEqual(g.restTarget('T', 400), undefined);
+  // A margin wider than the dip: not a cross. The cross turned off: none either.
+  const wide = new SinuousExitGate({ mode: 'rest', minNetProfit: 0.015, crossFeeMargin: 5 }, BENCH, undefined, undefined, 0);
+  assert.equal(wide.cross('T', CROSS, rollOver(wide, 'T', 0)).sell, false);
+  const off = new SinuousExitGate({ mode: 'rest', minNetProfit: 0.015, cross: false }, BENCH, undefined, undefined, 0);
+  assert.equal(off.cross('T', CROSS, rollOver(off, 'T', 0)).sell, false);
+  assert.equal(off.status().cross, false);
+  // All three hold: sell now.
+  const c = g.cross('T', CROSS, now);
+  assert.equal(c.sell, true);
+  assert.match(c.why!, /^exit curve: cross 0\.63 \(\+0\.203 a contract net, curve 0\.\d+ under projection 0\.\d+, spot against\)$/);
+  assert.equal(g.status().crossesPending, 1);
+  // Called again within seconds for the same market (the first order rejected): still one cross.
+  assert.equal(g.cross('T', CROSS, now + 2000).sell, true);
+  assert.equal(g.status().crossesPending, 1);
+  // The sale waits for its market's result across a restart; NO settles: holding YES would have paid 0, so the sale
+  // made its net price x 10.
+  const again = new SinuousExitGate({ mode: 'rest', minNetProfit: 0.015 }, BENCH, file, undefined, now);
+  assert.equal(again.status().crossesPending, 1);
+  again.settled('T', 'no', now + 60_000);
+  const s = again.status();
+  assert.equal(s.scored, 1);
+  assert.equal(s.crossesPending, 0);
+  assert.ok(Math.abs(s.netUsd - (0.63 - 0.0165) * 10) < 0.01, String(s.netUsd));
+});
+
+test('rest mode: the cross is benched when selling on it loses against holding; the resting sells go on', () => {
+  const events: CurveEvent[] = [];
+  const g = new SinuousExitGate({ mode: 'rest', minNetProfit: 0.015, restBandSigmas: 0 }, { minTrades: 20, t: 1, maxLossUsd: 5, window: 200 }, undefined, (e) => events.push(e), 0);
+  let now = 0;
+  for (const t of ['A', 'B']) {
+    now = rollOver(g, t, now);
+    assert.equal(g.cross(t, CROSS, now).sell, true);
+    // YES settles: holding would have paid $1 a contract, so each sale lost (1 - 0.6135) x 10.
+    g.settled(t, 'yes', now);
+  }
+  const s = g.status();
+  assert.ok(s.benched, JSON.stringify(s));
+  assert.match(s.benched!.reason, /^selling on the cross cost \$7\.73 against holding to settlement over 2 exits \(limit \$5\)$/);
+  assert.ok(events.some((e) => e.event === 'benched'));
+  now = rollOver(g, 'C', now);
+  const c = g.cross('C', CROSS, now);
+  assert.equal(c.sell, false);
+  assert.match(c.note ?? '', /the cross is benched/);
+  assert.notEqual(g.restTarget('C', 400), undefined, 'the resting sell goes on');
+  g.reset(now);
+  assert.equal(g.cross('C', CROSS, now).sell, true, 'a reset turns the cross back on');
+});

@@ -127,6 +127,8 @@ TP = re.compile(r'take-profit( NO)?: \+(-?[0-9.]+) a contract net of fees \(best
 OLD_TP = re.compile(r'profit target: (NO )?\+(-?[0-9.]+) a contract net of fees')  # sold at the target (before Oct 22 23:03)
 # The exit curve's resting sell (rest mode, paper since Oct 23): net a contract at its price, and the swing-top estimate.
 REST = re.compile(r'exit curve: rest( NO)? ([0-9.]+) \(\+(-?[0-9.]+) a contract net, swing top ([0-9.]+)\)')
+# The exit curve's cross (rest mode, paper since Oct 23): sold at the bid on a confirmed roll-over; net a contract.
+CROSS = re.compile(r'exit curve: cross( NO)? ([0-9.]+) \(\+(-?[0-9.]+) a contract net')
 def exit_kind(why):
     m = TP.match(why)
     if m: return 'take-profit (trailing)', m
@@ -134,11 +136,15 @@ def exit_kind(why):
     if m: return 'profit target (old: sold at once)', m
     m = REST.match(why)
     if m: return 'exit curve (resting sell)', m
+    m = CROSS.match(why)
+    if m: return 'exit curve (cross)', m
     if '- fee > q' in why: return 'model exit (market pays more)', None
     if why.startswith('confluence ratchet stop'): return 'ratchet stop', None
     return re.sub(r'[-+]?[0-9][0-9.]*', '#', why)[:40] or '?', None
-print('\n== exit fills by reason, by UTC day: fills, contracts, take-profit net a contract after fees (contract-weighted)')
-byk = collections.defaultdict(lambda: [0, 0.0, 0.0, 0.0])
+print('\n== exit fills by reason, by UTC day: fills, contracts, net a contract after fees (take-profit, exit curve; contract-weighted),'
+      '\n   and vs holding: what each exit made against holding those contracts to settlement, after its fee (settled markets only)')
+byk = collections.defaultdict(lambda: [0, 0.0, 0.0, 0.0, 0.0, 0.0])
+result_of = {x['ticker']: x['result'] for x in settles if x.get('result') in ('yes', 'no')}
 tp_rows, rest_rows = [], []
 for fl in fills:
     o = orders.get(fl['coid']) or {}
@@ -147,12 +153,19 @@ for fl in fills:
     why = next((w for sd, px, w in plans if sd == fl['side'] and px == o.get('price')), plans[0][2] if plans else '(no decision record)')
     k, m = exit_kind(why)
     b = byk[(fl['ts'][:10], k)]; b[0] += 1; b[1] += fl['count']
+    res = result_of.get(fl['ticker'])
+    if res:
+        # Selling YES at p (side ask) vs holding YES; buying YES at p to close NO (side bid) vs holding NO.
+        y = 1.0 if res == 'yes' else 0.0
+        per = fl['price'] - y if fl['side'] == 'ask' else y - fl['price']
+        b[4] += per * fl['count'] - (fl['fee'] or 0); b[5] += fl['count']
     if m:
-        b[2] += float(m.group(3) if m.re is REST else m.group(2)) * fl['count']; b[3] += fl['count']
+        b[2] += float(m.group(3) if m.re in (REST, CROSS) else m.group(2)) * fl['count']; b[3] += fl['count']
         if m.re is TP: tp_rows.append((fl['ts'], fl['ticker'], fl['count'], m))
         if m.re is REST: rest_rows.append((fl['ts'], fl['ticker'], fl['count'], m))
 for (d, k), b in sorted(byk.items()):
-    print(f"  {d}  {k:34s} fills {b[0]:4d}  contracts {b[1]:7.2f}" + (f"  net {b[2] / b[3]:+.3f} a contract" if b[3] else ''))
+    print(f"  {d}  {k:34s} fills {b[0]:4d}  contracts {b[1]:7.2f}" + (f"  net {b[2] / b[3]:+.3f} a contract" if b[3] else '')
+          + (f"  vs holding ${b[4]:+.2f} ({b[4] / b[5]:+.3f}/ct on {b[5]:.0f} ct)" if b[5] else ''))
 print('  last 12 take-profit fills (net now / best / floor, a contract after fees):')
 for ts, t, n, m in tp_rows[-12:]:
     print(f"    {ts[5:16]}  {t:34s} {n:6.2f} ct  +{float(m.group(2)):.3f} / +{float(m.group(3)):.3f} / +{float(m.group(4)):.3f}")
