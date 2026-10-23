@@ -265,11 +265,13 @@ async function main(): Promise<void> {
     md.on('fee_schedule', (e: { changed: boolean; error?: string }) => {
       const fs0 = md.feeStatus();
       const st = fs0.published;
-      if (e.error) { log.warn('fee schedule check failed (the last good read and the API schedule stay in use)', { error: e.error, url: cfg.feeSchedule.url }); return; }
-      audit.write('fee_schedule', st);
+      // A refused read keeps the schedule in use (the last good read, or the copy built into the release); the checks
+      // below run against it either way.
+      if (e.error) log.warn('fee schedule check failed (the schedule in use stays)', { error: e.error, url: cfg.feeSchedule.url, inUse: `${st.source} of ${st.effective}` });
+      else audit.write('fee_schedule', st);
       const day = new Date().toISOString().slice(0, 10);
       if (e.changed) alerter.notify('info', 'fee-schedule', `Kalshi fee schedule read: effective ${st.effective ?? '?'}, taker ${st.takerRate} / maker ${st.makerRate}, ${st.nonStandardListed} series with their own multipliers; the bot's formula reproduces ${st.tableCheck?.matched ?? 0}/${st.tableCheck?.rows ?? 0} rows of the published fee table`);
-      if (st.takerRate !== TAKER_RATE || st.makerRate !== MAKER_RATE) alerter.notify('warn', `fee-schedule-rates-${day}`, `Kalshi's published fee rates are taker ${st.takerRate}, maker ${st.makerRate} (built in: ${TAKER_RATE}, ${MAKER_RATE}); the bot prices with the published ones`);
+      if (st.takerRate !== null && (st.takerRate !== TAKER_RATE || st.makerRate !== MAKER_RATE)) alerter.notify('warn', `fee-schedule-rates-${day}`, `Kalshi's published fee rates are taker ${st.takerRate}, maker ${st.makerRate} (built in: ${TAKER_RATE}, ${MAKER_RATE}); the bot prices with the published ones`);
       if (st.tableCheck && st.tableCheck.matched < st.tableCheck.rows) alerter.notify('warn', `fee-schedule-table-${day}`, `Fee check: the bot's formula does not reproduce Kalshi's published fee table (${st.tableCheck.firstMiss})`);
       for (const s of fs0.series) if (s.source.startsWith('api and published')) alerter.notify('warn', `fee-disagree-${s.series}-${day}`, `Fee check: ${s.series}: the API says ${s.feeType} x${s.multiplier}, the published schedule lists maker ${s.published?.maker} / taker ${s.published?.taker}; pricing with the higher (taker x${s.taker}, maker x${s.maker})`);
     });

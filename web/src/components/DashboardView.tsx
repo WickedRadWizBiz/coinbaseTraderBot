@@ -212,7 +212,7 @@ export function DashboardView() {
                 const unverified = (fsch.series ?? []).filter((x: { verified: boolean }) => !x.verified).length;
                 const bad = unverified > 0 || (fsch.fills?.mismatch ?? 0) > 0 || (fsch.published?.tableCheck && fsch.published.tableCheck.matched < fsch.published.tableCheck.rows);
                 return <Row label="Kalshi fees" value={fsch.published?.effective ? `schedule of ${fsch.published.effective}` : 'schedule not read'}
-                  sub={`${(fsch.series?.length ?? 0) - unverified}/${fsch.series?.length ?? 0} series verified · grid $${fsch.precision?.using} · ${fsch.fills?.checked ?? 0} live fills checked, ${fsch.fills?.mismatch ?? 0} off${fsch.published?.error ? ` · last read: ${fsch.published.error}` : ''}`}
+                  sub={`${fsch.published?.source ? `${fsch.published.source} · ` : ''}${(fsch.series?.length ?? 0) - unverified}/${fsch.series?.length ?? 0} series verified · grid $${fsch.precision?.using} · ${fsch.fills?.checked ?? 0} live fills checked, ${fsch.fills?.mismatch ?? 0} off${fsch.published?.error ? ` · kalshi.com read: ${fsch.published.error}` : ''}`}
                   tone={bad ? 'warn' : fsch.published?.effective ? 'ok' : undefined} />;
               })()}
               <Row label="Settlement index" value={String(s.indexSource).toUpperCase()} sub={s.indexSource === 'proxy' ? 'Coinbase spot proxy (paper only)' : 'CF Benchmarks RTI via Kalshi'} tone={s.indexSource === 'none' ? 'bad' : s.indexSource === 'proxy' ? 'warn' : 'ok'} />

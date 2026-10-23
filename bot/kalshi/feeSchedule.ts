@@ -16,6 +16,9 @@
 //     account's rounding grid ($0.0001 for direct members, $0.01 through an FCM) from the fees actually charged.
 // A series is verified when the API gave a fee type the schedule defines. Where the published table and the API
 // disagree, the higher fee is used (a cost is never underestimated) and the status says so.
+// kalshi.com answers the server's own download with its bot check (HTTP 429, Oct 23), so until a read of the bot's
+// own succeeds the published schedule is the copy built into the release (feeScheduleSnapshot.json, refreshed with
+// scripts/feeScheduleSnapshot.ts from the PDF saved in a browser); whichever was read later is used.
 
 import { DEFAULT_FEES, orderFee, takerFee, type FeeSchedule } from '../fees';
 import { readJson, writeJsonAtomic } from '../util/persist';
@@ -153,15 +156,17 @@ export class FeeBook {
   private eventsAt = 0;
   private publishedAt = 0;
   private publishedError?: string;
-  published?: PublishedSchedule;
+  /** The bot's own last good read of the published schedule (kept on disk). */
+  private read?: PublishedSchedule;
   private learned?: number;
   private votes = { direct: 0, fcm: 0 };
   private fills: FillTally = { checked: 0, exact: 0, rebate: 0, mismatch: 0 };
   private readonly perSeries = new Map<string, { checked: number; mismatch: number }>();
 
-  constructor(private readonly configuredPrecision: number, private readonly file?: string) {
+  /** `snapshot`: the copy of the published schedule built into the release, used until a later read of the bot's own. */
+  constructor(private readonly configuredPrecision: number, private readonly file?: string, private readonly snapshot?: PublishedSchedule) {
     const s = file ? readJson<Saved>(file, { quarantine: true }) : undefined;
-    if (s?.published && typeof s.published.takerRate === 'number') this.published = s.published;
+    if (s?.published && typeof s.published.takerRate === 'number') this.read = s.published;
     if (s?.learnedPrecision === 0.01 || s?.learnedPrecision === 0.0001) this.learned = s.learnedPrecision;
     if (s?.votes) this.votes = { direct: Number(s.votes.direct) || 0, fcm: Number(s.votes.fcm) || 0 };
     if (s?.fills && typeof s.fills.checked === 'number') this.fills = { ...s.fills };
@@ -201,7 +206,7 @@ export class FeeBook {
     this.publishedAt = now;
     if ('error' in p) { this.publishedError = p.error; return { changed: false }; }
     const before = this.published;
-    this.published = p;
+    this.read = p;
     this.publishedError = undefined;
     this.save();
     const changed = !before || before.effective !== p.effective || before.takerRate !== p.takerRate || before.makerRate !== p.makerRate
@@ -210,6 +215,17 @@ export class FeeBook {
   }
 
   publishedCheckedAt(): number { return this.publishedAt; }
+
+  /** The published schedule in use: the bot's own read or the built-in copy, whichever was read later. */
+  get published(): PublishedSchedule | undefined {
+    const r = this.read, c = this.snapshot;
+    return r && (!c || r.checkedAt >= c.checkedAt) ? r : c;
+  }
+
+  private publishedSource(): 'kalshi.com' | 'built-in copy' | undefined {
+    const p = this.published;
+    return !p ? undefined : p === this.read ? 'kalshi.com' : 'built-in copy';
+  }
 
   // ---- the schedule --------------------------------------------------------------------------------------------
 
@@ -304,6 +320,7 @@ export class FeeBook {
     return {
       published: {
         url: FEE_SCHEDULE_URL,
+        source: this.publishedSource() ?? null,
         checkedAt: this.publishedAt || null,
         error: this.publishedError ?? null,
         effective: p?.effective ?? null,
@@ -334,6 +351,6 @@ export class FeeBook {
   }
 
   private save(): void {
-    if (this.file) writeJsonAtomic(this.file, { published: this.published, learnedPrecision: this.learned, votes: this.votes, fills: this.fills } satisfies Saved);
+    if (this.file) writeJsonAtomic(this.file, { published: this.read, learnedPrecision: this.learned, votes: this.votes, fills: this.fills } satisfies Saved);
   }
 }

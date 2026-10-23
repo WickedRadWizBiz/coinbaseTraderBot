@@ -16,7 +16,8 @@ import path from 'path';
 import WebSocket from 'ws';
 import type { Config } from '../config';
 import type { FeeSchedule } from '../fees';
-import { FeeBook, readPublishedSchedulePdf } from '../kalshi/feeSchedule';
+import { FeeBook, readPublishedSchedulePdf, type PublishedSchedule } from '../kalshi/feeSchedule';
+import feeScheduleSnapshot from '../kalshi/feeScheduleSnapshot.json';
 import type { KalshiRest } from '../kalshi/rest';
 import type { KalshiWs } from '../kalshi/ws';
 import type { MarketInfo } from '../kalshi/types';
@@ -130,7 +131,7 @@ export class MarketData extends EventEmitter {
     private readonly recorder: Recorder,
   ) {
     super();
-    this.feeBook = new FeeBook(cfg.kalshiBalancePrecision, cfg.dataDir ? path.join(cfg.dataDir, 'fee_schedule.json') : undefined);
+    this.feeBook = new FeeBook(cfg.kalshiBalancePrecision, cfg.dataDir ? path.join(cfg.dataDir, 'fee_schedule.json') : undefined, feeScheduleSnapshot as PublishedSchedule);
     const histDir = cfg.taNet?.enabled ? cfg.taNet.historyDir : undefined;
     this.indexBars = new IndexBars(histDir);
     this.indexStore = new IndexStore(histDir);
@@ -277,7 +278,8 @@ export class MarketData extends EventEmitter {
     const now = Date.now();
     try {
       const res = await fetchImpl(this.cfg.feeSchedule.url, { headers: { Accept: 'application/pdf', 'User-Agent': 'Mozilla/5.0 (compatible; fee schedule check)' }, signal: AbortSignal.timeout(30_000) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // kalshi.com's bot check (Vercel) answers a server with 429 and x-vercel-mitigated: challenge.
+      if (!res.ok) throw new Error(`HTTP ${res.status}${res.headers.get('x-vercel-mitigated') ? ` (kalshi.com's bot check: ${res.headers.get('x-vercel-mitigated')})` : ''}`);
       const buf = Buffer.from(await res.arrayBuffer());
       if (buf.length > 20e6) throw new Error(`${(buf.length / 1e6).toFixed(1)} MB is too large for the fee schedule`);
       const p = readPublishedSchedulePdf(buf, now);
