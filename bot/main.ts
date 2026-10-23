@@ -111,10 +111,11 @@ async function main(): Promise<void> {
   if (cfg.alertWebhookUrl) sinks.push(new WebhookSink(cfg.alertWebhookUrl));
   const alerter = new Alerter(sinks, audit);
   // Probation (VALIDATION_GATES=monitor): unvalidated models trade, and a book whose results are unacceptable is benched.
-  setProbation(new Probation(cfg.probation, path.join(cfg.bookDir, 'probation.json'), (book, reason) => {
+  const probationBooks = new Probation(cfg.probation, path.join(cfg.bookDir, 'probation.json'), (book, reason) => {
     audit.write('probation', { event: 'benched', book, reason });
     alerter.notify('warn', `probation-${book}`, `Probation: ${book} benched (its unvalidated models stop trading until the next model or a reset): ${reason}`);
-  }));
+  });
+  setProbation(probationBooks);
   if (cfg.probation.mode === 'monitor') log.info('validation gates: monitor (unvalidated models trade on probation)', { ...cfg.probation });
   // Exit-in-profit curve (SINUOUS_EXIT, bot/strategy/sinuousExit.ts): profit-taking exits on binary contracts also need
   // its signal; its scoreboard benches it under the probation rules when holding profit exits costs money.
@@ -250,6 +251,10 @@ async function main(): Promise<void> {
   const trainingOverride = () => control.killOverride;
   const perpsStreak = new StreakScaler(DEFAULT_STREAK, path.join(cfg.bookDir, 'streak_perps.json'));
   const perpsBreakEven = new BreakEven(path.join(cfg.bookDir, 'perps_break_even.json'));
+  // Probation's loss limit follows each account's size (PROBATION_MAX_LOSS_PCT of its break-even, at most
+  // PROBATION_MAX_LOSS_USD); a book already past it is benched now rather than at its next result.
+  probationBooks.setBreakEven((book) => (book === 'perps' || book === 'setups' ? perpsBreakEven.reference : equityGuard.reference));
+  probationBooks.review();
   let perpsPaper: PaperPerpExchange | undefined;
   const modelHealth = new ModelHealth({ minWindows: cfg.strategy.modelHealthMinWindows }, path.join(cfg.dataDir, 'model_health.json'));
   const taHealth = new ModelHealth({ minWindows: 1e9 }, path.join(cfg.dataDir, 'ta_health.json'));

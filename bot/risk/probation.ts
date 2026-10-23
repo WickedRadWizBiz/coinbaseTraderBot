@@ -7,7 +7,9 @@
 // soon as it exists, on probation: every settled Kalshi market, closed setup trade, closed perps position and settled
 // tennis market of its book is one result. The book is benched (its unvalidated parts go back behind their gates,
 // validated parts keep trading) when its results are unacceptable:
-//   - net loss beyond PROBATION_MAX_LOSS_USD at any time, or
+//   - a net loss beyond the loss limit at any time: PROBATION_MAX_LOSS_USD, or PROBATION_MAX_LOSS_PCT of the book's
+//     break-even (its starting cash, moved by deposits and refills) when that is smaller, so the limit follows the
+//     size of the account ($25, or 15% of a $41 account: $6.18), or
 //   - after PROBATION_MIN_TRADES results, a negative net with t = mean / (sd / sqrt(n)) at or below -PROBATION_T
 //     (losing by more than luck explains).
 // A benched book gets a fresh probation when a new model for it is loaded (the trainer's next promotion), or from
@@ -25,22 +27,47 @@ export interface ProbationParams {
   /** Bench when losing with t at or below -this. */
   t: number;
   maxLossUsd: number;
+  /** ...or this fraction of the book's break-even, when smaller. 0 = the dollar limit alone. */
+  maxLossPct: number;
   window: number;
 }
 
-export const DEFAULT_PROBATION: ProbationParams = { mode: 'monitor', minTrades: 20, t: 1, maxLossUsd: 25, window: 200 };
+export const DEFAULT_PROBATION: ProbationParams = { mode: 'monitor', minTrades: 20, t: 1, maxLossUsd: 25, maxLossPct: 0.15, window: 200 };
 
 interface BookState { results: number[]; since: number; benched?: { at: number; reason: string } }
 type State = Record<ProbationBook, BookState>;
 
-export interface ProbationBookStatus { trades: number; netUsd: number; t: number | null; since: number; benched: { at: number; reason: string } | null; open: boolean }
+export interface ProbationBookStatus { trades: number; netUsd: number; t: number | null; since: number; benched: { at: number; reason: string } | null; open: boolean; maxLossUsd: number }
 
 export class Probation {
   private st: State;
+  private breakEvenOf?: (book: ProbationBook) => number | undefined;
 
   constructor(readonly p: ProbationParams = DEFAULT_PROBATION, private readonly file?: string, private readonly onBench?: (book: ProbationBook, reason: string) => void, now = Date.now()) {
     const saved = file ? readJson<Partial<State>>(file, { quarantine: true }) : undefined;
     this.st = Object.fromEntries(PROBATION_BOOKS.map((b) => [b, saved?.[b] ?? { results: [], since: now }])) as State;
+  }
+
+  /** Each book's break-even (main.ts: the Kalshi pool for kalshi and tennis, the perps margin for perps and setups). */
+  setBreakEven(fn: (book: ProbationBook) => number | undefined): void { this.breakEvenOf = fn; }
+
+  /** The net loss that benches the book: PROBATION_MAX_LOSS_USD, or PROBATION_MAX_LOSS_PCT of its break-even if smaller. */
+  maxLoss(book: ProbationBook): number {
+    const be = this.breakEvenOf?.(book);
+    return this.p.maxLossPct > 0 && be !== undefined && be > 0 ? Math.min(this.p.maxLossUsd, this.p.maxLossPct * be) : this.p.maxLossUsd;
+  }
+
+  /** Apply the rules to every book still on probation: at start, once the loss limits are known, a book already past
+   *  them is benched now rather than at its next result. */
+  review(now = Date.now()): void {
+    if (this.p.mode !== 'monitor') return;
+    let changed = false;
+    for (const book of PROBATION_BOOKS) {
+      const b = this.st[book];
+      const why = b.benched ? undefined : this.verdict(book, b.results);
+      if (why) { b.benched = { at: now, reason: why }; this.onBench?.(book, why); changed = true; }
+    }
+    if (changed) this.save();
   }
 
   /** May an unvalidated part of this book trade? (A validated part always may.) */
@@ -60,7 +87,7 @@ export class Probation {
     b.results.push(+usd.toFixed(4));
     if (b.results.length > this.p.window) b.results.splice(0, b.results.length - this.p.window);
     if (!b.benched) {
-      const why = this.verdict(b.results);
+      const why = this.verdict(book, b.results);
       if (why) { b.benched = { at: now, reason: why }; this.onBench?.(book, why); }
     }
     this.save();
@@ -76,14 +103,18 @@ export class Probation {
     const out = { mode: this.p.mode } as Record<ProbationBook, ProbationBookStatus> & { mode: string };
     for (const k of PROBATION_BOOKS) {
       const b = this.st[k], s = stats(b.results);
-      out[k] = { trades: b.results.length, netUsd: +s.sum.toFixed(2), t: s.t === null ? null : +s.t.toFixed(2), since: b.since, benched: b.benched ?? null, open: this.open(k) };
+      out[k] = { trades: b.results.length, netUsd: +s.sum.toFixed(2), t: s.t === null ? null : +s.t.toFixed(2), since: b.since, benched: b.benched ?? null, open: this.open(k), maxLossUsd: +this.maxLoss(k).toFixed(2) };
     }
     return out;
   }
 
-  private verdict(r: number[]): string | undefined {
+  private verdict(book: ProbationBook, r: number[]): string | undefined {
     const s = stats(r);
-    if (s.sum <= -this.p.maxLossUsd) return `net loss $${(-s.sum).toFixed(2)} over ${r.length} results reached PROBATION_MAX_LOSS_USD ($${this.p.maxLossUsd})`;
+    const cap = this.maxLoss(book);
+    const limit = cap < this.p.maxLossUsd
+      ? `PROBATION_MAX_LOSS_PCT (${+(this.p.maxLossPct * 100).toFixed(1)}% of the $${this.breakEvenOf!(book)!.toFixed(2)} break-even: $${cap.toFixed(2)})`
+      : `PROBATION_MAX_LOSS_USD ($${this.p.maxLossUsd})`;
+    if (s.sum <= -cap) return `net loss $${(-s.sum).toFixed(2)} over ${r.length} results reached ${limit}`;
     if (r.length >= this.p.minTrades && s.sum < 0 && s.t !== null && s.t <= -this.p.t) return `losing beyond luck: net $${s.sum.toFixed(2)} over ${r.length} results, t ${s.t.toFixed(2)}`;
     return undefined;
   }

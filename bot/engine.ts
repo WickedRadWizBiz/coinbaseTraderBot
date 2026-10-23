@@ -26,7 +26,7 @@ import { isLive } from './oms/orderState';
 import { PositionBook } from './oms/positions';
 import { marketWorstLoss, RestingLike } from './risk/exposure';
 import type { KillSwitch } from './risk/killSwitch';
-import { RiskContext, RiskGateway } from './risk/riskGateway';
+import { EXIT_RATE_RESERVE, RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
 import { decide, decisionProbability, MarketView, OrderPlan } from './strategy/fairValueStrategy';
 import { ProfitPeaks } from './strategy/profitPeaks';
@@ -881,6 +881,7 @@ export class Engine {
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null, minQuoteContracts: S.minQuoteContracts,
       takeProfit: { floorPct: S.profitTargetPct, floorCents: +(S.profitTarget * 100).toFixed(2), giveBack: +S.profitGiveBack.toFixed(3) },
+      orders: { perMinute: this.d.cfg.risk.maxOrdersPerMinute, newRiskPerMinute: Math.max(1, Math.floor(this.d.cfg.risk.maxOrdersPerMinute * (1 - EXIT_RATE_RESERVE))), quoteTtlSec: S.orderTtlSec },
       // The flat sigma multiplier in use until a validated vol forecast takes over (null once one does).
       volFallbackMult: this.volFc.model?.validated ? null : S.volFallbackMult,
       clock: this.d.clock?.status(Date.now()) ?? null,
