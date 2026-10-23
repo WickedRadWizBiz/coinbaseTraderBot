@@ -429,6 +429,8 @@ def gate_state(g, tf):
 
 VARIANTS = ('all entry fills', 'gate open', 'gate blocked', f'calibrated edge >= {MIN_EDGE}', f'calibrated edge < {MIN_EDGE}', 'kept by both')
 res = collections.defaultdict(collections.Counter)
+ebk = collections.defaultdict(collections.Counter)  # by the edge the bot saw at entry (q - cost - fee)
+EDGE_BUCKETS = (('edge < 0.03', 0.03), ('0.03-0.04', 0.04), ('0.04-0.05', 0.05), ('0.05-0.07', 0.07), ('0.07-0.10', 0.10), ('0.10+', 9))
 kat = collections.defaultdict(list)
 skipped = collections.Counter()
 for f in sorted(fills, key=lambda f: f['t']):
@@ -458,6 +460,11 @@ for f in sorted(fills, key=lambda f: f['t']):
     edge_ok = e_cal >= MIN_EDGE
     pr = period(f['t'])
     kat[(pr, g)].append(k)
+    eb = next(lab for lab, hi in EDGE_BUCKETS if e_raw < hi)
+    for key in ((pr, g, eb), (pr, 'all', eb), ('ALL', g, eb), ('ALL', 'all', eb)):
+        r = ebk[key]
+        r['n'] += 1; r['c'] += c; r['pnl'] += pnl; r['win'] += 1 if (y if sgn > 0 else 1 - y) else 0
+        if gate_ok: r['gc'] += c; r['gpnl'] += pnl
     for v, keep in zip(VARIANTS, (True, gate_ok, not gate_ok, edge_ok, not edge_ok, gate_ok and edge_ok)):
         if not keep: continue
         for key in ((pr, g, v), (pr, 'all', v), ('ALL', g, v), ('ALL', 'all', v)):
@@ -472,6 +479,15 @@ for g in ('updown15m', 'hourly', 'all'):
             if not r or not r['n']: continue
             print(f"   {pr:10s} {v:24s} fills {r['n']:5d}  contracts {r['c']:8.1f}  P&L {r['pnl']:+9.2f} ({r['pnl'] / r['c']:+.3f}/ct)  won {100 * r['win'] / r['n']:3.0f}%  "
                   f"edge at entry {r['er'] / r['c']:+.3f} -> calibrated {r['ec'] / r['c']:+.3f}")
+print('   by the edge the bot saw at entry (decision probability minus price and fee): does a bigger edge pay more? (gate open: those fills only)')
+for g in ('updown15m', 'hourly', 'all'):
+    for pr in PERIODS + ['ALL']:
+        cells = []
+        for lab, _ in EDGE_BUCKETS:
+            r = ebk.get((pr, g, lab))
+            if r and r['c']:
+                cells.append(f"{lab} {r['c']:.0f}ct {r['pnl'] / r['c']:+.3f}/ct won {100 * r['win'] / r['n']:.0f}%" + (f" (gate open {r['gpnl'] / r['gc']:+.3f}/ct)" if r['gc'] else ''))
+        if cells: print(f'   {g:10s} {pr:10s} ' + ' | '.join(cells))
 print('   temperature k at the fills: median (min-max)')
 for (pr, g), ks in sorted(kat.items(), key=lambda kv: (kv[0][1], PERIODS.index(kv[0][0]))):
     ks.sort()
