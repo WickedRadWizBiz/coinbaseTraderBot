@@ -70,6 +70,7 @@ def fkey(f):
 files = sorted((f for f in glob.glob(os.path.join(data, 'audit', 'audit-*.jsonl')) if os.path.basename(f)[6:16] >= since_day), key=fkey)
 D = collections.namedtuple('D', 't tau fv p q bid ask pm spot strike src sigma sigp model pos')
 dec = collections.defaultdict(list)  # ticker -> [D] (Up/Down only)
+dec_h = collections.defaultdict(list)  # ticker -> [D] (hourly crypto: above / below and ranges)
 places = {}                           # decisionId -> placed orders (side, price, purpose, why)
 dec_of = {}                           # decisionId -> D
 orders, fills, settled = {}, [], {}
@@ -92,7 +93,8 @@ for f in files:
                     try: places[did_m.group(1).decode()] = json.loads(tail[pi + 8:ci])
                     except Exception: pass
                 tk = R_TICKER.search(head)
-                if not tk or b'15M-' not in tk.group(1): continue
+                if not tk or tk.group(1).startswith((b'KXATP', b'KXWTA')): continue
+                hourly = b'15M-' not in tk.group(1)  # hourly crypto markets: section 8 only (sections 1-4 and 6 read 15-minute ones)
                 v = {}
                 for k, rx in RX.items():
                     m = rx.search(head)
@@ -102,7 +104,7 @@ for f in files:
                 src, mod = R_SRC.search(head), R_MODEL.search(head)
                 d = D(iso(R_TS.search(line, 0, 80).group(1).decode()), v['tauSec'], v['fv'], v['pYes'], v['q'], float(ba.group(1)), float(ba.group(2)), v['pMarket'],
                       v['spot'], v['strike'], src.group(1).decode() if src else '?', v['sigma'], v['sigmaPricing'], mod.group(1).decode() if mod else '?', float(ba.group(3)))
-                dec[tk.group(1).decode()].append(d)
+                (dec_h if hourly else dec)[tk.group(1).decode()].append(d)
                 if placed: dec_of[did_m.group(1).decode()] = d
             elif b'"kind":"fill"' in h or b'"kind":"order_new"' in h or b'"kind":"settlement"' in h:
                 try: r = json.loads(line)
@@ -121,8 +123,8 @@ print(f'audit: {len(files)} files, {nbytes / 1e6:.0f} MB read in {time.time() - 
 
 # Kalshi's official results, strikes and expiration values for the Up/Down series seen.
 official = {}
-first_t = min((l[0].t for l in dec.values() if l), default=now) - 3600
-for series in sorted({t.split('-')[0] for t in dec}):
+first_t = min((l[0].t for l in list(dec.values()) + list(dec_h.values()) if l), default=now) - 3600
+for series in sorted({t.split('-')[0] for t in dec} | {t.split('-')[0] for t in dec_h}):
     cursor, pages = '', 0
     try:
         while pages < 20:
@@ -373,3 +375,125 @@ for k in sorted(tca, key=lambda k: (PERIODS.index(k[0]), k[1])):
     g = tca[k]
     print(f"   {k[0]:18s} {k[1]:5s} fills {g['n']:5d}  contracts {g['c']:7.1f}  at fill {g['m0'] / max(1e-9, g['c0']):+.4f}  "
           + '  '.join(f"{h} {g['m' + h] / g['c' + h]:+.4f}" for h in ('5s', '30s', '60s') if g['c' + h]))
+
+# ---- 8. the accuracy fix (Oct 23), tried on the record before it trades
+print('\n== 8. accuracy fix on the record (walk-forward over the markets settled before each fill; entry fills held to settlement, as in 5)')
+print('   k = temperature fitted on those markets (p re-scored as Phi(Phi^-1(p) / k)); gate = in the fill\'s time-to-close bucket the calibrated p')
+print('   scored a worse log loss than the market mid over the last GATE_N markets -> no entry (fewer than GATE_MIN: open). Markets with mid in [0.05, 0.95].')
+GATE_N, GATE_MIN, MIN_EDGE = 150, 40, 0.03
+BUCKETS = {'updown15m': ((600, 840), (450, 600), (300, 450), (90, 300)), 'hourly': ((2400, 3300), (1500, 2400), (600, 1500), (90, 600))}
+KGRID = [round(0.8 + 0.05 * i, 2) for i in range(25)]
+
+
+def grp(t): return 'updown15m' if '15M-' in t else 'hourly'
+
+
+def bucket_of(g, tau):
+    for i, (lo, hi) in enumerate(BUCKETS[g]):
+        if lo < tau <= hi: return i
+    return None
+
+
+# The decision probability is q = pMarket + kappa (p - pMarket): kappa as the bot ran it, from its own records.
+kap = sorted((d.q - d.pm) / (d.p - d.pm) for lst in list(dec.values()) + list(dec_h.values()) for d in lst
+             if d.q is not None and d.p is not None and d.pm is not None and abs(d.p - d.pm) >= 0.02)
+KAPPA = kap[len(kap) // 2] if kap else 0.5
+# One snapshot per market and bucket (the decision nearest the bucket's middle), known once the market has closed.
+snaps = collections.defaultdict(list)  # (group, bucket) -> [(close time, z of p, mid, outcome)]
+for t, lst in list(dec.items()) + list(dec_h.items()):
+    y = outcome(t)
+    if y is None or not lst: continue
+    g = grp(t)
+    close_t = sorted(d.t + d.tau for d in lst)[len(lst) // 2]
+    for i, (lo, hi) in enumerate(BUCKETS[g]):
+        c, best = (lo + hi) / 2, None
+        for d in lst:
+            if lo < d.tau <= hi and d.p is not None and 0.001 < d.p < 0.999 and 0.05 <= (d.bid + d.ask) / 2 <= 0.95 and (best is None or abs(d.tau - c) < abs(best.tau - c)): best = d
+        if best: snaps[(g, i)].append((close_t, phi_inv(best.p), (best.bid + best.ask) / 2, y))
+for v in snaps.values(): v.sort()
+closes = {key: [s[0] for s in v] for key, v in snaps.items()}
+_state = {}
+
+
+def gate_state(g, tf):
+    """(k, [(n, log loss calibrated p, log loss mid) per bucket]) from the markets that closed before tf."""
+    idx = tuple(bisect.bisect_left(closes.get((g, i), []), tf) for i in range(len(BUCKETS[g])))
+    if (g, idx) in _state: return _state[(g, idx)]
+    rows = [snaps[(g, i)][max(0, j - GATE_N):j] for i, j in enumerate(idx)]
+    every = [r for rr in rows for r in rr]
+    k = min(KGRID, key=lambda kk: sum(ll(phi(r[1] / kk), r[3]) for r in every)) if len(every) >= GATE_MIN else 1.0
+    per = [(len(rr), sum(ll(phi(r[1] / k), r[3]) for r in rr) / len(rr) if rr else None, sum(ll(r[2], r[3]) for r in rr) / len(rr) if rr else None) for rr in rows]
+    _state[(g, idx)] = (k, per)
+    return k, per
+
+
+VARIANTS = ('all entry fills', 'gate open', 'gate blocked', f'calibrated edge >= {MIN_EDGE}', f'calibrated edge < {MIN_EDGE}', 'kept by both')
+res = collections.defaultdict(collections.Counter)
+ebk = collections.defaultdict(collections.Counter)  # by the edge the bot saw at entry (q - cost - fee)
+EDGE_BUCKETS = (('edge < 0.03', 0.03), ('0.03-0.04', 0.04), ('0.04-0.05', 0.05), ('0.05-0.07', 0.07), ('0.07-0.10', 0.10), ('0.10+', 9))
+kat = collections.defaultdict(list)
+skipped = collections.Counter()
+for f in sorted(fills, key=lambda f: f['t']):
+    y = outcome(f['ticker'])
+    if y is None: continue
+    o = orders.get(f['coid'])
+    if origin(f, o) not in ('quote', 'entry'): continue
+    d = dec_of.get((o or {}).get('decisionId'))
+    if d is None or d.p is None or kind_of(f['ticker']) == 'tennis':
+        skipped['no decision record'] += 1
+        continue
+    g = grp(f['ticker'])
+    k, per = gate_state(g, f['t'])
+    b = bucket_of(g, d.tau)
+    n_b, l_bot, l_mid = per[b] if b is not None else (0, None, None)
+    gate_ok = n_b < GATE_MIN or l_bot <= l_mid
+    sgn = 1 if f['side'] == 'bid' else -1
+    c = f['count']
+    if not c: continue
+    pnl = sgn * c * (y - f['price']) - f['fee']
+    cost = f['price'] if sgn > 0 else 1 - f['price']
+    pm = d.pm if d.pm is not None else (d.bid + d.ask) / 2
+    q_raw = pm + KAPPA * (d.p - pm)
+    q_cal = pm + KAPPA * (phi(phi_inv(min(0.999, max(0.001, d.p))) / k) - pm)
+    e_raw = (q_raw if sgn > 0 else 1 - q_raw) - cost - f['fee'] / c
+    e_cal = (q_cal if sgn > 0 else 1 - q_cal) - cost - f['fee'] / c
+    edge_ok = e_cal >= MIN_EDGE
+    pr = period(f['t'])
+    kat[(pr, g)].append(k)
+    eb = next(lab for lab, hi in EDGE_BUCKETS if e_raw < hi)
+    for key in ((pr, g, eb), (pr, 'all', eb), ('ALL', g, eb), ('ALL', 'all', eb)):
+        r = ebk[key]
+        r['n'] += 1; r['c'] += c; r['pnl'] += pnl; r['win'] += 1 if (y if sgn > 0 else 1 - y) else 0
+        if gate_ok: r['gc'] += c; r['gpnl'] += pnl
+    for v, keep in zip(VARIANTS, (True, gate_ok, not gate_ok, edge_ok, not edge_ok, gate_ok and edge_ok)):
+        if not keep: continue
+        for key in ((pr, g, v), (pr, 'all', v), ('ALL', g, v), ('ALL', 'all', v)):
+            r = res[key]
+            r['n'] += 1; r['c'] += c; r['pnl'] += pnl; r['fee'] += f['fee']; r['er'] += e_raw * c; r['ec'] += e_cal * c; r['win'] += 1 if (y if sgn > 0 else 1 - y) else 0
+print(f'   kappa as run: {KAPPA:.2f} (median of {len(kap)} records); entry fills without a decision record: {skipped["no decision record"]}')
+for g in ('updown15m', 'hourly', 'all'):
+    print(f'-- {g}')
+    for pr in PERIODS + ['ALL']:
+        for v in VARIANTS:
+            r = res.get((pr, g, v))
+            if not r or not r['n']: continue
+            print(f"   {pr:10s} {v:24s} fills {r['n']:5d}  contracts {r['c']:8.1f}  P&L {r['pnl']:+9.2f} ({r['pnl'] / r['c']:+.3f}/ct)  won {100 * r['win'] / r['n']:3.0f}%  "
+                  f"edge at entry {r['er'] / r['c']:+.3f} -> calibrated {r['ec'] / r['c']:+.3f}")
+print('   by the edge the bot saw at entry (decision probability minus price and fee): does a bigger edge pay more? (gate open: those fills only)')
+for g in ('updown15m', 'hourly', 'all'):
+    for pr in PERIODS + ['ALL']:
+        cells = []
+        for lab, _ in EDGE_BUCKETS:
+            r = ebk.get((pr, g, lab))
+            if r and r['c']:
+                cells.append(f"{lab} {r['c']:.0f}ct {r['pnl'] / r['c']:+.3f}/ct won {100 * r['win'] / r['n']:.0f}%" + (f" (gate open {r['gpnl'] / r['gc']:+.3f}/ct)" if r['gc'] else ''))
+        if cells: print(f'   {g:10s} {pr:10s} ' + ' | '.join(cells))
+print('   temperature k at the fills: median (min-max)')
+for (pr, g), ks in sorted(kat.items(), key=lambda kv: (kv[0][1], PERIODS.index(kv[0][0]))):
+    ks.sort()
+    print(f'   {pr:18s} {g:10s} k {ks[len(ks) // 2]:.2f} ({ks[0]:.2f}-{ks[-1]:.2f}), {len(ks)} fills')
+print(f'   the gate now (last {GATE_N} settled markets per bucket): log loss of the calibrated p vs the mid')
+for g in BUCKETS:
+    k, per = gate_state(g, now + 3600)
+    print(f"   {g:10s} k={k:.2f}  " + '  '.join(f"{lo}-{hi}s n={n} " + (f"{lb:.4f} vs {lm:.4f} {'open' if n < GATE_MIN or lb <= lm else 'BLOCKED'}" if n else 'no data')
+                                             for (lo, hi), (n, lb, lm) in zip(BUCKETS[g], per)))

@@ -18,9 +18,10 @@ import { openExchange, tmpAudit, tmpDir } from './helpers';
 import { Vault } from '../bot/vault/vault';
 import { BalanceMonitor } from '../bot/vault/balanceMonitor';
 import { SinuousEntryGate, type EntryVerdict } from '../bot/strategy/sinuousEntry';
+import { AccuracyGate } from '../bot/strategy/accuracyGate';
 import { SinuousExitGate } from '../bot/strategy/sinuousExit';
 
-async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate; curveEntry?: SinuousEntryGate } = {}) {
+async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate; curveEntry?: SinuousEntryGate; accuracyGate?: AccuracyGate } = {}) {
   const dir = tmpDir();
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy, STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_ENABLED: 'false', ...opts.env });
   const now = Date.now();
@@ -50,7 +51,7 @@ async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy
   paper.on('fill', (f) => oms.onFill(f));
   paper.on('order', (o) => oms.onExchangeOrder(o));
   const recon = new Reconciler({ gateway: paper, oms, audit, getMarket: rest.getMarket, onPersistentBreak: (r) => void kill.engage(r, 'recon') });
-  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange(), curveExit: opts.curveExit, curveEntry: opts.curveEntry });
+  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange(), curveExit: opts.curveExit, curveEntry: opts.curveEntry, accuracyGate: opts.accuracyGate });
   return { cfg, md, paper, oms, kill, recon, engine, market, audit };
 }
 
@@ -299,6 +300,38 @@ test('exit curve: a profitable fair-value exit waits for a spike above the curve
   assert.deepEqual(curveExit.status().holding, []);
 });
 
+/** An exit curve in rest mode whose swing-top estimate the test sets. */
+class StubRest extends SinuousExitGate {
+  target: number | undefined = 0.55;
+  override restTarget(): number | undefined { return this.target; }
+}
+
+test('exit curve rest mode: the held position rests its sell at the curve target; an exit crossing the book pulls it', async () => {
+  const curveExit = new StubRest({ mode: 'rest', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
+  const { engine, recon, market, md, oms, audit } = await setup({ curveExit, env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+  engine.balance = (await recon.run('startup'))!.balance;
+  // Long 10 YES bought at 0.40 as a maker: the take-profit floor is 4c, so never below 0.44.
+  oms.onFill({ tradeId: 'r1', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.4, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.45, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, Date.now());
+  const sells = () => oms.liveOrders().filter((o) => o.ticker === market.ticker && o.side === 'ask' && o.purpose === 'exit' && o.timeInForce === 'good_till_canceled' && !o.cancelRequested);
+  await engine.tick();
+  const notes = () => engine.status.get(market.ticker)!.notes.join(' | ');
+  assert.deepEqual(sells().map((o) => [o.price, o.count, o.postOnly, o.reduceOnly]), [[0.55, 10, true, false]], notes());
+  const why = audit.tail(50, 'decision').flatMap((d) => ((d.data as { place?: Array<{ why: string }> }).place ?? []).map((p) => p.why));
+  assert.ok(why.some((w) => /^exit curve: rest 0\.55 \(\+0\.150 a contract net, swing top 0\.550\)/.test(w)), why.join(' | '));
+  // The bid runs to 0.80 (a book jump without trades, so the resting sell is not filled here): the take-profit arms and
+  // the winner runs.
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.8, size: 50 }], asks: [{ price: 0.82, size: 50 }] }, Date.now());
+  await engine.tick();
+  assert.equal(sells().length, 1, notes());
+  // Back to 0.60, more than a third of the best gain given back: the take-profit crosses the book, and the resting sell
+  // is pulled first so the two cannot sell more than is held.
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.6, size: 50 }], asks: [{ price: 0.62, size: 50 }] }, Date.now());
+  await engine.tick();
+  assert.equal(sells().length, 0, notes());
+  assert.equal(oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly && o.timeInForce === 'immediate_or_cancel').length, 1, notes());
+});
+
 test('exit curve: an exit at a loss goes out at once', async () => {
   const curveExit = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
   const { engine, recon, market, md, oms } = await setup({ curveExit });
@@ -419,6 +452,33 @@ test('paper fixed size: a wanted trade buys about PAPER_ORDER_USD of contracts (
   const s = quote(sized)!;
   assert.ok(s.count * s.price < 5, `${s.count} at ${s.price}`);
   assert.ok(s.count < q.count);
+});
+
+test('accuracy gate (paper): no new quote in a time-to-close bucket where the market mid called results better', async () => {
+  const quote = (g: Awaited<ReturnType<typeof setup>>) => g.oms.liveOrders().find((o) => o.ticker === g.market.ticker && o.purpose === 'quote' && !o.cancelRequested);
+  const env = { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' };
+  // 50 settled 15-minute markets per bucket around 10 minutes out, where the mid leaned the right way and the bot sat at 0.5.
+  const scorecard = (enabled: boolean) => {
+    const gate = new AccuracyGate({ enabled, window: 150, minMarkets: 40 });
+    for (let i = 0; i < 50; i++) for (const tau of [700, 520]) {
+      const t = `KXETH15M-M${i}-${tau}`;
+      gate.observe(t, tau, 0.5, i % 2 ? 0.65 : 0.35);
+      gate.settle(t, i % 2 ? 'yes' : 'no');
+    }
+    return gate;
+  };
+  const g = await setup({ env, accuracyGate: scorecard(true) });
+  g.engine.balance = (await g.recon.run('startup'))!.balance;
+  await g.engine.tick();
+  assert.equal(quote(g), undefined);
+  const why = Object.keys(g.engine.entryDiagnosis().reasons);
+  assert.ok(why.some((r) => /accuracy gate: the market has called results better (450-600|600-840) s before the close/.test(r)), why.join(' | '));
+  assert.equal(g.engine.guardStatus().accuracyGate?.enforced, true);
+  // ACCURACY_GATE=false: the scorecard is kept, the quote goes out.
+  const off = await setup({ env, accuracyGate: scorecard(false) });
+  off.engine.balance = (await off.recon.run('startup'))!.balance;
+  await off.engine.tick();
+  assert.ok(quote(off), JSON.stringify(off.engine.status.get(off.market.ticker)?.notes));
 });
 
 test('a manually recorded withdrawal is not counted again by the detector', async () => {

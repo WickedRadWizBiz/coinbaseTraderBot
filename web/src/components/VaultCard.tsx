@@ -91,7 +91,9 @@ export function VaultCard({ vault, session, onChange }: { vault: any; session: a
           ))}
         </div>
         <div className="px-4 pb-4 flex items-center justify-between gap-2 flex-wrap">
-          <span className="text-[10px] opacity-60 normal-case">Bookkeeping only: reserved money stays in your Kalshi cash; the bot just won&apos;t trade it. Withdrawn to date: {usd(vault.withdrawnTotal)}.</span>
+          <span className="text-[10px] opacity-60 normal-case">{vault.paperIgnored
+            ? 'Paper: the bot trades its whole balance and this vault only keeps its books. It is not profit: it counts half of every win and none of the losses (VAULT_IN_PAPER=false).'
+            : 'Bookkeeping only: reserved money stays in your Kalshi cash; the bot just won\u2019t trade it.'} Withdrawn to date: {usd(vault.withdrawnTotal)}.</span>
           <button onClick={record} className="flat-btn"><span>Record Withdrawal</span></button>
         </div>
       </div>

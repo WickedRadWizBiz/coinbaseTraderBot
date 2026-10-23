@@ -83,7 +83,11 @@ export class RiskGateway {
   private evaluate(i: OrderIntent, c: RiskContext): RiskDecision {
     const L = { ...this.limits, ...c.limitOverrides };
     const r: string[] = [];
-    const reduces = i.reduceOnly;
+    // A resting exit (the exit curve's resting sell: post-only, good till canceled; Kalshi takes reduce-only only on
+    // immediate-or-cancel orders) that sells no more than is held is checked as an exit.
+    const restingExit = !i.reduceOnly && i.purpose === 'exit' && i.timeInForce === 'good_till_canceled' && i.postOnly
+      && (i.side === 'ask' ? c.position > 0 : c.position < 0) && i.count <= Math.abs(c.position) + EPS;
+    const reduces = i.reduceOnly || restingExit;
 
     if (c.killEngaged) return { ok: false, reasons: ['kill switch engaged'] };
     if (c.mode === 'live' && c.modelLiveBlockers.length) r.push(`model not validated for live: ${c.modelLiveBlockers.join('; ')}`);

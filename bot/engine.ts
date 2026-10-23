@@ -37,6 +37,7 @@ import { CadenceGate, inEntryWindow, type CadenceReason } from './strategy/caden
 import { kalshiMaintenance, sessionEdge, sessionState, type SessionState } from './model/sessions';
 import type { EquityGuard } from './risk/equityGuard';
 import type { ModelHealth } from './model/modelHealth';
+import type { AccuracyGate } from './strategy/accuracyGate';
 import type { Tca } from './tca/tca';
 import type { MacroEvent } from './model/featureEngine';
 import { ladderQuotes } from './model/ladder';
@@ -218,6 +219,8 @@ export interface MarketStatus {
   q?: number;
   pStd?: number;
   entryWindow?: boolean;
+  /** The accuracy gate's reason when it closed the entry window (paper). */
+  accuracyBlock?: string;
   /** Why the last full (entry) evaluation ran under the relaxed cadence. */
   lastEval?: { reason: CadenceReason; ts: number };
   bestBid?: number;
@@ -285,6 +288,8 @@ export interface EngineDeps {
   modelHealth?: ModelHealth;
   /** Scores the TA tilt: P with the TA network's drift vs the same P without it (advantage > 0 = it helps). */
   taHealth?: ModelHealth;
+  /** Bot vs market mid log loss per time-to-close bucket; paper opens no entries where the market has been better. */
+  accuracyGate?: AccuracyGate;
   /** Scheduled macro releases (CPI, FOMC, NFP, PCE) for calendar features. */
   calendar?: MacroEvent[];
   /** Perp delta hedge of the binary book (stage 2). */
@@ -559,11 +564,12 @@ export class Engine {
         oms.settle(e.ticker, e.result);
         this.d.modelHealth?.onResult(e.ticker, e.result);
         this.d.taHealth?.onResult(e.ticker, e.result);
+        this.d.accuracyGate?.settle(e.ticker, e.result);
         this.snnSettle(e.ticker, e.result);
       }
     });
     // Official results of every scanned market (traded or not): the SNN's settlement labels.
-    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => { this.d.taHealth?.onResult(e.ticker, e.result); this.snnSettle(e.ticker, e.result); });
+    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => { this.d.taHealth?.onResult(e.ticker, e.result); this.d.accuracyGate?.settle(e.ticker, e.result); this.snnSettle(e.ticker, e.result); });
     oms.on('order_error', (n: number, msg: string) => {
       if (n >= cfg.risk.maxConsecutiveOrderErrors) void kill.engage(`${n} consecutive order errors (last: ${msg})`, 'oms');
     });
@@ -883,6 +889,7 @@ export class Engine {
       minTradableBankrollUsd: S.minTradableBankrollUsd,
       tier: { ...t, orderRiskUsd: +(t.orderFrac * b).toFixed(2), dailyLossLimitUsd: +this.d.risk.dailyLossLimit(b, this.tierLimits(t)).toFixed(2) },
       paperOrderUsd: this.paperOrderUsd() || null,
+      accuracyGate: this.d.accuracyGate ? { ...this.d.accuracyGate.status(), enforced: this.d.cfg.mode === 'paper' && this.d.cfg.strategy.accuracyGate.enabled } : null,
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null, minQuoteContracts: S.minQuoteContracts,
       takeProfit: { floorPct: S.profitTargetPct, floorCents: +(S.profitTarget * 100).toFixed(2), giveBack: +S.profitGiveBack.toFixed(3) },
@@ -1177,7 +1184,7 @@ export class Engine {
       const why = !st ? 'not evaluated yet'
         : st.blocked ? st.blocked
         : resting.has(m.ticker) ? undefined
-        : !st.entryWindow ? (this.entryGuards(now)[0] ?? 'outside the entry window (time to close / price band)')
+        : !st.entryWindow ? (st.accuracyBlock ?? this.entryGuards(now)[0] ?? 'outside the entry window (time to close / price band)')
         : 'no edge after fees';
       if (why) reasons[why] = (reasons[why] ?? 0) + 1; else quoting++;
     }
@@ -1860,7 +1867,8 @@ export class Engine {
     const ret = idx!.trailingLogReturn(now, cfg.strategy.fastMoveWindowSec * 1000);
     const fastMove = ret !== undefined && Math.abs(ret) > cfg.strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(cfg.strategy.fastMoveWindowSec);
 
-    const live = oms.liveOrders().filter((o) => o.ticker === m.ticker && o.purpose === 'quote' && isLive(o));
+    // The resting quotes, and the exit curve's resting sell (rest mode), which holds the held side's quote slot.
+    const live = oms.liveOrders().filter((o) => o.ticker === m.ticker && (o.purpose === 'quote' || (o.purpose === 'exit' && o.timeInForce === 'good_till_canceled')) && isLive(o));
     const quote = (side: 'bid' | 'ask') => {
       const o = live.filter((x) => x.side === side).sort((a, b) => b.createdTs - a.createdTs);
       // Extra same-side quotes (should not happen) are cancelled.
@@ -1876,7 +1884,12 @@ export class Engine {
     const kindWindow = S.cadence === 'relaxed'
       ? inEntryWindow(m.kind, tauSec, S.entryWindowUpdown, S.entryWindowHourly) && (m.kind === 'updown' || (mid >= S.hourlyMidBand[0] && mid <= S.hourlyMidBand[1]))
       : true;
-    const entryWindowOpen = kindWindow && guards.length === 0;
+    // Paper: no new entry where the market's own price has called recent results better than the bot (the owner's
+    // choice on Oct 23; bot/strategy/accuracyGate.ts). Every evaluation feeds the gate's scorecard, live included.
+    this.d.accuracyGate?.observe(m.ticker, tauSec, pYes, mid);
+    const accuracyBlock = kindWindow && guards.length === 0 && cfg.mode === 'paper' ? this.d.accuracyGate?.block(m.ticker, tauSec) : undefined;
+    const entryWindowOpen = kindWindow && guards.length === 0 && !accuracyBlock;
+    st.accuracyBlock = accuracyBlock;
     const restingBid = quote('bid');
     const restingAsk = quote('ask');
     const through = (r: { price: number } | undefined, best: number) => r !== undefined && Math.abs(best - r.price) >= 2 * S.requoteThreshold - 1e-9;
@@ -1907,6 +1920,8 @@ export class Engine {
       maxOrderRiskUsd: fixedUsd > 0 ? fixedUsd : Math.min(tier.orderFrac * bankroll * sizeMult * kellyScale, fCapUsd),
       maxContracts: floorCount(R.maxContractsPerOrder * (fixedUsd > 0 ? 1 : sizeMult)), minSidePrice: R.minSidePrice,
       ...(fixedUsd > 0 ? { fixedOrderUsd: fixedUsd } : {}),
+      // Exit curve, rest mode: the held position's sell rests at the curve's swing-top estimate (the strategy places it).
+      ...(() => { const r = st.position !== 0 ? this.d.curveExit?.restTarget(m.ticker) : undefined; return r !== undefined ? { curveRestSidePrice: r } : {}; })(),
       newRiskRoomUsd: reason ? this.newRiskRoom(m, bankroll, tier) : undefined,
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
       restingBid, restingAsk, nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
@@ -2121,7 +2136,7 @@ export class Engine {
       // The full feature map (hundreds of inputs) rides on orders that are not maker requotes and at
       // least every 5 minutes per market; quote churn records the prices and probabilities only (with
       // every market priced live, full records on every requote grew one day's audit file past 512 MB).
-      const full = plan.place.some((p) => p.purpose !== 'quote') || now - (this.lastFeatureAudit.get(m.ticker) ?? 0) >= 300_000;
+      const full = plan.place.some((p) => p.purpose !== 'quote' && p.timeInForce !== 'good_till_canceled') || now - (this.lastFeatureAudit.get(m.ticker) ?? 0) >= 300_000;
       if (full) this.lastFeatureAudit.set(m.ticker, now);
       this.d.audit.write('decision', {
         decisionId, ticker: m.ticker, model: model.id, spot: spot.value, strike, strikeSource: m.strikeSource, sigma: vol.sigmaPerSqrtSec, sigmaPricing,
@@ -2135,11 +2150,17 @@ export class Engine {
 
     // An exit must not trade against one of the bot's own resting quotes: Kalshi's self-trade prevention cancels the
     // exit instead (taker_at_cross), and a stale quote at the touch would turn every tick's exit into one more cancel.
+    // Rest mode: an exit that crosses the book also cancels the position's resting curve sell on its side (a resting
+    // order cannot be reduce-only on Kalshi; together they could sell more than is held); the next evaluation rests one
+    // again for what is left.
+    const restMode = this.d.curveExit?.p.mode === 'rest';
     for (const p of plan.place) {
       if (!p.reduceOnly || p.timeInForce !== 'immediate_or_cancel') continue;
       for (const o of this.crossingOwnOrders(m.ticker, p.side, p.price)) {
         if (!plan.cancel.some((c) => c.clientOrderId === o.clientOrderId)) plan.cancel.push({ clientOrderId: o.clientOrderId, reason: 'would cross our own exit' });
       }
+      const resting = restMode ? (p.side === 'ask' ? view.restingAsk : view.restingBid) : undefined;
+      if (resting && !plan.cancel.some((c) => c.clientOrderId === resting.clientOrderId)) plan.cancel.push({ clientOrderId: resting.clientOrderId, reason: 'an exit crosses the book: resting curve sell pulled' });
     }
     await Promise.all(plan.cancel.map((c) => oms.cancel(c.clientOrderId, c.reason)));
     // Orders carry the decision probability (q_adj under target-EV sizing): the gateway's fee-net

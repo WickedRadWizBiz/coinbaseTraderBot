@@ -21,6 +21,7 @@ import { MetaModel } from './model/metaModel';
 import { loadVolProfile, type VolProfile } from './model/volSeasonality';
 import { loadCalendar } from './model/calendar';
 import { ModelHealth } from './model/modelHealth';
+import { AccuracyGate } from './strategy/accuracyGate';
 import { directionalConviction, type TaNetView } from './strategy/taConviction';
 import { setTaNetEnsemble, TaNetEnsemble, taNetView } from './ta/taNetEnsemble';
 import { assetFeatureMap } from './model/featureEngine';
@@ -118,11 +119,18 @@ async function main(): Promise<void> {
   setProbation(probationBooks);
   if (cfg.probation.mode === 'monitor') log.info('validation gates: monitor (unvalidated models trade on probation)', { ...cfg.probation });
   // Exit-in-profit curve (SINUOUS_EXIT, bot/strategy/sinuousExit.ts): profit-taking exits on binary contracts also need
-  // its signal; its scoreboard benches it under the probation rules when holding profit exits costs money.
-  const curveExit = cfg.sinuousExit.mode === 'off' ? undefined : new SinuousExitGate(cfg.sinuousExit, cfg.probation, path.join(cfg.bookDir, 'curve-exit.json'), (e) => {
+  // its signal; its scoreboard benches it under the probation rules when holding profit exits costs money. Paper: the
+  // owner turned it back on on Oct 23 to see whether it pays (its scoreboard starts over once), and it is benched only
+  // when holding loses beyond luck at t <= -SINUOUS_PAPER_BENCH_T after SINUOUS_PAPER_BENCH_MIN_EXITS held exits, or
+  // costs PROBATION_MAX_LOSS_USD. Live keeps the probation rules and its scoreboard.
+  // Paper runs SINUOUS_EXIT_PAPER (rest by default: the curve places the exit instead of holding it).
+  const paperCurve = cfg.mode === 'paper';
+  const curveParams = paperCurve ? { ...cfg.sinuousExit, mode: cfg.sinuousExit.paperMode ?? cfg.sinuousExit.mode } : cfg.sinuousExit;
+  const curveBench = paperCurve ? { ...cfg.probation, t: cfg.sinuousExit.paperBenchT ?? cfg.probation.t, minTrades: cfg.sinuousExit.paperBenchMinExits ?? cfg.probation.minTrades } : cfg.probation;
+  const curveExit = curveParams.mode === 'off' ? undefined : new SinuousExitGate(curveParams, curveBench, path.join(cfg.bookDir, 'curve-exit.json'), (e) => {
     audit.write('curve_exit', e);
     if (e.event === 'benched') alerter.notify('warn', 'curve-exit', `Exit curve benched (profit exits go out without waiting for it until a reset): ${String(e.reason)}`);
-  });
+  }, Date.now(), paperCurve ? 'owner-on-2026-10-23' : undefined);
   // Entry curve (SINUOUS_ENTRY, bot/strategy/sinuousEntry.ts): monitor scores maker entries by the book's curve at the
   // fill; gate also holds back quotes the curve is running against.
   const curveEntry = cfg.sinuousEntry.mode === 'off' ? undefined : new SinuousEntryGate(cfg.sinuousEntry, path.join(cfg.bookDir, 'curve-entry.json'));
@@ -258,6 +266,8 @@ async function main(): Promise<void> {
   let perpsPaper: PaperPerpExchange | undefined;
   const modelHealth = new ModelHealth({ minWindows: cfg.strategy.modelHealthMinWindows }, path.join(cfg.dataDir, 'model_health.json'));
   const taHealth = new ModelHealth({ minWindows: 1e9 }, path.join(cfg.dataDir, 'ta_health.json'));
+  // Bot vs market per time-to-close bucket (each book its own scorecard); only paper blocks entries on it.
+  const accuracyGate = new AccuracyGate(cfg.strategy.accuracyGate, path.join(cfg.bookDir, 'accuracy_gate.json'));
   // TA conviction for the perps (setup trader): features + the TA network's raw view, cached per asset per minute.
   const convCache = new Map<string, { ts: number; f: Record<string, number>; v: TaNetView | undefined; rb?: { score: number; n: number }; gp?: { exposure: number } }>();
   const conviction = (asset: string, dir: number, now: number) => {
@@ -465,7 +475,7 @@ async function main(): Promise<void> {
   // The exchange's own status and maintenance schedule gate new entries (exits stay allowed).
   const exchangeStatus = new ExchangeStatusMonitor(rest);
   exchangeStatus.start();
-  const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json'), curveExit, curveEntry });
+  const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, accuracyGate, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json'), curveExit, curveEntry });
   engineRef = engine;
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();
@@ -533,6 +543,7 @@ async function main(): Promise<void> {
     oms.flush();
     kalshiCheck.flush();
     paper?.flush();
+    accuracyGate.flush();
     autoTrain.stop();
     try { engine.saveSnnBlender(); await Promise.all(Object.values(engine.snn?.units ?? {}).map((u) => u!.host.stop())); } catch (e) { log.error('SNN checkpoint on shutdown failed', { error: String(e) }); }
     audit.write('shutdown', { sig });

@@ -44,9 +44,21 @@ test('resting order joins the back of the queue and fills only on trades', async
   ex.onTrade('T', 0.45, 6, 'no'); // 4 more ahead, then 2 for us
   assert.equal(fills.length, 1);
   assert.equal((await ex.getOrder(o.orderId))!.fillCount, 2);
-  ex.onTrade('T', 0.44, 1, 'no'); // trade through our price fills the rest
+  ex.onTrade('T', 0.44, 1, 'no'); // a 1-contract trade through our price fills 1 of the 3 left
+  assert.equal((await ex.getOrder(o.orderId))!.fillCount, 3);
+  ex.onTrade('T', 0.44, 5, 'no'); // a bigger one fills the rest
   assert.equal((await ex.getOrder(o.orderId))!.status, 'executed');
   assert.equal((await ex.getPositions())[0].position, 5);
+});
+
+test('a trade through resting orders fills them best price first, no more than it printed', async () => {
+  const { ex } = setup();
+  const hi = await ex.createOrder(req({ price: 0.46 }));
+  const lo = await ex.createOrder(req({ price: 0.45 }));
+  ex.onTrade('T', 0.44, 7, 'no');
+  assert.equal((await ex.getOrder(hi.orderId))!.fillCount, 5);
+  assert.equal((await ex.getOrder(lo.orderId))!.fillCount, 2);
+  assert.equal((await ex.getPositions())[0].position, 7);
 });
 
 test('YES-taker trades do not fill resting YES bids', async () => {

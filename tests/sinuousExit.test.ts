@@ -180,3 +180,78 @@ test('gate: benched by the probation rules when holding costs money, and the ben
   assert.equal(again.status().scored, 0);
   assert.equal(again.active, true);
 });
+
+test('gate: a scoreboard saved under another restart tag starts over once (the owner turning paper back on); live keeps its own', () => {
+  const file = path.join(tmpDir(), 'curve-exit.json');
+  const g = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { ...BENCH, maxLossUsd: 1 }, file, undefined, 0);
+  let now = 0;
+  const exit = { sidePrice: 0.595, count: 10, exitFeePer: 0.01, entrySidePrice: 0.4, entryFeePer: 0.01 };
+  for (let i = 0; i < 20; i++) g.observe('T', 'crypto_15m', obs((now += 1000), 0.6));
+  g.check('T', { ...exit, protective: false }, now);
+  g.check('T', { ...exit, sidePrice: 0.475, protective: true }, now);
+  assert.ok(g.status().benched, 'held exit cost $1.20: benched');
+  // Live (no tag): the bench stays.
+  assert.ok(new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, BENCH, file, undefined, now).status().benched);
+  // Paper with the tag: started over once, the old scoreboard noted in the event.
+  const events: CurveEvent[] = [];
+  const paper = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { ...BENCH, t: 2, minTrades: 30 }, file, (e) => events.push(e), now, 'owner-on');
+  assert.equal(paper.status().benched, null);
+  assert.equal(paper.status().scored, 0);
+  assert.equal(paper.active, true);
+  assert.deepEqual(paper.status().benchRule, { t: 2, minExits: 30, maxLossUsd: 25 });
+  assert.equal(events[0]?.event, 'reset');
+  assert.deepEqual((events[0] as { before?: unknown }).before, { scored: 1, benched: 'holding profit exits cost $1.20 over 1 exits (limit $1)' });
+  // The same tag again (a restart): nothing is reset; a manual reset keeps the tag.
+  paper.reset(now + 1);
+  const again: CurveEvent[] = [];
+  const restarted = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, BENCH, file, (e) => again.push(e), now + 2, 'owner-on');
+  assert.equal(restarted.status().since, now + 1);
+  assert.equal(again.length, 0);
+});
+
+test('gate: the paper bench rule (t <= -2 after 30 held exits) leaves a curve losing within luck running', () => {
+  const run = (bench: { minTrades: number; t: number; maxLossUsd: number; window: number }) => {
+    const g = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, bench, undefined, undefined, 0);
+    let now = 0;
+    const exit = { sidePrice: 0.595, count: 10, exitFeePer: 0.01, entrySidePrice: 0.4, entryFeePer: 0.01 };
+    // 42 held exits, losses and gains interleaved: 4 in 7 cost 1c a contract ($0.10), 3 in 7 gained 1c (net -$0.60).
+    for (let k = 0; k < 42; k++) {
+      const t = `T${k}`;
+      for (let i = 0; i < 20; i++) g.observe(t, 'crypto_15m', obs((now += 1000), 0.6));
+      g.check(t, { ...exit, protective: false }, now);
+      g.check(t, { ...exit, sidePrice: k % 7 < 4 ? 0.585 : 0.605, protective: true }, now);
+    }
+    return g.status();
+  };
+  const loose = run({ minTrades: 20, t: 0.5, maxLossUsd: 25, window: 200 });
+  assert.ok(loose.benched, `benched under a loose rule (t ${loose.t})`);
+  const paper = run({ minTrades: 30, t: 2, maxLossUsd: 25, window: 200 });
+  assert.equal(paper.benched, null, `t ${paper.t} is within luck`);
+  assert.equal(paper.scored, 42);
+});
+
+test('rest mode: the swing-top estimate rides the curve\'s momentum; no exit is ever held', () => {
+  const rest = new SinuousExitGate({ mode: 'rest', minNetProfit: 0.015, restBandSigmas: 0 }, BENCH, undefined, undefined, 0);
+  let now = 0;
+  // Rising 0.5c a second: the momentum carries the estimate above the curve.
+  for (let i = 0; i < 20; i++) rest.observe('T', 'crypto_15m', obs((now += 1000), 0.5 + 0.005 * i));
+  const r = rest.reading('T')!;
+  const top = rest.restTarget('T')!;
+  assert.ok(top > r.curve! + 0.005, `top ${top} vs curve ${r.curve}`);
+  // Flat: the estimate is the curve itself (no band); with the band, half the book's noise above it.
+  for (let i = 0; i < 60; i++) rest.observe('F', 'crypto_15m', obs((now += 1000), 0.6));
+  assert.ok(Math.abs(rest.restTarget('F')! - rest.reading('F')!.curve!) < 0.002);
+  const banded = new SinuousExitGate({ mode: 'rest', minNetProfit: 0.015, restBandSigmas: 0.5 }, BENCH, undefined, undefined, 0);
+  now = 0;
+  for (let i = 0; i < 60; i++) banded.observe('F', 'crypto_15m', obs((now += 1000), 0.6));
+  assert.ok(banded.restTarget('F')! > banded.reading('F')!.curve! + 0.01, String(banded.restTarget('F')));
+  // Warming up: no estimate. Another mode: none either.
+  rest.observe('W', 'crypto_15m', obs(now, 0.6));
+  assert.equal(rest.restTarget('W'), undefined);
+  const gate = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, BENCH, undefined, undefined, 0);
+  for (let i = 0; i < 20; i++) gate.observe('T', 'crypto_15m', obs((now += 1000), 0.6));
+  assert.equal(gate.restTarget('T'), undefined);
+  // Rest mode lets every exit go, profit or not.
+  assert.equal(rest.check('F', { sidePrice: 0.595, count: 10, exitFeePer: 0.01, entrySidePrice: 0.4, entryFeePer: 0.01, protective: false }, now).allow, true);
+  assert.deepEqual(rest.status().holding, []);
+});
