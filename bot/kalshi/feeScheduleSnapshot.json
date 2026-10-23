@@ -1,0 +1,463 @@
+{
+ "checkedAt": 1792780964150,
+ "effective": "July 7, 2026",
+ "takerRate": 0.07,
+ "makerRate": 0.0175,
+ "centicent": true,
+ "nonStandard": {
+  "KXAAAGASM": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXATPMATCH": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXBALLONDOR": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXBTCMAX150": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXBTCY": {
+   "maker": 0,
+   "taker": 0
+  },
+  "KXCITRINI": {
+   "maker": 0,
+   "taker": 0
+  },
+  "KXCPI": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXCPIYOY": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXDOED": {
+   "maker": 0,
+   "taker": 0
+  },
+  "KXEGGS": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXELECTIRAN": {
+   "maker": 0,
+   "taker": 0
+  },
+  "KXEMMYCACTO": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXEMMYCACTR": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXEMMYCSERIES": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXEMMYDACTO": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXEMMYDACTR": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXEMMYDSERIES": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXETHY": {
+   "maker": 0,
+   "taker": 0
+  },
+  "KXFED": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXFEDDECISION": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXGAMBLINGREPEAL": {
+   "maker": 0,
+   "taker": 0
+  },
+  "KXGDP": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXGREENLAND": {
+   "maker": 0,
+   "taker": 0
+  },
+  "KXHEISMAN": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXINXY": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXIPO": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXIRANDEMOCRACY": {
+   "maker": 0,
+   "taker": 0
+  },
+  "KXLALIGA": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXLAYOFFSYINFO": {
+   "maker": 0,
+   "taker": 0
+  },
+  "KXLLM1": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXMARMAD": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXMENWORLDCUP": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXMLB": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXMLBAL": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXMLBASGAME": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXMLBGAME": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXMLBNL": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXMVE": {
+   "maker": 2,
+   "taker": 1
+  },
+  "KXNASDAQ100Y": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNBA": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNBAEAST": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNBAMVP": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNBAROY": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNBAWEST": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNCAAF": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNCAAFACC": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNCAAFB10": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNCAAFB12": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNCAAFGAME": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNCAAFPLAYOFF": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNCAAFSEC": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLAFCCHAMP": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLAFCEAST": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLAFCNORTH": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLAFCSOUTH": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLAFCWEST": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLCOTY": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLCPOTY": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLDPOTY": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLDROTY": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLGAME": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLMVP": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLNFCCHAMP": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLNFCEAST": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLNFCNORTH": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLNFCSOUTH": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLNFCWEST": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLOPOTY": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNFLOROTY": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNHL": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNHLEAST": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXNHLWEST": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXPAHLAVIHEAD": {
+   "maker": 0,
+   "taker": 0
+  },
+  "KXPAYROLLS": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXPGARYDER": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXPGASOLHEIM": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXPGATOUR": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXRATECUTCOUNT": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXSB": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXU3": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXUCL": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXUCLGAME": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXWCGAME": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXWNBA": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXWNBAGAME": {
+   "maker": 1,
+   "taker": 1
+  },
+  "KXWTAMATCH": {
+   "maker": 1,
+   "taker": 1
+  }
+ },
+ "conflicts": [],
+ "table": [
+  {
+   "price": 0.01,
+   "fee1": 0.01,
+   "fee100": 0.07
+  },
+  {
+   "price": 0.05,
+   "fee1": 0.01,
+   "fee100": 0.34
+  },
+  {
+   "price": 0.1,
+   "fee1": 0.01,
+   "fee100": 0.63
+  },
+  {
+   "price": 0.15,
+   "fee1": 0.01,
+   "fee100": 0.9
+  },
+  {
+   "price": 0.2,
+   "fee1": 0.02,
+   "fee100": 1.12
+  },
+  {
+   "price": 0.25,
+   "fee1": 0.02,
+   "fee100": 1.32
+  },
+  {
+   "price": 0.3,
+   "fee1": 0.02,
+   "fee100": 1.47
+  },
+  {
+   "price": 0.35,
+   "fee1": 0.02,
+   "fee100": 1.6
+  },
+  {
+   "price": 0.4,
+   "fee1": 0.02,
+   "fee100": 1.68
+  },
+  {
+   "price": 0.45,
+   "fee1": 0.02,
+   "fee100": 1.74
+  },
+  {
+   "price": 0.5,
+   "fee1": 0.02,
+   "fee100": 1.75
+  },
+  {
+   "price": 0.55,
+   "fee1": 0.02,
+   "fee100": 1.74
+  },
+  {
+   "price": 0.6,
+   "fee1": 0.02,
+   "fee100": 1.68
+  },
+  {
+   "price": 0.65,
+   "fee1": 0.02,
+   "fee100": 1.6
+  },
+  {
+   "price": 0.7,
+   "fee1": 0.02,
+   "fee100": 1.47
+  },
+  {
+   "price": 0.75,
+   "fee1": 0.02,
+   "fee100": 1.32
+  },
+  {
+   "price": 0.8,
+   "fee1": 0.02,
+   "fee100": 1.12
+  },
+  {
+   "price": 0.85,
+   "fee1": 0.01,
+   "fee100": 0.9
+  },
+  {
+   "price": 0.9,
+   "fee1": 0.01,
+   "fee100": 0.63
+  },
+  {
+   "price": 0.95,
+   "fee1": 0.01,
+   "fee100": 0.34
+  },
+  {
+   "price": 0.99,
+   "fee1": 0.01,
+   "fee100": 0.07
+  }
+ ],
+ "etag": "\"4ca657b9070e5e6d19cf17b621ff137a\"",
+ "lastModified": "Fri, 23 Oct 2026 15:22:06 GMT"
+}

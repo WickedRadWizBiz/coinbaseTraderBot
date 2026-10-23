@@ -10,6 +10,7 @@ import { KalshiRest as Rest } from '../bot/kalshi/rest';
 import { parseSeriesFees } from '../bot/kalshi/wire';
 import { MarketData, Recorder } from '../bot/marketdata/marketData';
 import { pdfLines, pdfText } from '../bot/util/pdfText';
+import SNAPSHOT from '../bot/kalshi/feeScheduleSnapshot.json';
 import { tmpDir } from './helpers';
 
 // ---- a small PDF drawn the way the published schedule is: a Type0 (Identity-H) font with a ToUnicode CMap, one glyph
@@ -248,10 +249,40 @@ test('fee book: the account\'s rounding grid is learned from the fees Kalshi cha
   assert.deepEqual(again.status([]).precision, { configured: 0.01, learned: 0.0001, using: 0.0001, votes: { direct: 4, fcm: 0 } });
 });
 
+test('the built-in copy of the published schedule (Kalshi\'s PDF effective July 7, 2026) reads as the PDF did', () => {
+  const c = SNAPSHOT as PublishedSchedule;
+  assert.deepEqual([c.effective, c.takerRate, c.makerRate, c.centicent, Object.keys(c.nonStandard).length], ['July 7, 2026', 0.07, 0.0175, true, 86]);
+  assert.deepEqual(tableCheck(c), { rows: 21, matched: 21, firstMiss: undefined });
+  // Tennis matches pay a maker fee; the crypto series are not listed (the general taker fee, no maker fee).
+  assert.deepEqual([c.nonStandard.KXATPMATCH, c.nonStandard.KXWTAMATCH], [{ maker: 1, taker: 1 }, { maker: 1, taker: 1 }]);
+  for (const s of ['KXBTC15M', 'KXETH15M', 'KXBTCD', 'KXBTC', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']) assert.equal(c.nonStandard[s], undefined, s);
+});
+
+test('fee book: the built-in copy is the published schedule until a later read of the bot\'s own', () => {
+  const file = path.join(tmpDir(), 'fee_schedule.json');
+  const copy = { ...PUBLISHED, checkedAt: 1000 };
+  const b = new FeeBook(0.01, file, copy);
+  b.setSeries('KXATPMATCH', { feeType: 'quadratic', multiplier: 1 }, 0);
+  assert.equal(b.status([]).published.source, 'built-in copy');
+  // The copy lists ATP matches with a maker fee the API did not report: the higher.
+  assert.equal(b.feesFor('KXATPMATCH', undefined).makerMultiplier, 1);
+  // kalshi.com refuses the read: the copy stays in use.
+  b.setPublished({ error: 'HTTP 429' }, 2000);
+  assert.deepEqual([b.status([]).published.source, b.status([]).published.effective, b.status([]).published.error], ['built-in copy', 'July 7, 2026', 'HTTP 429']);
+  // A read of the bot's own, later than the copy, replaces it and is kept for the next start.
+  b.setPublished({ ...PUBLISHED, checkedAt: 3000, effective: 'January 1, 2027' }, 3000);
+  assert.deepEqual([b.status([]).published.source, b.status([]).published.effective], ['kalshi.com', 'January 1, 2027']);
+  assert.equal(new FeeBook(0.01, file, copy).status([]).published.effective, 'January 1, 2027');
+  // A release whose copy is newer than that read uses its copy.
+  assert.equal(new FeeBook(0.01, file, { ...copy, checkedAt: 4000, effective: 'March 1, 2027' }).status([]).published.effective, 'March 1, 2027');
+});
+
 test('market data: reads the published schedule PDF; a failed read keeps the last good one', async () => {
   const dir = tmpDir();
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, SPOT_FEED: 'false', DOMINANCE_FEED: 'false', PERPS_FEED: 'false', TA_CANDLES: 'false' });
   const md = new MarketData(cfg, { getSeriesFees: async () => undefined, getOpenMarkets: async () => [] } as unknown as KalshiRest, undefined, new Recorder(path.join(dir, 'rec')));
+  // Before any read of its own: the copy built into the release.
+  assert.deepEqual([md.feeStatus().published.source, md.feeStatus().published.effective, md.feeStatus().published.nonStandardListed], ['built-in copy', 'July 7, 2026', 86]);
   const urls: string[] = [];
   const events: unknown[] = [];
   md.on('fee_schedule', (e) => events.push(e));
@@ -260,9 +291,9 @@ test('market data: reads the published schedule PDF; a failed read keeps the las
   let st = md.feeStatus().published;
   assert.deepEqual([st.effective, st.takerRate, st.makerRate, st.nonStandardListed, st.error], ['July 7, 2026', 0.07, 0.0175, 3, null]);
   assert.deepEqual(events, [{ changed: true, error: undefined }]);
-  await md.checkPublishedSchedule((async () => new Response('slow down', { status: 429 })) as unknown as typeof fetch);
+  await md.checkPublishedSchedule((async () => new Response('checkpoint', { status: 429, headers: { 'x-vercel-mitigated': 'challenge' } })) as unknown as typeof fetch);
   st = md.feeStatus().published;
-  assert.deepEqual([st.effective, st.error], ['July 7, 2026', 'HTTP 429']);
+  assert.deepEqual([st.effective, st.source, st.error], ['July 7, 2026', 'kalshi.com', "HTTP 429 (kalshi.com's bot check: challenge)"]);
   // Kept on disk for the next start.
   const md2 = new MarketData(cfg, {} as KalshiRest, undefined, new Recorder(path.join(dir, 'rec')));
   assert.equal(md2.feeStatus().published.effective, 'July 7, 2026');
