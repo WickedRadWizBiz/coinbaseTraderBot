@@ -105,6 +105,13 @@ for name, d in (('paper', DATA), ('live', os.path.join(DATA, 'live'))):
     if eg.get('reference') is not None and h: print(f"  {name} size vs break-even: break-even ${eg['reference']:.2f}, last hourly equity ${h[-1]['equity']:.2f} ({time.strftime('%m-%d %H:%M', time.gmtime(h[-1]['ts'] / 1000))} UTC)")
     ce = load(os.path.join(d, 'curve-exit.json'))
     if ce: print(f"  {name} exit curve: {len(ce.get('results') or [])} held exits scored, net ${sum(ce.get('results') or []):.2f} | benched {short(ce.get('benched'), 160)}")
+    fsch = load(os.path.join(d, 'fee_schedule.json'))
+    if fsch:
+        p, v, f = fsch.get('published') or {}, fsch.get('votes') or {}, fsch.get('fills') or {}
+        read = time.strftime('%m-%d %H:%M', time.gmtime((p.get('checkedAt') or 0) / 1000)) if p else '-'
+        print(f"  {name} fee schedule: published {p.get('effective')} (taker {p.get('takerRate')}, maker {p.get('makerRate')}, {len(p.get('nonStandard') or {})} series listed, read {read} UTC)"
+              f" | rounding grid learned {fsch.get('learnedPrecision')} (votes direct {v.get('direct', 0)}, fcm {v.get('fcm', 0)})"
+              f" | fills checked {f.get('checked', 0)}: exact {f.get('exact', 0)}, rebate {f.get('rebate', 0)}, mismatch {f.get('mismatch', 0)}" + (f" | last mismatch {short((f.get('last') or {}).get('note'), 300)}" if f.get('last') else ''))
 
 print('== settlement')
 st = s.get('settlement')

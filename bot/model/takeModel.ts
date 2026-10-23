@@ -8,7 +8,7 @@
 // would-be trades, so no trade is labelled by a model that saw its outcome) and only gates live
 // orders once its own held-out check showed it beats the fair-value probability alone.
 
-import { takerFee } from '../fees';
+import { takerFee, type FeeSchedule } from '../fees';
 import type { DenseLayer } from './metaModel';
 import { gbdtLogit, type GbdtModel } from './trees';
 import { gatedPredict, type GatedExperts } from './gatedExperts';
@@ -103,7 +103,7 @@ export function takeProbability(p: TakeModelParams, x: number[], gx?: number[]):
   return 1 / (1 + Math.exp(-h[0]));
 }
 
-export interface TakeGateCtx { pYes: number; features: Record<string, number>; tauSec: number; bid: number; ask: number; pStd?: number; margin: number }
+export interface TakeGateCtx { pYes: number; features: Record<string, number>; tauSec: number; bid: number; ask: number; pStd?: number; margin: number; fees?: FeeSchedule }
 
 /** Drop entry orders the take model says to skip. Exits and reduce-only orders always pass. */
 export function applyTakeGate(plan: { place: OrderPlan[]; notes: string[] }, take: TakeModelParams | undefined, c: TakeGateCtx): number {
@@ -114,7 +114,7 @@ export function applyTakeGate(plan: { place: OrderPlan[]; notes: string[] }, tak
     const side = o.side === 'bid' ? 'yes' : 'no';
     const price = side === 'yes' ? o.price : 1 - o.price;
     const q = takeProbability(take, takeInputs(side, c.pYes, price, c.ask - c.bid, c.tauSec, c.features, c.pStd), takeGatedInputs(side, c.features));
-    const breakeven = price + (o.postOnly ? 0 : takerFee(1, price));
+    const breakeven = price + (o.postOnly ? 0 : takerFee(1, price, c.fees));
     if (q >= breakeven + c.margin) return true;
     skipped++;
     plan.notes.push(`take model: skip ${side.toUpperCase()} @ ${price.toFixed(2)} (P(win) ${q.toFixed(3)} < break-even ${(breakeven + c.margin).toFixed(3)})`);

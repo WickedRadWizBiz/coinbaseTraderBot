@@ -226,13 +226,11 @@ export function parseMarket(m: Obj): MarketInfo | undefined {
 
 export function parseSeriesFees(raw: Obj): SeriesFeeInfo | undefined {
   const s: Obj = raw.series ?? raw;
-  const mult = parseCount(s.fee_multiplier);
+  const mult = Number(s.fee_multiplier);
   const type = s.fee_type ? String(s.fee_type) : undefined;
-  if (mult === undefined && !type) return undefined;
-  // `fee_type` names the schedule; `fee_multiplier` scales the taker fee.
-  // Maker multiplier is 0 unless the schedule says otherwise.
-  const makerMult = parseCount(s.maker_fee_multiplier) ?? 0;
-  return { takerMultiplier: mult ?? 1, makerMultiplier: makerMult, feeType: type };
+  if (!Number.isFinite(mult) && !type) return undefined;
+  // `fee_type` names the schedule's table, `fee_multiplier` scales it (bot/kalshi/feeSchedule.ts).
+  return { feeType: type, multiplier: s.fee_multiplier !== undefined && s.fee_multiplier !== null && Number.isFinite(mult) ? mult : undefined };
 }
 
 /** Parse the REST orderbook (YES bids and NO bids) into a YES bid/ask book. */

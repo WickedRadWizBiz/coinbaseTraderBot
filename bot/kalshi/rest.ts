@@ -293,6 +293,30 @@ export class KalshiRest implements ExchangeGateway {
       .filter((c: { scheduledTs: number }) => Number.isFinite(c.scheduledTs));
   }
 
+  /** GET /events/fee_changes (public): per-event overrides of the series' fee structure, every page (at most `maxPages`
+   *  of 1,000). A null field clears that part of the override. */
+  async getEventFeeChanges(maxPages = 5): Promise<Array<{ eventTicker: string; seriesTicker: string; type: string | null; multiplier: number | null; scheduledTs: number }>> {
+    const out: Array<{ eventTicker: string; seriesTicker: string; type: string | null; multiplier: number | null; scheduledTs: number }> = [];
+    let cursor = '';
+    for (let page = 0; page < maxPages; page++) {
+      const d = await this.read(`/events/fee_changes?limit=1000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, false);
+      for (const c of d?.event_fee_changes ?? []) {
+        const ts = Date.parse(String(c.scheduled_ts));
+        if (!c.event_ticker || !Number.isFinite(ts)) continue;
+        const m = c.fee_multiplier_override;
+        out.push({
+          eventTicker: String(c.event_ticker), seriesTicker: String(c.series_ticker ?? String(c.event_ticker).split('-')[0]),
+          type: c.fee_type_override ? String(c.fee_type_override) : null,
+          multiplier: m === null || m === undefined || !Number.isFinite(Number(m)) ? null : Number(m),
+          scheduledTs: ts,
+        });
+      }
+      cursor = d?.cursor ? String(d.cursor) : '';
+      if (!cursor) break;
+    }
+    return out;
+  }
+
   async getMarket(ticker: string): Promise<MarketInfo | undefined> {
     const data = await this.read(`/markets/${encodeURIComponent(ticker)}`, false);
     return parseMarket(data.market ?? data);

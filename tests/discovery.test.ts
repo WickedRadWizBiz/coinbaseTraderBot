@@ -34,7 +34,7 @@ test('STRATEGY_SERIES=auto (default) trades discovered series; explicit lists st
   };
   const rest = {
     listSeries: async () => [{ ticker: 'KXSOL15M' }, { ticker: 'KXETHD', frequency: 'hourly' }, { ticker: 'KXBTCMAXY' }],
-    getSeriesFees: async () => ({ takerMultiplier: 1, makerMultiplier: 0 }),
+    getSeriesFees: async () => ({ feeType: 'quadratic', multiplier: 1 }),
     getOpenMarkets: async (s: string) => bySeries[s] ?? [],
   } as unknown as KalshiRest;
   const md = new MarketData(cfg, rest, undefined, new Recorder(path.join(tmpDir(), 'rec')));

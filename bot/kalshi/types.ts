@@ -98,10 +98,11 @@ export interface MarketInfo {
   exchangeIndex?: number;
 }
 
+/** GET /series/{t}: the series' fee structure. bot/kalshi/feeSchedule.ts turns it into maker and taker multipliers. */
 export interface SeriesFeeInfo {
-  takerMultiplier: number;
-  makerMultiplier: number;
+  /** quadratic, quadratic_with_maker_fees, quadratic_with_combo_maker_fees or flat. */
   feeType?: string;
+  multiplier?: number;
 }
 
 export interface BookLevel { price: number; size: number }

@@ -27,7 +27,7 @@ async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy
   const now = Date.now();
   const market: MarketInfo = { ticker: 'KXBTC15M-TEST', seriesTicker: 'KXBTC15M', status: 'open', openTime: now - 300_000, closeTime: now + 600_000, floorStrike: 60000, tickSize: 0.01 };
   const rest = {
-    getSeriesFees: async () => ({ takerMultiplier: 1, makerMultiplier: 0 }),
+    getSeriesFees: async () => ({ feeType: 'quadratic', multiplier: 1 }),
     getOpenMarkets: async () => [market],
     getMarket: async () => market,
   } as unknown as KalshiRest;
@@ -268,13 +268,21 @@ test('paper: by default live sends what an unvalidated model wants, so nothing i
   assert.equal(audit.tail(50, 'paper_live_block').length, 0);
 });
 
-test('paper, like live: no trading a series until its fee schedule is verified', async () => {
-  const { engine, recon, paper, market, md } = await setup();
+test('paper, like live: no new entry in a series until its fee schedule is verified; an exit still goes out', async () => {
+  const { engine, recon, paper, market, md, oms } = await setup();
   engine.balance = (await recon.run('startup'))!.balance;
-  (md as unknown as { fees: Map<string, unknown> }).fees.delete(market.seriesTicker);
+  // The series reports a fee type the published schedule does not define as a formula.
+  md.feeBook.setSeries(market.seriesTicker, { feeType: 'flat', multiplier: 1 }, Date.now());
   await engine.tick();
   assert.equal((await paper.getOpenOrders()).length, 0);
-  assert.equal(engine.status.get(market.ticker)!.blocked, 'series fee schedule not verified');
+  const st = engine.status.get(market.ticker)!;
+  assert.equal(st.blocked, undefined);
+  assert.match(st.feeBlock ?? '', /fee type flat is not a formula the fee schedule defines/);
+  // Long 10 NO bought at 0.40; the market bids NO 0.20, above the model's value: cutting the loser goes out.
+  oms.onFill({ tradeId: 'fx1', orderId: '', ticker: market.ticker, side: 'ask', count: 10, price: 0.6, isTaker: true, fee: 0.17, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.78, size: 50 }], asks: [{ price: 0.8, size: 50 }] }, Date.now());
+  await engine.tick();
+  assert.equal(oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly).length, 1, engine.status.get(market.ticker)!.notes.join(' | '));
 });
 
 test('no orders until reconciliation is clean and balance known', async () => {

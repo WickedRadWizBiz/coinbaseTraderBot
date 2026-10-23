@@ -419,7 +419,7 @@ async function engineSetup(mode: 'shadow' | 'blend') {
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, DOMINANCE_FEED: 'false', SPOT_FEED: 'false', STRATEGY_SERIES: 'KXBTC15M', TENNIS_ENABLED: 'false', SNN_MODE: mode, SNN_WORKER: 'false', EVAL_IDLE_SEC: '0' });
   const now = Date.now();
   const market: MarketInfo = { ticker: 'KXBTC15M-SNN', seriesTicker: 'KXBTC15M', status: 'open', openTime: now - 300_000, closeTime: now + 600_000, floorStrike: 60000, tickSize: 0.01 };
-  const rest = { getSeriesFees: async () => ({ takerMultiplier: 1, makerMultiplier: 0 }), getOpenMarkets: async () => [market], getMarket: async () => market } as unknown as KalshiRest;
+  const rest = { getSeriesFees: async () => ({ feeType: 'quadratic', multiplier: 1 }), getOpenMarkets: async () => [market], getMarket: async () => market } as unknown as KalshiRest;
   const audit = tmpAudit();
   const md = new MarketData(cfg, rest, undefined, new Recorder(path.join(dir, 'rec')));
   await md.refreshCatalog(now);

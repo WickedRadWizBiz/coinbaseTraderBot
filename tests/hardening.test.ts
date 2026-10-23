@@ -196,7 +196,7 @@ test('record-only series: recorded with results, never traded, never a ladder si
   };
   const results = new Map<string, string>();
   const rest = {
-    getSeriesFees: async () => ({ takerMultiplier: 1, makerMultiplier: 1 }),
+    getSeriesFees: async () => ({ feeType: 'quadratic_with_maker_fees', multiplier: 1 }),
     getOpenMarkets: async (s: string) => catalog[s] ?? [],
     getMarket: async (t: string) => ({ ...(Object.values(catalog).flat().find((m) => m.ticker === t)!), result: results.get(t) ?? '' }),
   } as never;
