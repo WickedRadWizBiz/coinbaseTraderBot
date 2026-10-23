@@ -27,6 +27,7 @@
 
 #include <node.h>
 #include <nan.h>
+#include <memory>
 
 #include "./lib/include/ta_abstract.h"
 #include "./lib/include/ta_common.h"
@@ -509,18 +510,18 @@ class ExecuteWorker : public AsyncWorker {
     for (int i=0; i < wo->garbage_count; i++) {
         delete[] wo->garbage[i];
     }
-    delete[] wo->garbage;
+    free(wo->garbage);
 
     // Clear parameter holder memory
     TA_ParamHolderFree(wo->func_params);
     
     // Dispose output arrays
     for (int i=0; i < wo->nbOutput; i++) {
-        delete wo->outReal[i];
-        delete wo->outInt[i];
+        delete[] wo->outReal[i];
+        delete[] wo->outInt[i];
     }
-    delete wo->outReal;
-    delete wo->outInt;
+    delete[] wo->outReal;
+    delete[] wo->outInt;
     
     // Dispose work object
     delete wo;
@@ -613,6 +614,10 @@ NAN_METHOD(Execute) {
     
     // Get the callback function
     cb = new Callback(info[1].As<Function>());
+    // Owned here until an async worker takes it, so a synchronous call (no callback) or an early error return frees
+    // it. It leaked on every synchronous call (a Callback and a V8 global handle, about 130 bytes): the millions of
+    // calls that build the TA network's rows grew the trainer's memory by gigabytes.
+    std::unique_ptr<Callback> cbOwner(cb);
     
     // Check the function name parameter
     if (!HasOwnProperty(executeParameter, New<String>("name").ToLocalChecked()).FromJust()) {
@@ -693,7 +698,7 @@ NAN_METHOD(Execute) {
                         TA_ParamHolderFree(func_params);
 
                         // Clear values memory
-                        delete[] garbage;
+                        free(garbage);
                         
                         // Return internal error
                         REPORT_INTERNAL_ERROR(cb, "First argument must contain 'open' field");
@@ -716,7 +721,7 @@ NAN_METHOD(Execute) {
                         TA_ParamHolderFree(func_params);
 
                         // Clear values memory
-                        delete[] garbage;
+                        free(garbage);
                         if (open)
                             delete[] open;
                         
@@ -742,7 +747,7 @@ NAN_METHOD(Execute) {
                         TA_ParamHolderFree(func_params);
                         
                         // Clear values memory
-                        delete[] garbage;
+                        free(garbage);
                         if (open)
                             delete[] open;
                         if (high)
@@ -770,7 +775,7 @@ NAN_METHOD(Execute) {
                         TA_ParamHolderFree(func_params);
                         
                         // Clear values memory
-                        delete[] garbage;
+                        free(garbage);
                         if (open)
                             delete[] open;
                         if (low)
@@ -800,7 +805,7 @@ NAN_METHOD(Execute) {
                         TA_ParamHolderFree(func_params);
 
                         // Clear values memory
-                        delete[] garbage;
+                        free(garbage);
                         if (open)
                             delete[] open;
                         if (close)
@@ -832,7 +837,7 @@ NAN_METHOD(Execute) {
                         TA_ParamHolderFree(func_params);
                         
                         // Clear values memory
-                        delete[] garbage;
+                        free(garbage);
                         if (close)
                             delete[] close;
                         if (volume)
@@ -1058,20 +1063,20 @@ NAN_METHOD(Execute) {
         for (int i=0; i < wo->garbage_count; i++) {
             delete[] wo->garbage[i];
         }
-        delete[] wo->garbage;
+        free(wo->garbage);
         TA_ParamHolderFree(wo->func_params);
         for (int i=0; i < wo->nbOutput; i++) {
-            delete wo->outReal[i];
-            delete wo->outInt[i];
+            delete[] wo->outReal[i];
+            delete[] wo->outInt[i];
         }
-        delete wo->outReal;
-        delete wo->outInt;
+        delete[] wo->outReal;
+        delete[] wo->outInt;
         delete wo;
         return;
     }
 
     // Queue the work
-    AsyncQueueWorker(new ExecuteWorker(cb, wo));
+    AsyncQueueWorker(new ExecuteWorker(cbOwner.release(), wo));
     return;
 }
 

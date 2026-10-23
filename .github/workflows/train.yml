@@ -66,7 +66,8 @@ jobs:
           path: |
             node_modules
             vendor/talib/build
-          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+          # The binding's own source (talib.cpp) is in the key: a cached build of an older binding would keep its bugs.
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
 
       - name: Install dependencies
         if: steps.deps.outputs.cache-hit != 'true'

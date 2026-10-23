@@ -65,3 +65,17 @@ replay = os.path.join(DATA, 'history-replay')
 if os.path.isdir(replay):
     days = [x for x in os.listdir(replay) if x.startswith('md-')]
     print(f'\n== history replay on the server: {len(days)} day file(s)')
+
+# The remote runs' own logs (models/logs, copied back by train.yml): the step sequence of the newest two, where a
+# report only lists the steps that finished (a run stopped by its time limit or the memory watchdog leaves the
+# running step out). Step lines, row-build progress and stop reasons only.
+KEEP = ('[pipeline] ', 'quick phase', 'rows: ', 'computing ', 'memory ', 'checkpoint ', 'pipeline stopped', 'pipeline exited')
+for lf in sorted(glob.glob(os.path.join(MODELS, 'logs', 'pipeline-remote-*.log')))[-2:]:
+    try:
+        lines = open(lf, errors='replace').read().splitlines()
+    except Exception as e:  # noqa: BLE001
+        print('  unreadable', os.path.basename(lf), type(e).__name__); continue
+    picked = [ln for ln in lines if any(k in ln for k in KEEP)]
+    print(f'\n== {os.path.basename(lf)}: {len(lines)} lines; step lines ({len(picked)}, newest 60)')
+    for ln in picked[-60:]:
+        print('  ', ln[:180])
