@@ -15,7 +15,8 @@
 //    Oct 5-6 Kalshi trades arrived minutes behind, and quotes priced on live
 //    Coinbase prices were filled by those old trades - profits a real exchange
 //    could never have given.
-//  - Post-only orders that would cross are rejected, like the exchange.
+//  - Post-only orders that would cross are rejected, like the exchange, and so is reduce-only on an order that is
+//    not immediate-or-cancel (Kalshi accepts it on IOC orders only).
 //  - No bankroll refills. Drawdowns stay visible.
 
 import crypto from 'crypto';
@@ -151,6 +152,8 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
     if (this.byClientId.has(req.clientOrderId)) {
       throw new OrderRejectedError('duplicate client_order_id', 409, 'duplicate');
     }
+    // Like Kalshi (and the live REST client): reduce-only is accepted on immediate-or-cancel orders only.
+    if (req.reduceOnly && req.timeInForce !== 'immediate_or_cancel') throw new OrderRejectedError('reduce_only is only accepted with immediate_or_cancel', 400, 'invalid_order');
     const book = this.books(req.ticker);
     if (!book) throw new OrderRejectedError('unknown market', 404, 'market_not_found');
     const o: PaperOrder = {

@@ -24,6 +24,11 @@ test('post-only that would cross is rejected', async () => {
   await assert.rejects(ex.createOrder(req({ price: 0.48 })), /post only/);
 });
 
+test('reduce-only is accepted on immediate-or-cancel orders only, like Kalshi', async () => {
+  const { ex } = setup();
+  await assert.rejects(ex.createOrder(req({ side: 'ask', price: 0.5, reduceOnly: true })), /reduce_only is only accepted with immediate_or_cancel/);
+});
+
 test('IOC walks the visible book and pays taker fees; remainder cancelled', async () => {
   const { ex } = setup();
   const o = await ex.createOrder(req({ price: 0.48, postOnly: false, timeInForce: 'immediate_or_cancel', count: 6 }));

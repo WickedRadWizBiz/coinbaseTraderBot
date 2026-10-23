@@ -925,11 +925,12 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     // inside it; the REST client's own limiter holds every write to that budget anyway (bot/kalshi/rateLimiter.ts).
     maxOrdersPerMinute: num(env, 'RISK_MAX_ORDERS_PER_MIN', 120, 1, 600),
     maxOpenOrders: num(env, 'RISK_MAX_OPEN_ORDERS', 12, 1, 200),
-    // Paper tolerates older data: a busy small server delivers feed messages seconds late, and paper fills
-    // are simulated against the same book, so stale-by-a-few-seconds costs nothing but blocked training.
-    maxBookAgeMs: num(env, 'RISK_MAX_BOOK_AGE_MS', mode === 'paper' ? 30000 : 5000, 250, 120000),
+    // Paper uses live's limits (since Oct 23, so paper trades only on data live would trade on: paper resting orders
+    // fill from Kalshi's real trades, so a stale book meant quotes live would never have had there). Until then paper
+    // tolerated 30 s / 15 s to keep training going while a busy server delivered feed messages late.
+    maxBookAgeMs: num(env, 'RISK_MAX_BOOK_AGE_MS', 5000, 250, 120000),
     maxFeedLagMs: num(env, 'RISK_MAX_FEED_LAG_MS', 3000, 0, 120000),
-    maxIndexAgeMs: num(env, 'RISK_MAX_INDEX_AGE_MS', mode === 'paper' ? 15000 : 3000, 250, 120000),
+    maxIndexAgeMs: num(env, 'RISK_MAX_INDEX_AGE_MS', 3000, 250, 120000),
     noEntryBeforeCloseSec: num(env, 'RISK_NO_ENTRY_BEFORE_CLOSE_SEC', 15, 0, 600),
     maxConsecutiveOrderErrors: num(env, 'RISK_MAX_CONSEC_ORDER_ERRORS', 5, 1, 100),
   };

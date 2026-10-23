@@ -381,8 +381,9 @@ export class Engine {
     if (d.snn) this.attachBlender(d.snn.blender);
     // Registered before the startup reconciliation replays fills, so the
     // balance monitor sees every cash movement the bot's trading causes.
-    d.oms.on('fill', (f: { ticker: string; side: 'bid' | 'ask'; count: number; price: number; isTaker?: boolean; ts?: number }, _rec: unknown, fee: number, positionAfter: number) => {
-      this.fillLog?.onFill({ ticker: f.ticker, side: f.side, price: f.price, isTaker: Boolean(f.isTaker), ts: f.ts });
+    d.oms.on('fill', (f: { ticker: string; side: 'bid' | 'ask'; count: number; price: number; isTaker?: boolean; ts?: number }, rec: { clientOrderId?: string } | undefined, fee: number, positionAfter: number) => {
+      this.fillLog?.onFill({ ticker: f.ticker, side: f.side, price: f.price, isTaker: Boolean(f.isTaker), ts: f.ts, coid: rec?.clientOrderId });
+      this.noteLiveBlockFill(rec?.clientOrderId);
       const signed = f.side === 'bid' ? f.count : -f.count;
       const cash = fillCashDelta(f.side, f.count, f.price, fee, positionAfter - signed);
       d.balanceMonitor?.onCash(cash);
@@ -1750,7 +1751,8 @@ export class Engine {
       await this.cancelMarketQuotes(m.ticker, why);
     };
 
-    if (cfg.mode === 'live' && !md.hasVerifiedFees(m.seriesTicker)) return block('series fee schedule not verified');
+    // Both modes (paper since Oct 23, like live): no trading a series until its fee schedule is known.
+    if (!md.hasVerifiedFees(m.seriesTicker)) return block('series fee schedule not verified');
     const lagHalt = this.feedLagHalt();
     if (lagHalt) return block(lagHalt);
     if (!book.isUsable(now, R.maxBookAgeMs)) return block('book not usable');
@@ -2170,6 +2172,8 @@ export class Engine {
         tauSec, fv: fv.pYes, regime: fv.regime, pYes, ...(full ? { features, drivers: why.drivers } : {}), modelShift: why.shiftFromFairValue, bid: bid.price, ask: ask.price, position: st.position, fastMove,
         place: plan.place.map((p) => ({ side: p.side, price: p.price, count: p.count, purpose: p.purpose, edge: p.edge, why: p.why })),
         cancel: plan.cancel,
+        // Why no entry could open here (paper's accuracy gate), so studies need not recompute it.
+        ...(st.accuracyBlock ? { entryBlock: st.accuracyBlock } : {}),
       });
     }
 
@@ -2325,9 +2329,45 @@ export class Engine {
       }
       return;
     }
-    await oms.submit(intent);
+    const rec = await oms.submit(intent);
+    if (cfg.mode === 'paper' && !tennis) this.tagLiveBlock(rec.clientOrderId, p);
     const fx = this.fillX.get(p);
-    if (fx && !tennis) this.fillLog?.onQuote({ ticker: m.ticker, side: p.side, price: p.price, count: p.count, x: fx });
+    if (fx && !tennis) this.fillLog?.onQuote({ ticker: m.ticker, side: p.side, price: p.price, count: p.count, x: fx, coid: rec.clientOrderId });
+  }
+
+  /** Paper: why live would not have sent this order under its own rules: an entry while the model has not passed
+   *  validation and the Kalshi probation is benched (live's risk gateway rejects it), a paper training or exploration
+   *  trade (live never makes them), or a ratchet stop live would not run (hunt mode not validated, probation benched).
+   *  The owner's choice on Oct 23: paper keeps trading, and the P&L report shows a live-equivalent P&L without these. */
+  private liveWouldBlock(p: OrderPlan): string[] {
+    const { cfg, model } = this.d;
+    if (p.reduceOnly || p.purpose === 'exit') {
+      return p.why.startsWith('confluence ratchet stop') && !model.validatedHunt() && !gatePasses('kalshi', false) ? ['ratchet stop live would not run (hunt not validated, probation benched)'] : [];
+    }
+    const out: string[] = [];
+    if (!cfg.liveAllowUnvalidated && !gatePasses('kalshi', false) && model.liveBlockers().length) out.push('model not validated, probation benched');
+    if (p.why.startsWith('train (paper)')) out.push('paper training trade');
+    if (p.why.startsWith('explore (')) out.push('paper exploration');
+    return out;
+  }
+
+  /** Paper orders live would not have sent, until their first fill is audited (`paper_live_block`, one line per order:
+   *  the P&L report applies it to every fill of that order). Unfilled orders are forgotten after two hours. */
+  private readonly liveBlocks = new Map<string, { reasons: string[]; ts: number }>();
+
+  private tagLiveBlock(clientOrderId: string, p: OrderPlan): void {
+    const reasons = this.liveWouldBlock(p);
+    if (!reasons.length) return;
+    const now = this.now();
+    if (this.liveBlocks.size >= 5000) for (const [k, v] of this.liveBlocks) if (now - v.ts > 2 * 3_600_000) this.liveBlocks.delete(k);
+    this.liveBlocks.set(clientOrderId, { reasons, ts: now });
+  }
+
+  private noteLiveBlockFill(clientOrderId: string | undefined): void {
+    const t = clientOrderId ? this.liveBlocks.get(clientOrderId) : undefined;
+    if (!t) return;
+    this.liveBlocks.delete(clientOrderId!);
+    this.d.audit.write('paper_live_block', { clientOrderId, reasons: t.reasons });
   }
 
   /** The bot's resting orders an immediate order at `price` on `side` would trade against. */

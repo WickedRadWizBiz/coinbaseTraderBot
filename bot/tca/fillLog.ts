@@ -17,7 +17,8 @@ export interface FillLogRow {
   markout60: number | null;
 }
 
-interface Pending { row: Omit<FillLogRow, 'filled' | 'fillDelaySec' | 'markout60'>; fillTs?: number; fillPrice?: number; due: number; markoutDue?: number }
+/** `coid`: the quote's client order id, when known: a fill is then credited by its order, never by its price alone. */
+interface Pending { row: Omit<FillLogRow, 'filled' | 'fillDelaySec' | 'markout60'>; coid?: string; fillTs?: number; fillPrice?: number; due: number; markoutDue?: number }
 
 export class FillLog {
   private readonly pending: Pending[] = [];
@@ -29,16 +30,22 @@ export class FillLog {
   }
 
   /** A maker entry quote was sent. */
-  onQuote(q: { ticker: string; side: BookSide; price: number; count: number; x: Record<string, number> }): void {
+  onQuote(q: { ticker: string; side: BookSide; price: number; count: number; x: Record<string, number>; coid?: string }): void {
     const t = this.now();
-    this.pending.push({ row: { t, ...q, x: Object.fromEntries(Object.entries(q.x).map(([k, v]) => [k, Number.isFinite(v) ? +v.toFixed(5) : NaN])) }, due: t + FILL_HORIZON_SEC * 1000 });
+    const { coid, ...row } = q;
+    this.pending.push({ row: { t, ...row, x: Object.fromEntries(Object.entries(row.x).map(([k, v]) => [k, Number.isFinite(v) ? +v.toFixed(5) : NaN])) }, ...(coid ? { coid } : {}), due: t + FILL_HORIZON_SEC * 1000 });
   }
 
-  /** Any fill: the oldest open maker quote on the same ticker / side / price within its 60 s gets it. */
-  onFill(f: { ticker: string; side: BookSide; price: number; isTaker: boolean; ts?: number }): void {
+  /** Any fill. With its order's client id: the open quote of that order within its 60 s gets it, and a fill of an order
+   *  that is not a logged quote (an exit curve's resting sell at the same price, say) credits none. Without one (older
+   *  callers): the oldest open maker quote on the same ticker / side / price within its 60 s. */
+  onFill(f: { ticker: string; side: BookSide; price: number; isTaker: boolean; ts?: number; coid?: string }): void {
     if (f.isTaker) return;
     const ts = f.ts ?? this.now();
-    const p = this.pending.find((x) => x.fillTs === undefined && x.row.ticker === f.ticker && x.row.side === f.side && Math.abs(x.row.price - f.price) < 1e-9 && ts <= x.due);
+    const open = (x: Pending) => x.fillTs === undefined && ts <= x.due;
+    const p = f.coid
+      ? this.pending.find((x) => open(x) && x.coid === f.coid)
+      : this.pending.find((x) => open(x) && x.row.ticker === f.ticker && x.row.side === f.side && Math.abs(x.row.price - f.price) < 1e-9);
     if (p) { p.fillTs = ts; p.fillPrice = f.price; p.markoutDue = ts + FILL_HORIZON_SEC * 1000; }
   }
 
