@@ -5,6 +5,7 @@
 import fs from 'fs';
 import { parseSessionRisk, type SessionRiskProfile } from './model/sessionRisk';
 import { DEFAULT_PROBATION, type ProbationParams } from './risk/probation';
+import { FEE_SCHEDULE_URL } from './kalshi/feeSchedule';
 import { DEFAULT_SINUOUS_ENTRY, type SinuousEntryParams } from './strategy/sinuousEntry';
 import { DEFAULT_SINUOUS_EXIT, type SinuousExitParams } from './strategy/sinuousExit';
 import { defaultTiers, validateTiers, type TierPoint } from './risk/sizingTiers';
@@ -219,8 +220,11 @@ export interface Config {
   kalshiKeyId?: string;
   kalshiPrivateKeyPath?: string;
   kalshiSubaccount?: number;
-  /** Balance precision for fee rounding: 0.01 for non-direct (FCM-cleared) members, 0.0001 for direct members. */
+  /** Balance precision for fee rounding: 0.01 for non-direct (FCM-cleared) members, 0.0001 for direct members. The
+   *  starting point only: the fee check learns the account's grid from the fees Kalshi charges on live fills. */
   kalshiBalancePrecision: number;
+  /** Kalshi's published fee schedule (bot/kalshi/feeSchedule.ts), read at start and every KALSHI_FEE_SCHEDULE_HOURS. */
+  feeSchedule: { check: boolean; url: string; hours: number };
   /** LIVE_ALLOW_UNVALIDATED_MODEL (default true, the owner's choice on Oct 23): the model's validation never blocks a
    *  binary crypto order in live. Entries, exits and ratchet stops go out whether or not the model passed validation or
    *  its probation is benched; every other limit still applies. false: live entries (and ratchet stops) wait for a
@@ -1052,6 +1056,11 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     kalshiPrivateKeyPath,
     kalshiSubaccount: env.KALSHI_SUBACCOUNT ? num(env, 'KALSHI_SUBACCOUNT', 0, 0, 1000) : undefined,
     kalshiBalancePrecision: env.KALSHI_BALANCE_PRECISION === '0.0001' ? 0.0001 : 0.01,
+    feeSchedule: {
+      check: bool(env, 'KALSHI_FEE_SCHEDULE_CHECK', true),
+      url: env.KALSHI_FEE_SCHEDULE_URL?.startsWith('https://') ? env.KALSHI_FEE_SCHEDULE_URL : FEE_SCHEDULE_URL,
+      hours: num(env, 'KALSHI_FEE_SCHEDULE_HOURS', 6, 1, 168),
+    },
     liveAllowUnvalidated: bool(env, 'LIVE_ALLOW_UNVALIDATED_MODEL', true),
     probation: {
       mode: oneOf(env, 'VALIDATION_GATES', 'monitor', ['monitor', 'enforce'] as const),

@@ -20,7 +20,7 @@ import fs from 'fs';
 import type { BookSide } from '../kalshi/types';
 import type { OrderBook } from '../marketdata/orderBook';
 import type { OrderPlan } from '../strategy/fairValueStrategy';
-import { takerFee } from '../fees';
+import { takerFee, type FeeSchedule } from '../fees';
 import { gbdtLogit, validateGbdt, type GbdtModel } from '../model/trees';
 import { gatePasses } from '../risk/probation';
 
@@ -107,6 +107,8 @@ export interface FillDecisionCtx {
   minEv: number;
   /** The strategy's own taker threshold (takerBuffer + minEdge): a cross must clear it too. */
   takerMinEdge: number;
+  /** The market's fee schedule (default: the general one). */
+  fees?: FeeSchedule;
 }
 
 /** Maker entry quotes (not take-profit quotes, not exits). */
@@ -128,7 +130,7 @@ export function applyFillModel(plan: { place: OrderPlan[]; notes: string[] }, fm
     const touch = o.side === 'bid' ? ba?.price : bb?.price;
     const qSide = o.side === 'bid' ? c.q : 1 - c.q;
     const cost = touch === undefined ? NaN : o.side === 'bid' ? touch : 1 - touch;
-    const evTaker = Number.isFinite(cost) ? qSide - cost - takerFee(1, cost) : -Infinity;
+    const evTaker = Number.isFinite(cost) ? qSide - cost - takerFee(1, cost, c.fees) : -Infinity;
     const already = plan.place.some((p) => p !== o && p.side === o.side && p.purpose === 'entry' && !p.postOnly);
     const tag = `fill model ${o.side === 'bid' ? 'YES' : 'NO'}: P(fill) ${pf.toFixed(2)}, markout ${mk >= 0 ? '+' : ''}${mk.toFixed(3)}, EV maker ${evMaker.toFixed(3)} vs taker ${Number.isFinite(evTaker) ? evTaker.toFixed(3) : 'n/a'}`;
     if (!already && touch !== undefined && evTaker > evMaker && evTaker >= c.minEv && evTaker >= c.takerMinEdge) {

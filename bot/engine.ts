@@ -221,6 +221,8 @@ export interface MarketStatus {
   entryWindow?: boolean;
   /** The accuracy gate's reason when it closed the entry window (paper). */
   accuracyBlock?: string;
+  /** Why new entries wait for the market's fee schedule (exits still go out). */
+  feeBlock?: string;
   /** Why the last full (entry) evaluation ran under the relaxed cadence. */
   lastEval?: { reason: CadenceReason; ts: number };
   bestBid?: number;
@@ -1185,7 +1187,7 @@ export class Engine {
       const why = !st ? 'not evaluated yet'
         : st.blocked ? st.blocked
         : resting.has(m.ticker) ? undefined
-        : !st.entryWindow ? (st.accuracyBlock ?? this.entryGuards(now)[0] ?? 'outside the entry window (time to close / price band)')
+        : !st.entryWindow ? (st.feeBlock ?? st.accuracyBlock ?? this.entryGuards(now)[0] ?? 'outside the entry window (time to close / price band)')
         : 'no edge after fees';
       if (why) reasons[why] = (reasons[why] ?? 0) + 1; else quoting++;
     }
@@ -1751,8 +1753,9 @@ export class Engine {
       await this.cancelMarketQuotes(m.ticker, why);
     };
 
-    // Both modes (paper since Oct 23, like live): no trading a series until its fee schedule is known.
-    if (!md.hasVerifiedFees(m.seriesTicker)) return block('series fee schedule not verified');
+    // Both modes (paper since Oct 23, like live): no new entry in a series until its fee schedule is known exactly
+    // (bot/kalshi/feeSchedule.ts). Exits still go out, priced with a cautious schedule.
+    const feeBlock = md.feeBlock(m.ticker);
     const lagHalt = this.feedLagHalt();
     if (lagHalt) return block(lagHalt);
     if (!book.isUsable(now, R.maxBookAgeMs)) return block('book not usable');
@@ -1890,8 +1893,9 @@ export class Engine {
     // choice on Oct 23; bot/strategy/accuracyGate.ts). Every evaluation feeds the gate's scorecard, live included.
     this.d.accuracyGate?.observe(m.ticker, tauSec, pYes, mid);
     const accuracyBlock = kindWindow && guards.length === 0 && cfg.mode === 'paper' ? this.d.accuracyGate?.block(m.ticker, tauSec) : undefined;
-    const entryWindowOpen = kindWindow && guards.length === 0 && !accuracyBlock;
+    const entryWindowOpen = kindWindow && guards.length === 0 && !accuracyBlock && !feeBlock;
     st.accuracyBlock = accuracyBlock;
+    st.feeBlock = feeBlock;
     const restingBid = quote('bid');
     const restingAsk = quote('ask');
     const through = (r: { price: number } | undefined, best: number) => r !== undefined && Math.abs(best - r.price) >= 2 * S.requoteThreshold - 1e-9;
@@ -1987,9 +1991,9 @@ export class Engine {
     st.q = decisionProbability(view, strat);
     const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode, entries: Boolean(reason) });
     // The MLP decides whether each entry is worth taking (take/skip head, once validated).
-    if (S.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: S.takeMargin });
+    if (S.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: S.takeMargin, fees: md.feesFor(m.ticker) });
     // Quote, cross or skip each maker entry by expected value (fill model, once validated).
-    const fillCtx = { q: st.q ?? pYes, book, tick: m.tickSize, tauSec, sigma: vol.sigmaPerSqrtSec, features, minEv: S.fillMinEv, takerMinEdge: strat.takerBuffer + strat.minEdge };
+    const fillCtx = { q: st.q ?? pYes, book, tick: m.tickSize, tauSec, sigma: vol.sigmaPerSqrtSec, features, minEv: S.fillMinEv, takerMinEdge: strat.takerBuffer + strat.minEdge, fees: md.feesFor(m.ticker) };
     applyFillModel(plan, this.d.fillModel, fillCtx);
     // Conviction sizing. The adversarial evaluator tries to break each entry; one that survives with TA /
     // confluence evidence earns up to ADVERSARIAL_MAX_BOOST x, scaled by how much edge survived and how many
@@ -2174,7 +2178,7 @@ export class Engine {
         place: plan.place.map((p) => ({ side: p.side, price: p.price, count: p.count, purpose: p.purpose, edge: p.edge, why: p.why })),
         cancel: plan.cancel,
         // Why no entry could open here (paper's accuracy gate), so studies need not recompute it.
-        ...(st.accuracyBlock ? { entryBlock: st.accuracyBlock } : {}),
+        ...(st.feeBlock ?? st.accuracyBlock ? { entryBlock: st.feeBlock ?? st.accuracyBlock } : {}),
       });
     }
 

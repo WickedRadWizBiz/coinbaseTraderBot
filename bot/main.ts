@@ -1,7 +1,7 @@
 // Entry point. Wires the components; all behaviour lives in the modules.
 
 import { ExchangeStatusMonitor } from './kalshi/exchangeStatus';
-import { setBalancePrecision } from './fees';
+import { MAKER_RATE, setBalancePrecision, TAKER_RATE } from './fees';
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
@@ -193,6 +193,8 @@ async function main(): Promise<void> {
   const ws = signer ? new KalshiWs(cfg.wsUrl, signer, indexIds) : undefined;
   if (!signer) log.warn('no Kalshi API key (KALSHI_KEY_ID + KALSHI_PRIVATE_KEY_PATH): order books are polled over anonymous REST, which Kalshi rate limits hard; add the key even for paper trading');
   const md = new MarketData(cfg, rest, ws, new Recorder(path.join(cfg.dataDir, 'recordings')));
+  // The rounding grid an earlier run learned from Kalshi's charged fees wins over KALSHI_BALANCE_PRECISION.
+  setBalancePrecision(md.feeBook.precision());
   // Recordings grow by a day file per day: older days are gzipped (about 10x smaller) so months of them
   // fit on disk, and a low-disk alert fires before writes would fail.
   const recDir = path.join(cfg.dataDir, 'recordings');
@@ -239,6 +241,42 @@ async function main(): Promise<void> {
   oms.on('fill', (f: ExchangeFill, _rec: unknown, fee: number, positionAfter: number) => kalshiCheck.onBotFill(f, fee, positionAfter));
   oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized: number; positionBefore: number }) => kalshiCheck.onBotSettle(e, oms.positions.get(e.ticker)));
   kalshiCheck.start();
+
+  // Fee check (bot/kalshi/feeSchedule.ts): every live fill's charged fee against the schedule; the same check learns
+  // the account's rounding grid from the fees Kalshi charges.
+  if (cfg.mode === 'live') {
+    oms.on('fill', (f: ExchangeFill) => {
+      if (f.fee === undefined) return;
+      const m = md.markets.get(f.ticker);
+      const series = m?.seriesTicker ?? f.ticker.split('-')[0];
+      const c = md.feeBook.checkFill({ ticker: f.ticker, series, event: m?.eventTicker, count: f.count, sidePrice: f.side === 'bid' ? f.price : 1 - f.price, isTaker: f.isTaker, charged: f.fee, ts: f.ts });
+      if (c.learned !== undefined) {
+        setBalancePrecision(c.learned);
+        alerter.notify('info', 'fee-precision', `Fee check: Kalshi charges this account's fees on a $${c.learned} grid (${c.learned === 0.0001 ? 'a direct member' : 'through an FCM'}); the bot now prices with it (KALSHI_BALANCE_PRECISION=${cfg.kalshiBalancePrecision})`);
+      }
+      if (c.result === 'mismatch') {
+        audit.write('fee_check', { ticker: f.ticker, tradeId: f.tradeId, result: c.result, predicted: c.predicted, charged: c.charged, note: c.note });
+        alerter.notify('warn', `fee-mismatch-${series}-${new Date(f.ts).toISOString().slice(0, 10)}`, `Fee check: ${c.note}`);
+      }
+    });
+  }
+  // Kalshi's published fee schedule: read 30 s after start, then every KALSHI_FEE_SCHEDULE_HOURS.
+  if (cfg.feeSchedule.check) {
+    md.on('fee_schedule', (e: { changed: boolean; error?: string }) => {
+      const fs0 = md.feeStatus();
+      const st = fs0.published;
+      if (e.error) { log.warn('fee schedule check failed (the last good read and the API schedule stay in use)', { error: e.error, url: cfg.feeSchedule.url }); return; }
+      audit.write('fee_schedule', st);
+      const day = new Date().toISOString().slice(0, 10);
+      if (e.changed) alerter.notify('info', 'fee-schedule', `Kalshi fee schedule read: effective ${st.effective ?? '?'}, taker ${st.takerRate} / maker ${st.makerRate}, ${st.nonStandardListed} series with their own multipliers; the bot's formula reproduces ${st.tableCheck?.matched ?? 0}/${st.tableCheck?.rows ?? 0} rows of the published fee table`);
+      if (st.takerRate !== TAKER_RATE || st.makerRate !== MAKER_RATE) alerter.notify('warn', `fee-schedule-rates-${day}`, `Kalshi's published fee rates are taker ${st.takerRate}, maker ${st.makerRate} (built in: ${TAKER_RATE}, ${MAKER_RATE}); the bot prices with the published ones`);
+      if (st.tableCheck && st.tableCheck.matched < st.tableCheck.rows) alerter.notify('warn', `fee-schedule-table-${day}`, `Fee check: the bot's formula does not reproduce Kalshi's published fee table (${st.tableCheck.firstMiss})`);
+      for (const s of fs0.series) if (s.source.startsWith('api and published')) alerter.notify('warn', `fee-disagree-${s.series}-${day}`, `Fee check: ${s.series}: the API says ${s.feeType} x${s.multiplier}, the published schedule lists maker ${s.published?.maker} / taker ${s.published?.taker}; pricing with the higher (taker x${s.taker}, maker x${s.maker})`);
+    });
+    const checkSchedule = () => void md.checkPublishedSchedule();
+    setTimeout(checkSchedule, 30_000).unref();
+    setInterval(checkSchedule, cfg.feeSchedule.hours * 3_600_000).unref();
+  }
   const recon = new Reconciler({
     gateway, oms, audit, alerter,
     getMarket: (t) => rest.getMarket(t),

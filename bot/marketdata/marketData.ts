@@ -15,7 +15,8 @@ import fs from 'fs';
 import path from 'path';
 import WebSocket from 'ws';
 import type { Config } from '../config';
-import { DEFAULT_FEES, type FeeSchedule } from '../fees';
+import type { FeeSchedule } from '../fees';
+import { FeeBook, readPublishedSchedulePdf } from '../kalshi/feeSchedule';
 import type { KalshiRest } from '../kalshi/rest';
 import type { KalshiWs } from '../kalshi/ws';
 import type { MarketInfo } from '../kalshi/types';
@@ -94,10 +95,10 @@ export class MarketData extends EventEmitter {
   /** Microstructure feature state, fed identically in production and replay. */
   readonly features = new FeatureHub();
   readonly markets = new Map<string, ActiveMarket>();
-  private readonly fees = new Map<string, FeeSchedule>();
-  private readonly feesFetchedAt = new Map<string, number>();
-  /** Scheduled fee changes per series (GET /series/fee_changes), applied the moment they take effect. */
-  private readonly feeChanges = new Map<string, Array<{ multiplier?: number; scheduledTs: number }>>();
+  /** Kalshi's fee schedule per series and event, checked against the published schedule and the live fills. */
+  readonly feeBook: FeeBook;
+  private eventFeesAt = 0;
+  private publishedBusy = false;
   private pollTimer: NodeJS.Timeout | null = null;
   private indexTimer: NodeJS.Timeout | null = null;
   private binanceTimer: NodeJS.Timeout | null = null;
@@ -129,6 +130,7 @@ export class MarketData extends EventEmitter {
     private readonly recorder: Recorder,
   ) {
     super();
+    this.feeBook = new FeeBook(cfg.kalshiBalancePrecision, cfg.dataDir ? path.join(cfg.dataDir, 'fee_schedule.json') : undefined);
     const histDir = cfg.taNet?.enabled ? cfg.taNet.historyDir : undefined;
     this.indexBars = new IndexBars(histDir);
     this.indexStore = new IndexStore(histDir);
@@ -245,18 +247,49 @@ export class MarketData extends EventEmitter {
     return b;
   }
 
+  /** The fee schedule a market's orders are priced with (bot/kalshi/feeSchedule.ts). */
   feesFor(ticker: string): FeeSchedule {
     const m = this.markets.get(ticker);
-    const series = m?.seriesTicker ?? ticker.split('-')[0];
-    const base = this.fees.get(series) ?? DEFAULT_FEES;
-    // A scheduled change that has taken effect since the series fees were fetched overrides the taker multiplier.
-    const fetched = this.feesFetchedAt.get(series) ?? 0, now = Date.now();
-    const ch = this.feeChanges.get(series)?.filter((c) => c.scheduledTs > fetched && c.scheduledTs <= now && c.multiplier !== undefined).pop();
-    return ch ? { ...base, takerMultiplier: ch.multiplier! } : base;
+    return this.feeBook.feesFor(m?.seriesTicker ?? ticker.split('-')[0], m?.eventTicker ?? eventOf(ticker), Date.now());
   }
 
   hasVerifiedFees(series: string): boolean {
-    return this.fees.has(series);
+    return this.feeBook.verified(series).ok;
+  }
+
+  /** Why new entries in a market wait for its fee schedule, if they do (exits never wait). */
+  feeBlock(ticker: string): string | undefined {
+    const m = this.markets.get(ticker);
+    const v = this.feeBook.verified(m?.seriesTicker ?? ticker.split('-')[0], m?.eventTicker ?? eventOf(ticker));
+    return v.ok ? undefined : v.why;
+  }
+
+  /** The fee schedule check for the dashboard and diagnostics. */
+  feeStatus() {
+    return this.feeBook.status([...this.series.keys()]);
+  }
+
+  /** Read Kalshi's published fee schedule (KALSHI_FEE_SCHEDULE_URL); 'fee_schedule' is emitted with the result. A
+   *  failed read keeps the last good one. */
+  async checkPublishedSchedule(fetchImpl: typeof fetch = fetch): Promise<void> {
+    if (this.publishedBusy) return;
+    this.publishedBusy = true;
+    const now = Date.now();
+    try {
+      const res = await fetchImpl(this.cfg.feeSchedule.url, { headers: { Accept: 'application/pdf', 'User-Agent': 'Mozilla/5.0 (compatible; fee schedule check)' }, signal: AbortSignal.timeout(30_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > 20e6) throw new Error(`${(buf.length / 1e6).toFixed(1)} MB is too large for the fee schedule`);
+      const p = readPublishedSchedulePdf(buf, now);
+      if (!('error' in p)) { p.etag = res.headers.get('etag') ?? undefined; p.lastModified = res.headers.get('last-modified') ?? undefined; }
+      const { changed } = this.feeBook.setPublished(p, now);
+      this.emit('fee_schedule', { changed, error: 'error' in p ? p.error : undefined });
+    } catch (e) {
+      this.feeBook.setPublished({ error: String((e as Error).message ?? e) }, now);
+      this.emit('fee_schedule', { changed: false, error: String((e as Error).message ?? e) });
+    } finally {
+      this.publishedBusy = false;
+    }
   }
 
   /** How far behind real time Kalshi's data is reaching the bot (ms), undefined without a recent sample. */
@@ -334,17 +367,20 @@ export class MarketData extends EventEmitter {
 
   private async refreshCatalogOnce(now: number): Promise<void> {
     await this.refreshSeries(now);
+    // Per-event fee overrides, hourly (one call for every event; kept for the series traded here).
+    if (now - this.eventFeesAt > 3_600_000) {
+      this.eventFeesAt = now;
+      try { this.feeBook.setEventChanges(await this.rest.getEventFeeChanges(), (s) => this.series.has(s), now); } catch (e) { log.warn('event fee changes unavailable', { error: String(e) }); }
+    }
     const entries: Array<[string, string, boolean]> = [...[...this.series].map(([s, a]) => [s, a, false] as [string, string, boolean]), ...this.recordSeriesList().map(([s, a]) => [s, a, true] as [string, string, boolean])];
     let recordCount = [...this.markets.values()].filter((m) => m.recordOnly && m.closeTime > now).length;
     let failed = 0, lastError: string | undefined;
     const perSeries: NonNullable<MarketData['catalogHealth']['perSeries']> = {};
     for (const [series, asset, recordOnly] of entries) {
       try {
-        if (!recordOnly && now - (this.feesFetchedAt.get(series) ?? 0) > 3_600_000) {
-          const f = await this.rest.getSeriesFees(series);
-          if (f) this.fees.set(series, { takerMultiplier: f.takerMultiplier, makerMultiplier: f.makerMultiplier });
-          this.feesFetchedAt.set(series, now);
-          try { this.feeChanges.set(series, (await this.rest.getSeriesFeeChanges(series)).sort((a, b) => a.scheduledTs - b.scheduledTs)); } catch { /* optional: keep the last list */ }
+        if (!recordOnly && now - this.feeBook.seriesFetchedAt(series) > 3_600_000) {
+          this.feeBook.setSeries(series, await this.rest.getSeriesFees(series), now);
+          try { this.feeBook.setSeriesChanges(series, await this.rest.getSeriesFeeChanges(series)); } catch { /* optional: keep the last list */ }
         }
         const fetched = fillTickerStrikes(await this.rest.getOpenMarkets(series));
         // Which strikes to track: the ones at the money by Kalshi's own prices (nearest 50c on a ladder, the
@@ -576,4 +612,10 @@ export function nearestStrikes<M extends { ticker: string; eventTicker?: string;
     for (const m of ms) if (keep.has(m) || tracked.has(m.ticker)) out.push(m);
   }
   return out;
+}
+
+/** A market ticker's event ticker (SERIES-EVENT-MARKET), when the market info did not carry one. */
+function eventOf(ticker: string): string | undefined {
+  const parts = ticker.split('-');
+  return parts.length >= 3 ? parts.slice(0, -1).join('-') : undefined;
 }

@@ -9,20 +9,23 @@
 // With whole-cent prices and whole contracts this is the familiar "round the fee up to the next cent";
 // sub-cent prices and fractional contracts are where the rounding term matters. No settlement fee.
 // Multiplier defaults: taker M=1; maker M=0 unless the series is listed in the non-standard table.
-// Always prefer the multipliers the series API reports (and its scheduled fee changes) and the
-// `average_fee_paid` the exchange returns on each order/fill.
+// The bot's schedules come from bot/kalshi/feeSchedule.ts: the series API's fee type and multiplier (with scheduled
+// changes and event overrides), the published schedule's rates, and the rounding grid the account's fills show.
 
 export interface FeeSchedule {
   takerMultiplier: number;
   makerMultiplier: number;
   /** The member's balance precision in dollars (0.01 non-direct, 0.0001 direct). */
   balancePrecision?: number;
+  /** The published schedule's rates, when read (default 0.07 and 0.0175). */
+  takerRate?: number;
+  makerRate?: number;
 }
 
 export const DEFAULT_FEES: FeeSchedule = { takerMultiplier: 1, makerMultiplier: 0 };
 
-const TAKER_RATE = 0.07;
-const MAKER_RATE = 0.0175;
+export const TAKER_RATE = 0.07;
+export const MAKER_RATE = 0.0175;
 let defaultPrecision = 0.01;
 /** Set the balance precision used when a schedule doesn't carry one (config: KALSHI_BALANCE_PRECISION). */
 export function setBalancePrecision(p: number): void { if (p === 0.01 || p === 0.0001) defaultPrecision = p; }
@@ -42,11 +45,11 @@ function feeDollars(rate: number, multiplier: number, count: number, price: numb
 }
 
 export function takerFee(count: number, price: number, fees: FeeSchedule = DEFAULT_FEES): number {
-  return feeDollars(TAKER_RATE, fees.takerMultiplier, count, price, fees.balancePrecision ?? defaultPrecision);
+  return feeDollars(fees.takerRate ?? TAKER_RATE, fees.takerMultiplier, count, price, fees.balancePrecision ?? defaultPrecision);
 }
 
 export function makerFee(count: number, price: number, fees: FeeSchedule = DEFAULT_FEES): number {
-  return feeDollars(MAKER_RATE, fees.makerMultiplier, count, price, fees.balancePrecision ?? defaultPrecision);
+  return feeDollars(fees.makerRate ?? MAKER_RATE, fees.makerMultiplier, count, price, fees.balancePrecision ?? defaultPrecision);
 }
 
 export function orderFee(count: number, price: number, isTaker: boolean, fees: FeeSchedule = DEFAULT_FEES): number {

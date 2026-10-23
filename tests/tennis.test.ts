@@ -160,7 +160,7 @@ test('engine trades tennis inside its own 25% budget and keeps it out of the cry
   const m = (ticker: string, title: string): MarketInfo => ({ ticker, seriesTicker: 'KXATPMATCH', eventTicker: 'KXATPMATCH-E1', status: 'open', openTime: now - 3_600_000, closeTime: now + 6 * 3_600_000, tickSize: 0.01, title, startTime: now + 5 * 60_000 });
   const markets = [m('KXATPMATCH-E1-FAV', 'Will Fav win?'), m('KXATPMATCH-E1-DOG', 'Will Dog win?')];
   const rest = {
-    getSeriesFees: async () => ({ takerMultiplier: 1, makerMultiplier: 1 }),
+    getSeriesFees: async () => ({ feeType: 'quadratic_with_maker_fees', multiplier: 1 }),
     getOpenMarkets: async (s: string) => (s === 'KXATPMATCH' ? markets : []),
     getMarket: async () => undefined,
   } as unknown as KalshiRest;
@@ -306,7 +306,7 @@ test('live tennis scores: a match that has not started spends no calls of the da
     const now = Date.now();
     const m = (ticker: string, title: string): MarketInfo => ({ ticker, seriesTicker: 'KXATPMATCH', eventTicker: 'KXATPMATCH-E1', status: 'open', openTime: now - 3_600_000, closeTime: now + 6 * 3_600_000, tickSize: 0.01, title, startTime: now + startInMin * 60_000 });
     const markets = [m('KXATPMATCH-E1-FAV', 'Will Fav win?'), m('KXATPMATCH-E1-DOG', 'Will Dog win?')];
-    const rest = { getSeriesFees: async () => ({ takerMultiplier: 1, makerMultiplier: 1 }), getOpenMarkets: async (s: string) => (s === 'KXATPMATCH' ? markets : []), getMarket: async () => undefined } as unknown as KalshiRest;
+    const rest = { getSeriesFees: async () => ({ feeType: 'quadratic_with_maker_fees', multiplier: 1 }), getOpenMarkets: async (s: string) => (s === 'KXATPMATCH' ? markets : []), getMarket: async () => undefined } as unknown as KalshiRest;
     const audit = tmpAudit();
     const md = new MarketData(cfg, rest, undefined, new Recorder(path.join(dir, 'rec')));
     await md.refreshCatalog(now);
