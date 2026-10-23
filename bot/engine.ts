@@ -2137,7 +2137,7 @@ export class Engine {
       // projection by a share of the taker fee, the coin's price has turned against the side held, and the sale clears
       // the take-profit floor: sell at the bid now (the resting sell is pulled below, with any other own order in the
       // way). Not while hunting (the ratchet runs that winner), nor when another exit already crosses the book this tick.
-      if (curve.p.mode === 'rest' && !huntMode && view.exitWindowOpen !== false && !plan.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel')) {
+      if (curve.crossing && !huntMode && view.exitWindowOpen !== false && !plan.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel')) {
         const top = sign > 0 ? bid : ask;
         const n = floorCount(Math.min(held, top.size));
         if (n > 0) {

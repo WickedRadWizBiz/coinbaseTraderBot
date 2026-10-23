@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import path from 'path';
 import { test } from 'node:test';
+import { loadConfig } from '../bot/config';
 import {
   CURVE_PROFILES, dynamicKnobs, fromLogit, logit, microPrice, SinuousExitGate, SinuousExitTracker, tennisHighLeverage,
   type CurveEvent, type CurveObservation,
@@ -304,6 +305,25 @@ test('rest mode, the cross: a roll-over by half the fee with spot turned and the
   assert.equal(s.scored, 1);
   assert.equal(s.crossesPending, 0);
   assert.ok(Math.abs(s.netUsd - (0.63 - 0.0165) * 10) < 0.01, String(s.netUsd));
+});
+
+test('cross mode (paper\'s default): the curve sells on a confirmed cross but never rests a sell at the swing top and never holds an exit', () => {
+  const g = new SinuousExitGate({ mode: 'cross', minNetProfit: 0.015, restBandSigmas: 0 }, BENCH, undefined, undefined, 0);
+  const now = rollOver(g, 'T', 0);
+  // No resting sell, however the curve moves.
+  assert.equal(g.restTarget('T'), undefined);
+  assert.equal(g.restTarget('T', 400), undefined);
+  // The cross fires as in rest mode.
+  const c = g.cross('T', CROSS, now);
+  assert.equal(c.sell, true);
+  assert.match(c.why!, /^exit curve: cross 0\.63 /);
+  assert.deepEqual([g.status().mode, g.status().cross, g.status().crossesPending], ['cross', true, 1]);
+  // Every other exit (a profit exit, a stop) goes out at once: nothing is held.
+  assert.equal(g.check('T', { sidePrice: 0.66, count: 10, exitFeePer: 0.0157, entrySidePrice: 0.4, entryFeePer: 0.01, protective: false }, now).allow, true);
+  assert.equal(g.check('T', { sidePrice: 0.3, count: 10, exitFeePer: 0.0147, entrySidePrice: 0.4, entryFeePer: 0.01, protective: true }, now).allow, true);
+  assert.deepEqual(g.status().holding, []);
+  // The paper default.
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40) }).sinuousExit.paperMode, 'cross');
 });
 
 test('rest mode: the cross is benched when selling on it loses against holding; the resting sells go on', () => {

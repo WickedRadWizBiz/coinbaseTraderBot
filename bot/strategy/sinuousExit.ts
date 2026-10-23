@@ -63,6 +63,12 @@
 // a resting sell is lifted exactly when the contract is suddenly worth more). Scoreboard in rest mode: each cross exit
 // against holding to settlement, (net exit price - payout) x contracts; benched under the same rules (the resting
 // sells keep going, the cross stops until a reset).
+//
+// Cross mode (paper's default since the evening of Oct 23, SINUOUS_EXIT_PAPER=cross; the owner: "The resting at peak
+// should go"): the cross without the resting sell. The curve watches every held position and sells it at the bid on a
+// confirmed roll-over (above); nothing rests at the swing top and nothing is held, so the ratchet stop, the take-profit
+// and the model exit run exactly as without the curve. On Oct 23 the resting sells made +5.2c a contract but -$113 against
+// holding: the swing-top estimate sat a few cents above the market and filled on ordinary upticks, selling winners.
 
 import type { BookLevel } from '../kalshi/types';
 import type { ProbationParams } from '../risk/probation';
@@ -258,7 +264,7 @@ export class SinuousExitTracker {
 // ---- The gate and its scoreboard ------------------------------------------------------------------
 
 export interface SinuousExitParams {
-  mode: 'gate' | 'monitor' | 'rest' | 'off';
+  mode: 'gate' | 'monitor' | 'rest' | 'cross' | 'off';
   /** Net profit a contract (dollars) an exit must clear to count as a profit exit. */
   minNetProfit: number;
   /** Paper bench rule in place of the probation's (the owner turned the curve back on on Oct 23 to see whether it
@@ -267,7 +273,7 @@ export interface SinuousExitParams {
   paperBenchT?: number;
   paperBenchMinExits?: number;
   /** The mode in paper (SINUOUS_EXIT_PAPER; live keeps `mode`). */
-  paperMode?: 'gate' | 'monitor' | 'rest' | 'off';
+  paperMode?: 'gate' | 'monitor' | 'rest' | 'cross' | 'off';
   /** Rest mode: how far above the swing-top estimate the sell rests, in the book's noise standard deviations. */
   restBandSigmas?: number;
   /** Rest mode: sell at once on a confirmed roll-over (the cross; default on). */
@@ -401,10 +407,13 @@ export class SinuousExitGate {
 
   private get standDownSec(): number { return this.p.restStandDownSec ?? DEFAULT_REST_STAND_DOWN_SEC; }
 
-  /** Rest mode: sell the position at the bid now? On a confirmed roll-over (see the header) that clears the take-profit
-   *  floor; the sale is remembered and scored against holding to settlement when the market settles. */
+  /** Rest and cross modes sell on the cross and never hold an exit. */
+  get crossing(): boolean { return this.p.mode === 'rest' || this.p.mode === 'cross'; }
+
+  /** Rest and cross modes: sell the position at the bid now? On a confirmed roll-over (see the header) that clears the
+   *  take-profit floor; the sale is remembered and scored against holding to settlement when the market settles. */
   cross(ticker: string, e: CrossCheck, now: number): { sell: boolean; why?: string; note?: string } {
-    if (this.p.mode !== 'rest' || this.p.cross === false || e.tauSec <= this.standDownSec) return { sell: false };
+    if (!this.crossing || this.p.cross === false || e.tauSec <= this.standDownSec) return { sell: false };
     const k = this.trackers.get(ticker);
     const r = k?.reading;
     if (!k || !r || r.curve === undefined || r.projected === undefined || r.velocity === undefined) return { sell: false };
@@ -428,8 +437,8 @@ export class SinuousExitGate {
 
   /** May this exit go out now? A profit exit waits for the curve's signal (gate mode); every other exit goes. */
   check(ticker: string, e: ExitCheck, now: number): { allow: boolean; note?: string } {
-    // Rest mode places the exit instead of holding it: every exit goes.
-    if (this.p.mode === 'rest') return { allow: true };
+    // Rest and cross modes place exits instead of holding them: every exit goes.
+    if (this.crossing) return { allow: true };
     const exitNet = e.sidePrice - e.exitFeePer;
     const net = netProfitPerContract(e.sidePrice, e.entrySidePrice, e.entryFeePer, e.exitFeePer);
     const profitExit = !e.protective && net >= this.p.minNetProfit - 1e-9;
@@ -495,7 +504,7 @@ export class SinuousExitGate {
       scored: this.st.results.length, netUsd: +s.sum.toFixed(2), t: s.t === null ? null : +s.t.toFixed(2), since: this.st.since,
       benchRule: { t: this.bench.t, minExits: this.bench.minTrades, maxLossUsd: this.bench.maxLossUsd },
       holding: [...this.held.keys()], tracking: this.trackers.size,
-      cross: this.p.mode === 'rest' && this.p.cross !== false, crossesPending: this.st.crosses?.length ?? 0,
+      cross: this.crossing && this.p.cross !== false, crossesPending: this.st.crosses?.length ?? 0,
     };
   }
 
@@ -521,8 +530,8 @@ export class SinuousExitGate {
 
   private verdict(): string | undefined {
     const r = this.st.results, s = stats(r);
-    const what = this.p.mode === 'rest' ? 'selling on the cross' : 'holding profit exits';
-    const vs = this.p.mode === 'rest' ? ' against holding to settlement' : '';
+    const what = this.crossing ? 'selling on the cross' : 'holding profit exits';
+    const vs = this.crossing ? ' against holding to settlement' : '';
     if (s.sum <= -this.bench.maxLossUsd) return `${what} cost $${(-s.sum).toFixed(2)}${vs} over ${r.length} exits (limit $${this.bench.maxLossUsd})`;
     if (r.length >= this.bench.minTrades && s.sum < 0 && s.t !== null && s.t <= -this.bench.t) return `${what} is losing beyond luck${vs}: $${s.sum.toFixed(2)} over ${r.length} exits, t ${s.t.toFixed(2)}`;
     return undefined;
