@@ -534,8 +534,27 @@ test('vault and pocket are excluded from the tradable bankroll; wins feed the va
   assert.equal(engine.bankroll(), 195);
 });
 
+test('vault: a settled loss is won back before a later win is vaulted; the total starts at the account\'s net P&L', async () => {
+  const vault = new Vault({ enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session', dailyGoalUsd: 100 });
+  const { engine, recon, oms } = await setup({ vault, monitor: new BalanceMonitor(), env: { VAULT_IN_PAPER: 'true' } });
+  const r = await recon.run('startup');
+  engine.onBalance(r!.balance!);
+  assert.equal(vault.status().realized?.total, 0, 'started at the first balance read (no break-even to be under)');
+  // A $4 loss, then a $10 win: $6 of it is new profit, $3 vaulted.
+  oms.onFill({ tradeId: 'l', orderId: '', ticker: 'L', side: 'bid', count: 8, price: 0.5, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: Date.now() - 1, asset: 'BTC' });
+  oms.settle('L', 'no');
+  assert.equal(vault.status().realized?.total, -4);
+  oms.onFill({ tradeId: 'w', orderId: '', ticker: 'W', side: 'bid', count: 20, price: 0.5, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: Date.now() - 1, asset: 'BTC' });
+  oms.settle('W', 'yes');
+  assert.equal(vault.vaultTotal, 3);
+  // A refilled paper pool (the training supervisor's noteCash) starts the total over.
+  engine.noteCashFlow(50);
+  assert.deepEqual([vault.status().realized?.total, vault.status().realized?.high], [0, 0]);
+});
+
 test('paper: the vault keeps its books, but the paper bankroll is the whole balance (VAULT_IN_PAPER off, the default)', async () => {
-  // The vault keeps half of every win and none of the losses: by Oct 23 it held $343 of the $360 paper pool.
+  // The vault keeps half of every new realized high (before Oct 23's rule, half of every win and none of the losses:
+  // by Oct 23 it held $343 of the $360 paper pool).
   const vault = new Vault({ enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session', dailyGoalUsd: 100 });
   const { engine, recon, oms } = await setup({ vault, monitor: new BalanceMonitor() });
   const r = await recon.run('startup');
