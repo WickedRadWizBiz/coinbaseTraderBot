@@ -6,8 +6,10 @@
 //  - Resting orders join the BACK of their price level (queue ahead = visible
 //    size at that price when placed).
 //  - Resting orders fill only when public trades print: a trade at a price
-//    through ours fills us fully; a trade at our price first consumes the
-//    queue ahead. Book changes alone never fill us.
+//    through ours fills us up to the trade's size (a 1-contract print cannot
+//    fill a 20-contract order: until Oct 23 it filled the whole order, which
+//    overstated paper volume once orders grew to $10); a trade at our price
+//    first consumes the queue ahead. Book changes alone never fill us.
 //  - Only trades the exchange printed after the order was placed can fill it
 //    (by the trade's own time stamp). Market data can reach the bot late: on
 //    Oct 5-6 Kalshi trades arrived minutes behind, and quotes priced on live
@@ -264,7 +266,9 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
       const through = o.side === 'bid' ? price < o.price - 1e-9 : price > o.price + 1e-9;
       changed = true;
       if (through) {
-        this.fill(o, o.remainingCount, o.price, false);
+        const n = Math.min(o.remainingCount, remaining);
+        remaining -= n;
+        this.fill(o, n, o.price, false);
         continue;
       }
       const eatQueue = Math.min(o.queueAhead, remaining);
