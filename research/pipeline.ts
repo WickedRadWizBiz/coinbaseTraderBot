@@ -348,6 +348,16 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const want = (s: Step) => !o.skip?.includes(s) && (s === 'conditioning' ? !!o.only?.includes(s) : !o.only?.length || o.only.includes(s));
   const rec = A.recordingsDir;
   const days = recordingDays(rec);
+  // The models built from the bot's own recordings (vol forecast, dataset, the MLP candidate's backtest) replay every
+  // recorded day they read, 8 to 11 minutes a day each on the remote runner. AUTO_TRAIN_DECISION_DAYS keeps them on the
+  // newest days, so a run stops growing with the recordings (Oct 23: three days already overran the quick phase).
+  const decisionRec = (() => {
+    if (!(A.decisionDays > 0) || days.length <= A.decisionDays) return rec;
+    const dir = path.join(work, 'decision-days');
+    fs.rmSync(dir, { recursive: true, force: true });
+    linkDays(recordingFiles(rec).slice(-A.decisionDays), dir);
+    return dir;
+  })();
   const promoted = (name: keyof typeof MODEL_FILES) => path.join(A.dir, MODEL_FILES[name]);
   const report = path.join(A.dir, 'reports', `pipeline-${new Date(now).toISOString().replace(/[:.]/g, '-')}.json`);
   // Progress is saved after every step (state and a partial report), so a run cut short (a deploy restarts
@@ -384,11 +394,12 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         return undefined;
       }
     }
-    log(`${step}: running...`);
+    const hm = () => new Date().toISOString().slice(11, 16);
+    log(`${step}: running... (${hm()} UTC)`);
     try {
       const detail = await fn();
       steps.push({ step, ok: true, ms: Date.now() - t0, detail });
-      log(`${step}: done in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
+      log(`${step}: done in ${((Date.now() - t0) / 1000).toFixed(0)} s (${hm()} UTC)`);
       checkpoint(false);
       return detail;
     } catch (e) {
@@ -1043,11 +1054,11 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   if (want('vol_model')) {
     await run('vol_model', ifChanged('vol_model', async () => {
       // Counted from the file names first: reading two days of recordings only to find too few took 13-40 minutes.
-      const recDays = recordingDays(rec).length;
+      const recDays = recordingDays(decisionRec).length;
       if (recDays < VOL_MODEL_MIN_DAYS) throw new SkipStep(`not enough index history yet (needs ${VOL_MODEL_MIN_DAYS} days of recordings, have ${recDays})`);
       const cand = path.join(work, 'vol_model.candidate.json');
       let p;
-      try { p = await trainVolModelMain(argsOf({ recordings: rec, out: cand })); } catch (e) {
+      try { p = await trainVolModelMain(argsOf({ recordings: decisionRec, out: cand })); } catch (e) {
         if (/need at least/.test((e as Error).message)) throw new SkipStep(`not enough index history yet (${(e as Error).message})`);
         throw e;
       }
@@ -1063,7 +1074,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   // and the fill model (each is applied only if validated).
   const volModelArg = cfg.strategy.volModel && fs.existsSync(promoted('vol_model')) ? promoted('vol_model') : undefined;
   const fillModelArg = fs.existsSync(promoted('fill')) ? promoted('fill') : undefined;
-  if (want('dataset') || want('mlp')) await run('dataset', ifChanged('dataset', () => buildDatasetMain(argsOf({ recordings: rec, out: dataset, every: 60, 'vol-model': volModelArg }))), tooFew);
+  if (want('dataset') || want('mlp')) await run('dataset', ifChanged('dataset', () => buildDatasetMain(argsOf({ recordings: decisionRec, out: dataset, every: 60, 'vol-model': volModelArg }))), tooFew);
   if (want('mlp')) {
     const cand = path.join(work, 'model.candidate.json');
     await run('mlp', ifChanged('mlp', async () => {
@@ -1072,7 +1083,14 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         if (/need at least \d+ windows/.test((e as Error).message)) throw new SkipStep(`not enough settlement windows yet: ${(e as Error).message}`);
         throw e;
       }
-      await backtestMain(argsOf({ recordings: rec, model: cand, exits: cfg.strategy.exitPolicy, 'vol-model': volModelArg, 'fill-model': fillModelArg }), true);
+      // One replay with the exit settings production trades with. The backtest's own grid for confluence_ratchet
+      // (3 hunt margins x 2 wall fill ratios) replayed the recordings six times for the same annotation: most of the
+      // step, which ran out of the quick phase's time on Oct 22 and Oct 23.
+      await backtestMain(argsOf({
+        recordings: decisionRec, model: cand, exits: cfg.strategy.exitPolicy, 'vol-model': volModelArg, 'fill-model': fillModelArg,
+        'hunt-grid': cfg.strategy.huntTargetMargin, 'hunt-confluence': cfg.strategy.huntMinConfluence,
+        'ratchet-fill-grid': cfg.strategy.ratchetMinFillRatio, 'ratchet-age': cfg.strategy.ratchetMinWallAgeSec, 'ratchet-slip': cfg.strategy.ratchetSlippageTicks,
+      }), true);
       const m = MetaModel.load(cand);
       const passed = Boolean(m.params.validation?.passed);
       const usesSnn = m.params.features.some((f) => f.startsWith('snn_'));

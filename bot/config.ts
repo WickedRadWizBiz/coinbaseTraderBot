@@ -458,6 +458,9 @@ export interface AutoTrainConfig {
   sweepKalshiDays: number;
   /** Minimum days of recordings before anything is trained. */
   minDays: number;
+  /** The vol forecast, the dataset and the MLP candidate's backtest read only the newest this many recorded days
+   *  (0 = all). Each of them replays every recorded day it reads; the remote runner sets 4 to stay inside its time. */
+  decisionDays: number;
   /** Poll interval for model-file changes (hot reload). */
   watchSec: number;
   /** SNN population tournaments (crypto, perps): recorded days replayed, initial training block,
@@ -1226,6 +1229,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       sweepEveryDays: num(env, 'SWEEP_EVERY_DAYS', 7, 1, 365),
       sweepKalshiDays: num(env, 'SWEEP_KALSHI_DAYS', 60, 20, 2000),
       minDays: num(env, 'AUTO_TRAIN_MIN_DAYS', 1, 0, 365),
+      decisionDays: num(env, 'AUTO_TRAIN_DECISION_DAYS', 0, 0, 365),
       watchSec: num(env, 'AUTO_TRAIN_WATCH_SEC', 30, 5, 3600),
       snnPbtDays: num(env, 'AUTO_TRAIN_SNN_PBT_DAYS', 7, 2, 365),
       snnPbtInitDays: num(env, 'AUTO_TRAIN_SNN_PBT_INIT_DAYS', 3, 1, 60),

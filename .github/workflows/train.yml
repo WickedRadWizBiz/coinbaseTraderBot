@@ -131,6 +131,10 @@ jobs:
           # over 2 h on one thread on Oct 22. That step caps its threads by free memory itself (research/trainTaNet.ts
           # computeRowsInWorkers); the other steps keep TRAIN_WORKERS.
           export TA_ROW_WORKERS="${TA_ROW_WORKERS:-$(nproc)}"
+          # The vol forecast, the dataset and the MLP candidate's backtest read the newest 4 recorded days: each replays
+          # every day it reads (8 to 11 minutes a day here), and the quick phase must fit its 150 minutes as the
+          # recordings grow. A value in bot.env wins.
+          export AUTO_TRAIN_DECISION_DAYS="${AUTO_TRAIN_DECISION_DAYS:-4}"
           mkdir -p "$DATA/models/logs"
           LOG="$DATA/models/logs/pipeline-remote-$(date -u +%Y-%m-%dT%H-%M-%SZ).log"
           T0=$(date +%s)
