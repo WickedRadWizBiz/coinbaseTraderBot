@@ -1920,8 +1920,10 @@ export class Engine {
       maxOrderRiskUsd: fixedUsd > 0 ? fixedUsd : Math.min(tier.orderFrac * bankroll * sizeMult * kellyScale, fCapUsd),
       maxContracts: floorCount(R.maxContractsPerOrder * (fixedUsd > 0 ? 1 : sizeMult)), minSidePrice: R.minSidePrice,
       ...(fixedUsd > 0 ? { fixedOrderUsd: fixedUsd } : {}),
-      // Exit curve, rest mode: the held position's sell rests at the curve's swing-top estimate (the strategy places it).
-      ...(() => { const r = st.position !== 0 ? this.d.curveExit?.restTarget(m.ticker) : undefined; return r !== undefined ? { curveRestSidePrice: r } : {}; })(),
+      // Exit curve, rest mode: the held position's sell rests at the curve's swing-top estimate (the strategy places it);
+      // not in the stand-down before the close, and pulled during a fast index move (a resting sell is lifted exactly
+      // when the contract is suddenly worth more).
+      ...(() => { const r = st.position !== 0 && !fastMove ? this.d.curveExit?.restTarget(m.ticker, tauSec) : undefined; return r !== undefined ? { curveRestSidePrice: r } : {}; })(),
       newRiskRoomUsd: reason ? this.newRiskRoom(m, bankroll, tier) : undefined,
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
       restingBid, restingAsk, nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
@@ -2124,6 +2126,29 @@ export class Engine {
         if (g.note) plan.notes.push(g.note);
         return g.allow;
       });
+      // Rest mode, the cross (the owner's option #1 after the Oct 23 exit research): the curve rolled over below its
+      // projection by a share of the taker fee, the coin's price has turned against the side held, and the sale clears
+      // the take-profit floor: sell at the bid now (the resting sell is pulled below, with any other own order in the
+      // way). Not while hunting (the ratchet runs that winner), nor when another exit already crosses the book this tick.
+      if (curve.p.mode === 'rest' && !huntMode && view.exitWindowOpen !== false && !plan.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel')) {
+        const top = sign > 0 ? bid : ask;
+        const n = floorCount(Math.min(held, top.size));
+        if (n > 0) {
+          const win = S.fastMoveWindowSec;
+          const ret = idx!.trailingLogReturn(now, win * 1000);
+          const turn = ret === undefined || direction === 0 || Math.abs(ret) < 0.25 * vol.sigmaPerSqrtSec * Math.sqrt(win) ? 'flat' : Math.sign(ret) * direction * sign < 0 ? 'against' : 'with';
+          const exitFeePer = orderFee(n, sideBid, true, fees) / n;
+          const floor = Math.max(S.profitTarget ?? 0, (S.profitTargetPct ?? 0) * (entrySide + entryFeePer));
+          const c = curve.cross(m.ticker, { sidePrice: sideBid, count: n, exitFeePer, entrySidePrice: entrySide, entryFeePer, floor, tauSec, spot: turn }, now);
+          if (c.note) plan.notes.push(c.note);
+          if (c.sell) {
+            const q = st.q ?? pYes;
+            plan.place = plan.place.filter((p) => !(p.purpose === 'exit' && p.timeInForce === 'good_till_canceled'));
+            plan.place.push({ side: sign > 0 ? 'ask' : 'bid', price: top.price, count: n, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit',
+              edge: sign > 0 ? top.price - q - exitFeePer : q - top.price - exitFeePer, why: c.why! });
+          }
+        }
+      }
     } else curve?.flat(m.ticker, now);
     if (huntMode) plan.notes.push(`hunting: stop ${st.huntStop ?? 'forming'}`);
     if (huntNote) plan.notes.push(huntNote);

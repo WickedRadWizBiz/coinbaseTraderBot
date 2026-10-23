@@ -228,7 +228,8 @@ export interface Config {
    *  results are unacceptable is benched (bot/risk/probation.ts). enforce: every validation gate blocks as before. */
   probation: ProbationParams;
   /** SINUOUS_EXIT=gate (default): a profit-taking exit on a binary contract also needs the exit-in-profit curve's
-   *  signal (bot/strategy/sinuousExit.ts); monitor shows the curve without holding exits; off. */
+   *  signal (bot/strategy/sinuousExit.ts); monitor shows the curve without holding exits; rest (paper's default) rests
+   *  the sell at the swing top and sells on a confirmed cross (SINUOUS_CROSS); off. */
   sinuousExit: SinuousExitParams;
   /** SINUOUS_ENTRY=monitor (default): score maker entry fills by whether the order-book curve was moving against the side
    *  bought (bot/strategy/sinuousEntry.ts), blocking nothing; gate: no quote that adds to a position while it is; off. */
@@ -1061,6 +1062,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       mode: oneOf(env, 'SINUOUS_EXIT', DEFAULT_SINUOUS_EXIT.mode, ['gate', 'monitor', 'rest', 'off'] as const),
       paperMode: oneOf(env, 'SINUOUS_EXIT_PAPER', 'rest', ['gate', 'monitor', 'rest', 'off'] as const),
       restBandSigmas: num(env, 'SINUOUS_REST_BAND_SIGMAS', 0.5, 0, 3),
+      cross: bool(env, 'SINUOUS_CROSS', true),
+      crossFeeMargin: num(env, 'SINUOUS_CROSS_FEE_MARGIN', 0.5, 0, 5),
+      restStandDownSec: num(env, 'SINUOUS_REST_STAND_DOWN_SEC', 120, 0, 900),
       minNetProfit: num(env, 'SINUOUS_MIN_PROFIT_CENTS', DEFAULT_SINUOUS_EXIT.minNetProfit * 100, 0, 50) / 100,
       paperBenchT: num(env, 'SINUOUS_PAPER_BENCH_T', 2, 0.5, 10),
       paperBenchMinExits: num(env, 'SINUOUS_PAPER_BENCH_MIN_EXITS', 30, 5, 10_000),

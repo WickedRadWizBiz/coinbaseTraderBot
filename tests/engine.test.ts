@@ -19,7 +19,7 @@ import { Vault } from '../bot/vault/vault';
 import { BalanceMonitor } from '../bot/vault/balanceMonitor';
 import { SinuousEntryGate, type EntryVerdict } from '../bot/strategy/sinuousEntry';
 import { AccuracyGate } from '../bot/strategy/accuracyGate';
-import { SinuousExitGate } from '../bot/strategy/sinuousExit';
+import { SinuousExitGate, type CrossCheck } from '../bot/strategy/sinuousExit';
 
 async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate; curveEntry?: SinuousEntryGate; accuracyGate?: AccuracyGate } = {}) {
   const dir = tmpDir();
@@ -330,6 +330,50 @@ test('exit curve rest mode: the held position rests its sell at the curve target
   await engine.tick();
   assert.equal(sells().length, 0, notes());
   assert.equal(oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly && o.timeInForce === 'immediate_or_cancel').length, 1, notes());
+});
+
+/** An exit curve in rest mode whose cross the test arms: it records what the engine asked and sells on a turned spot. */
+class StubCross extends StubRest {
+  armed = false;
+  asked: CrossCheck[] = [];
+  override cross(_ticker: string, e: CrossCheck): { sell: boolean; why?: string } {
+    this.asked.push(e);
+    return this.armed && e.spot === 'against' ? { sell: true, why: `exit curve: cross ${e.sidePrice} (+0.010 a contract net, curve 0.5 under projection 0.6, spot against)` } : { sell: false };
+  }
+}
+
+test('exit curve rest mode, the cross: a turned spot sells at the bid at once and pulls the resting sell', async () => {
+  const curveExit = new StubCross({ mode: 'rest', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
+  curveExit.target = 0.7;
+  const { engine, recon, market, md, oms, audit } = await setup({ curveExit, env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+  engine.balance = (await recon.run('startup'))!.balance;
+  oms.onFill({ tradeId: 'x1', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.4, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.45, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, Date.now());
+  const notes = () => engine.status.get(market.ticker)!.notes.join(' | ');
+  const resting = () => oms.liveOrders().filter((o) => o.ticker === market.ticker && o.purpose === 'exit' && o.timeInForce === 'good_till_canceled' && !o.cancelRequested);
+  await engine.tick();
+  assert.deepEqual(resting().map((o) => o.price), [0.7], notes());
+  // What the engine asked: the side's bid, the whole position (the bid holds 50), the take-profit floor (4c on a 40c
+  // contract) and the time to close.
+  const first = curveExit.asked.at(-1)!;
+  assert.deepEqual([first.sidePrice, first.count], [0.45, 10]);
+  assert.ok(Math.abs(first.floor - 0.04) < 1e-9, String(first.floor));
+  assert.ok(first.tauSec > 500 && first.tauSec <= 600, String(first.tauSec));
+  // BTC drops 0.015% in the last five seconds (a quarter of a 5 s standard deviation is the noise floor; a fast move
+  // would be twice one): against a YES position on an up/down contract.
+  const idx = md.index.get('BTC')!;
+  const pts = (idx as unknown as { points: Array<{ ts: number; value: number }> }).points;
+  const cut = Date.now() + 200 - 5000;
+  const ref = [...pts].reverse().find((p) => p.ts <= cut)!.value;
+  idx.add(ref * Math.exp(-1.5e-4), Date.now());
+  curveExit.armed = true;
+  await engine.tick();
+  assert.equal(curveExit.asked.at(-1)!.spot, 'against', notes());
+  const iocs = oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly && o.timeInForce === 'immediate_or_cancel');
+  assert.deepEqual(iocs.map((o) => [o.side, o.price, o.count]), [['ask', 0.45, 10]], notes());
+  assert.equal(resting().length, 0, 'the resting sell is pulled');
+  const why = audit.tail(50, 'decision').flatMap((d) => ((d.data as { place?: Array<{ why: string }> }).place ?? []).map((p) => p.why));
+  assert.ok(why.some((w) => /^exit curve: cross 0\.45 /.test(w)), why.join(' | '));
 });
 
 test('exit curve: an exit at a loss goes out at once', async () => {
