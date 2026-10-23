@@ -174,6 +174,8 @@ export function createApi(d: ApiDeps): express.Express {
         selected: d.engine.model.params.training?.selected ?? null,
         importance: d.engine.model.params.training?.holdoutImportance ?? null,
         liveBlockers: d.engine.model.liveBlockers(),
+        // Whether those blockers hold back live entries (LIVE_ALLOW_UNVALIDATED_MODEL=false) or are information only.
+        liveGated: !d.cfg.liveAllowUnvalidated,
         validation: d.engine.model.params.validation ?? null,
       },
       kill: d.kill.status(),

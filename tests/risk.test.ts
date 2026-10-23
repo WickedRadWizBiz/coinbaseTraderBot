@@ -100,8 +100,18 @@ test('reduce-only exits are allowed during a halt but must reduce', () => {
   assert.equal(gw.check({ ...exit, timeInForce: 'good_till_canceled' }, ctx({ position: 3 })).ok, false);
 });
 
-test('live mode refuses an unvalidated model', () => {
+test('live mode refuses new risk from an unvalidated model, never an exit', () => {
   assert.equal(gw.check(intent(), ctx({ mode: 'live', modelLiveBlockers: ['no validation'] })).ok, false);
+  // An immediate-or-cancel reduce-only sell, and a resting post-only sell of what is held, both go out.
+  const ioc = intent({ side: 'ask', price: 0.44, count: 2, reduceOnly: true, postOnly: false, timeInForce: 'immediate_or_cancel', purpose: 'exit' });
+  assert.deepEqual(gw.check(ioc, ctx({ mode: 'live', modelLiveBlockers: ['no validation'], position: 3 })).reasons, []);
+  const rest = intent({ side: 'ask', price: 0.55, count: 3, purpose: 'exit', fairValue: 0.7 });
+  assert.deepEqual(gw.check(rest, ctx({ mode: 'live', modelLiveBlockers: ['no validation'], position: 3, bestBid: 0.45, bestAsk: 0.6 })).reasons, []);
+});
+
+test('by default the model\'s validation never gates a live binary order (LIVE_ALLOW_UNVALIDATED_MODEL, the owner\'s choice)', () => {
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).liveAllowUnvalidated, true);
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), LIVE_ALLOW_UNVALIDATED_MODEL: 'false' }).liveAllowUnvalidated, false);
 });
 
 test('an exception inside a check rejects (fail closed)', () => {

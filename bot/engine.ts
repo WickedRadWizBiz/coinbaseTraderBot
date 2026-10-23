@@ -1941,9 +1941,10 @@ export class Engine {
     let huntPlan: OrderPlan | undefined;
     let huntProtective = false;
     // Hunt mode is evaluated by research:backtest --annotate. With a passing evaluation the winning
-    // parameters are used; in live mode an unevaluated (or losing) hunt falls back to the fair-value exit.
+    // parameters are used; in live mode an unevaluated (or losing) hunt falls back to the fair-value exit,
+    // unless the model's validation does not gate live orders (LIVE_ALLOW_UNVALIDATED_MODEL, the default).
     const vh = model.validatedHunt();
-    const huntAllowed = cfg.strategy.exitPolicy === 'confluence_ratchet' && (cfg.mode !== 'live' || vh !== undefined || gatePasses('kalshi', false));
+    const huntAllowed = cfg.strategy.exitPolicy === 'confluence_ratchet' && (cfg.mode !== 'live' || cfg.liveAllowUnvalidated || vh !== undefined || gatePasses('kalshi', false));
     const huntNote = cfg.strategy.exitPolicy === 'confluence_ratchet' && !huntAllowed ? 'hunt mode not validated by the backtest: fair-value exit in live' : undefined;
     if (huntAllowed) {
       let h = this.hunts.get(m.ticker);
@@ -2342,7 +2343,7 @@ export class Engine {
   private liveWouldBlock(p: OrderPlan): string[] {
     const { cfg, model } = this.d;
     if (p.reduceOnly || p.purpose === 'exit') {
-      return p.why.startsWith('confluence ratchet stop') && !model.validatedHunt() && !gatePasses('kalshi', false) ? ['ratchet stop live would not run (hunt not validated, probation benched)'] : [];
+      return p.why.startsWith('confluence ratchet stop') && !cfg.liveAllowUnvalidated && !model.validatedHunt() && !gatePasses('kalshi', false) ? ['ratchet stop live would not run (hunt not validated, probation benched)'] : [];
     }
     const out: string[] = [];
     if (!cfg.liveAllowUnvalidated && !gatePasses('kalshi', false) && model.liveBlockers().length) out.push('model not validated, probation benched');

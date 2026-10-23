@@ -152,9 +152,9 @@ async function main(): Promise<void> {
     const blockers = cfg.liveAllowUnvalidated || gatePasses('kalshi', false) ? [] : model.liveBlockers();
     if (!cfg.liveAllowUnvalidated && gatePasses('kalshi', false) && model.liveBlockers().length) log.warn(`VALIDATION_GATES=monitor: trading binary contracts live with model ${model.id} on probation although it is not validated (${model.liveBlockers().join('; ')})`);
     if (cfg.liveAllowUnvalidated && model.liveBlockers().length) log.warn(`LIVE_ALLOW_UNVALIDATED_MODEL=true: trading binary contracts live with model ${model.id} although it is not validated (${model.liveBlockers().join('; ')})`);
-    // Other live books (perps, tennis) run on their own gates; the risk gateway keeps rejecting every
-    // binary crypto order while the model is unvalidated, so the process only refuses to start when
-    // there is nothing else to trade live.
+    // Other live books (perps, tennis) run on their own gates; with LIVE_ALLOW_UNVALIDATED_MODEL=false the risk gateway
+    // keeps rejecting every new binary crypto order while the model is unvalidated (exits still go out), so the
+    // process only refuses to start when there is nothing else to trade live.
     const otherLive = cfg.perps.trading === 'live' || cfg.perps.hedge === 'live' || (cfg.tennis.enabled && cfg.tennis.live);
     if (blockers.length && !otherLive) {
       log.error(`refusing to start live: model ${model.id} is not validated: ${blockers.join('; ')}`);
