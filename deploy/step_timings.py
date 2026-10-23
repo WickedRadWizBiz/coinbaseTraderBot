@@ -69,13 +69,14 @@ if os.path.isdir(replay):
 # The remote runs' own logs (models/logs, copied back by train.yml): the step sequence of the newest two, where a
 # report only lists the steps that finished (a run stopped by its time limit or the memory watchdog leaves the
 # running step out). Step lines, row-build progress and stop reasons only.
-KEEP = ('[pipeline] ', 'quick phase', 'rows: ', 'computing ', 'memory ', 'checkpoint ', 'pipeline stopped', 'pipeline exited')
+import re
+KEEP = re.compile(r'^\[pipeline\] [A-Za-z0-9_-]+: (running|done in|skipped|FAILED)|^\[ta-net\] computing |rows: \d+/\d+ coins|^\[(train|dataset|perps?|tennis)[^\]]*\] ')
 for lf in sorted(glob.glob(os.path.join(MODELS, 'logs', 'pipeline-remote-*.log')))[-2:]:
     try:
         lines = open(lf, errors='replace').read().splitlines()
     except Exception as e:  # noqa: BLE001
         print('  unreadable', os.path.basename(lf), type(e).__name__); continue
-    picked = [ln for ln in lines if any(k in ln for k in KEEP)]
-    print(f'\n== {os.path.basename(lf)}: {len(lines)} lines; step lines ({len(picked)}, newest 60)')
-    for ln in picked[-60:]:
+    picked = [ln for ln in lines if KEEP.search(ln)]
+    print(f'\n== {os.path.basename(lf)}: {len(lines)} lines; step lines ({len(picked)}' + (', the first 80 and the last 40)' if len(picked) > 120 else ')'))
+    for ln in (picked[:80] + ['   ...'] + picked[-40:] if len(picked) > 120 else picked):
         print('  ', ln[:180])

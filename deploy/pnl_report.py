@@ -24,10 +24,16 @@ files = sorted(f for f in glob.glob(os.path.join(data, 'audit', 'audit-*.jsonl')
 fills, settles, orders, starts, other = [], [], {}, [], collections.Counter()
 want = ('"kind":"fill"', '"kind":"settlement"', '"kind":"order_new"', '"kind":"startup"', '"kind":"training"', '"kind":"kill_', '"kind":"risk_reject"')
 rate_rejects = collections.Counter()
+exit_why = {}  # decisionId -> [(side, price, why)] of the exits it planned
 for f in files:
     with open(f, 'rb') as fh:
         for raw in fh:
             line = raw.decode('utf8', 'replace')
+            if '"kind":"decision"' in line[:160] and '"purpose":"exit"' in line:
+                try: d = json.loads(line).get('data') or {}
+                except Exception: continue
+                exit_why[d.get('decisionId')] = [(p.get('side'), p.get('price'), str(p.get('why') or '')) for p in d.get('place') or [] if p.get('purpose') == 'exit']
+                continue
             if not any(w in line[:160] for w in want): continue
             try: r = json.loads(line)
             except Exception: continue
@@ -112,6 +118,34 @@ for pu in sorted({k for c in pm.values() for k in c}):
     xs = [c[pu] for c in pm.values() if c[pu]]
     print(f"  {pu}: orders {sum(xs)}  p50 {pct(xs, .5)}  p90 {pct(xs, .9)}  max {max(xs, default=0)}")
 print('  order-rate rejections (audited, by purpose):', dict(collections.Counter(k[0] for k in rate_rejects.elements())) or 'none')
+
+# Exit fills by why they were sold (the decision that planned them): the take-profit (trailing since Oct 22 23:03 UTC:
+# "best" and "floor" in its reason; the old target before), the model exit (the market pays more than the model's
+# value), the hunt's ratchet stop, anything else by its first words. Net a contract after fees is the take-profit's own.
+import re
+TP = re.compile(r'take-profit( NO)?: \+(-?[0-9.]+) a contract net of fees \((?:best \+(-?[0-9.]+), floor \+(-?[0-9.]+)|target)')
+def exit_kind(why):
+    m = TP.match(why)
+    if m: return ('take-profit (trailing)' if m.group(3) is not None else 'take-profit (old target)'), m
+    if '- fee > q' in why: return 'model exit (market pays more)', None
+    if why.startswith('confluence ratchet stop'): return 'ratchet stop', None
+    return re.sub(r'[-+]?[0-9][0-9.]*', '#', why)[:40] or '?', None
+print('\n== exit fills by reason, by UTC day: fills, contracts, take-profit net a contract after fees (contract-weighted)')
+byk = collections.defaultdict(lambda: [0, 0.0, 0.0, 0.0])
+tp_rows = []
+for fl in fills:
+    o = orders.get(fl['coid']) or {}
+    if o.get('purpose') != 'exit': continue
+    plans = exit_why.get(o.get('decision')) or []
+    why = next((w for sd, px, w in plans if sd == fl['side'] and px == o.get('price')), plans[0][2] if plans else '(no decision record)')
+    k, m = exit_kind(why)
+    b = byk[(fl['ts'][:10], k)]; b[0] += 1; b[1] += fl['count']
+    if m: b[2] += float(m.group(2)) * fl['count']; b[3] += fl['count']; tp_rows.append((fl['ts'], fl['ticker'], fl['count'], m))
+for (d, k), b in sorted(byk.items()):
+    print(f"  {d}  {k:32s} fills {b[0]:4d}  contracts {b[1]:7.2f}" + (f"  net {b[2] / b[3]:+.3f} a contract" if b[3] else ''))
+print('  last 12 take-profit fills (net now / best / floor, a contract after fees):')
+for ts, t, n, m in tp_rows[-12:]:
+    print(f"    {ts[5:16]}  {t:34s} {n:6.2f} ct  +{float(m.group(2)):.3f} / " + (f"+{float(m.group(3)):.3f} / +{float(m.group(4)):.3f}" if m.group(3) is not None else 'old target'))
 
 # Worst settlements in the last day
 print('\n== 25 worst settlements in the last 24 h')
