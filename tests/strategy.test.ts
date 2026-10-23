@@ -219,6 +219,18 @@ test('minimum quote: a quote sizing wants is at least 3 contracts, inside the pe
   assert.equal(bidOf(view({ bankroll: 20, position: -2 }))!.count, 5, '3 new YES plus the 2 NO it buys back');
 });
 
+test('paper fixed size: a quote sizing wants buys about fixedOrderUsd of contracts, inside the per-order cap and the risk room', () => {
+  const bidOf = (v: MarketView) => decide(v, cfg).place.find((p) => p.side === 'bid');
+  const fixed = bidOf(view({ fixedOrderUsd: 10, maxOrderRiskUsd: 10, maxContracts: 100 }))!;
+  const usd = fixed.count * fixed.price;
+  assert.ok(usd > 9.4 && usd <= 10, `${fixed.count} at ${fixed.price}: $${usd.toFixed(2)} (fee included in the $10)`);
+  assert.ok(fixed.count > bidOf(view())!.count, 'more than the sized quote');
+  // The risk room left and the contract cap still bind; no quote where sizing wants none.
+  assert.ok(bidOf(view({ fixedOrderUsd: 10, maxOrderRiskUsd: 10, maxContracts: 100, newRiskRoomUsd: 4 }))!.count * fixed.price <= 4);
+  assert.equal(bidOf(view({ fixedOrderUsd: 10, maxOrderRiskUsd: 10, maxContracts: 6 }))!.count, 6);
+  assert.equal(decide(view({ fixedOrderUsd: 10, maxOrderRiskUsd: 10, maxContracts: 100, bankroll: 0 }), cfg).place.length, 0);
+});
+
 test('a resting quote due to expire on the exchange is placed again, unless the replacement would end no later', () => {
   const first = decide(view(), cfg).place.find((p) => p.side === 'bid')!;
   const resting = { clientOrderId: 'b', price: first.price, remaining: first.count };

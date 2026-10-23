@@ -87,6 +87,10 @@ import { marketContext } from './ta/marketContext';
 import { binaryTrades, optimalF, recencyWeight, type OptimalFReport } from './strategy/optimalF';
 import { altcoinRiskOn, confluenceBreadth, orientedSignals, selectionPriority, taDrift, taNetDirection, viewOf, type TaNetView } from './strategy/taConviction';
 
+/** Paper fixed size: how many fixed-size orders the window cap (markets closing together) and the total cap hold. */
+const PAPER_WINDOW_ORDERS = 3;
+const PAPER_TOTAL_ORDERS = 10;
+
 const log = logger('engine');
 
 /** Wall time spent per loop section over the last minute (ms per second of clock), the share of markets
@@ -878,6 +882,7 @@ export class Engine {
       targetEvUsd: +ev.targetEv.toFixed(2), minTradeEvUsd: +ev.minEv.toFixed(3),
       minTradableBankrollUsd: S.minTradableBankrollUsd,
       tier: { ...t, orderRiskUsd: +(t.orderFrac * b).toFixed(2), dailyLossLimitUsd: +this.d.risk.dailyLossLimit(b, this.tierLimits(t)).toFixed(2) },
+      paperOrderUsd: this.paperOrderUsd() || null,
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null, minQuoteContracts: S.minQuoteContracts,
       takeProfit: { floorPct: S.profitTargetPct, floorCents: +(S.profitTarget * 100).toFixed(2), giveBack: +S.profitGiveBack.toFixed(3) },
@@ -992,8 +997,29 @@ export class Engine {
   bankroll(): number | undefined {
     if (this.balance === undefined) return undefined;
     const committed = this.d.oms.positions.open().reduce((s, m) => s + PositionBook.maxLoss(m), 0);
-    // Vaulted and pocketed profit is not the bot's to trade.
-    return Math.max(0, this.balance + committed - (this.d.vault?.reserved() ?? 0));
+    // Vaulted and pocketed profit is not the bot's to trade. Paper trades its whole balance unless VAULT_IN_PAPER: the
+    // vault keeps half of every win and none of the losses, so it had taken $343 of the $360 paper pool (Oct 23).
+    const reserved = this.d.cfg.mode !== 'paper' || this.d.cfg.vault?.paper ? (this.d.vault?.reserved() ?? 0) : 0;
+    return Math.max(0, this.balance + committed - reserved);
+  }
+
+  /** Paper fixed order size in dollars (PAPER_ORDER_USD), 0 when off or in live. */
+  paperOrderUsd(): number {
+    return this.d.cfg.mode === 'paper' ? Math.max(0, this.d.cfg.strategy.paperOrderUsd ?? 0) : 0;
+  }
+
+  /** The risk gateway's per-order, window and total caps for crypto orders: the tier's, widened in paper to fit the
+   *  fixed order size (one order, PAPER_WINDOW_ORDERS in markets closing together, PAPER_TOTAL_ORDERS in all). */
+  private orderLimits(t: Tier, bankroll = this.bankroll() ?? 0): Partial<RiskLimits> {
+    const lim = this.tierLimits(t);
+    const usd = this.paperOrderUsd();
+    if (!(usd > 0) || !(bankroll > 0)) return lim;
+    return {
+      ...lim,
+      maxOrderRiskFrac: Math.max(t.orderFrac, usd / bankroll),
+      maxWindowRiskFrac: Math.max(t.windowFrac, (PAPER_WINDOW_ORDERS * usd) / bankroll),
+      maxTotalRiskFrac: Math.max(t.totalFrac, (PAPER_TOTAL_ORDERS * usd) / bankroll),
+    };
   }
 
   /** Today's (UTC) PnL: realized settlements + conservative mark-to-market. */
@@ -1045,7 +1071,8 @@ export class Engine {
   private newRiskRoom(m: ActiveMarket, bankroll: number, tier: Tier): number {
     const totals = this.riskTotals(m.closeTime);
     const free = this.freeCash(this.shardOf(m.ticker));
-    return Math.max(0, Math.min(tier.windowFrac * bankroll - totals.window, tier.totalFrac * bankroll - totals.total, free ?? Infinity));
+    const lim = this.orderLimits(tier, bankroll);
+    return Math.max(0, Math.min((lim.maxWindowRiskFrac ?? tier.windowFrac) * bankroll - totals.window, (lim.maxTotalRiskFrac ?? tier.totalFrac) * bankroll - totals.total, free ?? Infinity));
   }
 
   /** Crypto: window = markets closing together. Tennis (`tennisEvent`): window = the match, total = all tennis. */
@@ -1869,12 +1896,17 @@ export class Engine {
     // percentile of the growth-optimal fraction); applies to the conviction-boosted size too.
     const fCap = this.kalshiOptimalF('crypto', now);
     const fCapUsd = Number.isFinite(fCap.cap) ? fCap.cap * bankroll : Infinity;
+    // Paper fixed size (PAPER_ORDER_USD): a wanted trade buys about that many dollars, whatever the tier, the break-even
+    // scale, the session's size factor and optimal f would allow (the owner's choice for paper on Oct 23).
+    const fixedUsd = this.paperOrderUsd();
     const view: MarketView = {
       ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: st.position, bankroll,
       // Session risk profile can only shrink size (sizeMult in [0, 1]).
       // The risk scale (drawdown, losing streak, training-mode de-risking) shrinks every sizing route:
       // Kelly, target-EV and the per-order caps alike.
-      maxOrderRiskUsd: Math.min(tier.orderFrac * bankroll * sizeMult * kellyScale, fCapUsd), maxContracts: floorCount(R.maxContractsPerOrder * sizeMult), minSidePrice: R.minSidePrice,
+      maxOrderRiskUsd: fixedUsd > 0 ? fixedUsd : Math.min(tier.orderFrac * bankroll * sizeMult * kellyScale, fCapUsd),
+      maxContracts: floorCount(R.maxContractsPerOrder * (fixedUsd > 0 ? 1 : sizeMult)), minSidePrice: R.minSidePrice,
+      ...(fixedUsd > 0 ? { fixedOrderUsd: fixedUsd } : {}),
       newRiskRoomUsd: reason ? this.newRiskRoom(m, bankroll, tier) : undefined,
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
       restingBid, restingAsk, nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
@@ -1978,6 +2010,7 @@ export class Engine {
         else if (alt.active && sideDir > 0 && vetoed) plan.notes.push(`${alt.why}, but the adversary vetoed the x${S.altBoost} boost (${vetoed})`);
         const mult = Math.min(S.convictionMaxTotal, advMult * altMult);
         if (mult <= 1) continue;
+        if (fixedUsd > 0) { plan.notes.push(`conviction x${mult.toFixed(2)} not applied: paper orders are $${fixedUsd} (PAPER_ORDER_USD)`); continue; }
         const boosted = decide({ ...view, maxOrderRiskUsd: Math.min(view.maxOrderRiskUsd * mult, fCapUsd), maxContracts: floorCount(view.maxContracts * mult) }, { ...strat, kellyFraction: strat.kellyFraction * mult }, { exits: false, blockReductions: huntMode, entries: true });
         const match = boosted.place.find((b) => b.side === p.side && b.purpose === p.purpose && !b.reduceOnly && Math.abs(b.price - p.price) < 1e-9);
         const count = match ? floorCount(Math.min(match.count, p.count * mult)) : p.count;
@@ -2019,9 +2052,12 @@ export class Engine {
       }
     }
     if (this.fillLog) for (const p of plan.place) if (isMakerEntry(p)) this.fillX.set(p, fillInputs(p, fillCtx));
-    plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
-    if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${rs.parts.join(', ')})`);
-    if (Number.isFinite(fCapUsd) && fCapUsd < tier.orderFrac * bankroll * sizeMult * kellyScale) plan.notes.push(`optimal f cap: $${fCapUsd.toFixed(2)} per order (${(100 * fCap.cap).toFixed(2)}% of bankroll, ${fCap.rep?.n ?? 0} settled trades)`);
+    if (fixedUsd > 0) plan.notes.push(`paper size: $${fixedUsd} an order (PAPER_ORDER_USD; the tier, break-even scale and optimal f size live)`);
+    else {
+      plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
+      if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${rs.parts.join(', ')})`);
+      if (Number.isFinite(fCapUsd) && fCapUsd < tier.orderFrac * bankroll * sizeMult * kellyScale) plan.notes.push(`optimal f cap: $${fCapUsd.toFixed(2)} per order (${(100 * fCap.cap).toFixed(2)}% of bankroll, ${fCap.rep?.n ?? 0} settled trades)`);
+    }
     for (const g of guards) plan.notes.push(g);
     if (pbW && pbW.kalshi !== 1) plan.notes.push(`playbook ${pbW.source}: Kalshi size x${pbW.kalshi}`);
     if (cmpW && cmpW.w !== 1) plan.notes.push(`compensator ${cmpW.source}: Kalshi size x${cmpW.w.toFixed(2)}`);
@@ -2159,7 +2195,7 @@ export class Engine {
     // Tennis orders are rules-based (no model probability to size an edge from): budgeted separately.
     // Paper training trades are 1 contract with no edge requirement (they exist to produce trades).
     const training = cfg.mode === 'paper' && p.why.startsWith('train (paper)');
-    const pk = tennis || training ? undefined : this.portfolioCap(m, p, pYes, now);
+    const pk = tennis || training || this.paperOrderUsd() > 0 ? undefined : this.portfolioCap(m, p, pYes, now);
     if (pk && pk.contracts < p.count) {
       this.d.audit.write('decision', { decisionId, ticker: m.ticker, event: 'portfolio_kelly_cap', from: p.count, to: pk.contracts, fStar: +pk.fStar.toFixed(4), edgePerDay: +pk.edgePerDay.toFixed(4) });
       if (pk.contracts <= 0) return;
@@ -2199,7 +2235,7 @@ export class Engine {
       ordersLastMinute: oms.ordersSentInLast(60_000),
       openOrders: oms.liveOrders().length,
       modelLiveBlockers: cfg.liveAllowUnvalidated || gatePasses('kalshi', false) ? [] : model.liveBlockers(),
-      limitOverrides: this.tierLimits(this.tier()),
+      limitOverrides: this.orderLimits(this.tier()),
       dailyLossAdvisory: this.overrideActive(),
     };
     if (training) ctx.skipEdgeCollar = true;
