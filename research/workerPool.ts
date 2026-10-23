@@ -38,6 +38,12 @@ export function workerCount(env: NodeJS.ProcessEnv = process.env): number {
   return Math.max(1, Math.min(Number.isFinite(n) ? Math.floor(n) : 1, Math.max(1, os.cpus().length)));
 }
 
+/** Worker threads for the TA network's row rebuild (trainTaNet.ts computeRowsInWorkers, which also caps them by free
+ *  memory): TA_ROW_WORKERS when set (the remote runner: one per core), else TRAIN_WORKERS. */
+export function taRowWorkerCount(env: NodeJS.ProcessEnv = process.env): number {
+  return env.TA_ROW_WORKERS ? workerCount({ ...env, TRAIN_WORKERS: env.TA_ROW_WORKERS }) : workerCount(env);
+}
+
 export class WorkerPool<I, O> {
   private readonly idle: Worker[] = [];
   private readonly queue: Array<{ input: I; resolve: (o: O) => void; reject: (e: Error) => void; /** A retry's heap (MB). */ heapMb?: number }> = [];

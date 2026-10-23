@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import v8 from 'node:v8';
 import { KEY_PATTERNS, TALIB_KEYS, taEngine, talibCore, talibExtras, tl } from '../bot/ta/talib';
 import { tfState } from '../bot/ta/analyzer';
 import { atr, rsi, type Candle } from '../bot/ta/indicators';
@@ -37,6 +38,18 @@ test('TA-Lib: the native engine is active; core indicators agree with the built-
   assert.ok(Number.isNaN(T.sma200[100]) && Number.isFinite(T.sma200[n]), 'aligned outputs: NaN before the first value');
   // Every optional input gets TA-Lib's documented default (patterns with a penetration factor work).
   assert.ok(tl('CDLMORNINGSTAR', { open: cs.map((c) => c.o), high: cs.map((c) => c.h), low: cs.map((c) => c.l), close: cs.map((c) => c.c) }).outInteger);
+});
+
+test('TA-Lib: a call keeps no native memory (the binding leaked a V8 global handle on every synchronous call)', () => {
+  // About 330 calls a TA network row, millions over a training run: 13 GB on the remote runner on Oct 22.
+  const used = () => (v8.getHeapStatistics() as v8.HeapInfo & { used_global_handles_size?: number }).used_global_handles_size;
+  if (used() === undefined) return;
+  const close = walk(300, H).map((c) => c.c);
+  tl('RSI', { inReal: close }, { optInTimePeriod: 14 });
+  const before = used()!;
+  for (let i = 0; i < 5000; i++) tl('RSI', { inReal: close }, { optInTimePeriod: 14 });
+  // A leaked handle is 32 bytes: 5,000 calls left 160 KB behind.
+  assert.ok(used()! - before < 16_000, `global handles grew by ${used()! - before} bytes over 5000 calls`);
 });
 
 test('TA-Lib extras: every key, scale-free, patterns summarised; carried into the TA state and the network inputs', () => {

@@ -66,7 +66,8 @@ jobs:
           path: |
             node_modules
             vendor/talib/build
-          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+          # The binding's own source (talib.cpp) is in the key: a cached build of an older binding would keep its bugs.
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
 
       - name: Install dependencies
         if: steps.deps.outputs.cache-hit != 'true'
@@ -126,6 +127,10 @@ jobs:
           # The pipeline's heap: 8 GB of the runner's 16 (Node's default is about 4 GB: the quick run on Oct 21 ran out of
           # it, exit 134, before any step finished). The memory watchdog below still stops it before the runner runs out.
           export NODE_OPTIONS="--max-old-space-size=${PIPELINE_HEAP_MB:-8192}"
+          # The TA network's rows (years of hourly bars for every coin) are computed on every core: 745,551 rows took
+          # over 2 h on one thread on Oct 22. That step caps its threads by free memory itself (research/trainTaNet.ts
+          # computeRowsInWorkers); the other steps keep TRAIN_WORKERS.
+          export TA_ROW_WORKERS="${TA_ROW_WORKERS:-$(nproc)}"
           mkdir -p "$DATA/models/logs"
           LOG="$DATA/models/logs/pipeline-remote-$(date -u +%Y-%m-%dT%H-%M-%SZ).log"
           T0=$(date +%s)
@@ -161,8 +166,10 @@ jobs:
           if [ -n "$ONLY" ]; then
             run_pipeline 300 --only "$ONLY"; code=$?
           else
-            # 1. The models trained on the bot's own recordings first (minutes), copied back at once.
-            run_pipeline 90 --only vol_model,dataset,mlp,perps,tennis,fill,sizing; quick=$?
+            # 1. The models trained on the bot's own recordings first, copied back at once. 150 minutes: on Oct 22 the
+            # dataset took 31 and the MLP (its backtest included) did not finish in the 59 left of 90, so nothing was
+            # promoted (Oct 21: dataset 14, MLP 52, perps 23).
+            run_pipeline 150 --only vol_model,dataset,mlp,perps,tennis,fill,sizing; quick=$?
             echo "quick phase: exit $quick"; sync_models
             code=$quick
             # 2. Everything else in the time left (5 h in all). The oracle cull is left to the laptop trainer: it builds TA

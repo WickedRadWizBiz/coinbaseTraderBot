@@ -32,7 +32,7 @@ import { storedAssets } from './history/candles';
 import { transitionsOf } from './selection';
 import { regimeDayLabels } from './transitions';
 import { buildDataParallel, dayBootstrap, type TaNetData } from './trainTaNet';
-import { workerCount } from './workerPool';
+import { taRowWorkerCount } from './workerPool';
 
 const H = 3_600_000;
 const D = 86_400_000;
@@ -395,7 +395,7 @@ export function trainLibrarianOn(Dt: TaNetData, labels: Map<string, Map<string, 
 export async function trainLibrarian(hist: string, o: { cacheDir?: string; assets?: string[]; cull?: string[]; log?: (m: string) => void } = {}): Promise<LibReport> {
   const log = o.log ?? console.log;
   const assets = o.assets?.length ? o.assets : storedAssets(hist);
-  const Dt = await buildDataParallel(hist, assets, o.cacheDir ?? path.join(hist, '.tanet-cache'), log, workerCount());
+  const Dt = await buildDataParallel(hist, assets, o.cacheDir ?? path.join(hist, '.tanet-cache'), log, taRowWorkerCount());
   if (!Dt.assets.length) throw new Error('no coin has enough hourly and daily history for TA rows');
   const t0 = Math.min(...Dt.assets.map((a) => a.rowTs[0] ?? Infinity)), t1 = Math.max(...Dt.assets.map((a) => a.rowTs[a.rowTs.length - 1] ?? 0)) + D;
   const labels = regimeDayLabels(hist, Dt.assets.map((a) => a.asset), t0, t1, log);
