@@ -376,8 +376,9 @@ test('an exit never trades against the bot\'s own resting quote (self-trade prev
 });
 
 test('vault and pocket are excluded from the tradable bankroll; wins feed the vault', async () => {
+  // Live always keeps the vault out of the bankroll; paper does with VAULT_IN_PAPER (the same rule).
   const vault = new Vault({ enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session', dailyGoalUsd: 100 });
-  const { engine, recon, oms } = await setup({ vault, monitor: new BalanceMonitor() });
+  const { engine, recon, oms } = await setup({ vault, monitor: new BalanceMonitor(), env: { VAULT_IN_PAPER: 'true' } });
   const r = await recon.run('startup');
   engine.onBalance(r!.balance!);
   assert.equal(engine.bankroll(), 200);
@@ -386,6 +387,38 @@ test('vault and pocket are excluded from the tradable bankroll; wins feed the va
   oms.settle('W', 'yes');
   assert.equal(vault.vaultTotal, 5);
   assert.equal(engine.bankroll(), 195);
+});
+
+test('paper: the vault keeps its books, but the paper bankroll is the whole balance (VAULT_IN_PAPER off, the default)', async () => {
+  // The vault keeps half of every win and none of the losses: by Oct 23 it held $343 of the $360 paper pool.
+  const vault = new Vault({ enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session', dailyGoalUsd: 100 });
+  const { engine, recon, oms } = await setup({ vault, monitor: new BalanceMonitor() });
+  const r = await recon.run('startup');
+  engine.onBalance(r!.balance!);
+  oms.onFill({ tradeId: 'w', orderId: '', ticker: 'W', side: 'bid', count: 20, price: 0.5, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: Date.now() - 1, asset: 'BTC' });
+  oms.settle('W', 'yes');
+  assert.equal(vault.vaultTotal, 5, 'still vaulted on the books');
+  assert.equal(engine.bankroll(), 200, 'and still traded in paper');
+});
+
+test('paper fixed size: a wanted trade buys about PAPER_ORDER_USD of contracts ($10 by default); 0 sizes as in live', async () => {
+  const quote = (g: Awaited<ReturnType<typeof setup>>) => g.oms.liveOrders().find((o) => o.ticker === g.market.ticker && o.purpose === 'quote' && !o.cancelRequested && o.side === 'bid');
+  const env = { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' };
+  const fixed = await setup({ env });
+  fixed.engine.balance = (await fixed.recon.run('startup'))!.balance;
+  await fixed.engine.tick();
+  const q = quote(fixed)!;
+  assert.ok(q, JSON.stringify(fixed.engine.status.get(fixed.market.ticker)?.notes));
+  const usd = q.count * q.price;
+  assert.ok(usd > 10 - q.price - 0.05 && usd <= 10 + 1e-9, `${q.count} at ${q.price} = $${usd.toFixed(2)}`);
+  assert.match(fixed.engine.status.get(fixed.market.ticker)!.notes.join(' | '), /paper size: \$10 an order/);
+  // Off: the tier and break-even sizing of a $200 account, a few dollars at most.
+  const sized = await setup({ env: { ...env, PAPER_ORDER_USD: '0' } });
+  sized.engine.balance = (await sized.recon.run('startup'))!.balance;
+  await sized.engine.tick();
+  const s = quote(sized)!;
+  assert.ok(s.count * s.price < 5, `${s.count} at ${s.price}`);
+  assert.ok(s.count < q.count);
 });
 
 test('a manually recorded withdrawal is not counted again by the detector', async () => {
@@ -428,7 +461,8 @@ test('conviction: every evaluation records the TA overlay; the altcoin risk-on r
   assert.equal(st0.conviction!.alt.active, false);
   assert.match(st0.conviction!.alt.why, /not an altcoin|USDT\.D|RSI/);
 
-  const alt = await setup({ trend: 0.000002, env: { NON_ALTCOINS: 'NONE', PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false', ADVERSARIAL_BOOST: 'false' } });
+  // PAPER_ORDER_USD=0: a paper fixed size is never boosted, and this test is about the boost.
+  const alt = await setup({ trend: 0.000002, env: { NON_ALTCOINS: 'NONE', PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false', ADVERSARIAL_BOOST: 'false', PAPER_ORDER_USD: '0' } });
   const now = Date.now();
   // USDT.D falling over the last 20 minutes (with some noise for its volatility); the index rising (RSI > 50).
   let u = 5.0;

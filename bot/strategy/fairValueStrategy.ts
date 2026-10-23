@@ -56,6 +56,9 @@ export interface MarketView {
   /** Risk room left under the window and total caps and in free cash (dollars): a quote is only raised to the
    *  minimum size inside it. Unbounded when not given. */
   newRiskRoomUsd?: number;
+  /** Paper fixed size (PAPER_ORDER_USD): a trade sizing wants (contracts > 0) buys about this many dollars of
+   *  contracts, within maxOrderRiskUsd, the risk room and maxContracts. Undefined = the sized amount. */
+  fixedOrderUsd?: number;
   maxContracts: number;
   minSidePrice: number;
   tauSec: number;
@@ -129,7 +132,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
   const q = decisionProbability(v, cfg);
   const targetEv = cfg.sizing === 'target_ev';
   // Probabilities for the PURCHASED side: YES -> (q, p_mkt), NO -> (1 - q, 1 - p_mkt).
-  const size = (side: 'yes' | 'no', cost: number, fee: number, maxContracts: number) => {
+  const sized = (side: 'yes' | 'no', cost: number, fee: number, maxContracts: number) => {
     const qm = side === 'yes' ? v.pYes : 1 - v.pYes;
     if (targetEv && v.pMarket !== undefined) {
       const qk = side === 'yes' ? v.pMarket : 1 - v.pMarket;
@@ -137,6 +140,14 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
         { kappa: cfg.kappa, kellyFraction: cfg.kellyFraction, ...evThresholds(cfg, v.bankroll, v.maxOrderRiskUsd), minEdge: cfg.minEdge });
     }
     return kellySize({ q: side === 'yes' ? q : 1 - q, cost, feePerContract: fee, bankroll: v.bankroll, kellyFraction: cfg.kellyFraction, maxRiskUsd: v.maxOrderRiskUsd, maxContracts });
+  };
+  // Sizing decides whether a trade is worth taking; a paper fixed size then decides how much (PAPER_ORDER_USD).
+  const size = (side: 'yes' | 'no', cost: number, fee: number, maxContracts: number) => {
+    const k = sized(side, cost, fee, maxContracts);
+    if (!(v.fixedOrderUsd! > 0) || !(k.contracts > 0)) return k;
+    const usd = Math.min(v.fixedOrderUsd!, v.maxOrderRiskUsd, v.newRiskRoomUsd ?? Infinity);
+    const contracts = floorCount(Math.min(maxContracts, usd / (cost + fee)));
+    return contracts > 0 ? { ...k, contracts, riskUsd: contracts * (cost + fee) } : k;
   };
   // A maker quote sizing wants (contracts > 0) is at least minQuoteContracts, as far as the per-order caps and the risk
   // room left allow; never smaller than sizing asked for.

@@ -110,6 +110,10 @@ export interface StrategyConfig {
   /** Smallest maker quote, in contracts, when sizing wants a smaller one (within the per-order caps and the risk room
    *  left): Kalshi rounds each order's fee up to the cent, so a small position pays more a contract to sell. 0 = off. */
   minQuoteContracts: number;
+  /** Paper only: each crypto entry and maker quote buys about this many dollars of contracts once sizing wants the
+   *  trade, in place of the tier, break-even, optimal-f and portfolio-Kelly sizing (the owner's choice on Oct 23: profit
+   *  sales of $1 to $3 instead of cents). 0 = paper sizes like live. Live never uses it. */
+  paperOrderUsd: number;
   /** kelly = fractional Kelly on the model probability; target_ev = spec sizing (shrink to market, $ target, min EV). */
   sizing: 'kelly' | 'target_ev';
   kappa: number;
@@ -971,6 +975,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     makerBuffer: num(env, 'STRATEGY_MAKER_BUFFER', relaxed ? 0.02 : 0, 0, 0.1),
     makerBufferRange: band(env, 'STRATEGY_MAKER_BUFFER_RANGE', relaxed ? [0.015, 0.03] : [0, 0]),
     minQuoteContracts: num(env, 'STRATEGY_MIN_QUOTE_CONTRACTS', 3, 0, 100),
+    paperOrderUsd: num(env, 'PAPER_ORDER_USD', 10, 0, 1000),
     sizing: oneOf(env, 'STRATEGY_SIZING', relaxed ? 'target_ev' : 'kelly', ['kelly', 'target_ev'] as const),
     kappa: num(env, 'STRATEGY_KAPPA', 0.5, 0, 1),
     targetEvUsd: num(env, 'STRATEGY_TARGET_EV_USD', 10, 0, 10000),
@@ -1101,6 +1106,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       dailyGoalUsd: num(env, 'VAULT_DAILY_GOAL_USD', 100, 0, 1e7),
       rampStartUsd: num(env, 'VAULT_RAMP_START_USD', 20, 0, 1e7),
       rampFullUsd: num(env, 'VAULT_RAMP_FULL_USD', 100, 0, 1e7),
+      paper: bool(env, 'VAULT_IN_PAPER', false),
     },
     sizingTiers: parseSizingTiers(env.SIZING_TIERS, { risk, strategy }),
     conditioningApply: bool(env, 'CONDITIONING_APPLY', true),

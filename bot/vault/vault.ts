@@ -35,6 +35,9 @@ export interface VaultConfig {
   /** Graduation ramp (see header): tradable high-water mark where skimming starts / reaches full share. 0 full = off. */
   rampStartUsd?: number;
   rampFullUsd?: number;
+  /** Paper mode: what the vault and pocket hold is kept out of the paper bankroll too (false: paper trades its whole
+   *  balance; the vault still keeps its books). Live and shadow always keep it out. */
+  paper?: boolean;
 }
 
 export const DEFAULT_VAULT: VaultConfig = { enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session', dailyGoalUsd: 100, rampStartUsd: 20, rampFullUsd: 100 };
