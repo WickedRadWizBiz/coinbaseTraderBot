@@ -201,6 +201,26 @@ test('pipeline end to end: SNN first, backfilled SNN outputs, then the MLP train
   assert.equal(off.steps.find((x) => x.step === 'dataset')!.skipped, undefined);
 });
 
+test('AUTO_TRAIN_DECISION_DAYS: the dataset is built from the newest recorded days only', async () => {
+  const dir = tmpDir();
+  const rec = path.join(dir, 'recordings');
+  const day = (i: number) => Date.UTC(2026, 0, 1 + i, 6);
+  for (let i = 0; i < 3; i++) writeSyntheticRecordings(rec, { windows: 4, seed: 7 + i, start: day(i) });
+  assert.equal(recordingDays(rec).length, 3);
+  const cfg = cfgFor(dir, { AUTO_TRAIN_DECISION_DAYS: '2' });
+  const r = await runPipeline({ cfg, only: ['dataset'], log: () => undefined, now: T0 });
+  assert.ok(r.steps.every((s) => s.ok), JSON.stringify(r.steps.map((s) => [s.step, s.skipped, s.error?.slice(0, 300)])));
+  assert.deepEqual(recordingDays(path.join(cfg.autoTrain.dir, 'work', 'decision-days')), ['2026-01-02', '2026-01-03']);
+  const rows = fs.readFileSync(path.join(cfg.autoTrain.dir, 'work', 'dataset.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.ok(rows.length > 0);
+  assert.ok(rows.every((x) => x.t >= day(1)), 'no row from the oldest day');
+  // 0 (the default) reads every day.
+  const all = await runPipeline({ cfg: cfgFor(dir, { AUTO_TRAIN_SKIP_UNCHANGED: 'false' }), only: ['dataset'], log: () => undefined, now: T0 + 3_600_000 });
+  assert.ok(all.steps.every((s) => s.ok));
+  const rowsAll = fs.readFileSync(path.join(cfg.autoTrain.dir, 'work', 'dataset.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.ok(rowsAll.some((x) => x.t < day(1)), 'the oldest day is read without the setting');
+});
+
 test('pipeline readiness: the whole bot on its held-out days in % of the pool, every model\'s state, the target', async () => {
   const dir = tmpDir();
   const rec = path.join(dir, 'recordings');
