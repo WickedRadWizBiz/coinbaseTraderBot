@@ -18,9 +18,10 @@ import { openExchange, tmpAudit, tmpDir } from './helpers';
 import { Vault } from '../bot/vault/vault';
 import { BalanceMonitor } from '../bot/vault/balanceMonitor';
 import { SinuousEntryGate, type EntryVerdict } from '../bot/strategy/sinuousEntry';
+import { AccuracyGate } from '../bot/strategy/accuracyGate';
 import { SinuousExitGate } from '../bot/strategy/sinuousExit';
 
-async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate; curveEntry?: SinuousEntryGate } = {}) {
+async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate; curveEntry?: SinuousEntryGate; accuracyGate?: AccuracyGate } = {}) {
   const dir = tmpDir();
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy, STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_ENABLED: 'false', ...opts.env });
   const now = Date.now();
@@ -50,7 +51,7 @@ async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy
   paper.on('fill', (f) => oms.onFill(f));
   paper.on('order', (o) => oms.onExchangeOrder(o));
   const recon = new Reconciler({ gateway: paper, oms, audit, getMarket: rest.getMarket, onPersistentBreak: (r) => void kill.engage(r, 'recon') });
-  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange(), curveExit: opts.curveExit, curveEntry: opts.curveEntry });
+  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange(), curveExit: opts.curveExit, curveEntry: opts.curveEntry, accuracyGate: opts.accuracyGate });
   return { cfg, md, paper, oms, kill, recon, engine, market, audit };
 }
 
@@ -419,6 +420,33 @@ test('paper fixed size: a wanted trade buys about PAPER_ORDER_USD of contracts (
   const s = quote(sized)!;
   assert.ok(s.count * s.price < 5, `${s.count} at ${s.price}`);
   assert.ok(s.count < q.count);
+});
+
+test('accuracy gate (paper): no new quote in a time-to-close bucket where the market mid called results better', async () => {
+  const quote = (g: Awaited<ReturnType<typeof setup>>) => g.oms.liveOrders().find((o) => o.ticker === g.market.ticker && o.purpose === 'quote' && !o.cancelRequested);
+  const env = { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' };
+  // 50 settled 15-minute markets per bucket around 10 minutes out, where the mid leaned the right way and the bot sat at 0.5.
+  const scorecard = (enabled: boolean) => {
+    const gate = new AccuracyGate({ enabled, window: 150, minMarkets: 40 });
+    for (let i = 0; i < 50; i++) for (const tau of [700, 520]) {
+      const t = `KXETH15M-M${i}-${tau}`;
+      gate.observe(t, tau, 0.5, i % 2 ? 0.65 : 0.35);
+      gate.settle(t, i % 2 ? 'yes' : 'no');
+    }
+    return gate;
+  };
+  const g = await setup({ env, accuracyGate: scorecard(true) });
+  g.engine.balance = (await g.recon.run('startup'))!.balance;
+  await g.engine.tick();
+  assert.equal(quote(g), undefined);
+  const why = Object.keys(g.engine.entryDiagnosis().reasons);
+  assert.ok(why.some((r) => /accuracy gate: the market has called results better (450-600|600-840) s before the close/.test(r)), why.join(' | '));
+  assert.equal(g.engine.guardStatus().accuracyGate?.enforced, true);
+  // ACCURACY_GATE=false: the scorecard is kept, the quote goes out.
+  const off = await setup({ env, accuracyGate: scorecard(false) });
+  off.engine.balance = (await off.recon.run('startup'))!.balance;
+  await off.engine.tick();
+  assert.ok(quote(off), JSON.stringify(off.engine.status.get(off.market.ticker)?.notes));
 });
 
 test('a manually recorded withdrawal is not counted again by the detector', async () => {

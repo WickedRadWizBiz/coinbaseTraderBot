@@ -8,6 +8,7 @@ import { DEFAULT_PROBATION, type ProbationParams } from './risk/probation';
 import { DEFAULT_SINUOUS_ENTRY, type SinuousEntryParams } from './strategy/sinuousEntry';
 import { DEFAULT_SINUOUS_EXIT, type SinuousExitParams } from './strategy/sinuousExit';
 import { defaultTiers, validateTiers, type TierPoint } from './risk/sizingTiers';
+import type { AccuracyGateConfig } from './strategy/accuracyGate';
 import type { VaultConfig } from './vault/vault';
 import os from 'os';
 import path from 'path';
@@ -114,6 +115,10 @@ export interface StrategyConfig {
    *  trade, in place of the tier, break-even, optimal-f and portfolio-Kelly sizing (the owner's choice on Oct 23: profit
    *  sales of $1 to $3 instead of cents). 0 = paper sizes like live. Live never uses it. */
   paperOrderUsd: number;
+  /** Paper only: no new crypto entries in a time-to-close bucket where the market mid has scored a better log loss
+   *  than the bot's (temperature-calibrated) probability over the last settled markets (bot/strategy/accuracyGate.ts;
+   *  the owner's choice on Oct 23). Live never blocks on it. */
+  accuracyGate: AccuracyGateConfig;
   /** kelly = fractional Kelly on the model probability; target_ev = spec sizing (shrink to market, $ target, min EV). */
   sizing: 'kelly' | 'target_ev';
   kappa: number;
@@ -976,6 +981,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     makerBufferRange: band(env, 'STRATEGY_MAKER_BUFFER_RANGE', relaxed ? [0.015, 0.03] : [0, 0]),
     minQuoteContracts: num(env, 'STRATEGY_MIN_QUOTE_CONTRACTS', 3, 0, 100),
     paperOrderUsd: num(env, 'PAPER_ORDER_USD', 10, 0, 1000),
+    accuracyGate: { enabled: bool(env, 'ACCURACY_GATE', true), window: num(env, 'ACCURACY_GATE_WINDOW', 150, 20, 2000), minMarkets: num(env, 'ACCURACY_GATE_MIN_MARKETS', 40, 5, 1000) },
     sizing: oneOf(env, 'STRATEGY_SIZING', relaxed ? 'target_ev' : 'kelly', ['kelly', 'target_ev'] as const),
     kappa: num(env, 'STRATEGY_KAPPA', 0.5, 0, 1),
     targetEvUsd: num(env, 'STRATEGY_TARGET_EV_USD', 10, 0, 10000),

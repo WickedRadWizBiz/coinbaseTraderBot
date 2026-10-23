@@ -37,6 +37,7 @@ import { CadenceGate, inEntryWindow, type CadenceReason } from './strategy/caden
 import { kalshiMaintenance, sessionEdge, sessionState, type SessionState } from './model/sessions';
 import type { EquityGuard } from './risk/equityGuard';
 import type { ModelHealth } from './model/modelHealth';
+import type { AccuracyGate } from './strategy/accuracyGate';
 import type { Tca } from './tca/tca';
 import type { MacroEvent } from './model/featureEngine';
 import { ladderQuotes } from './model/ladder';
@@ -218,6 +219,8 @@ export interface MarketStatus {
   q?: number;
   pStd?: number;
   entryWindow?: boolean;
+  /** The accuracy gate's reason when it closed the entry window (paper). */
+  accuracyBlock?: string;
   /** Why the last full (entry) evaluation ran under the relaxed cadence. */
   lastEval?: { reason: CadenceReason; ts: number };
   bestBid?: number;
@@ -285,6 +288,8 @@ export interface EngineDeps {
   modelHealth?: ModelHealth;
   /** Scores the TA tilt: P with the TA network's drift vs the same P without it (advantage > 0 = it helps). */
   taHealth?: ModelHealth;
+  /** Bot vs market mid log loss per time-to-close bucket; paper opens no entries where the market has been better. */
+  accuracyGate?: AccuracyGate;
   /** Scheduled macro releases (CPI, FOMC, NFP, PCE) for calendar features. */
   calendar?: MacroEvent[];
   /** Perp delta hedge of the binary book (stage 2). */
@@ -559,11 +564,12 @@ export class Engine {
         oms.settle(e.ticker, e.result);
         this.d.modelHealth?.onResult(e.ticker, e.result);
         this.d.taHealth?.onResult(e.ticker, e.result);
+        this.d.accuracyGate?.settle(e.ticker, e.result);
         this.snnSettle(e.ticker, e.result);
       }
     });
     // Official results of every scanned market (traded or not): the SNN's settlement labels.
-    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => { this.d.taHealth?.onResult(e.ticker, e.result); this.snnSettle(e.ticker, e.result); });
+    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => { this.d.taHealth?.onResult(e.ticker, e.result); this.d.accuracyGate?.settle(e.ticker, e.result); this.snnSettle(e.ticker, e.result); });
     oms.on('order_error', (n: number, msg: string) => {
       if (n >= cfg.risk.maxConsecutiveOrderErrors) void kill.engage(`${n} consecutive order errors (last: ${msg})`, 'oms');
     });
@@ -883,6 +889,7 @@ export class Engine {
       minTradableBankrollUsd: S.minTradableBankrollUsd,
       tier: { ...t, orderRiskUsd: +(t.orderFrac * b).toFixed(2), dailyLossLimitUsd: +this.d.risk.dailyLossLimit(b, this.tierLimits(t)).toFixed(2) },
       paperOrderUsd: this.paperOrderUsd() || null,
+      accuracyGate: this.d.accuracyGate ? { ...this.d.accuracyGate.status(), enforced: this.d.cfg.mode === 'paper' && this.d.cfg.strategy.accuracyGate.enabled } : null,
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null, minQuoteContracts: S.minQuoteContracts,
       takeProfit: { floorPct: S.profitTargetPct, floorCents: +(S.profitTarget * 100).toFixed(2), giveBack: +S.profitGiveBack.toFixed(3) },
@@ -1177,7 +1184,7 @@ export class Engine {
       const why = !st ? 'not evaluated yet'
         : st.blocked ? st.blocked
         : resting.has(m.ticker) ? undefined
-        : !st.entryWindow ? (this.entryGuards(now)[0] ?? 'outside the entry window (time to close / price band)')
+        : !st.entryWindow ? (st.accuracyBlock ?? this.entryGuards(now)[0] ?? 'outside the entry window (time to close / price band)')
         : 'no edge after fees';
       if (why) reasons[why] = (reasons[why] ?? 0) + 1; else quoting++;
     }
@@ -1876,7 +1883,12 @@ export class Engine {
     const kindWindow = S.cadence === 'relaxed'
       ? inEntryWindow(m.kind, tauSec, S.entryWindowUpdown, S.entryWindowHourly) && (m.kind === 'updown' || (mid >= S.hourlyMidBand[0] && mid <= S.hourlyMidBand[1]))
       : true;
-    const entryWindowOpen = kindWindow && guards.length === 0;
+    // Paper: no new entry where the market's own price has called recent results better than the bot (the owner's
+    // choice on Oct 23; bot/strategy/accuracyGate.ts). Every evaluation feeds the gate's scorecard, live included.
+    this.d.accuracyGate?.observe(m.ticker, tauSec, pYes, mid);
+    const accuracyBlock = kindWindow && guards.length === 0 && cfg.mode === 'paper' ? this.d.accuracyGate?.block(m.ticker, tauSec) : undefined;
+    const entryWindowOpen = kindWindow && guards.length === 0 && !accuracyBlock;
+    st.accuracyBlock = accuracyBlock;
     const restingBid = quote('bid');
     const restingAsk = quote('ask');
     const through = (r: { price: number } | undefined, best: number) => r !== undefined && Math.abs(best - r.price) >= 2 * S.requoteThreshold - 1e-9;
