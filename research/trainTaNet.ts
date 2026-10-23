@@ -55,7 +55,7 @@ import { DAILY_CONTEXT_FEATURES, SLOW_INDEXES, TaNetContext } from '../bot/ta/ta
 import { rng } from './stats';
 import { TaNetTorch, type TaNetEngine } from './taNetTorch';
 import { progress } from './progress';
-import { WorkerPool, workerCount, workerScript } from './workerPool';
+import { taRowWorkerCount, WorkerPool, workerScript } from './workerPool';
 import { sessionTimeUp } from './sessionClock';
 
 const H = 3_600_000;
@@ -1238,7 +1238,7 @@ export async function trainTaNetMain(argOf: (k: string, d: string) => string = c
   const assets = spec === 'all' ? storedAssets(hist) : spec.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
   if (!assets.length) throw new Error(`need at least one asset with hourly history in ${hist} (npm run history:binance / history:import)`);
   const cache = argOf('cache', path.join(hist, '.tanet-cache'));
-  const D = await buildDataParallel(hist, assets, cache, log, workerCount());
+  const D = await buildDataParallel(hist, assets, cache, log, taRowWorkerCount());
   const num = (k: string, d: string) => Number(argOf(k, d));
   // Real regime transitions over the history the tournament evaluates (each round's transition penalty).
   const transitions = argOf('transitions', 'true') === 'false' ? [] : regimeTransitions(hist, D.assets.map((a) => a.asset), D.ts[0], D.ts[D.ts.length - 1] + H, log);

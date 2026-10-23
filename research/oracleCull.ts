@@ -33,7 +33,7 @@ import { storedAssets } from './history/candles';
 import { LIB_FIRST_DAYS, libRows, type LibRow } from './librarian';
 import { regimeDayLabels } from './transitions';
 import { buildDataParallel, type TaNetData } from './trainTaNet';
-import { workerCount } from './workerPool';
+import { taRowWorkerCount } from './workerPool';
 import { CULL_SCHEMA, type CullItem, type CullLevel, type OracleCullFile } from './cullFile';
 
 export { readCull, CULL_SCHEMA, type OracleCullFile } from './cullFile';
@@ -195,7 +195,7 @@ export function cullSummary(f: OracleCullFile, top = 8): string[] {
 export async function trainOracleCull(hist: string, o: { cacheDir?: string; level?: CullLevel; log?: (m: string) => void } = {}): Promise<OracleCullFile> {
   const log = o.log ?? console.log;
   const assets = storedAssets(hist);
-  const Dt = await buildDataParallel(hist, assets, o.cacheDir ?? path.join(hist, '.tanet-cache'), log, workerCount());
+  const Dt = await buildDataParallel(hist, assets, o.cacheDir ?? path.join(hist, '.tanet-cache'), log, taRowWorkerCount());
   if (!Dt.assets.length) throw new Error('no coin has enough hourly and daily history for TA rows');
   const t0 = Math.min(...Dt.assets.map((a) => a.rowTs[0] ?? Infinity)), t1 = Math.max(...Dt.assets.map((a) => a.rowTs[a.rowTs.length - 1] ?? 0)) + D;
   const labels = regimeDayLabels(hist, Dt.assets.map((a) => a.asset), t0, t1, log);

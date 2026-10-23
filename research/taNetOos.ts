@@ -24,7 +24,7 @@ import type { Hyper } from './pbt';
 import { storedAssets } from './history/candles';
 import type { TaNetEngine } from './taNetTorch';
 import { buildDataParallel, TaNetTrainEngine, taNetDims, type Member, type TaNetData } from './trainTaNet';
-import { workerCount } from './workerPool';
+import { taRowWorkerCount } from './workerPool';
 
 const H = 3_600_000;
 const DAY = 86_400_000;
@@ -90,7 +90,7 @@ async function walk(hist: string, o: OosOpts, hold: (e: TaNetTrainEngine) => voi
   const dir = oosDir(hist);
   fs.mkdirSync(dir, { recursive: true });
   const cacheDir = o.cacheDir ?? path.join(hist, '.tanet-cache');
-  const D = o.data ?? await buildDataParallel(hist, storedAssets(hist), cacheDir, log, workerCount());
+  const D = o.data ?? await buildDataParallel(hist, storedAssets(hist), cacheDir, log, taRowWorkerCount());
   // The params' own layout (flat or grouped), checked against the code's input sizes.
   const dims = P.dims;
   const want = taNetDims(P.arch ?? (P.dims.fam ? 'grouped' : 'flat'), P.dims.fam?.k ?? 4);

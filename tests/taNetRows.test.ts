@@ -3,12 +3,14 @@
 // monthly signatures are still accepted (and upgraded); rows for many coins are computed on worker threads.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import type { Candle } from '../bot/ta/indicators';
 import { TaNetContext } from '../bot/ta/taNetContext';
 import { aggregateCandles } from '../research/history/candles';
 import { assetRows, keepRowsBefore, legacySig, rowCheckpoints, type RowInputs } from '../research/trainTaNet';
+import { taRowWorkerCount } from '../research/workerPool';
 import { tmpDir } from './helpers';
 
 const H = 3_600_000, Q = 900_000, DAY = 86_400_000, T0 = Date.UTC(2020, 0, 1);
@@ -76,4 +78,12 @@ test('row cache: month signatures find the first changed month; a cache from bef
   assert.equal(r2.computed, 0, 'an older cache with a matching signature is used as is');
   assert.deepEqual(Array.from(r2.X), Array.from(r1.X));
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'TST.json'), 'utf8')).v, 2, 'and upgraded to month signatures');
+});
+
+test('row threads: TA_ROW_WORKERS when set (the remote runner: every core), else TRAIN_WORKERS; never above the cores', () => {
+  const cores = os.cpus().length;
+  assert.equal(taRowWorkerCount({ TRAIN_WORKERS: '1', TA_ROW_WORKERS: '3' }), Math.min(3, cores));
+  assert.equal(taRowWorkerCount({ TRAIN_WORKERS: '2' }), Math.min(2, cores));
+  assert.equal(taRowWorkerCount({}), 1);
+  assert.equal(taRowWorkerCount({ TA_ROW_WORKERS: '999' }), cores);
 });
