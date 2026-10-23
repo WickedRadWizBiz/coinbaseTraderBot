@@ -206,7 +206,7 @@ export function DashboardView() {
         <Panel title="System Telemetry" right={<LatencyBadges latency={s?.latency} />} className="!p-0" bodyClass="h-full" flush scroll="h-[470px] md:h-[440px]">
           {s ? (
             <div className="flex flex-col">
-              <Row label="Model" value={s.model.id} sub={s.model.liveBlockers.length ? `not live-validated (${s.model.liveBlockers.length} blockers)` : 'validated for live'} tone={s.model.liveBlockers.length ? 'warn' : 'ok'} />
+              <Row label="Model" value={s.model.id} sub={s.model.liveBlockers.length ? `not live-validated (${s.model.liveBlockers.length} checks failing${s.model.liveGated === false ? '; live trades anyway' : ''})` : 'validated for live'} tone={s.model.liveBlockers.length ? 'warn' : 'ok'} />
               <Row label="Settlement index" value={String(s.indexSource).toUpperCase()} sub={s.indexSource === 'proxy' ? 'Coinbase spot proxy (paper only)' : 'CF Benchmarks RTI via Kalshi'} tone={s.indexSource === 'none' ? 'bad' : s.indexSource === 'proxy' ? 'warn' : 'ok'} />
               <Row label="USDT.D (Binance×CoinGecko)" value={s.dominance?.usdtd != null ? `${s.dominance.usdtd.toFixed(3)}%` : 'NO DATA'}
                 sub={s.dominance?.usdtdChange5mPct != null ? `5m ${s.dominance.usdtdChange5mPct >= 0 ? '+' : ''}${s.dominance.usdtdChange5mPct.toFixed(3)}% · ${s.dominance.usdtdChange5mPct < 0 ? 'RISK-ON' : 'RISK-OFF'}` : (s.dominance?.error ?? (s.dominance?.enabled ? 'warming up' : 'disabled'))}

@@ -90,7 +90,8 @@ export class RiskGateway {
     const reduces = i.reduceOnly || restingExit;
 
     if (c.killEngaged) return { ok: false, reasons: ['kill switch engaged'] };
-    if (c.mode === 'live' && c.modelLiveBlockers.length) r.push(`model not validated for live: ${c.modelLiveBlockers.join('; ')}`);
+    // The model's validation holds back new risk only: an exit always goes out.
+    if (c.mode === 'live' && c.modelLiveBlockers.length && !reduces) r.push(`model not validated for live: ${c.modelLiveBlockers.join('; ')}`);
 
     // Order sanity.
     if (!(i.price > 0 && i.price < 1)) r.push(`price ${i.price} outside (0,1)`);

@@ -221,8 +221,10 @@ export interface Config {
   kalshiSubaccount?: number;
   /** Balance precision for fee rounding: 0.01 for non-direct (FCM-cleared) members, 0.0001 for direct members. */
   kalshiBalancePrecision: number;
-  /** LIVE_ALLOW_UNVALIDATED_MODEL=true: trade binary contracts live even when the model failed validation
-   *  (the operator accepts the risk; every other limit still applies). */
+  /** LIVE_ALLOW_UNVALIDATED_MODEL (default true, the owner's choice on Oct 23): the model's validation never blocks a
+   *  binary crypto order in live. Entries, exits and ratchet stops go out whether or not the model passed validation or
+   *  its probation is benched; every other limit still applies. false: live entries (and ratchet stops) wait for a
+   *  validated model or an open probation; an exit always goes out. */
   liveAllowUnvalidated: boolean;
   /** VALIDATION_GATES=monitor (default): models that have not passed validation trade anyway, on probation; a book whose
    *  results are unacceptable is benched (bot/risk/probation.ts). enforce: every validation gate blocks as before. */
@@ -1050,7 +1052,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     kalshiPrivateKeyPath,
     kalshiSubaccount: env.KALSHI_SUBACCOUNT ? num(env, 'KALSHI_SUBACCOUNT', 0, 0, 1000) : undefined,
     kalshiBalancePrecision: env.KALSHI_BALANCE_PRECISION === '0.0001' ? 0.0001 : 0.01,
-    liveAllowUnvalidated: bool(env, 'LIVE_ALLOW_UNVALIDATED_MODEL', false),
+    liveAllowUnvalidated: bool(env, 'LIVE_ALLOW_UNVALIDATED_MODEL', true),
     probation: {
       mode: oneOf(env, 'VALIDATION_GATES', 'monitor', ['monitor', 'enforce'] as const),
       minTrades: num(env, 'PROBATION_MIN_TRADES', DEFAULT_PROBATION.minTrades, 2, 10_000),

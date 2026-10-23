@@ -242,8 +242,9 @@ test('paper uses live\'s stale-data limits (a 5 s book, a 3 s index)', () => {
 });
 
 test('paper: an order live would not have sent is tagged at its first fill, for the live-equivalent P&L', async () => {
-  // No probation is set in tests and the identity model has no validation report: live would reject every entry.
-  const { engine, recon, paper, market, audit } = await setup({ env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+  // No probation is set in tests and the identity model has no validation report: with the model gating live orders
+  // (LIVE_ALLOW_UNVALIDATED_MODEL=false), live would reject every entry.
+  const { engine, recon, paper, market, audit } = await setup({ env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false', LIVE_ALLOW_UNVALIDATED_MODEL: 'false' } });
   engine.balance = (await recon.run('startup'))!.balance;
   await engine.tick();
   const o = (await paper.getOpenOrders())[0];
@@ -254,6 +255,17 @@ test('paper: an order live would not have sent is tagged at its first fill, for 
   else paper.onTrade(market.ticker, +(o.price + 0.01).toFixed(2), 100, 'yes');
   const tags = audit.tail(50, 'paper_live_block').map((r) => r.data as { clientOrderId: string; reasons: string[] });
   assert.deepEqual(tags, [{ clientOrderId: o.clientOrderId, reasons: ['model not validated, probation benched'] }]);
+});
+
+test('paper: by default live sends what an unvalidated model wants, so nothing is tagged for it', async () => {
+  const { engine, recon, paper, market, audit } = await setup({ env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+  engine.balance = (await recon.run('startup'))!.balance;
+  await engine.tick();
+  const o = (await paper.getOpenOrders())[0];
+  assert.ok(o, 'a maker quote rests');
+  if (o.side === 'bid') paper.onTrade(market.ticker, +(o.price - 0.01).toFixed(2), 100, 'no');
+  else paper.onTrade(market.ticker, +(o.price + 0.01).toFixed(2), 100, 'yes');
+  assert.equal(audit.tail(50, 'paper_live_block').length, 0);
 });
 
 test('paper, like live: no trading a series until its fee schedule is verified', async () => {

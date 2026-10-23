@@ -157,7 +157,7 @@ export function ModelView() {
             <FeatureTable model={m} />
             {m.liveBlockers.length > 0 && (
               <div className="border border-yellow-500/40 bg-yellow-500/10 p-3 text-yellow-300 text-xs">
-                <div className="font-bold uppercase mb-1">Live trading blocked until:</div>
+                <div className="font-bold uppercase mb-1">{m.liveGated === false ? 'Validation still failing (live trades anyway):' : 'Live entries blocked until:'}</div>
                 <ul className="list-disc pl-5 normal-case">{m.liveBlockers.map((b: string) => <li key={b}>{b}</li>)}</ul>
               </div>
             )}
