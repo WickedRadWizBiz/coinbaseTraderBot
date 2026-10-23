@@ -12,7 +12,7 @@ function countdown(ms: number): string {
 
 const KIND_TONE: Record<string, string> = {
   vault: 'text-crypto-success', pocket: 'text-crypto-primary', release: 'text-crypto-text',
-  withdrawal: 'text-crypto-danger', deposit: 'text-crypto-success', quota_reset: 'opacity-70',
+  withdrawal: 'text-crypto-danger', deposit: 'text-crypto-success', quota_reset: 'opacity-70', skip: 'opacity-70', ledger: 'text-crypto-primary',
 };
 
 /** Profit vault / pocket (bookkeeping rules on the Kalshi cash pool). */
@@ -40,7 +40,7 @@ export function VaultCard({ vault, session, onChange }: { vault: any; session: a
         <h3 className="font-bold tracking-[0.2em] text-lg uppercase text-crypto-text border-b border-crypto-primary pb-2 px-4 pt-4 flex flex-wrap items-center justify-between gap-2">
           <span className="flex items-center gap-2"><Lock className="w-5 h-5" /> Profit Vault</span>
           <span className={`px-2 py-0.5 text-[10px] font-bold tracking-widest border ${pocketing ? 'bg-crypto-primary/20 text-crypto-primary border-crypto-primary/60' : 'bg-crypto-success/20 text-crypto-success border-crypto-success/60 animate-pulse'}`}>
-            {pocketing ? `POCKETING ${Math.round(vault.pocketShare * 100)}%` : `VAULTING ${Math.round(vault.winShare * 100)}% OF WINS`}
+            {vault.realized?.toWinBack > 0 ? `WINNING BACK ${usd(vault.realized.toWinBack)}` : pocketing ? `POCKETING ${Math.round(vault.pocketShare * 100)}%` : `VAULTING ${Math.round(vault.winShare * 100)}% OF NEW PROFIT`}
           </span>
         </h3>
         <div className="grid grid-cols-2">
@@ -55,6 +55,12 @@ export function VaultCard({ vault, session, onChange }: { vault: any; session: a
             <div className="text-[10px] opacity-60">{vault.nextRelease ? `releases at US open in ${countdown(vault.nextRelease - now)}` : 'released at each US market open'}</div>
           </div>
         </div>
+        {vault.realized && (
+          <div className="px-4 py-2 flex justify-between text-xs font-bold tracking-widest uppercase gap-2 flex-wrap border-b border-crypto-primary/50">
+            <span className="text-crypto-text">Realized {vault.realized.total >= 0 ? '+' : '-'}{usd(Math.abs(vault.realized.total))} · high {usd(vault.realized.high)}</span>
+            <span className={vault.realized.toWinBack > 0 ? 'text-crypto-danger' : 'text-crypto-success'}>{vault.realized.toWinBack > 0 ? `${usd(vault.realized.toWinBack)} to win back before anything is vaulted` : 'at its high: new profit is vaulted'}</span>
+          </div>
+        )}
         <div className="px-4 py-3 flex flex-col gap-2 border-b border-crypto-primary/50">
           <div className="flex justify-between text-xs font-bold tracking-widest uppercase gap-2 flex-wrap">
             <span className="text-crypto-text">Today&apos;s goal {usd(vault.dailyVaulted)} / {usd(vault.dailyGoalUsd)}</span>
@@ -92,8 +98,8 @@ export function VaultCard({ vault, session, onChange }: { vault: any; session: a
         </div>
         <div className="px-4 pb-4 flex items-center justify-between gap-2 flex-wrap">
           <span className="text-[10px] opacity-60 normal-case">{vault.paperIgnored
-            ? 'Paper: the bot trades its whole balance and this vault only keeps its books. It is not profit: it counts half of every win and none of the losses (VAULT_IN_PAPER=false).'
-            : 'Bookkeeping only: reserved money stays in your Kalshi cash; the bot just won\u2019t trade it.'} Withdrawn to date: {usd(vault.withdrawnTotal)}.</span>
+            ? 'Paper: the bot trades its whole balance and this vault only keeps its books (VAULT_IN_PAPER=false). Only realized profit above the previous high is vaulted.'
+            : 'Bookkeeping only: reserved money stays in your Kalshi cash; the bot just won\u2019t trade it. Only realized profit above the previous high is vaulted.'} Withdrawn to date: {usd(vault.withdrawnTotal)}.</span>
           <button onClick={record} className="flat-btn"><span>Record Withdrawal</span></button>
         </div>
       </div>

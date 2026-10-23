@@ -38,6 +38,59 @@ test('50% of wins vaulted until the $100 quota, then 10% pocketed; crossing win 
   assert.equal(v.reserved(), 109);
 });
 
+test('realized profit only: a win that wins back a loss vaults nothing; only the part above the realized high is shared', () => {
+  // The owner, Oct 23: "I don't want any vaulting from a negative account, vaulting profits only happens if those are
+  // realized gains. A negative total doesn't count."
+  const now = T('2026-07-15T14:00:00Z');
+  const v = new Vault(CFG, undefined, () => now);
+  v.onSettled(20, 'A'); // a new high: half of it vaulted
+  assert.equal(v.vaultTotal, 10);
+  v.onSettled(-30, 'B'); // the total falls to -$10; the vault keeps what it holds
+  assert.equal(v.vaultTotal, 10);
+  assert.deepEqual(v.status().realized && { total: v.status().realized!.total, high: v.status().realized!.high, toWinBack: v.status().realized!.toWinBack }, { total: -10, high: 20, toWinBack: 30 });
+  v.onSettled(25, 'C'); // $15: still under the $20 high, a loss being won back
+  assert.equal(v.vaultTotal, 10, 'nothing vaulted while the total is under its high');
+  assert.equal(v.status().events[0].kind, 'skip');
+  assert.match(v.status().events[0].note!, /winning back losses/);
+  v.onSettled(10, 'D'); // $25: $5 above the high is new profit
+  assert.equal(v.vaultTotal, 12.5);
+  assert.match(v.status().events[0].note!, /50% of \$5\.00 of a \$10\.00 win above the realized high/);
+  assert.equal(v.pocketTotal, 0);
+});
+
+test('a negative account vaults nothing: the realized total starts at the account\'s net P&L against break-even', () => {
+  let now = T('2026-07-15T14:00:00Z');
+  const v = new Vault(CFG, undefined, () => now);
+  v.startLedger(now, -50); // the account is $50 under break-even when the rule starts
+  v.startLedger(now, -500); // started once: a later call changes nothing
+  v.onSettled(30, 'A');
+  assert.equal(v.vaultTotal, 0, '-$20: still negative');
+  now = T('2026-07-15T14:30:00Z');
+  v.onSettled(30, 'B'); // +$10: the loss is won back and $10 is new profit
+  assert.equal(v.vaultTotal, 5);
+  // An account above break-even starts at 0: its next win is new profit.
+  const up = new Vault(CFG, undefined, () => now);
+  up.startLedger(now, 40);
+  up.onSettled(8, 'A');
+  assert.equal(up.vaultTotal, 4);
+});
+
+test('the pocket and the quota count new profit only; a refilled paper pool starts the realized total over', () => {
+  let now = T('2026-07-15T14:00:00Z');
+  const v = new Vault(CFG, undefined, () => now);
+  v.onSettled(300, 'A'); // vault 100 (quota), pocket 10% of the other 100 = 10
+  assert.deepEqual([v.vaultTotal, v.pocketTotal], [100, 10]);
+  v.onSettled(-120, 'B');
+  v.onSettled(100, 'C'); // $280, under the $300 high: no pocket either
+  assert.deepEqual([v.vaultTotal, v.pocketTotal], [100, 10]);
+  v.onSettled(-200, 'D'); // $80
+  now = T('2026-07-15T14:10:00Z');
+  v.resetLedger(now); // the paper pool was exhausted and refilled: a new epoch
+  v.onSettled(10, 'E'); // quota met this session: 10% of a new $10 high pocketed
+  assert.equal(v.pocketTotal, 11);
+  assert.deepEqual([v.status().realized!.total, v.status().realized!.high], [10, 10]);
+});
+
 test('quota resets when the next market session opens; vaulting resumes', () => {
   let now = T('2026-07-15T14:00:00Z');
   const v = new Vault(CFG, undefined, () => now);
@@ -88,11 +141,17 @@ test('withdrawals come out of the vault first, then the pocket, then trading cas
   assert.equal(v.reserved(), 0);
 });
 
-test('vault state persists across restarts', () => {
+test('vault state persists across restarts, the realized total and its high included', () => {
   const file = path.join(tmpDir(), 'vault.json');
   const now = () => T('2026-07-15T14:00:00Z');
-  new Vault(CFG, file, now).onSettled(40, 'A');
-  assert.equal(new Vault(CFG, file, now).vaultTotal, 20);
+  const v = new Vault(CFG, file, now);
+  v.onSettled(40, 'A');
+  v.onSettled(-15, 'B');
+  const again = new Vault(CFG, file, now);
+  assert.equal(again.vaultTotal, 20);
+  assert.deepEqual([again.status().realized!.total, again.status().realized!.high], [25, 40]);
+  again.onSettled(10, 'C'); // $35: under the $40 high
+  assert.equal(again.vaultTotal, 20);
 });
 
 test('disabled vault reserves nothing', () => {

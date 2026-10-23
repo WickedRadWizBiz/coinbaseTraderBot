@@ -2,15 +2,22 @@
 // treats as its own to trade. Nothing moves on the exchange; reserved money is
 // simply excluded from the tradable bankroll (sizing and risk limits).
 //
-// Vault (quota): 50% of every win (market settled with positive, fee-inclusive
-//   realized PnL) is vaulted until the quota ($100) is met. Vaulting then stops
+// Realized profit only (the owner, Oct 23: "I don't want any vaulting from a negative account, vaulting profits only
+//   happens if those are realized gains. A negative total doesn't count."): the vault keeps the running total of
+//   every settled market's realized PnL, wins and losses, after fees, and its high-water mark. Only the part of a win
+//   that lifts the total to a new high is new profit, and only that is shared below. While the total is under its
+//   high, a negative total included, wins go to winning the losses back and nothing is vaulted or pocketed. So the
+//   vault never takes from an account that is down, nor on a day or session that is down. The total starts at the
+//   account's net P&L against its break-even when that is negative (the loss has to be won back first), else at 0,
+//   and starts over at 0 when an exhausted paper pool is refilled (a new training epoch).
+// Vault (quota): 50% of new profit is vaulted until the quota ($100) is met. Vaulting then stops
 //   until the next market session opens (any session: Asia, London, overlap,
 //   New York, twilight, weekend), when the quota resets. Vaulted money is
 //   permanent until withdrawn.
-// Pocket: only while the quota is met, 10% of each win is pocketed. Pocket
+// Pocket: only while the quota is met, 10% of new profit is pocketed. Pocket
 //   cycles run from one US market open (NYSE 09:30 ET) to the next; money
 //   pocketed in a cycle is released back to trading at the next US open.
-//   A win that crosses the quota fills it, and the rest of that win is
+//   New profit that crosses the quota fills it, and the rest of it is
 //   subject to the pocket.
 // Withdrawals from the Kalshi account come out of the vault first, then the
 //   pocket, then trading cash. Deposits add to trading cash.
@@ -51,7 +58,7 @@ export function vaultRamp(cfg: Pick<VaultConfig, 'rampStartUsd' | 'rampFullUsd'>
   return (Math.log(reference) - Math.log(start)) / (Math.log(full) - Math.log(start));
 }
 
-export type VaultEventKind = 'vault' | 'pocket' | 'release' | 'withdrawal' | 'deposit' | 'quota_reset' | 'skip';
+export type VaultEventKind = 'vault' | 'pocket' | 'release' | 'withdrawal' | 'deposit' | 'quota_reset' | 'skip' | 'ledger';
 
 export interface VaultEvent {
   ts: number;
@@ -72,10 +79,14 @@ export interface VaultState {
   /** Vaulted since the day (US open) began, and when that day began. */
   dailyVaulted?: number;
   dailyStart?: number;
+  /** Realized PnL of every settled market since `since` (wins and losses, after fees) and its high-water mark: only
+   *  a new high is profit to share. Absent in state saved before the rule: started at the first settlement. */
+  realized?: { total: number; high: number; since: number };
   events: VaultEvent[];
 }
 
 const r2 = (x: number) => Math.round(x * 100) / 100;
+const r6 = (x: number) => Math.round(x * 1e6) / 1e6;
 
 /** Next NYSE open (09:30 America/New_York on a weekday) strictly after ts. */
 export function nextUsOpen(ts: number): number {
@@ -153,33 +164,68 @@ export class Vault {
     if (changed) this.save();
   }
 
-  /** A market settled. Only positive realized PnL (a win) is shared. */
+  /** Start the realized total if it has not started (state saved before the rule, or a new vault): at the account's
+   *  net P&L against break-even when that is negative (won back before anything is vaulted), else at 0. The engine
+   *  calls it on its first balance read; a settlement before that starts it at 0. */
+  startLedger(now = this.now(), accountNet?: number): void {
+    if (!this.cfg.enabled || this.st.realized) return;
+    const start = accountNet !== undefined && Number.isFinite(accountNet) && accountNet < 0 ? r2(accountNet) : 0;
+    this.st.realized = { total: start, high: 0, since: now };
+    this.log({ ts: now, kind: 'ledger', amount: start, note: start < 0
+      ? `realized-profit rule starts: the account is $${(-start).toFixed(2)} under break-even, won back before anything is vaulted`
+      : 'realized-profit rule starts: only realized profit above the previous high is vaulted' });
+    this.save();
+  }
+
+  /** Start the realized total over at 0 (an exhausted paper pool refilled: a new training epoch). */
+  resetLedger(now = this.now(), why = 'paper pool refilled: new training epoch'): void {
+    if (!this.cfg.enabled) return;
+    const before = this.st.realized;
+    this.st.realized = { total: 0, high: 0, since: now };
+    this.log({ ts: now, kind: 'ledger', amount: 0, note: `${why}: realized total starts over${before ? ` (was $${before.total.toFixed(2)}, high $${before.high.toFixed(2)})` : ''}` });
+    this.save();
+  }
+
+  /** A market settled with this realized PnL (fee-inclusive, a win or a loss). It moves the realized total; only the
+   *  part of a win that lifts the total above its high is shared (see the header). */
   onSettled(realized: number, ticker: string, now = this.now(), reference?: number): void {
-    if (!this.cfg.enabled || !(realized > 0)) return;
+    if (!this.cfg.enabled || !Number.isFinite(realized) || realized === 0) return;
     this.tick(now);
+    this.startLedger(now);
+    const L = this.st.realized!;
+    L.total = r6(L.total + realized);
+    const gain = Math.max(0, L.total - L.high);
+    if (L.total > L.high) L.high = L.total;
+    if (!(realized > 0)) { this.save(); return; }
+    if (gain < 0.005) {
+      if (L.high - L.total >= 0.005) this.log({ ts: now, kind: 'skip', amount: 0, ticker, note: `$${realized.toFixed(2)} win kept for trading: realized total $${L.total.toFixed(2)} is $${(L.high - L.total).toFixed(2)} under its high $${L.high.toFixed(2)} (winning back losses)` });
+      this.save();
+      return;
+    }
+    const why = gain < realized - 0.005 ? `$${gain.toFixed(2)} of a $${realized.toFixed(2)} win above the realized high` : `$${realized.toFixed(2)} win`;
     const ramp = vaultRamp(this.cfg, reference);
     this.lastRamp = ramp;
     if (ramp <= 0) {
-      this.log({ ts: now, kind: 'skip', amount: 0, ticker, note: `$${realized.toFixed(2)} win kept for trading: high-water $${(reference ?? 0).toFixed(2)} is at or below the $${this.cfg.rampStartUsd} ramp start` });
+      this.log({ ts: now, kind: 'skip', amount: 0, ticker, note: `${why} kept for trading: high-water $${(reference ?? 0).toFixed(2)} is at or below the $${this.cfg.rampStartUsd} ramp start` });
       this.save();
       return;
     }
     const toQuota = Math.max(0, this.cfg.quotaUsd - this.st.quotaFilled);
-    const wantVault = ramp * this.cfg.winShare * realized;
+    const wantVault = ramp * this.cfg.winShare * gain;
     const v = r2(Math.min(wantVault, toQuota));
     if (v > 0) {
       this.st.vault = r2(this.st.vault + v);
       this.st.quotaFilled = r2(this.st.quotaFilled + v);
       this.st.dailyVaulted = r2((this.st.dailyVaulted ?? 0) + v);
-      this.log({ ts: now, kind: 'vault', amount: v, ticker, note: `${Math.round(ramp * this.cfg.winShare * 100)}% of $${realized.toFixed(2)} win` });
+      this.log({ ts: now, kind: 'vault', amount: v, ticker, note: `${Math.round(ramp * this.cfg.winShare * 100)}% of ${why}` });
     }
-    // Portion of the win after the quota was met is subject to the pocket.
+    // Portion of the new profit after the quota was met is subject to the pocket.
     const postQuotaShare = wantVault > 0 ? 1 - v / wantVault : 1;
-    const p = r2(ramp * this.cfg.pocketShare * realized * postQuotaShare);
+    const p = r2(ramp * this.cfg.pocketShare * gain * postQuotaShare);
     if (p > 0 && this.st.quotaFilled >= this.cfg.quotaUsd - 1e-9) {
       const releaseAt = nextUsOpen(now);
       this.st.pocket.push({ amount: p, ts: now, releaseAt });
-      this.log({ ts: now, kind: 'pocket', amount: p, ticker, note: `${Math.round(ramp * this.cfg.pocketShare * 100)}% pocketed until ${new Date(releaseAt).toISOString()}` });
+      this.log({ ts: now, kind: 'pocket', amount: p, ticker, note: `${Math.round(ramp * this.cfg.pocketShare * 100)}% of ${why}, pocketed until ${new Date(releaseAt).toISOString()}` });
     }
     this.save();
   }
@@ -232,6 +278,8 @@ export class Vault {
       nextRelease: this.st.pocket.length ? Math.min(...this.st.pocket.map((p) => p.releaseAt)) : null,
       nextUsOpen: nextUsOpen(now),
       withdrawnTotal: this.st.withdrawnTotal,
+      // Realized total and its high: nothing is vaulted until the total is above the high again.
+      realized: this.st.realized ? { total: r2(this.st.realized.total), high: r2(this.st.realized.high), toWinBack: r2(Math.max(0, this.st.realized.high - this.st.realized.total)), since: this.st.realized.since } : null,
       events: this.st.events.slice(-30).reverse(),
     };
   }

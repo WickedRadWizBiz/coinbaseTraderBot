@@ -354,6 +354,7 @@ export class Engine {
   private readonly now: () => number;
 
   private lastSettleTs = 0;
+  private vaultLedgerStarted = false;
   // SNN: L0 inputs observed during the last tick (one ATM contract per column), the latest readout.
   /** Closest-to-the-money Kalshi contract per crypto column (its book feeds the column's contract channels). */
   private readonly snnObs = new Map<string, { contract: { dAtm?: number; tauFrac?: number; mid?: number; spread?: number; imbalance?: number }; absD: number; ts: number }>();
@@ -435,9 +436,10 @@ export class Engine {
       d.balanceMonitor?.onCash(settleCashDelta(e.positionBefore, e.result));
       d.kalshiCheck?.onBotCash(settleCashDelta(e.positionBefore, e.result));
       this.saveMonitor();
-      if (d.vault && e.realized > 0) {
+      // Every settled market moves the vault's realized total: a loss is won back before anything more is vaulted.
+      if (d.vault && e.realized) {
         d.vault.onSettled(e.realized, e.ticker, this.now(), this.d.equityGuard?.tierReference(this.bankroll() ?? 0) ?? this.bankroll());
-        d.audit.write('vault', { event: 'win', ticker: e.ticker, realized: e.realized, status: d.vault.status(this.now()) });
+        if (e.realized > 0) d.audit.write('vault', { event: 'win', ticker: e.ticker, realized: e.realized, status: d.vault.status(this.now()) });
       }
     });
   }
@@ -458,10 +460,12 @@ export class Engine {
     return split;
   }
 
-  /** Cash the bot added itself (a paper training refill): expected by the deposit detector, not a deposit. */
+  /** Cash the bot added itself (a paper training refill): expected by the deposit detector, not a deposit. The
+   *  refilled pool is a new training epoch, so the vault's realized total starts over. */
   noteCashFlow(amount: number): void {
     this.d.balanceMonitor?.onCash(amount);
     this.saveMonitor();
+    this.d.vault?.resetLedger(this.now());
   }
 
   /** New balance from reconciliation: detect withdrawals/deposits, then store. */
@@ -471,6 +475,11 @@ export class Engine {
     this.balanceTs = readAt;
     this.checkShardCash();
     const eq = this.equity();
+    // The vault's realized total starts (once) at the account's net P&L against break-even when that is negative.
+    if (eq !== undefined && this.d.vault && !this.vaultLedgerStarted) {
+      this.vaultLedgerStarted = true;
+      this.d.vault.startLedger(this.now(), this.d.equityGuard?.netPnl(eq));
+    }
     if (eq !== undefined) for (const win of this.pendingResults.splice(0)) {
       const raised = this.d.equityGuard?.onTradeResult(win, eq, this.now());
       if (raised) this.d.audit.write('training', { event: 'break_even_raised', book: 'kalshi', ...raised });
