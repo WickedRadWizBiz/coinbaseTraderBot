@@ -152,6 +152,24 @@ test('fill log: quotes, maker fills and 60 s markouts; taker fills are ignored',
   assert.equal(ask.filled, 0); assert.equal(ask.markout60, null);
 });
 
+test('fill log: a fill is credited by its order when the order is known; a resting exit at the same price credits no quote', () => {
+  const dir = tmpDir();
+  let now = T0;
+  const log = new FillLog(dir, () => 0.5, () => now, { timers: false });
+  log.onQuote({ ticker: 'T', side: 'ask', price: 0.55, count: 3, x: { dist_ticks: 0 }, coid: 'q1' });
+  now += 2000;
+  // The exit curve's resting sell (another order) fills at the quote's price: not the quote's fill.
+  log.onFill({ ticker: 'T', side: 'ask', price: 0.55, isTaker: false, coid: 'exit-1' });
+  now += 3000;
+  log.onFill({ ticker: 'T', side: 'ask', price: 0.55, isTaker: false, coid: 'q1' });
+  now = T0 + 70_000;
+  log.flush();
+  const [row] = readFillLog(dir);
+  assert.equal(row.filled, 1);
+  assert.equal(row.fillDelaySec, 5, 'credited by its own order, five seconds in');
+  assert.equal((row as unknown as { coid?: string }).coid, undefined, 'the order id is not written to the training rows');
+});
+
 test('fill model: not ready until 500 quotes / 100 fills; validated once it beats the base rate on held-out days', () => {
   assert.throws(() => trainFillModel(fillRows(300)), /not ready/);
   const p = trainFillModel(fillRows(3000));

@@ -22,8 +22,9 @@ def hour(ts_iso):
 
 files = sorted(f for f in glob.glob(os.path.join(data, 'audit', 'audit-*.jsonl')) if os.path.basename(f)[6:16] >= since_day)
 fills, settles, orders, starts, other = [], [], {}, [], collections.Counter()
-want = ('"kind":"fill"', '"kind":"settlement"', '"kind":"order_new"', '"kind":"startup"', '"kind":"training"', '"kind":"kill_', '"kind":"risk_reject"')
+want = ('"kind":"fill"', '"kind":"settlement"', '"kind":"order_new"', '"kind":"startup"', '"kind":"training"', '"kind":"kill_', '"kind":"risk_reject"', '"kind":"paper_live_block"')
 rate_rejects = collections.Counter()
+live_block = {}  # paper: clientOrderId -> why live would not have sent that order (first fill's time, reasons)
 exit_why = {}  # decisionId -> [(side, price, why)] of the exits it planned
 for f in files:
     with open(f, 'rb') as fh:
@@ -47,6 +48,8 @@ for f in files:
                 orders[d.get('clientOrderId')] = {'ts': ts, 'purpose': d.get('purpose'), 'fv': d.get('fairValue'), 'price': d.get('price'), 'side': d.get('side'), 'count': d.get('count'), 'ticker': d.get('ticker', ''), 'tif': d.get('timeInForce'), 'post': d.get('postOnly'), 'decision': d.get('decisionId')}
             elif k == 'startup':
                 starts.append(ts)
+            elif k == 'paper_live_block':
+                live_block[d.get('clientOrderId')] = (ts, d.get('reasons') or [])
             elif k == 'risk_reject':
                 rs = d.get('reasons') or []
                 if any('order rate' in str(x) for x in rs): rate_rejects[((d.get('intent') or {}).get('purpose') or '?', ts[:13])] += 1
@@ -77,6 +80,41 @@ for s in settles:
     b[0] += 1; b[1] += s['realized']; b[2] += 1 if s['realized'] > 0 else 0
 for d in sorted(byd):
     print(d, '  '.join(f"{k}: {v[0]} / {v[1]:+.2f} / {100*v[2]/max(1,v[0]):.0f}%" for k, v in sorted(byd[d].items())), f"  TOTAL {sum(v[1] for v in byd[d].values()):+.2f}")
+
+# Paper: what live would have made. Each paper order live would not have sent under its own rules is tagged at its first
+# fill (paper_live_block: an entry while the model has not passed validation and the Kalshi probation is benched, a
+# paper training or exploration trade, a ratchet stop live would not run). A settled market's realized P&L counts in
+# proportion to its entry contracts live would also have bought. Ratchet stops cannot be replayed the way live would
+# have exited, so they are only counted. Tags begin at the deploy that added them (Oct 23).
+if live_block:
+    first = min(t for t, _ in live_block.values())
+    entry_ct = collections.defaultdict(lambda: [0.0, 0.0])  # ticker -> [entry contracts, of them live-blocked]
+    why_ct = collections.Counter()
+    ratchet = [0, 0.0]
+    for fl in fills:
+        o = orders.get(fl['coid']) or {}
+        tag = live_block.get(fl['coid'])
+        if tag: why_ct.update(tag[1])
+        if o.get('purpose') == 'exit':
+            if tag: ratchet[0] += 1; ratchet[1] += fl['count']
+            continue
+        e = entry_ct[fl['ticker']]; e[0] += fl['count']
+        if tag: e[1] += fl['count']
+    print(f"\n== live-equivalent realized P&L (paper trades live would also have made; tags since {first[5:16]} UTC)")
+    byh = collections.defaultdict(lambda: [0.0, 0.0, 0])
+    for x in settles:
+        if x['ts'] < first or x['ticker'].startswith('KXATP'): continue
+        tot, blk = entry_ct.get(x['ticker'], [0.0, 0.0])
+        share = 1 - blk / tot if tot > 0 else 1.0
+        b = byh[hour(x['ts'])]; b[0] += x['realized']; b[1] += x['realized'] * share; b[2] += 1
+    for h in sorted(byh):
+        print(f"  {h}  markets {byh[h][2]:3d}  paper {byh[h][0]:+8.2f}  live-equivalent {byh[h][1]:+8.2f}")
+    pt, lt = sum(v[0] for v in byh.values()), sum(v[1] for v in byh.values())
+    print(f"  total  paper {pt:+.2f}  live-equivalent {lt:+.2f}")
+    print('  fills live would not have had, by reason:', dict(why_ct.most_common()) or 'none')
+    if ratchet[0]: print(f"  ratchet stops live would not have run (it would have used the model exit): {ratchet[0]} fills, {ratchet[1]:.2f} contracts")
+else:
+    print('\n== live-equivalent realized P&L: no paper_live_block records yet (the tags begin at the Oct 23 deploy)')
 
 # Fills by day: side, taker share, avg price, size, purpose, edge at entry
 print('\n== fills by UTC day: count, contracts, $cost, taker%, YES-buy%, avg side price, avg contracts/fill, purpose mix, avg entry edge (fv vs price)')

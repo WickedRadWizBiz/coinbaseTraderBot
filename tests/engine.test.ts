@@ -235,10 +235,34 @@ test('paper (PAPER_OUTSIDE_PRICE_FALLBACK=true): an up/down strike comes from th
   assert.equal(am.strikeSource, 'computed');
 });
 
-test('live-style limits: paper tolerates late feed data, live does not', () => {
+test('paper uses live\'s stale-data limits (a 5 s book, a 3 s index)', () => {
   const paper = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40) });
-  assert.equal(paper.risk.maxIndexAgeMs, 15000);
-  assert.equal(paper.risk.maxBookAgeMs, 30000);
+  assert.equal(paper.risk.maxIndexAgeMs, 3000);
+  assert.equal(paper.risk.maxBookAgeMs, 5000);
+});
+
+test('paper: an order live would not have sent is tagged at its first fill, for the live-equivalent P&L', async () => {
+  // No probation is set in tests and the identity model has no validation report: live would reject every entry.
+  const { engine, recon, paper, market, audit } = await setup({ env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+  engine.balance = (await recon.run('startup'))!.balance;
+  await engine.tick();
+  const o = (await paper.getOpenOrders())[0];
+  assert.ok(o, 'a maker quote rests');
+  assert.equal(audit.tail(50, 'paper_live_block').length, 0, 'nothing is written before a fill');
+  // A taker trades through it.
+  if (o.side === 'bid') paper.onTrade(market.ticker, +(o.price - 0.01).toFixed(2), 100, 'no');
+  else paper.onTrade(market.ticker, +(o.price + 0.01).toFixed(2), 100, 'yes');
+  const tags = audit.tail(50, 'paper_live_block').map((r) => r.data as { clientOrderId: string; reasons: string[] });
+  assert.deepEqual(tags, [{ clientOrderId: o.clientOrderId, reasons: ['model not validated, probation benched'] }]);
+});
+
+test('paper, like live: no trading a series until its fee schedule is verified', async () => {
+  const { engine, recon, paper, market, md } = await setup();
+  engine.balance = (await recon.run('startup'))!.balance;
+  (md as unknown as { fees: Map<string, unknown> }).fees.delete(market.seriesTicker);
+  await engine.tick();
+  assert.equal((await paper.getOpenOrders()).length, 0);
+  assert.equal(engine.status.get(market.ticker)!.blocked, 'series fee schedule not verified');
 });
 
 test('no orders until reconciliation is clean and balance known', async () => {
