@@ -420,6 +420,30 @@ test('exit curve rest mode, the cross: a turned spot sells at the bid at once an
   assert.ok(why.some((w) => /^exit curve: cross 0\.45 /.test(w)), why.join(' | '));
 });
 
+/** An exit curve in cross mode (paper's default) whose cross the test arms; its swing-top estimate is the real one. */
+class StubCrossOnly extends SinuousExitGate {
+  armed = false;
+  override cross(ticker: string, e: CrossCheck, now: number): { sell: boolean; why?: string } {
+    return this.armed ? { sell: true, why: `exit curve: cross ${e.sidePrice} (+0.010 a contract net, curve 0.5 under projection 0.6, spot against)` } : super.cross(ticker, e, now);
+  }
+}
+
+test('exit curve cross mode (paper\'s default): no sell rests at the swing top; the cross still sells at the bid', async () => {
+  const curveExit = new StubCrossOnly({ mode: 'cross', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
+  const { engine, recon, market, md, oms } = await setup({ curveExit, env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+  engine.balance = (await recon.run('startup'))!.balance;
+  oms.onFill({ tradeId: 'k1', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.4, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.45, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, Date.now());
+  const notes = () => engine.status.get(market.ticker)!.notes.join(' | ');
+  const resting = () => oms.liveOrders().filter((o) => o.ticker === market.ticker && o.purpose === 'exit' && o.timeInForce === 'good_till_canceled' && !o.cancelRequested);
+  for (let i = 0; i < 3; i++) await engine.tick();
+  assert.deepEqual(resting(), [], notes());
+  curveExit.armed = true;
+  await engine.tick();
+  const iocs = oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly && o.timeInForce === 'immediate_or_cancel');
+  assert.deepEqual(iocs.map((o) => [o.side, o.price, o.count]), [['ask', 0.45, 10]], notes());
+});
+
 test('exit curve: an exit at a loss goes out at once', async () => {
   const curveExit = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
   const { engine, recon, market, md, oms } = await setup({ curveExit });

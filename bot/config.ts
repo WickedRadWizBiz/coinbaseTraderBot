@@ -234,8 +234,9 @@ export interface Config {
    *  results are unacceptable is benched (bot/risk/probation.ts). enforce: every validation gate blocks as before. */
   probation: ProbationParams;
   /** SINUOUS_EXIT=gate (default): a profit-taking exit on a binary contract also needs the exit-in-profit curve's
-   *  signal (bot/strategy/sinuousExit.ts); monitor shows the curve without holding exits; rest (paper's default) rests
-   *  the sell at the swing top and sells on a confirmed cross (SINUOUS_CROSS); off. */
+   *  signal (bot/strategy/sinuousExit.ts); monitor shows the curve without holding exits; cross (paper's default,
+   *  SINUOUS_EXIT_PAPER) sells on a confirmed cross (SINUOUS_CROSS) and holds nothing; rest also rests a sell at the
+   *  swing top; off. */
   sinuousExit: SinuousExitParams;
   /** SINUOUS_ENTRY=monitor (default): score maker entry fills by whether the order-book curve was moving against the side
    *  bought (bot/strategy/sinuousEntry.ts), blocking nothing; gate: no quote that adds to a position while it is; off. */
@@ -1071,8 +1072,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       window: num(env, 'PROBATION_WINDOW', DEFAULT_PROBATION.window, 10, 100_000),
     },
     sinuousExit: {
-      mode: oneOf(env, 'SINUOUS_EXIT', DEFAULT_SINUOUS_EXIT.mode, ['gate', 'monitor', 'rest', 'off'] as const),
-      paperMode: oneOf(env, 'SINUOUS_EXIT_PAPER', 'rest', ['gate', 'monitor', 'rest', 'off'] as const),
+      mode: oneOf(env, 'SINUOUS_EXIT', DEFAULT_SINUOUS_EXIT.mode, ['gate', 'monitor', 'rest', 'cross', 'off'] as const),
+      paperMode: oneOf(env, 'SINUOUS_EXIT_PAPER', 'cross', ['gate', 'monitor', 'rest', 'cross', 'off'] as const),
       restBandSigmas: num(env, 'SINUOUS_REST_BAND_SIGMAS', 0.5, 0, 3),
       cross: bool(env, 'SINUOUS_CROSS', true),
       crossFeeMargin: num(env, 'SINUOUS_CROSS_FEE_MARGIN', 0.5, 0, 5),
