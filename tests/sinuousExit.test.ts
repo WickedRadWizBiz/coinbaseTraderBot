@@ -229,3 +229,29 @@ test('gate: the paper bench rule (t <= -2 after 30 held exits) leaves a curve lo
   assert.equal(paper.benched, null, `t ${paper.t} is within luck`);
   assert.equal(paper.scored, 42);
 });
+
+test('rest mode: the swing-top estimate rides the curve\'s momentum; no exit is ever held', () => {
+  const rest = new SinuousExitGate({ mode: 'rest', minNetProfit: 0.015, restBandSigmas: 0 }, BENCH, undefined, undefined, 0);
+  let now = 0;
+  // Rising 0.5c a second: the momentum carries the estimate above the curve.
+  for (let i = 0; i < 20; i++) rest.observe('T', 'crypto_15m', obs((now += 1000), 0.5 + 0.005 * i));
+  const r = rest.reading('T')!;
+  const top = rest.restTarget('T')!;
+  assert.ok(top > r.curve! + 0.005, `top ${top} vs curve ${r.curve}`);
+  // Flat: the estimate is the curve itself (no band); with the band, half the book's noise above it.
+  for (let i = 0; i < 60; i++) rest.observe('F', 'crypto_15m', obs((now += 1000), 0.6));
+  assert.ok(Math.abs(rest.restTarget('F')! - rest.reading('F')!.curve!) < 0.002);
+  const banded = new SinuousExitGate({ mode: 'rest', minNetProfit: 0.015, restBandSigmas: 0.5 }, BENCH, undefined, undefined, 0);
+  now = 0;
+  for (let i = 0; i < 60; i++) banded.observe('F', 'crypto_15m', obs((now += 1000), 0.6));
+  assert.ok(banded.restTarget('F')! > banded.reading('F')!.curve! + 0.01, String(banded.restTarget('F')));
+  // Warming up: no estimate. Another mode: none either.
+  rest.observe('W', 'crypto_15m', obs(now, 0.6));
+  assert.equal(rest.restTarget('W'), undefined);
+  const gate = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, BENCH, undefined, undefined, 0);
+  for (let i = 0; i < 20; i++) gate.observe('T', 'crypto_15m', obs((now += 1000), 0.6));
+  assert.equal(gate.restTarget('T'), undefined);
+  // Rest mode lets every exit go, profit or not.
+  assert.equal(rest.check('F', { sidePrice: 0.595, count: 10, exitFeePer: 0.01, entrySidePrice: 0.4, entryFeePer: 0.01, protective: false }, now).allow, true);
+  assert.deepEqual(rest.status().holding, []);
+});

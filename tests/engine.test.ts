@@ -300,6 +300,38 @@ test('exit curve: a profitable fair-value exit waits for a spike above the curve
   assert.deepEqual(curveExit.status().holding, []);
 });
 
+/** An exit curve in rest mode whose swing-top estimate the test sets. */
+class StubRest extends SinuousExitGate {
+  target: number | undefined = 0.55;
+  override restTarget(): number | undefined { return this.target; }
+}
+
+test('exit curve rest mode: the held position rests its sell at the curve target; an exit crossing the book pulls it', async () => {
+  const curveExit = new StubRest({ mode: 'rest', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
+  const { engine, recon, market, md, oms, audit } = await setup({ curveExit, env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+  engine.balance = (await recon.run('startup'))!.balance;
+  // Long 10 YES bought at 0.40 as a maker: the take-profit floor is 4c, so never below 0.44.
+  oms.onFill({ tradeId: 'r1', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.4, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.45, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, Date.now());
+  const sells = () => oms.liveOrders().filter((o) => o.ticker === market.ticker && o.side === 'ask' && o.purpose === 'exit' && o.timeInForce === 'good_till_canceled' && !o.cancelRequested);
+  await engine.tick();
+  const notes = () => engine.status.get(market.ticker)!.notes.join(' | ');
+  assert.deepEqual(sells().map((o) => [o.price, o.count, o.postOnly, o.reduceOnly]), [[0.55, 10, true, false]], notes());
+  const why = audit.tail(50, 'decision').flatMap((d) => ((d.data as { place?: Array<{ why: string }> }).place ?? []).map((p) => p.why));
+  assert.ok(why.some((w) => /^exit curve: rest 0\.55 \(\+0\.150 a contract net, swing top 0\.550\)/.test(w)), why.join(' | '));
+  // The bid runs to 0.80 (a book jump without trades, so the resting sell is not filled here): the take-profit arms and
+  // the winner runs.
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.8, size: 50 }], asks: [{ price: 0.82, size: 50 }] }, Date.now());
+  await engine.tick();
+  assert.equal(sells().length, 1, notes());
+  // Back to 0.60, more than a third of the best gain given back: the take-profit crosses the book, and the resting sell
+  // is pulled first so the two cannot sell more than is held.
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.6, size: 50 }], asks: [{ price: 0.62, size: 50 }] }, Date.now());
+  await engine.tick();
+  assert.equal(sells().length, 0, notes());
+  assert.equal(oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly && o.timeInForce === 'immediate_or_cancel').length, 1, notes());
+});
+
 test('exit curve: an exit at a loss goes out at once', async () => {
   const curveExit = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
   const { engine, recon, market, md, oms } = await setup({ curveExit });

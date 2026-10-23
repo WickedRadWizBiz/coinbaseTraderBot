@@ -59,6 +59,9 @@ export interface MarketView {
   /** Paper fixed size (PAPER_ORDER_USD): a trade sizing wants (contracts > 0) buys about this many dollars of
    *  contracts, within maxOrderRiskUsd, the risk room and maxContracts. Undefined = the sized amount. */
   fixedOrderUsd?: number;
+  /** Exit curve rest mode: the side price at which the held position's sell rests (the curve's swing-top estimate).
+   *  Undefined = no resting curve sell. */
+  curveRestSidePrice?: number;
   maxContracts: number;
   minSidePrice: number;
   tauSec: number;
@@ -268,15 +271,38 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
       }
     }
   }
+  // Exit curve, rest mode (paper; the owner's choice on Oct 23): the held side's sell rests at the curve's estimate of
+  // where the current swing tops out (SinuousExitGate.restTarget), never below the take-profit floor, in place of the
+  // opposite-side maker quote and sized to the position exactly: a resting exit (purpose exit, post-only; Kalshi takes
+  // reduce-only on immediate-or-cancel orders only). Not while an exit crosses the book this tick, nor while a hunt runs
+  // the winner (blockReductions).
+  let restSide: 'bid' | 'ask' | undefined;
+  if (quoting && v.curveRestSidePrice !== undefined && v.position !== 0 && v.entrySidePrice !== undefined && !opts.blockReductions) {
+    const exiting = out.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel');
+    const n = round(Math.abs(v.position), 2);
+    const cost = v.entrySidePrice + (v.entryFeePerContract ?? 0);
+    const target = Math.min(0.99, Math.max(v.curveRestSidePrice, cost + floor));
+    const net = (sidePx: number) => sidePx - cost - orderFee(n, sidePx, false, v.fees) / n;
+    const why = (sidePx: number, no: string) => `exit curve: rest${no} ${sidePx} (+${net(sidePx).toFixed(3)} a contract net, swing top ${v.curveRestSidePrice!.toFixed(3)})`;
+    if (v.position > 0) {
+      const ap = Math.max(ceilToTick(target, tick), round(bid!.price + tick, 4));
+      desiredAsk = !exiting && ap < 1 ? { side: 'ask', price: ap, count: n, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, purpose: 'exit', expirationTime: v.closeSec - 1, edge: ap - q, why: why(ap, '') } : undefined;
+      restSide = 'ask';
+    } else {
+      const bp = Math.min(floorToTick(1 - target, tick), round(ask!.price - tick, 4));
+      desiredBid = !exiting && bp > 0 ? { side: 'bid', price: bp, count: n, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, purpose: 'exit', expirationTime: v.closeSec - 1, edge: q - bp, why: why(round(1 - bp, 4), ' NO') } : undefined;
+      restSide = 'bid';
+    }
+  }
   if (opts.blockReductions) {
     if (v.position > 0) desiredAsk = undefined;
     if (v.position < 0) desiredBid = undefined;
   }
-  reconcileQuote(v.restingBid, desiredBid, cfg.requoteThreshold, v.nowSec, out);
-  reconcileQuote(v.restingAsk, desiredAsk, cfg.requoteThreshold, v.nowSec, out);
+  reconcileQuote(v.restingBid, desiredBid, cfg.requoteThreshold, v.nowSec, out, restSide === 'bid');
+  reconcileQuote(v.restingAsk, desiredAsk, cfg.requoteThreshold, v.nowSec, out, restSide === 'ask');
 
   // ---- Selective taking -------------------------------------------------------
-  if ((cfg.style === 'taker' || cfg.style === 'both') && newRisk && !v.fastMove && out.place.every((p) => p.purpose !== 'exit')) {
+  if ((cfg.style === 'taker' || cfg.style === 'both') && newRisk && !v.fastMove && out.place.every((p) => p.purpose !== 'exit' || p.timeInForce !== 'immediate_or_cancel')) {
     const mayBuyYes = !(opts.blockReductions && v.position < 0);
     const mayBuyNo = !(opts.blockReductions && v.position > 0);
     if (mayBuyYes && ask && ask.price >= v.minSidePrice && ask.price <= 1 - v.minSidePrice) {
@@ -309,7 +335,8 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
 /** A resting quote this close to its exchange expiry (seconds) is replaced rather than left to lapse. */
 const EXPIRY_LEAD_SEC = 1;
 
-function reconcileQuote(resting: RestingQuote | undefined, desired: OrderPlan | undefined, threshold: number, nowSec: number, out: StrategyOutput): void {
+/** `exact`: the resting order is a position's exit, requoted whenever its size differs from the position's. */
+function reconcileQuote(resting: RestingQuote | undefined, desired: OrderPlan | undefined, threshold: number, nowSec: number, out: StrategyOutput, exact = false): void {
   if (resting && !desired) {
     out.cancel.push({ clientOrderId: resting.clientOrderId, reason: 'quote no longer wanted' });
     return;
@@ -320,8 +347,9 @@ function reconcileQuote(resting: RestingQuote | undefined, desired: OrderPlan | 
     return;
   }
   const moved = Math.abs(resting.price - desired.price) >= threshold - 1e-9;
-  // Only requote size when it shrinks materially (never chase size up and lose queue priority).
-  const shrink = desired.count < resting.remaining * 0.5;
+  // Only requote size when it shrinks materially (never chase size up and lose queue priority); an exit matches the
+  // position exactly, so it never sells more than is held.
+  const shrink = exact ? Math.abs(desired.count - resting.remaining) > 1e-9 : desired.count < resting.remaining * 0.5;
   // A quote at its exchange expiry is placed again, when the replacement would outlive it (not at the close, where both end together).
   const expiring = resting.expiresSec !== undefined && resting.expiresSec - nowSec <= EXPIRY_LEAD_SEC && (desired.expirationTime ?? Infinity) > resting.expiresSec;
   if (moved || shrink || expiring) {

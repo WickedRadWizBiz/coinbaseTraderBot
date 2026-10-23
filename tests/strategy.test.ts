@@ -243,3 +243,37 @@ test('a resting quote due to expire on the exchange is placed again, unless the 
   const atClose = decide(view({ closeSec: 1016, restingBid: { ...resting, expiresSec: 1001 } }), cfg);
   assert.equal(atClose.cancel.length, 0);
 });
+
+test('exit curve rest mode: the held side rests its sell at the curve target, never below the take-profit floor', () => {
+  // Long 10 YES bought at 0.40 as a maker (no fee): floor 4c, so never below 0.44. The model values it at 0.70.
+  const long = (o: Partial<MarketView> = {}) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: 0.47, size: 50 }, bestAsk: { price: 0.6, size: 50 }, ...o });
+  const restOf = (v: MarketView) => decide(v, cfg).place.find((p) => p.side === 'ask' && p.timeInForce === 'good_till_canceled');
+  const r = restOf(long({ curveRestSidePrice: 0.553 }))!;
+  assert.deepEqual([r.price, r.count, r.postOnly, r.reduceOnly, r.purpose], [0.56, 10, true, false, 'exit']);
+  assert.match(r.why, /^exit curve: rest 0\.56 \(\+0\.160 a contract net, swing top 0\.553\)/);
+  // A target under the floor rests at the floor; one at or under the bid, a tick above it.
+  assert.equal(restOf(long({ curveRestSidePrice: 0.42 }))!.price, 0.48, 'floor 0.44 is under the 0.47 bid: a tick above the bid');
+  assert.equal(restOf(long({ curveRestSidePrice: 0.42, bestBid: { price: 0.41, size: 50 } }))!.price, 0.44, 'the floor');
+  // Without a target, the opposite-side maker quote as before (not a curve sell).
+  assert.doesNotMatch(restOf(long())?.why ?? '', /exit curve/);
+  // While a hunt runs the winner: no resting sell.
+  assert.equal(decide(long({ curveRestSidePrice: 0.553 }), cfg, { blockReductions: true }).place.filter((p) => p.side === 'ask').length, 0);
+  // An exit crossing the book this tick (the bid pays more than the model's value): no resting sell beside it, and a
+  // resting one is pulled.
+  const exiting = decide(long({ curveRestSidePrice: 0.553, pYes: 0.4, restingAsk: { clientOrderId: 'r', price: 0.56, remaining: 10 } }), cfg);
+  assert.ok(exiting.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel'));
+  assert.equal(exiting.place.filter((p) => p.side === 'ask' && p.timeInForce === 'good_till_canceled').length, 0);
+  assert.ok(exiting.cancel.some((c) => c.clientOrderId === 'r'));
+});
+
+test('exit curve rest mode: a NO position rests a YES bid at 1 - target, and the resting sell follows the position size exactly', () => {
+  // Long 10 NO bought at 0.30 (YES sold at 0.70): floor 4c on 0.30 is 3c, never below NO 0.33. The model values NO at 0.50.
+  const short = (o: Partial<MarketView> = {}) => view({ position: -10, pYes: 0.5, entrySidePrice: 0.3, entryFeePerContract: 0, bestBid: { price: 0.4, size: 50 }, bestAsk: { price: 0.66, size: 50 }, ...o });
+  const r = decide(short({ curveRestSidePrice: 0.401 }), cfg).place.find((p) => p.side === 'bid' && p.purpose === 'exit')!;
+  assert.deepEqual([r.price, r.count], [0.59, 10]);
+  assert.match(r.why, /^exit curve: rest NO 0\.41 /);
+  // 4 of the 10 sold another way: the resting 10 is replaced by 6 (a quote would keep its size until it halved).
+  const out = decide(short({ position: -6, curveRestSidePrice: 0.401, restingBid: { clientOrderId: 'b', price: 0.59, remaining: 10 } }), cfg);
+  assert.ok(out.cancel.some((c) => c.clientOrderId === 'b'));
+  assert.equal(out.place.find((p) => p.side === 'bid' && p.purpose === 'exit')!.count, 6);
+});

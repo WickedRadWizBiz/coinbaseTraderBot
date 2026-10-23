@@ -1058,7 +1058,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       window: num(env, 'PROBATION_WINDOW', DEFAULT_PROBATION.window, 10, 100_000),
     },
     sinuousExit: {
-      mode: oneOf(env, 'SINUOUS_EXIT', DEFAULT_SINUOUS_EXIT.mode, ['gate', 'monitor', 'off'] as const),
+      mode: oneOf(env, 'SINUOUS_EXIT', DEFAULT_SINUOUS_EXIT.mode, ['gate', 'monitor', 'rest', 'off'] as const),
+      paperMode: oneOf(env, 'SINUOUS_EXIT_PAPER', 'rest', ['gate', 'monitor', 'rest', 'off'] as const),
+      restBandSigmas: num(env, 'SINUOUS_REST_BAND_SIGMAS', 0.5, 0, 3),
       minNetProfit: num(env, 'SINUOUS_MIN_PROFIT_CENTS', DEFAULT_SINUOUS_EXIT.minNetProfit * 100, 0, 50) / 100,
       paperBenchT: num(env, 'SINUOUS_PAPER_BENCH_T', 2, 0.5, 10),
       paperBenchMinExits: num(env, 'SINUOUS_PAPER_BENCH_MIN_EXITS', 30, 5, 10_000),

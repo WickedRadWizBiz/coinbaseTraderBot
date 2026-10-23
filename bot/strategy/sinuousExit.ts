@@ -40,8 +40,15 @@
 // negative net with t <= -PROBATION_T) the gate is benched and exits go out as before, until a reset.
 //
 // SINUOUS_EXIT=gate (default) holds profit exits for the curve; monitor computes and shows it without holding
-// anything; off. SINUOUS_MIN_PROFIT_CENTS (default 1.5): the net profit a contract an exit must clear to count as a
-// profit exit (smaller gains go out as before).
+// anything; rest places the exit instead of holding it (below); off. SINUOUS_MIN_PROFIT_CENTS (default 1.5): the net
+// profit a contract an exit must clear to count as a profit exit (smaller gains go out as before).
+//
+// Rest mode (paper by default, SINUOUS_EXIT_PAPER=rest; the owner's choice on Oct 23: the curve should give a place to
+// exit, not hold exits): nothing is held. The held side rests a sell at the curve's estimate of where the current swing
+// tops out: the level its momentum carries it to before it decays, x + max(0, v) / kappa in logit, plus
+// SINUOUS_REST_BAND_SIGMAS (0.5) of the book's noise, never below the take-profit floor (the strategy places it, in
+// place of the opposite-side maker quote, and moves it as the curve moves). A resting sell pays no fee on these markets.
+// Stops, the take-profit give-back and the model exit still cross the book at once (and cancel the resting sell first).
 
 import type { BookLevel } from '../kalshi/types';
 import type { ProbationParams } from '../risk/probation';
@@ -156,8 +163,16 @@ export class SinuousExitTracker {
   /** Projections waiting for their time, and the latest whose time has come. */
   private readonly pending: Array<{ due: number; x: number }> = [];
   private matured: number | undefined;
+  private knobs: CurveKnobs | undefined;
 
   constructor(readonly profile: CurveProfile) {}
+
+  /** Where the current swing tops out, in the side's price terms: the level the curve's momentum carries it to before
+   *  it decays (x + max(0, v) / kappa in logit), plus `bandSigmas` of the book's noise. Undefined while it warms up. */
+  swingTop(bandSigmas: number): number | undefined {
+    if (this.last === undefined || this.matured === undefined || !this.knobs) return undefined;
+    return fromLogit(this.x + Math.max(0, this.v) / this.knobs.kappa + bandSigmas * Math.sqrt(this.knobs.R));
+  }
 
   /** The curve's slope in the side's price terms, per second (positive = rising): undefined while it warms up (no
    *  projection has matured yet). */
@@ -183,6 +198,7 @@ export class SinuousExitTracker {
     // A one-sided book is treated as a wide one.
     const spread = o.bid && o.ask ? Math.max(0, o.ask.price - o.bid.price) : 0.1;
     const knobs = dynamicKnobs(this.profile, { spread, sidePrice: side, tauSec: o.tauSec, highLeverage: o.highLeverage });
+    this.knobs = knobs;
     const obs = logit(side);
     const netProfit = sideBid === undefined ? undefined : netProfitPerContract(sideBid, o.entrySidePrice, o.entryFeePer, o.exitFeePer);
     const gap = this.last === undefined ? Infinity : (o.now - this.last) / 1000;
@@ -228,7 +244,7 @@ export class SinuousExitTracker {
 // ---- The gate and its scoreboard ------------------------------------------------------------------
 
 export interface SinuousExitParams {
-  mode: 'gate' | 'monitor' | 'off';
+  mode: 'gate' | 'monitor' | 'rest' | 'off';
   /** Net profit a contract (dollars) an exit must clear to count as a profit exit. */
   minNetProfit: number;
   /** Paper bench rule in place of the probation's (the owner turned the curve back on on Oct 23 to see whether it
@@ -236,6 +252,10 @@ export interface SinuousExitParams {
    *  the probation's dollar limit. */
   paperBenchT?: number;
   paperBenchMinExits?: number;
+  /** The mode in paper (SINUOUS_EXIT_PAPER; live keeps `mode`). */
+  paperMode?: 'gate' | 'monitor' | 'rest' | 'off';
+  /** Rest mode: how far above the swing-top estimate the sell rests, in the book's noise standard deviations. */
+  restBandSigmas?: number;
 }
 
 export const DEFAULT_SINUOUS_EXIT: SinuousExitParams = { mode: 'gate', minNetProfit: 0.015 };
@@ -325,8 +345,17 @@ export class SinuousExitGate {
 
   reading(ticker: string): CurveReading | undefined { return this.trackers.get(ticker)?.reading; }
 
+  /** Rest mode: the side price to rest the held position's sell at (the swing-top estimate), or undefined (another mode,
+   *  no curve yet, or still warming up). */
+  restTarget(ticker: string): number | undefined {
+    if (this.p.mode !== 'rest') return undefined;
+    return this.trackers.get(ticker)?.t.swingTop(this.p.restBandSigmas ?? 0.5);
+  }
+
   /** May this exit go out now? A profit exit waits for the curve's signal (gate mode); every other exit goes. */
   check(ticker: string, e: ExitCheck, now: number): { allow: boolean; note?: string } {
+    // Rest mode places the exit instead of holding it: every exit goes.
+    if (this.p.mode === 'rest') return { allow: true };
     const exitNet = e.sidePrice - e.exitFeePer;
     const net = netProfitPerContract(e.sidePrice, e.entrySidePrice, e.entryFeePer, e.exitFeePer);
     const profitExit = !e.protective && net >= this.p.minNetProfit - 1e-9;

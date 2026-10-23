@@ -123,9 +123,11 @@ async function main(): Promise<void> {
   // owner turned it back on on Oct 23 to see whether it pays (its scoreboard starts over once), and it is benched only
   // when holding loses beyond luck at t <= -SINUOUS_PAPER_BENCH_T after SINUOUS_PAPER_BENCH_MIN_EXITS held exits, or
   // costs PROBATION_MAX_LOSS_USD. Live keeps the probation rules and its scoreboard.
+  // Paper runs SINUOUS_EXIT_PAPER (rest by default: the curve places the exit instead of holding it).
   const paperCurve = cfg.mode === 'paper';
+  const curveParams = paperCurve ? { ...cfg.sinuousExit, mode: cfg.sinuousExit.paperMode ?? cfg.sinuousExit.mode } : cfg.sinuousExit;
   const curveBench = paperCurve ? { ...cfg.probation, t: cfg.sinuousExit.paperBenchT ?? cfg.probation.t, minTrades: cfg.sinuousExit.paperBenchMinExits ?? cfg.probation.minTrades } : cfg.probation;
-  const curveExit = cfg.sinuousExit.mode === 'off' ? undefined : new SinuousExitGate(cfg.sinuousExit, curveBench, path.join(cfg.bookDir, 'curve-exit.json'), (e) => {
+  const curveExit = curveParams.mode === 'off' ? undefined : new SinuousExitGate(curveParams, curveBench, path.join(cfg.bookDir, 'curve-exit.json'), (e) => {
     audit.write('curve_exit', e);
     if (e.event === 'benched') alerter.notify('warn', 'curve-exit', `Exit curve benched (profit exits go out without waiting for it until a reset): ${String(e.reason)}`);
   }, Date.now(), paperCurve ? 'owner-on-2026-10-23' : undefined);

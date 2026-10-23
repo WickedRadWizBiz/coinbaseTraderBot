@@ -1867,7 +1867,8 @@ export class Engine {
     const ret = idx!.trailingLogReturn(now, cfg.strategy.fastMoveWindowSec * 1000);
     const fastMove = ret !== undefined && Math.abs(ret) > cfg.strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(cfg.strategy.fastMoveWindowSec);
 
-    const live = oms.liveOrders().filter((o) => o.ticker === m.ticker && o.purpose === 'quote' && isLive(o));
+    // The resting quotes, and the exit curve's resting sell (rest mode), which holds the held side's quote slot.
+    const live = oms.liveOrders().filter((o) => o.ticker === m.ticker && (o.purpose === 'quote' || (o.purpose === 'exit' && o.timeInForce === 'good_till_canceled')) && isLive(o));
     const quote = (side: 'bid' | 'ask') => {
       const o = live.filter((x) => x.side === side).sort((a, b) => b.createdTs - a.createdTs);
       // Extra same-side quotes (should not happen) are cancelled.
@@ -1919,6 +1920,8 @@ export class Engine {
       maxOrderRiskUsd: fixedUsd > 0 ? fixedUsd : Math.min(tier.orderFrac * bankroll * sizeMult * kellyScale, fCapUsd),
       maxContracts: floorCount(R.maxContractsPerOrder * (fixedUsd > 0 ? 1 : sizeMult)), minSidePrice: R.minSidePrice,
       ...(fixedUsd > 0 ? { fixedOrderUsd: fixedUsd } : {}),
+      // Exit curve, rest mode: the held position's sell rests at the curve's swing-top estimate (the strategy places it).
+      ...(() => { const r = st.position !== 0 ? this.d.curveExit?.restTarget(m.ticker) : undefined; return r !== undefined ? { curveRestSidePrice: r } : {}; })(),
       newRiskRoomUsd: reason ? this.newRiskRoom(m, bankroll, tier) : undefined,
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
       restingBid, restingAsk, nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
@@ -2133,7 +2136,7 @@ export class Engine {
       // The full feature map (hundreds of inputs) rides on orders that are not maker requotes and at
       // least every 5 minutes per market; quote churn records the prices and probabilities only (with
       // every market priced live, full records on every requote grew one day's audit file past 512 MB).
-      const full = plan.place.some((p) => p.purpose !== 'quote') || now - (this.lastFeatureAudit.get(m.ticker) ?? 0) >= 300_000;
+      const full = plan.place.some((p) => p.purpose !== 'quote' && p.timeInForce !== 'good_till_canceled') || now - (this.lastFeatureAudit.get(m.ticker) ?? 0) >= 300_000;
       if (full) this.lastFeatureAudit.set(m.ticker, now);
       this.d.audit.write('decision', {
         decisionId, ticker: m.ticker, model: model.id, spot: spot.value, strike, strikeSource: m.strikeSource, sigma: vol.sigmaPerSqrtSec, sigmaPricing,
@@ -2147,11 +2150,17 @@ export class Engine {
 
     // An exit must not trade against one of the bot's own resting quotes: Kalshi's self-trade prevention cancels the
     // exit instead (taker_at_cross), and a stale quote at the touch would turn every tick's exit into one more cancel.
+    // Rest mode: an exit that crosses the book also cancels the position's resting curve sell on its side (a resting
+    // order cannot be reduce-only on Kalshi; together they could sell more than is held); the next evaluation rests one
+    // again for what is left.
+    const restMode = this.d.curveExit?.p.mode === 'rest';
     for (const p of plan.place) {
       if (!p.reduceOnly || p.timeInForce !== 'immediate_or_cancel') continue;
       for (const o of this.crossingOwnOrders(m.ticker, p.side, p.price)) {
         if (!plan.cancel.some((c) => c.clientOrderId === o.clientOrderId)) plan.cancel.push({ clientOrderId: o.clientOrderId, reason: 'would cross our own exit' });
       }
+      const resting = restMode ? (p.side === 'ask' ? view.restingAsk : view.restingBid) : undefined;
+      if (resting && !plan.cancel.some((c) => c.clientOrderId === resting.clientOrderId)) plan.cancel.push({ clientOrderId: resting.clientOrderId, reason: 'an exit crosses the book: resting curve sell pulled' });
     }
     await Promise.all(plan.cancel.map((c) => oms.cancel(c.clientOrderId, c.reason)));
     // Orders carry the decision probability (q_adj under target-EV sizing): the gateway's fee-net

@@ -570,14 +570,16 @@ Nothing in the existing strategies changed: the engine filters their exit orders
 
 **The scoreboard** scores each held profit exit when the position finally exits: (exit price then − exit price when first held) × contracts, net of the exit fee; a settlement counts at $1 or $0. The gate is benched, with an alert, under the probation rules: a net cost of `PROBATION_MAX_LOSS_USD`, or after `PROBATION_MIN_TRADES` held exits a negative net with t ≤ −`PROBATION_T`. Benched, profit exits go out without waiting until a reset (the Reset button on the Telemetry tab's Exit curve row, or `POST /api/curve-exit/reset`).
 
-**Paper (since Oct 23).** The paper curve had benched itself that morning (−$0.57 over 80 held exits, t −1.19, under the loose probation rule t ≤ −1). The owner turned it back on to see whether it pays at the $10 paper size: its scoreboard started over once at that deploy, and in paper it is benched only when holding loses beyond luck at t ≤ −`SINUOUS_PAPER_BENCH_T` (2) after `SINUOUS_PAPER_BENCH_MIN_EXITS` (30) held exits, or costs `PROBATION_MAX_LOSS_USD`. Live keeps the probation rules and its scoreboard.
+**Rest mode (paper since Oct 23, `SINUOUS_EXIT_PAPER=rest`).** The owner wants the curve to give a place to exit rather than hold exits. In rest mode nothing is held: while a position is open, its sell rests at the curve's estimate of where the current swing tops out — the level the curve's momentum carries it to before it decays (x + max(0, v)/κ in logit), plus `SINUOUS_REST_BAND_SIGMAS` (0.5) of the book's noise — never below the take-profit floor and always a tick above the bid. It replaces the opposite-side maker quote, is sized to the position exactly, and is re-priced with the quotes (at each scheduled evaluation, about every 10 seconds while orders rest) when the target moves a cent. It is an exit order (post-only, good till canceled; Kalshi accepts reduce-only on immediate-or-cancel orders only), so the risk gateway checks it as an exit as long as it sells no more than is held. Stops, the take-profit give-back and the model exit still cross the book at once, and pull the resting sell first. No resting sell while a hunt runs a winner. A resting sell pays no fee on these markets. The P&L report lists the resting sells' fills (`exit curve (resting sell)`). Live keeps `SINUOUS_EXIT` (gate).
+
+In paper gate mode (`SINUOUS_EXIT_PAPER=gate`) the curve is benched only when holding loses beyond luck at t ≤ −`SINUOUS_PAPER_BENCH_T` (2) after `SINUOUS_PAPER_BENCH_MIN_EXITS` (30) held exits, or costs `PROBATION_MAX_LOSS_USD`; the paper scoreboard (benched −$0.57 over 80 held exits on the morning of Oct 23) started over once at that deploy.
 
 **On the dashboard:**
 - the depth monitor shows a CURVE badge for each held contract: its state, the curve, the projection and z;
 - the Telemetry tab's Exit curve row shows the scoreboard;
 - every hold, release, score and bench is in the audit log (`curve_exit`).
 
-**Modes:** `SINUOUS_EXIT=monitor` shows the curve and notes what it would hold, without holding anything. `off` removes it.
+**Modes:** `SINUOUS_EXIT=monitor` shows the curve and notes what it would hold, without holding anything. `rest` rests the exit at the curve's swing-top estimate instead of holding it (above). `off` removes it. `SINUOUS_EXIT_PAPER` sets the paper mode (rest by default).
 
 ### Entry curve (`SINUOUS_ENTRY`)
 

@@ -125,17 +125,21 @@ print('  order-rate rejections (audited, by purpose):', dict(collections.Counter
 import re
 TP = re.compile(r'take-profit( NO)?: \+(-?[0-9.]+) a contract net of fees \(best \+(-?[0-9.]+), floor \+(-?[0-9.]+)')
 OLD_TP = re.compile(r'profit target: (NO )?\+(-?[0-9.]+) a contract net of fees')  # sold at the target (before Oct 22 23:03)
+# The exit curve's resting sell (rest mode, paper since Oct 23): net a contract at its price, and the swing-top estimate.
+REST = re.compile(r'exit curve: rest( NO)? ([0-9.]+) \(\+(-?[0-9.]+) a contract net, swing top ([0-9.]+)\)')
 def exit_kind(why):
     m = TP.match(why)
     if m: return 'take-profit (trailing)', m
     m = OLD_TP.match(why)
     if m: return 'profit target (old: sold at once)', m
+    m = REST.match(why)
+    if m: return 'exit curve (resting sell)', m
     if '- fee > q' in why: return 'model exit (market pays more)', None
     if why.startswith('confluence ratchet stop'): return 'ratchet stop', None
     return re.sub(r'[-+]?[0-9][0-9.]*', '#', why)[:40] or '?', None
 print('\n== exit fills by reason, by UTC day: fills, contracts, take-profit net a contract after fees (contract-weighted)')
 byk = collections.defaultdict(lambda: [0, 0.0, 0.0, 0.0])
-tp_rows = []
+tp_rows, rest_rows = [], []
 for fl in fills:
     o = orders.get(fl['coid']) or {}
     if o.get('purpose') != 'exit': continue
@@ -144,13 +148,18 @@ for fl in fills:
     k, m = exit_kind(why)
     b = byk[(fl['ts'][:10], k)]; b[0] += 1; b[1] += fl['count']
     if m:
-        b[2] += float(m.group(2)) * fl['count']; b[3] += fl['count']
+        b[2] += float(m.group(3) if m.re is REST else m.group(2)) * fl['count']; b[3] += fl['count']
         if m.re is TP: tp_rows.append((fl['ts'], fl['ticker'], fl['count'], m))
+        if m.re is REST: rest_rows.append((fl['ts'], fl['ticker'], fl['count'], m))
 for (d, k), b in sorted(byk.items()):
     print(f"  {d}  {k:34s} fills {b[0]:4d}  contracts {b[1]:7.2f}" + (f"  net {b[2] / b[3]:+.3f} a contract" if b[3] else ''))
 print('  last 12 take-profit fills (net now / best / floor, a contract after fees):')
 for ts, t, n, m in tp_rows[-12:]:
     print(f"    {ts[5:16]}  {t:34s} {n:6.2f} ct  +{float(m.group(2)):.3f} / +{float(m.group(3)):.3f} / +{float(m.group(4)):.3f}")
+if rest_rows:
+    print('  last 12 exit-curve resting sells (side price, net a contract after fees, the swing-top estimate when placed; $ for the fill):')
+    for ts, t, n, m in rest_rows[-12:]:
+        print(f"    {ts[5:16]}  {t:34s} {n:6.2f} ct  at {float(m.group(2)):.2f}{' NO' if m.group(1) else ''}  +{float(m.group(3)):.3f}  top {float(m.group(4)):.3f}  ${n * float(m.group(3)):+.2f}")
 
 # Worst settlements in the last day
 print('\n== 25 worst settlements in the last 24 h')

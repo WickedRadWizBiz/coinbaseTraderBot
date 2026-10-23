@@ -158,3 +158,16 @@ test('order budget default: 120 a minute (96 for new risk), a fifth of Kalshi\'s
   // Kalshi Basic: 100 write tokens a second at 10 a write = 600 writes a minute; creates plus as many cancels fit 2.5 times over.
   assert.ok(2 * cfg.risk.maxOrdersPerMinute <= (100 / 10) * 60 / 2.5);
 });
+
+test('a resting exit (the exit curve\'s post-only sell) that sells no more than is held is checked as an exit', () => {
+  // Long 10 YES valued at 0.70: resting a sell at 0.55 has no edge against the model, yet it only reduces.
+  const rest = intent({ side: 'ask', price: 0.55, count: 10, purpose: 'exit', fairValue: 0.7 });
+  const c = ctx({ position: 10, bestBid: 0.45, bestAsk: 0.6, haltReasons: ['session edge'], freeCash: 0 });
+  assert.deepEqual(gw.check(rest, c).reasons, []);
+  // More than is held, or on the side that adds, or as a quote: new risk, refused for its missing edge.
+  assert.match(gw.check({ ...rest, count: 12 }, { ...c, haltReasons: [] }).reasons.join(';'), /no fee-net edge/);
+  assert.match(gw.check(rest, { ...c, position: -10, haltReasons: [] }).reasons.join(';'), /no fee-net edge/);
+  assert.match(gw.check({ ...rest, purpose: 'quote' }, { ...c, haltReasons: [] }).reasons.join(';'), /no fee-net edge/);
+  // Still post-only: one that would cross the bid is refused.
+  assert.match(gw.check({ ...rest, price: 0.45 }, c).reasons.join(';'), /post-only ask would cross/);
+});
