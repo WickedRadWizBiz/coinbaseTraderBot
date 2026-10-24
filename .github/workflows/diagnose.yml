@@ -158,7 +158,7 @@ jobs:
               echo "== P&L report"; nice -n 19 python3 /tmp/diag/deploy/pnl_report.py ~/bot/data 3 || true
               echo "== decision study"; nice -n 19 python3 /tmp/diag/deploy/decision_study.py ~/bot/data 3 || true
               echo "== exit study (the cross, the projected-peak rule and the live-line rule, replayed on the recordings; at most 15 min)"
-              timeout 900 nice -n 19 python3 /tmp/diag/deploy/cross_study.py ~/bot/data 2 || echo "(exit study stopped: $?)"
+              timeout 900 nice -n 19 python3 /tmp/diag/deploy/cross_study.py ~/bot/data 8 || echo "(exit study stopped: $?)"
               echo "== feed delay"; nice -n 19 python3 /tmp/diag/deploy/feed_delay.py ~/bot/data/recordings 1 || true
               echo "== latency study"; nice -n 19 python3 /tmp/diag/deploy/latency_study.py ~/bot/data/recordings 2 || true
             fi

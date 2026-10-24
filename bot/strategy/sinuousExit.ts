@@ -74,6 +74,7 @@
 // a cross was counted when it was called, so an unfilled one was scored as a sale it never made.
 
 import type { BookLevel } from '../kalshi/types';
+import type { LiveLineParams, LiveLineReading } from './liveLine';
 import type { ProbationParams } from '../risk/probation';
 import { readJson, writeJsonAtomic } from '../util/persist';
 
@@ -284,6 +285,11 @@ export interface SinuousExitParams {
   crossFeeMargin?: number;
   /** Rest mode: no resting sell and no cross in the last this many seconds before the close. */
   restStandDownSec?: number;
+  /** What the cross watches (SINUOUS_CROSS_SOURCE): 'line', Kalshi's live line for the coin (bot/strategy/liveLine.ts;
+   *  the owner's description, Oct 23), or 'book', the contract's own order-book curve confirmed by the coin's turn. */
+  crossSource?: 'line' | 'book';
+  /** The live line's look-ahead, x and confirmation (LIVE_LINE_AHEAD_SEC, LIVE_LINE_X_SIGMAS, LIVE_LINE_CONFIRM_SEC). */
+  line?: LiveLineParams;
 }
 
 /** The cross needs the coin's price to have turned against the side held: 'against', 'with' it, or 'flat' (within
@@ -301,6 +307,8 @@ export interface CrossCheck {
   floor: number;
   tauSec: number;
   spot: SpotTurn;
+  /** The position's reading of its coin's live line (the 'line' source). */
+  line?: LiveLineReading;
 }
 
 const DEFAULT_REST_STAND_DOWN_SEC = 120;
@@ -346,6 +354,9 @@ export interface SinuousExitStatus {
   /** Rest mode: whether the cross is on, and its exits still waiting for their market's result. */
   cross: boolean;
   crossesPending: number;
+  /** What the cross watches: the coin's live line, or the contract's book; the live line's settings. */
+  crossSource: 'line' | 'book';
+  line?: { aheadSec: number; xSigmas: number; confirmSec: number };
 }
 
 /**
@@ -415,6 +426,7 @@ export class SinuousExitGate {
    *  take-profit floor. What the order fills is scored (crossFilled), not the call. */
   cross(ticker: string, e: CrossCheck, now: number): { sell: boolean; why?: string; note?: string } {
     if (!this.crossing || this.p.cross === false || e.tauSec <= this.standDownSec) return { sell: false };
+    if (this.p.crossSource === 'line') return this.lineCross(ticker, e);
     const k = this.trackers.get(ticker);
     const r = k?.reading;
     if (!k || !r || r.curve === undefined || r.projected === undefined || r.velocity === undefined) return { sell: false };
@@ -425,6 +437,20 @@ export class SinuousExitGate {
     if (this.st.benched) return { sell: false, note: `exit curve: crossed (${curve}) but the cross is benched: ${this.st.benched.reason}` };
     if (e.spot !== 'against') return { sell: false, note: `exit curve: crossed (${curve}) but spot has not turned (${e.spot})` };
     return { sell: true, why: `exit curve: cross${k.sign < 0 ? ' NO' : ''} ${e.sidePrice} (+${net.toFixed(3)} a contract net, ${curve}, spot against)` };
+  }
+
+  /** The live-line cross: the coin's line under its projection by x for the confirmation seconds, and the sale clears the
+   *  take-profit floor. */
+  private lineCross(ticker: string, e: CrossCheck): { sell: boolean; why?: string; note?: string } {
+    const l = e.line;
+    if (!l?.broke) return { sell: false };
+    const net = netProfitPerContract(e.sidePrice, e.entrySidePrice, e.entryFeePer, e.exitFeePer);
+    if (!(net >= e.floor - 1e-9)) return { sell: false };
+    const k = this.trackers.get(ticker);
+    const no = (k?.sign ?? 1) < 0 ? ' NO' : '';
+    const line = `live line ${l.underSigmas} noise under its projection for ${l.breakSec} s`;
+    if (this.st.benched) return { sell: false, note: `exit curve: ${line} but the cross is benched: ${this.st.benched.reason}` };
+    return { sell: true, why: `exit curve: cross${no} ${e.sidePrice} (+${net.toFixed(3)} a contract net, ${line})` };
   }
 
   /** A cross exit filled: `count` contracts of the side held (`sign`) sold at `sidePrice`, paying `exitFeePer` a
@@ -510,6 +536,7 @@ export class SinuousExitGate {
       benchRule: { t: this.bench.t, minExits: this.bench.minTrades, maxLossUsd: this.bench.maxLossUsd },
       holding: [...this.held.keys()], tracking: this.trackers.size,
       cross: this.crossing && this.p.cross !== false, crossesPending: this.st.crosses?.length ?? 0,
+      crossSource: this.p.crossSource ?? 'book', ...(this.p.crossSource === 'line' && this.p.line ? { line: this.p.line } : {}),
     };
   }
 

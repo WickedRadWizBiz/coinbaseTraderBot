@@ -11,6 +11,7 @@ import { DEFAULT_SINUOUS_EXIT, type SinuousExitParams } from './strategy/sinuous
 import { defaultTiers, validateTiers, type TierPoint } from './risk/sizingTiers';
 import type { AccuracyGateConfig } from './strategy/accuracyGate';
 import type { VaultConfig } from './vault/vault';
+import { DEFAULT_LIVE_LINE } from './strategy/liveLine';
 import os from 'os';
 import path from 'path';
 
@@ -1073,9 +1074,20 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     sinuousExit: {
       mode: oneOf(env, 'SINUOUS_EXIT', DEFAULT_SINUOUS_EXIT.mode, ['gate', 'monitor', 'rest', 'cross', 'off'] as const),
       restBandSigmas: num(env, 'SINUOUS_REST_BAND_SIGMAS', 0.5, 0, 3),
-      cross: bool(env, 'SINUOUS_CROSS', true),
+      // The cross's sell signal is off until a version beats the bot's other exits on the exit study's replays: on
+      // Oct 23 (16:15-00:15 UTC, 250 positions) every turn-based rule lost against them (the book cross -$28.61
+      // against holding on its 15 fills and was benched by its own rule; the live line, the book cross and the
+      // projected-peak watch all lost on replay). The curves and the live line's heads-up run either way.
+      cross: bool(env, 'SINUOUS_CROSS', false),
       crossFeeMargin: num(env, 'SINUOUS_CROSS_FEE_MARGIN', 0.5, 0, 5),
       restStandDownSec: num(env, 'SINUOUS_REST_STAND_DOWN_SEC', 120, 0, 900),
+      // What the cross watches: Kalshi's live line for the coin (the owner's description, Oct 23), or the contract's book.
+      crossSource: oneOf(env, 'SINUOUS_CROSS_SOURCE', 'line', ['line', 'book'] as const),
+      line: {
+        aheadSec: num(env, 'LIVE_LINE_AHEAD_SEC', DEFAULT_LIVE_LINE.aheadSec, 3, 120),
+        xSigmas: num(env, 'LIVE_LINE_X_SIGMAS', DEFAULT_LIVE_LINE.xSigmas, 0.5, 6),
+        confirmSec: num(env, 'LIVE_LINE_CONFIRM_SEC', DEFAULT_LIVE_LINE.confirmSec, 1, 30),
+      },
       minNetProfit: num(env, 'SINUOUS_MIN_PROFIT_CENTS', DEFAULT_SINUOUS_EXIT.minNetProfit * 100, 0, 50) / 100,
       // Paper and live alike; the paper-only names from before Oct 24 are still read.
       benchT: num(env, 'SINUOUS_BENCH_T', num(env, 'SINUOUS_PAPER_BENCH_T', 2, 0.5, 10), 0.5, 10),

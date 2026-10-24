@@ -6,7 +6,8 @@ On the bot's own records: the audit log (fills, orders, the decisions that plann
 scoreboard events) and the market-data recordings (order books, the settlement index), replayed a second at a time
 through a port of the bot's curve (bot/strategy/sinuousExit.ts: tests/crossStudy.test.ts keeps the two identical).
 
-Usage: cross_study.py <data dir> [days=1]   (days counts UTC days back from today, today included)
+Usage: cross_study.py <data dir> [hours=8]  (the positions closed in the last `hours`; the recordings are read only
+       for those positions' windows: a plain day file is entered at its first needed line, a gzipped one is streamed)
        cross_study.py --selftest <series.json>   (the curve port on a series, for the test)
 
 Prints:
@@ -192,7 +193,15 @@ def selftest(path):
         st = t.swing_top(spec.get('band', 0.5))
         out.append(None if r is None else {**r, 'swingTop': None if st is None else round(st, 9)})
     fees = [taker_fee(c, p) for c, p in spec.get('fees', [])]
-    print(json.dumps({'readings': out, 'fees': fees}))
+    line = []
+    if spec.get('line'):
+        ln = spec['line']
+        lt = LineTracker(ln['kappa'], [ln['ahead']])
+        for sec, price, sigma in ln['points']:
+            lt.update(sec, math.log(price), sigma)
+            m = lt.matured[ln['ahead']]
+            line.append(None if m is None else {'projected': math.exp(m), 'under': (m - math.log(price)) / (sigma * math.sqrt(ln['ahead']))})
+    print(json.dumps({'readings': out, 'fees': fees, 'line': line}))
 
 
 # ---- The study --------------------------------------------------------------------------------------------------------
@@ -235,21 +244,42 @@ def mean(xs):
     return sum(xs) / len(xs) if xs else float('nan')
 
 
+def seek_time(fh, size, t_ms):
+    """Byte offset of the first line written at or after t_ms in a plain recording (lines are in time order)."""
+    lo, hi = 0, size
+    while hi - lo > 1 << 16:
+        mid = (lo + hi) // 2
+        fh.seek(mid); fh.readline()
+        line = fh.readline()
+        m = re.match(rb'\{"t":(\d+)', line)
+        if not m: hi = mid; continue
+        if int(m.group(1)) < t_ms: lo = mid
+        else: hi = mid
+    fh.seek(lo)
+    if lo: fh.readline()
+    return fh.tell()
+
+
 def main():
+    sys.stdout.reconfigure(line_buffering=True)  # a run stopped by its time limit still shows what it printed
     data = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser('~/bot/data')
-    days = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+    hours = float(sys.argv[2]) if len(sys.argv) > 2 else 8.0
     now = time.time()
-    since_day = time.strftime('%Y-%m-%d', time.gmtime(now - (days - 1) * 86400))
+    since_ms = int((now - hours * 3600) * 1000)
+    # Fills from two hours earlier, so a position opened before the window and closed inside it is whole.
+    from_iso = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(since_ms / 1000 - 7200)).encode()
     t0 = time.time()
 
     # -- The audit log.
-    files = sorted(f for f in glob.glob(os.path.join(data, 'audit', 'audit-*.jsonl')) if os.path.basename(f)[6:16] >= since_day)
+    files = sorted(f for f in glob.glob(os.path.join(data, 'audit', 'audit-*.jsonl')) if os.path.basename(f)[6:16] >= from_iso[:10].decode())
     fills, orders, results, exit_why, curve_events = [], {}, {}, {}, []
     want = (b'"kind":"fill"', b'"kind":"settlement"', b'"kind":"order_new"', b'"kind":"curve_exit"')
     for f in files:
         with open(f, 'rb') as fh:
             for line in fh:
                 head = line[:160]
+                i = head.find(b'"ts":"')
+                if i >= 0 and head[i + 6:i + 25] < from_iso: continue
                 if b'"kind":"decision"' in head:
                     if b'"purpose":"exit"' not in line: continue
                     try: d = json.loads(line).get('data') or {}
@@ -298,6 +328,8 @@ def main():
             if abs(ep['held']) < 1e-9:
                 ep['flat_ms'] = fl['ms']; episodes.append(ep); del open_ep[t]; ep = None
         if abs(rest) > 1e-9:
+            # An exit whose entry fell before the parsed range opens nothing.
+            if ep is None and o.get('purpose') == 'exit': continue
             if ep is None:
                 ep = {'ticker': t, 'sign': 1 if rest > 0 else -1, 'start_ms': fl['ms'], 'entries': [], 'exits': [], 'held': 0.0, 'close_ms': o.get('close'), 'asset': o.get('asset')}
                 open_ep[t] = ep
@@ -306,6 +338,8 @@ def main():
             ep['held'] += rest
             if not ep.get('close_ms') and o.get('close'): ep['close_ms'] = o.get('close')
     episodes.extend(open_ep.values())
+    # The positions closed (flat or settled) in the window.
+    episodes = [ep for ep in episodes if max(ep.get('flat_ms') or 0, (results.get(ep['ticker']) or (None, 0))[1]) >= since_ms or (not ep.get('flat_ms') and ep['ticker'] not in results)]
     for ep in episodes:
         res = results.get(ep['ticker'])
         ep['payout'] = None if not res else (1.0 if (ep['sign'] > 0) == (res[0] == 'yes') else 0.0)
@@ -320,7 +354,10 @@ def main():
         win[ep['ticker']] = (min(a, ep['start_ms'] - 120_000), max(b, end))
     assets = {ep.get('asset') for ep in episodes if ep.get('asset')}
     rec_dir = os.path.join(data, 'recordings')
-    first_day = time.strftime('%Y-%m-%d', time.gmtime(min((w[0] for w in win.values()), default=now * 1000) / 1000))
+    # The line needs 15 minutes before a position for its volatility and 10 for its warm-up.
+    need_from = min((w[0] for w in win.values()), default=now * 1000) - 1_560_000
+    need_to = max((w[1] for w in win.values()), default=now * 1000)
+    first_day = time.strftime('%Y-%m-%d', time.gmtime(need_from / 1000))
     rec_files = sorted(f for f in glob.glob(os.path.join(rec_dir, 'md-*.jsonl*')) if os.path.basename(f)[3:13] >= first_day and not f.endswith('.tmp'))
     plain_days = {os.path.basename(f)[3:13] for f in rec_files if f.endswith('.jsonl')}
     rec_files = [f for f in rec_files if f.endswith('.jsonl') or os.path.basename(f)[3:13] not in plain_days]
@@ -341,8 +378,14 @@ def main():
 
     for f in rec_files:
         with opener(f) as fh:
+            if not f.endswith('.gz'): seek_time(fh, os.path.getsize(f), need_from)
             for line in fh:
                 lines += 1
+                tm = line[5:18]
+                if tm.isdigit():
+                    tv = int(tm)
+                    if tv < need_from: continue
+                    if tv > need_to: break
                 ks = line.find(b'"k":"', 0, 48)
                 if ks < 0: continue
                 ke = line.find(b'"', ks + 5)
@@ -535,14 +578,26 @@ def main():
         prev_top, rise_target = None, None
         line = LineTracker(0.05 if profile == 'crypto_15m' else 0.02, sorted({(h if profile == 'crypto_15m' else 3 * h) for h, _ in (r['line'] for r in rules.values() if 'line' in r)}))
         line_run = collections.Counter()
-        line_dir = None
+        line_dir = direction(ep, start)
+        # The bot keeps one live-line curve per coin, running all the time: warm this one on the minutes before.
+        if line_dir:
+            for wsec in range(start - 600, start):
+                wpx, wsig = index_at(ep.get('asset'), wsec), sigma_cached(ep.get('asset'), wsec)
+                if wpx and wsig: line.update(wsec, ep['sign'] * line_dir * math.log(wpx), wsig)
         ent = sorted(ep['entries'], key=lambda e: e['ms'])
         exits = sorted(ep['exits'], key=lambda e: e['ms'])
         for sec in range(start, last_sec + 1):
             px, sig, dnow = index_at(ep.get('asset'), sec), sigma_cached(ep.get('asset'), sec), direction(ep, sec)
-            if line_dir is None and dnow: line_dir = dnow
-            line_ok = bool(px and sig and dnow and dnow == line_dir)
+            line_ok = bool(px and sig and line_dir and dnow == line_dir)
             if line_ok: line.update(sec, ep['sign'] * line_dir * math.log(px), sig)
+            # The break is counted on the line itself every second, as the bot's per-coin curve counts it.
+            for name, rule in rules.items():
+                if 'line' not in rule: continue
+                h15, kx = rule['line']
+                hh = h15 if profile == 'crypto_15m' else 3 * h15
+                proj = line.matured.get(hh) if line_ok else None
+                broke = proj is not None and proj - ep['sign'] * line_dir * math.log(px) >= kx * sig * math.sqrt(hh)
+                line_run[name] = line_run[name] + 1 if broke else 0
             tp = top_at(t, sec)
             if not tp: continue
             bid = (tp[1], tp[2]) if tp[1] is not None else None
@@ -569,11 +624,6 @@ def main():
                 if name in done: continue
                 fire = False
                 if 'line' in rule:
-                    h15, kx = rule['line']
-                    hh = h15 if profile == 'crypto_15m' else 3 * h15
-                    proj = line.matured.get(hh) if line_ok else None
-                    broke = proj is not None and proj - ep['sign'] * line_dir * math.log(px) >= kx * sig * math.sqrt(hh)
-                    line_run[name] = line_run[name] + 1 if broke else 0
                     fire = line_run[name] >= 2 and net >= floor - 1e-9 and tau > STAND_DOWN_SEC
                 elif 'margin' in rule:
                     if n > 0 and r['projected'] is not None and tau > STAND_DOWN_SEC:

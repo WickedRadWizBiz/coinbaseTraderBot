@@ -62,6 +62,7 @@ import { tierAt, type Tier } from './risk/sizingTiers';
 import type { ClockSkewMonitor } from './risk/clockSkew';
 import { BalanceMonitor, fillCashDelta, settleCashDelta } from './vault/balanceMonitor';
 import type { Vault } from './vault/vault';
+import type { LiveLineReading, LiveLines } from './strategy/liveLine';
 import { stateWriteStats, writeJsonAtomic } from './util/persist';
 import type { KalshiCheck } from './recon/kalshiCheck';
 import type { SnnBlender } from './snn/blender';
@@ -241,6 +242,8 @@ export interface MarketStatus {
   huntStop?: number;
   /** Exit-in-profit curve of the held position (bot/strategy/sinuousExit.ts). */
   curve?: CurveReading;
+  /** The held position's reading of its coin's live line (bot/strategy/liveLine.ts): the break and the heads-up. */
+  line?: LiveLineReading;
   /** Current values of the macro/confluence inputs for display. */
   macro?: Record<string, number | null>;
   /** SNN: model-only probability, p_snn, confidence c, alpha applied, and why it is not voting. */
@@ -308,6 +311,8 @@ export interface EngineDeps {
   curveExit?: SinuousExitGate;
   /** Entry curve: scores maker entries by the order-book curve at the fill; in gate mode it also holds quotes back (SINUOUS_ENTRY). */
   curveEntry?: SinuousEntryGate;
+  /** The live line: each coin's settlement index as a curve, shared by its contracts (bot/strategy/liveLine.ts). */
+  liveLines?: LiveLines;
   /** Cortex-like SNN (bot/snn): worker host, blender with earned alpha, conservative target scaler. */
   snn?: SnnFleet;
   /** Where the blender's settled (p_model, p_snn) history is saved (survives restarts). */
@@ -1773,6 +1778,8 @@ export class Engine {
     if (!spot) return block('index stale');
     const vol = idx!.vol();
     if (!vol) return block('volatility warming up');
+    // The live line: the coin's settlement index a point a second, one curve per coin (bot/strategy/liveLine.ts).
+    this.d.liveLines?.observe(m.asset, spot.ts, spot.value, vol.sigmaPerSqrtSec);
     const terms = md.termsFor(m);
     if (!terms) return block('strike unknown');
     const strike = terms.strike ?? terms.cap!;
@@ -2135,6 +2142,11 @@ export class Engine {
       st.curve = curve.observe(m.ticker, shortContract ? 'crypto_15m' : 'crypto_1h', {
         now, sign, bid, ask, entrySidePrice: entrySide, entryFeePer, exitFeePer: orderFee(held, sideBid, true, fees) / held, tauSec,
       });
+      // The position's reading of its coin's live line, in its side's terms: +1 when the side gains as the coin rises.
+      const orient = direction === 0 ? undefined : (direction * sign) as 1 | -1;
+      st.line = orient === undefined ? undefined : this.d.liveLines?.read(m.asset, orient, !shortContract, now);
+      if (st.line?.peak) plan.notes.push(`live line: the move is fading for the side; its momentum tops out near ${st.line.peak.top}`);
+      if (st.line?.broke && curve.p.cross === false) plan.notes.push(`live line: ${st.line.underSigmas} noise under its projection for ${st.line.breakSec} s (the cross would sell; it is off, SINUOUS_CROSS)`);
       plan.place = plan.place.filter((p) => {
         if (!p.reduceOnly || p.timeInForce !== 'immediate_or_cancel' || !(p.count > 0)) return true;
         const sidePrice = sign > 0 ? p.price : Math.round((1 - p.price) * 1e4) / 1e4;
@@ -2158,7 +2170,7 @@ export class Engine {
           const turn = ret === undefined || direction === 0 || Math.abs(ret) < 0.25 * vol.sigmaPerSqrtSec * Math.sqrt(win) ? 'flat' : Math.sign(ret) * direction * sign < 0 ? 'against' : 'with';
           const exitFeePer = orderFee(n, sideBid, true, fees) / n;
           const floor = Math.max(S.profitTarget ?? 0, (S.profitTargetPct ?? 0) * (entrySide + entryFeePer));
-          const c = curve.cross(m.ticker, { sidePrice: sideBid, count: n, exitFeePer, entrySidePrice: entrySide, entryFeePer, floor, tauSec, spot: turn }, now);
+          const c = curve.cross(m.ticker, { sidePrice: sideBid, count: n, exitFeePer, entrySidePrice: entrySide, entryFeePer, floor, tauSec, spot: turn, line: st.line }, now);
           if (c.note) plan.notes.push(c.note);
           if (c.sell) {
             const q = st.q ?? pYes;
