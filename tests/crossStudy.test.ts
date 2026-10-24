@@ -57,31 +57,48 @@ test('exit study: the Python curve and taker fee match the bot\'s on a random bo
   }
 });
 
-test('exit study: the Python live line matches the bot\'s (bot/strategy/liveLine.ts)', { skip: !python && 'no python' }, () => {
+test('exit study: the Python live line and its wiggle band match the bot\'s (bot/strategy/liveLine.ts)', { skip: !python && 'no python' }, () => {
   let seed = 3;
   const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647 - 0.5; };
-  const lines = new LiveLines({ aheadSec: 15, xSigmas: 2, confirmSec: 2 });
+  const lines = new LiveLines({ aheadSec: 15, bandK: 2, bandMinSec: 60, confirmSec: 2 });
   const points: Array<[number, number, number]> = [];
-  const want: Array<{ projected?: number; underSigmas?: number }> = [];
+  type Band = { lower: number; upper: number; underSd: number; run: number; n: number } | null;
+  const want: Array<{ projected?: number; band: Record<string, Band> }> = [];
   let y = Math.log(80_000), sec = 1_761_000_000;
-  for (let i = 0; i < 400; i++) {
-    sec += i === 200 ? 90 : 1; // a gap that restarts the line
+  const start = sec + 30; // the contract's window opens 30 s in
+  for (let i = 0; i < 500; i++) {
+    sec += i === 300 ? 90 : 1; // a gap that restarts the line
     const sigma = 2e-5 * (1 + 0.3 * Math.sin(i / 40));
-    y += sigma * (rnd() * 2 + (i > 300 ? -0.8 : 0.3));
+    // Wiggles, then sharp moves each way that break the band.
+    y += sigma * (rnd() * 2 + (i > 200 && i < 215 ? -4 : i > 420 && i < 430 ? 5 : 0.2));
     points.push([sec, Math.exp(y), sigma]);
     lines.observe('BTC', sec * 1000, Math.exp(y), sigma);
-    const r = lines.read('BTC', 1, false, sec * 1000)!;
-    want.push({ projected: r.projected, underSigmas: r.underSigmas });
+    const band: Record<string, Band> = {};
+    let projected: number | undefined;
+    for (const o of [1, -1] as const) {
+      const r = lines.read('BTC', o, false, sec * 1000, start * 1000)!;
+      projected = r.projected;
+      band[String(o)] = r.band ? { lower: r.band.lower, upper: r.band.upper, underSd: r.underSd!, run: r.breakSec, n: r.band.sec } : null;
+    }
+    want.push({ projected, band });
   }
+  assert.ok(want.some((w) => (w.band['1']?.run ?? 0) >= 2) && want.some((w) => (w.band['-1']?.run ?? 0) >= 2), 'the series breaks the band each way');
   const file = path.join(tmpDir(), 'line.json');
-  fs.writeFileSync(file, JSON.stringify({ profile: 'crypto_15m', obs: [], fees: [], line: { kappa: 0.05, ahead: 15, points } }));
+  fs.writeFileSync(file, JSON.stringify({ profile: 'crypto_15m', obs: [], fees: [], line: { kappa: 0.05, ahead: 15, points, start, k: 2, minN: 60 } }));
   const run = spawnSync(python!, ['-I', path.join('deploy', 'cross_study.py'), '--selftest', file], { encoding: 'utf8' });
   assert.equal(run.status, 0, run.stderr);
-  const got = (JSON.parse(run.stdout) as { line: Array<{ projected: number; under: number } | null> }).line;
+  const got = (JSON.parse(run.stdout) as { line: Array<{ projected: number; band: Record<string, Band> } | null> }).line;
   want.forEach((w, i) => {
     const g = got[i];
     if (w.projected === undefined) { assert.equal(g, null, `point ${i}: no projection yet`); return; }
     assert.ok(g && Math.abs(g.projected - w.projected) / w.projected < 1e-8, `point ${i} projection: bot ${w.projected}, study ${g?.projected}`);
-    assert.ok(Math.abs(g.under - w.underSigmas!) <= 0.0051, `point ${i} under: bot ${w.underSigmas}, study ${g.under}`);
+    for (const o of ['1', '-1']) {
+      const a: Band = w.band[o], b: Band = g.band[o];
+      if (a === null) { assert.equal(b, null, `point ${i} side ${o}: no band yet`); continue; }
+      assert.ok(b, `point ${i} side ${o}: a band`);
+      assert.ok(Math.abs(b.lower - a.lower) / a.lower < 1e-8 && Math.abs(b.upper - a.upper) / a.upper < 1e-8, `point ${i} side ${o} band: bot ${a.lower}-${a.upper}, study ${b.lower}-${b.upper}`);
+      assert.ok(Math.abs(b.underSd - a.underSd) <= 0.0101, `point ${i} side ${o} sd: bot ${a.underSd}, study ${b.underSd}`);
+      assert.deepEqual([b.run, b.n], [a.run, a.n], `point ${i} side ${o} break and wiggles`);
+    }
   });
 });

@@ -134,10 +134,16 @@ class Tracker:
         }
 
 
+BAND_SD_FLOOR = 0.1   # the band's sd floor, a share of the line's noise over the look-ahead (bot/strategy/liveLine.ts)
+BAND_MAX_RUN = 60
+
+
 class LineTracker:
     """The live-line curve (the owner's description, Oct 23): the same filter (level and decaying momentum) on the log of
     Kalshi's index, the line the contract settles on and the app draws, its noise scaled to the coin's per-second
-    volatility so one setting fits every coin and hour; projections for several look-aheads."""
+    volatility so one setting fits every coin and hour; projections for several look-aheads. And the wiggle band (the
+    owner, Oct 24): the line minus the projection made look-ahead seconds ago, a second at a time, whose mean +- k sd
+    since the contract opened is the band the line breaks out of."""
 
     def __init__(self, kappa, horizons):
         self.kappa = kappa
@@ -147,6 +153,34 @@ class LineTracker:
         self.last = None
         self.pending = {h: collections.deque() for h in horizons}
         self.matured = {h: None for h in horizons}
+        self.secs = {h: [] for h in horizons}; self.wig = {h: [] for h in horizons}; self.floor = {h: [] for h in horizons}
+        self.s1 = {h: [] for h in horizons}; self.s2 = {h: [] for h in horizons}
+
+    def band_at(self, h, j, i0, min_n):
+        n = j - i0
+        if n < min_n or n < 2: return None
+        s1, s2 = self.s1[h], self.s2[h]
+        total = s1[j - 1] - (s1[i0 - 1] if i0 > 0 else 0.0)
+        sq = s2[j - 1] - (s2[i0 - 1] if i0 > 0 else 0.0)
+        mean = total / n
+        return mean, max(math.sqrt(max(0.0, (sq - n * mean * mean) / (n - 1))), self.floor[h][j]), n
+
+    def band(self, h, start_sec, orient, k, min_n):
+        """LineFilter.band: the band since start_sec for the latest second, where the line is in it for the side (+ =
+        against it, in sd) and the seconds running it has been outside the band against the side."""
+        secs = self.secs[h]
+        last = len(secs) - 1
+        if last < 0: return None
+        lo = bisect.bisect_left(secs, start_sec)
+        now = self.band_at(h, last, lo, min_n)
+        if now is None: return None
+        run, j = 0, last
+        while j > lo and run < BAND_MAX_RUN:
+            if j < last and secs[j + 1] - secs[j] != 1: break
+            b = now if j == last else self.band_at(h, j, lo, min_n)
+            if b is None or orient * (b[0] - self.wig[h][j]) / b[1] < k: break
+            run += 1; j -= 1
+        return {'mean': now[0], 'sd': now[1], 'n': now[2], 'against': orient * (now[0] - self.wig[h][last]) / now[1], 'run': run}
 
     def update(self, now, y, sigma):
         R, qx, qv = (0.5 * sigma) ** 2, (0.5 * sigma) ** 2, (0.05 * sigma) ** 2
@@ -154,7 +188,9 @@ class LineTracker:
         if self.last is None or now - self.last > MAX_GAP_SEC:
             self.x, self.v = y, 0.0
             self.p00, self.p01, self.p10, self.p11 = R, 0.0, 0.0, (0.5 * sigma) ** 2
-            for h in self.horizons: self.pending[h].clear(); self.matured[h] = None
+            for h in self.horizons:
+                self.pending[h].clear(); self.matured[h] = None
+                for a in (self.secs, self.wig, self.floor, self.s1, self.s2): a[h].clear()
         elif now > self.last:
             dt = now - self.last; d = math.exp(-k * dt)
             xp = self.x + dt * self.v; vp = d * self.v
@@ -166,10 +202,16 @@ class LineTracker:
             self.x = xp + k0 * e; self.v = vp + k1 * e
             self.p00 = (1 - k0) * a00; self.p01 = (1 - k0) * a01
             self.p10 = a10 - k1 * a00; self.p11 = a11 - k1 * a01
+        else: return
         self.last = now
         for h in self.horizons:
             self.pending[h].append((now + h, self.x + self.v * (1 - math.exp(-k * h)) / k))
             while self.pending[h] and self.pending[h][0][0] <= now: self.matured[h] = self.pending[h].popleft()[1]
+            m = self.matured[h]
+            if m is None: continue
+            w, n = y - m, len(self.secs[h])
+            self.secs[h].append(now); self.wig[h].append(w); self.floor[h].append(BAND_SD_FLOOR * sigma * math.sqrt(h))
+            self.s1[h].append((self.s1[h][-1] if n else 0.0) + w); self.s2[h].append((self.s2[h][-1] if n else 0.0) + w * w)
 
 
 # ---- Fees (bot/fees.ts: Kalshi's taker fee, rounded onto a $0.01 balance grid) ---------------------------------------
@@ -196,11 +238,17 @@ def selftest(path):
     line = []
     if spec.get('line'):
         ln = spec['line']
-        lt = LineTracker(ln['kappa'], [ln['ahead']])
+        h = ln['ahead']
+        lt = LineTracker(ln['kappa'], [h])
         for sec, price, sigma in ln['points']:
             lt.update(sec, math.log(price), sigma)
-            m = lt.matured[ln['ahead']]
-            line.append(None if m is None else {'projected': math.exp(m), 'under': (m - math.log(price)) / (sigma * math.sqrt(ln['ahead']))})
+            m = lt.matured[h]
+            if m is None: line.append(None); continue
+            bands = {}
+            for o in (1, -1):
+                b = lt.band(h, ln['start'], o, ln['k'], ln['minN'])
+                bands[str(o)] = None if b is None else {'lower': math.exp(m + b['mean'] - ln['k'] * b['sd']), 'upper': math.exp(m + b['mean'] + ln['k'] * b['sd']), 'underSd': round(b['against'], 2), 'run': b['run'], 'n': b['n']}
+            line.append({'projected': math.exp(m), 'band': bands})
     print(json.dumps({'readings': out, 'fees': fees, 'line': line}))
 
 
@@ -211,6 +259,11 @@ FAST_MOVE_SEC = 5             # STRATEGY_FAST_MOVE_WINDOW_SEC: the cross's spot 
 PROFIT_TARGET = 0.02          # PROFIT_TARGET_CENTS / 100
 PROFIT_TARGET_PCT = 0.10      # PROFIT_TARGET_PCT
 MARKOUTS = (10, 30, 60, 120)
+BAND_MIN_SEC = 60             # LIVE_LINE_BAND_MIN_SEC: seconds of wiggles since the open before the band is used
+LINE_CONFIRM_SEC = 2          # LIVE_LINE_CONFIRM_SEC
+# Exits the bot no longer places (the resting sell went Oct 23, the book cross and the old profit target before it): a
+# replayed rule that sells before one of them is also scored on the positions without them.
+RETIRED_EXITS = {'exit curve (resting sell)', 'exit curve (cross)', 'profit target (old)'}
 
 TP = re.compile(r'take-profit( NO)?: \+(-?[0-9.]+) a contract net of fees')
 REST = re.compile(r'exit curve: rest( NO)? ')
@@ -354,8 +407,11 @@ def main():
         win[ep['ticker']] = (min(a, ep['start_ms'] - 120_000), max(b, end))
     assets = {ep.get('asset') for ep in episodes if ep.get('asset')}
     rec_dir = os.path.join(data, 'recordings')
-    # The line needs 15 minutes before a position for its volatility and 10 for its warm-up.
-    need_from = min((w[0] for w in win.values()), default=now * 1000) - 1_560_000
+    # The line needs 15 minutes of index before its first point for its volatility, and starts 10 minutes before a
+    # position or 5 before its contract's window opened (the wiggle band looks back to the open: at most the 15 or 60
+    # minutes before the close).
+    starts = [min(ep['start_ms'] - 600_000, ep['close_ms'] - (900_000 if '15M-' in ep['ticker'] else 3_600_000) - 300_000) for ep in episodes if ep.get('close_ms')]
+    need_from = min([w[0] for w in win.values()] + starts, default=now * 1000) - 960_000
     need_to = max((w[1] for w in win.values()), default=now * 1000)
     first_day = time.strftime('%Y-%m-%d', time.gmtime(need_from / 1000))
     rec_files = sorted(f for f in glob.glob(os.path.join(rec_dir, 'md-*.jsonl*')) if os.path.basename(f)[3:13] >= first_day and not f.endswith('.tmp'))
@@ -556,12 +612,18 @@ def main():
         'peak watch, highest estimate of the rise, band 0.5': {'peak': 0.5, 'rise': True},
         'peak watch, highest estimate of the rise, band 1.0': {'peak': 1.0, 'rise': True},
     }
-    # The owner's description: a curve predicting Kalshi's live line; sell when the line falls below it (for the side
-    # held) by more than x, x in the line's own noise over the look-ahead (k x sigma x sqrt(h)), for two seconds running.
-    for h15, kx in ((10, 1.5), (10, 2.5), (20, 1.5), (20, 2.5), (30, 2.0)):
-        rules[f'live line, {h15} s ahead ({3 * h15} s hourly), x = {kx} noise'] = {'line': (h15, kx)}
-    out = {k: {'fired': 0, 'ct': 0.0, 'sale': 0.0, 'vsActual': 0.0, 'vsHold': 0.0, 'better': 0, 'mk': collections.defaultdict(lambda: [0.0, 0.0])} for k in rules}
+    # The owner's description (Oct 23): a curve predicting Kalshi's live line; sell when the line falls below it (for the
+    # side held) by more than x for two seconds running. Oct 23's x: the line's own noise over the look-ahead (x sigma
+    # sqrt(h)). Oct 24's x (the owner): the wiggle band, the wiggles around the curve since the contract opened, mean
+    # +- k sd like Bollinger bands; the engine's default is k = 2 on the 15 s projection (45 s hourly).
+    rules['live line, 15 s ahead, x = 2 noise (Oct 23)'] = {'line': {'h': 15, 'kind': 'sigma', 'x': 2.0, 'floor': True}}
+    for h15, kb, fl in ((15, 2.0, True), (15, 1.5, True), (15, 2.5, True), (15, 3.0, True), (10, 2.0, True), (30, 2.0, True), (15, 2.0, False)):
+        rules[f'live line band, {h15} s ahead, k = {kb}{"" if fl else ", no profit floor"}'] = {'line': {'h': h15, 'kind': 'band', 'k': kb, 'floor': fl}}
+    line_rules = {k: r['line'] for k, r in rules.items() if 'line' in r}
+    out = {k: {'fired': 0, 'ct': 0.0, 'sale': 0.0, 'vsActual': 0.0, 'vsHold': 0.0, 'better': 0, 'breaks': 0, 'heldSec': 0, 'mk': collections.defaultdict(lambda: [0.0, 0.0]),
+               'nowFired': 0, 'nowCt': 0.0, 'nowVs': 0.0, 'nowBetter': 0} for k in rules}
     replayed = 0
+    windows = collections.Counter()
     for ep in episodes:
         t = ep['ticker']
         if not tops.get(t) or not ep.get('close_ms') or ep['payout'] is None: continue
@@ -576,28 +638,38 @@ def main():
         replayed += 1
         done = set()
         prev_top, rise_target = None, None
-        line = LineTracker(0.05 if profile == 'crypto_15m' else 0.02, sorted({(h if profile == 'crypto_15m' else 3 * h) for h, _ in (r['line'] for r in rules.values() if 'line' in r)}))
+        hz = lambda h: h if profile == 'crypto_15m' else 3 * h
+        line = LineTracker(0.05 if profile == 'crypto_15m' else 0.02, sorted({hz(lr['h']) for lr in line_rules.values()}))
         line_run = collections.Counter()
         line_dir = direction(ep, start)
-        # The bot keeps one live-line curve per coin, running all the time: warm this one on the minutes before.
+        orient = ep['sign'] * line_dir
+        # The wiggle band's window: from the contract's open, at most its 15 or 60 minutes before the close.
+        window_ms = 900_000 if profile == 'crypto_15m' else 3_600_000
+        band_start = max(o_ms or 0, c_ms - window_ms) // 1000
+        windows[(profile, 'opened in the window' if o_ms and c_ms - o_ms <= window_ms else 'opened earlier')] += 1
+        # The bot keeps one live-line curve per coin, running all the time: warm this one on the minutes before (and
+        # since the window opened, for the band).
         if line_dir:
-            for wsec in range(start - 600, start):
+            for wsec in range(min(start - 600, band_start - 300), start):
                 wpx, wsig = index_at(ep.get('asset'), wsec), sigma_cached(ep.get('asset'), wsec)
-                if wpx and wsig: line.update(wsec, ep['sign'] * line_dir * math.log(wpx), wsig)
+                if wpx and wsig: line.update(wsec, math.log(wpx), wsig)
         ent = sorted(ep['entries'], key=lambda e: e['ms'])
         exits = sorted(ep['exits'], key=lambda e: e['ms'])
         for sec in range(start, last_sec + 1):
             px, sig, dnow = index_at(ep.get('asset'), sec), sigma_cached(ep.get('asset'), sec), direction(ep, sec)
             line_ok = bool(px and sig and line_dir and dnow == line_dir)
-            if line_ok: line.update(sec, ep['sign'] * line_dir * math.log(px), sig)
+            if line_ok: line.update(sec, math.log(px), sig)
             # The break is counted on the line itself every second, as the bot's per-coin curve counts it.
-            for name, rule in rules.items():
-                if 'line' not in rule: continue
-                h15, kx = rule['line']
-                hh = h15 if profile == 'crypto_15m' else 3 * h15
-                proj = line.matured.get(hh) if line_ok else None
-                broke = proj is not None and proj - ep['sign'] * line_dir * math.log(px) >= kx * sig * math.sqrt(hh)
-                line_run[name] = line_run[name] + 1 if broke else 0
+            for name, lr in line_rules.items():
+                hh = hz(lr['h'])
+                if not line_ok: line_run[name] = 0; continue
+                if lr['kind'] == 'sigma':
+                    proj = line.matured.get(hh)
+                    broke = proj is not None and orient * (proj - math.log(px)) >= lr['x'] * sig * math.sqrt(hh)
+                    line_run[name] = line_run[name] + 1 if broke else 0
+                else:
+                    b = line.band(hh, band_start, orient, lr['k'], BAND_MIN_SEC)
+                    line_run[name] = b['run'] if b else 0
             tp = top_at(t, sec)
             if not tp: continue
             bid = (tp[1], tp[2]) if tp[1] is not None else None
@@ -620,11 +692,16 @@ def main():
             floor = max(PROFIT_TARGET, PROFIT_TARGET_PCT * (entry + entry_fee))
             net = side_bid - entry - entry_fee - fee_per
             v = r['velocity']
+            for name, lr in line_rules.items():
+                # How often the line breaks while held (fired or not): a 2 sd band is touched by ordinary wiggles.
+                out[name]['heldSec'] += 1
+                if line_run[name] == LINE_CONFIRM_SEC: out[name]['breaks'] += 1
             for name, rule in rules.items():
                 if name in done: continue
                 fire = False
                 if 'line' in rule:
-                    fire = line_run[name] >= 2 and net >= floor - 1e-9 and tau > STAND_DOWN_SEC
+                    lr = rule['line']
+                    fire = line_run[name] >= LINE_CONFIRM_SEC and (not lr['floor'] or net >= floor - 1e-9) and tau > STAND_DOWN_SEC
                 elif 'margin' in rule:
                     if n > 0 and r['projected'] is not None and tau > STAND_DOWN_SEC:
                         depth = r['projected'] - r['curve']
@@ -645,6 +722,10 @@ def main():
                 o['fired'] += 1; o['ct'] += held; o['sale'] += sale * held
                 o['vsActual'] += (sale - act) * held; o['vsHold'] += (sale - ep['payout']) * held
                 o['better'] += 1 if sale > act + 1e-9 else 0
+                # Against today's exits only: the positions whose contracts were not sold after this second by an exit
+                # since retired (the resting sell at the projected peak, the book cross, the old profit target).
+                if not any(x['kind'] in RETIRED_EXITS for x in ep['exits'] if x['ms'] // 1000 >= sec):
+                    o['nowFired'] += 1; o['nowCt'] += held; o['nowVs'] += (sale - act) * held; o['nowBetter'] += 1 if sale > act + 1e-9 else 0
                 for h in MARKOUTS:
                     if (sec + h) * 1000 > c_ms: continue
                     b = side_bid_at(ep, sec + h)
@@ -662,12 +743,18 @@ def main():
     print(f"\n== 3. rules replayed on {replayed} positions with a book, a close time and a result (each sells what is still held"
           f"\n   when it first fires, at the side's bid less the taker fee; no cross or peak sale in the last {STAND_DOWN_SEC} s)")
     print('   vs actual: against what those contracts got from the bot\'s own exits and settlement; better: positions where it beat them')
+    print('   live line rules: also the breaks while held (fired or not; the floor and the close hold most) per held hour')
+    print(f"   today's exits only: the same, on the positions no retired exit ({', '.join(sorted(RETIRED_EXITS))}) sold after the rule fired")
+    print(f"   windows: {', '.join(f'{p} {w} {n}' for (p, w), n in sorted(windows.items()))}")
     for name, o in out.items():
+        brk = f"  breaks {o['breaks']} ({3600 * o['breaks'] / o['heldSec']:.1f}/held h)" if name in line_rules and o['heldSec'] else ''
         if not o['fired']:
-            print(f"  {name:48s} never fired"); continue
+            print(f"  {name:52s} never fired{brk}"); continue
         mk = '  '.join(f"{h}s {o['mk'][h][0] / o['mk'][h][1]:+.3f}" if o['mk'][h][1] else f"{h}s  n/a " for h in MARKOUTS)
-        print(f"  {name:48s} fired {o['fired']:4d}  contracts {o['ct']:8.1f}  sale {o['sale'] / o['ct']:.3f}  vs actual ${o['vsActual']:+8.2f} ({o['vsActual'] / o['ct']:+.3f}/ct)"
-              f"  vs holding ${o['vsHold']:+8.2f}  better {100 * o['better'] / o['fired']:3.0f}%  markouts {mk}")
+        now_ = (f"  | today's exits only: fired {o['nowFired']}  vs actual ${o['nowVs']:+.2f} ({o['nowVs'] / o['nowCt']:+.3f}/ct)  better {100 * o['nowBetter'] / o['nowFired']:.0f}%"
+                if o['nowFired'] else "  | today's exits only: none")
+        print(f"  {name:52s} fired {o['fired']:4d}  contracts {o['ct']:8.1f}  sale {o['sale'] / o['ct']:.3f}  vs actual ${o['vsActual']:+8.2f} ({o['vsActual'] / o['ct']:+.3f}/ct)"
+              f"  vs holding ${o['vsHold']:+8.2f}  better {100 * o['better'] / o['fired']:3.0f}%  markouts {mk}{brk}{now_}")
     print(f"\n(done in {time.time() - t0:.0f} s)")
 
 

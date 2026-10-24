@@ -458,7 +458,7 @@ test('exit curve on the live line: a break of the coin\'s line sells the held po
   const curveExit = new SinuousExitGate({ mode: 'cross', minNetProfit: 0.015, crossSource: 'line' }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
   class BrokenLine extends LiveLines {
     override read(_asset: string, orient: 1 | -1): LiveLineReading {
-      return { price: 100, projected: 100.1, underSigmas: orient > 0 ? 2.6 : -2.6, slope: -0.4, breakSec: orient > 0 ? 2 : 0, broke: orient > 0 };
+      return { price: 100, projected: 100.1, band: { lower: 100.04, upper: 100.16, k: 2, sec: 300 }, underSd: orient > 0 ? 2.6 : -2.6, slope: -0.4, breakSec: orient > 0 ? 2 : 0, broke: orient > 0 };
     }
   }
   const liveLines = new BrokenLine();
@@ -475,14 +475,14 @@ test('exit curve on the live line: a break of the coin\'s line sells the held po
   assert.ok(exits.length >= 1, st.notes.join(' | '));
   assert.deepEqual([exits[0].side, exits[0].price], ['ask', 0.52]);
   const why = audit.tail(50, 'decision').flatMap((d) => ((d.data as { place?: Array<{ why: string }> }).place ?? []).map((p) => p.why));
-  assert.ok(why.some((w) => /^exit curve: cross 0\.52 \(\+0\.\d+ a contract net, live line 2\.6 noise under its projection for 2 s\)$/.test(w)), why.join(' | '));
+  assert.ok(why.some((w) => /^exit curve: cross 0\.52 \(\+0\.\d+ a contract net, live line outside its wiggle band for 2 s \(2\.6 sd, band \+-2 sd of 300 s since the open\)\)$/.test(w)), why.join(' | '));
   assert.equal(curveExit.status().crossesPending, 1, 'scored on its fill');
 });
 
 test('exit curve on the live line, the sell signal off (the default): a break is noted, nothing is sold on it', async () => {
   const curveExit = new SinuousExitGate({ mode: 'cross', minNetProfit: 0.015, crossSource: 'line', cross: false }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
   class BrokenLine extends LiveLines {
-    override read(): LiveLineReading { return { price: 100, projected: 100.1, underSigmas: 2.6, slope: -0.4, breakSec: 2, broke: true }; }
+    override read(): LiveLineReading { return { price: 100, projected: 100.1, band: { lower: 100.04, upper: 100.16, k: 2, sec: 300 }, underSd: 2.6, slope: -0.4, breakSec: 2, broke: true }; }
   }
   const { engine, recon, market, md, oms } = await setup({ curveExit, liveLines: new BrokenLine(), env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
   engine.balance = (await recon.run('startup'))!.balance;
@@ -491,7 +491,7 @@ test('exit curve on the live line, the sell signal off (the default): a break is
   md.book(market.ticker).applySnapshot({ bids: [{ price: 0.52, size: 50 }], asks: [{ price: 0.54, size: 50 }] }, Date.now());
   await engine.tick();
   const notes = engine.status.get(market.ticker)!.notes.join(' | ');
-  assert.match(notes, /live line: 2\.6 noise under its projection for 2 s \(the cross would sell; it is off, SINUOUS_CROSS\)/);
+  assert.match(notes, /live line: outside its wiggle band for 2 s \(2\.6 sd; the cross would sell; it is off, SINUOUS_CROSS\)/);
   assert.equal(curveExit.status().crossesPending, 0, 'nothing sold on it');
 });
 

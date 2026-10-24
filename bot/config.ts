@@ -1085,7 +1085,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       crossSource: oneOf(env, 'SINUOUS_CROSS_SOURCE', 'line', ['line', 'book'] as const),
       line: {
         aheadSec: num(env, 'LIVE_LINE_AHEAD_SEC', DEFAULT_LIVE_LINE.aheadSec, 3, 120),
-        xSigmas: num(env, 'LIVE_LINE_X_SIGMAS', DEFAULT_LIVE_LINE.xSigmas, 0.5, 6),
+        // x from the contract's own wiggles around the curve since it opened (the owner, Oct 24): mean +- k sd.
+        bandK: num(env, 'LIVE_LINE_BAND_K', DEFAULT_LIVE_LINE.bandK, 0.5, 6),
+        bandMinSec: num(env, 'LIVE_LINE_BAND_MIN_SEC', DEFAULT_LIVE_LINE.bandMinSec, 10, 900),
         confirmSec: num(env, 'LIVE_LINE_CONFIRM_SEC', DEFAULT_LIVE_LINE.confirmSec, 1, 30),
       },
       minNetProfit: num(env, 'SINUOUS_MIN_PROFIT_CENTS', DEFAULT_SINUOUS_EXIT.minNetProfit * 100, 0, 50) / 100,
