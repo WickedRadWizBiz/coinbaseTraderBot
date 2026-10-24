@@ -85,8 +85,21 @@ export interface RuleBookFile {
 
 export interface RuleBookReading { score: number; n: number; agree: string[]; oppose: string[]; cls?: Character; /** Signals present but silenced by a condition under which they fail. */ silenced?: string[]; /** Signals present but invalidated by another signal (or several) present now: 'id@tf by ...'. */ invalidated?: string[] }
 
+/** The rule book's trial reading (bot/strategy/componentTrials.ts): an implied P(up over h hours) from the trial rows'
+ *  confirmation hit rates, and the signals behind it. */
+export interface RuleTrialReading { pUp: number; h: number; n: number; agree: string[]; oppose: string[] }
+
+/** A trial row needs this many trades in the confirmation period. */
+export const TRIAL_MIN_CONF = 20;
+
+/** The rows the trial reads: the passing ones, and those that held up on both periods without passing the multiple-
+ *  testing bar (expectancy positive on discovery and confirmation, a confirmation hit rate of at least half). */
+export function trialRow(r: RuleRow): boolean {
+  return r.pass || (r.expBps > 0 && r.expConfBps > 0 && r.hitConf >= 0.5 && r.nConf >= TRIAL_MIN_CONF);
+}
+
 export class RuleBook {
-  private file?: { mtime: number; f?: RuleBookFile; idx: Map<string, RuleRow>; combos: ComboRow[]; conds: Map<string, ConditionRow[]>; inval: Map<string, InvalidationRow[]> };
+  private file?: { mtime: number; f?: RuleBookFile; idx: Map<string, RuleRow>; trial: Map<string, RuleRow>; combos: ComboRow[]; conds: Map<string, ConditionRow[]>; inval: Map<string, InvalidationRow[]> };
 
   constructor(private readonly path: () => string) {}
 
@@ -99,20 +112,25 @@ export class RuleBook {
     if (this.file?.mtime !== mtime) {
       try {
         const f = JSON.parse(fs.readFileSync(p, 'utf8')) as RuleBookFile;
-        const idx = new Map<string, RuleRow>();
-        for (const r of f.rows ?? []) if (r.pass && r.weight > 0) idx.set(`${r.kind}|${r.id}|${r.tf}|${r.h}|${r.cls}`, r);
+        const idx = new Map<string, RuleRow>(), trial = new Map<string, RuleRow>();
+        for (const r of f.rows ?? []) {
+          if (r.pass && r.weight > 0) idx.set(`${r.kind}|${r.id}|${r.tf}|${r.h}|${r.cls}`, r);
+          if (trialRow(r)) trial.set(`${r.kind}|${r.id}|${r.tf}|${r.h}|${r.cls}`, r);
+        }
         const conds = new Map<string, ConditionRow[]>();
         for (const c of f.conditions ?? []) if (c.pass) { const k = `${c.key}|${c.h}`; const l = conds.get(k); if (l) l.push(c); else conds.set(k, [c]); }
         const inval = new Map<string, InvalidationRow[]>();
         for (const v of f.invalidations ?? []) if (v.pass) { const k = `${v.key}|${v.h}`; const l = inval.get(k); if (l) l.push(v); else inval.set(k, [v]); }
-        this.file = { mtime, f, idx, combos: (f.combos ?? []).filter((c) => c.pass && c.weight > 0), conds, inval };
-      } catch { this.file = { mtime, idx: new Map(), combos: [], conds: new Map(), inval: new Map() }; }
+        this.file = { mtime, f, idx, trial, combos: (f.combos ?? []).filter((c) => c.pass && c.weight > 0), conds, inval };
+      } catch { this.file = { mtime, idx: new Map(), trial: new Map(), combos: [], conds: new Map(), inval: new Map() }; }
     }
     return this.file.idx;
   }
 
   /** Passing rows (for status). */
   passed(): RuleRow[] { const idx = this.load(); return idx ? [...idx.values()] : []; }
+  /** Rows the trial reads (for status). */
+  trialRows(): RuleRow[] { this.load(); return [...(this.file?.trial.values() ?? [])]; }
   /** Passing pairs of signals (for status). */
   passedCombos(): ComboRow[] { this.load(); return this.file?.combos ?? []; }
   /** Passing make-or-break conditions (for status). */
@@ -184,6 +202,31 @@ export class RuleBook {
     }
     if (!(den > 0)) return { score: 0, n: 0, agree, oppose, cls, silenced, invalidated };
     return { score: Math.max(-1, Math.min(1, num / den)), n: agree.length + oppose.length, agree, oppose, cls, silenced, invalidated };
+  }
+
+  /** The trial reading for `snap` at horizon h (hours) and character cls: each signal present with a trial row (the
+   *  character's own row, else the 'all characters' row) counts dir x strength x (its confirmation hit rate - 0.5),
+   *  weighted by its confirmation trades; P(up) is 0.5 plus their weighted mean, kept within 0.05..0.95. Conditions,
+   *  invalidations and pairs are left out: their study needs the passing rows. */
+  trialRead(snap: TaSnapshot | undefined, h: number, cls?: Character): RuleTrialReading | undefined {
+    this.load();
+    const trial = this.file?.trial;
+    if (!trial?.size || !snap) return undefined;
+    const hh = [...new Set([...trial.values()].map((r) => r.h))].sort((a, b) => Math.abs(a - h) - Math.abs(b - h))[0];
+    let num = 0, den = 0;
+    const agree: string[] = [], oppose: string[] = [];
+    const add = (kind: RuleRow['kind'], id: string, tf: string, dir: number, strength: number) => {
+      if (!dir || !(strength > 0)) return;
+      const row = (cls && trial.get(`${kind}|${id}|${tf}|${hh}|${cls}`)) || trial.get(`${kind}|${id}|${tf}|${hh}|all`);
+      if (!row) return;
+      num += row.nConf * Math.sign(dir) * Math.min(1, strength) * (row.hitConf - 0.5); den += row.nConf;
+      (dir > 0 ? agree : oppose).push(`${id}@${tf}`);
+    };
+    for (const s of snap.signals) add('rule', s.id, s.tf, s.dir, s.strength);
+    for (const s of snap.book ?? []) add('book', s.id, s.tf, s.dir, s.strength);
+    for (const c of snap.confluences) if (c.score) add('confluence', c.id, 'multi', Math.sign(c.score), Math.abs(c.score));
+    if (!(den > 0)) return undefined;
+    return { pUp: Math.max(0.05, Math.min(0.95, 0.5 + num / den)), h: hh, n: agree.length + oppose.length, agree, oppose };
   }
 }
 

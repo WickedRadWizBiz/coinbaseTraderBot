@@ -17,12 +17,14 @@ import { Reconciler } from '../bot/recon/reconciler';
 import { openExchange, tmpAudit, tmpDir } from './helpers';
 import { Vault } from '../bot/vault/vault';
 import { LiveLines, type LiveLineReading } from '../bot/strategy/liveLine';
+import { ComponentTrials, DEFAULT_TRIALS, type TrialName } from '../bot/strategy/componentTrials';
+import type { TaNetView } from '../bot/strategy/taConviction';
 import { BalanceMonitor } from '../bot/vault/balanceMonitor';
 import { SinuousEntryGate, type EntryVerdict } from '../bot/strategy/sinuousEntry';
 import { AccuracyGate } from '../bot/strategy/accuracyGate';
 import { SinuousExitGate, type CrossCheck } from '../bot/strategy/sinuousExit';
 
-async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate; curveEntry?: SinuousEntryGate; accuracyGate?: AccuracyGate; liveLines?: LiveLines } = {}) {
+async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate; curveEntry?: SinuousEntryGate; accuracyGate?: AccuracyGate; liveLines?: LiveLines; trials?: ComponentTrials } = {}) {
   const dir = tmpDir();
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy, STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_ENABLED: 'false', ...opts.env });
   const now = Date.now();
@@ -52,7 +54,7 @@ async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy
   paper.on('fill', (f) => oms.onFill(f));
   paper.on('order', (o) => oms.onExchangeOrder(o));
   const recon = new Reconciler({ gateway: paper, oms, audit, getMarket: rest.getMarket, onPersistentBreak: (r) => void kill.engage(r, 'recon') });
-  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange(), curveExit: opts.curveExit, curveEntry: opts.curveEntry, accuracyGate: opts.accuracyGate, liveLines: opts.liveLines });
+  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange(), curveExit: opts.curveExit, curveEntry: opts.curveEntry, accuracyGate: opts.accuracyGate, liveLines: opts.liveLines, trials: opts.trials });
   return { cfg, md, paper, oms, kill, recon, engine, market, audit };
 }
 
@@ -819,4 +821,39 @@ test('paper: a balance move nobody made (a paper book started fresh) re-anchors 
   engine.onBalance(100);
   assert.equal(vault.status().withdrawnTotal, 0, 'not booked as a withdrawal');
   assert.equal(monitor.state.expected, 100, 'expected balance re-anchored');
+});
+
+test('component trials: a trial that passed moves paper\'s price, never live\'s; every contract in its entry window is recorded', async () => {
+  class Stub extends ComponentTrials {
+    readonly onNames = new Set<TrialName>();
+    readonly records: Array<[TrialName, string, number, number]> = [];
+    override on(name: TrialName): boolean { return this.onNames.has(name); }
+    override record(name: TrialName, ticker: string, _asset: string, _close: number, pWith: number, pWithout: number): void { this.records.push([name, ticker, pWith, pWithout]); }
+  }
+  // The TA network's 1 h and 4 h calls, neither validated nor graded yet: today's tilt counts each at half.
+  const view: TaNetView = { up1: 0.62, up4: 0.6 };
+  const run = async (env: Record<string, string>, on: TrialName[]) => {
+    const trials = new Stub(DEFAULT_TRIALS);
+    for (const n of on) trials.onNames.add(n);
+    const s = await setup({ trials, env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false', ...env } });
+    (s.engine as unknown as { taView: () => TaNetView }).taView = () => view;
+    s.engine.balance = (await s.recon.run('startup'))!.balance;
+    await s.engine.tick();
+    return { st: s.engine.status.get(s.market.ticker)!, trials };
+  };
+  const off = await run({}, []);
+  assert.ok(off.st.trials && off.st.trials.ta! > off.st.taShift! && off.st.taShift! > 0, `full ${off.st.trials?.ta}, today ${off.st.taShift}`);
+  assert.deepEqual(off.st.trials!.applied, []);
+  const rec = off.trials.records.filter(([n]) => n === 'ta');
+  assert.ok(rec.length >= 1, 'the contract in its entry window is recorded');
+  assert.ok(Math.abs(rec[0][3] - off.st.pModel!) < 1e-12 && Math.abs(rec[0][2] - (off.st.pModel! + off.st.trials!.ta!)) < 1e-4, 'scored with the full tilt against the meta-model\'s price');
+  const on = await run({}, ['ta']);
+  assert.ok(Math.abs(on.st.taShift! - on.st.trials!.ta!) < 1e-4 && on.st.taShift! > off.st.taShift! * 1.5, `paper prices with the full-weight tilt once its trial passed: ${on.st.taShift}`);
+  assert.deepEqual(on.st.trials!.applied, ['ta']);
+  // Live: the same passing trial changes nothing.
+  const key = path.join(tmpDir(), 'k.pem');
+  fs.writeFileSync(key, 'x', { mode: 0o600 });
+  const live = await run({ TRADING_MODE: 'live', KALSHI_KEY_ID: 'id', KALSHI_PRIVATE_KEY_PATH: key, KALSHI_ENV: 'prod', LIVE_TRADING_ACKNOWLEDGED: 'I_ACCEPT_REAL_MONEY_RISK' }, ['ta']);
+  assert.ok(Math.abs(live.st.taShift! - off.st.taShift!) < 1e-6, `live ${live.st.taShift} vs paper without the trial ${off.st.taShift}`);
+  assert.deepEqual(live.st.trials!.applied, []);
 });

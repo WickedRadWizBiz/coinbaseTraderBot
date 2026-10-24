@@ -12,6 +12,7 @@ import { defaultTiers, validateTiers, type TierPoint } from './risk/sizingTiers'
 import type { AccuracyGateConfig } from './strategy/accuracyGate';
 import type { VaultConfig } from './vault/vault';
 import { DEFAULT_LIVE_LINE } from './strategy/liveLine';
+import { DEFAULT_TRIALS, type TrialParams } from './strategy/componentTrials';
 import os from 'os';
 import path from 'path';
 
@@ -241,6 +242,10 @@ export interface Config {
   /** SINUOUS_ENTRY=monitor (default): score maker entry fills by whether the order-book curve was moving against the side
    *  bought (bot/strategy/sinuousEntry.ts), blocking nothing; gate: no quote that adds to a position while it is; off. */
   sinuousEntry: SinuousEntryParams;
+  /** TRIALS (default on): the rule book, the SNN and the TA network each scored against the price without them on every
+   *  settled crypto contract; a trial that tests significantly better turns on in paper's prices, never in live's
+   *  (bot/strategy/componentTrials.ts). */
+  trials: TrialParams;
   host: string;
   port: number;
   /** DASHBOARD_PASSWORD: '' (default) = the dashboard opens without a login. */
@@ -1100,6 +1105,13 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     sinuousEntry: {
       mode: oneOf(env, 'SINUOUS_ENTRY', DEFAULT_SINUOUS_ENTRY.mode, ['gate', 'monitor', 'off'] as const),
       slope: num(env, 'SINUOUS_ENTRY_SLOPE_CENTS', DEFAULT_SINUOUS_ENTRY.slope * 100, 0, 10) / 100,
+    },
+    trials: {
+      enabled: bool(env, 'TRIALS', DEFAULT_TRIALS.enabled),
+      minWindows: num(env, 'TRIAL_MIN_WINDOWS', DEFAULT_TRIALS.minWindows, 20, 5000),
+      p: num(env, 'TRIAL_P', DEFAULT_TRIALS.p, 0.001, 0.5),
+      keep: num(env, 'TRIAL_KEEP', DEFAULT_TRIALS.keep, 50, 5000),
+      snnAlpha: num(env, 'TRIAL_SNN_ALPHA', DEFAULT_TRIALS.snnAlpha, 0, 1),
     },
     host,
     port: num(env, 'PORT', 3000, 1, 65535),
