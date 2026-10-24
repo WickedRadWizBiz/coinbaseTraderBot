@@ -113,6 +113,6 @@ test('TA trial: every head at full weight, validated or not', () => {
 test('trials: on by default with a 100-settlement, p 0.05 test and the SNN at 0.25; the knobs are read', () => {
   const d = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40) }).trials;
   assert.deepEqual(d, { enabled: true, minWindows: 100, p: 0.05, keep: 500, snnAlpha: 0.25 });
-  const c = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), TRIALS: 'false', TRIAL_MIN_WINDOWS: '200', TRIAL_P: '0.01', TRIAL_SNN_ALPHA: '0.1' }).trials;
-  assert.deepEqual([c.enabled, c.minWindows, c.p, c.snnAlpha], [false, 200, 0.01, 0.1]);
+  const c = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), TRIALS: 'false', TRIAL_MIN_WINDOWS: '200', TRIAL_P: '0.01', TRIAL_SNN_ALPHA: '0.1', TRIAL_KEEP: '150' }).trials;
+  assert.deepEqual([c.enabled, c.minWindows, c.p, c.snnAlpha, c.keep], [false, 200, 0.01, 0.1, 200], 'never fewer kept than the test needs');
 });

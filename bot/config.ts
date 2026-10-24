@@ -1106,13 +1106,17 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       mode: oneOf(env, 'SINUOUS_ENTRY', DEFAULT_SINUOUS_ENTRY.mode, ['gate', 'monitor', 'off'] as const),
       slope: num(env, 'SINUOUS_ENTRY_SLOPE_CENTS', DEFAULT_SINUOUS_ENTRY.slope * 100, 0, 10) / 100,
     },
-    trials: {
-      enabled: bool(env, 'TRIALS', DEFAULT_TRIALS.enabled),
-      minWindows: num(env, 'TRIAL_MIN_WINDOWS', DEFAULT_TRIALS.minWindows, 20, 5000),
-      p: num(env, 'TRIAL_P', DEFAULT_TRIALS.p, 0.001, 0.5),
-      keep: num(env, 'TRIAL_KEEP', DEFAULT_TRIALS.keep, 50, 5000),
-      snnAlpha: num(env, 'TRIAL_SNN_ALPHA', DEFAULT_TRIALS.snnAlpha, 0, 1),
-    },
+    trials: (() => {
+      const minWindows = num(env, 'TRIAL_MIN_WINDOWS', DEFAULT_TRIALS.minWindows, 20, 5000);
+      return {
+        enabled: bool(env, 'TRIALS', DEFAULT_TRIALS.enabled),
+        minWindows,
+        p: num(env, 'TRIAL_P', DEFAULT_TRIALS.p, 0.001, 0.5),
+        // The test needs at least TRIAL_MIN_WINDOWS settlements kept.
+        keep: Math.max(minWindows, num(env, 'TRIAL_KEEP', DEFAULT_TRIALS.keep, 50, 5000)),
+        snnAlpha: num(env, 'TRIAL_SNN_ALPHA', DEFAULT_TRIALS.snnAlpha, 0, 1),
+      };
+    })(),
     host,
     port: num(env, 'PORT', 3000, 1, 65535),
     dashboardPassword,
