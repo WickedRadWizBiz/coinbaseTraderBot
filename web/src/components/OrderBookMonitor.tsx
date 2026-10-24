@@ -19,6 +19,8 @@ interface MarketRow {
   huntStop?: number;
   /** Exit-in-profit curve of the held position (bot/strategy/sinuousExit.ts). */
   curve?: { signal: boolean; reason: string; curve?: number; projected?: number; z?: number; netProfit?: number };
+  /** The held position's reading of its coin's live line (bot/strategy/liveLine.ts). */
+  line?: { price: number; projected?: number; underSigmas?: number; slope: number; breakSec: number; broke: boolean; peak?: { top: number } };
 }
 
 interface Level { price: number; size: number }
@@ -190,6 +192,13 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
                       title="Exit-in-profit curve: a profit-taking exit goes out only on a spike above the curve or a roll-over below its projection">
                       CURVE {tab.curve.signal ? `${tab.curve.reason.replace(/_/g, ' ')} · EXIT OK` : tab.curve.reason.replace(/_/g, ' ')}
                       {tab.curve.curve !== undefined && ` · ${px(tab.curve.curve)}`}{tab.curve.projected !== undefined && ` → ${px(tab.curve.projected)}`}{tab.curve.z !== undefined && ` · z ${tab.curve.z.toFixed(1)}`}
+                    </span>
+                  )}
+                  {tab.line && tab.position !== 0 && (
+                    <span className={`px-2 py-0.5 crt-border font-bold text-[11px] ${tab.line.broke ? 'bg-crypto-danger/20 text-crypto-danger' : tab.line.peak ? 'bg-crypto-primary/20 text-crypto-primary' : 'bg-black/40 text-crypto-text'}`}
+                      title="Live line: the coin's settlement index as a curve. A break (the line under its projection by x for two seconds) is the cross's sell signal; a fading move shows where its momentum tops out">
+                      LINE {tab.line.broke ? `BREAK ${tab.line.breakSec}s` : tab.line.peak ? `FADING · TOP ${tab.line.peak.top}` : tab.line.slope > 0 ? 'WITH THE SIDE' : 'AGAINST'}
+                      {tab.line.underSigmas !== undefined && ` · ${tab.line.underSigmas >= 0 ? `${tab.line.underSigmas.toFixed(1)}σ under` : `${(-tab.line.underSigmas).toFixed(1)}σ over`}`}
                     </span>
                   )}
                   {book && !book.usable && !tabClosed && (

@@ -16,12 +16,13 @@ import { RiskGateway } from '../bot/risk/riskGateway';
 import { Reconciler } from '../bot/recon/reconciler';
 import { openExchange, tmpAudit, tmpDir } from './helpers';
 import { Vault } from '../bot/vault/vault';
+import { LiveLines, type LiveLineReading } from '../bot/strategy/liveLine';
 import { BalanceMonitor } from '../bot/vault/balanceMonitor';
 import { SinuousEntryGate, type EntryVerdict } from '../bot/strategy/sinuousEntry';
 import { AccuracyGate } from '../bot/strategy/accuracyGate';
 import { SinuousExitGate, type CrossCheck } from '../bot/strategy/sinuousExit';
 
-async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate; curveEntry?: SinuousEntryGate; accuracyGate?: AccuracyGate } = {}) {
+async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate; curveEntry?: SinuousEntryGate; accuracyGate?: AccuracyGate; liveLines?: LiveLines } = {}) {
   const dir = tmpDir();
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy, STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_ENABLED: 'false', ...opts.env });
   const now = Date.now();
@@ -51,7 +52,7 @@ async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy
   paper.on('fill', (f) => oms.onFill(f));
   paper.on('order', (o) => oms.onExchangeOrder(o));
   const recon = new Reconciler({ gateway: paper, oms, audit, getMarket: rest.getMarket, onPersistentBreak: (r) => void kill.engage(r, 'recon') });
-  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange(), curveExit: opts.curveExit, curveEntry: opts.curveEntry, accuracyGate: opts.accuracyGate });
+  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange(), curveExit: opts.curveExit, curveEntry: opts.curveEntry, accuracyGate: opts.accuracyGate, liveLines: opts.liveLines });
   return { cfg, md, paper, oms, kill, recon, engine, market, audit };
 }
 
@@ -451,6 +452,31 @@ test('exit curve cross mode (the default, paper and live): no sell rests at the 
   const s = curveExit.status();
   assert.equal(s.scored, 1);
   assert.ok(s.netUsd < -5 && s.netUsd > -6, `(0.45 - fee - 1) x 10: ${s.netUsd}`);
+});
+
+test('exit curve on the live line: a break of the coin\'s line sells the held position at the bid', async () => {
+  const curveExit = new SinuousExitGate({ mode: 'cross', minNetProfit: 0.015, crossSource: 'line' }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
+  class BrokenLine extends LiveLines {
+    override read(_asset: string, orient: 1 | -1): LiveLineReading {
+      return { price: 100, projected: 100.1, underSigmas: orient > 0 ? 2.6 : -2.6, slope: -0.4, breakSec: orient > 0 ? 2 : 0, broke: orient > 0 };
+    }
+  }
+  const liveLines = new BrokenLine();
+  const { engine, recon, market, md, oms, audit } = await setup({ curveExit, liveLines, env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+  engine.balance = (await recon.run('startup'))!.balance;
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.38, size: 50 }], asks: [{ price: 0.4, size: 50 }] }, Date.now());
+  await oms.submit({ ticker: market.ticker, asset: 'BTC', windowCloseTs: market.closeTime, side: 'bid', price: 0.4, count: 10, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: false, purpose: 'entry', fairValue: 0.5, modelId: 'm', decisionId: 'e' });
+  // Far enough in profit to clear the take-profit floor (+10% of the 0.417 cost): the bid is 0.52.
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.52, size: 50 }], asks: [{ price: 0.54, size: 50 }] }, Date.now());
+  await engine.tick();
+  const st = engine.status.get(market.ticker)!;
+  assert.equal(st.line?.broke, true, JSON.stringify(st.line));
+  const exits = oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly && o.timeInForce === 'immediate_or_cancel');
+  assert.ok(exits.length >= 1, st.notes.join(' | '));
+  assert.deepEqual([exits[0].side, exits[0].price], ['ask', 0.52]);
+  const why = audit.tail(50, 'decision').flatMap((d) => ((d.data as { place?: Array<{ why: string }> }).place ?? []).map((p) => p.why));
+  assert.ok(why.some((w) => /^exit curve: cross 0\.52 \(\+0\.\d+ a contract net, live line 2\.6 noise under its projection for 2 s\)$/.test(w)), why.join(' | '));
+  assert.equal(curveExit.status().crossesPending, 1, 'scored on its fill');
 });
 
 test('exit curve: a cross whose order fills nothing is not scored', async () => {

@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import { takerFee } from '../bot/fees';
 import type { BookLevel } from '../bot/kalshi/types';
 import { SinuousExitTracker, type CurveProfile } from '../bot/strategy/sinuousExit';
+import { LiveLines } from '../bot/strategy/liveLine';
 import { tmpDir } from './helpers';
 
 const python = ['python3', 'python'].find((p) => spawnSync(p, ['-c', 'import json'], { encoding: 'utf8' }).status === 0);
@@ -54,4 +55,33 @@ test('exit study: the Python curve and taker fee match the bot\'s on a random bo
     });
     fees.forEach(([c, px], i) => assert.ok(Math.abs(got.fees[i] - takerFee(c, px, { takerMultiplier: 1, makerMultiplier: 0, balancePrecision: 0.01 })) < 1e-9, `fee ${c} @ ${px}: bot ${takerFee(c, px, { takerMultiplier: 1, makerMultiplier: 0, balancePrecision: 0.01 })}, study ${got.fees[i]}`));
   }
+});
+
+test('exit study: the Python live line matches the bot\'s (bot/strategy/liveLine.ts)', { skip: !python && 'no python' }, () => {
+  let seed = 3;
+  const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647 - 0.5; };
+  const lines = new LiveLines({ aheadSec: 15, xSigmas: 2, confirmSec: 2 });
+  const points: Array<[number, number, number]> = [];
+  const want: Array<{ projected?: number; underSigmas?: number }> = [];
+  let y = Math.log(80_000), sec = 1_761_000_000;
+  for (let i = 0; i < 400; i++) {
+    sec += i === 200 ? 90 : 1; // a gap that restarts the line
+    const sigma = 2e-5 * (1 + 0.3 * Math.sin(i / 40));
+    y += sigma * (rnd() * 2 + (i > 300 ? -0.8 : 0.3));
+    points.push([sec, Math.exp(y), sigma]);
+    lines.observe('BTC', sec * 1000, Math.exp(y), sigma);
+    const r = lines.read('BTC', 1, false, sec * 1000)!;
+    want.push({ projected: r.projected, underSigmas: r.underSigmas });
+  }
+  const file = path.join(tmpDir(), 'line.json');
+  fs.writeFileSync(file, JSON.stringify({ profile: 'crypto_15m', obs: [], fees: [], line: { kappa: 0.05, ahead: 15, points } }));
+  const run = spawnSync(python!, ['-I', path.join('deploy', 'cross_study.py'), '--selftest', file], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  const got = (JSON.parse(run.stdout) as { line: Array<{ projected: number; under: number } | null> }).line;
+  want.forEach((w, i) => {
+    const g = got[i];
+    if (w.projected === undefined) { assert.equal(g, null, `point ${i}: no projection yet`); return; }
+    assert.ok(g && Math.abs(g.projected - w.projected) / w.projected < 1e-8, `point ${i} projection: bot ${w.projected}, study ${g?.projected}`);
+    assert.ok(Math.abs(g.under - w.underSigmas!) <= 0.0051, `point ${i} under: bot ${w.underSigmas}, study ${g.under}`);
+  });
 });
