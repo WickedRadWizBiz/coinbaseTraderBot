@@ -24,8 +24,9 @@ import { BalanceMonitor } from '../bot/vault/balanceMonitor';
 import { SinuousEntryGate, type EntryVerdict } from '../bot/strategy/sinuousEntry';
 import { AccuracyGate } from '../bot/strategy/accuracyGate';
 import { SinuousExitGate, type CrossCheck } from '../bot/strategy/sinuousExit';
+import { TakeProfitBench } from '../bot/strategy/takeProfitBench';
 
-async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate; curveEntry?: SinuousEntryGate; accuracyGate?: AccuracyGate; liveLines?: LiveLines; trials?: ComponentTrials; model?: MetaModel } = {}) {
+async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate; takeProfitBench?: TakeProfitBench; curveEntry?: SinuousEntryGate; accuracyGate?: AccuracyGate; liveLines?: LiveLines; trials?: ComponentTrials; model?: MetaModel } = {}) {
   const dir = tmpDir();
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy, STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_ENABLED: 'false', ...opts.env });
   const now = Date.now();
@@ -55,7 +56,7 @@ async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy
   paper.on('fill', (f) => oms.onFill(f));
   paper.on('order', (o) => oms.onExchangeOrder(o));
   const recon = new Reconciler({ gateway: paper, oms, audit, getMarket: rest.getMarket, onPersistentBreak: (r) => void kill.engage(r, 'recon') });
-  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: opts.model ?? MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange(), curveExit: opts.curveExit, curveEntry: opts.curveEntry, accuracyGate: opts.accuracyGate, liveLines: opts.liveLines, trials: opts.trials });
+  const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: opts.model ?? MetaModel.identity(), vault: opts.vault, balanceMonitor: opts.monitor, exchangeStatus: openExchange(), curveExit: opts.curveExit, takeProfitBench: opts.takeProfitBench, curveEntry: opts.curveEntry, accuracyGate: opts.accuracyGate, liveLines: opts.liveLines, trials: opts.trials });
   return { cfg, md, paper, oms, kill, recon, engine, market, audit };
 }
 
@@ -549,6 +550,43 @@ test('take-profit: a winner runs, then is sold once it gives back a third of its
   assert.ok(why.some((w) => /^take-profit: \+0\.082 a contract net of fees \(best \+0\.142, floor \+0\.040\)/.test(w)), why.join(' | '));
 });
 
+test('take-profit bench: a take-profit sale is scored on its fill against holding to settlement; benched, the take-profit sells nothing', async () => {
+  const rule = { minTrades: 30, t: 2, maxLossUsd: 25, window: 200 };
+  const run = async (bench: TakeProfitBench) => {
+    const g = await setup({ takeProfitBench: bench, env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+    g.engine.balance = (await g.recon.run('startup'))!.balance;
+    // Long 10 YES bought at 0.40 on the (paper) exchange, so the take-profit's sale can fill.
+    g.md.book(g.market.ticker).applySnapshot({ bids: [{ price: 0.38, size: 50 }], asks: [{ price: 0.4, size: 50 }] }, Date.now());
+    await g.oms.submit({ ticker: g.market.ticker, asset: 'BTC', windowCloseTs: g.market.closeTime, side: 'bid', price: 0.4, count: 10, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: false, purpose: 'entry', fairValue: 0.5, modelId: 'm', decisionId: 'e' });
+    assert.equal(g.oms.positions.get(g.market.ticker)?.yes, 10);
+    // Best 0.56, then back to 0.50: more than a third of the best gain given back.
+    g.md.book(g.market.ticker).applySnapshot({ bids: [{ price: 0.56, size: 50 }], asks: [{ price: 0.58, size: 50 }] }, Date.now());
+    await g.engine.tick();
+    g.md.book(g.market.ticker).applySnapshot({ bids: [{ price: 0.5, size: 50 }], asks: [{ price: 0.52, size: 50 }] }, Date.now());
+    await g.engine.tick();
+    return { ...g, notes: () => g.engine.status.get(g.market.ticker)!.notes.join(' | '), exits: () => g.oms.allOrders(500).filter((o) => o.ticker === g.market.ticker && o.reduceOnly) };
+  };
+  const bench = new TakeProfitBench(true, rule);
+  const g = await run(bench);
+  assert.deepEqual(g.exits().map((o) => [o.side, o.price, o.count, o.filledCount]), [['ask', 0.5, 10, 10]], g.notes());
+  assert.equal(bench.status().pending, 1);
+  // Settled YES: holding would have paid $1 a contract; the sale got 0.50 less its taker fee.
+  g.oms.settle(g.market.ticker, 'yes');
+  const s = bench.status();
+  assert.deepEqual([s.scored, s.pending], [1, 0]);
+  assert.ok(s.netUsd < -5 && s.netUsd > -5.3, `(0.50 - fee - 1) x 10: ${s.netUsd}`);
+  assert.equal(g.engine.takeProfitBenchStatus()?.scored, 1);
+  // A bench already called (the take-profit cost $26 against holding): the same pull-back sells nothing.
+  const benched = new TakeProfitBench(true, rule);
+  for (let i = 0; i < 13; i++) { benched.filled(`M${i}`, 1, 0.81, 10, 0.01, i); benched.settled(`M${i}`, 'yes', i + 1); }
+  const h = await run(benched);
+  assert.equal(h.exits().length, 0, h.notes());
+  assert.match(h.notes(), /take-profit benched: \+0\.\d+ now, best \+0\.\d+, not sold \(take-profit sales cost \$26\.00/);
+  // The dashboard's reset lifts it.
+  assert.equal(h.engine.resetTakeProfitBench(), true);
+  assert.equal(benched.benched, undefined);
+});
+
 test('take-profit: the last tick above the floor goes out at once, the exit curve never holds it', async () => {
   const curveExit = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
   const { engine, recon, market, md, oms } = await setup({ curveExit });
@@ -635,24 +673,35 @@ test('paper: the vault keeps its books, but the paper bankroll is the whole bala
   assert.equal(engine.bankroll(), 200, 'and still traded in paper');
 });
 
-test('paper fixed size: a wanted trade buys about PAPER_ORDER_USD of contracts ($10 by default); 0 sizes as in live', async () => {
+test('paper size: a wanted trade buys about PAPER_ORDER_FRAC of the bankroll (10%); PAPER_ORDER_FRAC=0 the fixed PAPER_ORDER_USD; both 0 size as in live', async () => {
   const quote = (g: Awaited<ReturnType<typeof setup>>) => g.oms.liveOrders().find((o) => o.ticker === g.market.ticker && o.purpose === 'quote' && !o.cancelRequested && o.side === 'bid');
   const env = { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' };
-  const fixed = await setup({ env });
-  fixed.engine.balance = (await fixed.recon.run('startup'))!.balance;
-  await fixed.engine.tick();
-  const q = quote(fixed)!;
-  assert.ok(q, JSON.stringify(fixed.engine.status.get(fixed.market.ticker)?.notes));
-  const usd = q.count * q.price;
-  assert.ok(usd > 10 - q.price - 0.05 && usd <= 10 + 1e-9, `${q.count} at ${q.price} = $${usd.toFixed(2)}`);
-  assert.match(fixed.engine.status.get(fixed.market.ticker)!.notes.join(' | '), /paper size: \$10 an order/);
-  // Off: the tier and break-even sizing of a $200 account, a few dollars at most.
-  const sized = await setup({ env: { ...env, PAPER_ORDER_USD: '0' } });
-  sized.engine.balance = (await sized.recon.run('startup'))!.balance;
-  await sized.engine.tick();
-  const s = quote(sized)!;
-  assert.ok(s.count * s.price < 5, `${s.count} at ${s.price}`);
-  assert.ok(s.count < q.count);
+  const run = async (extra: Record<string, string>) => {
+    const g = await setup({ env: { ...env, ...extra } });
+    g.engine.balance = (await g.recon.run('startup'))!.balance;
+    await g.engine.tick();
+    return { g, q: quote(g)!, notes: g.engine.status.get(g.market.ticker)?.notes ?? [] };
+  };
+  const near = (q: { count: number; price: number }, usd: number) => { const v = q.count * q.price; return v > usd - q.price - 0.05 && v <= usd + 1e-9; };
+  // 10% of the $200 account: $20 an order.
+  const frac = await run({});
+  assert.ok(frac.q, JSON.stringify(frac.notes));
+  assert.ok(near(frac.q, 20), `${frac.q.count} at ${frac.q.price}`);
+  assert.match(frac.notes.join(' | '), /paper size: \$20\.00 an order \(10% of the bankroll, PAPER_ORDER_FRAC\)/);
+  assert.equal(frac.g.engine.guardStatus().paperOrderFrac, 0.1);
+  // The share follows the bankroll: 2.5% of $200 is $5; the account shrinking to $100 halves the order the same way.
+  const half = await run({ PAPER_ORDER_FRAC: '0.025' });
+  assert.ok(near(half.q, 5), `${half.q.count} at ${half.q.price}`);
+  assert.equal(frac.g.engine.paperOrderUsd(100), 10);
+  // PAPER_ORDER_FRAC=0: the fixed PAPER_ORDER_USD, whatever the account.
+  const fixed = await run({ PAPER_ORDER_FRAC: '0', PAPER_ORDER_USD: '8' });
+  assert.ok(near(fixed.q, 8), `${fixed.q.count} at ${fixed.q.price}`);
+  assert.match(fixed.notes.join(' | '), /paper size: \$8 an order \(PAPER_ORDER_USD\)/);
+  assert.equal(fixed.g.engine.paperOrderUsd(100), 8);
+  // Both off: the tier and break-even sizing of a $200 account, a few dollars at most.
+  const sized = await run({ PAPER_ORDER_FRAC: '0', PAPER_ORDER_USD: '0' });
+  assert.ok(sized.q.count * sized.q.price < 5, `${sized.q.count} at ${sized.q.price}`);
+  assert.ok(sized.q.count < frac.q.count);
 });
 
 test('accuracy gate (paper): no new quote in a time-to-close bucket where the market mid called results better', async () => {
@@ -722,8 +771,8 @@ test('conviction: every evaluation records the TA overlay; the altcoin risk-on r
   assert.equal(st0.conviction!.alt.active, false);
   assert.match(st0.conviction!.alt.why, /not an altcoin|USDT\.D|RSI/);
 
-  // PAPER_ORDER_USD=0: a paper fixed size is never boosted, and this test is about the boost.
-  const alt = await setup({ trend: 0.000002, env: { NON_ALTCOINS: 'NONE', PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false', ADVERSARIAL_BOOST: 'false', PAPER_ORDER_USD: '0' } });
+  // PAPER_ORDER_FRAC=0 and PAPER_ORDER_USD=0: a paper order size is never boosted, and this test is about the boost.
+  const alt = await setup({ trend: 0.000002, env: { NON_ALTCOINS: 'NONE', PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false', ADVERSARIAL_BOOST: 'false', PAPER_ORDER_USD: '0', PAPER_ORDER_FRAC: '0' } });
   const now = Date.now();
   // USDT.D falling over the last 20 minutes (with some noise for its volatility); the index rising (RSI > 50).
   let u = 5.0;

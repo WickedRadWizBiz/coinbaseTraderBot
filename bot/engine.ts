@@ -33,6 +33,7 @@ import { ProfitPeaks } from './strategy/profitPeaks';
 import { ConfluenceRatchetExit } from './strategy/exitPolicies';
 import type { SinuousEntryGate } from './strategy/sinuousEntry';
 import { tennisHighLeverage, type CurveReading, type SinuousExitGate } from './strategy/sinuousExit';
+import type { TakeProfitBench } from './strategy/takeProfitBench';
 import { CadenceGate, inEntryWindow, type CadenceReason } from './strategy/cadence';
 import { kalshiMaintenance, sessionEdge, sessionState, type SessionState } from './model/sessions';
 import type { EquityGuard } from './risk/equityGuard';
@@ -313,6 +314,8 @@ export interface EngineDeps {
   tennisFair?: TennisFairModel;
   /** Exit-in-profit curve: profit-taking exits on binary contracts also need its signal (SINUOUS_EXIT). */
   curveExit?: SinuousExitGate;
+  /** The take-profit's scoreboard against holding to settlement, and its bench (TAKE_PROFIT_BENCH). */
+  takeProfitBench?: TakeProfitBench;
   /** Entry curve: scores maker entries by the order-book curve at the fill; in gate mode it also holds quotes back (SINUOUS_ENTRY). */
   curveEntry?: SinuousEntryGate;
   /** The live line: each coin's settlement index as a curve, shared by its contracts (bot/strategy/liveLine.ts). */
@@ -399,7 +402,7 @@ export class Engine {
     d.oms.on('fill', (f: { ticker: string; side: 'bid' | 'ask'; count: number; price: number; isTaker?: boolean; ts?: number }, rec: { clientOrderId?: string; decisionId?: string; side?: string; price?: number } | undefined, fee: number, positionAfter: number) => {
       this.fillLog?.onFill({ ticker: f.ticker, side: f.side, price: f.price, isTaker: Boolean(f.isTaker), ts: f.ts, coid: rec?.clientOrderId });
       this.noteLiveBlockFill(rec?.clientOrderId);
-      this.noteCrossFill(rec, f, fee);
+      this.noteScoredExitFill(rec, f, fee);
       const signed = f.side === 'bid' ? f.count : -f.count;
       const cash = fillCashDelta(f.side, f.count, f.price, fee, positionAfter - signed);
       d.balanceMonitor?.onCash(cash);
@@ -442,6 +445,8 @@ export class Engine {
     });
     // Exit-in-profit curve: a profit exit it was holding when the market settled is scored at the payout.
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no' }) => d.curveExit?.settled(e.ticker, e.result, this.now()));
+    // The take-profit's sales in a settled market are scored against what holding them paid.
+    d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no' }) => d.takeProfitBench?.settled(e.ticker, e.result, this.now()));
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized: number; positionBefore: number }) => {
       this.lastSettleTs = this.now();
       // One probation result per settled market that traded (VALIDATION_GATES=monitor: bot/risk/probation.ts).
@@ -667,6 +672,16 @@ export class Engine {
   resetCurveExit(): boolean {
     if (!this.d.curveExit) return false;
     this.d.curveExit.reset(this.now());
+    return true;
+  }
+
+  /** The take-profit's scoreboard against holding to settlement and its bench (null without one). */
+  takeProfitBenchStatus() { return this.d.takeProfitBench?.status() ?? null; }
+
+  /** Clear the take-profit's scoreboard (and a bench); false without one. */
+  resetTakeProfitBench(): boolean {
+    if (!this.d.takeProfitBench) return false;
+    this.d.takeProfitBench.reset(this.now());
     return true;
   }
 
@@ -914,7 +929,7 @@ export class Engine {
       targetEvUsd: +ev.targetEv.toFixed(2), minTradeEvUsd: +ev.minEv.toFixed(3),
       minTradableBankrollUsd: S.minTradableBankrollUsd,
       tier: { ...t, orderRiskUsd: +(t.orderFrac * b).toFixed(2), dailyLossLimitUsd: +this.d.risk.dailyLossLimit(b, this.tierLimits(t)).toFixed(2) },
-      paperOrderUsd: this.paperOrderUsd() || null,
+      paperOrderUsd: this.paperOrderUsd() || null, paperOrderFrac: this.d.cfg.mode === 'paper' ? this.d.cfg.strategy.paperOrderFrac || null : null,
       accuracyGate: this.d.accuracyGate ? { ...this.d.accuracyGate.status(), enforced: this.d.cfg.mode === 'paper' && this.d.cfg.strategy.accuracyGate.enabled } : null,
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null, minQuoteContracts: S.minQuoteContracts,
@@ -1037,16 +1052,29 @@ export class Engine {
     return Math.max(0, this.balance + committed - reserved);
   }
 
-  /** Paper fixed order size in dollars (PAPER_ORDER_USD), 0 when off or in live. */
-  paperOrderUsd(): number {
-    return this.d.cfg.mode === 'paper' ? Math.max(0, this.d.cfg.strategy.paperOrderUsd ?? 0) : 0;
+  /** Paper order size in dollars: PAPER_ORDER_FRAC of the bankroll (10%, the owner's choice on Oct 24: orders shrink as
+   *  the account does and grow as it does), or the fixed PAPER_ORDER_USD with PAPER_ORDER_FRAC=0. 0 in live, with both
+   *  off, or before the first balance read. */
+  paperOrderUsd(bankroll = this.bankroll()): number {
+    if (this.d.cfg.mode !== 'paper') return 0;
+    const frac = this.d.cfg.strategy.paperOrderFrac ?? 0;
+    if (frac > 0) return bankroll !== undefined && bankroll > 0 ? Math.round(frac * bankroll * 100) / 100 : 0;
+    return Math.max(0, this.d.cfg.strategy.paperOrderUsd ?? 0);
+  }
+
+  /** How paper sizes its orders, for notes and alerts ('' outside paper or with paper sized like live). */
+  paperSizing(): string {
+    const usd = this.paperOrderUsd();
+    if (!(usd > 0)) return '';
+    const frac = this.d.cfg.strategy.paperOrderFrac ?? 0;
+    return frac > 0 ? `$${usd.toFixed(2)} an order (${+(frac * 100).toFixed(2)}% of the bankroll, PAPER_ORDER_FRAC)` : `$${usd} an order (PAPER_ORDER_USD)`;
   }
 
   /** The risk gateway's per-order, window and total caps for crypto orders: the tier's, widened in paper to fit the
-   *  fixed order size (one order, PAPER_WINDOW_ORDERS in markets closing together, PAPER_TOTAL_ORDERS in all). */
+   *  order size (one order, PAPER_WINDOW_ORDERS in markets closing together, PAPER_TOTAL_ORDERS in all). */
   private orderLimits(t: Tier, bankroll = this.bankroll() ?? 0): Partial<RiskLimits> {
     const lim = this.tierLimits(t);
-    const usd = this.paperOrderUsd();
+    const usd = this.paperOrderUsd(bankroll);
     if (!(usd > 0) || !(bankroll > 0)) return lim;
     return {
       ...lim,
@@ -1150,13 +1178,13 @@ export class Engine {
     const pnl = this.dailyPnl();
     if (pnl <= -limit) {
       // Override off: the kill switch. Override on (paper or live): logged once a day; sizing already
-      // shrinks with the net loss (riskScale; not paper's fixed PAPER_ORDER_USD orders), so nothing else changes.
+      // shrinks with the net loss (riskScale; paper's orders follow the bankroll, PAPER_ORDER_FRAC), so nothing else changes.
       if (await kill.engage(`daily loss $${(-pnl).toFixed(2)} reached limit $${limit.toFixed(2)}`, 'risk')) return;
       const day = new Date(this.now()).toISOString().slice(0, 10);
       if (this.dailyBreachDay !== day) {
         this.dailyBreachDay = day;
-        const usd = this.paperOrderUsd();
-        this.d.audit.write('training', { event: 'daily_limit_breach', pnl: +pnl.toFixed(2), limit: +limit.toFixed(2), action: `override on: trading continues; ${usd > 0 ? `orders stay $${usd} (PAPER_ORDER_USD)` : 'size follows the net loss'}` });
+        const paper = this.paperSizing();
+        this.d.audit.write('training', { event: 'daily_limit_breach', pnl: +pnl.toFixed(2), limit: +limit.toFixed(2), action: `override on: trading continues; ${paper ? `paper orders ${paper}` : 'size follows the net loss'}` });
       }
     }
     const s0 = process.hrtime.bigint();
@@ -1984,9 +2012,10 @@ export class Engine {
     // percentile of the growth-optimal fraction); applies to the conviction-boosted size too.
     const fCap = this.kalshiOptimalF('crypto', now);
     const fCapUsd = Number.isFinite(fCap.cap) ? fCap.cap * bankroll : Infinity;
-    // Paper fixed size (PAPER_ORDER_USD): a wanted trade buys about that many dollars, whatever the tier, the break-even
-    // scale, the session's size factor and optimal f would allow (the owner's choice for paper on Oct 23).
-    const fixedUsd = this.paperOrderUsd();
+    // Paper size (PAPER_ORDER_FRAC of the bankroll, or the fixed PAPER_ORDER_USD): a wanted trade buys about that many
+    // dollars, whatever the tier, the break-even scale, the session's size factor and optimal f would allow (the owner's
+    // choice for paper on Oct 23, a share of the bankroll since Oct 24).
+    const fixedUsd = this.paperOrderUsd(bankroll);
     const view: MarketView = {
       ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: st.position, bankroll,
       // Session risk profile can only shrink size (sizeMult in [0, 1]).
@@ -2005,6 +2034,7 @@ export class Engine {
       pMarket, pStd: pred.std, makerBuffer: this.makerBuffer(), entrySidePrice: entrySidePrice !== undefined && entrySidePrice > 0 && entrySidePrice < 1 ? entrySidePrice : undefined,
       entryFeePerContract: pos && Math.abs(pos.yes) > 1e-9 ? pos.fees / Math.abs(pos.yes) : undefined,
       profitPeakSidePrice: this.profitPeaks.update(m.ticker, st.position, st.position > 0 ? bid.price : st.position < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
+      ...(this.d.takeProfitBench?.benched ? { takeProfitBenched: this.d.takeProfitBench.benched } : {}),
       entryWindowOpen, exitWindowOpen: tauSec > S.noExitBeforeCloseSec,
     };
     // Exit policy. confluence_ratchet: fair-value exit normally; "hunt" mode (liquidity ratchet
@@ -2103,7 +2133,7 @@ export class Engine {
         else if (alt.active && sideDir > 0 && vetoed) plan.notes.push(`${alt.why}, but the adversary vetoed the x${S.altBoost} boost (${vetoed})`);
         const mult = Math.min(S.convictionMaxTotal, advMult * altMult);
         if (mult <= 1) continue;
-        if (fixedUsd > 0) { plan.notes.push(`conviction x${mult.toFixed(2)} not applied: paper orders are $${fixedUsd} (PAPER_ORDER_USD)`); continue; }
+        if (fixedUsd > 0) { plan.notes.push(`conviction x${mult.toFixed(2)} not applied: paper orders are ${this.paperSizing()}`); continue; }
         const boosted = decide({ ...view, maxOrderRiskUsd: Math.min(view.maxOrderRiskUsd * mult, fCapUsd), maxContracts: floorCount(view.maxContracts * mult) }, { ...strat, kellyFraction: strat.kellyFraction * mult }, { exits: false, blockReductions: huntMode, entries: true });
         const match = boosted.place.find((b) => b.side === p.side && b.purpose === p.purpose && !b.reduceOnly && Math.abs(b.price - p.price) < 1e-9);
         const count = match ? floorCount(Math.min(match.count, p.count * mult)) : p.count;
@@ -2145,7 +2175,7 @@ export class Engine {
       }
     }
     if (this.fillLog) for (const p of plan.place) if (isMakerEntry(p)) this.fillX.set(p, fillInputs(p, fillCtx));
-    if (fixedUsd > 0) plan.notes.push(`paper size: $${fixedUsd} an order (PAPER_ORDER_USD; the tier, break-even scale and optimal f size live)`);
+    if (fixedUsd > 0) plan.notes.push(`paper size: ${this.paperSizing()}; the tier, break-even scale and optimal f size live`);
     else {
       plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
       if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${rs.parts.join(', ')})`);
@@ -2412,7 +2442,8 @@ export class Engine {
       return;
     }
     // Tagged before it is sent: a paper fill arrives inside submit(), a live one may beat its acknowledgement.
-    if (p.purpose === 'exit' && p.why.startsWith('exit curve: cross')) this.tagCrossOrder(decisionId, p);
+    if (p.purpose === 'exit' && p.why.startsWith('exit curve: cross')) this.tagScoredExit('cross', decisionId, p);
+    else if (p.purpose === 'exit' && p.why.startsWith('take-profit') && !tennis) this.tagScoredExit('take-profit', decisionId, p);
     const rec = await oms.submit(intent);
     if (cfg.mode === 'paper' && !tennis) this.tagLiveBlock(rec.clientOrderId, p);
     const fx = this.fillX.get(p);
@@ -2447,23 +2478,24 @@ export class Engine {
     this.liveBlocks.set(clientOrderId, { reasons, ts: now });
   }
 
-  /** The exit curve's cross orders (by decision, side and price: the one exit a decision sends across the book) until
-   *  they fill: the curve scores what they fill, not the call (a cross whose order does not fill sold nothing).
+  /** Exits scored on what they fill, not the call (an order that does not fill sold nothing), until they fill: the exit
+   *  curve's cross and the take-profit, by decision, side and price (the one exit a decision sends across the book).
    *  Forgotten after an hour. */
-  private readonly crossOrders = new Map<string, { sign: 1 | -1; ts: number }>();
+  private readonly scoredExits = new Map<string, { kind: 'cross' | 'take-profit'; sign: 1 | -1; ts: number }>();
 
-  private tagCrossOrder(decisionId: string, p: OrderPlan): void {
+  private tagScoredExit(kind: 'cross' | 'take-profit', decisionId: string, p: OrderPlan): void {
     const now = this.now();
-    if (this.crossOrders.size >= 500) for (const [k, v] of this.crossOrders) if (now - v.ts > 3_600_000) this.crossOrders.delete(k);
+    if (this.scoredExits.size >= 500) for (const [k, v] of this.scoredExits) if (now - v.ts > 3_600_000) this.scoredExits.delete(k);
     // Selling YES (an ask) closes a YES position; buying YES (a bid) closes a NO one.
-    this.crossOrders.set(`${decisionId}|${p.side}|${p.price}`, { sign: p.side === 'ask' ? 1 : -1, ts: now });
+    this.scoredExits.set(`${decisionId}|${p.side}|${p.price}`, { kind, sign: p.side === 'ask' ? 1 : -1, ts: now });
   }
 
-  private noteCrossFill(rec: { decisionId?: string; side?: string; price?: number } | undefined, f: { ticker: string; price: number; count: number }, fee: number): void {
-    const c = rec?.decisionId ? this.crossOrders.get(`${rec.decisionId}|${rec.side}|${rec.price}`) : undefined;
+  private noteScoredExitFill(rec: { decisionId?: string; side?: string; price?: number } | undefined, f: { ticker: string; price: number; count: number }, fee: number): void {
+    const c = rec?.decisionId ? this.scoredExits.get(`${rec.decisionId}|${rec.side}|${rec.price}`) : undefined;
     if (!c || !(f.count > 0)) return;
     const sidePrice = c.sign > 0 ? f.price : Math.round((1 - f.price) * 1e4) / 1e4;
-    this.d.curveExit?.crossFilled(f.ticker, c.sign, sidePrice, f.count, fee / f.count, this.now());
+    if (c.kind === 'cross') this.d.curveExit?.crossFilled(f.ticker, c.sign, sidePrice, f.count, fee / f.count, this.now());
+    else this.d.takeProfitBench?.filled(f.ticker, c.sign, sidePrice, f.count, fee / f.count, this.now());
   }
 
   private noteLiveBlockFill(clientOrderId: string | undefined): void {
