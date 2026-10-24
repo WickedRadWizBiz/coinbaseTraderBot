@@ -50,6 +50,11 @@ tr = g.get('trials') or {}
 for k, label in (('mlp', 'trained model'), ('snn', 'SNN'), ('ta', 'TA network'), ('rules', 'rule book')):
     t = tr.get(k)
     if t: print(f"  trial {label:13s} {t.get('state'):8s} {'in paper' if t.get('applied') else 'not in paper'}: {t.get('windows')} settlements, advantage {t.get('advantage')} nats, p(better) {t.get('pBetter')}, p(worse) {t.get('pWorse')}, pending {t.get('pending')} | {t.get('why') or 'not decided yet'}")
+rt = (s.get('ruleBook') or {}).get('trial')
+if rt is not None:
+    # A coin reads only the rows for its character and the 'all characters' rows: none of them for today's characters, no reading.
+    chars = {a: (c or {}).get('cls') for a, c in ((s.get('market') or {}).get('characters') or {}).items()}
+    print(f"  rule book trial rows {rt.get('rows')}: by character {rt.get('byCharacter')}, by horizon {rt.get('byHorizon')} | characters now {chars}")
 mk = get('/markets') or []
 mk = mk if isinstance(mk, list) else []
 for x in mk[:12]:

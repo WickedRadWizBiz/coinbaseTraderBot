@@ -1150,12 +1150,13 @@ export class Engine {
     const pnl = this.dailyPnl();
     if (pnl <= -limit) {
       // Override off: the kill switch. Override on (paper or live): logged once a day; sizing already
-      // shrinks with the net loss (riskScale), so nothing else changes.
+      // shrinks with the net loss (riskScale; not paper's fixed PAPER_ORDER_USD orders), so nothing else changes.
       if (await kill.engage(`daily loss $${(-pnl).toFixed(2)} reached limit $${limit.toFixed(2)}`, 'risk')) return;
       const day = new Date(this.now()).toISOString().slice(0, 10);
       if (this.dailyBreachDay !== day) {
         this.dailyBreachDay = day;
-        this.d.audit.write('training', { event: 'daily_limit_breach', pnl: +pnl.toFixed(2), limit: +limit.toFixed(2), action: 'override on: trading continues; size follows the net loss' });
+        const usd = this.paperOrderUsd();
+        this.d.audit.write('training', { event: 'daily_limit_breach', pnl: +pnl.toFixed(2), limit: +limit.toFixed(2), action: `override on: trading continues; ${usd > 0 ? `orders stay $${usd} (PAPER_ORDER_USD)` : 'size follows the net loss'}` });
       }
     }
     const s0 = process.hrtime.bigint();

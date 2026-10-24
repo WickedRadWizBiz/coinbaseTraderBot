@@ -190,6 +190,8 @@ def main():
         by = collections.Counter((r.get('h'), r.get('kind')) for r in trial)
         print(f"  {len(rows)} rows ({book.get('from')}..{book.get('to')}, confirmation from {book.get('splitAt')}): {sum(1 for r in rows if r.get('pass'))} passed, {len(trial)} trial rows"
               f"  by horizon and kind: {dict(sorted(by.items(), key=lambda kv: (kv[0][0] or 0, str(kv[0][1]))))}")
+        # A coin reads only the rows for its character and the 'all characters' rows.
+        print(f"  trial rows by character: {dict(collections.Counter(r.get('cls') for r in trial).most_common())}")
         for r in sorted(trial, key=lambda r: -(r.get('hitConf', 0) - 0.5) * r.get('nConf', 0))[:12]:
             print(f"    {r.get('kind')}|{r.get('id')}|{r.get('tf')} {r.get('h')}h {r.get('cls')}: discovery n {r.get('n')} hit {r.get('hit')} {r.get('expBps')} bps (p {r.get('p')}),"
                   f" confirmation n {r.get('nConf')} hit {r.get('hitConf')} {r.get('expConfBps')} bps")

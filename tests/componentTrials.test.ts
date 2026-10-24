@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { test } from 'node:test';
-import { ComponentTrials, DEFAULT_TRIALS, type TrialName, type TrialState } from '../bot/strategy/componentTrials';
+import { ComponentTrials, DEFAULT_TRIALS, TRIAL_LABEL, TRIAL_NAMES, type TrialName, type TrialState } from '../bot/strategy/componentTrials';
 import { RuleBook, type RuleBookFile, type RuleRow } from '../bot/strategy/ruleBook';
 import { taDrift } from '../bot/strategy/taConviction';
 import { normInv } from '../bot/util/num';
@@ -132,4 +132,6 @@ test('trials: on by default with a 100-settlement, p 0.05 test, the SNN at 0.25 
   const c = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), TRIALS: 'false', TRIAL_MIN_WINDOWS: '200', TRIAL_P: '0.01', TRIAL_SNN_ALPHA: '0.1', TRIAL_KEEP: '150', TRIAL_PAPER_START: 'snn, ta,bogus' }).trials;
   assert.deepEqual([c.enabled, c.minWindows, c.p, c.snnAlpha, c.keep, c.paperStart], [false, 200, 0.01, 0.1, 200, ['snn', 'ta']], 'never fewer kept than the test needs; unknown names dropped');
   assert.deepEqual(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), TRIAL_PAPER_START: '' }).trials.paperStart, []);
+  // Alerts name each trial (an Oct 24 alert called the trained model 'the rule book').
+  assert.deepEqual(TRIAL_NAMES.map((n) => TRIAL_LABEL[n]), ['trained model', 'SNN', 'TA network', 'rule book']);
 });

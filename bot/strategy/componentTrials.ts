@@ -35,6 +35,8 @@ import { readJson, writeJsonAtomic } from '../util/persist';
 
 export type TrialName = 'mlp' | 'snn' | 'ta' | 'rules';
 export const TRIAL_NAMES: TrialName[] = ['mlp', 'snn', 'ta', 'rules'];
+/** Each trial's name in alerts. */
+export const TRIAL_LABEL: Record<TrialName, string> = { mlp: 'trained model', snn: 'SNN', ta: 'TA network', rules: 'rule book' };
 export type TrialState = 'testing' | 'on' | 'off';
 /** Components that priced before the trials: paper keeps them while they are tested. */
 const BASELINE: TrialName[] = ['mlp'];

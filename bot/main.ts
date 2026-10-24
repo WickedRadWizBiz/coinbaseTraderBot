@@ -72,7 +72,7 @@ import { gatePasses, Probation, setProbation } from './risk/probation';
 import { SinuousEntryGate } from './strategy/sinuousEntry';
 import { SinuousExitGate } from './strategy/sinuousExit';
 import { LiveLines } from './strategy/liveLine';
-import { ComponentTrials } from './strategy/componentTrials';
+import { ComponentTrials, TRIAL_LABEL } from './strategy/componentTrials';
 import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
 
 const log = logger('main');
@@ -143,7 +143,7 @@ async function main(): Promise<void> {
   // (bot/strategy/componentTrials.ts). Each book keeps its own scorecards (DATA_DIR and DATA_DIR/live).
   const trials = cfg.trials.enabled ? new ComponentTrials(cfg.trials, path.join(cfg.bookDir, 'component_trials.json'), (name, to, why) => {
     audit.write('trial', { event: to, trial: name, why, appliesIn: 'paper' });
-    alerter.notify('info', `trial-${name}`, `Trial: the ${name === 'snn' ? 'SNN' : name === 'ta' ? 'TA network' : 'rule book'} is ${to === 'on' ? 'now ON in paper' : to === 'off' ? 'OFF in paper' : 'testing'}: ${why}`);
+    alerter.notify('info', `trial-${name}`, `Trial: the ${TRIAL_LABEL[name]} is ${to === 'on' ? 'now ON in paper' : to === 'off' ? 'OFF in paper' : 'testing'}: ${why}`);
   }) : undefined;
   // Entry curve (SINUOUS_ENTRY, bot/strategy/sinuousEntry.ts): monitor scores maker entries by the book's curve at the
   // fill; gate also holds back quotes the curve is running against.

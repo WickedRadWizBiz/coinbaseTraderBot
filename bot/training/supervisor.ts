@@ -69,8 +69,11 @@ export class TrainingSupervisor {
     const fresh = (equity: number): EpochState => ({ epoch: 1, startTs: this.now, startEquity: equity, peak: equity, trough: equity, fills: 0, refills: 0, refilled: 0 });
     const saved = readJson<TrainingState>(this.file, { quarantine: true });
     this.st = saved ?? { kalshi: fresh(d.cfg.paperBankrollUsd), perps: fresh(d.perpsStart ?? d.cfg.perps.paperBalanceUsd) };
-    // Override-covered automatic trips are vetoed (manual STOP ALL always engages).
-    d.kill.setSuppressor((source) => (this.covers(source) ? (d.cfg.mode === 'paper' ? 'override (paper): trading continues; size follows the net loss' : 'override (live): the loss limit does not stop trading; size follows the net loss') : undefined));
+    // Override-covered automatic trips are vetoed (manual STOP ALL always engages). Paper's fixed-size orders
+    // (PAPER_ORDER_USD) do not shrink with the net loss; the break-even scale sizes live only.
+    const paperUsd = d.cfg.mode === 'paper' ? Math.max(0, d.cfg.strategy?.paperOrderUsd ?? 0) : 0;
+    const sizing = paperUsd > 0 ? `orders stay $${paperUsd} (PAPER_ORDER_USD; the size cut for the net loss applies live only)` : 'size follows the net loss';
+    d.kill.setSuppressor((source) => (this.covers(source) ? (d.cfg.mode === 'paper' ? `override (paper): trading continues; ${sizing}` : `override (live): the loss limit does not stop trading; ${sizing}`) : undefined));
     d.oms.on('fill', () => { this.st.kalshi.fills++; });
   }
 
