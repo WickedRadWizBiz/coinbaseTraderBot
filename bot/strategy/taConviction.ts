@@ -95,13 +95,6 @@ export function taDrift(v: TaNetView | undefined, tauSec: number, c: Pick<Convic
   return { k: num / den, parts };
 }
 
-/** One forecast P(up over hSec) at full weight, as taDrift reads a head: the expected move over `tauSec` in sigma units
- *  (the rule book's trial, bot/strategy/componentTrials.ts). */
-export function forecastDrift(p: number, hSec: number, tauSec: number, maxZ: number): number {
-  if (!Number.isFinite(p) || !(hSec > 0) || !(tauSec > 0)) return 0;
-  return clamp(normInv(clamp(p, 1e-4, 1 - 1e-4)), -maxZ, maxZ) * Math.sqrt(tauSec / hSec);
-}
-
 /** Signals oriented so + = bullish for the underlying. */
 export function orientedSignals(f: Record<string, number>, v: TaNetView | undefined, live: boolean, rb?: { score: number; n: number }, gp?: { exposure: number }): Array<[string, number]> {
   const out: Array<[string, number]> = [];

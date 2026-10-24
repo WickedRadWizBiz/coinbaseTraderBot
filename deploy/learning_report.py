@@ -47,9 +47,9 @@ if mh: print('  live pricing vs market on settled windows:', short(mh, 300))
 th = g.get('taHealth')
 print('  TA network tilt vs math alone on settled windows (advantage > 0 = TA helps):', short(th, 300) if th else 'no settled windows yet')
 tr = g.get('trials') or {}
-for k, label in (('snn', 'SNN'), ('ta', 'TA network'), ('rules', 'rule book')):
+for k, label in (('mlp', 'trained model'), ('snn', 'SNN'), ('ta', 'TA network'), ('rules', 'rule book')):
     t = tr.get(k)
-    if t: print(f"  trial {label:10s} {t.get('state'):8s} {t.get('windows')} settlements, advantage {t.get('advantage')} nats, p(better) {t.get('pBetter')}, p(worse) {t.get('pWorse')}, pending {t.get('pending')} | {t.get('why') or 'not decided yet'}")
+    if t: print(f"  trial {label:13s} {t.get('state'):8s} {'in paper' if t.get('applied') else 'not in paper'}: {t.get('windows')} settlements, advantage {t.get('advantage')} nats, p(better) {t.get('pBetter')}, p(worse) {t.get('pWorse')}, pending {t.get('pending')} | {t.get('why') or 'not decided yet'}")
 mk = get('/markets') or []
 mk = mk if isinstance(mk, list) else []
 for x in mk[:12]:

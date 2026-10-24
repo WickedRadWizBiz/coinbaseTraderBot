@@ -30,6 +30,7 @@ import type { TaSignal, TaSnapshot } from '../ta/analyzer';
 import type { Character } from '../ta/character';
 import type { Timeframe } from '../ta/knowledge';
 import { CONTEXT_PARAMS, contextOf, oriented } from './ruleContext';
+import { normInv } from '../util/num';
 
 /** research/ruleBook.ts output (data/models/rule_book.json). */
 export interface RuleRow {
@@ -85,9 +86,9 @@ export interface RuleBookFile {
 
 export interface RuleBookReading { score: number; n: number; agree: string[]; oppose: string[]; cls?: Character; /** Signals present but silenced by a condition under which they fail. */ silenced?: string[]; /** Signals present but invalidated by another signal (or several) present now: 'id@tf by ...'. */ invalidated?: string[] }
 
-/** The rule book's trial reading (bot/strategy/componentTrials.ts): an implied P(up over h hours) from the trial rows'
- *  confirmation hit rates, and the signals behind it. */
-export interface RuleTrialReading { pUp: number; h: number; n: number; agree: string[]; oppose: string[] }
+/** The rule book's trial reading (bot/strategy/componentTrials.ts): the expected move over a contract's remaining life,
+ *  in sigma units (k of k sigma sqrt(tau); + = up), from the trial rows' confirmation hit rates, and the rows behind it. */
+export interface RuleTrialReading { k: number; rows: number; agree: string[]; oppose: string[] }
 
 /** A trial row needs this many trades in the confirmation period. */
 export const TRIAL_MIN_CONF = 20;
@@ -204,29 +205,36 @@ export class RuleBook {
     return { score: Math.max(-1, Math.min(1, num / den)), n: agree.length + oppose.length, agree, oppose, cls, silenced, invalidated };
   }
 
-  /** The trial reading for `snap` at horizon h (hours) and character cls: each signal present with a trial row (the
-   *  character's own row, else the 'all characters' row) counts dir x strength x (its confirmation hit rate - 0.5),
-   *  weighted by its confirmation trades; P(up) is 0.5 plus their weighted mean, kept within 0.05..0.95. Conditions,
-   *  invalidations and pairs are left out: their study needs the passing rows. */
-  trialRead(snap: TaSnapshot | undefined, h: number, cls?: Character): RuleTrialReading | undefined {
+  /** The trial reading for `snap` over a contract's remaining life `tauSec` and character cls. Each signal present
+   *  counts at every horizon it has a trial row for (the character's own row, else the 'all characters' row): its
+   *  confirmation hit rate is a P(move its way over the row's horizon H), read like a TA head, z = Phi^-1(hit rate)
+   *  (|z| <= maxZ), an expected move of z sqrt(tau / H) sigma sqrt(tau) its way, scaled by the signal's strength. The
+   *  reading is their mean weighted by confirmation trades. Conditions, invalidations and pairs are left out: their
+   *  study needs the passing rows. */
+  trialRead(snap: TaSnapshot | undefined, tauSec: number, cls: Character | undefined, maxZ: number): RuleTrialReading | undefined {
     this.load();
     const trial = this.file?.trial;
-    if (!trial?.size || !snap) return undefined;
-    const hh = [...new Set([...trial.values()].map((r) => r.h))].sort((a, b) => Math.abs(a - h) - Math.abs(b - h))[0];
-    let num = 0, den = 0;
+    if (!trial?.size || !snap || !(tauSec > 0)) return undefined;
+    const horizons = [...new Set([...trial.values()].map((r) => r.h))];
+    let num = 0, den = 0, rows = 0;
     const agree: string[] = [], oppose: string[] = [];
     const add = (kind: RuleRow['kind'], id: string, tf: string, dir: number, strength: number) => {
       if (!dir || !(strength > 0)) return;
-      const row = (cls && trial.get(`${kind}|${id}|${tf}|${hh}|${cls}`)) || trial.get(`${kind}|${id}|${tf}|${hh}|all`);
-      if (!row) return;
-      num += row.nConf * Math.sign(dir) * Math.min(1, strength) * (row.hitConf - 0.5); den += row.nConf;
-      (dir > 0 ? agree : oppose).push(`${id}@${tf}`);
+      let used = false;
+      for (const h of horizons) {
+        const row = (cls && trial.get(`${kind}|${id}|${tf}|${h}|${cls}`)) || trial.get(`${kind}|${id}|${tf}|${h}|all`);
+        if (!row) continue;
+        const z = Math.max(-maxZ, Math.min(maxZ, normInv(Math.max(1e-4, Math.min(1 - 1e-4, row.hitConf)))));
+        num += row.nConf * Math.sign(dir) * Math.min(1, strength) * z * Math.sqrt(tauSec / (h * 3600)); den += row.nConf;
+        rows++; used = true;
+      }
+      if (used) (dir > 0 ? agree : oppose).push(`${id}@${tf}`);
     };
     for (const s of snap.signals) add('rule', s.id, s.tf, s.dir, s.strength);
     for (const s of snap.book ?? []) add('book', s.id, s.tf, s.dir, s.strength);
     for (const c of snap.confluences) if (c.score) add('confluence', c.id, 'multi', Math.sign(c.score), Math.abs(c.score));
     if (!(den > 0)) return undefined;
-    return { pUp: Math.max(0.05, Math.min(0.95, 0.5 + num / den)), h: hh, n: agree.length + oppose.length, agree, oppose };
+    return { k: num / den, rows, agree, oppose };
   }
 }
 

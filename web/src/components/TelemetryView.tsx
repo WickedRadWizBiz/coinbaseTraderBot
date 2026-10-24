@@ -50,11 +50,11 @@ export function TelemetryView() {
                 <tr><td className="uppercase font-bold">Maker buffer</td><td>{cents(g.makerBuffer)}{g.makerMarkout60?.n ? ` (${g.makerMarkout60.n} fills)` : ' (default)'}</td><td className="uppercase font-bold">Vs break-even</td><td className={g.equityGuard?.sizeScale !== null && g.equityGuard?.sizeScale < 1 ? 'text-crypto-danger' : ''}>{g.equityGuard?.netPnl === null || g.equityGuard?.netPnl === undefined ? '—' : `${g.equityGuard.netPnl >= 0 ? '+' : '-'}$${Math.abs(g.equityGuard.netPnl).toFixed(2)}`} · size ×{g.equityGuard?.sizeScale?.toFixed(2) ?? '—'}</td></tr>
                 <tr><td className="uppercase font-bold">Model vs market</td><td className={g.modelHealth?.halt ? 'text-crypto-danger' : ''}>{g.modelHealth?.advantage === null || g.modelHealth?.advantage === undefined ? `${g.modelHealth?.windows ?? 0} windows` : `${g.modelHealth.advantage >= 0 ? '+' : ''}${g.modelHealth.advantage.toFixed(4)} nats · ${g.modelHealth.windows} windows`}</td><td className="uppercase font-bold">Entry guards</td><td className={g.entryGuards?.length ? 'text-crypto-danger' : 'text-crypto-success'}>{g.entryGuards?.length ? g.entryGuards.join(' · ') : 'clear'}</td></tr>
                 {g.trials && (() => {
-                  const names: Array<[string, string]> = [['snn', 'SNN'], ['ta', 'TA network'], ['rules', 'Rule book']];
+                  const names: Array<[string, string]> = [['mlp', 'Trained model'], ['snn', 'SNN'], ['ta', 'TA network'], ['rules', 'Rule book']];
                   const one = (k: string, label: string) => {
                     const t = g.trials[k];
                     if (!t) return null;
-                    const verdict = t.state === 'on' ? 'ON in paper' : t.state === 'off' ? 'off (worse)' : 'testing';
+                    const verdict = t.state === 'on' ? 'ON in paper' : t.state === 'off' ? 'off (worse)' : t.applied ? 'testing, in paper' : 'testing';
                     const adv = t.advantage === null ? '' : ` · ${t.advantage >= 0 ? 'saves' : 'costs'} ${Math.abs(t.advantage).toFixed(4)} nats · p(better) ${t.pBetter?.toFixed(3)}`;
                     return <span key={k} className={`mr-3 ${t.state === 'on' ? 'text-crypto-success' : t.state === 'off' ? 'text-crypto-danger' : ''}`} title={t.why ?? 'not decided yet'}>{label}: {verdict} · {t.windows}/{g.trials.params?.minWindows ?? 100} settlements{adv}</span>;
                   };

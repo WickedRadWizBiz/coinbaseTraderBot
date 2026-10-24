@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Component study (read-only): would the SNN or the TA network have priced the bot's crypto contracts better, on the
-bot's own records? The offline half of the component trials (bot/strategy/componentTrials.ts, which score the same
+"""Component study (read-only): would the trained model, the SNN or the TA network have priced the bot's crypto contracts
+better, on the bot's own records? The offline half of the component trials (bot/strategy/componentTrials.ts, which score the same
 contributions live from now on), and what the rule book's trial would read.
 
 On the audit log's decision records that carry the full feature map (every market at least every 5 minutes, and with
 every order that is not a requote), inside each contract's entry window, against the official results (the audit's
 settlements and the recordings' result lines, every scanned market):
-  - the meta-model's price: the fair value moved by the record's modelShift (logit(model) - logit(fair value));
+  - the trained model: the meta-model's price (the fair value moved by the record's modelShift, logit(model) -
+    logit(fair value)) against the math fair value alone;
   - the SNN: its probability for the contract, from the record's snn_bias (logit(p_snn) - logit(fair value)), blended
     in at weights 0.1 / 0.25 / 0.5 / 1 times its confidence c (calibration x surprise x governor, bot/snn/blender.ts);
   - the TA network: the tilt the bot applied (the record's price minus the meta-model's), at 0.5 / 1 / 2 times.
@@ -154,7 +155,9 @@ def main():
     compare('math fair value', lambda s: s['fv'], market)
     compare('meta-model', model, market)
     compare('the bot\'s price (meta-model + TA tilt)', lambda s: s['p'], market)
-    print('\n== 2. the SNN blended into the meta-model\'s price (saved = better than the meta-model alone)')
+    print('\n== 2. the trained model (meta-model) against the math fair value it refines (saved = better than the math alone)')
+    compare('meta-model', model, lambda s: s['fv'])
+    print('\n== 3. the SNN blended into the meta-model\'s price (saved = better than the meta-model alone; the trial blends at 0.25 flat)')
 
     def conf(s):
         c = s['snnCal'] if s['snnCal'] is not None else 1.0
@@ -173,11 +176,11 @@ def main():
         compare(f'SNN at {a} x confidence', snn_blend(a), model)
     compare('SNN at 0.25, confidence ignored', snn_blend(0.25, False), model)
     compare('SNN alone (its own probability)', snn_blend(1.0, False), model)
-    print('\n== 3. the TA network\'s tilt on the meta-model\'s price (saved = better than the meta-model alone)')
+    print('\n== 4. the TA network\'s tilt on the meta-model\'s price (saved = better than the meta-model alone)')
     for k in (0.5, 1.0, 2.0):
         compare(f'TA tilt x {k}', lambda s, k=k: max(0.001, min(0.999, s['model'] + k * (s['p'] - s['model']))), model, only=lambda s: abs(s['p'] - s['model']) > 1e-6)
 
-    print('\n== 4. the rule book\'s trial rows (data/models/rule_book.json): passing rows, and rows positive on both periods')
+    print('\n== 5. the rule book\'s trial rows (data/models/rule_book.json): passing rows, and rows positive on both periods')
     f = os.path.join(data, 'models', 'rule_book.json')
     try: book = json.load(open(f))
     except Exception as e: print(f'  no rule book: {e}'); book = None

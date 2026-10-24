@@ -88,7 +88,7 @@ import { activeRuleBook, STAND_ASIDE } from './strategy/ruleBook';
 import { activeGpSignals } from './gp/gpSignals';
 import { marketContext } from './ta/marketContext';
 import { binaryTrades, optimalF, recencyWeight, type OptimalFReport } from './strategy/optimalF';
-import { altcoinRiskOn, confluenceBreadth, forecastDrift, orientedSignals, selectionPriority, taDrift, taNetDirection, viewOf, type TaNetView } from './strategy/taConviction';
+import { altcoinRiskOn, confluenceBreadth, orientedSignals, selectionPriority, taDrift, taNetDirection, viewOf, type TaNetView } from './strategy/taConviction';
 
 /** Paper fixed size: how many fixed-size orders the window cap (markets closing together) and the total cap hold. */
 const PAPER_WINDOW_ORDERS = 3;
@@ -253,9 +253,9 @@ export interface MarketStatus {
   snnC?: number;
   snnAlpha?: number;
   snnShadow?: string;
-  /** The component trials' contributions to this contract's price (probability points over the meta-model's), and the
-   *  ones paper's price includes. */
-  trials?: { snn?: number; ta?: number; rules?: number; applied: TrialName[] };
+  /** The component trials' contributions to this contract's price (probability points: the trained model's over the
+   *  fair value, the others' over the trained model's), and the ones paper's price includes. */
+  trials?: { mlp?: number; snn?: number; ta?: number; rules?: number; applied: TrialName[] };
   updatedTs: number;
 }
 
@@ -1570,9 +1570,9 @@ export class Engine {
   }
 
   /** p_final = (1 - alpha c) p_model + alpha c p_snn in blend mode; otherwise p_model (SNN logged only). */
-  /** The price after the SNN's earned blend (alpha 0 until earned), and its trial blend (bot/strategy/componentTrials.ts):
-   *  blended at the trial's weight x its confidence, whatever alpha it has earned. */
-  private snnBlend(m: ActiveMarket, st: MarketStatus, pModel: number, tradable: boolean, now: number): { p: number; trial?: number } {
+  /** The price after the SNN's earned blend (alpha 0 until earned), and for its trial (bot/strategy/componentTrials.ts)
+   *  its probability and the trial's weight (TRIAL_SNN_ALPHA x its confidence), whatever alpha it has earned. */
+  private snnBlend(m: ActiveMarket, st: MarketStatus, pModel: number, tradable: boolean, now: number): { p: number; a?: number; pSnn?: number } {
     const snn = this.d.snn;
     st.pModel = pModel;
     const unit = snn?.units.crypto;
@@ -1588,8 +1588,11 @@ export class Engine {
     const p = snn.blender.pFinal(pModel, s.p, c, Boolean(shadow));
     Object.assign(st, { pSnn: s.p, snnC: c, snnAlpha: shadow ? 0 : snn.blender.alpha().alpha, snnShadow: shadow });
     if (tradable) snn.blender.record({ ticker: m.ticker, eventKey: s.eventKey, ts: now, pModel, pSnn: s.p, c });
-    const a = (this.d.trials?.p.snnAlpha ?? 0) * Math.max(0, Math.min(1, c));
-    return { p, trial: this.d.trials && Number.isFinite(s.p) ? (1 - a) * pModel + a * s.p : undefined };
+    // The trial blends at its weight without the confidence factor: on Oct 21-24's decisions the confidence cut the
+    // blend's gain (deploy/component_study.py: 0.25 x c saved 0.0014 of log loss a contract at p 0.09, 0.25 flat 0.0041
+    // at p 0.02).
+    if (!this.d.trials || !Number.isFinite(s.p)) return { p };
+    return { p, a: this.d.trials.p.snnAlpha, pSnn: s.p };
   }
 
   /** Load the blender's saved history; it is discarded when it was recorded against another meta-model. */
@@ -1847,12 +1850,16 @@ export class Engine {
     const pMarket = model.marketProbability(mid);
     // SNN: feed this market's encodings to the next 1 s step, then blend (alpha = 0 unless earned).
     this.snnObserve(m, { mid, spread: ask.price - bid.price, imbalance: features.imbalance, dAtm: fv.d2, tauFrac: tauSec / Math.max(1, (m.closeTime - m.openTime) / 1000) }, now);
-    const blended = this.snnBlend(m, st, pred.p, tauSec > R.noEntryBeforeCloseSec, now);
-    // Component trials (bot/strategy/componentTrials.ts): paper's price includes a trial's contribution once its test
-    // passed; live's never does.
+    // Component trials (bot/strategy/componentTrials.ts): paper's price follows each trial's verdict (the trained model
+    // stays in until it tests significantly worse than the math alone; the others go in once they test better, the
+    // rule book while it is tested); live's price never does.
     const trials = this.d.trials;
-    const trialOn = (name: TrialName) => cfg.mode === 'paper' && trials?.on(name) === true;
-    const pBase = trialOn('snn') && blended.trial !== undefined ? blended.trial : blended.p;
+    const trialOn = (name: TrialName) => cfg.mode === 'paper' && trials?.applied(name) === true;
+    const pModel = cfg.mode === 'paper' && trials && !trials.applied('mlp') ? fv.pYes : pred.p;
+    const blended = this.snnBlend(m, st, pModel, tauSec > R.noEntryBeforeCloseSec, now);
+    // The SNN's trial blend of a price: (1 - a) p + a p_snn.
+    const snnTrial = (p: number) => (blended.a !== undefined && blended.pSnn !== undefined ? (1 - blended.a) * p + blended.a * blended.pSnn : undefined);
+    const pBase = trialOn('snn') && blended.a !== undefined ? snnTrial(pModel)! : blended.p;
     const why = explain(model, features, fv.pYes);
     st.modelShift = why.shiftFromFairValue;
     st.drivers = why.drivers;
@@ -1893,12 +1900,13 @@ export class Engine {
     const taSnap = S0.ruleBook || trials ? md.features.candles.get(m.asset)?.snapshot(now, marketContext()?.macro()) : undefined;
     const rbRead = S0.ruleBook ? activeRuleBook()?.read(taSnap, Math.max(1, tauSec / 3600), coinChar?.cls) : undefined;
     // The rule book's trial: the rules that held up on both periods of its study, as an implied P(up) tilting the price.
-    const rbTrial = trials ? activeRuleBook()?.trialRead(taSnap, Math.max(1, tauSec / 3600), coinChar?.cls) : undefined;
-    const ruleShift = rbTrial ? tilt(forecastDrift(rbTrial.pUp, rbTrial.h * 3600, tauSec, S0.taPricingMaxZ), 1) : undefined;
+    const rbTrial = trials ? activeRuleBook()?.trialRead(taSnap, tauSec, coinChar?.cls, S0.taPricingMaxZ) : undefined;
+    const ruleShift = rbTrial ? tilt(rbTrial.k, 1) : undefined;
     if (trialOn('rules') && ruleShift) pYes = Math.max(0.001, Math.min(0.999, pYes + ruleShift));
     if (trials) {
       const d = (x: number | undefined) => (x === undefined ? undefined : +x.toFixed(4));
-      st.trials = { snn: d(blended.trial !== undefined ? blended.trial - pred.p : undefined), ta: d(taShiftFull), rules: d(ruleShift), applied: (['snn', 'ta', 'rules'] as TrialName[]).filter(trialOn) };
+      const snnP = snnTrial(pred.p);
+      st.trials = { mlp: d(pred.p - fv.pYes), snn: d(snnP === undefined ? undefined : snnP - pred.p), ta: d(taShiftFull), rules: d(ruleShift), applied: (['mlp', 'snn', 'ta', 'rules'] as TrialName[]).filter(trialOn) };
     }
     const standAside = S0.characterStandAside && coinChar && STAND_ASIDE.includes(coinChar.cls) ? coinChar.why : undefined;
     // The coin's evolved formula on the latest hourly bars (unvalidated ones never speak live).
@@ -1959,7 +1967,10 @@ export class Engine {
     // and without it.
     if (reason && kindWindow && trials) {
       const clampP = (x: number) => Math.max(0.001, Math.min(0.999, x));
-      if (blended.trial !== undefined) trials.record('snn', m.ticker, m.asset, m.closeTime, blended.trial, pred.p, now);
+      // The trained model against the math fair value it refines.
+      trials.record('mlp', m.ticker, m.asset, m.closeTime, pred.p, fv.pYes, now);
+      const snnP = snnTrial(pred.p);
+      if (snnP !== undefined) trials.record('snn', m.ticker, m.asset, m.closeTime, snnP, pred.p, now);
       if (taShiftFull !== undefined) trials.record('ta', m.ticker, m.asset, m.closeTime, clampP(pred.p + taShiftFull), pred.p, now);
       if (ruleShift !== undefined) trials.record('rules', m.ticker, m.asset, m.closeTime, clampP(pred.p + ruleShift), pred.p, now);
     }

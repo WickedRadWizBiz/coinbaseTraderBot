@@ -1,35 +1,43 @@
 // Component trials (the owner, Oct 24: "Have the rule book, SNN, and TA NET contribute, give each a shot and let's see
 // how well they perform. If they perform well in the test allow them to function for paper trading to further test
-// them").
+// them", then "The trained model as well" and "If the rule book has been trained ... let it trade in paper mode so we can
+// test it that way").
 //
 // Each component's contribution to a crypto contract's price is worked out at every scheduled evaluation inside the
 // contract's entry window, traded or not, in paper and in live, and scored when the contract settles: the log loss of
 // the price with the contribution against the price without it (the meta-model's price, before any tilt). A contract's
 // snapshots are averaged, and so are the contracts of one asset closing together (one outcome, a settlement). Over
 // the most recent TRIAL_KEEP settlements a Diebold-Mariano statistic (bot/model/modelHealth.ts) tests the difference:
-//   - testing: from the start, until the difference is significant either way;
-//   - on: better at one-sided p <= TRIAL_P over at least TRIAL_MIN_WINDOWS settlements. Paper's prices then include the
-//     contribution; live never does (live prices as it did before the trials);
-//   - off: worse at one-sided p <= TRIAL_P over at least TRIAL_MIN_WINDOWS settlements (paper prices without it).
-// The scores keep coming either way: a component that is on goes off once it is significantly worse, and one that is
-// off comes back on once it is significantly better.
+//   - testing: from the start, until the difference is significant either way. Paper prices as before meanwhile (the
+//     trained model in, the others out), except for the trials in TRIAL_PAPER_START (the rule book, the owner's
+//     choice: it trades in paper while it is tested);
+//   - on: better at one-sided p <= TRIAL_P over at least TRIAL_MIN_WINDOWS settlements: paper's prices include it;
+//   - off: worse at one-sided p <= TRIAL_P over at least TRIAL_MIN_WINDOWS settlements: paper prices without it.
+// Live never uses a trial's verdict: live prices as it did before the trials. The scores keep coming either way: a
+// component that is on goes off once it is significantly worse, and one that is off comes back on once it is better.
 //
 // The contributions (bot/engine.ts):
+//   - mlp: the trained meta-model's price against the math fair value it refines (bot/model/metaModel.ts). It priced
+//     before the trials, so it keeps pricing paper while it is tested and only an 'off' takes it out;
 //   - snn: the crypto network's probability for the contract blended in at the blender's cap, (1 - a) p + a p_snn with
-//     a = TRIAL_SNN_ALPHA (0.25) x its confidence c (bot/snn/blender.ts). The blender's own earned alpha stays 0 until
-//     its bootstrap test passes on 200 settled events since the last meta-model swap;
+//     a = TRIAL_SNN_ALPHA (0.25), without the blender's confidence factor (it cut the blend's gain on the recorded
+//     decisions). The blender's own earned alpha stays 0 until its bootstrap test passes on 200 settled events since the
+//     last meta-model swap;
 //   - ta: the TA network's 1 h / 4 h direction drift with every head counting fully, validated or not (today's tilt
 //     counts an unvalidated head by its graded skill, bot/strategy/taConviction.ts);
 //   - rules: the rule book's trial rows, the rules that held up on both periods of the walk-forward study without
-//     passing its multiple-testing bar (bot/strategy/ruleBook.ts trialRead), as a drift like the TA network's.
+//     passing its multiple-testing bar (bot/strategy/ruleBook.ts trialRead), as a drift like the TA network's: every
+//     horizon a signal present has a row for, its confirmation hit rate read as a P(move its way).
 
 import { dmStat, logLoss } from '../model/modelHealth';
 import { normCdf } from '../util/num';
 import { readJson, writeJsonAtomic } from '../util/persist';
 
-export type TrialName = 'snn' | 'ta' | 'rules';
-export const TRIAL_NAMES: TrialName[] = ['snn', 'ta', 'rules'];
+export type TrialName = 'mlp' | 'snn' | 'ta' | 'rules';
+export const TRIAL_NAMES: TrialName[] = ['mlp', 'snn', 'ta', 'rules'];
 export type TrialState = 'testing' | 'on' | 'off';
+/** Components that priced before the trials: paper keeps them while they are tested. */
+const BASELINE: TrialName[] = ['mlp'];
 
 export interface TrialParams {
   /** Record and score the trials (TRIALS). */
@@ -42,9 +50,11 @@ export interface TrialParams {
   keep: number;
   /** The SNN's blend weight in its trial (times its confidence). */
   snnAlpha: number;
+  /** Trials that trade in paper while they are tested (TRIAL_PAPER_START; an 'off' still takes them out). */
+  paperStart: TrialName[];
 }
 
-export const DEFAULT_TRIALS: TrialParams = { enabled: true, minWindows: 100, p: 0.05, keep: 500, snnAlpha: 0.25 };
+export const DEFAULT_TRIALS: TrialParams = { enabled: true, minWindows: 100, p: 0.05, keep: 500, snnAlpha: 0.25, paperStart: ['rules'] };
 
 interface Window { key: string; closeTs: number; d: number; n: number }
 interface Book { windows: Window[]; state: TrialState; since: number; why?: string }
@@ -52,6 +62,8 @@ type State = Record<TrialName, Book>;
 
 export interface TrialStatus {
   state: TrialState; since: number; why: string | null;
+  /** Paper's prices include it now. */
+  applied: boolean;
   /** Settlements scored, and the log loss the contribution saved a contract on average (+ = better with it). */
   windows: number; advantage: number | null;
   /** One-sided p-values: better with it, worse with it. */
@@ -70,8 +82,13 @@ export class ComponentTrials {
     this.st = Object.fromEntries(TRIAL_NAMES.map((n) => [n, saved?.[n] ?? { windows: [], state: 'testing', since: now }])) as State;
   }
 
-  /** Paper's prices include this component's contribution. */
-  on(name: TrialName): boolean { return this.p.enabled && this.st[name].state === 'on'; }
+  /** Paper's prices include this component: on, or still testing for a component that priced before the trials or
+   *  trades in paper while it is tested. With the trials off, paper prices as before (the trained model alone). */
+  applied(name: TrialName): boolean {
+    if (!this.p.enabled) return BASELINE.includes(name);
+    const st = this.st[name].state;
+    return st === 'on' || (st === 'testing' && (BASELINE.includes(name) || this.p.paperStart.includes(name)));
+  }
 
   /** One snapshot of a contract: its price with the component's contribution and without it. */
   record(name: TrialName, ticker: string, asset: string, closeTs: number, pWith: number, pWithout: number, now = Date.now()): void {
@@ -134,7 +151,7 @@ export class ComponentTrials {
     return Object.fromEntries(TRIAL_NAMES.map((name) => {
       const b = this.st[name], s = this.score(name);
       const r = (x: number | null, d: number) => (x === null ? null : +x.toFixed(d));
-      return [name, { state: b.state, since: b.since, why: b.why ?? null, windows: s.n, advantage: r(s.advantage, 5), pBetter: r(s.pBetter, 4), pWorse: r(s.pWorse, 4), pending: pending(name) }];
+      return [name, { state: b.state, since: b.since, why: b.why ?? null, applied: this.applied(name), windows: s.n, advantage: r(s.advantage, 5), pBetter: r(s.pBetter, 4), pWorse: r(s.pWorse, 4), pending: pending(name) }];
     })) as Record<TrialName, TrialStatus>;
   }
 }
