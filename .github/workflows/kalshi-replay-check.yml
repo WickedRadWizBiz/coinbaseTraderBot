@@ -27,6 +27,10 @@ on:
         description: 'Shortest stretch that gets a verdict (hours)'
         required: false
         default: '3'
+      nearby:
+        description: 'Bankrolls (x paper''s) the stretch is also replayed at, space separated; the verdict holds their median to paper (none = only paper''s)'
+        required: false
+        default: '0.95 0.975 1.025 1.05'
   push:
     branches: ['claude/kalshi-random-sweep']
     paths: ['.github/workflows/kalshi-replay-check.yml', 'research/replayCheck.ts', 'research/backtest.ts']
@@ -154,19 +158,31 @@ jobs:
         env:
           CHECK_FROM: ${{ inputs.from || 'auto' }}
           MIN_HOURS: ${{ inputs.min_hours || '3' }}
+          NEARBY: ${{ inputs.nearby || '0.95 0.975 1.025 1.05' }}
         run: |
           set -a; . data/sweep-env/train.env; set +a
           export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper
           BAL=$(cat "$RUNNER_TEMP/paper-balance" 2>/dev/null || true)
           GUARD="$RUNNER_TEMP/paper-guard.json"; [ -s "$GUARD" ] || GUARD=""
           OVERRIDE=$(cat "$RUNNER_TEMP/kill-override" 2>/dev/null || echo true)
-          T0=$(date +%s)
-          timeout 200m node --import tsx research/replayCheck.ts --recordings data/recordings --audit data/audit --days "$(cat data/sweeps/check-days.txt)" \
-            --from "$CHECK_FROM" --to "$(cat data/sweeps/check-to.txt)" --min-hours "$MIN_HOURS" ${BAL:+--paper-balance-now "$BAL"} \
-            ${GUARD:+--paper-guard "$GUARD"} --kill-override "$OVERRIDE" --maker-markouts "$RUNNER_TEMP/maker-markouts.json" --paper-probation "$RUNNER_TEMP/paper-probation.json" \
-            --paper-trials "$RUNNER_TEMP/paper-trials.json" --paper-tp-bench "$RUNNER_TEMP/paper-tp-bench.json" --paper-accuracy-gate "$RUNNER_TEMP/paper-accuracy-gate.json" \
-            --model data/models/model.json --out data/sweeps/replay-check-latest.json || echo "replay check failed or cut off"
-          echo "replay check took $(( ($(date +%s) - T0) / 60 )) min"
+          ARGS=(--recordings data/recordings --audit data/audit --days "$(cat data/sweeps/check-days.txt)" --from "$CHECK_FROM" --to "$(cat data/sweeps/check-to.txt)"
+            --min-hours "$MIN_HOURS" ${BAL:+--paper-balance-now "$BAL"} ${GUARD:+--paper-guard "$GUARD"} --kill-override "$OVERRIDE"
+            --maker-markouts "$RUNNER_TEMP/maker-markouts.json" --paper-probation "$RUNNER_TEMP/paper-probation.json" --paper-trials "$RUNNER_TEMP/paper-trials.json"
+            --paper-tp-bench "$RUNNER_TEMP/paper-tp-bench.json" --paper-accuracy-gate "$RUNNER_TEMP/paper-accuracy-gate.json" --model data/models/model.json)
+          T0=$(date +%s); mkdir -p data/sweeps/nearby; [ "$NEARBY" = none ] && NEARBY=''
+          # One replay's P&L is path-sensitive (the same code at a $64 or a $74 bankroll made -$11.63 or -$32.76 over one
+          # stretch): the stretch also replays at bankrolls a few percent off paper's, side by side (first in line for the
+          # out-of-memory killer, so the check's own replay is the last to go), and the verdict holds their median to paper's.
+          for s in $NEARBY; do
+            choom -n 900 -- timeout 200m node --import tsx research/replayCheck.ts "${ARGS[@]}" --bankroll-scale "$s" --out "data/sweeps/nearby/$s.json" > "$RUNNER_TEMP/nearby-$s.log" 2>&1 &
+          done
+          timeout 200m node --import tsx research/replayCheck.ts "${ARGS[@]}" --out data/sweeps/replay-check-own.json || echo "replay check failed or cut off"
+          wait
+          for s in $NEARBY; do [ -s "data/sweeps/nearby/$s.json" ] || echo "nearby replay x$s did not finish: $(grep -E 'Error|Killed|heap' "$RUNNER_TEMP/nearby-$s.log" | tail -n 1 | cut -c1-160)"; done
+          if [ -s data/sweeps/replay-check-own.json ]; then
+            node --import tsx research/replayCheck.ts --combine data/sweeps/replay-check-own.json --nearby "$(ls data/sweeps/nearby/*.json 2>/dev/null | paste -sd, -)" --out data/sweeps/replay-check-latest.json
+          fi
+          echo "replay check took $(( ($(date +%s) - T0) / 60 )) min; memory now $(free -m | awk '/^Mem:/ {print $3 " MB used of " $2}')"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

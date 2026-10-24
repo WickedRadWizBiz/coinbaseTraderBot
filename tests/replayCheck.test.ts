@@ -10,7 +10,7 @@ import type { TrialName } from '../bot/strategy/componentTrials';
 import { activeTaNet, setTaNet } from '../bot/ta/taNet';
 import { setTaNetEnsemble } from '../bot/ta/taNetEnsemble';
 import { engineModels, installProbation, runBacktest, type EvalReading } from '../research/backtest';
-import { benchAt, corr, gateAt, paperFromAudit, paperSummary, priceMatcher, readAudit, replayDays, settingsDiffer, stretchStart, verdict } from '../research/replayCheck';
+import { benchAt, corr, gateAt, nearbyVerdict, paperFromAudit, paperSummary, priceMatcher, readAudit, replayDays, settingsDiffer, stretchStart, verdict } from '../research/replayCheck';
 import { writeSyntheticRecordings } from '../research/synthetic';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'replay-check-test-'));
@@ -325,4 +325,20 @@ test('the bot\'s validation gates: monitor lets unvalidated models trade unless 
   } finally {
     setProbation(undefined);
   }
+});
+
+test('replay check: the verdict over nearby replays holds their median to paper', () => {
+  const side = (pnl: number, contracts: number) => ({ fills: 10, contracts, fees: 0, pnl, markets: 5, exits: {}, byHour: {}, byPurpose: {}, contractsByHour: {}, bySeries: {} });
+  const paper = side(-10, 1000);
+  const runs = [[-2, 900], [-9, 1000], [-30, 1100], [-11, 950], [4, 800]].map(([pnl, c], i) => ({ bankroll: 70 + i, bankrollScale: 1 + i * 0.025, replay: side(pnl, c) }));
+  const v = nearbyVerdict(runs, paper);
+  assert.equal(v.nearby.median, -9);
+  assert.equal(v.nearby.contractsMedian, 950);
+  assert.deepEqual([v.nearby.min, v.nearby.max, v.nearby.paperInside], [-30, 4, true]);
+  assert.ok(v.close, 'the median, -9, is within 25% of -10 although one replay alone is not');
+  assert.ok(Math.abs(v.pnlGap! - 0.1) < 1e-9);
+  const off = nearbyVerdict(runs.map((r) => ({ ...r, replay: side(r.replay.pnl + 25, 1000) })), paper);
+  assert.equal(off.close, false);
+  assert.equal(off.nearby.paperInside, false);
+  assert.ok(off.why.length > 0 && off.why.every((w) => w.startsWith('median of 5 replays')));
 });
