@@ -11,7 +11,7 @@ on:
         required: false
         default: ''
       pnl:
-        description: 'Also run the P&L forensics (deploy/pnl_report.py, decision_study.py, feed_delay.py, latency_study.py from the dispatched ref; read-only, a few minutes)'
+        description: 'Also run the P&L forensics (deploy/pnl_report.py, decision_study.py, cross_study.py, feed_delay.py, latency_study.py from the dispatched ref; read-only, a few minutes)'
         required: false
         default: 'false'
       timings:
@@ -37,7 +37,7 @@ jobs:
           username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
-          source: deploy/pnl_report.py,deploy/decision_study.py,deploy/feed_delay.py,deploy/latency_study.py,deploy/step_timings.py
+          source: deploy/pnl_report.py,deploy/decision_study.py,deploy/cross_study.py,deploy/feed_delay.py,deploy/latency_study.py,deploy/step_timings.py
           target: /tmp/diag
       - name: Report
         uses: appleboy/ssh-action@v1.0.3
@@ -129,6 +129,25 @@ jobs:
             for k, v in sorted((a.get("models") or {}).items()):
                 print("  model file", k, "|", (str(round((time.time() * 1000 - v["mtime"]) / 3.6e6, 1)) + " h old") if v.get("mtime") else "missing", "|", v.get("id") or "")
             print("  hot swaps", json.dumps(a.get("swaps"), default=str)[:400])' || true
+            echo "== exit curve, vault and mode settings in bot.env (none of these keys holds a secret)"
+            grep -E '^(TRADING_MODE|SINUOUS_[A-Z_]+|VAULT_[A-Z_]+|LIVE_ALLOW_UNVALIDATED_MODEL)=' ~/bot/bot.env 2>/dev/null || echo "(none set: the defaults)"
+            echo "== live books at rest (read from DATA_DIR/live while paper runs)"
+            python3 - <<'PYEOF' || true
+            import json, os
+            base = os.path.expanduser('~/bot/data/live')
+            def load(name):
+                try: return json.load(open(os.path.join(base, name)))
+                except Exception as e: return {'unreadable': str(e)[:80]}
+            v = load('vault.json')
+            ev = [(e.get('kind'), e.get('amount')) for e in (v.get('events') or [])[-6:]]
+            print('live vault', json.dumps({k: v.get(k) for k in ('vault', 'quotaFilled', 'withdrawnTotal', 'realized', 'unreadable')}), '| pocket', round(sum(p.get('amount', 0) for p in v.get('pocket') or []), 2), '| last events', ev)
+            c = load('curve-exit.json')
+            r = c.get('results') or []
+            print('live exit curve', json.dumps({'results': len(r), 'netUsd': round(sum(r), 2), 'restartTag': c.get('restartTag'), 'benched': c.get('benched'), 'crossesPending': len(c.get('crosses') or []), 'unreadable': c.get('unreadable')}))
+            g = load('equity_guard.json')
+            h = g.get('history') or []
+            print('live break-even', g.get('reference'), '| last hourly equity', h[-1] if h else None)
+            PYEOF
             echo "== learning and settlement report"
             if [ -f ~/bot/current/deploy/learning_report.py ]; then python3 ~/bot/current/deploy/learning_report.py ~/bot/data || true; else echo "(learning report ships with the next release)"; fi
             for p in $EXTRA_PATHS; do
@@ -138,6 +157,8 @@ jobs:
             if [ "$PNL" = "true" ] && [ -d /tmp/diag/deploy ]; then
               echo "== P&L report"; nice -n 19 python3 /tmp/diag/deploy/pnl_report.py ~/bot/data 3 || true
               echo "== decision study"; nice -n 19 python3 /tmp/diag/deploy/decision_study.py ~/bot/data 3 || true
+              echo "== exit study (the cross, the projected-peak rule and the live-line rule, replayed on the recordings; at most 15 min)"
+              timeout 900 nice -n 19 python3 /tmp/diag/deploy/cross_study.py ~/bot/data 2 || echo "(exit study stopped: $?)"
               echo "== feed delay"; nice -n 19 python3 /tmp/diag/deploy/feed_delay.py ~/bot/data/recordings 1 || true
               echo "== latency study"; nice -n 19 python3 /tmp/diag/deploy/latency_study.py ~/bot/data/recordings 2 || true
             fi
