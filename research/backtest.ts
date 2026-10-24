@@ -151,7 +151,15 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
    *  start empty there (research/replayCheck.ts starts hours before the stretch it compares). */
   startMs?: number;
   /** The break-even ratchet's daily goal (VAULT_DAILY_GOAL_USD), as the engine's equity guard has it; none when unset. */
-  dailyGoalUsd?: number }
+  dailyGoalUsd?: number;
+  /** The dashboard's kill-switch override (bot/control.ts: on unless turned off). With it the weekly loss pause does not
+   *  stop entries, as in the engine. Default on. */
+  killOverride?: boolean;
+  /** Start the equity guard from this saved state (a copy: the guard writes to it), e.g. the paper bot's
+   *  equity_guard.json, so the break-even it sizes against and its sizing tier are the bot's. */
+  equityGuardFile?: string;
+  /** No orders before this time (ms): until then the replay only watches (research/replayCheck.ts). */
+  tradeFromMs?: number }
 
 /** The engine's paper caps (bot/engine.ts): one order, this many closing together, this many in all. */
 export const PAPER_WINDOW_ORDERS = 3;
@@ -204,7 +212,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const tiers = opts.sizingTiers ?? defaultTiers({ risk: limits, strategy });
   let peakBank = 0;
   // The engine's loss-aware sizing and weekly loss pause, in memory (bot/risk/equityGuard.ts).
-  const guard = new EquityGuard({ ddScaleAt: strategy.ddScaleAt, weeklyLossPause: strategy.weeklyLossPause, dailyGoalUsd: opts.dailyGoalUsd });
+  const guard = new EquityGuard({ ddScaleAt: strategy.ddScaleAt, weeklyLossPause: strategy.weeklyLossPause, dailyGoalUsd: opts.dailyGoalUsd }, opts.equityGuardFile);
   const stratRun: StrategyConfig = { ...strategy, exitPolicy: policy === 'take_profit' ? 'take_profit' : policy === 'hold' ? 'hold' : strategy.exitPolicy === 'take_profit' ? 'fair_value' : strategy.exitPolicy };
   let firstTs = 0;
   const closeOf = new Map<string, number>();
@@ -368,7 +376,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       vault?.tick(st.now);
       const bankroll = Math.max(0, (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0) - (opts.paper ? 0 : vault?.reserved() ?? 0));
       peakBank = Math.max(peakBank, bankroll);
-      const tier = tierAt(tiers, peakBank);
+      // The tier from the tradable high-water mark, as the engine picks it (EquityGuard.tierReference).
+      const tier = tierAt(tiers, guard.tierReference(bankroll));
       // As the engine sizes (Engine.riskScale): full size at or above break-even (the starting equity, raised by the
       // guard's ratchets), down to a quarter at a net loss of the tier's ddScaleAt, never zero.
       guard.update(bankroll, st.now, bankroll, tier.weeklyLossPause);
@@ -451,7 +460,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         : true;
       gate?.observe(m.ticker, tauSec, pYes, mid);
       const accuracyBlock = kindWindow && gate ? gate.block(m.ticker, tauSec) : undefined;
-      const entryWindowOpen = kindWindow && !accuracyBlock && !mt.inside && mt.minutesTo > 30 && bankroll >= strategy.minTradableBankrollUsd && !guard.paused(st.now);
+      const entryWindowOpen = kindWindow && !accuracyBlock && !mt.inside && mt.minutesTo > 30 && bankroll >= strategy.minTradableBankrollUsd && (opts.killOverride !== false || !guard.paused(st.now));
       const rb = q('bid'), ra = q('ask');
       const through = (r: { price: number } | undefined, best: number) => r !== undefined && Math.abs(best - r.price) >= 2 * strategy.requoteThreshold - 1e-9;
       const posC = pos.position(m.ticker);
@@ -484,6 +493,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       for (const c of plan.cancel) if (!cancelInFlight.has(c.clientOrderId)) await send(m.ticker, 'cancel', () => cancelNow(c.clientOrderId), c.clientOrderId);
 
       for (const p of plan.place) {
+        if (opts.tradeFromMs !== undefined && st.now < opts.tradeFromMs) break;
         if (p.purpose === 'exit') {
           // Queue for next tick, like every other exit.
           if (!pending.has(m.ticker)) pending.set(m.ticker, { side: p.side, price: p.price, count: p.count, kind: 'fv' });

@@ -100,3 +100,24 @@ test('replay check: the stretch starts at the paper bot\'s last start; paper cou
   assert.deepEqual(settingsDiffer({ strategy: { accuracyGate: { enabled: true }, x: [1] }, dataDir: '/a', port: 1 }, a.startups[1].config), ['strategy.x'], 'machine settings (paths, ports) left out');
   assert.deepEqual(settingsDiffer({ strategy: { accuracyGate: { enabled: false } } }, a.startups[1].config), ['strategy.accuracyGate.enabled']);
 });
+
+test('backtest: the weekly loss pause stops entries only with the override off; before tradeFromMs the replay only watches', async () => {
+  const root = tmp();
+  const dir = path.join(root, 'rec');
+  writeSyntheticRecordings(dir, { windows: 6, seed: 12, marketNoise: 0.06 });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both' });
+  const base = { exitPolicy: 'take_profit' as const, paper: { orderFrac: 0.1, orderUsd: 0 } };
+  const plain = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, base);
+  assert.ok(plain.fills > 0);
+  const guard = path.join(root, 'equity_guard.json');
+  const paused = () => fs.writeFileSync(guard, JSON.stringify({ peak: 200, reference: 200, history: [], pausedUntil: Date.UTC(2100, 0, 1) }));
+  paused();
+  const off = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { ...base, equityGuardFile: guard, killOverride: false });
+  assert.equal(off.fills, 0, 'paused, override off: no entry');
+  paused();
+  const on = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { ...base, equityGuardFile: guard });
+  assert.equal(on.fills, plain.fills, 'override on (the default): the pause does not apply');
+  const watch = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { ...base, tradeFromMs: Number.MAX_SAFE_INTEGER });
+  assert.equal(watch.fills, 0);
+  assert.ok(watch.entryEvaluations > 0, 'it still evaluates (books, features and the gate warm up)');
+});

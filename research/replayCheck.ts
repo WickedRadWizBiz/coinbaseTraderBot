@@ -9,12 +9,15 @@
 // exits and the flat $10 order, and the replay traded 304 contracts to paper's 18,317. So the stretch starts at the
 // bot's last start in the audit log (--from auto) and ends at --to (when the recordings were copied); the replay
 // starts --warmup-hours earlier, so its books, features and gate scorecard are warm by then, and only markets closing
-// inside the stretch count on either side. The replay's bankroll is the paper account's at the start of the stretch:
-// --paper-balance-now less what paper settled since (or --bankroll).
+// inside the stretch count on either side. The replay only watches until the stretch begins, then trades from the
+// paper account's bankroll at that point (--paper-balance-now less what paper settled since, or --bankroll), its
+// equity guard started from the bot's own (--paper-guard: equity_guard.json, so it sizes against the same break-even)
+// and the dashboard's kill-switch override as the bot has it (--kill-override, on unless turned off).
 //
 //   npm run research:replay-check -- --recordings data/recordings --audit data/audit --days 2026-10-23,2026-10-24 \
 //       [--from auto|ISO] [--to ISO] [--min-hours 3] [--warmup-hours 8] [--model data/models/model.json] \
-//       [--paper-balance-now 512.30 | --bankroll 150] [--out data/sweeps/replay-check.json]
+//       [--paper-balance-now 512.30 | --bankroll 150] [--paper-guard equity_guard.json] [--kill-override true|false]
+//       [--out data/sweeps/replay-check.json]
 //   ... --plan   prints only the recorded days the stretch and its warm-up need (from the audit log)
 //
 // Tennis is left out of both sides (the backtester trades crypto contracts only). Read-only: writes only --out.
@@ -35,6 +38,8 @@ export interface SideSummary {
 }
 export interface ReplayCheck {
   days: string[]; bankroll: number; exitPolicy: string;
+  /** Whether the replay's equity guard started from the bot's, and the override it ran with. */
+  guardSeeded: boolean; killOverride: boolean;
   /** The compared stretch [from, to), its length, and the paper bot's starts in the days' audit log. */
   from: string; to: string; hours: number; startups: string[];
   /** Settings that differ from the ones the paper bot logged at the stretch's start (names only; null: no start in the
@@ -43,7 +48,7 @@ export interface ReplayCheck {
   /** Exits and the gate's counts are the whole replay's, warm-up included. */
   replay: SideSummary & { accuracyBlocks: number; entryEvaluations: number; takeProfitBenchedAt: string | null; sizeScaleMin: number };
   /** gateShare: of the markets in paper's entry diagnoses (one every 5 minutes), the share the accuracy gate kept out. */
-  paper: SideSummary & { gateShare: number | null };
+  paper: SideSummary & { gateShare: number | null; lastFillAt: string | null };
   /** Correlation of hourly P&L (hours either side traded). */
   hourCorr: number | null;
   /** |replay - paper| / |paper| on total P&L. */
@@ -120,12 +125,13 @@ export async function readAudit(auditDir: string, days: string[]): Promise<Audit
 }
 
 /** What paper did in [from, to). */
-export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): SideSummary & { gateShare: number | null } {
-  const out = { ...empty(), gateShare: null as number | null };
+export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): SideSummary & { gateShare: number | null; lastFillAt: string | null } {
+  const out = { ...empty(), gateShare: null as number | null, lastFillAt: null as string | null };
   const inside = (t: number) => t >= from && t < to;
   for (const f of a.fills) {
     if (!inside(f.t)) continue;
     out.fills++; out.contracts += f.count; out.fees += f.fee;
+    out.lastFillAt = new Date(f.t).toISOString();
     const o = f.coid ? a.orders.get(f.coid) : undefined;
     if (o?.purpose !== 'exit') continue;
     const k = exitKind(o.why ?? '');
@@ -144,7 +150,7 @@ export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): 
 }
 
 /** What paper did on `days`, from the audit log's fill, order and settlement records (crypto only). */
-export async function paperFromAudit(auditDir: string, days: string[], from?: number, to?: number): Promise<SideSummary & { gateShare: number | null }> {
+export async function paperFromAudit(auditDir: string, days: string[], from?: number, to?: number): Promise<ReturnType<typeof paperSummary>> {
   return paperSummary(await readAudit(auditDir, days), from, to);
 }
 
@@ -205,6 +211,8 @@ export interface ReplayCheckOpts {
   minHours?: number; warmupHours?: number;
   /** The replay's bankroll; else the paper balance at the start of the stretch, from the balance now. */
   bankroll?: number; paperBalanceNow?: number;
+  /** The paper bot's equity_guard.json (read from a copy) and its kill-switch override (default on, as bot/control.ts). */
+  paperGuard?: string; killOverride?: boolean;
 }
 
 export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
@@ -229,15 +237,21 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   if (!files.length) throw new Error(`none of ${days.join(', ')} is in ${o.recordings}`);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'replay-check-'));
   linkDays(files, dir);
+  // The guard writes its state as it goes: it gets a copy of the bot's.
+  const guardFile = o.paperGuard && fs.existsSync(o.paperGuard) ? path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'replay-guard-')), 'equity_guard.json') : undefined;
+  if (guardFile) fs.copyFileSync(o.paperGuard!, guardFile);
+  const killOverride = o.killOverride ?? true;
   const S = cfg.strategy;
   const policy = (EXIT_POLICIES as readonly string[]).includes(S.exitPolicy) ? S.exitPolicy : 'fair_value';
   const curveBench = { ...cfg.probation, t: cfg.sinuousExit.benchT ?? cfg.probation.t, minTrades: cfg.sinuousExit.benchMinExits ?? cfg.probation.minTrades };
   const r = await runBacktest(dir, model, S, cfg.risk, bankroll, {
     exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
     sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd }, accuracyGate: S.accuracyGate,
-    takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench }, startMs: from - (o.warmupHours ?? 8) * HOUR, dailyGoalUsd: cfg.vault.dailyGoalUsd,
+    takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench }, startMs: from - (o.warmupHours ?? 8) * HOUR, tradeFromMs: from,
+    dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride,
   });
   fs.rmSync(dir, { recursive: true, force: true });
+  if (guardFile) fs.rmSync(path.dirname(guardFile), { recursive: true, force: true });
   const replay = {
     ...empty(), accuracyBlocks: r.paper?.accuracyBlocks ?? 0, entryEvaluations: r.entryEvaluations,
     takeProfitBenchedAt: r.paper?.takeProfitBenchedAt ? new Date(r.paper.takeProfitBenchedAt).toISOString() : null, sizeScaleMin: r.sizeScaleMin ?? 1,
@@ -257,7 +271,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const checked = hours >= minHours;
   const v = verdict(replay, paper);
   return {
-    days, bankroll, exitPolicy: policy, from: new Date(from).toISOString(), to: new Date(to).toISOString(), hours,
+    days, bankroll, exitPolicy: policy, guardSeeded: Boolean(guardFile), killOverride, from: new Date(from).toISOString(), to: new Date(to).toISOString(), hours,
     startups: audit.startups.map((s) => new Date(s.t).toISOString()),
     settingsDiffer: startedAt ? settingsDiffer(JSON.parse(JSON.stringify(publicConfig(cfg as Config))), startedAt.config) : null,
     modelSwaps: audit.modelSwaps.filter(inside).map((t) => new Date(t).toISOString()),
@@ -289,6 +303,7 @@ async function main(): Promise<void> {
   const res = await replayCheck({
     recordings: arg('recordings', 'data/recordings'), audit: arg('audit', 'data/audit'), days, model: arg('model', 'params/model.json'),
     from: time('from'), to: time('to'), minHours: opt('min-hours'), warmupHours: opt('warmup-hours'), bankroll: opt('bankroll'), paperBalanceNow: opt('paper-balance-now'),
+    paperGuard: arg('paper-guard', '') || undefined, killOverride: arg('kill-override', 'true') !== 'false',
   });
   const out = arg('out', '');
   if (out) { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify(res, null, 2)); }
@@ -296,10 +311,11 @@ async function main(): Promise<void> {
   const pct = (x: number | null) => (x === null ? 'n/a' : `${(x * 100).toFixed(0)}%`);
   const hm = (iso: string) => iso.slice(0, 16).replace('T', ' ');
   const row = (n: string, s: SideSummary) => console.log(`${n.padEnd(7)} fills ${String(s.fills).padStart(6)}  contracts ${s.contracts.toFixed(0).padStart(7)}  fees ${s.fees.toFixed(2).padStart(7)}  markets ${String(s.markets).padStart(5)}  P&L ${f(s.pnl).padStart(8)}  exits ${JSON.stringify(s.exits)}`);
-  console.log(`replay check ${hm(res.from)} to ${hm(res.to)} UTC (${res.hours.toFixed(1)} h on one start of the paper bot) | exit policy ${res.exitPolicy} | bankroll $${res.bankroll}`);
+  console.log(`replay check ${hm(res.from)} to ${hm(res.to)} UTC (${res.hours.toFixed(1)} h on one start of the paper bot) | exit policy ${res.exitPolicy} | bankroll $${res.bankroll} | equity guard ${res.guardSeeded ? "the bot's" : 'fresh'}, override ${res.killOverride ? 'on' : 'off'}`);
   console.log(`paper bot starts in ${res.days.join(', ')}: ${res.startups.length ? res.startups.map(hm).join(', ') : 'none'}`);
   row('replay', res.replay);
   row('paper', res.paper);
+  console.log(`paper's last fill in the stretch: ${res.paper.lastFillAt ? hm(res.paper.lastFillAt) : 'none'}`);
   console.log(`accuracy gate: replay held back ${pct(res.replay.entryEvaluations ? res.replay.accuracyBlocks / res.replay.entryEvaluations : null)} of its entry evaluations; paper's diagnoses show it keeping out ${pct(res.paper.gateShare)} of the markets | take-profit benched ${res.replay.takeProfitBenchedAt ?? 'never'} | replay's loss-aware size went down to x${res.replay.sizeScaleMin.toFixed(2)}`);
   console.log(`settings that differ from the paper bot's at that start: ${res.settingsDiffer === null ? 'no start logged in these days' : res.settingsDiffer.length ? res.settingsDiffer.join(', ') : 'none'} | model swaps in the stretch: ${res.modelSwaps.length ? res.modelSwaps.map(hm).join(', ') : 'none'}`);
   console.log(`hourly P&L correlation ${res.hourCorr === null ? 'n/a' : res.hourCorr.toFixed(2)} | total gap ${pct(res.pnlGap)}`);

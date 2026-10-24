@@ -88,6 +88,10 @@ jobs:
           rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/audit.txt" bot:bot/data/audit/ "$DATA/audit/" || vanished_ok
           # The paper account's balance now: the check backs out what paper settled since the stretch began.
           ssh bot "python3 -c 'import json,os; print(json.load(open(os.path.expanduser(\"~/bot/data/paper_exchange.json\")))[\"balance\"])'" > "$RUNNER_TEMP/paper-balance" 2>/dev/null || rm -f "$RUNNER_TEMP/paper-balance"
+          # The bot's equity guard (the break-even it sizes against, its tier) and the dashboard's kill-switch override (on
+          # unless turned off), so the replay sizes and pauses as the bot does.
+          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/equity_guard.json "$RUNNER_TEMP/paper-guard.json" 2>/dev/null || rm -f "$RUNNER_TEMP/paper-guard.json"
+          ssh bot "python3 -c 'import json,os; s=json.load(open(os.path.expanduser(\"~/bot/data/control.json\"))); print(\"false\" if s.get(\"killOverride\") is False else \"true\")'" > "$RUNNER_TEMP/kill-override" 2>/dev/null || echo true > "$RUNNER_TEMP/kill-override"
           NEED=$(node --import tsx research/replayCheck.ts --plan --audit data/audit --days "$D" --from "$CHECK_FROM" --to "$TO")
           [[ "$NEED" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}(,[0-9]{4}-[0-9]{2}-[0-9]{2})*$ ]] || { echo "could not work out the stretch"; exit 1; }
           for d in ${NEED//,/ }; do
@@ -104,7 +108,7 @@ jobs:
           rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/models/model.json "$DATA/models/" || echo "no trained model on the server: the check uses the identity model"
           # The server's settings without any credential line and without server paths (the same filter as Remote training).
           ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$DATA/sweep-env/train.env" || true
-          echo "audit days $D: $(wc -l < "$RUNNER_TEMP/audit.txt") file(s); recorded days $NEED: $(ls "$DATA/recordings" | wc -l) file(s); settings $(wc -l < "$DATA/sweep-env/train.env") line(s); paper balance $([ -s "$RUNNER_TEMP/paper-balance" ] && echo read || echo 'not read')"
+          echo "audit days $D: $(wc -l < "$RUNNER_TEMP/audit.txt") file(s); recorded days $NEED: $(ls "$DATA/recordings" | wc -l) file(s); settings $(wc -l < "$DATA/sweep-env/train.env") line(s); paper balance $([ -s "$RUNNER_TEMP/paper-balance" ] && echo read || echo 'not read'), equity guard $([ -s "$RUNNER_TEMP/paper-guard.json" ] && echo read || echo 'not read'), override $(cat "$RUNNER_TEMP/kill-override")"
           du -sh "$DATA/recordings" | cat
       - name: Replay check (backtester vs paper, since the bot's last start)
         env:
@@ -114,9 +118,12 @@ jobs:
           set -a; . data/sweep-env/train.env; set +a
           export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper
           BAL=$(cat "$RUNNER_TEMP/paper-balance" 2>/dev/null || true)
+          GUARD="$RUNNER_TEMP/paper-guard.json"; [ -s "$GUARD" ] || GUARD=""
+          OVERRIDE=$(cat "$RUNNER_TEMP/kill-override" 2>/dev/null || echo true)
           T0=$(date +%s)
           timeout 200m node --import tsx research/replayCheck.ts --recordings data/recordings --audit data/audit --days "$(cat data/sweeps/check-days.txt)" \
             --from "$CHECK_FROM" --to "$(cat data/sweeps/check-to.txt)" --min-hours "$MIN_HOURS" ${BAL:+--paper-balance-now "$BAL"} \
+            ${GUARD:+--paper-guard "$GUARD"} --kill-override "$OVERRIDE" \
             --model data/models/model.json --out data/sweeps/replay-check-latest.json || echo "replay check failed or cut off"
           echo "replay check took $(( ($(date +%s) - T0) / 60 )) min"
       - uses: actions/upload-artifact@v4
