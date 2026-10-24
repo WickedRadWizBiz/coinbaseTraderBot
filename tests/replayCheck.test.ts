@@ -10,7 +10,7 @@ import type { TrialName } from '../bot/strategy/componentTrials';
 import { activeTaNet, setTaNet } from '../bot/ta/taNet';
 import { setTaNetEnsemble } from '../bot/ta/taNetEnsemble';
 import { engineModels, installProbation, runBacktest, type EvalReading } from '../research/backtest';
-import { corr, paperFromAudit, paperSummary, priceMatcher, readAudit, replayDays, settingsDiffer, stretchStart, verdict } from '../research/replayCheck';
+import { benchAt, corr, gateAt, paperFromAudit, paperSummary, priceMatcher, readAudit, replayDays, settingsDiffer, stretchStart, verdict } from '../research/replayCheck';
 import { writeSyntheticRecordings } from '../research/synthetic';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'replay-check-test-'));
@@ -250,6 +250,41 @@ test('backtest paper options: the paper bot\'s training trades and exploration e
   assert.equal(off.paper?.trainTrades, 0);
   const notPaper = await run({ PAPER_TRAINING_TRADES_PER_HOUR: '120' }, {});
   assert.equal(notPaper.paper?.trainTrades, 0, 'only with the paper options');
+  assert.ok((on.paper?.extraSent ?? 0) > 0, 'training trades reach the exchange');
+  assert.ok(!Object.keys(on.paper?.extraRejected ?? {}).some((k) => k.startsWith('no fee-net edge')), 'training trades need no edge, as in the engine');
+});
+
+test('replay check: the take-profit bench and the accuracy gate wound back to the stretch\'s start', async () => {
+  const from = 1_000_000;
+  const ev = (t: number, event: string) => ({ t, event });
+  const state = { results: [1, -2, 3, -4, 5], since: 10, benched: { at: from + 5, reason: 'r' }, sales: [{ ts: from - 1 }, { ts: from + 1 }] };
+  const b = benchAt(state, [ev(from - 5, 'scored'), ev(from + 1, 'scored'), ev(from + 2, 'benched'), ev(from + 3, 'scored')], from)!;
+  assert.deepEqual(b.results, [1, -2, 3], 'the markets scored since come off the end');
+  assert.equal(b.benched, undefined, 'a bench tripped since is not carried back');
+  assert.deepEqual(b.sales, [{ ts: from - 1 }]);
+  assert.equal(b.since, 10);
+  const before = benchAt({ ...state, benched: { at: from - 5, reason: 'r' } }, [], from)!;
+  assert.deepEqual(before.benched, { at: from - 5, reason: 'r' });
+  assert.equal(before.results.length, 5);
+  assert.equal(benchAt(state, [ev(from + 1, 'reset')], from), undefined, 'reset since: what it held before is gone');
+  const g = gateAt({ rows: { 'crypto:0': [{ ts: from - 1 }, { ts: from }, { ts: from + 1 }], 'crypto:1': [{ ts: from + 9 }] } }, from);
+  assert.deepEqual(g.rows, { 'crypto:0': [{ ts: from - 1 }], 'crypto:1': [] });
+
+  // The backtester starts from such a scoreboard: a benched one sells nothing at take-profit from the first moment on.
+  const dir = path.join(tmp(), 'rec');
+  writeSyntheticRecordings(dir, { windows: 6, seed: 12, marketNoise: 0.06 });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both' });
+  const rule = { minTrades: 1000, t: 99, maxLossUsd: 1e9, window: 50 };
+  const stateFile = path.join(tmp(), 'take-profit-bench.json');
+  fs.writeFileSync(stateFile, JSON.stringify({ results: [-1], since: 0, benched: { at: 0, reason: 'seeded' }, sales: [] }));
+  const run = (bench: object) => runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy: 'fair_value', paper: { orderFrac: 0.1, orderUsd: 0 }, startMs: 0, takeProfitBench: { enforce: true, rule, ...bench } });
+  const fresh = await run({});
+  assert.ok((fresh.paper?.takeProfitSales ?? 0) > 0, 'an empty scoreboard lets the take-profit sell');
+  assert.equal(fresh.paper?.takeProfitBenchedAt, undefined);
+  const seeded = await run({ stateFile });
+  assert.equal(seeded.paper?.takeProfitBenchedAt, 0);
+  assert.equal(seeded.paper?.takeProfitSales, 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')).benched, { at: 0, reason: 'seeded' });
 });
 
 test('backtest: the weekly loss pause stops entries only with the override off; before tradeFromMs the replay only watches', async () => {

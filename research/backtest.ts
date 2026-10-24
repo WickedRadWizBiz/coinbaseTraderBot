@@ -156,11 +156,16 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
    *  only in paper, so it does not shrink the bankroll here either. */
   paper?: { orderFrac: number; orderUsd: number };
   /** The paper accuracy gate (bot/strategy/accuracyGate.ts): no new entry in a time-to-close bucket where the market's
-   *  own price has called the recent results better than the bot. Starts with an empty scorecard (no look-ahead). */
+   *  own price has called the recent results better than the bot. Starts with an empty scorecard (no look-ahead), or
+   *  from accuracyGateFile. */
   accuracyGate?: AccuracyGateConfig;
+  /** The gate's scorecard to start from (a copy: the gate writes to it), e.g. the paper bot's as it stood at tradeFromMs.
+   *  Markets settling before tradeFromMs are then not scored again: the scorecard already holds paper's own. */
+  accuracyGateFile?: string;
   /** The take-profit bench (bot/strategy/takeProfitBench.ts): take-profit sales scored against holding to settlement,
-   *  benched (no more take-profit sales) on the exit curve's rule when `enforce`. */
-  takeProfitBench?: { enforce: boolean; rule: Pick<ProbationParams, 'minTrades' | 't' | 'maxLossUsd' | 'window'> };
+   *  benched (no more take-profit sales) on the exit curve's rule when `enforce`. `stateFile`: its scoreboard to start
+   *  from (a copy: the bench writes to it), else an empty one. */
+  takeProfitBench?: { enforce: boolean; rule: Pick<ProbationParams, 'minTrades' | 't' | 'maxLossUsd' | 'window'>; stateFile?: string };
   /** Replay from this time (ms) on: what the recordings hold before it is skipped, so the books, features and gate
    *  start empty there (research/replayCheck.ts starts hours before the stretch it compares). */
   startMs?: number;
@@ -334,9 +339,11 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const stopByOrder = new Map<string, number>();
   const exitLedger = new Map<string, Array<{ sideSign: number; n: number; proceeds: number }>>();
   let slipSum = 0, slipN = 0;
-  const gate = opts.accuracyGate?.enabled ? new AccuracyGate(opts.accuracyGate, undefined, () => st.now) : undefined;
-  const tpBench = opts.takeProfitBench ? new TakeProfitBench(opts.takeProfitBench.enforce, opts.takeProfitBench.rule, undefined, undefined, 0) : undefined;
+  const gate = opts.accuracyGate?.enabled ? new AccuracyGate(opts.accuracyGate, opts.accuracyGateFile, () => st.now) : undefined;
+  const tpBench = opts.takeProfitBench ? new TakeProfitBench(opts.takeProfitBench.enforce, opts.takeProfitBench.rule, opts.takeProfitBench.stateFile, undefined, 0) : undefined;
   res.paper = { accuracyBlocks: 0, takeProfitBenchedAt: undefined, takeProfitSales: 0, takeProfitContracts: 0, trainTrades: 0, exploreEntries: 0, extraSent: 0, extraRejected: {} };
+  // A bench started from a benched scoreboard (takeProfitBench.stateFile) is benched from the first trading moment on.
+  if (tpBench?.benched) res.paper.takeProfitBenchedAt = opts.tradeFromMs ?? opts.startMs;
   // The market context (opts.marketContext): a fresh one each run, so a replay of an earlier span starts clean; risk
   // gauges from the history directory the replay's index series come from (research/replay.ts).
   const mctx = opts.marketContext ? new MarketContext(path.resolve(process.env.HISTORY_DIR ?? path.join(process.env.DATA_DIR ?? './data', 'history'))) : undefined;
@@ -436,7 +443,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         if (out) {
           const result = out.label ? 'yes' : 'no';
           ex.settle(m.ticker, result);
-          gate?.settle(m.ticker, result);
+          if (!(opts.accuracyGateFile && opts.tradeFromMs !== undefined && st.now < opts.tradeFromMs)) gate?.settle(m.ticker, result);
           if (tpBench) { tpBench.settled(m.ticker, result, st.now); if (tpBench.benched && res.paper!.takeProfitBenchedAt === undefined) res.paper!.takeProfitBenchedAt = st.now; }
           for (const x of exitLedger.get(m.ticker) ?? []) {
             const won = (x.sideSign > 0) === (result === 'yes');
@@ -746,6 +753,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           position: pos.position(m.ticker), marketRiskNow: riskOf(m.ticker),
           marketRiskWith: p.reduceOnly ? riskOf(m.ticker) : riskOf(m.ticker, [{ ticker: m.ticker, side: p.side, price: p.price, remaining: p.count, isTaker: !p.postOnly }]),
           windowRisk, totalRisk, ordersLastMinute: 0, openOrders: openNow.length, modelLiveBlockers: [], limitOverrides: tierLimits,
+          // Paper training trades need no edge (bot/engine.ts): they exist to produce trades.
+          skipEdgeCollar: Boolean(opts.paper) && p.why.startsWith('train (paper)'),
         });
         if (!d.ok) {
           // Why the risk gateway turned down the paper bot's extra entries (numbers folded), for the replay check.
