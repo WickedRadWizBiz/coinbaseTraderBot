@@ -1052,9 +1052,9 @@ export class Engine {
     return Math.max(0, this.balance + committed - reserved);
   }
 
-  /** Paper order size in dollars: PAPER_ORDER_FRAC of the bankroll (5%, the owner's choice on Oct 24: orders shrink as
-   *  the account does, so one bad hour cannot empty the pool), or the fixed PAPER_ORDER_USD with PAPER_ORDER_FRAC=0. 0
-   *  in live, with both off, or before the first balance read. */
+  /** Paper order size in dollars: PAPER_ORDER_FRAC of the bankroll (10%, the owner's choice on Oct 24: orders shrink as
+   *  the account does and grow as it does), or the fixed PAPER_ORDER_USD with PAPER_ORDER_FRAC=0. 0 in live, with both
+   *  off, or before the first balance read. */
   paperOrderUsd(bankroll = this.bankroll()): number {
     if (this.d.cfg.mode !== 'paper') return 0;
     const frac = this.d.cfg.strategy.paperOrderFrac ?? 0;

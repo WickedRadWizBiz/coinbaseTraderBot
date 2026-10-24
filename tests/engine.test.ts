@@ -673,7 +673,7 @@ test('paper: the vault keeps its books, but the paper bankroll is the whole bala
   assert.equal(engine.bankroll(), 200, 'and still traded in paper');
 });
 
-test('paper size: a wanted trade buys about PAPER_ORDER_FRAC of the bankroll (5%); PAPER_ORDER_FRAC=0 the fixed PAPER_ORDER_USD; both 0 size as in live', async () => {
+test('paper size: a wanted trade buys about PAPER_ORDER_FRAC of the bankroll (10%); PAPER_ORDER_FRAC=0 the fixed PAPER_ORDER_USD; both 0 size as in live', async () => {
   const quote = (g: Awaited<ReturnType<typeof setup>>) => g.oms.liveOrders().find((o) => o.ticker === g.market.ticker && o.purpose === 'quote' && !o.cancelRequested && o.side === 'bid');
   const env = { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' };
   const run = async (extra: Record<string, string>) => {
@@ -683,16 +683,16 @@ test('paper size: a wanted trade buys about PAPER_ORDER_FRAC of the bankroll (5%
     return { g, q: quote(g)!, notes: g.engine.status.get(g.market.ticker)?.notes ?? [] };
   };
   const near = (q: { count: number; price: number }, usd: number) => { const v = q.count * q.price; return v > usd - q.price - 0.05 && v <= usd + 1e-9; };
-  // 5% of the $200 account: $10 an order.
+  // 10% of the $200 account: $20 an order.
   const frac = await run({});
   assert.ok(frac.q, JSON.stringify(frac.notes));
-  assert.ok(near(frac.q, 10), `${frac.q.count} at ${frac.q.price}`);
-  assert.match(frac.notes.join(' | '), /paper size: \$10\.00 an order \(5% of the bankroll, PAPER_ORDER_FRAC\)/);
-  assert.equal(frac.g.engine.guardStatus().paperOrderFrac, 0.05);
+  assert.ok(near(frac.q, 20), `${frac.q.count} at ${frac.q.price}`);
+  assert.match(frac.notes.join(' | '), /paper size: \$20\.00 an order \(10% of the bankroll, PAPER_ORDER_FRAC\)/);
+  assert.equal(frac.g.engine.guardStatus().paperOrderFrac, 0.1);
   // The share follows the bankroll: 2.5% of $200 is $5; the account shrinking to $100 halves the order the same way.
   const half = await run({ PAPER_ORDER_FRAC: '0.025' });
   assert.ok(near(half.q, 5), `${half.q.count} at ${half.q.price}`);
-  assert.equal(frac.g.engine.paperOrderUsd(100), 5);
+  assert.equal(frac.g.engine.paperOrderUsd(100), 10);
   // PAPER_ORDER_FRAC=0: the fixed PAPER_ORDER_USD, whatever the account.
   const fixed = await run({ PAPER_ORDER_FRAC: '0', PAPER_ORDER_USD: '8' });
   assert.ok(near(fixed.q, 8), `${fixed.q.count} at ${fixed.q.price}`);

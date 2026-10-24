@@ -122,8 +122,8 @@ export interface StrategyConfig {
    *  choice on Oct 23: profit sales of $1 to $3 instead of cents). Both 0 = paper sizes like live. Live never uses it. */
   paperOrderUsd: number;
   /** Paper only: each crypto entry and maker quote buys about this share of the bankroll once sizing wants the trade
-   *  (the owner's choice on Oct 24, 5%: orders shrink as the account does, so one bad hour cannot empty the pool, and
-   *  grow as it does). 0 = the fixed paperOrderUsd. Live never uses it. */
+   *  (the owner's choice on Oct 24, a minimum of 10%: orders shrink as the account does and grow as it does). 0 = the
+   *  fixed paperOrderUsd. Live never uses it. */
   paperOrderFrac: number;
   /** Paper only: no new crypto entries in a time-to-close bucket where the market mid has scored a better log loss
    *  than the bot's (temperature-calibrated) probability over the last settled markets (bot/strategy/accuracyGate.ts;
@@ -1005,7 +1005,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     makerBufferRange: band(env, 'STRATEGY_MAKER_BUFFER_RANGE', relaxed ? [0.015, 0.03] : [0, 0]),
     minQuoteContracts: num(env, 'STRATEGY_MIN_QUOTE_CONTRACTS', 3, 0, 100),
     paperOrderUsd: num(env, 'PAPER_ORDER_USD', 10, 0, 1000),
-    paperOrderFrac: num(env, 'PAPER_ORDER_FRAC', 0.05, 0, 1),
+    paperOrderFrac: num(env, 'PAPER_ORDER_FRAC', 0.10, 0, 1),
     accuracyGate: { enabled: bool(env, 'ACCURACY_GATE', true), window: num(env, 'ACCURACY_GATE_WINDOW', 150, 20, 2000), minMarkets: num(env, 'ACCURACY_GATE_MIN_MARKETS', 40, 5, 1000) },
     sizing: oneOf(env, 'STRATEGY_SIZING', relaxed ? 'target_ev' : 'kelly', ['kelly', 'target_ev'] as const),
     kappa: num(env, 'STRATEGY_KAPPA', 0.5, 0, 1),
