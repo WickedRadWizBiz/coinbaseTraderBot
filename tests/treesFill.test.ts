@@ -26,7 +26,8 @@ import { ReplayState } from '../research/replay';
 import { directionRows } from '../research/snnReplay';
 import { trainFillModel } from '../research/trainFillModel';
 import { trainPerp } from '../research/trainPerpModel';
-import { trainVolModel, type VolRow } from '../research/trainVolModel';
+import { trainVolModel, volRows, type VolRow } from '../research/trainVolModel';
+import { writeSyntheticRecordings } from '../research/synthetic';
 import { rng } from '../research/stats';
 import { tmpAudit, tmpDir } from './helpers';
 
@@ -86,6 +87,16 @@ function volRowsSynthetic(n: number): VolRow[] {
   }
   return rows;
 }
+
+test('vol model rows: a replay of many markets keeps only those still trading (the remote training ran out of heap)', async () => {
+  const dir = path.join(tmpDir(), 'rec');
+  writeSyntheticRecordings(dir, { windows: 12, seed: 5, marketNoise: 0.05 });
+  const st = new ReplayState();
+  const rows = await volRows(dir, { state: st });
+  assert.ok(rows.length > 0);
+  assert.ok(rows.every((r) => r.x.length === VOL_MODEL_FEATURES.length));
+  assert.ok(st.markets.size <= 1 && st.books.size <= 1, `held ${st.markets.size} markets, ${st.books.size} books`);
+});
 
 test('vol model: learns when realised vol will exceed the EWMA, validated by QLIKE on held-out days; clamped; inert unless validated', () => {
   assert.throws(() => trainVolModel(volRowsSynthetic(100)), /need at least/);

@@ -13,7 +13,7 @@
 import fs from 'fs';
 import path from 'path';
 import { assetFeatureMap } from '../bot/model/featureEngine';
-import { qlike, VOL_MODEL_ASSET_FEATURES, VOL_MODEL_FEATURES, VOL_MULT_MAX, VOL_MULT_MIN, volExtras, type VolModelParams } from '../bot/model/volModel';
+import { qlike, VOL_MODEL_ASSET_FEATURES, VOL_MODEL_EXTRAS, VOL_MODEL_FEATURES, VOL_MULT_MAX, VOL_MULT_MIN, volExtras, type VolModelParams } from '../bot/model/volModel';
 import { gbdtLogit } from '../bot/model/trees';
 import { dayBlockBootstrap } from '../bot/snn/blender';
 import { trainGbdt } from './gbdt';
@@ -47,11 +47,13 @@ class Grid {
   }
 }
 
-export async function volRows(dir: string, opts: { everySec?: number; fromDay?: string; toDay?: string } = {}): Promise<VolRow[]> {
-  const st = new ReplayState();
+/** `state`: the replay's state (a test reads what it holds at the end). */
+export async function volRows(dir: string, opts: { everySec?: number; fromDay?: string; toDay?: string; state?: ReplayState } = {}): Promise<VolRow[]> {
+  const st = opts.state ?? new ReplayState();
   const grid = new Grid();
   const every = (opts.everySec ?? 60) * 1000;
-  const samples: { asset: string; t: number; sigma: number; f: Record<string, number> }[] = [];
+  // Each sample keeps only the asset-level features the forecast reads (the full feature map is hundreds of values).
+  const samples: { asset: string; t: number; sigma: number; x: number[] }[] = [];
   let curSec = 0, nextSample = 0;
   for await (const e of readRecordings(dir, '', opts.fromDay, opts.toDay)) {
     st.apply(e);
@@ -68,11 +70,15 @@ export async function volRows(dir: string, opts: { everySec?: number; fromDay?: 
     }
     if (st.now < nextSample) continue;
     nextSample = Math.floor(st.now / every) * every + every;
+    // A market that is over goes with its book and microstructure state, as the backtester and the dataset builder drop
+    // them: the forecast reads only the asset-level series, and a replay of several days that kept every market it saw
+    // ran the remote training out of its 8 GB heap (Oct 23 and 24).
+    for (const m of [...st.markets.values()]) if (st.now >= m.closeTime + 90_000) st.forget(m.ticker);
     for (const [asset, idx] of st.index) {
       const vol = idx.vol();
       if (!vol || !idx.fresh(st.now, 5000)) continue;
       const f = assetFeatureMap(asset, st.now, { index: idx, spot: st.spot.get(asset), bars: st.features.bars.get(asset), candles: st.features.candles.get(asset), usdtd: st.usdtd, btcd: st.btcd, perp: st.features.perps.get(asset) });
-      samples.push({ asset, t: st.now, sigma: vol.sigmaPerSqrtSec, f });
+      samples.push({ asset, t: st.now, sigma: vol.sigmaPerSqrtSec, x: VOL_MODEL_ASSET_FEATURES.map((k) => f[k]) });
     }
   }
   const rows: VolRow[] = [];
@@ -81,9 +87,10 @@ export async function volRows(dir: string, opts: { everySec?: number; fromDay?: 
       const n = h * 60;
       const rv = grid.rv(s.asset, Math.floor(s.t / 1000), n);
       if (!(rv > 0) || !(s.sigma > 0)) continue;
-      const f = { ...s.f, ...volExtras(s.t, s.sigma, n) };
+      const extras = volExtras(s.t, s.sigma, n);
       const y = Math.max(-1.5, Math.min(1.5, 0.5 * Math.log(rv / (s.sigma * s.sigma))));
-      rows.push({ asset: s.asset, t: s.t, day: new Date(s.t).toISOString().slice(0, 10), tauSec: n, sigma: s.sigma, x: VOL_MODEL_FEATURES.map((k) => (Number.isFinite(f[k]) ? f[k] : NaN)), y, rvPerSec: rv });
+      const x = [...s.x, ...VOL_MODEL_EXTRAS.map((k) => extras[k])];
+      rows.push({ asset: s.asset, t: s.t, day: new Date(s.t).toISOString().slice(0, 10), tauSec: n, sigma: s.sigma, x: x.map((v) => (Number.isFinite(v) ? v : NaN)), y, rvPerSec: rv });
     }
   }
   return rows;
