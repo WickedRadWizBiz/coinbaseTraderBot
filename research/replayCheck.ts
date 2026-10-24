@@ -87,7 +87,7 @@ export interface ReplayCheck {
    *  days to compare with); model swaps in the stretch. */
   settingsDiffer: string[] | null; modelSwaps: string[];
   /** Exits and the gate's counts are the whole replay's, warm-up included. */
-  replay: SideSummary & { accuracyBlocks: number; entryEvaluations: number; takeProfitBenchedAt: string | null; sizeScaleMin: number; makerBufferEnd: number | null; extra: { train: number; explore: number; sent: number; rejected: Record<string, number> } };
+  replay: SideSummary & { accuracyBlocks: number; entryEvaluations: number; takeProfitBenchedAt: string | null; takeProfitScored: number; takeProfitNetUsd: number; rejected: Record<string, number>; sizeScaleMin: number; makerBufferEnd: number | null; extra: { train: number; explore: number; sent: number; rejected: Record<string, number> } };
   /** The paper bot's maker buffer now, from the maker markouts it was seeded with (null: fewer than 30, the setting). */
   makerBufferPaper: number | null;
   /** The engine's other models the replay priced with (engineModels), the validation gates' mode and benched books. */
@@ -118,6 +118,8 @@ const hourOf = (ms: number) => new Date(ms).toISOString().slice(0, 13);
 const isTennis = (t: string) => t.startsWith('KXATP') || t.startsWith('KXWTA');
 // The model exit names its prices ("bid 0.55 - fee > q 0.520 + 0.02", "NO bid 0.45 - fee > q + 0.02").
 const exitKind = (why: string) => /^take-profit/.test(why) ? 'take-profit' : /ratchet|stop/i.test(why) ? 'ratchet' : /cross|curve/i.test(why) ? 'cross' : /exit|fair|model|- fee > q/i.test(why) ? 'model exit' : 'other';
+/** A rejection reason with its numbers folded, so the same kind counts together (as research/backtest.ts folds them). */
+export const foldReason = (r: string) => r.replace(/[-+]?\$?\d[\d.,]*%?/g, '#');
 const empty = (): SideSummary => ({ fills: 0, contracts: 0, fees: 0, pnl: 0, markets: 0, exits: {}, byHour: {}, byPurpose: {}, contractsByHour: {}, bySeries: {} });
 const addSeries = (s: SideSummary, ticker: string, pnl: number) => { const x = (s.bySeries[ticker.split('-')[0]] ??= { markets: 0, pnl: 0 }); x.markets++; x.pnl += pnl; };
 export type PaperSide = SideSummary & {
@@ -127,6 +129,11 @@ export type PaperSide = SideSummary & {
   quiet: { diagnoses: number; lastAt: string | null; reasons: Record<string, number> };
   /** Hours in the stretch with entry diagnoses but no fill: their reasons, summed. */
   quietHours: Record<string, Record<string, number>>;
+  /** The take-profit bench in the stretch (its audit events): markets scored, what the sales made against holding to
+   *  settlement in total, and when it benched. */
+  takeProfitBench: { scored: number; netUsd: number; benchedAt: string | null };
+  /** The risk gateway's rejections in the stretch ("purpose: reason", as logged). */
+  rejected: Record<string, number>;
 };
 
 /** What the check reads from the audit log (crypto only), each with its time. */
@@ -139,7 +146,10 @@ export interface AuditRecords {
   diagnoses: Array<{ t: number; markets: number; gated: number; reasons: Record<string, number> }>;
   modelSwaps: number[];
   /** The take-profit bench's events (bot/strategy/takeProfitBench.ts): a market scored, the bench tripped or reset. */
-  benchEvents: Array<{ t: number; event: string }>;
+  benchEvents: Array<{ t: number; event: string; usd?: number }>;
+  /** The risk gateway's rejections as the engine logs them (one a market, side, purpose and reason a minute), crypto
+   *  only: "purpose: reason" with the numbers folded. */
+  rejects: Array<{ t: number; key: string }>;
   /** The price each crypto decision record traded on, by ticker in time order (with readAudit's `prices` option). */
   prices: Map<string, Array<{ t: number; pYes: number; fv: number; mid: number; position: number; spot?: number; strike?: number; sigma?: number; sigmaPricing?: number; pModel?: number }>>;
 }
@@ -155,7 +165,7 @@ const numAt = (line: string, key: string): number | undefined => {
  *  start before `prices.to`, each such start clearing what came before). */
 export async function readAudit(auditDir: string, days: string[], prices?: { from?: number; to?: number }): Promise<AuditRecords> {
   const want = new Set(days);
-  const a: AuditRecords = { fills: [], orders: new Map(), settlements: [], startups: [], diagnoses: [], modelSwaps: [], benchEvents: [], prices: new Map() };
+  const a: AuditRecords = { fills: [], orders: new Map(), settlements: [], startups: [], diagnoses: [], modelSwaps: [], benchEvents: [], rejects: [], prices: new Map() };
   const files = fs.existsSync(auditDir) ? fs.readdirSync(auditDir).filter((f) => /^audit-\d{4}-\d{2}-\d{2}.*\.jsonl(\.gz)?$/.test(f) && want.has(f.slice(6, 16))).sort() : [];
   const whyOf = new Map<string, string>();
   for (const f of files) {
@@ -189,7 +199,8 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
         }
       }
       const bench = head.includes('"kind":"take_profit_bench"');
-      if (!exitPlan && !diagnosis && !swap && !bench && !head.includes('"kind":"startup"') && !head.includes('"kind":"fill"') && !head.includes('"kind":"settlement"') && !head.includes('"kind":"order_new"')) continue;
+      const reject = head.includes('"kind":"risk_reject"');
+      if (!exitPlan && !diagnosis && !swap && !bench && !reject && !head.includes('"kind":"startup"') && !head.includes('"kind":"fill"') && !head.includes('"kind":"settlement"') && !head.includes('"kind":"order_new"')) continue;
       let r: { kind?: string; ts?: string; data?: Record<string, any> };
       try { r = JSON.parse(line); } catch { continue; }
       const d = r.data ?? {};
@@ -201,7 +212,12 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
         continue;
       }
       if (swap) { a.modelSwaps.push(t); continue; }
-      if (bench) { a.benchEvents.push({ t, event: String(d.event ?? '') }); continue; }
+      if (reject) {
+        const ticker = String(d.intent?.ticker ?? d.ticker ?? '');
+        if (ticker && !isTennis(ticker)) a.rejects.push({ t, key: `${String(d.intent?.purpose ?? 'order')}: ${foldReason(String(d.reasons?.[0] ?? 'rejected'))}` });
+        continue;
+      }
+      if (bench) { a.benchEvents.push({ t, event: String(d.event ?? ''), ...(typeof d.usd === 'number' ? { usd: d.usd } : {}) }); continue; }
       if (diagnosis) {
         let gated = 0;
         const reasons: Record<string, number> = {};
@@ -238,7 +254,7 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
 
 /** What paper did in [from, to). */
 export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): PaperSide {
-  const out: PaperSide = { ...empty(), gateShare: null, lastFillAt: null, extra: { train: 0, explore: 0 }, quiet: { diagnoses: 0, lastAt: null, reasons: {} }, quietHours: {} };
+  const out: PaperSide = { ...empty(), gateShare: null, lastFillAt: null, extra: { train: 0, explore: 0 }, quiet: { diagnoses: 0, lastAt: null, reasons: {} }, quietHours: {}, takeProfitBench: { scored: 0, netUsd: 0, benchedAt: null }, rejected: {} };
   const inside = (t: number) => t >= from && t < to;
   let lastFill = -Infinity;
   for (const f of a.fills) {
@@ -279,6 +295,12 @@ export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): 
     for (const [k, n] of Object.entries(d.reasons)) out.quiet.reasons[k] = (out.quiet.reasons[k] ?? 0) + n;
   }
   out.gateShare = markets > 0 ? gated / markets : null;
+  for (const r of a.rejects) if (inside(r.t)) out.rejected[r.key] = (out.rejected[r.key] ?? 0) + 1;
+  for (const e of a.benchEvents) {
+    if (!inside(e.t)) continue;
+    if (e.event === 'scored') { out.takeProfitBench.scored++; out.takeProfitBench.netUsd += e.usd ?? 0; }
+    if (e.event === 'benched' && !out.takeProfitBench.benchedAt) out.takeProfitBench.benchedAt = new Date(e.t).toISOString();
+  }
   return out;
 }
 
@@ -506,7 +528,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   if (guardFile) fs.rmSync(path.dirname(guardFile), { recursive: true, force: true });
   const replay = {
     ...empty(), accuracyBlocks: r.paper?.accuracyBlocks ?? 0, entryEvaluations: r.entryEvaluations,
-    takeProfitBenchedAt: r.paper?.takeProfitBenchedAt ? new Date(r.paper.takeProfitBenchedAt).toISOString() : null, sizeScaleMin: r.sizeScaleMin ?? 1,
+    takeProfitBenchedAt: r.paper?.takeProfitBenchedAt ? new Date(r.paper.takeProfitBenchedAt).toISOString() : null, takeProfitScored: r.paper?.takeProfitScored ?? 0, takeProfitNetUsd: r.paper?.takeProfitNetUsd ?? 0, rejected: r.paper?.rejected ?? {}, sizeScaleMin: r.sizeScaleMin ?? 1,
     makerBufferEnd: r.makerBufferEnd ?? null, extra: { train: r.paper?.trainTrades ?? 0, explore: r.paper?.exploreEntries ?? 0, sent: r.paper?.extraSent ?? 0, rejected: r.paper?.extraRejected ?? {} },
   };
   const mk = (o.makerMarkouts ?? []).slice(-2000);
@@ -613,7 +635,10 @@ async function main(): Promise<void> {
   console.log(`prices at paper's decision records: ${P.matched} of ${P.records} matched within 1 s | mean gap replay vs paper: fair value ${c(P.fv)}, mid ${c(P.mid)}, price traded on ${c(P.price)} | shift from fair value: paper ${c(P.shiftPaper)}, replay ${c(P.shiftReplay)} | same side of the mid ${pct(P.sameSide)} of ${P.sides} | same position ${pct(P.samePosition)}`);
   console.log(`the fair value's inputs, replay vs paper: index gap ${P.spotBp ?? 'n/a'} bp | strike differs on ${pct(P.strikeDiffers)} | volatility ratio: EWMA x${P.sigmaRatio ?? 'n/a'}, priced with x${P.sigmaPricingRatio ?? 'n/a'} | priced over the EWMA: paper x${P.pricedPaper ?? 'n/a'}, replay x${P.pricedReplay ?? 'n/a'} (TA network x${P.taVolMult ?? 'n/a'})`);
   console.log(`the price beyond the trained model's (TA tilt, rule book, SNN): paper ${c(P.overlayPaper)}, replay ${c(P.overlayReplay)} (TA tilt ${c(P.taShift)}, rule book ${c(P.ruleShift)})`);
-  console.log(`accuracy gate: replay held back ${pct(res.replay.entryEvaluations ? res.replay.accuracyBlocks / res.replay.entryEvaluations : null)} of its entry evaluations; paper's diagnoses show it keeping out ${pct(res.paper.gateShare)} of the markets | take-profit benched ${res.replay.takeProfitBenchedAt ?? 'never'} | replay's break-even size scale went down to x${res.replay.sizeScaleMin.toFixed(2)} (paper's orders, a share of the bankroll, ignore it)`);
+  console.log(`accuracy gate: replay held back ${pct(res.replay.entryEvaluations ? res.replay.accuracyBlocks / res.replay.entryEvaluations : null)} of its entry evaluations; paper's diagnoses show it keeping out ${pct(res.paper.gateShare)} of the markets | replay's break-even size scale went down to x${res.replay.sizeScaleMin.toFixed(2)} (paper's orders, a share of the bankroll, ignore it)`);
+  const tb = (scored: number, net: number, at: string | null) => `${scored} markets scored, ${f(net)} against holding to settlement, benched ${at ? hm(at) : 'never'}`;
+  console.log(`take-profit bench in the stretch: replay ${tb(res.replay.takeProfitScored, res.replay.takeProfitNetUsd, res.replay.takeProfitBenchedAt)} | paper ${tb(res.paper.takeProfitBench.scored, res.paper.takeProfitBench.netUsd, res.paper.takeProfitBench.benchedAt)}`);
+  console.log(`risk gateway turned down (one a market, side, purpose and reason a minute, as paper logs it): replay ${top(res.replay.rejected) || 'none'} | paper ${top(res.paper.rejected) || 'none'}`);
   const b = (x: number | null) => (x === null ? 'the setting' : `${(x * 100).toFixed(2)}c`);
   console.log(`maker buffer: paper's now ${b(res.makerBufferPaper)}, the replay's at its end ${b(res.replay.makerBufferEnd)} | the engine's other models in the replay: ${res.models.join(', ') || 'none'} | validation gates ${res.gates}${res.benched.length ? ` (benched: ${res.benched.join(', ')})` : ''}`);
   console.log(`started from paper's own state at the stretch's start: ${res.seeded.join(', ') || 'nothing (empty take-profit bench and accuracy gate)'}`);

@@ -127,7 +127,7 @@ export interface BacktestResult {
   sizeScaleMin?: number;
   /** With the paper options: entries the accuracy gate held back, when the take-profit bench benched, its sales (fills
    *  and contracts). */
-  paper?: { accuracyBlocks: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number; trainTrades?: number; exploreEntries?: number; extraSent?: number; extraRejected?: Record<string, number> };
+  paper?: { accuracyBlocks: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number; takeProfitScored?: number; takeProfitNetUsd?: number; rejected?: Record<string, number>; trainTrades?: number; exploreEntries?: number; extraSent?: number; extraRejected?: Record<string, number> };
   /** Fills and contracts by order purpose (quote, entry, exit), and contracts filled by UTC hour (YYYY-MM-DDTHH). */
   byPurpose?: Record<string, { fills: number; contracts: number }>;
   contractsByHour?: Record<string, number>;
@@ -340,8 +340,13 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const exitLedger = new Map<string, Array<{ sideSign: number; n: number; proceeds: number }>>();
   let slipSum = 0, slipN = 0;
   const gate = opts.accuracyGate?.enabled ? new AccuracyGate(opts.accuracyGate, opts.accuracyGateFile, () => st.now) : undefined;
-  const tpBench = opts.takeProfitBench ? new TakeProfitBench(opts.takeProfitBench.enforce, opts.takeProfitBench.rule, opts.takeProfitBench.stateFile, undefined, 0) : undefined;
-  res.paper = { accuracyBlocks: 0, takeProfitBenchedAt: undefined, takeProfitSales: 0, takeProfitContracts: 0, trainTrades: 0, exploreEntries: 0, extraSent: 0, extraRejected: {} };
+  // The bench's markets scored from the first trading moment on (the replay check sets them beside paper's).
+  const tpScored = (e: { event: string; usd?: unknown }) => { if (e.event === 'scored' && st.now >= (opts.tradeFromMs ?? -Infinity)) { res.paper!.takeProfitScored!++; res.paper!.takeProfitNetUsd! += Number(e.usd) || 0; } };
+  const tpBench = opts.takeProfitBench ? new TakeProfitBench(opts.takeProfitBench.enforce, opts.takeProfitBench.rule, opts.takeProfitBench.stateFile, tpScored, 0) : undefined;
+  res.paper = { accuracyBlocks: 0, takeProfitBenchedAt: undefined, takeProfitSales: 0, takeProfitContracts: 0, takeProfitScored: 0, takeProfitNetUsd: 0, rejected: {}, trainTrades: 0, exploreEntries: 0, extraSent: 0, extraRejected: {} };
+  // The risk gateway's rejections from the first trading moment on, deduped as the engine logs them (one a market, side,
+  // purpose and reason a minute), for the replay check.
+  const rejectSeen = new Map<string, number>();
   // A bench started from a benched scoreboard (takeProfitBench.stateFile) is benched from the first trading moment on.
   if (tpBench?.benched) res.paper.takeProfitBenchedAt = opts.tradeFromMs ?? opts.startMs;
   // The market context (opts.marketContext): a fresh one each run, so a replay of an earlier span starts clean; risk
@@ -758,7 +763,13 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         });
         if (!d.ok) {
           // Why the risk gateway turned down the paper bot's extra entries (numbers folded), for the replay check.
-          if (/^(train|explore)/.test(p.why)) { const k = (d.reasons?.[0] ?? 'rejected').replace(/[-+]?\$?\d[\d.,]*%?/g, '#'); res.paper!.extraRejected![k] = (res.paper!.extraRejected![k] ?? 0) + 1; }
+          const k = (d.reasons?.[0] ?? 'rejected').replace(/[-+]?\$?\d[\d.,]*%?/g, '#');
+          if (/^(train|explore)/.test(p.why)) res.paper!.extraRejected![k] = (res.paper!.extraRejected![k] ?? 0) + 1;
+          const seen = `${m.ticker}:${p.side}:${p.purpose}:${k}`;
+          if ((opts.tradeFromMs === undefined || st.now >= opts.tradeFromMs) && st.now - (rejectSeen.get(seen) ?? -Infinity) > 60_000) {
+            rejectSeen.set(seen, st.now);
+            res.paper!.rejected![`${p.purpose}: ${k}`] = (res.paper!.rejected![`${p.purpose}: ${k}`] ?? 0) + 1;
+          }
           continue;
         }
         if (/^(train|explore)/.test(p.why)) res.paper!.extraSent = (res.paper!.extraSent ?? 0) + 1;

@@ -55,6 +55,13 @@ test('replay check: paper side read from the audit log (crypto only, exits by ki
     L('fill', '2026-10-22T10:00:02.000Z', { fill: { ticker: 'KXATPMATCH-Y', count: 9, price: 0.5, side: 'bid' }, fee: 0.1 }),
     L('settlement', '2026-10-22T10:15:30.000Z', { ticker: 'KXBTC15M-X', result: 'no', realized: -1.25 }),
     L('settlement', '2026-10-22T11:15:30.000Z', { ticker: 'KXATPMATCH-Y', result: 'yes', realized: 4 }),
+    L('take_profit_bench', '2026-10-22T10:15:31.000Z', { event: 'scored', ticker: 'KXBTC15M-X', usd: 1.2, result: 'no' }),
+    L('take_profit_bench', '2026-10-22T10:30:31.000Z', { event: 'scored', ticker: 'KXBTC15M-W', usd: -3.5, result: 'yes' }),
+    L('take_profit_bench', '2026-10-22T10:30:31.000Z', { event: 'benched', reason: 'r' }),
+    L('risk_reject', '2026-10-22T10:03:00.000Z', { intent: { ticker: 'KXBTC15M-X', purpose: 'quote' }, reasons: ['window risk 12.50 > 10.00 cap'] }),
+    L('risk_reject', '2026-10-22T10:05:00.000Z', { intent: { ticker: 'KXBTC15M-W', purpose: 'quote' }, reasons: ['window risk 9.10 > 8.00 cap'] }),
+    L('risk_reject', '2026-10-22T10:06:00.000Z', { intent: { ticker: 'KXATPMATCH-Y', purpose: 'quote' }, reasons: ['window risk 9.10 > 8.00 cap'] }),
+    L('risk_reject', '2026-10-22T10:07:00.000Z', { ticker: 'KXBTC15M-X', reasons: ['exchange: insufficient balance'] }),
   ].join('\n') + '\n');
   fs.writeFileSync(path.join(dir, 'audit-2026-10-23.jsonl'), L('settlement', '2026-10-23T01:00:30.000Z', { ticker: 'KXETH15M-Z', result: 'yes', realized: 9 }) + '\n');
   const p = await paperFromAudit(dir, ['2026-10-22']);
@@ -68,6 +75,8 @@ test('replay check: paper side read from the audit log (crypto only, exits by ki
   assert.deepEqual(p.contractsByHour, { '2026-10-22T10': 11 });
   assert.deepEqual(p.extra, { train: 0, explore: 0 });
   assert.deepEqual(p.bySeries, { KXBTC15M: { markets: 1, pnl: -1.25 } });
+  assert.deepEqual(p.takeProfitBench, { scored: 2, netUsd: -2.3, benchedAt: '2026-10-22T10:30:31.000Z' });
+  assert.deepEqual(p.rejected, { 'quote: window risk # > # cap': 2, 'order: exchange: insufficient balance': 1 }, 'crypto only, numbers folded');
 });
 
 test('replay check verdict: same sign and within 25% of paper', () => {
@@ -280,6 +289,7 @@ test('replay check: the take-profit bench and the accuracy gate wound back to th
   const run = (bench: object) => runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy: 'fair_value', paper: { orderFrac: 0.1, orderUsd: 0 }, startMs: 0, takeProfitBench: { enforce: true, rule, ...bench } });
   const fresh = await run({});
   assert.ok((fresh.paper?.takeProfitSales ?? 0) > 0, 'an empty scoreboard lets the take-profit sell');
+  assert.ok((fresh.paper?.takeProfitScored ?? 0) > 0, 'its markets are scored as they settle');
   assert.equal(fresh.paper?.takeProfitBenchedAt, undefined);
   const seeded = await run({ stateFile });
   assert.equal(seeded.paper?.takeProfitBenchedAt, 0);
