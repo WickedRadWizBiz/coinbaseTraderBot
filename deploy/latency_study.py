@@ -9,19 +9,32 @@ carries: t (when the bot received it) and ts (the source's own time stamp):
   - how often the RTI value the bot holds actually changes
 Usage: latency_study.py <recordings dir> [hours=6]
 """
-import collections, glob, json, math, os, sys, time
+import collections, glob, gzip, json, math, os, sys, time
+
+
+def opener(f):
+    """A day file, plain or gzipped (today's is written as gzip while it is recorded)."""
+    return gzip.open(f, 'rb') if f.endswith('.gz') else open(f, 'rb')
+
+
+def lines_of(fh):
+    """Lines of an open day file; today's gzipped file may end in a member still being written."""
+    try:
+        yield from fh
+    except EOFError:
+        return
 
 rec_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser('~/bot/data/recordings')
 hours = float(sys.argv[2]) if len(sys.argv) > 2 else 6
 now_ms = time.time() * 1000
 since = now_ms - hours * 3_600_000
 day = time.strftime('%Y-%m-%d', time.gmtime())
-files = sorted(glob.glob(os.path.join(rec_dir, f'md-{day}.jsonl*')))
+files = [f for f in sorted(glob.glob(os.path.join(rec_dir, f'md-{day}.jsonl*'))) if f.endswith(('.jsonl', '.gz'))][:1]  # the plain file wins (a half-finished gzip)
 idx, spot = collections.defaultdict(list), collections.defaultdict(list)  # asset -> [(t, ts, v)]
 t0 = time.time()
 for f in files:
-    with open(f, 'rb') as fh:
-        for line in fh:
+    with opener(f) as fh:
+        for line in lines_of(fh):
             head = line[:40]
             is_idx = b'"k":"index"' in head
             if not is_idx and b'"k":"spot"' not in head: continue

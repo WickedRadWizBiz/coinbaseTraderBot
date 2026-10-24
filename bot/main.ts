@@ -36,7 +36,7 @@ import { MarketContext, marketContext, setMarketContext } from './ta/marketConte
 import { activeRuleBook, RuleBook, setRuleBook, STAND_ASIDE } from './strategy/ruleBook';
 import { activeGpSignals, GpSignals, setGpSignals } from './gp/gpSignals';
 import { SetupJournal } from './setups/journal';
-import { compressOldRecordings, freeBytesAt, makeRecordingsRoom, recordingsUsage } from './marketdata/recordingFiles';
+import { capRecordings, compressOldRecordings, freeBytesAt, makeRecordingsRoom, recordingsUsage } from './marketdata/recordingFiles';
 import { DEFAULT_LANES } from './setups/lanes';
 import { PaperPerpExchange } from './perps/paperPerp';
 import { KalshiPerpsRest, type PerpGateway } from './perps/perpRest';
@@ -212,14 +212,16 @@ async function main(): Promise<void> {
   const indexIds = Object.keys(cfg.indexIdMap);
   const ws = signer ? new KalshiWs(cfg.wsUrl, signer, indexIds) : undefined;
   if (!signer) log.warn('no Kalshi API key (KALSHI_KEY_ID + KALSHI_PRIVATE_KEY_PATH): order books are polled over anonymous REST, which Kalshi rate limits hard; add the key even for paper trading');
-  const md = new MarketData(cfg, rest, ws, new Recorder(path.join(cfg.dataDir, 'recordings')));
+  const md = new MarketData(cfg, rest, ws, new Recorder(path.join(cfg.dataDir, 'recordings'), { gzip: cfg.autoTrain.recordingsGzipLive }));
   // The rounding grid an earlier run learned from Kalshi's charged fees wins over KALSHI_BALANCE_PRECISION.
   setBalancePrecision(md.feeBook.precision());
-  // Recordings grow by a day file per day: older days are gzipped (about 10x smaller) so months of them
-  // fit on disk, and a low-disk alert fires before writes would fail.
+  // Recordings grow by a day file per day, gzipped as they are written (or, a day begun plain, after midnight: about
+  // 10x smaller), RECORDINGS_KEEP_DAYS of them kept, and a low-disk alert fires before writes would fail.
   const recDir = path.join(cfg.dataDir, 'recordings');
   const maintainRecordings = async () => {
     try {
+      const old = capRecordings(recDir, cfg.autoTrain.recordingsKeepDays);
+      if (old.length) log.info('recorded days past RECORDINGS_KEEP_DAYS deleted', { days: old, keep: cfg.autoTrain.recordingsKeepDays });
       // Below the floor, the oldest days go first (the gzip below also needs room to write).
       const floor = cfg.autoTrain.recordingsMinFreeGb * 1e9;
       const prune = () => {

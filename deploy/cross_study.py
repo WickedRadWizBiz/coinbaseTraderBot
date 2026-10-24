@@ -289,6 +289,14 @@ def opener(f):
     return gzip.open(f, 'rb') if f.endswith('.gz') else open(f, 'rb')
 
 
+def lines_of(fh):
+    """Lines of an open day file; today's gzipped file may end in a member still being written."""
+    try:
+        yield from fh
+    except EOFError:
+        return
+
+
 def pct(xs, q):
     return sorted(xs)[min(len(xs) - 1, int(q * len(xs)))] if xs else float('nan')
 
@@ -435,7 +443,7 @@ def main():
     for f in rec_files:
         with opener(f) as fh:
             if not f.endswith('.gz'): seek_time(fh, os.path.getsize(f), need_from)
-            for line in fh:
+            for line in lines_of(fh):
                 lines += 1
                 tm = line[5:18]
                 if tm.isdigit():
