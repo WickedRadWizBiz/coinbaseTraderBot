@@ -108,7 +108,8 @@ export interface BacktestResult {
   entryEvaluations: number;
   days: number;
   minEdge: number;
-  windows: Map<number, { pnl: number; contracts: number; fees: number }>;
+  /** Per market close time: P&L, contracts and fees (and fills, counted by the run since the replay check needed them). */
+  windows: Map<number, { pnl: number; contracts: number; fees: number; fills?: number }>;
   fills: number;
   contracts: number;
   fees: number;
@@ -142,7 +143,10 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
   accuracyGate?: AccuracyGateConfig;
   /** The take-profit bench (bot/strategy/takeProfitBench.ts): take-profit sales scored against holding to settlement,
    *  benched (no more take-profit sales) on the exit curve's rule when `enforce`. */
-  takeProfitBench?: { enforce: boolean; rule: Pick<ProbationParams, 'minTrades' | 't' | 'maxLossUsd' | 'window'> } }
+  takeProfitBench?: { enforce: boolean; rule: Pick<ProbationParams, 'minTrades' | 't' | 'maxLossUsd' | 'window'> };
+  /** Replay from this time (ms) on: what the recordings hold before it is skipped, so the books, features and gate
+   *  start empty there (research/replayCheck.ts starts hours before the stretch it compares). */
+  startMs?: number }
 
 /** The engine's paper caps (bot/engine.ts): one order, this many closing together, this many in all. */
 export const PAPER_WINDOW_ORDERS = 3;
@@ -213,6 +217,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     const b = res.windows.get(w) ?? { pnl: 0, contracts: 0, fees: 0 };
     b.contracts += f.count;
     b.fees += f.fee ?? 0;
+    b.fills = (b.fills ?? 0) + 1;
     res.windows.set(w, b);
     res.fills++; res.contracts += f.count; res.fees += f.fee ?? 0;
     if (cancelInFlight.has(f.orderId)) { L.cancelRaceFills++; L.cancelRaceContracts += f.count; }
@@ -258,6 +263,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
 
   let lastTick = 0;
   for await (const e of readRecordings(dir)) {
+    if (opts.startMs !== undefined && e.t < opts.startMs) continue;
     while (inflight.length && inflight[0].due <= e.t) await inflight.shift()!.run();
     st.apply(e);
     if (!firstTs) firstTs = st.now;
