@@ -29,7 +29,7 @@ on:
         default: '3'
   push:
     branches: ['claude/kalshi-random-sweep']
-    paths: ['.github/workflows/kalshi-replay-check.yml', 'research/replayCheck.ts']
+    paths: ['.github/workflows/kalshi-replay-check.yml', 'research/replayCheck.ts', 'research/backtest.ts']
 
 permissions:
   contents: read

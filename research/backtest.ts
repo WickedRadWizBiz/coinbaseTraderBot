@@ -45,6 +45,7 @@ import type { OrderIntent } from '../bot/oms/oms';
 import { PositionBook } from '../bot/oms/positions';
 import { PaperExchange } from '../bot/paper/paperExchange';
 import { marketWorstLoss } from '../bot/risk/exposure';
+import { EquityGuard } from '../bot/risk/equityGuard';
 import { RiskGateway } from '../bot/risk/riskGateway';
 import { decide } from '../bot/strategy/fairValueStrategy';
 import { ProfitPeaks } from '../bot/strategy/profitPeaks';
@@ -114,6 +115,8 @@ export interface BacktestResult {
   contracts: number;
   fees: number;
   pnl: number;
+  /** The smallest loss-aware size scale the run reached (bot/risk/equityGuard.ts; 1 = never below break-even). */
+  sizeScaleMin?: number;
   /** With the paper options: entries the accuracy gate held back, when the take-profit bench benched, its sales. */
   paper?: { accuracyBlocks: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number };
 }
@@ -146,7 +149,9 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
   takeProfitBench?: { enforce: boolean; rule: Pick<ProbationParams, 'minTrades' | 't' | 'maxLossUsd' | 'window'> };
   /** Replay from this time (ms) on: what the recordings hold before it is skipped, so the books, features and gate
    *  start empty there (research/replayCheck.ts starts hours before the stretch it compares). */
-  startMs?: number }
+  startMs?: number;
+  /** The break-even ratchet's daily goal (VAULT_DAILY_GOAL_USD), as the engine's equity guard has it; none when unset. */
+  dailyGoalUsd?: number }
 
 /** The engine's paper caps (bot/engine.ts): one order, this many closing together, this many in all. */
 export const PAPER_WINDOW_ORDERS = 3;
@@ -198,6 +203,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   // Bankroll tiers from the tradable high-water mark, with the tier's drawdown brake (mirrors the engine).
   const tiers = opts.sizingTiers ?? defaultTiers({ risk: limits, strategy });
   let peakBank = 0;
+  // The engine's loss-aware sizing and weekly loss pause, in memory (bot/risk/equityGuard.ts).
+  const guard = new EquityGuard({ ddScaleAt: strategy.ddScaleAt, weeklyLossPause: strategy.weeklyLossPause, dailyGoalUsd: opts.dailyGoalUsd });
   const stratRun: StrategyConfig = { ...strategy, exitPolicy: policy === 'take_profit' ? 'take_profit' : policy === 'hold' ? 'hold' : strategy.exitPolicy === 'take_profit' ? 'fair_value' : strategy.exitPolicy };
   let firstTs = 0;
   const closeOf = new Map<string, number>();
@@ -303,6 +310,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
             b.pnl += p.realized ?? 0;
             res.windows.set(m.closeTime, b);
             res.pnl += p.realized ?? 0;
+            if (p.realized) guard.onTradeResult(p.realized > 0, (await ex.getBalance()) + pos.open().reduce((x, q) => x + PositionBook.maxLoss(q), 0), st.now);
             if ((p.realized ?? 0) > 0) vault?.onSettled(p.realized!, m.ticker, st.now, peakBank);
             const sk = sessionState(m.openTime).key;
             const sb = res.bySession[sk] ?? { windows: 0, pnl: 0, contracts: 0, fees: 0 };
@@ -361,7 +369,11 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const bankroll = Math.max(0, (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0) - (opts.paper ? 0 : vault?.reserved() ?? 0));
       peakBank = Math.max(peakBank, bankroll);
       const tier = tierAt(tiers, peakBank);
-      const ddScale = peakBank > 0 ? Math.max(0, 1 - (1 - bankroll / peakBank) / tier.ddScaleAt) : 1;
+      // As the engine sizes (Engine.riskScale): full size at or above break-even (the starting equity, raised by the
+      // guard's ratchets), down to a quarter at a net loss of the tier's ddScaleAt, never zero.
+      guard.update(bankroll, st.now, bankroll, tier.weeklyLossPause);
+      const sizeScale = guard.sizeScale(bankroll, tier.ddScaleAt);
+      res.sizeScaleMin = Math.min(res.sizeScaleMin ?? 1, sizeScale);
       // Paper: about orderFrac of the bankroll an order (bot/engine.ts paperOrderUsd), the caps widened to fit it.
       const fixedUsd = !opts.paper ? 0 : opts.paper.orderFrac > 0 ? (bankroll > 0 ? Math.round(opts.paper.orderFrac * bankroll * 100) / 100 : 0) : Math.max(0, opts.paper.orderUsd);
       const tierLimits = { maxOrderRiskFrac: tier.orderFrac, maxWindowRiskFrac: tier.windowFrac, maxTotalRiskFrac: tier.totalFrac, dailyLossLimitFrac: tier.dailyLossFrac, dailyLossLimitUsd: tier.dailyLossUsd };
@@ -439,7 +451,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         : true;
       gate?.observe(m.ticker, tauSec, pYes, mid);
       const accuracyBlock = kindWindow && gate ? gate.block(m.ticker, tauSec) : undefined;
-      const entryWindowOpen = kindWindow && !accuracyBlock && !mt.inside && mt.minutesTo > 30 && bankroll >= strategy.minTradableBankrollUsd;
+      const entryWindowOpen = kindWindow && !accuracyBlock && !mt.inside && mt.minutesTo > 30 && bankroll >= strategy.minTradableBankrollUsd && !guard.paused(st.now);
       const rb = q('bid'), ra = q('ask');
       const through = (r: { price: number } | undefined, best: number) => r !== undefined && Math.abs(best - r.price) >= 2 * strategy.requoteThreshold - 1e-9;
       const posC = pos.position(m.ticker);
@@ -452,7 +464,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const entrySide = pNow && pNow.yes > 0 ? -pNow.netCash / pNow.yes : pNow && pNow.yes < 0 ? 1 - pNow.netCash / -pNow.yes : undefined;
       const plan = decide({
         ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: pos.position(m.ticker), bankroll,
-        maxOrderRiskUsd: fixedUsd > 0 ? fixedUsd : tier.orderFrac * bankroll * sessRisk.sizeMult, maxContracts: Math.floor(limits.maxContractsPerOrder * (fixedUsd > 0 ? 1 : sessRisk.sizeMult) * 100) / 100, minSidePrice: limits.minSidePrice,
+        maxOrderRiskUsd: fixedUsd > 0 ? fixedUsd : tier.orderFrac * bankroll * sessRisk.sizeMult * sizeScale, maxContracts: Math.floor(limits.maxContractsPerOrder * (fixedUsd > 0 ? 1 : sessRisk.sizeMult) * 100) / 100, minSidePrice: limits.minSidePrice,
         ...(fixedUsd > 0 ? { fixedOrderUsd: fixedUsd } : {}),
         ...(tpBench?.benched ? { takeProfitBenched: tpBench.benched } : {}),
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,
@@ -461,7 +473,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         entryFeePerContract: pNow && Math.abs(pNow.yes) > 1e-9 ? pNow.fees / Math.abs(pNow.yes) : undefined,
         profitPeakSidePrice: peaks.update(m.ticker, posC, posC > 0 ? bid.price : posC < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
         entryWindowOpen, exitWindowOpen: tauSec > strategy.noExitBeforeCloseSec,
-      }, { ...stratRun, kellyFraction: tier.kellyFraction * ddScale, minEdge: strategy.minEdge + sessRisk.minEdgeAdd, inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult }, {
+      }, { ...stratRun, kellyFraction: tier.kellyFraction * sizeScale, minEdge: strategy.minEdge + sessRisk.minEdgeAdd, inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult }, {
         exits: policy === 'fair_value' || policy === 'take_profit' || policy === 'hybrid' || (policy === 'confluence_ratchet' && !huntMode),
         blockReductions: huntMode,
         entries: Boolean(reason),

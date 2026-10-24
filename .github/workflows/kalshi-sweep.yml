@@ -38,7 +38,7 @@ on:
         default: '120'
   push:
     branches: ['claude/kalshi-random-sweep']
-    paths: ['.github/workflows/kalshi-sweep.yml', 'research/randomSweep.ts', 'research/kalshiReplayData.ts']
+    paths: ['.github/workflows/kalshi-sweep.yml', 'research/randomSweep.ts', 'research/kalshiReplayData.ts', 'research/backtest.ts']
 
 permissions:
   contents: read

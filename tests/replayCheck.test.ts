@@ -24,6 +24,8 @@ test('backtest paper options: orders sized from the bankroll share, gate and ben
   assert.ok(big.contracts >= small.contracts);
   // The gate starts with an empty scorecard: it cannot block before it has scored enough markets.
   assert.equal(small.paper.accuracyBlocks, 0);
+  // The engine's loss-aware size: a quarter at worst, never zero (a drawdown does not stop the replay trading).
+  assert.ok((big.sizeScaleMin ?? 1) >= 0.25 && (big.sizeScaleMin ?? 1) <= 1);
 });
 
 test('replay check: paper side read from the audit log (crypto only, exits by kind, P&L by hour)', async () => {

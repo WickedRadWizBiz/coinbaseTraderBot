@@ -41,7 +41,7 @@ export interface ReplayCheck {
    *  days to compare with); model swaps in the stretch. */
   settingsDiffer: string[] | null; modelSwaps: string[];
   /** Exits and the gate's counts are the whole replay's, warm-up included. */
-  replay: SideSummary & { accuracyBlocks: number; entryEvaluations: number; takeProfitBenchedAt: string | null };
+  replay: SideSummary & { accuracyBlocks: number; entryEvaluations: number; takeProfitBenchedAt: string | null; sizeScaleMin: number };
   /** gateShare: of the markets in paper's entry diagnoses (one every 5 minutes), the share the accuracy gate kept out. */
   paper: SideSummary & { gateShare: number | null };
   /** Correlation of hourly P&L (hours either side traded). */
@@ -158,7 +158,7 @@ export function stretchStart(startups: number[], days: string[], to: number): nu
 
 /** Settings that differ between two logged configs, by name (never the values): paths, hosts, ports and credentials
  *  differ between the server and a runner by design and are left out. */
-const MACHINE = /(Path|Dir|File|Host|Port|Url|Token|Password|Secret|KeyId|Webhook)$|^(port|alerts)$/;
+const MACHINE = /(Path|Dir|File|Host|Port|Url|Token|Password|Secret|KeyId|Webhook)$|^(port|alerts|dir|host|keyId)$/;
 export function settingsDiffer(a: unknown, b: unknown, at = ''): string[] {
   const obj = (x: unknown): x is Record<string, unknown> => Boolean(x) && typeof x === 'object' && !Array.isArray(x);
   if (!obj(a) || !obj(b)) return JSON.stringify(a) === JSON.stringify(b) ? [] : [at || '(all)'];
@@ -235,12 +235,12 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const r = await runBacktest(dir, model, S, cfg.risk, bankroll, {
     exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
     sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd }, accuracyGate: S.accuracyGate,
-    takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench }, startMs: from - (o.warmupHours ?? 8) * HOUR,
+    takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench }, startMs: from - (o.warmupHours ?? 8) * HOUR, dailyGoalUsd: cfg.vault.dailyGoalUsd,
   });
   fs.rmSync(dir, { recursive: true, force: true });
   const replay = {
     ...empty(), accuracyBlocks: r.paper?.accuracyBlocks ?? 0, entryEvaluations: r.entryEvaluations,
-    takeProfitBenchedAt: r.paper?.takeProfitBenchedAt ? new Date(r.paper.takeProfitBenchedAt).toISOString() : null,
+    takeProfitBenchedAt: r.paper?.takeProfitBenchedAt ? new Date(r.paper.takeProfitBenchedAt).toISOString() : null, sizeScaleMin: r.sizeScaleMin ?? 1,
   };
   const inside = (t: number) => t >= from && t < to;
   for (const [w, b] of r.windows) if (inside(w)) { replay.fills += b.fills ?? 0; replay.contracts += b.contracts; replay.fees += b.fees; }
@@ -300,7 +300,7 @@ async function main(): Promise<void> {
   console.log(`paper bot starts in ${res.days.join(', ')}: ${res.startups.length ? res.startups.map(hm).join(', ') : 'none'}`);
   row('replay', res.replay);
   row('paper', res.paper);
-  console.log(`accuracy gate: replay held back ${pct(res.replay.entryEvaluations ? res.replay.accuracyBlocks / res.replay.entryEvaluations : null)} of its entry evaluations; paper's diagnoses show it keeping out ${pct(res.paper.gateShare)} of the markets | take-profit benched ${res.replay.takeProfitBenchedAt ?? 'never'}`);
+  console.log(`accuracy gate: replay held back ${pct(res.replay.entryEvaluations ? res.replay.accuracyBlocks / res.replay.entryEvaluations : null)} of its entry evaluations; paper's diagnoses show it keeping out ${pct(res.paper.gateShare)} of the markets | take-profit benched ${res.replay.takeProfitBenchedAt ?? 'never'} | replay's loss-aware size went down to x${res.replay.sizeScaleMin.toFixed(2)}`);
   console.log(`settings that differ from the paper bot's at that start: ${res.settingsDiffer === null ? 'no start logged in these days' : res.settingsDiffer.length ? res.settingsDiffer.join(', ') : 'none'} | model swaps in the stretch: ${res.modelSwaps.length ? res.modelSwaps.map(hm).join(', ') : 'none'}`);
   console.log(`hourly P&L correlation ${res.hourCorr === null ? 'n/a' : res.hourCorr.toFixed(2)} | total gap ${pct(res.pnlGap)}`);
   console.log(!res.checked ? `VERDICT not checked yet: ${res.why.join('; ')}` : res.close ? 'VERDICT close: sweep results can count' : `VERDICT not close: ${res.why.join('; ')}`);
