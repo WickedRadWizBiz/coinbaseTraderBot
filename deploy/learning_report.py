@@ -119,6 +119,8 @@ for name, d in (('paper', DATA), ('live', os.path.join(DATA, 'live'))):
     if eg.get('reference') is not None and h: print(f"  {name} size vs break-even: break-even ${eg['reference']:.2f}, last hourly equity ${h[-1]['equity']:.2f} ({time.strftime('%m-%d %H:%M', time.gmtime(h[-1]['ts'] / 1000))} UTC)")
     ce = load(os.path.join(d, 'curve-exit.json'))
     if ce: print(f"  {name} exit curve: {len(ce.get('results') or [])} held exits scored, net ${sum(ce.get('results') or []):.2f} | benched {short(ce.get('benched'), 160)}")
+    tb = load(os.path.join(d, 'take-profit-bench.json'))
+    if tb: print(f"  {name} take-profit bench: {len(tb.get('results') or [])} markets scored, net ${sum(tb.get('results') or []):.2f} against holding to settlement, {len(tb.get('sales') or [])} sales waiting | benched {short(tb.get('benched'), 160)}")
     fsch = load(os.path.join(d, 'fee_schedule.json'))
     if fsch:
         p, v, f = fsch.get('published') or {}, fsch.get('votes') or {}, fsch.get('fills') or {}

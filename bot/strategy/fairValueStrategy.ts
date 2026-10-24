@@ -18,7 +18,9 @@
 //     best price its side could have been sold at since it was opened or added
 //     to): profitGiveBack of the best gain given back (a third by default), or
 //     into the last tick above the floor. Never below the floor, whatever the
-//     model thinks the contract is worth. Model exit: sell at the bid when the bid minus
+//     model thinks the contract is worth. Benched by its scoreboard against
+//     holding to settlement (takeProfitBenched, bot/strategy/takeProfitBench.ts),
+//     it sells nothing. Model exit: sell at the bid when the bid minus
 //     the taker fee beats q + exitMargin (the market overpays, or the model
 //     turned against the position). Mode B adds a resting maker take-profit at
 //     entry + TP, never offered below what the model thinks the position is
@@ -56,8 +58,9 @@ export interface MarketView {
   /** Risk room left under the window and total caps and in free cash (dollars): a quote is only raised to the
    *  minimum size inside it. Unbounded when not given. */
   newRiskRoomUsd?: number;
-  /** Paper fixed size (PAPER_ORDER_USD): a trade sizing wants (contracts > 0) buys about this many dollars of
-   *  contracts, within maxOrderRiskUsd, the risk room and maxContracts. Undefined = the sized amount. */
+  /** Paper order size (PAPER_ORDER_FRAC of the bankroll, or PAPER_ORDER_USD): a trade sizing wants (contracts > 0)
+   *  buys about this many dollars of contracts, within maxOrderRiskUsd, the risk room and maxContracts. Undefined = the
+   *  sized amount. */
   fixedOrderUsd?: number;
   /** Exit curve rest mode: the side price at which the held position's sell rests (the curve's swing-top estimate).
    *  Undefined = no resting curve sell. */
@@ -86,6 +89,8 @@ export interface MarketView {
   /** Best price the held side could have been sold at (its bid) since the position was opened, reversed or added to:
    *  the take-profit's high-water mark (ProfitPeaks). Without it the current bid is the best seen. */
   profitPeakSidePrice?: number;
+  /** Why the take-profit is benched (bot/strategy/takeProfitBench.ts): it sells nothing; the model exit still runs. */
+  takeProfitBenched?: string;
   /** Entry window open (contract kind, time to close, maintenance). Default: tau >= noEntryBeforeCloseSec. */
   entryWindowOpen?: boolean;
   /** Exits allowed (false in the final minute: ride to settlement). Default true. */
@@ -144,7 +149,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     }
     return kellySize({ q: side === 'yes' ? q : 1 - q, cost, feePerContract: fee, bankroll: v.bankroll, kellyFraction: cfg.kellyFraction, maxRiskUsd: v.maxOrderRiskUsd, maxContracts });
   };
-  // Sizing decides whether a trade is worth taking; a paper fixed size then decides how much (PAPER_ORDER_USD).
+  // Sizing decides whether a trade is worth taking; a paper order size then decides how much (PAPER_ORDER_FRAC / PAPER_ORDER_USD).
   const size = (side: 'yes' | 'no', cost: number, fee: number, maxContracts: number) => {
     const k = sized(side, cost, fee, maxContracts);
     if (!(v.fixedOrderUsd! > 0) || !(k.contracts > 0)) return k;
@@ -180,6 +185,10 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     const peak = v.profitPeakSidePrice;
     const best = peak !== undefined && peak > sidePx ? Math.max(net, banked(peak, orderFee(n, peak, true, v.fees) / n)) : net;
     if (!(best >= floor - 1e-9)) return { sell: false, protective: false, why: '' };
+    if (v.takeProfitBenched) {
+      out.notes.push(`take-profit benched${label}: +${net.toFixed(3)} now, best +${best.toFixed(3)}, not sold (${v.takeProfitBenched})`);
+      return { sell: false, protective: false, why: '' };
+    }
     const sellBelow = Math.max(best * (1 - giveBack), floor + tick);
     const lastTick = net <= floor + tick + 1e-9;
     const sell = net >= floor - 1e-9 && (giveBack <= 0 || (net < best - 1e-9 && (lastTick || net <= best * (1 - giveBack) + 1e-9)));
