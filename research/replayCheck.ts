@@ -10,7 +10,8 @@
 // bot's last start in the audit log (--from auto) and ends at --to (when the recordings were copied); the replay
 // starts --warmup-hours earlier, so its books, features and gate scorecard are warm by then, and only markets closing
 // inside the stretch count on either side. The replay only watches until the stretch begins, then trades from the
-// paper account's bankroll at that point (--paper-balance-now less what paper settled since, or --bankroll), its
+// paper account's bankroll at that point (--paper-balance-now, its cash plus the cost of the contracts it holds, less
+// what paper settled since; or --bankroll), its
 // equity guard started from the bot's own (--paper-guard: equity_guard.json, so it sizes against the same break-even)
 // and the dashboard's kill-switch override as the bot has it (--kill-override, on unless turned off).
 //
@@ -377,7 +378,8 @@ export interface ReplayCheckOpts {
   /** Start of the stretch (ms), or undefined for the bot's last start; end of it (ms), default the end of the days. */
   from?: number; to?: number;
   minHours?: number; warmupHours?: number;
-  /** The replay's bankroll; else the paper balance at the start of the stretch, from the balance now. */
+  /** The replay's bankroll; else the paper account's at the start of the stretch, from its equity at cost now (cash plus
+   *  the cost of the contracts held: cash alone leaves out what open positions tie up). */
   bankroll?: number; paperBalanceNow?: number;
   /** The paper bot's equity_guard.json (read from a copy) and its kill-switch override (default on, as bot/control.ts). */
   paperGuard?: string; killOverride?: boolean;
@@ -529,6 +531,7 @@ async function main(): Promise<void> {
   console.log(`settings that differ from the paper bot's at that start: ${res.settingsDiffer === null ? 'no start logged in these days' : res.settingsDiffer.length ? res.settingsDiffer.join(', ') : 'none'} | model swaps in the stretch: ${res.modelSwaps.length ? res.modelSwaps.map(hm).join(', ') : 'none'}`);
   console.log(`hourly P&L correlation ${res.hourCorr === null ? 'n/a' : res.hourCorr.toFixed(2)} | total gap ${pct(res.pnlGap)}`);
   console.log(!res.checked ? `VERDICT not checked yet: ${res.why.join('; ')}` : res.close ? 'VERDICT close: sweep results can count' : `VERDICT not close: ${res.why.join('; ')}`);
+  console.log(`peak memory ${(process.resourceUsage().maxRSS / 1024).toFixed(0)} MB`);
 }
 
 if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) main().catch((e) => { console.error((e as Error).message); process.exit(1); });
