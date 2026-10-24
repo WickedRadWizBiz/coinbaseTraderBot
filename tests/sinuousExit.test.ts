@@ -369,7 +369,7 @@ test('rest mode: the cross is benched when selling on it loses against holding; 
 
 test('cross on the live line: sells on its break when the sale clears the floor; never without one, under the floor, near the close or benched', () => {
   const g = new SinuousExitGate({ mode: 'cross', minNetProfit: 0.015, crossSource: 'line' }, { minTrades: 20, t: 1, maxLossUsd: 1, window: 200 }, undefined, undefined, 0);
-  const line = (broke: boolean) => ({ price: 100, projected: 100.05, underSigmas: broke ? 2.4 : 1.2, slope: -0.3, breakSec: broke ? 2 : 0, broke });
+  const line = (broke: boolean) => ({ price: 100, projected: 100.05, band: { lower: 99.98, upper: 100.12, k: 2, sec: 240 }, underSd: broke ? 2.4 : 1.2, slope: -0.3, breakSec: broke ? 2 : 0, broke });
   // The order-book curve does not matter here: the line alone decides (no book curve has been fed at all).
   assert.equal(g.cross('T', { ...CROSS, line: line(false) }, 0).sell, false, 'no break');
   assert.equal(g.cross('T', { ...CROSS, line: undefined }, 0).sell, false, 'no line reading');
@@ -377,7 +377,7 @@ test('cross on the live line: sells on its break when the sale clears the floor;
   assert.equal(g.cross('T', { ...CROSS, tauSec: 100, line: line(true) }, 0).sell, false, 'inside the stand-down');
   const c = g.cross('T', { ...CROSS, spot: 'with', line: line(true) }, 0);
   assert.equal(c.sell, true, 'the coin turn of the book source is not needed');
-  assert.match(c.why!, /^exit curve: cross 0\.63 \(\+0\.203 a contract net, live line 2\.4 noise under its projection for 2 s\)$/);
+  assert.match(c.why!, /^exit curve: cross 0\.63 \(\+0\.203 a contract net, live line outside its wiggle band for 2 s \(2\.4 sd, band \+-2 sd of 240 s since the open\)\)$/);
   // Scored on the fill like the book cross; losing past the dollar limit benches it.
   g.crossFilled('T', 1, 0.63, 10, 0.0165, 0);
   g.settled('T', 'yes', 1000);

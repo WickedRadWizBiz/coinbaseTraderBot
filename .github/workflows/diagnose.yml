@@ -18,6 +18,10 @@ on:
         description: 'Also print where training time goes (deploy/step_timings.py from the dispatched ref: minutes per pipeline step from the reports; read-only)'
         required: false
         default: 'false'
+      study_hours:
+        description: 'With pnl: hours of positions the exit study replays (whole number, 1-24; about a minute of server time an hour)'
+        required: false
+        default: '8'
 
 permissions:
   contents: read
@@ -45,13 +49,14 @@ jobs:
           EXTRA_PATHS: ${{ inputs.paths }}
           PNL: ${{ inputs.pnl }}
           TIMINGS: ${{ inputs.timings }}
+          STUDY_HOURS: ${{ inputs.study_hours }}
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
           username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
-          command_timeout: 25m
-          envs: EXTRA_PATHS,PNL,TIMINGS
+          command_timeout: 55m
+          envs: EXTRA_PATHS,PNL,TIMINGS,STUDY_HOURS
           script: |
             # The dashboard API needs the dashboard password when one is set. It is read here, on the server, from
             # bot.env and handed to curl on stdin (never on a command line, never printed): it doesn't leave the box.
@@ -157,8 +162,10 @@ jobs:
             if [ "$PNL" = "true" ] && [ -d /tmp/diag/deploy ]; then
               echo "== P&L report"; nice -n 19 python3 /tmp/diag/deploy/pnl_report.py ~/bot/data 3 || true
               echo "== decision study"; nice -n 19 python3 /tmp/diag/deploy/decision_study.py ~/bot/data 3 || true
-              echo "== exit study (the cross, the projected-peak rule and the live-line rule, replayed on the recordings; at most 15 min)"
-              timeout 900 nice -n 19 python3 /tmp/diag/deploy/cross_study.py ~/bot/data 8 || echo "(exit study stopped: $?)"
+              case "$STUDY_HOURS" in ''|*[!0-9]*) STUDY_HOURS=8;; esac
+              if [ "$STUDY_HOURS" -lt 1 ] || [ "$STUDY_HOURS" -gt 24 ]; then STUDY_HOURS=8; fi
+              echo "== exit study (the cross, the projected-peak rule and the live-line rules, replayed on the recordings: $STUDY_HOURS h)"
+              timeout $((STUDY_HOURS * 110 + 300)) nice -n 19 python3 /tmp/diag/deploy/cross_study.py ~/bot/data "$STUDY_HOURS" || echo "(exit study stopped: $?)"
               echo "== feed delay"; nice -n 19 python3 /tmp/diag/deploy/feed_delay.py ~/bot/data/recordings 1 || true
               echo "== latency study"; nice -n 19 python3 /tmp/diag/deploy/latency_study.py ~/bot/data/recordings 2 || true
             fi

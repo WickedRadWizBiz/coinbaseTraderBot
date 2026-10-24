@@ -1077,7 +1077,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       // The cross's sell signal is off until a version beats the bot's other exits on the exit study's replays: on
       // Oct 23 (16:15-00:15 UTC, 250 positions) every turn-based rule lost against them (the book cross -$28.61
       // against holding on its 15 fills and was benched by its own rule; the live line, the book cross and the
-      // projected-peak watch all lost on replay). The curves and the live line's heads-up run either way.
+      // projected-peak watch all lost on replay). Oct 24's wiggle band did no better (16 h, 564 positions: it sold on 8 and
+      // lost $3.51 against what they got; k 1.5, a 10 s look-ahead and no profit floor lost more). The curves, the live
+      // line's band and its heads-up run either way.
       cross: bool(env, 'SINUOUS_CROSS', false),
       crossFeeMargin: num(env, 'SINUOUS_CROSS_FEE_MARGIN', 0.5, 0, 5),
       restStandDownSec: num(env, 'SINUOUS_REST_STAND_DOWN_SEC', 120, 0, 900),
@@ -1085,7 +1087,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       crossSource: oneOf(env, 'SINUOUS_CROSS_SOURCE', 'line', ['line', 'book'] as const),
       line: {
         aheadSec: num(env, 'LIVE_LINE_AHEAD_SEC', DEFAULT_LIVE_LINE.aheadSec, 3, 120),
-        xSigmas: num(env, 'LIVE_LINE_X_SIGMAS', DEFAULT_LIVE_LINE.xSigmas, 0.5, 6),
+        // x from the contract's own wiggles around the curve since it opened (the owner, Oct 24): mean +- k sd.
+        bandK: num(env, 'LIVE_LINE_BAND_K', DEFAULT_LIVE_LINE.bandK, 0.5, 6),
+        bandMinSec: num(env, 'LIVE_LINE_BAND_MIN_SEC', DEFAULT_LIVE_LINE.bandMinSec, 10, 900),
         confirmSec: num(env, 'LIVE_LINE_CONFIRM_SEC', DEFAULT_LIVE_LINE.confirmSec, 1, 30),
       },
       minNetProfit: num(env, 'SINUOUS_MIN_PROFIT_CENTS', DEFAULT_SINUOUS_EXIT.minNetProfit * 100, 0, 50) / 100,

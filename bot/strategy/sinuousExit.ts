@@ -288,7 +288,8 @@ export interface SinuousExitParams {
   /** What the cross watches (SINUOUS_CROSS_SOURCE): 'line', Kalshi's live line for the coin (bot/strategy/liveLine.ts;
    *  the owner's description, Oct 23), or 'book', the contract's own order-book curve confirmed by the coin's turn. */
   crossSource?: 'line' | 'book';
-  /** The live line's look-ahead, x and confirmation (LIVE_LINE_AHEAD_SEC, LIVE_LINE_X_SIGMAS, LIVE_LINE_CONFIRM_SEC). */
+  /** The live line's look-ahead, wiggle band and confirmation (LIVE_LINE_AHEAD_SEC, LIVE_LINE_BAND_K,
+   *  LIVE_LINE_BAND_MIN_SEC, LIVE_LINE_CONFIRM_SEC). */
   line?: LiveLineParams;
 }
 
@@ -356,7 +357,7 @@ export interface SinuousExitStatus {
   crossesPending: number;
   /** What the cross watches: the coin's live line, or the contract's book; the live line's settings. */
   crossSource: 'line' | 'book';
-  line?: { aheadSec: number; xSigmas: number; confirmSec: number };
+  line?: LiveLineParams;
 }
 
 /**
@@ -439,8 +440,8 @@ export class SinuousExitGate {
     return { sell: true, why: `exit curve: cross${k.sign < 0 ? ' NO' : ''} ${e.sidePrice} (+${net.toFixed(3)} a contract net, ${curve}, spot against)` };
   }
 
-  /** The live-line cross: the coin's line under its projection by x for the confirmation seconds, and the sale clears the
-   *  take-profit floor. */
+  /** The live-line cross: the coin's line outside its wiggle band against the side for the confirmation seconds, and the
+   *  sale clears the take-profit floor. */
   private lineCross(ticker: string, e: CrossCheck): { sell: boolean; why?: string; note?: string } {
     const l = e.line;
     if (!l?.broke) return { sell: false };
@@ -448,7 +449,7 @@ export class SinuousExitGate {
     if (!(net >= e.floor - 1e-9)) return { sell: false };
     const k = this.trackers.get(ticker);
     const no = (k?.sign ?? 1) < 0 ? ' NO' : '';
-    const line = `live line ${l.underSigmas} noise under its projection for ${l.breakSec} s`;
+    const line = `live line outside its wiggle band for ${l.breakSec} s (${l.underSd} sd${l.band ? `, band +-${l.band.k} sd of ${l.band.sec} s since the open` : ''})`;
     if (this.st.benched) return { sell: false, note: `exit curve: ${line} but the cross is benched: ${this.st.benched.reason}` };
     return { sell: true, why: `exit curve: cross${no} ${e.sidePrice} (+${net.toFixed(3)} a contract net, ${line})` };
   }

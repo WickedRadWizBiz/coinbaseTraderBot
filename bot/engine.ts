@@ -2144,9 +2144,10 @@ export class Engine {
       });
       // The position's reading of its coin's live line, in its side's terms: +1 when the side gains as the coin rises.
       const orient = direction === 0 ? undefined : (direction * sign) as 1 | -1;
-      st.line = orient === undefined ? undefined : this.d.liveLines?.read(m.asset, orient, !shortContract, now);
+      // The band's wiggles start when the contract's window opened (at most its 15 or 60 minutes).
+      st.line = orient === undefined ? undefined : this.d.liveLines?.read(m.asset, orient, !shortContract, now, Math.max(m.openTime, m.closeTime - (shortContract ? 900_000 : 3_600_000)));
       if (st.line?.peak) plan.notes.push(`live line: the move is fading for the side; its momentum tops out near ${st.line.peak.top}`);
-      if (st.line?.broke && curve.p.cross === false) plan.notes.push(`live line: ${st.line.underSigmas} noise under its projection for ${st.line.breakSec} s (the cross would sell; it is off, SINUOUS_CROSS)`);
+      if (st.line?.broke && curve.p.cross === false) plan.notes.push(`live line: outside its wiggle band for ${st.line.breakSec} s (${st.line.underSd} sd; the cross would sell; it is off, SINUOUS_CROSS)`);
       plan.place = plan.place.filter((p) => {
         if (!p.reduceOnly || p.timeInForce !== 'immediate_or_cancel' || !(p.count > 0)) return true;
         const sidePrice = sign > 0 ? p.price : Math.round((1 - p.price) * 1e4) / 1e4;
@@ -2157,10 +2158,12 @@ export class Engine {
         if (g.note) plan.notes.push(g.note);
         return g.allow;
       });
-      // Rest mode, the cross (the owner's option #1 after the Oct 23 exit research): the curve rolled over below its
-      // projection by a share of the taker fee, the coin's price has turned against the side held, and the sale clears
-      // the take-profit floor: sell at the bid now (the resting sell is pulled below, with any other own order in the
-      // way). Not while hunting (the ratchet runs that winner), nor when another exit already crosses the book this tick.
+      // The cross: on the live line (the default source), the coin's line outside its wiggle band against the side for
+      // the confirmation seconds; on the book (the owner's option #1 after the Oct 23 exit research), the curve rolled
+      // over below its projection by a share of the taker fee with the coin's price turned against the side. Either
+      // way the sale clears the take-profit floor: sell at the bid now (the resting sell is pulled below, with any other
+      // own order in the way). Not while hunting (the ratchet runs that winner), nor when another exit already crosses
+      // the book this tick.
       if (curve.crossing && !huntMode && view.exitWindowOpen !== false && !plan.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel')) {
         const top = sign > 0 ? bid : ask;
         const n = floorCount(Math.min(held, top.size));

@@ -20,7 +20,7 @@ interface MarketRow {
   /** Exit-in-profit curve of the held position (bot/strategy/sinuousExit.ts). */
   curve?: { signal: boolean; reason: string; curve?: number; projected?: number; z?: number; netProfit?: number };
   /** The held position's reading of its coin's live line (bot/strategy/liveLine.ts). */
-  line?: { price: number; projected?: number; underSigmas?: number; slope: number; breakSec: number; broke: boolean; peak?: { top: number } };
+  line?: { price: number; projected?: number; band?: { lower: number; upper: number; k: number; sec: number }; underSd?: number; slope: number; breakSec: number; broke: boolean; peak?: { top: number } };
 }
 
 interface Level { price: number; size: number }
@@ -196,9 +196,9 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
                   )}
                   {tab.line && tab.position !== 0 && (
                     <span className={`px-2 py-0.5 crt-border font-bold text-[11px] ${tab.line.broke ? 'bg-crypto-danger/20 text-crypto-danger' : tab.line.peak ? 'bg-crypto-primary/20 text-crypto-primary' : 'bg-black/40 text-crypto-text'}`}
-                      title="Live line: the coin's settlement index as a curve. A break (the line under its projection by x for two seconds) is the cross's sell signal; a fading move shows where its momentum tops out">
+                      title={`Live line: the coin's settlement index as a curve, with a band from its own wiggles around the curve since the contract opened (mean ± ${tab.line.band?.k ?? 2} sd, like Bollinger bands${tab.line.band ? `; now ${tab.line.band.lower}-${tab.line.band.upper} over ${tab.line.band.sec} s` : '; it needs a minute of wiggles'}). A break (the line outside the band against the side for two seconds) is the cross's sell signal; a fading move shows where its momentum tops out`}>
                       LINE {tab.line.broke ? `BREAK ${tab.line.breakSec}s` : tab.line.peak ? `FADING · TOP ${tab.line.peak.top}` : tab.line.slope > 0 ? 'WITH THE SIDE' : 'AGAINST'}
-                      {tab.line.underSigmas !== undefined && ` · ${tab.line.underSigmas >= 0 ? `${tab.line.underSigmas.toFixed(1)}σ under` : `${(-tab.line.underSigmas).toFixed(1)}σ over`}`}
+                      {tab.line.underSd !== undefined ? ` · ${tab.line.underSd >= 0 ? `${tab.line.underSd.toFixed(1)} sd toward the band's losing edge` : `${(-tab.line.underSd).toFixed(1)} sd toward the winning edge`}` : ' · band forming'}
                     </span>
                   )}
                   {book && !book.usable && !tabClosed && (
