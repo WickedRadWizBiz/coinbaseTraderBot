@@ -2146,6 +2146,7 @@ export class Engine {
       const orient = direction === 0 ? undefined : (direction * sign) as 1 | -1;
       st.line = orient === undefined ? undefined : this.d.liveLines?.read(m.asset, orient, !shortContract, now);
       if (st.line?.peak) plan.notes.push(`live line: the move is fading for the side; its momentum tops out near ${st.line.peak.top}`);
+      if (st.line?.broke && curve.p.cross === false) plan.notes.push(`live line: ${st.line.underSigmas} noise under its projection for ${st.line.breakSec} s (the cross would sell; it is off, SINUOUS_CROSS)`);
       plan.place = plan.place.filter((p) => {
         if (!p.reduceOnly || p.timeInForce !== 'immediate_or_cancel' || !(p.count > 0)) return true;
         const sidePrice = sign > 0 ? p.price : Math.round((1 - p.price) * 1e4) / 1e4;

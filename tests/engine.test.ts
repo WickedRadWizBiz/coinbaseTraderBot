@@ -479,6 +479,22 @@ test('exit curve on the live line: a break of the coin\'s line sells the held po
   assert.equal(curveExit.status().crossesPending, 1, 'scored on its fill');
 });
 
+test('exit curve on the live line, the sell signal off (the default): a break is noted, nothing is sold on it', async () => {
+  const curveExit = new SinuousExitGate({ mode: 'cross', minNetProfit: 0.015, crossSource: 'line', cross: false }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
+  class BrokenLine extends LiveLines {
+    override read(): LiveLineReading { return { price: 100, projected: 100.1, underSigmas: 2.6, slope: -0.4, breakSec: 2, broke: true }; }
+  }
+  const { engine, recon, market, md, oms } = await setup({ curveExit, liveLines: new BrokenLine(), env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+  engine.balance = (await recon.run('startup'))!.balance;
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.38, size: 50 }], asks: [{ price: 0.4, size: 50 }] }, Date.now());
+  await oms.submit({ ticker: market.ticker, asset: 'BTC', windowCloseTs: market.closeTime, side: 'bid', price: 0.4, count: 10, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: false, purpose: 'entry', fairValue: 0.5, modelId: 'm', decisionId: 'e' });
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.52, size: 50 }], asks: [{ price: 0.54, size: 50 }] }, Date.now());
+  await engine.tick();
+  const notes = engine.status.get(market.ticker)!.notes.join(' | ');
+  assert.match(notes, /live line: 2\.6 noise under its projection for 2 s \(the cross would sell; it is off, SINUOUS_CROSS\)/);
+  assert.equal(curveExit.status().crossesPending, 0, 'nothing sold on it');
+});
+
 test('exit curve: a cross whose order fills nothing is not scored', async () => {
   const curveExit = new StubCrossOnly({ mode: 'cross', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
   const { engine, recon, market, md, oms } = await setup({ curveExit, env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });

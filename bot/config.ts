@@ -1074,7 +1074,11 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     sinuousExit: {
       mode: oneOf(env, 'SINUOUS_EXIT', DEFAULT_SINUOUS_EXIT.mode, ['gate', 'monitor', 'rest', 'cross', 'off'] as const),
       restBandSigmas: num(env, 'SINUOUS_REST_BAND_SIGMAS', 0.5, 0, 3),
-      cross: bool(env, 'SINUOUS_CROSS', true),
+      // The cross's sell signal is off until a version beats the bot's other exits on the exit study's replays: on
+      // Oct 23 (16:15-00:15 UTC, 250 positions) every turn-based rule lost against them (the book cross -$28.61
+      // against holding on its 15 fills and was benched by its own rule; the live line, the book cross and the
+      // projected-peak watch all lost on replay). The curves and the live line's heads-up run either way.
+      cross: bool(env, 'SINUOUS_CROSS', false),
       crossFeeMargin: num(env, 'SINUOUS_CROSS_FEE_MARGIN', 0.5, 0, 5),
       restStandDownSec: num(env, 'SINUOUS_REST_STAND_DOWN_SEC', 120, 0, 900),
       // What the cross watches: Kalshi's live line for the coin (the owner's description, Oct 23), or the contract's book.

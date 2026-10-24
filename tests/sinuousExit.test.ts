@@ -383,5 +383,10 @@ test('cross on the live line: sells on its break when the sale clears the floor;
   g.settled('T', 'yes', 1000);
   assert.ok(g.status().benched);
   assert.match(g.cross('U', { ...CROSS, line: line(true) }, 2000).note ?? '', /the cross is benched/);
-  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40) }).sinuousExit.crossSource, 'line');
+  // The defaults: the cross watches the live line, and its sell signal is off until it beats the other exits.
+  const d = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40) }).sinuousExit;
+  assert.deepEqual([d.crossSource, d.cross], ['line', false]);
+  const off = new SinuousExitGate({ ...d, minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 }, undefined, undefined, 0);
+  assert.equal(off.cross('V', { ...CROSS, line: line(true) }, 0).sell, false, 'off by default');
+  assert.equal(new SinuousExitGate({ ...loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), SINUOUS_CROSS: 'true' }).sinuousExit, minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 }, undefined, undefined, 0).cross('V', { ...CROSS, line: line(true) }, 0).sell, true, 'SINUOUS_CROSS=true turns it on');
 });
