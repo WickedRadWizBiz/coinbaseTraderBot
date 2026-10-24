@@ -48,6 +48,8 @@ export interface SideSummary {
   byPurpose: Record<string, { fills: number; contracts: number }>;
   /** Contracts filled by UTC hour. */
   contractsByHour: Record<string, number>;
+  /** Settled markets and P&L by series (the ticker before its first dash: KXBTC15M, KXETHD, ...). */
+  bySeries: Record<string, { markets: number; pnl: number }>;
 }
 /** The two sides' prices at the paper bot's decision records (the replay's evaluation of the market within 1 s). */
 export interface PriceMatch {
@@ -99,7 +101,8 @@ const hourOf = (ms: number) => new Date(ms).toISOString().slice(0, 13);
 const isTennis = (t: string) => t.startsWith('KXATP') || t.startsWith('KXWTA');
 // The model exit names its prices ("bid 0.55 - fee > q 0.520 + 0.02", "NO bid 0.45 - fee > q + 0.02").
 const exitKind = (why: string) => /^take-profit/.test(why) ? 'take-profit' : /ratchet|stop/i.test(why) ? 'ratchet' : /cross|curve/i.test(why) ? 'cross' : /exit|fair|model|- fee > q/i.test(why) ? 'model exit' : 'other';
-const empty = (): SideSummary => ({ fills: 0, contracts: 0, fees: 0, pnl: 0, markets: 0, exits: {}, byHour: {}, byPurpose: {}, contractsByHour: {} });
+const empty = (): SideSummary => ({ fills: 0, contracts: 0, fees: 0, pnl: 0, markets: 0, exits: {}, byHour: {}, byPurpose: {}, contractsByHour: {}, bySeries: {} });
+const addSeries = (s: SideSummary, ticker: string, pnl: number) => { const x = (s.bySeries[ticker.split('-')[0]] ??= { markets: 0, pnl: 0 }); x.markets++; x.pnl += pnl; };
 export type PaperSide = SideSummary & {
   gateShare: number | null; lastFillAt: string | null;
   /** Fills of paper's own extra entries: training trades and exploration entries. */
@@ -113,7 +116,7 @@ export type PaperSide = SideSummary & {
 export interface AuditRecords {
   fills: Array<{ t: number; coid?: string; count: number; fee: number }>;
   orders: Map<string, { purpose?: string; why?: string }>;
-  settlements: Array<{ t: number; pnl: number }>;
+  settlements: Array<{ t: number; pnl: number; ticker?: string }>;
   /** The bot's starts, with the settings it logged (bot/main.ts: publicConfig). */
   startups: Array<{ t: number; config: Record<string, unknown> }>;
   diagnoses: Array<{ t: number; markets: number; gated: number; reasons: Record<string, number> }>;
@@ -204,7 +207,7 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
       }
       // settlement: realized P&L of the market (fees included).
       if (isTennis(String(d.ticker ?? ''))) continue;
-      a.settlements.push({ t, pnl: Number(d.realized) || 0 });
+      a.settlements.push({ t, pnl: Number(d.realized) || 0, ticker: typeof d.ticker === 'string' ? d.ticker : undefined });
     }
   }
   return a;
@@ -236,6 +239,7 @@ export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): 
     out.pnl += s.pnl; out.markets++;
     const h = hourOf(s.t);
     out.byHour[h] = (out.byHour[h] ?? 0) + s.pnl;
+    if (s.ticker) addSeries(out, s.ticker, s.pnl);
   }
   let markets = 0, gated = 0;
   for (const d of a.diagnoses) {
@@ -421,6 +425,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     replay.pnl += t.pnl; replay.markets++;
     const h = hourOf(t.closeTs);
     replay.byHour[h] = (replay.byHour[h] ?? 0) + t.pnl;
+    addSeries(replay, t.ticker, t.pnl);
   }
   replay.byPurpose = r.byPurpose ?? {};
   replay.contractsByHour = r.contractsByHour ?? {};
@@ -487,6 +492,8 @@ async function main(): Promise<void> {
     console.log(`${h.replace('T', ' ')}:00  ${(res.replay.contractsByHour[h] ?? 0).toFixed(0).padStart(16)}  ${(res.paper.contractsByHour[h] ?? 0).toFixed(0).padStart(15)}  ${f(res.replay.byHour[h] ?? 0).padStart(11)}  ${f(res.paper.byHour[h] ?? 0).padStart(10)}`);
   }
   console.log(`paper's last fill in the stretch: ${res.paper.lastFillAt ? hm(res.paper.lastFillAt) : 'none'}`);
+  const series = [...new Set([...Object.keys(res.replay.bySeries), ...Object.keys(res.paper.bySeries)])].sort((x, y) => (res.paper.bySeries[y]?.markets ?? 0) - (res.paper.bySeries[x]?.markets ?? 0));
+  console.log(`settled markets / P&L by series: ${series.map((k) => `${k} replay ${res.replay.bySeries[k]?.markets ?? 0} / ${f(res.replay.bySeries[k]?.pnl ?? 0)}, paper ${res.paper.bySeries[k]?.markets ?? 0} / ${f(res.paper.bySeries[k]?.pnl ?? 0)}`).join(' | ') || 'none'}`);
   const top = (r: Record<string, number>) => Object.entries(r).filter(([k]) => k !== 'quoting').sort((x, y) => y[1] - x[1]).slice(0, 4).map(([k, n]) => `${k} x${n}`).join('; ');
   for (const [h, r] of Object.entries(res.paper.quietHours).sort()) console.log(`paper filled nothing in ${h.replace('T', ' ')}:00; its entry diagnoses then, markets by reason: ${top(r)}`);
   if (res.paper.quiet.diagnoses) console.log(`after it, ${res.paper.quiet.diagnoses} entry diagnoses (the last ${hm(res.paper.quiet.lastAt!)}), markets by reason summed over them: ${top(res.paper.quiet.reasons)}`);

@@ -64,10 +64,11 @@ test('replay check: paper side read from the audit log (crypto only, exits by ki
   assert.deepEqual(p.byPurpose, { exit: { fills: 2, contracts: 5 }, other: { fills: 1, contracts: 6 } }, 'an order the log does not name is other');
   assert.deepEqual(p.contractsByHour, { '2026-10-22T10': 11 });
   assert.deepEqual(p.extra, { train: 0, explore: 0 });
+  assert.deepEqual(p.bySeries, { KXBTC15M: { markets: 1, pnl: -1.25 } });
 });
 
 test('replay check verdict: same sign and within 25% of paper', () => {
-  const side = (pnl: number, contracts: number, byHour: Record<string, number>) => ({ fills: 1, contracts, fees: 0, pnl, markets: 1, exits: {}, byHour, byPurpose: {}, contractsByHour: {} });
+  const side = (pnl: number, contracts: number, byHour: Record<string, number>) => ({ fills: 1, contracts, fees: 0, pnl, markets: 1, exits: {}, byHour, byPurpose: {}, contractsByHour: {}, bySeries: {} });
   assert.equal(verdict(side(-90, 1000, { a: -90 }), side(-100, 1000, { a: -100 })).close, true);
   assert.equal(verdict(side(50, 1000, { a: 50 }), side(-100, 1000, { a: -100 })).close, false);
   assert.equal(verdict(side(-60, 1000, { a: -60 }), side(-100, 1000, { a: -100 })).close, false);
