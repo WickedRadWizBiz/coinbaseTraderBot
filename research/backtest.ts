@@ -117,8 +117,12 @@ export interface BacktestResult {
   pnl: number;
   /** The smallest loss-aware size scale the run reached (bot/risk/equityGuard.ts; 1 = never below break-even). */
   sizeScaleMin?: number;
-  /** With the paper options: entries the accuracy gate held back, when the take-profit bench benched, its sales. */
-  paper?: { accuracyBlocks: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number };
+  /** With the paper options: entries the accuracy gate held back, when the take-profit bench benched, its sales (fills
+   *  and contracts). */
+  paper?: { accuracyBlocks: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number };
+  /** Fills and contracts by order purpose (quote, entry, exit), and contracts filled by UTC hour (YYYY-MM-DDTHH). */
+  byPurpose?: Record<string, { fills: number; contracts: number }>;
+  contractsByHour?: Record<string, number>;
 }
 
 /**
@@ -159,7 +163,10 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
    *  equity_guard.json, so the break-even it sizes against and its sizing tier are the bot's. */
   equityGuardFile?: string;
   /** No orders before this time (ms): until then the replay only watches (research/replayCheck.ts). */
-  tradeFromMs?: number }
+  tradeFromMs?: number;
+  /** Called at every market evaluation with the price the replay trades on (the replay check sets it beside the paper
+   *  bot's decision records). */
+  onEval?: (e: { ticker: string; now: number; pYes: number; fv: number; bid: number; ask: number; position: number }) => void }
 
 /** The engine's paper caps (bot/engine.ts): one order, this many closing together, this many in all. */
 export const PAPER_WINDOW_ORDERS = 3;
@@ -218,13 +225,17 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const closeOf = new Map<string, number>();
   const ratchets = new Map<string, LiquidityRatchet>();
   const hunts = new Map<string, ConfluenceRatchetExit>();
-  const pending = new Map<string, { side: 'bid' | 'ask'; price: number; count: number; kind: 'fv' | 'rt'; stop?: number }>();
+  const pending = new Map<string, { side: 'bid' | 'ask'; price: number; count: number; kind: 'fv' | 'tp' | 'rt'; stop?: number }>();
   const stopByOrder = new Map<string, number>();
   const exitLedger = new Map<string, Array<{ sideSign: number; n: number; proceeds: number }>>();
   let slipSum = 0, slipN = 0;
   const gate = opts.accuracyGate?.enabled ? new AccuracyGate(opts.accuracyGate, undefined, () => st.now) : undefined;
   const tpBench = opts.takeProfitBench ? new TakeProfitBench(opts.takeProfitBench.enforce, opts.takeProfitBench.rule, undefined, undefined, 0) : undefined;
-  res.paper = { accuracyBlocks: 0, takeProfitBenchedAt: undefined, takeProfitSales: 0 };
+  res.paper = { accuracyBlocks: 0, takeProfitBenchedAt: undefined, takeProfitSales: 0, takeProfitContracts: 0 };
+  res.byPurpose = {};
+  res.contractsByHour = {};
+  // An order's purpose from its client order id (<ticker>-<ms>-<side>-<purpose>[-tp]; a queued exit <ticker>-<ms>-exit-<kind>).
+  const purposeOf = (coid?: string) => (!coid ? 'other' : coid.includes('-exit-') ? 'exit' : /-(quote|entry|exit)(?:-tp)?$/.exec(coid)?.[1] ?? 'other');
 
   ex.on('fill', (f) => {
     pos.applyFill({ ticker: f.ticker, side: f.side, count: f.count, price: f.price, fee: f.fee ?? 0 }, { closeTs: closeOf.get(f.ticker) });
@@ -235,6 +246,10 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     b.fills = (b.fills ?? 0) + 1;
     res.windows.set(w, b);
     res.fills++; res.contracts += f.count; res.fees += f.fee ?? 0;
+    const bp = (res.byPurpose![purposeOf(f.clientOrderId)] ??= { fills: 0, contracts: 0 });
+    bp.fills++; bp.contracts += f.count;
+    const hour = new Date(st.now).toISOString().slice(0, 13);
+    res.contractsByHour![hour] = (res.contractsByHour![hour] ?? 0) + f.count;
     if (cancelInFlight.has(f.orderId)) { L.cancelRaceFills++; L.cancelRaceContracts += f.count; }
     if (f.clientOrderId?.endsWith('-tp')) {
       res.takeProfitFills++;
@@ -243,6 +258,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         const sign = f.side === 'ask' ? 1 : -1;
         tpBench.filled(f.ticker, sign, sign > 0 ? f.price : Math.round((1 - f.price) * 1e4) / 1e4, f.count, (f.fee ?? 0) / f.count, st.now);
         res.paper!.takeProfitSales++;
+        res.paper!.takeProfitContracts = (res.paper!.takeProfitContracts ?? 0) + f.count;
       }
     }
     if (f.clientOrderId?.includes('-exit-')) {
@@ -370,6 +386,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         tape?.push(st.now, tickerHash(m.ticker), fv.pYes, pred.p, pred.std, tape.keys.map((k) => fmap[k]));
       }
       const pYes = pred.p;
+      opts.onEval?.({ ticker: m.ticker, now: st.now, pYes, fv: fv.pYes, bid: bid.price, ask: ask.price, position: pos.position(m.ticker) });
       const pMarket = model.marketProbability(mid);
       const ret = idx!.trailingLogReturn(st.now, strategy.fastMoveWindowSec * 1000);
       const fastMove = ret !== undefined && Math.abs(ret) > strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(strategy.fastMoveWindowSec);
@@ -495,8 +512,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       for (const p of plan.place) {
         if (opts.tradeFromMs !== undefined && st.now < opts.tradeFromMs) break;
         if (p.purpose === 'exit') {
-          // Queue for next tick, like every other exit.
-          if (!pending.has(m.ticker)) pending.set(m.ticker, { side: p.side, price: p.price, count: p.count, kind: 'fv' });
+          // Queue for next tick, like every other exit (a take-profit keeps its name: its fills feed the bench).
+          if (!pending.has(m.ticker)) pending.set(m.ticker, { side: p.side, price: p.price, count: p.count, kind: p.why.startsWith('take-profit') ? 'tp' : 'fv' });
           continue;
         }
         // A taker entry against an existing position is an early exit in disguise
