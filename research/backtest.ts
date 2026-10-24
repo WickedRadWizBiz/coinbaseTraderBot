@@ -127,7 +127,10 @@ export interface BacktestResult {
   sizeScaleMin?: number;
   /** With the paper options: entries the accuracy gate held back, when the take-profit bench benched, its sales (fills
    *  and contracts). */
-  paper?: { accuracyBlocks: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number; takeProfitScored?: number; takeProfitNetUsd?: number; rejected?: Record<string, number>; trainTrades?: number; exploreEntries?: number; extraSent?: number; extraRejected?: Record<string, number> };
+  paper?: { accuracyBlocks: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number; takeProfitScored?: number; takeProfitNetUsd?: number;
+    /** Each market the take-profit bench scored (from tradeFromMs): what its sales made against holding, contracts sold, when. */
+    takeProfitByMarket?: Record<string, { usd: number; contracts: number; t: number }>;
+    rejected?: Record<string, number>; trainTrades?: number; exploreEntries?: number; extraSent?: number; extraRejected?: Record<string, number> };
   /** Fills and contracts by order purpose (quote, entry, exit), and contracts filled by UTC hour (YYYY-MM-DDTHH). */
   byPurpose?: Record<string, { fills: number; contracts: number }>;
   contractsByHour?: Record<string, number>;
@@ -341,9 +344,13 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   let slipSum = 0, slipN = 0;
   const gate = opts.accuracyGate?.enabled ? new AccuracyGate(opts.accuracyGate, opts.accuracyGateFile, () => st.now) : undefined;
   // The bench's markets scored from the first trading moment on (the replay check sets them beside paper's).
-  const tpScored = (e: { event: string; usd?: unknown }) => { if (e.event === 'scored' && st.now >= (opts.tradeFromMs ?? -Infinity)) { res.paper!.takeProfitScored!++; res.paper!.takeProfitNetUsd! += Number(e.usd) || 0; } };
+  const tpScored = (e: { event: string; ticker?: string; usd?: unknown; contracts?: unknown }) => {
+    if (e.event !== 'scored' || st.now < (opts.tradeFromMs ?? -Infinity)) return;
+    res.paper!.takeProfitScored!++; res.paper!.takeProfitNetUsd! += Number(e.usd) || 0;
+    if (e.ticker) res.paper!.takeProfitByMarket![e.ticker] = { usd: Number(e.usd) || 0, contracts: Number(e.contracts) || 0, t: st.now };
+  };
   const tpBench = opts.takeProfitBench ? new TakeProfitBench(opts.takeProfitBench.enforce, opts.takeProfitBench.rule, opts.takeProfitBench.stateFile, tpScored, 0) : undefined;
-  res.paper = { accuracyBlocks: 0, takeProfitBenchedAt: undefined, takeProfitSales: 0, takeProfitContracts: 0, takeProfitScored: 0, takeProfitNetUsd: 0, rejected: {}, trainTrades: 0, exploreEntries: 0, extraSent: 0, extraRejected: {} };
+  res.paper = { accuracyBlocks: 0, takeProfitBenchedAt: undefined, takeProfitSales: 0, takeProfitContracts: 0, takeProfitScored: 0, takeProfitNetUsd: 0, takeProfitByMarket: {}, rejected: {}, trainTrades: 0, exploreEntries: 0, extraSent: 0, extraRejected: {} };
   // The risk gateway's rejections from the first trading moment on, deduped as the engine logs them (one a market, side,
   // purpose and reason a minute), for the replay check.
   const rejectSeen = new Map<string, number>();

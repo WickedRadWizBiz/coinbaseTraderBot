@@ -55,8 +55,8 @@ test('replay check: paper side read from the audit log (crypto only, exits by ki
     L('fill', '2026-10-22T10:00:02.000Z', { fill: { ticker: 'KXATPMATCH-Y', count: 9, price: 0.5, side: 'bid' }, fee: 0.1 }),
     L('settlement', '2026-10-22T10:15:30.000Z', { ticker: 'KXBTC15M-X', result: 'no', realized: -1.25 }),
     L('settlement', '2026-10-22T11:15:30.000Z', { ticker: 'KXATPMATCH-Y', result: 'yes', realized: 4 }),
-    L('take_profit_bench', '2026-10-22T10:15:31.000Z', { event: 'scored', ticker: 'KXBTC15M-X', usd: 1.2, result: 'no' }),
-    L('take_profit_bench', '2026-10-22T10:30:31.000Z', { event: 'scored', ticker: 'KXBTC15M-W', usd: -3.5, result: 'yes' }),
+    L('take_profit_bench', '2026-10-22T10:15:31.000Z', { event: 'scored', ticker: 'KXBTC15M-X', usd: 1.2, result: 'no', sales: 1, contracts: 4 }),
+    L('take_profit_bench', '2026-10-22T10:30:31.000Z', { event: 'scored', ticker: 'KXBTC15M-W', usd: -3.5, result: 'yes', sales: 2, contracts: 9.5 }),
     L('take_profit_bench', '2026-10-22T10:30:31.000Z', { event: 'benched', reason: 'r' }),
     L('risk_reject', '2026-10-22T10:03:00.000Z', { intent: { ticker: 'KXBTC15M-X', purpose: 'quote' }, reasons: ['window risk 12.50 > 10.00 cap'] }),
     L('risk_reject', '2026-10-22T10:05:00.000Z', { intent: { ticker: 'KXBTC15M-W', purpose: 'quote' }, reasons: ['window risk 9.10 > 8.00 cap'] }),
@@ -75,7 +75,10 @@ test('replay check: paper side read from the audit log (crypto only, exits by ki
   assert.deepEqual(p.contractsByHour, { '2026-10-22T10': 11 });
   assert.deepEqual(p.extra, { train: 0, explore: 0 });
   assert.deepEqual(p.bySeries, { KXBTC15M: { markets: 1, pnl: -1.25 } });
-  assert.deepEqual(p.takeProfitBench, { scored: 2, netUsd: -2.3, benchedAt: '2026-10-22T10:30:31.000Z' });
+  assert.deepEqual(p.takeProfitBench, { scored: 2, netUsd: -2.3, benchedAt: '2026-10-22T10:30:31.000Z', byMarket: {
+    'KXBTC15M-X': { usd: 1.2, contracts: 4, t: Date.parse('2026-10-22T10:15:31.000Z') },
+    'KXBTC15M-W': { usd: -3.5, contracts: 9.5, t: Date.parse('2026-10-22T10:30:31.000Z') },
+  } });
   assert.deepEqual(p.rejected, { 'quote: window risk # > # cap': 2, 'order: exchange: insufficient balance': 1 }, 'crypto only, numbers folded');
 });
 
@@ -177,6 +180,7 @@ test('replay check: prices set beside the paper bot\'s decision records', async 
   assert.equal(s.sides, 1, 'one record 2c or more off the mid');
   assert.equal(s.sameSide, 1);
   assert.equal(s.samePosition, 1);
+  assert.deepEqual(s.held, { paper: 0.5, replay: 0.5, paperSize: 5, replaySize: 3 }, 'each held at one of the two records: paper 5 contracts, the replay 3');
   assert.equal(s.spotBp, null, 'records without the fair value\'s inputs');
   assert.equal(s.overlayPaper, 0.035, 'paper priced 5c and 2c off its model');
   assert.equal(s.overlayReplay, null, 'replay readings without the model\'s price');
@@ -290,6 +294,10 @@ test('replay check: the take-profit bench and the accuracy gate wound back to th
   const fresh = await run({});
   assert.ok((fresh.paper?.takeProfitSales ?? 0) > 0, 'an empty scoreboard lets the take-profit sell');
   assert.ok((fresh.paper?.takeProfitScored ?? 0) > 0, 'its markets are scored as they settle');
+  const byMarket = Object.values(fresh.paper?.takeProfitByMarket ?? {});
+  assert.equal(byMarket.length, fresh.paper?.takeProfitScored, 'each scored market kept, with what its sales made');
+  assert.ok(Math.abs(byMarket.reduce((a, x) => a + x.usd, 0) - (fresh.paper?.takeProfitNetUsd ?? 0)) < 1e-6);
+  assert.ok(Math.abs(byMarket.reduce((a, x) => a + x.contracts, 0) - (fresh.paper?.takeProfitContracts ?? 0)) < 1e-6, 'every contract sold is scored once its market settles');
   assert.equal(fresh.paper?.takeProfitBenchedAt, undefined);
   const seeded = await run({ stateFile });
   assert.equal(seeded.paper?.takeProfitBenchedAt, 0);
