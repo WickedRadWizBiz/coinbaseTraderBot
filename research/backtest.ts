@@ -123,6 +123,8 @@ export interface BacktestResult {
   /** Fills and contracts by order purpose (quote, entry, exit), and contracts filled by UTC hour (YYYY-MM-DDTHH). */
   byPurpose?: Record<string, { fills: number; contracts: number }>;
   contractsByHour?: Record<string, number>;
+  /** The maker buffer at the last evaluation (adaptive with the paper options). */
+  makerBufferEnd?: number;
 }
 
 /**
@@ -164,12 +166,19 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
   equityGuardFile?: string;
   /** No orders before this time (ms): until then the replay only watches (research/replayCheck.ts). */
   tradeFromMs?: number;
+  /** With the paper options the maker buffer adapts as the engine's does (Engine.makerBuffer, bot/tca/tca.ts): once 30
+   *  maker fills have a 60 s markout, it is minus their average (the newest 2000), within strategy.makerBufferRange.
+   *  These seed it: the paper bot's own recent maker markouts (the replay check reads them from its TCA log). */
+  makerMarkouts?: number[];
   /** Called at every market evaluation with the price the replay trades on (the replay check sets it beside the paper
    *  bot's decision records). */
   onEval?: (e: { ticker: string; now: number; pYes: number; fv: number; bid: number; ask: number; position: number }) => void }
 
 /** The engine's paper caps (bot/engine.ts): one order, this many closing together, this many in all. */
 export const PAPER_WINDOW_ORDERS = 3;
+/** The maker buffer's markouts (bot/tca/tca.ts): the newest 2000, and 30 before it adapts (bot/engine.ts makerBuffer). */
+const MARKOUT_KEEP = 2000;
+const MARKOUT_MIN = 30;
 export const PAPER_TOTAL_ORDERS = 10;
 
 /** The features read after the model call, kept on the tape: confluence for its exit, the take gate's inputs. */
@@ -227,6 +236,16 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const hunts = new Map<string, ConfluenceRatchetExit>();
   const pending = new Map<string, { side: 'bid' | 'ask'; price: number; count: number; kind: 'fv' | 'tp' | 'rt'; stop?: number }>();
   let exitSeq = 0;
+  // The adaptive maker buffer (see BacktestOpts.makerMarkouts): maker fills wait 60 s for their markout, signed so that
+  // positive is the market moving the fill's way.
+  const markouts = (opts.makerMarkouts ?? []).filter((x) => Number.isFinite(x)).slice(-MARKOUT_KEEP);
+  const markoutDue: Array<{ due: number; ticker: string; sign: 1 | -1; price: number }> = [];
+  const makerBuffer = (): number => {
+    if (!opts.paper || markouts.length < MARKOUT_MIN) return strategy.makerBuffer;
+    const avg = markouts.reduce((a, x) => a + x, 0) / markouts.length;
+    return Math.min(strategy.makerBufferRange[1], Math.max(strategy.makerBufferRange[0], -avg));
+  };
+  res.makerBufferEnd = undefined;
   const stopByOrder = new Map<string, number>();
   const exitLedger = new Map<string, Array<{ sideSign: number; n: number; proceeds: number }>>();
   let slipSum = 0, slipN = 0;
@@ -247,6 +266,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     b.fills = (b.fills ?? 0) + 1;
     res.windows.set(w, b);
     res.fills++; res.contracts += f.count; res.fees += f.fee ?? 0;
+    if (opts.paper && !f.isTaker) markoutDue.push({ due: st.now + 60_000, ticker: f.ticker, sign: f.side === 'bid' ? 1 : -1, price: f.price });
     const bp = (res.byPurpose![purposeOf(f.clientOrderId)] ??= { fills: 0, contracts: 0 });
     bp.fills++; bp.contracts += f.count;
     const hour = new Date(st.now).toISOString().slice(0, 13);
@@ -303,6 +323,13 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     if (e.tie) continue; // the rest of this instant first
     if (st.now - lastTick < 1000) continue;
     lastTick = st.now;
+    while (markoutDue.length && markoutDue[0].due <= st.now) {
+      const x = markoutDue.shift()!;
+      const mid = st.books.get(x.ticker)?.mid();
+      if (mid === undefined) continue;
+      markouts.push(x.sign * (mid - x.price));
+      if (markouts.length > MARKOUT_KEEP) markouts.shift();
+    }
 
     for (const m of [...st.markets.values()]) {
       // Recorded for research, or synthesized from price history (quoted at the model's own fair value): never traded.
@@ -515,7 +542,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         newRiskRoomUsd,
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,
         restingBid: rb, restingAsk: ra, nowSec: Math.floor(st.now / 1000), closeSec: Math.floor(m.closeTime / 1000),
-        pMarket, pStd: pred.std, makerBuffer: strategy.makerBuffer, entrySidePrice: entrySide !== undefined && entrySide > 0 && entrySide < 1 ? entrySide : undefined,
+        pMarket, pStd: pred.std, makerBuffer: (res.makerBufferEnd = makerBuffer()), entrySidePrice: entrySide !== undefined && entrySide > 0 && entrySide < 1 ? entrySide : undefined,
         entryFeePerContract: pNow && Math.abs(pNow.yes) > 1e-9 ? pNow.fees / Math.abs(pNow.yes) : undefined,
         profitPeakSidePrice: peaks.update(m.ticker, posC, posC > 0 ? bid.price : posC < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
         entryWindowOpen, exitWindowOpen: tauSec > strategy.noExitBeforeCloseSec,

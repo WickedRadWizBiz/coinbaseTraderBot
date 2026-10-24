@@ -162,6 +162,21 @@ test('replay check: prices set beside the paper bot\'s decision records', async 
   assert.equal(s.samePosition, 1);
 });
 
+test('backtest paper options: the maker buffer adapts from the maker markouts as the engine\'s does', async () => {
+  const dir = path.join(tmp(), 'rec');
+  writeSyntheticRecordings(dir, { windows: 4, seed: 12, marketNoise: 0.06 });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both', STRATEGY_MAKER_BUFFER: '0.02', STRATEGY_MAKER_BUFFER_RANGE: '0.015,0.03' });
+  const paper = { orderFrac: 0.1, orderUsd: 0 };
+  // Picked off by 5c a fill on average: the widest buffer the range allows.
+  const pickedOff = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy: 'take_profit', paper, makerMarkouts: Array(2000).fill(-0.05) });
+  assert.equal(pickedOff.makerBufferEnd, 0.03);
+  // Fewer than 30 markouts: the setting.
+  const few = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy: 'take_profit', makerMarkouts: Array(2000).fill(-0.05) });
+  assert.equal(few.makerBufferEnd, 0.02, 'without the paper options the setting stays');
+  const fresh = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy: 'take_profit', paper, makerMarkouts: [0.01] });
+  assert.ok(fresh.makerBufferEnd !== undefined && fresh.makerBufferEnd >= 0.015 - 1e-12 && fresh.makerBufferEnd <= 0.03 + 1e-12);
+});
+
 test('backtest: the weekly loss pause stops entries only with the override off; before tradeFromMs the replay only watches', async () => {
   const root = tmp();
   const dir = path.join(root, 'rec');

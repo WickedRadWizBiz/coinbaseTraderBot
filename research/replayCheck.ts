@@ -18,11 +18,13 @@
 // paper's entry diagnoses gave once it stopped filling, and the price each side traded on, set side by side at the
 // paper bot's own decision records (the replay's evaluation of the same market within a second): the math fair value
 // (the index, its volatility and the strike), the book's mid, the price after the model and paper's overlays (the TA
-// tilt, the component trials), and the side of the market each would trade.
+// tilt, the component trials), and the side of the market each would trade. The replay's maker buffer adapts as the
+// engine's does, from the paper bot's own recent maker markouts (--maker-markouts, from its TCA log) on.
 //
 //   npm run research:replay-check -- --recordings data/recordings --audit data/audit --days 2026-10-23,2026-10-24 \
 //       [--from auto|ISO] [--to ISO] [--min-hours 3] [--warmup-hours 8] [--model data/models/model.json] \
-//       [--paper-balance-now 512.30 | --bankroll 150] [--paper-guard equity_guard.json] [--kill-override true|false]
+//       [--paper-balance-now 512.30 | --bankroll 150] [--paper-guard equity_guard.json] [--kill-override true|false] \
+//       [--maker-markouts markouts.json]
 //       [--out data/sweeps/replay-check.json]
 //   ... --plan   prints only the recorded days the stretch and its warm-up need (from the audit log)
 //
@@ -69,7 +71,9 @@ export interface ReplayCheck {
    *  days to compare with); model swaps in the stretch. */
   settingsDiffer: string[] | null; modelSwaps: string[];
   /** Exits and the gate's counts are the whole replay's, warm-up included. */
-  replay: SideSummary & { accuracyBlocks: number; entryEvaluations: number; takeProfitBenchedAt: string | null; sizeScaleMin: number };
+  replay: SideSummary & { accuracyBlocks: number; entryEvaluations: number; takeProfitBenchedAt: string | null; sizeScaleMin: number; makerBufferEnd: number | null };
+  /** The paper bot's maker buffer now, from the maker markouts it was seeded with (null: fewer than 30, the setting). */
+  makerBufferPaper: number | null;
   /** gateShare: of the markets in paper's entry diagnoses (one every 5 minutes), the share the accuracy gate kept out.
    *  quiet: the diagnoses after paper's last fill in the stretch (how many, the last one, and their reasons summed). */
   paper: PaperSide;
@@ -327,6 +331,8 @@ export interface ReplayCheckOpts {
   bankroll?: number; paperBalanceNow?: number;
   /** The paper bot's equity_guard.json (read from a copy) and its kill-switch override (default on, as bot/control.ts). */
   paperGuard?: string; killOverride?: boolean;
+  /** The paper bot's recent maker fills' 60 s markouts (its TCA log), which seed the replay's adaptive maker buffer. */
+  makerMarkouts?: number[];
 }
 
 export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
@@ -363,14 +369,17 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
     sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd }, accuracyGate: S.accuracyGate,
     takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench }, startMs: from - (o.warmupHours ?? 8) * HOUR, tradeFromMs: from,
-    dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, onEval: match.onEval,
+    dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, onEval: match.onEval, makerMarkouts: o.makerMarkouts,
   });
   fs.rmSync(dir, { recursive: true, force: true });
   if (guardFile) fs.rmSync(path.dirname(guardFile), { recursive: true, force: true });
   const replay = {
     ...empty(), accuracyBlocks: r.paper?.accuracyBlocks ?? 0, entryEvaluations: r.entryEvaluations,
     takeProfitBenchedAt: r.paper?.takeProfitBenchedAt ? new Date(r.paper.takeProfitBenchedAt).toISOString() : null, sizeScaleMin: r.sizeScaleMin ?? 1,
+    makerBufferEnd: r.makerBufferEnd ?? null,
   };
+  const mk = (o.makerMarkouts ?? []).slice(-2000);
+  const makerBufferPaper = mk.length >= 30 ? Math.min(S.makerBufferRange[1], Math.max(S.makerBufferRange[0], -mk.reduce((a, x) => a + x, 0) / mk.length)) : null;
   const inside = (t: number) => t >= from && t < to;
   for (const [w, b] of r.windows) if (inside(w)) { replay.fills += b.fills ?? 0; replay.contracts += b.contracts; replay.fees += b.fees; }
   for (const t of r.trades) {
@@ -394,7 +403,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     startups: audit.startups.map((s) => new Date(s.t).toISOString()),
     settingsDiffer: startedAt ? settingsDiffer(JSON.parse(JSON.stringify(publicConfig(cfg as Config))), startedAt.config) : null,
     modelSwaps: audit.modelSwaps.filter(inside).map((t) => new Date(t).toISOString()),
-    replay, paper, prices: match.summary(), ...v, checked, close: checked && v.close,
+    replay, paper, prices: match.summary(), makerBufferPaper, ...v, checked, close: checked && v.close,
     why: checked ? v.why : [`the stretch on one start of the paper bot is ${hours.toFixed(1)} h (from ${new Date(from).toISOString()}), the check needs ${minHours} h`],
   };
 }
@@ -423,6 +432,7 @@ async function main(): Promise<void> {
     recordings: arg('recordings', 'data/recordings'), audit: arg('audit', 'data/audit'), days, model: arg('model', 'params/model.json'),
     from: time('from'), to: time('to'), minHours: opt('min-hours'), warmupHours: opt('warmup-hours'), bankroll: opt('bankroll'), paperBalanceNow: opt('paper-balance-now'),
     paperGuard: arg('paper-guard', '') || undefined, killOverride: arg('kill-override', 'true') !== 'false',
+    makerMarkouts: arg('maker-markouts', '') && fs.existsSync(arg('maker-markouts', '')) ? (JSON.parse(fs.readFileSync(arg('maker-markouts', ''), 'utf8')) as unknown[]).map(Number).filter(Number.isFinite) : undefined,
   });
   const out = arg('out', '');
   if (out) { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify(res, null, 2)); }
@@ -449,6 +459,8 @@ async function main(): Promise<void> {
   const c = (x: number | null) => (x === null ? 'n/a' : `${(x * 100).toFixed(1)}c`);
   console.log(`prices at paper's decision records: ${P.matched} of ${P.records} matched within 1 s | mean gap replay vs paper: fair value ${c(P.fv)}, mid ${c(P.mid)}, price traded on ${c(P.price)} | shift from fair value: paper ${c(P.shiftPaper)}, replay ${c(P.shiftReplay)} | same side of the mid ${pct(P.sameSide)} of ${P.sides} | same position ${pct(P.samePosition)}`);
   console.log(`accuracy gate: replay held back ${pct(res.replay.entryEvaluations ? res.replay.accuracyBlocks / res.replay.entryEvaluations : null)} of its entry evaluations; paper's diagnoses show it keeping out ${pct(res.paper.gateShare)} of the markets | take-profit benched ${res.replay.takeProfitBenchedAt ?? 'never'} | replay's loss-aware size went down to x${res.replay.sizeScaleMin.toFixed(2)}`);
+  const b = (x: number | null) => (x === null ? 'the setting' : `${(x * 100).toFixed(2)}c`);
+  console.log(`maker buffer: paper's now ${b(res.makerBufferPaper)}, the replay's at its end ${b(res.replay.makerBufferEnd)}`);
   console.log(`settings that differ from the paper bot's at that start: ${res.settingsDiffer === null ? 'no start logged in these days' : res.settingsDiffer.length ? res.settingsDiffer.join(', ') : 'none'} | model swaps in the stretch: ${res.modelSwaps.length ? res.modelSwaps.map(hm).join(', ') : 'none'}`);
   console.log(`hourly P&L correlation ${res.hourCorr === null ? 'n/a' : res.hourCorr.toFixed(2)} | total gap ${pct(res.pnlGap)}`);
   console.log(!res.checked ? `VERDICT not checked yet: ${res.why.join('; ')}` : res.close ? 'VERDICT close: sweep results can count' : `VERDICT not close: ${res.why.join('; ')}`);
