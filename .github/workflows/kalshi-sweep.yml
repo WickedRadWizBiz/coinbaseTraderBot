@@ -1,17 +1,23 @@
 # Kalshi random sweep (the plan the owner approved on Oct 24): a daily search for better Kalshi settings, run on
 # GitHub's runners, never on the Lightsail box, and never applied by itself.
 #
-#   1. data     Kalshi's settled 15-minute contracts (public API) over the coins' 1-minute Binance history, built into
-#               recording files (research/kalshiReplayData.ts); cached, so each run only adds the new days
-#   2. server   read-only copy of the bot's recent recordings, its audit log for the replay check's days, its model and
-#               its settings without any credential line; then the replay check (research/replayCheck.ts): does the
-#               backtester trade like paper did on those days?
-#   3. sweep    random settings (research/randomSweep.ts) over the replayed and recorded days, on SHARDS runners at once
-#   4. report   settings near the 20 best tried too, then the verdict on the days the choice never saw; the proposal
-#               (data/sweeps/random-kalshi.json) is copied to the server, where the learning report can show it
+#   1. data       Kalshi's settled 15-minute contracts (public API) over the coins' 1-minute Binance history, built into
+#                 recording files (research/kalshiReplayData.ts); cached, so each run only adds the new days
+#   2. server     read-only copy of what the replay check needs (the bot's recordings and audit log of two recent days),
+#                 its model and its settings without any credential line; then the replay check (research/replayCheck.ts):
+#                 does the backtester trade like paper did on those days?
+#   3. search     stage 1 of research/randomSweep.ts: today's settings, the evidence trials and random draws, each on the
+#                 same sample of the older replayed days; one shard per runner
+#   4. refine     stage 2: settings near the 20 best of stage 1, on the same sample
+#   5. finalists  stage 3: the 20 best and today's settings on every replayed day, the newest 30% included
+#   6. report     stage 4 (the best and today's settings on the bot's own last three recorded days, copied from the
+#                 server), then the verdict; the proposal (data/sweeps/random-kalshi.json) is copied to the server, where
+#                 the learning report can show it
 #
 # This repository is public: the jobs print step names, counts, scores in $ and the settings tried; the server's
 # settings file, keys and logs never leave it, and nothing here can place an order or change the running bot.
+# The jobs' own variables are RS_* so they never collide with a bot.env setting (the sweep reads its settings from the
+# environment: a TRIALS variable here would be the bot's TRIALS switch).
 #
 # Required secrets (the same as Deploy): LIGHTSAIL_HOST, LIGHTSAIL_USERNAME, LIGHTSAIL_SSH_KEY (optional LIGHTSAIL_PORT).
 name: Kalshi random sweep
@@ -45,9 +51,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TRIALS: ${{ inputs.trials || '600' }}
-  DAYS: ${{ inputs.days || '120' }}
-  SHARDS: '6'
+  RS_TRIALS: ${{ inputs.trials || '600' }}
+  RS_DAYS: ${{ inputs.days || '120' }}
+  RS_SAMPLE: '40'
   SWEEP_BANKROLL_USD: '150'
   TRAIN_WORKERS: '4'
 
@@ -81,7 +87,7 @@ jobs:
           restore-keys: kalshi-replay-
       - name: Download what is new and build the replay
         run: |
-          node --import tsx research/kalshiReplayData.ts --history data/history --out data/history-replay --days "$DAYS" --budget-min 100 2>&1 \
+          node --import tsx research/kalshiReplayData.ts --history data/history --out data/history-replay --days "$RS_DAYS" --budget-min 100 2>&1 \
             | grep -vE '^\[kalshi-replay-data\] (binance|kalshi|replay): .*(skipp|already|listing|page)' | tail -40
           du -sh data/history data/history-replay | cat
       - name: Save the Kalshi history and its replay
@@ -124,40 +130,46 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
           printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
           ssh bot true && echo "connected"
-      - name: Copy recordings, audit, model and settings (read-only)
+      - name: Copy the check days, model and settings (read-only)
+        env:
+          CHECK_DAYS: ${{ inputs.check_days || '' }}
         run: |
           set -euo pipefail
-          DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/audit" "$DATA/models" "$DATA/sweep-env"
+          DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/audit" "$DATA/models" "$DATA/sweep-env" "$DATA/sweeps"
           vanished_ok() { local c=$?; [ $c -eq 24 ] && return 0; return $c; }
-          # Recorded days (md-YYYY-MM-DD), the last 21, compressed in transit at level 1 (cheap on the server's CPU).
-          ssh bot "cd ~/bot/data/recordings && find . -maxdepth 1 -type f -name 'md-*' -mtime -21 -printf '%P\n'" > "$RUNNER_TEMP/rec.txt"
+          D=$(echo "${CHECK_DAYS:-$(date -u -d '2 days ago' +%F),$(date -u -d 'yesterday' +%F)}" | tr -d ' ')
+          [[ "$D" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}(,[0-9]{4}-[0-9]{2}-[0-9]{2})*$ ]] || { echo "check_days must be YYYY-MM-DD[,YYYY-MM-DD...]"; exit 1; }
+          echo "$D" > "$DATA/sweeps/check-days.txt"
+          # Those days' recordings (md-YYYY-MM-DD.jsonl[.gz]) and audit log, compressed in transit at level 1 (cheap on
+          # the server's CPU); the day being recorded is never copied.
+          PAT=$(echo "$D" | tr ',' '\n' | sed -E "s/^(.+)$/-name 'md-\1.jsonl*' -o/" | tr '\n' ' ' | sed -E 's/ -o $//')
+          ssh bot "cd ~/bot/data/recordings && find . -maxdepth 1 -type f \( $PAT \) -printf '%P\n'" > "$RUNNER_TEMP/rec.txt"
           rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/rec.txt" bot:bot/data/recordings/ "$DATA/recordings/" || vanished_ok
-          ssh bot "cd ~/bot/data/audit && find . -maxdepth 1 -type f -name 'audit-*' -mtime -4 -printf '%P\n'" > "$RUNNER_TEMP/audit.txt"
+          PAT=$(echo "$D" | tr ',' '\n' | sed -E "s/^(.+)$/-name 'audit-\1*' -o/" | tr '\n' ' ' | sed -E 's/ -o $//')
+          ssh bot "cd ~/bot/data/audit && find . -maxdepth 1 -type f \( $PAT \) -printf '%P\n'" > "$RUNNER_TEMP/audit.txt"
           rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/audit.txt" bot:bot/data/audit/ "$DATA/audit/" || vanished_ok
           rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/models/model.json "$DATA/models/" || echo "no trained model on the server: the sweep uses the identity model"
           # The server's settings without any credential line and without server paths (the same filter as Remote training).
           ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$DATA/sweep-env/train.env" || true
-          echo "recordings: $(wc -l < "$RUNNER_TEMP/rec.txt") day file(s), audit: $(wc -l < "$RUNNER_TEMP/audit.txt") file(s), settings: $(wc -l < "$DATA/sweep-env/train.env") line(s)"
-          ls "$DATA/recordings" | sed -nE 's/^md-([0-9-]{10}).*/\1/p' | sort -u | tr '\n' ' '; echo
+          echo "check days $D: recordings $(wc -l < "$RUNNER_TEMP/rec.txt") file(s), audit $(wc -l < "$RUNNER_TEMP/audit.txt") file(s), settings $(wc -l < "$DATA/sweep-env/train.env") line(s)"
+          du -sh "$DATA/recordings" | cat
       - name: Replay check (backtester vs paper)
-        env:
-          CHECK_DAYS: ${{ inputs.check_days || '' }}
         run: |
           set -a; . data/sweep-env/train.env; set +a
           export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper
-          D="${CHECK_DAYS:-$(date -u -d '2 days ago' +%F),$(date -u -d 'yesterday' +%F)}"
-          node --import tsx research/replayCheck.ts --recordings data/recordings --audit data/audit --days "$D" --model data/models/model.json --bankroll "$SWEEP_BANKROLL_USD" --out data/sweeps/replay-check.json || echo "replay check failed"
-      - name: Save the server data for the sweep
+          node --import tsx research/replayCheck.ts --recordings data/recordings --audit data/audit --days "$(cat data/sweeps/check-days.txt)" \
+            --model data/models/model.json --bankroll "$SWEEP_BANKROLL_USD" --out data/sweeps/replay-check.json || echo "replay check failed"
+      - name: Save the model, settings and replay check for the sweep
         uses: actions/cache/save@v4
         with:
           path: |
-            data/recordings
             data/models
             data/sweep-env
+            data/sweeps/check-days.txt
             data/sweeps/replay-check.json
           key: kalshi-server-${{ github.run_id }}
 
-  sweep:
+  search:
     needs: [data, server]
     runs-on: ubuntu-latest
     timeout-minutes: 330
@@ -191,20 +203,19 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: |
-            data/recordings
             data/models
             data/sweep-env
+            data/sweeps/check-days.txt
             data/sweeps/replay-check.json
           key: kalshi-server-${{ github.run_id }}
           fail-on-cache-miss: true
-      - name: Days to replay
-        run: node --import tsx research/randomSweep.ts days --replay data/history-replay --recordings data/recordings --out data/sweep-days --days "$DAYS"
-      - name: Stage 1 (random settings), shard ${{ matrix.shard }}
+      - name: Stage 1 (random settings), shard ${{ strategy.job-index }} of ${{ strategy.job-total }}
         run: |
+          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$RS_DAYS"
           set -a; . data/sweep-env/train.env; set +a
           export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper
-          node --import tsx research/randomSweep.ts run --stage 1 --trials "$TRIALS" --shard "${{ matrix.shard }}/$SHARDS" --hours 5 \
-            --recordings data/sweep-days --model data/models/model.json --ledger data/sweeps/s1-${{ matrix.shard }}.jsonl
+          node --import tsx research/randomSweep.ts run --stage 1 --trials "$RS_TRIALS" --sample "$RS_SAMPLE" --shard "${{ strategy.job-index }}/${{ strategy.job-total }}" \
+            --hours 4.5 --recordings data/sweep-days --model data/models/model.json --tape-dir data/tapes --ledger data/sweeps/s1-${{ matrix.shard }}.jsonl
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -212,12 +223,15 @@ jobs:
           path: data/sweeps/s1-${{ matrix.shard }}.jsonl
           retention-days: 30
 
-  report:
-    needs: [sweep]
-    if: always() && needs.sweep.result != 'skipped'
+  refine:
+    needs: [search]
+    if: ${{ !cancelled() && needs.search.result != 'skipped' }}
     runs-on: ubuntu-latest
-    environment: production
-    timeout-minutes: 330
+    timeout-minutes: 200
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -244,9 +258,9 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: |
-            data/recordings
             data/models
             data/sweep-env
+            data/sweeps/check-days.txt
             data/sweeps/replay-check.json
           key: kalshi-server-${{ github.run_id }}
           fail-on-cache-miss: true
@@ -255,26 +269,126 @@ jobs:
           pattern: ledger-s1-*
           path: data/sweeps
           merge-multiple: true
-      - name: Stage 2 (near the 20 best) and the verdict
+      - name: Stage 2 (near the 20 best), shard ${{ strategy.job-index }} of ${{ strategy.job-total }}
         run: |
-          node --import tsx research/randomSweep.ts days --replay data/history-replay --recordings data/recordings --out data/sweep-days --days "$DAYS"
+          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$RS_DAYS"
           set -a; . data/sweep-env/train.env; set +a
           export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper
-          S1=$(ls data/sweeps/s1-*.jsonl | paste -sd, -)
-          node --import tsx research/randomSweep.ts run --stage 2 --from "$S1" --per-best 10 --hours 4 \
-            --recordings data/sweep-days --model data/models/model.json --ledger data/sweeps/s2.jsonl
-          node --import tsx research/randomSweep.ts report --from "$S1,data/sweeps/s2.jsonl" --recordings data/sweep-days --out data/sweeps/random-kalshi.json
-          [ -f data/sweeps/replay-check.json ] && python3 -c "import json; r=json.load(open('data/sweeps/replay-check.json')); print('replay check', ','.join(r['days']), 'close' if r['close'] else 'NOT close: ' + '; '.join(r['why']))" || echo "no replay check this run"
+          node --import tsx research/randomSweep.ts run --stage 2 --from "$(ls data/sweeps/s1-*.jsonl | paste -sd, -)" --per-best 10 --sample "$RS_SAMPLE" \
+            --shard "${{ strategy.job-index }}/${{ strategy.job-total }}" --hours 2.5 --recordings data/sweep-days --model data/models/model.json \
+            --tape-dir data/tapes --ledger data/sweeps/s2-${{ matrix.shard }}.jsonl
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: random-kalshi
-          path: |
-            data/sweeps/random-kalshi.json
-            data/sweeps/replay-check.json
-            data/sweeps/s2.jsonl
+          name: ledger-s2-${{ matrix.shard }}
+          path: data/sweeps/s2-${{ matrix.shard }}.jsonl
           retention-days: 30
-      - name: Copy the proposal to the server
+
+  finalists:
+    needs: [refine]
+    if: ${{ !cancelled() && needs.refine.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: kalshi-replay-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+            data/sweeps/check-days.txt
+            data/sweeps/replay-check.json
+          key: kalshi-server-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ledger-s[12]-*
+          path: data/sweeps
+          merge-multiple: true
+      - name: Stage 3 (the finalists on every day), shard ${{ strategy.job-index }} of ${{ strategy.job-total }}
+        run: |
+          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$RS_DAYS"
+          set -a; . data/sweep-env/train.env; set +a
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper
+          node --import tsx research/randomSweep.ts run --stage 3 --from "$(ls data/sweeps/s[12]-*.jsonl | paste -sd, -)" --sample "$RS_SAMPLE" \
+            --shard "${{ strategy.job-index }}/${{ strategy.job-total }}" --hours 4.5 --recordings data/sweep-days --model data/models/model.json \
+            --tape-dir data/tapes --ledger data/sweeps/s3-${{ matrix.shard }}.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ledger-s3-${{ matrix.shard }}
+          path: data/sweeps/s3-${{ matrix.shard }}.jsonl
+          retention-days: 30
+
+  report:
+    needs: [finalists]
+    if: ${{ !cancelled() && needs.finalists.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 200
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: kalshi-replay-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+            data/sweeps/check-days.txt
+            data/sweeps/replay-check.json
+          key: kalshi-server-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ledger-s*
+          path: data/sweeps
+          merge-multiple: true
+      - name: SSH to the server
         env:
           SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           HOST: ${{ secrets.LIGHTSAIL_HOST }}
@@ -283,7 +397,38 @@ jobs:
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
-          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Copy the last three recorded days (read-only)
+        run: |
+          set -euo pipefail
+          mkdir -p data/recordings
+          vanished_ok() { local c=$?; [ $c -eq 24 ] && return 0; return $c; }
+          PAT=$(for i in 3 2 1; do printf -- "-name 'md-%s.jsonl*' -o " "$(date -u -d "$i days ago" +%F)"; done | sed -E 's/ -o $//')
+          ssh bot "cd ~/bot/data/recordings && find . -maxdepth 1 -type f \( $PAT \) -printf '%P\n'" > "$RUNNER_TEMP/rec.txt"
+          rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/rec.txt" bot:bot/data/recordings/ data/recordings/ || vanished_ok
+          echo "recorded days: $(ls data/recordings | sed -nE 's/^md-([0-9-]{10}).*/\1/p' | sort -u | paste -sd' ' -)"
+      - name: Stage 4 (the bot's recorded days) and the verdict
+        run: |
+          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$RS_DAYS"
+          set -a; . data/sweep-env/train.env; set +a
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper
+          S123=$(ls data/sweeps/s[123]-*.jsonl | paste -sd, -)
+          node --import tsx research/randomSweep.ts run --stage 4 --from "$S123" --sample "$RS_SAMPLE" --recorded data/recordings --hours 2 \
+            --recordings data/sweep-days --model data/models/model.json --ledger data/sweeps/s4.jsonl || echo "stage 4 failed"
+          node --import tsx research/randomSweep.ts report --from "$S123,data/sweeps/s4.jsonl" --sample "$RS_SAMPLE" --recordings data/sweep-days --out data/sweeps/random-kalshi.json
+          [ -f data/sweeps/replay-check.json ] && python3 -c "import json; r=json.load(open('data/sweeps/replay-check.json')); print('replay check', ','.join(r['days']), 'close' if r['close'] else 'NOT close: ' + '; '.join(r['why']))" || echo "no replay check this run"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: random-kalshi
+          path: |
+            data/sweeps/random-kalshi.json
+            data/sweeps/replay-check.json
+            data/sweeps/s4.jsonl
+          retention-days: 30
+      - name: Copy the proposal to the server
+        run: |
           ssh bot "mkdir -p ~/bot/data/models/sweeps"
           rsync -a data/sweeps/random-kalshi.json data/sweeps/replay-check.json bot:bot/data/models/sweeps/ 2>/dev/null || rsync -a data/sweeps/random-kalshi.json bot:bot/data/models/sweeps/
           echo "proposal copied to the server (data/models/sweeps/random-kalshi.json); nothing applied"
