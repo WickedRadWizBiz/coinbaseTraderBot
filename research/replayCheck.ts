@@ -36,6 +36,10 @@ import path from 'path';
 import readline from 'readline';
 import zlib from 'zlib';
 import type { Config } from '../bot/config';
+import type { MacroEvent } from '../bot/model/featureEngine';
+import type { VolModel } from '../bot/model/volModel';
+import type { VolProfile } from '../bot/model/volSeasonality';
+import type { FillModel } from '../bot/tca/fillModel';
 
 export interface SideSummary {
   fills: number; contracts: number; fees: number; pnl: number; markets: number;
@@ -74,6 +78,8 @@ export interface ReplayCheck {
   replay: SideSummary & { accuracyBlocks: number; entryEvaluations: number; takeProfitBenchedAt: string | null; sizeScaleMin: number; makerBufferEnd: number | null };
   /** The paper bot's maker buffer now, from the maker markouts it was seeded with (null: fewer than 30, the setting). */
   makerBufferPaper: number | null;
+  /** The engine's other models the replay priced with (engineModels). */
+  models: string[];
   /** gateShare: of the markets in paper's entry diagnoses (one every 5 minutes), the share the accuracy gate kept out.
    *  quiet: the diagnoses after paper's last fill in the stretch (how many, the last one, and their reasons summed). */
   paper: PaperSide;
@@ -322,6 +328,28 @@ export function verdict(replay: SideSummary, paper: SideSummary, tol = 0.25): { 
   return { close: why.length === 0, pnlGap, hourCorr, why };
 }
 
+/** The models the engine prices with besides the meta-model, loaded as bot/main.ts loads them: the intraday volatility
+ *  profile (VOL_SEASONALITY, only when its own validation improved), the tree volatility forecast (VOL_MODEL) and the
+ *  fill model (each applied only when validated), and the macro calendar; from the bot's model directory
+ *  (AUTO_TRAIN_DIR, a copy of the server's) when there, else the shipped params/ files (bot/autotrain.ts
+ *  resolveModelPaths). `used` names the ones in use. */
+export async function engineModels(cfg: Config): Promise<{ volProfile?: VolProfile; volModel?: VolModel; fillModel?: FillModel; calendar?: MacroEvent[]; used: string[] }> {
+  const { resolveModelPaths } = await import('../bot/autotrain');
+  const { loadVolProfile } = await import('../bot/model/volSeasonality');
+  const { VolModel } = await import('../bot/model/volModel');
+  const { FillModel } = await import('../bot/tca/fillModel');
+  const { loadCalendar } = await import('../bot/model/calendar');
+  const paths = resolveModelPaths(cfg);
+  const vp = fs.existsSync(paths.vol) ? loadVolProfile(paths.vol) : undefined;
+  const volProfile = vp && cfg.strategy.volSeasonality && vp.validation?.improved ? vp : undefined;
+  let volModel: VolModel | undefined, fillModel: FillModel | undefined;
+  try { volModel = cfg.strategy.volModel && fs.existsSync(paths.vol_model) ? VolModel.load(paths.vol_model) : undefined; } catch { volModel = undefined; }
+  try { fillModel = fs.existsSync(paths.fill) ? FillModel.load(paths.fill) : undefined; } catch { fillModel = undefined; }
+  const calendar = loadCalendar(path.resolve(process.env.MACRO_CALENDAR_PATH ?? './params/calendar.json'));
+  const used = [volProfile ? 'vol profile' : '', volModel?.validated ? 'vol model' : '', fillModel?.validated ? 'fill model' : '', calendar?.length ? 'macro calendar' : ''].filter(Boolean);
+  return { volProfile, volModel, fillModel, calendar, used };
+}
+
 export interface ReplayCheckOpts {
   recordings: string; audit: string; days: string[]; model: string;
   /** Start of the stretch (ms), or undefined for the bot's last start; end of it (ms), default the end of the days. */
@@ -342,6 +370,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const { recordingFiles, linkDays } = await import('../bot/marketdata/recordingFiles');
   const { runBacktest } = await import('./backtest');
   const cfg = loadConfig(paperEnv(process.env));
+  const models = await engineModels(cfg as Config);
   const model = fs.existsSync(o.model) ? MetaModel.load(o.model) : MetaModel.identity();
   const days = [...o.days].sort();
   const audit = await readAudit(o.audit, days, { from: o.from, to: o.to });
@@ -370,6 +399,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd }, accuracyGate: S.accuracyGate,
     takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench }, startMs: from - (o.warmupHours ?? 8) * HOUR, tradeFromMs: from,
     dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, onEval: match.onEval, makerMarkouts: o.makerMarkouts,
+    volProfile: models.volProfile, applyVolSeasonality: Boolean(models.volProfile), volModel: models.volModel, fillModel: models.fillModel, calendar: models.calendar,
   });
   fs.rmSync(dir, { recursive: true, force: true });
   if (guardFile) fs.rmSync(path.dirname(guardFile), { recursive: true, force: true });
@@ -403,7 +433,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     startups: audit.startups.map((s) => new Date(s.t).toISOString()),
     settingsDiffer: startedAt ? settingsDiffer(JSON.parse(JSON.stringify(publicConfig(cfg as Config))), startedAt.config) : null,
     modelSwaps: audit.modelSwaps.filter(inside).map((t) => new Date(t).toISOString()),
-    replay, paper, prices: match.summary(), makerBufferPaper, ...v, checked, close: checked && v.close,
+    replay, paper, prices: match.summary(), makerBufferPaper, models: models.used, ...v, checked, close: checked && v.close,
     why: checked ? v.why : [`the stretch on one start of the paper bot is ${hours.toFixed(1)} h (from ${new Date(from).toISOString()}), the check needs ${minHours} h`],
   };
 }
@@ -460,7 +490,7 @@ async function main(): Promise<void> {
   console.log(`prices at paper's decision records: ${P.matched} of ${P.records} matched within 1 s | mean gap replay vs paper: fair value ${c(P.fv)}, mid ${c(P.mid)}, price traded on ${c(P.price)} | shift from fair value: paper ${c(P.shiftPaper)}, replay ${c(P.shiftReplay)} | same side of the mid ${pct(P.sameSide)} of ${P.sides} | same position ${pct(P.samePosition)}`);
   console.log(`accuracy gate: replay held back ${pct(res.replay.entryEvaluations ? res.replay.accuracyBlocks / res.replay.entryEvaluations : null)} of its entry evaluations; paper's diagnoses show it keeping out ${pct(res.paper.gateShare)} of the markets | take-profit benched ${res.replay.takeProfitBenchedAt ?? 'never'} | replay's loss-aware size went down to x${res.replay.sizeScaleMin.toFixed(2)}`);
   const b = (x: number | null) => (x === null ? 'the setting' : `${(x * 100).toFixed(2)}c`);
-  console.log(`maker buffer: paper's now ${b(res.makerBufferPaper)}, the replay's at its end ${b(res.replay.makerBufferEnd)}`);
+  console.log(`maker buffer: paper's now ${b(res.makerBufferPaper)}, the replay's at its end ${b(res.replay.makerBufferEnd)} | the engine's other models in the replay: ${res.models.join(', ') || 'none'}`);
   console.log(`settings that differ from the paper bot's at that start: ${res.settingsDiffer === null ? 'no start logged in these days' : res.settingsDiffer.length ? res.settingsDiffer.join(', ') : 'none'} | model swaps in the stretch: ${res.modelSwaps.length ? res.modelSwaps.map(hm).join(', ') : 'none'}`);
   console.log(`hourly P&L correlation ${res.hourCorr === null ? 'n/a' : res.hourCorr.toFixed(2)} | total gap ${pct(res.pnlGap)}`);
   console.log(!res.checked ? `VERDICT not checked yet: ${res.why.join('; ')}` : res.close ? 'VERDICT close: sweep results can count' : `VERDICT not close: ${res.why.join('; ')}`);
