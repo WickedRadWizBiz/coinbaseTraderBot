@@ -6,7 +6,10 @@ import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
 import { MetaModel } from '../bot/model/metaModel';
 import { gatePasses, setProbation } from '../bot/risk/probation';
-import { installProbation, runBacktest } from '../research/backtest';
+import type { TrialName } from '../bot/strategy/componentTrials';
+import { activeTaNet, setTaNet } from '../bot/ta/taNet';
+import { setTaNetEnsemble } from '../bot/ta/taNetEnsemble';
+import { engineModels, installProbation, runBacktest, type EvalReading } from '../research/backtest';
 import { corr, paperFromAudit, paperSummary, priceMatcher, readAudit, replayDays, settingsDiffer, stretchStart, verdict } from '../research/replayCheck';
 import { writeSyntheticRecordings } from '../research/synthetic';
 
@@ -145,6 +148,7 @@ test('replay check: prices set beside the paper bot\'s decision records', async 
   const a = await readAudit(dir, ['2026-10-24'], { to });
   assert.deepEqual([...a.prices.keys()].sort(), ['KXBTC15M-A', 'KXETH15M-C'], 'crypto only, since the last start');
   assert.deepEqual(a.prices.get('KXBTC15M-A')!.map((r) => [r.pYes, r.fv, r.mid, r.position]), [[0.65, 0.6, 0.59, 0], [0.6, 0.62, 0.61, 5]], 'the book after the feature map, not inside it');
+  assert.deepEqual(a.prices.get('KXBTC15M-A')!.map((r) => +r.pModel!.toFixed(6)), [0.6, 0.62], 'the model\'s price from its shift (0 here)');
   const from = Date.parse('2026-10-24T13:50:00Z');
   const m = priceMatcher(a.prices, from, to);
   const t0 = Date.parse('2026-10-24T14:00:00Z');
@@ -165,13 +169,17 @@ test('replay check: prices set beside the paper bot\'s decision records', async 
   assert.equal(s.sameSide, 1);
   assert.equal(s.samePosition, 1);
   assert.equal(s.spotBp, null, 'records without the fair value\'s inputs');
+  assert.equal(s.overlayPaper, 0.035, 'paper priced 5c and 2c off its model');
+  assert.equal(s.overlayReplay, null, 'replay readings without the model\'s price');
   // With them: the index 10 bp apart, the same strike, the volatility 20% higher in the replay.
   const t1 = Date.parse('2026-10-24T15:00:00Z');
-  const p2 = new Map([['KXBTC15M-D', [{ t: t1, pYes: 0.5, fv: 0.5, mid: 0.5, position: 0, spot: 100_000, strike: 100_000, sigma: 1e-4, sigmaPricing: 1.1e-4 }]]]);
+  const p2 = new Map([['KXBTC15M-D', [{ t: t1, pYes: 0.5, fv: 0.5, mid: 0.5, position: 0, spot: 100_000, strike: 100_000, sigma: 1e-4, sigmaPricing: 1.1e-4, pModel: 0.48 }]]]);
   const m2 = priceMatcher(p2, from, to);
-  m2.onEval({ ticker: 'KXBTC15M-D', now: t1, pYes: 0.5, fv: 0.5, bid: 0.49, ask: 0.51, position: 0, spot: 100_100, strike: 100_000, sigma: 1.2e-4, sigmaPricing: 1.32e-4 });
+  m2.onEval({ ticker: 'KXBTC15M-D', now: t1, pYes: 0.5, fv: 0.5, bid: 0.49, ask: 0.51, position: 0, spot: 100_100, strike: 100_000, sigma: 1.2e-4, sigmaPricing: 1.32e-4, pModel: 0.49, taVolMult: 1.1, taShift: 0.01, ruleShift: 0 });
   const s2 = m2.summary();
   assert.deepEqual([s2.spotBp, s2.strikeDiffers, s2.sigmaRatio, s2.sigmaPricingRatio], [10, 0, 1.2, 1.2]);
+  assert.deepEqual([s2.pricedPaper, s2.pricedReplay, s2.taVolMult], [1.1, 1.1, 1.1], 'the volatility priced with over the EWMA, each side');
+  assert.deepEqual([s2.overlayPaper, s2.overlayReplay, s2.taShift, s2.ruleShift], [0.02, 0.01, 0.01, 0]);
 });
 
 test('backtest paper options: the maker buffer adapts from the maker markouts as the engine\'s does', async () => {
@@ -187,6 +195,43 @@ test('backtest paper options: the maker buffer adapts from the maker markouts as
   assert.equal(few.makerBufferEnd, 0.02, 'without the paper options the setting stays');
   const fresh = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy: 'take_profit', paper, makerMarkouts: [0.01] });
   assert.ok(fresh.makerBufferEnd !== undefined && fresh.makerBufferEnd >= 0.015 - 1e-12 && fresh.makerBufferEnd <= 0.03 + 1e-12);
+});
+
+test('backtest paper options: paper\'s price follows the component trials; the TA network prices only once installed', async () => {
+  const dir = path.join(tmp(), 'rec');
+  writeSyntheticRecordings(dir, { windows: 2, seed: 7, marketNoise: 0.05 });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) });
+  // A model that moves the fair value's log-odds by 0.4.
+  const model = MetaModel.fromJson(JSON.stringify({ version: 't', kind: 'gbdt', features: ['logit_fv'], referenceSigma: 5e-5, gbdt: { baseScore: 0.4, trees: [] }, residualFeature: 0 }));
+  const read = async (trials: { applied(n: TrialName): boolean }) => {
+    const seen: EvalReading[] = [];
+    await runBacktest(dir, model, cfg.strategy, cfg.risk, 200, { paper: { orderFrac: 0.1, orderUsd: 0 }, trials, taNet: true, onEval: (e) => seen.push(e) });
+    return seen;
+  };
+  const on = await read({ applied: (n) => n === 'mlp' });
+  assert.ok(on.length > 0);
+  assert.ok(on.some((e) => Math.abs(e.pYes - e.fv) > 0.01), 'the model moves the price');
+  assert.ok(on.every((e) => e.pYes === e.pModel && e.taVolMult === 1 && e.taShift === 0 && e.ruleShift === 0), 'no TA network installed: no tilt, sigma as before');
+  const off = await read({ applied: () => false });
+  assert.ok(off.every((e) => e.pYes === e.fv), 'its trial off: paper prices at the fair value');
+});
+
+test('engine models: the TA network and the component trials\' verdicts as the bot loads them', async () => {
+  const dir = tmp();
+  fs.copyFileSync('params/ta_net.json', path.join(dir, 'ta_net.json'));
+  const trialsFile = path.join(dir, 'component_trials.json');
+  fs.writeFileSync(trialsFile, JSON.stringify({ mlp: { windows: [], state: 'off', since: 0 } }));
+  const before = fs.readFileSync(trialsFile, 'utf8');
+  try {
+    const m = await engineModels(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), AUTO_TRAIN_DIR: dir }), { trialsFile });
+    assert.ok(activeTaNet(), 'installed process-wide, as the bot does');
+    assert.ok(m.used.includes('TA network (vol forecast in use)'), m.used.join(', '));
+    assert.equal(m.trials?.applied('mlp'), false, 'the bot\'s verdict');
+    assert.equal(m.trials?.applied('rules'), true, 'tested in paper\'s price from the start');
+    assert.ok(m.used.includes('trials in paper\'s price: rules'), m.used.join(', '));
+    assert.ok((JSON.parse(m.sig) as unknown[]).includes(activeTaNet()!.net.version), 'a call tape depends on the network');
+    assert.equal(fs.readFileSync(trialsFile, 'utf8'), before, 'read from a copy');
+  } finally { setTaNet(undefined); setTaNetEnsemble(undefined); }
 });
 
 test('backtest paper options: the paper bot\'s training trades and exploration entries', async () => {

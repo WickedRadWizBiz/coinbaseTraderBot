@@ -50,6 +50,12 @@ import { marketWorstLoss } from '../bot/risk/exposure';
 import { EquityGuard } from '../bot/risk/equityGuard';
 import { RiskGateway } from '../bot/risk/riskGateway';
 import { decide, decisionProbability, type MarketView } from '../bot/strategy/fairValueStrategy';
+import { ComponentTrials, type TrialName } from '../bot/strategy/componentTrials';
+import { activeRuleBook, RuleBook, setRuleBook } from '../bot/strategy/ruleBook';
+import { taDrift } from '../bot/strategy/taConviction';
+import { MarketContext, marketContext, setMarketContext } from '../bot/ta/marketContext';
+import { setTaNet, sigma24, TaNet } from '../bot/ta/taNet';
+import { setTaNetEnsemble, TaNetEnsemble, taNetView } from '../bot/ta/taNetEnsemble';
 import { ProfitPeaks } from '../bot/strategy/profitPeaks';
 import { ConfluenceRatchetExit, DEFAULT_HUNT, DEFAULT_RATCHET, EXIT_POLICIES, ExitPolicyName, HuntParams, LiquidityRatchet, RatchetParams } from '../bot/strategy/exitPolicies';
 import { readRecordings, ReplayState } from './replay';
@@ -121,7 +127,7 @@ export interface BacktestResult {
   sizeScaleMin?: number;
   /** With the paper options: entries the accuracy gate held back, when the take-profit bench benched, its sales (fills
    *  and contracts). */
-  paper?: { accuracyBlocks: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number; trainTrades?: number; exploreEntries?: number };
+  paper?: { accuracyBlocks: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number; trainTrades?: number; exploreEntries?: number; extraSent?: number; extraRejected?: Record<string, number> };
   /** Fills and contracts by order purpose (quote, entry, exit), and contracts filled by UTC hour (YYYY-MM-DDTHH). */
   byPurpose?: Record<string, { fills: number; contracts: number }>;
   contractsByHour?: Record<string, number>;
@@ -174,9 +180,21 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
   makerMarkouts?: number[];
   /** Called at every market evaluation with the price the replay trades on (the replay check sets it beside the paper
    *  bot's decision records). */
-  onEval?: (e: EvalReading) => void }
-/** One market evaluation: the price traded on and what the fair value was made of. */
-export interface EvalReading { ticker: string; now: number; pYes: number; fv: number; bid: number; ask: number; position: number; spot?: number; strike?: number; sigma?: number; sigmaPricing?: number }
+  onEval?: (e: EvalReading) => void;
+  /** Price with the TA network as the engine does (bot/engine.ts), reading the network engineModels installed: its
+   *  validated vol forecast scales sigma (TA_VOL_WEIGHT) and its drift tilts the price (TA_PRICING). */
+  taNet?: boolean;
+  /** The component trials' verdicts (engineModels): with the paper options, paper's price leaves out the trained model
+   *  when its trial is off, takes the TA network's full drift when its trial is on, and adds the rule book's tilt while
+   *  that trial is applied. The SNN's blend is not replayed. */
+  trials?: { applied(name: TrialName): boolean };
+  /** Keep a market context (bot/ta/marketContext.ts) from the replayed candles, refreshed every minute as bot/main.ts
+   *  does: breadth for the TA features, and each coin's character for the rule book. Process-wide, as in the bot. */
+  marketContext?: boolean }
+/** One market evaluation: the price traded on and what the fair value was made of (pModel: the trained model's price,
+ *  before the TA tilt and the rule book's). */
+export interface EvalReading { ticker: string; now: number; pYes: number; fv: number; bid: number; ask: number; position: number; spot?: number; strike?: number; sigma?: number; sigmaPricing?: number;
+  pModel?: number; taVolMult?: number; taShift?: number; ruleShift?: number }
 
 /** The engine's paper caps (bot/engine.ts): one order, this many closing together, this many in all. */
 export const PAPER_WINDOW_ORDERS = 3;
@@ -202,22 +220,43 @@ const tapedMap = (keys: string[], x: Float64Array): Record<string, number> => ne
 
 /** The models the engine prices with besides the meta-model, loaded as bot/main.ts loads them: the intraday volatility
  *  profile (VOL_SEASONALITY, only when its own validation improved), the tree volatility forecast (VOL_MODEL) and the
- *  fill model (each applied only when validated), and the macro calendar; from the bot's model directory
- *  (AUTO_TRAIN_DIR, a copy of the server's) when there, else the shipped params/ files (bot/autotrain.ts
- *  resolveModelPaths). `used` names the ones in use; `sig` is what a call tape depends on. */
-export async function engineModels(cfg: Config): Promise<{ volProfile?: VolProfile; volModel?: VolModel; fillModel?: FillModel; calendar?: MacroEvent[]; used: string[]; sig: string }> {
+ *  fill model (each applied only when validated), the macro calendar, the TA network (TA_NET, with TA_NET_ENSEMBLE - 1
+ *  archived versions) and the rule book; from the bot's model directory (AUTO_TRAIN_DIR, a copy of the server's) when
+ *  there, else the shipped params/ files (bot/autotrain.ts resolveModelPaths). The TA network and the rule book are
+ *  installed process-wide, as in the bot. `trialsFile`: the bot's component_trials.json, read from a private copy (the
+ *  trials' verdicts on paper's price). `used` names the ones in use; `sig` is what a call tape depends on. */
+export async function engineModels(cfg: Config, o: { trialsFile?: string } = {}): Promise<{ volProfile?: VolProfile; volModel?: VolModel; fillModel?: FillModel; calendar?: MacroEvent[]; trials?: ComponentTrials; used: string[]; sig: string }> {
   const { resolveModelPaths } = await import('../bot/autotrain');
   const paths = resolveModelPaths(cfg);
   const vp = fs.existsSync(paths.vol) ? loadVolProfile(paths.vol) : undefined;
   const volProfile = vp && cfg.strategy.volSeasonality && vp.validation?.improved ? vp : undefined;
-  let volModel: VolModel | undefined, fillModel: FillModel | undefined;
+  let volModel: VolModel | undefined, fillModel: FillModel | undefined, taNet: TaNet | undefined;
   try { volModel = cfg.strategy.volModel && fs.existsSync(paths.vol_model) ? VolModel.load(paths.vol_model) : undefined; } catch { volModel = undefined; }
   try { fillModel = fs.existsSync(paths.fill) ? FillModel.load(paths.fill) : undefined; } catch { fillModel = undefined; }
   const calendar = loadCalendar(path.resolve(process.env.MACRO_CALENDAR_PATH ?? './params/calendar.json'));
-  const used = [volProfile ? 'vol profile' : '', volModel?.validated ? 'vol model' : '', fillModel ? `fill model${fillModel.validated ? '' : ' (unvalidated)'}` : '', calendar?.length ? 'macro calendar' : ''].filter(Boolean);
-  // What a call tape depends on: the fair value's volatility and the calendar's features.
-  const sig = JSON.stringify([volProfile?.version ?? null, volModel?.validated ? volModel.params.trainedAt : null, calendar?.length ?? 0]);
-  return { volProfile, volModel, fillModel, calendar, used, sig };
+  try { taNet = cfg.taNet.enabled && fs.existsSync(paths.ta_net) ? TaNet.load(paths.ta_net) : undefined; } catch { taNet = undefined; }
+  setTaNet(taNet, cfg.taNet.requireValidated);
+  const archiveDir = path.join(cfg.autoTrain.dir, 'archive', 'ta_net');
+  setTaNetEnsemble(taNet && cfg.taNet.ensemble > 1 ? new TaNetEnsemble(archiveDir, cfg.taNet.ensemble) : undefined);
+  const archived = taNet && cfg.taNet.ensemble > 1 && fs.existsSync(archiveDir) ? fs.readdirSync(archiveDir).filter((f) => f.endsWith('.json')).sort().reverse().slice(0, cfg.taNet.ensemble) : [];
+  const ruleBookFile = path.join(cfg.autoTrain.dir, 'rule_book.json');
+  setRuleBook(new RuleBook(() => ruleBookFile));
+  let trials: ComponentTrials | undefined;
+  if (cfg.trials.enabled) {
+    let file: string | undefined;
+    if (o.trialsFile && fs.existsSync(o.trialsFile)) {
+      file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'trials-')), 'component_trials.json');
+      fs.copyFileSync(o.trialsFile, file);
+    }
+    trials = new ComponentTrials(cfg.trials, file);
+  }
+  const taVol = taNet?.active(cfg.taNet.requireValidated).includes('vol_4h');
+  const used = [volProfile ? 'vol profile' : '', volModel?.validated ? 'vol model' : '', fillModel ? `fill model${fillModel.validated ? '' : ' (unvalidated)'}` : '', calendar?.length ? 'macro calendar' : '',
+    taNet ? `TA network${taVol ? ' (vol forecast in use)' : ''}${archived.length ? ` + ${Math.min(archived.length, cfg.taNet.ensemble - 1)} archived` : ''}` : '', fs.existsSync(ruleBookFile) ? 'rule book' : '',
+    trials ? `trials in paper's price: ${(['mlp', 'snn', 'ta', 'rules'] as TrialName[]).filter((n) => trials!.applied(n)).join(' ') || 'none'}` : ''].filter(Boolean);
+  // What a call tape depends on: the fair value's volatility, the calendar's and the TA network's features.
+  const sig = JSON.stringify([volProfile?.version ?? null, volModel?.validated ? volModel.params.trainedAt : null, calendar?.length ?? 0, taNet?.version ?? null, archived]);
+  return { volProfile, volModel, fillModel, calendar, trials, used, sig };
 }
 
 /** The validation gates as the bot runs them (bot/main.ts): with VALIDATION_GATES=monitor (the default) a model that
@@ -297,7 +336,12 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   let slipSum = 0, slipN = 0;
   const gate = opts.accuracyGate?.enabled ? new AccuracyGate(opts.accuracyGate, undefined, () => st.now) : undefined;
   const tpBench = opts.takeProfitBench ? new TakeProfitBench(opts.takeProfitBench.enforce, opts.takeProfitBench.rule, undefined, undefined, 0) : undefined;
-  res.paper = { accuracyBlocks: 0, takeProfitBenchedAt: undefined, takeProfitSales: 0, takeProfitContracts: 0, trainTrades: 0, exploreEntries: 0 };
+  res.paper = { accuracyBlocks: 0, takeProfitBenchedAt: undefined, takeProfitSales: 0, takeProfitContracts: 0, trainTrades: 0, exploreEntries: 0, extraSent: 0, extraRejected: {} };
+  // The market context (opts.marketContext): a fresh one each run, so a replay of an earlier span starts clean; risk
+  // gauges from the history directory the replay's index series come from (research/replay.ts).
+  const mctx = opts.marketContext ? new MarketContext(path.resolve(process.env.HISTORY_DIR ?? path.join(process.env.DATA_DIR ?? './data', 'history'))) : undefined;
+  if (mctx) setMarketContext(mctx);
+  let ctxAt = -Infinity;
   res.byPurpose = {};
   res.contractsByHour = {};
   // An order's purpose from its client order id (<ticker>-<ms>-<side>-<purpose>[-tp]; a queued exit <ticker>-<ms>-exit-<kind>).
@@ -376,6 +420,11 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       markouts.push(x.sign * (mid - x.price));
       if (markouts.length > MARKOUT_KEEP) markouts.shift();
     }
+    // Refreshed every minute, as bot/main.ts does.
+    if (mctx && st.now - ctxAt >= 60_000) {
+      ctxAt = st.now;
+      try { mctx.update(st.features.candles.values(), st.now, (a) => taNetView(a, st.features.candles.get(a), st.now)?.vol4h); } catch { /* as the bot: kept as it was */ }
+    }
 
     for (const m of [...st.markets.values()]) {
       // Recorded for research, or synthesized from price history (quoted at the model's own fair value): never traded.
@@ -437,11 +486,23 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const tauSec = (m.closeTime - st.now) / 1000;
       const settle = tauSec <= SETTLEMENT_AVG_SEC ? idx!.settlement(m.closeTime, st.now, SETTLEMENT_AVG_SEC) : undefined;
       const observed = settle?.avg, observedCount = settle?.n;
+      const candles = st.features.candles.get(m.asset);
+      // The TA network's readings (opts.taNet): its validated vol forecast scales sigma toward where volatility is heading,
+      // m = exp(forecast) x 24 h realised / EWMA in [0.5, 2], applied as m^TA_VOL_WEIGHT while the tree vol model is not
+      // validated (bot/engine.ts).
+      const taView = opts.taNet ? taNetView(m.asset, candles, st.now) : undefined;
+      let taVolMult = 1;
+      if (taView && strategy.taVolWeight > 0 && !volFc.model?.validated && taView.vol4h !== undefined && Number.isFinite(taView.vol4h)) {
+        const h1 = candles?.bars['1h'];
+        const rv = h1 && h1.length > 25 ? sigma24(h1, h1.length - 1) : NaN;
+        const ewmaHour = vol.sigmaPerSqrtSec * 60;
+        if (rv > 0 && ewmaHour > 0) taVolMult = Math.max(0.5, Math.min(2, Math.exp(taView.vol4h) * rv / ewmaHour)) ** strategy.taVolWeight;
+      }
       // As live: the vol forecast once validated, else the flat fallback multiplier.
       const sigmaFv = (opts.applyVolSeasonality ? effectiveSigma(vol.sigmaPerSqrtSec, opts.volProfile, m.asset, st.now, m.closeTime) : vol.sigmaPerSqrtSec)
         * (volFc.model?.validated
-          ? volFc.multiplier(m.asset, st.now, vol.sigmaPerSqrtSec, tauSec, () => assetFeatureMap(m.asset, st.now, { index: idx, spot: st.spot.get(m.asset), bars: st.features.bars.get(m.asset), candles: st.features.candles.get(m.asset), usdtd: st.usdtd, btcd: st.btcd, perp: st.features.perps.get(m.asset) }))
-          : strategy.volFallbackMult ?? 1);
+          ? volFc.multiplier(m.asset, st.now, vol.sigmaPerSqrtSec, tauSec, () => assetFeatureMap(m.asset, st.now, { index: idx, spot: st.spot.get(m.asset), bars: st.features.bars.get(m.asset), candles, usdtd: st.usdtd, btcd: st.btcd, perp: st.features.perps.get(m.asset) }))
+          : strategy.volFallbackMult ?? 1) * taVolMult;
       const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaFv, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
       if (!fv) continue;
       const mid = (bid.price + ask.price) / 2;
@@ -460,8 +521,32 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         pred = model.predictDetailed(fmap, fv.pYes);
         tape?.push(st.now, tickerHash(m.ticker), fv.pYes, pred.p, pred.std, tape.keys.map((k) => fmap[k]));
       }
-      const pYes = pred.p;
-      opts.onEval?.({ ticker: m.ticker, now: st.now, pYes, fv: fv.pYes, bid: bid.price, ask: ask.price, position: pos.position(m.ticker), spot: spot.value, strike: terms.strike, sigma: vol.sigmaPerSqrtSec, sigmaPricing: sigmaFv });
+      // Paper's price (bot/engine.ts): the trained model unless its trial switched it off, the TA network's drift (its
+      // trial's full drift once that is on) unless the model reads the network itself, then the rule book's trial tilt
+      // while that trial is applied. A tilt re-prices the contract with the index moved by w x k sigma sqrt(tau), capped.
+      const trialOn = (name: TrialName) => Boolean(opts.paper && opts.trials?.applied(name));
+      const tilt = (k: number, w: number) => {
+        if (!(Math.abs(k) > 1e-9)) return 0;
+        const tilted = priceContract(terms, { spot: spot.value * Math.exp(w * k * sigmaFv * Math.sqrt(tauSec)), sigmaPerSqrtSec: sigmaFv, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
+        return tilted ? Math.max(-strategy.taPricingMaxShift, Math.min(strategy.taPricingMaxShift, tilted.pYes - fv.pYes)) : 0;
+      };
+      const pModel = opts.paper && opts.trials && !trialOn('mlp') ? fv.pYes : pred.p;
+      const modelReadsTa = model.params.kind !== 'identity' && model.params.features.some((f) => f.startsWith('tanet_up'));
+      const taPricing = Boolean(opts.taNet) && strategy.taPricing && strategy.taPricingWeight > 0 && !modelReadsTa;
+      const drift = taPricing ? taDrift(taView, tauSec, { maxZ: strategy.taPricingMaxZ, live: false }) : undefined;
+      const driftFull = taPricing && opts.trials ? taDrift(taView, tauSec, { maxZ: strategy.taPricingMaxZ, live: false, full: true }) : undefined;
+      const taShiftFull = driftFull ? tilt(driftFull.k, strategy.taPricingWeight) : undefined;
+      const taShift = trialOn('ta') && taShiftFull !== undefined ? taShiftFull : drift ? tilt(drift.k, strategy.taPricingWeight) : 0;
+      let pYes = taShift !== 0 ? Math.max(0.001, Math.min(0.999, pModel + taShift)) : pModel;
+      let ruleShift = 0;
+      if (trialOn('rules')) {
+        const ctx = marketContext();
+        const rb = activeRuleBook()?.trialRead(candles?.snapshot(st.now, ctx?.macro()), tauSec, ctx?.character(m.asset)?.cls, strategy.taPricingMaxZ);
+        ruleShift = rb ? tilt(rb.k, 1) : 0;
+        if (ruleShift) pYes = Math.max(0.001, Math.min(0.999, pYes + ruleShift));
+      }
+      opts.onEval?.({ ticker: m.ticker, now: st.now, pYes, fv: fv.pYes, bid: bid.price, ask: ask.price, position: pos.position(m.ticker), spot: spot.value, strike: terms.strike, sigma: vol.sigmaPerSqrtSec, sigmaPricing: sigmaFv,
+        pModel: pred.p, taVolMult, taShift, ruleShift });
       const pMarket = model.marketProbability(mid);
       const ret = idx!.trailingLogReturn(st.now, strategy.fastMoveWindowSec * 1000);
       const fastMove = ret !== undefined && Math.abs(ret) > strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(strategy.fastMoveWindowSec);
@@ -608,7 +693,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       // an exploration entry (PAPER_EXPLORE: the best borderline one within PAPER_EXPLORE_BAND of the edge threshold, at
       // most 1 contract, at PAPER_EXPLORE_RATE, PAPER_EXPLORE_MAX_PER_HOUR), else a training trade (1 contract at the
       // touch on the side the model favours, PAPER_TRAINING_TRADES_PER_HOUR spread over the hour, one per contract).
-      if (opts.paper && reason && entryWindowOpen && posC === 0 && !plan.place.some((p) => p.purpose === 'entry')) {
+      // Only once trading starts: the bot starts with neither (a fresh process), so the warm-up must not use up their budgets.
+      if (opts.paper && reason && entryWindowOpen && posC === 0 && !plan.place.some((p) => p.purpose === 'entry') && (opts.tradeFromMs === undefined || st.now >= opts.tradeFromMs)) {
         while (exploreTs.length && exploreTs[0] < st.now - 3_600_000) exploreTs.shift();
         if (strategy.paperExplore) {
           const e = decide(view, { ...strat, minEdge: Math.max(0, strat.minEdge - strategy.exploreBand), style: 'both' }, { exits: false, blockReductions: false, entries: true }).place.find((p) => p.purpose === 'entry');
@@ -661,7 +747,12 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           marketRiskWith: p.reduceOnly ? riskOf(m.ticker) : riskOf(m.ticker, [{ ticker: m.ticker, side: p.side, price: p.price, remaining: p.count, isTaker: !p.postOnly }]),
           windowRisk, totalRisk, ordersLastMinute: 0, openOrders: openNow.length, modelLiveBlockers: [], limitOverrides: tierLimits,
         });
-        if (!d.ok) continue;
+        if (!d.ok) {
+          // Why the risk gateway turned down the paper bot's extra entries (numbers folded), for the replay check.
+          if (/^(train|explore)/.test(p.why)) { const k = (d.reasons?.[0] ?? 'rejected').replace(/[-+]?\$?\d[\d.,]*%?/g, '#'); res.paper!.extraRejected![k] = (res.paper!.extraRejected![k] ?? 0) + 1; }
+          continue;
+        }
+        if (/^(train|explore)/.test(p.why)) res.paper!.extraSent = (res.paper!.extraSent ?? 0) + 1;
         const clientOrderId = `${m.ticker}-${st.now}-${p.side}-${p.purpose}${p.why.startsWith('take-profit') ? '-tp' : ''}`;
         await send(m.ticker, 'order', async () => {
           try {

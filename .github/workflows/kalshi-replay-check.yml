@@ -126,6 +126,16 @@ jobs:
           for f in vol_profile.json vol_model.json fill_model.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
           # The validation gates' state (which books' unvalidated models are benched).
           rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/probation.json "$RUNNER_TEMP/paper-probation.json" 2>/dev/null || true
+          # The TA network the engine prices with (its promoted copy and the newest archived versions its ensemble blends),
+          # the rule book, the component trials' verdicts, and the index series the network's context and the market
+          # context read (dominance, the slow indexes, the risk gauges) from the bot's history directory.
+          for f in ta_net.json rule_book.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
+          mkdir -p "$DATA/models/archive/ta_net" "$DATA/history"
+          ssh bot 'ls -1 ~/bot/data/models/archive/ta_net/*.json 2>/dev/null | sort -r | head -4' | while read -r f; do rsync -a --rsync-path="nice -n 19 rsync" "bot:$f" "$DATA/models/archive/ta_net/" 2>/dev/null || true; done
+          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/component_trials.json "$RUNNER_TEMP/paper-trials.json" 2>/dev/null || true
+          INC=(--include='/*/'); for a in BTCDOM BTC.D USDT.D TOTAL3 OTHERS.D RTY DXY US10Y VIX HYG; do INC+=("--include=/*/$a/***"); done
+          rsync -a --rsync-path="nice -n 19 rsync" --prune-empty-dirs --max-size=50m "${INC[@]}" --exclude='*' bot:bot/data/history/ "$DATA/history/" 2>/dev/null || true
+          echo "TA network $([ -f "$DATA/models/ta_net.json" ] && echo "from the server" || echo "shipped") + $(ls "$DATA/models/archive/ta_net" | wc -l) archived; rule book $([ -f "$DATA/models/rule_book.json" ] && echo read || echo 'not read'); trials $([ -s "$RUNNER_TEMP/paper-trials.json" ] && echo read || echo 'not read'); index series $(find "$DATA/history" -name '*.csv' | wc -l) file(s)"
           # The server's settings without any credential line and without server paths (the same filter as Remote training).
           ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$DATA/sweep-env/train.env" || true
           echo "audit days $D: $(wc -l < "$RUNNER_TEMP/audit.txt") file(s); recorded days $NEED: $(ls "$DATA/recordings" | wc -l) file(s); settings $(wc -l < "$DATA/sweep-env/train.env") line(s); paper balance $([ -s "$RUNNER_TEMP/paper-balance" ] && echo read || echo 'not read'), equity guard $([ -s "$RUNNER_TEMP/paper-guard.json" ] && echo read || echo 'not read'), override $(cat "$RUNNER_TEMP/kill-override"), maker markouts $(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$RUNNER_TEMP/maker-markouts.json" 2>/dev/null || echo 0)"
@@ -144,7 +154,7 @@ jobs:
           timeout 200m node --import tsx research/replayCheck.ts --recordings data/recordings --audit data/audit --days "$(cat data/sweeps/check-days.txt)" \
             --from "$CHECK_FROM" --to "$(cat data/sweeps/check-to.txt)" --min-hours "$MIN_HOURS" ${BAL:+--paper-balance-now "$BAL"} \
             ${GUARD:+--paper-guard "$GUARD"} --kill-override "$OVERRIDE" --maker-markouts "$RUNNER_TEMP/maker-markouts.json" --paper-probation "$RUNNER_TEMP/paper-probation.json" \
-            --model data/models/model.json --out data/sweeps/replay-check-latest.json || echo "replay check failed or cut off"
+            --paper-trials "$RUNNER_TEMP/paper-trials.json" --model data/models/model.json --out data/sweeps/replay-check-latest.json || echo "replay check failed or cut off"
           echo "replay check took $(( ($(date +%s) - T0) / 60 )) min"
       - uses: actions/upload-artifact@v4
         if: always()

@@ -122,6 +122,15 @@ jobs:
           # its validation gates' state (probation.json: which books' unvalidated models are benched), as the replay check.
           for f in vol_profile.json vol_model.json fill_model.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
           rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/probation.json "$DATA/sweep-env/probation.json" 2>/dev/null || true
+          # The TA network (promoted copy and the newest archived versions its ensemble blends), the rule book, the component
+          # trials' verdicts and the index series the network's context reads, as the replay check.
+          for f in ta_net.json rule_book.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
+          mkdir -p "$DATA/models/archive/ta_net" "$DATA/sweep-env/history"
+          ssh bot 'ls -1 ~/bot/data/models/archive/ta_net/*.json 2>/dev/null | sort -r | head -4' | while read -r f; do rsync -a --rsync-path="nice -n 19 rsync" "bot:$f" "$DATA/models/archive/ta_net/" 2>/dev/null || true; done
+          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/component_trials.json "$DATA/sweep-env/component_trials.json" 2>/dev/null || true
+          INC=(--include='/*/'); for a in BTCDOM BTC.D USDT.D TOTAL3 OTHERS.D RTY DXY US10Y VIX HYG; do INC+=("--include=/*/$a/***"); done
+          rsync -a --rsync-path="nice -n 19 rsync" --prune-empty-dirs --max-size=50m "${INC[@]}" --exclude='*' bot:bot/data/history/ "$DATA/sweep-env/history/" 2>/dev/null || true
+          echo "TA network $([ -f "$DATA/models/ta_net.json" ] && echo "from the server" || echo "shipped") + $(ls "$DATA/models/archive/ta_net" | wc -l) archived; index series $(find "$DATA/sweep-env/history" -name '*.csv' | wc -l) file(s)"
           # The server's settings without any credential line and without server paths (the same filter as Remote training).
           ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$DATA/sweep-env/train.env" || true
           echo "settings: $(wc -l < "$DATA/sweep-env/train.env") line(s); model: $(ls "$DATA/models" | wc -l) file(s)"
@@ -177,7 +186,8 @@ jobs:
         run: |
           node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$RS_DAYS"
           set -a; . data/sweep-env/train.env; set +a
-          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json"
+          cp -rn data/sweep-env/history/. data/history/ 2>/dev/null || true
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json" RS_TRIALS_FILE="$GITHUB_WORKSPACE/data/sweep-env/component_trials.json"
           node --import tsx research/randomSweep.ts run --stage 1 --trials "$RS_TRIALS" --sample "$RS_SAMPLE" --shard "${{ strategy.job-index }}/${{ strategy.job-total }}" \
             --hours 4.5 --recordings data/sweep-days --model data/models/model.json --tape-dir data/tapes --ledger data/sweeps/s1-${{ matrix.shard }}.jsonl
       - uses: actions/upload-artifact@v4
@@ -235,7 +245,8 @@ jobs:
         run: |
           node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$RS_DAYS"
           set -a; . data/sweep-env/train.env; set +a
-          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json"
+          cp -rn data/sweep-env/history/. data/history/ 2>/dev/null || true
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json" RS_TRIALS_FILE="$GITHUB_WORKSPACE/data/sweep-env/component_trials.json"
           node --import tsx research/randomSweep.ts run --stage 2 --from "$(ls data/sweeps/s1-*.jsonl | paste -sd, -)" --per-best 10 --sample "$RS_SAMPLE" \
             --shard "${{ strategy.job-index }}/${{ strategy.job-total }}" --hours 2.5 --recordings data/sweep-days --model data/models/model.json \
             --tape-dir data/tapes --ledger data/sweeps/s2-${{ matrix.shard }}.jsonl
@@ -294,7 +305,8 @@ jobs:
         run: |
           node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$RS_DAYS"
           set -a; . data/sweep-env/train.env; set +a
-          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json"
+          cp -rn data/sweep-env/history/. data/history/ 2>/dev/null || true
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json" RS_TRIALS_FILE="$GITHUB_WORKSPACE/data/sweep-env/component_trials.json"
           node --import tsx research/randomSweep.ts run --stage 3 --from "$(ls data/sweeps/s[12]-*.jsonl | paste -sd, -)" --sample "$RS_SAMPLE" \
             --shard "${{ strategy.job-index }}/${{ strategy.job-total }}" --hours 4.5 --recordings data/sweep-days --model data/models/model.json \
             --tape-dir data/tapes --ledger data/sweeps/s3-${{ matrix.shard }}.jsonl
@@ -371,7 +383,8 @@ jobs:
         run: |
           node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$RS_DAYS"
           set -a; . data/sweep-env/train.env; set +a
-          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json"
+          cp -rn data/sweep-env/history/. data/history/ 2>/dev/null || true
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json" RS_TRIALS_FILE="$GITHUB_WORKSPACE/data/sweep-env/component_trials.json"
           S123=$(ls data/sweeps/s[123]-*.jsonl | paste -sd, -)
           # Real order books replay slowly: stage 4 gets a fixed slice of the job, and the verdict is written either way.
           timeout 150m node --import tsx research/randomSweep.ts run --stage 4 --from "$S123" --sample "$RS_SAMPLE" --recorded data/recordings --hours 2 \

@@ -152,19 +152,20 @@ export async function evalTrial(dir: string, modelPath: string, env: Record<stri
     const cfg = loadConfig(paperEnv({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), ...env }));
     const model = models.get(modelPath) ?? (fs.existsSync(modelPath) ? MetaModel.load(modelPath) : MetaModel.identity());
     models.set(modelPath, model);
-    // The engine's other models and its validation gates, as the replay check runs them (once a process: a trial does
-    // not change them).
-    engine ??= engineModels(cfg).then((m) => { installProbation(cfg, process.env.RS_PROBATION_FILE); return m; });
+    // The engine's other models, its validation gates and the component trials' verdicts, as the replay check runs them
+    // (once a process: a trial does not change them).
+    engine ??= engineModels(cfg, { trialsFile: process.env.RS_TRIALS_FILE }).then((m) => { installProbation(cfg, process.env.RS_PROBATION_FILE); return m; });
     const em = await engine;
     const S = cfg.strategy;
     const policy = (EXIT_POLICIES as readonly string[]).includes(S.exitPolicy) ? S.exitPolicy : 'fair_value';
     const rule = { ...cfg.probation, t: cfg.sinuousExit.benchT ?? cfg.probation.t, minTrades: cfg.sinuousExit.benchMinExits ?? cfg.probation.minTrades };
-    const tape = await tapeFor(dir, modelPath, tapeDir, [S.volFallbackMult, cfg.risk.maxBookAgeMs, cfg.risk.maxIndexAgeMs, S.takeGate, S.takeMargin, policy === 'confluence_ratchet', em.sig, Boolean(em.fillModel)]);
+    const tape = await tapeFor(dir, modelPath, tapeDir, [S.volFallbackMult, S.taVolWeight, cfg.risk.maxBookAgeMs, cfg.risk.maxIndexAgeMs, S.takeGate, S.takeMargin, policy === 'confluence_ratchet', em.sig, Boolean(em.fillModel)]);
     const r = await runBacktest(dir, model, S, cfg.risk, Number(process.env.SWEEP_BANKROLL_USD ?? cfg.paperBankrollUsd), {
       exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
       sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd },
       accuracyGate: S.accuracyGate, takeProfitBench: { enforce: S.takeProfitBench, rule }, tape, dailyGoalUsd: cfg.vault.dailyGoalUsd,
       volProfile: em.volProfile, applyVolSeasonality: Boolean(em.volProfile), volModel: em.volModel, fillModel: em.fillModel, calendar: em.calendar,
+      taNet: true, trials: em.trials, marketContext: true,
     });
     const byDay: Record<string, number> = {}, tradesByDay: Record<string, number> = {}, byHour: Record<string, number> = {};
     for (const t of r.trades) {
