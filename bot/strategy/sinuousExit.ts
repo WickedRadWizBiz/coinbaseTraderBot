@@ -64,11 +64,14 @@
 // against holding to settlement, (net exit price - payout) x contracts; benched under the same rules (the resting
 // sells keep going, the cross stops until a reset).
 //
-// Cross mode (paper's default since the evening of Oct 23, SINUOUS_EXIT_PAPER=cross; the owner: "The resting at peak
-// should go"): the cross without the resting sell. The curve watches every held position and sells it at the bid on a
+// Cross mode (the default in paper and live since Oct 24, SINUOUS_EXIT=cross; the owner on Oct 23: "The resting at peak
+// should go", and "It can't just be paper mode. When I take it out of paper mode into live it needs to behave
+// identical"): the cross without the resting sell. The curve watches every held position and sells it at the bid on a
 // confirmed roll-over (above); nothing rests at the swing top and nothing is held, so the ratchet stop, the take-profit
 // and the model exit run exactly as without the curve. On Oct 23 the resting sells made +5.2c a contract but -$113 against
 // holding: the swing-top estimate sat a few cents above the market and filled on ordinary upticks, selling winners.
+// The scoreboard counts the cross's fills (crossFilled): a cross whose order does not fill sold nothing. Before Oct 24
+// a cross was counted when it was called, so an unfilled one was scored as a sale it never made.
 
 import type { BookLevel } from '../kalshi/types';
 import type { ProbationParams } from '../risk/probation';
@@ -264,16 +267,15 @@ export class SinuousExitTracker {
 // ---- The gate and its scoreboard ------------------------------------------------------------------
 
 export interface SinuousExitParams {
+  /** The same in paper and live (SINUOUS_EXIT, cross by default). */
   mode: 'gate' | 'monitor' | 'rest' | 'cross' | 'off';
   /** Net profit a contract (dollars) an exit must clear to count as a profit exit. */
   minNetProfit: number;
-  /** Paper bench rule in place of the probation's (the owner turned the curve back on on Oct 23 to see whether it
-   *  pays): benched when holding loses beyond luck at t <= -paperBenchT after paperBenchMinExits held exits, or costs
-   *  the probation's dollar limit. */
-  paperBenchT?: number;
-  paperBenchMinExits?: number;
-  /** The mode in paper (SINUOUS_EXIT_PAPER; live keeps `mode`). */
-  paperMode?: 'gate' | 'monitor' | 'rest' | 'cross' | 'off';
+  /** Bench rule in place of the probation's, paper and live alike (SINUOUS_BENCH_T, SINUOUS_BENCH_MIN_EXITS): benched
+   *  when its results lose beyond luck at t <= -benchT after benchMinExits scored exits, or cost the probation's dollar
+   *  limit. */
+  benchT?: number;
+  benchMinExits?: number;
   /** Rest mode: how far above the swing-top estimate the sell rests, in the book's noise standard deviations. */
   restBandSigmas?: number;
   /** Rest mode: sell at once on a confirmed roll-over (the cross; default on). */
@@ -304,9 +306,8 @@ export interface CrossCheck {
 const DEFAULT_REST_STAND_DOWN_SEC = 120;
 /** A cross exit whose market never settles in view is forgotten after this long. */
 const CROSS_MAX_AGE_MS = 3 * 3_600_000;
-const CROSS_REPEAT_MS = 10_000;
 
-export const DEFAULT_SINUOUS_EXIT: SinuousExitParams = { mode: 'gate', minNetProfit: 0.015 };
+export const DEFAULT_SINUOUS_EXIT: SinuousExitParams = { mode: 'cross', minNetProfit: 0.015 };
 
 /** One exit the bot's own logic wants, in the held side's terms. */
 export interface ExitCheck {
@@ -411,7 +412,7 @@ export class SinuousExitGate {
   get crossing(): boolean { return this.p.mode === 'rest' || this.p.mode === 'cross'; }
 
   /** Rest and cross modes: sell the position at the bid now? On a confirmed roll-over (see the header) that clears the
-   *  take-profit floor; the sale is remembered and scored against holding to settlement when the market settles. */
+   *  take-profit floor. What the order fills is scored (crossFilled), not the call. */
   cross(ticker: string, e: CrossCheck, now: number): { sell: boolean; why?: string; note?: string } {
     if (!this.crossing || this.p.cross === false || e.tauSec <= this.standDownSec) return { sell: false };
     const k = this.trackers.get(ticker);
@@ -422,13 +423,17 @@ export class SinuousExitGate {
     if (!(net >= e.floor - 1e-9 && r.velocity <= 0 && depth > 0 && depth >= (this.p.crossFeeMargin ?? 0.5) * e.exitFeePer - 1e-9)) return { sell: false };
     const curve = `curve ${r.curve} under projection ${r.projected}`;
     if (this.st.benched) return { sell: false, note: `exit curve: crossed (${curve}) but the cross is benched: ${this.st.benched.reason}` };
-    if (e.spot !== 'against') return { sell: false, note: `exit curve: crossed (${curve}) but spot has not turned (${e.spot}): the resting sell stays` };
-    this.prune(now);
-    // A cross called again within seconds for the same market (the first order rejected or not filled) is one cross.
-    this.st.crosses = (this.st.crosses ?? []).filter((c) => !(c.ticker === ticker && now - c.ts < CROSS_REPEAT_MS));
-    this.st.crosses.push({ ticker, sign: k.sign, exitNet: +(e.sidePrice - e.exitFeePer).toFixed(6), count: e.count, ts: now });
-    this.save();
+    if (e.spot !== 'against') return { sell: false, note: `exit curve: crossed (${curve}) but spot has not turned (${e.spot})` };
     return { sell: true, why: `exit curve: cross${k.sign < 0 ? ' NO' : ''} ${e.sidePrice} (+${net.toFixed(3)} a contract net, ${curve}, spot against)` };
+  }
+
+  /** A cross exit filled: `count` contracts of the side held (`sign`) sold at `sidePrice`, paying `exitFeePer` a
+   *  contract. Remembered (across restarts) and scored against holding to settlement when the market settles. */
+  crossFilled(ticker: string, sign: 1 | -1, sidePrice: number, count: number, exitFeePer: number, now: number): void {
+    if (!(count > 0)) return;
+    this.prune(now);
+    (this.st.crosses ??= []).push({ ticker, sign, exitNet: +(sidePrice - exitFeePer).toFixed(6), count, ts: now });
+    this.save();
   }
 
   private prune(now: number): void {

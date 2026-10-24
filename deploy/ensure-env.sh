@@ -48,6 +48,13 @@ for pair in 'RISK_MAX_ORDERS_PER_MIN=30>120' 'STRATEGY_ORDER_TTL_SEC=60>20'; do
   old=${pair%%>*}; key=${old%%=*}; new="$key=${pair#*>}"
   if grep -qxF "$old" "$ENV"; then edit_env "^${old//./\\.}\$" "$new"; echo "$key: ${old#*=} -> ${new#*=} in $ENV"; fi
 done
+# One exit-curve mode for paper and live (the owner, Oct 23: live has to behave identically to paper): SINUOUS_EXIT_PAPER
+# is no longer read and is removed; a SINUOUS_EXIT pinned to an old default (gate, rest) becomes cross; any other
+# choice (monitor, off) is left alone.
+if grep -q '^SINUOUS_EXIT_PAPER=' "$ENV"; then edit_env '^SINUOUS_EXIT_PAPER='; echo "SINUOUS_EXIT_PAPER removed from $ENV (SINUOUS_EXIT sets paper and live)"; fi
+for old in gate rest; do
+  if grep -qx "SINUOUS_EXIT=$old" "$ENV"; then edit_env "^SINUOUS_EXIT=$old\$" 'SINUOUS_EXIT=cross'; echo "SINUOUS_EXIT: $old -> cross in $ENV"; fi
+done
 if [ -n "${DASHBOARD_PASSWORD:-}" ] && ! grep -qxF "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD" "$ENV"; then
   edit_env '^DASHBOARD_PASSWORD=' "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD"
   echo "dashboard password set from the deploy"

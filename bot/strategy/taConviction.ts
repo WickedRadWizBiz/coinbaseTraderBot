@@ -10,8 +10,8 @@
 //  2. Reliability. Each head counts by what it has proven: a head that passed the blind walk-forward
 //     test counts fully; one that did not counts by its own rolling skill on the last graded calls
 //     (1 - Brier / 0.25 over up to 168 hourly calls): no better than a coin flip -> no influence; better
-//     -> up to full weight. Before 24 graded calls an unvalidated head counts half in paper and not at
-//     all in live mode.
+//     -> up to full weight. Before 24 graded calls an unvalidated head counts half; in live mode only
+//     while LIVE_ALLOW_UNVALIDATED_MODEL is on (the default: paper and live price alike), else not at all.
 //  3. Breadth. The share of TA / confluence signals agreeing with the trade's direction (TA network 1h
 //     and 4h, the confluence count, the multi-timeframe trend / momentum rules, RSI and EMA stack):
 //     the more agree, the larger the conviction multiplier on the Kelly size (bot/strategy/adversary.ts).
@@ -46,7 +46,8 @@ export interface ConvictionConfig {
   maxShift: number;
   /** Largest |z| a forecast may contribute (z = 0.5 is P(up) = 0.69). */
   maxZ: number;
-  /** Live mode: unvalidated heads speak only once their graded skill is positive. */
+  /** Validated-only (live with LIVE_ALLOW_UNVALIDATED_MODEL off): unvalidated heads speak only once their graded skill
+   *  is positive. */
   live: boolean;
   /** Altcoin risk-on rule. */
   altBoost: number;

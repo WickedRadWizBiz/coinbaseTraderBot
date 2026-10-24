@@ -266,7 +266,7 @@ function rollOver(g: SinuousExitGate, ticker: string, now: number): number {
 
 const CROSS = { sidePrice: 0.63, count: 10, exitFeePer: 0.0165, entrySidePrice: 0.4, entryFeePer: 0.01, floor: 0.041, tauSec: 400, spot: 'against' as const };
 
-test('rest mode, the cross: a roll-over by half the fee with spot turned and the floor cleared sells at once; scored against holding to settlement', () => {
+test('rest mode, the cross: a roll-over by half the fee with spot turned and the floor cleared sells at once; its fills are scored against holding to settlement', () => {
   const file = path.join(tmpDir(), 'curve.json');
   const g = new SinuousExitGate({ mode: 'rest', minNetProfit: 0.015, restBandSigmas: 0 }, BENCH, file, undefined, 0);
   const now = rollOver(g, 'T', 0);
@@ -292,19 +292,32 @@ test('rest mode, the cross: a roll-over by half the fee with spot turned and the
   const c = g.cross('T', CROSS, now);
   assert.equal(c.sell, true);
   assert.match(c.why!, /^exit curve: cross 0\.63 \(\+0\.203 a contract net, curve 0\.\d+ under projection 0\.\d+, spot against\)$/);
-  assert.equal(g.status().crossesPending, 1);
-  // Called again within seconds for the same market (the first order rejected): still one cross.
-  assert.equal(g.cross('T', CROSS, now + 2000).sell, true);
-  assert.equal(g.status().crossesPending, 1);
+  // Only a fill is a sale: the call alone (its order rejected, or not filled) is not scored.
+  assert.equal(g.status().crossesPending, 0);
+  assert.equal(g.cross('T', CROSS, now + 2000).sell, true, 'called again: the next order');
+  g.crossFilled('T', 1, 0.63, 6, 0.0165, now + 2000);
+  g.crossFilled('T', 1, 0.63, 4, 0.0165, now + 2100);
+  assert.equal(g.status().crossesPending, 2);
   // The sale waits for its market's result across a restart; NO settles: holding YES would have paid 0, so the sale
   // made its net price x 10.
   const again = new SinuousExitGate({ mode: 'rest', minNetProfit: 0.015 }, BENCH, file, undefined, now);
-  assert.equal(again.status().crossesPending, 1);
+  assert.equal(again.status().crossesPending, 2);
   again.settled('T', 'no', now + 60_000);
   const s = again.status();
-  assert.equal(s.scored, 1);
+  assert.equal(s.scored, 2);
   assert.equal(s.crossesPending, 0);
   assert.ok(Math.abs(s.netUsd - (0.63 - 0.0165) * 10) < 0.01, String(s.netUsd));
+});
+
+test('cross: a NO position\'s fill is scored in NO terms; a cross that never filled leaves nothing to score', () => {
+  const g = new SinuousExitGate({ mode: 'cross', minNetProfit: 0.015 }, BENCH, undefined, undefined, 0);
+  g.crossFilled('N', -1, 0.7, 5, 0.0147, 0); // sold 5 NO at 70c
+  g.cross('U', CROSS, 0); // called, no curve yet: nothing
+  g.settled('N', 'no', 1000); // NO won: holding would have paid $1
+  g.settled('U', 'yes', 1000);
+  const s = g.status();
+  assert.equal(s.scored, 1);
+  assert.ok(Math.abs(s.netUsd - (0.7 - 0.0147 - 1) * 5) < 0.006, String(s.netUsd));
 });
 
 test('cross mode (paper\'s default): the curve sells on a confirmed cross but never rests a sell at the swing top and never holds an exit', () => {
@@ -313,17 +326,21 @@ test('cross mode (paper\'s default): the curve sells on a confirmed cross but ne
   // No resting sell, however the curve moves.
   assert.equal(g.restTarget('T'), undefined);
   assert.equal(g.restTarget('T', 400), undefined);
-  // The cross fires as in rest mode.
+  // The cross fires as in rest mode; its fill is what gets scored.
   const c = g.cross('T', CROSS, now);
   assert.equal(c.sell, true);
   assert.match(c.why!, /^exit curve: cross 0\.63 /);
+  g.crossFilled('T', 1, 0.63, 10, 0.0165, now);
   assert.deepEqual([g.status().mode, g.status().cross, g.status().crossesPending], ['cross', true, 1]);
   // Every other exit (a profit exit, a stop) goes out at once: nothing is held.
   assert.equal(g.check('T', { sidePrice: 0.66, count: 10, exitFeePer: 0.0157, entrySidePrice: 0.4, entryFeePer: 0.01, protective: false }, now).allow, true);
   assert.equal(g.check('T', { sidePrice: 0.3, count: 10, exitFeePer: 0.0147, entrySidePrice: 0.4, entryFeePer: 0.01, protective: true }, now).allow, true);
   assert.deepEqual(g.status().holding, []);
-  // The paper default.
-  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40) }).sinuousExit.paperMode, 'cross');
+  // The default in paper and live, with one bench rule (the paper-only names from before Oct 24 still read).
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40) }).sinuousExit;
+  assert.deepEqual([cfg.mode, cfg.benchT, cfg.benchMinExits], ['cross', 2, 30]);
+  assert.deepEqual([loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), SINUOUS_PAPER_BENCH_T: '3' }).sinuousExit.benchT, loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), SINUOUS_PAPER_BENCH_T: '3', SINUOUS_BENCH_T: '1.5' }).sinuousExit.benchT], [3, 1.5]);
+  assert.equal('paperMode' in cfg, false, 'no paper-only mode');
 });
 
 test('rest mode: the cross is benched when selling on it loses against holding; the resting sells go on', () => {
@@ -333,6 +350,7 @@ test('rest mode: the cross is benched when selling on it loses against holding; 
   for (const t of ['A', 'B']) {
     now = rollOver(g, t, now);
     assert.equal(g.cross(t, CROSS, now).sell, true);
+    g.crossFilled(t, 1, CROSS.sidePrice, CROSS.count, CROSS.exitFeePer, now);
     // YES settles: holding would have paid $1 a contract, so each sale lost (1 - 0.6135) x 10.
     g.settled(t, 'yes', now);
   }

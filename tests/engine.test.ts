@@ -428,11 +428,14 @@ class StubCrossOnly extends SinuousExitGate {
   }
 }
 
-test('exit curve cross mode (paper\'s default): no sell rests at the swing top; the cross still sells at the bid', async () => {
+test('exit curve cross mode (the default, paper and live): no sell rests at the swing top; the cross still sells at the bid', async () => {
   const curveExit = new StubCrossOnly({ mode: 'cross', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
   const { engine, recon, market, md, oms } = await setup({ curveExit, env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
   engine.balance = (await recon.run('startup'))!.balance;
-  oms.onFill({ tradeId: 'k1', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.4, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+  // Long 10 YES bought at 0.40 on the (paper) exchange, so its sale can fill.
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.38, size: 50 }], asks: [{ price: 0.4, size: 50 }] }, Date.now());
+  await oms.submit({ ticker: market.ticker, asset: 'BTC', windowCloseTs: market.closeTime, side: 'bid', price: 0.4, count: 10, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: false, purpose: 'entry', fairValue: 0.5, modelId: 'm', decisionId: 'e' });
+  assert.equal(oms.positions.get(market.ticker)?.yes, 10);
   md.book(market.ticker).applySnapshot({ bids: [{ price: 0.45, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, Date.now());
   const notes = () => engine.status.get(market.ticker)!.notes.join(' | ');
   const resting = () => oms.liveOrders().filter((o) => o.ticker === market.ticker && o.purpose === 'exit' && o.timeInForce === 'good_till_canceled' && !o.cancelRequested);
@@ -442,6 +445,28 @@ test('exit curve cross mode (paper\'s default): no sell rests at the swing top; 
   await engine.tick();
   const iocs = oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly && o.timeInForce === 'immediate_or_cancel');
   assert.deepEqual(iocs.map((o) => [o.side, o.price, o.count]), [['ask', 0.45, 10]], notes());
+  // Scored on its fill (10 sold at 0.45), paper and live alike: settled YES, holding would have paid $1 a contract.
+  assert.equal(curveExit.status().crossesPending, 1);
+  oms.settle(market.ticker, 'yes');
+  const s = curveExit.status();
+  assert.equal(s.scored, 1);
+  assert.ok(s.netUsd < -5 && s.netUsd > -6, `(0.45 - fee - 1) x 10: ${s.netUsd}`);
+});
+
+test('exit curve: a cross whose order fills nothing is not scored', async () => {
+  const curveExit = new StubCrossOnly({ mode: 'cross', minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 });
+  const { engine, recon, market, md, oms } = await setup({ curveExit, env: { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' } });
+  engine.balance = (await recon.run('startup'))!.balance;
+  oms.onFill({ tradeId: 'k2', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.4, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.45, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, Date.now());
+  // The paper exchange holds no position here (the fill above went to the bot's books only): it refuses the
+  // reduce-only sale, as Kalshi would, so the cross order fills nothing.
+  curveExit.armed = true;
+  await engine.tick();
+  const sent = oms.allOrders(500).filter((o) => o.ticker === market.ticker && o.reduceOnly);
+  assert.equal(sent.length, 1, 'the cross order was sent');
+  assert.equal(sent[0].filledCount, 0, sent[0].state);
+  assert.equal(curveExit.status().crossesPending, 0);
 });
 
 test('exit curve: an exit at a loss goes out at once', async () => {
