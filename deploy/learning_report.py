@@ -50,7 +50,12 @@ mk = get('/markets') or []
 mk = mk if isinstance(mk, list) else []
 for x in mk[:12]:
     c = x.get('conviction') or {}
-    if c: print(f"  {x.get('ticker')}: TA shift {x.get('taShift')}, taDir {c.get('taDir')}, breadth up/down {c.get('breadthUp')}/{c.get('breadthDown')}, drift {c.get('drift')}, alt {(c.get('alt') or {}).get('why')}")
+    if c:
+        gp, rb, ch = c.get('gp') or {}, c.get('ruleBook') or {}, c.get('character') or {}
+        gps = f"exposure {gp.get('exposure')} validated {gp.get('validated')} speaks {gp.get('speaks')}" if gp else 'none'
+        rbs = f"score {rb.get('score')} over {rb.get('n')} rules" if rb else 'none'
+        print(f"  {x.get('ticker')}: TA shift {x.get('taShift')}, taDir {c.get('taDir')}, breadth up/down {c.get('breadthUp')}/{c.get('breadthDown')}, drift {c.get('drift')}, alt {(c.get('alt') or {}).get('why')}"
+              f" | evolved formula {gps} | rule book {rbs} | character {ch.get('cls')} | stand aside {c.get('standAside')}")
 print('  tree models', short(s.get('treeModels'), 300))
 print('  snn', short(s.get('snn'), 400))
 
