@@ -49,7 +49,7 @@ import { PaperExchange } from '../bot/paper/paperExchange';
 import { marketWorstLoss } from '../bot/risk/exposure';
 import { EquityGuard } from '../bot/risk/equityGuard';
 import { RiskGateway } from '../bot/risk/riskGateway';
-import { decide } from '../bot/strategy/fairValueStrategy';
+import { decide, decisionProbability, type MarketView } from '../bot/strategy/fairValueStrategy';
 import { ProfitPeaks } from '../bot/strategy/profitPeaks';
 import { ConfluenceRatchetExit, DEFAULT_HUNT, DEFAULT_RATCHET, EXIT_POLICIES, ExitPolicyName, HuntParams, LiquidityRatchet, RatchetParams } from '../bot/strategy/exitPolicies';
 import { readRecordings, ReplayState } from './replay';
@@ -121,7 +121,7 @@ export interface BacktestResult {
   sizeScaleMin?: number;
   /** With the paper options: entries the accuracy gate held back, when the take-profit bench benched, its sales (fills
    *  and contracts). */
-  paper?: { accuracyBlocks: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number };
+  paper?: { accuracyBlocks: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number; trainTrades?: number; exploreEntries?: number };
   /** Fills and contracts by order purpose (quote, entry, exit), and contracts filled by UTC hour (YYYY-MM-DDTHH). */
   byPurpose?: Record<string, { fills: number; contracts: number }>;
   contractsByHour?: Record<string, number>;
@@ -174,7 +174,9 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
   makerMarkouts?: number[];
   /** Called at every market evaluation with the price the replay trades on (the replay check sets it beside the paper
    *  bot's decision records). */
-  onEval?: (e: { ticker: string; now: number; pYes: number; fv: number; bid: number; ask: number; position: number }) => void }
+  onEval?: (e: EvalReading) => void }
+/** One market evaluation: the price traded on and what the fair value was made of. */
+export interface EvalReading { ticker: string; now: number; pYes: number; fv: number; bid: number; ask: number; position: number; spot?: number; strike?: number; sigma?: number; sigmaPricing?: number }
 
 /** The engine's paper caps (bot/engine.ts): one order, this many closing together, this many in all. */
 export const PAPER_WINDOW_ORDERS = 3;
@@ -276,6 +278,10 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const hunts = new Map<string, ConfluenceRatchetExit>();
   const pending = new Map<string, { side: 'bid' | 'ask'; price: number; count: number; kind: 'fv' | 'tp' | 'rt'; stop?: number }>();
   let exitSeq = 0;
+  // The paper bot's exploration entries and training trades (with the paper options; see below).
+  const exploreTs: number[] = [], trainTs: number[] = [];
+  const trainTicker = new Set<string>();
+  const exploreRng = rng(29);
   // The adaptive maker buffer (see BacktestOpts.makerMarkouts): maker fills wait 60 s for their markout, signed so that
   // positive is the market moving the fill's way.
   const markouts = (opts.makerMarkouts ?? []).filter((x) => Number.isFinite(x)).slice(-MARKOUT_KEEP);
@@ -291,7 +297,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   let slipSum = 0, slipN = 0;
   const gate = opts.accuracyGate?.enabled ? new AccuracyGate(opts.accuracyGate, undefined, () => st.now) : undefined;
   const tpBench = opts.takeProfitBench ? new TakeProfitBench(opts.takeProfitBench.enforce, opts.takeProfitBench.rule, undefined, undefined, 0) : undefined;
-  res.paper = { accuracyBlocks: 0, takeProfitBenchedAt: undefined, takeProfitSales: 0, takeProfitContracts: 0 };
+  res.paper = { accuracyBlocks: 0, takeProfitBenchedAt: undefined, takeProfitSales: 0, takeProfitContracts: 0, trainTrades: 0, exploreEntries: 0 };
   res.byPurpose = {};
   res.contractsByHour = {};
   // An order's purpose from its client order id (<ticker>-<ms>-<side>-<purpose>[-tp]; a queued exit <ticker>-<ms>-exit-<kind>).
@@ -393,6 +399,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           hunts.delete(m.ticker);
           cadence.forget(m.ticker);
           pending.delete(m.ticker);
+          trainTicker.delete(m.ticker);
           const p = pos.get(m.ticker);
           if (p && !p.settled) {
             pos.settle(m.ticker, result, st.now);
@@ -454,7 +461,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         tape?.push(st.now, tickerHash(m.ticker), fv.pYes, pred.p, pred.std, tape.keys.map((k) => fmap[k]));
       }
       const pYes = pred.p;
-      opts.onEval?.({ ticker: m.ticker, now: st.now, pYes, fv: fv.pYes, bid: bid.price, ask: ask.price, position: pos.position(m.ticker) });
+      opts.onEval?.({ ticker: m.ticker, now: st.now, pYes, fv: fv.pYes, bid: bid.price, ask: ask.price, position: pos.position(m.ticker), spot: spot.value, strike: terms.strike, sigma: vol.sigmaPerSqrtSec, sigmaPricing: sigmaFv });
       const pMarket = model.marketProbability(mid);
       const ret = idx!.trailingLogReturn(st.now, strategy.fastMoveWindowSec * 1000);
       const fastMove = ret !== undefined && Math.abs(ret) > strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(strategy.fastMoveWindowSec);
@@ -574,7 +581,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         }
         newRiskRoomUsd = Math.max(0, Math.min(tierLimits.maxWindowRiskFrac * bankroll - windowRisk, tierLimits.maxTotalRiskFrac * bankroll - totalRisk, await ex.getBalance()));
       }
-      const plan = decide({
+      const view: MarketView = {
         ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: pos.position(m.ticker), bankroll,
         maxOrderRiskUsd: fixedUsd > 0 ? fixedUsd : tier.orderFrac * bankroll * sessRisk.sizeMult * sizeScale, maxContracts: Math.floor(limits.maxContractsPerOrder * (fixedUsd > 0 ? 1 : sessRisk.sizeMult) * 100) / 100, minSidePrice: limits.minSidePrice,
         ...(fixedUsd > 0 ? { fixedOrderUsd: fixedUsd } : {}),
@@ -586,14 +593,45 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         entryFeePerContract: pNow && Math.abs(pNow.yes) > 1e-9 ? pNow.fees / Math.abs(pNow.yes) : undefined,
         profitPeakSidePrice: peaks.update(m.ticker, posC, posC > 0 ? bid.price : posC < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
         entryWindowOpen, exitWindowOpen: tauSec > strategy.noExitBeforeCloseSec,
-      }, { ...stratRun, kellyFraction: tier.kellyFraction * sizeScale, minEdge: strategy.minEdge + sessRisk.minEdgeAdd, inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult }, {
+      };
+      const strat = { ...stratRun, kellyFraction: tier.kellyFraction * sizeScale, minEdge: strategy.minEdge + sessRisk.minEdgeAdd, inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult };
+      const plan = decide(view, strat, {
         exits: policy === 'fair_value' || policy === 'take_profit' || policy === 'hybrid' || (policy === 'confluence_ratchet' && !huntMode),
         blockReductions: huntMode,
         entries: Boolean(reason),
       });
+      const qDecision = decisionProbability(view, strat);
       if (strategy.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features: fmap, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: strategy.takeMargin });
       // Fill model (validated only), as live: quote, cross or skip each maker entry by expected value.
-      applyFillModel(plan, opts.fillModel, { q: pYes, book, tick: m.tickSize, tauSec, sigma: vol.sigmaPerSqrtSec, features: fmap, minEv: strategy.fillMinEv, takerMinEdge: strategy.takerBuffer + strategy.minEdge });
+      applyFillModel(plan, opts.fillModel, { q: qDecision, book, tick: m.tickSize, tauSec, sigma: vol.sigmaPerSqrtSec, features: fmap, minEv: strategy.fillMinEv, takerMinEdge: strategy.takerBuffer + strategy.minEdge });
+      // The paper bot's own extra entries (bot/engine.ts), when nothing else enters a flat market in its entry window:
+      // an exploration entry (PAPER_EXPLORE: the best borderline one within PAPER_EXPLORE_BAND of the edge threshold, at
+      // most 1 contract, at PAPER_EXPLORE_RATE, PAPER_EXPLORE_MAX_PER_HOUR), else a training trade (1 contract at the
+      // touch on the side the model favours, PAPER_TRAINING_TRADES_PER_HOUR spread over the hour, one per contract).
+      if (opts.paper && reason && entryWindowOpen && posC === 0 && !plan.place.some((p) => p.purpose === 'entry')) {
+        while (exploreTs.length && exploreTs[0] < st.now - 3_600_000) exploreTs.shift();
+        if (strategy.paperExplore) {
+          const e = decide(view, { ...strat, minEdge: Math.max(0, strat.minEdge - strategy.exploreBand), style: 'both' }, { exits: false, blockReductions: false, entries: true }).place.find((p) => p.purpose === 'entry');
+          if (e && exploreTs.length < strategy.exploreMaxPerHour && exploreRng() < strategy.exploreRate) {
+            exploreTs.push(st.now);
+            res.paper!.exploreEntries!++;
+            plan.place.push({ ...e, count: Math.min(e.count, 1), why: `explore (p=${strategy.exploreRate}): ${e.why}` });
+          }
+        }
+        while (trainTs.length && trainTs[0] < st.now - 3_600_000) trainTs.shift();
+        const perHour = strategy.paperTrainTrades;
+        if (!plan.place.some((p) => p.purpose === 'entry') && perHour > 0 && !trainTicker.has(m.ticker) && trainTs.length < perHour && st.now - (trainTs[trainTs.length - 1] ?? 0) >= (3_600_000 / perHour) * 0.5) {
+          const buyYes = qDecision >= mid;
+          const cost = buyYes ? ask.price : Math.round((1 - bid.price) * 10000) / 10000;
+          if (cost >= limits.minSidePrice && cost <= 1 - limits.minSidePrice && ask.price - bid.price <= 0.08 && !fastMove && tauSec > limits.noEntryBeforeCloseSec) {
+            trainTs.push(st.now);
+            trainTicker.add(m.ticker);
+            res.paper!.trainTrades!++;
+            plan.place.push({ side: buyYes ? 'bid' : 'ask', price: buyYes ? ask.price : bid.price, count: 1, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: false, purpose: 'entry',
+              edge: buyYes ? qDecision - ask.price : (1 - qDecision) - cost, why: `train (paper): ${buyYes ? 'YES' : 'NO'} at ${cost.toFixed(2)}` });
+          }
+        }
+      }
       for (const c of plan.cancel) if (!cancelInFlight.has(c.clientOrderId)) await send(m.ticker, 'cancel', () => cancelNow(c.clientOrderId), c.clientOrderId);
 
       for (const p of plan.place) {

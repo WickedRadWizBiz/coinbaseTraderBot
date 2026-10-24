@@ -63,6 +63,7 @@ test('replay check: paper side read from the audit log (crypto only, exits by ki
   assert.deepEqual(p.byHour, { '2026-10-22T10': -1.25 });
   assert.deepEqual(p.byPurpose, { exit: { fills: 2, contracts: 5 }, other: { fills: 1, contracts: 6 } }, 'an order the log does not name is other');
   assert.deepEqual(p.contractsByHour, { '2026-10-22T10': 11 });
+  assert.deepEqual(p.extra, { train: 0, explore: 0 });
 });
 
 test('replay check verdict: same sign and within 25% of paper', () => {
@@ -123,6 +124,7 @@ test('replay check: the stretch starts at the paper bot\'s last start; paper cou
   assert.equal(q.diagnoses, 2);
   assert.equal(q.lastAt, '2026-10-24T15:35:00.000Z');
   assert.deepEqual(q.reasons, { 'daily loss limit # reached': 19, quoting: 0 });
+  assert.deepEqual(paperSummary(await readAudit(dir, ['2026-10-24']), from, to).quietHours['2026-10-24T15'], { 'daily loss limit # reached': 19, quoting: 0 }, 'an hour without a fill');
 });
 
 test('replay check: prices set beside the paper bot\'s decision records', async () => {
@@ -161,6 +163,14 @@ test('replay check: prices set beside the paper bot\'s decision records', async 
   assert.equal(s.sides, 1, 'one record 2c or more off the mid');
   assert.equal(s.sameSide, 1);
   assert.equal(s.samePosition, 1);
+  assert.equal(s.spotBp, null, 'records without the fair value\'s inputs');
+  // With them: the index 10 bp apart, the same strike, the volatility 20% higher in the replay.
+  const t1 = Date.parse('2026-10-24T15:00:00Z');
+  const p2 = new Map([['KXBTC15M-D', [{ t: t1, pYes: 0.5, fv: 0.5, mid: 0.5, position: 0, spot: 100_000, strike: 100_000, sigma: 1e-4, sigmaPricing: 1.1e-4 }]]]);
+  const m2 = priceMatcher(p2, from, to);
+  m2.onEval({ ticker: 'KXBTC15M-D', now: t1, pYes: 0.5, fv: 0.5, bid: 0.49, ask: 0.51, position: 0, spot: 100_100, strike: 100_000, sigma: 1.2e-4, sigmaPricing: 1.32e-4 });
+  const s2 = m2.summary();
+  assert.deepEqual([s2.spotBp, s2.strikeDiffers, s2.sigmaRatio, s2.sigmaPricingRatio], [10, 0, 1.2, 1.2]);
 });
 
 test('backtest paper options: the maker buffer adapts from the maker markouts as the engine\'s does', async () => {
@@ -176,6 +186,24 @@ test('backtest paper options: the maker buffer adapts from the maker markouts as
   assert.equal(few.makerBufferEnd, 0.02, 'without the paper options the setting stays');
   const fresh = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy: 'take_profit', paper, makerMarkouts: [0.01] });
   assert.ok(fresh.makerBufferEnd !== undefined && fresh.makerBufferEnd >= 0.015 - 1e-12 && fresh.makerBufferEnd <= 0.03 + 1e-12);
+});
+
+test('backtest paper options: the paper bot\'s training trades and exploration entries', async () => {
+  const dir = path.join(tmp(), 'rec');
+  writeSyntheticRecordings(dir, { windows: 6, seed: 12, marketNoise: 0.06 });
+  const paper = { orderFrac: 0.1, orderUsd: 0 };
+  const run = (env: Record<string, string>, opts: object = { paper }) => {
+    const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both', ...env });
+    return runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy: 'take_profit', ...opts });
+  };
+  const on = await run({ PAPER_TRAINING_TRADES_PER_HOUR: '120', PAPER_EXPLORE: 'false' });
+  assert.ok((on.paper?.trainTrades ?? 0) > 0, 'training trades when nothing else enters');
+  assert.ok((on.paper?.trainTrades ?? 0) <= 120 * Math.ceil(on.days * 24), 'within the hourly budget');
+  assert.equal(on.paper?.exploreEntries, 0);
+  const off = await run({ PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' });
+  assert.equal(off.paper?.trainTrades, 0);
+  const notPaper = await run({ PAPER_TRAINING_TRADES_PER_HOUR: '120' }, {});
+  assert.equal(notPaper.paper?.trainTrades, 0, 'only with the paper options');
 });
 
 test('backtest: the weekly loss pause stops entries only with the override off; before tradeFromMs the replay only watches', async () => {

@@ -36,6 +36,7 @@ import path from 'path';
 import readline from 'readline';
 import zlib from 'zlib';
 import type { Config } from '../bot/config';
+import type { EvalReading } from './backtest';
 
 export interface SideSummary {
   fills: number; contracts: number; fees: number; pnl: number; markets: number;
@@ -60,6 +61,9 @@ export interface PriceMatch {
   sameSide: number | null; sides: number;
   /** The share of matched records where both held the same side of the market (or both were flat). */
   samePosition: number | null;
+  /** What the fair value is made of, replay vs paper: the index (mean |gap| in basis points), the strike (the share of
+   *  records where it differs) and the volatility (mean ratio replay / paper: the EWMA, and the one priced with). */
+  spotBp: number | null; strikeDiffers: number | null; sigmaRatio: number | null; sigmaPricingRatio: number | null;
 }
 export interface ReplayCheck {
   days: string[]; bankroll: number; exitPolicy: string;
@@ -71,7 +75,7 @@ export interface ReplayCheck {
    *  days to compare with); model swaps in the stretch. */
   settingsDiffer: string[] | null; modelSwaps: string[];
   /** Exits and the gate's counts are the whole replay's, warm-up included. */
-  replay: SideSummary & { accuracyBlocks: number; entryEvaluations: number; takeProfitBenchedAt: string | null; sizeScaleMin: number; makerBufferEnd: number | null };
+  replay: SideSummary & { accuracyBlocks: number; entryEvaluations: number; takeProfitBenchedAt: string | null; sizeScaleMin: number; makerBufferEnd: number | null; extra: { train: number; explore: number } };
   /** The paper bot's maker buffer now, from the maker markouts it was seeded with (null: fewer than 30, the setting). */
   makerBufferPaper: number | null;
   /** The engine's other models the replay priced with (engineModels), the validation gates' mode and benched books. */
@@ -98,7 +102,11 @@ const exitKind = (why: string) => /^take-profit/.test(why) ? 'take-profit' : /ra
 const empty = (): SideSummary => ({ fills: 0, contracts: 0, fees: 0, pnl: 0, markets: 0, exits: {}, byHour: {}, byPurpose: {}, contractsByHour: {} });
 export type PaperSide = SideSummary & {
   gateShare: number | null; lastFillAt: string | null;
+  /** Fills of paper's own extra entries: training trades and exploration entries. */
+  extra: { train: number; explore: number };
   quiet: { diagnoses: number; lastAt: string | null; reasons: Record<string, number> };
+  /** Hours in the stretch with entry diagnoses but no fill: their reasons, summed. */
+  quietHours: Record<string, Record<string, number>>;
 };
 
 /** What the check reads from the audit log (crypto only), each with its time. */
@@ -111,7 +119,7 @@ export interface AuditRecords {
   diagnoses: Array<{ t: number; markets: number; gated: number; reasons: Record<string, number> }>;
   modelSwaps: number[];
   /** The price each crypto decision record traded on, by ticker in time order (with readAudit's `prices` option). */
-  prices: Map<string, Array<{ t: number; pYes: number; fv: number; mid: number; position: number }>>;
+  prices: Map<string, Array<{ t: number; pYes: number; fv: number; mid: number; position: number; spot?: number; strike?: number; sigma?: number; sigmaPricing?: number }>>;
 }
 
 // A decision record's numbers sit before its feature map: read with a pattern, not parsed (the records are many).
@@ -134,8 +142,9 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
     for await (const line of rl) {
       const head = line.slice(0, 160);
       const decision = head.includes('"kind":"decision"');
-      // The decision that planned an exit names why (deploy/pnl_report.py reads it the same way).
-      const exitPlan = decision && line.includes('"purpose":"exit"');
+      // The decision that planned an exit names why (deploy/pnl_report.py reads it the same way); so does paper's training
+      // trade or exploration entry.
+      const exitPlan = decision && (line.includes('"purpose":"exit"') || line.includes('"why":"train (paper)') || line.includes('"why":"explore'));
       const diagnosis = decision && head.includes('"event":"entry_diagnosis"');
       const swap = head.includes('"kind":"config"') && head.includes('"event":"model_swapped"');
       if (prices && decision && !diagnosis) {
@@ -150,7 +159,7 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
           const bid = Number(b?.[1]), ask = Number(b?.[2]), position = Number(b?.[3]);
           if (pYes !== undefined && fv !== undefined && Number.isFinite(bid) && Number.isFinite(ask)) {
             const arr = a.prices.get(ticker) ?? [];
-            arr.push({ t, pYes, fv, mid: (bid + ask) / 2, position: Number.isFinite(position) ? position : 0 });
+            arr.push({ t, pYes, fv, mid: (bid + ask) / 2, position: Number.isFinite(position) ? position : 0, spot: numAt(pre, 'spot'), strike: numAt(pre, 'strike'), sigma: numAt(pre, 'sigma'), sigmaPricing: numAt(pre, 'sigmaPricing') });
             a.prices.set(ticker, arr);
           }
         }
@@ -181,7 +190,9 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
         continue;
       }
       if (exitPlan) {
-        for (const p of (d.place ?? []) as Array<{ purpose?: string; side?: string; price?: number; why?: string }>) if (p.purpose === 'exit') whyOf.set(`${d.decisionId}|${p.side}|${p.price}`, String(p.why ?? ''));
+        for (const p of (d.place ?? []) as Array<{ purpose?: string; side?: string; price?: number; why?: string }>) {
+          if (p.purpose === 'exit' || /^(train|explore)/.test(String(p.why ?? ''))) whyOf.set(`${d.decisionId}|${p.side}|${p.price}`, String(p.why ?? ''));
+        }
         continue;
       }
       if (r.kind === 'order_new') { a.orders.set(d.clientOrderId, { purpose: d.purpose, why: whyOf.get(`${d.decisionId}|${d.side}|${d.price}`) }); continue; }
@@ -201,7 +212,7 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
 
 /** What paper did in [from, to). */
 export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): PaperSide {
-  const out: PaperSide = { ...empty(), gateShare: null, lastFillAt: null, quiet: { diagnoses: 0, lastAt: null, reasons: {} } };
+  const out: PaperSide = { ...empty(), gateShare: null, lastFillAt: null, extra: { train: 0, explore: 0 }, quiet: { diagnoses: 0, lastAt: null, reasons: {} }, quietHours: {} };
   const inside = (t: number) => t >= from && t < to;
   let lastFill = -Infinity;
   for (const f of a.fills) {
@@ -214,6 +225,8 @@ export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): 
     const o = f.coid ? a.orders.get(f.coid) : undefined;
     const bp = (out.byPurpose[o?.purpose ?? 'other'] ??= { fills: 0, contracts: 0 });
     bp.fills++; bp.contracts += f.count;
+    if (o?.why?.startsWith('train')) out.extra.train++;
+    if (o?.why?.startsWith('explore')) out.extra.explore++;
     if (o?.purpose !== 'exit') continue;
     const k = exitKind(o.why ?? '');
     out.exits[k] = (out.exits[k] ?? 0) + f.count;
@@ -228,6 +241,11 @@ export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): 
   for (const d of a.diagnoses) {
     if (!inside(d.t)) continue;
     markets += d.markets; gated += d.gated;
+    const h = hourOf(d.t);
+    if (!out.contractsByHour[h]) {
+      const q = (out.quietHours[h] ??= {});
+      for (const [k, n] of Object.entries(d.reasons)) q[k] = (q[k] ?? 0) + n;
+    }
     if (d.t <= lastFill) continue;
     out.quiet.diagnoses++;
     out.quiet.lastAt = new Date(d.t).toISOString();
@@ -239,9 +257,10 @@ export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): 
 
 /** Sets the replay's evaluations beside paper's decision records: feed it every evaluation (in time order), then read
  *  the summary. A record is matched by the first evaluation of its market within a second of it. */
-export function priceMatcher(prices: AuditRecords['prices'], from: number, to: number): { onEval: (e: { ticker: string; now: number; pYes: number; fv: number; bid: number; ask: number; position: number }) => void; summary: () => PriceMatch } {
+export function priceMatcher(prices: AuditRecords['prices'], from: number, to: number): { onEval: (e: EvalReading) => void; summary: () => PriceMatch } {
   const next = new Map<string, number>();
   let matched = 0, dFv = 0, dMid = 0, dP = 0, shiftP = 0, shiftR = 0, sides = 0, same = 0, samePos = 0;
+  const parts = { spot: [0, 0], strike: [0, 0], sigma: [0, 0], sigmaPricing: [0, 0] };
   let records = 0;
   for (const arr of prices.values()) for (const r of arr) if (r.t >= from && r.t < to) records++;
   return {
@@ -259,12 +278,20 @@ export function priceMatcher(prices: AuditRecords['prices'], from: number, to: n
         shiftP += Math.abs(r.pYes - r.fv); shiftR += Math.abs(e.pYes - e.fv);
         if (Math.abs(r.pYes - r.mid) >= 0.02) { sides++; if (Math.sign(e.pYes - mid) === Math.sign(r.pYes - r.mid)) same++; }
         if (Math.sign(e.position) === Math.sign(r.position)) samePos++;
+        if (e.spot && r.spot) { parts.spot[0] += Math.abs(e.spot - r.spot) / r.spot * 1e4; parts.spot[1]++; }
+        if (e.strike !== undefined && r.strike !== undefined) { parts.strike[0] += Math.abs(e.strike - r.strike) > 1e-9 * Math.max(1, Math.abs(r.strike)) ? 1 : 0; parts.strike[1]++; }
+        if (e.sigma && r.sigma) { parts.sigma[0] += e.sigma / r.sigma; parts.sigma[1]++; }
+        if (e.sigmaPricing && r.sigmaPricing) { parts.sigmaPricing[0] += e.sigmaPricing / r.sigmaPricing; parts.sigmaPricing[1]++; }
       }
       next.set(e.ticker, i);
     },
     summary: () => {
       const m = (x: number) => (matched ? +(x / matched).toFixed(4) : null);
-      return { records, matched, fv: m(dFv), mid: m(dMid), price: m(dP), shiftPaper: m(shiftP), shiftReplay: m(shiftR), sameSide: sides ? +(same / sides).toFixed(3) : null, sides, samePosition: m(samePos) };
+      const avg = ([x, n]: number[], d = 3) => (n ? +(x / n).toFixed(d) : null);
+      return {
+        records, matched, fv: m(dFv), mid: m(dMid), price: m(dP), shiftPaper: m(shiftP), shiftReplay: m(shiftR), sameSide: sides ? +(same / sides).toFixed(3) : null, sides, samePosition: m(samePos),
+        spotBp: avg(parts.spot, 2), strikeDiffers: avg(parts.strike), sigmaRatio: avg(parts.sigma), sigmaPricingRatio: avg(parts.sigmaPricing),
+      };
     },
   };
 }
@@ -383,7 +410,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const replay = {
     ...empty(), accuracyBlocks: r.paper?.accuracyBlocks ?? 0, entryEvaluations: r.entryEvaluations,
     takeProfitBenchedAt: r.paper?.takeProfitBenchedAt ? new Date(r.paper.takeProfitBenchedAt).toISOString() : null, sizeScaleMin: r.sizeScaleMin ?? 1,
-    makerBufferEnd: r.makerBufferEnd ?? null,
+    makerBufferEnd: r.makerBufferEnd ?? null, extra: { train: r.paper?.trainTrades ?? 0, explore: r.paper?.exploreEntries ?? 0 },
   };
   const mk = (o.makerMarkouts ?? []).slice(-2000);
   const makerBufferPaper = mk.length >= 30 ? Math.min(S.makerBufferRange[1], Math.max(S.makerBufferRange[0], -mk.reduce((a, x) => a + x, 0) / mk.length)) : null;
@@ -454,18 +481,19 @@ async function main(): Promise<void> {
   row('paper', res.paper);
   const purposes = (s: SideSummary) => Object.entries(s.byPurpose).sort().map(([k, x]) => `${k} ${x.fills}/${x.contracts.toFixed(0)}`).join(', ') || 'none';
   console.log(`fills/contracts by order purpose: replay ${purposes(res.replay)} | paper ${purposes(res.paper)}`);
+  console.log(`paper's extra entries: training trades replay ${res.replay.extra.train} placed, paper ${res.paper.extra.train} filled | exploration replay ${res.replay.extra.explore} placed, paper ${res.paper.extra.explore} filled`);
   console.log('hour (UTC)      replay contracts  paper contracts   replay P&L   paper P&L');
   for (const h of [...new Set([...Object.keys(res.replay.contractsByHour), ...Object.keys(res.paper.contractsByHour), ...Object.keys(res.replay.byHour), ...Object.keys(res.paper.byHour)])].sort()) {
     console.log(`${h.replace('T', ' ')}:00  ${(res.replay.contractsByHour[h] ?? 0).toFixed(0).padStart(16)}  ${(res.paper.contractsByHour[h] ?? 0).toFixed(0).padStart(15)}  ${f(res.replay.byHour[h] ?? 0).padStart(11)}  ${f(res.paper.byHour[h] ?? 0).padStart(10)}`);
   }
   console.log(`paper's last fill in the stretch: ${res.paper.lastFillAt ? hm(res.paper.lastFillAt) : 'none'}`);
-  if (res.paper.quiet.diagnoses) {
-    const top = Object.entries(res.paper.quiet.reasons).sort((x, y) => y[1] - x[1]).slice(0, 6).map(([k, n]) => `${k} x${n}`).join('; ');
-    console.log(`after it, ${res.paper.quiet.diagnoses} entry diagnoses (the last ${hm(res.paper.quiet.lastAt!)}), markets by reason summed over them: ${top}`);
-  }
+  const top = (r: Record<string, number>) => Object.entries(r).filter(([k]) => k !== 'quoting').sort((x, y) => y[1] - x[1]).slice(0, 4).map(([k, n]) => `${k} x${n}`).join('; ');
+  for (const [h, r] of Object.entries(res.paper.quietHours).sort()) console.log(`paper filled nothing in ${h.replace('T', ' ')}:00; its entry diagnoses then, markets by reason: ${top(r)}`);
+  if (res.paper.quiet.diagnoses) console.log(`after it, ${res.paper.quiet.diagnoses} entry diagnoses (the last ${hm(res.paper.quiet.lastAt!)}), markets by reason summed over them: ${top(res.paper.quiet.reasons)}`);
   const P = res.prices;
   const c = (x: number | null) => (x === null ? 'n/a' : `${(x * 100).toFixed(1)}c`);
   console.log(`prices at paper's decision records: ${P.matched} of ${P.records} matched within 1 s | mean gap replay vs paper: fair value ${c(P.fv)}, mid ${c(P.mid)}, price traded on ${c(P.price)} | shift from fair value: paper ${c(P.shiftPaper)}, replay ${c(P.shiftReplay)} | same side of the mid ${pct(P.sameSide)} of ${P.sides} | same position ${pct(P.samePosition)}`);
+  console.log(`the fair value's inputs, replay vs paper: index gap ${P.spotBp ?? 'n/a'} bp | strike differs on ${pct(P.strikeDiffers)} | volatility ratio: EWMA x${P.sigmaRatio ?? 'n/a'}, priced with x${P.sigmaPricingRatio ?? 'n/a'}`);
   console.log(`accuracy gate: replay held back ${pct(res.replay.entryEvaluations ? res.replay.accuracyBlocks / res.replay.entryEvaluations : null)} of its entry evaluations; paper's diagnoses show it keeping out ${pct(res.paper.gateShare)} of the markets | take-profit benched ${res.replay.takeProfitBenchedAt ?? 'never'} | replay's loss-aware size went down to x${res.replay.sizeScaleMin.toFixed(2)}`);
   const b = (x: number | null) => (x === null ? 'the setting' : `${(x * 100).toFixed(2)}c`);
   console.log(`maker buffer: paper's now ${b(res.makerBufferPaper)}, the replay's at its end ${b(res.replay.makerBufferEnd)} | the engine's other models in the replay: ${res.models.join(', ') || 'none'} | validation gates ${res.gates}${res.benched.length ? ` (benched: ${res.benched.join(', ')})` : ''}`);
