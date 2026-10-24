@@ -226,6 +226,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const ratchets = new Map<string, LiquidityRatchet>();
   const hunts = new Map<string, ConfluenceRatchetExit>();
   const pending = new Map<string, { side: 'bid' | 'ask'; price: number; count: number; kind: 'fv' | 'tp' | 'rt'; stop?: number }>();
+  let exitSeq = 0;
   const stopByOrder = new Map<string, number>();
   const exitLedger = new Map<string, Array<{ sideSign: number; n: number; proceeds: number }>>();
   let slipSum = 0, slipN = 0;
@@ -409,11 +410,13 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         tierLimits.maxTotalRiskFrac = Math.max(tier.totalFrac, (PAPER_TOTAL_ORDERS * fixedUsd) / bankroll);
       }
       const q = (side: 'bid' | 'ask') => { const o = open.find((x) => x.side === side); return o ? { clientOrderId: o.orderId, price: o.price, remaining: o.remainingCount } : undefined; };
-      // Submit an exit that triggered on the previous tick (1 s reaction delay for every policy).
-      const due = pending.get(m.ticker);
-      pending.delete(m.ticker);
-      const curPos = pos.position(m.ticker);
-      if (due && Math.sign(curPos) === (due.side === 'ask' ? 1 : -1)) {
+      // An exit queued on an evaluation goes out on the next one, a second later (the live bot's reaction); with the paper
+      // options it goes out at the end of the same evaluation, as the paper bot sends it to its in-process exchange.
+      const fireExit = async () => {
+        const due = pending.get(m.ticker);
+        pending.delete(m.ticker);
+        const curPos = pos.position(m.ticker);
+        if (!due || Math.sign(curPos) !== (due.side === 'ask' ? 1 : -1)) return;
         const count = Math.min(due.count, Math.abs(curPos));
         const intent: OrderIntent = { ticker: m.ticker, asset: m.asset, windowCloseTs: m.closeTime, side: due.side, price: due.price, count, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', fairValue: pYes, modelId: model.id, decisionId: 'bt' };
         const d = gateway.check(intent, {
@@ -422,12 +425,13 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           windowRisk: 0, totalRisk: 0, ordersLastMinute: 0, openOrders: 0, modelLiveBlockers: [],
         });
         if (d.ok) {
-          const id = `${m.ticker}-${st.now}-exit-${due.kind}`;
+          const id = `${m.ticker}-${st.now}-${++exitSeq}-exit-${due.kind}`;
           if (due.stop !== undefined) stopByOrder.set(id, due.stop);
           exits.orders++;
           await send(m.ticker, 'order', async () => { try { await ex.createOrder({ ticker: m.ticker, side: due.side, count, price: due.price, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, selfTradePrevention: 'taker_at_cross', clientOrderId: id }); } catch { /* no fill */ } });
         }
-      }
+      };
+      await fireExit();
 
       // Ratchet / hybrid: evaluate the order-book-anchored stop.
       const posNow = pos.position(m.ticker);
@@ -488,11 +492,27 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       if (reason && accuracyBlock) res.paper!.accuracyBlocks++;
       const pNow = pos.get(m.ticker);
       const entrySide = pNow && pNow.yes > 0 ? -pNow.netCash / pNow.yes : pNow && pNow.yes < 0 ? 1 - pNow.netCash / -pNow.yes : undefined;
+      // As the engine (Engine.newRiskRoom): a new order fits the room left under the window and total caps and in the
+      // free cash, so near the caps an order shrinks instead of being refused. Paper's cash holds nothing back for
+      // resting orders, as the bot reads it.
+      let newRiskRoomUsd: number | undefined;
+      if (reason) {
+        // (Every resting order adds risk: the exchange takes reduce-only on immediate-or-cancel orders only.)
+        const restingAll = (await ex.getOpenOrders()).map((o) => ({ ticker: o.ticker, side: o.side, price: o.price, remaining: o.remainingCount, isTaker: false }));
+        let windowRisk = 0, totalRisk = 0;
+        for (const t of new Set([...pos.unsettled().map((x) => x.ticker), ...restingAll.map((r) => r.ticker)])) {
+          const l = marketWorstLoss(pos.get(t), restingAll.filter((r) => r.ticker === t), DEFAULT_FEES);
+          totalRisk += l;
+          if (closeOf.get(t) === m.closeTime) windowRisk += l;
+        }
+        newRiskRoomUsd = Math.max(0, Math.min(tierLimits.maxWindowRiskFrac * bankroll - windowRisk, tierLimits.maxTotalRiskFrac * bankroll - totalRisk, await ex.getBalance()));
+      }
       const plan = decide({
         ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: pos.position(m.ticker), bankroll,
         maxOrderRiskUsd: fixedUsd > 0 ? fixedUsd : tier.orderFrac * bankroll * sessRisk.sizeMult * sizeScale, maxContracts: Math.floor(limits.maxContractsPerOrder * (fixedUsd > 0 ? 1 : sessRisk.sizeMult) * 100) / 100, minSidePrice: limits.minSidePrice,
         ...(fixedUsd > 0 ? { fixedOrderUsd: fixedUsd } : {}),
         ...(tpBench?.benched ? { takeProfitBenched: tpBench.benched } : {}),
+        newRiskRoomUsd,
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,
         restingBid: rb, restingAsk: ra, nowSec: Math.floor(st.now / 1000), closeSec: Math.floor(m.closeTime / 1000),
         pMarket, pStd: pred.std, makerBuffer: strategy.makerBuffer, entrySidePrice: entrySide !== undefined && entrySide > 0 && entrySide < 1 ? entrySide : undefined,
@@ -544,6 +564,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           } catch { /* rejected like the exchange would */ }
         });
       }
+      if (opts.paper && (opts.tradeFromMs === undefined || st.now >= opts.tradeFromMs)) await fireExit();
     }
   }
   exits.avgSlippage = slipN ? slipSum / slipN : null;
