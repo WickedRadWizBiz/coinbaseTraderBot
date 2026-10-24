@@ -18,7 +18,20 @@ interface WindowScore { closeTs: number; d: number; n: number }
 
 export interface ModelHealthState { windows: WindowScore[] }
 
-const ll = (p: number, y: number) => { const q = Math.min(1 - 1e-6, Math.max(1e-6, p)); return y ? -Math.log(q) : -Math.log(1 - q); };
+/** Log loss of one probability for outcome y (1 = YES). */
+export const logLoss = (p: number, y: number) => { const q = Math.min(1 - 1e-6, Math.max(1e-6, p)); return y ? -Math.log(q) : -Math.log(1 - q); };
+
+/** Diebold-Mariano statistic of a loss-differential series in time order: its mean over its standard error, with a
+ *  Newey-West variance (lag cbrt(n)) for the overlap between neighbours. */
+export function dmStat(d: number[]): { mean: number; stat: number } {
+  const n = d.length;
+  const m = d.reduce((a, b) => a + b, 0) / n;
+  const L = Math.floor(Math.cbrt(n));
+  const g = (k: number) => { let s = 0; for (let t = k; t < n; t++) s += (d[t] - m) * (d[t - k] - m); return s / n; };
+  let v = g(0);
+  for (let k = 1; k <= L; k++) v += 2 * (1 - k / (L + 1)) * g(k);
+  return { mean: m, stat: m / Math.sqrt(Math.max(1e-18, v / n)) };
+}
 
 export class ModelHealth {
   private readonly snaps = new Map<string, Snap>();
@@ -37,7 +50,7 @@ export class ModelHealth {
     if (!s) return;
     this.snaps.delete(ticker);
     const y = result === 'yes' ? 1 : 0;
-    const d = ll(s.pModel, y) - ll(s.pMarket, y);
+    const d = logLoss(s.pModel, y) - logLoss(s.pMarket, y);
     const w = this.st.windows.find((x) => x.closeTs === s.closeTs);
     if (w) { w.d = (w.d * w.n + d) / (w.n + 1); w.n++; } else this.st.windows.push({ closeTs: s.closeTs, d, n: 1 });
     this.st.windows.sort((a, b) => a.closeTs - b.closeTs);
@@ -50,12 +63,7 @@ export class ModelHealth {
     const d = this.st.windows.map((w) => w.d);
     const n = d.length;
     if (n < 10) return { windows: n, advantage: null as number | null, pWorse: null as number | null, halt: false };
-    const m = d.reduce((a, b) => a + b, 0) / n;
-    const L = Math.floor(Math.cbrt(n));
-    const g = (k: number) => { let s = 0; for (let t = k; t < n; t++) s += (d[t] - m) * (d[t - k] - m); return s / n; };
-    let v = g(0);
-    for (let k = 1; k <= L; k++) v += 2 * (1 - k / (L + 1)) * g(k);
-    const stat = m / Math.sqrt(Math.max(1e-18, v / n));
+    const { mean: m, stat } = dmStat(d);
     const pWorse = 1 - normCdf(stat);
     // advantage > 0: model log loss lower than the calibrated market's.
     return { windows: n, advantage: -m, pWorse, halt: n >= this.p.minWindows && pWorse < 0.05 };

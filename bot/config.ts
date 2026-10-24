@@ -12,6 +12,7 @@ import { defaultTiers, validateTiers, type TierPoint } from './risk/sizingTiers'
 import type { AccuracyGateConfig } from './strategy/accuracyGate';
 import type { VaultConfig } from './vault/vault';
 import { DEFAULT_LIVE_LINE } from './strategy/liveLine';
+import { DEFAULT_TRIALS, TRIAL_NAMES, type TrialName, type TrialParams } from './strategy/componentTrials';
 import os from 'os';
 import path from 'path';
 
@@ -241,6 +242,10 @@ export interface Config {
   /** SINUOUS_ENTRY=monitor (default): score maker entry fills by whether the order-book curve was moving against the side
    *  bought (bot/strategy/sinuousEntry.ts), blocking nothing; gate: no quote that adds to a position while it is; off. */
   sinuousEntry: SinuousEntryParams;
+  /** TRIALS (default on): the trained model, the rule book, the SNN and the TA network each scored against the price
+   *  without them on every settled crypto contract; one that tests significantly better goes into paper's prices, one
+   *  significantly worse comes out, never in live's (bot/strategy/componentTrials.ts). */
+  trials: TrialParams;
   host: string;
   port: number;
   /** DASHBOARD_PASSWORD: '' (default) = the dashboard opens without a login. */
@@ -1101,6 +1106,19 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       mode: oneOf(env, 'SINUOUS_ENTRY', DEFAULT_SINUOUS_ENTRY.mode, ['gate', 'monitor', 'off'] as const),
       slope: num(env, 'SINUOUS_ENTRY_SLOPE_CENTS', DEFAULT_SINUOUS_ENTRY.slope * 100, 0, 10) / 100,
     },
+    trials: (() => {
+      const minWindows = num(env, 'TRIAL_MIN_WINDOWS', DEFAULT_TRIALS.minWindows, 20, 5000);
+      return {
+        enabled: bool(env, 'TRIALS', DEFAULT_TRIALS.enabled),
+        minWindows,
+        p: num(env, 'TRIAL_P', DEFAULT_TRIALS.p, 0.001, 0.5),
+        // The test needs at least TRIAL_MIN_WINDOWS settlements kept.
+        keep: Math.max(minWindows, num(env, 'TRIAL_KEEP', DEFAULT_TRIALS.keep, 50, 5000)),
+        snnAlpha: num(env, 'TRIAL_SNN_ALPHA', DEFAULT_TRIALS.snnAlpha, 0, 1),
+        // Trials that trade in paper while they are tested (the owner, Oct 24: the trained rule book trades in paper).
+        paperStart: (env.TRIAL_PAPER_START ?? DEFAULT_TRIALS.paperStart.join(',')).split(',').map((x) => x.trim()).filter((x): x is TrialName => (TRIAL_NAMES as string[]).includes(x)),
+      };
+    })(),
     host,
     port: num(env, 'PORT', 3000, 1, 65535),
     dashboardPassword,

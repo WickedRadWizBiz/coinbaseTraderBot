@@ -63,6 +63,7 @@ import type { ClockSkewMonitor } from './risk/clockSkew';
 import { BalanceMonitor, fillCashDelta, settleCashDelta } from './vault/balanceMonitor';
 import type { Vault } from './vault/vault';
 import type { LiveLineReading, LiveLines } from './strategy/liveLine';
+import type { ComponentTrials, TrialName } from './strategy/componentTrials';
 import { stateWriteStats, writeJsonAtomic } from './util/persist';
 import type { KalshiCheck } from './recon/kalshiCheck';
 import type { SnnBlender } from './snn/blender';
@@ -252,6 +253,9 @@ export interface MarketStatus {
   snnC?: number;
   snnAlpha?: number;
   snnShadow?: string;
+  /** The component trials' contributions to this contract's price (probability points: the trained model's over the
+   *  fair value, the others' over the trained model's), and the ones paper's price includes. */
+  trials?: { mlp?: number; snn?: number; ta?: number; rules?: number; applied: TrialName[] };
   updatedTs: number;
 }
 
@@ -313,6 +317,9 @@ export interface EngineDeps {
   curveEntry?: SinuousEntryGate;
   /** The live line: each coin's settlement index as a curve, shared by its contracts (bot/strategy/liveLine.ts). */
   liveLines?: LiveLines;
+  /** The rule book, SNN and TA network trials: each scored against the price without it; paper uses the ones that pass
+   *  (bot/strategy/componentTrials.ts). */
+  trials?: ComponentTrials;
   /** Cortex-like SNN (bot/snn): worker host, blender with earned alpha, conservative target scaler. */
   snn?: SnnFleet;
   /** Where the blender's settled (p_model, p_snn) history is saved (survives restarts). */
@@ -582,12 +589,13 @@ export class Engine {
         oms.settle(e.ticker, e.result);
         this.d.modelHealth?.onResult(e.ticker, e.result);
         this.d.taHealth?.onResult(e.ticker, e.result);
+        this.d.trials?.onResult(e.ticker, e.result, this.now());
         this.d.accuracyGate?.settle(e.ticker, e.result);
         this.snnSettle(e.ticker, e.result);
       }
     });
     // Official results of every scanned market (traded or not): the SNN's settlement labels.
-    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => { this.d.taHealth?.onResult(e.ticker, e.result); this.d.accuracyGate?.settle(e.ticker, e.result); this.snnSettle(e.ticker, e.result); });
+    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => { this.d.taHealth?.onResult(e.ticker, e.result); this.d.trials?.onResult(e.ticker, e.result, this.now()); this.d.accuracyGate?.settle(e.ticker, e.result); this.snnSettle(e.ticker, e.result); });
     oms.on('order_error', (n: number, msg: string) => {
       if (n >= cfg.risk.maxConsecutiveOrderErrors) void kill.engage(`${n} consecutive order errors (last: ${msg})`, 'oms');
     });
@@ -919,6 +927,7 @@ export class Engine {
       modelHealth: this.d.modelHealth?.status() ?? null,
       // Does the TA network's drift improve the probabilities? (log loss with vs without it, per window)
       taHealth: this.d.taHealth?.status() ?? null,
+      trials: this.d.trials ? { ...this.d.trials.status(), params: this.d.trials.p, appliesIn: 'paper' } : null,
       cpu: this.cpu.status(),
       taEnsemble: activeTaNetEnsemble()?.status() ?? null,
       // Optimal f on the Kalshi pool's settled trades (cap on the stake per order, fraction of bankroll).
@@ -1561,14 +1570,16 @@ export class Engine {
   }
 
   /** p_final = (1 - alpha c) p_model + alpha c p_snn in blend mode; otherwise p_model (SNN logged only). */
-  private snnBlend(m: ActiveMarket, st: MarketStatus, pModel: number, tradable: boolean, now: number): number {
+  /** The price after the SNN's earned blend (alpha 0 until earned), and for its trial (bot/strategy/componentTrials.ts)
+   *  its probability and the trial's weight (TRIAL_SNN_ALPHA x its confidence), whatever alpha it has earned. */
+  private snnBlend(m: ActiveMarket, st: MarketStatus, pModel: number, tradable: boolean, now: number): { p: number; a?: number; pSnn?: number } {
     const snn = this.d.snn;
     st.pModel = pModel;
     const unit = snn?.units.crypto;
-    if (!snn || !unit) return pModel;
+    if (!snn || !unit) return { p: pModel };
     const reply = this.snnReplies.get('crypto');
     const s = this.snnScores.get(m.ticker);
-    if (!s || s.domain !== 'crypto') { st.snnShadow = reply ? 'not scored' : 'no readout (timeout or warming up)'; return pModel; }
+    if (!s || s.domain !== 'crypto') { st.snnShadow = reply ? 'not scored' : 'no readout (timeout or warming up)'; return { p: pModel }; }
     const c = snn.blender.confidence(s.surprise, s.surprise0, s.G);
     const shadow = this.d.cfg.snn.mode !== 'blend' ? 'shadow mode'
       : !reply ? 'readout timed out'
@@ -1577,7 +1588,11 @@ export class Engine {
     const p = snn.blender.pFinal(pModel, s.p, c, Boolean(shadow));
     Object.assign(st, { pSnn: s.p, snnC: c, snnAlpha: shadow ? 0 : snn.blender.alpha().alpha, snnShadow: shadow });
     if (tradable) snn.blender.record({ ticker: m.ticker, eventKey: s.eventKey, ts: now, pModel, pSnn: s.p, c });
-    return p;
+    // The trial blends at its weight without the confidence factor: on Oct 21-24's decisions the confidence cut the
+    // blend's gain (deploy/component_study.py: 0.25 x c saved 0.0014 of log loss a contract at p 0.09, 0.25 flat 0.0041
+    // at p 0.02).
+    if (!this.d.trials || !Number.isFinite(s.p)) return { p };
+    return { p, a: this.d.trials.p.snnAlpha, pSnn: s.p };
   }
 
   /** Load the blender's saved history; it is discarded when it was recorded against another meta-model. */
@@ -1835,7 +1850,16 @@ export class Engine {
     const pMarket = model.marketProbability(mid);
     // SNN: feed this market's encodings to the next 1 s step, then blend (alpha = 0 unless earned).
     this.snnObserve(m, { mid, spread: ask.price - bid.price, imbalance: features.imbalance, dAtm: fv.d2, tauFrac: tauSec / Math.max(1, (m.closeTime - m.openTime) / 1000) }, now);
-    const pBase = this.snnBlend(m, st, pred.p, tauSec > R.noEntryBeforeCloseSec, now);
+    // Component trials (bot/strategy/componentTrials.ts): paper's price follows each trial's verdict (the trained model
+    // stays in until it tests significantly worse than the math alone; the others go in once they test better, the
+    // rule book while it is tested); live's price never does.
+    const trials = this.d.trials;
+    const trialOn = (name: TrialName) => cfg.mode === 'paper' && trials?.applied(name) === true;
+    const pModel = cfg.mode === 'paper' && trials && !trials.applied('mlp') ? fv.pYes : pred.p;
+    const blended = this.snnBlend(m, st, pModel, tauSec > R.noEntryBeforeCloseSec, now);
+    // The SNN's trial blend of a price: (1 - a) p + a p_snn.
+    const snnTrial = (p: number) => (blended.a !== undefined && blended.pSnn !== undefined ? (1 - blended.a) * p + blended.a * blended.pSnn : undefined);
+    const pBase = trialOn('snn') && blended.a !== undefined ? snnTrial(pModel)! : blended.p;
     const why = explain(model, features, fv.pYes);
     st.modelShift = why.shiftFromFairValue;
     st.drivers = why.drivers;
@@ -1855,21 +1879,35 @@ export class Engine {
     // trade live (LIVE_ALLOW_UNVALIDATED_MODEL, the default): the same market prices the same in both modes.
     const liveMode = cfg.mode === 'live' && !cfg.liveAllowUnvalidated;
     const modelReadsTa = model.params.kind !== 'identity' && model.params.features.some((f) => f.startsWith('tanet_up'));
-    let pYes = pBase, taShift = 0;
-    const drift = S0.taPricing && S0.taPricingWeight > 0 && !modelReadsTa ? taDrift(taView, tauSec, { maxZ: S0.taPricingMaxZ, live: liveMode }) : undefined;
-    if (drift && Math.abs(drift.k) > 1e-9) {
-      const mv = S0.taPricingWeight * drift.k * sigmaPricing * Math.sqrt(tauSec);
-      const tilted = priceContract(terms, { spot: spot.value * Math.exp(mv), sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
-      if (tilted) {
-        taShift = Math.max(-S0.taPricingMaxShift, Math.min(S0.taPricingMaxShift, tilted.pYes - fv.pYes));
-        pYes = Math.max(0.001, Math.min(0.999, pBase + taShift));
-      }
-    }
+    // A forecast's tilt of the fair value: the contract re-priced with the index moved by w x k sigma sqrt(tau) (k: the
+    // expected move in sigma units), as a shift in probability points, capped.
+    const tilt = (k: number, w: number) => {
+      if (!(Math.abs(k) > 1e-9)) return 0;
+      const tilted = priceContract(terms, { spot: spot.value * Math.exp(w * k * sigmaPricing * Math.sqrt(tauSec)), sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
+      return tilted ? Math.max(-S0.taPricingMaxShift, Math.min(S0.taPricingMaxShift, tilted.pYes - fv.pYes)) : 0;
+    };
+    const taPricing = S0.taPricing && S0.taPricingWeight > 0 && !modelReadsTa;
+    const drift = taPricing ? taDrift(taView, tauSec, { maxZ: S0.taPricingMaxZ, live: liveMode }) : undefined;
+    // The TA network's trial: every head at full weight, validated or not.
+    const driftFull = taPricing && trials ? taDrift(taView, tauSec, { maxZ: S0.taPricingMaxZ, live: false, full: true }) : undefined;
+    const taShiftFull = driftFull ? tilt(driftFull.k, S0.taPricingWeight) : undefined;
+    const taShift = trialOn('ta') && taShiftFull !== undefined ? taShiftFull : drift ? tilt(drift.k, S0.taPricingWeight) : 0;
+    let pYes = taShift !== 0 ? Math.max(0.001, Math.min(0.999, pBase + taShift)) : pBase;
     const shortContract = (m.closeTime - m.openTime) / 60_000 <= 20;
     // Rule book (rules that passed the walk-forward study, for the coin's character) and the character
     // gate: no conviction boosts in a volatile-systemic market.
     const coinChar = marketContext()?.character(m.asset);
-    const rbRead = S0.ruleBook ? activeRuleBook()?.read(md.features.candles.get(m.asset)?.snapshot(now, marketContext()?.macro()), Math.max(1, tauSec / 3600), coinChar?.cls) : undefined;
+    const taSnap = S0.ruleBook || trials ? md.features.candles.get(m.asset)?.snapshot(now, marketContext()?.macro()) : undefined;
+    const rbRead = S0.ruleBook ? activeRuleBook()?.read(taSnap, Math.max(1, tauSec / 3600), coinChar?.cls) : undefined;
+    // The rule book's trial: the rules that held up on both periods of its study, as an implied P(up) tilting the price.
+    const rbTrial = trials ? activeRuleBook()?.trialRead(taSnap, tauSec, coinChar?.cls, S0.taPricingMaxZ) : undefined;
+    const ruleShift = rbTrial ? tilt(rbTrial.k, 1) : undefined;
+    if (trialOn('rules') && ruleShift) pYes = Math.max(0.001, Math.min(0.999, pYes + ruleShift));
+    if (trials) {
+      const d = (x: number | undefined) => (x === undefined ? undefined : +x.toFixed(4));
+      const snnP = snnTrial(pred.p);
+      st.trials = { mlp: d(pred.p - fv.pYes), snn: d(snnP === undefined ? undefined : snnP - pred.p), ta: d(taShiftFull), rules: d(ruleShift), applied: (['mlp', 'snn', 'ta', 'rules'] as TrialName[]).filter(trialOn) };
+    }
     const standAside = S0.characterStandAside && coinChar && STAND_ASIDE.includes(coinChar.cls) ? coinChar.why : undefined;
     // The coin's evolved formula on the latest hourly bars (unvalidated ones never speak live).
     const gpRead = S0.gp ? activeGpSignals()?.read(m.asset, (a) => md.features.candles.get(a)?.bars['1h']) : undefined;
@@ -1924,7 +1962,18 @@ export class Engine {
     if (reason) st.lastEval = { reason, ts: now };
     st.entryWindow = entryWindowOpen;
     if (reason && entryWindowOpen) this.d.modelHealth?.record(m.ticker, pred.p, pMarket, m.closeTime);
-    if (reason && entryWindowOpen && taShift !== 0) this.d.taHealth?.record(m.ticker, pYes, pBase, m.closeTime);
+    if (reason && entryWindowOpen && taShift !== 0) this.d.taHealth?.record(m.ticker, Math.max(0.001, Math.min(0.999, pBase + taShift)), pBase, m.closeTime);
+    // The trials score every contract in its entry window, traded or not: the meta-model's price with each contribution
+    // and without it.
+    if (reason && kindWindow && trials) {
+      const clampP = (x: number) => Math.max(0.001, Math.min(0.999, x));
+      // The trained model against the math fair value it refines.
+      trials.record('mlp', m.ticker, m.asset, m.closeTime, pred.p, fv.pYes, now);
+      const snnP = snnTrial(pred.p);
+      if (snnP !== undefined) trials.record('snn', m.ticker, m.asset, m.closeTime, snnP, pred.p, now);
+      if (taShiftFull !== undefined) trials.record('ta', m.ticker, m.asset, m.closeTime, clampP(pred.p + taShiftFull), pred.p, now);
+      if (ruleShift !== undefined) trials.record('rules', m.ticker, m.asset, m.closeTime, clampP(pred.p + ruleShift), pred.p, now);
+    }
     const pos = oms.positions.get(m.ticker);
     const entrySidePrice = pos && pos.yes > 0 ? -pos.netCash / pos.yes : pos && pos.yes < 0 ? 1 - pos.netCash / -pos.yes : undefined;
     const tier = this.tier();

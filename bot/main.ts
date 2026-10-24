@@ -72,6 +72,7 @@ import { gatePasses, Probation, setProbation } from './risk/probation';
 import { SinuousEntryGate } from './strategy/sinuousEntry';
 import { SinuousExitGate } from './strategy/sinuousExit';
 import { LiveLines } from './strategy/liveLine';
+import { ComponentTrials } from './strategy/componentTrials';
 import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
 
 const log = logger('main');
@@ -136,6 +137,14 @@ async function main(): Promise<void> {
   // The live line (bot/strategy/liveLine.ts): each coin's settlement index as a curve, shared by its contracts; the cross
   // watches it (SINUOUS_CROSS_SOURCE=line) and the depth monitor shows each held position's reading.
   const liveLines = curveExit ? new LiveLines(cfg.sinuousExit.line) : undefined;
+  // The rule book, SNN and TA network trials (the owner, Oct 24: "give each a shot and let's see how well they perform. If
+  // they perform well in the test allow them to function for paper trading"): each scored against the price without it
+  // on every settled crypto contract; one that tests significantly better goes into paper's prices, never live's
+  // (bot/strategy/componentTrials.ts). Each book keeps its own scorecards (DATA_DIR and DATA_DIR/live).
+  const trials = cfg.trials.enabled ? new ComponentTrials(cfg.trials, path.join(cfg.bookDir, 'component_trials.json'), (name, to, why) => {
+    audit.write('trial', { event: to, trial: name, why, appliesIn: 'paper' });
+    alerter.notify('info', `trial-${name}`, `Trial: the ${name === 'snn' ? 'SNN' : name === 'ta' ? 'TA network' : 'rule book'} is ${to === 'on' ? 'now ON in paper' : to === 'off' ? 'OFF in paper' : 'testing'}: ${why}`);
+  }) : undefined;
   // Entry curve (SINUOUS_ENTRY, bot/strategy/sinuousEntry.ts): monitor scores maker entries by the book's curve at the
   // fill; gate also holds back quotes the curve is running against.
   const curveEntry = cfg.sinuousEntry.mode === 'off' ? undefined : new SinuousEntryGate(cfg.sinuousEntry, path.join(cfg.bookDir, 'curve-entry.json'));
@@ -521,7 +530,7 @@ async function main(): Promise<void> {
   // The exchange's own status and maintenance schedule gate new entries (exits stay allowed).
   const exchangeStatus = new ExchangeStatusMonitor(rest);
   exchangeStatus.start();
-  const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, accuracyGate, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json'), curveExit, curveEntry, liveLines });
+  const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, accuracyGate, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json'), curveExit, curveEntry, liveLines, trials });
   engineRef = engine;
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();

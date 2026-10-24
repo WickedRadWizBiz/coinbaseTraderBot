@@ -11,7 +11,7 @@ on:
         required: false
         default: ''
       pnl:
-        description: 'Also run the P&L forensics (deploy/pnl_report.py, decision_study.py, cross_study.py, feed_delay.py, latency_study.py from the dispatched ref; read-only, a few minutes)'
+        description: 'Also run the P&L forensics (deploy/pnl_report.py, decision_study.py, cross_study.py, component_study.py, feed_delay.py, latency_study.py from the dispatched ref; read-only, a few minutes)'
         required: false
         default: 'false'
       timings:
@@ -41,7 +41,7 @@ jobs:
           username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
-          source: deploy/pnl_report.py,deploy/decision_study.py,deploy/cross_study.py,deploy/feed_delay.py,deploy/latency_study.py,deploy/step_timings.py
+          source: deploy/pnl_report.py,deploy/decision_study.py,deploy/cross_study.py,deploy/component_study.py,deploy/feed_delay.py,deploy/latency_study.py,deploy/step_timings.py
           target: /tmp/diag
       - name: Report
         uses: appleboy/ssh-action@v1.0.3
@@ -166,6 +166,8 @@ jobs:
               if [ "$STUDY_HOURS" -lt 1 ] || [ "$STUDY_HOURS" -gt 24 ]; then STUDY_HOURS=8; fi
               echo "== exit study (the cross, the projected-peak rule and the live-line rules, replayed on the recordings: $STUDY_HOURS h)"
               timeout $((STUDY_HOURS * 110 + 300)) nice -n 19 python3 /tmp/diag/deploy/cross_study.py ~/bot/data "$STUDY_HOURS" || echo "(exit study stopped: $?)"
+              echo "== component study (the SNN and the TA network against the meta-model's price on the last 3 days of decisions; the rule book's trial rows)"
+              timeout 1200 nice -n 19 python3 /tmp/diag/deploy/component_study.py ~/bot/data 3 || echo "(component study stopped: $?)"
               echo "== feed delay"; nice -n 19 python3 /tmp/diag/deploy/feed_delay.py ~/bot/data/recordings 1 || true
               echo "== latency study"; nice -n 19 python3 /tmp/diag/deploy/latency_study.py ~/bot/data/recordings 2 || true
             fi

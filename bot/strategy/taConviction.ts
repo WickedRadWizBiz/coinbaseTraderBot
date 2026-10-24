@@ -70,12 +70,14 @@ export function reliability(validated: boolean | undefined, skill: number | unde
   return Math.min(1, 0.5 + s * 25);
 }
 
-/** Expected move over `tauSec` in sigma units (of sigma * sqrt(tau)), signed: + = up. Undefined without a usable head. */
-export function taDrift(v: TaNetView | undefined, tauSec: number, c: Pick<ConvictionConfig, 'maxZ' | 'live'>): { k: number; parts: string[] } | undefined {
+/** Expected move over `tauSec` in sigma units (of sigma * sqrt(tau)), signed: + = up. Undefined without a usable head.
+ *  `full`: every head counts fully, validated or not (the TA network's trial, bot/strategy/componentTrials.ts). */
+export function taDrift(v: TaNetView | undefined, tauSec: number, c: Pick<ConvictionConfig, 'maxZ' | 'live'> & { full?: boolean }): { k: number; parts: string[] } | undefined {
   if (!v || !(tauSec > 0)) return undefined;
+  const r = (validated: boolean | undefined, skill: number | undefined, graded: number | undefined) => (c.full ? 1 : reliability(validated, skill, graded, c.live));
   const heads: Array<{ p?: number; r: number; hSec: number; name: string }> = [
-    { p: v.up1, r: reliability(v.validated1, v.skill1, v.graded1, c.live), hSec: H, name: '1h' },
-    { p: v.up4, r: reliability(v.validated4, v.skill4, v.graded4, c.live), hSec: 4 * H, name: '4h' },
+    { p: v.up1, r: r(v.validated1, v.skill1, v.graded1), hSec: H, name: '1h' },
+    { p: v.up4, r: r(v.validated4, v.skill4, v.graded4), hSec: 4 * H, name: '4h' },
   ];
   let num = 0, den = 0;
   const parts: string[] = [];
