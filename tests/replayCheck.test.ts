@@ -5,7 +5,8 @@ import path from 'path';
 import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
 import { MetaModel } from '../bot/model/metaModel';
-import { runBacktest } from '../research/backtest';
+import { gatePasses, setProbation } from '../bot/risk/probation';
+import { installProbation, runBacktest } from '../research/backtest';
 import { corr, paperFromAudit, paperSummary, priceMatcher, readAudit, replayDays, settingsDiffer, stretchStart, verdict } from '../research/replayCheck';
 import { writeSyntheticRecordings } from '../research/synthetic';
 
@@ -196,4 +197,23 @@ test('backtest: the weekly loss pause stops entries only with the override off; 
   const watch = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { ...base, tradeFromMs: Number.MAX_SAFE_INTEGER });
   assert.equal(watch.fills, 0);
   assert.ok(watch.entryEvaluations > 0, 'it still evaluates (books, features and the gate warm up)');
+});
+
+test('the bot\'s validation gates: monitor lets unvalidated models trade unless their book is benched', () => {
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) });
+  try {
+    assert.deepEqual(installProbation(cfg), [], 'no state: nothing benched');
+    assert.equal(gatePasses('kalshi', false), true);
+    const file = path.join(tmp(), 'probation.json');
+    fs.writeFileSync(file, JSON.stringify({ kalshi: { results: [-5], since: 0, benched: { at: 1, reason: 'lost' } } }));
+    assert.deepEqual(installProbation(cfg, file), ['kalshi']);
+    assert.equal(gatePasses('kalshi', false), false);
+    assert.equal(gatePasses('kalshi', true), true);
+    assert.equal(fs.readFileSync(file, 'utf8').includes('"benched"'), true, 'the bot\'s file is only read');
+    const enforce = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), VALIDATION_GATES: 'enforce' });
+    assert.deepEqual(installProbation(enforce), []);
+    assert.equal(gatePasses('kalshi', false), false);
+  } finally {
+    setProbation(undefined);
+  }
 });

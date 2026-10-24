@@ -124,6 +124,8 @@ jobs:
           # The other models the engine prices with (the vol profile, vol model and fill model), where the server has them;
           # else the shipped params/ files, as the bot picks them.
           for f in vol_profile.json vol_model.json fill_model.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
+          # The validation gates' state (which books' unvalidated models are benched).
+          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/probation.json "$RUNNER_TEMP/paper-probation.json" 2>/dev/null || true
           # The server's settings without any credential line and without server paths (the same filter as Remote training).
           ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$DATA/sweep-env/train.env" || true
           echo "audit days $D: $(wc -l < "$RUNNER_TEMP/audit.txt") file(s); recorded days $NEED: $(ls "$DATA/recordings" | wc -l) file(s); settings $(wc -l < "$DATA/sweep-env/train.env") line(s); paper balance $([ -s "$RUNNER_TEMP/paper-balance" ] && echo read || echo 'not read'), equity guard $([ -s "$RUNNER_TEMP/paper-guard.json" ] && echo read || echo 'not read'), override $(cat "$RUNNER_TEMP/kill-override"), maker markouts $(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$RUNNER_TEMP/maker-markouts.json" 2>/dev/null || echo 0)"
@@ -141,7 +143,7 @@ jobs:
           T0=$(date +%s)
           timeout 200m node --import tsx research/replayCheck.ts --recordings data/recordings --audit data/audit --days "$(cat data/sweeps/check-days.txt)" \
             --from "$CHECK_FROM" --to "$(cat data/sweeps/check-to.txt)" --min-hours "$MIN_HOURS" ${BAL:+--paper-balance-now "$BAL"} \
-            ${GUARD:+--paper-guard "$GUARD"} --kill-override "$OVERRIDE" --maker-markouts "$RUNNER_TEMP/maker-markouts.json" \
+            ${GUARD:+--paper-guard "$GUARD"} --kill-override "$OVERRIDE" --maker-markouts "$RUNNER_TEMP/maker-markouts.json" --paper-probation "$RUNNER_TEMP/paper-probation.json" \
             --model data/models/model.json --out data/sweeps/replay-check-latest.json || echo "replay check failed or cut off"
           echo "replay check took $(( ($(date +%s) - T0) / 60 )) min"
       - uses: actions/upload-artifact@v4

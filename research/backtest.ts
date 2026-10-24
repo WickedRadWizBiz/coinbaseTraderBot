@@ -21,8 +21,10 @@
 // the model file's validation block gets netEdgeCiLow / deflatedSharpe.
 
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { loadConfig, paperEnv, type StrategyConfig, type RiskLimits } from '../bot/config';
+import { loadConfig, paperEnv, type Config, type StrategyConfig, type RiskLimits } from '../bot/config';
+import { PROBATION_BOOKS, Probation, setProbation } from '../bot/risk/probation';
 import { DEFAULT_FEES } from '../bot/fees';
 import { assetFeatureMap, computeFeatureMap } from '../bot/model/featureEngine';
 import { VolForecaster, VolModel } from '../bot/model/volModel';
@@ -183,9 +185,12 @@ export const PAPER_TOTAL_ORDERS = 10;
 
 /** The features read after the model call, kept on the tape: confluence for its exit, the take gate's inputs. */
 export const TAKE_TAPE_KEYS = ['snn_up_h', 'snn_bias', 'snn_skill_h', 'snn_cal_h', ...TAKE_GATED_TREND.map(([n]) => n), ...TAKE_GATED_MICRO.map(([n]) => n), ...TAKE_GATED_DRIVERS];
-const tapeKeys = (policy: ExitPolicyName, strategy: StrategyConfig, model: MetaModel) => [
+/** The features the fill model reads beside the book (bot/tca/fillModel.ts fillInputs). */
+const FILL_TAPE_KEYS = ['ofi_30s', 'tfi_60s', 'microprice_drift', 'trade_intensity_60s', 'vpin_300s'];
+const tapeKeys = (policy: ExitPolicyName, strategy: StrategyConfig, model: MetaModel, fillModel?: FillModel) => [
   ...(policy === 'confluence_ratchet' ? ['conf_count'] : []),
   ...(strategy.takeGate === 'validated' && model.params.take?.validation.validated ? TAKE_TAPE_KEYS : []),
+  ...(fillModel ? FILL_TAPE_KEYS : []),
 ];
 /** A feature map with only the taped keys; reading any other is a miss (the run starts over without the tape). */
 const tapedMap = (keys: string[], x: Float64Array): Record<string, number> => new Proxy({} as Record<string, number>, {
@@ -193,10 +198,45 @@ const tapedMap = (keys: string[], x: Float64Array): Record<string, number> => ne
   has: (_, k) => typeof k === 'string' && keys.includes(k),
 });
 
+/** The models the engine prices with besides the meta-model, loaded as bot/main.ts loads them: the intraday volatility
+ *  profile (VOL_SEASONALITY, only when its own validation improved), the tree volatility forecast (VOL_MODEL) and the
+ *  fill model (each applied only when validated), and the macro calendar; from the bot's model directory
+ *  (AUTO_TRAIN_DIR, a copy of the server's) when there, else the shipped params/ files (bot/autotrain.ts
+ *  resolveModelPaths). `used` names the ones in use; `sig` is what a call tape depends on. */
+export async function engineModels(cfg: Config): Promise<{ volProfile?: VolProfile; volModel?: VolModel; fillModel?: FillModel; calendar?: MacroEvent[]; used: string[]; sig: string }> {
+  const { resolveModelPaths } = await import('../bot/autotrain');
+  const paths = resolveModelPaths(cfg);
+  const vp = fs.existsSync(paths.vol) ? loadVolProfile(paths.vol) : undefined;
+  const volProfile = vp && cfg.strategy.volSeasonality && vp.validation?.improved ? vp : undefined;
+  let volModel: VolModel | undefined, fillModel: FillModel | undefined;
+  try { volModel = cfg.strategy.volModel && fs.existsSync(paths.vol_model) ? VolModel.load(paths.vol_model) : undefined; } catch { volModel = undefined; }
+  try { fillModel = fs.existsSync(paths.fill) ? FillModel.load(paths.fill) : undefined; } catch { fillModel = undefined; }
+  const calendar = loadCalendar(path.resolve(process.env.MACRO_CALENDAR_PATH ?? './params/calendar.json'));
+  const used = [volProfile ? 'vol profile' : '', volModel?.validated ? 'vol model' : '', fillModel ? `fill model${fillModel.validated ? '' : ' (unvalidated)'}` : '', calendar?.length ? 'macro calendar' : ''].filter(Boolean);
+  // What a call tape depends on: the fair value's volatility and the calendar's features.
+  const sig = JSON.stringify([volProfile?.version ?? null, volModel?.validated ? volModel.params.trainedAt : null, calendar?.length ?? 0]);
+  return { volProfile, volModel, fillModel, calendar, used, sig };
+}
+
+/** The validation gates as the bot runs them (bot/main.ts): with VALIDATION_GATES=monitor (the default) a model that
+ *  has not passed validation (the fill model, the take model) trades on probation unless its book is benched. `stateFile`
+ *  is the bot's probation.json, read from a private copy (nothing is written back). Process-wide, as in the bot; returns
+ *  the benched books. */
+export function installProbation(cfg: Config, stateFile?: string): string[] {
+  let file: string | undefined;
+  if (stateFile && fs.existsSync(stateFile)) {
+    file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'probation-')), 'probation.json');
+    fs.copyFileSync(stateFile, file);
+  }
+  const p = new Probation(cfg.probation, file);
+  setProbation(p);
+  return p.p.mode === 'monitor' ? PROBATION_BOOKS.filter((b) => !p.open(b)) : [];
+}
+
 export async function runBacktest(dir: string, model: MetaModel, strategy: StrategyConfig, limits: RiskLimits, bankroll0: number, opts: BacktestOpts = {}): Promise<BacktestResult> {
   const t = opts.tape;
-  if (!t || opts.fillModel) return runBacktestOnce(dir, model, strategy, limits, bankroll0, opts);
-  const keys = tapeKeys(opts.exitPolicy ?? 'fair_value', strategy, model);
+  if (!t) return runBacktestOnce(dir, model, strategy, limits, bankroll0, opts);
+  const keys = tapeKeys(opts.exitPolicy ?? 'fair_value', strategy, model, opts.fillModel);
   for (let attempt = 0; ; attempt++) {
     const tape = openTape(t.file, t.sig, keys);
     try {

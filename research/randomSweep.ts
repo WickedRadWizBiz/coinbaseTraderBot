@@ -148,18 +148,23 @@ export async function evalTrial(dir: string, modelPath: string, env: Record<stri
     const { loadConfig, paperEnv } = await import('../bot/config');
     const { MetaModel } = await import('../bot/model/metaModel');
     const { EXIT_POLICIES } = await import('../bot/strategy/exitPolicies');
-    const { runBacktest } = await import('./backtest');
+    const { engineModels, installProbation, runBacktest } = await import('./backtest');
     const cfg = loadConfig(paperEnv({ ...process.env, DASHBOARD_TOKEN: process.env.DASHBOARD_TOKEN ?? 'x'.repeat(32), ...env }));
     const model = models.get(modelPath) ?? (fs.existsSync(modelPath) ? MetaModel.load(modelPath) : MetaModel.identity());
     models.set(modelPath, model);
+    // The engine's other models and its validation gates, as the replay check runs them (once a process: a trial does
+    // not change them).
+    engine ??= engineModels(cfg).then((m) => { installProbation(cfg, process.env.RS_PROBATION_FILE); return m; });
+    const em = await engine;
     const S = cfg.strategy;
     const policy = (EXIT_POLICIES as readonly string[]).includes(S.exitPolicy) ? S.exitPolicy : 'fair_value';
     const rule = { ...cfg.probation, t: cfg.sinuousExit.benchT ?? cfg.probation.t, minTrades: cfg.sinuousExit.benchMinExits ?? cfg.probation.minTrades };
-    const tape = await tapeFor(dir, modelPath, tapeDir, [S.volFallbackMult, cfg.risk.maxBookAgeMs, cfg.risk.maxIndexAgeMs, S.takeGate, S.takeMargin, policy === 'confluence_ratchet']);
+    const tape = await tapeFor(dir, modelPath, tapeDir, [S.volFallbackMult, cfg.risk.maxBookAgeMs, cfg.risk.maxIndexAgeMs, S.takeGate, S.takeMargin, policy === 'confluence_ratchet', em.sig, Boolean(em.fillModel)]);
     const r = await runBacktest(dir, model, S, cfg.risk, Number(process.env.SWEEP_BANKROLL_USD ?? cfg.paperBankrollUsd), {
       exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
       sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd },
       accuracyGate: S.accuracyGate, takeProfitBench: { enforce: S.takeProfitBench, rule }, tape, dailyGoalUsd: cfg.vault.dailyGoalUsd,
+      volProfile: em.volProfile, applyVolSeasonality: Boolean(em.volProfile), volModel: em.volModel, fillModel: em.fillModel, calendar: em.calendar,
     });
     const byDay: Record<string, number> = {}, tradesByDay: Record<string, number> = {}, byHour: Record<string, number> = {};
     for (const t of r.trades) {
@@ -174,6 +179,7 @@ export async function evalTrial(dir: string, modelPath: string, env: Record<stri
   }
 }
 const models = new Map<string, import('../bot/model/metaModel').MetaModel>();
+let engine: ReturnType<typeof import('./backtest').engineModels> | undefined;
 
 export function readLedgers(files: string[]): TrialResult[] {
   const byKey = new Map<string, TrialResult>();
