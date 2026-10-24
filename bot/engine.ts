@@ -384,9 +384,10 @@ export class Engine {
     if (d.snn) this.attachBlender(d.snn.blender);
     // Registered before the startup reconciliation replays fills, so the
     // balance monitor sees every cash movement the bot's trading causes.
-    d.oms.on('fill', (f: { ticker: string; side: 'bid' | 'ask'; count: number; price: number; isTaker?: boolean; ts?: number }, rec: { clientOrderId?: string } | undefined, fee: number, positionAfter: number) => {
+    d.oms.on('fill', (f: { ticker: string; side: 'bid' | 'ask'; count: number; price: number; isTaker?: boolean; ts?: number }, rec: { clientOrderId?: string; decisionId?: string; side?: string; price?: number } | undefined, fee: number, positionAfter: number) => {
       this.fillLog?.onFill({ ticker: f.ticker, side: f.side, price: f.price, isTaker: Boolean(f.isTaker), ts: f.ts, coid: rec?.clientOrderId });
       this.noteLiveBlockFill(rec?.clientOrderId);
+      this.noteCrossFill(rec, f, fee);
       const signed = f.side === 'bid' ? f.count : -f.count;
       const cash = fillCashDelta(f.side, f.count, f.price, fee, positionAfter - signed);
       d.balanceMonitor?.onCash(cash);
@@ -1843,7 +1844,9 @@ export class Engine {
     // TA conviction overlay: the TA network's direction forecasts add a drift to the fair value (unless
     // the live model already reads them), and TA / confluence breadth + the altcoin rule feed sizing.
     const S0 = cfg.strategy;
-    const liveMode = cfg.mode === 'live';
+    // Live reads the TA network's unproven heads and the evolved formula as paper does while unvalidated models may
+    // trade live (LIVE_ALLOW_UNVALIDATED_MODEL, the default): the same market prices the same in both modes.
+    const liveMode = cfg.mode === 'live' && !cfg.liveAllowUnvalidated;
     const modelReadsTa = model.params.kind !== 'identity' && model.params.features.some((f) => f.startsWith('tanet_up'));
     let pYes = pBase, taShift = 0;
     const drift = S0.taPricing && S0.taPricingWeight > 0 && !modelReadsTa ? taDrift(taView, tauSec, { maxZ: S0.taPricingMaxZ, live: liveMode }) : undefined;
@@ -2343,6 +2346,8 @@ export class Engine {
       }
       return;
     }
+    // Tagged before it is sent: a paper fill arrives inside submit(), a live one may beat its acknowledgement.
+    if (p.purpose === 'exit' && p.why.startsWith('exit curve: cross')) this.tagCrossOrder(decisionId, p);
     const rec = await oms.submit(intent);
     if (cfg.mode === 'paper' && !tennis) this.tagLiveBlock(rec.clientOrderId, p);
     const fx = this.fillX.get(p);
@@ -2375,6 +2380,25 @@ export class Engine {
     const now = this.now();
     if (this.liveBlocks.size >= 5000) for (const [k, v] of this.liveBlocks) if (now - v.ts > 2 * 3_600_000) this.liveBlocks.delete(k);
     this.liveBlocks.set(clientOrderId, { reasons, ts: now });
+  }
+
+  /** The exit curve's cross orders (by decision, side and price: the one exit a decision sends across the book) until
+   *  they fill: the curve scores what they fill, not the call (a cross whose order does not fill sold nothing).
+   *  Forgotten after an hour. */
+  private readonly crossOrders = new Map<string, { sign: 1 | -1; ts: number }>();
+
+  private tagCrossOrder(decisionId: string, p: OrderPlan): void {
+    const now = this.now();
+    if (this.crossOrders.size >= 500) for (const [k, v] of this.crossOrders) if (now - v.ts > 3_600_000) this.crossOrders.delete(k);
+    // Selling YES (an ask) closes a YES position; buying YES (a bid) closes a NO one.
+    this.crossOrders.set(`${decisionId}|${p.side}|${p.price}`, { sign: p.side === 'ask' ? 1 : -1, ts: now });
+  }
+
+  private noteCrossFill(rec: { decisionId?: string; side?: string; price?: number } | undefined, f: { ticker: string; price: number; count: number }, fee: number): void {
+    const c = rec?.decisionId ? this.crossOrders.get(`${rec.decisionId}|${rec.side}|${rec.price}`) : undefined;
+    if (!c || !(f.count > 0)) return;
+    const sidePrice = c.sign > 0 ? f.price : Math.round((1 - f.price) * 1e4) / 1e4;
+    this.d.curveExit?.crossFilled(f.ticker, c.sign, sidePrice, f.count, fee / f.count, this.now());
   }
 
   private noteLiveBlockFill(clientOrderId: string | undefined): void {

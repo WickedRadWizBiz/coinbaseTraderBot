@@ -233,10 +233,9 @@ export interface Config {
   /** VALIDATION_GATES=monitor (default): models that have not passed validation trade anyway, on probation; a book whose
    *  results are unacceptable is benched (bot/risk/probation.ts). enforce: every validation gate blocks as before. */
   probation: ProbationParams;
-  /** SINUOUS_EXIT=gate (default): a profit-taking exit on a binary contract also needs the exit-in-profit curve's
-   *  signal (bot/strategy/sinuousExit.ts); monitor shows the curve without holding exits; cross (paper's default,
-   *  SINUOUS_EXIT_PAPER) sells on a confirmed cross (SINUOUS_CROSS) and holds nothing; rest also rests a sell at the
-   *  swing top; off. */
+  /** SINUOUS_EXIT, the same in paper and live: cross (default) sells on a confirmed cross (SINUOUS_CROSS) and holds
+   *  nothing (bot/strategy/sinuousExit.ts); gate holds a profit-taking exit for the curve's signal; monitor shows the
+   *  curve without holding exits; rest also rests a sell at the swing top; off. */
   sinuousExit: SinuousExitParams;
   /** SINUOUS_ENTRY=monitor (default): score maker entry fills by whether the order-book curve was moving against the side
    *  bought (bot/strategy/sinuousEntry.ts), blocking nothing; gate: no quote that adds to a position while it is; off. */
@@ -1073,14 +1072,14 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     },
     sinuousExit: {
       mode: oneOf(env, 'SINUOUS_EXIT', DEFAULT_SINUOUS_EXIT.mode, ['gate', 'monitor', 'rest', 'cross', 'off'] as const),
-      paperMode: oneOf(env, 'SINUOUS_EXIT_PAPER', 'cross', ['gate', 'monitor', 'rest', 'cross', 'off'] as const),
       restBandSigmas: num(env, 'SINUOUS_REST_BAND_SIGMAS', 0.5, 0, 3),
       cross: bool(env, 'SINUOUS_CROSS', true),
       crossFeeMargin: num(env, 'SINUOUS_CROSS_FEE_MARGIN', 0.5, 0, 5),
       restStandDownSec: num(env, 'SINUOUS_REST_STAND_DOWN_SEC', 120, 0, 900),
       minNetProfit: num(env, 'SINUOUS_MIN_PROFIT_CENTS', DEFAULT_SINUOUS_EXIT.minNetProfit * 100, 0, 50) / 100,
-      paperBenchT: num(env, 'SINUOUS_PAPER_BENCH_T', 2, 0.5, 10),
-      paperBenchMinExits: num(env, 'SINUOUS_PAPER_BENCH_MIN_EXITS', 30, 5, 10_000),
+      // Paper and live alike; the paper-only names from before Oct 24 are still read.
+      benchT: num(env, 'SINUOUS_BENCH_T', num(env, 'SINUOUS_PAPER_BENCH_T', 2, 0.5, 10), 0.5, 10),
+      benchMinExits: num(env, 'SINUOUS_BENCH_MIN_EXITS', num(env, 'SINUOUS_PAPER_BENCH_MIN_EXITS', 30, 5, 10_000), 5, 10_000),
     },
     sinuousEntry: {
       mode: oneOf(env, 'SINUOUS_ENTRY', DEFAULT_SINUOUS_ENTRY.mode, ['gate', 'monitor', 'off'] as const),

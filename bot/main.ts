@@ -118,21 +118,20 @@ async function main(): Promise<void> {
   });
   setProbation(probationBooks);
   if (cfg.probation.mode === 'monitor') log.info('validation gates: monitor (unvalidated models trade on probation)', { ...cfg.probation });
-  // Exit-in-profit curve (SINUOUS_EXIT, bot/strategy/sinuousExit.ts): profit-taking exits on binary contracts also need
-  // its signal; its scoreboard benches it under the probation rules when holding profit exits costs money. Paper: the
-  // owner turned it back on on Oct 23 to see whether it pays (its scoreboard starts over once), and it is benched only
-  // when holding loses beyond luck at t <= -SINUOUS_PAPER_BENCH_T after SINUOUS_PAPER_BENCH_MIN_EXITS held exits, or
-  // costs PROBATION_MAX_LOSS_USD. Live keeps the probation rules and its scoreboard.
-  // Paper runs SINUOUS_EXIT_PAPER (cross by default: the curve sells on a confirmed cross and holds nothing).
-  const paperCurve = cfg.mode === 'paper';
-  const curveParams = paperCurve ? { ...cfg.sinuousExit, mode: cfg.sinuousExit.paperMode ?? cfg.sinuousExit.mode } : cfg.sinuousExit;
-  const curveBench = paperCurve ? { ...cfg.probation, t: cfg.sinuousExit.paperBenchT ?? cfg.probation.t, minTrades: cfg.sinuousExit.paperBenchMinExits ?? cfg.probation.minTrades } : cfg.probation;
+  // Exit-in-profit curve (SINUOUS_EXIT, bot/strategy/sinuousExit.ts), the same in paper and live (the owner, Oct 23: "It
+  // can't just be paper mode. When I take it out of paper mode into live it needs to behave identical"): cross by
+  // default, the curve sells a held position at the bid on a confirmed roll-over and holds nothing. Its scoreboard (each
+  // filled cross against holding to settlement) benches the cross when it loses beyond luck at t <= -SINUOUS_BENCH_T
+  // after SINUOUS_BENCH_MIN_EXITS scored exits, or costs PROBATION_MAX_LOSS_USD. Each book keeps its own scoreboard
+  // (DATA_DIR and DATA_DIR/live); both started over once on Oct 24, when crosses began to be scored on their fills.
+  const curveParams = cfg.sinuousExit;
+  const curveBench = { ...cfg.probation, t: cfg.sinuousExit.benchT ?? cfg.probation.t, minTrades: cfg.sinuousExit.benchMinExits ?? cfg.probation.minTrades };
   const curveExit = curveParams.mode === 'off' ? undefined : new SinuousExitGate(curveParams, curveBench, path.join(cfg.bookDir, 'curve-exit.json'), (e) => {
     audit.write('curve_exit', e);
     if (e.event === 'benched') alerter.notify('warn', 'curve-exit', curveParams.mode === 'rest' || curveParams.mode === 'cross'
       ? `Exit curve's cross benched (it stops selling on the cross until a reset${curveParams.mode === 'rest' ? '; the resting sells go on' : ''}): ${String(e.reason)}`
       : `Exit curve benched (profit exits go out without waiting for it until a reset): ${String(e.reason)}`);
-  }, Date.now(), paperCurve ? 'owner-on-2026-10-23' : undefined);
+  }, Date.now(), 'cross-fills-2026-10-24');
   // Entry curve (SINUOUS_ENTRY, bot/strategy/sinuousEntry.ts): monitor scores maker entries by the book's curve at the
   // fill; gate also holds back quotes the curve is running against.
   const curveEntry = cfg.sinuousEntry.mode === 'off' ? undefined : new SinuousEntryGate(cfg.sinuousEntry, path.join(cfg.bookDir, 'curve-entry.json'));
@@ -503,8 +502,9 @@ async function main(): Promise<void> {
   const ms = macroSettings(cfg.macro);
   setMacro(new MacroService({ historyDir: cfg.taNet.historyDir, index: (a) => md.indexStore.get(a, '1d'), file: path.join(cfg.dataDir, 'waterfall.json'), params: ms.params, fractal: ms.fractal, audit }));
   setRuleBook(new RuleBook(() => path.join(cfg.autoTrain.dir, 'rule_book.json')));
-  // Evolved formulas (research/gpIndicators.ts): re-read when the pipeline promotes a new champion.
-  setGpSignals(new GpSignals(() => path.join(cfg.autoTrain.dir, 'gp_indicators.json'), () => !cfg.strategy.gpRequireValidated && cfg.mode !== 'live'));
+  // Evolved formulas (research/gpIndicators.ts): re-read when the pipeline promotes a new champion. An unproven one speaks
+  // with GP_REQUIRE_VALIDATED=false, in live too while unvalidated models may trade live (the same as paper).
+  setGpSignals(new GpSignals(() => path.join(cfg.autoTrain.dir, 'gp_indicators.json'), () => !cfg.strategy.gpRequireValidated && (cfg.mode !== 'live' || cfg.liveAllowUnvalidated)));
   const refreshMarketCtx = () => { try { const now = Date.now(); marketCtx.update(md.features.candles.values(), now, (a) => taNetView(a, md.features.candles.get(a), now)?.vol4h); } catch (e) { log.warn(`market context: ${String(e)}`); } };
   setInterval(refreshMarketCtx, 60_000).unref();
   // Market-wide context for the TA network: every tracked coin's candles and the index series.

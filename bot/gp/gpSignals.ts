@@ -2,7 +2,8 @@
 // <AUTO_TRAIN_DIR>/gp_indicators.json), run on the coins' latest closed hourly bars. Its exposure (-1 = fully
 // short .. +1 = fully long, after the 10 % dead band) joins the TA conviction signals (bot/strategy/
 // taConviction.ts) as one more reading of the coin's direction. Only a formula that passed its test on the
-// most recent, never-seen years speaks (GP_REQUIRE_VALIDATED=false lets the others speak in paper mode).
+// most recent, never-seen years speaks (GP_REQUIRE_VALIDATED=false lets the others speak in paper, and in live while
+// LIVE_ALLOW_UNVALIDATED_MODEL is on, so both modes price alike).
 //
 // The file is re-read when it changes (checked at most every 30 s; the pipeline promotes a new champion without a
 // restart); a reading is computed once per new hourly bar.
