@@ -110,8 +110,24 @@ export interface ReplayCheck {
   bankrollScale?: number;
   /** With --combine: every replay of the stretch (this one and the nearby ones), their median, range and whether paper's
    *  P&L falls inside it; pnlGap, close and why are then the median's. */
-  nearby?: { runs: Array<{ bankrollScale: number; bankroll: number; pnl: number; contracts: number; fills: number }>; median: number; contractsMedian: number; min: number; max: number; paperInside: boolean };
+  nearby?: {
+    runs: Array<{ bankrollScale: number; bankroll: number; pnl: number; contracts: number; fills: number }>; median: number; contractsMedian: number; min: number; max: number; paperInside: boolean;
+    /** The replays' standard deviation (null under 3 replays): how far luck alone moves this stretch's P&L. */
+    sd: number | null;
+    /** Every stretch checked with this backtester so far, this one included: paper's P&L and the replays' medians summed,
+     *  their combined standard deviation, and how many of those apart paper is (z). */
+    tally?: { stretches: number; hours: number; paper: number; median: number; sd: number; z: number | null };
+    /** The P&L test the verdict used: 'luck' (paper within 2 standard deviations of the replays over the tally, with
+     *  contracts and prices matching) or 'pct' (the replays' median within 25% of paper's, one stretch). */
+    test: 'luck' | 'pct';
+  };
 }
+
+/** One checked stretch, kept for the tally across stretches (research/replayCheck.ts --history). `code` names the
+ *  backtester the replays ran (a change starts a new tally: old replays say nothing about new code). */
+export interface StretchTally { from: string; to: string; hours: number; paper: number; median: number; sd: number; runs: number; code: string }
+/** Whether two stretches share any time (ISO times compare as text): a later check of the same hours replaces the earlier. */
+const overlaps = (a: { from: string; to: string }, b: { from: string; to: string }) => a.from < b.to && b.from < a.to;
 
 const HOUR = 3_600_000;
 const hourOf = (ms: number) => new Date(ms).toISOString().slice(0, 13);
@@ -412,14 +428,35 @@ export function verdict(replay: SideSummary, paper: SideSummary, tol = 0.25): { 
 
 const median = (xs: number[]) => { const s = [...xs].sort((a, b) => a - b), n = s.length; return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2; };
 
-/** The verdict over replays of one stretch at nearby bankrolls (the first is the check's own): their median P&L and
- *  contracts held to paper's as verdict() holds one replay's, and whether paper's P&L falls inside their range. */
-export function nearbyVerdict(runs: Array<Pick<ReplayCheck, 'bankroll' | 'bankrollScale'> & { replay: SideSummary }>, paper: SideSummary, tol = 0.25): { nearby: NonNullable<ReplayCheck['nearby']>; close: boolean; pnlGap: number | null; why: string[] } {
+/** The verdict over replays of one stretch at nearby bankrolls (the first is the check's own). The replays' spread is
+ *  how much luck alone moves the stretch's P&L. Test 'luck' (the default): paper's P&L within 2 standard deviations of
+ *  the replays' median, summed over every stretch checked with this backtester (`history`, this one replacing any
+ *  earlier check of the same hours), the median's contracts within 0.5-2x of paper's, and prices that match (fair
+ *  value within 1c, the same side of the mid 95% of the time). Test 'pct': the median within `tol` of paper's P&L and the
+ *  same contracts rule, as verdict() holds one replay. Returns the stretch's tally entry (with 3 replays or more). */
+export function nearbyVerdict(runs: Array<Pick<ReplayCheck, 'bankroll' | 'bankrollScale'> & { replay: SideSummary }>, paper: SideSummary,
+  o: { tol?: number; test?: 'luck' | 'pct'; prices?: Pick<PriceMatch, 'fv' | 'sameSide'>; history?: StretchTally[]; stretch?: { from: string; to: string; hours: number; code: string } } = {},
+): { nearby: NonNullable<ReplayCheck['nearby']>; close: boolean; pnlGap: number | null; why: string[]; entry?: StretchTally } {
+  const tol = o.tol ?? 0.25;
   const rows = runs.map((r) => ({ bankrollScale: r.bankrollScale ?? 1, bankroll: r.bankroll, pnl: r.replay.pnl, contracts: r.replay.contracts, fills: r.replay.fills }));
-  const pnls = rows.map((r) => r.pnl), min = Math.min(...pnls), max = Math.max(...pnls);
-  const nearby = { runs: rows, median: median(pnls), contractsMedian: median(rows.map((r) => r.contracts)), min, max, paperInside: paper.pnl >= min - 1e-9 && paper.pnl <= max + 1e-9 };
-  const v = verdict({ ...runs[0].replay, pnl: nearby.median, contracts: nearby.contractsMedian }, paper, tol);
-  return { nearby, close: v.close, pnlGap: v.pnlGap, why: v.why.map((w) => `median of ${rows.length} replays: ${w}`) };
+  const pnls = rows.map((r) => r.pnl), min = Math.min(...pnls), max = Math.max(...pnls), mean = pnls.reduce((a, x) => a + x, 0) / pnls.length;
+  const sd = pnls.length >= 3 ? Math.sqrt(pnls.reduce((a, x) => a + (x - mean) ** 2, 0) / (pnls.length - 1)) : null;
+  const med = median(pnls), contractsMedian = median(rows.map((r) => r.contracts));
+  const entry = o.stretch && sd !== null ? { ...o.stretch, paper: paper.pnl, median: med, sd, runs: rows.length } : undefined;
+  const all = [...(o.history ?? []).filter((h) => o.stretch && h.code === o.stretch.code && !overlaps(h, o.stretch)), ...(entry ? [entry] : [])];
+  const T = all.length ? { stretches: all.length, hours: all.reduce((a, h) => a + h.hours, 0), paper: all.reduce((a, h) => a + h.paper, 0), median: all.reduce((a, h) => a + h.median, 0), sd: Math.sqrt(all.reduce((a, h) => a + h.sd ** 2, 0)) } : undefined;
+  const tally = T ? { ...T, z: T.sd > 0 ? (T.paper - T.median) / T.sd : null } : undefined;
+  const test = (o.test ?? 'luck') === 'luck' && tally ? 'luck' : 'pct';
+  const nearby = { runs: rows, median: med, contractsMedian, min, max, paperInside: paper.pnl >= min - 1e-9 && paper.pnl <= max + 1e-9, sd, ...(tally ? { tally } : {}), test } as NonNullable<ReplayCheck['nearby']>;
+  const v = verdict({ ...runs[0].replay, pnl: med, contracts: contractsMedian }, paper, tol);
+  if (test === 'pct') return { nearby, close: v.close, pnlGap: v.pnlGap, why: v.why.map((w) => `median of ${rows.length} replays: ${w}`), entry };
+  const why: string[] = [];
+  const f = (x: number) => (x >= 0 ? '+' : '') + x.toFixed(2);
+  if (tally!.z === null || Math.abs(tally!.z) > 2) why.push(`P&L beyond luck: paper ${f(tally!.paper)} vs the replays' ${f(tally!.median)} +/- ${tally!.sd.toFixed(2)} over ${tally!.stretches} stretch(es), ${tally!.z === null ? 'n/a' : Math.abs(tally!.z).toFixed(1)} standard deviations apart (limit 2)`);
+  if (paper.contracts > 0 && (contractsMedian / paper.contracts < 0.5 || contractsMedian / paper.contracts > 2)) why.push(`volume off: the replays' median ${contractsMedian.toFixed(0)} vs paper ${paper.contracts.toFixed(0)} contracts`);
+  if (o.prices && (o.prices.fv === null || o.prices.fv > 0.01)) why.push(`fair value off paper's by ${o.prices.fv === null ? 'n/a' : `${(o.prices.fv * 100).toFixed(1)}c`} (limit 1c)`);
+  if (o.prices && (o.prices.sameSide === null || o.prices.sameSide < 0.95)) why.push(`same side of the mid ${o.prices.sameSide === null ? 'n/a' : `${(o.prices.sameSide * 100).toFixed(0)}%`} of the time (needs 95%)`);
+  return { nearby, close: why.length === 0, pnlGap: v.pnlGap, why, entry };
 }
 
 export interface ReplayCheckOpts {
@@ -576,18 +613,27 @@ async function main(): Promise<void> {
   const f = (x: number) => (x >= 0 ? '+' : '') + x.toFixed(2);
   const pct = (x: number | null) => (x === null ? 'n/a' : `${(x * 100).toFixed(0)}%`);
   if (process.argv.includes('--combine')) {
-    // The check's own replay and the nearby ones (each a --out of this script; a missing or broken one is left out).
-    const read = (p: string): ReplayCheck | undefined => { try { return JSON.parse(fs.readFileSync(p, 'utf8')) as ReplayCheck; } catch { return undefined; } };
-    const own = read(arg('combine', ''));
+    // The check's own replay and the nearby ones (each a --out of this script; a missing or broken one is left out), and
+    // the tally of stretches checked before (--history: read, this stretch added or replaced, written back).
+    const read = <T>(p: string): T | undefined => { try { return JSON.parse(fs.readFileSync(p, 'utf8')) as T; } catch { return undefined; } };
+    const own = read<ReplayCheck>(arg('combine', ''));
     if (!own) throw new Error('--combine: the check\'s own result is missing');
-    const others = arg('nearby', '').split(',').filter(Boolean).map(read).filter((r): r is ReplayCheck => Boolean(r && r.replay && r.from === own.from && r.to === own.to));
-    const nv = nearbyVerdict([own, ...others], own.paper);
+    const others = arg('nearby', '').split(',').filter(Boolean).map((p) => read<ReplayCheck>(p)).filter((r): r is ReplayCheck => Boolean(r && r.replay && r.from === own.from && r.to === own.to));
+    const historyFile = arg('history', '');
+    const history = (historyFile && read<StretchTally[]>(historyFile)) || [];
+    const code = arg('code', 'unknown');
+    const nv = nearbyVerdict([own, ...others], own.paper, { test: arg('pnl-test', 'luck') === 'pct' ? 'pct' : 'luck', prices: own.prices, history: Array.isArray(history) ? history : [], stretch: own.checked ? { from: own.from, to: own.to, hours: own.hours, code } : undefined });
     const res: ReplayCheck = { ...own, nearby: nv.nearby, pnlGap: nv.pnlGap, close: own.checked && nv.close, why: own.checked ? nv.why : own.why };
+    if (historyFile && nv.entry) {
+      fs.mkdirSync(path.dirname(historyFile), { recursive: true });
+      fs.writeFileSync(historyFile, JSON.stringify([...(Array.isArray(history) ? history : []).filter((h) => !overlaps(h, nv.entry!)), nv.entry].slice(-200), null, 1));
+    }
     const out = arg('out', '');
     if (out) { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify(res, null, 2)); }
     const N = nv.nearby;
     console.log(`nearby replays of the stretch: ${[...N.runs].sort((a, b) => a.bankrollScale - b.bankrollScale).map((r) => `x${r.bankrollScale} ($${r.bankroll}) ${f(r.pnl)} / ${r.contracts.toFixed(0)} c`).join(' | ')}`);
-    console.log(`median ${f(N.median)} (range ${f(N.min)} to ${f(N.max)}), ${N.contractsMedian.toFixed(0)} contracts | paper ${f(own.paper.pnl)} / ${own.paper.contracts.toFixed(0)} c, ${N.paperInside ? 'inside' : 'outside'} the range | median gap ${pct(nv.pnlGap)}`);
+    console.log(`median ${f(N.median)} (range ${f(N.min)} to ${f(N.max)}, standard deviation ${N.sd === null ? 'n/a' : N.sd.toFixed(2)}), ${N.contractsMedian.toFixed(0)} contracts | paper ${f(own.paper.pnl)} / ${own.paper.contracts.toFixed(0)} c, ${N.paperInside ? 'inside' : 'outside'} the range | median gap ${pct(nv.pnlGap)}`);
+    if (N.tally) console.log(`stretches checked with this backtester (${code}): ${N.tally.stretches}, ${N.tally.hours.toFixed(1)} h | paper ${f(N.tally.paper)} vs the replays' ${f(N.tally.median)} +/- ${N.tally.sd.toFixed(2)}: ${N.tally.z === null ? 'n/a' : Math.abs(N.tally.z).toFixed(1)} standard deviations apart | test: ${N.test === 'luck' ? 'within 2 standard deviations' : 'median within 25%'}`);
     console.log(!res.checked ? `VERDICT not checked yet: ${res.why.join('; ')}` : res.close ? 'VERDICT close: sweep results can count' : `VERDICT not close: ${res.why.join('; ')}`);
     return;
   }

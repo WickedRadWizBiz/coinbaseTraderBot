@@ -352,3 +352,48 @@ test('replay check: the verdict over nearby replays holds their median to paper'
   assert.equal(off.nearby.paperInside, false);
   assert.ok(off.why.length > 0 && off.why.every((w) => w.startsWith('median of 5 replays')));
 });
+
+test('replay check: the luck test holds paper within 2 standard deviations of the replays, summed over the stretches', () => {
+  const side = (pnl: number, contracts: number) => ({ fills: 10, contracts, fees: 0, pnl, markets: 5, exits: {}, byHour: {}, byPurpose: {}, contractsByHour: {}, bySeries: {} });
+  const paper = side(-10, 1000);
+  const runs = [[-2, 900], [-9, 1000], [-30, 1100], [-11, 950], [4, 800]].map(([pnl, c], i) => ({ bankroll: 70 + i, bankrollScale: 1 + i * 0.025, replay: side(pnl, c) }));
+  const stretch = { from: '2026-10-24T00:00:00.000Z', to: '2026-10-24T07:00:00.000Z', hours: 7, code: 'abc1234' };
+  const prices = { fv: 0.004, sameSide: 0.99 };
+  const one = nearbyVerdict(runs, paper, { stretch, prices });
+  assert.equal(one.nearby.test, 'luck');
+  assert.ok(Math.abs(one.nearby.sd! - Math.sqrt(661.2 / 4)) < 1e-9, 'the sample standard deviation of the five replays');
+  assert.deepEqual({ ...one.entry!, sd: Math.round(one.entry!.sd * 1000) / 1000 }, { ...stretch, paper: -10, median: -9, sd: 12.857, runs: 5 });
+  assert.equal(one.nearby.tally!.stretches, 1);
+  assert.ok(one.close, `one stretch, 1 below the median with a spread of 12.9: ${one.why.join('; ')}`);
+  // Paper beat the replays by about 30 in each of two earlier stretches: alone each is luck, together they are not.
+  const earlier = [
+    { from: '2026-10-22T00:00:00.000Z', to: '2026-10-22T07:00:00.000Z', hours: 7, paper: 30, median: 0, sd: 10, runs: 5, code: 'abc1234' },
+    { from: '2026-10-23T00:00:00.000Z', to: '2026-10-23T07:00:00.000Z', hours: 7, paper: 25, median: -5, sd: 10, runs: 5, code: 'abc1234' },
+  ];
+  const all = nearbyVerdict(runs, paper, { stretch, prices, history: earlier });
+  assert.equal(all.nearby.tally!.stretches, 3);
+  assert.equal(all.nearby.tally!.hours, 21);
+  assert.deepEqual([all.nearby.tally!.paper, all.nearby.tally!.median], [45, -14]);
+  assert.ok(Math.abs(all.nearby.tally!.z! - 59 / Math.sqrt(661.2 / 4 + 200)) < 1e-9);
+  assert.equal(all.close, false);
+  assert.ok(all.why[0].startsWith('P&L beyond luck'), all.why[0]);
+  // Stretches replayed by another backtester say nothing about this one; a re-check of the same stretch replaces it.
+  const other = nearbyVerdict(runs, paper, { stretch, prices, history: earlier.map((h) => ({ ...h, code: 'old0000' })) });
+  assert.equal(other.nearby.tally!.stretches, 1);
+  assert.ok(other.close);
+  const again = nearbyVerdict(runs, paper, { stretch, prices, history: [{ ...stretch, paper: 100, median: 0, sd: 1, runs: 5 }, { ...earlier[1], from: '2026-10-23T20:00:00.000Z', to: '2026-10-24T03:00:00.000Z' }] });
+  assert.equal(again.nearby.tally!.stretches, 1, 'the same hours, and hours inside an earlier check, count once');
+  assert.ok(again.close);
+  // The contracts and the prices still have to match.
+  const thin = nearbyVerdict(runs.map((r) => ({ ...r, replay: side(r.replay.pnl, 400) })), paper, { stretch, prices });
+  assert.deepEqual(thin.why.map((w) => w.split(':')[0]), ['volume off']);
+  const priced = nearbyVerdict(runs, paper, { stretch, prices: { fv: 0.02, sameSide: 0.9 } });
+  assert.equal(priced.why.length, 2);
+  assert.ok(priced.why[0].startsWith('fair value off') && priced.why[1].startsWith('same side of the mid'));
+  // Two replays give no spread: no tally entry, and the verdict falls back to the median within 25%.
+  const two = nearbyVerdict(runs.slice(0, 2), paper, { stretch, prices });
+  assert.equal(two.entry, undefined);
+  assert.equal(two.nearby.test, 'pct');
+  // Test 'pct' on request.
+  assert.equal(nearbyVerdict(runs, paper, { stretch, prices, history: earlier, test: 'pct' }).close, true);
+});
