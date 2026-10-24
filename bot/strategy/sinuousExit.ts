@@ -530,7 +530,7 @@ export class SinuousExitGate {
   }
 
   status(): SinuousExitStatus {
-    const s = stats(this.st.results);
+    const s = scoreStats(this.st.results);
     return {
       mode: this.p.mode, minNetProfitCents: +(this.p.minNetProfit * 100).toFixed(2), benched: this.st.benched ?? null,
       scored: this.st.results.length, netUsd: +s.sum.toFixed(2), t: s.t === null ? null : +s.t.toFixed(2), since: this.st.since,
@@ -562,7 +562,7 @@ export class SinuousExitGate {
   }
 
   private verdict(): string | undefined {
-    const r = this.st.results, s = stats(r);
+    const r = this.st.results, s = scoreStats(r);
     const what = this.crossing ? 'selling on the cross' : 'holding profit exits';
     const vs = this.crossing ? ' against holding to settlement' : '';
     if (s.sum <= -this.bench.maxLossUsd) return `${what} cost $${(-s.sum).toFixed(2)}${vs} over ${r.length} exits (limit $${this.bench.maxLossUsd})`;
@@ -575,7 +575,8 @@ export class SinuousExitGate {
   }
 }
 
-function stats(r: number[]): { sum: number; t: number | null } {
+/** A scoreboard's net and its t statistic (mean over its standard error); t is null below two results. */
+export function scoreStats(r: number[]): { sum: number; t: number | null } {
   const n = r.length, sum = r.reduce((a, v) => a + v, 0);
   if (n < 2) return { sum, t: null };
   const m = sum / n, sd = Math.sqrt(r.reduce((a, v) => a + (v - m) ** 2, 0) / (n - 1));

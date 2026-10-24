@@ -94,6 +94,9 @@ export interface StrategyConfig {
   /** Take-profit: once armed, sell when the gain falls back by this fraction of its best (never below the floor).
    *  0 = sell as soon as the floor is reached. */
   profitGiveBack: number;
+  /** Take-profit bench (bot/strategy/takeProfitBench.ts): its crypto sales scored against holding to settlement, the
+   *  take-profit benched on the exit curve's rule. false = scored only, never benched. */
+  takeProfitBench: boolean;
   /** relaxed = decide on each 1-minute bar close or on a trigger (spec cadence); continuous = every tick. */
   cadence: 'relaxed' | 'continuous';
   /** Scheduled evaluation period, fair-value move that triggers an evaluation, re-price period, and the floor between evaluations. */
@@ -114,10 +117,14 @@ export interface StrategyConfig {
   /** Smallest maker quote, in contracts, when sizing wants a smaller one (within the per-order caps and the risk room
    *  left): Kalshi rounds each order's fee up to the cent, so a small position pays more a contract to sell. 0 = off. */
   minQuoteContracts: number;
-  /** Paper only: each crypto entry and maker quote buys about this many dollars of contracts once sizing wants the
-   *  trade, in place of the tier, break-even, optimal-f and portfolio-Kelly sizing (the owner's choice on Oct 23: profit
-   *  sales of $1 to $3 instead of cents). 0 = paper sizes like live. Live never uses it. */
+  /** Paper only, with paperOrderFrac 0: each crypto entry and maker quote buys about this many dollars of contracts
+   *  once sizing wants the trade, in place of the tier, break-even, optimal-f and portfolio-Kelly sizing (the owner's
+   *  choice on Oct 23: profit sales of $1 to $3 instead of cents). Both 0 = paper sizes like live. Live never uses it. */
   paperOrderUsd: number;
+  /** Paper only: each crypto entry and maker quote buys about this share of the bankroll once sizing wants the trade
+   *  (the owner's choice on Oct 24, a minimum of 10%: orders shrink as the account does and grow as it does). 0 = the
+   *  fixed paperOrderUsd. Live never uses it. */
+  paperOrderFrac: number;
   /** Paper only: no new crypto entries in a time-to-close bucket where the market mid has scored a better log loss
    *  than the bot's (temperature-calibrated) probability over the last settled markets (bot/strategy/accuracyGate.ts;
    *  the owner's choice on Oct 23). Live never blocks on it. */
@@ -980,6 +987,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     profitTarget: num(env, 'PROFIT_TARGET_CENTS', 2, 0, 50) / 100,
     profitTargetPct: num(env, 'PROFIT_TARGET_PCT', 0.10, 0, 1),
     profitGiveBack: num(env, 'PROFIT_GIVE_BACK', 1 / 3, 0, 1),
+    // The owner, Oct 24: the take-profit goes on the exit curve's scoreboard and bench (it sold winners for $230 less
+    // than holding them on Oct 23-24).
+    takeProfitBench: bool(env, 'TAKE_PROFIT_BENCH', true),
     cadence,
     evalBarSec: num(env, 'STRATEGY_EVAL_BAR_SEC', 60, 5, 600),
     evalFvMove: num(env, 'STRATEGY_EVAL_FV_MOVE', 0.015, 0.001, 0.2),
@@ -995,6 +1005,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     makerBufferRange: band(env, 'STRATEGY_MAKER_BUFFER_RANGE', relaxed ? [0.015, 0.03] : [0, 0]),
     minQuoteContracts: num(env, 'STRATEGY_MIN_QUOTE_CONTRACTS', 3, 0, 100),
     paperOrderUsd: num(env, 'PAPER_ORDER_USD', 10, 0, 1000),
+    paperOrderFrac: num(env, 'PAPER_ORDER_FRAC', 0.10, 0, 1),
     accuracyGate: { enabled: bool(env, 'ACCURACY_GATE', true), window: num(env, 'ACCURACY_GATE_WINDOW', 150, 20, 2000), minMarkets: num(env, 'ACCURACY_GATE_MIN_MARKETS', 40, 5, 1000) },
     sizing: oneOf(env, 'STRATEGY_SIZING', relaxed ? 'target_ev' : 'kelly', ['kelly', 'target_ev'] as const),
     kappa: num(env, 'STRATEGY_KAPPA', 0.5, 0, 1),

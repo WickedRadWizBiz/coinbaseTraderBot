@@ -195,6 +195,7 @@ export function createApi(d: ApiDeps): express.Express {
       treeModels: d.engine.treeModelStatus(),
       probation: probation()?.status() ?? null,
       curveExit: d.engine.curveExitStatus(),
+      takeProfitBench: d.engine.takeProfitBenchStatus(),
       curveEntry: d.engine.curveEntryStatus(),
       kalshiAccount: d.engine.kalshiAccountStatus(),
       autoTrain: d.autoTrain ? (() => { const a = d.autoTrain!.status(); return { mode: a.mode, running: a.running, paused: a.paused, window: a.window, nextRun: a.nextRun, lastExit: a.lastExit, lastSwap: a.swaps[0] ?? null, lastReport: a.lastReport }; })() : null,
@@ -405,6 +406,13 @@ export function createApi(d: ApiDeps): express.Express {
     if (!d.engine.resetCurveExit()) return res.status(400).json({ error: 'exit curve is off (SINUOUS_EXIT=off)' });
     d.audit.write('curve_exit', { event: 'reset', by: 'dashboard' });
     res.json({ ok: true, curveExit: d.engine.curveExitStatus() });
+  });
+
+  // Take-profit bench (bot/strategy/takeProfitBench.ts): clear its scoreboard and lift a bench.
+  api.post('/take-profit/reset', (_req, res) => {
+    if (!d.engine.resetTakeProfitBench()) return res.status(400).json({ error: 'no take-profit bench' });
+    d.audit.write('take_profit_bench', { event: 'reset', by: 'dashboard' });
+    res.json({ ok: true, takeProfitBench: d.engine.takeProfitBenchStatus() });
   });
 
   // Probation (VALIDATION_GATES=monitor, bot/risk/probation.ts): a fresh probation for a benched book.
