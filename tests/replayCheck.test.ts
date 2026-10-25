@@ -10,7 +10,7 @@ import type { TrialName } from '../bot/strategy/componentTrials';
 import { activeTaNet, setTaNet } from '../bot/ta/taNet';
 import { setTaNetEnsemble } from '../bot/ta/taNetEnsemble';
 import { engineModels, installProbation, runBacktest, type EvalReading } from '../research/backtest';
-import { benchAt, corr, gateAt, nearbyVerdict, paperFromAudit, paperSummary, priceMatcher, readAudit, replayDays, settingsDiffer, stretchStart, verdict } from '../research/replayCheck';
+import { benchAt, benchTimeline, corr, gateAt, nearbyVerdict, paperFromAudit, paperSummary, priceMatcher, readAudit, replayDays, settingsDiffer, stretchStart, verdict } from '../research/replayCheck';
 import { writeSyntheticRecordings } from '../research/synthetic';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'replay-check-test-'));
@@ -303,6 +303,21 @@ test('replay check: the take-profit bench and the accuracy gate wound back to th
   assert.equal(seeded.paper?.takeProfitBenchedAt, 0);
   assert.equal(seeded.paper?.takeProfitSales, 0);
   assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')).benched, { at: 0, reason: 'seeded' });
+
+  // Paper's bench through the stretch: benched at the start or not, then its benches and resets in it.
+  const tl = benchTimeline([{ t: from - 9, event: 'benched', reason: 'early' }, { t: from - 1, event: 'scored', usd: 1 }, { t: from + 1, event: 'reset' }, { t: from + 2, event: 'benched', reason: 'again' }], from, from + 10);
+  assert.deepEqual(tl, { benched: 'early', events: [{ t: from + 1, benched: null }, { t: from + 2, benched: 'again' }] });
+  assert.equal(benchTimeline([{ t: from - 9, event: 'benched', reason: 'early' }], from, from + 10, null).benched, null, 'the state file wound back wins');
+  // Following it, the take-profit sells or sits out as paper's did, whatever the replay's own scoreboard says; that one
+  // still scores every sale, and says when it would have benched.
+  const sat = await run({ follow: { benched: 'paper benched', events: [] } });
+  assert.equal(sat.paper?.takeProfitSales, 0);
+  const lifted = await run({ stateFile, follow: { benched: 'paper benched', events: [{ t: 0, benched: null }] } });
+  assert.equal(lifted.paper?.takeProfitSales, fresh.paper?.takeProfitSales, 'lifted from the start: sells as an empty scoreboard does, though its own was seeded benched');
+  assert.equal(lifted.paper?.takeProfitBenchedAt, undefined);
+  const strict = await run({ rule: { ...rule, maxLossUsd: 1e-6 }, follow: { benched: null, events: [] } });
+  assert.equal(strict.paper?.takeProfitSales, fresh.paper?.takeProfitSales, 'its own verdict does not stop the sales');
+  assert.ok(Object.values(strict.paper?.takeProfitByMarket ?? {}).some((x) => x.usd < 0) && strict.paper?.takeProfitBenchedAt !== undefined, 'its first losing market would have benched it');
 });
 
 test('backtest: the weekly loss pause stops entries only with the override off; before tradeFromMs the replay only watches', async () => {

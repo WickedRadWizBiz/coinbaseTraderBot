@@ -1,36 +1,49 @@
-// The backtester's model-call tape (research/callTape.ts): the first run over a window records every model call, later
-// runs with other strategy settings play them back and must end on exactly the result of a run without the tape.
+// The backtester's model-call tape (research/callTape.ts): the first run over a window records the model call for every
+// contract every second, later runs with other strategy settings look up the ones they make (a market with nothing
+// working waits a few seconds between evaluations) and must end on exactly the result of a run without the tape.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import { loadConfig } from '../bot/config';
 import { MetaModel } from '../bot/model/metaModel';
-import { runBacktest, type BacktestResult } from '../research/backtest';
+import { PRIORITY_TAPE_KEYS, runBacktest, type BacktestResult } from '../research/backtest';
 import { openTape, pruneTapes, TapeMiss, TapeReader, TapeWriter, tickerHash } from '../research/callTape';
 import { writeSyntheticRecordings } from '../research/synthetic';
 import { tmpDir } from './helpers';
 
-test('tape: rows come back in order; a call out of step, too many or too few is a miss', () => {
+test('tape: calls are looked up by second and contract; one the tape does not hold, or on another fair value, is a miss', () => {
   const file = path.join(tmpDir(), 't.tape');
   const w = openTape(file, 'sig', ['a']) as TapeWriter;
   assert.equal(w.mode, 'record');
-  for (let i = 0; i < 70_000; i++) w.push(i, tickerHash('X'), 0.5, i / 70_000, i % 2 ? 0.1 : undefined, [i * 2]);
+  // Three contracts a second, 70,000 calls: one second straddles the first chunk's end (65,536 rows).
+  const ids = ['X', 'Y', 'Z'].map(tickerHash);
+  for (let i = 0; i < 70_000; i++) w.push(Math.floor(i / 3), ids[i % 3], 0.5, i / 70_000, i % 2 ? 0.1 : undefined, [i * 2]);
   w.finish();
   const r = openTape(file, 'sig', ['a']) as TapeReader;
   assert.equal(r.mode, 'replay');
-  const c0 = r.next(0, tickerHash('X'), 0.5);
+  const c0 = r.next(0, ids[0], 0.5);
   assert.deepEqual([c0.p, c0.std, c0.x[0]], [0, undefined, 0]);
-  const c = r.next(1, tickerHash('X'), 0.5);
-  assert.deepEqual([c.p, c.std, c.x[0]], [1 / 70_000, 0.1, 2]);
-  assert.equal(r.next(2, tickerHash('X'), 0.5).std, undefined);
-  assert.throws(() => r.next(3, tickerHash('X'), 0.6), TapeMiss, 'another fair value');
+  const z = r.next(0, ids[2], 0.5);
+  assert.deepEqual([z.p, z.x[0]], [2 / 70_000, 4], 'another contract in the same second, out of the recorded order');
+  const y = r.next(1, ids[1], 0.5);
+  assert.deepEqual([y.p, y.std, y.x[0]], [4 / 70_000, undefined, 8], 'contracts the run skips are passed over');
+  assert.throws(() => r.next(1, ids[1], 0.5), TapeMiss, 'the same call twice');
   r.abort();
+  const s2 = openTape(file, 'sig', ['a']) as TapeReader;
+  const cut = 21_845; // rows 65,535 .. 65,537
+  assert.deepEqual([s2.next(cut, ids[0], 0.5).x[0], s2.next(cut, ids[1], 0.5).x[0], s2.next(cut, ids[2], 0.5).x[0]], [131_070, 131_072, 131_074], 'a second across two chunks');
+  assert.throws(() => s2.next(cut + 1, ids[0], 0.6), TapeMiss, 'another fair value');
+  assert.throws(() => s2.next(cut, ids[0], 0.5), TapeMiss, 'back in time');
+  s2.abort();
+  const gone = openTape(file, 'sig', ['a']) as TapeReader;
+  assert.throws(() => gone.next(1, tickerHash('W'), 0.5), TapeMiss, 'a contract the tape never saw');
+  gone.abort();
   assert.equal(openTape(file, 'other', ['a']).mode, 'record', 'another signature: recorded afresh');
   assert.equal(openTape(file, 'sig', ['b']).mode, 'record', 'other keys: recorded afresh');
   const short = openTape(file, 'sig', ['a']) as TapeReader;
-  for (let i = 0; i < 10; i++) short.next(i, tickerHash('X'), 0.5);
-  assert.throws(() => short.finish(), TapeMiss, 'fewer calls than the tape');
+  for (let i = 0; i < 10; i++) short.next(i, ids[0], 0.5);
+  short.finish(); // fewer calls than the tape: markets with nothing working wait
   pruneTapes(path.dirname(file), 1);
   assert.equal(fs.existsSync(file), false, 'over the size cap: dropped');
 });
@@ -49,7 +62,7 @@ test('backtest on a tape: other settings played back give exactly the untaped re
     assert.ok(plain.fills > 0, 'the run trades');
     await runBacktest(dir, model, cfg.strategy, cfg.risk, 200, { exitPolicy, tape });
     assert.ok(fs.existsSync(`${tape.file}.json`), 'recorded');
-    assert.equal(openTape(tape.file, tape.sig, exitPolicy === 'confluence_ratchet' ? ['conf_count'] : []).mode, 'replay');
+    assert.equal(openTape(tape.file, tape.sig, PRIORITY_TAPE_KEYS).mode, 'replay');
     const played = await runBacktest(dir, model, B, cfg.risk, 200, { exitPolicy, tape });
     assert.equal(summary(played), summary(plain), `${exitPolicy}: played back = run afresh`);
   }

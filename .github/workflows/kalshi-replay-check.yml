@@ -147,9 +147,10 @@ jobs:
           # The validation gates' state (which books' unvalidated models are benched).
           rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/probation.json "$RUNNER_TEMP/paper-probation.json" 2>/dev/null || true
           # The TA network the engine prices with (its promoted copy and the newest archived versions its ensemble blends),
-          # the rule book, the component trials' verdicts, and the index series the network's context and the market
-          # context read (dominance, the slow indexes, the risk gauges) from the bot's history directory.
-          for f in ta_net.json rule_book.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
+          # the rule book and the evolved formula (both among the signals that order the engine's markets), the component
+          # trials' verdicts, and the index series the network's context and the market context read (dominance, the slow
+          # indexes, the risk gauges) from the bot's history directory.
+          for f in ta_net.json rule_book.json gp_indicators.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
           mkdir -p "$DATA/models/archive/ta_net" "$DATA/history"
           ssh bot 'ls -1 ~/bot/data/models/archive/ta_net/*.json 2>/dev/null | sort -r | head -4' | while read -r f; do rsync -a --rsync-path="nice -n 19 rsync" "bot:$f" "$DATA/models/archive/ta_net/" 2>/dev/null || true; done
           rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/component_trials.json "$RUNNER_TEMP/paper-trials.json" 2>/dev/null || true

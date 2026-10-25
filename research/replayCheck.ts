@@ -96,6 +96,9 @@ export interface ReplayCheck {
   models: string[]; gates: string; benched: string[];
   /** What the replay started from that paper had at the stretch's start (the take-profit bench, the accuracy gate). */
   seeded: string[];
+  /** The replay's take-profit sold or sat out as paper's bench did (benchTimeline): benched at the start or not, and
+   *  paper's benches and resets in the stretch; null: the replay's own bench decided (--own-bench). */
+  benchFollowed: { benched: string | null; events: Array<{ t: string; benched: string | null }> } | null;
   /** gateShare: of the markets in paper's entry diagnoses (one every 5 minutes), the share the accuracy gate kept out.
    *  quiet: the diagnoses after paper's last fill in the stretch (how many, the last one, and their reasons summed). */
   paper: PaperSide;
@@ -166,7 +169,7 @@ export interface AuditRecords {
   diagnoses: Array<{ t: number; markets: number; gated: number; reasons: Record<string, number> }>;
   modelSwaps: number[];
   /** The take-profit bench's events (bot/strategy/takeProfitBench.ts): a market scored, the bench tripped or reset. */
-  benchEvents: Array<{ t: number; event: string; usd?: number; ticker?: string; contracts?: number }>;
+  benchEvents: Array<{ t: number; event: string; usd?: number; ticker?: string; contracts?: number; reason?: string }>;
   /** The risk gateway's rejections as the engine logs them (one a market, side, purpose and reason a minute), crypto
    *  only: "purpose: reason" with the numbers folded. */
   rejects: Array<{ t: number; key: string }>;
@@ -237,7 +240,7 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
         if (ticker && !isTennis(ticker)) a.rejects.push({ t, key: `${String(d.intent?.purpose ?? 'order')}: ${foldReason(String(d.reasons?.[0] ?? 'rejected'))}` });
         continue;
       }
-      if (bench) { a.benchEvents.push({ t, event: String(d.event ?? ''), ...(typeof d.usd === 'number' ? { usd: d.usd } : {}), ...(typeof d.ticker === 'string' ? { ticker: d.ticker } : {}), ...(typeof d.contracts === 'number' ? { contracts: d.contracts } : {}) }); continue; }
+      if (bench) { a.benchEvents.push({ t, event: String(d.event ?? ''), ...(typeof d.usd === 'number' ? { usd: d.usd } : {}), ...(typeof d.ticker === 'string' ? { ticker: d.ticker } : {}), ...(typeof d.contracts === 'number' ? { contracts: d.contracts } : {}), ...(typeof d.reason === 'string' ? { reason: d.reason } : {}) }); continue; }
       if (diagnosis) {
         let gated = 0;
         const reasons: Record<string, number> = {};
@@ -491,6 +494,8 @@ export interface ReplayCheckOpts {
   /** The paper bot's take-profit-bench.json and accuracy_gate.json now: the replay starts from them as they stood when
    *  the stretch began (benchAt, gateAt). */
   paperTpBench?: string; paperAccuracyGate?: string;
+  /** The replay's take-profit benches on its own scoreboard instead of following paper's bench (benchTimeline). */
+  ownBench?: boolean;
 }
 
 /** The take-profit bench as paper had it when the stretch began: its state file now less the markets it scored since
@@ -502,6 +507,17 @@ export function benchAt(state: { results?: number[]; since?: number; benched?: {
   const scored = after.filter((e) => e.event === 'scored').length;
   const results = Array.isArray(state.results) ? state.results.slice(0, Math.max(0, state.results.length - scored)) : [];
   return { results, since: state.since ?? from, ...(state.benched && state.benched.at < from ? { benched: state.benched } : {}), sales: (state.sales ?? []).filter((x) => x.ts < from) };
+}
+
+/** Paper's take-profit bench through the stretch, for the replay to follow: benched at its start or not (`startBenched`,
+ *  from its state file wound back; undefined: the last bench or reset logged before the stretch), then each bench and
+ *  reset in it. One early run of bad luck benches a bench on its own scoreboard for the rest of the day, and the
+ *  replay's luck in its first minutes is its own: followed, both sell or sit out together and the rest compares. */
+export function benchTimeline(events: AuditRecords['benchEvents'], from: number, to: number, startBenched?: string | null): { benched: string | null; events: Array<{ t: number; benched: string | null }> } {
+  const turn = (e: AuditRecords['benchEvents'][number]) => e.event === 'benched' || e.event === 'reset';
+  const before = events.filter((e) => e.t < from && turn(e)).pop();
+  const benched = startBenched !== undefined ? startBenched : before?.event === 'benched' ? before.reason ?? 'benched' : null;
+  return { benched, events: events.filter((e) => e.t >= from && e.t < to && turn(e)).map((e) => ({ t: e.t, benched: e.event === 'benched' ? e.reason ?? 'benched' : null })) };
 }
 
 /** The accuracy gate's scorecard as it stood when the stretch began: the snapshots scored before it. */
@@ -545,11 +561,12 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const seedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'replay-seed-'));
   const readState = (f?: string) => { try { return f && fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : undefined; } catch { return undefined; } };
   const seeded: string[] = [];
-  let benchFile: string | undefined, gateFile: string | undefined;
+  let benchFile: string | undefined, gateFile: string | undefined, startBenched: string | null | undefined;
   const benchNow = readState(o.paperTpBench);
   if (benchNow) {
     const b = benchAt(benchNow, audit.benchEvents, from);
     if (b) {
+      startBenched = b.benched?.reason ?? null;
       benchFile = path.join(seedDir, 'take-profit-bench.json');
       fs.writeFileSync(benchFile, JSON.stringify(b));
       seeded.push(`take-profit bench (${b.results.length} markets scored${b.benched ? ', benched' : ''})`);
@@ -562,11 +579,12 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     fs.writeFileSync(gateFile, JSON.stringify(g));
     seeded.push(`accuracy gate (${Object.values(g.rows).reduce((a, r) => a + r.length, 0)} scored snapshots)`);
   }
+  const follow = o.ownBench ? undefined : benchTimeline(audit.benchEvents, from, to, startBenched);
   const match = priceMatcher(audit.prices, from, to);
   const r = await runBacktest(dir, model, S, cfg.risk, bankroll, {
     exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
     sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd }, accuracyGate: S.accuracyGate,
-    takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile }, accuracyGateFile: gateFile, startMs: from - (o.warmupHours ?? 8) * HOUR, tradeFromMs: from,
+    takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile, ...(follow ? { follow } : {}) }, accuracyGateFile: gateFile, startMs: from - (o.warmupHours ?? 8) * HOUR, tradeFromMs: from,
     dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, onEval: match.onEval, makerMarkouts: o.makerMarkouts,
     volProfile: models.volProfile, applyVolSeasonality: Boolean(models.volProfile), volModel: models.volModel, fillModel: models.fillModel, calendar: models.calendar,
     taNet: true, trials: models.trials, marketContext: true,
@@ -605,7 +623,9 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     startups: audit.startups.map((s) => new Date(s.t).toISOString()),
     settingsDiffer: startedAt ? settingsDiffer(JSON.parse(JSON.stringify(publicConfig(cfg as Config))), startedAt.config) : null,
     modelSwaps: audit.modelSwaps.filter(inside).map((t) => new Date(t).toISOString()),
-    replay, paper, prices: match.summary(), makerBufferPaper, models: models.used, gates: cfg.probation.mode, benched, seeded, ...v, checked, close: checked && v.close,
+    replay, paper, prices: match.summary(), makerBufferPaper, models: models.used, gates: cfg.probation.mode, benched, seeded,
+    benchFollowed: follow ? { benched: follow.benched, events: follow.events.map((e) => ({ t: new Date(e.t).toISOString(), benched: e.benched })) } : null,
+    ...v, checked, close: checked && v.close,
     why: checked ? v.why : [`the stretch on one start of the paper bot is ${hours.toFixed(1)} h (from ${new Date(from).toISOString()}), the check needs ${minHours} h`],
   };
 }
@@ -664,6 +684,7 @@ async function main(): Promise<void> {
     makerMarkouts: arg('maker-markouts', '') && fs.existsSync(arg('maker-markouts', '')) ? (JSON.parse(fs.readFileSync(arg('maker-markouts', ''), 'utf8')) as unknown[]).map(Number).filter(Number.isFinite) : undefined,
     paperProbation: arg('paper-probation', '') || undefined, paperTrials: arg('paper-trials', '') || undefined,
     paperTpBench: arg('paper-tp-bench', '') || undefined, paperAccuracyGate: arg('paper-accuracy-gate', '') || undefined,
+    ownBench: process.argv.includes('--own-bench'),
   });
   const out = arg('out', '');
   if (out) { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify(res, null, 2)); }
@@ -693,8 +714,10 @@ async function main(): Promise<void> {
   console.log(`the fair value's inputs, replay vs paper: index gap ${P.spotBp ?? 'n/a'} bp | strike differs on ${pct(P.strikeDiffers)} | volatility ratio: EWMA x${P.sigmaRatio ?? 'n/a'}, priced with x${P.sigmaPricingRatio ?? 'n/a'} | priced over the EWMA: paper x${P.pricedPaper ?? 'n/a'}, replay x${P.pricedReplay ?? 'n/a'} (TA network x${P.taVolMult ?? 'n/a'})`);
   console.log(`the price beyond the trained model's (TA tilt, rule book, SNN): paper ${c(P.overlayPaper)}, replay ${c(P.overlayReplay)} (TA tilt ${c(P.taShift)}, rule book ${c(P.ruleShift)})`);
   console.log(`accuracy gate: replay held back ${pct(res.replay.entryEvaluations ? res.replay.accuracyBlocks / res.replay.entryEvaluations : null)} of its entry evaluations; paper's diagnoses show it keeping out ${pct(res.paper.gateShare)} of the markets | replay's break-even size scale went down to x${res.replay.sizeScaleMin.toFixed(2)} (paper's orders, a share of the bankroll, ignore it)`);
-  const tb = (scored: number, net: number, at: string | null) => `${scored} markets scored, ${f(net)} against holding to settlement, benched ${at ? hm(at) : 'never'}`;
-  console.log(`take-profit bench in the stretch: replay ${tb(res.replay.takeProfitScored, res.replay.takeProfitNetUsd, res.replay.takeProfitBenchedAt)} | paper ${tb(res.paper.takeProfitBench.scored, res.paper.takeProfitBench.netUsd, res.paper.takeProfitBench.benchedAt)}`);
+  const tb = (scored: number, net: number, at: string | null, would = false) => `${scored} markets scored, ${f(net)} against holding to settlement, ${would ? 'its own scoreboard would have benched it' : 'benched'} ${at ? hm(at) : 'never'}`;
+  console.log(`take-profit bench in the stretch: replay ${tb(res.replay.takeProfitScored, res.replay.takeProfitNetUsd, res.replay.takeProfitBenchedAt, Boolean(res.benchFollowed))} | paper ${tb(res.paper.takeProfitBench.scored, res.paper.takeProfitBench.netUsd, res.paper.takeProfitBench.benchedAt)}`);
+  const BF = res.benchFollowed;
+  console.log(BF ? `the replay's take-profit sold or sat out as paper's bench did: ${BF.benched ? 'benched' : 'selling'} at the start${BF.events.map((e) => `, ${e.benched ? 'benched' : 'selling again'} ${hm(e.t)}`).join('')}` : "the replay's take-profit benched on its own scoreboard (--own-bench)");
   // Market by market: the first ones each side scored, with what the other side's sales made on the same market.
   const RB = res.replay.takeProfitByMarket ?? {}, PB = res.paper.takeProfitBench.byMarket ?? {};
   const one = (x: TakeProfitMarket | undefined) => (x ? `${x.contracts.toFixed(0)} c ${f(x.usd)}` : 'none');

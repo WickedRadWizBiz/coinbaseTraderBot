@@ -2,10 +2,11 @@
 //
 // Every second the backtester prices each open contract, builds the full feature map and asks the model for its
 // probability: three quarters of a Kalshi backtest's time. None of that depends on the strategy settings a sweep moves
-// (edges, buffers, sizing): the calls come in the same order with the same answers whatever they are. The first run
-// over a window records each call's answer (the model's probability and spread, plus the few features read after it);
-// every later run over the same window and model plays them back, checking each call's time and contract on the way,
-// and starts over without the tape at the first mismatch.
+// (edges, buffers, sizing), but which contracts are asked about in a second does: a market with nothing working is
+// evaluated only every few seconds (research/backtest.ts, as the engine). The first run over a window records the call
+// for every contract every second (the model's probability and spread, plus the few features read after it); every
+// later run over the same window and model looks up the ones it makes, by second and contract, checking the fair value
+// it was made on, and starts over without the tape at the first one missing.
 //
 // Layout: <file> holds chunks [u32 length][raw deflate of float64 rows]; <file>.json (written last, so a tape without
 // it is unfinished) holds the signature, the extra feature keys and the call count. Rows: time, contract hash, the
@@ -16,7 +17,7 @@ import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
 
-export const TAPE_SCHEMA = 'ktape2';
+export const TAPE_SCHEMA = 'ktape3';
 const ROWS_PER_CHUNK = 65_536;
 const BASE = 6;
 
@@ -85,6 +86,11 @@ export class TapeReader {
   private read = 0;
   private readonly W: number;
   private readonly x: Float64Array;
+  /** The second being read: its calls (copied out of the chunks, which a second can straddle) by contract hash. */
+  private second = -Infinity;
+  private sec = new Float64Array(0);
+  private secN = 0;
+  private readonly at = new Map<number, number>();
   constructor(file: string, readonly keys: string[], private readonly calls: number) {
     this.fd = fs.openSync(file, 'r');
     this.W = BASE + keys.length;
@@ -100,19 +106,43 @@ export class TapeReader {
     this.n = this.rows.length / this.W; this.i = 0;
     return true;
   }
-  /** The next call's answer; throws TapeMiss when the run has drifted from the tape. */
-  next(at: number, ticker: number, fv: number): TapeCall {
-    if (this.i >= this.n && !this.chunk()) throw new TapeMiss('the run made more model calls than the tape holds');
-    const o = this.i * this.W;
-    if (this.rows[o] !== at || this.rows[o + 1] !== ticker || this.rows[o + 2] !== fv) throw new TapeMiss(`call ${this.read} differs from the tape`);
-    this.i++; this.read++;
-    for (let k = 0; k < this.keys.length; k++) this.x[k] = this.rows[o + BASE + k];
-    return { p: this.rows[o + 3], std: this.rows[o + 4] ? this.rows[o + 5] : undefined, x: this.x, at };
+  /** Moves to second `t`: the calls before it are passed over (contracts the run did not evaluate then). */
+  private seek(t: number): void {
+    if (t < this.second) throw new TapeMiss('the run went back in time');
+    this.at.clear(); this.secN = 0;
+    for (;;) {
+      if (this.i >= this.n && !this.chunk()) break;
+      const r = this.rows[this.i * this.W];
+      if (r < t) { this.i++; continue; }
+      if (r > t) break;
+      let j = this.i;
+      while (j < this.n && this.rows[j * this.W] === t) j++;
+      const need = (this.secN + j - this.i) * this.W;
+      if (need > this.sec.length) { const grown = new Float64Array(Math.max(need, this.sec.length * 2)); grown.set(this.sec.subarray(0, this.secN * this.W)); this.sec = grown; }
+      this.sec.set(this.rows.subarray(this.i * this.W, j * this.W), this.secN * this.W);
+      this.secN += j - this.i;
+      this.i = j;
+      if (j < this.n) break; // the next second starts in this chunk; else it may go on in the next one
+    }
+    for (let k = 0; k < this.secN; k++) this.at.set(this.sec[k * this.W + 1], k * this.W);
+    this.second = t;
   }
-  /** At the end of the run: every call on the tape was made. */
+  /** The call for contract `ticker` at second `at`; throws TapeMiss when the tape has none, or one made on another fair
+   *  value (other data). */
+  next(at: number, ticker: number, fv: number): TapeCall {
+    if (at !== this.second) this.seek(at);
+    const o = this.at.get(ticker);
+    if (o === undefined) throw new TapeMiss(`no call for contract ${ticker} at ${at} on the tape (call ${this.read})`);
+    if (this.sec[o + 2] !== fv) throw new TapeMiss(`call ${this.read} was made on another fair value`);
+    this.at.delete(ticker);
+    this.read++;
+    for (let k = 0; k < this.keys.length; k++) this.x[k] = this.sec[o + BASE + k];
+    return { p: this.sec[o + 3], std: this.sec[o + 4] ? this.sec[o + 5] : undefined, x: this.x, at };
+  }
+  /** At the end of the run: it made no more calls than the tape holds (fewer is normal: idle markets wait). */
   finish(): void {
     fs.closeSync(this.fd);
-    if (this.read !== this.calls) throw new TapeMiss(`the run made ${this.read} of the tape's ${this.calls} model calls`);
+    if (this.read > this.calls) throw new TapeMiss(`the run made ${this.read} model calls, the tape holds ${this.calls}`);
   }
   abort(): void { try { fs.closeSync(this.fd); } catch { /* closed */ } }
 }
