@@ -1,27 +1,33 @@
-name: "Gemini Code Review and Assistant"
+name: "Advanced Two-Tier Gemini Code Review"
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  issue_comment:
-    types: [created]
 
 jobs:
-  gemini-review:
+  ai-review:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
-      issues: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
-      - name: Run Gemini CLI Action
-        uses: google-github-actions/run-gemini-cli@v0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install google-genai requests
+
+      - name: Run Two-Tier Gemini Review
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          gemini_model: "gemini-2.5-flash"
-          prompt: "You are an expert quantitative developer reviewing Python trading bots and financial state machines. Provide concise, clean, production-ready code feedback."
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: python .github/scripts/ai_review.py
