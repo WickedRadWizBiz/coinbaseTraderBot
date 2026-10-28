@@ -71,6 +71,7 @@ import { ConfluenceRatchetExit, DEFAULT_HUNT, DEFAULT_RATCHET, EXIT_POLICIES, Ex
 import { readRecordings, ReplayState } from './replay';
 import { AccuracyGate, type AccuracyGateConfig } from '../bot/strategy/accuracyGate';
 import { TakeProfitBench } from '../bot/strategy/takeProfitBench';
+import { compactReading, MarketState, observeMarket } from '../bot/marketdata/marketState';
 import { gatePasses, type ProbationParams } from '../bot/risk/probation';
 import { bootstrapMeanCi, deflatedSharpe, pbo, rng, sharpe } from './stats';
 
@@ -241,7 +242,9 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
 /** One market evaluation: the price traded on and what the fair value was made of (pModel: the trained model's price,
  *  before the TA tilt and the rule book's). */
 export interface EvalReading { ticker: string; now: number; pYes: number; fv: number; bid: number; ask: number; position: number; spot?: number; strike?: number; sigma?: number; sigmaPricing?: number;
-  pModel?: number; taVolMult?: number; taShift?: number; ruleShift?: number }
+  pModel?: number; taVolMult?: number; taShift?: number; ruleShift?: number;
+  /** The market-state reading (compactReading), as the engine's decision audit records it. */
+  mstate?: Record<string, number | null> }
 
 /** The engine's paper caps (bot/engine.ts): one order, this many closing together, this many in all. */
 export const PAPER_WINDOW_ORDERS = 3;
@@ -348,6 +351,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const policy = opts.exitPolicy ?? 'fair_value';
   const st = new ReplayState();
   const volFc = new VolForecaster(opts.volModel);
+  // Market state, fed at each evaluation exactly as the engine feeds it (bot/marketdata/marketState.ts).
+  const mstate = new MarketState();
   const pos = new PositionBook();
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => DEFAULT_FEES, () => st.now);
   const gateway = new RiskGateway(limits);
@@ -689,8 +694,9 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         ruleShift = rb ? tilt(rb.k, 1) : 0;
         if (ruleShift) pYes = Math.max(0.001, Math.min(0.999, pYes + ruleShift));
       }
+      const mRead = observeMarket(mstate, { asset: m.asset, ticker: m.ticker, index: idx!, now: st.now, bid, ask, trades: st.features.micro.get(m.ticker)?.tradesIn(st.now, 300_000) });
       opts.onEval?.({ ticker: m.ticker, now: st.now, pYes, fv: fv.pYes, bid: bid.price, ask: ask.price, position: pos.position(m.ticker), spot: spot.value, strike: terms.strike, sigma: vol.sigmaPerSqrtSec, sigmaPricing: sigmaFv,
-        pModel: pred.p, taVolMult, taShift, ruleShift });
+        pModel: pred.p, taVolMult, taShift, ruleShift, mstate: compactReading(mRead) });
       const pMarket = model.marketProbability(mid);
       const ret = idx!.trailingLogReturn(st.now, strategy.fastMoveWindowSec * 1000);
       const fastMove = ret !== undefined && Math.abs(ret) > strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(strategy.fastMoveWindowSec);

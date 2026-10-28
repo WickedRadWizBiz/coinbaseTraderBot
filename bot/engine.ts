@@ -16,6 +16,7 @@ import type { Config, RiskLimits } from './config';
 import type { ExchangeFill, ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
 import type { IndexTracker } from './marketdata/indexTracker';
+import { compactReading, MarketState, observeMarket, type MarketStateReading } from './marketdata/marketState';
 import type { OrderBook } from './marketdata/orderBook';
 import { computeFeatureMap, FEATURE_SCHEMA_VERSION, FEATURES } from './model/featureEngine';
 import { ADVERSARY_GROUPS, evaluateEntry, seedOf, type AdversaryVerdict } from './strategy/adversary';
@@ -352,6 +353,8 @@ export class Engine {
   private lastDecisionAudit = new Map<string, number>();
   /** Last decision record per market that carried the full feature map (see the decision audit below). */
   private lastFeatureAudit = new Map<string, number>();
+  /** One reading a coin of what the market is doing (volatility, change points, liquidity, flow), fed at every evaluation. */
+  readonly marketState = new MarketState();
   private lastRejectAudit = new Map<string, number>();
   private dataHalt: string | undefined = 'awaiting market data';
   balance: number | undefined;
@@ -1754,7 +1757,13 @@ export class Engine {
       probation: pr ? Object.fromEntries(Object.entries(pr).filter(([k]) => k !== 'mode').map(([k, b]) => { const s = b as { trades: number; netUsd: number; benched: unknown }; return [k, { trades: s.trades, netUsd: s.netUsd, benched: Boolean(s.benched) }]; })) : null,
       indexAgeMs: Object.fromEntries([...this.d.md.index].map(([a, idx]) => [a, idx.health(now).ageMs])),
       maxIndexAgeMs: this.d.cfg.risk.maxIndexAgeMs,
+      marketState: Object.fromEntries(this.marketState.assets().map((a) => [a, this.marketState.reading(a, now)])),
     });
+  }
+
+  /** The market-state reading of every coin seen. */
+  marketStates(now = this.now()): MarketStateReading[] {
+    return this.marketState.assets().sort().map((a) => this.marketState.reading(a, now));
   }
 
   /** TA network: version, blind-test results per head, and each asset's latest forecast and live skill. */
@@ -2003,6 +2012,9 @@ export class Engine {
 
     const ret = idx!.trailingLogReturn(now, cfg.strategy.fastMoveWindowSec * 1000);
     const fastMove = ret !== undefined && Math.abs(ret) > cfg.strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(cfg.strategy.fastMoveWindowSec);
+    // Market state: fed here and in the backtester the same way (observeMarket), read by the audit now and by the
+    // dynamic thresholds next.
+    const mState = observeMarket(this.marketState, { asset: m.asset, ticker: m.ticker, index: idx!, now, bid, ask, trades: md.features.micro.get(m.ticker)?.tradesIn(now, 300_000) });
 
     // The resting quotes, and the exit curve's resting sell (rest mode), which holds the held side's quote slot.
     const live = oms.liveOrders().filter((o) => o.ticker === m.ticker && (o.purpose === 'quote' || (o.purpose === 'exit' && o.timeInForce === 'good_till_canceled')) && isLive(o));
@@ -2327,7 +2339,7 @@ export class Engine {
         decisionId, ticker: m.ticker, model: model.id, spot: spot.value, strike, strikeSource: m.strikeSource, sigma: vol.sigmaPerSqrtSec, sigmaPricing,
         session: sess.key, sessionRisk: sessRisk,
         kind: m.kind, cap: terms.cap, cadence: reason ?? null, featureSchema: FEATURE_SCHEMA_VERSION, pMarket, pStd: pred.std, q: st.q,
-        tauSec, fv: fv.pYes, regime: fv.regime, pYes, ...(full ? { features, drivers: why.drivers } : {}), modelShift: why.shiftFromFairValue, bid: bid.price, ask: ask.price, position: st.position, fastMove,
+        tauSec, fv: fv.pYes, regime: fv.regime, pYes, ...(full ? { features, drivers: why.drivers } : {}), modelShift: why.shiftFromFairValue, bid: bid.price, ask: ask.price, position: st.position, fastMove, mstate: compactReading(mState),
         place: plan.place.map((p) => ({ side: p.side, price: p.price, count: p.count, purpose: p.purpose, edge: p.edge, why: p.why })),
         cancel: plan.cancel,
         // Why no entry could open here (paper's accuracy gate), so studies need not recompute it.
