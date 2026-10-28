@@ -27,7 +27,7 @@ import { recordingFiles } from '../bot/marketdata/recordingFiles';
 import { PERP_FEATURES, perpFeatures, perpGatedLayout, PerpModel, type PerpModelParams } from '../bot/perps/perpSignal';
 import { fitGatedExperts, gatedPredict, type GatedExperts } from '../bot/model/gatedExperts';
 import { HOLDOUT_RULE, isHoldout, weekBlocks } from './historyLedger';
-import { readRecordings, ReplayState } from './replay';
+import { readRecordings, ReplayState, type LineFilter } from './replay';
 import { hashStr, replayPerpDays } from './history/historyReplay';
 import { WorkerPool, workerCount, workerScript } from './workerPool';
 import type { PerpDatasetJob } from './perpDatasetWorker';
@@ -41,12 +41,17 @@ const DAY = 86_400_000;
 /** Bumped when the rows change for the same recordings (the cache keys carry it). */
 const PERP_DATASET_VERSION = 1;
 
+/** The lines a perp row reads: the asset-level prices and dominance, candles, the perp quotes and the SNN's calls, never
+ *  the Kalshi contracts' books (most of a recorded day). */
+const PERP_KINDS = new Set(['index', 'spot', 'dominance', 'candles', 'perp', 'snn']);
+export const perpLines: LineFilter = (k) => PERP_KINDS.has(k);
+
 /** Feature rows with forward-return labels for a run of consecutive recorded days (`days`, in order). The
  *  replay starts with `warm` (the recorded day before: the trackers warm up) and reads on into `tail` (the
  *  day after) only as far as the last samples' labels need. A sample is taken once its whole instant is in
  *  (the history replay writes every asset's prices and the dominance of an instant as one burst). `state`: the
- *  replay's state (a test reads what it holds at the end). */
-export async function perpRowsForDays(dir: string, days: string[], warm: string | undefined, tail: string | undefined, opts: { everySec?: number; horizonMin?: number; state?: ReplayState } = {}): Promise<PerpRow[]> {
+ *  replay's state (a test reads what it holds at the end). `keep`: the lines parsed (default perpLines; null: all). */
+export async function perpRowsForDays(dir: string, days: string[], warm: string | undefined, tail: string | undefined, opts: { everySec?: number; horizonMin?: number; state?: ReplayState; keep?: LineFilter | null } = {}): Promise<PerpRow[]> {
   if (!days.length) return [];
   const every = (opts.everySec ?? 300) * 1000;
   const H = (opts.horizonMin ?? 240) * 60_000;
@@ -57,7 +62,7 @@ export async function perpRowsForDays(dir: string, days: string[], warm: string 
   const nextAt = new Map<string, number>();
   const quoted = new Set<string>();
   let sweepAt = 0;
-  for await (const e of readRecordings(dir, undefined, warm ?? days[0], tail ?? days[days.length - 1])) {
+  for await (const e of readRecordings(dir, undefined, warm ?? days[0], tail ?? days[days.length - 1], opts.keep === null ? undefined : (opts.keep ?? perpLines))) {
     if (e.t >= to + H + 300_000) break;
     st.apply(e);
     // The rows read only the asset-level series: a Kalshi market that is over goes with its book (the remote

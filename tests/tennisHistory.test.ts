@@ -13,6 +13,8 @@ import { readRecordings, ReplayState } from '../research/replay';
 import { replaySnn } from '../research/snnReplay';
 import { snnInteractions } from '../research/snnPbt';
 import { buildTennisDataset } from '../research/trainTennisModel';
+import { writeSyntheticRecordings } from '../research/synthetic';
+import { mergeRecordingDays } from './helpers';
 
 const TENNIS = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).tennis;
 const DAY0 = Date.parse('2026-03-02T00:00:00Z');
@@ -129,6 +131,23 @@ test('tennis history replay: real matches with their tape, a book that follows e
   assert.equal(res.net.tennisTemplate?.n, 2, 'both matches learned into the template');
   assert.equal(res.net.columns.size, 0, 'ended match columns are dropped');
   assert.ok(snnInteractions(res.rows, 'tennis').length <= 2, 'at most one bet per match');
+});
+
+test('tennis rows skip the crypto contracts and the asset prices: the same rows as reading every line', async () => {
+  const hist = fs.mkdtempSync(path.join(os.tmpdir(), 'th-')), out = path.join(hist, 'replay'), mixed = path.join(hist, 'mixed');
+  writeTennisHistory(hist);
+  await buildHistoryReplay({ historyDir: hist, outDir: out, assets: [], fromDay: '2026-03-02', toDay: '2026-03-03', tennisSeries: ['KXATPMATCH'], log: () => {} });
+  // A recorded day carries the crypto contracts and the asset prices beside the matches.
+  writeSyntheticRecordings(path.join(hist, 'crypto'), { windows: 40, start: DAY0 + 9 * 3_600_000 });
+  await mergeRecordingDays(mixed, [out, path.join(hist, 'crypto')]);
+  assert.ok(fs.readFileSync(path.join(mixed, 'md-2026-03-02.jsonl'), 'utf8').includes('"k":"book","ticker":"SYN-'), 'the crypto books are in the day');
+  const every = await buildTennisDataset(mixed, TENNIS, 60, new ReplayState(), null);
+  const st = new ReplayState();
+  const rows = await buildTennisDataset(mixed, TENNIS, 60, st);
+  assert.ok(every.length > 100, `${every.length} rows`);
+  assert.deepEqual(rows, every);
+  assert.equal(st.index.size + st.spot.size, 0, 'no asset price was read');
+  assert.ok([...st.books.keys()].every((t) => t.startsWith('KXATPMATCH')), 'no crypto book was read');
 });
 
 test('tennis template: a new match starts from what earlier matches learned; it survives checkpoints and the model file', () => {

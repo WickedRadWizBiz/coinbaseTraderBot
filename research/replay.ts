@@ -49,17 +49,28 @@ export interface RecMarket {
 
 export interface RecEvent { t: number; k: string; [key: string]: any }
 
-async function* lines(file: string): AsyncGenerator<RecEvent> {
+/** Which recorded lines a reader parses, asked with each line's kind and the raw line before it is parsed. A line it
+ *  declines comes through as `{ t, k: 'skip' }`, so the replay's clock and its ties move exactly as they would with it.
+ *  Most of a recorded day is the order books of the crypto contracts, which the perps and tennis replays never read:
+ *  parsing and applying them all made those steps of the remote training take hours. */
+export type LineFilter = (kind: string, line: string) => boolean;
+const LINE_HEAD = /^\{"t":(-?\d+(?:\.\d+)?),"k":"([a-z_]+)"/;
+
+async function* lines(file: string, keep?: LineFilter): AsyncGenerator<RecEvent> {
   const rl = file.endsWith('.gz') ? recordingLines(file) : readline.createInterface({ input: fs.createReadStream(file), crlfDelay: Infinity });
   for await (const line of rl) {
     if (!line) continue;
+    if (keep) {
+      const h = LINE_HEAD.exec(line);
+      if (h && !keep(h[2], line)) { yield { t: Number(h[1]), k: 'skip' }; continue; }
+    }
     try { yield JSON.parse(line) as RecEvent; } catch { /* torn line */ }
   }
 }
 
 /** k-way merge by time; ties go to the first file, then the others in order. */
-async function* mergeByTime(files: string[]): AsyncGenerator<RecEvent> {
-  const its = files.map((x) => lines(x));
+async function* mergeByTime(files: string[], keep?: LineFilter): AsyncGenerator<RecEvent> {
+  const its = files.map((x) => lines(x, keep));
   const heads = await Promise.all(its.map((it) => it.next()));
   for (;;) {
     let best = -1;
@@ -75,14 +86,14 @@ async function* mergeByTime(files: string[]): AsyncGenerator<RecEvent> {
  *  sidecar events (prequential SNN outputs) are merged in by time.
  *  An event followed by another with the same timestamp carries `tie: true`: a replay applies a whole
  *  instant before acting on it (the history replay writes each instant's prices and books as one burst
- *  of same-time records; in live recordings exact ties are rare). */
-export async function* readRecordings(dir: string, sidecar = process.env.SNN_BACKFILL_DIR, fromDay?: string, toDay?: string): AsyncGenerator<RecEvent> {
+ *  of same-time records; in live recordings exact ties are rare). `keep`: the lines to parse (LineFilter). */
+export async function* readRecordings(dir: string, sidecar = process.env.SNN_BACKFILL_DIR, fromDay?: string, toDay?: string, keep?: LineFilter): AsyncGenerator<RecEvent> {
   const files = recordingFiles(dir).filter((f) => (!fromDay || f.day >= fromDay) && (!toDay || f.day <= toDay));
   const sides = (sidecar ?? '').split(path.delimiter).filter(Boolean);
   let prev: RecEvent | undefined;
   for (const f of files) {
     const extra = sides.map((d) => path.join(d, `snnfill-${f.day}.jsonl`)).filter((x) => fs.existsSync(x));
-    for await (const e of extra.length ? mergeByTime([f.file, ...extra]) : lines(f.file)) {
+    for await (const e of extra.length ? mergeByTime([f.file, ...extra], keep) : lines(f.file, keep)) {
       if (prev) { if (e.t === prev.t) prev.tie = true; yield prev; }
       prev = e;
     }

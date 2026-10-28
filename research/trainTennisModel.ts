@@ -9,6 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import { loadConfig, paperEnv, type TennisConfig } from '../bot/config';
+import { contractKind } from '../bot/model/fairValue';
 import { tennisSnapshotValues } from '../bot/snn/inputs';
 import { TENNIS_FAIR_FEATURES, tennisFairInputs, type TennisFairParams } from '../bot/tennis/tennisFair';
 import { MatchTracker, type MatchMarket } from '../bot/tennis/tennisStrategy';
@@ -16,7 +17,7 @@ import { sigmoid } from '../bot/util/num';
 import { predictLogits } from './mlp';
 import { MlpTorch, trainMlp } from './mlpTorch';
 import { predictGbdtLogits, trainGbdt } from './gbdt';
-import { readRecordings, ReplayState } from './replay';
+import { readRecordings, ReplayState, type LineFilter } from './replay';
 
 export interface TennisRow { event: string; t: number; f: Record<string, number>; pA: number; y: 0 | 1 }
 
@@ -28,7 +29,29 @@ function flowOf(st: ReplayState, ticker: string, windowSec: number): number | un
 
 /** One row per match per `everySec` while it trades, built with the engine's own input function. `st`: the replay's
  *  state (a test reads what it holds at the end). */
-export async function buildTennisDataset(dir: string, cfg: TennisConfig, everySec = 60, st = new ReplayState()): Promise<TennisRow[]> {
+/** The lines a tennis row reads: the matches' markets, books and trades, the scores, results and the SNN's calls. Not
+ *  the crypto contracts' books or the asset prices, which are most of a recorded day: reading every line of 8 days took
+ *  the remote training 102 minutes (Oct 28). A match is known from its market line, which comes before its book. */
+export function tennisLines(): LineFilter {
+  const matches = new Set<string>();
+  return (k, line) => {
+    switch (k) {
+      case 'market':
+        try { const m = JSON.parse(line); if ((m.kind ?? contractKind(m.series ?? '')) === 'match') matches.add(m.ticker); } catch { /* torn line */ }
+        return true;
+      case 'book': case 'delta': case 'trade':
+        return matches.has(TICKER.exec(line)?.[1] ?? '');
+      case 'index': case 'spot': case 'dominance': case 'candles': case 'perp':
+        return false;
+      default:
+        return true;
+    }
+  };
+}
+const TICKER = /"ticker":"([^"]+)"/;
+
+/** `keep`: the lines parsed (default tennisLines(); null: all). */
+export async function buildTennisDataset(dir: string, cfg: TennisConfig, everySec = 60, st = new ReplayState(), keep: LineFilter | null = tennisLines()): Promise<TennisRow[]> {
   const trackers = new Map<string, MatchTracker>();
   const pending = new Map<string, Omit<TennisRow, 'y'>[]>();
   const lastSample = new Map<string, number>();
@@ -36,7 +59,7 @@ export async function buildTennisDataset(dir: string, cfg: TennisConfig, everySe
   const rows: TennisRow[] = [];
   const eventOf = (t: string) => st.markets.get(t)?.event ?? t.slice(0, t.lastIndexOf('-'));
   let last = 0;
-  for await (const e of readRecordings(dir)) {
+  for await (const e of readRecordings(dir, undefined, undefined, undefined, keep ?? undefined)) {
     st.apply(e);
     if (st.now - last < 5000) continue;
     last = st.now;
