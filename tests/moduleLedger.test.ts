@@ -58,10 +58,11 @@ test('the paper order size flags every sizing lever it bypasses', () => {
   assert.deepEqual(row(live, 'optimal f cap').flags, []);
 });
 
-test('live never follows the paper-only parts', () => {
+test('live follows the trials and the accuracy gate as paper does', () => {
   const rows = buildLedger(base({ mode: 'live', sizing: { ...base().sizing, paperOrderUsd: 0 } }));
-  assert.equal(row(rows, 'accuracy gate').state, 'shadow');
-  assert.ok(row(rows, 'meta model').flags.includes('trial result applies in paper only'));
+  assert.equal(row(rows, 'accuracy gate').state, 'on');
+  assert.equal(row(rows, 'TA network').state, 'benched');
+  assert.equal(row(rows, 'meta model').state, 'on');
 });
 
 test('exits, gates and feeds', () => {

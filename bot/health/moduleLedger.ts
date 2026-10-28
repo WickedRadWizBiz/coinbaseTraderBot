@@ -81,10 +81,9 @@ function trialRow(module: string, area: ModuleRow['area'], t: TrialReading | und
   const flags = [...(base.flags ?? [])];
   let state = base.state;
   if (t && state !== 'off') {
-    // The trials put a part into paper's prices (applied) or take it out; live's prices never follow them.
-    if (mode === 'paper') state = t.applied ? 'on' : t.state === 'off' ? 'benched' : 'shadow';
+    // The trials put a part into the prices (applied) or take it out, in paper and live alike.
+    state = t.applied ? 'on' : t.state === 'off' ? 'benched' : 'shadow';
     if (t.state === 'off') flags.push('trial: priced worse with it');
-    if (mode === 'live' && t.applied) flags.push('trial result applies in paper only');
   }
   const score = t ? { label: 'log loss saved a contract vs the price without it', value: r4(t.advantage), n: t.windows } : null;
   return { module, area, state, validated: base.validated, score, flags, ...(base.note ? { note: base.note } : {}) };
@@ -124,8 +123,7 @@ export function buildLedger(x: LedgerInput): ModuleRow[] {
   // Gates.
   if (x.accuracyGate) {
     const g = x.accuracyGate;
-    const flags = x.mode === 'paper' ? ['paper only: live never blocks on it'] : [];
-    rows.push({ module: 'accuracy gate', area: 'gates', state: !g.enabled ? 'off' : x.mode === 'paper' ? 'on' : 'shadow', validated: null, score: { label: 'time-to-close buckets blocked', value: g.blocked, n: g.buckets }, flags });
+    rows.push({ module: 'accuracy gate', area: 'gates', state: g.enabled ? 'on' : 'off', validated: null, score: { label: 'time-to-close buckets blocked', value: g.blocked, n: g.buckets }, flags: [] });
   }
   for (const [book, p] of Object.entries(x.probation ?? {})) {
     rows.push({ module: `probation: ${book}`, area: 'gates', state: p.benched ? 'benched' : 'on', validated: null, score: { label: 'net dollars on probation', value: +p.netUsd.toFixed(2), n: p.trades }, flags: [] });

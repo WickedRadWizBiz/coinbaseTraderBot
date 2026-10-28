@@ -169,14 +169,14 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
   tape?: { file: string; sig: string };
   /** Paper sizing as the engine does it (bot/engine.ts paperOrderUsd / orderLimits): each crypto order buys about
    *  orderFrac of the bankroll (or the fixed orderUsd with orderFrac 0), whatever the tier allows; the risk caps widen
-   *  to fit one order, PAPER_WINDOW_ORDERS closing together and PAPER_TOTAL_ORDERS in all. The vault is bookkeeping
-   *  only in paper, so it does not shrink the bankroll here either. */
+   *  to fit one order, PAPER_WINDOW_ORDERS closing together and PAPER_TOTAL_ORDERS in all. Both 0 (the default): sized
+   *  as live. The vault's reserve leaves the bankroll in both modes, as in the engine. */
   paper?: { orderFrac: number; orderUsd: number };
   /** The optimal f cap as the engine applies it (Engine.kalshiOptimalF): the stake per order never above what the
    *  replay's own settled entries support (bootstrap quantile of the growth-optimal fraction, recency weighted, once
-   *  there are minTradesKalshi), floored in paper at paperFloor x the tier's per-order fraction. Starts from
+   *  there are minTradesKalshi), floored (paper and live alike) at paperFloor x the tier's per-order fraction. Starts from
    *  `seed` (settled entries before the replay, as trades.jsonl rows) when given, else from nothing. */
-  optimalF?: { enabled: boolean; quantile: number; halfLifeDays: number; minTradesKalshi: number; paperFloor: number; live?: boolean; seed?: Array<{ ts: number; ticker: string; cost: number; count: number; won: boolean }> };
+  optimalF?: { enabled: boolean; quantile: number; halfLifeDays: number; minTradesKalshi: number; paperFloor: number; seed?: Array<{ ts: number; ticker: string; cost: number; count: number; won: boolean }> };
   /** The paper accuracy gate (bot/strategy/accuracyGate.ts): no new entry in a time-to-close bucket where the market's
    *  own price has called the recent results better than the bot. Starts with an empty scorecard (no look-ahead), or
    *  from accuracyGateFile. */
@@ -445,7 +445,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const trades = binaryTrades(ofRows).map((t) => ({ ...t, w: recencyWeight(t.ts, now, o.halfLifeDays) }));
       ofCache = { at: now, cap: optimalF(trades, { quantile: o.quantile, minTrades: o.minTradesKalshi, horizon: 100 }).cap };
     }
-    return !o.live && Number.isFinite(ofCache.cap) ? Math.max(ofCache.cap, o.paperFloor * orderFrac) : ofCache.cap;
+    return Number.isFinite(ofCache.cap) ? Math.max(ofCache.cap, o.paperFloor * orderFrac) : ofCache.cap;
   };
   ex.on('fill', (f) => {
     pos.applyFill({ ticker: f.ticker, side: f.side, count: f.count, price: f.price, fee: f.fee ?? 0 }, { closeTs: closeOf.get(f.ticker) });
@@ -695,7 +695,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const ret = idx!.trailingLogReturn(st.now, strategy.fastMoveWindowSec * 1000);
       const fastMove = ret !== undefined && Math.abs(ret) > strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(strategy.fastMoveWindowSec);
       vault?.tick(st.now);
-      const bankroll = Math.max(0, (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0) - (opts.paper ? 0 : vault?.reserved() ?? 0));
+      const bankroll = Math.max(0, (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0) - (vault?.reserved() ?? 0));
       peakBank = Math.max(peakBank, bankroll);
       // The tier from the tradable high-water mark, as the engine picks it (EquityGuard.tierReference).
       const tier = tierAt(tiers, guard.tierReference(bankroll));

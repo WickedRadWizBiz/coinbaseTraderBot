@@ -719,7 +719,8 @@ export class Engine {
    * shown as a warning (System Telemetry) and trading continues.
    */
   private skewHalt(): string | undefined {
-    if (this.d.cfg.clockSkewMaxMs <= 0 || this.d.cfg.mode !== 'live') return undefined;
+    // Paper and live alike (the owner, Oct 28: paper behaves as live).
+    if (this.d.cfg.clockSkewMaxMs <= 0) return undefined;
     return this.d.clock?.haltReason(Date.now());
   }
 
@@ -883,7 +884,8 @@ export class Engine {
       this.fCaps[book] = c;
     }
     let cap = c.rep.cap;
-    if (this.d.cfg.mode !== 'live' && Number.isFinite(cap)) cap = Math.max(cap, of.paperFloor * this.tier().orderFrac);
+    // The floor applies in paper and live alike (the owner, Oct 28): with no measured edge the stake shrinks to it.
+    if (Number.isFinite(cap)) cap = Math.max(cap, of.paperFloor * this.tier().orderFrac);
     return { cap, rep: c.rep };
   }
 
@@ -932,7 +934,7 @@ export class Engine {
       minTradableBankrollUsd: S.minTradableBankrollUsd,
       tier: { ...t, orderRiskUsd: +(t.orderFrac * b).toFixed(2), dailyLossLimitUsd: +this.d.risk.dailyLossLimit(b, this.tierLimits(t)).toFixed(2) },
       paperOrderUsd: this.paperOrderUsd() || null, paperOrderFrac: this.d.cfg.mode === 'paper' ? this.d.cfg.strategy.paperOrderFrac || null : null,
-      accuracyGate: this.d.accuracyGate ? { ...this.d.accuracyGate.status(), enforced: this.d.cfg.mode === 'paper' && this.d.cfg.strategy.accuracyGate.enabled } : null,
+      accuracyGate: this.d.accuracyGate ? { ...this.d.accuracyGate.status(), enforced: this.d.cfg.strategy.accuracyGate.enabled } : null,
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null, minQuoteContracts: S.minQuoteContracts,
       takeProfit: { floorPct: S.profitTargetPct, floorCents: +(S.profitTarget * 100).toFixed(2), giveBack: +S.profitGiveBack.toFixed(3) },
@@ -944,7 +946,7 @@ export class Engine {
       modelHealth: this.d.modelHealth?.status() ?? null,
       // Does the TA network's drift improve the probabilities? (log loss with vs without it, per window)
       taHealth: this.d.taHealth?.status() ?? null,
-      trials: this.d.trials ? { ...this.d.trials.status(), params: this.d.trials.p, appliesIn: 'paper' } : null,
+      trials: this.d.trials ? { ...this.d.trials.status(), params: this.d.trials.p, appliesIn: 'paper and live' } : null,
       cpu: this.cpu.status(),
       taEnsemble: activeTaNetEnsemble()?.status() ?? null,
       // Optimal f on the Kalshi pool's settled trades (cap on the stake per order, fraction of bankroll).
@@ -1048,9 +1050,9 @@ export class Engine {
   bankroll(): number | undefined {
     if (this.balance === undefined) return undefined;
     const committed = this.d.oms.positions.open().reduce((s, m) => s + PositionBook.maxLoss(m), 0);
-    // Vaulted and pocketed profit is not the bot's to trade. Paper trades its whole balance unless VAULT_IN_PAPER: the
-    // vault keeps half of every win and none of the losses, so it had taken $343 of the $360 paper pool (Oct 23).
-    const reserved = this.d.cfg.mode !== 'paper' || this.d.cfg.vault?.paper ? (this.d.vault?.reserved() ?? 0) : 0;
+    // Vaulted and pocketed profit is not the bot's to trade, in paper as in live (the owner, Oct 28: paper behaves as
+    // live; VAULT_IN_PAPER is no longer read).
+    const reserved = this.d.vault?.reserved() ?? 0;
     return Math.max(0, this.balance + committed - reserved);
   }
 
@@ -1923,12 +1925,12 @@ export class Engine {
     const pMarket = model.marketProbability(mid);
     // SNN: feed this market's encodings to the next 1 s step, then blend (alpha = 0 unless earned).
     this.snnObserve(m, { mid, spread: ask.price - bid.price, imbalance: features.imbalance, dAtm: fv.d2, tauFrac: tauSec / Math.max(1, (m.closeTime - m.openTime) / 1000) }, now);
-    // Component trials (bot/strategy/componentTrials.ts): paper's price follows each trial's verdict (the trained model
-    // stays in until it tests significantly worse than the math alone; the others go in once they test better, the
-    // rule book while it is tested); live's price never does.
+    // Component trials (bot/strategy/componentTrials.ts): the price follows each trial's verdict, in paper and live alike
+    // (the owner, Oct 28) (the trained model stays in until it tests significantly worse than the math alone; the others
+    // go in once they test better, the rule book while it is tested).
     const trials = this.d.trials;
-    const trialOn = (name: TrialName) => cfg.mode === 'paper' && trials?.applied(name) === true;
-    const pModel = cfg.mode === 'paper' && trials && !trials.applied('mlp') ? fv.pYes : pred.p;
+    const trialOn = (name: TrialName) => trials?.applied(name) === true;
+    const pModel = trials && !trials.applied('mlp') ? fv.pYes : pred.p;
     const blended = this.snnBlend(m, st, pModel, tauSec > R.noEntryBeforeCloseSec, now);
     // The SNN's trial blend of a price: (1 - a) p + a p_snn.
     const snnTrial = (p: number) => (blended.a !== undefined && blended.pSnn !== undefined ? (1 - blended.a) * p + blended.a * blended.pSnn : undefined);
@@ -2022,7 +2024,7 @@ export class Engine {
     // Paper: no new entry where the market's own price has called recent results better than the bot (the owner's
     // choice on Oct 23; bot/strategy/accuracyGate.ts). Every evaluation feeds the gate's scorecard, live included.
     this.d.accuracyGate?.observe(m.ticker, tauSec, pYes, mid);
-    const accuracyBlock = kindWindow && guards.length === 0 && cfg.mode === 'paper' ? this.d.accuracyGate?.block(m.ticker, tauSec) : undefined;
+    const accuracyBlock = kindWindow && guards.length === 0 ? this.d.accuracyGate?.block(m.ticker, tauSec) : undefined;
     const entryWindowOpen = kindWindow && guards.length === 0 && !accuracyBlock && !feeBlock;
     st.accuracyBlock = accuracyBlock;
     st.feeBlock = feeBlock;

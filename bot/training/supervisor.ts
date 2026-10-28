@@ -75,7 +75,7 @@ export class TrainingSupervisor {
       if (!this.covers(source)) return undefined;
       const paper = d.cfg.mode === 'paper' ? d.engine.paperSizing?.() ?? '' : '';
       const sizing = paper ? `paper orders ${paper}` : 'size follows the net loss';
-      return d.cfg.mode === 'paper' ? `override (paper): trading continues; ${sizing}` : `override (live): the loss limit does not stop trading; ${sizing}`;
+      return `override (${d.cfg.mode}): the loss limit does not stop trading; ${sizing}`;
     });
     d.oms.on('fill', () => { this.st.kalshi.fills++; });
   }
@@ -86,10 +86,11 @@ export class TrainingSupervisor {
   /** Paper mode with the override on: exhausted pools are refilled. */
   active(): boolean { return this.d.cfg.mode === 'paper' && this.d.control.killOverride; }
 
-  /** Whether the override covers an automatic kill trip from `source`: all of them in paper, the loss limit ('risk') in live. */
+  /** Whether the override covers an automatic kill trip from `source`: the loss limit ('risk') only, in paper as in live
+   *  (the owner, Oct 28: paper behaves as live); every other automatic trip halts both. */
   covers(source: string | undefined): boolean {
     if (!this.d.control.killOverride || KillSwitch.isManual(source)) return false;
-    return this.d.cfg.mode === 'paper' || source === 'risk';
+    return source === 'risk';
   }
 
   start(): void {

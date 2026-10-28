@@ -205,8 +205,7 @@ export function createApi(d: ApiDeps): express.Express {
         budget: d.engine.tennisBudget(),
         matches: [...d.engine.tennisStatus.values()],
       },
-      // Paper without VAULT_IN_PAPER trades its whole balance: the vault only keeps its books (the card says so).
-      vault: d.vault ? { ...d.vault.status(), paperIgnored: d.cfg.mode === 'paper' && !d.cfg.vault?.paper } : null,
+      vault: d.vault ? { ...d.vault.status(), paperIgnored: false } : null,
       dominance: dominanceStatus(d.md),
       wsConnected: d.md.wsConnected,
       catalog: d.md.catalogHealth,

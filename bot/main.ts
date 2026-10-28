@@ -343,9 +343,9 @@ async function main(): Promise<void> {
       v = taNetView(asset, candles, now);
       // The rule book at the setups' holding horizon (a day), for the coin's character.
       const rb = cfg.strategy.ruleBook ? activeRuleBook()?.read(candles?.snapshot(now, marketContext()?.macro()), 24, marketContext()?.character(asset)?.cls) : undefined;
-      // The coin's evolved formula (validated only in live mode).
+      // The coin's evolved formula: validated, or on probation (the same rule in paper and live).
       const g = cfg.strategy.gp ? activeGpSignals()?.read(asset, (a) => md.features.candles.get(a)?.bars['1h']) : undefined;
-      const gp = g && (g.validated || (g.speaks && cfg.mode !== 'live') || gatePasses('setups', false)) ? g : undefined;
+      const gp = g && (g.validated || gatePasses('setups', false)) ? g : undefined;
       c = { ts: now, f, v, rb, gp };
       convCache.set(asset, c);
     }

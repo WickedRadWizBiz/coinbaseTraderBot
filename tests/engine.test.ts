@@ -660,7 +660,7 @@ test('vault: a settled loss is won back before a later win is vaulted; the total
   assert.deepEqual([vault.status().realized?.total, vault.status().realized?.high], [0, 0]);
 });
 
-test('paper: the vault keeps its books, but the paper bankroll is the whole balance (VAULT_IN_PAPER off, the default)', async () => {
+test('paper: the vault reserve leaves the bankroll, as in live (since Oct 28)', async () => {
   // The vault keeps half of every new realized high (before Oct 23's rule, half of every win and none of the losses:
   // by Oct 23 it held $343 of the $360 paper pool).
   const vault = new Vault({ enabled: true, quotaUsd: 100, winShare: 0.5, pocketShare: 0.1, quotaReset: 'session', dailyGoalUsd: 100 });
@@ -670,7 +670,7 @@ test('paper: the vault keeps its books, but the paper bankroll is the whole bala
   oms.onFill({ tradeId: 'w', orderId: '', ticker: 'W', side: 'bid', count: 20, price: 0.5, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: Date.now() - 1, asset: 'BTC' });
   oms.settle('W', 'yes');
   assert.equal(vault.vaultTotal, 5, 'still vaulted on the books');
-  assert.equal(engine.bankroll(), 200, 'and still traded in paper');
+  assert.equal(engine.bankroll(), 195, 'and not traded, in paper as in live');
 });
 
 test('paper size: by default paper sizes as live; PAPER_ORDER_FRAC buys a share of the bankroll; PAPER_ORDER_FRAC=0 with PAPER_ORDER_USD a fixed amount', async () => {
@@ -875,7 +875,7 @@ test('paper: a balance move nobody made (a paper book started fresh) re-anchors 
   assert.equal(monitor.state.expected, 100, 'expected balance re-anchored');
 });
 
-test('component trials: a trial that passed moves paper\'s price, never live\'s; every contract in its entry window is recorded', async () => {
+test('component trials: a trial that passed moves the price in paper and live alike; every contract in its entry window is recorded', async () => {
   class Stub extends ComponentTrials {
     readonly onNames = new Set<TrialName>();
     readonly records: Array<[TrialName, string, number, number]> = [];
@@ -902,15 +902,15 @@ test('component trials: a trial that passed moves paper\'s price, never live\'s;
   const on = await run({}, ['ta']);
   assert.ok(Math.abs(on.st.taShift! - on.st.trials!.ta!) < 1e-4 && on.st.taShift! > off.st.taShift! * 1.5, `paper prices with the full-weight tilt once its trial passed: ${on.st.taShift}`);
   assert.deepEqual(on.st.trials!.applied, ['ta']);
-  // Live: the same passing trial changes nothing.
+  // Live: the same passing trial moves live's price the same way (the owner, Oct 28: paper behaves as live).
   const key = path.join(tmpDir(), 'k.pem');
   fs.writeFileSync(key, 'x', { mode: 0o600 });
   const live = await run({ TRADING_MODE: 'live', KALSHI_KEY_ID: 'id', KALSHI_PRIVATE_KEY_PATH: key, KALSHI_ENV: 'prod', LIVE_TRADING_ACKNOWLEDGED: 'I_ACCEPT_REAL_MONEY_RISK' }, ['ta']);
-  assert.ok(Math.abs(live.st.taShift! - off.st.taShift!) < 1e-6, `live ${live.st.taShift} vs paper without the trial ${off.st.taShift}`);
-  assert.deepEqual(live.st.trials!.applied, []);
+  assert.ok(Math.abs(live.st.taShift! - on.st.taShift!) < 1e-6, `live ${live.st.taShift} vs paper with the trial ${on.st.taShift}`);
+  assert.deepEqual(live.st.trials!.applied, ['ta']);
 });
 
-test('component trials: the trained model comes out of paper\'s price when its trial says so, never out of live\'s', async () => {
+test('component trials: the trained model comes out of the price when its trial says so, in paper and live alike', async () => {
   class Stub extends ComponentTrials {
     readonly onNames = new Set<TrialName>();
     readonly records: Array<[TrialName, number, number]> = [];
@@ -939,5 +939,5 @@ test('component trials: the trained model comes out of paper\'s price when its t
   const key = path.join(tmpDir(), 'k.pem');
   fs.writeFileSync(key, 'x', { mode: 0o600 });
   const live = await run({ TRADING_MODE: 'live', KALSHI_KEY_ID: 'id', KALSHI_PRIVATE_KEY_PATH: key, KALSHI_ENV: 'prod', LIVE_TRADING_ACKNOWLEDGED: 'I_ACCEPT_REAL_MONEY_RISK' }, []);
-  assert.ok(Math.abs(lean(live.st) - 0.4) < 1e-6, 'live keeps the trained model whatever its trial says');
+  assert.ok(Math.abs(live.st.pModel! - live.st.fairValue!) < 1e-12, 'out of live\'s price too');
 });
