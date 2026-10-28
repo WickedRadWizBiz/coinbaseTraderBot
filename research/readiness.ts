@@ -18,6 +18,7 @@ import path from 'path';
 import { validatedParts } from './champion';
 import { bootstrapMeanCi } from './stats';
 import type { Block, HistoryLedger } from './historyLedger';
+import { GO_LIVE_GATES } from '../bot/model/metaModel';
 
 export interface ReadinessTarget { poolUsd: number; dailyPct: number; maxDdPct: number; minDays: number }
 export interface DailyStats {
@@ -81,7 +82,14 @@ export function componentStatus(dir: string, files: Record<string, { kind: strin
       case 'perp': detail = `IC ${num(v.ic, 3)} (lower bound ${num(v.icCiLo, 3)}), net ${num(v.pnlBpsPerTrade, 1)} bps/trade (lower bound ${num(v.pnlCiLo, 1)}), DSR ${num(v.dsrProbability, 3)}, backtest ${v.backtest ? (v.backtest.ok ? 'passed' : 'failed') : 'not run'}`; break;
       case 'ta_net': detail = `${parts} of 3 heads validated; network DSR ${num(p.network?.dsr?.probability, 3)}`; break;
       case 'setups': detail = `${parts} of 2 lanes validated`; break;
-      case 'mlp': detail = `log loss ${num(v.logLossModel, 4)} vs the market's ${num(v.logLossMarketCal, 4)} (DM p ${num(v.dmPValue, 3)}) over ${v.nWindows ?? 0} windows`; break;
+      case 'mlp': {
+        // The daily trainer's running tally of unseen windows (research/goLiveTally.ts), when it keeps one.
+        const t = v.tally;
+        detail = t
+          ? `tally of unseen windows: log loss ${num(t.logLossModel, 4)} vs the market's ${num(t.logLossMarketCal, 4)} (DM p ${num(t.dmPValue, 3)}) over ${t.nWindows} of ${GO_LIVE_GATES.minWindows} windows, ${t.windowsTraded} of ${GO_LIVE_GATES.minWindowsTraded} traded, ${t.days} day(s)`
+          : `log loss ${num(v.logLossModel, 4)} vs the market's ${num(v.logLossMarketCal, 4)} (DM p ${num(v.dmPValue, 3)}) over ${v.nWindows ?? 0} windows`;
+        break;
+      }
       case 'tennis': detail = `Brier ${num(v.brierModel, 4)} vs the market's ${num(v.brierMarket, 4)} on ${v.holdoutMatches ?? 0} held-out matches`; break;
       case 'gp': detail = Object.values(p.champions ?? {}).map((c: any) => `${c.asset} ${c.validated ? 'validated' : 'not validated'} (test Sharpe ${num(c.test?.sharpe, 2)})`).join(', ') || 'no champion'; break;
       case 'snn': detail = `${p.notes?.split(';')[0] ?? 'trained'}, trained ${String(p.trainedAt ?? '').slice(0, 10)}`; break;

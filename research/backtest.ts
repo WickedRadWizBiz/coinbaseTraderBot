@@ -46,7 +46,7 @@ import { defaultTiers, tierAt, type TierPoint } from '../bot/risk/sizingTiers';
 import { CadenceGate, inEntryWindow } from '../bot/strategy/cadence';
 import type { MacroEvent } from '../bot/model/featureEngine';
 import { loadCalendar } from '../bot/model/calendar';
-import { MetaModel } from '../bot/model/metaModel';
+import { GO_LIVE_GATES, MetaModel } from '../bot/model/metaModel';
 import type { OrderIntent } from '../bot/oms/oms';
 import { PositionBook } from '../bot/oms/positions';
 import { PaperExchange } from '../bot/paper/paperExchange';
@@ -937,7 +937,8 @@ export function evaluateHunt(results: BacktestResult[], allWindows: number[], mi
   };
 }
 
-export async function backtestMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
+/** Returns the production settings' per-window results (the go-live tally reads them: research/goLiveTally.ts). */
+export async function backtestMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')): Promise<{ windows: BacktestResult['windows'] }> {
   const dir = argOf('recordings', 'data/recordings');
   const modelPath = argOf('model', 'params/model.json');
   const model = fs.existsSync(modelPath) ? MetaModel.load(modelPath) : MetaModel.identity();
@@ -1029,10 +1030,11 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
   }
   // The model annotation uses the production exit policy at the configured minEdge.
   const prod = cfg.strategy.exitPolicy === 'confluence_ratchet' ? 'fair_value' : cfg.strategy.exitPolicy;
-  const best = summaries.find((s) => s.minEdge === cfg.strategy.minEdge && s.exit === prod) ?? summaries[0];
+  const bi = Math.max(0, summaries.findIndex((s) => s.minEdge === cfg.strategy.minEdge && s.exit === prod));
+  const best = summaries[bi];
   const exitEvaluation = evaluateHunt(results, allWindows, cfg.strategy.minEdge);
   if (exitEvaluation) console.log('hunt mode vs fair-value exit (paired per window):', exitEvaluation);
-  console.log(`windows traded: ${best.windowsTraded} (need >= 1000 independent windows before trusting any edge)`);
+  console.log(`windows traded: ${best.windowsTraded} (need >= ${GO_LIVE_GATES.minWindowsTraded} independent windows before trusting any edge)`);
 
   if (annotate && fs.existsSync(modelPath)) {
     const params = JSON.parse(fs.readFileSync(modelPath, 'utf8'));
@@ -1049,10 +1051,11 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
       ...(exitEvaluation ? { exitEvaluation } : {}),
     };
     params.validation.passed = Boolean(params.validation.passed) && best.edgeCiLo > 0 && best.deflatedExcess > 0 && best.dsrProb > 0.95
-      && (pboValue === undefined || pboValue < 0.2) && best.windowsTraded >= 1000;
+      && (pboValue === undefined || pboValue < 0.2) && best.windowsTraded >= GO_LIVE_GATES.minWindowsTraded;
     fs.writeFileSync(modelPath, JSON.stringify(params, null, 2) + '\n');
     console.log(`annotated ${modelPath}: passed=${params.validation.passed}`);
   }
+  return { windows: results[bi].windows };
 }
 
 if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void backtestMain();

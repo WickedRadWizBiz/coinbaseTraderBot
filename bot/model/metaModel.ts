@@ -10,7 +10,9 @@
 //    runtime. The file's SHA-256 is stamped on every decision and order.
 //  - Carries its own validation report. Live trading refuses a model whose
 //    report does not pass the go-live gates (Brier better than market mid,
-//    calibration within tolerance, enough independent windows).
+//    calibration within tolerance, enough independent windows). The daily
+//    trainer judges them on its running tally of unseen windows instead
+//    (research/goLiveTally.ts): the recordings hold 20 days.
 //  - `kind: "identity"` passes the fair value through unchanged. That is the
 //    default until a trained model earns its place.
 
@@ -64,9 +66,41 @@ export interface ValidationReport {
   /** Fee-inclusive net edge per contract, 95% CI lower bound (backtest). */
   netEdgeCiLow?: number;
   deflatedSharpe?: number;
+  /** Settlement windows the production settings traded in the backtest. */
+  backtestWindowsTraded?: number;
   variantsTried?: number;
+  /** The daily trainer's running tally (research/goLiveTally.ts). When present the gates read it instead of this
+   *  model's own holdout, and that holdout must still beat the calibrated market. */
+  tally?: TallyEvidence;
   evaluatedAt: string;
   notes?: string;
+}
+
+/** What the go-live gates read: one model's holdout and backtest, or the running tally. */
+export interface GateEvidence {
+  nWindows: number;
+  brierModel: number;
+  brierMarket: number;
+  maxCalibrationErrorPp: number;
+  logLossModel?: number;
+  logLossMarketCal?: number;
+  dmPValue?: number;
+  maxExcessCalibrationPp?: number;
+  netEdgeCiLow?: number;
+  deflatedSharpe?: number;
+  dsrProbability?: number;
+  pbo?: number;
+  windowsTraded?: number;
+}
+
+/** Every settlement window judged once, by the first daily candidate that never trained on it, kept across runs:
+ *  `days` recorded days and `models` candidates, windows closing `from`..`through`. */
+export interface TallyEvidence extends GateEvidence {
+  windowsTraded: number;
+  days: number;
+  models: number;
+  from: string;
+  through: string;
 }
 
 /** One additional ensemble member (same kind and features as the primary). */
@@ -115,7 +149,33 @@ export const GO_LIVE_GATES = {
   maxDmPValue: 0.05,
   minDsrProbability: 0.95,
   maxPbo: 0.2,
+  /** Settlement windows the backtest traded (independent bets) before any edge is trusted. */
+  minWindowsTraded: 1000,
 };
+
+/** Why the evidence does not clear the go-live gates, or [] if it does. */
+export function gateBlockers(e: GateEvidence): string[] {
+  const out: string[] = [];
+  // With nothing traded yet the count below says it; "no backtest result" would not.
+  const untraded = e.windowsTraded === 0;
+  if (e.nWindows < GO_LIVE_GATES.minWindows) out.push(`only ${e.nWindows} validation windows (< ${GO_LIVE_GATES.minWindows})`);
+  if (!(e.brierModel < e.brierMarket)) out.push(`Brier ${e.brierModel} does not beat market ${e.brierMarket}`);
+  if (e.maxCalibrationErrorPp > GO_LIVE_GATES.maxCalibrationErrorPp) out.push(`calibration error ${e.maxCalibrationErrorPp}pp > ${GO_LIVE_GATES.maxCalibrationErrorPp}pp`);
+  if (e.netEdgeCiLow === undefined) { if (!untraded) out.push('no fee-inclusive backtest result (run research:backtest --annotate)'); }
+  else if (!(e.netEdgeCiLow > 0)) out.push(`net edge CI lower bound ${e.netEdgeCiLow} <= 0`);
+  if (e.deflatedSharpe === undefined) { if (!untraded) out.push('no deflated Sharpe result'); }
+  else if (!(e.deflatedSharpe > 0)) out.push(`deflated Sharpe ${e.deflatedSharpe} <= 0`);
+  if (e.logLossModel === undefined || e.logLossMarketCal === undefined) out.push('no log-loss comparison against the calibrated market');
+  else if (!(e.logLossModel < e.logLossMarketCal)) out.push(`log loss ${e.logLossModel} does not beat calibrated market ${e.logLossMarketCal}`);
+  if (e.dmPValue === undefined) out.push('no Diebold-Mariano test vs the calibrated market');
+  else if (!(e.dmPValue < GO_LIVE_GATES.maxDmPValue)) out.push(`Diebold-Mariano p ${e.dmPValue} >= ${GO_LIVE_GATES.maxDmPValue}`);
+  if (e.maxExcessCalibrationPp !== undefined && e.maxExcessCalibrationPp > GO_LIVE_GATES.maxExcessCalibrationPp) out.push(`calibration slice error ${e.maxExcessCalibrationPp}pp beyond noise > ${GO_LIVE_GATES.maxExcessCalibrationPp}pp`);
+  if (e.dsrProbability === undefined) { if (!untraded) out.push('no deflated Sharpe probability (run research:backtest --annotate)'); }
+  else if (!(e.dsrProbability > GO_LIVE_GATES.minDsrProbability)) out.push(`deflated Sharpe probability ${e.dsrProbability} <= ${GO_LIVE_GATES.minDsrProbability}`);
+  if (e.pbo !== undefined && !(e.pbo < GO_LIVE_GATES.maxPbo)) out.push(`PBO ${e.pbo} >= ${GO_LIVE_GATES.maxPbo}`);
+  if (e.windowsTraded !== undefined && e.windowsTraded < GO_LIVE_GATES.minWindowsTraded) out.push(`only ${e.windowsTraded} windows traded in the backtest (< ${GO_LIVE_GATES.minWindowsTraded})`);
+  return out;
+}
 
 export class MetaModel {
   readonly hash: string;
@@ -146,24 +206,12 @@ export class MetaModel {
   /** Why this model may not be used for live trading, or [] if it may. */
   liveBlockers(): string[] {
     const v = this.params.validation;
-    const out: string[] = [];
     if (!v) return ['model has no validation report'];
+    const out: string[] = [];
     if (!v.passed) out.push('validation.passed is false');
-    if (v.nWindows < GO_LIVE_GATES.minWindows) out.push(`only ${v.nWindows} validation windows (< ${GO_LIVE_GATES.minWindows})`);
-    if (!(v.brierModel < v.brierMarket)) out.push(`Brier ${v.brierModel} does not beat market ${v.brierMarket}`);
-    if (v.maxCalibrationErrorPp > GO_LIVE_GATES.maxCalibrationErrorPp) out.push(`calibration error ${v.maxCalibrationErrorPp}pp > ${GO_LIVE_GATES.maxCalibrationErrorPp}pp`);
-    if (v.netEdgeCiLow === undefined) out.push('no fee-inclusive backtest result (run research:backtest --annotate)');
-    else if (!(v.netEdgeCiLow > 0)) out.push(`net edge CI lower bound ${v.netEdgeCiLow} <= 0`);
-    if (v.deflatedSharpe === undefined) out.push('no deflated Sharpe result');
-    else if (!(v.deflatedSharpe > 0)) out.push(`deflated Sharpe ${v.deflatedSharpe} <= 0`);
-    if (v.logLossModel === undefined || v.logLossMarketCal === undefined) out.push('no log-loss comparison against the calibrated market');
-    else if (!(v.logLossModel < v.logLossMarketCal)) out.push(`log loss ${v.logLossModel} does not beat calibrated market ${v.logLossMarketCal}`);
-    if (v.dmPValue === undefined) out.push('no Diebold-Mariano test vs the calibrated market');
-    else if (!(v.dmPValue < GO_LIVE_GATES.maxDmPValue)) out.push(`Diebold-Mariano p ${v.dmPValue} >= ${GO_LIVE_GATES.maxDmPValue}`);
-    if (v.maxExcessCalibrationPp !== undefined && v.maxExcessCalibrationPp > GO_LIVE_GATES.maxExcessCalibrationPp) out.push(`calibration slice error ${v.maxExcessCalibrationPp}pp beyond noise > ${GO_LIVE_GATES.maxExcessCalibrationPp}pp`);
-    if (v.dsrProbability === undefined) out.push('no deflated Sharpe probability (run research:backtest --annotate)');
-    else if (!(v.dsrProbability > GO_LIVE_GATES.minDsrProbability)) out.push(`deflated Sharpe probability ${v.dsrProbability} <= ${GO_LIVE_GATES.minDsrProbability}`);
-    if (v.pbo !== undefined && !(v.pbo < GO_LIVE_GATES.maxPbo)) out.push(`PBO ${v.pbo} >= ${GO_LIVE_GATES.maxPbo}`);
+    if (!v.tally) return [...out, ...gateBlockers({ ...v, windowsTraded: v.backtestWindowsTraded })];
+    for (const b of gateBlockers(v.tally)) out.push(`running tally: ${b}`);
+    if (!(v.logLossModel !== undefined && v.logLossMarketCal !== undefined && v.logLossModel < v.logLossMarketCal)) out.push(`own holdout: log loss ${v.logLossModel} does not beat calibrated market ${v.logLossMarketCal}`);
     return out;
   }
 

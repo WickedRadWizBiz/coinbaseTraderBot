@@ -175,6 +175,13 @@ test('pipeline end to end: SNN first, backfilled SNN outputs, then the MLP train
   assert.ok(rows.filter((x) => Number.isFinite(x.fx.snn_up_15m)).length > rows.length * 0.5, 'SNN direction available as an MLP input');
   const mlp = MetaModel.load(path.join(cfg.autoTrain.dir, 'model.json'));
   assert.equal(mlp.params.kind, 'mlp', 'MLP-only default');
+  // The go-live tally: the candidate's holdout windows, judged once; the model's gates read it.
+  const tallyFile = path.join(cfg.autoTrain.dir, 'mlp_tally.json');
+  const tally = JSON.parse(fs.readFileSync(tallyFile, 'utf8'));
+  assert.equal(tally.batches.length, 1);
+  assert.equal(tally.batches[0].model, mlp.params.version);
+  assert.equal(mlp.params.validation?.tally?.nWindows, tally.batches[0].windows.length);
+  assert.ok(mlp.liveBlockers().some((b) => b.startsWith('running tally: only')), mlp.liveBlockers().join('; '));
   assert.ok(r.state.snnVersions?.crypto && r.state.snnVersions?.perps);
   assert.equal(r.state.trainedWithSnn?.crypto, r.state.snnVersions?.crypto, 'the promoted MLP was trained on the promoted crypto network\'s outputs');
   assert.ok(fs.existsSync(path.join(cfg.autoTrain.dir, 'snn_crypto.json')) && fs.existsSync(path.join(cfg.autoTrain.dir, 'snn_perps.json')));
@@ -192,6 +199,7 @@ test('pipeline end to end: SNN first, backfilled SNN outputs, then the MLP train
   await runPipeline({ cfg, only: ['dataset', 'mlp'], log: () => undefined, now: T0 + 2 * 3_600_000 });
   const same = await runPipeline({ cfg, only: ['dataset', 'mlp'], log: () => undefined, now: T0 + 3 * 3_600_000 });
   for (const s of ['dataset', 'mlp']) assert.match(String(same.steps.find((x) => x.step === s)!.skipped), /nothing it reads changed/, s);
+  assert.deepEqual(JSON.parse(fs.readFileSync(tallyFile, 'utf8')).through, tally.through, 'no window judged twice');
   const recFile = path.join(rec, fs.readdirSync(rec).find((f) => f.startsWith('md-'))!);
   fs.appendFileSync(recFile, '\n');
   const changed = await runPipeline({ cfg, only: ['dataset'], log: () => undefined, now: T0 + 4 * 3_600_000 });

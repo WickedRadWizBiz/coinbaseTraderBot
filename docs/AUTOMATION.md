@@ -55,7 +55,7 @@ This is `research/pipeline.ts`. By default (`AUTO_TRAIN=remote`) it runs on a Gi
 | snn-tennis | Always skipped: the tennis network can't be replayed (no recorded score feed), so it learns live and keeps its checkpoints in `data/snn/tennis/` | — |
 | vol_model | Trains the tree volatility forecast (how far realised vol over a contract's life will differ from the EWMA) and checks it on held-out days | `vol_model.json` |
 | dataset | Turns the recordings, plus the crypto network's logged and backfilled outputs, into labelled training rows. Priced with the vol forecast when it is validated | `work/dataset.jsonl` |
-| mlp | Trains the MLP fair value and its take/skip head (MLP vs trees vs gated experts, the best one kept), backtests it after fees, records the result in the model file | `model.json` |
+| mlp | Trains the MLP fair value and its take/skip head (MLP vs trees vs gated experts, the best one kept), backtests it after fees, records the result in the model file, and adds its holdout's new windows to the go-live tally (below) | `model.json`, `mlp_tally.json` |
 | vol | Fits the intraday volatility profile | `vol_profile.json` |
 | perps | Trains the perps model (ridge vs trees vs gated experts, on the perps network's 1h/4h calls and skill), then runs its execution backtest | `perp_model.json` |
 | tennis | Trains the tennis model (MLP vs trees; 4 signals, score, book, tennis network) | `tennis_model.json` |
@@ -226,6 +226,8 @@ The built-in gates still apply even in this mode:
 
 Set `AUTO_TRAIN_PROMOTE=validated` once you want only models that passed their checks to be promoted.
 
+**The meta-model's go-live tally.** The recordings hold 20 days, and the meta-model's gates want 1,000 held-out settlement windows and 1,000 that the backtest traded, so no single training can show them. A day's candidate never trains on its holdout, the newest windows of its dataset. The mlp step adds the holdout windows no candidate judged before to `mlp_tally.json`, with what the candidate's backtest made on them, good or bad, and the gates read the tally: everything added so far (`research/goLiveTally.ts`). The next day's holdout reaches back to the first window the tally has not judged (at most half of the dataset), so every window is judged once, by the first candidate that never trained on it. Only results are kept: per window its losses and P&L, per run the calibration bins, about 3 MB a year; results more than a year older than the newest are dropped. The candidate's own holdout must still beat the calibrated market. At about 96 windows a day the judged windows pass 1,000 in about 11 days; the traded ones come as fast as the strategy trades (15 windows on the day measured on Oct 28, which would take about 10 weeks). The readiness report's MLP line shows the tally.
+
 ## Running it yourself
 
 | What you want | How |
@@ -244,7 +246,7 @@ Running from a checkout: `npm run pipeline` reads recordings from `data/recordin
 These can't be automated, or deliberately aren't.
 
 **1. Keep the bot running so it records data.**
-- Training needs recordings. Expect at least a few days before the MLP trains: it needs 8 or more settlement windows just to try, and about 1,000 before its validation can pass.
+- Training needs recordings. Expect at least a few days before the MLP trains: it needs 8 or more settlement windows just to try. Its validation passes once the go-live tally holds 1,000 judged windows and 1,000 traded ones.
 - Perps training needs `PERPS_FEED=true` so perp quotes get recorded.
 - Tennis scores need a Live Tennis API key in `LIVE_TENNIS_API_KEY`. That switches `TENNIS_SCORE_FEED` to `livetennis` automatically. The tennis model needs at least 100 settled matches before it can pass validation.
 
