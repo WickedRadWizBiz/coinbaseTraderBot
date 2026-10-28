@@ -132,8 +132,8 @@ jobs:
           # computeRowsInWorkers); the other steps keep TRAIN_WORKERS.
           export TA_ROW_WORKERS="${TA_ROW_WORKERS:-$(nproc)}"
           # The vol forecast, the dataset and the MLP candidate's backtest read the newest 4 recorded days: each replays
-          # every day it reads (8 to 11 minutes a day here), and the quick phase must fit its 150 minutes as the
-          # recordings grow. A value in bot.env wins.
+          # every day it reads (8 to 11 minutes a day here), and the quick phase must fit its time as the recordings
+          # grow. A value in bot.env wins.
           export AUTO_TRAIN_DECISION_DAYS="${AUTO_TRAIN_DECISION_DAYS:-4}"
           mkdir -p "$DATA/models/logs"
           LOG="$DATA/models/logs/pipeline-remote-$(date -u +%Y-%m-%dT%H-%M-%SZ).log"
@@ -170,15 +170,20 @@ jobs:
           if [ -n "$ONLY" ]; then
             run_pipeline 300 --only "$ONLY"; code=$?
           else
-            # 1. The models trained on the bot's own recordings first, copied back at once. 150 minutes: on Oct 22 the
-            # dataset took 31 and the MLP (its backtest included) did not finish in the 59 left of 90, so nothing was
-            # promoted (Oct 21: dataset 14, MLP 52, perps 23).
-            run_pipeline 150 --only vol_model,dataset,mlp,perps,tennis,fill,sizing; quick=$?
-            echo "quick phase: exit $quick"; sync_models
+            # 1. The models trained on the bot's own recordings first, copied back at once, in two parts. The pipeline
+            # runs its steps in a fixed order (vol_model, dataset, mlp, then perps, tennis, fill, sizing), and the first
+            # three alone took 182 minutes on Oct 24 (33 + 33 + 116): in one 150-minute part the MLP was cut every day and
+            # the four after it never ran. The short four go first (at most 75 minutes; tennis read 8 recorded days in 102
+            # minutes on Oct 28 before it skipped the crypto books); the MLP's three get what is left of 260 minutes.
+            run_pipeline 75 --only perps,tennis,fill,sizing; first=$?
+            echo "quick phase, perps / tennis / fill / sizing: exit $first"; sync_models
+            run_pipeline $(( 260 - ($(date +%s) - T0) / 60 )) --only vol_model,dataset,mlp; quick=$?
+            echo "quick phase, vol model / dataset / MLP: exit $quick"; sync_models
+            case $quick in 0|124|137|143) quick=$first;; esac
             code=$quick
-            # 2. Everything else in the time left (5 h in all). The oracle cull is left to the laptop trainer: it builds TA
-            # rows for every coin over all of history (over 14 GB here) and runs weekly there; the TA network and the
-            # Librarian read the oracle_cull.json the laptop sends.
+            # 2. Everything else in the time left (5 h in all, so at least 40 minutes). The oracle cull is left to the laptop
+            # trainer: it builds TA rows for every coin over all of history (over 14 GB here) and runs weekly there; the TA
+            # network and the Librarian read the oracle_cull.json the laptop sends.
             left=$(( 300 - ($(date +%s) - T0) / 60 ))
             if [ "$left" -gt 20 ]; then run_pipeline "$left" --skip oracle_cull; code=$?; fi
             # A failed step in the quick phase is not hidden by a second phase that finished.

@@ -179,11 +179,16 @@ test('perps config: directional trading simulated by default; live needs live mo
   assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PERP_TRADING: 'off' }).perps.trading, 'off');
 });
 
+import fs from 'fs';
 import path from 'path';
 import { writeSyntheticPerps } from '../research/syntheticPerps';
-import { buildPerpDataset, trainPerp } from '../research/trainPerpModel';
-import { runPerpBacktest } from '../research/perpBacktest';
-import { tmpDir } from './helpers';
+import { buildPerpDataset, perpRowsForDays, trainPerp } from '../research/trainPerpModel';
+import { writeSyntheticRecordings } from '../research/synthetic';
+import { recordingDayList } from '../bot/marketdata/recordingFiles';
+import { ReplayState } from '../research/replay';
+import { PERP_BACKTEST_MIN_DAYS, runPerpBacktest } from '../research/perpBacktest';
+import { runPipeline } from '../research/pipeline';
+import { mergeRecordingDays, tmpDir } from './helpers';
 
 test('research pipeline: a random walk never validates; a planted momentum signal is found and trades profitably', async () => {
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) });
@@ -203,6 +208,39 @@ test('research pipeline: a random walk never validates; a planted momentum signa
   assert.ok(sig.v.ic > 0.3 && sig.v.icCiLo > 0, JSON.stringify(sig.v));
   assert.ok(sig.bt.trades > 0 && sig.bt.pnlUsd > 0, JSON.stringify({ ...sig.bt, dailyPnl: undefined }));
   assert.ok(sig.bt.fees > 0);
+});
+
+test('perp rows skip the Kalshi contracts\' lines: the same rows as reading every line', async () => {
+  const base = tmpDir(), dir = path.join(base, 'mixed'), start = Date.parse('2026-06-01T00:00:00Z');
+  writeSyntheticPerps(path.join(base, 'perps'), { days: 1, momentum: 10, seed: 11, stepSec: 60, start });
+  // A recorded day carries the Kalshi contracts' markets and books beside the perp quotes.
+  writeSyntheticRecordings(path.join(base, 'kalshi'), { windows: 40, start });
+  await mergeRecordingDays(dir, [path.join(base, 'perps'), path.join(base, 'kalshi')]);
+  const days = recordingDayList(dir);
+  assert.ok(fs.readFileSync(path.join(dir, `md-${days[0]}.jsonl`), 'utf8').includes('"k":"book"'), 'the Kalshi books are in the day');
+  const every = await perpRowsForDays(dir, days, undefined, undefined, { everySec: 300, horizonMin: 60, keep: null });
+  const st = new ReplayState();
+  const rows = await perpRowsForDays(dir, days, undefined, undefined, { everySec: 300, horizonMin: 60, state: st });
+  assert.ok(every.length > 100, `${every.length} rows`);
+  assert.deepEqual(rows, every);
+  assert.equal(st.markets.size + st.books.size, 0, 'no Kalshi contract was read');
+});
+
+test('pipeline perps: the execution backtest is left out on the recordings, which never reach the days it needs to pass', async () => {
+  const dir = tmpDir();
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: dir, AUTO_TRAIN: 'off' });
+  writeSyntheticPerps(cfg.autoTrain.recordingsDir, { days: 3, momentum: 10, seed: 11, stepSec: 60 });
+  const lines: string[] = [];
+  const r = await runPipeline({ cfg, only: ['perps'], log: (m) => lines.push(m) });
+  const step = r.steps.find((s) => s.step === 'perps')!;
+  assert.ok(step.ok && !step.skipped, JSON.stringify(step));
+  const note = `left out: 3 recorded day(s), it passes only over ${PERP_BACKTEST_MIN_DAYS}`;
+  assert.equal((step.detail as { backtest?: string }).backtest, note, JSON.stringify(step.detail));
+  assert.ok(lines.includes(`perps: execution backtest ${note}`), lines.join('\n'));
+  // The candidate was not annotated: no backtest verdict, so it trades at pilot size as before.
+  const cand = PerpModel.load(path.join(cfg.autoTrain.dir, 'work', 'perp_model.candidate.json'))!;
+  assert.equal(cand.params.validation?.backtest, undefined);
+  assert.equal(cand.validated(), false);
 });
 
 test('capital locked in binaries inflates the perp sigma: smaller Kelly size, never larger', () => {

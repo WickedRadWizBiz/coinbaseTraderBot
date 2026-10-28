@@ -89,7 +89,7 @@ import { trainFillMain } from './trainFillModel';
 import { trainVolModelMain, VOL_MODEL_MIN_DAYS } from './trainVolModel';
 import { backtestMain } from './backtest';
 import { buildDatasetMain } from './buildDataset';
-import { perpBacktestMain } from './perpBacktest';
+import { perpBacktestMain, PERP_BACKTEST_MIN_DAYS } from './perpBacktest';
 import { sessionsMain } from './sessions';
 import { snnAblationMain, type Verdict } from './snnAblation';
 import { replaySnn } from './snnReplay';
@@ -1139,17 +1139,21 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         throw e;
       }
       if (!fs.existsSync(cand)) throw new SkipStep('perp trainer wrote no model');
-      // The execution backtest: the held-out weeks on the replay, else the recordings.
-      let btSrc = perpSrc;
+      // The execution backtest: the held-out weeks on the replay, else the recordings. It passes only over
+      // PERP_BACKTEST_MIN_DAYS days, which the recordings never reach, so there it is left out: over every recorded day
+      // it ran past the remote run's 5 hours (Oct 28) for a verdict that could only be "failed".
+      let btSrc: string | undefined = perpSrc;
       if (held.length) {
         btSrc = path.join(work, 'perp-backtest-days');
         fs.rmSync(btSrc, { recursive: true, force: true });
         linkDays(held.flatMap((b) => b.days).map((d) => ({ day: d, file: path.join(replayDir, `md-${d}.jsonl.gz`) })), btSrc);
-      }
-      await perpBacktestMain(argsOf({ recordings: btSrc, model: cand }), true);
+      } else if (perpSrc === rec && days.length < PERP_BACKTEST_MIN_DAYS) btSrc = undefined;
+      const backtest = btSrc ? undefined : `left out: ${days.length} recorded day(s), it passes only over ${PERP_BACKTEST_MIN_DAYS}`;
+      if (btSrc) await perpBacktestMain(argsOf({ recordings: btSrc, model: cand }), true);
+      else log(`perps: execution backtest ${backtest}`);
       const m = PerpModel.load(cand);
       const ok = Boolean(m?.validated());
-      if (A.promote === 'validated' && !ok) return { promoted: false, reason: m?.blockers().join('; ') };
+      if (A.promote === 'validated' && !ok) return { promoted: false, reason: m?.blockers().join('; '), backtest };
       // Contest: the live rule's net P&L per trade on the held-out weeks, challenger vs the model in use --
       // only when the model in use was also trained without them (else the contest would favour it).
       const live = PerpModel.load(promoted('perp'));
@@ -1165,9 +1169,9 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       if (held.length) { const ids = new Set(held.map((b) => b.id)); ledger.markTrained('perp-model', weekBlocks(perpDays).filter((b) => !ids.has(b.id)).map((b) => b.id)); ledger.save(); }
       const scored = contest && contest.candidate.trades >= 20 && contest.incumbent.trades >= 20;
       const champ = promoteIfChampion({ dir: A.dir, kind: 'perp', candidate: cand, live: promoted('perp'), enabled: A.champion, candidateScore: scored ? -contest!.candidate.meanBps : undefined, incumbentScore: scored ? -contest!.incumbent.meanBps : undefined });
-      if (!champ.promote) return { promoted: false, reason: champ.reason, contest };
+      if (!champ.promote) return { promoted: false, reason: champ.reason, contest, backtest };
       state.trainedWithSnn!.perps = state.snnVersions!.perps;
-      return { promoted: true, improved: champ.improved, champion: champ.reason, validated: ok, blockers: m?.blockers() ?? [], contest, data: perpSrc === rec ? 'recordings' : `history replay (${replayDays().length} days, ${held.length} held-out weeks)` };
+      return { promoted: true, improved: champ.improved, champion: champ.reason, validated: ok, blockers: m?.blockers() ?? [], backtest, contest, data: perpSrc === rec ? 'recordings' : `history replay (${replayDays().length} days, ${held.length} held-out weeks)` };
     }), perpSrc === rec ? tooFew : undefined);
   }
 
