@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { brier, maxCalibrationErrorPp, reliability, weightedLogLoss } from '../bot/model/calibration';
 import { FEATURE_NAMES } from '../bot/model/features';
 import { gateBlockers, GO_LIVE_GATES, MetaModel, type MetaModelParams } from '../bot/model/metaModel';
-import { addBatch, addHistoryBatch, annotateTally, judgeBatch, nextHistoryDays, tallyEvidence, worstOfMinute, type GoLiveTally, type HoldoutJudged } from '../research/goLiveTally';
+import { addBatch, addHistoryBatch, annotateTally, judgeBatch, nextHistoryDays, tallyEvidence, fillQuotes, type GoLiveTally, type HoldoutJudged } from '../research/goLiveTally';
 import { dieboldMariano } from '../research/stats';
 import { holdoutCut } from '../research/trainMetaModel';
 import { tmpDir } from './helpers';
@@ -179,9 +179,9 @@ test('history results count toward the gates and are shown apart from the record
   assert.equal('pnl' in ev, false);
 });
 
-test('a history day as the tally plays it: real contracts only, each book at the worse side of its minute', () => {
+test('a history day as the tally plays it: real contracts only, each book at the worse side of its minute so far', () => {
   const book = (t: number, ticker: string, bid: number, ask: number) => ({ t, k: 'book', ticker, bids: [{ price: bid, size: 100 }], asks: [{ price: ask, size: 100 }] });
-  const out = worstOfMinute([
+  const out = fillQuotes([
     { t: 0, k: 'market', ticker: 'REAL' },
     { t: 0, k: 'market', ticker: 'FAKE', synth: 1 },
     book(60_000, 'REAL', 0.40, 0.42), book(75_000, 'REAL', 0.43, 0.45), book(90_000, 'REAL', 0.38, 0.41),
@@ -190,10 +190,11 @@ test('a history day as the tally plays it: real contracts only, each book at the
     { t: 75_000, k: 'alive', tickers: ['REAL', 'FAKE'] },
     { t: 80_000, k: 'alive', tickers: ['FAKE'] },
     { t: 85_000, k: 'spot' },
-  ]);
+  ], { how: 'worst' });
   assert.equal(out.some((e) => e.ticker === 'FAKE'), false);
   const books = out.filter((e) => e.k === 'book').map((e) => [e.t, e.bids![0].price, e.asks![0].price]);
-  assert.deepEqual(books, [[60_000, 0.38, 0.45], [75_000, 0.38, 0.45], [90_000, 0.38, 0.45], [120_000, 0.50, 0.52]]);
+  // Never a later quote: at 75 s the 90 s bid of 0.38 is not known yet.
+  assert.deepEqual(books, [[60_000, 0.40, 0.42], [75_000, 0.40, 0.45], [90_000, 0.38, 0.45], [120_000, 0.50, 0.52]]);
   assert.deepEqual(out.filter((e) => e.k === 'alive').map((e) => e.tickers), [['REAL']]);
   assert.ok(out.some((e) => e.k === 'spot'));
 });

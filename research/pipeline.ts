@@ -66,7 +66,7 @@
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, librarian, cross_graph, rule_book, gp, lead_lag, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, playbook, readiness
+//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, librarian, cross_graph, rule_book, gp, lead_lag, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, tally_history, vol, perps, tennis, fill, sizing, playbook, readiness
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --sweep-all          # every step due now (weekly studies, tournaments, ablations, sweeps)
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
@@ -124,7 +124,7 @@ import { trainCrossLead } from './crossLead';
 import { CL_SCHEMA, setCrossLeadPath } from '../bot/ta/crossLead';
 import { setCrossGraphPath, XG_SCHEMA } from '../bot/ta/crossGraph';
 import { LIB_SCHEMA, setLibrarianPath } from '../bot/ta/librarian';
-import { addBatch, addHistoryBatch, annotateTally, judgeBatch, judgeRows, nextHistoryDays, readTally, tallyEvidence, writeHistoryDays } from './goLiveTally';
+import { addBatch, addHistoryBatch, annotateTally, judgeBatch, judgeRows, nextHistoryDays, readQuoteFill, readTally, tallyEvidence, writeHistoryDays } from './goLiveTally';
 
 const readLibSchema = (f: string): string | undefined => { try { return (JSON.parse(fs.readFileSync(f, 'utf8')) as { schema?: string }).schema; } catch { return undefined; } };
 import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, downloadBinanceOpenInterest, type BinanceMarket } from './history/binanceVision';
@@ -142,7 +142,7 @@ import { capHours, enterDecisionPhase, resetSession, sessionActive, sessionTimeU
 /** Coins with Kalshi crypto contracts: the SNN tournaments' transition penalty reads their regime changes. */
 const SNN_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
 
-export const STEPS = ['history', 'history_replay', 'oracle_cull', 'ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'cross_lead', 'rule_book', 'gp', 'lead_lag', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
+export const STEPS = ['history', 'history_replay', 'oracle_cull', 'ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'cross_lead', 'rule_book', 'gp', 'lead_lag', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'tally_history', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -382,7 +382,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const sessionMin = Number(process.env.TRAIN_SESSION_MIN) || 0;
   resetSession();
   const DATA_STEPS = ['history-seed', 'history', 'history-index', 'history_replay', 'conditioning'];
-  const DECISION_STEPS = ['vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness'];
+  const DECISION_STEPS = ['vol_model', 'dataset', 'mlp', 'tally_history', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness'];
   const run = async (step: string, fn: () => Promise<unknown>, skip?: string) => {
     const t0 = Date.now();
     if (stopRequested) {
@@ -1125,42 +1125,12 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       // them, and the gates are judged on the tally.
       const judge = MetaModel.load(cand);
       const batch = judgeBatch(rep.judged, bt.windows, { after: tally.through, model: judge.params.version, trials: judge.params.validation?.variantsTried ?? 1, at: new Date(now).toISOString() });
-      let tallied = batch ? addBatch(tally, batch) : tally;
+      const tallied = batch ? addBatch(tally, batch) : tally;
       if (batch) writeAtomic(tallyFile, JSON.stringify(tallied));
-      // Then the history replay's unseen days, played as if live (research/goLiveTally.ts), a few at a time while
-      // TALLY_HISTORY_MIN lasts; each chunk is kept as soon as it is judged.
-      const kDays = T.historyReplay ? replayKalshiDays(replayDir) : [];
-      const histMin = Number(process.env.TALLY_HISTORY_MIN ?? 30), chunk = Math.max(1, Number(process.env.TALLY_HISTORY_CHUNK) || 5);
-      const histStart = Date.now();
-      let histAdded = 0;
-      while (kDays.length && Date.now() - histStart < histMin * 60_000) {
-        const next = nextHistoryDays(kDays, days[0], tallied, chunk);
-        if (!next.length) break;
-        const src = path.join(work, 'tally-history');
-        const hData = path.join(work, 'tally-history.jsonl');
-        try {
-          writeHistoryDays(replayDir, next, src);
-          await buildDatasetMain(argsOf({ recordings: src, out: hData, every: 60, 'vol-model': volModelArg }));
-          const { rows } = await readDataset(hData);
-          const hbt = rows.length ? await backtestMain(argsOf({
-            recordings: src, model: cand, exits: cfg.strategy.exitPolicy, 'vol-model': volModelArg, 'fill-model': fillModelArg,
-            'hunt-grid': cfg.strategy.huntTargetMargin, 'hunt-confluence': cfg.strategy.huntMinConfluence,
-            'ratchet-fill-grid': cfg.strategy.ratchetMinFillRatio, 'ratchet-age': cfg.strategy.ratchetMinWallAgeSec, 'ratchet-slip': cfg.strategy.ratchetSlippageTicks,
-          }), false) : undefined;
-          const hb = hbt ? judgeBatch(judgeRows(judge, rows), hbt.windows, { after: 0, model: judge.params.version, trials: judge.params.validation?.variantsTried ?? 1, at: new Date(now).toISOString() }) : undefined;
-          tallied = addHistoryBatch(tallied, tallied.history?.edge ?? days[0], next, hb);
-          writeAtomic(tallyFile, JSON.stringify(tallied));
-          histAdded += hb?.windows.length ?? 0;
-          log(`mlp: history days ${next[0]}..${next[next.length - 1]} played as live: ${hb?.windows.length ?? 0} window(s), ${hb?.trades.filter((x) => x[2] > 0).length ?? 0} traded`);
-        } finally {
-          fs.rmSync(src, { recursive: true, force: true });
-          fs.rmSync(hData, { force: true });
-        }
-      }
       const ev = tallyEvidence(tallied);
       if (ev) annotateTally(cand, ev);
-      const goLive = ev ? { days: ev.days, windows: ev.nWindows, windowsTraded: ev.windowsTraded, added: batch?.windows.length ?? 0, historyAdded: histAdded, recorded: ev.recorded ?? null, history: ev.history ?? null } : null;
-      if (ev) log(`mlp: go-live tally ${ev.nWindows} of ${GO_LIVE_GATES.minWindows} judged windows, ${ev.windowsTraded} of ${GO_LIVE_GATES.minWindowsTraded} traded, over ${ev.days} day(s) (${batch?.windows.length ?? 0} recorded and ${histAdded} history window(s) added)`);
+      const goLive = ev ? { days: ev.days, windows: ev.nWindows, windowsTraded: ev.windowsTraded, added: batch?.windows.length ?? 0, recorded: ev.recorded ?? null, history: ev.history ?? null } : null;
+      if (ev) log(`mlp: go-live tally ${ev.nWindows} of ${GO_LIVE_GATES.minWindows} judged windows, ${ev.windowsTraded} of ${GO_LIVE_GATES.minWindowsTraded} traded, over ${ev.days} day(s) (${batch?.windows.length ?? 0} added)`);
       const m = MetaModel.load(cand);
       const passed = Boolean(m.params.validation?.passed);
       const usesSnn = m.params.features.some((f) => f.startsWith('snn_'));
@@ -1175,6 +1145,52 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   }
 
   // ---- 6. intraday volatility profile: the replay's last 180 days of 1-minute history when it exists ----
+  // ---- 5b. the go-live tally's unseen history: the live decision model plays the history replay's days before the
+  // recordings as if live, a few at a time while TALLY_HISTORY_MIN lasts (research/goLiveTally.ts); each chunk is kept
+  // as soon as it is judged, and the gates are judged again on the whole tally ----
+  if (want('tally_history')) {
+    const tallyFile = path.join(A.dir, 'mlp_tally.json');
+    await run('tally_history', async () => {
+      const live = mlpPath();
+      if (!live) throw new SkipStep('no decision model yet');
+      const kDays = T.historyReplay ? replayKalshiDays(replayDir) : [];
+      if (!kDays.length) throw new SkipStep('no history replay day with Kalshi\'s real contracts yet');
+      const judge = MetaModel.load(live);
+      const histMin = Number(process.env.TALLY_HISTORY_MIN ?? 30), chunk = Math.max(1, Number(process.env.TALLY_HISTORY_CHUNK) || 5);
+      const fill = readQuoteFill(A.dir);
+      const t0 = Date.now();
+      let tallied = readTally(tallyFile), played = 0, added = 0, traded = 0;
+      while (Date.now() - t0 < histMin * 60_000) {
+        const next = nextHistoryDays(kDays, days[0], tallied, chunk);
+        if (!next.length) break;
+        const src = path.join(work, 'tally-history');
+        const hData = path.join(work, 'tally-history.jsonl');
+        try {
+          writeHistoryDays(replayDir, next, src, fill);
+          await buildDatasetMain(argsOf({ recordings: src, out: hData, every: 60, 'vol-model': volModelArg }));
+          const { rows } = await readDataset(hData);
+          const bt = rows.length ? await backtestMain(argsOf({
+            recordings: src, model: live, exits: cfg.strategy.exitPolicy, 'vol-model': volModelArg, 'fill-model': fillModelArg,
+            'hunt-grid': cfg.strategy.huntTargetMargin, 'hunt-confluence': cfg.strategy.huntMinConfluence,
+            'ratchet-fill-grid': cfg.strategy.ratchetMinFillRatio, 'ratchet-age': cfg.strategy.ratchetMinWallAgeSec, 'ratchet-slip': cfg.strategy.ratchetSlippageTicks,
+          }), false) : undefined;
+          const b = bt ? judgeBatch(judgeRows(judge, rows), bt.windows, { after: 0, model: judge.params.version, trials: judge.params.validation?.variantsTried ?? 1, at: new Date(now).toISOString() }) : undefined;
+          tallied = addHistoryBatch(tallied, tallied.history?.edge ?? days[0], next, b);
+          writeAtomic(tallyFile, JSON.stringify(tallied));
+          played += next.length; added += b?.windows.length ?? 0; traded += b?.trades.filter((x) => x[2] > 0).length ?? 0;
+          log(`tally_history: ${next[0]}..${next[next.length - 1]} played as live (${fill.how} quotes): ${b?.windows.length ?? 0} window(s), ${b?.trades.filter((x) => x[2] > 0).length ?? 0} traded`);
+        } finally {
+          fs.rmSync(src, { recursive: true, force: true });
+          fs.rmSync(hData, { force: true });
+        }
+      }
+      if (!played) throw new SkipStep(tallied.history ? `every history day before ${tallied.history.edge} already played` : 'no recorded day yet to start from');
+      const ev = tallyEvidence(tallied);
+      const gate = ev ? annotateTally(live, ev) : undefined;
+      return { days: played, windows: added, traded, quotes: fill.how, goLive: ev ? { days: ev.days, windows: ev.nWindows, windowsTraded: ev.windowsTraded, recorded: ev.recorded ?? null, history: ev.history ?? null } : null, passed: gate?.passed ?? false, liveBlockers: gate?.blockers ?? [] };
+    });
+  }
+
   if (want('vol')) {
     const recent = T.historyReplay ? replayDays().slice(-180) : [];
     await run('vol', ifChanged('vol', async () => {
