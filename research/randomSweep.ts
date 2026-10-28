@@ -8,6 +8,7 @@
 //   npm run research:random-sweep -- run    --stage 2|3 --recordings data/sweep-days --from LEDGER,...
 //   npm run research:random-sweep -- run    --stage 4 --recordings data/sweep-days --from LEDGER,... --recorded DIR
 //   npm run research:random-sweep -- report --recordings data/sweep-days --from LEDGER,... [--out data/sweeps/random-kalshi.json]
+//       [--replay-check data/sweeps/replay-check-latest.json]
 //   (run also takes --model data/models/model.json --ledger FILE --hours 4 --tape-dir DIR --seed N)
 //
 // Each trial is a set of bot.env lines (a winner is exactly what the bot would run). The days are split once:
@@ -16,7 +17,7 @@
 //   - stage 2: settings near the 20 best of stage 1, on the same sample
 //   - stage 3: the 20 best of stages 1-2 and today's settings on every day (tune and holdout)
 //   - stage 4: the best of stage 3 and today's settings on the bot's own recorded days (real order books, where the
-//     history replay has minute candles): reported next to the verdict, not part of it
+//     history replay has minute candles)
 // Score: net $ an hour after fees (every hour of the days, traded or not), less half the worst drawdown spread over the
 // same hours, so a smooth $3/h beats one that earns $4/h through deep swings. Doing nothing scores 0.
 // A candidate is proposed only if all of these hold (otherwise the report says which failed):
@@ -25,6 +26,10 @@
 //     the stage 1-2 search and on the finalists alike
 //   - the deflated Sharpe ratio of its holdout days (every trial counted) has a probability of at least 0.95
 //   - enough trades on the holdout days (MIN_HOLDOUT_TRADES)
+//   - the latest replay check is close (the backtester trades as paper does: research/replayCheck.ts), and on the
+//     recorded days (stage 4) the candidate makes money and beats today's settings. The history replay rebuilds
+//     Kalshi's quotes from minute candles, and the sweeps of Oct 25 accepted settings that made +$400k on $150 there
+//     and lost on the recorded day as today's settings did; these two rules would have turned them down.
 // Every trial is kept in the ledger (one JSON line each, written as it finishes; a stopped run resumes), failures too.
 // The model's calls are the same whatever the strategy settings, so each run records them once per day set (research/
 // callTape.ts) and plays them back after.
@@ -249,15 +254,22 @@ export interface SweepReportOut {
   chosen: Pick | null;
   pbo: { search: number | null; finalists: number | null };
   deflated: { sharpe: number; sr0: number; probability: number } | null;
-  /** Stage 4: today's settings and the chosen candidate on the bot's own recorded days (not part of the verdict). */
+  /** Stage 4: today's settings and the chosen candidate on the bot's own recorded days. */
   recorded: { days: string[]; baseline: { pnl: number; trades: number; contracts: number } | null; chosen: { pnl: number; trades: number; contracts: number } | null } | null;
+  /** The replay check's verdict the report was judged with (null: none given or none found). */
+  replayCheck: ReplayGate | null;
   accepted: boolean; why: string[];
   /** The bot.env lines of the accepted candidate (empty when none is). */
   envLines: string[];
 }
 
-/** The verdict: finalists ranked on the tune days, the best judged once on the holdout days, the rules applied. */
-export function report(trials: TrialResult[], days: string[], sampleSize = 40): SweepReportOut {
+/** The replay check's latest verdict (data/models/sweeps/replay-check-latest.json). */
+export interface ReplayGate { close: boolean; why: string[]; from?: string; to?: string }
+
+/** The verdict: finalists ranked on the tune days, the best judged once on the holdout days, the rules applied. `gate`:
+ *  the replay check's verdict (null: none found) and whether stage 4's recorded days count; left out, those rules are
+ *  not applied (the stage 4 run picks its candidate that way). */
+export function report(trials: TrialResult[], days: string[], sampleSize = 40, gate: { replayCheck?: ReplayGate | null; recorded?: boolean } = {}): SweepReportOut {
   const { tune, holdout } = splitDays(days);
   const sample = sampleDays(tune, sampleSize);
   const ok = trials.filter((t) => t.ok);
@@ -270,6 +282,7 @@ export function report(trials: TrialResult[], days: string[], sampleSize = 40): 
   const best = scored[0];
   const why: string[] = [];
   const pSearch = pboOf(sampled, sample), pFinal = pboOf(finals, [...tune, ...holdout]);
+  const recOf = (id: string | undefined) => { const t = rec.find((x) => x.id === id); return t ? { pnl: t.pnl, trades: t.trades, contracts: t.contracts } : null; };
   let deflated: SweepReportOut['deflated'] = null;
   if (best) {
     // Every trial tried counts (the search's breadth), with the spread of their Sharpe ratios on the sample.
@@ -289,10 +302,18 @@ export function report(trials: TrialResult[], days: string[], sampleSize = 40): 
     }
     if (!(deflated && deflated.probability >= DSR_MIN)) why.push(`deflated Sharpe probability ${deflated && Number.isFinite(deflated.probability) ? deflated.probability.toFixed(2) : 'n/a'} (needs ${DSR_MIN})`);
     if (best.holdout.trades < MIN_HOLDOUT_TRADES) why.push(`only ${best.holdout.trades} trades on the holdout days (needs ${MIN_HOLDOUT_TRADES})`);
+    if (gate.replayCheck !== undefined && !gate.replayCheck?.close) why.push(gate.replayCheck ? `the replay check is not close (${gate.replayCheck.why.join('; ') || 'not checked yet'})` : 'no replay check verdict yet');
+    if (gate.recorded) {
+      const c = recOf(best.t.id), b0 = recOf(trialId({}));
+      if (!c) why.push('not replayed on the recorded days (stage 4)');
+      else {
+        if (!(c.pnl > 0)) why.push(`loses on the recorded days ($${c.pnl.toFixed(2)})`);
+        if (b0 && !(c.pnl > b0.pnl)) why.push(`not better than today's settings on the recorded days ($${c.pnl.toFixed(2)} vs $${b0.pnl.toFixed(2)})`);
+      }
+    }
   }
   const accepted = why.length === 0;
   const pick = (x: (typeof scored)[number]): Pick => ({ id: x.t.id, env: x.t.env, tune: x.tune, holdout: x.holdout });
-  const recOf = (id: string | undefined) => { const t = rec.find((x) => x.id === id); return t ? { pnl: t.pnl, trades: t.trades, contracts: t.contracts } : null; };
   const recDays = [...new Set(rec.flatMap((t) => Object.keys(t.byDay)))].sort();
   return {
     at: new Date().toISOString(), days: { tune, holdout, sample },
@@ -302,6 +323,7 @@ export function report(trials: TrialResult[], days: string[], sampleSize = 40): 
     top: scored.slice(0, TOP_REFINE + 1).map(pick), chosen: best ? pick(best) : null,
     pbo: { search: Number.isFinite(pSearch) ? pSearch : null, finalists: Number.isFinite(pFinal) ? pFinal : null }, deflated,
     recorded: rec.length ? { days: recDays, baseline: recOf(trialId({})), chosen: recOf(best?.t.id) } : null,
+    replayCheck: gate.replayCheck ?? null,
     accepted, why,
     envLines: accepted && best ? Object.entries(best.t.env).sort().map(([k, v]) => `${k}=${v}`) : [],
   };
@@ -420,7 +442,14 @@ async function main(): Promise<void> {
     return;
   }
   if (cmd === 'report') {
-    const r = report(readLedgers(from), files.map((d) => d.day), sampleSize);
+    // The replay check's verdict file (the workflow copies the server's); missing or unreadable, nothing is accepted.
+    const readGate = (f: string): ReplayGate | null => {
+      try {
+        const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+        return { close: j.checked !== false && j.close === true, why: j.checked === false ? ['not checked yet'] : Array.isArray(j.why) ? j.why.map(String) : [], from: j.from, to: j.to };
+      } catch { return null; }
+    };
+    const r = report(readLedgers(from), files.map((d) => d.day), sampleSize, { replayCheck: readGate(arg('replay-check', path.join('data', 'sweeps', 'replay-check-latest.json'))), recorded: true });
     const out = arg('out', path.join('data', 'sweeps', 'random-kalshi.json'));
     fs.mkdirSync(path.dirname(out), { recursive: true });
     fs.writeFileSync(out, JSON.stringify(r, null, 1));

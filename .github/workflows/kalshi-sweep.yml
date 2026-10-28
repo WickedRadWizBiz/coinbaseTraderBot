@@ -38,7 +38,7 @@ on:
         default: '120'
   push:
     branches: ['claude/kalshi-random-sweep']
-    paths: ['.github/workflows/kalshi-sweep.yml', 'research/randomSweep.ts', 'research/kalshiReplayData.ts', 'research/backtest.ts']
+    paths: ['.github/workflows/kalshi-sweep.yml', 'research/randomSweep.ts', 'research/kalshiReplayData.ts', 'research/history/historyReplay.ts', 'research/backtest.ts']
 
 permissions:
   contents: read
@@ -389,7 +389,7 @@ jobs:
           # Real order books replay slowly: stage 4 gets a fixed slice of the job, and the verdict is written either way.
           timeout 150m node --import tsx research/randomSweep.ts run --stage 4 --from "$S123" --sample "$RS_SAMPLE" --recorded data/recordings --hours 2 \
             --recordings data/sweep-days --model data/models/model.json --ledger data/sweeps/s4.jsonl || echo "stage 4 failed or cut off"
-          node --import tsx research/randomSweep.ts report --from "$S123,data/sweeps/s4.jsonl" --sample "$RS_SAMPLE" --recordings data/sweep-days --out data/sweeps/random-kalshi.json
+          node --import tsx research/randomSweep.ts report --from "$S123,data/sweeps/s4.jsonl" --sample "$RS_SAMPLE" --recordings data/sweep-days --out data/sweeps/random-kalshi.json --replay-check data/sweeps/replay-check-latest.json
           [ -f data/sweeps/replay-check-latest.json ] && python3 -c "import json; r=json.load(open('data/sweeps/replay-check-latest.json')); print('latest replay check', r['from'][:16], 'to', r['to'][:16], 'close' if r['close'] else ('not checked yet: ' if not r['checked'] else 'NOT close: ') + '; '.join(r['why']))" || true
       - uses: actions/upload-artifact@v4
         if: always()

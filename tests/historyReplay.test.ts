@@ -148,6 +148,38 @@ test('history replay: day files the replay reads like live recordings; the perps
   assert.ok(rows.every((x) => Number.isFinite(x.y)));
 });
 
+test('history replay: with requote, a real contract\'s quote follows the index between its minute candles', async () => {
+  const hist = tmpDir(), plain = path.join(tmpDir(), 'replay'), out = path.join(tmpDir(), 'replay');
+  writeHistory(hist);
+  const opts = { historyDir: hist, assets: ['BTC'], fromDay: '2026-03-01', toDay: '2026-03-01', synthetic: false, log: () => {} };
+  await buildHistoryReplay({ ...opts, outDir: plain });
+  await buildHistoryReplay({ ...opts, outDir: out, requote: true });
+  const read = async (dir: string) => {
+    const books: Array<{ t: number; ticker: string; bid: number; ask: number }> = [], ix = new Map<number, number>();
+    for await (const e of readRecordings(dir)) {
+      if (e.k === 'book') books.push({ t: e.t, ticker: e.ticker, bid: e.bids[0].price, ask: e.asks[0].price });
+      if (e.k === 'index') ix.set(e.t, e.value);
+    }
+    return { books, ix };
+  };
+  const a = await read(plain), b = await read(out);
+  const onMinute = (x: { t: number }) => x.t % MIN === 0;
+  assert.ok(a.books.length >= 24 * 14 && a.books.every(onMinute), 'without requote: the candles\' quotes only');
+  assert.deepEqual(b.books.filter(onMinute), a.books, 'the candles stay as they were');
+  const between = b.books.filter((x) => !onMinute(x));
+  assert.ok(between.length >= 24 * 14 * 3 * 0.9, `quotes between the candles: ${between.length}`);
+  assert.ok(between.every((x) => Math.round((x.ask - x.bid) * 100) === 3), 'at the candle\'s spread');
+  // The quote moves with the index since the candle (the candles here all quote 45c / 48c).
+  let moved = 0, withIndex = 0;
+  for (const x of between) {
+    const t0 = Math.floor(x.t / MIN) * MIN, d = b.ix.get(x.t)! - b.ix.get(t0)!, m = (x.bid + x.ask) / 2 - 0.465;
+    if (Math.abs(m) < 0.005) continue;
+    moved++;
+    if (Math.sign(m) === Math.sign(d)) withIndex++;
+  }
+  assert.ok(moved > 100 && withIndex / moved > 0.9, `moved ${moved}, with the index ${withIndex}`);
+});
+
 test('history replay: the crypto network trades the synthetic contracts', async () => {
   const hist = tmpDir(), out = path.join(tmpDir(), 'replay');
   writeHistory(hist);

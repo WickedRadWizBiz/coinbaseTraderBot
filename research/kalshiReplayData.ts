@@ -1,7 +1,8 @@
 // The data the random sweep replays besides the bot's own recordings: Kalshi's settled 15-minute crypto contracts
 // (public API, research/history/kalshiHistory.ts) over the coins' 1-minute Binance history, built into recording files
 // by the history replay (research/history/historyReplay.ts) with real contracts only (no synthetic ones: the strategy
-// never trades those). Everything is incremental: a run adds what is new and resumes what a time budget cut short, so a
+// never trades those), their quotes following the index between Kalshi's minute candles (requote: a minute's quote left
+// standing is a price a backtest can pick off). Everything is incremental: a run adds what is new and resumes what a time budget cut short, so a
 // cached folder grows run by run (the Kalshi download runs at half Kalshi's public rate limit).
 //
 //   npm run research:kalshi-replay-data -- --history data/history --out data/history-replay [--days 365]
@@ -33,7 +34,7 @@ export async function kalshiReplayData(o: { history: string; out: string; days: 
   const left = Math.max(60_000, o.budgetMin * 60_000 - (Date.now() - t0));
   const k = await downloadKalshiHistory({ baseUrl: o.restBaseUrl ?? process.env.KALSHI_REST_URL ?? 'https://external-api.kalshi.com/trade-api/v2', series: o.series, days: o.days, out: path.join(o.history, 'kalshi'), budgetMs: left, log: (m) => log(`kalshi: ${m}`) });
   log(`kalshi: ${k.markets} new market(s), ${k.remaining} left for the next run${k.budgetHit ? ' (time budget reached)' : ''}`);
-  const r = await buildHistoryReplay({ historyDir: o.history, outDir: o.out, assets: o.assets, fromDay, toDay: yesterday, synthetic: false, log: (m) => log(`replay: ${m}`) });
+  const r = await buildHistoryReplay({ historyDir: o.history, outDir: o.out, assets: o.assets, fromDay, toDay: yesterday, synthetic: false, requote: true, log: (m) => log(`replay: ${m}`) });
   log(`replay: ${r.written} day(s) written, ${r.skipped} already built${r.notes.length ? ` | ${r.notes.join('; ')}` : ''}`);
   const days = replayKalshiDays(o.out);
   log(`${days.length} day(s) with real Kalshi contracts${days.length ? `: ${days[0]}..${days[days.length - 1]}` : ''}`);

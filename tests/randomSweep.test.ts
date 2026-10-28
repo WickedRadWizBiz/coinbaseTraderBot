@@ -60,3 +60,29 @@ test('random sweep: finalists ranked on the tune days, the best judged once on t
   assert.ok(r3.why.some((w) => /stage 3/.test(w)));
   assert.equal(sampleRanking([trial({}, () => 1, 'all')], days).length, 0, 'the ranking reads the sample results only');
 });
+
+test('random sweep: a proposal also needs a close replay check, and to make money on the recorded days and beat today\'s there', () => {
+  const hold = { EXIT_POLICY: 'hold' }, steady = (i: number) => 2 + (i % 3) * 0.1;
+  const search = [trial({}, () => -1, 'sample'), trial(hold, steady, 'sample'), trial({ STRATEGY_STYLE: 'maker' }, (i) => (i % 2 ? 1 : -1.5), 'sample'), trial({ STRATEGY_MIN_EDGE: '0.05' }, (i) => (i % 3 ? 0.5 : -1), 'sample')];
+  const finals = [trial({}, () => -1), trial(hold, steady)];
+  const close = { close: true, why: [] };
+  const free = report([...search, ...finals], days, 20);
+  assert.equal(free.accepted, true, free.why.join('; '));
+  // The sweeps of Oct 25: the history replay's winner lost on the recorded day as today's settings did.
+  const lostThere = [...search, ...finals, trial({}, () => -0.1, 'recorded'), trial(hold, () => -0.09, 'recorded')];
+  const r1 = report(lostThere, days, 20, { replayCheck: close, recorded: true });
+  assert.equal(r1.accepted, false);
+  assert.ok(r1.why.some((w) => /loses on the recorded days/.test(w)), r1.why.join('; '));
+  assert.deepEqual(r1.envLines, []);
+  const behind = report([...search, ...finals, trial({}, () => 0.2, 'recorded'), trial(hold, () => 0.1, 'recorded')], days, 20, { replayCheck: close, recorded: true });
+  assert.ok(behind.why.some((w) => /not better than today's settings on the recorded days/.test(w)), behind.why.join('; '));
+  const ok = [...search, ...finals, trial({}, () => -0.1, 'recorded'), trial(hold, () => 0.1, 'recorded')];
+  const r2 = report(ok, days, 20, { replayCheck: { close: false, why: ['P&L beyond luck'] }, recorded: true });
+  assert.deepEqual(r2.why, ['the replay check is not close (P&L beyond luck)']);
+  assert.deepEqual(report(ok, days, 20, { replayCheck: null, recorded: true }).why, ['no replay check verdict yet']);
+  assert.ok(report([...search, ...finals], days, 20, { replayCheck: close, recorded: true }).why.some((w) => /stage 4/.test(w)));
+  const r3 = report(ok, days, 20, { replayCheck: close, recorded: true });
+  assert.equal(r3.accepted, true, r3.why.join('; '));
+  assert.deepEqual(r3.envLines, ['EXIT_POLICY=hold']);
+  assert.deepEqual(r3.replayCheck, close);
+});
