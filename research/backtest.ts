@@ -68,7 +68,7 @@ import { ProfitPeaks } from '../bot/strategy/profitPeaks';
 import { ConfluenceRatchetExit, DEFAULT_HUNT, DEFAULT_RATCHET, EXIT_POLICIES, ExitPolicyName, HuntParams, LiquidityRatchet, RatchetParams } from '../bot/strategy/exitPolicies';
 import { readRecordings, ReplayState } from './replay';
 import { AccuracyGate, type AccuracyGateConfig } from '../bot/strategy/accuracyGate';
-import { TakeProfitBench } from '../bot/strategy/takeProfitBench';
+import { ExitBenches, TakeProfitBench, scoredExitKind, type ExitKind } from '../bot/strategy/takeProfitBench';
 import { gatePasses, type ProbationParams } from '../bot/risk/probation';
 import { bootstrapMeanCi, deflatedSharpe, pbo, rng, sharpe } from './stats';
 
@@ -137,7 +137,7 @@ export interface BacktestResult {
   refills?: Array<{ t: number; usd: number }>;
   /** With the paper options: entries the accuracy gate held back, when the take-profit bench benched, its sales (fills
    *  and contracts). */
-  paper?: { accuracyBlocks: number; sessionEdgeBlocks?: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number; takeProfitScored?: number; takeProfitNetUsd?: number;
+  paper?: { accuracyBlocks: number; sessionEdgeBlocks?: number; exitBenches?: Partial<Record<ExitKind, { scored: number; netUsd: number; benchedAt: number | undefined }>>; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number; takeProfitScored?: number; takeProfitNetUsd?: number;
     /** Each market the take-profit bench scored (from tradeFromMs): what its sales made against holding, contracts sold, when. */
     takeProfitByMarket?: Record<string, { usd: number; contracts: number; t: number }>;
     rejected?: Record<string, number>; trainTrades?: number; exploreEntries?: number; extraSent?: number; extraRejected?: Record<string, number> };
@@ -183,6 +183,9 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
    *  benched. */
   takeProfitBench?: { enforce: boolean; rule: Pick<ProbationParams, 'minTrades' | 't' | 'maxLossUsd' | 'window'>; stateFile?: string;
     follow?: { benched: string | null; events: Array<{ t: number; benched: string | null }> } };
+  /** The model exit's and the ratchet stop's benches (EXIT_BENCH), on the take-profit bench's rule: benched as the engine
+   *  does it when true, else scored only (paper.exitBenches says when each would have benched). */
+  exitBench?: boolean;
   /** Replay from this time (ms) on: what the recordings hold before it is skipped, so the books, features and gate
    *  start empty there (research/replayCheck.ts starts hours before the stretch it compares). */
   startMs?: number;
@@ -399,6 +402,12 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   };
   const follow = opts.takeProfitBench?.follow;
   const tpBench = opts.takeProfitBench ? new TakeProfitBench(opts.takeProfitBench.enforce && !follow, opts.takeProfitBench.rule, opts.takeProfitBench.stateFile, tpScored, 0) : undefined;
+  // The other scored exit kinds (EXIT_BENCH): the model exit and the ratchet stop, each on the same rule, benched as the
+  // engine does it when opts.exitBench, else scored only (paper.exitBenches says when each would have benched).
+  const benchOf = (kind: ExitKind) => (res.paper!.exitBenches ??= {})[kind] ??= { scored: 0, netUsd: 0, benchedAt: undefined };
+  const benches = opts.takeProfitBench ? new ExitBenches((['model-exit', 'ratchet-stop'] as const).map((kind) => new TakeProfitBench(Boolean(opts.exitBench), opts.takeProfitBench!.rule, undefined, (e) => {
+    if (e.event === 'scored') { const b = benchOf(kind); b.scored++; b.netUsd += Number(e.usd) || 0; }
+  }, 0, kind))) : undefined;
   // Benched or selling now: the replay's own bench, or the one it follows.
   let followAt = 0, followed = follow?.benched ?? undefined;
   const tpBenched = (): string | undefined => {
@@ -439,6 +448,11 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     const hour = new Date(st.now).toISOString().slice(0, 13);
     res.contractsByHour![hour] = (res.contractsByHour![hour] ?? 0) + f.count;
     if (cancelInFlight.has(f.orderId)) { L.cancelRaceFills++; L.cancelRaceContracts += f.count; }
+    const benchKind: ExitKind | undefined = f.clientOrderId?.endsWith('-me') ? 'model-exit' : f.clientOrderId?.endsWith('-exit-rt') ? 'ratchet-stop' : undefined;
+    if (benchKind && benches && f.count > 0) {
+      const sign = f.side === 'ask' ? 1 : -1;
+      benches.filled(benchKind, f.ticker, sign, sign > 0 ? f.price : Math.round((1 - f.price) * 1e4) / 1e4, f.count, (f.fee ?? 0) / f.count, st.now);
+    }
     if (f.clientOrderId?.endsWith('-tp')) {
       res.takeProfitFills++;
       if (tpBench && f.count > 0) {
@@ -532,6 +546,10 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           ex.settle(m.ticker, result);
           if (!(opts.accuracyGateFile && opts.tradeFromMs !== undefined && st.now < opts.tradeFromMs)) gate?.settle(m.ticker, result);
           if (tpBench) { tpBench.settled(m.ticker, result, st.now); if (res.paper!.takeProfitBenchedAt === undefined && ownBenched()) res.paper!.takeProfitBenchedAt = st.now; }
+          if (benches) {
+            benches.settled(m.ticker, result, st.now);
+            for (const kind of benches.kinds()) { const b = benchOf(kind), sb = benches.get(kind)!.status(); if (b.benchedAt === undefined && (sb.benched || sb.wouldBench)) b.benchedAt = st.now; }
+          }
           for (const x of exitLedger.get(m.ticker) ?? []) {
             const won = (x.sideSign > 0) === (result === 'yes');
             exits.regret += (won ? x.n : 0) - x.proceeds;
@@ -725,7 +743,10 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const sess = sessionState(st.now);
       const sessRisk = sessionRiskFor(opts.sessionRisk ?? {}, sess);
       let huntMode = false;
-      if (policy === 'confluence_ratchet') {
+      // The ratchet stop benched (EXIT_BENCH), as the engine does it: no hunt mode; the fair-value exit has the position.
+      const ratchetBenched = benches?.benched('ratchet-stop');
+      if (ratchetBenched) hunts.delete(m.ticker);
+      if (policy === 'confluence_ratchet' && !ratchetBenched) {
         const posH = pos.position(m.ticker);
         let h = hunts.get(m.ticker);
         if (!h) { h = new ConfluenceRatchetExit(opts.hunt ?? DEFAULT_HUNT, opts.ratchet ?? DEFAULT_RATCHET); hunts.set(m.ticker, h); }
@@ -790,6 +811,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         maxOrderRiskUsd: fixedUsd > 0 ? fixedUsd : tier.orderFrac * bankroll * sessRisk.sizeMult * sizeScale, maxContracts: Math.floor(limits.maxContractsPerOrder * (fixedUsd > 0 ? 1 : sessRisk.sizeMult) * 100) / 100, minSidePrice: limits.minSidePrice,
         ...(fixedUsd > 0 ? { fixedOrderUsd: fixedUsd } : {}),
         ...(() => { const b = tpBenched(); return b ? { takeProfitBenched: b } : {}; })(),
+        ...(() => { const b = benches?.benched('model-exit'); return b ? { modelExitBenched: b } : {}; })(),
         newRiskRoomUsd,
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,
         restingBid: rb, restingAsk: ra, nowSec: Math.floor(st.now / 1000), closeSec: Math.floor(m.closeTime / 1000),
@@ -880,7 +902,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           continue;
         }
         if (/^(train|explore)/.test(p.why)) res.paper!.extraSent = (res.paper!.extraSent ?? 0) + 1;
-        const clientOrderId = `${m.ticker}-${st.now}-${p.side}-${p.purpose}${p.why.startsWith('take-profit') ? '-tp' : ''}`;
+        const clientOrderId = `${m.ticker}-${st.now}-${p.side}-${p.purpose}${p.why.startsWith('take-profit') ? '-tp' : scoredExitKind(p.why) === 'model-exit' ? '-me' : ''}`;
         await send(m.ticker, 'order', async () => {
           try {
             await ex.createOrder({ ticker: m.ticker, side: p.side, count: p.count, price: p.price, timeInForce: p.timeInForce, postOnly: p.postOnly, reduceOnly: p.reduceOnly, selfTradePrevention: 'taker_at_cross', clientOrderId, expirationTime: p.expirationTime });

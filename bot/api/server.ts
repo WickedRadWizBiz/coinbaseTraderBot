@@ -1,3 +1,4 @@
+import { EXIT_KINDS, type ExitKind } from '../strategy/takeProfitBench';
 // Operator API. Read-only by design:
 //  - Bound to loopback by default (reach it through an SSH tunnel/Tailscale).
 //  - With DASHBOARD_PASSWORD set, every /api route requires it as the bearer (constant-time compare),
@@ -196,6 +197,7 @@ export function createApi(d: ApiDeps): express.Express {
       probation: probation()?.status() ?? null,
       curveExit: d.engine.curveExitStatus(),
       takeProfitBench: d.engine.takeProfitBenchStatus(),
+      exitBenches: d.engine.exitBenchStatus(),
       curveEntry: d.engine.curveEntryStatus(),
       kalshiAccount: d.engine.kalshiAccountStatus(),
       autoTrain: d.autoTrain ? (() => { const a = d.autoTrain!.status(); return { mode: a.mode, running: a.running, paused: a.paused, window: a.window, nextRun: a.nextRun, lastExit: a.lastExit, lastSwap: a.swaps[0] ?? null, lastReport: a.lastReport }; })() : null,
@@ -413,6 +415,16 @@ export function createApi(d: ApiDeps): express.Express {
     if (!d.engine.resetTakeProfitBench()) return res.status(400).json({ error: 'no take-profit bench' });
     d.audit.write('take_profit_bench', { event: 'reset', by: 'dashboard' });
     res.json({ ok: true, takeProfitBench: d.engine.takeProfitBenchStatus() });
+  });
+
+  // Exit benches (EXIT_BENCH, bot/strategy/takeProfitBench.ts ExitBenches): clear one kind's scoreboard and lift its bench.
+  // Body { kind: 'model-exit' | 'ratchet-stop' | 'take-profit' }.
+  api.post('/exit-bench/reset', (req, res) => {
+    const kind = String((req.body as { kind?: unknown } | undefined)?.kind ?? '') as ExitKind;
+    if (!EXIT_KINDS.includes(kind)) return res.status(400).json({ error: `kind must be one of ${EXIT_KINDS.join(', ')}` });
+    if (!d.engine.resetExitBench(kind)) return res.status(400).json({ error: `no ${kind} bench` });
+    d.audit.write('exit_bench', { kind, event: 'reset', by: 'dashboard' });
+    res.json({ ok: true, exitBenches: d.engine.exitBenchStatus() });
   });
 
   // Probation (VALIDATION_GATES=monitor, bot/risk/probation.ts): a fresh probation for a benched book.

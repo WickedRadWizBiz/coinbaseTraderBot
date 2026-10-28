@@ -33,7 +33,7 @@ import { ProfitPeaks } from './strategy/profitPeaks';
 import { ConfluenceRatchetExit } from './strategy/exitPolicies';
 import type { SinuousEntryGate } from './strategy/sinuousEntry';
 import { tennisHighLeverage, type CurveReading, type SinuousExitGate } from './strategy/sinuousExit';
-import type { TakeProfitBench } from './strategy/takeProfitBench';
+import { scoredExitKind, type ExitBenches, type ExitKind, type TakeProfitBench, type TakeProfitBenchStatus } from './strategy/takeProfitBench';
 import { CadenceGate, inEntryWindow, type CadenceReason } from './strategy/cadence';
 import { kalshiMaintenance, sessionEdge, sessionState, type SessionState } from './model/sessions';
 import type { EquityGuard } from './risk/equityGuard';
@@ -316,6 +316,8 @@ export interface EngineDeps {
   curveExit?: SinuousExitGate;
   /** The take-profit's scoreboard against holding to settlement, and its bench (TAKE_PROFIT_BENCH). */
   takeProfitBench?: TakeProfitBench;
+  /** The model exit's and the ratchet stop's scoreboards and benches, each like the take-profit's (EXIT_BENCH). */
+  exitBenches?: ExitBenches;
   /** Entry curve: scores maker entries by the order-book curve at the fill; in gate mode it also holds quotes back (SINUOUS_ENTRY). */
   curveEntry?: SinuousEntryGate;
   /** The live line: each coin's settlement index as a curve, shared by its contracts (bot/strategy/liveLine.ts). */
@@ -447,6 +449,7 @@ export class Engine {
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no' }) => d.curveExit?.settled(e.ticker, e.result, this.now()));
     // The take-profit's sales in a settled market are scored against what holding them paid.
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no' }) => d.takeProfitBench?.settled(e.ticker, e.result, this.now()));
+    d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no' }) => d.exitBenches?.settled(e.ticker, e.result, this.now()));
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized: number; positionBefore: number }) => {
       this.lastSettleTs = this.now();
       // One probation result per settled market that traded (VALIDATION_GATES=monitor: bot/risk/probation.ts).
@@ -683,6 +686,18 @@ export class Engine {
     if (!this.d.takeProfitBench) return false;
     this.d.takeProfitBench.reset(this.now());
     return true;
+  }
+
+  /** Every scored exit kind's scoreboard against holding to settlement and its bench: the take-profit's and the others' (EXIT_BENCH). */
+  exitBenchStatus(): Partial<Record<ExitKind, TakeProfitBenchStatus>> {
+    const tp = this.d.takeProfitBench?.status();
+    return { ...(tp ? { 'take-profit': tp } : {}), ...(this.d.exitBenches?.status() ?? {}) };
+  }
+
+  /** Clear one exit kind's scoreboard (and a bench); false without one. */
+  resetExitBench(kind: ExitKind): boolean {
+    if (kind === 'take-profit') return this.resetTakeProfitBench();
+    return this.d.exitBenches?.reset(kind, this.now()) ?? false;
   }
 
   /** Current market session, its risk multipliers and the hunt guard, for the dashboard. */
@@ -2035,6 +2050,7 @@ export class Engine {
       entryFeePerContract: pos && Math.abs(pos.yes) > 1e-9 ? pos.fees / Math.abs(pos.yes) : undefined,
       profitPeakSidePrice: this.profitPeaks.update(m.ticker, st.position, st.position > 0 ? bid.price : st.position < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
       ...(this.d.takeProfitBench?.benched ? { takeProfitBenched: this.d.takeProfitBench.benched } : {}),
+      ...(() => { const b = this.d.exitBenches?.benched('model-exit'); return b ? { modelExitBenched: b } : {}; })(),
       entryWindowOpen, exitWindowOpen: tauSec > S.noExitBeforeCloseSec,
     };
     // Exit policy. confluence_ratchet: fair-value exit normally; "hunt" mode (liquidity ratchet
@@ -2049,7 +2065,10 @@ export class Engine {
     const vh = model.validatedHunt();
     const huntAllowed = cfg.strategy.exitPolicy === 'confluence_ratchet' && (cfg.mode !== 'live' || cfg.liveAllowUnvalidated || vh !== undefined || gatePasses('kalshi', false));
     const huntNote = cfg.strategy.exitPolicy === 'confluence_ratchet' && !huntAllowed ? 'hunt mode not validated by the backtest: fair-value exit in live' : undefined;
-    if (huntAllowed) {
+    // The ratchet stop benched (EXIT_BENCH): no hunt mode; the fair-value exit has the position until a reset.
+    const ratchetBenched = this.d.exitBenches?.benched('ratchet-stop');
+    if (ratchetBenched) this.hunts.delete(m.ticker);
+    if (huntAllowed && !ratchetBenched) {
       let h = this.hunts.get(m.ticker);
       if (!h) {
         const S = cfg.strategy;
@@ -2443,7 +2462,7 @@ export class Engine {
     }
     // Tagged before it is sent: a paper fill arrives inside submit(), a live one may beat its acknowledgement.
     if (p.purpose === 'exit' && p.why.startsWith('exit curve: cross')) this.tagScoredExit('cross', decisionId, p);
-    else if (p.purpose === 'exit' && p.why.startsWith('take-profit') && !tennis) this.tagScoredExit('take-profit', decisionId, p);
+    else if (p.purpose === 'exit' && !tennis) { const kind = scoredExitKind(p.why); if (kind) this.tagScoredExit(kind, decisionId, p); }
     const rec = await oms.submit(intent);
     if (cfg.mode === 'paper' && !tennis) this.tagLiveBlock(rec.clientOrderId, p);
     const fx = this.fillX.get(p);
@@ -2481,9 +2500,9 @@ export class Engine {
   /** Exits scored on what they fill, not the call (an order that does not fill sold nothing), until they fill: the exit
    *  curve's cross and the take-profit, by decision, side and price (the one exit a decision sends across the book).
    *  Forgotten after an hour. */
-  private readonly scoredExits = new Map<string, { kind: 'cross' | 'take-profit'; sign: 1 | -1; ts: number }>();
+  private readonly scoredExits = new Map<string, { kind: 'cross' | ExitKind; sign: 1 | -1; ts: number }>();
 
-  private tagScoredExit(kind: 'cross' | 'take-profit', decisionId: string, p: OrderPlan): void {
+  private tagScoredExit(kind: 'cross' | ExitKind, decisionId: string, p: OrderPlan): void {
     const now = this.now();
     if (this.scoredExits.size >= 500) for (const [k, v] of this.scoredExits) if (now - v.ts > 3_600_000) this.scoredExits.delete(k);
     // Selling YES (an ask) closes a YES position; buying YES (a bid) closes a NO one.
@@ -2495,7 +2514,8 @@ export class Engine {
     if (!c || !(f.count > 0)) return;
     const sidePrice = c.sign > 0 ? f.price : Math.round((1 - f.price) * 1e4) / 1e4;
     if (c.kind === 'cross') this.d.curveExit?.crossFilled(f.ticker, c.sign, sidePrice, f.count, fee / f.count, this.now());
-    else this.d.takeProfitBench?.filled(f.ticker, c.sign, sidePrice, f.count, fee / f.count, this.now());
+    else if (c.kind === 'take-profit') this.d.takeProfitBench?.filled(f.ticker, c.sign, sidePrice, f.count, fee / f.count, this.now());
+    else this.d.exitBenches?.filled(c.kind, f.ticker, c.sign, sidePrice, f.count, fee / f.count, this.now());
   }
 
   private noteLiveBlockFill(clientOrderId: string | undefined): void {

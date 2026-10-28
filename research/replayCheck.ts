@@ -106,7 +106,7 @@ export interface ReplayCheck {
   /** Each side's refills of a pool that ran dry, in the stretch (bot/training/supervisor.ts). */
   refills?: { paper: Array<{ t: string; usd: number }>; replay: Array<{ t: string; usd: number }> };
   /** Exits and the gate's counts are the whole replay's, warm-up included. */
-  replay: SideSummary & { accuracyBlocks: number; sessionEdgeBlocks?: number; entryEvaluations: number; takeProfitBenchedAt: string | null; takeProfitScored: number; takeProfitNetUsd: number; takeProfitByMarket: Record<string, TakeProfitMarket>; rejected: Record<string, number>; sizeScaleMin: number; makerBufferEnd: number | null; extra: { train: number; explore: number; sent: number; rejected: Record<string, number> } };
+  replay: SideSummary & { accuracyBlocks: number; sessionEdgeBlocks?: number; entryEvaluations: number; exitBenches?: Record<string, { scored: number; netUsd: number; benchedAt: string | null }>; takeProfitBenchedAt: string | null; takeProfitScored: number; takeProfitNetUsd: number; takeProfitByMarket: Record<string, TakeProfitMarket>; rejected: Record<string, number>; sizeScaleMin: number; makerBufferEnd: number | null; extra: { train: number; explore: number; sent: number; rejected: Record<string, number> } };
   /** The paper bot's maker buffer now, from the maker markouts it was seeded with (null: fewer than 30, the setting). */
   makerBufferPaper: number | null;
   /** The engine's other models the replay priced with (engineModels), the validation gates' mode and benched books. */
@@ -670,7 +670,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const r = await runBacktest(dir, model, S, cfg.risk, bankroll, {
     exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
     sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd }, accuracyGate: S.accuracyGate,
-    takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile, ...(follow ? { follow } : {}) }, accuracyGateFile: gateFile, startMs, tradeFromMs: from,
+    takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile, ...(follow ? { follow } : {}) }, exitBench: S.exitBench, accuracyGateFile: gateFile, startMs, tradeFromMs: from,
     dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, refillUsd: cfg.paperBankrollUsd, sessionEdge: cfg.sessionEdge, onEval: match.onEval, makerMarkouts: o.makerMarkouts,
     volProfile: models.volProfile, applyVolSeasonality: Boolean(models.volProfile), volModel: models.volModel, fillModel: models.fillModel, calendar: models.calendar,
     taNet: true, trials: models.trials, marketContext: true, ...(o.tickPhaseMs !== undefined ? { tickPhaseMs: o.tickPhaseMs } : {}), ...(seed ? { seedCandles: seed } : {}),
@@ -680,6 +680,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   if (guardFile) fs.rmSync(path.dirname(guardFile), { recursive: true, force: true });
   const replay = {
     ...empty(), accuracyBlocks: r.paper?.accuracyBlocks ?? 0, sessionEdgeBlocks: r.paper?.sessionEdgeBlocks ?? 0, entryEvaluations: r.entryEvaluations,
+    exitBenches: Object.fromEntries(Object.entries(r.paper?.exitBenches ?? {}).map(([k, b]) => [k, { scored: b!.scored, netUsd: +b!.netUsd.toFixed(2), benchedAt: b!.benchedAt ? new Date(b!.benchedAt).toISOString() : null }])),
     takeProfitBenchedAt: r.paper?.takeProfitBenchedAt ? new Date(r.paper.takeProfitBenchedAt).toISOString() : null, takeProfitScored: r.paper?.takeProfitScored ?? 0, takeProfitNetUsd: r.paper?.takeProfitNetUsd ?? 0, takeProfitByMarket: r.paper?.takeProfitByMarket ?? {}, rejected: r.paper?.rejected ?? {}, sizeScaleMin: r.sizeScaleMin ?? 1,
     makerBufferEnd: r.makerBufferEnd ?? null, extra: { train: r.paper?.trainTrades ?? 0, explore: r.paper?.exploreEntries ?? 0, sent: r.paper?.extraSent ?? 0, rejected: r.paper?.extraRejected ?? {} },
   };
@@ -817,6 +818,7 @@ async function main(): Promise<void> {
   console.log(`session edges (no new entries, SESSION_EDGE_NO_ENTRY): replay held back ${pct(res.replay.entryEvaluations ? (res.replay.sessionEdgeBlocks ?? 0) / res.replay.entryEvaluations : null)} of its entry evaluations; paper's diagnoses show them keeping out ${pct(res.paper.edgeShare ?? null)} of the markets`);
   const tb = (scored: number, net: number, at: string | null, would = false) => `${scored} markets scored, ${f(net)} against holding to settlement, ${would ? 'its own scoreboard would have benched it' : 'benched'} ${at ? hm(at) : 'never'}`;
   console.log(`take-profit bench in the stretch: replay ${tb(res.replay.takeProfitScored, res.replay.takeProfitNetUsd, res.replay.takeProfitBenchedAt, Boolean(res.benchFollowed))} | paper ${tb(res.paper.takeProfitBench.scored, res.paper.takeProfitBench.netUsd, res.paper.takeProfitBench.benchedAt)}`);
+  for (const [k, b] of Object.entries(res.replay.exitBenches ?? {})) console.log(`${k} bench in the stretch (EXIT_BENCH): replay ${b.scored} markets scored, ${f(b.netUsd)} against holding to settlement, benched (or would have) ${b.benchedAt ? hm(b.benchedAt) : 'never'}`);
   const BF = res.benchFollowed;
   console.log(BF ? `the replay's take-profit sold or sat out as paper's bench did: ${BF.benched ? 'benched' : 'selling'} at the start${BF.events.map((e) => `, ${e.benched ? 'benched' : 'selling again'} ${hm(e.t)}`).join('')}` : "the replay's take-profit benched on its own scoreboard (--own-bench)");
   // Market by market: the first ones each side scored, with what the other side's sales made on the same market.

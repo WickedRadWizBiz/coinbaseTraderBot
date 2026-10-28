@@ -173,6 +173,18 @@ test('take-profit benched (its scoreboard against holding to settlement): it sel
   assert.match(model.why, /^bid 0\.53 - fee > q 0\.400/);
 });
 
+test('model exit benched (its scoreboard against holding to settlement, EXIT_BENCH): it sells nothing; the take-profit still sells', () => {
+  const long = (bid: number, peak: number, pYes: number) => view({ position: 10, pYes, entrySidePrice: 0.4, entryFeePerContract: 0, profitPeakSidePrice: peak, bestBid: { price: bid, size: 50 }, bestAsk: { price: bid + 0.02, size: 50 }, modelExitBenched: 'model-exit sales cost $26.00 against holding to settlement over 13 markets (limit $25)' });
+  // The model values it at 0.40 and the bid is 0.53: the model exit would sell, and does not (no better bid seen, so no take-profit).
+  const out = decide(long(0.53, 0.53, 0.4), cfg);
+  assert.equal(out.place.filter((p) => p.purpose === 'exit').length, 0);
+  assert.ok(out.notes.some((n) => /^model exit benched: bid 0\.53 - fee > q 0\.400 \+ [0-9.]+, not sold \(model-exit sales cost \$26\.00/.test(n)), out.notes.join(' | '));
+  // Back from a best of 0.60 the trailing take-profit still sells (a third of the best given back): its own bench is clear.
+  const tp = decide(long(0.53, 0.6, 0.4), cfg).place.find((p) => p.purpose === 'exit')!;
+  assert.deepEqual([tp.side, tp.price, tp.count], ['ask', 0.53, 10]);
+  assert.match(tp.why, /^take-profit: /);
+});
+
 test('take-profit on a NO position: trails the NO bid and buys back at the YES ask', () => {
   // Holding 10 NO bought at 0.40; the model wants to keep it (P(YES) 0.30). Best NO bid 0.60, now 0.53 (YES ask 0.47).
   const short = (yesAsk: number, peakNo: number) => view({ position: -10, pYes: 0.3, entrySidePrice: 0.4, entryFeePerContract: 0, profitPeakSidePrice: peakNo, bestBid: { price: yesAsk - 0.02, size: 50 }, bestAsk: { price: yesAsk, size: 50 } });

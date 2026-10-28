@@ -91,6 +91,8 @@ export interface MarketView {
   profitPeakSidePrice?: number;
   /** Why the take-profit is benched (bot/strategy/takeProfitBench.ts): it sells nothing; the model exit still runs. */
   takeProfitBenched?: string;
+  /** Why the model exit is benched (bot/strategy/takeProfitBench.ts ExitBenches): it sells nothing; the take-profit still runs. */
+  modelExitBenched?: string;
   /** Entry window open (contract kind, time to close, maintenance). Default: tau >= noEntryBeforeCloseSec. */
   entryWindowOpen?: boolean;
   /** Exits allowed (false in the final minute: ride to settlement). Default true. */
@@ -203,7 +205,8 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     const fee = n > 0 ? orderFee(n, bid.price, true, v.fees) / n : 0;
     const edge = bid.price - q - fee;
     const tp = n > 0 ? takeProfit(n, bid.price, fee, '') : undefined;
-    if (n > 0 && (edge >= margin || tp?.sell)) {
+    if (n > 0 && edge >= margin && v.modelExitBenched && !tp?.sell) out.notes.push(`model exit benched: bid ${bid.price} - fee > q ${q.toFixed(3)} + ${margin}, not sold (${v.modelExitBenched})`);
+    if (n > 0 && ((edge >= margin && !v.modelExitBenched) || tp?.sell)) {
       out.place.push({ side: 'ask', price: bid.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge,
         ...(tp?.sell && tp.protective ? { protective: true } : {}),
         why: tp?.sell ? tp.why : `bid ${bid.price} - fee > q ${q.toFixed(3)} + ${margin}` });
@@ -214,7 +217,8 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     const fee = n > 0 ? orderFee(n, noBid, true, v.fees) / n : 0;
     const edge = q - ask.price - fee;
     const tp = n > 0 ? takeProfit(n, noBid, fee, ' NO') : undefined;
-    if (n > 0 && (edge >= margin || tp?.sell)) {
+    if (n > 0 && edge >= margin && v.modelExitBenched && !tp?.sell) out.notes.push(`model exit benched NO: NO bid ${noBid.toFixed(2)} - fee > q + ${margin}, not sold (${v.modelExitBenched})`);
+    if (n > 0 && ((edge >= margin && !v.modelExitBenched) || tp?.sell)) {
       out.place.push({ side: 'bid', price: ask.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge,
         ...(tp?.sell && tp.protective ? { protective: true } : {}),
         why: tp?.sell ? tp.why : `NO bid ${noBid.toFixed(2)} - fee > q + ${margin}` });

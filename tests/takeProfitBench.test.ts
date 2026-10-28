@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
-import { TakeProfitBench, type TakeProfitBenchEvent } from '../bot/strategy/takeProfitBench';
+import { ExitBenches, TakeProfitBench, scoredExitKind, type TakeProfitBenchEvent } from '../bot/strategy/takeProfitBench';
 
 const RULE = { minTrades: 30, t: 2, maxLossUsd: 25, window: 200 };
 const T0 = 1_761_000_000_000;
@@ -77,4 +77,32 @@ test('take-profit bench: sales and scores survive a restart; a reset lifts the b
 test('take-profit bench: on by default (TAKE_PROFIT_BENCH)', () => {
   assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40) }).strategy.takeProfitBench, true);
   assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), TAKE_PROFIT_BENCH: 'false' }).strategy.takeProfitBench, false);
+});
+
+test('exit benches: each scored exit kind has its own scoreboard; a settlement scores every kind; reset is per kind', () => {
+  const benches = new ExitBenches((['model-exit', 'ratchet-stop'] as const).map((kind) => new TakeProfitBench(true, RULE, undefined, undefined, T0, kind)));
+  assert.deepEqual(benches.kinds(), ['model-exit', 'ratchet-stop']);
+  // The model exit sold YES at 0.70 and the ratchet stop the rest at 0.55, 1c fee each; the market settled YES.
+  benches.filled('model-exit', 'KXBTC15M-A', 1, 0.70, 10, 0.01, T0);
+  benches.filled('ratchet-stop', 'KXBTC15M-A', 1, 0.55, 10, 0.01, T0 + 1000);
+  benches.settled('KXBTC15M-A', 'yes', T0 + 900_000);
+  const s = benches.status();
+  assert.deepEqual([s['model-exit']!.scored, s['model-exit']!.netUsd, s['ratchet-stop']!.netUsd, s['ratchet-stop']!.kind], [1, -3.1, -4.6, 'ratchet-stop']);
+  assert.equal(benches.benched('take-profit'), undefined, 'a kind without a scoreboard here is never benched');
+  // $25 of ratchet-stop losses bench that kind alone; a reset of that kind lifts it and leaves the other scoreboard.
+  for (let i = 0; i < 5; i++) { benches.filled('ratchet-stop', `KXETH15M-${i}`, 1, 0.50, 10, 0.01, T0); benches.settled(`KXETH15M-${i}`, 'yes', T0 + 1000); }
+  assert.match(benches.benched('ratchet-stop')!, /^ratchet-stop sales cost \$/);
+  assert.equal(benches.benched('model-exit'), undefined);
+  assert.equal(benches.reset('ratchet-stop', T0 + 2000), true);
+  assert.equal(benches.benched('ratchet-stop'), undefined);
+  assert.equal(benches.status()['model-exit']!.scored, 1);
+  assert.equal(benches.reset('take-profit'), false);
+});
+
+test('scored exit kinds are read off the exit order\'s reason', () => {
+  assert.equal(scoredExitKind('take-profit: +0.112 a contract net of fees (best +0.183, floor +0.040)'), 'take-profit');
+  assert.equal(scoredExitKind('bid 0.53 - fee > q 0.400 + 0.01'), 'model-exit');
+  assert.equal(scoredExitKind('NO bid 0.60 - fee > q + 0.01'), 'model-exit');
+  assert.equal(scoredExitKind('confluence ratchet stop 0.62'), 'ratchet-stop');
+  assert.equal(scoredExitKind('exit curve: cross 0.6 (+0.02 a contract net'), undefined);
 });

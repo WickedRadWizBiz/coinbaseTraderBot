@@ -71,7 +71,7 @@ import { SettlementSweeper } from './paper/settlementSweeper';
 import { gatePasses, Probation, setProbation } from './risk/probation';
 import { SinuousEntryGate } from './strategy/sinuousEntry';
 import { SinuousExitGate } from './strategy/sinuousExit';
-import { TakeProfitBench } from './strategy/takeProfitBench';
+import { ExitBenches, TakeProfitBench } from './strategy/takeProfitBench';
 import { LiveLines } from './strategy/liveLine';
 import { ComponentTrials, TRIAL_LABEL } from './strategy/componentTrials';
 import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
@@ -142,6 +142,12 @@ async function main(): Promise<void> {
     audit.write('take_profit_bench', e);
     if (e.event === 'benched') alerter.notify('warn', 'take-profit-bench', `Take-profit benched (winners ride to the model exit, the ratchet stop or settlement until a reset): ${String(e.reason)}`);
   });
+  // Every other scored exit kind on the same scoreboard and bench (EXIT_BENCH; the owner, Oct 28): the model exit and the
+  // ratchet stop, each against holding to settlement on the curve's rule, each book its own file (scored only when off).
+  const exitBenches = new ExitBenches((['model-exit', 'ratchet-stop'] as const).map((kind) => new TakeProfitBench(cfg.strategy.exitBench, curveBench, path.join(cfg.bookDir, `exit-bench-${kind}.json`), (e) => {
+    audit.write('exit_bench', { kind, ...e });
+    if (e.event === 'benched') alerter.notify('warn', `exit-bench-${kind}`, `${kind === 'model-exit' ? 'Model exit' : 'Ratchet stop'} benched (it stops selling until a reset; the other exits and settlement go on): ${String(e.reason)}`);
+  }, Date.now(), kind)));
   // The live line (bot/strategy/liveLine.ts): each coin's settlement index as a curve, shared by its contracts; the cross
   // watches it (SINUOUS_CROSS_SOURCE=line) and the depth monitor shows each held position's reading.
   const liveLines = curveExit ? new LiveLines(cfg.sinuousExit.line) : undefined;
@@ -540,7 +546,7 @@ async function main(): Promise<void> {
   // The exchange's own status and maintenance schedule gate new entries (exits stay allowed).
   const exchangeStatus = new ExchangeStatusMonitor(rest);
   exchangeStatus.start();
-  const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, accuracyGate, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json'), curveExit, takeProfitBench, curveEntry, liveLines, trials });
+  const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, accuracyGate, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json'), curveExit, takeProfitBench, exitBenches, curveEntry, liveLines, trials });
   engineRef = engine;
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();

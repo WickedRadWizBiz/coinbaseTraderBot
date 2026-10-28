@@ -97,6 +97,8 @@ export interface StrategyConfig {
   /** Take-profit bench (bot/strategy/takeProfitBench.ts): its crypto sales scored against holding to settlement, the
    *  take-profit benched on the exit curve's rule. false = scored only, never benched. */
   takeProfitBench: boolean;
+  /** EXIT_BENCH: the model exit and the ratchet stop on a scoreboard and bench each, like the take-profit's (ExitBenches). */
+  exitBench: boolean;
   /** relaxed = decide on each 1-minute bar close or on a trigger (spec cadence); continuous = every tick. */
   cadence: 'relaxed' | 'continuous';
   /** Scheduled evaluation period, fair-value move that triggers an evaluation, re-price period, and the floor between evaluations. */
@@ -995,6 +997,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     // The owner, Oct 24: the take-profit goes on the exit curve's scoreboard and bench (it sold winners for $230 less
     // than holding them on Oct 23-24).
     takeProfitBench: bool(env, 'TAKE_PROFIT_BENCH', true),
+    // The owner, Oct 28: every exit kind proves itself against holding, per trade. The model exit and the ratchet stop get
+    // the take-profit's scoreboard and bench each (bot/strategy/takeProfitBench.ts ExitBenches); false = scored only.
+    exitBench: bool(env, 'EXIT_BENCH', true),
     cadence,
     evalBarSec: num(env, 'STRATEGY_EVAL_BAR_SEC', 60, 5, 600),
     evalFvMove: num(env, 'STRATEGY_EVAL_FV_MOVE', 0.015, 0.001, 0.2),
