@@ -1,0 +1,27 @@
+name: "Gemini Code Review and Assistant"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  gemini-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Gemini CLI Action
+        uses: google-github-actions/run-gemini-cli@v0
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          gemini_model: "gemini-2.5-flash"
+          prompt: "You are an expert quantitative developer reviewing Python trading bots and financial state machines. Provide concise, clean, production-ready code feedback."
