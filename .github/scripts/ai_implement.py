@@ -11,7 +11,8 @@ from google.genai import types
 DEFAULT_TASK = (
     "Implement the Fast Spot S/R & Volume Profile Engine, the Kalshi Strike Shield & "
     "80/20 Core/Runner Selector, and the Async Execution FSM in TypeScript, and wire "
-    "them cleanly into kalshiService.ts, bot/oms/oms.ts, and bot/main.ts."
+    "them cleanly into bot/marketdata/spotCandles.ts, bot/strategy/fairValueStrategy.ts, "
+    "bot/kalshi/rest.ts, bot/oms/oms.ts, and bot/engine.ts."
 )
 
 
@@ -51,7 +52,7 @@ def get_repo_tree() -> List[str]:
     return sorted(file_list)
 
 
-def read_files(filepaths: List[str], max_chars_per_file: int = 30000) -> str:
+def read_files(filepaths: List[str], max_chars_per_file: int = 25000) -> str:
     bundled = []
     for fp in filepaths:
         if os.path.exists(fp) and os.path.isfile(fp):
@@ -69,17 +70,15 @@ def generate_with_retry(
     max_retries: int = 6,
 ):
     """
-    Wraps Gemini calls with exponential backoff for 503/429 spikes.
-    Automatically skips unavailable models and steps down from 'high' to 'medium'
-    thinking on later retries if the high-thinking queue is congested.
+    Immediately switches from gemini-4-argon to gemini-3.8-flash if the key is on the Free Tier ('limit: 0').
+    Handles transient 503/429 rate limits on gemini-3.8-flash with backoff.
     """
     candidate_models = ["gemini-4-argon", "gemini-3.8-flash"] if prefer_argon else ["gemini-3.8-flash"]
     candidate_models = [m for m in candidate_models if m not in UNAVAILABLE_MODELS]
 
     for model_name in candidate_models:
         for attempt in range(1, max_retries + 1):
-            # Step down to 'medium' thinking on attempts 5+ if 'high' pool is saturated with 503s
-            active_thinking = "medium" if (thinking_level == "high" and attempt >= 5) else thinking_level
+            active_thinking = "medium" if (thinking_level == "high" and attempt >= 4) else thinking_level
             token_cap = 16384 if active_thinking == "medium" else 32768
 
             cfg_kwargs = {
@@ -107,20 +106,19 @@ def generate_with_retry(
 
             except Exception as err:
                 err_str = str(err).upper()
-                # If model is not permitted/found on this key tier, cache and switch immediately
-                if any(code in err_str for code in ("404", "NOT_FOUND", "403", "PERMISSION_DENIED")):
-                    print(f"Model {model_name} not available on this key tier. Switching to fallback...")
+                # Instant switch if the model has 'limit: 0' on the Free Tier or is 403/404
+                if any(code in err_str for code in ("LIMIT: 0", "404", "NOT_FOUND", "403", "PERMISSION_DENIED")):
+                    print(f"Model {model_name} has 0 quota on this tier. Switching immediately to gemini-3.8-flash...")
                     UNAVAILABLE_MODELS.add(model_name)
                     break
 
-                # Transient 503 / 429 / 500 server demand spike -> exponential backoff with jitter
                 is_transient = any(
                     code in err_str
                     for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "502", "504", "OVERLOADED")
                 )
                 if is_transient and attempt < max_retries:
-                    sleep_sec = min(75.0, (5.0 * (1.8 ** (attempt - 1))) + random.uniform(1.0, 5.0))
-                    print(f"Transient API spike ({err}). Retrying in {sleep_sec:.1f}s...")
+                    sleep_sec = min(75.0, (12.0 * (1.6 ** (attempt - 1))) + random.uniform(2.0, 6.0))
+                    print(f"Rate limit or demand spike. Waiting {sleep_sec:.1f}s before retry...")
                     time.sleep(sleep_sec)
                     continue
 
@@ -215,11 +213,10 @@ def main():
         )
         print(f"Architecture Plan Summary:\n{plan.summary}")
 
-        # Step 4: Generate each file individually with 4s pacing between calls to prevent burst 503s
+        # Step 4: Generate each file with a 12s pause between files to respect Free Tier RPM/TPM limits
         generated_context = ""
         for idx, step in enumerate(plan.steps[:6]):
-            if idx > 0:
-                time.sleep(4.0)
+            time.sleep(12.0)
 
             existing_target = read_files([step.filepath]) if os.path.exists(step.filepath) else "NEW FILE"
             file_prompt = (
@@ -245,7 +242,7 @@ def main():
             with open(target_path, "w", encoding="utf-8") as f:
                 f.write(gen_file.content)
             print(f"Wrote file: {step.filepath} ({gen_file.explanation})")
-            generated_context += f"\n=== GENERATED: {step.filepath} ===\n{gen_file.content[:12000]}\n"
+            generated_context += f"\n=== GENERATED: {step.filepath} ===\n{gen_file.content[:10000]}\n"
 
     except Exception:
         print("An error occurred during the AI implementation pipeline:")
