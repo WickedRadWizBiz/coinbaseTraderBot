@@ -12,14 +12,16 @@
 // replay day before the first recorded day the tally saw (`history.edge`) is one no candidate trained on. Each run
 // walks back from there, newest day first, and plays the next days as if live: only Kalshi's real contracts (the
 // replay's stand-ins for missing history are dropped) at the worse side of each minute's quotes (the history keeps
-// one quote a minute and the replay moves it with the index in between: a buy pays the highest ask of the minute,
-// a sell gets the lowest bid). Their results are kept apart from the recorded days' and the gates read both.
+// one quote a minute; how the quotes in between are filled in is chosen by research/replayFidelity.ts, and until it
+// has chosen, at the worse side of the minute so far: a buy pays the highest ask, a sell gets the lowest bid). Their
+// results are kept apart from the recorded days' and the gates read both.
 
 import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
 import { MetaModel, type MetaModelParams, type TallyEvidence, type TallyPart } from '../bot/model/metaModel';
 import type { DatasetRow } from './buildDataset';
+import { hashStr, normals } from './history/historyReplay';
 import { repriceRow, rowWeights } from './trainMetaModel';
 import { readJson } from '../bot/util/persist';
 import { bootstrapMeanCi, deflatedSharpe, dieboldMariano } from './stats';
@@ -129,38 +131,82 @@ export function judgeRows(model: MetaModel, rows: DatasetRow[]): HoldoutJudged {
   };
 }
 
-type Book = { price: number; size: number };
-type Ev = { t: number; k: string; ticker?: string; tickers?: string[]; synth?: number; bids?: Book[]; asks?: Book[] };
-const MIN = 60_000;
+/** How the quotes between Kalshi's minute candles are filled in when a history day is played as live (Steven,
+ *  Oct 28: as close to the real market as can be shown): `hold` the minute's quote stands until the next; `requote`
+ *  the replay's own (the quote follows the index: research/history/historyReplay.ts requoteBetween); `worst` that, at
+ *  the worse side of the minute so far; `noise` that, plus a Brownian bridge in log-odds pinned at the candles, of
+ *  `sigma` per square-root second. research/replayFidelity.ts picks the one whose backtest is closest to the real
+ *  quotes' on the recorded days (models/replay_fidelity.json); until it has, `worst`. */
+export const QUOTE_FILLS = ['hold', 'requote', 'worst', 'noise'] as const;
+export type QuoteFill = { how: (typeof QUOTE_FILLS)[number]; sigma?: number };
 
-/** A replay day as the tally plays it: Kalshi's real contracts only (the stand-ins, `synth`, are dropped with all
- *  their records) and every book at the worse side of its minute: the minute's lowest bid and highest ask. */
-export function worstOfMinute(events: Ev[]): Ev[] {
-  const synth = new Set(events.filter((e) => e.k === 'market' && e.synth && e.ticker).map((e) => e.ticker!));
-  const kept = events.filter((e) => !(e.ticker && synth.has(e.ticker))).map((e) => (e.k === 'alive' && e.tickers ? { ...e, tickers: e.tickers.filter((x) => !synth.has(x)) } : e));
-  const worst = new Map<string, { bid: number; ask: number }>();
-  const key = (e: Ev) => `${e.ticker}|${Math.floor(e.t / MIN)}`;
-  for (const e of kept) {
-    if (e.k !== 'book' || !e.bids?.length || !e.asks?.length) continue;
-    const w = worst.get(key(e)) ?? { bid: Infinity, ask: -Infinity };
-    w.bid = Math.min(w.bid, e.bids[0].price); w.ask = Math.max(w.ask, e.asks[0].price);
-    worst.set(key(e), w);
-  }
-  return kept.filter((e) => !(e.k === 'alive' && !e.tickers?.length)).map((e) => {
-    if (e.k !== 'book' || !e.bids?.length || !e.asks?.length) return e;
-    const w = worst.get(key(e))!;
-    return { ...e, bids: [{ ...e.bids[0], price: w.bid }, ...e.bids.slice(1)], asks: [{ ...e.asks[0], price: w.ask }, ...e.asks.slice(1)] };
-  });
+export function readQuoteFill(modelsDir: string): QuoteFill {
+  const f = readJson<{ choice?: QuoteFill }>(path.join(modelsDir, 'replay_fidelity.json'))?.choice;
+  return f && (QUOTE_FILLS as readonly string[]).includes(f.how) && (f.how !== 'noise' || (f.sigma ?? 0) > 0) ? f : { how: 'worst' };
 }
 
-/** Write the history days into `dir` as the tally plays them (worstOfMinute), named as recordings are. */
-export function writeHistoryDays(replayDir: string, days: readonly string[], dir: string): void {
+type Book = { price: number; size: number };
+export type Ev = { t: number; k: string; ticker?: string; tickers?: string[]; synth?: number; bids?: Book[]; asks?: Book[]; [key: string]: unknown };
+const MIN = 60_000;
+const logit = (p: number) => { const q = Math.min(0.995, Math.max(0.005, p)); return Math.log(q / (1 - q)); };
+
+/** The bridge's value `s` ms into a minute (0 at both ends), at the quarter-minute prints the replay quotes at. */
+function bridgeAt(ticker: string, minute: number, s: number, sigma: number): number {
+  const k = Math.round(s / 15_000);
+  if (k <= 0 || k >= 4) return 0;
+  const z = normals((hashStr(ticker) ^ minute) >>> 0, 3);
+  let x = 0;
+  for (let j = 1; j <= k; j++) {
+    const prev = (j - 1) * 15, at = j * 15;
+    x = x * (60 - at) / (60 - prev) + sigma * Math.sqrt(((at - prev) * (60 - at)) / (60 - prev)) * z[j - 1];
+  }
+  return x;
+}
+
+/** Plays a replay day's records one at a time as the tally does: Kalshi's real contracts only (the stand-ins,
+ *  `synth`, are dropped with all their records), the quotes between the minute candles (the books off the minute
+ *  marks) filled in as `fill` says. Only quotes already seen count, so the model never reads a later one. */
+export function quoteFiller(fill: QuoteFill): (e: Ev) => Ev | undefined {
+  const synth = new Set<string>();
+  const worst = new Map<string, { minute: number; bid: number; ask: number }>();
+  return (e) => {
+    if (e.k === 'market' && e.synth && e.ticker) synth.add(e.ticker);
+    if (e.ticker && synth.has(e.ticker)) return undefined;
+    if (e.k === 'alive' && e.tickers) {
+      const tickers = e.tickers.filter((x) => !synth.has(x));
+      return tickers.length ? { ...e, tickers } : undefined;
+    }
+    if (e.k !== 'book' || !e.bids?.length || !e.asks?.length || !e.ticker) return e;
+    const minute = Math.floor(e.t / MIN), between = e.t % MIN !== 0;
+    if (fill.how === 'hold') return between ? undefined : e;
+    if (fill.how === 'noise' && between) {
+      const bid = e.bids[0].price, ask = e.asks[0].price, w = Math.max(1, Math.round((ask - bid) * 100));
+      const mid = 1 / (1 + Math.exp(-(logit((bid + ask) / 2) + bridgeAt(e.ticker, minute, e.t % MIN, fill.sigma ?? 0))));
+      const b = Math.min(99 - w, Math.max(1, Math.round(mid * 100 - w / 2)));
+      return { ...e, bids: [{ ...e.bids[0], price: b / 100 }, ...e.bids.slice(1)], asks: [{ ...e.asks[0], price: (b + w) / 100 }, ...e.asks.slice(1)] };
+    }
+    if (fill.how !== 'worst') return e;
+    let w = worst.get(e.ticker);
+    if (!w || w.minute !== minute) worst.set(e.ticker, (w = { minute, bid: Infinity, ask: -Infinity }));
+    w.bid = Math.min(w.bid, e.bids[0].price); w.ask = Math.max(w.ask, e.asks[0].price);
+    return { ...e, bids: [{ ...e.bids[0], price: w.bid }, ...e.bids.slice(1)], asks: [{ ...e.asks[0], price: w.ask }, ...e.asks.slice(1)] };
+  };
+}
+
+/** A whole day through quoteFiller. */
+export function fillQuotes(events: Ev[], fill: QuoteFill): Ev[] {
+  const f = quoteFiller(fill);
+  return events.map(f).filter((e): e is Ev => e !== undefined);
+}
+
+/** Write the history days into `dir` as the tally plays them (fillQuotes), named as recordings are. */
+export function writeHistoryDays(replayDir: string, days: readonly string[], dir: string, fill: QuoteFill = { how: 'worst' }): void {
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   for (const d of days) {
     const name = `md-${d}.jsonl.gz`;
     const lines = zlib.gunzipSync(fs.readFileSync(path.join(replayDir, name))).toString('utf8').split('\n').filter(Boolean);
-    const out = worstOfMinute(lines.map((l) => JSON.parse(l) as Ev));
+    const out = fillQuotes(lines.map((l) => JSON.parse(l) as Ev), fill);
     fs.writeFileSync(path.join(dir, name), zlib.gzipSync(out.map((e) => JSON.stringify(e)).join('\n') + '\n', { level: 1 }));
   }
 }
