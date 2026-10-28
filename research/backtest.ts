@@ -61,6 +61,8 @@ import { activeGpSignals, GpSignals, setGpSignals } from '../bot/gp/gpSignals';
 import { MarketContext, marketContext, setMarketContext } from '../bot/ta/marketContext';
 import { setTaNet, sigma24, TaNet } from '../bot/ta/taNet';
 import type { TaSnapshot } from '../bot/ta/analyzer';
+import type { CandleRow } from '../bot/ta/candleStore';
+import type { Timeframe } from '../bot/ta/knowledge';
 import { setTaNetEnsemble, TaNetEnsemble, taNetView } from '../bot/ta/taNetEnsemble';
 import { ProfitPeaks } from '../bot/strategy/profitPeaks';
 import { ConfluenceRatchetExit, DEFAULT_HUNT, DEFAULT_RATCHET, EXIT_POLICIES, ExitPolicyName, HuntParams, LiquidityRatchet, RatchetParams } from '../bot/strategy/exitPolicies';
@@ -222,7 +224,11 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
   trials?: { applied(name: TrialName): boolean };
   /** Keep a market context (bot/ta/marketContext.ts) from the replayed candles, refreshed every minute as bot/main.ts
    *  does: breadth for the TA features, and each coin's character for the rule book. Process-wide, as in the bot. */
-  marketContext?: boolean }
+  marketContext?: boolean;
+  /** The spot candles the bot held when the replay starts (research/seedCandles.ts: its startup fetch, made for startMs),
+   *  fed to the replay before its first event as the bot's own fetch feeds it. Without them a replay that starts in the
+   *  middle of a run has only the bars recorded since, too few for the TA network. A call tape's sig must name them. */
+  seedCandles?: { at: number; sets: Array<{ asset: string; tf: Timeframe; rows: CandleRow[] }> } }
 /** One market evaluation: the price traded on and what the fair value was made of (pModel: the trained model's price,
  *  before the TA tilt and the rule book's). */
 export interface EvalReading { ticker: string; now: number; pYes: number; fv: number; bid: number; ask: number; position: number; spot?: number; strike?: number; sigma?: number; sigmaPricing?: number;
@@ -475,6 +481,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const cancelNow = async (orderId: string) => { cancelInFlight.delete(orderId); try { await ex.cancelOrder(orderId); } catch { /* already gone: the cancel lost the race */ L.lateKills++; } };
 
   let lastTick = 0, nextTick = -Infinity, refillAt = -Infinity;
+  for (const c of opts.seedCandles?.sets ?? []) st.features.onCandles(c.asset, c.tf, c.rows, opts.seedCandles!.at);
   for await (const e of readRecordings(dir)) {
     if (opts.startMs !== undefined && e.t < opts.startMs) continue;
     while (inflight.length && inflight[0].due <= e.t) await inflight.shift()!.run();

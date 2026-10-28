@@ -11,11 +11,11 @@ import { logger } from '../util/log';
 
 const log = logger('spot-candles');
 
-const GRANULARITY: Partial<Record<Timeframe, number>> = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '1d': 86400 };
+export const GRANULARITY: Partial<Record<Timeframe, number>> = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '1d': 86400 };
 const EVERY_MS: Partial<Record<Timeframe, number>> = { '1m': 60_000, '5m': 150_000, '15m': 300_000, '1h': 600_000, '1d': 3_600_000 };
 /** Timeframes that get one older page at startup: the TA network reads 256 closed 15m bars at each of
  *  its last 12 hourly steps (300 bars), one more than a single Coinbase page (300 incl. the forming bar). */
-const BACKFILL: Timeframe[] = ['15m'];
+export const BACKFILL: Timeframe[] = ['15m'];
 
 export class SpotCandleFeed extends EventEmitter {
   private timer?: NodeJS.Timeout;

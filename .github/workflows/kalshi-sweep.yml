@@ -38,7 +38,7 @@ on:
         default: '120'
   push:
     branches: ['claude/kalshi-random-sweep']
-    paths: ['.github/workflows/kalshi-sweep.yml', 'research/randomSweep.ts', 'research/kalshiReplayData.ts', 'research/history/historyReplay.ts', 'research/backtest.ts']
+    paths: ['.github/workflows/kalshi-sweep.yml', 'research/randomSweep.ts', 'research/kalshiReplayData.ts', 'research/history/historyReplay.ts', 'research/backtest.ts', 'research/seedCandles.ts']
 
 permissions:
   contents: read
@@ -385,6 +385,11 @@ jobs:
           set -a; . data/sweep-env/train.env; set +a
           cp -rn data/sweep-env/history/. data/history/ 2>/dev/null || true
           export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json" RS_TRIALS_FILE="$GITHUB_WORKSPACE/data/sweep-env/component_trials.json"
+          # The recorded days start in the middle of the bot's run: the spot candles it held at the first one's start (its
+          # startup fetch from Coinbase, made for that midnight), else the TA network has too few bars to price with.
+          FIRST=$(ls data/recordings | sed -nE 's/^md-([0-9-]{10}).*/\1/p' | sort -u | head -n 1)
+          [ -n "$FIRST" ] && { node --import tsx research/seedCandles.ts --at "${FIRST}T00:00:00Z" --out data/sweeps/seed-candles.json || echo "spot candles for the recorded days: not fetched (the recorded ones only)"; }
+          export RS_SEED_CANDLES="$GITHUB_WORKSPACE/data/sweeps/seed-candles.json"
           S123=$(ls data/sweeps/s[123]-*.jsonl | paste -sd, -)
           # Real order books replay slowly: stage 4 gets a fixed slice of the job, and the verdict is written either way.
           timeout 150m node --import tsx research/randomSweep.ts run --stage 4 --from "$S123" --sample "$RS_SAMPLE" --recorded data/recordings --hours 2 \

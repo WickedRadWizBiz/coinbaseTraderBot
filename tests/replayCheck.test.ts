@@ -116,6 +116,7 @@ test('replay check: the stretch starts at the paper bot\'s last start; paper cou
     L('fill', '2026-10-24T14:01:00.000Z', { fill: { ticker: 'KXETH15M-B', count: 7, price: 0.4, side: 'bid' }, fee: 0.2, clientOrderId: 'b' }),
     L('settlement', '2026-10-24T14:15:30.000Z', { ticker: 'KXETH15M-B', result: 'no', realized: -3 }),
     L('config', '2026-10-24T15:00:00.000Z', { event: 'model_swapped', from: 'm1', to: 'm2' }),
+    L('config', '2026-10-24T16:00:00.000Z', { event: 'hot_swap', kind: 'vol_model', file: '/srv/b/models/vol_model.json' }),
     L('fill', '2026-10-24T18:00:00.000Z', { fill: { ticker: 'KXSOL15M-C', count: 9, price: 0.3, side: 'bid' }, fee: 0.3, clientOrderId: 'c' }),
   ].join('\n') + '\n');
   const a = await readAudit(dir, ['2026-10-24']);
@@ -129,6 +130,7 @@ test('replay check: the stretch starts at the paper bot\'s last start; paper cou
   assert.deepEqual([p.fills, p.contracts, p.markets, p.pnl], [1, 7, 1, -3], 'only what happened inside the stretch');
   assert.equal(p.gateShare, 0.6);
   assert.equal(a.modelSwaps.length, 1);
+  assert.deepEqual(a.hotSwaps, [{ t: Date.parse('2026-10-24T16:00:00Z'), kind: 'vol_model' }], 'every model the bot hot-swapped, by kind');
   assert.deepEqual(settingsDiffer({ strategy: { accuracyGate: { enabled: true }, x: [1] }, dataDir: '/a', port: 1 }, a.startups[1].config), ['strategy.x'], 'machine settings (paths, ports) left out');
   assert.deepEqual(settingsDiffer({ strategy: { accuracyGate: { enabled: false } } }, a.startups[1].config), ['strategy.accuracyGate.enabled']);
   // Paper's last fill in the stretch is 14:01: the diagnoses after it give the reasons it stopped (numbers folded).

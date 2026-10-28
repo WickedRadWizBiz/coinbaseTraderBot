@@ -49,7 +49,7 @@ on:
         default: 'luck'
   push:
     branches: ['claude/kalshi-random-sweep']
-    paths: ['.github/workflows/kalshi-replay-check.yml', 'research/replayCheck.ts', 'research/backtest.ts']
+    paths: ['.github/workflows/kalshi-replay-check.yml', 'research/replayCheck.ts', 'research/backtest.ts', 'research/seedCandles.ts']
 
 permissions:
   contents: read
@@ -204,6 +204,11 @@ jobs:
             --maker-markouts "$RUNNER_TEMP/maker-markouts.json" --paper-probation "$RUNNER_TEMP/paper-probation.json" --paper-trials "$RUNNER_TEMP/paper-trials.json"
             --paper-tp-bench "$RUNNER_TEMP/paper-tp-bench.json" --paper-accuracy-gate "$RUNNER_TEMP/paper-accuracy-gate.json" --model data/models/model.json)
           T0=$(date +%s); mkdir -p data/sweeps/nearby; [ "$NEARBY" = none ] && NEARBY=''
+          # The spot candles the bot held when the replay starts (its startup fetch from Coinbase, made for that time): a
+          # stretch that begins in the middle of a run otherwise replays with only the bars recorded since, too few for the
+          # TA network, and prices without its volatility forecast (Oct 27: the fair value 1.5c off paper's).
+          node --import tsx research/replayCheck.ts "${ARGS[@]}" --fetch-seed data/sweeps/seed-candles.json || echo "spot candles for the replay's start: not fetched (the recorded ones only)"
+          [ -s data/sweeps/seed-candles.json ] && ARGS+=(--seed-candles data/sweeps/seed-candles.json)
           # One replay's P&L is path-sensitive (the same code at a $64 or a $74 bankroll made -$11.63 or -$32.76 over one
           # stretch): the stretch also replays at bankrolls a few percent off paper's, each evaluating at another point of
           # the second (paper's 1 s timer could have fallen anywhere in it), side by side (first in line for the
@@ -219,7 +224,7 @@ jobs:
           for s in $NEARBY; do [ -s "data/sweeps/nearby/$s.json" ] || echo "nearby replay x$s did not finish: $(grep -E 'Error|Killed|heap' "$RUNNER_TEMP/nearby-$s.log" | tail -n 1 | cut -c1-160)"; done
           if [ -s data/sweeps/replay-check-own.json ]; then
             # The tally counts only stretches replayed by this same backtester (a hash of its files: a fix starts afresh).
-            CODE=$(cat research/backtest.ts research/replay.ts research/callTape.ts research/replayCheck.ts | sha256sum | cut -c1-8)
+            CODE=$(cat research/backtest.ts research/replay.ts research/callTape.ts research/replayCheck.ts research/seedCandles.ts | sha256sum | cut -c1-8)
             node --import tsx research/replayCheck.ts --combine data/sweeps/replay-check-own.json --nearby "$(ls data/sweeps/nearby/*.json 2>/dev/null | paste -sd, -)" \
               --history data/sweeps/replay-check-history.json --code "$CODE" --pnl-test "$PNL_TEST" --out data/sweeps/replay-check-latest.json
           fi

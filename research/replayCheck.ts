@@ -21,14 +21,18 @@
 // paper bot's own decision records (the replay's evaluation of the same market within a second): the math fair value
 // (the index, its volatility and the strike), the book's mid, the price after the model and paper's overlays (the TA
 // tilt, the component trials), and the side of the market each would trade. The replay's maker buffer adapts as the
-// engine's does, from the paper bot's own recent maker markouts (--maker-markouts, from its TCA log) on.
+// engine's does, from the paper bot's own recent maker markouts (--maker-markouts, from its TCA log) on. The replay starts
+// with the spot candles the bot held then (--seed-candles: its startup fetch, made for the replay's start by
+// --fetch-seed): a stretch that begins in the middle of a run otherwise has only the bars recorded since, too few for the
+// TA network, and prices without its volatility forecast and tilt.
 //
 //   npm run research:replay-check -- --recordings data/recordings --audit data/audit --days 2026-10-23,2026-10-24 \
 //       [--from auto|ISO] [--to ISO] [--min-hours 3] [--warmup-hours 8] [--model data/models/model.json] \
 //       [--paper-balance-now 512.30 | --bankroll 150] [--paper-guard equity_guard.json] [--kill-override true|false] \
 //       [--maker-markouts markouts.json] [--paper-probation probation.json] [--paper-trials component_trials.json]
-//       [--bankroll-scale 1] [--tick-phase-ms 0] [--out data/sweeps/replay-check.json]
+//       [--bankroll-scale 1] [--tick-phase-ms 0] [--seed-candles seed-candles.json] [--out data/sweeps/replay-check.json]
 //   ... --plan   prints only the recorded days the stretch and its warm-up need (from the audit log)
+//   ... --fetch-seed seed-candles.json   fetches only the spot candles the bot held when the replay starts (Coinbase)
 //   npm run research:replay-check -- --combine main.json --nearby a.json,b.json [--out replay-check.json]
 //         the verdict over nearby replays: one replay's P&L is path-sensitive (the same code at a $64 or a $74 bankroll
 //         made -$11.63 or -$32.76 over one stretch), so the same stretch is replayed at bankrolls a few percent apart,
@@ -96,6 +100,9 @@ export interface ReplayCheck {
   /** Settings that differ from the ones the paper bot logged at the stretch's start (names only; null: no start in the
    *  days to compare with); model swaps in the stretch. */
   settingsDiffer: string[] | null; modelSwaps: string[];
+  /** The models the bot hot-swapped from the stretch's start on, by kind (in the days read): the replay prices the whole
+   *  stretch with the files as they were when the check copied them. */
+  hotSwaps?: Array<{ t: string; kind: string }>;
   /** Each side's refills of a pool that ran dry, in the stretch (bot/training/supervisor.ts). */
   refills?: { paper: Array<{ t: string; usd: number }>; replay: Array<{ t: string; usd: number }> };
   /** Exits and the gate's counts are the whole replay's, warm-up included. */
@@ -178,6 +185,8 @@ export interface AuditRecords {
   startups: Array<{ t: number; config: Record<string, unknown> }>;
   diagnoses: Array<{ t: number; markets: number; gated: number; edged?: number; reasons: Record<string, number> }>;
   modelSwaps: number[];
+  /** Every model the bot hot-swapped (bot/autotrain.ts: its kind, e.g. vol_model or ta_net), the meta-model among them. */
+  hotSwaps: Array<{ t: number; kind: string }>;
   /** The take-profit bench's events (bot/strategy/takeProfitBench.ts): a market scored, the bench tripped or reset. */
   benchEvents: Array<{ t: number; event: string; usd?: number; ticker?: string; contracts?: number; reason?: string }>;
   /** The risk gateway's rejections as the engine logs them (one a market, side, purpose and reason a minute), crypto
@@ -202,7 +211,7 @@ const numAt = (line: string, key: string): number | undefined => {
  *  start before `prices.to`, each such start clearing what came before). */
 export async function readAudit(auditDir: string, days: string[], prices?: { from?: number; to?: number }): Promise<AuditRecords> {
   const want = new Set(days);
-  const a: AuditRecords = { fills: [], orders: new Map(), settlements: [], startups: [], diagnoses: [], modelSwaps: [], benchEvents: [], rejects: [], refills: [], prices: new Map() };
+  const a: AuditRecords = { fills: [], orders: new Map(), settlements: [], startups: [], diagnoses: [], modelSwaps: [], hotSwaps: [], benchEvents: [], rejects: [], refills: [], prices: new Map() };
   const files = fs.existsSync(auditDir) ? fs.readdirSync(auditDir).filter((f) => /^audit-\d{4}-\d{2}-\d{2}.*\.jsonl(\.gz)?$/.test(f) && want.has(f.slice(6, 16))).sort() : [];
   const whyOf = new Map<string, string>();
   for (const f of files) {
@@ -216,6 +225,7 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
       const exitPlan = decision && (line.includes('"purpose":"exit"') || line.includes('"why":"train (paper)') || line.includes('"why":"explore'));
       const diagnosis = decision && head.includes('"event":"entry_diagnosis"');
       const swap = head.includes('"kind":"config"') && head.includes('"event":"model_swapped"');
+      const hotSwap = head.includes('"kind":"config"') && head.includes('"event":"hot_swap"');
       if (prices && decision && !diagnosis) {
         const ts = /"ts":"([^"]+)"/.exec(head)?.[1];
         const ticker = /"ticker":"([^"]+)"/.exec(line.slice(0, 400))?.[1];
@@ -238,7 +248,7 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
       const bench = head.includes('"kind":"take_profit_bench"');
       const reject = head.includes('"kind":"risk_reject"');
       const training = head.includes('"kind":"training"');
-      if (!exitPlan && !diagnosis && !swap && !bench && !reject && !training && !head.includes('"kind":"startup"') && !head.includes('"kind":"fill"') && !head.includes('"kind":"settlement"') && !head.includes('"kind":"order_new"')) continue;
+      if (!exitPlan && !diagnosis && !swap && !hotSwap && !bench && !reject && !training && !head.includes('"kind":"startup"') && !head.includes('"kind":"fill"') && !head.includes('"kind":"settlement"') && !head.includes('"kind":"order_new"')) continue;
       let r: { kind?: string; ts?: string; data?: Record<string, any> };
       try { r = JSON.parse(line); } catch { continue; }
       const d = r.data ?? {};
@@ -250,6 +260,7 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
         continue;
       }
       if (swap) { a.modelSwaps.push(t); continue; }
+      if (hotSwap) { if (typeof d.kind === 'string') a.hotSwaps.push({ t, kind: d.kind }); continue; }
       if (training) { if (d.event === 'capital_exhaustion' && d.book === 'kalshi' && typeof d.refill === 'number') a.refills.push({ t, usd: d.refill }); continue; }
       if (reject) {
         const ticker = String(d.intent?.ticker ?? d.ticker ?? '');
@@ -563,6 +574,9 @@ export interface ReplayCheckOpts {
   paperTpBench?: string; paperAccuracyGate?: string;
   /** The replay's take-profit benches on its own scoreboard instead of following paper's bench (benchTimeline). */
   ownBench?: boolean;
+  /** The spot candles the bot held when the replay starts (research/seedCandles.ts, fetched by --fetch-seed for that
+   *  start): a seed fetched for another start is not used. */
+  seedCandles?: string;
 }
 
 /** The take-profit bench as paper had it when the stretch began: its state file now less the markets it scored since
@@ -598,6 +612,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const { EXIT_POLICIES } = await import('../bot/strategy/exitPolicies');
   const { recordingFiles, linkDays } = await import('../bot/marketdata/recordingFiles');
   const { engineModels, installProbation, runBacktest } = await import('./backtest');
+  const { readSeedCandles } = await import('./seedCandles');
   const cfg = loadConfig(paperEnv(process.env));
   const models = await engineModels(cfg as Config, { trialsFile: o.paperTrials });
   const benched = installProbation(cfg as Config, o.paperProbation);
@@ -647,14 +662,18 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     seeded.push(`accuracy gate (${Object.values(g.rows).reduce((a, r) => a + r.length, 0)} scored snapshots)`);
   }
   const follow = o.ownBench ? undefined : benchTimeline(audit.benchEvents, from, to, startBenched);
+  const startMs = from - (o.warmupHours ?? 8) * HOUR;
+  const seed = readSeedCandles(o.seedCandles, startMs);
+  if (seed) seeded.push(`spot candles as the bot fetches them (${new Set(seed.sets.map((c) => c.asset)).size} coins, ${seed.sets.reduce((n, c) => n + c.rows.length, 0)} bars${seed.missing.length ? `; not fetched: ${seed.missing.join(', ')}` : ''})`);
+  else if (o.seedCandles) seeded.push('spot candles: none fetched for this start (the recorded ones only)');
   const match = priceMatcher(audit.prices, from, to);
   const r = await runBacktest(dir, model, S, cfg.risk, bankroll, {
     exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
     sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd }, accuracyGate: S.accuracyGate,
-    takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile, ...(follow ? { follow } : {}) }, accuracyGateFile: gateFile, startMs: from - (o.warmupHours ?? 8) * HOUR, tradeFromMs: from,
+    takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile, ...(follow ? { follow } : {}) }, accuracyGateFile: gateFile, startMs, tradeFromMs: from,
     dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, refillUsd: cfg.paperBankrollUsd, sessionEdge: cfg.sessionEdge, onEval: match.onEval, makerMarkouts: o.makerMarkouts,
     volProfile: models.volProfile, applyVolSeasonality: Boolean(models.volProfile), volModel: models.volModel, fillModel: models.fillModel, calendar: models.calendar,
-    taNet: true, trials: models.trials, marketContext: true, ...(o.tickPhaseMs !== undefined ? { tickPhaseMs: o.tickPhaseMs } : {}),
+    taNet: true, trials: models.trials, marketContext: true, ...(o.tickPhaseMs !== undefined ? { tickPhaseMs: o.tickPhaseMs } : {}), ...(seed ? { seedCandles: seed } : {}),
   });
   fs.rmSync(dir, { recursive: true, force: true });
   fs.rmSync(seedDir, { recursive: true, force: true });
@@ -690,6 +709,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     startups: audit.startups.map((s) => new Date(s.t).toISOString()),
     settingsDiffer: startedAt ? settingsDiffer(JSON.parse(JSON.stringify(publicConfig(cfg as Config))), startedAt.config) : null,
     modelSwaps: audit.modelSwaps.filter(inside).map((t) => new Date(t).toISOString()),
+    hotSwaps: audit.hotSwaps.filter((x) => x.t >= from).map((x) => ({ t: new Date(x.t).toISOString(), kind: x.kind })),
     refills: { paper: audit.refills.filter((x) => inside(x.t)).map((x) => ({ t: new Date(x.t).toISOString(), usd: x.usd })), replay: (r.refills ?? []).filter((x) => inside(x.t)).map((x) => ({ t: new Date(x.t).toISOString(), usd: x.usd })) },
     replay, paper, prices: match.summary(), makerBufferPaper, models: models.used, gates: cfg.probation.mode, benched, seeded,
     benchFollowed: follow ? { benched: follow.benched, events: follow.events.map((e) => ({ t: new Date(e.t).toISOString(), benched: e.benched })) } : null,
@@ -738,11 +758,17 @@ async function main(): Promise<void> {
   }
   const days = arg('days', '').split(',').map((x) => x.trim()).filter(Boolean);
   if (!days.length) throw new Error('--days YYYY-MM-DD[,YYYY-MM-DD...] is required');
-  if (process.argv.includes('--plan')) {
-    // Only the audit log is read: prints the recorded days the stretch and its warm-up need.
+  const seedOut = arg('fetch-seed', '');
+  if (process.argv.includes('--plan') || seedOut) {
+    // Only the audit log is read: prints the recorded days the stretch and its warm-up need, or fetches the spot candles
+    // the bot held when the replay starts (its startup fetch, made for that time) into --fetch-seed.
     const a = await readAudit(arg('audit', 'data/audit'), days);
     const to = time('to') ?? Date.parse(`${[...days].sort().pop()}T00:00:00Z`) + 24 * HOUR;
-    console.log(replayDays(time('from') ?? stretchStart(a.startups.map((x) => x.t), days, to), to, opt('warmup-hours')).join(','));
+    const from = time('from') ?? stretchStart(a.startups.map((x) => x.t), days, to);
+    if (!seedOut) { console.log(replayDays(from, to, opt('warmup-hours')).join(',')); return; }
+    const { loadConfig, paperEnv } = await import('../bot/config');
+    const { writeSeedCandles } = await import('./seedCandles');
+    console.log(await writeSeedCandles(loadConfig(paperEnv(process.env)) as Config, from - (opt('warmup-hours') ?? 8) * HOUR, seedOut));
     return;
   }
   const res = await replayCheck({
@@ -752,7 +778,7 @@ async function main(): Promise<void> {
     makerMarkouts: arg('maker-markouts', '') && fs.existsSync(arg('maker-markouts', '')) ? (JSON.parse(fs.readFileSync(arg('maker-markouts', ''), 'utf8')) as unknown[]).map(Number).filter(Number.isFinite) : undefined,
     paperProbation: arg('paper-probation', '') || undefined, paperTrials: arg('paper-trials', '') || undefined,
     paperTpBench: arg('paper-tp-bench', '') || undefined, paperAccuracyGate: arg('paper-accuracy-gate', '') || undefined,
-    ownBench: process.argv.includes('--own-bench'),
+    ownBench: process.argv.includes('--own-bench'), seedCandles: arg('seed-candles', '') || undefined,
   });
   const out = arg('out', '');
   if (out) { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify(res, null, 2)); }
@@ -810,6 +836,9 @@ async function main(): Promise<void> {
   console.log(`maker buffer: paper's now ${b(res.makerBufferPaper)}, the replay's at its end ${b(res.replay.makerBufferEnd)} | the engine's other models in the replay: ${res.models.join(', ') || 'none'} | validation gates ${res.gates}${res.benched.length ? ` (benched: ${res.benched.join(', ')})` : ''}`);
   console.log(`started from paper's own state at the stretch's start: ${res.seeded.join(', ') || 'nothing (empty take-profit bench and accuracy gate)'}`);
   console.log(`settings that differ from the paper bot's at that start: ${res.settingsDiffer === null ? 'no start logged in these days' : res.settingsDiffer.length ? res.settingsDiffer.join(', ') : 'none'} | model swaps in the stretch: ${res.modelSwaps.length ? res.modelSwaps.map(hm).join(', ') : 'none'}`);
+  // The replay prices the whole stretch with the model files as the check copied them: one swapped after the stretch
+  // began priced paper only from then on.
+  if (res.hotSwaps) console.log(`models the bot hot-swapped since the stretch began: ${res.hotSwaps.length ? res.hotSwaps.map((x) => `${x.kind} ${hm(x.t)}`).join(', ') : 'none'}`);
   console.log(`hourly P&L correlation ${res.hourCorr === null ? 'n/a' : res.hourCorr.toFixed(2)} | total gap ${pct(res.pnlGap)}`);
   console.log(!res.checked ? `VERDICT not checked yet: ${res.why.join('; ')}` : res.close ? 'VERDICT close: sweep results can count' : `VERDICT not close: ${res.why.join('; ')}`);
   console.log(`peak memory ${(process.resourceUsage().maxRSS / 1024).toFixed(0)} MB`);
