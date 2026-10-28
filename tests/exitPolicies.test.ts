@@ -226,3 +226,19 @@ test('validated hunt parameters come from the model file only when hunt mode won
   assert.equal(no.validatedHunt(), undefined);
   assert.equal(MetaModel.identity().validatedHunt(), undefined);
 });
+
+test('hunt mode with the hybrid rule holds a triggered stop while the model values the contract above it', () => {
+  const b = book([[0.6, 8]], [[0.63, 10]]);
+  const dip = book([[0.56, 8]], [[0.6, 10]]);
+  const h = new ConfluenceRatchetExit({ ...H, hybrid: true }, P);
+  hunt(h, { qSide: 0.55, sideBid: 0.5, b, now: 0 });
+  hunt(h, { sideBid: 0.6, confluence: 3, b, now: 1000 }); // stop at the lock, 0.57
+  const held = hunt(h, { qSide: 0.6, sideBid: 0.56, confluence: 3, b: dip, now: 2000 });
+  assert.deepEqual([held.mode, held.event, held.plan, held.stop], ['hunt', 'hybrid_hold', undefined, 0.57], 'the model says 0.60: the stop holds');
+  const sold = hunt(h, { qSide: 0.5, sideBid: 0.56, confluence: 3, b: dip, now: 3000 });
+  assert.deepEqual([sold.event, sold.plan?.price], ['triggered', 0.56], 'the model says 0.50: the stop sells');
+  const off = new ConfluenceRatchetExit(H, P);
+  hunt(off, { qSide: 0.55, sideBid: 0.5, b, now: 0 });
+  hunt(off, { sideBid: 0.6, confluence: 3, b, now: 1000 });
+  assert.equal(hunt(off, { qSide: 0.6, sideBid: 0.56, confluence: 3, b: dip, now: 2000 }).event, 'triggered', 'without the rule the stop sells whatever the model says');
+});

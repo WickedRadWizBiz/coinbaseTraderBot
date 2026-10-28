@@ -30,7 +30,7 @@ import { EXIT_RATE_RESERVE, RiskContext, RiskGateway } from './risk/riskGateway'
 import type { Reconciler } from './recon/reconciler';
 import { decide, decisionProbability, MarketView, OrderPlan } from './strategy/fairValueStrategy';
 import { ProfitPeaks } from './strategy/profitPeaks';
-import { ConfluenceRatchetExit } from './strategy/exitPolicies';
+import { ConfluenceRatchetExit, HuntEvent } from './strategy/exitPolicies';
 import type { SinuousEntryGate } from './strategy/sinuousEntry';
 import { tennisHighLeverage, type CurveReading, type SinuousExitGate } from './strategy/sinuousExit';
 import type { TakeProfitBench } from './strategy/takeProfitBench';
@@ -242,6 +242,8 @@ export interface MarketStatus {
   exitMode?: 'fair_value' | 'hunt';
   huntTarget?: number;
   huntStop?: number;
+  /** The hunt's last event, so a hybrid hold is audited once rather than every tick. */
+  huntEvent?: HuntEvent;
   /** Exit-in-profit curve of the held position (bot/strategy/sinuousExit.ts). */
   curve?: CurveReading;
   /** The held position's reading of its coin's live line (bot/strategy/liveLine.ts): the break and the heads-up. */
@@ -2043,6 +2045,7 @@ export class Engine {
     let huntMode = false;
     let huntPlan: OrderPlan | undefined;
     let huntProtective = false;
+    let huntHeld: string | undefined;
     // Hunt mode is evaluated by research:backtest --annotate. With a passing evaluation the winning
     // parameters are used; in live mode an unevaluated (or losing) hunt falls back to the fair-value exit,
     // unless the model's validation does not gate live orders (LIVE_ALLOW_UNVALIDATED_MODEL, the default).
@@ -2054,9 +2057,9 @@ export class Engine {
       if (!h) {
         const S = cfg.strategy;
         h = vh
-          ? new ConfluenceRatchetExit({ targetMargin: vh.targetMargin * this.snnTargetScale(), minConfluence: vh.minConfluence }, { minFillRatio: vh.minFillRatio, minWallAgeMs: vh.minWallAgeMs, slippageTicks: vh.slippageTicks })
+          ? new ConfluenceRatchetExit({ targetMargin: vh.targetMargin * this.snnTargetScale(), minConfluence: vh.minConfluence, hybrid: S.huntHybrid }, { minFillRatio: vh.minFillRatio, minWallAgeMs: vh.minWallAgeMs, slippageTicks: vh.slippageTicks })
           : new ConfluenceRatchetExit(
-            { targetMargin: S.huntTargetMargin * this.snnTargetScale(), minConfluence: S.huntMinConfluence },
+            { targetMargin: S.huntTargetMargin * this.snnTargetScale(), minConfluence: S.huntMinConfluence, hybrid: S.huntHybrid },
             { minFillRatio: S.ratchetMinFillRatio, minWallAgeMs: S.ratchetMinWallAgeSec * 1000, slippageTicks: S.ratchetSlippageTicks },
           );
         this.hunts.set(m.ticker, h);
@@ -2071,10 +2074,15 @@ export class Engine {
       st.exitMode = d.mode;
       st.huntTarget = d.target;
       st.huntStop = d.stop;
-      if (d.event && d.event !== 'armed') {
+      if (d.event && d.event !== 'armed' && (d.event !== 'hybrid_hold' || st.huntEvent !== 'hybrid_hold')) {
         this.d.audit.write('decision', { ticker: m.ticker, huntEvent: d.event, target: d.target, stop: d.stop, position: st.position, confCount: features.conf_count, pYes });
       }
-      if (d.plan) {
+      st.huntEvent = d.event;
+      if (d.plan && view.exitWindowOpen === false) {
+        // The no-exit window before the close (STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC) holds the hunt stop as well: the per-sale
+        // diagnosis of Oct 28 found every stop sale inside the last two minutes on the losing side of settlement.
+        huntHeld = `hunting: stop ${d.plan.stop} held, ${Math.round(tauSec)} s to the close`;
+      } else if (d.plan) {
         huntPlan = { side: d.plan.side, price: d.plan.price, count: d.plan.count, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge: 0, why: `confluence ratchet stop ${d.plan.stop}` };
         huntProtective = d.event === 'triggered' || d.event === 'profit_take_gap';
       }
@@ -2264,7 +2272,7 @@ export class Engine {
         }
       }
     } else curve?.flat(m.ticker, now);
-    if (huntMode) plan.notes.push(`hunting: stop ${st.huntStop ?? 'forming'}`);
+    if (huntMode) plan.notes.push(huntHeld ?? `hunting: stop ${st.huntStop ?? 'forming'}`);
     if (huntNote) plan.notes.push(huntNote);
     st.notes = plan.notes;
 

@@ -168,6 +168,9 @@ export interface HuntParams {
   targetMargin: number;
   /** Minimum confluence score oriented to the position (conf_count x side sign). */
   minConfluence: number;
+  /** The hybrid rule in hunt mode (HUNT_HYBRID): a triggered stop sells only when the model's own value for the contract
+   *  is below the stop plus the fee; otherwise the stop holds (hybrid_hold) and keeps trailing. */
+  hybrid?: boolean;
 }
 
 export const DEFAULT_HUNT: HuntParams = { targetMargin: 0.02, minConfluence: 2 };
@@ -209,7 +212,9 @@ export interface HuntDecision {
  *   - as the surge continues it ratchets up to the highest exit-side wall the
  *     price has moved past: a level big enough to fill the whole position that
  *     has persisted (so the exit can actually be filled there);
- *   - when the price reverses to below the stop, exit reduce-only there.
+ *   - when the price reverses to below the stop, exit reduce-only there (with the
+ *     hybrid rule on, only when the model's value is below the stop plus the fee;
+ *     otherwise the stop holds).
  * Take-profit early, at the bid (never below the lock): confluence flips
  * against the position, or the session turns unsafe for book-anchored stops.
  * A gap through the stop sells at the bid while still above the entry fair
@@ -255,7 +260,7 @@ export class ConfluenceRatchetExit {
       this.active = true;
       this.ratchet.reset();
       this.floor = round(Math.floor(target / i.tick + 1e-9) * i.tick, 4);
-      const r0 = this.ratchet.evaluate({ position: i.position, book: i.book, now: i.now, tick: i.tick, fees: i.fees, floor: this.floor });
+      const r0 = this.ratchet.evaluate({ position: i.position, book: i.book, now: i.now, tick: i.tick, fees: i.fees, floor: this.floor, hybrid: this.h.hybrid, qSide: i.qSide });
       return { mode: 'hunt', event: 'activated', target, stop: r0.stop };
     }
 
@@ -264,7 +269,7 @@ export class ConfluenceRatchetExit {
     if (i.sessionBlocked && above) return { mode: 'hunt', plan: this.sellAtBid(i, sign), event: 'profit_take_session', target, stop: this.ratchet.stop };
     if (oriented <= -this.h.minConfluence && above) return { mode: 'hunt', plan: this.sellAtBid(i, sign), event: 'profit_take_confluence', target, stop: this.ratchet.stop };
 
-    const r = this.ratchet.evaluate({ position: i.position, book: i.book, now: i.now, tick: i.tick, fees: i.fees, floor: this.floor });
+    const r = this.ratchet.evaluate({ position: i.position, book: i.book, now: i.now, tick: i.tick, fees: i.fees, floor: this.floor, hybrid: this.h.hybrid, qSide: i.qSide });
     if (r.event === 'gapped') {
       if (i.sideBid !== undefined && i.sideBid >= this.entryQ! - 1e-9) return { mode: 'hunt', plan: this.sellAtBid(i, sign), event: 'profit_take_gap', target, stop: r.stop };
       this.active = false;

@@ -109,7 +109,8 @@ export interface StrategyConfig {
   entryWindowHourly: [number, number];
   /** Hourly strikes are only entered while the market mid is inside this band. */
   hourlyMidBand: [number, number];
-  /** No exits in the final seconds: positions ride to settlement (spreads widen inside the averaging window). */
+  /** No exits in the final seconds, the hunt stop included: positions ride to settlement (spreads widen inside the
+   *  averaging window, and the stop sales inside the last minutes were the ones found always wrong). */
   noExitBeforeCloseSec: number;
   /** Maker adverse-selection buffer: default, and clamp range when estimated from 60 s markouts. */
   makerBuffer: number;
@@ -195,6 +196,9 @@ export interface StrategyConfig {
   modelHealthMinWindows: number;
   huntTargetMargin: number;
   huntMinConfluence: number;
+  /** HUNT_HYBRID: in hunt mode a triggered stop sells only when the model agrees the contract is worth less than the stop
+   *  plus the fee (bot/strategy/exitPolicies.ts); off by default. */
+  huntHybrid: boolean;
   ratchetMinFillRatio: number;
   ratchetMinWallAgeSec: number;
   ratchetSlippageTicks: number;
@@ -1049,6 +1053,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     modelHealthMinWindows: num(env, 'MODEL_HEALTH_MIN_WINDOWS', 200, 20, 100000),
     huntTargetMargin: num(env, 'HUNT_TARGET_MARGIN', 0.02, 0, 0.5),
     huntMinConfluence: num(env, 'HUNT_MIN_CONFLUENCE', 2, 1, 7),
+    huntHybrid: bool(env, 'HUNT_HYBRID', false),
     ratchetMinFillRatio: num(env, 'RATCHET_MIN_FILL_RATIO', 1, 0.1, 20),
     ratchetMinWallAgeSec: num(env, 'RATCHET_MIN_WALL_AGE_SEC', 3, 0, 120),
     ratchetSlippageTicks: num(env, 'RATCHET_SLIPPAGE_TICKS', 1, 0, 10),
