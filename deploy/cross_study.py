@@ -6,7 +6,8 @@ On the bot's own records: the audit log (fills, orders, the decisions that plann
 scoreboard events) and the market-data recordings (order books, the settlement index), replayed a second at a time
 through a port of the bot's curve (bot/strategy/sinuousExit.ts: tests/crossStudy.test.ts keeps the two identical).
 
-Usage: cross_study.py <data dir> [hours=8]  (the positions closed in the last `hours`; the recordings are read only
+Usage: cross_study.py <data dir> [hours=8] [until=now]  (the positions closed in the `hours` up to `until`, an ISO UTC
+       time such as 2026-10-28T03:10:00Z; the recordings are read only
        for those positions' windows: a plain day file is entered at its first needed line, a gzipped one is streamed)
        cross_study.py --selftest <series.json>   (the curve port on a series, for the test)
 
@@ -325,7 +326,8 @@ def main():
     sys.stdout.reconfigure(line_buffering=True)  # a run stopped by its time limit still shows what it printed
     data = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser('~/bot/data')
     hours = float(sys.argv[2]) if len(sys.argv) > 2 else 8.0
-    now = time.time()
+    until = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] not in ('', 'now') else None
+    now = datetime.datetime.strptime(until, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp() if until else time.time()
     since_ms = int((now - hours * 3600) * 1000)
     # Fills from two hours earlier, so a position opened before the window and closed inside it is whole.
     from_iso = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(since_ms / 1000 - 7200)).encode()
@@ -355,7 +357,7 @@ def main():
                     fl = d.get('fill') or {}
                     fills.append({'ms': iso_ms(ts), 'ticker': fl.get('ticker', ''), 'side': fl.get('side'), 'count': float(fl.get('count') or 0), 'price': float(fl.get('price') or 0), 'fee': float(d.get('fee') or 0), 'coid': d.get('clientOrderId')})
                 elif k == 'order_new':
-                    orders[d.get('clientOrderId')] = {'purpose': d.get('purpose'), 'price': d.get('price'), 'side': d.get('side'), 'decision': d.get('decisionId'), 'close': d.get('windowCloseTs'), 'asset': d.get('asset')}
+                    orders[d.get('clientOrderId')] = {'purpose': d.get('purpose'), 'price': d.get('price'), 'side': d.get('side'), 'decision': d.get('decisionId'), 'close': d.get('windowCloseTs'), 'asset': d.get('asset'), 'fv': d.get('fairValue')}
                 elif k == 'settlement':
                     if d.get('result') in ('yes', 'no'): results[d.get('ticker', '')] = (d['result'], iso_ms(ts))
                 elif k == 'curve_exit':
@@ -383,7 +385,7 @@ def main():
         if ep and held * signed < 0:  # reduces
             n = min(abs(signed), abs(held))
             px = fl['price'] if ep['sign'] > 0 else 1 - fl['price']
-            ep['exits'].append({'ms': fl['ms'], 'n': n, 'px': round(px, 4), 'fee': fl['fee'] * n / fl['count'], 'kind': exit_kind(why_of(fl) or '(entry order)') if o.get('purpose') == 'exit' else 'a quote that reduced it', 'why': why_of(fl) or ''})
+            ep['exits'].append({'ms': fl['ms'], 'why': (why_of(fl) or '') if o.get('purpose') == 'exit' else '', 'fv': o.get('fv'), 'n': n, 'px': round(px, 4), 'fee': fl['fee'] * n / fl['count'], 'kind': exit_kind(why_of(fl) or '(entry order)') if o.get('purpose') == 'exit' else 'a quote that reduced it', 'why': why_of(fl) or ''})
             ep['held'] = held + (n if signed > 0 else -n)
             rest = signed - (n if signed > 0 else -n)
             if abs(ep['held']) < 1e-9:
@@ -400,7 +402,7 @@ def main():
             if not ep.get('close_ms') and o.get('close'): ep['close_ms'] = o.get('close')
     episodes.extend(open_ep.values())
     # The positions closed (flat or settled) in the window.
-    episodes = [ep for ep in episodes if max(ep.get('flat_ms') or 0, (results.get(ep['ticker']) or (None, 0))[1]) >= since_ms or (not ep.get('flat_ms') and ep['ticker'] not in results)]
+    episodes = [ep for ep in episodes if ep['start_ms'] <= now * 1000 and max(ep.get('flat_ms') or 0, (results.get(ep['ticker']) or (None, 0))[1]) >= since_ms or (not ep.get('flat_ms') and ep['ticker'] not in results)]
     for ep in episodes:
         res = results.get(ep['ticker'])
         ep['payout'] = None if not res else (1.0 if (ep['sign'] > 0) == (res[0] == 'yes') else 0.0)
@@ -586,6 +588,72 @@ def main():
         mk = '  '.join(f"{h}s {r['mk'][h][0] / r['mk'][h][1]:+.3f}" if r['mk'][h][1] else f"{h}s  n/a " for h in MARKOUTS)
         print(f"  {k:32s} fills {r['fills']:4d}  contracts {r['n']:8.1f}  net {r['net'] / r['netn']:+.3f}/ct" if r['netn'] else f"  {k:32s} fills {r['fills']:4d}  contracts {r['n']:8.1f}  net   n/a  ", end='')
         print(f"  vs holding ${r['vs']:+8.2f} ({r['vs'] / r['vsn']:+.3f}/ct)" if r['vsn'] else '  vs holding      n/a', f"  markouts {mk}")
+
+    # -- 1b. Why the ratchet stop and the model exit lose: each sale against settlement, the side the market and the model
+    #        gave the held side, and the price after the sale, by what the rule saw. Model exit: the claimed edge at the sale
+    #        (side bid - the fee paid - side q, q from the order's fair value or the reason). Ratchet: the stop against the
+    #        average entry (a profit lock or a loss stop). Both: the time to the close and the series.
+    LONG_MK = (60, 300, 900)
+    def bucket_rows():
+        return collections.defaultdict(lambda: {'fills': 0, 'n': 0.0, 'vs': 0.0, 'vsn': 0.0, 'won': 0.0, 'px': 0.0, 'q': 0.0, 'qn': 0.0, 'mk': collections.defaultdict(lambda: [0.0, 0.0])})
+    def add(rows, key, ep, x, side_q):
+        r = rows[key]; r['fills'] += 1; r['n'] += x['n']
+        if ep['payout'] is not None:
+            r['vs'] += (x['px'] - ep['payout']) * x['n'] - x['fee']; r['vsn'] += x['n']; r['won'] += ep['payout'] * x['n']; r['px'] += x['px'] * x['n']
+            if side_q is not None: r['q'] += side_q * x['n']; r['qn'] += x['n']
+        for h in LONG_MK:
+            sec = x['ms'] // 1000 + h
+            if ep.get('close_ms') and sec * 1000 > ep['close_ms']: continue
+            b = side_bid_at(ep, sec)
+            if b is None: continue
+            m = r['mk'][h]; m[0] += (x['px'] - b) * x['n']; m[1] += x['n']
+    def show(title, rows):
+        print(f"  {title}")
+        if not rows: print('    (no such sales in the window)')
+        for k, r in sorted(rows.items(), key=lambda kv: -kv[1]['n']):
+            mk = '  '.join(f"{h}s {r['mk'][h][0] / r['mk'][h][1]:+.3f}" if r['mk'][h][1] else f"{h}s  n/a " for h in LONG_MK)
+            if r['vsn']:
+                won = f"won {100 * r['won'] / r['vsn']:3.0f}%, sold at {r['px'] / r['vsn']:.3f}" + (f", model said {r['q'] / r['qn']:.3f}" if r['qn'] else '')
+                print(f"    {k:34s} fills {r['fills']:4d}  contracts {r['n']:7.1f}  vs holding ${r['vs']:+8.2f} ({r['vs'] / r['vsn']:+.3f}/ct)  {won}  markouts {mk}")
+            else:
+                print(f"    {k:34s} fills {r['fills']:4d}  contracts {r['n']:7.1f}  vs holding      n/a  markouts {mk}")
+    edge_rows, stop_rows, tau_rows, series_rows = bucket_rows(), bucket_rows(), bucket_rows(), bucket_rows()
+    for ep in episodes:
+        en = sum(e['n'] for e in ep['entries']); avg = (sum(e['n'] * e['px'] for e in ep['entries']) / en) if en else None
+        for x in ep['exits']:
+            kind = x['kind']
+            if kind not in ('ratchet stop', 'model exit (market pays more)'): continue
+            short = 'ratchet' if kind == 'ratchet stop' else 'model exit'
+            fv = x.get('fv')
+            if fv is None:
+                m = re.search(r'q ([0-9.]+)', x.get('why') or '')
+                side_q = float(m.group(1)) if m and ep['sign'] > 0 else None
+            else:
+                side_q = float(fv) if ep['sign'] > 0 else 1 - float(fv)
+            if short == 'model exit':
+                if side_q is None: eb = 'claimed edge unknown'
+                else:
+                    e = x['px'] - x['fee'] / x['n'] - side_q
+                    eb = 'claimed edge <1c' if e < 0.01 else 'claimed edge 1-2c' if e < 0.02 else 'claimed edge 2-4c' if e < 0.04 else 'claimed edge >=4c'
+                add(edge_rows, f"{short}: {eb}", ep, x, side_q)
+            else:
+                m = re.search(r'stop ([0-9.]+)', x.get('why') or ''); stop = float(m.group(1)) if m else None
+                if avg is None or stop is None: sb = 'stop vs entry unknown'
+                else:
+                    d = stop - avg
+                    sb = 'stop below the entry (a loss)' if d < -0.005 else 'stop at the entry' if d <= 0.005 else 'stop above the entry (a profit)'
+                add(stop_rows, f"{short}: {sb}", ep, x, side_q)
+            tau = (ep['close_ms'] - x['ms']) / 60000 if ep.get('close_ms') else None
+            tb = 'time to close n/a' if tau is None else '<2 min to the close' if tau < 2 else '2-5 min to the close' if tau < 5 else '5-10 min to the close' if tau < 10 else '>10 min to the close'
+            add(tau_rows, f"{short}: {tb}", ep, x, side_q)
+            add(series_rows, f"{short}: {ep['ticker'].split('-')[0]}", ep, x, side_q)
+    print('\n== 1b. why the ratchet stop and the model exit lose: each sale against settlement (vs holding, after the fee), how often'
+          '\n   the held side won and what it was sold at (the market\'s probability) against the model\'s q, and the held side\'s bid'
+          '\n   60 / 300 / 900 s after the sale (+ = it fell, the sale was timed well; - = it came back), by what the rule saw')
+    show("by the model's claimed edge at the sale (side bid - fee paid - side q)", edge_rows)
+    show('by the ratchet stop against the average entry', stop_rows)
+    show('by the time to the close', tau_rows)
+    show('by series', series_rows)
 
     # -- 2. The cross's scoreboard against its fills.
     print('\n== 2. the cross\'s scoreboard (curve_exit events) against its fills')
