@@ -235,12 +235,13 @@ test('pipeline readiness: the whole bot on its held-out days in % of the pool, e
   const step = r.steps.find((s) => s.step === 'readiness')!;
   assert.ok(step.ok && !step.skipped, JSON.stringify(step).slice(0, 600));
   const f = JSON.parse(fs.readFileSync(path.join(cfg.autoTrain.dir, 'readiness.json'), 'utf8'));
-  assert.deepEqual(f.target, { poolUsd: 200, dailyPct: 0.5, maxDdPct: 10, minDays: 30 });
-  assert.equal(f.wholeBot.days, 2, 'the newest 15% of 7 recorded days');
-  assert.match(f.wholeBot.window, /^recordings: 2 day\(s\) 2026-06-06\.\.2026-06-07/);
+  // On the recordings (the bot keeps 20 days) the newest 5 complete days the MLP was not fitted on, and 5 days pass.
+  assert.deepEqual(f.target, { poolUsd: 200, dailyPct: 0.5, maxDdPct: 10, minDays: 5 });
+  assert.equal(f.wholeBot.days, 5, 'the newest 5 of 7 recorded days (no MLP: none fitted)');
+  assert.match(f.wholeBot.window, /^recordings: 5 day\(s\) 2026-06-03\.\.2026-06-07/);
   assert.ok(Number.isFinite(f.wholeBot.meanPct) && Number.isFinite(f.wholeBot.maxDdPct));
-  assert.equal(f.met, false);
-  assert.ok(f.why.some((w: string) => /2 held-out day\(s\), need 30/.test(w)));
+  assert.ok(!f.why.some((w: string) => /held-out day/.test(w)), 'enough days');
+  assert.equal(f.met, f.why.length === 0);
   assert.deepEqual(f.components.map((c: { name: string }) => c.name), ['ta_net', 'setups', 'mlp', 'perp', 'vol_model', 'tennis', 'snn_crypto', 'snn_perps', 'snn_tennis', 'gp']);
   assert.ok(f.components.every((c: { present: boolean }) => !c.present), 'nothing trained in this folder yet');
   assert.deepEqual(f.ledger, []);
@@ -250,6 +251,40 @@ test('pipeline readiness: the whole bot on its held-out days in % of the pool, e
   await runPipeline({ cfg, only: ['readiness'], log: (m) => logs.push(m), now: T0 + 9 * 86_400_000 });
   assert.ok(logs.some((m) => /whole-bot replay from .* reused/.test(m)), logs.join('\n').slice(-600));
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(cfg.autoTrain.dir, 'readiness.json'), 'utf8')).wholeBot, f.wholeBot);
+  // Part way through the newest day, that day is still being recorded: the 5 days before it.
+  await runPipeline({ cfg, only: ['readiness'], log: () => undefined, now: T0 + 6.5 * 86_400_000 });
+  const partial = JSON.parse(fs.readFileSync(path.join(cfg.autoTrain.dir, 'readiness.json'), 'utf8'));
+  assert.match(partial.wholeBot.window, /^recordings: 5 day\(s\) 2026-06-02\.\.2026-06-06/);
+});
+
+test('pipeline sweep on the recordings: the newest 14 complete days (the bot keeps 20), never today\'s file', async () => {
+  const dir = tmpDir();
+  const rec = path.join(dir, 'recordings');
+  const day = (i: number) => new Date(T0 + i * 86_400_000).toISOString().slice(0, 10);
+  // Each day its own contracts (the synthetic writer names them SYN-0.. every day).
+  const write = (to: string, n: number) => {
+    for (let d = 0; d < n; d++) {
+      writeSyntheticRecordings(to, { windows: 1, seed: 60 + d, start: T0 + d * 86_400_000 });
+      const f = path.join(to, `md-${day(d)}.jsonl`);
+      fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replaceAll('"SYN-', `"SYN${d}-`));
+    }
+  };
+  write(rec, 16);
+  const cfg = cfgFor(dir, { SWEEP_TARGETS: 'kalshi', SWEEP_HOURS: '0.05' });
+  // Part way through the 16th day: 15 complete days, the newest 14 swept.
+  const r = await runPipeline({ cfg, only: ['sweep'], log: () => undefined, now: T0 + 15.5 * 86_400_000 });
+  const step = r.steps.find((s) => s.step === 'sweep-kalshi')!;
+  assert.ok(step.ok && !step.skipped, JSON.stringify(step).slice(0, 600));
+  assert.equal((step.detail as { data: string }).data, 'recordings: 14 day(s)');
+  const ledger = JSON.parse(fs.readFileSync(path.join(cfg.autoTrain.dir, 'sweeps', 'kalshi.json'), 'utf8'));
+  assert.deepEqual(ledger.meta.days, Array.from({ length: 14 }, (_, i) => day(1 + i)));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(cfg.autoTrain.dir, 'pipeline_state.json'), 'utf8')).readiness.gates['sweep kalshi'], { have: 15, need: 14, ready: true });
+  // 13 complete days are not enough.
+  const few = tmpDir();
+  write(path.join(few, 'recordings'), 14);
+  const r2 = await runPipeline({ cfg: cfgFor(few, { SWEEP_TARGETS: 'kalshi', SWEEP_HOURS: '0.05' }), only: ['sweep'], log: () => undefined, now: T0 + 13.5 * 86_400_000 });
+  const s2 = r2.steps.find((s) => s.step === 'sweep-kalshi')!;
+  assert.match(String(s2.skipped), /only 13 recorded day\(s\) .*needs at least 14/, JSON.stringify(s2).slice(0, 400));
 });
 
 test('remote mode: models copied in by the training workflow are hot-swapped; this machine never runs the pipeline', async () => {

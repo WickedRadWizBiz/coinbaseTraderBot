@@ -8,10 +8,13 @@
 //               of TRAIN_TARGET_POOL_USD (default $200).
 //   per day     in percent of the pool: the mean and its 95% bootstrap interval, the median, the share of
 //               winning days, the worst day, the largest drawdown of the equity curve, the annualised Sharpe.
+//               Without that replay, the bot's own recordings (it keeps 20 days, RECORDINGS_KEEP_DAYS): their
+//               newest READINESS_RECORDED_DAYS complete days the MLP was not fitted on.
 //   target      TRAIN_TARGET_DAILY_PCT (default 50: $100 a day on $200) with the interval's lower end at or
-//               above it, a drawdown of at most TRAIN_TARGET_MAX_DD_PCT (default 10), over at least 30 days.
+//               above it, a drawdown of at most TRAIN_TARGET_MAX_DD_PCT (default 10), over at least 30 days
+//               (5 on the recordings).
 //   solid       what a sound bot shows (see SOLID): a positive mean whose interval stays above zero, a
-//               drawdown within 15%, a Sharpe of 2 or more, over 30 days or more.
+//               drawdown within 15%, a Sharpe of 2 or more, over 30 days or more (5 on the recordings).
 
 import fs from 'fs';
 import path from 'path';
@@ -28,6 +31,10 @@ export interface DailyStats {
 
 /** What a sound bot shows on held-out days (realistic, after fees). */
 export const SOLID = { minDays: 30, maxDdPct: 15, sharpe: 2 };
+/** On the bot's own recordings (20 days kept) the whole bot is judged on its newest 5 complete days the MLP was not
+ *  fitted on, and 5 days are enough: the interval's lower end still has to clear the target (zero for SOLID), and on
+ *  5 days one day well short of it fails that. */
+export const READINESS_RECORDED_DAYS = 5;
 
 /** Daily statistics of a P&L series (USD per day) on a fixed pool. */
 export function dailyStats(pnlUsd: number[], poolUsd: number, dates?: string[]): DailyStats {
@@ -56,10 +63,10 @@ export function targetMet(s: DailyStats, t: ReadinessTarget): { met: boolean; wh
   return { met: why.length === 0, why };
 }
 
-/** Does the whole bot look sound (SOLID)? */
-export function solidWholeBot(s: DailyStats): { solid: boolean; why: string[] } {
+/** Does the whole bot look sound (SOLID)? `minDays`: READINESS_RECORDED_DAYS on the recordings. */
+export function solidWholeBot(s: DailyStats, minDays = SOLID.minDays): { solid: boolean; why: string[] } {
   const why: string[] = [];
-  if (s.days < SOLID.minDays) why.push(`${s.days} day(s) < ${SOLID.minDays}`);
+  if (s.days < minDays) why.push(`${s.days} day(s) < ${minDays}`);
   if (!(s.ciLoPct > 0)) why.push(`mean ${s.meanPct.toFixed(2)}%/day, interval reaches ${s.ciLoPct.toFixed(2)}% (not clearly above 0)`);
   if (!(s.maxDdPct <= SOLID.maxDdPct)) why.push(`drawdown ${s.maxDdPct.toFixed(1)}% > ${SOLID.maxDdPct}%`);
   if (!(s.sharpe >= SOLID.sharpe)) why.push(`Sharpe ${Number.isFinite(s.sharpe) ? s.sharpe.toFixed(2) : 'n/a'} < ${SOLID.sharpe}`);
