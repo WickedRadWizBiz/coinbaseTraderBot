@@ -101,7 +101,6 @@ import { snnContest, type ContestResult } from './snnContest';
 import { daysOf, HistoryLedger, HOLDOUT_RULE, isHoldout, isoWeek, weekBlocks } from './historyLedger';
 import { componentStatus, dailyStats, ledgerStatus, READINESS_RECORDED_DAYS, SOLID, solidWholeBot, targetMet, writeReadiness, type ReadinessFile, type ReadinessTarget } from './readiness';
 import { readWalk, walkDir } from './historyWalk';
-import { componentStatus, dailyStats, ledgerStatus, SOLID, solidWholeBot, targetMet, writeReadiness, type ReadinessFile, type ReadinessTarget } from './readiness';
 import { loadWholeBot, runWholeBot, settingsFromConfig } from './wholeBot';
 import { SetupModel } from '../bot/setups/setupModel';
 import { withSnnHyper } from '../bot/snn/population';
