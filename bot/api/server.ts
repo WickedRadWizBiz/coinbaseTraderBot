@@ -205,8 +205,7 @@ export function createApi(d: ApiDeps): express.Express {
         budget: d.engine.tennisBudget(),
         matches: [...d.engine.tennisStatus.values()],
       },
-      // Paper without VAULT_IN_PAPER trades its whole balance: the vault only keeps its books (the card says so).
-      vault: d.vault ? { ...d.vault.status(), paperIgnored: d.cfg.mode === 'paper' && !d.cfg.vault?.paper } : null,
+      vault: d.vault ? { ...d.vault.status(), paperIgnored: false } : null,
       dominance: dominanceStatus(d.md),
       wsConnected: d.md.wsConnected,
       catalog: d.md.catalogHealth,
@@ -255,6 +254,8 @@ export function createApi(d: ApiDeps): express.Express {
   api.get('/kalshi-check', (_req, res) => res.json(d.kalshiCheck?.report() ?? null));
   // CPU, disk writes and memory: the last minute, and 10-minute buckets over 24 h (bot/engine.ts CpuMeter).
   api.get('/cpu', (_req, res) => res.json({ now: d.engine.cpu.status(), history: d.engine.cpu.history() }));
+  // Module ledger: one row per adaptive part (on / shadow / off / benched, validated, its score, what blocks it).
+  api.get('/modules', (_req, res) => res.json({ at: Date.now(), mode: d.cfg.mode, rows: d.engine.moduleLedger() }));
   // On-demand main-thread CPU profile for diagnostics (?sec=1..15; once a minute; read-only).
   api.get('/debug/profile', async (req, res) => { res.json(await cpuProfile(Number(req.query.sec ?? 10))); });
   api.get('/markets', (_req, res) => res.json([...d.engine.status.values()].sort((a, b) => a.closeTs - b.closeTs || a.ticker.localeCompare(b.ticker))));
