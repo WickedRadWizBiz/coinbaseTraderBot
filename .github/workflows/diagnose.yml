@@ -160,7 +160,8 @@ jobs:
               echo "== GET $p"; api "$p" | head -c 6000; echo
             done
             if [ "$PNL" = "true" ] && [ -d /tmp/diag/deploy ]; then
-              echo "== P&L report"; nice -n 19 python3 /tmp/diag/deploy/pnl_report.py ~/bot/data 3 || true
+              echo "== P&L report"; nice -n 19 python3 /tmp/diag/deploy/pnl_report.py ~/bot/data 8 || true
+              echo "== kalshi check by day"; api /api/kalshi-check | python3 -c 'import json,sys; r=json.load(sys.stdin); [print(" ", d.get("day"), json.dumps(d.get("bot"))) for d in (r.get("days") or [])]' || true
               echo "== decision study"; nice -n 19 python3 /tmp/diag/deploy/decision_study.py ~/bot/data 3 || true
               case "$STUDY_HOURS" in ''|*[!0-9]*) STUDY_HOURS=8;; esac
               if [ "$STUDY_HOURS" -lt 1 ] || [ "$STUDY_HOURS" -gt 24 ]; then STUDY_HOURS=8; fi
