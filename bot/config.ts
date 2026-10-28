@@ -463,6 +463,11 @@ export interface AutoTrainConfig {
   /** Delete the oldest recorded days when the disk runs low (the newest two days are kept unless the disk is nearly
    *  full, then only today). */
   recordingsPrune: boolean;
+  /** Write each day's recording as gzip while it is recorded (a gzip member every few seconds: about a tenth of the
+   *  plain size at every hour); false = plain until midnight, then gzipped (takes effect from the next new day file). */
+  recordingsGzipLive: boolean;
+  /** Recorded days kept, today included (0 = no cap; at least 2): older days are deleted (the disk floor still applies). */
+  recordingsKeepDays: number;
   /** always = promote every freshly trained model (hot-swap mode); validated = only models whose
    *  validation passed (MLP: validation.passed; perps: validated(); SNN: its stage accepted). */
   promote: 'always' | 'validated';
@@ -1292,6 +1297,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       recordingsGzipAfterDays: num(env, 'RECORDINGS_GZIP_AFTER_DAYS', 1, 0, 365),
       recordingsMinFreeGb: num(env, 'RECORDINGS_MIN_FREE_GB', 5, 0, 1e4),
       recordingsPrune: bool(env, 'RECORDINGS_PRUNE', true),
+      recordingsGzipLive: bool(env, 'RECORDINGS_GZIP_LIVE', true),
+      recordingsKeepDays: num(env, 'RECORDINGS_KEEP_DAYS', 20, 0, 3650),
       promote: oneOf(env, 'AUTO_TRAIN_PROMOTE', 'always', ['always', 'validated'] as const),
       champion: bool(env, 'AUTO_TRAIN_CHAMPION', true),
       snnStage: oneOf(env, 'AUTO_TRAIN_SNN_STAGE', 'auto', ['auto', 'S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const),

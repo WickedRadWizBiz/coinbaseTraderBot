@@ -177,6 +177,7 @@ test('REST reports each response Date header to the skew guard; responses withou
 
 import fs from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 import { MarketData, Recorder } from '../bot/marketdata/marketData';
 import type { MarketInfo } from '../bot/kalshi/types';
 import { ReplayState, readRecordings } from '../research/replay';
@@ -260,18 +261,21 @@ test('backtest latency: orders and cancels arrive late against the later book an
 });
 
 test('recorder: messages that arrive after close() (sockets draining at shutdown) are dropped, not written to the ended stream', async () => {
-  const dir = tmpDir();
-  const rec = new Recorder(dir);
-  rec.write('index', { asset: 'BTC', value: 1 });
-  rec.close();
-  const errors: unknown[] = [];
-  const onErr = (e: unknown) => errors.push(e);
-  process.on('uncaughtException', onErr);
-  try {
-    rec.write('index', { asset: 'BTC', value: 2 }); // used to emit ERR_STREAM_WRITE_AFTER_END: exit status 1
-    await new Promise((r) => setTimeout(r, 50));
-  } finally { process.off('uncaughtException', onErr); }
-  assert.equal(errors.length, 0);
-  const lines = fs.readFileSync(path.join(dir, fs.readdirSync(dir)[0]), 'utf8').trim().split('\n');
-  assert.equal(lines.length, 1);
+  for (const gzip of [false, true]) {
+    const dir = tmpDir();
+    const rec = new Recorder(dir, { gzip });
+    rec.write('index', { asset: 'BTC', value: 1 });
+    rec.close();
+    const errors: unknown[] = [];
+    const onErr = (e: unknown) => errors.push(e);
+    process.on('uncaughtException', onErr);
+    try {
+      rec.write('index', { asset: 'BTC', value: 2 }); // used to emit ERR_STREAM_WRITE_AFTER_END: exit status 1
+      await new Promise((r) => setTimeout(r, 50));
+    } finally { process.off('uncaughtException', onErr); }
+    assert.equal(errors.length, 0);
+    const raw = fs.readFileSync(path.join(dir, fs.readdirSync(dir)[0]));
+    const lines = (gzip ? zlib.gunzipSync(raw) : raw).toString('utf8').trim().split('\n');
+    assert.equal(lines.length, 1);
+  }
 });
