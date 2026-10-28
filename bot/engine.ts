@@ -16,6 +16,7 @@ import type { Config, RiskLimits } from './config';
 import type { ExchangeFill, ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
 import type { IndexTracker } from './marketdata/indexTracker';
+import { dynamicEdge, dynamicEdgeOn } from './strategy/dynamicEdge';
 import { compactReading, MarketState, observeMarket, type MarketStateReading } from './marketdata/marketState';
 import type { OrderBook } from './marketdata/orderBook';
 import { computeFeatureMap, FEATURE_SCHEMA_VERSION, FEATURES } from './model/featureEngine';
@@ -2139,9 +2140,10 @@ export class Engine {
     } else {
       st.exitMode = 'fair_value';
     }
+    const dEdge = dynamicEdge(cfg.strategy.dynamicEdge, mState, pred.std);
     const strat = {
       ...cfg.strategy,
-      minEdge: cfg.strategy.minEdge + sessRisk.minEdgeAdd,
+      minEdge: Math.max(0, cfg.strategy.minEdge + sessRisk.minEdgeAdd + dEdge.add),
       inventorySkewPerContract: cfg.strategy.inventorySkewPerContract * sessRisk.skewMult,
       kellyFraction: tier.kellyFraction * kellyScale,
     };
@@ -2242,6 +2244,7 @@ export class Engine {
     for (const g of guards) plan.notes.push(g);
     if (pbW && pbW.kalshi !== 1) plan.notes.push(`playbook ${pbW.source}: Kalshi size x${pbW.kalshi}`);
     if (cmpW && cmpW.w !== 1) plan.notes.push(`compensator ${cmpW.source}: Kalshi size x${cmpW.w.toFixed(2)}`);
+    if (dEdge.add !== 0) plan.notes.push(`market state ${dEdge.add > 0 ? '+' : ''}${dEdge.add.toFixed(4)} edge`);
     if (sessRisk.applied.length) plan.notes.push(`session risk ${sessRisk.applied.join('+')}: size x${sessRisk.sizeMult}, +${sessRisk.minEdgeAdd} edge`);
     if (huntPlan) plan.place.unshift(huntPlan);
     // Entry curve (strategy/sinuousEntry.ts): a quote that adds to the position is against the curve when the book's
@@ -2339,7 +2342,7 @@ export class Engine {
         decisionId, ticker: m.ticker, model: model.id, spot: spot.value, strike, strikeSource: m.strikeSource, sigma: vol.sigmaPerSqrtSec, sigmaPricing,
         session: sess.key, sessionRisk: sessRisk,
         kind: m.kind, cap: terms.cap, cadence: reason ?? null, featureSchema: FEATURE_SCHEMA_VERSION, pMarket, pStd: pred.std, q: st.q,
-        tauSec, fv: fv.pYes, regime: fv.regime, pYes, ...(full ? { features, drivers: why.drivers } : {}), modelShift: why.shiftFromFairValue, bid: bid.price, ask: ask.price, position: st.position, fastMove, mstate: compactReading(mState),
+        tauSec, fv: fv.pYes, regime: fv.regime, pYes, ...(full ? { features, drivers: why.drivers } : {}), modelShift: why.shiftFromFairValue, bid: bid.price, ask: ask.price, position: st.position, fastMove, mstate: compactReading(mState), ...(dynamicEdgeOn(cfg.strategy.dynamicEdge) ? { edgeAdd: +dEdge.add.toFixed(4) } : {}),
         place: plan.place.map((p) => ({ side: p.side, price: p.price, count: p.count, purpose: p.purpose, edge: p.edge, why: p.why })),
         cancel: plan.cancel,
         // Why no entry could open here (paper's accuracy gate), so studies need not recompute it.

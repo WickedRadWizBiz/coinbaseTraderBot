@@ -2,6 +2,7 @@
 // frozen. Nothing at runtime (API, LLM, learner) can change it. Changing a
 // parameter means a reviewed commit and a redeploy.
 
+import type { DynamicEdgeParams } from './strategy/dynamicEdge';
 import fs from 'fs';
 import { parseSessionRisk, type SessionRiskProfile } from './model/sessionRisk';
 import { DEFAULT_PROBATION, type ProbationParams } from './risk/probation';
@@ -76,6 +77,8 @@ export interface StrategyConfig {
   /** Pull quotes if |index move| over `fastMoveWindowSec` exceeds this many sigmas. */
   fastMoveSigmas: number;
   fastMoveWindowSec: number;
+  /** Entry edge moved with the market state (bot/strategy/dynamicEdge.ts; DYN_EDGE_*, all 0 = static edge). */
+  dynamicEdge: DynamicEdgeParams;
   /** Resting orders expire on the exchange after this many seconds (dead-man switch); a quote still wanted is placed again. */
   orderTtlSec: number;
   /** Exit mode. hold = Mode A (ride to settlement, no exit fee); fair_value = model exit only;
@@ -984,6 +987,15 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     // Quotes stay fresh (a stale bid is the one that gets picked off): pulled on a 2-sigma move, re-priced every 10 s.
     fastMoveSigmas: num(env, 'STRATEGY_FAST_MOVE_SIGMAS', 2, 0.5, 20),
     fastMoveWindowSec: num(env, 'STRATEGY_FAST_MOVE_WINDOW_SEC', 5, 1, 120),
+    dynamicEdge: {
+      vol: num(env, 'DYN_EDGE_VOL', 0, -0.2, 0.2),
+      change: num(env, 'DYN_EDGE_CHANGE', 0, 0, 0.2),
+      spread: num(env, 'DYN_EDGE_SPREAD', 0, 0, 2),
+      flow: num(env, 'DYN_EDGE_FLOW', 0, 0, 0.2),
+      uncertainty: num(env, 'DYN_EDGE_UNCERTAINTY', 0, 0, 2),
+      maxUp: num(env, 'DYN_EDGE_MAX_UP', 0.05, 0, 0.3),
+      maxDown: num(env, 'DYN_EDGE_MAX_DOWN', 0.01, 0, 0.1),
+    },
     // 20 s: a quote the bot stops tending is gone from the exchange within 20 s. Re-placing the ones still wanted costs
     // orders, which RISK_MAX_ORDERS_PER_MIN (120) now has room for.
     orderTtlSec: num(env, 'STRATEGY_ORDER_TTL_SEC', 20, 10, 900),

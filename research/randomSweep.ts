@@ -77,6 +77,13 @@ export const EVIDENCE_TRIALS: Array<Record<string, string>> = [
   { ENTRY_WINDOW_15M: '600,300', ENTRY_WINDOW_HOURLY: '2400,600' },
   { EXIT_POLICY: 'hold', STRATEGY_STYLE: 'maker', RISK_MIN_SIDE_PRICE: '0.2' },
   { STRATEGY_MIN_EDGE: '0.05', STRATEGY_TAKER_BUFFER: '0.03' },
+  // The entry edge moved with the market state (bot/strategy/dynamicEdge.ts), one reading at a time, then together.
+  { DYN_EDGE_VOL: '0.02' },
+  { DYN_EDGE_CHANGE: '0.03' },
+  { DYN_EDGE_SPREAD: '0.5' },
+  { DYN_EDGE_FLOW: '0.02' },
+  { DYN_EDGE_UNCERTAINTY: '0.5' },
+  { DYN_EDGE_VOL: '0.02', DYN_EDGE_CHANGE: '0.03', DYN_EDGE_SPREAD: '0.5', DYN_EDGE_FLOW: '0.02', DYN_EDGE_UNCERTAINTY: '0.5' },
 ];
 
 export const MIN_HOLDOUT_TRADES = 50;
