@@ -1,0 +1,54 @@
+name: "Gemini Auto-Implement & PR"
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_prompt:
+        description: "What should Gemini implement and wire into the codebase?"
+        required: true
+        default: "Implement the Fast Spot S/R & Volume Profile Engine, the Kalshi Strike Shield & 80/20 Core/Runner Selector, and the Async Execution FSM in TypeScript, and wire them cleanly into kalshiService.ts, bot/oms/oms.ts, and bot/main.ts."
+  issue_comment:
+    types: [created]
+
+jobs:
+  auto-implement:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/gemini-implement'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install google-genai pydantic
+
+      - name: Run Two-Tier Gemini Code Generator
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TASK_PROMPT: ${{ github.event.inputs.task_prompt || github.event.comment.body }}
+        run: python .github/scripts/ai_implement.py
+
+      - name: Create Pull Request with Changes
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "feat(kalshi): auto-implement S/R shield selector and 80/20 execution FSM"
+          branch: "gemini/auto-implement-kalshi-sr"
+          delete-branch: true
+          title: "🤖 Gemini Auto-Implement: Kalshi S/R Shield & 80/20 Execution FSM"
+          body: |
+            ### Automated Implementation Summary
+            This Pull Request was automatically generated and wired into the repository by the Two-Tier Gemini Implementation Pipeline:
+            - **Tier 1 (`gemini-2.5-flash`):** Indexed repository structure and mapped existing TypeScript interfaces across `bot/`.
+            - **Tier 2 (`gemini-2.5-pro` at High Thinking):** Generated and integrated the TypeScript modules and refactored target files.
