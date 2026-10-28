@@ -56,7 +56,8 @@ on:
     paths: ['.github/workflows/kalshi-replay-check.yml', 'research/replayCheck.ts', 'research/backtest.ts', 'research/seedCandles.ts']
 
 permissions:
-  contents: read
+  # Write for the one step that posts the replay's summary on the commit (a comment); everything else reads.
+  contents: write
 
 concurrency:
   # Comparison runs (overrides set) each get their own group, so several exit policies replay side by side; a fidelity
@@ -228,14 +229,14 @@ jobs:
             [[ "$ph" =~ ^[0-9]{1,3}$ ]] || { echo "phases must be whole ms below 1000"; exit 1; }
             choom -n 900 -- timeout 200m node --import tsx research/replayCheck.ts "${ARGS[@]}" --bankroll-scale "$s" --tick-phase-ms "$ph" --out "data/sweeps/nearby/$s.json" > "$RUNNER_TEMP/nearby-$s.log" 2>&1 &
           done
-          timeout 200m node --import tsx research/replayCheck.ts "${ARGS[@]}" --tick-phase-ms 0 --out data/sweeps/replay-check-own.json || echo "replay check failed or cut off"
+          { timeout 200m node --import tsx research/replayCheck.ts "${ARGS[@]}" --tick-phase-ms 0 --out data/sweeps/replay-check-own.json || echo "replay check failed or cut off"; } 2>&1 | tee "$RUNNER_TEMP/own.log"
           wait
           for s in $NEARBY; do [ -s "data/sweeps/nearby/$s.json" ] || echo "nearby replay x$s did not finish: $(grep -E 'Error|Killed|heap' "$RUNNER_TEMP/nearby-$s.log" | tail -n 1 | cut -c1-160)"; done
           if [ -s data/sweeps/replay-check-own.json ]; then
             # The tally counts only stretches replayed by this same backtester (a hash of its files: a fix starts afresh).
             CODE=$(cat research/backtest.ts research/replay.ts research/callTape.ts research/replayCheck.ts research/seedCandles.ts | sha256sum | cut -c1-8)
             node --import tsx research/replayCheck.ts --combine data/sweeps/replay-check-own.json --nearby "$(ls data/sweeps/nearby/*.json 2>/dev/null | paste -sd, -)" \
-              --history data/sweeps/replay-check-history.json --code "$CODE" --pnl-test "$PNL_TEST" --out data/sweeps/replay-check-latest.json
+              --history data/sweeps/replay-check-history.json --code "$CODE" --pnl-test "$PNL_TEST" --out data/sweeps/replay-check-latest.json 2>&1 | tee -a "$RUNNER_TEMP/own.log"
           fi
           echo "replay check took $(( ($(date +%s) - T0) / 60 )) min; memory now $(free -m | awk '/^Mem:/ {print $3 " MB used of " $2}')"
       - uses: actions/upload-artifact@v4
@@ -245,6 +246,20 @@ jobs:
           path: data/sweeps/replay-check-latest.json
           if-no-files-found: ignore
           retention-days: 30
+      - name: Post the summary on the commit
+        # The job log lives on a host the cloud sessions that dispatch comparison runs cannot read, so the summary the
+        # check printed (counts, dollars and settings; the same lines as the log) goes on the commit as a comment, where
+        # the API serves it. Every manual or push run posts; the daily scheduled run keeps to the log and the server's verdict.
+        if: ${{ always() && github.event_name != 'schedule' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OVERRIDES: ${{ inputs.overrides || '' }}
+          CHECK_FROM: ${{ inputs.from || 'auto' }}
+        run: |
+          LOG="$RUNNER_TEMP/own.log"; [ -s "$LOG" ] || { echo "no replay output to post"; exit 0; }
+          { echo "**Replay check** run [$GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) · from $CHECK_FROM${OVERRIDES:+ · replay-only overrides: \`$OVERRIDES\`}"
+            echo; echo '```'; cut -c1-600 "$LOG" | head -n 150; echo '```'; } > "$RUNNER_TEMP/comment.md"
+          jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' | gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" --input - --jq '.html_url'
       - name: Copy the verdict to the server
         # A replay with overrides is a comparison, not a fidelity check: it never touches the server's verdict or tally.
         if: ${{ !inputs.overrides }}
