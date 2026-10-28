@@ -14,6 +14,10 @@ on:
         description: 'With exit_hours: the end of the window, an ISO UTC time such as 2026-10-28T03:10:00Z, or now'
         required: false
         default: 'now'
+      exit_models:
+        description: 'With exit_hours: also run the decision study (the model against the market, log loss) and the component study (SNN, TA network, meta-model) on the last 3 days, read-only'
+        required: false
+        default: 'false'
       paths:
         description: 'Optional: extra read-only dashboard API paths to print, space separated (e.g. /api/snn /api/autotrain)'
         required: false
@@ -211,6 +215,7 @@ jobs:
         env:
           HOURS: ${{ inputs.exit_hours }}
           UNTIL: ${{ inputs.exit_until || 'now' }}
+          MODELS: ${{ inputs.exit_models || 'false' }}
         run: |
           [[ "$HOURS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "hours must be a number"; exit 1; }
           U=''
@@ -222,6 +227,11 @@ jobs:
           ssh bot "mkdir -p /tmp/diag"
           scp -q deploy/cross_study.py bot:/tmp/diag/cross_study.py
           { ssh bot "timeout $T nice -n 19 python3 /tmp/diag/cross_study.py ~/bot/data $HOURS $U" || echo "(exit study stopped: $?)"; } 2>&1 | tee "$RUNNER_TEMP/report.txt"
+          if [ "$MODELS" = true ]; then
+            scp -q deploy/decision_study.py deploy/component_study.py bot:/tmp/diag/
+            { echo; echo "== decision study (the model against the market, last 3 days)"; ssh bot "timeout 1500 nice -n 19 python3 /tmp/diag/decision_study.py ~/bot/data 3" || echo "(decision study stopped: $?)"
+              echo; echo "== component study (SNN, TA network, meta-model against the meta-model's price, last 3 days)"; ssh bot "timeout 1500 nice -n 19 python3 /tmp/diag/component_study.py ~/bot/data 3" || echo "(component study stopped: $?)"; } 2>&1 | tee -a "$RUNNER_TEMP/report.txt"
+          fi
       - name: Post the report on the commit
         if: always()
         env:
@@ -231,5 +241,5 @@ jobs:
         run: |
           R="$RUNNER_TEMP/report.txt"; [ -s "$R" ] || { echo "no report to post"; exit 0; }
           { echo "**Exit diagnosis** run [$GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) · $HOURS h of positions up to $UNTIL"
-            echo; echo '```'; cut -c1-600 "$R" | head -n 400; echo '```'; } > "$RUNNER_TEMP/comment.md"
+            echo; echo '```'; cut -c1-400 "$R" | head -c 60000; echo; echo '```'; } > "$RUNNER_TEMP/comment.md"
           jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' | gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" --input - --jq '.html_url'

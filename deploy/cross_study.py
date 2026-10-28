@@ -595,9 +595,9 @@ def main():
     #        average entry (a profit lock or a loss stop). Both: the time to the close and the series.
     LONG_MK = (60, 300, 900)
     def bucket_rows():
-        return collections.defaultdict(lambda: {'fills': 0, 'n': 0.0, 'vs': 0.0, 'vsn': 0.0, 'won': 0.0, 'px': 0.0, 'q': 0.0, 'qn': 0.0, 'mk': collections.defaultdict(lambda: [0.0, 0.0])})
+        return collections.defaultdict(lambda: {'fills': 0, 'n': 0.0, 'fee': 0.0, 'vs': 0.0, 'vsn': 0.0, 'won': 0.0, 'px': 0.0, 'q': 0.0, 'qn': 0.0, 'mk': collections.defaultdict(lambda: [0.0, 0.0])})
     def add(rows, key, ep, x, side_q):
-        r = rows[key]; r['fills'] += 1; r['n'] += x['n']
+        r = rows[key]; r['fills'] += 1; r['n'] += x['n']; r['fee'] += x['fee']
         if ep['payout'] is not None:
             r['vs'] += (x['px'] - ep['payout']) * x['n'] - x['fee']; r['vsn'] += x['n']; r['won'] += ep['payout'] * x['n']; r['px'] += x['px'] * x['n']
             if side_q is not None: r['q'] += side_q * x['n']; r['qn'] += x['n']
@@ -614,7 +614,7 @@ def main():
             mk = '  '.join(f"{h}s {r['mk'][h][0] / r['mk'][h][1]:+.3f}" if r['mk'][h][1] else f"{h}s  n/a " for h in LONG_MK)
             if r['vsn']:
                 won = f"won {100 * r['won'] / r['vsn']:3.0f}%, sold at {r['px'] / r['vsn']:.3f}" + (f", model said {r['q'] / r['qn']:.3f}" if r['qn'] else '')
-                print(f"    {k:34s} fills {r['fills']:4d}  contracts {r['n']:7.1f}  vs holding ${r['vs']:+8.2f} ({r['vs'] / r['vsn']:+.3f}/ct)  {won}  markouts {mk}")
+                print(f"    {k:34s} fills {r['fills']:4d}  contracts {r['n']:7.1f}  fee {r['fee'] / r['n']:.4f}/ct  vs holding ${r['vs']:+8.2f} ({r['vs'] / r['vsn']:+.3f}/ct)  {won}  markouts {mk}")
             else:
                 print(f"    {k:34s} fills {r['fills']:4d}  contracts {r['n']:7.1f}  vs holding      n/a  markouts {mk}")
     edge_rows, stop_rows, tau_rows, series_rows = bucket_rows(), bucket_rows(), bucket_rows(), bucket_rows()
