@@ -63,6 +63,7 @@ import type { ReadinessFile } from './readiness';
 import { torchSelfTest } from './taNetTorch';
 import { ensureTorch } from './torchSetup';
 import { ensureTvDatafeed } from './tvSetup';
+import { leaseCommand, readWalk, WALK_FIRST_SEC_PER_DAY, WALK_MAX_DAYS, WALK_MIN_DAYS, WALK_NETS, WALK_START, walkDir, type WalkNet, type WalkState } from './historyWalkState';
 import { asIntensity, lowerPriority, markRunEnd, markRunIntensity, markRunStart, planEnv, ResourceGovernor, resourcePlan, type GovernorStatus, type Intensity, type ResourcePlan } from './trainerResources';
 
 export interface TrainerSettings { host?: string; user?: string; port?: number; key?: string; /** How hard it works (research/trainerResources.ts). */ intensity?: Intensity; /** Run the sweeps that replay Kalshi's contracts (the `kalshi` and `bot` targets: slow). Off by default. */ kalshiSweep?: boolean }
@@ -84,8 +85,9 @@ export function parseManifest(text: string): RemoteFile[] {
   });
 }
 
-/** The trainer's own Python and PyTorch (research/torchSetup.ts): never compared with the server's files. */
-export const LOCAL_ONLY_DIRS = new Set(['python-env', 'python-dist', 'uv-cache', 'tv-env']);
+/** The trainer's own Python and PyTorch (research/torchSetup.ts) and the history walk's scratch (downloads and replay
+ *  days it rebuilds): never compared with the server's files. */
+export const LOCAL_ONLY_DIRS = new Set(['python-env', 'python-dist', 'uv-cache', 'tv-env', 'walk-work']);
 
 /** Local files under `root` with the same shape (forward-slash relative paths). */
 export function localManifest(root: string, skipDirs: ReadonlySet<string> = new Set()): Map<string, RemoteFile> {
@@ -123,8 +125,9 @@ export function filesToPull(remote: RemoteFile[], local: Map<string, RemoteFile>
 const KEEP_LOCAL = /(^|\/)history\/kalshi\/[^/]+\/\.index\.json$|(^|\/)work\/tanet-population\.json$|(^|\/)models\/pipeline_state\.json$|(^|\/)work\/history-ledger\.json$|(^|\/)work\/snnpbt\//;
 
 /** Never copied down: the TA network's row cache and training pack are built from this machine's own history (the
- *  server's never match it, and a copy over the laptop's made it recompute every coin's years of rows). */
-const NO_PULL = /(^|\/)work\/tanet-cache\//;
+ *  server's never match it, and a copy over the laptop's made it recompute every coin's years of rows); and the history
+ *  walks' populations and replay states, which only a walk turn copies, whole, under the walk's lease (walkTurn). */
+const NO_PULL = /(^|\/)work\/tanet-cache\/|(^|\/)work\/history-walk\/[^/]+\/(pbt|replay-state)\/|(^|\/)work\/history-walk\/[^/]+\.(incoming|old)\//;
 
 /** The conditioning champion and its rollback copy (bot/strategy/conditioningOverlay.ts). The server is their
  *  source of truth: a dashboard rollback replaces or removes them there, so they are sent up only when this trainer
@@ -152,6 +155,28 @@ export interface PushRecord { at: number; why: string; files: number; mb: number
 export function readPushes(dataDir: string): PushRecord[] {
   try { return fs.readFileSync(path.join(dataDir, 'pushes.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as PushRecord); } catch { return []; }
 }
+
+/** This computer's name on the history walk's lease (research/historyWalkState.ts leaseCommand). */
+export const walkHolder = (host = os.hostname()): string => `laptop-${host.replace(/[^A-Za-z0-9._-]/g, '-')}`.slice(0, 60);
+
+/** A session's history walk (Steven, Oct 28: 20 to 90 days per 30 minutes of the slider): the block's bounds in days, and
+ *  the minutes it may take, the session's length or more, up to three times it, when the shortest block needs more at the
+ *  measured pace. */
+export function walkBudget(sessionMin: number, secPerDay = WALK_FIRST_SEC_PER_DAY): { minDays: number; maxDays: number; minutes: number } {
+  const scale = sessionMin / 30;
+  const minDays = Math.max(WALK_MIN_DAYS, Math.round(WALK_MIN_DAYS * scale)), maxDays = Math.max(minDays, Math.round(WALK_MAX_DAYS * scale));
+  return { minDays, maxDays, minutes: Math.round(Math.max(sessionMin, Math.min(3 * sessionMin, (minDays * secPerDay) / 60))) };
+}
+
+/** The networks in the order a session tries to walk them: the one furthest behind first (a walk not started yet
+ *  stands at its first day). */
+export function walkOrder(next: Partial<Record<WalkNet, string>>): WalkNet[] {
+  return [...WALK_NETS].sort((a, b) => ((next[a] ?? WALK_START[a]) < (next[b] ?? WALK_START[b]) ? -1 : (next[a] ?? WALK_START[a]) > (next[b] ?? WALK_START[b]) ? 1 : 0));
+}
+
+/** A walk's files that travel between this computer and the server: not a tournament round in progress, not a partial
+ *  write. */
+export const walkFiles = (files: RemoteFile[]): RemoteFile[] => files.filter((f) => !/^pbt\/round\//.test(f.path) && !f.path.endsWith('.tmp'));
 
 /** The pipeline step a log line says just finished ("[pipeline] <step>: done in N s"), if any. */
 export const finishedStep = (line: string): string | undefined => /^\[pipeline\] ([\w-]+): done in /.exec(line)?.[1];
@@ -375,6 +400,9 @@ export const TRAINER_ENV_TEMPLATE = [
   '# TRAIN_TARGET_MAX_DD_PCT=10',
   '# Rounds in a row without progress before it stops:',
   '# TRAIN_PLATEAU_ROUNDS=3',
+  '# Each session first walks a spiking network through its next block of history (with the server and GitHub);',
+  '# false turns that off:',
+  '# TRAINER_WALK=true',
   '',
 ].join('\n');
 
@@ -453,11 +481,19 @@ function pipelineCmd(): { cmd: string; args: string[] } {
   return entry.endsWith('.cjs') ? { cmd: process.execPath, args: [path.join(path.dirname(entry), 'pipeline.cjs')] } : pipelineCommand(entry);
 }
 
+/** The history walk's command: the bundled historyWalk.cjs next to this file, or the TS source under tsx. */
+function walkCmd(): { cmd: string; args: string[] } {
+  const entry = process.argv[1] ?? '';
+  return entry.endsWith('.cjs') ? { cmd: process.execPath, args: [path.join(path.dirname(entry), 'historyWalk.cjs')] } : { cmd: process.execPath, args: ['--import', 'tsx', path.resolve('research/historyWalk.ts')] };
+}
+
 /** What the trainer window (research/trainerUi.ts) hears from a run. */
 export interface TrainerHooks {
   /** Every line the pipeline prints ([progress] lines included; they are kept out of the console and the log). */
   line?: (l: string) => void;
-  phase?: (p: 'starting' | 'pull' | 'pipeline' | 'push' | 'done') => void;
+  phase?: (p: 'starting' | 'pull' | 'walk' | 'pipeline' | 'push' | 'done') => void;
+  /** The history walk starts on `net`, expected to take about `minutes`. */
+  walkStart?: (net: WalkNet, minutes: number) => void;
   roundStart?: (round: number, full: boolean, sweepAll: boolean) => void;
   roundEnd?: (board: string[]) => void;
   /** The pipeline process of the round in progress (undefined between rounds): the window's Stop ends it. */
@@ -472,7 +508,12 @@ export interface TrainerHooks {
 /** A round of the pipeline; `heapOom`: it ran out of its memory cap (NODE_OPTIONS) and crashed. */
 async function runRound(env: NodeJS.ProcessEnv, only: string[] | undefined, logFile: string, extra: string[] = [], hooks?: TrainerHooks): Promise<{ code: number; heapOom: boolean }> {
   const { cmd, args } = pipelineCmd();
-  const child = spawn(cmd, [...args, ...(only?.length ? ['--only', only.join(',')] : []), ...extra], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  return runChild(cmd, [...args, ...(only?.length ? ['--only', only.join(',')] : []), ...extra], env, logFile, hooks);
+}
+
+/** A child process of the run (a pipeline round, the history walk), its output to the console, the log and the window. */
+async function runChild(cmd: string, argv: string[], env: NodeJS.ProcessEnv, logFile: string, hooks?: TrainerHooks): Promise<{ code: number; heapOom: boolean }> {
+  const child = spawn(cmd, argv, { env, stdio: ['ignore', 'pipe', 'pipe'] });
   // Inherited from this process already; set again in case it was started at another priority.
   if (child.pid && (env.TRAINER_PRIORITY === 'low' || env.TRAINER_PRIORITY === 'below_normal')) lowerPriority(env.TRAINER_PRIORITY, child.pid);
   hooks?.child?.(child);
@@ -781,6 +822,60 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   writeText(path.join(dataDir, 'GUIDE.txt'), guide);
   console.log(guide);
 
+  async function walkTurn(srv: Server, sessionMin: number): Promise<boolean> {
+    const holder = walkHolder(), base = '~/bot/data/models/work/history-walk';
+    const next: Partial<Record<WalkNet, string>> = {};
+    for (const n of WALK_NETS) { try { next[n] = (JSON.parse(srv.run(`cat ${base}/${n}/walk.json 2>/dev/null || true`).out) as WalkState).next; } catch { /* not started */ } }
+    for (const net of walkOrder(next)) {
+      const take = srv.run(leaseCommand('take', net, holder, 3 * sessionMin + 60));
+      if (!take.ok) { log(`history walk, ${net}: ${(take.out + take.err).trim().split('\n').pop() ?? 'lease not taken'}`); continue; }
+      try {
+        hooks?.phase?.('walk');
+        const dir = walkDir(models, net), incoming = `${dir}.incoming`;
+        // 1. Where the walk stands on the server, whole, into a folder of its own, then in place of this computer's copy.
+        const ls = srv.run(`if [ -d ${base}/${net} ]; then cd ${base}/${net} && find . -type f -printf '%P\\t%s\\t%T@\\n'; fi`);
+        if (!ls.ok) { log(`history walk, ${net}: listing the server's walk failed (${ls.err.trim().slice(0, 200)}); no walk this session`); return false; }
+        const files = walkFiles(parseManifest(ls.out));
+        fs.rmSync(incoming, { recursive: true, force: true });
+        fs.mkdirSync(incoming, { recursive: true });
+        log(`history walk, ${net}: copying where the walk stands from the server (${files.length} file(s), ${(files.reduce((a, f) => a + f.size, 0) / 1e6).toFixed(0)} MB)...`);
+        if (files.length && !(await srv.pull(`${base}/${net}`, files.map((f) => f.path), incoming))) { log(`history walk, ${net}: the copy failed; no walk this session`); return false; }
+        const got = localManifest(incoming);
+        const short = files.filter((f) => got.get(f.path)?.size !== f.size);
+        if (short.length) { log(`history walk, ${net}: ${short.length} file(s) did not arrive whole (${short.slice(0, 3).map((f) => f.path).join(', ')}); no walk this session`); return false; }
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.renameSync(incoming, dir);
+        // 2. The block.
+        const b = walkBudget(sessionMin, readWalk(dir, net).secPerDay);
+        log(`history walk, ${net}: from ${readWalk(dir, net).next}, ${b.minDays}-${b.maxDays} day(s) in about ${b.minutes} min`);
+        hooks?.walkStart?.(net, b.minutes);
+        hooks?.line?.(`[pipeline] walk-${net}: running...\n`);
+        const t = Date.now();
+        const { cmd, args } = walkCmd();
+        const { code } = await runChild(cmd, [...args, 'run', '--net', net, '--minutes', String(b.minutes), '--min-days', String(b.minDays), '--max-days', String(b.maxDays), '--work', path.join(dataDir, 'walk-work', net), '--by', holder], envFor(b.minutes / 60), logFile, hooks);
+        hooks?.line?.(`[pipeline] walk-${net}: ${code === 0 ? `done in ${Math.round((Date.now() - t) / 1000)} s` : 'FAILED'}\n`);
+        // A walk stopped part-way saved the days it finished; one that crashed sends nothing.
+        if (code !== 0 && !stopped()) { log(`history walk, ${net}: exit ${code}; nothing sent, the server's walk stands`); return true; }
+        // 3. Back to the server, whole, swapped in only once every file arrived, and only while the lease is still ours.
+        hooks?.phase?.('push');
+        if (!srv.run(leaseCommand('take', net, holder, 60)).ok) { log(`history walk, ${net}: the lease ran out and another walker took it; this block is not sent`); return true; }
+        const send = walkFiles([...localManifest(dir).values()]);
+        srv.run(`rm -rf ${base}/${net}.incoming`);
+        log(`history walk, ${net}: sending the walk to the server (${send.length} file(s), ${(send.reduce((a, f) => a + f.size, 0) / 1e6).toFixed(0)} MB)...`);
+        const ok = await srv.push(dir, send.map((f) => f.path), `${base}/${net}.incoming`);
+        const after = srv.run(`cd ${base}/${net}.incoming && find . -type f -printf '%P\\t%s\\t%T@\\n'`);
+        const check = after.ok ? confirmPushed(send, parseManifest(after.out)) : { confirmed: 0, missing: send.map((f) => f.path) };
+        if (!ok || check.missing.length) { srv.run(`rm -rf ${base}/${net}.incoming`); log(`history walk, ${net}: ${check.missing.length} file(s) not confirmed on the server; the server's walk stands, this block is walked again`); return true; }
+        const swap = srv.run(`cd ${base} && rm -rf ${net}.old && { [ ! -d ${net} ] || mv ${net} ${net}.old; } && mv ${net}.incoming ${net} && rm -rf ${net}.old`);
+        log(swap.ok ? `history walk, ${net}: sent and confirmed (${check.confirmed} file(s)); it now stands at ${readWalk(dir, net).next}` : `history walk, ${net}: swapping it in on the server failed (${swap.err.trim().slice(0, 200)})`);
+        return true;
+      } finally {
+        srv.run(leaseCommand('give', net, holder));
+      }
+    }
+    return false;
+  }
+
   // ---- 2-3. rounds ----
   // Steps of a single round (--only, or conditioning mode from the window): one round, then the push.
   const only = o.only ?? argOf('only')?.split(',').filter(Boolean);
@@ -795,16 +890,27 @@ export async function runTrainer(o: { hours: number; dataDir: string; settings: 
   }
   let why: string | undefined;
   const stopped = () => !!hooks?.stopRequested?.();
+  if (!continuous) deadline = Date.now() + hours * 3_600_000;
+
+  // ---- 2a. the history walk's next block (research/historyWalk.ts; Steven, Oct 28) ----
+  // The network furthest behind walks on from where its walk stands on the server (GitHub walks it daily too): its
+  // folder is copied down whole under the walk's lease, the block runs here, and the folder goes back whole, swapped in
+  // only once every file arrived, so to the network the block follows the last one as if no time had passed between.
+  // Each session walks one block; TRAINER_WALK=false turns it off.
+  let walked = false;
+  if (server && !only && !flag('no-push') && (userEnv.TRAINER_WALK ?? process.env.TRAINER_WALK) !== 'false' && !stopped()) {
+    try { walked = await walkTurn(server, continuous ? 240 : hours * 60); } catch (e) { log(`history walk: ${(e as Error).message}; on to the training`); }
+  }
+
   let round = 0, lastMs = 0, plateau = 0;
   // The last full round (new history, the replay extended): remembered between runs, so starting again after a stop
   // continues with the training (the pipeline skips the steps it already finished) instead of repeating them.
   const tstate = readTrainerState(dataDir);
   let lastFull = only ? 0 : tstate.lastFullAt ?? 0;
   if (lastFull && Date.now() - lastFull < 24 * 3_600_000) log(`the last full round's history and replay finished ${((Date.now() - lastFull) / 3_600_000).toFixed(1)} h ago: continuing with the training (the next full round in ${(24 - (Date.now() - lastFull) / 3_600_000).toFixed(1)} h)`);
-  if (!continuous) deadline = Date.now() + hours * 3_600_000;
   while (!stopped()) {
     const left = deadline - Date.now();
-    if (round > 0 && (left < 15 * 60_000 || left < 0.6 * lastMs)) { why = `the ${Math.round(hours * 60)}-minute session is used up`; break; }
+    if ((round > 0 || walked) && (left < 15 * 60_000 || left < 0.6 * lastMs)) { why = `the ${Math.round(hours * 60)}-minute session is used up`; break; }
     round++;
     // Round 1 and then once a day: every step (new history, the replay extended, new recordings: new weeks).
     const full = !only && Date.now() - lastFull >= 24 * 3_600_000;
