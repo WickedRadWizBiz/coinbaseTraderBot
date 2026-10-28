@@ -1,0 +1,46 @@
+# Scratch, not for merging: times one history-walk block per spiking network on a GitHub runner (Binance's public
+# archives only; nothing from the server, no secrets).
+name: Scratch history walk timing
+
+on:
+  push:
+    branches: [claude/walk-timing]
+
+permissions:
+  contents: read
+
+jobs:
+  time:
+    strategy:
+      fail-fast: false
+      matrix:
+        domain: [crypto, perps]
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - name: Time
+        run: |
+          export DATA_DIR="$RUNNER_TEMP/data" TRADING_MODE=paper AUTO_TRAIN=off NODE_OPTIONS="--max-old-space-size=12288"
+          node --import tsx scratch/walkTiming.ts ${{ matrix.domain }} 2021-03-01 6 > "$RUNNER_TEMP/out.log" 2>&1; c=$?
+          grep -E '^TIMING' "$RUNNER_TEMP/out.log" | cut -c1-260
+          grep -E 'FATAL ERROR|heap out of memory' "$RUNNER_TEMP/out.log" | head -3
+          exit $c
