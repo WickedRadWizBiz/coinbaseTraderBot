@@ -86,6 +86,7 @@ import { FillLog } from './tca/fillLog';
 import { recordLatency } from './util/latency';
 import { performance } from 'perf_hooks';
 import { activeRuleBook, STAND_ASIDE } from './strategy/ruleBook';
+import { buildLedger, type ModuleRow } from './health/moduleLedger';
 import { activeGpSignals } from './gp/gpSignals';
 import { marketContext } from './ta/marketContext';
 import { binaryTrades, optimalF, recencyWeight, type OptimalFReport } from './strategy/optimalF';
@@ -1709,6 +1710,48 @@ export class Engine {
       fillLogging: Boolean(this.fillLog),
       taNet: this.taNetStatus(),
     };
+  }
+
+  /** Module ledger (bot/health/moduleLedger.ts): one row per adaptive part, what is on, validated, earning or stale. */
+  moduleLedger(now = this.now()): ModuleRow[] {
+    const S = this.d.cfg.strategy;
+    const g = this.guardStatus(now);
+    const ag = this.d.accuracyGate?.status();
+    const agBuckets = ag ? Object.values(ag.groups).flatMap((x) => x.buckets) : [];
+    const rt = activeTaNet();
+    const pb = playbook(), pbF = pb?.current(now);
+    const cmp = compensator()?.status(now);
+    const of = this.kalshiOptimalF('crypto', now);
+    const tp = this.d.takeProfitBench?.status();
+    const pr = probation()?.status();
+    const snn = this.snnBrief() as { mode: string; alpha?: number };
+    const v = this.d.volModel, f = this.d.fillModel;
+    return buildLedger({
+      mode: this.d.cfg.mode,
+      model: { id: this.model.id, liveBlockers: this.model.liveBlockers() },
+      modelHealth: this.d.modelHealth?.status() ?? null,
+      taHealth: this.d.taHealth?.status() ?? null,
+      trials: this.d.trials?.status() ?? null,
+      snn: { mode: snn.mode, alpha: snn.alpha ?? null },
+      taNet: rt ? { version: rt.net.params.version, activeHeads: rt.net.active(true).length } : null,
+      ruleBook: S.ruleBook ? { passed: activeRuleBook()?.passed().length ?? 0 } : null,
+      volModel: v ? { validated: v.validated, applied: Boolean(v.validated && S.volModel), improvement: v.params.validation.improvement.mean } : null,
+      fillModel: f ? { validated: f.validated, active: gatePasses('kalshi', f.validated) } : null,
+      playbook: pb ? { enabled: Boolean(pb.status(undefined, now).apply && pbF?.enabled), validated: Boolean(pbF?.enabled) } : null,
+      compensator: cmp ? { enabled: cmp.apply && cmp.enabled, validated: cmp.enabled } : null,
+      characterStandAside: S.characterStandAside,
+      accuracyGate: ag ? { enabled: ag.enabled, blocked: agBuckets.filter((b) => !b.open).length, buckets: agBuckets.length } : null,
+      sessionRisk: { keys: Object.keys(S.sessionRisk).length },
+      sizing: {
+        paperOrderUsd: this.paperOrderUsd(), tier: g.tier.name, sizeScale: g.equityGuard?.sizeScale ?? null,
+        optimalF: of.rep ? { cap: Number.isFinite(of.cap) ? of.cap : null, trades: of.rep.n } : null, portfolioKelly: S.portfolioKelly,
+      },
+      exitPolicy: S.exitPolicy,
+      takeProfitBench: tp ? { scored: tp.scored, netUsd: tp.netUsd, benched: Boolean(tp.benched), enforce: tp.enforce } : null,
+      probation: pr ? Object.fromEntries(Object.entries(pr).filter(([k]) => k !== 'mode').map(([k, b]) => { const s = b as { trades: number; netUsd: number; benched: unknown }; return [k, { trades: s.trades, netUsd: s.netUsd, benched: Boolean(s.benched) }]; })) : null,
+      indexAgeMs: Object.fromEntries([...this.d.md.index].map(([a, idx]) => [a, idx.health(now).ageMs])),
+      maxIndexAgeMs: this.d.cfg.risk.maxIndexAgeMs,
+    });
   }
 
   /** TA network: version, blind-test results per head, and each asset's latest forecast and live skill. */

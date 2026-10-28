@@ -542,6 +542,11 @@ async function main(): Promise<void> {
   exchangeStatus.start();
   const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, accuracyGate, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json'), curveExit, takeProfitBench, curveEntry, liveLines, trials });
   engineRef = engine;
+  // Module ledger once an hour (and 5 minutes after start) in the audit log, for the daily module report
+  // (deploy/module_report.py): which parts were on, shadow, off or benched, and what flagged them.
+  const writeLedger = () => { try { audit.write('modules', { rows: engine.moduleLedger() }); } catch (e) { log.warn('module ledger failed', { error: String(e) }); } };
+  setTimeout(writeLedger, 300_000).unref();
+  setInterval(writeLedger, 3_600_000).unref();
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();
   // Paper training override: automatic kill trips de-risk instead of halting; exhausted pools are refilled.
