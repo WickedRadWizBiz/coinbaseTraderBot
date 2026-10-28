@@ -112,7 +112,17 @@ export interface ReplayOpts {
   requote?: boolean;
   /** Rebuild days already written (default: skip them unless the format version changed). */
   force?: boolean;
+  /** Keep every built day's end-of-day state, not only the last KEEP_STATES days' and each month's last (the history
+   *  walk, research/historyWalk.ts, goes on next time from whichever day it stopped at). */
+  keepAllStates?: boolean;
   log?: (m: string) => void;
+}
+
+/** Can a kept end-of-day state built as `stateSig` carry on a build signed `base`? The same build but for coins listed
+ *  since: those start fresh at their first bar, as they would have. */
+function carriesOn(stateSig: string, base: string, stateAssets: string[], assets: string[]): boolean {
+  const rest = (s: string) => s.split(':').filter((_, i) => i !== 1).join(':');
+  return rest(stateSig) === rest(base) && stateAssets.every((a) => assets.includes(a));
 }
 
 /** Garman-Klass variance of a bar's log price over its minute (unbiased for a driftless random walk). */
@@ -499,15 +509,16 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
     return { days: Math.round((to - from) / DAY) + 1, written: 0, skipped: Math.round((to - from) / DAY) + 1, assets, notes, synthetic: 0, tennis: 0, dominance: 0 };
   }
   let resumedFrom: string | undefined;
-  if (start > from) {
+  // A kept state of the day before `from` carries on too: the history walk builds its blocks one after another.
+  if (start > from || fs.existsSync(stateFileOf(iso(from - DAY)))) {
     const kept = fs.existsSync(stateDir) ? fs.readdirSync(stateDir).map((f) => /^(\d{4}-\d{2}-\d{2})\.json\.gz$/.exec(f)?.[1]).filter((d): d is string => !!d && d < iso(start) && d >= iso(from - DAY)).sort().reverse() : [];
     let resumed = false;
     for (const d of kept) {
       try {
         const f = JSON.parse(zlib.gunzipSync(fs.readFileSync(stateFileOf(d))).toString('utf8')) as StateFile;
-        if (f.version !== REPLAY_VERSION || f.sig !== base || !assets.every((a) => f.state.assets[a])) continue;
+        if (f.version !== REPLAY_VERSION || !carriesOn(f.sig, base, Object.keys(f.state.assets), assets)) continue;
         const at = Date.parse(d) + DAY;
-        for (const [a, s] of st) { await s.spot.skip(at); await s.perp.skip(at); Object.assign(s, f.state.assets[a]); }
+        for (const [a, s] of st) { await s.spot.skip(at); await s.perp.skip(at); if (f.state.assets[a]) Object.assign(s, f.state.assets[a]); }
         carry = f.state.carry;
         dom.state = f.state.dom;
         start = at;
@@ -662,7 +673,7 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
     ev.sort((x, y) => x.t - y.t);
     const cut = ev.findIndex((e) => e.t >= d1);
     if (cut >= 0) carry = ev.splice(cut);
-    if (to - d0 < KEEP_STATES * DAY || iso(d1).endsWith('-01')) {
+    if (o.keepAllStates || to - d0 < KEEP_STATES * DAY || iso(d1).endsWith('-01')) {
       const state: DayState = { carry, assets: Object.fromEntries([...st].map(([a, x]) => [a, { recent: x.recent, basis: x.basis, vPath: x.vPath, vMkt: x.vMkt, prints: x.prints, open: x.open }])), dom: dom.state };
       const sf: StateFile = { version: REPLAY_VERSION, sig: base, day, state };
       fs.writeFileSync(`${stateFileOf(day)}.tmp`, zlib.gzipSync(JSON.stringify(sf), { level: 6 }));
@@ -687,7 +698,7 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
   const keepFrom = iso(to - (KEEP_STATES - 1) * DAY);
   for (const f of fs.readdirSync(stateDir)) {
     const d = /^(\d{4}-\d{2}-\d{2})\.json\.gz$/.exec(f)?.[1];
-    if (d && d < keepFrom && !iso(Date.parse(d) + DAY).endsWith('-01')) fs.rmSync(path.join(stateDir, f), { force: true });
+    if (d && !o.keepAllStates && d < keepFrom && !iso(Date.parse(d) + DAY).endsWith('-01')) fs.rmSync(path.join(stateDir, f), { force: true });
   }
   log(`history replay: ${written} day(s) written, ${skipped} already built${resumedFrom ? ` (continued from the end of ${resumedFrom})` : ''}, ${assets.length} asset(s)${synthetic ? `, ${synthCount} synthetic contract(s)` : ''}${tennisSeries.length ? `, ${tennisCount} tennis match market(s)` : ''}${anchors.length ? `, dominance at ${domCount} prints` : ''}`);
   return { days, written, skipped, assets, notes, synthetic: synthCount, tennis: tennisCount, dominance: domCount, resumed: resumedFrom };

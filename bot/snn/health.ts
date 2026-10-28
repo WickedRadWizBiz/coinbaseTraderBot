@@ -143,3 +143,12 @@ export class SnnHealth {
     this.lastTheta = s.lastTheta ?? undefined; this.inBandSince = s.inBandSince; this.lastMinute = s.lastMinute;
   }
 }
+
+export type HealthState = ReturnType<SnnHealth['state']>;
+
+/** A monitor's state with its reference to be taken afresh: calibration starts again at the next observation, and the
+ *  breach timers and any freeze measured against the old reference end (the governor and salience windows keep what
+ *  they saw). A network deployed anew starts so; the history walk re-anchors its members so (research/snnPbt.ts). */
+export function recalibrated(s: HealthState): HealthState {
+  return { ...s, ref: null, start: 0, freezeLearning: false, shadow: false, outSince: [], inBandSince: 0, lastTheta: null };
+}

@@ -104,7 +104,7 @@ export class MemberScheduler {
     const j0 = g[0].job;
     try {
       const out = await this.o.gpu.run({
-        gpuGroup: { spec: this.o.spec, tape: j0.playTape!, domain: j0.domain as 'crypto' | 'perps', members: g.map((w) => ({ params: w.job.params, checkpoint: w.job.checkpoint, from: w.job.from })) },
+        gpuGroup: { spec: this.o.spec, tape: j0.playTape!, domain: j0.domain as 'crypto' | 'perps', members: g.map((w) => ({ params: w.job.params, checkpoint: w.job.checkpoint, from: w.job.from, pauseLearning: w.job.pauseLearning })) },
       });
       const span = j0.to - j0.from;
       if (span > 0) this.gpuCost = mean(this.gpuCost, out.ms / (g.length * span));

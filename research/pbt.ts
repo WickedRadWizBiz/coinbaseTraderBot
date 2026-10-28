@@ -207,6 +207,9 @@ export async function runPbt<S>(o: {
   /** Asked before each round: true ends the call there (the training session's time is up); the rounds left are run
    *  by a later call that resumes the population. */
   stop?: () => boolean;
+  /** Each lineage's record keeps only the interactions of this long before the round's end (a tournament that goes on
+   *  for years, the history walk, would otherwise carry every bet it ever judged). */
+  recordMs?: number;
 }): Promise<PbtResult<S>> {
   const r = rng((o.seed ?? 17) + (o.resume ? o.resume.trials : 0));
   const n = o.resume?.members.length ?? o.population ?? 3;
@@ -347,6 +350,7 @@ export async function runPbt<S>(o: {
     if (kept.length) log(`round ${round.index}: member(s) ${kept.sort((a, b) => a - b).map((x) => `#${x}`).join(', ')} finished before the stop: kept`);
     members.forEach((m, i) => {
       trials++; pushAll(m.record, evals[i].interactions); m.scores.push({ round: round.index, fitness: evals[i].report.fitness });
+      if (o.recordMs) { const from = round.evalTo - o.recordMs; if (m.record.length && m.record[0].ts < from) m.record = m.record.filter((x) => x.ts >= from); }
       m.blocks = [...(m.blocks ?? m.scores.slice(0, -1).map((x) => x.fitness)), evals[i].report.fitness].slice(-64);
     });
     if (ga) {
