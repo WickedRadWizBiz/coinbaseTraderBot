@@ -101,7 +101,14 @@ export interface TallyEvidence extends GateEvidence {
   models: number;
   from: string;
   through: string;
+  /** Each source on its own: the recorded days, and the history replay's days played as if live (Kalshi's real
+   *  contracts at the worse side of each minute's quotes). The gates read the sum. */
+  recorded?: TallyPart;
+  history?: TallyPart;
 }
+
+/** One source of the tally. */
+export interface TallyPart { nWindows: number; windowsTraded: number; days: number; brierModel: number; brierMarket: number; logLossModel: number; logLossMarketCal: number; netEdgeCiLow?: number; pnl: number }
 
 /** One additional ensemble member (same kind and features as the primary). */
 export interface EnsembleMember {
