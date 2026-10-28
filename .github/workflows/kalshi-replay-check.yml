@@ -150,7 +150,10 @@ jobs:
             if ssh bot "test -f ~/bot/data/recordings/$f"; then
               ssh bot "nice -n 19 gzip -1 -c ~/bot/data/recordings/$f; [ \$? -le 2 ]" > "$DATA/recordings/$f.gz"
             elif ssh bot "test -f ~/bot/data/recordings/$f.gz"; then
-              rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/recordings/$f.gz" "$DATA/recordings/" || vanished_ok
+              # Today's is the bot's live gzip (#172: a member every few seconds): read as it stands, the readers skip a
+              # last member still being written. Finished days are copied whole.
+              if [ "$d" = "$(date -u +%F)" ]; then ssh bot "nice -n 19 cat ~/bot/data/recordings/$f.gz" > "$DATA/recordings/$f.gz"
+              else rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/recordings/$f.gz" "$DATA/recordings/" || vanished_ok; fi
             fi
           done
           echo "$(echo "$D,$NEED" | tr ',' '\n' | sort -u | paste -sd, -)" > "$DATA/sweeps/check-days.txt"
