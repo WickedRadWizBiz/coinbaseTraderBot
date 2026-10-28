@@ -1,7 +1,9 @@
 import os
+import time
+import random
 import pathlib
 import traceback
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -36,6 +38,7 @@ class RelevantFilesSelection(BaseModel):
 
 IGNORE_DIRS = {".git", "node_modules", "dist", "build", ".next", "__pycache__", ".github"}
 ALLOWED_EXTENSIONS = {".ts", ".tsx", ".js", ".json", ".py"}
+UNAVAILABLE_MODELS = set()
 
 
 def get_repo_tree() -> List[str]:
@@ -57,34 +60,76 @@ def read_files(filepaths: List[str], max_chars_per_file: int = 30000) -> str:
     return "\n\n".join(bundled)
 
 
-def call_high_thinking_structured(client: genai.Client, prompt: str, schema_cls):
+def generate_with_retry(
+    client: genai.Client,
+    prompt: str,
+    thinking_level: str = "low",
+    schema_cls: Optional[type] = None,
+    prefer_argon: bool = False,
+    max_retries: int = 6,
+):
     """
-    Tries gemini-4-argon (thinking_level=high) first; falls back to gemini-3.8-flash (thinking_level=high).
-    Uses the 32,768 non-streaming token cap and validates JSON fallback if .parsed is None.
+    Wraps Gemini calls with exponential backoff for 503/429 spikes.
+    Automatically skips unavailable models and steps down from 'high' to 'medium'
+    thinking on later retries if the high-thinking queue is congested.
     """
-    high_cfg = types.GenerateContentConfig(
-        max_output_tokens=32768,
-        thinking_config=types.ThinkingConfig(thinking_level="high"),
-        response_mime_type="application/json",
-        response_schema=schema_cls,
-    )
-    for model_name in ("gemini-4-argon", "gemini-3.8-flash"):
-        try:
-            print(f"Calling {model_name} (thinking_level=high)...")
-            resp = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=high_cfg,
-            )
-            if resp.parsed is not None:
-                return resp.parsed
-            if resp.text:
-                return schema_cls.model_validate_json(resp.text)
-        except Exception as err:
-            print(f"Model {model_name} attempt failed: {err}")
-            if model_name == "gemini-3.8-flash":
+    candidate_models = ["gemini-4-argon", "gemini-3.8-flash"] if prefer_argon else ["gemini-3.8-flash"]
+    candidate_models = [m for m in candidate_models if m not in UNAVAILABLE_MODELS]
+
+    for model_name in candidate_models:
+        for attempt in range(1, max_retries + 1):
+            # Step down to 'medium' thinking on attempts 5+ if 'high' pool is saturated with 503s
+            active_thinking = "medium" if (thinking_level == "high" and attempt >= 5) else thinking_level
+            token_cap = 16384 if active_thinking == "medium" else 32768
+
+            cfg_kwargs = {
+                "max_output_tokens": token_cap,
+                "thinking_config": types.ThinkingConfig(thinking_level=active_thinking),
+            }
+            if schema_cls is not None:
+                cfg_kwargs["response_mime_type"] = "application/json"
+                cfg_kwargs["response_schema"] = schema_cls
+
+            try:
+                print(f"[{model_name}] Attempt {attempt}/{max_retries} (thinking={active_thinking})...")
+                resp = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(**cfg_kwargs),
+                )
+                if schema_cls is not None:
+                    if resp.parsed is not None:
+                        return resp.parsed
+                    if resp.text:
+                        return schema_cls.model_validate_json(resp.text)
+                    raise ValueError("Empty structured response from model.")
+                return resp.text
+
+            except Exception as err:
+                err_str = str(err).upper()
+                # If model is not permitted/found on this key tier, cache and switch immediately
+                if any(code in err_str for code in ("404", "NOT_FOUND", "403", "PERMISSION_DENIED")):
+                    print(f"Model {model_name} not available on this key tier. Switching to fallback...")
+                    UNAVAILABLE_MODELS.add(model_name)
+                    break
+
+                # Transient 503 / 429 / 500 server demand spike -> exponential backoff with jitter
+                is_transient = any(
+                    code in err_str
+                    for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "502", "504", "OVERLOADED")
+                )
+                if is_transient and attempt < max_retries:
+                    sleep_sec = min(75.0, (5.0 * (1.8 ** (attempt - 1))) + random.uniform(1.0, 5.0))
+                    print(f"Transient API spike ({err}). Retrying in {sleep_sec:.1f}s...")
+                    time.sleep(sleep_sec)
+                    continue
+
+                if model_name != candidate_models[-1]:
+                    print(f"Error on {model_name}: {err}. Trying next model...")
+                    break
                 raise
-    raise RuntimeError("Failed to generate structured output from both models.")
+
+    raise RuntimeError("All model attempts and retries exhausted.")
 
 
 def main():
@@ -108,21 +153,14 @@ def main():
             "Select up to 8 existing files from the repository tree that need to be read or modified "
             "to understand the interfaces and implement this task."
         )
-
-        selection_resp = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=flash_selector_prompt,
-            config=types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_level="low"),
-                response_mime_type="application/json",
-                response_schema=RelevantFilesSelection,
-            ),
+        selection: RelevantFilesSelection = generate_with_retry(
+            client,
+            flash_selector_prompt,
+            thinking_level="low",
+            schema_cls=RelevantFilesSelection,
+            prefer_argon=False,
         )
-        selected_files = (
-            selection_resp.parsed.filepaths
-            if selection_resp.parsed
-            else RelevantFilesSelection.model_validate_json(selection_resp.text).filepaths
-        )
+        selected_files = selection.filepaths
         print(f"Selected existing files for context: {selected_files}")
 
         codebase_context = read_files(selected_files)
@@ -133,13 +171,13 @@ def main():
             "in these existing files so our lead architect model can wire new modules in without breaking types:\n\n"
             + codebase_context
         )
-        arch_summary = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=flash_map_prompt,
-            config=types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_level="low")
-            ),
-        ).text
+        arch_summary: str = generate_with_retry(
+            client,
+            flash_map_prompt,
+            thinking_level="low",
+            schema_cls=None,
+            prefer_argon=False,
+        )
 
         reference_spec = (
             "Required Architecture Specifications:\n"
@@ -168,12 +206,21 @@ def main():
             "Create a concise step-by-step file plan (maximum 6 files) listing each new file to create "
             "and each existing file to wire into."
         )
-        plan: ArchitecturePlan = call_high_thinking_structured(client, plan_prompt, ArchitecturePlan)
+        plan: ArchitecturePlan = generate_with_retry(
+            client,
+            plan_prompt,
+            thinking_level="high",
+            schema_cls=ArchitecturePlan,
+            prefer_argon=True,
+        )
         print(f"Architecture Plan Summary:\n{plan.summary}")
 
-        # Step 4: Generate each file individually at HIGH thinking so output never truncates
+        # Step 4: Generate each file individually with 4s pacing between calls to prevent burst 503s
         generated_context = ""
-        for step in plan.steps[:6]:
+        for idx, step in enumerate(plan.steps[:6]):
+            if idx > 0:
+                time.sleep(4.0)
+
             existing_target = read_files([step.filepath]) if os.path.exists(step.filepath) else "NEW FILE"
             file_prompt = (
                 "You are a Principal Quant Architect writing production TypeScript code.\n"
@@ -186,7 +233,13 @@ def main():
                 f"Existing Content of {step.filepath}:\n{existing_target}\n\n"
                 "Return the COMPLETE, valid, production-ready source code for this file without placeholders."
             )
-            gen_file: GeneratedFile = call_high_thinking_structured(client, file_prompt, GeneratedFile)
+            gen_file: GeneratedFile = generate_with_retry(
+                client,
+                file_prompt,
+                thinking_level="high",
+                schema_cls=GeneratedFile,
+                prefer_argon=True,
+            )
             target_path = pathlib.Path(step.filepath)
             target_path.parent.mkdir(parents=True, exist_ok=True)
             with open(target_path, "w", encoding="utf-8") as f:
