@@ -41,7 +41,7 @@ import { sessionState } from '../bot/model/sessions';
 import { Vault, type VaultConfig } from '../bot/vault/vault';
 import { ladderQuotes } from '../bot/model/ladder';
 import { priceContract, SETTLEMENT_AVG_SEC } from '../bot/model/fairValue';
-import { kalshiMaintenance } from '../bot/model/sessions';
+import { kalshiMaintenance, sessionEdge } from '../bot/model/sessions';
 import { defaultTiers, tierAt, type TierPoint } from '../bot/risk/sizingTiers';
 import { CadenceGate, inEntryWindow } from '../bot/strategy/cadence';
 import type { MacroEvent } from '../bot/model/featureEngine';
@@ -135,7 +135,7 @@ export interface BacktestResult {
   refills?: Array<{ t: number; usd: number }>;
   /** With the paper options: entries the accuracy gate held back, when the take-profit bench benched, its sales (fills
    *  and contracts). */
-  paper?: { accuracyBlocks: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number; takeProfitScored?: number; takeProfitNetUsd?: number;
+  paper?: { accuracyBlocks: number; sessionEdgeBlocks?: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number; takeProfitScored?: number; takeProfitNetUsd?: number;
     /** Each market the take-profit bench scored (from tradeFromMs): what its sales made against holding, contracts sold, when. */
     takeProfitByMarket?: Record<string, { usd: number; contracts: number; t: number }>;
     rejected?: Record<string, number>; trainTrades?: number; exploreEntries?: number; extraSent?: number; extraRejected?: Record<string, number> };
@@ -194,6 +194,9 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
    *  cancelled, the account is topped back up to it and the equity guard starts a new epoch. Checked every 5 s from
    *  tradeFromMs, as the supervisor's pass runs. Off when unset. */
   refillUsd?: number;
+  /** The engine's session-edge block (bot/engine.ts sessionEdgeBlock: SESSION_EDGE_NO_ENTRY, SESSION_EDGE_MIN): no new
+   *  entries in the first or last minutes of the Asia, London and New York sessions on weekdays. Off when unset. */
+  sessionEdge?: { minutes: number; noEntry: boolean };
   /** Start the equity guard from this saved state (a copy: the guard writes to it), e.g. the paper bot's
    *  equity_guard.json, so the break-even it sizes against and its sizing tier are the bot's. */
   equityGuardFile?: string;
@@ -399,7 +402,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   };
   // When the replay's own scoreboard benched (or, following another bench, would have).
   const ownBenched = () => (follow ? tpBench?.status().wouldBench ?? undefined : tpBench?.benched);
-  res.paper = { accuracyBlocks: 0, takeProfitBenchedAt: undefined, takeProfitSales: 0, takeProfitContracts: 0, takeProfitScored: 0, takeProfitNetUsd: 0, takeProfitByMarket: {}, rejected: {}, trainTrades: 0, exploreEntries: 0, extraSent: 0, extraRejected: {} };
+  res.paper = { accuracyBlocks: 0, sessionEdgeBlocks: 0, takeProfitBenchedAt: undefined, takeProfitSales: 0, takeProfitContracts: 0, takeProfitScored: 0, takeProfitNetUsd: 0, takeProfitByMarket: {}, rejected: {}, trainTrades: 0, exploreEntries: 0, extraSent: 0, extraRejected: {} };
   // The risk gateway's rejections from the first trading moment on, deduped as the engine logs them (one a market, side,
   // purpose and reason a minute), for the replay check.
   const rejectSeen = new Map<string, number>();
@@ -742,9 +745,13 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const kindWindow = strategy.cadence === 'relaxed'
         ? inEntryWindow(m.kind, tauSec, strategy.entryWindowUpdown, strategy.entryWindowHourly) && (m.kind === 'updown' || (mid >= strategy.hourlyMidBand[0] && mid <= strategy.hourlyMidBand[1]))
         : true;
+      // The guards that stop new risk (Engine.entryGuards): the maintenance window, a pool below the tradable minimum, the
+      // weekly pause with the override off and the session edges. The accuracy gate is asked only when none of them holds.
+      const edge = opts.sessionEdge?.noEntry ? sessionEdge(st.now, opts.sessionEdge.minutes) : undefined;
+      const guarded = mt.inside || mt.minutesTo <= 30 || bankroll < strategy.minTradableBankrollUsd || (opts.killOverride === false && guard.paused(st.now)) || edge !== undefined;
       gate?.observe(m.ticker, tauSec, pYes, mid);
-      const accuracyBlock = kindWindow && gate ? gate.block(m.ticker, tauSec) : undefined;
-      const entryWindowOpen = kindWindow && !accuracyBlock && !mt.inside && mt.minutesTo > 30 && bankroll >= strategy.minTradableBankrollUsd && (opts.killOverride !== false || !guard.paused(st.now));
+      const accuracyBlock = kindWindow && !guarded && gate ? gate.block(m.ticker, tauSec) : undefined;
+      const entryWindowOpen = kindWindow && !guarded && !accuracyBlock;
       const rb = q('bid'), ra = q('ask');
       const through = (r: { price: number } | undefined, best: number) => r !== undefined && Math.abs(best - r.price) >= 2 * strategy.requoteThreshold - 1e-9;
       const posC = pos.position(m.ticker);
@@ -753,6 +760,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const reason = cadence.check(m.ticker, { now: st.now, fairValue: pYes, entryWindowOpen, hasResting: Boolean(rb || ra), bookThroughQuote: through(rb, bid.price) || through(ra, ask.price), positionChanged });
       if (reason) res.entryEvaluations++;
       if (reason && accuracyBlock) res.paper!.accuracyBlocks++;
+      if (reason && kindWindow && edge !== undefined && res.paper) res.paper.sessionEdgeBlocks!++;
       const pNow = pos.get(m.ticker);
       const entrySide = pNow && pNow.yes > 0 ? -pNow.netCash / pNow.yes : pNow && pNow.yes < 0 ? 1 - pNow.netCash / -pNow.yes : undefined;
       // As the engine (Engine.newRiskRoom): a new order fits the room left under the window and total caps and in the

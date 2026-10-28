@@ -80,6 +80,10 @@ export interface PriceMatch {
   /** The price beyond the trained model's (mean |price - model's price|: the TA tilt, the rule book's, the SNN's), paper
    *  and replay, and the replay's own tilts (mean |shift|). */
   overlayPaper: number | null; overlayReplay: number | null; taShift: number | null; ruleShift: number | null;
+  /** The fair value gap by how far apart the two evaluations were, and by paper's time to the close (in the last minute
+   *  the contract settles on the index's average, and a fraction of a basis point moves its value by cents). */
+  fvByApart?: Array<{ label: string; matched: number; fv: number | null }>;
+  fvByClose?: Array<{ label: string; matched: number; fv: number | null }>;
   /** The same over the stretch's first hour (after a start of the bot: its first windows). */
   firstHour?: PriceMatch;
 }
@@ -95,7 +99,7 @@ export interface ReplayCheck {
   /** Each side's refills of a pool that ran dry, in the stretch (bot/training/supervisor.ts). */
   refills?: { paper: Array<{ t: string; usd: number }>; replay: Array<{ t: string; usd: number }> };
   /** Exits and the gate's counts are the whole replay's, warm-up included. */
-  replay: SideSummary & { accuracyBlocks: number; entryEvaluations: number; takeProfitBenchedAt: string | null; takeProfitScored: number; takeProfitNetUsd: number; takeProfitByMarket: Record<string, TakeProfitMarket>; rejected: Record<string, number>; sizeScaleMin: number; makerBufferEnd: number | null; extra: { train: number; explore: number; sent: number; rejected: Record<string, number> } };
+  replay: SideSummary & { accuracyBlocks: number; sessionEdgeBlocks?: number; entryEvaluations: number; takeProfitBenchedAt: string | null; takeProfitScored: number; takeProfitNetUsd: number; takeProfitByMarket: Record<string, TakeProfitMarket>; rejected: Record<string, number>; sizeScaleMin: number; makerBufferEnd: number | null; extra: { train: number; explore: number; sent: number; rejected: Record<string, number> } };
   /** The paper bot's maker buffer now, from the maker markouts it was seeded with (null: fewer than 30, the setting). */
   makerBufferPaper: number | null;
   /** The engine's other models the replay priced with (engineModels), the validation gates' mode and benched books. */
@@ -152,7 +156,7 @@ const empty = (): SideSummary => ({ fills: 0, contracts: 0, fees: 0, pnl: 0, mar
 export interface TakeProfitMarket { usd: number; contracts: number; t: number }
 const addSeries = (s: SideSummary, ticker: string, pnl: number) => { const x = (s.bySeries[ticker.split('-')[0]] ??= { markets: 0, pnl: 0 }); x.markets++; x.pnl += pnl; };
 export type PaperSide = SideSummary & {
-  gateShare: number | null; lastFillAt: string | null;
+  gateShare: number | null; edgeShare?: number | null; lastFillAt: string | null;
   /** Fills of paper's own extra entries: training trades and exploration entries. */
   extra: { train: number; explore: number };
   quiet: { diagnoses: number; lastAt: string | null; reasons: Record<string, number> };
@@ -172,7 +176,7 @@ export interface AuditRecords {
   settlements: Array<{ t: number; pnl: number; ticker?: string }>;
   /** The bot's starts, with the settings it logged (bot/main.ts: publicConfig). */
   startups: Array<{ t: number; config: Record<string, unknown> }>;
-  diagnoses: Array<{ t: number; markets: number; gated: number; reasons: Record<string, number> }>;
+  diagnoses: Array<{ t: number; markets: number; gated: number; edged?: number; reasons: Record<string, number> }>;
   modelSwaps: number[];
   /** The take-profit bench's events (bot/strategy/takeProfitBench.ts): a market scored, the bench tripped or reset. */
   benchEvents: Array<{ t: number; event: string; usd?: number; ticker?: string; contracts?: number; reason?: string }>;
@@ -185,7 +189,7 @@ export interface AuditRecords {
   prices: Map<string, PriceRecord[]>;
 }
 /** A crypto decision record's price, its fair value and what went into it, the book's mid and the position then. */
-export interface PriceRecord { t: number; pYes: number; fv: number; mid: number; position: number; spot?: number; strike?: number; sigma?: number; sigmaPricing?: number; pModel?: number }
+export interface PriceRecord { t: number; pYes: number; fv: number; mid: number; position: number; spot?: number; strike?: number; sigma?: number; sigmaPricing?: number; pModel?: number; tauSec?: number }
 
 // A decision record's numbers sit before its feature map: read with a pattern, not parsed (the records are many).
 const numAt = (line: string, key: string): number | undefined => {
@@ -226,7 +230,7 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
           if (pYes !== undefined && fv !== undefined && Number.isFinite(bid) && Number.isFinite(ask)) {
             const arr = a.prices.get(ticker) ?? [];
             const pModel = Number.isFinite(shift) && fv > 0 && fv < 1 ? 1 / (1 + Math.exp(-(Math.log(fv / (1 - fv)) + shift))) : undefined;
-            arr.push({ t, pYes, fv, mid: (bid + ask) / 2, position: Number.isFinite(position) ? position : 0, spot: numAt(pre, 'spot'), strike: numAt(pre, 'strike'), sigma: numAt(pre, 'sigma'), sigmaPricing: numAt(pre, 'sigmaPricing'), pModel });
+            arr.push({ t, pYes, fv, mid: (bid + ask) / 2, position: Number.isFinite(position) ? position : 0, spot: numAt(pre, 'spot'), strike: numAt(pre, 'strike'), sigma: numAt(pre, 'sigma'), sigmaPricing: numAt(pre, 'sigmaPricing'), pModel, tauSec: numAt(pre, 'tauSec') });
             a.prices.set(ticker, arr);
           }
         }
@@ -254,16 +258,17 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
       }
       if (bench) { a.benchEvents.push({ t, event: String(d.event ?? ''), ...(typeof d.usd === 'number' ? { usd: d.usd } : {}), ...(typeof d.ticker === 'string' ? { ticker: d.ticker } : {}), ...(typeof d.contracts === 'number' ? { contracts: d.contracts } : {}), ...(typeof d.reason === 'string' ? { reason: d.reason } : {}) }); continue; }
       if (diagnosis) {
-        let gated = 0;
+        let gated = 0, edged = 0;
         const reasons: Record<string, number> = {};
         for (const [why, n] of Object.entries((d.reasons ?? {}) as Record<string, number>)) {
           if (why.startsWith('accuracy gate')) gated += Number(n) || 0;
+          if (why.startsWith('session edge')) edged += Number(n) || 0;
           // Reasons carry numbers (a bucket, a price): summed under their wording without them.
           const k = why.replace(/[-+]?\$?\d[\d.,]*%?/g, '#').slice(0, 90);
           reasons[k] = (reasons[k] ?? 0) + (Number(n) || 0);
         }
         reasons.quoting = Number(d.quoting) || 0;
-        a.diagnoses.push({ t, markets: Number(d.markets) || 0, gated, reasons });
+        a.diagnoses.push({ t, markets: Number(d.markets) || 0, gated, edged, reasons });
         continue;
       }
       if (exitPlan) {
@@ -315,10 +320,10 @@ export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): 
     out.byHour[h] = (out.byHour[h] ?? 0) + s.pnl;
     if (s.ticker) addSeries(out, s.ticker, s.pnl);
   }
-  let markets = 0, gated = 0;
+  let markets = 0, gated = 0, edged = 0;
   for (const d of a.diagnoses) {
     if (!inside(d.t)) continue;
-    markets += d.markets; gated += d.gated;
+    markets += d.markets; gated += d.gated; edged += d.edged ?? 0;
     const h = hourOf(d.t);
     if (!out.contractsByHour[h]) {
       const q = (out.quietHours[h] ??= {});
@@ -330,6 +335,7 @@ export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): 
     for (const [k, n] of Object.entries(d.reasons)) out.quiet.reasons[k] = (out.quiet.reasons[k] ?? 0) + n;
   }
   out.gateShare = markets > 0 ? gated / markets : null;
+  out.edgeShare = markets > 0 ? edged / markets : null;
   for (const r of a.rejects) if (inside(r.t)) out.rejected[r.key] = (out.rejected[r.key] ?? 0) + 1;
   for (const e of a.benchEvents) {
     if (!inside(e.t)) continue;
@@ -343,42 +349,66 @@ export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): 
 }
 
 /** Sets the replay's evaluations beside paper's decision records: feed it every evaluation (in time order), then read
- *  the summary. A record is matched by the first evaluation of its market within a second of it. */
+ *  the summary. A record is matched by the nearer of the market's evaluations around it (the last one at or before it,
+ *  the first one after it) when that is within a second. */
 export function priceMatcher(prices: AuditRecords['prices'], from: number, to: number): { onEval: (e: EvalReading) => void; summary: () => PriceMatch } {
   const next = new Map<string, number>();
+  const prev = new Map<string, EvalReading>();
   // The whole stretch, and its first hour apart: after a start of the bot, paper's first window is where the two parted.
   const all = priceTally(), first = priceTally();
   let records = 0, firstRecords = 0;
   for (const arr of prices.values()) for (const r of arr) if (r.t >= from && r.t < to) { records++; if (r.t < from + HOUR) firstRecords++; }
+  const take = (e: EvalReading | undefined, r: PriceRecord, apart: number) => {
+    if (!e || apart > 1000 || r.t < from || r.t >= to) return;
+    all.add(e, r, apart);
+    if (r.t < from + HOUR) first.add(e, r, apart);
+  };
   return {
     onEval: (e) => {
       if (e.now < from - 1000 || e.now >= to + 1000) return;
       const arr = prices.get(e.ticker);
       if (!arr) return;
+      const p = prev.get(e.ticker);
       let i = next.get(e.ticker) ?? 0;
-      while (i < arr.length && (arr[i].t < e.now - 1000 || arr[i].t < from)) i++;
-      if (i < arr.length && arr[i].t <= e.now + 1000 && arr[i].t < to) {
-        const r = arr[i++];
-        all.add(e, r);
-        if (r.t < from + HOUR) first.add(e, r);
+      // The records up to this evaluation lie between it and the one before: each goes to the nearer of the two.
+      for (; i < arr.length && arr[i].t <= e.now; i++) {
+        const r = arr[i], before = p ? r.t - p.now : Infinity, after = e.now - r.t;
+        take(before < after ? p : e, r, Math.min(before, after));
       }
       next.set(e.ticker, i);
+      prev.set(e.ticker, e);
     },
-    summary: () => ({ ...all.summary(records), firstHour: first.summary(firstRecords) }),
+    summary: () => {
+      // Records after a market's last evaluation can still be within a second of it.
+      for (const [ticker, p] of prev) {
+        const arr = prices.get(ticker)!;
+        for (let i = next.get(ticker) ?? 0; i < arr.length && arr[i].t <= p.now + 1000; i++) take(p, arr[i], arr[i].t - p.now);
+        next.set(ticker, arr.length);
+      }
+      return { ...all.summary(records), firstHour: first.summary(firstRecords) };
+    },
   };
 }
 
 /** One tally of the replay's prices beside paper's decision records (priceMatcher). */
-function priceTally(): { add: (e: EvalReading, r: PriceRecord) => void; summary: (records: number) => PriceMatch } {
+const APART = [{ label: 'within 250 ms', upTo: 250 }, { label: '250-500 ms', upTo: 500 }, { label: '0.5-1 s', upTo: 1000 }];
+const TO_CLOSE = [{ label: 'last minute', upTo: 60 }, { label: '1-5 min', upTo: 300 }, { label: 'over 5 min', upTo: Infinity }];
+function priceTally(): { add: (e: EvalReading, r: PriceRecord, apart: number) => void; summary: (records: number) => PriceMatch } {
   let matched = 0, dFv = 0, dMid = 0, dP = 0, shiftP = 0, shiftR = 0, sides = 0, same = 0, samePos = 0;
+  const byApart = APART.map(() => [0, 0]), byClose = TO_CLOSE.map(() => [0, 0]);
   const held = { paper: 0, replay: 0, paperSize: 0, replaySize: 0 };
   const parts = { spot: [0, 0], strike: [0, 0], sigma: [0, 0], sigmaPricing: [0, 0], pricedPaper: [0, 0], pricedReplay: [0, 0], taVolMult: [0, 0], overlayPaper: [0, 0], overlayReplay: [0, 0], taShift: [0, 0], ruleShift: [0, 0] };
   const add = (k: keyof typeof parts, x: number | undefined) => { if (x !== undefined && Number.isFinite(x)) { parts[k][0] += x; parts[k][1]++; } };
   return {
-    add: (e, r) => {
+    add: (e, r, apart) => {
       const mid = (e.bid + e.ask) / 2;
       matched++;
       dFv += Math.abs(e.fv - r.fv); dMid += Math.abs(mid - r.mid); dP += Math.abs(e.pYes - r.pYes);
+      // Kept as [sum of gaps, records], as the other parts.
+      const a = byApart[APART.findIndex((b) => apart <= b.upTo)];
+      if (a) { a[0] += Math.abs(e.fv - r.fv); a[1]++; }
+      const k = r.tauSec === undefined ? -1 : TO_CLOSE.findIndex((b) => r.tauSec! <= b.upTo);
+      if (k >= 0) { byClose[k][0] += Math.abs(e.fv - r.fv); byClose[k][1]++; }
       shiftP += Math.abs(r.pYes - r.fv); shiftR += Math.abs(e.pYes - e.fv);
       if (Math.abs(r.pYes - r.mid) >= 0.02) { sides++; if (Math.sign(e.pYes - mid) === Math.sign(r.pYes - r.mid)) same++; }
       if (Math.sign(e.position) === Math.sign(r.position)) samePos++;
@@ -405,6 +435,8 @@ function priceTally(): { add: (e: EvalReading, r: PriceRecord) => void; summary:
         spotBp: avg(parts.spot, 2), strikeDiffers: avg(parts.strike), sigmaRatio: avg(parts.sigma), sigmaPricingRatio: avg(parts.sigmaPricing),
         pricedPaper: avg(parts.pricedPaper), pricedReplay: avg(parts.pricedReplay), taVolMult: avg(parts.taVolMult),
         overlayPaper: avg(parts.overlayPaper, 4), overlayReplay: avg(parts.overlayReplay, 4), taShift: avg(parts.taShift, 4), ruleShift: avg(parts.ruleShift, 4),
+        fvByApart: APART.map((b, i) => ({ label: b.label, matched: byApart[i][1], fv: avg(byApart[i], 4) })),
+        fvByClose: TO_CLOSE.map((b, i) => ({ label: b.label, matched: byClose[i][1], fv: avg(byClose[i], 4) })),
       };
     },
   };
@@ -618,7 +650,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
     sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd }, accuracyGate: S.accuracyGate,
     takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile, ...(follow ? { follow } : {}) }, accuracyGateFile: gateFile, startMs: from - (o.warmupHours ?? 8) * HOUR, tradeFromMs: from,
-    dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, refillUsd: cfg.paperBankrollUsd, onEval: match.onEval, makerMarkouts: o.makerMarkouts,
+    dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, refillUsd: cfg.paperBankrollUsd, sessionEdge: cfg.sessionEdge, onEval: match.onEval, makerMarkouts: o.makerMarkouts,
     volProfile: models.volProfile, applyVolSeasonality: Boolean(models.volProfile), volModel: models.volModel, fillModel: models.fillModel, calendar: models.calendar,
     taNet: true, trials: models.trials, marketContext: true, ...(o.tickPhaseMs !== undefined ? { tickPhaseMs: o.tickPhaseMs } : {}),
   });
@@ -626,7 +658,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   fs.rmSync(seedDir, { recursive: true, force: true });
   if (guardFile) fs.rmSync(path.dirname(guardFile), { recursive: true, force: true });
   const replay = {
-    ...empty(), accuracyBlocks: r.paper?.accuracyBlocks ?? 0, entryEvaluations: r.entryEvaluations,
+    ...empty(), accuracyBlocks: r.paper?.accuracyBlocks ?? 0, sessionEdgeBlocks: r.paper?.sessionEdgeBlocks ?? 0, entryEvaluations: r.entryEvaluations,
     takeProfitBenchedAt: r.paper?.takeProfitBenchedAt ? new Date(r.paper.takeProfitBenchedAt).toISOString() : null, takeProfitScored: r.paper?.takeProfitScored ?? 0, takeProfitNetUsd: r.paper?.takeProfitNetUsd ?? 0, takeProfitByMarket: r.paper?.takeProfitByMarket ?? {}, rejected: r.paper?.rejected ?? {}, sizeScaleMin: r.sizeScaleMin ?? 1,
     makerBufferEnd: r.makerBufferEnd ?? null, extra: { train: r.paper?.trainTrades ?? 0, explore: r.paper?.exploreEntries ?? 0, sent: r.paper?.extraSent ?? 0, rejected: r.paper?.extraRejected ?? {} },
   };
@@ -749,9 +781,12 @@ async function main(): Promise<void> {
   console.log(`prices at paper's decision records: ${P.matched} of ${P.records} matched within 1 s | mean gap replay vs paper: fair value ${c(P.fv)}, mid ${c(P.mid)}, price traded on ${c(P.price)} | shift from fair value: paper ${c(P.shiftPaper)}, replay ${c(P.shiftReplay)} | same side of the mid ${pct(P.sameSide)} of ${P.sides} | same position ${pct(P.samePosition)}`);
   console.log(`the fair value's inputs, replay vs paper: index gap ${P.spotBp ?? 'n/a'} bp | strike differs on ${pct(P.strikeDiffers)} | volatility ratio: EWMA x${P.sigmaRatio ?? 'n/a'}, priced with x${P.sigmaPricingRatio ?? 'n/a'} | priced over the EWMA: paper x${P.pricedPaper ?? 'n/a'}, replay x${P.pricedReplay ?? 'n/a'} (TA network x${P.taVolMult ?? 'n/a'})`);
   console.log(`the price beyond the trained model's (TA tilt, rule book, SNN): paper ${c(P.overlayPaper)}, replay ${c(P.overlayReplay)} (TA tilt ${c(P.taShift)}, rule book ${c(P.ruleShift)})`);
+  const by = (rows: PriceMatch['fvByApart']) => (rows ?? []).map((b) => `${b.label} ${c(b.fv)} (${b.matched})`).join(', ');
+  if (P.fvByApart) console.log(`fair value gap by how far apart the two evaluations were: ${by(P.fvByApart)} | by paper's time to the close: ${by(P.fvByClose)}`);
   const F = P.firstHour;
   if (F?.matched) console.log(`the stretch's first hour: ${F.matched} of ${F.records} matched | fair value gap ${c(F.fv)}, mid ${c(F.mid)}, price traded on ${c(F.price)} | same side of the mid ${pct(F.sameSide)} of ${F.sides} | same position ${pct(F.samePosition)}, held paper ${pct(F.held.paper)} (${F.held.paperSize ?? 'n/a'} c), replay ${pct(F.held.replay)} (${F.held.replaySize ?? 'n/a'} c) | index gap ${F.spotBp ?? 'n/a'} bp, EWMA x${F.sigmaRatio ?? 'n/a'}, priced with x${F.sigmaPricingRatio ?? 'n/a'} | beyond the model: paper ${c(F.overlayPaper)}, replay ${c(F.overlayReplay)}`);
   console.log(`accuracy gate: replay held back ${pct(res.replay.entryEvaluations ? res.replay.accuracyBlocks / res.replay.entryEvaluations : null)} of its entry evaluations; paper's diagnoses show it keeping out ${pct(res.paper.gateShare)} of the markets | replay's break-even size scale went down to x${res.replay.sizeScaleMin.toFixed(2)} (paper's orders, a share of the bankroll, ignore it)`);
+  console.log(`session edges (no new entries, SESSION_EDGE_NO_ENTRY): replay held back ${pct(res.replay.entryEvaluations ? (res.replay.sessionEdgeBlocks ?? 0) / res.replay.entryEvaluations : null)} of its entry evaluations; paper's diagnoses show them keeping out ${pct(res.paper.edgeShare ?? null)} of the markets`);
   const tb = (scored: number, net: number, at: string | null, would = false) => `${scored} markets scored, ${f(net)} against holding to settlement, ${would ? 'its own scoreboard would have benched it' : 'benched'} ${at ? hm(at) : 'never'}`;
   console.log(`take-profit bench in the stretch: replay ${tb(res.replay.takeProfitScored, res.replay.takeProfitNetUsd, res.replay.takeProfitBenchedAt, Boolean(res.benchFollowed))} | paper ${tb(res.paper.takeProfitBench.scored, res.paper.takeProfitBench.netUsd, res.paper.takeProfitBench.benchedAt)}`);
   const BF = res.benchFollowed;

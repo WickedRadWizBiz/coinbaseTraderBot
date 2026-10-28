@@ -164,7 +164,7 @@ test('replay check: prices set beside the paper bot\'s decision records', async 
   const from = Date.parse('2026-10-24T13:50:00Z');
   const m = priceMatcher(a.prices, from, to);
   const t0 = Date.parse('2026-10-24T14:00:00Z');
-  // The replay evaluates every second; the first within a second of a record is its match.
+  // The replay evaluates every second; the nearer of the two around a record is its match, when within a second.
   m.onEval({ ticker: 'KXBTC15M-A', now: t0 - 1500, pYes: 0.9, fv: 0.9, bid: 0.1, ask: 0.2, position: 0 });
   m.onEval({ ticker: 'KXBTC15M-A', now: t0 + 400, pYes: 0.62, fv: 0.61, bid: 0.58, ask: 0.6, position: 0 });
   m.onEval({ ticker: 'KXBTC15M-A', now: t0 + 1400, pYes: 0.62, fv: 0.61, bid: 0.58, ask: 0.6, position: 0 });
@@ -185,6 +185,21 @@ test('replay check: prices set beside the paper bot\'s decision records', async 
   assert.equal(s.overlayPaper, 0.035, 'paper priced 5c and 2c off its model');
   assert.equal(s.overlayReplay, null, 'replay readings without the model\'s price');
   assert.deepEqual([s.firstHour?.records, s.firstHour?.matched, s.firstHour?.fv, s.firstHour?.samePosition], [3, 2, 0.005, 1], 'the stretch\'s first hour apart: all of these records');
+  assert.deepEqual(s.fvByApart?.map((b) => [b.matched, b.fv]), [[1, 0], [1, 0.01], [0, null]], 'by how far apart: 200 ms (no gap) and 400 ms (1c)');
+  assert.deepEqual(s.fvByClose?.map((b) => [b.matched, b.fv]), [[0, null], [2, 0.005], [0, null]], 'both 5 minutes before the close');
+  // The nearer of the two evaluations around a record (not the first within a second), and a record after the market's
+  // last evaluation, within a second of it.
+  const t2 = Date.parse('2026-10-24T16:00:00Z');
+  const p3 = new Map([['KXBTC15M-E', [{ t: t2, pYes: 0.5, fv: 0.5, mid: 0.5, position: 0, tauSec: 30 }, { t: t2 + 5000, pYes: 0.5, fv: 0.5, mid: 0.5, position: 0, tauSec: 25 }]]]);
+  const m3 = priceMatcher(p3, from, to);
+  m3.onEval({ ticker: 'KXBTC15M-E', now: t2 - 800, pYes: 0.5, fv: 0.4, bid: 0.49, ask: 0.51, position: 0 });
+  m3.onEval({ ticker: 'KXBTC15M-E', now: t2 + 300, pYes: 0.5, fv: 0.52, bid: 0.49, ask: 0.51, position: 0 });
+  m3.onEval({ ticker: 'KXBTC15M-E', now: t2 + 4200, pYes: 0.5, fv: 0.47, bid: 0.49, ask: 0.51, position: 0 });
+  const s3 = m3.summary();
+  assert.equal(s3.matched, 2);
+  assert.equal(s3.fv, 0.025, '300 ms after the first (2c off, not the 10c of 800 ms before it); 800 ms before the second (3c off)');
+  assert.deepEqual(s3.fvByApart?.map((b) => [b.matched, b.fv]), [[0, null], [1, 0.02], [1, 0.03]]);
+  assert.deepEqual(s3.fvByClose?.map((b) => b.matched), [2, 0, 0], 'both in the contract\'s last minute');
   // With them: the index 10 bp apart, the same strike, the volatility 20% higher in the replay.
   const t1 = Date.parse('2026-10-24T15:00:00Z');
   const p2 = new Map([['KXBTC15M-D', [{ t: t1, pYes: 0.5, fv: 0.5, mid: 0.5, position: 0, spot: 100_000, strike: 100_000, sigma: 1e-4, sigmaPricing: 1.1e-4, pModel: 0.48 }]]]);
@@ -372,6 +387,25 @@ test('backtest: a pool that ran dry is refilled as paper\'s training supervisor 
   assert.deepEqual(a.refills, [{ t: Date.parse('2026-10-28T00:01:20.000Z'), usd: 90.77 }], 'the Kalshi pool\'s refills only');
   assert.ok(Math.abs(paperBankrollAt(86.69, { ...a, settlements: [{ t: Date.parse('2026-10-27T23:45:30.000Z'), pnl: -90.77 }, { t: Date.parse('2026-10-28T01:30:30.000Z'), pnl: -13.31 }] }, Date.parse('2026-10-27T00:00:00.000Z')) - 100) < 1e-9);
   assert.ok(Math.abs(paperBankrollAt(86.69, a, Date.parse('2026-10-28T00:05:00.000Z')) - 100) < 1e-9, 'after the refill: equity now less what settled since');
+});
+
+test('backtest: no new entries in a session edge, as the engine\'s SESSION_EDGE_NO_ENTRY keeps them out', async () => {
+  const dir = path.join(tmp(), 'rec');
+  // From Thursday, Jan 1 2026, 00:00 UTC: Tokyo opens then, so the Asia open's edge runs to 00:40.
+  writeSyntheticRecordings(dir, { windows: 6, seed: 12, marketNoise: 0.06 });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both' });
+  assert.deepEqual(cfg.sessionEdge, { minutes: 40, noEntry: true }, 'on by default in the bot');
+  const base = { exitPolicy: 'take_profit' as const, paper: { orderFrac: 0.1, orderUsd: 0 } };
+  const edgeEnd = Date.parse('2026-01-01T00:40:00Z');
+  const tradedBy = (r: Awaited<ReturnType<typeof runBacktest>>) => [...r.windows].filter(([close, w]) => close <= edgeEnd && (w.fills ?? 0) > 0).length;
+  const open = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, base);
+  assert.ok(tradedBy(open) > 0, 'unset: it trades the windows inside the edge');
+  const edge = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { ...base, sessionEdge: cfg.sessionEdge });
+  assert.equal(tradedBy(edge), 0, 'no fill in the windows that closed inside the edge');
+  assert.ok(edge.fills > 0, 'it trades once the edge is over');
+  assert.ok(edge.paper!.sessionEdgeBlocks! > 0);
+  const off = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { ...base, sessionEdge: { minutes: 40, noEntry: false } });
+  assert.equal(off.fills, open.fills, 'SESSION_EDGE_NO_ENTRY=false: no block');
 });
 
 test('backtest tickPhaseMs: the markets evaluated on the engine\'s 1 s timer, that far into each second', async () => {
