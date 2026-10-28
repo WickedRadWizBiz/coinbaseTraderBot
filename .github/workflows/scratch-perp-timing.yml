@@ -1,0 +1,68 @@
+# Scratch, not for merging: times the perps step's execution backtest on the server's recorded days (read-only copy).
+name: Scratch perps backtest timing
+
+on:
+  push:
+    branches: [claude/perp-backtest-timing]
+
+permissions:
+  contents: read
+
+jobs:
+  time:
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [filtered, all-lines]
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+
+      - name: Copy data from the server (read-only)
+        run: |
+          set -euo pipefail
+          DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings"
+          vanished_ok() { local c=$?; [ $c -eq 24 ] && return 0; return $c; }
+          rsync -a --rsync-path="nice -n 19 rsync" --exclude 'recordings/' --exclude 'logs/' --exclude 'audit*' --exclude '*.log' --exclude '.venv*' --exclude '*.tmp' --exclude 'models/work/' bot:bot/data/ "$DATA/" || vanished_ok
+          rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --include 'md-*' --exclude '*' bot:bot/data/recordings/ "$DATA/recordings/" || vanished_ok
+          echo "copied $(ls "$DATA/recordings" | wc -l) recording file(s)"
+          ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$RUNNER_TEMP/train.env" || true
+
+      - name: Time
+        run: |
+          set -a; . "$RUNNER_TEMP/train.env"; set +a
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper AUTO_TRAIN=off NODE_OPTIONS="--max-old-space-size=8192"
+          node --import tsx scratch/perpTiming.ts ${{ matrix.mode }} > "$RUNNER_TEMP/out.log" 2>&1; c=$?
+          grep -E '^TIMING' "$RUNNER_TEMP/out.log" | cut -c1-240
+          exit $c
