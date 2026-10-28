@@ -1,0 +1,411 @@
+# Kalshi random sweep (the plan the owner approved on Oct 24): a daily search for better Kalshi settings, run on
+# GitHub's runners, never on the Lightsail box, and never applied by itself.
+#
+#   1. data       Kalshi's settled 15-minute contracts (public API) over the coins' 1-minute Binance history, built into
+#                 recording files (research/kalshiReplayData.ts); cached, so each run only adds the new days
+#   2. server     read-only copy of the bot's model and its settings without any credential line
+#   3. search     stage 1 of research/randomSweep.ts: today's settings, the evidence trials and random draws, each on the
+#                 same sample of the older replayed days; one shard per runner
+#   4. refine     stage 2: settings near the 20 best of stage 1, on the same sample
+#   5. finalists  stage 3: the 20 best and today's settings on every replayed day, the newest 30% included
+#   6. report     stage 4 (the best and today's settings on the bot's own last RS_RECORDED_DAYS recorded days, copied
+#                 from the server), then the verdict; the proposal (data/sweeps/random-kalshi.json) is copied to the
+#                 server, where the learning report can show it
+#
+# The replay check (does the backtester trade like paper?) is its own workflow, kalshi-replay-check.yml: the report
+# shows its latest verdict from the server.
+#
+# This repository is public: the jobs print step names, counts, scores in $ and the settings tried; the server's
+# settings file, keys and logs never leave it, and nothing here can place an order or change the running bot.
+# The jobs' own variables are RS_* so they never collide with a bot.env setting (the sweep reads its settings from the
+# environment: a TRIALS variable here would be the bot's TRIALS switch).
+#
+# Required secrets (the same as Deploy): LIGHTSAIL_HOST, LIGHTSAIL_USERNAME, LIGHTSAIL_SSH_KEY (optional LIGHTSAIL_PORT).
+name: Kalshi random sweep
+
+on:
+  schedule:
+    - cron: '23 9 * * *'
+  workflow_dispatch:
+    inputs:
+      trials:
+        description: 'Random settings to try (stage 1)'
+        required: false
+        default: '600'
+      days:
+        description: 'Days of Kalshi history to replay (most recent)'
+        required: false
+        default: '120'
+  push:
+    branches: ['claude/kalshi-random-sweep']
+    paths: ['.github/workflows/kalshi-sweep.yml', 'research/randomSweep.ts', 'research/kalshiReplayData.ts', 'research/history/historyReplay.ts', 'research/backtest.ts', 'research/seedCandles.ts']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kalshi-random-sweep
+  cancel-in-progress: false
+
+env:
+  RS_TRIALS: ${{ inputs.trials || '600' }}
+  RS_DAYS: ${{ inputs.days || '120' }}
+  RS_SAMPLE: '40'
+  RS_RECORDED_DAYS: '2'
+  SWEEP_BANKROLL_USD: '150'
+  TRAIN_WORKERS: '4'
+
+jobs:
+  data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - name: Restore the Kalshi history and its replay
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: kalshi-replay-${{ github.run_id }}
+          restore-keys: kalshi-replay-
+      - name: Download what is new and build the replay
+        run: |
+          node --import tsx research/kalshiReplayData.ts --history data/history --out data/history-replay --days "$RS_DAYS" --budget-min 100 2>&1 \
+            | grep -vE '^\[kalshi-replay-data\] (binance|kalshi|replay): .*(skipp|already|listing|page)' | tail -40
+          du -sh data/history data/history-replay | cat
+      - name: Save the Kalshi history and its replay
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: kalshi-replay-${{ github.run_id }}
+
+  server:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    steps:
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Copy the model and settings (read-only)
+        run: |
+          set -euo pipefail
+          DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/models" "$DATA/sweep-env"
+          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/models/model.json "$DATA/models/" || echo "no trained model on the server: the sweep uses the identity model"
+          # The other models the engine prices with (the vol profile, vol model and fill model) where the server has them, and
+          # its validation gates' state (probation.json: which books' unvalidated models are benched), as the replay check.
+          for f in vol_profile.json vol_model.json fill_model.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
+          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/probation.json "$DATA/sweep-env/probation.json" 2>/dev/null || true
+          # The TA network (promoted copy and the newest archived versions its ensemble blends), the rule book, the evolved
+          # formula, the component trials' verdicts and the index series the network's context reads, as the replay check.
+          for f in ta_net.json rule_book.json gp_indicators.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
+          mkdir -p "$DATA/models/archive/ta_net" "$DATA/sweep-env/history"
+          ssh bot 'ls -1 ~/bot/data/models/archive/ta_net/*.json 2>/dev/null | sort -r | head -4' | while read -r f; do rsync -a --rsync-path="nice -n 19 rsync" "bot:$f" "$DATA/models/archive/ta_net/" 2>/dev/null || true; done
+          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/component_trials.json "$DATA/sweep-env/component_trials.json" 2>/dev/null || true
+          INC=(--include='/*/'); for a in BTCDOM BTC.D USDT.D TOTAL3 OTHERS.D RTY DXY US10Y VIX HYG; do INC+=("--include=/*/$a/***"); done
+          rsync -a --rsync-path="nice -n 19 rsync" --prune-empty-dirs --max-size=50m "${INC[@]}" --exclude='*' bot:bot/data/history/ "$DATA/sweep-env/history/" 2>/dev/null || true
+          echo "TA network $([ -f "$DATA/models/ta_net.json" ] && echo "from the server" || echo "shipped") + $(ls "$DATA/models/archive/ta_net" | wc -l) archived; index series $(find "$DATA/sweep-env/history" -name '*.csv' | wc -l) file(s)"
+          # The server's settings without any credential line and without server paths (the same filter as Remote training).
+          ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$DATA/sweep-env/train.env" || true
+          echo "settings: $(wc -l < "$DATA/sweep-env/train.env") line(s); model: $(ls "$DATA/models" | wc -l) file(s)"
+          ssh bot "df -P -BG ~ | awk 'NR==2 {print \"server disk: \" \$4 \" free of \" \$2}'; ls ~/bot/data/recordings | sed -nE 's/^md-([0-9-]{10}).*/\\1/p' | sort -u | tr '\\n' ' '" || true
+          echo
+      - name: Save the model and settings for the sweep
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+          key: kalshi-server-${{ github.run_id }}
+
+  search:
+    needs: [data, server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: kalshi-replay-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+          key: kalshi-server-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Stage 1 (random settings), shard ${{ strategy.job-index }} of ${{ strategy.job-total }}
+        run: |
+          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$RS_DAYS"
+          set -a; . data/sweep-env/train.env; set +a
+          cp -rn data/sweep-env/history/. data/history/ 2>/dev/null || true
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json" RS_TRIALS_FILE="$GITHUB_WORKSPACE/data/sweep-env/component_trials.json"
+          node --import tsx research/randomSweep.ts run --stage 1 --trials "$RS_TRIALS" --sample "$RS_SAMPLE" --shard "${{ strategy.job-index }}/${{ strategy.job-total }}" \
+            --hours 4.5 --recordings data/sweep-days --model data/models/model.json --tape-dir data/tapes --ledger data/sweeps/s1-${{ matrix.shard }}.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ledger-s1-${{ matrix.shard }}
+          path: data/sweeps/s1-${{ matrix.shard }}.jsonl
+          retention-days: 30
+
+  refine:
+    needs: [search]
+    if: ${{ !cancelled() && needs.search.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: kalshi-replay-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+          key: kalshi-server-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ledger-s1-*
+          path: data/sweeps
+          merge-multiple: true
+      - name: Stage 2 (near the 20 best), shard ${{ strategy.job-index }} of ${{ strategy.job-total }}
+        run: |
+          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$RS_DAYS"
+          set -a; . data/sweep-env/train.env; set +a
+          cp -rn data/sweep-env/history/. data/history/ 2>/dev/null || true
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json" RS_TRIALS_FILE="$GITHUB_WORKSPACE/data/sweep-env/component_trials.json"
+          node --import tsx research/randomSweep.ts run --stage 2 --from "$(ls data/sweeps/s1-*.jsonl | paste -sd, -)" --per-best 10 --sample "$RS_SAMPLE" \
+            --shard "${{ strategy.job-index }}/${{ strategy.job-total }}" --hours 2.5 --recordings data/sweep-days --model data/models/model.json \
+            --tape-dir data/tapes --ledger data/sweeps/s2-${{ matrix.shard }}.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ledger-s2-${{ matrix.shard }}
+          path: data/sweeps/s2-${{ matrix.shard }}.jsonl
+          retention-days: 30
+
+  finalists:
+    needs: [refine]
+    if: ${{ !cancelled() && needs.refine.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: kalshi-replay-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+          key: kalshi-server-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ledger-s[12]-*
+          path: data/sweeps
+          merge-multiple: true
+      - name: Stage 3 (the finalists on every day), shard ${{ strategy.job-index }} of ${{ strategy.job-total }}
+        run: |
+          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$RS_DAYS"
+          set -a; . data/sweep-env/train.env; set +a
+          cp -rn data/sweep-env/history/. data/history/ 2>/dev/null || true
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json" RS_TRIALS_FILE="$GITHUB_WORKSPACE/data/sweep-env/component_trials.json"
+          node --import tsx research/randomSweep.ts run --stage 3 --from "$(ls data/sweeps/s[12]-*.jsonl | paste -sd, -)" --sample "$RS_SAMPLE" \
+            --shard "${{ strategy.job-index }}/${{ strategy.job-total }}" --hours 4.5 --recordings data/sweep-days --model data/models/model.json \
+            --tape-dir data/tapes --ledger data/sweeps/s3-${{ matrix.shard }}.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ledger-s3-${{ matrix.shard }}
+          path: data/sweeps/s3-${{ matrix.shard }}.jsonl
+          retention-days: 30
+
+  report:
+    needs: [finalists]
+    if: ${{ !cancelled() && needs.finalists.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: kalshi-replay-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+          key: kalshi-server-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ledger-s*
+          path: data/sweeps
+          merge-multiple: true
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Copy the last recorded days (read-only)
+        run: |
+          set -euo pipefail
+          mkdir -p data/recordings
+          vanished_ok() { local c=$?; [ $c -eq 24 ] && return 0; return $c; }
+          PAT=$(for i in $(seq "$RS_RECORDED_DAYS" -1 1); do printf -- "-name 'md-%s.jsonl*' -o " "$(date -u -d "$i days ago" +%F)"; done | sed -E 's/ -o $//')
+          ssh bot "cd ~/bot/data/recordings && find . -maxdepth 1 -type f \( $PAT \) -printf '%P\n'" > "$RUNNER_TEMP/rec.txt"
+          rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/rec.txt" bot:bot/data/recordings/ data/recordings/ || vanished_ok
+          echo "recorded days: $(ls data/recordings | sed -nE 's/^md-([0-9-]{10}).*/\1/p' | sort -u | paste -sd' ' -)"
+          rsync -a bot:bot/data/models/sweeps/replay-check-latest.json data/sweeps/ 2>/dev/null || echo "no replay check on the server yet"
+      - name: Stage 4 (the bot's recorded days) and the verdict
+        run: |
+          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$RS_DAYS"
+          set -a; . data/sweep-env/train.env; set +a
+          cp -rn data/sweep-env/history/. data/history/ 2>/dev/null || true
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json" RS_TRIALS_FILE="$GITHUB_WORKSPACE/data/sweep-env/component_trials.json"
+          # The recorded days start in the middle of the bot's run: the spot candles it held at the first one's start (its
+          # startup fetch from Coinbase, made for that midnight), else the TA network has too few bars to price with.
+          FIRST=$(ls data/recordings | sed -nE 's/^md-([0-9-]{10}).*/\1/p' | sort -u | head -n 1)
+          [ -n "$FIRST" ] && { node --import tsx research/seedCandles.ts --at "${FIRST}T00:00:00Z" --out data/sweeps/seed-candles.json || echo "spot candles for the recorded days: not fetched (the recorded ones only)"; }
+          export RS_SEED_CANDLES="$GITHUB_WORKSPACE/data/sweeps/seed-candles.json"
+          S123=$(ls data/sweeps/s[123]-*.jsonl | paste -sd, -)
+          # Real order books replay slowly: stage 4 gets a fixed slice of the job, and the verdict is written either way.
+          timeout 150m node --import tsx research/randomSweep.ts run --stage 4 --from "$S123" --sample "$RS_SAMPLE" --recorded data/recordings --hours 2 \
+            --recordings data/sweep-days --model data/models/model.json --ledger data/sweeps/s4.jsonl || echo "stage 4 failed or cut off"
+          node --import tsx research/randomSweep.ts report --from "$S123,data/sweeps/s4.jsonl" --sample "$RS_SAMPLE" --recordings data/sweep-days --out data/sweeps/random-kalshi.json --replay-check data/sweeps/replay-check-latest.json
+          [ -f data/sweeps/replay-check-latest.json ] && python3 -c "import json; r=json.load(open('data/sweeps/replay-check-latest.json')); print('latest replay check', r['from'][:16], 'to', r['to'][:16], 'close' if r['close'] else ('not checked yet: ' if not r['checked'] else 'NOT close: ') + '; '.join(r['why']))" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: random-kalshi
+          path: |
+            data/sweeps/random-kalshi.json
+            data/sweeps/s4.jsonl
+          retention-days: 30
+      - name: Copy the proposal to the server
+        run: |
+          ssh bot "mkdir -p ~/bot/data/models/sweeps"
+          rsync -a data/sweeps/random-kalshi.json bot:bot/data/models/sweeps/
+          echo "proposal copied to the server (data/models/sweeps/random-kalshi.json); nothing applied"

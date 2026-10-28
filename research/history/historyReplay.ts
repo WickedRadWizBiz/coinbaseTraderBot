@@ -22,7 +22,8 @@
 //                  carried at most 10 minutes)
 //   market / book / trade / result / alive
 //                  Kalshi's settled contracts (history/kalshi, 1-minute YES bid / ask candles): the market
-//                  a minute before it opens, a book snapshot each minute (nominal 100 contracts a side),
+//                  a minute before it opens, a book snapshot each minute (nominal 100 contracts a side; with
+//                  requote also at every print in between, following the index: requoteBetween),
 //                  marked alive at the prints in between while it is near the money, the minute's volume as
 //                  one trade at its last price, the result one second after the close
 //   tennis (tennisSeries)
@@ -69,7 +70,7 @@ import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
 import zlib from 'zlib';
-import { contractKind, priceContract, SETTLEMENT_AVG_SEC } from '../../bot/model/fairValue';
+import { contractKind, priceContract, SETTLEMENT_AVG_SEC, type MarketKind } from '../../bot/model/fairValue';
 import { dayGunzip } from '../../bot/marketdata/recordingFiles';
 import { loadSeries } from './candles';
 import { loadKalshiTrades, type KalshiHistMarket, type KalshiTrade } from './kalshiHistory';
@@ -106,6 +107,9 @@ export interface ReplayOpts {
   perpSpecs?: Record<string, PerpSpec>;
   /** Synthetic 15-minute and hourly contracts where Kalshi's history has none (default on). */
   synthetic?: boolean;
+  /** Real contracts' quotes follow the index at every print between their minute candles (requoteBetween) instead of
+   *  the minute's last quote standing until the next one (default off: a strategy backtest wants it on). */
+  requote?: boolean;
   /** Rebuild days already written (default: skip them unless the format version changed). */
   force?: boolean;
   log?: (m: string) => void;
@@ -468,7 +472,7 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
   // next day's file, so every file stays in time order.
   let carry: Ev[] = [];
   const tennisSeries = o.tennisSeries ?? [];
-  const base = `${REPLAY_VERSION}:${assets.join(',')}:${synthetic ? 'synth' : 'real'}:${tennisSeries.join(',')}`;
+  const base = `${REPLAY_VERSION}:${assets.join(',')}:${synthetic ? 'synth' : 'real'}:${tennisSeries.join(',')}${o.requote ? ':requote' : ''}`;
   const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
   // A day's inputs: the Kalshi history it reads (a later download reached it), how far the 1-minute
   // history and funding rates reach into it, and the dominance anchors near it.
@@ -531,6 +535,8 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
     const realHour = new Set(kAll.filter((m) => /D$/.test(m.series)).map((m) => `${m.asset}:${m.closeTime}`));
     // Every asset's spot print at each slot of the day (the dominance rebuild reads them all at once).
     const slotPx = new Map<string, Float64Array>();
+    // With requote: every asset's index print and market volatility at each slot (the real contracts' quotes between candles).
+    const slotIx = new Map<string, Float64Array>(), slotSig = new Map<string, Float64Array>();
     let perpAssets = 0;
     for (const [a, s] of st) {
       const pre = await s.spot.until(d0);
@@ -541,6 +547,8 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
       if (perpBars.length) perpAssets++;
       const px = spotBars.length ? new Float64Array(SLOTS).fill(NaN) : undefined;
       if (px) slotPx.set(a, px);
+      const ixs = px && o.requote ? new Float64Array(SLOTS).fill(NaN) : undefined, sgs = ixs ? new Float64Array(SLOTS).fill(NaN) : undefined;
+      if (ixs && sgs) { slotIx.set(a, ixs); slotSig.set(a, sgs); }
       if (spotBars.length) {
         // Backfill: the last 300 closed bars of every timeframe before the day starts.
         const r5 = aggregate(s.recent.slice(-5 * BACKFILL), 5 * MIN);
@@ -581,6 +589,7 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
           ev.push({ t, k: 'index', asset: a, value: iv, ts: t, src: 'kalshi', hist: 1 });
           ev.push({ t, k: 'spot', asset: a, value: v, ts: t, hist: 1 });
           if (px) px[slot0 + k] = v;
+          if (ixs && sgs) { ixs[slot0 + k] = iv; sgs[slot0 + k] = s.vMkt && s.vMkt > 0 ? Math.sqrt(s.vMkt) : NaN; }
           if (pprints) {
             const pv = pprints[k][1];
             ev.push({ t, k: 'perp', ticker: spec.ticker ?? `${a}-PERP`, asset: a, ts: t, bid: roundTo(pv * (1 - half), spec.tickSize, -1), ask: roundTo(pv * (1 + half), spec.tickSize, 1), last: pv, mark: pv,
@@ -632,13 +641,16 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
       const kind = contractKind(m.series, m.strikeType);
       ev.push({ t: m.openTime - MIN, k: 'market', ticker: m.ticker, series: m.series, asset: m.asset, openTime: m.openTime, closeTime: m.closeTime, strike: m.strike, cap: m.cap, kind, event: m.event, tickSize: 0.01, hist: 1 });
       const cs = (m.candles ?? []).filter((c) => c.ts >= m.openTime && c.ts <= m.closeTime);
+      const ixs = slotIx.get(m.asset), sgs = slotSig.get(m.asset);
       for (let i = 0; i < cs.length; i++) {
         const c = cs[i];
         if (c.bidC !== null && c.askC !== null && c.askC > c.bidC) {
           ev.push({ t: c.ts, k: 'book', ticker: m.ticker, bids: [{ price: c.bidC, size: 100 }], asks: [{ price: c.askC, size: 100 }], ts: c.ts });
-          // The minute's last quote stands until the next one (near the money, where a network would use it).
+          // The minute's last quote stands until the next one (near the money, where a network would use it), or with
+          // requote follows the index until then.
           const mid = (c.bidC + c.askC) / 2, until = Math.min(cs[i + 1]?.ts ?? m.closeTime, m.closeTime);
           if (mid >= 0.03 && mid <= 0.97) for (let at = c.ts + 15_000; at < until; at += 15_000) { const l = alive.get(at); if (l) l.push(m.ticker); else alive.set(at, [m.ticker]); }
+          if (ixs && sgs) requoteBetween(ev, { ...m, kind }, c.bidC, c.askC, c.ts, until, d0, ixs, sgs);
         }
         if (c.volume && c.volume > 0 && c.last !== null) ev.push({ t: c.ts, k: 'trade', ticker: m.ticker, price: c.last, count: c.volume, ts: c.ts - 1 });
       }
@@ -722,6 +734,46 @@ function synthTick(a: string, s: AssetState, t: number, iv: number, ev: Ev[], re
     ev.push({ t, k: 'book', ticker: c.ticker, bids: [{ price: bid, size: 100 }], asks: [{ price: ask, size: 100 }] });
   }
   return listed;
+}
+
+const logit = (p: number) => { const q = Math.min(0.995, Math.max(0.005, p)); return Math.log(q / (1 - q)); };
+
+/** A real contract's quotes between two of its minute candles (`t0` to `until`), at every print of the day's slots
+ *  (`ixs`: the index, `sgs`: the market volatility). Kalshi's history keeps one quote a minute, but the market follows
+ *  the index in between: a replay that left the minute's quote standing let a backtest buy and sell at prices up to
+ *  45 s old (the random sweeps of Oct 25 turned that into +$400k on $150). The quote moves with a no-skill fair value
+ *  of the contract (synthTick's), keeping the market's own view from the candle: its logit offset from that fair value
+ *  and its spread. The candles themselves stay as they were. */
+export function requoteBetween(ev: Ev[], m: { ticker: string; kind: MarketKind; strike: number | null; cap: number | null; closeTime: number }, bid0: number, ask0: number, t0: number, until: number, d0: number, ixs: Float64Array, sgs: Float64Array): void {
+  const slot = (t: number) => { const k = TICKS.indexOf((t - d0) % MIN); return t >= d0 && k >= 0 ? Math.floor((t - d0) / MIN) * TICKS.length + k : -1; };
+  const terms = { kind: m.kind, strike: m.strike ?? undefined, cap: m.cap ?? undefined };
+  const fvAt = (t: number): number | undefined => {
+    const i = slot(t);
+    if (i < 0 || i >= ixs.length || !(ixs[i] > 0) || !(sgs[i] > 0)) return undefined;
+    const tau = (m.closeTime - t) / 1000;
+    if (tau <= 0) return undefined;
+    let obs: { avg: number; n: number } | undefined;
+    if (tau <= SETTLEMENT_AVG_SEC) {
+      // The settlement average so far, from the prints of its window.
+      const prints: Array<[number, number]> = [];
+      for (let at = t - (SETTLEMENT_AVG_SEC + 20) * 1000; at <= t; at += 1000) { const j = slot(at); if (j >= 0 && j < ixs.length && ixs[j] > 0) prints.push([at, ixs[j]]); }
+      obs = windowAverage(prints, m.closeTime, t);
+      if (!obs) return undefined;
+    }
+    return priceContract(terms, { spot: ixs[i], sigmaPerSqrtSec: sgs[i], tauSec: tau, observedAvg: obs?.avg, observedCount: obs?.n, nu: MARKET_NU })?.pYes;
+  };
+  const p0 = fvAt(t0);
+  if (p0 === undefined) return;
+  const off = logit((bid0 + ask0) / 2) - logit(p0);
+  const w = Math.max(1, Math.round((ask0 - bid0) * 100));
+  for (let t = t0 + 1000; t < until; t += 1000) {
+    if (slot(t) < 0) continue;
+    const p = fvAt(t);
+    if (p === undefined) continue;
+    const mid = 1 / (1 + Math.exp(-(logit(p) + off)));
+    const bid = Math.min(99 - w, Math.max(1, Math.round(mid * 100 - w / 2)));
+    ev.push({ t, k: 'book', ticker: m.ticker, bids: [{ price: bid / 100, size: 100 }], asks: [{ price: (bid + w) / 100, size: 100 }], ts: t });
+  }
 }
 
 /** Kalshi's settled tennis match markets whose match starts on this day, as the live feed would show them:
