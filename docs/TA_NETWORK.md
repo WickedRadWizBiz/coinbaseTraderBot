@@ -366,6 +366,7 @@ This model ships as `params/ta_net.json`. The server's pipeline continues the to
 | `TA_NET_MAX_ROUNDS_PER_RUN` | `36` | Rounds per pipeline run while the first tournament runs (0 = all at once). |
 | `TA_NET_RESTART_EVERY` | `6` | Every N rounds the worst network restarts from scratch with random settings (0 = never). |
 | `TAKER_FLOW` | `true` | Listen to the Coinbase trade feed for live taker order flow. |
+| `SPOT_BOOK_RECORD_SEC` | `15` | Record Coinbase's spot order book for every tracked coin this often (`spot_book` recording lines, `SPOT_BOOK_DEPTH` levels a side, default 10); 0 = off. About 5 MB a day gzipped for 7 coins. |
 | `COINBASE_WS_URL` | `wss://ws-feed.exchange.coinbase.com` | Coinbase Exchange public WebSocket. |
 | `HISTORY_DIR` | `data/history` | The candle store. |
 | `HISTORY_AUTO_UPDATE` | `true` | Refresh Binance and Coinbase data in the daily pipeline. |

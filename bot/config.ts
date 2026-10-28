@@ -299,6 +299,10 @@ export interface Config {
   coinbaseRestUrl: string;
   /** Coinbase public trade feed (taker order flow for the candles) and its URL. */
   takerFlow: boolean;
+  /** Record Coinbase's spot order book (top spotBookDepth levels a side) for every tracked coin every this many seconds
+   *  (SPOT_BOOK_RECORD_SEC; 0 = off): the depth the exit and sizing research needs, which the recordings lacked. */
+  spotBookRecordSec: number;
+  spotBookDepth: number;
   coinbaseWsUrl: string;
   binanceWsUrl: string;
   coingeckoUrl: string;
@@ -1161,6 +1165,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     taStudyPath: path.resolve(env.TA_STUDY_PATH ?? './params/ta_study.json'),
     coinbaseRestUrl: env.COINBASE_REST_URL ?? 'https://api.exchange.coinbase.com',
     takerFlow: bool(env, 'TAKER_FLOW', true),
+    spotBookRecordSec: num(env, 'SPOT_BOOK_RECORD_SEC', 15, 0, 3600),
+    spotBookDepth: num(env, 'SPOT_BOOK_DEPTH', 10, 1, 50),
     coinbaseWsUrl: env.COINBASE_WS_URL ?? 'wss://ws-feed.exchange.coinbase.com',
     // Binance.com blocks US IPs; the market-data-only host usually works. Override if needed.
     binanceWsUrl: env.BINANCE_WS_URL ?? 'wss://data-stream.binance.vision/ws/!miniTicker@arr',
