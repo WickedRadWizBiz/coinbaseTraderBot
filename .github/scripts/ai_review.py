@@ -1,9 +1,14 @@
 import os
+import time
+import random
 import subprocess
 import requests
 import traceback
 from google import genai
 from google.genai import types
+
+UNAVAILABLE_MODELS = set()
+
 
 def get_pr_diff() -> str:
     base_sha = os.environ.get("PR_BASE_SHA")
@@ -11,6 +16,7 @@ def get_pr_diff() -> str:
     cmd = ["git", "diff", f"{base_sha}...{head_sha}"] if (base_sha and head_sha) else ["git", "diff", "HEAD^", "HEAD"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     return result.stdout
+
 
 def post_github_comment(body: str):
     token = os.environ.get("GITHUB_TOKEN")
@@ -23,36 +29,62 @@ def post_github_comment(body: str):
     url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
     headers = {
         "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json"
+        "Accept": "application/vnd.github+json",
     }
     response = requests.post(url, json={"body": body}, headers=headers)
     print(f"Posted comment status: {response.status_code}")
 
-def generate_deep_review(client: genai.Client, prompt: str) -> tuple[str, str]:
-    """
-    Attempts Gemini 4 Argon at HIGH thinking first; falls back to Gemini 3.8 Flash at HIGH thinking
-    if the API key tier only permits gemini-3.8-flash.
-    """
-    high_thinking_cfg = types.GenerateContentConfig(
-        max_output_tokens=65536,
-        thinking_config=types.ThinkingConfig(thinking_level="high")
-    )
-    try:
-        print("Attempting Tier 2 review with gemini-4-argon (thinking_level=high)...")
-        resp = client.models.generate_content(
-            model="gemini-4-argon",
-            contents=prompt,
-            config=high_thinking_cfg
-        )
-        return resp.text, "gemini-4-argon (High Thinking)"
-    except Exception as err:
-        print(f"gemini-4-argon unavailable on this key ({err}). Using gemini-3.8-flash (thinking_level=high)...")
-        resp = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
-            config=high_thinking_cfg
-        )
-        return resp.text, "gemini-3.8-flash (High Thinking)"
+
+def generate_text_with_retry(
+    client: genai.Client,
+    prompt: str,
+    thinking_level: str = "low",
+    prefer_argon: bool = False,
+    max_retries: int = 6,
+) -> tuple[str, str]:
+    candidate_models = ["gemini-4-argon", "gemini-3.8-flash"] if prefer_argon else ["gemini-3.8-flash"]
+    candidate_models = [m for m in candidate_models if m not in UNAVAILABLE_MODELS]
+
+    for model_name in candidate_models:
+        for attempt in range(1, max_retries + 1):
+            active_thinking = "medium" if (thinking_level == "high" and attempt >= 5) else thinking_level
+            token_cap = 16384 if active_thinking == "medium" else 32768
+
+            try:
+                print(f"[{model_name}] Attempt {attempt}/{max_retries} (thinking={active_thinking})...")
+                resp = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        max_output_tokens=token_cap,
+                        thinking_config=types.ThinkingConfig(thinking_level=active_thinking),
+                    ),
+                )
+                return resp.text, f"{model_name} ({active_thinking.capitalize()} Thinking)"
+
+            except Exception as err:
+                err_str = str(err).upper()
+                if any(code in err_str for code in ("404", "NOT_FOUND", "403", "PERMISSION_DENIED")):
+                    print(f"Model {model_name} unavailable on this key tier. Switching to fallback...")
+                    UNAVAILABLE_MODELS.add(model_name)
+                    break
+
+                is_transient = any(
+                    code in err_str
+                    for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "502", "504", "OVERLOADED")
+                )
+                if is_transient and attempt < max_retries:
+                    sleep_sec = min(75.0, (5.0 * (1.8 ** (attempt - 1))) + random.uniform(1.0, 5.0))
+                    print(f"Transient API spike ({err}). Retrying in {sleep_sec:.1f}s...")
+                    time.sleep(sleep_sec)
+                    continue
+
+                if model_name != candidate_models[-1]:
+                    break
+                raise
+
+    raise RuntimeError("All model attempts and retries exhausted.")
+
 
 def main():
     try:
@@ -72,17 +104,11 @@ def main():
             "Filter out routine boilerplate formatting updates and cleanly summarize the core "
             "algorithmic, state machine, and trading logic changes:\n\n" + diff[:25000]
         )
-
-        flash_response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=flash_prompt,
-            config=types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_level="low")
-            )
+        parsed_summary, _ = generate_text_with_retry(
+            client, flash_prompt, thinking_level="low", prefer_argon=False
         )
-        parsed_summary = flash_response.text
 
-        print("Step 2: Conducting deep code vetting at High thinking level...")
+        print("Step 2: Conducting deep code vetting...")
         deep_prompt = (
             "You are a rigorous Principal Software Engineer and Quant Developer reviewing a high-stakes algorithmic trading bot. "
             "Perform an exhaustive technical review focusing heavily on:\n"
@@ -92,8 +118,9 @@ def main():
             f"Parsed Logic Summary:\n{parsed_summary}\n\n"
             f"Raw Code Changes (Diff):\n{diff[:20000]}"
         )
-
-        review_output, model_used = generate_deep_review(client, deep_prompt)
+        review_output, model_used = generate_text_with_retry(
+            client, deep_prompt, thinking_level="high", prefer_argon=True
+        )
 
         final_comment = (
             "### 🤖 Gemini Architecture & Code Review\n\n"
@@ -106,6 +133,7 @@ def main():
         print("An error occurred during the AI review pipeline:")
         traceback.print_exc()
         exit(1)
+
 
 if __name__ == "__main__":
     main()
