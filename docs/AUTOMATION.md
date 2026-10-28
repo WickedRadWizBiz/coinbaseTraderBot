@@ -13,9 +13,12 @@ You only need to do the things in **"What you still do by hand"** below.
 
 ### 1. It records data, all the time
 
-While the bot runs in any mode (paper, shadow or live), it writes every book update, trade, index tick and settlement to `data/recordings/md-YYYY-MM-DD.jsonl`. This is what everything below learns from, and the longer the bot runs, the more of the whole system becomes testable (see 8 below).
+While the bot runs in any mode (paper, shadow or live), it writes every book update, trade, index tick and settlement to `data/recordings/md-YYYY-MM-DD.jsonl.gz`. This is what everything below learns from, and the longer the bot runs, the more of the whole system becomes testable (see 8 below).
 
-- **Compression:** only the newest `RECORDINGS_GZIP_AFTER_DAYS` days (1: today) stay plain. Yesterday is gzipped to `md-YYYY-MM-DD.jsonl.gz` right after midnight, about a tenth of the size, so months of recordings fit on the server; a plain day can pass 20 GB. Every replay, trainer and sweep reads both forms.
+- **Compression:** the day file is written as gzip while it is recorded (`RECORDINGS_GZIP_LIVE`): the lines of the last few seconds (10 s, or 2 MB) become one gzip member, appended whole. A day takes about a tenth of the plain size at every hour; a plain day could pass 20 GB by midnight and push the older days off the disk. A reader of today's file only ever meets whole members, and the lines still in memory are written at shutdown (a crash loses at most those few seconds).
+  - A day begun as a plain file (`RECORDINGS_GZIP_LIVE=false`, or a bot from before gzip writing) stays plain until midnight. Then it is gzipped whole: only the newest `RECORDINGS_GZIP_AFTER_DAYS` days (1: today) stay plain. A day never splits over two files, so switching takes effect with the next day.
+  - Every replay, trainer, sweep and diagnostic script reads both forms, today's file included.
+- **Kept days:** the newest `RECORDINGS_KEEP_DAYS` (20) days are kept, today included, and older days are deleted (the plan of Oct 24: 14 to 20 days on the server for the sweep's checks on real order books). `0` keeps days until the disk floor below.
 - **Disk floor:** if free space where the recordings live drops below `RECORDINGS_MIN_FREE_GB` (5), the bot deletes the oldest recorded days until twice that is free, and sends an alert naming the days.
   - The newest two days are kept, unless the disk is still below a quarter of the floor. Then yesterday goes too, and only today is kept.
   - A full disk stops the bot from saving its state and from starting at all, which is worse than losing training days.
@@ -299,6 +302,8 @@ These can't be automated, or deliberately aren't.
 | `RECORDINGS_GZIP_AFTER_DAYS` | `1` | Recorded days kept plain, today included; older days are gzipped (0 = never). |
 | `RECORDINGS_MIN_FREE_GB` | `5` | Below this much free space: alert, and delete the oldest recorded days until twice this is free. |
 | `RECORDINGS_PRUNE` | `true` | `false` = alert only, never delete recordings. |
+| `RECORDINGS_GZIP_LIVE` | `true` | Write each day's recording as gzip while it is recorded; `false` = plain until midnight (from the next new day). |
+| `RECORDINGS_KEEP_DAYS` | `20` | Recorded days kept, today included; older days are deleted (0 = no cap, at least 2). |
 | `AUTO_TRAIN_SNN_PBT_DAYS` / `AUTO_TRAIN_SNN_PBT_EVERY_DAYS` | `7` / `30` | SNN tournaments: days replayed, how often they rerun (docs/EVOLUTION.md has every tournament setting). On the history replay, a generation is that many days of weeks the network has never trained on (docs/LAPTOP_TRAINING.md, history ledger). |
 | `TOURNAMENT_PARENTS` / `TOURNAMENT_BREED_EVERY` / `TOURNAMENT_MUTATION` / `TOURNAMENT_ISLANDS` | `3` / `4` / `0.03` / `1` | Genetic breeding in tournaments of 6+ networks (the laptop's): parents per generation (0 = off), rounds per generation, offspring mutation, islands (docs/EVOLUTION.md). |
 | `GP_EVERY_DAYS` / `GP_POPULATION` / `GP_GENERATIONS` / `GP_ASSETS` / `GP_CROSS` | `7` / `1000` / `15` / five coins / `BTC,ETH` | Genetic programming of formulas (docs/EVOLUTION.md has the fitness, dead band and gate settings). |

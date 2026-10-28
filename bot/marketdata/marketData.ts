@@ -13,6 +13,7 @@ import { parsePriceRanges } from '../kalshi/priceGrid';
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 import WebSocket from 'ws';
 import type { Config } from '../config';
 import type { FeeSchedule } from '../fees';
@@ -53,29 +54,115 @@ export interface ActiveMarket extends MarketInfo {
   recordOnly?: boolean;
 }
 
+/** The day file is written as gzip (RECORDINGS_GZIP_LIVE): the lines of the last few seconds become one gzip member,
+ *  appended whole, so the day takes about a tenth of the disk at every hour (a plain day passed 20 GB by midnight and
+ *  pushed the older days off the disk) and a reader of today's file only ever meets whole members. */
+export interface RecorderOpts {
+  gzip?: boolean;
+  /** A member at least this often (ms), and sooner once this many bytes of lines wait. */
+  memberMs?: number;
+  memberBytes?: number;
+  now?: () => number;
+}
+
+type Member = { file: string; text: string };
+
 export class Recorder {
   private day = '';
+  private file = '';
   private stream: fs.WriteStream | null = null;
+  private lines: string[] = [];
+  private bytes = 0;
+  private timer: NodeJS.Timeout | null = null;
+  private queue: Member[] = [];
+  private busy: Member | null = null;
+  private readonly warned = new Set<string>();
   private closed = false;
-  constructor(private readonly dir: string) { fs.mkdirSync(dir, { recursive: true }); }
+  private readonly gzip: boolean;
+  private readonly memberMs: number;
+  private readonly memberBytes: number;
+  private readonly now: () => number;
+  constructor(private readonly dir: string, o: RecorderOpts = {}) {
+    fs.mkdirSync(dir, { recursive: true });
+    this.gzip = o.gzip ?? true;
+    this.memberMs = o.memberMs ?? 10_000;
+    this.memberBytes = o.memberBytes ?? 2 * 1024 * 1024;
+    this.now = o.now ?? Date.now;
+  }
   write(kind: string, data: Record<string, unknown>): void {
     // Sockets still draining at shutdown deliver messages after close(): dropped (writing to the ended
     // stream raised an unhandled 'error' and the bot exited with status 1 on every deploy).
     if (this.closed) return;
-    const now = Date.now();
+    const now = this.now();
     const day = new Date(now).toISOString().slice(0, 10);
-    if (day !== this.day) {
-      this.stream?.end();
-      this.day = day;
-      const file = path.join(this.dir, `md-${day}.jsonl`);
-      this.stream = fs.createWriteStream(file, { flags: 'a', mode: 0o600 });
-      // Recording is best effort: a disk error is logged (once per file) instead of taking the bot down.
-      let warned = false;
-      this.stream.on('error', (e) => { if (!warned) { warned = true; log.warn('recording write failed', { file, error: String(e) }); } });
-    }
-    this.stream!.write(JSON.stringify({ t: now, k: kind, ...data }) + '\n');
+    if (day !== this.day) this.open(day);
+    const line = JSON.stringify({ t: now, k: kind, ...data }) + '\n';
+    if (this.stream) { this.stream.write(line); return; }
+    this.lines.push(line);
+    this.bytes += line.length;
+    if (this.bytes >= this.memberBytes) this.cut();
+    else this.timer ??= setTimeout(() => this.cut(), this.memberMs).unref();
   }
-  close(): void { this.closed = true; this.stream?.end(); }
+  /** A new day's file. A day keeps the form it was begun in, so it never splits over two files: one begun plain (gzip
+   *  writing off, or a bot from before it) stays plain until midnight, when it is gzipped whole as before. */
+  private open(day: string): void {
+    this.cut();
+    this.stream?.end();
+    this.stream = null;
+    this.day = day;
+    const plain = path.join(this.dir, `md-${day}.jsonl`), gz = `${plain}.gz`;
+    this.file = fs.existsSync(gz) ? gz : fs.existsSync(plain) || !this.gzip ? plain : gz;
+    if (this.file !== plain) return;
+    this.stream = fs.createWriteStream(plain, { flags: 'a', mode: 0o600 });
+    this.stream.on('error', (e) => this.warn(plain, e));
+  }
+  /** The lines so far become one member: compressed off the event loop, appended in order. */
+  private cut(): void {
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    if (!this.lines.length) return;
+    this.queue.push({ file: this.file, text: this.lines.join('') });
+    this.lines = [];
+    this.bytes = 0;
+    this.pump();
+  }
+  private pump(): void {
+    if (this.busy || this.closed || !this.queue.length) return;
+    const m = (this.busy = this.queue.shift()!);
+    zlib.gzip(m.text, (err, gz) => {
+      if (this.busy !== m) return; // close() wrote it already
+      this.busy = null;
+      if (err) this.warn(m.file, err); else this.append(m.file, gz);
+      this.pump();
+    });
+  }
+  /** One member in one write. A write cut short (a full disk) is undone: a broken member would hide every member
+   *  appended after it. Recording is best effort: a disk error is logged (once per file) instead of taking the bot down. */
+  private append(file: string, gz: Buffer): void {
+    let size = 0;
+    try { size = fs.statSync(file).size; } catch { /* a new file */ }
+    try { fs.appendFileSync(file, gz, { mode: 0o600 }); } catch (e) {
+      try { fs.truncateSync(file, size); } catch { /* nothing was written */ }
+      this.warn(file, e);
+    }
+  }
+  private warn(file: string, e: unknown): void {
+    if (this.warned.has(file)) return;
+    this.warned.add(file);
+    log.warn('recording write failed', { file, error: String(e) });
+  }
+  /** Shutdown: the lines still in memory are compressed and written now, in order (the process exits right after). */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.cut();
+    const left = [...(this.busy ? [this.busy] : []), ...this.queue];
+    this.busy = null;
+    this.queue = [];
+    for (const m of left) {
+      try { this.append(m.file, zlib.gzipSync(m.text)); } catch (e) { this.warn(m.file, e); }
+    }
+    this.stream?.end();
+  }
 }
 
 export class MarketData extends EventEmitter {

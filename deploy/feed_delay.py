@@ -6,17 +6,32 @@ Every recording carries t (when the bot processed it) and, for Kalshi trades, th
 carry their source time too. A backlog (event-loop stalls, compressed frames queued) shows up as large delays.
 Usage: feed_delay.py <recordings dir> [days=3]
 """
-import collections, glob, json, os, sys, time
+import collections, glob, gzip, json, os, sys, time
+
+
+def opener(f):
+    """A day file, plain or gzipped (today's is written as gzip while it is recorded)."""
+    return gzip.open(f, 'rb') if f.endswith('.gz') else open(f, 'rb')
+
+
+def lines_of(fh):
+    """Lines of an open day file; today's gzipped file may end in a member still being written."""
+    try:
+        yield from fh
+    except EOFError:
+        return
 
 rec_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser('~/bot/data/recordings')
 days = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 first_day = time.strftime('%Y-%m-%d', time.gmtime(time.time() - (days - 1) * 86400))
-files = sorted(f for f in glob.glob(os.path.join(rec_dir, 'md-*.jsonl*')) if os.path.basename(f)[3:13] >= first_day)
+files = sorted(f for f in glob.glob(os.path.join(rec_dir, 'md-*.jsonl*')) if os.path.basename(f)[3:13] >= first_day and not f.endswith('.tmp'))
+plain_days = {os.path.basename(f)[3:13] for f in files if f.endswith('.jsonl')}
+files = [f for f in files if f.endswith('.jsonl') or os.path.basename(f)[3:13] not in plain_days]  # a half-finished gzip
 lag = collections.defaultdict(lambda: collections.defaultdict(list))  # hour -> feed -> [ms]
 t0 = time.time()
 for f in files:
-    with open(f, 'rb') as fh:
-        for line in fh:
+    with opener(f) as fh:
+        for line in lines_of(fh):
             head = line[:40]
             if b'"k":"trade"' in head: feed = 'kalshi trade'
             elif b'"k":"spot"' in head: feed = 'coinbase'

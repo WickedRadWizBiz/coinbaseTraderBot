@@ -71,6 +71,7 @@ import path from 'path';
 import readline from 'readline';
 import zlib from 'zlib';
 import { contractKind, priceContract, SETTLEMENT_AVG_SEC, type MarketKind } from '../../bot/model/fairValue';
+import { dayGunzip } from '../../bot/marketdata/recordingFiles';
 import { loadSeries } from './candles';
 import { loadKalshiTrades, type KalshiHistMarket, type KalshiTrade } from './kalshiHistory';
 import { anchorsIn, dominanceAnchors, DominanceReplay, type DomState } from './dominanceReplay';
@@ -330,7 +331,7 @@ export async function perpSpecsFromRecordings(dir: string, assets: string[]): Pr
   const files = fs.readdirSync(dir).filter((f) => /^md-\d{4}-\d{2}-\d{2}\.jsonl(\.gz)?$/.test(f)).sort().reverse().slice(0, 2);
   for (const f of files) {
     const input = fs.createReadStream(path.join(dir, f));
-    const rl = readline.createInterface({ input: f.endsWith('.gz') ? input.pipe(zlib.createGunzip()) : input, crlfDelay: Infinity });
+    const rl = readline.createInterface({ input: f.endsWith('.gz') ? input.pipe(dayGunzip()) : input, crlfDelay: Infinity });
     const spreads: Record<string, number[]> = {};
     for await (const l of rl) {
       if (!l.includes('"k":"perp"')) continue;
