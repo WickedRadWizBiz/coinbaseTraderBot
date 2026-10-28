@@ -523,7 +523,9 @@ export function nearbyVerdict(runs: Array<Pick<ReplayCheck, 'bankroll' | 'bankro
   const all = [...(o.history ?? []).filter((h) => o.stretch && h.code === o.stretch.code && !overlaps(h, o.stretch)), ...(entry ? [entry] : [])];
   const T = all.length ? { stretches: all.length, hours: all.reduce((a, h) => a + h.hours, 0), paper: all.reduce((a, h) => a + h.paper, 0), median: all.reduce((a, h) => a + h.median, 0), sd: Math.sqrt(all.reduce((a, h) => a + h.sd ** 2, 0)) } : undefined;
   const tally = T ? { ...T, z: T.sd > 0 ? (T.paper - T.median) / T.sd : null } : undefined;
-  const test = (o.test ?? 'luck') === 'luck' && tally ? 'luck' : 'pct';
+  // Fewer than 3 replays of this stretch finished (the others cut off or out of memory): it falls back to the median within
+  // 25%, so the stretches before it never stand in for it.
+  const test = (o.test ?? 'luck') === 'luck' && entry ? 'luck' : 'pct';
   const nearby = { runs: rows, median: med, contractsMedian, min, max, paperInside: paper.pnl >= min - 1e-9 && paper.pnl <= max + 1e-9, sd, ...(tally ? { tally } : {}), test } as NonNullable<ReplayCheck['nearby']>;
   const v = verdict({ ...runs[0].replay, pnl: med, contracts: contractsMedian }, paper, tol);
   if (test === 'pct') return { nearby, close: v.close, pnlGap: v.pnlGap, why: v.why.map((w) => `median of ${rows.length} replays: ${w}`), entry };

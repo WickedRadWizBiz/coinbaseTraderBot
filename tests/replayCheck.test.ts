@@ -500,6 +500,10 @@ test('replay check: the luck test holds paper within 2 standard deviations of th
   const two = nearbyVerdict(runs.slice(0, 2), paper, { stretch, prices });
   assert.equal(two.entry, undefined);
   assert.equal(two.nearby.test, 'pct');
+  // So does a stretch checked after others: they don't stand in for it.
+  const twoAfter = nearbyVerdict(runs.slice(0, 2), paper, { stretch, prices, history: earlier });
+  assert.equal(twoAfter.nearby.test, 'pct');
+  assert.ok(twoAfter.why.length > 0 && twoAfter.why.every((w) => w.startsWith('median of 2 replays')), twoAfter.why.join('; '));
   // Test 'pct' on request.
   assert.equal(nearbyVerdict(runs, paper, { stretch, prices, history: earlier, test: 'pct' }).close, true);
 });
