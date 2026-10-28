@@ -572,6 +572,8 @@ export interface ReplayCheckOpts {
   /** The paper bot's take-profit-bench.json and accuracy_gate.json now: the replay starts from them as they stood when
    *  the stretch began (benchAt, gateAt). */
   paperTpBench?: string; paperAccuracyGate?: string;
+  /** Paper's trades.jsonl (settled entries): the optimal f cap starts from those settled before the stretch. */
+  paperTrades?: string;
   /** The replay's take-profit benches on its own scoreboard instead of following paper's bench (benchTimeline). */
   ownBench?: boolean;
   /** The spot candles the bot held when the replay starts (research/seedCandles.ts, fetched by --fetch-seed for that
@@ -666,11 +668,19 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const seed = readSeedCandles(o.seedCandles, startMs);
   if (seed) seeded.push(`spot candles as the bot fetches them (${new Set(seed.sets.map((c) => c.asset)).size} coins, ${seed.sets.reduce((n, c) => n + c.rows.length, 0)} bars${seed.missing.length ? `; not fetched: ${seed.missing.join(', ')}` : ''})`);
   else if (o.seedCandles) seeded.push('spot candles: none fetched for this start (the recorded ones only)');
+  let ofSeed: Array<{ ts: number; ticker: string; cost: number; count: number; won: boolean }> | undefined;
+  if (o.paperTrades && fs.existsSync(o.paperTrades)) {
+    ofSeed = [];
+    for (const l of fs.readFileSync(o.paperTrades, 'utf8').split('\n')) { try { const r = l ? JSON.parse(l) : undefined; if (r && r.ts < from && r.book === 'crypto') ofSeed.push(r); } catch { /* partial first line */ } }
+    seeded.push(`optimal f (${ofSeed.length} settled entries before the stretch)`);
+  }
   const match = priceMatcher(audit.prices, from, to);
   const r = await runBacktest(dir, model, S, cfg.risk, bankroll, {
     exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
     sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd }, accuracyGate: S.accuracyGate,
     takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile, ...(follow ? { follow } : {}) }, exitBench: S.exitBench, accuracyGateFile: gateFile, startMs, tradeFromMs: from,
+    optimalF: { ...cfg.optimalF, ...(ofSeed ? { seed: ofSeed } : {}) },
+    takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile, ...(follow ? { follow } : {}) }, accuracyGateFile: gateFile, startMs, tradeFromMs: from,
     dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, refillUsd: cfg.paperBankrollUsd, sessionEdge: cfg.sessionEdge, onEval: match.onEval, makerMarkouts: o.makerMarkouts,
     volProfile: models.volProfile, applyVolSeasonality: Boolean(models.volProfile), volModel: models.volModel, fillModel: models.fillModel, calendar: models.calendar,
     taNet: true, trials: models.trials, marketContext: true, ...(o.tickPhaseMs !== undefined ? { tickPhaseMs: o.tickPhaseMs } : {}), ...(seed ? { seedCandles: seed } : {}),
@@ -778,7 +788,7 @@ async function main(): Promise<void> {
     paperGuard: arg('paper-guard', '') || undefined, killOverride: arg('kill-override', 'true') !== 'false',
     makerMarkouts: arg('maker-markouts', '') && fs.existsSync(arg('maker-markouts', '')) ? (JSON.parse(fs.readFileSync(arg('maker-markouts', ''), 'utf8')) as unknown[]).map(Number).filter(Number.isFinite) : undefined,
     paperProbation: arg('paper-probation', '') || undefined, paperTrials: arg('paper-trials', '') || undefined,
-    paperTpBench: arg('paper-tp-bench', '') || undefined, paperAccuracyGate: arg('paper-accuracy-gate', '') || undefined,
+    paperTpBench: arg('paper-tp-bench', '') || undefined, paperAccuracyGate: arg('paper-accuracy-gate', '') || undefined, paperTrades: arg('paper-trades', '') || undefined,
     ownBench: process.argv.includes('--own-bench'), seedCandles: arg('seed-candles', '') || undefined,
   });
   const out = arg('out', '');

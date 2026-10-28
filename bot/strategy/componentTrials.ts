@@ -11,9 +11,9 @@
 //   - testing: from the start, until the difference is significant either way. Paper prices as before meanwhile (the
 //     trained model in, the others out), except for the trials in TRIAL_PAPER_START (the rule book, the owner's
 //     choice: it trades in paper while it is tested);
-//   - on: better at one-sided p <= TRIAL_P over at least TRIAL_MIN_WINDOWS settlements: paper's prices include it;
-//   - off: worse at one-sided p <= TRIAL_P over at least TRIAL_MIN_WINDOWS settlements: paper prices without it.
-// Live never uses a trial's verdict: live prices as it did before the trials. The scores keep coming either way: a
+//   - on: better at one-sided p <= TRIAL_P over at least TRIAL_MIN_WINDOWS settlements: the prices include it;
+//   - off: worse at one-sided p <= TRIAL_P over at least TRIAL_MIN_WINDOWS settlements: the bot prices without it.
+// Paper and live both follow the verdicts (the owner, Oct 28: paper behaves as live). The scores keep coming: a
 // component that is on goes off once it is significantly worse, and one that is off comes back on once it is better.
 //
 // The contributions (bot/engine.ts):

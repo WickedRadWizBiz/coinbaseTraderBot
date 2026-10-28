@@ -388,13 +388,15 @@ export async function trainPerpMain(argOf: (k: string, d: string) => string = cl
   const dir = argOf('recordings', 'data/recordings');
   let rows = await buildPerpDataset(dir, { everySec, horizonMin, cacheDir: argOf('cache', '') || undefined, workers: Number(argOf('workers', String(workerCount()))), log: (m) => console.log(m) });
   // --holdout ledger: the history ledger's held-out weeks are left out (champion contests are run there), and
-  // so are the rows just before them whose label (the return over the horizon) ends inside one.
-  const held = argOf('holdout', '') === 'ledger' ? holdoutDays(recordingFiles(dir).map((f) => f.day)) : undefined;
+  // so are the rows just before them whose label (the return over the horizon) ends inside one. --holdout-from DAY:
+  // the same for every recorded day from DAY on (the execution backtest replays them).
+  const from = argOf('holdout-from', '');
+  const held = argOf('holdout', '') === 'ledger' ? holdoutDays(recordingFiles(dir).map((f) => f.day)) : from ? new Set(recordingFiles(dir).map((f) => f.day).filter((d) => d >= from)) : undefined;
   const dayOf = (t: number) => new Date(t).toISOString().slice(0, 10);
-  if (held) { const n = rows.length; rows = rows.filter((r) => !held.has(dayOf(r.ts)) && !held.has(dayOf(r.ts + horizonMin * 60_000))); console.log(`held out ${n - rows.length} rows of ${held.size / 7} holdout week(s)`); }
+  if (held) { const n = rows.length; rows = rows.filter((r) => !held.has(dayOf(r.ts)) && !held.has(dayOf(r.ts + horizonMin * 60_000))); console.log(`held out ${n - rows.length} rows of ${from ? `${held.size} recorded day(s) from ${from}` : `${held.size / 7} holdout week(s)`}`); }
   console.log(`${rows.length} labelled rows`);
   const res = trainPerp(rows, { horizonMin, everySec, makerBps: cfg.perps.makerFeeBps, entryEdgeBps: cfg.perps.entryEdgeBps });
-  if (held) res.params.holdout = HOLDOUT_RULE;
+  if (held && !from) res.params.holdout = HOLDOUT_RULE;
   console.table(res.oos);
   console.log(JSON.stringify(res.params.validation, null, 1));
   const out = argOf('out', 'params/perp_model.candidate.json');

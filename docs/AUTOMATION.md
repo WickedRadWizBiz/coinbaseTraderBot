@@ -55,7 +55,8 @@ This is `research/pipeline.ts`. By default (`AUTO_TRAIN=remote`) it runs on a Gi
 | snn-tennis | Always skipped: the tennis network can't be replayed (no recorded score feed), so it learns live and keeps its checkpoints in `data/snn/tennis/` | — |
 | vol_model | Trains the tree volatility forecast (how far realised vol over a contract's life will differ from the EWMA) and checks it on held-out days | `vol_model.json` |
 | dataset | Turns the recordings, plus the crypto network's logged and backfilled outputs, into labelled training rows. Priced with the vol forecast when it is validated | `work/dataset.jsonl` |
-| mlp | Trains the MLP fair value and its take/skip head (MLP vs trees vs gated experts, the best one kept), backtests it after fees, records the result in the model file | `model.json` |
+| mlp | Trains the MLP fair value and its take/skip head (MLP vs trees vs gated experts, the best one kept), backtests it after fees, records the result in the model file, and adds its holdout's new windows to the go-live tally (below) | `model.json`, `mlp_tally.json` |
+| tally_history | Plays the history replay's days before the recordings, which no decision model trained on, as if live: the live decision model trades Kalshi's real contracts on them, newest day first, for up to `TALLY_HISTORY_MIN` minutes (default 30), and the results go into the go-live tally apart from the recorded days' (below) | `mlp_tally.json`, `model.json` (its validation) |
 | vol | Fits the intraday volatility profile | `vol_profile.json` |
 | perps | Trains the perps model (ridge vs trees vs gated experts, on the perps network's 1h/4h calls and skill), then runs its execution backtest | `perp_model.json` |
 | tennis | Trains the tennis model (MLP vs trees; 4 signals, score, book, tennis network) | `tennis_model.json` |
@@ -64,6 +65,8 @@ This is `research/pipeline.ts`. By default (`AUTO_TRAIN=remote`) it runs on a Gi
 There's a report for each run in `data/models/reports/` and a log in `data/models/logs/`.
 
 **The history walk** (`.github/workflows/history-walk.yml`, `research/historyWalk.ts`) runs beside the daily training. The crypto and perps networks walk their history in time order (crypto from 2017-08-18, perps from 2019-09-09), a block of 20 to 90 days per run, three copies of each network with slightly different knobs. Every copy keeps its whole state from block to block, and the replay goes on from its own end-of-day state, so a block boundary looks like any midnight. Each day is judged before the copies learn from it; the holdout weeks are played through with learning paused. Where each network stands lives on the server (`data/models/work/history-walk/<net>/`), taken in turns under a lease, and while a network is behind each run starts the next one; once caught up a nightly run (01:41 UTC) walks the new days. It stays a week behind the latest day, so the daily training, which starts from the walk's best network, is judged on days that network never saw.
+
+The Windows trainer walks too. At the start of each session it takes the lease for the network furthest behind (or the other network, when GitHub holds the first). It copies that network's walk folder down whole, walks a block of 20 to 90 days per 30 minutes of the session slider, and sends the folder back whole. The server swaps the folder in only after every file has arrived, and only while the lease is still the laptop's. A walk that crashed sends nothing, and the server's walk stands. The block can run past the session's length when the shortest block needs it, up to three times the length; then the session goes on with its training rounds. `TRAINER_WALK=false` in `trainer.env` turns the walk off.
 
 A step with nothing to work on yet is reported as **skipped**, not failed. Examples: no perp quotes recorded, fewer than 8 settlement windows, fewer than 5 settled tennis matches, fewer than 3 days of index data for the vol forecast, not enough maker quotes for the fill model.
 
@@ -226,6 +229,16 @@ The built-in gates still apply even in this mode:
 
 Set `AUTO_TRAIN_PROMOTE=validated` once you want only models that passed their checks to be promoted.
 
+**The meta-model's go-live tally.** The recordings hold 20 days, and the meta-model's gates want 1,000 held-out settlement windows and 1,000 that the backtest traded, so no single training can show them. A day's candidate never trains on its holdout, the newest windows of its dataset. The mlp step adds the holdout windows no candidate judged before to `mlp_tally.json`, with what the candidate's backtest made on them, good or bad, and the gates read the tally: everything added so far (`research/goLiveTally.ts`). The next day's holdout reaches back to the first window the tally has not judged (at most half of the dataset), so every window is judged once, by the first candidate that never trained on it. Only results are kept: per window its losses and P&L, per run the calibration bins, about 3 MB a year; results more than a year older than the newest are dropped. The candidate's own holdout must still beat the calibrated market. At about 96 windows a day the judged windows pass 1,000 in about 11 days; the traded ones come as fast as the strategy trades (15 windows on the day measured on Oct 28, which would take about 10 weeks). The readiness report's MLP line shows the tally.
+
+**History played as live.** Waiting on the recorded days alone, the 1,000 traded windows would take weeks. So the tally_history step also plays the history replay's days that have Kalshi's real contracts and fall before the first recorded day the tally saw. The decision model trains only on the recordings, so none of those days was ever trained on. Each run walks back from there, newest day first, a few days at a time (`TALLY_HISTORY_CHUNK`, default 5), keeping each chunk as soon as it is judged. The replay's stand-in contracts are dropped. Kalshi's history keeps one quote per minute, so how the quotes in between are filled in is chosen by the Replay fidelity workflow (`research/replayFidelity.ts`), which works like this:
+
+- It cuts the newest recorded days down to exactly what the history would hold, then fills them back in four ways: holding the minute's quote, following the index as the replay does, taking the worse side of the minute so far, or adding a calibrated random bridge.
+- It backtests the decision model on each version and on the real quotes.
+- It writes the closest one to `replay_fidelity.json`.
+
+Until that file exists, history is played at the worse side of each minute. The tally reports the history results (`history`) apart from the recorded days (`recorded`), and the gates read both.
+
 ## Running it yourself
 
 | What you want | How |
@@ -244,7 +257,7 @@ Running from a checkout: `npm run pipeline` reads recordings from `data/recordin
 These can't be automated, or deliberately aren't.
 
 **1. Keep the bot running so it records data.**
-- Training needs recordings. Expect at least a few days before the MLP trains: it needs 8 or more settlement windows just to try, and about 1,000 before its validation can pass.
+- Training needs recordings. Expect at least a few days before the MLP trains: it needs 8 or more settlement windows just to try. Its validation passes once the go-live tally holds 1,000 judged windows and 1,000 traded ones.
 - Perps training needs `PERPS_FEED=true` so perp quotes get recorded.
 - Tennis scores need a Live Tennis API key in `LIVE_TENNIS_API_KEY`. That switches `TENNIS_SCORE_FEED` to `livetennis` automatically. The tennis model needs at least 100 settled matches before it can pass validation.
 

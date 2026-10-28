@@ -186,7 +186,8 @@ import { buildPerpDataset, perpRowsForDays, trainPerp } from '../research/trainP
 import { writeSyntheticRecordings } from '../research/synthetic';
 import { recordingDayList } from '../bot/marketdata/recordingFiles';
 import { ReplayState } from '../research/replay';
-import { PERP_BACKTEST_MIN_DAYS, runPerpBacktest } from '../research/perpBacktest';
+import { PERP_RECORDED_MIN_DAYS, runPerpBacktest } from '../research/perpBacktest';
+import { trainPerpMain } from '../research/trainPerpModel';
 import { runPipeline } from '../research/pipeline';
 import { mergeRecordingDays, tmpDir } from './helpers';
 
@@ -226,7 +227,30 @@ test('perp rows skip the Kalshi contracts\' lines: the same rows as reading ever
   assert.equal(st.markets.size + st.books.size, 0, 'no Kalshi contract was read');
 });
 
-test('pipeline perps: the execution backtest is left out on the recordings, which never reach the days it needs to pass', async () => {
+test('perp backtest: no Kalshi contract read, the same result as reading every line; from: trades from that day only', async () => {
+  const base = tmpDir(), dir = path.join(base, 'mixed'), start = Date.parse('2026-06-01T00:00:00Z');
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) });
+  writeSyntheticPerps(path.join(base, 'perps'), { days: 2, momentum: 10, seed: 11, stepSec: 60, start });
+  writeSyntheticRecordings(path.join(base, 'kalshi'), { windows: 40, start });
+  await mergeRecordingDays(dir, [path.join(base, 'perps'), path.join(base, 'kalshi')]);
+  const days = recordingDayList(dir);
+  assert.equal(days.length, 2);
+  const model = new PerpModel(trainPerp(await buildPerpDataset(dir, { everySec: 300, horizonMin: 240 }), { horizonMin: 240, everySec: 300, minEff: 20 }).params);
+  const P = { ...cfg.perps, paperBalanceUsd: 1000 };
+  const every = await runPerpBacktest(dir, P, model, { minDays: 0.5, keep: null });
+  const st = new ReplayState();
+  const filtered = await runPerpBacktest(dir, P, model, { minDays: 0.5, state: st });
+  assert.ok(every.trades > 0, JSON.stringify({ ...every, dailyPnl: undefined }));
+  assert.deepEqual(filtered, every);
+  assert.equal(st.markets.size + st.books.size, 0, 'no Kalshi contract was read');
+  // From the second day: the first only warms the trackers up.
+  const late = await runPerpBacktest(dir, P, model, { minDays: 0.5, from: days[1] });
+  assert.equal(late.dailyPnl.length, 1, JSON.stringify(late.dailyPnl));
+  assert.ok(late.days > 0.9 && late.days <= 1, String(late.days));
+  assert.ok(late.trades <= every.trades);
+});
+
+test('pipeline perps: with too few recorded days to hold a week out, the execution backtest is left out', async () => {
   const dir = tmpDir();
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: dir, AUTO_TRAIN: 'off' });
   writeSyntheticPerps(cfg.autoTrain.recordingsDir, { days: 3, momentum: 10, seed: 11, stepSec: 60 });
@@ -234,13 +258,49 @@ test('pipeline perps: the execution backtest is left out on the recordings, whic
   const r = await runPipeline({ cfg, only: ['perps'], log: (m) => lines.push(m) });
   const step = r.steps.find((s) => s.step === 'perps')!;
   assert.ok(step.ok && !step.skipped, JSON.stringify(step));
-  const note = `left out: 3 recorded day(s), it passes only over ${PERP_BACKTEST_MIN_DAYS}`;
+  const note = `left out: 3 recorded day(s), it needs ${2 * (PERP_RECORDED_MIN_DAYS + 1)} (the newest ${PERP_RECORDED_MIN_DAYS + 1} held out of training to test on)`;
   assert.equal((step.detail as { backtest?: string }).backtest, note, JSON.stringify(step.detail));
   assert.ok(lines.includes(`perps: execution backtest ${note}`), lines.join('\n'));
   // The candidate was not annotated: no backtest verdict, so it trades at pilot size as before.
   const cand = PerpModel.load(path.join(cfg.autoTrain.dir, 'work', 'perp_model.candidate.json'))!;
   assert.equal(cand.params.validation?.backtest, undefined);
   assert.equal(cand.validated(), false);
+});
+
+test('pipeline perps on 20 recorded days: the newest week is held out of training and the backtest replays it', async () => {
+  const dir = tmpDir();
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: dir, AUTO_TRAIN: 'off' });
+  writeSyntheticPerps(cfg.autoTrain.recordingsDir, { days: 20, momentum: 10, seed: 11, stepSec: 300 });
+  const days = recordingDayList(cfg.autoTrain.recordingsDir);
+  assert.equal(days.length, 20);
+  const said: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => { said.push(a.map(String).join(' ')); };
+  let r;
+  try { r = await runPipeline({ cfg, only: ['perps'], log: (m) => said.push(m) }); } finally { console.log = log; }
+  const step = r.steps.find((s) => s.step === 'perps')!;
+  assert.ok(step.ok && !step.skipped, JSON.stringify(step));
+  const d = step.detail as { backtest?: { from?: string; days: number }; data?: string };
+  assert.equal(d.backtest?.from, days[13], JSON.stringify(d));
+  assert.match(String(d.data), /the newest 7 held out for the backtest/);
+  assert.ok(said.some((l) => l.includes(`recorded day(s) from ${days[13]}`) && /^held out [1-9]\d* rows of 7 /.test(l)), said.filter((l) => l.startsWith('held out')).join('\n'));
+  // The verdict covers the held-out week only (the day before it warmed up), and passes from 5 days there.
+  const cand = PerpModel.load(path.join(cfg.autoTrain.dir, 'work', 'perp_model.candidate.json'))!;
+  const bt = cand.params.validation!.backtest!;
+  assert.ok(bt.days > 6.9 && bt.days <= 7, String(bt.days));
+  assert.ok(bt.days >= PERP_RECORDED_MIN_DAYS);
+  // Trained on the first 13 days alone: the trainer told to hold the week out makes the same model, and one trained on
+  // every day another.
+  const train = async (extra: Record<string, string>) => {
+    const out = path.join(dir, `${Object.keys(extra).length}.json`);
+    const args: Record<string, string> = { recordings: cfg.autoTrain.recordingsDir, out, cache: path.join(cfg.autoTrain.dir, 'work', 'perp-dataset-rec'), ...extra };
+    console.log = () => {};
+    try { await trainPerpMain((k, def) => args[k] ?? def); } finally { console.log = log; }
+    return JSON.parse(fs.readFileSync(out, 'utf8')).validation as { nEff: number; ic: number };
+  };
+  const alone = await train({ 'holdout-from': days[13] }), all = await train({});
+  assert.deepEqual([alone.nEff, alone.ic], [cand.params.validation!.nEff, cand.params.validation!.ic]);
+  assert.ok(all.nEff > alone.nEff, `${all.nEff} vs ${alone.nEff}`);
 });
 
 test('capital locked in binaries inflates the perp sigma: smaller Kelly size, never larger', () => {

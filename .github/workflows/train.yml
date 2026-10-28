@@ -194,7 +194,7 @@ jobs:
           echo "code=$code" >> "$GITHUB_OUTPUT"
           case $code in 0) echo "pipeline finished";; 124|137|143) echo "pipeline stopped by its time limit, the memory watchdog or a stop signal (progress saved; continues next run)";; *) echo "pipeline exited with $code";; esac
 
-      - name: Summary (step names and promotions only)
+      - name: Summary (step names, promotions and counts only)
         if: always() && steps.pull.outcome == 'success'
         run: |
           python3 - "$GITHUB_WORKSPACE/data/models/reports" <<'PY'
@@ -207,6 +207,11 @@ jobs:
               d = st.get('detail') if isinstance(st.get('detail'), dict) else {}
               state = 'skipped' if st.get('skipped') else 'error' if not st.get('ok') else 'promoted' if d.get('promoted') else 'done'
               print(f"  {st.get('step')}: {state} ({round((st.get('ms') or 0) / 60000, 1)} min)")
+              g = d.get('goLive')
+              if isinstance(g, dict): print(f"    go-live tally: {g.get('windows')} judged windows, {g.get('windowsTraded')} traded (each needs 1,000), over {g.get('days')} day(s)")
+              for src in ('recorded', 'history'):
+                  p = (g or {}).get(src) if isinstance(g, dict) else None
+                  if isinstance(p, dict): print(f"      {src}: {p.get('nWindows')} windows, {p.get('windowsTraded')} traded, P&L ${p.get('pnl')}, over {p.get('days')} day(s)")
           PY
 
       - name: Copy models and history back to the server

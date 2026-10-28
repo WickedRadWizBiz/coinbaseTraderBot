@@ -24,6 +24,7 @@ export type AuditKind =
   | 'data_stale' | 'data_gap'
   | 'vault'
   | 'snn'
+  | 'modules'
   | 'waterfall'
   | 'alert' | 'error';
 
