@@ -44,6 +44,8 @@ export function explain(step: string): string {
   if (step === 'tennis') return 'Training the tennis model on Kalshi\'s match history.';
   if (step === 'fill') return 'Learning from the bot\'s own orders which quotes get filled.';
   if (step === 'sizing') return 'Tuning bet sizes on settled trades.';
+  const walk = /^walk-([a-z]+)$/.exec(step)?.[1];
+  if (walk) return `Walking the ${walk} spiking network through the next block of history, day by day as if it were happening now; it carries on from where the last walk stopped, here or on GitHub.`;
   if (step === 'readiness') return 'Scoring the whole bot on days nothing was trained on, against your target.';
   return 'Working on the next part of the pipeline.';
 }
@@ -93,8 +95,9 @@ export class RoundProgress {
   private readonly log: string[] = [];
   phase = 'starting';
 
-  constructor(rounds: StepTiming[][], readonly full: boolean, private readonly now: () => number = Date.now) {
-    const p = planFrom(rounds, full);
+  /** `fixed`: the steps and their expected times when they are not a pipeline round's (the history walk). */
+  constructor(rounds: StepTiming[][], readonly full: boolean, private readonly now: () => number = Date.now, fixed?: { plan: string[]; expect: Map<string, number> }) {
+    const p = fixed ?? planFrom(rounds, full);
     this.plan = p.plan; this.expect = p.expect;
   }
 
