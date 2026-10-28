@@ -19,7 +19,8 @@
 //   through   a trade printed at a better price than ours for a buyer of our side (it would have hit us first)
 //   queue     also trades at our price once the size resting there when we joined has traded, and a bid for our
 //             side at or above our price (it would have matched us)
-// Each rule is scored two ways per lot, against what paper actually made and what holding to settlement made:
+// One market's resting sells for the same rule and side share the tape (cheapest first, then the earliest lot), so a
+// print or a bid never fills two of them. Each rule is scored two ways per lot, against what paper actually made and what holding to settlement made:
 //   +paper    the resting sell on top of the exits paper took (whichever came first sells; the rest settles)
 //   or hold   the resting sell alone; what it does not sell settles
 // Fees: the entry's and paper's exits' as logged; the resting sells at the maker rate times --maker-mult (0: the
@@ -37,6 +38,8 @@ import zlib from 'zlib';
 import { makerFee } from '../bot/fees';
 import { IndexTracker } from '../bot/marketdata/indexTracker';
 import { OrderBook } from '../bot/marketdata/orderBook';
+import { recordingDayList } from '../bot/marketdata/recordingFiles';
+import type { BookSnapshot } from '../bot/kalshi/types';
 import { contractKind, priceContract, type ContractTerms, type MarketKind } from '../bot/model/fairValue';
 import type { Candle } from '../bot/ta/indicators';
 import { swings } from '../bot/ta/structure';
@@ -48,7 +51,11 @@ const EPS = 1e-9;
 /** A target must bank at least this much a contract over the entry price. */
 export const MIN_PROFIT = 0.02;
 
-export interface AuditFill { t: number; ticker: string; side: 'bid' | 'ask'; price: number; count: number; fee: number; purpose: string }
+export interface AuditFill {
+  t: number; ticker: string; side: 'bid' | 'ask'; price: number; count: number; fee: number; purpose: string;
+  /** The market's YES position after the fill, as the audit logged it. */
+  posAfter?: number;
+}
 
 /** A lot's exit by paper: when, how many, at what price for the held side, and that part of the fill's fee. */
 export interface PaperExit { t: number; qty: number; px: number; fee: number }
@@ -89,22 +96,34 @@ export async function readFills(auditDir: string, days: string[]): Promise<Audit
       const count = Number(fl.count), price = Number(fl.price);
       if (!(count > 0) || !(price > 0 && price < 1)) continue;
       const coid = d.clientOrderId ?? fl.clientOrderId;
-      out.push({ t, ticker, side: fl.side, price, count, fee: Number(d.fee) || 0, purpose: (coid && purpose.get(String(coid))) || 'other' });
+      const posAfter = Number(d.position);
+      out.push({ t, ticker, side: fl.side, price, count, fee: Number(d.fee) || 0, purpose: (coid && purpose.get(String(coid))) || 'other', ...(Number.isFinite(posAfter) ? { posAfter } : {}) });
     }
   }
   return out.sort((a, b) => a.t - b.t);
 }
 
 /** Fills into lots: a fill that adds to (or opens) a position is a lot; one that reduces it closes lots first in, first
- *  out (its fee shared by contracts); one that crosses through flat closes them all and opens a lot the other way. */
+ *  out (its fee shared by contracts); one that crosses through flat closes them all and opens a lot the other way. A
+ *  position held before the first fill read (its logged position after the fill, less the fill) is carried: reductions
+ *  close it first, and it is not scored. */
 export function buildLots(fills: AuditFill[]): Lot[] {
   const lots: Lot[] = [];
   const open = new Map<string, Lot[]>();
   const rem = new Map<Lot, number>();
   for (const f of fills) {
-    const q = open.get(f.ticker) ?? [];
-    open.set(f.ticker, q);
     const sign: 1 | -1 = f.side === 'bid' ? 1 : -1;
+    let q = open.get(f.ticker);
+    if (!q) {
+      q = [];
+      open.set(f.ticker, q);
+      const carried = f.posAfter === undefined ? 0 : round(f.posAfter - sign * f.count, 2);
+      if (Math.abs(carried) > EPS) {
+        const c: Lot = { ticker: f.ticker, t: f.t, sign: carried > 0 ? 1 : -1, n: Math.abs(carried), entry: NaN, entryFee: 0, purpose: 'carried', exits: [] };
+        q.push(c);
+        rem.set(c, Math.abs(carried));
+      }
+    }
     let left = f.count;
     const feePer = f.fee / f.count;
     while (left > EPS && q.length && q[0].sign !== sign) {
@@ -155,45 +174,89 @@ export function nextLevel(bars: Candle[], spot: number, up: boolean): number | u
   return up ? Math.min(...cands) : Math.max(...cands);
 }
 
-/** A resting post-only sell of a lot at `price` (side terms), filled from the tape in both modes. */
+/** A resting post-only sell of a lot at `price` (side terms), filled from the tape in both modes. One market's sells for
+ *  the same rule and side compete for the same buyers: allocateTrade / allocateBook share each print and each crossing
+ *  bid among them, cheapest first, then the earliest lot (`order`), so the same liquidity never fills two of them. */
 export class RestingSell {
   through = 0;
   queue = 0;
   readonly throughFills: Array<{ t: number; qty: number }> = [];
   readonly queueFills: Array<{ t: number; qty: number }> = [];
-  private ahead: number;
-  /** Bid size for our side at or above our price already counted (a resting bid matches us once). */
+  /** Size resting at our price when we joined that has not traded yet (the real book's queue ahead of us). */
+  ahead: number;
+  /** Crossing bid size already matched to this sell (a resting bid matches once). */
   private crossed = 0;
 
-  constructor(readonly sign: 1 | -1, readonly n: number, readonly price: number, sizeAhead: number) {
+  constructor(readonly sign: 1 | -1, readonly n: number, readonly price: number, sizeAhead: number, readonly order = 0) {
     this.ahead = Math.max(0, sizeAhead);
   }
 
-  private add(mode: 'through' | 'queue', t: number, qty: number): void {
-    const room = this.n - this[mode];
-    const q = Math.min(room, qty);
-    if (q <= EPS) return;
+  /** Credits up to `qty` in one mode; returns what it took. */
+  add(mode: 'through' | 'queue', t: number, qty: number): number {
+    const q = Math.min(this.n - this[mode], qty);
+    if (q <= EPS) return 0;
     this[mode] = round(this[mode] + q, 2);
     (mode === 'through' ? this.throughFills : this.queueFills).push({ t, qty: round(q, 2) });
+    return q;
   }
 
-  /** A trade on the market: YES price, contracts, the taker's side. */
-  onTrade(t: number, yesPrice: number, count: number, takerSide: string | undefined): void {
-    // Our sell is lifted by a buyer of our side: a YES taker for long YES, a NO taker for long NO.
-    if (takerSide !== (this.sign > 0 ? 'yes' : 'no')) return;
-    const px = this.sign > 0 ? yesPrice : round(1 - yesPrice, 4);
-    if (px > this.price + EPS) { this.add('through', t, count); this.add('queue', t, count); return; }
-    if (Math.abs(px - this.price) <= EPS) {
-      const eat = Math.min(this.ahead, count);
-      this.ahead -= eat;
-      if (count - eat > EPS) this.add('queue', t, count - eat);
+  /** The crossing bid size matched to this sell now: what is new since the last match fills it (queue mode). */
+  crossedTo(t: number, size: number): void {
+    if (size > this.crossed + EPS) this.add('queue', t, size - this.crossed);
+    this.crossed = Math.max(this.crossed, size);
+  }
+
+  /** A trade with this sell alone in the market. */
+  onTrade(t: number, yesPrice: number, count: number, takerSide: string | undefined): void { allocateTrade([this], t, yesPrice, count, takerSide); }
+
+  /** A book change with this sell alone: `bidSizeAtOrAbove` = bids for our side at or above our price. */
+  onBook(t: number, bidSizeAtOrAbove: number): void { this.crossedTo(t, bidSizeAtOrAbove); }
+}
+
+const byPriority = (a: RestingSell, b: RestingSell) => a.price - b.price || a.order - b.order;
+
+/** A trade, shared by one market's sells for one rule and one side (all the same sign). A buyer of our side who paid
+ *  more than a sell's price lifted it before the print, cheapest first (both modes); a print at a sell's price reaches
+ *  it once the size ahead of it has traded and the earlier sells at that price have filled (queue mode). */
+export function allocateTrade(sells: RestingSell[], t: number, yesPrice: number, count: number, takerSide: string | undefined): void {
+  if (!sells.length) return;
+  const sign = sells[0].sign;
+  // Our sell is lifted by a buyer of our side: a YES taker for long YES, a NO taker for long NO.
+  if (takerSide !== (sign > 0 ? 'yes' : 'no')) return;
+  const px = sign > 0 ? yesPrice : round(1 - yesPrice, 4);
+  const sorted = [...sells].sort(byPriority);
+  let leftT = count, leftQ = count;
+  for (const s of sorted) {
+    if (!(s.price < px - EPS)) break;
+    leftT -= s.add('through', t, leftT);
+    leftQ -= s.add('queue', t, leftQ);
+  }
+  let atPrice = 0;
+  for (const s of sorted) {
+    if (Math.abs(s.price - px) > EPS) continue;
+    const eat = Math.min(s.ahead, count);
+    s.ahead -= eat;
+    atPrice += s.add('queue', t, Math.max(0, leftQ - eat - atPrice));
+  }
+}
+
+/** A book change, shared the same way: the bids for our side at or above a sell's price would have matched it, the
+ *  cheapest sell first, taking the best bids first (queue mode). */
+export function allocateBook(sells: RestingSell[], t: number, snap: BookSnapshot): void {
+  if (!sells.length) return;
+  const sign = sells[0].sign;
+  // Bids for our side, best first, in side terms (a YES ask at a is a NO bid at 1 - a).
+  const bids = sign > 0 ? snap.bids.map((l) => ({ p: l.price, q: l.size })) : snap.asks.map((l) => ({ p: round(1 - l.price, 4), q: l.size }));
+  let i = 0;
+  for (const s of [...sells].sort(byPriority)) {
+    let got = 0;
+    while (got < s.n - EPS && i < bids.length && bids[i].p >= s.price - EPS) {
+      const q = Math.min(s.n - got, bids[i].q);
+      got += q;
+      bids[i].q -= q;
+      if (bids[i].q <= EPS) i++;
     }
-  }
-
-  /** The book after a change: a bid for our side at or above our price would have matched us (queue mode). */
-  onBook(t: number, bidSizeAtOrAbove: number): void {
-    if (bidSizeAtOrAbove > this.crossed + EPS) this.add('queue', t, bidSizeAtOrAbove - this.crossed);
-    this.crossed = Math.max(this.crossed, bidSizeAtOrAbove);
+    s.crossedTo(t, got);
   }
 }
 
@@ -260,7 +323,7 @@ export async function runStudy(o: { recordings: string; audit: string; days: str
   const bars = new Map<string, Candle[]>();
   const results = new Map<string, 'yes' | 'no'>();
   const pending = [...lots];
-  let next = 0;
+  let next = 0, order = 0;
   type Active = { lot: Lot; m: Mkt; sells: Partial<Record<Rule, RestingSell>> };
   const active = new Map<string, Active[]>();
   const done: Array<{ a: Active; payout: 0 | 1 }> = [];
@@ -326,26 +389,33 @@ export async function runStudy(o: { recordings: string; audit: string; days: str
       const T = targets[r];
       if (T === undefined || T >= 1) continue;
       const ahead = v.sell.find((l) => Math.abs(l.price - T) <= EPS)?.size ?? 0;
-      sells[r] = new RestingSell(lot.sign, lot.n, T, ahead);
+      sells[r] = new RestingSell(lot.sign, lot.n, T, ahead, order);
     }
+    order++;
     const arr = active.get(lot.ticker) ?? [];
     arr.push({ lot, m, sells });
     active.set(lot.ticker, arr);
   };
 
-  const bidsAtOrAbove = (book: OrderBook, sign: 1 | -1, price: number): number => {
-    const s = book.snapshot(100);
-    // A bid for our side at or above our ask: a YES bid >= T for long YES; a YES ask <= 1 - T for long NO.
-    return sign > 0 ? s.bids.filter((l) => l.price >= price - EPS).reduce((a, l) => a + l.size, 0)
-      : s.asks.filter((l) => round(1 - l.price, 4) >= price - EPS).reduce((a, l) => a + l.size, 0);
+  // One market's sells that compete for the same buyers: the same rule, the same side.
+  const groups = (arr: Active[]): RestingSell[][] => {
+    const out: RestingSell[][] = [];
+    for (const r of RULES) for (const sign of [1, -1] as const) {
+      const g = arr.filter((a) => a.lot.sign === sign && a.sells[r]).map((a) => a.sells[r]!);
+      if (g.length) out.push(g);
+    }
+    return out;
   };
 
+  // A market is scored once its official result is in (the settlement sweeper or a lifecycle message can bring it
+  // minutes after the close), or from the recorded index half an hour after the close; nothing fills after the close.
   const settle = (now: number) => {
     for (const [ticker, arr] of active) {
       const m = arr[0].m;
-      if (now < m.closeTime + 90_000) continue;
+      if (now < m.closeTime + 90_000 || (!results.has(ticker) && now < m.closeTime + 30 * 60_000)) continue;
       const p = outcome(m);
-      for (const a of arr) { if (p === undefined) skip('no result'); else done.push({ a, payout: p }); }
+      // The payout of the side each lot holds: a long NO contract pays when NO wins.
+      for (const a of arr) { if (p === undefined) skip('no result'); else done.push({ a, payout: (a.lot.sign > 0 ? p : 1 - p) as 0 | 1 }); }
       active.delete(ticker);
       books.delete(ticker);
       markets.delete(ticker);
@@ -353,7 +423,13 @@ export async function runStudy(o: { recordings: string; audit: string; days: str
   };
 
   let events = 0, lastSettle = 0;
-  for await (const e of readRecordings(o.recordings, '', days[0], days[days.length - 1], keep) as AsyncGenerator<RecEvent>) {
+  // The recordings start a day early where that day was recorded: a market is written once, when the bot first lists it
+  // (up to 90 min before its close), and its book snapshot comes when it is subscribed, so the first studied hours'
+  // markets were introduced the day before. Lots come only from the studied days.
+  const prev = new Date(Date.parse(`${days[0]}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+  const from = recordingDayList(o.recordings).includes(prev) ? prev : days[0];
+  if (from === prev) log(`recordings read from ${prev} (warm-up: markets listed and books snapshotted before ${days[0]})`);
+  for await (const e of readRecordings(o.recordings, '', from, days[days.length - 1], keep) as AsyncGenerator<RecEvent>) {
     events++;
     while (next < pending.length && pending[next].t <= e.t) activate(pending[next++], e.t);
     switch (e.k) {
@@ -379,11 +455,21 @@ export async function runStudy(o: { recordings: string; audit: string; days: str
         if (!b) { b = new OrderBook(e.ticker); books.set(e.ticker, b); }
         if (e.k === 'book') b.applySnapshot({ bids: e.bids ?? [], asks: e.asks ?? [] }, e.t);
         else b.applyDelta(e.side, e.price, e.delta, e.t);
-        for (const a of active.get(e.ticker) ?? []) for (const s of Object.values(a.sells)) s!.onBook(e.t, bidsAtOrAbove(b, a.lot.sign, s!.price));
+        const arr = active.get(e.ticker);
+        if (!arr?.length) break;
+        // Most book changes cross no resting sell: the sorted book is built only when our side's best bid reaches one.
+        const yb = b.bestBid()?.price, ya = b.bestAsk()?.price;
+        let snap: BookSnapshot | undefined;
+        for (const g of groups(arr)) {
+          const best = g[0].sign > 0 ? yb : ya === undefined ? undefined : round(1 - ya, 4);
+          if (best === undefined || !g.some((x) => x.price <= best + EPS)) continue;
+          snap ??= b.snapshot(100);
+          allocateBook(g, e.t, snap);
+        }
         break;
       }
       case 'trade':
-        for (const a of active.get(e.ticker) ?? []) for (const s of Object.values(a.sells)) s!.onTrade(e.ts ?? e.t, e.price, e.count, e.takerSide);
+        for (const g of groups(active.get(e.ticker) ?? [])) allocateTrade(g, e.t, e.price, e.count, e.takerSide);
         break;
       case 'result':
       case 'lifecycle':
