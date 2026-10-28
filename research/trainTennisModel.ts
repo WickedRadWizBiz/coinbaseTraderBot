@@ -26,9 +26,9 @@ function flowOf(st: ReplayState, ticker: string, windowSec: number): number | un
   return tot > 0 ? tr.reduce((x, y) => x + y.signed, 0) / tot : undefined;
 }
 
-/** One row per match per `everySec` while it trades, built with the engine's own input function. */
-export async function buildTennisDataset(dir: string, cfg: TennisConfig, everySec = 60): Promise<TennisRow[]> {
-  const st = new ReplayState();
+/** One row per match per `everySec` while it trades, built with the engine's own input function. `st`: the replay's
+ *  state (a test reads what it holds at the end). */
+export async function buildTennisDataset(dir: string, cfg: TennisConfig, everySec = 60, st = new ReplayState()): Promise<TennisRow[]> {
   const trackers = new Map<string, MatchTracker>();
   const pending = new Map<string, Omit<TennisRow, 'y'>[]>();
   const lastSample = new Map<string, number>();
@@ -40,6 +40,8 @@ export async function buildTennisDataset(dir: string, cfg: TennisConfig, everySe
     st.apply(e);
     if (st.now - last < 5000) continue;
     last = st.now;
+    // The other markets the recordings carry (every crypto contract) go once over; the matches are settled below.
+    st.forgetClosed(90_000, (m) => m.kind === 'match');
     const byEvent = new Map<string, string[]>();
     for (const m of st.markets.values()) if (m.kind === 'match') byEvent.set(eventOf(m.ticker), [...(byEvent.get(eventOf(m.ticker)) ?? []), m.ticker]);
     for (const [event, tickers] of byEvent) {
