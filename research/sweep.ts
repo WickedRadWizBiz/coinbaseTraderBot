@@ -417,12 +417,17 @@ const kalshiModels = new Map<string, import('../bot/model/metaModel').MetaModel>
 /** Model-call tapes (research/callTape.ts) kept within SWEEP_TAPE_GB (default 4), least recently used out. */
 export const sweepTapeBytes = () => Math.max(0.1, Number(process.env.SWEEP_TAPE_GB ?? 4) || 4) * 1e9;
 
+/** Recorded days a Kalshi or whole-bot sweep needs, split 70 / 15 / 15 (9 / 2 / 3 days on 14). The bot keeps 20 days
+ *  (RECORDINGS_KEEP_DAYS): a sweep on its newest 14 complete days has them for 5 more daily runs to finish in (a sweep
+ *  whose days are gone starts over). */
+export const SWEEP_MIN_DAYS = 14;
+
 export async function kalshiTarget(recordings: string, modelPath: string, workers = 1, tapeDir?: string): Promise<SweepTarget> {
   const { loadConfig, paperEnv } = await import('../bot/config');
   const cfg = loadConfig(paperEnv(process.env));
   const { recordingFiles, linkDays } = await import('../bot/marketdata/recordingFiles');
   const days = recordingFiles(recordings);
-  if (days.length < 20) throw new Error(`only ${days.length} recorded day(s) in ${recordings}: the kalshi sweep needs at least 20`);
+  if (days.length < SWEEP_MIN_DAYS) throw new Error(`only ${days.length} recorded day(s) in ${recordings}: the kalshi sweep needs at least ${SWEEP_MIN_DAYS}`);
   const a = Math.floor(days.length * 0.7), b = Math.floor(days.length * 0.85);
   const split = { tune: days.slice(0, a), check: days.slice(a, b), final: days.slice(b) };
   const dirs = {} as Record<SweepWindow, string>;
@@ -467,7 +472,7 @@ export async function kalshiTarget(recordings: string, modelPath: string, worker
 export async function botTarget(recordings: string, history: string, modelPath: string, setupOos: string, setupModelPath?: string, tapeDir?: string): Promise<SweepTarget> {
   const { loadWholeBot, runWholeBot, settingsFromConfig, recordedDays } = await import('./wholeBot');
   const n = recordedDays(recordings).length;
-  if (n < 20) throw new Error(`only ${n} recorded day(s) in ${recordings}: the whole-bot sweep needs at least 20`);
+  if (n < SWEEP_MIN_DAYS) throw new Error(`only ${n} recorded day(s) in ${recordings}: the whole-bot sweep needs at least ${SWEEP_MIN_DAYS}`);
   const D = await loadWholeBot({ recordings, history, setupOos, modelPath, split: { tune: [0, 0.7], check: [0.7, 0.85], final: [0.85, 1] } });
   if (tapeDir) {
     pruneTapes(tapeDir, sweepTapeBytes());

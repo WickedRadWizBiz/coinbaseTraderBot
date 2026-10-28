@@ -90,7 +90,7 @@ import { trainFillMain } from './trainFillModel';
 import { trainVolModelMain, VOL_MODEL_MIN_DAYS } from './trainVolModel';
 import { backtestMain } from './backtest';
 import { buildDatasetMain } from './buildDataset';
-import { perpBacktestMain, PERP_BACKTEST_MIN_DAYS } from './perpBacktest';
+import { perpBacktestMain, PERP_RECORDED_MIN_DAYS, PERP_RECORDED_TEST_DAYS } from './perpBacktest';
 import { sessionsMain } from './sessions';
 import { snnAblationMain, type Verdict } from './snnAblation';
 import { replaySnn } from './snnReplay';
@@ -99,8 +99,8 @@ import { buildPerpDataset, perpRuleRecord, trainPerpMain } from './trainPerpMode
 import { runSnnPbt } from './snnPbt';
 import { snnContest, type ContestResult } from './snnContest';
 import { daysOf, HistoryLedger, HOLDOUT_RULE, isHoldout, isoWeek, weekBlocks } from './historyLedger';
+import { componentStatus, dailyStats, ledgerStatus, READINESS_RECORDED_DAYS, SOLID, solidWholeBot, targetMet, writeReadiness, type ReadinessFile, type ReadinessTarget } from './readiness';
 import { readWalk, walkDir } from './historyWalk';
-import { componentStatus, dailyStats, ledgerStatus, SOLID, solidWholeBot, targetMet, writeReadiness, type ReadinessFile, type ReadinessTarget } from './readiness';
 import { loadWholeBot, runWholeBot, settingsFromConfig } from './wholeBot';
 import { SetupModel } from '../bot/setups/setupModel';
 import { withSnnHyper } from '../bot/snn/population';
@@ -108,7 +108,7 @@ import { versionHash } from '../bot/snn/params';
 import { trainTennisMain } from './trainTennisModel';
 import { trainTaNetMain } from './trainTaNet';
 import { forecastSchema, setupInputStatus, trainSetupMain } from './trainSetupModel';
-import { sweepMain } from './sweep';
+import { sweepMain, SWEEP_MIN_DAYS } from './sweep';
 import { collectFiles, importFile } from './history/importCsv';
 import { downloadKalshiHistory, downloadKalshiTrades } from './history/kalshiHistory';
 import { dominanceNeedFrom, indexNeeds, tvFill } from './history/tradingview';
@@ -448,6 +448,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   };
   const tooFew = days.length < A.minDays ? `only ${days.length} day(s) of recordings in ${rec} (< AUTO_TRAIN_MIN_DAYS=${A.minDays})` : undefined;
   const lastDays = (n: number) => (days.length ? days.slice(-n) : []);
+  // The recorded days before today (today's file is still being written).
+  const completeDays = days.filter((d) => d < new Date(now).toISOString().slice(0, 10));
   // How far the recordings have grown (and what that unlocks): reported every run.
   {
     const u = recordingsUsage(rec);
@@ -457,7 +459,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       recordedDays: days.length, firstDay: days[0] ?? null, lastDay: days[days.length - 1] ?? null, recordingsGb: +(u.bytes / 1e9).toFixed(2), freeGb: u.freeBytes !== undefined ? +(u.freeBytes / 1e9).toFixed(1) : null,
       gates: {
         'snn / mlp / perps / vol_model (AUTO_TRAIN_MIN_DAYS)': g(days.length, A.minDays),
-        'sweep kalshi': g(days.length, 20), 'sweep bot (whole-bot replay)': g(days.length, 20),
+        'sweep kalshi': g(completeDays.length, SWEEP_MIN_DAYS), 'sweep bot (whole-bot replay)': g(completeDays.length, SWEEP_MIN_DAYS),
         'setup_snn gate': g(journalTrades, SNN_GATE_MIN_TRADES),
       },
     };
@@ -832,10 +834,13 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         if (recorded) {
           const files = new Map(recordingFiles(source === 'replay' ? replayDir : rec).map((f) => [f.day, f.file]));
           if (pinned && !pinned.every((d) => files.has(d))) { log(`sweep-${target}: some of the unfinished sweep's days are gone: starting over`); pinned = undefined; }
-          // The most recent SWEEP_KALSHI_DAYS days (every setting tried replays all of them); an unfinished sweep on more
-          // days than that (from before the cap) starts over on the recent ones.
-          if (pinned && pinned.length > A.sweepKalshiDays) { log(`sweep-${target}: the unfinished sweep is on ${pinned.length} days, over SWEEP_KALSHI_DAYS=${A.sweepKalshiDays}: starting over on the recent ones`); pinned = undefined; }
-          const use = pinned ?? (source === 'replay' ? kDays.filter((d) => files.has(d)) : [...files.keys()]).slice(-A.sweepKalshiDays);
+          // The most recent SWEEP_KALSHI_DAYS days of the replay (every setting tried replays all of them); an unfinished
+          // sweep on more days than that (from before the cap) starts over on the recent ones. On the recordings, the
+          // newest SWEEP_MIN_DAYS complete days: the bot keeps 20 (RECORDINGS_KEEP_DAYS), so a sweep has its days for 5
+          // more daily runs, and none of its files changes (a file still being written would change every score).
+          const cap = source === 'replay' ? A.sweepKalshiDays : SWEEP_MIN_DAYS;
+          if (pinned && pinned.length > cap) { log(`sweep-${target}: the unfinished sweep is on ${pinned.length} days, over ${source === 'replay' ? `SWEEP_KALSHI_DAYS=${cap}` : `the ${cap} recorded days swept`}: starting over on the recent ones`); pinned = undefined; }
+          const use = pinned ?? (source === 'replay' ? kDays.filter((d) => files.has(d)) : completeDays.filter((d) => files.has(d))).slice(-cap);
           sweepSrc = path.join(work, 'sweep-replay');
           fs.rmSync(sweepSrc, { recursive: true, force: true });
           linkDays(use.map((d) => ({ day: d, file: files.get(d)! })), sweepSrc);
@@ -1174,25 +1179,40 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       // execution backtest run there, on weeks the model has never seen.
       const perpDays = perpSrc === replayDir ? replayPerpDays(replayDir) : [];
       const held = perpDays.length ? weekBlocks(perpDays).filter((b) => isHoldout(b, replayDays().slice(-1)[0])) : [];
-      try { await trainPerpMain(argsOf({ recordings: perpSrc, out: cand, every: perpSrc === rec ? undefined : 900, cache, workers: workerCount(), holdout: held.length ? 'ledger' : undefined })); } catch (e) {
+      // On the recordings the newest week is held out of training for the execution backtest (the bot keeps 20 days:
+      // 13 to train on, 7 to test on). With fewer than 12 days there are too few to do both (the backtest passes from
+      // PERP_RECORDED_MIN_DAYS days of quotes), and the model trains on them all.
+      const testN = Math.min(PERP_RECORDED_TEST_DAYS, Math.floor(days.length / 2));
+      const recTest = perpSrc === rec && testN > PERP_RECORDED_MIN_DAYS ? days.slice(-testN) : [];
+      try { await trainPerpMain(argsOf({ recordings: perpSrc, out: cand, every: perpSrc === rec ? undefined : 900, cache, workers: workerCount(), holdout: held.length ? 'ledger' : undefined, 'holdout-from': recTest[0] })); } catch (e) {
         if (/record more perp data|no perp/i.test((e as Error).message)) throw new SkipStep('no perp quotes recorded yet (PERPS_FEED=true records them)');
         throw e;
       }
       if (!fs.existsSync(cand)) throw new SkipStep('perp trainer wrote no model');
-      // The execution backtest: the held-out weeks on the replay, else the recordings. It passes only over
-      // PERP_BACKTEST_MIN_DAYS days, which the recordings never reach, so there it is left out: over every recorded day
-      // it ran past the remote run's 5 hours (Oct 28) for a verdict that could only be "failed".
-      let btSrc: string | undefined = perpSrc;
+      // The execution backtest, on days the candidate never trained on: the held-out weeks on the replay (it passes from
+      // PERP_BACKTEST_MIN_DAYS days), the held-out newest week on the recordings (from PERP_RECORDED_MIN_DAYS), after
+      // the recorded day before it to warm the trackers up.
+      let btSrc: string | undefined = perpSrc, btFrom: string | undefined;
       if (held.length) {
         btSrc = path.join(work, 'perp-backtest-days');
         fs.rmSync(btSrc, { recursive: true, force: true });
         linkDays(held.flatMap((b) => b.days).map((d) => ({ day: d, file: path.join(replayDir, `md-${d}.jsonl.gz`) })), btSrc);
-      } else if (perpSrc === rec && days.length < PERP_BACKTEST_MIN_DAYS) btSrc = undefined;
-      const backtest = btSrc ? undefined : `left out: ${days.length} recorded day(s), it passes only over ${PERP_BACKTEST_MIN_DAYS}`;
-      if (btSrc) await perpBacktestMain(argsOf({ recordings: btSrc, model: cand }), true);
-      else log(`perps: execution backtest ${backtest}`);
+      } else if (perpSrc === rec) {
+        btSrc = undefined;
+        if (recTest.length) {
+          btSrc = path.join(work, 'perp-backtest-days');
+          fs.rmSync(btSrc, { recursive: true, force: true });
+          linkDays(recordingFiles(rec).filter((f) => f.day >= days[days.length - recTest.length - 1]), btSrc);
+          btFrom = recTest[0];
+        }
+      }
+      const left = btSrc ? undefined : `left out: ${days.length} recorded day(s), it needs ${2 * (PERP_RECORDED_MIN_DAYS + 1)} (the newest ${PERP_RECORDED_MIN_DAYS + 1} held out of training to test on)`;
+      if (btSrc) await perpBacktestMain(argsOf({ recordings: btSrc, model: cand, from: btFrom, 'min-days': btFrom ? PERP_RECORDED_MIN_DAYS : undefined }), true);
+      else log(`perps: execution backtest ${left}`);
       const m = PerpModel.load(cand);
       const ok = Boolean(m?.validated());
+      const bt = m?.params.validation?.backtest;
+      const backtest = left ?? (bt ? { ok: bt.ok, days: +bt.days.toFixed(1), pnlUsd: +bt.pnlUsd.toFixed(2), trades: bt.trades, ...(btFrom ? { from: btFrom } : {}) } : undefined);
       if (A.promote === 'validated' && !ok) return { promoted: false, reason: m?.blockers().join('; '), backtest };
       // Contest: the live rule's net P&L per trade on the held-out weeks, challenger vs the model in use --
       // only when the model in use was also trained without them (else the contest would favour it).
@@ -1211,7 +1231,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const champ = promoteIfChampion({ dir: A.dir, kind: 'perp', candidate: cand, live: promoted('perp'), enabled: A.champion, candidateScore: scored ? -contest!.candidate.meanBps : undefined, incumbentScore: scored ? -contest!.incumbent.meanBps : undefined });
       if (!champ.promote) return { promoted: false, reason: champ.reason, contest, backtest };
       state.trainedWithSnn!.perps = state.snnVersions!.perps;
-      return { promoted: true, improved: champ.improved, champion: champ.reason, validated: ok, blockers: m?.blockers() ?? [], backtest, contest, data: perpSrc === rec ? 'recordings' : `history replay (${replayDays().length} days, ${held.length} held-out weeks)` };
+      return { promoted: true, improved: champ.improved, champion: champ.reason, validated: ok, blockers: m?.blockers() ?? [], backtest, contest, data: perpSrc === rec ? `recordings (${days.length} days${recTest.length ? `, the newest ${recTest.length} held out for the backtest` : ''})` : `history replay (${replayDays().length} days, ${held.length} held-out weeks)` };
     }), perpSrc === rec ? tooFew : undefined);
   }
 
@@ -1312,20 +1332,25 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   // trainer stops at; every model's state; each network's weeks in the history ledger (research/readiness.ts) ----
   if (want('readiness')) {
     await run('readiness', async () => {
-      const target: ReadinessTarget = { poolUsd: A.targetPoolUsd, dailyPct: A.targetDailyPct, maxDdPct: A.targetMaxDdPct, minDays: SOLID.minDays };
       const kinds: Array<[keyof typeof MODEL_FILES, string]> = [['ta_net', 'ta_net'], ['setups', 'setups'], ['mlp', 'mlp'], ['perp', 'perp'], ['vol_model', 'vol_model'], ['tennis', 'tennis'], ['snn_crypto', 'snn'], ['snn_perps', 'snn'], ['snn_tennis', 'snn']];
       const components = componentStatus(A.dir, { ...Object.fromEntries(kinds.map(([k, kind]) => [k, { kind, file: promoted(k) }])), gp: { kind: 'gp', file: path.join(A.dir, 'gp_indicators.json') } });
       const rDays = T.historyReplay ? replayDays() : [], pDays = T.historyReplay ? replayPerpDays(replayDir) : [];
       const ledgerInfo = ledgerStatus(ledger, { 'snn-crypto': weekBlocks(rDays), 'snn-perps': weekBlocks(pDays), 'perp-model': weekBlocks(pDays), 'snn-tennis': weekBlocks(T.historyReplay ? replayTennisDays(replayDir) : [], 1) }, rDays[rDays.length - 1] ?? days[days.length - 1] ?? '1970-01-01');
-      // The days: the sweep's (the replay's days that hold Kalshi's real contracts, else the recordings), their
-      // newest 15% (the sweep's final window: never tuned on), without the days the MLP was fitted on (its
-      // development span; its own holdout stays in), at most the newest 90.
+      // The days: the replay's days that hold Kalshi's real contracts (the sweep's), their newest 15% (the sweep's final
+      // window: never tuned on), without the days the MLP was fitted on (its development span; its own holdout stays
+      // in), at most the newest 90, and 30 of them to pass. Without that replay, the recordings: the bot keeps 20 days
+      // (RECORDINGS_KEEP_DAYS) and the MLP is fitted on the newest, so their newest 15% leaves a day or two; the whole
+      // bot is judged on the newest READINESS_RECORDED_DAYS complete days the MLP was not fitted on (a part of today is
+      // not a day), and passes on 5.
       const kDays = T.historyReplay ? replayKalshiDays(replayDir) : [];
       const useReplay = kDays.length >= 20 && kDays.length > days.length;
-      const all = useReplay ? kDays : days;
+      const minDays = useReplay ? SOLID.minDays : READINESS_RECORDED_DAYS;
+      const target: ReadinessTarget = { poolUsd: A.targetPoolUsd, dailyPct: A.targetDailyPct, maxDdPct: A.targetMaxDdPct, minDays };
       const fit = mlpPath() ? (MetaModel.load(mlpPath()!).params.training as { firstWindow?: string; holdoutStart?: string } | undefined) : undefined;
       const fitted = (d: string) => Boolean(fit?.firstWindow && fit.holdoutStart && d >= fit.firstWindow.slice(0, 10) && d < fit.holdoutStart.slice(0, 10));
-      const held = all.slice(Math.floor(all.length * 0.85)).filter((d) => !fitted(d)).slice(-90);
+      const held = useReplay
+        ? kDays.slice(Math.floor(kDays.length * 0.85)).filter((d) => !fitted(d)).slice(-90)
+        : completeDays.filter((d) => !fitted(d)).slice(-Math.max(READINESS_RECORDED_DAYS, days.length - Math.floor(days.length * 0.85)));
       let wholeBot: ReadinessFile['wholeBot'];
       let note: string | undefined;
       // The whole-bot replay is reused while nothing it reads changed (the models' and ledger's status is refreshed).
@@ -1345,7 +1370,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
           try { book = SetupModel.load(fs.existsSync(promoted('setups')) ? promoted('setups') : cfg.perps.setupModelPath)?.params.book; } catch { book = undefined; }
           const r = await runWholeBot(D, 'held', { ...settingsFromConfig(cfg, book), totalUsd: target.poolUsd });
           const st = dailyStats(r.days.map((x) => x.total), target.poolUsd, r.days.map((x) => x.day));
-          const sw = solidWholeBot(st);
+          const sw = solidWholeBot(st, minDays);
           wholeBot = { ...st, window: `${useReplay ? 'history replay (real Kalshi contracts)' : 'recordings'}: ${held.length} day(s) ${held[0]}..${held[held.length - 1]}`, kalshiUsd: r.kalshiUsd, perpsUsd: r.perpsUsd, solid: sw.solid, solidWhy: sw.why };
         } finally {
           for (const d of Object.values(D.dirs)) fs.rmSync(d, { recursive: true, force: true });
