@@ -31,6 +31,10 @@ on:
         description: 'Bankrolls (x paper''s) the stretch is also replayed at, space separated; the verdict holds their median to paper (none = only paper''s)'
         required: false
         default: '0.95 0.975 1.025 1.05'
+      phases:
+        description: 'Where in each second the nearby replays evaluate (ms), one for each nearby bankroll in order: paper''s 1 s timer can fall anywhere in the second (the check''s own replay evaluates at 0)'
+        required: false
+        default: '200 400 600 800'
       pnl_test:
         description: 'How the verdict judges P&L: luck (paper within 2 standard deviations of the replays, summed over the stretches checked) or pct (the replays'' median within 25% of paper''s)'
         required: false
@@ -166,6 +170,7 @@ jobs:
           CHECK_FROM: ${{ inputs.from || 'auto' }}
           MIN_HOURS: ${{ inputs.min_hours || '3' }}
           NEARBY: ${{ inputs.nearby || '0.95 0.975 1.025 1.05' }}
+          PHASES: ${{ inputs.phases || '200 400 600 800' }}
           PNL_TEST: ${{ inputs.pnl_test || 'luck' }}
         run: |
           set -a; . data/sweep-env/train.env; set +a
@@ -179,12 +184,16 @@ jobs:
             --paper-tp-bench "$RUNNER_TEMP/paper-tp-bench.json" --paper-accuracy-gate "$RUNNER_TEMP/paper-accuracy-gate.json" --model data/models/model.json)
           T0=$(date +%s); mkdir -p data/sweeps/nearby; [ "$NEARBY" = none ] && NEARBY=''
           # One replay's P&L is path-sensitive (the same code at a $64 or a $74 bankroll made -$11.63 or -$32.76 over one
-          # stretch): the stretch also replays at bankrolls a few percent off paper's, side by side (first in line for the
+          # stretch): the stretch also replays at bankrolls a few percent off paper's, each evaluating at another point of
+          # the second (paper's 1 s timer could have fallen anywhere in it), side by side (first in line for the
           # out-of-memory killer, so the check's own replay is the last to go), and the verdict holds their median to paper's.
+          read -ra PH <<< "$PHASES"; i=0
           for s in $NEARBY; do
-            choom -n 900 -- timeout 200m node --import tsx research/replayCheck.ts "${ARGS[@]}" --bankroll-scale "$s" --out "data/sweeps/nearby/$s.json" > "$RUNNER_TEMP/nearby-$s.log" 2>&1 &
+            ph="${PH[$i]:-0}"; i=$((i + 1))
+            [[ "$ph" =~ ^[0-9]{1,3}$ ]] || { echo "phases must be whole ms below 1000"; exit 1; }
+            choom -n 900 -- timeout 200m node --import tsx research/replayCheck.ts "${ARGS[@]}" --bankroll-scale "$s" --tick-phase-ms "$ph" --out "data/sweeps/nearby/$s.json" > "$RUNNER_TEMP/nearby-$s.log" 2>&1 &
           done
-          timeout 200m node --import tsx research/replayCheck.ts "${ARGS[@]}" --out data/sweeps/replay-check-own.json || echo "replay check failed or cut off"
+          timeout 200m node --import tsx research/replayCheck.ts "${ARGS[@]}" --tick-phase-ms 0 --out data/sweeps/replay-check-own.json || echo "replay check failed or cut off"
           wait
           for s in $NEARBY; do [ -s "data/sweeps/nearby/$s.json" ] || echo "nearby replay x$s did not finish: $(grep -E 'Error|Killed|heap' "$RUNNER_TEMP/nearby-$s.log" | tail -n 1 | cut -c1-160)"; done
           if [ -s data/sweeps/replay-check-own.json ]; then

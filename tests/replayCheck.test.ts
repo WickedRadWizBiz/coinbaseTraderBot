@@ -10,7 +10,7 @@ import type { TrialName } from '../bot/strategy/componentTrials';
 import { activeTaNet, setTaNet } from '../bot/ta/taNet';
 import { setTaNetEnsemble } from '../bot/ta/taNetEnsemble';
 import { engineModels, installProbation, runBacktest, type EvalReading } from '../research/backtest';
-import { benchAt, benchTimeline, corr, gateAt, nearbyVerdict, paperFromAudit, paperSummary, priceMatcher, readAudit, replayDays, settingsDiffer, stretchStart, verdict } from '../research/replayCheck';
+import { benchAt, benchTimeline, corr, gateAt, nearbyVerdict, paperBankrollAt, paperFromAudit, paperSummary, priceMatcher, readAudit, replayDays, settingsDiffer, stretchStart, verdict } from '../research/replayCheck';
 import { writeSyntheticRecordings } from '../research/synthetic';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'replay-check-test-'));
@@ -184,6 +184,7 @@ test('replay check: prices set beside the paper bot\'s decision records', async 
   assert.equal(s.spotBp, null, 'records without the fair value\'s inputs');
   assert.equal(s.overlayPaper, 0.035, 'paper priced 5c and 2c off its model');
   assert.equal(s.overlayReplay, null, 'replay readings without the model\'s price');
+  assert.deepEqual([s.firstHour?.records, s.firstHour?.matched, s.firstHour?.fv, s.firstHour?.samePosition], [3, 2, 0.005, 1], 'the stretch\'s first hour apart: all of these records');
   // With them: the index 10 bp apart, the same strike, the volatility 20% higher in the replay.
   const t1 = Date.parse('2026-10-24T15:00:00Z');
   const p2 = new Map([['KXBTC15M-D', [{ t: t1, pYes: 0.5, fv: 0.5, mid: 0.5, position: 0, spot: 100_000, strike: 100_000, sigma: 1e-4, sigmaPricing: 1.1e-4, pModel: 0.48 }]]]);
@@ -193,6 +194,7 @@ test('replay check: prices set beside the paper bot\'s decision records', async 
   assert.deepEqual([s2.spotBp, s2.strikeDiffers, s2.sigmaRatio, s2.sigmaPricingRatio], [10, 0, 1.2, 1.2]);
   assert.deepEqual([s2.pricedPaper, s2.pricedReplay, s2.taVolMult], [1.1, 1.1, 1.1], 'the volatility priced with over the EWMA, each side');
   assert.deepEqual([s2.overlayPaper, s2.overlayReplay, s2.taShift, s2.ruleShift], [0.02, 0.01, 0.01, 0]);
+  assert.deepEqual([s2.firstHour?.records, s2.firstHour?.matched], [0, 0], 'over an hour after the stretch began');
 });
 
 test('backtest paper options: the maker buffer adapts from the maker markouts as the engine\'s does', async () => {
@@ -339,6 +341,53 @@ test('backtest: the weekly loss pause stops entries only with the override off; 
   const watch = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { ...base, tradeFromMs: Number.MAX_SAFE_INTEGER });
   assert.equal(watch.fills, 0);
   assert.ok(watch.entryEvaluations > 0, 'it still evaluates (books, features and the gate warm up)');
+});
+
+test('backtest: a pool that ran dry is refilled as paper\'s training supervisor does it; the check backs refills out of paper\'s bankroll', async () => {
+  const root = tmp();
+  const dir = path.join(root, 'rec');
+  writeSyntheticRecordings(dir, { windows: 6, seed: 12, marketNoise: 0.06 });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both' });
+  const base = { exitPolicy: 'take_profit' as const, paper: { orderFrac: 0.1, orderUsd: 0 } };
+  // $5 is below MIN_TRADABLE_BANKROLL_USD ($10): the supervisor's first pass tops the pool back up to $100.
+  const dry = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 5, base);
+  assert.equal(dry.refills, undefined, 'no refill unless asked for');
+  const refilled = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 5, { ...base, refillUsd: 100 });
+  assert.equal(refilled.refills?.[0].usd, 95);
+  assert.ok(refilled.contracts > dry.contracts, 'it trades on the refilled pool');
+  const off = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 5, { ...base, refillUsd: 100, killOverride: false });
+  assert.equal(off.refills, undefined, 'the supervisor refills only under the override');
+  // Oct 28: the pool ran dry at 00:01 and was topped back up with $90.77; paper settled -$104.08 since the stretch began.
+  const adir = path.join(root, 'audit');
+  fs.mkdirSync(adir);
+  const L = (kind: string, ts: string, data: object) => JSON.stringify({ ts, kind, data });
+  fs.writeFileSync(path.join(adir, 'audit-2026-10-28.jsonl'), [
+    L('settlement', '2026-10-27T23:45:30.000Z', { ticker: 'KXBTC15M-A', result: 'no', realized: -90.77 }),
+    L('training', '2026-10-28T00:01:20.000Z', { event: 'capital_exhaustion', book: 'kalshi', epoch: 11, refill: 90.77, endEquity: 9.23 }),
+    L('training', '2026-10-28T00:01:25.000Z', { event: 'capital_exhaustion', book: 'perps', epoch: 2, refill: 40, endEquity: 4 }),
+    L('training', '2026-10-28T00:02:00.000Z', { event: 'kill_released', previous: {} }),
+    L('settlement', '2026-10-28T01:30:30.000Z', { ticker: 'KXBTC15M-B', result: 'no', realized: -13.31 }),
+  ].join('\n') + '\n');
+  const a = await readAudit(adir, ['2026-10-28']);
+  assert.deepEqual(a.refills, [{ t: Date.parse('2026-10-28T00:01:20.000Z'), usd: 90.77 }], 'the Kalshi pool\'s refills only');
+  assert.ok(Math.abs(paperBankrollAt(86.69, { ...a, settlements: [{ t: Date.parse('2026-10-27T23:45:30.000Z'), pnl: -90.77 }, { t: Date.parse('2026-10-28T01:30:30.000Z'), pnl: -13.31 }] }, Date.parse('2026-10-27T00:00:00.000Z')) - 100) < 1e-9);
+  assert.ok(Math.abs(paperBankrollAt(86.69, a, Date.parse('2026-10-28T00:05:00.000Z')) - 100) < 1e-9, 'after the refill: equity now less what settled since');
+});
+
+test('backtest tickPhaseMs: the markets evaluated on the engine\'s 1 s timer, that far into each second', async () => {
+  const dir = path.join(tmp(), 'rec');
+  writeSyntheticRecordings(dir, { windows: 2, seed: 7, marketNoise: 0.05 });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both' });
+  const ticks = async (tickPhaseMs?: number) => {
+    const ts = new Set<number>();
+    await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { paper: { orderFrac: 0.1, orderUsd: 0 }, ...(tickPhaseMs !== undefined ? { tickPhaseMs } : {}), onEval: (e) => { ts.add(e.now); } });
+    return [...ts];
+  };
+  const plain = await ticks(), early = await ticks(250);
+  assert.ok(early.length > 100);
+  const cells = early.map((t) => Math.floor((t - 250) / 1000));
+  assert.ok(cells.every((c, i) => i === 0 || c > cells[i - 1]), 'one pass a second of the grid');
+  assert.deepEqual(early, plain, 'these recordings have an event every 5 s: each gets a pass either way');
 });
 
 test('the bot\'s validation gates: monitor lets unvalidated models trade unless their book is benched', () => {

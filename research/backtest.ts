@@ -131,6 +131,8 @@ export interface BacktestResult {
   pnl: number;
   /** The smallest loss-aware size scale the run reached (bot/risk/equityGuard.ts; 1 = never below break-even). */
   sizeScaleMin?: number;
+  /** Each refill of a pool that ran dry (BacktestOpts.refillUsd): when, and how much went in. */
+  refills?: Array<{ t: number; usd: number }>;
   /** With the paper options: entries the accuracy gate held back, when the take-profit bench benched, its sales (fills
    *  and contracts). */
   paper?: { accuracyBlocks: number; takeProfitBenchedAt: number | undefined; takeProfitSales: number; takeProfitContracts?: number; takeProfitScored?: number; takeProfitNetUsd?: number;
@@ -187,11 +189,20 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
   /** The dashboard's kill-switch override (bot/control.ts: on unless turned off). With it the weekly loss pause does not
    *  stop entries, as in the engine. Default on. */
   killOverride?: boolean;
+  /** The paper training supervisor's refill (bot/training/supervisor.ts checkKalshi), with the override on: once the
+   *  bankroll is below MIN_TRADABLE_BANKROLL_USD and below this amount (PAPER_BANKROLL_USD), resting orders are
+   *  cancelled, the account is topped back up to it and the equity guard starts a new epoch. Checked every 5 s from
+   *  tradeFromMs, as the supervisor's pass runs. Off when unset. */
+  refillUsd?: number;
   /** Start the equity guard from this saved state (a copy: the guard writes to it), e.g. the paper bot's
    *  equity_guard.json, so the break-even it sizes against and its sizing tier are the bot's. */
   equityGuardFile?: string;
   /** No orders before this time (ms): until then the replay only watches (research/replayCheck.ts). */
   tradeFromMs?: number;
+  /** Evaluate on the engine's 1 s timer (bot/engine.ts: setInterval) this many ms into each second: wherever paper's
+   *  timer fell, the replay can evaluate a little before or after the market moves it saw. Unset: at the first recorded
+   *  event a second after the last evaluation. */
+  tickPhaseMs?: number;
   /** With the paper options the maker buffer adapts as the engine's does (Engine.makerBuffer, bot/tca/tca.ts): once 30
    *  maker fills have a 60 s markout, it is minus their average (the newest 2000), within strategy.makerBufferRange.
    *  These seed it: the paper bot's own recent maker markouts (the replay check reads them from its TCA log). */
@@ -460,7 +471,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const inflightFor = (t: string) => inflight.some((x) => x.ticker === t);
   const cancelNow = async (orderId: string) => { cancelInFlight.delete(orderId); try { await ex.cancelOrder(orderId); } catch { /* already gone: the cancel lost the race */ L.lateKills++; } };
 
-  let lastTick = 0;
+  let lastTick = 0, nextTick = -Infinity, refillAt = -Infinity;
   for await (const e of readRecordings(dir)) {
     if (opts.startMs !== undefined && e.t < opts.startMs) continue;
     while (inflight.length && inflight[0].due <= e.t) await inflight.shift()!.run();
@@ -468,7 +479,10 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     if (!firstTs) firstTs = st.now;
     if (e.k === 'trade') ex.onTrade(e.ticker, e.price, e.count, e.takerSide, e.ts);
     if (e.tie) continue; // the rest of this instant first
-    if (st.now - lastTick < 1000) continue;
+    if (opts.tickPhaseMs !== undefined) {
+      if (st.now < nextTick) continue;
+      nextTick = st.now - ((((st.now - opts.tickPhaseMs) % 1000) + 1000) % 1000) + 1000;
+    } else if (st.now - lastTick < 1000) continue;
     lastTick = st.now;
     while (markoutDue.length && markoutDue[0].due <= st.now) {
       const x = markoutDue.shift()!;
@@ -481,6 +495,19 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     if (mctx && st.now - ctxAt >= 60_000) {
       ctxAt = st.now;
       try { mctx.update(st.features.candles.values(), st.now, (a) => taNetView(a, st.features.candles.get(a), st.now)?.vol4h); } catch { /* as the bot: kept as it was */ }
+    }
+    // The supervisor's pass (bot/training/supervisor.ts checkKalshi): a pool that can no longer trade is refilled.
+    if (opts.refillUsd !== undefined && opts.killOverride !== false && st.now - refillAt >= 5_000 && st.now >= (opts.tradeFromMs ?? -Infinity)) {
+      refillAt = st.now;
+      const bank = (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0);
+      if (bank < strategy.minTradableBankrollUsd && bank < opts.refillUsd) {
+        for (const o of await ex.getOpenOrders()) await cancelNow(o.orderId);
+        const usd = Math.round((opts.refillUsd - bank) * 100) / 100;
+        ex.refill(usd);
+        const eq = (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0);
+        guard.resetEpoch(eq, st.now, eq);
+        (res.refills ??= []).push({ t: st.now, usd });
+      }
     }
 
     for (const m of [...st.markets.values()].sort((a, b) => (priority.get(b.ticker) ?? 0) - (priority.get(a.ticker) ?? 0))) {

@@ -11,9 +11,10 @@
 // starts --warmup-hours earlier, so its books, features and gate scorecard are warm by then, and only markets closing
 // inside the stretch count on either side. The replay only watches until the stretch begins, then trades from the
 // paper account's bankroll at that point (--paper-balance-now, its cash plus the cost of the contracts it holds, less
-// what paper settled since; or --bankroll), its
+// what paper settled since and the refills when its pool ran dry; or --bankroll), its
 // equity guard started from the bot's own (--paper-guard: equity_guard.json, so it sizes against the same break-even)
-// and the dashboard's kill-switch override as the bot has it (--kill-override, on unless turned off).
+// and the dashboard's kill-switch override as the bot has it (--kill-override, on unless turned off), and a pool that
+// runs dry refilled as the bot's training supervisor does it.
 //
 // Where they part, it shows: fills by order purpose (quote, entry, exit), contracts and P&L hour by hour, the reasons
 // paper's entry diagnoses gave once it stopped filling, and the price each side traded on, set side by side at the
@@ -26,12 +27,13 @@
 //       [--from auto|ISO] [--to ISO] [--min-hours 3] [--warmup-hours 8] [--model data/models/model.json] \
 //       [--paper-balance-now 512.30 | --bankroll 150] [--paper-guard equity_guard.json] [--kill-override true|false] \
 //       [--maker-markouts markouts.json] [--paper-probation probation.json] [--paper-trials component_trials.json]
-//       [--bankroll-scale 1] [--out data/sweeps/replay-check.json]
+//       [--bankroll-scale 1] [--tick-phase-ms 0] [--out data/sweeps/replay-check.json]
 //   ... --plan   prints only the recorded days the stretch and its warm-up need (from the audit log)
 //   npm run research:replay-check -- --combine main.json --nearby a.json,b.json [--out replay-check.json]
 //         the verdict over nearby replays: one replay's P&L is path-sensitive (the same code at a $64 or a $74 bankroll
-//         made -$11.63 or -$32.76 over one stretch), so the same stretch is replayed at bankrolls a few percent apart
-//         (--bankroll-scale, run side by side) and their median is held to paper's
+//         made -$11.63 or -$32.76 over one stretch), so the same stretch is replayed at bankrolls a few percent apart,
+//         each evaluating at another point of the second as paper's 1 s timer could (--bankroll-scale, --tick-phase-ms,
+//         run side by side), and their median is held to paper's
 //
 // Tennis is left out of both sides (the backtester trades crypto contracts only). Read-only: writes only --out.
 
@@ -78,6 +80,8 @@ export interface PriceMatch {
   /** The price beyond the trained model's (mean |price - model's price|: the TA tilt, the rule book's, the SNN's), paper
    *  and replay, and the replay's own tilts (mean |shift|). */
   overlayPaper: number | null; overlayReplay: number | null; taShift: number | null; ruleShift: number | null;
+  /** The same over the stretch's first hour (after a start of the bot: its first windows). */
+  firstHour?: PriceMatch;
 }
 export interface ReplayCheck {
   days: string[]; bankroll: number; exitPolicy: string;
@@ -88,6 +92,8 @@ export interface ReplayCheck {
   /** Settings that differ from the ones the paper bot logged at the stretch's start (names only; null: no start in the
    *  days to compare with); model swaps in the stretch. */
   settingsDiffer: string[] | null; modelSwaps: string[];
+  /** Each side's refills of a pool that ran dry, in the stretch (bot/training/supervisor.ts). */
+  refills?: { paper: Array<{ t: string; usd: number }>; replay: Array<{ t: string; usd: number }> };
   /** Exits and the gate's counts are the whole replay's, warm-up included. */
   replay: SideSummary & { accuracyBlocks: number; entryEvaluations: number; takeProfitBenchedAt: string | null; takeProfitScored: number; takeProfitNetUsd: number; takeProfitByMarket: Record<string, TakeProfitMarket>; rejected: Record<string, number>; sizeScaleMin: number; makerBufferEnd: number | null; extra: { train: number; explore: number; sent: number; rejected: Record<string, number> } };
   /** The paper bot's maker buffer now, from the maker markouts it was seeded with (null: fewer than 30, the setting). */
@@ -111,12 +117,12 @@ export interface ReplayCheck {
   checked: boolean;
   close: boolean;
   why: string[];
-  /** The replay's bankroll over paper's at the stretch's start (nearby replays). */
-  bankrollScale?: number;
+  /** The replay's bankroll over paper's at the stretch's start, and where in each second it evaluated (nearby replays). */
+  bankrollScale?: number; tickPhaseMs?: number;
   /** With --combine: every replay of the stretch (this one and the nearby ones), their median, range and whether paper's
    *  P&L falls inside it; pnlGap, close and why are then the median's. */
   nearby?: {
-    runs: Array<{ bankrollScale: number; bankroll: number; pnl: number; contracts: number; fills: number }>; median: number; contractsMedian: number; min: number; max: number; paperInside: boolean;
+    runs: Array<{ bankrollScale: number; tickPhaseMs?: number; bankroll: number; pnl: number; contracts: number; fills: number }>; median: number; contractsMedian: number; min: number; max: number; paperInside: boolean;
     /** The replays' standard deviation (null under 3 replays): how far luck alone moves this stretch's P&L. */
     sd: number | null;
     /** Every stretch checked with this backtester so far, this one included: paper's P&L and the replays' medians summed,
@@ -173,9 +179,13 @@ export interface AuditRecords {
   /** The risk gateway's rejections as the engine logs them (one a market, side, purpose and reason a minute), crypto
    *  only: "purpose: reason" with the numbers folded. */
   rejects: Array<{ t: number; key: string }>;
+  /** Refills of the Kalshi paper pool after it ran dry (bot/training/supervisor.ts: a new training epoch), cash added. */
+  refills: Array<{ t: number; usd: number }>;
   /** The price each crypto decision record traded on, by ticker in time order (with readAudit's `prices` option). */
-  prices: Map<string, Array<{ t: number; pYes: number; fv: number; mid: number; position: number; spot?: number; strike?: number; sigma?: number; sigmaPricing?: number; pModel?: number }>>;
+  prices: Map<string, PriceRecord[]>;
 }
+/** A crypto decision record's price, its fair value and what went into it, the book's mid and the position then. */
+export interface PriceRecord { t: number; pYes: number; fv: number; mid: number; position: number; spot?: number; strike?: number; sigma?: number; sigmaPricing?: number; pModel?: number }
 
 // A decision record's numbers sit before its feature map: read with a pattern, not parsed (the records are many).
 const numAt = (line: string, key: string): number | undefined => {
@@ -188,7 +198,7 @@ const numAt = (line: string, key: string): number | undefined => {
  *  start before `prices.to`, each such start clearing what came before). */
 export async function readAudit(auditDir: string, days: string[], prices?: { from?: number; to?: number }): Promise<AuditRecords> {
   const want = new Set(days);
-  const a: AuditRecords = { fills: [], orders: new Map(), settlements: [], startups: [], diagnoses: [], modelSwaps: [], benchEvents: [], rejects: [], prices: new Map() };
+  const a: AuditRecords = { fills: [], orders: new Map(), settlements: [], startups: [], diagnoses: [], modelSwaps: [], benchEvents: [], rejects: [], refills: [], prices: new Map() };
   const files = fs.existsSync(auditDir) ? fs.readdirSync(auditDir).filter((f) => /^audit-\d{4}-\d{2}-\d{2}.*\.jsonl(\.gz)?$/.test(f) && want.has(f.slice(6, 16))).sort() : [];
   const whyOf = new Map<string, string>();
   for (const f of files) {
@@ -223,7 +233,8 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
       }
       const bench = head.includes('"kind":"take_profit_bench"');
       const reject = head.includes('"kind":"risk_reject"');
-      if (!exitPlan && !diagnosis && !swap && !bench && !reject && !head.includes('"kind":"startup"') && !head.includes('"kind":"fill"') && !head.includes('"kind":"settlement"') && !head.includes('"kind":"order_new"')) continue;
+      const training = head.includes('"kind":"training"');
+      if (!exitPlan && !diagnosis && !swap && !bench && !reject && !training && !head.includes('"kind":"startup"') && !head.includes('"kind":"fill"') && !head.includes('"kind":"settlement"') && !head.includes('"kind":"order_new"')) continue;
       let r: { kind?: string; ts?: string; data?: Record<string, any> };
       try { r = JSON.parse(line); } catch { continue; }
       const d = r.data ?? {};
@@ -235,6 +246,7 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
         continue;
       }
       if (swap) { a.modelSwaps.push(t); continue; }
+      if (training) { if (d.event === 'capital_exhaustion' && d.book === 'kalshi' && typeof d.refill === 'number') a.refills.push({ t, usd: d.refill }); continue; }
       if (reject) {
         const ticker = String(d.intent?.ticker ?? d.ticker ?? '');
         if (ticker && !isTennis(ticker)) a.rejects.push({ t, key: `${String(d.intent?.purpose ?? 'order')}: ${foldReason(String(d.reasons?.[0] ?? 'rejected'))}` });
@@ -334,12 +346,10 @@ export function paperSummary(a: AuditRecords, from = -Infinity, to = Infinity): 
  *  the summary. A record is matched by the first evaluation of its market within a second of it. */
 export function priceMatcher(prices: AuditRecords['prices'], from: number, to: number): { onEval: (e: EvalReading) => void; summary: () => PriceMatch } {
   const next = new Map<string, number>();
-  let matched = 0, dFv = 0, dMid = 0, dP = 0, shiftP = 0, shiftR = 0, sides = 0, same = 0, samePos = 0;
-  const held = { paper: 0, replay: 0, paperSize: 0, replaySize: 0 };
-  const parts = { spot: [0, 0], strike: [0, 0], sigma: [0, 0], sigmaPricing: [0, 0], pricedPaper: [0, 0], pricedReplay: [0, 0], taVolMult: [0, 0], overlayPaper: [0, 0], overlayReplay: [0, 0], taShift: [0, 0], ruleShift: [0, 0] };
-  const add = (k: keyof typeof parts, x: number | undefined) => { if (x !== undefined && Number.isFinite(x)) { parts[k][0] += x; parts[k][1]++; } };
-  let records = 0;
-  for (const arr of prices.values()) for (const r of arr) if (r.t >= from && r.t < to) records++;
+  // The whole stretch, and its first hour apart: after a start of the bot, paper's first window is where the two parted.
+  const all = priceTally(), first = priceTally();
+  let records = 0, firstRecords = 0;
+  for (const arr of prices.values()) for (const r of arr) if (r.t >= from && r.t < to) { records++; if (r.t < from + HOUR) firstRecords++; }
   return {
     onEval: (e) => {
       if (e.now < from - 1000 || e.now >= to + 1000) return;
@@ -349,29 +359,44 @@ export function priceMatcher(prices: AuditRecords['prices'], from: number, to: n
       while (i < arr.length && (arr[i].t < e.now - 1000 || arr[i].t < from)) i++;
       if (i < arr.length && arr[i].t <= e.now + 1000 && arr[i].t < to) {
         const r = arr[i++];
-        const mid = (e.bid + e.ask) / 2;
-        matched++;
-        dFv += Math.abs(e.fv - r.fv); dMid += Math.abs(mid - r.mid); dP += Math.abs(e.pYes - r.pYes);
-        shiftP += Math.abs(r.pYes - r.fv); shiftR += Math.abs(e.pYes - e.fv);
-        if (Math.abs(r.pYes - r.mid) >= 0.02) { sides++; if (Math.sign(e.pYes - mid) === Math.sign(r.pYes - r.mid)) same++; }
-        if (Math.sign(e.position) === Math.sign(r.position)) samePos++;
-        if (r.position !== 0) { held.paper++; held.paperSize += Math.abs(r.position); }
-        if (e.position !== 0) { held.replay++; held.replaySize += Math.abs(e.position); }
-        if (e.spot && r.spot) { parts.spot[0] += Math.abs(e.spot - r.spot) / r.spot * 1e4; parts.spot[1]++; }
-        if (e.strike !== undefined && r.strike !== undefined) { parts.strike[0] += Math.abs(e.strike - r.strike) > 1e-9 * Math.max(1, Math.abs(r.strike)) ? 1 : 0; parts.strike[1]++; }
-        if (e.sigma && r.sigma) { parts.sigma[0] += e.sigma / r.sigma; parts.sigma[1]++; }
-        if (e.sigmaPricing && r.sigmaPricing) { parts.sigmaPricing[0] += e.sigmaPricing / r.sigmaPricing; parts.sigmaPricing[1]++; }
-        if (r.sigma && r.sigmaPricing) add('pricedPaper', r.sigmaPricing / r.sigma);
-        if (e.sigma && e.sigmaPricing) add('pricedReplay', e.sigmaPricing / e.sigma);
-        add('taVolMult', e.taVolMult);
-        if (r.pModel !== undefined) add('overlayPaper', Math.abs(r.pYes - r.pModel));
-        if (e.pModel !== undefined) add('overlayReplay', Math.abs(e.pYes - e.pModel));
-        if (e.taShift !== undefined) add('taShift', Math.abs(e.taShift));
-        if (e.ruleShift !== undefined) add('ruleShift', Math.abs(e.ruleShift));
+        all.add(e, r);
+        if (r.t < from + HOUR) first.add(e, r);
       }
       next.set(e.ticker, i);
     },
-    summary: () => {
+    summary: () => ({ ...all.summary(records), firstHour: first.summary(firstRecords) }),
+  };
+}
+
+/** One tally of the replay's prices beside paper's decision records (priceMatcher). */
+function priceTally(): { add: (e: EvalReading, r: PriceRecord) => void; summary: (records: number) => PriceMatch } {
+  let matched = 0, dFv = 0, dMid = 0, dP = 0, shiftP = 0, shiftR = 0, sides = 0, same = 0, samePos = 0;
+  const held = { paper: 0, replay: 0, paperSize: 0, replaySize: 0 };
+  const parts = { spot: [0, 0], strike: [0, 0], sigma: [0, 0], sigmaPricing: [0, 0], pricedPaper: [0, 0], pricedReplay: [0, 0], taVolMult: [0, 0], overlayPaper: [0, 0], overlayReplay: [0, 0], taShift: [0, 0], ruleShift: [0, 0] };
+  const add = (k: keyof typeof parts, x: number | undefined) => { if (x !== undefined && Number.isFinite(x)) { parts[k][0] += x; parts[k][1]++; } };
+  return {
+    add: (e, r) => {
+      const mid = (e.bid + e.ask) / 2;
+      matched++;
+      dFv += Math.abs(e.fv - r.fv); dMid += Math.abs(mid - r.mid); dP += Math.abs(e.pYes - r.pYes);
+      shiftP += Math.abs(r.pYes - r.fv); shiftR += Math.abs(e.pYes - e.fv);
+      if (Math.abs(r.pYes - r.mid) >= 0.02) { sides++; if (Math.sign(e.pYes - mid) === Math.sign(r.pYes - r.mid)) same++; }
+      if (Math.sign(e.position) === Math.sign(r.position)) samePos++;
+      if (r.position !== 0) { held.paper++; held.paperSize += Math.abs(r.position); }
+      if (e.position !== 0) { held.replay++; held.replaySize += Math.abs(e.position); }
+      if (e.spot && r.spot) { parts.spot[0] += Math.abs(e.spot - r.spot) / r.spot * 1e4; parts.spot[1]++; }
+      if (e.strike !== undefined && r.strike !== undefined) { parts.strike[0] += Math.abs(e.strike - r.strike) > 1e-9 * Math.max(1, Math.abs(r.strike)) ? 1 : 0; parts.strike[1]++; }
+      if (e.sigma && r.sigma) { parts.sigma[0] += e.sigma / r.sigma; parts.sigma[1]++; }
+      if (e.sigmaPricing && r.sigmaPricing) { parts.sigmaPricing[0] += e.sigmaPricing / r.sigmaPricing; parts.sigmaPricing[1]++; }
+      if (r.sigma && r.sigmaPricing) add('pricedPaper', r.sigmaPricing / r.sigma);
+      if (e.sigma && e.sigmaPricing) add('pricedReplay', e.sigmaPricing / e.sigma);
+      add('taVolMult', e.taVolMult);
+      if (r.pModel !== undefined) add('overlayPaper', Math.abs(r.pYes - r.pModel));
+      if (e.pModel !== undefined) add('overlayReplay', Math.abs(e.pYes - e.pModel));
+      if (e.taShift !== undefined) add('taShift', Math.abs(e.taShift));
+      if (e.ruleShift !== undefined) add('ruleShift', Math.abs(e.ruleShift));
+    },
+    summary: (records) => {
       const m = (x: number) => (matched ? +(x / matched).toFixed(4) : null);
       const avg = ([x, n]: number[], d = 3) => (n ? +(x / n).toFixed(d) : null);
       return {
@@ -388,6 +413,12 @@ export function priceMatcher(prices: AuditRecords['prices'], from: number, to: n
 /** What paper did on `days`, from the audit log's fill, order and settlement records (crypto only). */
 export async function paperFromAudit(auditDir: string, days: string[], from?: number, to?: number): Promise<ReturnType<typeof paperSummary>> {
   return paperSummary(await readAudit(auditDir, days), from, to);
+}
+
+/** Paper's bankroll when the stretch began: its equity at cost now, less what it settled since and less the cash put back
+ *  in each time the pool ran dry since (a refill is no P&L). */
+export function paperBankrollAt(equityNow: number, a: Pick<AuditRecords, 'settlements' | 'refills'>, from: number): number {
+  return equityNow - a.settlements.filter((s) => s.t >= from).reduce((x, s) => x + s.pnl, 0) - a.refills.filter((x) => x.t >= from).reduce((x, f) => x + f.usd, 0);
 }
 
 /** Where the compared stretch starts: the bot's last start before `to` (each deploy restarts it, so from there on one
@@ -448,11 +479,11 @@ const median = (xs: number[]) => { const s = [...xs].sort((a, b) => a - b), n = 
  *  earlier check of the same hours), the median's contracts within 0.5-2x of paper's, and prices that match (fair
  *  value within 1c, the same side of the mid 95% of the time). Test 'pct': the median within `tol` of paper's P&L and the
  *  same contracts rule, as verdict() holds one replay. Returns the stretch's tally entry (with 3 replays or more). */
-export function nearbyVerdict(runs: Array<Pick<ReplayCheck, 'bankroll' | 'bankrollScale'> & { replay: SideSummary }>, paper: SideSummary,
+export function nearbyVerdict(runs: Array<Pick<ReplayCheck, 'bankroll' | 'bankrollScale' | 'tickPhaseMs'> & { replay: SideSummary }>, paper: SideSummary,
   o: { tol?: number; test?: 'luck' | 'pct'; prices?: Pick<PriceMatch, 'fv' | 'sameSide'>; history?: StretchTally[]; stretch?: { from: string; to: string; hours: number; code: string } } = {},
 ): { nearby: NonNullable<ReplayCheck['nearby']>; close: boolean; pnlGap: number | null; why: string[]; entry?: StretchTally } {
   const tol = o.tol ?? 0.25;
-  const rows = runs.map((r) => ({ bankrollScale: r.bankrollScale ?? 1, bankroll: r.bankroll, pnl: r.replay.pnl, contracts: r.replay.contracts, fills: r.replay.fills }));
+  const rows = runs.map((r) => ({ bankrollScale: r.bankrollScale ?? 1, ...(r.tickPhaseMs !== undefined ? { tickPhaseMs: r.tickPhaseMs } : {}), bankroll: r.bankroll, pnl: r.replay.pnl, contracts: r.replay.contracts, fills: r.replay.fills }));
   const pnls = rows.map((r) => r.pnl), min = Math.min(...pnls), max = Math.max(...pnls), mean = pnls.reduce((a, x) => a + x, 0) / pnls.length;
   const sd = pnls.length >= 3 ? Math.sqrt(pnls.reduce((a, x) => a + (x - mean) ** 2, 0) / (pnls.length - 1)) : null;
   const med = median(pnls), contractsMedian = median(rows.map((r) => r.contracts));
@@ -483,6 +514,8 @@ export interface ReplayCheckOpts {
   bankroll?: number; paperBalanceNow?: number;
   /** The replay's bankroll times this (nearby replays, default 1). */
   bankrollScale?: number;
+  /** Where in each second the replay evaluates (BacktestOpts.tickPhaseMs; nearby replays differ in it as paper's timer could). */
+  tickPhaseMs?: number;
   /** The paper bot's equity_guard.json (read from a copy) and its kill-switch override (default on, as bot/control.ts). */
   paperGuard?: string; killOverride?: boolean;
   /** The paper bot's recent maker fills' 60 s markouts (its TCA log), which seed the replay's adaptive maker buffer. */
@@ -541,7 +574,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const from = o.from ?? stretchStart(audit.startups.map((s) => s.t), days, to);
   const hours = (to - from) / HOUR;
   const startedAt = audit.startups.filter((s) => s.t <= from).pop();
-  const paperStart = (o.paperBalanceNow ?? NaN) - audit.settlements.filter((s) => s.t >= from).reduce((x, s) => x + s.pnl, 0);
+  const paperStart = paperBankrollAt(o.paperBalanceNow ?? NaN, audit, from);
   const bankroll = Math.round((o.bankroll ?? (Number.isFinite(paperStart) && paperStart > 0 ? paperStart : cfg.paperBankrollUsd)) * (o.bankrollScale ?? 1) * 100) / 100;
 
   const want = new Set(days);
@@ -585,9 +618,9 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
     sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd }, accuracyGate: S.accuracyGate,
     takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile, ...(follow ? { follow } : {}) }, accuracyGateFile: gateFile, startMs: from - (o.warmupHours ?? 8) * HOUR, tradeFromMs: from,
-    dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, onEval: match.onEval, makerMarkouts: o.makerMarkouts,
+    dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, refillUsd: cfg.paperBankrollUsd, onEval: match.onEval, makerMarkouts: o.makerMarkouts,
     volProfile: models.volProfile, applyVolSeasonality: Boolean(models.volProfile), volModel: models.volModel, fillModel: models.fillModel, calendar: models.calendar,
-    taNet: true, trials: models.trials, marketContext: true,
+    taNet: true, trials: models.trials, marketContext: true, ...(o.tickPhaseMs !== undefined ? { tickPhaseMs: o.tickPhaseMs } : {}),
   });
   fs.rmSync(dir, { recursive: true, force: true });
   fs.rmSync(seedDir, { recursive: true, force: true });
@@ -619,10 +652,11 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const checked = hours >= minHours;
   const v = verdict(replay, paper);
   return {
-    days, bankroll, bankrollScale: o.bankrollScale ?? 1, exitPolicy: policy, guardSeeded: Boolean(guardFile), killOverride, from: new Date(from).toISOString(), to: new Date(to).toISOString(), hours,
+    days, bankroll, bankrollScale: o.bankrollScale ?? 1, ...(o.tickPhaseMs !== undefined ? { tickPhaseMs: o.tickPhaseMs } : {}), exitPolicy: policy, guardSeeded: Boolean(guardFile), killOverride, from: new Date(from).toISOString(), to: new Date(to).toISOString(), hours,
     startups: audit.startups.map((s) => new Date(s.t).toISOString()),
     settingsDiffer: startedAt ? settingsDiffer(JSON.parse(JSON.stringify(publicConfig(cfg as Config))), startedAt.config) : null,
     modelSwaps: audit.modelSwaps.filter(inside).map((t) => new Date(t).toISOString()),
+    refills: { paper: audit.refills.filter((x) => inside(x.t)).map((x) => ({ t: new Date(x.t).toISOString(), usd: x.usd })), replay: (r.refills ?? []).filter((x) => inside(x.t)).map((x) => ({ t: new Date(x.t).toISOString(), usd: x.usd })) },
     replay, paper, prices: match.summary(), makerBufferPaper, models: models.used, gates: cfg.probation.mode, benched, seeded,
     benchFollowed: follow ? { benched: follow.benched, events: follow.events.map((e) => ({ t: new Date(e.t).toISOString(), benched: e.benched })) } : null,
     ...v, checked, close: checked && v.close,
@@ -662,7 +696,7 @@ async function main(): Promise<void> {
     const out = arg('out', '');
     if (out) { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify(res, null, 2)); }
     const N = nv.nearby;
-    console.log(`nearby replays of the stretch: ${[...N.runs].sort((a, b) => a.bankrollScale - b.bankrollScale).map((r) => `x${r.bankrollScale} ($${r.bankroll}) ${f(r.pnl)} / ${r.contracts.toFixed(0)} c`).join(' | ')}`);
+    console.log(`nearby replays of the stretch: ${[...N.runs].sort((a, b) => a.bankrollScale - b.bankrollScale).map((r) => `x${r.bankrollScale}${r.tickPhaseMs !== undefined ? ` at +${r.tickPhaseMs} ms` : ''} ($${r.bankroll}) ${f(r.pnl)} / ${r.contracts.toFixed(0)} c`).join(' | ')}`);
     console.log(`median ${f(N.median)} (range ${f(N.min)} to ${f(N.max)}, standard deviation ${N.sd === null ? 'n/a' : N.sd.toFixed(2)}), ${N.contractsMedian.toFixed(0)} contracts | paper ${f(own.paper.pnl)} / ${own.paper.contracts.toFixed(0)} c, ${N.paperInside ? 'inside' : 'outside'} the range | median gap ${pct(nv.pnlGap)}`);
     if (N.tally) console.log(`stretches checked with this backtester (${code}): ${N.tally.stretches}, ${N.tally.hours.toFixed(1)} h | paper ${f(N.tally.paper)} vs the replays' ${f(N.tally.median)} +/- ${N.tally.sd.toFixed(2)}: ${N.tally.z === null ? 'n/a' : Math.abs(N.tally.z).toFixed(1)} standard deviations apart | test: ${N.test === 'luck' ? 'within 2 standard deviations' : 'median within 25%'}`);
     console.log(!res.checked ? `VERDICT not checked yet: ${res.why.join('; ')}` : res.close ? 'VERDICT close: sweep results can count' : `VERDICT not close: ${res.why.join('; ')}`);
@@ -679,7 +713,7 @@ async function main(): Promise<void> {
   }
   const res = await replayCheck({
     recordings: arg('recordings', 'data/recordings'), audit: arg('audit', 'data/audit'), days, model: arg('model', 'params/model.json'),
-    from: time('from'), to: time('to'), minHours: opt('min-hours'), warmupHours: opt('warmup-hours'), bankroll: opt('bankroll'), paperBalanceNow: opt('paper-balance-now'), bankrollScale: opt('bankroll-scale'),
+    from: time('from'), to: time('to'), minHours: opt('min-hours'), warmupHours: opt('warmup-hours'), bankroll: opt('bankroll'), paperBalanceNow: opt('paper-balance-now'), bankrollScale: opt('bankroll-scale'), tickPhaseMs: opt('tick-phase-ms'),
     paperGuard: arg('paper-guard', '') || undefined, killOverride: arg('kill-override', 'true') !== 'false',
     makerMarkouts: arg('maker-markouts', '') && fs.existsSync(arg('maker-markouts', '')) ? (JSON.parse(fs.readFileSync(arg('maker-markouts', ''), 'utf8')) as unknown[]).map(Number).filter(Number.isFinite) : undefined,
     paperProbation: arg('paper-probation', '') || undefined, paperTrials: arg('paper-trials', '') || undefined,
@@ -690,8 +724,10 @@ async function main(): Promise<void> {
   if (out) { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify(res, null, 2)); }
   const hm = (iso: string) => iso.slice(0, 16).replace('T', ' ');
   const row = (n: string, s: SideSummary) => console.log(`${n.padEnd(7)} fills ${String(s.fills).padStart(6)}  contracts ${s.contracts.toFixed(0).padStart(7)}  fees ${s.fees.toFixed(2).padStart(7)}  markets ${String(s.markets).padStart(5)}  P&L ${f(s.pnl).padStart(8)}  exits ${JSON.stringify(s.exits)}`);
-  console.log(`replay check ${hm(res.from)} to ${hm(res.to)} UTC (${res.hours.toFixed(1)} h on one start of the paper bot) | exit policy ${res.exitPolicy} | bankroll $${res.bankroll}${res.bankrollScale !== undefined && res.bankrollScale !== 1 ? ` (x${res.bankrollScale} paper's)` : ''} | equity guard ${res.guardSeeded ? "the bot's" : 'fresh'}, override ${res.killOverride ? 'on' : 'off'}`);
+  console.log(`replay check ${hm(res.from)} to ${hm(res.to)} UTC (${res.hours.toFixed(1)} h on one start of the paper bot) | exit policy ${res.exitPolicy} | bankroll $${res.bankroll}${res.bankrollScale !== undefined && res.bankrollScale !== 1 ? ` (x${res.bankrollScale} paper's)` : ''}${res.tickPhaseMs !== undefined ? ` | evaluating ${res.tickPhaseMs} ms into each second` : ''} | equity guard ${res.guardSeeded ? "the bot's" : 'fresh'}, override ${res.killOverride ? 'on' : 'off'}`);
   console.log(`paper bot starts in ${res.days.join(', ')}: ${res.startups.length ? res.startups.map(hm).join(', ') : 'none'}`);
+  const refilled = (xs: Array<{ t: string; usd: number }> = []) => xs.map((x) => `${hm(x.t)} (+$${x.usd.toFixed(2)})`).join(', ') || 'none';
+  if (res.refills?.paper.length || res.refills?.replay.length) console.log(`the pool ran dry and was refilled (a new training epoch): paper ${refilled(res.refills.paper)} | replay ${refilled(res.refills.replay)}`);
   row('replay', res.replay);
   row('paper', res.paper);
   const purposes = (s: SideSummary) => Object.entries(s.byPurpose).sort().map(([k, x]) => `${k} ${x.fills}/${x.contracts.toFixed(0)}`).join(', ') || 'none';
@@ -713,6 +749,8 @@ async function main(): Promise<void> {
   console.log(`prices at paper's decision records: ${P.matched} of ${P.records} matched within 1 s | mean gap replay vs paper: fair value ${c(P.fv)}, mid ${c(P.mid)}, price traded on ${c(P.price)} | shift from fair value: paper ${c(P.shiftPaper)}, replay ${c(P.shiftReplay)} | same side of the mid ${pct(P.sameSide)} of ${P.sides} | same position ${pct(P.samePosition)}`);
   console.log(`the fair value's inputs, replay vs paper: index gap ${P.spotBp ?? 'n/a'} bp | strike differs on ${pct(P.strikeDiffers)} | volatility ratio: EWMA x${P.sigmaRatio ?? 'n/a'}, priced with x${P.sigmaPricingRatio ?? 'n/a'} | priced over the EWMA: paper x${P.pricedPaper ?? 'n/a'}, replay x${P.pricedReplay ?? 'n/a'} (TA network x${P.taVolMult ?? 'n/a'})`);
   console.log(`the price beyond the trained model's (TA tilt, rule book, SNN): paper ${c(P.overlayPaper)}, replay ${c(P.overlayReplay)} (TA tilt ${c(P.taShift)}, rule book ${c(P.ruleShift)})`);
+  const F = P.firstHour;
+  if (F?.matched) console.log(`the stretch's first hour: ${F.matched} of ${F.records} matched | fair value gap ${c(F.fv)}, mid ${c(F.mid)}, price traded on ${c(F.price)} | same side of the mid ${pct(F.sameSide)} of ${F.sides} | same position ${pct(F.samePosition)}, held paper ${pct(F.held.paper)} (${F.held.paperSize ?? 'n/a'} c), replay ${pct(F.held.replay)} (${F.held.replaySize ?? 'n/a'} c) | index gap ${F.spotBp ?? 'n/a'} bp, EWMA x${F.sigmaRatio ?? 'n/a'}, priced with x${F.sigmaPricingRatio ?? 'n/a'} | beyond the model: paper ${c(F.overlayPaper)}, replay ${c(F.overlayReplay)}`);
   console.log(`accuracy gate: replay held back ${pct(res.replay.entryEvaluations ? res.replay.accuracyBlocks / res.replay.entryEvaluations : null)} of its entry evaluations; paper's diagnoses show it keeping out ${pct(res.paper.gateShare)} of the markets | replay's break-even size scale went down to x${res.replay.sizeScaleMin.toFixed(2)} (paper's orders, a share of the bankroll, ignore it)`);
   const tb = (scored: number, net: number, at: string | null, would = false) => `${scored} markets scored, ${f(net)} against holding to settlement, ${would ? 'its own scoreboard would have benched it' : 'benched'} ${at ? hm(at) : 'never'}`;
   console.log(`take-profit bench in the stretch: replay ${tb(res.replay.takeProfitScored, res.replay.takeProfitNetUsd, res.replay.takeProfitBenchedAt, Boolean(res.benchFollowed))} | paper ${tb(res.paper.takeProfitBench.scored, res.paper.takeProfitBench.netUsd, res.paper.takeProfitBench.benchedAt)}`);
