@@ -6,6 +6,14 @@ name: Server diagnostics
 on:
   workflow_dispatch:
     inputs:
+      exit_hours:
+        description: 'Exit study instead of the diagnostics: hours of positions deploy/cross_study.py covers, ending at exit_until (read-only; about a minute of server time an hour; the report is posted on the commit)'
+        required: false
+        default: ''
+      exit_until:
+        description: 'With exit_hours: the end of the window, an ISO UTC time such as 2026-10-28T03:10:00Z, or now'
+        required: false
+        default: 'now'
       paths:
         description: 'Optional: extra read-only dashboard API paths to print, space separated (e.g. /api/snn /api/autotrain)'
         required: false
@@ -29,6 +37,7 @@ permissions:
 jobs:
   diagnose:
     runs-on: ubuntu-latest
+    if: ${{ !inputs.exit_hours }}
     environment: production
     steps:
       - uses: actions/checkout@v5
@@ -175,3 +184,52 @@ jobs:
               echo "== training step timings"; nice -n 19 python3 /tmp/diag/deploy/step_timings.py ~/bot/data 30 || true
             fi
             echo "== last 60 log lines"; journalctl -u kalshi-bot -n 60 --no-pager | cut -c1-300
+
+  exit-study:
+    # Why the ratchet stop and the model exit lose, from the paper bot's own records (read-only): deploy/cross_study.py from
+    # the dispatched ref runs on the server over a window of positions and the report is posted on the commit (the job log
+    # sits on a host the cloud sessions cannot read). Nothing on the server changes; the report is counts, prices and dollars.
+    if: ${{ inputs.exit_hours }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Run the exit study on the server (read-only)
+        env:
+          HOURS: ${{ inputs.exit_hours }}
+          UNTIL: ${{ inputs.exit_until || 'now' }}
+        run: |
+          [[ "$HOURS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "hours must be a number"; exit 1; }
+          U=''
+          if [ "$UNTIL" != now ]; then
+            [[ "$UNTIL" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "until must be an ISO UTC time or now"; exit 1; }
+            U="$UNTIL"
+          fi
+          T=$(python3 -c "print(int(float('$HOURS') * 110 + 600))")
+          ssh bot "mkdir -p /tmp/diag"
+          scp -q deploy/cross_study.py bot:/tmp/diag/cross_study.py
+          { ssh bot "timeout $T nice -n 19 python3 /tmp/diag/cross_study.py ~/bot/data $HOURS $U" || echo "(exit study stopped: $?)"; } 2>&1 | tee "$RUNNER_TEMP/report.txt"
+      - name: Post the report on the commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOURS: ${{ inputs.exit_hours }}
+          UNTIL: ${{ inputs.exit_until || 'now' }}
+        run: |
+          R="$RUNNER_TEMP/report.txt"; [ -s "$R" ] || { echo "no report to post"; exit 0; }
+          { echo "**Exit diagnosis** run [$GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) · $HOURS h of positions up to $UNTIL"
+            echo; echo '```'; cut -c1-600 "$R" | head -n 400; echo '```'; } > "$RUNNER_TEMP/comment.md"
+          jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' | gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" --input - --jq '.html_url'
