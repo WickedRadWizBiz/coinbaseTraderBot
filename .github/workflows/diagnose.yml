@@ -240,6 +240,13 @@ jobs:
           UNTIL: ${{ inputs.exit_until || 'now' }}
         run: |
           R="$RUNNER_TEMP/report.txt"; [ -s "$R" ] || { echo "no report to post"; exit 0; }
-          { echo "**Exit diagnosis** run [$GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) · $HOURS h of positions up to $UNTIL"
-            echo; echo '```'; cut -c1-400 "$R" | head -c 60000; echo; echo '```'; } > "$RUNNER_TEMP/comment.md"
-          jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' | gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" --input - --jq '.html_url'
+          # A comment holds 65k characters: a long report (the model studies) goes up in parts, split on line ends.
+          cut -c1-400 "$R" > "$RUNNER_TEMP/report.cut"
+          split -C 60000 -d "$RUNNER_TEMP/report.cut" "$RUNNER_TEMP/part."
+          n=0
+          for P in "$RUNNER_TEMP"/part.*; do
+            n=$((n + 1)); [ "$n" -le 4 ] || { echo "report longer than four parts: the rest is in the job log"; break; }
+            { echo "**Exit diagnosis** run [$GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) · $HOURS h of positions up to $UNTIL · part $n"
+              echo; echo '```'; cat "$P"; echo; echo '```'; } > "$RUNNER_TEMP/comment.md"
+            jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' | gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" --input - --jq '.html_url'
+          done
