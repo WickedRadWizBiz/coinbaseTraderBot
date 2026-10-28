@@ -147,7 +147,7 @@ def main():
             print(f"  {name:58s} {len(series)} settlements: too few"); return
         m, stat = dm(series)
         print(f"  {name:58s} {len(series):5d} settlements  log loss {'saved' if m <= 0 else 'added'} {abs(m):.5f} a contract"
-              f"  p(better) {norm_cdf(stat):.3f}  p(worse) {1 - norm_cdf(stat):.3f}")
+              f"  p(better) {1 - norm_cdf(stat):.3f}  p(worse) {norm_cdf(stat):.3f}")
 
     model = lambda s: s['model']
     print('\n== 1. baselines: each price against Kalshi\'s (calibrated mid; saved = better than the market)')
