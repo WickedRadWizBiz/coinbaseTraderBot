@@ -87,6 +87,7 @@ import { recordLatency } from './util/latency';
 import { performance } from 'perf_hooks';
 import { activeRuleBook, STAND_ASIDE } from './strategy/ruleBook';
 import { buildLedger, type ModuleRow } from './health/moduleLedger';
+import { orderBudget } from './sizing/orderBudget';
 import { activeGpSignals } from './gp/gpSignals';
 import { marketContext } from './ta/marketContext';
 import { binaryTrades, optimalF, recencyWeight, type OptimalFReport } from './strategy/optimalF';
@@ -2059,14 +2060,14 @@ export class Engine {
     // dollars, whatever the tier, the break-even scale, the session's size factor and optimal f would allow (the owner's
     // choice for paper on Oct 23, a share of the bankroll since Oct 24).
     const fixedUsd = this.paperOrderUsd(bankroll);
+    // Session risk profile can only shrink size (sizeMult in [0, 1]). The risk scale (drawdown, losing streak,
+    // training-mode de-risking) shrinks every sizing route: Kelly, target-EV and the per-order caps alike. The same
+    // budget sizes the backtester's orders (bot/sizing/orderBudget.ts).
+    const budget = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult, riskScale: kellyScale, fCapUsd, paperOrderUsd: fixedUsd, maxContractsPerOrder: R.maxContractsPerOrder });
     const view: MarketView = {
       ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: st.position, bankroll,
-      // Session risk profile can only shrink size (sizeMult in [0, 1]).
-      // The risk scale (drawdown, losing streak, training-mode de-risking) shrinks every sizing route:
-      // Kelly, target-EV and the per-order caps alike.
-      maxOrderRiskUsd: fixedUsd > 0 ? fixedUsd : Math.min(tier.orderFrac * bankroll * sizeMult * kellyScale, fCapUsd),
-      maxContracts: floorCount(R.maxContractsPerOrder * (fixedUsd > 0 ? 1 : sizeMult)), minSidePrice: R.minSidePrice,
-      ...(fixedUsd > 0 ? { fixedOrderUsd: fixedUsd } : {}),
+      maxOrderRiskUsd: budget.maxOrderRiskUsd, maxContracts: budget.maxContracts, minSidePrice: R.minSidePrice,
+      ...(budget.fixedOrderUsd ? { fixedOrderUsd: budget.fixedOrderUsd } : {}),
       // Exit curve, rest mode: the held position's sell rests at the curve's swing-top estimate (the strategy places it);
       // not in the stand-down before the close, and pulled during a fast index move (a resting sell is lifted exactly
       // when the contract is suddenly worth more).

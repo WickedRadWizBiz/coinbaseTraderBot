@@ -43,6 +43,8 @@ import { ladderQuotes } from '../bot/model/ladder';
 import { priceContract, SETTLEMENT_AVG_SEC } from '../bot/model/fairValue';
 import { kalshiMaintenance, sessionEdge } from '../bot/model/sessions';
 import { defaultTiers, tierAt, type TierPoint } from '../bot/risk/sizingTiers';
+import { orderBudget } from '../bot/sizing/orderBudget';
+import { binaryTrades, optimalF, recencyWeight } from '../bot/strategy/optimalF';
 import { CadenceGate, inEntryWindow } from '../bot/strategy/cadence';
 import type { MacroEvent } from '../bot/model/featureEngine';
 import { loadCalendar } from '../bot/model/calendar';
@@ -133,6 +135,8 @@ export interface BacktestResult {
   pnl: number;
   /** The smallest loss-aware size scale the run reached (bot/risk/equityGuard.ts; 1 = never below break-even). */
   sizeScaleMin?: number;
+  /** Evaluations whose stake the optimal f cap set (below the tier's). */
+  optimalFBound?: number;
   /** Each refill of a pool that ran dry (BacktestOpts.refillUsd): when, and how much went in. */
   refills?: Array<{ t: number; usd: number }>;
   /** With the paper options: entries the accuracy gate held back, when the take-profit bench benched, its sales (fills
@@ -168,6 +172,11 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
    *  to fit one order, PAPER_WINDOW_ORDERS closing together and PAPER_TOTAL_ORDERS in all. The vault is bookkeeping
    *  only in paper, so it does not shrink the bankroll here either. */
   paper?: { orderFrac: number; orderUsd: number };
+  /** The optimal f cap as the engine applies it (Engine.kalshiOptimalF): the stake per order never above what the
+   *  replay's own settled entries support (bootstrap quantile of the growth-optimal fraction, recency weighted, once
+   *  there are minTradesKalshi), floored in paper at paperFloor x the tier's per-order fraction. Starts from
+   *  `seed` (settled entries before the replay, as trades.jsonl rows) when given, else from nothing. */
+  optimalF?: { enabled: boolean; quantile: number; halfLifeDays: number; minTradesKalshi: number; paperFloor: number; live?: boolean; seed?: Array<{ ts: number; ticker: string; cost: number; count: number; won: boolean }> };
   /** The paper accuracy gate (bot/strategy/accuracyGate.ts): no new entry in a time-to-close bucket where the market's
    *  own price has called the recent results better than the bot. Starts with an empty scorecard (no look-ahead), or
    *  from accuracyGateFile. */
@@ -424,6 +433,20 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   // An order's purpose from its client order id (<ticker>-<ms>-<side>-<purpose>[-tp]; a queued exit <ticker>-<ms>-exit-<kind>).
   const purposeOf = (coid?: string) => (!coid ? 'other' : coid.includes('-exit-') ? 'exit' : /-(quote|entry|exit)(?:-tp)?$/.exec(coid)?.[1] ?? 'other');
 
+  // Settled entries for the optimal f cap, as the engine's trades.jsonl rows (Engine: every fill that is not an exit or
+  // a reduce-only take-profit).
+  const ofRows: Array<{ ts: number; ticker: string; cost: number; count: number; won: boolean }> = [...(opts.optimalF?.seed ?? [])];
+  const ofOpen = new Map<string, Array<{ side: 'bid' | 'ask'; cost: number; count: number }>>();
+  let ofCache: { at: number; cap: number } | undefined;
+  const optimalFCap = (now: number, orderFrac: number): number => {
+    const o = opts.optimalF;
+    if (!o?.enabled) return Infinity;
+    if (!ofCache || now - ofCache.at >= 3_600_000 || now < ofCache.at) {
+      const trades = binaryTrades(ofRows).map((t) => ({ ...t, w: recencyWeight(t.ts, now, o.halfLifeDays) }));
+      ofCache = { at: now, cap: optimalF(trades, { quantile: o.quantile, minTrades: o.minTradesKalshi, horizon: 100 }).cap };
+    }
+    return !o.live && Number.isFinite(ofCache.cap) ? Math.max(ofCache.cap, o.paperFloor * orderFrac) : ofCache.cap;
+  };
   ex.on('fill', (f) => {
     pos.applyFill({ ticker: f.ticker, side: f.side, count: f.count, price: f.price, fee: f.fee ?? 0 }, { closeTs: closeOf.get(f.ticker) });
     const w = closeOf.get(f.ticker)!;
@@ -433,6 +456,11 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     b.fills = (b.fills ?? 0) + 1;
     res.windows.set(w, b);
     res.fills++; res.contracts += f.count; res.fees += f.fee ?? 0;
+    if (opts.optimalF?.enabled && purposeOf(f.clientOrderId) !== 'exit' && !f.clientOrderId?.endsWith('-tp')) {
+      const list = ofOpen.get(f.ticker) ?? [];
+      list.push({ side: f.side, cost: f.side === 'bid' ? f.price : 1 - f.price, count: f.count });
+      ofOpen.set(f.ticker, list.slice(-50));
+    }
     if (opts.paper && !f.isTaker) markoutDue.push({ due: st.now + 60_000, ticker: f.ticker, sign: f.side === 'bid' ? 1 : -1, price: f.price });
     const bp = (res.byPurpose![purposeOf(f.clientOrderId)] ??= { fills: 0, contracts: 0 });
     bp.fills++; bp.contracts += f.count;
@@ -530,6 +558,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         if (out) {
           const result = out.label ? 'yes' : 'no';
           ex.settle(m.ticker, result);
+          for (const x of ofOpen.get(m.ticker) ?? []) ofRows.push({ ts: st.now, ticker: m.ticker, cost: x.cost, count: x.count, won: (x.side === 'bid') === (result === 'yes') });
+          ofOpen.delete(m.ticker);
           if (!(opts.accuracyGateFile && opts.tradeFromMs !== undefined && st.now < opts.tradeFromMs)) gate?.settle(m.ticker, result);
           if (tpBench) { tpBench.settled(m.ticker, result, st.now); if (res.paper!.takeProfitBenchedAt === undefined && ownBenched()) res.paper!.takeProfitBenchedAt = st.now; }
           for (const x of exitLedger.get(m.ticker) ?? []) {
@@ -787,8 +817,9 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       }
       const view: MarketView = {
         ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: pos.position(m.ticker), bankroll,
-        maxOrderRiskUsd: fixedUsd > 0 ? fixedUsd : tier.orderFrac * bankroll * sessRisk.sizeMult * sizeScale, maxContracts: Math.floor(limits.maxContractsPerOrder * (fixedUsd > 0 ? 1 : sessRisk.sizeMult) * 100) / 100, minSidePrice: limits.minSidePrice,
-        ...(fixedUsd > 0 ? { fixedOrderUsd: fixedUsd } : {}),
+        // As the engine sizes (bot/sizing/orderBudget.ts); the regime weight (playbook / Compensator) is not replayed.
+        ...(() => { const b = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult: sessRisk.sizeMult, riskScale: sizeScale, fCapUsd: optimalFCap(st.now, tier.orderFrac) * bankroll, paperOrderUsd: fixedUsd, maxContractsPerOrder: limits.maxContractsPerOrder }); if (b.boundBy === 'optimal_f') res.optimalFBound = (res.optimalFBound ?? 0) + 1; return { maxOrderRiskUsd: b.maxOrderRiskUsd, maxContracts: b.maxContracts, ...(b.fixedOrderUsd ? { fixedOrderUsd: b.fixedOrderUsd } : {}) }; })(),
+        minSidePrice: limits.minSidePrice,
         ...(() => { const b = tpBenched(); return b ? { takeProfitBenched: b } : {}; })(),
         newRiskRoomUsd,
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,

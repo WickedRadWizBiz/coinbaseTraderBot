@@ -120,6 +120,9 @@ jobs:
           # events wind the bench back): the replay starts from them as they stood when the stretch began.
           rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/take-profit-bench.json "$RUNNER_TEMP/paper-tp-bench.json" 2>/dev/null || true
           rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/accuracy_gate.json "$RUNNER_TEMP/paper-accuracy-gate.json" 2>/dev/null || true
+          # Paper's settled entries (the newest ~4 MB, as the bot reads them): the replay's optimal f cap starts from the
+          # ones settled before the stretch.
+          ssh bot "tail -c 4000000 ~/bot/data/trades.jsonl" > "$RUNNER_TEMP/paper-trades.jsonl" 2>/dev/null || rm -f "$RUNNER_TEMP/paper-trades.jsonl"
           # The stretches checked before, for the luck test's tally (the verdict adds this one and copies it back).
           rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/models/sweeps/replay-check-history.json "$DATA/sweeps/" 2>/dev/null || true
           # The paper account's equity at cost now (its cash plus what the contracts it holds cost; cash alone leaves out what
@@ -202,7 +205,7 @@ jobs:
           ARGS=(--recordings data/recordings --audit data/audit --days "$(cat data/sweeps/check-days.txt)" --from "$CHECK_FROM" --to "$(cat data/sweeps/check-to.txt)"
             --min-hours "$MIN_HOURS" ${BAL:+--paper-balance-now "$BAL"} ${GUARD:+--paper-guard "$GUARD"} --kill-override "$OVERRIDE"
             --maker-markouts "$RUNNER_TEMP/maker-markouts.json" --paper-probation "$RUNNER_TEMP/paper-probation.json" --paper-trials "$RUNNER_TEMP/paper-trials.json"
-            --paper-tp-bench "$RUNNER_TEMP/paper-tp-bench.json" --paper-accuracy-gate "$RUNNER_TEMP/paper-accuracy-gate.json" --model data/models/model.json)
+            --paper-tp-bench "$RUNNER_TEMP/paper-tp-bench.json" --paper-accuracy-gate "$RUNNER_TEMP/paper-accuracy-gate.json" --paper-trades "$RUNNER_TEMP/paper-trades.jsonl" --model data/models/model.json)
           T0=$(date +%s); mkdir -p data/sweeps/nearby; [ "$NEARBY" = none ] && NEARBY=''
           # The spot candles the bot held when the replay starts (its startup fetch from Coinbase, made for that time): a
           # stretch that begins in the middle of a run otherwise replays with only the bars recorded since, too few for the

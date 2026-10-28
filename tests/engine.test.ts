@@ -673,7 +673,7 @@ test('paper: the vault keeps its books, but the paper bankroll is the whole bala
   assert.equal(engine.bankroll(), 200, 'and still traded in paper');
 });
 
-test('paper size: a wanted trade buys about PAPER_ORDER_FRAC of the bankroll (10%); PAPER_ORDER_FRAC=0 the fixed PAPER_ORDER_USD; both 0 size as in live', async () => {
+test('paper size: by default paper sizes as live; PAPER_ORDER_FRAC buys a share of the bankroll; PAPER_ORDER_FRAC=0 with PAPER_ORDER_USD a fixed amount', async () => {
   const quote = (g: Awaited<ReturnType<typeof setup>>) => g.oms.liveOrders().find((o) => o.ticker === g.market.ticker && o.purpose === 'quote' && !o.cancelRequested && o.side === 'bid');
   const env = { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' };
   const run = async (extra: Record<string, string>) => {
@@ -683,8 +683,8 @@ test('paper size: a wanted trade buys about PAPER_ORDER_FRAC of the bankroll (10
     return { g, q: quote(g)!, notes: g.engine.status.get(g.market.ticker)?.notes ?? [] };
   };
   const near = (q: { count: number; price: number }, usd: number) => { const v = q.count * q.price; return v > usd - q.price - 0.05 && v <= usd + 1e-9; };
-  // 10% of the $200 account: $20 an order.
-  const frac = await run({});
+  // PAPER_ORDER_FRAC=0.1: 10% of the $200 account, $20 an order.
+  const frac = await run({ PAPER_ORDER_FRAC: '0.1' });
   assert.ok(frac.q, JSON.stringify(frac.notes));
   assert.ok(near(frac.q, 20), `${frac.q.count} at ${frac.q.price}`);
   assert.match(frac.notes.join(' | '), /paper size: \$20\.00 an order \(10% of the bankroll, PAPER_ORDER_FRAC\)/);
@@ -698,8 +698,10 @@ test('paper size: a wanted trade buys about PAPER_ORDER_FRAC of the bankroll (10
   assert.ok(near(fixed.q, 8), `${fixed.q.count} at ${fixed.q.price}`);
   assert.match(fixed.notes.join(' | '), /paper size: \$8 an order \(PAPER_ORDER_USD\)/);
   assert.equal(fixed.g.engine.paperOrderUsd(100), 8);
-  // Both off: the tier and break-even sizing of a $200 account, a few dollars at most.
-  const sized = await run({ PAPER_ORDER_FRAC: '0', PAPER_ORDER_USD: '0' });
+  // Both off (the default since Oct 28: paper sizes like live): the tier and break-even sizing of a $200 account, a few
+  // dollars at most.
+  const sized = await run({});
+  assert.equal(sized.g.engine.paperOrderUsd(100), 0);
   assert.ok(sized.q.count * sized.q.price < 5, `${sized.q.count} at ${sized.q.price}`);
   assert.ok(sized.q.count < frac.q.count);
 });
