@@ -209,6 +209,9 @@ jobs:
               print(f"  {st.get('step')}: {state} ({round((st.get('ms') or 0) / 60000, 1)} min)")
               g = d.get('goLive')
               if isinstance(g, dict): print(f"    go-live tally: {g.get('windows')} judged windows, {g.get('windowsTraded')} traded (each needs 1,000), over {g.get('days')} day(s)")
+              for src in ('recorded', 'history'):
+                  p = (g or {}).get(src) if isinstance(g, dict) else None
+                  if isinstance(p, dict): print(f"      {src}: {p.get('nWindows')} windows, {p.get('windowsTraded')} traded, P&L ${p.get('pnl')}, over {p.get('days')} day(s)")
           PY
 
       - name: Copy models and history back to the server

@@ -69,7 +69,7 @@ export interface TrainerSettings { host?: string; user?: string; port?: number; 
 export interface RemoteFile { path: string; size: number; mtime: number }
 
 /** Steps that continue a tournament or depend on one: what rounds after the first repeat. */
-export const CONTINUE_STEPS = ['ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'cross_lead', 'rule_book', 'gp', 'setups', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'perps', 'playbook', 'readiness'];
+export const CONTINUE_STEPS = ['ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'cross_lead', 'rule_book', 'gp', 'setups', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'tally_history', 'perps', 'playbook', 'readiness'];
 
 /** Never sent to the server: links to replay days, caches it rebuilds, backfills, logs, partial writes, and the history
  *  walk's folder (its walkers copy it themselves, under its lease: research/historyWalk.ts). */
