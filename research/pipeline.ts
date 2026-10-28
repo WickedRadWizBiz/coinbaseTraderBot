@@ -81,7 +81,7 @@ import v8 from 'v8';
 import path from 'path';
 import { MODEL_FILES } from '../bot/autotrain';
 import { loadConfig, paperEnv, type Config } from '../bot/config';
-import { MetaModel } from '../bot/model/metaModel';
+import { GO_LIVE_GATES, MetaModel } from '../bot/model/metaModel';
 import { PerpModel } from '../bot/perps/perpSignal';
 import type { SnnCheckpoint } from '../bot/snn/network';
 import { DEFAULT_SNN, domainParams, STAGES, stageFlags, type SnnDomain, type Stage } from '../bot/snn/params';
@@ -124,6 +124,7 @@ import { trainCrossLead } from './crossLead';
 import { CL_SCHEMA, setCrossLeadPath } from '../bot/ta/crossLead';
 import { setCrossGraphPath, XG_SCHEMA } from '../bot/ta/crossGraph';
 import { LIB_SCHEMA, setLibrarianPath } from '../bot/ta/librarian';
+import { addBatch, annotateTally, judgeBatch, readTally, tallyEvidence } from './goLiveTally';
 
 const readLibSchema = (f: string): string | undefined => { try { return (JSON.parse(fs.readFileSync(f, 'utf8')) as { schema?: string }).schema; } catch { return undefined; } };
 import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, downloadBinanceOpenInterest, type BinanceMarket } from './history/binanceVision';
@@ -1101,30 +1102,45 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   if (want('dataset') || want('mlp')) await run('dataset', ifChanged('dataset', () => buildDatasetMain(argsOf({ recordings: decisionRec, out: dataset, every: 60, 'vol-model': volModelArg }))), tooFew);
   if (want('mlp')) {
     const cand = path.join(work, 'model.candidate.json');
+    // The go-live record kept across runs (research/goLiveTally.ts): the recordings hold 20 days, the gates want 1,000
+    // judged windows and 1,000 traded ones.
+    const tallyFile = path.join(A.dir, 'mlp_tally.json');
     await run('mlp', ifChanged('mlp', async () => {
       if (!fs.existsSync(dataset) || fs.statSync(dataset).size === 0) throw new SkipStep('empty dataset: no priced contracts with outcomes in the recordings yet');
-      try { await trainMetaModelMain(argsOf({ data: dataset, out: cand })); } catch (e) {
-        if (/need at least \d+ windows/.test((e as Error).message)) throw new SkipStep(`not enough settlement windows yet: ${(e as Error).message}`);
+      const tally = readTally(tallyFile);
+      // The holdout reaches back to the first window the tally has not judged, so every window is judged once.
+      const rep = await trainMetaModelMain(argsOf({ data: dataset, out: cand, 'holdout-from': tally.through || undefined })).catch((e: Error) => {
+        if (/need at least \d+ windows/.test(e.message)) throw new SkipStep(`not enough settlement windows yet: ${e.message}`);
         throw e;
-      }
+      });
       // One replay with the exit settings production trades with. The backtest's own grid for confluence_ratchet
       // (3 hunt margins x 2 wall fill ratios) replayed the recordings six times for the same annotation: most of the
       // step, which ran out of the quick phase's time on Oct 22 and Oct 23.
-      await backtestMain(argsOf({
+      const bt = await backtestMain(argsOf({
         recordings: decisionRec, model: cand, exits: cfg.strategy.exitPolicy, 'vol-model': volModelArg, 'fill-model': fillModelArg,
         'hunt-grid': cfg.strategy.huntTargetMargin, 'hunt-confluence': cfg.strategy.huntMinConfluence,
         'ratchet-fill-grid': cfg.strategy.ratchetMinFillRatio, 'ratchet-age': cfg.strategy.ratchetMinWallAgeSec, 'ratchet-slip': cfg.strategy.ratchetSlippageTicks,
       }), true);
+      // The holdout windows no candidate judged before go into the tally with what this candidate's backtest made on
+      // them, and the gates are judged on the tally.
+      const judge = MetaModel.load(cand);
+      const batch = judgeBatch(rep.judged, bt.windows, { after: tally.through, model: judge.params.version, trials: judge.params.validation?.variantsTried ?? 1, at: new Date(now).toISOString() });
+      const tallied = batch ? addBatch(tally, batch) : tally;
+      if (batch) writeAtomic(tallyFile, JSON.stringify(tallied));
+      const ev = tallyEvidence(tallied);
+      if (ev) annotateTally(cand, ev);
+      const goLive = ev ? { days: ev.days, windows: ev.nWindows, windowsTraded: ev.windowsTraded, added: batch?.windows.length ?? 0 } : null;
+      if (ev) log(`mlp: go-live tally ${ev.nWindows} of ${GO_LIVE_GATES.minWindows} judged windows, ${ev.windowsTraded} of ${GO_LIVE_GATES.minWindowsTraded} traded, over ${ev.days} day(s) (${batch?.windows.length ?? 0} added)`);
       const m = MetaModel.load(cand);
       const passed = Boolean(m.params.validation?.passed);
       const usesSnn = m.params.features.some((f) => f.startsWith('snn_'));
-      if (A.promote === 'validated' && !passed) return { promoted: false, id: m.id, reason: `validation not passed (${m.liveBlockers().join('; ')})` };
+      if (A.promote === 'validated' && !passed) return { promoted: false, id: m.id, reason: `validation not passed (${m.liveBlockers().join('; ')})`, goLive };
       const champ = promoteIfChampion({ dir: A.dir, kind: 'mlp', candidate: cand, live: promoted('mlp'), enabled: A.champion });
-      if (!champ.promote) return { promoted: false, id: m.id, reason: champ.reason };
+      if (!champ.promote) return { promoted: false, id: m.id, reason: champ.reason, goLive };
       state.mlpId = m.id;
       state.trainedWithSnn!.crypto = state.snnVersions!.crypto;
       state.trainedWithTaNet = state.taNetVersion;
-      return { promoted: true, improved: champ.improved, champion: champ.reason, id: m.id, kind: m.params.kind, usesSnnFeatures: usesSnn, take: m.params.take?.validation ?? null, validationPassed: passed, liveBlockers: m.liveBlockers() };
+      return { promoted: true, improved: champ.improved, champion: champ.reason, id: m.id, kind: m.params.kind, usesSnnFeatures: usesSnn, take: m.params.take?.validation ?? null, validationPassed: passed, liveBlockers: m.liveBlockers(), goLive };
     }), tooFew);
   }
 
