@@ -59,7 +59,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: kalshi-replay-check
+  # Comparison runs (overrides set) each get their own group, so several exit policies replay side by side; a fidelity
+  # check keeps the shared group and never runs beside another.
+  group: kalshi-replay-check${{ inputs.overrides && format('-{0}-{1}', inputs.overrides, inputs.from) || '' }}
   cancel-in-progress: false
 
 jobs:
