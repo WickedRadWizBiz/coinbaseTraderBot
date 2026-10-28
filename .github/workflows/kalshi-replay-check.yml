@@ -47,6 +47,10 @@ on:
         description: 'How the verdict judges P&L: luck (paper within 2 standard deviations of the replays, summed over the stretches checked) or pct (the replays'' median within 25% of paper''s)'
         required: false
         default: 'luck'
+      overrides:
+        description: 'Replay-only settings, KEY=VALUE space separated (e.g. EXIT_POLICY=hold): the replay runs with them against what paper actually did, and the verdict is not copied to the server'
+        required: false
+        default: ''
   push:
     branches: ['claude/kalshi-random-sweep']
     paths: ['.github/workflows/kalshi-replay-check.yml', 'research/replayCheck.ts', 'research/backtest.ts', 'research/seedCandles.ts']
@@ -193,8 +197,11 @@ jobs:
           NEARBY: ${{ inputs.nearby || '0.95 0.975 1.025 1.05' }}
           PHASES: ${{ inputs.phases || '200 400 600 800' }}
           PNL_TEST: ${{ inputs.pnl_test || 'luck' }}
+          OVERRIDES: ${{ inputs.overrides || '' }}
         run: |
           set -a; . data/sweep-env/train.env; set +a
+          # Replay-only overrides (an exit policy to compare, say) on top of the server's settings; paper's side is what it did.
+          for kv in $OVERRIDES; do export "$kv"; echo "replay-only override: $kv"; done
           export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper
           BAL=$(cat "$RUNNER_TEMP/paper-balance" 2>/dev/null || true)
           GUARD="$RUNNER_TEMP/paper-guard.json"; [ -s "$GUARD" ] || GUARD=""
@@ -237,6 +244,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
       - name: Copy the verdict to the server
+        # A replay with overrides is a comparison, not a fidelity check: it never touches the server's verdict or tally.
+        if: ${{ !inputs.overrides }}
         run: |
           [ -f data/sweeps/replay-check-latest.json ] || { echo "no verdict to copy"; exit 0; }
           ssh bot "mkdir -p ~/bot/data/models/sweeps"
