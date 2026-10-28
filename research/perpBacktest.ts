@@ -41,6 +41,10 @@ export function traderParams(P: PerpsConfig): PerpTraderParams {
   };
 }
 
+/** Days of quotes the backtest needs before it can pass. The bot keeps 20 days of recordings (RECORDINGS_KEEP_DAYS), so
+ *  only the replayed history ever has them. */
+export const PERP_BACKTEST_MIN_DAYS = 30;
+
 /** `opts.state`: the replay's state (a test reads what it holds at the end). */
 export async function runPerpBacktest(dir: string, P: PerpsConfig, model: PerpModel | undefined, opts: { startBalance?: number; trials?: number; minDays?: number; state?: ReplayState } = {}): Promise<PerpBacktestResult> {
   const st = opts.state ?? new ReplayState();
@@ -94,7 +98,7 @@ export async function runPerpBacktest(dir: string, P: PerpsConfig, model: PerpMo
   return {
     days, startEquity: start, endEquity: end, pnlUsd: end - start, fees: led.reduce((s, p) => s + p.fees, 0), funding: led.reduce((s, p) => s + p.funding, 0),
     trades, stopOuts: sim.stopFills(), dailyPnl: daily, pnlCiLo: ci.lo, dsrProbability: dsr,
-    ok: days >= (opts.minDays ?? 30) && ci.lo > 0 && dsr > 0.95,
+    ok: days >= (opts.minDays ?? PERP_BACKTEST_MIN_DAYS) && ci.lo > 0 && dsr > 0.95,
   };
 }
 

@@ -182,7 +182,8 @@ test('perps config: directional trading simulated by default; live needs live mo
 import path from 'path';
 import { writeSyntheticPerps } from '../research/syntheticPerps';
 import { buildPerpDataset, trainPerp } from '../research/trainPerpModel';
-import { runPerpBacktest } from '../research/perpBacktest';
+import { PERP_BACKTEST_MIN_DAYS, runPerpBacktest } from '../research/perpBacktest';
+import { runPipeline } from '../research/pipeline';
 import { tmpDir } from './helpers';
 
 test('research pipeline: a random walk never validates; a planted momentum signal is found and trades profitably', async () => {
@@ -203,6 +204,23 @@ test('research pipeline: a random walk never validates; a planted momentum signa
   assert.ok(sig.v.ic > 0.3 && sig.v.icCiLo > 0, JSON.stringify(sig.v));
   assert.ok(sig.bt.trades > 0 && sig.bt.pnlUsd > 0, JSON.stringify({ ...sig.bt, dailyPnl: undefined }));
   assert.ok(sig.bt.fees > 0);
+});
+
+test('pipeline perps: the execution backtest is left out on the recordings, which never reach the days it needs to pass', async () => {
+  const dir = tmpDir();
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: dir, AUTO_TRAIN: 'off' });
+  writeSyntheticPerps(cfg.autoTrain.recordingsDir, { days: 3, momentum: 10, seed: 11, stepSec: 60 });
+  const lines: string[] = [];
+  const r = await runPipeline({ cfg, only: ['perps'], log: (m) => lines.push(m) });
+  const step = r.steps.find((s) => s.step === 'perps')!;
+  assert.ok(step.ok && !step.skipped, JSON.stringify(step));
+  const note = `left out: 3 recorded day(s), it passes only over ${PERP_BACKTEST_MIN_DAYS}`;
+  assert.equal((step.detail as { backtest?: string }).backtest, note, JSON.stringify(step.detail));
+  assert.ok(lines.includes(`perps: execution backtest ${note}`), lines.join('\n'));
+  // The candidate was not annotated: no backtest verdict, so it trades at pilot size as before.
+  const cand = PerpModel.load(path.join(cfg.autoTrain.dir, 'work', 'perp_model.candidate.json'))!;
+  assert.equal(cand.params.validation?.backtest, undefined);
+  assert.equal(cand.validated(), false);
 });
 
 test('capital locked in binaries inflates the perp sigma: smaller Kelly size, never larger', () => {
