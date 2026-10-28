@@ -49,7 +49,7 @@ This is `research/pipeline.ts`. By default (`AUTO_TRAIN=remote`) it runs on a Gi
 | sweep-&lt;target&gt; | The sweep optimizer, weekly (see 7 below). Proposals only | `sweeps/<target>.json` |
 | snn-crypto-ablation | Tests the crypto network's stages S0–S6 on settled contracts. Runs weekly, or when forced | `work/snn_crypto_ablation.json` |
 | snn-crypto-pbt | Tournament of three identical crypto networks over the last 7 recorded days. The elite's knobs are used from then on. Runs at the start, when the stage changes, and every 30 days | `work/snnpbt/crypto/` |
-| snn-crypto-train | Trains the crypto network (15m/1h) at the highest stage whose whole chain passed, with the tournament's knobs | `snn_crypto.json` |
+| snn-crypto-train | Trains the crypto network (15m/1h) at the highest stage whose whole chain passed, with the tournament's knobs. When the history walk (below) runs that stage, it starts from the walk's best network and its knobs instead, and on the recordings replaces the network in use only if it does at least as well on the newest unseen days | `snn_crypto.json` |
 | snn-crypto-backfill | Fills in the crypto network's outputs for recorded minutes with no live log, one day at a time, resuming where it left off. No output ever saw its own result | `work/snnfill/crypto/` |
 | snn-perps-ablation / -pbt / -train / -backfill | The same for the perps network (1h/4h), judged on its own direction calls because perps never settle | `snn_perps.json`, `work/snnfill/perps/` |
 | snn-tennis | Always skipped: the tennis network can't be replayed (no recorded score feed), so it learns live and keeps its checkpoints in `data/snn/tennis/` | — |
@@ -62,6 +62,8 @@ This is `research/pipeline.ts`. By default (`AUTO_TRAIN=remote`) it runs on a Gi
 | fill | Trains the fill / adverse-selection model from the bot's own maker quotes. Skipped ("collecting") until 500 quotes and 100 fills exist; promoted only once it beats the base rate on held-out days | `fill_model.json` |
 
 There's a report for each run in `data/models/reports/` and a log in `data/models/logs/`.
+
+**The history walk** (`.github/workflows/history-walk.yml`, `research/historyWalk.ts`) runs beside the daily training. The crypto and perps networks walk their history in time order (crypto from 2017-08-18, perps from 2019-09-09), a block of 20 to 90 days per run, three copies of each network with slightly different knobs. Every copy keeps its whole state from block to block, and the replay goes on from its own end-of-day state, so a block boundary looks like any midnight. Each day is judged before the copies learn from it; the holdout weeks are played through with learning paused. Where each network stands lives on the server (`data/models/work/history-walk/<net>/`), taken in turns under a lease, and while a network is behind each run starts the next one; once caught up a nightly run (01:41 UTC) walks the new days. It stays a week behind the latest day, so the daily training, which starts from the walk's best network, is judged on days that network never saw.
 
 A step with nothing to work on yet is reported as **skipped**, not failed. Examples: no perp quotes recorded, fewer than 8 settlement windows, fewer than 5 settled tennis matches, fewer than 3 days of index data for the vol forecast, not enough maker quotes for the fill model.
 

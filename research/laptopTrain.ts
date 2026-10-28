@@ -71,8 +71,9 @@ export interface RemoteFile { path: string; size: number; mtime: number }
 /** Steps that continue a tournament or depend on one: what rounds after the first repeat. */
 export const CONTINUE_STEPS = ['ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'cross_lead', 'rule_book', 'gp', 'setups', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'perps', 'playbook', 'readiness'];
 
-/** Never sent to the server: links to replay days, caches it rebuilds, backfills, logs, partial writes. */
-const NO_PUSH = /^(work\/(snnfill|perp-dataset[^/]*|perp-backtest-days|sweep-replay|kalshi-tape|vol-replay|readiness-days|playbook-days|tanet-cache)\/|logs\/)|\.tmp$/;
+/** Never sent to the server: links to replay days, caches it rebuilds, backfills, logs, partial writes, and the history
+ *  walk's folder (its walkers copy it themselves, under its lease: research/historyWalk.ts). */
+const NO_PUSH = /^(work\/(snnfill|perp-dataset[^/]*|perp-backtest-days|sweep-replay|kalshi-tape|vol-replay|readiness-days|playbook-days|tanet-cache|history-walk)\/|logs\/)|\.tmp$/;
 
 /** `find -printf '%P\t%s\t%T@\n'` output -> files (mtime in ms). */
 export function parseManifest(text: string): RemoteFile[] {

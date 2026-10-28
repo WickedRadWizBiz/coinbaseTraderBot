@@ -29,9 +29,12 @@ export interface SnnReplayJob {
   playTape?: string;
   /** Only record the span's tape to this file (rows and checkpoint come back empty). */
   recordTape?: string;
+  /** No weight learning (the history walk's holdout weeks). */
+  pauseLearning?: boolean;
 }
-/** `ms`: the replay's own time (not the wait for a free worker). */
-export interface SnnReplayOut { rows: SnnRow[]; checkpoint?: SnnCheckpoint; ms?: number }
+/** `ms`: the replay's own time (not the wait for a free worker); `steps`: network steps replayed; `frozen`: of them,
+ *  steps with learning frozen by the health monitor. */
+export interface SnnReplayOut { rows: SnnRow[]; checkpoint?: SnnCheckpoint; ms?: number; steps?: number; frozen?: number }
 
 /** research/trainSnn.ts with these arguments (its command-line flags without the dashes). */
 export interface SnnTrainJob { train: Record<string, string | number | undefined> }
@@ -42,7 +45,7 @@ export interface SnnGpuSpec { python: string; cpu?: boolean; threads?: number }
 /** A group of members playing one tape on the GPU (each from its own checkpoint and start), or a check that the
  *  device pool starts here (its backend comes back). */
 export type SnnGpuJob =
-  | { gpuGroup: { spec: SnnGpuSpec; tape: string; domain: 'crypto' | 'perps'; members: { params: SnnParams; checkpoint?: SnnCheckpoint; from: number }[] } }
+  | { gpuGroup: { spec: SnnGpuSpec; tape: string; domain: 'crypto' | 'perps'; members: { params: SnnParams; checkpoint?: SnnCheckpoint; from: number; pauseLearning?: boolean }[] } }
   | { gpuProbe: SnnGpuSpec };
 /** `ms`: the group's time, the pool's start excluded. */
 export interface SnnGpuOut { outs: SnnReplayOut[]; ms: number; backend?: string; prof?: GroupProf }
@@ -68,7 +71,7 @@ async function gpuJob(j: SnnGpuJob): Promise<SnnGpuOut> {
   const pool = await gpuPool(g.spec);
   const s0 = await pool.stats(), p0 = { ...pool.prof };
   const t0 = performance.now();
-  const rs = await playSnnTapeGpu(g.tape, g.members.map((m) => ({ params: m.params, domain: g.domain, checkpoint: m.checkpoint, allowParamChange: true, from: m.from })), pool);
+  const rs = await playSnnTapeGpu(g.tape, g.members.map((m) => ({ params: m.params, domain: g.domain, checkpoint: m.checkpoint, allowParamChange: true, from: m.from, pauseLearning: m.pauseLearning })), pool);
   const ms = performance.now() - t0;
   const s1 = await pool.stats();
   const waitMs = pool.prof.stepMs - p0.stepMs;
@@ -93,8 +96,8 @@ parentPort?.on('message', async (j: SnnReplayJob | SnnGpuJob | SnnTrainJob) => {
       parentPort!.postMessage({ ok: true, out: { rows: [] } satisfies SnnReplayOut });
       return;
     }
-    const r = j.playTape ? playSnnTape(j.playTape, { params: j.params, domain: j.domain, checkpoint: j.checkpoint, snnModel: j.snnModel, allowParamChange: true, from: j.from }) : await replaySnn(j.dir, { params: j.params, domain: j.domain, model, calendar, checkpoint: j.checkpoint, snnModel: j.snnModel, allowParamChange: true, from: j.from, to: j.to, fromDay: j.fromDay, toDay: j.toDay, skipModel: j.skipModel, tennis: j.tennis });
-    const out: SnnReplayOut = { rows: r.rows, checkpoint: r.net.serialize(), ms: performance.now() - t0 };
+    const r = j.playTape ? playSnnTape(j.playTape, { params: j.params, domain: j.domain, checkpoint: j.checkpoint, snnModel: j.snnModel, allowParamChange: true, from: j.from, pauseLearning: j.pauseLearning }) : await replaySnn(j.dir, { params: j.params, domain: j.domain, model, calendar, checkpoint: j.checkpoint, snnModel: j.snnModel, allowParamChange: true, from: j.from, to: j.to, fromDay: j.fromDay, toDay: j.toDay, skipModel: j.skipModel, tennis: j.tennis, pauseLearning: j.pauseLearning });
+    const out: SnnReplayOut = { rows: r.rows, checkpoint: r.net.serialize(), ms: performance.now() - t0, steps: r.steps, frozen: r.frozenSteps };
     parentPort!.postMessage({ ok: true, out });
   } catch (e) {
     parentPort!.postMessage({ ok: false, error: (e as Error).stack ?? String(e) });
