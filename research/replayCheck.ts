@@ -680,7 +680,6 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd }, accuracyGate: S.accuracyGate,
     takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile, ...(follow ? { follow } : {}) }, exitBench: S.exitBench, accuracyGateFile: gateFile, startMs, tradeFromMs: from,
     optimalF: { ...cfg.optimalF, ...(ofSeed ? { seed: ofSeed } : {}) },
-    takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile, ...(follow ? { follow } : {}) }, accuracyGateFile: gateFile, startMs, tradeFromMs: from,
     dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, refillUsd: cfg.paperBankrollUsd, sessionEdge: cfg.sessionEdge, onEval: match.onEval, makerMarkouts: o.makerMarkouts,
     volProfile: models.volProfile, applyVolSeasonality: Boolean(models.volProfile), volModel: models.volModel, fillModel: models.fillModel, calendar: models.calendar,
     taNet: true, trials: models.trials, marketContext: true, ...(o.tickPhaseMs !== undefined ? { tickPhaseMs: o.tickPhaseMs } : {}), ...(seed ? { seedCandles: seed } : {}),
