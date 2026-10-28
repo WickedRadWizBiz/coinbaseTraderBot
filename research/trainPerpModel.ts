@@ -44,20 +44,25 @@ const PERP_DATASET_VERSION = 1;
 /** Feature rows with forward-return labels for a run of consecutive recorded days (`days`, in order). The
  *  replay starts with `warm` (the recorded day before: the trackers warm up) and reads on into `tail` (the
  *  day after) only as far as the last samples' labels need. A sample is taken once its whole instant is in
- *  (the history replay writes every asset's prices and the dominance of an instant as one burst). */
-export async function perpRowsForDays(dir: string, days: string[], warm: string | undefined, tail: string | undefined, opts: { everySec?: number; horizonMin?: number } = {}): Promise<PerpRow[]> {
+ *  (the history replay writes every asset's prices and the dominance of an instant as one burst). `state`: the
+ *  replay's state (a test reads what it holds at the end). */
+export async function perpRowsForDays(dir: string, days: string[], warm: string | undefined, tail: string | undefined, opts: { everySec?: number; horizonMin?: number; state?: ReplayState } = {}): Promise<PerpRow[]> {
   if (!days.length) return [];
   const every = (opts.everySec ?? 300) * 1000;
   const H = (opts.horizonMin ?? 240) * 60_000;
   const from = Date.parse(days[0]), to = Date.parse(days[days.length - 1]) + DAY;
-  const st = new ReplayState();
+  const st = opts.state ?? new ReplayState();
   const samples: Array<{ ts: number; asset: string; x: number[]; mid: number; fundingBps: number }> = [];
   const mids = new Map<string, Array<{ ts: number; mid: number }>>();
   const nextAt = new Map<string, number>();
   const quoted = new Set<string>();
+  let sweepAt = 0;
   for await (const e of readRecordings(dir, undefined, warm ?? days[0], tail ?? days[days.length - 1])) {
     if (e.t >= to + H + 300_000) break;
     st.apply(e);
+    // The rows read only the asset-level series: a Kalshi market that is over goes with its book (the remote
+    // training's perps step ran out of its 8 GB heap on Oct 25 holding every contract of the days it replayed).
+    if (st.now >= sweepAt) { st.forgetClosed(); sweepAt = st.now + 60_000; }
     if (e.k === 'perp') quoted.add((e as any).asset as string);
     if (e.tie || !quoted.size) continue;
     for (const asset of quoted) {

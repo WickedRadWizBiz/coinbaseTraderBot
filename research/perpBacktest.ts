@@ -41,8 +41,9 @@ export function traderParams(P: PerpsConfig): PerpTraderParams {
   };
 }
 
-export async function runPerpBacktest(dir: string, P: PerpsConfig, model: PerpModel | undefined, opts: { startBalance?: number; trials?: number; minDays?: number } = {}): Promise<PerpBacktestResult> {
-  const st = new ReplayState();
+/** `opts.state`: the replay's state (a test reads what it holds at the end). */
+export async function runPerpBacktest(dir: string, P: PerpsConfig, model: PerpModel | undefined, opts: { startBalance?: number; trials?: number; minDays?: number; state?: ReplayState } = {}): Promise<PerpBacktestResult> {
+  const st = opts.state ?? new ReplayState();
   const hub = st.features.perps;
   const tickerAsset = (t: string) => [...hub.byAsset.entries()].find(([, s]) => s.latest?.ticker === t)?.[0];
   const start = opts.startBalance ?? P.paperBalanceUsd;
@@ -54,11 +55,14 @@ export async function runPerpBacktest(dir: string, P: PerpsConfig, model: PerpMo
     sources: (asset) => ({ index: st.index.get(asset), spot: st.spot.get(asset), bars: st.features.bars.get(asset), candles: st.features.candles.get(asset), usdtd: st.usdtd, btcd: st.btcd, perp: hub.get(asset), snn: st.snnContext(asset, undefined, 'perps') }),
   });
   const daily: number[] = [];
-  let dayKey = '', dayStart = start, first = 0, lastTick = 0, trades = 0, quoted = false;
+  let dayKey = '', dayStart = start, first = 0, lastTick = 0, trades = 0, quoted = false, sweepAt = 0;
   const lastPos = new Map<string, number>();
   for await (const e of readRecordings(dir)) {
     st.apply(e);
     if (!first) first = st.now;
+    // Perps read only the asset-level series: a Kalshi market that is over goes with its book (weeks of recordings
+    // with every contract do not fit the remote training's heap).
+    if (st.now >= sweepAt) { st.forgetClosed(); sweepAt = st.now + 60_000; }
     if (e.k === 'perp') quoted = true;
     // After a quote, once its whole instant is in (the history replay writes every asset's prices and the
     // dominance of an instant as one burst of same-time records).

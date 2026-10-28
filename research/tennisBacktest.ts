@@ -32,8 +32,8 @@ function flowOf(st: ReplayState, ticker: string, windowSec = 60): number | undef
   return tot > 0 ? tr.reduce((x, y) => x + y.signed, 0) / tot : undefined;
 }
 
-export async function runTennisBacktest(dir: string, cfg: TennisConfig, bankroll0: number): Promise<TennisBacktest> {
-  const st = new ReplayState();
+/** `st`: the replay's state (a test reads what it holds at the end). */
+export async function runTennisBacktest(dir: string, cfg: TennisConfig, bankroll0: number, st = new ReplayState()): Promise<TennisBacktest> {
   const pos = new PositionBook();
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => FEES, () => st.now);
   const trackers = new Map<string, MatchTracker>();
@@ -53,6 +53,8 @@ export async function runTennisBacktest(dir: string, cfg: TennisConfig, bankroll
     if (e.k === 'trade') ex.onTrade(e.ticker, e.price, e.count, e.takerSide, e.ts);
     if (st.now - last < 5000) continue;
     last = st.now;
+    // The other markets the recordings carry (every crypto contract) go once over; the matches are settled below.
+    st.forgetClosed(90_000, (m) => m.kind === 'match');
     const byEvent = new Map<string, string[]>();
     for (const m of st.markets.values()) if (m.kind === 'match') byEvent.set(eventOf(m.ticker), [...(byEvent.get(eventOf(m.ticker)) ?? []), m.ticker]);
     const open = await ex.getOpenOrders();

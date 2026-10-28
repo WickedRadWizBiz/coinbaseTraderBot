@@ -11,6 +11,7 @@ import { AutoTrainer } from '../bot/autotrain';
 import { loadConfig } from '../bot/config';
 import type { Engine } from '../bot/engine';
 import { OrderBook } from '../bot/marketdata/orderBook';
+import { recordingFiles } from '../bot/marketdata/recordingFiles';
 import { MetaModel } from '../bot/model/metaModel';
 import { TAKE_FEATURES, takeInputs, takeProbability, type TakeModelParams } from '../bot/model/takeModel';
 import { gbdtLogit } from '../bot/model/trees';
@@ -25,7 +26,10 @@ import { runPipeline } from '../research/pipeline';
 import { ReplayState } from '../research/replay';
 import { directionRows } from '../research/snnReplay';
 import { trainFillModel } from '../research/trainFillModel';
-import { trainPerp } from '../research/trainPerpModel';
+import { perpRowsForDays, trainPerp } from '../research/trainPerpModel';
+import { runPerpBacktest } from '../research/perpBacktest';
+import { runTennisBacktest } from '../research/tennisBacktest';
+import { buildTennisDataset } from '../research/trainTennisModel';
 import { trainVolModel, volRows, type VolRow } from '../research/trainVolModel';
 import { writeSyntheticRecordings } from '../research/synthetic';
 import { rng } from '../research/stats';
@@ -96,6 +100,26 @@ test('vol model rows: a replay of many markets keeps only those still trading (t
   assert.ok(rows.length > 0);
   assert.ok(rows.every((r) => r.x.length === VOL_MODEL_FEATURES.length));
   assert.ok(st.markets.size <= 1 && st.books.size <= 1, `held ${st.markets.size} markets, ${st.books.size} books`);
+});
+
+test('perps and tennis replays keep only the Kalshi markets still trading (the remote training\'s perps step ran out of heap)', async () => {
+  const dir = path.join(tmpDir(), 'rec');
+  writeSyntheticRecordings(dir, { windows: 12, seed: 5, marketNoise: 0.05 });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) });
+  const held = (st: ReplayState) => `held ${st.markets.size} markets, ${st.books.size} books`;
+  const days = recordingFiles(dir).map((f) => f.day);
+  let st = new ReplayState();
+  await perpRowsForDays(dir, days, undefined, undefined, { state: st });
+  assert.ok(st.markets.size <= 1 && st.books.size <= 1, `perp rows: ${held(st)}`);
+  st = new ReplayState();
+  await runPerpBacktest(dir, cfg.perps, undefined, { state: st });
+  assert.ok(st.markets.size <= 1 && st.books.size <= 1, `perp backtest: ${held(st)}`);
+  st = new ReplayState();
+  await buildTennisDataset(dir, cfg.tennis, 60, st);
+  assert.ok(st.markets.size <= 1 && st.books.size <= 1, `tennis rows: ${held(st)}`);
+  st = new ReplayState();
+  await runTennisBacktest(dir, cfg.tennis, 200, st);
+  assert.ok(st.markets.size <= 1 && st.books.size <= 1, `tennis backtest: ${held(st)}`);
 });
 
 test('vol model: learns when realised vol will exceed the EWMA, validated by QLIKE on held-out days; clamped; inert unless validated', () => {

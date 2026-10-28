@@ -73,7 +73,7 @@ export async function volRows(dir: string, opts: { everySec?: number; fromDay?: 
     // A market that is over goes with its book and microstructure state, as the backtester and the dataset builder drop
     // them: the forecast reads only the asset-level series, and a replay of several days that kept every market it saw
     // ran the remote training out of its 8 GB heap (Oct 23 and 24).
-    for (const m of [...st.markets.values()]) if (st.now >= m.closeTime + 90_000) st.forget(m.ticker);
+    st.forgetClosed();
     for (const [asset, idx] of st.index) {
       const vol = idx.vol();
       if (!vol || !idx.fresh(st.now, 5000)) continue;

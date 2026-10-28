@@ -277,6 +277,13 @@ export class ReplayState {
     this.snnContract.delete(ticker);
   }
 
+  /** Forget every market `graceMs` past its close, except those `keep` holds back (a caller that settles them itself):
+   *  for a replay that reads only the asset-level series or one kind of market, so a replay of many days does not hold
+   *  every contract it saw (the remote training ran out of its 8 GB heap that way, Oct 23 to 25). */
+  forgetClosed(graceMs = 90_000, keep?: (m: RecMarket) => boolean): void {
+    for (const m of [...this.markets.values()]) if (this.now >= m.closeTime + graceMs && !keep?.(m)) this.forget(m.ticker);
+  }
+
   book(t: string): OrderBook {
     let b = this.books.get(t);
     if (!b) { b = new OrderBook(t); this.books.set(t, b); }
