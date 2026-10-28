@@ -64,8 +64,8 @@ def generate_text_with_retry(
 
             except Exception as err:
                 err_str = str(err).upper()
-                if any(code in err_str for code in ("404", "NOT_FOUND", "403", "PERMISSION_DENIED")):
-                    print(f"Model {model_name} unavailable on this key tier. Switching to fallback...")
+                if any(code in err_str for code in ("LIMIT: 0", "404", "NOT_FOUND", "403", "PERMISSION_DENIED")):
+                    print(f"Model {model_name} has 0 quota on this tier. Switching immediately to fallback...")
                     UNAVAILABLE_MODELS.add(model_name)
                     break
 
