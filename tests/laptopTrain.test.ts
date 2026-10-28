@@ -30,8 +30,9 @@ test('laptop trainer: manifests, what to copy down and what to send back', () =>
   const srvK = [{ path: kIdx, size: 9, mtime: 90_000 }, { path: kDay, size: 9, mtime: 90_000 }];
   assert.deepEqual(filesToPull(srvK, new Map([[kIdx, { path: kIdx, size: 5, mtime: 10_000 }]])).map((f) => f.path), [kDay]);
   assert.deepEqual(filesToPull(srvK, new Map()).map((f) => f.path), [kIdx, kDay]);
-  // Never sent: links to replay days, caches the server rebuilds, logs, partial writes.
+  // Never sent: links to replay days, caches the server rebuilds, logs, partial writes, the history walk's folder.
   const files = ['work/perp-dataset/2021-01-01.json.gz', 'work/perp-dataset-rec/x.gz', 'work/perp-backtest-days/md-2021-01-01.jsonl.gz', 'work/sweep-replay/md-2021-01-01.jsonl.gz', 'work/vol-replay/a', 'work/readiness-days/b', 'work/tanet-cache/BTC.bin',
+    'work/history-walk/crypto/replay-state/2018-01-01.json.gz', 'work/history-walk/perps/pbt/m0.json',
     'logs/pipeline-laptop.log', 'x.json.tmp', 'work/history-ledger.json', 'readiness.json', 'work/snnpbt/perps/state.json', 'archive/ta_net/v1.json'];
   const all = new Map(files.map((f) => [f, { path: f, size: 1, mtime: 9_000_000 }]));
   assert.deepEqual(filesToPush(all, []).map((f) => f.path).sort(), ['archive/ta_net/v1.json', 'readiness.json', 'work/history-ledger.json', 'work/snnpbt/perps/state.json']);

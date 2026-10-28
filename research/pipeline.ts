@@ -39,7 +39,8 @@
 //   0f. sweep        sweep optimizer proposals (setups per side, the volatility trail, kalshi, the whole bot)
 //   1. snn           per replayable network (crypto: 15m/1h with contracts; perps: 1h/4h, graded on
 //                    direction calls): ablation when due -> population tournament of identical networks
-//                    (snnPbt.ts; the elite's knobs) -> train at the best accepted stage -> promote
+//                    (snnPbt.ts; the elite's knobs) -> train at the best accepted stage (from the history
+//                    walk's best network when it walks that stage: historyWalk.ts) -> promote
 //                    snn_<domain>.json -> prequential backfill (work/snnfill/<domain>). Tournament and
 //                    training on the history replay when it has the days; the crypto network's ablation
 //                    (its gate for live use) always on the bot's recordings, against real Kalshi prices.
@@ -98,6 +99,7 @@ import { buildPerpDataset, perpRuleRecord, trainPerpMain } from './trainPerpMode
 import { runSnnPbt } from './snnPbt';
 import { snnContest, type ContestResult } from './snnContest';
 import { daysOf, HistoryLedger, HOLDOUT_RULE, isHoldout, isoWeek, weekBlocks } from './historyLedger';
+import { readWalk, walkDir } from './historyWalk';
 import { componentStatus, dailyStats, ledgerStatus, SOLID, solidWholeBot, targetMet, writeReadiness, type ReadinessFile, type ReadinessTarget } from './readiness';
 import { loadWholeBot, runWholeBot, settingsFromConfig } from './wholeBot';
 import { SetupModel } from '../bot/setups/setupModel';
@@ -161,6 +163,11 @@ export interface SnnDomainState {
   pbtComplete?: boolean;
   /** How the tournament's days were chosen (the latest days, or blocks across the replay's years). */
   pbtLayout?: string;
+  /** The history walk's first day not walked when this network last trained (a walk that moved on trains it again),
+   *  and whether the training started from the walk's network fell short of the network in use (the next one then
+   *  starts from nothing). */
+  walkThrough?: string;
+  walkFellShort?: boolean;
 }
 
 export const REPLAYABLE: Exclude<SnnDomain, 'tennis'>[] = ['crypto', 'perps'];
@@ -984,19 +991,36 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         return { complete: true, adopted: true, pbo: r.pbo, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: src === rec ? 'recordings' : `history replay, ${pbtDays.length} days from ${pbtDays[0]} to ${pbtDays[pbtDays.length - 1]}`, ...genInfo };
       }, srcGate ?? noFresh ?? (pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`)) as { complete?: boolean } | undefined;
       const hyper = ds.pbtStage === stage ? ds.pbtHyper : undefined;
-      const trainNeeded = Boolean(verdicts) || Boolean(pbt?.complete) || !fs.existsSync(file) || ds.stage !== stage;
+      // The history walk's best network (research/historyWalk.ts), when the walk runs this stage. A walk that moved on
+      // since this network last trained trains it again.
+      const wDir = walkDir(A.dir, domain), walked = readWalk(wDir, domain), eliteFile = path.join(wDir, 'elite.json');
+      const walkElite = walked.elite && walked.stage === stage && fs.existsSync(eliteFile) ? walked.elite : undefined;
+      const trainNeeded = Boolean(verdicts) || Boolean(pbt?.complete) || !fs.existsSync(file) || ds.stage !== stage || Boolean(walkElite && ds.walkThrough !== walkElite.through);
       await run(`snn-${domain}-train`, async () => {
         const span = lastSrc(A.snnTrainDays);
         const nEval = span.length >= 2 ? Math.max(1, Math.round(span.length * 0.2)) : 0;
         const trainSpan = span.slice(0, span.length - nEval), evalSpan = span.slice(span.length - nEval);
         const cand = path.join(work, `snn_${domain}.candidate.json`);
+        // Started from the walk's network, with its knobs, only when the walk never saw the unseen days the training is
+        // judged on (it stays a week behind), and not right after it fell short of the network in use: that training
+        // starts from nothing, as before the walk, so the network in use never grows old.
+        const fromWalk = walkElite && !ds.walkFellShort && (!evalSpan.length || walkElite.through <= evalSpan[0]) ? walkElite : undefined;
         const r = await trainSnnApart({
-          recordings: src, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined, hyper: hyper ? JSON.stringify(hyper) : undefined, 'skip-model': src === rec ? undefined : 'true',
+          recordings: src, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined, hyper: fromWalk ? JSON.stringify(fromWalk.hyper) : hyper ? JSON.stringify(hyper) : undefined, 'skip-model': src === rec ? undefined : 'true',
           from: trainSpan[0], to: evalSpan[0] ?? undefined,
           'eval-from': evalSpan[0], 'eval-to': evalSpan.length ? nextDay(evalSpan[evalSpan.length - 1]) : undefined,
+          init: fromWalk ? eliteFile : undefined, incumbent: fromWalk && src === rec ? file : undefined,
         });
+        if (walkElite) ds.walkThrough = walkElite.through;
+        ds.walkFellShort = undefined;
         if (src !== rec) { ledger.markTrained(ledgerNet, weekBlocks(span).map((b) => b.id)); ledger.save(); }
         if (A.promote === 'validated' && !stageAccepted) return { promoted: false, stage, reason: 'stage not accepted by the ablation', result: r };
+        // On the recordings (no contest) a network started from the walk's replaces the network in use only by doing at
+        // least as well on the newest days, unseen by both.
+        if (fromWalk && r.incumbent?.n && r.eval && r.eval.snn > r.incumbent.snn) {
+          ds.walkFellShort = true;
+          return { promoted: false, stage, reason: `started from the history walk's network (walked to ${fromWalk.through}): Brier ${r.eval.snn.toFixed(4)} on the ${evalSpan.length} newest day(s), the network in use ${r.incumbent.snn.toFixed(4)}; the next training starts from nothing`, result: r };
+        }
         // Contest (history replay): the new network replaces the one in use only if it beats it on held-out
         // weeks neither has trained on (the least-judged ones), replayed as live. Its own training days are
         // the latest ones, younger than any held-out week unless AUTO_TRAIN_SNN_TRAIN_DAYS reaches past half a
@@ -1018,7 +1042,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         ds.stage = stage;
         ds.version = r?.version;
         state.snnVersions![domain] = r?.version;
-        return { promoted: true, improved: first || contest?.winner === 'candidate', stage, stageAccepted, contest, result: r };
+        return { promoted: true, improved: first || contest?.winner === 'candidate', stage, stageAccepted, contest, result: r, ...(fromWalk ? { fromWalk: fromWalk.through } : {}) };
       }, srcGate ?? (trainNeeded ? undefined : 'up to date'));
       // Prequential backfill, day by day from the last backfilled day (a fresh online network of the
       // promoted stage: it was never fitted offline on these days, so no output saw its own label).

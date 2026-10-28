@@ -153,6 +153,10 @@ export class SnnNetwork {
   tennisTemplate?: { arrays: Record<string, TypedArr>; wf: Float64Array; dirWf: Float64Array; n: number };
   /** Offline training only: accumulate e-prop eligibility in columns that carry an `elig` array. */
   training = false;
+  /** Learning paused (the history walk's holdout weeks, research/historyWalk.ts): the network runs through the days as
+   *  time flows -- its state, clock, tags and running statistics move on, its weights consolidate as time passes --
+   *  but it learns nothing from them. */
+  pauseLearning = false;
   /** Research only: every graded direction call (ablation of direction-only domains such as perps). */
   dirLog?: { key: string; ts: number; p: number; y: 0 | 1 }[];
 
@@ -250,7 +254,7 @@ export class SnnNetwork {
    *  (y = price higher than at the tag). Runs every step whether or not anything is traded. */
   private stepDirections(ts: number, cols: Column[]): void {
     const sample = ts % (this.p.dirEverySec * 1000) === 0;
-    const learn = !this.health.freezeLearning;
+    const learn = !this.learningFrozen;
     for (const c of cols) {
       const ro = this.dirReadouts.get(c.key)!, tags = this.dirTags.get(c.key)!;
       const price = c.lastSpot;
@@ -272,6 +276,9 @@ export class SnnNetwork {
       }
     }
   }
+
+  /** No weight learns now: the health monitor froze learning, or it is paused. */
+  get learningFrozen(): boolean { return this.health.freezeLearning || this.pauseLearning; }
 
   sortedColumns(): Column[] {
     return [...this.columns.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
@@ -317,7 +324,7 @@ export class SnnNetwork {
     const rateI = cols.map((c) => c.meanRateI());
     const totalI = rateI.reduce((a, b) => a + b, 0);
     const byKey = new Map(cols.map((c) => [c.key, c]));
-    const frozen = this.health.freezeLearning;
+    const frozen = this.learningFrozen;
     return cols.map((c, i) => {
       const partner = F.gapJunctions ? byKey.get(gapPartner(c.key)) : undefined;
       return {
@@ -502,7 +509,7 @@ export class SnnNetwork {
     for (const [key, ro] of this.readouts) {
       if (!ro.tags.has(ticker)) continue;
       const c = this.columns.get(key)!;
-      const used = ro.settle(ticker, result, now, 1 - this.p.govDelta * c.G, !this.health.freezeLearning);
+      const used = ro.settle(ticker, result, now, 1 - this.p.govDelta * c.G, !this.learningFrozen);
       return { column: key, used };
     }
     return { used: 0 };

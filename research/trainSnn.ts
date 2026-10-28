@@ -9,8 +9,11 @@
 // One network at a time (--domain crypto|perps; tennis learns live). Exports frozen weights
 // (params/snn_<domain>.candidate.json) with the health reference measured on
 // the training window. Evaluate out-of-sample on the NEXT window (--eval-from/--eval-to) before use.
+// --init <model file>: every pass goes on from a trained network's weights and readouts instead of from nothing (the
+// history walk's best network, research/historyWalk.ts). --incumbent <model file>: the network in use is judged on
+// the same out-of-sample window (research/pipeline.ts compares the two).
 //
-//   npm run research:snn-train -- --recordings data/recordings --from 2026-06-01 --to 2026-06-22 --eval-from 2026-06-22 --eval-to 2026-06-29 [--domain crypto|perps] [--stage S5] [--out params/snn_crypto.candidate.json]
+//   npm run research:snn-train -- --recordings data/recordings --from 2026-06-01 --to 2026-06-22 --eval-from 2026-06-22 --eval-to 2026-06-29 [--domain crypto|perps] [--stage S5] [--out params/snn_crypto.candidate.json] [--init models/work/history-walk/crypto/elite.json] [--incumbent models/snn_crypto.json]
 
 import fs from 'fs';
 import path from 'path';
@@ -70,17 +73,25 @@ export async function trainSnnMain(argOf: (k: string, d: string) => string = cli
   // --skip-model true: p_model is the fair value (synthetic contracts of the history replay, where the
   // decision model's view of a market quoted at the fair value is moot).
   const win = { from: date('from'), to: date('to'), domain, skipModel: argOf('skip-model', '') === 'true' };
+  // --init: the network every pass starts from, without its health reference (the training measures its own on the
+  // training window).
+  const initPath = argOf('init', '');
+  const init: SnnModelFile | undefined = initPath ? { ...(JSON.parse(fs.readFileSync(initPath, 'utf8')) as SnnModelFile), healthRef: undefined } : undefined;
 
   // 1. PC pretraining (U0, U1, precisions), only for stages with the PC pathway.
   let preset: SnnModelFile | undefined;
   if (params.flags.pc) {
     process.stderr.write('PC pretraining...\n');
-    const pre = await replaySnn(dir, { params: withFlags(params, { pcLearn: true }), model, ...win, calendar, lean: true });
-    preset = { version: versionHash(params), params, columns: Object.fromEntries([...pre.net.columns].map(([k, c]) => [k, { U1: encodeArr(c.U1), U0: encodeArr(c.U0) }])) };
+    const pre = await replaySnn(dir, { params: withFlags(params, { pcLearn: true }), model, snnModel: init, ...win, calendar, lean: true });
+    // From --init: its other weights and readouts with the pretrained U0, U1.
+    preset = {
+      version: versionHash(params), params, ...(init ? { readouts: init.readouts, dirReadouts: init.dirReadouts } : {}),
+      columns: Object.fromEntries([...pre.net.columns].map(([k, c]) => [k, { ...init?.columns?.[k], U1: encodeArr(c.U1), U0: encodeArr(c.U0) }])),
+    };
   }
   // 2. e-prop L1 training + feature collection for the readout.
   process.stderr.write('surrogate-gradient L1 training + readout data...\n');
-  const tr = await replaySnn(dir, { params, model, snnModel: preset, ...win, calendar, lean: true, training: { eprop: { eta: Number(argOf('eprop-eta', '1e-3')) }, collect: true, collectMax: Number(argOf('readout-max', String(READOUT_MAX))) } });
+  const tr = await replaySnn(dir, { params, model, snnModel: preset ?? init, ...win, calendar, lean: true, training: { eprop: { eta: Number(argOf('eprop-eta', '1e-3')) }, collect: true, collectMax: Number(argOf('readout-max', String(READOUT_MAX))) } });
   // 3. Readout fit per column.
   const readouts: Record<string, number[]> = {};
   for (const [k, ro] of tr.net.readouts) {
@@ -110,8 +121,17 @@ export async function trainSnnMain(argOf: (k: string, d: string) => string = cli
     evalStats = b(res.score);
     console.log('eval window (out-of-sample):', evalStats);
   }
+  // --incumbent: the network in use on the same window, as it runs (its own settings and weights).
+  const incPath = argOf('incumbent', '');
+  let incumbentStats: ReturnType<typeof b> | undefined;
+  if (ev.from && incPath && fs.existsSync(incPath)) {
+    const inc = JSON.parse(fs.readFileSync(incPath, 'utf8')) as SnnModelFile;
+    const res = await replaySnn(dir, { params: inc.params, model, snnModel: inc, ...ev, calendar, lean: true });
+    incumbentStats = b(res.score);
+    console.log('eval window, the network in use:', incumbentStats);
+  }
   console.log(`wrote ${out} (version ${file.version}); copy to params/snn_${domain}.json only after research:snn-ablation --domain ${domain} accepts the stage`);
-  return { out, version: file.version, stage, domain, train: trainStats, eval: evalStats };
+  return { out, version: file.version, stage, domain, train: trainStats, eval: evalStats, ...(incumbentStats ? { incumbent: incumbentStats } : {}), ...(init ? { init: initPath } : {}) };
 }
 
 if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void trainSnnMain();

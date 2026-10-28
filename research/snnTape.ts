@@ -250,6 +250,8 @@ export async function recordSnnTape(dir: string, file: string, o: Omit<SnnReplay
 export interface PlayOpts {
   params: SnnParams; domain?: SnnDomain; snnModel?: SnnModelFile; whitelist?: string[];
   checkpoint?: SnnCheckpoint; allowParamChange?: boolean; from?: number;
+  /** No weight learning (SnnNetwork.pauseLearning). */
+  pauseLearning?: boolean;
 }
 
 /** A replay from its tape: the same network calls and rows as replaySnn with skipModel (p_model = the
@@ -281,6 +283,7 @@ export class TapeMember {
   constructor(private readonly o: PlayOpts, net?: SnnNetwork) {
     this.net = net ?? new SnnNetwork(o.params, { whitelist: o.whitelist, model: o.snnModel });
     this.net.dirLog = [];
+    this.net.pauseLearning = Boolean(o.pauseLearning);
     if (o.checkpoint) this.net.restore(o.checkpoint, { allowParamChange: o.allowParamChange });
     if (o.from && this.net.lastTs > o.from) this.net.rewind();
   }

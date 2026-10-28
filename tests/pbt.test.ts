@@ -82,6 +82,22 @@ test('tournament: identical start, elite survives, worst clones elite, middle + 
   assert.ok(rest.elite.record.length >= rest.log.length, 'out-of-sample record of the lineage');
 });
 
+test('tournament record window (the history walk): each lineage keeps only its latest days of bets', async () => {
+  const rounds = walkForwardRounds(0, 12 * DAY, 2 * DAY, DAY, DAY);
+  const hooks = {
+    init: () => ({ x: 0 }),
+    clone: (s: { x: number }) => ({ x: s.x }),
+    train: (s: { x: number }) => s,
+    evaluate: (_s: { x: number }, _h: Record<string, number>, r: { evalFrom: number }) => ({ report: { fitness: 0, sortino: 0, maxDrawdown: 0, costs: 0, netReturn: 0, interactions: 1, independent: 1, days: 1 }, interactions: [{ ts: r.evalFrom + 1, ret: 0.01, cost: 0 }] }),
+  };
+  const o = { base: { target: 1 }, spec: { target: { min: 0.1, max: 10 } }, rounds, hooks, seed: 5 };
+  const from = rounds[rounds.length - 1].evalTo - 3 * DAY;
+  const all = await runPbt(o);
+  assert.ok(all.members.every((m) => m.record.some((x) => x.ts < from)), 'by default the whole record');
+  const kept = await runPbt({ ...o, recordMs: 3 * DAY });
+  for (const m of kept.members) assert.ok(m.record.length === 3 && m.record.every((x) => x.ts >= from), `member ${m.id}: its last 3 days`);
+});
+
 test('tournament: a round stopped part-way keeps the members that finished it; the resumed round runs only the rest', async () => {
   const rounds = walkForwardRounds(0, 10 * DAY, 2 * DAY, DAY, DAY).slice(0, 3);
   const spec = { target: { min: 0.1, max: 10 } };

@@ -102,8 +102,9 @@ jobs:
           DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings"
           # rsync exit 24: a file vanished during the copy (the live bot rotates its SNN checkpoints): not an error.
           vanished_ok() { local c=$?; [ $c -eq 24 ] && { echo "a few files changed on the server during the copy (rotated checkpoints): continuing"; return 0; }; return $c; }
-          # Everything but recordings (copied below), logs and audit trails; nice'd on the server.
-          rsync -a --rsync-path="nice -n 19 rsync" --exclude 'recordings/' --exclude 'logs/' --exclude 'audit*' --exclude '*.log' --exclude '.venv*' --exclude '*.tmp' bot:bot/data/ "$DATA/" || vanished_ok
+          # Everything but recordings (copied below), logs and audit trails; nice'd on the server. Of the history walk
+          # (history-walk.yml) only where it stands and its best network: the training starts from it.
+          rsync -a --rsync-path="nice -n 19 rsync" --exclude 'recordings/' --exclude 'logs/' --exclude 'audit*' --exclude '*.log' --exclude '.venv*' --exclude '*.tmp' --exclude 'models/work/history-walk/*/pbt/' --exclude 'models/work/history-walk/*/replay-state/' bot:bot/data/ "$DATA/" || vanished_ok
           # Recordings: the last DAYS days of market data plus every other file. Today's and yesterday's are
           # still plain JSON lines: compressed in transit (level 1, cheap on the server's CPU).
           ssh bot "cd ~/bot/data/recordings && find . -type f \( ! -name 'md-*' -o -mtime -$DAYS \) -printf '%P\n'" > "$RUNNER_TEMP/recordings.txt"
@@ -141,7 +142,7 @@ jobs:
           # Copies the models (and this run's log) to the server: every 45 minutes while training, and after the
           # quick phase. Tournaments resume from these checkpoints; rebuildable caches stay here.
           sync_models() {
-            rsync -a --update --rsync-path="nice -n 19 rsync" --exclude '*.tmp' --exclude 'logs/' --exclude 'work/snnfill/' --exclude 'work/perp-dataset*/' --exclude 'work/perp-backtest-days/' --exclude 'work/sweep-replay/' --exclude 'work/vol-replay/' --exclude 'work/readiness-days/' --exclude 'work/playbook-days/' --exclude 'work/tanet-cache/' "$DATA/models/" bot:bot/data/models/ >/dev/null 2>&1; local c=$?
+            rsync -a --update --rsync-path="nice -n 19 rsync" --exclude '*.tmp' --exclude 'logs/' --exclude 'work/history-walk/' --exclude 'work/snnfill/' --exclude 'work/perp-dataset*/' --exclude 'work/perp-backtest-days/' --exclude 'work/sweep-replay/' --exclude 'work/vol-replay/' --exclude 'work/readiness-days/' --exclude 'work/playbook-days/' --exclude 'work/tanet-cache/' "$DATA/models/" bot:bot/data/models/ >/dev/null 2>&1; local c=$?
             rsync -a --rsync-path="nice -n 19 rsync" "$LOG" bot:bot/data/models/logs/ >/dev/null 2>&1 || true
             case $c in 0|23|24) echo "checkpoint $(date -u +%H:%M): models copied to the server";; *) echo "checkpoint $(date -u +%H:%M): copy failed ($c), retried later";; esac
           }
@@ -213,8 +214,8 @@ jobs:
         run: |
           set -euo pipefail
           DATA="$GITHUB_WORKSPACE/data"
-          # --update: never overwrite a file that is newer on the server.
-          rsync -a --update --rsync-path="nice -n 19 rsync" --exclude 'work/tanet-cache/torch-pack/' "$DATA/models/" bot:bot/data/models/
+          # --update: never overwrite a file that is newer on the server. The history walk's folder is the walk's own.
+          rsync -a --update --rsync-path="nice -n 19 rsync" --exclude 'work/tanet-cache/torch-pack/' --exclude 'work/history-walk/' "$DATA/models/" bot:bot/data/models/
           [ -d "$DATA/history" ] && rsync -a --update --rsync-path="nice -n 19 rsync" "$DATA/history/" bot:bot/data/history/ || true
           echo "models and history copied back; the bot hot-swaps what changed"
 
