@@ -89,7 +89,7 @@ import { FillModel } from '../bot/tca/fillModel';
 import { trainFillMain } from './trainFillModel';
 import { trainVolModelMain, VOL_MODEL_MIN_DAYS } from './trainVolModel';
 import { backtestMain } from './backtest';
-import { buildDatasetMain } from './buildDataset';
+import { buildDatasetMain, readDataset } from './buildDataset';
 import { perpBacktestMain, PERP_BACKTEST_MIN_DAYS } from './perpBacktest';
 import { sessionsMain } from './sessions';
 import { snnAblationMain, type Verdict } from './snnAblation';
@@ -124,7 +124,7 @@ import { trainCrossLead } from './crossLead';
 import { CL_SCHEMA, setCrossLeadPath } from '../bot/ta/crossLead';
 import { setCrossGraphPath, XG_SCHEMA } from '../bot/ta/crossGraph';
 import { LIB_SCHEMA, setLibrarianPath } from '../bot/ta/librarian';
-import { addBatch, annotateTally, judgeBatch, readTally, tallyEvidence } from './goLiveTally';
+import { addBatch, addHistoryBatch, annotateTally, judgeBatch, judgeRows, nextHistoryDays, readTally, tallyEvidence, writeHistoryDays } from './goLiveTally';
 
 const readLibSchema = (f: string): string | undefined => { try { return (JSON.parse(fs.readFileSync(f, 'utf8')) as { schema?: string }).schema; } catch { return undefined; } };
 import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, downloadBinanceOpenInterest, type BinanceMarket } from './history/binanceVision';
@@ -1125,12 +1125,42 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       // them, and the gates are judged on the tally.
       const judge = MetaModel.load(cand);
       const batch = judgeBatch(rep.judged, bt.windows, { after: tally.through, model: judge.params.version, trials: judge.params.validation?.variantsTried ?? 1, at: new Date(now).toISOString() });
-      const tallied = batch ? addBatch(tally, batch) : tally;
+      let tallied = batch ? addBatch(tally, batch) : tally;
       if (batch) writeAtomic(tallyFile, JSON.stringify(tallied));
+      // Then the history replay's unseen days, played as if live (research/goLiveTally.ts), a few at a time while
+      // TALLY_HISTORY_MIN lasts; each chunk is kept as soon as it is judged.
+      const kDays = T.historyReplay ? replayKalshiDays(replayDir) : [];
+      const histMin = Number(process.env.TALLY_HISTORY_MIN ?? 30), chunk = Math.max(1, Number(process.env.TALLY_HISTORY_CHUNK) || 5);
+      const histStart = Date.now();
+      let histAdded = 0;
+      while (kDays.length && Date.now() - histStart < histMin * 60_000) {
+        const next = nextHistoryDays(kDays, days[0], tallied, chunk);
+        if (!next.length) break;
+        const src = path.join(work, 'tally-history');
+        const hData = path.join(work, 'tally-history.jsonl');
+        try {
+          writeHistoryDays(replayDir, next, src);
+          await buildDatasetMain(argsOf({ recordings: src, out: hData, every: 60, 'vol-model': volModelArg }));
+          const { rows } = await readDataset(hData);
+          const hbt = rows.length ? await backtestMain(argsOf({
+            recordings: src, model: cand, exits: cfg.strategy.exitPolicy, 'vol-model': volModelArg, 'fill-model': fillModelArg,
+            'hunt-grid': cfg.strategy.huntTargetMargin, 'hunt-confluence': cfg.strategy.huntMinConfluence,
+            'ratchet-fill-grid': cfg.strategy.ratchetMinFillRatio, 'ratchet-age': cfg.strategy.ratchetMinWallAgeSec, 'ratchet-slip': cfg.strategy.ratchetSlippageTicks,
+          }), false) : undefined;
+          const hb = hbt ? judgeBatch(judgeRows(judge, rows), hbt.windows, { after: 0, model: judge.params.version, trials: judge.params.validation?.variantsTried ?? 1, at: new Date(now).toISOString() }) : undefined;
+          tallied = addHistoryBatch(tallied, tallied.history?.edge ?? days[0], next, hb);
+          writeAtomic(tallyFile, JSON.stringify(tallied));
+          histAdded += hb?.windows.length ?? 0;
+          log(`mlp: history days ${next[0]}..${next[next.length - 1]} played as live: ${hb?.windows.length ?? 0} window(s), ${hb?.trades.filter((x) => x[2] > 0).length ?? 0} traded`);
+        } finally {
+          fs.rmSync(src, { recursive: true, force: true });
+          fs.rmSync(hData, { force: true });
+        }
+      }
       const ev = tallyEvidence(tallied);
       if (ev) annotateTally(cand, ev);
-      const goLive = ev ? { days: ev.days, windows: ev.nWindows, windowsTraded: ev.windowsTraded, added: batch?.windows.length ?? 0 } : null;
-      if (ev) log(`mlp: go-live tally ${ev.nWindows} of ${GO_LIVE_GATES.minWindows} judged windows, ${ev.windowsTraded} of ${GO_LIVE_GATES.minWindowsTraded} traded, over ${ev.days} day(s) (${batch?.windows.length ?? 0} added)`);
+      const goLive = ev ? { days: ev.days, windows: ev.nWindows, windowsTraded: ev.windowsTraded, added: batch?.windows.length ?? 0, historyAdded: histAdded, recorded: ev.recorded ?? null, history: ev.history ?? null } : null;
+      if (ev) log(`mlp: go-live tally ${ev.nWindows} of ${GO_LIVE_GATES.minWindows} judged windows, ${ev.windowsTraded} of ${GO_LIVE_GATES.minWindowsTraded} traded, over ${ev.days} day(s) (${batch?.windows.length ?? 0} recorded and ${histAdded} history window(s) added)`);
       const m = MetaModel.load(cand);
       const passed = Boolean(m.params.validation?.passed);
       const usesSnn = m.params.features.some((f) => f.startsWith('snn_'));
