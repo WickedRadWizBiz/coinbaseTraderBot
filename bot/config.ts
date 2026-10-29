@@ -205,7 +205,8 @@ export interface StrategyConfig {
    *  sells every dip: sell the whole position at the bid when the bid is at least the math fair value plus
    *  HUNT_LOCK_SALE_FV_MARGIN (0.02) and/or the last minute's Kalshi taker flow favours the held side. HUNT_LOCK_SALE_AT
    *  (lock | trigger) says when: right at the lock, or (default) the first time the bid sits under the ratchet's stop.
-   *  HUNT_LOCK_SALE_ELSE (hold | exit) when the rule does not hit. Off by default. */
+   *  HUNT_LOCK_SALE_ELSE (hold | exit) when the rule does not hit. fair_value by default (Oct 29): on the replayed days it is
+   *  never worse than the trailing stop (+$39 on Oct 28, level on Oct 27) and level with holding, on half the contracts. */
   huntLockSale: 'off' | 'fair_value' | 'flow' | 'either' | 'both';
   huntLockSaleFvMargin: number;
   huntLockSaleElse: 'hold' | 'exit';
@@ -1066,7 +1067,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     huntMinConfluence: num(env, 'HUNT_MIN_CONFLUENCE', 2, 1, 7),
     huntHybrid: bool(env, 'HUNT_HYBRID', false),
     huntSellIntoGap: bool(env, 'HUNT_SELL_INTO_GAP', true),
-    huntLockSale: oneOf(env, 'HUNT_LOCK_SALE', 'off', ['off', 'fair_value', 'flow', 'either', 'both'] as const),
+    huntLockSale: oneOf(env, 'HUNT_LOCK_SALE', 'fair_value', ['off', 'fair_value', 'flow', 'either', 'both'] as const),
     huntLockSaleFvMargin: num(env, 'HUNT_LOCK_SALE_FV_MARGIN', 0.02, -0.2, 0.2),
     huntLockSaleElse: oneOf(env, 'HUNT_LOCK_SALE_ELSE', 'hold', ['hold', 'exit'] as const),
     huntLockSaleAt: oneOf(env, 'HUNT_LOCK_SALE_AT', 'trigger', ['lock', 'trigger'] as const),

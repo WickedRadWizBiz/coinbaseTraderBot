@@ -177,7 +177,7 @@ export interface HuntParams {
    *  days the gap sales were the ratchet's main loss (sold into liquidity holes on contracts that then paid $1). */
   sellIntoGap?: boolean;
   /** HUNT_LOCK_SALE: a one-time judgement of the hunted position instead of a trailing stop that sells every dip. 'off'
-   *  (default) trails as before. 'fair_value' sells the whole position at the bid when the bid is at least the math fair
+   *  trails as before (the setting's default, fair_value, is in bot/config.ts). 'fair_value' sells the whole position at the bid when the bid is at least the math fair
    *  value plus lockSaleFvMargin (the market pays more than the spot says the contract is worth); 'flow' when the last
    *  minute's Kalshi taker flow favours the held side; 'either' and 'both' combine the two. lockSaleAt says when the
    *  judgement is made: 'lock' right at the lock, 'trigger' (default) the first time the bid sits under the ratchet's stop
