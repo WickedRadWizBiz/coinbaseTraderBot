@@ -299,6 +299,50 @@ test('hunt sell-wall ask (HUNT_WALL_ASK): in hunt mode the held side rests its s
   assert.ok(pulled.cancel.some((c) => c.clientOrderId === 'w'));
 });
 
+test('profit mandate: a position in profit after fees is sold at the bid whatever the policy or the model says, outside the last share of the window', () => {
+  // Long 10 YES at 0.40 plus the 0.0175 entry fee; the model values it at 0.70, so the model exit never sells. The 0.47 bid nets ~0.453.
+  const long = (o: Partial<MarketView> = {}) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.47, size: 50 }, bestAsk: { price: 0.6, size: 50 }, ...o });
+  const exitOf = (v: MarketView, o: { exits?: boolean; profitMandate?: number } = {}) =>
+    decide(v, cfg, { exits: false, profitMandate: 0.01, ...o }).place.find((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel');
+  const e = exitOf(long())!;
+  assert.deepEqual([e.side, e.price, e.count, e.reduceOnly], ['ask', 0.47, 10, true]);
+  assert.match(e.why, /^profit mandate exit: bid 0\.47 - fee 0\.01\d >= cost 0\.41\d \+ 0\.01/);
+  assert.ok(exitOf(long(), { exits: true }), 'with the model exit on as well');
+  assert.equal(exitOf(long({ bestBid: { price: 0.43, size: 50 } })), undefined, 'not in profit after fees: nothing');
+  assert.equal(exitOf(long({ exitWindowOpen: false })), undefined, 'the last share of the window rides to settlement');
+  assert.equal(exitOf(long(), { profitMandate: undefined }), undefined, 'off');
+  assert.equal(exitOf(long({ entrySidePrice: undefined })), undefined, 'no entry cost known: nothing');
+  // Long NO: 10 NO at 0.40 plus the fee; the YES ask 0.53 makes the NO bid 0.47.
+  const short = view({ position: -10, pYes: 0.3, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.4, size: 50 }, bestAsk: { price: 0.53, size: 50 } });
+  const s = exitOf(short)!;
+  assert.deepEqual([s.side, s.price, s.count], ['bid', 0.53, 10]);
+  assert.match(s.why, /^profit mandate exit: NO bid 0\.47 - fee/);
+});
+
+test('quota snipe: a position whose whole net profit after fees covers what the clock hour needs is sold at the bid, whatever the policy, the hunt or the model says', () => {
+  // Long 10 YES at 0.40 plus the 0.0175 entry fee (cost 0.4175); the model values it at 0.70. At the 0.52 bid the position is up
+  // 10 x 0.1025 = 1.025 less the ~0.18 taker fee: +0.85 net; at 0.50 it is +0.65.
+  const long = (o: Partial<MarketView> = {}) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.52, size: 50 }, bestAsk: { price: 0.6, size: 50 }, ...o });
+  const exitOf = (v: MarketView, o: { exits?: boolean; blockReductions?: boolean; pacerUsd?: number } = {}) =>
+    decide(v, cfg, { exits: false, pacerUsd: 0.75, ...o }).place.find((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel');
+  const e = exitOf(long())!;
+  assert.deepEqual([e.side, e.price, e.count, e.reduceOnly], ['ask', 0.52, 10, true]);
+  assert.match(e.why, /^quota snipe: \+\$0\.8\d net on 10 at bid 0\.52 covers the \$0\.75 the hour needs/);
+  assert.ok(exitOf(long(), { blockReductions: true }), 'a hunt trailing its stop does not stop the snipe');
+  assert.equal(exitOf(long({ bestBid: { price: 0.5, size: 50 } })), undefined, '+0.65 net does not cover the 0.75 needed');
+  assert.ok(exitOf(long({ bestBid: { price: 0.5, size: 50 } }), { pacerUsd: 0.5 }), 'it does cover 0.50: the threshold moves with the clock');
+  assert.equal(exitOf(long({ exitWindowOpen: false })), undefined, 'the last share of the window rides to settlement');
+  assert.equal(exitOf(long(), { pacerUsd: undefined }), undefined, 'pacer off');
+  assert.equal(exitOf(long({ entrySidePrice: undefined })), undefined, 'no entry cost known: nothing');
+  // A thin bid takes what it can; the whole position's profit is what is judged.
+  assert.equal(exitOf(long({ bestBid: { price: 0.52, size: 4 } }))!.count, 4);
+  // Long NO: 10 NO at 0.40 plus the fee; the YES ask 0.48 makes the NO bid 0.52.
+  const short = view({ position: -10, pYes: 0.3, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.4, size: 50 }, bestAsk: { price: 0.48, size: 50 } });
+  const s = exitOf(short)!;
+  assert.deepEqual([s.side, s.price, s.count], ['bid', 0.48, 10]);
+  assert.match(s.why, /^quota snipe: \+\$0\.8\d net on 10 NO at bid 0\.52 covers/);
+});
+
 test('exit curve rest mode: a NO position rests a YES bid at 1 - target, and the resting sell follows the position size exactly', () => {
   // Long 10 NO bought at 0.30 (YES sold at 0.70): floor 4c on 0.30 is 3c, never below NO 0.33. The model values NO at 0.50.
   const short = (o: Partial<MarketView> = {}) => view({ position: -10, pYes: 0.5, entrySidePrice: 0.3, entryFeePerContract: 0, bestBid: { price: 0.4, size: 50 }, bestAsk: { price: 0.66, size: 50 }, ...o });
