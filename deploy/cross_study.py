@@ -349,7 +349,7 @@ def main():
                         try: r = json.loads(line)
                         except Exception: continue
                         d = r.get('data') or {}
-                        hunts[d.get('ticker', '')].append({'ms': iso_ms(r.get('ts', '')), 'ev': d.get('huntEvent'), 'target': d.get('target'), 'stop': d.get('stop'), 'pYes': d.get('pYes')})
+                        hunts[d.get('ticker', '')].append({'ms': iso_ms(r.get('ts', '')), 'ev': d.get('huntEvent'), 'target': d.get('target'), 'stop': d.get('stop'), 'pYes': d.get('pYes'), 'pos': d.get('position')})
                         continue
                     if b'"purpose":"exit"' not in line: continue
                     try: d = json.loads(line).get('data') or {}
@@ -692,7 +692,7 @@ def main():
             cur = None
             for h in hs:
                 if h['ev'] == 'activated':
-                    cur = {'ep': ep, 'avg': avg, 'act_ms': h['ms'], 'floor': h['stop'] if h['stop'] is not None else h['target'], 'ratchets': 0, 'max_stop': h['stop'], 'end': None, 'sales': []}
+                    cur = {'ep': ep, 'avg': avg, 'act_ms': h['ms'], 'floor': h['stop'] if h['stop'] is not None else h['target'], 'ratchets': 0, 'max_stop': h['stop'], 'end': None, 'sales': [], 'giveback': None}
                     acts.append(cur)
                 elif cur is None: continue
                 elif h['ev'] == 'ratcheted':
@@ -700,6 +700,7 @@ def main():
                     if h['stop'] is not None and (cur['max_stop'] is None or h['stop'] > cur['max_stop']): cur['max_stop'] = h['stop']
                 elif h['ev'] in ENDS and cur['end'] is None:
                     cur['end'] = h
+                if h['ev'] == 'deactivated_giveback': cur['giveback'] = h
                 if h['ev'] in ('deactivated_giveback', 'deactivated_session'): cur = None
             eacts = [a for a in acts if a['ep'] is ep]
             for x in ep['exits']:
@@ -716,7 +717,7 @@ def main():
                 sale_rows.append({'n': x['n'], 'px': x['px'], 'fee': x['fee'], 'lock': (a['floor'] - a['avg']) if a['avg'] is not None else None, 'walk': stop - a['floor'],
                                   'peak': pk, 'give': (pk - x['px']) if pk is not None else None, 'slip': stop - x['px'], 'q': q, 'q_over': (q - stop) if q is not None else None,
                                   'hyb': (q >= stop + fee_per) if q is not None else None, 'held': (x['ms'] - a['act_ms']) / 1000,
-                                  'tau': (ep['close_ms'] - x['ms']) / 60000 if ep.get('close_ms') else None, 'payout': ep['payout']})
+                                  'tau': (ep['close_ms'] - x['ms']) / 60000 if ep.get('close_ms') else None, 'payout': ep['payout'], 'end': a['end']['ev'] if a['end'] else 'none'})
 
         def wmean(rows, k):
             s = [(r[k], r['n']) for r in rows if r.get(k) is not None]
@@ -762,6 +763,24 @@ def main():
             rs = [r for r in settled if r['tau'] is not None and (lo is None or r['tau'] >= lo) and (hi is None or r['tau'] < hi)]
             if not rs: continue
             print(f"    {lab:26s} contracts {sum(r['n'] for r in rs):7.1f}  vs holding ${sum((r['px'] - r['payout']) * r['n'] - r['fee'] for r in rs):+8.2f}  won {pc(wmean(rs, 'payout'))}  sold at {wmean(rs, 'px'):.3f}  peak {f3(wmean(rs, 'peak'))}  gave back {f3(wmean(rs, 'give'))}/ct")
+        for ev in ('triggered', 'profit_take_gap', 'profit_take_confluence', 'profit_take_session', 'none'):
+            rs = [r for r in settled if r['end'] == ev]
+            if not rs: continue
+            print(f"    {('hunt ended by ' + ev):26s} contracts {sum(r['n'] for r in rs):7.1f}  vs holding ${sum((r['px'] - r['payout']) * r['n'] - r['fee'] for r in rs):+8.2f}  won {pc(wmean(rs, 'payout'))}  sold at {wmean(rs, 'px'):.3f}  peak {f3(wmean(rs, 'peak'))}  gave back {f3(wmean(rs, 'give'))}/ct")
+        # The lock given back: the bid at the moment the hunt dropped it, against what the contracts then paid.
+        gb = []
+        for a in acts:
+            g = a.get('giveback')
+            if not g: continue
+            ep = a['ep']; n = abs(float(g.get('pos') or 0)) or sum(x['n'] for x in ep['entries'])
+            gb.append({'n': n, 'bid': side_bid_at(ep, g['ms'] // 1000), 'floor': a['floor'], 'avg': a['avg'], 'payout': ep['payout']})
+        if gb:
+            s_ = [r for r in gb if r['bid'] is not None and r['payout'] is not None]
+            vs_gb = sum((r['bid'] - r['payout']) * r['n'] - taker_fee(r['n'], r['bid']) for r in s_)
+            under = wmean([{'n': r['n'], 'd': r['floor'] - r['bid']} for r in s_ if r['floor'] is not None], 'd')
+            vs_entry = wmean([{'n': r['n'], 'd': r['bid'] - r['avg']} for r in s_ if r['avg'] is not None], 'd')
+            print(f"  the lock given back ({len(gb)} hunts, {sum(r['n'] for r in gb):.1f} contracts): the bid at the giveback {f3(wmean(s_, 'bid'))}, {f3(under)}/ct under the lock and {f3(vs_entry)}/ct against the entry;"
+                  f" won {pc(wmean(s_, 'payout'))}; selling at that bid instead of dropping the lock: ${vs_gb:+.2f} against holding on {sum(r['n'] for r in s_):.0f} settled contracts")
 
     try:
         anatomy()
