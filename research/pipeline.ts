@@ -142,7 +142,7 @@ import { capHours, enterDecisionPhase, resetSession, sessionActive, sessionTimeU
 /** Coins with Kalshi crypto contracts: the SNN tournaments' transition penalty reads their regime changes. */
 const SNN_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
 
-export const STEPS = ['history', 'history_replay', 'oracle_cull', 'ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'cross_lead', 'rule_book', 'gp', 'lead_lag', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'tally_history', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
+export const STEPS = ['history', 'history_replay', 'oracle_cull', 'ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'cross_lead', 'rule_book', 'gp', 'lead_lag', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'tally_history', 'vol', 'perps', 'tennis', 'fill', 'session_risk', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -382,7 +382,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const sessionMin = Number(process.env.TRAIN_SESSION_MIN) || 0;
   resetSession();
   const DATA_STEPS = ['history-seed', 'history', 'history-index', 'history_replay', 'conditioning'];
-  const DECISION_STEPS = ['vol_model', 'dataset', 'mlp', 'tally_history', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness'];
+  const DECISION_STEPS = ['vol_model', 'dataset', 'mlp', 'tally_history', 'vol', 'perps', 'tennis', 'fill', 'session_risk', 'sizing', 'playbook', 'readiness'];
   const run = async (step: string, fn: () => Promise<unknown>, skip?: string) => {
     const t0 = Date.now();
     if (stopRequested) {
@@ -1315,6 +1315,18 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const m = FillModel.load(promoted('fill'));
       return { promoted: true, active: Boolean(m?.validated), validation: p.validation };
     });
+  }
+
+  // ---- 8b. session risk: per-session backtest of the current model and settings on the recordings; sessions that
+  // reliably lose shrink, ones that reliably earn grow at half weight (research/sessions.ts). The bot applies it
+  // under any hand-set SESSION_RISK (SESSION_RISK_AUTO). ----
+  if (want('session_risk')) {
+    await run('session_risk', ifChanged('session_risk', async () => {
+      const out = promoted('session_risk');
+      await sessionsMain(argsOf({ recordings: rec, out: path.join(work, 'vol_profile.session-risk.json'), model: fs.existsSync(promoted('mlp')) ? promoted('mlp') : cfg.paramsPath, 'risk-out': out }));
+      const f = JSON.parse(fs.readFileSync(out, 'utf8')) as { profile: Record<string, unknown> };
+      return { promoted: true, sessions: Object.keys(f.profile) };
+    }), tooFew);
   }
 
   // ---- 9. sizing tuner: replays the bot's settled entries under a grid of sizing policies (PROPOSAL) ----

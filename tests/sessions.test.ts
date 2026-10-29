@@ -41,8 +41,8 @@ test('session state reports transitions, the US-open window and Monday Asia open
   assert.equal(zoneTime(T('2026-07-15T13:30:00Z'), 'America/New_York').hhmm, '09:30');
 });
 
-test('session risk profile: validated, reduce-only, stricter value wins in the US-open window', () => {
-  assert.throws(() => parseSessionRisk('{"asia":{"sizeMult":1.5}}'), /sizeMult/);
+test('session risk profile: validated, at most 1.5x size, stricter value wins in the US-open window', () => {
+  assert.throws(() => parseSessionRisk('{"asia":{"sizeMult":1.6}}'), /sizeMult/);
   assert.throws(() => parseSessionRisk('{"mars":{}}'), /unknown session/);
   const p = parseSessionRisk('{"london_ny_overlap":{"sizeMult":0.8,"minEdgeAdd":0.005},"us_open":{"sizeMult":0.5,"minEdgeAdd":0.01}}');
   const inOpen = sessionRiskFor(p, sessionState(T('2026-07-15T13:40:00Z')));

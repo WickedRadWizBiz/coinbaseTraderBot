@@ -19,6 +19,7 @@ import { KalshiWs } from './kalshi/ws';
 import { MarketData, Recorder } from './marketdata/marketData';
 import { MetaModel } from './model/metaModel';
 import { loadVolProfile, type VolProfile } from './model/volSeasonality';
+import { loadSessionRiskFile } from './model/sessionRisk';
 import { loadCalendar } from './model/calendar';
 import { ModelHealth } from './model/modelHealth';
 import { AccuracyGate } from './strategy/accuracyGate';
@@ -541,6 +542,9 @@ async function main(): Promise<void> {
   const exchangeStatus = new ExchangeStatusMonitor(rest);
   exchangeStatus.start();
   const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, accuracyGate, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json'), curveExit, takeProfitBench, curveEntry, liveLines, trials });
+  // The pipeline's session risk profile (session_risk.json), under SESSION_RISK; autotrain hot-swaps new ones.
+  const sr = loadSessionRiskFile(modelPaths.session_risk);
+  if (sr) { engine.setSessionRiskAuto(sr.profile); log.info(`session risk ${sr.version}${cfg.strategy.sessionRiskAuto ? '' : ' loaded, not applied (SESSION_RISK_AUTO off)'}`, { sessions: Object.keys(sr.profile) }); }
   engineRef = engine;
   // Module ledger once an hour (and 5 minutes after start) in the audit log, for the daily module report
   // (deploy/module_report.py): which parts were on, shadow, off or benched, and what flagged them.

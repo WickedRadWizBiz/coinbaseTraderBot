@@ -81,7 +81,7 @@ The old `metaLearningEngine.ts` and `plasticityEngine.ts` (tfjs-node) retrained 
      - **In learning:** session indicators, time to and since a session change, the US-open window (09:30–10:00 ET, the documented ETF-era volatility spike), Monday Asia open, a seasonal volatility ratio, and, as weak-evidence candidates only, Asian-range position and breakout. All of these are eligible only with 14+ days of data.
      - **In logic:**
        - an intraday volatility profile scales the EWMA sigma used for fair value, following Andersen & Bollerslev (1997). It is fitted and validated out of sample by `npm run research:sessions` and applied only if it improved accuracy;
-       - reduce-only per-session risk multipliers (`SESSION_RISK`), with values recommended from backtest evidence;
+       - per-session risk multipliers, applied automatically from the training pipeline's `session_risk.json` (`SESSION_RISK_AUTO=true`): a session that reliably loses gets no new risk, one indistinguishable from zero is halved, one that reliably earns grows at half that weight (x1.25, dollars only, contracts per order stay capped); `SESSION_RISK` set by hand wins per session;
        - a session guard that keeps hunt mode's order-book stops out of twilight and weekend liquidity and away from session changes.
      - The dashboard shows the session card with venue clocks and a countdown.
 3. **Go-live gates enforced in code.** Live mode refuses to start unless the model's validation report shows:
@@ -668,7 +668,7 @@ npm run research:fill-train -- --fills data/fills                               
 npm run research:snn-golden                                                              # regenerate the Python golden vectors
 ```
 
-`npm run research:sessions` reports volatility, Kalshi spreads and depth, and trade activity for each session. It fits and validates the intraday volatility profile (`params/vol_profile.json`), backtests P&L by session, and prints a recommended `SESSION_RISK` along with the evidence behind it.
+`npm run research:sessions` reports volatility, Kalshi spreads and depth, and trade activity for each session. It fits and validates the intraday volatility profile (`params/vol_profile.json`), backtests P&L by session, and prints a recommended `SESSION_RISK` along with the evidence behind it (`--risk-out` writes it as `session_risk.json`, which the pipeline's `session_risk` step does every run and the bot applies).
 
 **Latency injection.** `--latency-ms 250 [--cancel-latency-ms 150] [--latency-jitter-ms 100]` makes every order and cancel reach the simulated exchange late, against whatever the book and the tape look like by then (seeded jitter, so runs repeat). A taker order fills at the later price, a maker quote joins the queue late, and a cancel can lose the race to a trade (`cancelRaceFills` counts those fills). While a market has anything in flight the strategy plans nothing new for it, like the engine's per-market busy flag. The default is no latency, which is optimistic: on the synthetic data 500 ms of latency cuts P&L by about 40% and 3 s by about 80%, so run the real recordings at your actual round-trip time (`--latency-ms`, typically 100–400 from a US cloud host) before trusting a profit number. The tennis backtest does not inject latency yet.
 

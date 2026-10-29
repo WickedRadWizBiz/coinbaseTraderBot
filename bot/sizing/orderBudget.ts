@@ -3,7 +3,8 @@
 //
 //   maxOrderRiskUsd = min(tier.orderFrac x bankroll x sizeMult x riskScale, optimal f cap x bankroll)
 //
-//   sizeMult   the session's size factor x the regime weight (Compensator, else the playbook): market conditions
+//   sizeMult   the session's size factor x the regime weight (Compensator, else the playbook): market conditions.
+//              Above 1 it grows the dollar stake only: contracts per order never pass RISK_MAX_CONTRACTS_PER_ORDER.
 //   riskScale  the loss-aware scale (EquityGuard: full size at break-even, shrinking with net losses)
 //   optimal f  the growth-optimal stake the bot's own settled trades support, at a bootstrap quantile
 //              (bot/strategy/optimalF.ts): the measured edge, with a margin for how uncertain it is. Infinity until
@@ -42,5 +43,5 @@ export function orderBudget(i: OrderBudgetInput): OrderBudget {
   if (i.paperOrderUsd > 0) return { maxOrderRiskUsd: i.paperOrderUsd, maxContracts: floorCount(i.maxContractsPerOrder), fixedOrderUsd: i.paperOrderUsd, boundBy: 'paper' };
   const tierUsd = i.orderFrac * i.bankroll * i.sizeMult * i.riskScale;
   const capped = Number.isFinite(i.fCapUsd) && i.fCapUsd < tierUsd;
-  return { maxOrderRiskUsd: capped ? i.fCapUsd : tierUsd, maxContracts: floorCount(i.maxContractsPerOrder * i.sizeMult), boundBy: capped ? 'optimal_f' : 'tier' };
+  return { maxOrderRiskUsd: capped ? i.fCapUsd : tierUsd, maxContracts: floorCount(i.maxContractsPerOrder * Math.min(1, i.sizeMult)), boundBy: capped ? 'optimal_f' : 'tier' };
 }
