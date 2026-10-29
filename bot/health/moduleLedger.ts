@@ -24,7 +24,7 @@ export interface ModuleScore {
 
 export interface ModuleRow {
   module: string;
-  area: 'pricing' | 'regime' | 'gates' | 'sizing' | 'exits' | 'data';
+  area: 'pricing' | 'regime' | 'gates' | 'sizing' | 'exits' | 'data' | 'throughput';
   state: ModuleState;
   validated: boolean | null;
   score: ModuleScore | null;
@@ -75,6 +75,17 @@ export interface LedgerInput {
   maxIndexAgeMs: number;
   /** Market-state readings per coin (bot/marketdata/marketState.ts). */
   marketState?: Record<string, { rv1h: number | null; changeProb: number | null; spread: number | null }> | null;
+  /** Throughput (phase 6): is the bot keeping up with the market? */
+  throughput?: {
+    /** Main-thread busy share over the last minute (event-loop utilization). */
+    mainBusy: number | null;
+    /** How far behind real time Kalshi's data reaches the bot (ms). */
+    feedLagMs: number | null;
+    ordersLastMinute: number;
+    maxOrdersPerMinute: number;
+    /** Oldest evaluation among markets the bot holds or quotes (ms; null = none held). */
+    heldEvalAgeMs: number | null;
+  } | null;
 }
 
 const driftFlag = (h: HealthReading | null | undefined): string[] => (h?.drift?.alarm ? [`drift: scoring worse since ${h.drift.since ? new Date(h.drift.since).toISOString().slice(0, 16) : 'recently'}`] : []);
@@ -159,6 +170,18 @@ export function buildLedger(x: LedgerInput): ModuleRow[] {
     const flags = [r.rv1h === null ? 'volatility: under an hour of index minutes' : '', r.spread === null ? 'no Kalshi book in 5 minutes' : ''].filter(Boolean);
     rows.push({ module: `market state ${asset}`, area: 'data', state: r.rv1h === null ? 'off' : 'on', validated: null, score: { label: 'P(change point in the last 5 minutes)', value: r4(r.changeProb), n: 0 }, flags });
   }
+  // Throughput (phase 6): scale the machinery only when these show the bot falling behind.
+  const t = x.throughput;
+  if (t) {
+    const lag = (module: string, label: string, value: number | null, limit: number, flag: string, d = 3) => {
+      const bad = value !== null && value > limit;
+      rows.push({ module, area: 'throughput', state: value === null ? 'off' : 'on', validated: null, score: { label, value: value === null ? null : +value.toFixed(d), n: 0 }, flags: bad ? [flag] : [] });
+    };
+    lag('main thread', 'busy share of the last minute', t.mainBusy, 0.8, 'over 80% busy: evaluations queue behind each other');
+    lag('Kalshi feed', 'seconds behind real time', t.feedLagMs === null ? null : t.feedLagMs / 1000, 2, 'over 2 s behind: prices act on stale books', 2);
+    lag('order rate', 'share of the per-minute order limit', t.maxOrdersPerMinute > 0 ? t.ordersLastMinute / t.maxOrdersPerMinute : null, 0.8, 'over 80% of the order limit: new risk is refused first');
+    lag('held-market evaluation', 'seconds since the oldest evaluation of a held market', t.heldEvalAgeMs === null ? null : t.heldEvalAgeMs / 1000, 3, 'a held market went over 3 s without an evaluation', 1);
+  }
   return rows;
 }
 
@@ -166,5 +189,5 @@ export function buildLedger(x: LedgerInput): ModuleRow[] {
 export function ledgerLine(r: ModuleRow): string {
   const s = r.score ? ` | ${r.score.label}: ${r.score.value ?? '-'}${r.score.n ? ` (n=${r.score.n})` : ''}` : '';
   const v = r.validated === null ? '' : r.validated ? ' | validated' : ' | not validated';
-  return `${r.area.padEnd(7)} ${r.module.padEnd(26)} ${r.state.padEnd(7)}${v}${s}${r.flags.length ? ` | ${r.flags.join('; ')}` : ''}`;
+  return `${r.area.padEnd(10)} ${r.module.padEnd(26)} ${r.state.padEnd(7)}${v}${s}${r.flags.length ? ` | ${r.flags.join('; ')}` : ''}`;
 }

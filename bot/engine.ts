@@ -1760,6 +1760,11 @@ export class Engine {
       indexAgeMs: Object.fromEntries([...this.d.md.index].map(([a, idx]) => [a, idx.health(now).ageMs])),
       maxIndexAgeMs: this.d.cfg.risk.maxIndexAgeMs,
       marketState: Object.fromEntries(this.marketState.assets().map((a) => [a, this.marketState.reading(a, now)])),
+      throughput: (() => {
+        const held = new Set([...this.d.oms.positions.open().map((p) => p.ticker), ...this.d.oms.liveOrders().filter((o) => isLive(o)).map((o) => o.ticker)]);
+        const ages = [...held].map((t) => this.status.get(t)?.updatedTs).filter((x): x is number => x !== undefined).map((ts) => now - ts);
+        return { mainBusy: this.cpu.status()?.mainBusy ?? null, feedLagMs: this.d.md.kalshiFeedLagMs(now) ?? null, ordersLastMinute: this.d.oms.ordersSentInLast(60_000), maxOrdersPerMinute: this.d.cfg.risk.maxOrdersPerMinute, heldEvalAgeMs: ages.length ? Math.max(...ages) : null };
+      })(),
     });
   }
 

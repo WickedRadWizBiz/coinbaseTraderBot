@@ -35,7 +35,7 @@ def line(r):
     s = f" | {sc.get('label')}: {sc.get('value')}{' (n=%s)' % sc['n'] if sc.get('n') else ''}" if sc else ''
     v = '' if r.get('validated') is None else (' | validated' if r['validated'] else ' | not validated')
     f = f" | {'; '.join(r['flags'])}" if r.get('flags') else ''
-    return f"{r['area']:<7} {r['module']:<26} {r['state']:<7}{v}{s}{f}"
+    return f"{r['area']:<10} {r['module']:<26} {r['state']:<7}{v}{s}{f}"
 
 
 print('== modules now')
@@ -73,6 +73,6 @@ print(f'{n} hourly snapshots')
 for m in sorted(hours, key=lambda k: (last[k]['area'], k)):
     h = ' '.join(f'{s} {c}h' for s, c in hours[m].most_common())
     sc = (last[m].get('score') or {})
-    print(f"  {last[m]['area']:<7} {m:<26} {h:<28} latest {sc.get('value')}{' n=%s' % sc['n'] if sc.get('n') else ''}")
+    print(f"  {last[m]['area']:<10} {m:<26} {h:<28} latest {sc.get('value')}{' n=%s' % sc['n'] if sc.get('n') else ''}")
     for f, c in flags[m].most_common(3):
         print(f'      flag {c}h: {f}')
