@@ -746,7 +746,7 @@ def main():
             print(f"    {k:44s} hunts {r['acts']:4d}  contracts {r['n']:7.1f}  lock {f3(r['lock'] / r['lockn'] if r['lockn'] else None)}/ct  won {pc(r['won'] / r['wonn'] if r['wonn'] else None)}")
         if not sale_rows:
             print('  no ratchet sale in the window has a recorded hunt (older audit logs have no hunt decision records)')
-            return
+            return acts
         settled = [r for r in sale_rows if r['payout'] is not None]
         vs = sum((r['px'] - r['payout']) * r['n'] - r['fee'] for r in settled); vsn = sum(r['n'] for r in settled)
         print(f"  ratchet sales with a recorded hunt: {len(sale_rows)} sales, {sum(r['n'] for r in sale_rows):.1f} contracts, vs holding ${vs:+.2f} on {vsn:.0f} settled contracts, won {pc(wmean(settled, 'payout'))}")
@@ -781,11 +781,83 @@ def main():
             vs_entry = wmean([{'n': r['n'], 'd': r['bid'] - r['avg']} for r in s_ if r['avg'] is not None], 'd')
             print(f"  the lock given back ({len(gb)} hunts, {sum(r['n'] for r in gb):.1f} contracts): the bid at the giveback {f3(wmean(s_, 'bid'))}, {f3(under)}/ct under the lock and {f3(vs_entry)}/ct against the entry;"
                   f" won {pc(wmean(s_, 'payout'))}; selling at that bid instead of dropping the lock: ${vs_gb:+.2f} against holding on {sum(r['n'] for r in s_):.0f} settled contracts")
+        return acts
+
+    # -- 1d. The oracle on the hunted positions: the best exit hindsight allows, against what the ratchet got, holding, and
+    #        a family of causal trailing stops run on the same recorded paths (no walls: a trail of d ticks under the running
+    #        peak of the side bid since the lock, never below the lock; the gap either sold at the bid or waited for the bid to
+    #        come back within a tick of the stop; with and without the 120 s close window).
+    def oracle(acts):
+        print('\n== 1d. the oracle on the hunted positions: hindsight\'s best exit, the ratchet\'s actual result, holding from the lock,'
+              '\n   and causal trailing stops replayed on the same recorded paths (dollars against holding the same contracts to settlement)')
+        TICK = 0.01
+        paths = []
+        for a in acts:
+            ep = a['ep']
+            if ep['payout'] is None or not ep.get('close_ms') or not tops.get(ep['ticker']) or a['floor'] is None: continue
+            c_sec = ep['close_ms'] // 1000
+            s0 = a['act_ms'] // 1000
+            if c_sec <= s0 + 1: continue
+            en = sum(e['n'] for e in ep['entries'] if e['ms'] <= a['act_ms'])
+            ex = sum(x['n'] for x in ep['exits'] if x['ms'] < a['act_ms'])
+            n = round(en - ex, 2)
+            if n <= 0: continue
+            # What the contracts held at the lock actually got: the exits after it, then settlement for the rest.
+            left, got = n, 0.0
+            for x in sorted(ep['exits'], key=lambda x: x['ms']):
+                if x['ms'] < a['act_ms'] or left <= 1e-9: continue
+                k = min(left, x['n']); got += k * x['px'] - x['fee'] * k / x['n']; left -= k
+            got += left * ep['payout']
+            bids = []
+            last = None
+            for sec in range(s0, c_sec + 1):
+                b = side_bid_at(ep, sec)
+                if b is not None and 0 < b < 1: last = b
+                bids.append(last)
+            paths.append({'n': n, 'floor': a['floor'], 'payout': ep['payout'], 'actual': got / n, 'bids': bids, 'c_sec': c_sec, 's0': s0, 'ticker': ep['ticker']})
+        if not paths:
+            print('  no hunted position with a book, a close time and a result'); return
+        N = sum(p['n'] for p in paths)
+        def fee1(px, n): return taker_fee(n, px) / n
+        def run(d, gap, window):
+            vs, sold_n, sold_won, sold_px, sold_cnt = 0.0, 0.0, 0.0, 0.0, 0
+            for p in paths:
+                n, floor, pay, bids = p['n'], p['floor'], p['payout'], p['bids']
+                last_sec = p['c_sec'] - window
+                peak = max(floor, bids[0] or floor)
+                stop = max(floor, peak - d * TICK)
+                value = pay
+                for i, b in enumerate(bids):
+                    sec = p['s0'] + i
+                    if sec > last_sec: break
+                    if b is None: continue
+                    if b > peak + 1e-9: peak = b; stop = max(floor, peak - d * TICK)
+                    if b < stop - 1e-9:
+                        if gap == 'sell' or b >= stop - TICK - 1e-9:
+                            value = b - fee1(b, n); sold_n += n; sold_won += pay * n; sold_px += b * n; sold_cnt += 1
+                            break
+                vs += (value - pay) * n
+            return vs, sold_n, sold_won, sold_px, sold_cnt
+        f = lambda v: f"{v:+9.2f}"
+        orc = sum(((1.0 if p['payout'] >= 0.5 else max(0.0, max(x for x in p['bids'] if x is not None) - fee1(max(x for x in p['bids'] if x is not None), p['n']))) - p['payout']) * p['n'] for p in paths if any(x is not None for x in p['bids']))
+        act = sum((p['actual'] - p['payout']) * p['n'] for p in paths)
+        print(f"  hunted positions with a path: {len(paths)}, {N:.1f} contracts; held side won {100 * sum(p['payout'] * p['n'] for p in paths) / N:.0f}%")
+        print(f"  hindsight's best exit (hold the winners, sell the losers at their peak bid, fee paid): {f(orc)} against holding; the ratchet's actual result: {f(act)}; holding from the lock: {f(0.0)}")
+        print('  trailing stops on the same paths (trail d ticks under the running peak since the lock, never below the lock):')
+        print('    trail  gap    window   vs holding   hunts sold  contracts sold  won%  avg sale')
+        for window in (0, 120):
+            for gap in ('sell', 'wait'):
+                for d in (1, 2, 3, 4, 6, 8, 12, 20):
+                    vs, sn, sw, spx, sc = run(d, gap, window)
+                    print(f"    {d:5d}  {gap:5s}  {window:4d} s   {f(vs)}   {sc:10d}  {sn:14.1f}  {(100 * sw / sn) if sn else 0:4.0f}  {(spx / sn) if sn else 0:8.3f}")
+        print("  (gap 'sell' = sell at the bid whenever it is under the stop, as today; 'wait' = sell only when the bid is within a tick of the stop, otherwise"
+              "\n   hold on; the hunted position's actual result includes the model exit and settlement after the hunt ended)")
 
     try:
-        anatomy()
+        acts = anatomy()
+        oracle(acts or [])
     except Exception as e:  # a one-shot run on the server: the sections after this one still print
-        print(f"  (1c stopped: {type(e).__name__}: {e})")
+        print(f"  (1c/1d stopped: {type(e).__name__}: {e})")
 
     # -- 2. The cross's scoreboard against its fills.
     print('\n== 2. the cross\'s scoreboard (curve_exit events) against its fills')
