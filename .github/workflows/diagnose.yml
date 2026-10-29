@@ -203,6 +203,10 @@ jobs:
     if: inputs.ta_study == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 340
+    # The log's tail is posted as a comment on the dispatched commit (contents: write): the job-log host is not
+    # reachable from every place the study is read from.
+    permissions:
+      contents: write
     concurrency:
       group: ta-contract-study
       cancel-in-progress: false
@@ -210,6 +214,7 @@ jobs:
       TA_FROM: ${{ inputs.ta_from }}
       TA_TO: ${{ inputs.ta_to }}
       TA_ASSETS: ${{ inputs.ta_assets || 'BTC,ETH,SOL,XRP,DOGE' }}
+      NODE_OPTIONS: --max-old-space-size=12288
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -242,12 +247,24 @@ jobs:
             ta-study-${{ steps.key.outputs.coins }}-
             ta-study-
       - name: Run the study
+        id: study
         run: |
           set -euo pipefail
           args=(--assets "$TA_ASSETS")
           [ -n "$TA_FROM" ] && args+=(--from "$TA_FROM")
           [ -n "$TA_TO" ] && args+=(--to "$TA_TO")
-          node --import tsx research/taContractStudy.ts "${args[@]}" 2>&1 | grep -vE '^\s*$' | tail -400
+          set +e
+          node --import tsx research/taContractStudy.ts "${args[@]}" 2>&1 | grep -vE '^\s*$' | tee "$RUNNER_TEMP/ta-study.log" | tail -400
+          c=${PIPESTATUS[0]}
+          echo "exit=$c" >> "$GITHUB_OUTPUT"
+          exit $c
+      - name: Post the log's tail on the commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo "TA contract study run ${{ github.run_id }} (${TA_ASSETS}, ${TA_FROM:-auto}..${TA_TO:-auto}): exit ${{ steps.study.outputs.exit || 'none' }}"; echo; echo '```'; tail -c 60000 "$RUNNER_TEMP/ta-study.log" 2>/dev/null | tail -120; echo '```'; } > "$RUNNER_TEMP/comment.md"
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@"$RUNNER_TEMP/comment.md" --silent || echo "could not post the comment"
       - name: Keep the report
         if: always()
         uses: actions/upload-artifact@v4

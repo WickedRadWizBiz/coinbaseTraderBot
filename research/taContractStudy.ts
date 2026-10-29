@@ -4,7 +4,7 @@
 //
 //   node --import tsx research/taContractStudy.ts --from 2025-10-01 --to 2026-09-30 [--assets BTC,ETH,SOL,XRP,DOGE]
 //        [--history data/history] [--replay data/ta-study-replay] [--out research/out/ta-contract-study]
-//        [--sets base,base+ta,...] [--max-rows 200000] [--kalshi-budget-min 20] [--skip-download] [--skip-replay]
+//        [--sets base,base+ta,...] [--max-rows 80000] [--kalshi-budget-min 20] [--skip-download] [--skip-replay]
 //
 // 1. Binance's 1-minute spot bars for the assets and months (data.binance.vision, research/history/binanceVision.ts),
 //    and Kalshi's settled 15-minute contracts over the same days with their minute quotes (public API,
@@ -80,7 +80,8 @@ export async function taContractStudyMain(): Promise<StudyReport> {
   const to = arg('to', new Date(Date.now() - 2 * DAY).toISOString().slice(0, 10));
   const from = arg('from', new Date(Date.parse(to) - 120 * DAY).toISOString().slice(0, 10));
   const sets = arg('sets', STUDY_SETS.join(',')).split(',');
-  const maxRows = Number(arg('max-rows', '200000'));
+  // Rows in memory (about 14 KB each): past this, each contract's snapshots are thinned evenly (readDataset).
+  const maxRows = Number(arg('max-rows', '80000'));
   fs.mkdirSync(out, { recursive: true });
 
   // 1. History. The replay's first day needs the bars before it (volatility, the candle store's 300 closed bars).
@@ -112,7 +113,8 @@ export async function taContractStudyMain(): Promise<StudyReport> {
   try {
     await buildDataset(replay, Number(arg('every', '60')), 5e-5, {
       entryWindowOnly: true, includeSynthetic: true,
-      onRow: (r) => { buf.push(JSON.stringify(r) + '\n'); total++; if (r.synthetic) synth++; if (buf.length >= 2000) drain(); },
+      // The 15-minute Up/Down contracts only: the replay's hourly ladder is another question (and four times the rows).
+      onRow: (r) => { if ((r.kind ?? 'updown') !== 'updown') return; buf.push(JSON.stringify(r) + '\n'); total++; if (r.synthetic) synth++; if (buf.length >= 2000) drain(); },
     });
     drain();
   } finally { fs.closeSync(fd); }
