@@ -13,6 +13,8 @@
 //
 // It only reads statuses the modules already keep; it never changes anything.
 
+import type { ScoreboardStatus } from './scoreboard';
+
 export type ModuleState = 'on' | 'shadow' | 'off' | 'benched';
 
 export interface ModuleScore {
@@ -47,6 +49,8 @@ export interface LedgerInput {
   taHealth?: HealthReading | null;
   /** Component trials (bot/strategy/componentTrials.ts): mlp, snn, ta, rules; applied in paper only. */
   trials?: Partial<Record<'mlp' | 'snn' | 'ta' | 'rules', TrialReading>> | null;
+  /** The scoreboard: every price against the Kalshi market on settled windows (bot/health/scoreboard.ts). */
+  scoreboard?: ScoreboardStatus | null;
   snn?: { mode: string; alpha: number | null } | null;
   taNet?: { version: string; activeHeads: number } | null;
   ruleBook?: { passed: number } | null;
@@ -116,6 +120,15 @@ export function buildLedger(x: LedgerInput): ModuleRow[] {
     const h = x.modelHealth;
     const worse = h.pWorse !== null && h.pWorse < 0.05;
     rows.push({ module: 'pricing vs market', area: 'pricing', state: 'on', validated: null, score: { label: 'log loss better than the calibrated market a window', value: r4(h.advantage), n: h.windows }, flags: [...(worse ? ['significantly worse than the market price'] : []), ...driftFlag(h)] });
+  }
+  // The scoreboard: one row per price against the market (shadow: it changes nothing; validated = better with its CI).
+  for (const r of x.scoreboard?.rows ?? []) {
+    const c = r.vsMarket;
+    const flags: string[] = [];
+    if (c.verdict === 'worse') flags.push('worse than the market (95% CI)');
+    if (c.verdict === 'undecided' && c.ci) flags.push(`undecided: 95% CI [${c.ci[0]}, ${c.ci[1]}] over ${c.days} day(s)`);
+    if (r.vsRefined && r.vsRefined.verdict !== 'too few') flags.push(`vs ${r.vsRefined.baseline.replace('_', ' ')}: ${r.vsRefined.verdict} (${r.vsRefined.saved! >= 0 ? 'saves' : 'costs'} ${Math.abs(r.vsRefined.saved!).toFixed(4)})`);
+    rows.push({ module: `scoreboard: ${r.label}`, area: 'pricing', state: c.verdict === 'too few' ? 'off' : 'shadow', validated: c.verdict === 'too few' ? null : c.verdict === 'better', score: { label: 'log loss saved a window vs the Kalshi market', value: r4(c.saved), n: c.windows }, flags });
   }
   const snnOn = x.snn && x.snn.mode !== 'off';
   rows.push(trialRow('SNN', 'pricing', tr.snn, { state: !snnOn ? 'off' : x.snn!.mode === 'blend' && (x.snn!.alpha ?? 0) > 0 ? 'on' : 'shadow', validated: null, note: snnOn ? `mode ${x.snn!.mode}, alpha ${x.snn!.alpha ?? 0}` : undefined }, x.mode));

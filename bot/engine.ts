@@ -68,6 +68,7 @@ import { BalanceMonitor, fillCashDelta, settleCashDelta } from './vault/balanceM
 import type { Vault } from './vault/vault';
 import type { LiveLineReading, LiveLines } from './strategy/liveLine';
 import type { ComponentTrials, TrialName } from './strategy/componentTrials';
+import type { Scoreboard } from './health/scoreboard';
 import { stateWriteStats, writeJsonAtomic } from './util/persist';
 import type { KalshiCheck } from './recon/kalshiCheck';
 import type { SnnBlender } from './snn/blender';
@@ -330,6 +331,8 @@ export interface EngineDeps {
   /** The rule book, SNN and TA network trials: each scored against the price without it; paper uses the ones that pass
    *  (bot/strategy/componentTrials.ts). */
   trials?: ComponentTrials;
+  /** The scoreboard: every price against the Kalshi market on settled contracts (bot/health/scoreboard.ts). */
+  scoreboard?: Scoreboard;
   /** Cortex-like SNN (bot/snn): worker host, blender with earned alpha, conservative target scaler. */
   snn?: SnnFleet;
   /** Where the blender's settled (p_model, p_snn) history is saved (survives restarts). */
@@ -609,7 +612,7 @@ export class Engine {
       }
     });
     // Official results of every scanned market (traded or not): the SNN's settlement labels.
-    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => { this.d.taHealth?.onResult(e.ticker, e.result); this.d.trials?.onResult(e.ticker, e.result, this.now()); this.d.accuracyGate?.settle(e.ticker, e.result); this.snnSettle(e.ticker, e.result); });
+    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => { this.d.taHealth?.onResult(e.ticker, e.result); this.d.trials?.onResult(e.ticker, e.result, this.now()); this.d.scoreboard?.onResult(e.ticker, e.result); this.d.accuracyGate?.settle(e.ticker, e.result); this.snnSettle(e.ticker, e.result); });
     oms.on('order_error', (n: number, msg: string) => {
       if (n >= cfg.risk.maxConsecutiveOrderErrors) void kill.engage(`${n} consecutive order errors (last: ${msg})`, 'oms');
     });
@@ -954,6 +957,7 @@ export class Engine {
       // Does the TA network's drift improve the probabilities? (log loss with vs without it, per window)
       taHealth: this.d.taHealth?.status() ?? null,
       trials: this.d.trials ? { ...this.d.trials.status(), params: this.d.trials.p, appliesIn: 'paper and live' } : null,
+      scoreboard: this.d.scoreboard?.status() ?? null,
       cpu: this.cpu.status(),
       taEnsemble: activeTaNetEnsemble()?.status() ?? null,
       // Optimal f on the Kalshi pool's settled trades (cap on the stake per order, fraction of bankroll).
@@ -1631,8 +1635,8 @@ export class Engine {
     // The trial blends at its weight without the confidence factor: on Oct 21-24's decisions the confidence cut the
     // blend's gain (deploy/component_study.py: 0.25 x c saved 0.0014 of log loss a contract at p 0.09, 0.25 flat 0.0041
     // at p 0.02).
-    if (!this.d.trials || !Number.isFinite(s.p)) return { p };
-    return { p, a: this.d.trials.p.snnAlpha, pSnn: s.p };
+    if (!Number.isFinite(s.p)) return { p };
+    return { p, pSnn: s.p, ...(this.d.trials ? { a: this.d.trials.p.snnAlpha } : {}) };
   }
 
   /** Load the blender's saved history; it is discarded when it was recorded against another meta-model. */
@@ -1754,6 +1758,7 @@ export class Engine {
       modelHealth: this.d.modelHealth?.status() ?? null,
       taHealth: this.d.taHealth?.status() ?? null,
       trials: this.d.trials?.status() ?? null,
+      scoreboard: this.d.scoreboard?.status() ?? null,
       snn: { mode: snn.mode, alpha: snn.alpha ?? null },
       taNet: rt ? { version: rt.net.params.version, activeHeads: rt.net.active(true).length } : null,
       ruleBook: S.ruleBook ? { passed: activeRuleBook()?.passed().length ?? 0 } : null,
@@ -1781,6 +1786,9 @@ export class Engine {
       })(),
     });
   }
+
+  /** The scoreboard's standing: every price against the market (bot/health/scoreboard.ts). */
+  scoreboardStatus() { return this.d.scoreboard?.status() ?? null; }
 
   /** The market-state reading of every coin seen. */
   marketStates(now = this.now()): MarketStateReading[] {
@@ -2082,6 +2090,11 @@ export class Engine {
       if (snnP !== undefined) trials.record('snn', m.ticker, m.asset, m.closeTime, snnP, pred.p, now);
       if (taShiftFull !== undefined) trials.record('ta', m.ticker, m.asset, m.closeTime, clampP(pred.p + taShiftFull), pred.p, now);
       if (ruleShift !== undefined) trials.record('rules', m.ticker, m.asset, m.closeTime, clampP(pred.p + ruleShift), pred.p, now);
+    }
+    // The scoreboard: every price against the market, same cadence, traded or not (bot/health/scoreboard.ts).
+    if (reason && kindWindow && this.d.scoreboard) {
+      const clampP = (x: number) => Math.max(0.001, Math.min(0.999, x));
+      this.d.scoreboard.record(m.ticker, m.asset, m.closeTime, { market: pMarket, fair_value: fv.pYes, meta_model: pred.p, bot_price: pYes, snn: blended.pSnn, ta_tilt: taShiftFull !== undefined ? clampP(pred.p + taShiftFull) : undefined }, now);
     }
     const pos = oms.positions.get(m.ticker);
     const entrySidePrice = pos && pos.yes > 0 ? -pos.netCash / pos.yes : pos && pos.yes < 0 ? 1 - pos.netCash / -pos.yes : undefined;

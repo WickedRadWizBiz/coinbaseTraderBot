@@ -15,6 +15,7 @@ import type { AccuracyGateConfig } from './strategy/accuracyGate';
 import type { VaultConfig } from './vault/vault';
 import { DEFAULT_LIVE_LINE } from './strategy/liveLine';
 import { DEFAULT_TRIALS, TRIAL_NAMES, type TrialName, type TrialParams } from './strategy/componentTrials';
+import { DEFAULT_SCOREBOARD, type ScoreboardParams } from './health/scoreboard';
 import os from 'os';
 import path from 'path';
 
@@ -285,6 +286,9 @@ export interface Config {
    *  without them on every settled crypto contract; one that tests significantly better goes into paper's prices, one
    *  significantly worse comes out, never in live's (bot/strategy/componentTrials.ts). */
   trials: TrialParams;
+  /** SCOREBOARD (default on): every price (math fair value, meta-model, the bot's, the SNN's, the TA tilt) scored against the
+   *  Kalshi market on every settled crypto contract, paper and live alike (bot/health/scoreboard.ts). */
+  scoreboard: ScoreboardParams;
   host: string;
   port: number;
   /** DASHBOARD_PASSWORD: '' (default) = the dashboard opens without a login. */
@@ -1202,6 +1206,12 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         paperStart: (env.TRIAL_PAPER_START ?? DEFAULT_TRIALS.paperStart.join(',')).split(',').map((x) => x.trim()).filter((x): x is TrialName => (TRIAL_NAMES as string[]).includes(x)),
       };
     })(),
+    scoreboard: {
+      enabled: bool(env, 'SCOREBOARD', DEFAULT_SCOREBOARD.enabled),
+      keep: num(env, 'SCOREBOARD_KEEP', DEFAULT_SCOREBOARD.keep, 100, 20000),
+      snnAlpha: num(env, 'TRIAL_SNN_ALPHA', DEFAULT_SCOREBOARD.snnAlpha, 0, 1),
+      bootstrap: num(env, 'SCOREBOARD_BOOTSTRAP', DEFAULT_SCOREBOARD.bootstrap, 50, 5000),
+    },
     host,
     port: num(env, 'PORT', 3000, 1, 65535),
     dashboardPassword,
