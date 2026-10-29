@@ -17,6 +17,7 @@ import type { ExchangeFill, ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
 import type { IndexTracker } from './marketdata/indexTracker';
 import { dynamicEdge, dynamicEdgeOn } from './strategy/dynamicEdge';
+import { otherCoinsHeld, regimeScale, regimeScaleOn } from './strategy/regimeScale';
 import { compactReading, MarketState, observeMarket, type MarketStateReading } from './marketdata/marketState';
 import type { OrderBook } from './marketdata/orderBook';
 import { computeFeatureMap, FEATURE_SCHEMA_VERSION, FEATURES } from './model/featureEngine';
@@ -2067,7 +2068,10 @@ export class Engine {
     const entrySidePrice = pos && pos.yes > 0 ? -pos.netCash / pos.yes : pos && pos.yes < 0 ? 1 - pos.netCash / -pos.yes : undefined;
     const tier = this.tier();
     const rs = this.riskScale('crypto');
-    const kellyScale = rs.scale;
+    // The regime scale (market state: volatility, a recent change point, correlated coins held) joins the risk scale,
+    // computed the same way in the backtester.
+    const reg = regimeScale(cfg.strategy.regimeScale, mState, otherCoinsHeld(oms.positions.open(), m.asset, (t) => this.d.md.markets.get(t)?.asset));
+    const kellyScale = rs.scale * reg.mult;
     // Optimal f: the stake per order never above what the settled trade history supports (bootstrap 25th
     // percentile of the growth-optimal fraction); applies to the conviction-boosted size too.
     const fCap = this.kalshiOptimalF('crypto', now);
@@ -2239,7 +2243,7 @@ export class Engine {
     if (fixedUsd > 0) plan.notes.push(`paper size: ${this.paperSizing()}; the tier, break-even scale and optimal f size live`);
     else {
       plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
-      if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${rs.parts.join(', ')})`);
+      if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${[...rs.parts, ...(reg.mult !== 1 ? [`regime x${reg.mult.toFixed(2)}`] : [])].join(', ')})`);
       if (Number.isFinite(fCapUsd) && fCapUsd < tier.orderFrac * bankroll * sizeMult * kellyScale) plan.notes.push(`optimal f cap: $${fCapUsd.toFixed(2)} per order (${(100 * fCap.cap).toFixed(2)}% of bankroll, ${fCap.rep?.n ?? 0} settled trades)`);
     }
     for (const g of guards) plan.notes.push(g);
@@ -2343,7 +2347,7 @@ export class Engine {
         decisionId, ticker: m.ticker, model: model.id, spot: spot.value, strike, strikeSource: m.strikeSource, sigma: vol.sigmaPerSqrtSec, sigmaPricing,
         session: sess.key, sessionRisk: sessRisk,
         kind: m.kind, cap: terms.cap, cadence: reason ?? null, featureSchema: FEATURE_SCHEMA_VERSION, pMarket, pStd: pred.std, q: st.q,
-        tauSec, fv: fv.pYes, regime: fv.regime, pYes, ...(full ? { features, drivers: why.drivers } : {}), modelShift: why.shiftFromFairValue, bid: bid.price, ask: ask.price, position: st.position, fastMove, mstate: compactReading(mState), ...(dynamicEdgeOn(cfg.strategy.dynamicEdge) ? { edgeAdd: +dEdge.add.toFixed(4) } : {}),
+        tauSec, fv: fv.pYes, regime: fv.regime, pYes, ...(full ? { features, drivers: why.drivers } : {}), modelShift: why.shiftFromFairValue, bid: bid.price, ask: ask.price, position: st.position, fastMove, mstate: compactReading(mState), ...(dynamicEdgeOn(cfg.strategy.dynamicEdge) ? { edgeAdd: +dEdge.add.toFixed(4) } : {}), ...(regimeScaleOn(cfg.strategy.regimeScale) ? { regimeMult: +reg.mult.toFixed(3) } : {}),
         place: plan.place.map((p) => ({ side: p.side, price: p.price, count: p.count, purpose: p.purpose, edge: p.edge, why: p.why })),
         cancel: plan.cancel,
         // Why no entry could open here (paper's accuracy gate), so studies need not recompute it.

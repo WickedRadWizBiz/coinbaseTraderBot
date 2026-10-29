@@ -84,6 +84,11 @@ export const EVIDENCE_TRIALS: Array<Record<string, string>> = [
   { DYN_EDGE_FLOW: '0.02' },
   { DYN_EDGE_UNCERTAINTY: '0.5' },
   { DYN_EDGE_VOL: '0.02', DYN_EDGE_CHANGE: '0.03', DYN_EDGE_SPREAD: '0.5', DYN_EDGE_FLOW: '0.02', DYN_EDGE_UNCERTAINTY: '0.5' },
+  // The order size moved with the market state (bot/strategy/regimeScale.ts), one reading at a time, then together.
+  { REGIME_VOL_TARGET: '0.5' },
+  { REGIME_CHANGE_DERISK: '0.5' },
+  { REGIME_CORR_DERISK: '0.5' },
+  { REGIME_VOL_TARGET: '0.5', REGIME_CHANGE_DERISK: '0.5', REGIME_CORR_DERISK: '0.5' },
 ];
 
 export const MIN_HOLDOUT_TRADES = 50;

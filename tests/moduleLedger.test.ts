@@ -87,3 +87,8 @@ test('a market-state row per coin', () => {
   assert.equal(row(rows, 'market state ETH').state, 'off');
   assert.equal(row(rows, 'market state ETH').flags.length, 2);
 });
+
+test('drift flags on the pricing rows', () => {
+  const rows = buildLedger(base({ modelHealth: { windows: 200, advantage: 0.001, pWorse: 0.5, drift: { alarm: true, since: Date.UTC(2026, 9, 29, 6) } } }));
+  assert.ok(row(rows, 'pricing vs market').flags.some((f) => f.startsWith('drift: scoring worse since 2026-10-29T06:00')));
+});

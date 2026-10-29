@@ -33,7 +33,7 @@ export interface ModuleRow {
 }
 
 export interface TrialReading { state: 'testing' | 'on' | 'off'; applied: boolean; windows: number; advantage: number | null; pWorse: number | null }
-export interface HealthReading { windows: number; advantage: number | null; pWorse: number | null }
+export interface HealthReading { windows: number; advantage: number | null; pWorse: number | null; drift?: { alarm: boolean; since: number | null } }
 
 /** What the ledger reads, gathered by the engine from the modules' own statuses (missing = the part is not loaded). */
 export interface LedgerInput {
@@ -77,6 +77,8 @@ export interface LedgerInput {
   marketState?: Record<string, { rv1h: number | null; changeProb: number | null; spread: number | null }> | null;
 }
 
+const driftFlag = (h: HealthReading | null | undefined): string[] => (h?.drift?.alarm ? [`drift: scoring worse since ${h.drift.since ? new Date(h.drift.since).toISOString().slice(0, 16) : 'recently'}`] : []);
+
 const r4 = (x: number | null | undefined): number | null => (x === null || x === undefined || !Number.isFinite(x) ? null : +x.toFixed(4));
 
 function trialRow(module: string, area: ModuleRow['area'], t: TrialReading | undefined, base: Omit<ModuleRow, 'module' | 'area' | 'score' | 'flags' | 'state'> & { state: ModuleState; flags?: string[] }, mode: LedgerInput['mode']): ModuleRow {
@@ -102,12 +104,13 @@ export function buildLedger(x: LedgerInput): ModuleRow[] {
   if (x.modelHealth) {
     const h = x.modelHealth;
     const worse = h.pWorse !== null && h.pWorse < 0.05;
-    rows.push({ module: 'pricing vs market', area: 'pricing', state: 'on', validated: null, score: { label: 'log loss better than the calibrated market a window', value: r4(h.advantage), n: h.windows }, flags: worse ? ['significantly worse than the market price'] : [] });
+    rows.push({ module: 'pricing vs market', area: 'pricing', state: 'on', validated: null, score: { label: 'log loss better than the calibrated market a window', value: r4(h.advantage), n: h.windows }, flags: [...(worse ? ['significantly worse than the market price'] : []), ...driftFlag(h)] });
   }
   const snnOn = x.snn && x.snn.mode !== 'off';
   rows.push(trialRow('SNN', 'pricing', tr.snn, { state: !snnOn ? 'off' : x.snn!.mode === 'blend' && (x.snn!.alpha ?? 0) > 0 ? 'on' : 'shadow', validated: null, note: snnOn ? `mode ${x.snn!.mode}, alpha ${x.snn!.alpha ?? 0}` : undefined }, x.mode));
   const ta = trialRow('TA network', 'pricing', tr.ta, { state: x.taNet ? (x.taNet.activeHeads > 0 ? 'on' : 'shadow') : 'off', validated: x.taNet ? x.taNet.activeHeads > 0 : null, note: x.taNet ? `${x.taNet.version}, ${x.taNet.activeHeads} validated heads` : undefined }, x.mode);
   if (x.taHealth && x.taHealth.pWorse !== null && x.taHealth.pWorse < 0.05) ta.flags.push('its drift makes prices significantly worse');
+  ta.flags.push(...driftFlag(x.taHealth));
   rows.push(ta);
   rows.push(trialRow('rule book', 'pricing', tr.rules, { state: x.ruleBook && x.ruleBook.passed > 0 ? 'on' : 'off', validated: x.ruleBook ? x.ruleBook.passed > 0 : null }, x.mode));
   if (x.volModel) rows.push({ module: 'volatility forecast', area: 'pricing', state: x.volModel.applied ? 'on' : x.volModel.validated ? 'off' : 'shadow', validated: x.volModel.validated, score: { label: 'held-out QLIKE improvement', value: r4(x.volModel.improvement), n: 0 }, flags: [] });

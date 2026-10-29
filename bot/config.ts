@@ -3,6 +3,7 @@
 // parameter means a reviewed commit and a redeploy.
 
 import type { DynamicEdgeParams } from './strategy/dynamicEdge';
+import type { RegimeScaleParams } from './strategy/regimeScale';
 import fs from 'fs';
 import { parseSessionRisk, type SessionRiskProfile } from './model/sessionRisk';
 import { DEFAULT_PROBATION, type ProbationParams } from './risk/probation';
@@ -79,6 +80,8 @@ export interface StrategyConfig {
   fastMoveWindowSec: number;
   /** Entry edge moved with the market state (bot/strategy/dynamicEdge.ts; DYN_EDGE_*, all 0 = static edge). */
   dynamicEdge: DynamicEdgeParams;
+  /** Order size moved with the market state (bot/strategy/regimeScale.ts; REGIME_*, all 0 = no change). */
+  regimeScale: RegimeScaleParams;
   /** Resting orders expire on the exchange after this many seconds (dead-man switch); a quote still wanted is placed again. */
   orderTtlSec: number;
   /** Exit mode. hold = Mode A (ride to settlement, no exit fee); fair_value = model exit only;
@@ -1000,6 +1003,13 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       uncertainty: num(env, 'DYN_EDGE_UNCERTAINTY', 0, 0, 2),
       maxUp: num(env, 'DYN_EDGE_MAX_UP', 0.05, 0, 0.3),
       maxDown: num(env, 'DYN_EDGE_MAX_DOWN', 0.01, 0, 0.1),
+    },
+    regimeScale: {
+      volTarget: num(env, 'REGIME_VOL_TARGET', 0, 0, 2),
+      changeDerisk: num(env, 'REGIME_CHANGE_DERISK', 0, 0, 1),
+      corrDerisk: num(env, 'REGIME_CORR_DERISK', 0, 0, 2),
+      min: num(env, 'REGIME_SCALE_MIN', 0.25, 0, 1),
+      max: num(env, 'REGIME_SCALE_MAX', 1, 1, 2),
     },
     // 20 s: a quote the bot stops tending is gone from the exchange within 20 s. Re-placing the ones still wanted costs
     // orders, which RISK_MAX_ORDERS_PER_MIN (120) now has room for.
