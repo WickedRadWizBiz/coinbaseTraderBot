@@ -73,6 +73,7 @@ import { AccuracyGate, type AccuracyGateConfig } from '../bot/strategy/accuracyG
 import { TakeProfitBench } from '../bot/strategy/takeProfitBench';
 import { compactReading, MarketState, observeMarket } from '../bot/marketdata/marketState';
 import { dynamicEdge } from '../bot/strategy/dynamicEdge';
+import { otherCoinsHeld, regimeScale } from '../bot/strategy/regimeScale';
 import { gatePasses, type ProbationParams } from '../bot/risk/probation';
 import { bootstrapMeanCi, deflatedSharpe, pbo, rng, sharpe } from './stats';
 
@@ -709,7 +710,9 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       // As the engine sizes (Engine.riskScale): full size at or above break-even (the starting equity, raised by the
       // guard's ratchets), down to a quarter at a net loss of the tier's ddScaleAt, never zero.
       guard.update(bankroll, st.now, bankroll, tier.weeklyLossPause);
-      const sizeScale = guard.sizeScale(bankroll, tier.ddScaleAt);
+      // The regime scale joins the loss-aware scale exactly as in the engine (bot/strategy/regimeScale.ts).
+      const regMult = regimeScale(strategy.regimeScale, mRead, otherCoinsHeld(pos.open(), m.asset, (t) => st.markets.get(t)?.asset)).mult;
+      const sizeScale = guard.sizeScale(bankroll, tier.ddScaleAt) * regMult;
       res.sizeScaleMin = Math.min(res.sizeScaleMin ?? 1, sizeScale);
       // Paper: about orderFrac of the bankroll an order (bot/engine.ts paperOrderUsd), the caps widened to fit it.
       const fixedUsd = !opts.paper ? 0 : opts.paper.orderFrac > 0 ? (bankroll > 0 ? Math.round(opts.paper.orderFrac * bankroll * 100) / 100 : 0) : Math.max(0, opts.paper.orderUsd);
