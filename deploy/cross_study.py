@@ -253,6 +253,275 @@ def selftest(path):
     print(json.dumps({'readings': out, 'fees': fees, 'line': line}))
 
 
+def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee):
+    """1e. Information-anchored ratchets on the recorded paths: the price trail with guards (fair value, spot momentum, the
+    book's top), trails on the spot-implied fair value, resting (maker, fee-free) profit sales, and the same from entry
+    with the policy's own lock. Dollars against holding the same contracts to settlement."""
+    import math, bisect, collections
+    print('\n== 1e. ratchet lab: what the ratchet would need (dollars against holding the same contracts to settlement)')
+    TICK = 0.01
+    W = 60  # SETTLEMENT_AVG_SEC
+
+    def ncdf(z): return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+    def p_above(S, K, v):
+        if not (v > 1e-16): return 1.0 if S >= K else 0.0
+        return ncdf((math.log(S / K) - 0.5 * v) / math.sqrt(v))
+
+    strikes = {}
+
+    def strike_of(ep):
+        t = ep['ticker']
+        if t in strikes: return strikes[t]
+        tm = terms.get(t) or {}
+        K, cap, kind = tm.get('strike'), tm.get('cap'), tm.get('kind')
+        if not (K and K > 0) and tm.get('openTime') and ep.get('asset'):
+            o = int(tm['openTime'] // 1000)
+            for s in range(o, o + 120):
+                S = index_at(ep['asset'], s)
+                if S: K = S; break
+        strikes[t] = ((K if K and K > 0 else None), (cap if cap and cap > 0 else None), kind)
+        return strikes[t]
+
+    def side_fv(ep, sec, c_sec):
+        K, cap, kind = strike_of(ep)
+        a = ep.get('asset')
+        S = index_at(a, sec) if a else None
+        sig = sigma_cached(a, sec) if a else None
+        if K is None or S is None or not sig: return None
+        tau = max(0.0, c_sec - sec)
+        v = sig * sig * max(tau - 2.0 * W / 3.0, 1e-6) if tau > W else sig * sig * max(tau, 1e-6) / 3.0
+        if kind == 'less':
+            p = 1.0 - p_above(S, cap if cap else K, v)
+        else:
+            p = p_above(S, K, v)
+            if cap: p -= p_above(S, cap, v)
+        p = min(max(p, 1e-4), 1 - 1e-4)
+        return p if ep['sign'] > 0 else 1.0 - p
+
+    def side_top(ep, sec):
+        tp = top_at(ep['ticker'], sec)
+        if not tp: return None
+        if ep['sign'] > 0:
+            return (tp[1], tp[2], tp[3], tp[4])
+        b = None if tp[3] is None else round(1 - tp[3], 4)
+        a = None if tp[1] is None else round(1 - tp[1], 4)
+        return (b, tp[4], a, tp[2])
+
+    def fee1(px, n): return taker_fee(n, px) / n if n > 0 and 0 < px < 1 else 0.0
+
+    def build_path(ep, s0, c_sec):
+        """Per-second series from s0 to c_sec: side bid, its size, side ask, its size, spot-implied side fair value, spot."""
+        bids, bsz, asks, asz, fvs, spots = [], [], [], [], [], []
+        lb = la = lbs = las = None
+        a = ep.get('asset')
+        for sec in range(s0, c_sec + 1):
+            tp = side_top(ep, sec)
+            if tp:
+                if tp[0] is not None and 0 < tp[0] < 1: lb, lbs = tp[0], tp[1]
+                if tp[2] is not None and 0 < tp[2] < 1: la, las = tp[2], tp[3]
+            bids.append(lb); bsz.append(lbs); asks.append(la); asz.append(las)
+            fvs.append(side_fv(ep, sec, c_sec))
+            spots.append(index_at(a, sec) if a else None)
+        return {'bids': bids, 'bsz': bsz, 'asks': asks, 'asz': asz, 'fv': fvs, 'spot': spots, 's0': s0}
+
+    def spot_with(path, i, ep, sig):
+        """Spot moved with the held side over the last 60 s by more than a quarter of its noise: True / False / None."""
+        s1 = path['spot'][i]
+        s0 = path['spot'][i - 60] if i >= 60 else index_at(ep.get('asset'), path['s0'] + i - 60)
+        if s1 is None or s0 is None or not sig or s0 <= 0: return None
+        K, cap, kind = strike_of(ep)
+        d = -1 if kind == 'less' else 1
+        ret = math.log(s1 / s0)
+        if abs(ret) < 0.25 * sig * math.sqrt(60): return False
+        return (1 if ret > 0 else -1) * d * ep['sign'] > 0
+
+    # ---- the simulator ---------------------------------------------------------------------------------------------
+    def sim(p, lock, trail, sale, guard, window, extra=None):
+        """Run one policy on a path. Returns (value a contract, sold n, sale px, sale sec, armed) with value=None if never sold.
+        lock: ('armed',) | ('bid', T) | ('fv', T) | ('both', T).  trail: ('none',) | ('bid', d ticks) | ('fv', D).
+        sale: ('taker',) | ('rest', k ticks, 'fixed' | 'fv').  guard: None | G (a stop sale only when bid >= fv - G).
+        extra: None | 'spot' (hold when spot still moves with us) | 'book' (hold when the top bid is 3x the top ask)."""
+        n, pay, bids, fv = p['n'], p['payout'], p['bids'], p['fv']
+        last_taker = p['c_sec'] - window
+        armed = lock[0] == 'armed'
+        floor = p.get('floor')
+        b0 = p['b0']; q0 = p['q0']
+        peak = None; qpeak = None; stop = None; qstop = None; L = None
+        for i, b in enumerate(bids):
+            sec = p['s0'] + i
+            q = fv[i]
+            if b is None: continue
+            if not armed:
+                ok_b = b0 is not None and b >= b0 + lock[1] - 1e-9
+                ok_q = q is not None and q0 is not None and q >= q0 + lock[1] - 1e-9
+                if (lock[0] == 'bid' and ok_b) or (lock[0] == 'fv' and ok_q) or (lock[0] == 'both' and ok_b and ok_q):
+                    armed = True
+                    floor = b
+                else:
+                    continue
+            if peak is None: peak = max(b, floor or 0.0)
+            if b > peak + 1e-9: peak = b
+            if q is not None and (qpeak is None or q > qpeak): qpeak = q
+            if trail[0] == 'bid': stop = max(floor or 0.0, peak - trail[1] * TICK)
+            elif trail[0] == 'fv' and qpeak is not None: qstop = qpeak - trail[1]
+            # the resting sale: an ask at L, lifted (no fee) when the bid reaches it
+            if sale[0] == 'rest':
+                if sale[2] == 'fixed':
+                    if L is None: L = round(max(b, q or 0.0, floor or 0.0) + sale[1] * TICK, 4)
+                else:
+                    cand = round((q if q is not None else b) + sale[1] * TICK, 4)
+                    if L is None or cand > L: L = cand
+                if L is not None and b >= L - 1e-9:
+                    return (L, n, L, sec, True)
+            # the stop
+            trig = False
+            if trail[0] == 'bid' and stop is not None and b < stop - 1e-9: trig = True
+            if trail[0] == 'fv' and qstop is not None and q is not None and q < qstop - 1e-9: trig = True
+            if trig and sec <= last_taker:
+                if guard is not None and q is not None and b < q - guard - 1e-9: continue
+                if extra == 'spot':
+                    w = spot_with(p['path'], i, p['ep'], p['sig'])
+                    if w: continue
+                if extra == 'book':
+                    bs, as_ = p['path']['bsz'][i], p['path']['asz'][i]
+                    if bs and as_ and bs >= 3 * as_: continue
+                return (b - fee1(b, n), n, b, sec, True)
+        return (None, 0.0, None, None, armed)
+
+    def table(paths, rules, title, with_actual):
+        if not paths:
+            print(f'  {title}: no position with a path'); return
+        N = sum(p['n'] for p in paths)
+        won = sum(p['payout'] * p['n'] for p in paths) / N
+        orc = 0.0
+        for p in paths:
+            pk = max((x for x in p['bids'] if x is not None), default=None)
+            if p['payout'] < 0.5 and pk is not None: orc += max(0.0, pk - fee1(pk, p['n'])) * p['n']
+        act = sum((p['actual'] - p['payout']) * p['n'] for p in paths) if with_actual else None
+        print(f'  {title}: {len(paths)} positions, {N:.1f} contracts, held side won {100 * won:.0f}%; hindsight (hold winners, sell losers at the peak) {orc:+.2f}'
+              + (f"; the ratchet's actual {act:+.2f}" if act is not None else ''))
+        print('    rule                                                   vs holding   sold  contracts  won%  avg sale  avg fv@sale  armed')
+        out = {}
+        for name, (lock, trail, sale, guard, window, extra) in rules:
+            vs = sold_n = sold_won = sold_px = sold_fv = 0.0; sold_cnt = 0; armed_cnt = 0; fvn = 0
+            for p in paths:
+                v, sn, px, sec, armed = sim(p, lock, trail, sale, guard, window, extra)
+                armed_cnt += 1 if armed else 0
+                if v is None: continue
+                vs += (v - p['payout']) * sn; sold_n += sn; sold_won += p['payout'] * sn; sold_px += px * sn; sold_cnt += 1
+                q = p['fv'][sec - p['s0']]
+                if q is not None: sold_fv += q * sn; fvn += sn
+            out[name] = vs
+            print(f"    {name:54s} {vs:+10.2f}  {sold_cnt:5d}  {sold_n:9.1f}  {(100 * sold_won / sold_n) if sold_n else 0:4.0f}  {(sold_px / sold_n) if sold_n else 0:8.3f}  {(sold_fv / fvn) if fvn else 0:11.3f}  {armed_cnt:5d}")
+        return out
+
+    # ---- A. from the actual locks (the same positions as 1d) -------------------------------------------------------
+    pathsA = []
+    for a in acts:
+        ep = a['ep']
+        if ep['payout'] is None or not ep.get('close_ms') or not tops.get(ep['ticker']) or a['floor'] is None: continue
+        c_sec = ep['close_ms'] // 1000; s0 = a['act_ms'] // 1000
+        if c_sec <= s0 + 1: continue
+        en = sum(e['n'] for e in ep['entries'] if e['ms'] <= a['act_ms']); ex = sum(x['n'] for x in ep['exits'] if x['ms'] < a['act_ms'])
+        n = round(en - ex, 2)
+        if n <= 0: continue
+        left, got = n, 0.0
+        for x in sorted(ep['exits'], key=lambda x: x['ms']):
+            if x['ms'] < a['act_ms'] or left <= 1e-9: continue
+            k = min(left, x['n']); got += k * x['px'] - x['fee'] * k / x['n']; left -= k
+        got += left * ep['payout']
+        path = build_path(ep, s0, c_sec)
+        b0 = next((x for x in path['bids'] if x is not None), None)
+        q0 = next((x for x in path['fv'] if x is not None), None)
+        pathsA.append({'n': n, 'floor': a['floor'], 'payout': ep['payout'], 'actual': got / n, 'bids': path['bids'], 'fv': path['fv'], 'path': path,
+                       'c_sec': c_sec, 's0': s0, 'b0': b0, 'q0': q0, 'ep': ep, 'sig': sigma_cached(ep.get('asset'), s0) if ep.get('asset') else None})
+    have_fv = sum(1 for p in pathsA if p['q0'] is not None)
+    print(f'  spot-implied fair value available on {have_fv} of {len(pathsA)} hunted positions (strike from the market record or the index at the open)')
+    R = lambda lock, trail, sale, guard=None, window=0, extra=None: (lock, trail, sale, guard, window, extra)
+    A = ('armed',)
+    rulesA = [
+        ('bid trail 1 tick (as 1d)', R(A, ('bid', 1), ('taker',))),
+        ('bid trail 2 ticks', R(A, ('bid', 2), ('taker',))),
+        ('bid trail 1, guard: bid >= fv', R(A, ('bid', 1), ('taker',), 0.0)),
+        ('bid trail 1, guard: bid >= fv - 2c', R(A, ('bid', 1), ('taker',), 0.02)),
+        ('bid trail 1, guard: bid >= fv - 5c', R(A, ('bid', 1), ('taker',), 0.05)),
+        ('bid trail 1, hold while spot moves with us', R(A, ('bid', 1), ('taker',), None, 0, 'spot')),
+        ('bid trail 1, hold on a 3x top-bid wall', R(A, ('bid', 1), ('taker',), None, 0, 'book')),
+        ('bid trail 1, no sale in the last 300 s', R(A, ('bid', 1), ('taker',), None, 300)),
+        ('fv trail 3 pts', R(A, ('fv', 0.03), ('taker',))),
+        ('fv trail 5 pts', R(A, ('fv', 0.05), ('taker',))),
+        ('fv trail 5 pts, guard: bid >= fv - 2c', R(A, ('fv', 0.05), ('taker',), 0.02)),
+        ('fv trail 8 pts', R(A, ('fv', 0.08), ('taker',))),
+        ('fv trail 8 pts, guard: bid >= fv - 2c', R(A, ('fv', 0.08), ('taker',), 0.02)),
+        ('fv trail 12 pts', R(A, ('fv', 0.12), ('taker',))),
+        ('rest an ask at lock + 1 tick (no fee)', R(A, ('none',), ('rest', 1, 'fixed'))),
+        ('rest an ask at lock + 2 ticks', R(A, ('none',), ('rest', 2, 'fixed'))),
+        ('rest an ask at lock + 3 ticks', R(A, ('none',), ('rest', 3, 'fixed'))),
+        ('rest an ask at lock + 5 ticks', R(A, ('none',), ('rest', 5, 'fixed'))),
+        ('rest an ask at fv + 2c, ratcheting up', R(A, ('none',), ('rest', 2, 'fv'))),
+        ('rest an ask at fv + 3c, ratcheting up', R(A, ('none',), ('rest', 3, 'fv'))),
+        ('rest an ask at fv + 5c, ratcheting up', R(A, ('none',), ('rest', 5, 'fv'))),
+        ('rest lock + 2 & bid trail 1', R(A, ('bid', 1), ('rest', 2, 'fixed'))),
+        ('rest lock + 3 & bid trail 1, guard fv - 2c', R(A, ('bid', 1), ('rest', 3, 'fixed'), 0.02)),
+        ('rest fv + 3 & fv trail 8, guard fv - 2c', R(A, ('fv', 0.08), ('rest', 3, 'fv'), 0.02)),
+        ('rest lock + 3 & fv trail 8', R(A, ('fv', 0.08), ('rest', 3, 'fixed'))),
+    ]
+    table(pathsA, rulesA, 'A. from the actual locks', True)
+
+    # ---- B. from entry on every position, with the policy's own lock -------------------------------------------------
+    pathsB = []
+    for ep in episodes:
+        if ep['payout'] is None or not ep.get('close_ms') or not tops.get(ep['ticker']) or not ep['entries']: continue
+        c_sec = ep['close_ms'] // 1000
+        ents = sorted(ep['entries'], key=lambda e: e['ms'])
+        s0 = ents[0]['ms'] // 1000 + 1
+        if c_sec <= s0 + 1: continue
+        n = round(sum(e['n'] for e in ents), 2)
+        if n <= 0: continue
+        cost = sum(e['n'] * e['px'] for e in ents) / n
+        path = build_path(ep, s0, c_sec)
+        q0 = next((x for x in path['fv'] if x is not None), None)
+        pathsB.append({'n': n, 'floor': None, 'payout': ep['payout'], 'actual': None, 'bids': path['bids'], 'fv': path['fv'], 'path': path,
+                       'c_sec': c_sec, 's0': s0, 'b0': cost, 'q0': q0, 'ep': ep, 'sig': sigma_cached(ep.get('asset'), s0) if ep.get('asset') else None})
+    print(f'  (B: the lock is the policy\'s own: \'bid\' = the side bid 2c over the average entry price, \'fv\' = the spot-implied fair value 3 pts over its value at entry)')
+    for lname, lock in (('lock: bid +2c', ('bid', 0.02)), ('lock: fv +3 pts', ('fv', 0.03)), ('lock: bid +2c and fv +3 pts', ('both', 0.02))):
+        rulesB = [
+            (f'{lname}; bid trail 1', R(lock, ('bid', 1), ('taker',))),
+            (f'{lname}; bid trail 1, guard fv - 2c', R(lock, ('bid', 1), ('taker',), 0.02)),
+            (f'{lname}; fv trail 5', R(lock, ('fv', 0.05), ('taker',))),
+            (f'{lname}; fv trail 8, guard fv - 2c', R(lock, ('fv', 0.08), ('taker',), 0.02)),
+            (f'{lname}; rest lock + 2', R(lock, ('none',), ('rest', 2, 'fixed'))),
+            (f'{lname}; rest lock + 3', R(lock, ('none',), ('rest', 3, 'fixed'))),
+            (f'{lname}; rest fv + 3, ratcheting', R(lock, ('none',), ('rest', 3, 'fv'))),
+            (f'{lname}; rest lock + 2 & bid trail 1', R(lock, ('bid', 1), ('rest', 2, 'fixed'))),
+            (f'{lname}; rest fv + 3 & fv trail 8, guard fv - 2c', R(lock, ('fv', 0.08), ('rest', 3, 'fv'), 0.02)),
+        ]
+        table(pathsB, rulesB, f'B. from entry, {lname}', False)
+
+    # ---- C. what separates the right stop sales from the wrong ones (at the 1-tick trail's trigger, from the locks) --
+    print('  C. at the 1-tick trail\'s trigger (from the actual locks): the sale against settlement by what the rule could see')
+    buckets = collections.defaultdict(lambda: [0, 0.0, 0.0, 0.0, 0.0])  # hunts, contracts, won, px, sell-vs-hold $
+    for p in pathsA:
+        v, sn, px, sec, armed = sim(p, A, ('bid', 1), ('taker',), None, 0, None)
+        if v is None: continue
+        i = sec - p['s0']; q = p['fv'][i]
+        tau = p['c_sec'] - sec
+        keys = []
+        keys.append(('fair value vs bid', 'no fv' if q is None else ('bid < fv - 5c' if px < q - 0.05 else 'bid < fv - 2c' if px < q - 0.02 else 'bid >= fv + 2c' if px >= q + 0.02 else 'within 2c')))
+        w = spot_with(p['path'], i, p['ep'], p['sig'])
+        keys.append(('spot last 60 s', 'n/a' if w is None else ('with us' if w else 'flat or against')))
+        keys.append(('time to close', '< 120 s' if tau < 120 else '120-300 s' if tau < 300 else '300-600 s' if tau < 600 else '> 600 s'))
+        bs, as_ = p['path']['bsz'][i], p['path']['asz'][i]
+        keys.append(('top of book', 'n/a' if not bs or not as_ else ('bid 3x ask' if bs >= 3 * as_ else 'ask 3x bid' if as_ >= 3 * bs else 'balanced')))
+        keys.append(('sale price', '< 0.30' if px < 0.3 else '0.30-0.50' if px < 0.5 else '0.50-0.70' if px < 0.7 else '>= 0.70'))
+        for k in keys:
+            r = buckets[k]; r[0] += 1; r[1] += sn; r[2] += p['payout'] * sn; r[3] += px * sn; r[4] += (v - p['payout']) * sn
+    for (feat, val), r in sorted(buckets.items()):
+        print(f"    {feat:18s} {val:18s} hunts {r[0]:4d}  contracts {r[1]:8.1f}  won {100 * r[2] / r[1] if r[1] else 0:4.0f}%  sale {r[3] / r[1] if r[1] else 0:.3f}  selling vs holding ${r[4]:+8.2f}")
+    print("  (a bucket whose won% sits well under its sale price is where the stop sale was right; the fair value is the spot-implied one, the bot's math price)")
+
+
 # ---- The study --------------------------------------------------------------------------------------------------------
 
 STAND_DOWN_SEC = 120          # SINUOUS_REST_STAND_DOWN_SEC: no cross in the last two minutes
@@ -856,6 +1125,7 @@ def main():
     try:
         acts = anatomy()
         oracle(acts or [])
+        ratchet_lab(acts or [], episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee)
     except Exception as e:  # a one-shot run on the server: the sections after this one still print
         print(f"  (1c/1d stopped: {type(e).__name__}: {e})")
 
