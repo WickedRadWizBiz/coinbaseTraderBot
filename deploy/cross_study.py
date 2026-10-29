@@ -309,6 +309,14 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         return (b, tp[4], a, tp[2])
 
     def fee1(px, n): return taker_fee(n, px) / n if n > 0 and 0 < px < 1 else 0.0
+    def cost_of(entries, until_ms):
+        """Average entry cost a contract, fee in, of the fills up to until_ms (Steven's accounting: sold in profit or not)."""
+        ce = [e for e in entries if e['ms'] <= until_ms]
+        k = sum(e['n'] for e in ce)
+        return (sum(e['n'] * e['px'] + e['fee'] for e in ce) / k) if k > 0 else None
+    def market_len(p):
+        t = (p.get('ep') or {}).get('ticker') or p.get('ticker') or ''
+        return 900.0 if '15M' in t else 3600.0
 
     trade_secs = {t: [x[0] for x in v] for t, v in (trades or {}).items()}
 
@@ -370,7 +378,9 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         ask at the first top-of-book sell wall (ask size >= ratio x bid size and >= the position) that pays fv + m0, filled when
         the bid reaches it (no fee)."""
         n, pay, bids, fv = p['n'], p['payout'], p['bids'], p['fv']
-        last_taker = p['c_sec'] - window
+        # window: no taker sale in the last `window` seconds; ('frac', f): none in the last f of the market's length (Steven's
+        # risk rule, Oct 29: get out in profit at the dip unless less than 10% of the window is left, then let it settle).
+        last_taker = p['c_sec'] - (window[1] * market_len(p) if isinstance(window, tuple) else window)
         armed = lock[0] == 'armed'
         confirm = (extra or {}).get('confirm', 0) if isinstance(extra, dict) else 0
         first_only = bool((extra or {}).get('first_only')) if isinstance(extra, dict) else False
@@ -449,6 +459,11 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                     if q is None or b < q + thr - 1e-9:
                         if first_only: return (None, 0.0, None, None, True)
                         continue
+                elif isinstance(guard, tuple) and guard[0] == 'profit':
+                    c = p.get('cost')
+                    if c is not None and b - fee1(b, n) <= c + 1e-9:
+                        if first_only: return (None, 0.0, None, None, True)
+                        continue
                 elif guard is not None and q is not None and b < q - guard - 1e-9:
                     if first_only: return (None, 0.0, None, None, True)
                     continue
@@ -474,21 +489,31 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             pk = max((x for x in p['bids'] if x is not None), default=None)
             if p['payout'] < 0.5 and pk is not None: orc += max(0.0, pk - fee1(pk, p['n'])) * p['n']
         act = sum((p['actual'] - p['payout']) * p['n'] for p in paths) if with_actual else None
+        costed = [p for p in paths if p.get('cost') is not None]
+        hold_real = sum((p['payout'] - p['cost']) * p['n'] for p in costed)
         print(f'  {title}: {len(paths)} positions, {N:.1f} contracts, held side won {100 * won:.0f}%; hindsight (hold winners, sell losers at the peak) {orc:+.2f}'
-              + (f"; the ratchet's actual {act:+.2f}" if act is not None else ''))
-        print('    rule                                                   vs holding   sold  contracts  won%  avg sale  avg fv@sale  armed')
+              + (f"; the ratchet's actual {act:+.2f}" if act is not None else '')
+              + f"; holding every one realizes {hold_real:+.2f} against entry cost (fee in) on {len(costed)} costed positions")
+        print('    rule                                                   vs holding   sold  contracts  won%  avg sale  avg fv@sale  armed  realized $  held  sold in profit%')
         out = {}
         for name, (lock, trail, sale, guard, window, extra) in rules:
-            vs = sold_n = sold_won = sold_px = sold_fv = 0.0; sold_cnt = 0; armed_cnt = 0; fvn = 0
+            vs = sold_n = sold_won = sold_px = sold_fv = real = 0.0; sold_cnt = armed_cnt = fvn = held_cnt = prof_cnt = 0
             for p in paths:
                 v, sn, px, sec, armed = sim(p, lock, trail, sale, guard, window, extra)
                 armed_cnt += 1 if armed else 0
-                if v is None: continue
+                c = p.get('cost')
+                if v is None:
+                    held_cnt += 1
+                    if c is not None: real += (p['payout'] - c) * p['n']
+                    continue
+                if c is not None:
+                    real += (v - c) * sn + (p['payout'] - c) * (p['n'] - sn)
+                    if v > c + 1e-9: prof_cnt += 1
                 vs += (v - p['payout']) * sn; sold_n += sn; sold_won += p['payout'] * sn; sold_px += px * sn; sold_cnt += 1
                 q = p['fv'][sec - p['s0']]
                 if q is not None: sold_fv += q * sn; fvn += sn
             out[name] = vs
-            print(f"    {name:54s} {vs:+10.2f}  {sold_cnt:5d}  {sold_n:9.1f}  {(100 * sold_won / sold_n) if sold_n else 0:4.0f}  {(sold_px / sold_n) if sold_n else 0:8.3f}  {(sold_fv / fvn) if fvn else 0:11.3f}  {armed_cnt:5d}")
+            print(f"    {name:54s} {vs:+10.2f}  {sold_cnt:5d}  {sold_n:9.1f}  {(100 * sold_won / sold_n) if sold_n else 0:4.0f}  {(sold_px / sold_n) if sold_n else 0:8.3f}  {(sold_fv / fvn) if fvn else 0:11.3f}  {armed_cnt:5d}  {real:+10.2f}  {held_cnt:4d}  {(100 * prof_cnt / sold_cnt) if sold_cnt else 0:14.0f}")
         return out
 
     # ---- A. from the actual locks (the same positions as 1d) -------------------------------------------------------
@@ -509,7 +534,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         path = build_path(ep, s0, c_sec)
         b0 = next((x for x in path['bids'] if x is not None), None)
         q0 = next((x for x in path['fv'] if x is not None), None)
-        pathsA.append({'n': n, 'floor': a['floor'], 'payout': ep['payout'], 'actual': got / n, 'bids': path['bids'], 'fv': path['fv'], 'path': path,
+        pathsA.append({'n': n, 'floor': a['floor'], 'payout': ep['payout'], 'actual': got / n, 'bids': path['bids'], 'fv': path['fv'], 'path': path, 'cost': cost_of(ep['entries'], a['act_ms']),
                        'c_sec': c_sec, 's0': s0, 'b0': b0, 'q0': q0, 'ep': ep, 'sig': sigma_cached(ep.get('asset'), s0) if ep.get('asset') else None})
     have_fv = sum(1 for p in pathsA if p['q0'] is not None)
     print(f'  spot-implied fair value available on {have_fv} of {len(pathsA)} hunted positions (strike from the market record or the index at the open)')
@@ -593,6 +618,14 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         ('Steven: rest an ask at a sell wall (ask 3x the bid), any premium', R(A, ('none',), ('wall', 3, None))),
         ('Steven: rest an ask at a sell wall (3x, fv + 2c) and trail 1 under the peak', R(A, ('bid', 1), ('wall', 3, 0.02))),
         ('Steven: rest an ask at a sell wall (3x, fv + 2c), first-dip judgement (fv + 2c) else hold', R(A, ('bid', 1), ('wall', 3, 0.02), -0.02, 0, {'first_only': True})),
+        # Steven's risk rule (Oct 29 23:15): out in profit at the dip, unless less than 10% of the window is left, then settle
+        ('Steven RM: trailing stop (trail 1), no sale in the last 10% of the window', R(A, ('bid', 1), ('taker',), None, ('frac', 0.10))),
+        ('Steven RM: trailing stop (trail 2), no sale in the last 10%', R(A, ('bid', 2), ('taker',), None, ('frac', 0.10))),
+        ('Steven RM: trail 1, last 20% settles', R(A, ('bid', 1), ('taker',), None, ('frac', 0.20))),
+        ('Steven RM: trail 1, last 5% settles', R(A, ('bid', 1), ('taker',), None, ('frac', 0.05))),
+        ('Steven RM: trail 1, last 10%, sell only in profit vs cost (else keep trailing)', R(A, ('bid', 1), ('taker',), ('profit',), ('frac', 0.10))),
+        ('Steven RM: trail 1, last 10%, with the sell wall (3x, fv + 2c)', R(A, ('bid', 1), ('wall', 3, 0.02), None, ('frac', 0.10))),
+        ('Steven RM: trail 1, last 10%, sell wall, first dip judged vs fv + 2c else hold', R(A, ('bid', 1), ('wall', 3, 0.02), -0.02, ('frac', 0.10), {'first_only': True})),
     ]
     table(pathsA, rulesA, 'A. from the actual locks', True)
 
@@ -609,7 +642,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         cost = sum(e['n'] * e['px'] for e in ents) / n
         path = build_path(ep, s0, c_sec)
         q0 = next((x for x in path['fv'] if x is not None), None)
-        pathsB.append({'n': n, 'floor': None, 'payout': ep['payout'], 'actual': None, 'bids': path['bids'], 'fv': path['fv'], 'path': path,
+        pathsB.append({'n': n, 'floor': None, 'payout': ep['payout'], 'actual': None, 'bids': path['bids'], 'fv': path['fv'], 'path': path, 'cost': cost,
                        'c_sec': c_sec, 's0': s0, 'b0': cost, 'q0': q0, 'ep': ep, 'sig': sigma_cached(ep.get('asset'), s0) if ep.get('asset') else None})
     print(f'  (B: the lock is the policy\'s own: \'bid\' = the side bid 2c over the average entry price, \'fv\' = the spot-implied fair value 3 pts over its value at entry)')
     for lname, lock in (('lock: bid +2c', ('bid', 0.02)), ('lock: fv +3 pts', ('fv', 0.03)), ('lock: bid +2c and fv +3 pts', ('both', 0.02))):
