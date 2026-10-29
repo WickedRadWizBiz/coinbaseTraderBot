@@ -23,8 +23,8 @@
 //     a = TRIAL_SNN_ALPHA (0.25), without the blender's confidence factor (it cut the blend's gain on the recorded
 //     decisions). The blender's own earned alpha stays 0 until its bootstrap test passes on 200 settled events since the
 //     last meta-model swap;
-//   - ta: the TA network's 1 h / 4 h direction drift with every head counting fully, validated or not (today's tilt
-//     counts an unvalidated head by its graded skill, bot/strategy/taConviction.ts);
+//   - ta: the TA network's 1 h / 4 h direction drift with every head counting fully, validated or not (outside the
+//     trial only a head that passed its blind test moves the price, bot/strategy/taConviction.ts);
 //   - rules: the rule book's trial rows, the rules that held up on both periods of the walk-forward study without
 //     passing its multiple-testing bar (bot/strategy/ruleBook.ts trialRead), as a drift like the TA network's: every
 //     horizon a signal present has a row for, its confirmation hit rate read as a P(move its way).

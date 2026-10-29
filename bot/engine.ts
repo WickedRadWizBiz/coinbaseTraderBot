@@ -1950,8 +1950,9 @@ export class Engine {
     // TA conviction overlay: the TA network's direction forecasts add a drift to the fair value (unless
     // the live model already reads them), and TA / confluence breadth + the altcoin rule feed sizing.
     const S0 = cfg.strategy;
-    // Live reads the TA network's unproven heads and the evolved formula as paper does while unvalidated models may
-    // trade live (LIVE_ALLOW_UNVALIDATED_MODEL, the default): the same market prices the same in both modes.
+    // Live reads the evolved formula as paper does while unvalidated models may trade live (LIVE_ALLOW_UNVALIDATED_MODEL,
+    // the default): the same market prices the same in both modes. The TA network's unproven heads reach the price in
+    // neither mode except through their component trial (bot/strategy/taConviction.ts reliability).
     const liveMode = cfg.mode === 'live' && !cfg.liveAllowUnvalidated;
     const modelReadsTa = model.params.kind !== 'identity' && model.params.features.some((f) => f.startsWith('tanet_up'));
     // A forecast's tilt of the fair value: the contract re-priced with the index moved by w x k sigma sqrt(tau) (k: the
