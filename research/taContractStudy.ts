@@ -84,15 +84,19 @@ export async function taContractStudyMain(): Promise<StudyReport> {
   const maxRows = Number(arg('max-rows', '80000'));
   fs.mkdirSync(out, { recursive: true });
 
-  // 1. History. The replay's first day needs the bars before it (volatility, the candle store's 300 closed bars).
+  // 1. History. The 1-minute bars make the index prints and the 1m / 5m candles; the replay reads the 15m, hourly and
+  //    daily candles from the spot store (research/history/historyReplay.ts loadSeries), and its first day starts with
+  //    the last 300 closed bars of each, so the daily series reaches back about a year before `from`.
   if (!process.argv.includes('--skip-download')) {
-    const fromMonth = new Date(Date.parse(from) - 31 * DAY).toISOString().slice(0, 7);
-    const rs = await downloadBinance({ out: history, assets, intervals: ['1m'], markets: ['spot'], source: 'binance-1m', fromMonth, toMonth: to.slice(0, 7), log: (m) => log(`binance: ${m}`) });
-    log(`binance: ${rs.length} series checked`);
+    const month = (ms: number) => new Date(ms).toISOString().slice(0, 7);
+    const toMonth = to.slice(0, 7);
+    const rs = await downloadBinance({ out: history, assets, intervals: ['1m'], markets: ['spot'], source: 'binance-1m', fromMonth: month(Date.parse(from) - 31 * DAY), toMonth, log: (m) => log(`binance: ${m}`) });
+    const slow = await downloadBinance({ out: history, assets, intervals: ['15m', '1h', '1d'], markets: ['spot'], fromMonth: month(Date.parse(from) - 400 * DAY), toMonth, log: (m) => log(`binance: ${m}`) });
+    log(`binance: ${rs.length + slow.length} series checked`);
     const budgetMin = Number(arg('kalshi-budget-min', '20'));
     if (budgetMin > 0) {
       const days = Math.ceil((Date.now() - Date.parse(from)) / DAY) + 1;
-      const k = await downloadKalshiHistory({ baseUrl: process.env.KALSHI_REST_URL ?? 'https://external-api.kalshi.com/trade-api/v2', series: series15m(assets), days, out: path.join(history, 'kalshi'), budgetMs: budgetMin * 60_000, log: (m) => log(`kalshi: ${m}`) });
+      const k = await downloadKalshiHistory({ baseUrl: process.env.KALSHI_REST_URL ?? 'https://external-api.kalshi.com/trade-api/v2', series: series15m(assets), days, out: path.join(history, 'kalshi'), budgetMs: budgetMin * 60_000, ratePerSec: 5, log: (m) => log(`kalshi: ${m}`) });
       log(`kalshi: ${k.markets} markets stored, ${k.skipped} already there, ${k.remaining} left for the next run${k.budgetHit ? ' (budget hit)' : ''}`);
     }
   }
