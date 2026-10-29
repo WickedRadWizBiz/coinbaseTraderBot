@@ -301,7 +301,10 @@ export async function replayFidelityMain(argOf: (k: string, d: string) => string
   if (stage === 'backtest') {
     const how = argOf('how', '');
     if (how !== 'real' && !(QUOTE_FILLS as readonly string[]).includes(how)) throw new Error(`--how must be real or one of ${QUOTE_FILLS.join(', ')}`);
-    writeWindows(path.join(work, `windows-${how}.json`), await backtestDir(dirOf(how), model));
+    const w = await backtestDir(dirOf(how), model);
+    // The real backtest's runner has no prepare stage, so nothing has made the folder yet.
+    fs.mkdirSync(work, { recursive: true });
+    writeWindows(path.join(work, `windows-${how}.json`), w);
     return undefined;
   }
   if (stage === 'compare') {
