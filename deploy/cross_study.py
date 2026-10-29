@@ -362,11 +362,14 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         """Run one policy on a path. Returns (value a contract, sold n, sale px, sale sec, armed) with value=None if never sold.
         lock: ('armed',) | ('bid', T) | ('fv', T) | ('both', T).  trail: ('none',) | ('bid', d ticks) | ('fv', D).
         sale: ('taker',) | ('rest', k ticks, 'fixed' | 'fv').  guard: None | G (a stop sale only when bid >= fv - G).
-        extra: None | 'spot' (hold when spot still moves with us) | 'book' (hold when the top bid is 3x the top ask)."""
+        extra: None | 'spot' (hold when spot still moves with us) | 'book' (hold when the top bid is 3x the top ask)
+        | {'first_only': True} (a stop whose guard fails holds to settlement instead of trailing on).
+        sale ('any', m): sell the first second the bid pays fv + m, no trail. A guard G < 0 asks for bid >= fv + |G|."""
         n, pay, bids, fv = p['n'], p['payout'], p['bids'], p['fv']
         last_taker = p['c_sec'] - window
         armed = lock[0] == 'armed'
         confirm = (extra or {}).get('confirm', 0) if isinstance(extra, dict) else 0
+        first_only = bool((extra or {}).get('first_only')) if isinstance(extra, dict) else False
         under = 0  # seconds running under the stop
         floor = p.get('floor')
         b0 = p['b0']; q0 = p['q0']
@@ -413,6 +416,9 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                     if L is None or cand > L: L = cand
                 if L is not None and b >= L - 1e-9:
                     return (L, n, L, sec, True)
+            # sell into a stale-high bid: any second after the lock when the bid pays over the spot-implied fair value (no trail)
+            if sale[0] == 'any' and q is not None and b >= q + sale[1] - 1e-9 and sec <= last_taker:
+                return (b - fee1(b, n), n, b, sec, True)
             # the stop
             trig = False
             if trail[0] in ('bid', 'vol') and stop is not None and b < stop - 1e-9: trig = True
@@ -422,7 +428,9 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 if under < confirm: continue
             elif confirm: under = 0
             if trig and sec <= last_taker:
-                if guard is not None and q is not None and b < q - guard - 1e-9: continue
+                if guard is not None and q is not None and b < q - guard - 1e-9:
+                    if first_only: return (None, 0.0, None, None, True)
+                    continue
                 if extra == 'spot':
                     w = spot_with(p['path'], i, p['ep'], p['sig'])
                     if w: continue
@@ -532,6 +540,24 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         ('sell at the lock if bid >= fv + 2c, else bid trail 1', R(A, ('bid', 1), ('lock', 0.02, 'else_trail'))),
         ('sell at the lock if bid >= fv + 2c, else vol trail 2 sd', R(A, ('vol', 2.0), ('lock', 0.02, 'else_trail'))),
         ('sell at the lock if bid >= fv + 2c, else fv trail 8', R(A, ('fv', 0.08), ('lock', 0.02, 'else_trail'))),
+        # v5: the stop sale judged against the fair value the other way round: sell only into a bid over fair value
+        ('bid trail 1, sell only if bid >= fv + 2c (else keep trailing)', R(A, ('bid', 1), ('taker',), -0.02)),
+        ('bid trail 1, sell only if bid >= fv + 4c (else keep trailing)', R(A, ('bid', 1), ('taker',), -0.04)),
+        ('bid trail 2, sell only if bid >= fv + 2c (else keep trailing)', R(A, ('bid', 2), ('taker',), -0.02)),
+        ('bid trail 4, sell only if bid >= fv + 2c (else keep trailing)', R(A, ('bid', 4), ('taker',), -0.02)),
+        ('bid trail 1, first trigger: sell if bid >= fv, else hold', R(A, ('bid', 1), ('taker',), 0.0, 0, {'first_only': True})),
+        ('bid trail 1, first trigger: sell if bid >= fv + 2c, else hold', R(A, ('bid', 1), ('taker',), -0.02, 0, {'first_only': True})),
+        ('bid trail 1, first trigger: sell if bid >= fv + 4c, else hold', R(A, ('bid', 1), ('taker',), -0.04, 0, {'first_only': True})),
+        ('bid trail 2, first trigger: sell if bid >= fv + 2c, else hold', R(A, ('bid', 2), ('taker',), -0.02, 0, {'first_only': True})),
+        ('fv trail 5 pts, sell only if bid >= fv + 2c (else keep trailing)', R(A, ('fv', 0.05), ('taker',), -0.02)),
+        ('fv trail 5 pts, first trigger: sell if bid >= fv + 2c, else hold', R(A, ('fv', 0.05), ('taker',), -0.02, 0, {'first_only': True})),
+        ('sell at the lock if bid >= fv + 2c, else trail 1 with the same test (keep trailing)', R(A, ('bid', 1), ('lock', 0.02, 'else_trail'), -0.02)),
+        ('sell at the lock if bid >= fv + 2c, else trail 1, first trigger with the same test, else hold', R(A, ('bid', 1), ('lock', 0.02, 'else_trail'), -0.02, 0, {'first_only': True})),
+        ('sell at the lock if bid >= fv, else trail 1 sell only if bid >= fv (keep trailing)', R(A, ('bid', 1), ('lock', 0.0, 'else_trail'), 0.0)),
+        ('sell any second the bid >= fv, else hold', R(A, ('none',), ('any', 0.0))),
+        ('sell any second the bid >= fv + 2c, else hold', R(A, ('none',), ('any', 0.02))),
+        ('sell any second the bid >= fv + 4c, else hold', R(A, ('none',), ('any', 0.04))),
+        ('sell any second the bid >= fv + 2c, none in the last 120 s', R(A, ('none',), ('any', 0.02), None, 120)),
     ]
     table(pathsA, rulesA, 'A. from the actual locks', True)
 
@@ -570,6 +596,9 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             (f'{lname}; sell at the lock if taker flow favours us, else hold', R(lock, ('none',), ('lock', 0.0, 'else_hold', 'flow'))),
             (f'{lname}; sell at the lock if bid >= fv - 2c or flow favours us', R(lock, ('none',), ('lock', -0.02, 'else_hold', 'either'))),
             (f'{lname}; sell at the lock if bid >= fv - 2c and flow favours us', R(lock, ('none',), ('lock', -0.02, 'else_hold', 'both'))),
+            (f'{lname}; bid trail 1, sell only if bid >= fv + 2c (keep trailing)', R(lock, ('bid', 1), ('taker',), -0.02)),
+            (f'{lname}; bid trail 1, first trigger: sell if bid >= fv + 2c, else hold', R(lock, ('bid', 1), ('taker',), -0.02, 0, {'first_only': True})),
+            (f'{lname}; sell any second the bid >= fv + 2c, else hold', R(lock, ('none',), ('any', 0.02))),
         ]
         table(pathsB, rulesB, f'B. from entry, {lname}', False)
 
