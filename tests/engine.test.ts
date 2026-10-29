@@ -28,7 +28,9 @@ import { TakeProfitBench } from '../bot/strategy/takeProfitBench';
 
 async function setup(opts: { askSize?: number; dailyLossUsd?: string; exitPolicy?: string; vault?: Vault; monitor?: BalanceMonitor; env?: Record<string, string>; trend?: number; curveExit?: SinuousExitGate; takeProfitBench?: TakeProfitBench; curveEntry?: SinuousEntryGate; accuracyGate?: AccuracyGate; liveLines?: LiveLines; trials?: ComponentTrials; model?: MetaModel } = {}) {
   const dir = tmpDir();
-  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy, STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_ENABLED: 'false', ...opts.env });
+  // The exit tests were written against the ratchet policy and the 1c margin (the defaults until Oct 29; the fallback is now the
+  // model exit at a 4c margin).
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, RISK_DAILY_LOSS_USD: opts.dailyLossUsd ?? '10', DOMINANCE_FEED: 'false', SPOT_FEED: 'false', EXIT_POLICY: opts.exitPolicy ?? 'confluence_ratchet', STRATEGY_EXIT_MARGIN: '0.01', STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false', TENNIS_ENABLED: 'false', ...opts.env });
   const now = Date.now();
   const market: MarketInfo = { ticker: 'KXBTC15M-TEST', seriesTicker: 'KXBTC15M', status: 'open', openTime: now - 300_000, closeTime: now + 600_000, floorStrike: 60000, tickSize: 0.01 };
   const rest = {

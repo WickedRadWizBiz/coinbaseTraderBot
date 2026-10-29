@@ -146,8 +146,8 @@ Every placement and re-price is an order. The risk gateway allows `RISK_MAX_ORDE
 - **Exits never meet the bot's own quotes.** An immediate exit that would trade against one of the bot's own resting orders pulls that order first. Otherwise Kalshi's self-trade prevention cancels the exit instead, every tick.
 - **Model exit.** Sell at the bid only when the bid minus the taker fee exceeds q_adj + 1¢.
 - **`EXIT_POLICY`:**
-  - `confluence_ratchet` (the default) sells for profit with the model exit, and lets a winner run on the order-book ratchet (below) while confluence agrees.
-  - `fair_value` is the model exit alone.
+  - `fair_value` (the default since Oct 29) is the model exit alone: it sells at the bid where the bid, after the taker fee, beats the model's value by `STRATEGY_EXIT_MARGIN` (4¢), and lets the rest settle. On the recorded days it came out level with holding to settlement, while every form of the ratchet trailed holding by $70 to $125 on the same entries.
+  - `confluence_ratchet` sells for profit with the model exit, and lets a winner run on the order-book ratchet (below) while confluence agrees. Off by default since Oct 29: its stop locked a few cents on contracts that then paid $1 86% of the time.
   - `take_profit` (Mode B) rests a maker take-profit at entry + 8¢. It never offers below what the model thinks the position is worth.
   - `hold` (Mode A) rides every contract to settlement: no exit fee, and no selling for profit.
 
@@ -684,7 +684,7 @@ The backtest mirrors the engine: cadence-gated entries, entry windows, target-EV
   - A gap through the stop sells at the bid while that is still above the entry fair value. Below it, hunt mode ends and the fair-value exit takes over.
   - **Evaluated in research.** `research:backtest` runs hunt mode over a grid of target margins (`--hunt-grid`, default 1/2/4¢) and wall fill ratios (`--ratchet-fill-grid`, default 1×/2×). Every variant counts toward the Deflated Sharpe. The best variant is compared with the fair-value exit window by window, and `--annotate` writes the result into the model file as `validation.exitEvaluation`. `huntOk` requires at least 300 windows, a paired bootstrap CI lower bound above 0, and a deflated probability above 0.95.
   - With a passing evaluation the engine uses the winning parameters. In live mode an unevaluated or losing hunt mode falls back to the fair-value exit, and the dashboard says so.
-  - It is the default (`EXIT_POLICY=confluence_ratchet`), and the dashboard shows HUNTING with the target and stop.
+  - It is off by default since Oct 29 (`EXIT_POLICY=confluence_ratchet` turns it on), and the dashboard shows HUNTING with the target and stop.
 
 Every exit executes one tick after it triggers. The exit policy governs all active reductions, so taker entries against a position are blocked under hold and ratchet. The diagnostics report:
 - exit regret: settlement value of the exited contracts minus exit proceeds

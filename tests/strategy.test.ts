@@ -6,7 +6,9 @@ import { decide, MarketView } from '../bot/strategy/fairValueStrategy';
 import { ProfitPeaks } from '../bot/strategy/profitPeaks';
 
 // Continuous cadence + Kelly sizing (the pre-relaxed behaviour these tests pin down).
-const base = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_CADENCE: 'continuous' }).strategy;
+// The exit tests below were written against the ratchet policy and the 1c margin (the defaults until Oct 29; the fallback is
+// now the model exit at a 4c margin).
+const base = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_CADENCE: 'continuous', EXIT_POLICY: 'confluence_ratchet', STRATEGY_EXIT_MARGIN: '0.01' }).strategy;
 const cfg: StrategyConfig = {
   ...base,
   style: 'maker', series: ['KXBTC15M'], kellyFraction: 0.25, minEdge: 0.02, takerBuffer: 0.01,

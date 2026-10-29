@@ -31,8 +31,16 @@ grep -q '^DASHBOARD_TOKEN=' "$ENV" && edit_env '^DASHBOARD_TOKEN=' && echo "remo
 for old in windows background; do
   if grep -qx "AUTO_TRAIN=$old" "$ENV"; then edit_env "^AUTO_TRAIN=$old\$" 'AUTO_TRAIN=remote'; echo "AUTO_TRAIN: $old -> remote in $ENV"; fi
 done
-# The old default exit (hold: every contract rode to settlement, never sold for profit) becomes the ratchet exit.
-if grep -qx 'EXIT_POLICY=hold' "$ENV"; then edit_env '^EXIT_POLICY=hold$' 'EXIT_POLICY=confluence_ratchet'; echo "EXIT_POLICY: hold -> confluence_ratchet in $ENV"; fi
+# The ratchet exit (the default since Oct 24) gives way to the model exit at a 4c margin: on the recorded days every form of the
+# ratchet stop trailed holding to settlement by $70 to $125 on the same entries (Oct 28), while the model exit at 4c came out
+# level with holding. A bot.env that pins the ratchet, or the old 1c margin, gets the new fallback once: the marker line records
+# it, so a later pin of the ratchet is a choice and stays; any other value is left alone.
+MARK='# exit fallback 2026-10-29: migrated'
+if ! grep -qxF "$MARK" "$ENV"; then
+  if grep -qx 'EXIT_POLICY=confluence_ratchet' "$ENV"; then edit_env '^EXIT_POLICY=confluence_ratchet$' 'EXIT_POLICY=fair_value'; echo "EXIT_POLICY: confluence_ratchet -> fair_value in $ENV"; fi
+  if grep -qx 'STRATEGY_EXIT_MARGIN=0.01' "$ENV"; then edit_env '^STRATEGY_EXIT_MARGIN=0.01$' 'STRATEGY_EXIT_MARGIN=0.04'; echo "STRATEGY_EXIT_MARGIN: 0.01 -> 0.04 in $ENV"; fi
+  printf '%s\n' "$MARK" >> "$ENV"
+fi
 if grep -qx 'CATALOG_STRIKES_PER_EVENT=8' "$ENV"; then edit_env '^CATALOG_STRIKES_PER_EVENT=8$' 'CATALOG_STRIKES_PER_EVENT=4'; echo "CATALOG_STRIKES_PER_EVENT: 8 -> 4 in $ENV"; fi
 # Entries tuned for quick exits (fresher quotes, a bigger maker discount, time to sell before the close): a bot.env
 # that pins the old default of one of these gets the new one; any other value is left alone.
