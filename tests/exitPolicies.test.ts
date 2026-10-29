@@ -200,7 +200,7 @@ test('hunt mode is evaluated against the fair-value exit on identical windows; o
     return {
       exitPolicy: policy, label: policy, huntParams: policy === 'confluence_ratchet' ? { hunt: { targetMargin: margin, minConfluence: 2 }, ratchet: { minFillRatio: 1, minWallAgeMs: 3000, slippageTicks: 1 } } : undefined,
       vaultEnd: 0, pocketEnd: 0, bySession: {}, trades: [], takeProfitFills: 0, entryEvaluations: 0, days: 4, minEdge: 0.03, windows, fills: 0, contracts: 0, fees: 0, pnl,
-      exits: { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 10, huntDeactivations: 0, huntProfitTakes: 3, avgSlippage: null },
+      exits: { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 10, huntDeactivations: 0, huntProfitTakes: 3, lockSales: 0, lockHolds: 0, wallAsks: 0, wallFills: 0, avgSlippage: null },
     };
   };
   const base = mkRes('fair_value', (i) => ((i * 37) % 11) / 10 - 0.5);
