@@ -234,6 +234,7 @@ jobs:
         with:
           path: |
             data/history/binance-1m
+            data/history/kalshi
             data/ta-study-replay
           key: ta-study-${{ steps.key.outputs.coins }}-${{ inputs.ta_from }}-${{ inputs.ta_to }}-${{ github.run_id }}
           restore-keys: |

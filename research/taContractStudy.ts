@@ -4,9 +4,11 @@
 //
 //   node --import tsx research/taContractStudy.ts --from 2025-10-01 --to 2026-09-30 [--assets BTC,ETH,SOL,XRP,DOGE]
 //        [--history data/history] [--replay data/ta-study-replay] [--out research/out/ta-contract-study]
-//        [--sets base,base+ta,...] [--max-rows 200000] [--skip-download] [--skip-replay]
+//        [--sets base,base+ta,...] [--max-rows 200000] [--kalshi-budget-min 20] [--skip-download] [--skip-replay]
 //
-// 1. Binance's 1-minute spot bars for the assets and months (data.binance.vision, research/history/binanceVision.ts).
+// 1. Binance's 1-minute spot bars for the assets and months (data.binance.vision, research/history/binanceVision.ts),
+//    and Kalshi's settled 15-minute contracts over the same days with their minute quotes (public API,
+//    research/history/kalshiHistory.ts; at most --kalshi-budget-min of requests a run, the rest next run).
 // 2. The history replay turns them into recording days (research/history/historyReplay.ts): a synthetic 15-minute
 //    Up/Down contract every quarter hour per coin, with Kalshi's rules (the strike is the 60 s index average before
 //    the open, the result the 60 s average before the close), plus Kalshi's real contracts where <history>/kalshi has
@@ -34,6 +36,8 @@ import { clamp, logit, sigmoid } from '../bot/util/num';
 import { buildDataset, readDataset, type DatasetRow } from './buildDataset';
 import { downloadBinance } from './history/binanceVision';
 import { buildHistoryReplay, replayKalshiDays } from './history/historyReplay';
+import { downloadKalshiHistory } from './history/kalshiHistory';
+import { series15m } from './kalshiReplayData';
 import { dieboldMariano } from './stats';
 import { rowWeights, trainMetaModel, type TrainReport } from './trainMetaModel';
 
@@ -84,6 +88,12 @@ export async function taContractStudyMain(): Promise<StudyReport> {
     const fromMonth = new Date(Date.parse(from) - 31 * DAY).toISOString().slice(0, 7);
     const rs = await downloadBinance({ out: history, assets, intervals: ['1m'], markets: ['spot'], source: 'binance-1m', fromMonth, toMonth: to.slice(0, 7), log: (m) => log(`binance: ${m}`) });
     log(`binance: ${rs.length} series checked`);
+    const budgetMin = Number(arg('kalshi-budget-min', '20'));
+    if (budgetMin > 0) {
+      const days = Math.ceil((Date.now() - Date.parse(from)) / DAY) + 1;
+      const k = await downloadKalshiHistory({ baseUrl: process.env.KALSHI_REST_URL ?? 'https://external-api.kalshi.com/trade-api/v2', series: series15m(assets), days, out: path.join(history, 'kalshi'), budgetMs: budgetMin * 60_000, log: (m) => log(`kalshi: ${m}`) });
+      log(`kalshi: ${k.markets} markets stored, ${k.skipped} already there, ${k.remaining} left for the next run${k.budgetHit ? ' (budget hit)' : ''}`);
+    }
   }
   // 2. Replay days with synthetic contracts (and Kalshi's real ones where the history has them).
   let rep = { days: 0, synthetic: 0 };
