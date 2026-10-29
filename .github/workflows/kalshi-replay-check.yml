@@ -40,7 +40,7 @@ on:
         required: false
         default: '200 400 600 800'
       skip_models:
-        description: 'Model files the paper bot did not have in the stretch, left out of the replay, space separated (any of vol_profile.json vol_model.json fill_model.json rule_book.json gp_indicators.json): one promoted since then would otherwise price the whole stretch'
+        description: 'Model files the paper bot did not have in the stretch, left out of the replay, space separated (any of vol_profile.json vol_model.json fill_model.json session_risk.json rule_book.json gp_indicators.json): one promoted since then would otherwise price the whole stretch'
         required: false
         default: ''
       pnl_test:
@@ -99,7 +99,7 @@ jobs:
         run: |
           set -euo pipefail
           DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/audit" "$DATA/models" "$DATA/sweep-env" "$DATA/sweeps"
-          for f in $SKIP_MODELS; do [[ "$f" =~ ^(vol_profile|vol_model|fill_model|rule_book|gp_indicators)\.json$ ]] || { echo "skip_models: $f is not one of the model files the check copies"; exit 1; }; done
+          for f in $SKIP_MODELS; do [[ "$f" =~ ^(vol_profile|vol_model|fill_model|session_risk|rule_book|gp_indicators)\.json$ ]] || { echo "skip_models: $f is not one of the model files the check copies"; exit 1; }; done
           # A model file left out (skip_models): one the paper bot did not have yet in the stretch.
           wanted() { case " $SKIP_MODELS " in *" $1 "*) echo "$1 left out (skip_models)"; return 1;; esac; }
           vanished_ok() { local c=$?; [ $c -eq 24 ] && return 0; return $c; }
@@ -171,7 +171,7 @@ jobs:
           rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/models/model.json "$DATA/models/" || echo "no trained model on the server: the check uses the identity model"
           # The other models the engine prices with (the vol profile, vol model and fill model), where the server has them;
           # else the shipped params/ files, as the bot picks them.
-          for f in vol_profile.json vol_model.json fill_model.json; do wanted "$f" || continue; rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
+          for f in vol_profile.json vol_model.json fill_model.json session_risk.json; do wanted "$f" || continue; rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
           # The validation gates' state (which books' unvalidated models are benched).
           rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/probation.json "$RUNNER_TEMP/paper-probation.json" 2>/dev/null || true
           # The TA network the engine prices with (its promoted copy and the newest archived versions its ensemble blends),

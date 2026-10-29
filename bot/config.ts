@@ -207,6 +207,9 @@ export interface StrategyConfig {
   ratchetSlippageTicks: number;
   /** Per-session risk multipliers (can only reduce risk). */
   sessionRisk: SessionRiskProfile;
+  /** Apply the pipeline's session_risk.json under SESSION_RISK (bot/model/sessionRisk.ts). */
+  sessionRiskAuto: boolean;
+  sessionRiskPath: string;
   /** Block hunt mode in twilight/weekend liquidity and near session changes. */
   huntSessionGuard: boolean;
   huntTransitionBufferMin: number;
@@ -1087,6 +1090,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     sessionRisk: (() => { try { return parseSessionRisk(env.SESSION_RISK); } catch (e) { throw new ConfigError((e as Error).message); } })(),
     huntSessionGuard: bool(env, 'HUNT_SESSION_GUARD', true),
     huntTransitionBufferMin: num(env, 'HUNT_TRANSITION_BUFFER_MIN', 10, 0, 120),
+    sessionRiskAuto: bool(env, 'SESSION_RISK_AUTO', true),
+    sessionRiskPath: path.resolve(env.SESSION_RISK_PATH ?? './params/session_risk.json'),
     volSeasonality: bool(env, 'VOL_SEASONALITY', true),
     volProfilePath: path.resolve(env.VOL_PROFILE_PATH ?? './params/vol_profile.json'),
     volModel: bool(env, 'VOL_MODEL', true),

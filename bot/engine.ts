@@ -52,7 +52,7 @@ import { parseTennisScore } from './tennis/liveScore';
 import { diffScore, findMatch, toTennisScore, type LiveTennisMatch, type TennisScoreClient } from './tennis/liveTennisApi';
 import { tennisFairInputs, type TennisFairModel } from './tennis/tennisFair';
 import type { TennisScore } from './tennis/tennisModel';
-import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
+import { huntBlockedBySession, mergeSessionRisk, sessionRiskFor, type SessionRiskProfile } from './model/sessionRisk';
 import { playbook } from './strategy/playbook';
 import { compensator } from './strategy/compensator';
 import { macro } from './macro/macroService';
@@ -698,7 +698,7 @@ export class Engine {
     const S = this.d.cfg.strategy;
     return {
       ...st,
-      risk: sessionRiskFor(S.sessionRisk, st),
+      risk: sessionRiskFor(this.sessionRiskProfile(), st),
       huntBlocked: S.exitPolicy === 'confluence_ratchet' && S.huntSessionGuard ? huntBlockedBySession(st, S.huntTransitionBufferMin) : undefined,
       volProfile: this.d.volProfile ? { version: this.d.volProfile.version, applied: true } : undefined,
     };
@@ -1684,6 +1684,18 @@ export class Engine {
     this.d.volProfile = vp;
   }
 
+  private sessionRiskAuto: SessionRiskProfile = {};
+  /** The pipeline's session risk profile (session_risk.json), applied under SESSION_RISK when SESSION_RISK_AUTO. */
+  setSessionRiskAuto(p: SessionRiskProfile | undefined): void {
+    this.sessionRiskAuto = p ?? {};
+  }
+
+  /** The session risk profile in force: the automatic one with the hand-set SESSION_RISK on top. */
+  sessionRiskProfile(): SessionRiskProfile {
+    const S = this.d.cfg.strategy;
+    return S.sessionRiskAuto ? mergeSessionRisk(this.sessionRiskAuto, S.sessionRisk) : S.sessionRisk;
+  }
+
   get model(): MetaModel { return this.d.model; }
   get snn(): EngineDeps['snn'] { return this.d.snn; }
 
@@ -1749,7 +1761,7 @@ export class Engine {
       compensator: cmp ? { enabled: cmp.apply && cmp.enabled, validated: cmp.enabled } : null,
       characterStandAside: S.characterStandAside,
       accuracyGate: ag ? { enabled: ag.enabled, blocked: agBuckets.filter((b) => !b.open).length, buckets: agBuckets.length } : null,
-      sessionRisk: { keys: Object.keys(S.sessionRisk).length },
+      sessionRisk: { keys: Object.keys(this.sessionRiskProfile()).length },
       sizing: {
         paperOrderUsd: this.paperOrderUsd(), tier: g.tier.name, sizeScale: g.equityGuard?.sizeScale ?? null,
         optimalF: of.rep ? { cap: Number.isFinite(of.cap) ? of.cap : null, trades: of.rep.n } : null, portfolioKelly: S.portfolioKelly,
@@ -1920,7 +1932,7 @@ export class Engine {
     const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
     if (!fv) return block('fair value unavailable');
     const sess = sessionState(now);
-    const sessRisk = sessionRiskFor(cfg.strategy.sessionRisk, sess);
+    const sessRisk = sessionRiskFor(this.sessionRiskProfile(), sess);
     // Strategy weight: the Compensator's ramp on the coin's Librarian reading (bot/strategy/compensator.ts) when it is
     // on, else the playbook's Kalshi weight in this coin's confirmed regime (bot/strategy/playbook.ts).
     const cmpW = compensator()?.weight(m.asset, 'kalshi', now);
@@ -2085,7 +2097,7 @@ export class Engine {
     // dollars, whatever the tier, the break-even scale, the session's size factor and optimal f would allow (the owner's
     // choice for paper on Oct 23, a share of the bankroll since Oct 24).
     const fixedUsd = this.paperOrderUsd(bankroll);
-    // Session risk profile can only shrink size (sizeMult in [0, 1]). The risk scale (drawdown, losing streak,
+    // Session risk scales size (sizeMult in [0, 1.5]: above 1 only for a reliably earning session, dollars only). The risk scale (drawdown, losing streak,
     // training-mode de-risking) shrinks every sizing route: Kelly, target-EV and the per-order caps alike. The same
     // budget sizes the backtester's orders (bot/sizing/orderBudget.ts).
     const budget = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult, riskScale: kellyScale, fCapUsd, paperOrderUsd: fixedUsd, maxContractsPerOrder: R.maxContractsPerOrder });

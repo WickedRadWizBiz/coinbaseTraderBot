@@ -36,7 +36,7 @@ import { applyFillModel, FillModel } from '../bot/tca/fillModel';
 import { applyTakeGate, TAKE_GATED_DRIVERS, TAKE_GATED_MICRO, TAKE_GATED_TREND } from '../bot/model/takeModel';
 import { dropTape, openTape, TapeMiss, tickerHash, type TapeReader, type TapeWriter } from './callTape';
 import { effectiveSigma, loadVolProfile, type VolProfile } from '../bot/model/volSeasonality';
-import { sessionRiskFor, huntBlockedBySession, type SessionRiskProfile } from '../bot/model/sessionRisk';
+import { sessionRiskFor, huntBlockedBySession, loadSessionRiskFile, mergeSessionRisk, type SessionRiskProfile } from '../bot/model/sessionRisk';
 import { sessionState } from '../bot/model/sessions';
 import { Vault, type VaultConfig } from '../bot/vault/vault';
 import { ladderQuotes } from '../bot/model/ladder';
@@ -279,10 +279,13 @@ const tapedMap = (keys: string[], x: Float64Array): Record<string, number> => ne
  *  there, else the shipped params/ files (bot/autotrain.ts resolveModelPaths). The TA network and the rule book are
  *  installed process-wide, as in the bot. `trialsFile`: the bot's component_trials.json, read from a private copy (the
  *  trials' verdicts on paper's price). `used` names the ones in use; `sig` is what a call tape depends on. */
-export async function engineModels(cfg: Config, o: { trialsFile?: string } = {}): Promise<{ volProfile?: VolProfile; volModel?: VolModel; fillModel?: FillModel; calendar?: MacroEvent[]; trials?: ComponentTrials; used: string[]; sig: string }> {
+export async function engineModels(cfg: Config, o: { trialsFile?: string } = {}): Promise<{ sessionRisk: SessionRiskProfile; volProfile?: VolProfile; volModel?: VolModel; fillModel?: FillModel; calendar?: MacroEvent[]; trials?: ComponentTrials; used: string[]; sig: string }> {
   const { resolveModelPaths } = await import('../bot/autotrain');
   const paths = resolveModelPaths(cfg);
   const vp = fs.existsSync(paths.vol) ? loadVolProfile(paths.vol) : undefined;
+  // The session risk profile the engine applies (bot/engine.ts sessionRiskProfile): the pipeline's, under SESSION_RISK.
+  const srAuto = cfg.strategy.sessionRiskAuto && fs.existsSync(paths.session_risk) ? loadSessionRiskFile(paths.session_risk)?.profile : undefined;
+  const sessionRisk = srAuto ? mergeSessionRisk(srAuto, cfg.strategy.sessionRisk) : cfg.strategy.sessionRisk;
   const volProfile = vp && cfg.strategy.volSeasonality && vp.validation?.improved ? vp : undefined;
   let volModel: VolModel | undefined, fillModel: FillModel | undefined, taNet: TaNet | undefined;
   try { volModel = cfg.strategy.volModel && fs.existsSync(paths.vol_model) ? VolModel.load(paths.vol_model) : undefined; } catch { volModel = undefined; }
@@ -313,7 +316,8 @@ export async function engineModels(cfg: Config, o: { trialsFile?: string } = {})
     cfg.strategy.gp && fs.existsSync(gpFile) ? 'evolved formula' : '', trials ? `trials in paper's price: ${(['mlp', 'snn', 'ta', 'rules'] as TrialName[]).filter((n) => trials!.applied(n)).join(' ') || 'none'}` : ''].filter(Boolean);
   // What a call tape depends on: the fair value's volatility, the calendar's and the TA network's features.
   const sig = JSON.stringify([volProfile?.version ?? null, volModel?.validated ? volModel.params.trainedAt : null, calendar?.length ?? 0, taNet?.version ?? null, archived]);
-  return { volProfile, volModel, fillModel, calendar, trials, used, sig };
+  if (srAuto && Object.keys(srAuto).length) used.push(`session risk (${Object.keys(srAuto).join(' ')})`);
+  return { sessionRisk, volProfile, volModel, fillModel, calendar, trials, used, sig };
 }
 
 /** The validation gates as the bot runs them (bot/main.ts): with VALIDATION_GATES=monitor (the default) a model that
