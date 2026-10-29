@@ -218,6 +218,12 @@ export interface StrategyConfig {
   huntLockSaleFvMargin: number;
   huntLockSaleElse: 'hold' | 'exit';
   huntLockSaleAt: 'lock' | 'trigger';
+  /** HUNT_WALL_ASK: while the hunt's stop walks up, rest the position's sell at a top-of-book sell wall on our side (the best
+   *  ask's size at least HUNT_WALL_ASK_RATIO x the best bid's and the position, its price at least the fair value plus
+   *  HUNT_LOCK_SALE_FV_MARGIN), post-only behind the wall, until it fills or the lock sale's judgement cancels it. Off by
+   *  default: measured level with the judgement alone (+9 / +98 vs +8 / +106 against holding on the recorded days). */
+  huntWallAsk: boolean;
+  huntWallAskRatio: number;
   ratchetMinFillRatio: number;
   ratchetMinWallAgeSec: number;
   ratchetSlippageTicks: number;
@@ -1106,6 +1112,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     huntLockSaleFvMargin: num(env, 'HUNT_LOCK_SALE_FV_MARGIN', 0.02, -0.2, 0.2),
     huntLockSaleElse: oneOf(env, 'HUNT_LOCK_SALE_ELSE', 'hold', ['hold', 'exit'] as const),
     huntLockSaleAt: oneOf(env, 'HUNT_LOCK_SALE_AT', 'trigger', ['lock', 'trigger'] as const),
+    huntWallAsk: bool(env, 'HUNT_WALL_ASK', false),
+    huntWallAskRatio: num(env, 'HUNT_WALL_ASK_RATIO', 3, 1, 1000),
     ratchetMinFillRatio: num(env, 'RATCHET_MIN_FILL_RATIO', 1, 0.1, 20),
     ratchetMinWallAgeSec: num(env, 'RATCHET_MIN_WALL_AGE_SEC', 3, 0, 120),
     ratchetSlippageTicks: num(env, 'RATCHET_SLIPPAGE_TICKS', 1, 0, 10),

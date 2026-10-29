@@ -278,6 +278,27 @@ test('exit curve rest mode: the held side rests its sell at the curve target, ne
   assert.ok(exiting.cancel.some((c) => c.clientOrderId === 'r'));
 });
 
+test('hunt sell-wall ask (HUNT_WALL_ASK): in hunt mode the held side rests its sell at the wall price, a tick above the bid at least, and nothing without one', () => {
+  const long = (o: Partial<MarketView> = {}) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: 0.47, size: 50 }, bestAsk: { price: 0.6, size: 50 }, ...o });
+  const restOf = (v: MarketView) => decide(v, cfg, { blockReductions: true }).place.find((p) => p.side === 'ask' && p.timeInForce === 'good_till_canceled');
+  const r = restOf(long({ huntRestSidePrice: 0.6 }))!;
+  assert.deepEqual([r.price, r.count, r.postOnly, r.reduceOnly, r.purpose], [0.6, 10, true, false, 'exit']);
+  assert.match(r.why, /^confluence ratchet wall ask 0\.6 /);
+  assert.equal(restOf(long({ huntRestSidePrice: 0.47 }))!.price, 0.48, 'never at or under the bid');
+  assert.equal(restOf(long()), undefined, 'no wall: nothing rests while the hunt blocks reductions');
+  assert.equal(restOf(long({ curveRestSidePrice: 0.553 })), undefined, 'the curve sell stays off in hunt mode');
+  // Outside hunt mode the wall price is not used.
+  assert.doesNotMatch(decide(long({ huntRestSidePrice: 0.6 }), cfg).place.find((p) => p.side === 'ask')?.why ?? '', /wall ask/);
+  // Long NO: a YES bid at 1 - the wall price, under the ask.
+  const short = view({ position: -10, pYes: 0.3, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: 0.4, size: 50 }, bestAsk: { price: 0.53, size: 50 }, huntRestSidePrice: 0.64 });
+  const b = decide(short, cfg, { blockReductions: true }).place.find((p) => p.side === 'bid' && p.timeInForce === 'good_till_canceled')!;
+  assert.deepEqual([b.price, b.count, b.postOnly, b.purpose], [0.36, 10, true, 'exit']);
+  assert.match(b.why, /wall ask NO 0\.64/);
+  // A resting one is pulled when the hunt stops asking for it.
+  const pulled = decide(long({ restingAsk: { clientOrderId: 'w', price: 0.6, remaining: 10 } }), cfg, { blockReductions: true });
+  assert.ok(pulled.cancel.some((c) => c.clientOrderId === 'w'));
+});
+
 test('exit curve rest mode: a NO position rests a YES bid at 1 - target, and the resting sell follows the position size exactly', () => {
   // Long 10 NO bought at 0.30 (YES sold at 0.70): floor 4c on 0.30 is 3c, never below NO 0.33. The model values NO at 0.50.
   const short = (o: Partial<MarketView> = {}) => view({ position: -10, pYes: 0.5, entrySidePrice: 0.3, entryFeePerContract: 0, bestBid: { price: 0.4, size: 50 }, bestAsk: { price: 0.66, size: 50 }, ...o });

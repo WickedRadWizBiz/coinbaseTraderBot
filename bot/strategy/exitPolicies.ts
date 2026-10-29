@@ -58,6 +58,13 @@ export function exitLevels(book: OrderBook, positionSign: number, depth = 50): S
   return snap.asks.map((l) => ({ price: round(1 - l.price, 4), size: l.size }));
 }
 
+/** Our side's ask levels in side-price terms (the sells queued above ours), best (lowest) first. */
+export function askLevels(book: OrderBook, positionSign: number, depth = 50): SideLevel[] {
+  const snap = book.snapshot(depth);
+  if (positionSign > 0) return snap.asks.map((l) => ({ price: l.price, size: l.size }));
+  return snap.bids.map((l) => ({ price: round(1 - l.price, 4), size: l.size }));
+}
+
 export interface ExitOrderPlan {
   side: BookSide;
   /** YES-terms limit price. */
@@ -190,11 +197,18 @@ export interface HuntParams {
   lockSaleFvMargin?: number;
   lockSaleElse?: 'hold' | 'exit';
   lockSaleAt?: 'lock' | 'trigger';
+  /** HUNT_WALL_ASK: while the stop walks up, the position's sell rests at a top-of-book sell wall on our side (the best ask's
+   *  size at least wallAskRatio x the best bid's and the position, its price at least the fair value plus lockSaleFvMargin):
+   *  joined behind the wall, post-only, until it fills or the lock sale's judgement cancels it (Steven's sell-wall order,
+   *  Oct 29). Measured with the first-dip judgement in cross_study 1e: +9 / +98 against holding on the recorded days, level
+   *  with the judgement alone (+8 / +106); a resting wall sell on its own lost on both days (its fills are adversely selected). */
+  wallAsk?: boolean;
+  wallAskRatio?: number;
 }
 
 export const DEFAULT_HUNT: HuntParams = { targetMargin: 0.02, minConfluence: 2 };
 
-export type HuntEvent = 'activated' | 'profit_take_confluence' | 'profit_take_session' | 'profit_take_gap' | 'deactivated_giveback' | 'deactivated_session' | 'lock_sale' | 'lock_hold' | 'lock_pass' | RatchetEvent;
+export type HuntEvent = 'activated' | 'profit_take_confluence' | 'profit_take_session' | 'profit_take_gap' | 'deactivated_giveback' | 'deactivated_session' | 'lock_sale' | 'lock_hold' | 'lock_pass' | 'wall_ask' | RatchetEvent;
 
 export interface HuntInput {
   position: number;
@@ -222,6 +236,8 @@ export interface HuntDecision {
   event?: HuntEvent;
   target?: number;
   stop?: number;
+  /** HUNT_WALL_ASK: the side price at which the position's sell rests (a top-of-book sell wall); undefined = none. */
+  rest?: number;
 }
 
 /**
@@ -256,6 +272,8 @@ export class ConfluenceRatchetExit {
   private lockJudged = false;
   private lockSold = false;
   private holding = false;
+  /** HUNT_WALL_ASK: the sell wall's side price the position's sell rests at, once found. */
+  private wallRest: number | undefined;
 
   constructor(private readonly h: HuntParams = DEFAULT_HUNT, ratchet: RatchetParams = DEFAULT_RATCHET) {
     this.ratchet = new LiquidityRatchet(ratchet);
@@ -269,6 +287,7 @@ export class ConfluenceRatchetExit {
     this.lockJudged = false;
     this.lockSold = false;
     this.holding = false;
+    this.wallRest = undefined;
     this.ratchet.reset();
   }
 
@@ -284,6 +303,18 @@ export class ConfluenceRatchetExit {
     const fvOk = i.sideBid !== undefined && i.fvSide !== undefined && i.sideBid >= i.fvSide + (this.h.lockSaleFvMargin ?? 0.02) - 1e-9;
     const flowOk = i.flowSide !== undefined && i.flowSide > 0;
     return lockSale === 'fair_value' ? fvOk : lockSale === 'flow' ? flowOk : lockSale === 'either' ? fvOk || flowOk : lockSale === 'both' ? fvOk && flowOk : false;
+  }
+
+  /** HUNT_WALL_ASK: a top-of-book sell wall on our side (side terms), if one stands: the best ask's size at least wallAskRatio x
+   *  the best bid's and the position, its price at least the fair value plus the lock sale's margin. */
+  private sellWall(i: HuntInput, sign: number): number | undefined {
+    if (i.fvSide === undefined) return undefined;
+    const ask = askLevels(i.book, sign, 1)[0];
+    const bid = exitLevels(i.book, sign, 1)[0];
+    if (!ask || !bid) return undefined;
+    if (ask.size + 1e-9 < (this.h.wallAskRatio ?? 3) * bid.size || ask.size + 1e-9 < Math.abs(i.position)) return undefined;
+    if (ask.price < i.fvSide + (this.h.lockSaleFvMargin ?? 0.02) - 1e-9) return undefined;
+    return round(ask.price, 4);
   }
 
   update(i: HuntInput): HuntDecision {
@@ -324,12 +355,22 @@ export class ConfluenceRatchetExit {
     if (this.lockSold) return i.sideBid === undefined ? { mode: 'hunt', target, stop: this.floor } : { mode: 'hunt', plan: this.sellAtBid(i, sign), target, stop: this.floor };
     if (this.holding) return { mode: 'hunt', target, stop: this.floor };
 
+    // HUNT_WALL_ASK: once a sell wall stands on our side over the fair value plus the margin, the position's sell rests at it
+    // (bot/strategy/fairValueStrategy.ts places it post-only, sized to the position) until it fills, a sale below replaces it
+    // or the lock sale's judgement cancels it; found once a hunt. Never beside a sale: a decision with a plan carries no rest.
+    let wallEvent: HuntEvent | undefined;
+    if (this.h.wallAsk && this.wallRest === undefined) {
+      const w = this.sellWall(i, sign);
+      if (w !== undefined) { this.wallRest = w; wallEvent = 'wall_ask'; }
+    }
+    const rest = this.wallRest;
+
     // HUNT_LOCK_SALE at the trigger: the stop walks up as usual; the first time the bid sits under it (a dip or a gap) the
     // position is judged once: sold into a bid over fair value, otherwise held to settlement or handed to the normal exit.
     // No profit take before that judgement: the lab measured the plain lock, trail and first-dip rule (cross_study 1e).
     if ((this.h.lockSale ?? 'off') !== 'off' && (this.h.lockSaleAt ?? 'trigger') === 'trigger') {
       const r = this.ratchet.evaluate({ position: i.position, book: i.book, now: i.now, tick: i.tick, fees: i.fees, floor: this.floor, qSide: i.qSide });
-      if ((r.event !== 'triggered' && r.event !== 'gapped') || i.sideBid === undefined) return { mode: 'hunt', event: r.event, target, stop: r.stop };
+      if ((r.event !== 'triggered' && r.event !== 'gapped') || i.sideBid === undefined) return { mode: 'hunt', event: wallEvent ?? r.event, target, stop: r.stop, rest };
       this.lockJudged = true;
       if (this.lockSaleHit(i)) {
         this.lockSold = true;
@@ -341,6 +382,7 @@ export class ConfluenceRatchetExit {
       }
       this.active = false;
       this.floor = undefined;
+      this.wallRest = undefined;
       this.ratchet.reset();
       return { mode: 'fair_value', event: 'lock_pass', target };
     }
@@ -352,13 +394,14 @@ export class ConfluenceRatchetExit {
 
     const r = this.ratchet.evaluate({ position: i.position, book: i.book, now: i.now, tick: i.tick, fees: i.fees, floor: this.floor, hybrid: this.h.hybrid, qSide: i.qSide });
     if (r.event === 'gapped') {
-      if (this.h.sellIntoGap === false) return { mode: 'hunt', event: 'gapped', target, stop: r.stop };
+      if (this.h.sellIntoGap === false) return { mode: 'hunt', event: 'gapped', target, stop: r.stop, rest };
       if (i.sideBid !== undefined && i.sideBid >= this.entryQ! - 1e-9) return { mode: 'hunt', plan: this.sellAtBid(i, sign), event: 'profit_take_gap', target, stop: r.stop };
       this.active = false;
       this.floor = undefined;
+      this.wallRest = undefined;
       this.ratchet.reset();
       return { mode: 'fair_value', event: 'deactivated_giveback', target };
     }
-    return { mode: 'hunt', plan: r.plan, event: r.event, target, stop: r.stop };
+    return r.plan ? { mode: 'hunt', plan: r.plan, event: r.event, target, stop: r.stop } : { mode: 'hunt', event: wallEvent ?? r.event, target, stop: r.stop, rest };
   }
 }
