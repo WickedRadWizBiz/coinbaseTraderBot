@@ -41,16 +41,16 @@ class Dist {
 
 interface Cell {
   samples: number; spread: Dist; quotedLevels: Dist; depth10: Dist; wallSize: Dist; wallRatio: Dist; wallOffset: Dist;
-  levelSize: Dist[]; tradesPerMin: Dist; tradeSize: Dist; takerYes: number; trades: number; deltasPerMin: Dist;
+  levelSize: Dist[]; levelFilled: Dist[]; tradesPerMin: Dist; tradeSize: Dist; takerYes: number; trades: number; deltasPerMin: Dist;
 }
 const newCell = (): Cell => ({ samples: 0, spread: new Dist(), quotedLevels: new Dist(), depth10: new Dist(), wallSize: new Dist(), wallRatio: new Dist(), wallOffset: new Dist(),
-  levelSize: Array.from({ length: LEVELS }, () => new Dist()), tradesPerMin: new Dist(), tradeSize: new Dist(), takerYes: 0, trades: 0, deltasPerMin: new Dist() });
+  levelSize: Array.from({ length: LEVELS }, () => new Dist()), levelFilled: Array.from({ length: LEVELS }, () => new Dist()), tradesPerMin: new Dist(), tradeSize: new Dist(), takerYes: 0, trades: 0, deltasPerMin: new Dist() });
 
 /** Queue-reactive counts: per (distance from best in cents, queue size bucket), events and seconds spent there. */
 interface Qr { seconds: number; add: number; cancel: number; trade: number; addSize: Dist; cancelSize: Dist }
 const newQr = (): Qr => ({ seconds: 0, add: 0, cancel: 0, trade: 0, addSize: new Dist(), cancelSize: new Dist() });
 
-interface Contract { ticker: string; close: number; book: OrderBook; lastSample: number; minute: number; deltas: number; trades: number; lastT: number }
+interface Contract { ticker: string; close: number; book: OrderBook; lastSample: number; minute: number; deltas: number; trades: number }
 
 type Side = 'bid' | 'ask';
 /** The book's levels on one side, best first, as [price cents, size]. */
@@ -74,20 +74,6 @@ async function run(files: string[]) {
     if (!bb || !ba) return undefined;
     return { tau: (c.close - t) / MIN, mid: ((bb.price + ba.price) / 2) * 100 };
   };
-  // Seconds spent at each (distance, queue size) since the contract's last event: the intensities' denominators.
-  const accrue = (c: Contract, t: number) => {
-    const dt = (t - c.lastT) / 1000;
-    if (dt > 0 && dt < 600 && c.book.bestBid() && c.book.bestAsk()) {
-      for (const side of ['bid', 'ask'] as Side[]) {
-        const lv = sideLevels(c.book, side);
-        if (!lv.length) continue;
-        const best = lv[0][0];
-        const at = new Map(lv.map(([p, s]) => [Math.abs(p - best), s]));
-        for (let off = 0; off < LEVELS; off++) qrOf(off, at.get(off) ?? 0).seconds += dt;
-      }
-    }
-    c.lastT = t;
-  };
   const sample = (c: Contract, t: number) => {
     const s = state(c, t);
     if (!s || s.tau < 0) return;
@@ -97,11 +83,14 @@ async function run(files: string[]) {
     cell.spread.add(asks[0][0] - bids[0][0]);
     for (const lv of [bids, asks]) {
       const best = lv[0][0];
+      // Each sample stands for SAMPLE_MS at each distance and queue size: the intensities' denominators.
+      const atAll = new Map(lv.map(([p, v]) => [Math.abs(p - best), v]));
+      for (let off = 0; off < LEVELS; off++) qrOf(off, atAll.get(off) ?? 0).seconds += SAMPLE_MS / 1000;
       const near = lv.filter(([p]) => Math.abs(p - best) < LEVELS);
       cell.quotedLevels.add(near.length);
       cell.depth10.add(near.reduce((a, [, v]) => a + v, 0));
       const at = new Map(near.map(([p, v]) => [Math.abs(p - best), v]));
-      for (let off = 0; off < LEVELS; off++) cell.levelSize[off].add(at.get(off) ?? 0);
+      for (let off = 0; off < LEVELS; off++) { const v = at.get(off) ?? 0; cell.levelSize[off].add(v); if (v > 0) cell.levelFilled[off].add(v); }
       const sizes = near.map(([, v]) => v).sort((a, b) => a - b);
       const med = sizes[Math.floor(sizes.length / 2)] || 1;
       const wall = near.reduce((m, x) => (x[1] > m[1] ? x : m), near[0]);
@@ -121,7 +110,7 @@ async function run(files: string[]) {
       try { e = JSON.parse(line); } catch { continue; }
       const t: number = e.t ?? e.ts;
       if (e.k === 'market' && e.ticker && e.closeTime && (e.kind === 'updown' || /15M/.test(e.series ?? ''))) {
-        if (!contracts.has(e.ticker)) contracts.set(e.ticker, { ticker: e.ticker, close: Number(e.closeTime), book: new OrderBook(e.ticker), lastSample: 0, minute: 0, deltas: 0, trades: 0, lastT: t });
+        if (!contracts.has(e.ticker)) contracts.set(e.ticker, { ticker: e.ticker, close: Number(e.closeTime), book: new OrderBook(e.ticker), lastSample: 0, minute: 0, deltas: 0, trades: 0 });
         continue;
       }
       const c = e.ticker ? contracts.get(e.ticker) : undefined;
@@ -132,16 +121,15 @@ async function run(files: string[]) {
       const m = Math.floor(t / MIN);
       if (c.minute && m > c.minute) minuteEnd(c, c.minute * MIN + MIN - 1);
       c.minute = m;
-      accrue(c, t);
       if (e.k === 'book') {
         c.book.applySnapshot({ bids: e.bids ?? [], asks: e.asks ?? [] }, t);
         if (!c.lastSample) c.lastSample = Math.ceil(t / SAMPLE_MS) * SAMPLE_MS - SAMPLE_MS;
       } else if (e.k === 'delta' && (e.side === 'bid' || e.side === 'ask')) {
         const side = e.side as Side;
-        const lv = sideLevels(c.book, side);
+        const top = side === 'bid' ? c.book.bestBid() : c.book.bestAsk();
         const p = Math.round(Number(e.price) * 100), d = Number(e.delta);
-        if (lv.length && Number.isFinite(d) && d !== 0) {
-          const best = lv[0][0];
+        if (top && Number.isFinite(d) && d !== 0) {
+          const best = Math.round(top.price * 100);
           // A level better than the best is a new best (distance 0); the queue is the level's size before the change.
           const off = side === 'bid' ? Math.max(0, best - p) : Math.max(0, p - best);
           const before = c.book.sizeAt(side, Number(e.price));
@@ -172,6 +160,9 @@ function report(cells: Map<string, Cell>, qr: Map<string, Qr>) {
       spread: c.spread.summary(), quotedLevels: c.quotedLevels.summary(), depth10: c.depth10.summary(),
       wallSize: c.wallSize.summary(), wallRatio: c.wallRatio.summary(), wallOffset: c.wallOffset.summary(),
       levelSizeP50: c.levelSize.map((d) => d.q(0.5)), levelSizeMean: c.levelSize.map((d) => +d.mean().toFixed(1)),
+      // Where a level is quoted: how often, and its size's median and 90th percentile (the simulator draws from these).
+      levelQuoted: c.levelFilled.map((d) => +(d.xs.length / Math.max(1, c.levelSize[0].xs.length)).toFixed(3)),
+      levelFilledP50: c.levelFilled.map((d) => d.q(0.5)), levelFilledP90: c.levelFilled.map((d) => d.q(0.9)),
       tradesPerMin: c.tradesPerMin.summary(), deltasPerMin: c.deltasPerMin.summary(), tradeSize: c.tradeSize.summary(),
       takerYesShare: c.trades ? +(c.takerYes / c.trades).toFixed(3) : null,
     };
@@ -199,7 +190,7 @@ async function main() {
   console.log(`[depth] ${days.length} day(s): ${days[0].day}..${days[days.length - 1].day}`);
   console.log('[depth] shape by minutes to close and mid (each side; sizes in contracts, spread and offsets in cents)');
   for (const s of r.shape) {
-    console.log(`  ${s.tau.padEnd(9)} ${s.mid.padEnd(7)} n=${String(s.samples).padStart(6)}  spread p50 ${s.spread.p50} p90 ${s.spread.p90} | levels in 10c ${s.quotedLevels.p50} | depth10 p50 ${s.depth10.p50} | wall ${s.wallSize.p50} (x${(+s.wallRatio.p50).toFixed(1)} median, ${s.wallOffset.p50}c back) | lvl0-4 p50 ${s.levelSizeP50.slice(0, 5).join('/')} | trades/min ${s.tradesPerMin.mean} size p50 ${s.tradeSize.p50} | changes/min ${s.deltasPerMin.mean}`);
+    console.log(`  ${s.tau.padEnd(9)} ${s.mid.padEnd(7)} n=${String(s.samples).padStart(6)}  spread p50 ${s.spread.p50} p90 ${s.spread.p90} | levels in 10c ${s.quotedLevels.p50} | depth10 p50 ${s.depth10.p50} | wall ${s.wallSize.p50} (x${(+s.wallRatio.p50).toFixed(1)} median, ${s.wallOffset.p50}c back) | lvl0-4 quoted ${s.levelQuoted.slice(0, 5).join('/')} size p50 ${s.levelFilledP50.slice(0, 5).join('/')} p90 ${s.levelFilledP90.slice(0, 5).join('/')} | trades/min ${s.tradesPerMin.mean} size p50 ${s.tradeSize.p50} | changes/min ${s.deltasPerMin.mean}`);
   }
   console.log('[depth] queue-reactive flow (per second at each distance from best and queue size)');
   for (const f of r.flow) console.log(`  off ${String(f.offset).padStart(2)}c q ${f.queue.padEnd(9)} ${String(f.seconds).padStart(8)} s  add ${f.addPerSec} (p50 ${f.addSize.p50})  cancel ${f.cancelPerSec} (p50 ${f.cancelSize.p50})  trade ${f.tradePerSec}`);
