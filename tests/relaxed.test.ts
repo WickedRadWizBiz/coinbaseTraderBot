@@ -27,7 +27,9 @@ import { writeSyntheticRecordings } from '../research/synthetic';
 import { repriceRow, rowWeights, trainMetaModel } from '../research/trainMetaModel';
 import { tmpDir } from './helpers';
 
-const relaxed = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).strategy;
+// These tests were written against the ratchet policy and the 1c margin (the defaults until Oct 29; the fallback is now the
+// model exit at a 4c margin).
+const relaxed = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), EXIT_POLICY: 'confluence_ratchet', STRATEGY_EXIT_MARGIN: '0.01' }).strategy;
 
 // ---- Cadence -----------------------------------------------------------------
 

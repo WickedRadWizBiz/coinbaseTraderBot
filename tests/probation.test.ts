@@ -8,10 +8,11 @@ import { gatePasses, Probation, setProbation, DEFAULT_PROBATION } from '../bot/r
 import { minScoreFor } from '../bot/setups/lanes';
 import { tmpDir } from './helpers';
 
-test('defaults: unvalidated models trade on probation, and contracts exit on the ratchet', () => {
+test('defaults: unvalidated models trade on probation, and the model exit at a 4c margin is the fallback exit', () => {
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) });
   assert.equal(cfg.probation.mode, 'monitor');
-  assert.equal(cfg.strategy.exitPolicy, 'confluence_ratchet');
+  assert.equal(cfg.strategy.exitPolicy, 'fair_value');
+  assert.equal(cfg.strategy.exitMargin, 0.04);
   assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), VALIDATION_GATES: 'enforce', EXIT_POLICY: 'hold' }).probation.mode, 'enforce');
 });
 
