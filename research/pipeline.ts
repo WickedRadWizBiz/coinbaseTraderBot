@@ -124,7 +124,8 @@ import { trainCrossLead } from './crossLead';
 import { CL_SCHEMA, setCrossLeadPath } from '../bot/ta/crossLead';
 import { setCrossGraphPath, XG_SCHEMA } from '../bot/ta/crossGraph';
 import { LIB_SCHEMA, setLibrarianPath } from '../bot/ta/librarian';
-import { addBatch, addHistoryBatch, annotateTally, judgeBatch, judgeRows, nextHistoryDays, readQuoteFill, readTally, tallyEvidence, writeHistoryDays } from './goLiveTally';
+import { addBatch, addHistoryBatch, annotateTally, DEPTH_MODEL_FILE, judgeBatch, judgeRows, nextHistoryDays, readQuoteFill, readTally, tallyEvidence, writeHistoryDays } from './goLiveTally';
+import { readDepthModel } from './history/depthSim';
 
 const readLibSchema = (f: string): string | undefined => { try { return (JSON.parse(fs.readFileSync(f, 'utf8')) as { schema?: string }).schema; } catch { return undefined; } };
 import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, downloadBinanceOpenInterest, type BinanceMarket } from './history/binanceVision';
@@ -1171,7 +1172,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         const src = path.join(work, 'tally-history');
         const hData = path.join(work, 'tally-history.jsonl');
         try {
-          await writeHistoryDays(replayDir, next, src, fill);
+          await writeHistoryDays(replayDir, next, src, fill, fill.how === 'depth' ? readDepthModel(path.join(A.dir, DEPTH_MODEL_FILE)) : undefined);
           await buildDatasetMain(argsOf({ recordings: src, out: hData, every: 60, 'vol-model': volModelArg }));
           const { rows } = await readDataset(hData);
           const bt = rows.length ? await backtestMain(argsOf({

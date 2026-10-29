@@ -25,6 +25,7 @@ import { hashStr, normals } from './history/historyReplay';
 import { repriceRow, rowWeights } from './trainMetaModel';
 import { readJson } from '../bot/util/persist';
 import { recordingLines } from '../bot/marketdata/recordingFiles';
+import { DepthSim, readDepthModel, type DepthModel } from './history/depthSim';
 import { bootstrapMeanCi, deflatedSharpe, dieboldMariano } from './stats';
 
 /** Results older than this before the newest are dropped: a year of windows is about 3 MB. */
@@ -137,13 +138,18 @@ export function judgeRows(model: MetaModel, rows: DatasetRow[]): HoldoutJudged {
  *  the replay's own (the quote follows the index: research/history/historyReplay.ts requoteBetween); `worst` that, at
  *  the worse side of the minute so far; `noise` that, plus a Brownian bridge in log-odds pinned at the candles, of
  *  `sigma` per square-root second. research/replayFidelity.ts picks the one whose backtest is closest to the real
- *  quotes' on the recorded days (models/replay_fidelity.json); until it has, `worst`. */
-export const QUOTE_FILLS = ['hold', 'requote', 'worst', 'noise'] as const;
+ *  quotes' on the recorded days (models/replay_fidelity.json); until it has, `worst`. `depth` is `requote` with the
+ *  whole book around each quote and its changes and trades simulated from the recordings (research/history/depthSim.ts,
+ *  the model in models/depth_model.json); the history's minute trades give way to the simulated ones. */
+export const QUOTE_FILLS = ['hold', 'requote', 'worst', 'noise', 'depth'] as const;
 export type QuoteFill = { how: (typeof QUOTE_FILLS)[number]; sigma?: number };
+export const DEPTH_MODEL_FILE = 'depth_model.json';
 
 export function readQuoteFill(modelsDir: string): QuoteFill {
   const f = readJson<{ choice?: QuoteFill }>(path.join(modelsDir, 'replay_fidelity.json'))?.choice;
-  return f && (QUOTE_FILLS as readonly string[]).includes(f.how) && (f.how !== 'noise' || (f.sigma ?? 0) > 0) ? f : { how: 'worst' };
+  const ok = f && (QUOTE_FILLS as readonly string[]).includes(f.how) && (f.how !== 'noise' || (f.sigma ?? 0) > 0)
+    && (f.how !== 'depth' || readDepthModel(path.join(modelsDir, DEPTH_MODEL_FILE)) !== undefined);
+  return ok ? f! : { how: 'worst' };
 }
 
 type Book = { price: number; size: number };
@@ -195,15 +201,53 @@ export function quoteFiller(fill: QuoteFill): (e: Ev) => Ev | undefined {
 }
 
 /** A whole day through quoteFiller. */
-export function fillQuotes(events: Ev[], fill: QuoteFill): Ev[] {
-  const f = quoteFiller(fill);
-  return events.map(f).filter((e): e is Ev => e !== undefined);
+export function fillQuotes(events: Ev[], fill: QuoteFill, depth?: DepthModel): Ev[] {
+  const f = streamFiller(fill, depth);
+  return [...events.flatMap((e) => f.push(e)), ...f.end()];
+}
+
+/** The time between the replay's quotes (research/history/historyReplay.ts requotes every quarter-minute). */
+const ANCHOR_MS = 15_000;
+
+/** quoteFiller as a stream that can add records: `depth` plays the simulated book around each quote, its changes and
+ *  trades merged into the day in time order (a record is never written before one already written). */
+export function streamFiller(fill: QuoteFill, depth?: DepthModel): { push: (e: Ev) => Ev[]; end: () => Ev[] } {
+  if (fill.how !== 'depth') {
+    const f = quoteFiller(fill);
+    return { push: (e) => { const x = f(e); return x ? [x] : []; }, end: () => [] };
+  }
+  if (!depth) throw new Error('the depth fill-in needs a depth model (models/depth_model.json)');
+  const anchors = quoteFiller({ how: 'requote' });
+  const sim = new DepthSim(depth);
+  const close = new Map<string, number>();
+  let pending: Ev[] = [];
+  const due = (t: number) => { const i = pending.findIndex((x) => x.t >= t); const out = i < 0 ? pending : pending.slice(0, i); pending = i < 0 ? [] : pending.slice(i); return out; };
+  return {
+    push: (raw) => {
+      const e = anchors(raw);
+      const out = due(raw.t);
+      if (!e) return out;
+      if (e.k === 'market' && e.ticker && e.closeTime) close.set(e.ticker, Number(e.closeTime));
+      const c = e.ticker ? close.get(e.ticker) : undefined;
+      if (c === undefined) return [...out, e];
+      if (e.k === 'trade') return out;
+      if (e.k === 'result') { sim.forget(e.ticker!); close.delete(e.ticker!); pending = pending.filter((x) => x.ticker !== e.ticker); return [...out, e]; }
+      if (e.k !== 'book' || !e.bids?.length || !e.asks?.length) return [...out, e];
+      // A new quote: what was simulated after it for this contract gives way to the book played from it.
+      pending = pending.filter((x) => x.ticker !== e.ticker);
+      const played = sim.play(e.ticker!, e.t, e.bids[0].price, e.asks[0].price, e.t + ANCHOR_MS, c) as Ev[];
+      if (!played.length) return [...out, e];
+      pending = [...pending, ...played.slice(1)].sort((a, b) => a.t - b.t);
+      return [...out, played[0]];
+    },
+    end: () => { const out = pending; pending = []; return out; },
+  };
 }
 
 /** One day's file through quoteFiller, a line at a time (a whole recorded day is longer than the longest string V8
  *  allows, so it is never read into one). */
-export async function fillDayFile(src: string, dst: string, fill: QuoteFill): Promise<void> {
-  const f = quoteFiller(fill);
+export async function fillDayFile(src: string, dst: string, fill: QuoteFill, depth?: DepthModel): Promise<void> {
+  const f = streamFiller(fill, depth);
   const gz = zlib.createGzip({ level: 1 });
   const done = new Promise<void>((resolve, reject) => {
     const out = fs.createWriteStream(dst);
@@ -219,22 +263,22 @@ export async function fillDayFile(src: string, dst: string, fill: QuoteFill): Pr
   };
   for await (const line of recordingLines(src)) {
     if (!line) continue;
-    const e = f(JSON.parse(line) as Ev);
-    if (e) buf.push(JSON.stringify(e) + '\n');
+    for (const e of f.push(JSON.parse(line) as Ev)) buf.push(JSON.stringify(e) + '\n');
     if (buf.length >= 2000) await flush();
   }
+  for (const e of f.end()) buf.push(JSON.stringify(e) + '\n');
   await flush();
   gz.end();
   await done;
 }
 
 /** Write the history days into `dir` as the tally plays them (quoteFiller), named as recordings are. */
-export async function writeHistoryDays(replayDir: string, days: readonly string[], dir: string, fill: QuoteFill = { how: 'worst' }): Promise<void> {
+export async function writeHistoryDays(replayDir: string, days: readonly string[], dir: string, fill: QuoteFill = { how: 'worst' }, depth?: DepthModel): Promise<void> {
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   for (const d of days) {
     const name = `md-${d}.jsonl.gz`;
-    await fillDayFile(path.join(replayDir, name), path.join(dir, name), fill);
+    await fillDayFile(path.join(replayDir, name), path.join(dir, name), fill, depth);
   }
 }
 
