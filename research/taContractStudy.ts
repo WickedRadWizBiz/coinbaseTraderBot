@@ -40,11 +40,32 @@ import { downloadBinance } from './history/binanceVision';
 import { buildHistoryReplay, replayKalshiDays } from './history/historyReplay';
 import { downloadKalshiHistory } from './history/kalshiHistory';
 import { series15m } from './kalshiReplayData';
+import { gradeHorizons, IFTRADES_TRIGGERS, loadTriggers, type CoinTriggers, type HorizonGrade } from './iftradesTriggers';
 import { dieboldMariano } from './stats';
 import { rowWeights, trainMetaModel, type TrainReport } from './trainMetaModel';
 
 /** The feature sets compared: the fair value's geometry alone, then the TA library and the confluence readings on top. */
-export const STUDY_SETS = ['base', 'base+ta', 'base+ta+taconf', 'base+momentum+confluence', 'base+ta+taconf+momentum+confluence', 'base+ta+taconf+momentum+confluence+vol+clock'];
+export const STUDY_SETS = ['base', 'base+ta', 'base+ta+taconf', 'base+momentum+confluence', 'base+ta+taconf+momentum+confluence', 'base+ta+taconf+momentum+confluence+vol+clock', 'base+iftrades', 'base+momentum+confluence+iftrades'];
+/** Study-only group: the operator's iftrades strategy triggers (research/iftradesTriggers.ts), read into every row. */
+export const IFTRADES_GROUP = 'iftrades';
+
+export interface TriggerContracts { trigger: string; side: 1 | -1; contracts: number; upShare: number; fvMean: number; z: number }
+
+/** Per trigger and side, over the first row of each contract: how often the contract settled Up against what the fair
+ *  value said, and the normal z of that difference (binomial, independent contracts). */
+export function triggerContracts(rows: DatasetRow[]): TriggerContracts[] {
+  const first = new Map<string, DatasetRow>();
+  for (const r of rows) { const k = `${r.asset}:${r.window}`; const f = first.get(k); if (!f || r.t < f.t) first.set(k, r); }
+  const out: TriggerContracts[] = [];
+  for (const trigger of IFTRADES_TRIGGERS) for (const side of [1, -1] as const) {
+    let n = 0, up = 0, fv = 0;
+    for (const r of first.values()) if (r.fx[trigger] === side) { n++; up += r.label; fv += r.fv; }
+    const fvMean = n ? fv / n : NaN, upShare = n ? up / n : NaN;
+    const z = n ? (upShare - fvMean) / Math.sqrt(Math.max(1e-9, (fvMean * (1 - fvMean)) / n)) : NaN;
+    out.push({ trigger, side, contracts: n, upShare, fvMean, z });
+  }
+  return out;
+}
 
 export interface StackFit { w: number; devLogLoss: number; testLogLoss: number; testMidLogLoss: number; dm: ReturnType<typeof dieboldMariano> }
 
@@ -55,6 +76,7 @@ export interface StudyReport {
   phase1: { cv: TrainReport['cv']; base?: TrainReport['cv'][number]; selected: TrainReport['selected']; holdout: TrainReport['holdout']; dropped: TrainReport['dropped'];
     /** Each set's out-of-fold edge over 'base' in standard errors of its own log loss (> 1 earns its place). */
     edge: Array<{ set: string; model: string; features: number; dLogLoss: number; se: number; sigma: number }> };
+  iftrades?: { contracts: TriggerContracts[]; horizons: HorizonGrade[] };
   phase2?: { rows: number; windows: number; logLoss: { model: number; fairValue: number; mid: number }; dm: ReturnType<typeof dieboldMariano>;
     stack: StackFit };
 }
@@ -88,7 +110,8 @@ export async function taContractStudyMain(): Promise<StudyReport> {
   // for each of them, so this caps the rows a run reads back into memory (the trainer weights contracts equally anyway).
   const maxContracts = Number(arg('max-contracts', '60000'));
   // Only the inputs the compared sets read go into the rows (the full production vector is ~400 inputs a row).
-  const keep = new Set(featuresInGroups([...new Set(sets.flatMap((x) => x.split('+')))] as FeatureGroup[]));
+  const keep = new Set(featuresInGroups([...new Set(sets.flatMap((x) => x.split('+')))].filter((g) => g !== IFTRADES_GROUP) as FeatureGroup[]));
+  const iftrades = !process.argv.includes('--no-iftrades') && sets.some((x) => x.split('+').includes(IFTRADES_GROUP));
   fs.mkdirSync(out, { recursive: true });
 
   // 1. History. The 1-minute bars make the index prints and the 1m / 5m candles; the replay reads the 15m, hourly and
@@ -116,6 +139,8 @@ export async function taContractStudyMain(): Promise<StudyReport> {
     for (const n of r.notes) log(`replay: ${n}`);
   }
   const kalshiDays = replayKalshiDays(replay).length;
+  // 2b. The iftrades triggers, from the same 1-minute history (every row gets their values at its time).
+  const triggers: Map<string, CoinTriggers> = iftrades ? await loadTriggers(history, assets, from, to, (m) => log(`iftrades: ${m}`)) : new Map();
   // 3. Rows, streamed to disk as contracts settle.
   const file = path.join(out, 'rows.jsonl');
   let total = 0, synth = 0, contracts = 0, skippedContracts = 0;
@@ -145,6 +170,8 @@ export async function taContractStudyMain(): Promise<StudyReport> {
         if (r.synthetic && !keepContract(r.ticker)) return;
         const fx: Record<string, number> = {};
         for (const k of Object.keys(r.fx)) if (keep.has(k)) fx[k] = r.fx[k];
+        const tg = triggers.get(r.asset);
+        if (tg) Object.assign(fx, tg.at(r.t));
         buf.push(JSON.stringify({ ...r, fx }) + '\n'); total++; if (r.synthetic) synth++; if (buf.length >= 2000) drain();
       },
     });
@@ -159,16 +186,26 @@ export async function taContractStudyMain(): Promise<StudyReport> {
   if (synthRows.length < 1000) throw new Error(`too few synthetic rows (${synthRows.length}): is the 1-minute history there?`);
 
   // 4. Phase 1: the trainer, trees only, one configuration per set; no take model, no Student-t search.
-  const t = await trainMetaModel(synthRows, { sets, families: ['gbdt'], takeModel: false, ensemble: 1, cpcvGroups: 0, fixedNu: null, depths: [2, 3], log: (m) => log(`train: ${m}`) });
+  const t = await trainMetaModel(synthRows, { sets, families: ['gbdt'], takeModel: false, ensemble: 1, cpcvGroups: 0, fixedNu: null, depths: [2, 3], extraGroups: iftrades ? { [IFTRADES_GROUP]: [...IFTRADES_TRIGGERS] } : undefined, log: (m) => log(`train: ${m}`) });
   const base = t.cv.filter((c) => c.set === 'base').sort((a, b) => a.oosLogLoss - b.oosLogLoss)[0];
   const edge = t.cv.map((c) => ({ set: c.set, model: c.model, features: c.features, dLogLoss: base ? base.oosLogLoss - c.oosLogLoss : NaN, se: c.se, sigma: base && c.se > 0 ? (base.oosLogLoss - c.oosLogLoss) / c.se : NaN }));
   console.table(edge.map((e) => ({ ...e, dLogLoss: +e.dLogLoss.toFixed(5), se: +e.se.toFixed(5), sigma: +e.sigma.toFixed(2) })));
   // A set missing from the table resolved to another set's features once its mostly-missing inputs were dropped.
   for (const [set, names] of Object.entries(t.dropped)) log(`train: dropped from ${set}: ${names.length} input(s): ${names.slice(0, 12).join('; ')}${names.length > 12 ? '; ...' : ''}`);
   const present = (name: string) => synthRows.filter((r) => Number.isFinite(r.fx[name])).length / synthRows.length;
-  log(`inputs present in synthetic rows: ${['ta_rsi_1h', 'ta_rsi_15m', 'ta_ema_stack_1h', 'taconf_net_trend', 'taconf_mtf_momentum', 'conf_count', 'ret_1h_z', 'tanet_up_1h'].map((n) => `${n} ${(present(n) * 100).toFixed(0)}%`).join(', ')}`);
+  log(`inputs present in synthetic rows: ${['ta_rsi_1h', 'ta_rsi_15m', 'ta_ema_stack_1h', 'taconf_net_trend', 'taconf_mtf_momentum', 'conf_count', 'ret_1h_z', 'tanet_up_1h', 'if_rsi20_15m', 'if_dip_2_4h'].map((n) => `${n} ${(present(n) * 100).toFixed(0)}%`).join(', ')}`);
   log(`phase 1: selected ${t.selected.set} / ${t.selected.model} (${t.selected.rule}); holdout log loss model ${t.holdout.logLossModel.toFixed(5)} vs fair value ${t.holdout.logLossMarket.toFixed(5)} over ${t.holdout.nWindows} windows (Brier ${t.holdout.brierModel.toFixed(5)} vs ${t.holdout.brierFairValue.toFixed(5)})`);
   const report: StudyReport = { from, to, assets, replay: { ...rep, kalshiDays }, rows: { total, kept: rows.length, synthetic: synthRows.length, real: realRows.length, windows }, phase1: { cv: t.cv, base, selected: t.selected, holdout: t.holdout, dropped: t.dropped, edge } };
+
+  // 4b. The iftrades triggers on their own: contracts that settled Up after each, and the spot path after each firing.
+  if (triggers.size) {
+    const contracts = triggerContracts(rows), horizons = gradeHorizons(triggers, [15, 60, 240], from, to);
+    report.iftrades = { contracts, horizons };
+    log('iftrades: contracts whose first snapshot had the trigger on (side +1 = the strategy\'s buy condition), share settled Up vs the fair value\'s share; 200+ contracts shown');
+    console.table(contracts.filter((c) => c.contracts >= 200).map((c) => ({ ...c, upShare: +c.upShare.toFixed(4), fvMean: +c.fvMean.toFixed(4), z: +c.z.toFixed(2) })));
+    log('iftrades: spot log return after each non-overlapping firing, in the firing\'s direction (bps, before fees; a spot round trip costs ~10 bps)');
+    console.table(horizons.filter((h) => h.n >= 30).map((h) => ({ ...h, hit: +h.hit.toFixed(3), meanBps: +h.meanBps.toFixed(1), tStat: +h.tStat.toFixed(2) })));
+  }
 
   // 5. Phase 2: the chosen model on Kalshi's real contracts, against the mid; then the stack.
   if (realRows.length >= 500) {
