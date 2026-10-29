@@ -79,3 +79,11 @@ test('exits, gates and feeds', () => {
   assert.equal(row(rows, 'volatility forecast').state, 'off');
   assert.match(ledgerLine(tp), /dollars vs holding to settlement: -41.2 \(n=30\)/);
 });
+
+test('a market-state row per coin', () => {
+  const rows = buildLedger(base({ marketState: { BTC: { rv1h: 0.0001, changeProb: 0.12, spread: 0.02 }, ETH: { rv1h: null, changeProb: null, spread: null } } }));
+  assert.equal(row(rows, 'market state BTC').state, 'on');
+  assert.equal(row(rows, 'market state BTC').score?.value, 0.12);
+  assert.equal(row(rows, 'market state ETH').state, 'off');
+  assert.equal(row(rows, 'market state ETH').flags.length, 2);
+});

@@ -73,6 +73,8 @@ export interface LedgerInput {
   /** Index age per asset (ms; null = never seen). */
   indexAgeMs: Record<string, number | null>;
   maxIndexAgeMs: number;
+  /** Market-state readings per coin (bot/marketdata/marketState.ts). */
+  marketState?: Record<string, { rv1h: number | null; changeProb: number | null; spread: number | null }> | null;
 }
 
 const r4 = (x: number | null | undefined): number | null => (x === null || x === undefined || !Number.isFinite(x) ? null : +x.toFixed(4));
@@ -149,6 +151,10 @@ export function buildLedger(x: LedgerInput): ModuleRow[] {
   for (const [asset, age] of Object.entries(x.indexAgeMs).sort(([a], [b]) => a.localeCompare(b))) {
     const stale = age === null || age > x.maxIndexAgeMs;
     rows.push({ module: `index ${asset}`, area: 'data', state: stale ? 'off' : 'on', validated: null, score: { label: 'seconds since the last index value', value: age === null ? null : +(age / 1000).toFixed(1), n: 0 }, flags: stale ? ['stale: blocks new orders on it'] : [] });
+  }
+  for (const [asset, r] of Object.entries(x.marketState ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
+    const flags = [r.rv1h === null ? 'volatility: under an hour of index minutes' : '', r.spread === null ? 'no Kalshi book in 5 minutes' : ''].filter(Boolean);
+    rows.push({ module: `market state ${asset}`, area: 'data', state: r.rv1h === null ? 'off' : 'on', validated: null, score: { label: 'P(change point in the last 5 minutes)', value: r4(r.changeProb), n: 0 }, flags });
   }
   return rows;
 }
