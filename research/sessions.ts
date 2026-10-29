@@ -147,7 +147,8 @@ export async function fitAndValidateVolProfile(dir: string, returns: SessionRese
   return final;
 }
 
-/** Reduce-only SESSION_RISK recommendation from a per-session backtest breakdown. */
+/** SESSION_RISK recommendation from a per-session backtest breakdown (shrinks losing sessions, grows reliably earning
+ *  ones at half weight). */
 export function recommendSessionRisk(
   perSessionWindowEdges: Map<string, number[]>,
   stats: SessionStats[],
@@ -171,6 +172,7 @@ export function recommendSessionRisk(
     const entry: Record<string, number> = {};
     if (ci.hi < 0) entry.sizeMult = 0;            // reliably losing: no new risk
     else if (ci.lo < 0) entry.sizeMult = 0.5;     // not distinguishable from zero: halve
+    else entry.sizeMult = 1.25;                   // reliably earning: grow at half the weight of the halving step
     if (st?.medianSpread != null && Number.isFinite(typicalSpread) && st.medianSpread > 1.5 * typicalSpread) entry.minEdgeAdd = 0.01;
     if (Object.keys(entry).length) profile[k] = entry;
     row.recommendation = Object.keys(entry).length ? entry : 'neutral';
@@ -214,8 +216,14 @@ export async function sessionsMain(argOf: (k: string, d: string) => string = cli
     const rec = recommendSessionRisk(perSession, m.stats);
     console.log('per-session evidence (fee-inclusive net edge per contract, bootstrap 95% CI over windows):');
     console.table(rec.evidence);
-    console.log('recommended SESSION_RISK (review, then set in the server .env):');
+    console.log('recommended SESSION_RISK (applied by the bot from session_risk.json when SESSION_RISK_AUTO=true):');
     console.log(`SESSION_RISK='${JSON.stringify(rec.profile)}'`);
+    const riskOut = argOf('risk-out', '');
+    if (riskOut) {
+      fs.mkdirSync(path.dirname(riskOut), { recursive: true });
+      fs.writeFileSync(riskOut, JSON.stringify({ version: `session-risk-${new Date().toISOString().slice(0, 16)}`, model: model.id, profile: rec.profile, evidence: rec.evidence }, null, 2) + '\n');
+      console.log(`wrote ${riskOut}`);
+    }
   }
 }
 

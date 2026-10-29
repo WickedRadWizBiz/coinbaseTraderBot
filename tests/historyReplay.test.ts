@@ -218,3 +218,20 @@ test('history replay: a build that adds days continues from the saved state (sam
   for (const d of ['2026-03-03', '2026-03-04']) assert.ok(read(a, d) === read(c, d), `${d}: identical after the late data`);
   assert.match(read(a, '2026-03-03'), /KXBTC15M-LATE/);
 });
+
+test('history replay: a walk block built in a new folder from the end state the walk carried matches one long build', async () => {
+  const hist = tmpDir(), one = path.join(tmpDir(), 'one'), b1 = path.join(tmpDir(), 'b1'), b2 = path.join(tmpDir(), 'b2');
+  writeHistory(hist);
+  const opts = { historyDir: hist, assets: ['BTC'], log: () => {} };
+  await buildHistoryReplay({ ...opts, outDir: one, fromDay: '2026-03-01', toDay: '2026-03-04' });
+  // Block 1 (warm-up day 03-01, then 03-02 and 03-03) keeps every day's end state; walked to 03-04, the walk carries
+  // only the end of 03-02 to the next block, which warms up on 03-03.
+  await buildHistoryReplay({ ...opts, outDir: b1, fromDay: '2026-03-01', toDay: '2026-03-03', keepAllStates: true });
+  assert.deepEqual(fs.readdirSync(path.join(b1, 'replay-states')).sort(), ['2026-03-01.json.gz', '2026-03-02.json.gz', '2026-03-03.json.gz']);
+  fs.mkdirSync(path.join(b2, 'replay-states'), { recursive: true });
+  fs.copyFileSync(path.join(b1, 'replay-states', '2026-03-02.json.gz'), path.join(b2, 'replay-states', '2026-03-02.json.gz'));
+  const next = await buildHistoryReplay({ ...opts, outDir: b2, fromDay: '2026-03-03', toDay: '2026-03-04', keepAllStates: true });
+  assert.deepEqual([next.resumed, next.written], ['2026-03-02', 2]);
+  const read = (dir: string, d: string) => zlib.gunzipSync(fs.readFileSync(path.join(dir, `md-${d}.jsonl.gz`))).toString();
+  for (const d of ['2026-03-03', '2026-03-04']) assert.ok(read(b2, d) === read(one, d), `${d}: the same day as in one build`);
+});

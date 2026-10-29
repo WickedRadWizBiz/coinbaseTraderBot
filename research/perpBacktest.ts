@@ -6,6 +6,7 @@
 // validation.backtest, which (with a passing walk-forward validation) unlocks full-size live trading.
 //
 //   npm run research:perp-backtest -- --recordings data/recordings --model params/perp_model.candidate.json [--annotate]
+//         [--from YYYY-MM-DD: trade from that day, the days before only warm up] [--min-days N: days needed to pass]
 
 import fs from 'fs';
 import path from 'path';
@@ -14,8 +15,9 @@ import { PerpHedger } from '../bot/perps/hedger';
 import { PaperPerpExchange } from '../bot/perps/paperPerp';
 import { PerpModel } from '../bot/perps/perpSignal';
 import { PerpTrader, type PerpTraderParams } from '../bot/perps/perpTrader';
-import { readRecordings, ReplayState } from './replay';
+import { readRecordings, ReplayState, type LineFilter } from './replay';
 import { bootstrapMeanCi, deflatedSharpe } from './stats';
+import { perpLines } from './trainPerpModel';
 
 export interface PerpBacktestResult {
   days: number;
@@ -41,12 +43,17 @@ export function traderParams(P: PerpsConfig): PerpTraderParams {
   };
 }
 
-/** Days of quotes the backtest needs before it can pass. The bot keeps 20 days of recordings (RECORDINGS_KEEP_DAYS), so
- *  only the replayed history ever has them. */
+/** Days of quotes the backtest needs to pass on the history replay's held-out weeks. */
 export const PERP_BACKTEST_MIN_DAYS = 30;
+/** On the bot's recordings (it keeps 20 days, RECORDINGS_KEEP_DAYS) the newest week is held out of training and replayed
+ *  here, out of sample, and the backtest passes from 5 days of quotes (a daily deflated Sharpe reads 5 days or more). */
+export const PERP_RECORDED_TEST_DAYS = 7;
+export const PERP_RECORDED_MIN_DAYS = 5;
 
-/** `opts.state`: the replay's state (a test reads what it holds at the end). */
-export async function runPerpBacktest(dir: string, P: PerpsConfig, model: PerpModel | undefined, opts: { startBalance?: number; trials?: number; minDays?: number; state?: ReplayState } = {}): Promise<PerpBacktestResult> {
+/** `opts.from`: the first day traded (YYYY-MM-DD); the days before it only warm the trackers up. `opts.keep`: the lines
+ *  parsed (default perpLines: the perps read no Kalshi contract; null: all). `opts.state`: the replay's state (a test
+ *  reads what it holds at the end). */
+export async function runPerpBacktest(dir: string, P: PerpsConfig, model: PerpModel | undefined, opts: { startBalance?: number; trials?: number; minDays?: number; from?: string; keep?: LineFilter | null; state?: ReplayState } = {}): Promise<PerpBacktestResult> {
   const st = opts.state ?? new ReplayState();
   const hub = st.features.perps;
   const tickerAsset = (t: string) => [...hub.byAsset.entries()].find(([, s]) => s.latest?.ticker === t)?.[0];
@@ -61,9 +68,10 @@ export async function runPerpBacktest(dir: string, P: PerpsConfig, model: PerpMo
   const daily: number[] = [];
   let dayKey = '', dayStart = start, first = 0, lastTick = 0, trades = 0, quoted = false, sweepAt = 0;
   const lastPos = new Map<string, number>();
-  for await (const e of readRecordings(dir)) {
+  const fromMs = opts.from ? Date.parse(`${opts.from}T00:00:00Z`) : -Infinity;
+  for await (const e of readRecordings(dir, undefined, undefined, undefined, opts.keep === null ? undefined : (opts.keep ?? perpLines))) {
     st.apply(e);
-    if (!first) first = st.now;
+    if (!first && st.now >= fromMs) first = st.now;
     // Perps read only the asset-level series: a Kalshi market that is over goes with its book (weeks of recordings
     // with every contract do not fit the remote training's heap).
     if (st.now >= sweepAt) { st.forgetClosed(); sweepAt = st.now + 60_000; }
@@ -72,6 +80,7 @@ export async function runPerpBacktest(dir: string, P: PerpsConfig, model: PerpMo
     // dominance of an instant as one burst of same-time records).
     if (e.tie || !quoted) continue;
     quoted = false;
+    if (st.now < fromMs) continue;
     sim.step();
     // Decide right after a quote arrives (live polls every ~2 s, so decisions always see a fresh quote).
     if (st.now - lastTick < 5_000) continue;
@@ -107,7 +116,8 @@ export async function perpBacktestMain(argOf: (k: string, d: string) => string =
   const modelPath = argOf('model', cfg.perps.modelPath);
   const model = PerpModel.load(modelPath);
   if (!model) console.warn(`no model at ${modelPath}: backtesting the momentum prior at pilot size`);
-  const r = await runPerpBacktest(argOf('recordings', 'data/recordings'), cfg.perps, model, { startBalance: Number(argOf('balance', String(cfg.perps.paperBalanceUsd))) });
+  const minDays = Number(argOf('min-days', '')), from = argOf('from', '');
+  const r = await runPerpBacktest(argOf('recordings', 'data/recordings'), cfg.perps, model, { startBalance: Number(argOf('balance', String(cfg.perps.paperBalanceUsd))), ...(minDays > 0 ? { minDays } : {}), ...(from ? { from } : {}) });
   const { dailyPnl: _d, ...summary } = r;
   console.table([{ ...summary, pnlUsd: +r.pnlUsd.toFixed(2), fees: +r.fees.toFixed(2), funding: +r.funding.toFixed(2), days: +r.days.toFixed(1) }]);
   if (annotate && model && fs.existsSync(modelPath)) {

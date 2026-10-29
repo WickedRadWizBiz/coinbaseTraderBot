@@ -5,7 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { championDecision } from '../research/champion';
 import { daysOf, HistoryLedger, HOLDOUT_RULE, isHoldout, isoWeek, spread, weekBlocks } from '../research/historyLedger';
-import { dailyStats, ledgerStatus, solidWholeBot, targetMet } from '../research/readiness';
+import { dailyStats, ledgerStatus, READINESS_RECORDED_DAYS, solidWholeBot, targetMet } from '../research/readiness';
 import { holdoutDays, perpRuleRecord, type PerpRow } from '../research/trainPerpModel';
 import { PERP_FEATURES, PerpModel } from '../bot/perps/perpSignal';
 import { tmpDir } from './helpers';
@@ -121,6 +121,17 @@ test('readiness: daily results in % of the pool, the target met only consistentl
   assert.equal(solidWholeBot(modest).solid, true, '+0.32% a day, steadily');
   assert.equal(targetMet(modest, t).met, false);
   assert.equal(targetMet(modest, { ...t, dailyPct: 0.2 }).met, true);
+});
+
+test('readiness on the recordings (20 days kept): 5 days pass, and one day well short of the target fails them', () => {
+  const t = { poolUsd: 200, dailyPct: 50, maxDdPct: 10, minDays: READINESS_RECORDED_DAYS };
+  const good = dailyStats([120, 120, 120, 120, 90], 200);
+  assert.deepEqual(targetMet(good, t), { met: true, why: [] });
+  assert.equal(solidWholeBot(good, READINESS_RECORDED_DAYS).solid, true);
+  assert.equal(solidWholeBot(good).solid, false, 'the history replay still takes 30 days');
+  assert.equal(targetMet(dailyStats([120, 120, 120, 120, 60], 200), t).met, false, 'a 54% mean, one day at 30%');
+  assert.equal(solidWholeBot(dailyStats([2, 2, 2, 2, -3], 200), READINESS_RECORDED_DAYS).solid, false);
+  assert.ok(targetMet(dailyStats([120, 120, 120, 120], 200), t).why.some((w) => /4 held-out day\(s\), need 5/.test(w)));
 });
 
 test('champion: a promotion counts as an improvement only when the challenger beat the model in use', () => {

@@ -74,7 +74,7 @@ test('session research: measures sessions, and will not validate a profile on to
   assert.ok(p.assets.BTC && p.assets['*']);
 });
 
-test('session risk recommendations are reduce-only and need enough windows', () => {
+test('session risk recommendations shrink losers, grow reliable earners at half weight, and need enough windows', () => {
   const lose = Array.from({ length: 40 }, (_, i) => -0.05 + (i % 3) * 0.001);
   const flat = Array.from({ length: 40 }, (_, i) => (i % 2 ? 0.02 : -0.02));
   const rec = recommendSessionRisk(new Map([['twilight', lose], ['london', flat], ['asia', [0.1]]]), []);
@@ -82,4 +82,9 @@ test('session risk recommendations are reduce-only and need enough windows', () 
   assert.deepEqual(rec.profile.london, { sizeMult: 0.5 });
   assert.equal(rec.profile.asia, undefined);
   assert.match(String(rec.evidence.find((e) => e.session === 'asia')!.recommendation), /insufficient/);
+});
+
+test('a reliably earning session grows at half the weight of the halving step', () => {
+  const win = Array.from({ length: 40 }, (_, i) => 0.05 + (i % 3) * 0.001);
+  assert.deepEqual(recommendSessionRisk(new Map([['new_york', win]]), []).profile.new_york, { sizeMult: 1.25 });
 });

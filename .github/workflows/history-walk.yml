@@ -1,0 +1,160 @@
+# History walk (research/historyWalk.ts): each spiking network walks the years of history in time order on a GitHub
+# runner, a block of days per run, its population carried from run to run as if time had never stopped. While a
+# network is behind, each run starts the next one as it ends; once it has caught up, the daily run walks the newest
+# days. The laptop trainer walks the same networks: where each stands and its population live on the server, and a
+# lease there lets one walker at a time take a network, so no day is walked twice.
+#
+#   1. takes the network's lease on the server (another walker holding it: this run ends at once)
+#   2. copies the walk's own folder from the server (the population, the replay builder's state, where it stands), and
+#      for the block's days Kalshi's settled contracts and the dominance series; nothing else (the Binance archives
+#      come from data.binance.vision, the recordings and the rest of the history stay on the server)
+#   3. walks (MINUTES), copies the walk's folder back, gives the lease back, and while the network is still behind
+#      starts the next run
+#
+# The daily training (train.yml, snn-<net>-train) starts from the walk's best network and is judged as usual on the
+# newest days it did not train on. This repository is public: the job prints days, minutes and fitness numbers only.
+#
+# Required secrets (the same as Deploy): LIGHTSAIL_HOST, LIGHTSAIL_USERNAME, LIGHTSAIL_SSH_KEY (optional LIGHTSAIL_PORT).
+name: History walk
+
+on:
+  schedule:
+    - cron: '41 1 * * *'
+  workflow_dispatch:
+    inputs:
+      net:
+        description: 'Network to walk: crypto or perps (empty: both)'
+        required: false
+        default: ''
+      minutes:
+        description: 'Walking time, minutes (the block is sized to fit it)'
+        required: false
+        default: '270'
+
+permissions:
+  contents: read
+  # Starts the next run while a network is behind.
+  actions: write
+
+jobs:
+  walk:
+    strategy:
+      fail-fast: false
+      matrix:
+        net: ${{ fromJSON(inputs.net && format('["{0}"]', inputs.net) || '["crypto","perps"]') }}
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 340
+    env:
+      NET: ${{ matrix.net }}
+      MINUTES: ${{ inputs.minutes || '270' }}
+      HOLDER: github-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+
+      - name: Take the walk's lease
+        id: lease
+        run: |
+          set +e
+          ssh bot "$(node --import tsx research/historyWalk.ts lease take --net "$NET" --holder "$HOLDER" --ttl-min 345)"; c=$?
+          case $c in
+            0) echo "held=true" >> "$GITHUB_OUTPUT";;
+            3) echo "held=false" >> "$GITHUB_OUTPUT"; echo "another walker has the $NET walk: nothing to do";;
+            *) exit $c;;
+          esac
+
+      - name: Copy the walk and the block's inputs from the server (read-only)
+        if: steps.lease.outputs.held == 'true'
+        id: pull
+        run: |
+          set -euo pipefail
+          DATA="$GITHUB_WORKSPACE/data"; W="$DATA/models/work/history-walk/$NET"; H="$RUNNER_TEMP/walk/history"
+          mkdir -p "$W" "$H"
+          # The walk's folder (an error copying an existing one ends the run: it must never start over by mistake).
+          if ssh bot "test -d ~/bot/data/models/work/history-walk/$NET"; then
+            rsync -a --rsync-path="nice -n 19 rsync" --exclude 'pbt/round/' "bot:bot/data/models/work/history-walk/$NET/" "$W/"
+          else echo "no $NET walk on the server yet: it starts at the beginning"; fi
+          # The server's settings without any credential, and without server paths (this runner has its own).
+          ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$RUNNER_TEMP/walk.env" || true
+          set -a; . "$RUNNER_TEMP/walk.env"; set +a
+          export DATA_DIR="$DATA" TRADING_MODE=paper AUTO_TRAIN=off
+          node --import tsx research/historyWalk.ts plan --net "$NET" --minutes "$MINUTES" | tee "$RUNNER_TEMP/plan.json"
+          # Kalshi's settled contracts of the block's days and the day after each (contracts running past midnight),
+          # and the BTC.D / USDT.D series the replay anchors dominance to: small files.
+          python3 -c 'import json,sys,datetime as d; p=json.load(open(sys.argv[1]));
+          [print("*/%s.jsonl" % (d.date.fromisoformat(p["warmUp"]) + d.timedelta(days=i)).isoformat()) for i in range(p.get("days",0)+2)] if not p.get("caughtUp") else None' "$RUNNER_TEMP/plan.json" > "$RUNNER_TEMP/kalshi-days.txt"
+          if [ "$NET" = crypto ] && [ -s "$RUNNER_TEMP/kalshi-days.txt" ] && ssh bot "test -d ~/bot/data/history/kalshi"; then
+            rsync -a --rsync-path="nice -n 19 rsync" --include='*/' --include-from="$RUNNER_TEMP/kalshi-days.txt" --exclude='*' --prune-empty-dirs bot:bot/data/history/kalshi/ "$H/kalshi/"
+          fi
+          rsync -a --rsync-path="nice -n 19 rsync" --include='/tradingview/' --include='/binance-index/' --include='/bot-index/' --include='/*/BTC.D/***' --include='/*/USDT.D/***' --exclude='*' bot:bot/data/history/ "$H/" || true
+          echo "from the server: walk folder $(du -sh "$W" | cut -f1), Kalshi day files $(find "$H/kalshi" -type f 2>/dev/null | wc -l)"
+
+      - name: Walk
+        if: steps.lease.outputs.held == 'true'
+        id: walk
+        run: |
+          set +e -uo pipefail
+          DATA="$GITHUB_WORKSPACE/data"
+          set -a; . "$RUNNER_TEMP/walk.env"; set +a
+          # One worker thread per core: three members walking and the next day's tape (research/historyWalk.ts).
+          export DATA_DIR="$DATA" TRADING_MODE=paper AUTO_TRAIN=off TRAIN_WORKERS="$(nproc)" TRAIN_WORKER_HEAP_MB=3072 SNN_TAPE_CACHE_GB=3
+          export NODE_OPTIONS="--max-old-space-size=4096"
+          node --import tsx research/historyWalk.ts run --net "$NET" --minutes "$MINUTES" --work "$RUNNER_TEMP/walk" --history "$RUNNER_TEMP/walk/history" --by "$HOLDER" > "$RUNNER_TEMP/walk.log" 2>&1; c=$?
+          # Days, minutes and fitness only (public repo): the block's lines and the last rounds.
+          grep -E "^\[walk\] $NET: (block|[0-9]+ archive|[0-9]+ replay|walked|caught up|no trades)" "$RUNNER_TEMP/walk.log" | cut -c1-220
+          grep -E "^\[walk\] $NET: round " "$RUNNER_TEMP/walk.log" | tail -5 | cut -c1-220
+          grep -E '^history walk failed|FATAL ERROR|heap out of memory' "$RUNNER_TEMP/walk.log" | head -3 | cut -c1-220
+          grep -E '^WALK ' "$RUNNER_TEMP/walk.log" | tail -1 | sed 's/^WALK //' > "$RUNNER_TEMP/walk.json"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print("behind=%d" % (r.get("behind") or 0)); print("walked=%d" % (r.get("days") or 0))' "$RUNNER_TEMP/walk.json" >> "$GITHUB_OUTPUT" 2>/dev/null || true
+          exit $c
+
+      - name: Copy the walk back to the server
+        if: always() && steps.lease.outputs.held == 'true' && steps.pull.outcome == 'success'
+        run: |
+          W="$GITHUB_WORKSPACE/data/models/work/history-walk/$NET"
+          # Only a walk that exists here goes back (never an empty folder over the server's).
+          [ -s "$W/walk.json" ] || [ -s "$W/pbt/state.json" ] || { echo "nothing walked: the server's walk is left as it was"; exit 0; }
+          ssh bot "mkdir -p ~/bot/data/models/work/history-walk/$NET"
+          rsync -a --delete --rsync-path="nice -n 19 rsync" --exclude 'pbt/round/' "$W/" "bot:bot/data/models/work/history-walk/$NET/"
+          echo "the $NET walk copied to the server ($(du -sh "$W" | cut -f1))"
+
+      - name: Give the walk's lease back
+        if: always() && steps.lease.outputs.held == 'true'
+        run: ssh bot "$(node --import tsx research/historyWalk.ts lease give --net "$NET" --holder "$HOLDER")"
+
+      - name: Start the next run while behind
+        if: steps.walk.outcome == 'success' && steps.walk.outputs.behind != '0' && steps.walk.outputs.walked != '0' && steps.walk.outputs.behind != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run history-walk.yml --ref "$GITHUB_REF_NAME" -f net="$NET" -f minutes="$MINUTES"
+          echo "the $NET walk is ${{ steps.walk.outputs.behind }} day(s) behind: next run started"

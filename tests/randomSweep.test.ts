@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { report, sampleDays, sampleRanking, scoreOf, SPACE, splitDays, stage1Trials, stage2Trials, trialId, type Scope, type TrialResult } from '../research/randomSweep';
+import { EVIDENCE_TRIALS, report, sampleDays, sampleRanking, scoreOf, SPACE, splitDays, stage1Trials, stage2Trials, trialId, type Scope, type TrialResult } from '../research/randomSweep';
 
 const days = Array.from({ length: 40 }, (_, i) => new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10));
 const trial = (env: Record<string, string>, perDay: (i: number) => number, scope: Scope = 'all'): TrialResult => {
@@ -14,14 +14,15 @@ test('random sweep: stage 1 starts from today, then the evidence trials, then di
   assert.equal(t.length, 50);
   assert.deepEqual(t[0], {});
   assert.equal(new Set(t.map(trialId)).size, 50);
-  for (const e of t.slice(10)) for (const d of SPACE) assert.ok(d.values.includes(e[d.env]), d.env);
+  for (const e of t.slice(1 + EVIDENCE_TRIALS.length)) for (const d of SPACE) assert.ok(d.values.includes(e[d.env]), d.env);
   assert.deepEqual(stage1Trials(50, 3), t, 'the same seed draws the same trials (shards agree)');
   assert.ok(SPACE.every((d) => d.env !== 'PAPER_ORDER_FRAC'), 'order size is not swept');
 });
 
 test('random sweep: stage 2 moves one to three settings one step from each of the best, never repeating a trial', () => {
-  const best = stage1Trials(12, 5).slice(8);
-  const tried = new Set(stage1Trials(12, 5).map(trialId));
+  const n = 1 + EVIDENCE_TRIALS.length + 4;
+  const best = stage1Trials(n, 5).slice(-4);
+  const tried = new Set(stage1Trials(n, 5).map(trialId));
   const near = stage2Trials(best, 5, 2, tried);
   assert.equal(near.length, 20);
   for (const n of near) assert.ok(!tried.has(trialId(n)));

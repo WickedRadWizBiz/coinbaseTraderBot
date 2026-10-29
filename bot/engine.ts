@@ -16,6 +16,9 @@ import type { Config, RiskLimits } from './config';
 import type { ExchangeFill, ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
 import type { IndexTracker } from './marketdata/indexTracker';
+import { dynamicEdge, dynamicEdgeOn } from './strategy/dynamicEdge';
+import { otherCoinsHeld, regimeScale, regimeScaleOn } from './strategy/regimeScale';
+import { compactReading, MarketState, observeMarket, type MarketStateReading } from './marketdata/marketState';
 import type { OrderBook } from './marketdata/orderBook';
 import { computeFeatureMap, FEATURE_SCHEMA_VERSION, FEATURES } from './model/featureEngine';
 import { ADVERSARY_GROUPS, evaluateEntry, seedOf, type AdversaryVerdict } from './strategy/adversary';
@@ -49,7 +52,7 @@ import { parseTennisScore } from './tennis/liveScore';
 import { diffScore, findMatch, toTennisScore, type LiveTennisMatch, type TennisScoreClient } from './tennis/liveTennisApi';
 import { tennisFairInputs, type TennisFairModel } from './tennis/tennisFair';
 import type { TennisScore } from './tennis/tennisModel';
-import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
+import { huntBlockedBySession, mergeSessionRisk, sessionRiskFor, type SessionRiskProfile } from './model/sessionRisk';
 import { playbook } from './strategy/playbook';
 import { compensator } from './strategy/compensator';
 import { macro } from './macro/macroService';
@@ -86,6 +89,8 @@ import { FillLog } from './tca/fillLog';
 import { recordLatency } from './util/latency';
 import { performance } from 'perf_hooks';
 import { activeRuleBook, STAND_ASIDE } from './strategy/ruleBook';
+import { buildLedger, type ModuleRow } from './health/moduleLedger';
+import { orderBudget } from './sizing/orderBudget';
 import { activeGpSignals } from './gp/gpSignals';
 import { marketContext } from './ta/marketContext';
 import { binaryTrades, optimalF, recencyWeight, type OptimalFReport } from './strategy/optimalF';
@@ -352,6 +357,8 @@ export class Engine {
   private lastDecisionAudit = new Map<string, number>();
   /** Last decision record per market that carried the full feature map (see the decision audit below). */
   private lastFeatureAudit = new Map<string, number>();
+  /** One reading a coin of what the market is doing (volatility, change points, liquidity, flow), fed at every evaluation. */
+  readonly marketState = new MarketState();
   private lastRejectAudit = new Map<string, number>();
   private dataHalt: string | undefined = 'awaiting market data';
   balance: number | undefined;
@@ -693,7 +700,7 @@ export class Engine {
     const S = this.d.cfg.strategy;
     return {
       ...st,
-      risk: sessionRiskFor(S.sessionRisk, st),
+      risk: sessionRiskFor(this.sessionRiskProfile(), st),
       huntBlocked: S.exitPolicy === 'confluence_ratchet' && S.huntSessionGuard ? huntBlockedBySession(st, S.huntTransitionBufferMin) : undefined,
       volProfile: this.d.volProfile ? { version: this.d.volProfile.version, applied: true } : undefined,
     };
@@ -719,7 +726,8 @@ export class Engine {
    * shown as a warning (System Telemetry) and trading continues.
    */
   private skewHalt(): string | undefined {
-    if (this.d.cfg.clockSkewMaxMs <= 0 || this.d.cfg.mode !== 'live') return undefined;
+    // Paper and live alike (the owner, Oct 28: paper behaves as live).
+    if (this.d.cfg.clockSkewMaxMs <= 0) return undefined;
     return this.d.clock?.haltReason(Date.now());
   }
 
@@ -883,7 +891,8 @@ export class Engine {
       this.fCaps[book] = c;
     }
     let cap = c.rep.cap;
-    if (this.d.cfg.mode !== 'live' && Number.isFinite(cap)) cap = Math.max(cap, of.paperFloor * this.tier().orderFrac);
+    // The floor applies in paper and live alike (the owner, Oct 28): with no measured edge the stake shrinks to it.
+    if (Number.isFinite(cap)) cap = Math.max(cap, of.paperFloor * this.tier().orderFrac);
     return { cap, rep: c.rep };
   }
 
@@ -932,7 +941,7 @@ export class Engine {
       minTradableBankrollUsd: S.minTradableBankrollUsd,
       tier: { ...t, orderRiskUsd: +(t.orderFrac * b).toFixed(2), dailyLossLimitUsd: +this.d.risk.dailyLossLimit(b, this.tierLimits(t)).toFixed(2) },
       paperOrderUsd: this.paperOrderUsd() || null, paperOrderFrac: this.d.cfg.mode === 'paper' ? this.d.cfg.strategy.paperOrderFrac || null : null,
-      accuracyGate: this.d.accuracyGate ? { ...this.d.accuracyGate.status(), enforced: this.d.cfg.mode === 'paper' && this.d.cfg.strategy.accuracyGate.enabled } : null,
+      accuracyGate: this.d.accuracyGate ? { ...this.d.accuracyGate.status(), enforced: this.d.cfg.strategy.accuracyGate.enabled } : null,
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null, minQuoteContracts: S.minQuoteContracts,
       takeProfit: { floorPct: S.profitTargetPct, floorCents: +(S.profitTarget * 100).toFixed(2), giveBack: +S.profitGiveBack.toFixed(3) },
@@ -944,7 +953,7 @@ export class Engine {
       modelHealth: this.d.modelHealth?.status() ?? null,
       // Does the TA network's drift improve the probabilities? (log loss with vs without it, per window)
       taHealth: this.d.taHealth?.status() ?? null,
-      trials: this.d.trials ? { ...this.d.trials.status(), params: this.d.trials.p, appliesIn: 'paper' } : null,
+      trials: this.d.trials ? { ...this.d.trials.status(), params: this.d.trials.p, appliesIn: 'paper and live' } : null,
       cpu: this.cpu.status(),
       taEnsemble: activeTaNetEnsemble()?.status() ?? null,
       // Optimal f on the Kalshi pool's settled trades (cap on the stake per order, fraction of bankroll).
@@ -1048,9 +1057,9 @@ export class Engine {
   bankroll(): number | undefined {
     if (this.balance === undefined) return undefined;
     const committed = this.d.oms.positions.open().reduce((s, m) => s + PositionBook.maxLoss(m), 0);
-    // Vaulted and pocketed profit is not the bot's to trade. Paper trades its whole balance unless VAULT_IN_PAPER: the
-    // vault keeps half of every win and none of the losses, so it had taken $343 of the $360 paper pool (Oct 23).
-    const reserved = this.d.cfg.mode !== 'paper' || this.d.cfg.vault?.paper ? (this.d.vault?.reserved() ?? 0) : 0;
+    // Vaulted and pocketed profit is not the bot's to trade, in paper as in live (the owner, Oct 28: paper behaves as
+    // live; VAULT_IN_PAPER is no longer read).
+    const reserved = this.d.vault?.reserved() ?? 0;
     return Math.max(0, this.balance + committed - reserved);
   }
 
@@ -1677,6 +1686,18 @@ export class Engine {
     this.d.volProfile = vp;
   }
 
+  private sessionRiskAuto: SessionRiskProfile = {};
+  /** The pipeline's session risk profile (session_risk.json), applied under SESSION_RISK when SESSION_RISK_AUTO. */
+  setSessionRiskAuto(p: SessionRiskProfile | undefined): void {
+    this.sessionRiskAuto = p ?? {};
+  }
+
+  /** The session risk profile in force: the automatic one with the hand-set SESSION_RISK on top. */
+  sessionRiskProfile(): SessionRiskProfile {
+    const S = this.d.cfg.strategy;
+    return S.sessionRiskAuto ? mergeSessionRisk(this.sessionRiskAuto, S.sessionRisk) : S.sessionRisk;
+  }
+
   get model(): MetaModel { return this.d.model; }
   get snn(): EngineDeps['snn'] { return this.d.snn; }
 
@@ -1711,6 +1732,59 @@ export class Engine {
       fillLogging: Boolean(this.fillLog),
       taNet: this.taNetStatus(),
     };
+  }
+
+  /** Module ledger (bot/health/moduleLedger.ts): one row per adaptive part, what is on, validated, earning or stale. */
+  moduleLedger(now = this.now()): ModuleRow[] {
+    const S = this.d.cfg.strategy;
+    const g = this.guardStatus(now);
+    const ag = this.d.accuracyGate?.status();
+    const agBuckets = ag ? Object.values(ag.groups).flatMap((x) => x.buckets) : [];
+    const rt = activeTaNet();
+    const pb = playbook(), pbF = pb?.current(now);
+    const cmp = compensator()?.status(now);
+    const of = this.kalshiOptimalF('crypto', now);
+    const tp = this.d.takeProfitBench?.status();
+    const pr = probation()?.status();
+    const snn = this.snnBrief() as { mode: string; alpha?: number };
+    const v = this.d.volModel, f = this.d.fillModel;
+    return buildLedger({
+      mode: this.d.cfg.mode,
+      model: { id: this.model.id, liveBlockers: this.model.liveBlockers() },
+      modelHealth: this.d.modelHealth?.status() ?? null,
+      taHealth: this.d.taHealth?.status() ?? null,
+      trials: this.d.trials?.status() ?? null,
+      snn: { mode: snn.mode, alpha: snn.alpha ?? null },
+      taNet: rt ? { version: rt.net.params.version, activeHeads: rt.net.active(true).length } : null,
+      ruleBook: S.ruleBook ? { passed: activeRuleBook()?.passed().length ?? 0 } : null,
+      volModel: v ? { validated: v.validated, applied: Boolean(v.validated && S.volModel), improvement: v.params.validation.improvement.mean } : null,
+      fillModel: f ? { validated: f.validated, active: gatePasses('kalshi', f.validated) } : null,
+      playbook: pb ? { enabled: Boolean(pb.status(undefined, now).apply && pbF?.enabled), validated: Boolean(pbF?.enabled) } : null,
+      compensator: cmp ? { enabled: cmp.apply && cmp.enabled, validated: cmp.enabled } : null,
+      characterStandAside: S.characterStandAside,
+      accuracyGate: ag ? { enabled: ag.enabled, blocked: agBuckets.filter((b) => !b.open).length, buckets: agBuckets.length } : null,
+      sessionRisk: { keys: Object.keys(this.sessionRiskProfile()).length },
+      sizing: {
+        paperOrderUsd: this.paperOrderUsd(), tier: g.tier.name, sizeScale: g.equityGuard?.sizeScale ?? null,
+        optimalF: of.rep ? { cap: Number.isFinite(of.cap) ? of.cap : null, trades: of.rep.n } : null, portfolioKelly: S.portfolioKelly,
+      },
+      exitPolicy: S.exitPolicy,
+      takeProfitBench: tp ? { scored: tp.scored, netUsd: tp.netUsd, benched: Boolean(tp.benched), enforce: tp.enforce } : null,
+      probation: pr ? Object.fromEntries(Object.entries(pr).filter(([k]) => k !== 'mode').map(([k, b]) => { const s = b as { trades: number; netUsd: number; benched: unknown }; return [k, { trades: s.trades, netUsd: s.netUsd, benched: Boolean(s.benched) }]; })) : null,
+      indexAgeMs: Object.fromEntries([...this.d.md.index].map(([a, idx]) => [a, idx.health(now).ageMs])),
+      maxIndexAgeMs: this.d.cfg.risk.maxIndexAgeMs,
+      marketState: Object.fromEntries(this.marketState.assets().map((a) => [a, this.marketState.reading(a, now)])),
+      throughput: (() => {
+        const held = new Set([...this.d.oms.positions.open().map((p) => p.ticker), ...this.d.oms.liveOrders().filter((o) => isLive(o)).map((o) => o.ticker)]);
+        const ages = [...held].map((t) => this.status.get(t)?.updatedTs).filter((x): x is number => x !== undefined).map((ts) => now - ts);
+        return { mainBusy: this.cpu.status()?.mainBusy ?? null, feedLagMs: this.d.md.kalshiFeedLagMs(now) ?? null, ordersLastMinute: this.d.oms.ordersSentInLast(60_000), maxOrdersPerMinute: this.d.cfg.risk.maxOrdersPerMinute, heldEvalAgeMs: ages.length ? Math.max(...ages) : null };
+      })(),
+    });
+  }
+
+  /** The market-state reading of every coin seen. */
+  marketStates(now = this.now()): MarketStateReading[] {
+    return this.marketState.assets().sort().map((a) => this.marketState.reading(a, now));
   }
 
   /** TA network: version, blind-test results per head, and each asset's latest forecast and live skill. */
@@ -1860,7 +1934,7 @@ export class Engine {
     const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
     if (!fv) return block('fair value unavailable');
     const sess = sessionState(now);
-    const sessRisk = sessionRiskFor(cfg.strategy.sessionRisk, sess);
+    const sessRisk = sessionRiskFor(this.sessionRiskProfile(), sess);
     // Strategy weight: the Compensator's ramp on the coin's Librarian reading (bot/strategy/compensator.ts) when it is
     // on, else the playbook's Kalshi weight in this coin's confirmed regime (bot/strategy/playbook.ts).
     const cmpW = compensator()?.weight(m.asset, 'kalshi', now);
@@ -1881,12 +1955,12 @@ export class Engine {
     const pMarket = model.marketProbability(mid);
     // SNN: feed this market's encodings to the next 1 s step, then blend (alpha = 0 unless earned).
     this.snnObserve(m, { mid, spread: ask.price - bid.price, imbalance: features.imbalance, dAtm: fv.d2, tauFrac: tauSec / Math.max(1, (m.closeTime - m.openTime) / 1000) }, now);
-    // Component trials (bot/strategy/componentTrials.ts): paper's price follows each trial's verdict (the trained model
-    // stays in until it tests significantly worse than the math alone; the others go in once they test better, the
-    // rule book while it is tested); live's price never does.
+    // Component trials (bot/strategy/componentTrials.ts): the price follows each trial's verdict, in paper and live alike
+    // (the owner, Oct 28) (the trained model stays in until it tests significantly worse than the math alone; the others
+    // go in once they test better, the rule book while it is tested).
     const trials = this.d.trials;
-    const trialOn = (name: TrialName) => cfg.mode === 'paper' && trials?.applied(name) === true;
-    const pModel = cfg.mode === 'paper' && trials && !trials.applied('mlp') ? fv.pYes : pred.p;
+    const trialOn = (name: TrialName) => trials?.applied(name) === true;
+    const pModel = trials && !trials.applied('mlp') ? fv.pYes : pred.p;
     const blended = this.snnBlend(m, st, pModel, tauSec > R.noEntryBeforeCloseSec, now);
     // The SNN's trial blend of a price: (1 - a) p + a p_snn.
     const snnTrial = (p: number) => (blended.a !== undefined && blended.pSnn !== undefined ? (1 - blended.a) * p + blended.a * blended.pSnn : undefined);
@@ -1906,8 +1980,9 @@ export class Engine {
     // TA conviction overlay: the TA network's direction forecasts add a drift to the fair value (unless
     // the live model already reads them), and TA / confluence breadth + the altcoin rule feed sizing.
     const S0 = cfg.strategy;
-    // Live reads the TA network's unproven heads and the evolved formula as paper does while unvalidated models may
-    // trade live (LIVE_ALLOW_UNVALIDATED_MODEL, the default): the same market prices the same in both modes.
+    // Live reads the evolved formula as paper does while unvalidated models may trade live (LIVE_ALLOW_UNVALIDATED_MODEL,
+    // the default): the same market prices the same in both modes. The TA network's unproven heads reach the price in
+    // neither mode except through their component trial (bot/strategy/taConviction.ts reliability).
     const liveMode = cfg.mode === 'live' && !cfg.liveAllowUnvalidated;
     const modelReadsTa = model.params.kind !== 'identity' && model.params.features.some((f) => f.startsWith('tanet_up'));
     // A forecast's tilt of the fair value: the contract re-priced with the index moved by w x k sigma sqrt(tau) (k: the
@@ -1959,6 +2034,9 @@ export class Engine {
 
     const ret = idx!.trailingLogReturn(now, cfg.strategy.fastMoveWindowSec * 1000);
     const fastMove = ret !== undefined && Math.abs(ret) > cfg.strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(cfg.strategy.fastMoveWindowSec);
+    // Market state: fed here and in the backtester the same way (observeMarket), read by the audit now and by the
+    // dynamic thresholds next.
+    const mState = observeMarket(this.marketState, { asset: m.asset, ticker: m.ticker, index: idx!, now, bid, ask, trades: md.features.micro.get(m.ticker)?.tradesIn(now, 300_000) });
 
     // The resting quotes, and the exit curve's resting sell (rest mode), which holds the held side's quote slot.
     const live = oms.liveOrders().filter((o) => o.ticker === m.ticker && (o.purpose === 'quote' || (o.purpose === 'exit' && o.timeInForce === 'good_till_canceled')) && isLive(o));
@@ -1980,7 +2058,7 @@ export class Engine {
     // Paper: no new entry where the market's own price has called recent results better than the bot (the owner's
     // choice on Oct 23; bot/strategy/accuracyGate.ts). Every evaluation feeds the gate's scorecard, live included.
     this.d.accuracyGate?.observe(m.ticker, tauSec, pYes, mid);
-    const accuracyBlock = kindWindow && guards.length === 0 && cfg.mode === 'paper' ? this.d.accuracyGate?.block(m.ticker, tauSec) : undefined;
+    const accuracyBlock = kindWindow && guards.length === 0 ? this.d.accuracyGate?.block(m.ticker, tauSec) : undefined;
     const entryWindowOpen = kindWindow && guards.length === 0 && !accuracyBlock && !feeBlock;
     st.accuracyBlock = accuracyBlock;
     st.feeBlock = feeBlock;
@@ -2009,7 +2087,10 @@ export class Engine {
     const entrySidePrice = pos && pos.yes > 0 ? -pos.netCash / pos.yes : pos && pos.yes < 0 ? 1 - pos.netCash / -pos.yes : undefined;
     const tier = this.tier();
     const rs = this.riskScale('crypto');
-    const kellyScale = rs.scale;
+    // The regime scale (market state: volatility, a recent change point, correlated coins held) joins the risk scale,
+    // computed the same way in the backtester.
+    const reg = regimeScale(cfg.strategy.regimeScale, mState, otherCoinsHeld(oms.positions.open(), m.asset, (t) => this.d.md.markets.get(t)?.asset));
+    const kellyScale = rs.scale * reg.mult;
     // Optimal f: the stake per order never above what the settled trade history supports (bootstrap 25th
     // percentile of the growth-optimal fraction); applies to the conviction-boosted size too.
     const fCap = this.kalshiOptimalF('crypto', now);
@@ -2018,14 +2099,14 @@ export class Engine {
     // dollars, whatever the tier, the break-even scale, the session's size factor and optimal f would allow (the owner's
     // choice for paper on Oct 23, a share of the bankroll since Oct 24).
     const fixedUsd = this.paperOrderUsd(bankroll);
+    // Session risk scales size (sizeMult in [0, 1.5]: above 1 only for a reliably earning session, dollars only). The risk scale (drawdown, losing streak,
+    // training-mode de-risking) shrinks every sizing route: Kelly, target-EV and the per-order caps alike. The same
+    // budget sizes the backtester's orders (bot/sizing/orderBudget.ts).
+    const budget = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult, riskScale: kellyScale, fCapUsd, paperOrderUsd: fixedUsd, maxContractsPerOrder: R.maxContractsPerOrder });
     const view: MarketView = {
       ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: st.position, bankroll,
-      // Session risk profile can only shrink size (sizeMult in [0, 1]).
-      // The risk scale (drawdown, losing streak, training-mode de-risking) shrinks every sizing route:
-      // Kelly, target-EV and the per-order caps alike.
-      maxOrderRiskUsd: fixedUsd > 0 ? fixedUsd : Math.min(tier.orderFrac * bankroll * sizeMult * kellyScale, fCapUsd),
-      maxContracts: floorCount(R.maxContractsPerOrder * (fixedUsd > 0 ? 1 : sizeMult)), minSidePrice: R.minSidePrice,
-      ...(fixedUsd > 0 ? { fixedOrderUsd: fixedUsd } : {}),
+      maxOrderRiskUsd: budget.maxOrderRiskUsd, maxContracts: budget.maxContracts, minSidePrice: R.minSidePrice,
+      ...(budget.fixedOrderUsd ? { fixedOrderUsd: budget.fixedOrderUsd } : {}),
       // Exit curve, rest mode: the held position's sell rests at the curve's swing-top estimate (the strategy places it);
       // not in the stand-down before the close, and pulled during a fast index move (a resting sell is lifted exactly
       // when the contract is suddenly worth more).
@@ -2091,9 +2172,10 @@ export class Engine {
     } else {
       st.exitMode = 'fair_value';
     }
+    const dEdge = dynamicEdge(cfg.strategy.dynamicEdge, mState, pred.std);
     const strat = {
       ...cfg.strategy,
-      minEdge: cfg.strategy.minEdge + sessRisk.minEdgeAdd,
+      minEdge: Math.max(0, cfg.strategy.minEdge + sessRisk.minEdgeAdd + dEdge.add),
       inventorySkewPerContract: cfg.strategy.inventorySkewPerContract * sessRisk.skewMult,
       kellyFraction: tier.kellyFraction * kellyScale,
     };
@@ -2188,12 +2270,13 @@ export class Engine {
     if (fixedUsd > 0) plan.notes.push(`paper size: ${this.paperSizing()}; the tier, break-even scale and optimal f size live`);
     else {
       plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
-      if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${rs.parts.join(', ')})`);
+      if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${[...rs.parts, ...(reg.mult !== 1 ? [`regime x${reg.mult.toFixed(2)}`] : [])].join(', ')})`);
       if (Number.isFinite(fCapUsd) && fCapUsd < tier.orderFrac * bankroll * sizeMult * kellyScale) plan.notes.push(`optimal f cap: $${fCapUsd.toFixed(2)} per order (${(100 * fCap.cap).toFixed(2)}% of bankroll, ${fCap.rep?.n ?? 0} settled trades)`);
     }
     for (const g of guards) plan.notes.push(g);
     if (pbW && pbW.kalshi !== 1) plan.notes.push(`playbook ${pbW.source}: Kalshi size x${pbW.kalshi}`);
     if (cmpW && cmpW.w !== 1) plan.notes.push(`compensator ${cmpW.source}: Kalshi size x${cmpW.w.toFixed(2)}`);
+    if (dEdge.add !== 0) plan.notes.push(`market state ${dEdge.add > 0 ? '+' : ''}${dEdge.add.toFixed(4)} edge`);
     if (sessRisk.applied.length) plan.notes.push(`session risk ${sessRisk.applied.join('+')}: size x${sessRisk.sizeMult}, +${sessRisk.minEdgeAdd} edge`);
     if (huntPlan) plan.place.unshift(huntPlan);
     // Entry curve (strategy/sinuousEntry.ts): a quote that adds to the position is against the curve when the book's
@@ -2291,7 +2374,7 @@ export class Engine {
         decisionId, ticker: m.ticker, model: model.id, spot: spot.value, strike, strikeSource: m.strikeSource, sigma: vol.sigmaPerSqrtSec, sigmaPricing,
         session: sess.key, sessionRisk: sessRisk,
         kind: m.kind, cap: terms.cap, cadence: reason ?? null, featureSchema: FEATURE_SCHEMA_VERSION, pMarket, pStd: pred.std, q: st.q,
-        tauSec, fv: fv.pYes, regime: fv.regime, pYes, ...(full ? { features, drivers: why.drivers } : {}), modelShift: why.shiftFromFairValue, bid: bid.price, ask: ask.price, position: st.position, fastMove,
+        tauSec, fv: fv.pYes, regime: fv.regime, pYes, ...(full ? { features, drivers: why.drivers } : {}), modelShift: why.shiftFromFairValue, bid: bid.price, ask: ask.price, position: st.position, fastMove, mstate: compactReading(mState), ...(dynamicEdgeOn(cfg.strategy.dynamicEdge) ? { edgeAdd: +dEdge.add.toFixed(4) } : {}), ...(regimeScaleOn(cfg.strategy.regimeScale) ? { regimeMult: +reg.mult.toFixed(3) } : {}),
         place: plan.place.map((p) => ({ side: p.side, price: p.price, count: p.count, purpose: p.purpose, edge: p.edge, why: p.why })),
         cancel: plan.cancel,
         // Why no entry could open here (paper's accuracy gate), so studies need not recompute it.

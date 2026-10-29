@@ -16,6 +16,13 @@
 // (research/trainSnn.ts --hyper) and for the live network. The population is saved after every
 // round, so a long tournament can run in chunks (--max-rounds) across pipeline runs.
 //
+// History walk (`walk`; research/historyWalk.ts): the same population walks the history replay's days in time order,
+// block after block across runs, every member going on from where it stopped as if time had never stopped: a round
+// for every day the walk may learn from (judged before the member learns it), the other days (the holdout weeks)
+// played through with learning paused and judged by nobody. Each member's health reference is taken afresh every
+// WALK_HEALTH_DAYS walked days, as a newly trained network's is: one measured years before would freeze its learning
+// once markets drifted past its bands.
+//
 // Genetic layer (`genetic`; research/genetic.ts): in a population of 6+ the best survivors breed every few
 // rounds. An offspring takes each column -- one asset and horizon, a strategy of its own -- from the parent
 // whose column made more over the generation (crypto, perps; a tennis network's columns are its matches,
@@ -30,6 +37,7 @@ import fs from 'fs';
 import path from 'path';
 import { MetaModel } from '../bot/model/metaModel';
 import { loadCalendar } from '../bot/model/calendar';
+import { recalibrated } from '../bot/snn/health';
 import type { SnnCheckpoint } from '../bot/snn/network';
 import { DEFAULT_SNN, domainParams, stageFlags, versionHash, withFlags, type SnnParams, type Stage } from '../bot/snn/params';
 import { SNN_HYPER_SPEC, snnHyperOf, withSnnHyper } from '../bot/snn/population';
@@ -37,8 +45,15 @@ import { binaryBet, coverageFloor, fitnessOf, independentInteractions, type Hype
 
 /** Least share of opportunities a tournament member must act on (sitting out must not win). */
 export const SNN_MIN_COVERAGE = 0.05;
+/** The history walk keeps its latest rounds' log and each lineage's bets of its latest days (the selection's checks
+ *  and the deflated Sharpe ratio read them), not years of them. */
+export const WALK_LOG_ROUNDS = 400;
+export const WALK_RECORD_DAYS = 120;
+/** Walked days after which a member's health reference is taken afresh (the daily training's window, 21 days: a live
+ *  network's reference is never older). */
+export const WALK_HEALTH_DAYS = 21;
 import { dsrOf } from './fitness';
-import { fileMemberProgress, runPbt, walkForwardRounds, type GeneticOpts, type PbtMember, type PbtRoundLog } from './pbt';
+import { fileMemberProgress, runPbt, walkForwardRounds, type GeneticOpts, type PbtMember, type PbtRound, type PbtRoundLog } from './pbt';
 import { DEFAULT_TRANSITION, pboGate, tournamentPbo, transitionPenalty, type Transition } from './selection';
 import { assetOfGroup } from './transitions';
 import { geneTraits, type GaGeneration, type GaState } from './genetic';
@@ -117,6 +132,11 @@ interface Saved {
 
 export interface SnnPbtResult {
   domain: 'crypto' | 'perps' | 'tennis'; stage: Stage; complete: boolean; remaining: number; rounds: number; trials: number;
+  /** The history walk: the first day the population has not walked (its last judged day's next), when it has. */
+  walkedTo?: string;
+  /** The history walk: the share of this run's steps on the days it may learn from in which the health monitor froze
+   *  a member's learning (CPU workers only). */
+  frozen?: number;
   elite: { member: number; hyper: Hyper; lineage: number[]; parents?: [number, number] };
   dsr: { sharpe: number; sr0: number; probability: number; n: number };
   /** Probability of backtest overfitting of the selection (research/selection.ts): the pipeline adopts the elite's
@@ -150,6 +170,22 @@ function segments(days: string[]): string[][] {
   return out;
 }
 
+/** The history walk's rounds over a block of consecutive days: one per day not `paused` (judged on that day), its
+ *  training block the days since the last round (paused days, and a fresh population's first `initDays` days to
+ *  learn from). Indexed from 0. */
+export function walkRounds(days: string[], paused: (day: string) => boolean, initDays = 0): PbtRound[] {
+  const out: PbtRound[] = [];
+  let prev = days.length ? Date.parse(`${days[0]}T00:00:00Z`) : 0, learnFirst = initDays;
+  for (const d of days) {
+    if (paused(d)) continue;
+    if (learnFirst > 0) { learnFirst--; continue; }
+    const t = Date.parse(`${d}T00:00:00Z`);
+    out.push({ index: out.length, trainFrom: prev, trainTo: t, evalFrom: t, evalTo: t + DAY });
+    prev = t + DAY;
+  }
+  return out;
+}
+
 export async function runSnnPbt(o: {
   recordings: string; domain: 'crypto' | 'perps' | 'tennis'; stage: Stage; days: string[]; initDays?: number; evalDays?: number;
   /** Real regime transitions (research/transitions.ts): each round pays for drawdown and turnover in the 24 hours
@@ -179,10 +215,16 @@ export async function runSnnPbt(o: {
   gpu?: SnnGpuSpec | false;
   /** Ends the tournament before its next round (the training session's time is up: research/sessionClock.ts). */
   stop?: () => boolean;
+  /** The history walk (research/historyWalk.ts): `days` are a block of consecutive days the saved population walks on
+   *  from where it stopped (a fresh one learns its first `initDays` before anything is judged), `allDays` the day
+   *  before them (warm-up) and the block. One round per day not `paused`; a paused day is played with learning paused
+   *  (SnnNetwork.pauseLearning) and judged by nobody. */
+  walk?: { paused: (day: string) => boolean };
 }): Promise<SnnPbtResult> {
   const log = o.log ?? (() => {});
+  let quietNoTrades = false;
   const initDays = o.initDays ?? 3, evalDays = o.evalDays ?? 1;
-  if (o.days.length < initDays + evalDays) throw new Error(`need at least ${initDays + evalDays} days of recordings for an SNN tournament (have ${o.days.length})`);
+  if (!o.walk && o.days.length < initDays + evalDays) throw new Error(`need at least ${initDays + evalDays} days of recordings for an SNN tournament (have ${o.days.length})`);
   const base: SnnParams = domainParams(o.domain, withFlags({ ...DEFAULT_SNN, seed: o.seed ?? DEFAULT_SNN.seed }, stageFlags(o.stage)));
   const baseVersion = versionHash(base);
   const start = Date.parse(`${o.days[0]}T00:00:00Z`);
@@ -202,7 +244,9 @@ export async function runSnnPbt(o: {
   // A new ledger generation: the saved population moves on to new weeks (all their rounds to run).
   const newGen = Boolean(saved && o.generation && saved.generation !== o.generation);
   if (newGen) log(`${o.domain} SNN tournament: generation ${o.generation} on ${o.days.length} day(s) the population has never trained on (${saved!.log.length} rounds so far)`);
-  let rounds = (saved && !newGen ? all.filter((r) => r.evalFrom >= saved!.lastEvalTo - 1) : all).map((r, k) => ({ ...r, index: (saved?.nextIndex ?? 0) + k }));
+  let rounds = (o.walk ? walkRounds(o.days, o.walk.paused, saved ? 0 : initDays).filter((r) => !saved || r.evalFrom >= saved.lastEvalTo)
+    : saved && !newGen ? all.filter((r) => r.evalFrom >= saved!.lastEvalTo - 1) : all).map((r, k) => ({ ...r, index: (saved?.nextIndex ?? 0) + k }));
+  if (o.walk && !saved && !rounds.length) throw new Error(`need more than ${initDays} day(s) the walk may learn from to start an SNN walk (have ${o.days.filter((d) => !o.walk!.paused(d)).length})`);
   const pending = rounds.length;
   if (o.maxRounds && o.maxRounds > 0) rounds = rounds.slice(0, o.maxRounds);
   const resume = saved ? {
@@ -255,29 +299,49 @@ export async function runSnnPbt(o: {
     },
   }) : undefined;
 
-  const replay = async (s: MemberState, hyper: Hyper, from: number, to: number, next?: { from: number; to: number }) => {
-    if (to <= s.through) return { rows: [] as SnnRow[] };
-    const a = Math.max(from, s.through);
+  const replaySpan = async (s: MemberState, hyper: Hyper, a: number, to: number, pause: boolean, next?: { from: number; to: number }) => {
     const params = withSnnHyper(base, hyper);
     const span = spanOf(a, to);
     const tape = tapes ? await tapes.get(span) : undefined;
     // The next round's tape is recorded while this round's members play (on a free worker).
     if (tapes && pool && next) setImmediate(() => void tapes.get(spanOf(next.from, next.to)));
     if (pool) {
-      const job: SnnReplayJob = { dir: o.recordings, params, domain: o.domain, modelPath: o.modelPath, checkpoint: s.cp, from: a, to, fromDay: span.fromDay, toDay: span.toDay, skipModel: true, tennis: o.tennis, playTape: tape };
+      const job: SnnReplayJob = { dir: o.recordings, params, domain: o.domain, modelPath: o.modelPath, checkpoint: s.cp, from: a, to, fromDay: span.fromDay, toDay: span.toDay, skipModel: true, tennis: o.tennis, playTape: tape, ...(pause ? { pauseLearning: true } : {}) };
       const r = sched ? await sched.run(job) : await pool.run(job);
       s.cp = r.checkpoint;
       s.through = to;
-      return { rows: r.rows };
+      return { rows: r.rows, steps: r.steps, frozen: r.frozen };
     }
     // Fitness reads p_snn against the market only: the decision model's p_model is not computed.
-    const r = tape ? playSnnTape(tape, { params, domain: o.domain, checkpoint: s.cp, allowParamChange: true, from: a })
-      : await replaySnn(o.recordings, { params, domain: o.domain, model: o.model, calendar, checkpoint: s.cp, allowParamChange: true, from: a, to, fromDay: span.fromDay, toDay: span.toDay, skipModel: true, tennis: o.tennis });
+    const r = tape ? playSnnTape(tape, { params, domain: o.domain, checkpoint: s.cp, allowParamChange: true, from: a, pauseLearning: pause })
+      : await replaySnn(o.recordings, { params, domain: o.domain, model: o.model, calendar, checkpoint: s.cp, allowParamChange: true, from: a, to, fromDay: span.fromDay, toDay: span.toDay, skipModel: true, tennis: o.tennis, pauseLearning: pause });
     s.cp = r.net.serialize();
     s.through = to;
-    return r;
+    return { rows: r.rows, steps: r.steps, frozen: r.frozenSteps };
   };
-  const nextRound = (r: { index: number }) => { const n = rounds.find((x) => x.index === r.index + 1); return n ? { from: n.evalFrom, to: n.evalTo } : undefined; };
+  let walkSteps = 0, walkFrozen = 0;
+  const replay = async (s: MemberState, hyper: Hyper, from: number, to: number, next?: { from: number; to: number }) => {
+    if (to <= s.through) return { rows: [] as SnnRow[] };
+    if (!o.walk) return replaySpan(s, hyper, Math.max(from, s.through), to, false, next);
+    // The walk goes on from the member's own last day, a day at a time (a day's tape each); a paused day's rows go.
+    const rows: SnnRow[] = [];
+    while (s.through < to) {
+      const a = s.through, b = Math.min(to, Math.floor(a / DAY) * DAY + DAY), pause = o.walk.paused(dayOf(a));
+      const ref = s.cp?.health.ref;
+      if (s.cp && ref && a - ref.ts >= WALK_HEALTH_DAYS * DAY) s.cp = { ...s.cp, health: recalibrated(s.cp.health) };
+      const r = await replaySpan(s, hyper, a, b, pause, b < to ? { from: b, to: Math.min(to, b + DAY) } : next);
+      if (pause) continue;
+      for (const x of r.rows) rows.push(x);
+      walkSteps += r.steps ?? 0; walkFrozen += r.frozen ?? 0;
+    }
+    return { rows };
+  };
+  const nextRound = (r: { index: number; evalTo: number }) => {
+    // The walk plays every day in turn: the next day's tape (a paused one too) is the next one needed.
+    if (o.walk) return r.evalTo < start + o.days.length * DAY ? { from: r.evalTo, to: r.evalTo + DAY } : undefined;
+    const n = rounds.find((x) => x.index === r.index + 1);
+    return n ? { from: n.evalFrom, to: n.evalTo } : undefined;
+  };
   const save = (members: PbtMember<MemberState>[], trials: number, plog: PbtRoundLog[], lastEvalTo: number, nextIndex: number, ga?: GaState) => {
     if (!o.stateDir) return;
     fs.mkdirSync(o.stateDir, { recursive: true });
@@ -315,13 +379,21 @@ export async function runSnnPbt(o: {
         const xs = snnInteractions(rows, o.domain);
         // Opportunities: one per contract (crypto and tennis bet each contract at most once), one per step (perps).
         const opportunities = o.domain !== 'perps' ? new Set(rows.map((x) => x.ticker)).size : rows.length;
+        if (!xs.length && !quietNoTrades) {
+          // Once per run: why a round scored the coverage floor (no step to bet on, or the network never leaves the middle).
+          quietNoTrades = true;
+          const spread = rows.reduce((m, x) => Math.max(m, Math.abs(x.pSnn - 0.5)), 0);
+          log(`${o.domain}: no trades in round ${new Date(r.evalFrom).toISOString().slice(0, 10)}: ${rows.length} step(s) evaluated, furthest from even ${spread.toFixed(4)}`);
+        }
         const report = coverageFloor(fitnessOf(xs, { from: r.evalFrom, to: r.evalTo, clusterMs: clusterFor(o.domain) }), xs.length, opportunities, SNN_MIN_COVERAGE);
         const tp = transitions.length ? transitionPenalty(xs, transitions, { ...DEFAULT_TRANSITION, from: r.evalFrom, to: r.evalTo, assetOf }) : undefined;
         return { report: tp ? { ...report, fitness: report.fitness - tp.penalty } : report, interactions: independentInteractions(xs, clusterFor(o.domain)), traits: columnTraits(xs), ...(tp ? { extra: { transitionPenalty: tp.penalty, transitions: tp.transitions } } : {}) };
       },
     },
-    onRound: ({ members, trials, log: plog, round, ga }) => save(members, trials, plog, round.evalTo, round.index + 1, ga),
+    onRound: ({ members, trials, log: plog, round, ga }) => save(members, trials, o.walk ? plog.slice(-WALK_LOG_ROUNDS) : plog, round.evalTo, round.index + 1, ga),
     stop: o.stop,
+    // The walk runs for years: each lineage's record keeps its latest WALK_RECORD_DAYS days.
+    ...(o.walk ? { recordMs: WALK_RECORD_DAYS * DAY } : {}),
   }).finally(() => Promise.all([pool?.close(), gpuPool?.close()]));
   if (!rounds.length && resume) Object.assign(res, { members: resume.members, trials: resume.trials, log: resume.log, elite: resume.members.find((m) => m.id === resume.log[resume.log.length - 1]?.ranking[0]?.member) ?? resume.members[0] });
   const dsr = dsrOf(res.elite.record, clusterFor(o.domain), res.trials);
@@ -330,8 +402,9 @@ export async function runSnnPbt(o: {
   log(`${o.domain} elite #${res.elite.id} (lineage ${res.elite.lineage.join('>')}); out-of-sample ${dsr.n} independent interactions, DSR probability ${Number.isFinite(dsr.probability) ? dsr.probability.toFixed(3) : 'n/a'} over ${res.trials} trials`);
   const ga = res.ga ?? (resume?.ga && o.genetic ? resume.ga : undefined);
   const traits = ga ? Object.fromEntries(Object.entries(geneTraits(ga.genes, SNN_HYPER_SPEC)).filter(([, t]) => t.conf > 0).map(([k, t]) => [k, { best: t.best, rho: t.rho, conf: t.conf }])) : {};
+  const lastTo = res.log[res.log.length - 1]?.evalTo;
   return {
-    domain: o.domain, stage: o.stage, complete: pending - res.ran === 0, remaining: pending - res.ran, rounds: res.log.length, trials: res.trials,
+    domain: o.domain, stage: o.stage, complete: pending - res.ran === 0, remaining: pending - res.ran, rounds: res.log.length, trials: res.trials, ...(o.walk && lastTo ? { walkedTo: lastTo } : {}), ...(o.walk && walkSteps ? { frozen: walkFrozen / walkSteps } : {}),
     elite: { member: res.elite.id, hyper: res.elite.hyper, lineage: res.elite.lineage, ...(res.elite.parents ? { parents: res.elite.parents } : {}) },
     dsr: { sharpe: dsr.sharpe, sr0: dsr.sr0, probability: dsr.probability, n: dsr.n }, pbo: { pbo: pboR.pbo, rounds: pboR.rounds, members: pboR.members, ok: pboOk.ok, why: pboOk.why }, log: res.log,
     ...(ga ? { ga: { islands: new Set(res.members.map((m) => m.island ?? 0)).size, generation: ga.generation, sinceOffspringWon: ga.sinceOffspringWon, last: ga.history[ga.history.length - 1], traits } } : {}),

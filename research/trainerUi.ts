@@ -111,6 +111,7 @@ export class TrainerUi {
       hooks: {
         roundStart: (round, full) => { this.state.round = round; this.tracker = new RoundProgress(readRounds(models), full); },
         phase: (p) => { this.tracker ??= new RoundProgress(readRounds(models), true); this.tracker.setPhase(p); },
+        walkStart: (net, minutes) => { this.tracker = new RoundProgress([], false, Date.now, { plan: [`walk-${net}`], expect: new Map([[`walk-${net}`, minutes * 60_000]]) }); },
         line: (l) => this.tracker?.line(l),
         roundEnd: (board) => { this.state.board = board; },
         child: (c) => { this.child = c; },

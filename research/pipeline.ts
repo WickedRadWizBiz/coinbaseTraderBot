@@ -39,7 +39,8 @@
 //   0f. sweep        sweep optimizer proposals (setups per side, the volatility trail, kalshi, the whole bot)
 //   1. snn           per replayable network (crypto: 15m/1h with contracts; perps: 1h/4h, graded on
 //                    direction calls): ablation when due -> population tournament of identical networks
-//                    (snnPbt.ts; the elite's knobs) -> train at the best accepted stage -> promote
+//                    (snnPbt.ts; the elite's knobs) -> train at the best accepted stage (from the history
+//                    walk's best network when it walks that stage: historyWalk.ts) -> promote
 //                    snn_<domain>.json -> prequential backfill (work/snnfill/<domain>). Tournament and
 //                    training on the history replay when it has the days; the crypto network's ablation
 //                    (its gate for live use) always on the bot's recordings, against real Kalshi prices.
@@ -65,7 +66,7 @@
 // AUTO_TRAIN_ON_MODEL_CHANGE).
 //
 //   npm run pipeline                         # everything
-//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, librarian, cross_graph, rule_book, gp, lead_lag, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, vol, perps, tennis, fill, sizing, playbook, readiness
+//   npm run pipeline -- --only mlp,perps     # steps: history, history_replay, ta_net, ta_net_oos, librarian, cross_graph, rule_book, gp, lead_lag, setups, setup_snn, sweep, snn, vol_model, dataset, mlp, tally_history, vol, perps, tennis, fill, sizing, playbook, readiness
 //   npm run pipeline -- --force-ablation     # re-run the SNN ablations even if not due
 //   npm run pipeline -- --sweep-all          # every step due now (weekly studies, tournaments, ablations, sweeps)
 //   npm run pipeline -- --only ta_net --force-ta-net   # retrain the TA network now
@@ -80,7 +81,7 @@ import v8 from 'v8';
 import path from 'path';
 import { MODEL_FILES } from '../bot/autotrain';
 import { loadConfig, paperEnv, type Config } from '../bot/config';
-import { MetaModel } from '../bot/model/metaModel';
+import { GO_LIVE_GATES, MetaModel } from '../bot/model/metaModel';
 import { PerpModel } from '../bot/perps/perpSignal';
 import type { SnnCheckpoint } from '../bot/snn/network';
 import { DEFAULT_SNN, domainParams, STAGES, stageFlags, type SnnDomain, type Stage } from '../bot/snn/params';
@@ -88,8 +89,8 @@ import { FillModel } from '../bot/tca/fillModel';
 import { trainFillMain } from './trainFillModel';
 import { trainVolModelMain, VOL_MODEL_MIN_DAYS } from './trainVolModel';
 import { backtestMain } from './backtest';
-import { buildDatasetMain } from './buildDataset';
-import { perpBacktestMain, PERP_BACKTEST_MIN_DAYS } from './perpBacktest';
+import { buildDatasetMain, readDataset } from './buildDataset';
+import { perpBacktestMain, PERP_RECORDED_MIN_DAYS, PERP_RECORDED_TEST_DAYS } from './perpBacktest';
 import { sessionsMain } from './sessions';
 import { snnAblationMain, type Verdict } from './snnAblation';
 import { replaySnn } from './snnReplay';
@@ -98,7 +99,8 @@ import { buildPerpDataset, perpRuleRecord, trainPerpMain } from './trainPerpMode
 import { runSnnPbt } from './snnPbt';
 import { snnContest, type ContestResult } from './snnContest';
 import { daysOf, HistoryLedger, HOLDOUT_RULE, isHoldout, isoWeek, weekBlocks } from './historyLedger';
-import { componentStatus, dailyStats, ledgerStatus, SOLID, solidWholeBot, targetMet, writeReadiness, type ReadinessFile, type ReadinessTarget } from './readiness';
+import { componentStatus, dailyStats, ledgerStatus, READINESS_RECORDED_DAYS, SOLID, solidWholeBot, targetMet, writeReadiness, type ReadinessFile, type ReadinessTarget } from './readiness';
+import { readWalk, walkDir } from './historyWalk';
 import { loadWholeBot, runWholeBot, settingsFromConfig } from './wholeBot';
 import { SetupModel } from '../bot/setups/setupModel';
 import { withSnnHyper } from '../bot/snn/population';
@@ -106,7 +108,7 @@ import { versionHash } from '../bot/snn/params';
 import { trainTennisMain } from './trainTennisModel';
 import { trainTaNetMain } from './trainTaNet';
 import { forecastSchema, setupInputStatus, trainSetupMain } from './trainSetupModel';
-import { sweepMain } from './sweep';
+import { sweepMain, SWEEP_MIN_DAYS } from './sweep';
 import { collectFiles, importFile } from './history/importCsv';
 import { downloadKalshiHistory, downloadKalshiTrades } from './history/kalshiHistory';
 import { dominanceNeedFrom, indexNeeds, tvFill } from './history/tradingview';
@@ -122,6 +124,7 @@ import { trainCrossLead } from './crossLead';
 import { CL_SCHEMA, setCrossLeadPath } from '../bot/ta/crossLead';
 import { setCrossGraphPath, XG_SCHEMA } from '../bot/ta/crossGraph';
 import { LIB_SCHEMA, setLibrarianPath } from '../bot/ta/librarian';
+import { addBatch, addHistoryBatch, annotateTally, judgeBatch, judgeRows, nextHistoryDays, readQuoteFill, readTally, tallyEvidence, writeHistoryDays } from './goLiveTally';
 
 const readLibSchema = (f: string): string | undefined => { try { return (JSON.parse(fs.readFileSync(f, 'utf8')) as { schema?: string }).schema; } catch { return undefined; } };
 import { BINANCE_INDEXES, downloadBinance, downloadBinanceFunding, downloadBinanceOpenInterest, type BinanceMarket } from './history/binanceVision';
@@ -139,7 +142,7 @@ import { capHours, enterDecisionPhase, resetSession, sessionActive, sessionTimeU
 /** Coins with Kalshi crypto contracts: the SNN tournaments' transition penalty reads their regime changes. */
 const SNN_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
 
-export const STEPS = ['history', 'history_replay', 'oracle_cull', 'ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'cross_lead', 'rule_book', 'gp', 'lead_lag', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
+export const STEPS = ['history', 'history_replay', 'oracle_cull', 'ta_net', 'ta_net_oos', 'librarian', 'cross_graph', 'cross_lead', 'rule_book', 'gp', 'lead_lag', 'setups', 'setup_snn', 'sweep', 'snn', 'vol_model', 'dataset', 'mlp', 'tally_history', 'vol', 'perps', 'tennis', 'fill', 'session_risk', 'sizing', 'playbook', 'readiness', 'conditioning'] as const;
 export type Step = typeof STEPS[number];
 
 /** Per replayable network. */
@@ -161,6 +164,11 @@ export interface SnnDomainState {
   pbtComplete?: boolean;
   /** How the tournament's days were chosen (the latest days, or blocks across the replay's years). */
   pbtLayout?: string;
+  /** The history walk's first day not walked when this network last trained (a walk that moved on trains it again),
+   *  and whether the training started from the walk's network fell short of the network in use (the next one then
+   *  starts from nothing). */
+  walkThrough?: string;
+  walkFellShort?: boolean;
 }
 
 export const REPLAYABLE: Exclude<SnnDomain, 'tennis'>[] = ['crypto', 'perps'];
@@ -374,7 +382,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   const sessionMin = Number(process.env.TRAIN_SESSION_MIN) || 0;
   resetSession();
   const DATA_STEPS = ['history-seed', 'history', 'history-index', 'history_replay', 'conditioning'];
-  const DECISION_STEPS = ['vol_model', 'dataset', 'mlp', 'vol', 'perps', 'tennis', 'fill', 'sizing', 'playbook', 'readiness'];
+  const DECISION_STEPS = ['vol_model', 'dataset', 'mlp', 'tally_history', 'vol', 'perps', 'tennis', 'fill', 'session_risk', 'sizing', 'playbook', 'readiness'];
   const run = async (step: string, fn: () => Promise<unknown>, skip?: string) => {
     const t0 = Date.now();
     if (stopRequested) {
@@ -440,6 +448,8 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   };
   const tooFew = days.length < A.minDays ? `only ${days.length} day(s) of recordings in ${rec} (< AUTO_TRAIN_MIN_DAYS=${A.minDays})` : undefined;
   const lastDays = (n: number) => (days.length ? days.slice(-n) : []);
+  // The recorded days before today (today's file is still being written).
+  const completeDays = days.filter((d) => d < new Date(now).toISOString().slice(0, 10));
   // How far the recordings have grown (and what that unlocks): reported every run.
   {
     const u = recordingsUsage(rec);
@@ -449,7 +459,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       recordedDays: days.length, firstDay: days[0] ?? null, lastDay: days[days.length - 1] ?? null, recordingsGb: +(u.bytes / 1e9).toFixed(2), freeGb: u.freeBytes !== undefined ? +(u.freeBytes / 1e9).toFixed(1) : null,
       gates: {
         'snn / mlp / perps / vol_model (AUTO_TRAIN_MIN_DAYS)': g(days.length, A.minDays),
-        'sweep kalshi': g(days.length, 20), 'sweep bot (whole-bot replay)': g(days.length, 20),
+        'sweep kalshi': g(completeDays.length, SWEEP_MIN_DAYS), 'sweep bot (whole-bot replay)': g(completeDays.length, SWEEP_MIN_DAYS),
         'setup_snn gate': g(journalTrades, SNN_GATE_MIN_TRADES),
       },
     };
@@ -824,10 +834,13 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         if (recorded) {
           const files = new Map(recordingFiles(source === 'replay' ? replayDir : rec).map((f) => [f.day, f.file]));
           if (pinned && !pinned.every((d) => files.has(d))) { log(`sweep-${target}: some of the unfinished sweep's days are gone: starting over`); pinned = undefined; }
-          // The most recent SWEEP_KALSHI_DAYS days (every setting tried replays all of them); an unfinished sweep on more
-          // days than that (from before the cap) starts over on the recent ones.
-          if (pinned && pinned.length > A.sweepKalshiDays) { log(`sweep-${target}: the unfinished sweep is on ${pinned.length} days, over SWEEP_KALSHI_DAYS=${A.sweepKalshiDays}: starting over on the recent ones`); pinned = undefined; }
-          const use = pinned ?? (source === 'replay' ? kDays.filter((d) => files.has(d)) : [...files.keys()]).slice(-A.sweepKalshiDays);
+          // The most recent SWEEP_KALSHI_DAYS days of the replay (every setting tried replays all of them); an unfinished
+          // sweep on more days than that (from before the cap) starts over on the recent ones. On the recordings, the
+          // newest SWEEP_MIN_DAYS complete days: the bot keeps 20 (RECORDINGS_KEEP_DAYS), so a sweep has its days for 5
+          // more daily runs, and none of its files changes (a file still being written would change every score).
+          const cap = source === 'replay' ? A.sweepKalshiDays : SWEEP_MIN_DAYS;
+          if (pinned && pinned.length > cap) { log(`sweep-${target}: the unfinished sweep is on ${pinned.length} days, over ${source === 'replay' ? `SWEEP_KALSHI_DAYS=${cap}` : `the ${cap} recorded days swept`}: starting over on the recent ones`); pinned = undefined; }
+          const use = pinned ?? (source === 'replay' ? kDays.filter((d) => files.has(d)) : completeDays.filter((d) => files.has(d))).slice(-cap);
           sweepSrc = path.join(work, 'sweep-replay');
           fs.rmSync(sweepSrc, { recursive: true, force: true });
           linkDays(use.map((d) => ({ day: d, file: files.get(d)! })), sweepSrc);
@@ -984,19 +997,36 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         return { complete: true, adopted: true, pbo: r.pbo, rounds: r.rounds, trials: r.trials, elite: r.elite, dsr: r.dsr, population: A.snnPbtPopulation, data: src === rec ? 'recordings' : `history replay, ${pbtDays.length} days from ${pbtDays[0]} to ${pbtDays[pbtDays.length - 1]}`, ...genInfo };
       }, srcGate ?? noFresh ?? (pbtDue ? undefined : `knobs chosen ${(((now - (ds.pbtAt ?? now)) / 86_400_000)).toFixed(1)} day(s) ago`)) as { complete?: boolean } | undefined;
       const hyper = ds.pbtStage === stage ? ds.pbtHyper : undefined;
-      const trainNeeded = Boolean(verdicts) || Boolean(pbt?.complete) || !fs.existsSync(file) || ds.stage !== stage;
+      // The history walk's best network (research/historyWalk.ts), when the walk runs this stage. A walk that moved on
+      // since this network last trained trains it again.
+      const wDir = walkDir(A.dir, domain), walked = readWalk(wDir, domain), eliteFile = path.join(wDir, 'elite.json');
+      const walkElite = walked.elite && walked.stage === stage && fs.existsSync(eliteFile) ? walked.elite : undefined;
+      const trainNeeded = Boolean(verdicts) || Boolean(pbt?.complete) || !fs.existsSync(file) || ds.stage !== stage || Boolean(walkElite && ds.walkThrough !== walkElite.through);
       await run(`snn-${domain}-train`, async () => {
         const span = lastSrc(A.snnTrainDays);
         const nEval = span.length >= 2 ? Math.max(1, Math.round(span.length * 0.2)) : 0;
         const trainSpan = span.slice(0, span.length - nEval), evalSpan = span.slice(span.length - nEval);
         const cand = path.join(work, `snn_${domain}.candidate.json`);
+        // Started from the walk's network, with its knobs, only when the walk never saw the unseen days the training is
+        // judged on (it stays a week behind), and not right after it fell short of the network in use: that training
+        // starts from nothing, as before the walk, so the network in use never grows old.
+        const fromWalk = walkElite && !ds.walkFellShort && (!evalSpan.length || walkElite.through <= evalSpan[0]) ? walkElite : undefined;
         const r = await trainSnnApart({
-          recordings: src, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined, hyper: hyper ? JSON.stringify(hyper) : undefined, 'skip-model': src === rec ? undefined : 'true',
+          recordings: src, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined, hyper: fromWalk ? JSON.stringify(fromWalk.hyper) : hyper ? JSON.stringify(hyper) : undefined, 'skip-model': src === rec ? undefined : 'true',
           from: trainSpan[0], to: evalSpan[0] ?? undefined,
           'eval-from': evalSpan[0], 'eval-to': evalSpan.length ? nextDay(evalSpan[evalSpan.length - 1]) : undefined,
+          init: fromWalk ? eliteFile : undefined, incumbent: fromWalk && src === rec ? file : undefined,
         });
+        if (walkElite) ds.walkThrough = walkElite.through;
+        ds.walkFellShort = undefined;
         if (src !== rec) { ledger.markTrained(ledgerNet, weekBlocks(span).map((b) => b.id)); ledger.save(); }
         if (A.promote === 'validated' && !stageAccepted) return { promoted: false, stage, reason: 'stage not accepted by the ablation', result: r };
+        // On the recordings (no contest) a network started from the walk's replaces the network in use only by doing at
+        // least as well on the newest days, unseen by both.
+        if (fromWalk && r.incumbent?.n && r.eval && r.eval.snn > r.incumbent.snn) {
+          ds.walkFellShort = true;
+          return { promoted: false, stage, reason: `started from the history walk's network (walked to ${fromWalk.through}): Brier ${r.eval.snn.toFixed(4)} on the ${evalSpan.length} newest day(s), the network in use ${r.incumbent.snn.toFixed(4)}; the next training starts from nothing`, result: r };
+        }
         // Contest (history replay): the new network replaces the one in use only if it beats it on held-out
         // weeks neither has trained on (the least-judged ones), replayed as live. Its own training days are
         // the latest ones, younger than any held-out week unless AUTO_TRAIN_SNN_TRAIN_DAYS reaches past half a
@@ -1018,7 +1048,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         ds.stage = stage;
         ds.version = r?.version;
         state.snnVersions![domain] = r?.version;
-        return { promoted: true, improved: first || contest?.winner === 'candidate', stage, stageAccepted, contest, result: r };
+        return { promoted: true, improved: first || contest?.winner === 'candidate', stage, stageAccepted, contest, result: r, ...(fromWalk ? { fromWalk: fromWalk.through } : {}) };
       }, srcGate ?? (trainNeeded ? undefined : 'up to date'));
       // Prequential backfill, day by day from the last backfilled day (a fresh online network of the
       // promoted stage: it was never fitted offline on these days, so no output saw its own label).
@@ -1077,34 +1107,95 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   if (want('dataset') || want('mlp')) await run('dataset', ifChanged('dataset', () => buildDatasetMain(argsOf({ recordings: decisionRec, out: dataset, every: 60, 'vol-model': volModelArg }))), tooFew);
   if (want('mlp')) {
     const cand = path.join(work, 'model.candidate.json');
+    // The go-live record kept across runs (research/goLiveTally.ts): the recordings hold 20 days, the gates want 1,000
+    // judged windows and 1,000 traded ones.
+    const tallyFile = path.join(A.dir, 'mlp_tally.json');
     await run('mlp', ifChanged('mlp', async () => {
       if (!fs.existsSync(dataset) || fs.statSync(dataset).size === 0) throw new SkipStep('empty dataset: no priced contracts with outcomes in the recordings yet');
-      try { await trainMetaModelMain(argsOf({ data: dataset, out: cand })); } catch (e) {
-        if (/need at least \d+ windows/.test((e as Error).message)) throw new SkipStep(`not enough settlement windows yet: ${(e as Error).message}`);
+      const tally = readTally(tallyFile);
+      // The holdout reaches back to the first window the tally has not judged, so every window is judged once.
+      const rep = await trainMetaModelMain(argsOf({ data: dataset, out: cand, 'holdout-from': tally.through || undefined })).catch((e: Error) => {
+        if (/need at least \d+ windows/.test(e.message)) throw new SkipStep(`not enough settlement windows yet: ${e.message}`);
         throw e;
-      }
+      });
       // One replay with the exit settings production trades with. The backtest's own grid for confluence_ratchet
       // (3 hunt margins x 2 wall fill ratios) replayed the recordings six times for the same annotation: most of the
       // step, which ran out of the quick phase's time on Oct 22 and Oct 23.
-      await backtestMain(argsOf({
+      const bt = await backtestMain(argsOf({
         recordings: decisionRec, model: cand, exits: cfg.strategy.exitPolicy, 'vol-model': volModelArg, 'fill-model': fillModelArg,
         'hunt-grid': cfg.strategy.huntTargetMargin, 'hunt-confluence': cfg.strategy.huntMinConfluence,
         'ratchet-fill-grid': cfg.strategy.ratchetMinFillRatio, 'ratchet-age': cfg.strategy.ratchetMinWallAgeSec, 'ratchet-slip': cfg.strategy.ratchetSlippageTicks,
       }), true);
+      // The holdout windows no candidate judged before go into the tally with what this candidate's backtest made on
+      // them, and the gates are judged on the tally.
+      const judge = MetaModel.load(cand);
+      const batch = judgeBatch(rep.judged, bt.windows, { after: tally.through, model: judge.params.version, trials: judge.params.validation?.variantsTried ?? 1, at: new Date(now).toISOString() });
+      const tallied = batch ? addBatch(tally, batch) : tally;
+      if (batch) writeAtomic(tallyFile, JSON.stringify(tallied));
+      const ev = tallyEvidence(tallied);
+      if (ev) annotateTally(cand, ev);
+      const goLive = ev ? { days: ev.days, windows: ev.nWindows, windowsTraded: ev.windowsTraded, added: batch?.windows.length ?? 0, recorded: ev.recorded ?? null, history: ev.history ?? null } : null;
+      if (ev) log(`mlp: go-live tally ${ev.nWindows} of ${GO_LIVE_GATES.minWindows} judged windows, ${ev.windowsTraded} of ${GO_LIVE_GATES.minWindowsTraded} traded, over ${ev.days} day(s) (${batch?.windows.length ?? 0} added)`);
       const m = MetaModel.load(cand);
       const passed = Boolean(m.params.validation?.passed);
       const usesSnn = m.params.features.some((f) => f.startsWith('snn_'));
-      if (A.promote === 'validated' && !passed) return { promoted: false, id: m.id, reason: `validation not passed (${m.liveBlockers().join('; ')})` };
+      if (A.promote === 'validated' && !passed) return { promoted: false, id: m.id, reason: `validation not passed (${m.liveBlockers().join('; ')})`, goLive };
       const champ = promoteIfChampion({ dir: A.dir, kind: 'mlp', candidate: cand, live: promoted('mlp'), enabled: A.champion });
-      if (!champ.promote) return { promoted: false, id: m.id, reason: champ.reason };
+      if (!champ.promote) return { promoted: false, id: m.id, reason: champ.reason, goLive };
       state.mlpId = m.id;
       state.trainedWithSnn!.crypto = state.snnVersions!.crypto;
       state.trainedWithTaNet = state.taNetVersion;
-      return { promoted: true, improved: champ.improved, champion: champ.reason, id: m.id, kind: m.params.kind, usesSnnFeatures: usesSnn, take: m.params.take?.validation ?? null, validationPassed: passed, liveBlockers: m.liveBlockers() };
+      return { promoted: true, improved: champ.improved, champion: champ.reason, id: m.id, kind: m.params.kind, usesSnnFeatures: usesSnn, take: m.params.take?.validation ?? null, validationPassed: passed, liveBlockers: m.liveBlockers(), goLive };
     }), tooFew);
   }
 
   // ---- 6. intraday volatility profile: the replay's last 180 days of 1-minute history when it exists ----
+  // ---- 5b. the go-live tally's unseen history: the live decision model plays the history replay's days before the
+  // recordings as if live, a few at a time while TALLY_HISTORY_MIN lasts (research/goLiveTally.ts); each chunk is kept
+  // as soon as it is judged, and the gates are judged again on the whole tally ----
+  if (want('tally_history')) {
+    const tallyFile = path.join(A.dir, 'mlp_tally.json');
+    await run('tally_history', async () => {
+      const live = mlpPath();
+      if (!live) throw new SkipStep('no decision model yet');
+      const kDays = T.historyReplay ? replayKalshiDays(replayDir) : [];
+      if (!kDays.length) throw new SkipStep('no history replay day with Kalshi\'s real contracts yet');
+      const judge = MetaModel.load(live);
+      const histMin = Number(process.env.TALLY_HISTORY_MIN ?? 30), chunk = Math.max(1, Number(process.env.TALLY_HISTORY_CHUNK) || 5);
+      const fill = readQuoteFill(A.dir);
+      const t0 = Date.now();
+      let tallied = readTally(tallyFile), played = 0, added = 0, traded = 0;
+      while (Date.now() - t0 < histMin * 60_000) {
+        const next = nextHistoryDays(kDays, days[0], tallied, chunk);
+        if (!next.length) break;
+        const src = path.join(work, 'tally-history');
+        const hData = path.join(work, 'tally-history.jsonl');
+        try {
+          await writeHistoryDays(replayDir, next, src, fill);
+          await buildDatasetMain(argsOf({ recordings: src, out: hData, every: 60, 'vol-model': volModelArg }));
+          const { rows } = await readDataset(hData);
+          const bt = rows.length ? await backtestMain(argsOf({
+            recordings: src, model: live, exits: cfg.strategy.exitPolicy, 'vol-model': volModelArg, 'fill-model': fillModelArg,
+            'hunt-grid': cfg.strategy.huntTargetMargin, 'hunt-confluence': cfg.strategy.huntMinConfluence,
+            'ratchet-fill-grid': cfg.strategy.ratchetMinFillRatio, 'ratchet-age': cfg.strategy.ratchetMinWallAgeSec, 'ratchet-slip': cfg.strategy.ratchetSlippageTicks,
+          }), false) : undefined;
+          const b = bt ? judgeBatch(judgeRows(judge, rows), bt.windows, { after: 0, model: judge.params.version, trials: judge.params.validation?.variantsTried ?? 1, at: new Date(now).toISOString() }) : undefined;
+          tallied = addHistoryBatch(tallied, tallied.history?.edge ?? days[0], next, b);
+          writeAtomic(tallyFile, JSON.stringify(tallied));
+          played += next.length; added += b?.windows.length ?? 0; traded += b?.trades.filter((x) => x[2] > 0).length ?? 0;
+          log(`tally_history: ${next[0]}..${next[next.length - 1]} played as live (${fill.how} quotes): ${b?.windows.length ?? 0} window(s), ${b?.trades.filter((x) => x[2] > 0).length ?? 0} traded`);
+        } finally {
+          fs.rmSync(src, { recursive: true, force: true });
+          fs.rmSync(hData, { force: true });
+        }
+      }
+      if (!played) throw new SkipStep(tallied.history ? `every history day before ${tallied.history.edge} already played` : 'no recorded day yet to start from');
+      const ev = tallyEvidence(tallied);
+      const gate = ev ? annotateTally(live, ev) : undefined;
+      return { days: played, windows: added, traded, quotes: fill.how, goLive: ev ? { days: ev.days, windows: ev.nWindows, windowsTraded: ev.windowsTraded, recorded: ev.recorded ?? null, history: ev.history ?? null } : null, passed: gate?.passed ?? false, liveBlockers: gate?.blockers ?? [] };
+    });
+  }
+
   if (want('vol')) {
     const recent = T.historyReplay ? replayDays().slice(-180) : [];
     await run('vol', ifChanged('vol', async () => {
@@ -1134,25 +1225,40 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       // execution backtest run there, on weeks the model has never seen.
       const perpDays = perpSrc === replayDir ? replayPerpDays(replayDir) : [];
       const held = perpDays.length ? weekBlocks(perpDays).filter((b) => isHoldout(b, replayDays().slice(-1)[0])) : [];
-      try { await trainPerpMain(argsOf({ recordings: perpSrc, out: cand, every: perpSrc === rec ? undefined : 900, cache, workers: workerCount(), holdout: held.length ? 'ledger' : undefined })); } catch (e) {
+      // On the recordings the newest week is held out of training for the execution backtest (the bot keeps 20 days:
+      // 13 to train on, 7 to test on). With fewer than 12 days there are too few to do both (the backtest passes from
+      // PERP_RECORDED_MIN_DAYS days of quotes), and the model trains on them all.
+      const testN = Math.min(PERP_RECORDED_TEST_DAYS, Math.floor(days.length / 2));
+      const recTest = perpSrc === rec && testN > PERP_RECORDED_MIN_DAYS ? days.slice(-testN) : [];
+      try { await trainPerpMain(argsOf({ recordings: perpSrc, out: cand, every: perpSrc === rec ? undefined : 900, cache, workers: workerCount(), holdout: held.length ? 'ledger' : undefined, 'holdout-from': recTest[0] })); } catch (e) {
         if (/record more perp data|no perp/i.test((e as Error).message)) throw new SkipStep('no perp quotes recorded yet (PERPS_FEED=true records them)');
         throw e;
       }
       if (!fs.existsSync(cand)) throw new SkipStep('perp trainer wrote no model');
-      // The execution backtest: the held-out weeks on the replay, else the recordings. It passes only over
-      // PERP_BACKTEST_MIN_DAYS days, which the recordings never reach, so there it is left out: over every recorded day
-      // it ran past the remote run's 5 hours (Oct 28) for a verdict that could only be "failed".
-      let btSrc: string | undefined = perpSrc;
+      // The execution backtest, on days the candidate never trained on: the held-out weeks on the replay (it passes from
+      // PERP_BACKTEST_MIN_DAYS days), the held-out newest week on the recordings (from PERP_RECORDED_MIN_DAYS), after
+      // the recorded day before it to warm the trackers up.
+      let btSrc: string | undefined = perpSrc, btFrom: string | undefined;
       if (held.length) {
         btSrc = path.join(work, 'perp-backtest-days');
         fs.rmSync(btSrc, { recursive: true, force: true });
         linkDays(held.flatMap((b) => b.days).map((d) => ({ day: d, file: path.join(replayDir, `md-${d}.jsonl.gz`) })), btSrc);
-      } else if (perpSrc === rec && days.length < PERP_BACKTEST_MIN_DAYS) btSrc = undefined;
-      const backtest = btSrc ? undefined : `left out: ${days.length} recorded day(s), it passes only over ${PERP_BACKTEST_MIN_DAYS}`;
-      if (btSrc) await perpBacktestMain(argsOf({ recordings: btSrc, model: cand }), true);
-      else log(`perps: execution backtest ${backtest}`);
+      } else if (perpSrc === rec) {
+        btSrc = undefined;
+        if (recTest.length) {
+          btSrc = path.join(work, 'perp-backtest-days');
+          fs.rmSync(btSrc, { recursive: true, force: true });
+          linkDays(recordingFiles(rec).filter((f) => f.day >= days[days.length - recTest.length - 1]), btSrc);
+          btFrom = recTest[0];
+        }
+      }
+      const left = btSrc ? undefined : `left out: ${days.length} recorded day(s), it needs ${2 * (PERP_RECORDED_MIN_DAYS + 1)} (the newest ${PERP_RECORDED_MIN_DAYS + 1} held out of training to test on)`;
+      if (btSrc) await perpBacktestMain(argsOf({ recordings: btSrc, model: cand, from: btFrom, 'min-days': btFrom ? PERP_RECORDED_MIN_DAYS : undefined }), true);
+      else log(`perps: execution backtest ${left}`);
       const m = PerpModel.load(cand);
       const ok = Boolean(m?.validated());
+      const bt = m?.params.validation?.backtest;
+      const backtest = left ?? (bt ? { ok: bt.ok, days: +bt.days.toFixed(1), pnlUsd: +bt.pnlUsd.toFixed(2), trades: bt.trades, ...(btFrom ? { from: btFrom } : {}) } : undefined);
       if (A.promote === 'validated' && !ok) return { promoted: false, reason: m?.blockers().join('; '), backtest };
       // Contest: the live rule's net P&L per trade on the held-out weeks, challenger vs the model in use --
       // only when the model in use was also trained without them (else the contest would favour it).
@@ -1171,7 +1277,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const champ = promoteIfChampion({ dir: A.dir, kind: 'perp', candidate: cand, live: promoted('perp'), enabled: A.champion, candidateScore: scored ? -contest!.candidate.meanBps : undefined, incumbentScore: scored ? -contest!.incumbent.meanBps : undefined });
       if (!champ.promote) return { promoted: false, reason: champ.reason, contest, backtest };
       state.trainedWithSnn!.perps = state.snnVersions!.perps;
-      return { promoted: true, improved: champ.improved, champion: champ.reason, validated: ok, blockers: m?.blockers() ?? [], backtest, contest, data: perpSrc === rec ? 'recordings' : `history replay (${replayDays().length} days, ${held.length} held-out weeks)` };
+      return { promoted: true, improved: champ.improved, champion: champ.reason, validated: ok, blockers: m?.blockers() ?? [], backtest, contest, data: perpSrc === rec ? `recordings (${days.length} days${recTest.length ? `, the newest ${recTest.length} held out for the backtest` : ''})` : `history replay (${replayDays().length} days, ${held.length} held-out weeks)` };
     }), perpSrc === rec ? tooFew : undefined);
   }
 
@@ -1209,6 +1315,18 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       const m = FillModel.load(promoted('fill'));
       return { promoted: true, active: Boolean(m?.validated), validation: p.validation };
     });
+  }
+
+  // ---- 8b. session risk: per-session backtest of the current model and settings on the recordings; sessions that
+  // reliably lose shrink, ones that reliably earn grow at half weight (research/sessions.ts). The bot applies it
+  // under any hand-set SESSION_RISK (SESSION_RISK_AUTO). ----
+  if (want('session_risk')) {
+    await run('session_risk', ifChanged('session_risk', async () => {
+      const out = promoted('session_risk');
+      await sessionsMain(argsOf({ recordings: rec, out: path.join(work, 'vol_profile.session-risk.json'), model: fs.existsSync(promoted('mlp')) ? promoted('mlp') : cfg.paramsPath, 'risk-out': out }));
+      const f = JSON.parse(fs.readFileSync(out, 'utf8')) as { profile: Record<string, unknown> };
+      return { promoted: true, sessions: Object.keys(f.profile) };
+    }), tooFew);
   }
 
   // ---- 9. sizing tuner: replays the bot's settled entries under a grid of sizing policies (PROPOSAL) ----
@@ -1272,20 +1390,25 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
   // trainer stops at; every model's state; each network's weeks in the history ledger (research/readiness.ts) ----
   if (want('readiness')) {
     await run('readiness', async () => {
-      const target: ReadinessTarget = { poolUsd: A.targetPoolUsd, dailyPct: A.targetDailyPct, maxDdPct: A.targetMaxDdPct, minDays: SOLID.minDays };
       const kinds: Array<[keyof typeof MODEL_FILES, string]> = [['ta_net', 'ta_net'], ['setups', 'setups'], ['mlp', 'mlp'], ['perp', 'perp'], ['vol_model', 'vol_model'], ['tennis', 'tennis'], ['snn_crypto', 'snn'], ['snn_perps', 'snn'], ['snn_tennis', 'snn']];
       const components = componentStatus(A.dir, { ...Object.fromEntries(kinds.map(([k, kind]) => [k, { kind, file: promoted(k) }])), gp: { kind: 'gp', file: path.join(A.dir, 'gp_indicators.json') } });
       const rDays = T.historyReplay ? replayDays() : [], pDays = T.historyReplay ? replayPerpDays(replayDir) : [];
       const ledgerInfo = ledgerStatus(ledger, { 'snn-crypto': weekBlocks(rDays), 'snn-perps': weekBlocks(pDays), 'perp-model': weekBlocks(pDays), 'snn-tennis': weekBlocks(T.historyReplay ? replayTennisDays(replayDir) : [], 1) }, rDays[rDays.length - 1] ?? days[days.length - 1] ?? '1970-01-01');
-      // The days: the sweep's (the replay's days that hold Kalshi's real contracts, else the recordings), their
-      // newest 15% (the sweep's final window: never tuned on), without the days the MLP was fitted on (its
-      // development span; its own holdout stays in), at most the newest 90.
+      // The days: the replay's days that hold Kalshi's real contracts (the sweep's), their newest 15% (the sweep's final
+      // window: never tuned on), without the days the MLP was fitted on (its development span; its own holdout stays
+      // in), at most the newest 90, and 30 of them to pass. Without that replay, the recordings: the bot keeps 20 days
+      // (RECORDINGS_KEEP_DAYS) and the MLP is fitted on the newest, so their newest 15% leaves a day or two; the whole
+      // bot is judged on the newest READINESS_RECORDED_DAYS complete days the MLP was not fitted on (a part of today is
+      // not a day), and passes on 5.
       const kDays = T.historyReplay ? replayKalshiDays(replayDir) : [];
       const useReplay = kDays.length >= 20 && kDays.length > days.length;
-      const all = useReplay ? kDays : days;
+      const minDays = useReplay ? SOLID.minDays : READINESS_RECORDED_DAYS;
+      const target: ReadinessTarget = { poolUsd: A.targetPoolUsd, dailyPct: A.targetDailyPct, maxDdPct: A.targetMaxDdPct, minDays };
       const fit = mlpPath() ? (MetaModel.load(mlpPath()!).params.training as { firstWindow?: string; holdoutStart?: string } | undefined) : undefined;
       const fitted = (d: string) => Boolean(fit?.firstWindow && fit.holdoutStart && d >= fit.firstWindow.slice(0, 10) && d < fit.holdoutStart.slice(0, 10));
-      const held = all.slice(Math.floor(all.length * 0.85)).filter((d) => !fitted(d)).slice(-90);
+      const held = useReplay
+        ? kDays.slice(Math.floor(kDays.length * 0.85)).filter((d) => !fitted(d)).slice(-90)
+        : completeDays.filter((d) => !fitted(d)).slice(-Math.max(READINESS_RECORDED_DAYS, days.length - Math.floor(days.length * 0.85)));
       let wholeBot: ReadinessFile['wholeBot'];
       let note: string | undefined;
       // The whole-bot replay is reused while nothing it reads changed (the models' and ledger's status is refreshed).
@@ -1305,7 +1428,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
           try { book = SetupModel.load(fs.existsSync(promoted('setups')) ? promoted('setups') : cfg.perps.setupModelPath)?.params.book; } catch { book = undefined; }
           const r = await runWholeBot(D, 'held', { ...settingsFromConfig(cfg, book), totalUsd: target.poolUsd });
           const st = dailyStats(r.days.map((x) => x.total), target.poolUsd, r.days.map((x) => x.day));
-          const sw = solidWholeBot(st);
+          const sw = solidWholeBot(st, minDays);
           wholeBot = { ...st, window: `${useReplay ? 'history replay (real Kalshi contracts)' : 'recordings'}: ${held.length} day(s) ${held[0]}..${held[held.length - 1]}`, kalshiUsd: r.kalshiUsd, perpsUsd: r.perpsUsd, solid: sw.solid, solidWhy: sw.why };
         } finally {
           for (const d of Object.values(D.dirs)) fs.rmSync(d, { recursive: true, force: true });

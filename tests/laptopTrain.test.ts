@@ -3,7 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
-import { afterRound, championsGone, confirmPushed, CONTINUE_STEPS, finishedStep, fullRoundDone, modelsChangedSince, readTrainerState, writeTrainerState, filesToPull, filesToPush, guideText, kalshiSweeps, laptopProfile, readSettings, writeSettings, LOCAL_ONLY_DIRS, localManifest, parseManifest, readPushes, roundOutcome, runTrainer, safeServerEnv, scoreboard, Server, serverLine, usableKey } from '../research/laptopTrain';
+import { afterRound, championsGone, confirmPushed, CONTINUE_STEPS, finishedStep, fullRoundDone, modelsChangedSince, readTrainerState, writeTrainerState, filesToPull, filesToPush, guideText, kalshiSweeps, laptopProfile, readSettings, writeSettings, LOCAL_ONLY_DIRS, localManifest, parseManifest, readPushes, roundOutcome, runTrainer, safeServerEnv, scoreboard, Server, serverLine, usableKey, walkBudget, walkFiles, walkHolder, walkOrder } from '../research/laptopTrain';
+import { RoundProgress } from '../research/trainerProgress';
 import { dailyStats, type ReadinessFile } from '../research/readiness';
 import { resourcePlan } from '../research/trainerResources';
 import { tmpDir } from './helpers';
@@ -30,8 +31,9 @@ test('laptop trainer: manifests, what to copy down and what to send back', () =>
   const srvK = [{ path: kIdx, size: 9, mtime: 90_000 }, { path: kDay, size: 9, mtime: 90_000 }];
   assert.deepEqual(filesToPull(srvK, new Map([[kIdx, { path: kIdx, size: 5, mtime: 10_000 }]])).map((f) => f.path), [kDay]);
   assert.deepEqual(filesToPull(srvK, new Map()).map((f) => f.path), [kIdx, kDay]);
-  // Never sent: links to replay days, caches the server rebuilds, logs, partial writes.
+  // Never sent: links to replay days, caches the server rebuilds, logs, partial writes, the history walk's folder.
   const files = ['work/perp-dataset/2021-01-01.json.gz', 'work/perp-dataset-rec/x.gz', 'work/perp-backtest-days/md-2021-01-01.jsonl.gz', 'work/sweep-replay/md-2021-01-01.jsonl.gz', 'work/vol-replay/a', 'work/readiness-days/b', 'work/tanet-cache/BTC.bin',
+    'work/history-walk/crypto/replay-state/2018-01-01.json.gz', 'work/history-walk/perps/pbt/m0.json',
     'logs/pipeline-laptop.log', 'x.json.tmp', 'work/history-ledger.json', 'readiness.json', 'work/snnpbt/perps/state.json', 'archive/ta_net/v1.json'];
   const all = new Map(files.map((f) => [f, { path: f, size: 1, mtime: 9_000_000 }]));
   assert.deepEqual(filesToPush(all, []).map((f) => f.path).sort(), ['archive/ta_net/v1.json', 'readiness.json', 'work/history-ledger.json', 'work/snnpbt/perps/state.json']);
@@ -287,4 +289,54 @@ test('windows key copy: a read-only copy from an earlier run is reused for the s
   assert.equal(usableKey(key, dir, 'win32'), copy, 'the same key: no copy over the read-only file');
   fs.writeFileSync(key, 'KEY-2');
   assert.equal(fs.readFileSync(usableKey(key, dir, 'win32'), 'utf8'), 'KEY-2', 'a different key replaces it');
+});
+
+test('history walk: one holder name per computer, safe for the lease', () => {
+  assert.equal(walkHolder('STEVEN-PC'), 'laptop-STEVEN-PC');
+  assert.equal(walkHolder('Steven\'s Laptop (2)'), 'laptop-Steven-s-Laptop--2-');
+  assert.match(walkHolder('x'.repeat(200)), /^laptop-x+$/);
+  assert.equal(walkHolder('x'.repeat(200)).length, 60);
+});
+
+test('history walk: 20 to 90 days per 30 minutes of the slider, and time for the shortest block', () => {
+  // 30 minutes at the measured 2 minutes a day: 20 days need 40 minutes, so it may run that long.
+  assert.deepEqual(walkBudget(30, 120), { minDays: 20, maxDays: 90, minutes: 40 });
+  assert.deepEqual(walkBudget(60, 120), { minDays: 40, maxDays: 180, minutes: 80 });
+  // Fast days: never shorter than the session.
+  assert.deepEqual(walkBudget(30, 30), { minDays: 20, maxDays: 90, minutes: 30 });
+  // A first walk, pace unknown (10 minutes a day guessed): at most three sessions' length.
+  assert.equal(walkBudget(30).minutes, 90);
+  // A short session still walks at least a holdout's worth of days.
+  assert.deepEqual(walkBudget(15, 60), { minDays: 20, maxDays: 45, minutes: 20 });
+});
+
+test('history walk: the network furthest behind goes first', () => {
+  assert.deepEqual(walkOrder({ crypto: '2019-03-01', perps: '2020-01-01' }), ['crypto', 'perps']);
+  assert.deepEqual(walkOrder({ crypto: '2021-03-01', perps: '2020-01-01' }), ['perps', 'crypto']);
+  // Not started: at its first day (perps from 2019-09-09).
+  assert.deepEqual(walkOrder({ crypto: '2019-10-01' }), ['perps', 'crypto']);
+});
+
+test('history walk: what travels, and what the ordinary copy leaves to the walk', () => {
+  const f = (p: string) => ({ path: p, size: 1, mtime: 0 });
+  assert.deepEqual(walkFiles([f('walk.json'), f('elite.json'), f('pbt/state.json'), f('pbt/round/m0.json'), f('replay-state/2019-03-01.json.gz'), f('walk.json.tmp')]).map((x) => x.path),
+    ['walk.json', 'elite.json', 'pbt/state.json', 'replay-state/2019-03-01.json.gz']);
+  const base = 'models/work/history-walk/crypto';
+  const pulled = filesToPull([f(`${base}/walk.json`), f(`${base}/elite.json`), f(`${base}/pbt/state.json`), f(`${base}/replay-state/x.json.gz`), f(`${base}.incoming/walk.json`), f('models/model.json')], new Map()).map((x) => x.path);
+  assert.deepEqual(pulled, [`${base}/walk.json`, `${base}/elite.json`, 'models/model.json']);
+  assert.ok(LOCAL_ONLY_DIRS.has('walk-work'));
+});
+
+test('the window shows the history walk as its own step', () => {
+  let t = 0;
+  const p = new RoundProgress([], false, () => t, { plan: ['walk-crypto'], expect: new Map([['walk-crypto', 40 * 60_000]]) });
+  p.line('[pipeline] walk-crypto: running...');
+  t = 10 * 60_000;
+  const v = p.view();
+  assert.equal(v.step, 'walk-crypto');
+  assert.match(v.explanation, /crypto spiking network through the next block of history/);
+  assert.equal(Math.round(v.training.pct), 25);
+  assert.equal(v.training.etaSec, 30 * 60);
+  p.line('[pipeline] walk-crypto: done in 600 s');
+  assert.equal(p.view().training.pct, 100);
 });

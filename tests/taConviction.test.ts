@@ -8,11 +8,12 @@ const CFG = { weight: 1, maxShift: 0.06, maxZ: 0.5, live: false, altBoost: 2.5, 
 
 test('TA conviction: reliability follows validation and graded skill', () => {
   assert.equal(reliability(true, undefined, 0, false), 1);
-  assert.equal(reliability(false, undefined, 0, false), 0.5, 'ungraded unvalidated head: half in paper');
-  assert.equal(reliability(false, undefined, 0, true), 0, 'and nothing in live mode');
-  assert.equal(reliability(false, -0.01, 100, false), 0, 'worse than a coin flip: no influence');
-  assert.equal(reliability(false, 0.01, 100, false), 0.75);
-  assert.equal(reliability(false, 0.05, 100, false), 1);
+  assert.equal(reliability(true, 0.05, 100, false), 1);
+  assert.equal(reliability(true, -0.05, 100, false), 0.5, 'a validated head whose live skill turns clearly negative counts half');
+  assert.equal(reliability(true, -0.05, 10, false), 1, 'but not before 24 graded calls');
+  assert.equal(reliability(false, undefined, 0, false), 0, 'a head that failed its blind test: nothing, paper or live');
+  assert.equal(reliability(false, undefined, 0, true), 0);
+  assert.equal(reliability(false, 0.05, 100, false), 0, 'its rolling live skill never promotes it');
 });
 
 test('TA conviction: drift points with the forecast and shrinks over shorter contracts', () => {
@@ -20,7 +21,11 @@ test('TA conviction: drift points with the forecast and shrinks over shorter con
   const d15 = taDrift(v, 900, CFG)!, d60 = taDrift(v, 3600, CFG)!;
   assert.ok(d15.k > 0 && d60.k > d15.k, `${d15.k} ${d60.k}`);
   assert.ok(taDrift({ up1: 0.4, validated1: true }, 900, CFG)!.k < 0);
-  assert.equal(taDrift({ up1: 0.7, skill1: -0.05, graded1: 100 }, 900, CFG), undefined, 'a head with negative skill does not move prices');
+  assert.equal(taDrift({ up1: 0.7, skill1: 0.05, graded1: 100 }, 900, CFG), undefined, 'an unvalidated head does not move prices, whatever its live skill');
+  // Reliability weighs a head once: a half-trusted head alone gives the same drift as a fully trusted one.
+  const half = taDrift({ up1: 0.6, validated1: true, skill1: -0.05, graded1: 100 }, 900, CFG)!;
+  assert.deepEqual(half.parts, ['1h P(up) 0.600 x0.50']);
+  assert.ok(Math.abs(half.k - d15.k) < 1e-12, `${half.k} ${d15.k}`);
   // |z| is capped.
   assert.ok(taDrift({ up1: 0.99, validated1: true }, 3600, CFG)!.k <= 0.5 + 1e-9);
 });
@@ -29,10 +34,14 @@ test('TA conviction: breadth counts agreeing signals net of those against', () =
   const f = { conf_count: 2, taconf_net_trend: 3, taconf_trend_alignment: 0.5, ta_rsi_1h: 0.2, ta_ema_stack_1h: -1 };
   const s = orientedSignals(f, { up1: 0.6, validated1: true }, false);
   const up = confluenceBreadth(s, 1), dn = confluenceBreadth(s, -1);
-  assert.equal(up.agree.length, 5);
-  assert.equal(up.oppose.length, 1);
-  assert.ok(Math.abs(up.breadth - 4 / 6) < 1e-9);
+  // One vote per idea: the TA network, the confluence count and the momentum family (3 of its 4 readings bullish).
+  assert.deepEqual(s.map(([n]) => n), ['TA net', 'confluence count', 'momentum']);
+  assert.ok(Math.abs(s[2][1] - 0.5) < 1e-12, 'momentum: the mean sign of its readings');
+  assert.equal(up.agree.length, 3);
+  assert.equal(up.oppose.length, 0);
+  assert.ok(Math.abs(up.breadth - 3 / 4) < 1e-9);
   assert.equal(dn.breadth, 0);
+  assert.equal(orientedSignals(f, { up1: 0.6, validated1: false, skill1: 0.05, graded1: 100 }, false).some(([n]) => n === 'TA net'), false, 'a failed head casts no vote');
   assert.ok(taNetDirection({ up1: 0.6, validated1: true }, false)! > 0);
 });
 
@@ -55,7 +64,9 @@ test('TA conviction: perp longs on an altcoin in risk-on get 2.5x, capped in tot
   assert.equal(short.mult, 1, 'everything agrees with up: no breadth for a short');
   assert.ok(long.priority > short.priority);
   const btc = directionalConviction('BTC', 1, f, undefined, c);
-  assert.equal(btc.mult, 2, 'full breadth: the confluence boost alone (max 2x)');
+  assert.equal(btc.mult, 1.5, 'two ideas agree (confluence count, momentum) of the four a full boost needs: half the confluence boost');
+  const full = directionalConviction('BTC', 1, f, { up1: 0.6, validated1: true }, { ...c, ruleBook: { score: 0.8, n: 3 } });
+  assert.equal(full.mult, 2, 'four independent ideas agree: the full confluence boost (max 2x)');
 });
 
 test('adversary: the TA network against the side breaks it; breadth scales the boost', () => {

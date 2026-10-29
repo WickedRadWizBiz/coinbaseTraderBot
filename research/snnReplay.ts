@@ -77,6 +77,8 @@ export interface SnnReplayOpts {
   checkpoint?: SnnCheckpoint;
   /** Accept a checkpoint taken under different (shape-preserving) hyperparameters (tournament clones). */
   allowParamChange?: boolean;
+  /** Run the network with no weight learning (SnnNetwork.pauseLearning): the history walk's holdout weeks. */
+  pauseLearning?: boolean;
   /** Only read recording files in this day range (YYYY-MM-DD, inclusive; warm-up included by the caller). */
   fromDay?: string;
   toDay?: string;
@@ -117,6 +119,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
   const net = new SnnNetwork(o.params, { whitelist: o.whitelist, model: o.snnModel });
   net.dirLog = o.lean && domain !== 'perps' ? undefined : [];
   net.training = Boolean(o.training?.eprop);
+  net.pauseLearning = Boolean(o.pauseLearning);
   if (o.checkpoint) net.restore(o.checkpoint, { allowParamChange: o.allowParamChange });
   // A checkpoint from later in time (a tournament generation moving back to earlier weeks): start over the
   // network's clock and time-bound state, keep what it learned.

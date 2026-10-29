@@ -55,6 +55,12 @@ if grep -q '^SINUOUS_EXIT_PAPER=' "$ENV"; then edit_env '^SINUOUS_EXIT_PAPER='; 
 for old in gate rest; do
   if grep -qx "SINUOUS_EXIT=$old" "$ENV"; then edit_env "^SINUOUS_EXIT=$old\$" 'SINUOUS_EXIT=cross'; echo "SINUOUS_EXIT: $old -> cross in $ENV"; fi
 done
+# Paper behaves exactly like live (the owner, Oct 28): a bot.env pinned to the old paper-only defaults (order sizes
+# PAPER_ORDER_FRAC 0.1 / 0.10 and PAPER_ORDER_USD 10, exploration entries, 12 training trades an hour, the vault left
+# out of paper's bankroll) drops them, so the new defaults (off) apply; any other value is left alone.
+for old in 'PAPER_ORDER_FRAC=0.1' 'PAPER_ORDER_FRAC=0.10' 'PAPER_ORDER_USD=10' 'PAPER_EXPLORE=true' 'PAPER_TRAINING_TRADES_PER_HOUR=12' 'VAULT_IN_PAPER=false'; do
+  if grep -qxF "$old" "$ENV"; then edit_env "^${old//./\\.}\$"; echo "${old%%=*}=${old#*=} removed from $ENV (paper behaves like live)"; fi
+done
 if [ -n "${DASHBOARD_PASSWORD:-}" ] && ! grep -qxF "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD" "$ENV"; then
   edit_env '^DASHBOARD_PASSWORD=' "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD"
   echo "dashboard password set from the deploy"

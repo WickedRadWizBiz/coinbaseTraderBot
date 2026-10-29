@@ -155,6 +155,8 @@ jobs:
             PYEOF
             echo "== learning and settlement report"
             if [ -f ~/bot/current/deploy/learning_report.py ]; then python3 ~/bot/current/deploy/learning_report.py ~/bot/data || true; else echo "(learning report ships with the next release)"; fi
+            echo "== module report (what is on, validated, earning or stale; deploy/module_report.py)"
+            if [ -f ~/bot/current/deploy/module_report.py ]; then python3 ~/bot/current/deploy/module_report.py ~/bot/data 24 || true; else echo "(module report ships with the next release)"; fi
             for p in $EXTRA_PATHS; do
               case "$p" in /api/*) ;; *) echo "skipping $p (only /api/... paths)"; continue;; esac
               echo "== GET $p"; api "$p" | head -c 6000; echo

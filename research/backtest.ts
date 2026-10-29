@@ -36,17 +36,19 @@ import { applyFillModel, FillModel } from '../bot/tca/fillModel';
 import { applyTakeGate, TAKE_GATED_DRIVERS, TAKE_GATED_MICRO, TAKE_GATED_TREND } from '../bot/model/takeModel';
 import { dropTape, openTape, TapeMiss, tickerHash, type TapeReader, type TapeWriter } from './callTape';
 import { effectiveSigma, loadVolProfile, type VolProfile } from '../bot/model/volSeasonality';
-import { sessionRiskFor, huntBlockedBySession, type SessionRiskProfile } from '../bot/model/sessionRisk';
+import { sessionRiskFor, huntBlockedBySession, loadSessionRiskFile, mergeSessionRisk, type SessionRiskProfile } from '../bot/model/sessionRisk';
 import { sessionState } from '../bot/model/sessions';
 import { Vault, type VaultConfig } from '../bot/vault/vault';
 import { ladderQuotes } from '../bot/model/ladder';
 import { priceContract, SETTLEMENT_AVG_SEC } from '../bot/model/fairValue';
 import { kalshiMaintenance, sessionEdge } from '../bot/model/sessions';
 import { defaultTiers, tierAt, type TierPoint } from '../bot/risk/sizingTiers';
+import { orderBudget } from '../bot/sizing/orderBudget';
+import { binaryTrades, optimalF, recencyWeight } from '../bot/strategy/optimalF';
 import { CadenceGate, inEntryWindow } from '../bot/strategy/cadence';
 import type { MacroEvent } from '../bot/model/featureEngine';
 import { loadCalendar } from '../bot/model/calendar';
-import { MetaModel } from '../bot/model/metaModel';
+import { GO_LIVE_GATES, MetaModel } from '../bot/model/metaModel';
 import type { OrderIntent } from '../bot/oms/oms';
 import { PositionBook } from '../bot/oms/positions';
 import { PaperExchange } from '../bot/paper/paperExchange';
@@ -69,6 +71,9 @@ import { ConfluenceRatchetExit, DEFAULT_HUNT, DEFAULT_RATCHET, EXIT_POLICIES, Ex
 import { readRecordings, ReplayState } from './replay';
 import { AccuracyGate, type AccuracyGateConfig } from '../bot/strategy/accuracyGate';
 import { TakeProfitBench } from '../bot/strategy/takeProfitBench';
+import { compactReading, MarketState, observeMarket } from '../bot/marketdata/marketState';
+import { dynamicEdge } from '../bot/strategy/dynamicEdge';
+import { otherCoinsHeld, regimeScale } from '../bot/strategy/regimeScale';
 import { gatePasses, type ProbationParams } from '../bot/risk/probation';
 import { bootstrapMeanCi, deflatedSharpe, pbo, rng, sharpe } from './stats';
 
@@ -133,6 +138,8 @@ export interface BacktestResult {
   pnl: number;
   /** The smallest loss-aware size scale the run reached (bot/risk/equityGuard.ts; 1 = never below break-even). */
   sizeScaleMin?: number;
+  /** Evaluations whose stake the optimal f cap set (below the tier's). */
+  optimalFBound?: number;
   /** Each refill of a pool that ran dry (BacktestOpts.refillUsd): when, and how much went in. */
   refills?: Array<{ t: number; usd: number }>;
   /** With the paper options: entries the accuracy gate held back, when the take-profit bench benched, its sales (fills
@@ -165,9 +172,14 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
   tape?: { file: string; sig: string };
   /** Paper sizing as the engine does it (bot/engine.ts paperOrderUsd / orderLimits): each crypto order buys about
    *  orderFrac of the bankroll (or the fixed orderUsd with orderFrac 0), whatever the tier allows; the risk caps widen
-   *  to fit one order, PAPER_WINDOW_ORDERS closing together and PAPER_TOTAL_ORDERS in all. The vault is bookkeeping
-   *  only in paper, so it does not shrink the bankroll here either. */
+   *  to fit one order, PAPER_WINDOW_ORDERS closing together and PAPER_TOTAL_ORDERS in all. Both 0 (the default): sized
+   *  as live. The vault's reserve leaves the bankroll in both modes, as in the engine. */
   paper?: { orderFrac: number; orderUsd: number };
+  /** The optimal f cap as the engine applies it (Engine.kalshiOptimalF): the stake per order never above what the
+   *  replay's own settled entries support (bootstrap quantile of the growth-optimal fraction, recency weighted, once
+   *  there are minTradesKalshi), floored (paper and live alike) at paperFloor x the tier's per-order fraction. Starts from
+   *  `seed` (settled entries before the replay, as trades.jsonl rows) when given, else from nothing. */
+  optimalF?: { enabled: boolean; quantile: number; halfLifeDays: number; minTradesKalshi: number; paperFloor: number; seed?: Array<{ ts: number; ticker: string; cost: number; count: number; won: boolean }> };
   /** The paper accuracy gate (bot/strategy/accuracyGate.ts): no new entry in a time-to-close bucket where the market's
    *  own price has called the recent results better than the bot. Starts with an empty scorecard (no look-ahead), or
    *  from accuracyGateFile. */
@@ -232,7 +244,9 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
 /** One market evaluation: the price traded on and what the fair value was made of (pModel: the trained model's price,
  *  before the TA tilt and the rule book's). */
 export interface EvalReading { ticker: string; now: number; pYes: number; fv: number; bid: number; ask: number; position: number; spot?: number; strike?: number; sigma?: number; sigmaPricing?: number;
-  pModel?: number; taVolMult?: number; taShift?: number; ruleShift?: number }
+  pModel?: number; taVolMult?: number; taShift?: number; ruleShift?: number;
+  /** The market-state reading (compactReading), as the engine's decision audit records it. */
+  mstate?: Record<string, number | null> }
 
 /** The engine's paper caps (bot/engine.ts): one order, this many closing together, this many in all. */
 export const PAPER_WINDOW_ORDERS = 3;
@@ -265,10 +279,13 @@ const tapedMap = (keys: string[], x: Float64Array): Record<string, number> => ne
  *  there, else the shipped params/ files (bot/autotrain.ts resolveModelPaths). The TA network and the rule book are
  *  installed process-wide, as in the bot. `trialsFile`: the bot's component_trials.json, read from a private copy (the
  *  trials' verdicts on paper's price). `used` names the ones in use; `sig` is what a call tape depends on. */
-export async function engineModels(cfg: Config, o: { trialsFile?: string } = {}): Promise<{ volProfile?: VolProfile; volModel?: VolModel; fillModel?: FillModel; calendar?: MacroEvent[]; trials?: ComponentTrials; used: string[]; sig: string }> {
+export async function engineModels(cfg: Config, o: { trialsFile?: string } = {}): Promise<{ sessionRisk: SessionRiskProfile; volProfile?: VolProfile; volModel?: VolModel; fillModel?: FillModel; calendar?: MacroEvent[]; trials?: ComponentTrials; used: string[]; sig: string }> {
   const { resolveModelPaths } = await import('../bot/autotrain');
   const paths = resolveModelPaths(cfg);
   const vp = fs.existsSync(paths.vol) ? loadVolProfile(paths.vol) : undefined;
+  // The session risk profile the engine applies (bot/engine.ts sessionRiskProfile): the pipeline's, under SESSION_RISK.
+  const srAuto = cfg.strategy.sessionRiskAuto && fs.existsSync(paths.session_risk) ? loadSessionRiskFile(paths.session_risk)?.profile : undefined;
+  const sessionRisk = srAuto ? mergeSessionRisk(srAuto, cfg.strategy.sessionRisk) : cfg.strategy.sessionRisk;
   const volProfile = vp && cfg.strategy.volSeasonality && vp.validation?.improved ? vp : undefined;
   let volModel: VolModel | undefined, fillModel: FillModel | undefined, taNet: TaNet | undefined;
   try { volModel = cfg.strategy.volModel && fs.existsSync(paths.vol_model) ? VolModel.load(paths.vol_model) : undefined; } catch { volModel = undefined; }
@@ -299,7 +316,8 @@ export async function engineModels(cfg: Config, o: { trialsFile?: string } = {})
     cfg.strategy.gp && fs.existsSync(gpFile) ? 'evolved formula' : '', trials ? `trials in paper's price: ${(['mlp', 'snn', 'ta', 'rules'] as TrialName[]).filter((n) => trials!.applied(n)).join(' ') || 'none'}` : ''].filter(Boolean);
   // What a call tape depends on: the fair value's volatility, the calendar's and the TA network's features.
   const sig = JSON.stringify([volProfile?.version ?? null, volModel?.validated ? volModel.params.trainedAt : null, calendar?.length ?? 0, taNet?.version ?? null, archived]);
-  return { volProfile, volModel, fillModel, calendar, trials, used, sig };
+  if (srAuto && Object.keys(srAuto).length) used.push(`session risk (${Object.keys(srAuto).join(' ')})`);
+  return { sessionRisk, volProfile, volModel, fillModel, calendar, trials, used, sig };
 }
 
 /** The validation gates as the bot runs them (bot/main.ts): with VALIDATION_GATES=monitor (the default) a model that
@@ -339,6 +357,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const policy = opts.exitPolicy ?? 'fair_value';
   const st = new ReplayState();
   const volFc = new VolForecaster(opts.volModel);
+  // Market state, fed at each evaluation exactly as the engine feeds it (bot/marketdata/marketState.ts).
+  const mstate = new MarketState();
   const pos = new PositionBook();
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => DEFAULT_FEES, () => st.now);
   const gateway = new RiskGateway(limits);
@@ -424,6 +444,20 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   // An order's purpose from its client order id (<ticker>-<ms>-<side>-<purpose>[-tp]; a queued exit <ticker>-<ms>-exit-<kind>).
   const purposeOf = (coid?: string) => (!coid ? 'other' : coid.includes('-exit-') ? 'exit' : /-(quote|entry|exit)(?:-tp)?$/.exec(coid)?.[1] ?? 'other');
 
+  // Settled entries for the optimal f cap, as the engine's trades.jsonl rows (Engine: every fill that is not an exit or
+  // a reduce-only take-profit).
+  const ofRows: Array<{ ts: number; ticker: string; cost: number; count: number; won: boolean }> = [...(opts.optimalF?.seed ?? [])];
+  const ofOpen = new Map<string, Array<{ side: 'bid' | 'ask'; cost: number; count: number }>>();
+  let ofCache: { at: number; cap: number } | undefined;
+  const optimalFCap = (now: number, orderFrac: number): number => {
+    const o = opts.optimalF;
+    if (!o?.enabled) return Infinity;
+    if (!ofCache || now - ofCache.at >= 3_600_000 || now < ofCache.at) {
+      const trades = binaryTrades(ofRows).map((t) => ({ ...t, w: recencyWeight(t.ts, now, o.halfLifeDays) }));
+      ofCache = { at: now, cap: optimalF(trades, { quantile: o.quantile, minTrades: o.minTradesKalshi, horizon: 100 }).cap };
+    }
+    return Number.isFinite(ofCache.cap) ? Math.max(ofCache.cap, o.paperFloor * orderFrac) : ofCache.cap;
+  };
   ex.on('fill', (f) => {
     pos.applyFill({ ticker: f.ticker, side: f.side, count: f.count, price: f.price, fee: f.fee ?? 0 }, { closeTs: closeOf.get(f.ticker) });
     const w = closeOf.get(f.ticker)!;
@@ -433,6 +467,11 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     b.fills = (b.fills ?? 0) + 1;
     res.windows.set(w, b);
     res.fills++; res.contracts += f.count; res.fees += f.fee ?? 0;
+    if (opts.optimalF?.enabled && purposeOf(f.clientOrderId) !== 'exit' && !f.clientOrderId?.endsWith('-tp')) {
+      const list = ofOpen.get(f.ticker) ?? [];
+      list.push({ side: f.side, cost: f.side === 'bid' ? f.price : 1 - f.price, count: f.count });
+      ofOpen.set(f.ticker, list.slice(-50));
+    }
     if (opts.paper && !f.isTaker) markoutDue.push({ due: st.now + 60_000, ticker: f.ticker, sign: f.side === 'bid' ? 1 : -1, price: f.price });
     const bp = (res.byPurpose![purposeOf(f.clientOrderId)] ??= { fills: 0, contracts: 0 });
     bp.fills++; bp.contracts += f.count;
@@ -530,6 +569,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         if (out) {
           const result = out.label ? 'yes' : 'no';
           ex.settle(m.ticker, result);
+          for (const x of ofOpen.get(m.ticker) ?? []) ofRows.push({ ts: st.now, ticker: m.ticker, cost: x.cost, count: x.count, won: (x.side === 'bid') === (result === 'yes') });
+          ofOpen.delete(m.ticker);
           if (!(opts.accuracyGateFile && opts.tradeFromMs !== undefined && st.now < opts.tradeFromMs)) gate?.settle(m.ticker, result);
           if (tpBench) { tpBench.settled(m.ticker, result, st.now); if (res.paper!.takeProfitBenchedAt === undefined && ownBenched()) res.paper!.takeProfitBenchedAt = st.now; }
           for (const x of exitLedger.get(m.ticker) ?? []) {
@@ -659,20 +700,23 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         ruleShift = rb ? tilt(rb.k, 1) : 0;
         if (ruleShift) pYes = Math.max(0.001, Math.min(0.999, pYes + ruleShift));
       }
+      const mRead = observeMarket(mstate, { asset: m.asset, ticker: m.ticker, index: idx!, now: st.now, bid, ask, trades: st.features.micro.get(m.ticker)?.tradesIn(st.now, 300_000) });
       opts.onEval?.({ ticker: m.ticker, now: st.now, pYes, fv: fv.pYes, bid: bid.price, ask: ask.price, position: pos.position(m.ticker), spot: spot.value, strike: terms.strike, sigma: vol.sigmaPerSqrtSec, sigmaPricing: sigmaFv,
-        pModel: pred.p, taVolMult, taShift, ruleShift });
+        pModel: pred.p, taVolMult, taShift, ruleShift, mstate: compactReading(mRead) });
       const pMarket = model.marketProbability(mid);
       const ret = idx!.trailingLogReturn(st.now, strategy.fastMoveWindowSec * 1000);
       const fastMove = ret !== undefined && Math.abs(ret) > strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(strategy.fastMoveWindowSec);
       vault?.tick(st.now);
-      const bankroll = Math.max(0, (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0) - (opts.paper ? 0 : vault?.reserved() ?? 0));
+      const bankroll = Math.max(0, (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0) - (vault?.reserved() ?? 0));
       peakBank = Math.max(peakBank, bankroll);
       // The tier from the tradable high-water mark, as the engine picks it (EquityGuard.tierReference).
       const tier = tierAt(tiers, guard.tierReference(bankroll));
       // As the engine sizes (Engine.riskScale): full size at or above break-even (the starting equity, raised by the
       // guard's ratchets), down to a quarter at a net loss of the tier's ddScaleAt, never zero.
       guard.update(bankroll, st.now, bankroll, tier.weeklyLossPause);
-      const sizeScale = guard.sizeScale(bankroll, tier.ddScaleAt);
+      // The regime scale joins the loss-aware scale exactly as in the engine (bot/strategy/regimeScale.ts).
+      const regMult = regimeScale(strategy.regimeScale, mRead, otherCoinsHeld(pos.open(), m.asset, (t) => st.markets.get(t)?.asset)).mult;
+      const sizeScale = guard.sizeScale(bankroll, tier.ddScaleAt) * regMult;
       res.sizeScaleMin = Math.min(res.sizeScaleMin ?? 1, sizeScale);
       // Paper: about orderFrac of the bankroll an order (bot/engine.ts paperOrderUsd), the caps widened to fit it.
       const fixedUsd = !opts.paper ? 0 : opts.paper.orderFrac > 0 ? (bankroll > 0 ? Math.round(opts.paper.orderFrac * bankroll * 100) / 100 : 0) : Math.max(0, opts.paper.orderUsd);
@@ -788,8 +832,9 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       }
       const view: MarketView = {
         ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: pos.position(m.ticker), bankroll,
-        maxOrderRiskUsd: fixedUsd > 0 ? fixedUsd : tier.orderFrac * bankroll * sessRisk.sizeMult * sizeScale, maxContracts: Math.floor(limits.maxContractsPerOrder * (fixedUsd > 0 ? 1 : sessRisk.sizeMult) * 100) / 100, minSidePrice: limits.minSidePrice,
-        ...(fixedUsd > 0 ? { fixedOrderUsd: fixedUsd } : {}),
+        // As the engine sizes (bot/sizing/orderBudget.ts); the regime weight (playbook / Compensator) is not replayed.
+        ...(() => { const b = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult: sessRisk.sizeMult, riskScale: sizeScale, fCapUsd: optimalFCap(st.now, tier.orderFrac) * bankroll, paperOrderUsd: fixedUsd, maxContractsPerOrder: limits.maxContractsPerOrder }); if (b.boundBy === 'optimal_f') res.optimalFBound = (res.optimalFBound ?? 0) + 1; return { maxOrderRiskUsd: b.maxOrderRiskUsd, maxContracts: b.maxContracts, ...(b.fixedOrderUsd ? { fixedOrderUsd: b.fixedOrderUsd } : {}) }; })(),
+        minSidePrice: limits.minSidePrice,
         ...(() => { const b = tpBenched(); return b ? { takeProfitBenched: b } : {}; })(),
         newRiskRoomUsd,
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,
@@ -799,7 +844,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         profitPeakSidePrice: peaks.update(m.ticker, posC, posC > 0 ? bid.price : posC < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
         entryWindowOpen, exitWindowOpen: tauSec > strategy.noExitBeforeCloseSec,
       };
-      const strat = { ...stratRun, kellyFraction: tier.kellyFraction * sizeScale, minEdge: strategy.minEdge + sessRisk.minEdgeAdd, inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult };
+      const strat = { ...stratRun, kellyFraction: tier.kellyFraction * sizeScale, minEdge: Math.max(0, strategy.minEdge + sessRisk.minEdgeAdd + dynamicEdge(strategy.dynamicEdge, mRead, pred.std).add), inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult };
       const plan = decide(view, strat, {
         exits: policy === 'fair_value' || policy === 'take_profit' || policy === 'hybrid' || (policy === 'confluence_ratchet' && !huntMode),
         blockReductions: huntMode,
@@ -938,7 +983,8 @@ export function evaluateHunt(results: BacktestResult[], allWindows: number[], mi
   };
 }
 
-export async function backtestMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
+/** Returns the production settings' per-window results (the go-live tally reads them: research/goLiveTally.ts). */
+export async function backtestMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')): Promise<{ windows: BacktestResult['windows'] }> {
   const dir = argOf('recordings', 'data/recordings');
   const modelPath = argOf('model', 'params/model.json');
   const model = fs.existsSync(modelPath) ? MetaModel.load(modelPath) : MetaModel.identity();
@@ -1033,10 +1079,11 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
   }
   // The model annotation uses the production exit policy at the configured minEdge.
   const prod = cfg.strategy.exitPolicy === 'confluence_ratchet' ? 'fair_value' : cfg.strategy.exitPolicy;
-  const best = summaries.find((s) => s.minEdge === cfg.strategy.minEdge && s.exit === prod) ?? summaries[0];
+  const bi = Math.max(0, summaries.findIndex((s) => s.minEdge === cfg.strategy.minEdge && s.exit === prod));
+  const best = summaries[bi];
   const exitEvaluation = evaluateHunt(results, allWindows, cfg.strategy.minEdge);
   if (exitEvaluation) console.log('hunt mode vs fair-value exit (paired per window):', exitEvaluation);
-  console.log(`windows traded: ${best.windowsTraded} (need >= 1000 independent windows before trusting any edge)`);
+  console.log(`windows traded: ${best.windowsTraded} (need >= ${GO_LIVE_GATES.minWindowsTraded} independent windows before trusting any edge)`);
 
   if (annotate && fs.existsSync(modelPath)) {
     const params = JSON.parse(fs.readFileSync(modelPath, 'utf8'));
@@ -1053,10 +1100,11 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
       ...(exitEvaluation ? { exitEvaluation } : {}),
     };
     params.validation.passed = Boolean(params.validation.passed) && best.edgeCiLo > 0 && best.deflatedExcess > 0 && best.dsrProb > 0.95
-      && (pboValue === undefined || pboValue < 0.2) && best.windowsTraded >= 1000;
+      && (pboValue === undefined || pboValue < 0.2) && best.windowsTraded >= GO_LIVE_GATES.minWindowsTraded;
     fs.writeFileSync(modelPath, JSON.stringify(params, null, 2) + '\n');
     console.log(`annotated ${modelPath}: passed=${params.validation.passed}`);
   }
+  return { windows: results[bi].windows };
 }
 
 if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void backtestMain();

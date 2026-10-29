@@ -48,6 +48,9 @@ export interface BinanceOpts {
   markets: BinanceMarket[];
   /** Skip archives before this month (YYYY-MM). */
   fromMonth?: string;
+  /** Skip archives after this month (YYYY-MM): a history walk block (research/historyWalk.ts) fetches only its own
+   *  months. A bounded run neither trusts nor records a series' last full check. */
+  toMonth?: string;
   /** Store under this source instead of the market's default (e.g. 1-minute spot bars kept apart from the
    *  spot store the TA steps read, so a multi-gigabyte file never joins their splice). */
   source?: string;
@@ -153,8 +156,8 @@ export async function downloadBinance(o: BinanceOpts): Promise<BinanceSummary[]>
     const ck = `${market}|${pair}|${tf}|${o.source ?? ''}`;
     const last = checked[ck];
     const sameFrom = last && (!last.from || (o.fromMonth !== undefined && o.fromMonth >= last.from));
-    if (last && sameFrom && o.recheckMs && now - last.at < o.recheckMs) { s.fresh = true; fresh++; return; }
-    const incremental = Boolean(last && sameFrom && now - last.full < FULL_RELIST_MS);
+    if (!o.toMonth && last && sameFrom && o.recheckMs && now - last.at < o.recheckMs) { s.fresh = true; fresh++; return; }
+    const incremental = Boolean(!o.toMonth && last && sameFrom && now - last.full < FULL_RELIST_MS);
     const mPrefix = `${MARKET_PREFIX[market]}/monthly/${MARKET_KIND[market]}/${pair}/${tf}/`, dPrefix = `${MARKET_PREFIX[market]}/daily/${MARKET_KIND[market]}/${pair}/${tf}/`;
     const knownM = incremental ? knownUnder(mPrefix) : [], knownD = incremental ? knownUnder(dPrefix) : [];
     const newest = (keys: string[]) => keys.reduce((a, k) => (k > a ? k : a), '');
@@ -169,11 +172,11 @@ export async function downloadBinance(o: BinanceOpts): Promise<BinanceSummary[]>
     const merge = (known: string[], listed: Array<{ key: string; size: number }>) => [...new Map([...known.map((key) => [key, { key, size: manifest.files[key].size }] as const), ...listed.map((k) => [k.key, k] as const)]).values()];
     monthly = merge(knownM, monthly);
     daily = merge(knownD, daily);
-    if (!monthly.length && !daily.length) { s.note = 'not listed on Binance'; checked[ck] = { at: now, full: now, from: o.fromMonth }; saveManifest(); return; }
+    if (!monthly.length && !daily.length) { s.note = 'not listed on Binance'; if (!o.toMonth) checked[ck] = { at: now, full: now, from: o.fromMonth }; saveManifest(); return; }
     const month = (k: string) => /-(\d{4}-\d{2})(?:-\d{2})?\.zip$/.exec(k)?.[1] ?? '';
     const months = new Set(monthly.map((k) => month(k.key)));
     // Daily archives only for months that have no monthly archive yet (the current month).
-    const want = [...monthly, ...daily.filter((k) => !months.has(month(k.key)))].filter((k) => !o.fromMonth || month(k.key) >= o.fromMonth);
+    const want = [...monthly, ...daily.filter((k) => !months.has(month(k.key)))].filter((k) => (!o.fromMonth || month(k.key) >= o.fromMonth) && (!o.toMonth || month(k.key) <= o.toMonth));
     s.listed = want.length;
     const todo = want.filter((k) => manifest.files[k.key]?.size !== k.size);
     s.skipped = want.length - todo.length;
@@ -225,7 +228,7 @@ export async function downloadBinance(o: BinanceOpts): Promise<BinanceSummary[]>
     if (deferred.length) { s.bars = upsertSeries(o.out, source, asset, tf, deferred.flat()); deferred.length = 0; }
     else if (stored) s.bars = countRows(file);
     // A clean check is remembered (a failure is asked again next run, with a full listing).
-    if (!s.failed) checked[ck] = { at: now, full: incremental ? last!.full : now, from: o.fromMonth };
+    if (o.toMonth) { /* a bounded run says nothing about the months after it */ } else if (!s.failed) checked[ck] = { at: now, full: incremental ? last!.full : now, from: o.fromMonth };
     else delete checked[ck];
     saveManifest();
     if (todo.length || s.failed) log(`${pair} ${market} ${tf}: fetched ${s.fetched}, already had ${s.skipped}, failed ${s.failed}; ${s.bars || 'no new'} bars stored`);
@@ -239,7 +242,7 @@ export async function downloadBinance(o: BinanceOpts): Promise<BinanceSummary[]>
 /** Binance USD-M funding rates (monthly fundingRate archives: calc_time, funding_interval_hours,
  *  last_funding_rate) -> <out>/binance-funding/<ASSET>/funding.csv ("ts,rate", ms and fraction per
  *  interval), merged and de-duplicated. A perp-quote input of the history replay (research/history/historyReplay.ts). */
-export async function downloadBinanceFunding(o: { out: string; assets: string[]; fromMonth?: string; recheckMs?: number; now?: number; fetchImpl?: typeof fetch; log?: (m: string) => void }): Promise<Array<{ asset: string; fetched: number; rows: number; note?: string; fresh?: boolean }>> {
+export async function downloadBinanceFunding(o: { out: string; assets: string[]; fromMonth?: string; toMonth?: string; recheckMs?: number; now?: number; fetchImpl?: typeof fetch; log?: (m: string) => void }): Promise<Array<{ asset: string; fetched: number; rows: number; note?: string; fresh?: boolean }>> {
   const f = o.fetchImpl ?? fetch;
   const log = o.log ?? ((m: string) => console.log(`[binance] ${m}`));
   const manifestFile = path.join(o.out, 'binance-funding', 'manifest.json');
@@ -251,13 +254,14 @@ export async function downloadBinanceFunding(o: { out: string; assets: string[];
     const pair = `${asset}USDT`;
     const r = { asset, fetched: 0, rows: 0 } as { asset: string; fetched: number; rows: number; note?: string; fresh?: boolean };
     res.push(r);
-    const ck = `${asset}|${o.fromMonth ?? ''}`;
+    const ck = `${asset}|${o.fromMonth ?? ''}${o.toMonth ? `|${o.toMonth}` : ''}`;
     if (checked.fresh(ck, now, o.recheckMs)) { r.fresh = true; continue; }
     let keys: Array<{ key: string; size: number }>;
     try { keys = (await listKeys(`data/futures/um/monthly/fundingRate/${pair}/`, f)).filter((k) => k.key.endsWith('.zip')); } catch (e) { r.note = (e as Error).message; continue; }
-    if (!keys.some((k) => manifest[k.key] !== k.size && (!o.fromMonth || (/-(\d{4}-\d{2})\.zip$/.exec(k.key)?.[1] ?? '') >= o.fromMonth))) { checked.mark(ck, now); checked.save(); if (!keys.length) r.note = 'no USD-M perpetual'; continue; }
     const month = (k: string) => /-(\d{4}-\d{2})\.zip$/.exec(k)?.[1] ?? '';
-    const todo = keys.filter((k) => (!o.fromMonth || month(k.key) >= o.fromMonth) && manifest[k.key] !== k.size);
+    const inRange = (k: { key: string }) => (!o.fromMonth || month(k.key) >= o.fromMonth) && (!o.toMonth || month(k.key) <= o.toMonth);
+    if (!keys.some((k) => manifest[k.key] !== k.size && inRange(k))) { checked.mark(ck, now); checked.save(); if (!keys.length) r.note = 'no USD-M perpetual'; continue; }
+    const todo = keys.filter((k) => inRange(k) && manifest[k.key] !== k.size);
     if (!keys.length) { r.note = 'no USD-M perpetual'; continue; }
     const file = path.join(o.out, 'binance-funding', asset, 'funding.csv');
     const rows = new Map<number, number>();
@@ -319,7 +323,7 @@ export function parseMetricsCsv(text: string): Array<[number, number, number]> {
  *  <out>/binance-oi/<ASSET>/oi.csv ("ts,oi,oi_usd": ms, coins, USD), merged and de-duplicated. The history
  *  replay puts it on its perp quotes (the perps model's open-interest inputs). Daily files only: Binance
  *  publishes no monthly metrics archive. */
-export async function downloadBinanceOpenInterest(o: { out: string; assets: string[]; fromDay?: string; concurrency?: number; recheckMs?: number; now?: number; fetchImpl?: typeof fetch; log?: (m: string) => void }): Promise<Array<{ asset: string; fetched: number; rows: number; note?: string; fresh?: boolean }>> {
+export async function downloadBinanceOpenInterest(o: { out: string; assets: string[]; fromDay?: string; toDay?: string; concurrency?: number; recheckMs?: number; now?: number; fetchImpl?: typeof fetch; log?: (m: string) => void }): Promise<Array<{ asset: string; fetched: number; rows: number; note?: string; fresh?: boolean }>> {
   const f = o.fetchImpl ?? fetch;
   const log = o.log ?? ((m: string) => console.log(`[binance] ${m}`));
   const manifestFile = path.join(o.out, 'binance-oi', 'manifest.json');
@@ -331,7 +335,7 @@ export async function downloadBinanceOpenInterest(o: { out: string; assets: stri
     const pair = `${asset}USDT`;
     const r = { asset, fetched: 0, rows: 0 } as { asset: string; fetched: number; rows: number; note?: string; fresh?: boolean };
     res.push(r);
-    const ck = `${asset}|${o.fromDay ?? ''}`;
+    const ck = `${asset}|${o.fromDay ?? ''}${o.toDay ? `|${o.toDay}` : ''}`;
     if (checked.fresh(ck, now, o.recheckMs)) { r.fresh = true; continue; }
     // Daily archives sort by date: list only those after the newest one stored (one page instead of years).
     const prefix = `data/futures/um/daily/metrics/${pair}/`;
@@ -342,7 +346,7 @@ export async function downloadBinanceOpenInterest(o: { out: string; assets: stri
     if (after) keys = [...new Map([...Object.keys(manifest).filter((k) => k.startsWith(prefix)).map((key) => [key, { key, size: manifest[key] }] as const), ...keys.map((k) => [k.key, k] as const)]).values()];
     if (!keys.length) { r.note = 'no USD-M perpetual metrics'; continue; }
     const day = (k: string) => /-(\d{4}-\d{2}-\d{2})\.zip$/.exec(k)?.[1] ?? '';
-    const todo = keys.filter((k) => (!o.fromDay || day(k.key) >= o.fromDay) && manifest[k.key] !== k.size);
+    const todo = keys.filter((k) => (!o.fromDay || day(k.key) >= o.fromDay) && (!o.toDay || day(k.key) <= o.toDay) && manifest[k.key] !== k.size);
     const file = path.join(o.out, 'binance-oi', asset, 'oi.csv');
     const rows = new Map<number, [number, number]>();
     if (todo.length && fs.existsSync(file)) {

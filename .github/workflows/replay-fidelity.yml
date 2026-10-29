@@ -1,0 +1,191 @@
+# How true to life the history replay's Kalshi quotes are (research/replayFidelity.ts; Steven, Oct 28). The newest whole
+# recorded days are cut down to Kalshi's minute candles, filled back in each way the go-live tally can play a history
+# day, and the decision model's backtest on each is compared with its backtest on the real quotes. The closest fill-in
+# goes to the server as models/replay_fidelity.json, which the daily training's tally_history step reads.
+#
+# The five backtests (the real quotes and each fill-in) run on runners of their own: one after another they outlast a
+# job's time limit. Each fill-in's runner rebuilds the fill-ins itself (no recordings leave the server's and runners'
+# disks); only the per-window P&L goes between jobs, for a day.
+#
+# Read-only on the server except that one file. This repository is public: the job prints the fill-ins' names, $ figures
+# and counts, never the settings file, keys or logs.
+#
+# Required secrets (the same as Deploy): LIGHTSAIL_HOST, LIGHTSAIL_USERNAME, LIGHTSAIL_SSH_KEY (optional LIGHTSAIL_PORT).
+name: Replay fidelity
+
+on:
+  schedule:
+    - cron: '23 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Whole recorded days compared (the newest; the day before them is read for the contracts still open at midnight)'
+        required: false
+        default: '4'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: replay-fidelity
+  cancel-in-progress: false
+
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 10
+    outputs:
+      files: ${{ steps.pick.outputs.files }}
+    env:
+      DAYS: ${{ inputs.days || '4' }}
+    steps:
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Pick the days
+        id: pick
+        run: |
+          set -euo pipefail
+          [[ "$DAYS" =~ ^[0-9]+$ ]] && [ "$DAYS" -ge 2 ] || { echo "days must be a whole number of at least 2"; exit 1; }
+          # The newest DAYS whole days and the day before them (today's is still being recorded), the same on every runner.
+          TODAY=$(date -u +%F)
+          FILES=$(ssh bot "cd ~/bot/data/recordings && ls -1 md-*.jsonl*" | sort | awk -v t="md-$TODAY" '$0 < t' | tail -n $((DAYS + 1)) | tr '\n' ' ')
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          echo "days: $FILES"
+
+  backtest:
+    needs: pick
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        how: [real, hold, requote, worst, noise]
+    env:
+      DAYS: ${{ inputs.days || '4' }}
+      FILES: ${{ needs.pick.outputs.files }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Copy the days, the decision model and the settings (read-only)
+        run: |
+          set -euo pipefail
+          DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/models"
+          printf '%s\n' $FILES > "$RUNNER_TEMP/recordings.txt"
+          rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/"
+          for f in model.json vol_model.json fill_model.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || echo "$f: not on the server"; done
+          [ -f "$DATA/models/model.json" ] || { echo "no decision model on the server yet"; exit 1; }
+          echo "copied $(ls "$DATA/recordings" | wc -l) recording file(s)"
+          # The server's settings without any credential, and without server paths (as Remote training copies them).
+          ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$RUNNER_TEMP/train.env" || true
+      - name: Backtest (${{ matrix.how }})
+        run: |
+          set -euo pipefail
+          DATA="$GITHUB_WORKSPACE/data"; WORK="$DATA/fidelity"
+          set -a; . "$RUNNER_TEMP/train.env"; set +a
+          export DATA_DIR="$DATA" TRADING_MODE=paper AUTO_TRAIN=off NODE_OPTIONS="--max-old-space-size=12288"
+          run() {
+            if ! node --import tsx research/replayFidelity.ts --recordings "$DATA/recordings" --model "$DATA/models/model.json" --days "$DAYS" --work "$WORK" "$@" 2>&1 | tee -a "$RUNNER_TEMP/fidelity.log" | { grep --line-buffered '^\[fidelity\]' || true; }; then
+              tail -5 "$RUNNER_TEMP/fidelity.log" | cut -c1-200; exit 1
+            fi
+          }
+          if [ "${{ matrix.how }}" != real ]; then run --stage prepare; fi
+          run --stage backtest --how "${{ matrix.how }}"
+          mkdir -p "$RUNNER_TEMP/out" && cp "$WORK/windows-${{ matrix.how }}.json" "$RUNNER_TEMP/out/"
+          if [ -f "$WORK/meta.json" ]; then cp "$WORK/meta.json" "$RUNNER_TEMP/out/"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fidelity-${{ matrix.how }}
+          path: ${{ runner.temp }}/out/
+          retention-days: 1
+
+  compare:
+    needs: backtest
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fidelity-*
+          path: ${{ runner.temp }}/in
+      - name: Compare the fill-ins with the real quotes
+        run: |
+          set -euo pipefail
+          WORK="$GITHUB_WORKSPACE/data/fidelity"; OUT="$GITHUB_WORKSPACE/data/models/replay_fidelity.json"
+          mkdir -p "$WORK"
+          cp "$RUNNER_TEMP"/in/fidelity-*/windows-*.json "$WORK/"
+          cp "$RUNNER_TEMP/in/fidelity-hold/meta.json" "$WORK/"
+          export TRADING_MODE=paper AUTO_TRAIN=off
+          node --import tsx research/replayFidelity.ts --stage compare --work "$WORK" --model model.json --out "$OUT" > "$RUNNER_TEMP/fidelity.log" 2>&1 || { tail -5 "$RUNNER_TEMP/fidelity.log" | cut -c1-200; exit 1; }
+          python3 - "$OUT" <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          print('days:', ', '.join(r['days']), '| real quotes:', r['real']['windowsTraded'], 'windows traded, P&L $', r['real']['pnl'])
+          for v in r['variants']:
+              print(f"  {v['how']:8s} P&L ${v['pnl']:>9}  traded {v['windowsTraded']:>4}  off by ${v['biasUsd']:>9}  per-window error ${v['rmseUsd']}  correlation {v['corr']}")
+          c = r['choice']
+          print('closest to the real quotes:', c['how'] + (f" (bridge {c['sigma']})" if c.get('sigma') else ''))
+          PY
+      - name: Send the verdict to the server
+        run: rsync -a --rsync-path="nice -n 19 rsync" "$GITHUB_WORKSPACE/data/models/replay_fidelity.json" bot:bot/data/models/ && echo "verdict copied; the next training run plays history with it"

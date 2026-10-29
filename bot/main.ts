@@ -19,6 +19,7 @@ import { KalshiWs } from './kalshi/ws';
 import { MarketData, Recorder } from './marketdata/marketData';
 import { MetaModel } from './model/metaModel';
 import { loadVolProfile, type VolProfile } from './model/volSeasonality';
+import { loadSessionRiskFile } from './model/sessionRisk';
 import { loadCalendar } from './model/calendar';
 import { ModelHealth } from './model/modelHealth';
 import { AccuracyGate } from './strategy/accuracyGate';
@@ -343,9 +344,9 @@ async function main(): Promise<void> {
       v = taNetView(asset, candles, now);
       // The rule book at the setups' holding horizon (a day), for the coin's character.
       const rb = cfg.strategy.ruleBook ? activeRuleBook()?.read(candles?.snapshot(now, marketContext()?.macro()), 24, marketContext()?.character(asset)?.cls) : undefined;
-      // The coin's evolved formula (validated only in live mode).
+      // The coin's evolved formula: validated, or on probation (the same rule in paper and live).
       const g = cfg.strategy.gp ? activeGpSignals()?.read(asset, (a) => md.features.candles.get(a)?.bars['1h']) : undefined;
-      const gp = g && (g.validated || (g.speaks && cfg.mode !== 'live') || gatePasses('setups', false)) ? g : undefined;
+      const gp = g && (g.validated || gatePasses('setups', false)) ? g : undefined;
       c = { ts: now, f, v, rb, gp };
       convCache.set(asset, c);
     }
@@ -541,7 +542,15 @@ async function main(): Promise<void> {
   const exchangeStatus = new ExchangeStatusMonitor(rest);
   exchangeStatus.start();
   const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, accuracyGate, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json'), curveExit, takeProfitBench, curveEntry, liveLines, trials });
+  // The pipeline's session risk profile (session_risk.json), under SESSION_RISK; autotrain hot-swaps new ones.
+  const sr = loadSessionRiskFile(modelPaths.session_risk);
+  if (sr) { engine.setSessionRiskAuto(sr.profile); log.info(`session risk ${sr.version}${cfg.strategy.sessionRiskAuto ? '' : ' loaded, not applied (SESSION_RISK_AUTO off)'}`, { sessions: Object.keys(sr.profile) }); }
   engineRef = engine;
+  // Module ledger once an hour (and 5 minutes after start) in the audit log, for the daily module report
+  // (deploy/module_report.py): which parts were on, shadow, off or benched, and what flagged them.
+  const writeLedger = () => { try { audit.write('modules', { rows: engine.moduleLedger() }); } catch (e) { log.warn('module ledger failed', { error: String(e) }); } };
+  setTimeout(writeLedger, 300_000).unref();
+  setInterval(writeLedger, 3_600_000).unref();
   const autoTrain = new AutoTrainer({ cfg, engine, audit, alerter, perpTrader });
   autoTrain.start();
   // Paper training override: automatic kill trips de-risk instead of halting; exhausted pools are refilled.

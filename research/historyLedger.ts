@@ -57,6 +57,15 @@ export function isHoldout(b: Block, latestDay: string): boolean {
   return index % HOLDOUT_EVERY === 3;
 }
 
+/** Is this day in a week of the holdout pattern, whatever the week's age (the week from its Monday, as isHoldout
+ *  counts a complete week)? The history walk (research/historyWalk.ts) never trains on these weeks, so a week that
+ *  turns into a holdout week as it ages was never trained on. */
+export function inHoldoutWeek(day: string): boolean {
+  const t = Date.parse(`${day}T00:00:00Z`);
+  const monday = t - ((new Date(t).getUTCDay() + 6) % 7) * DAY;
+  return Math.round((monday - Date.UTC(1970, 0, 5)) / (7 * DAY)) % HOLDOUT_EVERY === 3;
+}
+
 /** `n` items spread evenly over `xs` (first and last included). */
 export function spread<T>(xs: T[], n: number): T[] {
   if (n >= xs.length) return [...xs];

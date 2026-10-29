@@ -2,6 +2,8 @@
 // frozen. Nothing at runtime (API, LLM, learner) can change it. Changing a
 // parameter means a reviewed commit and a redeploy.
 
+import type { DynamicEdgeParams } from './strategy/dynamicEdge';
+import type { RegimeScaleParams } from './strategy/regimeScale';
 import fs from 'fs';
 import { parseSessionRisk, type SessionRiskProfile } from './model/sessionRisk';
 import { DEFAULT_PROBATION, type ProbationParams } from './risk/probation';
@@ -76,6 +78,10 @@ export interface StrategyConfig {
   /** Pull quotes if |index move| over `fastMoveWindowSec` exceeds this many sigmas. */
   fastMoveSigmas: number;
   fastMoveWindowSec: number;
+  /** Entry edge moved with the market state (bot/strategy/dynamicEdge.ts; DYN_EDGE_*, all 0 = static edge). */
+  dynamicEdge: DynamicEdgeParams;
+  /** Order size moved with the market state (bot/strategy/regimeScale.ts; REGIME_*, all 0 = no change). */
+  regimeScale: RegimeScaleParams;
   /** Resting orders expire on the exchange after this many seconds (dead-man switch); a quote still wanted is placed again. */
   orderTtlSec: number;
   /** Exit mode. hold = Mode A (ride to settlement, no exit fee); fair_value = model exit only;
@@ -169,8 +175,9 @@ export interface StrategyConfig {
    *  evidence, are re-sized by Kelly with a conviction multiplier up to adversarialMaxBoost (<= 2). */
   adversarialBoost: boolean;
   adversarialMaxBoost: number;
-  /** TA conviction overlay (bot/strategy/taConviction.ts): the TA network's direction forecasts add a
-   *  drift to the mathematical fair value (weight x reliability; at most taPricingMaxShift). */
+  /** TA conviction overlay (bot/strategy/taConviction.ts): the TA network's blind-test-validated direction forecasts
+   *  add a drift to the mathematical fair value (weight x reliability; at most taPricingMaxShift); unproven heads
+   *  only through the 'ta' component trial. */
   taPricing: boolean;
   taPricingWeight: number;
   taPricingMaxShift: number;
@@ -216,6 +223,9 @@ export interface StrategyConfig {
   ratchetSlippageTicks: number;
   /** Per-session risk multipliers (can only reduce risk). */
   sessionRisk: SessionRiskProfile;
+  /** Apply the pipeline's session_risk.json under SESSION_RISK (bot/model/sessionRisk.ts). */
+  sessionRiskAuto: boolean;
+  sessionRiskPath: string;
   /** Block hunt mode in twilight/weekend liquidity and near session changes. */
   huntSessionGuard: boolean;
   huntTransitionBufferMin: number;
@@ -315,6 +325,14 @@ export interface Config {
   coinbaseRestUrl: string;
   /** Coinbase public trade feed (taker order flow for the candles) and its URL. */
   takerFlow: boolean;
+  /** Record Coinbase's spot order book (top spotBookDepth levels a side) for every tracked coin every this many seconds
+   *  (SPOT_BOOK_RECORD_SEC; 0 = off): the depth the exit and sizing research needs, which the recordings lacked. */
+  spotBookRecordSec: number;
+  spotBookDepth: number;
+  /** Also record the whole spot book's size in SPOT_BOOK_BANDS bands SPOT_BOOK_BAND_BPS wide out from the mid
+   *  (defaults 10 x 10 bps = out to 1%), so walls past the top levels are kept; 0 bands = off. */
+  spotBookBandBps: number;
+  spotBookBands: number;
   coinbaseWsUrl: string;
   binanceWsUrl: string;
   coingeckoUrl: string;
@@ -996,6 +1014,23 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     // Quotes stay fresh (a stale bid is the one that gets picked off): pulled on a 2-sigma move, re-priced every 10 s.
     fastMoveSigmas: num(env, 'STRATEGY_FAST_MOVE_SIGMAS', 2, 0.5, 20),
     fastMoveWindowSec: num(env, 'STRATEGY_FAST_MOVE_WINDOW_SEC', 5, 1, 120),
+    dynamicEdge: {
+      vol: num(env, 'DYN_EDGE_VOL', 0, -0.2, 0.2),
+      change: num(env, 'DYN_EDGE_CHANGE', 0, 0, 0.2),
+      spread: num(env, 'DYN_EDGE_SPREAD', 0, 0, 2),
+      flow: num(env, 'DYN_EDGE_FLOW', 0, 0, 0.2),
+      uncertainty: num(env, 'DYN_EDGE_UNCERTAINTY', 0, 0, 2),
+      maxUp: num(env, 'DYN_EDGE_MAX_UP', 0.05, 0, 0.3),
+      maxDown: num(env, 'DYN_EDGE_MAX_DOWN', 0.01, 0, 0.1),
+    },
+    regimeScale: {
+      volTarget: num(env, 'REGIME_VOL_TARGET', 0, 0, 2),
+      changeDerisk: num(env, 'REGIME_CHANGE_DERISK', 0, 0, 1),
+      corrDerisk: num(env, 'REGIME_CORR_DERISK', 0, 0, 2),
+      min: num(env, 'REGIME_SCALE_MIN', 0.25, 0, 1),
+      max: num(env, 'REGIME_SCALE_MAX', 1.5, 1, 2),
+      upWeight: num(env, 'REGIME_UP_WEIGHT', 0.5, 0, 1),
+    },
     // 20 s: a quote the bot stops tending is gone from the exchange within 20 s. Re-placing the ones still wanted costs
     // orders, which RISK_MAX_ORDERS_PER_MIN (120) now has room for.
     orderTtlSec: num(env, 'STRATEGY_ORDER_TTL_SEC', 20, 10, 900),
@@ -1025,8 +1060,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     makerBuffer: num(env, 'STRATEGY_MAKER_BUFFER', relaxed ? 0.02 : 0, 0, 0.1),
     makerBufferRange: band(env, 'STRATEGY_MAKER_BUFFER_RANGE', relaxed ? [0.015, 0.03] : [0, 0]),
     minQuoteContracts: num(env, 'STRATEGY_MIN_QUOTE_CONTRACTS', 3, 0, 100),
-    paperOrderUsd: num(env, 'PAPER_ORDER_USD', 10, 0, 1000),
-    paperOrderFrac: num(env, 'PAPER_ORDER_FRAC', 0.10, 0, 1),
+    paperOrderUsd: num(env, 'PAPER_ORDER_USD', 0, 0, 1000),
+    paperOrderFrac: num(env, 'PAPER_ORDER_FRAC', 0, 0, 1),
     accuracyGate: { enabled: bool(env, 'ACCURACY_GATE', true), window: num(env, 'ACCURACY_GATE_WINDOW', 150, 20, 2000), minMarkets: num(env, 'ACCURACY_GATE_MIN_MARKETS', 40, 5, 1000) },
     sizing: oneOf(env, 'STRATEGY_SIZING', relaxed ? 'target_ev' : 'kelly', ['kelly', 'target_ev'] as const),
     kappa: num(env, 'STRATEGY_KAPPA', 0.5, 0, 1),
@@ -1039,11 +1074,11 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     ddScaleAt: num(env, 'RISK_DD_SCALE_AT', 0.15, 0.01, 1),
     weeklyLossPause: num(env, 'RISK_WEEKLY_LOSS_PAUSE', 0.08, 0.01, 1),
     modelHealthHalt: bool(env, 'MODEL_HEALTH_HALT', true),
-    paperExplore: bool(env, 'PAPER_EXPLORE', true),
+    paperExplore: bool(env, 'PAPER_EXPLORE', false),
     exploreRate: num(env, 'PAPER_EXPLORE_RATE', 0.1, 0, 1),
     exploreBand: num(env, 'PAPER_EXPLORE_BAND', 0.02, 0, 0.1),
     exploreMaxPerHour: num(env, 'PAPER_EXPLORE_MAX_PER_HOUR', 6, 0, 120),
-    paperTrainTrades: num(env, 'PAPER_TRAINING_TRADES_PER_HOUR', 12, 0, 120),
+    paperTrainTrades: num(env, 'PAPER_TRAINING_TRADES_PER_HOUR', 0, 0, 120),
     idleEvalSec: num(env, 'EVAL_IDLE_SEC', 5, 0, 60),
     outsidePriceFallback: bool(env, 'PAPER_OUTSIDE_PRICE_FALLBACK', false),
     adversarialBoost: bool(env, 'ADVERSARIAL_BOOST', true),
@@ -1077,6 +1112,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     sessionRisk: (() => { try { return parseSessionRisk(env.SESSION_RISK); } catch (e) { throw new ConfigError((e as Error).message); } })(),
     huntSessionGuard: bool(env, 'HUNT_SESSION_GUARD', true),
     huntTransitionBufferMin: num(env, 'HUNT_TRANSITION_BUFFER_MIN', 10, 0, 120),
+    sessionRiskAuto: bool(env, 'SESSION_RISK_AUTO', true),
+    sessionRiskPath: path.resolve(env.SESSION_RISK_PATH ?? './params/session_risk.json'),
     volSeasonality: bool(env, 'VOL_SEASONALITY', true),
     volProfilePath: path.resolve(env.VOL_PROFILE_PATH ?? './params/vol_profile.json'),
     volModel: bool(env, 'VOL_MODEL', true),
@@ -1183,6 +1220,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     taStudyPath: path.resolve(env.TA_STUDY_PATH ?? './params/ta_study.json'),
     coinbaseRestUrl: env.COINBASE_REST_URL ?? 'https://api.exchange.coinbase.com',
     takerFlow: bool(env, 'TAKER_FLOW', true),
+    spotBookRecordSec: num(env, 'SPOT_BOOK_RECORD_SEC', 15, 0, 3600),
+    spotBookDepth: num(env, 'SPOT_BOOK_DEPTH', 10, 1, 50),
+    spotBookBandBps: num(env, 'SPOT_BOOK_BAND_BPS', 10, 1, 500),
+    spotBookBands: num(env, 'SPOT_BOOK_BANDS', 10, 0, 100),
     coinbaseWsUrl: env.COINBASE_WS_URL ?? 'wss://ws-feed.exchange.coinbase.com',
     // Binance.com blocks US IPs; the market-data-only host usually works. Override if needed.
     binanceWsUrl: env.BINANCE_WS_URL ?? 'wss://data-stream.binance.vision/ws/!miniTicker@arr',

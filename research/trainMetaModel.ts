@@ -4,13 +4,17 @@
 //   Default: MLP only, with hidden layers (a real neural network). Pass --families mlp,gbdt to also
 //   compare gradient-boosted trees, or --hidden 0 to include the no-hidden-layer (logistic) MLP.
 //        [--ensemble 5] [--epochs 400] [--cpcv 10]   (0 disables the CPCV report)
+//        [--holdout-from <ms>]   (the go-live tally's last judged window: the holdout reaches back to the one after it)
 //
 // Protocol (institutional blueprint 5-7, relaxed-cadence spec "Labels"):
 //  - Rows are (contract, decision time) snapshots labelled with the settlement
 //    outcome. Row weight = 1 / snapshots of that contract, and for hourly
 //    events also / strikes sampled in the event (they share one outcome).
 //  - Split chronologically by settlement WINDOW. The final 20% of windows is
-//    an untouched holdout used once for the report.
+//    an untouched holdout used once for the report. With --holdout-from it
+//    reaches back to the first window the go-live tally has not judged (at
+//    most half of the windows), so every window is judged once by a model
+//    that never trained on it (research/goLiveTally.ts).
 //  - On the first 80%, expanding-window folds with a 1-hour embargo before
 //    each validation fold choose the FEATURE SET, the MODEL FAMILY (residual
 //    MLP or residual gradient-boosted trees, both with the fair-value log-odds
@@ -51,6 +55,7 @@ import { takerFee } from '../bot/fees';
 import { TAKE_FEATURES, TAKE_GATED_FEATURES, TAKE_GATED_LAYOUT, TAKE_RESIDUAL, takeGatedInputs, takeInputs, type TakeModelParams } from '../bot/model/takeModel';
 import { fitGatedExperts, gatedPredict } from '../bot/model/gatedExperts';
 import { dieboldMariano, rng } from './stats';
+import type { HoldoutJudged } from './goLiveTally';
 
 function arg(name: string, def: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -108,6 +113,8 @@ export interface TrainReport {
   nu: { chosen: number | null; table: Array<{ nu: number | null; logLoss: number }> };
   dropped: Record<string, string[]>;
   importance: Array<{ feature: string; group: string; logLossIncrease: number }>;
+  /** The holdout as the shipped model predicts it, for the go-live tally. */
+  judged: HoldoutJudged;
 }
 
 export interface TrainOpts {
@@ -129,6 +136,9 @@ export interface TrainOpts {
   /** Combinatorial purged CV of the selected configuration (N groups, k held out); 0 disables. */
   cpcvGroups?: number;
   cpcvK?: number;
+  /** The go-live tally's last judged window (ms): the holdout starts at the first window after it when that is
+   *  earlier than the final 20%, at most half of the windows (research/goLiveTally.ts). */
+  holdoutFrom?: number;
 }
 
 /**
@@ -150,8 +160,9 @@ export function cpcvSplits(windows: number[], N: number, k: number): Array<{ tes
   return out;
 }
 
-/** 1 / snapshots per contract, and / strikes per event for hourly events; normalized to mean 1. */
-export function rowWeights(rows: DatasetRow[]): number[] {
+/** 1 / snapshots per contract, and / strikes per event for hourly events; normalized to mean 1 unless `normalize` is
+ *  false (each contract, or hourly event, then weighs 1 over its snapshots). */
+export function rowWeights(rows: DatasetRow[], normalize = true): number[] {
   const snaps = new Map<string, number>();
   const strikes = new Map<string, Set<string>>();
   for (const r of rows) {
@@ -164,6 +175,7 @@ export function rowWeights(rows: DatasetRow[]): number[] {
     const k = (r.kind ?? 'updown') === 'updown' ? 1 : strikes.get(eventOf(r.ticker, r.event))!.size;
     return 1 / (snaps.get(r.ticker)! * k);
   });
+  if (!normalize) return w;
   const m = w.reduce((a, b) => a + b, 0) / Math.max(1, w.length);
   return w.map((x) => x / m);
 }
@@ -200,13 +212,20 @@ function meanSe(xs: number[]): { mean: number; se: number } {
   return { mean: m, se: Math.sqrt(v / n) };
 }
 
+/** The first holdout window of `windows` (ascending): the final 20%, reaching back to the first window after `from`
+ *  (the go-live tally's last judged window) when that is earlier, but never past the middle. */
+export function holdoutCut(windows: number[], from?: number): number {
+  const next = from === undefined ? undefined : windows.find((w) => w > from);
+  return Math.min(windows[Math.floor(windows.length * 0.8)], Math.max(next ?? Infinity, windows[Math.floor(windows.length * 0.5)]));
+}
+
 /** `torch`: fit the MLPs in PyTorch (research/mlpTorch.ts, the GPU when there is one); the same algorithm and output. */
 export async function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts & { torch?: MlpTorch; log?: (m: string) => void } = {}): Promise<TrainReport> {
   const rows = rowsIn.map((r) => ({ ...r, fx: { ...r.fx } }));
   const folds = opts.folds ?? 5;
   const windows = [...new Set(rows.map((r) => r.window))].sort((a, b) => a - b);
   if (windows.length < folds + 3) throw new Error(`need at least ${folds + 3} windows, have ${windows.length}`);
-  const cut = windows[Math.floor(windows.length * 0.8)];
+  const cut = holdoutCut(windows, opts.holdoutFrom);
   const isDev = (r: DatasetRow) => r.window < cut;
 
   // ---- Student-t nu for the pricer (dev windows only), then re-price every row. ----
@@ -505,13 +524,17 @@ export async function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts & { t
     nu: { chosen: chosenNu ?? null, table: nuTable.map(({ nu, logLoss }) => ({ nu, logLoss })) },
     dropped,
     importance,
+    judged: {
+      window: hold.map((x) => x.window), tauSec: hold.map((x) => x.tauSec), p: pHold, pMkt: pMktCal, mid: hold.map((x) => x.mid), y,
+      w: rowWeights(hold, false), cut,
+    },
   };
 }
 
 /** Rows the trainer holds by default: about 3 GB of the remote run's 8 GB heap. */
 export const DATASET_MAX_ROWS = 200_000;
 
-export async function trainMetaModelMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')) {
+export async function trainMetaModelMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')): Promise<TrainReport> {
   const data = argOf('data', 'research/out/dataset.jsonl');
   const out = argOf('out', 'params/model.candidate.json');
   // At most DATASET_MAX_ROWS rows in memory (about 14 KB each): past it, each contract's snapshots are thinned evenly.
@@ -530,6 +553,7 @@ export async function trainMetaModelMain(argOf: (k: string, d: string) => string
     depths: argOf('depths', '2,3').split(',').map(Number),
     ensemble: Number(argOf('ensemble', '5')),
     cpcvGroups: Number(argOf('cpcv', '10')),
+    holdoutFrom: argOf('holdout-from', '') ? Number(argOf('holdout-from', '')) : undefined,
   }).finally(() => torch?.close());
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, JSON.stringify(rep.params, null, 2) + '\n');
@@ -542,6 +566,7 @@ export async function trainMetaModelMain(argOf: (k: string, d: string) => string
   console.table(rep.importance.slice(0, 15));
   console.log(`selected ${rep.params.version}; validation.passed=${rep.params.validation!.passed}; wrote ${out}`);
   console.log('Next: npm run research:backtest -- --model', out, '--annotate');
+  return rep;
 }
 
 if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void trainMetaModelMain();
