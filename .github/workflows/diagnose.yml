@@ -226,16 +226,19 @@ jobs:
       - name: Install dependencies
         if: steps.deps.outputs.cache-hit != 'true'
         run: npm ci
+      - name: Cache key (a cache key may not contain commas)
+        id: key
+        run: echo "coins=$(printf '%s' "$TA_ASSETS" | tr ',' '-')" >> "$GITHUB_OUTPUT"
       - name: Restore the 1-minute history and the replay days
         uses: actions/cache@v4
         with:
           path: |
             data/history/binance-1m
             data/ta-study-replay
-          key: ta-study-${{ inputs.ta_assets }}-${{ inputs.ta_from }}-${{ inputs.ta_to }}-${{ github.run_id }}
+          key: ta-study-${{ steps.key.outputs.coins }}-${{ inputs.ta_from }}-${{ inputs.ta_to }}-${{ github.run_id }}
           restore-keys: |
-            ta-study-${{ inputs.ta_assets }}-${{ inputs.ta_from }}-${{ inputs.ta_to }}-
-            ta-study-${{ inputs.ta_assets }}-
+            ta-study-${{ steps.key.outputs.coins }}-${{ inputs.ta_from }}-${{ inputs.ta_to }}-
+            ta-study-${{ steps.key.outputs.coins }}-
             ta-study-
       - name: Run the study
         run: |
