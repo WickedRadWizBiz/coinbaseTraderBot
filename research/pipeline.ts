@@ -1171,7 +1171,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         const src = path.join(work, 'tally-history');
         const hData = path.join(work, 'tally-history.jsonl');
         try {
-          writeHistoryDays(replayDir, next, src, fill);
+          await writeHistoryDays(replayDir, next, src, fill);
           await buildDatasetMain(argsOf({ recordings: src, out: hData, every: 60, 'vol-model': volModelArg }));
           const { rows } = await readDataset(hData);
           const bt = rows.length ? await backtestMain(argsOf({

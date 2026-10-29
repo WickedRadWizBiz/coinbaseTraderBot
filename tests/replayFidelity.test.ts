@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
 import { test } from 'node:test';
-import { fillQuotes, type Ev } from '../research/goLiveTally';
+import { fillDayFile, fillQuotes, QUOTE_FILLS, type Ev } from '../research/goLiveTally';
 import { asHistory, bridgeSigma, compareWindows, newCarry } from '../research/replayFidelity';
 import { tmpDir } from './helpers';
 
@@ -79,4 +79,15 @@ test('the bridge size and the window-by-window comparison', () => {
   assert.equal(rows[1].biasUsd, 3);
   assert.equal(rows[1].windowsTraded, 3);
   assert.equal(rows[1].rmseUsd, 1);
+});
+
+test('a day is filled in line by line exactly as the whole-day fill does it', async () => {
+  const dir = tmpDir();
+  const { file } = recordedDay(dir);
+  const evs = read(file);
+  for (const how of QUOTE_FILLS) {
+    const out = path.join(dir, `${how}.jsonl.gz`);
+    await fillDayFile(file, out, { how, sigma: 0.05 });
+    assert.deepEqual(read(out), fillQuotes(evs, { how, sigma: 0.05 }), how);
+  }
 });

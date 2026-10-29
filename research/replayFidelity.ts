@@ -26,7 +26,7 @@ import { OrderBook } from '../bot/marketdata/orderBook';
 import { recordingFiles, recordingLines, type RecordingDay } from '../bot/marketdata/recordingFiles';
 import { contractKind, type MarketKind } from '../bot/model/fairValue';
 import { backtestMain } from './backtest';
-import { fillQuotes, QUOTE_FILLS, type Ev, type QuoteFill } from './goLiveTally';
+import { fillDayFile, QUOTE_FILLS, type Ev, type QuoteFill } from './goLiveTally';
 import { gkVariance, requoteBetween } from './history/historyReplay';
 
 const MIN = 60_000, SLOT = 15_000, DAY = 86_400_000;
@@ -223,12 +223,8 @@ export async function replayFidelityMain(argOf: (k: string, d: string) => string
   const sigmaAll = bridgeSigma(res);
   for (let i = 0; i < days.length; i++) {
     const name = `md-${days[i].day}.jsonl.gz`;
-    const evs = zlib.gunzipSync(fs.readFileSync(path.join(dirs.history, name))).toString('utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as Ev);
     const sigma = bridgeSigma(res.filter((_, j) => j !== i));
-    for (const how of QUOTE_FILLS) {
-      const filled = fillQuotes(evs, { how, sigma });
-      fs.writeFileSync(path.join(dirs[how], name), zlib.gzipSync(filled.map((e) => JSON.stringify(e)).join('\n') + '\n', { level: 1 }));
-    }
+    for (const how of QUOTE_FILLS) await fillDayFile(path.join(dirs.history, name), path.join(dirs[how], name), { how, sigma });
   }
   fs.rmSync(dirs.history, { recursive: true, force: true });
   // The backtest as the pipeline runs it for the decision model (research/pipeline.ts, mlp): the production exit

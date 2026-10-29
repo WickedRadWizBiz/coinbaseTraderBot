@@ -24,6 +24,7 @@ import type { DatasetRow } from './buildDataset';
 import { hashStr, normals } from './history/historyReplay';
 import { repriceRow, rowWeights } from './trainMetaModel';
 import { readJson } from '../bot/util/persist';
+import { recordingLines } from '../bot/marketdata/recordingFiles';
 import { bootstrapMeanCi, deflatedSharpe, dieboldMariano } from './stats';
 
 /** Results older than this before the newest are dropped: a year of windows is about 3 MB. */
@@ -199,15 +200,41 @@ export function fillQuotes(events: Ev[], fill: QuoteFill): Ev[] {
   return events.map(f).filter((e): e is Ev => e !== undefined);
 }
 
-/** Write the history days into `dir` as the tally plays them (fillQuotes), named as recordings are. */
-export function writeHistoryDays(replayDir: string, days: readonly string[], dir: string, fill: QuoteFill = { how: 'worst' }): void {
+/** One day's file through quoteFiller, a line at a time (a whole recorded day is longer than the longest string V8
+ *  allows, so it is never read into one). */
+export async function fillDayFile(src: string, dst: string, fill: QuoteFill): Promise<void> {
+  const f = quoteFiller(fill);
+  const gz = zlib.createGzip({ level: 1 });
+  const done = new Promise<void>((resolve, reject) => {
+    const out = fs.createWriteStream(dst);
+    out.on('finish', resolve).on('error', reject);
+    gz.on('error', reject).pipe(out);
+  });
+  let buf: string[] = [];
+  const flush = async () => {
+    if (!buf.length) return;
+    const ok = gz.write(buf.join(''));
+    buf = [];
+    if (!ok) await new Promise((r) => gz.once('drain', r));
+  };
+  for await (const line of recordingLines(src)) {
+    if (!line) continue;
+    const e = f(JSON.parse(line) as Ev);
+    if (e) buf.push(JSON.stringify(e) + '\n');
+    if (buf.length >= 2000) await flush();
+  }
+  await flush();
+  gz.end();
+  await done;
+}
+
+/** Write the history days into `dir` as the tally plays them (quoteFiller), named as recordings are. */
+export async function writeHistoryDays(replayDir: string, days: readonly string[], dir: string, fill: QuoteFill = { how: 'worst' }): Promise<void> {
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   for (const d of days) {
     const name = `md-${d}.jsonl.gz`;
-    const lines = zlib.gunzipSync(fs.readFileSync(path.join(replayDir, name))).toString('utf8').split('\n').filter(Boolean);
-    const out = fillQuotes(lines.map((l) => JSON.parse(l) as Ev), fill);
-    fs.writeFileSync(path.join(dir, name), zlib.gzipSync(out.map((e) => JSON.stringify(e)).join('\n') + '\n', { level: 1 }));
+    await fillDayFile(path.join(replayDir, name), path.join(dir, name), fill);
   }
 }
 
