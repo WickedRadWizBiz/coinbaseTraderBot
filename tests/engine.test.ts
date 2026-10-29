@@ -882,7 +882,7 @@ test('component trials: a trial that passed moves the price in paper and live al
     override applied(name: TrialName): boolean { return this.onNames.has(name); }
     override record(name: TrialName, ticker: string, _asset: string, _close: number, pWith: number, pWithout: number): void { this.records.push([name, ticker, pWith, pWithout]); }
   }
-  // The TA network's 1 h and 4 h calls, neither validated nor graded yet: today's tilt counts each at half.
+  // The TA network's 1 h and 4 h calls, neither validated: outside their trial they do not move the price at all.
   const view: TaNetView = { up1: 0.62, up4: 0.6 };
   const run = async (env: Record<string, string>, on: TrialName[]) => {
     const trials = new Stub(DEFAULT_TRIALS);
@@ -894,13 +894,13 @@ test('component trials: a trial that passed moves the price in paper and live al
     return { st: s.engine.status.get(s.market.ticker)!, trials };
   };
   const off = await run({}, []);
-  assert.ok(off.st.trials && off.st.trials.ta! > off.st.taShift! && off.st.taShift! > 0, `full ${off.st.trials?.ta}, today ${off.st.taShift}`);
+  assert.ok(off.st.trials && off.st.trials.ta! > 0 && off.st.taShift === 0, `full ${off.st.trials?.ta}, today ${off.st.taShift}`);
   assert.deepEqual(off.st.trials!.applied, []);
   const rec = off.trials.records.filter(([n]) => n === 'ta');
   assert.ok(rec.length >= 1, 'the contract in its entry window is recorded');
   assert.ok(Math.abs(rec[0][3] - off.st.pModel!) < 1e-12 && Math.abs(rec[0][2] - (off.st.pModel! + off.st.trials!.ta!)) < 1e-4, 'scored with the full tilt against the meta-model\'s price');
   const on = await run({}, ['ta']);
-  assert.ok(Math.abs(on.st.taShift! - on.st.trials!.ta!) < 1e-4 && on.st.taShift! > off.st.taShift! * 1.5, `paper prices with the full-weight tilt once its trial passed: ${on.st.taShift}`);
+  assert.ok(Math.abs(on.st.taShift! - on.st.trials!.ta!) < 1e-4 && on.st.taShift! > 0, `paper prices with the full-weight tilt once its trial passed: ${on.st.taShift}`);
   assert.deepEqual(on.st.trials!.applied, ['ta']);
   // Live: the same passing trial moves live's price the same way (the owner, Oct 28: paper behaves as live).
   const key = path.join(tmpDir(), 'k.pem');

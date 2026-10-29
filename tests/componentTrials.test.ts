@@ -119,11 +119,11 @@ test('rule book trial: rows positive on both periods count without passing; ever
 
 test('TA trial: every head at full weight, validated or not', () => {
   const v = { up1: 0.56, up4: 0.53, skill1: 0, graded1: 50, validated1: false, skill4: undefined, graded4: 3, validated4: false };
-  // Today: the 1-hour head, graded with no skill, says nothing; the 4-hour head, not graded yet, counts half.
-  assert.deepEqual(taDrift(v, 900, { maxZ: 0.5, live: false })!.parts, ['4h P(up) 0.530 x0.50']);
+  // Outside its trial neither unvalidated head moves the price.
+  assert.equal(taDrift(v, 900, { maxZ: 0.5, live: false }), undefined);
   const full = taDrift(v, 900, { maxZ: 0.5, live: false, full: true })!;
   assert.deepEqual(full.parts, ['1h P(up) 0.560 x1.00', '4h P(up) 0.530 x1.00']);
-  assert.ok(full.k > taDrift(v, 900, { maxZ: 0.5, live: false })!.k, JSON.stringify(full));
+  assert.ok(full.k > 0, JSON.stringify(full));
 });
 
 test('trials: on by default with a 100-settlement, p 0.05 test, the SNN at 0.25 and the rule book trading in paper; the knobs are read', () => {

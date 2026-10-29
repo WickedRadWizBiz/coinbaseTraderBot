@@ -171,8 +171,9 @@ export interface StrategyConfig {
    *  evidence, are re-sized by Kelly with a conviction multiplier up to adversarialMaxBoost (<= 2). */
   adversarialBoost: boolean;
   adversarialMaxBoost: number;
-  /** TA conviction overlay (bot/strategy/taConviction.ts): the TA network's direction forecasts add a
-   *  drift to the mathematical fair value (weight x reliability; at most taPricingMaxShift). */
+  /** TA conviction overlay (bot/strategy/taConviction.ts): the TA network's blind-test-validated direction forecasts
+   *  add a drift to the mathematical fair value (weight x reliability; at most taPricingMaxShift); unproven heads
+   *  only through the 'ta' component trial. */
   taPricing: boolean;
   taPricingWeight: number;
   taPricingMaxShift: number;
