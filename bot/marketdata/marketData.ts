@@ -285,7 +285,8 @@ export class MarketData extends EventEmitter {
     }
     if (this.cfg.spotBookRecordSec > 0) {
       this.spotBooks = new SpotBookRecorder(() => [...this.index.keys()], (asset, b) => this.recorder.write('spot_book', spotBookLine(asset, b)),
-        this.cfg.spotBookRecordSec * 1000, new SpotBookService(this.cfg.coinbaseRestUrl, 1000, this.cfg.spotBookDepth));
+        this.cfg.spotBookRecordSec * 1000, new SpotBookService(this.cfg.coinbaseRestUrl, 1000, this.cfg.spotBookDepth, fetch,
+          { bps: this.cfg.spotBookBandBps, n: this.cfg.spotBookBands }));
       this.spotBooks.start();
     }
     if (this.cfg.taCandles) {

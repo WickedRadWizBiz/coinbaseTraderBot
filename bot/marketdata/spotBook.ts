@@ -9,6 +9,24 @@ export interface SpotBook {
   bids: BookLevel[];
   asks: BookLevel[];
   ts: number;
+  /** Size resting in fixed-width bands out from the mid, over the whole book (bandBps wide; [0] = nearest band). */
+  bands?: { bps: number; bids: number[]; asks: number[] };
+}
+
+/** Sums each side's size into `n` bands `bps` basis points wide, measured out from the mid; levels past the last band
+ *  are left out. Lets a short recording line see walls well beyond the top levels (BTC's top 10 span a few dollars). */
+export function bandDepth(bids: BookLevel[], asks: BookLevel[], bps: number, n: number): SpotBook['bands'] {
+  if (!bids.length || !asks.length || bps <= 0 || n <= 0) return undefined;
+  const mid = (bids[0].price + asks[0].price) / 2;
+  const sum = (rows: BookLevel[]) => {
+    const out = new Array<number>(n).fill(0);
+    for (const l of rows) {
+      const i = Math.floor((Math.abs(l.price - mid) / mid) * 10_000 / bps);
+      if (i < n) out[i] += l.size;
+    }
+    return out.map((v) => Number(v.toPrecision(6)));
+  };
+  return { bps, bids: sum(bids), asks: sum(asks) };
 }
 
 export class SpotBookService {
@@ -20,6 +38,7 @@ export class SpotBookService {
     private readonly ttlMs = 2000,
     private readonly depth = 50,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly band: { bps: number; n: number } = { bps: 0, n: 0 },
   ) {}
 
   async get(asset: string): Promise<SpotBook> {
@@ -41,10 +60,13 @@ export class SpotBookService {
     if (!res.ok) throw new Error(`spot book ${product}: HTTP ${res.status}`);
     const data = (await res.json()) as { bids?: unknown[][]; asks?: unknown[][] };
     const lv = (rows: unknown[][] | undefined) =>
-      (rows ?? []).slice(0, this.depth)
+      (rows ?? [])
         .map((r) => ({ price: Number(r[0]), size: Number(r[1]) }))
         .filter((l) => Number.isFinite(l.price) && Number.isFinite(l.size) && l.size > 0);
-    const book: SpotBook = { product, bids: lv(data.bids), asks: lv(data.asks), ts: Date.now() };
+    const bids = lv(data.bids), asks = lv(data.asks);
+    const book: SpotBook = { product, bids: bids.slice(0, this.depth), asks: asks.slice(0, this.depth), ts: Date.now() };
+    const bands = bandDepth(bids, asks, this.band.bps, this.band.n);
+    if (bands) book.bands = bands;
     this.cache.set(product, { book, at: Date.now() });
     return book;
   }
@@ -92,7 +114,10 @@ export class SpotBookRecorder {
   }
 }
 
-/** A book as a compact recording line: [[price, size]...] per side, best first. */
+/** A book as a compact recording line: [[price, size]...] per side, best first; with bands, `bw` (band width in bps)
+ *  and `bb`/`ba` (size per band, nearest first). */
 export function spotBookLine(asset: string, b: SpotBook): Record<string, unknown> {
-  return { asset, b: b.bids.map((l) => [l.price, l.size]), a: b.asks.map((l) => [l.price, l.size]), ts: b.ts };
+  const line: Record<string, unknown> = { asset, b: b.bids.map((l) => [l.price, l.size]), a: b.asks.map((l) => [l.price, l.size]), ts: b.ts };
+  if (b.bands) Object.assign(line, { bw: b.bands.bps, bb: b.bands.bids, ba: b.bands.asks });
+  return line;
 }
