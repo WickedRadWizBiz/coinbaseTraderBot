@@ -15,7 +15,8 @@ name: Replay fidelity
 
 on:
   schedule:
-    - cron: '23 4 * * 0'
+    # Every other day (Steven, Oct 29: the depth simulator must keep passing on fresh days before history training uses it).
+    - cron: '23 4 */2 * *'
   workflow_dispatch:
     inputs:
       days:
@@ -81,8 +82,12 @@ jobs:
       fail-fast: false
       matrix:
         how: [real, hold, requote, worst, noise, depth]
+        # The days split in two runs in a row, each backtested on a runner of its own from the day before it
+        # (one runner for all of them ran past the job's time limit on the depth fill-in).
+        part: [0, 1]
     env:
       DAYS: ${{ inputs.days || '4' }}
+      PARTS: 2
       FILES: ${{ needs.pick.outputs.files }}
       FIT: ${{ needs.pick.outputs.fit }}
     steps:
@@ -130,7 +135,7 @@ jobs:
           set -a; . "$RUNNER_TEMP/train.env"; set +a
           export DATA_DIR="$DATA" TRADING_MODE=paper AUTO_TRAIN=off NODE_OPTIONS="--max-old-space-size=12288"
           run() {
-            if ! node --import tsx research/replayFidelity.ts --recordings "$DATA/recordings" --model "$DATA/models/model.json" --days "$DAYS" --work "$WORK" "$@" 2>&1 | tee -a "$RUNNER_TEMP/fidelity.log" | { grep --line-buffered '^\[fidelity\]' || true; }; then
+            if ! node --import tsx research/replayFidelity.ts --recordings "$DATA/recordings" --model "$DATA/models/model.json" --days "$DAYS" --work "$WORK" --parts "$PARTS" --part "${{ matrix.part }}" "$@" 2>&1 | tee -a "$RUNNER_TEMP/fidelity.log" | { grep --line-buffered '^\[fidelity\]' || true; }; then
               tail -5 "$RUNNER_TEMP/fidelity.log" | cut -c1-200; exit 1
             fi
           }
@@ -145,12 +150,12 @@ jobs:
             run --stage prepare --only "${{ matrix.how }}"
           fi
           run --stage backtest --how "${{ matrix.how }}"
-          mkdir -p "$RUNNER_TEMP/out" && cp "$WORK/windows-${{ matrix.how }}.json" "$RUNNER_TEMP/out/"
-          if [ -f "$WORK/meta.json" ]; then cp "$WORK/meta.json" "$RUNNER_TEMP/out/"; fi
+          mkdir -p "$RUNNER_TEMP/out" && cp "$WORK"/windows-${{ matrix.how }}-p*.json "$RUNNER_TEMP/out/"
+          if [ -f "$WORK/meta.json" ]; then cp "$WORK/meta.json" "$RUNNER_TEMP/out/meta-p${{ matrix.part }}.json"; fi
           if [ -f "$DATA/models/depth_model.json" ]; then cp "$DATA/models/depth_model.json" "$RUNNER_TEMP/out/"; fi
       - uses: actions/upload-artifact@v4
         with:
-          name: fidelity-${{ matrix.how }}
+          name: fidelity-${{ matrix.how }}-p${{ matrix.part }}
           path: ${{ runner.temp }}/out/
           retention-days: 1
 
@@ -198,7 +203,7 @@ jobs:
           WORK="$GITHUB_WORKSPACE/data/fidelity"; OUT="$GITHUB_WORKSPACE/data/models/replay_fidelity.json"
           mkdir -p "$WORK"
           cp "$RUNNER_TEMP"/in/fidelity-*/windows-*.json "$WORK/"
-          cp "$RUNNER_TEMP/in/fidelity-hold/meta.json" "$WORK/"
+          cp "$RUNNER_TEMP"/in/fidelity-hold-p*/meta-p*.json "$WORK/"
           export TRADING_MODE=paper AUTO_TRAIN=off
           node --import tsx research/replayFidelity.ts --stage compare --work "$WORK" --model model.json --out "$OUT" > "$RUNNER_TEMP/fidelity.log" 2>&1 || { tail -5 "$RUNNER_TEMP/fidelity.log" | cut -c1-200; exit 1; }
           python3 - "$OUT" <<'PY'
@@ -215,6 +220,6 @@ jobs:
           set -euo pipefail
           # A depth verdict needs its model next to it (the tally falls back to the worst side without one).
           if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["choice"]["how"] == "depth" else 1)' "$GITHUB_WORKSPACE/data/models/replay_fidelity.json"; then
-            rsync -a --rsync-path="nice -n 19 rsync" "$RUNNER_TEMP/in/fidelity-depth/depth_model.json" bot:bot/data/models/
+            rsync -a --rsync-path="nice -n 19 rsync" "$RUNNER_TEMP/in/fidelity-depth-p0/depth_model.json" bot:bot/data/models/
           fi
           rsync -a --rsync-path="nice -n 19 rsync" "$GITHUB_WORKSPACE/data/models/replay_fidelity.json" bot:bot/data/models/ && echo "verdict copied; the next training run plays history with it"
