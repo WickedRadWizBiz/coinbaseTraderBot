@@ -201,6 +201,12 @@ export interface StrategyConfig {
   huntHybrid: boolean;
   /** HUNT_SELL_INTO_GAP: off, a gap through the hunt stop never sells (the lock waits for the bid to come back). */
   huntSellIntoGap: boolean;
+  /** HUNT_LOCK_SALE: off | fair_value | flow | either | both. Sell the whole position at the bid right at the lock (instead of
+   *  trailing a stop) when the bid is at least the math fair value minus HUNT_LOCK_SALE_FV_MARGIN and/or the last minute's
+   *  Kalshi taker flow favours the held side; HUNT_LOCK_SALE_ELSE (hold | exit) when the rule does not hit. Off by default. */
+  huntLockSale: 'off' | 'fair_value' | 'flow' | 'either' | 'both';
+  huntLockSaleFvMargin: number;
+  huntLockSaleElse: 'hold' | 'exit';
   ratchetMinFillRatio: number;
   ratchetMinWallAgeSec: number;
   ratchetSlippageTicks: number;
@@ -1057,6 +1063,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     huntMinConfluence: num(env, 'HUNT_MIN_CONFLUENCE', 2, 1, 7),
     huntHybrid: bool(env, 'HUNT_HYBRID', false),
     huntSellIntoGap: bool(env, 'HUNT_SELL_INTO_GAP', true),
+    huntLockSale: oneOf(env, 'HUNT_LOCK_SALE', 'off', ['off', 'fair_value', 'flow', 'either', 'both'] as const),
+    huntLockSaleFvMargin: num(env, 'HUNT_LOCK_SALE_FV_MARGIN', 0.02, -0.2, 0.2),
+    huntLockSaleElse: oneOf(env, 'HUNT_LOCK_SALE_ELSE', 'hold', ['hold', 'exit'] as const),
     ratchetMinFillRatio: num(env, 'RATCHET_MIN_FILL_RATIO', 1, 0.1, 20),
     ratchetMinWallAgeSec: num(env, 'RATCHET_MIN_WALL_AGE_SEC', 3, 0, 120),
     ratchetSlippageTicks: num(env, 'RATCHET_SLIPPAGE_TICKS', 1, 0, 10),

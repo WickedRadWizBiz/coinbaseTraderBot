@@ -956,6 +956,7 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
     targetMargin: Number(argOf('hunt-margin', String(DEFAULT_HUNT.targetMargin))),
     minConfluence: Number(argOf('hunt-confluence', String(DEFAULT_HUNT.minConfluence))),
     hybrid: argOf('hunt-hybrid', '0') === '1', sellIntoGap: argOf('hunt-sell-into-gap', '1') === '1',
+    lockSale: argOf('hunt-lock-sale', 'off') as 'off' | 'fair_value' | 'flow' | 'either' | 'both', lockSaleFvMargin: Number(argOf('hunt-lock-sale-fv-margin', '0.02')), lockSaleElse: argOf('hunt-lock-sale-else', 'hold') as 'hold' | 'exit',
   };
   // Hunt mode is evaluated over a parameter grid (target margin x wall fill ratio); every variant
   // counts toward the Deflated Sharpe.
