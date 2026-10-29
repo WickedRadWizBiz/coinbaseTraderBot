@@ -262,21 +262,22 @@ test('hunt mode without the gap sale holds through a gap: the stop waits at the 
   assert.deepEqual([sold.event, sold.plan?.price], ['profit_take_gap', 0.55], 'the default sells at the bid on a gap that is still at the entry fair value');
 });
 
-test('HUNT_LOCK_SALE judges the lock once: sells at the bid when the bid is at or above the fair value (minus the margin) or the taker flow favours the side, else holds with no stop or hands over', () => {
+test('HUNT_LOCK_SALE_AT=lock judges the lock once: sells at the bid when the bid pays the fair value plus the margin or the taker flow favours the side, else holds with no stop or hands over', () => {
+  const L = { ...H, lockSaleAt: 'lock' as const };
   const b = book([[0.6, 8], [0.57, 30]], [[0.63, 10]]);
   const at = (h: ConfluenceRatchetExit, o: { sideBid?: number; confluence?: number; fvSide?: number; flowSide?: number; now: number; b?: OrderBook }) =>
     h.update({ position: 5, qSide: 0.55, sideBid: o.sideBid, confluence: o.confluence ?? 0, book: o.b ?? b, now: o.now, tick: 0.01, fees: DEFAULT_FEES, fvSide: o.fvSide, flowSide: o.flowSide });
 
-  // fair value: the bid 0.6 is within 2c of a 0.61 fair value -> sold at the bid, and kept being sold until flat
-  const fv = new ConfluenceRatchetExit({ ...H, lockSale: 'fair_value', lockSaleFvMargin: 0.02 }, P);
+  // fair value: the bid 0.6 pays 2c over a 0.58 fair value -> sold at the bid, and kept being sold until flat
+  const fv = new ConfluenceRatchetExit({ ...L, lockSale: 'fair_value', lockSaleFvMargin: 0.02 }, P);
   at(fv, { sideBid: 0.5, now: 0 });
-  const sale = at(fv, { sideBid: 0.6, confluence: 3, fvSide: 0.61, now: 1000 });
+  const sale = at(fv, { sideBid: 0.6, confluence: 3, fvSide: 0.58, now: 1000 });
   assert.deepEqual([sale.mode, sale.event, sale.plan?.side, sale.plan?.price], ['hunt', 'lock_sale', 'ask', 0.6]);
-  const again = at(fv, { sideBid: 0.59, confluence: 3, fvSide: 0.61, now: 2000, b: book([[0.59, 8]], [[0.63, 10]]) });
+  const again = at(fv, { sideBid: 0.59, confluence: 3, fvSide: 0.58, now: 2000, b: book([[0.59, 8]], [[0.63, 10]]) });
   assert.deepEqual([again.mode, again.event, again.plan?.price], ['hunt', undefined, 0.59], 'still selling at the bid, no new event');
 
   // fair value too far above the bid -> the default 'hold': hunt mode without a stop, nothing sells on the way down
-  const hold = new ConfluenceRatchetExit({ ...H, lockSale: 'fair_value' }, P);
+  const hold = new ConfluenceRatchetExit({ ...L, lockSale: 'fair_value' }, P);
   at(hold, { sideBid: 0.5, now: 0 });
   const held = at(hold, { sideBid: 0.6, confluence: 3, fvSide: 0.66, now: 1000 });
   assert.deepEqual([held.mode, held.event, held.plan, held.stop], ['hunt', 'lock_hold', undefined, 0.57]);
@@ -284,7 +285,7 @@ test('HUNT_LOCK_SALE judges the lock once: sells at the bid when the bid is at o
   assert.deepEqual([down.mode, down.event, down.plan], ['hunt', undefined, undefined], 'a hold has no stop, no profit take and no giveback');
 
   // 'exit': the lock is judged once and the normal exit has the position; it does not re-arm at the next tick
-  const exit = new ConfluenceRatchetExit({ ...H, lockSale: 'flow', lockSaleElse: 'exit' }, P);
+  const exit = new ConfluenceRatchetExit({ ...L, lockSale: 'flow', lockSaleElse: 'exit' }, P);
   at(exit, { sideBid: 0.5, now: 0 });
   const pass = at(exit, { sideBid: 0.6, confluence: 3, flowSide: -2, now: 1000 });
   assert.deepEqual([pass.mode, pass.event], ['fair_value', 'lock_pass']);
@@ -292,17 +293,54 @@ test('HUNT_LOCK_SALE judges the lock once: sells at the bid when the bid is at o
   assert.deepEqual([later.mode, later.event], ['fair_value', undefined], 'judged once: no second lock');
 
   // 'flow' sells when takers buy the side; 'both' needs the fair value too; an unpriced lock (no fair value) cannot hit 'fair_value'
-  const flow = new ConfluenceRatchetExit({ ...H, lockSale: 'flow' }, P);
+  const flow = new ConfluenceRatchetExit({ ...L, lockSale: 'flow' }, P);
   at(flow, { sideBid: 0.5, now: 0 });
   assert.equal(at(flow, { sideBid: 0.6, confluence: 3, flowSide: 3, now: 1000 }).event, 'lock_sale');
-  const both = new ConfluenceRatchetExit({ ...H, lockSale: 'both' }, P);
+  const both = new ConfluenceRatchetExit({ ...L, lockSale: 'both' }, P);
   at(both, { sideBid: 0.5, now: 0 });
   assert.equal(at(both, { sideBid: 0.6, confluence: 3, flowSide: 3, fvSide: 0.7, now: 1000 }).event, 'lock_hold');
-  const unpriced = new ConfluenceRatchetExit({ ...H, lockSale: 'fair_value' }, P);
+  const unpriced = new ConfluenceRatchetExit({ ...L, lockSale: 'fair_value' }, P);
   at(unpriced, { sideBid: 0.5, now: 0 });
   assert.equal(at(unpriced, { sideBid: 0.6, confluence: 3, now: 1000 }).event, 'lock_hold');
   // position flat: everything resets, a new position gets a fresh judgement
   unpriced.update({ position: 0, qSide: 0.5, sideBid: 0.5, confluence: 0, book: b, now: 3000, tick: 0.01, fees: DEFAULT_FEES });
   at(unpriced, { sideBid: 0.5, now: 4000 });
-  assert.equal(at(unpriced, { sideBid: 0.6, confluence: 3, fvSide: 0.6, now: 5000 }).event, 'lock_sale');
+  assert.equal(at(unpriced, { sideBid: 0.6, confluence: 3, fvSide: 0.55, now: 5000 }).event, 'lock_sale');
+});
+
+test('HUNT_LOCK_SALE at the trigger (default): the stop walks up as before; the first dip or gap under it is judged once, sold into a bid over fair value, else held with nothing reducing the position, or handed over with else=exit', () => {
+  const at = (h: ConfluenceRatchetExit, o: { sideBid: number; confluence?: number; fvSide?: number; now: number; b: OrderBook }) =>
+    h.update({ position: 5, qSide: 0.55, sideBid: o.sideBid, confluence: o.confluence ?? 3, book: o.b, now: o.now, tick: 0.01, fees: DEFAULT_FEES, fvSide: o.fvSide });
+  const up = book([[0.61, 6], [0.58, 30]], [[0.64, 10]]); // a wall at 0.58 under the bid
+  const dip = book([[0.57, 30], [0.55, 10]], [[0.62, 10]]); // the bid one tick under the 0.58 stop
+  const gap = book([[0.5, 40]], [[0.55, 10]]);
+
+  // sold: at the first dip the bid 0.57 pays 2c over a 0.55 fair value
+  const sell = new ConfluenceRatchetExit({ ...H, lockSale: 'fair_value', lockSaleFvMargin: 0.02 }, P);
+  at(sell, { sideBid: 0.5, confluence: 0, now: 0, b: up });
+  const on = at(sell, { sideBid: 0.61, now: 1000, b: up });
+  assert.deepEqual([on.mode, on.event], ['hunt', 'activated']);
+  const walked = at(sell, { sideBid: 0.61, confluence: -3, fvSide: 0.7, now: 4000, b: up }); // the wall has aged: the stop walks up; no profit take on the flip
+  assert.deepEqual([walked.mode, walked.event, walked.stop, walked.plan], ['hunt', 'ratcheted', 0.58, undefined]);
+  const sold = at(sell, { sideBid: 0.57, fvSide: 0.55, now: 5000, b: dip });
+  assert.deepEqual([sold.mode, sold.event, sold.plan?.side, sold.plan?.price], ['hunt', 'lock_sale', 'ask', 0.57]);
+  assert.equal(at(sell, { sideBid: 0.56, fvSide: 0.55, now: 6000, b: book([[0.56, 8]], [[0.6, 10]]) }).plan?.price, 0.56, 'keeps selling at the bid until flat');
+
+  // held: the bid at the first dip is under fair value plus the margin -> nothing reduces the position after that
+  const hold = new ConfluenceRatchetExit({ ...H, lockSale: 'fair_value', lockSaleFvMargin: 0.02 }, P);
+  at(hold, { sideBid: 0.5, confluence: 0, now: 0, b: up });
+  at(hold, { sideBid: 0.61, now: 1000, b: up }); at(hold, { sideBid: 0.61, now: 4000, b: up });
+  const held = at(hold, { sideBid: 0.57, fvSide: 0.58, now: 5000, b: dip });
+  assert.deepEqual([held.mode, held.event, held.plan], ['hunt', 'lock_hold', undefined]);
+  const deeper = at(hold, { sideBid: 0.5, confluence: -3, fvSide: 0.2, now: 6000, b: gap });
+  assert.deepEqual([deeper.mode, deeper.event, deeper.plan], ['hunt', undefined, undefined], 'judged once: no stop, no gap sale, no profit take');
+
+  // a gap is a first trigger too; else=exit hands the position to the normal exit, judged once
+  const exit = new ConfluenceRatchetExit({ ...H, lockSale: 'fair_value', lockSaleElse: 'exit' }, P);
+  at(exit, { sideBid: 0.5, confluence: 0, now: 0, b: up });
+  at(exit, { sideBid: 0.61, now: 1000, b: up }); at(exit, { sideBid: 0.61, now: 4000, b: up });
+  const pass = at(exit, { sideBid: 0.5, fvSide: 0.6, now: 5000, b: gap });
+  assert.deepEqual([pass.mode, pass.event], ['fair_value', 'lock_pass']);
+  const later = at(exit, { sideBid: 0.61, now: 6000, b: up });
+  assert.deepEqual([later.mode, later.event], ['fair_value', undefined], 'no second lock');
 });

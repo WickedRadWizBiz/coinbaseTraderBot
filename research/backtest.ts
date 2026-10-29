@@ -732,6 +732,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         const d = h.update({
           position: posH, qSide: posH >= 0 ? pYes : 1 - pYes, sideBid: posH > 0 ? bid.price : posH < 0 ? 1 - ask.price : undefined,
           confluence: fmap.conf_count, book, now: st.now, tick: m.tickSize, fees: DEFAULT_FEES,
+          fvSide: posH > 0 ? pYes : posH < 0 ? 1 - pYes : undefined, // our side's price for the lock sale (the engine passes the math fair value; no taker-flow feature here)
           sessionBlocked: (opts.huntSessionGuard ?? true) ? huntBlockedBySession(sess, opts.huntTransitionBufferMin ?? 10) : undefined,
         });
         huntMode = d.mode === 'hunt';
@@ -957,6 +958,7 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
     minConfluence: Number(argOf('hunt-confluence', String(DEFAULT_HUNT.minConfluence))),
     hybrid: argOf('hunt-hybrid', '0') === '1', sellIntoGap: argOf('hunt-sell-into-gap', '1') === '1',
     lockSale: argOf('hunt-lock-sale', 'off') as 'off' | 'fair_value' | 'flow' | 'either' | 'both', lockSaleFvMargin: Number(argOf('hunt-lock-sale-fv-margin', '0.02')), lockSaleElse: argOf('hunt-lock-sale-else', 'hold') as 'hold' | 'exit',
+    lockSaleAt: argOf('hunt-lock-sale-at', 'trigger') as 'lock' | 'trigger',
   };
   // Hunt mode is evaluated over a parameter grid (target margin x wall fill ratio); every variant
   // counts toward the Deflated Sharpe.

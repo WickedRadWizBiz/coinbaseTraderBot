@@ -176,16 +176,20 @@ export interface HuntParams {
    *  wall (never below the lock) and the position waits for the bid to come back to it, or rides to settlement: on the recorded
    *  days the gap sales were the ratchet's main loss (sold into liquidity holes on contracts that then paid $1). */
   sellIntoGap?: boolean;
-  /** HUNT_LOCK_SALE: what the hunt does AT the lock instead of trailing a stop. 'off' (default) trails as before.
-   *  'fair_value' sells the whole position at the bid right at the lock when the bid is at least the math fair value minus
-   *  lockSaleFvMargin; 'flow' when the last minute's Kalshi taker flow favours the held side (buyers lifting it); 'either'
-   *  and 'both' combine the two. When the rule does not hit, lockSaleElse decides: 'hold' keeps the position with no stop
-   *  (hunt mode stays on, nothing reduces it) and 'exit' hands it to the normal exit. The lock is judged once a position:
-   *  on the recorded days the lock was a spike whose outcome the price path could not tell, but the fair value and the
-   *  taker flow at that moment could (deploy/cross_study.py, section 1e). */
+  /** HUNT_LOCK_SALE: a one-time judgement of the hunted position instead of a trailing stop that sells every dip. 'off'
+   *  (default) trails as before. 'fair_value' sells the whole position at the bid when the bid is at least the math fair
+   *  value plus lockSaleFvMargin (the market pays more than the spot says the contract is worth); 'flow' when the last
+   *  minute's Kalshi taker flow favours the held side; 'either' and 'both' combine the two. lockSaleAt says when the
+   *  judgement is made: 'lock' right at the lock, 'trigger' (default) the first time the bid sits under the ratchet's stop
+   *  (a dip or a gap), the stop walking up as usual until then and no profit take before it. When the rule does not hit,
+   *  lockSaleElse decides: 'hold' keeps the position with no stop (hunt mode stays on, nothing reduces it) and 'exit'
+   *  hands it to the normal exit. Judged once a position: on the recorded days no causal trailing stop matched holding
+   *  (the dips it sold were cheap against the contracts' win rate), while a bid over fair value at the first dip marked
+   *  the positions worth selling on both days (deploy/cross_study.py, section 1e). */
   lockSale?: 'off' | 'fair_value' | 'flow' | 'either' | 'both';
   lockSaleFvMargin?: number;
   lockSaleElse?: 'hold' | 'exit';
+  lockSaleAt?: 'lock' | 'trigger';
 }
 
 export const DEFAULT_HUNT: HuntParams = { targetMargin: 0.02, minConfluence: 2 };
@@ -274,6 +278,14 @@ export class ConfluenceRatchetExit {
     return sign > 0 ? { side: 'ask', price: round(px, 4), count: n, stop: px } : { side: 'bid', price: round(1 - px, 4), count: n, stop: px };
   }
 
+  /** The lock sale's test: the bid pays at least the fair value plus the margin, and/or the taker flow favours the side. */
+  private lockSaleHit(i: HuntInput): boolean {
+    const lockSale = this.h.lockSale ?? 'off';
+    const fvOk = i.sideBid !== undefined && i.fvSide !== undefined && i.sideBid >= i.fvSide + (this.h.lockSaleFvMargin ?? 0.02) - 1e-9;
+    const flowOk = i.flowSide !== undefined && i.flowSide > 0;
+    return lockSale === 'fair_value' ? fvOk : lockSale === 'flow' ? flowOk : lockSale === 'either' ? fvOk || flowOk : lockSale === 'both' ? fvOk && flowOk : false;
+  }
+
   update(i: HuntInput): HuntDecision {
     if (Math.abs(i.position) < 1e-9) { this.reset(); return { mode: 'fair_value' }; }
     const sign = Math.sign(i.position);
@@ -287,12 +299,9 @@ export class ConfluenceRatchetExit {
       // A lock already judged by the lock sale (HUNT_LOCK_SALE_ELSE=exit): the normal exit has the position now.
       if (this.lockJudged) return { mode: 'fair_value', target };
       if (!(i.sideBid !== undefined && i.sideBid >= target - 1e-9 && oriented >= this.h.minConfluence)) return { mode: 'fair_value', target };
-      const lockSale = this.h.lockSale ?? 'off';
-      if (lockSale !== 'off') {
+      if ((this.h.lockSale ?? 'off') !== 'off' && (this.h.lockSaleAt ?? 'trigger') === 'lock') {
         this.lockJudged = true;
-        const fvOk = i.fvSide !== undefined && i.sideBid >= i.fvSide - (this.h.lockSaleFvMargin ?? 0.02) - 1e-9;
-        const flowOk = i.flowSide !== undefined && i.flowSide > 0;
-        const hit = lockSale === 'fair_value' ? fvOk : lockSale === 'flow' ? flowOk : lockSale === 'either' ? fvOk || flowOk : fvOk && flowOk;
+        const hit = this.lockSaleHit(i);
         const floor = round(Math.floor(target / i.tick + 1e-9) * i.tick, 4);
         if (hit) {
           this.active = true; this.lockSold = true; this.floor = floor;
@@ -314,6 +323,27 @@ export class ConfluenceRatchetExit {
     // The lock sale: keep selling at the bid until flat; the lock hold: nothing reduces the position.
     if (this.lockSold) return i.sideBid === undefined ? { mode: 'hunt', target, stop: this.floor } : { mode: 'hunt', plan: this.sellAtBid(i, sign), target, stop: this.floor };
     if (this.holding) return { mode: 'hunt', target, stop: this.floor };
+
+    // HUNT_LOCK_SALE at the trigger: the stop walks up as usual; the first time the bid sits under it (a dip or a gap) the
+    // position is judged once: sold into a bid over fair value, otherwise held to settlement or handed to the normal exit.
+    // No profit take before that judgement: the lab measured the plain lock, trail and first-dip rule (cross_study 1e).
+    if ((this.h.lockSale ?? 'off') !== 'off' && (this.h.lockSaleAt ?? 'trigger') === 'trigger') {
+      const r = this.ratchet.evaluate({ position: i.position, book: i.book, now: i.now, tick: i.tick, fees: i.fees, floor: this.floor, qSide: i.qSide });
+      if ((r.event !== 'triggered' && r.event !== 'gapped') || i.sideBid === undefined) return { mode: 'hunt', event: r.event, target, stop: r.stop };
+      this.lockJudged = true;
+      if (this.lockSaleHit(i)) {
+        this.lockSold = true;
+        return { mode: 'hunt', plan: this.sellAtBid(i, sign), event: 'lock_sale', target, stop: r.stop };
+      }
+      if ((this.h.lockSaleElse ?? 'hold') === 'hold') {
+        this.holding = true;
+        return { mode: 'hunt', event: 'lock_hold', target, stop: r.stop };
+      }
+      this.active = false;
+      this.floor = undefined;
+      this.ratchet.reset();
+      return { mode: 'fair_value', event: 'lock_pass', target };
+    }
 
     // Take the locked profit early at the bid when the reason to hunt is gone.
     const above = i.sideBid !== undefined && i.sideBid >= this.floor! - 1e-9;

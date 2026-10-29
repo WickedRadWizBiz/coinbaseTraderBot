@@ -2057,9 +2057,9 @@ export class Engine {
       if (!h) {
         const S = cfg.strategy;
         h = vh
-          ? new ConfluenceRatchetExit({ targetMargin: vh.targetMargin * this.snnTargetScale(), minConfluence: vh.minConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap, lockSale: S.huntLockSale, lockSaleFvMargin: S.huntLockSaleFvMargin, lockSaleElse: S.huntLockSaleElse }, { minFillRatio: vh.minFillRatio, minWallAgeMs: vh.minWallAgeMs, slippageTicks: vh.slippageTicks })
+          ? new ConfluenceRatchetExit({ targetMargin: vh.targetMargin * this.snnTargetScale(), minConfluence: vh.minConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap, lockSale: S.huntLockSale, lockSaleFvMargin: S.huntLockSaleFvMargin, lockSaleElse: S.huntLockSaleElse, lockSaleAt: S.huntLockSaleAt }, { minFillRatio: vh.minFillRatio, minWallAgeMs: vh.minWallAgeMs, slippageTicks: vh.slippageTicks })
           : new ConfluenceRatchetExit(
-            { targetMargin: S.huntTargetMargin * this.snnTargetScale(), minConfluence: S.huntMinConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap, lockSale: S.huntLockSale, lockSaleFvMargin: S.huntLockSaleFvMargin, lockSaleElse: S.huntLockSaleElse },
+            { targetMargin: S.huntTargetMargin * this.snnTargetScale(), minConfluence: S.huntMinConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap, lockSale: S.huntLockSale, lockSaleFvMargin: S.huntLockSaleFvMargin, lockSaleElse: S.huntLockSaleElse, lockSaleAt: S.huntLockSaleAt },
             { minFillRatio: S.ratchetMinFillRatio, minWallAgeMs: S.ratchetMinWallAgeSec * 1000, slippageTicks: S.ratchetSlippageTicks },
           );
         this.hunts.set(m.ticker, h);
