@@ -238,8 +238,9 @@ jobs:
       - name: Cache key (a cache key may not contain commas)
         id: key
         run: echo "coins=$(printf '%s' "$TA_ASSETS" | tr ',' '-')" >> "$GITHUB_OUTPUT"
+      # Restore and save are separate steps so the hours of replay days are kept even when the study itself fails.
       - name: Restore the 1-minute history and the replay days
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             data/history/binance-1m
@@ -264,6 +265,16 @@ jobs:
           c=${PIPESTATUS[0]}
           echo "exit=$c" >> "$GITHUB_OUTPUT"
           exit $c
+      - name: Save the history and the replay days
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/history/binance-1m
+            data/history/binance
+            data/history/kalshi
+            data/ta-study-replay
+          key: ta-study-${{ steps.key.outputs.coins }}-${{ inputs.ta_from }}-${{ inputs.ta_to }}-${{ github.run_id }}
       - name: Post the log's tail on the commit
         if: always()
         env:

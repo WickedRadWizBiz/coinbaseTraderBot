@@ -4,7 +4,7 @@
 //
 //   node --import tsx research/taContractStudy.ts --from 2025-10-01 --to 2026-09-30 [--assets BTC,ETH,SOL,XRP,DOGE]
 //        [--history data/history] [--replay data/ta-study-replay] [--out research/out/ta-contract-study]
-//        [--sets base,base+ta,...] [--max-rows 250000] [--kalshi-budget-min 20] [--skip-download] [--skip-replay] [--rebuild-replay]
+//        [--sets base,base+ta,...] [--max-rows 250000] [--max-contracts 60000] [--kalshi-budget-min 20] [--skip-download] [--skip-replay] [--rebuild-replay]
 //
 // 1. Binance's 1-minute spot bars for the assets and months (data.binance.vision, research/history/binanceVision.ts),
 //    and Kalshi's settled 15-minute contracts over the same days with their minute quotes (public API,
@@ -31,6 +31,8 @@
 import fs from 'fs';
 import path from 'path';
 import { brier, weightedLogLoss } from '../bot/model/calibration';
+import crypto from 'crypto';
+import { featuresInGroups, type FeatureGroup } from '../bot/model/featureEngine';
 import { MetaModel } from '../bot/model/metaModel';
 import { clamp, logit, sigmoid } from '../bot/util/num';
 import { buildDataset, readDataset, type DatasetRow } from './buildDataset';
@@ -82,6 +84,11 @@ export async function taContractStudyMain(): Promise<StudyReport> {
   const sets = arg('sets', STUDY_SETS.join(',')).split(',');
   // Rows in memory (about 14 KB each): past this, each contract's snapshots are thinned evenly (readDataset).
   const maxRows = Number(arg('max-rows', '250000'));
+  // Contracts kept (a deterministic share by ticker hash): a year of five coins makes ~175k contracts, and a row is kept
+  // for each of them, so this caps the rows a run reads back into memory (the trainer weights contracts equally anyway).
+  const maxContracts = Number(arg('max-contracts', '60000'));
+  // Only the inputs the compared sets read go into the rows (the full production vector is ~400 inputs a row).
+  const keep = new Set(featuresInGroups([...new Set(sets.flatMap((x) => x.split('+')))] as FeatureGroup[]));
   fs.mkdirSync(out, { recursive: true });
 
   // 1. History. The 1-minute bars make the index prints and the 1m / 5m candles; the replay reads the 15m, hourly and
@@ -111,7 +118,21 @@ export async function taContractStudyMain(): Promise<StudyReport> {
   const kalshiDays = replayKalshiDays(replay).length;
   // 3. Rows, streamed to disk as contracts settle.
   const file = path.join(out, 'rows.jsonl');
-  let total = 0, synth = 0;
+  let total = 0, synth = 0, contracts = 0, skippedContracts = 0;
+  const kept = new Map<string, boolean>();
+  const keepContract = (ticker: string) => {
+    let k = kept.get(ticker);
+    if (k === undefined) {
+      // Real contracts are few and all kept; synthetic ones by a fixed share of their ticker hash.
+      const h = parseInt(crypto.createHash('sha1').update(ticker).digest('hex').slice(0, 8), 16) / 0x100000000;
+      k = h < Math.min(1, maxContracts / Math.max(1, expectedContracts));
+      kept.set(ticker, k);
+      if (k) contracts++; else skippedContracts++;
+    }
+    return k;
+  };
+  // Synthetic 15-minute contracts expected: one a quarter hour per coin over the replayed days.
+  const expectedContracts = Math.max(1, Math.round((Date.parse(to) - Date.parse(from)) / DAY + 1) * 96 * assets.length);
   const fd = fs.openSync(`${file}.tmp`, 'w');
   let buf: string[] = [];
   const drain = () => { if (buf.length) { fs.writeSync(fd, buf.join('')); buf = []; } };
@@ -119,12 +140,18 @@ export async function taContractStudyMain(): Promise<StudyReport> {
     await buildDataset(replay, Number(arg('every', '60')), 5e-5, {
       entryWindowOnly: true, includeSynthetic: true,
       // The 15-minute Up/Down contracts only: the replay's hourly ladder is another question (and four times the rows).
-      onRow: (r) => { if ((r.kind ?? 'updown') !== 'updown') return; buf.push(JSON.stringify(r) + '\n'); total++; if (r.synthetic) synth++; if (buf.length >= 2000) drain(); },
+      onRow: (r) => {
+        if ((r.kind ?? 'updown') !== 'updown') return;
+        if (r.synthetic && !keepContract(r.ticker)) return;
+        const fx: Record<string, number> = {};
+        for (const k of Object.keys(r.fx)) if (keep.has(k)) fx[k] = r.fx[k];
+        buf.push(JSON.stringify({ ...r, fx }) + '\n'); total++; if (r.synthetic) synth++; if (buf.length >= 2000) drain();
+      },
     });
     drain();
   } finally { fs.closeSync(fd); }
   fs.renameSync(`${file}.tmp`, file);
-  log(`rows: ${total} (${synth} synthetic, ${total - synth} real) over ${from}..${to}`);
+  log(`rows: ${total} (${synth} synthetic, ${total - synth} real) over ${from}..${to}; ${contracts} synthetic contracts kept, ${skippedContracts} left out (max ${maxContracts}); ${keep.size} inputs a row`);
   const { rows } = await readDataset(file, maxRows > 0 ? maxRows : Infinity);
   const synthRows = rows.filter((r) => r.synthetic), realRows = rows.filter((r) => !r.synthetic);
   const windows = new Set(rows.map((r) => r.window)).size;
