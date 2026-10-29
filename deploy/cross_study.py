@@ -336,6 +336,7 @@ def main():
     # -- The audit log.
     files = sorted(f for f in glob.glob(os.path.join(data, 'audit', 'audit-*.jsonl')) if os.path.basename(f)[6:16] >= from_iso[:10].decode())
     fills, orders, results, exit_why, curve_events = [], {}, {}, {}, []
+    hunts = collections.defaultdict(list)  # ticker -> the hunt's decision records (activated / ratcheted / triggered / profit takes / deactivations)
     want = (b'"kind":"fill"', b'"kind":"settlement"', b'"kind":"order_new"', b'"kind":"curve_exit"')
     for f in files:
         with open(f, 'rb') as fh:
@@ -344,6 +345,12 @@ def main():
                 i = head.find(b'"ts":"')
                 if i >= 0 and head[i + 6:i + 25] < from_iso: continue
                 if b'"kind":"decision"' in head:
+                    if b'"huntEvent":"' in line:
+                        try: r = json.loads(line)
+                        except Exception: continue
+                        d = r.get('data') or {}
+                        hunts[d.get('ticker', '')].append({'ms': iso_ms(r.get('ts', '')), 'ev': d.get('huntEvent'), 'target': d.get('target'), 'stop': d.get('stop'), 'pYes': d.get('pYes')})
+                        continue
                     if b'"purpose":"exit"' not in line: continue
                     try: d = json.loads(line).get('data') or {}
                     except Exception: continue
@@ -654,6 +661,112 @@ def main():
     show('by the ratchet stop against the average entry', stop_rows)
     show('by the time to the close', tau_rows)
     show('by series', series_rows)
+
+    # -- 1c. The ratchet's anatomy: the hunt's decision records (activated / ratcheted / triggered / profit takes /
+    #        deactivations) joined to the positions and the recorded top of book. Where the lock sits against the entry
+    #        and the model, how far the stop walked up, what the bid did between the lock and the sale, and what the
+    #        sold contracts then paid.
+    def anatomy():
+        print('\n== 1c. the ratchet\'s anatomy (hunt decision records joined to the positions and the top of book; side terms)')
+        ev_count = collections.Counter(h['ev'] for hs in hunts.values() for h in hs if since_ms <= h['ms'] <= now * 1000)
+        print('  hunt events in the window: ' + (', '.join(f"{k} {v}" for k, v in sorted(ev_count.items(), key=lambda kv: -kv[1])) if ev_count else 'none (no hunt decision records)'))
+
+        def side_q_of(ep, p):
+            return None if p is None else (float(p) if ep['sign'] > 0 else 1 - float(p))
+
+        def peak_bid(ep, a_ms, b_ms):
+            t = ep['ticker']; v = tops.get(t)
+            if not v: return None
+            i0 = max(0, bisect.bisect_right(top_secs[t], a_ms // 1000) - 1); i1 = bisect.bisect_right(top_secs[t], b_ms // 1000)
+            vals = [e[1] if ep['sign'] > 0 else (None if e[3] is None else round(1 - e[3], 4)) for e in v[i0:i1]]
+            vals = [x for x in vals if x is not None]
+            return max(vals) if vals else None
+
+        ENDS = ('triggered', 'profit_take_confluence', 'profit_take_session', 'profit_take_gap', 'deactivated_giveback', 'deactivated_session')
+        acts, sale_rows = [], []
+        for ep in episodes:
+            end_ms = (ep.get('flat_ms') or ep.get('close_ms') or int(now * 1000)) + 1000
+            hs = sorted((h for h in hunts.get(ep['ticker'], []) if ep['start_ms'] - 1000 <= h['ms'] <= end_ms), key=lambda h: h['ms'])
+            if not hs: continue
+            en = sum(e['n'] for e in ep['entries']); avg = (sum(e['n'] * e['px'] for e in ep['entries']) / en) if en else None
+            cur = None
+            for h in hs:
+                if h['ev'] == 'activated':
+                    cur = {'ep': ep, 'avg': avg, 'act_ms': h['ms'], 'floor': h['stop'] if h['stop'] is not None else h['target'], 'ratchets': 0, 'max_stop': h['stop'], 'end': None, 'sales': []}
+                    acts.append(cur)
+                elif cur is None: continue
+                elif h['ev'] == 'ratcheted':
+                    cur['ratchets'] += 1
+                    if h['stop'] is not None and (cur['max_stop'] is None or h['stop'] > cur['max_stop']): cur['max_stop'] = h['stop']
+                elif h['ev'] in ENDS and cur['end'] is None:
+                    cur['end'] = h
+                if h['ev'] in ('deactivated_giveback', 'deactivated_session'): cur = None
+            eacts = [a for a in acts if a['ep'] is ep]
+            for x in ep['exits']:
+                if x['kind'] != 'ratchet stop': continue
+                a = next((a for a in reversed(eacts) if a['act_ms'] <= x['ms'] + 1000), None)
+                if a is None: continue
+                a['sales'].append(x)
+                m = re.search(r'stop ([0-9.]+)', x.get('why') or ''); stop = float(m.group(1)) if m else a['max_stop']
+                if stop is None or a['floor'] is None: continue
+                pk = peak_bid(ep, a['act_ms'], x['ms'])
+                trig = a['end'] if a['end'] and a['end']['ev'] == 'triggered' else None
+                q = side_q_of(ep, trig['pYes']) if trig else None
+                fee_per = taker_fee(x['n'], stop) / x['n'] if x['n'] else 0.0
+                sale_rows.append({'n': x['n'], 'px': x['px'], 'fee': x['fee'], 'lock': (a['floor'] - a['avg']) if a['avg'] is not None else None, 'walk': stop - a['floor'],
+                                  'peak': pk, 'give': (pk - x['px']) if pk is not None else None, 'slip': stop - x['px'], 'q': q, 'q_over': (q - stop) if q is not None else None,
+                                  'hyb': (q >= stop + fee_per) if q is not None else None, 'held': (x['ms'] - a['act_ms']) / 1000,
+                                  'tau': (ep['close_ms'] - x['ms']) / 60000 if ep.get('close_ms') else None, 'payout': ep['payout']})
+
+        def wmean(rows, k):
+            s = [(r[k], r['n']) for r in rows if r.get(k) is not None]
+            return (sum(v * n for v, n in s) / sum(n for _, n in s)) if s else None
+
+        def wshare(rows, k):
+            s = [(1.0 if r[k] else 0.0, r['n']) for r in rows if r.get(k) is not None]
+            return (sum(v * n for v, n in s) / sum(n for _, n in s)) if s else None
+
+        f3 = lambda v: 'n/a' if v is None else f"{v:+.3f}"
+        pc = lambda v: 'n/a' if v is None else f"{100 * v:.0f}%"
+        walked = sum(1 for a in acts if a['max_stop'] is not None and a['floor'] is not None and a['max_stop'] > a['floor'] + 1e-9)
+        print(f"  hunts (activations) {len(acts)} on {len({id(a['ep']) for a in acts})} positions; the stop walked above the lock in {walked} of them"
+              f" ({mean([a['ratchets'] for a in acts]) if acts else 0:.1f} ratchet steps a hunt)")
+        how = collections.defaultdict(lambda: {'acts': 0, 'n': 0.0, 'lock': 0.0, 'lockn': 0.0, 'won': 0.0, 'wonn': 0.0})
+        for a in acts:
+            ep = a['ep']; e = a['end']
+            kind = ('stopped out (ratchet sale)' if a['sales'] else ('profit take at the bid: ' + e['ev'][12:]) if e and e['ev'].startswith('profit_take')
+                    else ('lock given back: ' + e['ev'][12:]) if e and e['ev'].startswith('deactivated') else 'stop hit, no sale recorded' if e else 'ran on (stop never hit)')
+            r = how[kind]; r['acts'] += 1
+            n_held = sum(x['n'] for x in ep['entries']); r['n'] += n_held
+            if a['floor'] is not None and a['avg'] is not None: r['lock'] += (a['floor'] - a['avg']) * n_held; r['lockn'] += n_held
+            if ep['payout'] is not None: r['won'] += ep['payout'] * n_held; r['wonn'] += n_held
+        print("  how each hunt ended (contracts = the position's size; lock = the floor above the average entry; won = the held side at settlement):")
+        for k, r in sorted(how.items(), key=lambda kv: -kv[1]['acts']):
+            print(f"    {k:44s} hunts {r['acts']:4d}  contracts {r['n']:7.1f}  lock {f3(r['lock'] / r['lockn'] if r['lockn'] else None)}/ct  won {pc(r['won'] / r['wonn'] if r['wonn'] else None)}")
+        if not sale_rows:
+            print('  no ratchet sale in the window has a recorded hunt (older audit logs have no hunt decision records)')
+            return
+        settled = [r for r in sale_rows if r['payout'] is not None]
+        vs = sum((r['px'] - r['payout']) * r['n'] - r['fee'] for r in settled); vsn = sum(r['n'] for r in settled)
+        print(f"  ratchet sales with a recorded hunt: {len(sale_rows)} sales, {sum(r['n'] for r in sale_rows):.1f} contracts, vs holding ${vs:+.2f} on {vsn:.0f} settled contracts, won {pc(wmean(settled, 'payout'))}")
+        up = wmean([{'n': r['n'], 'w': 1.0 if r['walk'] > 0.005 else 0.0} for r in sale_rows], 'w')
+        print(f"    the lock (floor - average entry) {f3(wmean(sale_rows, 'lock'))}/ct; the stop at the sale {f3(wmean(sale_rows, 'walk'))}/ct above the lock, above it at all on {pc(up)} of the contracts")
+        print(f"    the side bid's peak between the lock and the sale {f3(wmean(sale_rows, 'peak'))}; the sale gave back {f3(wmean(sale_rows, 'give'))}/ct of it and filled {f3(wmean(sale_rows, 'slip'))}/ct under the stop (the wall it leaned on was gone)")
+        print(f"    the model's value at the trigger {f3(wmean(sale_rows, 'q'))}, {f3(wmean(sale_rows, 'q_over'))}/ct above the stop; the hybrid rule would have held {pc(wshare(sale_rows, 'hyb'))} of the contracts sold")
+        print(f"    from the lock to the sale {wmean(sale_rows, 'held') or 0:.0f} s; {wmean(sale_rows, 'tau') or 0:.1f} min to the close at the sale")
+        for lo, hi, lab in ((None, 0.005, 'stop at the lock'), (0.005, 0.03, 'stop 1-2c above the lock'), (0.03, None, 'stop 3c+ above the lock')):
+            rs = [r for r in settled if (lo is None or r['walk'] >= lo) and (hi is None or r['walk'] < hi)]
+            if not rs: continue
+            print(f"    {lab:26s} contracts {sum(r['n'] for r in rs):7.1f}  vs holding ${sum((r['px'] - r['payout']) * r['n'] - r['fee'] for r in rs):+8.2f}  won {pc(wmean(rs, 'payout'))}  sold at {wmean(rs, 'px'):.3f}  peak {f3(wmean(rs, 'peak'))}  gave back {f3(wmean(rs, 'give'))}/ct")
+        for lo, hi, lab in ((None, 2, 'sold <2 min to the close'), (2, 5, 'sold 2-5 min to the close'), (5, None, 'sold 5+ min to the close')):
+            rs = [r for r in settled if r['tau'] is not None and (lo is None or r['tau'] >= lo) and (hi is None or r['tau'] < hi)]
+            if not rs: continue
+            print(f"    {lab:26s} contracts {sum(r['n'] for r in rs):7.1f}  vs holding ${sum((r['px'] - r['payout']) * r['n'] - r['fee'] for r in rs):+8.2f}  won {pc(wmean(rs, 'payout'))}  sold at {wmean(rs, 'px'):.3f}  peak {f3(wmean(rs, 'peak'))}  gave back {f3(wmean(rs, 'give'))}/ct")
+
+    try:
+        anatomy()
+    except Exception as e:  # a one-shot run on the server: the sections after this one still print
+        print(f"  (1c stopped: {type(e).__name__}: {e})")
 
     # -- 2. The cross's scoreboard against its fills.
     print('\n== 2. the cross\'s scoreboard (curve_exit events) against its fills')
