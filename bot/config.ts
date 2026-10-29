@@ -199,6 +199,8 @@ export interface StrategyConfig {
   /** HUNT_HYBRID: in hunt mode a triggered stop sells only when the model agrees the contract is worth less than the stop
    *  plus the fee (bot/strategy/exitPolicies.ts); off by default. */
   huntHybrid: boolean;
+  /** HUNT_SELL_INTO_GAP: off, a gap through the hunt stop never sells (the lock waits for the bid to come back). */
+  huntSellIntoGap: boolean;
   ratchetMinFillRatio: number;
   ratchetMinWallAgeSec: number;
   ratchetSlippageTicks: number;
@@ -1054,6 +1056,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     huntTargetMargin: num(env, 'HUNT_TARGET_MARGIN', 0.02, 0, 0.5),
     huntMinConfluence: num(env, 'HUNT_MIN_CONFLUENCE', 2, 1, 7),
     huntHybrid: bool(env, 'HUNT_HYBRID', false),
+    huntSellIntoGap: bool(env, 'HUNT_SELL_INTO_GAP', true),
     ratchetMinFillRatio: num(env, 'RATCHET_MIN_FILL_RATIO', 1, 0.1, 20),
     ratchetMinWallAgeSec: num(env, 'RATCHET_MIN_WALL_AGE_SEC', 3, 0, 120),
     ratchetSlippageTicks: num(env, 'RATCHET_SLIPPAGE_TICKS', 1, 0, 10),

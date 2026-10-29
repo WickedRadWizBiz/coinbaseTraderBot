@@ -171,6 +171,11 @@ export interface HuntParams {
   /** The hybrid rule in hunt mode (HUNT_HYBRID): a triggered stop sells only when the model's own value for the contract
    *  is below the stop plus the fee; otherwise the stop holds (hybrid_hold) and keeps trailing. */
   hybrid?: boolean;
+  /** HUNT_SELL_INTO_GAP (on by default): when the bid gaps more than the slippage below the stop, sell at the bid while it is
+   *  still at or above the entry fair value, and drop the lock below it. Off: a gap never sells. The stop falls back to the next
+   *  wall (never below the lock) and the position waits for the bid to come back to it, or rides to settlement: on the recorded
+   *  days the gap sales were the ratchet's main loss (sold into liquidity holes on contracts that then paid $1). */
+  sellIntoGap?: boolean;
 }
 
 export const DEFAULT_HUNT: HuntParams = { targetMargin: 0.02, minConfluence: 2 };
@@ -218,7 +223,9 @@ export interface HuntDecision {
  * Take-profit early, at the bid (never below the lock): confluence flips
  * against the position, or the session turns unsafe for book-anchored stops.
  * A gap through the stop sells at the bid while still above the entry fair
- * value; below it, hunt mode ends and the fair-value exit takes over.
+ * value; below it, hunt mode ends and the fair-value exit takes over. With
+ * the gap sale off (HUNT_SELL_INTO_GAP=false) a gap sells nothing: the stop
+ * waits at the next wall, never below the lock, for the bid to come back.
  */
 export class ConfluenceRatchetExit {
   private readonly ratchet: LiquidityRatchet;
@@ -271,6 +278,7 @@ export class ConfluenceRatchetExit {
 
     const r = this.ratchet.evaluate({ position: i.position, book: i.book, now: i.now, tick: i.tick, fees: i.fees, floor: this.floor, hybrid: this.h.hybrid, qSide: i.qSide });
     if (r.event === 'gapped') {
+      if (this.h.sellIntoGap === false) return { mode: 'hunt', event: 'gapped', target, stop: r.stop };
       if (i.sideBid !== undefined && i.sideBid >= this.entryQ! - 1e-9) return { mode: 'hunt', plan: this.sellAtBid(i, sign), event: 'profit_take_gap', target, stop: r.stop };
       this.active = false;
       this.floor = undefined;

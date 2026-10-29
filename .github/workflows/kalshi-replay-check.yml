@@ -69,7 +69,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     environment: production
-    timeout-minutes: 240
+    timeout-minutes: 345
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -227,9 +227,9 @@ jobs:
           for s in $NEARBY; do
             ph="${PH[$i]:-0}"; i=$((i + 1))
             [[ "$ph" =~ ^[0-9]{1,3}$ ]] || { echo "phases must be whole ms below 1000"; exit 1; }
-            choom -n 900 -- timeout 200m node --import tsx research/replayCheck.ts "${ARGS[@]}" --bankroll-scale "$s" --tick-phase-ms "$ph" --out "data/sweeps/nearby/$s.json" > "$RUNNER_TEMP/nearby-$s.log" 2>&1 &
+            choom -n 900 -- timeout 320m node --import tsx research/replayCheck.ts "${ARGS[@]}" --bankroll-scale "$s" --tick-phase-ms "$ph" --out "data/sweeps/nearby/$s.json" > "$RUNNER_TEMP/nearby-$s.log" 2>&1 &
           done
-          { timeout 200m node --import tsx research/replayCheck.ts "${ARGS[@]}" --tick-phase-ms 0 --out data/sweeps/replay-check-own.json || echo "replay check failed or cut off"; } 2>&1 | tee "$RUNNER_TEMP/own.log"
+          { timeout 320m node --import tsx research/replayCheck.ts "${ARGS[@]}" --tick-phase-ms 0 --out data/sweeps/replay-check-own.json || echo "replay check failed or cut off"; } 2>&1 | tee "$RUNNER_TEMP/own.log"
           wait
           for s in $NEARBY; do [ -s "data/sweeps/nearby/$s.json" ] || echo "nearby replay x$s did not finish: $(grep -E 'Error|Killed|heap' "$RUNNER_TEMP/nearby-$s.log" | tail -n 1 | cut -c1-160)"; done
           if [ -s data/sweeps/replay-check-own.json ]; then

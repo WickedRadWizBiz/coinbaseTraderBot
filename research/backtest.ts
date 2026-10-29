@@ -955,7 +955,7 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
   const hunt: HuntParams = {
     targetMargin: Number(argOf('hunt-margin', String(DEFAULT_HUNT.targetMargin))),
     minConfluence: Number(argOf('hunt-confluence', String(DEFAULT_HUNT.minConfluence))),
-    hybrid: argOf('hunt-hybrid', '0') === '1',
+    hybrid: argOf('hunt-hybrid', '0') === '1', sellIntoGap: argOf('hunt-sell-into-gap', '1') === '1',
   };
   // Hunt mode is evaluated over a parameter grid (target margin x wall fill ratio); every variant
   // counts toward the Deflated Sharpe.

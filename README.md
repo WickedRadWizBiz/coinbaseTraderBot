@@ -682,6 +682,7 @@ The backtest mirrors the engine: cadence-gated entries, entry windows, target-EV
   - With a passing evaluation the engine uses the winning parameters. In live mode an unevaluated or losing hunt mode falls back to the fair-value exit, and the dashboard says so.
   - It is the default (`EXIT_POLICY=confluence_ratchet`), and the dashboard shows HUNTING with the target and stop.
   - `HUNT_HYBRID=true` (off by default) makes a triggered stop sell only when the model agrees the contract is worth less than the stop plus the fee; otherwise the stop holds and keeps trailing. `STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC` holds the hunt stop as well in the final seconds, so a winner rides to settlement.
+  - `HUNT_SELL_INTO_GAP=false` turns off the gap sale: when the bid gaps more than a tick below the stop the hunt sells nothing, the stop waits at the next wall (never below the lock) for the bid to come back, and otherwise the position rides to settlement. On the recorded days the gap sales were the ratchet's main loss: sold into liquidity holes at the bid, on contracts that then paid $1 (Oct 28: every one of them).
 
 Every exit executes one tick after it triggers. The exit policy governs all active reductions, so taker entries against a position are blocked under hold and ratchet. The diagnostics report:
 - exit regret: settlement value of the exited contracts minus exit proceeds

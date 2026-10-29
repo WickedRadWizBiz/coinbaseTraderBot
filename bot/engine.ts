@@ -2057,9 +2057,9 @@ export class Engine {
       if (!h) {
         const S = cfg.strategy;
         h = vh
-          ? new ConfluenceRatchetExit({ targetMargin: vh.targetMargin * this.snnTargetScale(), minConfluence: vh.minConfluence, hybrid: S.huntHybrid }, { minFillRatio: vh.minFillRatio, minWallAgeMs: vh.minWallAgeMs, slippageTicks: vh.slippageTicks })
+          ? new ConfluenceRatchetExit({ targetMargin: vh.targetMargin * this.snnTargetScale(), minConfluence: vh.minConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap }, { minFillRatio: vh.minFillRatio, minWallAgeMs: vh.minWallAgeMs, slippageTicks: vh.slippageTicks })
           : new ConfluenceRatchetExit(
-            { targetMargin: S.huntTargetMargin * this.snnTargetScale(), minConfluence: S.huntMinConfluence, hybrid: S.huntHybrid },
+            { targetMargin: S.huntTargetMargin * this.snnTargetScale(), minConfluence: S.huntMinConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap },
             { minFillRatio: S.ratchetMinFillRatio, minWallAgeMs: S.ratchetMinWallAgeSec * 1000, slippageTicks: S.ratchetSlippageTicks },
           );
         this.hunts.set(m.ticker, h);
@@ -2074,7 +2074,7 @@ export class Engine {
       st.exitMode = d.mode;
       st.huntTarget = d.target;
       st.huntStop = d.stop;
-      if (d.event && d.event !== 'armed' && (d.event !== 'hybrid_hold' || st.huntEvent !== 'hybrid_hold')) {
+      if (d.event && d.event !== 'armed' && ((d.event !== 'hybrid_hold' && d.event !== 'gapped') || st.huntEvent !== d.event)) {
         this.d.audit.write('decision', { ticker: m.ticker, huntEvent: d.event, target: d.target, stop: d.stop, position: st.position, confCount: features.conf_count, pYes });
       }
       st.huntEvent = d.event;

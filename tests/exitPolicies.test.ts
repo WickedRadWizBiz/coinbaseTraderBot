@@ -242,3 +242,22 @@ test('hunt mode with the hybrid rule holds a triggered stop while the model valu
   hunt(off, { sideBid: 0.6, confluence: 3, b, now: 1000 });
   assert.equal(hunt(off, { qSide: 0.6, sideBid: 0.56, confluence: 3, b: dip, now: 2000 }).event, 'triggered', 'without the rule the stop sells whatever the model says');
 });
+
+test('hunt mode without the gap sale holds through a gap: the stop waits at the lock for the bid to come back', () => {
+  const b = book([[0.6, 8]], [[0.63, 10]]); // no wall below the bid: the stop stays at the lock
+  const k = new ConfluenceRatchetExit({ ...H, sellIntoGap: false }, P);
+  hunt(k, { qSide: 0.55, sideBid: 0.5, b, now: 0 });
+  hunt(k, { sideBid: 0.6, confluence: 3, b, now: 1000 });
+  const gap = hunt(k, { sideBid: 0.55, confluence: 3, b: book([[0.55, 8]], [[0.58, 10]]), now: 2000 });
+  assert.deepEqual([gap.mode, gap.event, gap.plan, gap.stop], ['hunt', 'gapped', undefined, 0.57], 'a gap to the entry fair value sells nothing (the default sells at the bid there)');
+  const deep = hunt(k, { sideBid: 0.5, confluence: 3, b: book([[0.5, 8]], [[0.53, 10]]), now: 3000 });
+  assert.deepEqual([deep.mode, deep.event, deep.plan, deep.stop], ['hunt', 'gapped', undefined, 0.57], 'a gap below the entry fair value keeps the lock too (the default drops it)');
+  const back = hunt(k, { sideBid: 0.56, confluence: 3, b: book([[0.56, 8]], [[0.6, 10]]), now: 4000 });
+  assert.deepEqual([back.event, back.plan?.price], ['triggered', 0.56], 'the bid coming back to a tick under the lock sells there');
+
+  const g = new ConfluenceRatchetExit(H, P); // the default: the gap sale
+  hunt(g, { qSide: 0.55, sideBid: 0.5, b, now: 0 });
+  hunt(g, { sideBid: 0.6, confluence: 3, b, now: 1000 });
+  const sold = hunt(g, { sideBid: 0.55, confluence: 3, b: book([[0.55, 8]], [[0.58, 10]]), now: 2000 });
+  assert.deepEqual([sold.event, sold.plan?.price], ['profit_take_gap', 0.55], 'the default sells at the bid on a gap that is still at the entry fair value');
+});
