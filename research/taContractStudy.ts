@@ -231,6 +231,29 @@ export async function taContractStudyMain(): Promise<StudyReport> {
     log(`phase 2: stack w = ${stack.w} (dev log loss ${stack.devLogLoss.toFixed(5)}); test log loss ${stack.testLogLoss.toFixed(5)} vs mid alone ${stack.testMidLogLoss.toFixed(5)} (P(stack better) ${stack.dm.pValue.toFixed(3)}); Brier mid ${brier(sorted.map((r) => r.mid), y).toFixed(5)}`);
   } else log(`phase 2 skipped: ${realRows.length} real rows (Kalshi's history has ${kalshiDays} replayed day(s) here)`);
 
+  // 6. Summary at the end (the log's tail is what gets read): the edge table, the triggers that stand out, phase 2 and a
+  //    look at the real quotes themselves (a broken mid shows up here, not in a model's number).
+  log('SUMMARY ' + '='.repeat(60));
+  log(`rows ${rows.length} (${synthRows.length} synthetic, ${realRows.length} real) over ${windows} windows, ${replayDays} replay day(s)`);
+  console.table(edge.map((e) => ({ set: e.set, model: e.model, features: e.features, sigma: +e.sigma.toFixed(2) })));
+  if (report.iftrades) {
+    const c = report.iftrades.contracts.filter((x) => x.contracts >= 200).sort((a, b) => Math.abs(b.z) - Math.abs(a.z)).slice(0, 16);
+    log('triggers on contracts, by |z| (200+ contracts): side +1 = the strategy\'s buy condition');
+    console.table(c.map((x) => ({ trigger: x.trigger, side: x.side, contracts: x.contracts, upShare: +x.upShare.toFixed(3), fvMean: +x.fvMean.toFixed(3), z: +x.z.toFixed(2) })));
+    const h = report.iftrades.horizons.filter((x) => x.n >= 100 && Math.abs(x.tStat) >= 2);
+    log(`triggers on the spot path with |t| >= 2 (100+ firings): ${h.length} of ${report.iftrades.horizons.filter((x) => x.n >= 100).length} tested`);
+    console.table(h.map((x) => ({ trigger: x.trigger, side: x.side, horizonMin: x.horizonMin, n: x.n, hit: +x.hit.toFixed(3), meanBps: +x.meanBps.toFixed(1), t: +x.tStat.toFixed(2) })));
+  }
+  if (realRows.length) {
+    const q = (xs: number[], p: number) => { const a = [...xs].sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.floor(p * a.length))]; };
+    const mids = realRows.map((r) => r.mid);
+    const ext = realRows.filter((r) => r.mid <= 0.05 || r.mid >= 0.95);
+    log(`real quotes: mid quantiles 5/25/50/75/95% = ${[0.05, 0.25, 0.5, 0.75, 0.95].map((p) => q(mids, p).toFixed(3)).join(' / ')}; mid at or beyond 5c/95c in ${ext.length} rows (${(100 * ext.length / realRows.length).toFixed(1)}%), of which settled with the quote ${ext.length ? (100 * ext.filter((r) => (r.mid >= 0.95) === (r.label === 1)).length / ext.length).toFixed(0) : '-'}%; bid <= 0 in ${realRows.filter((r) => !(r.bid > 0)).length} rows; spread > 20c in ${realRows.filter((r) => r.ask - r.bid > 0.2).length} rows`);
+    const byMonth = new Map<string, DatasetRow[]>();
+    for (const r of realRows) { const k = new Date(r.t).toISOString().slice(0, 7); (byMonth.get(k) ?? byMonth.set(k, []).get(k)!).push(r); }
+    const ll = (q: number, y: number) => -(y * Math.log(clamp(q, 1e-6, 1 - 1e-6)) + (1 - y) * Math.log(1 - clamp(q, 1e-6, 1 - 1e-6)));
+    console.table([...byMonth.entries()].sort().map(([m, rs]) => ({ month: m, rows: rs.length, logLossMid: +(rs.reduce((s, r) => s + ll(r.mid, r.label), 0) / rs.length).toFixed(4), logLossFv: +(rs.reduce((s, r) => s + ll(r.fv, r.label), 0) / rs.length).toFixed(4), upShare: +(rs.reduce((s, r) => s + r.label, 0) / rs.length).toFixed(3), midMean: +(rs.reduce((s, r) => s + r.mid, 0) / rs.length).toFixed(3) })));
+  }
   fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   log(`wrote ${path.join(out, 'report.json')}`);
   return report;
