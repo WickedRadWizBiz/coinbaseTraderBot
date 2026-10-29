@@ -130,7 +130,7 @@ jobs:
           export NODE_OPTIONS="--max-old-space-size=4096"
           node --import tsx research/historyWalk.ts run --net "$NET" --minutes "$MINUTES" --work "$RUNNER_TEMP/walk" --history "$RUNNER_TEMP/walk/history" --by "$HOLDER" > "$RUNNER_TEMP/walk.log" 2>&1; c=$?
           # Days, minutes and fitness only (public repo): the block's lines and the last rounds.
-          grep -E "^\[walk\] $NET: (block|[0-9]+ archive|[0-9]+ replay|walked|caught up)" "$RUNNER_TEMP/walk.log" | cut -c1-220
+          grep -E "^\[walk\] $NET: (block|[0-9]+ archive|[0-9]+ replay|walked|caught up|no trades)" "$RUNNER_TEMP/walk.log" | cut -c1-220
           grep -E "^\[walk\] $NET: round " "$RUNNER_TEMP/walk.log" | tail -5 | cut -c1-220
           grep -E '^history walk failed|FATAL ERROR|heap out of memory' "$RUNNER_TEMP/walk.log" | head -3 | cut -c1-220
           grep -E '^WALK ' "$RUNNER_TEMP/walk.log" | tail -1 | sed 's/^WALK //' > "$RUNNER_TEMP/walk.json"
