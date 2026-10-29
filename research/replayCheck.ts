@@ -676,7 +676,6 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   }
   const match = priceMatcher(audit.prices, from, to);
   const r = await runBacktest(dir, model, S, cfg.risk, bankroll, {
-    exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
     // The hunt and the ratchet as the engine builds them from the settings (bot/engine.ts), so HUNT_* and RATCHET_* overrides
     // reach the replay; before this the replay hunted with the code defaults whatever the settings said.
     hunt: { targetMargin: S.huntTargetMargin, minConfluence: S.huntMinConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap, lockSale: S.huntLockSale, lockSaleFvMargin: S.huntLockSaleFvMargin, lockSaleElse: S.huntLockSaleElse, lockSaleAt: S.huntLockSaleAt },
