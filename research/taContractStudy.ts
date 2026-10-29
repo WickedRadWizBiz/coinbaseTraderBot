@@ -4,7 +4,7 @@
 //
 //   node --import tsx research/taContractStudy.ts --from 2025-10-01 --to 2026-09-30 [--assets BTC,ETH,SOL,XRP,DOGE]
 //        [--history data/history] [--replay data/ta-study-replay] [--out research/out/ta-contract-study]
-//        [--sets base,base+ta,...] [--max-rows 80000] [--kalshi-budget-min 20] [--skip-download] [--skip-replay]
+//        [--sets base,base+ta,...] [--max-rows 80000] [--kalshi-budget-min 20] [--skip-download] [--skip-replay] [--rebuild-replay]
 //
 // 1. Binance's 1-minute spot bars for the assets and months (data.binance.vision, research/history/binanceVision.ts),
 //    and Kalshi's settled 15-minute contracts over the same days with their minute quotes (public API,
@@ -103,7 +103,8 @@ export async function taContractStudyMain(): Promise<StudyReport> {
   // 2. Replay days with synthetic contracts (and Kalshi's real ones where the history has them).
   let rep = { days: 0, synthetic: 0 };
   if (!process.argv.includes('--skip-replay')) {
-    const r = await buildHistoryReplay({ historyDir: history, outDir: replay, assets, fromDay: from, toDay: to, synthetic: true, log: (m) => log(`replay: ${m}`) });
+    // --rebuild-replay: days already built are built again (the replay otherwise skips them, e.g. after a history fix).
+    const r = await buildHistoryReplay({ historyDir: history, outDir: replay, assets, fromDay: from, toDay: to, synthetic: true, force: process.argv.includes('--rebuild-replay'), log: (m) => log(`replay: ${m}`) });
     rep = { days: r.days, synthetic: r.synthetic };
     for (const n of r.notes) log(`replay: ${n}`);
   }

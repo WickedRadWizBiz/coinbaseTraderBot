@@ -38,6 +38,10 @@ on:
         description: 'With ta_study: coins, comma separated'
         required: false
         default: 'BTC,ETH,SOL,XRP,DOGE'
+      ta_rebuild:
+        description: 'With ta_study: build the cached replay days again (after a history fix)'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
@@ -254,6 +258,7 @@ jobs:
           args=(--assets "$TA_ASSETS")
           [ -n "$TA_FROM" ] && args+=(--from "$TA_FROM")
           [ -n "$TA_TO" ] && args+=(--to "$TA_TO")
+          [ "${{ inputs.ta_rebuild }}" = "true" ] && args+=(--rebuild-replay)
           set +e
           node --import tsx research/taContractStudy.ts "${args[@]}" 2>&1 | grep -vE '^\s*$' | tee "$RUNNER_TEMP/ta-study.log" | tail -400
           c=${PIPESTATUS[0]}
