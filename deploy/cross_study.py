@@ -818,6 +818,13 @@ def main():
         end = (ep.get('close_ms') or (ep['start_ms'] + 3_600_000)) + 1000
         a, b = win.get(ep['ticker'], (ep['start_ms'], end))
         win[ep['ticker']] = (min(a, ep['start_ms'] - 120_000), max(b, end))
+    # The book is kept from the market's OPEN, not from two minutes before the first fill: the recorder's only full
+    # snapshot usually comes with the subscription at the open, and deltas before a snapshot cannot be applied (the
+    # old window dropped the snapshot for most hunted markets, leaving two thirds of the hunts without a path).
+    close_of = {}
+    for ep in episodes:
+        if ep.get('close_ms'): close_of[ep['ticker']] = max(close_of.get(ep['ticker'], 0), ep['close_ms'])
+    bookwin = {t: ((min(a, close_of[t] - (900_000 if '15M-' in t else 3_600_000) - 300_000) if t in close_of else a), b) for t, (a, b) in win.items()}
     assets = {ep.get('asset') for ep in episodes if ep.get('asset')}
     rec_dir = os.path.join(data, 'recordings')
     # The line needs 15 minutes of index before its first point for its volatility, and starts 10 minutes before a
@@ -868,7 +875,7 @@ def main():
                     if tb not in wanted_b: continue
                     r = json.loads(line)
                     t = r['ticker']; ms = r.get('t') or r.get('ts')
-                    a, b = win[t]
+                    a, b = bookwin[t]
                     if ms < a or ms > b: continue
                     sec = ms // 1000
                     if t in books and sec > cur_sec.get(t, 0):
