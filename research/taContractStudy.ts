@@ -98,7 +98,8 @@ export function fitStack(dev: Array<{ mid: number; model: number; fv: number; y:
 }
 
 export async function taContractStudyMain(): Promise<StudyReport> {
-  const log = (m: string) => console.log(`[ta-study] ${m}`);
+  const t0 = Date.now();
+  const log = (m: string) => console.log(`[ta-study +${((Date.now() - t0) / 60_000).toFixed(0)}m] ${m}`);
   const history = arg('history', 'data/history'), replay = arg('replay', 'data/ta-study-replay'), out = arg('out', 'research/out/ta-contract-study');
   const assets = arg('assets', 'BTC,ETH,SOL,XRP,DOGE').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
   const to = arg('to', new Date(Date.now() - 2 * DAY).toISOString().slice(0, 10));
@@ -165,17 +166,19 @@ export async function taContractStudyMain(): Promise<StudyReport> {
   let buf: string[] = [];
   const drain = () => { if (buf.length) { fs.writeSync(fd, buf.join('')); buf = []; } };
   try {
-    await buildDataset(replay, Number(arg('every', '60')), 5e-5, {
+    // Snapshots every 3 minutes (4 a contract; the trainer keeps one or two) and only the sampled contracts: the
+    // feature vector is the expensive part, so neither is computed for a contract the rows will not hold.
+    await buildDataset(replay, Number(arg('every', '180')), 5e-5, {
       entryWindowOnly: true, includeSynthetic: true,
+      skipMarket: (m) => (m.kind ?? 'updown') !== 'updown' || (!!m.synthetic && !keepContract(m.ticker)),
       // The 15-minute Up/Down contracts only: the replay's hourly ladder is another question (and four times the rows).
       onRow: (r) => {
-        if ((r.kind ?? 'updown') !== 'updown') return;
-        if (r.synthetic && !keepContract(r.ticker)) return;
         const fx: Record<string, number> = {};
         for (const k of Object.keys(r.fx)) if (keep.has(k)) fx[k] = r.fx[k];
         const tg = triggers.get(r.asset);
         if (tg) Object.assign(fx, tg.at(r.t));
         buf.push(JSON.stringify({ ...r, fx }) + '\n'); total++; if (r.synthetic) synth++; if (buf.length >= 2000) drain();
+        if (total % 100_000 === 0) log(`rows: ${total} so far (${new Date(r.t).toISOString().slice(0, 10)})`);
       },
     });
     drain();

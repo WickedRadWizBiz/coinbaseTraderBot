@@ -67,7 +67,7 @@ export function eventOf(ticker: string, event?: string): string {
 
 export async function buildDataset(
   dir: string, everySec: number, referenceSigma = 5e-5,
-  opts: { volProfile?: VolProfile; applyVolSeasonality?: boolean; volModel?: VolModel; entryWindowOnly?: boolean; calendar?: MacroEvent[]; entryWindowUpdown?: [number, number]; entryWindowHourly?: [number, number]; includeSynthetic?: boolean; onRow?: (r: DatasetRow) => void } = {},
+  opts: { volProfile?: VolProfile; applyVolSeasonality?: boolean; volModel?: VolModel; entryWindowOnly?: boolean; calendar?: MacroEvent[]; entryWindowUpdown?: [number, number]; entryWindowHourly?: [number, number]; includeSynthetic?: boolean; onRow?: (r: DatasetRow) => void; /** A market to leave out before any feature is computed (a study's sample of contracts). */ skipMarket?: (m: RecMarket) => boolean } = {},
 ): Promise<DatasetRow[]> {
   const volProfile = opts.volProfile;
   const st = new ReplayState();
@@ -97,6 +97,7 @@ export async function buildDataset(
       if (m.recordOnly || (m.synthetic && !opts.includeSynthetic)) { if (st.now >= m.closeTime + 90_000) st.forget(m.ticker); continue; }
       if (st.now >= m.closeTime + 90_000) { flush(m); st.forget(m.ticker); continue; }
       if (st.now < m.openTime || st.now >= m.closeTime) continue;
+      if (opts.skipMarket?.(m)) continue;
       const book = st.books.get(m.ticker);
       const idx = st.index.get(m.asset);
       const bid = book?.bestBid();
