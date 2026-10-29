@@ -364,7 +364,11 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         sale: ('taker',) | ('rest', k ticks, 'fixed' | 'fv').  guard: None | G (a stop sale only when bid >= fv - G).
         extra: None | 'spot' (hold when spot still moves with us) | 'book' (hold when the top bid is 3x the top ask)
         | {'first_only': True} (a stop whose guard fails holds to settlement instead of trailing on).
-        sale ('any', m): sell the first second the bid pays fv + m, no trail. A guard G < 0 asks for bid >= fv + |G|."""
+        sale ('any', m): sell the first second the bid pays fv + m, no trail. A guard G < 0 asks for bid >= fv + |G|.
+        Steven's variants (Oct 29): sale ('anyscale', m0, a): sell any second the bid pays fv + m0 + a x (peak - lock); guard
+        ('scale', m0, a): a stop sale only when the bid pays fv + m0 + a x (peak - lock); sale ('wall', ratio, m0 | None): rest an
+        ask at the first top-of-book sell wall (ask size >= ratio x bid size and >= the position) that pays fv + m0, filled when
+        the bid reaches it (no fee)."""
         n, pay, bids, fv = p['n'], p['payout'], p['bids'], p['fv']
         last_taker = p['c_sec'] - window
         armed = lock[0] == 'armed'
@@ -419,6 +423,18 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             # sell into a stale-high bid: any second after the lock when the bid pays over the spot-implied fair value (no trail)
             if sale[0] == 'any' and q is not None and b >= q + sale[1] - 1e-9 and sec <= last_taker:
                 return (b - fee1(b, n), n, b, sec, True)
+            if sale[0] == 'anyscale' and q is not None and sec <= last_taker:
+                thr = sale[1] + sale[2] * max(0.0, peak - (floor if floor is not None else peak))
+                if b >= q + thr - 1e-9: return (b - fee1(b, n), n, b, sec, True)
+            # Steven's wall exit: rest an ask at a top-of-book sell wall that pays the premium; it fills when the bid reaches it
+            if sale[0] == 'wall':
+                if L is None:
+                    a_px, a_sz, b_sz = p['path']['asks'][i], p['path']['asz'][i], p['path']['bsz'][i]
+                    if a_px is not None and a_sz and b_sz is not None and a_sz >= sale[1] * max(b_sz, 1e-9) and a_sz >= n \
+                            and (sale[2] is None or (q is not None and a_px >= q + sale[2] - 1e-9)):
+                        L = a_px
+                if L is not None and b >= L - 1e-9:
+                    return (L, n, L, sec, True)
             # the stop
             trig = False
             if trail[0] in ('bid', 'vol') and stop is not None and b < stop - 1e-9: trig = True
@@ -428,7 +444,12 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 if under < confirm: continue
             elif confirm: under = 0
             if trig and sec <= last_taker:
-                if guard is not None and q is not None and b < q - guard - 1e-9:
+                if isinstance(guard, tuple) and guard[0] == 'scale':
+                    thr = guard[1] + guard[2] * max(0.0, peak - (floor if floor is not None else peak))
+                    if q is None or b < q + thr - 1e-9:
+                        if first_only: return (None, 0.0, None, None, True)
+                        continue
+                elif guard is not None and q is not None and b < q - guard - 1e-9:
                     if first_only: return (None, 0.0, None, None, True)
                     continue
                 if extra == 'spot':
@@ -558,6 +579,20 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         ('sell any second the bid >= fv + 2c, else hold', R(A, ('none',), ('any', 0.02))),
         ('sell any second the bid >= fv + 4c, else hold', R(A, ('none',), ('any', 0.04))),
         ('sell any second the bid >= fv + 2c, none in the last 120 s', R(A, ('none',), ('any', 0.02), None, 120)),
+        # v6: Steven's variants: keep checking the premium, scale it with the rise since the lock, rest at sell walls
+        ('Steven: sell any second the bid >= fv + 2c + 0.5 x the rise since the lock', R(A, ('none',), ('anyscale', 0.02, 0.5))),
+        ('Steven: sell any second the bid >= fv + 2c + 1 x the rise since the lock', R(A, ('none',), ('anyscale', 0.02, 1.0))),
+        ('Steven: sell any second the bid >= fv + 2c + 2 x the rise since the lock', R(A, ('none',), ('anyscale', 0.02, 2.0))),
+        ('Steven: sell any second the bid >= fv + 4c + 1 x the rise since the lock', R(A, ('none',), ('anyscale', 0.04, 1.0))),
+        ('Steven: at every dip (trail 1) sell if bid >= fv + 2c + 0.5 x the rise, else keep trailing', R(A, ('bid', 1), ('taker',), ('scale', 0.02, 0.5))),
+        ('Steven: at every dip (trail 1) sell if bid >= fv + 2c + 1 x the rise, else keep trailing', R(A, ('bid', 1), ('taker',), ('scale', 0.02, 1.0))),
+        ('Steven: at every dip (trail 2) sell if bid >= fv + 2c + 1 x the rise, else keep trailing', R(A, ('bid', 2), ('taker',), ('scale', 0.02, 1.0))),
+        ('first dip only (trail 1): sell if bid >= fv + 2c + 0.5 x the rise, else hold', R(A, ('bid', 1), ('taker',), ('scale', 0.02, 0.5), 0, {'first_only': True})),
+        ('Steven: rest an ask at a sell wall (ask 3x the bid, >= the position) paying fv + 2c', R(A, ('none',), ('wall', 3, 0.02))),
+        ('Steven: rest an ask at a sell wall (ask 5x the bid) paying fv + 2c', R(A, ('none',), ('wall', 5, 0.02))),
+        ('Steven: rest an ask at a sell wall (ask 3x the bid), any premium', R(A, ('none',), ('wall', 3, None))),
+        ('Steven: rest an ask at a sell wall (3x, fv + 2c) and trail 1 under the peak', R(A, ('bid', 1), ('wall', 3, 0.02))),
+        ('Steven: rest an ask at a sell wall (3x, fv + 2c), first-dip judgement (fv + 2c) else hold', R(A, ('bid', 1), ('wall', 3, 0.02), -0.02, 0, {'first_only': True})),
     ]
     table(pathsA, rulesA, 'A. from the actual locks', True)
 
