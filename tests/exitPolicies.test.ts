@@ -344,3 +344,49 @@ test('HUNT_LOCK_SALE at the trigger (default): the stop walks up as before; the 
   const later = at(exit, { sideBid: 0.61, now: 6000, b: up });
   assert.deepEqual([later.mode, later.event], ['fair_value', undefined], 'no second lock');
 });
+
+test('HUNT_WALL_ASK: the hunted position rests its sell at a top-of-book sell wall over fair value plus the margin, found once; the first-dip judgement still runs and cancels it on a hold', () => {
+  const at = (h: ConfluenceRatchetExit, o: { sideBid: number; confluence?: number; fvSide?: number; now: number; b: OrderBook }) =>
+    h.update({ position: 5, qSide: 0.55, sideBid: o.sideBid, confluence: o.confluence ?? 3, book: o.b, now: o.now, tick: 0.01, fees: DEFAULT_FEES, fvSide: o.fvSide });
+  const W = { ...H, lockSale: 'fair_value' as const, lockSaleFvMargin: 0.02, wallAsk: true, wallAskRatio: 3 };
+  const thin = book([[0.61, 6], [0.58, 30]], [[0.64, 10]]); // the 0.64 ask is under 3 x the 6 bid: no wall
+  const wall = book([[0.61, 6], [0.58, 30]], [[0.64, 20]]); // 20 >= 3 x 6 and >= the 5 held
+  const dip = book([[0.57, 30], [0.55, 10]], [[0.62, 10]]);
+
+  const h = new ConfluenceRatchetExit(W, P);
+  at(h, { sideBid: 0.5, confluence: 0, now: 0, b: thin });
+  const on = at(h, { sideBid: 0.61, fvSide: 0.6, now: 1000, b: thin });
+  assert.deepEqual([on.event, on.rest], ['activated', undefined], 'no wall yet');
+  const low = at(h, { sideBid: 0.61, fvSide: 0.63, now: 2000, b: wall });
+  assert.equal(low.rest, undefined, 'the wall at 0.64 is under fair value 0.63 + 2c');
+  const found = at(h, { sideBid: 0.61, fvSide: 0.6, now: 3000, b: wall });
+  assert.deepEqual([found.mode, found.event, found.rest, found.plan], ['hunt', 'wall_ask', 0.64, undefined]);
+  const kept = at(h, { sideBid: 0.61, fvSide: 0.6, now: 4000, b: thin });
+  assert.deepEqual([kept.event, kept.rest], ['ratcheted', 0.64], 'found once: the rest stays when the wall thins');
+  const held = at(h, { sideBid: 0.57, fvSide: 0.58, now: 5000, b: dip });
+  assert.deepEqual([held.event, held.rest, held.plan], ['lock_hold', undefined, undefined], 'the judgement cancels the resting sell');
+  assert.equal(at(h, { sideBid: 0.6, fvSide: 0.5, now: 6000, b: wall }).rest, undefined, 'nothing rests after the hold');
+
+  // sold at the first dip: the sale replaces the resting sell
+  const s = new ConfluenceRatchetExit(W, P);
+  at(s, { sideBid: 0.5, confluence: 0, now: 0, b: thin });
+  at(s, { sideBid: 0.61, fvSide: 0.6, now: 1000, b: wall });
+  assert.equal(at(s, { sideBid: 0.61, fvSide: 0.6, now: 4000, b: wall }).rest, 0.64);
+  const sold = at(s, { sideBid: 0.57, fvSide: 0.55, now: 5000, b: dip });
+  assert.deepEqual([sold.event, sold.plan?.price, sold.rest], ['lock_sale', 0.57, undefined]);
+
+  // long NO: the wall is a YES bid, read in NO terms
+  const no = new ConfluenceRatchetExit(W, P);
+  const atNo = (o: { sideBid: number; confluence?: number; fvSide?: number; now: number; b: OrderBook }) =>
+    no.update({ position: -5, qSide: 0.55, sideBid: o.sideBid, confluence: o.confluence ?? -3, book: o.b, now: o.now, tick: 0.01, fees: DEFAULT_FEES, fvSide: o.fvSide });
+  const noWall = book([[0.36, 20]], [[0.39, 6], [0.42, 30]]); // NO bid 0.61 (6), NO ask 0.64 (20)
+  atNo({ sideBid: 0.5, confluence: 0, now: 0, b: noWall });
+  atNo({ sideBid: 0.61, fvSide: 0.6, now: 1000, b: noWall });
+  assert.equal(atNo({ sideBid: 0.61, fvSide: 0.6, now: 2000, b: noWall }).rest, 0.64);
+
+  // off: nothing rests
+  const off = new ConfluenceRatchetExit({ ...H, lockSale: 'fair_value' as const }, P);
+  at(off, { sideBid: 0.5, confluence: 0, now: 0, b: thin });
+  at(off, { sideBid: 0.61, fvSide: 0.6, now: 1000, b: wall });
+  assert.equal(at(off, { sideBid: 0.61, fvSide: 0.6, now: 2000, b: wall }).rest, undefined);
+});

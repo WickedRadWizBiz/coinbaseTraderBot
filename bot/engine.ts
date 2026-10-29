@@ -2125,6 +2125,7 @@ export class Engine {
     // its entry fair value AND confluence agrees with the position.
     let huntMode = false;
     let huntPlan: OrderPlan | undefined;
+    let huntRest: number | undefined;
     let huntProtective = false;
     let huntHeld: string | undefined;
     // Hunt mode is evaluated by research:backtest --annotate. With a passing evaluation the winning
@@ -2138,9 +2139,9 @@ export class Engine {
       if (!h) {
         const S = cfg.strategy;
         h = vh
-          ? new ConfluenceRatchetExit({ targetMargin: vh.targetMargin * this.snnTargetScale(), minConfluence: vh.minConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap, lockSale: S.huntLockSale, lockSaleFvMargin: S.huntLockSaleFvMargin, lockSaleElse: S.huntLockSaleElse, lockSaleAt: S.huntLockSaleAt }, { minFillRatio: vh.minFillRatio, minWallAgeMs: vh.minWallAgeMs, slippageTicks: vh.slippageTicks })
+          ? new ConfluenceRatchetExit({ targetMargin: vh.targetMargin * this.snnTargetScale(), minConfluence: vh.minConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap, lockSale: S.huntLockSale, lockSaleFvMargin: S.huntLockSaleFvMargin, lockSaleElse: S.huntLockSaleElse, lockSaleAt: S.huntLockSaleAt, wallAsk: S.huntWallAsk, wallAskRatio: S.huntWallAskRatio }, { minFillRatio: vh.minFillRatio, minWallAgeMs: vh.minWallAgeMs, slippageTicks: vh.slippageTicks })
           : new ConfluenceRatchetExit(
-            { targetMargin: S.huntTargetMargin * this.snnTargetScale(), minConfluence: S.huntMinConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap, lockSale: S.huntLockSale, lockSaleFvMargin: S.huntLockSaleFvMargin, lockSaleElse: S.huntLockSaleElse, lockSaleAt: S.huntLockSaleAt },
+            { targetMargin: S.huntTargetMargin * this.snnTargetScale(), minConfluence: S.huntMinConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap, lockSale: S.huntLockSale, lockSaleFvMargin: S.huntLockSaleFvMargin, lockSaleElse: S.huntLockSaleElse, lockSaleAt: S.huntLockSaleAt, wallAsk: S.huntWallAsk, wallAskRatio: S.huntWallAskRatio },
             { minFillRatio: S.ratchetMinFillRatio, minWallAgeMs: S.ratchetMinWallAgeSec * 1000, slippageTicks: S.ratchetSlippageTicks },
           );
         this.hunts.set(m.ticker, h);
@@ -2154,11 +2155,12 @@ export class Engine {
         sessionBlocked: cfg.strategy.huntSessionGuard ? huntBlockedBySession(sess, cfg.strategy.huntTransitionBufferMin) : undefined,
       });
       huntMode = d.mode === 'hunt';
+      huntRest = d.rest;
       st.exitMode = d.mode;
       st.huntTarget = d.target;
       st.huntStop = d.stop;
       if (d.event && d.event !== 'armed' && ((d.event !== 'hybrid_hold' && d.event !== 'gapped') || st.huntEvent !== d.event)) {
-        this.d.audit.write('decision', { ticker: m.ticker, huntEvent: d.event, target: d.target, stop: d.stop, position: st.position, confCount: features.conf_count, pYes });
+        this.d.audit.write('decision', { ticker: m.ticker, huntEvent: d.event, target: d.target, stop: d.stop, rest: d.rest, position: st.position, confCount: features.conf_count, pYes });
       }
       st.huntEvent = d.event;
       if (d.plan && view.exitWindowOpen === false) {
@@ -2180,6 +2182,7 @@ export class Engine {
       kellyFraction: tier.kellyFraction * kellyScale,
     };
     st.q = decisionProbability(view, strat);
+    if (huntRest !== undefined) view.huntRestSidePrice = huntRest;
     const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode, entries: Boolean(reason) });
     // The MLP decides whether each entry is worth taking (take/skip head, once validated).
     if (S.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: S.takeMargin, fees: md.feesFor(m.ticker) });
@@ -2387,7 +2390,7 @@ export class Engine {
     // Rest mode: an exit that crosses the book also cancels the position's resting curve sell on its side (a resting
     // order cannot be reduce-only on Kalshi; together they could sell more than is held); the next evaluation rests one
     // again for what is left.
-    const restMode = this.d.curveExit?.p.mode === 'rest';
+    const restMode = this.d.curveExit?.p.mode === 'rest' || huntMode;
     for (const p of plan.place) {
       if (!p.reduceOnly || p.timeInForce !== 'immediate_or_cancel') continue;
       for (const o of this.crossingOwnOrders(m.ticker, p.side, p.price)) {

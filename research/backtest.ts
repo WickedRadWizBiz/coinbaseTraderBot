@@ -769,6 +769,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const sess = sessionState(st.now);
       const sessRisk = sessionRiskFor(opts.sessionRisk ?? {}, sess);
       let huntMode = false;
+      let huntRest: number | undefined;
       if (policy === 'confluence_ratchet') {
         const posH = pos.position(m.ticker);
         let h = hunts.get(m.ticker);
@@ -780,6 +781,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           sessionBlocked: (opts.huntSessionGuard ?? true) ? huntBlockedBySession(sess, opts.huntTransitionBufferMin ?? 10) : undefined,
         });
         huntMode = d.mode === 'hunt';
+        huntRest = d.rest;
         if (d.event === 'activated') exits.huntActivations++;
         if (d.event === 'deactivated_giveback') exits.huntDeactivations++;
         if (d.event === 'profit_take_confluence' || d.event === 'profit_take_session' || d.event === 'profit_take_gap') exits.huntProfitTakes++;
@@ -843,6 +845,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         entryFeePerContract: pNow && Math.abs(pNow.yes) > 1e-9 ? pNow.fees / Math.abs(pNow.yes) : undefined,
         profitPeakSidePrice: peaks.update(m.ticker, posC, posC > 0 ? bid.price : posC < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
         entryWindowOpen, exitWindowOpen: tauSec > strategy.noExitBeforeCloseSec,
+        ...(huntRest !== undefined ? { huntRestSidePrice: huntRest } : {}),
       };
       const strat = { ...stratRun, kellyFraction: tier.kellyFraction * sizeScale, minEdge: Math.max(0, strategy.minEdge + sessRisk.minEdgeAdd + dynamicEdge(strategy.dynamicEdge, mRead, pred.std).add), inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult };
       const plan = decide(view, strat, {
@@ -1005,6 +1008,7 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
     hybrid: argOf('hunt-hybrid', '0') === '1', sellIntoGap: argOf('hunt-sell-into-gap', '1') === '1',
     lockSale: argOf('hunt-lock-sale', 'fair_value') as 'off' | 'fair_value' | 'flow' | 'either' | 'both', lockSaleFvMargin: Number(argOf('hunt-lock-sale-fv-margin', '0.02')), lockSaleElse: argOf('hunt-lock-sale-else', 'hold') as 'hold' | 'exit',
     lockSaleAt: argOf('hunt-lock-sale-at', 'trigger') as 'lock' | 'trigger',
+    wallAsk: argOf('hunt-wall-ask', '0') === '1', wallAskRatio: Number(argOf('hunt-wall-ask-ratio', '3')),
   };
   // Hunt mode is evaluated over a parameter grid (target margin x wall fill ratio); every variant
   // counts toward the Deflated Sharpe.

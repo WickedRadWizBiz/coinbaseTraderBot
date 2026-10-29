@@ -65,6 +65,9 @@ export interface MarketView {
   /** Exit curve rest mode: the side price at which the held position's sell rests (the curve's swing-top estimate).
    *  Undefined = no resting curve sell. */
   curveRestSidePrice?: number;
+  /** Hunt mode's sell-wall ask (HUNT_WALL_ASK, bot/strategy/exitPolicies.ts): the side price at which the hunted position's
+   *  sell rests, joined behind a top-of-book sell wall. Undefined = none. Placed while the hunt blocks every other reduction. */
+  huntRestSidePrice?: number;
   maxContracts: number;
   minSidePrice: number;
   tauSec: number;
@@ -306,6 +309,23 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
   if (opts.blockReductions) {
     if (v.position > 0) desiredAsk = undefined;
     if (v.position < 0) desiredBid = undefined;
+  }
+  // Hunt mode's sell-wall ask (HUNT_WALL_ASK, bot/strategy/exitPolicies.ts): the hunted position's sell rests at the sell
+  // wall's price (joined behind it, post-only, sized to the position) in the held side's quote slot, the one reduction a hunt
+  // allows; pulled like the curve sell when an exit crosses the book this tick, and when the hunt stops asking for it.
+  if (quoting && opts.blockReductions && v.huntRestSidePrice !== undefined && v.position !== 0) {
+    const exiting = out.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel');
+    const n = round(Math.abs(v.position), 2);
+    const why = (sidePx: number, no: string) => `confluence ratchet wall ask${no} ${sidePx} (rests behind the sell wall at ${v.huntRestSidePrice!.toFixed(2)})`;
+    if (v.position > 0) {
+      const ap = Math.max(ceilToTick(v.huntRestSidePrice, tick), round(bid!.price + tick, 4));
+      desiredAsk = !exiting && ap < 1 ? { side: 'ask', price: ap, count: n, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, purpose: 'exit', expirationTime: v.closeSec - 1, edge: ap - q, why: why(ap, '') } : undefined;
+      restSide = 'ask';
+    } else {
+      const bp = Math.min(floorToTick(1 - v.huntRestSidePrice, tick), round(ask!.price - tick, 4));
+      desiredBid = !exiting && bp > 0 ? { side: 'bid', price: bp, count: n, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, purpose: 'exit', expirationTime: v.closeSec - 1, edge: q - bp, why: why(round(1 - bp, 4), ' NO') } : undefined;
+      restSide = 'bid';
+    }
   }
   reconcileQuote(v.restingBid, desiredBid, cfg.requoteThreshold, v.nowSec, out, restSide === 'bid');
   reconcileQuote(v.restingAsk, desiredAsk, cfg.requoteThreshold, v.nowSec, out, restSide === 'ask');
