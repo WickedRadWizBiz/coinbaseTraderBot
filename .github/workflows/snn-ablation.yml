@@ -8,6 +8,11 @@
 name: SNN ablation
 
 on:
+  # A push of this file or the ablation code on its development branch runs it with the defaults (a dispatch needs
+  # the file on main first).
+  push:
+    branches: ['claude/project-thread-jwz96h']
+    paths: ['.github/workflows/snn-ablation.yml', 'research/snnAblation.ts']
   workflow_dispatch:
     inputs:
       only:
