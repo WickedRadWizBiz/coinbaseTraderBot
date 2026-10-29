@@ -50,9 +50,9 @@ export interface StudyReport {
   from: string; to: string; assets: string[];
   replay: { days: number; synthetic: number; kalshiDays: number };
   rows: { total: number; kept: number; synthetic: number; real: number; windows: number };
-  phase1: { cv: TrainReport['cv']; base?: TrainReport['cv'][number]; selected: TrainReport['selected']; holdout: TrainReport['holdout'];
+  phase1: { cv: TrainReport['cv']; base?: TrainReport['cv'][number]; selected: TrainReport['selected']; holdout: TrainReport['holdout']; dropped: TrainReport['dropped'];
     /** Each set's out-of-fold edge over 'base' in standard errors of its own log loss (> 1 earns its place). */
-    edge: Array<{ set: string; model: string; dLogLoss: number; se: number; sigma: number }> };
+    edge: Array<{ set: string; model: string; features: number; dLogLoss: number; se: number; sigma: number }> };
   phase2?: { rows: number; windows: number; logLoss: { model: number; fairValue: number; mid: number }; dm: ReturnType<typeof dieboldMariano>;
     stack: StackFit };
 }
@@ -129,10 +129,14 @@ export async function taContractStudyMain(): Promise<StudyReport> {
   // 4. Phase 1: the trainer, trees only, one configuration per set; no take model, no Student-t search.
   const t = await trainMetaModel(synthRows, { sets, families: ['gbdt'], takeModel: false, ensemble: 1, cpcvGroups: 0, fixedNu: null, depths: [2, 3], log: (m) => log(`train: ${m}`) });
   const base = t.cv.filter((c) => c.set === 'base').sort((a, b) => a.oosLogLoss - b.oosLogLoss)[0];
-  const edge = t.cv.map((c) => ({ set: c.set, model: c.model, dLogLoss: base ? base.oosLogLoss - c.oosLogLoss : NaN, se: c.se, sigma: base && c.se > 0 ? (base.oosLogLoss - c.oosLogLoss) / c.se : NaN }));
+  const edge = t.cv.map((c) => ({ set: c.set, model: c.model, features: c.features, dLogLoss: base ? base.oosLogLoss - c.oosLogLoss : NaN, se: c.se, sigma: base && c.se > 0 ? (base.oosLogLoss - c.oosLogLoss) / c.se : NaN }));
   console.table(edge.map((e) => ({ ...e, dLogLoss: +e.dLogLoss.toFixed(5), se: +e.se.toFixed(5), sigma: +e.sigma.toFixed(2) })));
+  // A set missing from the table resolved to another set's features once its mostly-missing inputs were dropped.
+  for (const [set, names] of Object.entries(t.dropped)) log(`train: dropped from ${set}: ${names.length} input(s): ${names.slice(0, 12).join('; ')}${names.length > 12 ? '; ...' : ''}`);
+  const present = (name: string) => synthRows.filter((r) => Number.isFinite(r.fx[name])).length / synthRows.length;
+  log(`inputs present in synthetic rows: ${['ta_rsi_1h', 'ta_rsi_15m', 'ta_ema_stack_1h', 'taconf_net_trend', 'taconf_mtf_momentum', 'conf_count', 'ret_1h_z', 'tanet_up_1h'].map((n) => `${n} ${(present(n) * 100).toFixed(0)}%`).join(', ')}`);
   log(`phase 1: selected ${t.selected.set} / ${t.selected.model} (${t.selected.rule}); holdout log loss model ${t.holdout.logLossModel.toFixed(5)} vs fair value ${t.holdout.logLossMarket.toFixed(5)} over ${t.holdout.nWindows} windows (Brier ${t.holdout.brierModel.toFixed(5)} vs ${t.holdout.brierFairValue.toFixed(5)})`);
-  const report: StudyReport = { from, to, assets, replay: { ...rep, kalshiDays }, rows: { total, kept: rows.length, synthetic: synthRows.length, real: realRows.length, windows }, phase1: { cv: t.cv, base, selected: t.selected, holdout: t.holdout, edge } };
+  const report: StudyReport = { from, to, assets, replay: { ...rep, kalshiDays }, rows: { total, kept: rows.length, synthetic: synthRows.length, real: realRows.length, windows }, phase1: { cv: t.cv, base, selected: t.selected, holdout: t.holdout, dropped: t.dropped, edge } };
 
   // 5. Phase 2: the chosen model on Kalshi's real contracts, against the mid; then the stack.
   if (realRows.length >= 500) {
