@@ -607,6 +607,9 @@ export interface SnnConfig {
   /** Conservative-only dynamic target scaling (hunt take-profit distance), one step per 15 min. */
   targetScaling: boolean;
   deferred: { wilsonCowan: boolean; gapJunctions: boolean; izhikevichCH: boolean; dcaap: boolean };
+  /** SNN_ANCHOR_MID: the contract readouts start from the market's mid and learn the correction (bot/snn/network.ts
+   *  anchorLogit); a new version hash, so the networks start fresh when it flips. */
+  anchorMid: boolean;
   /** Tennis: run three networks live and keep the fittest (population-based training). */
   tennisPopulation: boolean;
   /** Graded matches between live tournament rounds. */
@@ -1452,6 +1455,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         };
       })(),
       crossFeed: bool(env, 'SNN_CROSS_FEED', false),
+      anchorMid: bool(env, 'SNN_ANCHOR_MID', false),
       deferred: {
         wilsonCowan: bool(env, 'SNN_WILSON_COWAN', false),
         gapJunctions: bool(env, 'SNN_GAP_JUNCTIONS', false),

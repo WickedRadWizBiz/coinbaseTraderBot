@@ -23,7 +23,7 @@ import { blend, brier, calibrationSlope, correlation, surpriseConfidence } from 
 import { DEFAULT_SNN, domainParams, stageFlags, type SnnFlags, type SnnParams, type Stage } from '../bot/snn/params';
 import { replaySnn, type SnnReplayResult, type SnnRow } from './snnReplay';
 
-export interface Mechanism { name: string; candidate: { stage: Stage; flags?: Partial<SnnFlags> }; baseline: { stage: Stage; flags?: Partial<SnnFlags> }; note: string }
+export interface Mechanism { name: string; candidate: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams> }; baseline: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams> }; note: string }
 
 /** The staging order and each stage's comparison (S0..S6, then the deferred mechanisms vs proxies). */
 export const MECHANISMS: Mechanism[] = [
@@ -38,6 +38,7 @@ export const MECHANISMS: Mechanism[] = [
   { name: 'gap junctions', candidate: { stage: 'S5', flags: { gapJunctions: true } }, baseline: { stage: 'S5', flags: { proxies: true } }, note: 'vs BTC-ETH correlation feature' },
   { name: 'Izhikevich CH', candidate: { stage: 'S5', flags: { izhikevichCH: true } }, baseline: { stage: 'S5', flags: { proxies: true } }, note: 'vs delta-spike burst counter' },
   { name: 'dCaAP units', candidate: { stage: 'S5', flags: { dcaap: true } }, baseline: { stage: 'S5' }, note: 'vs 2-branch Poirazi XOR' },
+  { name: 'mid-anchored readout', candidate: { stage: 'S5', params: { anchorMid: true } }, baseline: { stage: 'S5' }, note: 'logit p = logit(mid) + w . phi, weights from zero, vs the readout that prices from scratch (SNN plan phase 1)' },
 ];
 
 export const MAX_GRID = 20;
@@ -179,9 +180,9 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
     if (only && !m.name.startsWith(only)) continue;
     const configs = grid[m.name] ?? [{}];
     if (configs.length > MAX_GRID) throw new Error(`${m.name}: ${configs.length} configs exceed the pre-registered cap of ${MAX_GRID}`);
-    const base = await run(`${m.name} [baseline]`, m.baseline.stage, m.baseline.flags, {});
+    const base = await run(`${m.name} [baseline]`, m.baseline.stage, m.baseline.flags, { ...(m.baseline.params ?? {}) });
     const tried: { res: SnnReplayResult; sum: RunSummary }[] = [];
-    for (const ov of configs) tried.push(await run(m.name, m.candidate.stage, m.candidate.flags, ov));
+    for (const ov of configs) tried.push(await run(m.name, m.candidate.stage, m.candidate.flags, { ...(m.candidate.params ?? {}), ...ov }));
     const best = tried.sort((a, b) => a.sum.brier - b.sum.brier)[0];
     const v = judge(m, best.res, base.res, best.sum, base.sum, tried.map((t) => t.sum));
     verdicts.push(v);
