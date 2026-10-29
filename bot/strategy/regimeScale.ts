@@ -8,7 +8,9 @@
 //            model's history fits it least
 //   corr     1 / (1 + k x max(0, correlation) x other coins held): positions on coins that move together are one bet
 //
-// The product stays within [REGIME_SCALE_MIN, REGIME_SCALE_MAX] (max 1 by default: it only shrinks). Every weight is 0
+// Above 1 the product counts at REGIME_UP_WEIGHT (0.5): size grows at about half the weight it shrinks with (Steven,
+// Oct 28: "it can scale risk up, just perhaps about half or more the weight"). The result stays within
+// [REGIME_SCALE_MIN 0.25, REGIME_SCALE_MAX 1.5], inside the hard caps, which never move. Every weight is 0
 // by default, so nothing changes until the sweep (research/randomSweep.ts) accepts settings that earn more. A reading
 // the market state does not have yet leaves its part at 1.
 import type { MarketStateReading } from '../marketdata/marketState';
@@ -19,9 +21,11 @@ export interface RegimeScaleParams {
   corrDerisk: number;
   min: number;
   max: number;
+  /** Share of a rise above 1 that counts (shrinking counts in full). */
+  upWeight: number;
 }
 
-export const REGIME_SCALE_OFF: RegimeScaleParams = { volTarget: 0, changeDerisk: 0, corrDerisk: 0, min: 0.25, max: 1 };
+export const REGIME_SCALE_OFF: RegimeScaleParams = { volTarget: 0, changeDerisk: 0, corrDerisk: 0, min: 0.25, max: 1.5, upWeight: 0.5 };
 
 export interface RegimeScale {
   mult: number;
@@ -37,7 +41,9 @@ export function regimeScale(p: RegimeScaleParams, r: MarketStateReading | undefi
     corr: p.corrDerisk && ok(r?.correlation) ? 1 / (1 + p.corrDerisk * Math.max(0, r!.correlation!) * Math.max(0, otherCoinsHeld)) : 1,
   };
   const raw = parts.vol * parts.change * parts.corr;
-  return { mult: raw === 1 ? 1 : Math.max(p.min, Math.min(p.max, raw)), parts };
+  if (raw === 1) return { mult: 1, parts };
+  const damped = raw > 1 ? 1 + p.upWeight * (raw - 1) : raw;
+  return { mult: Math.max(p.min, Math.min(p.max, damped)), parts };
 }
 
 export const regimeScaleOn = (p: RegimeScaleParams) => p.volTarget !== 0 || p.changeDerisk !== 0 || p.corrDerisk !== 0;

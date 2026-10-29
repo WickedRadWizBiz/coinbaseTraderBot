@@ -1009,7 +1009,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       changeDerisk: num(env, 'REGIME_CHANGE_DERISK', 0, 0, 1),
       corrDerisk: num(env, 'REGIME_CORR_DERISK', 0, 0, 2),
       min: num(env, 'REGIME_SCALE_MIN', 0.25, 0, 1),
-      max: num(env, 'REGIME_SCALE_MAX', 1, 1, 2),
+      max: num(env, 'REGIME_SCALE_MAX', 1.5, 1, 2),
+      upWeight: num(env, 'REGIME_UP_WEIGHT', 0.5, 0, 1),
     },
     // 20 s: a quote the bot stops tending is gone from the exchange within 20 s. Re-placing the ones still wanted costs
     // orders, which RISK_MAX_ORDERS_PER_MIN (120) now has room for.

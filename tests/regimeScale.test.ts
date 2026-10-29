@@ -29,10 +29,12 @@ test('vol targeting, change-point de-risk and correlated coins each shrink the s
   assert.equal(all.mult, 0.25);
 });
 
-test('calm market sizes up only when the max allows it; missing readings leave size alone', () => {
+test('calm market sizes up at half weight within the max; missing readings leave size alone', () => {
   const calm = reading({ rv15m: 1e-4, rv6h: 4e-4 });
-  assert.equal(regimeScale({ ...REGIME_SCALE_OFF, volTarget: 0.5 }, calm, 0).mult, 1);
-  assert.equal(regimeScale({ ...REGIME_SCALE_OFF, volTarget: 0.5, max: 1.5 }, calm, 0).mult, 1.5);
+  // (4)^0.5 = 2: the rise counts at half weight, 1 + 0.5 x 1 = 1.5; capped by the max.
+  assert.equal(regimeScale({ ...REGIME_SCALE_OFF, volTarget: 0.5 }, calm, 0).mult, 1.5);
+  assert.equal(regimeScale({ ...REGIME_SCALE_OFF, volTarget: 0.5, max: 1.2 }, calm, 0).mult, 1.2);
+  assert.equal(regimeScale({ ...REGIME_SCALE_OFF, volTarget: 0.5, max: 1 }, calm, 0).mult, 1, 'max 1: only shrinks');
   const none = reading({ rv15m: null, rv6h: null, changeProb: null, correlation: null });
   assert.equal(regimeScale({ ...REGIME_SCALE_OFF, volTarget: 1, changeDerisk: 1, corrDerisk: 1 }, none, 4).mult, 1);
 });
