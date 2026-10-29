@@ -987,9 +987,15 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     // 20 s: a quote the bot stops tending is gone from the exchange within 20 s. Re-placing the ones still wanted costs
     // orders, which RISK_MAX_ORDERS_PER_MIN (120) now has room for.
     orderTtlSec: num(env, 'STRATEGY_ORDER_TTL_SEC', 20, 10, 900),
-    // Sell for profit once the bid beats the model's value, and let winners run on the confluence ratchet.
-    exitPolicy: oneOf(env, 'EXIT_POLICY', 'confluence_ratchet', ['hold', 'fair_value', 'take_profit', 'confluence_ratchet'] as const),
-    exitMargin: num(env, 'STRATEGY_EXIT_MARGIN', 0.01, 0, 0.5),
+    // The fallback exit is the model exit at a 4c margin. On the recorded days (Oct 27, 27 h; Oct 28, 7.9 h) every form of the
+    // ratchet stop trailed holding to settlement by $70 to $125 on the same entries (its sales locked a few cents on contracts
+    // that then paid $1 86% of the time), while the model exit at this margin came out level with holding: it sells only where
+    // the market pays well above the model's value and lets the rest settle, fee-free. The other policies stay for the
+    // per-trade exit chooser to pick from.
+    exitPolicy: oneOf(env, 'EXIT_POLICY', 'fair_value', ['hold', 'fair_value', 'take_profit', 'confluence_ratchet'] as const),
+    // 4c: the per-sale study found the model exit's 1 to 2c disagreements sold where the market was right (the model's own error
+    // at exit time is about that size), so a smaller margin sells on noise and pays the taker fee for it.
+    exitMargin: num(env, 'STRATEGY_EXIT_MARGIN', 0.04, 0, 0.5),
     takeProfit: num(env, 'STRATEGY_TAKE_PROFIT', 0.08, 0.01, 0.5),
     // Take-profit (owner's spec, Oct 22): winners run. Armed at 10% of what the contract cost (at least 2c) net of every
     // fee, then sold when a third of the best gain is given back, never below that floor.
