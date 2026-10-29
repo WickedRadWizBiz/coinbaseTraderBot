@@ -49,3 +49,50 @@ export class SpotBookService {
     return book;
   }
 }
+
+/** Records the spot book (top `depth` levels a side) of each coin every `everyMs` as a 'spot_book' recording line
+ *  ({asset, b: [[price, size]...], a: [...]}, best first). One request at a time, spread over the period (Coinbase's
+ *  public limit is 10 a second); a product Coinbase does not list (404) is not asked again for an hour. */
+export class SpotBookRecorder {
+  private timer?: NodeJS.Timeout;
+  private readonly skipUntil = new Map<string, number>();
+  private running = false;
+
+  constructor(
+    private readonly assets: () => string[],
+    private readonly write: (asset: string, book: SpotBook) => void,
+    private readonly everyMs: number,
+    private readonly books: SpotBookService,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  start(): void {
+    if (this.everyMs > 0 && !this.timer) { this.timer = setInterval(() => void this.round(), this.everyMs); this.timer.unref(); }
+  }
+
+  stop(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
+
+  /** One pass over the coins (exposed for tests). */
+  async round(): Promise<number> {
+    if (this.running) return 0;
+    this.running = true;
+    let n = 0;
+    try {
+      for (const asset of this.assets()) {
+        if ((this.skipUntil.get(asset) ?? 0) > this.now()) continue;
+        try {
+          this.write(asset, await this.books.get(asset));
+          n++;
+        } catch (e) {
+          if (String(e).includes('HTTP 404')) this.skipUntil.set(asset, this.now() + 3_600_000);
+        }
+      }
+    } finally { this.running = false; }
+    return n;
+  }
+}
+
+/** A book as a compact recording line: [[price, size]...] per side, best first. */
+export function spotBookLine(asset: string, b: SpotBook): Record<string, unknown> {
+  return { asset, b: b.bids.map((l) => [l.price, l.size]), a: b.asks.map((l) => [l.price, l.size]), ts: b.ts };
+}
