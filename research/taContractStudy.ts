@@ -104,8 +104,9 @@ export async function taContractStudyMain(): Promise<StudyReport> {
   const to = arg('to', new Date(Date.now() - 2 * DAY).toISOString().slice(0, 10));
   const from = arg('from', new Date(Date.parse(to) - 120 * DAY).toISOString().slice(0, 10));
   const sets = arg('sets', STUDY_SETS.join(',')).split(',');
-  // Rows in memory (about 14 KB each): past this, each contract's snapshots are thinned evenly (readDataset).
-  const maxRows = Number(arg('max-rows', '250000'));
+  // Rows in memory: past this, each contract's snapshots are thinned evenly (readDataset), never below one a contract.
+  // 193k rows of 111 inputs fit the runner's 12 GB heap; 250k did not (a year of five coins with Kalshi's contracts).
+  const maxRows = Number(arg('max-rows', '150000'));
   // Contracts kept (a deterministic share by ticker hash): a year of five coins makes ~175k contracts, and a row is kept
   // for each of them, so this caps the rows a run reads back into memory (the trainer weights contracts equally anyway).
   const maxContracts = Number(arg('max-contracts', '60000'));
@@ -156,8 +157,10 @@ export async function taContractStudyMain(): Promise<StudyReport> {
     }
     return k;
   };
-  // Synthetic 15-minute contracts expected: one a quarter hour per coin over the replayed days.
-  const expectedContracts = Math.max(1, Math.round((Date.parse(to) - Date.parse(from)) / DAY + 1) * 96 * assets.length);
+  // Synthetic 15-minute contracts expected: one a quarter hour per coin over every replay day on disk (the dataset reads
+  // them all, not only this run's from..to: a cache carries earlier blocks).
+  const replayDays = fs.existsSync(replay) ? fs.readdirSync(replay).filter((f) => /^md-\d{4}-\d{2}-\d{2}\.jsonl(\.gz)?$/.test(f)).length : 0;
+  const expectedContracts = Math.max(1, Math.max(replayDays, Math.round((Date.parse(to) - Date.parse(from)) / DAY + 1)) * 96 * assets.length);
   const fd = fs.openSync(`${file}.tmp`, 'w');
   let buf: string[] = [];
   const drain = () => { if (buf.length) { fs.writeSync(fd, buf.join('')); buf = []; } };
@@ -178,7 +181,7 @@ export async function taContractStudyMain(): Promise<StudyReport> {
     drain();
   } finally { fs.closeSync(fd); }
   fs.renameSync(`${file}.tmp`, file);
-  log(`rows: ${total} (${synth} synthetic, ${total - synth} real) over ${from}..${to}; ${contracts} synthetic contracts kept, ${skippedContracts} left out (max ${maxContracts}); ${keep.size} inputs a row`);
+  log(`rows: ${total} (${synth} synthetic, ${total - synth} real) over ${replayDays} replay day(s); ${contracts} synthetic contracts kept, ${skippedContracts} left out (max ${maxContracts}); ${keep.size} inputs a row`);
   const { rows } = await readDataset(file, maxRows > 0 ? maxRows : Infinity);
   const synthRows = rows.filter((r) => r.synthetic), realRows = rows.filter((r) => !r.synthetic);
   const windows = new Set(rows.map((r) => r.window)).size;
