@@ -253,7 +253,7 @@ def selftest(path):
     print(json.dumps({'readings': out, 'fees': fees, 'line': line}))
 
 
-def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee):
+def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades=None):
     """1e. Information-anchored ratchets on the recorded paths: the price trail with guards (fair value, spot momentum, the
     book's top), trails on the spot-implied fair value, resting (maker, fee-free) profit sales, and the same from entry
     with the policy's own lock. Dollars against holding the same contracts to settlement."""
@@ -310,6 +310,27 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
 
     def fee1(px, n): return taker_fee(n, px) / n if n > 0 and 0 < px < 1 else 0.0
 
+    trade_secs = {t: [x[0] for x in v] for t, v in (trades or {}).items()}
+
+    def flow(ep, sec, win=60):
+        """Net taker contracts on the held side over the last `win` s (+ = buyers lifting our side): None without a tape."""
+        v = (trades or {}).get(ep['ticker'])
+        if not v: return None
+        ss = trade_secs[ep['ticker']]
+        i0 = bisect.bisect_left(ss, sec - win); i1 = bisect.bisect_right(ss, sec)
+        if i1 <= i0: return 0.0
+        mine = 'yes' if ep['sign'] > 0 else 'no'
+        return sum((x[2] if x[1] == mine else -x[2]) for x in v[i0:i1])
+
+    def bid_std(path, i, win=120):
+        """Realized standard deviation of the side bid's one-second changes over the last `win` s (the contract's own noise)."""
+        xs = [b for b in path['bids'][max(0, i - win):i + 1] if b is not None]
+        if len(xs) < 20: return None
+        d = [b - a for a, b in zip(xs, xs[1:]) if abs(b - a) > 1e-12]
+        if len(d) < 5: return None
+        m = sum(d) / len(d)
+        return math.sqrt(sum((x - m) ** 2 for x in d) / (len(d) - 1))
+
     def build_path(ep, s0, c_sec):
         """Per-second series from s0 to c_sec: side bid, its size, side ask, its size, spot-implied side fair value, spot."""
         bids, bsz, asks, asz, fvs, spots = [], [], [], [], [], []
@@ -345,6 +366,8 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         n, pay, bids, fv = p['n'], p['payout'], p['bids'], p['fv']
         last_taker = p['c_sec'] - window
         armed = lock[0] == 'armed'
+        confirm = (extra or {}).get('confirm', 0) if isinstance(extra, dict) else 0
+        under = 0  # seconds running under the stop
         floor = p.get('floor')
         b0 = p['b0']; q0 = p['q0']
         peak = None; qpeak = None; stop = None; qstop = None; L = None
@@ -360,10 +383,21 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                     floor = b
                 else:
                     continue
-            if peak is None: peak = max(b, floor or 0.0)
+            if peak is None:
+                peak = max(b, floor or 0.0)
+                # sell at the lock when the market pays over the spot-implied fair value (into strength)
+                if sale[0] == 'lock':
+                    if q is not None and b >= q + sale[1] - 1e-9 and sec <= last_taker: return (b - fee1(b, n), n, b, sec, True)
+                    if q is None or sale[2] == 'else_hold': return (None, 0.0, None, None, True)
+                    # else: carry on with the trail given in `trail`
             if b > peak + 1e-9: peak = b
             if q is not None and (qpeak is None or q > qpeak): qpeak = q
             if trail[0] == 'bid': stop = max(floor or 0.0, peak - trail[1] * TICK)
+            elif trail[0] == 'vol':
+                sd = bid_std(p['path'], i)
+                w = max(TICK, trail[1] * (sd if sd else TICK))
+                cand = max(floor or 0.0, peak - w)
+                stop = cand if stop is None else max(stop, cand)
             elif trail[0] == 'fv' and qpeak is not None: qstop = qpeak - trail[1]
             # the resting sale: an ask at L, lifted (no fee) when the bid reaches it
             if sale[0] == 'rest':
@@ -376,8 +410,12 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                     return (L, n, L, sec, True)
             # the stop
             trig = False
-            if trail[0] == 'bid' and stop is not None and b < stop - 1e-9: trig = True
+            if trail[0] in ('bid', 'vol') and stop is not None and b < stop - 1e-9: trig = True
             if trail[0] == 'fv' and qstop is not None and q is not None and q < qstop - 1e-9: trig = True
+            if trig and confirm:
+                under += 1
+                if under < confirm: continue
+            elif confirm: under = 0
             if trig and sec <= last_taker:
                 if guard is not None and q is not None and b < q - guard - 1e-9: continue
                 if extra == 'spot':
@@ -386,6 +424,9 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 if extra == 'book':
                     bs, as_ = p['path']['bsz'][i], p['path']['asz'][i]
                     if bs and as_ and bs >= 3 * as_: continue
+                if extra == 'flow':
+                    f = flow(p['ep'], sec)
+                    if f is not None and f > 0: continue
                 return (b - fee1(b, n), n, b, sec, True)
         return (None, 0.0, None, None, armed)
 
@@ -466,6 +507,21 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         ('rest lock + 3 & bid trail 1, guard fv - 2c', R(A, ('bid', 1), ('rest', 3, 'fixed'), 0.02)),
         ('rest fv + 3 & fv trail 8, guard fv - 2c', R(A, ('fv', 0.08), ('rest', 3, 'fv'), 0.02)),
         ('rest lock + 3 & fv trail 8', R(A, ('fv', 0.08), ('rest', 3, 'fixed'))),
+        ('bid trail 1, confirmed 2 s under the stop', R(A, ('bid', 1), ('taker',), None, 0, {'confirm': 2})),
+        ('bid trail 1, confirmed 5 s', R(A, ('bid', 1), ('taker',), None, 0, {'confirm': 5})),
+        ('bid trail 1, confirmed 10 s', R(A, ('bid', 1), ('taker',), None, 0, {'confirm': 10})),
+        ('bid trail 2, confirmed 5 s', R(A, ('bid', 2), ('taker',), None, 0, {'confirm': 5})),
+        ('vol trail 1 sd of the bid (120 s)', R(A, ('vol', 1.0), ('taker',))),
+        ('vol trail 2 sd', R(A, ('vol', 2.0), ('taker',))),
+        ('vol trail 3 sd', R(A, ('vol', 3.0), ('taker',))),
+        ('vol trail 2 sd, guard fv - 2c', R(A, ('vol', 2.0), ('taker',), 0.02)),
+        ('bid trail 1, hold while taker flow favours us (60 s)', R(A, ('bid', 1), ('taker',), None, 0, 'flow')),
+        ('sell at the lock if bid >= fv, else hold', R(A, ('none',), ('lock', 0.0, 'else_hold'))),
+        ('sell at the lock if bid >= fv + 2c, else hold', R(A, ('none',), ('lock', 0.02, 'else_hold'))),
+        ('sell at the lock if bid >= fv + 4c, else hold', R(A, ('none',), ('lock', 0.04, 'else_hold'))),
+        ('sell at the lock if bid >= fv + 2c, else bid trail 1', R(A, ('bid', 1), ('lock', 0.02, 'else_trail'))),
+        ('sell at the lock if bid >= fv + 2c, else vol trail 2 sd', R(A, ('vol', 2.0), ('lock', 0.02, 'else_trail'))),
+        ('sell at the lock if bid >= fv + 2c, else fv trail 8', R(A, ('fv', 0.08), ('lock', 0.02, 'else_trail'))),
     ]
     table(pathsA, rulesA, 'A. from the actual locks', True)
 
@@ -496,6 +552,10 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             (f'{lname}; rest fv + 3, ratcheting', R(lock, ('none',), ('rest', 3, 'fv'))),
             (f'{lname}; rest lock + 2 & bid trail 1', R(lock, ('bid', 1), ('rest', 2, 'fixed'))),
             (f'{lname}; rest fv + 3 & fv trail 8, guard fv - 2c', R(lock, ('fv', 0.08), ('rest', 3, 'fv'), 0.02)),
+            (f'{lname}; bid trail 1, confirmed 5 s', R(lock, ('bid', 1), ('taker',), None, 0, {'confirm': 5})),
+            (f'{lname}; vol trail 2 sd', R(lock, ('vol', 2.0), ('taker',))),
+            (f'{lname}; sell at the lock if bid >= fv + 2c, else hold', R(lock, ('none',), ('lock', 0.02, 'else_hold'))),
+            (f'{lname}; sell at the lock if bid >= fv + 2c, else vol trail 2 sd', R(lock, ('vol', 2.0), ('lock', 0.02, 'else_trail'))),
         ]
         table(pathsB, rulesB, f'B. from entry, {lname}', False)
 
@@ -520,6 +580,39 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
     for (feat, val), r in sorted(buckets.items()):
         print(f"    {feat:18s} {val:18s} hunts {r[0]:4d}  contracts {r[1]:8.1f}  won {100 * r[2] / r[1] if r[1] else 0:4.0f}%  sale {r[3] / r[1] if r[1] else 0:.3f}  selling vs holding ${r[4]:+8.2f}")
     print("  (a bucket whose won% sits well under its sale price is where the stop sale was right; the fair value is the spot-implied one, the bot's math price)")
+    print('  D. at the lock itself (the actual locks): selling right there against settlement, by what the rule could see')
+    dk = collections.defaultdict(lambda: [0, 0.0, 0.0, 0.0, 0.0])
+    tape = 0
+    for p in pathsA:
+        i = next((j for j, b in enumerate(p['bids']) if b is not None), None)
+        if i is None: continue
+        b = p['bids'][i]; q = p['fv'][i]; sec = p['s0'] + i; tau = p['c_sec'] - sec; n = p['n']
+        v = b - fee1(b, n)
+        keys = [('fv vs bid at lock', 'no fv' if q is None else ('bid < fv - 2c' if b < q - 0.02 else 'bid >= fv + 4c' if b >= q + 0.04 else 'bid >= fv + 2c' if b >= q + 0.02 else 'within 2c')),
+                ('time to close', '< 120 s' if tau < 120 else '120-300 s' if tau < 300 else '300-600 s' if tau < 600 else '> 600 s'),
+                ('lock price', '< 0.30' if b < 0.3 else '0.30-0.50' if b < 0.5 else '0.50-0.70' if b < 0.7 else '>= 0.70')]
+        w = spot_with(p['path'], i, p['ep'], p['sig'])
+        keys.append(('spot last 60 s', 'n/a' if w is None else ('with us' if w else 'flat or against')))
+        f = flow(p['ep'], sec)
+        if f is not None: tape += 1
+        keys.append(('taker flow 60 s', 'no tape' if f is None else ('with us' if f > 0 else 'against us' if f < 0 else 'none')))
+        sd = bid_std(p['path'], i)
+        keys.append(('bid noise (sd/s)', 'n/a' if sd is None else ('< 0.5c' if sd < 0.005 else '0.5-1c' if sd < 0.01 else '1-2c' if sd < 0.02 else '>= 2c')))
+        for k in keys:
+            r = dk[k]; r[0] += 1; r[1] += n; r[2] += p['payout'] * n; r[3] += b * n; r[4] += (v - p['payout']) * n
+    for (feat, val), r in sorted(dk.items()):
+        print(f"    {feat:18s} {val:18s} hunts {r[0]:4d}  contracts {r[1]:8.1f}  won {100 * r[2] / r[1] if r[1] else 0:4.0f}%  lock bid {r[3] / r[1] if r[1] else 0:.3f}  selling at the lock vs holding ${r[4]:+8.2f}")
+    print(f"  (tape seen on {tape} of {len(pathsA)} locks; a bucket whose won% sits under its lock bid is where selling at the lock beat holding)")
+    # how the hunts the 1-tick trail never sold ended
+    ends = collections.Counter(); endn = collections.defaultdict(float); endw = collections.defaultdict(float)
+    for p in pathsA:
+        v, sn, px, sec, armed = sim(p, A, ('bid', 1), ('taker',), None, 0, None)
+        if v is not None: continue
+        bs = [b for b in p['bids'] if b is not None]
+        lastb = bs[-1] if bs else None
+        k = 'no bid at all' if lastb is None else ('bid ended >= 0.90' if lastb >= 0.9 else 'bid ended <= 0.10' if lastb <= 0.1 else 'bid ended mid')
+        ends[k] += 1; endn[k] += p['n']; endw[k] += p['payout'] * p['n']
+    print('  E. the hunts the 1-tick trail never sold, by how their recorded bid ended: ' + '; '.join(f"{k}: {c} hunts, {endn[k]:.0f} ct, won {100 * endw[k] / endn[k] if endn[k] else 0:.0f}%" for k, c in ends.items()))
 
 
 # ---- The study --------------------------------------------------------------------------------------------------------
@@ -707,6 +800,7 @@ def main():
     tops = collections.defaultdict(list)   # ticker -> [(sec, bid, bidSize, ask, askSize)] when the top changed
     cur_sec = {}
     index = collections.defaultdict(list)  # asset -> [(sec, value)]
+    trades = collections.defaultdict(list)  # ticker -> [(sec, takerSide, count, price)]
     terms = {}
     wanted_b = {t.encode() for t in wanted}
     assets_b = {a.encode() for a in assets}
@@ -766,6 +860,14 @@ def main():
                     s = index[r['asset']]
                     if s and s[-1][0] == sec: s[-1] = (sec, float(r['value']))
                     elif not s or sec > s[-1][0]: s.append((sec, float(r['value'])))
+                elif kind == b'trade':
+                    ts_ = line.find(b'"ticker":"', ke)
+                    if ts_ < 0: continue
+                    te = line.find(b'"', ts_ + 10)
+                    if line[ts_ + 10:te] not in wanted_b: continue
+                    r = json.loads(line)
+                    tsec = int((r.get('ts') or r.get('t') or 0) // 1000)
+                    if tsec: trades[r['ticker']].append((tsec, r.get('takerSide'), float(r.get('count') or 0), r.get('price')))
                 elif kind == b'market':
                     ts_ = line.find(b'"ticker":"', ke)
                     if ts_ < 0: continue
@@ -1125,7 +1227,7 @@ def main():
     try:
         acts = anatomy()
         oracle(acts or [])
-        ratchet_lab(acts or [], episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee)
+        ratchet_lab(acts or [], episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades)
     except Exception as e:  # a one-shot run on the server: the sections after this one still print
         print(f"  (1c/1d stopped: {type(e).__name__}: {e})")
 
