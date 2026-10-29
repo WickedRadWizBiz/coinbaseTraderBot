@@ -38,7 +38,7 @@ import { clamp, logit, sigmoid } from '../bot/util/num';
 import { buildDataset, readDataset, type DatasetRow } from './buildDataset';
 import { downloadBinance } from './history/binanceVision';
 import { buildHistoryReplay, replayKalshiDays } from './history/historyReplay';
-import { downloadKalshiHistory } from './history/kalshiHistory';
+import { downloadKalshiHistory, repairLegacyCents } from './history/kalshiHistory';
 import { series15m } from './kalshiReplayData';
 import { gradeHorizons, IFTRADES_TRIGGERS, loadTriggers, type CoinTriggers, type HorizonGrade } from './iftradesTriggers';
 import { dieboldMariano } from './stats';
@@ -132,6 +132,9 @@ export async function taContractStudyMain(): Promise<StudyReport> {
       log(`kalshi: ${k.markets} markets stored, ${k.skipped} already there, ${k.remaining} left for the next run${k.budgetHit ? ' (budget hit)' : ''}`);
     }
   }
+  // Markets fetched from Kalshi's /historical endpoint before 2026-10-29 were stored with their quotes divided by 100
+  // twice (dollars read as cents): a mid of half a cent. Repaired in place; the replay rebuilds the days it changes.
+  repairLegacyCents(path.join(history, 'kalshi'), (m) => log(`kalshi: ${m}`));
   // 2. Replay days with synthetic contracts (and Kalshi's real ones where the history has them).
   let rep = { days: 0, synthetic: 0 };
   if (!process.argv.includes('--skip-replay')) {
