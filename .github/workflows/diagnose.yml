@@ -42,6 +42,10 @@ on:
         description: 'With ta_study: build the cached replay days again (after a history fix)'
         required: false
         default: 'false'
+      ta_dominance:
+        description: 'With ta_study: copy the BTC.D / USDT.D series from the server first so the replay carries dominance (rebuilds every cached replay day: about 3.5 h per half year)'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
@@ -206,6 +210,7 @@ jobs:
   ta-study:
     if: inputs.ta_study == 'true'
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 340
     # The log's tail is posted as a comment on the dispatched commit (contents: write): the job-log host is not
     # reachable from every place the study is read from.
@@ -252,6 +257,25 @@ jobs:
             ta-study-${{ steps.key.outputs.coins }}-${{ inputs.ta_from }}-${{ inputs.ta_to }}-
             ta-study-${{ steps.key.outputs.coins }}-
             ta-study-
+      - name: SSH to the server (dominance series)
+        if: inputs.ta_dominance == 'true'
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Copy the BTC.D / USDT.D series from the server (read-only)
+        if: inputs.ta_dominance == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p data/history
+          rsync -a --rsync-path="nice -n 19 rsync" --include='/tradingview/' --include='/binance-index/' --include='/bot-index/' --include='/*/BTC.D/***' --include='/*/USDT.D/***' --exclude='*' bot:bot/data/history/ data/history/
+          echo "dominance files: $(find data/history -path '*BTC.D*' -o -path '*USDT.D*' | grep -c . || true)"
       - name: Run the study
         id: study
         run: |
