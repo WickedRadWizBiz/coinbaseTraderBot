@@ -200,14 +200,28 @@ interface FidelityMeta { days: string[]; files: string[]; warm?: string; res: Re
 
 const elapsed = (t0: number) => `${((Date.now() - t0) / 60_000).toFixed(1)} min`;
 
-/** Cut the newest `n` whole recorded days down to the history's minute candles and write each fill-in's folder under
- *  `work` (one per QUOTE_FILLS), with meta.json for the later stages. */
-async function prepare(rec: string, n: number, work: string, fills: readonly QuoteFill['how'][], depth?: DepthModel): Promise<FidelityMeta> {
-  // Whole days only: today's is still being recorded.
+/** The newest `n` whole recorded days (today's is still being recorded), and of them the `part`-th of `parts` runs of
+ *  days in a row: each part is backtested on a runner of its own, from the day before it. */
+export function sliceDays(rec: string, n: number, part: number, parts: number) {
   const today = new Date().toISOString().slice(0, 10);
   const all = recordingFiles(rec).filter((d) => d.day < today);
-  const days = all.slice(-n);
-  if (days.length < 2) throw new Error(`need at least 2 whole recorded days, have ${days.length}`);
+  const newest = all.slice(-n);
+  if (newest.length < 2) throw new Error(`need at least 2 whole recorded days, have ${newest.length}`);
+  const per = Math.ceil(newest.length / parts);
+  const days = newest.slice(part * per, (part + 1) * per);
+  if (!days.length) throw new Error(`part ${part} of ${parts} has no days (${newest.length} day(s))`);
+  return { all, days, warm: all[all.indexOf(days[0]) - 1] };
+}
+
+/** A window's day: the day its contract closed in (UTC; one closing at midnight belongs to the day before). */
+const dayOfWindow = (closeTime: number) => new Date(closeTime - 1).toISOString().slice(0, 10);
+/** The windows of these days only (the day read before them warms the bot up and is not compared). */
+export const onDays = (w: Windows, days: readonly string[]): Windows => new Map([...w].filter(([k]) => days.includes(dayOfWindow(k))));
+
+/** Cut the newest `n` whole recorded days down to the history's minute candles and write each fill-in's folder under
+ *  `work` (one per QUOTE_FILLS), with meta.json for the later stages. */
+async function prepare(rec: string, n: number, work: string, fills: readonly QuoteFill['how'][], depth?: DepthModel, part = 0, parts = 1): Promise<FidelityMeta> {
+  const { all, days } = sliceDays(rec, n, part, parts);
   fs.rmSync(work, { recursive: true, force: true });
   const dirs = Object.fromEntries(['history', ...fills].map((k) => [k, path.join(work, k)]));
   for (const d of Object.values(dirs)) fs.mkdirSync(d, { recursive: true });
@@ -216,7 +230,7 @@ async function prepare(rec: string, n: number, work: string, fills: readonly Quo
   // The day before is read first, for the contracts and books still open at midnight; it is not compared, but the real
   // replay reads it too, so both start from the same state.
   const carry = newCarry();
-  const warm = all[all.length - days.length - 1];
+  const warm = all[all.indexOf(days[0]) - 1];
   if (warm) await asHistory(warm, undefined, carry);
   for (const d of days) {
     res.push(await asHistory(d, path.join(dirs.history, `md-${d.day}.jsonl.gz`), carry));
@@ -303,27 +317,42 @@ export async function replayFidelityMain(argOf: (k: string, d: string) => string
   if (depthFile && !depth) throw new Error(`no usable depth model in ${depthFile}`);
   const only = argOf('only', '');
   const fills = QUOTE_FILLS.filter((h) => (h !== 'depth' || depth) && (!only || h === only));
-  const dirOf = (how: string) => (how !== 'real' ? path.join(work, how) : fs.existsSync(path.join(work, 'meta.json')) ? realDir(rec, work, readMeta()) : rec);
-  if (stage === 'prepare') { await prepare(rec, n, work, fills, depth); return undefined; }
+  const parts = Math.max(1, Number(argOf('parts', '1'))), part = Number(argOf('part', '0'));
+  const sliced = (): FidelityMeta => { const { days, warm } = sliceDays(rec, n, part, parts); return { days: days.map((d) => d.day), files: [...(warm ? [warm] : []), ...days].map((d) => path.basename(d.file)), warm: warm?.day, res: [], sigmaAll: 0 }; };
+  const dirOf = (how: string) => (how !== 'real' ? path.join(work, how) : realDir(rec, work, fs.existsSync(path.join(work, 'meta.json')) ? readMeta() : sliced()));
+  if (stage === 'prepare') { await prepare(rec, n, work, fills, depth, part, parts); return undefined; }
   if (stage === 'backtest') {
     const how = argOf('how', '');
     if (how !== 'real' && !(QUOTE_FILLS as readonly string[]).includes(how)) throw new Error(`--how must be real or one of ${QUOTE_FILLS.join(', ')}`);
     const w = await backtestDir(dirOf(how), model);
     // The real backtest's runner has no prepare stage, so nothing has made the folder yet.
     fs.mkdirSync(work, { recursive: true });
-    writeWindows(path.join(work, `windows-${how}.json`), w);
+    writeWindows(path.join(work, parts > 1 ? `windows-${how}-p${part}.json` : `windows-${how}.json`), onDays(w, sliced().days));
     return undefined;
   }
   if (stage === 'compare') {
     // Each fill-in whose backtest came back.
-    const variants = Object.fromEntries(QUOTE_FILLS.filter((how) => fs.existsSync(path.join(work, `windows-${how}.json`))).map((how) => [how, readWindows(path.join(work, `windows-${how}.json`))]));
-    return compare(readMeta(), readWindows(path.join(work, 'windows-real.json')), variants, model, out);
+    // Each fill-in whose backtests all came back (one file, or one per part: windows-<how>-p<k>.json).
+    const files = fs.readdirSync(work);
+    const metas = files.filter((f) => /^meta(-p\d+)?\.json$/.test(f)).map((f) => JSON.parse(fs.readFileSync(path.join(work, f), 'utf8')) as FidelityMeta);
+    const res = metas.flatMap((m) => m.res);
+    const meta: FidelityMeta = { ...metas[0], days: [...new Set(metas.flatMap((m) => m.days))].sort(), res, sigmaAll: metas.length > 1 ? bridgeSigma(res) : metas[0].sigmaAll };
+    const nParts = Math.max(1, metas.length);
+    const load = (how: string): Windows | undefined => {
+      const mine = files.filter((f) => new RegExp(`^windows-${how}(-p\\d+)?\\.json$`).test(f));
+      if (!mine.length || (mine.some((f) => /-p\d+\.json$/.test(f)) && mine.length < nParts)) return undefined;
+      return onDays(new Map(mine.flatMap((f) => [...readWindows(path.join(work, f))])), meta.days);
+    };
+    const real = load('real');
+    if (!real) throw new Error('the real backtest did not come back (every part is needed)');
+    const variants = Object.fromEntries(QUOTE_FILLS.map((how) => [how, load(how)] as const).filter((x): x is [QuoteFill['how'], Windows] => !!x[1]));
+    return compare(meta, real, variants, model, out);
   }
   if (stage !== 'all') throw new Error(`unknown --stage ${stage}`);
   const meta = await prepare(rec, n, work, fills, depth);
-  const real = await backtestDir(dirOf('real'), model);
+  const real = onDays(await backtestDir(dirOf('real'), model), meta.days);
   const variants: Record<string, Windows> = {};
-  for (const how of fills) variants[how] = await backtestDir(dirOf(how), model);
+  for (const how of fills) variants[how] = onDays(await backtestDir(dirOf(how), model), meta.days);
   const r = compare(meta, real, variants, model, out);
   fs.rmSync(work, { recursive: true, force: true });
   return r;

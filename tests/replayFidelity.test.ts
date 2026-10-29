@@ -4,7 +4,7 @@ import path from 'path';
 import zlib from 'zlib';
 import { test } from 'node:test';
 import { fillDayFile, fillQuotes, QUOTE_FILLS, type Ev } from '../research/goLiveTally';
-import { asHistory, bridgeSigma, compareWindows, newCarry } from '../research/replayFidelity';
+import { asHistory, bridgeSigma, compareWindows, newCarry, onDays, sliceDays } from '../research/replayFidelity';
 import { tmpDir } from './helpers';
 import { DepthSim, readDepthModel } from '../research/history/depthSim';
 
@@ -76,8 +76,8 @@ test('the noise fill-in is pinned at the candles and grows with the measured siz
 
 test('the bridge size and the window-by-window comparison', () => {
   assert.equal(bridgeSigma([{ r2: 8, f: 2, n: 4 }, { r2: 10, f: 2.5, n: 5 }]), 2);
-  const real = new Map([[1, { pnl: 1, contracts: 1 }], [2, { pnl: -1, contracts: 1 }]]);
-  const rows = compareWindows(real, { same: real, high: new Map([[1, { pnl: 2, contracts: 1 }], [2, { pnl: 0, contracts: 1 }], [3, { pnl: 1, contracts: 1 }]]) });
+  const real = new Map([[1, { pnl: 1, contracts: 1, fees: 0 }], [2, { pnl: -1, contracts: 1 }]]);
+  const rows = compareWindows(real, { same: real, high: new Map([[1, { pnl: 2, contracts: 1, fees: 0 }], [2, { pnl: 0, contracts: 1 }], [3, { pnl: 1, contracts: 1, fees: 0 }]]) });
   assert.deepEqual(rows[0], { how: 'same', pnl: 0, windowsTraded: 2, biasUsd: 0, rmseUsd: 0, corr: 1 });
   assert.equal(rows[1].biasUsd, 3);
   assert.equal(rows[1].windowsTraded, 3);
@@ -120,4 +120,18 @@ test('the depth simulator steps in tenths of a cent below 10 cents and above 90,
   assert.ok((tail.bids as Array<{ price: number }>).every((l) => l.price <= 0.052 && l.price > 0.052 - 0.0105), 'ten tenth-cent ticks behind the best bid');
   const mid = sim.play('KXBTC15M-V', D0, 0.45, 0.46, D0, D0 + 10 * MIN)[0];
   assert.ok([...(mid.bids as Array<{ price: number }>), ...(mid.asks as Array<{ price: number }>)].every((l) => Math.round(l.price * 1000) % 10 === 0), 'whole cents in the middle');
+});
+
+test('the days split into parts, each read from the day before it, and only their own windows compared', () => {
+  const dir = tmpDir();
+  for (const d of ['2026-10-20', '2026-10-21', '2026-10-22', '2026-10-23', '2026-10-24']) fs.writeFileSync(path.join(dir, `md-${d}.jsonl.gz`), zlib.gzipSync(''));
+  const day = (x: { day: string }) => x.day;
+  const whole = sliceDays(dir, 4, 0, 1);
+  assert.deepEqual([whole.warm && day(whole.warm), whole.days.map(day)], ['2026-10-20', ['2026-10-21', '2026-10-22', '2026-10-23', '2026-10-24']]);
+  const b = sliceDays(dir, 4, 1, 2);
+  assert.deepEqual([b.warm && day(b.warm), b.days.map(day)], ['2026-10-22', ['2026-10-23', '2026-10-24']]);
+  const at = (d: string, h: number) => Date.parse(`${d}T00:00:00Z`) + h * 3_600_000;
+  const w = new Map([[at('2026-10-22', 12), { pnl: 1, contracts: 1, fees: 0 }], [at('2026-10-23', 12), { pnl: 2, contracts: 1, fees: 0 }], [at('2026-10-24', 0), { pnl: 3, contracts: 1, fees: 0 }]]);
+  // The warm-up day's windows are left out; a window closing at midnight belongs to the day before.
+  assert.deepEqual([...onDays(w, ['2026-10-23']).values()].map((x) => x.pnl), [2, 3]);
 });
