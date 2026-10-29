@@ -6,6 +6,9 @@ import { test } from 'node:test';
 import { fillDayFile, fillQuotes, QUOTE_FILLS, type Ev } from '../research/goLiveTally';
 import { asHistory, bridgeSigma, compareWindows, newCarry } from '../research/replayFidelity';
 import { tmpDir } from './helpers';
+import { readDepthModel } from '../research/history/depthSim';
+
+const depth = readDepthModel(path.join(import.meta.dirname, 'fixtures', 'depth_model.json'))!;
 
 const D0 = Date.UTC(2026, 9, 20);
 const MIN = 60_000;
@@ -87,7 +90,25 @@ test('a day is filled in line by line exactly as the whole-day fill does it', as
   const evs = read(file);
   for (const how of QUOTE_FILLS) {
     const out = path.join(dir, `${how}.jsonl.gz`);
-    await fillDayFile(file, out, { how, sigma: 0.05 });
-    assert.deepEqual(read(out), fillQuotes(evs, { how, sigma: 0.05 }), how);
+    await fillDayFile(file, out, { how, sigma: 0.05 }, depth);
+    assert.deepEqual(read(out), fillQuotes(evs, { how, sigma: 0.05 }, depth), how);
   }
+});
+
+test('the depth fill-in plays a whole book around each quote, the same every time', () => {
+  const dir = tmpDir();
+  const evs = read(recordedDay(dir).file);
+  const a = fillQuotes(evs, { how: 'depth' }, depth), b = fillQuotes(evs, { how: 'depth' }, depth);
+  assert.deepEqual(a, b, 'seeded: the same day plays out the same wherever it is replayed');
+  assert.ok(a.every((e, i) => i === 0 || e.t >= a[i - 1].t), 'in time order');
+  const books = a.filter((e) => e.k === 'book' && e.ticker === 'KXBTC15M-A');
+  const requoted = fillQuotes(evs, { how: 'requote' }).filter((e) => e.k === 'book' && e.ticker === 'KXBTC15M-A');
+  // Each quote is still the best bid and ask, now with levels behind it.
+  assert.equal(books.length, requoted.length);
+  for (let i = 0; i < books.length; i++) assert.deepEqual([books[i].bids![0].price, books[i].asks![0].price], [requoted[i].bids![0].price, requoted[i].asks![0].price]);
+  assert.ok(books.some((x) => x.bids!.length > 1 && x.asks!.length > 1));
+  assert.ok(a.some((e) => e.k === 'delta') && a.some((e) => e.k === 'trade' && e.sim === 1), 'changes and trades between the quotes');
+  // The recorded trades give way to the simulated ones.
+  assert.ok(a.filter((e) => e.k === 'trade').every((e) => e.sim === 1));
+  assert.throws(() => fillQuotes(evs, { how: 'depth' }), /depth model/);
 });

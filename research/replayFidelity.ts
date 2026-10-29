@@ -16,7 +16,7 @@
 // Only the quotes are tested: the history's index is itself bridged between 1-minute bars, the recordings' is real.
 //
 //   npm run research:replay-fidelity -- --recordings data/recordings --model data/models/model.json [--days 4]
-//       [--out data/models/replay_fidelity.json] [--stage all|prepare|backtest --how <real|fill-in>|compare --work <dir>]
+//       [--out data/models/replay_fidelity.json] [--depth-model depth_model.json] [--only <fill-in>] [--stage all|prepare|backtest --how <real|fill-in>|compare --work <dir>]
 
 import fs from 'fs';
 import path from 'path';
@@ -27,6 +27,7 @@ import { linkDays, recordingFiles, recordingLines, type RecordingDay } from '../
 import { contractKind, type MarketKind } from '../bot/model/fairValue';
 import { backtestMain } from './backtest';
 import { fillDayFile, QUOTE_FILLS, type Ev, type QuoteFill } from './goLiveTally';
+import { readDepthModel, type DepthModel } from './history/depthSim';
 import { gkVariance, requoteBetween } from './history/historyReplay';
 
 const MIN = 60_000, SLOT = 15_000, DAY = 86_400_000;
@@ -201,14 +202,14 @@ const elapsed = (t0: number) => `${((Date.now() - t0) / 60_000).toFixed(1)} min`
 
 /** Cut the newest `n` whole recorded days down to the history's minute candles and write each fill-in's folder under
  *  `work` (one per QUOTE_FILLS), with meta.json for the later stages. */
-async function prepare(rec: string, n: number, work: string): Promise<FidelityMeta> {
+async function prepare(rec: string, n: number, work: string, fills: readonly QuoteFill['how'][], depth?: DepthModel): Promise<FidelityMeta> {
   // Whole days only: today's is still being recorded.
   const today = new Date().toISOString().slice(0, 10);
   const all = recordingFiles(rec).filter((d) => d.day < today);
   const days = all.slice(-n);
   if (days.length < 2) throw new Error(`need at least 2 whole recorded days, have ${days.length}`);
   fs.rmSync(work, { recursive: true, force: true });
-  const dirs = Object.fromEntries(['history', ...QUOTE_FILLS].map((k) => [k, path.join(work, k)]));
+  const dirs = Object.fromEntries(['history', ...fills].map((k) => [k, path.join(work, k)]));
   for (const d of Object.values(dirs)) fs.mkdirSync(d, { recursive: true });
   const res: Residuals[] = [];
   const t0 = Date.now();
@@ -226,7 +227,7 @@ async function prepare(rec: string, n: number, work: string): Promise<FidelityMe
   for (let i = 0; i < days.length; i++) {
     const name = `md-${days[i].day}.jsonl.gz`;
     const sigma = bridgeSigma(res.filter((_, j) => j !== i));
-    for (const how of QUOTE_FILLS) await fillDayFile(path.join(dirs.history, name), path.join(dirs[how], name), { how, sigma });
+    for (const how of fills) await fillDayFile(path.join(dirs.history, name), path.join(dirs[how], name), { how, sigma }, depth);
   }
   console.log(`[fidelity] fill-ins written (${elapsed(t0)})`);
   fs.rmSync(dirs.history, { recursive: true, force: true });
@@ -296,8 +297,14 @@ export async function replayFidelityMain(argOf: (k: string, d: string) => string
   const stage = argOf('stage', 'all');
   const readMeta = (): FidelityMeta => JSON.parse(fs.readFileSync(path.join(work, 'meta.json'), 'utf8'));
   // The real days without the prepare stage's meta (a runner of its own): the recordings folder as copied.
+  // The depth fill-in's model (research/depthStudy.ts --out), fitted on days other than these; without one it is left out.
+  const depthFile = argOf('depth-model', '');
+  const depth = depthFile ? readDepthModel(depthFile) : undefined;
+  if (depthFile && !depth) throw new Error(`no usable depth model in ${depthFile}`);
+  const only = argOf('only', '');
+  const fills = QUOTE_FILLS.filter((h) => (h !== 'depth' || depth) && (!only || h === only));
   const dirOf = (how: string) => (how !== 'real' ? path.join(work, how) : fs.existsSync(path.join(work, 'meta.json')) ? realDir(rec, work, readMeta()) : rec);
-  if (stage === 'prepare') { await prepare(rec, n, work); return undefined; }
+  if (stage === 'prepare') { await prepare(rec, n, work, fills, depth); return undefined; }
   if (stage === 'backtest') {
     const how = argOf('how', '');
     if (how !== 'real' && !(QUOTE_FILLS as readonly string[]).includes(how)) throw new Error(`--how must be real or one of ${QUOTE_FILLS.join(', ')}`);
@@ -308,14 +315,15 @@ export async function replayFidelityMain(argOf: (k: string, d: string) => string
     return undefined;
   }
   if (stage === 'compare') {
-    const variants = Object.fromEntries(QUOTE_FILLS.map((how) => [how, readWindows(path.join(work, `windows-${how}.json`))]));
+    // Each fill-in whose backtest came back.
+    const variants = Object.fromEntries(QUOTE_FILLS.filter((how) => fs.existsSync(path.join(work, `windows-${how}.json`))).map((how) => [how, readWindows(path.join(work, `windows-${how}.json`))]));
     return compare(readMeta(), readWindows(path.join(work, 'windows-real.json')), variants, model, out);
   }
   if (stage !== 'all') throw new Error(`unknown --stage ${stage}`);
-  const meta = await prepare(rec, n, work);
+  const meta = await prepare(rec, n, work, fills, depth);
   const real = await backtestDir(dirOf('real'), model);
   const variants: Record<string, Windows> = {};
-  for (const how of QUOTE_FILLS) variants[how] = await backtestDir(dirOf(how), model);
+  for (const how of fills) variants[how] = await backtestDir(dirOf(how), model);
   const r = compare(meta, real, variants, model, out);
   fs.rmSync(work, { recursive: true, force: true });
   return r;

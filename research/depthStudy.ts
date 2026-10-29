@@ -156,7 +156,7 @@ function report(cells: Map<string, Cell>, qr: Map<string, Qr>) {
   const shape = [...cells.entries()].filter(([, c]) => c.samples >= 20).map(([k, c]) => {
     const [ti, mi] = k.split('|').map(Number);
     return {
-      tau: label(TAU_EDGES, ti, ' min'), mid: label(MID_EDGES, mi, 'c'), samples: c.samples,
+      ti, mi, tau: label(TAU_EDGES, ti, ' min'), mid: label(MID_EDGES, mi, 'c'), samples: c.samples,
       spread: c.spread.summary(), quotedLevels: c.quotedLevels.summary(), depth10: c.depth10.summary(),
       wallSize: c.wallSize.summary(), wallRatio: c.wallRatio.summary(), wallOffset: c.wallOffset.summary(),
       levelSizeP50: c.levelSize.map((d) => d.q(0.5)), levelSizeMean: c.levelSize.map((d) => +d.mean().toFixed(1)),
@@ -170,7 +170,7 @@ function report(cells: Map<string, Cell>, qr: Map<string, Qr>) {
   const flow = [...qr.entries()].filter(([, q]) => q.seconds > 60).map(([k, q]) => {
     const [off, qi] = k.split('|').map(Number);
     const per = (n: number) => +(n / q.seconds).toFixed(5);
-    return { offset: off, queue: label(Q_EDGES, qi), seconds: Math.round(q.seconds), addPerSec: per(q.add), cancelPerSec: per(q.cancel), tradePerSec: per(q.trade),
+    return { offset: off, qi, queue: label(Q_EDGES, qi), seconds: Math.round(q.seconds), addPerSec: per(q.add), cancelPerSec: per(q.cancel), tradePerSec: per(q.trade),
       addSize: q.addSize.summary(), cancelSize: q.cancelSize.summary() };
   }).sort((a, b) => a.offset - b.offset || a.queue.localeCompare(b.queue));
   return { shape, flow };

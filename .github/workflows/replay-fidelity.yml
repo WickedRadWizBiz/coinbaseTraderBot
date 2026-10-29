@@ -22,6 +22,10 @@ on:
         description: 'Whole recorded days compared (the newest; the day before them is read for the contracts still open at midnight)'
         required: false
         default: '4'
+      fit_days:
+        description: 'Older recorded days the depth fill-in is fitted on (never the compared ones)'
+        required: false
+        default: '3'
 
 permissions:
   contents: read
@@ -37,8 +41,10 @@ jobs:
     timeout-minutes: 10
     outputs:
       files: ${{ steps.pick.outputs.files }}
+      fit: ${{ steps.pick.outputs.fit }}
     env:
       DAYS: ${{ inputs.days || '4' }}
+      FIT_DAYS: ${{ inputs.fit_days || '3' }}
     steps:
       - name: SSH to the server
         env:
@@ -58,9 +64,13 @@ jobs:
           [[ "$DAYS" =~ ^[0-9]+$ ]] && [ "$DAYS" -ge 2 ] || { echo "days must be a whole number of at least 2"; exit 1; }
           # The newest DAYS whole days and the day before them (today's is still being recorded), the same on every runner.
           TODAY=$(date -u +%F)
-          FILES=$(ssh bot "cd ~/bot/data/recordings && ls -1 md-*.jsonl*" | sort | awk -v t="md-$TODAY" '$0 < t' | tail -n $((DAYS + 1)) | tr '\n' ' ')
+          ALL=$(ssh bot "cd ~/bot/data/recordings && ls -1 md-*.jsonl*" | sort | awk -v t="md-$TODAY" '$0 < t')
+          FILES=$(echo "$ALL" | tail -n $((DAYS + 1)) | tr '\n' ' ')
+          # The depth fill-in's model is fitted on the days before those (the warm-up day included in neither).
+          FIT=$(echo "$ALL" | head -n -$((DAYS + 1)) | tail -n "$FIT_DAYS" | tr '\n' ' ')
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
-          echo "days: $FILES"
+          echo "fit=$FIT" >> "$GITHUB_OUTPUT"
+          echo "days: $FILES | depth fitted on: $FIT"
 
   backtest:
     needs: pick
@@ -70,10 +80,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        how: [real, hold, requote, worst, noise]
+        how: [real, hold, requote, worst, noise, depth]
     env:
       DAYS: ${{ inputs.days || '4' }}
       FILES: ${{ needs.pick.outputs.files }}
+      FIT: ${{ needs.pick.outputs.fit }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -123,10 +134,20 @@ jobs:
               tail -5 "$RUNNER_TEMP/fidelity.log" | cut -c1-200; exit 1
             fi
           }
-          if [ "${{ matrix.how }}" != real ]; then run --stage prepare; fi
+          if [ "${{ matrix.how }}" = depth ]; then
+            [ -n "$FIT" ] || { echo "no older recorded days to fit the depth model on"; exit 1; }
+            mkdir -p "$DATA/fit" && printf '%s\n' $FIT > "$RUNNER_TEMP/fit.txt"
+            rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/fit.txt" bot:bot/data/recordings/ "$DATA/fit/"
+            node --import tsx research/depthStudy.ts --recordings "$DATA/fit" --out "$DATA/models/depth_model.json" 2>&1 | grep -E '^\[depth\] [0-9]' || true
+            [ -s "$DATA/models/depth_model.json" ] || { echo "the depth study wrote no model"; exit 1; }
+            run --stage prepare --only depth --depth-model "$DATA/models/depth_model.json"
+          elif [ "${{ matrix.how }}" != real ]; then
+            run --stage prepare --only "${{ matrix.how }}"
+          fi
           run --stage backtest --how "${{ matrix.how }}"
           mkdir -p "$RUNNER_TEMP/out" && cp "$WORK/windows-${{ matrix.how }}.json" "$RUNNER_TEMP/out/"
           if [ -f "$WORK/meta.json" ]; then cp "$WORK/meta.json" "$RUNNER_TEMP/out/"; fi
+          if [ -f "$DATA/models/depth_model.json" ]; then cp "$DATA/models/depth_model.json" "$RUNNER_TEMP/out/"; fi
       - uses: actions/upload-artifact@v4
         with:
           name: fidelity-${{ matrix.how }}
@@ -135,6 +156,8 @@ jobs:
 
   compare:
     needs: backtest
+    # A fill-in whose job failed is left out of the comparison (the real backtest is still needed).
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 20
@@ -188,4 +211,10 @@ jobs:
           print('closest to the real quotes:', c['how'] + (f" (bridge {c['sigma']})" if c.get('sigma') else ''))
           PY
       - name: Send the verdict to the server
-        run: rsync -a --rsync-path="nice -n 19 rsync" "$GITHUB_WORKSPACE/data/models/replay_fidelity.json" bot:bot/data/models/ && echo "verdict copied; the next training run plays history with it"
+        run: |
+          set -euo pipefail
+          # A depth verdict needs its model next to it (the tally falls back to the worst side without one).
+          if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["choice"]["how"] == "depth" else 1)' "$GITHUB_WORKSPACE/data/models/replay_fidelity.json"; then
+            rsync -a --rsync-path="nice -n 19 rsync" "$RUNNER_TEMP/in/fidelity-depth/depth_model.json" bot:bot/data/models/
+          fi
+          rsync -a --rsync-path="nice -n 19 rsync" "$GITHUB_WORKSPACE/data/models/replay_fidelity.json" bot:bot/data/models/ && echo "verdict copied; the next training run plays history with it"
