@@ -15,6 +15,11 @@ import fs from 'fs';
 import { hashStr } from './historyReplay';
 
 export const DEPTH_LEVELS = 10;
+/** Prices in tenths of a cent: Kalshi quotes in tenths below 10 cents and above 90 cents, whole cents between. */
+export const PX = 1000;
+export const tickAt = (px: number) => (px < 100 || px > 900 ? 1 : 10);
+/** Ticks between a price and the best price on its side (both in tenths of a cent). */
+export const ticksFrom = (px: number, best: number) => Math.round(Math.abs(px - best) / tickAt(best));
 const MIN = 60_000;
 /** The study's buckets (research/depthStudy.ts): minutes to close, mid in cents, queue size in contracts. */
 const TAU_EDGES = [1, 3, 6, 10, 15, 60, Infinity];
@@ -51,7 +56,7 @@ const expDraw = (u: () => number, rate: number) => -Math.log(Math.max(u(), 1e-12
 
 type Level = { price: number; size: number };
 type Side = 'bid' | 'ask';
-interface SimBook { bid: Map<number, number>; ask: Map<number, number> } // price in cents -> size
+interface SimBook { bid: Map<number, number>; ask: Map<number, number> } // price in tenths of a cent -> size
 
 export type DepthEv = { t: number; k: string; ticker: string; [key: string]: unknown };
 
@@ -88,24 +93,24 @@ export class DepthSim {
   /** The book at an anchor quote (bid and ask in dollars) and its life until `until`: a full snapshot at `t`, then
    *  the changes and trades in between, in time order. `close` is the contract's close time. */
   play(ticker: string, t: number, bid: number, ask: number, until: number, close: number): DepthEv[] {
-    const bB = Math.round(bid * 100), bA = Math.round(ask * 100);
-    if (!(bB >= 1 && bA <= 99 && bA > bB)) return [];
+    const bB = Math.round(bid * PX), bA = Math.round(ask * PX);
+    if (!(bB >= 1 && bA <= PX - 1 && bA > bB)) return [];
     const u = rng(hashStr(ticker) ^ Math.floor(t / 1000));
-    const cell = this.cell((close - t) / MIN, (bB + bA) / 2);
+    const cell = this.cell((close - t) / MIN, (bB + bA) / 20);
     let b = this.books.get(ticker);
     if (!b) this.books.set(ticker, (b = { bid: new Map(), ask: new Map() }));
     // Re-centre: the quote's levels are the best ones; levels it moved through go; empty places near the top are drawn.
-    for (const [p] of b.bid) if (p > bB || p < bB - DEPTH_LEVELS + 1) b.bid.delete(p);
-    for (const [p] of b.ask) if (p < bA || p > bA + DEPTH_LEVELS - 1) b.ask.delete(p);
+    for (const [p] of b.bid) if (p > bB || ticksFrom(p, bB) >= DEPTH_LEVELS) b.bid.delete(p);
+    for (const [p] of b.ask) if (p < bA || ticksFrom(p, bA) >= DEPTH_LEVELS) b.ask.delete(p);
     for (const side of ['bid', 'ask'] as Side[]) {
-      const m = b[side], best = side === 'bid' ? bB : bA;
+      const m = b[side], best = side === 'bid' ? bB : bA, tick = tickAt(best);
       for (let off = 0; off < DEPTH_LEVELS; off++) {
-        const p = side === 'bid' ? best - off : best + off;
-        if (p < 1 || p > 99 || m.has(p)) continue;
+        const p = side === 'bid' ? best - off * tick : best + off * tick;
+        if (p < 1 || p > PX - 1 || m.has(p)) continue;
         if (off === 0 || u() < (cell.levelQuoted[off] ?? 0)) m.set(p, lognormal(u, cell.levelFilledP50[off], cell.levelFilledP90[off]));
       }
     }
-    const levels = (side: Side): Level[] => [...b![side].entries()].sort((x, y) => (side === 'bid' ? y[0] - x[0] : x[0] - y[0])).map(([p, s]) => ({ price: p / 100, size: s }));
+    const levels = (side: Side): Level[] => [...b![side].entries()].sort((x, y) => (side === 'bid' ? y[0] - x[0] : x[0] - y[0])).map(([p, s]) => ({ price: p / PX, size: s }));
     const out: DepthEv[] = [{ t, k: 'book', ticker, bids: levels('bid'), asks: levels('ask'), ts: t, sim: 1 }];
     // Until the next anchor: each level's adds and cancels, and the trades, as competing Poisson clocks.
     const tradeRate = Math.max(0, cell.tradesPerMin?.mean ?? 0) / 60;
@@ -115,13 +120,14 @@ export class DepthSim {
       for (const side of ['bid', 'ask'] as Side[]) {
         const m = b[side], top = side === 'bid' ? Math.max(...m.keys()) : Math.min(...m.keys());
         if (!Number.isFinite(top)) continue;
+        const tick = tickAt(top);
         for (let off = 0; off < DEPTH_LEVELS; off++) {
-          const p = side === 'bid' ? top - off : top + off;
-          if (p < 1 || p > 99) continue;
+          const p = side === 'bid' ? top - off * tick : top + off * tick;
+          if (p < 1 || p > PX - 1) continue;
           const q = m.get(p) ?? 0, f = this.rates(off, q);
           if (!f) continue;
-          if (f.addPerSec > 0) clocks.push({ rate: f.addPerSec, act: () => { const d = lognormal(u, f.addSize.p50, f.addSize.p90); m.set(p, q + d); out.push({ t: now, k: 'delta', ticker, side, price: p / 100, delta: d, ts: now, sim: 1 }); } });
-          if (q > 0 && f.cancelPerSec > 0) clocks.push({ rate: f.cancelPerSec, act: () => { const d = Math.min(q, lognormal(u, f.cancelSize.p50, f.cancelSize.p90)); if (q - d > 0) m.set(p, q - d); else m.delete(p); out.push({ t: now, k: 'delta', ticker, side, price: p / 100, delta: -d, ts: now, sim: 1 }); } });
+          if (f.addPerSec > 0) clocks.push({ rate: f.addPerSec, act: () => { const d = lognormal(u, f.addSize.p50, f.addSize.p90); m.set(p, q + d); out.push({ t: now, k: 'delta', ticker, side, price: p / PX, delta: d, ts: now, sim: 1 }); } });
+          if (q > 0 && f.cancelPerSec > 0) clocks.push({ rate: f.cancelPerSec, act: () => { const d = Math.min(q, lognormal(u, f.cancelSize.p50, f.cancelSize.p90)); if (q - d > 0) m.set(p, q - d); else m.delete(p); out.push({ t: now, k: 'delta', ticker, side, price: p / PX, delta: -d, ts: now, sim: 1 }); } });
         }
       }
       if (tradeRate > 0) clocks.push({ rate: tradeRate, act: () => {
@@ -130,9 +136,9 @@ export class DepthSim {
         const top = side === 'bid' ? Math.max(...m.keys()) : Math.min(...m.keys());
         if (!Number.isFinite(top)) return;
         const q = m.get(top)!, n = Math.min(q, lognormal(u, cell.tradeSize.p50, cell.tradeSize.p90));
-        out.push({ t: now, k: 'trade', ticker, price: top / 100, count: n, takerSide: yes ? 'yes' : 'no', ts: now, sim: 1 });
+        out.push({ t: now, k: 'trade', ticker, price: top / PX, count: n, takerSide: yes ? 'yes' : 'no', ts: now, sim: 1 });
         if (q - n > 0) m.set(top, q - n); else m.delete(top);
-        out.push({ t: now, k: 'delta', ticker, side, price: top / 100, delta: -n, ts: now, sim: 1 });
+        out.push({ t: now, k: 'delta', ticker, side, price: top / PX, delta: -n, ts: now, sim: 1 });
       } });
       const total = clocks.reduce((a, c) => a + c.rate, 0);
       if (!(total > 0)) break;

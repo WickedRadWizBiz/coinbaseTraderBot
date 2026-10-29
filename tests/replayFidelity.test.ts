@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { fillDayFile, fillQuotes, QUOTE_FILLS, type Ev } from '../research/goLiveTally';
 import { asHistory, bridgeSigma, compareWindows, newCarry } from '../research/replayFidelity';
 import { tmpDir } from './helpers';
-import { readDepthModel } from '../research/history/depthSim';
+import { DepthSim, readDepthModel } from '../research/history/depthSim';
 
 const depth = readDepthModel(path.join(import.meta.dirname, 'fixtures', 'depth_model.json'))!;
 
@@ -111,4 +111,13 @@ test('the depth fill-in plays a whole book around each quote, the same every tim
   // The recorded trades give way to the simulated ones.
   assert.ok(a.filter((e) => e.k === 'trade').every((e) => e.sim === 1));
   assert.throws(() => fillQuotes(evs, { how: 'depth' }), /depth model/);
+});
+
+test('the depth simulator steps in tenths of a cent below 10 cents and above 90, whole cents between', () => {
+  const sim = new DepthSim(depth);
+  const tail = sim.play('KXBTC15M-U', D0, 0.052, 0.054, D0, D0 + 10 * MIN)[0];
+  assert.deepEqual([(tail.bids as Array<{ price: number }>)[0].price, (tail.asks as Array<{ price: number }>)[0].price], [0.052, 0.054]);
+  assert.ok((tail.bids as Array<{ price: number }>).every((l) => l.price <= 0.052 && l.price > 0.052 - 0.0105), 'ten tenth-cent ticks behind the best bid');
+  const mid = sim.play('KXBTC15M-V', D0, 0.45, 0.46, D0, D0 + 10 * MIN)[0];
+  assert.ok([...(mid.bids as Array<{ price: number }>), ...(mid.asks as Array<{ price: number }>)].every((l) => Math.round(l.price * 1000) % 10 === 0), 'whole cents in the middle');
 });
