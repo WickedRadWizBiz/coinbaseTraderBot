@@ -52,7 +52,8 @@ interface Qr { seconds: number; add: number; cancel: number; trade: number; addS
 const newQr = (): Qr => ({ seconds: 0, add: 0, cancel: 0, trade: 0, addSize: new Dist(), cancelSize: new Dist() });
 
 interface Contract { ticker: string; close: number; book: OrderBook; lastSample: number; minute: number; deltas: number; trades: number; seen: Set<string> }
-/** Trades seen twice (same id, or same time, price, size and side): a recorder double count would inflate the rates. */
+/** Trades alike to one already seen in the same second (time, price, size and side; the recordings keep no trade id). Kept:
+ *  trades are stamped in whole seconds, so on a busy book most are separate trades, not the recorder counting one twice. */
 export const tradeCount = { all: 0, repeated: 0 };
 
 type Side = 'bid' | 'ask';
@@ -144,7 +145,7 @@ async function run(files: string[]) {
       } else if (e.k === 'trade') {
         const id = String(e.trade_id ?? `${e.ts}|${e.price}|${e.count}|${e.takerSide}`);
         tradeCount.all++;
-        if (c.seen.has(id)) { tradeCount.repeated++; continue; }
+        if (c.seen.has(id)) tradeCount.repeated++;
         c.seen.add(id);
         const s = state(c, t);
         if (s) { const cell = cellOf(s.tau, s.mid); cell.trades++; cell.tradeSize.add(Number(e.count)); if (e.takerSide === 'yes') cell.takerYes++; }
@@ -156,6 +157,8 @@ async function run(files: string[]) {
       }
     }
   }
+  // The last minute of contracts no later event closed (their final minute: no event after the close).
+  for (const c of contracts.values()) if (c.minute) minuteEnd(c, Math.min(c.minute * MIN + MIN - 1, c.close - 1));
   return report(cells, qr);
 }
 
@@ -199,7 +202,7 @@ async function main() {
   for (const s of r.shape) {
     console.log(`  ${s.tau.padEnd(9)} ${s.mid.padEnd(7)} n=${String(s.samples).padStart(6)}  spread p50 ${s.spread.p50} p90 ${s.spread.p90} | levels in 10 ticks ${s.quotedLevels.p50} | depth10 p50 ${s.depth10.p50} | wall ${s.wallSize.p50} (x${(+s.wallRatio.p50).toFixed(1)} median, ${s.wallOffset.p50} ticks back) | lvl0-4 quoted ${s.levelQuoted.slice(0, 5).join('/')} size p50 ${s.levelFilledP50.slice(0, 5).join('/')} p90 ${s.levelFilledP90.slice(0, 5).join('/')} | trades/min ${s.tradesPerMin.mean} size p50 ${s.tradeSize.p50} | changes/min ${s.deltasPerMin.mean}`);
   }
-  console.log(`[depth] trades: ${tradeCount.all} recorded, ${tradeCount.repeated} repeated (${tradeCount.all ? ((100 * tradeCount.repeated) / tradeCount.all).toFixed(1) : 0}%, left out)`);
+  console.log(`[depth] trades: ${tradeCount.all} recorded, ${tradeCount.repeated} repeated (${tradeCount.all ? ((100 * tradeCount.repeated) / tradeCount.all).toFixed(1) : 0}%, kept: whole-second stamps, no trade id)`);
   console.log('[depth] queue-reactive flow (per second at each distance from best and queue size)');
   for (const f of r.flow) console.log(`  off ${String(f.offset).padStart(2)}t q ${f.queue.padEnd(9)} ${String(f.seconds).padStart(8)} s  add ${f.addPerSec} (p50 ${f.addSize.p50})  cancel ${f.cancelPerSec} (p50 ${f.cancelSize.p50})  trade ${f.tradePerSec}`);
 }
