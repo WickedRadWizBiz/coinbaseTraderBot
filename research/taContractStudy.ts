@@ -4,7 +4,7 @@
 //
 //   node --import tsx research/taContractStudy.ts --from 2025-10-01 --to 2026-09-30 [--assets BTC,ETH,SOL,XRP,DOGE]
 //        [--history data/history] [--replay data/ta-study-replay] [--out research/out/ta-contract-study]
-//        [--sets base,base+ta,...] [--max-rows 80000] [--kalshi-budget-min 20] [--skip-download] [--skip-replay] [--rebuild-replay]
+//        [--sets base,base+ta,...] [--max-rows 250000] [--kalshi-budget-min 20] [--skip-download] [--skip-replay] [--rebuild-replay]
 //
 // 1. Binance's 1-minute spot bars for the assets and months (data.binance.vision, research/history/binanceVision.ts),
 //    and Kalshi's settled 15-minute contracts over the same days with their minute quotes (public API,
@@ -81,7 +81,7 @@ export async function taContractStudyMain(): Promise<StudyReport> {
   const from = arg('from', new Date(Date.parse(to) - 120 * DAY).toISOString().slice(0, 10));
   const sets = arg('sets', STUDY_SETS.join(',')).split(',');
   // Rows in memory (about 14 KB each): past this, each contract's snapshots are thinned evenly (readDataset).
-  const maxRows = Number(arg('max-rows', '80000'));
+  const maxRows = Number(arg('max-rows', '250000'));
   fs.mkdirSync(out, { recursive: true });
 
   // 1. History. The 1-minute bars make the index prints and the 1m / 5m candles; the replay reads the 15m, hourly and
