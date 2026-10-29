@@ -100,6 +100,12 @@ export interface ExitStats {
   huntDeactivations: number;
   /** Early take-profits at the bid (confluence flipped, session unsafe, gap through the stop). */
   huntProfitTakes: number;
+  /** HUNT_LOCK_SALE judgements (sold at the bid / held), and HUNT_WALL_ASK resting sells placed (once a hunt) and the
+   *  contracts filled on them. */
+  lockSales: number;
+  lockHolds: number;
+  wallAsks: number;
+  wallFills: number;
   /** Mean (stop - fill price) in side terms for ratchet exits; positive = filled below the stop. */
   avgSlippage: number | null;
 }
@@ -362,7 +368,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const pos = new PositionBook();
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => DEFAULT_FEES, () => st.now);
   const gateway = new RiskGateway(limits);
-  const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, huntProfitTakes: 0, avgSlippage: null };
+  const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, huntProfitTakes: 0, lockSales: 0, lockHolds: 0, wallAsks: 0, wallFills: 0, avgSlippage: null };
   const vault = opts.vault ? new Vault(opts.vault, undefined, () => st.now) : undefined;
   const res: BacktestResult = { exitPolicy: policy, label: policy === 'confluence_ratchet' ? `confluence_ratchet[m=${(opts.hunt ?? DEFAULT_HUNT).targetMargin},f=${(opts.ratchet ?? DEFAULT_RATCHET).minFillRatio}]` : policy, huntParams: policy === 'confluence_ratchet' ? { hunt: opts.hunt ?? DEFAULT_HUNT, ratchet: opts.ratchet ?? DEFAULT_RATCHET } : undefined, vaultEnd: 0, pocketEnd: 0, bySession: {}, exits, trades: [], takeProfitFills: 0, latency: { orderMs: opts.latency?.orderMs ?? 0, cancelMs: opts.latency?.cancelMs ?? opts.latency?.orderMs ?? 0, jitterMs: opts.latency?.jitterMs ?? 0, sent: 0, cancelRaceFills: 0, cancelRaceContracts: 0, lateKills: 0 }, entryEvaluations: 0, days: 0, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
   const cadence = new CadenceGate(strategy);
@@ -475,6 +481,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     if (opts.paper && !f.isTaker) markoutDue.push({ due: st.now + 60_000, ticker: f.ticker, sign: f.side === 'bid' ? 1 : -1, price: f.price });
     const bp = (res.byPurpose![purposeOf(f.clientOrderId)] ??= { fills: 0, contracts: 0 });
     bp.fills++; bp.contracts += f.count;
+    if (f.clientOrderId?.endsWith('-exit-wall')) exits.wallFills += f.count;
     const hour = new Date(st.now).toISOString().slice(0, 13);
     res.contractsByHour![hour] = (res.contractsByHour![hour] ?? 0) + f.count;
     if (cancelInFlight.has(f.orderId)) { L.cancelRaceFills++; L.cancelRaceContracts += f.count; }
@@ -785,6 +792,9 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         if (d.event === 'activated') exits.huntActivations++;
         if (d.event === 'deactivated_giveback') exits.huntDeactivations++;
         if (d.event === 'profit_take_confluence' || d.event === 'profit_take_session' || d.event === 'profit_take_gap') exits.huntProfitTakes++;
+        if (d.event === 'lock_sale') exits.lockSales++;
+        if (d.event === 'lock_hold') exits.lockHolds++;
+        if (d.event === 'wall_ask') exits.wallAsks++;
         if (d.event === 'gapped') exits.gaps++;
         if (d.plan && !pending.has(m.ticker)) {
           exits.ratchetTriggers++;
@@ -929,7 +939,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           continue;
         }
         if (/^(train|explore)/.test(p.why)) res.paper!.extraSent = (res.paper!.extraSent ?? 0) + 1;
-        const clientOrderId = `${m.ticker}-${st.now}-${p.side}-${p.purpose}${p.why.startsWith('take-profit') ? '-tp' : ''}`;
+        const clientOrderId = `${m.ticker}-${st.now}-${p.side}-${p.purpose}${p.why.startsWith('take-profit') ? '-tp' : p.why.startsWith('confluence ratchet wall ask') ? '-wall' : ''}`;
         await send(m.ticker, 'order', async () => {
           try {
             await ex.createOrder({ ticker: m.ticker, side: p.side, count: p.count, price: p.price, timeInForce: p.timeInForce, postOnly: p.postOnly, reduceOnly: p.reduceOnly, selfTradePrevention: 'taker_at_cross', clientOrderId, expirationTime: p.expirationTime });

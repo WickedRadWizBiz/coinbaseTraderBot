@@ -53,6 +53,8 @@ export interface SideSummary {
   fills: number; contracts: number; fees: number; pnl: number; markets: number;
   /** Exit contracts by kind (take-profit, model exit, ratchet stop, cross, other). */
   exits: Record<string, number>;
+  /** confluence_ratchet: what hunt mode did in the replay (activations, stop triggers, lock sale judgements, wall asks). */
+  hunt?: string;
   /** Settled P&L by UTC hour (YYYY-MM-DDTHH). */
   byHour: Record<string, number>;
   /** Fills and contracts by order purpose (quote, entry, exit; other: an order the log does not name). */
@@ -713,6 +715,8 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const tpContracts = r.paper?.takeProfitContracts ?? 0;
   if (tpContracts) replay.exits['take-profit'] = +tpContracts.toFixed(2);
   if (r.exits.contracts - tpContracts > 1e-9) replay.exits['model exit / ratchet'] = +(r.exits.contracts - tpContracts).toFixed(2);
+  const x = r.exits;
+  if (x.huntActivations || x.wallAsks) replay.hunt = `hunt mode in the replay: ${x.huntActivations} activations, ${x.ratchetTriggers} stop triggers, ${x.gaps} gaps, ${x.huntProfitTakes} profit takes, ${x.lockSales} lock sales, ${x.lockHolds} lock holds, ${x.wallAsks} wall asks (${x.wallFills.toFixed(0)} contracts filled on them)`;
   const paper = paperSummary(audit, from, to);
   const minHours = o.minHours ?? 3;
   const checked = hours >= minHours;
@@ -803,6 +807,7 @@ async function main(): Promise<void> {
   if (res.refills?.paper.length || res.refills?.replay.length) console.log(`the pool ran dry and was refilled (a new training epoch): paper ${refilled(res.refills.paper)} | replay ${refilled(res.refills.replay)}`);
   row('replay', res.replay);
   row('paper', res.paper);
+  if (res.replay.hunt) console.log(res.replay.hunt);
   const purposes = (s: SideSummary) => Object.entries(s.byPurpose).sort().map(([k, x]) => `${k} ${x.fills}/${x.contracts.toFixed(0)}`).join(', ') || 'none';
   console.log(`fills/contracts by order purpose: replay ${purposes(res.replay)} | paper ${purposes(res.paper)}`);
   const X = res.replay.extra, rej = Object.entries(X.rejected).sort((x, y) => y[1] - x[1]).slice(0, 3).map(([k, n]) => `${k} x${n}`).join('; ');
