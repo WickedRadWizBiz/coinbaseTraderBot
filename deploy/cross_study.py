@@ -387,8 +387,13 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 peak = max(b, floor or 0.0)
                 # sell at the lock when the market pays over the spot-implied fair value (into strength)
                 if sale[0] == 'lock':
-                    if q is not None and b >= q + sale[1] - 1e-9 and sec <= last_taker: return (b - fee1(b, n), n, b, sec, True)
-                    if q is None or sale[2] == 'else_hold': return (None, 0.0, None, None, True)
+                    cond = sale[3] if len(sale) > 3 else 'fv'
+                    fv_ok = q is not None and b >= q + sale[1] - 1e-9
+                    f = flow(p['ep'], sec) if cond != 'fv' else None
+                    fl_ok = f is not None and f > 0
+                    hit = fv_ok if cond == 'fv' else fl_ok if cond == 'flow' else (fv_ok or fl_ok) if cond == 'either' else (fv_ok and fl_ok)
+                    if hit and sec <= last_taker: return (b - fee1(b, n), n, b, sec, True)
+                    if sale[2] == 'else_hold': return (None, 0.0, None, None, True)
                     # else: carry on with the trail given in `trail`
             if b > peak + 1e-9: peak = b
             if q is not None and (qpeak is None or q > qpeak): qpeak = q
@@ -519,6 +524,11 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         ('sell at the lock if bid >= fv, else hold', R(A, ('none',), ('lock', 0.0, 'else_hold'))),
         ('sell at the lock if bid >= fv + 2c, else hold', R(A, ('none',), ('lock', 0.02, 'else_hold'))),
         ('sell at the lock if bid >= fv + 4c, else hold', R(A, ('none',), ('lock', 0.04, 'else_hold'))),
+        ('sell at the lock if bid >= fv - 2c, else hold', R(A, ('none',), ('lock', -0.02, 'else_hold'))),
+        ('sell at the lock if taker flow favours us, else hold', R(A, ('none',), ('lock', 0.0, 'else_hold', 'flow'))),
+        ('sell at the lock if bid >= fv - 2c or flow favours us', R(A, ('none',), ('lock', -0.02, 'else_hold', 'either'))),
+        ('sell at the lock if bid >= fv - 2c and flow favours us', R(A, ('none',), ('lock', -0.02, 'else_hold', 'both'))),
+        ('sell at the lock if bid >= fv - 2c, else fv trail 8', R(A, ('fv', 0.08), ('lock', -0.02, 'else_trail'))),
         ('sell at the lock if bid >= fv + 2c, else bid trail 1', R(A, ('bid', 1), ('lock', 0.02, 'else_trail'))),
         ('sell at the lock if bid >= fv + 2c, else vol trail 2 sd', R(A, ('vol', 2.0), ('lock', 0.02, 'else_trail'))),
         ('sell at the lock if bid >= fv + 2c, else fv trail 8', R(A, ('fv', 0.08), ('lock', 0.02, 'else_trail'))),
@@ -556,6 +566,10 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             (f'{lname}; vol trail 2 sd', R(lock, ('vol', 2.0), ('taker',))),
             (f'{lname}; sell at the lock if bid >= fv + 2c, else hold', R(lock, ('none',), ('lock', 0.02, 'else_hold'))),
             (f'{lname}; sell at the lock if bid >= fv + 2c, else vol trail 2 sd', R(lock, ('vol', 2.0), ('lock', 0.02, 'else_trail'))),
+            (f'{lname}; sell at the lock if bid >= fv - 2c, else hold', R(lock, ('none',), ('lock', -0.02, 'else_hold'))),
+            (f'{lname}; sell at the lock if taker flow favours us, else hold', R(lock, ('none',), ('lock', 0.0, 'else_hold', 'flow'))),
+            (f'{lname}; sell at the lock if bid >= fv - 2c or flow favours us', R(lock, ('none',), ('lock', -0.02, 'else_hold', 'either'))),
+            (f'{lname}; sell at the lock if bid >= fv - 2c and flow favours us', R(lock, ('none',), ('lock', -0.02, 'else_hold', 'both'))),
         ]
         table(pathsB, rulesB, f'B. from entry, {lname}', False)
 
@@ -613,6 +627,26 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         k = 'no bid at all' if lastb is None else ('bid ended >= 0.90' if lastb >= 0.9 else 'bid ended <= 0.10' if lastb <= 0.1 else 'bid ended mid')
         ends[k] += 1; endn[k] += p['n']; endw[k] += p['payout'] * p['n']
     print('  E. the hunts the 1-tick trail never sold, by how their recorded bid ended: ' + '; '.join(f"{k}: {c} hunts, {endn[k]:.0f} ct, won {100 * endw[k] / endn[k] if endn[k] else 0:.0f}%" for k, c in ends.items()))
+    # E2. why a hunt has no recorded side bid at all: the recorder's tops for its market around the lock
+    why = collections.Counter(); shown = 0
+    for p in pathsA:
+        if any(b is not None for b in p['bids']): continue
+        ep = p['ep']; t = ep['ticker']; v = tops.get(t) or []
+        at0 = top_at(t, p['s0']); atc = top_at(t, p['c_sec'])
+        if not v: r = 'no tops for the market'
+        elif at0 is None: r = f"tops start after the lock (first key {v[0][0] - p['s0']:+d} s)"
+        else:
+            yb, ya = at0[1], at0[3]
+            r = ('yes bid side empty at the lock' if ep['sign'] > 0 and yb is None else 'yes ask side empty at the lock' if ep['sign'] < 0 and ya is None else 'side bid present at the lock?!')
+            if v[-1][0] < p['s0']: r += f"; last top {p['s0'] - v[-1][0]} s before the lock"
+        why[(('YES' if ep['sign'] > 0 else 'NO'), r)] += 1
+        if shown < 8:
+            shown += 1
+            print(f"    E2 example: {t} {'YES' if ep['sign'] > 0 else 'NO'} lock {p['s0']} close {p['c_sec']} tops {len(v)} first {v[0][0] - p['s0'] if v else 'n/a'} s last {v[-1][0] - p['s0'] if v else 'n/a'} s (rel. to the lock); at lock {None if at0 is None else at0[1:]}; at close {None if atc is None else atc[1:]}")
+    for (side, r), c in why.most_common():
+        print(f"    E2 {side:3s} {c:4d} hunts: {r}")
+    sides = collections.Counter(('YES' if p['ep']['sign'] > 0 else 'NO', any(b is not None for b in p['bids'])) for p in pathsA)
+    print('    E2 hunts by side and whether a side bid was recorded: ' + ', '.join(f"{s} {'with' if w else 'without'} path: {c}" for (s, w), c in sorted(sides.items())))
 
 
 # ---- The study --------------------------------------------------------------------------------------------------------
