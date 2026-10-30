@@ -189,7 +189,7 @@ export class SnnNetwork {
     const tpl = tennis && !pre ? this.tennisTemplate : undefined;
     if (tpl) for (const [name, a] of Object.entries(tpl.arrays)) copyInto(c.arrays()[name], a);
     this.columns.set(key, c);
-    const ro = new Readout(c.nFeat, { eta: this.p.readoutEta, cap: this.p.readoutCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: this.p.tagsPerContract, maxTagged: this.p.maxTaggedContracts, traceTauSec: this.p.traceTauSec, useTags: this.p.flags.tags },
+    const ro = new Readout(c.nFeat, { eta: this.p.readoutEta, cap: this.p.readoutCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: this.p.tagsPerContract, maxTagged: this.p.maxTaggedContracts, traceTauSec: this.p.traceTauSec, useTags: this.p.flags.tags, ...this.anchorDivFloor() },
       this.preset?.readouts?.[key] ?? tpl?.wf ?? (this.p.anchorMid ? undefined : priorWeights(c.nFeat, this.p.priorSlope)));
     this.readouts.set(key, ro);
     const dir = new Readout(c.nFeat, { eta: this.p.dirEta, cap: this.p.dirCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: 1, maxTagged: 1, traceTauSec: this.p.traceTauSec, useTags: true },
@@ -580,7 +580,7 @@ export class SnnNetwork {
       c.setScalars(col.scalars);
       this.columns.set(c.key, c);
       if (col.inputs) this.inputs.set(c.key, col.inputs);
-      const r = new Readout(c.nFeat, { eta: this.p.readoutEta, cap: this.p.readoutCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: this.p.tagsPerContract, maxTagged: this.p.maxTaggedContracts, traceTauSec: this.p.traceTauSec, useTags: this.p.flags.tags });
+      const r = new Readout(c.nFeat, { eta: this.p.readoutEta, cap: this.p.readoutCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: this.p.tagsPerContract, maxTagged: this.p.maxTaggedContracts, traceTauSec: this.p.traceTauSec, useTags: this.p.flags.tags, ...this.anchorDivFloor() });
       const ro = col.readout;
       // A checkpoint of the other readout kind (allowParamChange): its columns, but contract readouts start over as a
       // fresh network's would (zero correction when anchored, the crude prior when not).
@@ -639,6 +639,12 @@ export class SnnNetwork {
 
   /** Column readout probability for one threshold (training helpers). */
   readoutLogit(key: string, phi: Float64Array): number { return this.readouts.get(key)!.logit(phi); }
+
+  /** Contract readouts of a mid-anchored network measure fast-slow divergence against the plain prior's norm
+   *  (readout.ts divFloor); a plain network's readouts are unchanged. */
+  private anchorDivFloor(): { divFloor?: number } {
+    return this.p.anchorMid ? { divFloor: Math.hypot(...priorWeights(2, this.p.priorSlope)) } : {};
+  }
 
   /** The logit a contract readout starts from for one threshold. With `anchorMid` it is the market's own P(index > K):
    *  the contract's mid (a 'less' contract pays below its cap, so 1 - mid), clipped to [ANCHOR_CLIP, 1 - ANCHOR_CLIP] so a

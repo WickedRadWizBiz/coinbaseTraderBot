@@ -144,3 +144,23 @@ test('offline readout fit: with offsets the weights learn the correction to the 
   const plain = fitLogistic(X, y, new Float64Array(2), 1e-4, 300);
   assert.ok(plain.loss > fit.loss + 0.02, `${plain.loss} > ${fit.loss}`);
 });
+
+test('anchored readout: learning a small correction does not read as fast-slow divergence (it froze 97.9% of steps)', () => {
+  const tp = tape(30);
+  const net = new SnnNetwork(small({ anchorMid: true, readoutEta: 0.05, readoutCap: 1 }));
+  for (let s = 0; s < 30; s++) net.step(T0 + s * 1000, tp[s]);
+  for (let k = 1; k <= 5; k++) { net.score([query(`D${k}`, { mid: 0.4 })], T0 + (40 + k * 61) * 1000); net.settle(`D${k}`, 'yes', T0 + (40 + k * 61) * 1000 + 1); }
+  const ro = net.readouts.get('BTC-15m')!;
+  let d = 0, s = 0;
+  for (let i = 0; i < ro.n; i++) { d += (ro.wf[i] - ro.ws[i]) ** 2; s += ro.ws[i] ** 2; }
+  assert.ok(Math.sqrt(d) > 0, 'it learned');
+  assert.ok(Math.sqrt(d / Math.max(s, 1e-300)) >= 0.1, 'relative to |w_s| alone it would breach the 0.1 band');
+  assert.ok(ro.divergence() < 0.1, `against the prior norm it does not: ${ro.divergence()}`);
+  assert.ok(Math.abs(ro.divergence() - Math.sqrt(d) / Math.hypot(4 * DEFAULT_SNN.priorSlope)) < 1e-12);
+  // A plain readout measures divergence exactly as before.
+  const plain = new SnnNetwork(small());
+  plain.step(T0, tp[0]);
+  const pr = plain.readouts.get('BTC-15m')!;
+  pr.wf[1] += 0.3;
+  assert.ok(Math.abs(pr.divergence() - 0.3 / (4 * DEFAULT_SNN.priorSlope)) < 1e-12);
+});
