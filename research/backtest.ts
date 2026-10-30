@@ -1018,7 +1018,7 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
     hybrid: argOf('hunt-hybrid', '0') === '1', sellIntoGap: argOf('hunt-sell-into-gap', '1') === '1',
     lockSale: argOf('hunt-lock-sale', 'fair_value') as 'off' | 'fair_value' | 'flow' | 'either' | 'both', lockSaleFvMargin: Number(argOf('hunt-lock-sale-fv-margin', '0.02')), lockSaleElse: argOf('hunt-lock-sale-else', 'hold') as 'hold' | 'exit',
     lockSaleAt: argOf('hunt-lock-sale-at', 'trigger') as 'lock' | 'trigger',
-    wallAsk: argOf('hunt-wall-ask', '0') === '1', wallAskRatio: Number(argOf('hunt-wall-ask-ratio', '3')),
+    wallAsk: argOf('hunt-wall-ask', '1') === '1', wallAskRatio: Number(argOf('hunt-wall-ask-ratio', '3')),
   };
   // Hunt mode is evaluated over a parameter grid (target margin x wall fill ratio); every variant
   // counts toward the Deflated Sharpe.
