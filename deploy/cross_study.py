@@ -990,6 +990,58 @@ def pacer_audit(recs, startups, since_ms, until_ms):
         print(f"    snipe {when(ms)}: {str(d.get('why') or '')[:140]} | needed {float(d.get('neededUsd') or 0):.2f}")
 
 
+def audit_tail(episodes, results, pacer_recs, startups, since_ms, until_ms):
+    """Audit mode (no recordings): paper's realized P&L after fees by stretch between bot starts, from the fills and
+    settlements (tennis left out, entry fees in) and from the pacer's own credits (every contract type), and the exits
+    by reason without the book's markouts."""
+    try:
+        from zoneinfo import ZoneInfo
+        NY = ZoneInfo('America/New_York')
+    except Exception:
+        NY = None
+
+    def when(ms):
+        u = time.strftime('%m-%d %H:%M', time.gmtime(ms / 1000))
+        if NY is None: return u + ' UTC'
+        return u + ' UTC (' + datetime.datetime.fromtimestamp(ms / 1000, NY).strftime('%I:%M %p %Z').lstrip('0') + ')'
+    events, rows = [], collections.defaultdict(lambda: {'fills': 0, 'n': 0.0, 'net': 0.0, 'netn': 0.0, 'vs': 0.0, 'vsn': 0.0})
+    for ep in episodes:
+        en = sum(e['n'] for e in ep['entries'])
+        if en <= 0: continue
+        avg, efc, out = sum(e['n'] * e['px'] for e in ep['entries']) / en, sum(e['fee'] for e in ep['entries']) / en, 0.0
+        for x in ep['exits']:
+            out += x['n']
+            if not since_ms <= x['ms'] <= until_ms: continue
+            u = (x['px'] - avg - efc) * x['n'] - x['fee']
+            events.append((x['ms'], u))
+            r = rows[x['kind']]; r['fills'] += 1; r['n'] += x['n']; r['net'] += u; r['netn'] += x['n']
+            if ep['payout'] is not None: r['vs'] += (x['px'] - ep['payout']) * x['n'] - x['fee']; r['vsn'] += x['n']
+        res = results.get(ep['ticker'])
+        if ep['payout'] is not None and res and en - out > 1e-9 and since_ms <= res[1] <= until_ms:
+            u = (ep['payout'] - avg - efc) * (en - out)
+            events.append((res[1], u))
+            r = rows['(held to settlement)']; r['fills'] += 1; r['n'] += en - out; r['net'] += u; r['netn'] += en - out
+    pc = [(ms, float(d.get('usd') or 0)) for ms, d in pacer_recs if since_ms <= ms <= until_ms and d.get('event') in ('credit', 'settled')]
+    sn = [ms for ms, d in pacer_recs if since_ms <= ms <= until_ms and d.get('event') == 'snipe']
+    marks = sorted(set([since_ms] + [m for m in startups if since_ms < m <= until_ms]))
+    print("\n== 0d. paper's realized P&L after fees by stretch between bot starts: from the fills and settlements (tennis left"
+          "\n   out, entry fees in) and from the pacer's own credits (every contract type; none before the pacer was deployed)")
+    print(f"   {'from':<30} {'to':<30} {'hours':>6} {'fills $':>9} {'$/h':>7} {'pacer $':>9} {'$/h':>7} {'snipes':>6}")
+    for a, b in zip(marks, marks[1:] + [until_ms]):
+        h = (b - a) / 3.6e6
+        fx, px = sum(u for ms, u in events if a <= ms < b), sum(u for ms, u in pc if a <= ms < b)
+        print(f"   {when(a):<30} {when(b):<30} {h:6.1f} {fx:+9.2f} {fx / h if h > 0 else 0:+7.2f} {px:+9.2f} {px / h if h > 0 else 0:+7.2f} {sum(1 for ms in sn if a <= ms < b):6d}")
+    print("   from each start to the window's end:")
+    for a in marks:
+        h = (until_ms - a) / 3.6e6
+        fx, px = sum(u for ms, u in events if ms >= a), sum(u for ms, u in pc if ms >= a)
+        print(f"   {when(a):<30} {h:6.1f} h  fills {fx:+9.2f} ({fx / h if h > 0 else 0:+.2f}/h)  pacer {px:+9.2f} ({px / h if h > 0 else 0:+.2f}/h)")
+    print('\n== 1. exit fills by reason in the window (audit mode: no markouts): fills, contracts, net after fees, vs holding to settlement')
+    for k, r in sorted(rows.items(), key=lambda kv: -kv[1]['n']):
+        vs = f"vs holding ${r['vs']:+8.2f} ({r['vs'] / r['vsn']:+.3f}/ct)" if r['vsn'] else 'vs holding n/a'
+        print(f"  {k:32s} fills {r['fills']:4d}  contracts {r['n']:8.1f}  net ${r['net']:+8.2f} ({r['net'] / r['netn']:+.3f}/ct)  {vs}")
+
+
 def pool_audit(training, rejects, since_ms, until_ms, other=()):
     """Section 0c: the paper pool (the training supervisor's pool_raised / capital_exhaustion records) and why orders were
     refused (risk_reject reasons with the numbers stripped; the engine writes one per market, side and kind a minute)."""
@@ -1111,6 +1163,7 @@ def main():
     data = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser('~/bot/data')
     hours = float(sys.argv[2]) if len(sys.argv) > 2 else 8.0
     until = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] not in ('', 'now') else None
+    audit_only = len(sys.argv) > 4 and sys.argv[4] == 'audit'   # the audit sections only: no recordings, a few minutes
     now = datetime.datetime.strptime(until, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp() if until else time.time()
     since_ms = int((now - hours * 3600) * 1000)
     # Fills from two hours earlier, so a position opened before the window and closed inside it is whole.
@@ -1221,6 +1274,10 @@ def main():
     for ep in episodes:
         res = results.get(ep['ticker'])
         ep['payout'] = None if not res else (1.0 if (ep['sign'] > 0) == (res[0] == 'yes') else 0.0)
+    if audit_only:
+        audit_tail(episodes, results, pacer_recs, startups, since_ms, int(now * 1000))
+        print(f'\n(audit mode done in {time.time() - t0:.0f} s)')
+        return
 
     # -- 1. Exit fills by reason (vs holding; markouts after the book is loaded).
     # -- The recordings: top of book a second at a time for the episodes' markets, the settlement index, market terms.

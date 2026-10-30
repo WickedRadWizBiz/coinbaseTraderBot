@@ -18,6 +18,10 @@ on:
         description: 'With exit_hours: run the sinusoid study (deploy/sine_study.py: sine-wave direction and turn calls on the 15-minute contracts) instead, on a copy of the day recordings on the runner (the server only sends the files)'
         required: false
         default: 'false'
+      exit_audit:
+        description: 'With exit_hours: the audit sections only (the pacer, sizes, pool, realized P&L by stretch between bot starts, exits by reason without markouts); no recordings, a few minutes of server time'
+        required: false
+        default: 'false'
       exit_models:
         description: 'With exit_hours: also run the decision study (the model against the market, log loss) and the component study (SNN, TA network, meta-model) on the last 3 days, read-only'
         required: false
@@ -284,6 +288,7 @@ jobs:
           HOURS: ${{ inputs.exit_hours }}
           UNTIL: ${{ inputs.exit_until || 'now' }}
           MODELS: ${{ inputs.exit_models || 'false' }}
+          AUDIT: ${{ inputs.exit_audit || 'false' }}
         run: |
           [[ "$HOURS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "hours must be a number"; exit 1; }
           U=''
@@ -295,7 +300,9 @@ jobs:
           T=$(python3 -c "print(min(8100, int(float('$HOURS') * 110 + 4800)))")
           ssh bot "mkdir -p /tmp/diag"
           scp -q deploy/cross_study.py bot:/tmp/diag/cross_study.py
-          { ssh bot "timeout $T nice -n 19 python3 /tmp/diag/cross_study.py ~/bot/data $HOURS $U" || echo "(exit study stopped: $?)"; } 2>&1 | tee "$RUNNER_TEMP/report.txt"
+          MODE=''
+          [ "$AUDIT" = true ] && MODE="${U:-now} audit"
+          { ssh bot "timeout $T nice -n 19 python3 /tmp/diag/cross_study.py ~/bot/data $HOURS ${MODE:-$U}" || echo "(exit study stopped: $?)"; } 2>&1 | tee "$RUNNER_TEMP/report.txt"
           if [ "$MODELS" = true ]; then
             scp -q deploy/decision_study.py deploy/component_study.py bot:/tmp/diag/
             { echo; echo "== decision study (the model against the market, last 3 days)"; ssh bot "timeout 1500 nice -n 19 python3 /tmp/diag/decision_study.py ~/bot/data 3" || echo "(decision study stopped: $?)"
