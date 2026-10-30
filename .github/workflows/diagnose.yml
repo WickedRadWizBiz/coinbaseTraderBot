@@ -14,6 +14,10 @@ on:
         description: 'With exit_hours: the end of the window, an ISO UTC time such as 2026-10-28T03:10:00Z, or now'
         required: false
         default: 'now'
+      exit_sine:
+        description: 'With exit_hours: run the sinusoid study (deploy/sine_study.py: sine-wave direction and turn calls on the 15-minute contracts) instead, on a copy of the day recordings on the runner (the server only sends the files)'
+        required: false
+        default: 'false'
       exit_models:
         description: 'With exit_hours: also run the decision study (the model against the market, log loss) and the component study (SNN, TA network, meta-model) on the last 3 days, read-only'
         required: false
@@ -189,11 +193,75 @@ jobs:
             fi
             echo "== last 60 log lines"; journalctl -u kalshi-bot -n 60 --no-pager | cut -c1-300
 
+  sine-study:
+    # Steven's sinusoid research (Oct 30): can a sine-wave model call the next minute's direction (snipe entries) or the turns
+    # (exits) on the 15-minute contracts? deploy/sine_study.py runs on the runner over a copy of the window's day recordings:
+    # the server only sends the files (scp, read-only), so the bot's box parses nothing. The report (counts, rates, cents)
+    # is posted on the commit like the exit study's.
+    if: ${{ inputs.exit_hours && inputs.exit_sine == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Copy the window's day recordings (read-only)
+        env:
+          HOURS: ${{ inputs.exit_hours }}
+          UNTIL: ${{ inputs.exit_until || 'now' }}
+        run: |
+          [[ "$HOURS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "hours must be a number"; exit 1; }
+          if [ "$UNTIL" = now ]; then UNTIL=$(date -u +%Y-%m-%dT%H:%M:%SZ); fi
+          [[ "$UNTIL" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "until must be an ISO UTC time or now"; exit 1; }
+          echo "UNTIL=$UNTIL" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/data/recordings"
+          # The UTC days from 20 minutes before the window (the index warm-up) to its last second; the gzipped day file,
+          # or the plain one when the day has no gzipped file.
+          DAYS=$(python3 -c "import datetime as d; u=d.datetime.strptime('$UNTIL','%Y-%m-%dT%H:%M:%SZ')-d.timedelta(seconds=1); s=u-d.timedelta(hours=float('$HOURS'), minutes=20); print(' '.join((s.date()+d.timedelta(days=i)).isoformat() for i in range((u.date()-s.date()).days+1)))")
+          for D in $DAYS; do
+            F=$(ssh bot "cd ~/bot/data/recordings && ls md-$D.jsonl.gz 2>/dev/null || ls md-$D.jsonl 2>/dev/null" | head -1)
+            [ -n "$F" ] || { echo "no recording for $D"; continue; }
+            scp -q "bot:~/bot/data/recordings/$F" "$RUNNER_TEMP/data/recordings/"
+          done
+          ls -la "$RUNNER_TEMP/data/recordings" | tail -n +2
+      - name: Run the sinusoid study (on the runner)
+        env:
+          HOURS: ${{ inputs.exit_hours }}
+        run: |
+          { timeout 16200 python3 deploy/sine_study.py "$RUNNER_TEMP/data" "$HOURS" "$UNTIL" || echo "(sinusoid study stopped: $?)"; } 2>&1 | tee "$RUNNER_TEMP/report.txt"
+      - name: Post the report on the commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOURS: ${{ inputs.exit_hours }}
+        run: |
+          R="$RUNNER_TEMP/report.txt"; [ -s "$R" ] || { echo "no report to post"; exit 0; }
+          cut -c1-400 "$R" > "$RUNNER_TEMP/report.cut"
+          split -C 60000 -d "$RUNNER_TEMP/report.cut" "$RUNNER_TEMP/part."
+          n=0
+          for P in "$RUNNER_TEMP"/part.*; do
+            n=$((n + 1)); [ "$n" -le 4 ] || { echo "report longer than four parts: the rest is in the job log"; break; }
+            { echo "**Sinusoid study** run [$GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) · 15-minute contracts opened in the $HOURS h up to ${UNTIL:-now} · part $n"
+              echo; echo '```'; cat "$P"; echo; echo '```'; } > "$RUNNER_TEMP/comment.md"
+            jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' | gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" --input - --jq '.html_url'
+          done
+
   exit-study:
     # Why the ratchet stop and the model exit lose, from the paper bot's own records (read-only): deploy/cross_study.py from
     # the dispatched ref runs on the server over a window of positions and the report is posted on the commit (the job log
     # sits on a host the cloud sessions cannot read). Nothing on the server changes; the report is counts, prices and dollars.
-    if: ${{ inputs.exit_hours }}
+    if: ${{ inputs.exit_hours && inputs.exit_sine != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 150
     permissions:

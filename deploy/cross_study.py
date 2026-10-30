@@ -1042,13 +1042,15 @@ def size_audit(orders, fills, sizing, since_ms, until_ms):
     adds = lambda o: o.get('purpose') == 'entry' or (o.get('purpose') == 'quote' and not o.get('ro'))
     ent = sorted((o for o in orders.values() if o.get('ms') is not None and since_ms <= o['ms'] <= until_ms and adds(o)), key=lambda o: o['ms'])
     ef = [fl for fl in fills if since_ms <= fl['ms'] <= until_ms and adds(orders.get(fl['coid']) or {})]
-    usd = lambda o: float(o.get('count') or 0) * float(o.get('price') or 0)
+    # What the order stakes on its side: a YES bid costs its price, a YES ask that opens NO costs 1 - price (the side's price).
+    side_px = lambda side, px: float(px or 0) if side == 'bid' else 1 - float(px or 0)
+    usd = lambda o: float(o.get('count') or 0) * side_px(o.get('side'), o.get('price'))
     print(f'== 0b. position sizes: {len(ent)} entry orders (taker entries and maker quotes that add), {len(ef)} entry fills')
     if ent:
         c = [float(o.get('count') or 0) for o in ent]; u = [usd(o) for o in ent]
         print(f'  per order: contracts median {pct(c, .5):.2f} (p10 {pct(c, .1):.2f}, p90 {pct(c, .9):.2f}); stake median ${pct(u, .5):.2f} (p10 ${pct(u, .1):.2f}, p90 ${pct(u, .9):.2f})')
     if ef:
-        print(f"  filled: {sum(x['count'] for x in ef):.1f} contracts, ${sum(x['count'] * x['price'] for x in ef):.2f} staked; per fill median {pct([x['count'] for x in ef], .5):.2f} contracts")
+        print(f"  filled: {sum(x['count'] for x in ef):.1f} contracts, ${sum(x['count'] * side_px(x['side'], x['price']) for x in ef):.2f} staked; per fill median {pct([x['count'] for x in ef], .5):.2f} contracts")
     by = collections.OrderedDict()
     for o in ent: by.setdefault(o['ms'] // 3600_000, []).append(o)
     if by: print('    clock hour                     orders  contracts (median)  stake $ (median)  stake $ (p90)')
