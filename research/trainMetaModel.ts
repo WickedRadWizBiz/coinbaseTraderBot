@@ -84,9 +84,13 @@ export const DEFAULT_SETS = [
 
 const ALL_GROUPS: FeatureGroup[] = ['base', 'micro', 'momentum', 'spot', 'macro', 'confluence', 'session', 'time', 'geometry', 'vol', 'kalshi', 'returns', 'clock', 'calendar', 'interaction', 'ladder', 'perp', 'ta', 'taconf', 'snn', 'tanet'];
 
-export function resolveSet(spec: string, tiers: FeatureTier[] = ['T1', 'T2']): string[] {
-  const groups: FeatureGroup[] = spec === 'all' ? ALL_GROUPS : (spec.split('+') as FeatureGroup[]);
-  return featuresInGroups(groups).filter((n) => tiers.includes(FEATURES[n].tier ?? 'T1'));
+export function resolveSet(spec: string, tiers: FeatureTier[] = ['T1', 'T2'], extra: Record<string, string[]> = {}): string[] {
+  // A study may name groups of its own (opts.extraGroups): inputs it put into the rows that the feature engine does not
+  // register. They are kept whole (no tier).
+  const parts = spec === 'all' ? ALL_GROUPS : spec.split('+');
+  const groups = parts.filter((g) => !(g in extra)) as FeatureGroup[];
+  const own = parts.filter((g) => g in extra).flatMap((g) => extra[g]);
+  return [...featuresInGroups(groups).filter((n) => tiers.includes(FEATURES[n].tier ?? 'T1')), ...own];
 }
 
 /** Default model search: MLP only, with hidden layers (8 or 16 units, picked by the 1-SE rule). */
@@ -131,6 +135,8 @@ export interface TrainOpts {
   depths?: number[];
   ensemble?: number;
   tiers?: FeatureTier[];
+  /** Study-only input groups by name (see resolveSet). */
+  extraGroups?: Record<string, string[]>;
   /** Skip the Student-t search (keeps the dataset's Gaussian pricing). */
   fixedNu?: number | null;
   /** Combinatorial purged CV of the selected configuration (N groups, k held out); 0 disables. */
@@ -265,9 +271,9 @@ export async function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts & { t
   const dropped: Record<string, string[]> = {};
   const devDays = new Set(dev.map((r) => new Date(r.window).toISOString().slice(0, 10))).size;
   const sets = (opts.sets ?? DEFAULT_SETS).map((spec) => {
-    const names = resolveSet(spec, opts.tiers).filter((n) => {
-      if (FEATURES[n].group === 'base') return true;
-      const g = FEATURES[n].group;
+    const names = resolveSet(spec, opts.tiers, opts.extraGroups).filter((n) => {
+      if (FEATURES[n]?.group === 'base') return true;
+      const g = FEATURES[n]?.group;
       if ((g === 'time' || g === 'session' || g === 'clock' || g === 'calendar') && devDays < MIN_DAYS_FOR_TIME) {
         (dropped[spec] ??= []).push(`${n} (needs ${MIN_DAYS_FOR_TIME}+ days, have ${devDays})`);
         return false;
@@ -486,7 +492,7 @@ export async function trainMetaModel(rowsIn: DatasetRow[], opts: TrainOpts & { t
     const col = hold.map((x) => x.fx[f]);
     for (let i = col.length - 1; i > 0; i--) { const k = Math.floor(r() * (i + 1)); [col[i], col[k]] = [col[k], col[i]]; }
     const p = predictRows(hold, (row, i) => ({ ...row.fx, [f]: col[i] }));
-    return { feature: f, group: FEATURES[f].group, logLossIncrease: weightedLogLoss(p, y, wHold) - logLossModel };
+    return { feature: f, group: FEATURES[f]?.group ?? 'study', logLossIncrease: weightedLogLoss(p, y, wHold) - logLossModel };
   }).sort((a, b) => b.logLossIncrease - a.logLossIncrease);
 
   params.training = {
