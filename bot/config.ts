@@ -122,12 +122,13 @@ export interface StrategyConfig {
   /** STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC: no exits in the last share of the contract's window either (0.10 = the last 90 s of a
    *  15-minute market, 6 min of an hourly one): a position there rides to settlement (Steven's rule, Oct 29). */
   noExitBeforeCloseFrac: number;
-  /** PACER (Steven's spec, Oct 29 23:35 UTC): the hourly quota pacer (bot/risk/quotaPacer.ts). A 24-hour profit clock anchored
+  /** PACER (Steven's spec, Oct 29 23:35 UTC; off by default since Oct 30: in the exit lab on the recorded days it sold winners at
+   *  the bid before they settled while the losers never reached its target, and every variant made less than the first-dip
+   *  rule alone): the hourly quota pacer (bot/risk/quotaPacer.ts). A 24-hour profit clock anchored
    *  to 10:00 AM New York time at PACER_HOURLY_USD (4.50) an hour; the strategy sells a position at once (the "quota snipe") when
    *  its net profit after fees, sold at the bid, covers what the rest of the clock hour owes, clamped to [PACER_MIN_TAKE_USD,
    *  PACER_MAX_TARGET_USD], whatever the exit policy (hold included), the hunt or the model says. Inside the last share of the
-   *  window a position in profit rides to settlement instead, and a hunted position is never held for settlement
-   *  (HUNT_LOCK_SALE_ELSE=exit). */
+   *  window a position in profit rides to settlement instead. */
   pacer: PacerConfig;
   /** PROFIT_MANDATE (off by default; Steven's first wording, Oct 29 23:22 UTC): outside that final share of the window a position
    *  whose side bid net of the exit fee clears its entry cost (entry fee in) by PROFIT_MANDATE_MIN is sold at the bid whatever the
@@ -229,8 +230,8 @@ export interface StrategyConfig {
    *  sells every dip: sell the whole position at the bid when the bid is at least the math fair value plus
    *  HUNT_LOCK_SALE_FV_MARGIN (0.02) and/or the last minute's Kalshi taker flow favours the held side. HUNT_LOCK_SALE_AT
    *  (lock | trigger) says when: right at the lock, or (default) the first time the bid sits under the ratchet's stop.
-   *  HUNT_LOCK_SALE_ELSE (hold | exit; exit by default since Oct 29 23:00 UTC: the profit mandate never
-   *  holds a hunted position to settlement) when the rule does not hit. fair_value by default (Oct 29): on the replayed days it is
+   *  HUNT_LOCK_SALE_ELSE (hold | exit; hold by default, the setup the exit lab measured: exit, #204's default (in paper
+   *  from Oct 30 01:31 UTC), hands the position to the fair-value exit) when the rule does not hit. fair_value by default (Oct 29): on the replayed days it is
    *  never worse than the trailing stop (+$39 on Oct 28, level on Oct 27) and level with holding, on half the contracts. */
   huntLockSale: 'off' | 'fair_value' | 'flow' | 'either' | 'both';
   huntLockSaleFvMargin: number;
@@ -851,7 +852,7 @@ function pacerConfig(env: Env): PacerConfig {
   if (!validZone(tz)) throw new Error(`PACER_TZ ${tz} is not a time zone this Node knows`);
   const minTakeUsd = num(env, 'PACER_MIN_TAKE_USD', 0.75, 0, 10_000);
   return {
-    enabled: bool(env, 'PACER', true),
+    enabled: bool(env, 'PACER', false),
     group: bool(env, 'PACER_GROUP', true),
     hourlyUsd: num(env, 'PACER_HOURLY_USD', 4.5, 0, 10_000),
     anchorHour: Math.floor(num(env, 'PACER_ANCHOR_HOUR', 10, 0, 23)),
@@ -1151,7 +1152,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     huntSellIntoGap: bool(env, 'HUNT_SELL_INTO_GAP', true),
     huntLockSale: oneOf(env, 'HUNT_LOCK_SALE', 'fair_value', ['off', 'fair_value', 'flow', 'either', 'both'] as const),
     huntLockSaleFvMargin: num(env, 'HUNT_LOCK_SALE_FV_MARGIN', 0.02, -0.2, 0.2),
-    huntLockSaleElse: oneOf(env, 'HUNT_LOCK_SALE_ELSE', 'exit', ['hold', 'exit'] as const),
+    huntLockSaleElse: oneOf(env, 'HUNT_LOCK_SALE_ELSE', 'hold', ['hold', 'exit'] as const),
     huntLockSaleAt: oneOf(env, 'HUNT_LOCK_SALE_AT', 'trigger', ['lock', 'trigger'] as const),
     huntWallAsk: bool(env, 'HUNT_WALL_ASK', true),
     huntWallAskRatio: num(env, 'HUNT_WALL_ASK_RATIO', 3, 1, 1000),
