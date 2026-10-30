@@ -419,7 +419,9 @@ export interface OptimalFConfig {
   /** Trades needed before a cap applies: setup lanes (backtest + live), Kalshi (settled positions). */
   minTradesSetups: number;
   minTradesKalshi: number;
-  /** Paper: the cap never goes below this share of the configured risk (keeps collecting evidence). */
+  /** The cap never goes below this share of the configured risk: the tier's per-order fraction on the Kalshi pools (paper
+   *  and live), a lane's risk on the paper setups. 1 (Steven, Oct 30: entries were too small with no measured edge): a
+   *  history without edge no longer cuts the stake below the tier's share; 0.25 until then. */
   paperFloor: number;
 }
 
@@ -1407,7 +1409,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       liveMult: num(env, 'OPTIMAL_F_LIVE_MULT', 2, 0.1, 20),
       minTradesSetups: num(env, 'OPTIMAL_F_MIN_TRADES', 50, 10, 10000),
       minTradesKalshi: num(env, 'OPTIMAL_F_MIN_TRADES_KALSHI', 100, 10, 10000),
-      paperFloor: num(env, 'OPTIMAL_F_PAPER_FLOOR', 0.25, 0, 1),
+      paperFloor: num(env, 'OPTIMAL_F_PAPER_FLOOR', 1, 0, 1),
     },
     autoTrain: {
       mode: oneOf(env, 'AUTO_TRAIN', 'remote', ['off', 'daily', 'windows', 'background', 'remote'] as const),

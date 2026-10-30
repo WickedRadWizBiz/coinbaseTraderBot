@@ -838,7 +838,7 @@ test('optimal f on the Kalshi pool: settled trades in trades.jsonl cap the stake
   const f = engine.kalshiOptimalF('crypto', now);
   assert.equal(f.rep?.n, 150);
   assert.equal(f.rep?.cap, 0);
-  assert.ok(f.cap > 0 && Math.abs(f.cap - cfg.optimalF.paperFloor * engine.tier().orderFrac) < 1e-12, 'paper: floored at a quarter of the per-order fraction');
+  assert.ok(f.cap > 0 && Math.abs(f.cap - cfg.optimalF.paperFloor * engine.tier().orderFrac) < 1e-12, 'floored at OPTIMAL_F_PAPER_FLOOR x the per-order fraction (the whole of it by default)');
   assert.equal(engine.kalshiOptimalF('tennis', now).rep?.n, 0, 'books are separate');
   assert.equal(engine.kalshiOptimalF('tennis', now).cap, Infinity, 'too few trades: no cap');
 });

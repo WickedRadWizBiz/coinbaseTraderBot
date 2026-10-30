@@ -880,8 +880,8 @@ export class Engine {
 
   /** Optimal f on the pool's settled entries (trades.jsonl, one trade per market, recency weighted),
    *  recomputed hourly: the stake per order (fraction of bankroll) never above its bootstrap 25th
-   *  percentile once there are enough trades (OPTIMAL_F_MIN_TRADES_KALSHI); paper floors it at
-   *  paperFloor x the tier's per-order fraction. Infinity = no cap. */
+   *  percentile once there are enough trades (OPTIMAL_F_MIN_TRADES_KALSHI); floored at OPTIMAL_F_PAPER_FLOOR x the
+   *  tier's per-order fraction (1 since Oct 30: no measured edge no longer shrinks the stake). Infinity = no cap. */
   kalshiOptimalF(book: 'crypto' | 'tennis', now = this.now()): { cap: number; rep?: OptimalFReport } {
     const of = this.d.cfg.optimalF;
     if (!of?.enabled || !this.d.cfg.dataDir || this.d.streakFiles === false) return { cap: Infinity };
@@ -906,7 +906,8 @@ export class Engine {
       this.fCaps[book] = c;
     }
     let cap = c.rep.cap;
-    // The floor applies in paper and live alike (the owner, Oct 28): with no measured edge the stake shrinks to it.
+    // The floor applies in paper and live alike (the owner, Oct 28): with no measured edge the stake shrinks to it, and
+    // at the default (1, Steven, Oct 30) not below the tier's per-order share.
     if (Number.isFinite(cap)) cap = Math.max(cap, of.paperFloor * this.tier().orderFrac);
     return { cap, rep: c.rep };
   }
