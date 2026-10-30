@@ -191,6 +191,15 @@ def cell(hits, n, p0=0.5):
     return f'{100 * hits / n:5.1f}% z{zline(hits, n, p0):+5.1f}' if n else '    -        '
 
 
+def cluster_se(groups):
+    """The mean a trade and its standard error with the trades clustered by contract: groups = [(trades, sum), ...]."""
+    n = sum(g[0] for g in groups)
+    if not n: return 0.0, 0.0
+    m, k = sum(g[1] for g in groups) / n, len(groups)
+    v = sum((g[1] - m * g[0]) ** 2 for g in groups) * (k / (k - 1) if k > 1 else 1.0)
+    return m, math.sqrt(v) / n
+
+
 def chance(calls_up, moves_up, n):
     """The hit rate a call independent of the move would get, given the shares of up calls and up moves."""
     a, b = calls_up / n, moves_up / n
@@ -321,9 +330,16 @@ class Contract:
         for v in self.mid:
             if v is not None: lastm = v
             self.midf.append(lastm if lastm is not None else first)
-        # The result the bot recorded, else the mid in the last ten seconds (unknown when the close was still in doubt).
-        tail = [m for m in self.mid[-10:] if m is not None]
-        self.payout = {'yes': 1.0, 'no': 0.0}.get(result) if result else None if not tail else 1.0 if tail[-1] >= 0.9 else 0.0 if tail[-1] <= 0.1 else None
+        # The result the bot recorded, else the book's last top in the last ten seconds: a YES bid of 90c or more, or a YES
+        # ask of 10c or less (once the close is decided the losing side's bids empty, so the book is often one-sided);
+        # unknown when the close was still in doubt.
+        self.payout = {'yes': 1.0, 'no': 0.0}.get(result) if result else None
+        if self.payout is None:
+            for b, a in zip(reversed(self.bid[-10:]), reversed(self.ask[-10:])):
+                if b is None and a is None: continue
+                if b is not None and b >= 0.9: self.payout = 1.0
+                elif a is not None and a <= 0.1: self.payout = 0.0
+                break
         self.lo = WARM
         self.hi = n - int(LAST_SHARE * n)   # the last 10% rides to settlement: no call is acted on there
 
@@ -514,6 +530,7 @@ def main():
     s3 = collections.defaultdict(lambda: {'tops': 0, 'bottoms': 0, 'top': {1: [0, 0], 2: [0, 0]}, 'bottom': {1: [0, 0], 2: [0, 0]}, 'mk': [0.0, 0.0, 0]})
     s4 = collections.defaultdict(lambda: [0, 0, 0.0, 0, 0.0, 0.0])    # entries -> trades, hits +2c, net +2c, hits +4c, net +4c, hold
     s4x = collections.defaultdict(lambda: [0, 0, 0.0])                 # exit rule on the every-minute entries -> trades, sold at a top, net
+    s4g, s4d = collections.defaultdict(list), collections.defaultdict(list)   # per contract: (trades, +4c net) / (trades, net minus the +4c snipe's)
     n_settled = 0
     for ci, k in enumerate(contracts):
         s = {name: f(k.x) for name, f in CONTRACT_CYCLES}
@@ -611,23 +628,27 @@ def main():
             return out
 
         for name in entry_names:
-            acc = s4[name]
+            acc, nc, sc = s4[name], 0, 0.0
             for j, side in entries(name):
                 a, b, c = trade_out(j, side, 0.02), trade_out(j, side, 0.04), trade_out(j, side, 'hold')
                 if a is None or b is None or c is None: continue
                 acc[0] += 1; acc[1] += a[1]; acc[2] += a[0]; acc[3] += b[1]; acc[4] += b[0]; acc[5] += c[0]
+                nc += 1; sc += b[0]
+            if nc: s4g[name].append((nc, sc))
         ref = entries('every minute (ref)')
-        for label, rule in (('snipe +2c', 0.02), ('snipe +4c', 0.04), ('hold', 'hold')):
-            for j, side in ref:
-                o = trade_out(j, side, rule)
-                if o is not None: x = s4x[label]; x[0] += 1; x[2] += o[0]
+        o4 = {e: trade_out(*e, 0.04) for e in ref}
+        rules = [('snipe +2c', 0.02, None), ('snipe +4c', 0.04, None), ('hold', 'hold', None)]
         for name in ['momentum 10 s'] + [m for m in names if m not in ('imbalance', 'momentum 10 s')]:
             sig = s.get(name)
-            if sig is None: continue
-            tps, bts = turns(sig, lo, hi)
-            for j, side in ref:
-                o = trade_out(j, side, 'top', tps if side > 0 else bts)
-                if o is not None: x = s4x['top: ' + name]; x[0] += 1; x[1] += o[1]; x[2] += o[0]
+            if sig is not None: rules.append(('top: ' + name, 'top', turns(sig, lo, hi)))
+        for label, rule, evs in rules:
+            x, nc, dc = s4x[label], 0, 0.0
+            for e in ref:
+                o = o4[e] if rule == 0.04 else trade_out(*e, rule, (evs[0] if e[1] > 0 else evs[1]) if evs else None)
+                if o is None: continue
+                x[0] += 1; x[1] += o[1]; x[2] += o[0]
+                if o4[e] is not None: nc += 1; dc += o[0] - o4[e][0]
+            if nc: s4d[label].append((nc, dc))
         del sides
         if ci % 100 == 99: print(f'  {ci + 1} of {len(contracts)} contracts ({time.time() - t0:.0f} s)')
 
@@ -680,24 +701,27 @@ def main():
         cs = [cell(*a[kd][c], 0.5 if name == 'every 15 s (ref)' else base[(kd, c)]) for kd, c in (('top', 1), ('top', 2), ('bottom', 1), ('bottom', 2))]
         print(f"   {name:<16} {a['tops']:>6} {cs[0]:>15} {cs[1]:>15} {mk:>15}   {a['bottoms']:>7} {cs[2]:>15} {cs[3]:>15}")
 
-    print(f'\n== S4. snipe trades on the {n_settled} contracts with a clear result: buy the called side at the ask (a predicted bottom'
+    print(f'\n== S4. snipe trades on the {n_settled} of {len(contracts)} contracts with a clear result: buy the called side at the ask (a predicted bottom'
           f'\n   buys YES, a predicted top buys NO; at most one a side every 30 s, none in the last 10% or its minute before), {ORDER}'
           '\n   contracts, taker fees both ways. The snipe sells at the bid once the net is +2c (or +4c) a contract; unsold by the'
           '\n   last 10%, it rides to settlement in profit and is sold at the bid otherwise. "hold": every contract to settlement.'
-          '\n   Net cents a contract; hit: the snipe filled.')
-    print(f"   {'entries':<20} {'trades':>7} {'snipe +2c: hit / net':>22} {'snipe +4c: hit / net':>22} {'hold':>8}")
+          '\n   Net cents a contract; hit: the snipe filled; se: the +4c net\'s standard error with trades clustered by contract.')
+    print(f"   {'entries':<20} {'trades':>7} {'snipe +2c: hit / net':>22} {'snipe +4c: hit / net':>22} {'se':>6} {'hold':>8}")
     for name in entry_names:
         a = s4.get(name)
         if not a or not a[0]: continue
-        print(f'   {name:<20} {a[0]:>7} {100 * a[1] / a[0]:>11.0f}% / {100 * a[2] / a[0]:+6.2f} {100 * a[3] / a[0]:>11.0f}% / {100 * a[4] / a[0]:+6.2f} {100 * a[5] / a[0]:+8.2f}')
+        se = cluster_se(s4g.get(name, []))[1]
+        print(f'   {name:<20} {a[0]:>7} {100 * a[1] / a[0]:>11.0f}% / {100 * a[2] / a[0]:+6.2f} {100 * a[3] / a[0]:>11.0f}% / {100 * a[4] / a[0]:+6.2f} {100 * se:>6.2f} {100 * a[5] / a[0]:+8.2f}')
     print('\n   exits at the predicted top, on the every-minute entries (both sides; a held NO\'s top is a predicted YES bottom):'
           f'\n   sell at the bid at the first predicted top once the net is at least {100 * MIN_PROFIT:.1f}c a contract (the curve\'s floor), else as'
-          '\n   the snipe rows end. Against the +2c / +4c snipe and holding, on the same entries.')
-    print(f"   {'exit':<26} {'trades':>7} {'sold at a top':>14} {'net':>8}")
+          '\n   the snipe rows end. Against the +2c / +4c snipe and holding, on the same entries; "vs +4c": the net minus the +4c'
+          '\n   snipe\'s on the same entries, +- its standard error with trades clustered by contract.')
+    print(f"   {'exit':<26} {'trades':>7} {'sold at a top':>14} {'net':>8} {'vs +4c':>16}")
     for label in ['snipe +2c', 'snipe +4c', 'hold'] + ['top: ' + m for m in ['momentum 10 s'] + [m for m in names if m not in ('imbalance', 'momentum 10 s')]]:
         x = s4x.get(label)
         if not x or not x[0]: continue
-        print(f"   {label:<26} {x[0]:>7} {(f'{100 * x[1] / x[0]:.0f}%' if label.startswith('top') else ''):>14} {100 * x[2] / x[0]:+8.2f}")
+        dm, ds = cluster_se(s4d.get(label, []))
+        print(f"   {label:<26} {x[0]:>7} {(f'{100 * x[1] / x[0]:.0f}%' if label.startswith('top') else ''):>14} {100 * x[2] / x[0]:+8.2f} {(f'{100 * dm:+.2f} +- {100 * ds:.2f}' if label != 'snipe +4c' else ''):>16}")
     print(f'\n(done in {time.time() - t0:.0f} s)')
 
 if __name__ == '__main__':
