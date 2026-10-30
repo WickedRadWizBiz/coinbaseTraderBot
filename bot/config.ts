@@ -858,7 +858,7 @@ function pacerConfig(env: Env): PacerConfig {
     anchorHour: Math.floor(num(env, 'PACER_ANCHOR_HOUR', 10, 0, 23)),
     anchorMinute: Math.floor(num(env, 'PACER_ANCHOR_MINUTE', 0, 0, 59)),
     tz,
-    mode: oneOf(env, 'PACER_MODE', 'cumulative', ['cumulative', 'rolling_hour'] as const),
+    mode: oneOf(env, 'PACER_MODE', 'rolling_hour', ['cumulative', 'rolling_hour'] as const),
     minTakeUsd,
     maxTargetUsd: Math.max(minTakeUsd, num(env, 'PACER_MAX_TARGET_USD', 6.5, 0, 10_000)),
   };

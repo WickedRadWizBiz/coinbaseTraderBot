@@ -5,8 +5,9 @@
 // contract's window when the position is in profit, where it rides to settlement (STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC).
 //
 //   cycle      the most recent anchor (10:00 AM New York) to the next one; hour #1 is 10-11 AM, #24 is 9-10 AM
-//   deficit    cumulative mode (the default): hour# x hourly - realized since the anchor, so a slow hour is owed by the
-//              next ones ("don't stack up deficit across hours"); rolling_hour: hourly - realized in this clock hour
+//   deficit    rolling_hour (the default, Steven: "I don't want the bot to stack up deficit across hours"): hourly -
+//              realized in this clock hour, so a slow hour is not owed by the next ones; cumulative (his reference code's
+//              default, the default here until Oct 30): hour# x hourly - realized since the anchor, a slow hour owed later
 //   needed     max(min take, min(deficit, max target)): ahead of pace the floor still takes a profit at once ("if it's
 //              ahead it shouldn't slow down"), and a cold streak never demands more than the cap from one position
 //   realized   net of fees: each reducing fill credits its realized part against the position's cost basis (entry fee
