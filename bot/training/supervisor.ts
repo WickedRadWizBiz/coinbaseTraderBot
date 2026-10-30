@@ -38,7 +38,8 @@ const log = logger('training');
 
 type Book = 'kalshi' | 'perps';
 
-interface EpochState { epoch: number; startTs: number; startEquity: number; peak: number; trough: number; fills: number; refills: number; refilled: number }
+/** pool: the configured pool (PAPER_BANKROLL_USD) the epoch started from; a larger one tops the pool up (raisePool). */
+interface EpochState { epoch: number; startTs: number; startEquity: number; peak: number; trough: number; fills: number; refills: number; refilled: number; pool?: number }
 interface TrainingState { kalshi: EpochState; perps: EpochState; last?: EpochRecord }
 
 export interface EpochRecord {
@@ -66,7 +67,7 @@ export class TrainingSupervisor {
     noteCash?: (amount: number) => void;
     now?: () => number;
   }) {
-    const fresh = (equity: number): EpochState => ({ epoch: 1, startTs: this.now, startEquity: equity, peak: equity, trough: equity, fills: 0, refills: 0, refilled: 0 });
+    const fresh = (equity: number): EpochState => ({ epoch: 1, startTs: this.now, startEquity: equity, peak: equity, trough: equity, fills: 0, refills: 0, refilled: 0, pool: equity });
     const saved = readJson<TrainingState>(this.file, { quarantine: true });
     this.st = saved ?? { kalshi: fresh(d.cfg.paperBankrollUsd), perps: fresh(d.perpsStart ?? d.cfg.perps.paperBalanceUsd) };
     // Override-covered automatic trips are vetoed (manual STOP ALL always engages). Paper sizes its orders by its own
@@ -133,6 +134,7 @@ export class TrainingSupervisor {
     s.peak = Math.max(s.peak, eq); s.trough = Math.min(s.trough, eq);
     const floor = this.d.cfg.strategy.minTradableBankrollUsd;
     const start = this.d.cfg.paperBankrollUsd;
+    if (start > (s.pool ?? s.startEquity) + 0.005) return this.raisePool(eq, bank, start);
     if (bank >= floor || bank >= start) return;
     await this.d.oms.cancelAll('capital exhaustion: new training epoch');
     const amount = +(start - bank).toFixed(2);
@@ -141,6 +143,25 @@ export class TrainingSupervisor {
     e.onBalance(await paper.getBalance());
     this.d.equityGuard?.resetEpoch(e.equity() ?? start, this.now, e.bankroll() ?? start);
     this.endEpoch('kalshi', eq, amount, { size: e.riskScale('crypto'), streak: { crypto: e.streak.crypto.status(), tennis: e.streak.tennis.status() } });
+    this.st.kalshi.pool = start;
+  }
+
+  /** A larger configured pool (PAPER_BANKROLL_USD; Steven, Oct 30: $200) tops the Kalshi paper pool's tradable bankroll up
+   *  to it once (the paper exchange already added the difference at startup; this covers the drawdown) and starts a new
+   *  epoch at full size (break-even reset). Not a training failure: no epochs.jsonl record. */
+  private async raisePool(eq: number, bank: number, start: number): Promise<void> {
+    const e = this.d.engine, paper = this.d.kalshiPaper!, s = this.st.kalshi;
+    const amount = Math.max(0, +(start - bank).toFixed(2));
+    if (amount > 0) {
+      paper.refill(amount);
+      this.d.noteCash?.(amount);
+      e.onBalance(await paper.getBalance());
+    }
+    this.d.equityGuard?.resetEpoch(e.equity() ?? eq + amount, this.now, e.bankroll() ?? bank + amount);
+    const now = this.now, startEquity = eq + amount;
+    this.d.audit.write('training', { event: 'pool_raised', book: 'kalshi', epoch: s.epoch, from: +(s.pool ?? s.startEquity).toFixed(2), to: start, bankroll: +bank.toFixed(2), equity: +eq.toFixed(2), topUp: amount });
+    this.d.alerter.notify('info', 'training-kalshi', `Kalshi paper pool raised to $${start} (PAPER_BANKROLL_USD): topped up with $${amount}, a new epoch at full size`);
+    this.st.kalshi = { epoch: s.epoch + 1, startTs: now, startEquity, peak: startEquity, trough: startEquity, fills: 0, refills: s.refills, refilled: +(s.refilled + amount).toFixed(2), pool: start };
   }
 
   private async checkPerps(): Promise<void> {

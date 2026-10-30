@@ -150,6 +150,13 @@ export interface StrategyConfig {
    *  (the owner's choice on Oct 24, a minimum of 10%: orders shrink as the account does and grow as it does). 0 = the
    *  fixed paperOrderUsd. Live never uses it. */
   paperOrderFrac: number;
+  /** The order band, paper and live (Steven, Oct 30: "between $10-$20 an order"): each crypto entry and maker quote that
+   *  sizing wants stakes its sized amount clamped to [orderUsdMin, orderUsdMax] dollars, within the risk room and free
+   *  cash left (an entry the room cannot fit at orderUsdMin is skipped), in place of the tier, loss-aware, optimal-f and
+   *  portfolio-Kelly sizing; the risk caps widen to fit it as for the paper order size. orderUsdMin 0 = off. A paper
+   *  order size (paperOrderUsd / paperOrderFrac) wins over it. */
+  orderUsdMin: number;
+  orderUsdMax: number;
   /** Paper only: no new crypto entries in a time-to-close bucket where the market mid has scored a better log loss
    *  than the bot's (temperature-calibrated) probability over the last settled markets (bot/strategy/accuracyGate.ts;
    *  the owner's choice on Oct 23). Live never blocks on it. */
@@ -321,6 +328,8 @@ export interface Config {
   auditMaxFileMb: number;
   auditRetentionDays: number;
   paramsPath: string;
+  /** The paper Kalshi pool (Steven, Oct 30: $200): what paper starts with and refills to; raising it tops the pool up once
+   *  (bot/training/supervisor.ts). */
   paperBankrollUsd: number;
   /** Map of Kalshi CF Benchmarks index id -> asset symbol (BTC, ETH...). */
   indexIdMap: Record<string, string>;
@@ -1116,6 +1125,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     minQuoteContracts: num(env, 'STRATEGY_MIN_QUOTE_CONTRACTS', 3, 0, 100),
     paperOrderUsd: num(env, 'PAPER_ORDER_USD', 0, 0, 1000),
     paperOrderFrac: num(env, 'PAPER_ORDER_FRAC', 0, 0, 1),
+    orderUsdMin: num(env, 'ORDER_USD_MIN', 10, 0, 1000),
+    orderUsdMax: num(env, 'ORDER_USD_MAX', 20, 0, 1000),
     accuracyGate: { enabled: bool(env, 'ACCURACY_GATE', true), window: num(env, 'ACCURACY_GATE_WINDOW', 150, 20, 2000), minMarkets: num(env, 'ACCURACY_GATE_MIN_MARKETS', 40, 5, 1000) },
     sizing: oneOf(env, 'STRATEGY_SIZING', relaxed ? 'target_ev' : 'kelly', ['kelly', 'target_ev'] as const),
     kappa: num(env, 'STRATEGY_KAPPA', 0.5, 0, 1),
@@ -1264,8 +1275,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     auditMaxFileMb: num(env, 'AUDIT_MAX_FILE_MB', 256, 16, 4096),
     auditRetentionDays: num(env, 'AUDIT_RETENTION_DAYS', 30, 0, 3650),
     paramsPath: path.resolve(env.MODEL_PARAMS_PATH ?? './params/model.json'),
-    // Starts in the aggressive tier; see SIZING_TIERS.
-    paperBankrollUsd: num(env, 'PAPER_BANKROLL_USD', 100, 1, 1e7),
+    // $200 since Oct 30 (Steven), the normal tier; see SIZING_TIERS.
+    paperBankrollUsd: num(env, 'PAPER_BANKROLL_USD', 200, 1, 1e7),
     indexIdMap: jsonMap(env, 'INDEX_ID_MAP', DEFAULT_INDEX_IDS),
     seriesAssetMap,
     catalogHorizonMin: num(env, 'CATALOG_HORIZON_MIN', 90, 16, 7 * 24 * 60),

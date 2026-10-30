@@ -62,6 +62,10 @@ export interface MarketView {
    *  buys about this many dollars of contracts, within maxOrderRiskUsd, the risk room and maxContracts. Undefined = the
    *  sized amount. */
   fixedOrderUsd?: number;
+  /** The order band (ORDER_USD_MIN / ORDER_USD_MAX, paper and live): a trade sizing wants (contracts > 0) stakes the
+   *  sized amount clamped to [min, max] dollars, within maxOrderRiskUsd, the risk room and maxContracts; skipped when
+   *  those cannot fit the minimum. Undefined = the sized amount. */
+  orderBandUsd?: { min: number; max: number };
   /** Exit curve rest mode: the side price at which the held position's sell rests (the curve's swing-top estimate).
    *  Undefined = no resting curve sell. */
   curveRestSidePrice?: number;
@@ -165,13 +169,28 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     }
     return kellySize({ q: side === 'yes' ? q : 1 - q, cost, feePerContract: fee, bankroll: v.bankroll, kellyFraction: cfg.kellyFraction, maxRiskUsd: v.maxOrderRiskUsd, maxContracts });
   };
-  // Sizing decides whether a trade is worth taking; a paper order size then decides how much (PAPER_ORDER_FRAC / PAPER_ORDER_USD).
+  // Sizing decides whether a trade is worth taking; a paper order size (PAPER_ORDER_FRAC / PAPER_ORDER_USD) or the order
+  // band (ORDER_USD_MIN / ORDER_USD_MAX: the sized stake clamped into it) then decides how much.
   const size = (side: 'yes' | 'no', cost: number, fee: number, maxContracts: number) => {
     const k = sized(side, cost, fee, maxContracts);
-    if (!(v.fixedOrderUsd! > 0) || !(k.contracts > 0)) return k;
-    const usd = Math.min(v.fixedOrderUsd!, v.maxOrderRiskUsd, v.newRiskRoomUsd ?? Infinity);
-    const contracts = floorCount(Math.min(maxContracts, usd / (cost + fee)));
-    return contracts > 0 ? { ...k, contracts, riskUsd: contracts * (cost + fee) } : k;
+    if (!(k.contracts > 0)) return k;
+    const room = Math.min(v.maxOrderRiskUsd, v.newRiskRoomUsd ?? Infinity);
+    if (v.fixedOrderUsd! > 0) {
+      const usd = Math.min(v.fixedOrderUsd!, room);
+      const contracts = floorCount(Math.min(maxContracts, usd / (cost + fee)));
+      return contracts > 0 ? { ...k, contracts, riskUsd: contracts * (cost + fee) } : k;
+    }
+    const b = v.orderBandUsd;
+    if (!b) return k;
+    const unit = cost + fee;
+    const inBand = (usd: number) => {
+      const contracts = floorCount(Math.min(maxContracts, usd / unit));
+      return contracts > 0 && contracts * unit >= b.min - 0.01 ? { ...k, contracts, riskUsd: contracts * unit } : undefined;
+    };
+    // Never below the band. When the risk room cannot fit even the minimum, the minimum still goes out, for the risk
+    // gateway to refuse with its reason (free cash on the market's shard, the window or total cap); when the contract
+    // cap cannot fit it, nothing.
+    return inBand(Math.min(Math.max(k.contracts * unit, b.min), b.max, room)) ?? inBand(b.min) ?? { ...k, contracts: 0, riskUsd: 0 };
   };
   // A maker quote sizing wants (contracts > 0) is at least minQuoteContracts, as far as the per-order caps and the risk
   // room left allow; never smaller than sizing asked for.

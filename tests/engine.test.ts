@@ -673,7 +673,7 @@ test('paper: the vault reserve leaves the bankroll, as in live (since Oct 28)', 
   assert.equal(engine.bankroll(), 195, 'and not traded, in paper as in live');
 });
 
-test('paper size: by default paper sizes as live; PAPER_ORDER_FRAC buys a share of the bankroll; PAPER_ORDER_FRAC=0 with PAPER_ORDER_USD a fixed amount', async () => {
+test('paper size: by default the $10-$20 order band, as live; PAPER_ORDER_FRAC buys a share of the bankroll; PAPER_ORDER_FRAC=0 with PAPER_ORDER_USD a fixed amount; band off, paper sizes as live', async () => {
   const quote = (g: Awaited<ReturnType<typeof setup>>) => g.oms.liveOrders().find((o) => o.ticker === g.market.ticker && o.purpose === 'quote' && !o.cancelRequested && o.side === 'bid');
   const env = { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' };
   const run = async (extra: Record<string, string>) => {
@@ -698,12 +698,19 @@ test('paper size: by default paper sizes as live; PAPER_ORDER_FRAC buys a share 
   assert.ok(near(fixed.q, 8), `${fixed.q.count} at ${fixed.q.price}`);
   assert.match(fixed.notes.join(' | '), /paper size: \$8 an order \(PAPER_ORDER_USD\)/);
   assert.equal(fixed.g.engine.paperOrderUsd(100), 8);
-  // Both off (the default since Oct 28: paper sizes like live): the tier and break-even sizing of a $200 account, a few
-  // dollars at most.
-  const sized = await run({});
+  // Both off (the default since Oct 28: paper sizes like live) and the band off: the tier and break-even sizing of a $200
+  // account, a few dollars at most.
+  const sized = await run({ ORDER_USD_MIN: '0' });
   assert.equal(sized.g.engine.paperOrderUsd(100), 0);
+  assert.equal(sized.g.engine.guardStatus().orderBandUsd, null);
   assert.ok(sized.q.count * sized.q.price < 5, `${sized.q.count} at ${sized.q.price}`);
   assert.ok(sized.q.count < frac.q.count);
+  // The default since Oct 30 (Steven): the order band, $10-$20 an order (paper and live alike).
+  const band = await run({});
+  assert.ok(band.q, JSON.stringify(band.notes));
+  assert.ok(band.q.count * band.q.price > 9.4 && band.q.count * band.q.price <= 20, `${band.q.count} at ${band.q.price}`);
+  assert.match(band.notes.join(' | '), /order band: \$10-\$20 an order \(ORDER_USD_MIN\/MAX\)/);
+  assert.deepEqual(band.g.engine.guardStatus().orderBandUsd, { min: 10, max: 20 });
 });
 
 test('accuracy gate (paper): no new quote in a time-to-close bucket where the market mid called results better', async () => {
