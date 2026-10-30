@@ -38,7 +38,8 @@ const log = logger('training');
 
 type Book = 'kalshi' | 'perps';
 
-/** pool: the configured pool (PAPER_BANKROLL_USD) the epoch started from; a larger one tops the pool up (raisePool). */
+/** pool: the configured pool (PAPER_BANKROLL_USD) the epoch started from; a larger one tops the pool up (raisePool). Recorded
+ *  since Oct 30: a state without it is topped up once when the tradable bankroll is under the configured pool. */
 interface EpochState { epoch: number; startTs: number; startEquity: number; peak: number; trough: number; fills: number; refills: number; refilled: number; pool?: number }
 interface TrainingState { kalshi: EpochState; perps: EpochState; last?: EpochRecord }
 
@@ -134,7 +135,11 @@ export class TrainingSupervisor {
     s.peak = Math.max(s.peak, eq); s.trough = Math.min(s.trough, eq);
     const floor = this.d.cfg.strategy.minTradableBankrollUsd;
     const start = this.d.cfg.paperBankrollUsd;
-    if (start > (s.pool ?? s.startEquity) + 0.005) return this.raisePool(eq, bank, start);
+    // A larger configured pool than the epoch's tops the tradable bankroll up to it once. A state from before the pool was
+    // recorded goes by the tradable bankroll itself: the epoch's start equity counts vaulted and pocketed profit, which is
+    // not the pool's to trade.
+    if (s.pool === undefined ? bank < start - 0.005 : start > s.pool + 0.005) return this.raisePool(eq, bank, start);
+    if (s.pool === undefined) s.pool = start;
     if (bank >= floor || bank >= start) return;
     await this.d.oms.cancelAll('capital exhaustion: new training epoch');
     const amount = +(start - bank).toFixed(2);
@@ -159,7 +164,7 @@ export class TrainingSupervisor {
     }
     this.d.equityGuard?.resetEpoch(e.equity() ?? eq + amount, this.now, e.bankroll() ?? bank + amount);
     const now = this.now, startEquity = eq + amount;
-    this.d.audit.write('training', { event: 'pool_raised', book: 'kalshi', epoch: s.epoch, from: +(s.pool ?? s.startEquity).toFixed(2), to: start, bankroll: +bank.toFixed(2), equity: +eq.toFixed(2), topUp: amount });
+    this.d.audit.write('training', { event: 'pool_raised', book: 'kalshi', epoch: s.epoch, from: s.pool ?? null, to: start, bankroll: +bank.toFixed(2), equity: +eq.toFixed(2), topUp: amount });
     this.d.alerter.notify('info', 'training-kalshi', `Kalshi paper pool raised to $${start} (PAPER_BANKROLL_USD): topped up with $${amount}, a new epoch at full size`);
     this.st.kalshi = { epoch: s.epoch + 1, startTs: now, startEquity, peak: startEquity, trough: startEquity, fills: 0, refills: s.refills, refilled: +(s.refilled + amount).toFixed(2), pool: start };
   }
