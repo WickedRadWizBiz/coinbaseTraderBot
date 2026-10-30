@@ -253,7 +253,7 @@ def selftest(path):
     print(json.dumps({'readings': out, 'fees': fees, 'line': line}))
 
 
-def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades=None, entry_sigs=(), mres=None):
+def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades=None, entry_sigs=(), mres=None, more_books=None):
     """1e. Information-anchored ratchets on the recorded paths: the price trail with guards (fair value, spot momentum, the
     book's top), trails on the spot-implied fair value, resting (maker, fee-free) profit sales, and the same from entry
     with the policy's own lock. Dollars against holding the same contracts to settlement."""
@@ -556,6 +556,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
     for ep in episodes:
         if ep.get('entries'): paper_at[ep['ticker']].append(min(e['ms'] for e in ep['entries']) // 1000)
     sig_cache = {}
+    sig_miss = set()
 
     def sig_pos(j):
         """A position from entry signal j: the side's recorded ask at the signal second, the market's recorded result."""
@@ -564,6 +565,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         tm = terms.get(tk) or {}
         res = (mres or {}).get(tk)
         out = None
+        if not tops.get(tk): sig_miss.add(tk)
         if res in ('yes', 'no') and tm.get('closeTime') and tops.get(tk):
             ep = {'ticker': tk, 'sign': sign, 'asset': tm.get('asset'), 'close_ms': int(tm['closeTime']), 'entries': [], 'exits': []}
             ep['payout'] = 1.0 if (sign > 0) == (res == 'yes') else 0.0
@@ -943,13 +945,24 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
     print('     entry cost clamped to the band, the contract count rescaled (x5 for $50-$100). Re-entry: after a pacer snipe banks its')
     print('     target, buy the same side of the same market at the ask the next second with the same stake, repeat while the market')
     print('     has room. Depth: contracts over the top-of-book size pay 2c worse on entry and sale (top-of-book only, no deeper levels).')
+    baseG = R(lockB, ('bid', 1), ('taker',), -0.02, ('frac_profit', 0.10), {'first_only': True})
+    SL = ('slices', False)
+    ANY = ({'size': (10, 20, 1), 'reenter': 'any'}, {'size': (10, 20, 1), 'reenter': 'any', 'depth': True},
+           {'size': (10, 20, 5), 'reenter': 'any'}, {'size': (10, 20, 5), 'reenter': 'any', 'depth': True})
+    tried = set()
+    for gen in range(3 if more_books else 0):  # the signal markets a re-entry reaches (each pass can reach further)
+        sig_miss.clear()
+        for kw in ANY: pacer_run(pathsB, baseG, SL, **kw)
+        new = sig_miss - tried
+        if not new: break
+        tried |= new
+        more_books(new)
+        for j in [j for j in sig_cache if entry_sigs[j][1] in new]: del sig_cache[j]
     ok = sum(1 for j in range(len(entry_sigs)) if sig_pos(j) is not None)
     agree = [(1.0 if (mres or {}).get(ep['ticker']) == ('yes' if ep['sign'] > 0 else 'no') else 0.0) == ep['payout'] for ep in episodes if ep.get('payout') is not None and (mres or {}).get(ep['ticker'])]
     print(f"     'next signal': the bot's own taker entry signals (decision records placing an entry): {len(entry_sigs)} in the window, {ok} with a")
     print(f"     book path and a recorded result; signal markets paper itself traded within 5 min are skipped. Results agree with paper's settlements on {sum(agree)} of {len(agree)}.")
     print('    stake; pacer; re-entry; depth                                     realized $     $/h  entries  re-entries  re-entry $  base sales  snipes  held  peak $ at work  thin fills  depth $')
-    baseG = R(lockB, ('bid', 1), ('taker',), -0.02, ('frac_profit', 0.10), {'first_only': True})
-    SL = ('slices', False)
     for lab, pacer, kw in (
             ("paper's own sizes; slices no group", SL, {}),
             ('$10-$20; no pacer', None, {'size': (10, 20, 1)}),
@@ -1392,11 +1405,6 @@ def main():
     for ep in episodes:
         if ep.get('close_ms'): close_of[ep['ticker']] = max(close_of.get(ep['ticker'], 0), ep['close_ms'])
     entry_sigs = sorted(x for x in entry_sigs if since_ms // 1000 <= x[0] <= now)
-    for sec, t, *_ in entry_sigs:
-        if t in close_of or not t: continue
-        a, b = win.get(t, (sec * 1000 - 3_900_000, sec * 1000 + 3_700_000))
-        win[t] = (min(a, sec * 1000 - 3_900_000), max(b, sec * 1000 + 3_700_000))
-        wanted.add(t)
     bookwin = {t: ((min(a, close_of[t] - (900_000 if '15M-' in t else 3_600_000) - 300_000) if t in close_of else a), b) for t, (a, b) in win.items()}
     assets = {ep.get('asset') for ep in episodes if ep.get('asset')}
     rec_dir = os.path.join(data, 'recordings')
@@ -1427,79 +1435,85 @@ def main():
         ba = min(asks) if asks else None
         return (bb / 1e4 if bb is not None else None, bids[bb] if bb is not None else 0, ba / 1e4 if ba is not None else None, asks[ba] if ba is not None else 0)
 
-    for f in rec_files:
-        with opener(f) as fh:
-            if not f.endswith('.gz'): seek_time(fh, os.path.getsize(f), need_from)
-            for line in lines_of(fh):
-                lines += 1
-                tm = line[5:18]
-                if tm.isdigit():
-                    tv = int(tm)
-                    if tv < need_from: continue
-                    if tv > need_to: break
-                ks = line.find(b'"k":"', 0, 48)
-                if ks < 0: continue
-                ke = line.find(b'"', ks + 5)
-                kind = line[ks + 5:ke]
-                if kind in (b'delta', b'book'):
-                    ts_ = line.find(b'"ticker":"', ke)
-                    if ts_ < 0: continue
-                    te = line.find(b'"', ts_ + 10)
-                    tb = line[ts_ + 10:te]
-                    if tb not in wanted_b: continue
-                    r = json.loads(line)
-                    t = r['ticker']; ms = r.get('t') or r.get('ts')
-                    a, b = bookwin[t]
-                    if ms < a or ms > b: continue
-                    sec = ms // 1000
-                    if t in books and sec > cur_sec.get(t, 0):
-                        top = top_of(t)
-                        if not tops[t] or tops[t][-1][1:] != top: tops[t].append((cur_sec.get(t, sec - 1) + 1, *top))
-                    cur_sec[t] = sec
-                    if kind == b'book':
-                        books[t] = ({js_round(l['price'] * 1e4): l['size'] for l in r.get('bids') or [] if l.get('size', 0) > 0}, {js_round(l['price'] * 1e4): l['size'] for l in r.get('asks') or [] if l.get('size', 0) > 0})
-                    elif t in books:
-                        m = books[t][0] if r.get('side') == 'bid' else books[t][1]
-                        key = js_round(r['price'] * 1e4)
-                        nxt = m.get(key, 0) + r['delta']
-                        if nxt <= 1e-9: m.pop(key, None)
-                        else: m[key] = nxt
-                elif kind == b'index':
-                    as_ = line.find(b'"asset":"', ke)
-                    if as_ < 0: continue
-                    ae = line.find(b'"', as_ + 9)
-                    if line[as_ + 9:ae] not in assets_b: continue
-                    r = json.loads(line)
-                    if r.get('src') == 'proxy': continue
-                    sec = int((r.get('ts') or r.get('t')) // 1000)
-                    s = index[r['asset']]
-                    if s and s[-1][0] == sec: s[-1] = (sec, float(r['value']))
-                    elif not s or sec > s[-1][0]: s.append((sec, float(r['value'])))
-                elif kind == b'trade':
-                    ts_ = line.find(b'"ticker":"', ke)
-                    if ts_ < 0: continue
-                    te = line.find(b'"', ts_ + 10)
-                    if line[ts_ + 10:te] not in wanted_b: continue
-                    r = json.loads(line)
-                    tsec = int((r.get('ts') or r.get('t') or 0) // 1000)
-                    if tsec: trades[r['ticker']].append((tsec, r.get('takerSide'), float(r.get('count') or 0), r.get('price')))
-                elif kind == b'market':
-                    ts_ = line.find(b'"ticker":"', ke)
-                    if ts_ < 0: continue
-                    te = line.find(b'"', ts_ + 10)
-                    if line[ts_ + 10:te] not in wanted_b: continue
-                    r = json.loads(line)
-                    terms[r['ticker']] = r
-                elif kind == b'result':
-                    ts_ = line.find(b'"ticker":"', ke)
-                    if ts_ < 0: continue
-                    te = line.find(b'"', ts_ + 10)
-                    if line[ts_ + 10:te] not in wanted_b: continue
-                    r = json.loads(line)
-                    if r.get('result') in ('yes', 'no'): rec_results[r['ticker']] = r['result']
-    for t in books:  # the last state
-        top = top_of(t)
-        if not tops[t] or tops[t][-1][1:] != top: tops[t].append((cur_sec.get(t, 0) + 1, *top))
+    def load_recordings(wanted_b, assets_b, need_from, need_to, bookwin):
+        """One pass over the recordings: books (tops), index, trades, market terms and results for the wanted tickers."""
+        n = 0
+        for f in rec_files:
+            with opener(f) as fh:
+                if not f.endswith('.gz'): seek_time(fh, os.path.getsize(f), need_from)
+                for line in lines_of(fh):
+                    n += 1
+                    tm = line[5:18]
+                    if tm.isdigit():
+                        tv = int(tm)
+                        if tv < need_from: continue
+                        if tv > need_to: break
+                    ks = line.find(b'"k":"', 0, 48)
+                    if ks < 0: continue
+                    ke = line.find(b'"', ks + 5)
+                    kind = line[ks + 5:ke]
+                    if kind in (b'delta', b'book'):
+                        ts_ = line.find(b'"ticker":"', ke)
+                        if ts_ < 0: continue
+                        te = line.find(b'"', ts_ + 10)
+                        tb = line[ts_ + 10:te]
+                        if tb not in wanted_b: continue
+                        r = json.loads(line)
+                        t = r['ticker']; ms = r.get('t') or r.get('ts')
+                        a, b = bookwin[t]
+                        if ms < a or ms > b: continue
+                        sec = ms // 1000
+                        if t in books and sec > cur_sec.get(t, 0):
+                            top = top_of(t)
+                            if not tops[t] or tops[t][-1][1:] != top: tops[t].append((cur_sec.get(t, sec - 1) + 1, *top))
+                        cur_sec[t] = sec
+                        if kind == b'book':
+                            books[t] = ({js_round(l['price'] * 1e4): l['size'] for l in r.get('bids') or [] if l.get('size', 0) > 0}, {js_round(l['price'] * 1e4): l['size'] for l in r.get('asks') or [] if l.get('size', 0) > 0})
+                        elif t in books:
+                            m = books[t][0] if r.get('side') == 'bid' else books[t][1]
+                            key = js_round(r['price'] * 1e4)
+                            nxt = m.get(key, 0) + r['delta']
+                            if nxt <= 1e-9: m.pop(key, None)
+                            else: m[key] = nxt
+                    elif kind == b'index':
+                        as_ = line.find(b'"asset":"', ke)
+                        if as_ < 0: continue
+                        ae = line.find(b'"', as_ + 9)
+                        if line[as_ + 9:ae] not in assets_b: continue
+                        r = json.loads(line)
+                        if r.get('src') == 'proxy': continue
+                        sec = int((r.get('ts') or r.get('t')) // 1000)
+                        s = index[r['asset']]
+                        if s and s[-1][0] == sec: s[-1] = (sec, float(r['value']))
+                        elif not s or sec > s[-1][0]: s.append((sec, float(r['value'])))
+                    elif kind == b'trade':
+                        ts_ = line.find(b'"ticker":"', ke)
+                        if ts_ < 0: continue
+                        te = line.find(b'"', ts_ + 10)
+                        if line[ts_ + 10:te] not in wanted_b: continue
+                        r = json.loads(line)
+                        tsec = int((r.get('ts') or r.get('t') or 0) // 1000)
+                        if tsec: trades[r['ticker']].append((tsec, r.get('takerSide'), float(r.get('count') or 0), r.get('price')))
+                    elif kind == b'market':
+                        ts_ = line.find(b'"ticker":"', ke)
+                        if ts_ < 0: continue
+                        te = line.find(b'"', ts_ + 10)
+                        if line[ts_ + 10:te] not in wanted_b: continue
+                        r = json.loads(line)
+                        terms[r['ticker']] = r
+                    elif kind == b'result':
+                        ts_ = line.find(b'"ticker":"', ke)
+                        if ts_ < 0: continue
+                        te = line.find(b'"', ts_ + 10)
+                        if line[ts_ + 10:te] not in wanted_b: continue
+                        r = json.loads(line)
+                        if r.get('result') in ('yes', 'no'): rec_results[r['ticker']] = r['result']
+        for t in books:  # the last state
+            top = top_of(t)
+            if not tops[t] or tops[t][-1][1:] != top: tops[t].append((cur_sec.get(t, 0) + 1, *top))
+        return n
+
+    lines = load_recordings(wanted_b, assets_b, need_from, need_to, bookwin)
     print(f"recordings {[os.path.basename(f) for f in rec_files]}: {lines} lines, books for {sum(1 for t in wanted if tops.get(t))} of {len(wanted)} markets, index for {sorted(a for a in index if index[a])}  ({time.time() - t0:.0f} s)")
     top_secs = {t: [x[0] for x in v] for t, v in tops.items()}
     idx_secs = {a: [x[0] for x in v] for a, v in index.items()}
@@ -1851,7 +1865,24 @@ def main():
         acts = anatomy()
         oracle(acts or [])
         for t, v in results.items(): rec_results.setdefault(t, v[0])
-        ratchet_lab(acts or [], episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades, entry_sigs, rec_results)
+
+        def more_books(tks):
+            """A second pass over the recordings for the entry signals' markets section G asks for (books from 65 min before
+            the first signal, the market's open, to an hour after the last)."""
+            t1 = time.time()
+            bw = {}
+            for sec, t, *_ in entry_sigs:
+                if t not in tks: continue
+                a, b = bw.get(t, (sec * 1000 - 3_900_000, sec * 1000 + 4_500_000))
+                bw[t] = (min(a, sec * 1000 - 3_900_000), max(b, sec * 1000 + 4_500_000))
+            if not bw: return 0
+            nl = load_recordings({t.encode() for t in bw}, set(), min(a for a, b in bw.values()), max(b for a, b in bw.values()), bw)
+            got = sum(1 for t in bw if tops.get(t))
+            for t in bw:
+                top_secs[t] = [x[0] for x in tops.get(t, [])]
+            print(f'  (G: second recordings pass for {len(bw)} signal markets: {nl} lines, books for {got}, results for {sum(1 for t in bw if t in rec_results)}; {time.time() - t1:.0f} s)')
+            return got
+        ratchet_lab(acts or [], episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades, entry_sigs, rec_results, more_books)
     except Exception as e:  # a one-shot run on the server: the sections after this one still print
         print(f"  (1c/1d stopped: {type(e).__name__}: {e})")
 
