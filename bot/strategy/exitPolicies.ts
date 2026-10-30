@@ -238,6 +238,8 @@ export interface HuntDecision {
   stop?: number;
   /** HUNT_WALL_ASK: the side price at which the position's sell rests (a top-of-book sell wall); undefined = none. */
   rest?: number;
+  /** The lock hold (HUNT_LOCK_SALE_ELSE=hold): hunt mode holds the position with no stop; the engine lets the profit mandate sell it. */
+  hold?: boolean;
 }
 
 /**
@@ -340,7 +342,7 @@ export class ConfluenceRatchetExit {
         }
         if ((this.h.lockSaleElse ?? 'hold') === 'hold') {
           this.active = true; this.holding = true; this.floor = floor;
-          return { mode: 'hunt', event: 'lock_hold', target, stop: floor };
+          return { mode: 'hunt', event: 'lock_hold', target, stop: floor, hold: true };
         }
         return { mode: 'fair_value', event: 'lock_pass', target };
       }
@@ -353,7 +355,7 @@ export class ConfluenceRatchetExit {
 
     // The lock sale: keep selling at the bid until flat; the lock hold: nothing reduces the position.
     if (this.lockSold) return i.sideBid === undefined ? { mode: 'hunt', target, stop: this.floor } : { mode: 'hunt', plan: this.sellAtBid(i, sign), target, stop: this.floor };
-    if (this.holding) return { mode: 'hunt', target, stop: this.floor };
+    if (this.holding) return { mode: 'hunt', target, stop: this.floor, hold: true };
 
     // HUNT_WALL_ASK: once a sell wall stands on our side over the fair value plus the margin, the position's sell rests at it
     // (bot/strategy/fairValueStrategy.ts places it post-only, sized to the position) until it fills, a sale below replaces it
@@ -378,7 +380,7 @@ export class ConfluenceRatchetExit {
       }
       if ((this.h.lockSaleElse ?? 'hold') === 'hold') {
         this.holding = true;
-        return { mode: 'hunt', event: 'lock_hold', target, stop: r.stop };
+        return { mode: 'hunt', event: 'lock_hold', target, stop: r.stop, hold: true };
       }
       this.active = false;
       this.floor = undefined;

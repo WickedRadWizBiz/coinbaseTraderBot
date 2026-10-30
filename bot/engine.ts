@@ -31,9 +31,10 @@ import { marketWorstLoss, RestingLike } from './risk/exposure';
 import type { KillSwitch } from './risk/killSwitch';
 import { EXIT_RATE_RESERVE, RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
-import { decide, decisionProbability, MarketView, OrderPlan } from './strategy/fairValueStrategy';
+import { decide, decisionProbability, MarketView, netProfitAtBid, OrderPlan } from './strategy/fairValueStrategy';
 import { ProfitPeaks } from './strategy/profitPeaks';
 import { ConfluenceRatchetExit, HuntEvent } from './strategy/exitPolicies';
+import { HourlyQuotaPacer, SnipeGroup } from './risk/quotaPacer';
 import type { SinuousEntryGate } from './strategy/sinuousEntry';
 import { tennisHighLeverage, type CurveReading, type SinuousExitGate } from './strategy/sinuousExit';
 import type { TakeProfitBench } from './strategy/takeProfitBench';
@@ -350,6 +351,10 @@ export class Engine {
   private readonly hunts = new Map<string, ConfluenceRatchetExit>();
   /** Take-profit high-water marks: the best price each held side could have been sold at since it was opened or added to. */
   private readonly profitPeaks = new ProfitPeaks();
+  /** The hourly quota pacer (PACER, bot/risk/quotaPacer.ts): its cycle persists in DATA_DIR across restarts. */
+  private readonly pacer: HourlyQuotaPacer;
+  /** Positions in profit after fees whose profits together cover the pacer's target are all sold (PACER_GROUP). */
+  private readonly snipeGroup = new SnipeGroup();
   private readonly cadence: CadenceGate;
   private readonly lastPosition = new Map<string, number>();
   private timers: NodeJS.Timeout[] = [];
@@ -405,6 +410,7 @@ export class Engine {
     this.cadence = new CadenceGate(d.cfg.strategy);
     this.volFc = new VolForecaster(d.cfg.strategy.volModel ? d.volModel : undefined);
     if (d.fillLogDir) this.fillLog = new FillLog(d.fillLogDir, (t) => d.md.books.get(t)?.mid(), this.now);
+    this.pacer = new HourlyQuotaPacer(d.cfg.strategy.pacer, this.now(), d.cfg.dataDir && d.streakFiles !== false ? path.join(d.cfg.bookDir ?? d.cfg.dataDir, 'quota_pacer_state.json') : undefined);
     if (d.snn) this.attachBlender(d.snn.blender);
     // Registered before the startup reconciliation replays fills, so the
     // balance monitor sees every cash movement the bot's trading causes.
@@ -412,6 +418,9 @@ export class Engine {
       this.fillLog?.onFill({ ticker: f.ticker, side: f.side, price: f.price, isTaker: Boolean(f.isTaker), ts: f.ts, coid: rec?.clientOrderId });
       this.noteLiveBlockFill(rec?.clientOrderId);
       this.noteScoredExitFill(rec, f, fee);
+      // The quota pacer credits the realized part of every reduction, net of its fee, against the position's cost basis.
+      const book = d.oms.positions.get(f.ticker);
+      if (book) { const c = this.pacer.onFill(f, fee, book, this.now()); if (Math.abs(c) > 1e-9) d.audit.write('pacer', { event: 'credit', ticker: f.ticker, usd: Math.round(c * 1e4) / 1e4, ...this.pacer.status(this.now()) }); }
       const signed = f.side === 'bid' ? f.count : -f.count;
       const cash = fillCashDelta(f.side, f.count, f.price, fee, positionAfter - signed);
       d.balanceMonitor?.onCash(cash);
@@ -458,6 +467,9 @@ export class Engine {
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no' }) => d.takeProfitBench?.settled(e.ticker, e.result, this.now()));
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized: number; positionBefore: number }) => {
       this.lastSettleTs = this.now();
+      // The quota pacer credits what the market's realized total still lacks after its exits.
+      this.snipeGroup.forget(e.ticker);
+      { const c = this.pacer.onSettled(e.ticker, e.realized ?? 0, this.now()); if (Math.abs(c) > 1e-9) d.audit.write('pacer', { event: 'settled', ticker: e.ticker, usd: Math.round(c * 1e4) / 1e4, ...this.pacer.status(this.now()) }); }
       // One probation result per settled market that traded (VALIDATION_GATES=monitor: bot/risk/probation.ts).
       if (e.realized) probation()?.record(this.isTennis(e.ticker) ? 'tennis' : 'kalshi', e.realized, this.now());
       d.balanceMonitor?.onCash(settleCashDelta(e.positionBefore, e.result));
@@ -2118,7 +2130,7 @@ export class Engine {
       entryFeePerContract: pos && Math.abs(pos.yes) > 1e-9 ? pos.fees / Math.abs(pos.yes) : undefined,
       profitPeakSidePrice: this.profitPeaks.update(m.ticker, st.position, st.position > 0 ? bid.price : st.position < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
       ...(this.d.takeProfitBench?.benched ? { takeProfitBenched: this.d.takeProfitBench.benched } : {}),
-      entryWindowOpen, exitWindowOpen: tauSec > S.noExitBeforeCloseSec,
+      entryWindowOpen, exitWindowOpen: tauSec > Math.max(S.noExitBeforeCloseSec, Number.isFinite(m.openTime) ? S.noExitBeforeCloseFrac * (m.closeTime - m.openTime) / 1000 : 0),
     };
     // Exit policy. confluence_ratchet: fair-value exit normally; "hunt" mode (liquidity ratchet
     // manages the exit, nothing else may reduce the position) only while the contract has beaten
@@ -2126,6 +2138,7 @@ export class Engine {
     let huntMode = false;
     let huntPlan: OrderPlan | undefined;
     let huntRest: number | undefined;
+    let huntHold = false;
     let huntProtective = false;
     let huntHeld: string | undefined;
     // Hunt mode is evaluated by research:backtest --annotate. With a passing evaluation the winning
@@ -2156,6 +2169,7 @@ export class Engine {
       });
       huntMode = d.mode === 'hunt';
       huntRest = d.rest;
+      huntHold = d.hold === true;
       st.exitMode = d.mode;
       st.huntTarget = d.target;
       st.huntStop = d.stop;
@@ -2183,7 +2197,16 @@ export class Engine {
     };
     st.q = decisionProbability(view, strat);
     if (huntRest !== undefined) view.huntRestSidePrice = huntRest;
-    const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode, entries: Boolean(reason) });
+    // The quota snipe (PACER) sells a position whose net profit covers what the clock hour needs, the hunt included. The profit
+    // mandate (PROFIT_MANDATE, off by default) sells any position in profit outside the last share of the window, a hunt trailing
+    // its stop excepted; a hunt that holds (HUNT_LOCK_SALE_ELSE=hold) is not excepted, so its reductions are not blocked.
+    const pacerUsd = this.pacer.neededUsd(now);
+    // Steven's group rule (PACER_GROUP): this position, in profit after fees, is sold when the positions in profit together cover the target.
+    const group = pacerUsd !== undefined && S.pacer.group ? this.snipeGroup.judge(m.ticker, view.exitWindowOpen !== false ? netProfitAtBid(view) : undefined, pacerUsd, now) : undefined;
+    const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode && !huntHold, entries: Boolean(reason), profitMandate: S.profitMandate && (!huntMode || huntHold) ? S.profitMandateMin : undefined, pacerUsd, ...(group?.sell ? { pacerGroup: group } : {}) });
+    // A quota snipe liquidates the position: the hunt's stop order would only double it. The decision is audited with the clock.
+    const snipe = plan.place.find((p) => p.purpose === 'exit' && p.why.startsWith('quota snipe'));
+    if (snipe) { huntPlan = undefined; this.d.audit.write('pacer', { event: 'snipe', ticker: m.ticker, why: snipe.why, count: snipe.count, price: snipe.price, ...this.pacer.status(now) }); }
     // The MLP decides whether each entry is worth taking (take/skip head, once validated).
     if (S.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: S.takeMargin, fees: md.feesFor(m.ticker) });
     // Quote, cross or skip each maker entry by expected value (fill model, once validated).

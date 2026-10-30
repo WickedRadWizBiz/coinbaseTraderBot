@@ -276,6 +276,8 @@ def exit_kind(why):
     if REST.match(why): return 'exit curve (resting sell)'
     if CROSS.match(why): return 'exit curve (cross)'
     if '- fee > q' in why: return 'model exit (market pays more)'
+    if why.startswith('quota snipe'): return 'quota snipe (sold to pace)'
+    if why.startswith('profit mandate'): return 'profit mandate (sold in profit)'
     if why.startswith('confluence ratchet wall ask'): return 'ratchet wall ask (resting sell)'
     if why.startswith('confluence ratchet stop'): return 'ratchet stop'
     if why.startswith('tennis'): return 'tennis'

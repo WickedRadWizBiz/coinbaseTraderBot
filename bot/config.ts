@@ -4,6 +4,7 @@
 
 import type { DynamicEdgeParams } from './strategy/dynamicEdge';
 import type { RegimeScaleParams } from './strategy/regimeScale';
+import { type PacerConfig, validZone } from './risk/quotaPacer';
 import fs from 'fs';
 import { parseSessionRisk, type SessionRiskProfile } from './model/sessionRisk';
 import { DEFAULT_PROBATION, type ProbationParams } from './risk/probation';
@@ -118,6 +119,22 @@ export interface StrategyConfig {
   /** No exits in the final seconds, the hunt stop included: positions ride to settlement (spreads widen inside the
    *  averaging window, and the stop sales inside the last minutes were the ones found always wrong). */
   noExitBeforeCloseSec: number;
+  /** STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC: no exits in the last share of the contract's window either (0.10 = the last 90 s of a
+   *  15-minute market, 6 min of an hourly one): a position there rides to settlement (Steven's rule, Oct 29). */
+  noExitBeforeCloseFrac: number;
+  /** PACER (Steven's spec, Oct 29 23:35 UTC): the hourly quota pacer (bot/risk/quotaPacer.ts). A 24-hour profit clock anchored
+   *  to 10:00 AM New York time at PACER_HOURLY_USD (4.50) an hour; the strategy sells a position at once (the "quota snipe") when
+   *  its net profit after fees, sold at the bid, covers what the rest of the clock hour owes, clamped to [PACER_MIN_TAKE_USD,
+   *  PACER_MAX_TARGET_USD], whatever the exit policy (hold included), the hunt or the model says. Inside the last share of the
+   *  window a position in profit rides to settlement instead, and a hunted position is never held for settlement
+   *  (HUNT_LOCK_SALE_ELSE=exit). */
+  pacer: PacerConfig;
+  /** PROFIT_MANDATE (off by default; Steven's first wording, Oct 29 23:22 UTC): outside that final share of the window a position
+   *  whose side bid net of the exit fee clears its entry cost (entry fee in) by PROFIT_MANDATE_MIN is sold at the bid whatever the
+   *  exit policy or the model says, a hunt trailing its stop excepted. On, a penny of profit sells before the pacer's threshold is
+   *  ever reached. */
+  profitMandate: boolean;
+  profitMandateMin: number;
   /** Maker adverse-selection buffer: default, and clamp range when estimated from 60 s markouts. */
   makerBuffer: number;
   makerBufferRange: [number, number];
@@ -212,7 +229,8 @@ export interface StrategyConfig {
    *  sells every dip: sell the whole position at the bid when the bid is at least the math fair value plus
    *  HUNT_LOCK_SALE_FV_MARGIN (0.02) and/or the last minute's Kalshi taker flow favours the held side. HUNT_LOCK_SALE_AT
    *  (lock | trigger) says when: right at the lock, or (default) the first time the bid sits under the ratchet's stop.
-   *  HUNT_LOCK_SALE_ELSE (hold | exit) when the rule does not hit. fair_value by default (Oct 29): on the replayed days it is
+   *  HUNT_LOCK_SALE_ELSE (hold | exit; exit by default since Oct 29 23:00 UTC: the profit mandate never
+   *  holds a hunted position to settlement) when the rule does not hit. fair_value by default (Oct 29): on the replayed days it is
    *  never worse than the trailing stop (+$39 on Oct 28, level on Oct 27) and level with holding, on half the contracts. */
   huntLockSale: 'off' | 'fair_value' | 'flow' | 'either' | 'both';
   huntLockSaleFvMargin: number;
@@ -827,6 +845,24 @@ function num(env: Env, key: string, def: number, lo: number, hi: number): number
   return v;
 }
 
+/** The hourly quota pacer's settings (PACER_*, bot/risk/quotaPacer.ts). */
+function pacerConfig(env: Env): PacerConfig {
+  const tz = (env.PACER_TZ ?? 'America/New_York').trim() || 'America/New_York';
+  if (!validZone(tz)) throw new Error(`PACER_TZ ${tz} is not a time zone this Node knows`);
+  const minTakeUsd = num(env, 'PACER_MIN_TAKE_USD', 0.75, 0, 10_000);
+  return {
+    enabled: bool(env, 'PACER', true),
+    group: bool(env, 'PACER_GROUP', true),
+    hourlyUsd: num(env, 'PACER_HOURLY_USD', 4.5, 0, 10_000),
+    anchorHour: Math.floor(num(env, 'PACER_ANCHOR_HOUR', 10, 0, 23)),
+    anchorMinute: Math.floor(num(env, 'PACER_ANCHOR_MINUTE', 0, 0, 59)),
+    tz,
+    mode: oneOf(env, 'PACER_MODE', 'cumulative', ['cumulative', 'rolling_hour'] as const),
+    minTakeUsd,
+    maxTargetUsd: Math.max(minTakeUsd, num(env, 'PACER_MAX_TARGET_USD', 6.5, 0, 10_000)),
+  };
+}
+
 function bool(env: Env, key: string, def: boolean): boolean {
   const raw = env[key];
   if (raw === undefined || raw === '') return def;
@@ -1063,6 +1099,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     entryWindowHourly: window(env, 'ENTRY_WINDOW_HOURLY', relaxed ? [3300, 600] : [3600, 15]),
     hourlyMidBand: band(env, 'HOURLY_MID_BAND', [0.1, 0.9]),
     noExitBeforeCloseSec: num(env, 'STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC', relaxed ? 60 : 0, 0, 600),
+    noExitBeforeCloseFrac: num(env, 'STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC', 0.10, 0, 0.9),
+    pacer: pacerConfig(env),
+    profitMandate: bool(env, 'PROFIT_MANDATE', false),
+    profitMandateMin: num(env, 'PROFIT_MANDATE_MIN', 0.01, 0, 0.5),
     // Maker discount for the measured adverse move a minute after a fill: at least 1.5c, up to 3c.
     makerBuffer: num(env, 'STRATEGY_MAKER_BUFFER', relaxed ? 0.02 : 0, 0, 0.1),
     makerBufferRange: band(env, 'STRATEGY_MAKER_BUFFER_RANGE', relaxed ? [0.015, 0.03] : [0, 0]),
@@ -1111,7 +1151,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     huntSellIntoGap: bool(env, 'HUNT_SELL_INTO_GAP', true),
     huntLockSale: oneOf(env, 'HUNT_LOCK_SALE', 'fair_value', ['off', 'fair_value', 'flow', 'either', 'both'] as const),
     huntLockSaleFvMargin: num(env, 'HUNT_LOCK_SALE_FV_MARGIN', 0.02, -0.2, 0.2),
-    huntLockSaleElse: oneOf(env, 'HUNT_LOCK_SALE_ELSE', 'hold', ['hold', 'exit'] as const),
+    huntLockSaleElse: oneOf(env, 'HUNT_LOCK_SALE_ELSE', 'exit', ['hold', 'exit'] as const),
     huntLockSaleAt: oneOf(env, 'HUNT_LOCK_SALE_AT', 'trigger', ['lock', 'trigger'] as const),
     huntWallAsk: bool(env, 'HUNT_WALL_ASK', true),
     huntWallAskRatio: num(env, 'HUNT_WALL_ASK_RATIO', 3, 1, 1000),

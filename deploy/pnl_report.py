@@ -177,6 +177,8 @@ def exit_kind(why):
     m = CROSS.match(why)
     if m: return 'exit curve (cross)', m
     if '- fee > q' in why: return 'model exit (market pays more)', None
+    if why.startswith('quota snipe'): return 'quota snipe (sold to pace)', None
+    if why.startswith('profit mandate'): return 'profit mandate (sold in profit)', None
     if why.startswith('confluence ratchet wall ask'): return 'ratchet wall ask (resting sell)', None
     if why.startswith('confluence ratchet stop'): return 'ratchet stop', None
     return re.sub(r'[-+]?[0-9][0-9.]*', '#', why)[:40] or '?', None

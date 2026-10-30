@@ -55,7 +55,7 @@ import { PaperExchange } from '../bot/paper/paperExchange';
 import { marketWorstLoss } from '../bot/risk/exposure';
 import { EquityGuard } from '../bot/risk/equityGuard';
 import { RiskGateway } from '../bot/risk/riskGateway';
-import { decide, decisionProbability, type MarketView } from '../bot/strategy/fairValueStrategy';
+import { decide, decisionProbability, netProfitAtBid, type MarketView } from '../bot/strategy/fairValueStrategy';
 import { ComponentTrials, type TrialName } from '../bot/strategy/componentTrials';
 import { activeRuleBook, RuleBook, setRuleBook } from '../bot/strategy/ruleBook';
 import { altcoinRiskOn, confluenceBreadth, orientedSignals, selectionPriority, taDrift, taNetDirection } from '../bot/strategy/taConviction';
@@ -68,6 +68,7 @@ import type { Timeframe } from '../bot/ta/knowledge';
 import { setTaNetEnsemble, TaNetEnsemble, taNetView } from '../bot/ta/taNetEnsemble';
 import { ProfitPeaks } from '../bot/strategy/profitPeaks';
 import { ConfluenceRatchetExit, DEFAULT_HUNT, DEFAULT_RATCHET, EXIT_POLICIES, ExitPolicyName, HuntParams, LiquidityRatchet, RatchetParams } from '../bot/strategy/exitPolicies';
+import { HourlyQuotaPacer, SnipeGroup } from '../bot/risk/quotaPacer';
 import { readRecordings, ReplayState } from './replay';
 import { AccuracyGate, type AccuracyGateConfig } from '../bot/strategy/accuracyGate';
 import { TakeProfitBench } from '../bot/strategy/takeProfitBench';
@@ -106,6 +107,9 @@ export interface ExitStats {
   lockHolds: number;
   wallAsks: number;
   wallFills: number;
+  /** Quota snipes (PACER, bot/risk/quotaPacer.ts): sales and the contracts they sold. */
+  quotaSnipes: number;
+  quotaSnipeContracts: number;
   /** Mean (stop - fill price) in side terms for ratchet exits; positive = filled below the stop. */
   avgSlippage: number | null;
 }
@@ -368,7 +372,11 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const pos = new PositionBook();
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => DEFAULT_FEES, () => st.now);
   const gateway = new RiskGateway(limits);
-  const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, huntProfitTakes: 0, lockSales: 0, lockHolds: 0, wallAsks: 0, wallFills: 0, avgSlippage: null };
+  const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, huntProfitTakes: 0, lockSales: 0, lockHolds: 0, wallAsks: 0, wallFills: 0, quotaSnipes: 0, quotaSnipeContracts: 0, avgSlippage: null };
+  // The hourly quota pacer on the replay's clock (PACER, bot/risk/quotaPacer.ts), as the engine runs it.
+  let pacer: HourlyQuotaPacer | undefined;
+  const pacerAt = (now: number) => (pacer ??= new HourlyQuotaPacer(strategy.pacer, now));
+  const snipeGroup = new SnipeGroup();
   const vault = opts.vault ? new Vault(opts.vault, undefined, () => st.now) : undefined;
   const res: BacktestResult = { exitPolicy: policy, label: policy === 'confluence_ratchet' ? `confluence_ratchet[m=${(opts.hunt ?? DEFAULT_HUNT).targetMargin},f=${(opts.ratchet ?? DEFAULT_RATCHET).minFillRatio}]` : policy, huntParams: policy === 'confluence_ratchet' ? { hunt: opts.hunt ?? DEFAULT_HUNT, ratchet: opts.ratchet ?? DEFAULT_RATCHET } : undefined, vaultEnd: 0, pocketEnd: 0, bySession: {}, exits, trades: [], takeProfitFills: 0, latency: { orderMs: opts.latency?.orderMs ?? 0, cancelMs: opts.latency?.cancelMs ?? opts.latency?.orderMs ?? 0, jitterMs: opts.latency?.jitterMs ?? 0, sent: 0, cancelRaceFills: 0, cancelRaceContracts: 0, lateKills: 0 }, entryEvaluations: 0, days: 0, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
   const cadence = new CadenceGate(strategy);
@@ -397,7 +405,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const closeOf = new Map<string, number>();
   const ratchets = new Map<string, LiquidityRatchet>();
   const hunts = new Map<string, ConfluenceRatchetExit>();
-  const pending = new Map<string, { side: 'bid' | 'ask'; price: number; count: number; kind: 'fv' | 'tp' | 'rt'; stop?: number }>();
+  const pending = new Map<string, { side: 'bid' | 'ask'; price: number; count: number; kind: 'fv' | 'tp' | 'rt' | 'snipe'; stop?: number }>();
   let exitSeq = 0;
   // The paper bot's exploration entries and training trades (with the paper options; see below).
   const exploreTs: number[] = [], trainTs: number[] = [];
@@ -465,7 +473,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     return Number.isFinite(ofCache.cap) ? Math.max(ofCache.cap, o.paperFloor * orderFrac) : ofCache.cap;
   };
   ex.on('fill', (f) => {
-    pos.applyFill({ ticker: f.ticker, side: f.side, count: f.count, price: f.price, fee: f.fee ?? 0 }, { closeTs: closeOf.get(f.ticker) });
+    const bookAfter = pos.applyFill({ ticker: f.ticker, side: f.side, count: f.count, price: f.price, fee: f.fee ?? 0 }, { closeTs: closeOf.get(f.ticker) });
+    pacerAt(st.now).onFill(f, f.fee ?? 0, bookAfter, st.now);
     const w = closeOf.get(f.ticker)!;
     const b = res.windows.get(w) ?? { pnl: 0, contracts: 0, fees: 0 };
     b.contracts += f.count;
@@ -482,6 +491,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     const bp = (res.byPurpose![purposeOf(f.clientOrderId)] ??= { fills: 0, contracts: 0 });
     bp.fills++; bp.contracts += f.count;
     if (f.clientOrderId?.endsWith('-exit-wall')) exits.wallFills += f.count;
+    if (f.clientOrderId?.endsWith('-exit-snipe')) { exits.quotaSnipes++; exits.quotaSnipeContracts += f.count; }
     const hour = new Date(st.now).toISOString().slice(0, 13);
     res.contractsByHour![hour] = (res.contractsByHour![hour] ?? 0) + f.count;
     if (cancelInFlight.has(f.orderId)) { L.cancelRaceFills++; L.cancelRaceContracts += f.count; }
@@ -588,6 +598,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           exitLedger.delete(m.ticker);
           ratchets.delete(m.ticker);
           hunts.delete(m.ticker);
+          snipeGroup.forget(m.ticker);
           cadence.forget(m.ticker);
           pending.delete(m.ticker);
           priority.delete(m.ticker);
@@ -596,6 +607,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           const p = pos.get(m.ticker);
           if (p && !p.settled) {
             pos.settle(m.ticker, result, st.now);
+            pacer?.onSettled(m.ticker, p.realized ?? 0, st.now);
             const traded = res.windows.get(m.closeTime)?.contracts ?? 0;
             if (traded > 0) res.trades.push({ ticker: m.ticker, closeTs: m.closeTime, pnl: p.realized ?? 0, contracts: traded, kind: m.kind });
             const b = res.windows.get(m.closeTime) ?? { pnl: 0, contracts: 0, fees: 0 };
@@ -777,6 +789,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const sessRisk = sessionRiskFor(opts.sessionRisk ?? {}, sess);
       let huntMode = false;
       let huntRest: number | undefined;
+      let huntHold = false;
       if (policy === 'confluence_ratchet') {
         const posH = pos.position(m.ticker);
         let h = hunts.get(m.ticker);
@@ -789,6 +802,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         });
         huntMode = d.mode === 'hunt';
         huntRest = d.rest;
+        huntHold = d.hold === true;
         if (d.event === 'activated') exits.huntActivations++;
         if (d.event === 'deactivated_giveback') exits.huntDeactivations++;
         if (d.event === 'profit_take_confluence' || d.event === 'profit_take_session' || d.event === 'profit_take_gap') exits.huntProfitTakes++;
@@ -854,14 +868,19 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         pMarket, pStd: pred.std, makerBuffer: (res.makerBufferEnd = makerBuffer()), entrySidePrice: entrySide !== undefined && entrySide > 0 && entrySide < 1 ? entrySide : undefined,
         entryFeePerContract: pNow && Math.abs(pNow.yes) > 1e-9 ? pNow.fees / Math.abs(pNow.yes) : undefined,
         profitPeakSidePrice: peaks.update(m.ticker, posC, posC > 0 ? bid.price : posC < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
-        entryWindowOpen, exitWindowOpen: tauSec > strategy.noExitBeforeCloseSec,
+        entryWindowOpen, exitWindowOpen: tauSec > Math.max(strategy.noExitBeforeCloseSec, Number.isFinite(m.openTime) ? strategy.noExitBeforeCloseFrac * (m.closeTime - m.openTime) / 1000 : 0),
         ...(huntRest !== undefined ? { huntRestSidePrice: huntRest } : {}),
       };
       const strat = { ...stratRun, kellyFraction: tier.kellyFraction * sizeScale, minEdge: Math.max(0, strategy.minEdge + sessRisk.minEdgeAdd + dynamicEdge(strategy.dynamicEdge, mRead, pred.std).add), inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult };
+      const pacerUsdNow = pacerAt(st.now).neededUsd(st.now);
+      const group = pacerUsdNow !== undefined && strategy.pacer.group ? snipeGroup.judge(m.ticker, view.exitWindowOpen !== false ? netProfitAtBid(view) : undefined, pacerUsdNow, st.now) : undefined;
       const plan = decide(view, strat, {
         exits: policy === 'fair_value' || policy === 'take_profit' || policy === 'hybrid' || (policy === 'confluence_ratchet' && !huntMode),
-        blockReductions: huntMode,
+        blockReductions: huntMode && !huntHold,
         entries: Boolean(reason),
+        profitMandate: strategy.profitMandate && (!huntMode || huntHold) ? strategy.profitMandateMin : undefined,
+        pacerUsd: pacerUsdNow,
+        ...(group?.sell ? { pacerGroup: group } : {}),
       });
       const qDecision = decisionProbability(view, strat);
       if (strategy.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features: fmap, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: strategy.takeMargin });
@@ -902,7 +921,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         if (opts.tradeFromMs !== undefined && st.now < opts.tradeFromMs) break;
         if (p.purpose === 'exit') {
           // Queue for next tick, like every other exit (a take-profit keeps its name: its fills feed the bench).
-          if (!pending.has(m.ticker)) pending.set(m.ticker, { side: p.side, price: p.price, count: p.count, kind: p.why.startsWith('take-profit') ? 'tp' : 'fv' });
+          if (!pending.has(m.ticker)) pending.set(m.ticker, { side: p.side, price: p.price, count: p.count, kind: p.why.startsWith('take-profit') ? 'tp' : p.why.startsWith('quota snipe') ? 'snipe' : 'fv' });
           continue;
         }
         // A taker entry against an existing position is an early exit in disguise
@@ -1016,7 +1035,7 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
     targetMargin: Number(argOf('hunt-margin', String(DEFAULT_HUNT.targetMargin))),
     minConfluence: Number(argOf('hunt-confluence', String(DEFAULT_HUNT.minConfluence))),
     hybrid: argOf('hunt-hybrid', '0') === '1', sellIntoGap: argOf('hunt-sell-into-gap', '1') === '1',
-    lockSale: argOf('hunt-lock-sale', 'fair_value') as 'off' | 'fair_value' | 'flow' | 'either' | 'both', lockSaleFvMargin: Number(argOf('hunt-lock-sale-fv-margin', '0.02')), lockSaleElse: argOf('hunt-lock-sale-else', 'hold') as 'hold' | 'exit',
+    lockSale: argOf('hunt-lock-sale', 'fair_value') as 'off' | 'fair_value' | 'flow' | 'either' | 'both', lockSaleFvMargin: Number(argOf('hunt-lock-sale-fv-margin', '0.02')), lockSaleElse: argOf('hunt-lock-sale-else', 'exit') as 'hold' | 'exit',
     lockSaleAt: argOf('hunt-lock-sale-at', 'trigger') as 'lock' | 'trigger',
     wallAsk: argOf('hunt-wall-ask', '1') === '1', wallAskRatio: Number(argOf('hunt-wall-ask-ratio', '3')),
   };
