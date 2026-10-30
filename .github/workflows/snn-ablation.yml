@@ -26,7 +26,7 @@ on:
       days:
         description: 'Recorded days to replay (most recent)'
         required: false
-        default: '10'
+        default: '8'
 
 permissions:
   contents: read
@@ -41,9 +41,10 @@ jobs:
     environment: production
     timeout-minutes: 345
     env:
-      ONLY: ${{ inputs.only || '' }}
+      # A push run has no inputs: it judges the mid-anchored readout only (every mechanism takes ~1.7 h each).
+      ONLY: ${{ github.event_name == 'push' && 'mid-anchored' || inputs.only }}
       DOMAIN: ${{ inputs.domain || 'crypto' }}
-      DAYS: ${{ inputs.days || '10' }}
+      DAYS: ${{ inputs.days || '8' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

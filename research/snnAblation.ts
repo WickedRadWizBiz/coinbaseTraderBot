@@ -50,6 +50,9 @@ export interface Verdict {
   delta: { mean: number; lo: number; hi: number; events: number; days: number };
   blend: { alpha: number; mean: number; lo: number; hi: number };
   pnl: { blend: number; model: number; diff: number };
+  /** Brier of the SNN alone minus the market's (the contract's mid, clipped like the anchor), per settlement window:
+   *  below zero with its CI = the SNN beats the market. The SNN plan's phase 1 go/no-go reads the candidate's row. */
+  vsMarket: { candidate: { mean: number; lo: number; hi: number; events: number; days: number }; baseline: { mean: number; lo: number; hi: number; events: number; days: number } };
   extra?: Record<string, unknown>;
   criteria: { a: boolean; b: boolean; c: boolean; d: boolean; e: boolean; f: boolean };
   accepted: boolean;
@@ -69,6 +72,12 @@ export function pairedEvent(cand: SnnRow[], base: SnnRow[], f: (r: SnnRow) => nu
     ev.set(r.eventKey, e);
   }
   return dayBlockBootstrap([...ev.values()].map((e) => ({ day: e.day, x: e.s / e.n })), iters);
+}
+
+const clipMid = (m: number) => Math.min(0.98, Math.max(0.02, m));
+/** The SNN alone against the market on the same rows: per-event mean of brier(p_snn) - brier(mid), day-block CI. */
+export function vsMarket(rows: SnnRow[], iters = 2000) {
+  return eventCi(rows, (r) => brier(r.pSnn, r.y) - brier(clipMid(r.mid), r.y), iters);
 }
 
 /** Per-event mean of a per-row quantity, clustered and day-block bootstrapped. */
@@ -149,7 +158,8 @@ export function judge(m: Mechanism, cand: SnnReplayResult, base: SnnReplayResult
   if (extra.surpriseVsVol && !(extra.surpriseVsVol as { beatsVol: boolean }).beatsVol) criteria.a = false;
   return {
     mechanism: m.name, note: m.note, candidate: candSum, baseline: baseSum, configsTried: tried,
-    delta, blend: bl, pnl: { blend: pnlBlend, model: pnlModel, diff: pnlBlend - pnlModel }, extra,
+    delta, blend: bl, pnl: { blend: pnlBlend, model: pnlModel, diff: pnlBlend - pnlModel },
+    vsMarket: { candidate: vsMarket(cand.rows), baseline: vsMarket(base.rows) }, extra,
     criteria, accepted: Object.values(criteria).every(Boolean),
   };
 }
@@ -187,6 +197,8 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
     const v = judge(m, best.res, base.res, best.sum, base.sum, tried.map((t) => t.sum));
     verdicts.push(v);
     console.log(`${v.accepted ? 'ACCEPT' : 'reject'}  ${m.name}: dBrier ${v.delta.mean.toFixed(5)} [${v.delta.lo.toFixed(5)}, ${v.delta.hi.toFixed(5)}] over ${v.delta.events} events / ${v.delta.days} days; slope ${v.candidate.calSlope.toFixed(2)}; corr ${v.candidate.corrModel.toFixed(2)}; blend a=${v.blend.alpha} [${v.blend.lo.toFixed(5)}, ${v.blend.hi.toFixed(5)}]; p99 ${v.candidate.p99Ms.toFixed(1)} ms; ${JSON.stringify(v.criteria)}`);
+    const vm = (x: Verdict['vsMarket']['candidate']) => `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]${x.hi < 0 ? ' BEATS the market' : x.lo > 0 ? ' worse than the market' : ' undecided'}`;
+    console.log(`        vs market (Brier SNN - mid, per window): candidate ${vm(v.vsMarket.candidate)}; baseline ${vm(v.vsMarket.baseline)}`);
   }
   const out = argOf('out', 'research/out/snn_ablation.json');
   fs.mkdirSync(path.dirname(out), { recursive: true });
