@@ -119,8 +119,9 @@ export interface StrategyConfig {
   /** No exits in the final seconds, the hunt stop included: positions ride to settlement (spreads widen inside the
    *  averaging window, and the stop sales inside the last minutes were the ones found always wrong). */
   noExitBeforeCloseSec: number;
-  /** STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC: no exits in the last share of the contract's window either (0.10 = the last 90 s of a
-   *  15-minute market, 6 min of an hourly one): a position there rides to settlement (Steven's rule, Oct 29). */
+  /** STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC: in the last share of the contract's window (0.10 = the last 90 s of a 15-minute market,
+   *  6 min of an hourly one) a position in profit after fees rides to settlement, no exit selling it (Steven's rule, Oct 29); a
+   *  position that is not in profit keeps its exits until STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC. */
   noExitBeforeCloseFrac: number;
   /** PACER (Steven's spec, Oct 29 23:35 UTC): the hourly quota pacer (bot/risk/quotaPacer.ts). A 24-hour profit clock anchored
    *  to 10:00 AM New York time at PACER_HOURLY_USD (4.50) an hour; the strategy sells a position at once (the "quota snipe") when

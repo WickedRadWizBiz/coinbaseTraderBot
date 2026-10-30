@@ -169,6 +169,8 @@ interface Saved { cycleStart: number; lastProfitTs: number; realized24h: number;
 
 export class HourlyQuotaPacer {
   private cycleStart: number;
+  /** The next anchor, computed once a cycle (the wall-clock arithmetic is the costly part of a status read). */
+  private nextAnchor: number;
   private lastProfitTs: number;
   private realized24h = 0;
   private readonly buckets = new Map<number, number>();
@@ -177,15 +179,18 @@ export class HourlyQuotaPacer {
 
   constructor(readonly cfg: PacerConfig, now: number, private readonly file?: string) {
     this.cycleStart = anchorBefore(now, cfg);
+    this.nextAnchor = anchorAfter(this.cycleStart, cfg);
     this.lastProfitTs = now;
     this.load();
   }
 
   /** Resets the cycle the moment the clock crosses an anchor. */
   private rollover(now: number): boolean {
+    if (now >= this.cycleStart && now < this.nextAnchor) return false;
     const a = anchorBefore(now, this.cfg);
     if (a <= this.cycleStart) return false;
     this.cycleStart = a;
+    this.nextAnchor = anchorAfter(a, this.cfg);
     this.lastProfitTs = now;
     this.realized24h = 0;
     this.buckets.clear();
@@ -247,7 +252,7 @@ export class HourlyQuotaPacer {
     const neededUsd = Math.max(c.minTakeUsd, Math.min(rawDeficit, c.maxTargetUsd));
     const r4 = (x: number) => Math.round(x * 1e4) / 1e4;
     return {
-      anchorStart: this.cycleStart, nextReset: anchorAfter(this.cycleStart, c), elapsedSec: Math.round(elapsedSec), hourIndex,
+      anchorStart: this.cycleStart, nextReset: this.nextAnchor, elapsedSec: Math.round(elapsedSec), hourIndex,
       minutesIntoHour: r4(secInto / 60), minutesRemaining: r4(minutesRemaining), minutesSinceProfit: r4(Math.max(0, now - this.lastProfitTs) / 60_000),
       realized24hUsd: r4(this.realized24h), realizedHourUsd: r4(realizedHour), linearBenchmarkUsd: r4(elapsedSec * c.hourlyUsd / 3600),
       nextHourGoalUsd: r4(nextHourGoal), rawDeficitUsd: r4(rawDeficit), neededUsd: r4(neededUsd), requiredUsdPerMin: r4(Math.max(0, rawDeficit) / minutesRemaining),

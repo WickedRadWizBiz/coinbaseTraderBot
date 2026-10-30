@@ -309,7 +309,8 @@ test('profit mandate: a position in profit after fees is sold at the bid whateve
   assert.match(e.why, /^profit mandate exit: bid 0\.47 - fee 0\.01\d >= cost 0\.41\d \+ 0\.01/);
   assert.ok(exitOf(long(), { exits: true }), 'with the model exit on as well');
   assert.equal(exitOf(long({ bestBid: { price: 0.43, size: 50 } })), undefined, 'not in profit after fees: nothing');
-  assert.equal(exitOf(long({ exitWindowOpen: false })), undefined, 'the last share of the window rides to settlement');
+  assert.equal(exitOf(long({ exitWindowOpen: false })), undefined, 'the final minute rides to settlement');
+  assert.equal(exitOf(long({ settleShare: true })), undefined, 'in profit in the last share of the window: rides to settlement');
   assert.equal(exitOf(long(), { profitMandate: undefined }), undefined, 'off');
   assert.equal(exitOf(long({ entrySidePrice: undefined })), undefined, 'no entry cost known: nothing');
   // Long NO: 10 NO at 0.40 plus the fee; the YES ask 0.53 makes the NO bid 0.47.
@@ -335,7 +336,12 @@ test('quota snipe: a position whose whole net profit after fees covers what the 
   assert.match(g.why, /^quota snipe \(group\): \+\$0\.6\d net on 10 at bid 0\.5, with 1 other position in profit \(\+\$1\.10 together\) covers the \$0\.75 the hour needs/);
   assert.equal(exitOf(long({ bestBid: { price: 0.43, size: 50 } }), { pacerGroup: { sumUsd: 1.1, members: 2 } }), undefined, 'not in profit itself: not a member');
   assert.ok(exitOf(long({ bestBid: { price: 0.5, size: 50 } }), { pacerUsd: 0.5 }), 'it does cover 0.50: the threshold moves with the clock');
-  assert.equal(exitOf(long({ exitWindowOpen: false })), undefined, 'the last share of the window rides to settlement');
+  assert.equal(exitOf(long({ exitWindowOpen: false })), undefined, 'the final minute rides to settlement');
+  assert.equal(exitOf(long({ settleShare: true })), undefined, 'in profit in the last share of the window: rides to settlement');
+  // Not in profit in the last share: the normal exits still act (here the model exit: the model values YES at 0.20).
+  const loser = decide(long({ settleShare: true, pYes: 0.2, bestBid: { price: 0.38, size: 50 } }), cfg, { exits: true, pacerUsd: 0.75 });
+  assert.ok(loser.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel'), 'a losing position in the last share keeps its exits');
+  assert.ok(!decide(long({ settleShare: true, pYes: 0.2 }), cfg, { exits: true, pacerUsd: 0.75 }).place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel'), 'a winning one does not');
   assert.equal(exitOf(long(), { pacerUsd: undefined }), undefined, 'pacer off');
   assert.equal(exitOf(long({ entrySidePrice: undefined })), undefined, 'no entry cost known: nothing');
   // A thin bid takes what it can; the whole position's profit is what is judged.
