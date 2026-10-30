@@ -253,7 +253,7 @@ def selftest(path):
     print(json.dumps({'readings': out, 'fees': fees, 'line': line}))
 
 
-def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades=None):
+def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades=None, entry_sigs=(), mres=None):
     """1e. Information-anchored ratchets on the recorded paths: the price trail with guards (fair value, spot momentum, the
     book's top), trails on the spot-implied fair value, resting (maker, fee-free) profit sales, and the same from entry
     with the policy's own lock. Dollars against holding the same contracts to settlement."""
@@ -551,6 +551,34 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         anchors[h] = r
         return r
 
+    sig_secs = [x[0] for x in entry_sigs]
+    paper_at = collections.defaultdict(list)
+    for ep in episodes:
+        if ep.get('entries'): paper_at[ep['ticker']].append(min(e['ms'] for e in ep['entries']) // 1000)
+    sig_cache = {}
+
+    def sig_pos(j):
+        """A position from entry signal j: the side's recorded ask at the signal second, the market's recorded result."""
+        if j in sig_cache: return sig_cache[j]
+        sec, tk, sign, px, edge = entry_sigs[j]
+        tm = terms.get(tk) or {}
+        res = (mres or {}).get(tk)
+        out = None
+        if res in ('yes', 'no') and tm.get('closeTime') and tops.get(tk):
+            ep = {'ticker': tk, 'sign': sign, 'asset': tm.get('asset'), 'close_ms': int(tm['closeTime']), 'entries': [], 'exits': []}
+            ep['payout'] = 1.0 if (sign > 0) == (res == 'yes') else 0.0
+            c_sec = ep['close_ms'] // 1000
+            mk = {'ep': ep}
+            if sec + 1 < c_sec - 0.10 * market_len(mk) - 60:
+                path = build_path(ep, sec, c_sec)
+                a = path['asks'][0]
+                if a is not None and 0.01 <= a <= 0.98:
+                    out = {'n': 1.0, 'floor': None, 'payout': ep['payout'], 'actual': None, 'bids': path['bids'], 'fv': path['fv'], 'path': path,
+                           'cost': a, 'costF': a, 'c_sec': c_sec, 's0': sec, 'b0': a, 'q0': next((x for x in path['fv'] if x is not None), None),
+                           'ep': ep, 'sig': sigma_cached(ep.get('asset'), sec) if ep.get('asset') else None}
+        sig_cache[j] = out
+        return out
+
     def pacer_run(paths, base, pacer, hourly=4.5, floor=0.75, cap=6.5, frac=0.10, no_exit_sec=60, size=None, reenter=False, depth=False):
         """One base exit with (or without) the pacer on top, every position in time order on one clock. base: a sim() rule or
         None (hold everything); pacer: None | (mode, group) with mode 'cumulative' | 'rolling_hour' | 'slices' (Steven's
@@ -558,7 +586,8 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         size=(lo, hi, mult): each position's stake (contracts x entry cost, fee in) clamped to [lo, hi] then scaled by mult, the
         contract count rescaled to match (Steven, Oct 30: $10-$20 now, $50-$100 asked). reenter: once a pacer snipe banks its
         target, buy the same side of the same market again at the ask the next second with the same stake, and repeat while the
-        market has room (not inside its last 10% or final minute). depth: contracts beyond the top-of-book size pay 2c worse
+        market has room (not inside its last 10% or final minute); reenter='any': instead take the bot's next own taker entry
+        signal (any market, either side) in the 120 s after the snipe, at the recorded ask, same stake. depth: contracts beyond the top-of-book size pay 2c worse
         (the ask on entry, the bid on a sale): the lab otherwise fills every size at the top."""
         DEPTH_PX = 0.02
         ps = []
@@ -583,7 +612,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         for p in ps:
             v, sn, px, sec, armed = sim(p, *base) if base is not None else (None, 0.0, None, None, False)
             outs.append((v, sec))
-        T0 = min(p['s0'] for p in ps); T1 = max(p['c_sec'] for p in ps)
+        T0 = min(p['s0'] for p in ps); T1 = max(p['c_sec'] for p in ps); T_end = [T1]
         starts = collections.defaultdict(list); closes = collections.defaultdict(list)
         for i, p in enumerate(ps):
             starts[p['s0']].append(i)
@@ -595,6 +624,31 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         live = set(); done = [False] * len(ps); child = [False] * len(ps)
         for p in ps:
             if p.get('thin_in'): st['thin_n'] += 1; st['thin_usd'] += p['thin_in']
+
+        def reenter_any(i, t):
+            """The bot's next taker entry signal after the snipe at t on a market neither held here nor traded by paper nearby."""
+            stake = ps[i]['n'] * ps[i]['costF']
+            j0 = bisect.bisect_right(sig_secs, t)
+            for j in range(j0, len(entry_sigs)):
+                sec, tk, sign, px, edge = entry_sigs[j]
+                if sec > t + 120: return None
+                if j in used or any(ps[x]['ep']['ticker'] == tk for x in live) or any(abs(s0 - sec) <= 300 for s0 in paper_at.get(tk, ())): continue
+                q = sig_pos(j)
+                if q is None: continue
+                used.add(j)
+                a = q['cost']; n0 = stake / a; n = stake / (a + fee1(a, n0)); cF = a + fee1(a, n)
+                c = thin(None, 0, q['path']['asz'], n)
+                if c > 0: cF += c / n; st['thin_n'] += 1; st['thin_usd'] += c
+                q = dict(q, n=n, costF=cF)
+                ps.append(q); done.append(False); child.append(True)
+                v, sn, spx, ssec, armed = sim(q, *base) if base is not None else (None, 0.0, None, None, False)
+                outs.append((v, ssec)); k = len(ps) - 1
+                closes[ssec if v is not None else q['c_sec']].append(k); starts[sec].append(k); T_end[0] = max(T_end[0], q['c_sec'])
+                st['re'] += 1; st['entries'] += 1
+                return k
+            return None
+
+        used = set()
 
         def reenter_at(i, t):
             """Buy the same side again at the ask at t + 1 with the same stake; returns the new position's index or None."""
@@ -650,7 +704,9 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             st['cap_now'] -= ps[i]['n'] * ps[i]['costF']
             if child[i]: st['re_real'] += x
 
-        for t in range(T0, T1 + 1):
+        t = T0 - 1
+        while t < T_end[0]:
+            t += 1
             a = ny_anchor(t)
             if st['cyc'] is None or a > st['cyc']:
                 st['cyc'] = a; st['cyc_real'] = 0.0; st['bk'] = collections.defaultdict(float)
@@ -687,7 +743,8 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 if net >= need(t) - 1e-9:
                     if c > 0: st['thin_n'] += 1; st['thin_usd'] += c
                     close(i, t, net, 'snipe'); st['cts'] += p['n']
-                    if reenter: reenter_at(i, t)
+                    if reenter == 'any': reenter_any(i, t)
+                    elif reenter: reenter_at(i, t)
                 elif net > 1e-9:
                     members.append((i, net))
             if pacer[1] and len(members) >= 2 and sum(x for _, x in members) >= need(t) - 1e-9:
@@ -886,6 +943,10 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
     print('     entry cost clamped to the band, the contract count rescaled (x5 for $50-$100). Re-entry: after a pacer snipe banks its')
     print('     target, buy the same side of the same market at the ask the next second with the same stake, repeat while the market')
     print('     has room. Depth: contracts over the top-of-book size pay 2c worse on entry and sale (top-of-book only, no deeper levels).')
+    ok = sum(1 for j in range(len(entry_sigs)) if sig_pos(j) is not None)
+    agree = [(1.0 if (mres or {}).get(ep['ticker']) == ('yes' if ep['sign'] > 0 else 'no') else 0.0) == ep['payout'] for ep in episodes if ep.get('payout') is not None and (mres or {}).get(ep['ticker'])]
+    print(f"     'next signal': the bot's own taker entry signals (decision records placing an entry): {len(entry_sigs)} in the window, {ok} with a")
+    print(f"     book path and a recorded result; signal markets paper itself traded within 5 min are skipped. Results agree with paper's settlements on {sum(agree)} of {len(agree)}.")
     print('    stake; pacer; re-entry; depth                                     realized $     $/h  entries  re-entries  re-entry $  base sales  snipes  held  peak $ at work  thin fills  depth $')
     baseG = R(lockB, ('bid', 1), ('taker',), -0.02, ('frac_profit', 0.10), {'first_only': True})
     SL = ('slices', False)
@@ -900,7 +961,11 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             ('$10-$20; slices no group; re-entry', SL, {'size': (10, 20, 1), 'reenter': True}),
             ('$10-$20; slices no group; re-entry; depth', SL, {'size': (10, 20, 1), 'reenter': True, 'depth': True}),
             ('$50-$100; slices no group; re-entry', SL, {'size': (10, 20, 5), 'reenter': True}),
-            ('$50-$100; slices no group; re-entry; depth', SL, {'size': (10, 20, 5), 'reenter': True, 'depth': True})):
+            ('$50-$100; slices no group; re-entry; depth', SL, {'size': (10, 20, 5), 'reenter': True, 'depth': True}),
+            ('$10-$20; slices no group; next signal any market', SL, {'size': (10, 20, 1), 'reenter': 'any'}),
+            ('$10-$20; slices no group; next signal; depth', SL, {'size': (10, 20, 1), 'reenter': 'any', 'depth': True}),
+            ('$50-$100; slices no group; next signal any market', SL, {'size': (10, 20, 5), 'reenter': 'any'}),
+            ('$50-$100; slices no group; next signal; depth', SL, {'size': (10, 20, 5), 'reenter': 'any', 'depth': True})):
         r = pacer_run(pathsB, baseG, pacer, **kw)
         if r is None: print('    (no costed position)'); break
         print(f"    {lab:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['entries']:7d}  {r['re']:10d}  {r['re_real']:+10.2f}  {r['base']:10d}  {r['snipe']:6d}  {r['held']:4d}  {r['cap_peak']:14.2f}  {r['thin_n']:10d}  {r['thin_usd']:7.2f}")
@@ -1207,6 +1272,7 @@ def main():
     pacer_recs, startups = [], []  # the quota pacer's audit records (credit / settled / snipe, each with the clock) and bot starts
     sizing_recs = []  # the module ledger's sizing rows (audit 'modules': tier, loss-aware scale, optimal f cap, portfolio Kelly)
     training_recs, reject_recs = [], []  # the training supervisor's events (pool raised, exhaustion) and risk rejections
+    entry_sigs = []  # the bot's own taker entry signals (decision records placing an 'entry'): (sec, ticker, sign, price, edge)
     control_recs = []  # kill switch trips and resets, the override's toggles (audit config), paper balance rebases (audit vault)
     for f in files:
         with open(f, 'rb') as fh:
@@ -1221,6 +1287,13 @@ def main():
                         d = r.get('data') or {}
                         hunts[d.get('ticker', '')].append({'ms': iso_ms(r.get('ts', '')), 'ev': d.get('huntEvent'), 'target': d.get('target'), 'stop': d.get('stop'), 'pYes': d.get('pYes'), 'pos': d.get('position')})
                         continue
+                    if b'"purpose":"entry"' in line:
+                        try: r = json.loads(line)
+                        except Exception: r = {}
+                        d = r.get('data') or {}
+                        for p in d.get('place') or []:
+                            if p.get('purpose') == 'entry' and p.get('side') in ('bid', 'ask'):
+                                entry_sigs.append((iso_ms(r.get('ts', '')) // 1000, d.get('ticker', ''), 1 if p['side'] == 'bid' else -1, p.get('price'), p.get('edge')))
                     if b'"purpose":"exit"' not in line: continue
                     try: d = json.loads(line).get('data') or {}
                     except Exception: continue
@@ -1318,6 +1391,12 @@ def main():
     close_of = {}
     for ep in episodes:
         if ep.get('close_ms'): close_of[ep['ticker']] = max(close_of.get(ep['ticker'], 0), ep['close_ms'])
+    entry_sigs = sorted(x for x in entry_sigs if since_ms // 1000 <= x[0] <= now)
+    for sec, t, *_ in entry_sigs:
+        if t in close_of or not t: continue
+        a, b = win.get(t, (sec * 1000 - 3_900_000, sec * 1000 + 3_700_000))
+        win[t] = (min(a, sec * 1000 - 3_900_000), max(b, sec * 1000 + 3_700_000))
+        wanted.add(t)
     bookwin = {t: ((min(a, close_of[t] - (900_000 if '15M-' in t else 3_600_000) - 300_000) if t in close_of else a), b) for t, (a, b) in win.items()}
     assets = {ep.get('asset') for ep in episodes if ep.get('asset')}
     rec_dir = os.path.join(data, 'recordings')
@@ -1337,6 +1416,7 @@ def main():
     index = collections.defaultdict(list)  # asset -> [(sec, value)]
     trades = collections.defaultdict(list)  # ticker -> [(sec, takerSide, count, price)]
     terms = {}
+    rec_results = {}  # ticker -> 'yes' | 'no' (the recorder's settlement results)
     wanted_b = {t.encode() for t in wanted}
     assets_b = {a.encode() for a in assets}
     lines = 0
@@ -1410,6 +1490,13 @@ def main():
                     if line[ts_ + 10:te] not in wanted_b: continue
                     r = json.loads(line)
                     terms[r['ticker']] = r
+                elif kind == b'result':
+                    ts_ = line.find(b'"ticker":"', ke)
+                    if ts_ < 0: continue
+                    te = line.find(b'"', ts_ + 10)
+                    if line[ts_ + 10:te] not in wanted_b: continue
+                    r = json.loads(line)
+                    if r.get('result') in ('yes', 'no'): rec_results[r['ticker']] = r['result']
     for t in books:  # the last state
         top = top_of(t)
         if not tops[t] or tops[t][-1][1:] != top: tops[t].append((cur_sec.get(t, 0) + 1, *top))
@@ -1763,7 +1850,8 @@ def main():
     try:
         acts = anatomy()
         oracle(acts or [])
-        ratchet_lab(acts or [], episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades)
+        for t, v in results.items(): rec_results.setdefault(t, v[0])
+        ratchet_lab(acts or [], episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades, entry_sigs, rec_results)
     except Exception as e:  # a one-shot run on the server: the sections after this one still print
         print(f"  (1c/1d stopped: {type(e).__name__}: {e})")
 
