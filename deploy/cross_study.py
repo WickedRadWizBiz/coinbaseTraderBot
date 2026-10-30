@@ -551,12 +551,34 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         anchors[h] = r
         return r
 
-    def pacer_run(paths, base, pacer, hourly=4.5, floor=0.75, cap=6.5, frac=0.10, no_exit_sec=60):
+    def pacer_run(paths, base, pacer, hourly=4.5, floor=0.75, cap=6.5, frac=0.10, no_exit_sec=60, size=None, reenter=False, depth=False):
         """One base exit with (or without) the pacer on top, every position in time order on one clock. base: a sim() rule or
         None (hold everything); pacer: None | (mode, group) with mode 'cumulative' | 'rolling_hour' | 'slices' (Steven's
-        non-stacking spec of Oct 30, bot/risk/quotaPacer.ts: catch-up slices of at most the hourly target)."""
-        ps = [p for p in paths if p.get('costF') is not None]
+        non-stacking spec of Oct 30, bot/risk/quotaPacer.ts: catch-up slices of at most the hourly target).
+        size=(lo, hi, mult): each position's stake (contracts x entry cost, fee in) clamped to [lo, hi] then scaled by mult, the
+        contract count rescaled to match (Steven, Oct 30: $10-$20 now, $50-$100 asked). reenter: once a pacer snipe banks its
+        target, buy the same side of the same market again at the ask the next second with the same stake, and repeat while the
+        market has room (not inside its last 10% or final minute). depth: contracts beyond the top-of-book size pay 2c worse
+        (the ask on entry, the bid on a sale): the lab otherwise fills every size at the top."""
+        DEPTH_PX = 0.02
+        ps = []
+        for p in paths:
+            if p.get('costF') is None: continue
+            if size is not None:
+                lo, hi, mult = size
+                stake = min(max(p['n'] * p['costF'], lo), hi) * mult
+                p = dict(p, n=stake / p['costF'])
+            if depth:  # entry depth folded into the cost a contract
+                c = DEPTH_PX * max(0.0, p['n'] - (p['path']['asz'][0] or 0.0))
+                if c > 0: p = dict(p, costF=p['costF'] + c / p['n'], thin_in=c)
+            ps.append(p)
         if not ps: return None
+
+        def thin(p, k, px_sz, n):  # the depth charge: contracts over the top-of-book size at path index k
+            if not depth: return 0.0
+            sz = px_sz[k] if 0 <= k < len(px_sz) else None
+            return DEPTH_PX * max(0.0, n - (sz or 0.0))
+
         outs = []
         for p in ps:
             v, sn, px, sec, armed = sim(p, *base) if base is not None else (None, 0.0, None, None, False)
@@ -568,8 +590,35 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             v, sec = outs[i]
             closes[sec if v is not None else p['c_sec']].append(i)
         st = {'real': 0.0, 'cyc': None, 'cyc_real': 0.0, 'bk': collections.defaultdict(float), 'base': 0, 'held': 0, 'snipe': 0, 'group': 0, 'cts': 0.0,
-              'hours': 0, 'on_pace': 0, 'hkey': None, 'slice': 0.0, 'sl_h': 0}
-        live = set(); done = [False] * len(ps)
+              'hours': 0, 'on_pace': 0, 'hkey': None, 'slice': 0.0, 'sl_h': 0,
+              'entries': len(ps), 're': 0, 're_real': 0.0, 'cap_now': 0.0, 'cap_peak': 0.0, 'thin_n': 0, 'thin_usd': 0.0}
+        live = set(); done = [False] * len(ps); child = [False] * len(ps)
+        for p in ps:
+            if p.get('thin_in'): st['thin_n'] += 1; st['thin_usd'] += p['thin_in']
+
+        def reenter_at(i, t):
+            """Buy the same side again at the ask at t + 1 with the same stake; returns the new position's index or None."""
+            p = ps[i]; t1 = t + 1; k = t1 - p['s0']
+            if t1 > p['c_sec'] - no_exit_sec or t1 > p['c_sec'] - frac * market_len(p) - 60: return None
+            pa = p['path']
+            if not (0 <= k < len(pa['asks'])): return None
+            a = pa['asks'][k]
+            if a is None or not (0.01 <= a <= 0.98): return None
+            stake = p['n'] * p['costF']
+            n0 = stake / a; cF = a + fee1(a, n0)
+            n = stake / cF; cF = a + fee1(a, n)
+            c = thin(None, k, pa['asz'], n)
+            if c > 0: cF += c / n; st['thin_n'] += 1; st['thin_usd'] += c
+            sub = {key: pa[key][k:] for key in ('bids', 'bsz', 'asks', 'asz', 'fv', 'spot')}
+            sub['s0'] = t1
+            q = dict(p, n=n, bids=sub['bids'], fv=sub['fv'], path=sub, cost=a, costF=cF, s0=t1, b0=a, floor=None,
+                     q0=next((x for x in sub['fv'] if x is not None), None), actual=None)
+            ps.append(q); done.append(False); child.append(True)
+            v, sn, px, sec, armed = sim(q, *base) if base is not None else (None, 0.0, None, None, False)
+            outs.append((v, sec)); j = len(ps) - 1
+            closes[sec if v is not None else q['c_sec']].append(j); starts[t1].append(j)
+            st['re'] += 1; st['entries'] += 1
+            return j
 
         def hidx(t): return min(int((t - st['cyc']) // 3600) + 1, 24)
 
@@ -598,6 +647,8 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
 
         def close(i, t, x, kind):
             done[i] = True; live.discard(i); credit(x, t); st[kind] += 1
+            st['cap_now'] -= ps[i]['n'] * ps[i]['costF']
+            if child[i]: st['re_real'] += x
 
         for t in range(T0, T1 + 1):
             a = ny_anchor(t)
@@ -612,11 +663,16 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 elif c0 != st['cyc'] and st.get('last_cyc_real', 0.0) >= h0 * hourly - 1e-9: st['on_pace'] += 1
                 st['slice'] = 0.0; st['sl_h'] = 0  # slices: a new clock hour starts a fresh slice (a partial one is not owed)
             st['hkey'] = hk; st['last_cyc_real'] = st['cyc_real']
-            for i in starts.get(t, ()): live.add(i)
-            for i in closes.get(t, ()):
+            for i in starts.get(t, ()):
+                live.add(i); st['cap_now'] += ps[i]['n'] * ps[i]['costF']
+            st['cap_peak'] = max(st['cap_peak'], st['cap_now'])
+            for i in list(closes.get(t, ())):
                 if done[i]: continue
                 p = ps[i]; v, sec = outs[i]
-                if v is not None and sec == t: close(i, t, (v - p['costF']) * p['n'], 'base')
+                if v is not None and sec == t:
+                    c = thin(p, t - p['s0'], p['path']['bsz'], p['n'])
+                    if c > 0: st['thin_n'] += 1; st['thin_usd'] += c
+                    close(i, t, (v - p['costF']) * p['n'] - c, 'base')
                 else: close(i, t, (p['payout'] - p['costF']) * p['n'], 'held')
             if pacer is None: continue
             members = []
@@ -626,9 +682,12 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 k = t - p['s0']
                 b = p['bids'][k] if 0 <= k < len(p['bids']) else None
                 if b is None: continue
-                net = p['n'] * (b - p['costF']) - taker_fee(p['n'], b)
+                c = thin(p, k, p['path']['bsz'], p['n'])
+                net = p['n'] * (b - p['costF']) - taker_fee(p['n'], b) - c
                 if net >= need(t) - 1e-9:
+                    if c > 0: st['thin_n'] += 1; st['thin_usd'] += c
                     close(i, t, net, 'snipe'); st['cts'] += p['n']
+                    if reenter: reenter_at(i, t)
                 elif net > 1e-9:
                     members.append((i, net))
             if pacer[1] and len(members) >= 2 and sum(x for _, x in members) >= need(t) - 1e-9:
@@ -820,6 +879,31 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         ('hold all', None),
         ('lock bid +2c, first dip judged vs fv + 2c else hold (PR #204 window)', R(lockB, ('bid', 1), ('taker',), -0.02, ('frac_profit', 0.10), {'first_only': True})),
     ])
+
+    # ---- G. Steven, Oct 30: bigger stakes ($50-$100 an order) and buying again after each target is banked ------------
+    print('  G. sizes and re-entry on every position from its entry (B), current exits (lock bid +2c, first dip judged vs fv + 2c')
+    print('     else hold, PR #204 window) and the slices pacer with no group rule unless the row says otherwise. Stakes: each position\'s')
+    print('     entry cost clamped to the band, the contract count rescaled (x5 for $50-$100). Re-entry: after a pacer snipe banks its')
+    print('     target, buy the same side of the same market at the ask the next second with the same stake, repeat while the market')
+    print('     has room. Depth: contracts over the top-of-book size pay 2c worse on entry and sale (top-of-book only, no deeper levels).')
+    print('    stake; pacer; re-entry; depth                                     realized $     $/h  entries  re-entries  re-entry $  base sales  snipes  held  peak $ at work  thin fills  depth $')
+    baseG = R(lockB, ('bid', 1), ('taker',), -0.02, ('frac_profit', 0.10), {'first_only': True})
+    SL = ('slices', False)
+    for lab, pacer, kw in (
+            ("paper's own sizes; slices no group", SL, {}),
+            ('$10-$20; no pacer', None, {'size': (10, 20, 1)}),
+            ('$10-$20; slices no group [BASELINE]', SL, {'size': (10, 20, 1)}),
+            ('$10-$20; slices no group; depth', SL, {'size': (10, 20, 1), 'depth': True}),
+            ('$50-$100; no pacer', None, {'size': (10, 20, 5)}),
+            ('$50-$100; slices no group', SL, {'size': (10, 20, 5)}),
+            ('$50-$100; slices no group; depth', SL, {'size': (10, 20, 5), 'depth': True}),
+            ('$10-$20; slices no group; re-entry', SL, {'size': (10, 20, 1), 'reenter': True}),
+            ('$10-$20; slices no group; re-entry; depth', SL, {'size': (10, 20, 1), 'reenter': True, 'depth': True}),
+            ('$50-$100; slices no group; re-entry', SL, {'size': (10, 20, 5), 'reenter': True}),
+            ('$50-$100; slices no group; re-entry; depth', SL, {'size': (10, 20, 5), 'reenter': True, 'depth': True})):
+        r = pacer_run(pathsB, baseG, pacer, **kw)
+        if r is None: print('    (no costed position)'); break
+        print(f"    {lab:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['entries']:7d}  {r['re']:10d}  {r['re_real']:+10.2f}  {r['base']:10d}  {r['snipe']:6d}  {r['held']:4d}  {r['cap_peak']:14.2f}  {r['thin_n']:10d}  {r['thin_usd']:7.2f}")
 
     # ---- C. what separates the right stop sales from the wrong ones (at the 1-tick trail's trigger, from the locks) --
     print('  C. at the 1-tick trail\'s trigger (from the actual locks): the sale against settlement by what the rule could see')
