@@ -1063,6 +1063,7 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
   const fmPath = argOf('fill-model', '');
   const fillModel = fmPath ? FillModel.load(fmPath) : undefined;
   const calendar = loadCalendar(argOf('calendar', 'params/calendar.json'));
+  // The paper supervisor's refill of a pool that ran dry: --refill <usd> (PAPER_BANKROLL_USD). Default: none.
   // Execution latency (ms): --latency-ms 250 [--cancel-latency-ms 150] [--latency-jitter-ms 100]. Default: none.
   const latency: BacktestLatency | undefined = Number(argOf('latency-ms', '0')) > 0 || Number(argOf('latency-jitter-ms', '0')) > 0
     ? { orderMs: Number(argOf('latency-ms', '0')), cancelMs: argOf('cancel-latency-ms', '') ? Number(argOf('cancel-latency-ms', '0')) : undefined, jitterMs: Number(argOf('latency-jitter-ms', '0')) }
@@ -1079,6 +1080,7 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
           exitPolicy, ratchet: c.ratchet, hunt: c.hunt, volProfile, applyVolSeasonality: Boolean(volProfile), volModel, fillModel,
           sessionRisk: cfg.strategy.sessionRisk, huntSessionGuard: cfg.strategy.huntSessionGuard, huntTransitionBufferMin: cfg.strategy.huntTransitionBufferMin,
           vault: cfg.vault.enabled ? cfg.vault : undefined, calendar, sizingTiers: cfg.sizingTiers, latency,
+          ...(argOf('refill', '') ? { refillUsd: Number(argOf('refill', '')) } : {}),
         }));
       }
     }
