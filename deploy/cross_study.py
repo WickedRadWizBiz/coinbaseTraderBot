@@ -896,6 +896,7 @@ CROSS = re.compile(r'exit curve: cross( NO)? ')
 
 
 def exit_kind(why):
+    if why.startswith('quota snipe'): return 'quota snipe (sold to pace)'
     if TP.match(why): return 'take-profit (trailing)'
     if why.startswith('profit target'): return 'profit target (old)'
     if REST.match(why): return 'exit curve (resting sell)'
@@ -904,6 +905,68 @@ def exit_kind(why):
     if why.startswith('confluence ratchet stop'): return 'ratchet stop'
     if why.startswith('tennis'): return 'tennis'
     return re.sub(r'[-+]?[0-9][0-9.]*', '#', why)[:40] or '?'
+
+
+def pacer_audit(recs, startups, since_ms, until_ms):
+    """Section 0: the hourly quota pacer as paper ran it, from its audit records (bot/engine.ts writes one per credit,
+    settlement and snipe, each with the clock's status after it)."""
+    recs = sorted(r for r in recs if since_ms <= r[0] <= until_ms)
+    if not recs:
+        print('== 0. the hourly quota pacer in paper: no audit pacer records in the window'); return
+    try:
+        from zoneinfo import ZoneInfo
+        NY = ZoneInfo('America/New_York')
+    except Exception:
+        NY = None
+
+    def when(ms):
+        u = time.strftime('%m-%d %H:%M', time.gmtime(ms / 1000))
+        if NY is None: return u + ' UTC'
+        return u + ' UTC (' + datetime.datetime.fromtimestamp(ms / 1000, NY).strftime('%I:%M %p %Z').lstrip('0') + ')'
+
+    print(f'== 0. the hourly quota pacer in paper (PACER): {len(recs)} audit pacer records, {when(recs[0][0])} to {when(recs[-1][0])}')
+    st = [m for m in startups if since_ms - 7200_000 <= m <= until_ms]
+    print('  bot starts: ' + (', '.join(when(m) for m in st) or 'none in the window'))
+    # integrity: each credit's usd moves realized24hUsd by exactly that much within a cycle; a snipe moves nothing; a start
+    # between two records must not lose the cycle's realized total (the state file)
+    prev = None; bad = []; resumed = []
+    for ms, d in recs:
+        a, r, u, ev = d.get('anchorStart'), float(d.get('realized24hUsd') or 0), float(d.get('usd') or 0), d.get('event')
+        if prev is not None:
+            pms, pa, pr = prev
+            restarted = any(pms < m <= ms for m in st)
+            if a == pa:
+                exp = pr + (u if ev in ('credit', 'settled') else 0.0)
+                if abs(exp - r) > 0.011: bad.append((ms, ev, pr, u, r, restarted))
+                elif restarted: resumed.append((ms, pr, r))
+            elif restarted or a != pa:
+                if a is not None and pa is not None and a < pa: bad.append((ms, 'cycle went back', pr, u, r, restarted))
+        prev = (ms, a, r)
+    print(f'  integrity: {len(recs) - len(bad)} of {len(recs)} records continue the running total' + (f'; restarts resumed with the total intact: {len(resumed)}' if resumed else ''))
+    for ms, ev, pr, u, r, rs in bad[:12]:
+        print(f'    MISMATCH {when(ms)} {ev}: before {pr:+.2f}, credit {u:+.2f}, after {r:+.2f}' + (' (a bot start in between: the state file did not carry the cycle)' if rs else ''))
+    cr = [d for _, d in recs if d.get('event') == 'credit']; se = [d for _, d in recs if d.get('event') == 'settled']; sn = [(ms, d) for ms, d in recs if d.get('event') == 'snipe']
+    f = lambda xs: sum(float(x.get('usd') or 0) for x in xs)
+    pos = lambda xs: sum(max(0.0, float(x.get('usd') or 0)) for x in xs)
+    print(f"  credits: {len(cr)} reducing fills {f(cr):+.2f} (gains {pos(cr):+.2f}, losses {f(cr) - pos(cr):+.2f}); {len(se)} settlements {f(se):+.2f} (gains {pos(se):+.2f}, losses {f(se) - pos(se):+.2f})")
+    grp = [x for x in sn if '(group)' in str(x[1].get('why') or '')]
+    print(f"  quota snipes: {len(sn)} ({len(grp)} by the group rule), {sum(float(d.get('count') or 0) for _, d in sn):.0f} contracts")
+    print('    clock hour (cycle, hour #)          credits     fills $  settled $  snipes  realized in cycle  goal by hour end  needed  ahead')
+    hours = collections.OrderedDict()
+    for ms, d in recs:
+        k = (d.get('anchorStart'), d.get('hourIndex'))
+        h = hours.setdefault(k, {'n': 0, 'fill': 0.0, 'set': 0.0, 'snipe': 0, 'last': None, 'ms': ms})
+        ev = d.get('event'); u = float(d.get('usd') or 0)
+        if ev == 'credit': h['n'] += 1; h['fill'] += u
+        elif ev == 'settled': h['n'] += 1; h['set'] += u
+        elif ev == 'snipe': h['snipe'] += 1
+        h['last'] = d
+    for (a, hi), h in hours.items():
+        d = h['last']
+        lab = (datetime.datetime.fromtimestamp(a / 1000, NY).strftime('%m-%d %I %p') if (NY and a) else str(a)) + f', #{hi}'
+        print(f"    {lab:34s} {h['n']:7d}  {h['fill']:+9.2f}  {h['set']:+9.2f}  {h['snipe']:6d}  {float(d.get('realized24hUsd') or 0):+17.2f}  {float(d.get('nextHourGoalUsd') or 0):16.2f}  {float(d.get('neededUsd') or 0):6.2f}  {'yes' if d.get('ahead') else 'no'}")
+    for ms, d in sn[:30]:
+        print(f"    snipe {when(ms)}: {str(d.get('why') or '')[:140]} | needed {float(d.get('neededUsd') or 0):.2f}")
 
 
 def iso_ms(ts):
@@ -961,7 +1024,8 @@ def main():
     files = sorted(f for f in glob.glob(os.path.join(data, 'audit', 'audit-*.jsonl')) if os.path.basename(f)[6:16] >= from_iso[:10].decode())
     fills, orders, results, exit_why, curve_events = [], {}, {}, {}, []
     hunts = collections.defaultdict(list)  # ticker -> the hunt's decision records (activated / ratcheted / triggered / profit takes / deactivations)
-    want = (b'"kind":"fill"', b'"kind":"settlement"', b'"kind":"order_new"', b'"kind":"curve_exit"')
+    want = (b'"kind":"fill"', b'"kind":"settlement"', b'"kind":"order_new"', b'"kind":"curve_exit"', b'"kind":"pacer"', b'"kind":"startup"')
+    pacer_recs, startups = [], []  # the quota pacer's audit records (credit / settled / snipe, each with the clock) and bot starts
     for f in files:
         with open(f, 'rb') as fh:
             for line in fh:
@@ -993,8 +1057,13 @@ def main():
                     if d.get('result') in ('yes', 'no'): results[d.get('ticker', '')] = (d['result'], iso_ms(ts))
                 elif k == 'curve_exit':
                     curve_events.append((ts, d))
+                elif k == 'pacer':
+                    pacer_recs.append((iso_ms(ts), d))
+                elif k == 'startup':
+                    startups.append(iso_ms(ts))
     fills.sort(key=lambda x: x['ms'])
     print(f"audit files {[os.path.basename(f) for f in files]}: fills {len(fills)}  orders {len(orders)}  settled markets {len(results)}  ({time.time() - t0:.0f} s)")
+    pacer_audit(pacer_recs, startups, since_ms, int(now * 1000))
 
     def why_of(fl):
         o = orders.get(fl['coid']) or {}
