@@ -553,7 +553,8 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
 
     def pacer_run(paths, base, pacer, hourly=4.5, floor=0.75, cap=6.5, frac=0.10, no_exit_sec=60):
         """One base exit with (or without) the pacer on top, every position in time order on one clock. base: a sim() rule or
-        None (hold everything); pacer: None | (mode, group) with mode 'cumulative' | 'rolling_hour'."""
+        None (hold everything); pacer: None | (mode, group) with mode 'cumulative' | 'rolling_hour' | 'slices' (Steven's
+        non-stacking spec of Oct 30, bot/risk/quotaPacer.ts: catch-up slices of at most the hourly target)."""
         ps = [p for p in paths if p.get('costF') is not None]
         if not ps: return None
         outs = []
@@ -567,16 +568,31 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             v, sec = outs[i]
             closes[sec if v is not None else p['c_sec']].append(i)
         st = {'real': 0.0, 'cyc': None, 'cyc_real': 0.0, 'bk': collections.defaultdict(float), 'base': 0, 'held': 0, 'snipe': 0, 'group': 0, 'cts': 0.0,
-              'hours': 0, 'on_pace': 0, 'hkey': None}
+              'hours': 0, 'on_pace': 0, 'hkey': None, 'slice': 0.0, 'sl_h': 0}
         live = set(); done = [False] * len(ps)
 
         def hidx(t): return min(int((t - st['cyc']) // 3600) + 1, 24)
 
+        def req(h):  # what the rest of the cycle owes an hour block, this one included
+            return max(0.0, 24 * hourly - st['cyc_real']) / max(1, 24 - h + 1)
+
+        def slice_goal(h): return min(hourly, req(h))
+
         def credit(x, t):
             st['real'] += x; st['cyc_real'] += x; st['bk'][hidx(t)] += x
+            if pacer is not None and pacer[0] == 'slices':
+                h = hidx(t); st['slice'] += x; g = slice_goal(h); n = 0
+                while g > 0 and st['slice'] >= g - 1e-9 and n < 1000:  # a slice reached is banked, the excess carried
+                    st['slice'] -= g; st['sl_h'] += 1; n += 1; g = slice_goal(h)
+                    if g < floor: break
+                if st['slice'] < 0: st['slice'] = 0.0  # a loss never raises the target
 
         def need(t):
             h = hidx(t)
+            if pacer[0] == 'slices':
+                catch = req(h) > hourly + 1e-9
+                raw = floor if st['sl_h'] > 0 and not catch else slice_goal(h) - st['slice']
+                return max(floor, min(raw, hourly))
             raw = h * hourly - st['cyc_real'] if pacer[0] == 'cumulative' else hourly - st['bk'][h]
             return max(floor, min(raw, cap))
 
@@ -594,6 +610,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 c0, h0 = st['hkey']
                 if c0 == st['cyc'] and st['cyc_real'] >= h0 * hourly - 1e-9: st['on_pace'] += 1
                 elif c0 != st['cyc'] and st.get('last_cyc_real', 0.0) >= h0 * hourly - 1e-9: st['on_pace'] += 1
+                st['slice'] = 0.0; st['sl_h'] = 0  # slices: a new clock hour starts a fresh slice (a partial one is not owed)
             st['hkey'] = hk; st['last_cyc_real'] = st['cyc_real']
             for i in starts.get(t, ()): live.add(i)
             for i in closes.get(t, ()):
@@ -622,13 +639,16 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         return st
 
     def pacer_table(paths, title, bases):
-        print(f'  F. the hourly quota pacer (PACER, PR #204) in time order on {title}: $4.50 an hour from 10:00 AM New York, the cumulative deficit')
-        print('     clamped to [0.75, 6.50], one position (or, with the group rule, several each in profit) sold at the bid once its net profit')
-        print('     after fees covers it; the last 10% of a window holds a position in profit, the final 60 s every one. Realized $ after fees')
-        print('     against entry cost (fee in), the clock counting only these positions.')
+        print(f'  F. the hourly quota pacer (PACER) in time order on {title}: $4.50 an hour from 10:00 AM New York. cumulative (PR #204):')
+        print('     the deficit since the anchor clamped to [0.75, 6.50]; slices (Steven, Oct 30, PR #205): the required rate (108 less the')
+        print('     cycle realized, over the hour blocks left) caps a slice at 4.50 when behind, else the rate; the threshold is the slice goal')
+        print('     less what it banked, a fresh slice each clock hour, 0.75 once a slice is banked on pace, floored at 0.75. One position (or,')
+        print('     with the group rule, several each in profit) sold at the bid once its net profit after fees covers it; the last 10% of a')
+        print('     window holds a position in profit, the final 60 s every one. Realized $ after fees against entry cost (fee in), the clock')
+        print('     counting only these positions.')
         print('    base exit; pacer                                                  realized $     $/h  base sales  snipes  group  contracts sniped  held  hours on pace')
         for bname, base in bases:
-            for pname, pacer in (('no pacer', None), ('pacer (cumulative, group rule)', ('cumulative', True)), ('pacer, no group rule', ('cumulative', False)), ('pacer, rolling hour, group rule', ('rolling_hour', True))):
+            for pname, pacer in (('no pacer', None), ('pacer (cumulative, group rule)', ('cumulative', True)), ('pacer (slices, group rule)', ('slices', True)), ('pacer (slices, no group rule)', ('slices', False))):
                 r = pacer_run(paths, base, pacer)
                 if r is None: print('    (no costed position)'); return
                 lab = f'{bname}; {pname}'
@@ -951,7 +971,7 @@ def pacer_audit(recs, startups, since_ms, until_ms):
     print(f"  credits: {len(cr)} reducing fills {f(cr):+.2f} (gains {pos(cr):+.2f}, losses {f(cr) - pos(cr):+.2f}); {len(se)} settlements {f(se):+.2f} (gains {pos(se):+.2f}, losses {f(se) - pos(se):+.2f})")
     grp = [x for x in sn if '(group)' in str(x[1].get('why') or '')]
     print(f"  quota snipes: {len(sn)} ({len(grp)} by the group rule), {sum(float(d.get('count') or 0) for _, d in sn):.0f} contracts")
-    print('    clock hour (cycle, hour #)          credits     fills $  settled $  snipes  realized in cycle  goal by hour end  needed  ahead')
+    print('    clock hour (cycle, hour #)          credits     fills $  settled $  snipes  realized in cycle  goal by hour end  needed  ahead  mode (slices: banked, req/h)')
     hours = collections.OrderedDict()
     for ms, d in recs:
         k = (d.get('anchorStart'), d.get('hourIndex'))
@@ -964,9 +984,48 @@ def pacer_audit(recs, startups, since_ms, until_ms):
     for (a, hi), h in hours.items():
         d = h['last']
         lab = (datetime.datetime.fromtimestamp(a / 1000, NY).strftime('%m-%d %I %p') if (NY and a) else str(a)) + f', #{hi}'
-        print(f"    {lab:34s} {h['n']:7d}  {h['fill']:+9.2f}  {h['set']:+9.2f}  {h['snipe']:6d}  {float(d.get('realized24hUsd') or 0):+17.2f}  {float(d.get('nextHourGoalUsd') or 0):16.2f}  {float(d.get('neededUsd') or 0):6.2f}  {'yes' if d.get('ahead') else 'no'}")
+        sl = f" {d.get('slicesThisHour')}, {float(d.get('requiredPerHourUsd') or 0):.2f}" if d.get('mode') == 'slices' else ''
+        print(f"    {lab:34s} {h['n']:7d}  {h['fill']:+9.2f}  {h['set']:+9.2f}  {h['snipe']:6d}  {float(d.get('realized24hUsd') or 0):+17.2f}  {float(d.get('nextHourGoalUsd') or 0):16.2f}  {float(d.get('neededUsd') or 0):6.2f}  {'yes' if d.get('ahead') else 'no':5s}  {d.get('mode') or 'cumulative'}{sl}")
     for ms, d in sn[:30]:
         print(f"    snipe {when(ms)}: {str(d.get('why') or '')[:140]} | needed {float(d.get('neededUsd') or 0):.2f}")
+
+
+def size_audit(orders, fills, sizing, since_ms, until_ms):
+    """Section 0b: what each entry stakes (order_new: contracts x price; taker entries and maker quotes that add) by clock hour,
+    and the sizer's state from the module ledger's sizing rows (paper sizes like live since PR #183, Oct 28 22:19 UTC)."""
+    try:
+        from zoneinfo import ZoneInfo
+        NY = ZoneInfo('America/New_York')
+    except Exception:
+        NY = None
+
+    def when(ms):
+        u = time.strftime('%m-%d %H:%M', time.gmtime(ms / 1000))
+        return u + ' UTC' + ('' if NY is None else ' (' + datetime.datetime.fromtimestamp(ms / 1000, NY).strftime('%I:%M %p %Z').lstrip('0') + ')')
+
+    adds = lambda o: o.get('purpose') == 'entry' or (o.get('purpose') == 'quote' and not o.get('ro'))
+    ent = sorted((o for o in orders.values() if o.get('ms') is not None and since_ms <= o['ms'] <= until_ms and adds(o)), key=lambda o: o['ms'])
+    ef = [fl for fl in fills if since_ms <= fl['ms'] <= until_ms and adds(orders.get(fl['coid']) or {})]
+    usd = lambda o: float(o.get('count') or 0) * float(o.get('price') or 0)
+    print(f'== 0b. position sizes: {len(ent)} entry orders (taker entries and maker quotes that add), {len(ef)} entry fills')
+    if ent:
+        c = [float(o.get('count') or 0) for o in ent]; u = [usd(o) for o in ent]
+        print(f'  per order: contracts median {pct(c, .5):.2f} (p10 {pct(c, .1):.2f}, p90 {pct(c, .9):.2f}); stake median ${pct(u, .5):.2f} (p10 ${pct(u, .1):.2f}, p90 ${pct(u, .9):.2f})')
+    if ef:
+        print(f"  filled: {sum(x['count'] for x in ef):.1f} contracts, ${sum(x['count'] * x['price'] for x in ef):.2f} staked; per fill median {pct([x['count'] for x in ef], .5):.2f} contracts")
+    by = collections.OrderedDict()
+    for o in ent: by.setdefault(o['ms'] // 3600_000, []).append(o)
+    if by: print('    clock hour                     orders  contracts (median)  stake $ (median)  stake $ (p90)')
+    for hk, xs in list(by.items())[-36:]:
+        print(f"    {when(hk * 3600_000):30s} {len(xs):6d}  {pct([float(o.get('count') or 0) for o in xs], .5):18.2f}  {pct([usd(o) for o in xs], .5):16.2f}  {pct([usd(o) for o in xs], .9):13.2f}")
+    sz = [(ms, rows) for ms, rows in sizing if since_ms - 3600_000 <= ms <= until_ms and rows]
+    for ms, rows in (sz[:1] + sz[-1:] if len(sz) > 1 else sz):
+        parts = []
+        for r in rows:
+            sc = r.get('score') or {}
+            parts.append(f"{r.get('module')}: {r.get('state')}" + (f" ({sc.get('label')} {sc.get('value')}, n {sc.get('n')})" if sc else '') + (f" [{r.get('note')}]" if r.get('note') else '') + (' {' + '; '.join(r.get('flags') or []) + '}' if r.get('flags') else ''))
+        print(f'  sizer at {when(ms)}: ' + ' | '.join(parts))
+    if not sz: print('  sizer: no module ledger record in the window')
 
 
 def iso_ms(ts):
@@ -1024,8 +1083,9 @@ def main():
     files = sorted(f for f in glob.glob(os.path.join(data, 'audit', 'audit-*.jsonl')) if os.path.basename(f)[6:16] >= from_iso[:10].decode())
     fills, orders, results, exit_why, curve_events = [], {}, {}, {}, []
     hunts = collections.defaultdict(list)  # ticker -> the hunt's decision records (activated / ratcheted / triggered / profit takes / deactivations)
-    want = (b'"kind":"fill"', b'"kind":"settlement"', b'"kind":"order_new"', b'"kind":"curve_exit"', b'"kind":"pacer"', b'"kind":"startup"')
+    want = (b'"kind":"fill"', b'"kind":"settlement"', b'"kind":"order_new"', b'"kind":"curve_exit"', b'"kind":"pacer"', b'"kind":"startup"', b'"kind":"modules"')
     pacer_recs, startups = [], []  # the quota pacer's audit records (credit / settled / snipe, each with the clock) and bot starts
+    sizing_recs = []  # the module ledger's sizing rows (audit 'modules': tier, loss-aware scale, optimal f cap, portfolio Kelly)
     for f in files:
         with open(f, 'rb') as fh:
             for line in fh:
@@ -1052,7 +1112,8 @@ def main():
                     fl = d.get('fill') or {}
                     fills.append({'ms': iso_ms(ts), 'ticker': fl.get('ticker', ''), 'side': fl.get('side'), 'count': float(fl.get('count') or 0), 'price': float(fl.get('price') or 0), 'fee': float(d.get('fee') or 0), 'coid': d.get('clientOrderId')})
                 elif k == 'order_new':
-                    orders[d.get('clientOrderId')] = {'purpose': d.get('purpose'), 'price': d.get('price'), 'side': d.get('side'), 'decision': d.get('decisionId'), 'close': d.get('windowCloseTs'), 'asset': d.get('asset'), 'fv': d.get('fairValue')}
+                    orders[d.get('clientOrderId')] = {'purpose': d.get('purpose'), 'price': d.get('price'), 'side': d.get('side'), 'decision': d.get('decisionId'), 'close': d.get('windowCloseTs'), 'asset': d.get('asset'), 'fv': d.get('fairValue'),
+                                                      'count': d.get('count'), 'ro': bool(d.get('reduceOnly')), 'ms': iso_ms(ts)}
                 elif k == 'settlement':
                     if d.get('result') in ('yes', 'no'): results[d.get('ticker', '')] = (d['result'], iso_ms(ts))
                 elif k == 'curve_exit':
@@ -1061,9 +1122,12 @@ def main():
                     pacer_recs.append((iso_ms(ts), d))
                 elif k == 'startup':
                     startups.append(iso_ms(ts))
+                elif k == 'modules':
+                    sizing_recs.append((iso_ms(ts), [x for x in d.get('rows') or [] if x.get('area') == 'sizing']))
     fills.sort(key=lambda x: x['ms'])
     print(f"audit files {[os.path.basename(f) for f in files]}: fills {len(fills)}  orders {len(orders)}  settled markets {len(results)}  ({time.time() - t0:.0f} s)")
     pacer_audit(pacer_recs, startups, since_ms, int(now * 1000))
+    size_audit(orders, fills, sizing_recs, since_ms, int(now * 1000))
 
     def why_of(fl):
         o = orders.get(fl['coid']) or {}
