@@ -23,6 +23,8 @@ export type PacerMode = 'cumulative' | 'rolling_hour';
 export interface PacerConfig {
   /** PACER: the quota snipe is on. */
   enabled: boolean;
+  /** PACER_GROUP: positions each in profit after fees whose profits together cover the target are all sold (SnipeGroup). */
+  group: boolean;
   /** PACER_HOURLY_USD: the hourly target (4.50). */
   hourlyUsd: number;
   /** PACER_ANCHOR_HOUR / PACER_ANCHOR_MINUTE: the cycle's start on the wall clock of PACER_TZ (10:00). */
@@ -114,6 +116,54 @@ export function validZone(tz: string): boolean {
 }
 
 const round2 = (x: number) => Math.round(x * 100) / 100;
+
+export interface GroupVerdict {
+  /** This market is to be sold as a member of a group whose profits together cover the target. */
+  sell: boolean;
+  /** The members' net profits summed, and how many there are (this market included). */
+  sumUsd: number;
+  members: number;
+}
+
+/** Steven's addition (Oct 30 2026 00:05 UTC): when more than one position is in profit after fees and those profits together
+ *  cover what the hour needs, they are all sold. The engine judges markets one at a time, so each market's net profit at its bid
+ *  is recorded as it is evaluated; when the fresh ones sum to the target, every member is marked and sold at its next evaluation
+ *  while still in profit (a sale's credit lowers the target, which must not strand the rest of the group). A position inside the
+ *  final share of its window is not a member (it rides to settlement). */
+export class SnipeGroup {
+  private readonly nets = new Map<string, { net: number; at: number }>();
+  private readonly marked = new Map<string, number>();
+
+  constructor(private readonly staleMs = 120_000, private readonly markMs = 90_000) {}
+
+  /** Records the market's net profit after fees at its bid (undefined: flat, no basis, or inside its final share) and says whether
+   *  it is to be sold as a member of a group covering `needed`. */
+  judge(ticker: string, net: number | undefined, needed: number | undefined, now: number): GroupVerdict {
+    if (net === undefined || !(net > 1e-9)) {
+      this.nets.delete(ticker);
+      this.marked.delete(ticker);
+      return { sell: false, sumUsd: 0, members: 0 };
+    }
+    this.nets.set(ticker, { net, at: now });
+    for (const [t, x] of this.nets) if (now - x.at > this.staleMs) this.nets.delete(t);
+    for (const [t, until] of this.marked) if (until <= now) this.marked.delete(t);
+    let sumUsd = 0;
+    for (const x of this.nets.values()) sumUsd += x.net;
+    const members = this.nets.size;
+    if (this.marked.has(ticker)) return { sell: true, sumUsd, members };
+    if (needed !== undefined && members >= 2 && sumUsd >= needed - 1e-9) {
+      for (const t of this.nets.keys()) this.marked.set(t, now + this.markMs);
+      return { sell: true, sumUsd, members };
+    }
+    return { sell: false, sumUsd, members };
+  }
+
+  /** The market settled or is gone. */
+  forget(ticker: string): void {
+    this.nets.delete(ticker);
+    this.marked.delete(ticker);
+  }
+}
 
 interface Saved { cycleStart: number; lastProfitTs: number; realized24h: number; buckets: Record<string, number>; fed: Record<string, number>; savedAt: number }
 

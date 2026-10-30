@@ -323,13 +323,17 @@ test('quota snipe: a position whose whole net profit after fees covers what the 
   // Long 10 YES at 0.40 plus the 0.0175 entry fee (cost 0.4175); the model values it at 0.70. At the 0.52 bid the position is up
   // 10 x 0.1025 = 1.025 less the ~0.18 taker fee: +0.85 net; at 0.50 it is +0.65.
   const long = (o: Partial<MarketView> = {}) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.52, size: 50 }, bestAsk: { price: 0.6, size: 50 }, ...o });
-  const exitOf = (v: MarketView, o: { exits?: boolean; blockReductions?: boolean; pacerUsd?: number } = {}) =>
+  const exitOf = (v: MarketView, o: { exits?: boolean; blockReductions?: boolean; pacerUsd?: number; pacerGroup?: { sumUsd: number; members: number } } = {}) =>
     decide(v, cfg, { exits: false, pacerUsd: 0.75, ...o }).place.find((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel');
   const e = exitOf(long())!;
   assert.deepEqual([e.side, e.price, e.count, e.reduceOnly], ['ask', 0.52, 10, true]);
   assert.match(e.why, /^quota snipe: \+\$0\.8\d net on 10 at bid 0\.52 covers the \$0\.75 the hour needs/);
   assert.ok(exitOf(long(), { blockReductions: true }), 'a hunt trailing its stop does not stop the snipe');
   assert.equal(exitOf(long({ bestBid: { price: 0.5, size: 50 } })), undefined, '+0.65 net does not cover the 0.75 needed');
+  // The group rule: in profit, and with the other positions in profit covering the target, it sells whatever its own net.
+  const g = exitOf(long({ bestBid: { price: 0.5, size: 50 } }), { pacerGroup: { sumUsd: 1.1, members: 2 } })!;
+  assert.match(g.why, /^quota snipe \(group\): \+\$0\.6\d net on 10 at bid 0\.5, with 1 other position in profit \(\+\$1\.10 together\) covers the \$0\.75 the hour needs/);
+  assert.equal(exitOf(long({ bestBid: { price: 0.43, size: 50 } }), { pacerGroup: { sumUsd: 1.1, members: 2 } }), undefined, 'not in profit itself: not a member');
   assert.ok(exitOf(long({ bestBid: { price: 0.5, size: 50 } }), { pacerUsd: 0.5 }), 'it does cover 0.50: the threshold moves with the clock');
   assert.equal(exitOf(long({ exitWindowOpen: false })), undefined, 'the last share of the window rides to settlement');
   assert.equal(exitOf(long(), { pacerUsd: undefined }), undefined, 'pacer off');

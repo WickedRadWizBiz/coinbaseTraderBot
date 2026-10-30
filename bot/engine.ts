@@ -31,10 +31,10 @@ import { marketWorstLoss, RestingLike } from './risk/exposure';
 import type { KillSwitch } from './risk/killSwitch';
 import { EXIT_RATE_RESERVE, RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
-import { decide, decisionProbability, MarketView, OrderPlan } from './strategy/fairValueStrategy';
+import { decide, decisionProbability, MarketView, netProfitAtBid, OrderPlan } from './strategy/fairValueStrategy';
 import { ProfitPeaks } from './strategy/profitPeaks';
 import { ConfluenceRatchetExit, HuntEvent } from './strategy/exitPolicies';
-import { HourlyQuotaPacer } from './risk/quotaPacer';
+import { HourlyQuotaPacer, SnipeGroup } from './risk/quotaPacer';
 import type { SinuousEntryGate } from './strategy/sinuousEntry';
 import { tennisHighLeverage, type CurveReading, type SinuousExitGate } from './strategy/sinuousExit';
 import type { TakeProfitBench } from './strategy/takeProfitBench';
@@ -353,6 +353,8 @@ export class Engine {
   private readonly profitPeaks = new ProfitPeaks();
   /** The hourly quota pacer (PACER, bot/risk/quotaPacer.ts): its cycle persists in DATA_DIR across restarts. */
   private readonly pacer: HourlyQuotaPacer;
+  /** Positions in profit after fees whose profits together cover the pacer's target are all sold (PACER_GROUP). */
+  private readonly snipeGroup = new SnipeGroup();
   private readonly cadence: CadenceGate;
   private readonly lastPosition = new Map<string, number>();
   private timers: NodeJS.Timeout[] = [];
@@ -466,6 +468,7 @@ export class Engine {
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized: number; positionBefore: number }) => {
       this.lastSettleTs = this.now();
       // The quota pacer credits what the market's realized total still lacks after its exits.
+      this.snipeGroup.forget(e.ticker);
       { const c = this.pacer.onSettled(e.ticker, e.realized ?? 0, this.now()); if (Math.abs(c) > 1e-9) d.audit.write('pacer', { event: 'settled', ticker: e.ticker, usd: Math.round(c * 1e4) / 1e4, ...this.pacer.status(this.now()) }); }
       // One probation result per settled market that traded (VALIDATION_GATES=monitor: bot/risk/probation.ts).
       if (e.realized) probation()?.record(this.isTennis(e.ticker) ? 'tennis' : 'kalshi', e.realized, this.now());
@@ -2198,7 +2201,9 @@ export class Engine {
     // mandate (PROFIT_MANDATE, off by default) sells any position in profit outside the last share of the window, a hunt trailing
     // its stop excepted; a hunt that holds (HUNT_LOCK_SALE_ELSE=hold) is not excepted, so its reductions are not blocked.
     const pacerUsd = this.pacer.neededUsd(now);
-    const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode && !huntHold, entries: Boolean(reason), profitMandate: S.profitMandate && (!huntMode || huntHold) ? S.profitMandateMin : undefined, pacerUsd });
+    // Steven's group rule (PACER_GROUP): this position, in profit after fees, is sold when the positions in profit together cover the target.
+    const group = pacerUsd !== undefined && S.pacer.group ? this.snipeGroup.judge(m.ticker, view.exitWindowOpen !== false ? netProfitAtBid(view) : undefined, pacerUsd, now) : undefined;
+    const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode && !huntHold, entries: Boolean(reason), profitMandate: S.profitMandate && (!huntMode || huntHold) ? S.profitMandateMin : undefined, pacerUsd, ...(group?.sell ? { pacerGroup: group } : {}) });
     // A quota snipe liquidates the position: the hunt's stop order would only double it. The decision is audited with the clock.
     const snipe = plan.place.find((p) => p.purpose === 'exit' && p.why.startsWith('quota snipe'));
     if (snipe) { huntPlan = undefined; this.d.audit.write('pacer', { event: 'snipe', ticker: m.ticker, why: snipe.why, count: snipe.count, price: snipe.price, ...this.pacer.status(now) }); }

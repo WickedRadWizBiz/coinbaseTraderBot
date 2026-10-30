@@ -55,7 +55,7 @@ import { PaperExchange } from '../bot/paper/paperExchange';
 import { marketWorstLoss } from '../bot/risk/exposure';
 import { EquityGuard } from '../bot/risk/equityGuard';
 import { RiskGateway } from '../bot/risk/riskGateway';
-import { decide, decisionProbability, type MarketView } from '../bot/strategy/fairValueStrategy';
+import { decide, decisionProbability, netProfitAtBid, type MarketView } from '../bot/strategy/fairValueStrategy';
 import { ComponentTrials, type TrialName } from '../bot/strategy/componentTrials';
 import { activeRuleBook, RuleBook, setRuleBook } from '../bot/strategy/ruleBook';
 import { altcoinRiskOn, confluenceBreadth, orientedSignals, selectionPriority, taDrift, taNetDirection } from '../bot/strategy/taConviction';
@@ -68,7 +68,7 @@ import type { Timeframe } from '../bot/ta/knowledge';
 import { setTaNetEnsemble, TaNetEnsemble, taNetView } from '../bot/ta/taNetEnsemble';
 import { ProfitPeaks } from '../bot/strategy/profitPeaks';
 import { ConfluenceRatchetExit, DEFAULT_HUNT, DEFAULT_RATCHET, EXIT_POLICIES, ExitPolicyName, HuntParams, LiquidityRatchet, RatchetParams } from '../bot/strategy/exitPolicies';
-import { HourlyQuotaPacer } from '../bot/risk/quotaPacer';
+import { HourlyQuotaPacer, SnipeGroup } from '../bot/risk/quotaPacer';
 import { readRecordings, ReplayState } from './replay';
 import { AccuracyGate, type AccuracyGateConfig } from '../bot/strategy/accuracyGate';
 import { TakeProfitBench } from '../bot/strategy/takeProfitBench';
@@ -376,6 +376,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   // The hourly quota pacer on the replay's clock (PACER, bot/risk/quotaPacer.ts), as the engine runs it.
   let pacer: HourlyQuotaPacer | undefined;
   const pacerAt = (now: number) => (pacer ??= new HourlyQuotaPacer(strategy.pacer, now));
+  const snipeGroup = new SnipeGroup();
   const vault = opts.vault ? new Vault(opts.vault, undefined, () => st.now) : undefined;
   const res: BacktestResult = { exitPolicy: policy, label: policy === 'confluence_ratchet' ? `confluence_ratchet[m=${(opts.hunt ?? DEFAULT_HUNT).targetMargin},f=${(opts.ratchet ?? DEFAULT_RATCHET).minFillRatio}]` : policy, huntParams: policy === 'confluence_ratchet' ? { hunt: opts.hunt ?? DEFAULT_HUNT, ratchet: opts.ratchet ?? DEFAULT_RATCHET } : undefined, vaultEnd: 0, pocketEnd: 0, bySession: {}, exits, trades: [], takeProfitFills: 0, latency: { orderMs: opts.latency?.orderMs ?? 0, cancelMs: opts.latency?.cancelMs ?? opts.latency?.orderMs ?? 0, jitterMs: opts.latency?.jitterMs ?? 0, sent: 0, cancelRaceFills: 0, cancelRaceContracts: 0, lateKills: 0 }, entryEvaluations: 0, days: 0, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
   const cadence = new CadenceGate(strategy);
@@ -597,6 +598,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           exitLedger.delete(m.ticker);
           ratchets.delete(m.ticker);
           hunts.delete(m.ticker);
+          snipeGroup.forget(m.ticker);
           cadence.forget(m.ticker);
           pending.delete(m.ticker);
           priority.delete(m.ticker);
@@ -870,12 +872,15 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         ...(huntRest !== undefined ? { huntRestSidePrice: huntRest } : {}),
       };
       const strat = { ...stratRun, kellyFraction: tier.kellyFraction * sizeScale, minEdge: Math.max(0, strategy.minEdge + sessRisk.minEdgeAdd + dynamicEdge(strategy.dynamicEdge, mRead, pred.std).add), inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult };
+      const pacerUsdNow = pacerAt(st.now).neededUsd(st.now);
+      const group = pacerUsdNow !== undefined && strategy.pacer.group ? snipeGroup.judge(m.ticker, view.exitWindowOpen !== false ? netProfitAtBid(view) : undefined, pacerUsdNow, st.now) : undefined;
       const plan = decide(view, strat, {
         exits: policy === 'fair_value' || policy === 'take_profit' || policy === 'hybrid' || (policy === 'confluence_ratchet' && !huntMode),
         blockReductions: huntMode && !huntHold,
         entries: Boolean(reason),
         profitMandate: strategy.profitMandate && (!huntMode || huntHold) ? strategy.profitMandateMin : undefined,
-        pacerUsd: pacerAt(st.now).neededUsd(st.now),
+        pacerUsd: pacerUsdNow,
+        ...(group?.sell ? { pacerGroup: group } : {}),
       });
       const qDecision = decisionProbability(view, strat);
       if (strategy.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features: fmap, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: strategy.takeMargin });

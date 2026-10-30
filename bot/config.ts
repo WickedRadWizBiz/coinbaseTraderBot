@@ -852,6 +852,7 @@ function pacerConfig(env: Env): PacerConfig {
   const minTakeUsd = num(env, 'PACER_MIN_TAKE_USD', 0.75, 0, 10_000);
   return {
     enabled: bool(env, 'PACER', true),
+    group: bool(env, 'PACER_GROUP', true),
     hourlyUsd: num(env, 'PACER_HOURLY_USD', 4.5, 0, 10_000),
     anchorHour: Math.floor(num(env, 'PACER_ANCHOR_HOUR', 10, 0, 23)),
     anchorMinute: Math.floor(num(env, 'PACER_ANCHOR_MINUTE', 0, 0, 59)),

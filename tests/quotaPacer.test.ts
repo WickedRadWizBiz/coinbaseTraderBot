@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { HourlyQuotaPacer, anchorAfter, anchorBefore, wallClock, wallToUtc, type PacerConfig } from '../bot/risk/quotaPacer';
+import { HourlyQuotaPacer, SnipeGroup, anchorAfter, anchorBefore, wallClock, wallToUtc, type PacerConfig } from '../bot/risk/quotaPacer';
 import { PositionBook } from '../bot/oms/positions';
 
-const CFG: PacerConfig = { enabled: true, hourlyUsd: 4.5, anchorHour: 10, anchorMinute: 0, tz: 'America/New_York', mode: 'cumulative', minTakeUsd: 0.75, maxTargetUsd: 6.5 };
+const CFG: PacerConfig = { enabled: true, group: true, hourlyUsd: 4.5, anchorHour: 10, anchorMinute: 0, tz: 'America/New_York', mode: 'cumulative', minTakeUsd: 0.75, maxTargetUsd: 6.5 };
 const T = (iso: string) => Date.parse(iso);
 
 test('the cycle anchors on 10:00 AM New York wall time, EDT and EST alike', () => {
@@ -85,6 +85,28 @@ test('credits: every reduction credits its realized profit net of its fee, and a
   assert.equal(fill('C', 'bid', 4, 0.5, 0.04, t0 + 7000), 0);
   assert.equal(+fill('C', 'ask', 6, 0.45, 0.06, t0 + 8000).toFixed(4), +(4 * (0.45 - 0.51) - 0.04).toFixed(4));
   assert.equal(+p.status(t0 + 8000).realized24hUsd.toFixed(4), +(3.35 + 0.8 + 4 * (0.45 - 0.51) - 0.04).toFixed(4));
+});
+
+test('the group: positions each in profit after fees whose profits together cover the target are all sold', () => {
+  const g = new SnipeGroup(120_000, 90_000);
+  const t0 = 1_000_000;
+  // A alone (+2.50) does not cover 4.50; with B (+2.20) the two do: both are to be sold, B at once and A at its next look.
+  assert.deepEqual(g.judge('A', 2.5, 4.5, t0), { sell: false, sumUsd: 2.5, members: 1 });
+  assert.deepEqual(g.judge('B', 2.2, 4.5, t0 + 1000), { sell: true, sumUsd: 4.7, members: 2 });
+  assert.equal(g.judge('A', 2.4, 2.0, t0 + 2000).sell, true, 'A is sold on its mark even though the target fell after B\'s sale');
+  // A member that is no longer in profit is not sold, and drops out of the sum.
+  assert.deepEqual(g.judge('A', -0.1, 4.5, t0 + 3000), { sell: false, sumUsd: 0, members: 0 });
+  assert.equal(g.judge('B', 2.2, 4.5, t0 + 4000).sell, true, 'B keeps its mark');
+  // Marks expire; stale members fall out of the sum; one position never forms a group.
+  assert.deepEqual(g.judge('B', 2.2, 4.5, t0 + 100_000), { sell: false, sumUsd: 2.2, members: 1 });
+  assert.equal(g.judge('C', 3.0, 4.5, t0 + 101_000).sell, true, 'B (fresh 1 s ago) and C cover 4.50');
+  assert.deepEqual(g.judge('C', 3.0, 4.5, t0 + 300_000), { sell: false, sumUsd: 3.0, members: 1 }, 'B went stale and the marks expired');
+  assert.equal(g.judge('C', 5.0, 4.5, t0 + 301_000).sell, false, 'alone, the per-position snipe is what sells it');
+  g.forget('C');
+  assert.deepEqual(g.judge('D', 1.0, 0.75, t0 + 302_000), { sell: false, sumUsd: 1.0, members: 1 });
+  assert.equal(g.judge('E', 1.0, undefined, t0 + 303_000).sell, false, 'no target: nothing');
+  // Inside the final share of its window a position is not a member (the caller passes undefined).
+  assert.deepEqual(g.judge('D', undefined, 0.75, t0 + 304_000), { sell: false, sumUsd: 0, members: 0 });
 });
 
 test('the state file resumes the running cycle after a restart and drops it after the anchor, keeping open markets\' credits', () => {
