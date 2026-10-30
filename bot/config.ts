@@ -120,13 +120,16 @@ export interface StrategyConfig {
   /** No exits in the final seconds, the hunt stop included: positions ride to settlement (spreads widen inside the
    *  averaging window, and the stop sales inside the last minutes were the ones found always wrong). */
   noExitBeforeCloseSec: number;
-  /** STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC: no exits in the last share of the contract's window either (0.10 = the last 90 s of a
-   *  15-minute market, 6 min of an hourly one): a position there rides to settlement (Steven's rule, Oct 29). */
+  /** STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC: in the last share of the contract's window (0.10 = the last 90 s of a 15-minute market,
+   *  6 min of an hourly one) a position in profit after fees rides to settlement, no exit selling it (Steven's rule, Oct 29); a
+   *  position that is not in profit keeps its exits until STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC. */
   noExitBeforeCloseFrac: number;
   /** PACER (Steven's spec, Oct 29 23:35 UTC): the hourly quota pacer (bot/risk/quotaPacer.ts). A 24-hour profit clock anchored
    *  to 10:00 AM New York time at PACER_HOURLY_USD (4.50) an hour; the strategy sells a position at once (the "quota snipe") when
-   *  its net profit after fees, sold at the bid, covers what the rest of the clock hour owes, clamped to [PACER_MIN_TAKE_USD,
-   *  PACER_MAX_TARGET_USD], whatever the exit policy (hold included), the hunt or the model says. Inside the last share of the
+   *  its net profit after fees, sold at the bid, covers the running slice's goal (PACER_MODE=slices, Steven's non-stacking
+   *  spec of Oct 30: never more than PACER_HOURLY_USD, a deficit caught up in rolling slices, a fresh slice each clock hour)
+   *  or, in the older modes, the clock hour's deficit clamped to [PACER_MIN_TAKE_USD, PACER_MAX_TARGET_USD], whatever the
+   *  exit policy (hold included), the hunt or the model says. Inside the last share of the
    *  window a position in profit rides to settlement instead, and a hunted position is never held for settlement
    *  (HUNT_LOCK_SALE_ELSE=exit). */
   pacer: PacerConfig;
@@ -873,7 +876,7 @@ function pacerConfig(env: Env): PacerConfig {
     anchorHour: Math.floor(num(env, 'PACER_ANCHOR_HOUR', 10, 0, 23)),
     anchorMinute: Math.floor(num(env, 'PACER_ANCHOR_MINUTE', 0, 0, 59)),
     tz,
-    mode: oneOf(env, 'PACER_MODE', 'cumulative', ['cumulative', 'rolling_hour'] as const),
+    mode: oneOf(env, 'PACER_MODE', 'slices', ['slices', 'cumulative', 'rolling_hour'] as const),
     minTakeUsd,
     maxTargetUsd: Math.max(minTakeUsd, num(env, 'PACER_MAX_TARGET_USD', 6.5, 0, 10_000)),
   };

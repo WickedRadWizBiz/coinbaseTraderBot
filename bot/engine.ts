@@ -31,7 +31,7 @@ import { marketWorstLoss, RestingLike } from './risk/exposure';
 import type { KillSwitch } from './risk/killSwitch';
 import { EXIT_RATE_RESERVE, RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
-import { decide, decisionProbability, MarketView, netProfitAtBid, OrderPlan } from './strategy/fairValueStrategy';
+import { decide, decisionProbability, MarketView, netProfitAtBid, OrderPlan, ridesToSettlement } from './strategy/fairValueStrategy';
 import { ProfitPeaks } from './strategy/profitPeaks';
 import { ConfluenceRatchetExit, HuntEvent } from './strategy/exitPolicies';
 import { HourlyQuotaPacer, SnipeGroup } from './risk/quotaPacer';
@@ -2153,7 +2153,8 @@ export class Engine {
       entryFeePerContract: pos && Math.abs(pos.yes) > 1e-9 ? pos.fees / Math.abs(pos.yes) : undefined,
       profitPeakSidePrice: this.profitPeaks.update(m.ticker, st.position, st.position > 0 ? bid.price : st.position < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
       ...(this.d.takeProfitBench?.benched ? { takeProfitBenched: this.d.takeProfitBench.benched } : {}),
-      entryWindowOpen, exitWindowOpen: tauSec > Math.max(S.noExitBeforeCloseSec, Number.isFinite(m.openTime) ? S.noExitBeforeCloseFrac * (m.closeTime - m.openTime) / 1000 : 0),
+      entryWindowOpen, exitWindowOpen: tauSec > S.noExitBeforeCloseSec,
+      settleShare: Number.isFinite(m.openTime) && tauSec <= S.noExitBeforeCloseFrac * (m.closeTime - m.openTime) / 1000,
     };
     // Exit policy. confluence_ratchet: fair-value exit normally; "hunt" mode (liquidity ratchet
     // manages the exit, nothing else may reduce the position) only while the contract has beaten
@@ -2200,10 +2201,11 @@ export class Engine {
         this.d.audit.write('decision', { ticker: m.ticker, huntEvent: d.event, target: d.target, stop: d.stop, rest: d.rest, position: st.position, confCount: features.conf_count, pYes });
       }
       st.huntEvent = d.event;
-      if (d.plan && view.exitWindowOpen === false) {
+      if (d.plan && (view.exitWindowOpen === false || ridesToSettlement(view))) {
         // The no-exit window before the close (STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC) holds the hunt stop as well: the per-sale
-        // diagnosis of Oct 28 found every stop sale inside the last two minutes on the losing side of settlement.
-        huntHeld = `hunting: stop ${d.plan.stop} held, ${Math.round(tauSec)} s to the close`;
+        // diagnosis of Oct 28 found every stop sale inside the last two minutes on the losing side of settlement. So does the last
+        // share of the window for a position in profit after fees (Steven's rule, STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC).
+        huntHeld = view.exitWindowOpen === false ? `hunting: stop ${d.plan.stop} held, ${Math.round(tauSec)} s to the close` : `hunting: stop ${d.plan.stop} held: in profit in the last share of the window, riding to settlement`;
       } else if (d.plan) {
         huntPlan = { side: d.plan.side, price: d.plan.price, count: d.plan.count, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge: 0, why: `confluence ratchet stop ${d.plan.stop}` };
         huntProtective = d.event === 'triggered' || d.event === 'profit_take_gap';
@@ -2225,7 +2227,7 @@ export class Engine {
     // its stop excepted; a hunt that holds (HUNT_LOCK_SALE_ELSE=hold) is not excepted, so its reductions are not blocked.
     const pacerUsd = this.pacer.neededUsd(now);
     // Steven's group rule (PACER_GROUP): this position, in profit after fees, is sold when the positions in profit together cover the target.
-    const group = pacerUsd !== undefined && S.pacer.group ? this.snipeGroup.judge(m.ticker, view.exitWindowOpen !== false ? netProfitAtBid(view) : undefined, pacerUsd, now) : undefined;
+    const group = pacerUsd !== undefined && S.pacer.group ? this.snipeGroup.judge(m.ticker, view.exitWindowOpen !== false && view.settleShare !== true ? netProfitAtBid(view) : undefined, pacerUsd, now) : undefined;
     const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode && !huntHold, entries: Boolean(reason), profitMandate: S.profitMandate && (!huntMode || huntHold) ? S.profitMandateMin : undefined, pacerUsd, ...(group?.sell ? { pacerGroup: group } : {}) });
     // A quota snipe liquidates the position: the hunt's stop order would only double it. The decision is audited with the clock.
     const snipe = plan.place.find((p) => p.purpose === 'exit' && p.why.startsWith('quota snipe'));
@@ -2388,7 +2390,7 @@ export class Engine {
       // way the sale clears the take-profit floor: sell at the bid now (the resting sell is pulled below, with any other
       // own order in the way). Not while hunting (the ratchet runs that winner), nor when another exit already crosses
       // the book this tick.
-      if (curve.crossing && !huntMode && view.exitWindowOpen !== false && !plan.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel')) {
+      if (curve.crossing && !huntMode && view.exitWindowOpen !== false && !ridesToSettlement(view) && !plan.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel')) {
         const top = sign > 0 ? bid : ask;
         const n = floorCount(Math.min(held, top.size));
         if (n > 0) {

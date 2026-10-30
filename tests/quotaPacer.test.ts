@@ -126,3 +126,59 @@ test('the state file resumes the running cycle after a restart and drops it afte
   assert.equal(r.status(t0 + 25 * 3_600_000).realized24hUsd, 0);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('slices (Steven, Oct 30): never more than the hourly target, a deficit caught up in rolling slices, a fresh slice each hour, a loss never raising it', () => {
+  const S: PacerConfig = { ...CFG, mode: 'slices' };
+  const t0 = T('2026-10-29T14:00:00Z');
+  // Hour #1 with nothing realized: 108 over 24 blocks is exactly the hourly target, on pace.
+  let s = new HourlyQuotaPacer(S, t0 + 10 * 60_000).status(t0 + 10 * 60_000);
+  assert.deepEqual([s.hourIndex, s.hoursRemaining, s.requiredPerHourUsd, s.catchUp, s.sliceGoalUsd, s.neededUsd, s.ahead], [1, 24, 4.5, false, 4.5, 4.5, true]);
+  // A start at 9:31 PM (hour #12) with nothing realized: 108 over 13 blocks is 8.31 an hour, catch-up, yet one position is
+  // never asked for more than 4.50 (the cumulative mode asked its 6.50 cap for the 54 owed).
+  const t12 = t0 + 11 * 3_600_000 + 31 * 60_000;
+  const p = new HourlyQuotaPacer(S, t12);
+  s = p.status(t12);
+  assert.deepEqual([s.hourIndex, s.hoursRemaining, s.requiredPerHourUsd, s.catchUp, s.sliceGoalUsd, s.neededUsd, s.ahead], [12, 13, 8.3077, true, 4.5, 4.5, false]);
+  p.record(3, t12 + 60_000);
+  s = p.status(t12 + 60_000);
+  assert.deepEqual([s.sliceRealizedUsd, s.neededUsd], [3, 1.5], 'the running slice owes the rest of its 4.50');
+  // 2 more: the slice is reached and rolls over at once with 0.50 carried; still behind, the next slice asks 4.00.
+  p.record(2, t12 + 120_000);
+  s = p.status(t12 + 120_000);
+  assert.deepEqual([s.slicesThisHour, s.sliceRealizedUsd, s.neededUsd, s.catchUp], [1, 0.5, 4, true]);
+  // A loss floors the slice at 0: the target never rises above 4.50.
+  p.record(-3, t12 + 180_000);
+  s = p.status(t12 + 180_000);
+  assert.deepEqual([s.realized24hUsd, s.sliceRealizedUsd, s.neededUsd], [2, 0, 4.5]);
+  p.record(1.2, t12 + 240_000);
+  assert.equal(p.status(t12 + 240_000).neededUsd, 3.3);
+  // The next clock hour starts a fresh slice: the partial 1.20 is not owed on top of it.
+  s = p.status(t12 + 40 * 60_000);
+  assert.deepEqual([s.hourIndex, s.slicesThisHour, s.sliceRealizedUsd, s.neededUsd], [13, 0, 0, 4.5]);
+  // One big win banks several slices at once.
+  p.record(10, t12 + 41 * 60_000);
+  s = p.status(t12 + 41 * 60_000);
+  assert.deepEqual([s.slicesThisHour, s.sliceRealizedUsd, s.neededUsd], [2, 1, 3.5]);
+
+  // On pace (cruise): the goal is the required rate, and once a slice is banked in the hour the floor stands.
+  const c = new HourlyQuotaPacer(S, t0 + 21 * 3_600_000);
+  c.record(100, t0 + 21 * 3_600_000 + 60_000); // hour #22
+  s = c.status(t0 + 22 * 3_600_000 + 60_000); // hour #23: 8 left over 2 blocks
+  assert.deepEqual([s.hourIndex, s.requiredPerHourUsd, s.catchUp, s.sliceGoalUsd, s.slicesThisHour, s.neededUsd, s.ahead], [23, 4, false, 4, 0, 4, true]);
+  c.record(4.2, t0 + 22 * 3_600_000 + 120_000);
+  s = c.status(t0 + 22 * 3_600_000 + 120_000);
+  assert.deepEqual([s.catchUp, s.slicesThisHour > 0, s.neededUsd], [false, true, 0.75]);
+  // The day's target met: the floor.
+  c.record(10, t0 + 22 * 3_600_000 + 180_000);
+  assert.deepEqual([c.status(t0 + 22 * 3_600_000 + 180_000).requiredPerHourUsd, c.neededUsd(t0 + 22 * 3_600_000 + 180_000)], [0, 0.75]);
+
+  // The state file: a restart in the same hour resumes the slice; in a later hour the cycle's total, not the partial slice.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pacer-slices-'));
+  const file = path.join(dir, 'quota_pacer_state.json');
+  const q = new HourlyQuotaPacer(S, t12, file);
+  q.record(3, t12 + 60_000);
+  assert.equal(new HourlyQuotaPacer(S, t12 + 5 * 60_000, file).status(t12 + 5 * 60_000).neededUsd, 1.5);
+  s = new HourlyQuotaPacer(S, t12 + 45 * 60_000, file).status(t12 + 45 * 60_000);
+  assert.deepEqual([s.hourIndex, s.realized24hUsd, s.sliceRealizedUsd, s.neededUsd], [13, 3, 0, 4.5]);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
