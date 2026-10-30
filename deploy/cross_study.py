@@ -990,6 +990,31 @@ def pacer_audit(recs, startups, since_ms, until_ms):
         print(f"    snipe {when(ms)}: {str(d.get('why') or '')[:140]} | needed {float(d.get('neededUsd') or 0):.2f}")
 
 
+def pool_audit(training, rejects, since_ms, until_ms):
+    """Section 0c: the paper pool (the training supervisor's pool_raised / capital_exhaustion records) and why orders were
+    refused (risk_reject reasons with the numbers stripped; the engine writes one per market, side and kind a minute)."""
+    try:
+        from zoneinfo import ZoneInfo
+        NY = ZoneInfo('America/New_York')
+    except Exception:
+        NY = None
+
+    def when(ms):
+        u = time.strftime('%m-%d %H:%M', time.gmtime(ms / 1000))
+        if NY is None: return u + ' UTC'
+        return u + ' UTC (' + datetime.datetime.fromtimestamp(ms / 1000, NY).strftime('%I:%M %p %Z').lstrip('0') + ')'
+    ev = sorted((ms, d) for ms, d in training if since_ms <= ms <= until_ms and d.get('event') in ('pool_raised', 'capital_exhaustion'))
+    print(f'== 0c. the paper pool: {len(ev)} pool events in the window' + ('' if ev else ' (no pool_raised or capital_exhaustion records)'))
+    for ms, d in ev:
+        if d.get('event') == 'pool_raised':
+            print(f"   {when(ms)}  pool raised ${d.get('from')} -> ${d.get('to')}: bankroll ${d.get('bankroll')} equity ${d.get('equity')}, topped up ${d.get('topUp')} (epoch {d.get('epoch')})")
+        else:
+            print(f"   {when(ms)}  capital exhaustion (epoch {d.get('epoch')}, {d.get('hours')} h): ${d.get('endEquity')} left, refilled ${d.get('refill')}")
+    c = collections.Counter(re.sub(r'[-\d.$%]+', '#', str((d.get('reasons') or ['?'])[0]))[:100] for ms, d in rejects if since_ms <= ms <= until_ms)
+    print(f'   risk rejections: {sum(c.values())} records (one per market, side and kind a minute)')
+    for why, n in c.most_common(8): print(f'     {n:5d}  {why}')
+
+
 def size_audit(orders, fills, sizing, since_ms, until_ms):
     """Section 0b: what each entry stakes (order_new: contracts x price; taker entries and maker quotes that add) by clock hour,
     and the sizer's state from the module ledger's sizing rows (paper sizes like live since PR #183, Oct 28 22:19 UTC)."""
@@ -1083,9 +1108,10 @@ def main():
     files = sorted(f for f in glob.glob(os.path.join(data, 'audit', 'audit-*.jsonl')) if os.path.basename(f)[6:16] >= from_iso[:10].decode())
     fills, orders, results, exit_why, curve_events = [], {}, {}, {}, []
     hunts = collections.defaultdict(list)  # ticker -> the hunt's decision records (activated / ratcheted / triggered / profit takes / deactivations)
-    want = (b'"kind":"fill"', b'"kind":"settlement"', b'"kind":"order_new"', b'"kind":"curve_exit"', b'"kind":"pacer"', b'"kind":"startup"', b'"kind":"modules"')
+    want = (b'"kind":"fill"', b'"kind":"settlement"', b'"kind":"order_new"', b'"kind":"curve_exit"', b'"kind":"pacer"', b'"kind":"startup"', b'"kind":"modules"', b'"kind":"training"', b'"kind":"risk_reject"')
     pacer_recs, startups = [], []  # the quota pacer's audit records (credit / settled / snipe, each with the clock) and bot starts
     sizing_recs = []  # the module ledger's sizing rows (audit 'modules': tier, loss-aware scale, optimal f cap, portfolio Kelly)
+    training_recs, reject_recs = [], []  # the training supervisor's events (pool raised, exhaustion) and risk rejections
     for f in files:
         with open(f, 'rb') as fh:
             for line in fh:
@@ -1124,10 +1150,15 @@ def main():
                     startups.append(iso_ms(ts))
                 elif k == 'modules':
                     sizing_recs.append((iso_ms(ts), [x for x in d.get('rows') or [] if x.get('area') == 'sizing']))
+                elif k == 'training':
+                    training_recs.append((iso_ms(ts), d))
+                elif k == 'risk_reject':
+                    reject_recs.append((iso_ms(ts), d))
     fills.sort(key=lambda x: x['ms'])
     print(f"audit files {[os.path.basename(f) for f in files]}: fills {len(fills)}  orders {len(orders)}  settled markets {len(results)}  ({time.time() - t0:.0f} s)")
     pacer_audit(pacer_recs, startups, since_ms, int(now * 1000))
     size_audit(orders, fills, sizing_recs, since_ms, int(now * 1000))
+    pool_audit(training_recs, reject_recs, since_ms, int(now * 1000))
 
     def why_of(fl):
         o = orders.get(fl['coid']) or {}
