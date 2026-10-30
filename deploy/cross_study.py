@@ -380,7 +380,17 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         n, pay, bids, fv = p['n'], p['payout'], p['bids'], p['fv']
         # window: no taker sale in the last `window` seconds; ('frac', f): none in the last f of the market's length (Steven's
         # risk rule, Oct 29: get out in profit at the dip unless less than 10% of the window is left, then let it settle).
-        last_taker = p['c_sec'] - (window[1] * market_len(p) if isinstance(window, tuple) else window)
+        share_from = None
+        if isinstance(window, tuple) and window[0] == 'frac_profit':
+            last_taker = p['c_sec'] - (window[2] if len(window) > 2 else 60)
+            share_from = p['c_sec'] - window[1] * market_len(p)
+        else:
+            last_taker = p['c_sec'] - (window[1] * market_len(p) if isinstance(window, tuple) else window)
+
+        def may_sell(sec, b):
+            if sec > last_taker: return False
+            c = p.get('cost')
+            return not (share_from is not None and sec > share_from and c is not None and b - fee1(b, n) > c + 1e-9)
         armed = lock[0] == 'armed'
         confirm = (extra or {}).get('confirm', 0) if isinstance(extra, dict) else 0
         first_only = bool((extra or {}).get('first_only')) if isinstance(extra, dict) else False
@@ -409,7 +419,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                     f = flow(p['ep'], sec) if cond != 'fv' else None
                     fl_ok = f is not None and f > 0
                     hit = fv_ok if cond == 'fv' else fl_ok if cond == 'flow' else (fv_ok or fl_ok) if cond == 'either' else (fv_ok and fl_ok)
-                    if hit and sec <= last_taker: return (b - fee1(b, n), n, b, sec, True)
+                    if hit and may_sell(sec, b): return (b - fee1(b, n), n, b, sec, True)
                     if sale[2] == 'else_hold': return (None, 0.0, None, None, True)
                     # else: carry on with the trail given in `trail`
             if b > peak + 1e-9: peak = b
@@ -431,9 +441,9 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 if L is not None and b >= L - 1e-9:
                     return (L, n, L, sec, True)
             # sell into a stale-high bid: any second after the lock when the bid pays over the spot-implied fair value (no trail)
-            if sale[0] == 'any' and q is not None and b >= q + sale[1] - 1e-9 and sec <= last_taker:
+            if sale[0] == 'any' and q is not None and b >= q + sale[1] - 1e-9 and may_sell(sec, b):
                 return (b - fee1(b, n), n, b, sec, True)
-            if sale[0] == 'anyscale' and q is not None and sec <= last_taker:
+            if sale[0] == 'anyscale' and q is not None and may_sell(sec, b):
                 thr = sale[1] + sale[2] * max(0.0, peak - (floor if floor is not None else peak))
                 if b >= q + thr - 1e-9: return (b - fee1(b, n), n, b, sec, True)
             # Steven's wall exit: rest an ask at a top-of-book sell wall that pays the premium; it fills when the bid reaches it
@@ -453,7 +463,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 under += 1
                 if under < confirm: continue
             elif confirm: under = 0
-            if trig and sec <= last_taker:
+            if trig and may_sell(sec, b):
                 if isinstance(guard, tuple) and guard[0] == 'scale':
                     thr = guard[1] + guard[2] * max(0.0, peak - (floor if floor is not None else peak))
                     if q is None or b < q + thr - 1e-9:
@@ -516,6 +526,114 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             print(f"    {name:54s} {vs:+10.2f}  {sold_cnt:5d}  {sold_n:9.1f}  {(100 * sold_won / sold_n) if sold_n else 0:4.0f}  {(sold_px / sold_n) if sold_n else 0:8.3f}  {(sold_fv / fvn) if fvn else 0:11.3f}  {armed_cnt:5d}  {real:+10.2f}  {held_cnt:4d}  {(100 * prof_cnt / sold_cnt) if sold_cnt else 0:14.0f}")
         return out
 
+    # ---- F. the hourly quota pacer (PACER, PR #204: Steven Oct 29-30) run in time order across the positions ----------
+    try:
+        from zoneinfo import ZoneInfo
+        NY = ZoneInfo('America/New_York')
+    except Exception:
+        NY = None
+    import datetime as _dt
+    anchors = {}
+
+    def ny_anchor(sec):
+        """The most recent 10:00 AM America/New_York at or before `sec` (EDT/EST from the zone database; fixed 2026 dates
+        without it)."""
+        h = sec // 3600
+        if h in anchors: return anchors[h]
+        if NY is not None:
+            d = _dt.datetime.fromtimestamp(h * 3600, NY)
+            a = d.replace(hour=10, minute=0, second=0, microsecond=0)
+            if d < a: a = (d - _dt.timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+            r = int(a.timestamp())
+        else:
+            off = 4 * 3600 if h * 3600 < 1793512800 else 5 * 3600  # EDT until 2026-11-01 06:00 UTC, then EST
+            r = ((h * 3600 - off - 10 * 3600) // 86400) * 86400 + 10 * 3600 + off
+        anchors[h] = r
+        return r
+
+    def pacer_run(paths, base, pacer, hourly=4.5, floor=0.75, cap=6.5, frac=0.10, no_exit_sec=60):
+        """One base exit with (or without) the pacer on top, every position in time order on one clock. base: a sim() rule or
+        None (hold everything); pacer: None | (mode, group) with mode 'cumulative' | 'rolling_hour'."""
+        ps = [p for p in paths if p.get('costF') is not None]
+        if not ps: return None
+        outs = []
+        for p in ps:
+            v, sn, px, sec, armed = sim(p, *base) if base is not None else (None, 0.0, None, None, False)
+            outs.append((v, sec))
+        T0 = min(p['s0'] for p in ps); T1 = max(p['c_sec'] for p in ps)
+        starts = collections.defaultdict(list); closes = collections.defaultdict(list)
+        for i, p in enumerate(ps):
+            starts[p['s0']].append(i)
+            v, sec = outs[i]
+            closes[sec if v is not None else p['c_sec']].append(i)
+        st = {'real': 0.0, 'cyc': None, 'cyc_real': 0.0, 'bk': collections.defaultdict(float), 'base': 0, 'held': 0, 'snipe': 0, 'group': 0, 'cts': 0.0,
+              'hours': 0, 'on_pace': 0, 'hkey': None}
+        live = set(); done = [False] * len(ps)
+
+        def hidx(t): return min(int((t - st['cyc']) // 3600) + 1, 24)
+
+        def credit(x, t):
+            st['real'] += x; st['cyc_real'] += x; st['bk'][hidx(t)] += x
+
+        def need(t):
+            h = hidx(t)
+            raw = h * hourly - st['cyc_real'] if pacer[0] == 'cumulative' else hourly - st['bk'][h]
+            return max(floor, min(raw, cap))
+
+        def close(i, t, x, kind):
+            done[i] = True; live.discard(i); credit(x, t); st[kind] += 1
+
+        for t in range(T0, T1 + 1):
+            a = ny_anchor(t)
+            if st['cyc'] is None or a > st['cyc']:
+                st['cyc'] = a; st['cyc_real'] = 0.0; st['bk'] = collections.defaultdict(float)
+            hk = (st['cyc'], hidx(t))
+            if st['hkey'] is not None and hk != st['hkey']:
+                # the clock hour that just ended: on pace if the cycle's realized total had reached its goal
+                st['hours'] += 1
+                c0, h0 = st['hkey']
+                if c0 == st['cyc'] and st['cyc_real'] >= h0 * hourly - 1e-9: st['on_pace'] += 1
+                elif c0 != st['cyc'] and st.get('last_cyc_real', 0.0) >= h0 * hourly - 1e-9: st['on_pace'] += 1
+            st['hkey'] = hk; st['last_cyc_real'] = st['cyc_real']
+            for i in starts.get(t, ()): live.add(i)
+            for i in closes.get(t, ()):
+                if done[i]: continue
+                p = ps[i]; v, sec = outs[i]
+                if v is not None and sec == t: close(i, t, (v - p['costF']) * p['n'], 'base')
+                else: close(i, t, (p['payout'] - p['costF']) * p['n'], 'held')
+            if pacer is None: continue
+            members = []
+            for i in sorted(live):
+                p = ps[i]
+                if t > p['c_sec'] - no_exit_sec or t > p['c_sec'] - frac * market_len(p): continue  # final minute / last share
+                k = t - p['s0']
+                b = p['bids'][k] if 0 <= k < len(p['bids']) else None
+                if b is None: continue
+                net = p['n'] * (b - p['costF']) - taker_fee(p['n'], b)
+                if net >= need(t) - 1e-9:
+                    close(i, t, net, 'snipe'); st['cts'] += p['n']
+                elif net > 1e-9:
+                    members.append((i, net))
+            if pacer[1] and len(members) >= 2 and sum(x for _, x in members) >= need(t) - 1e-9:
+                for i, net in members:
+                    close(i, t, net, 'group'); st['cts'] += ps[i]['n']
+        st['span_h'] = (T1 - T0) / 3600.0
+        st['n'] = len(ps)
+        return st
+
+    def pacer_table(paths, title, bases):
+        print(f'  F. the hourly quota pacer (PACER, PR #204) in time order on {title}: $4.50 an hour from 10:00 AM New York, the cumulative deficit')
+        print('     clamped to [0.75, 6.50], one position (or, with the group rule, several each in profit) sold at the bid once its net profit')
+        print('     after fees covers it; the last 10% of a window holds a position in profit, the final 60 s every one. Realized $ after fees')
+        print('     against entry cost (fee in), the clock counting only these positions.')
+        print('    base exit; pacer                                                  realized $     $/h  base sales  snipes  group  contracts sniped  held  hours on pace')
+        for bname, base in bases:
+            for pname, pacer in (('no pacer', None), ('pacer (cumulative, group rule)', ('cumulative', True)), ('pacer, no group rule', ('cumulative', False)), ('pacer, rolling hour, group rule', ('rolling_hour', True))):
+                r = pacer_run(paths, base, pacer)
+                if r is None: print('    (no costed position)'); return
+                lab = f'{bname}; {pname}'
+                print(f"    {lab:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['base']:10d}  {r['snipe']:6d}  {r['group']:5d}  {r['cts']:16.1f}  {r['held']:4d}  {r['on_pace']:5d} of {r['hours']}")
+
     # ---- A. from the actual locks (the same positions as 1d) -------------------------------------------------------
     pathsA = []
     for a in acts:
@@ -534,7 +652,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         path = build_path(ep, s0, c_sec)
         b0 = next((x for x in path['bids'] if x is not None), None)
         q0 = next((x for x in path['fv'] if x is not None), None)
-        pathsA.append({'n': n, 'floor': a['floor'], 'payout': ep['payout'], 'actual': got / n, 'bids': path['bids'], 'fv': path['fv'], 'path': path, 'cost': cost_of(ep['entries'], a['act_ms']),
+        pathsA.append({'n': n, 'floor': a['floor'], 'payout': ep['payout'], 'actual': got / n, 'bids': path['bids'], 'fv': path['fv'], 'path': path, 'cost': cost_of(ep['entries'], a['act_ms']), 'costF': cost_of(ep['entries'], a['act_ms']),
                        'c_sec': c_sec, 's0': s0, 'b0': b0, 'q0': q0, 'ep': ep, 'sig': sigma_cached(ep.get('asset'), s0) if ep.get('asset') else None})
     have_fv = sum(1 for p in pathsA if p['q0'] is not None)
     print(f'  spot-implied fair value available on {have_fv} of {len(pathsA)} hunted positions (strike from the market record or the index at the open)')
@@ -628,6 +746,14 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         ('Steven RM: trail 1, last 10%, sell wall, first dip judged vs fv + 2c else hold', R(A, ('bid', 1), ('wall', 3, 0.02), -0.02, ('frac', 0.10), {'first_only': True})),
     ]
     table(pathsA, rulesA, 'A. from the actual locks', True)
+    print('    PR #204 window: no sale in the final 60 s; in the last 10% of the window none that would be in profit (it rides)')
+    rows204 = [
+        ('PR #204: first dip judged vs fv + 2c else hold', R(A, ('bid', 1), ('taker',), -0.02, ('frac_profit', 0.10), {'first_only': True})),
+        ('PR #204 + #203: sell wall, first-dip judgement', R(A, ('bid', 1), ('wall', 3, 0.02), -0.02, ('frac_profit', 0.10), {'first_only': True})),
+        ('PR #204 window, trailing stop (trail 1)', R(A, ('bid', 1), ('taker',), None, ('frac_profit', 0.10))),
+    ]
+    table(pathsA, rows204, 'A. (same positions), PR #204\'s window', True)
+    pacer_table(pathsA, 'the hunted positions from their locks (A)', [('hold all', None)] + [(n, r) for n, r in rows204[:2]])
 
     # ---- B. from entry on every position, with the policy's own lock -------------------------------------------------
     pathsB = []
@@ -642,7 +768,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         cost = sum(e['n'] * e['px'] for e in ents) / n
         path = build_path(ep, s0, c_sec)
         q0 = next((x for x in path['fv'] if x is not None), None)
-        pathsB.append({'n': n, 'floor': None, 'payout': ep['payout'], 'actual': None, 'bids': path['bids'], 'fv': path['fv'], 'path': path, 'cost': cost,
+        pathsB.append({'n': n, 'floor': None, 'payout': ep['payout'], 'actual': None, 'bids': path['bids'], 'fv': path['fv'], 'path': path, 'cost': cost, 'costF': cost_of(ents, ep['close_ms']),
                        'c_sec': c_sec, 's0': s0, 'b0': cost, 'q0': q0, 'ep': ep, 'sig': sigma_cached(ep.get('asset'), s0) if ep.get('asset') else None})
     print(f'  (B: the lock is the policy\'s own: \'bid\' = the side bid 2c over the average entry price, \'fv\' = the spot-implied fair value 3 pts over its value at entry)')
     for lname, lock in (('lock: bid +2c', ('bid', 0.02)), ('lock: fv +3 pts', ('fv', 0.03)), ('lock: bid +2c and fv +3 pts', ('both', 0.02))):
@@ -669,6 +795,11 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             (f'{lname}; sell any second the bid >= fv + 2c, else hold', R(lock, ('none',), ('any', 0.02))),
         ]
         table(pathsB, rulesB, f'B. from entry, {lname}', False)
+    lockB = ('bid', 0.02)
+    pacer_table(pathsB, 'every position from its entry (B: the bot\'s whole clock)', [
+        ('hold all', None),
+        ('lock bid +2c, first dip judged vs fv + 2c else hold (PR #204 window)', R(lockB, ('bid', 1), ('taker',), -0.02, ('frac_profit', 0.10), {'first_only': True})),
+    ])
 
     # ---- C. what separates the right stop sales from the wrong ones (at the 1-tick trail's trigger, from the locks) --
     print('  C. at the 1-tick trail\'s trigger (from the actual locks): the sale against settlement by what the rule could see')
@@ -1054,7 +1185,8 @@ def main():
 
     def sigma_cached(asset, sec):
         k = (asset, sec // 60)
-        if k not in sig_cache: sig_cache[k] = sigma_at(asset, sec) if asset else None
+        # computed at the minute's start whichever second asks first: no later index point reaches an earlier second
+        if k not in sig_cache: sig_cache[k] = sigma_at(asset, (sec // 60) * 60) if asset else None
         return sig_cache[k]
 
     def direction(ep, sec):
