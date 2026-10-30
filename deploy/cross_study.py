@@ -589,7 +589,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         contract count rescaled to match (Steven, Oct 30: $10-$20 now, $50-$100 asked). reenter: once a pacer snipe banks its
         target, buy the same side of the same market again at the ask the next second with the same stake, and repeat while the
         market has room (not inside its last 10% or final minute); reenter='any': instead take the bot's next own taker entry
-        signal (any market, either side) in the 120 s after the snipe, at the recorded ask, same stake. depth: contracts beyond the top-of-book size pay 2c worse
+        signal (any market, either side) from the snipe to the end of its clock hour (at least 120 s), at the recorded ask, same stake. depth: contracts beyond the top-of-book size pay 2c worse
         (the ask on entry, the bid on a sale): the lab otherwise fills every size at the top."""
         DEPTH_PX = 0.02
         ps = []
@@ -633,7 +633,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             j0 = bisect.bisect_right(sig_secs, t)
             for j in range(j0, len(entry_sigs)):
                 sec, tk, sign, px, edge = entry_sigs[j]
-                if sec > t + 120: return None
+                if sec > max(t + 120, (t // 3600 + 1) * 3600): return None  # the rest of the clock hour (Steven: 'on repeat within the hour')
                 if j in used or any(ps[x]['ep']['ticker'] == tk for x in live) or any(abs(s0 - sec) <= 300 for s0 in paper_at.get(tk, ())): continue
                 q = sig_pos(j)
                 if q is None: continue
@@ -960,7 +960,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         for j in [j for j in sig_cache if entry_sigs[j][1] in new]: del sig_cache[j]
     ok = sum(1 for j in range(len(entry_sigs)) if sig_pos(j) is not None)
     agree = [(1.0 if (mres or {}).get(ep['ticker']) == ('yes' if ep['sign'] > 0 else 'no') else 0.0) == ep['payout'] for ep in episodes if ep.get('payout') is not None and (mres or {}).get(ep['ticker'])]
-    print(f"     'next signal': the bot's own taker entry signals (decision records placing an entry): {len(entry_sigs)} in the window, {ok} with a")
+    print(f"     'next signal' (to the end of the snipe's clock hour): the bot's own taker entry signals (decision records placing an entry): {len(entry_sigs)} in the window, {ok} with a")
     print(f"     book path and a recorded result; signal markets paper itself traded within 5 min are skipped. Results agree with paper's settlements on {sum(agree)} of {len(agree)}.")
     print('    stake; pacer; re-entry; depth                                     realized $     $/h  entries  re-entries  re-entry $  base sales  snipes  held  peak $ at work  thin fills  depth $')
     for lab, pacer, kw in (
