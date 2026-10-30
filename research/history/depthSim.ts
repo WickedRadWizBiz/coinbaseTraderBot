@@ -52,7 +52,24 @@ function lognormal(u: () => number, p50: number, p90: number): number {
   const s = p90 > p50 ? Math.log(p90 / p50) / 1.2816 : 0;
   return Math.max(1, Math.round(p50 * Math.exp(s * normal(u))));
 }
-const expDraw = (u: () => number, rate: number) => -Math.log(Math.max(u(), 1e-12)) / rate;
+/** A seeded Poisson count: by multiplying uniforms when small, else its normal approximation. */
+function poisson(u: () => number, lambda: number): number {
+  if (!(lambda > 0)) return 0;
+  if (lambda > 30) return Math.max(0, Math.round(lambda + Math.sqrt(lambda) * normal(u)));
+  const L = Math.exp(-lambda);
+  let k = 0, p = u();
+  while (p > L) { k++; p *= u(); }
+  return k;
+}
+/** The total of n log-normal sizes (median p50, 90th percentile p90): drawn one by one up to 30, else from the mean and
+ *  spread of the sum. */
+function sumOf(u: () => number, n: number, p50: number, p90: number): number {
+  if (n <= 0) return 0;
+  if (n <= 30) { let s = 0; for (let i = 0; i < n; i++) s += lognormal(u, p50, p90); return s; }
+  const sg = p90 > p50 && p50 > 0 ? Math.log(p90 / p50) / 1.2816 : 0, m = Math.max(1, p50) * Math.exp((sg * sg) / 2);
+  const sd = m * Math.sqrt(Math.max(0, Math.exp(sg * sg) - 1));
+  return Math.max(n, Math.round(n * m + Math.sqrt(n) * sd * normal(u)));
+}
 
 type Level = { price: number; size: number };
 type Side = 'bid' | 'ask';
@@ -112,25 +129,29 @@ export class DepthSim {
     }
     const levels = (side: Side): Level[] => [...b![side].entries()].sort((x, y) => (side === 'bid' ? y[0] - x[0] : x[0] - y[0])).map(([p, s]) => ({ price: p / PX, size: s }));
     const out: DepthEv[] = [{ t, k: 'book', ticker, bids: levels('bid'), asks: levels('ask'), ts: t, sim: 1 }];
-    // Until the next anchor: each level's adds and cancels, and the trades, as competing Poisson clocks.
+    // Until the next anchor, second by second: each level's adds and cancels arrive at the measured queue-reactive rates
+    // (Poisson counts per second, netted into one change per level), and the trades take the best level at the measured
+    // rate, size and side. Counting per second, not event by event, keeps a busy book (hundreds of changes a second) cheap.
     const tradeRate = Math.max(0, cell.tradesPerMin?.mean ?? 0) / 60;
-    let now = t, lastChange = t;
-    // Adds and cancels are netted per level and second (one delta each): the book at every second is the same as
-    // event by event, with a tenth to a fiftieth of the lines. Trades flush the net first, so they see the book as it is.
-    const net = new Map<string, { side: Side; p: number; d: number }>();
-    const change = (side: Side, p: number, d: number) => {
-      const k = `${side}|${p}`, x = net.get(k);
-      if (x) x.d += d; else net.set(k, { side, p, d });
-      lastChange = now;
-    };
-    const flush = () => {
-      for (const x of net.values()) if (x.d !== 0) out.push({ t: lastChange, k: 'delta', ticker, side: x.side, price: x.p / PX, delta: x.d, ts: lastChange, sim: 1 });
-      net.clear();
-    };
-    for (let guard = 0; guard < 5000; guard++) {
-      const clocks: Array<{ rate: number; act: () => void }> = [];
+    const best = (side: Side) => { const m = b![side]; let top = side === 'bid' ? -Infinity : Infinity; for (const p of m.keys()) if (side === 'bid' ? p > top : p < top) top = p; return top; };
+    for (let sec = t; sec < until; sec += 1000) {
+      const end = Math.min(sec + 1000, until);
+      // The trades in this second, spread through it, each on the book as it stands.
+      const nTr = poisson(u, tradeRate * ((end - sec) / 1000));
+      for (let i = 0; i < nTr; i++) {
+        const at = sec + Math.floor(((i + 1) * (end - sec)) / (nTr + 1));
+        // A YES taker buys at the best ask; a NO taker sells YES at the best bid.
+        const yes = u() < (cell.takerYesShare ?? 0.5), side: Side = yes ? 'ask' : 'bid', m = b[side], top = best(side);
+        if (!Number.isFinite(top)) continue;
+        const q = m.get(top)!, n = Math.min(q, lognormal(u, cell.tradeSize.p50, cell.tradeSize.p90));
+        out.push({ t: at, k: 'trade', ticker, price: top / PX, count: n, takerSide: yes ? 'yes' : 'no', ts: at, sim: 1 });
+        if (q - n > 0) m.set(top, q - n); else m.delete(top);
+        out.push({ t: at, k: 'delta', ticker, side, price: top / PX, delta: -n, ts: at, sim: 1 });
+      }
+      // Then each level's net change over the second.
+      const at = end - 1, frac = (end - sec) / 1000;
       for (const side of ['bid', 'ask'] as Side[]) {
-        const m = b[side], top = side === 'bid' ? Math.max(...m.keys()) : Math.min(...m.keys());
+        const m = b[side], top = best(side);
         if (!Number.isFinite(top)) continue;
         const tick = tickAt(top);
         for (let off = 0; off < DEPTH_LEVELS; off++) {
@@ -138,31 +159,15 @@ export class DepthSim {
           if (p < 1 || p > PX - 1) continue;
           const q = m.get(p) ?? 0, f = this.rates(off, q);
           if (!f) continue;
-          if (f.addPerSec > 0) clocks.push({ rate: f.addPerSec, act: () => { const d = lognormal(u, f.addSize.p50, f.addSize.p90); m.set(p, q + d); change(side, p, d); } });
-          if (q > 0 && f.cancelPerSec > 0) clocks.push({ rate: f.cancelPerSec, act: () => { const d = Math.min(q, lognormal(u, f.cancelSize.p50, f.cancelSize.p90)); if (q - d > 0) m.set(p, q - d); else m.delete(p); change(side, p, -d); } });
+          const added = sumOf(u, poisson(u, f.addPerSec * frac), f.addSize.p50, f.addSize.p90);
+          const cancelled = q > 0 ? Math.min(q, sumOf(u, poisson(u, f.cancelPerSec * frac), f.cancelSize.p50, f.cancelSize.p90)) : 0;
+          const d = added - cancelled;
+          if (d === 0) continue;
+          if (q + d > 0) m.set(p, q + d); else m.delete(p);
+          out.push({ t: at, k: 'delta', ticker, side, price: p / PX, delta: d, ts: at, sim: 1 });
         }
       }
-      if (tradeRate > 0) clocks.push({ rate: tradeRate, act: () => {
-        // A YES taker buys at the best ask; a NO taker sells YES at the best bid.
-        const yes = u() < (cell.takerYesShare ?? 0.5), side: Side = yes ? 'ask' : 'bid', m = b![side];
-        const top = side === 'bid' ? Math.max(...m.keys()) : Math.min(...m.keys());
-        if (!Number.isFinite(top)) return;
-        const q = m.get(top)!, n = Math.min(q, lognormal(u, cell.tradeSize.p50, cell.tradeSize.p90));
-        flush();
-        out.push({ t: now, k: 'trade', ticker, price: top / PX, count: n, takerSide: yes ? 'yes' : 'no', ts: now, sim: 1 });
-        if (q - n > 0) m.set(top, q - n); else m.delete(top);
-        out.push({ t: now, k: 'delta', ticker, side, price: top / PX, delta: -n, ts: now, sim: 1 });
-      } });
-      const total = clocks.reduce((a, c) => a + c.rate, 0);
-      if (!(total > 0)) break;
-      const next = now + Math.max(1, Math.round(expDraw(u, total) * 1000));
-      if (Math.floor(next / 1000) !== Math.floor(now / 1000)) flush();
-      now = next;
-      if (now >= until) break;
-      let pick = u() * total;
-      for (const c of clocks) { pick -= c.rate; if (pick <= 0) { c.act(); break; } }
     }
-    flush();
     return out;
   }
 }
