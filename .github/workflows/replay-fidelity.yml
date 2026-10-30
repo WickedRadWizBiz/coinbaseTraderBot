@@ -82,12 +82,12 @@ jobs:
       fail-fast: false
       matrix:
         how: [real, hold, requote, worst, noise, depth]
-        # The days split in two runs in a row, each backtested on a runner of its own from the day before it
-        # (one runner for all of them ran past the job's time limit on the depth fill-in).
-        part: [0, 1]
+        # The days split into four runs of one day, each backtested on a runner of its own from the day before it
+        # (two days of the depth fill-in took 4.5 hours or more, near the time limit).
+        part: [0, 1, 2, 3]
     env:
       DAYS: ${{ inputs.days || '4' }}
-      PARTS: 2
+      PARTS: 4
       FILES: ${{ needs.pick.outputs.files }}
       FIT: ${{ needs.pick.outputs.fit }}
     steps:
