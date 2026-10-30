@@ -305,7 +305,8 @@ test('replay check: the take-profit bench and the accuracy gate wound back to th
   // The backtester starts from such a scoreboard: a benched one sells nothing at take-profit from the first moment on.
   const dir = path.join(tmp(), 'rec');
   writeSyntheticRecordings(dir, { windows: 6, seed: 12, marketNoise: 0.06 });
-  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both' });
+  // The quota snipe (on by default) and the profit mandate would sell the winners before the take-profit arms: off, so the bench is what sells.
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both', PROFIT_MANDATE: 'false', PACER: 'false' });
   const rule = { minTrades: 1000, t: 99, maxLossUsd: 1e9, window: 50 };
   const stateFile = path.join(tmp(), 'take-profit-bench.json');
   fs.writeFileSync(stateFile, JSON.stringify({ results: [-1], since: 0, benched: { at: 0, reason: 'seeded' }, sales: [] }));
