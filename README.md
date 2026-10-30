@@ -632,7 +632,7 @@ Nothing in the existing strategies changed: the engine filters their exit orders
 In gate mode the same bench rule applies to held exits (`SINUOUS_BENCH_T`, `SINUOUS_BENCH_MIN_EXITS`; the paper-only names `SINUOUS_PAPER_BENCH_*` from before Oct 24 are still read). The paper gate scoreboard was benched at −$0.57 over 80 held exits on the morning of Oct 23.
 
 **On the dashboard:**
-- the depth monitor shows a CURVE badge for each held contract (its state, the curve, the projection and z) and a LINE badge (the live line: with or against the side, FADING with its projected top, or BREAK, and how far under or over its projection it is);
+- the depth monitor shows a SNIPE badge for each held contract in place of the old CURVE badge (Steven, Oct 30: the curve sells nothing while `SINUOUS_CROSS` is off, so its state only said why it would not sell): what the clock hour needs for the quota snipe and the position's whole profit after fees at the bid now, e.g. SNIPE AT +$4.50 · NOW +$1.20 (green once it covers the target, amber in profit, RIDING TO SETTLEMENT in the last 10% of the window in profit, PACER OFF without the pacer); the curve's reading stays in `/api/markets` (`curve`). It also shows a LINE badge (the live line: with or against the side, FADING with its projected top, or BREAK, and how far under or over its projection it is);
 - the Telemetry tab's Exit curve row shows the scoreboard;
 - every hold, release, score and bench is in the audit log (`curve_exit`).
 

@@ -948,3 +948,20 @@ test('component trials: the trained model comes out of the price when its trial 
   const live = await run({ TRADING_MODE: 'live', KALSHI_KEY_ID: 'id', KALSHI_PRIVATE_KEY_PATH: key, KALSHI_ENV: 'prod', LIVE_TRADING_ACKNOWLEDGED: 'I_ACCEPT_REAL_MONEY_RISK' }, []);
   assert.ok(Math.abs(live.st.pModel! - live.st.fairValue!) < 1e-12, 'out of live\'s price too');
 });
+
+test('the dashboard\'s snipe badge: the hour\'s target and the held position\'s profit after fees at the bid; pacer off, no target', async () => {
+  for (const pacer of ['true', 'false']) {
+    const { engine, recon, market, md, oms } = await setup({ env: { PACER: pacer } });
+    const r = await recon.run('startup');
+    engine.balance = r!.balance;
+    md.book(market.ticker).applySnapshot({ bids: [{ price: 0.56, size: 50 }], asks: [{ price: 0.58, size: 50 }] }, Date.now());
+    await engine.tick();
+    assert.equal(engine.status.get(market.ticker)!.snipe, undefined, 'flat: no badge');
+    // Long 10 YES bought at 0.40 as a maker: at a 0.56 bid it is +$1.60 less the $0.18 taker fee, +$1.42. A fresh pacer's
+    // slice is the full $4.50, so it is not sniped yet.
+    oms.onFill({ tradeId: 'p1', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.4, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+    await engine.tick();
+    const s = engine.status.get(market.ticker)!.snipe!;
+    assert.deepEqual({ ...s, nowUsd: Math.round(s.nowUsd! * 100) / 100 }, { atUsd: pacer === 'true' ? 4.5 : undefined, nowUsd: 1.42, rides: false, closed: false });
+  }
+});

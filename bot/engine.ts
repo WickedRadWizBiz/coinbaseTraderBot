@@ -253,6 +253,10 @@ export interface MarketStatus {
   huntEvent?: HuntEvent;
   /** Exit-in-profit curve of the held position (bot/strategy/sinuousExit.ts). */
   curve?: CurveReading;
+  /** The quota snipe on the held position (bot/risk/quotaPacer.ts), for the dashboard: what the clock hour needs (`atUsd`,
+   *  undefined with the pacer off) and the position's whole profit after fees if sold at its side's bid now (`nowUsd`); `rides`
+   *  when it is in profit in the last share of the window (it rides to settlement), `closed` in the final minute. */
+  snipe?: { atUsd?: number; nowUsd?: number; rides: boolean; closed: boolean };
   /** The held position's reading of its coin's live line (bot/strategy/liveLine.ts): the break and the heads-up. */
   line?: LiveLineReading;
   /** Current values of the macro/confluence inputs for display. */
@@ -2226,6 +2230,7 @@ export class Engine {
     // mandate (PROFIT_MANDATE, off by default) sells any position in profit outside the last share of the window, a hunt trailing
     // its stop excepted; a hunt that holds (HUNT_LOCK_SALE_ELSE=hold) is not excepted, so its reductions are not blocked.
     const pacerUsd = this.pacer.neededUsd(now);
+    if (view.position !== 0) st.snipe = { atUsd: pacerUsd, nowUsd: netProfitAtBid(view), rides: ridesToSettlement(view), closed: view.exitWindowOpen === false };
     // Steven's group rule (PACER_GROUP): this position, in profit after fees, is sold when the positions in profit together cover the target.
     const group = pacerUsd !== undefined && S.pacer.group ? this.snipeGroup.judge(m.ticker, view.exitWindowOpen !== false && view.settleShare !== true ? netProfitAtBid(view) : undefined, pacerUsd, now) : undefined;
     const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode && !huntHold, entries: Boolean(reason), profitMandate: S.profitMandate && (!huntMode || huntHold) ? S.profitMandateMin : undefined, pacerUsd, ...(group?.sell ? { pacerGroup: group } : {}) });
