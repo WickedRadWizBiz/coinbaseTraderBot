@@ -990,7 +990,7 @@ def pacer_audit(recs, startups, since_ms, until_ms):
         print(f"    snipe {when(ms)}: {str(d.get('why') or '')[:140]} | needed {float(d.get('neededUsd') or 0):.2f}")
 
 
-def pool_audit(training, rejects, since_ms, until_ms):
+def pool_audit(training, rejects, since_ms, until_ms, other=()):
     """Section 0c: the paper pool (the training supervisor's pool_raised / capital_exhaustion records) and why orders were
     refused (risk_reject reasons with the numbers stripped; the engine writes one per market, side and kind a minute)."""
     try:
@@ -1003,13 +1003,24 @@ def pool_audit(training, rejects, since_ms, until_ms):
         u = time.strftime('%m-%d %H:%M', time.gmtime(ms / 1000))
         if NY is None: return u + ' UTC'
         return u + ' UTC (' + datetime.datetime.fromtimestamp(ms / 1000, NY).strftime('%I:%M %p %Z').lstrip('0') + ')'
-    ev = sorted((ms, d) for ms, d in training if since_ms <= ms <= until_ms and d.get('event') in ('pool_raised', 'capital_exhaustion'))
-    print(f'== 0c. the paper pool: {len(ev)} pool events in the window' + ('' if ev else ' (no pool_raised or capital_exhaustion records)'))
-    for ms, d in ev:
-        if d.get('event') == 'pool_raised':
+    ev = sorted([(ms, 'training', d) for ms, d in training if since_ms <= ms <= until_ms] + [x for x in other if since_ms <= x[0] <= until_ms], key=lambda x: x[0])
+    print(f'== 0c. the paper pool, the kill switch and its override: {len(ev)} events in the window' + ('' if ev else ' (no training, kill, override or paper rebase records)'))
+    for ms, k, d in ev[-40:]:
+        e = d.get('event')
+        if e == 'pool_raised':
             print(f"   {when(ms)}  pool raised ${d.get('from')} -> ${d.get('to')}: bankroll ${d.get('bankroll')} equity ${d.get('equity')}, topped up ${d.get('topUp')} (epoch {d.get('epoch')})")
-        else:
+        elif e == 'capital_exhaustion':
             print(f"   {when(ms)}  capital exhaustion (epoch {d.get('epoch')}, {d.get('hours')} h): ${d.get('endEquity')} left, refilled ${d.get('refill')}")
+        elif e == 'daily_limit_breach':
+            print(f"   {when(ms)}  daily loss limit breached (override on, trading continues): P&L ${d.get('pnl')} limit ${d.get('limit')}")
+        elif e == 'paper_rebase':
+            print(f"   {when(ms)}  paper balance moved (paper exchange top-up or a fresh book): deposit {d.get('deposit')} withdrawal {d.get('withdrawal')} balance ${d.get('balance')}")
+        elif k.startswith('kill'):
+            st = d.get('previous') if k == 'kill_reset' else d
+            st = st if isinstance(st, dict) else {}
+            print(f"   {when(ms)}  {k}: {str(st.get('reason') or d.get('reason') or '')[:90]} (source {st.get('source') or d.get('source')}{', by ' + str(d.get('by')) if d.get('by') else ''})")
+        else:
+            print(f"   {when(ms)}  {k} {e}")
     c = collections.Counter(re.sub(r'[-\d.$%]+', '#', str((d.get('reasons') or ['?'])[0]))[:100] for ms, d in rejects if since_ms <= ms <= until_ms)
     print(f'   risk rejections: {sum(c.values())} records (one per market, side and kind a minute)')
     for why, n in c.most_common(8): print(f'     {n:5d}  {why}')
@@ -1108,10 +1119,11 @@ def main():
     files = sorted(f for f in glob.glob(os.path.join(data, 'audit', 'audit-*.jsonl')) if os.path.basename(f)[6:16] >= from_iso[:10].decode())
     fills, orders, results, exit_why, curve_events = [], {}, {}, {}, []
     hunts = collections.defaultdict(list)  # ticker -> the hunt's decision records (activated / ratcheted / triggered / profit takes / deactivations)
-    want = (b'"kind":"fill"', b'"kind":"settlement"', b'"kind":"order_new"', b'"kind":"curve_exit"', b'"kind":"pacer"', b'"kind":"startup"', b'"kind":"modules"', b'"kind":"training"', b'"kind":"risk_reject"')
+    want = (b'"kind":"fill"', b'"kind":"settlement"', b'"kind":"order_new"', b'"kind":"curve_exit"', b'"kind":"pacer"', b'"kind":"startup"', b'"kind":"modules"', b'"kind":"training"', b'"kind":"risk_reject"', b'"kind":"kill_', b'"kind":"config"', b'"kind":"vault"')
     pacer_recs, startups = [], []  # the quota pacer's audit records (credit / settled / snipe, each with the clock) and bot starts
     sizing_recs = []  # the module ledger's sizing rows (audit 'modules': tier, loss-aware scale, optimal f cap, portfolio Kelly)
     training_recs, reject_recs = [], []  # the training supervisor's events (pool raised, exhaustion) and risk rejections
+    control_recs = []  # kill switch trips and resets, the override's toggles (audit config), paper balance rebases (audit vault)
     for f in files:
         with open(f, 'rb') as fh:
             for line in fh:
@@ -1154,11 +1166,17 @@ def main():
                     training_recs.append((iso_ms(ts), d))
                 elif k == 'risk_reject':
                     reject_recs.append((iso_ms(ts), d))
+                elif k in ('kill_engaged', 'kill_reset', 'kill_suppressed'):
+                    control_recs.append((iso_ms(ts), k, d))
+                elif k == 'config' and str(d.get('event') or '').startswith('kill_override'):
+                    control_recs.append((iso_ms(ts), 'override', d))
+                elif k == 'vault' and d.get('event') == 'paper_rebase':
+                    control_recs.append((iso_ms(ts), 'vault', d))
     fills.sort(key=lambda x: x['ms'])
     print(f"audit files {[os.path.basename(f) for f in files]}: fills {len(fills)}  orders {len(orders)}  settled markets {len(results)}  ({time.time() - t0:.0f} s)")
     pacer_audit(pacer_recs, startups, since_ms, int(now * 1000))
     size_audit(orders, fills, sizing_recs, since_ms, int(now * 1000))
-    pool_audit(training_recs, reject_recs, since_ms, int(now * 1000))
+    pool_audit(training_recs, reject_recs, since_ms, int(now * 1000), control_recs)
 
     def why_of(fl):
         o = orders.get(fl['coid']) or {}
