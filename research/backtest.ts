@@ -1027,7 +1027,7 @@ export function evaluateHunt(results: BacktestResult[], allWindows: number[], mi
 }
 
 /** Returns the production settings' per-window results (the go-live tally reads them: research/goLiveTally.ts). */
-export async function backtestMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')): Promise<{ windows: BacktestResult['windows'] }> {
+export async function backtestMain(argOf: (k: string, d: string) => string = cliArg, annotate: boolean = process.argv.includes('--annotate')): Promise<{ windows: BacktestResult['windows']; result: BacktestResult }> {
   const dir = argOf('recordings', 'data/recordings');
   const modelPath = argOf('model', 'params/model.json');
   const model = fs.existsSync(modelPath) ? MetaModel.load(modelPath) : MetaModel.identity();
@@ -1148,7 +1148,7 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
     fs.writeFileSync(modelPath, JSON.stringify(params, null, 2) + '\n');
     console.log(`annotated ${modelPath}: passed=${params.validation.passed}`);
   }
-  return { windows: results[bi].windows };
+  return { windows: results[bi].windows, result: results[bi] };
 }
 
 if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void backtestMain();

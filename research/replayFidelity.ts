@@ -272,8 +272,12 @@ async function backtestDir(dir: string, model: string): Promise<Windows> {
     'ratchet-fill-grid': String(cfg.strategy.ratchetMinFillRatio), 'ratchet-age': String(cfg.strategy.ratchetMinWallAgeSec), 'ratchet-slip': String(cfg.strategy.ratchetSlippageTicks),
   };
   const t0 = Date.now();
-  const w = (await backtestMain((k, d) => (k === 'recordings' ? dir : k in fixed ? fixed[k] : d), false)).windows;
+  const { windows: w, result: r } = await backtestMain((k, d) => (k === 'recordings' ? dir : k in fixed ? fixed[k] : d), false);
   console.log(`[fidelity] backtest on ${path.basename(dir)}: ${w.size} windows (${elapsed(t0)})`);
+  // Why a backtest traded what it did (counts only): the entry evaluations, the orders sent, the fills, and the risk
+  // gateway's commonest refusals.
+  const refused = Object.entries(r.paper?.rejected ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k} x${n}`).join('; ');
+  console.log(`[fidelity] ${path.basename(dir)}: ${r.entryEvaluations} entry evaluations, ${r.latency?.sent ?? 0} orders sent, ${r.fills} fills, ${r.contracts} contracts, optimal-f bound ${r.optimalFBound ?? 0}${refused ? ` | refused: ${refused}` : ''}`);
   return w;
 }
 
@@ -286,6 +290,8 @@ function compare(meta: FidelityMeta, real: Windows, variants: Record<string, Win
   const best = [...rows].sort((a, b) => a.rmseUsd - b.rmseUsd)[0];
   const choice: QuoteFill = best.how === 'noise' ? { how: 'noise', sigma: +meta.sigmaAll.toPrecision(6) } : { how: best.how as QuoteFill['how'] };
   const realPnl = [...real.values()].reduce((a, x) => a + x.pnl, 0);
+  // Without a real baseline there is nothing to be closest to: no verdict (it would still pick a fill-in and send it).
+  if (![...real.values()].some((x) => x.contracts > 0)) throw new Error('the backtest on the real quotes traded no window: no verdict');
   const report = {
     at: new Date().toISOString(), days: meta.days, model: path.basename(model),
     real: { pnl: +realPnl.toFixed(4), windowsTraded: [...real.values()].filter((x) => x.contracts > 0).length },
