@@ -297,12 +297,14 @@ jobs:
             U="$UNTIL"
           fi
           # 80 min of fixed allowance for the recordings load: two 24 h windows run side by side timed out at 40 (Oct 30)
-          T=$(python3 -c "print(min(8100, int(float('$HOURS') * 110 + 4800)))")
-          ssh bot "mkdir -p /tmp/diag"
-          scp -q deploy/cross_study.py bot:/tmp/diag/cross_study.py
+          T=$(python3 -c "print(min(8400, int(float('$HOURS') * 110 + 6000)))")
+          # A directory of this run's own: studies dispatched from other branches at the same time each copy their own script.
+          D="/tmp/diag-$GITHUB_RUN_ID"
+          ssh bot "mkdir -p $D"
+          scp -q deploy/cross_study.py "bot:$D/cross_study.py"
           MODE=''
           [ "$AUDIT" = true ] && MODE="${U:-now} audit"
-          { ssh bot "timeout $T nice -n 19 python3 /tmp/diag/cross_study.py ~/bot/data $HOURS ${MODE:-$U}" || echo "(exit study stopped: $?)"; } 2>&1 | tee "$RUNNER_TEMP/report.txt"
+          { ssh bot "timeout $T nice -n 19 python3 $D/cross_study.py ~/bot/data $HOURS ${MODE:-$U}; s=\$?; rm -rf $D; exit \$s" || echo "(exit study stopped: $?)"; } 2>&1 | tee "$RUNNER_TEMP/report.txt"
           if [ "$MODELS" = true ]; then
             scp -q deploy/decision_study.py deploy/component_study.py bot:/tmp/diag/
             { echo; echo "== decision study (the model against the market, last 3 days)"; ssh bot "timeout 1500 nice -n 19 python3 /tmp/diag/decision_study.py ~/bot/data 3" || echo "(decision study stopped: $?)"
