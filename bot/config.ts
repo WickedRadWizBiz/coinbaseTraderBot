@@ -16,6 +16,7 @@ import type { AccuracyGateConfig } from './strategy/accuracyGate';
 import type { VaultConfig } from './vault/vault';
 import { DEFAULT_LIVE_LINE } from './strategy/liveLine';
 import { DEFAULT_TRIALS, TRIAL_NAMES, type TrialName, type TrialParams } from './strategy/componentTrials';
+import { DEFAULT_SCOREBOARD, type ScoreboardParams } from './health/scoreboard';
 import os from 'os';
 import path from 'path';
 
@@ -119,16 +120,20 @@ export interface StrategyConfig {
   /** No exits in the final seconds, the hunt stop included: positions ride to settlement (spreads widen inside the
    *  averaging window, and the stop sales inside the last minutes were the ones found always wrong). */
   noExitBeforeCloseSec: number;
-  /** STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC: no exits in the last share of the contract's window either (0.10 = the last 90 s of a
-   *  15-minute market, 6 min of an hourly one): a position there rides to settlement (Steven's rule, Oct 29). */
+  /** STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC: in the last share of the contract's window (0.10 = the last 90 s of a 15-minute market,
+   *  6 min of an hourly one) a position in profit after fees rides to settlement, no exit selling it (Steven's rule, Oct 29); a
+   *  position that is not in profit keeps its exits until STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC. */
   noExitBeforeCloseFrac: number;
   /** PACER (Steven's spec, Oct 29 23:35 UTC; off by default since Oct 30: in the exit lab on the recorded days it sold winners at
    *  the bid before they settled while the losers never reached its target, and every variant made less than the first-dip
    *  rule alone): the hourly quota pacer (bot/risk/quotaPacer.ts). A 24-hour profit clock anchored
    *  to 10:00 AM New York time at PACER_HOURLY_USD (4.50) an hour; the strategy sells a position at once (the "quota snipe") when
-   *  its net profit after fees, sold at the bid, covers what the rest of the clock hour owes, clamped to [PACER_MIN_TAKE_USD,
-   *  PACER_MAX_TARGET_USD], whatever the exit policy (hold included), the hunt or the model says. Inside the last share of the
-   *  window a position in profit rides to settlement instead. */
+   *  its net profit after fees, sold at the bid, covers the running slice's goal (PACER_MODE=slices, Steven's non-stacking
+   *  spec of Oct 30: never more than PACER_HOURLY_USD, a deficit caught up in rolling slices, a fresh slice each clock hour)
+   *  or, in the older modes, the clock hour's deficit clamped to [PACER_MIN_TAKE_USD, PACER_MAX_TARGET_USD], whatever the
+   *  exit policy (hold included), the hunt or the model says. Inside the last share of the
+   *  window a position in profit rides to settlement instead, and with HUNT_LOCK_SALE_ELSE=exit a hunted position is never
+   *  held for settlement. */
   pacer: PacerConfig;
   /** PROFIT_MANDATE (off by default; Steven's first wording, Oct 29 23:22 UTC): outside that final share of the window a position
    *  whose side bid net of the exit fee clears its entry cost (entry fee in) by PROFIT_MANDATE_MIN is sold at the bid whatever the
@@ -150,6 +155,13 @@ export interface StrategyConfig {
    *  (the owner's choice on Oct 24, a minimum of 10%: orders shrink as the account does and grow as it does). 0 = the
    *  fixed paperOrderUsd. Live never uses it. */
   paperOrderFrac: number;
+  /** The order band, paper and live (Steven, Oct 30: "between $10-$20 an order"): each crypto entry and maker quote that
+   *  sizing wants stakes its sized amount clamped to [orderUsdMin, orderUsdMax] dollars, within the risk room and free
+   *  cash left (an entry the room cannot fit at orderUsdMin is skipped), in place of the tier, loss-aware, optimal-f and
+   *  portfolio-Kelly sizing; the risk caps widen to fit it as for the paper order size. orderUsdMin 0 = off. A paper
+   *  order size (paperOrderUsd / paperOrderFrac) wins over it. */
+  orderUsdMin: number;
+  orderUsdMax: number;
   /** Paper only: no new crypto entries in a time-to-close bucket where the market mid has scored a better log loss
    *  than the bot's (temperature-calibrated) probability over the last settled markets (bot/strategy/accuracyGate.ts;
    *  the owner's choice on Oct 23). Live never blocks on it. */
@@ -305,6 +317,9 @@ export interface Config {
    *  without them on every settled crypto contract; one that tests significantly better goes into paper's prices, one
    *  significantly worse comes out, never in live's (bot/strategy/componentTrials.ts). */
   trials: TrialParams;
+  /** SCOREBOARD (default on): every price (math fair value, meta-model, the bot's, the SNN's, the TA tilt) scored against the
+   *  Kalshi market on every settled crypto contract, paper and live alike (bot/health/scoreboard.ts). */
+  scoreboard: ScoreboardParams;
   host: string;
   port: number;
   /** DASHBOARD_PASSWORD: '' (default) = the dashboard opens without a login. */
@@ -318,6 +333,8 @@ export interface Config {
   auditMaxFileMb: number;
   auditRetentionDays: number;
   paramsPath: string;
+  /** The paper Kalshi pool (Steven, Oct 30: $200): what paper starts with and refills to; raising it tops the pool up once
+   *  (bot/training/supervisor.ts). */
   paperBankrollUsd: number;
   /** Map of Kalshi CF Benchmarks index id -> asset symbol (BTC, ETH...). */
   indexIdMap: Record<string, string>;
@@ -623,6 +640,9 @@ export interface SnnConfig {
   /** Conservative-only dynamic target scaling (hunt take-profit distance), one step per 15 min. */
   targetScaling: boolean;
   deferred: { wilsonCowan: boolean; gapJunctions: boolean; izhikevichCH: boolean; dcaap: boolean };
+  /** SNN_ANCHOR_MID: the contract readouts start from the market's mid and learn the correction (bot/snn/network.ts
+   *  anchorLogit); a new version hash, so the networks start fresh when it flips. */
+  anchorMid: boolean;
   /** Tennis: run three networks live and keep the fittest (population-based training). */
   tennisPopulation: boolean;
   /** Graded matches between live tournament rounds. */
@@ -858,7 +878,7 @@ function pacerConfig(env: Env): PacerConfig {
     anchorHour: Math.floor(num(env, 'PACER_ANCHOR_HOUR', 10, 0, 23)),
     anchorMinute: Math.floor(num(env, 'PACER_ANCHOR_MINUTE', 0, 0, 59)),
     tz,
-    mode: oneOf(env, 'PACER_MODE', 'cumulative', ['cumulative', 'rolling_hour'] as const),
+    mode: oneOf(env, 'PACER_MODE', 'slices', ['slices', 'cumulative', 'rolling_hour'] as const),
     minTakeUsd,
     maxTargetUsd: Math.max(minTakeUsd, num(env, 'PACER_MAX_TARGET_USD', 6.5, 0, 10_000)),
   };
@@ -1110,6 +1130,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     minQuoteContracts: num(env, 'STRATEGY_MIN_QUOTE_CONTRACTS', 3, 0, 100),
     paperOrderUsd: num(env, 'PAPER_ORDER_USD', 0, 0, 1000),
     paperOrderFrac: num(env, 'PAPER_ORDER_FRAC', 0, 0, 1),
+    orderUsdMin: num(env, 'ORDER_USD_MIN', 10, 0, 1000),
+    orderUsdMax: num(env, 'ORDER_USD_MAX', 20, 0, 1000),
     accuracyGate: { enabled: bool(env, 'ACCURACY_GATE', true), window: num(env, 'ACCURACY_GATE_WINDOW', 150, 20, 2000), minMarkets: num(env, 'ACCURACY_GATE_MIN_MARKETS', 40, 5, 1000) },
     sizing: oneOf(env, 'STRATEGY_SIZING', relaxed ? 'target_ev' : 'kelly', ['kelly', 'target_ev'] as const),
     kappa: num(env, 'STRATEGY_KAPPA', 0.5, 0, 1),
@@ -1244,6 +1266,12 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         paperStart: (env.TRIAL_PAPER_START ?? DEFAULT_TRIALS.paperStart.join(',')).split(',').map((x) => x.trim()).filter((x): x is TrialName => (TRIAL_NAMES as string[]).includes(x)),
       };
     })(),
+    scoreboard: {
+      enabled: bool(env, 'SCOREBOARD', DEFAULT_SCOREBOARD.enabled),
+      keep: num(env, 'SCOREBOARD_KEEP', DEFAULT_SCOREBOARD.keep, 100, 20000),
+      snnAlpha: num(env, 'TRIAL_SNN_ALPHA', DEFAULT_SCOREBOARD.snnAlpha, 0, 1),
+      bootstrap: num(env, 'SCOREBOARD_BOOTSTRAP', DEFAULT_SCOREBOARD.bootstrap, 50, 5000),
+    },
     host,
     port: num(env, 'PORT', 3000, 1, 65535),
     dashboardPassword,
@@ -1252,8 +1280,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     auditMaxFileMb: num(env, 'AUDIT_MAX_FILE_MB', 256, 16, 4096),
     auditRetentionDays: num(env, 'AUDIT_RETENTION_DAYS', 30, 0, 3650),
     paramsPath: path.resolve(env.MODEL_PARAMS_PATH ?? './params/model.json'),
-    // Starts in the aggressive tier; see SIZING_TIERS.
-    paperBankrollUsd: num(env, 'PAPER_BANKROLL_USD', 100, 1, 1e7),
+    // $200 since Oct 30 (Steven), the normal tier; see SIZING_TIERS.
+    paperBankrollUsd: num(env, 'PAPER_BANKROLL_USD', 200, 1, 1e7),
     indexIdMap: jsonMap(env, 'INDEX_ID_MAP', DEFAULT_INDEX_IDS),
     seriesAssetMap,
     catalogHorizonMin: num(env, 'CATALOG_HORIZON_MIN', 90, 16, 7 * 24 * 60),
@@ -1484,6 +1512,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         };
       })(),
       crossFeed: bool(env, 'SNN_CROSS_FEED', false),
+      anchorMid: bool(env, 'SNN_ANCHOR_MID', false),
       deferred: {
         wilsonCowan: bool(env, 'SNN_WILSON_COWAN', false),
         gapJunctions: bool(env, 'SNN_GAP_JUNCTIONS', false),

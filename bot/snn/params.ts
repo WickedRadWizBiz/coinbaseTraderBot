@@ -78,6 +78,10 @@ export interface SnnParams {
   /** Readout. */
   readoutEta: number; readoutCap: number; tagEverySec: number; tagsPerContract: number; maxTaggedContracts: number; traceTauSec: number;
   priorSlope: number;
+  /** Mid-anchored contract readout (the SNN plan's phase 1): logit p = logit(market mid) + w . phi, weights starting at
+   *  zero, so the readout starts as the market and can only add value where the market is wrong. Optional: absent = off,
+   *  and absent keys keep the version hash, so networks without it keep their checkpoints. */
+  anchorMid?: boolean;
   /** Wilson-Cowan regime drive gain; gap-junction coupling factor (<< 1). */
   wcGain: number; gapCoupling: number;
   /** Catch-up: at most this many 1 s steps per call; larger gaps reset transient state. */

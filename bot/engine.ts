@@ -31,7 +31,7 @@ import { marketWorstLoss, RestingLike } from './risk/exposure';
 import type { KillSwitch } from './risk/killSwitch';
 import { EXIT_RATE_RESERVE, RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
-import { decide, decisionProbability, MarketView, netProfitAtBid, OrderPlan } from './strategy/fairValueStrategy';
+import { decide, decisionProbability, MarketView, netProfitAtBid, OrderPlan, ridesToSettlement } from './strategy/fairValueStrategy';
 import { ProfitPeaks } from './strategy/profitPeaks';
 import { ConfluenceRatchetExit, HuntEvent } from './strategy/exitPolicies';
 import { HourlyQuotaPacer, SnipeGroup } from './risk/quotaPacer';
@@ -69,6 +69,7 @@ import { BalanceMonitor, fillCashDelta, settleCashDelta } from './vault/balanceM
 import type { Vault } from './vault/vault';
 import type { LiveLineReading, LiveLines } from './strategy/liveLine';
 import type { ComponentTrials, TrialName } from './strategy/componentTrials';
+import type { Scoreboard } from './health/scoreboard';
 import { stateWriteStats, writeJsonAtomic } from './util/persist';
 import type { KalshiCheck } from './recon/kalshiCheck';
 import type { SnnBlender } from './snn/blender';
@@ -91,7 +92,7 @@ import { recordLatency } from './util/latency';
 import { performance } from 'perf_hooks';
 import { activeRuleBook, STAND_ASIDE } from './strategy/ruleBook';
 import { buildLedger, type ModuleRow } from './health/moduleLedger';
-import { orderBudget } from './sizing/orderBudget';
+import { orderBand, orderBudget } from './sizing/orderBudget';
 import { activeGpSignals } from './gp/gpSignals';
 import { marketContext } from './ta/marketContext';
 import { binaryTrades, optimalF, recencyWeight, type OptimalFReport } from './strategy/optimalF';
@@ -331,6 +332,8 @@ export interface EngineDeps {
   /** The rule book, SNN and TA network trials: each scored against the price without it; paper uses the ones that pass
    *  (bot/strategy/componentTrials.ts). */
   trials?: ComponentTrials;
+  /** The scoreboard: every price against the Kalshi market on settled contracts (bot/health/scoreboard.ts). */
+  scoreboard?: Scoreboard;
   /** Cortex-like SNN (bot/snn): worker host, blender with earned alpha, conservative target scaler. */
   snn?: SnnFleet;
   /** Where the blender's settled (p_model, p_snn) history is saved (survives restarts). */
@@ -621,7 +624,7 @@ export class Engine {
       }
     });
     // Official results of every scanned market (traded or not): the SNN's settlement labels.
-    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => { this.d.taHealth?.onResult(e.ticker, e.result); this.d.trials?.onResult(e.ticker, e.result, this.now()); this.d.accuracyGate?.settle(e.ticker, e.result); this.snnSettle(e.ticker, e.result); });
+    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => { this.d.taHealth?.onResult(e.ticker, e.result); this.d.trials?.onResult(e.ticker, e.result, this.now()); this.d.scoreboard?.onResult(e.ticker, e.result); this.d.accuracyGate?.settle(e.ticker, e.result); this.snnSettle(e.ticker, e.result); });
     oms.on('order_error', (n: number, msg: string) => {
       if (n >= cfg.risk.maxConsecutiveOrderErrors) void kill.engage(`${n} consecutive order errors (last: ${msg})`, 'oms');
     });
@@ -952,7 +955,7 @@ export class Engine {
       targetEvUsd: +ev.targetEv.toFixed(2), minTradeEvUsd: +ev.minEv.toFixed(3),
       minTradableBankrollUsd: S.minTradableBankrollUsd,
       tier: { ...t, orderRiskUsd: +(t.orderFrac * b).toFixed(2), dailyLossLimitUsd: +this.d.risk.dailyLossLimit(b, this.tierLimits(t)).toFixed(2) },
-      paperOrderUsd: this.paperOrderUsd() || null, paperOrderFrac: this.d.cfg.mode === 'paper' ? this.d.cfg.strategy.paperOrderFrac || null : null,
+      paperOrderUsd: this.paperOrderUsd() || null, orderBandUsd: this.orderBandUsd() ?? null, paperOrderFrac: this.d.cfg.mode === 'paper' ? this.d.cfg.strategy.paperOrderFrac || null : null,
       accuracyGate: this.d.accuracyGate ? { ...this.d.accuracyGate.status(), enforced: this.d.cfg.strategy.accuracyGate.enabled } : null,
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null, minQuoteContracts: S.minQuoteContracts,
@@ -966,6 +969,7 @@ export class Engine {
       // Does the TA network's drift improve the probabilities? (log loss with vs without it, per window)
       taHealth: this.d.taHealth?.status() ?? null,
       trials: this.d.trials ? { ...this.d.trials.status(), params: this.d.trials.p, appliesIn: 'paper and live' } : null,
+      scoreboard: this.d.scoreboard?.status() ?? null,
       cpu: this.cpu.status(),
       taEnsemble: activeTaNetEnsemble()?.status() ?? null,
       // Optimal f on the Kalshi pool's settled trades (cap on the stake per order, fraction of bankroll).
@@ -1085,6 +1089,13 @@ export class Engine {
     return Math.max(0, this.d.cfg.strategy.paperOrderUsd ?? 0);
   }
 
+  /** The order band (ORDER_USD_MIN / ORDER_USD_MAX, Steven's choice on Oct 30: $10-$20 an order), paper and live; undefined
+   *  when off or while a paper order size is in use (it wins). */
+  orderBandUsd(bankroll = this.bankroll()): { min: number; max: number } | undefined {
+    if (this.paperOrderUsd(bankroll) > 0) return undefined;
+    return orderBand(this.d.cfg.strategy.orderUsdMin, this.d.cfg.strategy.orderUsdMax);
+  }
+
   /** How paper sizes its orders, for notes and alerts ('' outside paper or with paper sized like live). */
   paperSizing(): string {
     const usd = this.paperOrderUsd();
@@ -1093,11 +1104,11 @@ export class Engine {
     return frac > 0 ? `$${usd.toFixed(2)} an order (${+(frac * 100).toFixed(2)}% of the bankroll, PAPER_ORDER_FRAC)` : `$${usd} an order (PAPER_ORDER_USD)`;
   }
 
-  /** The risk gateway's per-order, window and total caps for crypto orders: the tier's, widened in paper to fit the
-   *  order size (one order, PAPER_WINDOW_ORDERS in markets closing together, PAPER_TOTAL_ORDERS in all). */
+  /** The risk gateway's per-order, window and total caps for crypto orders: the tier's, widened to fit the paper order
+   *  size or the order band's top (one order, PAPER_WINDOW_ORDERS in markets closing together, PAPER_TOTAL_ORDERS in all). */
   private orderLimits(t: Tier, bankroll = this.bankroll() ?? 0): Partial<RiskLimits> {
     const lim = this.tierLimits(t);
-    const usd = this.paperOrderUsd(bankroll);
+    const usd = this.paperOrderUsd(bankroll) || (this.orderBandUsd(bankroll)?.max ?? 0);
     if (!(usd > 0) || !(bankroll > 0)) return lim;
     return {
       ...lim,
@@ -1532,7 +1543,7 @@ export class Engine {
       if (!terms || !spot || !vol) continue;
       const tauSec = (m.closeTime - now) / 1000;
       cq.push({
-        ticker: m.ticker, column: snnColumn(m), kind: terms.kind, strike: terms.strike, cap: terms.cap, spot: spot.value, sigma: vol.sigmaPerSqrtSec,
+        ticker: m.ticker, column: snnColumn(m), kind: terms.kind, strike: terms.strike, cap: terms.cap, spot: spot.value, sigma: vol.sigmaPerSqrtSec, mid: md.books.get(m.ticker)?.mid(),
         tauSec, lifeSec: (m.closeTime - m.openTime) / 1000, eventKey: `${m.asset}:${m.closeTime}`, tag: tauSec > cfg.risk.noEntryBeforeCloseSec,
       });
     }
@@ -1643,8 +1654,8 @@ export class Engine {
     // The trial blends at its weight without the confidence factor: on Oct 21-24's decisions the confidence cut the
     // blend's gain (deploy/component_study.py: 0.25 x c saved 0.0014 of log loss a contract at p 0.09, 0.25 flat 0.0041
     // at p 0.02).
-    if (!this.d.trials || !Number.isFinite(s.p)) return { p };
-    return { p, a: this.d.trials.p.snnAlpha, pSnn: s.p };
+    if (!Number.isFinite(s.p)) return { p };
+    return { p, pSnn: s.p, ...(this.d.trials ? { a: this.d.trials.p.snnAlpha } : {}) };
   }
 
   /** Load the blender's saved history; it is discarded when it was recorded against another meta-model. */
@@ -1766,6 +1777,7 @@ export class Engine {
       modelHealth: this.d.modelHealth?.status() ?? null,
       taHealth: this.d.taHealth?.status() ?? null,
       trials: this.d.trials?.status() ?? null,
+      scoreboard: this.d.scoreboard?.status() ?? null,
       snn: { mode: snn.mode, alpha: snn.alpha ?? null },
       taNet: rt ? { version: rt.net.params.version, activeHeads: rt.net.active(true).length } : null,
       ruleBook: S.ruleBook ? { passed: activeRuleBook()?.passed().length ?? 0 } : null,
@@ -1777,7 +1789,7 @@ export class Engine {
       accuracyGate: ag ? { enabled: ag.enabled, blocked: agBuckets.filter((b) => !b.open).length, buckets: agBuckets.length } : null,
       sessionRisk: { keys: Object.keys(this.sessionRiskProfile()).length },
       sizing: {
-        paperOrderUsd: this.paperOrderUsd(), tier: g.tier.name, sizeScale: g.equityGuard?.sizeScale ?? null,
+        paperOrderUsd: this.paperOrderUsd(), orderBandUsd: this.orderBandUsd() ?? null, tier: g.tier.name, sizeScale: g.equityGuard?.sizeScale ?? null,
         optimalF: of.rep ? { cap: Number.isFinite(of.cap) ? of.cap : null, trades: of.rep.n } : null, portfolioKelly: S.portfolioKelly,
       },
       exitPolicy: S.exitPolicy,
@@ -1793,6 +1805,9 @@ export class Engine {
       })(),
     });
   }
+
+  /** The scoreboard's standing: every price against the market (bot/health/scoreboard.ts). */
+  scoreboardStatus() { return this.d.scoreboard?.status() ?? null; }
 
   /** The market-state reading of every coin seen. */
   marketStates(now = this.now()): MarketStateReading[] {
@@ -2095,6 +2110,11 @@ export class Engine {
       if (taShiftFull !== undefined) trials.record('ta', m.ticker, m.asset, m.closeTime, clampP(pred.p + taShiftFull), pred.p, now);
       if (ruleShift !== undefined) trials.record('rules', m.ticker, m.asset, m.closeTime, clampP(pred.p + ruleShift), pred.p, now);
     }
+    // The scoreboard: every price against the market, same cadence, traded or not (bot/health/scoreboard.ts).
+    if (reason && kindWindow && this.d.scoreboard) {
+      const clampP = (x: number) => Math.max(0.001, Math.min(0.999, x));
+      this.d.scoreboard.record(m.ticker, m.asset, m.closeTime, { market: pMarket, fair_value: fv.pYes, meta_model: pred.p, bot_price: pYes, snn: blended.pSnn, ta_tilt: taShiftFull !== undefined ? clampP(pred.p + taShiftFull) : undefined }, now);
+    }
     const pos = oms.positions.get(m.ticker);
     const entrySidePrice = pos && pos.yes > 0 ? -pos.netCash / pos.yes : pos && pos.yes < 0 ? 1 - pos.netCash / -pos.yes : undefined;
     const tier = this.tier();
@@ -2111,14 +2131,17 @@ export class Engine {
     // dollars, whatever the tier, the break-even scale, the session's size factor and optimal f would allow (the owner's
     // choice for paper on Oct 23, a share of the bankroll since Oct 24).
     const fixedUsd = this.paperOrderUsd(bankroll);
+    // The order band (ORDER_USD_MIN / ORDER_USD_MAX, Steven, Oct 30), paper and live: the sized stake clamped to $10-$20.
+    const band = this.orderBandUsd(bankroll);
     // Session risk scales size (sizeMult in [0, 1.5]: above 1 only for a reliably earning session, dollars only). The risk scale (drawdown, losing streak,
     // training-mode de-risking) shrinks every sizing route: Kelly, target-EV and the per-order caps alike. The same
     // budget sizes the backtester's orders (bot/sizing/orderBudget.ts).
-    const budget = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult, riskScale: kellyScale, fCapUsd, paperOrderUsd: fixedUsd, maxContractsPerOrder: R.maxContractsPerOrder });
+    const budget = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult, riskScale: kellyScale, fCapUsd, paperOrderUsd: fixedUsd, bandUsd: band, maxContractsPerOrder: R.maxContractsPerOrder });
     const view: MarketView = {
       ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: st.position, bankroll,
       maxOrderRiskUsd: budget.maxOrderRiskUsd, maxContracts: budget.maxContracts, minSidePrice: R.minSidePrice,
       ...(budget.fixedOrderUsd ? { fixedOrderUsd: budget.fixedOrderUsd } : {}),
+      ...(budget.band ? { orderBandUsd: budget.band } : {}),
       // Exit curve, rest mode: the held position's sell rests at the curve's swing-top estimate (the strategy places it);
       // not in the stand-down before the close, and pulled during a fast index move (a resting sell is lifted exactly
       // when the contract is suddenly worth more).
@@ -2130,7 +2153,8 @@ export class Engine {
       entryFeePerContract: pos && Math.abs(pos.yes) > 1e-9 ? pos.fees / Math.abs(pos.yes) : undefined,
       profitPeakSidePrice: this.profitPeaks.update(m.ticker, st.position, st.position > 0 ? bid.price : st.position < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
       ...(this.d.takeProfitBench?.benched ? { takeProfitBenched: this.d.takeProfitBench.benched } : {}),
-      entryWindowOpen, exitWindowOpen: tauSec > Math.max(S.noExitBeforeCloseSec, Number.isFinite(m.openTime) ? S.noExitBeforeCloseFrac * (m.closeTime - m.openTime) / 1000 : 0),
+      entryWindowOpen, exitWindowOpen: tauSec > S.noExitBeforeCloseSec,
+      settleShare: Number.isFinite(m.openTime) && tauSec <= S.noExitBeforeCloseFrac * (m.closeTime - m.openTime) / 1000,
     };
     // Exit policy. confluence_ratchet: fair-value exit normally; "hunt" mode (liquidity ratchet
     // manages the exit, nothing else may reduce the position) only while the contract has beaten
@@ -2177,10 +2201,11 @@ export class Engine {
         this.d.audit.write('decision', { ticker: m.ticker, huntEvent: d.event, target: d.target, stop: d.stop, rest: d.rest, position: st.position, confCount: features.conf_count, pYes });
       }
       st.huntEvent = d.event;
-      if (d.plan && view.exitWindowOpen === false) {
+      if (d.plan && (view.exitWindowOpen === false || ridesToSettlement(view))) {
         // The no-exit window before the close (STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC) holds the hunt stop as well: the per-sale
-        // diagnosis of Oct 28 found every stop sale inside the last two minutes on the losing side of settlement.
-        huntHeld = `hunting: stop ${d.plan.stop} held, ${Math.round(tauSec)} s to the close`;
+        // diagnosis of Oct 28 found every stop sale inside the last two minutes on the losing side of settlement. So does the last
+        // share of the window for a position in profit after fees (Steven's rule, STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC).
+        huntHeld = view.exitWindowOpen === false ? `hunting: stop ${d.plan.stop} held, ${Math.round(tauSec)} s to the close` : `hunting: stop ${d.plan.stop} held: in profit in the last share of the window, riding to settlement`;
       } else if (d.plan) {
         huntPlan = { side: d.plan.side, price: d.plan.price, count: d.plan.count, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge: 0, why: `confluence ratchet stop ${d.plan.stop}` };
         huntProtective = d.event === 'triggered' || d.event === 'profit_take_gap';
@@ -2202,7 +2227,7 @@ export class Engine {
     // its stop excepted; a hunt that holds (HUNT_LOCK_SALE_ELSE=hold) is not excepted, so its reductions are not blocked.
     const pacerUsd = this.pacer.neededUsd(now);
     // Steven's group rule (PACER_GROUP): this position, in profit after fees, is sold when the positions in profit together cover the target.
-    const group = pacerUsd !== undefined && S.pacer.group ? this.snipeGroup.judge(m.ticker, view.exitWindowOpen !== false ? netProfitAtBid(view) : undefined, pacerUsd, now) : undefined;
+    const group = pacerUsd !== undefined && S.pacer.group ? this.snipeGroup.judge(m.ticker, view.exitWindowOpen !== false && view.settleShare !== true ? netProfitAtBid(view) : undefined, pacerUsd, now) : undefined;
     const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode && !huntHold, entries: Boolean(reason), profitMandate: S.profitMandate && (!huntMode || huntHold) ? S.profitMandateMin : undefined, pacerUsd, ...(group?.sell ? { pacerGroup: group } : {}) });
     // A quota snipe liquidates the position: the hunt's stop order would only double it. The decision is audited with the clock.
     const snipe = plan.place.find((p) => p.purpose === 'exit' && p.why.startsWith('quota snipe'));
@@ -2252,7 +2277,8 @@ export class Engine {
         const mult = Math.min(S.convictionMaxTotal, advMult * altMult);
         if (mult <= 1) continue;
         if (fixedUsd > 0) { plan.notes.push(`conviction x${mult.toFixed(2)} not applied: paper orders are ${this.paperSizing()}`); continue; }
-        const boosted = decide({ ...view, maxOrderRiskUsd: Math.min(view.maxOrderRiskUsd * mult, fCapUsd), maxContracts: floorCount(view.maxContracts * mult) }, { ...strat, kellyFraction: strat.kellyFraction * mult }, { exits: false, blockReductions: huntMode, entries: true });
+        // Inside the order band the boost moves Kelly's stake toward the band's top, never past it.
+        const boosted = decide(band ? view : { ...view, maxOrderRiskUsd: Math.min(view.maxOrderRiskUsd * mult, fCapUsd), maxContracts: floorCount(view.maxContracts * mult) }, { ...strat, kellyFraction: strat.kellyFraction * mult }, { exits: false, blockReductions: huntMode, entries: true });
         const match = boosted.place.find((b) => b.side === p.side && b.purpose === p.purpose && !b.reduceOnly && Math.abs(b.price - p.price) < 1e-9);
         const count = match ? floorCount(Math.min(match.count, p.count * mult)) : p.count;
         if (count > p.count) {
@@ -2294,6 +2320,7 @@ export class Engine {
     }
     if (this.fillLog) for (const p of plan.place) if (isMakerEntry(p)) this.fillX.set(p, fillInputs(p, fillCtx));
     if (fixedUsd > 0) plan.notes.push(`paper size: ${this.paperSizing()}; the tier, break-even scale and optimal f size live`);
+    else if (band) plan.notes.push(`order band: $${band.min}-$${band.max} an order (ORDER_USD_MIN/MAX), the sized stake clamped into it; the tier, loss scale and optimal f do not size it`);
     else {
       plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
       if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${[...rs.parts, ...(reg.mult !== 1 ? [`regime x${reg.mult.toFixed(2)}`] : [])].join(', ')})`);
@@ -2363,7 +2390,7 @@ export class Engine {
       // way the sale clears the take-profit floor: sell at the bid now (the resting sell is pulled below, with any other
       // own order in the way). Not while hunting (the ratchet runs that winner), nor when another exit already crosses
       // the book this tick.
-      if (curve.crossing && !huntMode && view.exitWindowOpen !== false && !plan.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel')) {
+      if (curve.crossing && !huntMode && view.exitWindowOpen !== false && !ridesToSettlement(view) && !plan.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel')) {
         const top = sign > 0 ? bid : ask;
         const n = floorCount(Math.min(held, top.size));
         if (n > 0) {
@@ -2476,7 +2503,7 @@ export class Engine {
     // Tennis orders are rules-based (no model probability to size an edge from): budgeted separately.
     // Paper training trades are 1 contract with no edge requirement (they exist to produce trades).
     const training = cfg.mode === 'paper' && p.why.startsWith('train (paper)');
-    const pk = tennis || training || this.paperOrderUsd() > 0 ? undefined : this.portfolioCap(m, p, pYes, now);
+    const pk = tennis || training || this.paperOrderUsd() > 0 || this.orderBandUsd() ? undefined : this.portfolioCap(m, p, pYes, now);
     if (pk && pk.contracts < p.count) {
       this.d.audit.write('decision', { decisionId, ticker: m.ticker, event: 'portfolio_kelly_cap', from: p.count, to: pk.contracts, fStar: +pk.fStar.toFixed(4), edgePerDay: +pk.edgePerDay.toFixed(4) });
       if (pk.contracts <= 0) return;

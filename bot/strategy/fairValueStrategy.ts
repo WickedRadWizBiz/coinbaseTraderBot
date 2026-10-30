@@ -62,6 +62,10 @@ export interface MarketView {
    *  buys about this many dollars of contracts, within maxOrderRiskUsd, the risk room and maxContracts. Undefined = the
    *  sized amount. */
   fixedOrderUsd?: number;
+  /** The order band (ORDER_USD_MIN / ORDER_USD_MAX, paper and live): a trade sizing wants (contracts > 0) stakes the
+   *  sized amount clamped to [min, max] dollars, within maxOrderRiskUsd, the risk room and maxContracts; skipped when
+   *  those cannot fit the minimum. Undefined = the sized amount. */
+  orderBandUsd?: { min: number; max: number };
   /** Exit curve rest mode: the side price at which the held position's sell rests (the curve's swing-top estimate).
    *  Undefined = no resting curve sell. */
   curveRestSidePrice?: number;
@@ -98,6 +102,9 @@ export interface MarketView {
   entryWindowOpen?: boolean;
   /** Exits allowed (false in the final minute: ride to settlement). Default true. */
   exitWindowOpen?: boolean;
+  /** Inside the last STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC of the contract's window (Steven's rule, Oct 29): a position in profit
+   *  after fees rides to settlement (no exit sells it); one that is not keeps its exits. Default false. */
+  settleShare?: boolean;
 }
 
 export interface OrderPlan {
@@ -135,17 +142,28 @@ export function decisionProbability(v: Pick<MarketView, 'pYes' | 'pMarket'>, cfg
  * opposite-side takes), used while a winner is being run under the confluence
  * ratchet. `opts.entries: false` evaluates exits only and leaves resting quotes
  * untouched (relaxed cadence between scheduled evaluations). */
+/** A position's whole profit after fees if sold at its side's bid now: `cost` is the side-terms cost a contract, entry fee in
+ *  (undefined: unknown), `bid`/`ask` the YES book's top (a NO position sells at 1 - ask). Undefined when flat or unknown. */
+export function positionNetAtBid(position: number, cost: number | undefined, bid: { price: number } | undefined, ask: { price: number } | undefined, fees?: FeeSchedule): number | undefined {
+  if (cost === undefined) return undefined;
+  if (position > 0 && bid) return position * (bid.price - cost) - orderFee(position, bid.price, true, fees);
+  if (position < 0 && ask) {
+    const noBid = round(1 - ask.price, 4);
+    return -position * (noBid - cost) - orderFee(-position, noBid, true, fees);
+  }
+  return undefined;
+}
+
 /** The whole position's profit after fees if sold at its side's bid now (undefined: flat, no cost basis or no bid). The quota
  *  snipe's measure (bot/risk/quotaPacer.ts), shared with the engine's group judgement. */
 export function netProfitAtBid(v: MarketView): number | undefined {
   const cost = v.entrySidePrice !== undefined ? v.entrySidePrice + (v.entryFeePerContract ?? 0) : undefined;
-  if (cost === undefined) return undefined;
-  if (v.position > 0 && v.bestBid) return v.position * (v.bestBid.price - cost) - orderFee(v.position, v.bestBid.price, true, v.fees);
-  if (v.position < 0 && v.bestAsk) {
-    const noBid = round(1 - v.bestAsk.price, 4);
-    return -v.position * (noBid - cost) - orderFee(-v.position, noBid, true, v.fees);
-  }
-  return undefined;
+  return positionNetAtBid(v.position, cost, v.bestBid, v.bestAsk, v.fees);
+}
+
+/** Steven's rule (Oct 29): inside the last share of the window a position in profit after fees rides to settlement. */
+export function ridesToSettlement(v: MarketView): boolean {
+  return v.exitWindowOpen !== false && v.settleShare === true && v.position !== 0 && (netProfitAtBid(v) ?? 0) > 1e-9;
 }
 
 export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boolean; blockReductions?: boolean; entries?: boolean; profitMandate?: number; pacerUsd?: number; pacerGroup?: { sumUsd: number; members: number } } = {}): StrategyOutput {
@@ -165,13 +183,28 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     }
     return kellySize({ q: side === 'yes' ? q : 1 - q, cost, feePerContract: fee, bankroll: v.bankroll, kellyFraction: cfg.kellyFraction, maxRiskUsd: v.maxOrderRiskUsd, maxContracts });
   };
-  // Sizing decides whether a trade is worth taking; a paper order size then decides how much (PAPER_ORDER_FRAC / PAPER_ORDER_USD).
+  // Sizing decides whether a trade is worth taking; a paper order size (PAPER_ORDER_FRAC / PAPER_ORDER_USD) or the order
+  // band (ORDER_USD_MIN / ORDER_USD_MAX: the sized stake clamped into it) then decides how much.
   const size = (side: 'yes' | 'no', cost: number, fee: number, maxContracts: number) => {
     const k = sized(side, cost, fee, maxContracts);
-    if (!(v.fixedOrderUsd! > 0) || !(k.contracts > 0)) return k;
-    const usd = Math.min(v.fixedOrderUsd!, v.maxOrderRiskUsd, v.newRiskRoomUsd ?? Infinity);
-    const contracts = floorCount(Math.min(maxContracts, usd / (cost + fee)));
-    return contracts > 0 ? { ...k, contracts, riskUsd: contracts * (cost + fee) } : k;
+    if (!(k.contracts > 0)) return k;
+    const room = Math.min(v.maxOrderRiskUsd, v.newRiskRoomUsd ?? Infinity);
+    if (v.fixedOrderUsd! > 0) {
+      const usd = Math.min(v.fixedOrderUsd!, room);
+      const contracts = floorCount(Math.min(maxContracts, usd / (cost + fee)));
+      return contracts > 0 ? { ...k, contracts, riskUsd: contracts * (cost + fee) } : k;
+    }
+    const b = v.orderBandUsd;
+    if (!b) return k;
+    const unit = cost + fee;
+    const inBand = (usd: number) => {
+      const contracts = floorCount(Math.min(maxContracts, usd / unit));
+      return contracts > 0 && contracts * unit >= b.min - 0.01 ? { ...k, contracts, riskUsd: contracts * unit } : undefined;
+    };
+    // Never below the band. When the risk room cannot fit even the minimum, the minimum still goes out, for the risk
+    // gateway to refuse with its reason (free cash on the market's shard, the window or total cap); when the contract
+    // cap cannot fit it, nothing.
+    return inBand(Math.min(Math.max(k.contracts * unit, b.min), b.max, room)) ?? inBand(b.min) ?? { ...k, contracts: 0, riskUsd: 0 };
   };
   // A maker quote sizing wants (contracts > 0) is at least minQuoteContracts, as far as the per-order caps and the risk
   // room left allow; never smaller than sizing asked for.
@@ -183,8 +216,11 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
   };
 
   // ---- Exits (risk-reducing, allowed in every style) ------------------------
-  const exitWindow = v.exitWindowOpen !== false;
-  if (!exitWindow && v.position !== 0) out.notes.push('final minute: riding to settlement');
+  // The final minute holds every position; the last share of the window (settleShare) holds one in profit after fees.
+  const riding = ridesToSettlement(v);
+  const exitWindow = v.exitWindowOpen !== false && !riding;
+  if (v.exitWindowOpen === false && v.position !== 0) out.notes.push('final minute: riding to settlement');
+  if (riding) out.notes.push('final share of the window, in profit after fees: riding to settlement');
   const exits = opts.exits !== false && exitWindow;
   const margin = cfg.exitMargin ?? cfg.takerBuffer;
   // Take-profit: what selling the held side at its touch banks a contract over its cost, net of every fee. The floor is
@@ -215,7 +251,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     return { sell, protective: lastTick && giveBack > 0, why: `take-profit${label}: +${net.toFixed(3)} a contract net of fees (best +${best.toFixed(3)}, floor +${floor.toFixed(3)})` };
   };
   // Steven's profit rules (Oct 29). The quota snipe (PACER, bot/risk/quotaPacer.ts): outside the last share of the window
-  // (exitWindowOpen) a position whose whole net profit after fees, sold at the bid, covers opts.pacerUsd (what the rest of the
+  // (settleShare) a position whose whole net profit after fees, sold at the bid, covers opts.pacerUsd (what the rest of the
   // clock hour owes, clamped) is sold at the bid whatever the exit policy, the hunt or the model says; a thin bid takes what it
   // can and the rest is judged again next tick. Inside that final share a position in profit rides to settlement. The profit
   // mandate (PROFIT_MANDATE, off by default) sells any position whose side bid net of the exit fee clears its entry cost (fee

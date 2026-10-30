@@ -13,6 +13,8 @@
 //
 // It only reads statuses the modules already keep; it never changes anything.
 
+import type { ScoreboardStatus } from './scoreboard';
+
 export type ModuleState = 'on' | 'shadow' | 'off' | 'benched';
 
 export interface ModuleScore {
@@ -47,6 +49,8 @@ export interface LedgerInput {
   taHealth?: HealthReading | null;
   /** Component trials (bot/strategy/componentTrials.ts): mlp, snn, ta, rules; applied in paper only. */
   trials?: Partial<Record<'mlp' | 'snn' | 'ta' | 'rules', TrialReading>> | null;
+  /** The scoreboard: every price against the Kalshi market on settled windows (bot/health/scoreboard.ts). */
+  scoreboard?: ScoreboardStatus | null;
   snn?: { mode: string; alpha: number | null } | null;
   taNet?: { version: string; activeHeads: number } | null;
   ruleBook?: { passed: number } | null;
@@ -60,6 +64,8 @@ export interface LedgerInput {
   sizing: {
     /** PAPER_ORDER_FRAC / PAPER_ORDER_USD in dollars an order (0 = paper sizes like live). */
     paperOrderUsd: number;
+    /** ORDER_USD_MIN / ORDER_USD_MAX, paper and live (null = off). */
+    orderBandUsd?: { min: number; max: number } | null;
     tier: string;
     /** EquityGuard's loss-aware size scale (1 = full size). */
     sizeScale: number | null;
@@ -107,7 +113,8 @@ function trialRow(module: string, area: ModuleRow['area'], t: TrialReading | und
 export function buildLedger(x: LedgerInput): ModuleRow[] {
   const rows: ModuleRow[] = [];
   const tr = x.trials ?? {};
-  const paperSized = x.mode === 'paper' && x.sizing.paperOrderUsd > 0;
+  // A paper order size or the order band sizes every order: the tier, the loss scale, optimal f and portfolio Kelly stand by.
+  const paperSized = (x.mode === 'paper' && x.sizing.paperOrderUsd > 0) || Boolean(x.sizing.orderBandUsd);
 
   // Pricing.
   const mlpValid = x.model.liveBlockers.length === 0;
@@ -116,6 +123,15 @@ export function buildLedger(x: LedgerInput): ModuleRow[] {
     const h = x.modelHealth;
     const worse = h.pWorse !== null && h.pWorse < 0.05;
     rows.push({ module: 'pricing vs market', area: 'pricing', state: 'on', validated: null, score: { label: 'log loss better than the calibrated market a window', value: r4(h.advantage), n: h.windows }, flags: [...(worse ? ['significantly worse than the market price'] : []), ...driftFlag(h)] });
+  }
+  // The scoreboard: one row per price against the market (shadow: it changes nothing; validated = better with its CI).
+  for (const r of x.scoreboard?.rows ?? []) {
+    const c = r.vsMarket;
+    const flags: string[] = [];
+    if (c.verdict === 'worse') flags.push('worse than the market (95% CI)');
+    if (c.verdict === 'undecided' && c.ci) flags.push(`undecided: 95% CI [${c.ci[0]}, ${c.ci[1]}] over ${c.days} day(s)`);
+    if (r.vsRefined && r.vsRefined.verdict !== 'too few') flags.push(`vs ${r.vsRefined.baseline.replace('_', ' ')}: ${r.vsRefined.verdict} (${r.vsRefined.saved! >= 0 ? 'saves' : 'costs'} ${Math.abs(r.vsRefined.saved!).toFixed(4)})`);
+    rows.push({ module: `scoreboard: ${r.label}`, area: 'pricing', state: c.verdict === 'too few' ? 'off' : 'shadow', validated: c.verdict === 'too few' ? null : c.verdict === 'better', score: { label: 'log loss saved a window vs the Kalshi market', value: r4(c.saved), n: c.windows }, flags });
   }
   const snnOn = x.snn && x.snn.mode !== 'off';
   rows.push(trialRow('SNN', 'pricing', tr.snn, { state: !snnOn ? 'off' : x.snn!.mode === 'blend' && (x.snn!.alpha ?? 0) > 0 ? 'on' : 'shadow', validated: null, note: snnOn ? `mode ${x.snn!.mode}, alpha ${x.snn!.alpha ?? 0}` : undefined }, x.mode));
@@ -146,7 +162,9 @@ export function buildLedger(x: LedgerInput): ModuleRow[] {
   }
 
   // Sizing.
-  const sizingFlags = paperSized ? [`bypassed in paper: every order is $${x.sizing.paperOrderUsd.toFixed(2)} (PAPER_ORDER_FRAC/USD)`] : [];
+  const band = x.sizing.orderBandUsd;
+  const sizingFlags = !paperSized ? [] : x.mode === 'paper' && x.sizing.paperOrderUsd > 0 ? [`bypassed in paper: every order is $${x.sizing.paperOrderUsd.toFixed(2)} (PAPER_ORDER_FRAC/USD)`]
+    : band ? [`bypassed: every order is $${band.min}-$${band.max} (ORDER_USD_MIN/MAX)`] : [];
   rows.push({ module: 'sizing tier', area: 'sizing', state: paperSized ? 'shadow' : 'on', validated: null, score: null, flags: [...sizingFlags], note: x.sizing.tier });
   rows.push({ module: 'loss-aware size scale', area: 'sizing', state: paperSized ? 'shadow' : 'on', validated: null, score: { label: 'size multiplier', value: r4(x.sizing.sizeScale), n: 0 }, flags: [...sizingFlags] });
   const of = x.sizing.optimalF;
