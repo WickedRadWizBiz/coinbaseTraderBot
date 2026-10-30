@@ -31,7 +31,8 @@ export type PacerMode = 'slices' | 'cumulative' | 'rolling_hour';
 export interface PacerConfig {
   /** PACER: the quota snipe is on. */
   enabled: boolean;
-  /** PACER_GROUP: positions each in profit after fees whose profits together cover the target are all sold (SnipeGroup). */
+  /** PACER_GROUP (off by default since Oct 30): positions each in profit after fees whose profits together cover the target are
+   *  all sold (SnipeGroup). */
   group: boolean;
   /** PACER_HOURLY_USD: the hourly target (4.50). */
   hourlyUsd: number;

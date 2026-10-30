@@ -871,7 +871,9 @@ function pacerConfig(env: Env): PacerConfig {
   const minTakeUsd = num(env, 'PACER_MIN_TAKE_USD', 0.75, 0, 10_000);
   return {
     enabled: bool(env, 'PACER', true),
-    group: bool(env, 'PACER_GROUP', true),
+    // Off by default since Oct 30: in the exit lab (Oct 24-28, every position) the group sold winners the pacer alone would
+    // have kept and made less on 4 of the 5 days (+$163 against +$222 without it).
+    group: bool(env, 'PACER_GROUP', false),
     hourlyUsd: num(env, 'PACER_HOURLY_USD', 4.5, 0, 10_000),
     anchorHour: Math.floor(num(env, 'PACER_ANCHOR_HOUR', 10, 0, 23)),
     anchorMinute: Math.floor(num(env, 'PACER_ANCHOR_MINUTE', 0, 0, 59)),

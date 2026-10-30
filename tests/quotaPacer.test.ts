@@ -5,6 +5,7 @@ import os from 'os';
 import path from 'path';
 import { HourlyQuotaPacer, SnipeGroup, anchorAfter, anchorBefore, wallClock, wallToUtc, type PacerConfig } from '../bot/risk/quotaPacer';
 import { PositionBook } from '../bot/oms/positions';
+import { loadConfig } from '../bot/config';
 
 const CFG: PacerConfig = { enabled: true, group: true, hourlyUsd: 4.5, anchorHour: 10, anchorMinute: 0, tz: 'America/New_York', mode: 'cumulative', minTakeUsd: 0.75, maxTargetUsd: 6.5 };
 const T = (iso: string) => Date.parse(iso);
@@ -181,4 +182,10 @@ test('slices (Steven, Oct 30): never more than the hourly target, a deficit caug
   s = new HourlyQuotaPacer(S, t12 + 45 * 60_000, file).status(t12 + 45 * 60_000);
   assert.deepEqual([s.hourIndex, s.realized24hUsd, s.sliceRealizedUsd, s.neededUsd], [13, 3, 0, 4.5]);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('defaults: the pacer is on in slices mode; the group rule is off (Oct 30: it made less on 4 of 5 lab days); PACER_GROUP=true turns it on', () => {
+  const p = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).strategy.pacer;
+  assert.deepEqual([p.enabled, p.mode, p.group], [true, 'slices', false]);
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PACER_GROUP: 'true' }).strategy.pacer.group, true);
 });
