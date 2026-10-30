@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Area, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { api, pct, px } from '../api';
+import { api, pct, px, usd } from '../api';
 import { everyAligned } from './usePoll';
 
 interface MarketRow {
@@ -17,8 +17,8 @@ interface MarketRow {
   exitMode?: 'fair_value' | 'hunt';
   huntTarget?: number;
   huntStop?: number;
-  /** Exit-in-profit curve of the held position (bot/strategy/sinuousExit.ts). */
-  curve?: { signal: boolean; reason: string; curve?: number; projected?: number; z?: number; netProfit?: number };
+  /** The quota snipe on the held position: the hour's target and the position's profit after fees at the bid now (bot/engine.ts). */
+  snipe?: { atUsd?: number; nowUsd?: number; rides: boolean; closed: boolean };
   /** The held position's reading of its coin's live line (bot/strategy/liveLine.ts). */
   line?: { price: number; projected?: number; band?: { lower: number; upper: number; k: number; sec: number }; underSd?: number; slope: number; breakSec: number; broke: boolean; peak?: { top: number } };
 }
@@ -187,13 +187,7 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
                       HUNTING · TARGET {px(tab.huntTarget)} · STOP {tab.huntStop !== undefined ? px(tab.huntStop) : 'FORMING'}
                     </span>
                   )}
-                  {tab.curve && tab.position !== 0 && (
-                    <span className={`px-2 py-0.5 crt-border font-bold text-[11px] ${tab.curve.signal ? 'bg-crypto-success/20 text-crypto-success' : 'bg-black/40 text-crypto-primary'}`}
-                      title="Exit-in-profit curve: a profit-taking exit goes out only on a spike above the curve or a roll-over below its projection">
-                      CURVE {tab.curve.signal ? `${tab.curve.reason.replace(/_/g, ' ')} · EXIT OK` : tab.curve.reason.replace(/_/g, ' ')}
-                      {tab.curve.curve !== undefined && ` · ${px(tab.curve.curve)}`}{tab.curve.projected !== undefined && ` → ${px(tab.curve.projected)}`}{tab.curve.z !== undefined && ` · z ${tab.curve.z.toFixed(1)}`}
-                    </span>
-                  )}
+                  {tab.snipe && tab.position !== 0 && <SnipeBadge snipe={tab.snipe} />}
                   {tab.line && tab.position !== 0 && (
                     <span className={`px-2 py-0.5 crt-border font-bold text-[11px] ${tab.line.broke ? 'bg-crypto-danger/20 text-crypto-danger' : tab.line.peak ? 'bg-crypto-primary/20 text-crypto-primary' : 'bg-black/40 text-crypto-text'}`}
                       title={`Live line: the coin's settlement index as a curve, with a band from its own wiggles around the curve since the contract opened (mean ± ${tab.line.band?.k ?? 2} sd, like Bollinger bands${tab.line.band ? `; now ${tab.line.band.lower}-${tab.line.band.upper} over ${tab.line.band.sec} s` : '; it needs a minute of wiggles'}). A break (the line outside the band against the side for two seconds) is the cross's sell signal; a fading move shows where its momentum tops out`}>
@@ -276,5 +270,19 @@ export function OrderBookMonitor({ markets, orders = [] }: { markets: MarketRow[
         )}
       </div>
     </div>
+  );
+}
+
+/** How far the held position is from the quota snipe: it sells at the bid once its whole profit after fees covers what the
+ *  clock hour needs (bot/risk/quotaPacer.ts); in the last share of the window a position in profit rides to settlement. */
+function SnipeBadge({ snipe: s }: { snipe: NonNullable<MarketRow['snipe']> }) {
+  const net = (x?: number) => (x !== undefined && x > 0 ? `+${usd(x)}` : usd(x));
+  const hit = !s.rides && !s.closed && s.atUsd !== undefined && s.nowUsd !== undefined && s.nowUsd >= s.atUsd - 1e-9;
+  const label = s.closed ? 'FINAL MINUTE · TO SETTLEMENT' : s.rides ? 'RIDING TO SETTLEMENT' : s.atUsd === undefined ? 'PACER OFF' : `SNIPE AT ${net(s.atUsd)}`;
+  return (
+    <span className={`px-2 py-0.5 crt-border font-bold text-[11px] ${hit ? 'bg-crypto-success/20 text-crypto-success' : (s.nowUsd ?? 0) > 0 ? 'bg-[#f59e0b15] text-[#f59e0b]' : 'bg-black/40 text-crypto-primary'}`}
+      title="Quota snipe: the position is sold at the bid once its whole profit after fees (entry and exit fees in) covers what the clock hour still needs (the pacer's $0.75 to $4.50). In the last 10% of the window a position in profit rides to settlement instead.">
+      {label} · NOW {net(s.nowUsd)}
+    </span>
   );
 }
