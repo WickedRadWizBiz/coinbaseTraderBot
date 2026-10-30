@@ -627,7 +627,8 @@ export interface SnnConfig {
   targetScaling: boolean;
   deferred: { wilsonCowan: boolean; gapJunctions: boolean; izhikevichCH: boolean; dcaap: boolean };
   /** SNN_ANCHOR_MID: the contract readouts start from the market's mid and learn the correction (bot/snn/network.ts
-   *  anchorLogit); a new version hash, so the networks start fresh when it flips. */
+   *  anchorLogit). Default on (Steven, Oct 30); crypto network only (params.ts anchorFor). A new version hash, so the
+   *  crypto network starts fresh when it flips. */
   anchorMid: boolean;
   /** Tennis: run three networks live and keep the fittest (population-based training). */
   tennisPopulation: boolean;
@@ -1496,7 +1497,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
         };
       })(),
       crossFeed: bool(env, 'SNN_CROSS_FEED', false),
-      anchorMid: bool(env, 'SNN_ANCHOR_MID', false),
+      anchorMid: bool(env, 'SNN_ANCHOR_MID', true),
       deferred: {
         wilsonCowan: bool(env, 'SNN_WILSON_COWAN', false),
         gapJunctions: bool(env, 'SNN_GAP_JUNCTIONS', false),

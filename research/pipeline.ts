@@ -84,7 +84,7 @@ import { loadConfig, paperEnv, type Config } from '../bot/config';
 import { GO_LIVE_GATES, MetaModel } from '../bot/model/metaModel';
 import { PerpModel } from '../bot/perps/perpSignal';
 import type { SnnCheckpoint } from '../bot/snn/network';
-import { DEFAULT_SNN, domainParams, STAGES, stageFlags, type SnnDomain, type Stage } from '../bot/snn/params';
+import { anchorFor, DEFAULT_SNN, domainParams, STAGES, stageFlags, type SnnDomain, type Stage } from '../bot/snn/params';
 import { FillModel } from '../bot/tca/fillModel';
 import { trainFillMain } from './trainFillModel';
 import { trainVolModelMain, VOL_MODEL_MIN_DAYS } from './trainVolModel';
@@ -881,7 +881,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     const pbt = await run('snn-tennis-pbt', async () => {
       let r;
       try {
-        r = await runSnnPbt({ recordings: replayDir, domain: 'tennis', stage, days: tennisDays.slice(-A.snnPbtDays), initDays: A.snnPbtInitDays, evalDays: 1, anchorMid: cfg.snn.anchorMid, stateDir: path.join(work, 'snnpbt', 'tennis'), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), genetic, tennis: cfg.tennis, log, stop: sessionTimeUp });
+        r = await runSnnPbt({ recordings: replayDir, domain: 'tennis', stage, days: tennisDays.slice(-A.snnPbtDays), initDays: A.snnPbtInitDays, evalDays: 1, anchorMid: anchorFor(cfg.snn.anchorMid, 'tennis'), stateDir: path.join(work, 'snnpbt', 'tennis'), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), genetic, tennis: cfg.tennis, log, stop: sessionTimeUp });
       } catch (e) {
         if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
         throw e;
@@ -898,7 +898,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
     const trainNeeded = Boolean(pbt?.complete) || !fs.existsSync(file) || ds.stage !== stage;
     await run('snn-tennis-train', async () => {
       const span = tennisDays.slice(-A.snnTrainDays);
-      const params = withSnnHyper(domainParams('tennis', { ...DEFAULT_SNN, flags: { ...stageFlags(stage), ...cfg.snn.deferred }, ...(cfg.snn.anchorMid ? { anchorMid: true } : {}), seed: cfg.snn.seed, maxColumns: cfg.snn.maxColumns, readoutEta: cfg.snn.readoutEta }), hyper);
+      const params = withSnnHyper(domainParams('tennis', { ...DEFAULT_SNN, flags: { ...stageFlags(stage), ...cfg.snn.deferred }, ...(anchorFor(cfg.snn.anchorMid, 'tennis') ? { anchorMid: true } : {}), seed: cfg.snn.seed, maxColumns: cfg.snn.maxColumns, readoutEta: cfg.snn.readoutEta }), hyper);
       const r = await replaySnn(replayDir, { params, domain: 'tennis', tennis: cfg.tennis, skipModel: true, from: dayMs(span[0]), to: dayMs(nextDay(span[span.length - 1])), fromDay: span[0], toDay: span[span.length - 1] });
       const matches = r.net.tennisTemplate?.n ?? 0;
       if (!matches) throw new SkipStep('no tennis match settled in the replayed days');
@@ -981,7 +981,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
         let r;
         try {
           const transitions = pbtDays.length ? regimeTransitions(T.historyDir, SNN_COINS.filter((a) => storedAssets(T.historyDir).includes(a)), Date.parse(`${pbtDays[0]}T00:00:00Z`), Date.parse(`${pbtDays[pbtDays.length - 1]}T00:00:00Z`) + 86_400_000, log) : [];
-          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, allDays: srcDays, layout, generation: gen?.id, transitions, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, anchorMid: cfg.snn.anchorMid, stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), genetic, log, stop: sessionTimeUp });
+          r = await runSnnPbt({ recordings: src, domain, stage, days: pbtDays, allDays: srcDays, layout, generation: gen?.id, transitions, initDays: A.snnPbtInitDays, evalDays: 1, model: domain === 'crypto' && mlpPath() ? MetaModel.load(mlpPath()!) : undefined, modelPath: domain === 'crypto' ? mlpPath() : undefined, anchorMid: anchorFor(cfg.snn.anchorMid, domain), stateDir: path.join(work, 'snnpbt', domain), maxRounds: A.snnPbtMaxRounds || undefined, restartEvery: A.snnPbtRestartEvery, fresh: ds.pbtStage !== undefined && ds.pbtStage !== stage, population: A.snnPbtPopulation, workers: workerCount(), genetic, log, stop: sessionTimeUp });
           ds.turnAt = Date.now();
         } catch (e) {
           if (/need at least/.test((e as Error).message)) throw new SkipStep((e as Error).message);
@@ -1016,7 +1016,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
           recordings: src, stage, domain, out: cand, model: domain === 'crypto' ? mlpPath() : undefined, hyper: fromWalk ? JSON.stringify(fromWalk.hyper) : hyper ? JSON.stringify(hyper) : undefined, 'skip-model': src === rec ? undefined : 'true',
           from: trainSpan[0], to: evalSpan[0] ?? undefined,
           'eval-from': evalSpan[0], 'eval-to': evalSpan.length ? nextDay(evalSpan[evalSpan.length - 1]) : undefined,
-          init: fromWalk ? eliteFile : undefined, incumbent: fromWalk && src === rec ? file : undefined, anchor: cfg.snn.anchorMid ? 'true' : undefined,
+          init: fromWalk ? eliteFile : undefined, incumbent: fromWalk && src === rec ? file : undefined, anchor: anchorFor(cfg.snn.anchorMid, domain) ? 'true' : undefined,
         });
         if (walkElite) ds.walkThrough = walkElite.through;
         ds.walkFellShort = undefined;
@@ -1054,7 +1054,7 @@ export async function runPipeline(o: PipelineOpts = {}): Promise<{ steps: StepRe
       // Prequential backfill, day by day from the last backfilled day (a fresh online network of the
       // promoted stage: it was never fitted offline on these days, so no output saw its own label).
       await run(`snn-${domain}-backfill`, async () => {
-        const params = withSnnHyper(domainParams(domain, { ...DEFAULT_SNN, flags: { ...stageFlags(stage), ...cfg.snn.deferred }, ...(cfg.snn.anchorMid ? { anchorMid: true } : {}), seed: cfg.snn.seed, maxColumns: cfg.snn.maxColumns, readoutEta: cfg.snn.readoutEta }), hyper);
+        const params = withSnnHyper(domainParams(domain, { ...DEFAULT_SNN, flags: { ...stageFlags(stage), ...cfg.snn.deferred }, ...(anchorFor(cfg.snn.anchorMid, domain) ? { anchorMid: true } : {}), seed: cfg.snn.seed, maxColumns: cfg.snn.maxColumns, readoutEta: cfg.snn.readoutEta }), hyper);
         const pv = versionHash(params);
         if (ds.backfillStage !== stage || (ds.backfillVersion && ds.backfillVersion !== pv)) { for (const f of fs.readdirSync(fill)) fs.rmSync(path.join(fill, f), { force: true }); ds.backfillThrough = undefined; ds.backfillStage = stage; }
         ds.backfillVersion = pv;

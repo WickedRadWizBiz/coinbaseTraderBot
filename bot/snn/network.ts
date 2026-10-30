@@ -166,7 +166,9 @@ export class SnnNetwork {
     this.p = p;
     this.version = versionHash(p);
     this.whitelist = opts.whitelist?.length ? opts.whitelist : undefined;
-    this.preset = opts.model;
+    // Contract readout weights mean something else with and without the mid anchor (a correction to the market vs
+    // the whole logit), so a model of the other kind lends its columns but not its contract readouts.
+    this.preset = opts.model && !!opts.model.params?.anchorMid !== !!p.anchorMid ? { ...opts.model, readouts: undefined } : opts.model;
     this.health = new SnnHealth(opts.health ?? DEFAULT_HEALTH);
     if (opts.model?.healthRef) this.health.ref = opts.model.healthRef;
     if (opts.model?.tennisTemplate) this.tennisTemplate = this.decodeTemplate(opts.model.tennisTemplate);
@@ -541,6 +543,7 @@ export class SnnNetwork {
     return {
       version: this.version, lastTs: this.lastTs, steps: this.steps, salience: this.salience, top: this.top ?? null,
       wc: [...this.wc], corr: [...this.corr], health: this.health.state(), lastTag: [...this.lastTag], nanRestores: this.nanRestores, tennisTemplate: this.encodeTemplate(),
+      ...(this.p.anchorMid ? { anchorMid: true as const } : {}),
       columns: this.sortedColumns().map((c) => ({
         key: c.key, asset: c.asset,
         arrays: Object.fromEntries(Object.entries(c.arrays()).map(([k, a]) => [k, encodeArr(a)])),
@@ -579,10 +582,16 @@ export class SnnNetwork {
       if (col.inputs) this.inputs.set(c.key, col.inputs);
       const r = new Readout(c.nFeat, { eta: this.p.readoutEta, cap: this.p.readoutCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: this.p.tagsPerContract, maxTagged: this.p.maxTaggedContracts, traceTauSec: this.p.traceTauSec, useTags: this.p.flags.tags });
       const ro = col.readout;
+      // A checkpoint of the other readout kind (allowParamChange): its columns, but contract readouts start over as a
+      // fresh network's would (zero correction when anchored, the crude prior when not).
+      if (!!cp.anchorMid !== !!this.p.anchorMid) {
+        if (!this.p.anchorMid) { const pw = priorWeights(c.nFeat, this.p.priorSlope); r.wf.set(pw); r.ws.set(pw); }
+      } else {
       copyInto(r.wf, decodeArr(ro.wf, r.wf)); copyInto(r.ws, decodeArr(ro.ws, r.ws)); copyInto(r.trace, decodeArr(ro.trace, r.trace));
       r.traceTs = ro.traceTs; r.brierFast = ro.brierFast ?? NaN; r.brierSlow = ro.brierSlow ?? NaN; r.updates = ro.updates;
       r.history.splice(0, r.history.length, ...ro.history);
       for (const [t, e] of ro.tags) r.tags.set(t, { kind: e.kind, tags: e.tags.map((g) => ({ phi: decodeArr(g.phi, new Float32Array(c.nFeat)) as Float32Array, p: g.p, ts: g.ts, role: g.role })) });
+      }
       this.readouts.set(c.key, r);
       const dr = new Readout(c.nFeat, { eta: this.p.dirEta, cap: this.p.dirCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: 1, maxTagged: 1, traceTauSec: this.p.traceTauSec, useTags: true });
       if (col.dir) {
@@ -654,6 +663,8 @@ export interface SnnCheckpoint {
   version: string; lastTs: number; steps: number; salience: Record<string, number>; top: string | null;
   wc: [string, { E: number; I: number }][]; corr?: [string, { ab: number; aa: number; bb: number }][]; health: ReturnType<SnnHealth['state']>; lastTag: [string, number][]; nanRestores?: number;
   tennisTemplate?: TennisTemplateFile;
+  /** Written by a mid-anchored network; absent = the readouts price the whole logit. */
+  anchorMid?: true;
   columns: {
     key: string; asset: string; arrays: Record<string, string>; scalars: Record<string, number | boolean>; inputs: ColumnInput | null;
     dir?: { wf: string; ws: string; brierFast: number | null; brierSlow: number | null; updates: number; history: { p: number; y: number; ts: number }[]; tags: { ts: number; phi: string; p: number; price0: number }[]; stats: { absMove: number; n: number } | null };

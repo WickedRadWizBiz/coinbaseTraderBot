@@ -152,6 +152,11 @@ export const SNN_DOMAINS: SnnDomain[] = ['crypto', 'perps', 'tennis'];
 
 /** Time constants matched to each domain's horizons. Crypto (15m / 1h contracts) keeps the PDF's
  *  values; perps (1h / 4h) run ~3-5x slower; tennis (point by point, 5-minute calls) faster. */
+/** SNN_ANCHOR_MID reaches the crypto contract network only: it was measured there (Oct 30 ablation: better than
+ *  the plain readout, level with the market). Perps make direction calls with no contract mid and tennis was never
+ *  measured, so their networks and version hashes stay as they are. */
+export function anchorFor(on: boolean, domain: SnnDomain | undefined): boolean { return on && domain === 'crypto'; }
+
 export function domainParams(domain: SnnDomain, base: SnnParams = DEFAULT_SNN): SnnParams {
   if (domain === 'perps') {
     return {
