@@ -169,7 +169,7 @@ Every placement and re-price is an order. The risk gateway allows `RISK_MAX_ORDE
   | $100+ | normal | 2% | 3% | 1/4 | 15% |
 
   - The tier comes from the **high-water mark** of tradable bankroll, not the current balance. Once the account has grown into a tier it stays there, and losses never re-escalate risk. Withdrawals from trading cash lower the mark.
-  - The **hard floor is $10** (`MIN_TRADABLE_BANKROLL_USD`): a $20 account keeps trading after a $2 loss and stops only below $10. `PAPER_BANKROLL_USD` defaults to $200 (since Oct 30; it was $100). Raising it later tops the paper account up to the new pool once: at startup the paper exchange adds the difference, then the training supervisor adds whatever drawdown is left and starts a new epoch at full size (`pool_raised` in the audit log; not a training failure, nothing in `epochs.jsonl`).
+  - The **hard floor is $10** (`MIN_TRADABLE_BANKROLL_USD`): a $20 account keeps trading after a $2 loss and stops only below $10. `PAPER_BANKROLL_USD` defaults to $200 (since Oct 30; it was $100). Raising it later tops the paper account up to the new pool once: at startup the paper exchange adds the difference, then the training supervisor brings the tradable bankroll (vaulted and pocketed profit is not the pool's) up to the pool and starts a new epoch at full size (`pool_raised` in the audit log; not a training failure, nothing in `epochs.jsonl`).
   - The paper pool exists only in paper mode. In live mode the bot shows and trades only the Kalshi cash pool:
     - its orders, positions, vault, break-even, balance history, perps trades and Kalshi check live in `DATA_DIR/live`, apart from the paper books;
     - a perps setting of `paper` is off in live.
