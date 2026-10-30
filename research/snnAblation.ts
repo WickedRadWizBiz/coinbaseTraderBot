@@ -186,6 +186,30 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
     return cache.get(k)!;
   };
   const verdicts: Verdict[] = [];
+  const out = argOf('out', 'research/out/snn_ablation.json');
+  // Split mode, for runs too long for one job: --side baseline|candidate replays one side of the first mechanism
+  // matching --only and saves it (--save); --judge base.json,cand.json judges two saved sides. Same verdict.
+  const side = argOf('side', ''), judgeFiles = argOf('judge', '');
+  if (side || judgeFiles) {
+    const m = MECHANISMS.find((x) => !only || x.name.startsWith(only));
+    if (!m) throw new Error(`no mechanism starts with "${only}"`);
+    if (side) {
+      if (side !== 'baseline' && side !== 'candidate') throw new Error('--side is baseline or candidate');
+      const spec = side === 'baseline' ? m.baseline : m.candidate;
+      const r = await run(side === 'baseline' ? `${m.name} [baseline]` : m.name, spec.stage, spec.flags, { ...(spec.params ?? {}) });
+      const save = argOf('save', `research/out/snn_ablation_${side}.json`);
+      fs.mkdirSync(path.dirname(save), { recursive: true });
+      fs.writeFileSync(save, JSON.stringify(savedSide(m.name, side, r.res, r.sum)));
+      console.log(`saved ${side} of ${m.name}: ${r.sum.events} windows, ${r.sum.rows} rows -> ${save}`);
+      return [];
+    }
+    const [bf, cf] = judgeFiles.split(',');
+    const b = loadSide(bf, m.name, 'baseline'), c = loadSide(cf, m.name, 'candidate');
+    const v = judge(m, c.res, b.res, c.sum, b.sum, [c.sum]);
+    printVerdict(v);
+    writeVerdicts(out, { domain, recordings: dir, from: from ?? null, to: to ?? null }, [v]);
+    return [v];
+  }
   for (const m of MECHANISMS) {
     if (only && !m.name.startsWith(only)) continue;
     const configs = grid[m.name] ?? [{}];
@@ -196,17 +220,35 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
     const best = tried.sort((a, b) => a.sum.brier - b.sum.brier)[0];
     const v = judge(m, best.res, base.res, best.sum, base.sum, tried.map((t) => t.sum));
     verdicts.push(v);
-    console.log(`${v.accepted ? 'ACCEPT' : 'reject'}  ${m.name}: dBrier ${v.delta.mean.toFixed(5)} [${v.delta.lo.toFixed(5)}, ${v.delta.hi.toFixed(5)}] over ${v.delta.events} events / ${v.delta.days} days; slope ${v.candidate.calSlope.toFixed(2)}; corr ${v.candidate.corrModel.toFixed(2)}; blend a=${v.blend.alpha} [${v.blend.lo.toFixed(5)}, ${v.blend.hi.toFixed(5)}]; p99 ${v.candidate.p99Ms.toFixed(1)} ms; ${JSON.stringify(v.criteria)}`);
-    const vm = (x: Verdict['vsMarket']['candidate']) => `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]${x.hi < 0 ? ' BEATS the market' : x.lo > 0 ? ' worse than the market' : ' undecided'}`;
-    console.log(`        vs market (Brier SNN - mid, per window): candidate ${vm(v.vsMarket.candidate)}; baseline ${vm(v.vsMarket.baseline)}`);
+    printVerdict(v);
   }
-  const out = argOf('out', 'research/out/snn_ablation.json');
-  fs.mkdirSync(path.dirname(out), { recursive: true });
-  fs.writeFileSync(out, JSON.stringify({ generatedAt: new Date().toISOString(), domain, recordings: dir, from: from ?? null, to: to ?? null, verdicts }, null, 1));
+  writeVerdicts(out, { domain, recordings: dir, from: from ?? null, to: to ?? null }, verdicts);
   console.log(`wrote ${out} (${verdicts.filter((v) => v.accepted).length}/${verdicts.length} accepted; expect most to fail - that is the system working)`);
   return verdicts;
 }
 
 if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void snnAblationMain();
+
+function printVerdict(v: Verdict) {
+  console.log(`${v.accepted ? 'ACCEPT' : 'reject'}  ${v.mechanism}: dBrier ${v.delta.mean.toFixed(5)} [${v.delta.lo.toFixed(5)}, ${v.delta.hi.toFixed(5)}] over ${v.delta.events} events / ${v.delta.days} days; slope ${v.candidate.calSlope.toFixed(2)}; corr ${v.candidate.corrModel.toFixed(2)}; blend a=${v.blend.alpha} [${v.blend.lo.toFixed(5)}, ${v.blend.hi.toFixed(5)}]; p99 ${v.candidate.p99Ms.toFixed(1)} ms; ${JSON.stringify(v.criteria)}`);
+  const vm = (x: Verdict['vsMarket']['candidate']) => `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]${x.hi < 0 ? ' BEATS the market' : x.lo > 0 ? ' worse than the market' : ' undecided'}`;
+  console.log(`        vs market (Brier SNN - mid, per window): candidate ${vm(v.vsMarket.candidate)}; baseline ${vm(v.vsMarket.baseline)}`);
+}
+
+function writeVerdicts(out: string, meta: Record<string, unknown>, verdicts: Verdict[]) {
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, JSON.stringify({ generatedAt: new Date().toISOString(), ...meta, verdicts }, null, 1));
+}
+
+/** One replayed side as the judge needs it: its rows, the S5 column rankings and its summary. */
+export function savedSide(mechanism: string, side: string, res: SnnReplayResult, sum: RunSummary) {
+  return { mechanism, side, sum, rows: res.rows, ranking: res.ranking };
+}
+
+export function loadSide(file: string, mechanism: string, side: string): { res: SnnReplayResult; sum: RunSummary } {
+  const j = JSON.parse(fs.readFileSync(file, 'utf8')) as ReturnType<typeof savedSide>;
+  if (j.mechanism !== mechanism || j.side !== side) throw new Error(`${file} holds the ${j.side} of "${j.mechanism}", not the ${side} of "${mechanism}"`);
+  return { res: { rows: j.rows, ranking: j.ranking } as unknown as SnnReplayResult, sum: j.sum };
+}
 
 function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; }

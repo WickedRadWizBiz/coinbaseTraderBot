@@ -36,7 +36,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Every mechanism in one job (a dispatch with an empty "only"; hours).
   ablate:
+    if: github.event_name != 'push' && inputs.only == ''
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 345
@@ -95,6 +97,118 @@ jobs:
           MODEL=""; [ "$DOMAIN" = crypto ] && [ -f "$DATA/models/model.json" ] && MODEL="--model $DATA/models/model.json"
           # The verdict lines (ACCEPT / reject, dBrier with its CI, slope, correlation, blend, latency) and the file.
           npm run --silent research:snn-ablation -- --recordings "$DATA/recordings" --domain "$DOMAIN" --from "${FROM}T00:00:00Z" --only "$ONLY" --out research/out/snn_ablation.json $MODEL
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snn-ablation-${{ inputs.domain || 'crypto' }}
+          path: research/out/snn_ablation.json
+          if-no-files-found: ignore
+
+  # One mechanism: its baseline and candidate replay on two runners at once (each ~2-3 h), then one judge.
+  side:
+    if: github.event_name == 'push' || inputs.only != ''
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [baseline, candidate]
+    env:
+      # A push run has no inputs: it judges the mid-anchored readout only (every mechanism takes ~1.7 h each).
+      ONLY: ${{ github.event_name == 'push' && 'mid-anchored' || inputs.only }}
+      DOMAIN: ${{ inputs.domain || 'crypto' }}
+      DAYS: ${{ inputs.days || '8' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Copy the recordings and the meta-model (read-only)
+        run: |
+          set -euo pipefail
+          [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days must be a number"; exit 1; }
+          [[ "$DOMAIN" =~ ^(crypto|perps)$ ]] || { echo "domain must be crypto or perps"; exit 1; }
+          DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/models"
+          vanished_ok() { local c=$?; [ $c -eq 24 ] && return 0; return $c; }
+          ssh bot "cd ~/bot/data/recordings && find . -type f \( ! -name 'md-*' -o -mtime -$DAYS \) -printf '%P\n'" > "$RUNNER_TEMP/recordings.txt"
+          rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/" || vanished_ok
+          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/models/model.json "$DATA/models/" 2>/dev/null || echo "no promoted meta-model on the server: the shipped params/model.json prices"
+          echo "copied $(wc -l < "$RUNNER_TEMP/recordings.txt") recording file(s); data $(du -sh "$DATA" | cut -f1)"
+          # The oldest complete recorded day copied: the replay starts there.
+          FROM=$(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | sed 's/^md-//' | head -1)
+          [ -n "$FROM" ] || { echo "no recordings copied"; exit 1; }
+          echo "FROM=$FROM" >> "$GITHUB_ENV"
+          echo "replay from $FROM ($(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | wc -l) day(s))"
+      - name: Replay one side
+        run: |
+          set -euo pipefail
+          DATA="$GITHUB_WORKSPACE/data"; mkdir -p research/out
+          MODEL=""; [ "$DOMAIN" = crypto ] && [ -f "$DATA/models/model.json" ] && MODEL="--model $DATA/models/model.json"
+          npm run --silent research:snn-ablation -- --recordings "$DATA/recordings" --domain "$DOMAIN" --from "${FROM}T00:00:00Z" --only "$ONLY" --side ${{ matrix.side }} --save research/out/side-${{ matrix.side }}.json $MODEL
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snn-ablation-side-${{ matrix.side }}
+          path: research/out/side-${{ matrix.side }}.json
+          retention-days: 7
+
+  judge:
+    needs: side
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # A push run has no inputs: it judges the mid-anchored readout only (every mechanism takes ~1.7 h each).
+      ONLY: ${{ github.event_name == 'push' && 'mid-anchored' || inputs.only }}
+      DOMAIN: ${{ inputs.domain || 'crypto' }}
+      DAYS: ${{ inputs.days || '8' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: snn-ablation-side-*
+          path: research/out
+          merge-multiple: true
+      - name: Judge
+        run: |
+          set -euo pipefail
+          # The verdict line and the "vs market" line (the SNN plan's phase 1 go/no-go).
+          npm run --silent research:snn-ablation -- --domain "$DOMAIN" --only "$ONLY" --judge research/out/side-baseline.json,research/out/side-candidate.json --out research/out/snn_ablation.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

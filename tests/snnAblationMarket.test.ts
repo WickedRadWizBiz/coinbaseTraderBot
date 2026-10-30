@@ -1,7 +1,11 @@
 // The ablation's "vs market" line: the SNN alone against the contract's mid, per settlement window, day-block CI.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { vsMarket } from '../research/snnAblation';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { judge, loadSide, MECHANISMS, savedSide, summarize, vsMarket } from '../research/snnAblation';
+import type { SnnReplayResult } from '../research/snnReplay';
 import type { SnnRow } from '../research/snnReplay';
 import { Xoshiro128 } from '../bot/snn/rng';
 
@@ -26,4 +30,17 @@ test('vs market: an SNN that knows the truth beats a noisy mid; one that copies 
   assert.ok(worse.lo > 0, `worse: ${JSON.stringify(worse)}`);
   assert.equal(better.events, 1200, 'two snapshots of one contract are one window');
   assert.equal(better.days, 6);
+});
+
+test('split mode: a side saved by one job and judged by another gives the same verdict as one run', () => {
+  const m = MECHANISMS.find((x) => x.name.startsWith('mid-anchored'))!;
+  const fake = (rs: SnnRow[]) => ({ rows: rs, ranking: [{ ts: 1, bySalience: 0.01, byEdge: 0 }], stepMs: [0.2, 0.3], steps: 2, frozenSteps: 0, net: { nanRestores: 0 } }) as unknown as SnnReplayResult;
+  const cand = fake(rows(300, (t) => t)), base = fake(rows(300, (_t, m2) => m2));
+  const cs = summarize(m.name, {}, cand), bs = summarize(`${m.name} [baseline]`, {}, base);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'abl-'));
+  fs.writeFileSync(path.join(dir, 'b.json'), JSON.stringify(savedSide(m.name, 'baseline', base, bs)));
+  fs.writeFileSync(path.join(dir, 'c.json'), JSON.stringify(savedSide(m.name, 'candidate', cand, cs)));
+  const b = loadSide(path.join(dir, 'b.json'), m.name, 'baseline'), c = loadSide(path.join(dir, 'c.json'), m.name, 'candidate');
+  assert.deepEqual(judge(m, c.res, b.res, c.sum, b.sum, [c.sum]), judge(m, cand, base, cs, bs, [cs]));
+  assert.throws(() => loadSide(path.join(dir, 'b.json'), m.name, 'candidate'), /holds the baseline/);
 });
