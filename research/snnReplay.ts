@@ -47,7 +47,8 @@ export interface SnnReplayResult {
   steps: number;
   /** Per scoring time: column ranked top by salience vs by readout edge, and the realised captured mispricing of each. */
   ranking: { ts: number; bySalience: number; byEdge: number }[];
-  collected: { column: string; phi: Float64Array; y: 0 | 1 }[];
+  /** Readout snapshots for the offline fit: features, label and the logit the readout starts from (anchorMid; else 0). */
+  collected: { column: string; phi: Float64Array; y: 0 | 1; offset: number }[];
 }
 
 export interface SnnReplayOpts {
@@ -153,7 +154,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     else { const j = Math.floor(pick() * r.seen); if (j < max) r.kept[j] = c; }
   };
   const eprop = new Map<string, { column: string; elig: Float32Array; p: number; kind: string }>();
-  const pendingPhi = new Map<string, { column: string; phi: Float64Array; kind: string; role: 'strike' | 'cap' }[]>();
+  const pendingPhi = new Map<string, { column: string; phi: Float64Array; kind: string; role: 'strike' | 'cap'; offset: number }[]>();
   let nextSec = 0, frozenSteps = 0, steps = 0;
   const volRef = new Map<string, number>();
 
@@ -202,7 +203,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
       }
     }
     eprop.delete(m.ticker);
-    for (const t of pendingPhi.get(m.ticker) ?? []) { const y = exceedLabel(t.kind, t.role, result); if (y !== undefined) collect({ column: t.column, phi: t.phi, y }); }
+    for (const t of pendingPhi.get(m.ticker) ?? []) { const y = exceedLabel(t.kind, t.role, result); if (y !== undefined) collect({ column: t.column, phi: t.phi, y, offset: t.offset }); }
     pendingPhi.delete(m.ticker);
     net.settle(m.ticker, result, st.now);
     for (const v of rankRefs.get(m.ticker) ?? []) v.y = out.label;
@@ -258,7 +259,7 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
     for (const m of contracts ? active : []) {
       const x = priced.get(m.ticker);
       if (!x) continue;
-      queries.push({ ticker: m.ticker, column: columnOf(m), kind: x.terms.kind, strike: x.terms.strike, cap: x.terms.cap, spot: x.spot.value, sigma: x.vol.sigmaPerSqrtSec, tauSec: x.tauSec, lifeSec: (m.closeTime - m.openTime) / 1000, eventKey: `${m.asset}:${m.closeTime}`, tag: m.closeTime - st.now > noEntry });
+      queries.push({ ticker: m.ticker, column: columnOf(m), kind: x.terms.kind, strike: x.terms.strike, cap: x.terms.cap, mid: x.mid, spot: x.spot.value, sigma: x.vol.sigmaPerSqrtSec, tauSec: x.tauSec, lifeSec: (m.closeTime - m.openTime) / 1000, eventKey: `${m.asset}:${m.closeTime}`, tag: m.closeTime - st.now > noEntry });
       ctx.push({ pYes: x.fv.pYes, mid: x.mid, asset: m.asset });
     }
     return { queries, ctx };
@@ -367,12 +368,12 @@ export async function replaySnn(dir: string, o: SnnReplayOpts): Promise<SnnRepla
         const roles: ['strike' | 'cap', number | undefined][] = q.kind === 'less' ? [['cap', q.cap]] : q.kind === 'between' ? [['strike', q.strike], ['cap', q.cap]] : [['strike', q.strike]];
         for (const [role, K] of roles) if (K) {
           const d = Math.log(q.spot / K) / (q.sigma * Math.sqrt(q.tauSec));
-          pendingPhi.set(s.ticker, [...(pendingPhi.get(s.ticker) ?? []), { column: s.column, phi: c.features(d, Math.min(1, q.tauSec / q.lifeSec), net.extras(c)), kind: q.kind, role }]);
+          pendingPhi.set(s.ticker, [...(pendingPhi.get(s.ticker) ?? []), { column: s.column, phi: c.features(d, Math.min(1, q.tauSec / q.lifeSec), net.extras(c)), kind: q.kind, role, offset: net.anchorLogit(q, role, d) }]);
         }
       }
       if (o.training?.eprop && c.elig && (q.kind === 'updown' || q.kind === 'greater')) {
         const d = Math.log(q.spot / q.strike!) / (q.sigma * Math.sqrt(q.tauSec));
-        const pRaw = sigmoid(net.readoutLogit(s.column, c.features(d, Math.min(1, q.tauSec / q.lifeSec), net.extras(c))));
+        const pRaw = sigmoid(net.anchorLogit(q, 'strike', d) + net.readoutLogit(s.column, c.features(d, Math.min(1, q.tauSec / q.lifeSec), net.extras(c))));
         eprop.set(s.ticker, { column: s.column, elig: Float32Array.from(c.elig), p: pRaw, kind: q.kind });
       }
     }

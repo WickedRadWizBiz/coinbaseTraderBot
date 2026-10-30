@@ -123,7 +123,7 @@ export async function runWalk(o: {
   const coins = SNN_COINS.filter((a) => storedAssets(hist).includes(a));
   const transitions = regimeTransitions(hist, coins, Date.parse(`${first}T00:00:00Z`), Date.parse(`${last}T00:00:00Z`) + DAY, quiet);
   const res = await runSnnPbt({
-    recordings: rep, domain: o.net, stage: st.stage as Stage, days: plan.days, allDays: [plan.warmUp, ...plan.days], layout: 'walk', walk: { paused: inHoldoutWeek },
+    recordings: rep, domain: o.net, stage: st.stage as Stage, days: plan.days, allDays: [plan.warmUp, ...plan.days], layout: 'walk', walk: { paused: inHoldoutWeek }, anchorMid: cfg.snn.anchorMid,
     transitions, initDays: A.snnPbtInitDays, evalDays: 1, stateDir: path.join(dir, 'pbt'), restartEvery: 0, population: WALK_POPULATION, workers,
     genetic: { parents: A.gaParents, islands: A.gaIslands, breedEvery: A.gaBreedEvery, mutation: A.gaMutation }, tapeDir: path.join(o.work, 'tapes'),
     stop: () => now() >= deadline, log: (m) => log(`${o.net}: ${m}`),
@@ -135,7 +135,7 @@ export async function runWalk(o: {
   const fitness = lastRound?.ranking.find((x) => x.member === res.elite.member)?.fitness;
   if (res.walkedTo && fs.existsSync(path.join(dir, 'pbt', `m${res.elite.member}.json`))) {
     const cp = JSON.parse(fs.readFileSync(path.join(dir, 'pbt', `m${res.elite.member}.json`), 'utf8')) as SnnCheckpoint;
-    const params = withSnnHyper(domainParams(o.net, withFlags({ ...DEFAULT_SNN }, stageFlags(st.stage as Stage))), res.elite.hyper);
+    const params = withSnnHyper(domainParams(o.net, withFlags({ ...DEFAULT_SNN, ...(cfg.snn.anchorMid ? { anchorMid: true } : {}) }, stageFlags(st.stage as Stage))), res.elite.hyper);
     const net = new SnnNetwork(params);
     net.restore(cp, { allowParamChange: true });
     const f = path.join(dir, 'elite.json');

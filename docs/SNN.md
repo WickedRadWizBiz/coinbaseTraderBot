@@ -228,8 +228,20 @@ Learning resumes after 30 min back within band.
 `SNN_<CRYPTO|PERPS|TENNIS>_MODEL_PATH` (default `params/snn_<domain>.json`), `SNN_CROSS_FEED` (default false),
 `SNN_COLUMNS` (whitelist), `SNN_MAX_COLUMNS`, `SNN_CHECKPOINT_DIR`, `SNN_CHECKPOINT_EVERY_MIN`, `SNN_WORKER`,
 `SNN_TIMEOUT_MS` (≤ 200), `SNN_LATENCY_SKIP_P99_MS`, `SNN_ALPHA_MAX` (≤ 0.25), `SNN_MIN_EVENTS`,
-`SNN_READOUT_ETA`, `SNN_SEED`, `SNN_TARGET_SCALING`, and the deferred flags `SNN_WILSON_COWAN`,
+`SNN_READOUT_ETA`, `SNN_SEED`, `SNN_TARGET_SCALING`, `SNN_ANCHOR_MID` (below), and the deferred flags `SNN_WILSON_COWAN`,
 `SNN_GAP_JUNCTIONS`, `SNN_IZHIKEVICH_CH`, `SNN_DCAAP`.
+
+**The mid-anchored readout (`SNN_ANCHOR_MID`, off by default; the SNN plan's phase 1).** The contract readout prices
+from scratch: logit p = w . phi with a crude fair-value prior in w. Anchored, it starts from the market instead:
+logit p = logit(mid) + w . phi with w at zero, so p equals the contract's mid until the settlements teach a correction,
+and it can only add value where the market is wrong (a `less` contract reads 1 - mid; a `between` contract's mid says
+nothing about either threshold, and a query without a usable mid falls back to the crude prior; the mid is clipped to
+[2%, 98%]). Tags store the anchored p, so the settlement delta is still the exact log-loss gradient; the offline readout
+fit (`research/trainSnn.ts --anchor true`) adds the same offset per snapshot. The engine, the replay and the tapes carry
+the mid with each query; the history walk, the tournament and the daily training read the setting from the
+configuration, and the ablation lists it as a mechanism (`mid-anchored readout`, S5 vs S5). It is a version of its own:
+flipping it starts the networks fresh, and checkpoints of the other kind are refused. The go/no-go: the scoreboard's
+`SNN alone` row beats the market with its CI over at least 1,000 windows and 3 days.
 
 The legacy blend uses the crypto network only. **α is earned.** It is the grid α* ∈ [0, 0.25] that minimises blended Brier over the last ≤ 2000 settled
 scanned contracts, with at least 200 events. It is adopted only when the event-clustered day-block CI of

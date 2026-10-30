@@ -219,7 +219,8 @@ export function* readTape(file: string): Generator<Op> {
             const ticker = strs[vu()], column = strs[vu()], kind = strs[vu()], eventKey = strs[vu()], asset = strs[vu()], fl = b[i++];
             const strike = fl & 1 ? f64() : undefined, cap = fl & 2 ? f64() : undefined;
             const spot = f64(), sigma = f64(), tauSec = f64(), lifeSec = f64(), pYes = f64(), mid = f64();
-            queries.push({ ticker, column, kind, strike, cap, spot, sigma, tauSec, lifeSec, eventKey, tag: Boolean(fl & 4) });
+            // The mid travels in the row's context; the mid-anchored readout reads it from the query.
+            queries.push({ ticker, column, kind, strike, cap, mid, spot, sigma, tauSec, lifeSec, eventKey, tag: Boolean(fl & 4) });
             ctx.push({ pYes, mid, asset });
           }
           yield { op: OP_SCORE, T, queries, ctx };

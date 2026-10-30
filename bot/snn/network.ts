@@ -114,6 +114,8 @@ const TRAINED_ARRAYS = ['w1', 'w1s', 'theta1', 'alpha1', 'U1', 'U0'];
 const TEMPLATE_MATCHES = 100;
 
 const DT_MS = 1000;
+/** The mid-anchored readout's clip of the market's probability (a 1 c quote is not a 1% chance). */
+const ANCHOR_CLIP = 0.02;
 
 export function priorWeights(nFeat: number, slope: number): Float64Array {
   // p_snn starts as a crude fair value P(index > K) ~ sigma(1.7 d) on the clipped-d feature (d/4).
@@ -186,7 +188,7 @@ export class SnnNetwork {
     if (tpl) for (const [name, a] of Object.entries(tpl.arrays)) copyInto(c.arrays()[name], a);
     this.columns.set(key, c);
     const ro = new Readout(c.nFeat, { eta: this.p.readoutEta, cap: this.p.readoutCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: this.p.tagsPerContract, maxTagged: this.p.maxTaggedContracts, traceTauSec: this.p.traceTauSec, useTags: this.p.flags.tags },
-      this.preset?.readouts?.[key] ?? tpl?.wf ?? priorWeights(c.nFeat, this.p.priorSlope));
+      this.preset?.readouts?.[key] ?? tpl?.wf ?? (this.p.anchorMid ? undefined : priorWeights(c.nFeat, this.p.priorSlope)));
     this.readouts.set(key, ro);
     const dir = new Readout(c.nFeat, { eta: this.p.dirEta, cap: this.p.dirCap, tauC: this.p.tauC, eps: this.p.eps, tagsPerContract: 1, maxTagged: 1, traceTauSec: this.p.traceTauSec, useTags: true },
       (this.preset as { dirReadouts?: Record<string, number[]> } | undefined)?.dirReadouts?.[key] ?? tpl?.dirWf);
@@ -453,7 +455,7 @@ export class SnnNetwork {
         // Tennis: one threshold, distance given directly.
         if (!Number.isFinite(q.d)) continue;
         const phi = c.features(q.d, q.lifeFrac ?? 0, this.extras(c));
-        ths.push({ q, role: 'strike', K: 1, p: ro.predict(phi), phi });
+        ths.push({ q, role: 'strike', K: 1, p: sigmoid(this.anchorLogit(q, 'strike', q.d) + ro.logit(phi)), phi });
         continue;
       }
       if (!(q.spot > 0) || !(q.sigma > 0) || !(q.tauSec > 0)) continue;
@@ -463,7 +465,7 @@ export class SnnNetwork {
         if (!(K && K > 0)) continue;
         const d = Math.log(q.spot / K) / (q.sigma * Math.sqrt(q.tauSec));
         const phi = c.features(d, life, this.extras(c));
-        ths.push({ q, role, K, p: ro.predict(phi), phi });
+        ths.push({ q, role, K, p: sigmoid(this.anchorLogit(q, role, d) + ro.logit(phi)), phi });
       }
     }
     // Strike monotonicity: within an event, P(index > K) must be non-increasing in K.
@@ -628,6 +630,24 @@ export class SnnNetwork {
 
   /** Column readout probability for one threshold (training helpers). */
   readoutLogit(key: string, phi: Float64Array): number { return this.readouts.get(key)!.logit(phi); }
+
+  /** The logit a contract readout starts from for one threshold. With `anchorMid` it is the market's own P(index > K):
+   *  the contract's mid (a 'less' contract pays below its cap, so 1 - mid), clipped to [ANCHOR_CLIP, 1 - ANCHOR_CLIP] so a
+   *  1 c or 99 c quote still leaves room; a 'between' contract's mid says nothing about either threshold alone, and a
+   *  query without a usable mid falls back to the crude fair value sigma(priorSlope x d) the un-anchored readout starts
+   *  from. Without the flag it is 0 (the weights carry the prior). Tags store the anchored p, so the settlement delta
+   *  stays the exact log-loss gradient. */
+  anchorLogit(q: Pick<ContractQuery, 'kind' | 'mid'>, role: ThresholdRole, d: number): number {
+    if (!this.p.anchorMid) return 0;
+    const mid = q.mid;
+    if (q.kind !== 'between' && mid !== undefined && Number.isFinite(mid) && mid > 0 && mid < 1) {
+      const pk = q.kind === 'less' ? 1 - mid : mid;
+      const c = Math.min(1 - ANCHOR_CLIP, Math.max(ANCHOR_CLIP, pk));
+      return Math.log(c / (1 - c));
+    }
+    void role;
+    return this.p.priorSlope * Math.max(-4, Math.min(4, Number.isFinite(d) ? d : 0));
+  }
 }
 
 export interface SnnCheckpoint {
