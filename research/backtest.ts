@@ -43,7 +43,7 @@ import { ladderQuotes } from '../bot/model/ladder';
 import { priceContract, SETTLEMENT_AVG_SEC } from '../bot/model/fairValue';
 import { kalshiMaintenance, sessionEdge } from '../bot/model/sessions';
 import { defaultTiers, tierAt, type TierPoint } from '../bot/risk/sizingTiers';
-import { orderBudget } from '../bot/sizing/orderBudget';
+import { orderBand, orderBudget } from '../bot/sizing/orderBudget';
 import { binaryTrades, optimalF, recencyWeight } from '../bot/strategy/optimalF';
 import { CadenceGate, inEntryWindow } from '../bot/strategy/cadence';
 import type { MacroEvent } from '../bot/model/featureEngine';
@@ -739,11 +739,14 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       res.sizeScaleMin = Math.min(res.sizeScaleMin ?? 1, sizeScale);
       // Paper: about orderFrac of the bankroll an order (bot/engine.ts paperOrderUsd), the caps widened to fit it.
       const fixedUsd = !opts.paper ? 0 : opts.paper.orderFrac > 0 ? (bankroll > 0 ? Math.round(opts.paper.orderFrac * bankroll * 100) / 100 : 0) : Math.max(0, opts.paper.orderUsd);
+      // The order band (ORDER_USD_MIN / ORDER_USD_MAX), paper and live, as the engine applies it (Engine.orderBandUsd).
+      const band = fixedUsd > 0 ? undefined : orderBand(strategy.orderUsdMin, strategy.orderUsdMax);
+      const fitUsd = fixedUsd > 0 ? fixedUsd : band?.max ?? 0;
       const tierLimits = { maxOrderRiskFrac: tier.orderFrac, maxWindowRiskFrac: tier.windowFrac, maxTotalRiskFrac: tier.totalFrac, dailyLossLimitFrac: tier.dailyLossFrac, dailyLossLimitUsd: tier.dailyLossUsd };
-      if (fixedUsd > 0 && bankroll > 0) {
-        tierLimits.maxOrderRiskFrac = Math.max(tier.orderFrac, fixedUsd / bankroll);
-        tierLimits.maxWindowRiskFrac = Math.max(tier.windowFrac, (PAPER_WINDOW_ORDERS * fixedUsd) / bankroll);
-        tierLimits.maxTotalRiskFrac = Math.max(tier.totalFrac, (PAPER_TOTAL_ORDERS * fixedUsd) / bankroll);
+      if (fitUsd > 0 && bankroll > 0) {
+        tierLimits.maxOrderRiskFrac = Math.max(tier.orderFrac, fitUsd / bankroll);
+        tierLimits.maxWindowRiskFrac = Math.max(tier.windowFrac, (PAPER_WINDOW_ORDERS * fitUsd) / bankroll);
+        tierLimits.maxTotalRiskFrac = Math.max(tier.totalFrac, (PAPER_TOTAL_ORDERS * fitUsd) / bankroll);
       }
       const q = (side: 'bid' | 'ask') => { const o = open.find((x) => x.side === side); return o ? { clientOrderId: o.orderId, price: o.price, remaining: o.remainingCount } : undefined; };
       // An exit queued on an evaluation goes out on the next one, a second later (the live bot's reaction); with the paper
@@ -859,7 +862,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const view: MarketView = {
         ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: pos.position(m.ticker), bankroll,
         // As the engine sizes (bot/sizing/orderBudget.ts); the regime weight (playbook / Compensator) is not replayed.
-        ...(() => { const b = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult: sessRisk.sizeMult, riskScale: sizeScale, fCapUsd: optimalFCap(st.now, tier.orderFrac) * bankroll, paperOrderUsd: fixedUsd, maxContractsPerOrder: limits.maxContractsPerOrder }); if (b.boundBy === 'optimal_f') res.optimalFBound = (res.optimalFBound ?? 0) + 1; return { maxOrderRiskUsd: b.maxOrderRiskUsd, maxContracts: b.maxContracts, ...(b.fixedOrderUsd ? { fixedOrderUsd: b.fixedOrderUsd } : {}) }; })(),
+        ...(() => { const b = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult: sessRisk.sizeMult, riskScale: sizeScale, fCapUsd: optimalFCap(st.now, tier.orderFrac) * bankroll, paperOrderUsd: fixedUsd, bandUsd: band, maxContractsPerOrder: limits.maxContractsPerOrder }); if (b.boundBy === 'optimal_f') res.optimalFBound = (res.optimalFBound ?? 0) + 1; return { maxOrderRiskUsd: b.maxOrderRiskUsd, maxContracts: b.maxContracts, ...(b.fixedOrderUsd ? { fixedOrderUsd: b.fixedOrderUsd } : {}), ...(b.band ? { orderBandUsd: b.band } : {}) }; })(),
         minSidePrice: limits.minSidePrice,
         ...(() => { const b = tpBenched(); return b ? { takeProfitBenched: b } : {}; })(),
         newRiskRoomUsd,

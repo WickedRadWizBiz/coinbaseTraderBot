@@ -92,7 +92,7 @@ import { recordLatency } from './util/latency';
 import { performance } from 'perf_hooks';
 import { activeRuleBook, STAND_ASIDE } from './strategy/ruleBook';
 import { buildLedger, type ModuleRow } from './health/moduleLedger';
-import { orderBudget } from './sizing/orderBudget';
+import { orderBand, orderBudget } from './sizing/orderBudget';
 import { activeGpSignals } from './gp/gpSignals';
 import { marketContext } from './ta/marketContext';
 import { binaryTrades, optimalF, recencyWeight, type OptimalFReport } from './strategy/optimalF';
@@ -955,7 +955,7 @@ export class Engine {
       targetEvUsd: +ev.targetEv.toFixed(2), minTradeEvUsd: +ev.minEv.toFixed(3),
       minTradableBankrollUsd: S.minTradableBankrollUsd,
       tier: { ...t, orderRiskUsd: +(t.orderFrac * b).toFixed(2), dailyLossLimitUsd: +this.d.risk.dailyLossLimit(b, this.tierLimits(t)).toFixed(2) },
-      paperOrderUsd: this.paperOrderUsd() || null, paperOrderFrac: this.d.cfg.mode === 'paper' ? this.d.cfg.strategy.paperOrderFrac || null : null,
+      paperOrderUsd: this.paperOrderUsd() || null, orderBandUsd: this.orderBandUsd() ?? null, paperOrderFrac: this.d.cfg.mode === 'paper' ? this.d.cfg.strategy.paperOrderFrac || null : null,
       accuracyGate: this.d.accuracyGate ? { ...this.d.accuracyGate.status(), enforced: this.d.cfg.strategy.accuracyGate.enabled } : null,
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null, minQuoteContracts: S.minQuoteContracts,
@@ -1089,6 +1089,13 @@ export class Engine {
     return Math.max(0, this.d.cfg.strategy.paperOrderUsd ?? 0);
   }
 
+  /** The order band (ORDER_USD_MIN / ORDER_USD_MAX, Steven's choice on Oct 30: $10-$20 an order), paper and live; undefined
+   *  when off or while a paper order size is in use (it wins). */
+  orderBandUsd(bankroll = this.bankroll()): { min: number; max: number } | undefined {
+    if (this.paperOrderUsd(bankroll) > 0) return undefined;
+    return orderBand(this.d.cfg.strategy.orderUsdMin, this.d.cfg.strategy.orderUsdMax);
+  }
+
   /** How paper sizes its orders, for notes and alerts ('' outside paper or with paper sized like live). */
   paperSizing(): string {
     const usd = this.paperOrderUsd();
@@ -1097,11 +1104,11 @@ export class Engine {
     return frac > 0 ? `$${usd.toFixed(2)} an order (${+(frac * 100).toFixed(2)}% of the bankroll, PAPER_ORDER_FRAC)` : `$${usd} an order (PAPER_ORDER_USD)`;
   }
 
-  /** The risk gateway's per-order, window and total caps for crypto orders: the tier's, widened in paper to fit the
-   *  order size (one order, PAPER_WINDOW_ORDERS in markets closing together, PAPER_TOTAL_ORDERS in all). */
+  /** The risk gateway's per-order, window and total caps for crypto orders: the tier's, widened to fit the paper order
+   *  size or the order band's top (one order, PAPER_WINDOW_ORDERS in markets closing together, PAPER_TOTAL_ORDERS in all). */
   private orderLimits(t: Tier, bankroll = this.bankroll() ?? 0): Partial<RiskLimits> {
     const lim = this.tierLimits(t);
-    const usd = this.paperOrderUsd(bankroll);
+    const usd = this.paperOrderUsd(bankroll) || (this.orderBandUsd(bankroll)?.max ?? 0);
     if (!(usd > 0) || !(bankroll > 0)) return lim;
     return {
       ...lim,
@@ -1782,7 +1789,7 @@ export class Engine {
       accuracyGate: ag ? { enabled: ag.enabled, blocked: agBuckets.filter((b) => !b.open).length, buckets: agBuckets.length } : null,
       sessionRisk: { keys: Object.keys(this.sessionRiskProfile()).length },
       sizing: {
-        paperOrderUsd: this.paperOrderUsd(), tier: g.tier.name, sizeScale: g.equityGuard?.sizeScale ?? null,
+        paperOrderUsd: this.paperOrderUsd(), orderBandUsd: this.orderBandUsd() ?? null, tier: g.tier.name, sizeScale: g.equityGuard?.sizeScale ?? null,
         optimalF: of.rep ? { cap: Number.isFinite(of.cap) ? of.cap : null, trades: of.rep.n } : null, portfolioKelly: S.portfolioKelly,
       },
       exitPolicy: S.exitPolicy,
@@ -2124,14 +2131,17 @@ export class Engine {
     // dollars, whatever the tier, the break-even scale, the session's size factor and optimal f would allow (the owner's
     // choice for paper on Oct 23, a share of the bankroll since Oct 24).
     const fixedUsd = this.paperOrderUsd(bankroll);
+    // The order band (ORDER_USD_MIN / ORDER_USD_MAX, Steven, Oct 30), paper and live: the sized stake clamped to $10-$20.
+    const band = this.orderBandUsd(bankroll);
     // Session risk scales size (sizeMult in [0, 1.5]: above 1 only for a reliably earning session, dollars only). The risk scale (drawdown, losing streak,
     // training-mode de-risking) shrinks every sizing route: Kelly, target-EV and the per-order caps alike. The same
     // budget sizes the backtester's orders (bot/sizing/orderBudget.ts).
-    const budget = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult, riskScale: kellyScale, fCapUsd, paperOrderUsd: fixedUsd, maxContractsPerOrder: R.maxContractsPerOrder });
+    const budget = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult, riskScale: kellyScale, fCapUsd, paperOrderUsd: fixedUsd, bandUsd: band, maxContractsPerOrder: R.maxContractsPerOrder });
     const view: MarketView = {
       ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: st.position, bankroll,
       maxOrderRiskUsd: budget.maxOrderRiskUsd, maxContracts: budget.maxContracts, minSidePrice: R.minSidePrice,
       ...(budget.fixedOrderUsd ? { fixedOrderUsd: budget.fixedOrderUsd } : {}),
+      ...(budget.band ? { orderBandUsd: budget.band } : {}),
       // Exit curve, rest mode: the held position's sell rests at the curve's swing-top estimate (the strategy places it);
       // not in the stand-down before the close, and pulled during a fast index move (a resting sell is lifted exactly
       // when the contract is suddenly worth more).
@@ -2265,7 +2275,8 @@ export class Engine {
         const mult = Math.min(S.convictionMaxTotal, advMult * altMult);
         if (mult <= 1) continue;
         if (fixedUsd > 0) { plan.notes.push(`conviction x${mult.toFixed(2)} not applied: paper orders are ${this.paperSizing()}`); continue; }
-        const boosted = decide({ ...view, maxOrderRiskUsd: Math.min(view.maxOrderRiskUsd * mult, fCapUsd), maxContracts: floorCount(view.maxContracts * mult) }, { ...strat, kellyFraction: strat.kellyFraction * mult }, { exits: false, blockReductions: huntMode, entries: true });
+        // Inside the order band the boost moves Kelly's stake toward the band's top, never past it.
+        const boosted = decide(band ? view : { ...view, maxOrderRiskUsd: Math.min(view.maxOrderRiskUsd * mult, fCapUsd), maxContracts: floorCount(view.maxContracts * mult) }, { ...strat, kellyFraction: strat.kellyFraction * mult }, { exits: false, blockReductions: huntMode, entries: true });
         const match = boosted.place.find((b) => b.side === p.side && b.purpose === p.purpose && !b.reduceOnly && Math.abs(b.price - p.price) < 1e-9);
         const count = match ? floorCount(Math.min(match.count, p.count * mult)) : p.count;
         if (count > p.count) {
@@ -2307,6 +2318,7 @@ export class Engine {
     }
     if (this.fillLog) for (const p of plan.place) if (isMakerEntry(p)) this.fillX.set(p, fillInputs(p, fillCtx));
     if (fixedUsd > 0) plan.notes.push(`paper size: ${this.paperSizing()}; the tier, break-even scale and optimal f size live`);
+    else if (band) plan.notes.push(`order band: $${band.min}-$${band.max} an order (ORDER_USD_MIN/MAX), the sized stake clamped into it; the tier, loss scale and optimal f do not size it`);
     else {
       plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
       if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${[...rs.parts, ...(reg.mult !== 1 ? [`regime x${reg.mult.toFixed(2)}`] : [])].join(', ')})`);
@@ -2489,7 +2501,7 @@ export class Engine {
     // Tennis orders are rules-based (no model probability to size an edge from): budgeted separately.
     // Paper training trades are 1 contract with no edge requirement (they exist to produce trades).
     const training = cfg.mode === 'paper' && p.why.startsWith('train (paper)');
-    const pk = tennis || training || this.paperOrderUsd() > 0 ? undefined : this.portfolioCap(m, p, pYes, now);
+    const pk = tennis || training || this.paperOrderUsd() > 0 || this.orderBandUsd() ? undefined : this.portfolioCap(m, p, pYes, now);
     if (pk && pk.contracts < p.count) {
       this.d.audit.write('decision', { decisionId, ticker: m.ticker, event: 'portfolio_kelly_cap', from: p.count, to: pk.contracts, fStar: +pk.fStar.toFixed(4), edgePerDay: +pk.edgePerDay.toFixed(4) });
       if (pk.contracts <= 0) return;

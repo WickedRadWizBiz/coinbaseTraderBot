@@ -243,6 +243,28 @@ test('paper fixed size: a quote sizing wants buys about fixedOrderUsd of contrac
   assert.equal(decide(view({ fixedOrderUsd: 10, maxOrderRiskUsd: 10, maxContracts: 100, bankroll: 0 }), cfg).place.length, 0);
 });
 
+test('order band (Steven, Oct 30): a quote sizing wants stakes its sized amount clamped to $10-$20, never less; the room binds inside the band', () => {
+  const bidOf = (v: MarketView) => decide(v, cfg).place.find((p) => p.side === 'bid');
+  const band = { min: 10, max: 20 };
+  const sized = bidOf(view({ maxOrderRiskUsd: 20, maxContracts: 100 }))!;
+  assert.ok(sized.count * sized.price < 9, 'Kelly alone stakes a few dollars here');
+  const low = bidOf(view({ orderBandUsd: band, maxOrderRiskUsd: 20, maxContracts: 100 }))!;
+  const usd = low.count * low.price;
+  assert.ok(usd > 9.4 && usd <= 10, `raised to the $10 minimum: ${low.count} at ${low.price} = $${usd.toFixed(2)} (fee included)`);
+  // A stake Kelly sizes above the top is cut to it.
+  const high = bidOf(view({ orderBandUsd: band, maxOrderRiskUsd: 20, maxContracts: 100, bankroll: 20_000 }))!;
+  assert.ok(high.count * high.price > 18 && high.count * high.price <= 20, `$${(high.count * high.price).toFixed(2)}`);
+  // The room binds inside the band: $15 of room, a $15 quote.
+  const room = bidOf(view({ orderBandUsd: band, maxOrderRiskUsd: 20, maxContracts: 100, bankroll: 20_000, newRiskRoomUsd: 15 }))!;
+  assert.ok(room.count * room.price > 13.5 && room.count * room.price <= 15, `$${(room.count * room.price).toFixed(2)}`);
+  // Never below the minimum: room for less than $10 still quotes the $10 minimum (the risk gateway refuses it and says
+  // why); no quote when the contract cap cannot fit $10, none where sizing wants none.
+  const tight = bidOf(view({ orderBandUsd: band, maxOrderRiskUsd: 20, maxContracts: 100, newRiskRoomUsd: 6 }))!;
+  assert.ok(tight.count * tight.price > 9.4 && tight.count * tight.price <= 10, `$${(tight.count * tight.price).toFixed(2)}`);
+  assert.equal(bidOf(view({ orderBandUsd: band, maxOrderRiskUsd: 20, maxContracts: 6 })), undefined);
+  assert.equal(decide(view({ orderBandUsd: band, maxOrderRiskUsd: 20, maxContracts: 100, bankroll: 0 }), cfg).place.length, 0);
+});
+
 test('a resting quote due to expire on the exchange is placed again, unless the replacement would end no later', () => {
   const first = decide(view(), cfg).place.find((p) => p.side === 'bid')!;
   const resting = { clientOrderId: 'b', price: first.price, remaining: first.count };
