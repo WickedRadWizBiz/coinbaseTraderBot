@@ -128,7 +128,7 @@ test('lane book: queue by score, re-check before entry, slow lane first, one pos
   assert.equal(b4.select(1, 10_000, () => ({ px: 100, score: 0.2 }))[0].notional, 20_000);
 });
 
-test('live setup trader: detects on a closed candle, queues, re-checks, enters with an exchange stop, exits on the stop', async () => {
+test('live setup trader: detects on a closed candle, queues, re-checks, enters with an exchange stop, exits on the stop (or on the quota snipe)', async () => {
   const fs = await import('node:fs');
   const os = await import('node:os');
   const path = await import('node:path');
@@ -172,6 +172,27 @@ test('live setup trader: detects on a closed candle, queues, re-checks, enters w
   // A restarted trader resumes the open trade.
   const again = new SetupTrader({ params: defaultSetupParams({ pilotMaxNotionalUsd: 1e9 }), hub, gateway, modelPath: modelFile, statePath: path.join(dir, 'state.json'), candles: () => set, spot: () => px.v });
   assert.equal(again.book.positions.size, 1);
+  // The quota snipe on the restarted one (Steven's profit rules apply to every contract type; perps never settle, so no last
+  // share of a window): once the trade's whole result after costs, closed at the price now, covers what the clock hour needs,
+  // it is closed at once (urgent) and its result is credited to the clock; short of that, the plan runs.
+  const open = [...again.book.positions.values()][0];
+  const win = open.entry + 0.9 * ((open.plan.target1 ?? open.entry + open.dir * 2 * sig.atr) - open.entry); // short of the first target
+  const wantUsd = (tradeResult(open, win).ret - open.frac * defaultSetupParams().costs.takerExit) * open.notional!;
+  assert.ok(wantUsd > 0, `in profit after costs: ${wantUsd}`);
+  const credits: number[] = [], snipes: string[] = [];
+  const pacer = (neededUsd: number) => ({ neededUsd, credit: (usd: number) => { credits.push(usd); }, snipe: (_t: string, why: string) => { snipes.push(why); } });
+  px.v = win;
+  hub.apply({ ticker: 'BTC-PERP', asset: 'BTC', ts: now + 30_000, bid: win * 1.001 - 0.01, ask: win * 1.001 + 0.01 });
+  const held = await again.targets({ positions: new Map([['BTC-PERP', { ticker: 'BTC-PERP', position: tgt.target } as never]]), hedge: [], now: now + 30_000 }, { pacer: pacer(wantUsd + 0.01) });
+  assert.notEqual(held.find((t) => t.asset === 'BTC')!.target, 0, 'less than the hour needs: the plan runs');
+  const sn = await again.targets({ positions: new Map([['BTC-PERP', { ticker: 'BTC-PERP', position: tgt.target } as never]]), hedge: [], now: now + 31_000 }, { pacer: pacer(wantUsd - 0.01) });
+  const so = sn.find((t) => t.asset === 'BTC')!;
+  assert.deepEqual([so.target, so.urgent, so.reason], [0, true, 'exit: quota']);
+  assert.equal(again.status().recentTrades[0].reason, 'quota');
+  assert.equal(credits.length, 1);
+  assert.ok(Math.abs(credits[0] - wantUsd) < 1e-9, `credited ${credits[0]} = the trade's result ${wantUsd}`);
+  assert.match(snipes[0], /^quota snipe: \+\$\d+\.\d\d net on the fast 15m \w+ (long|short) at [\d.]+ covers the \$\d+\.\d\d the hour needs$/);
+  px.v = sig.ref;
   // Price through the stop: flat, urgent, recorded as a stop.
   px.v = sig.stop - sig.dir * sig.atr;
   hub.apply({ ticker: 'BTC-PERP', asset: 'BTC', ts: now + 60_000, bid: px.v - 0.01, ask: px.v + 0.01 });

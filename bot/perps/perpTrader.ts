@@ -17,6 +17,9 @@
 //   stop      max(stopAtrMult x 1h ATR, minStopBps) from the entry, placed ON THE EXCHANGE
 //             (Kalshi exit trigger on the liquidation mark) so it protects the position even if the
 //             bot is down; the bot also flattens itself if the touch crosses the stop
+//   snipe     the quota pacer (Steven's profit rules apply to every contract type, Oct 30): a position whose
+//             profit after fees, closed at the touch now, covers what the clock hour needs is closed at once
+//             (perps never settle: the rule for the last share of a window does not apply)
 // Account guards (PerpTrader): perp daily loss stop on margin-account equity (flattens and halts
 // for the rest of the UTC day), cooldown after a stop-out, kill switch / halts flatten urgently,
 // minimum equity for new entries, optional hard requirement of a validated model.
@@ -24,7 +27,7 @@
 import type { AuditLog } from '../audit/auditLog';
 import type { CandleSet } from '../ta/candleStore';
 import type { BarStore } from '../model/featureEngine';
-import type { DirTarget, DirectionalContext } from './hedger';
+import type { DirTarget, DirectionalContext, DirectionalGuards } from './hedger';
 import type { PerpHub } from './perpData';
 import type { PerpGateway } from './perpRest';
 import { perpFeatures, priorMuBps, type PerpFeatureSources, type PerpModel } from './perpSignal';
@@ -54,6 +57,8 @@ export interface PerpTraderParams {
   pilotMaxLeverage: number;
   priorIc: number;
   makerBps: number;
+  /** Taker fee (bps of notional): a snipe crosses the touch. Unset = makerBps. */
+  takerBps?: number;
   requireValidation: boolean;
   minEquityUsd: number;
 }
@@ -85,11 +90,19 @@ export interface PerpDecisionInput {
   noEntry?: string;
   /** Share of total capital locked in binary bets until settlement (inflates the perp's sigma). */
   lockedFrac?: number;
+  /** The net dollars a position must be up for its sale now (the quota pacer, bot/risk/quotaPacer.ts); undefined = off. */
+  pacerUsd?: number;
 }
 
 export interface PerpDecision { target: number; urgent: boolean; reason: string; stopPrice?: number; netEdgeBps?: number; leverage?: number }
 
 const floorStep = (x: number, step: number) => Math.sign(x) * Math.floor(Math.abs(x) / step + 1e-9) * step;
+
+/** A perp position's profit after fees closed at `exit` (contracts signed; maker entry, taker exit). */
+export function perpNetUsd(count: number, entry: number, exit: number, p: Pick<PerpTraderParams, 'makerBps' | 'takerBps'>): number {
+  const n = Math.abs(count);
+  return n * Math.sign(count) * (exit - entry) - (n * (entry * p.makerBps + exit * (p.takerBps ?? p.makerBps))) / 1e4;
+}
 
 export function decidePerp(i: PerpDecisionInput, p: PerpTraderParams): PerpDecision {
   const cur = i.current;
@@ -103,6 +116,12 @@ export function decidePerp(i: PerpDecisionInput, p: PerpTraderParams): PerpDecis
   if (curDir !== 0 && i.entryPrice) {
     const stop = stopFor(curDir, i.entryPrice);
     if (curDir > 0 ? i.bid <= stop : i.ask >= stop) return { target: 0, urgent: true, reason: `stop hit at ${stop}`, stopPrice: stop };
+  }
+  // The quota snipe: closed at the touch whatever the signal says.
+  if (curDir !== 0 && i.entryPrice && i.pacerUsd !== undefined) {
+    const px = curDir > 0 ? i.bid : i.ask;
+    const net = perpNetUsd(cur, i.entryPrice, px, p);
+    if (net >= i.pacerUsd - 1e-9) return { target: 0, urgent: true, reason: `quota snipe: +$${net.toFixed(2)} net on ${cur} at ${px} covers the $${i.pacerUsd.toFixed(2)} the hour needs` };
   }
   if (i.muBps === undefined || !(i.sigmaHBps && i.sigmaHBps > 0)) {
     return { target: 0, urgent: false, reason: `no signal (${i.source}): flat` };
@@ -177,6 +196,8 @@ export class PerpTrader {
   /** Margin equity when each position opened (its probation result at close). */
   private readonly equityAtOpen = new Map<string, number>();
   private readonly lastDir = new Map<string, number>();
+  /** Entry price of each directional position at the last tick (the quota pacer's credit when it shrinks). */
+  private readonly entryAt = new Map<string, number>();
   /** Features are recomputed at most every featureEverySec per asset (they move on minute bars). */
   private readonly featCache = new Map<string, { ts: number; f: Record<string, number>; sigma1m?: number; atrFrac?: number }>();
   readonly lastDecisions = new Map<string, PerpDecision & { muBps?: number; sigmaHBps?: number; source: string; current: number }>();
@@ -203,7 +224,7 @@ export class PerpTrader {
   }
 
   /** Directional targets for the executor (called after it has synced positions). */
-  async targets(c: DirectionalContext, guards: { halt?: string; noEntry?: string; lockedFrac?: number }): Promise<DirTarget[]> {
+  async targets(c: DirectionalContext, guards: DirectionalGuards): Promise<DirTarget[]> {
     const P = this.d.params;
     const now = c.now;
     const equity = await this.refreshEquity(now);
@@ -228,6 +249,13 @@ export class PerpTrader {
       }
       if (current !== 0 && Math.sign(current) !== Math.sign(prev)) { this.heldSince.set(ticker, now); if (equity !== undefined) this.equityAtOpen.set(ticker, equity); }
       if (current === 0) this.heldSince.delete(ticker);
+      // The quota pacer counts what a reduction realized, net of fees, toward the bot's hourly target: the closed contracts
+      // from their entry to the touch now (the exit's own fill price is not reported; the touch is within a tick or two).
+      const closed = prev === 0 ? 0 : Math.sign(current) === Math.sign(prev) ? Math.max(0, Math.abs(prev) - Math.abs(current)) : Math.abs(prev);
+      const exitPx = prev > 0 ? l.bid : l.ask, entryPx = this.entryAt.get(ticker);
+      if (closed > 1e-9 && exitPx !== undefined && entryPx !== undefined) guards.pacer?.credit(perpNetUsd(Math.sign(prev) * closed, entryPx, exitPx, P), ticker);
+      const ep = c.positions.get(ticker)?.entryPrice;
+      if (current !== 0 && ep) this.entryAt.set(ticker, ep); else this.entryAt.delete(ticker);
       const last = this.lastDecisions.get(ticker);
       if (prev !== 0 && current === 0 && last && last.target !== 0 && Math.sign(last.target) === Math.sign(prev)) {
         this.cooldownUntil.set(asset, now + P.cooldownMin * 60_000); // closed without us asking: a stop fired
@@ -268,8 +296,9 @@ export class PerpTrader {
         current, entryPrice: current !== 0 ? c.positions.get(ticker)?.entryPrice : undefined,
         heldMin: this.heldSince.has(ticker) ? (now - this.heldSince.get(ticker)!) / 60_000 : undefined,
         equity: equity ?? 0, atrFrac, marketLeverage: l.leverage, step: l.fractional ? 0.01 : 1, otherNotional: used - mine,
-        halt: guards.halt ?? (this.d.trainingOverride?.() ? undefined : this.dayHalt), noEntry, lockedFrac: guards.lockedFrac,
+        halt: guards.halt ?? (this.d.trainingOverride?.() ? undefined : this.dayHalt), noEntry, lockedFrac: guards.lockedFrac, pacerUsd: guards.pacer?.neededUsd,
       }, P);
+      if (dec.reason.startsWith('quota snipe')) guards.pacer?.snipe(ticker, dec.reason);
       this.lastDecisions.set(ticker, { ...dec, muBps, sigmaHBps: sig, source, current });
       if (dec.target !== current || dec.urgent) this.d.audit?.write('perp_decision', { asset, ticker, current, target: dec.target, reason: dec.reason, muBps, sigmaHBps: sig, source, validated, equity, stop: dec.stopPrice });
       out.push({ asset, ticker, target: dec.target, urgent: dec.urgent, reason: dec.reason, stopPrice: dec.stopPrice });
