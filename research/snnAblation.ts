@@ -233,6 +233,10 @@ function printVerdict(v: Verdict) {
   console.log(`${v.accepted ? 'ACCEPT' : 'reject'}  ${v.mechanism}: dBrier ${v.delta.mean.toFixed(5)} [${v.delta.lo.toFixed(5)}, ${v.delta.hi.toFixed(5)}] over ${v.delta.events} events / ${v.delta.days} days; slope ${v.candidate.calSlope.toFixed(2)}; corr ${v.candidate.corrModel.toFixed(2)}; blend a=${v.blend.alpha} [${v.blend.lo.toFixed(5)}, ${v.blend.hi.toFixed(5)}]; p99 ${v.candidate.p99Ms.toFixed(1)} ms; ${JSON.stringify(v.criteria)}`);
   const vm = (x: Verdict['vsMarket']['candidate']) => `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]${x.hi < 0 ? ' BEATS the market' : x.lo > 0 ? ' worse than the market' : ' undecided'}`;
   console.log(`        vs market (Brier SNN - mid, per window): candidate ${vm(v.vsMarket.candidate)}; baseline ${vm(v.vsMarket.baseline)}`);
+  // Criterion e's parts, so a failure names its cause in the log (the verdict file is not readable everywhere).
+  const st = (x: RunSummary) => `Brier ${x.brier.toFixed(5)} (meta-model ${x.brierModel.toFixed(5)}), ${x.events} windows, learning frozen ${(100 * x.frozenFrac).toFixed(1)}%, NaN restores ${x.nanRestores}, p99 ${x.p99Ms.toFixed(1)} ms`;
+  console.log(`        candidate: ${st(v.candidate)}`);
+  console.log(`        baseline:  ${st(v.baseline)}`);
 }
 
 function writeVerdicts(out: string, meta: Record<string, unknown>, verdicts: Verdict[]) {
