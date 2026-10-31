@@ -6,7 +6,7 @@ import { PaperPerpExchange } from '../bot/perps/paperPerp';
 import { PerpHub, type PerpSnapshot } from '../bot/perps/perpData';
 import { KalshiPerpsRest, parsePerpBalance, parsePerpOrder, parsePerpRisk } from '../bot/perps/perpRest';
 import { PerpModel, priorMuBps, type PerpModelParams } from '../bot/perps/perpSignal';
-import { decidePerp, PerpTrader, type PerpDecisionInput, type PerpTraderParams } from '../bot/perps/perpTrader';
+import { decidePerp, perpNetUsd, PerpTrader, type PerpDecisionInput, type PerpTraderParams } from '../bot/perps/perpTrader';
 
 const T0 = 1_800_000_000_000;
 // A realistic per-contract market: 0.001 BTC contracts priced ~$100 (index $100,000).
@@ -148,6 +148,46 @@ test('live loop: executor + trader enter as maker, set the exchange stop, stop o
   now += 5000;
   await ex.tick([], { reduceOnly: true, directional: (c) => t2.targets({ ...c, now }, { halt: 'kill switch engaged' }) });
   assert.equal((await sim.getPositions()).length, 0, 'flattened immediately');
+});
+
+test('quota snipe on perps (Steven, Oct 30: the profit rules apply to every contract type; perps never settle): closed at the touch once its profit after fees covers the hour; every closed position counts toward the clock', async () => {
+  const PT = { ...P, takerBps: 12 };
+  // 5 long from 100, bid 101.20: +$6.00 less the maker entry and taker exit fees covers $4.50 -> closed now, urgent.
+  const net = perpNetUsd(5, 100, 101.2, PT);
+  assert.ok(Math.abs(net - (6 - (5 * (100 * 5 + 101.2 * 12)) / 1e4)) < 1e-9);
+  const d = decidePerp(base({ current: 5, entryPrice: 100, bid: 101.2, ask: 101.22, pacerUsd: 4.5 }), PT);
+  assert.deepEqual([d.target, d.urgent, d.reason], [0, true, `quota snipe: +$${net.toFixed(2)} net on 5 at 101.2 covers the $4.50 the hour needs`]);
+  // A short mirrors it at the ask; short of the hour's need, or with the pacer off, the signal decides (here: hold).
+  assert.match(decidePerp(base({ current: -5, entryPrice: 102.5, bid: 100.98, ask: 101, muBps: -40, pacerUsd: 4.5 }), PT).reason, /^quota snipe: \+\$6\.6\d net on -5 at 101 /);
+  assert.equal(decidePerp(base({ current: 5, entryPrice: 100, bid: 100.5, ask: 100.52, pacerUsd: 4.5 }), PT).reason.split(' ')[0], 'hold');
+  assert.equal(decidePerp(base({ current: 5, entryPrice: 100, bid: 101.2, ask: 101.22 }), PT).reason.split(' ')[0], 'hold');
+  // The live loop: the executor closes the sniped position at the touch (reduce-only IOC), and the next tick credits the
+  // closed contracts' result to the clock, the paper account's own realized P&L less fees.
+  const hub = new PerpHub();
+  let now = T0;
+  hub.apply(snap({ ts: now }));
+  const sim = new PaperPerpExchange(hub, () => 'BTC', { makerBps: 5, takerBps: 12 }, undefined, () => now, 1000);
+  const ex = new PerpHedger({ gateway: sim, hub, params: { minDollarDelta: 2000, maxNotionalUsd: 1000, excludeTauSec: 120, repriceSec: 30, takerAfterSec: 300 }, now: () => now, minTickMs: 0 });
+  const trader = new PerpTrader({ params: PT, hub, gateway: sim, model: model(40, true), sources: () => ({}) });
+  const credits: number[] = [], snipes: string[] = [];
+  const pacer = { neededUsd: 0.75, credit: (usd: number) => { credits.push(usd); }, snipe: (_t: string, why: string) => { snipes.push(why); } };
+  const tick = () => ex.tick([], { directional: (c) => trader.targets({ ...c, now }, { pacer }) });
+  await tick();
+  now += 5000; hub.apply(snap({ ts: now, bid: 99.95, ask: 99.98 })); sim.step();
+  const held = (await sim.getPositions())[0].position;
+  assert.ok(held > 0);
+  await tick();
+  assert.equal(snipes.length, 0, 'not in profit yet');
+  now += 5000; hub.apply(snap({ ts: now, bid: 101.5, ask: 101.52 })); sim.step();
+  await tick();
+  assert.equal(snipes.length, 1);
+  assert.match(snipes[0], /^quota snipe: /);
+  assert.equal((await sim.getPositions()).length, 0, 'closed at the bid');
+  now += 5000; await tick();
+  const led = sim.ledger()['BTC-PERP'];
+  assert.equal(credits.length, 1);
+  assert.ok(Math.abs(credits[0] - perpNetUsd(held, 99.99, 101.5, PT)) < 1e-9, `${credits[0]}`);
+  assert.ok(Math.abs(credits[0] - (led.realized - led.fees)) < 1e-9, `credit ${credits[0]} = the account's ${led.realized - led.fees}`);
 });
 
 test('perp daily loss stop flattens and halts for the day; unvalidated model trades pilot size only', async () => {
