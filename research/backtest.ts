@@ -55,7 +55,7 @@ import { PaperExchange } from '../bot/paper/paperExchange';
 import { marketWorstLoss } from '../bot/risk/exposure';
 import { EquityGuard } from '../bot/risk/equityGuard';
 import { RiskGateway } from '../bot/risk/riskGateway';
-import { applyFvGate, decide, loserNoEntry, decisionProbability, netProfitAtBid, positionNetAtBid, type MarketView } from '../bot/strategy/fairValueStrategy';
+import { applyFvGate, decide, loserNoEntry, trainingCount, decisionProbability, netProfitAtBid, positionNetAtBid, type MarketView } from '../bot/strategy/fairValueStrategy';
 import { ComponentTrials, type TrialName } from '../bot/strategy/componentTrials';
 import { activeRuleBook, RuleBook, setRuleBook } from '../bot/strategy/ruleBook';
 import { altcoinRiskOn, confluenceBreadth, orientedSignals, selectionPriority, taDrift, taNetDirection } from '../bot/strategy/taConviction';
@@ -966,12 +966,14 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       // Fill model (validated only), as live: quote, cross or skip each maker entry by expected value.
       applyFillModel(plan, opts.fillModel, { q: qDecision, book, tick: m.tickSize, tauSec, sigma: vol.sigmaPerSqrtSec, features: fmap, minEv: strategy.fillMinEv, takerMinEdge: strategy.takerBuffer + strategy.minEdge });
       if (reason && nEntries()) res.funnel![funnelKey('after take gate + fill model')] = (res.funnel![funnelKey('after take gate + fill model')] ?? 0) + 1;
-      // The paper bot's own extra entries (bot/engine.ts), when nothing else enters a flat market in its entry window:
+      // The bot's own extra entries (bot/engine.ts), when nothing else enters a flat market in its entry window. Paper only:
       // an exploration entry (PAPER_EXPLORE: the best borderline one within PAPER_EXPLORE_BAND of the edge threshold, at
-      // most 1 contract, at PAPER_EXPLORE_RATE, PAPER_EXPLORE_MAX_PER_HOUR), else a training trade (1 contract at the
-      // touch on the side the model favours, PAPER_TRAINING_TRADES_PER_HOUR spread over the hour, one per contract).
+      // most 1 contract, at PAPER_EXPLORE_RATE, PAPER_EXPLORE_MAX_PER_HOUR). Paper and live alike since Oct 31: else a
+      // training trade (at the touch on the side the model favours, sized at the order band's minimum,
+      // TRAINING_TRADES_PER_HOUR spread over the hour, one per contract), screened by the fair value gate below.
       // Only once trading starts: the bot starts with neither (a fresh process), so the warm-up must not use up their budgets.
-      if (opts.paper && reason && entryWindowOpen && posC === 0 && !plan.place.some((p) => p.purpose === 'entry') && (opts.tradeFromMs === undefined || st.now >= opts.tradeFromMs)) {
+      const extraOk = Boolean(reason) && entryWindowOpen && posC === 0 && (opts.tradeFromMs === undefined || st.now >= opts.tradeFromMs);
+      if (opts.paper && extraOk && !plan.place.some((p) => p.purpose === 'entry')) {
         while (exploreTs.length && exploreTs[0] < st.now - 3_600_000) exploreTs.shift();
         if (strategy.paperExplore) {
           const e = decide(view, { ...strat, minEdge: Math.max(0, strat.minEdge - strategy.exploreBand), style: 'both' }, { exits: false, blockReductions: false, entries: true }).place.find((p) => p.purpose === 'entry');
@@ -981,17 +983,19 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
             plan.place.push({ ...e, count: Math.min(e.count, 1), why: `explore (p=${strategy.exploreRate}): ${e.why}` });
           }
         }
+      }
+      if (extraOk && !plan.place.some((p) => p.purpose === 'entry')) {
         while (trainTs.length && trainTs[0] < st.now - 3_600_000) trainTs.shift();
-        const perHour = strategy.paperTrainTrades;
-        if (!plan.place.some((p) => p.purpose === 'entry') && perHour > 0 && !trainTicker.has(m.ticker) && trainTs.length < perHour && st.now - (trainTs[trainTs.length - 1] ?? 0) >= (3_600_000 / perHour) * 0.5) {
+        const perHour = strategy.trainTrades;
+        if (perHour > 0 && !trainTicker.has(m.ticker) && trainTs.length < perHour && st.now - (trainTs[trainTs.length - 1] ?? 0) >= (3_600_000 / perHour) * 0.5) {
           const buyYes = qDecision >= mid;
           const cost = buyYes ? ask.price : Math.round((1 - bid.price) * 10000) / 10000;
           if (cost >= limits.minSidePrice && cost <= 1 - limits.minSidePrice && ask.price - bid.price <= 0.08 && !fastMove && tauSec > limits.noEntryBeforeCloseSec) {
             trainTs.push(st.now);
             trainTicker.add(m.ticker);
             res.paper!.trainTrades!++;
-            plan.place.push({ side: buyYes ? 'bid' : 'ask', price: buyYes ? ask.price : bid.price, count: 1, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: false, purpose: 'entry',
-              edge: buyYes ? qDecision - ask.price : (1 - qDecision) - cost, why: `train (paper): ${buyYes ? 'YES' : 'NO'} at ${cost.toFixed(2)}` });
+            plan.place.push({ side: buyYes ? 'bid' : 'ask', price: buyYes ? ask.price : bid.price, count: trainingCount(cost, view), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: false, purpose: 'entry',
+              edge: buyYes ? qDecision - ask.price : (1 - qDecision) - cost, why: `train: ${buyYes ? 'YES' : 'NO'} at ${cost.toFixed(2)}` });
           }
         }
       }
@@ -1025,8 +1029,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           position: pos.position(m.ticker), marketRiskNow: riskOf(m.ticker),
           marketRiskWith: p.reduceOnly ? riskOf(m.ticker) : riskOf(m.ticker, [{ ticker: m.ticker, side: p.side, price: p.price, remaining: p.count, isTaker: !p.postOnly }]),
           windowRisk, totalRisk, ordersLastMinute: 0, openOrders: openNow.length, modelLiveBlockers: [], limitOverrides: tierLimits,
-          // Paper training trades need no edge (bot/engine.ts): they exist to produce trades.
-          skipEdgeCollar: Boolean(opts.paper) && p.why.startsWith('train (paper)'),
+          // Training trades need no edge (bot/engine.ts): they exist to produce trades.
+          skipEdgeCollar: p.why.startsWith('train:'),
         });
         if (!d.ok) {
           // Why the risk gateway turned down the paper bot's extra entries (numbers folded), for the replay check.

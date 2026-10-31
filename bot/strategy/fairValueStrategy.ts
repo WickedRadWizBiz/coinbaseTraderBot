@@ -212,6 +212,20 @@ export function loserExit(v: MarketView, cfg: Pick<StrategyConfig, 'loserExits'>
     edge: fvSide === undefined ? 0 : sideBid - fee - fvSide, why };
 }
 
+/** A training trade's size (TRAINING_TRADES_PER_HOUR, paper and live): the order band's minimum (or the fixed paper order
+ *  size) in contracts (0.01 steps, as the strategy sizes) at `cost` with the taker fee, never past the band's maximum (or the
+ *  fixed size) once the fee rounds up on the whole order, within the per-order contract cap; 1 contract without a band. */
+export function trainingCount(cost: number, v: Pick<MarketView, 'orderBandUsd' | 'fixedOrderUsd' | 'maxContracts' | 'fees'>): number {
+  const fixed = (v.fixedOrderUsd ?? 0) > 0 ? v.fixedOrderUsd! : undefined;
+  const usd = fixed ?? v.orderBandUsd?.min;
+  if (!(usd !== undefined && usd > 0) || !(cost > 0 && cost < 1)) return 1;
+  const cap = fixed ?? Math.max(usd, v.orderBandUsd!.max);
+  const unit = cost + orderFee(100, cost, true, v.fees) / 100;
+  let n = floorCount(Math.min(v.maxContracts > 0 ? v.maxContracts : Infinity, usd / unit));
+  while (n > 0 && n * cost + orderFee(n, cost, true, v.fees) > cap + 1e-9) n = round(n - 0.01, 2);
+  return Math.max(n, 0.01);
+}
+
 /** Where the loser window cut runs: the last share of the window (settleShare), the final minute, and from LOSER_WINDOW_SHARE
  *  of the window left when that is set. */
 export function inLoserWindow(v: Pick<MarketView, 'settleShare' | 'exitWindowOpen' | 'tauSec' | 'windowSec'>, L: LoserExitConfig): boolean {

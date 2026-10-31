@@ -270,7 +270,7 @@ test('engine models: the TA network and the component trials\' verdicts as the b
   } finally { setTaNet(undefined); setTaNetEnsemble(undefined); }
 });
 
-test('backtest paper options: the paper bot\'s training trades and exploration entries', async () => {
+test('backtest: the bot\'s training trades (paper and live alike) and paper\'s exploration entries', async () => {
   const dir = path.join(tmp(), 'rec');
   writeSyntheticRecordings(dir, { windows: 6, seed: 12, marketNoise: 0.06 });
   const paper = { orderFrac: 0.1, orderUsd: 0 };
@@ -278,15 +278,16 @@ test('backtest paper options: the paper bot\'s training trades and exploration e
     const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both', ...NO_LOSER_RULES, ...env });
     return runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy: 'take_profit', ...opts });
   };
-  const on = await run({ PAPER_TRAINING_TRADES_PER_HOUR: '120', PAPER_EXPLORE: 'false' });
+  const on = await run({ TRAINING_TRADES_PER_HOUR: '120', PAPER_EXPLORE: 'false' });
   assert.ok((on.paper?.trainTrades ?? 0) > 0, 'training trades when nothing else enters');
   assert.ok((on.paper?.trainTrades ?? 0) <= 120 * Math.ceil(on.days * 24), 'within the hourly budget');
   assert.equal(on.paper?.exploreEntries, 0);
-  const off = await run({ PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' });
+  const off = await run({ TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' });
   assert.equal(off.paper?.trainTrades, 0);
-  const notPaper = await run({ PAPER_TRAINING_TRADES_PER_HOUR: '120' }, {});
-  assert.equal(notPaper.paper?.trainTrades, 0, 'only with the paper options');
-  assert.ok((on.paper?.extraSent ?? 0) > 0, 'training trades reach the exchange');
+  const notPaper = await run({ TRAINING_TRADES_PER_HOUR: '120', PAPER_EXPLORE: 'true', PAPER_EXPLORE_RATE: '1' }, {});
+  assert.ok((notPaper.paper?.trainTrades ?? 0) > 0, 'training trades without the paper options too (paper and live alike since Oct 31)');
+  assert.equal(notPaper.paper?.exploreEntries, 0, 'exploration only with the paper options');
+  assert.ok((on.paper?.extraSent ?? 0) > 0, `training trades reach the exchange: ${JSON.stringify(on.paper?.extraRejected)}`);
   assert.ok(!Object.keys(on.paper?.extraRejected ?? {}).some((k) => k.startsWith('no fee-net edge')), 'training trades need no edge, as in the engine');
 });
 

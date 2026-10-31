@@ -224,9 +224,9 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
     for await (const line of rl) {
       const head = line.slice(0, 160);
       const decision = head.includes('"kind":"decision"');
-      // The decision that planned an exit names why (deploy/pnl_report.py reads it the same way); so does paper's training
-      // trade or exploration entry.
-      const exitPlan = decision && (line.includes('"purpose":"exit"') || line.includes('"why":"train (paper)') || line.includes('"why":"explore'));
+      // The decision that planned an exit names why (deploy/pnl_report.py reads it the same way); so does a training
+      // trade ("train (paper)" until Oct 31, "train:" since) or paper's exploration entry.
+      const exitPlan = decision && (line.includes('"purpose":"exit"') || line.includes('"why":"train (paper)') || line.includes('"why":"train:') || line.includes('"why":"explore'));
       const diagnosis = decision && head.includes('"event":"entry_diagnosis"');
       const swap = head.includes('"kind":"config"') && head.includes('"event":"model_swapped"');
       const hotSwap = head.includes('"kind":"config"') && head.includes('"event":"hot_swap"');

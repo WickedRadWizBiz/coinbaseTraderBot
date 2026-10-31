@@ -224,9 +224,11 @@ export interface StrategyConfig {
   exploreRate: number;
   exploreBand: number;
   exploreMaxPerHour: number;
-  /** Paper only: guaranteed 1-contract training trades per hour on the side the model favours, taken when
-   *  nothing qualifies on edge, so the bot always produces trades to learn from and to watch (0 = off). */
-  paperTrainTrades: number;
+  /** TRAINING_TRADES_PER_HOUR (12; PAPER_TRAINING_TRADES_PER_HOUR is still read when the new key is unset): training
+   *  trades an hour on the side the model favours, taken when nothing qualifies on edge, so the bot keeps producing
+   *  trades to learn from (0 = off). Steven's pick on Oct 31 (sizing thread): back on, in paper and live alike, each
+   *  sized at the order band's minimum ($10) and screened by the fair value gate (FV_ENTRY_GATE) like every entry. */
+  trainTrades: number;
   /** Markets with no position and no resting order are fully re-evaluated at most every idleEvalSec
    *  (1 s otherwise): most of the bot's CPU is the per-second evaluation of markets it is not in. */
   idleEvalSec: number;
@@ -1202,7 +1204,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     exploreRate: num(env, 'PAPER_EXPLORE_RATE', 0.1, 0, 1),
     exploreBand: num(env, 'PAPER_EXPLORE_BAND', 0.02, 0, 0.1),
     exploreMaxPerHour: num(env, 'PAPER_EXPLORE_MAX_PER_HOUR', 6, 0, 120),
-    paperTrainTrades: num(env, 'PAPER_TRAINING_TRADES_PER_HOUR', 0, 0, 120),
+    trainTrades: num(env, 'TRAINING_TRADES_PER_HOUR', num(env, 'PAPER_TRAINING_TRADES_PER_HOUR', 12, 0, 120), 0, 120),
     idleEvalSec: num(env, 'EVAL_IDLE_SEC', 5, 0, 60),
     outsidePriceFallback: bool(env, 'PAPER_OUTSIDE_PRICE_FALLBACK', false),
     adversarialBoost: bool(env, 'ADVERSARIAL_BOOST', true),
