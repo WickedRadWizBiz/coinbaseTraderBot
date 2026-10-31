@@ -774,7 +774,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 for i in sorted(live):
                     p = ps[i]; k = t - p['s0']
                     b = p['bids'][k] if 0 <= k < len(p['bids']) else None
-                    inwin = t > p['c_sec'] - no_exit_sec or t > p['c_sec'] - frac * market_len(p)
+                    inwin = t > p['c_sec'] - no_exit_sec or t > p['c_sec'] - loser.get('wfrac', frac) * market_len(p)
                     if b is None:
                         if inwin and t == p['c_sec'] - 1: st['nobid'] += 1
                         continue
@@ -1190,6 +1190,11 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
     for m, nm in ((-0.06, '6c'), (-0.09, '9c'), (-0.03, '3c')):
         for k in (1, 2):
             rowsL.append((f'ALL origins, gate fv >= cost + {nm}; 3c top size' + (f'; stake x{k}' if k > 1 else ''), S3, gall(m, k)))
+    # round 7: where the window cut starts (PR #230's replay: the last 90 s have thin bids). Today's rules plus the window
+    # cut alone, and the gate (every origin) + 3c cut, with the cut of anything not in profit starting at 10/20/30% left
+    for wf in (0.10, 0.20, 0.30):
+        rowsL.append((f'window cut from {int(wf * 100)}% left, top size', {'split': True, 'wfrac': wf}, bando))
+        rowsL.append((f'ALL origins, gate 6c; 3c top size; window cut from {int(wf * 100)}% left', dict(S3, wfrac=wf), gall(-0.06)))
     print('     entry gate: the position is skipped when the spot fair value at its entry is under its cost (fee in) less the margin shown.')
     for lab, lz, rm in rowsL:
         for dp in (False, True):
