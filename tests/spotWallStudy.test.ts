@@ -43,10 +43,15 @@ test('band outcomes: touch, far edge and bounce per band, either side; holes and
   assert.equal(t.bounce[1], Infinity);
 });
 
-test('second path carries the last price of each second forward', () => {
-  const { t0, px } = secondPath([1_000_500, 10, 1_000_900, 11, 1_003_100, 12]);
+test('second path carries the last price of each second forward; staleness is judged by tick arrival', () => {
+  const { t0, px, age } = secondPath([1_000_500, 10, 1_000_900, 11, 1_003_100, 12]);
   assert.equal(t0, 1000);
   assert.deepEqual([...px], [11, 11, 11, 12]);
+  assert.deepEqual([...age], [0, 1, 2, 0]);
+  // A flat price with a tick every second is not a hole; 3 s without a tick is, at a 2 s limit.
+  const flat = Float64Array.from([100, 100, 100, 100, 100]);
+  assert.ok(bandOutcomes(flat, 0, 4, 100, 0.01, 3, true, Float64Array.from([0, 0, 0, 0, 0]), 2));
+  assert.equal(bandOutcomes(flat, 0, 4, 100, 0.01, 3, true, Float64Array.from([0, 1, 2, 3, 0]), 2), undefined);
 });
 
 test('integrity: a clean book passes; crossed, cut-short or out-of-step books fail', () => {

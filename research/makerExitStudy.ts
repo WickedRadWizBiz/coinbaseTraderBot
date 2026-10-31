@@ -320,7 +320,7 @@ export async function runStudy(o: { recordings: string; audit: string; days: str
   // Only the lots' markets' books and trades are parsed (most of a recorded day is other markets' books).
   const keep = (kind: string, line: string) => {
     if (kind === 'book' || kind === 'delta' || kind === 'trade') { const m = TICKER.exec(line.slice(0, 200)); return Boolean(m && tickers.has(m[1])); }
-    return kind === 'market' || kind === 'index' || kind === 'result' || kind === 'lifecycle' || kind === 'spot_book';
+    return kind === 'market' || kind === 'index' || kind === 'result' || kind === 'lifecycle' || kind === 'spot_book' || kind === 'spot';
   };
   const days = [...o.days].sort();
   const markets = new Map<string, Mkt>();
@@ -329,6 +329,7 @@ export async function runStudy(o: { recordings: string; audit: string; days: str
   const bars = new Map<string, Candle[]>();
   const results = new Map<string, 'yes' | 'no'>();
   const spotWalls = new SpotWallTracker();
+  const coinbase = new Map<string, { value: number; ts: number }>();
   const pending = [...lots];
   let next = 0, order = 0;
   type Active = { lot: Lot; m: Mkt; sells: Partial<Record<Rule, RestingSell>> };
@@ -390,9 +391,11 @@ export async function runStudy(o: { recordings: string; audit: string; days: str
       };
       const withWall = (side: number | undefined) => (side === undefined ? undefined : wall !== undefined && wall >= floor - EPS && wall < side ? clamp(wall) : side);
       const Lsr = nextLevel(bars.get(m.asset) ?? [], spot, up);
-      // The wall's distance from the Coinbase mid, carried onto the index the contract settles on (they differ by bps).
-      const raw = spotWalls.wallLevel(m.asset, now, up), sv = spotWalls.latest(m.asset);
-      const Lsw = raw !== undefined && sv ? spot * (raw / sv.mid) : undefined;
+      // The wall's own Coinbase price, carried onto the index the contract settles on by the current Coinbase-to-index
+      // gap (they differ by bps); a wall spot has already passed gives no level.
+      const raw = spotWalls.wallLevel(m.asset, now, up), cb = coinbase.get(m.asset);
+      const L0 = raw !== undefined && cb && now - cb.ts <= 10_000 ? raw * (spot / cb.value) : undefined;
+      const Lsw = L0 !== undefined && (up ? L0 > spot : L0 < spot) ? L0 : undefined;
       const sr = at(Lsr), sw = at(Lsw);
       if (sr !== undefined) { targets.sr = sr; targets['sr+wall'] = withWall(sr); }
       if (sw !== undefined) { targets.spotwall = sw; targets['spotwall+wall'] = withWall(sw); }
@@ -486,6 +489,9 @@ export async function runStudy(o: { recordings: string; audit: string; days: str
       }
       case 'trade':
         for (const g of groups(active.get(e.ticker) ?? [])) allocateTrade(g, e.t, e.price, e.count, e.takerSide);
+        break;
+      case 'spot':
+        if (!e.hist && e.asset && e.value > 0) coinbase.set(e.asset, { value: e.value, ts: e.ts ?? e.t });
         break;
       case 'spot_book':
         if (!e.hist && e.asset) spotWalls.add(e.asset, { ts: e.ts ?? e.t, b: e.b ?? [], a: e.a ?? [], bw: e.bw, bb: e.bb, ba: e.ba });

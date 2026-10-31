@@ -112,6 +112,7 @@ jobs:
       - name: Maker exit study with spot wall targets
         if: steps.walls.outputs.code == '0'
         run: |
+          set -o pipefail
           T0=$(date +%s)
           node --max-old-space-size=6144 --import tsx research/makerExitStudy.ts --recordings data/recordings --audit data/audit \
             --days "$(cat data/sweeps/study-days.txt)" --out data/sweeps/maker-exit-study.json | tee data/sweeps/maker-exit-study.txt

@@ -9,10 +9,12 @@
 //    (the same side, the same distance from the mid) held over the hour before (its median; nothing later is used).
 //    From each snapshot, over the next 5 and 15 minutes of ticker prices: did the price reach the band (touched),
 //    stop inside it (held: it never reached the band's far edge), or come back a band's width toward where it started
-//    after touching it (bounced)? Walls are compared with plain bands at the same coin, side and distance, and the
+//    after touching it (bounced)? Walls are compared with plain bands at the same coin, side, distance and volatility
+//    third (the price range of the 5 minutes before), and the
 //    difference in held and bounced rates is pooled over those strata (each weighted tw*tp/(tw+tp) by its touch
 //    counts), with a 90% interval from resampling whole hours. Also: whether a touched wall was still there (at least
-//    half its z) in the last snapshot before the touch, and how often each distance is reached at all.
+//    half its size left in its price range) in the last snapshot before the touch, and how often each distance is
+//    reached at all.
 //
 //   npm run research:spot-wall-study -- --recordings data/recordings [--from 2026-10-29] [--to 2026-10-31] [--out f.json]
 //
@@ -146,31 +148,33 @@ export function checkIntegrity(asset: string, lines: Array<SpotBookLine & { t: n
   return r;
 }
 
-/** One second-by-second price path (the last ticker price of each second, carried forward). */
-export function secondPath(ticks: Float64Array | number[]): { t0: number; px: Float64Array } {
+/** One second-by-second price path (the last ticker price of each second, carried forward) and, per second, how many
+ *  seconds since a tick last arrived (a feed gap, as opposed to trades printing at one price). */
+export function secondPath(ticks: Float64Array | number[]): { t0: number; px: Float64Array; age: Float64Array } {
   const T = ticks.length / 2;
-  if (!T) return { t0: 0, px: new Float64Array(0) };
+  if (!T) return { t0: 0, px: new Float64Array(0), age: new Float64Array(0) };
   const t0 = Math.floor(ticks[0] / 1000), t1 = Math.floor(ticks[2 * (T - 1)] / 1000);
   const px = new Float64Array(t1 - t0 + 1).fill(NaN);
-  for (let i = 0; i < T; i++) px[Math.floor(ticks[2 * i] / 1000) - t0] = ticks[2 * i + 1];
-  for (let i = 1; i < px.length; i++) if (Number.isNaN(px[i])) px[i] = px[i - 1];
-  return { t0, px };
+  const age = new Float64Array(px.length).fill(NaN);
+  for (let i = 0; i < T; i++) { const j = Math.floor(ticks[2 * i] / 1000) - t0; px[j] = ticks[2 * i + 1]; age[j] = 0; }
+  for (let i = 1; i < px.length; i++) if (Number.isNaN(px[i])) { px[i] = px[i - 1]; age[i] = age[i - 1] + 1; }
+  return { t0, px, age };
 }
 
 /** From second s (exclusive) over H seconds: for bands k = 1..n-1 on one side, the first second the price reached each
  *  band's near edge (k) and far edge (k+1), and the first second it came back a band's width toward the start after
- *  reaching band k. Infinity where it never did; undefined if the path has a hole or ends inside the horizon. */
-export function bandOutcomes(px: Float64Array, s: number, H: number, mid: number, w: number, n: number, up: boolean, maxStaleSec = 120):
+ *  reaching band k. Infinity where it never did; undefined if the path has a hole (no tick for over maxStaleSec, judged
+ *  by tick arrival, never by an unchanged price) or ends inside the horizon. */
+export function bandOutcomes(px: Float64Array, s: number, H: number, mid: number, w: number, n: number, up: boolean, age?: Float64Array, maxStaleSec = 120):
   { touch: number[]; bounce: number[] } | undefined {
   if (s < 0 || s + H >= px.length) return undefined;
   const edge = (k: number) => (up ? mid * (1 + k * w) : mid * (1 - k * w));
   const touch = new Array<number>(n + 1).fill(Infinity), bounce = new Array<number>(n + 1).fill(Infinity);
-  let next = 1, last = px[s], same = 0;
+  let next = 1;
   for (let d = 1; d <= H; d++) {
     const p = px[s + d];
     if (Number.isNaN(p)) return undefined;
-    same = p === last ? same + 1 : 0; last = p;
-    if (same > maxStaleSec) return undefined;
+    if (age && age[s + d] > maxStaleSec) return undefined;
     while (next <= n && (up ? p >= edge(next) : p <= edge(next))) touch[next++] = d;
     for (let k = 1; k < next && k < n; k++) {
       if (bounce[k] !== Infinity || touch[k + 1] !== Infinity) continue;
@@ -190,7 +194,8 @@ export interface WallStudy {
   effect: Record<string, { held: [number, number, number]; bounce: [number, number, number]; strata: number; wallTouches: number; plainTouches: number }>;
   /** Per horizon, side and distance (bands from the mid), over the passing coins: walls vs plain bands. */
   table: Array<{ H: number; side: 'ask' | 'bid'; k: number; wall: Count; plain: Count }>;
-  /** Touched walls (15 min): still a wall (z >= half) in the last snapshot before the touch, and their held rate. */
+  /** Touched walls (15 min): at least half the wall's size still in its price range in the last snapshot before the
+   *  touch, and their held rate. */
   persistence: { touched: number; stayed: number; heldStayed: number; pulled: number; heldPulled: number; unknown: number };
 }
 
@@ -222,19 +227,32 @@ export async function runWallStudy(o: { recordings: string; from?: string; to?: 
     integrity.push(integ);
     log(`[integrity] ${asset}: ${integ.pass ? 'PASS' : `FAIL (${integ.why.join('; ')})`}`);
     if (!integ.pass) continue;
-    const { t0, px } = secondPath(ticks);
+    const { t0, px, age } = secondPath(ticks);
     const tracker = new SpotWallTracker();
     const views: WallView[] = [];
     for (const l of lines) { const v = tracker.add(asset, l); if (v) views.push(v); }
+    // The 5 minutes before each snapshot: its price range (bps), so walls are compared with plain bands in the same
+    // volatility third (a calm market reaches fewer bands and may also carry thicker books).
+    const vol = views.map((v) => {
+      const s = Math.ceil(v.ts / 1000) - t0;
+      if (s - 300 < 0 || s >= px.length) return NaN;
+      let lo = Infinity, hi = -Infinity;
+      for (let d = s - 300; d <= s; d++) { const p = px[d]; if (p < lo) lo = p; if (p > hi) hi = p; }
+      return Number.isFinite(lo) && Number.isFinite(hi) ? ((hi - lo) / v.mid) * 10_000 : NaN;
+    });
+    const vs = vol.filter(Number.isFinite).sort((x, y) => x - y);
+    const cut1 = vs[Math.floor(vs.length / 3)] ?? Infinity, cut2 = vs[Math.floor((2 * vs.length) / 3)] ?? Infinity;
     for (let i = 0; i < views.length; i++) {
       const v = views[i];
       const w = v.bw / 10_000;
       const s = Math.ceil(v.ts / 1000) - t0;
       const hour = Math.floor(v.ts / 3_600_000);
+      if (!Number.isFinite(vol[i])) continue;
+      const third = vol[i] < cut1 ? 0 : vol[i] < cut2 ? 1 : 2;
       for (const side of ['ask', 'bid'] as const) {
         const z = side === 'ask' ? v.zAsk : v.zBid;
         const nb = z.length;
-        const out = bandOutcomes(px, s, HS[HS.length - 1], v.mid, w, nb, side === 'ask');
+        const out = bandOutcomes(px, s, HS[HS.length - 1], v.mid, w, nb, side === 'ask', age);
         if (!out) continue;
         for (let k = 1; k < nb; k++) {
           if (!Number.isFinite(z[k])) continue;
@@ -248,26 +266,35 @@ export async function runWallStudy(o: { recordings: string; from?: string; to?: 
             const c = isWall ? row.wall : row.plain;
             c.n++; if (touched) c.touch++; if (held) c.held++; if (bounced) c.bounce++;
             const hm = byHour.get(hour) ?? byHour.set(hour, new Map()).get(hour)!;
-            const sk = `${asset}|${key}`;
+            const sk = `${asset}|v${third}|${key}`;
             const hs = hm.get(sk) ?? hm.set(sk, { w: zc(), p: zc() }).get(sk)!;
             const hc = isWall ? hs.w : hs.p;
             hc.n++; if (touched) hc.touch++; if (held) hc.held++; if (bounced) hc.bounce++;
           }
           if (isWall && out.touch[k] <= 900) {
-            // Was it still there just before the price arrived? The band holding the wall's middle in the last snapshot
-            // at or before the touch, against that band's own history then.
+            // Was it still there just before the price arrived? The size resting in the wall's own price range in the last
+            // snapshot at or before the touch (each band of that snapshot pro-rated by its overlap with the range),
+            // against the wall's size when it was seen: stayed if at least half is left.
             persistence.touched++;
             const tt = (s + out.touch[k] + t0) * 1000;
             let lo = i, hi = views.length - 1;
             while (lo < hi) { const m = (lo + hi + 1) >> 1; if (views[m].ts <= tt) lo = m; else hi = m - 1; }
             const vi = lo;
             const u = views[vi];
-            const c = side === 'ask' ? v.mid * (1 + (k + 0.5) * w) : v.mid * (1 - (k + 0.5) * w);
-            const j = Math.floor((Math.abs(c - u.mid) / u.mid) * 10_000 / u.bw);
-            const zz = (side === 'ask') === (c > u.mid) ? (side === 'ask' ? u.zAsk : u.zBid)[j] : NaN;
+            const rLo = side === 'ask' ? v.mid * (1 + k * w) : v.mid * (1 - (k + 1) * w);
+            const rHi = side === 'ask' ? v.mid * (1 + (k + 1) * w) : v.mid * (1 - k * w);
+            const uSizes = side === 'ask' ? u.ask : u.bid, uw = u.bw / 10_000;
+            let left = 0;
+            for (let b = 0; b < uSizes.length; b++) {
+              const bl = side === 'ask' ? u.mid * (1 + b * uw) : u.mid * (1 - (b + 1) * uw);
+              const bh = side === 'ask' ? u.mid * (1 + (b + 1) * uw) : u.mid * (1 - b * uw);
+              left += (uSizes[b] * Math.max(0, Math.min(rHi, bh) - Math.max(rLo, bl))) / (bh - bl);
+            }
+            const was = (side === 'ask' ? v.ask : v.bid)[k];
+            const share = was > 0 ? left / was : NaN;
             const held = !(out.touch[k + 1] <= 900);
-            if (vi === i || !Number.isFinite(zz)) persistence.unknown++;
-            else if (zz >= wallZ / 2) { persistence.stayed++; if (held) persistence.heldStayed++; }
+            if (vi === i || !Number.isFinite(share)) persistence.unknown++;
+            else if (share >= 0.5) { persistence.stayed++; if (held) persistence.heldStayed++; }
             else { persistence.pulled++; if (held) persistence.heldPulled++; }
           }
         }
@@ -293,8 +320,9 @@ export async function runWallStudy(o: { recordings: string; from?: string; to?: 
     return { d: den ? (100 * num) / den : NaN, strata, wt, pt };
   };
   const boot = o.boot ?? 500;
+  // mulberry32: a 2^32 period, plenty for the resamples (a float LCG lost its low bits and cycled after ~10k draws).
   let seed = 12345;
-  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x80000000; };
+  const rnd = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
   const all = hours.map((_, i) => i);
   const effect: WallStudy['effect'] = {};
   for (const H of HS) {
@@ -323,7 +351,7 @@ export function wallReport(r: WallStudy): string {
       + `bands contain the top ${pc(i.bandsConsistent, 1)}, outer bands filled ${pc(i.outerBandsFilled, 1)}, whole-band size ${f1(i.bandsOverTopMedian)}x the top levels`
       + (i.why.length ? `  -> ${i.why.join('; ')}` : ''));
   }
-  out.push('', 'Walls vs plain bands (pooled over coin, side and distance; points, 90% interval from resampled hours)');
+  out.push('', 'Walls vs plain bands (pooled over coin, side, distance and volatility third; points, 90% interval from resampled hours)');
   for (const [h, e] of Object.entries(r.effect)) {
     out.push(`  ${h.padEnd(6)} held ${f1(e.held[0])} [${f1(e.held[1])}, ${f1(e.held[2])}]   bounced ${f1(e.bounce[0])} [${f1(e.bounce[1])}, ${f1(e.bounce[2])}]   (${e.strata} strata, ${e.wallTouches} wall / ${e.plainTouches} plain touches)`);
   }
