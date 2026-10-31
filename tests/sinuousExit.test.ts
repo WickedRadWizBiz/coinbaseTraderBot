@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'fs';
 import path from 'path';
 import { test } from 'node:test';
 import { loadConfig } from '../bot/config';
@@ -153,7 +154,7 @@ test('gate: monitor mode never holds; a settlement scores a held exit at the pay
   assert.ok(Math.abs((u.usd as number) - 0) < 1e-9, 'bid 0.595 net 0.585, the same as when held');
 });
 
-test('gate: benched by the probation rules when holding costs money, and the bench survives a restart', () => {
+test('gate: a window the probation rules reject makes it one level stricter (never benched), and the level survives a restart', () => {
   const file = path.join(tmpDir(), 'curve-exit.json');
   const events: CurveEvent[] = [];
   const g = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { ...BENCH, maxLossUsd: 3 }, file, (e) => events.push(e), 0);
@@ -166,20 +167,17 @@ test('gate: benched by the probation rules when holding costs money, and the ben
     // The trailing stop sells 12c lower: holding cost $1.20.
     g.check(t, { ...exit, sidePrice: 0.475, protective: true }, now);
   }
-  assert.ok(g.status().benched, 'net -$3.60 reached the $3 limit');
-  assert.equal(g.active, false);
-  assert.ok(events.some((e) => e.event === 'benched'));
-  // Benched: profit exits go out (with a note).
-  for (let i = 0; i < 20; i++) g.observe('V', 'crypto_15m', obs((now += 1000), 0.6));
-  const v = g.check('V', { ...exit, protective: false }, now);
-  assert.equal(v.allow, true);
-  assert.match(v.note!, /benched/);
+  assert.deepEqual([g.status().benched, g.status().level, g.status().scored], [null, 1, 0], 'net -$3.60 reached the $3 limit: level 1, a fresh window');
+  assert.equal(g.active, true, 'still holding profit exits');
+  assert.ok(events.some((e) => e.event === 'stricter' && e.level === 1));
   const again = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { ...BENCH, maxLossUsd: 3 }, file, undefined, 0);
-  assert.ok(again.status().benched);
+  assert.equal(again.level, 1);
   again.reset(now);
-  assert.equal(again.status().benched, null);
-  assert.equal(again.status().scored, 0);
-  assert.equal(again.active, true);
+  assert.deepEqual([again.level, again.status().scored, again.active], [0, 0, true]);
+  // A bench saved before the ladder comes back as level 1 with a fresh window.
+  fs.writeFileSync(file, JSON.stringify({ results: [-1, -2], since: 0, benched: { at: 0, reason: 'old' } }));
+  const old = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, BENCH, file, undefined, 5);
+  assert.deepEqual([old.level, old.status().scored, old.status().benched], [1, 0, null]);
 });
 
 test('gate: a scoreboard saved under another restart tag starts over once (the owner turning paper back on); live keeps its own', () => {
@@ -190,18 +188,16 @@ test('gate: a scoreboard saved under another restart tag starts over once (the o
   for (let i = 0; i < 20; i++) g.observe('T', 'crypto_15m', obs((now += 1000), 0.6));
   g.check('T', { ...exit, protective: false }, now);
   g.check('T', { ...exit, sidePrice: 0.475, protective: true }, now);
-  assert.ok(g.status().benched, 'held exit cost $1.20: benched');
-  // Live (no tag): the bench stays.
-  assert.ok(new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, BENCH, file, undefined, now).status().benched);
+  assert.equal(g.level, 1, 'held exit cost $1.20: one level stricter');
+  // Live (no tag): the level stays.
+  assert.equal(new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, BENCH, file, undefined, now).level, 1);
   // Paper with the tag: started over once, the old scoreboard noted in the event.
   const events: CurveEvent[] = [];
   const paper = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, { ...BENCH, t: 2, minTrades: 30 }, file, (e) => events.push(e), now, 'owner-on');
-  assert.equal(paper.status().benched, null);
-  assert.equal(paper.status().scored, 0);
-  assert.equal(paper.active, true);
+  assert.deepEqual([paper.status().benched, paper.level, paper.status().scored, paper.active], [null, 0, 0, true]);
   assert.deepEqual(paper.status().benchRule, { t: 2, minExits: 30, maxLossUsd: 25 });
   assert.equal(events[0]?.event, 'reset');
-  assert.deepEqual((events[0] as { before?: unknown }).before, { scored: 1, benched: 'holding profit exits cost $1.20 over 1 exits (limit $1)' });
+  assert.deepEqual((events[0] as { before?: unknown }).before, { scored: 0, benched: null, level: 1 });
   // The same tag again (a restart): nothing is reset; a manual reset keeps the tag.
   paper.reset(now + 1);
   const again: CurveEvent[] = [];
@@ -210,7 +206,7 @@ test('gate: a scoreboard saved under another restart tag starts over once (the o
   assert.equal(again.length, 0);
 });
 
-test('gate: the paper bench rule (t <= -2 after 30 held exits) leaves a curve losing within luck running', () => {
+test('gate: the paper rule (t <= -2 after 30 held exits) leaves a curve losing within luck at level 0', () => {
   const run = (bench: { minTrades: number; t: number; maxLossUsd: number; window: number }) => {
     const g = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, bench, undefined, undefined, 0);
     let now = 0;
@@ -225,9 +221,9 @@ test('gate: the paper bench rule (t <= -2 after 30 held exits) leaves a curve lo
     return g.status();
   };
   const loose = run({ minTrades: 20, t: 0.5, maxLossUsd: 25, window: 200 });
-  assert.ok(loose.benched, `benched under a loose rule (t ${loose.t})`);
+  assert.ok(loose.level >= 1 && loose.benched === null, `stricter under a loose rule, never benched (level ${loose.level})`);
   const paper = run({ minTrades: 30, t: 2, maxLossUsd: 25, window: 200 });
-  assert.equal(paper.benched, null, `t ${paper.t} is within luck`);
+  assert.deepEqual([paper.benched, paper.level], [null, 0], `t ${paper.t} is within luck`);
   assert.equal(paper.scored, 42);
 });
 
@@ -343,31 +339,33 @@ test('cross mode (paper\'s default): the curve sells on a confirmed cross but ne
   assert.equal('paperMode' in cfg, false, 'no paper-only mode');
 });
 
-test('rest mode: the cross is benched when selling on it loses against holding; the resting sells go on', () => {
+test('rest mode: a cross losing against holding gets one level stricter (a fair-value confirm), never benched; the resting sells go on', () => {
   const events: CurveEvent[] = [];
-  const g = new SinuousExitGate({ mode: 'rest', minNetProfit: 0.015, restBandSigmas: 0 }, { minTrades: 20, t: 1, maxLossUsd: 5, window: 200 }, undefined, (e) => events.push(e), 0);
+  const g = new SinuousExitGate({ mode: 'rest', minNetProfit: 0.015, restBandSigmas: 0, crossFeeMargin: 0.25 }, { minTrades: 20, t: 1, maxLossUsd: 5, window: 200 }, undefined, (e) => events.push(e), 0);
   let now = 0;
   for (const t of ['A', 'B']) {
     now = rollOver(g, t, now);
-    assert.equal(g.cross(t, CROSS, now).sell, true);
+    assert.equal(g.cross(t, { ...CROSS, fvSide: 0.95 }, now).sell, true, 'level 0: no fair-value confirm');
     g.crossFilled(t, 1, CROSS.sidePrice, CROSS.count, CROSS.exitFeePer, now);
     // YES settles: holding would have paid $1 a contract, so each sale lost (1 - 0.6135) x 10.
     g.settled(t, 'yes', now);
   }
   const s = g.status();
-  assert.ok(s.benched, JSON.stringify(s));
-  assert.match(s.benched!.reason, /^selling on the cross cost \$7\.73 against holding to settlement over 2 exits \(limit \$5\)$/);
-  assert.ok(events.some((e) => e.event === 'benched'));
+  assert.deepEqual([s.benched, s.level], [null, 1], JSON.stringify(s));
+  const step = events.find((e) => e.event === 'stricter');
+  assert.match(String(step?.reason), /^selling on the cross \(against holding to settlement\) cost \$7\.73 over 2 results \(limit \$5\)$/);
   now = rollOver(g, 'C', now);
-  const c = g.cross('C', CROSS, now);
+  // Level 1: the coin says the side is worth 0.95, far above the net bid: the cross waits.
+  const c = g.cross('C', { ...CROSS, fvSide: 0.95 }, now);
   assert.equal(c.sell, false);
-  assert.match(c.note ?? '', /the cross is benched/);
+  assert.match(c.note ?? '', /fair value 0\.950 is above the net bid 0\.614 \+ 0\.04 \(level 1\)/);
+  assert.equal(g.cross('C', { ...CROSS, fvSide: 0.6 }, now).sell, true, 'the coin agrees: sells');
   assert.notEqual(g.restTarget('C', 400), undefined, 'the resting sell goes on');
   g.reset(now);
-  assert.equal(g.cross('C', CROSS, now).sell, true, 'a reset turns the cross back on');
+  assert.equal(g.cross('C', { ...CROSS, fvSide: 0.95 }, now).sell, true, 'a reset goes back to level 0');
 });
 
-test('cross on the live line: sells on its break when the sale clears the floor; never without one, under the floor, near the close or benched', () => {
+test('cross on the live line: sells on its break when the sale clears the floor; never without one, under the floor, near the close; stricter after losses', () => {
   const g = new SinuousExitGate({ mode: 'cross', minNetProfit: 0.015, crossSource: 'line' }, { minTrades: 20, t: 1, maxLossUsd: 1, window: 200 }, undefined, undefined, 0);
   const line = (broke: boolean) => ({ price: 100, projected: 100.05, band: { lower: 99.98, upper: 100.12, k: 2, sec: 240 }, underSd: broke ? 2.4 : 1.2, slope: -0.3, breakSec: broke ? 2 : 0, broke });
   // The order-book curve does not matter here: the line alone decides (no book curve has been fed at all).
@@ -378,11 +376,16 @@ test('cross on the live line: sells on its break when the sale clears the floor;
   const c = g.cross('T', { ...CROSS, spot: 'with', line: line(true) }, 0);
   assert.equal(c.sell, true, 'the coin turn of the book source is not needed');
   assert.match(c.why!, /^exit curve: cross 0\.63 \(\+0\.203 a contract net, live line outside its wiggle band for 2 s \(2\.4 sd, band \+-2 sd of 240 s since the open\)\)$/);
-  // Scored on the fill like the book cross; losing past the dollar limit benches it.
+  // Scored on the fill like the book cross; losing past the dollar limit makes it one level stricter.
   g.crossFilled('T', 1, 0.63, 10, 0.0165, 0);
   g.settled('T', 'yes', 1000);
-  assert.ok(g.status().benched);
-  assert.match(g.cross('U', { ...CROSS, line: line(true) }, 2000).note ?? '', /the cross is benched/);
+  assert.deepEqual([g.status().benched, g.level], [null, 1]);
+  assert.match(g.cross('U', { ...CROSS, line: line(true), fvSide: 0.9 }, 2000).note ?? '', /fair value 0\.900 is above the net bid/);
+  assert.equal(g.cross('U', { ...CROSS, line: line(true), fvSide: 0.6 }, 2000).sell, true);
+  // A pinned level (SINUOUS_CROSS_LEVEL) holds whatever the scores say.
+  const pinned = new SinuousExitGate({ mode: 'cross', minNetProfit: 0.015, crossSource: 'line', crossLevel: 3 }, { minTrades: 20, t: 1, maxLossUsd: 1, window: 200 }, undefined, undefined, 0);
+  assert.equal(pinned.level, 3);
+  assert.equal(pinned.cross('U', { ...CROSS, line: line(true), fvSide: 0.63 }, 0).sell, false, 'level 3: margin 0.01 above the 0.6135 net bid');
   // The defaults: the cross watches the live line, and its sell signal is off until it beats the other exits.
   const d = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40) }).sinuousExit;
   assert.deepEqual([d.crossSource, d.cross], ['line', false]);

@@ -10,7 +10,9 @@ import { parseSessionRisk, type SessionRiskProfile } from './model/sessionRisk';
 import { DEFAULT_PROBATION, type ProbationParams } from './risk/probation';
 import { FEE_SCHEDULE_URL } from './kalshi/feeSchedule';
 import { DEFAULT_SINUOUS_ENTRY, type SinuousEntryParams } from './strategy/sinuousEntry';
-import { DEFAULT_SINUOUS_EXIT, type SinuousExitParams } from './strategy/sinuousExit';
+import { DEFAULT_CROSS_FV_MARGINS, DEFAULT_SINUOUS_EXIT, type SinuousExitParams } from './strategy/sinuousExit';
+import { parseLevelMargins } from './strategy/levelLadder';
+import { DEFAULT_TP_FV_MARGINS } from './strategy/fairValueStrategy';
 import { defaultTiers, validateTiers, type TierPoint } from './risk/sizingTiers';
 import type { AccuracyGateConfig } from './strategy/accuracyGate';
 import type { VaultConfig } from './vault/vault';
@@ -123,6 +125,11 @@ export interface StrategyConfig {
   /** Take-profit bench (bot/strategy/takeProfitBench.ts): its crypto sales scored against holding to settlement, the
    *  take-profit benched on the exit curve's rule. false = scored only, never benched. */
   takeProfitBench: boolean;
+  /** The take-profit's strictness ladder (Oct 31, never bench): TP_LEVEL pins a level (-1: the ladder decides), TP_LEVEL_MAX
+   *  caps it, TP_FV_MARGINS the fair-value confirm by level (bot/strategy/levelLadder.ts). */
+  takeProfitLevel: number;
+  takeProfitLevelMax: number;
+  takeProfitFvMargins?: number[];
   /** relaxed = decide on each 1-minute bar close or on a trigger (spec cadence); continuous = every tick. */
   cadence: 'relaxed' | 'continuous';
   /** Scheduled evaluation period, fair-value move that triggers an evaluation, re-price period, and the floor between evaluations. */
@@ -1139,6 +1146,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     // The owner, Oct 24: the take-profit goes on the exit curve's scoreboard and bench (it sold winners for $230 less
     // than holding them on Oct 23-24).
     takeProfitBench: bool(env, 'TAKE_PROFIT_BENCH', true),
+    takeProfitLevel: Math.round(num(env, 'TP_LEVEL', -1, -1, 10)),
+    takeProfitLevelMax: Math.round(num(env, 'TP_LEVEL_MAX', 4, 0, 10)),
+    takeProfitFvMargins: parseLevelMargins(env.TP_FV_MARGINS, DEFAULT_TP_FV_MARGINS),
     cadence,
     evalBarSec: num(env, 'STRATEGY_EVAL_BAR_SEC', 60, 5, 600),
     evalFvMove: num(env, 'STRATEGY_EVAL_FV_MOVE', 0.015, 0.001, 0.2),
@@ -1284,6 +1294,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       // Paper and live alike; the paper-only names from before Oct 24 are still read.
       benchT: num(env, 'SINUOUS_BENCH_T', num(env, 'SINUOUS_PAPER_BENCH_T', 2, 0.5, 10), 0.5, 10),
       benchMinExits: num(env, 'SINUOUS_BENCH_MIN_EXITS', num(env, 'SINUOUS_PAPER_BENCH_MIN_EXITS', 30, 5, 10_000), 5, 10_000),
+      // The cross's strictness ladder (Oct 31: a trip makes it stricter, never benched; bot/strategy/levelLadder.ts).
+      crossFvMargins: parseLevelMargins(env.SINUOUS_CROSS_FV_MARGINS, DEFAULT_CROSS_FV_MARGINS),
+      crossLevel: Math.round(num(env, 'SINUOUS_CROSS_LEVEL', -1, -1, 10)),
+      crossLevelMax: Math.round(num(env, 'SINUOUS_CROSS_LEVEL_MAX', 4, 0, 10)),
     },
     sinuousEntry: {
       mode: oneOf(env, 'SINUOUS_ENTRY', DEFAULT_SINUOUS_ENTRY.mode, ['gate', 'monitor', 'off'] as const),

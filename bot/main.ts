@@ -133,17 +133,17 @@ async function main(): Promise<void> {
   const curveBench = { ...cfg.probation, t: cfg.sinuousExit.benchT ?? cfg.probation.t, minTrades: cfg.sinuousExit.benchMinExits ?? cfg.probation.minTrades };
   const curveExit = curveParams.mode === 'off' ? undefined : new SinuousExitGate(curveParams, curveBench, path.join(cfg.bookDir, 'curve-exit.json'), (e) => {
     audit.write('curve_exit', e);
-    if (e.event === 'benched') alerter.notify('warn', 'curve-exit', curveParams.mode === 'rest' || curveParams.mode === 'cross'
-      ? `Exit curve's cross benched (it stops selling on the cross until a reset${curveParams.mode === 'rest' ? '; the resting sells go on' : ''}): ${String(e.reason)}`
-      : `Exit curve benched (profit exits go out without waiting for it until a reset): ${String(e.reason)}`);
+    // Never benched (Oct 31): a rejected window makes the cross one level stricter (bot/strategy/levelLadder.ts).
+    if (e.event === 'stricter' || e.event === 'looser') alerter.notify('info', 'curve-exit', `Exit curve's cross ${e.event} (level ${String(e.from)} -> ${String(e.level)}): ${String(e.reason)}`);
   }, Date.now(), 'cross-fills-2026-10-24');
   // Take-profit bench (bot/strategy/takeProfitBench.ts; the owner, Oct 24: the take-profit goes on the exit curve's
   // scoreboard and bench): each crypto take-profit sale against holding to settlement, benched on the curve's rule
   // (TAKE_PROFIT_BENCH=false: scored only). Each book keeps its own scoreboard (DATA_DIR and DATA_DIR/live).
   const takeProfitBench = new TakeProfitBench(cfg.strategy.takeProfitBench, curveBench, path.join(cfg.bookDir, 'take-profit-bench.json'), (e) => {
     audit.write('take_profit_bench', e);
-    if (e.event === 'benched') alerter.notify('warn', 'take-profit-bench', `Take-profit benched (winners ride to the model exit, the ratchet stop or settlement until a reset): ${String(e.reason)}`);
-  });
+    // Never benched (Oct 31): a rejected window makes the take-profit one level stricter (its fair-value confirm).
+    if (e.event === 'stricter' || e.event === 'looser') alerter.notify('info', 'take-profit-bench', `Take-profit ${e.event} (level ${String(e.from)} -> ${String(e.level)}): ${String(e.reason)}`);
+  }, Date.now(), { pinned: cfg.strategy.takeProfitLevel, max: cfg.strategy.takeProfitLevelMax });
   // The live line (bot/strategy/liveLine.ts): each coin's settlement index as a curve, shared by its contracts; the cross
   // watches it (SINUOUS_CROSS_SOURCE=line) and the depth monitor shows each held position's reading.
   const liveLines = curveExit ? new LiveLines(cfg.sinuousExit.line) : undefined;

@@ -2182,6 +2182,7 @@ export class Engine {
       entryFeePerContract: pos && Math.abs(pos.yes) > 1e-9 ? pos.fees / Math.abs(pos.yes) : undefined,
       profitPeakSidePrice: this.profitPeaks.update(m.ticker, st.position, st.position > 0 ? bid.price : st.position < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
       ...(this.d.takeProfitBench?.benched ? { takeProfitBenched: this.d.takeProfitBench.benched } : {}),
+      ...(this.d.takeProfitBench ? { takeProfitLevel: this.d.takeProfitBench.level } : {}),
       entryWindowOpen, exitWindowOpen: tauSec > S.noExitBeforeCloseSec,
       settleShare: Number.isFinite(m.openTime) && tauSec <= S.noExitBeforeCloseFrac * (m.closeTime - m.openTime) / 1000,
     };
@@ -2439,7 +2440,7 @@ export class Engine {
           const turn = ret === undefined || direction === 0 || Math.abs(ret) < 0.25 * vol.sigmaPerSqrtSec * Math.sqrt(win) ? 'flat' : Math.sign(ret) * direction * sign < 0 ? 'against' : 'with';
           const exitFeePer = orderFee(n, sideBid, true, fees) / n;
           const floor = Math.max(S.profitTarget ?? 0, (S.profitTargetPct ?? 0) * (entrySide + entryFeePer));
-          const c = curve.cross(m.ticker, { sidePrice: sideBid, count: n, exitFeePer, entrySidePrice: entrySide, entryFeePer, floor, tauSec, spot: turn, line: st.line }, now);
+          const c = curve.cross(m.ticker, { sidePrice: sideBid, count: n, exitFeePer, entrySidePrice: entrySide, entryFeePer, floor, tauSec, spot: turn, line: st.line, fvSide: sign > 0 ? fv.pYes : 1 - fv.pYes }, now);
           if (c.note) plan.notes.push(c.note);
           if (c.sell) {
             const q = st.q ?? pYes;

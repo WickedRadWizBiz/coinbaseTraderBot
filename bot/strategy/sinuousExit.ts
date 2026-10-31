@@ -37,7 +37,10 @@
 // Scoreboard. Each profit exit the curve holds back is scored when the position finally exits: (exit price then -
 // exit price when first held) x contracts, both net of the exit fee; a settlement counts at 1 or 0. Under the
 // probation rules (bot/risk/probation.ts: a net loss beyond PROBATION_MAX_LOSS_USD, or after PROBATION_MIN_TRADES a
-// negative net with t <= -PROBATION_T) the gate is benched and exits go out as before, until a reset.
+// negative net with t <= -PROBATION_T) the cross used to be benched. Since Oct 31 (Steven: rework, never bench) a rejected
+// window makes it one level stricter instead (bot/strategy/levelLadder.ts): from level 1 the cross also needs the coin's
+// spot fair value of the side to be at most the net bid plus the level's margin (SINUOUS_CROSS_FV_MARGINS), and its fee
+// margin grows with the level; a winning window at a raised level steps it back.
 //
 // SINUOUS_EXIT=gate (default) holds profit exits for the curve; monitor computes and shows it without holding
 // anything; rest places the exit instead of holding it (below); off. SINUOUS_MIN_PROFIT_CENTS (default 1.5): the net
@@ -75,8 +78,10 @@
 
 import type { BookLevel } from '../kalshi/types';
 import type { LiveLineParams, LiveLineReading } from './liveLine';
+import { LevelLadder, levelMargin } from './levelLadder';
 import type { ProbationParams } from '../risk/probation';
 import { readJson, writeJsonAtomic } from '../util/persist';
+import { scoreStats } from './scoreStats';
 
 export type CurveProfile = 'crypto_15m' | 'crypto_1h' | 'tennis';
 
@@ -291,6 +296,13 @@ export interface SinuousExitParams {
   /** The live line's look-ahead, wiggle band and confirmation (LIVE_LINE_AHEAD_SEC, LIVE_LINE_BAND_K,
    *  LIVE_LINE_BAND_MIN_SEC, LIVE_LINE_CONFIRM_SEC). */
   line?: LiveLineParams;
+  /** The cross's strictness ladder (bot/strategy/levelLadder.ts; Steven, Oct 31: rework, never bench): the fair-value
+   *  confirm a level asks for (SINUOUS_CROSS_FV_MARGINS, index 0 = level 1): the cross sells only while the coin's spot
+   *  fair value of the side is at most the net bid plus that margin; each level also multiplies the fee margin by
+   *  (1 + level). SINUOUS_CROSS_LEVEL pins a level (-1: the ladder decides), SINUOUS_CROSS_LEVEL_MAX caps it. */
+  crossFvMargins?: number[];
+  crossLevel?: number;
+  crossLevelMax?: number;
 }
 
 /** The cross needs the coin's price to have turned against the side held: 'against', 'with' it, or 'flat' (within
@@ -310,11 +322,17 @@ export interface CrossCheck {
   spot: SpotTurn;
   /** The position's reading of its coin's live line (the 'line' source). */
   line?: LiveLineReading;
+  /** The coin's spot fair value of the side held (MarketView.pFair), for the level's fair-value confirm. */
+  fvSide?: number;
 }
 
 const DEFAULT_REST_STAND_DOWN_SEC = 120;
 /** A cross exit whose market never settles in view is forgotten after this long. */
 const CROSS_MAX_AGE_MS = 3 * 3_600_000;
+
+/** The cross's fair-value confirm by level (1, 2, 3, 4...): the coin's value of the side may sit at most this far above the
+ *  net bid. */
+export const DEFAULT_CROSS_FV_MARGINS = [0.04, 0.02, 0.01, 0];
 
 export const DEFAULT_SINUOUS_EXIT: SinuousExitParams = { mode: 'cross', minNetProfit: 0.015 };
 
@@ -330,7 +348,7 @@ export interface ExitCheck {
 }
 
 export interface CurveEvent {
-  event: 'held' | 'released' | 'scored' | 'benched' | 'reset';
+  event: 'held' | 'released' | 'scored' | 'benched' | 'reset' | 'stricter' | 'looser';
   ticker?: string;
   [k: string]: unknown;
 }
@@ -338,12 +356,16 @@ export interface CurveEvent {
 interface Held { sign: 1 | -1; heldNet: number; count: number; ts: number }
 /** A cross exit waiting for its market's result: the net price a contract it sold at. */
 interface Crossed { ticker: string; sign: 1 | -1; exitNet: number; count: number; ts: number }
-interface SavedState { results: number[]; since: number; benched?: { at: number; reason: string }; restartTag?: string; crosses?: Crossed[] }
+interface SavedState { results: number[]; since: number; level: number; benched?: { at: number; reason: string }; restartTag?: string; crosses?: Crossed[] }
 
 export interface SinuousExitStatus {
   mode: SinuousExitParams['mode'];
   minNetProfitCents: number;
+  /** Never set any more (a trip makes the cross stricter instead); kept for the dashboard. */
   benched: { at: number; reason: string } | null;
+  /** The strictness level in force (0 = as before any trip) and whether a setting pins it. */
+  level: number;
+  levelPinned: boolean;
   scored: number;
   netUsd: number;
   t: number | null;
@@ -369,6 +391,7 @@ export class SinuousExitGate {
   private readonly trackers = new Map<string, { t: SinuousExitTracker; sign: 1 | -1; seen: number; reading?: CurveReading; lastExitNet?: number }>();
   private readonly held = new Map<string, Held>();
   private st: SavedState;
+  private readonly ladder: LevelLadder;
 
   constructor(
     readonly p: SinuousExitParams,
@@ -381,18 +404,33 @@ export class SinuousExitGate {
   ) {
     const saved = file ? readJson<SavedState>(file, { quarantine: true }) : undefined;
     const usable = saved && Array.isArray(saved.results) ? saved : undefined;
-    if (usable && (restartTag === undefined || usable.restartTag === restartTag)) this.st = usable;
-    else {
-      this.st = { results: [], since: now, ...(restartTag !== undefined ? { restartTag } : {}) };
+    this.ladder = new LevelLadder(bench, p.crossLevelMax ?? 4, p.crossLevel !== undefined && p.crossLevel >= 0 ? p.crossLevel : undefined);
+    if (usable && (restartTag === undefined || usable.restartTag === restartTag)) {
+      // A bench saved before the ladder: the cross comes back one level stricter, with a fresh window.
+      this.st = usable.benched ? { ...usable, results: [], since: now, level: Math.max(1, usable.level || 0), benched: undefined } : { ...usable, level: usable.level || 0 };
+    } else {
+      this.st = { results: [], since: now, level: 0, ...(restartTag !== undefined ? { restartTag } : {}) };
       if (usable) {
         this.save();
-        this.onEvent?.({ event: 'reset', reason: `started over (${restartTag})`, before: { scored: usable.results.length, benched: usable.benched?.reason ?? null } });
+        this.onEvent?.({ event: 'reset', reason: `started over (${restartTag})`, before: { scored: usable.results.length, benched: usable.benched?.reason ?? null, level: usable.level ?? 0 } });
       }
     }
   }
 
-  /** Holding exits now: gate mode and not benched. */
-  get active(): boolean { return this.p.mode === 'gate' && !this.st.benched; }
+  /** Holding exits now: gate mode. */
+  get active(): boolean { return this.p.mode === 'gate'; }
+
+  /** The cross's strictness level in force. */
+  get level(): number { return this.ladder.level(this.st); }
+
+  /** The level's fair-value confirm: undefined when it passes (level 0, or the coin's value of the side is at most the net
+   *  bid plus the level's margin), else why the cross waits. */
+  private fvHold(e: CrossCheck): string | undefined {
+    const m = levelMargin(this.p.crossFvMargins ?? DEFAULT_CROSS_FV_MARGINS, this.level);
+    if (m === undefined || e.fvSide === undefined) return undefined;
+    const netBid = e.sidePrice - e.exitFeePer;
+    return e.fvSide <= netBid + m + 1e-9 ? undefined : `the coin's fair value ${e.fvSide.toFixed(3)} is above the net bid ${netBid.toFixed(3)} + ${m} (level ${this.level})`;
+  }
 
   /** Feed one tick of a held market; a new or reversed position starts a fresh curve. */
   observe(ticker: string, profile: CurveProfile, o: Omit<CurveObservation, 'minNetProfit'>): CurveReading {
@@ -433,9 +471,10 @@ export class SinuousExitGate {
     if (!k || !r || r.curve === undefined || r.projected === undefined || r.velocity === undefined) return { sell: false };
     const net = netProfitPerContract(e.sidePrice, e.entrySidePrice, e.entryFeePer, e.exitFeePer);
     const depth = r.projected - r.curve;
-    if (!(net >= e.floor - 1e-9 && r.velocity <= 0 && depth > 0 && depth >= (this.p.crossFeeMargin ?? 0.5) * e.exitFeePer - 1e-9)) return { sell: false };
+    if (!(net >= e.floor - 1e-9 && r.velocity <= 0 && depth > 0 && depth >= (this.p.crossFeeMargin ?? 0.5) * (1 + this.level) * e.exitFeePer - 1e-9)) return { sell: false };
     const curve = `curve ${r.curve} under projection ${r.projected}`;
-    if (this.st.benched) return { sell: false, note: `exit curve: crossed (${curve}) but the cross is benched: ${this.st.benched.reason}` };
+    const fv = this.fvHold(e);
+    if (fv) return { sell: false, note: `exit curve: crossed (${curve}) but ${fv}` };
     if (e.spot !== 'against') return { sell: false, note: `exit curve: crossed (${curve}) but spot has not turned (${e.spot})` };
     return { sell: true, why: `exit curve: cross${k.sign < 0 ? ' NO' : ''} ${e.sidePrice} (+${net.toFixed(3)} a contract net, ${curve}, spot against)` };
   }
@@ -450,7 +489,8 @@ export class SinuousExitGate {
     const k = this.trackers.get(ticker);
     const no = (k?.sign ?? 1) < 0 ? ' NO' : '';
     const line = `live line outside its wiggle band for ${l.breakSec} s (${l.underSd} sd${l.band ? `, band +-${l.band.k} sd of ${l.band.sec} s since the open` : ''})`;
-    if (this.st.benched) return { sell: false, note: `exit curve: ${line} but the cross is benched: ${this.st.benched.reason}` };
+    const fv = this.fvHold(e);
+    if (fv) return { sell: false, note: `exit curve: ${line} but ${fv}` };
     return { sell: true, why: `exit curve: cross${no} ${e.sidePrice} (+${net.toFixed(3)} a contract net, ${line})` };
   }
 
@@ -488,7 +528,7 @@ export class SinuousExitGate {
     }
     const why = r ? `${r.reason}${r.z !== undefined ? `, z ${r.z}` : ''}${r.projected !== undefined ? `, curve ${r.curve} vs projection ${r.projected}` : ''}` : 'no curve yet';
     if (!this.active) {
-      return { allow: true, note: `curve (${this.st.benched ? 'benched' : this.p.mode}) would hold the profit exit at ${e.sidePrice}: ${why}` };
+      return { allow: true, note: `curve (${this.p.mode}) would hold the profit exit at ${e.sidePrice}: ${why}` };
     }
     if (!this.held.has(ticker)) {
       const k = this.trackers.get(ticker);
@@ -523,7 +563,7 @@ export class SinuousExitGate {
   }
 
   reset(now = Date.now()): void {
-    this.st = { results: [], since: now, ...(this.st.restartTag !== undefined ? { restartTag: this.st.restartTag } : {}), ...(this.st.crosses?.length ? { crosses: this.st.crosses } : {}) };
+    this.st = { results: [], since: now, level: 0, ...(this.st.restartTag !== undefined ? { restartTag: this.st.restartTag } : {}), ...(this.st.crosses?.length ? { crosses: this.st.crosses } : {}) };
     this.held.clear();
     this.save();
     this.onEvent?.({ event: 'reset' });
@@ -532,7 +572,7 @@ export class SinuousExitGate {
   status(): SinuousExitStatus {
     const s = scoreStats(this.st.results);
     return {
-      mode: this.p.mode, minNetProfitCents: +(this.p.minNetProfit * 100).toFixed(2), benched: this.st.benched ?? null,
+      mode: this.p.mode, minNetProfitCents: +(this.p.minNetProfit * 100).toFixed(2), benched: null, level: this.level, levelPinned: this.ladder.pinned !== undefined,
       scored: this.st.results.length, netUsd: +s.sum.toFixed(2), t: s.t === null ? null : +s.t.toFixed(2), since: this.st.since,
       benchRule: { t: this.bench.t, minExits: this.bench.minTrades, maxLossUsd: this.bench.maxLossUsd },
       holding: [...this.held.keys()], tracking: this.trackers.size,
@@ -549,25 +589,14 @@ export class SinuousExitGate {
     this.record(ticker, (exitNet - h.heldNet) * h.count, now, how, { heldSec: Math.round((now - h.ts) / 1000) });
   }
 
-  /** One scoreboard result in dollars; benches when the results turn unacceptable. */
+  /** One scoreboard result in dollars; a window the old bench rule rejects makes the cross one level stricter, a winning
+   *  one at a raised level one looser (bot/strategy/levelLadder.ts). Never benched. */
   private record(ticker: string, usd: number, now: number, how: string, extra: Record<string, unknown>): void {
-    this.st.results.push(+usd.toFixed(4));
-    if (this.st.results.length > this.bench.window) this.st.results.splice(0, this.st.results.length - this.bench.window);
     this.onEvent?.({ event: 'scored', ticker, usd: +usd.toFixed(4), how, ...extra });
-    if (!this.st.benched) {
-      const why = this.verdict();
-      if (why) { this.st.benched = { at: now, reason: why }; this.onEvent?.({ event: 'benched', reason: why }); }
-    }
+    const what = this.crossing ? 'selling on the cross (against holding to settlement)' : 'holding profit exits';
+    const move = this.ladder.record(this.st, usd, now, what);
+    if (move) this.onEvent?.({ ...move });
     this.save();
-  }
-
-  private verdict(): string | undefined {
-    const r = this.st.results, s = scoreStats(r);
-    const what = this.crossing ? 'selling on the cross' : 'holding profit exits';
-    const vs = this.crossing ? ' against holding to settlement' : '';
-    if (s.sum <= -this.bench.maxLossUsd) return `${what} cost $${(-s.sum).toFixed(2)}${vs} over ${r.length} exits (limit $${this.bench.maxLossUsd})`;
-    if (r.length >= this.bench.minTrades && s.sum < 0 && s.t !== null && s.t <= -this.bench.t) return `${what} is losing beyond luck${vs}: $${s.sum.toFixed(2)} over ${r.length} exits, t ${s.t.toFixed(2)}`;
-    return undefined;
   }
 
   private save(): void {
@@ -575,10 +604,4 @@ export class SinuousExitGate {
   }
 }
 
-/** A scoreboard's net and its t statistic (mean over its standard error); t is null below two results. */
-export function scoreStats(r: number[]): { sum: number; t: number | null } {
-  const n = r.length, sum = r.reduce((a, v) => a + v, 0);
-  if (n < 2) return { sum, t: null };
-  const m = sum / n, sd = Math.sqrt(r.reduce((a, v) => a + (v - m) ** 2, 0) / (n - 1));
-  return { sum, t: sd > 0 ? m / (sd / Math.sqrt(n)) : m < 0 ? -Infinity : m > 0 ? Infinity : 0 };
-}
+export { scoreStats } from './scoreStats';

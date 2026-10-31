@@ -112,6 +112,27 @@ test('take-profit on a NO position (PROFIT_GIVE_BACK=0): bought back at the ask,
   assert.match(exit.why, /^take-profit NO: \+0\.02/);
 });
 
+test('take-profit ladder (Oct 31, never bench): from level 1 it sells only while the coin\'s fair value of the side is at most the net bid plus the level\'s margin', () => {
+  const pt = { ...cfg, profitTarget: 0.02, profitTargetPct: 0, profitGiveBack: 0, takeProfitFvMargins: [0.06, 0.03, 0.01, 0] };
+  const long = (o: Partial<MarketView>) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: 0.44, size: 50 }, bestAsk: { price: 0.46, size: 50 }, ...o });
+  const tp = (v: MarketView) => decide(v, pt).place.find((p) => p.purpose === 'exit' && p.why.startsWith('take-profit'));
+  // Level 0: sells at +2.2c whatever the coin says.
+  assert.ok(tp(long({ pFair: 0.9, takeProfitLevel: 0 })));
+  // Level 1: the coin says 0.90 against a 0.422 net bid: held (riding), with a note.
+  const held = decide(long({ pFair: 0.9, takeProfitLevel: 1 }), pt);
+  assert.equal(held.place.filter((p) => p.why.startsWith('take-profit')).length, 0);
+  assert.ok(held.notes.some((n) => /^take-profit held by fair value \(level 1\): \+0\.022 now, the coin's value 0\.900 > net bid 0\.422 \+ 0\.06$/.test(n)), held.notes.join(' | '));
+  // Level 1, the coin at 0.47 (within 6c of the net bid): sells. Level 3 (1c margin): held.
+  assert.ok(tp(long({ pFair: 0.47, takeProfitLevel: 1 })));
+  assert.equal(tp(long({ pFair: 0.47, takeProfitLevel: 3 })), undefined);
+  // NO side: the coin's value of NO is 1 - pFair.
+  const short = (pFair: number) => view({ position: -10, pYes: 0.3, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: 0.54, size: 50 }, bestAsk: { price: 0.56, size: 50 }, pFair, takeProfitLevel: 2 });
+  assert.equal(decide(short(0.2), pt).place.filter((p) => p.why.startsWith('take-profit')).length, 0, 'NO worth 0.80 to the coin');
+  assert.equal(decide(short(0.55), pt).place.filter((p) => p.why.startsWith('take-profit')).length, 1, 'NO worth 0.45 to the coin');
+  // No fair value in the view: no confirm.
+  assert.ok(tp(long({ takeProfitLevel: 4 })));
+});
+
 test('take-profit: no exits in the final minute or while hunting (the hunt\'s trailing stop has it)', () => {
   const pt = { ...cfg, profitTarget: 0.02, profitTargetPct: 0, profitGiveBack: 0 };
   const long = view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0, bestBid: { price: 0.5, size: 50 }, bestAsk: { price: 0.52, size: 50 } });

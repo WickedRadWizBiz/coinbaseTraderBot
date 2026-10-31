@@ -38,6 +38,11 @@ import type { OrderPurpose } from '../oms/orderState';
 import { evThresholds, kellySize, targetEvSize } from '../sizing/kelly';
 import { quotaCall } from '../risk/quotaPacer';
 import { ceilToTick, floorCount, floorToTick, round } from '../util/num';
+import { levelMargin } from './levelLadder';
+
+/** The take-profit's fair-value confirm by level (1, 2, 3, 4...): the coin's value of the side may sit at most this far above
+ *  the net bid (TP_FV_MARGINS). */
+export const DEFAULT_TP_FV_MARGINS = [0.06, 0.03, 0.01, 0];
 
 export interface RestingQuote {
   clientOrderId: string;
@@ -102,6 +107,9 @@ export interface MarketView {
   profitPeakSidePrice?: number;
   /** Why the take-profit is benched (bot/strategy/takeProfitBench.ts): it sells nothing; the model exit still runs. */
   takeProfitBenched?: string;
+  /** The take-profit's strictness level (bot/strategy/takeProfitBench.ts, levelLadder.ts): from 1 it sells only while the
+   *  coin's spot fair value of the side (pFair) is at most the net bid plus the level's margin (cfg.takeProfitFvMargins). */
+  takeProfitLevel?: number;
   /** Entry window open (contract kind, time to close, maintenance). Default: tau >= noEntryBeforeCloseSec. */
   entryWindowOpen?: boolean;
   /** Exits allowed (false in the final minute: ride to settlement). Default true. */
@@ -311,6 +319,14 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: {
     if (v.takeProfitBenched) {
       out.notes.push(`take-profit benched${label}: +${net.toFixed(3)} now, best +${best.toFixed(3)}, not sold (${v.takeProfitBenched})`);
       return { sell: false, protective: false, why: '' };
+    }
+    // The level's fair-value confirm: a winner the coin says is worth more than the bid pays (net of the exit fee) plus the
+    // level's margin is not sold here; it rides on (to the model exit, the quota's floor, the end window).
+    const fvM = levelMargin(cfg.takeProfitFvMargins ?? DEFAULT_TP_FV_MARGINS, v.takeProfitLevel ?? 0);
+    const fvSide = v.pFair === undefined ? undefined : label === ' NO' ? 1 - v.pFair : v.pFair;
+    if (fvM !== undefined && fvSide !== undefined && fvSide > sidePx - exitFee + fvM + 1e-9) {
+      out.notes.push(`take-profit held by fair value${label} (level ${v.takeProfitLevel}): +${net.toFixed(3)} now, the coin's value ${fvSide.toFixed(3)} > net bid ${(sidePx - exitFee).toFixed(3)} + ${fvM}`);
+      return { sell: false, protective: false, why: '', riding: true };
     }
     const sellBelow = Math.max(best * (1 - giveBack), floor + tick);
     const lastTick = net <= floor + tick + 1e-9;
