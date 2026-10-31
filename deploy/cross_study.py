@@ -1171,7 +1171,9 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
              ('fv < bid - fee - 2c, top size', {'fvbid': 0.02, 'split': True}, bando), ('fv < bid - fee - 4c, top size', {'fvbid': 0.04, 'split': True}, bando),
              ('entry gate fv >= cost; window only', {}, gate(0.0)), ('entry gate fv >= cost; 3c top size', S3, gate(0.0)),
              ('entry gate fv >= cost - 3c; 3c top size', S3, gate(0.03)), ('entry gate fv >= cost - 6c; 3c top size', S3, gate(0.06)),
-             ('entry gate fv >= cost + 3c; 3c top size', S3, gate(-0.03)), ('entry gate fv >= cost + 6c; 3c top size', S3, gate(-0.06))]
+             ('entry gate fv >= cost + 3c; 3c top size', S3, gate(-0.03)), ('entry gate fv >= cost + 6c; 3c top size', S3, gate(-0.06)),
+             ('entry gate fv >= cost + 6c; window only', {}, gate(-0.06)), ('entry gate fv >= cost + 9c; 3c top size', S3, gate(-0.09)),
+             ('entry gate fv >= cost + 12c; 3c top size', S3, gate(-0.12))]
     print('     entry gate: the position is skipped when the spot fair value at its entry is under its cost (fee in) less the margin shown.')
     for lab, lz, rm in rowsL:
         for dp in (False, True):
