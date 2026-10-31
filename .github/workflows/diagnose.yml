@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       exit_hours:
-        description: 'Exit study instead of the diagnostics: hours of positions deploy/cross_study.py covers, ending at exit_until (read-only; about a minute of server time an hour; the report is posted on the commit)'
+        description: 'Exit study instead of the diagnostics: hours of positions deploy/cross_study.py covers, ending at exit_until (runs on the GitHub runner over copies of the window''s audit and recording files: the server only sends files, at 8 MB/s; the report is posted on the commit)'
         required: false
         default: ''
       exit_until:
@@ -19,11 +19,11 @@ on:
         required: false
         default: 'false'
       exit_audit:
-        description: 'With exit_hours: the audit sections only (the pacer, sizes, pool, realized P&L by stretch between bot starts, exits by reason without markouts); no recordings, a few minutes of server time'
+        description: 'With exit_hours: the audit sections only (the pacer, sizes, pool, realized P&L by stretch between bot starts, exits by reason without markouts); copies only the audit files'
         required: false
         default: 'false'
       exit_models:
-        description: 'With exit_hours: also run the decision study (the model against the market, log loss) and the component study (SNN, TA network, meta-model) on the last 3 days, read-only'
+        description: 'With exit_hours: also run the decision study (the model against the market, log loss) and the component study (SNN, TA network, meta-model) on the last 3 days, on the runner (copies 3 days of files, tca.jsonl and the rule book)'
         required: false
         default: 'false'
       paths:
@@ -200,7 +200,7 @@ jobs:
   sine-study:
     # Steven's sinusoid research (Oct 30): can a sine-wave model call the next minute's direction (snipe entries) or the turns
     # (exits) on the 15-minute contracts? deploy/sine_study.py runs on the runner over a copy of the window's day recordings:
-    # the server only sends the files (scp, read-only), so the bot's box parses nothing. The report (counts, rates, cents)
+    # the server only sends the files (scp at 8 MB/s, read-only), so the bot's box parses nothing. The report (counts, rates, cents)
     # is posted on the commit like the exit study's.
     if: ${{ inputs.exit_hours && inputs.exit_sine == 'true' }}
     runs-on: ubuntu-latest
@@ -236,7 +236,7 @@ jobs:
           for D in $DAYS; do
             F=$(ssh bot "cd ~/bot/data/recordings && ls md-$D.jsonl.gz 2>/dev/null || ls md-$D.jsonl 2>/dev/null" | head -1)
             [ -n "$F" ] || { echo "no recording for $D"; continue; }
-            scp -q "bot:~/bot/data/recordings/$F" "$RUNNER_TEMP/data/recordings/"
+            scp -q -l 64000 "bot:~/bot/data/recordings/$F" "$RUNNER_TEMP/data/recordings/"
           done
           ls -la "$RUNNER_TEMP/data/recordings" | tail -n +2
       - name: Run the sinusoid study (on the runner)
@@ -263,11 +263,12 @@ jobs:
 
   exit-study:
     # Why the ratchet stop and the model exit lose, from the paper bot's own records (read-only): deploy/cross_study.py from
-    # the dispatched ref runs on the server over a window of positions and the report is posted on the commit (the job log
-    # sits on a host the cloud sessions cannot read). Nothing on the server changes; the report is counts, prices and dollars.
+    # the dispatched ref runs on this runner over copies of the window's audit and recording files, and the report is posted
+    # on the commit (the job log sits on a host the cloud sessions cannot read). Steven's rule (Oct 31): never load the
+    # server's CPU (on Oct 30 the studies used up its burst credits and paper could not trade), so the server only sends files.
     if: ${{ inputs.exit_hours && inputs.exit_sine != 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 200
     permissions:
       contents: write
     steps:
@@ -283,7 +284,7 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
           printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
           ssh bot true && echo "connected"
-      - name: Run the exit study on the server (read-only)
+      - name: Copy the window's files to the runner (read-only, 8 MB/s)
         env:
           HOURS: ${{ inputs.exit_hours }}
           UNTIL: ${{ inputs.exit_until || 'now' }}
@@ -291,24 +292,52 @@ jobs:
           AUDIT: ${{ inputs.exit_audit || 'false' }}
         run: |
           [[ "$HOURS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "hours must be a number"; exit 1; }
-          U=''
           if [ "$UNTIL" != now ]; then
             [[ "$UNTIL" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "until must be an ISO UTC time or now"; exit 1; }
-            U="$UNTIL"
           fi
-          # 80 min of fixed allowance for the recordings load: two 24 h windows run side by side timed out at 40 (Oct 30)
-          T=$(python3 -c "print(min(8400, int(float('$HOURS') * 110 + 6000)))")
-          # A directory of this run's own: studies dispatched from other branches at the same time each copy their own script.
-          D="/tmp/diag-$GITHUB_RUN_ID"
-          ssh bot "mkdir -p $D"
-          scp -q deploy/cross_study.py "bot:$D/cross_study.py"
-          MODE=''
-          [ "$AUDIT" = true ] && MODE="${U:-now} audit"
-          { ssh bot "timeout $T nice -n 19 python3 $D/cross_study.py ~/bot/data $HOURS ${MODE:-$U}; s=\$?; rm -rf $D; exit \$s" || echo "(exit study stopped: $?)"; } 2>&1 | tee "$RUNNER_TEMP/report.txt"
+          # The days the studies read: the audit from 2 h before the window and the books from a market's open before its
+          # first position (3 h covers both), to 2 h after the window's end (the markouts); the model studies read 3 days back.
+          read -r D0 D1 < <(python3 -c "
+          import datetime as d
+          now = d.datetime.now(d.timezone.utc)
+          e = now if '$UNTIL' == 'now' else d.datetime.strptime('$UNTIL', '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=d.timezone.utc)
+          s = e - d.timedelta(hours=float('$HOURS') + 3)
+          if '$MODELS' == 'true': s = min(s, now - d.timedelta(days=3))
+          print(s.strftime('%Y-%m-%d'), (e + d.timedelta(hours=2)).strftime('%Y-%m-%d'))")
+          R="$RUNNER_TEMP/data"
+          mkdir -p "$R/audit" "$R/recordings" "$R/tca" "$R/models"
+          ssh bot "ls -1 ~/bot/data/audit/ ~/bot/data/recordings/" > "$RUNNER_TEMP/ls.txt"
+          has() { grep -qxF "$1" "$RUNNER_TEMP/ls.txt"; }
+          # scp -l 64000 (kbit/s) holds the copy to 8 MB/s so the server's CPU stays near idle.
+          D="$D0"
+          while [[ ! "$D" > "$D1" ]]; do
+            has "audit-$D.jsonl" && scp -q -l 64000 "bot:bot/data/audit/audit-$D.jsonl" "$R/audit/"
+            # The books (audit mode reads none): the plain day file when the day has one, as the study prefers, else the gzipped one.
+            if [ "$AUDIT" != true ] || [ "$MODELS" = true ]; then
+              if has "md-$D.jsonl"; then scp -q -l 64000 "bot:bot/data/recordings/md-$D.jsonl" "$R/recordings/"
+              elif has "md-$D.jsonl.gz"; then scp -q -l 64000 "bot:bot/data/recordings/md-$D.jsonl.gz" "$R/recordings/"; fi
+            fi
+            D=$(date -u -d "$D + 1 day" +%Y-%m-%d)
+          done
           if [ "$MODELS" = true ]; then
-            scp -q deploy/decision_study.py deploy/component_study.py bot:/tmp/diag/
-            { echo; echo "== decision study (the model against the market, last 3 days)"; ssh bot "timeout 1500 nice -n 19 python3 /tmp/diag/decision_study.py ~/bot/data 3" || echo "(decision study stopped: $?)"
-              echo; echo "== component study (SNN, TA network, meta-model against the meta-model's price, last 3 days)"; ssh bot "timeout 1500 nice -n 19 python3 /tmp/diag/component_study.py ~/bot/data 3" || echo "(component study stopped: $?)"; } 2>&1 | tee -a "$RUNNER_TEMP/report.txt"
+            scp -q -l 64000 bot:bot/data/tca/tca.jsonl "$R/tca/" || echo "(no tca.jsonl)"
+            scp -q -l 64000 bot:bot/data/models/rule_book.json "$R/models/" || echo "(no rule_book.json)"
+          fi
+          echo "days $D0 to $D1:"; du -sh "$R"/*; ls "$R/audit" "$R/recordings"
+      - name: Run the exit study on the runner
+        env:
+          HOURS: ${{ inputs.exit_hours }}
+          UNTIL: ${{ inputs.exit_until || 'now' }}
+          MODELS: ${{ inputs.exit_models || 'false' }}
+          AUDIT: ${{ inputs.exit_audit || 'false' }}
+        run: |
+          R="$RUNNER_TEMP/data"
+          U=''; [ "$UNTIL" != now ] && U="$UNTIL"
+          MODE=''; [ "$AUDIT" = true ] && MODE="${U:-now} audit"
+          { timeout 6600 python3 deploy/cross_study.py "$R" "$HOURS" ${MODE:-$U} || echo "(exit study stopped: $?)"; } 2>&1 | tee "$RUNNER_TEMP/report.txt"
+          if [ "$MODELS" = true ]; then
+            { echo; echo "== decision study (the model against the market, last 3 days)"; timeout 1500 python3 deploy/decision_study.py "$R" 3 || echo "(decision study stopped: $?)"
+              echo; echo "== component study (SNN, TA network, meta-model against the meta-model's price, last 3 days)"; timeout 1500 python3 deploy/component_study.py "$R" 3 || echo "(component study stopped: $?)"; } 2>&1 | tee -a "$RUNNER_TEMP/report.txt"
           fi
       - name: Post the report on the commit
         if: always()
