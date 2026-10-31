@@ -599,7 +599,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         sig_cache[j] = out
         return out
 
-    def pacer_run(paths, base, pacer, hourly=4.5, floor=0.75, cap=6.5, frac=0.10, no_exit_sec=60, size=None, reenter=False, depth=False):
+    def pacer_run(paths, base, pacer, hourly=4.5, floor=0.75, cap=6.5, frac=0.10, no_exit_sec=60, size=None, reenter=False, depth=False, stake_fn=None):
         """One base exit with (or without) the pacer on top, every position in time order on one clock. base: a sim() rule or
         None (hold everything); pacer: None | (mode, group) with mode 'cumulative' | 'rolling_hour' | 'slices' (Steven's
         non-stacking spec of Oct 30, bot/risk/quotaPacer.ts: catch-up slices of at most the hourly target).
@@ -611,11 +611,17 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         (the ask on entry, the bid on a sale): the lab otherwise fills every size at the top."""
         DEPTH_PX = 0.02
         ps = []
-        for p in paths:
+        for k0, p in enumerate(paths):
+            p0 = p
             if p.get('costF') is None: continue
+            p = dict(p, src=k0)
             if size is not None:
                 lo, hi, mult = size
                 stake = min(max(p['n'] * p['costF'], lo), hi) * mult
+                p = dict(p, n=stake / p['costF'])
+            if stake_fn is not None:  # a sizing variant: the stake from the position (None skips the entry)
+                stake = stake_fn(p)
+                if stake is None or stake <= 0: continue
                 p = dict(p, n=stake / p['costF'])
             if depth:  # entry depth folded into the cost a contract
                 c = DEPTH_PX * max(0.0, p['n'] - (p['path']['asz'][0] or 0.0))
@@ -640,7 +646,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             closes[sec if v is not None else p['c_sec']].append(i)
         st = {'real': 0.0, 'cyc': None, 'cyc_real': 0.0, 'bk': collections.defaultdict(float), 'base': 0, 'held': 0, 'snipe': 0, 'group': 0, 'cts': 0.0,
               'hours': 0, 'on_pace': 0, 'hkey': None, 'slice': 0.0, 'sl_h': 0,
-              'entries': len(ps), 're': 0, 're_real': 0.0, 'cap_now': 0.0, 'cap_peak': 0.0, 'thin_n': 0, 'thin_usd': 0.0}
+              'per': {}, 'stk': {}, 'entries': len(ps), 're': 0, 're_real': 0.0, 'cap_now': 0.0, 'cap_peak': 0.0, 'thin_n': 0, 'thin_usd': 0.0}
         live = set(); done = [False] * len(ps); child = [False] * len(ps)
         for p in ps:
             if p.get('thin_in'): st['thin_n'] += 1; st['thin_usd'] += p['thin_in']
@@ -721,6 +727,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
 
         def close(i, t, x, kind):
             done[i] = True; live.discard(i); credit(x, t); st[kind] += 1
+            if not child[i]: st['per'][ps[i]['src']] = st['per'].get(ps[i]['src'], 0.0) + x; st['stk'][ps[i]['src']] = ps[i]['n'] * ps[i]['costF']
             st['cap_now'] -= ps[i]['n'] * ps[i]['costF']
             if child[i]: st['re_real'] += x
 
@@ -1004,6 +1011,38 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         r = pacer_run(pathsB, baseG, pacer, **kw)
         if r is None: print('    (no costed position)'); break
         print(f"    {lab:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['entries']:7d}  {r['re']:10d}  {r['re_real']:+10.2f}  {r['base']:10d}  {r['snipe']:6d}  {r['held']:4d}  {r['cap_peak']:14.2f}  {r['thin_n']:10d}  {r['thin_usd']:7.2f}")
+
+    # ---- G2. (sizing thread, Oct 31) where the $10-$20 band loses: by the price paid, and price-aware sizing variants ------
+    print('  G2. by the price paid for the side bought (average entry price, fee out), current exits + slices pacer, no group rule:')
+    print('     positions, $ staked and realized $ after fees at paper\'s own sizes and at the $10-$20 band (one joint run each, each')
+    print('     position\'s own realized $).')
+    own = pacer_run(pathsB, baseG, SL)
+    band = pacer_run(pathsB, baseG, SL, size=(10, 20, 1))
+    if own is not None and band is not None:
+        cuts = ((0.0, 0.10, 'under 10c'), (0.10, 0.20, '10-20c'), (0.20, 0.35, '20-35c'), (0.35, 0.65, '35-65c'), (0.65, 0.80, '65-80c'), (0.80, 1.01, 'over 80c'))
+        print('    price paid    positions   won%   own: staked   realized    band: staked   realized')
+        for lo, hi, nm in cuts:
+            ks = [k for k, p in enumerate(pathsB) if p.get('costF') is not None and lo <= p['cost'] < hi]
+            won = sum(1 for k in ks if pathsB[k]['payout'] > 0.5)
+            print(f"    {nm:12s} {len(ks):10d}  {100 * won / len(ks) if ks else 0:5.0f}  {sum(own['stk'].get(k, 0) for k in ks):12.2f}  {sum(own['per'].get(k, 0) for k in ks):+9.2f}  {sum(band['stk'].get(k, 0) for k in ks):14.2f}  {sum(band['per'].get(k, 0) for k in ks):+9.2f}")
+    def bandv(p): return min(max(p['n'] * p['costF'], 10.0), 20.0)
+    def ownv(p): return p['n'] * p['costF']
+    print('    sizing variant                                                    realized $     $/h  entries  snipes  held  peak $ at work  depth $')
+    rows = [("paper's own sizes", {}), ('$10-$20 band [BASELINE]', {'size': (10, 20, 1)})]
+    for cut in (0.10, 0.20, 0.35):
+        c = int(round(cut * 100))
+        rows.append((f'(a) band at {c}c and up, own size below', {'stake_fn': (lambda cut: lambda p: bandv(p) if p['cost'] >= cut else ownv(p))(cut)}))
+        rows.append((f'(b) band at {c}c and up, no entry below', {'stake_fn': (lambda cut: lambda p: bandv(p) if p['cost'] >= cut else None)(cut)}))
+    rows += [('(c) band x min(1, price / 0.35)', {'stake_fn': lambda p: bandv(p) * min(1.0, p['cost'] / 0.35)}),
+             ('(c) band x min(1, price / 0.35); depth', {'stake_fn': lambda p: bandv(p) * min(1.0, p['cost'] / 0.35), 'depth': True}),
+             ("(d) paper's own sizes x8", {'stake_fn': lambda p: ownv(p) * 8}),
+             ("(d) paper's own sizes x8; depth", {'stake_fn': lambda p: ownv(p) * 8, 'depth': True})]
+    for lab, kw in rows:
+        r = pacer_run(pathsB, baseG, SL, **kw)
+        if r is None: print('    (no costed position)'); break
+        print(f"    {lab:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['entries']:7d}  {r['snipe']:6d}  {r['held']:4d}  {r['cap_peak']:14.2f}  {r['thin_usd']:7.2f}")
+    stakes = sorted(ownv(p) for p in pathsB if p.get('costF') is not None)
+    if stakes: print(f"    (paper's own stakes: median ${stakes[len(stakes) // 2]:.2f}, p10 ${stakes[len(stakes) // 10]:.2f}, p90 ${stakes[9 * len(stakes) // 10]:.2f})")
 
     # ---- C. what separates the right stop sales from the wrong ones (at the 1-tick trail's trigger, from the locks) --
     print('  C. at the 1-tick trail\'s trigger (from the actual locks): the sale against settlement by what the rule could see')
