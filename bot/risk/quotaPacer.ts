@@ -61,6 +61,9 @@ export interface PacerConfig {
   floor: PacerFloorMode;
   /** PACER_TRAIL_KEEP (trail mode): the share of the profit above the need a floor keeps as the profit grows (0.5). */
   trailKeep: number;
+  /** PACER_FLOOR_TICKS (lab, Oct 31): the floor sale waits until the profit is this many price ticks a contract below the
+   *  floor (0: at the floor), so a one-tick dip does not sell a winner. */
+  floorTicks: number;
 }
 
 export const CYCLE_HOURS = 24;
@@ -248,9 +251,10 @@ export interface QuotaCall {
 /** The quota's call on one position: `net` its profit after fees at the touch now, `need` what the hour needs (undefined: the
  *  pacer is off or the position is not judged), `floor` its armed floor (QuotaFloors), `higher` why another exit rule aims
  *  higher (undefined: none, or PACER_FLOOR off). */
-export function quotaCall(net: number | undefined, need: number | undefined, floor: number | undefined, higher: string | undefined, keep?: number): QuotaCall {
+export function quotaCall(net: number | undefined, need: number | undefined, floor: number | undefined, higher: string | undefined, keep?: number, cushion = 0): QuotaCall {
   if (net === undefined) return {};
-  if (floor !== undefined && net < floor - 1e-9) return { sell: 'floor' };
+  // `cushion` (PACER_FLOOR_TICKS): dollars below the floor the profit may dip before the floor sells.
+  if (floor !== undefined && net < floor - cushion - 1e-9) return { sell: 'floor' };
   if (need === undefined || net < need - 1e-9) return {};
   // `keep` (trail mode): the floor trails the profit, keeping that share of what it has made above the need.
   return higher !== undefined ? { arm: keep === undefined ? need : need + keep * (net - need) } : { sell: 'snipe' };
