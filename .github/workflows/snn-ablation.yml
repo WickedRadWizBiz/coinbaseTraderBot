@@ -122,7 +122,6 @@ jobs:
           set -euo pipefail
           DATA="$GITHUB_WORKSPACE/data"; mkdir -p research/out
           MODEL=""; [ "$DOMAIN" = crypto ] && [ -f "$DATA/models/model.json" ] && MODEL="--model $DATA/models/model.json"
-          INIT=""; [ -f research/out/init/snn-history-checkpoint.json ] && INIT="--init research/out/init/snn-history-checkpoint.json"
           # The verdict lines (ACCEPT / reject, dBrier with its CI, slope, correlation, blend, latency) and the file.
           npm run --silent research:snn-ablation -- --recordings "$DATA/recordings" --domain "$DOMAIN" --from "${FROM}T00:00:00Z" --only "$ONLY" --out research/out/snn_ablation.json $MODEL
       - uses: actions/upload-artifact@v4
@@ -202,6 +201,7 @@ jobs:
           set -euo pipefail
           DATA="$GITHUB_WORKSPACE/data"; mkdir -p research/out
           MODEL=""; [ "$DOMAIN" = crypto ] && [ -f "$DATA/models/model.json" ] && MODEL="--model $DATA/models/model.json"
+          INIT=""; [ -f research/out/init/snn-history-checkpoint.json ] && INIT="--init research/out/init/snn-history-checkpoint.json"
           npm run --silent research:snn-ablation -- --recordings "$DATA/recordings" --domain "$DOMAIN" --from "${FROM}T00:00:00Z" --only "$ONLY" --side ${{ matrix.side }} --save research/out/side-${{ matrix.side }}.json $MODEL $INIT
       - uses: actions/upload-artifact@v4
         with:
