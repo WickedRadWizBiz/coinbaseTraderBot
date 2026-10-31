@@ -40,8 +40,8 @@ export function monthChunks(from: string, to: string): [string, string][] {
   return out;
 }
 
-export function trainParams(stage: Stage, volNorm?: number): SnnParams {
-  return domainParams('crypto', { ...DEFAULT_SNN, anchorMid: true, ...(volNorm ? { volNorm } : {}), flags: { ...stageFlags(stage) } });
+export function trainParams(stage: Stage, volNorm?: number, soft = false): SnnParams {
+  return domainParams('crypto', { ...DEFAULT_SNN, anchorMid: true, ...(volNorm ? { volNorm } : {}), ...(soft ? { softLabel: { lagSec: 300, etaScale: 0.3 } } : {}), flags: { ...stageFlags(stage) } });
 }
 
 async function main() {
@@ -53,13 +53,14 @@ async function main() {
   const assets = cfg.taNet.historyReplayAssets;
   const stage = (arg('stage', '') || cfg.snn.domains.crypto.stage) as Stage;
   const volNorm = Number(arg('vol-norm', '0')) || undefined;
-  const params = trainParams(stage, volNorm);
+  const soft = arg('soft', '') === 'true';
+  const params = trainParams(stage, volNorm, soft);
   const calendar = loadCalendar(path.resolve('params/calendar.json'));
   let checkpoint: SnnCheckpoint | undefined;
   const ckIn = arg('checkpoint-in');
   if (ckIn && fs.existsSync(ckIn)) { checkpoint = JSON.parse(fs.readFileSync(ckIn, 'utf8')); console.log(`[hist-train] continuing from ${ckIn}`); }
   const ckOut = arg('checkpoint-out', path.join(work, 'checkpoint.json'));
-  console.log(`[hist-train] anchored crypto SNN, stage ${stage}${volNorm ? `, volNorm ${volNorm}` : ''}, ${from}..${to}, ${assets.join(',')}`);
+  console.log(`[hist-train] anchored crypto SNN, stage ${stage}${volNorm ? `, volNorm ${volNorm}` : ''}${soft ? ', soft labels' : ''}, ${from}..${to}, ${assets.join(',')}`);
 
   const f5 = (x: { mean: number; lo: number; hi: number }) => `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]`;
   for (const [a, b] of monthChunks(from, to)) {

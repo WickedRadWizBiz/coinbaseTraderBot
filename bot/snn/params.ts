@@ -93,6 +93,13 @@ export interface SnnParams {
    *  scaled features, so learning follows the same scaled output (the gradient stays exact). Optional: absent = off,
    *  and the version hash is unchanged. */
   volNorm?: number;
+  /** Learn every few minutes, not only at settlement (Steven, Oct 31: make the SNNs learn, fast). With anchorMid, a
+   *  contract scored now is scored again `lagSec` later against the market's mid at that time, a soft label: the delta
+   *  rule (target - p) phi at `etaScale` x the readout's eta. The later mid is the market's best estimate of the
+   *  settlement, so this is the settlement gradient with far less noise, about lagSec/900 x more often on a 15m
+   *  contract; at zero correction it teaches the readout where the mid goes next. Settlement learning is unchanged.
+   *  Optional: absent = off, and the version hash is unchanged. */
+  softLabel?: { lagSec: number; etaScale: number };
   /** Wilson-Cowan regime drive gain; gap-junction coupling factor (<< 1). */
   wcGain: number; gapCoupling: number;
   /** Catch-up: at most this many 1 s steps per call; larger gaps reset transient state. */

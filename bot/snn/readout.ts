@@ -108,6 +108,15 @@ export class Readout {
     return usable.length;
   }
 
+  /** Soft-label update: the same delta rule against a probability the market later showed (the mid some minutes on)
+   *  instead of the 0/1 settlement. No calibration history is recorded (that stays settlement-only). */
+  soft(phi: ArrayLike<number>, p: number, target: number, eta: number): void {
+    if (!Number.isFinite(target) || !Number.isFinite(p)) return;
+    const dw = readoutDelta(phi, target, p, eta, this.o.cap);
+    for (let i = 0; i < this.n; i++) this.wf[i] += dw[i];
+    this.updates++;
+  }
+
   private record(p: number, y: number, ts: number): void {
     this.history.push({ p, y, ts });
     if (this.history.length > 2000) this.history.shift();
