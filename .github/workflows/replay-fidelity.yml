@@ -14,10 +14,8 @@
 name: Replay fidelity
 
 on:
-  schedule:
-    # Every other day (Steven, Oct 29: the depth simulator must keep passing on fresh days before history training uses it).
-    # 09:30 UTC: after the night's other server copies (Steven, Oct 31: one copy off the server at a time).
-    - cron: '30 9 */2 * *'
+  # No fixed schedule (Oct 31): only one copy may come off the server at a time, so each run is dispatched when the
+  # copy slot is free, about every other day (Steven, Oct 29: the depth simulator must keep passing on fresh days).
   workflow_dispatch:
     inputs:
       days:
