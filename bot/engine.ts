@@ -17,6 +17,7 @@ import type { ExchangeFill, ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
 import type { IndexTracker } from './marketdata/indexTracker';
 import { dynamicEdge, dynamicEdgeOn } from './strategy/dynamicEdge';
+import { makerLean, priceLean } from './strategy/reversalLean';
 import { otherCoinsHeld, regimeScale, regimeScaleOn } from './strategy/regimeScale';
 import { compactReading, MarketState, observeMarket, type MarketStateReading } from './marketdata/marketState';
 import type { OrderBook } from './marketdata/orderBook';
@@ -2040,6 +2041,9 @@ export class Engine {
     const rbTrial = trials ? activeRuleBook()?.trialRead(taSnap, tauSec, coinChar?.cls, S0.taPricingMaxZ) : undefined;
     const ruleShift = rbTrial ? tilt(rbTrial.k, 1) : undefined;
     if (trialOn('rules') && ruleShift) pYes = Math.max(0.001, Math.min(0.999, pYes + ruleShift));
+    // The TA reversal lean on close calls (TA_LEAN_PRICE; 0 = off), as the backtester applies it.
+    const leanP = priceLean(S0.reversalLean, features, pBase);
+    if (leanP) pYes = Math.max(0.001, Math.min(0.999, pYes + leanP));
     if (trials) {
       const d = (x: number | undefined) => (x === undefined ? undefined : +x.toFixed(4));
       const snnP = snnTrial(pred.p);
@@ -2153,7 +2157,7 @@ export class Engine {
       newRiskRoomUsd: reason ? this.newRiskRoom(m, bankroll, tier) : undefined,
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
       restingBid, restingAsk, nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
-      pMarket, pStd: pred.std, makerBuffer: this.makerBuffer(), entrySidePrice: entrySidePrice !== undefined && entrySidePrice > 0 && entrySidePrice < 1 ? entrySidePrice : undefined,
+      pMarket, pStd: pred.std, makerBuffer: this.makerBuffer(), makerLean: makerLean(S0.reversalLean, features), entrySidePrice: entrySidePrice !== undefined && entrySidePrice > 0 && entrySidePrice < 1 ? entrySidePrice : undefined,
       entryFeePerContract: pos && Math.abs(pos.yes) > 1e-9 ? pos.fees / Math.abs(pos.yes) : undefined,
       profitPeakSidePrice: this.profitPeaks.update(m.ticker, st.position, st.position > 0 ? bid.price : st.position < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
       ...(this.d.takeProfitBench?.benched ? { takeProfitBenched: this.d.takeProfitBench.benched } : {}),

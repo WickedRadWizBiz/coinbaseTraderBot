@@ -3,6 +3,7 @@
 // parameter means a reviewed commit and a redeploy.
 
 import type { DynamicEdgeParams } from './strategy/dynamicEdge';
+import type { ReversalLeanParams } from './strategy/reversalLean';
 import type { RegimeScaleParams } from './strategy/regimeScale';
 import { type PacerConfig, validZone } from './risk/quotaPacer';
 import fs from 'fs';
@@ -84,6 +85,8 @@ export interface StrategyConfig {
   dynamicEdge: DynamicEdgeParams;
   /** Order size moved with the market state (bot/strategy/regimeScale.ts; REGIME_*, all 0 = no change). */
   regimeScale: RegimeScaleParams;
+  /** The TA reversal lean on maker quotes and close calls (bot/strategy/reversalLean.ts; TA_LEAN_*, 0 = off). */
+  reversalLean: ReversalLeanParams;
   /** Resting orders expire on the exchange after this many seconds (dead-man switch); a quote still wanted is placed again. */
   orderTtlSec: number;
   /** Exit mode. hold = Mode A (ride to settlement, no exit fee); fair_value = model exit only;
@@ -1086,6 +1089,12 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       uncertainty: num(env, 'DYN_EDGE_UNCERTAINTY', 0, 0, 2),
       maxUp: num(env, 'DYN_EDGE_MAX_UP', 0.05, 0, 0.3),
       maxDown: num(env, 'DYN_EDGE_MAX_DOWN', 0.01, 0, 0.1),
+    },
+    reversalLean: {
+      maker: num(env, 'TA_LEAN_MAKER', 0, 0, 0.02),
+      price: num(env, 'TA_LEAN_PRICE', 0, 0, 0.02),
+      band: num(env, 'TA_LEAN_BAND', 0.15, 0, 0.5),
+      max: num(env, 'TA_LEAN_MAX', 0.02, 0, 0.05),
     },
     regimeScale: {
       volTarget: num(env, 'REGIME_VOL_TARGET', 0, 0, 2),

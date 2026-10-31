@@ -74,6 +74,7 @@ import { AccuracyGate, type AccuracyGateConfig } from '../bot/strategy/accuracyG
 import { TakeProfitBench } from '../bot/strategy/takeProfitBench';
 import { compactReading, MarketState, observeMarket } from '../bot/marketdata/marketState';
 import { dynamicEdge } from '../bot/strategy/dynamicEdge';
+import { makerLean, priceLean } from '../bot/strategy/reversalLean';
 import { otherCoinsHeld, regimeScale } from '../bot/strategy/regimeScale';
 import { gatePasses, type ProbationParams } from '../bot/risk/probation';
 import { bootstrapMeanCi, deflatedSharpe, pbo, rng, sharpe } from './stats';
@@ -744,6 +745,11 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         ruleShift = rb ? tilt(rb.k, 1) : 0;
         if (ruleShift) pYes = Math.max(0.001, Math.min(0.999, pYes + ruleShift));
       }
+      {
+        // The TA reversal lean on close calls (TA_LEAN_PRICE; 0 = off), as the engine applies it.
+        const leanP = priceLean(strategy.reversalLean, fmap, pModel);
+        if (leanP) pYes = Math.max(0.001, Math.min(0.999, pYes + leanP));
+      }
       const mRead = observeMarket(mstate, { asset: m.asset, ticker: m.ticker, index: idx!, now: st.now, bid, ask, trades: st.features.micro.get(m.ticker)?.tradesIn(st.now, 300_000) });
       opts.onEval?.({ ticker: m.ticker, now: st.now, pYes, fv: fv.pYes, bid: bid.price, ask: ask.price, position: pos.position(m.ticker), spot: spot.value, strike: terms.strike, sigma: vol.sigmaPerSqrtSec, sigmaPricing: sigmaFv,
         pModel: pred.p, taVolMult, taShift, ruleShift, mstate: compactReading(mRead) });
@@ -900,7 +906,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         newRiskRoomUsd,
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,
         restingBid: rb, restingAsk: ra, nowSec: Math.floor(st.now / 1000), closeSec: Math.floor(m.closeTime / 1000),
-        pMarket, pStd: pred.std, makerBuffer: (res.makerBufferEnd = makerBuffer()), entrySidePrice: entrySide !== undefined && entrySide > 0 && entrySide < 1 ? entrySide : undefined,
+        pMarket, pStd: pred.std, makerBuffer: (res.makerBufferEnd = makerBuffer()), makerLean: makerLean(strategy.reversalLean, fmap), entrySidePrice: entrySide !== undefined && entrySide > 0 && entrySide < 1 ? entrySide : undefined,
         entryFeePerContract: pNow && Math.abs(pNow.yes) > 1e-9 ? pNow.fees / Math.abs(pNow.yes) : undefined,
         profitPeakSidePrice: peaks.update(m.ticker, posC, posC > 0 ? bid.price : posC < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
         entryWindowOpen, exitWindowOpen: tauSec > strategy.noExitBeforeCloseSec,

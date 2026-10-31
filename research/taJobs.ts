@@ -20,6 +20,15 @@ import type { EntryLogRow } from './backtest';
 /** Each variant's bot.env lines on top of the server's settings. The jobs add theirs as they are built. */
 export const VARIANTS: Record<string, Record<string, string>> = {
   baseline: {},
+  // Job 1, when to trade: ask less edge while volatility rises (the contract lags a moving coin) / volatility targeting.
+  j1_lag: { DYN_EDGE_VOL: '-0.02', DYN_EDGE_MAX_DOWN: '0.02' },
+  j1_voltarget: { REGIME_VOL_TARGET: '0.5' },
+  // Job 2, where to rest maker orders: the reversal lean on the quoted centre (cents a vote, capped at 2).
+  j2_maker: { TA_LEAN_MAKER: '0.005' },
+  j2_maker_hi: { TA_LEAN_MAKER: '0.01' },
+  // Direction: the reversal lean on close calls (fair value within 15 points of 50%).
+  dir_lean: { TA_LEAN_PRICE: '0.005' },
+  all_on: { DYN_EDGE_VOL: '-0.02', DYN_EDGE_MAX_DOWN: '0.02', TA_LEAN_MAKER: '0.005', TA_LEAN_PRICE: '0.005' },
 };
 
 function arg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith('--') ? process.argv[i + 1] : d; }

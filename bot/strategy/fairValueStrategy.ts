@@ -89,6 +89,8 @@ export interface MarketView {
   pStd?: number;
   /** Maker adverse-selection buffer in dollars (added to minEdge for quotes). */
   makerBuffer?: number;
+  /** Shift of the quoted centre from the TA reversal lean (bot/strategy/reversalLean.ts; + = toward YES). */
+  makerLean?: number;
   /** Average entry price of the side currently held (profit target, Mode B take-profit). */
   entrySidePrice?: number;
   /** Fees already paid, a contract held (the profit target nets them out). */
@@ -315,7 +317,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
   const offset = cfg.minEdge + (v.makerBuffer ?? 0);
   const expiry = Math.min(v.nowSec + cfg.orderTtlSec, v.closeSec - Math.max(1, Math.floor(v.noEntryBeforeCloseSec)));
   if (quoting && quoteAllowed) {
-    const skewed = q - cfg.inventorySkewPerContract * v.position;
+    const skewed = q - cfg.inventorySkewPerContract * v.position + (v.makerLean ?? 0);
 
     // YES bid.
     let bp = floorToTick(skewed - offset, tick);
