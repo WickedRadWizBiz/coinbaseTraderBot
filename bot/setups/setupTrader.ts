@@ -34,6 +34,7 @@ import type { PerpHub } from '../perps/perpData';
 import type { PerpGateway } from '../perps/perpRest';
 import { adaptToVol, applyRatchet, applyScaleOut, atr4hAt, detectLast, FAST_TFS, SLOW_TFS, SETUP_MIN_BARS, TF_MS, type Lane, type SetupSignal } from './detectors';
 import { DEFAULT_COSTS, exitTrade, openTrade, stepTrade, tradeResult, type CostModel, type OpenTrade } from './exits';
+import { quotaCall, type PacerFloorMode } from '../risk/quotaPacer';
 import { activeCrossLead, crossLeadSetupReading, crossLeadSum, type CrossLeadReading } from '../ta/crossLead';
 import type { LibrarianReading } from '../ta/librarian';
 import type { XgReading } from '../ta/crossGraph';
@@ -295,6 +296,7 @@ export class SetupTrader {
     probation()?.record('setups', usd, now);
     // The quota pacer counts every closed trade's result, net of its costs, toward the bot's hourly target.
     this.pacer?.credit(usd, this.d.hub.get(t.asset)?.latest?.ticker ?? t.asset);
+    this.pacer?.floors?.forget(`${t.asset}|${t.entryTs}`);
     this.history.push({ asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, exit: t.closed?.px ?? NaN, entryTs: t.entryTs, exitTs: t.closed?.ts ?? now, reason: t.closed?.reason ?? 'manual', r: res.r, ret: res.ret, usd, score: t.score });
     this.d.audit?.write('setup_trade', { event: 'closed', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entry: t.entry, exit: t.closed?.px, reason: t.closed?.reason, r: res.r, usd });
     this.d.journal?.trade({ ts: now, event: 'closed', asset: t.asset, lane: t.lane, kind: t.kind, tf: t.tf, dir: t.dir, entryTs: t.entryTs, entry: t.entry, exit: t.closed?.px ?? null, reason: t.closed?.reason ?? 'manual', r: res.r, ret: res.ret, usd, score: t.score ?? null });
@@ -342,13 +344,22 @@ export class SetupTrader {
       }
       // The quota snipe (Steven's profit rules apply to every contract type, Oct 30; bot/risk/quotaPacer.ts): a trade whose
       // whole result after costs, closed at the price now, covers what the clock hour needs is closed at once, whatever its
-      // plan says. Perps never settle: the rule for the last share of a contract's window does not apply.
+      // plan says. Perps never settle: the rule for the last share of a contract's window does not apply. Under PACER_FLOOR
+      // (Steven, Oct 31) a plan aiming higher keeps the trade, the need it covered its floor, and the trade is closed once its
+      // result falls below that floor (setupHigher).
       const need = this.pacer?.neededUsd;
       if (need !== undefined && !t.closed && t.notional) {
         const net = (tradeResult(t, px).ret - t.frac * this.d.params.costs.takerExit) * t.notional;
-        if (net >= need - 1e-9) {
+        const mode = this.pacer?.floorMode ?? 'off';
+        const key = `${asset}|${t.entryTs}`;
+        const floor = mode === 'off' ? undefined : this.pacer?.floors?.floor(key, t.dir * t.frac);
+        const higher = setupHigher(t, px, mode);
+        const call = quotaCall(net, need, floor, higher);
+        if (call.arm !== undefined) this.pacer?.floors?.arm(key, t.dir * t.frac, call.arm);
+        if (call.sell) {
           exitTrade(t, px, now, 'quota', this.d.params.costs);
-          this.pacer!.snipe(this.d.hub.get(asset)?.latest?.ticker ?? asset, `quota snipe: +$${net.toFixed(2)} net on the ${t.lane} ${t.tf} ${t.kind} ${t.dir > 0 ? 'long' : 'short'} at ${px} covers the $${need.toFixed(2)} the hour needs`);
+          const what = `the ${t.lane} ${t.tf} ${t.kind} ${t.dir > 0 ? 'long' : 'short'} at ${px}`;
+          this.pacer!.snipe(this.d.hub.get(asset)?.latest?.ticker ?? asset, call.sell === 'floor' ? `quota snipe (floor): +$${net.toFixed(2)} net on ${what} fell below its $${floor!.toFixed(2)} floor` : `quota snipe: +$${net.toFixed(2)} net on ${what} covers the $${need.toFixed(2)} the hour needs`);
           this.record(t, now); this.book.remove(asset); changed = true; exitNow.add(asset);
         }
       }
@@ -557,6 +568,16 @@ export class SetupTrader {
       lastError: this.lastError ?? null,
     };
   }
+}
+
+/** PACER_FLOOR on a setup trade: why its plan aims higher than the quota (undefined: none). A set price: the first target not
+ *  yet taken or the final target, beyond the price now; riding mode adds a trade riding its trailing stop. */
+export function setupHigher(t: OpenTrade, px: number, mode: PacerFloorMode): string | undefined {
+  if (mode === 'off') return undefined;
+  const beyond = (x: number | undefined) => x !== undefined && t.dir * (x - px) > 1e-12;
+  if (!t.partialDone && beyond(t.plan.target1)) return `the setup's first target ${t.plan.target1}`;
+  if (beyond(t.plan.target2)) return `the setup's target ${t.plan.target2}`;
+  return mode === 'riding' ? `the setup trade riding its stop ${t.stop}` : undefined;
 }
 
 /** Wilder ATR(14) at the last bar. */
