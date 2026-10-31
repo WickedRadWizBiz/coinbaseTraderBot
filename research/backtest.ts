@@ -114,6 +114,8 @@ export interface ExitStats {
    *  decisions to sell a position whose profit fell below its floor (their fills count among the quota snipes). */
   floorArms?: number;
   floorSales?: number;
+  /** PACER_FLOOR_CONFIRM=model (lab): ticks a breached floor was held because the model valued the position above it. */
+  floorHolds?: number;
   /** Exit audit by kind (a queued exit's client id ends -exit-<kind>: snipe, floor, tp, fv, ...), for the markets settled in
    *  the replay: fills, contracts, net proceeds, what those contracts paid at settlement, and what the best side bid after
    *  the sale up to the close would have fetched, less the sale's own fee. */
@@ -914,6 +916,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       });
       if (plan.pacerArm && quotaFloors.arm(m.ticker, view.position, plan.pacerArm.usd)) exits.floorArms!++;
       if (plan.place.some((p) => p.purpose === 'exit' && p.why.startsWith('quota snipe (floor)'))) exits.floorSales!++;
+      if (plan.notes.some((n) => n.startsWith('quota floor held: '))) exits.floorHolds = (exits.floorHolds ?? 0) + 1;
       const qDecision = decisionProbability(view, strat);
       if (strategy.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features: fmap, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: strategy.takeMargin });
       // Fill model (validated only), as live: quote, cross or skip each maker entry by expected value.

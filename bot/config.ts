@@ -890,6 +890,7 @@ function pacerConfig(env: Env): PacerConfig {
     floor: oneOf(env, 'PACER_FLOOR', 'riding', ['off', 'targets', 'riding', 'trail'] as const),
     trailKeep: num(env, 'PACER_TRAIL_KEEP', 0.5, 0, 1),
     floorTicks: num(env, 'PACER_FLOOR_TICKS', 0, 0, 50),
+    floorConfirm: oneOf(env, 'PACER_FLOOR_CONFIRM', 'none', ['none', 'model'] as const),
   };
 }
 
