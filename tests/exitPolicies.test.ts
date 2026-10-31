@@ -105,12 +105,16 @@ test('flat position resets the ratchet', () => {
   assert.equal(r.stop, undefined);
 });
 
+// The loser rules (FV_ENTRY_GATE, LOSER_CUT, LOSER_WINDOW_CUT; on by default) off: the synthetic market sits near fair value,
+// so the 6c gate would refuse most entries, and these tests pin down other mechanics.
+const NO_LOSER_RULES = { FV_ENTRY_GATE: 'false', LOSER_CUT: 'false', LOSER_WINDOW_CUT: 'false' };
+
 test('backtester compares all exit policies on identical data', async () => {
   const dir = path.join(tmpDir(), 'rec');
   writeSyntheticRecordings(dir, { windows: 8, seed: 9, marketNoise: 0.05 });
   // Continuous cadence + Kelly: an exit-policy comparison with plenty of trades. The profit mandate (on by default) would sell
   // every policy's winners at the bid, hold included: off here, so the policies' own mechanics are compared.
-  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both', STRATEGY_CADENCE: 'continuous', PROFIT_MANDATE: 'false', PACER: 'false' });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both', STRATEGY_CADENCE: 'continuous', PROFIT_MANDATE: 'false', PACER: 'false', ...NO_LOSER_RULES });
   const out: Record<string, Awaited<ReturnType<typeof runBacktest>>> = {};
   for (const exitPolicy of ['hold', 'fair_value', 'take_profit', 'liquidity_ratchet', 'hybrid', 'confluence_ratchet'] as const) {
     out[exitPolicy] = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy });
