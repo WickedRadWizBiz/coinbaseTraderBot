@@ -995,7 +995,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         }
         if (/^(train|explore)/.test(p.why)) res.paper!.extraSent = (res.paper!.extraSent ?? 0) + 1;
         const clientOrderId = `${m.ticker}-${st.now}-${p.side}-${p.purpose}${p.why.startsWith('take-profit') ? '-tp' : p.why.startsWith('confluence ratchet wall ask') ? '-wall' : ''}`;
-        if (res.entryLog && p.purpose === 'entry' && !p.reduceOnly) sentCtx.set(clientOrderId, { ticker: m.ticker, asset: m.asset, closeTs: m.closeTime, pYes, mid, tauSec, f: fmap });
+        if (res.entryLog && !p.reduceOnly && (p.purpose === 'entry' || (p.purpose === 'quote' && p.why.startsWith('maker ')))) sentCtx.set(clientOrderId, { ticker: m.ticker, asset: m.asset, closeTs: m.closeTime, pYes, mid, tauSec, f: fmap });
         await send(m.ticker, 'order', async () => {
           try {
             await ex.createOrder({ ticker: m.ticker, side: p.side, count: p.count, price: p.price, timeInForce: p.timeInForce, postOnly: p.postOnly, reduceOnly: p.reduceOnly, selfTradePrevention: 'taker_at_cross', clientOrderId, expirationTime: p.expirationTime });
