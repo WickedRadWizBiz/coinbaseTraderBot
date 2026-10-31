@@ -16,6 +16,12 @@ export interface ReversalLeanParams {
   /** Job 4: sell a position in profit after fees when the votes against the held side reach this (TA_EXIT_EXTREME_VOTES;
    *  0 = off). The coin stretched in the position's favour is the bounce the lean expects, so the profit is taken first. */
   exitVotes?: number;
+  /** Job 4, second iteration (Oct 31): the first sold any profit and cost $0.68/h on the full bot (it cut winners for a cent
+   *  and paid the taker fee). It now also needs the bid, net of the exit fee, within `exitEdge` of the fair value for the
+   *  held side (TA_EXIT_EXTREME_EDGE; -1 = any) and the sale to lock in at least `exitShare` of the position's most it can
+   *  still make by settlement, (1 - cost) a contract (TA_EXIT_EXTREME_SHARE; 0 = any profit). */
+  exitEdge?: number;
+  exitShare?: number;
   /** Probability points per vote on the quoted centre (TA_LEAN_MAKER; 0 = off). */
   maker: number;
   /** Probability points per vote on the decision probability (TA_LEAN_PRICE; 0 = off). */

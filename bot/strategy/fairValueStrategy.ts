@@ -268,6 +268,9 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
   const cost = v.entrySidePrice !== undefined ? v.entrySidePrice + (v.entryFeePerContract ?? 0) : undefined;
   const mandate = mandateMin !== undefined && cost !== undefined && exitWindow;
   const pacerUsd = opts.pacerUsd;
+  // Job 4's sale must sell near the fair value and lock in its share of what the position can still make (reversalLean.ts).
+  const rl = cfg.reversalLean;
+  const extremePays = (edge: number, netSide: number) => edge >= (rl?.exitEdge ?? -1) - 1e-9 && (cost === undefined || netSide - cost >= (rl?.exitShare ?? 0) * (1 - cost) - 1e-9);
   const sniping = pacerUsd !== undefined && cost !== undefined && exitWindow;
   if ((exits || mandate || sniping) && v.position > 0 && bid) {
     const n = Math.min(v.position, bid.size);
@@ -277,7 +280,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     const pm = mandate && n > 0 && bid.price - fee >= cost! + mandateMin! - 1e-9;
     const netUsd = sniping ? netProfitAtBid(v) ?? 0 : 0;
     const snipe = sniping && n > 0 && (netUsd >= pacerUsd! - 1e-9 || (opts.pacerGroup !== undefined && netUsd > 1e-9));
-    const extreme = exitWindow && n > 0 && v.extremeExit === true && (netProfitAtBid(v) ?? 0) > 1e-9;
+    const extreme = exitWindow && n > 0 && v.extremeExit === true && (netProfitAtBid(v) ?? 0) > 1e-9 && extremePays(edge, bid.price - fee);
     if (n > 0 && ((exits && (edge >= margin || tp?.sell)) || pm || snipe || extreme)) {
       out.place.push({ side: 'ask', price: bid.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge,
         ...(tp?.sell && tp.protective ? { protective: true } : {}),
@@ -294,7 +297,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     const pm = mandate && n > 0 && noBid - fee >= cost! + mandateMin! - 1e-9;
     const netUsd = sniping ? netProfitAtBid(v) ?? 0 : 0;
     const snipe = sniping && n > 0 && (netUsd >= pacerUsd! - 1e-9 || (opts.pacerGroup !== undefined && netUsd > 1e-9));
-    const extreme = exitWindow && n > 0 && v.extremeExit === true && (netProfitAtBid(v) ?? 0) > 1e-9;
+    const extreme = exitWindow && n > 0 && v.extremeExit === true && (netProfitAtBid(v) ?? 0) > 1e-9 && extremePays(edge, noBid - fee);
     if (n > 0 && ((exits && (edge >= margin || tp?.sell)) || pm || snipe || extreme)) {
       out.place.push({ side: 'bid', price: ask.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge,
         ...(tp?.sell && tp.protective ? { protective: true } : {}),

@@ -1099,6 +1099,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       band: num(env, 'TA_LEAN_BAND', 0.15, 0, 0.5),
       max: num(env, 'TA_LEAN_MAX', 0.02, 0, 0.05),
       exitVotes: num(env, 'TA_EXIT_EXTREME_VOTES', 0, 0, 3),
+      exitEdge: num(env, 'TA_EXIT_EXTREME_EDGE', -1, -1, 1),
+      exitShare: num(env, 'TA_EXIT_EXTREME_SHARE', 0, 0, 1),
     },
     regimeScale: {
       volTarget: num(env, 'REGIME_VOL_TARGET', 0, 0, 2),

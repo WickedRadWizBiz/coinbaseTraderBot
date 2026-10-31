@@ -47,3 +47,16 @@ test('the extreme exit fires only against the held side and only when switched o
   assert.equal(extremeExit(p, f, -10), false); // long NO: the stretch is against it
   assert.equal(extremeExit(p, f, 0), false);
 });
+
+test('job 4 (second iteration) sells on the stretch only for its share of what is left to make', () => {
+  const v = {
+    ticker: 'T', pYes: 0.5, bestBid: { price: 0.5, size: 100 }, bestAsk: { price: 0.52, size: 100 }, position: 10, bankroll: 1000,
+    maxOrderRiskUsd: 20, maxContracts: 20, minSidePrice: 0.05, tauSec: 600, noEntryBeforeCloseSec: 30, fastMove: false, tickSize: 0.01,
+    nowSec: 1000, closeSec: 1600, entrySidePrice: 0.4, entryFeePerContract: 0, extremeExit: true,
+  } as unknown as MarketView;
+  const S = loadConfig(paperEnv({ ...process.env, DASHBOARD_TOKEN: 'x'.repeat(32) })).strategy;
+  const sells = (rl: Partial<typeof S.reversalLean>) => decide(v, { ...S, reversalLean: { ...S.reversalLean, ...rl } }, { exits: false, pacerUsd: 100 }).place.some((o) => o.why.startsWith('extreme take-profit'));
+  assert.equal(sells({ exitShare: 0 }), true); // any profit: +10c a contract minus the fee
+  assert.equal(sells({ exitShare: 0.5 }), false); // needs 30c of the 60c left
+  assert.equal(sells({ exitShare: 0, exitEdge: 0.05 }), false); // the bid is not 5c over the fair value
+});
