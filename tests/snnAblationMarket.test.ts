@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { judge, loadSide, MECHANISMS, savedSide, summarize, vsMarket } from '../research/snnAblation';
+import { judge, loadSide, MECHANISMS, savedSide, summarize, vsMarket, vsMarketBreakdown } from '../research/snnAblation';
 import type { SnnReplayResult } from '../research/snnReplay';
 import type { SnnRow } from '../research/snnReplay';
 import { Xoshiro128 } from '../bot/snn/rng';
@@ -43,4 +43,16 @@ test('split mode: a side saved by one job and judged by another gives the same v
   const b = loadSide(path.join(dir, 'b.json'), m.name, 'baseline'), c = loadSide(path.join(dir, 'c.json'), m.name, 'candidate');
   assert.deepEqual(judge(m, c.res, b.res, c.sum, b.sum, [c.sum]), judge(m, cand, base, cs, bs, [cs]));
   assert.throws(() => loadSide(path.join(dir, 'b.json'), m.name, 'candidate'), /holds the baseline/);
+});
+
+test('breakdown: a slice where the SNN knows the truth shows up as beating the market; small slices say too few', () => {
+  const good = rows(900, (t) => t, 3).map((r) => ({ ...r, column: 'BTC-15m' }));
+  const flat = rows(900, (_t, m) => Math.min(0.98, Math.max(0.02, m)), 4).map((r) => ({ ...r, column: 'ETH-15m', eventKey: `F${r.eventKey}`, ticker: `F${r.ticker}` }));
+  const tiny = rows(40, (t) => t, 5).map((r) => ({ ...r, column: 'SOL-15m', eventKey: `S${r.eventKey}`, ticker: `S${r.ticker}` }));
+  const bd = vsMarketBreakdown([...good, ...flat, ...tiny], 300);
+  const col = (c: string) => bd.find((x) => x.by === 'column' && x.slice === c)!;
+  assert.equal(col('BTC-15m').verdict, 'BEATS the market');
+  assert.equal(col('ETH-15m').verdict, 'undecided');
+  assert.equal(col('SOL-15m').verdict, 'too few');
+  assert.ok(['mid', 'hourUtc', 'kind', 'vol'].every((b) => bd.some((x) => x.by === b)));
 });

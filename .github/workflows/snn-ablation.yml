@@ -10,11 +10,6 @@
 name: SNN ablation
 
 on:
-  # A push of this file or the ablation code on its development branch runs it with the defaults (a dispatch needs
-  # the file on main first).
-  push:
-    branches: ['claude/project-thread-jwz96h']
-    paths: ['.github/workflows/snn-ablation.yml', 'research/snnAblation.ts']
   workflow_dispatch:
     inputs:
       only:
@@ -29,9 +24,14 @@ on:
         description: 'Recorded days to replay (most recent)'
         required: false
         default: '8'
+      from_run:
+        description: 'Judge only: re-judge the saved sides of this earlier run id (no replay, no server read; artifacts last 7 days)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: snn-ablation
@@ -40,13 +40,12 @@ concurrency:
 jobs:
   # Every mechanism in one job (a dispatch with an empty "only"; hours).
   ablate:
-    if: github.event_name != 'push' && inputs.only == ''
+    if: inputs.only == '' && inputs.from_run == ''
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 345
     env:
-      # A push run has no inputs: it judges the mid-anchored readout only (every mechanism takes ~1.7 h each).
-      ONLY: ${{ github.event_name == 'push' && 'mid-anchored' || inputs.only }}
+      ONLY: ${{ inputs.only }}
       DOMAIN: ${{ inputs.domain || 'crypto' }}
       DAYS: ${{ inputs.days || '8' }}
     steps:
@@ -108,7 +107,7 @@ jobs:
 
   # One mechanism: its baseline and candidate replay on two runners at once (each ~2-3 h), then one judge.
   side:
-    if: github.event_name == 'push' || inputs.only != ''
+    if: inputs.only != '' && inputs.from_run == ''
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 345
@@ -117,8 +116,7 @@ jobs:
       matrix:
         side: [baseline, candidate]
     env:
-      # A push run has no inputs: it judges the mid-anchored readout only (every mechanism takes ~1.7 h each).
-      ONLY: ${{ github.event_name == 'push' && 'mid-anchored' || inputs.only }}
+      ONLY: ${{ inputs.only }}
       DOMAIN: ${{ inputs.domain || 'crypto' }}
       DAYS: ${{ inputs.days || '8' }}
     steps:
@@ -178,11 +176,11 @@ jobs:
 
   judge:
     needs: side
+    if: always() && (needs.side.result == 'success' || inputs.from_run != '')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # A push run has no inputs: it judges the mid-anchored readout only (every mechanism takes ~1.7 h each).
-      ONLY: ${{ github.event_name == 'push' && 'mid-anchored' || inputs.only }}
+      ONLY: ${{ inputs.only }}
       DOMAIN: ${{ inputs.domain || 'crypto' }}
       DAYS: ${{ inputs.days || '8' }}
     steps:
@@ -206,11 +204,15 @@ jobs:
           pattern: snn-ablation-side-*
           path: research/out
           merge-multiple: true
+          # Judge-only: the sides saved by an earlier run.
+          run-id: ${{ inputs.from_run || github.run_id }}
+          github-token: ${{ inputs.from_run != '' && github.token || '' }}
       - name: Judge
         run: |
           set -euo pipefail
-          # The verdict line and the "vs market" line (the SNN plan's phase 1 go/no-go).
-          npm run --silent research:snn-ablation -- --domain "$DOMAIN" --only "$ONLY" --judge research/out/side-baseline.json,research/out/side-candidate.json --out research/out/snn_ablation.json
+          # The verdict line, the "vs market" line (the SNN plan's phase 1 go/no-go) and where the SNN stands against
+          # the market by asset x horizon, mid level, hour, kind and volatility.
+          npm run --silent research:snn-ablation -- --domain "$DOMAIN" --only "$ONLY" --judge research/out/side-baseline.json,research/out/side-candidate.json --breakdown true --out research/out/snn_ablation.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

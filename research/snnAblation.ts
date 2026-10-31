@@ -80,6 +80,31 @@ export function vsMarket(rows: SnnRow[], iters = 2000) {
   return eventCi(rows, (r) => brier(r.pSnn, r.y) - brier(clipMid(r.mid), r.y), iters);
 }
 
+/** Where the SNN differs from the market: vsMarket within slices of the rows (column = asset x horizon, the mid's
+ *  distance from 50 cents, the UTC hour block, the contract kind, the volatility regime). A slice with its CI below zero
+ *  is a place the SNN beats the market; a slice too small for a CI says so. */
+export function vsMarketBreakdown(rows: SnnRow[], iters = 1000, minEvents = 150) {
+  const slicers: Record<string, (r: SnnRow) => string> = {
+    column: (r) => r.column,
+    mid: (r) => { const d = Math.abs(r.mid - 0.5); return d < 0.1 ? 'mid 40-60c' : d < 0.25 ? 'mid 25-40/60-75c' : d < 0.4 ? 'mid 10-25/75-90c' : 'mid <10/>90c'; },
+    hourUtc: (r) => { const h = new Date(r.ts).getUTCHours(); const b = Math.floor(h / 4) * 4; return `${String(b).padStart(2, '0')}-${String(b + 4).padStart(2, '0')} UTC`; },
+    kind: (r) => r.kind,
+    vol: (r) => (r.volRatio < 0.8 ? 'vol low' : r.volRatio < 1.25 ? 'vol normal' : 'vol high'),
+  };
+  const out: { by: string; slice: string; events: number; mean: number; lo: number; hi: number; verdict: string }[] = [];
+  for (const [by, f] of Object.entries(slicers)) {
+    const groups = new Map<string, SnnRow[]>();
+    for (const r of rows) { const k = f(r); const g = groups.get(k); if (g) g.push(r); else groups.set(k, [r]); }
+    for (const [slice, g] of [...groups].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const events = new Set(g.map((r) => r.eventKey)).size;
+      if (events < minEvents) { out.push({ by, slice, events, mean: NaN, lo: NaN, hi: NaN, verdict: 'too few' }); continue; }
+      const c = vsMarket(g, iters);
+      out.push({ by, slice, events, mean: c.mean, lo: c.lo, hi: c.hi, verdict: c.hi < 0 ? 'BEATS the market' : c.lo > 0 ? 'worse' : 'undecided' });
+    }
+  }
+  return out;
+}
+
 /** Per-event mean of a per-row quantity, clustered and day-block bootstrapped. */
 export function eventCi(rows: SnnRow[], f: (r: SnnRow) => number, iters = 2000) {
   const ev = new Map<string, { s: number; n: number; day: string }>();
@@ -207,6 +232,13 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
     const b = loadSide(bf, m.name, 'baseline'), c = loadSide(cf, m.name, 'candidate');
     const v = judge(m, c.res, b.res, c.sum, b.sum, [c.sum]);
     printVerdict(v);
+    // --breakdown: where the candidate differs from the market (no new replay; seconds).
+    if (argOf('breakdown', '') === 'true') {
+      const bd = vsMarketBreakdown(c.res.rows);
+      console.log('        where the candidate stands against the market (Brier SNN - mid per window, day-block 95% CI):');
+      for (const x of bd) console.log(`          ${x.by.padEnd(8)} ${x.slice.padEnd(20)} ${String(x.events).padStart(5)} windows  ${Number.isFinite(x.mean) ? `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]` : ''.padEnd(29)}  ${x.verdict}`);
+      v.extra = { ...(v.extra ?? {}), vsMarketBreakdown: bd };
+    }
     writeVerdicts(out, { domain, recordings: dir, from: from ?? null, to: to ?? null }, [v]);
     return [v];
   }
