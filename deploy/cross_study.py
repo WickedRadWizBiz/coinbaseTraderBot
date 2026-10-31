@@ -604,9 +604,9 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         None (hold everything); pacer: None | (mode, group) with mode 'cumulative' | 'rolling_hour' | 'slices' (Steven's
         non-stacking spec of Oct 30, bot/risk/quotaPacer.ts: catch-up slices of at most the hourly target).
         size=(lo, hi, mult): each position's stake (contracts x entry cost, fee in) clamped to [lo, hi] then scaled by mult, the
-        contract count rescaled to match (Steven, Oct 30: $10-$20 now, $50-$100 asked). reenter: once a pacer snipe banks its
-        target, buy the same side of the same market again at the ask the next second with the same stake, and repeat while the
-        market has room (not inside its last 10% or final minute); reenter='any': instead take the bot's next own taker entry
+        contract count rescaled to match (Steven, Oct 30: $10-$20 now, $50-$100 asked). reenter=True (same market at the ask, kept
+        only for old runs; Steven, Oct 31: not a method the bot uses, so the lab no longer measures it); reenter='any': once a
+        pacer snipe banks its target, take the bot's next own taker entry
         signal (any market, either side) from the snipe to the end of its clock hour (at least 120 s), at the recorded ask, same stake. depth: contracts beyond the top-of-book size pay 2c worse
         (the ask on entry, the bid on a sale): the lab otherwise fills every size at the top."""
         DEPTH_PX = 0.02
@@ -978,8 +978,8 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
     print('  G. sizes and re-entry on every position from its entry (B), current exits (lock bid +2c, first dip judged vs fv + 2c')
     print('     else hold, PR #204 window) and the slices pacer with no group rule unless the row says otherwise. Stakes: each position\'s')
     print('     entry cost clamped to the band, the contract count rescaled (x5 for $50-$100). Re-entry: after a pacer snipe banks its')
-    print('     target, buy the same side of the same market at the ask the next second with the same stake, repeat while the market')
-    print('     has room. Depth: contracts over the top-of-book size pay 2c worse on entry and sale (top-of-book only, no deeper levels).')
+    print('     target, take the bot\'s next own entry signal in any market, either side, to the end of the clock hour (same stake).')
+    print('     Depth: contracts over the top-of-book size pay 2c worse on entry and sale (top-of-book only, no deeper levels).')
     baseG = R(lockB, ('bid', 1), ('taker',), -0.02, ('frac_profit', 0.10), {'first_only': True})
     SL = ('slices', False)
     ANY = ({'size': (10, 20, 1), 'reenter': 'any'}, {'size': (10, 20, 1), 'reenter': 'any', 'depth': True},
@@ -1010,10 +1010,6 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             ('$50-$100; no pacer', None, {'size': (10, 20, 5)}),
             ('$50-$100; slices no group', SL, {'size': (10, 20, 5)}),
             ('$50-$100; slices no group; depth', SL, {'size': (10, 20, 5), 'depth': True}),
-            ('$10-$20; slices no group; re-entry', SL, {'size': (10, 20, 1), 'reenter': True}),
-            ('$10-$20; slices no group; re-entry; depth', SL, {'size': (10, 20, 1), 'reenter': True, 'depth': True}),
-            ('$50-$100; slices no group; re-entry', SL, {'size': (10, 20, 5), 'reenter': True}),
-            ('$50-$100; slices no group; re-entry; depth', SL, {'size': (10, 20, 5), 'reenter': True, 'depth': True}),
             ('$10-$20; slices no group; next signal any market', SL, {'size': (10, 20, 1), 'reenter': 'any'}),
             ('$10-$20; slices no group; next signal; depth', SL, {'size': (10, 20, 1), 'reenter': 'any', 'depth': True}),
             ('$50-$100; slices no group; next signal any market', SL, {'size': (10, 20, 5), 'reenter': 'any'}),
@@ -1109,8 +1105,6 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
              ('$10-$20; no pacer', {'remap': bando, 'pacer': None}), ('$10-$20; no pacer; depth', {'remap': bando, 'pacer': None, 'depth': True}),
              ('$50-$100; slices', {'remap': band5}), ('$50-$100; slices; depth', {'remap': band5, 'depth': True}),
              ('$50-$100; no pacer', {'remap': band5, 'pacer': None}), ('$50-$100; no pacer; depth', {'remap': band5, 'pacer': None, 'depth': True}),
-             ('$10-$20; slices; re-enter same market', {'remap': bando, 'reenter': True}),
-             ('$50-$100; slices; re-enter same market; depth', {'remap': band5, 'reenter': True, 'depth': True}),
              ('$10-$20; slices; next signal any market', {'remap': bando, 'reenter': 'any'}),
              ('$10-$20; slices; next signal; depth', {'remap': bando, 'reenter': 'any', 'depth': True}),
              ('$50-$100; slices; next signal any market', {'remap': band5, 'reenter': 'any'}),
