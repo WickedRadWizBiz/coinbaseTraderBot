@@ -11,7 +11,7 @@ on:
         required: false
         default: ''
       pnl:
-        description: 'Also run the P&L forensics (deploy/pnl_report.py, decision_study.py, cross_study.py, component_study.py, feed_delay.py, latency_study.py from the dispatched ref; read-only, a few minutes)'
+        description: 'Also run the P&L forensics (deploy/pnl_report.py, decision_study.py, cross_study.py, component_study.py, feed_delay.py, latency_study.py from the dispatched ref) on a GitHub runner: the last days of audit and recordings are copied off the server at 8 MB/s (read-only; 20-40 min)'
         required: false
         default: 'false'
       timings:
@@ -19,7 +19,7 @@ on:
         required: false
         default: 'false'
       study_hours:
-        description: 'With pnl: hours of positions the exit study replays (whole number, 1-24; about a minute of server time an hour)'
+        description: 'With pnl: hours of positions the exit study replays (whole number, 1-24)'
         required: false
         default: '8'
       ta_study:
@@ -61,16 +61,16 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v5
-        if: inputs.pnl == 'true' || inputs.timings == 'true'
+        if: inputs.timings == 'true'
       - name: Upload the report scripts
-        if: inputs.pnl == 'true' || inputs.timings == 'true'
+        if: inputs.timings == 'true'
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
           username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
-          source: deploy/pnl_report.py,deploy/decision_study.py,deploy/cross_study.py,deploy/component_study.py,deploy/feed_delay.py,deploy/latency_study.py,deploy/step_timings.py
+          source: deploy/step_timings.py
           target: /tmp/diag
       - name: Report
         uses: appleboy/ssh-action@v1.0.3
@@ -190,18 +190,7 @@ jobs:
               case "$p" in /api/*) ;; *) echo "skipping $p (only /api/... paths)"; continue;; esac
               echo "== GET $p"; api "$p" | head -c 6000; echo
             done
-            if [ "$PNL" = "true" ] && [ -d /tmp/diag/deploy ]; then
-              echo "== P&L report"; nice -n 19 python3 /tmp/diag/deploy/pnl_report.py ~/bot/data 3 || true
-              echo "== decision study"; nice -n 19 python3 /tmp/diag/deploy/decision_study.py ~/bot/data 3 || true
-              case "$STUDY_HOURS" in ''|*[!0-9]*) STUDY_HOURS=8;; esac
-              if [ "$STUDY_HOURS" -lt 1 ] || [ "$STUDY_HOURS" -gt 24 ]; then STUDY_HOURS=8; fi
-              echo "== exit study (the cross, the projected-peak rule and the live-line rules, replayed on the recordings: $STUDY_HOURS h)"
-              timeout $((STUDY_HOURS * 110 + 300)) nice -n 19 python3 /tmp/diag/deploy/cross_study.py ~/bot/data "$STUDY_HOURS" || echo "(exit study stopped: $?)"
-              echo "== component study (the SNN and the TA network against the meta-model's price on the last 3 days of decisions; the rule book's trial rows)"
-              timeout 1200 nice -n 19 python3 /tmp/diag/deploy/component_study.py ~/bot/data 3 || echo "(component study stopped: $?)"
-              echo "== feed delay"; nice -n 19 python3 /tmp/diag/deploy/feed_delay.py ~/bot/data/recordings 1 || true
-              echo "== latency study"; nice -n 19 python3 /tmp/diag/deploy/latency_study.py ~/bot/data/recordings 2 || true
-            fi
+            if [ "$PNL" = "true" ]; then echo "== P&L forensics: in the 'forensics' job's log (they run on a GitHub runner, not on the server)"; fi
             if [ "$TIMINGS" = "true" ] && [ -f /tmp/diag/deploy/step_timings.py ]; then
               echo "== training step timings"; nice -n 19 python3 /tmp/diag/deploy/step_timings.py ~/bot/data 30 || true
             fi

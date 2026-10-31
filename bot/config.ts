@@ -728,6 +728,10 @@ export interface TennisConfig {
    * progress sell at the bid regardless (0 = off). */
   underdogLateProgress: number;
   underdogCutProgress: number;
+  /** Steven's profit rules on tennis (Oct 30): in the last share of the match by its progress (0.30: his "less than 30%"
+   *  for tennis, against the 10% of a crypto contract's window, STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC) a position in profit
+   *  after fees rides to settlement; elsewhere the quota snipe applies as on every contract type. 0 = off. */
+  settleFrac: number;
   /** Tennis MLP (fair P(win) from the 4 signals, score, book and SNN): when validated, entries need
    *  fair - price >= this. */
   fairMinEdge: number;
@@ -881,6 +885,8 @@ function pacerConfig(env: Env): PacerConfig {
     mode: oneOf(env, 'PACER_MODE', 'slices', ['slices', 'cumulative', 'rolling_hour'] as const),
     minTakeUsd,
     maxTargetUsd: Math.max(minTakeUsd, num(env, 'PACER_MAX_TARGET_USD', 6.5, 0, 10_000)),
+    // Steven (Oct 31): under a higher target the quota is the position's stop, not its sale.
+    floor: oneOf(env, 'PACER_FLOOR', 'riding', ['off', 'targets', 'riding'] as const),
   };
 }
 
@@ -1570,6 +1576,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       earlyFullSizeMin: num(env, 'TENNIS_EARLY_FULL_SIZE_MIN', 10, 0, 240),
       underdogLateProgress: num(env, 'TENNIS_UNDERDOG_LATE_PROGRESS', 0.35, 0, 1),
       underdogCutProgress: num(env, 'TENNIS_UNDERDOG_CUT_PROGRESS', 0.6, 0, 1),
+      settleFrac: num(env, 'TENNIS_NO_EXIT_BEFORE_END_FRAC', 0.30, 0, 0.9),
       fairMinEdge: num(env, 'TENNIS_FAIR_MIN_EDGE', 0.01, -0.5, 0.5),
       modelPath: path.resolve(env.TENNIS_MODEL_PATH ?? './params/tennis_model.json'),
     },

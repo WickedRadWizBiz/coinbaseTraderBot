@@ -68,7 +68,7 @@ import type { Timeframe } from '../bot/ta/knowledge';
 import { setTaNetEnsemble, TaNetEnsemble, taNetView } from '../bot/ta/taNetEnsemble';
 import { ProfitPeaks } from '../bot/strategy/profitPeaks';
 import { ConfluenceRatchetExit, DEFAULT_HUNT, DEFAULT_RATCHET, EXIT_POLICIES, ExitPolicyName, HuntParams, LiquidityRatchet, RatchetParams } from '../bot/strategy/exitPolicies';
-import { HourlyQuotaPacer, SnipeGroup } from '../bot/risk/quotaPacer';
+import { HourlyQuotaPacer, QuotaFloors, SnipeGroup } from '../bot/risk/quotaPacer';
 import { readRecordings, ReplayState } from './replay';
 import { AccuracyGate, type AccuracyGateConfig } from '../bot/strategy/accuracyGate';
 import { TakeProfitBench } from '../bot/strategy/takeProfitBench';
@@ -110,6 +110,10 @@ export interface ExitStats {
   /** Quota snipes (PACER, bot/risk/quotaPacer.ts): sales and the contracts they sold. */
   quotaSnipes: number;
   quotaSnipeContracts: number;
+  /** PACER_FLOOR: floors armed or raised (a rule aiming higher kept a position whose profit covered the need), and the
+   *  decisions to sell a position whose profit fell below its floor (their fills count among the quota snipes). */
+  floorArms?: number;
+  floorSales?: number;
   /** Mean (stop - fill price) in side terms for ratchet exits; positive = filled below the stop. */
   avgSlippage: number | null;
 }
@@ -372,11 +376,12 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const pos = new PositionBook();
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => DEFAULT_FEES, () => st.now);
   const gateway = new RiskGateway(limits);
-  const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, huntProfitTakes: 0, lockSales: 0, lockHolds: 0, wallAsks: 0, wallFills: 0, quotaSnipes: 0, quotaSnipeContracts: 0, avgSlippage: null };
+  const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, huntProfitTakes: 0, lockSales: 0, lockHolds: 0, wallAsks: 0, wallFills: 0, quotaSnipes: 0, quotaSnipeContracts: 0, floorArms: 0, floorSales: 0, avgSlippage: null };
   // The hourly quota pacer on the replay's clock (PACER, bot/risk/quotaPacer.ts), as the engine runs it.
   let pacer: HourlyQuotaPacer | undefined;
   const pacerAt = (now: number) => (pacer ??= new HourlyQuotaPacer(strategy.pacer, now));
   const snipeGroup = new SnipeGroup();
+  const quotaFloors = new QuotaFloors();
   const vault = opts.vault ? new Vault(opts.vault, undefined, () => st.now) : undefined;
   const res: BacktestResult = { exitPolicy: policy, label: policy === 'confluence_ratchet' ? `confluence_ratchet[m=${(opts.hunt ?? DEFAULT_HUNT).targetMargin},f=${(opts.ratchet ?? DEFAULT_RATCHET).minFillRatio}]` : policy, huntParams: policy === 'confluence_ratchet' ? { hunt: opts.hunt ?? DEFAULT_HUNT, ratchet: opts.ratchet ?? DEFAULT_RATCHET } : undefined, vaultEnd: 0, pocketEnd: 0, bySession: {}, exits, trades: [], takeProfitFills: 0, latency: { orderMs: opts.latency?.orderMs ?? 0, cancelMs: opts.latency?.cancelMs ?? opts.latency?.orderMs ?? 0, jitterMs: opts.latency?.jitterMs ?? 0, sent: 0, cancelRaceFills: 0, cancelRaceContracts: 0, lateKills: 0 }, entryEvaluations: 0, days: 0, minEdge: strategy.minEdge, windows: new Map(), fills: 0, contracts: 0, fees: 0, pnl: 0 };
   const cadence = new CadenceGate(strategy);
@@ -599,6 +604,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           ratchets.delete(m.ticker);
           hunts.delete(m.ticker);
           snipeGroup.forget(m.ticker);
+          quotaFloors.forget(m.ticker);
           cadence.forget(m.ticker);
           pending.delete(m.ticker);
           priority.delete(m.ticker);
@@ -892,7 +898,11 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         profitMandate: strategy.profitMandate && (!huntMode || huntHold) ? strategy.profitMandateMin : undefined,
         pacerUsd: pacerUsdNow,
         ...(group?.sell ? { pacerGroup: group } : {}),
+        // PACER_FLOOR, as the engine: the hunt trailing its stop rides a winner (riding mode).
+        ...(strategy.pacer.floor === 'off' ? {} : { pacerFloor: quotaFloors.floor(m.ticker, view.position), ...(strategy.pacer.floor === 'riding' && huntMode && !huntHold ? { pacerHigher: 'the hunt riding its stop' } : {}) }),
       });
+      if (plan.pacerArm && quotaFloors.arm(m.ticker, view.position, plan.pacerArm.usd)) exits.floorArms!++;
+      if (plan.place.some((p) => p.purpose === 'exit' && p.why.startsWith('quota snipe (floor)'))) exits.floorSales!++;
       const qDecision = decisionProbability(view, strat);
       if (strategy.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features: fmap, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: strategy.takeMargin });
       // Fill model (validated only), as live: quote, cross or skip each maker entry by expected value.
@@ -1063,6 +1073,7 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
   const fmPath = argOf('fill-model', '');
   const fillModel = fmPath ? FillModel.load(fmPath) : undefined;
   const calendar = loadCalendar(argOf('calendar', 'params/calendar.json'));
+  // The paper supervisor's refill of a pool that ran dry: --refill <usd> (PAPER_BANKROLL_USD). Default: none.
   // Execution latency (ms): --latency-ms 250 [--cancel-latency-ms 150] [--latency-jitter-ms 100]. Default: none.
   const latency: BacktestLatency | undefined = Number(argOf('latency-ms', '0')) > 0 || Number(argOf('latency-jitter-ms', '0')) > 0
     ? { orderMs: Number(argOf('latency-ms', '0')), cancelMs: argOf('cancel-latency-ms', '') ? Number(argOf('cancel-latency-ms', '0')) : undefined, jitterMs: Number(argOf('latency-jitter-ms', '0')) }
@@ -1079,6 +1090,7 @@ export async function backtestMain(argOf: (k: string, d: string) => string = cli
           exitPolicy, ratchet: c.ratchet, hunt: c.hunt, volProfile, applyVolSeasonality: Boolean(volProfile), volModel, fillModel,
           sessionRisk: cfg.strategy.sessionRisk, huntSessionGuard: cfg.strategy.huntSessionGuard, huntTransitionBufferMin: cfg.strategy.huntTransitionBufferMin,
           vault: cfg.vault.enabled ? cfg.vault : undefined, calendar, sizingTiers: cfg.sizingTiers, latency,
+          ...(argOf('refill', '') ? { refillUsd: Number(argOf('refill', '')) } : {}),
         }));
       }
     }
