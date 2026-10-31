@@ -44,3 +44,11 @@ test('correction gain replay: causal (an outcome is used only after its contract
   const raw = rs.reduce((s, r) => s + brier(r.pSnn, r.y), 0), gained = out.reduce((s, r) => s + brier(r.pSnn, r.y), 0);
   assert.ok(gained < raw, `gained ${gained} raw ${raw}`);
 });
+
+test('correction gain: a window counts once however many rows it was priced in', () => {
+  const c = { mid: 0.5, volRatio: 1, horizonMin: 60, kind: 'greater' };
+  const a = new CorrectionGain({ forget: 1, prior: 1 }), b = new CorrectionGain({ forget: 1, prior: 1 });
+  a.updateWindow([{ c, pSnn: 0.6 }], 1); a.updateWindow([{ c, pSnn: 0.6 }], 0);
+  b.updateWindow(Array.from({ length: 50 }, () => ({ c, pSnn: 0.6 })), 1); b.updateWindow([{ c, pSnn: 0.6 }], 0);
+  assert.ok(Math.abs(a.gain(c) - b.gain(c)) < 1e-9, `${a.gain(c)} vs ${b.gain(c)}`);
+});

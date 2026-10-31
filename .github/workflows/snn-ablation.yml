@@ -29,7 +29,7 @@ on:
         required: false
         default: ''
       judge_args:
-        description: 'Extra judge flags, e.g. --gain true --gainPrior 400 --gainForget 0.9995 (the learned correction gain)'
+        description: 'Extra judge flags, e.g. --gain true --gainPrior 100 --gainForget 0.999 (the learned correction gain)'
         required: false
         default: '--gain true'
 

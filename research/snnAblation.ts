@@ -261,10 +261,17 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
     // --gain: the candidate priced through the learned correction gain (bot/snn/correctionGain.ts), replayed causally
     // over the saved rows. The gain does not feed back into the SNN's learning, so this is exactly what it would price.
     if (argOf('gain', '') === 'true') {
-      const o: GainOpts = { prior: Number(argOf('gainPrior', '400')), forget: Number(argOf('gainForget', '0.9995')) };
+      // A small pre-registered grid (prior strength in windows x forgetting per window), all printed: picking the best
+      // here is fitting to these days, so the pick is only confirmed on days recorded after them.
+      const f5 = (x: { mean: number; lo: number; hi: number }) => `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]`;
+      for (const prior of [30, 100, 300]) for (const forget of [0.998, 0.999, 0.9997]) {
+        const vg = vsMarket(replayGain(c.res.rows, { prior, forget }));
+        console.log(`        correction gain grid: prior ${String(prior).padStart(3)} windows, forget ${forget}: vs market ${f5(vg)}`);
+      }
+      const o: GainOpts = { prior: Number(argOf('gainPrior', '100')), forget: Number(argOf('gainForget', '0.999')) };
       const gained = replayGain(c.res.rows, o), raw = vsMarket(c.res.rows), vm = vsMarket(gained);
       const f = (x: { mean: number; lo: number; hi: number }) => `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]`;
-      console.log(`        correction gain (prior ${o.prior} rows, forget ${o.forget}): vs market ${f(vm)} (SNN as is ${f(raw)}); ${vm.hi < 0 ? 'BEATS the market' : vm.lo > 0 ? 'worse' : 'undecided'}`);
+      console.log(`        correction gain (prior ${o.prior} windows, forget ${o.forget}): vs market ${f(vm)} (SNN as is ${f(raw)}); ${vm.hi < 0 ? 'BEATS the market' : vm.lo > 0 ? 'worse' : 'undecided'}`);
       const before = new Map(vsMarketBreakdown(c.res.rows).map((x) => [`${x.by}|${x.slice}`, x]));
       for (const x of vsMarketBreakdown(gained)) {
         const b0 = before.get(`${x.by}|${x.slice}`);

@@ -12,45 +12,56 @@
  *
  * g = beta . z, with z the context vector (bias, high vol, low vol, distance of the mid from 50c, 15m horizon,
  * up/down kind). beta is a ridge regression with a forgetting factor, pulled toward g = 1 (trust the SNN as is) by a
- * prior worth `prior` settled rows, and fed a row only once its contract has settled (the caller decides when).
+ * prior worth `prior` settled windows, and fed a window only once its contract has settled (the caller decides when).
+ * Each settled window counts once (its rows share a weight of 1), so the many rows of a busy 15m window cannot drown
+ * the rest, and forgetting runs once per settled window.
  */
 
 export interface GainContext { mid: number; volRatio: number; horizonMin: number; kind: string }
 export interface GainOpts { prior?: number; forget?: number; min?: number; max?: number }
 
-export const GAIN_FEATURES = ['bias', 'vol high', 'vol low', 'tail', '15m', 'updown'] as const;
+export const GAIN_FEATURES = ['bias', 'vol high', 'vol low', 'tail', '15m', 'updown', 'between'] as const;
 const K = GAIN_FEATURES.length;
 const clipMid = (m: number) => Math.min(0.98, Math.max(0.02, m));
 
 export function gainFeatures(c: GainContext): number[] {
   const tail = Math.min(1, Math.abs(clipMid(c.mid) - 0.5) / 0.45);
-  return [1, c.volRatio >= 1.25 ? 1 : 0, c.volRatio < 0.8 ? 1 : 0, tail, c.horizonMin <= 15 ? 1 : 0, c.kind === 'updown' ? 1 : 0];
+  return [1, c.volRatio >= 1.25 ? 1 : 0, c.volRatio < 0.8 ? 1 : 0, tail, c.horizonMin <= 15 ? 1 : 0, c.kind === 'updown' ? 1 : 0, c.kind === 'between' ? 1 : 0];
 }
 
 export class CorrectionGain {
   private A: number[]; // K x K, row-major: sum of x^2 z z^T
   private b: number[]; // sum of x e z
-  private xx = 0; private n = 0; // running mean of x^2 (scales the prior)
+  private xx = 0; private n = 0; // running mean of x^2 per window (scales the prior)
   readonly prior: number; readonly forget: number; readonly min: number; readonly max: number;
 
   constructor(o: GainOpts = {}) {
-    this.prior = o.prior ?? 400; this.forget = o.forget ?? 0.9995; this.min = o.min ?? 0; this.max = o.max ?? 3;
+    this.prior = o.prior ?? 100; this.forget = o.forget ?? 0.999; this.min = o.min ?? 0; this.max = o.max ?? 3;
     this.A = new Array(K * K).fill(0); this.b = new Array(K).fill(0);
   }
 
-  /** Learn from one settled row: the SNN's probability, the market mid, and the outcome. */
-  update(c: GainContext, pSnn: number, y: 0 | 1): void {
-    const m = clipMid(c.mid), x = pSnn - m, e = y - m;
-    if (!Number.isFinite(x) || !Number.isFinite(e)) return;
-    const z = gainFeatures(c), f = this.forget;
+  /** Learn from one settled window: its rows (the SNN's probability and the mid when each was priced, with their
+   *  contexts) and the outcome. The rows share a total weight of 1. */
+  updateWindow(rows: { c: GainContext; pSnn: number }[], y: 0 | 1): void {
+    const ok = rows.filter((r) => Number.isFinite(r.pSnn - clipMid(r.c.mid)));
+    if (!ok.length) return;
+    const f = this.forget, w = 1 / ok.length;
     for (let i = 0; i < K * K; i++) this.A[i] *= f;
     for (let i = 0; i < K; i++) this.b[i] *= f;
-    for (let i = 0; i < K; i++) {
-      this.b[i] += x * e * z[i];
-      for (let j = 0; j < K; j++) this.A[i * K + j] += x * x * z[i] * z[j];
+    let xx = 0;
+    for (const r of ok) {
+      const m = clipMid(r.c.mid), x = r.pSnn - m, e = y - m, z = gainFeatures(r.c);
+      for (let i = 0; i < K; i++) {
+        this.b[i] += w * x * e * z[i];
+        for (let j = 0; j < K; j++) this.A[i * K + j] += w * x * x * z[i] * z[j];
+      }
+      xx += w * x * x;
     }
-    this.xx = (this.xx * this.n + x * x) / (this.n + 1); this.n = Math.min(this.n + 1, 5000);
+    this.xx = (this.xx * this.n + xx) / (this.n + 1); this.n = Math.min(this.n + 1, 2000);
   }
+
+  /** Learn from one settled row on its own (a window of one row). */
+  update(c: GainContext, pSnn: number, y: 0 | 1): void { this.updateWindow([{ c, pSnn }], y); }
 
   /** The current coefficients: ridge solution pulled toward beta0 = (1, 0, ..., 0). */
   beta(): number[] {
@@ -106,21 +117,30 @@ function solve(M: number[], v: number[], n: number): number[] {
   return out;
 }
 
-/** Replay the gain over recorded rows in time order, causally: a row's price uses only rows whose contracts settled
- *  before it (an event's outcome is released at its first row's time plus the column's horizon, which is at or after
- *  its close). Returns the rows with p_snn replaced by the gained price. */
+/** Replay the gain over recorded rows in time order, causally: a row's price uses only windows that settled before it
+ *  (an event's outcome is released at its first row's time plus the column's horizon, which is at or after its close).
+ *  Returns the rows with p_snn replaced by the gained price. */
 export function replayGain<R extends { eventKey: string; column: string; ts: number; kind: string; mid: number; volRatio: number; pSnn: number; y: 0 | 1 }>(rows: R[], o: GainOpts = {}): R[] {
   const g = new CorrectionGain(o);
   const horizon = (col: string) => { const m = /-(\d+)m$/.exec(col); return m ? Number(m[1]) : 60; };
   const ctx = (r: R): GainContext => ({ mid: r.mid, volRatio: r.volRatio, horizonMin: horizon(r.column), kind: r.kind });
   const sorted = rows.map((r, i) => ({ r, i })).sort((a, b) => a.r.ts - b.r.ts || a.i - b.i);
-  const first = new Map<string, number>();
-  for (const { r } of sorted) if (!first.has(r.eventKey)) first.set(r.eventKey, r.ts);
-  const pending = sorted.map(({ r }) => ({ r, at: first.get(r.eventKey)! + horizon(r.column) * 60_000 })).sort((a, b) => a.at - b.at);
+  const events = new Map<string, { at: number; rows: R[] }>();
+  for (const { r } of sorted) {
+    const e = events.get(r.eventKey);
+    if (e) e.rows.push(r); else events.set(r.eventKey, { at: r.ts + horizon(r.column) * 60_000, rows: [r] });
+  }
+  // An event's rows are all priced before it settles (rows stop at the close), so releasing the whole window at `at`
+  // only uses rows already seen; any row priced at or after `at` would be a recording error and is left out.
+  const pending = [...events.values()].sort((a, b) => a.at - b.at);
   const out = new Array<R>(rows.length);
   let k = 0, beta = g.beta(), dirty = false;
   for (const { r, i } of sorted) {
-    while (k < pending.length && pending[k].at <= r.ts) { const q = pending[k++].r; g.update(ctx(q), q.pSnn, q.y); dirty = true; }
+    while (k < pending.length && pending[k].at <= r.ts) {
+      const e = pending[k++];
+      g.updateWindow(e.rows.filter((q) => q.ts < e.at).map((q) => ({ c: ctx(q), pSnn: q.pSnn })), e.rows[0].y);
+      dirty = true;
+    }
     if (dirty) { beta = g.beta(); dirty = false; }
     out[i] = { ...r, pSnn: g.apply(ctx(r), r.pSnn, beta) };
   }
