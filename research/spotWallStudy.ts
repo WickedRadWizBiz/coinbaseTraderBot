@@ -28,6 +28,9 @@ export interface SpotBookLine { ts: number; b: number[][]; a: number[][]; bw?: n
 
 const medianOf = (xs: number[]): number => { if (!xs.length) return NaN; const s = [...xs].sort((x, y) => x - y); const n = s.length; return n % 2 ? s[n >> 1] : (s[n / 2 - 1] + s[n / 2]) / 2; };
 
+/** A pause in the recordings longer than this is an outage: not recorded time, left out of coverage and of the study. */
+export const OUTAGE_MS = 10 * 60_000;
+
 /** Each band's size against its own trailing history (the same coin, side and distance), one line at a time. */
 export interface WallView { ts: number; mid: number; bw: number; zBid: number[]; zAsk: number[]; bid: number[]; ask: number[] }
 
@@ -41,6 +44,9 @@ export class SpotWallTracker {
   add(asset: string, line: SpotBookLine): WallView | undefined {
     const bb = line.bb, ba = line.ba, bw = line.bw;
     if (!bb || !ba || !bw || !line.b?.length || !line.a?.length) return undefined;
+    // After an outage (the bot down or not recording) the hour before is not "the hour before": start the history over.
+    const prev = this.last.get(asset);
+    if (prev && line.ts - prev.ts > OUTAGE_MS) for (const k of [...this.hist.keys()]) if (k.startsWith(`${asset}|`)) this.hist.delete(k);
     const mid = (line.b[0][0] + line.a[0][0]) / 2;
     const z = (side: 'b' | 'a', sizes: number[]) => {
       const key = `${asset}|${side}|${bw}|${sizes.length}`;
@@ -81,7 +87,9 @@ export function topPerBand(levels: number[][], mid: number, bps: number, n: numb
 }
 
 export interface Integrity {
-  asset: string; snaps: number; withBands: number; hours: number; cadenceSec: number; coverage: number;
+  asset: string; snaps: number; withBands: number; hours: number; cadenceSec: number;
+  /** Recorded hours (the span less outages), the outages (start ISO time, minutes) and coverage within recorded time. */
+  recordedHours: number; outages: Array<[string, number]>; coverage: number;
   gapsOver60s: number; longestGapMin: number; nonMonotone: number; crossed: number; unsorted: number; badSize: number;
   repeated: number; fetchLagMsMedian: number; spotTicks: number; midVsSpotBpsMedian: number; midVsSpotBpsP99: number;
   midVsSpotChecked: number; bandsConsistent: number; outerBandsFilled: number; bandsOverTopMedian: number;
@@ -122,11 +130,15 @@ export function checkIntegrity(asset: string, lines: Array<SpotBookLine & { t: n
   }
   const cadence = medianOf(dts);
   const span = n > 1 ? lines[n - 1].ts - lines[0].ts : 0;
-  const coverage = span > 0 && cadence > 0 ? Math.min(1, ((n - 1) * cadence) / span) : 0;
+  const outages: Array<[string, number]> = [];
+  let outMs = 0;
+  for (let i = 1; i < n; i++) { const dt = lines[i].ts - lines[i - 1].ts; if (dt > OUTAGE_MS) { outages.push([new Date(lines[i - 1].ts).toISOString().slice(0, 16), Math.round(dt / 60_000)]); outMs += dt; } }
+  const recorded = span - outMs;
+  const coverage = recorded > 0 && cadence > 0 ? Math.min(1, ((n - 1 - outages.length) * cadence) / recorded) : 0;
   const gaps = dts.filter((d) => d > 60_000);
   const sortedDiffs = [...diffs].sort((x, y) => x - y);
   const r: Integrity = {
-    asset, snaps: n, withBands: banded.length, hours: span / 3_600_000, cadenceSec: cadence / 1000, coverage,
+    asset, snaps: n, withBands: banded.length, hours: span / 3_600_000, cadenceSec: cadence / 1000, recordedHours: recorded / 3_600_000, outages, coverage,
     gapsOver60s: gaps.length, longestGapMin: gaps.length ? Math.max(...gaps) / 60_000 : 0, nonMonotone, crossed, unsorted, badSize, repeated,
     fetchLagMsMedian: medianOf(lags), spotTicks: T, midVsSpotBpsMedian: medianOf(diffs),
     midVsSpotBpsP99: sortedDiffs.length ? sortedDiffs[Math.floor(0.99 * (sortedDiffs.length - 1))] : NaN, midVsSpotChecked: midChecked,
@@ -134,7 +146,8 @@ export function checkIntegrity(asset: string, lines: Array<SpotBookLine & { t: n
     bandsOverTopMedian: medianOf(ratios), pass: false, why,
   };
   if (banded.length < 1000) why.push(`only ${banded.length} snapshots with bands`);
-  if (coverage < 0.9) why.push(`coverage ${(100 * coverage).toFixed(0)}%`);
+  if (coverage < 0.9) why.push(`coverage ${(100 * coverage).toFixed(0)}% of recorded time`);
+  if (recorded < 24 * 3_600_000) why.push(`only ${(recorded / 3_600_000).toFixed(1)} recorded hours`);
   if (crossed > n * 0.001) why.push(`${crossed} crossed books`);
   if (unsorted > n * 0.001) why.push(`${unsorted} unsorted books`);
   if (badSize > n * 0.001) why.push(`${badSize} books with a bad level`);
@@ -345,7 +358,7 @@ const pc = (a: number, b: number) => (b > 0 ? `${((100 * a) / b).toFixed(0)}%` :
 export function wallReport(r: WallStudy): string {
   const out: string[] = [`Spot wall study ${r.from ?? ''}..${r.to ?? ''} (wall = z >= ${r.wallZ} vs the band's own trailing hour)`, '', 'Integrity'];
   for (const i of r.integrity) {
-    out.push(`  ${i.asset.padEnd(5)} ${i.pass ? 'PASS' : 'FAIL'}  ${i.snaps} snaps (${i.withBands} with bands) over ${i.hours.toFixed(1)} h, every ${i.cadenceSec.toFixed(0)} s, coverage ${pc(i.coverage, 1)}, `
+    out.push(`  ${i.asset.padEnd(5)} ${i.pass ? 'PASS' : 'FAIL'}  ${i.snaps} snaps (${i.withBands} with bands) over ${i.hours.toFixed(1)} h, every ${i.cadenceSec.toFixed(0)} s; recorded ${i.recordedHours.toFixed(1)} h (outages: ${i.outages.map(([a, m]) => `${a} ${m} min`).join(', ') || 'none'}), coverage ${pc(i.coverage, 1)} of it, `
       + `${i.gapsOver60s} gaps > 60 s (longest ${i.longestGapMin.toFixed(1)} min); crossed ${i.crossed}, unsorted ${i.unsorted}, bad level ${i.badSize}, out of order ${i.nonMonotone}, repeated ${i.repeated}; `
       + `fetch lag ${f1(i.fetchLagMsMedian)} ms; mid vs ticker ${f1(i.midVsSpotBpsMedian)} bps (p99 ${f1(i.midVsSpotBpsP99)}, ${i.midVsSpotChecked} checked, ${i.spotTicks} ticks); `
       + `bands contain the top ${pc(i.bandsConsistent, 1)}, outer bands filled ${pc(i.outerBandsFilled, 1)}, whole-band size ${f1(i.bandsOverTopMedian)}x the top levels`

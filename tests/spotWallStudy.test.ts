@@ -57,7 +57,7 @@ test('second path carries the last price of each second forward; staleness is ju
 test('integrity: a clean book passes; crossed, cut-short or out-of-step books fail', () => {
   const ticks: number[] = [];
   const lines: Array<SpotBookLine & { t: number }> = [];
-  for (let i = 0; i < 1200; i++) {
+  for (let i = 0; i < 6000; i++) {
     const ts = 1_000_000 + i * 15_000;
     ticks.push(ts - 1000, 100_000);
     const l = line(ts, 100_000, [5, 5, 5, 5]);
@@ -75,4 +75,25 @@ test('integrity: a clean book passes; crossed, cut-short or out-of-step books fa
   assert.match(checkIntegrity('BTC', lines, off).why.join(';'), /mid vs ticker/);
   const small = lines.map((l) => ({ ...l, ba: [1, 5, 5, 5] }));
   assert.match(checkIntegrity('BTC', small, ticks).why.join(';'), /contain the top/);
+});
+
+test('outages: left out of coverage and the band history starts over after one', () => {
+  const tr = new SpotWallTracker(240, 3);
+  for (let i = 0; i < 4; i++) tr.add('BTC', line(i * 15_000, 100_000, [5, 5, 5, 5]));
+  assert.ok(Number.isFinite(tr.latest('BTC')!.zAsk[1]));
+  // 11 minutes later: no history, no z.
+  assert.ok(Number.isNaN(tr.add('BTC', line(45_000 + 11 * 60_000, 100_000, [5, 5, 5, 5]))!.zAsk[1]));
+  const ticks: number[] = [];
+  const lines: Array<SpotBookLine & { t: number }> = [];
+  for (let i = 0; i < 12_000; i++) {
+    const ts = 1_000_000 + i * 15_000 + (i >= 6000 ? 6 * 3_600_000 : 0); // a 6-hour outage half way
+    ticks.push(ts - 1000, 100_000);
+    const l = line(ts, 100_000, [5, 5, 5, 5]);
+    l.b = [[99_999.5, 1 + (i % 3)], [99_999, 1]];
+    lines.push(l);
+  }
+  const r = checkIntegrity('BTC', lines, ticks);
+  assert.equal(r.outages.length, 1);
+  assert.ok(r.coverage > 0.99 && Math.abs(r.recordedHours - 50) < 0.1, `${r.coverage} ${r.recordedHours}`);
+  assert.equal(r.pass, true, r.why.join('; '));
 });
