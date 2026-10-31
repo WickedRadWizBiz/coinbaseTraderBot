@@ -58,7 +58,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: snn-ablation
+  group: snn-ablation-${{ inputs.hist_from != '' && 'history' || 'ablate' }}
   cancel-in-progress: false
 
 jobs:
