@@ -1174,6 +1174,13 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
              ('entry gate fv >= cost + 3c; 3c top size', S3, gate(-0.03)), ('entry gate fv >= cost + 6c; 3c top size', S3, gate(-0.06)),
              ('entry gate fv >= cost + 6c; window only', {}, gate(-0.06)), ('entry gate fv >= cost + 9c; 3c top size', S3, gate(-0.09)),
              ('entry gate fv >= cost + 12c; 3c top size', S3, gate(-0.12))]
+    gx = lambda m, k: (lambda p: (lambda q: None if q is None else dict(q, n=k * q['n']))(gate(m)(p)))
+    for m, nm in ((-0.06, '6c'), (-0.03, '3c'), (0.0, '0c')):
+        for k in (2, 3, 5):  # the gated entries carry their edge: a bigger stake on them ($20-$40 .. $50-$100)
+            rowsL.append((f'entry gate fv >= cost + {nm}; 3c top size; stake x{k}', S3, gx(m, k)))
+    # the gate scaled by how far fair value clears the cost: x1 at the margin, up to x5 at +20c
+    gs = lambda p: (lambda q: None if q is None else dict(q, n=q['n'] * min(5.0, 1 + max(0.0, (q['q0'] or 0) - q['costF'] - 0.06) * 20)))(gate(-0.06)(p))
+    rowsL.append(('entry gate fv >= cost + 6c; 3c top size; stake x1-x5 by edge', S3, gs))
     print('     entry gate: the position is skipped when the spot fair value at its entry is under its cost (fee in) less the margin shown.')
     for lab, lz, rm in rowsL:
         for dp in (False, True):
