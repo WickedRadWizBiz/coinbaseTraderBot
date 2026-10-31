@@ -613,7 +613,8 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         exits for positions not in profit, each a taker sale at the bid. 'window': inside the last share (or the final minute)
         sell whenever net after fees <= 0; 'stop': f sells once net <= -f x stake; 'fvbid': sells when the spot fair value is
         below the bid less its fee (holding is worth less than selling); 'fvcost': m sells when fair value < entry cost - m;
-        'time': f sells when only f of the window is left and net < 0; 'grace': s seconds after entry before any cut but the window."""
+        'time': f sells when only f of the window is left and net < 0; 'grace': s seconds after entry before any cut but the window;
+        'confirm': s seconds the cut must hold in a row before it sells; 'split': each second sells at most the top bid's size."""
         DEPTH_PX = 0.02
         ps = []
         for k0, p in enumerate(paths):
@@ -656,7 +657,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
               'hours': 0, 'on_pace': 0, 'hkey': None, 'slice': 0.0, 'sl_h': 0,
               'per': {}, 'stk': {}, 'entries': len(ps), 're': 0, 're_real': 0.0, 'cap_now': 0.0, 'cap_peak': 0.0, 'thin_n': 0, 'thin_usd': 0.0,
               'held_w': 0, 'held_w_usd': 0.0, 'held_l': 0, 'held_l_usd': 0.0, 'cut': 0, 'cut_usd': 0.0, 'cut_win': 0, 'nobid': 0}
-        live = set(); done = [False] * len(ps); child = [False] * len(ps)
+        live = set(); done = [False] * len(ps); child = [False] * len(ps); conf = {}
         for p in ps:
             if p.get('thin_in'): st['thin_n'] += 1; st['thin_usd'] += p['thin_in']
 
@@ -769,7 +770,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                     x = (p['payout'] - p['costF']) * p['n']; close(i, t, x, 'held')
                     if x > 0: st['held_w'] += 1; st['held_w_usd'] += x
                     else: st['held_l'] += 1; st['held_l_usd'] += x
-            if loser:
+            if loser is not None:
                 for i in sorted(live):
                     p = ps[i]; k = t - p['s0']
                     b = p['bids'][k] if 0 <= k < len(p['bids']) else None
@@ -787,7 +788,18 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                         elif 'fvbid' in loser and q is not None and q < b - fee1(b, p['n']) - loser['fvbid']: cut = True
                         elif 'fvcost' in loser and q is not None and q < p['costF'] - loser['fvcost']: cut = True
                         elif 'time' in loser and t > p['c_sec'] - loser['time'] * market_len(p): cut = True
+                    if cut and not inwin and loser.get('confirm'):
+                        conf[i] = conf.get(i, 0) + 1
+                        if conf[i] < loser['confirm']: cut = False
+                    elif not cut: conf.pop(i, None)
                     if cut:
+                        sz = p['path']['bsz'][k] if 0 <= k < len(p['path']['bsz']) else None
+                        if loser.get('split') and sz and sz < p['n'] - 1e-9:  # only the top bid's size this second, the rest waits
+                            m = sz; x = m * (b - p['costF']) - taker_fee(m, b)
+                            credit(x, t); st['cut_usd'] += x; st['cap_now'] -= m * p['costF']
+                            if not child[i]: st['per'][p['src']] = st['per'].get(p['src'], 0.0) + x
+                            p['n'] -= m
+                            continue
                         if c > 0: st['thin_n'] += 1; st['thin_usd'] += c
                         close(i, t, net, 'cut'); st['cut_usd'] += net
                         if p['payout'] > 0.5: st['cut_win'] += 1  # would have settled a winner
@@ -1153,11 +1165,13 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
     print('     cut$ = what the cuts realized; cutW = cuts on positions that would have settled as winners.')
     print('    loser rule                                                        realized $     $/h  snipes  heldW  heldW $  heldL  heldL $   cuts    cut $  cutW  nobid  depth $')
     rowsL = [('none (today)', None), ('window only', {}),
-             ('stop 25%', {'stop': 0.25}), ('stop 50%', {'stop': 0.50}), ('stop 75%', {'stop': 0.75}),
-             ('fair value < bid - fee', {'fvbid': 0.0}), ('fair value < bid - fee - 3c', {'fvbid': 0.03}),
-             ('fair value < cost - 10c', {'fvcost': 0.10}), ('fair value < cost - 20c', {'fvcost': 0.20}),
-             ('half the window left, still losing', {'time': 0.5}), ('a quarter left, still losing', {'time': 0.25}),
-             ('fv < bid - fee, 60 s grace', {'fvbid': 0.0, 'grace': 60}), ('fv < cost - 10c or stop 50%', {'fvcost': 0.10, 'stop': 0.5})]
+             ('fv < bid - fee - 3c (round 1 best)', {'fvbid': 0.03}), ('fv < bid - fee - 5c', {'fvbid': 0.05}),
+             ('fv < bid - fee - 8c', {'fvbid': 0.08}), ('fv < bid - fee - 12c', {'fvbid': 0.12}),
+             ('fv < bid - fee - 5c, 10 s in a row', {'fvbid': 0.05, 'confirm': 10}), ('fv < bid - fee - 5c, 30 s in a row', {'fvbid': 0.05, 'confirm': 30}),
+             ('fv < bid - fee - 3c, top size a second', {'fvbid': 0.03, 'split': True}), ('fv < bid - fee - 5c, top size a second', {'fvbid': 0.05, 'split': True}),
+             ('fv < bid - fee - 5c, 10 s, top size', {'fvbid': 0.05, 'confirm': 10, 'split': True}),
+             ('fv < cost - 15c', {'fvcost': 0.15}), ('fv < cost - 30c', {'fvcost': 0.30}), ('fv < cost - 20c, top size a second', {'fvcost': 0.20, 'split': True}),
+             ('window only, top size a second', {'split': True})]
     for lab, lz in rowsL:
         for dp in (False, True):
             r = pacer_run(pathsB, baseG, SL, remap=bando, loser=lz, depth=dp)
