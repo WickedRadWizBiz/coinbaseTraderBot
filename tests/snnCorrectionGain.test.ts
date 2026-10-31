@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CorrectionGain, replayGain } from '../bot/snn/correctionGain';
+import { CorrectionGain, replayGain, volScaled } from '../bot/snn/correctionGain';
 import { Xoshiro128 } from '../bot/snn/rng';
 
 type Row = { eventKey: string; column: string; ts: number; kind: string; mid: number; volRatio: number; pSnn: number; y: 0 | 1 };
@@ -51,4 +51,11 @@ test('correction gain: a window counts once however many rows it was priced in',
   a.updateWindow([{ c, pSnn: 0.6 }], 1); a.updateWindow([{ c, pSnn: 0.6 }], 0);
   b.updateWindow(Array.from({ length: 50 }, () => ({ c, pSnn: 0.6 })), 1); b.updateWindow([{ c, pSnn: 0.6 }], 0);
   assert.ok(Math.abs(a.gain(c) - b.gain(c)) < 1e-9, `${a.gain(c)} vs ${b.gain(c)}`);
+});
+
+test('fixed vol sizing: shrinks the correction only above normal volatility', () => {
+  assert.equal(volScaled(0.5, 0.6, 1, 1), 0.6);
+  assert.equal(volScaled(0.5, 0.6, 0.5, 2), 0.6);
+  assert.ok(Math.abs(volScaled(0.5, 0.6, 2, 1) - 0.55) < 1e-12);
+  assert.ok(Math.abs(volScaled(0.5, 0.6, 2, 2) - 0.525) < 1e-12);
 });

@@ -22,7 +22,7 @@ import { dayBlockBootstrap } from '../bot/snn/blender';
 import { blend, brier, calibrationSlope, correlation, surpriseConfidence } from '../bot/snn/formulas';
 import { DEFAULT_SNN, domainParams, stageFlags, type SnnFlags, type SnnParams, type Stage } from '../bot/snn/params';
 import { replaySnn, type SnnReplayResult, type SnnRow } from './snnReplay';
-import { replayGain, type GainOpts } from '../bot/snn/correctionGain';
+import { replayGain, volScaled, type GainOpts } from '../bot/snn/correctionGain';
 
 export interface Mechanism { name: string; candidate: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams> }; baseline: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams> }; note: string }
 
@@ -268,7 +268,15 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
         const vg = vsMarket(replayGain(c.res.rows, { prior, forget }));
         console.log(`        correction gain grid: prior ${String(prior).padStart(3)} windows, forget ${forget}: vs market ${f5(vg)}`);
       }
-      const o: GainOpts = { prior: Number(argOf('gainPrior', '100')), forget: Number(argOf('gainForget', '0.999')) };
+      for (const prior of [100, 400]) for (const forget of [0.9995, 0.9999]) {
+        const vg = vsMarket(replayGain(c.res.rows, { prior, forget, perRow: true }));
+        console.log(`        correction gain grid, per row: prior ${String(prior).padStart(3)}, forget ${forget}: vs market ${f5(vg)}`);
+      }
+      for (const k of [0.5, 1, 2]) {
+        const vg = vsMarket(c.res.rows.map((r) => ({ ...r, pSnn: volScaled(r.mid, r.pSnn, r.volRatio, k) })));
+        console.log(`        fixed vol sizing (correction / volRatio^${k} above normal vol): vs market ${f5(vg)}`);
+      }
+      const o: GainOpts = { prior: Number(argOf('gainPrior', '100')), forget: Number(argOf('gainForget', '0.999')), perRow: argOf('gainPerRow', '') === 'true' };
       const gained = replayGain(c.res.rows, o), raw = vsMarket(c.res.rows), vm = vsMarket(gained);
       const f = (x: { mean: number; lo: number; hi: number }) => `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]`;
       console.log(`        correction gain (prior ${o.prior} windows, forget ${o.forget}): vs market ${f(vm)} (SNN as is ${f(raw)}); ${vm.hi < 0 ? 'BEATS the market' : vm.lo > 0 ? 'worse' : 'undecided'}`);

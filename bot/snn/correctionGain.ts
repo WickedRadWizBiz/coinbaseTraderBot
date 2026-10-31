@@ -18,7 +18,7 @@
  */
 
 export interface GainContext { mid: number; volRatio: number; horizonMin: number; kind: string }
-export interface GainOpts { prior?: number; forget?: number; min?: number; max?: number }
+export interface GainOpts { prior?: number; forget?: number; min?: number; max?: number; perRow?: boolean }
 
 export const GAIN_FEATURES = ['bias', 'vol high', 'vol low', 'tail', '15m', 'updown', 'between'] as const;
 const K = GAIN_FEATURES.length;
@@ -138,11 +138,21 @@ export function replayGain<R extends { eventKey: string; column: string; ts: num
   for (const { r, i } of sorted) {
     while (k < pending.length && pending[k].at <= r.ts) {
       const e = pending[k++];
-      g.updateWindow(e.rows.filter((q) => q.ts < e.at).map((q) => ({ c: ctx(q), pSnn: q.pSnn })), e.rows[0].y);
+      const seen = e.rows.filter((q) => q.ts < e.at).map((q) => ({ c: ctx(q), pSnn: q.pSnn }));
+      if (o.perRow) for (const q of seen) g.updateWindow([q], e.rows[0].y); // every row its own weight (busy windows weigh more)
+      else g.updateWindow(seen, e.rows[0].y);
       dirty = true;
     }
     if (dirty) { beta = g.beta(); dirty = false; }
     out[i] = { ...r, pSnn: g.apply(ctx(r), r.pSnn, beta) };
   }
   return out;
+}
+
+/** The fixed volatility sizing the audit points to: the correction divided by volRatio^k when volatility runs above
+ *  normal (volRatio > 1), untouched otherwise. Nothing is learned, so it cannot chase noise; k is confirmed on days
+ *  recorded after the ones it was read from. */
+export function volScaled(mid: number, pSnn: number, volRatio: number, k: number): number {
+  const m = clipMid(mid), s = volRatio > 1 && Number.isFinite(volRatio) ? Math.pow(volRatio, -k) : 1;
+  return Math.min(0.999, Math.max(0.001, m + s * (pSnn - m)));
 }
