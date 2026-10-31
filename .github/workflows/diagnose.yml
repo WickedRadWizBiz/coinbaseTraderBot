@@ -46,13 +46,17 @@ on:
         description: 'With ta_study: copy the BTC.D / USDT.D series from the server first so the replay carries dominance (rebuilds every cached replay day: about 3.5 h per half year)'
         required: false
         default: 'false'
+      kalshi_repair:
+        description: 'Instead of the server report: repair the Kalshi history quotes stored on the server once (deploy/kalshi_cents_repair.py; quotes saved in hundredths of a cent before PR #217). Rewrites only those day files; safe to run again'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
 
 jobs:
   diagnose:
-    if: inputs.ta_study != 'true'
+    if: inputs.ta_study != 'true' && inputs.kalshi_repair != 'true'
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -202,6 +206,56 @@ jobs:
               echo "== training step timings"; nice -n 19 python3 /tmp/diag/deploy/step_timings.py ~/bot/data 30 || true
             fi
             echo "== last 60 log lines"; journalctl -u kalshi-bot -n 60 --no-pager | cut -c1-300
+
+  # One-time repair of the Kalshi history stored on the server (Steven's go, Oct 31): markets from Kalshi's /historical
+  # endpoint were saved with quotes 100x too small until PR #217. Writes only data/history/kalshi day files, through a
+  # temp file and a rename; the bot's own state is not touched. Prints counts, posted as a comment on the commit.
+  kalshi-repair:
+    if: inputs.kalshi_repair == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Upload the repair script
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+          source: deploy/kalshi_cents_repair.py
+          target: /tmp/kalshi-repair-${{ github.run_id }}
+      - name: Repair
+        id: repair
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+          command_timeout: 25m
+          capture_stdout: true
+          script: |
+            S=/tmp/kalshi-repair-${{ github.run_id }}/deploy/kalshi_cents_repair.py
+            cd ~
+            DIRS=$(find . -maxdepth 6 -type d -path '*/history/kalshi' -not -path '*/node_modules/*' 2>/dev/null | sort)
+            echo "== Kalshi history stores found: $(echo "$DIRS" | grep -c . || true)"
+            [ -z "$DIRS" ] && exit 0
+            echo "== before"; python3 "$S" --dry-run $DIRS
+            echo "== repair"; python3 "$S" $DIRS
+            echo "== after (should be 0)"; python3 "$S" --dry-run $DIRS
+            rm -rf /tmp/kalshi-repair-${{ github.run_id }}
+      - name: Post the counts on the commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUT: ${{ steps.repair.outputs.stdout }}
+        run: |
+          { echo "Kalshi quote repair, run ${{ github.run_id }} (${{ job.status }})"; echo; echo '```'; printf '%s\n' "$OUT" | tail -40; echo '```'; } > "$RUNNER_TEMP/comment.md"
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@"$RUNNER_TEMP/comment.md" --silent || echo "could not post the comment"
 
   # The TA contract study (the TA network review, Oct 29): does TA on the spot candles beat the fair value, and Kalshi's
   # mid, at the 15-minute contract's own question? Runs on this runner from Binance's public archives; the server is not
