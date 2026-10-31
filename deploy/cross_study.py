@@ -253,7 +253,7 @@ def selftest(path):
     print(json.dumps({'readings': out, 'fees': fees, 'line': line}))
 
 
-def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades=None, entry_sigs=(), mres=None, more_books=None):
+def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades=None, entry_sigs=(), mres=None, more_books=None, orders=None):
     """1e. Information-anchored ratchets on the recorded paths: the price trail with guards (fair value, spot momentum, the
     book's top), trails on the spot-implied fair value, resting (maker, fee-free) profit sales, and the same from entry
     with the policy's own lock. Dollars against holding the same contracts to settlement."""
@@ -599,7 +599,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         sig_cache[j] = out
         return out
 
-    def pacer_run(paths, base, pacer, hourly=4.5, floor=0.75, cap=6.5, frac=0.10, no_exit_sec=60, size=None, reenter=False, depth=False, stake_fn=None):
+    def pacer_run(paths, base, pacer, hourly=4.5, floor=0.75, cap=6.5, frac=0.10, no_exit_sec=60, size=None, reenter=False, depth=False, stake_fn=None, remap=None):
         """One base exit with (or without) the pacer on top, every position in time order on one clock. base: a sim() rule or
         None (hold everything); pacer: None | (mode, group) with mode 'cumulative' | 'rolling_hour' | 'slices' (Steven's
         non-stacking spec of Oct 30, bot/risk/quotaPacer.ts: catch-up slices of at most the hourly target).
@@ -619,6 +619,9 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 lo, hi, mult = size
                 stake = min(max(p['n'] * p['costF'], lo), hi) * mult
                 p = dict(p, n=stake / p['costF'])
+            if remap is not None:  # a different set or sizing of the same positions (None leaves one out)
+                p = remap(p)
+                if p is None: continue
             if stake_fn is not None:  # a sizing variant: the stake from the position (None skips the entry)
                 stake = stake_fn(p)
                 if stake is None or stake <= 0: continue
@@ -929,9 +932,16 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         n = round(sum(e['n'] for e in ents), 2)
         if n <= 0: continue
         cost = sum(e['n'] * e['px'] for e in ents) / n
+        nb = cb = 0.0
+        for e in ents:
+            o = (orders or {}).get(e.get('coid')) or {}
+            try: stake_o = float(o.get('count') or 0) * e['px']
+            except Exception: stake_o = 0.0
+            fct = min(max(stake_o, 10.0), 20.0) / stake_o if stake_o > 0 else 1.0
+            nb += e['n'] * fct; cb += e['n'] * fct * (e['px'] + (e['fee'] / e['n'] if e['n'] else 0.0))
         path = build_path(ep, s0, c_sec)
         q0 = next((x for x in path['fv'] if x is not None), None)
-        pathsB.append({'n': n, 'floor': None, 'payout': ep['payout'], 'actual': None, 'bids': path['bids'], 'fv': path['fv'], 'path': path, 'cost': cost, 'costF': cost_of(ents, ep['close_ms']),
+        pathsB.append({'origin': ep.get('origin', 'normal'), 'n_band': nb, 'costF_band': (cb / nb) if nb > 0 else None, 'n': n, 'floor': None, 'payout': ep['payout'], 'actual': None, 'bids': path['bids'], 'fv': path['fv'], 'path': path, 'cost': cost, 'costF': cost_of(ents, ep['close_ms']),
                        'c_sec': c_sec, 's0': s0, 'b0': cost, 'q0': q0, 'ep': ep, 'sig': sigma_cached(ep.get('asset'), s0) if ep.get('asset') else None})
     print(f'  (B: the lock is the policy\'s own: \'bid\' = the side bid 2c over the average entry price, \'fv\' = the spot-implied fair value 3 pts over its value at entry)')
     for lname, lock in (('lock: bid +2c', ('bid', 0.02)), ('lock: fv +3 pts', ('fv', 0.03)), ('lock: bid +2c and fv +3 pts', ('both', 0.02))):
@@ -1049,6 +1059,39 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             if r is None: break
             lab = f"own sizes x{m}" + ('; depth' if dep else '')
             print(f"    {lab:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['entries']:7d}  {r['snipe']:6d}  {r['held']:4d}  {r['cap_peak']:14.2f}  {r['thin_usd']:7.2f}")
+    # G4 (sizing thread, Oct 31): paper's training (1-contract 'train (paper)') and exploration ('explore (p=...)') trades are
+    # off in today's bot and the real band never sized them; the band applies to each ORDER's stake (a partial fill keeps its share).
+    org = collections.Counter(p['origin'] for p in pathsB if p.get('costF') is not None)
+    print(f"  G4. positions by origin of their first entry: {dict(org)}; training and exploration trades are off in today's bot.")
+    if own is not None and band is not None:
+        for g in ('train', 'explore', 'normal'):
+            ks = [k for k, p in enumerate(pathsB) if p.get('costF') is not None and p['origin'] == g]
+            print(f"    {g:8s} {len(ks):5d} positions: own staked {sum(own['stk'].get(k, 0) for k in ks):9.2f} realized {sum(own['per'].get(k, 0) for k in ks):+9.2f}; position-clamp band staked {sum(band['stk'].get(k, 0) for k in ks):9.2f} realized {sum(band['per'].get(k, 0) for k in ks):+9.2f}")
+    normal = lambda p: p if p['origin'] == 'normal' else None
+    bando = lambda p: dict(p, n=p['n_band'], costF=p['costF_band']) if p['origin'] == 'normal' and p.get('costF_band') else None
+    own_n = pacer_run(pathsB, baseG, SL, remap=normal)
+    band_n = pacer_run(pathsB, baseG, SL, remap=bando)
+    print('    normal entries only (the band per order):')
+    print('    price paid    positions   won%   own: staked   realized    band: staked   realized')
+    if own_n is not None and band_n is not None:
+        for lo, hi, nm in cuts:
+            ks = [k for k, p in enumerate(pathsB) if p.get('costF') is not None and p['origin'] == 'normal' and lo <= p['cost'] < hi]
+            won = sum(1 for k in ks if pathsB[k]['payout'] > 0.5)
+            print(f"    {nm:12s} {len(ks):10d}  {100 * won / len(ks) if ks else 0:5.0f}  {sum(own_n['stk'].get(k, 0) for k in ks):12.2f}  {sum(own_n['per'].get(k, 0) for k in ks):+9.2f}  {sum(band_n['stk'].get(k, 0) for k in ks):14.2f}  {sum(band_n['per'].get(k, 0) for k in ks):+9.2f}")
+    print('    sizing (normal entries only)                                      realized $     $/h  entries  snipes  held  peak $ at work  depth $')
+    rows4 = [('own sizes', {'remap': normal}), ('own sizes; depth', {'remap': normal, 'depth': True}),
+             ('$10-$20 band per order', {'remap': bando}), ('$10-$20 band per order; depth', {'remap': bando, 'depth': True}),
+             ('own sizes; no pacer', {'remap': normal, 'pacer': None}), ('$10-$20 band per order; no pacer', {'remap': bando, 'pacer': None})]
+    for m in (2, 3, 4):
+        rows4 += [(f'own sizes x{m}', {'remap': normal, 'stake_fn': (lambda m: lambda p: ownv(p) * m)(m)}),
+                  (f'own sizes x{m}; depth', {'remap': normal, 'stake_fn': (lambda m: lambda p: ownv(p) * m)(m), 'depth': True})]
+    for lab, kw in rows4:
+        kw = dict(kw); pc = kw.pop('pacer', SL)
+        r = pacer_run(pathsB, baseG, pc, **kw)
+        if r is None: print('    (no costed position)'); break
+        print(f"    {lab:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['entries']:7d}  {r['snipe']:6d}  {r['held']:4d}  {r['cap_peak']:14.2f}  {r['thin_usd']:7.2f}")
+    sn = sorted(ownv(p) for p in pathsB if p.get('costF') is not None and p['origin'] == 'normal')
+    if sn: print(f"    (normal entries' own stakes: median ${sn[len(sn) // 2]:.2f}, p10 ${sn[len(sn) // 10]:.2f}, p90 ${sn[9 * len(sn) // 10]:.2f})")
     stakes = sorted(ownv(p) for p in pathsB if p.get('costF') is not None)
     if stakes: print(f"    (paper's own stakes: median ${stakes[len(stakes) // 2]:.2f}, p10 ${stakes[len(stakes) // 10]:.2f}, p90 ${stakes[9 * len(stakes) // 10]:.2f})")
 
@@ -1354,6 +1397,7 @@ def main():
     pacer_recs, startups = [], []  # the quota pacer's audit records (credit / settled / snipe, each with the clock) and bot starts
     sizing_recs = []  # the module ledger's sizing rows (audit 'modules': tier, loss-aware scale, optimal f cap, portfolio Kelly)
     training_recs, reject_recs = [], []  # the training supervisor's events (pool raised, exhaustion) and risk rejections
+    entry_why = {}  # decisionId -> [(side, price, why)] of the non-exit orders it placed (training / exploration tags)
     entry_sigs = []  # the bot's own taker entry signals (decision records placing an 'entry'): (sec, ticker, sign, price, edge)
     control_recs = []  # kill switch trips and resets, the override's toggles (audit config), paper balance rebases (audit vault)
     for f in files:
@@ -1369,13 +1413,19 @@ def main():
                         d = r.get('data') or {}
                         hunts[d.get('ticker', '')].append({'ms': iso_ms(r.get('ts', '')), 'ev': d.get('huntEvent'), 'target': d.get('target'), 'stop': d.get('stop'), 'pYes': d.get('pYes'), 'pos': d.get('position')})
                         continue
-                    if b'"purpose":"entry"' in line:
+                    if b'"purpose":"entry"' in line or b'explore (p=' in line:
                         try: r = json.loads(line)
                         except Exception: r = {}
                         d = r.get('data') or {}
+                        ws = []
                         for p in d.get('place') or []:
-                            if p.get('purpose') == 'entry' and p.get('side') in ('bid', 'ask'):
+                            if p.get('purpose') == 'exit': continue
+                            w = str(p.get('why') or '')
+                            ws.append((p.get('side'), p.get('price'), w))
+                            # the bot's own entry signals (training and exploration trades are off in today's bot: left out)
+                            if p.get('purpose') == 'entry' and p.get('side') in ('bid', 'ask') and not w.startswith(('train (paper)', 'explore (p=')):
                                 entry_sigs.append((iso_ms(r.get('ts', '')) // 1000, d.get('ticker', ''), 1 if p['side'] == 'bid' else -1, p.get('price'), p.get('edge')))
+                        if d.get('decisionId') and ws: entry_why[d['decisionId']] = ws
                     if b'"purpose":"exit"' not in line: continue
                     try: d = json.loads(line).get('data') or {}
                     except Exception: continue
@@ -1449,7 +1499,11 @@ def main():
                 ep = {'ticker': t, 'sign': 1 if rest > 0 else -1, 'start_ms': fl['ms'], 'entries': [], 'exits': [], 'held': 0.0, 'close_ms': o.get('close'), 'asset': o.get('asset')}
                 open_ep[t] = ep
             px = fl['price'] if ep['sign'] > 0 else 1 - fl['price']
-            ep['entries'].append({'ms': fl['ms'], 'n': abs(rest), 'px': round(px, 4), 'fee': fl['fee'] * abs(rest) / fl['count']})
+            ep['entries'].append({'ms': fl['ms'], 'n': abs(rest), 'px': round(px, 4), 'fee': fl['fee'] * abs(rest) / fl['count'], 'coid': fl['coid']})
+            if 'origin' not in ep:
+                ws = entry_why.get(o.get('decision')) or []
+                w = next((w for sd, pr, w in ws if sd == fl['side'] and pr == o.get('price')), ws[0][2] if ws else '')
+                ep['origin'] = 'train' if w.startswith('train (paper)') else 'explore' if w.startswith('explore (p=') else 'normal'
             ep['held'] += rest
             if not ep.get('close_ms') and o.get('close'): ep['close_ms'] = o.get('close')
     episodes.extend(open_ep.values())
@@ -1951,7 +2005,7 @@ def main():
                 top_secs[t] = [x[0] for x in tops.get(t, [])]
             print(f'  (G: second recordings pass for {len(bw)} signal markets: {nl} lines, books for {got}, results for {sum(1 for t in bw if t in rec_results)}; {time.time() - t1:.0f} s)')
             return got
-        ratchet_lab(acts or [], episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades, entry_sigs, rec_results, more_books)
+        ratchet_lab(acts or [], episodes, tops, terms, index_at, sigma_cached, top_at, taker_fee, trades, entry_sigs, rec_results, more_books, orders)
     except Exception as e:  # a one-shot run on the server: the sections after this one still print
         print(f"  (1c/1d stopped: {type(e).__name__}: {e})")
 
