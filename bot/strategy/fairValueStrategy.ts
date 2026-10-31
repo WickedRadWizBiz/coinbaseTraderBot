@@ -50,6 +50,9 @@ export interface RestingQuote {
 export interface MarketView {
   ticker: string;
   pYes: number;
+  /** The spot fair value of YES: the contract priced off the index (bot/model/fairValue.ts priceContract), before the model,
+   *  the SNN, the TA and the rules move it. The loser exits' measure (cfg.loserExits); unset: those that need it are off. */
+  pFair?: number;
   bestBid?: { price: number; size: number };
   bestAsk?: { price: number; size: number };
   position: number;
@@ -170,6 +173,62 @@ export function ridesToSettlement(v: MarketView): boolean {
   return v.exitWindowOpen !== false && v.settleShare === true && v.position !== 0 && (netProfitAtBid(v) ?? 0) > 1e-9;
 }
 
+/** Steven's settlement rule (Oct 31: nothing rides to settlement unless it is in the last share of its window and in profit)
+ *  and the sizing lab's loser exits (cfg.loserExits, section L). A position not in profit after fees at its side's bid is sold
+ *  there, the top bid's size: inside the last share of the window or the final minute (the window cut), and anywhere once
+ *  the spot fair value of its side is below the bid less the taker fee a contract less the margin (the loser cut: the index
+ *  moves before Kalshi does, so it sells at once). Undefined: no such sale (in profit, no bid, no cost basis, or off). */
+export function loserExit(v: MarketView, cfg: Pick<StrategyConfig, 'loserExits'>): OrderPlan | undefined {
+  const L = cfg.loserExits;
+  if (!L || (!L.cut && !L.window) || v.position === 0) return undefined;
+  const long = v.position > 0;
+  const top = long ? v.bestBid : v.bestAsk;
+  if (!top || !(top.size > 0)) return undefined;
+  const net = netProfitAtBid(v);
+  if (net === undefined || net > 1e-9) return undefined;
+  const sideBid = long ? top.price : round(1 - top.price, 4);
+  const n = round(Math.min(Math.abs(v.position), top.size), 2);
+  if (!(n > 0)) return undefined;
+  const fee = orderFee(n, sideBid, true, v.fees) / n;
+  const fvSide = v.pFair === undefined ? undefined : long ? v.pFair : 1 - v.pFair;
+  const held = `${Math.abs(v.position)}${long ? '' : ' NO'}`;
+  let why: string | undefined;
+  if (L.window && (v.settleShare === true || v.exitWindowOpen === false)) {
+    why = `loser window cut: ${net.toFixed(2)} net after fees on ${held} at bid ${sideBid.toFixed(2)}, ${Math.round(v.tauSec)} s to the close (only a position in profit rides to settlement)`;
+  } else if (L.cut && fvSide !== undefined && fvSide < sideBid - fee - L.cutMargin - 1e-9) {
+    why = `loser cut: fair value ${fvSide.toFixed(3)} < bid ${sideBid.toFixed(2)} - fee ${fee.toFixed(3)} - ${L.cutMargin}, ${net.toFixed(2)} net after fees on ${held}`;
+  }
+  if (!why) return undefined;
+  return { side: long ? 'ask' : 'bid', price: top.price, count: n, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit',
+    edge: fvSide === undefined ? 0 : sideBid - fee - fvSide, why };
+}
+
+/** FV_ENTRY_GATE (cfg.loserExits): an entry's side, bought at `cost` a contract with `fee`, must leave the spot fair value of
+ *  that side at least the margin above cost plus fee. True when the gate is off or no fair value is known. */
+export function fvGatePasses(pFair: number | undefined, side: 'yes' | 'no', cost: number, fee: number, cfg: Pick<StrategyConfig, 'loserExits'>): boolean {
+  const L = cfg.loserExits;
+  if (!L?.gate || pFair === undefined) return true;
+  return (side === 'yes' ? pFair : 1 - pFair) >= cost + fee + L.gateMargin - 1e-9;
+}
+
+/** The fair value gate on a finished plan (after the fill model turns quotes into crosses and paper adds its training trades):
+ *  drops each order that opens or adds to a position at a cost the gate refuses. An order that only reduces the position is
+ *  kept. Returns how many were dropped. */
+export function applyFvGate(plan: StrategyOutput, pFair: number | undefined, position: number, fees: FeeSchedule | undefined, cfg: Pick<StrategyConfig, 'loserExits'>): number {
+  if (!cfg.loserExits?.gate || pFair === undefined) return 0;
+  const before = plan.place.length;
+  plan.place = plan.place.filter((p) => {
+    if (p.reduceOnly || p.purpose === 'exit' || !(p.count > 0)) return true;
+    const buysYes = p.side === 'bid';
+    if (buysYes ? position < 0 && p.count <= -position + 1e-9 : position > 0 && p.count <= position + 1e-9) return true;
+    const cost = buysYes ? p.price : round(1 - p.price, 4);
+    const ok = fvGatePasses(pFair, buysYes ? 'yes' : 'no', cost, orderFee(p.count, cost, !p.postOnly, fees) / p.count, cfg);
+    if (!ok) plan.notes.push(`fair value gate: dropped ${p.purpose} ${buysYes ? 'YES' : 'NO'} at ${cost.toFixed(2)} (fair value ${(buysYes ? pFair : 1 - pFair).toFixed(3)} under cost + fee + ${cfg.loserExits!.gateMargin})`);
+    return ok;
+  });
+  return before - plan.place.length;
+}
+
 export function decide(v: MarketView, cfg: StrategyConfig, opts: {
   exits?: boolean; blockReductions?: boolean; entries?: boolean; profitMandate?: number; pacerUsd?: number; pacerGroup?: { sumUsd: number; members: number };
   /** PACER_FLOOR: the position's armed floor in dollars (QuotaFloors); why a rule outside this function rides a winner (the
@@ -225,10 +284,13 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: {
   };
 
   // ---- Exits (risk-reducing, allowed in every style) ------------------------
-  // The final minute holds every position; the last share of the window (settleShare) holds one in profit after fees.
+  // The final minute and the last share of the window (settleShare) hold a position in profit after fees; under the loser exits
+  // (cfg.loserExits, Steven's rule of Oct 31) one that is not is sold, and the loser cut sells one the index has turned on.
   const riding = ridesToSettlement(v);
-  const exitWindow = v.exitWindowOpen !== false && !riding;
-  if (v.exitWindowOpen === false && v.position !== 0) out.notes.push('final minute: riding to settlement');
+  const cut = loserExit(v, cfg);
+  if (cut) out.place.push(cut);
+  const exitWindow = v.exitWindowOpen !== false && !riding && !cut;
+  if (v.exitWindowOpen === false && v.position !== 0 && !cut) out.notes.push('final minute: riding to settlement');
   if (riding) out.notes.push('final share of the window, in profit after fees: riding to settlement');
   const exits = opts.exits !== false && exitWindow;
   const margin = cfg.exitMargin ?? cfg.takerBuffer;
@@ -347,6 +409,14 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: {
   if (!entriesAllowed) out.notes.push('outside entry window');
   if (vetoed) out.notes.push(`ensemble veto: |p - p_mkt| < ${cfg.ensembleVetoSigmas} x ${v.pStd!.toFixed(3)}`);
   if (v.fastMove) out.notes.push('fast index move: quotes pulled');
+  // FV_ENTRY_GATE (cfg.loserExits; the sizing lab, Oct 31): new risk only where the spot fair value of the side bought is at
+  // least its cost with the fee plus the margin (the positions that rode to settlement losing were bad from the start).
+  const gate = (side: 'yes' | 'no', cost: number, n: number, taker: boolean): boolean => {
+    const fee = n > 0 ? orderFee(n, cost, taker, v.fees) / n : 0;
+    if (fvGatePasses(v.pFair, side, cost, fee, cfg)) return true;
+    out.notes.push(`fair value gate: ${side.toUpperCase()} fair value ${(side === 'yes' ? v.pFair! : 1 - v.pFair!).toFixed(3)} < ${cost.toFixed(2)} + fee ${fee.toFixed(3)} + ${cfg.loserExits!.gateMargin}`);
+    return false;
+  };
 
   // ---- Maker quotes -----------------------------------------------------------
   let desiredBid: OrderPlan | undefined;
@@ -364,7 +434,8 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: {
       const fee = orderFee(1, bp, false, v.fees);
       const k = size('yes', bp, fee, v.maxContracts);
       const unwind = Math.max(0, -v.position);
-      const count = round(Math.min(v.maxContracts, quoteSize(k.contracts, bp, fee) + unwind), 2);
+      const fresh = k.contracts > 0 && gate('yes', bp, k.contracts, false) ? k.contracts : 0;
+      const count = round(Math.min(v.maxContracts, quoteSize(fresh, bp, fee) + unwind), 2);
       if (count > 0) desiredBid = { side: 'bid', price: bp, count, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, purpose: 'quote', expirationTime: expiry, edge: q - bp - fee, why: 'maker bid' };
     }
     // YES ask (= NO bid at 1 - ap).
@@ -375,7 +446,8 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: {
       const fee = orderFee(1, noCost, false, v.fees);
       const k = size('no', noCost, fee, v.maxContracts);
       const unwind = Math.max(0, v.position);
-      const count = round(Math.min(v.maxContracts, quoteSize(k.contracts, noCost, fee) + unwind), 2);
+      const fresh = k.contracts > 0 && gate('no', noCost, k.contracts, false) ? k.contracts : 0;
+      const count = round(Math.min(v.maxContracts, quoteSize(fresh, noCost, fee) + unwind), 2);
       if (count > 0) desiredAsk = { side: 'ask', price: ap, count, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, purpose: 'quote', expirationTime: expiry, edge: (1 - q) - noCost - fee, why: 'maker ask' };
     }
   }
@@ -453,7 +525,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: {
       if (k.contracts > 0) {
         const fee = orderFee(k.contracts, ask.price, true, v.fees) / k.contracts;
         const edge = q - ask.price - fee;
-        if (edge >= cfg.takerBuffer + cfg.minEdge) {
+        if (edge >= cfg.takerBuffer + cfg.minEdge && gate('yes', ask.price, k.contracts, true)) {
           out.place.push({ side: 'bid', price: ask.price, count: k.contracts, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: false, purpose: 'entry', edge, why: `take YES: q ${q.toFixed(3)} vs ask ${ask.price}` });
         }
       }
@@ -465,7 +537,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: {
       if (k.contracts > 0) {
         const fee = orderFee(k.contracts, noCost, true, v.fees) / k.contracts;
         const edge = (1 - q) - noCost - fee;
-        if (edge >= cfg.takerBuffer + cfg.minEdge) {
+        if (edge >= cfg.takerBuffer + cfg.minEdge && gate('no', noCost, k.contracts, true)) {
           out.place.push({ side: 'ask', price: bid.price, count: k.contracts, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: false, purpose: 'entry', edge, why: `take NO: q ${q.toFixed(3)} vs bid ${bid.price}` });
         }
       }

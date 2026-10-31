@@ -31,7 +31,7 @@ import { marketWorstLoss, RestingLike } from './risk/exposure';
 import type { KillSwitch } from './risk/killSwitch';
 import { EXIT_RATE_RESERVE, RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
-import { decide, decisionProbability, MarketView, netProfitAtBid, OrderPlan, positionNetAtBid, ridesToSettlement } from './strategy/fairValueStrategy';
+import { applyFvGate, decide, decisionProbability, MarketView, netProfitAtBid, OrderPlan, positionNetAtBid, ridesToSettlement } from './strategy/fairValueStrategy';
 import { ProfitPeaks } from './strategy/profitPeaks';
 import { ConfluenceRatchetExit, HuntEvent } from './strategy/exitPolicies';
 import { HourlyQuotaPacer, QuotaFloors, SnipeGroup } from './risk/quotaPacer';
@@ -1408,7 +1408,7 @@ export class Engine {
       // (TENNIS_NO_EXIT_BEFORE_END_FRAC, 30%, by its progress: the live score against the format's sets, else the time and
       // information clocks) riding in profit.
       const out = decideMatch(tracker, { event, now, startTime: ms.find((m) => m.startTime)?.startTime, markets, closeTime: Math.min(...ms.map((m) => m.closeTime)), score: sc?.score, fairA }, T,
-        { bankroll, tennisRisk: totals.total, matchRisk: totals.window }, ms[0].tickSize, { pacerUsd: this.pacer.neededUsd(now), settleFrac: T.settleFrac, floorMode: this.d.cfg.strategy.pacer.floor, floors: this.quotaFloors });
+        { bankroll, tennisRisk: totals.total, matchRisk: totals.window }, ms[0].tickSize, { pacerUsd: this.pacer.neededUsd(now), settleFrac: T.settleFrac, floorMode: this.d.cfg.strategy.pacer.floor, floors: this.quotaFloors, loserWindow: this.d.cfg.strategy.loserExits?.window });
       if (tradeable) for (const p of out.plans) if (p.leg === 'quota_snipe') this.d.audit.write('pacer', { event: 'snipe', ticker: p.ticker, book: 'tennis', why: p.why, count: p.count, price: p.price, ...this.pacer.status(now) });
       // Exit-in-profit curve (strategy/sinuousExit.ts) on each held player market: a take-profit (the target, the
       // late-match profit, a hunt's confluence fade or time limit) also needs the curve's signal; a broken trailing
@@ -2167,7 +2167,7 @@ export class Engine {
     // budget sizes the backtester's orders (bot/sizing/orderBudget.ts).
     const budget = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult, riskScale: kellyScale, fCapUsd, paperOrderUsd: fixedUsd, bandUsd: band, maxContractsPerOrder: R.maxContractsPerOrder });
     const view: MarketView = {
-      ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: st.position, bankroll,
+      ticker: m.ticker, pYes, pFair: fv.pYes, bestBid: bid, bestAsk: ask, position: st.position, bankroll,
       maxOrderRiskUsd: budget.maxOrderRiskUsd, maxContracts: budget.maxContracts, minSidePrice: R.minSidePrice,
       ...(budget.fixedOrderUsd ? { fixedOrderUsd: budget.fixedOrderUsd } : {}),
       ...(budget.band ? { orderBandUsd: budget.band } : {}),
@@ -2267,6 +2267,9 @@ export class Engine {
     // A quota snipe liquidates the position: the hunt's stop order would only double it. The decision is audited with the clock.
     const snipe = plan.place.find((p) => p.purpose === 'exit' && p.why.startsWith('quota snipe'));
     if (snipe) { huntPlan = undefined; this.d.audit.write('pacer', { event: 'snipe', ticker: m.ticker, why: snipe.why, count: snipe.count, price: snipe.price, ...this.pacer.status(now) }); }
+    // A loser exit (LOSER_CUT / LOSER_WINDOW_CUT) sells the position at the bid in place of the hunt's own sale.
+    const loserSale = plan.place.find((p) => p.purpose === 'exit' && p.why.startsWith('loser'));
+    if (loserSale) { huntPlan = undefined; this.d.audit.write('loser_exit', { ticker: m.ticker, why: loserSale.why, count: loserSale.count, price: loserSale.price }); }
     // The MLP decides whether each entry is worth taking (take/skip head, once validated).
     if (S.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: S.takeMargin, fees: md.feesFor(m.ticker) });
     // Quote, cross or skip each maker entry by expected value (fill model, once validated).
@@ -2353,6 +2356,8 @@ export class Engine {
         plan.notes.push('training trade (paper, 1 contract)');
       }
     }
+    // FV_ENTRY_GATE on the finished plan: the fill model's crosses and paper's training trades open positions too.
+    applyFvGate(plan, fv.pYes, view.position, view.fees, S);
     if (this.fillLog) for (const p of plan.place) if (isMakerEntry(p)) this.fillX.set(p, fillInputs(p, fillCtx));
     if (fixedUsd > 0) plan.notes.push(`paper size: ${this.paperSizing()}; the tier, break-even scale and optimal f size live`);
     else if (band) plan.notes.push(`order band: $${band.min}-$${band.max} an order (ORDER_USD_MIN/MAX), the sized stake clamped into it; the tier, loss scale and optimal f do not size it`);

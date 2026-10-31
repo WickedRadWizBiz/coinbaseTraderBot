@@ -54,6 +54,24 @@ export interface RiskLimits {
   maxConsecutiveOrderErrors: number;
 }
 
+/** Steven's settlement rule and the loser exits that enforce it (bot/strategy/fairValueStrategy.ts decide). */
+export interface LoserExitConfig {
+  /** FV_ENTRY_GATE (on): a crypto entry is taken only when the spot fair value of the side bought (the contract priced off the
+   *  index, before the model, the SNN, the TA and the rules) is at least its cost with the fee plus FV_ENTRY_GATE_MARGIN. */
+  gate: boolean;
+  /** FV_ENTRY_GATE_MARGIN (0.06 a contract, the lab's best of 0, 3, 6, 9 and 12 cents). */
+  gateMargin: number;
+  /** LOSER_CUT (on): a position not in profit after fees is sold at the bid (the top bid's size each evaluation, no delay)
+   *  as soon as the spot fair value of its side is below the bid less the taker fee a contract less LOSER_CUT_MARGIN. */
+  cut: boolean;
+  /** LOSER_CUT_MARGIN (0.03 a contract; the lab: 3c beat 5, 8 and 12c, and waiting 10-30 s lost). */
+  cutMargin: number;
+  /** LOSER_WINDOW_CUT (on): inside the last share of the window (STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC) or the final
+   *  STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC, a position not in profit after fees is sold at the bid (Steven's rule); only a
+   *  position in profit rides to settlement. Tennis: its last share of the match (TENNIS_NO_EXIT_BEFORE_END_FRAC). */
+  window: boolean;
+}
+
 export interface StrategyConfig {
   style: StrategyStyle;
   /** Series to trade, e.g. KXBTC15M (with seriesAuto: the fallback list). */
@@ -133,6 +151,10 @@ export interface StrategyConfig {
    *  window a position in profit rides to settlement instead, and a hunted position is never held for settlement
    *  (HUNT_LOCK_SALE_ELSE=exit). */
   pacer: PacerConfig;
+  /** Steven's settlement rule (Oct 31: nothing rides to settlement unless it is in the last share of its window and in profit)
+   *  and the sizing lab's loser exits (section L, Oct 31), the same in paper and live. Unset: off (views and tests built
+   *  outside the loader). */
+  loserExits?: LoserExitConfig;
   /** PROFIT_MANDATE (off by default; Steven's first wording, Oct 29 23:22 UTC): outside that final share of the window a position
    *  whose side bid net of the exit fee clears its entry cost (entry fee in) by PROFIT_MANDATE_MIN is sold at the bid whatever the
    *  exit policy or the model says, a hunt trailing its stop excepted. On, a penny of profit sells before the pacer's threshold is
@@ -1129,6 +1151,13 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     noExitBeforeCloseSec: num(env, 'STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC', relaxed ? 60 : 0, 0, 600),
     noExitBeforeCloseFrac: num(env, 'STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC', 0.10, 0, 0.9),
     pacer: pacerConfig(env),
+    loserExits: {
+      gate: bool(env, 'FV_ENTRY_GATE', true),
+      gateMargin: num(env, 'FV_ENTRY_GATE_MARGIN', 0.06, 0, 0.5),
+      cut: bool(env, 'LOSER_CUT', true),
+      cutMargin: num(env, 'LOSER_CUT_MARGIN', 0.03, 0, 0.5),
+      window: bool(env, 'LOSER_WINDOW_CUT', true),
+    },
     profitMandate: bool(env, 'PROFIT_MANDATE', false),
     profitMandateMin: num(env, 'PROFIT_MANDATE_MIN', 0.01, 0, 0.5),
     // Maker discount for the measured adverse move a minute after a fill: at least 1.5c, up to 3c.

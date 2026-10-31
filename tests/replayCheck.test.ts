@@ -15,10 +15,14 @@ import { writeSyntheticRecordings } from '../research/synthetic';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'replay-check-test-'));
 
+// The loser rules (FV_ENTRY_GATE, LOSER_CUT, LOSER_WINDOW_CUT; on by default) off: the synthetic market sits near fair value,
+// so the 6c gate would refuse most entries, and these tests pin down other mechanics.
+const NO_LOSER_RULES = { FV_ENTRY_GATE: 'false', LOSER_CUT: 'false', LOSER_WINDOW_CUT: 'false' };
+
 test('backtest paper options: orders sized from the bankroll share, gate and bench wired in', async () => {
   const dir = path.join(tmp(), 'rec');
   writeSyntheticRecordings(dir, { windows: 8, seed: 12, marketNoise: 0.06 });
-  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both' });
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both', ...NO_LOSER_RULES });
   const rule = { ...cfg.probation, t: 2, minTrades: 30 };
   const small = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy: 'take_profit', paper: { orderFrac: 0.02, orderUsd: 0 }, accuracyGate: cfg.strategy.accuracyGate, takeProfitBench: { enforce: true, rule } });
   const big = await runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy: 'take_profit', paper: { orderFrac: 0.2, orderUsd: 0 }, accuracyGate: cfg.strategy.accuracyGate, takeProfitBench: { enforce: true, rule } });
@@ -271,7 +275,7 @@ test('backtest paper options: the paper bot\'s training trades and exploration e
   writeSyntheticRecordings(dir, { windows: 6, seed: 12, marketNoise: 0.06 });
   const paper = { orderFrac: 0.1, orderUsd: 0 };
   const run = (env: Record<string, string>, opts: object = { paper }) => {
-    const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both', ...env });
+    const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both', ...NO_LOSER_RULES, ...env });
     return runBacktest(dir, MetaModel.identity(), cfg.strategy, cfg.risk, 200, { exitPolicy: 'take_profit', ...opts });
   };
   const on = await run({ PAPER_TRAINING_TRADES_PER_HOUR: '120', PAPER_EXPLORE: 'false' });
