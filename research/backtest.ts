@@ -117,6 +117,10 @@ export interface ExitStats {
 export interface SessionBreakdown { windows: number; pnl: number; contracts: number; fees: number }
 
 /** One traded contract (a market in which a position was taken), settled. */
+/** One entry fill (BacktestResult.entryLog). price and fee are per contract on the bought side; f is the decision's feature
+ *  map when the order was sent; won is set at settlement. */
+export interface EntryLogRow { ticker: string; asset: string; t: number; closeTs: number; side: 'yes' | 'no'; price: number; fee: number; count: number; taker: boolean; pYes: number; mid: number; tauSec: number; f: Record<string, number>; won?: boolean }
+
 export interface TradeResult { ticker: string; closeTs: number; pnl: number; contracts: number; kind: string }
 
 export interface BacktestResult {
@@ -161,6 +165,9 @@ export interface BacktestResult {
   /** Fills and contracts by order purpose (quote, entry, exit), and contracts filled by UTC hour (YYYY-MM-DDTHH). */
   byPurpose?: Record<string, { fills: number; contracts: number }>;
   contractsByHour?: Record<string, number>;
+  /** With BacktestOpts.entryLog: every entry fill with what the decision saw when its order went out, and whether the
+   *  side it bought settled in the money (research/taJobs.ts: the take gate's trades, labelled by profit after fees). */
+  entryLog?: EntryLogRow[];
   /** The maker buffer at the last evaluation (adaptive with the paper options). */
   makerBufferEnd?: number;
 }
@@ -180,6 +187,8 @@ export interface BacktestOpts { exitPolicy?: ExitPolicyName; ratchet?: RatchetPa
    *  must change with anything the calls depend on (the days, the model, the vol settings, the risk limits). Not used
    *  with a fill model (it reads features the tape does not keep). */
   tape?: { file: string; sig: string };
+  /** Keep BacktestResult.entryLog. */
+  entryLog?: boolean;
   /** Paper sizing as the engine does it (bot/engine.ts paperOrderUsd / orderLimits): each crypto order buys about
    *  orderFrac of the bankroll (or the fixed orderUsd with orderFrac 0), whatever the tier allows; the risk caps widen
    *  to fit one order, PAPER_WINDOW_ORDERS closing together and PAPER_TOTAL_ORDERS in all. Both 0 (the default): sized
@@ -455,6 +464,10 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   let ctxAt = -Infinity;
   res.byPurpose = {};
   res.contractsByHour = {};
+  // Entry orders sent, by client order id: what the decision saw (the entry log reads it at the fill).
+  const sentCtx = new Map<string, Omit<EntryLogRow, 'price' | 'fee' | 'count' | 'taker' | 't' | 'side'>>();
+  const openLog = new Map<string, EntryLogRow[]>();
+  if (opts.entryLog) res.entryLog = [];
   // An order's purpose from its client order id (<ticker>-<ms>-<side>-<purpose>[-tp]; a queued exit <ticker>-<ms>-exit-<kind>).
   const purposeOf = (coid?: string) => (!coid ? 'other' : coid.includes('-exit-') ? 'exit' : /-(quote|entry|exit)(?:-tp)?$/.exec(coid)?.[1] ?? 'other');
 
@@ -494,6 +507,13 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     if (f.clientOrderId?.endsWith('-exit-snipe')) { exits.quotaSnipes++; exits.quotaSnipeContracts += f.count; }
     const hour = new Date(st.now).toISOString().slice(0, 13);
     res.contractsByHour![hour] = (res.contractsByHour![hour] ?? 0) + f.count;
+    const sc = res.entryLog && f.clientOrderId ? sentCtx.get(f.clientOrderId) : undefined;
+    if (sc && f.count > 0) {
+      const yes = f.side === 'bid';
+      const row: EntryLogRow = { ...sc, t: st.now, side: yes ? 'yes' : 'no', price: yes ? f.price : 1 - f.price, fee: (f.fee ?? 0) / f.count, count: f.count, taker: Boolean(f.isTaker) };
+      res.entryLog!.push(row);
+      openLog.set(f.ticker, [...(openLog.get(f.ticker) ?? []), row]);
+    }
     if (cancelInFlight.has(f.orderId)) { L.cancelRaceFills++; L.cancelRaceContracts += f.count; }
     if (f.clientOrderId?.endsWith('-tp')) {
       res.takeProfitFills++;
@@ -586,6 +606,11 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         if (out) {
           const result = out.label ? 'yes' : 'no';
           ex.settle(m.ticker, result);
+          if (res.entryLog) {
+            for (const r of openLog.get(m.ticker) ?? []) r.won = (r.side === 'yes') === (result === 'yes');
+            openLog.delete(m.ticker);
+            for (const k of sentCtx.keys()) if (k.startsWith(`${m.ticker}-`)) sentCtx.delete(k);
+          }
           for (const x of ofOpen.get(m.ticker) ?? []) ofRows.push({ ts: st.now, ticker: m.ticker, cost: x.cost, count: x.count, won: (x.side === 'bid') === (result === 'yes') });
           ofOpen.delete(m.ticker);
           if (!(opts.accuracyGateFile && opts.tradeFromMs !== undefined && st.now < opts.tradeFromMs)) gate?.settle(m.ticker, result);
@@ -970,6 +995,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         }
         if (/^(train|explore)/.test(p.why)) res.paper!.extraSent = (res.paper!.extraSent ?? 0) + 1;
         const clientOrderId = `${m.ticker}-${st.now}-${p.side}-${p.purpose}${p.why.startsWith('take-profit') ? '-tp' : p.why.startsWith('confluence ratchet wall ask') ? '-wall' : ''}`;
+        if (res.entryLog && p.purpose === 'entry' && !p.reduceOnly) sentCtx.set(clientOrderId, { ticker: m.ticker, asset: m.asset, closeTs: m.closeTime, pYes, mid, tauSec, f: fmap });
         await send(m.ticker, 'order', async () => {
           try {
             await ex.createOrder({ ticker: m.ticker, side: p.side, count: p.count, price: p.price, timeInForce: p.timeInForce, postOnly: p.postOnly, reduceOnly: p.reduceOnly, selfTradePrevention: 'taker_at_cross', clientOrderId, expirationTime: p.expirationTime });

@@ -21,7 +21,7 @@ function arg(k: string, d: string): string { const i = process.argv.indexOf(`--$
 export async function kalshiReplayData(o: { history: string; out: string; days: number; assets: string[]; series: string[]; budgetMin: number; restBaseUrl?: string; log?: (m: string) => void }): Promise<string[]> {
   const log = o.log ?? ((m: string) => console.log(`[kalshi-replay-data] ${m}`));
   const { downloadBinance } = await import('./history/binanceVision');
-  const { downloadKalshiHistory } = await import('./history/kalshiHistory');
+  const { downloadKalshiHistory, repairLegacyCents } = await import('./history/kalshiHistory');
   const { buildHistoryReplay, replayKalshiDays } = await import('./history/historyReplay');
   const t0 = Date.now();
   const now = Date.now();
@@ -34,6 +34,8 @@ export async function kalshiReplayData(o: { history: string; out: string; days: 
   const left = Math.max(60_000, o.budgetMin * 60_000 - (Date.now() - t0));
   const k = await downloadKalshiHistory({ baseUrl: o.restBaseUrl ?? process.env.KALSHI_REST_URL ?? 'https://external-api.kalshi.com/trade-api/v2', series: o.series, days: o.days, out: path.join(o.history, 'kalshi'), budgetMs: left, log: (m) => log(`kalshi: ${m}`) });
   log(`kalshi: ${k.markets} new market(s), ${k.remaining} left for the next run${k.budgetHit ? ' (time budget reached)' : ''}`);
+  // Quotes stored before PR #217 in hundredths of a cent: fixed in place (the day files change size, so the replay rebuilds those days).
+  repairLegacyCents(path.join(o.history, 'kalshi'), (m) => log(`kalshi: ${m}`));
   const r = await buildHistoryReplay({ historyDir: o.history, outDir: o.out, assets: o.assets, fromDay, toDay: yesterday, synthetic: false, requote: true, log: (m) => log(`replay: ${m}`) });
   log(`replay: ${r.written} day(s) written, ${r.skipped} already built${r.notes.length ? ` | ${r.notes.join('; ')}` : ''}`);
   const days = replayKalshiDays(o.out);

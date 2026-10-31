@@ -158,7 +158,8 @@ async function tapeFor(dir: string, modelPath: string, tapeDir: string | undefin
 }
 
 /** One trial: the production backtester over every day in `dir`, as paper with these bot.env lines. */
-export async function evalTrial(dir: string, modelPath: string, env: Record<string, string>, stage = 1, scope: Scope = 'sample', tapeDir?: string): Promise<TrialResult> {
+/** `entryLog`: also write every entry fill with its decision's inputs to this JSONL file (research/taJobs.ts). */
+export async function evalTrial(dir: string, modelPath: string, env: Record<string, string>, stage = 1, scope: Scope = 'sample', tapeDir?: string, extra: { entryLog?: string } = {}): Promise<TrialResult> {
   const t0 = Date.now();
   const base = { id: trialId(env), stage, scope, env, ms: 0, pnl: 0, fees: 0, contracts: 0, fills: 0, trades: 0, byDay: {}, tradesByDay: {}, byHour: {} };
   try {
@@ -190,8 +191,12 @@ export async function evalTrial(dir: string, modelPath: string, env: Record<stri
       optimalF: cfg.optimalF,
       accuracyGate: S.accuracyGate, takeProfitBench: { enforce: S.takeProfitBench, rule }, tape, dailyGoalUsd: cfg.vault.dailyGoalUsd, sessionEdge: cfg.sessionEdge,
       volProfile: em.volProfile, applyVolSeasonality: Boolean(em.volProfile), volModel: em.volModel, fillModel: em.fillModel, calendar: em.calendar,
-      taNet: true, trials: em.trials, marketContext: true, ...(seed ? { seedCandles: seed } : {}),
+      taNet: true, trials: em.trials, marketContext: true, ...(seed ? { seedCandles: seed } : {}), entryLog: Boolean(extra.entryLog),
     });
+    if (extra.entryLog && r.entryLog) {
+      fs.mkdirSync(path.dirname(extra.entryLog), { recursive: true });
+      fs.writeFileSync(extra.entryLog, r.entryLog.map((x) => JSON.stringify(x)).join('\n') + '\n');
+    }
     const byDay: Record<string, number> = {}, tradesByDay: Record<string, number> = {}, byHour: Record<string, number> = {};
     for (const t of r.trades) {
       const iso = new Date(t.closeTs).toISOString();
