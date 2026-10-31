@@ -28,6 +28,10 @@ on:
         description: 'Judge only: re-judge the saved sides of this earlier run id (no replay, no server read; artifacts last 7 days)'
         required: false
         default: ''
+      judge_args:
+        description: 'Extra judge flags, e.g. --gain true --gainPrior 400 --gainForget 0.9995 (the learned correction gain)'
+        required: false
+        default: '--gain true'
 
 permissions:
   contents: read
@@ -210,11 +214,13 @@ jobs:
           run-id: ${{ inputs.from_run || github.run_id }}
           github-token: ${{ inputs.from_run != '' && github.token || '' }}
       - name: Judge
+        env:
+          JUDGE_ARGS: ${{ inputs.judge_args }}
         run: |
           set -euo pipefail
           # The verdict line, the "vs market" line (the SNN plan's phase 1 go/no-go) and where the SNN stands against
           # the market by asset x horizon, mid level, hour, kind and volatility.
-          npm run --silent research:snn-ablation -- --domain "$DOMAIN" --only "$ONLY" --judge research/out/side-baseline.json,research/out/side-candidate.json --breakdown true --out research/out/snn_ablation.json
+          npm run --silent research:snn-ablation -- --domain "$DOMAIN" --only "$ONLY" --judge research/out/side-baseline.json,research/out/side-candidate.json --breakdown true $(printf '%s' "$JUDGE_ARGS" | tr -cd 'a-zA-Z0-9 .-') --out research/out/snn_ablation.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

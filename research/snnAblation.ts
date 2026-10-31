@@ -22,6 +22,7 @@ import { dayBlockBootstrap } from '../bot/snn/blender';
 import { blend, brier, calibrationSlope, correlation, surpriseConfidence } from '../bot/snn/formulas';
 import { DEFAULT_SNN, domainParams, stageFlags, type SnnFlags, type SnnParams, type Stage } from '../bot/snn/params';
 import { replaySnn, type SnnReplayResult, type SnnRow } from './snnReplay';
+import { replayGain, type GainOpts } from '../bot/snn/correctionGain';
 
 export interface Mechanism { name: string; candidate: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams> }; baseline: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams> }; note: string }
 
@@ -256,6 +257,20 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
       console.log('          (correction: mean size in cents, edge in cents per contract traded at the mid in its direction before fees, calibration slope b; b<1 overcorrects, b<=0 wrong way)');
       for (const x of bd) console.log(`          ${x.by.padEnd(8)} ${x.slice.padEnd(20)} ${String(x.events).padStart(5)} windows  ${Number.isFinite(x.mean) ? `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]` : ''.padEnd(29)}  ${x.verdict.padEnd(16)}  size ${x.corr.sizeCents.toFixed(2)}c  edge ${x.corr.edgeCents.toFixed(2)}c  b ${x.corr.slope.toFixed(2)}`);
       v.extra = { ...(v.extra ?? {}), vsMarketBreakdown: bd };
+    }
+    // --gain: the candidate priced through the learned correction gain (bot/snn/correctionGain.ts), replayed causally
+    // over the saved rows. The gain does not feed back into the SNN's learning, so this is exactly what it would price.
+    if (argOf('gain', '') === 'true') {
+      const o: GainOpts = { prior: Number(argOf('gainPrior', '400')), forget: Number(argOf('gainForget', '0.9995')) };
+      const gained = replayGain(c.res.rows, o), raw = vsMarket(c.res.rows), vm = vsMarket(gained);
+      const f = (x: { mean: number; lo: number; hi: number }) => `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]`;
+      console.log(`        correction gain (prior ${o.prior} rows, forget ${o.forget}): vs market ${f(vm)} (SNN as is ${f(raw)}); ${vm.hi < 0 ? 'BEATS the market' : vm.lo > 0 ? 'worse' : 'undecided'}`);
+      const before = new Map(vsMarketBreakdown(c.res.rows).map((x) => [`${x.by}|${x.slice}`, x]));
+      for (const x of vsMarketBreakdown(gained)) {
+        const b0 = before.get(`${x.by}|${x.slice}`);
+        console.log(`          ${x.by.padEnd(8)} ${x.slice.padEnd(20)} ${String(x.events).padStart(5)} windows  ${Number.isFinite(x.mean) ? `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]` : ''.padEnd(29)}  ${x.verdict.padEnd(16)}  was ${b0 && Number.isFinite(b0.mean) ? b0.mean.toFixed(5) : '-'}  size ${x.corr.sizeCents.toFixed(2)}c  edge ${x.corr.edgeCents.toFixed(2)}c  b ${x.corr.slope.toFixed(2)}`);
+      }
+      v.extra = { ...(v.extra ?? {}), correctionGain: { opts: o, vsMarket: vm, raw } };
     }
     writeVerdicts(out, { domain, recordings: dir, from: from ?? null, to: to ?? null }, [v]);
     return [v];
