@@ -23,29 +23,30 @@ import { recordingFiles } from '../bot/marketdata/recordingFiles';
 // day-bootstrap interval): j1_lag +0.14 [-0.34,+0.63], j1_voltarget +0.25 [-0.08,+0.62], j2_maker +0.35 [-0.11,+0.83],
 // j2_maker_hi +1.01 [+0.36,+1.63], dir_lean +0.44 [-0.05,+0.96], j4_extreme -0.68 [-1.31,-0.05], j4_extreme_lo -0.69,
 // all_on +0.60, j3_gate +5.25 [+3.81,+6.79] (+2.75/h), j3_gate_margin (1c) +5.99 [+4.49,+7.63] (+3.49/h), all_in +5.10.
-// No job is switched off (Steven, Oct 31): round 3 reworks job 4, widens the gate's margin and stacks the leans on it.
+// Round 3 (run 41201349346): g_m3 +4.41/h, g_m2 +2.51, 1c +2.61 (round 2: +3.49), leans on g_m2 +2.19, full +2.28;
+// j4_v2 +0.17 [-0.08,+0.43] (job 4 no longer loses). Its gate replays started hours after its baseline and restored a
+// newer copy of the server's model, so round 4 pins one copy for every replay and repeats the margins with the stacks.
+// No job is switched off (Steven, Oct 31).
 export const VARIANTS: Record<string, Record<string, string>> = {
   baseline: {},
   // Job 4, second iteration: sell on the stretch only near the fair value and for half of what is left to make.
   j4_v2: { TA_EXIT_EXTREME_VOTES: '1.5', TA_EXIT_EXTREME_EDGE: '0', TA_EXIT_EXTREME_SHARE: '0.5' },
-  j4_v2_loose: { TA_EXIT_EXTREME_VOTES: '1', TA_EXIT_EXTREME_EDGE: '-0.02', TA_EXIT_EXTREME_SHARE: '0.3' },
 };
 
 /** Where train-gate writes the mid-anchored take gate (job 3) the gate variants read. */
 const GATE_FILE = 'data/models/take_mid.json';
 const LEANS = { TA_LEAN_MAKER: '0.01', TA_LEAN_PRICE: '0.005' };
 const LAG = { DYN_EDGE_VOL: '-0.02', DYN_EDGE_MAX_DOWN: '0.02' };
+const gate = (m: string) => ({ TAKE_MID_GATE: GATE_FILE, TAKE_MID_MARGIN: m });
 export const GATE_VARIANTS: Record<string, Record<string, string>> = {
-  j3_gate_margin: { TAKE_MID_GATE: GATE_FILE, TAKE_MID_MARGIN: '0.01' },
-  g_m2: { TAKE_MID_GATE: GATE_FILE, TAKE_MID_MARGIN: '0.02' },
-  g_m3: { TAKE_MID_GATE: GATE_FILE, TAKE_MID_MARGIN: '0.03' },
-  g_m2_leans: { TAKE_MID_GATE: GATE_FILE, TAKE_MID_MARGIN: '0.02', ...LEANS },
-  g_m2_j4v2: { TAKE_MID_GATE: GATE_FILE, TAKE_MID_MARGIN: '0.02', ...VARIANTS.j4_v2 },
-  g_m2_full: { TAKE_MID_GATE: GATE_FILE, TAKE_MID_MARGIN: '0.02', ...LEANS, ...LAG, ...VARIANTS.j4_v2 },
+  j3_gate_margin: gate('0.01'),
+  g_m3: gate('0.03'),
+  g_m4: gate('0.04'),
+  g_m5: gate('0.05'),
+  g_m3_maker: { ...gate('0.03'), TA_LEAN_MAKER: '0.01' },
+  g_m3_full: { ...gate('0.03'), ...LEANS, ...LAG, ...VARIANTS.j4_v2 },
 };
 
-/** The replay's days, or (when its cache is gone by report time) every calendar day the runs' results span: the history
- *  replay has one per day, so the span is the same list. */
 function dayList(days: string, out: string): string[] {
   const listed = fs.existsSync(days) ? recordingFiles(days).map((d) => d.day).sort() : [];
   if (listed.length) return listed;

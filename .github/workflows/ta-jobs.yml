@@ -43,6 +43,7 @@ jobs:
     outputs:
       variants: ${{ steps.v.outputs.variants }}
       gates: ${{ steps.v.outputs.gates }}
+      server_key: ${{ steps.pin.outputs.cache-matched-key }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -81,6 +82,18 @@ jobs:
             data/history
             data/history-replay
           key: ta-jobs-replay-${{ github.run_id }}
+      # Pin one copy of the server's model and settings for every replay of this run: the daily sweep on main saves a new
+      # copy, and replays that start hours apart would otherwise compare different models (round 3, Oct 31).
+      - name: Pin the server's model and settings copy
+        id: pin
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+          key: kalshi-server-none
+          restore-keys: kalshi-server-
+          lookup-only: true
       - name: The variants
         id: v
         run: |
@@ -125,8 +138,8 @@ jobs:
           path: |
             data/models
             data/sweep-env
-          key: kalshi-server-none
-          restore-keys: kalshi-server-
+          key: ${{ needs.data.outputs.server_key }}
+          fail-on-cache-miss: true
       - name: Replay ${{ matrix.variant }}
         env:
           NODE_OPTIONS: --max-old-space-size=12288
@@ -184,8 +197,8 @@ jobs:
           path: |
             data/models
             data/sweep-env
-          key: kalshi-server-none
-          restore-keys: kalshi-server-
+          key: ${{ needs.data.outputs.server_key }}
+          fail-on-cache-miss: true
       - uses: actions/download-artifact@v4
         with:
           name: ta-jobs-baseline
