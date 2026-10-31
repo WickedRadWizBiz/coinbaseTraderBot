@@ -494,6 +494,9 @@ export class SnnNetwork {
       const ps = s.pExceed.strike, pc = s.pExceed.cap;
       s.p = q.kind === 'less' ? 1 - pc! : q.kind === 'between' ? Math.max(1e-4, (ps ?? 0) - (pc ?? 0)) : ps!;
       s.p = Math.min(1 - 1e-4, Math.max(1e-4, s.p));
+      // anchorBand: outside the band around 50 cents the network prices at the market.
+      const band = this.p.anchorMid ? this.p.anchorBand : undefined;
+      if (band !== undefined && q.mid !== undefined && Number.isFinite(q.mid) && Math.abs(q.mid - 0.5) > band) s.p = Math.min(1 - ANCHOR_CLIP, Math.max(ANCHOR_CLIP, q.mid));
     }
     // Per-contract tags: the readout's own (unprojected) prediction, so the delta rule is the exact
     // log-loss gradient; at most one tag per contract per tagEverySec.

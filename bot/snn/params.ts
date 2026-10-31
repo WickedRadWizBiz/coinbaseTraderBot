@@ -82,6 +82,11 @@ export interface SnnParams {
    *  zero, so the readout starts as the market and can only add value where the market is wrong. Optional: absent = off,
    *  and absent keys keep the version hash, so networks without it keep their checkpoints. */
   anchorMid?: boolean;
+  /** With anchorMid: the network's price departs from the market only where the contract's mid is within this distance
+   *  of 50 cents; elsewhere it is the (clipped) mid. Learning is unchanged (tags keep the readout's own price). The
+   *  Oct 31 breakdown found the anchored correction beat the market at 40-60c and not in the tails. Optional: absent =
+   *  no band, and the version hash is unchanged. */
+  anchorBand?: number;
   /** Wilson-Cowan regime drive gain; gap-junction coupling factor (<< 1). */
   wcGain: number; gapCoupling: number;
   /** Catch-up: at most this many 1 s steps per call; larger gaps reset transient state. */

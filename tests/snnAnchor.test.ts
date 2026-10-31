@@ -164,3 +164,25 @@ test('anchored readout: learning a small correction does not read as fast-slow d
   pr.wf[1] += 0.3;
   assert.ok(Math.abs(pr.divergence() - 0.3 / (4 * DEFAULT_SNN.priorSlope)) < 1e-12);
 });
+
+test('anchor band: outside 50c +/- band the price is the market, inside it is the learned correction; learning is unchanged', () => {
+  const tp = tape(30);
+  const mk = (band?: number) => {
+    const net = new SnnNetwork(small({ anchorMid: true, readoutEta: 0.05, readoutCap: 1, ...(band !== undefined ? { anchorBand: band } : {}) }));
+    for (let s = 0; s < 30; s++) net.step(T0 + s * 1000, tp[s]);
+    for (let k = 1; k <= 40; k++) { net.score([query(`B${k}`, { mid: 0.45 })], T0 + (40 + k * 61) * 1000); net.settle(`B${k}`, 'yes', T0 + (40 + k * 61) * 1000 + 1); }
+    return net;
+  };
+  const banded = mk(0.1), free = mk();
+  // Same learning: the band only changes the price handed out.
+  assert.deepEqual([...banded.readouts.get('BTC-15m')!.wf], [...free.readouts.get('BTC-15m')!.wf], 'identical weights');
+  const at = (n: SnnNetwork, mid: number, tk: string) => n.score([query(tk, { tag: false, mid })], T0 + 9000e3)[0].p;
+  assert.equal(at(banded, 0.45, 'X1'), at(free, 0.45, 'X1'), 'inside the band: the learned price');
+  assert.ok(Math.abs(at(free, 0.45, 'X1') - 0.45) > 1e-6, 'which differs from the mid');
+  assert.ok(Math.abs(at(banded, 0.75, 'X2') - 0.75) < 1e-12, 'outside: the mid');
+  assert.ok(Math.abs(at(banded, 0.005, 'X3') - 0.02) < 1e-12, 'outside, clipped like the anchor');
+  assert.ok(Math.abs(at(free, 0.75, 'X2') - 0.75) > 1e-6, 'without the band it would have departed');
+  const base = small({ anchorMid: true });
+  assert.equal(versionHash(base), versionHash({ ...base }), 'absent: hash unchanged');
+  assert.notEqual(versionHash(base), versionHash({ ...base, anchorBand: 0.1 }));
+});
