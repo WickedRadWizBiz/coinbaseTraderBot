@@ -1,4 +1,4 @@
-# Benched lab round 1 (2026-10-31): the take-profit, the curve cross and the Kalshi probation reworked into stricter
+# Benched lab round 1b (2026-10-31; 1a cancelled: empty TP_FV_MARGINS parsed as [0]): the take-profit, the curve cross and the Kalshi probation reworked into stricter
 # levels instead of benches, against today's bot with PR #230's loser exits (base: the take-profit follows paper's bench,
 # the cross off, paper's probation). One arm per line: tag: KEY=VALUE ... (empty = base).
 # days=2026-10-29,2026-10-30
