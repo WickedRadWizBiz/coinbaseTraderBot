@@ -118,9 +118,17 @@ export function hedgeTargets(
 
 export interface DirectionalContext { positions: Map<string, PerpPosition>; hedge: HedgeTarget[]; now: number }
 
+/** The hourly quota pacer as a directional perp strategy sees it (bot/risk/quotaPacer.ts; Steven's profit rules apply to
+ *  every contract type, Oct 30): the net dollars a position must be up for its sale now (undefined while the pacer is off),
+ *  the credit of a closed trade's result net of fees, and the audit of a snipe. Perps never settle, so the rule for the last
+ *  share of a contract's window does not apply to them. */
+export interface PerpPacer { neededUsd?: number; credit(usd: number, ticker: string): void; snipe(ticker: string, why: string): void }
+
+export interface DirectionalGuards { halt?: string; noEntry?: string; lockedFrac?: number; pacer?: PerpPacer }
+
 /** A directional strategy the executor drives (PerpTrader, SetupTrader). */
 export interface DirectionalTrader {
-  targets(c: DirectionalContext, guards: { halt?: string; noEntry?: string; lockedFrac?: number }): Promise<DirTarget[]>;
+  targets(c: DirectionalContext, guards: DirectionalGuards): Promise<DirTarget[]>;
   status(): object;
 }
 

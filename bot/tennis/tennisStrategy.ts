@@ -32,6 +32,10 @@
 //     With a live score (TENNIS_SCORE_FEED) progress comes from the exact
 //     score. See MatchTracker.progress.
 //
+// Steven's profit rules apply here as on every contract type (Oct 29-30, see decideMatch): the quota snipe
+// sells a position whose profit after fees covers what the clock hour needs, and in the last 30% of the
+// match (by that progress, not the market's window) a position in profit rides to settlement.
+//
 // Pure logic (no I/O): the engine turns plans into risk-checked orders.
 
 import type { TennisConfig } from '../config';
@@ -46,6 +50,9 @@ export interface MatchMarket {
   ticker: string; title?: string; quote: Quote; position: number; avgEntry?: number; book?: OrderBook;
   /** Signed taker flow on this market over the last minute: (YES-taker - NO-taker) / total, in [-1, 1]. */
   flow?: number;
+  /** The whole position's profit after fees if sold at the bid now, the entry fee in (the quota snipe's measure on every
+   *  contract type, bot/strategy/fairValueStrategy.ts positionNetAtBid); undefined when flat or unknown. */
+  netAtBid?: number;
 }
 
 export type MatchPhase = 'pre' | 'underdog_window' | 'live' | 'late' | 'done';
@@ -80,7 +87,7 @@ export interface TennisPlan {
   postOnly: boolean;
   reduceOnly: boolean;
   timeInForce: 'good_till_canceled' | 'immediate_or_cancel';
-  leg: 'underdog_entry' | 'underdog_tp' | 'underdog_trail' | 'underdog_late' | 'underdog_cut' | 'underdog_stop' | 'fav_entry' | 'fav_trail' | 'fav_stop';
+  leg: 'underdog_entry' | 'underdog_tp' | 'underdog_trail' | 'underdog_late' | 'underdog_cut' | 'underdog_stop' | 'fav_entry' | 'fav_trail' | 'fav_stop' | 'quota_snipe';
   why: string;
 }
 
@@ -134,13 +141,15 @@ export class MatchTracker {
     return a ?? (b !== undefined ? 1 - b : undefined);
   }
 
-  /** Grand Slam main draw: best of 5 with a 10-point final-set tiebreak. Slam qualifying: best of 3
-   * with the 10-point final-set tiebreak. Everything else on the ATP tour: best of 3, 7-point tiebreaks. */
+  /** Grand Slam main draw: best of 5 with a 10-point final-set tiebreak. Slam qualifying, and the women's
+   * matches (WTA series) at the Slams: best of 3 with the 10-point final-set tiebreak. Everything else on
+   * the tours: best of 3, 7-point tiebreaks. */
   format(ms: MatchMarket[]): MatchFormat {
     const titles = ms.map((m) => m.title ?? '').join(' ');
     const slam = GRAND_SLAMS.test(titles);
     const quali = /qualif/i.test(titles);
-    return { bestOf: slam && !quali ? 5 : 3, finalTiebreak: slam ? 10 : 7 };
+    const wta = ms.some((m) => /^KXWTA/i.test(m.ticker));
+    return { bestOf: slam && !quali && !wta ? 5 : 3, finalTiebreak: slam ? 10 : 7 };
   }
 
   bestOf(ms: MatchMarket[]): 3 | 5 {
@@ -352,11 +361,53 @@ export function tennisSize(price: number, cfg: TennisConfig, b: BudgetView, make
   return Math.floor((room / cost) * 100) / 100;
 }
 
+/** Steven's profit rules as tennis sees them (Oct 29-30; bot/risk/quotaPacer.ts). */
+export interface TennisProfitRules {
+  /** The net dollars a position must be up for its sale now (the pacer's slice); undefined while the pacer is off. */
+  pacerUsd?: number;
+  /** The last share of the match (TENNIS_NO_EXIT_BEFORE_END_FRAC, 0.30) in which a position in profit after fees
+   *  rides to settlement. A share of the match's progress (MatchTracker.progress: the live score's sets, games and points
+   *  against the format's best-of, else the time and information clocks), not of the market's window: a match market
+   *  closes long after the match ends. 0 or unset = off. */
+  settleFrac?: number;
+}
+
 /**
  * Decide orders for one match. Returns the desired resting/IOC plans; the
  * caller cancels resting tennis orders that are not in the plan.
  */
-export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig, budget: BudgetView, tick = 0.01): { phase: MatchPhase; plans: TennisPlan[]; notes: string[] } {
+export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig, budget: BudgetView, tick = 0.01, rules: TennisProfitRules = {}): { phase: MatchPhase; plans: TennisPlan[]; notes: string[] } {
+  return applyProfitRules(t, s, decideLegs(t, s, cfg, budget, tick), rules);
+}
+
+/**
+ * Steven's profit rules (Oct 29-30), on tennis as on every contract type. Inside the last share of the match a position in
+ * profit after fees rides to settlement: no exit sells it (one that is not keeps its exits: the stops, the late cut).
+ * Elsewhere the quota snipe sells a position whose whole profit after fees at the bid covers what the clock hour needs,
+ * whatever the legs planned for it (the hunt, the take-profit, the favorite's hold); a thin bid takes what it can and the
+ * rest is judged again next tick.
+ */
+function applyProfitRules(t: MatchTracker, s: MatchSnapshot, out: { phase: MatchPhase; plans: TennisPlan[]; notes: string[] }, r: TennisProfitRules): { phase: MatchPhase; plans: TennisPlan[]; notes: string[] } {
+  const frac = r.settleFrac ?? 0;
+  const prog = t.liveSince !== undefined ? t.progress(s.now, s.markets) : 0;
+  const lastShare = frac > 0 && prog >= 1 - frac - 1e-9;
+  for (const m of s.markets) {
+    if (!(m.position > 0)) continue;
+    const net = m.netAtBid;
+    const others = (p: TennisPlan) => p.ticker !== m.ticker || p.side !== 'ask';
+    if (lastShare && net !== undefined && net > 1e-9) {
+      out.plans = out.plans.filter(others);
+      out.notes.push(`${m.ticker}: match ${(prog * 100).toFixed(0)}% done (its last ${(frac * 100).toFixed(0)}%), +$${net.toFixed(2)} after fees: riding to settlement`);
+    } else if (r.pacerUsd !== undefined && net !== undefined && net >= r.pacerUsd - 1e-9 && m.quote.bid !== undefined) {
+      out.plans = out.plans.filter(others);
+      out.plans.push({ ticker: m.ticker, side: 'ask', price: m.quote.bid, count: m.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg: 'quota_snipe',
+        why: `+$${net.toFixed(2)} net on ${m.position} at bid ${m.quote.bid} covers the $${r.pacerUsd.toFixed(2)} the hour needs` });
+    }
+  }
+  return out;
+}
+
+function decideLegs(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig, budget: BudgetView, tick: number): { phase: MatchPhase; plans: TennisPlan[]; notes: string[] } {
   const phase = t.observe(s);
   const plans: TennisPlan[] = [];
   const notes: string[] = [];

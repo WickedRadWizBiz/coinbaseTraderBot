@@ -31,7 +31,7 @@ import { marketWorstLoss, RestingLike } from './risk/exposure';
 import type { KillSwitch } from './risk/killSwitch';
 import { EXIT_RATE_RESERVE, RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
-import { decide, decisionProbability, MarketView, netProfitAtBid, OrderPlan, ridesToSettlement } from './strategy/fairValueStrategy';
+import { decide, decisionProbability, MarketView, netProfitAtBid, OrderPlan, positionNetAtBid, ridesToSettlement } from './strategy/fairValueStrategy';
 import { ProfitPeaks } from './strategy/profitPeaks';
 import { ConfluenceRatchetExit, HuntEvent } from './strategy/exitPolicies';
 import { HourlyQuotaPacer, SnipeGroup } from './risk/quotaPacer';
@@ -46,7 +46,7 @@ import type { AccuracyGate } from './strategy/accuracyGate';
 import type { Tca } from './tca/tca';
 import type { MacroEvent } from './model/featureEngine';
 import { ladderQuotes } from './model/ladder';
-import type { BinaryExposure, DirectionalContext, PerpHedger } from './perps/hedger';
+import type { BinaryExposure, DirectionalContext, PerpHedger, PerpPacer } from './perps/hedger';
 import type { DirectionalTrader } from './perps/hedger';
 import { decideMatch, MatchTracker, type MatchMarket } from './tennis/tennisStrategy';
 import { parseTennisScore } from './tennis/liveScore';
@@ -1383,6 +1383,8 @@ export class Engine {
         return {
           ticker: m.ticker, title: m.title, position: pos?.yes ?? 0,
           avgEntry: pos && pos.yes > 0 ? -pos.netCash / pos.yes : undefined,
+          // The quota snipe's measure, as on the crypto contracts: the cost basis has the entry fee in.
+          netAtBid: pos && pos.yes > 0 ? positionNetAtBid(pos.yes, (pos.fees - pos.netCash) / pos.yes, b, a, md.feesFor(m.ticker)) : undefined,
           quote: { bid: b?.price, ask: a?.price, bidSize: b?.size, askSize: a?.size },
           book: usable ? book : undefined,
           flow: (() => {
@@ -1399,8 +1401,12 @@ export class Engine {
       // Tennis SNN column inputs and the tennis MLP's fair value (it decides whether an entry is worth taking).
       const tv = this.snnTennisObserve(event, ms, markets, tracker, sc, now);
       const fairA = this.tennisFairFor(event, tv, ms[0].ticker);
+      // Steven's profit rules on tennis as on every contract type: the quota snipe, and the last share of the match
+      // (TENNIS_NO_EXIT_BEFORE_END_FRAC, 30%, by its progress: the live score against the format's sets, else the time and
+      // information clocks) riding in profit.
       const out = decideMatch(tracker, { event, now, startTime: ms.find((m) => m.startTime)?.startTime, markets, closeTime: Math.min(...ms.map((m) => m.closeTime)), score: sc?.score, fairA }, T,
-        { bankroll, tennisRisk: totals.total, matchRisk: totals.window }, ms[0].tickSize);
+        { bankroll, tennisRisk: totals.total, matchRisk: totals.window }, ms[0].tickSize, { pacerUsd: this.pacer.neededUsd(now), settleFrac: T.settleFrac });
+      if (tradeable) for (const p of out.plans) if (p.leg === 'quota_snipe') this.d.audit.write('pacer', { event: 'snipe', ticker: p.ticker, book: 'tennis', why: p.why, count: p.count, price: p.price, ...this.pacer.status(now) });
       // Exit-in-profit curve (strategy/sinuousExit.ts) on each held player market: a take-profit (the target, the
       // late-match profit, a hunt's confluence fade or time limit) also needs the curve's signal; a broken trailing
       // stop, a stop and the late-match salvage never wait.
@@ -1482,7 +1488,20 @@ export class Engine {
       const f = this.d.md.perpFeed;
       const skew = this.skewHalt();
       const noEntry = skew ?? (this.d.control && !this.d.control.active ? 'stopped from the dashboard' : undefined) ?? this.sessionEdgeBlock() ?? this.d.exchangeStatus?.perpsBlock() ?? (f?.lastError ? `perps feed unavailable (${f.lastError})` : undefined);
-      return t.targets(c, { halt, noEntry, lockedFrac: this.lockedFraction() });
+      return t.targets(c, { halt, noEntry, lockedFrac: this.lockedFraction(), pacer: this.perpPacer() });
+    };
+  }
+
+  /** The quota pacer for the perp strategies (Steven's profit rules apply to every contract type): the snipe's target, and
+   *  every closed perp trade's result net of fees counted toward the same hourly target as the binaries'. */
+  private perpPacer(): PerpPacer {
+    return {
+      neededUsd: this.pacer.neededUsd(this.now()),
+      credit: (usd, ticker) => {
+        this.pacer.record(usd, this.now());
+        if (Math.abs(usd) > 1e-9) this.d.audit.write('pacer', { event: 'credit', ticker, book: 'perps', usd: Math.round(usd * 1e4) / 1e4, ...this.pacer.status(this.now()) });
+      },
+      snipe: (ticker, why) => this.d.audit.write('pacer', { event: 'snipe', ticker, book: 'perps', why, ...this.pacer.status(this.now()) }),
     };
   }
 
