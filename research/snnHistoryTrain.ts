@@ -2,7 +2,7 @@
 // ... fix this expeditiously"). The anchored crypto network learns its correction to the market only when a contract
 // settles: about 460 windows a day, and the ablations replay 8 recorded days. Kalshi's settled crypto contracts with
 // their 1-minute bid / ask candles (history/kalshi, repaired by PR #219) cover months more. This walks ONE anchored
-// crypto network through them in time order, month by month, carrying its whole state (research/snnReplay.ts with a
+// crypto network through them in time order, week by week, carrying its whole state (research/snnReplay.ts with a
 // checkpoint), real contracts only (no synthetic ones), and prints after every month how it priced that month BEFORE
 // learning each outcome (prequential: every price precedes the settlement that trains on it), against the market:
 // the learning curve. The checkpoint at the end is the network a recorded-days ablation then starts from (--init).
@@ -40,6 +40,24 @@ export function monthChunks(from: string, to: string): [string, string][] {
   return out;
 }
 
+/** The month chunks cut into pieces of at most `days` days, so the checkpoint (and the learning curve) is saved often
+ *  and a job stopped by its time limit loses at most one piece. */
+export function trainChunks(from: string, to: string, days = 7): [string, string][] {
+  const out: [string, string][] = [];
+  for (const [a, b] of monthChunks(from, to)) {
+    let x = a;
+    while (x <= b) { const y = addDays(x, days - 1) < b ? addDays(x, days - 1) : b; out.push([x, y]); x = addDays(y, 1); }
+  }
+  return out;
+}
+
+/** Where a continued training starts: the day after the checkpoint's last scored moment (never before --from). */
+export function resumeDay(from: string, lastTs: number | undefined): string {
+  if (!lastTs || !Number.isFinite(lastTs)) return from;
+  const next = addDays(new Date(lastTs).toISOString().slice(0, 10), 1);
+  return next > from ? next : from;
+}
+
 export function trainParams(stage: Stage, volNorm?: number, soft = false): SnnParams {
   return domainParams('crypto', { ...DEFAULT_SNN, anchorMid: true, ...(volNorm ? { volNorm } : {}), ...(soft ? { softLabel: { lagSec: 300, etaScale: 0.3 } } : {}), flags: { ...stageFlags(stage) } });
 }
@@ -58,14 +76,22 @@ async function main() {
   const calendar = loadCalendar(path.resolve('params/calendar.json'));
   let checkpoint: SnnCheckpoint | undefined;
   const ckIn = arg('checkpoint-in');
-  if (ckIn && fs.existsSync(ckIn)) { checkpoint = JSON.parse(fs.readFileSync(ckIn, 'utf8')); console.log(`[hist-train] continuing from ${ckIn}`); }
+  let start = from;
+  if (ckIn && fs.existsSync(ckIn)) {
+    checkpoint = JSON.parse(fs.readFileSync(ckIn, 'utf8')) as SnnCheckpoint;
+    start = resumeDay(from, checkpoint.lastTs);
+    const upd = checkpoint.columns.reduce((s, c) => s + (c.readout?.updates ?? 0), 0);
+    console.log(`[hist-train] continuing from ${ckIn}: last scored ${checkpoint.lastTs ? new Date(checkpoint.lastTs).toISOString() : 'never'}, ${upd} readout updates so far; resuming at ${start}`);
+  }
   const ckOut = arg('checkpoint-out', path.join(work, 'checkpoint.json'));
   console.log(`[hist-train] anchored crypto SNN, stage ${stage}${volNorm ? `, volNorm ${volNorm}` : ''}${soft ? ', soft labels' : ''}, ${from}..${to}, ${assets.join(',')}`);
 
   const f5 = (x: { mean: number; lo: number; hi: number }) => `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]`;
-  for (const [a, b] of monthChunks(from, to)) {
+  if (start > to) { console.log(`[hist-train] the checkpoint already covers ${from}..${to}`); if (checkpoint) { fs.mkdirSync(path.dirname(ckOut), { recursive: true }); fs.writeFileSync(ckOut, JSON.stringify(checkpoint)); } return; }
+  for (const [a, b] of trainChunks(start, to)) {
     if (Date.now() > deadline) { console.log(`[hist-train] time is up before ${a}: the next run continues from the checkpoint`); break; }
     const warm = addDays(a, -1), t0 = Date.now();
+    console.log(`[hist-train] ${a}..${b}: building and replaying`);
     const month = (d: string) => d.slice(0, 7);
     const dl = async (intervals: ('1m' | '15m' | '1h' | '1d')[], f: string, source?: string) =>
       (await downloadBinance({ out: hist, assets, intervals, markets: ['spot'], source, fromMonth: month(f), toMonth: month(b), log: () => undefined })).reduce((s, x) => s + x.fetched, 0);
