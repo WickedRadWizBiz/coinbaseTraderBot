@@ -61,6 +61,9 @@ done
 for old in 'PAPER_ORDER_FRAC=0.1' 'PAPER_ORDER_FRAC=0.10' 'PAPER_ORDER_USD=10' 'PAPER_EXPLORE=true' 'PAPER_TRAINING_TRADES_PER_HOUR=12' 'VAULT_IN_PAPER=false'; do
   if grep -qxF "$old" "$ENV"; then edit_env "^${old//./\\.}\$"; echo "${old%%=*}=${old#*=} removed from $ENV (paper behaves like live)"; fi
 done
+# The paper pool is $200 (the owner, Oct 30): a bot.env pinned to the old $100 drops it, so the new default applies (the
+# bot tops the paper account up to it once); any other value is left alone.
+if grep -qxF 'PAPER_BANKROLL_USD=100' "$ENV"; then edit_env '^PAPER_BANKROLL_USD=100$'; echo "PAPER_BANKROLL_USD=100 removed from $ENV (the paper pool is \$200)"; fi
 if [ -n "${DASHBOARD_PASSWORD:-}" ] && ! grep -qxF "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD" "$ENV"; then
   edit_env '^DASHBOARD_PASSWORD=' "DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD"
   echo "dashboard password set from the deploy"

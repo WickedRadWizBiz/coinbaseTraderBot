@@ -257,7 +257,10 @@ export function createApi(d: ApiDeps): express.Express {
   // CPU, disk writes and memory: the last minute, and 10-minute buckets over 24 h (bot/engine.ts CpuMeter).
   api.get('/cpu', (_req, res) => res.json({ now: d.engine.cpu.status(), history: d.engine.cpu.history() }));
   // Module ledger: one row per adaptive part (on / shadow / off / benched, validated, its score, what blocks it).
+  api.get('/market-state', (_req, res) => res.json({ at: Date.now(), coins: d.engine.marketStates() }));
   api.get('/modules', (_req, res) => res.json({ at: Date.now(), mode: d.cfg.mode, rows: d.engine.moduleLedger() }));
+  // The scoreboard: every price against the Kalshi market on settled contracts (bot/health/scoreboard.ts).
+  api.get('/scoreboard', (_req, res) => res.json({ at: Date.now(), mode: d.cfg.mode, scoreboard: d.engine.scoreboardStatus() }));
   // On-demand main-thread CPU profile for diagnostics (?sec=1..15; once a minute; read-only).
   api.get('/debug/profile', async (req, res) => { res.json(await cpuProfile(Number(req.query.sec ?? 10))); });
   api.get('/markets', (_req, res) => res.json([...d.engine.status.values()].sort((a, b) => a.closeTs - b.closeTs || a.ticker.localeCompare(b.ticker))));

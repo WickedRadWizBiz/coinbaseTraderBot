@@ -23,7 +23,7 @@ import { blend, brier, calibrationSlope, correlation, surpriseConfidence } from 
 import { DEFAULT_SNN, domainParams, stageFlags, type SnnFlags, type SnnParams, type Stage } from '../bot/snn/params';
 import { replaySnn, type SnnReplayResult, type SnnRow } from './snnReplay';
 
-export interface Mechanism { name: string; candidate: { stage: Stage; flags?: Partial<SnnFlags> }; baseline: { stage: Stage; flags?: Partial<SnnFlags> }; note: string }
+export interface Mechanism { name: string; candidate: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams> }; baseline: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams> }; note: string }
 
 /** The staging order and each stage's comparison (S0..S6, then the deferred mechanisms vs proxies). */
 export const MECHANISMS: Mechanism[] = [
@@ -38,6 +38,8 @@ export const MECHANISMS: Mechanism[] = [
   { name: 'gap junctions', candidate: { stage: 'S5', flags: { gapJunctions: true } }, baseline: { stage: 'S5', flags: { proxies: true } }, note: 'vs BTC-ETH correlation feature' },
   { name: 'Izhikevich CH', candidate: { stage: 'S5', flags: { izhikevichCH: true } }, baseline: { stage: 'S5', flags: { proxies: true } }, note: 'vs delta-spike burst counter' },
   { name: 'dCaAP units', candidate: { stage: 'S5', flags: { dcaap: true } }, baseline: { stage: 'S5' }, note: 'vs 2-branch Poirazi XOR' },
+  { name: 'anchor band 40-60c', candidate: { stage: 'S5', params: { anchorMid: true, anchorBand: 0.1 } }, baseline: { stage: 'S5', params: { anchorMid: true } }, note: 'the anchored price departs from the mid only at 40-60c (picked on Oct 22-30; judge on later days only)' },
+  { name: 'mid-anchored readout', candidate: { stage: 'S5', params: { anchorMid: true } }, baseline: { stage: 'S5' }, note: 'logit p = logit(mid) + w . phi, weights from zero, vs the readout that prices from scratch (SNN plan phase 1)' },
 ];
 
 export const MAX_GRID = 20;
@@ -49,6 +51,9 @@ export interface Verdict {
   delta: { mean: number; lo: number; hi: number; events: number; days: number };
   blend: { alpha: number; mean: number; lo: number; hi: number };
   pnl: { blend: number; model: number; diff: number };
+  /** Brier of the SNN alone minus the market's (the contract's mid, clipped like the anchor), per settlement window:
+   *  below zero with its CI = the SNN beats the market. The SNN plan's phase 1 go/no-go reads the candidate's row. */
+  vsMarket: { candidate: { mean: number; lo: number; hi: number; events: number; days: number }; baseline: { mean: number; lo: number; hi: number; events: number; days: number } };
   extra?: Record<string, unknown>;
   criteria: { a: boolean; b: boolean; c: boolean; d: boolean; e: boolean; f: boolean };
   accepted: boolean;
@@ -68,6 +73,37 @@ export function pairedEvent(cand: SnnRow[], base: SnnRow[], f: (r: SnnRow) => nu
     ev.set(r.eventKey, e);
   }
   return dayBlockBootstrap([...ev.values()].map((e) => ({ day: e.day, x: e.s / e.n })), iters);
+}
+
+const clipMid = (m: number) => Math.min(0.98, Math.max(0.02, m));
+/** The SNN alone against the market on the same rows: per-event mean of brier(p_snn) - brier(mid), day-block CI. */
+export function vsMarket(rows: SnnRow[], iters = 2000) {
+  return eventCi(rows, (r) => brier(r.pSnn, r.y) - brier(clipMid(r.mid), r.y), iters);
+}
+
+/** Where the SNN differs from the market: vsMarket within slices of the rows (column = asset x horizon, the mid's
+ *  distance from 50 cents, the UTC hour block, the contract kind, the volatility regime). A slice with its CI below zero
+ *  is a place the SNN beats the market; a slice too small for a CI says so. */
+export function vsMarketBreakdown(rows: SnnRow[], iters = 1000, minEvents = 150) {
+  const slicers: Record<string, (r: SnnRow) => string> = {
+    column: (r) => r.column,
+    mid: (r) => { const d = Math.abs(r.mid - 0.5); return d < 0.1 ? 'mid 40-60c' : d < 0.25 ? 'mid 25-40/60-75c' : d < 0.4 ? 'mid 10-25/75-90c' : 'mid <10/>90c'; },
+    hourUtc: (r) => { const h = new Date(r.ts).getUTCHours(); const b = Math.floor(h / 4) * 4; return `${String(b).padStart(2, '0')}-${String(b + 4).padStart(2, '0')} UTC`; },
+    kind: (r) => r.kind,
+    vol: (r) => (r.volRatio < 0.8 ? 'vol low' : r.volRatio < 1.25 ? 'vol normal' : 'vol high'),
+  };
+  const out: { by: string; slice: string; events: number; mean: number; lo: number; hi: number; verdict: string }[] = [];
+  for (const [by, f] of Object.entries(slicers)) {
+    const groups = new Map<string, SnnRow[]>();
+    for (const r of rows) { const k = f(r); const g = groups.get(k); if (g) g.push(r); else groups.set(k, [r]); }
+    for (const [slice, g] of [...groups].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const events = new Set(g.map((r) => r.eventKey)).size;
+      if (events < minEvents) { out.push({ by, slice, events, mean: NaN, lo: NaN, hi: NaN, verdict: 'too few' }); continue; }
+      const c = vsMarket(g, iters);
+      out.push({ by, slice, events, mean: c.mean, lo: c.lo, hi: c.hi, verdict: c.hi < 0 ? 'BEATS the market' : c.lo > 0 ? 'worse' : 'undecided' });
+    }
+  }
+  return out;
 }
 
 /** Per-event mean of a per-row quantity, clustered and day-block bootstrapped. */
@@ -148,7 +184,8 @@ export function judge(m: Mechanism, cand: SnnReplayResult, base: SnnReplayResult
   if (extra.surpriseVsVol && !(extra.surpriseVsVol as { beatsVol: boolean }).beatsVol) criteria.a = false;
   return {
     mechanism: m.name, note: m.note, candidate: candSum, baseline: baseSum, configsTried: tried,
-    delta, blend: bl, pnl: { blend: pnlBlend, model: pnlModel, diff: pnlBlend - pnlModel }, extra,
+    delta, blend: bl, pnl: { blend: pnlBlend, model: pnlModel, diff: pnlBlend - pnlModel },
+    vsMarket: { candidate: vsMarket(cand.rows), baseline: vsMarket(base.rows) }, extra,
     criteria, accepted: Object.values(criteria).every(Boolean),
   };
 }
@@ -175,25 +212,80 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
     return cache.get(k)!;
   };
   const verdicts: Verdict[] = [];
+  const out = argOf('out', 'research/out/snn_ablation.json');
+  // Split mode, for runs too long for one job: --side baseline|candidate replays one side of the first mechanism
+  // matching --only and saves it (--save); --judge base.json,cand.json judges two saved sides. Same verdict.
+  const side = argOf('side', ''), judgeFiles = argOf('judge', '');
+  if (side || judgeFiles) {
+    const m = MECHANISMS.find((x) => !only || x.name.startsWith(only));
+    if (!m) throw new Error(`no mechanism starts with "${only}"`);
+    if (side) {
+      if (side !== 'baseline' && side !== 'candidate') throw new Error('--side is baseline or candidate');
+      const spec = side === 'baseline' ? m.baseline : m.candidate;
+      const r = await run(side === 'baseline' ? `${m.name} [baseline]` : m.name, spec.stage, spec.flags, { ...(spec.params ?? {}) });
+      const save = argOf('save', `research/out/snn_ablation_${side}.json`);
+      fs.mkdirSync(path.dirname(save), { recursive: true });
+      fs.writeFileSync(save, JSON.stringify(savedSide(m.name, side, r.res, r.sum)));
+      console.log(`saved ${side} of ${m.name}: ${r.sum.events} windows, ${r.sum.rows} rows -> ${save}`);
+      return [];
+    }
+    const [bf, cf] = judgeFiles.split(',');
+    const b = loadSide(bf, m.name, 'baseline'), c = loadSide(cf, m.name, 'candidate');
+    const v = judge(m, c.res, b.res, c.sum, b.sum, [c.sum]);
+    printVerdict(v);
+    // --breakdown: where the candidate differs from the market (no new replay; seconds).
+    if (argOf('breakdown', '') === 'true') {
+      const bd = vsMarketBreakdown(c.res.rows);
+      console.log('        where the candidate stands against the market (Brier SNN - mid per window, day-block 95% CI):');
+      for (const x of bd) console.log(`          ${x.by.padEnd(8)} ${x.slice.padEnd(20)} ${String(x.events).padStart(5)} windows  ${Number.isFinite(x.mean) ? `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]` : ''.padEnd(29)}  ${x.verdict}`);
+      v.extra = { ...(v.extra ?? {}), vsMarketBreakdown: bd };
+    }
+    writeVerdicts(out, { domain, recordings: dir, from: from ?? null, to: to ?? null }, [v]);
+    return [v];
+  }
   for (const m of MECHANISMS) {
     if (only && !m.name.startsWith(only)) continue;
     const configs = grid[m.name] ?? [{}];
     if (configs.length > MAX_GRID) throw new Error(`${m.name}: ${configs.length} configs exceed the pre-registered cap of ${MAX_GRID}`);
-    const base = await run(`${m.name} [baseline]`, m.baseline.stage, m.baseline.flags, {});
+    const base = await run(`${m.name} [baseline]`, m.baseline.stage, m.baseline.flags, { ...(m.baseline.params ?? {}) });
     const tried: { res: SnnReplayResult; sum: RunSummary }[] = [];
-    for (const ov of configs) tried.push(await run(m.name, m.candidate.stage, m.candidate.flags, ov));
+    for (const ov of configs) tried.push(await run(m.name, m.candidate.stage, m.candidate.flags, { ...(m.candidate.params ?? {}), ...ov }));
     const best = tried.sort((a, b) => a.sum.brier - b.sum.brier)[0];
     const v = judge(m, best.res, base.res, best.sum, base.sum, tried.map((t) => t.sum));
     verdicts.push(v);
-    console.log(`${v.accepted ? 'ACCEPT' : 'reject'}  ${m.name}: dBrier ${v.delta.mean.toFixed(5)} [${v.delta.lo.toFixed(5)}, ${v.delta.hi.toFixed(5)}] over ${v.delta.events} events / ${v.delta.days} days; slope ${v.candidate.calSlope.toFixed(2)}; corr ${v.candidate.corrModel.toFixed(2)}; blend a=${v.blend.alpha} [${v.blend.lo.toFixed(5)}, ${v.blend.hi.toFixed(5)}]; p99 ${v.candidate.p99Ms.toFixed(1)} ms; ${JSON.stringify(v.criteria)}`);
+    printVerdict(v);
   }
-  const out = argOf('out', 'research/out/snn_ablation.json');
-  fs.mkdirSync(path.dirname(out), { recursive: true });
-  fs.writeFileSync(out, JSON.stringify({ generatedAt: new Date().toISOString(), domain, recordings: dir, from: from ?? null, to: to ?? null, verdicts }, null, 1));
+  writeVerdicts(out, { domain, recordings: dir, from: from ?? null, to: to ?? null }, verdicts);
   console.log(`wrote ${out} (${verdicts.filter((v) => v.accepted).length}/${verdicts.length} accepted; expect most to fail - that is the system working)`);
   return verdicts;
 }
 
 if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))) void snnAblationMain();
+
+function printVerdict(v: Verdict) {
+  console.log(`${v.accepted ? 'ACCEPT' : 'reject'}  ${v.mechanism}: dBrier ${v.delta.mean.toFixed(5)} [${v.delta.lo.toFixed(5)}, ${v.delta.hi.toFixed(5)}] over ${v.delta.events} events / ${v.delta.days} days; slope ${v.candidate.calSlope.toFixed(2)}; corr ${v.candidate.corrModel.toFixed(2)}; blend a=${v.blend.alpha} [${v.blend.lo.toFixed(5)}, ${v.blend.hi.toFixed(5)}]; p99 ${v.candidate.p99Ms.toFixed(1)} ms; ${JSON.stringify(v.criteria)}`);
+  const vm = (x: Verdict['vsMarket']['candidate']) => `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]${x.hi < 0 ? ' BEATS the market' : x.lo > 0 ? ' worse than the market' : ' undecided'}`;
+  console.log(`        vs market (Brier SNN - mid, per window): candidate ${vm(v.vsMarket.candidate)}; baseline ${vm(v.vsMarket.baseline)}`);
+  // Criterion e's parts, so a failure names its cause in the log (the verdict file is not readable everywhere).
+  const st = (x: RunSummary) => `Brier ${x.brier.toFixed(5)} (meta-model ${x.brierModel.toFixed(5)}), ${x.events} windows, learning frozen ${(100 * x.frozenFrac).toFixed(1)}%, NaN restores ${x.nanRestores}, p99 ${x.p99Ms.toFixed(1)} ms`;
+  console.log(`        candidate: ${st(v.candidate)}`);
+  console.log(`        baseline:  ${st(v.baseline)}`);
+}
+
+function writeVerdicts(out: string, meta: Record<string, unknown>, verdicts: Verdict[]) {
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, JSON.stringify({ generatedAt: new Date().toISOString(), ...meta, verdicts }, null, 1));
+}
+
+/** One replayed side as the judge needs it: its rows, the S5 column rankings and its summary. */
+export function savedSide(mechanism: string, side: string, res: SnnReplayResult, sum: RunSummary) {
+  return { mechanism, side, sum, rows: res.rows, ranking: res.ranking };
+}
+
+export function loadSide(file: string, mechanism: string, side: string): { res: SnnReplayResult; sum: RunSummary } {
+  const j = JSON.parse(fs.readFileSync(file, 'utf8')) as ReturnType<typeof savedSide>;
+  if (j.mechanism !== mechanism || j.side !== side) throw new Error(`${file} holds the ${j.side} of "${j.mechanism}", not the ${side} of "${mechanism}"`);
+  return { res: { rows: j.rows, ranking: j.ranking } as unknown as SnnReplayResult, sum: j.sum };
+}
 
 function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; }

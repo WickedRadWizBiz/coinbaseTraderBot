@@ -16,17 +16,18 @@
 // Only the quotes are tested: the history's index is itself bridged between 1-minute bars, the recordings' is real.
 //
 //   npm run research:replay-fidelity -- --recordings data/recordings --model data/models/model.json [--days 4]
-//       [--out data/models/replay_fidelity.json]
+//       [--out data/models/replay_fidelity.json] [--depth-model depth_model.json] [--only <fill-in>] [--stage all|prepare|backtest --how <real|fill-in>|compare --work <dir>]
 
 import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
 import { loadConfig, paperEnv } from '../bot/config';
 import { OrderBook } from '../bot/marketdata/orderBook';
-import { recordingFiles, recordingLines, type RecordingDay } from '../bot/marketdata/recordingFiles';
+import { linkDays, recordingFiles, recordingLines, type RecordingDay } from '../bot/marketdata/recordingFiles';
 import { contractKind, type MarketKind } from '../bot/model/fairValue';
 import { backtestMain } from './backtest';
-import { fillQuotes, QUOTE_FILLS, type Ev, type QuoteFill } from './goLiveTally';
+import { fillDayFile, QUOTE_FILLS, type Ev, type QuoteFill } from './goLiveTally';
+import { readDepthModel, type DepthModel } from './history/depthSim';
 import { gkVariance, requoteBetween } from './history/historyReplay';
 
 const MIN = 60_000, SLOT = 15_000, DAY = 86_400_000;
@@ -194,45 +195,74 @@ export function compareWindows(real: ReadonlyMap<number, { pnl: number; contract
   });
 }
 
-export async function replayFidelityMain(argOf: (k: string, d: string) => string = cliArg): Promise<{ choice: QuoteFill; rows: FidelityRow[] }> {
-  const rec = argOf('recordings', 'data/recordings');
-  const model = argOf('model', 'data/models/model.json');
-  const out = argOf('out', 'data/models/replay_fidelity.json');
-  const n = Number(argOf('days', '4'));
-  const work = argOf('work', path.join(path.dirname(out), 'work', 'replay-fidelity'));
-  // Whole days only: today's is still being recorded.
+/** What the prepare stage hands the backtests and the comparison (`<work>/meta.json`). */
+interface FidelityMeta { days: string[]; files: string[]; warm?: string; res: Residuals[]; sigmaAll: number }
+
+const elapsed = (t0: number) => `${((Date.now() - t0) / 60_000).toFixed(1)} min`;
+
+/** The newest `n` whole recorded days (today's is still being recorded), and of them the `part`-th of `parts` runs of
+ *  days in a row: each part is backtested on a runner of its own, from the day before it. */
+export function sliceDays(rec: string, n: number, part: number, parts: number) {
   const today = new Date().toISOString().slice(0, 10);
   const all = recordingFiles(rec).filter((d) => d.day < today);
-  const days = all.slice(-n);
-  if (days.length < 2) throw new Error(`need at least 2 whole recorded days, have ${days.length}`);
+  const newest = all.slice(-n);
+  if (newest.length < 2) throw new Error(`need at least 2 whole recorded days, have ${newest.length}`);
+  const per = Math.ceil(newest.length / parts);
+  const days = newest.slice(part * per, (part + 1) * per);
+  if (!days.length) throw new Error(`part ${part} of ${parts} has no days (${newest.length} day(s))`);
+  return { all, days, warm: all[all.indexOf(days[0]) - 1] };
+}
+
+/** A window's day: the day its contract closed in (UTC; one closing at midnight belongs to the day before). */
+const dayOfWindow = (closeTime: number) => new Date(closeTime - 1).toISOString().slice(0, 10);
+/** The windows of these days only (the day read before them warms the bot up and is not compared). */
+export const onDays = (w: Windows, days: readonly string[]): Windows => new Map([...w].filter(([k]) => days.includes(dayOfWindow(k))));
+
+/** Cut the newest `n` whole recorded days down to the history's minute candles and write each fill-in's folder under
+ *  `work` (one per QUOTE_FILLS), with meta.json for the later stages. */
+async function prepare(rec: string, n: number, work: string, fills: readonly QuoteFill['how'][], depth?: DepthModel, part = 0, parts = 1): Promise<FidelityMeta> {
+  const { all, days } = sliceDays(rec, n, part, parts);
   fs.rmSync(work, { recursive: true, force: true });
-  const dirs = Object.fromEntries(['real', 'history', ...QUOTE_FILLS].map((k) => [k, path.join(work, k)]));
+  const dirs = Object.fromEntries(['history', ...fills].map((k) => [k, path.join(work, k)]));
   for (const d of Object.values(dirs)) fs.mkdirSync(d, { recursive: true });
   const res: Residuals[] = [];
+  const t0 = Date.now();
   // The day before is read first, for the contracts and books still open at midnight; it is not compared, but the real
   // replay reads it too, so both start from the same state.
   const carry = newCarry();
-  const warm = all[all.length - days.length - 1];
-  if (warm) { await asHistory(warm, undefined, carry); fs.symlinkSync(path.resolve(warm.file), path.join(dirs.real, path.basename(warm.file))); }
+  const warm = all[all.indexOf(days[0]) - 1];
+  if (warm) await asHistory(warm, undefined, carry);
   for (const d of days) {
-    fs.symlinkSync(path.resolve(d.file), path.join(dirs.real, path.basename(d.file)));
     res.push(await asHistory(d, path.join(dirs.history, `md-${d.day}.jsonl.gz`), carry));
-    console.log(`[fidelity] ${d.day}: cut down to the history's minute candles and filled back in`);
+    console.log(`[fidelity] ${d.day}: cut down to the history's minute candles and filled back in (${elapsed(t0)})`);
   }
   // Each day's fill-ins; the bridge's size from the other days.
   const sigmaAll = bridgeSigma(res);
   for (let i = 0; i < days.length; i++) {
     const name = `md-${days[i].day}.jsonl.gz`;
-    const evs = zlib.gunzipSync(fs.readFileSync(path.join(dirs.history, name))).toString('utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as Ev);
     const sigma = bridgeSigma(res.filter((_, j) => j !== i));
-    for (const how of QUOTE_FILLS) {
-      const filled = fillQuotes(evs, { how, sigma });
-      fs.writeFileSync(path.join(dirs[how], name), zlib.gzipSync(filled.map((e) => JSON.stringify(e)).join('\n') + '\n', { level: 1 }));
-    }
+    for (const how of fills) await fillDayFile(path.join(dirs.history, name), path.join(dirs[how], name), { how, sigma }, depth);
   }
+  console.log(`[fidelity] fill-ins written (${elapsed(t0)})`);
   fs.rmSync(dirs.history, { recursive: true, force: true });
-  // The backtest as the pipeline runs it for the decision model (research/pipeline.ts, mlp): the production exit
-  // settings, the vol forecast and the fill model next to the model when present.
+  const meta: FidelityMeta = { days: days.map((d) => d.day), files: [...(warm ? [warm] : []), ...days].map((d) => path.basename(d.file)), warm: warm?.day, res, sigmaAll };
+  fs.writeFileSync(path.join(work, 'meta.json'), JSON.stringify(meta));
+  return meta;
+}
+
+/** The real recordings the prepare stage used, linked into `<work>/real`. */
+function realDir(rec: string, work: string, meta: FidelityMeta): string {
+  const dir = path.join(work, 'real');
+  fs.rmSync(dir, { recursive: true, force: true });
+  linkDays(meta.files.map((f) => ({ day: '', file: path.join(rec, f) })), dir);
+  return dir;
+}
+
+type Windows = Awaited<ReturnType<typeof backtestMain>>['windows'];
+
+/** The decision model's backtest on one folder of days, as the pipeline runs it for the decision model
+ *  (research/pipeline.ts, mlp): the production exit settings, the vol forecast and the fill model next to the model. */
+async function backtestDir(dir: string, model: string): Promise<Windows> {
   const cfg = loadConfig(paperEnv(process.env));
   const models = path.dirname(model);
   const opt = (f: string) => (fs.existsSync(path.join(models, f)) ? path.join(models, f) : '');
@@ -240,27 +270,106 @@ export async function replayFidelityMain(argOf: (k: string, d: string) => string
     model, exits: cfg.strategy.exitPolicy, 'vol-model': cfg.strategy.volModel ? opt('vol_model.json') : '', 'fill-model': opt('fill_model.json'),
     'hunt-grid': String(cfg.strategy.huntTargetMargin), 'hunt-confluence': String(cfg.strategy.huntMinConfluence),
     'ratchet-fill-grid': String(cfg.strategy.ratchetMinFillRatio), 'ratchet-age': String(cfg.strategy.ratchetMinWallAgeSec), 'ratchet-slip': String(cfg.strategy.ratchetSlippageTicks),
+    // The paper bot's pool is topped back up when it runs dry (bot/training/supervisor.ts): without it a losing replay goes
+    // broke on its first day ($10-$20 orders on a $200 pool) and trades nothing after.
+    refill: String(cfg.paperBankrollUsd),
   };
-  const bt = async (dir: string) => (await backtestMain((k, d) => (k === 'recordings' ? dir : k in fixed ? fixed[k] : d), false)).windows;
-  const real = await bt(dirs.real);
-  const variants: Record<string, Awaited<ReturnType<typeof bt>>> = {};
-  for (const how of QUOTE_FILLS) variants[how] = await bt(dirs[how]);
+  const t0 = Date.now();
+  const { windows: w, result: r } = await backtestMain((k, d) => (k === 'recordings' ? dir : k in fixed ? fixed[k] : d), false);
+  console.log(`[fidelity] backtest on ${path.basename(dir)}: ${w.size} windows (${elapsed(t0)})`);
+  // Why a backtest traded what it did (counts only): the entry evaluations, the orders sent, the fills, and the risk
+  // gateway's commonest refusals.
+  const refused = Object.entries(r.paper?.rejected ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k} x${n}`).join('; ');
+  console.log(`[fidelity] ${path.basename(dir)}: ${r.entryEvaluations} entry evaluations, ${r.latency?.sent ?? 0} orders sent, ${r.fills} fills, ${r.contracts} contracts, optimal-f bound ${r.optimalFBound ?? 0}, refills ${r.refills?.length ?? 0} ($${(r.refills ?? []).reduce((a, x) => a + x.usd, 0).toFixed(2)})${refused ? ` | refused: ${refused}` : ''}`);
+  // Which windows it traded and when (counts only): a backtest that stops early, or trades only outside the compared days,
+  // shows here.
+  const byHour = Object.entries(r.contractsByHour ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  console.log(`[fidelity] ${path.basename(dir)}: ${r.trades.length} settled positions; traded hours ${byHour.length ? `${byHour[0][0]}h to ${byHour[byHour.length - 1][0]}h` : 'none'} (${byHour.map(([h, n]) => `${h.slice(11)}:${Math.round(n)}`).join(' ')})`);
+  console.log(`[fidelity] ${path.basename(dir)} windows: ${[...w].filter(([, x]) => x.contracts > 0).slice(0, 30).map(([k, x]) => `${Number.isFinite(k) ? new Date(k).toISOString().slice(5, 16) : String(k)} ${Math.round(x.contracts)}ct $${x.pnl.toFixed(2)}`).join('; ')}`);
+  return w;
+}
+
+const writeWindows = (file: string, w: Windows) => fs.writeFileSync(file, JSON.stringify([...w.entries()]));
+const readWindows = (file: string): Windows => new Map(JSON.parse(fs.readFileSync(file, 'utf8')));
+
+/** The fill-ins' backtests against the real one, written to `out`. */
+function compare(meta: FidelityMeta, real: Windows, variants: Record<string, Windows>, model: string, out: string): { choice: QuoteFill; rows: FidelityRow[] } {
   const rows = compareWindows(real, variants);
   const best = [...rows].sort((a, b) => a.rmseUsd - b.rmseUsd)[0];
-  const choice: QuoteFill = best.how === 'noise' ? { how: 'noise', sigma: +sigmaAll.toPrecision(6) } : { how: best.how as QuoteFill['how'] };
+  const choice: QuoteFill = best.how === 'noise' ? { how: 'noise', sigma: +meta.sigmaAll.toPrecision(6) } : { how: best.how as QuoteFill['how'] };
   const realPnl = [...real.values()].reduce((a, x) => a + x.pnl, 0);
+  // Without a real baseline there is nothing to be closest to: no verdict (it would still pick a fill-in and send it).
+  if (![...real.values()].some((x) => x.contracts > 0)) throw new Error('the backtest on the real quotes traded no window: no verdict');
   const report = {
-    at: new Date().toISOString(), days: days.map((d) => d.day), model: path.basename(model),
+    at: new Date().toISOString(), days: meta.days, model: path.basename(model),
     real: { pnl: +realPnl.toFixed(4), windowsTraded: [...real.values()].filter((x) => x.contracts > 0).length },
-    variants: rows, bridgeSigma: +sigmaAll.toPrecision(6), residualPoints: res.reduce((a, r) => a + r.n, 0), choice,
+    variants: rows, bridgeSigma: +meta.sigmaAll.toPrecision(6), residualPoints: meta.res.reduce((a, r) => a + r.n, 0), choice,
   };
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(`${out}.tmp`, JSON.stringify(report, null, 1));
   fs.renameSync(`${out}.tmp`, out);
-  fs.rmSync(work, { recursive: true, force: true });
   console.table([{ how: 'real', ...report.real }, ...rows]);
   console.log(`[fidelity] closest to the real quotes: ${choice.how}${choice.sigma ? ` (bridge ${choice.sigma} log-odds per root second)` : ''}`);
   return { choice, rows };
+}
+
+/** `--stage all` (the default) runs everything in one process. The workflow splits it so the five backtests run on
+ *  runners of their own: `--stage prepare` (the fill-in folders and meta.json under --work), `--stage backtest --how
+ *  <real|fill-in>` (that backtest's windows to <work>/windows-<how>.json), `--stage compare` (the verdict). */
+export async function replayFidelityMain(argOf: (k: string, d: string) => string = cliArg): Promise<{ choice: QuoteFill; rows: FidelityRow[] } | undefined> {
+  const rec = argOf('recordings', 'data/recordings');
+  const model = argOf('model', 'data/models/model.json');
+  const out = argOf('out', 'data/models/replay_fidelity.json');
+  const n = Number(argOf('days', '4'));
+  const work = argOf('work', path.join(path.dirname(out), 'work', 'replay-fidelity'));
+  const stage = argOf('stage', 'all');
+  const readMeta = (): FidelityMeta => JSON.parse(fs.readFileSync(path.join(work, 'meta.json'), 'utf8'));
+  // The real days without the prepare stage's meta (a runner of its own): the recordings folder as copied.
+  // The depth fill-in's model (research/depthStudy.ts --out), fitted on days other than these; without one it is left out.
+  const depthFile = argOf('depth-model', '');
+  const depth = depthFile ? readDepthModel(depthFile) : undefined;
+  if (depthFile && !depth) throw new Error(`no usable depth model in ${depthFile}`);
+  const only = argOf('only', '');
+  const fills = QUOTE_FILLS.filter((h) => (h !== 'depth' || depth) && (!only || h === only));
+  const parts = Math.max(1, Number(argOf('parts', '1'))), part = Number(argOf('part', '0'));
+  const sliced = (): FidelityMeta => { const { days, warm } = sliceDays(rec, n, part, parts); return { days: days.map((d) => d.day), files: [...(warm ? [warm] : []), ...days].map((d) => path.basename(d.file)), warm: warm?.day, res: [], sigmaAll: 0 }; };
+  const dirOf = (how: string) => (how !== 'real' ? path.join(work, how) : realDir(rec, work, fs.existsSync(path.join(work, 'meta.json')) ? readMeta() : sliced()));
+  if (stage === 'prepare') { await prepare(rec, n, work, fills, depth, part, parts); return undefined; }
+  if (stage === 'backtest') {
+    const how = argOf('how', '');
+    if (how !== 'real' && !(QUOTE_FILLS as readonly string[]).includes(how)) throw new Error(`--how must be real or one of ${QUOTE_FILLS.join(', ')}`);
+    const w = await backtestDir(dirOf(how), model);
+    // The real backtest's runner has no prepare stage, so nothing has made the folder yet.
+    fs.mkdirSync(work, { recursive: true });
+    writeWindows(path.join(work, parts > 1 ? `windows-${how}-p${part}.json` : `windows-${how}.json`), onDays(w, sliced().days));
+    return undefined;
+  }
+  if (stage === 'compare') {
+    // Each fill-in whose backtest came back.
+    // Each fill-in whose backtests all came back (one file, or one per part: windows-<how>-p<k>.json).
+    const files = fs.readdirSync(work);
+    const metas = files.filter((f) => /^meta(-p\d+)?\.json$/.test(f)).map((f) => JSON.parse(fs.readFileSync(path.join(work, f), 'utf8')) as FidelityMeta);
+    const res = metas.flatMap((m) => m.res);
+    const meta: FidelityMeta = { ...metas[0], days: [...new Set(metas.flatMap((m) => m.days))].sort(), res, sigmaAll: metas.length > 1 ? bridgeSigma(res) : metas[0].sigmaAll };
+    const nParts = Math.max(1, metas.length);
+    const load = (how: string): Windows | undefined => {
+      const mine = files.filter((f) => new RegExp(`^windows-${how}(-p\\d+)?\\.json$`).test(f));
+      if (!mine.length || (mine.some((f) => /-p\d+\.json$/.test(f)) && mine.length < nParts)) return undefined;
+      return onDays(new Map(mine.flatMap((f) => [...readWindows(path.join(work, f))])), meta.days);
+    };
+    const real = load('real');
+    if (!real) throw new Error('the real backtest did not come back (every part is needed)');
+    const variants = Object.fromEntries(QUOTE_FILLS.map((how) => [how, load(how)] as const).filter((x): x is [QuoteFill['how'], Windows] => !!x[1]));
+    return compare(meta, real, variants, model, out);
+  }
+  if (stage !== 'all') throw new Error(`unknown --stage ${stage}`);
+  const meta = await prepare(rec, n, work, fills, depth);
+  const real = onDays(await backtestDir(dirOf('real'), model), meta.days);
+  const variants: Record<string, Windows> = {};
+  for (const how of fills) variants[how] = onDays(await backtestDir(dirOf(how), model), meta.days);
+  const r = compare(meta, real, variants, model, out);
+  fs.rmSync(work, { recursive: true, force: true });
+  return r;
 }
 
 function cliArg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; }

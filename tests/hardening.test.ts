@@ -235,10 +235,10 @@ import { writeSyntheticRecordings } from '../research/synthetic';
 test('backtest latency: orders and cancels arrive late against the later book and tape; cancels can lose the race', async () => {
   const dir = path.join(tmpDir(), 'rec');
   writeSyntheticRecordings(dir, { windows: 8, seed: 9, marketNoise: 0.05 });
-  // Quote settings pinned: this is about the latency mechanics, and on 8 synthetic windows the P&L moves more with any
-  // one of them than with the delay (the synthetic tape has constant volatility and random flow).
+  // Quote and size settings pinned: this is about the latency mechanics, and on 8 synthetic windows the P&L moves more
+  // with any one of them than with the delay (the synthetic tape has constant volatility and random flow).
   const c = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_STYLE: 'both', STRATEGY_CADENCE: 'continuous',
-    STRATEGY_ORDER_TTL_SEC: '60', STRATEGY_FAST_MOVE_SIGMAS: '3', STRATEGY_MIN_QUOTE_CONTRACTS: '0', VOL_FALLBACK_MULT: '1' });
+    STRATEGY_ORDER_TTL_SEC: '60', STRATEGY_FAST_MOVE_SIGMAS: '3', STRATEGY_MIN_QUOTE_CONTRACTS: '0', VOL_FALLBACK_MULT: '1', ORDER_USD_MIN: '0' });
   const run = (latency?: { orderMs: number; cancelMs?: number; jitterMs?: number }) => runBacktest(dir, MetaModel.identity(), c.strategy, c.risk, 200, { exitPolicy: 'fair_value', latency });
   const base = await run();
   assert.equal(base.latency!.sent, 0, 'no latency by default: nothing is queued');

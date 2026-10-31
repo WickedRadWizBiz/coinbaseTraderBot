@@ -79,3 +79,25 @@ test('exits, gates and feeds', () => {
   assert.equal(row(rows, 'volatility forecast').state, 'off');
   assert.match(ledgerLine(tp), /dollars vs holding to settlement: -41.2 \(n=30\)/);
 });
+
+test('a market-state row per coin', () => {
+  const rows = buildLedger(base({ marketState: { BTC: { rv1h: 0.0001, changeProb: 0.12, spread: 0.02 }, ETH: { rv1h: null, changeProb: null, spread: null } } }));
+  assert.equal(row(rows, 'market state BTC').state, 'on');
+  assert.equal(row(rows, 'market state BTC').score?.value, 0.12);
+  assert.equal(row(rows, 'market state ETH').state, 'off');
+  assert.equal(row(rows, 'market state ETH').flags.length, 2);
+});
+
+test('drift flags on the pricing rows', () => {
+  const rows = buildLedger(base({ modelHealth: { windows: 200, advantage: 0.001, pWorse: 0.5, drift: { alarm: true, since: Date.UTC(2026, 9, 29, 6) } } }));
+  assert.ok(row(rows, 'pricing vs market').flags.some((f) => f.startsWith('drift: scoring worse since 2026-10-29T06:00')));
+});
+
+test('throughput rows flag a bot falling behind', () => {
+  const rows = buildLedger(base({ throughput: { mainBusy: 0.92, feedLagMs: 400, ordersLastMinute: 100, maxOrdersPerMinute: 120, heldEvalAgeMs: null } }));
+  assert.equal(row(rows, 'main thread').flags.length, 1);
+  assert.deepEqual(row(rows, 'Kalshi feed').flags, []);
+  assert.equal(row(rows, 'Kalshi feed').score?.value, 0.4);
+  assert.equal(row(rows, 'order rate').flags.length, 1);
+  assert.equal(row(rows, 'held-market evaluation').state, 'off');
+});

@@ -53,6 +53,8 @@ export interface SideSummary {
   fills: number; contracts: number; fees: number; pnl: number; markets: number;
   /** Exit contracts by kind (take-profit, model exit, ratchet stop, cross, other). */
   exits: Record<string, number>;
+  /** confluence_ratchet: what hunt mode did in the replay (activations, stop triggers, lock sale judgements, wall asks). */
+  hunt?: string;
   /** Settled P&L by UTC hour (YYYY-MM-DDTHH). */
   byHour: Record<string, number>;
   /** Fills and contracts by order purpose (quote, entry, exit; other: an order the log does not name). */
@@ -155,7 +157,7 @@ const HOUR = 3_600_000;
 const hourOf = (ms: number) => new Date(ms).toISOString().slice(0, 13);
 const isTennis = (t: string) => t.startsWith('KXATP') || t.startsWith('KXWTA');
 // The model exit names its prices ("bid 0.55 - fee > q 0.520 + 0.02", "NO bid 0.45 - fee > q + 0.02").
-const exitKind = (why: string) => /^take-profit/.test(why) ? 'take-profit' : /ratchet|stop/i.test(why) ? 'ratchet' : /cross|curve/i.test(why) ? 'cross' : /exit|fair|model|- fee > q/i.test(why) ? 'model exit' : 'other';
+const exitKind = (why: string) => /^quota snipe/.test(why) ? 'quota snipe' : /^profit mandate/.test(why) ? 'profit mandate' : /^take-profit/.test(why) ? 'take-profit' : /ratchet|stop/i.test(why) ? 'ratchet' : /cross|curve/i.test(why) ? 'cross' : /exit|fair|model|- fee > q/i.test(why) ? 'model exit' : 'other';
 /** A rejection reason with its numbers folded, so the same kind counts together (as research/backtest.ts folds them). */
 export const foldReason = (r: string) => r.replace(/[-+]?\$?\d[\d.,]*%?/g, '#');
 const empty = (): SideSummary => ({ fills: 0, contracts: 0, fees: 0, pnl: 0, markets: 0, exits: {}, byHour: {}, byPurpose: {}, contractsByHour: {}, bySeries: {} });
@@ -676,7 +678,11 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   }
   const match = priceMatcher(audit.prices, from, to);
   const r = await runBacktest(dir, model, S, cfg.risk, bankroll, {
-    exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
+    // The hunt and the ratchet as the engine builds them from the settings (bot/engine.ts), so HUNT_* and RATCHET_* overrides
+    // reach the replay; before this the replay hunted with the code defaults whatever the settings said.
+    hunt: { targetMargin: S.huntTargetMargin, minConfluence: S.huntMinConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap, lockSale: S.huntLockSale, lockSaleFvMargin: S.huntLockSaleFvMargin, lockSaleElse: S.huntLockSaleElse, lockSaleAt: S.huntLockSaleAt, wallAsk: S.huntWallAsk, wallAskRatio: S.huntWallAskRatio },
+    ratchet: { minFillRatio: S.ratchetMinFillRatio, minWallAgeMs: S.ratchetMinWallAgeSec * 1000, slippageTicks: S.ratchetSlippageTicks },
+    exitPolicy: policy as never, sessionRisk: models.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
     sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd }, accuracyGate: S.accuracyGate,
     takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile, ...(follow ? { follow } : {}) }, exitBench: S.exitBench, accuracyGateFile: gateFile, startMs, tradeFromMs: from,
     optimalF: { ...cfg.optimalF, ...(ofSeed ? { seed: ofSeed } : {}) },
@@ -710,6 +716,8 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const tpContracts = r.paper?.takeProfitContracts ?? 0;
   if (tpContracts) replay.exits['take-profit'] = +tpContracts.toFixed(2);
   if (r.exits.contracts - tpContracts > 1e-9) replay.exits['model exit / ratchet'] = +(r.exits.contracts - tpContracts).toFixed(2);
+  const x = r.exits;
+  if (x.huntActivations || x.wallAsks || x.quotaSnipes) replay.hunt = `hunt mode in the replay: ${x.huntActivations} activations, ${x.ratchetTriggers} stop triggers, ${x.gaps} gaps, ${x.huntProfitTakes} profit takes, ${x.lockSales} lock sales, ${x.lockHolds} lock holds, ${x.wallAsks} wall asks (${x.wallFills.toFixed(0)} contracts filled on them), ${x.quotaSnipes} quota snipes (${x.quotaSnipeContracts.toFixed(0)} contracts)${x.floorArms || x.floorSales ? `, ${x.floorArms ?? 0} quota floors armed, ${x.floorSales ?? 0} floor sale calls` : ''}`;
   const paper = paperSummary(audit, from, to);
   const minHours = o.minHours ?? 3;
   const checked = hours >= minHours;
@@ -800,6 +808,7 @@ async function main(): Promise<void> {
   if (res.refills?.paper.length || res.refills?.replay.length) console.log(`the pool ran dry and was refilled (a new training epoch): paper ${refilled(res.refills.paper)} | replay ${refilled(res.refills.replay)}`);
   row('replay', res.replay);
   row('paper', res.paper);
+  if (res.replay.hunt) console.log(res.replay.hunt);
   const purposes = (s: SideSummary) => Object.entries(s.byPurpose).sort().map(([k, x]) => `${k} ${x.fills}/${x.contracts.toFixed(0)}`).join(', ') || 'none';
   console.log(`fills/contracts by order purpose: replay ${purposes(res.replay)} | paper ${purposes(res.paper)}`);
   const X = res.replay.extra, rej = Object.entries(X.rejected).sort((x, y) => y[1] - x[1]).slice(0, 3).map(([k, n]) => `${k} x${n}`).join('; ');

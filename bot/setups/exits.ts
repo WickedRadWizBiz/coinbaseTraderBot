@@ -29,7 +29,7 @@ export interface CostModel {
 
 export const DEFAULT_COSTS: CostModel = { entry: 0.0014, makerExit: 0.0005, takerExit: 0.0014, fundingPer8h: 0.0001 };
 
-export type ExitReason = 'stop' | 'breakeven' | 'trail' | 'target' | 'time' | 'manual' | 'leadlag';
+export type ExitReason = 'stop' | 'breakeven' | 'trail' | 'target' | 'time' | 'manual' | 'leadlag' | 'quota';
 
 export interface OpenTrade {
   asset: string;

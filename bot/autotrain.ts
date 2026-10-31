@@ -26,6 +26,7 @@ import type { Config } from './config';
 import type { Engine } from './engine';
 import { MetaModel } from './model/metaModel';
 import { loadVolProfile } from './model/volSeasonality';
+import { loadSessionRiskFile } from './model/sessionRisk';
 import { PerpModel } from './perps/perpSignal';
 import type { PerpTrader } from './perps/perpTrader';
 import { createSnnUnit } from './snn';
@@ -41,7 +42,7 @@ import { SystemPressure } from './util/systemPressure';
 
 const log = logger('autotrain');
 
-export const MODEL_FILES = { mlp: 'model.json', perp: 'perp_model.json', snn_crypto: 'snn_crypto.json', snn_perps: 'snn_perps.json', snn_tennis: 'snn_tennis.json', vol: 'vol_profile.json', vol_model: 'vol_model.json', tennis: 'tennis_model.json', fill: 'fill_model.json', ta_net: 'ta_net.json', ta_net_wf: 'ta_net_wf.json', setups: 'setup_model.json', librarian: 'librarian.json', cross_graph: 'cross_graph.json', cross_lead: 'cross_lead.json' } as const;
+export const MODEL_FILES = { mlp: 'model.json', perp: 'perp_model.json', snn_crypto: 'snn_crypto.json', snn_perps: 'snn_perps.json', snn_tennis: 'snn_tennis.json', vol: 'vol_profile.json', session_risk: 'session_risk.json', vol_model: 'vol_model.json', tennis: 'tennis_model.json', fill: 'fill_model.json', ta_net: 'ta_net.json', ta_net_wf: 'ta_net_wf.json', setups: 'setup_model.json', librarian: 'librarian.json', cross_graph: 'cross_graph.json', cross_lead: 'cross_lead.json' } as const;
 type Kind = keyof typeof MODEL_FILES;
 
 /** The file the bot should load for each model: the pipeline's promoted copy in AUTO_TRAIN_DIR
@@ -57,7 +58,7 @@ export function resolveModelPaths(cfg: Readonly<Config>): Record<Kind, string> {
   return {
     mlp: pick('mlp', cfg.paramsPath), perp: pick('perp', cfg.perps.modelPath),
     snn_crypto: pick('snn_crypto', cfg.snn.domains.crypto.modelPath), snn_perps: pick('snn_perps', cfg.snn.domains.perps.modelPath), snn_tennis: pick('snn_tennis', cfg.snn.domains.tennis.modelPath),
-    vol: pick('vol', cfg.strategy.volProfilePath), vol_model: pick('vol_model', cfg.strategy.volModelPath), tennis: pick('tennis', cfg.tennis.modelPath), fill: pick('fill', cfg.strategy.fillModelPath), ta_net: pick('ta_net', cfg.taNet.modelPath),
+    vol: pick('vol', cfg.strategy.volProfilePath), session_risk: pick('session_risk', cfg.strategy.sessionRiskPath), vol_model: pick('vol_model', cfg.strategy.volModelPath), tennis: pick('tennis', cfg.tennis.modelPath), fill: pick('fill', cfg.strategy.fillModelPath), ta_net: pick('ta_net', cfg.taNet.modelPath),
     setups: pick('setups', cfg.perps.setupModelPath), ta_net_wf: pick('ta_net_wf', cfg.perps.setupTaNetPath), librarian: pick('librarian', cfg.taNet.librarianPath), cross_graph: pick('cross_graph', cfg.taNet.crossGraphPath), cross_lead: pick('cross_lead', cfg.taNet.crossLeadPath),
   };
 }
@@ -275,7 +276,7 @@ export class AutoTrainer {
   /** Poll the model files; hot-swap whatever changed. */
   async watch(): Promise<void> {
     const paths = resolveModelPaths(this.d.cfg);
-    for (const k of ['ta_net', 'snn_crypto', 'snn_perps', 'snn_tennis', 'vol_model', 'mlp', 'vol', 'perp', 'tennis', 'fill'] as Kind[]) {
+    for (const k of ['ta_net', 'snn_crypto', 'snn_perps', 'snn_tennis', 'vol_model', 'mlp', 'vol', 'session_risk', 'perp', 'tennis', 'fill'] as Kind[]) {
       const p = paths[k], m = mtime(p);
       if (m === null || this.mtimes.get(p) === m) continue;
       // Do not load a file the pipeline is still writing (promotion is a copy; wait one poll).
@@ -308,6 +309,10 @@ export class AutoTrainer {
       const apply = vp && cfg.strategy.volSeasonality && vp.validation?.improved ? vp : undefined;
       engine.setVolProfile(apply);
       this.record('vol', apply ? `applied ${vp!.version}` : 'loaded, not applied (validation did not improve or VOL_SEASONALITY off)');
+    } else if (kind === 'session_risk') {
+      const sr = loadSessionRiskFile(file);
+      engine.setSessionRiskAuto(sr?.profile);
+      this.record('session_risk', sr ? `${cfg.strategy.sessionRiskAuto ? 'applied' : 'loaded, not applied (SESSION_RISK_AUTO off)'} ${sr.version}: ${Object.keys(sr.profile).join(', ') || 'neutral'}` : 'invalid file: neutral');
     } else if (kind === 'perp') {
       const m = PerpModel.load(file);
       if (!m || !this.d.perpTrader) return;

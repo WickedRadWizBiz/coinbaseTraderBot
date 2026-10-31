@@ -3,9 +3,12 @@ import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
 import { test } from 'node:test';
-import { fillQuotes, type Ev } from '../research/goLiveTally';
-import { asHistory, bridgeSigma, compareWindows, newCarry } from '../research/replayFidelity';
+import { fillDayFile, fillQuotes, QUOTE_FILLS, type Ev } from '../research/goLiveTally';
+import { asHistory, bridgeSigma, compareWindows, newCarry, onDays, sliceDays } from '../research/replayFidelity';
 import { tmpDir } from './helpers';
+import { DepthSim, readDepthModel } from '../research/history/depthSim';
+
+const depth = readDepthModel(path.join(import.meta.dirname, 'fixtures', 'depth_model.json'))!;
 
 const D0 = Date.UTC(2026, 9, 20);
 const MIN = 60_000;
@@ -73,10 +76,62 @@ test('the noise fill-in is pinned at the candles and grows with the measured siz
 
 test('the bridge size and the window-by-window comparison', () => {
   assert.equal(bridgeSigma([{ r2: 8, f: 2, n: 4 }, { r2: 10, f: 2.5, n: 5 }]), 2);
-  const real = new Map([[1, { pnl: 1, contracts: 1 }], [2, { pnl: -1, contracts: 1 }]]);
-  const rows = compareWindows(real, { same: real, high: new Map([[1, { pnl: 2, contracts: 1 }], [2, { pnl: 0, contracts: 1 }], [3, { pnl: 1, contracts: 1 }]]) });
+  const real = new Map([[1, { pnl: 1, contracts: 1, fees: 0 }], [2, { pnl: -1, contracts: 1 }]]);
+  const rows = compareWindows(real, { same: real, high: new Map([[1, { pnl: 2, contracts: 1, fees: 0 }], [2, { pnl: 0, contracts: 1 }], [3, { pnl: 1, contracts: 1, fees: 0 }]]) });
   assert.deepEqual(rows[0], { how: 'same', pnl: 0, windowsTraded: 2, biasUsd: 0, rmseUsd: 0, corr: 1 });
   assert.equal(rows[1].biasUsd, 3);
   assert.equal(rows[1].windowsTraded, 3);
   assert.equal(rows[1].rmseUsd, 1);
+});
+
+test('a day is filled in line by line exactly as the whole-day fill does it', async () => {
+  const dir = tmpDir();
+  const { file } = recordedDay(dir);
+  const evs = read(file);
+  for (const how of QUOTE_FILLS) {
+    const out = path.join(dir, `${how}.jsonl.gz`);
+    await fillDayFile(file, out, { how, sigma: 0.05 }, depth);
+    assert.deepEqual(read(out), fillQuotes(evs, { how, sigma: 0.05 }, depth), how);
+  }
+});
+
+test('the depth fill-in plays a whole book around each quote, the same every time', () => {
+  const dir = tmpDir();
+  const evs = read(recordedDay(dir).file);
+  const a = fillQuotes(evs, { how: 'depth' }, depth), b = fillQuotes(evs, { how: 'depth' }, depth);
+  assert.deepEqual(a, b, 'seeded: the same day plays out the same wherever it is replayed');
+  assert.ok(a.every((e, i) => i === 0 || e.t >= a[i - 1].t), 'in time order');
+  const books = a.filter((e) => e.k === 'book' && e.ticker === 'KXBTC15M-A');
+  const requoted = fillQuotes(evs, { how: 'requote' }).filter((e) => e.k === 'book' && e.ticker === 'KXBTC15M-A');
+  // Each quote is still the best bid and ask, now with levels behind it.
+  assert.equal(books.length, requoted.length);
+  for (let i = 0; i < books.length; i++) assert.deepEqual([books[i].bids![0].price, books[i].asks![0].price], [requoted[i].bids![0].price, requoted[i].asks![0].price]);
+  assert.ok(books.some((x) => x.bids!.length > 1 && x.asks!.length > 1));
+  assert.ok(a.some((e) => e.k === 'delta') && a.some((e) => e.k === 'trade' && e.sim === 1), 'changes and trades between the quotes');
+  // The recorded trades give way to the simulated ones.
+  assert.ok(a.filter((e) => e.k === 'trade').every((e) => e.sim === 1));
+  assert.throws(() => fillQuotes(evs, { how: 'depth' }), /depth model/);
+});
+
+test('the depth simulator steps in tenths of a cent below 10 cents and above 90, whole cents between', () => {
+  const sim = new DepthSim(depth);
+  const tail = sim.play('KXBTC15M-U', D0, 0.052, 0.054, D0, D0 + 10 * MIN)[0];
+  assert.deepEqual([(tail.bids as Array<{ price: number }>)[0].price, (tail.asks as Array<{ price: number }>)[0].price], [0.052, 0.054]);
+  assert.ok((tail.bids as Array<{ price: number }>).every((l) => l.price <= 0.052 && l.price > 0.052 - 0.0105), 'ten tenth-cent ticks behind the best bid');
+  const mid = sim.play('KXBTC15M-V', D0, 0.45, 0.46, D0, D0 + 10 * MIN)[0];
+  assert.ok([...(mid.bids as Array<{ price: number }>), ...(mid.asks as Array<{ price: number }>)].every((l) => Math.round(l.price * 1000) % 10 === 0), 'whole cents in the middle');
+});
+
+test('the days split into parts, each read from the day before it, and only their own windows compared', () => {
+  const dir = tmpDir();
+  for (const d of ['2026-10-20', '2026-10-21', '2026-10-22', '2026-10-23', '2026-10-24']) fs.writeFileSync(path.join(dir, `md-${d}.jsonl.gz`), zlib.gzipSync(''));
+  const day = (x: { day: string }) => x.day;
+  const whole = sliceDays(dir, 4, 0, 1);
+  assert.deepEqual([whole.warm && day(whole.warm), whole.days.map(day)], ['2026-10-20', ['2026-10-21', '2026-10-22', '2026-10-23', '2026-10-24']]);
+  const b = sliceDays(dir, 4, 1, 2);
+  assert.deepEqual([b.warm && day(b.warm), b.days.map(day)], ['2026-10-22', ['2026-10-23', '2026-10-24']]);
+  const at = (d: string, h: number) => Date.parse(`${d}T00:00:00Z`) + h * 3_600_000;
+  const w = new Map([[at('2026-10-22', 12), { pnl: 1, contracts: 1, fees: 0 }], [at('2026-10-23', 12), { pnl: 2, contracts: 1, fees: 0 }], [at('2026-10-24', 0), { pnl: 3, contracts: 1, fees: 0 }]]);
+  // The warm-up day's windows are left out; a window closing at midnight belongs to the day before.
+  assert.deepEqual([...onDays(w, ['2026-10-23']).values()].map((x) => x.pnl), [2, 3]);
 });

@@ -32,6 +32,7 @@ import type { CandleRow } from '../ta/candleStore';
 import type { Timeframe } from '../ta/knowledge';
 import { SpotCandleFeed } from './spotCandles';
 import { TakerFlowFeed } from './takerFlow';
+import { SpotBookRecorder, SpotBookService, spotBookLine } from './spotBook';
 import { KalshiPerpsRest } from '../perps/perpRest';
 import type { PerpSnapshot } from '../perps/perpData';
 import { contractKind, type ContractTerms, type MarketKind } from '../model/fairValue';
@@ -208,6 +209,7 @@ export class MarketData extends EventEmitter {
   private proxyWs: WebSocket | null = null;
   private candleFeed?: SpotCandleFeed;
   private takerFlow?: TakerFlowFeed;
+  private spotBooks?: SpotBookRecorder;
   indexSource: 'kalshi' | 'proxy' | 'none' = 'none';
   wsConnected = false;
 
@@ -281,6 +283,12 @@ export class MarketData extends EventEmitter {
       this.binanceTimer = setInterval(() => this.pullBinance(), 1000);
       this.binanceTimer.unref();
     }
+    if (this.cfg.spotBookRecordSec > 0) {
+      this.spotBooks = new SpotBookRecorder(() => [...this.index.keys()], (asset, b) => this.recorder.write('spot_book', spotBookLine(asset, b)),
+        this.cfg.spotBookRecordSec * 1000, new SpotBookService(this.cfg.coinbaseRestUrl, 1000, this.cfg.spotBookDepth, fetch,
+          { bps: this.cfg.spotBookBandBps, n: this.cfg.spotBookBands }));
+      this.spotBooks.start();
+    }
     if (this.cfg.taCandles) {
       // Live order flow (Coinbase public trades) so live candles carry taker-buy volume like the history.
       if (this.cfg.takerFlow) { this.takerFlow = new TakerFlowFeed([...this.index.keys()], this.cfg.coinbaseWsUrl); this.takerFlow.start(); }
@@ -326,6 +334,7 @@ export class MarketData extends EventEmitter {
     this.perpFeed?.stop();
     this.candleFeed?.stop();
     this.takerFlow?.stop();
+    this.spotBooks?.stop();
     this.recorder.close();
   }
 

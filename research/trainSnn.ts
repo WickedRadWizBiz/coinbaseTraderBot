@@ -29,19 +29,22 @@ import { withSnnHyper } from '../bot/snn/population';
 export const READOUT_MAX = 20_000;
 
 /** L2-regularised logistic regression by gradient descent with backtracking (full batch). */
-export function fitLogistic(X: Float64Array[], y: number[], w0: Float64Array, l2 = 1e-3, iters = 300): { w: Float64Array; loss: number } {
+/** L2-regularised logistic regression (the bias unpenalised). `offsets`: a fixed logit per row the fit adds to (the
+ *  mid-anchored readout's market logit), so the weights learn the correction. */
+export function fitLogistic(X: Float64Array[], y: number[], w0: Float64Array, l2 = 1e-3, iters = 300, offsets?: ArrayLike<number>): { w: Float64Array; loss: number } {
   const n = X.length, d = w0.length;
   let w = Float64Array.from(w0);
+  const off = (i: number) => (offsets ? offsets[i] : 0);
   const lossAt = (v: Float64Array) => {
     let s = 0;
-    for (let i = 0; i < n; i++) { let z = 0; for (let j = 0; j < d; j++) z += v[j] * X[i][j]; const p = Math.min(1 - 1e-12, Math.max(1e-12, sigmoid(z))); s -= y[i] * Math.log(p) + (1 - y[i]) * Math.log(1 - p); }
+    for (let i = 0; i < n; i++) { let z = off(i); for (let j = 0; j < d; j++) z += v[j] * X[i][j]; const p = Math.min(1 - 1e-12, Math.max(1e-12, sigmoid(z))); s -= y[i] * Math.log(p) + (1 - y[i]) * Math.log(1 - p); }
     let r = 0; for (let j = 1; j < d; j++) r += v[j] * v[j];
     return s / Math.max(1, n) + 0.5 * l2 * r;
   };
   let loss = lossAt(w), lr = 1;
   for (let it = 0; it < iters && n; it++) {
     const g = new Float64Array(d);
-    for (let i = 0; i < n; i++) { let z = 0; for (let j = 0; j < d; j++) z += w[j] * X[i][j]; const e = sigmoid(z) - y[i]; for (let j = 0; j < d; j++) g[j] += e * X[i][j]; }
+    for (let i = 0; i < n; i++) { let z = off(i); for (let j = 0; j < d; j++) z += w[j] * X[i][j]; const e = sigmoid(z) - y[i]; for (let j = 0; j < d; j++) g[j] += e * X[i][j]; }
     for (let j = 0; j < d; j++) g[j] = g[j] / n + (j ? l2 * w[j] : 0);
     let next: Float64Array, nl: number;
     for (;;) {
@@ -69,7 +72,9 @@ export async function trainSnnMain(argOf: (k: string, d: string) => string = cli
   const out = argOf('out', `params/snn_${domain}.candidate.json`);
   // --hyper: knobs chosen by the population tournament (research/snnPbt.ts).
   const hyperArg = argOf('hyper', '');
-  const params: SnnParams = withSnnHyper(domainParams(domain, withFlags({ ...DEFAULT_SNN, seed: Number(argOf('seed', String(DEFAULT_SNN.seed))) }, stageFlags(stage))), hyperArg ? JSON.parse(hyperArg) : undefined);
+  // --anchor true: the mid-anchored contract readout (SNN_ANCHOR_MID; bot/snn/network.ts anchorLogit).
+  const anchor = argOf('anchor', '') === 'true';
+  const params: SnnParams = withSnnHyper(domainParams(domain, withFlags({ ...DEFAULT_SNN, seed: Number(argOf('seed', String(DEFAULT_SNN.seed))), ...(anchor ? { anchorMid: true } : {}) }, stageFlags(stage))), hyperArg ? JSON.parse(hyperArg) : undefined);
   // --skip-model true: p_model is the fair value (synthetic contracts of the history replay, where the
   // decision model's view of a market quoted at the fair value is moot).
   const win = { from: date('from'), to: date('to'), domain, skipModel: argOf('skip-model', '') === 'true' };
@@ -97,7 +102,7 @@ export async function trainSnnMain(argOf: (k: string, d: string) => string = cli
   for (const [k, ro] of tr.net.readouts) {
     const data = tr.collected.filter((c) => c.column === k);
     if (data.length < 50) { readouts[k] = Array.from(ro.wf); continue; }
-    const fit = fitLogistic(data.map((d) => d.phi), data.map((d) => d.y), ro.wf, Number(argOf('l2', '1e-3')));
+    const fit = fitLogistic(data.map((d) => d.phi), data.map((d) => d.y), ro.wf, Number(argOf('l2', '1e-3')), 300, data.map((d) => d.offset));
     readouts[k] = Array.from(fit.w);
     console.log(`readout ${k}: ${data.length} labelled snapshots, log-loss ${fit.loss.toFixed(4)}`);
   }

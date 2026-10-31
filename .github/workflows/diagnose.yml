@@ -11,7 +11,7 @@ on:
         required: false
         default: ''
       pnl:
-        description: 'Also run the P&L forensics (deploy/pnl_report.py, decision_study.py, cross_study.py, component_study.py, feed_delay.py, latency_study.py from the dispatched ref; read-only, a few minutes)'
+        description: 'Also run the P&L forensics (deploy/pnl_report.py, decision_study.py, cross_study.py, component_study.py, feed_delay.py, latency_study.py from the dispatched ref) on a GitHub runner: the last days of audit and recordings are copied off the server at 8 MB/s (read-only; 20-40 min)'
         required: false
         default: 'false'
       timings:
@@ -19,29 +19,58 @@ on:
         required: false
         default: 'false'
       study_hours:
-        description: 'With pnl: hours of positions the exit study replays (whole number, 1-24; about a minute of server time an hour)'
+        description: 'With pnl: hours of positions the exit study replays (whole number, 1-24)'
         required: false
         default: '8'
+      ta_study:
+        description: 'Instead of the server report: run the TA contract study (research/taContractStudy.ts) on this runner, no server involved'
+        required: false
+        default: 'false'
+      ta_from:
+        description: 'With ta_study: first replayed day (YYYY-MM-DD; empty = 120 days before ta_to)'
+        required: false
+        default: ''
+      ta_to:
+        description: 'With ta_study: last replayed day (YYYY-MM-DD; empty = the day before yesterday)'
+        required: false
+        default: ''
+      ta_assets:
+        description: 'With ta_study: coins, comma separated'
+        required: false
+        default: 'BTC,ETH,SOL,XRP,DOGE'
+      ta_rebuild:
+        description: 'With ta_study: build the cached replay days again (after a history fix)'
+        required: false
+        default: 'false'
+      ta_dominance:
+        description: 'With ta_study: copy the BTC.D / USDT.D series from the server first so the replay carries dominance (rebuilds every cached replay day: about 3.5 h per half year)'
+        required: false
+        default: 'false'
+      kalshi_repair:
+        description: 'Instead of the server report: repair the Kalshi history quotes stored on the server once (deploy/kalshi_cents_repair.py; quotes saved in hundredths of a cent before PR #217). Rewrites only those day files; safe to run again'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
 
 jobs:
   diagnose:
+    if: inputs.ta_study != 'true' && inputs.kalshi_repair != 'true'
     runs-on: ubuntu-latest
     environment: production
     steps:
       - uses: actions/checkout@v5
-        if: inputs.pnl == 'true' || inputs.timings == 'true'
+        if: inputs.timings == 'true'
       - name: Upload the report scripts
-        if: inputs.pnl == 'true' || inputs.timings == 'true'
+        if: inputs.timings == 'true'
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.LIGHTSAIL_HOST }}
           username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
           key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
-          source: deploy/pnl_report.py,deploy/decision_study.py,deploy/cross_study.py,deploy/component_study.py,deploy/feed_delay.py,deploy/latency_study.py,deploy/step_timings.py
+          source: deploy/step_timings.py
           target: /tmp/diag
       - name: Report
         uses: appleboy/ssh-action@v1.0.3
@@ -161,19 +190,169 @@ jobs:
               case "$p" in /api/*) ;; *) echo "skipping $p (only /api/... paths)"; continue;; esac
               echo "== GET $p"; api "$p" | head -c 6000; echo
             done
-            if [ "$PNL" = "true" ] && [ -d /tmp/diag/deploy ]; then
-              echo "== P&L report"; nice -n 19 python3 /tmp/diag/deploy/pnl_report.py ~/bot/data 3 || true
-              echo "== decision study"; nice -n 19 python3 /tmp/diag/deploy/decision_study.py ~/bot/data 3 || true
-              case "$STUDY_HOURS" in ''|*[!0-9]*) STUDY_HOURS=8;; esac
-              if [ "$STUDY_HOURS" -lt 1 ] || [ "$STUDY_HOURS" -gt 24 ]; then STUDY_HOURS=8; fi
-              echo "== exit study (the cross, the projected-peak rule and the live-line rules, replayed on the recordings: $STUDY_HOURS h)"
-              timeout $((STUDY_HOURS * 110 + 300)) nice -n 19 python3 /tmp/diag/deploy/cross_study.py ~/bot/data "$STUDY_HOURS" || echo "(exit study stopped: $?)"
-              echo "== component study (the SNN and the TA network against the meta-model's price on the last 3 days of decisions; the rule book's trial rows)"
-              timeout 1200 nice -n 19 python3 /tmp/diag/deploy/component_study.py ~/bot/data 3 || echo "(component study stopped: $?)"
-              echo "== feed delay"; nice -n 19 python3 /tmp/diag/deploy/feed_delay.py ~/bot/data/recordings 1 || true
-              echo "== latency study"; nice -n 19 python3 /tmp/diag/deploy/latency_study.py ~/bot/data/recordings 2 || true
-            fi
+            if [ "$PNL" = "true" ]; then echo "== P&L forensics: in the 'forensics' job's log (they run on a GitHub runner, not on the server)"; fi
             if [ "$TIMINGS" = "true" ] && [ -f /tmp/diag/deploy/step_timings.py ]; then
               echo "== training step timings"; nice -n 19 python3 /tmp/diag/deploy/step_timings.py ~/bot/data 30 || true
             fi
             echo "== last 60 log lines"; journalctl -u kalshi-bot -n 60 --no-pager | cut -c1-300
+
+  # One-time repair of the Kalshi history stored on the server (Steven's go, Oct 31): markets from Kalshi's /historical
+  # endpoint were saved with quotes 100x too small until PR #217. Writes only data/history/kalshi day files, through a
+  # temp file and a rename; the bot's own state is not touched. Prints counts, posted as a comment on the commit.
+  kalshi-repair:
+    if: inputs.kalshi_repair == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Upload the repair script
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+          source: deploy/kalshi_cents_repair.py
+          target: /tmp/kalshi-repair-${{ github.run_id }}
+      - name: Repair
+        id: repair
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+          command_timeout: 25m
+          capture_stdout: true
+          script: |
+            S=/tmp/kalshi-repair-${{ github.run_id }}/deploy/kalshi_cents_repair.py
+            cd ~
+            DIRS=$(find . -maxdepth 6 -type d -path '*/history/kalshi' -not -path '*/node_modules/*' 2>/dev/null | sort)
+            echo "== Kalshi history stores found: $(echo "$DIRS" | grep -c . || true)"
+            [ -z "$DIRS" ] && exit 0
+            echo "== before"; nice -n 19 ionice -c3 python3 "$S" --dry-run $DIRS
+            echo "== repair"; nice -n 19 ionice -c3 python3 "$S" $DIRS
+            echo "== after (should be 0)"; nice -n 19 ionice -c3 python3 "$S" --dry-run $DIRS
+            rm -rf /tmp/kalshi-repair-${{ github.run_id }}
+      - name: Post the counts on the commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUT: ${{ steps.repair.outputs.stdout }}
+        run: |
+          { echo "Kalshi quote repair, run ${{ github.run_id }} (${{ job.status }})"; echo; echo '```'; printf '%s\n' "$OUT" | tail -40; echo '```'; } > "$RUNNER_TEMP/comment.md"
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@"$RUNNER_TEMP/comment.md" --silent || echo "could not post the comment"
+
+  # The TA contract study (the TA network review, Oct 29): does TA on the spot candles beat the fair value, and Kalshi's
+  # mid, at the 15-minute contract's own question? Runs on this runner from Binance's public archives; the server is not
+  # touched. The history and the replay days are cached between runs (keyed by coins and days), so a wider range only
+  # builds what is new. Prints aggregates only (counts, log losses, the chosen set): this repository is public.
+  ta-study:
+    if: inputs.ta_study == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 340
+    # The log's tail is posted as a comment on the dispatched commit (contents: write): the job-log host is not
+    # reachable from every place the study is read from.
+    permissions:
+      contents: write
+    concurrency:
+      group: ta-contract-study
+      cancel-in-progress: false
+    env:
+      TA_FROM: ${{ inputs.ta_from }}
+      TA_TO: ${{ inputs.ta_to }}
+      TA_ASSETS: ${{ inputs.ta_assets || 'BTC,ETH,SOL,XRP,DOGE' }}
+      NODE_OPTIONS: --max-old-space-size=12288
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci
+      - name: Cache key (a cache key may not contain commas)
+        id: key
+        run: echo "coins=$(printf '%s' "$TA_ASSETS" | tr ',' '-')" >> "$GITHUB_OUTPUT"
+      # Restore and save are separate steps so the hours of replay days are kept even when the study itself fails.
+      - name: Restore the 1-minute history and the replay days
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history/binance-1m
+            data/history/binance
+            data/history/kalshi
+            data/ta-study-replay
+          key: ta-study-${{ steps.key.outputs.coins }}-${{ inputs.ta_from }}-${{ inputs.ta_to }}-${{ github.run_id }}
+          restore-keys: |
+            ta-study-${{ steps.key.outputs.coins }}-${{ inputs.ta_from }}-${{ inputs.ta_to }}-
+            ta-study-${{ steps.key.outputs.coins }}-
+            ta-study-
+      - name: SSH to the server (dominance series)
+        if: inputs.ta_dominance == 'true'
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Copy the BTC.D / USDT.D series from the server (read-only)
+        if: inputs.ta_dominance == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p data/history
+          rsync -a --rsync-path="nice -n 19 rsync" --include='/tradingview/' --include='/binance-index/' --include='/bot-index/' --include='/*/BTC.D/***' --include='/*/USDT.D/***' --exclude='*' bot:bot/data/history/ data/history/
+          echo "dominance files: $(find data/history -path '*BTC.D*' -o -path '*USDT.D*' | grep -c . || true)"
+      - name: Run the study
+        id: study
+        run: |
+          set -euo pipefail
+          args=(--assets "$TA_ASSETS")
+          [ -n "$TA_FROM" ] && args+=(--from "$TA_FROM")
+          [ -n "$TA_TO" ] && args+=(--to "$TA_TO")
+          [ "${{ inputs.ta_rebuild }}" = "true" ] && args+=(--rebuild-replay)
+          set +e
+          node --import tsx research/taContractStudy.ts "${args[@]}" 2>&1 | grep --line-buffered -vE '^\s*$' | tee "$RUNNER_TEMP/ta-study.log" | tail -400
+          c=${PIPESTATUS[0]}
+          echo "exit=$c" >> "$GITHUB_OUTPUT"
+          exit $c
+      - name: Save the history and the replay days
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/history/binance-1m
+            data/history/binance
+            data/history/kalshi
+            data/ta-study-replay
+          key: ta-study-${{ steps.key.outputs.coins }}-${{ inputs.ta_from }}-${{ inputs.ta_to }}-${{ github.run_id }}
+      - name: Post the log's tail on the commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo "TA contract study run ${{ github.run_id }} (${TA_ASSETS}, ${TA_FROM:-auto}..${TA_TO:-auto}): exit ${{ steps.study.outputs.exit || 'none' }}"; echo; echo '```'; grep -vE 'binance:|replay: 20|rows: [0-9]+ so far' "$RUNNER_TEMP/ta-study.log" 2>/dev/null | head -40; echo '[...]'; tail -c 56000 "$RUNNER_TEMP/ta-study.log" 2>/dev/null | tail -150; echo '```'; } > "$RUNNER_TEMP/comment.md"
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@"$RUNNER_TEMP/comment.md" --silent || echo "could not post the comment"
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ta-contract-study-report
+          path: research/out/ta-contract-study/report.json
+          if-no-files-found: ignore

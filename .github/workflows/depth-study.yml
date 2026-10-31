@@ -1,0 +1,77 @@
+# Depth study (research/depthStudy.ts; Steven, Oct 29: simulate in the history the full depth the recordings show).
+# Measures, on the recorded days, the Kalshi book's shape (spread, size by level, walls), its queue-reactive flow (adds,
+# cancels and trades per second by distance from the best price and queue size) and the trades, against minutes to
+# close and the mid: the inputs of the depth simulator for the history replay.
+#
+# Read-only on the server: it copies recorded days, nothing is written back. This repository is public: the job prints
+# counts, sizes and rates only, never settings, keys or logs.
+#
+# Required secrets (the same as Deploy): LIGHTSAIL_HOST, LIGHTSAIL_USERNAME, LIGHTSAIL_SSH_KEY (optional LIGHTSAIL_PORT).
+name: Depth study
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Newest whole recorded days to study'
+        required: false
+        default: '4'
+  push:
+    branches: ['claude/depth-study']
+    paths: ['.github/workflows/depth-study.yml', 'research/depthStudy.ts']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: depth-study
+  cancel-in-progress: false
+
+jobs:
+  study:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 300
+    env:
+      DAYS: ${{ inputs.days || '4' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Copy the newest whole recorded days (read-only)
+        run: |
+          set -euo pipefail
+          [[ "$DAYS" =~ ^[0-9]+$ ]] && [ "$DAYS" -ge 1 ] || { echo "days must be a whole number"; exit 1; }
+          REC="$GITHUB_WORKSPACE/data/recordings"; mkdir -p "$REC"
+          TODAY=$(date -u +%F)
+          ssh bot "cd ~/bot/data/recordings && ls -1 md-*.jsonl*" | sort | awk -v t="md-$TODAY" '$0 < t' | tail -n "$DAYS" > "$RUNNER_TEMP/days.txt"
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/days.txt" bot:bot/data/recordings/ "$REC/"
+          echo "copied $(wc -l < "$RUNNER_TEMP/days.txt") day(s)"
+      - name: Measure the depth
+        run: |
+          set -euo pipefail
+          export NODE_OPTIONS="--max-old-space-size=12288"
+          node --import tsx research/depthStudy.ts --recordings "$GITHUB_WORKSPACE/data/recordings" --out "$RUNNER_TEMP/depth_study.json" 2>&1 | grep -E '^(\[depth\]|  )' | cut -c1-400

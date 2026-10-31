@@ -16,6 +16,9 @@ import type { Config, RiskLimits } from './config';
 import type { ExchangeFill, ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
 import type { IndexTracker } from './marketdata/indexTracker';
+import { dynamicEdge, dynamicEdgeOn } from './strategy/dynamicEdge';
+import { otherCoinsHeld, regimeScale, regimeScaleOn } from './strategy/regimeScale';
+import { compactReading, MarketState, observeMarket, type MarketStateReading } from './marketdata/marketState';
 import type { OrderBook } from './marketdata/orderBook';
 import { computeFeatureMap, FEATURE_SCHEMA_VERSION, FEATURES } from './model/featureEngine';
 import { ADVERSARY_GROUPS, evaluateEntry, seedOf, type AdversaryVerdict } from './strategy/adversary';
@@ -28,9 +31,10 @@ import { marketWorstLoss, RestingLike } from './risk/exposure';
 import type { KillSwitch } from './risk/killSwitch';
 import { EXIT_RATE_RESERVE, RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
-import { decide, decisionProbability, MarketView, OrderPlan } from './strategy/fairValueStrategy';
+import { decide, decisionProbability, MarketView, netProfitAtBid, OrderPlan, positionNetAtBid, ridesToSettlement } from './strategy/fairValueStrategy';
 import { ProfitPeaks } from './strategy/profitPeaks';
-import { ConfluenceRatchetExit } from './strategy/exitPolicies';
+import { ConfluenceRatchetExit, HuntEvent } from './strategy/exitPolicies';
+import { HourlyQuotaPacer, QuotaFloors, SnipeGroup } from './risk/quotaPacer';
 import type { SinuousEntryGate } from './strategy/sinuousEntry';
 import { tennisHighLeverage, type CurveReading, type SinuousExitGate } from './strategy/sinuousExit';
 import { scoredExitKind, type ExitBenches, type ExitKind, type TakeProfitBench, type TakeProfitBenchStatus } from './strategy/takeProfitBench';
@@ -42,14 +46,14 @@ import type { AccuracyGate } from './strategy/accuracyGate';
 import type { Tca } from './tca/tca';
 import type { MacroEvent } from './model/featureEngine';
 import { ladderQuotes } from './model/ladder';
-import type { BinaryExposure, DirectionalContext, PerpHedger } from './perps/hedger';
+import type { BinaryExposure, DirectionalContext, PerpHedger, PerpPacer } from './perps/hedger';
 import type { DirectionalTrader } from './perps/hedger';
 import { decideMatch, MatchTracker, type MatchMarket } from './tennis/tennisStrategy';
 import { parseTennisScore } from './tennis/liveScore';
 import { diffScore, findMatch, toTennisScore, type LiveTennisMatch, type TennisScoreClient } from './tennis/liveTennisApi';
 import { tennisFairInputs, type TennisFairModel } from './tennis/tennisFair';
 import type { TennisScore } from './tennis/tennisModel';
-import { huntBlockedBySession, sessionRiskFor } from './model/sessionRisk';
+import { huntBlockedBySession, mergeSessionRisk, sessionRiskFor, type SessionRiskProfile } from './model/sessionRisk';
 import { playbook } from './strategy/playbook';
 import { compensator } from './strategy/compensator';
 import { macro } from './macro/macroService';
@@ -65,6 +69,7 @@ import { BalanceMonitor, fillCashDelta, settleCashDelta } from './vault/balanceM
 import type { Vault } from './vault/vault';
 import type { LiveLineReading, LiveLines } from './strategy/liveLine';
 import type { ComponentTrials, TrialName } from './strategy/componentTrials';
+import type { Scoreboard } from './health/scoreboard';
 import { stateWriteStats, writeJsonAtomic } from './util/persist';
 import type { KalshiCheck } from './recon/kalshiCheck';
 import type { SnnBlender } from './snn/blender';
@@ -87,7 +92,7 @@ import { recordLatency } from './util/latency';
 import { performance } from 'perf_hooks';
 import { activeRuleBook, STAND_ASIDE } from './strategy/ruleBook';
 import { buildLedger, type ModuleRow } from './health/moduleLedger';
-import { orderBudget } from './sizing/orderBudget';
+import { orderBand, orderBudget } from './sizing/orderBudget';
 import { activeGpSignals } from './gp/gpSignals';
 import { marketContext } from './ta/marketContext';
 import { binaryTrades, optimalF, recencyWeight, type OptimalFReport } from './strategy/optimalF';
@@ -244,8 +249,14 @@ export interface MarketStatus {
   exitMode?: 'fair_value' | 'hunt';
   huntTarget?: number;
   huntStop?: number;
+  /** The hunt's last event, so a hybrid hold is audited once rather than every tick. */
+  huntEvent?: HuntEvent;
   /** Exit-in-profit curve of the held position (bot/strategy/sinuousExit.ts). */
   curve?: CurveReading;
+  /** The quota snipe on the held position (bot/risk/quotaPacer.ts), for the dashboard: what the clock hour needs (`atUsd`,
+   *  undefined with the pacer off) and the position's whole profit after fees if sold at its side's bid now (`nowUsd`); `rides`
+   *  when it is in profit in the last share of the window (it rides to settlement), `closed` in the final minute. */
+  snipe?: { atUsd?: number; nowUsd?: number; rides: boolean; closed: boolean };
   /** The held position's reading of its coin's live line (bot/strategy/liveLine.ts): the break and the heads-up. */
   line?: LiveLineReading;
   /** Current values of the macro/confluence inputs for display. */
@@ -327,6 +338,8 @@ export interface EngineDeps {
   /** The rule book, SNN and TA network trials: each scored against the price without it; paper uses the ones that pass
    *  (bot/strategy/componentTrials.ts). */
   trials?: ComponentTrials;
+  /** The scoreboard: every price against the Kalshi market on settled contracts (bot/health/scoreboard.ts). */
+  scoreboard?: Scoreboard;
   /** Cortex-like SNN (bot/snn): worker host, blender with earned alpha, conservative target scaler. */
   snn?: SnnFleet;
   /** Where the blender's settled (p_model, p_snn) history is saved (survives restarts). */
@@ -347,6 +360,12 @@ export class Engine {
   private readonly hunts = new Map<string, ConfluenceRatchetExit>();
   /** Take-profit high-water marks: the best price each held side could have been sold at since it was opened or added to. */
   private readonly profitPeaks = new ProfitPeaks();
+  /** The hourly quota pacer (PACER, bot/risk/quotaPacer.ts): its cycle persists in DATA_DIR across restarts. */
+  private readonly pacer: HourlyQuotaPacer;
+  /** Positions in profit after fees whose profits together cover the pacer's target are all sold (PACER_GROUP). */
+  private readonly snipeGroup = new SnipeGroup();
+  /** PACER_FLOOR: each held market's quota floor (bot/risk/quotaPacer.ts). */
+  private readonly quotaFloors = new QuotaFloors();
   private readonly cadence: CadenceGate;
   private readonly lastPosition = new Map<string, number>();
   private timers: NodeJS.Timeout[] = [];
@@ -354,6 +373,8 @@ export class Engine {
   private lastDecisionAudit = new Map<string, number>();
   /** Last decision record per market that carried the full feature map (see the decision audit below). */
   private lastFeatureAudit = new Map<string, number>();
+  /** One reading a coin of what the market is doing (volatility, change points, liquidity, flow), fed at every evaluation. */
+  readonly marketState = new MarketState();
   private lastRejectAudit = new Map<string, number>();
   private dataHalt: string | undefined = 'awaiting market data';
   balance: number | undefined;
@@ -400,6 +421,7 @@ export class Engine {
     this.cadence = new CadenceGate(d.cfg.strategy);
     this.volFc = new VolForecaster(d.cfg.strategy.volModel ? d.volModel : undefined);
     if (d.fillLogDir) this.fillLog = new FillLog(d.fillLogDir, (t) => d.md.books.get(t)?.mid(), this.now);
+    this.pacer = new HourlyQuotaPacer(d.cfg.strategy.pacer, this.now(), d.cfg.dataDir && d.streakFiles !== false ? path.join(d.cfg.bookDir ?? d.cfg.dataDir, 'quota_pacer_state.json') : undefined);
     if (d.snn) this.attachBlender(d.snn.blender);
     // Registered before the startup reconciliation replays fills, so the
     // balance monitor sees every cash movement the bot's trading causes.
@@ -407,6 +429,9 @@ export class Engine {
       this.fillLog?.onFill({ ticker: f.ticker, side: f.side, price: f.price, isTaker: Boolean(f.isTaker), ts: f.ts, coid: rec?.clientOrderId });
       this.noteLiveBlockFill(rec?.clientOrderId);
       this.noteScoredExitFill(rec, f, fee);
+      // The quota pacer credits the realized part of every reduction, net of its fee, against the position's cost basis.
+      const book = d.oms.positions.get(f.ticker);
+      if (book) { const c = this.pacer.onFill(f, fee, book, this.now()); if (Math.abs(c) > 1e-9) d.audit.write('pacer', { event: 'credit', ticker: f.ticker, usd: Math.round(c * 1e4) / 1e4, ...this.pacer.status(this.now()) }); }
       const signed = f.side === 'bid' ? f.count : -f.count;
       const cash = fillCashDelta(f.side, f.count, f.price, fee, positionAfter - signed);
       d.balanceMonitor?.onCash(cash);
@@ -454,6 +479,10 @@ export class Engine {
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no' }) => d.exitBenches?.settled(e.ticker, e.result, this.now()));
     d.oms.on('settled', (e: { ticker: string; result: 'yes' | 'no'; realized: number; positionBefore: number }) => {
       this.lastSettleTs = this.now();
+      // The quota pacer credits what the market's realized total still lacks after its exits.
+      this.snipeGroup.forget(e.ticker);
+      this.quotaFloors.forget(e.ticker);
+      { const c = this.pacer.onSettled(e.ticker, e.realized ?? 0, this.now()); if (Math.abs(c) > 1e-9) d.audit.write('pacer', { event: 'settled', ticker: e.ticker, usd: Math.round(c * 1e4) / 1e4, ...this.pacer.status(this.now()) }); }
       // One probation result per settled market that traded (VALIDATION_GATES=monitor: bot/risk/probation.ts).
       if (e.realized) probation()?.record(this.isTennis(e.ticker) ? 'tennis' : 'kalshi', e.realized, this.now());
       d.balanceMonitor?.onCash(settleCashDelta(e.positionBefore, e.result));
@@ -605,7 +634,7 @@ export class Engine {
       }
     });
     // Official results of every scanned market (traded or not): the SNN's settlement labels.
-    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => { this.d.taHealth?.onResult(e.ticker, e.result); this.d.trials?.onResult(e.ticker, e.result, this.now()); this.d.accuracyGate?.settle(e.ticker, e.result); this.snnSettle(e.ticker, e.result); });
+    md.on('result', (e: { ticker: string; result: 'yes' | 'no' }) => { this.d.taHealth?.onResult(e.ticker, e.result); this.d.trials?.onResult(e.ticker, e.result, this.now()); this.d.scoreboard?.onResult(e.ticker, e.result); this.d.accuracyGate?.settle(e.ticker, e.result); this.snnSettle(e.ticker, e.result); });
     oms.on('order_error', (n: number, msg: string) => {
       if (n >= cfg.risk.maxConsecutiveOrderErrors) void kill.engage(`${n} consecutive order errors (last: ${msg})`, 'oms');
     });
@@ -708,7 +737,7 @@ export class Engine {
     const S = this.d.cfg.strategy;
     return {
       ...st,
-      risk: sessionRiskFor(S.sessionRisk, st),
+      risk: sessionRiskFor(this.sessionRiskProfile(), st),
       huntBlocked: S.exitPolicy === 'confluence_ratchet' && S.huntSessionGuard ? huntBlockedBySession(st, S.huntTransitionBufferMin) : undefined,
       volProfile: this.d.volProfile ? { version: this.d.volProfile.version, applied: true } : undefined,
     };
@@ -948,7 +977,7 @@ export class Engine {
       targetEvUsd: +ev.targetEv.toFixed(2), minTradeEvUsd: +ev.minEv.toFixed(3),
       minTradableBankrollUsd: S.minTradableBankrollUsd,
       tier: { ...t, orderRiskUsd: +(t.orderFrac * b).toFixed(2), dailyLossLimitUsd: +this.d.risk.dailyLossLimit(b, this.tierLimits(t)).toFixed(2) },
-      paperOrderUsd: this.paperOrderUsd() || null, paperOrderFrac: this.d.cfg.mode === 'paper' ? this.d.cfg.strategy.paperOrderFrac || null : null,
+      paperOrderUsd: this.paperOrderUsd() || null, orderBandUsd: this.orderBandUsd() ?? null, paperOrderFrac: this.d.cfg.mode === 'paper' ? this.d.cfg.strategy.paperOrderFrac || null : null,
       accuracyGate: this.d.accuracyGate ? { ...this.d.accuracyGate.status(), enforced: this.d.cfg.strategy.accuracyGate.enabled } : null,
       entryWindowUpdown: S.entryWindowUpdown, entryWindowHourly: S.entryWindowHourly,
       makerBuffer: this.makerBuffer(), makerMarkout60: this.d.tca?.makerMarkout60() ?? null, minQuoteContracts: S.minQuoteContracts,
@@ -962,6 +991,7 @@ export class Engine {
       // Does the TA network's drift improve the probabilities? (log loss with vs without it, per window)
       taHealth: this.d.taHealth?.status() ?? null,
       trials: this.d.trials ? { ...this.d.trials.status(), params: this.d.trials.p, appliesIn: 'paper and live' } : null,
+      scoreboard: this.d.scoreboard?.status() ?? null,
       cpu: this.cpu.status(),
       taEnsemble: activeTaNetEnsemble()?.status() ?? null,
       // Optimal f on the Kalshi pool's settled trades (cap on the stake per order, fraction of bankroll).
@@ -1081,6 +1111,13 @@ export class Engine {
     return Math.max(0, this.d.cfg.strategy.paperOrderUsd ?? 0);
   }
 
+  /** The order band (ORDER_USD_MIN / ORDER_USD_MAX, Steven's choice on Oct 30: $10-$20 an order), paper and live; undefined
+   *  when off or while a paper order size is in use (it wins). */
+  orderBandUsd(bankroll = this.bankroll()): { min: number; max: number } | undefined {
+    if (this.paperOrderUsd(bankroll) > 0) return undefined;
+    return orderBand(this.d.cfg.strategy.orderUsdMin, this.d.cfg.strategy.orderUsdMax);
+  }
+
   /** How paper sizes its orders, for notes and alerts ('' outside paper or with paper sized like live). */
   paperSizing(): string {
     const usd = this.paperOrderUsd();
@@ -1089,11 +1126,11 @@ export class Engine {
     return frac > 0 ? `$${usd.toFixed(2)} an order (${+(frac * 100).toFixed(2)}% of the bankroll, PAPER_ORDER_FRAC)` : `$${usd} an order (PAPER_ORDER_USD)`;
   }
 
-  /** The risk gateway's per-order, window and total caps for crypto orders: the tier's, widened in paper to fit the
-   *  order size (one order, PAPER_WINDOW_ORDERS in markets closing together, PAPER_TOTAL_ORDERS in all). */
+  /** The risk gateway's per-order, window and total caps for crypto orders: the tier's, widened to fit the paper order
+   *  size or the order band's top (one order, PAPER_WINDOW_ORDERS in markets closing together, PAPER_TOTAL_ORDERS in all). */
   private orderLimits(t: Tier, bankroll = this.bankroll() ?? 0): Partial<RiskLimits> {
     const lim = this.tierLimits(t);
-    const usd = this.paperOrderUsd(bankroll);
+    const usd = this.paperOrderUsd(bankroll) || (this.orderBandUsd(bankroll)?.max ?? 0);
     if (!(usd > 0) || !(bankroll > 0)) return lim;
     return {
       ...lim,
@@ -1364,6 +1401,8 @@ export class Engine {
         return {
           ticker: m.ticker, title: m.title, position: pos?.yes ?? 0,
           avgEntry: pos && pos.yes > 0 ? -pos.netCash / pos.yes : undefined,
+          // The quota snipe's measure, as on the crypto contracts: the cost basis has the entry fee in.
+          netAtBid: pos && pos.yes > 0 ? positionNetAtBid(pos.yes, (pos.fees - pos.netCash) / pos.yes, b, a, md.feesFor(m.ticker)) : undefined,
           quote: { bid: b?.price, ask: a?.price, bidSize: b?.size, askSize: a?.size },
           book: usable ? book : undefined,
           flow: (() => {
@@ -1380,8 +1419,12 @@ export class Engine {
       // Tennis SNN column inputs and the tennis MLP's fair value (it decides whether an entry is worth taking).
       const tv = this.snnTennisObserve(event, ms, markets, tracker, sc, now);
       const fairA = this.tennisFairFor(event, tv, ms[0].ticker);
+      // Steven's profit rules on tennis as on every contract type: the quota snipe, and the last share of the match
+      // (TENNIS_NO_EXIT_BEFORE_END_FRAC, 30%, by its progress: the live score against the format's sets, else the time and
+      // information clocks) riding in profit.
       const out = decideMatch(tracker, { event, now, startTime: ms.find((m) => m.startTime)?.startTime, markets, closeTime: Math.min(...ms.map((m) => m.closeTime)), score: sc?.score, fairA }, T,
-        { bankroll, tennisRisk: totals.total, matchRisk: totals.window }, ms[0].tickSize);
+        { bankroll, tennisRisk: totals.total, matchRisk: totals.window }, ms[0].tickSize, { pacerUsd: this.pacer.neededUsd(now), settleFrac: T.settleFrac, floorMode: this.d.cfg.strategy.pacer.floor, floors: this.quotaFloors });
+      if (tradeable) for (const p of out.plans) if (p.leg === 'quota_snipe') this.d.audit.write('pacer', { event: 'snipe', ticker: p.ticker, book: 'tennis', why: p.why, count: p.count, price: p.price, ...this.pacer.status(now) });
       // Exit-in-profit curve (strategy/sinuousExit.ts) on each held player market: a take-profit (the target, the
       // late-match profit, a hunt's confluence fade or time limit) also needs the curve's signal; a broken trailing
       // stop, a stop and the late-match salvage never wait.
@@ -1463,7 +1506,22 @@ export class Engine {
       const f = this.d.md.perpFeed;
       const skew = this.skewHalt();
       const noEntry = skew ?? (this.d.control && !this.d.control.active ? 'stopped from the dashboard' : undefined) ?? this.sessionEdgeBlock() ?? this.d.exchangeStatus?.perpsBlock() ?? (f?.lastError ? `perps feed unavailable (${f.lastError})` : undefined);
-      return t.targets(c, { halt, noEntry, lockedFrac: this.lockedFraction() });
+      return t.targets(c, { halt, noEntry, lockedFrac: this.lockedFraction(), pacer: this.perpPacer() });
+    };
+  }
+
+  /** The quota pacer for the perp strategies (Steven's profit rules apply to every contract type): the snipe's target, and
+   *  every closed perp trade's result net of fees counted toward the same hourly target as the binaries'. */
+  private perpPacer(): PerpPacer {
+    return {
+      neededUsd: this.pacer.neededUsd(this.now()),
+      credit: (usd, ticker) => {
+        this.pacer.record(usd, this.now());
+        if (Math.abs(usd) > 1e-9) this.d.audit.write('pacer', { event: 'credit', ticker, book: 'perps', usd: Math.round(usd * 1e4) / 1e4, ...this.pacer.status(this.now()) });
+      },
+      snipe: (ticker, why) => this.d.audit.write('pacer', { event: 'snipe', ticker, book: 'perps', why, ...this.pacer.status(this.now()) }),
+      floorMode: this.d.cfg.strategy.pacer.floor,
+      floors: this.quotaFloors,
     };
   }
 
@@ -1528,7 +1586,7 @@ export class Engine {
       if (!terms || !spot || !vol) continue;
       const tauSec = (m.closeTime - now) / 1000;
       cq.push({
-        ticker: m.ticker, column: snnColumn(m), kind: terms.kind, strike: terms.strike, cap: terms.cap, spot: spot.value, sigma: vol.sigmaPerSqrtSec,
+        ticker: m.ticker, column: snnColumn(m), kind: terms.kind, strike: terms.strike, cap: terms.cap, spot: spot.value, sigma: vol.sigmaPerSqrtSec, mid: md.books.get(m.ticker)?.mid(),
         tauSec, lifeSec: (m.closeTime - m.openTime) / 1000, eventKey: `${m.asset}:${m.closeTime}`, tag: tauSec > cfg.risk.noEntryBeforeCloseSec,
       });
     }
@@ -1639,8 +1697,8 @@ export class Engine {
     // The trial blends at its weight without the confidence factor: on Oct 21-24's decisions the confidence cut the
     // blend's gain (deploy/component_study.py: 0.25 x c saved 0.0014 of log loss a contract at p 0.09, 0.25 flat 0.0041
     // at p 0.02).
-    if (!this.d.trials || !Number.isFinite(s.p)) return { p };
-    return { p, a: this.d.trials.p.snnAlpha, pSnn: s.p };
+    if (!Number.isFinite(s.p)) return { p };
+    return { p, pSnn: s.p, ...(this.d.trials ? { a: this.d.trials.p.snnAlpha } : {}) };
   }
 
   /** Load the blender's saved history; it is discarded when it was recorded against another meta-model. */
@@ -1692,6 +1750,18 @@ export class Engine {
   /** Hot-swap the validated intraday volatility profile (undefined removes it). */
   setVolProfile(vp: VolProfile | undefined): void {
     this.d.volProfile = vp;
+  }
+
+  private sessionRiskAuto: SessionRiskProfile = {};
+  /** The pipeline's session risk profile (session_risk.json), applied under SESSION_RISK when SESSION_RISK_AUTO. */
+  setSessionRiskAuto(p: SessionRiskProfile | undefined): void {
+    this.sessionRiskAuto = p ?? {};
+  }
+
+  /** The session risk profile in force: the automatic one with the hand-set SESSION_RISK on top. */
+  sessionRiskProfile(): SessionRiskProfile {
+    const S = this.d.cfg.strategy;
+    return S.sessionRiskAuto ? mergeSessionRisk(this.sessionRiskAuto, S.sessionRisk) : S.sessionRisk;
   }
 
   get model(): MetaModel { return this.d.model; }
@@ -1750,6 +1820,7 @@ export class Engine {
       modelHealth: this.d.modelHealth?.status() ?? null,
       taHealth: this.d.taHealth?.status() ?? null,
       trials: this.d.trials?.status() ?? null,
+      scoreboard: this.d.scoreboard?.status() ?? null,
       snn: { mode: snn.mode, alpha: snn.alpha ?? null },
       taNet: rt ? { version: rt.net.params.version, activeHeads: rt.net.active(true).length } : null,
       ruleBook: S.ruleBook ? { passed: activeRuleBook()?.passed().length ?? 0 } : null,
@@ -1759,9 +1830,9 @@ export class Engine {
       compensator: cmp ? { enabled: cmp.apply && cmp.enabled, validated: cmp.enabled } : null,
       characterStandAside: S.characterStandAside,
       accuracyGate: ag ? { enabled: ag.enabled, blocked: agBuckets.filter((b) => !b.open).length, buckets: agBuckets.length } : null,
-      sessionRisk: { keys: Object.keys(S.sessionRisk).length },
+      sessionRisk: { keys: Object.keys(this.sessionRiskProfile()).length },
       sizing: {
-        paperOrderUsd: this.paperOrderUsd(), tier: g.tier.name, sizeScale: g.equityGuard?.sizeScale ?? null,
+        paperOrderUsd: this.paperOrderUsd(), orderBandUsd: this.orderBandUsd() ?? null, tier: g.tier.name, sizeScale: g.equityGuard?.sizeScale ?? null,
         optimalF: of.rep ? { cap: Number.isFinite(of.cap) ? of.cap : null, trades: of.rep.n } : null, portfolioKelly: S.portfolioKelly,
       },
       exitPolicy: S.exitPolicy,
@@ -1769,7 +1840,21 @@ export class Engine {
       probation: pr ? Object.fromEntries(Object.entries(pr).filter(([k]) => k !== 'mode').map(([k, b]) => { const s = b as { trades: number; netUsd: number; benched: unknown }; return [k, { trades: s.trades, netUsd: s.netUsd, benched: Boolean(s.benched) }]; })) : null,
       indexAgeMs: Object.fromEntries([...this.d.md.index].map(([a, idx]) => [a, idx.health(now).ageMs])),
       maxIndexAgeMs: this.d.cfg.risk.maxIndexAgeMs,
+      marketState: Object.fromEntries(this.marketState.assets().map((a) => [a, this.marketState.reading(a, now)])),
+      throughput: (() => {
+        const held = new Set([...this.d.oms.positions.open().map((p) => p.ticker), ...this.d.oms.liveOrders().filter((o) => isLive(o)).map((o) => o.ticker)]);
+        const ages = [...held].map((t) => this.status.get(t)?.updatedTs).filter((x): x is number => x !== undefined).map((ts) => now - ts);
+        return { mainBusy: this.cpu.status()?.mainBusy ?? null, feedLagMs: this.d.md.kalshiFeedLagMs(now) ?? null, ordersLastMinute: this.d.oms.ordersSentInLast(60_000), maxOrdersPerMinute: this.d.cfg.risk.maxOrdersPerMinute, heldEvalAgeMs: ages.length ? Math.max(...ages) : null };
+      })(),
     });
+  }
+
+  /** The scoreboard's standing: every price against the market (bot/health/scoreboard.ts). */
+  scoreboardStatus() { return this.d.scoreboard?.status() ?? null; }
+
+  /** The market-state reading of every coin seen. */
+  marketStates(now = this.now()): MarketStateReading[] {
+    return this.marketState.assets().sort().map((a) => this.marketState.reading(a, now));
   }
 
   /** TA network: version, blind-test results per head, and each asset's latest forecast and live skill. */
@@ -1827,6 +1912,7 @@ export class Engine {
         this.status.delete(t);
         this.hunts.delete(t);
         this.profitPeaks.forget(t);
+        this.quotaFloors.forget(t);
         this.cadence.forget(t);
         this.lastPosition.delete(t);
         this.d.modelHealth?.forget(t);
@@ -1919,7 +2005,7 @@ export class Engine {
     const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaPricing, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
     if (!fv) return block('fair value unavailable');
     const sess = sessionState(now);
-    const sessRisk = sessionRiskFor(cfg.strategy.sessionRisk, sess);
+    const sessRisk = sessionRiskFor(this.sessionRiskProfile(), sess);
     // Strategy weight: the Compensator's ramp on the coin's Librarian reading (bot/strategy/compensator.ts) when it is
     // on, else the playbook's Kalshi weight in this coin's confirmed regime (bot/strategy/playbook.ts).
     const cmpW = compensator()?.weight(m.asset, 'kalshi', now);
@@ -1965,8 +2051,9 @@ export class Engine {
     // TA conviction overlay: the TA network's direction forecasts add a drift to the fair value (unless
     // the live model already reads them), and TA / confluence breadth + the altcoin rule feed sizing.
     const S0 = cfg.strategy;
-    // Live reads the TA network's unproven heads and the evolved formula as paper does while unvalidated models may
-    // trade live (LIVE_ALLOW_UNVALIDATED_MODEL, the default): the same market prices the same in both modes.
+    // Live reads the evolved formula as paper does while unvalidated models may trade live (LIVE_ALLOW_UNVALIDATED_MODEL,
+    // the default): the same market prices the same in both modes. The TA network's unproven heads reach the price in
+    // neither mode except through their component trial (bot/strategy/taConviction.ts reliability).
     const liveMode = cfg.mode === 'live' && !cfg.liveAllowUnvalidated;
     const modelReadsTa = model.params.kind !== 'identity' && model.params.features.some((f) => f.startsWith('tanet_up'));
     // A forecast's tilt of the fair value: the contract re-priced with the index moved by w x k sigma sqrt(tau) (k: the
@@ -2018,6 +2105,9 @@ export class Engine {
 
     const ret = idx!.trailingLogReturn(now, cfg.strategy.fastMoveWindowSec * 1000);
     const fastMove = ret !== undefined && Math.abs(ret) > cfg.strategy.fastMoveSigmas * vol.sigmaPerSqrtSec * Math.sqrt(cfg.strategy.fastMoveWindowSec);
+    // Market state: fed here and in the backtester the same way (observeMarket), read by the audit now and by the
+    // dynamic thresholds next.
+    const mState = observeMarket(this.marketState, { asset: m.asset, ticker: m.ticker, index: idx!, now, bid, ask, trades: md.features.micro.get(m.ticker)?.tradesIn(now, 300_000) });
 
     // The resting quotes, and the exit curve's resting sell (rest mode), which holds the held side's quote slot.
     const live = oms.liveOrders().filter((o) => o.ticker === m.ticker && (o.purpose === 'quote' || (o.purpose === 'exit' && o.timeInForce === 'good_till_canceled')) && isLive(o));
@@ -2064,11 +2154,19 @@ export class Engine {
       if (taShiftFull !== undefined) trials.record('ta', m.ticker, m.asset, m.closeTime, clampP(pred.p + taShiftFull), pred.p, now);
       if (ruleShift !== undefined) trials.record('rules', m.ticker, m.asset, m.closeTime, clampP(pred.p + ruleShift), pred.p, now);
     }
+    // The scoreboard: every price against the market, same cadence, traded or not (bot/health/scoreboard.ts).
+    if (reason && kindWindow && this.d.scoreboard) {
+      const clampP = (x: number) => Math.max(0.001, Math.min(0.999, x));
+      this.d.scoreboard.record(m.ticker, m.asset, m.closeTime, { market: pMarket, fair_value: fv.pYes, meta_model: pred.p, bot_price: pYes, snn: blended.pSnn, ta_tilt: taShiftFull !== undefined ? clampP(pred.p + taShiftFull) : undefined }, now);
+    }
     const pos = oms.positions.get(m.ticker);
     const entrySidePrice = pos && pos.yes > 0 ? -pos.netCash / pos.yes : pos && pos.yes < 0 ? 1 - pos.netCash / -pos.yes : undefined;
     const tier = this.tier();
     const rs = this.riskScale('crypto');
-    const kellyScale = rs.scale;
+    // The regime scale (market state: volatility, a recent change point, correlated coins held) joins the risk scale,
+    // computed the same way in the backtester.
+    const reg = regimeScale(cfg.strategy.regimeScale, mState, otherCoinsHeld(oms.positions.open(), m.asset, (t) => this.d.md.markets.get(t)?.asset));
+    const kellyScale = rs.scale * reg.mult;
     // Optimal f: the stake per order never above what the settled trade history supports (bootstrap 25th
     // percentile of the growth-optimal fraction); applies to the conviction-boosted size too.
     const fCap = this.kalshiOptimalF('crypto', now);
@@ -2077,14 +2175,17 @@ export class Engine {
     // dollars, whatever the tier, the break-even scale, the session's size factor and optimal f would allow (the owner's
     // choice for paper on Oct 23, a share of the bankroll since Oct 24).
     const fixedUsd = this.paperOrderUsd(bankroll);
-    // Session risk profile can only shrink size (sizeMult in [0, 1]). The risk scale (drawdown, losing streak,
+    // The order band (ORDER_USD_MIN / ORDER_USD_MAX, Steven, Oct 30), paper and live: the sized stake clamped to $10-$20.
+    const band = this.orderBandUsd(bankroll);
+    // Session risk scales size (sizeMult in [0, 1.5]: above 1 only for a reliably earning session, dollars only). The risk scale (drawdown, losing streak,
     // training-mode de-risking) shrinks every sizing route: Kelly, target-EV and the per-order caps alike. The same
     // budget sizes the backtester's orders (bot/sizing/orderBudget.ts).
-    const budget = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult, riskScale: kellyScale, fCapUsd, paperOrderUsd: fixedUsd, maxContractsPerOrder: R.maxContractsPerOrder });
+    const budget = orderBudget({ bankroll, orderFrac: tier.orderFrac, sizeMult, riskScale: kellyScale, fCapUsd, paperOrderUsd: fixedUsd, bandUsd: band, maxContractsPerOrder: R.maxContractsPerOrder });
     const view: MarketView = {
       ticker: m.ticker, pYes, bestBid: bid, bestAsk: ask, position: st.position, bankroll,
       maxOrderRiskUsd: budget.maxOrderRiskUsd, maxContracts: budget.maxContracts, minSidePrice: R.minSidePrice,
       ...(budget.fixedOrderUsd ? { fixedOrderUsd: budget.fixedOrderUsd } : {}),
+      ...(budget.band ? { orderBandUsd: budget.band } : {}),
       // Exit curve, rest mode: the held position's sell rests at the curve's swing-top estimate (the strategy places it);
       // not in the stand-down before the close, and pulled during a fast index move (a resting sell is lifted exactly
       // when the contract is suddenly worth more).
@@ -2098,13 +2199,17 @@ export class Engine {
       ...(this.d.takeProfitBench?.benched ? { takeProfitBenched: this.d.takeProfitBench.benched } : {}),
       ...(() => { const b = this.d.exitBenches?.benched('model-exit'); return b ? { modelExitBenched: b } : {}; })(),
       entryWindowOpen, exitWindowOpen: tauSec > S.noExitBeforeCloseSec,
+      settleShare: Number.isFinite(m.openTime) && tauSec <= S.noExitBeforeCloseFrac * (m.closeTime - m.openTime) / 1000,
     };
     // Exit policy. confluence_ratchet: fair-value exit normally; "hunt" mode (liquidity ratchet
     // manages the exit, nothing else may reduce the position) only while the contract has beaten
     // its entry fair value AND confluence agrees with the position.
     let huntMode = false;
     let huntPlan: OrderPlan | undefined;
+    let huntRest: number | undefined;
+    let huntHold = false;
     let huntProtective = false;
+    let huntHeld: string | undefined;
     // Hunt mode is evaluated by research:backtest --annotate. With a passing evaluation the winning
     // parameters are used; in live mode an unevaluated (or losing) hunt falls back to the fair-value exit,
     // unless the model's validation does not gate live orders (LIVE_ALLOW_UNVALIDATED_MODEL, the default).
@@ -2119,9 +2224,9 @@ export class Engine {
       if (!h) {
         const S = cfg.strategy;
         h = vh
-          ? new ConfluenceRatchetExit({ targetMargin: vh.targetMargin * this.snnTargetScale(), minConfluence: vh.minConfluence }, { minFillRatio: vh.minFillRatio, minWallAgeMs: vh.minWallAgeMs, slippageTicks: vh.slippageTicks })
+          ? new ConfluenceRatchetExit({ targetMargin: vh.targetMargin * this.snnTargetScale(), minConfluence: vh.minConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap, lockSale: S.huntLockSale, lockSaleFvMargin: S.huntLockSaleFvMargin, lockSaleElse: S.huntLockSaleElse, lockSaleAt: S.huntLockSaleAt, wallAsk: S.huntWallAsk, wallAskRatio: S.huntWallAskRatio }, { minFillRatio: vh.minFillRatio, minWallAgeMs: vh.minWallAgeMs, slippageTicks: vh.slippageTicks })
           : new ConfluenceRatchetExit(
-            { targetMargin: S.huntTargetMargin * this.snnTargetScale(), minConfluence: S.huntMinConfluence },
+            { targetMargin: S.huntTargetMargin * this.snnTargetScale(), minConfluence: S.huntMinConfluence, hybrid: S.huntHybrid, sellIntoGap: S.huntSellIntoGap, lockSale: S.huntLockSale, lockSaleFvMargin: S.huntLockSaleFvMargin, lockSaleElse: S.huntLockSaleElse, lockSaleAt: S.huntLockSaleAt, wallAsk: S.huntWallAsk, wallAskRatio: S.huntWallAskRatio },
             { minFillRatio: S.ratchetMinFillRatio, minWallAgeMs: S.ratchetMinWallAgeSec * 1000, slippageTicks: S.ratchetSlippageTicks },
           );
         this.hunts.set(m.ticker, h);
@@ -2129,31 +2234,58 @@ export class Engine {
       const d = h.update({
         position: st.position, qSide: st.position >= 0 ? pYes : 1 - pYes,
         sideBid: st.position > 0 ? bid.price : st.position < 0 ? 1 - ask.price : undefined,
+        fvSide: st.position > 0 ? fv.pYes : st.position < 0 ? 1 - fv.pYes : undefined,
+        flowSide: Number.isFinite(features.kalshi_flow_1m) ? (st.position >= 0 ? features.kalshi_flow_1m : -features.kalshi_flow_1m) : undefined,
         confluence: features.conf_count, book, now, tick: m.tickSize, fees: md.feesFor(m.ticker),
         sessionBlocked: cfg.strategy.huntSessionGuard ? huntBlockedBySession(sess, cfg.strategy.huntTransitionBufferMin) : undefined,
       });
       huntMode = d.mode === 'hunt';
+      huntRest = d.rest;
+      huntHold = d.hold === true;
       st.exitMode = d.mode;
       st.huntTarget = d.target;
       st.huntStop = d.stop;
-      if (d.event && d.event !== 'armed') {
-        this.d.audit.write('decision', { ticker: m.ticker, huntEvent: d.event, target: d.target, stop: d.stop, position: st.position, confCount: features.conf_count, pYes });
+      if (d.event && d.event !== 'armed' && ((d.event !== 'hybrid_hold' && d.event !== 'gapped') || st.huntEvent !== d.event)) {
+        this.d.audit.write('decision', { ticker: m.ticker, huntEvent: d.event, target: d.target, stop: d.stop, rest: d.rest, position: st.position, confCount: features.conf_count, pYes });
       }
-      if (d.plan) {
+      st.huntEvent = d.event;
+      if (d.plan && (view.exitWindowOpen === false || ridesToSettlement(view))) {
+        // The no-exit window before the close (STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC) holds the hunt stop as well: the per-sale
+        // diagnosis of Oct 28 found every stop sale inside the last two minutes on the losing side of settlement. So does the last
+        // share of the window for a position in profit after fees (Steven's rule, STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC).
+        huntHeld = view.exitWindowOpen === false ? `hunting: stop ${d.plan.stop} held, ${Math.round(tauSec)} s to the close` : `hunting: stop ${d.plan.stop} held: in profit in the last share of the window, riding to settlement`;
+      } else if (d.plan) {
         huntPlan = { side: d.plan.side, price: d.plan.price, count: d.plan.count, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge: 0, why: `confluence ratchet stop ${d.plan.stop}` };
         huntProtective = d.event === 'triggered' || d.event === 'profit_take_gap';
       }
     } else {
       st.exitMode = 'fair_value';
     }
+    const dEdge = dynamicEdge(cfg.strategy.dynamicEdge, mState, pred.std);
     const strat = {
       ...cfg.strategy,
-      minEdge: cfg.strategy.minEdge + sessRisk.minEdgeAdd,
+      minEdge: Math.max(0, cfg.strategy.minEdge + sessRisk.minEdgeAdd + dEdge.add),
       inventorySkewPerContract: cfg.strategy.inventorySkewPerContract * sessRisk.skewMult,
       kellyFraction: tier.kellyFraction * kellyScale,
     };
     st.q = decisionProbability(view, strat);
-    const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode, entries: Boolean(reason) });
+    if (huntRest !== undefined) view.huntRestSidePrice = huntRest;
+    // The quota snipe (PACER) sells a position whose net profit covers what the clock hour needs, the hunt included. The profit
+    // mandate (PROFIT_MANDATE, off by default) sells any position in profit outside the last share of the window, a hunt trailing
+    // its stop excepted; a hunt that holds (HUNT_LOCK_SALE_ELSE=hold) is not excepted, so its reductions are not blocked.
+    const pacerUsd = this.pacer.neededUsd(now);
+    if (view.position !== 0) st.snipe = { atUsd: pacerUsd, nowUsd: netProfitAtBid(view), rides: ridesToSettlement(view), closed: view.exitWindowOpen === false };
+    // Steven's group rule (PACER_GROUP): this position, in profit after fees, is sold when the positions in profit together cover the target.
+    const group = pacerUsd !== undefined && S.pacer.group ? this.snipeGroup.judge(m.ticker, view.exitWindowOpen !== false && view.settleShare !== true ? netProfitAtBid(view) : undefined, pacerUsd, now) : undefined;
+    // PACER_FLOOR (Steven, Oct 31): under a higher target the quota is the position's stop. The hunt trailing its stop rides a
+    // winner (riding mode); its lock hold rides to settlement, which the quota still takes (Oct 29).
+    const pacerFloor = this.quotaFloors.floor(m.ticker, view.position);
+    const floorOpts = S.pacer.floor === 'off' ? {} : { pacerFloor, ...(S.pacer.floor === 'riding' && huntMode && !huntHold ? { pacerHigher: `the hunt riding its stop ${st.huntStop ?? ''}`.trim() } : {}) };
+    const plan = decide(view, strat, { exits: !huntMode && S.exitPolicy !== 'hold', blockReductions: huntMode && !huntHold, entries: Boolean(reason), profitMandate: S.profitMandate && (!huntMode || huntHold) ? S.profitMandateMin : undefined, pacerUsd, ...(group?.sell ? { pacerGroup: group } : {}), ...floorOpts });
+    if (plan.pacerArm && this.quotaFloors.arm(m.ticker, view.position, plan.pacerArm.usd)) this.d.audit.write('pacer', { event: 'floor', ticker: m.ticker, usd: plan.pacerArm.usd, why: plan.pacerArm.why, ...this.pacer.status(now) });
+    // A quota snipe liquidates the position: the hunt's stop order would only double it. The decision is audited with the clock.
+    const snipe = plan.place.find((p) => p.purpose === 'exit' && p.why.startsWith('quota snipe'));
+    if (snipe) { huntPlan = undefined; this.d.audit.write('pacer', { event: 'snipe', ticker: m.ticker, why: snipe.why, count: snipe.count, price: snipe.price, ...this.pacer.status(now) }); }
     // The MLP decides whether each entry is worth taking (take/skip head, once validated).
     if (S.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: S.takeMargin, fees: md.feesFor(m.ticker) });
     // Quote, cross or skip each maker entry by expected value (fill model, once validated).
@@ -2199,7 +2331,8 @@ export class Engine {
         const mult = Math.min(S.convictionMaxTotal, advMult * altMult);
         if (mult <= 1) continue;
         if (fixedUsd > 0) { plan.notes.push(`conviction x${mult.toFixed(2)} not applied: paper orders are ${this.paperSizing()}`); continue; }
-        const boosted = decide({ ...view, maxOrderRiskUsd: Math.min(view.maxOrderRiskUsd * mult, fCapUsd), maxContracts: floorCount(view.maxContracts * mult) }, { ...strat, kellyFraction: strat.kellyFraction * mult }, { exits: false, blockReductions: huntMode, entries: true });
+        // Inside the order band the boost moves Kelly's stake toward the band's top, never past it.
+        const boosted = decide(band ? view : { ...view, maxOrderRiskUsd: Math.min(view.maxOrderRiskUsd * mult, fCapUsd), maxContracts: floorCount(view.maxContracts * mult) }, { ...strat, kellyFraction: strat.kellyFraction * mult }, { exits: false, blockReductions: huntMode, entries: true });
         const match = boosted.place.find((b) => b.side === p.side && b.purpose === p.purpose && !b.reduceOnly && Math.abs(b.price - p.price) < 1e-9);
         const count = match ? floorCount(Math.min(match.count, p.count * mult)) : p.count;
         if (count > p.count) {
@@ -2241,14 +2374,16 @@ export class Engine {
     }
     if (this.fillLog) for (const p of plan.place) if (isMakerEntry(p)) this.fillX.set(p, fillInputs(p, fillCtx));
     if (fixedUsd > 0) plan.notes.push(`paper size: ${this.paperSizing()}; the tier, break-even scale and optimal f size live`);
+    else if (band) plan.notes.push(`order band: $${band.min}-$${band.max} an order (ORDER_USD_MIN/MAX), the sized stake clamped into it; the tier, loss scale and optimal f do not size it`);
     else {
       plan.notes.push(`tier ${tier.name}: ${(tier.orderFrac * 100).toFixed(1)}%/order, Kelly ${tier.kellyFraction.toFixed(2)} (high-water $${tier.reference.toFixed(2)})`);
-      if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${rs.parts.join(', ')})`);
+      if (kellyScale < 1) plan.notes.push(`risk x${kellyScale.toFixed(2)} (${[...rs.parts, ...(reg.mult !== 1 ? [`regime x${reg.mult.toFixed(2)}`] : [])].join(', ')})`);
       if (Number.isFinite(fCapUsd) && fCapUsd < tier.orderFrac * bankroll * sizeMult * kellyScale) plan.notes.push(`optimal f cap: $${fCapUsd.toFixed(2)} per order (${(100 * fCap.cap).toFixed(2)}% of bankroll, ${fCap.rep?.n ?? 0} settled trades)`);
     }
     for (const g of guards) plan.notes.push(g);
     if (pbW && pbW.kalshi !== 1) plan.notes.push(`playbook ${pbW.source}: Kalshi size x${pbW.kalshi}`);
     if (cmpW && cmpW.w !== 1) plan.notes.push(`compensator ${cmpW.source}: Kalshi size x${cmpW.w.toFixed(2)}`);
+    if (dEdge.add !== 0) plan.notes.push(`market state ${dEdge.add > 0 ? '+' : ''}${dEdge.add.toFixed(4)} edge`);
     if (sessRisk.applied.length) plan.notes.push(`session risk ${sessRisk.applied.join('+')}: size x${sessRisk.sizeMult}, +${sessRisk.minEdgeAdd} edge`);
     if (huntPlan) plan.place.unshift(huntPlan);
     // Entry curve (strategy/sinuousEntry.ts): a quote that adds to the position is against the curve when the book's
@@ -2309,7 +2444,7 @@ export class Engine {
       // way the sale clears the take-profit floor: sell at the bid now (the resting sell is pulled below, with any other
       // own order in the way). Not while hunting (the ratchet runs that winner), nor when another exit already crosses
       // the book this tick.
-      if (curve.crossing && !huntMode && view.exitWindowOpen !== false && !plan.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel')) {
+      if (curve.crossing && !huntMode && view.exitWindowOpen !== false && !ridesToSettlement(view) && !plan.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel')) {
         const top = sign > 0 ? bid : ask;
         const n = floorCount(Math.min(held, top.size));
         if (n > 0) {
@@ -2329,7 +2464,7 @@ export class Engine {
         }
       }
     } else curve?.flat(m.ticker, now);
-    if (huntMode) plan.notes.push(`hunting: stop ${st.huntStop ?? 'forming'}`);
+    if (huntMode) plan.notes.push(huntHeld ?? `hunting: stop ${st.huntStop ?? 'forming'}`);
     if (huntNote) plan.notes.push(huntNote);
     st.notes = plan.notes;
 
@@ -2346,7 +2481,7 @@ export class Engine {
         decisionId, ticker: m.ticker, model: model.id, spot: spot.value, strike, strikeSource: m.strikeSource, sigma: vol.sigmaPerSqrtSec, sigmaPricing,
         session: sess.key, sessionRisk: sessRisk,
         kind: m.kind, cap: terms.cap, cadence: reason ?? null, featureSchema: FEATURE_SCHEMA_VERSION, pMarket, pStd: pred.std, q: st.q,
-        tauSec, fv: fv.pYes, regime: fv.regime, pYes, ...(full ? { features, drivers: why.drivers } : {}), modelShift: why.shiftFromFairValue, bid: bid.price, ask: ask.price, position: st.position, fastMove,
+        tauSec, fv: fv.pYes, regime: fv.regime, pYes, ...(full ? { features, drivers: why.drivers } : {}), modelShift: why.shiftFromFairValue, bid: bid.price, ask: ask.price, position: st.position, fastMove, mstate: compactReading(mState), ...(dynamicEdgeOn(cfg.strategy.dynamicEdge) ? { edgeAdd: +dEdge.add.toFixed(4) } : {}), ...(regimeScaleOn(cfg.strategy.regimeScale) ? { regimeMult: +reg.mult.toFixed(3) } : {}),
         place: plan.place.map((p) => ({ side: p.side, price: p.price, count: p.count, purpose: p.purpose, edge: p.edge, why: p.why })),
         cancel: plan.cancel,
         // Why no entry could open here (paper's accuracy gate), so studies need not recompute it.
@@ -2359,7 +2494,7 @@ export class Engine {
     // Rest mode: an exit that crosses the book also cancels the position's resting curve sell on its side (a resting
     // order cannot be reduce-only on Kalshi; together they could sell more than is held); the next evaluation rests one
     // again for what is left.
-    const restMode = this.d.curveExit?.p.mode === 'rest';
+    const restMode = this.d.curveExit?.p.mode === 'rest' || huntMode;
     for (const p of plan.place) {
       if (!p.reduceOnly || p.timeInForce !== 'immediate_or_cancel') continue;
       for (const o of this.crossingOwnOrders(m.ticker, p.side, p.price)) {
@@ -2422,7 +2557,7 @@ export class Engine {
     // Tennis orders are rules-based (no model probability to size an edge from): budgeted separately.
     // Paper training trades are 1 contract with no edge requirement (they exist to produce trades).
     const training = cfg.mode === 'paper' && p.why.startsWith('train (paper)');
-    const pk = tennis || training || this.paperOrderUsd() > 0 ? undefined : this.portfolioCap(m, p, pYes, now);
+    const pk = tennis || training || this.paperOrderUsd() > 0 || this.orderBandUsd() ? undefined : this.portfolioCap(m, p, pYes, now);
     if (pk && pk.contracts < p.count) {
       this.d.audit.write('decision', { decisionId, ticker: m.ticker, event: 'portfolio_kelly_cap', from: p.count, to: pk.contracts, fStar: +pk.fStar.toFixed(4), edgePerDay: +pk.edgePerDay.toFixed(4) });
       if (pk.contracts <= 0) return;

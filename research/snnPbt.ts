@@ -201,7 +201,10 @@ export async function runSnnPbt(o: {
   generation?: string;
   /** The tennis config (required for the tennis domain: the engine's match inputs). */
   tennis?: TennisConfig;
-  model?: MetaModel; seed?: number; stateDir?: string; maxRounds?: number; restartEvery?: number; fresh?: boolean; log?: (m: string) => void;
+  model?: MetaModel; seed?: number;
+  /** The mid-anchored contract readout (SNN_ANCHOR_MID). */
+  anchorMid?: boolean;
+  stateDir?: string; maxRounds?: number; restartEvery?: number; fresh?: boolean; log?: (m: string) => void;
   /** Members in the population (default 3) and worker threads replaying them at once (default 1). With
    *  workers > 1 each member's replay runs in its own thread; `modelPath` is then the MLP's file. */
   population?: number; workers?: number; modelPath?: string;
@@ -222,9 +225,10 @@ export async function runSnnPbt(o: {
   walk?: { paused: (day: string) => boolean };
 }): Promise<SnnPbtResult> {
   const log = o.log ?? (() => {});
+  let quietNoTrades = false;
   const initDays = o.initDays ?? 3, evalDays = o.evalDays ?? 1;
   if (!o.walk && o.days.length < initDays + evalDays) throw new Error(`need at least ${initDays + evalDays} days of recordings for an SNN tournament (have ${o.days.length})`);
-  const base: SnnParams = domainParams(o.domain, withFlags({ ...DEFAULT_SNN, seed: o.seed ?? DEFAULT_SNN.seed }, stageFlags(o.stage)));
+  const base: SnnParams = domainParams(o.domain, withFlags({ ...DEFAULT_SNN, seed: o.seed ?? DEFAULT_SNN.seed, ...(o.anchorMid ? { anchorMid: true } : {}) }, stageFlags(o.stage)));
   const baseVersion = versionHash(base);
   const start = Date.parse(`${o.days[0]}T00:00:00Z`);
   // Blocks across the years (eraDays): each run of consecutive days is walked forward on its own (its first
@@ -378,6 +382,12 @@ export async function runSnnPbt(o: {
         const xs = snnInteractions(rows, o.domain);
         // Opportunities: one per contract (crypto and tennis bet each contract at most once), one per step (perps).
         const opportunities = o.domain !== 'perps' ? new Set(rows.map((x) => x.ticker)).size : rows.length;
+        if (!xs.length && !quietNoTrades) {
+          // Once per run: why a round scored the coverage floor (no step to bet on, or the network never leaves the middle).
+          quietNoTrades = true;
+          const spread = rows.reduce((m, x) => Math.max(m, Math.abs(x.pSnn - 0.5)), 0);
+          log(`${o.domain}: no trades in round ${new Date(r.evalFrom).toISOString().slice(0, 10)}: ${rows.length} step(s) evaluated, furthest from even ${spread.toFixed(4)}`);
+        }
         const report = coverageFloor(fitnessOf(xs, { from: r.evalFrom, to: r.evalTo, clusterMs: clusterFor(o.domain) }), xs.length, opportunities, SNN_MIN_COVERAGE);
         const tp = transitions.length ? transitionPenalty(xs, transitions, { ...DEFAULT_TRANSITION, from: r.evalFrom, to: r.evalTo, assetOf }) : undefined;
         return { report: tp ? { ...report, fitness: report.fitness - tp.penalty } : report, interactions: independentInteractions(xs, clusterFor(o.domain)), traits: columnTraits(xs), ...(tp ? { extra: { transitionPenalty: tp.penalty, transitions: tp.transitions } } : {}) };

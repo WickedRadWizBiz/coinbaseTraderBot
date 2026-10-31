@@ -12,6 +12,7 @@
 
 import { readJson, writeJsonAtomic } from '../util/persist';
 import { normCdf } from '../util/num';
+import { pageHinkley } from '../health/drift';
 
 interface Snap { pModel: number; pMarket: number; closeTs: number }
 interface WindowScore { closeTs: number; d: number; n: number }
@@ -62,11 +63,13 @@ export class ModelHealth {
   status() {
     const d = this.st.windows.map((w) => w.d);
     const n = d.length;
-    if (n < 10) return { windows: n, advantage: null as number | null, pWorse: null as number | null, halt: false };
+    // Drift: recently worse than its own record (bot/health/drift.ts). Reported, never halts.
+    const drift = pageHinkley(this.st.windows.map((w) => ({ ts: w.closeTs, x: w.d })));
+    if (n < 10) return { windows: n, advantage: null as number | null, pWorse: null as number | null, halt: false, drift };
     const { mean: m, stat } = dmStat(d);
     const pWorse = 1 - normCdf(stat);
     // advantage > 0: model log loss lower than the calibrated market's.
-    return { windows: n, advantage: -m, pWorse, halt: n >= this.p.minWindows && pWorse < 0.05 };
+    return { windows: n, advantage: -m, pWorse, halt: n >= this.p.minWindows && pWorse < 0.05, drift };
   }
 
   forget(ticker: string): void { this.snaps.delete(ticker); }

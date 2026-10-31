@@ -77,6 +77,18 @@ export const EVIDENCE_TRIALS: Array<Record<string, string>> = [
   { ENTRY_WINDOW_15M: '600,300', ENTRY_WINDOW_HOURLY: '2400,600' },
   { EXIT_POLICY: 'hold', STRATEGY_STYLE: 'maker', RISK_MIN_SIDE_PRICE: '0.2' },
   { STRATEGY_MIN_EDGE: '0.05', STRATEGY_TAKER_BUFFER: '0.03' },
+  // The entry edge moved with the market state (bot/strategy/dynamicEdge.ts), one reading at a time, then together.
+  { DYN_EDGE_VOL: '0.02' },
+  { DYN_EDGE_CHANGE: '0.03' },
+  { DYN_EDGE_SPREAD: '0.5' },
+  { DYN_EDGE_FLOW: '0.02' },
+  { DYN_EDGE_UNCERTAINTY: '0.5' },
+  { DYN_EDGE_VOL: '0.02', DYN_EDGE_CHANGE: '0.03', DYN_EDGE_SPREAD: '0.5', DYN_EDGE_FLOW: '0.02', DYN_EDGE_UNCERTAINTY: '0.5' },
+  // The order size moved with the market state (bot/strategy/regimeScale.ts), one reading at a time, then together.
+  { REGIME_VOL_TARGET: '0.5' },
+  { REGIME_CHANGE_DERISK: '0.5' },
+  { REGIME_CORR_DERISK: '0.5' },
+  { REGIME_VOL_TARGET: '0.5', REGIME_CHANGE_DERISK: '0.5', REGIME_CORR_DERISK: '0.5' },
 ];
 
 export const MIN_HOLDOUT_TRADES = 50;
@@ -173,7 +185,7 @@ export async function evalTrial(dir: string, modelPath: string, env: Record<stri
     const seed = first ? readSeedCandles(process.env.RS_SEED_CANDLES, Date.parse(`${first}T00:00:00Z`)) : undefined;
     const tape = await tapeFor(dir, modelPath, tapeDir, [S.volFallbackMult, S.taVolWeight, cfg.risk.maxBookAgeMs, cfg.risk.maxIndexAgeMs, S.takeGate, S.takeMargin, policy === 'confluence_ratchet', em.sig, Boolean(em.fillModel), seed ? [seed.at, seed.sets.reduce((n, c) => n + c.rows.length, 0)] : null]);
     const r = await runBacktest(dir, model, S, cfg.risk, Number(process.env.SWEEP_BANKROLL_USD ?? cfg.paperBankrollUsd), {
-      exitPolicy: policy as never, sessionRisk: S.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
+      exitPolicy: policy as never, sessionRisk: em.sessionRisk, huntSessionGuard: S.huntSessionGuard, huntTransitionBufferMin: S.huntTransitionBufferMin,
       sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd },
       optimalF: cfg.optimalF,
       accuracyGate: S.accuracyGate, takeProfitBench: { enforce: S.takeProfitBench, rule }, tape, dailyGoalUsd: cfg.vault.dailyGoalUsd, sessionEdge: cfg.sessionEdge,

@@ -78,6 +78,15 @@ export interface SnnParams {
   /** Readout. */
   readoutEta: number; readoutCap: number; tagEverySec: number; tagsPerContract: number; maxTaggedContracts: number; traceTauSec: number;
   priorSlope: number;
+  /** Mid-anchored contract readout (the SNN plan's phase 1): logit p = logit(market mid) + w . phi, weights starting at
+   *  zero, so the readout starts as the market and can only add value where the market is wrong. Optional: absent = off,
+   *  and absent keys keep the version hash, so networks without it keep their checkpoints. */
+  anchorMid?: boolean;
+  /** With anchorMid: the network's price departs from the market only where the contract's mid is within this distance
+   *  of 50 cents; elsewhere it is the (clipped) mid. Learning is unchanged (tags keep the readout's own price). The
+   *  Oct 31 breakdown found the anchored correction beat the market at 40-60c and not in the tails. Optional: absent =
+   *  no band, and the version hash is unchanged. */
+  anchorBand?: number;
   /** Wilson-Cowan regime drive gain; gap-junction coupling factor (<< 1). */
   wcGain: number; gapCoupling: number;
   /** Catch-up: at most this many 1 s steps per call; larger gaps reset transient state. */
@@ -148,6 +157,11 @@ export const SNN_DOMAINS: SnnDomain[] = ['crypto', 'perps', 'tennis'];
 
 /** Time constants matched to each domain's horizons. Crypto (15m / 1h contracts) keeps the PDF's
  *  values; perps (1h / 4h) run ~3-5x slower; tennis (point by point, 5-minute calls) faster. */
+/** SNN_ANCHOR_MID reaches the crypto contract network only: it was measured there (Oct 30 ablation: better than
+ *  the plain readout, level with the market). Perps make direction calls with no contract mid and tennis was never
+ *  measured, so their networks and version hashes stay as they are. */
+export function anchorFor(on: boolean, domain: SnnDomain | undefined): boolean { return on && domain === 'crypto'; }
+
 export function domainParams(domain: SnnDomain, base: SnnParams = DEFAULT_SNN): SnnParams {
   if (domain === 'perps') {
     return {

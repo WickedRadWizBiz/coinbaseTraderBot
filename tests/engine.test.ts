@@ -673,7 +673,7 @@ test('paper: the vault reserve leaves the bankroll, as in live (since Oct 28)', 
   assert.equal(engine.bankroll(), 195, 'and not traded, in paper as in live');
 });
 
-test('paper size: by default paper sizes as live; PAPER_ORDER_FRAC buys a share of the bankroll; PAPER_ORDER_FRAC=0 with PAPER_ORDER_USD a fixed amount', async () => {
+test('paper size: by default the $10-$20 order band, as live; PAPER_ORDER_FRAC buys a share of the bankroll; PAPER_ORDER_FRAC=0 with PAPER_ORDER_USD a fixed amount; band off, paper sizes as live', async () => {
   const quote = (g: Awaited<ReturnType<typeof setup>>) => g.oms.liveOrders().find((o) => o.ticker === g.market.ticker && o.purpose === 'quote' && !o.cancelRequested && o.side === 'bid');
   const env = { PAPER_TRAINING_TRADES_PER_HOUR: '0', PAPER_EXPLORE: 'false' };
   const run = async (extra: Record<string, string>) => {
@@ -698,12 +698,19 @@ test('paper size: by default paper sizes as live; PAPER_ORDER_FRAC buys a share 
   assert.ok(near(fixed.q, 8), `${fixed.q.count} at ${fixed.q.price}`);
   assert.match(fixed.notes.join(' | '), /paper size: \$8 an order \(PAPER_ORDER_USD\)/);
   assert.equal(fixed.g.engine.paperOrderUsd(100), 8);
-  // Both off (the default since Oct 28: paper sizes like live): the tier and break-even sizing of a $200 account, a few
-  // dollars at most.
-  const sized = await run({});
+  // Both off (the default since Oct 28: paper sizes like live) and the band off: the tier and break-even sizing of a $200
+  // account, a few dollars at most.
+  const sized = await run({ ORDER_USD_MIN: '0' });
   assert.equal(sized.g.engine.paperOrderUsd(100), 0);
+  assert.equal(sized.g.engine.guardStatus().orderBandUsd, null);
   assert.ok(sized.q.count * sized.q.price < 5, `${sized.q.count} at ${sized.q.price}`);
   assert.ok(sized.q.count < frac.q.count);
+  // The default since Oct 30 (Steven): the order band, $10-$20 an order (paper and live alike).
+  const band = await run({});
+  assert.ok(band.q, JSON.stringify(band.notes));
+  assert.ok(band.q.count * band.q.price > 9.4 && band.q.count * band.q.price <= 20, `${band.q.count} at ${band.q.price}`);
+  assert.match(band.notes.join(' | '), /order band: \$10-\$20 an order \(ORDER_USD_MIN\/MAX\)/);
+  assert.deepEqual(band.g.engine.guardStatus().orderBandUsd, { min: 10, max: 20 });
 });
 
 test('accuracy gate (paper): no new quote in a time-to-close bucket where the market mid called results better', async () => {
@@ -882,7 +889,7 @@ test('component trials: a trial that passed moves the price in paper and live al
     override applied(name: TrialName): boolean { return this.onNames.has(name); }
     override record(name: TrialName, ticker: string, _asset: string, _close: number, pWith: number, pWithout: number): void { this.records.push([name, ticker, pWith, pWithout]); }
   }
-  // The TA network's 1 h and 4 h calls, neither validated nor graded yet: today's tilt counts each at half.
+  // The TA network's 1 h and 4 h calls, neither validated: outside their trial they do not move the price at all.
   const view: TaNetView = { up1: 0.62, up4: 0.6 };
   const run = async (env: Record<string, string>, on: TrialName[]) => {
     const trials = new Stub(DEFAULT_TRIALS);
@@ -894,13 +901,13 @@ test('component trials: a trial that passed moves the price in paper and live al
     return { st: s.engine.status.get(s.market.ticker)!, trials };
   };
   const off = await run({}, []);
-  assert.ok(off.st.trials && off.st.trials.ta! > off.st.taShift! && off.st.taShift! > 0, `full ${off.st.trials?.ta}, today ${off.st.taShift}`);
+  assert.ok(off.st.trials && off.st.trials.ta! > 0 && off.st.taShift === 0, `full ${off.st.trials?.ta}, today ${off.st.taShift}`);
   assert.deepEqual(off.st.trials!.applied, []);
   const rec = off.trials.records.filter(([n]) => n === 'ta');
   assert.ok(rec.length >= 1, 'the contract in its entry window is recorded');
   assert.ok(Math.abs(rec[0][3] - off.st.pModel!) < 1e-12 && Math.abs(rec[0][2] - (off.st.pModel! + off.st.trials!.ta!)) < 1e-4, 'scored with the full tilt against the meta-model\'s price');
   const on = await run({}, ['ta']);
-  assert.ok(Math.abs(on.st.taShift! - on.st.trials!.ta!) < 1e-4 && on.st.taShift! > off.st.taShift! * 1.5, `paper prices with the full-weight tilt once its trial passed: ${on.st.taShift}`);
+  assert.ok(Math.abs(on.st.taShift! - on.st.trials!.ta!) < 1e-4 && on.st.taShift! > 0, `paper prices with the full-weight tilt once its trial passed: ${on.st.taShift}`);
   assert.deepEqual(on.st.trials!.applied, ['ta']);
   // Live: the same passing trial moves live's price the same way (the owner, Oct 28: paper behaves as live).
   const key = path.join(tmpDir(), 'k.pem');
@@ -940,4 +947,21 @@ test('component trials: the trained model comes out of the price when its trial 
   fs.writeFileSync(key, 'x', { mode: 0o600 });
   const live = await run({ TRADING_MODE: 'live', KALSHI_KEY_ID: 'id', KALSHI_PRIVATE_KEY_PATH: key, KALSHI_ENV: 'prod', LIVE_TRADING_ACKNOWLEDGED: 'I_ACCEPT_REAL_MONEY_RISK' }, []);
   assert.ok(Math.abs(live.st.pModel! - live.st.fairValue!) < 1e-12, 'out of live\'s price too');
+});
+
+test('the dashboard\'s snipe badge: the hour\'s target and the held position\'s profit after fees at the bid; pacer off, no target', async () => {
+  for (const pacer of ['true', 'false']) {
+    const { engine, recon, market, md, oms } = await setup({ env: { PACER: pacer } });
+    const r = await recon.run('startup');
+    engine.balance = r!.balance;
+    md.book(market.ticker).applySnapshot({ bids: [{ price: 0.56, size: 50 }], asks: [{ price: 0.58, size: 50 }] }, Date.now());
+    await engine.tick();
+    assert.equal(engine.status.get(market.ticker)!.snipe, undefined, 'flat: no badge');
+    // Long 10 YES bought at 0.40 as a maker: at a 0.56 bid it is +$1.60 less the $0.18 taker fee, +$1.42. A fresh pacer's
+    // slice is the full $4.50, so it is not sniped yet.
+    oms.onFill({ tradeId: 'p1', orderId: '', ticker: market.ticker, side: 'bid', count: 10, price: 0.4, isTaker: false, fee: 0, ts: Date.now() }, { closeTs: market.closeTime, asset: 'BTC' });
+    await engine.tick();
+    const s = engine.status.get(market.ticker)!.snipe!;
+    assert.deepEqual({ ...s, nowUsd: Math.round(s.nowUsd! * 100) / 100 }, { atUsd: pacer === 'true' ? 4.5 : undefined, nowUsd: 1.42, rides: false, closed: false });
+  }
 });

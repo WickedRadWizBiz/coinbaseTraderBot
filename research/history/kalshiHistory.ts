@@ -46,13 +46,48 @@ export interface KalshiHistMarket {
 export function parseCandle(c: Record<string, any>): KalshiCandle | undefined {
   const ts = num(c.end_period_ts);
   if (ts === null) return undefined;
-  const d = (o: any, k: string) => num(o?.[`${k}_dollars`]) ?? (num(o?.[k]) !== null ? num(o?.[k])! / 100 : null);
+  // Legacy fields: integer cents (1..99) on the live endpoints, but dollars (0.01..0.99) on /historical: a value
+  // under 1 is already dollars.
+  const d = (o: any, k: string) => num(o?.[`${k}_dollars`]) ?? (num(o?.[k]) !== null ? (num(o?.[k])! >= 1 ? num(o?.[k])! / 100 : num(o?.[k])!) : null);
   const yb = c.yes_bid ?? {}, ya = c.yes_ask ?? {}, p = c.price ?? {};
   return {
     ts: ts * 1000, bidO: d(yb, 'open'), bidH: d(yb, 'high'), bidL: d(yb, 'low'), bidC: d(yb, 'close'),
     askO: d(ya, 'open'), askH: d(ya, 'high'), askL: d(ya, 'low'), askC: d(ya, 'close'),
     last: d(p, 'close'), volume: num(c.volume_fp ?? c.volume), oi: num(c.open_interest_fp ?? c.open_interest),
   };
+}
+
+const PRICE_KEYS = ['bidO', 'bidH', 'bidL', 'bidC', 'askO', 'askH', 'askL', 'askC', 'last'] as const;
+
+/** Repair stored markets whose candles were parsed as cents when the endpoint sent dollars (a price under one cent
+ *  is impossible, so 0 < v < 0.01 is a dollar value divided by 100 once more). Rewrites the day files in place;
+ *  idempotent. Returns the markets and files changed. */
+export function repairLegacyCents(dir: string, log?: (m: string) => void): { files: number; markets: number } {
+  let files = 0, markets = 0;
+  if (!fs.existsSync(dir)) return { files, markets };
+  for (const series of fs.readdirSync(dir)) {
+    const sd = path.join(dir, series);
+    if (!fs.statSync(sd).isDirectory()) continue;
+    for (const f of fs.readdirSync(sd).filter((x) => x.endsWith('.jsonl'))) {
+      const file = path.join(sd, f);
+      const lines = fs.readFileSync(file, 'utf8').split('\n');
+      let changed = 0;
+      const out = lines.map((l) => {
+        if (!l) return l;
+        let m: KalshiHistMarket;
+        try { m = JSON.parse(l); } catch { return l; }
+        if (!Array.isArray(m.candles)) return l;
+        let hit = false;
+        for (const c of m.candles) for (const k of PRICE_KEYS) { const v = c[k]; if (v !== null && v > 0 && v < 0.01) { c[k] = Math.round(v * 1e6) / 1e4; hit = true; } }
+        if (!hit) return l;
+        changed++;
+        return JSON.stringify(m);
+      });
+      if (changed) { fs.writeFileSync(`${file}.tmp`, out.join('\n')); fs.renameSync(`${file}.tmp`, file); files++; markets += changed; }
+    }
+  }
+  if (markets) log?.(`repaired ${markets} market(s) in ${files} file(s) whose quotes were stored in hundredths of a cent`);
+  return { files, markets };
 }
 
 export function parseHistMarket(m: Record<string, any>, series: string): Omit<KalshiHistMarket, 'candles'> | undefined {

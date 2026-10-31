@@ -117,19 +117,19 @@ jobs:
         run: |
           set -euo pipefail
           DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/models" "$DATA/sweep-env"
-          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/models/model.json "$DATA/models/" || echo "no trained model on the server: the sweep uses the identity model"
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" bot:bot/data/models/model.json "$DATA/models/" || echo "no trained model on the server: the sweep uses the identity model"
           # The other models the engine prices with (the vol profile, vol model and fill model) where the server has them, and
           # its validation gates' state (probation.json: which books' unvalidated models are benched), as the replay check.
-          for f in vol_profile.json vol_model.json fill_model.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
-          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/probation.json "$DATA/sweep-env/probation.json" 2>/dev/null || true
+          for f in vol_profile.json vol_model.json fill_model.json session_risk.json; do rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" bot:bot/data/probation.json "$DATA/sweep-env/probation.json" 2>/dev/null || true
           # The TA network (promoted copy and the newest archived versions its ensemble blends), the rule book, the evolved
           # formula, the component trials' verdicts and the index series the network's context reads, as the replay check.
-          for f in ta_net.json rule_book.json gp_indicators.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
+          for f in ta_net.json rule_book.json gp_indicators.json; do rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
           mkdir -p "$DATA/models/archive/ta_net" "$DATA/sweep-env/history"
-          ssh bot 'ls -1 ~/bot/data/models/archive/ta_net/*.json 2>/dev/null | sort -r | head -4' | while read -r f; do rsync -a --rsync-path="nice -n 19 rsync" "bot:$f" "$DATA/models/archive/ta_net/" 2>/dev/null || true; done
-          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/component_trials.json "$DATA/sweep-env/component_trials.json" 2>/dev/null || true
+          ssh bot 'ls -1 ~/bot/data/models/archive/ta_net/*.json 2>/dev/null | sort -r | head -4' | while read -r f; do rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "bot:$f" "$DATA/models/archive/ta_net/" 2>/dev/null || true; done
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" bot:bot/data/component_trials.json "$DATA/sweep-env/component_trials.json" 2>/dev/null || true
           INC=(--include='/*/'); for a in BTCDOM BTC.D USDT.D TOTAL3 OTHERS.D RTY DXY US10Y VIX HYG; do INC+=("--include=/*/$a/***"); done
-          rsync -a --rsync-path="nice -n 19 rsync" --prune-empty-dirs --max-size=50m "${INC[@]}" --exclude='*' bot:bot/data/history/ "$DATA/sweep-env/history/" 2>/dev/null || true
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --prune-empty-dirs --max-size=50m "${INC[@]}" --exclude='*' bot:bot/data/history/ "$DATA/sweep-env/history/" 2>/dev/null || true
           echo "TA network $([ -f "$DATA/models/ta_net.json" ] && echo "from the server" || echo "shipped") + $(ls "$DATA/models/archive/ta_net" | wc -l) archived; index series $(find "$DATA/sweep-env/history" -name '*.csv' | wc -l) file(s)"
           # The server's settings without any credential line and without server paths (the same filter as Remote training).
           ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$DATA/sweep-env/train.env" || true
@@ -376,9 +376,9 @@ jobs:
           vanished_ok() { local c=$?; [ $c -eq 24 ] && return 0; return $c; }
           PAT=$(for i in $(seq "$RS_RECORDED_DAYS" -1 1); do printf -- "-name 'md-%s.jsonl*' -o " "$(date -u -d "$i days ago" +%F)"; done | sed -E 's/ -o $//')
           ssh bot "cd ~/bot/data/recordings && find . -maxdepth 1 -type f \( $PAT \) -printf '%P\n'" > "$RUNNER_TEMP/rec.txt"
-          rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/rec.txt" bot:bot/data/recordings/ data/recordings/ || vanished_ok
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/rec.txt" bot:bot/data/recordings/ data/recordings/ || vanished_ok
           echo "recorded days: $(ls data/recordings | sed -nE 's/^md-([0-9-]{10}).*/\1/p' | sort -u | paste -sd' ' -)"
-          rsync -a bot:bot/data/models/sweeps/replay-check-latest.json data/sweeps/ 2>/dev/null || echo "no replay check on the server yet"
+          rsync -a --bwlimit=8000 bot:bot/data/models/sweeps/replay-check-latest.json data/sweeps/ 2>/dev/null || echo "no replay check on the server yet"
       - name: Stage 4 (the bot's recorded days) and the verdict
         run: |
           node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$RS_DAYS"
@@ -407,5 +407,5 @@ jobs:
       - name: Copy the proposal to the server
         run: |
           ssh bot "mkdir -p ~/bot/data/models/sweeps"
-          rsync -a data/sweeps/random-kalshi.json bot:bot/data/models/sweeps/
+          rsync -a --bwlimit=8000 --whole-file data/sweeps/random-kalshi.json bot:bot/data/models/sweeps/
           echo "proposal copied to the server (data/models/sweeps/random-kalshi.json); nothing applied"

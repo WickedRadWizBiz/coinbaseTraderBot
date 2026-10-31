@@ -6,7 +6,8 @@ import { PaperPerpExchange } from '../bot/perps/paperPerp';
 import { PerpHub, type PerpSnapshot } from '../bot/perps/perpData';
 import { KalshiPerpsRest, parsePerpBalance, parsePerpOrder, parsePerpRisk } from '../bot/perps/perpRest';
 import { PerpModel, priorMuBps, type PerpModelParams } from '../bot/perps/perpSignal';
-import { decidePerp, PerpTrader, type PerpDecisionInput, type PerpTraderParams } from '../bot/perps/perpTrader';
+import { decidePerp, perpNetUsd, PerpTrader, type PerpDecisionInput, type PerpTraderParams } from '../bot/perps/perpTrader';
+import { QuotaFloors } from '../bot/risk/quotaPacer';
 
 const T0 = 1_800_000_000_000;
 // A realistic per-contract market: 0.001 BTC contracts priced ~$100 (index $100,000).
@@ -150,6 +151,86 @@ test('live loop: executor + trader enter as maker, set the exchange stop, stop o
   assert.equal((await sim.getPositions()).length, 0, 'flattened immediately');
 });
 
+test('quota snipe on perps (Steven, Oct 30: the profit rules apply to every contract type; perps never settle): closed at the touch once its profit after fees covers the hour; every closed position counts toward the clock', async () => {
+  const PT = { ...P, takerBps: 12 };
+  // 5 long from 100, bid 101.20: +$6.00 less the maker entry and taker exit fees covers $4.50 -> closed now, urgent.
+  const net = perpNetUsd(5, 100, 101.2, PT);
+  assert.ok(Math.abs(net - (6 - (5 * (100 * 5 + 101.2 * 12)) / 1e4)) < 1e-9);
+  const d = decidePerp(base({ current: 5, entryPrice: 100, bid: 101.2, ask: 101.22, pacerUsd: 4.5 }), PT);
+  assert.deepEqual([d.target, d.urgent, d.reason], [0, true, `quota snipe: +$${net.toFixed(2)} net on 5 at 101.2 covers the $4.50 the hour needs`]);
+  // A short mirrors it at the ask; short of the hour's need, or with the pacer off, the signal decides (here: hold).
+  assert.match(decidePerp(base({ current: -5, entryPrice: 102.5, bid: 100.98, ask: 101, muBps: -40, pacerUsd: 4.5 }), PT).reason, /^quota snipe: \+\$6\.6\d net on -5 at 101 /);
+  assert.equal(decidePerp(base({ current: 5, entryPrice: 100, bid: 100.5, ask: 100.52, pacerUsd: 4.5 }), PT).reason.split(' ')[0], 'hold');
+  assert.equal(decidePerp(base({ current: 5, entryPrice: 100, bid: 101.2, ask: 101.22 }), PT).reason.split(' ')[0], 'hold');
+  // The live loop: the executor closes the sniped position at the touch (reduce-only IOC), and the next tick credits the
+  // closed contracts' result to the clock, the paper account's own realized P&L less fees.
+  const hub = new PerpHub();
+  let now = T0;
+  hub.apply(snap({ ts: now }));
+  const sim = new PaperPerpExchange(hub, () => 'BTC', { makerBps: 5, takerBps: 12 }, undefined, () => now, 1000);
+  const ex = new PerpHedger({ gateway: sim, hub, params: { minDollarDelta: 2000, maxNotionalUsd: 1000, excludeTauSec: 120, repriceSec: 30, takerAfterSec: 300 }, now: () => now, minTickMs: 0 });
+  const trader = new PerpTrader({ params: PT, hub, gateway: sim, model: model(40, true), sources: () => ({}) });
+  const credits: number[] = [], snipes: string[] = [];
+  const pacer = { neededUsd: 0.75, credit: (usd: number) => { credits.push(usd); }, snipe: (_t: string, why: string) => { snipes.push(why); } };
+  const tick = () => ex.tick([], { directional: (c) => trader.targets({ ...c, now }, { pacer }) });
+  await tick();
+  now += 5000; hub.apply(snap({ ts: now, bid: 99.95, ask: 99.98 })); sim.step();
+  const held = (await sim.getPositions())[0].position;
+  assert.ok(held > 0);
+  await tick();
+  assert.equal(snipes.length, 0, 'not in profit yet');
+  now += 5000; hub.apply(snap({ ts: now, bid: 101.5, ask: 101.52 })); sim.step();
+  await tick();
+  assert.equal(snipes.length, 1);
+  assert.match(snipes[0], /^quota snipe: /);
+  assert.equal((await sim.getPositions()).length, 0, 'closed at the bid');
+  now += 5000; await tick();
+  const led = sim.ledger()['BTC-PERP'];
+  assert.equal(credits.length, 1);
+  assert.ok(Math.abs(credits[0] - perpNetUsd(held, 99.99, 101.5, PT)) < 1e-9, `${credits[0]}`);
+  assert.ok(Math.abs(credits[0] - (led.realized - led.fees)) < 1e-9, `credit ${credits[0]} = the account's ${led.realized - led.fees}`);
+});
+
+
+test('quota floor on perps (PACER_FLOOR, Steven Oct 31): riding, a signal still holding the position keeps it, the need becomes its floor, and it is closed once its profit falls below it; a perp has no set sell price, so targets snipes', async () => {
+  const PT = { ...P, takerBps: 12 };
+  const at = (o: Partial<PerpDecisionInput>) => decidePerp(base({ current: 5, entryPrice: 100, bid: 101.2, ask: 101.22, pacerUsd: 4.5, ...o }), PT);
+  const net = perpNetUsd(5, 100, 101.2, PT);
+  const ride = at({ pacerFloorMode: 'riding' });
+  assert.deepEqual([ride.target > 0, ride.urgent, ride.pacerArm], [true, false, 4.5], 'held at the signal target');
+  assert.ok(ride.reason.startsWith('hold') && ride.reason.endsWith(`; quota floor: +$${net.toFixed(2)} net covers the $4.50 the hour needs, held for the model signal holding the position`), ride.reason);
+  assert.deepEqual([at({ pacerFloorMode: 'riding', pacerFloor: 6 }).reason, at({ pacerFloorMode: 'riding', pacerFloor: 6 }).urgent], [`quota snipe (floor): +$${net.toFixed(2)} net on 5 at 101.2 fell below its $6.00 floor`, true]);
+  assert.match(at({ pacerFloorMode: 'targets' }).reason, /^quota snipe: /);
+  assert.match(at({ pacerFloorMode: 'off', pacerFloor: 6 }).reason, /^quota snipe: /, 'off ignores a floor');
+  assert.match(at({ pacerFloorMode: 'riding', muBps: -40 }).reason, /^quota snipe: /, 'a signal turned against the position does not hold it');
+  // The live loop: the trader arms the floor on the pacer's floors, then closes the position at the touch below it.
+  const hub = new PerpHub();
+  let now = T0;
+  hub.apply(snap({ ts: now }));
+  const sim = new PaperPerpExchange(hub, () => 'BTC', { makerBps: 5, takerBps: 12 }, undefined, () => now, 1000);
+  const ex = new PerpHedger({ gateway: sim, hub, params: { minDollarDelta: 2000, maxNotionalUsd: 1000, excludeTauSec: 120, repriceSec: 30, takerAfterSec: 300 }, now: () => now, minTickMs: 0 });
+  const trader = new PerpTrader({ params: PT, hub, gateway: sim, model: model(40, true), sources: () => ({}) });
+  const floors = new QuotaFloors();
+  const snipes: string[] = [];
+  const pacer = { neededUsd: 0.75, credit: () => {}, snipe: (_t: string, why: string) => { snipes.push(why); }, floorMode: 'riding' as const, floors };
+  const tick = () => ex.tick([], { directional: (c) => trader.targets({ ...c, now }, { pacer }) });
+  await tick();
+  now += 5000; hub.apply(snap({ ts: now, bid: 99.95, ask: 99.98 })); sim.step();
+  const held = (await sim.getPositions())[0].position;
+  await tick();
+  now += 5000; hub.apply(snap({ ts: now, bid: 101.5, ask: 101.52 })); sim.step();
+  await tick();
+  assert.equal(snipes.length, 0, 'the signal still holds it');
+  assert.equal((await sim.getPositions())[0].position, held);
+  assert.equal(floors.floor('BTC-PERP', held), 0.75);
+  const fall = 99.99 + 0.17 + 0.5 / held; // about +$0.50 after fees: under the floor
+  assert.ok(perpNetUsd(held, 99.99, fall, PT) > 0 && perpNetUsd(held, 99.99, fall, PT) < 0.75, `${held} ${perpNetUsd(held, 99.99, fall, PT)}`);
+  now += 5000; hub.apply(snap({ ts: now, bid: Math.round(fall * 100) / 100, ask: Math.round(fall * 100) / 100 + 0.02 })); sim.step();
+  await tick();
+  assert.equal(snipes.length, 1);
+  assert.match(snipes[0], /^quota snipe \(floor\): \+\$0\.\d\d net on [\d.]+ at [\d.]+ fell below its \$0\.75 floor$/);
+  assert.equal((await sim.getPositions()).length, 0, 'closed at the bid');
+});
 test('perp daily loss stop flattens and halts for the day; unvalidated model trades pilot size only', async () => {
   const hub = new PerpHub();
   let now = T0;

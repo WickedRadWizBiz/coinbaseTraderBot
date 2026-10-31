@@ -7,14 +7,18 @@
 //     over H, or z * sqrt(tau / H) sigma over a contract's remaining life tau. The contract is re-priced
 //     with the index moved by weight x reliability x that drift, so the side the network favours is
 //     worth more than the math alone says (and the other side less). The shift is capped (maxShift).
-//  2. Reliability. Each head counts by what it has proven: a head that passed the blind walk-forward
-//     test counts fully; one that did not counts by its own rolling skill on the last graded calls
-//     (1 - Brier / 0.25 over up to 168 hourly calls): no better than a coin flip -> no influence; better
-//     -> up to full weight. Before 24 graded calls an unvalidated head counts half; in live mode only
-//     while LIVE_ALLOW_UNVALIDATED_MODEL is on (the default: paper and live price alike), else not at all.
-//  3. Breadth. The share of TA / confluence signals agreeing with the trade's direction (TA network 1h
-//     and 4h, the confluence count, the multi-timeframe trend / momentum rules, RSI and EMA stack):
-//     the more agree, the larger the conviction multiplier on the Kelly size (bot/strategy/adversary.ts).
+//  2. Reliability. Each head counts by what it has proven on the blind walk-forward test: a head that
+//     passed counts fully (half once its rolling live skill, 1 - Brier / 0.25 over up to 168 graded hourly
+//     calls, turns clearly negative); a head that failed counts for nothing, in paper and in live alike.
+//     An unproven head reaches the price only through its component trial (bot/strategy/componentTrials.ts,
+//     every head at full weight), which switches it on when it beats the price without it on settlements.
+//     The rolling skill never promotes a failed head: 168 hourly calls is far too few to overturn the test
+//     (the Oct 2026 network's 1h head is a coin flip on its holdout and its 4h head significantly worse).
+//  3. Breadth. The share of TA / confluence signals agreeing with the trade's direction, one vote per
+//     independent idea: the TA network (its proven heads together), the confluence count, the momentum
+//     family (the multi-timeframe trend / momentum rules, RSI and EMA stack, which mostly say the same
+//     thing and used to cast up to five votes), the rule book and the evolved formula. The more agree,
+//     the larger the conviction multiplier on the Kelly size (bot/strategy/adversary.ts).
 //  4. Altcoin risk-on rule. An altcoin (every asset but BTC by default), when USDT.D is falling and RSI
 //     is above 50, is selected first and sized at altBoost x (2.5x) its normal Kelly size, for trades
 //     long the underlying (YES on up / above, a perp long): that is the setup the rule describes.
@@ -60,14 +64,13 @@ export interface ConvictionConfig {
 const H = 3600;
 const MIN_GRADED = 24;
 
-/** How much a head counts (0..1). */
-export function reliability(validated: boolean | undefined, skill: number | undefined, graded: number | undefined, live: boolean): number {
+/** How much a head counts (0..1): a validated head fully, half once its rolling live skill is clearly negative; a head
+ *  that failed its blind test nothing (`live` is kept for callers: paper and live weigh heads the same). */
+export function reliability(validated: boolean | undefined, skill: number | undefined, graded: number | undefined, _live: boolean): number {
+  if (!validated) return 0;
   const g = graded ?? 0;
   const s = skill !== undefined && Number.isFinite(skill) ? skill : undefined;
-  if (validated) return s !== undefined && g >= MIN_GRADED && s < -0.02 ? 0.5 : 1;
-  if (s === undefined || g < MIN_GRADED) return live ? 0 : 0.5;
-  if (s <= 0) return 0;
-  return Math.min(1, 0.5 + s * 25);
+  return s !== undefined && g >= MIN_GRADED && s < -0.02 ? 0.5 : 1;
 }
 
 /** Expected move over `tauSec` in sigma units (of sigma * sqrt(tau)), signed: + = up. Undefined without a usable head.
@@ -87,7 +90,7 @@ export function taDrift(v: TaNetView | undefined, tauSec: number, c: Pick<Convic
     // Closer horizons speak louder: weight by how well H matches tau (1 at tau = H, 1/4 at 4x off).
     const match = Math.min(tauSec, h.hSec) / Math.max(tauSec, h.hSec);
     const w = h.r * Math.sqrt(match);
-    num += w * z * Math.sqrt(tauSec / h.hSec) * h.r;
+    num += w * z * Math.sqrt(tauSec / h.hSec);
     den += w;
     parts.push(`${h.name} P(up) ${h.p.toFixed(3)} x${h.r.toFixed(2)}`);
   }
@@ -99,16 +102,21 @@ export function taDrift(v: TaNetView | undefined, tauSec: number, c: Pick<Convic
 export function orientedSignals(f: Record<string, number>, v: TaNetView | undefined, live: boolean, rb?: { score: number; n: number }, gp?: { exposure: number }): Array<[string, number]> {
   const out: Array<[string, number]> = [];
   const add = (name: string, x: number | undefined, dead = 0) => { if (x !== undefined && Number.isFinite(x) && Math.abs(x) > dead) out.push([name, x]); };
+  // The TA network's proven heads, reliability-weighted, as ONE vote (the heads share a network).
   if (v) {
-    if (reliability(v.validated1, v.skill1, v.graded1, live) > 0 && v.up1 !== undefined) add('TA net 1h', v.up1 - 0.5, 0.02);
-    if (reliability(v.validated4, v.skill4, v.graded4, live) > 0 && v.up4 !== undefined) add('TA net 4h', v.up4 - 0.5, 0.02);
+    let num = 0, den = 0;
+    for (const [p, r] of [[v.up1, reliability(v.validated1, v.skill1, v.graded1, live)], [v.up4, reliability(v.validated4, v.skill4, v.graded4, live)]] as const) {
+      if (p === undefined || !Number.isFinite(p) || r <= 0) continue;
+      num += r * (p - 0.5); den += r;
+    }
+    if (den > 0) add('TA net', num / den, 0.02);
   }
   add('confluence count', f.conf_count);
-  add('MTF trend', f.taconf_net_trend, 0.5);
-  add('trend alignment', f.taconf_trend_alignment, 0.1);
-  add('MTF momentum', f.taconf_mtf_momentum, 0.1);
-  add('RSI 1h', f.ta_rsi_1h, 0.04);
-  add('EMA stack 1h', f.ta_ema_stack_1h, 0.1);
+  // The momentum family as ONE vote: the mean sign of the readings outside their dead bands (the multi-timeframe
+  // trend / momentum rules, RSI and the EMA stack mostly measure the same move).
+  const fam: Array<[number | undefined, number]> = [[f.taconf_net_trend, 0.5], [f.taconf_trend_alignment, 0.1], [f.taconf_mtf_momentum, 0.1], [f.ta_rsi_1h, 0.04], [f.ta_ema_stack_1h, 0.1]];
+  const votes = fam.filter(([x, dead]) => x !== undefined && Number.isFinite(x) && Math.abs(x) > dead).map(([x]) => Math.sign(x!));
+  if (votes.length) add('momentum', votes.reduce((a, b) => a + b, 0) / votes.length);
   // The rules that passed the walk-forward study for this character (bot/strategy/ruleBook.ts).
   if (rb && rb.n > 0) add('rule book', rb.score, 0.1);
   // The evolved formula's exposure (bot/gp/gpSignals.ts), outside its dead band.

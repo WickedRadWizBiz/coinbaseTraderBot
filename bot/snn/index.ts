@@ -9,7 +9,7 @@ import { DEFAULT_BLENDER, SnnBlender, TargetScaler } from './blender';
 import { SnnHost, type SnnHostLike } from './host';
 import type { SnnCheckpoint, SnnModelFile } from './network';
 import { SnnPopulationHost } from './population';
-import { DEFAULT_SNN, domainParams, SNN_DOMAINS, stageFlags, versionHash, type SnnDomain, type SnnParams } from './params';
+import { anchorFor, DEFAULT_SNN, domainParams, SNN_DOMAINS, stageFlags, versionHash, type SnnDomain, type SnnParams } from './params';
 
 export { SnnBlender, TargetScaler } from './blender';
 export { SnnHost } from './host';
@@ -18,7 +18,7 @@ const log = logger('snn');
 
 export function snnParams(c: SnnConfig, domain?: SnnDomain): SnnParams {
   const stage = domain ? c.domains[domain].stage : c.stage;
-  const base = { ...DEFAULT_SNN, seed: c.seed, maxColumns: c.maxColumns, readoutEta: c.readoutEta, flags: { ...stageFlags(stage), ...c.deferred } };
+  const base = { ...DEFAULT_SNN, seed: c.seed, maxColumns: c.maxColumns, readoutEta: c.readoutEta, flags: { ...stageFlags(stage), ...c.deferred }, ...(anchorFor(c.anchorMid, domain) ? { anchorMid: true } : {}) };
   return domain ? domainParams(domain, base) : base;
 }
 

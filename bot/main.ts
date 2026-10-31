@@ -19,6 +19,7 @@ import { KalshiWs } from './kalshi/ws';
 import { MarketData, Recorder } from './marketdata/marketData';
 import { MetaModel } from './model/metaModel';
 import { loadVolProfile, type VolProfile } from './model/volSeasonality';
+import { loadSessionRiskFile } from './model/sessionRisk';
 import { loadCalendar } from './model/calendar';
 import { ModelHealth } from './model/modelHealth';
 import { AccuracyGate } from './strategy/accuracyGate';
@@ -74,6 +75,7 @@ import { SinuousExitGate } from './strategy/sinuousExit';
 import { ExitBenches, TakeProfitBench } from './strategy/takeProfitBench';
 import { LiveLines } from './strategy/liveLine';
 import { ComponentTrials, TRIAL_LABEL } from './strategy/componentTrials';
+import { Scoreboard } from './health/scoreboard';
 import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
 
 const log = logger('main');
@@ -159,6 +161,9 @@ async function main(): Promise<void> {
     audit.write('trial', { event: to, trial: name, why, appliesIn: 'paper' });
     alerter.notify('info', `trial-${name}`, `Trial: the ${TRIAL_LABEL[name]} is ${to === 'on' ? 'now ON in paper' : to === 'off' ? 'OFF in paper' : 'testing'}: ${why}`);
   }) : undefined;
+  // The scoreboard: every price against the Kalshi market on every settled crypto contract, paper and live alike
+  // (bot/health/scoreboard.ts). Each book keeps its own.
+  const scoreboard = cfg.scoreboard.enabled ? new Scoreboard(cfg.scoreboard, path.join(cfg.bookDir, 'scoreboard.json')) : undefined;
   // Entry curve (SINUOUS_ENTRY, bot/strategy/sinuousEntry.ts): monitor scores maker entries by the book's curve at the
   // fill; gate also holds back quotes the curve is running against.
   const curveEntry = cfg.sinuousEntry.mode === 'off' ? undefined : new SinuousEntryGate(cfg.sinuousEntry, path.join(cfg.bookDir, 'curve-entry.json'));
@@ -470,7 +475,7 @@ async function main(): Promise<void> {
           horizonMin: P.horizonMin, entryEdgeBps: P.entryEdgeBps, exitEdgeBps: P.exitEdgeBps, kellyFraction: P.kellyFraction, maxLeverage: P.maxLeverage,
           maxNotionalUsd: P.maxTradeNotionalUsd, maxTotalNotionalUsd: P.maxTotalNotionalUsd, stopAtrMult: P.stopAtrMult, minStopBps: P.minStopBps, maxHoldMin: P.maxHoldMin,
           dailyLossFrac: P.dailyLossFrac, cooldownMin: P.cooldownMin, pilotMaxNotionalUsd: P.pilotMaxNotionalUsd, pilotMaxLeverage: P.pilotMaxLeverage, priorIc: P.priorIc,
-          makerBps: P.makerFeeBps, requireValidation: P.requireValidation, minEquityUsd: P.minEquityUsd, liqBuffer: P.liqBuffer, maintMargin: P.maintMargin,
+          makerBps: P.makerFeeBps, takerBps: P.takerFeeBps, requireValidation: P.requireValidation, minEquityUsd: P.minEquityUsd, liqBuffer: P.liqBuffer, maintMargin: P.maintMargin,
         },
         hub, gateway: perpGateway, model: perpModel, audit, trainingOverride,
         sources: (asset) => ({ index: md.index.get(asset), spot: md.spot.get(asset), bars: md.features.bars.get(asset), candles: md.features.candles.get(asset), usdtd: md.usdtd, btcd: md.btcd, perp: hub.get(asset), snn: engineRef?.snnContext(asset, undefined, 'perps') }),
@@ -547,6 +552,10 @@ async function main(): Promise<void> {
   const exchangeStatus = new ExchangeStatusMonitor(rest);
   exchangeStatus.start();
   const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, accuracyGate, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json'), curveExit, takeProfitBench, exitBenches, curveEntry, liveLines, trials });
+  const engine: Engine = new Engine({ kalshiCheck, control, exchangeStatus, cfg, audit, alerter, md, gateway, oms, risk, kill, recon, model, volProfile, vault, balanceMonitor, balanceMonitorPath, tca, equityGuard, modelHealth, taHealth, accuracyGate, calendar, hedger, perpTrader: directionalTrader, clock, tennisScores, tennisFair, volModel, fillModel, fillLogDir: path.join(cfg.dataDir, 'fills'), snn, snnBlenderPath: path.join(cfg.snn.checkpointDir, 'blender.json'), curveExit, takeProfitBench, curveEntry, liveLines, trials, scoreboard });
+  // The pipeline's session risk profile (session_risk.json), under SESSION_RISK; autotrain hot-swaps new ones.
+  const sr = loadSessionRiskFile(modelPaths.session_risk);
+  if (sr) { engine.setSessionRiskAuto(sr.profile); log.info(`session risk ${sr.version}${cfg.strategy.sessionRiskAuto ? '' : ' loaded, not applied (SESSION_RISK_AUTO off)'}`, { sessions: Object.keys(sr.profile) }); }
   engineRef = engine;
   // Module ledger once an hour (and 5 minutes after start) in the audit log, for the daily module report
   // (deploy/module_report.py): which parts were on, shadow, off or benched, and what flagged them.

@@ -1,0 +1,107 @@
+# Maker exit study (research/makerExitStudy.ts; the owner's choice on Oct 28: measure before building a new exit). Would a
+# resting post-only sell, placed when each paper position opened, have paid better than the exits paper took? Replays
+# paper's own positions (the audit log) against the real Kalshi tape the bot recorded and prints fill rates and dollars
+# for each target rule against paper's actual exits and against holding to settlement.
+#
+# Read-only on the server: it copies the audit log and the recorded days, nothing is written back. This repository is
+# public: the job prints counts and $ totals only, never settings, keys or logs.
+#
+# Required secrets (the same as Deploy): LIGHTSAIL_HOST, LIGHTSAIL_USERNAME, LIGHTSAIL_SSH_KEY (optional LIGHTSAIL_PORT).
+name: Maker exit study
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Recorded days to study, comma separated (empty = the 3 newest complete days)'
+        required: false
+        default: ''
+  push:
+    branches: ['claude/maker-exit-study']
+    paths: ['.github/workflows/maker-exit-study.yml', 'research/makerExitStudy.ts']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maker-exit-study
+  cancel-in-progress: false
+
+jobs:
+  study:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Copy the audit log and the recorded days (read-only)
+        env:
+          STUDY_DAYS: ${{ inputs.days || '' }}
+        run: |
+          set -euo pipefail
+          DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/audit" "$DATA/sweeps"
+          vanished_ok() { local c=$?; [ $c -eq 24 ] && return 0; return $c; }
+          if [ -z "$STUDY_DAYS" ]; then
+            # The 3 newest complete (gzipped, not today's) recorded days.
+            STUDY_DAYS=$(ssh bot "ls -1 ~/bot/data/recordings/ 2>/dev/null" | sed -nE 's/^md-([0-9]{4}-[0-9]{2}-[0-9]{2})\.jsonl\.gz$/\1/p' | grep -v "^$(date -u +%F)$" | sort | tail -n 3 | paste -sd, -)
+          fi
+          D=$(echo "$STUDY_DAYS" | tr -d ' ')
+          [[ "$D" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}(,[0-9]{4}-[0-9]{2}-[0-9]{2})*$ ]] || { echo "days must be YYYY-MM-DD[,YYYY-MM-DD...]"; exit 1; }
+          echo "$D" > "$DATA/sweeps/study-days.txt"
+          # The day before the first one is copied too (its recording only): markets are written once, when the bot first
+          # lists them, and their book snapshots when it subscribes, so the first hours' markets were introduced then.
+          PREV=$(date -u -d "$(echo "$D" | tr ',' '\n' | sort | head -n 1) -1 day" +%F)
+          for d in $PREV ${D//,/ }; do
+            if [ "$d" != "$PREV" ]; then
+              ssh bot "cd ~/bot/data/audit && find . -maxdepth 1 -type f -name 'audit-$d*' -printf '%P\n'" > "$RUNNER_TEMP/audit-$d.txt"
+              rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/audit-$d.txt" bot:bot/data/audit/ "$DATA/audit/" || vanished_ok
+            fi
+            if ssh bot "test -f ~/bot/data/recordings/md-$d.jsonl.gz"; then
+              rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "bot:bot/data/recordings/md-$d.jsonl.gz" "$DATA/recordings/" || vanished_ok
+            elif ssh bot "test -f ~/bot/data/recordings/md-$d.jsonl"; then
+              rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "bot:bot/data/recordings/md-$d.jsonl" "$DATA/recordings/" || vanished_ok
+              [ ! -f "$DATA/recordings/md-$d.jsonl" ] || gzip -1 "$DATA/recordings/md-$d.jsonl"
+            else
+              echo "no recording for $d on the server"
+            fi
+          done
+          echo "days $D (+ $PREV recording as warm-up): audit $(ls "$DATA/audit" | wc -l) file(s), recordings $(ls "$DATA/recordings" | wc -l) file(s)"
+          du -sh "$DATA/recordings" | cat
+      - name: Study
+        run: |
+          T0=$(date +%s)
+          node --max-old-space-size=6144 --import tsx research/makerExitStudy.ts --recordings data/recordings --audit data/audit \
+            --days "$(cat data/sweeps/study-days.txt)" --out data/sweeps/maker-exit-study.json
+          echo "study took $(( ($(date +%s) - T0) / 60 )) min"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: maker-exit-study
+          path: data/sweeps/maker-exit-study.json
+          if-no-files-found: ignore
+          retention-days: 30

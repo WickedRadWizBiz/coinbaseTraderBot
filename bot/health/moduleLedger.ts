@@ -13,6 +13,8 @@
 //
 // It only reads statuses the modules already keep; it never changes anything.
 
+import type { ScoreboardStatus } from './scoreboard';
+
 export type ModuleState = 'on' | 'shadow' | 'off' | 'benched';
 
 export interface ModuleScore {
@@ -24,7 +26,7 @@ export interface ModuleScore {
 
 export interface ModuleRow {
   module: string;
-  area: 'pricing' | 'regime' | 'gates' | 'sizing' | 'exits' | 'data';
+  area: 'pricing' | 'regime' | 'gates' | 'sizing' | 'exits' | 'data' | 'throughput';
   state: ModuleState;
   validated: boolean | null;
   score: ModuleScore | null;
@@ -33,7 +35,7 @@ export interface ModuleRow {
 }
 
 export interface TrialReading { state: 'testing' | 'on' | 'off'; applied: boolean; windows: number; advantage: number | null; pWorse: number | null }
-export interface HealthReading { windows: number; advantage: number | null; pWorse: number | null }
+export interface HealthReading { windows: number; advantage: number | null; pWorse: number | null; drift?: { alarm: boolean; since: number | null } }
 
 /** What the ledger reads, gathered by the engine from the modules' own statuses (missing = the part is not loaded). */
 export interface LedgerInput {
@@ -47,6 +49,8 @@ export interface LedgerInput {
   taHealth?: HealthReading | null;
   /** Component trials (bot/strategy/componentTrials.ts): mlp, snn, ta, rules; applied in paper only. */
   trials?: Partial<Record<'mlp' | 'snn' | 'ta' | 'rules', TrialReading>> | null;
+  /** The scoreboard: every price against the Kalshi market on settled windows (bot/health/scoreboard.ts). */
+  scoreboard?: ScoreboardStatus | null;
   snn?: { mode: string; alpha: number | null } | null;
   taNet?: { version: string; activeHeads: number } | null;
   ruleBook?: { passed: number } | null;
@@ -60,6 +64,8 @@ export interface LedgerInput {
   sizing: {
     /** PAPER_ORDER_FRAC / PAPER_ORDER_USD in dollars an order (0 = paper sizes like live). */
     paperOrderUsd: number;
+    /** ORDER_USD_MIN / ORDER_USD_MAX, paper and live (null = off). */
+    orderBandUsd?: { min: number; max: number } | null;
     tier: string;
     /** EquityGuard's loss-aware size scale (1 = full size). */
     sizeScale: number | null;
@@ -73,7 +79,22 @@ export interface LedgerInput {
   /** Index age per asset (ms; null = never seen). */
   indexAgeMs: Record<string, number | null>;
   maxIndexAgeMs: number;
+  /** Market-state readings per coin (bot/marketdata/marketState.ts). */
+  marketState?: Record<string, { rv1h: number | null; changeProb: number | null; spread: number | null }> | null;
+  /** Throughput (phase 6): is the bot keeping up with the market? */
+  throughput?: {
+    /** Main-thread busy share over the last minute (event-loop utilization). */
+    mainBusy: number | null;
+    /** How far behind real time Kalshi's data reaches the bot (ms). */
+    feedLagMs: number | null;
+    ordersLastMinute: number;
+    maxOrdersPerMinute: number;
+    /** Oldest evaluation among markets the bot holds or quotes (ms; null = none held). */
+    heldEvalAgeMs: number | null;
+  } | null;
 }
+
+const driftFlag = (h: HealthReading | null | undefined): string[] => (h?.drift?.alarm ? [`drift: scoring worse since ${h.drift.since ? new Date(h.drift.since).toISOString().slice(0, 16) : 'recently'}`] : []);
 
 const r4 = (x: number | null | undefined): number | null => (x === null || x === undefined || !Number.isFinite(x) ? null : +x.toFixed(4));
 
@@ -92,7 +113,8 @@ function trialRow(module: string, area: ModuleRow['area'], t: TrialReading | und
 export function buildLedger(x: LedgerInput): ModuleRow[] {
   const rows: ModuleRow[] = [];
   const tr = x.trials ?? {};
-  const paperSized = x.mode === 'paper' && x.sizing.paperOrderUsd > 0;
+  // A paper order size or the order band sizes every order: the tier, the loss scale, optimal f and portfolio Kelly stand by.
+  const paperSized = (x.mode === 'paper' && x.sizing.paperOrderUsd > 0) || Boolean(x.sizing.orderBandUsd);
 
   // Pricing.
   const mlpValid = x.model.liveBlockers.length === 0;
@@ -100,12 +122,22 @@ export function buildLedger(x: LedgerInput): ModuleRow[] {
   if (x.modelHealth) {
     const h = x.modelHealth;
     const worse = h.pWorse !== null && h.pWorse < 0.05;
-    rows.push({ module: 'pricing vs market', area: 'pricing', state: 'on', validated: null, score: { label: 'log loss better than the calibrated market a window', value: r4(h.advantage), n: h.windows }, flags: worse ? ['significantly worse than the market price'] : [] });
+    rows.push({ module: 'pricing vs market', area: 'pricing', state: 'on', validated: null, score: { label: 'log loss better than the calibrated market a window', value: r4(h.advantage), n: h.windows }, flags: [...(worse ? ['significantly worse than the market price'] : []), ...driftFlag(h)] });
+  }
+  // The scoreboard: one row per price against the market (shadow: it changes nothing; validated = better with its CI).
+  for (const r of x.scoreboard?.rows ?? []) {
+    const c = r.vsMarket;
+    const flags: string[] = [];
+    if (c.verdict === 'worse') flags.push('worse than the market (95% CI)');
+    if (c.verdict === 'undecided' && c.ci) flags.push(`undecided: 95% CI [${c.ci[0]}, ${c.ci[1]}] over ${c.days} day(s)`);
+    if (r.vsRefined && r.vsRefined.verdict !== 'too few') flags.push(`vs ${r.vsRefined.baseline.replace('_', ' ')}: ${r.vsRefined.verdict} (${r.vsRefined.saved! >= 0 ? 'saves' : 'costs'} ${Math.abs(r.vsRefined.saved!).toFixed(4)})`);
+    rows.push({ module: `scoreboard: ${r.label}`, area: 'pricing', state: c.verdict === 'too few' ? 'off' : 'shadow', validated: c.verdict === 'too few' ? null : c.verdict === 'better', score: { label: 'log loss saved a window vs the Kalshi market', value: r4(c.saved), n: c.windows }, flags });
   }
   const snnOn = x.snn && x.snn.mode !== 'off';
   rows.push(trialRow('SNN', 'pricing', tr.snn, { state: !snnOn ? 'off' : x.snn!.mode === 'blend' && (x.snn!.alpha ?? 0) > 0 ? 'on' : 'shadow', validated: null, note: snnOn ? `mode ${x.snn!.mode}, alpha ${x.snn!.alpha ?? 0}` : undefined }, x.mode));
   const ta = trialRow('TA network', 'pricing', tr.ta, { state: x.taNet ? (x.taNet.activeHeads > 0 ? 'on' : 'shadow') : 'off', validated: x.taNet ? x.taNet.activeHeads > 0 : null, note: x.taNet ? `${x.taNet.version}, ${x.taNet.activeHeads} validated heads` : undefined }, x.mode);
   if (x.taHealth && x.taHealth.pWorse !== null && x.taHealth.pWorse < 0.05) ta.flags.push('its drift makes prices significantly worse');
+  ta.flags.push(...driftFlag(x.taHealth));
   rows.push(ta);
   rows.push(trialRow('rule book', 'pricing', tr.rules, { state: x.ruleBook && x.ruleBook.passed > 0 ? 'on' : 'off', validated: x.ruleBook ? x.ruleBook.passed > 0 : null }, x.mode));
   if (x.volModel) rows.push({ module: 'volatility forecast', area: 'pricing', state: x.volModel.applied ? 'on' : x.volModel.validated ? 'off' : 'shadow', validated: x.volModel.validated, score: { label: 'held-out QLIKE improvement', value: r4(x.volModel.improvement), n: 0 }, flags: [] });
@@ -130,7 +162,9 @@ export function buildLedger(x: LedgerInput): ModuleRow[] {
   }
 
   // Sizing.
-  const sizingFlags = paperSized ? [`bypassed in paper: every order is $${x.sizing.paperOrderUsd.toFixed(2)} (PAPER_ORDER_FRAC/USD)`] : [];
+  const band = x.sizing.orderBandUsd;
+  const sizingFlags = !paperSized ? [] : x.mode === 'paper' && x.sizing.paperOrderUsd > 0 ? [`bypassed in paper: every order is $${x.sizing.paperOrderUsd.toFixed(2)} (PAPER_ORDER_FRAC/USD)`]
+    : band ? [`bypassed: every order is $${band.min}-$${band.max} (ORDER_USD_MIN/MAX)`] : [];
   rows.push({ module: 'sizing tier', area: 'sizing', state: paperSized ? 'shadow' : 'on', validated: null, score: null, flags: [...sizingFlags], note: x.sizing.tier });
   rows.push({ module: 'loss-aware size scale', area: 'sizing', state: paperSized ? 'shadow' : 'on', validated: null, score: { label: 'size multiplier', value: r4(x.sizing.sizeScale), n: 0 }, flags: [...sizingFlags] });
   const of = x.sizing.optimalF;
@@ -150,6 +184,22 @@ export function buildLedger(x: LedgerInput): ModuleRow[] {
     const stale = age === null || age > x.maxIndexAgeMs;
     rows.push({ module: `index ${asset}`, area: 'data', state: stale ? 'off' : 'on', validated: null, score: { label: 'seconds since the last index value', value: age === null ? null : +(age / 1000).toFixed(1), n: 0 }, flags: stale ? ['stale: blocks new orders on it'] : [] });
   }
+  for (const [asset, r] of Object.entries(x.marketState ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
+    const flags = [r.rv1h === null ? 'volatility: under an hour of index minutes' : '', r.spread === null ? 'no Kalshi book in 5 minutes' : ''].filter(Boolean);
+    rows.push({ module: `market state ${asset}`, area: 'data', state: r.rv1h === null ? 'off' : 'on', validated: null, score: { label: 'P(change point in the last 5 minutes)', value: r4(r.changeProb), n: 0 }, flags });
+  }
+  // Throughput (phase 6): scale the machinery only when these show the bot falling behind.
+  const t = x.throughput;
+  if (t) {
+    const lag = (module: string, label: string, value: number | null, limit: number, flag: string, d = 3) => {
+      const bad = value !== null && value > limit;
+      rows.push({ module, area: 'throughput', state: value === null ? 'off' : 'on', validated: null, score: { label, value: value === null ? null : +value.toFixed(d), n: 0 }, flags: bad ? [flag] : [] });
+    };
+    lag('main thread', 'busy share of the last minute', t.mainBusy, 0.8, 'over 80% busy: evaluations queue behind each other');
+    lag('Kalshi feed', 'seconds behind real time', t.feedLagMs === null ? null : t.feedLagMs / 1000, 2, 'over 2 s behind: prices act on stale books', 2);
+    lag('order rate', 'share of the per-minute order limit', t.maxOrdersPerMinute > 0 ? t.ordersLastMinute / t.maxOrdersPerMinute : null, 0.8, 'over 80% of the order limit: new risk is refused first');
+    lag('held-market evaluation', 'seconds since the oldest evaluation of a held market', t.heldEvalAgeMs === null ? null : t.heldEvalAgeMs / 1000, 3, 'a held market went over 3 s without an evaluation', 1);
+  }
   return rows;
 }
 
@@ -157,5 +207,5 @@ export function buildLedger(x: LedgerInput): ModuleRow[] {
 export function ledgerLine(r: ModuleRow): string {
   const s = r.score ? ` | ${r.score.label}: ${r.score.value ?? '-'}${r.score.n ? ` (n=${r.score.n})` : ''}` : '';
   const v = r.validated === null ? '' : r.validated ? ' | validated' : ' | not validated';
-  return `${r.area.padEnd(7)} ${r.module.padEnd(26)} ${r.state.padEnd(7)}${v}${s}${r.flags.length ? ` | ${r.flags.join('; ')}` : ''}`;
+  return `${r.area.padEnd(10)} ${r.module.padEnd(26)} ${r.state.padEnd(7)}${v}${s}${r.flags.length ? ` | ${r.flags.join('; ')}` : ''}`;
 }

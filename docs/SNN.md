@@ -228,8 +228,27 @@ Learning resumes after 30 min back within band.
 `SNN_<CRYPTO|PERPS|TENNIS>_MODEL_PATH` (default `params/snn_<domain>.json`), `SNN_CROSS_FEED` (default false),
 `SNN_COLUMNS` (whitelist), `SNN_MAX_COLUMNS`, `SNN_CHECKPOINT_DIR`, `SNN_CHECKPOINT_EVERY_MIN`, `SNN_WORKER`,
 `SNN_TIMEOUT_MS` (≤ 200), `SNN_LATENCY_SKIP_P99_MS`, `SNN_ALPHA_MAX` (≤ 0.25), `SNN_MIN_EVENTS`,
-`SNN_READOUT_ETA`, `SNN_SEED`, `SNN_TARGET_SCALING`, and the deferred flags `SNN_WILSON_COWAN`,
+`SNN_READOUT_ETA`, `SNN_SEED`, `SNN_TARGET_SCALING`, `SNN_ANCHOR_MID` (below), and the deferred flags `SNN_WILSON_COWAN`,
 `SNN_GAP_JUNCTIONS`, `SNN_IZHIKEVICH_CH`, `SNN_DCAAP`.
+
+**The mid-anchored readout (`SNN_ANCHOR_MID`, on by default since Oct 30, crypto network only; the SNN plan's phase 1).** The contract readout prices
+from scratch: logit p = w . phi with a crude fair-value prior in w. Anchored, it starts from the market instead:
+logit p = logit(mid) + w . phi with w at zero, so p equals the contract's mid until the settlements teach a correction,
+and it can only add value where the market is wrong (a `less` contract reads 1 - mid; a `between` contract's mid says
+nothing about either threshold, and a query without a usable mid falls back to the crude prior; the mid is clipped to
+[2%, 98%]). Tags store the anchored p, so the settlement delta is still the exact log-loss gradient; the offline readout
+fit (`research/trainSnn.ts --anchor true`) adds the same offset per snapshot. The engine, the replay and the tapes carry
+the mid with each query; the history walk, the tournament and the daily training read the setting from the
+configuration, and the ablation lists it as a mechanism (`mid-anchored readout`, S5 vs S5). It reaches the crypto
+contract network only (`anchorFor` in params.ts): perps make direction calls with no contract mid, and tennis was never
+measured, so their params and version hashes are unchanged. It is a version of its own: the crypto network starts fresh
+when it flips. Where a network of the other kind is restored or warm-started (the history walk's checkpoints, the daily
+training's `--init` from the walk's elite), the columns carry over but the contract readouts do not: an anchored readout
+starts at zero correction, a plain one at the crude prior. `SNN_ANCHOR_MID=false` turns it off.
+The go/no-go was the ablation on recorded days (Steven, Oct 30). Result, 3,867 windows over 9 days: the anchored readout
+beats the plain one (Brier -0.00094, CI [-0.00170, -0.00020]) and the plain one is worse than the market (+0.00106,
+CI [+0.00024, +0.00192]), but the anchored one only ties the market (+0.00013, CI [-0.00008, +0.00032]). So it is on as
+an improvement to the SNN feature, and the SNN does not take the lead until it beats the market.
 
 The legacy blend uses the crypto network only. **α is earned.** It is the grid α* ∈ [0, 0.25] that minimises blended Brier over the last ≤ 2000 settled
 scanned contracts, with at least 200 events. It is adopted only when the event-clustered day-block CI of
