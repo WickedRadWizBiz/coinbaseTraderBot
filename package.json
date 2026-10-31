@@ -47,6 +47,7 @@
     "research:random-sweep": "tsx research/randomSweep.ts",
     "research:replay-check": "tsx research/replayCheck.ts",
     "research:maker-exit-study": "tsx research/makerExitStudy.ts",
+    "research:spot-wall-study": "tsx research/spotWallStudy.ts",
     "research:seed-candles": "tsx research/seedCandles.ts",
     "research:kalshi-replay-data": "tsx research/kalshiReplayData.ts",
     "research:replay-fidelity": "tsx research/replayFidelity.ts",

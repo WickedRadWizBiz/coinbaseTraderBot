@@ -13,6 +13,11 @@
 //                             the time left at entry) if spot reaches the next spot level in our direction: a swing high
 //                             or low of the last 4 hours of 1-minute index bars, or the hour's high or low
 //   sr+wall                   the lower of the two
+//   spotwall                  like sr, at the near edge of the nearest Coinbase spot book wall in our direction instead:
+//                             a band (10 bps of the whole book) holding at least twice its own trailing hour's median
+//                             (research/spotWallStudy.ts; only where the recordings carry the bands, from Oct 29)
+//   spotwall+wall             the lower of spotwall and wall
+//   sr+spotwall               the first barrier: whichever of the sr level and the spot wall spot reaches first
 // Every target is at least 2c over the entry and one tick over our side's best bid (a post-only order never crosses).
 //
 // A resting sell fills two ways, both counted:
@@ -45,6 +50,7 @@ import type { Candle } from '../bot/ta/indicators';
 import { swings } from '../bot/ta/structure';
 import { ceilToTick, floorToTick, round } from '../bot/util/num';
 import { readRecordings, type RecEvent } from './replay';
+import { SpotWallTracker } from './spotWallStudy';
 
 const isTennis = (t: string) => t.startsWith('KXATP') || t.startsWith('KXWTA');
 const EPS = 1e-9;
@@ -277,7 +283,7 @@ export function lotPnl(lot: Lot, payout: 0 | 1, fills: Array<{ t: number; qty: n
   return cash + left * payout;
 }
 
-export const RULES = ['tp+4c', 'tp+8c', 'tp+12c', 'wall', 'sr', 'sr+wall'] as const;
+export const RULES = ['tp+4c', 'tp+8c', 'tp+12c', 'wall', 'sr', 'sr+wall', 'spotwall', 'spotwall+wall', 'sr+spotwall'] as const;
 export type Rule = (typeof RULES)[number];
 
 export interface RuleTally {
@@ -314,7 +320,7 @@ export async function runStudy(o: { recordings: string; audit: string; days: str
   // Only the lots' markets' books and trades are parsed (most of a recorded day is other markets' books).
   const keep = (kind: string, line: string) => {
     if (kind === 'book' || kind === 'delta' || kind === 'trade') { const m = TICKER.exec(line.slice(0, 200)); return Boolean(m && tickers.has(m[1])); }
-    return kind === 'market' || kind === 'index' || kind === 'result' || kind === 'lifecycle';
+    return kind === 'market' || kind === 'index' || kind === 'result' || kind === 'lifecycle' || kind === 'spot_book';
   };
   const days = [...o.days].sort();
   const markets = new Map<string, Mkt>();
@@ -322,6 +328,7 @@ export async function runStudy(o: { recordings: string; audit: string; days: str
   const index = new Map<string, IndexTracker>();
   const bars = new Map<string, Candle[]>();
   const results = new Map<string, 'yes' | 'no'>();
+  const spotWalls = new SpotWallTracker();
   const pending = [...lots];
   let next = 0, order = 0;
   type Active = { lot: Lot; m: Mkt; sells: Partial<Record<Rule, RestingSell>> };
@@ -373,16 +380,25 @@ export async function runStudy(o: { recordings: string; audit: string; days: str
     const terms = termsOf(m);
     const tau = (m.closeTime - now) / 1000;
     if (up !== undefined && spot && sigma && terms && tau > 60) {
-      const L = nextLevel(bars.get(m.asset) ?? [], spot, up);
-      const fv = L ? priceContract(terms, { spot: L, sigmaPerSqrtSec: sigma, tauSec: tau }) : undefined;
-      if (fv) {
+      // What our side is worth if spot reaches level L, if that banks the minimum (else the level gives no target: the
+      // lot holds).
+      const at = (L: number | undefined): number | undefined => {
+        const fv = L ? priceContract(terms, { spot: L, sigmaPerSqrtSec: sigma, tauSec: tau }) : undefined;
+        if (!fv) return undefined;
         const side = floorToTick(lot.sign > 0 ? fv.pYes : 1 - fv.pYes, tick);
-        // Worth selling there only if it banks the minimum (else the level gives no target: the lot holds).
-        if (side >= floor - EPS && side <= 0.99) {
-          targets.sr = side;
-          targets['sr+wall'] = wall !== undefined && wall >= floor - EPS && wall < side ? clamp(wall) : side;
-        }
-      }
+        return side >= floor - EPS && side <= 0.99 ? side : undefined;
+      };
+      const withWall = (side: number | undefined) => (side === undefined ? undefined : wall !== undefined && wall >= floor - EPS && wall < side ? clamp(wall) : side);
+      const Lsr = nextLevel(bars.get(m.asset) ?? [], spot, up);
+      // The wall's distance from the Coinbase mid, carried onto the index the contract settles on (they differ by bps).
+      const raw = spotWalls.wallLevel(m.asset, now, up), sv = spotWalls.latest(m.asset);
+      const Lsw = raw !== undefined && sv ? spot * (raw / sv.mid) : undefined;
+      const sr = at(Lsr), sw = at(Lsw);
+      if (sr !== undefined) { targets.sr = sr; targets['sr+wall'] = withWall(sr); }
+      if (sw !== undefined) { targets.spotwall = sw; targets['spotwall+wall'] = withWall(sw); }
+      // The first barrier spot meets going our way (a level past spot: nearer = lower going up, higher going down).
+      const near = [Lsr, Lsw].filter((x): x is number => x !== undefined && (up ? x > spot : x < spot));
+      if (near.length) { const first = at(up ? Math.min(...near) : Math.max(...near)); if (first !== undefined) targets['sr+spotwall'] = first; }
     }
     const sells: Partial<Record<Rule, RestingSell>> = {};
     for (const r of RULES) {
@@ -471,6 +487,9 @@ export async function runStudy(o: { recordings: string; audit: string; days: str
       case 'trade':
         for (const g of groups(active.get(e.ticker) ?? [])) allocateTrade(g, e.t, e.price, e.count, e.takerSide);
         break;
+      case 'spot_book':
+        if (!e.hist && e.asset) spotWalls.add(e.asset, { ts: e.ts ?? e.t, b: e.b ?? [], a: e.a ?? [], bw: e.bw, bb: e.bb, ba: e.ba });
+        break;
       case 'result':
       case 'lifecycle':
         if (e.result === 'yes' || e.result === 'no') results.set(e.ticker, e.result);
@@ -525,12 +544,12 @@ export function report(r: StudyResult): string {
   out.push(`Maker exit study, days ${r.days.join(', ')}: ${r.lots} lots, ${r.contracts} contracts` + (Object.keys(r.skipped).length ? ` (skipped: ${Object.entries(r.skipped).map(([k, v]) => `${k} ${v}`).join(', ')})` : ''));
   out.push(`  paper's actual exits: ${usd(r.actualUsd)}   holding every lot to settlement: ${usd(r.holdUsd)}   (paper exited ${r.paperExited.lots} lots, ${r.paperExited.contracts} contracts, before settlement)`);
   out.push('');
-  out.push('  rule      lots w/ target   filled (through / queue)   median min to fill   +paper: through / queue          or hold: through / queue         (maker fee x0; x1 in brackets)');
+  out.push('  rule           lots w/ target   filled (through / queue)   median min to fill   +paper: through / queue          or hold: through / queue         (maker fee x0; x1 in brackets)');
   for (const rule of RULES) {
     const x = r.byRule[rule];
     const m = median(x.minutesToFill);
     const both = (v: [number, number]) => `${usd(v[0])} [${usd(v[1])}]`;
-    out.push(`  ${rule.padEnd(9)} ${pct(x.withTarget, x.lots).padStart(14)}   ${pct(x.filledThrough, x.targetContracts).padStart(8)} / ${pct(x.filledQueue, x.targetContracts).padEnd(13)}   ${(Number.isFinite(m) ? m.toFixed(1) : 'n/a').padStart(18)}   ${both(x.usd.through.paper)} / ${both(x.usd.queue.paper)}   ${both(x.usd.through.hold)} / ${both(x.usd.queue.hold)}`);
+    out.push(`  ${rule.padEnd(14)} ${pct(x.withTarget, x.lots).padStart(14)}   ${pct(x.filledThrough, x.targetContracts).padStart(8)} / ${pct(x.filledQueue, x.targetContracts).padEnd(13)}   ${(Number.isFinite(m) ? m.toFixed(1) : 'n/a').padStart(18)}   ${both(x.usd.through.paper)} / ${both(x.usd.queue.paper)}   ${both(x.usd.through.hold)} / ${both(x.usd.queue.hold)}`);
   }
   out.push('');
   out.push('  by series (actual vs hold): ' + Object.entries(r.bySeries).sort((a, b) => b[1].lots - a[1].lots).map(([s, v]) => `${s} ${v.lots} lots ${usd(v.actualUsd)} vs ${usd(v.holdUsd)}`).join('; '));
