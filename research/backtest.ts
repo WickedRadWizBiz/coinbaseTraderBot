@@ -93,6 +93,9 @@ export interface ExitStats {
   regret: number;
   /** Exit fills whose side went on to settle in the money. */
   stoppedWinners: number;
+  /** Entry and quote fills (not exits) in the last 10% of their contract's window: what a window cut at the bid sells back. */
+  lateFills?: number;
+  lateContracts?: number;
   ratchetTriggers: number;
   gaps: number;
   hybridHolds: number;
@@ -424,6 +427,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const stratRun: StrategyConfig = { ...strategy, exitPolicy: policy === 'take_profit' ? 'take_profit' : policy === 'hold' ? 'hold' : strategy.exitPolicy === 'take_profit' ? 'fair_value' : strategy.exitPolicy };
   let firstTs = 0;
   const closeOf = new Map<string, number>();
+  const windowOf = new Map<string, number>(); // each market's window, open to close (ms)
   const lastFair = new Map<string, number>(); // the exit audit: each market's last spot fair value (YES)
   const ratchets = new Map<string, LiquidityRatchet>();
   const hunts = new Map<string, ConfluenceRatchetExit>();
@@ -510,6 +514,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       ofOpen.set(f.ticker, list.slice(-50));
     }
     if (opts.paper && !f.isTaker) markoutDue.push({ due: st.now + 60_000, ticker: f.ticker, sign: f.side === 'bid' ? 1 : -1, price: f.price });
+    const winMs = windowOf.get(f.ticker);
+    if (purposeOf(f.clientOrderId) !== 'exit' && winMs && w - st.now <= 0.1 * winMs) { exits.lateFills = (exits.lateFills ?? 0) + 1; exits.lateContracts = (exits.lateContracts ?? 0) + f.count; }
     const bp = (res.byPurpose![purposeOf(f.clientOrderId)] ??= { fills: 0, contracts: 0 });
     bp.fills++; bp.contracts += f.count;
     if (f.clientOrderId?.endsWith('-exit-wall')) exits.wallFills += f.count;
@@ -604,6 +610,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       // Recorded for research, or synthesized from price history (quoted at the model's own fair value): never traded.
       if (m.recordOnly || m.synthetic) { if (st.now >= m.closeTime + 90_000) st.forget(m.ticker); continue; }
       closeOf.set(m.ticker, m.closeTime);
+      if (Number.isFinite(m.openTime)) windowOf.set(m.ticker, m.closeTime - m.openTime);
       // Settle closed markets.
       if (st.now >= m.closeTime + 60_000) {
         const out = st.outcome(m);
@@ -629,6 +636,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           }
           exitLedger.delete(m.ticker);
           lastFair.delete(m.ticker);
+          windowOf.delete(m.ticker);
           ratchets.delete(m.ticker);
           hunts.delete(m.ticker);
           snipeGroup.forget(m.ticker);
