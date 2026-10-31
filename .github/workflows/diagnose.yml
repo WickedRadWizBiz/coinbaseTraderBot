@@ -46,13 +46,17 @@ on:
         description: 'With ta_study: copy the BTC.D / USDT.D series from the server first so the replay carries dominance (rebuilds every cached replay day: about 3.5 h per half year)'
         required: false
         default: 'false'
+      kalshi_repair:
+        description: 'Instead of the server report: repair the Kalshi history quotes stored on the server once (deploy/kalshi_cents_repair.py; quotes saved in hundredths of a cent before PR #217). Rewrites only those day files; safe to run again'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
 
 jobs:
   diagnose:
-    if: inputs.ta_study != 'true'
+    if: inputs.ta_study != 'true' && inputs.kalshi_repair != 'true'
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -192,58 +196,55 @@ jobs:
             fi
             echo "== last 60 log lines"; journalctl -u kalshi-bot -n 60 --no-pager | cut -c1-300
 
-  # The P&L forensics on this runner (Steven, Oct 31: "We don't ever want to burden the server CPU"): the last four days
-  # of audit and recordings and the bot's state files are copied off the server with scp at 8 MB/s (the copy is the
-  # server's only work; nothing there changes) and the studies run here. Their output stays in this job's log.
-  forensics:
-    if: inputs.ta_study != 'true' && inputs.pnl == 'true'
+  # One-time repair of the Kalshi history stored on the server (Steven's go, Oct 31): markets from Kalshi's /historical
+  # endpoint were saved with quotes 100x too small until PR #217. Writes only data/history/kalshi day files, through a
+  # temp file and a rename; the bot's own state is not touched. Prints counts, posted as a comment on the commit.
+  kalshi-repair:
+    if: inputs.kalshi_repair == 'true'
     runs-on: ubuntu-latest
     environment: production
-    timeout-minutes: 150
+    timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
-      - name: SSH to the server
+      - name: Upload the repair script
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+          source: deploy/kalshi_cents_repair.py
+          target: /tmp/kalshi-repair-${{ github.run_id }}
+      - name: Repair
+        id: repair
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          port: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+          command_timeout: 25m
+          capture_stdout: true
+          script: |
+            S=/tmp/kalshi-repair-${{ github.run_id }}/deploy/kalshi_cents_repair.py
+            cd ~
+            DIRS=$(find . -maxdepth 6 -type d -path '*/history/kalshi' -not -path '*/node_modules/*' 2>/dev/null | sort)
+            echo "== Kalshi history stores found: $(echo "$DIRS" | grep -c . || true)"
+            [ -z "$DIRS" ] && exit 0
+            echo "== before"; nice -n 19 ionice -c3 python3 "$S" --dry-run $DIRS
+            echo "== repair"; nice -n 19 ionice -c3 python3 "$S" $DIRS
+            echo "== after (should be 0)"; nice -n 19 ionice -c3 python3 "$S" --dry-run $DIRS
+            rm -rf /tmp/kalshi-repair-${{ github.run_id }}
+      - name: Post the counts on the commit
+        if: always()
         env:
-          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
-          HOST: ${{ secrets.LIGHTSAIL_HOST }}
-          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
-          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+          GH_TOKEN: ${{ github.token }}
+          OUT: ${{ steps.repair.outputs.stdout }}
         run: |
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
-          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
-          ssh bot true && echo "connected"
-      - name: Copy the last days' files to the runner (read-only on the server, 8 MB/s)
-        run: |
-          # The studies read 3 days back (today included, the exit study at most 24 h): audit and recordings from 3 days
-          # before today, and the state files pnl_report, decision_study and component_study open.
-          D0=$(date -u -d '3 days ago' +%Y-%m-%d)
-          mkdir -p data/audit data/recordings data/tca data/models
-          ssh bot "ls ~/bot/data/audit/ ~/bot/data/recordings/" | grep -oE '(audit|md)-[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl(\.gz)?' | sort -u > "$RUNNER_TEMP/ls.txt"
-          for f in $(cat "$RUNNER_TEMP/ls.txt"); do
-            day=$(echo "$f" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}')
-            [[ "$day" < "$D0" ]] && continue
-            dir=recordings; [[ "$f" == audit-* ]] && dir=audit
-            scp -q -l 64000 "bot:bot/data/$dir/$f" "data/$dir/$f"
-          done
-          for f in oms_state.json trades.jsonl tca/tca.jsonl models/rule_book.json; do
-            scp -q -l 64000 "bot:bot/data/$f" "data/$f" 2>/dev/null || echo "($f not on the server)"
-          done
-          du -sh data; ls data/audit data/recordings
-      - name: P&L forensics
-        env:
-          STUDY_HOURS: ${{ inputs.study_hours }}
-        run: |
-          echo "== P&L report"; python3 deploy/pnl_report.py data 3 || true
-          echo "== decision study"; python3 deploy/decision_study.py data 3 || true
-          case "$STUDY_HOURS" in ''|*[!0-9]*) STUDY_HOURS=8;; esac
-          if [ "$STUDY_HOURS" -lt 1 ] || [ "$STUDY_HOURS" -gt 24 ]; then STUDY_HOURS=8; fi
-          echo "== exit study (the cross, the projected-peak rule and the live-line rules, replayed on the recordings: $STUDY_HOURS h)"
-          timeout $((STUDY_HOURS * 110 + 1200)) python3 deploy/cross_study.py data "$STUDY_HOURS" || echo "(exit study stopped: $?)"
-          echo "== component study (the SNN and the TA network against the meta-model's price on the last 3 days of decisions; the rule book's trial rows)"
-          timeout 1800 python3 deploy/component_study.py data 3 || echo "(component study stopped: $?)"
-          echo "== feed delay"; python3 deploy/feed_delay.py data/recordings 1 || true
-          echo "== latency study"; python3 deploy/latency_study.py data/recordings 2 || true
+          { echo "Kalshi quote repair, run ${{ github.run_id }} (${{ job.status }})"; echo; echo '```'; printf '%s\n' "$OUT" | tail -40; echo '```'; } > "$RUNNER_TEMP/comment.md"
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@"$RUNNER_TEMP/comment.md" --silent || echo "could not post the comment"
 
   # The TA contract study (the TA network review, Oct 29): does TA on the spot candles beat the fair value, and Kalshi's
   # mid, at the 15-minute contract's own question? Runs on this runner from Binance's public archives; the server is not
