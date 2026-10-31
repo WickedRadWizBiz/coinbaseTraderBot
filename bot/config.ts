@@ -212,6 +212,9 @@ export interface StrategyConfig {
   weeklyLossPause: number;
   /** Halt new risk when the rolling log-loss advantage vs the calibrated market is significantly negative. */
   modelHealthHalt: boolean;
+  /** In place of the halt (Oct 31, never bench): the decision price leans toward the market by the model's measured skill
+   *  (MODEL_SKILL, MODEL_SKILL_MIN; MODEL_SKILL_W pins the weight). */
+  modelSkill: { on: boolean; min: number; pinned?: number };
   /** Paper exploration: occasionally enter a borderline opportunity (edge within exploreBand below the
    *  threshold, still fee-net positive) at minimum size, logged with its probability, so the fill model
    *  and the edge threshold get data near the boundary. Paper mode only. */
@@ -1192,7 +1195,9 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     ensembleVetoSigmas: num(env, 'STRATEGY_ENSEMBLE_VETO_SIGMAS', 2, 0, 10),
     ddScaleAt: num(env, 'RISK_DD_SCALE_AT', 0.15, 0.01, 1),
     weeklyLossPause: num(env, 'RISK_WEEKLY_LOSS_PAUSE', 0.08, 0.01, 1),
-    modelHealthHalt: bool(env, 'MODEL_HEALTH_HALT', true),
+    // Never bench (Oct 31): the model-vs-market check no longer halts entries; the skill weight below replaces it.
+    modelHealthHalt: bool(env, 'MODEL_HEALTH_HALT', false),
+    modelSkill: { on: bool(env, 'MODEL_SKILL', true), min: num(env, 'MODEL_SKILL_MIN', 0.25, 0.05, 1), pinned: num(env, 'MODEL_SKILL_W', -1, -1, 1) },
     paperExplore: bool(env, 'PAPER_EXPLORE', false),
     exploreRate: num(env, 'PAPER_EXPLORE_RATE', 0.1, 0, 1),
     exploreBand: num(env, 'PAPER_EXPLORE_BAND', 0.02, 0, 0.1),
@@ -1271,6 +1276,10 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       maxLossUsd: num(env, 'PROBATION_MAX_LOSS_USD', DEFAULT_PROBATION.maxLossUsd, 0, 1e9),
       maxLossPct: num(env, 'PROBATION_MAX_LOSS_PCT', DEFAULT_PROBATION.maxLossPct, 0, 1),
       window: num(env, 'PROBATION_WINDOW', DEFAULT_PROBATION.window, 10, 100_000),
+      // Graded, never benched (Oct 31): the highest level, and what each level asks of an unvalidated take / fill model.
+      levelMax: Math.round(num(env, 'PROBATION_LEVEL_MAX', DEFAULT_PROBATION.levelMax!, 0, 10)),
+      takeStep: num(env, 'PROBATION_TAKE_STEP', DEFAULT_PROBATION.takeStep!, 0, 0.2),
+      fillStep: num(env, 'PROBATION_FILL_STEP', DEFAULT_PROBATION.fillStep!, 0, 0.1),
     },
     sinuousExit: {
       mode: oneOf(env, 'SINUOUS_EXIT', DEFAULT_SINUOUS_EXIT.mode, ['gate', 'monitor', 'rest', 'cross', 'off'] as const),

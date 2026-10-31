@@ -73,4 +73,22 @@ export class ModelHealth {
   }
 
   forget(ticker: string): void { this.snaps.delete(ticker); }
+
+  /** The model's skill weight (modelSkillWeight) from the current status. */
+  skillWeight(p: SkillParams): number { return modelSkillWeight(this.status(), p); }
+}
+
+// Skill weight (Steven, Oct 31: "Anything benched needs to be reworked ... rather than bench them"). In place of halting new
+// risk when the model loses to the calibrated market (MODEL_HEALTH_HALT), the decision price leans toward the market as far as
+// the evidence says the model is worse: q = market + w (model - market) (bot/strategy/fairValueStrategy.ts decisionProbability).
+// w = 1 while the evidence does not lean worse (pWorse >= 0.5, or under 10 windows); it falls linearly toward MODEL_SKILL_MIN
+// as pWorse falls to 0 (at the old halt's p = 0.05: about 0.33 with the 0.25 floor); a drift alarm (the model recently worse
+// than its own record) halves it. Never 0: the model keeps a say, and keeps being scored. MODEL_SKILL_W pins it (the lab).
+export interface SkillParams { on: boolean; min: number; pinned?: number }
+export function modelSkillWeight(h: { pWorse: number | null; drift?: { alarm: boolean } }, p: SkillParams): number {
+  if (p.pinned !== undefined && p.pinned >= 0) return Math.min(1, p.pinned);
+  if (!p.on) return 1;
+  let w = h.pWorse === null || h.pWorse >= 0.5 ? 1 : p.min + (1 - p.min) * (h.pWorse / 0.5);
+  if (h.drift?.alarm) w *= 0.5;
+  return Math.max(p.min, Math.min(1, w));
 }

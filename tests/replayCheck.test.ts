@@ -323,10 +323,11 @@ test('replay check: the take-profit bench and the accuracy gate wound back to th
   assert.ok(Math.abs(byMarket.reduce((a, x) => a + x.usd, 0) - (fresh.paper?.takeProfitNetUsd ?? 0)) < 1e-6);
   assert.ok(Math.abs(byMarket.reduce((a, x) => a + x.contracts, 0) - (fresh.paper?.takeProfitContracts ?? 0)) < 1e-6, 'every contract sold is scored once its market settles');
   assert.equal(fresh.paper?.takeProfitBenchedAt, undefined);
+  // A bench seeded from before the ladder (Oct 31: never benched) comes back as level 1: it still sells, with the fair-value confirm.
   const seeded = await run({ stateFile });
-  assert.equal(seeded.paper?.takeProfitBenchedAt, 0);
-  assert.equal(seeded.paper?.takeProfitSales, 0);
-  assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')).benched, { at: 0, reason: 'seeded' });
+  assert.equal(seeded.paper?.takeProfitBenchedAt, undefined);
+  assert.ok((seeded.paper?.takeProfitSales ?? 0) <= (fresh.paper?.takeProfitSales ?? 0), 'level 1 asks more of each sale');
+  assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).level, 1);
 
   // Paper's bench through the stretch: benched at the start or not, then its benches and resets in it.
   const tl = benchTimeline([{ t: from - 9, event: 'benched', reason: 'early' }, { t: from - 1, event: 'scored', usd: 1 }, { t: from + 1, event: 'reset' }, { t: from + 2, event: 'benched', reason: 'again' }], from, from + 10);
@@ -431,15 +432,15 @@ test('backtest tickPhaseMs: the markets evaluated on the engine\'s 1 s timer, th
   assert.deepEqual(early, plain, 'these recordings have an event every 5 s: each gets a pass either way');
 });
 
-test('the bot\'s validation gates: monitor lets unvalidated models trade unless their book is benched', () => {
+test('the bot\'s validation gates: monitor lets unvalidated models trade, graded by their book\'s probation level (never benched)', () => {
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) });
   try {
-    assert.deepEqual(installProbation(cfg), [], 'no state: nothing benched');
+    assert.deepEqual(installProbation(cfg), [], 'no state: every book at level 0');
     assert.equal(gatePasses('kalshi', false), true);
     const file = path.join(tmp(), 'probation.json');
     fs.writeFileSync(file, JSON.stringify({ kalshi: { results: [-5], since: 0, benched: { at: 1, reason: 'lost' } } }));
-    assert.deepEqual(installProbation(cfg, file), ['kalshi']);
-    assert.equal(gatePasses('kalshi', false), false);
+    assert.deepEqual(installProbation(cfg, file), ['kalshi (level 1)'], 'a bench saved before the ladder: level 1');
+    assert.equal(gatePasses('kalshi', false), true);
     assert.equal(gatePasses('kalshi', true), true);
     assert.equal(fs.readFileSync(file, 'utf8').includes('"benched"'), true, 'the bot\'s file is only read');
     const enforce = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), VALIDATION_GATES: 'enforce' });

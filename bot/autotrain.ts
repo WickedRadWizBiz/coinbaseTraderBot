@@ -291,7 +291,7 @@ export class AutoTrainer {
     this.swaps.length = Math.min(this.swaps.length, 20);
     // A new model for a book starts a fresh probation (VALIDATION_GATES=monitor: bot/risk/probation.ts).
     const book = ({ mlp: 'kalshi', fill: 'kalshi', perp: 'perps', tennis: 'tennis' } as const)[kind as 'mlp'];
-    if (book && probation()?.status()[book].benched) {
+    if (book && probation()?.status()[book].level) {
       probation()!.reset(book, this.now);
       this.d.audit.write('probation', { event: 'reset', book, reason: `new ${kind} model: ${detail}` });
     }

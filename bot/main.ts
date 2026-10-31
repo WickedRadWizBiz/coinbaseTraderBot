@@ -117,9 +117,10 @@ async function main(): Promise<void> {
   if (cfg.alertWebhookUrl) sinks.push(new WebhookSink(cfg.alertWebhookUrl));
   const alerter = new Alerter(sinks, audit);
   // Probation (VALIDATION_GATES=monitor): unvalidated models trade, and a book whose results are unacceptable is benched.
-  const probationBooks = new Probation(cfg.probation, path.join(cfg.bookDir, 'probation.json'), (book, reason) => {
-    audit.write('probation', { event: 'benched', book, reason });
-    alerter.notify('warn', `probation-${book}`, `Probation: ${book} benched (its unvalidated models stop trading until the next model or a reset): ${reason}`);
+  // Graded, never benched (Oct 31): a rejected window asks the book's unvalidated models for more, one level at a time.
+  const probationBooks = new Probation(cfg.probation, path.join(cfg.bookDir, 'probation.json'), (book, reason, move) => {
+    audit.write('probation', { event: move.event, book, reason, level: move.level, from: move.from });
+    alerter.notify('info', `probation-${book}`, `Probation: ${book} ${move.event} (level ${move.from} -> ${move.level}; its unvalidated models keep trading, asked for more at each level): ${reason}`);
   });
   setProbation(probationBooks);
   if (cfg.probation.mode === 'monitor') log.info('validation gates: monitor (unvalidated models trade on probation)', { ...cfg.probation });
