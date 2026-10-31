@@ -51,7 +51,7 @@ export class LevelLadder {
 
 /** A list of per-level margins from a setting ("0.06,0.03,0.01,0"): index 0 is level 1. */
 export function parseLevelMargins(raw: string | undefined, fallback: number[]): number[] {
-  const xs = (raw ?? '').split(',').map((s) => Number(s.trim())).filter((x) => Number.isFinite(x) && Math.abs(x) <= 1);
+  const xs = (raw ?? '').split(',').map((s) => s.trim()).filter((s) => s !== '').map(Number).filter((x) => Number.isFinite(x) && Math.abs(x) <= 1);
   return xs.length ? xs : fallback;
 }
 

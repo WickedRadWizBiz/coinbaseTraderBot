@@ -13,7 +13,7 @@ import type { DenseLayer } from './metaModel';
 import { gbdtLogit, type GbdtModel } from './trees';
 import { gatedPredict, type GatedExperts } from './gatedExperts';
 import type { OrderPlan } from '../strategy/fairValueStrategy';
-import { gatePasses } from '../risk/probation';
+import { gatePasses, probationLevel, probationTakeAdd } from '../risk/probation';
 
 export const TAKE_FEATURES = ['edge', 'logit_p_side', 'price_side', 'spread', 'tau_min', 'snn_up_side', 'snn_bias_side', 'snn_agree_side', 'p_std', 'snn_skill_h', 'snn_cal_h'] as const;
 /** Index of logit_p_side: the tree candidate learns a residual on the fair-value probability. */
@@ -108,6 +108,8 @@ export interface TakeGateCtx { pYes: number; features: Record<string, number>; t
 /** Drop entry orders the take model says to skip. Exits and reduce-only orders always pass. */
 export function applyTakeGate(plan: { place: OrderPlan[]; notes: string[] }, take: TakeModelParams | undefined, c: TakeGateCtx): number {
   if (!take || !gatePasses('kalshi', take.validation.validated)) return 0;
+  // On probation (unvalidated), each level of the Kalshi book's probation asks for a wider margin (bot/risk/probation.ts).
+  const extra = take.validation.validated ? 0 : probationTakeAdd('kalshi');
   let skipped = 0;
   plan.place = plan.place.filter((o) => {
     if (o.reduceOnly || o.purpose === 'exit') return true;
@@ -115,9 +117,9 @@ export function applyTakeGate(plan: { place: OrderPlan[]; notes: string[] }, tak
     const price = side === 'yes' ? o.price : 1 - o.price;
     const q = takeProbability(take, takeInputs(side, c.pYes, price, c.ask - c.bid, c.tauSec, c.features, c.pStd), takeGatedInputs(side, c.features));
     const breakeven = price + (o.postOnly ? 0 : takerFee(1, price, c.fees));
-    if (q >= breakeven + c.margin) return true;
+    if (q >= breakeven + c.margin + extra) return true;
     skipped++;
-    plan.notes.push(`take model: skip ${side.toUpperCase()} @ ${price.toFixed(2)} (P(win) ${q.toFixed(3)} < break-even ${(breakeven + c.margin).toFixed(3)})`);
+    plan.notes.push(`take model: skip ${side.toUpperCase()} @ ${price.toFixed(2)} (P(win) ${q.toFixed(3)} < break-even ${(breakeven + c.margin + extra).toFixed(3)}${extra ? `, probation level ${probationLevel('kalshi')}` : ''})`);
     return false;
   });
   return skipped;

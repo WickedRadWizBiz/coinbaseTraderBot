@@ -41,7 +41,7 @@ import type { TakeProfitBench } from './strategy/takeProfitBench';
 import { CadenceGate, inEntryWindow, type CadenceReason } from './strategy/cadence';
 import { kalshiMaintenance, sessionEdge, sessionState, type SessionState } from './model/sessions';
 import type { EquityGuard } from './risk/equityGuard';
-import type { ModelHealth } from './model/modelHealth';
+import { modelSkillWeight, type ModelHealth } from './model/modelHealth';
 import type { AccuracyGate } from './strategy/accuracyGate';
 import type { Tca } from './tca/tca';
 import type { MacroEvent } from './model/featureEngine';
@@ -57,7 +57,7 @@ import { huntBlockedBySession, mergeSessionRisk, sessionRiskFor, type SessionRis
 import { playbook } from './strategy/playbook';
 import { compensator } from './strategy/compensator';
 import { macro } from './macro/macroService';
-import { gatePasses, probation } from './risk/probation';
+import { gatePasses, probation, probationLevel } from './risk/probation';
 import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
 import { applyTakeGate } from './model/takeModel';
 import { effectiveSigma, type VolProfile } from './model/volSeasonality';
@@ -2075,7 +2075,9 @@ export class Engine {
     const gpRead = S0.gp ? activeGpSignals()?.read(m.asset, (a) => md.features.candles.get(a)?.bars['1h']) : undefined;
     // On probation (VALIDATION_GATES=monitor) an unvalidated formula speaks too, live included.
     const gpSpeaks = gpRead && (gpRead.validated || (gpRead.speaks && !liveMode) || gatePasses('kalshi', false)) ? gpRead : undefined;
-    const signals = orientedSignals(features, taView, liveMode, rbRead, gpSpeaks);
+    // An unvalidated formula's vote is halved at each level of the Kalshi book's probation (graded, never benched, Oct 31).
+    const gpVote = gpSpeaks && !gpSpeaks.validated && probationLevel('kalshi') > 0 ? { ...gpSpeaks, exposure: gpSpeaks.exposure * 0.5 ** probationLevel('kalshi') } : gpSpeaks;
+    const signals = orientedSignals(features, taView, liveMode, rbRead, gpVote);
     const taDir = taNetDirection(taView, liveMode);
     const rsiTrade = [shortContract ? features.ta_rsi_15m : features.ta_rsi_1h, features.rsi_14_1m].find((x) => x !== undefined && Number.isFinite(x));
     const alt = altcoinRiskOn(m.asset, features.usdtd_ret_15m_z, rsiTrade, S0);
@@ -2183,6 +2185,7 @@ export class Engine {
       profitPeakSidePrice: this.profitPeaks.update(m.ticker, st.position, st.position > 0 ? bid.price : st.position < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
       ...(this.d.takeProfitBench?.benched ? { takeProfitBenched: this.d.takeProfitBench.benched } : {}),
       ...(this.d.takeProfitBench ? { takeProfitLevel: this.d.takeProfitBench.level } : {}),
+      ...(() => { const w = this.d.modelHealth?.skillWeight(cfg.strategy.modelSkill) ?? modelSkillWeight({ pWorse: null }, cfg.strategy.modelSkill); return w < 1 ? { modelSkillWeight: w } : {}; })(),
       entryWindowOpen, exitWindowOpen: tauSec > S.noExitBeforeCloseSec,
       settleShare: Number.isFinite(m.openTime) && tauSec <= S.noExitBeforeCloseFrac * (m.closeTime - m.openTime) / 1000,
     };

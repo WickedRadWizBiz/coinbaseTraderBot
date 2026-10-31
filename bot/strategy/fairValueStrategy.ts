@@ -110,6 +110,8 @@ export interface MarketView {
   /** The take-profit's strictness level (bot/strategy/takeProfitBench.ts, levelLadder.ts): from 1 it sells only while the
    *  coin's spot fair value of the side (pFair) is at most the net bid plus the level's margin (cfg.takeProfitFvMargins). */
   takeProfitLevel?: number;
+  /** The model's skill weight against the calibrated market (bot/model/modelHealth.ts; 1 or undefined = full say). */
+  modelSkillWeight?: number;
   /** Entry window open (contract kind, time to close, maintenance). Default: tau >= noEntryBeforeCloseSec. */
   entryWindowOpen?: boolean;
   /** Exits allowed (false in the final minute: ride to settlement). Default true. */
@@ -146,9 +148,12 @@ export interface StrategyOutput {
 }
 
 /** Decision probability of YES: the model, or shrunk toward the calibrated market under target-EV sizing. */
-export function decisionProbability(v: Pick<MarketView, 'pYes' | 'pMarket'>, cfg: Pick<StrategyConfig, 'sizing' | 'kappa'>): number {
-  if (cfg.sizing !== 'target_ev' || v.pMarket === undefined) return v.pYes;
-  return v.pMarket + cfg.kappa * (v.pYes - v.pMarket);
+export function decisionProbability(v: Pick<MarketView, 'pYes' | 'pMarket' | 'modelSkillWeight'>, cfg: Pick<StrategyConfig, 'sizing' | 'kappa'>): number {
+  if (v.pMarket === undefined) return v.pYes;
+  const base = cfg.sizing !== 'target_ev' ? v.pYes : v.pMarket + cfg.kappa * (v.pYes - v.pMarket);
+  // The model's skill weight (bot/model/modelHealth.ts modelSkillWeight): toward the market as far as the model has lost to it.
+  const w = v.modelSkillWeight;
+  return w === undefined || w >= 1 ? base : v.pMarket + w * (base - v.pMarket);
 }
 
 /** `opts.exits: false` disables the built-in model exit (another exit policy

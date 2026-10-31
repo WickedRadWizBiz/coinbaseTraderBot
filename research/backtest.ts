@@ -364,7 +364,8 @@ export function installProbation(cfg: Config, stateFile?: string): string[] {
   }
   const p = new Probation(cfg.probation, file);
   setProbation(p);
-  return p.p.mode === 'monitor' ? PROBATION_BOOKS.filter((b) => !p.open(b)) : [];
+  // Graded, never benched (Oct 31): the books on a raised level, with it.
+  return p.p.mode === 'monitor' ? PROBATION_BOOKS.filter((b) => p.level(b) > 0).map((b) => `${b} (level ${p.level(b)})`) : [];
 }
 
 export async function runBacktest(dir: string, model: MetaModel, strategy: StrategyConfig, limits: RiskLimits, bankroll0: number, opts: BacktestOpts = {}): Promise<BacktestResult> {
@@ -919,6 +920,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         minSidePrice: limits.minSidePrice,
         ...(() => { const b = tpBenched(); return b ? { takeProfitBenched: b } : {}; })(),
         ...(tpBench ? { takeProfitLevel: tpBench.level } : {}),
+        // The model's skill weight: the replay keeps no model-health record, so only a pinned one (MODEL_SKILL_W) applies.
+        ...(strategy.modelSkill && (strategy.modelSkill.pinned ?? -1) >= 0 && strategy.modelSkill.pinned! < 1 ? { modelSkillWeight: strategy.modelSkill.pinned } : {}),
         newRiskRoomUsd,
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,
         restingBid: rb, restingAsk: ra, nowSec: Math.floor(st.now / 1000), closeSec: Math.floor(m.closeTime / 1000),

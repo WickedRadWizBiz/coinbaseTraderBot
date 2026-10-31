@@ -149,7 +149,7 @@ export class SetupTrader {
       if (m === this.modelMtime) return;
       this.model = SetupModel.load(file);
       // A new model (not the one loaded at startup) starts a fresh probation for the setups book.
-      if (this.modelMtime !== 0 && probation()?.status().setups.benched) { probation()!.reset('setups'); this.d.audit?.write('probation', { event: 'reset', book: 'setups', reason: `new setup model ${this.model?.params.version}` }); }
+      if (this.modelMtime !== 0 && probation()?.status().setups.level) { probation()!.reset('setups'); this.d.audit?.write('probation', { event: 'reset', book: 'setups', reason: `new setup model ${this.model?.params.version}` }); }
       this.modelMtime = m;
       this.modelError = undefined;
       const P = this.d.params.book, M = this.model?.params.book;

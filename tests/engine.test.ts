@@ -576,15 +576,17 @@ test('take-profit bench: a take-profit sale is scored on its fill against holdin
   assert.deepEqual([s.scored, s.pending], [1, 0]);
   assert.ok(s.netUsd < -5 && s.netUsd > -5.3, `(0.50 - fee - 1) x 10: ${s.netUsd}`);
   assert.equal(g.engine.takeProfitBenchStatus()?.scored, 1);
-  // A bench already called (the take-profit cost $26 against holding): the same pull-back sells nothing.
-  const benched = new TakeProfitBench(true, rule);
-  for (let i = 0; i < 13; i++) { benched.filled(`M${i}`, 1, 0.81, 10, 0.01, i); benched.settled(`M${i}`, 'yes', i + 1); }
-  const h = await run(benched);
+  // A rule already tripped (the take-profit cost $26 against holding): level 1, never benched. The coin's fair value of the
+  // side is far above the 0.50 bid, so the same pull-back is held by the fair-value confirm.
+  const stepped = new TakeProfitBench(true, rule);
+  for (let i = 0; i < 13; i++) { stepped.filled(`M${i}`, 1, 0.81, 10, 0.01, i); stepped.settled(`M${i}`, 'yes', i + 1); }
+  assert.deepEqual([stepped.level, stepped.benched], [1, undefined]);
+  const h = await run(stepped);
   assert.equal(h.exits().length, 0, h.notes());
-  assert.match(h.notes(), /take-profit benched: \+0\.\d+ now, best \+0\.\d+, not sold \(take-profit sales cost \$26\.00/);
-  // The dashboard's reset lifts it.
+  assert.match(h.notes(), /take-profit held by fair value \(level 1\): \+0\.\d+ now, the coin's value 0\.\d+ > net bid 0\.\d+ \+ 0\.06/);
+  // The dashboard's reset goes back to level 0.
   assert.equal(h.engine.resetTakeProfitBench(), true);
-  assert.equal(benched.benched, undefined);
+  assert.equal(stepped.level, 0);
 });
 
 test('take-profit: the last tick above the floor goes out at once, the exit curve never holds it', async () => {

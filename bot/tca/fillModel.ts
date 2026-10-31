@@ -22,7 +22,7 @@ import type { OrderBook } from '../marketdata/orderBook';
 import type { OrderPlan } from '../strategy/fairValueStrategy';
 import { takerFee, type FeeSchedule } from '../fees';
 import { gbdtLogit, validateGbdt, type GbdtModel } from '../model/trees';
-import { gatePasses } from '../risk/probation';
+import { gatePasses, probationFillAdd } from '../risk/probation';
 
 export const FILL_FEATURES = [
   'side_price', 'dist_ticks', 'queue_ahead_log', 'touch_size_log', 'opp_touch_size_log', 'spread_ticks', 'imbalance_side',
@@ -119,6 +119,8 @@ export const isMakerEntry = (o: OrderPlan) => o.purpose === 'quote' && o.postOnl
 export function applyFillModel(plan: { place: OrderPlan[]; notes: string[] }, fm: FillModel | undefined, c: FillDecisionCtx): { crossed: number; skipped: number } {
   const res = { crossed: 0, skipped: 0 };
   if (!fm || !gatePasses('kalshi', fm.validated)) return res;
+  // On probation (unvalidated), each level of the Kalshi book's probation raises the expected-value bar (bot/risk/probation.ts).
+  if (!fm.validated && probationFillAdd('kalshi') > 0) c = { ...c, minEv: c.minEv + probationFillAdd('kalshi') };
   const bb = c.book.bestBid(), ba = c.book.bestAsk();
   const next: OrderPlan[] = [];
   for (const o of plan.place) {
