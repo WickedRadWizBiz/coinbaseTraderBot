@@ -24,7 +24,7 @@ import { DEFAULT_SNN, domainParams, stageFlags, type SnnFlags, type SnnParams, t
 import { replaySnn, type SnnReplayResult, type SnnRow } from './snnReplay';
 import { replayGain, volScaled, type GainOpts } from '../bot/snn/correctionGain';
 
-export interface Mechanism { name: string; candidate: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams> }; baseline: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams> }; note: string }
+export interface Mechanism { name: string; candidate: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams>; /** Start from the network in --init (a history-training checkpoint). */ init?: true }; baseline: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams> }; note: string }
 
 /** The staging order and each stage's comparison (S0..S6, then the deferred mechanisms vs proxies). */
 export const MECHANISMS: Mechanism[] = [
@@ -39,6 +39,7 @@ export const MECHANISMS: Mechanism[] = [
   { name: 'gap junctions', candidate: { stage: 'S5', flags: { gapJunctions: true } }, baseline: { stage: 'S5', flags: { proxies: true } }, note: 'vs BTC-ETH correlation feature' },
   { name: 'Izhikevich CH', candidate: { stage: 'S5', flags: { izhikevichCH: true } }, baseline: { stage: 'S5', flags: { proxies: true } }, note: 'vs delta-spike burst counter' },
   { name: 'dCaAP units', candidate: { stage: 'S5', flags: { dcaap: true } }, baseline: { stage: 'S5' }, note: 'vs 2-branch Poirazi XOR' },
+  { name: 'history-trained', candidate: { stage: 'S5', params: { anchorMid: true }, init: true }, baseline: { stage: 'S5', params: { anchorMid: true } }, note: 'the anchored network after history training on Kalshi contracts (--init checkpoint) vs the same network from cold, on recorded days after the history' },
   { name: 'vol-normalized readout', candidate: { stage: 'S5', params: { anchorMid: true, volNorm: 1 } }, baseline: { stage: 'S5', params: { anchorMid: true } }, note: 'anchored readout features divided by the fast/slow activity ratio when it runs hot (audit Oct 31: correction ~8x too big in high vol)' },
   { name: 'anchor band 40-60c', candidate: { stage: 'S5', params: { anchorMid: true, anchorBand: 0.1 } }, baseline: { stage: 'S5', params: { anchorMid: true } }, note: 'the anchored price departs from the mid only at 40-60c (picked on Oct 22-30; judge on later days only)' },
   { name: 'mid-anchored readout', candidate: { stage: 'S5', params: { anchorMid: true } }, baseline: { stage: 'S5' }, note: 'logit p = logit(mid) + w . phi, weights from zero, vs the readout that prices from scratch (SNN plan phase 1)' },
@@ -219,12 +220,15 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
   const domain = argOf('domain', 'crypto') as 'crypto' | 'perps';
   const calendar = loadCalendar(path.resolve('params/calendar.json'));
   const cache = new Map<string, { res: SnnReplayResult; sum: RunSummary }>();
-  const run = async (name: string, stage: Stage, flags: Partial<SnnFlags> | undefined, overrides: Partial<SnnParams>) => {
+  const initFile = argOf('init', '');
+  const run = async (name: string, stage: Stage, flags: Partial<SnnFlags> | undefined, overrides: Partial<SnnParams>, init = false) => {
     const params: SnnParams = domainParams(domain, { ...DEFAULT_SNN, ...overrides, flags: { ...stageFlags(stage), ...(flags ?? {}) } });
-    const k = JSON.stringify(params);
+    const k = JSON.stringify(params) + (init ? `|init:${initFile}` : '');
     if (!cache.has(k)) {
       process.stderr.write(`replaying ${name} ${JSON.stringify(overrides)}...\n`);
-      const res = await replaySnn(dir, { params, model, from, to, calendar, domain });
+      if (init && !(initFile && fs.existsSync(initFile))) throw new Error(`${name}: needs --init <history-training checkpoint>`);
+      const checkpoint = init ? JSON.parse(fs.readFileSync(initFile, 'utf8')) : undefined;
+      const res = await replaySnn(dir, { params, model, from, to, calendar, domain, checkpoint, allowParamChange: init || undefined });
       cache.set(k, { res, sum: summarize(name, overrides, res) });
     }
     return cache.get(k)!;
@@ -240,7 +244,7 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
     if (side) {
       if (side !== 'baseline' && side !== 'candidate') throw new Error('--side is baseline or candidate');
       const spec = side === 'baseline' ? m.baseline : m.candidate;
-      const r = await run(side === 'baseline' ? `${m.name} [baseline]` : m.name, spec.stage, spec.flags, { ...(spec.params ?? {}) });
+      const r = await run(side === 'baseline' ? `${m.name} [baseline]` : m.name, spec.stage, spec.flags, { ...(spec.params ?? {}) }, side === 'candidate' && m.candidate.init === true);
       const save = argOf('save', `research/out/snn_ablation_${side}.json`);
       fs.mkdirSync(path.dirname(save), { recursive: true });
       fs.writeFileSync(save, JSON.stringify(savedSide(m.name, side, r.res, r.sum)));
@@ -293,11 +297,12 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
   }
   for (const m of MECHANISMS) {
     if (only && !m.name.startsWith(only)) continue;
+    if (m.candidate.init && !initFile) { console.log(`skip ${m.name}: needs --init <history-training checkpoint>`); continue; }
     const configs = grid[m.name] ?? [{}];
     if (configs.length > MAX_GRID) throw new Error(`${m.name}: ${configs.length} configs exceed the pre-registered cap of ${MAX_GRID}`);
     const base = await run(`${m.name} [baseline]`, m.baseline.stage, m.baseline.flags, { ...(m.baseline.params ?? {}) });
     const tried: { res: SnnReplayResult; sum: RunSummary }[] = [];
-    for (const ov of configs) tried.push(await run(m.name, m.candidate.stage, m.candidate.flags, { ...(m.candidate.params ?? {}), ...ov }));
+    for (const ov of configs) tried.push(await run(m.name, m.candidate.stage, m.candidate.flags, { ...(m.candidate.params ?? {}), ...ov }, m.candidate.init === true));
     const best = tried.sort((a, b) => a.sum.brier - b.sum.brier)[0];
     const v = judge(m, best.res, base.res, best.sum, base.sum, tried.map((t) => t.sum));
     verdicts.push(v);

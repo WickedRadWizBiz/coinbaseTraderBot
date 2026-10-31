@@ -32,6 +32,10 @@ on:
         description: 'Reuse the baseline side saved by this earlier run id (same mechanism, unchanged baseline): only the candidate replays, so the server is read once instead of twice'
         required: false
         default: ''
+      init_from:
+        description: 'history-trained: the run id whose history training saved the checkpoint the candidate starts from'
+        required: false
+        default: ''
       hist_from:
         description: 'History training instead of an ablation: first day (YYYY-MM-DD) of Kalshi contract history to walk the anchored crypto SNN through (research/snnHistoryTrain.ts)'
         required: false
@@ -118,6 +122,7 @@ jobs:
           set -euo pipefail
           DATA="$GITHUB_WORKSPACE/data"; mkdir -p research/out
           MODEL=""; [ "$DOMAIN" = crypto ] && [ -f "$DATA/models/model.json" ] && MODEL="--model $DATA/models/model.json"
+          INIT=""; [ -f research/out/init/snn-history-checkpoint.json ] && INIT="--init research/out/init/snn-history-checkpoint.json"
           # The verdict lines (ACCEPT / reject, dBrier with its CI, slope, correlation, blend, latency) and the file.
           npm run --silent research:snn-ablation -- --recordings "$DATA/recordings" --domain "$DOMAIN" --from "${FROM}T00:00:00Z" --only "$ONLY" --out research/out/snn_ablation.json $MODEL
       - uses: actions/upload-artifact@v4
@@ -184,12 +189,20 @@ jobs:
           [ -n "$FROM" ] || { echo "no recordings copied"; exit 1; }
           echo "FROM=$FROM" >> "$GITHUB_ENV"
           echo "replay from $FROM ($(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | wc -l) day(s))"
+      - uses: actions/download-artifact@v4
+        # history-trained: the candidate starts from the network a history-training run saved.
+        if: inputs.init_from != '' && matrix.side == 'candidate'
+        with:
+          name: snn-history-checkpoint
+          path: research/out/init
+          run-id: ${{ inputs.init_from }}
+          github-token: ${{ github.token }}
       - name: Replay one side
         run: |
           set -euo pipefail
           DATA="$GITHUB_WORKSPACE/data"; mkdir -p research/out
           MODEL=""; [ "$DOMAIN" = crypto ] && [ -f "$DATA/models/model.json" ] && MODEL="--model $DATA/models/model.json"
-          npm run --silent research:snn-ablation -- --recordings "$DATA/recordings" --domain "$DOMAIN" --from "${FROM}T00:00:00Z" --only "$ONLY" --side ${{ matrix.side }} --save research/out/side-${{ matrix.side }}.json $MODEL
+          npm run --silent research:snn-ablation -- --recordings "$DATA/recordings" --domain "$DOMAIN" --from "${FROM}T00:00:00Z" --only "$ONLY" --side ${{ matrix.side }} --save research/out/side-${{ matrix.side }}.json $MODEL $INIT
       - uses: actions/upload-artifact@v4
         with:
           name: snn-ablation-side-${{ matrix.side }}
