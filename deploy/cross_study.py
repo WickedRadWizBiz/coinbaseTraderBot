@@ -1092,6 +1092,34 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         print(f"    {lab:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['entries']:7d}  {r['snipe']:6d}  {r['held']:4d}  {r['cap_peak']:14.2f}  {r['thin_usd']:7.2f}")
     sn = sorted(ownv(p) for p in pathsB if p.get('costF') is not None and p['origin'] == 'normal')
     if sn: print(f"    (normal entries' own stakes: median ${sn[len(sn) // 2]:.2f}, p10 ${sn[len(sn) // 10]:.2f}, p90 ${sn[9 * len(sn) // 10]:.2f})")
+    # G5: Steven's asks (Oct 30) again on normal entries only with the band per order (G counted training trades, clamped)
+    band5 = lambda p: dict(p, n=5 * p['n_band'], costF=p['costF_band']) if p['origin'] == 'normal' and p.get('costF_band') else None
+    ANY5 = ({'remap': bando, 'reenter': 'any'}, {'remap': band5, 'reenter': 'any'}, {'remap': band5, 'reenter': 'any', 'depth': True})
+    for gen in range(3 if more_books else 0):
+        sig_miss.clear()
+        for kw in ANY5: pacer_run(pathsB, baseG, SL, **kw)
+        new = sig_miss - tried
+        if not new: break
+        tried |= new
+        more_books(new)
+        for j in [j for j in sig_cache if entry_sigs[j][1] in new]: del sig_cache[j]
+    print('  G5. Steven\'s asks on normal entries only (no training or exploration trades), the $10-$20 band per order, x5 = $50-$100')
+    print('    stake; pacer; re-entry; depth                                     realized $     $/h  entries  re-entries  re-entry $  snipes  held  peak $ at work  depth $')
+    rows5 = [('$10-$20; slices [BASELINE]', {'remap': bando}), ('$10-$20; slices; depth', {'remap': bando, 'depth': True}),
+             ('$10-$20; no pacer', {'remap': bando, 'pacer': None}), ('$10-$20; no pacer; depth', {'remap': bando, 'pacer': None, 'depth': True}),
+             ('$50-$100; slices', {'remap': band5}), ('$50-$100; slices; depth', {'remap': band5, 'depth': True}),
+             ('$50-$100; no pacer', {'remap': band5, 'pacer': None}), ('$50-$100; no pacer; depth', {'remap': band5, 'pacer': None, 'depth': True}),
+             ('$10-$20; slices; re-enter same market', {'remap': bando, 'reenter': True}),
+             ('$50-$100; slices; re-enter same market; depth', {'remap': band5, 'reenter': True, 'depth': True}),
+             ('$10-$20; slices; next signal any market', {'remap': bando, 'reenter': 'any'}),
+             ('$10-$20; slices; next signal; depth', {'remap': bando, 'reenter': 'any', 'depth': True}),
+             ('$50-$100; slices; next signal any market', {'remap': band5, 'reenter': 'any'}),
+             ('$50-$100; slices; next signal; depth', {'remap': band5, 'reenter': 'any', 'depth': True})]
+    for lab, kw in rows5:
+        kw = dict(kw); pc = kw.pop('pacer', SL)
+        r = pacer_run(pathsB, baseG, pc, **kw)
+        if r is None: print('    (no costed position)'); break
+        print(f"    {lab:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['entries']:7d}  {r['re']:10d}  {r['re_real']:+10.2f}  {r['snipe']:6d}  {r['held']:4d}  {r['cap_peak']:14.2f}  {r['thin_usd']:7.2f}")
     stakes = sorted(ownv(p) for p in pathsB if p.get('costF') is not None)
     if stakes: print(f"    (paper's own stakes: median ${stakes[len(stakes) // 2]:.2f}, p10 ${stakes[len(stakes) // 10]:.2f}, p90 ${stakes[9 * len(stakes) // 10]:.2f})")
 
