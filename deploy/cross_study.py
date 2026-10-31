@@ -1164,17 +1164,18 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
     print('     by the rule shown, and always inside the last 10% (or final minute) unless in profit. held W/L = settled winners/losers.')
     print('     cut$ = what the cuts realized; cutW = cuts on positions that would have settled as winners.')
     print('    loser rule                                                        realized $     $/h  snipes  heldW  heldW $  heldL  heldL $   cuts    cut $  cutW  nobid  depth $')
-    rowsL = [('none (today)', None), ('window only', {}),
-             ('fv < bid - fee - 3c (round 1 best)', {'fvbid': 0.03}), ('fv < bid - fee - 5c', {'fvbid': 0.05}),
-             ('fv < bid - fee - 8c', {'fvbid': 0.08}), ('fv < bid - fee - 12c', {'fvbid': 0.12}),
-             ('fv < bid - fee - 5c, 10 s in a row', {'fvbid': 0.05, 'confirm': 10}), ('fv < bid - fee - 5c, 30 s in a row', {'fvbid': 0.05, 'confirm': 30}),
-             ('fv < bid - fee - 3c, top size a second', {'fvbid': 0.03, 'split': True}), ('fv < bid - fee - 5c, top size a second', {'fvbid': 0.05, 'split': True}),
-             ('fv < bid - fee - 5c, 10 s, top size', {'fvbid': 0.05, 'confirm': 10, 'split': True}),
-             ('fv < cost - 15c', {'fvcost': 0.15}), ('fv < cost - 30c', {'fvcost': 0.30}), ('fv < cost - 20c, top size a second', {'fvcost': 0.20, 'split': True}),
-             ('window only, top size a second', {'split': True})]
-    for lab, lz in rowsL:
+    gate = lambda m: (lambda p: (lambda q: None if q is None or (q.get('q0') is not None and q['q0'] < q['costF'] - m) else q)(bando(p)))
+    S3 = {'fvbid': 0.03, 'split': True}
+    rowsL = [('none (today)', None, bando), ('window only', {}, bando),
+             ('fv < bid - fee - 3c, top size (round 2 best)', S3, bando),
+             ('fv < bid - fee - 2c, top size', {'fvbid': 0.02, 'split': True}, bando), ('fv < bid - fee - 4c, top size', {'fvbid': 0.04, 'split': True}, bando),
+             ('entry gate fv >= cost; window only', {}, gate(0.0)), ('entry gate fv >= cost; 3c top size', S3, gate(0.0)),
+             ('entry gate fv >= cost - 3c; 3c top size', S3, gate(0.03)), ('entry gate fv >= cost - 6c; 3c top size', S3, gate(0.06)),
+             ('entry gate fv >= cost + 3c; 3c top size', S3, gate(-0.03)), ('entry gate fv >= cost + 6c; 3c top size', S3, gate(-0.06))]
+    print('     entry gate: the position is skipped when the spot fair value at its entry is under its cost (fee in) less the margin shown.')
+    for lab, lz, rm in rowsL:
         for dp in (False, True):
-            r = pacer_run(pathsB, baseG, SL, remap=bando, loser=lz, depth=dp)
+            r = pacer_run(pathsB, baseG, SL, remap=rm, loser=lz, depth=dp)
             if r is None: print('    (no costed position)'); break
             lb = lab + ('; depth' if dp else '')
             print(f"    {lb:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['snipe']:6d}  {r['held_w']:5d}  {r['held_w_usd']:+8.2f}  {r['held_l']:5d}  {r['held_l_usd']:+8.2f}  {r['cut']:5d}  {r['cut_usd']:+8.2f}  {r['cut_win']:4d}  {r['nobid']:5d}  {r['thin_usd']:7.2f}")
