@@ -22,6 +22,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: ta-jobs-${{ github.ref }}
@@ -31,9 +32,12 @@ env:
   TJ_DAYS: ${{ inputs.days || '120' }}
   TJ_SPLIT: ${{ inputs.split || '' }}
   SWEEP_BANKROLL_USD: '200'
+  # A push whose message holds [report-from:<run id>] only redoes the report of that earlier run (its replays and artifacts).
+  TJ_REPORT_FROM: ${{ contains(github.event.head_commit.message, '[report-from:') && github.event.head_commit.message || '' }}
 
 jobs:
   data:
+    if: ${{ !contains(github.event.head_commit.message, '[report-from:') }}
     runs-on: ubuntu-latest
     timeout-minutes: 150
     outputs:
@@ -143,7 +147,7 @@ jobs:
 
   run-gate:
     needs: [data, run]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.data.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 330
     strategy:
@@ -227,16 +231,26 @@ jobs:
       - name: Install dependencies
         if: steps.deps.outputs.cache-hit != 'true'
         run: npm ci --no-audit --no-fund --silent
+      - name: Which run to report
+        id: src
+        run: |
+          from=$(printf '%s' "$TJ_REPORT_FROM" | grep -oE '\[report-from:[0-9]+\]' | grep -oE '[0-9]+' || true)
+          echo "run=${from:-${{ github.run_id }}}" >> "$GITHUB_OUTPUT"
+      # The same paths as the save in the data job: a cache's version covers its paths, so a subset never matches.
       - uses: actions/cache/restore@v4
         with:
-          path: data/history-replay
-          key: ta-jobs-replay-${{ github.run_id }}
+          path: |
+            data/history
+            data/history-replay
+          key: ta-jobs-replay-${{ steps.src.outputs.run }}
           fail-on-cache-miss: true
       - uses: actions/download-artifact@v4
         with:
           pattern: ta-jobs-*
           path: research/out/ta-jobs
           merge-multiple: true
+          run-id: ${{ steps.src.outputs.run }}
+          github-token: ${{ github.token }}
       - name: Report
         run: |
           node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$TJ_DAYS"
@@ -248,5 +262,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          { echo "TA jobs comparison, run ${{ github.run_id }}"; echo; echo '```'; tail -120 "$RUNNER_TEMP/report.txt" 2>/dev/null; echo '```'; } > "$RUNNER_TEMP/comment.md"
+          { echo "TA jobs comparison, run ${{ steps.src.outputs.run }}"; echo; echo '```'; tail -120 "$RUNNER_TEMP/report.txt" 2>/dev/null; echo '```'; } > "$RUNNER_TEMP/comment.md"
           gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@"$RUNNER_TEMP/comment.md" --silent || echo "could not post the comment"
