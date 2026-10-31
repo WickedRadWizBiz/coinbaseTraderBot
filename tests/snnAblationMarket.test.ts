@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { judge, loadSide, MECHANISMS, savedSide, summarize, vsMarket, vsMarketBreakdown } from '../research/snnAblation';
+import { judge, loadSide, MECHANISMS, savedSide, summarize, vsMarket, vsMarketBreakdown, correctionStats } from '../research/snnAblation';
 import type { SnnReplayResult } from '../research/snnReplay';
 import type { SnnRow } from '../research/snnReplay';
 import { Xoshiro128 } from '../bot/snn/rng';
@@ -55,4 +55,15 @@ test('breakdown: a slice where the SNN knows the truth shows up as beating the m
   assert.equal(col('ETH-15m').verdict, 'undecided');
   assert.equal(col('SOL-15m').verdict, 'too few');
   assert.ok(['mid', 'hourUtc', 'kind', 'vol'].every((b) => bd.some((x) => x.by === b)));
+});
+
+test('correction audit: slope 1 when the correction is the truth, below 1 when doubled, negative when reversed', () => {
+  const base = rows(2000, (t) => t, 7);
+  const scaled = (k: number) => base.map((r) => { const m = Math.min(0.98, Math.max(0.02, r.mid)); return { ...r, pSnn: Math.min(0.999, Math.max(0.001, m + k * (r.pSnn - m))) }; });
+  const one = correctionStats(base), dbl = correctionStats(scaled(2)), rev = correctionStats(scaled(-1));
+  assert.ok(Math.abs(one.slope - 1) < 0.15, `truth: ${one.slope}`);
+  assert.ok(dbl.slope < 0.65 && dbl.slope > 0.35, `doubled: ${dbl.slope}`);
+  assert.ok(rev.slope < 0, `reversed: ${rev.slope}`);
+  assert.ok(one.edgeCents > 3 && rev.edgeCents < -3, `edge: ${one.edgeCents} ${rev.edgeCents}`);
+  assert.ok(dbl.sizeCents > 1.8 * one.sizeCents && dbl.sizeCents <= 2 * one.sizeCents + 1e-9, `size: ${one.sizeCents} ${dbl.sizeCents}`);
 });

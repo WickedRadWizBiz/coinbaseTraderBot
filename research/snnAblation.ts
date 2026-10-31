@@ -81,6 +81,22 @@ export function vsMarket(rows: SnnRow[], iters = 2000) {
   return eventCi(rows, (r) => brier(r.pSnn, r.y) - brier(clipMid(r.mid), r.y), iters);
 }
 
+/** The audit of the SNN's correction to the market within a slice: its mean size (cents); its edge, the mean of
+ *  sign(p_snn - mid) * (y - mid) in cents, which is what one contract bought at the mid in the direction of the
+ *  correction would earn before fees (a share "pointing the right way" says little on a 0/1 outcome, since even the
+ *  true probability points the right way about half the time); and its calibration slope, the least-squares b in
+ *  (y - mid) = b (p_snn - mid): b near 1 = the right size, 0 < b < 1 = it overcorrects (shrinking it by b would
+ *  help), b > 1 = it is too timid, b <= 0 = it points the wrong way. */
+export function correctionStats(rows: SnnRow[]) {
+  let sxy = 0, sxx = 0, size = 0, edge = 0, n = 0, moved = 0;
+  for (const r of rows) {
+    const m = Math.min(0.98, Math.max(0.02, r.mid)), x = r.pSnn - m, e = r.y - m;
+    sxy += x * e; sxx += x * x; size += Math.abs(x); n++;
+    if (x !== 0) { edge += Math.sign(x) * e; moved++; }
+  }
+  return { sizeCents: n ? (100 * size) / n : 0, edgeCents: moved ? (100 * edge) / moved : 0, slope: sxx > 0 ? sxy / sxx : NaN };
+}
+
 /** Where the SNN differs from the market: vsMarket within slices of the rows (column = asset x horizon, the mid's
  *  distance from 50 cents, the UTC hour block, the contract kind, the volatility regime). A slice with its CI below zero
  *  is a place the SNN beats the market; a slice too small for a CI says so. */
@@ -92,15 +108,15 @@ export function vsMarketBreakdown(rows: SnnRow[], iters = 1000, minEvents = 150)
     kind: (r) => r.kind,
     vol: (r) => (r.volRatio < 0.8 ? 'vol low' : r.volRatio < 1.25 ? 'vol normal' : 'vol high'),
   };
-  const out: { by: string; slice: string; events: number; mean: number; lo: number; hi: number; verdict: string }[] = [];
+  const out: { by: string; slice: string; events: number; mean: number; lo: number; hi: number; verdict: string; corr: ReturnType<typeof correctionStats> }[] = [];
   for (const [by, f] of Object.entries(slicers)) {
     const groups = new Map<string, SnnRow[]>();
     for (const r of rows) { const k = f(r); const g = groups.get(k); if (g) g.push(r); else groups.set(k, [r]); }
     for (const [slice, g] of [...groups].sort((a, b) => a[0].localeCompare(b[0]))) {
       const events = new Set(g.map((r) => r.eventKey)).size;
-      if (events < minEvents) { out.push({ by, slice, events, mean: NaN, lo: NaN, hi: NaN, verdict: 'too few' }); continue; }
+      if (events < minEvents) { out.push({ by, slice, events, mean: NaN, lo: NaN, hi: NaN, verdict: 'too few', corr: correctionStats(g) }); continue; }
       const c = vsMarket(g, iters);
-      out.push({ by, slice, events, mean: c.mean, lo: c.lo, hi: c.hi, verdict: c.hi < 0 ? 'BEATS the market' : c.lo > 0 ? 'worse' : 'undecided' });
+      out.push({ by, slice, events, mean: c.mean, lo: c.lo, hi: c.hi, verdict: c.hi < 0 ? 'BEATS the market' : c.lo > 0 ? 'worse' : 'undecided', corr: correctionStats(g) });
     }
   }
   return out;
@@ -237,7 +253,8 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
     if (argOf('breakdown', '') === 'true') {
       const bd = vsMarketBreakdown(c.res.rows);
       console.log('        where the candidate stands against the market (Brier SNN - mid per window, day-block 95% CI):');
-      for (const x of bd) console.log(`          ${x.by.padEnd(8)} ${x.slice.padEnd(20)} ${String(x.events).padStart(5)} windows  ${Number.isFinite(x.mean) ? `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]` : ''.padEnd(29)}  ${x.verdict}`);
+      console.log('          (correction: mean size in cents, edge in cents per contract traded at the mid in its direction before fees, calibration slope b; b<1 overcorrects, b<=0 wrong way)');
+      for (const x of bd) console.log(`          ${x.by.padEnd(8)} ${x.slice.padEnd(20)} ${String(x.events).padStart(5)} windows  ${Number.isFinite(x.mean) ? `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]` : ''.padEnd(29)}  ${x.verdict.padEnd(16)}  size ${x.corr.sizeCents.toFixed(2)}c  edge ${x.corr.edgeCents.toFixed(2)}c  b ${x.corr.slope.toFixed(2)}`);
       v.extra = { ...(v.extra ?? {}), vsMarketBreakdown: bd };
     }
     writeVerdicts(out, { domain, recordings: dir, from: from ?? null, to: to ?? null }, [v]);
