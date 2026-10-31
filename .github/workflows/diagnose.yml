@@ -218,6 +218,14 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
           printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
           ssh bot true && echo "connected"
+      # Files already copied by an earlier lab run on this branch come from the Actions cache, not the server
+      - name: Restore the copied server files
+        if: ${{ inputs.exit_runner }}
+        uses: actions/cache/restore@v4
+        with:
+          path: labcache
+          key: exit-lab-${{ github.run_id }}
+          restore-keys: exit-lab-
       - name: Copy each window's files to the runner (read-only on the server) and run the study here
         if: ${{ inputs.exit_runner }}
         env:
@@ -245,7 +253,13 @@ jobs:
               day=$(echo "$f" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}')
               dir=recordings; [[ "$f" == audit-* ]] && dir=audit
               if [[ "$day" < "$D0" || "$day" > "$D1" ]]; then rm -f "data/$dir/$f"; continue; fi
-              [ -s "data/$dir/$f" ] || scp -q -l 64000 "bot:bot/data/$dir/$f" "data/$dir/$f"
+              if [ ! -s "data/$dir/$f" ]; then
+                # a finished day (not today's growing file) is reused from the cache
+                if [ -s "labcache/$f" ] && [ "$day" \< "$(date -u +%F)" ]; then cp "labcache/$f" "data/$dir/$f"
+                else scp -q -l 64000 "bot:bot/data/$dir/$f" "data/$dir/$f"
+                  if [ "$day" \< "$(date -u +%F)" ]; then mkdir -p labcache && cp "data/$dir/$f" "labcache/$f"; fi
+                fi
+              fi
             done
             echo "window $h h up to $u: $(du -sh data | cut -f1) on disk ($(ls data/audit data/recordings | grep -c jsonl) files)"
             if [ "$multi" = 0 ]; then
@@ -256,6 +270,12 @@ jobs:
                 sed -n '/^  G\. /,/^  C\. /p' "$RUNNER_TEMP/one.txt" | grep -v '^  C\. '; echo; } | tee -a "$RUNNER_TEMP/report.txt"
             fi
           done
+      - name: Save the copied server files for the next lab run
+        if: ${{ always() && inputs.exit_runner }}
+        uses: actions/cache/save@v4
+        with:
+          path: labcache
+          key: exit-lab-${{ github.run_id }}
       - name: Run the exit study on the server (read-only)
         if: ${{ !inputs.exit_runner }}
         env:
