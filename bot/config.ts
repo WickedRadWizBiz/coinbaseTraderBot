@@ -70,6 +70,14 @@ export interface LoserExitConfig {
    *  STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC, a position not in profit after fees is sold at the bid (Steven's rule); only a
    *  position in profit rides to settlement. Tennis: its last share of the match (TENNIS_NO_EXIT_BEFORE_END_FRAC). */
   window: boolean;
+  /** LOSER_WINDOW_JUDGE (bid): how the window cut tells a loser it sells. bid: not in profit after fees at the bid (as first
+   *  built). fair: that, and the spot fair value of the side under the bid less the taker fee a contract (selling beats
+   *  holding: a bid that has fallen under fair value near the close is not hit). cost: that, and the spot fair value of the
+   *  side under its cost with the entry fee (in profit judged by the coin's price instead of a thin closing bid). */
+  windowJudge: 'bid' | 'fair' | 'cost';
+  /** LOSER_WINDOW_SHARE (0: off): the window cut also runs once this share of the contract's window is left, when that is
+   *  earlier than the last share (STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC), while the books are still deep. */
+  windowShare: number;
 }
 
 export interface StrategyConfig {
@@ -1160,6 +1168,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       cut: bool(env, 'LOSER_CUT', true),
       cutMargin: num(env, 'LOSER_CUT_MARGIN', 0.03, 0, 0.5),
       window: bool(env, 'LOSER_WINDOW_CUT', true),
+      windowJudge: oneOf(env, 'LOSER_WINDOW_JUDGE', 'bid', ['bid', 'fair', 'cost'] as const),
+      windowShare: num(env, 'LOSER_WINDOW_SHARE', 0, 0, 0.9),
     },
     profitMandate: bool(env, 'PROFIT_MANDATE', false),
     profitMandateMin: num(env, 'PROFIT_MANDATE_MIN', 0.01, 0, 0.5),
