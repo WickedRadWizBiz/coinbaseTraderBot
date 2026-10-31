@@ -296,7 +296,10 @@ jobs:
         run: |
           LOG="$RUNNER_TEMP/own.log"; [ -s "$LOG" ] || { echo "no replay output to post"; exit 0; }
           { echo "**Replay check** run [$GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) · from $CHECK_FROM${OVERRIDES:+ · replay-only overrides: \`$OVERRIDES\`}"
-            echo; echo '```'; cut -c1-600 "$LOG" | head -n 150; echo '```'; } > "$RUNNER_TEMP/comment.md"
+            echo; echo '```'; grep -vE ' (WARN|INFO|DEBUG) +\[' "$LOG" | cut -c1-900 | head -n 120; echo '```'
+            echo; echo 'Every replay (own, then nearby by bankroll scale):'; echo; echo '```'
+            for L in "$LOG" "$RUNNER_TEMP"/nearby-*.log; do echo "== $(basename "$L" .log)"; grep -E '^replay  +fills|^hunt mode in the replay|^exit audit|^fills/contracts by order purpose|^settled markets / P&L by series' "$L" | cut -c1-900; done
+            grep -E '^(nearby replays of the stretch|median )' "$LOG" | cut -c1-1500; echo '```'; } > "$RUNNER_TEMP/comment.md"
           jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' | gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" --input - --jq '.html_url'
       - name: Copy the verdict to the server
         # A replay with overrides is a comparison, not a fidelity check: it never touches the server's verdict or tally.

@@ -430,3 +430,17 @@ test('exit curve rest mode: a NO position rests a YES bid at 1 - target, and the
   assert.ok(out.cancel.some((c) => c.clientOrderId === 'b'));
   assert.equal(out.place.find((p) => p.side === 'bid' && p.purpose === 'exit')!.count, 6);
 });
+
+test('quota trail (PACER_FLOOR=trail, lab): a winner no other rule holds rides on the quota, its floor keeping a share of the gain', () => {
+  // Long 10 YES at 0.40 plus the fee, about +0.85 net at the 0.52 bid; the model's exits are off, so nothing else aims higher.
+  const long = view({ position: 10, pYes: 0.5, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.52, size: 50 }, bestAsk: { price: 0.6, size: 50 } });
+  const sale = (out: StrategyOutput) => out.place.find((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel');
+  const riding = decide(long, { ...cfg, pacer: { ...cfg.pacer, floor: 'riding' } }, { exits: false, pacerUsd: 0.75 });
+  assert.match(sale(riding)!.why, /^quota snipe: /, 'riding: nothing aims higher, sold at the quota');
+  const trail = decide(long, { ...cfg, pacer: { ...cfg.pacer, floor: 'trail', trailKeep: 0.5 } }, { exits: false, pacerUsd: 0.75 });
+  assert.equal(sale(trail), undefined, 'trail: held');
+  assert.equal(trail.pacerArm?.why, 'the quota trailing its best');
+  assert.ok(trail.pacerArm!.usd > 0.75 + 1e-9 && trail.pacerArm!.usd < 0.86, `trail: the floor keeps half the gain above the need (${trail.pacerArm!.usd})`);
+  // Below the armed floor it is sold at the bid.
+  assert.match(sale(decide(long, { ...cfg, pacer: { ...cfg.pacer, floor: 'trail', trailKeep: 0.5 } }, { exits: false, pacerUsd: 0.75, pacerFloor: 0.95 }))!.why, /^quota snipe \(floor\): /);
+});

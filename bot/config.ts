@@ -909,7 +909,8 @@ function pacerConfig(env: Env): PacerConfig {
     minTakeUsd,
     maxTargetUsd: Math.max(minTakeUsd, num(env, 'PACER_MAX_TARGET_USD', 6.5, 0, 10_000)),
     // Steven (Oct 31): under a higher target the quota is the position's stop, not its sale.
-    floor: oneOf(env, 'PACER_FLOOR', 'riding', ['off', 'targets', 'riding'] as const),
+    floor: oneOf(env, 'PACER_FLOOR', 'riding', ['off', 'targets', 'riding', 'trail'] as const),
+    trailKeep: num(env, 'PACER_TRAIL_KEEP', 0.5, 0, 1),
   };
 }
 

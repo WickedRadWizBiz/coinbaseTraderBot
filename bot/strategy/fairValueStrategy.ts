@@ -349,13 +349,13 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: {
     if (set(v.curveRestSidePrice)) return `the curve's sell resting at ${v.curveRestSidePrice!.toFixed(2)}`;
     if (set(v.huntRestSidePrice)) return `the hunt's sell resting at the wall ${v.huntRestSidePrice!.toFixed(2)}`;
     for (const t of opts.higherTargets ?? []) if (set(t.sidePrice)) return `${t.why} at ${t.sidePrice.toFixed(2)}`;
-    if (floorMode !== 'riding') return undefined;
+    if (floorMode !== 'riding' && floorMode !== 'trail') return undefined;
     if (exits && tp?.riding) return 'the take-profit riding its best';
-    return opts.pacerHigher;
+    return opts.pacerHigher ?? (floorMode === 'trail' ? 'the quota trailing its best' : undefined);
   };
   const quota = (netUsd: number, sideBid: number, modelPx: number, tp: { sell: boolean; riding?: boolean } | undefined, selling: boolean) => {
     const higher = sniping && !selling ? aimsHigher(sideBid, modelPx, tp) : undefined;
-    const call = sniping ? quotaCall(netUsd, pacerUsd, opts.pacerFloor, higher) : {};
+    const call = sniping ? quotaCall(netUsd, pacerUsd, opts.pacerFloor, higher, floorMode === 'trail' ? cfg.pacer?.trailKeep : undefined) : {};
     if (call.arm !== undefined) {
       out.pacerArm = { usd: call.arm, why: higher! };
       out.notes.push(`quota floor: +$${netUsd.toFixed(2)} net covers the $${call.arm.toFixed(2)} the hour needs; held for ${higher}, sold if the profit falls below its floor`);
