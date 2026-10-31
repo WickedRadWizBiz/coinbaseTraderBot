@@ -1181,6 +1181,15 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
     # the gate scaled by how far fair value clears the cost: x1 at the margin, up to x5 at +20c
     gs = lambda p: (lambda q: None if q is None else dict(q, n=q['n'] * min(5.0, 1 + max(0.0, (q['q0'] or 0) - q['costF'] - 0.06) * 20)))(gate(-0.06)(p))
     rowsL.append(('entry gate fv >= cost + 6c; 3c top size; stake x1-x5 by edge', S3, gs))
+    # round 6: more gated trades. Training and exploration entries (off in today's bot) as candidates too, each at the band
+    def band_all(p):
+        if p['origin'] == 'normal': return bando(p)
+        st_ = min(max(p['n'] * p['costF'], 10.0), 20.0)
+        return dict(p, n=st_ / p['costF'])
+    gall = lambda m, k=1: (lambda p: (lambda q: None if q is None or q.get('q0') is None or q['q0'] < q['costF'] - m else dict(q, n=k * q['n']))(band_all(p)))
+    for m, nm in ((-0.06, '6c'), (-0.09, '9c'), (-0.03, '3c')):
+        for k in (1, 2):
+            rowsL.append((f'ALL origins, gate fv >= cost + {nm}; 3c top size' + (f'; stake x{k}' if k > 1 else ''), S3, gall(m, k)))
     print('     entry gate: the position is skipped when the spot fair value at its entry is under its cost (fee in) less the margin shown.')
     for lab, lz, rm in rowsL:
         for dp in (False, True):
