@@ -39,6 +39,7 @@ export const MECHANISMS: Mechanism[] = [
   { name: 'gap junctions', candidate: { stage: 'S5', flags: { gapJunctions: true } }, baseline: { stage: 'S5', flags: { proxies: true } }, note: 'vs BTC-ETH correlation feature' },
   { name: 'Izhikevich CH', candidate: { stage: 'S5', flags: { izhikevichCH: true } }, baseline: { stage: 'S5', flags: { proxies: true } }, note: 'vs delta-spike burst counter' },
   { name: 'dCaAP units', candidate: { stage: 'S5', flags: { dcaap: true } }, baseline: { stage: 'S5' }, note: 'vs 2-branch Poirazi XOR' },
+  { name: 'vol-normalized readout', candidate: { stage: 'S5', params: { anchorMid: true, volNorm: 1 } }, baseline: { stage: 'S5', params: { anchorMid: true } }, note: 'anchored readout features divided by the fast/slow activity ratio when it runs hot (audit Oct 31: correction ~8x too big in high vol)' },
   { name: 'anchor band 40-60c', candidate: { stage: 'S5', params: { anchorMid: true, anchorBand: 0.1 } }, baseline: { stage: 'S5', params: { anchorMid: true } }, note: 'the anchored price departs from the mid only at 40-60c (picked on Oct 22-30; judge on later days only)' },
   { name: 'mid-anchored readout', candidate: { stage: 'S5', params: { anchorMid: true } }, baseline: { stage: 'S5' }, note: 'logit p = logit(mid) + w . phi, weights from zero, vs the readout that prices from scratch (SNN plan phase 1)' },
 ];
