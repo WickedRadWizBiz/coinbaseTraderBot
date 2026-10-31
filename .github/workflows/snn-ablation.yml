@@ -99,6 +99,12 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
           printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
           ssh bot true && echo "connected"
+      - name: Recordings from the cache (only new or changed files are then read from the server)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/recordings
+          key: snn-recordings-${{ inputs.domain || 'crypto' }}-${{ github.run_id }}
+          restore-keys: snn-recordings-${{ inputs.domain || 'crypto' }}-
       - name: Copy the recordings and the meta-model (read-only)
         run: |
           set -euo pipefail
@@ -107,16 +113,23 @@ jobs:
           DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/models"
           vanished_ok() { local c=$?; [ $c -eq 24 ] && return 0; return $c; }
           ssh bot "cd ~/bot/data/recordings && find . -type f \( ! -name 'md-*' -o -mtime -$DAYS \) -printf '%P\n'" > "$RUNNER_TEMP/recordings.txt"
-          rsync -a --bwlimit=8m --rsync-path="flock bot/data/locks/snn-ablation-copy.lock nice -n 19 ionice -c3 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/" || vanished_ok
+          # Cached files outside today's window are dropped (the replay starts at the oldest day present).
+          (cd "$DATA/recordings" && find . -type f -printf '%P\n' | sort > "$RUNNER_TEMP/have.txt"; sort "$RUNNER_TEMP/recordings.txt" | comm -23 "$RUNNER_TEMP/have.txt" - | xargs -r -d '\n' rm -f)
+          echo "cache held $(wc -l < "$RUNNER_TEMP/have.txt") file(s); rsync now reads only new or changed ones"
+          rsync -a --whole-file --bwlimit=8m --rsync-path="flock bot/data/locks/snn-ablation-copy.lock nice -n 19 ionice -c3 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/" || vanished_ok
           rsync -a --rsync-path="nice -n 19 ionice -c3 rsync" bot:bot/data/models/model.json "$DATA/models/" 2>/dev/null || echo "no promoted meta-model on the server: the shipped params/model.json prices"
-          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/" || vanished_ok
-          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" bot:bot/data/models/model.json "$DATA/models/" 2>/dev/null || echo "no promoted meta-model on the server: the shipped params/model.json prices"
           echo "copied $(wc -l < "$RUNNER_TEMP/recordings.txt") recording file(s); data $(du -sh "$DATA" | cut -f1)"
           # The oldest complete recorded day copied: the replay starts there.
           FROM=$(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | sed 's/^md-//' | head -1)
           [ -n "$FROM" ] || { echo "no recordings copied"; exit 1; }
           echo "FROM=$FROM" >> "$GITHUB_ENV"
           echo "replay from $FROM ($(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | wc -l) day(s))"
+      - name: Save the recordings to the cache
+        if: matrix.side != 'baseline'
+        uses: actions/cache/save@v4
+        with:
+          path: data/recordings
+          key: snn-recordings-${{ inputs.domain || 'crypto' }}-${{ github.run_id }}
       - name: Ablation
         run: |
           set -euo pipefail
@@ -172,6 +185,12 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
           printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
           ssh bot true && echo "connected"
+      - name: Recordings from the cache (only new or changed files are then read from the server)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/recordings
+          key: snn-recordings-${{ inputs.domain || 'crypto' }}-${{ github.run_id }}
+          restore-keys: snn-recordings-${{ inputs.domain || 'crypto' }}-
       - name: Copy the recordings and the meta-model (read-only)
         run: |
           set -euo pipefail
@@ -180,7 +199,10 @@ jobs:
           DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/models"
           vanished_ok() { local c=$?; [ $c -eq 24 ] && return 0; return $c; }
           ssh bot "cd ~/bot/data/recordings && find . -type f \( ! -name 'md-*' -o -mtime -$DAYS \) -printf '%P\n'" > "$RUNNER_TEMP/recordings.txt"
-          rsync -a --bwlimit=8m --rsync-path="flock bot/data/locks/snn-ablation-copy.lock nice -n 19 ionice -c3 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/" || vanished_ok
+          # Cached files outside today's window are dropped (the replay starts at the oldest day present).
+          (cd "$DATA/recordings" && find . -type f -printf '%P\n' | sort > "$RUNNER_TEMP/have.txt"; sort "$RUNNER_TEMP/recordings.txt" | comm -23 "$RUNNER_TEMP/have.txt" - | xargs -r -d '\n' rm -f)
+          echo "cache held $(wc -l < "$RUNNER_TEMP/have.txt") file(s); rsync now reads only new or changed ones"
+          rsync -a --whole-file --bwlimit=8m --rsync-path="flock bot/data/locks/snn-ablation-copy.lock nice -n 19 ionice -c3 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/" || vanished_ok
           rsync -a --rsync-path="nice -n 19 ionice -c3 rsync" bot:bot/data/models/model.json "$DATA/models/" 2>/dev/null || echo "no promoted meta-model on the server: the shipped params/model.json prices"
           echo "copied $(wc -l < "$RUNNER_TEMP/recordings.txt") recording file(s); data $(du -sh "$DATA" | cut -f1)"
           # The oldest complete recorded day copied: the replay starts there.
@@ -188,6 +210,12 @@ jobs:
           [ -n "$FROM" ] || { echo "no recordings copied"; exit 1; }
           echo "FROM=$FROM" >> "$GITHUB_ENV"
           echo "replay from $FROM ($(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | wc -l) day(s))"
+      - name: Save the recordings to the cache
+        if: matrix.side != 'baseline'
+        uses: actions/cache/save@v4
+        with:
+          path: data/recordings
+          key: snn-recordings-${{ inputs.domain || 'crypto' }}-${{ github.run_id }}
       - uses: actions/download-artifact@v4
         # history-trained: the candidate starts from the network a history-training run saved.
         if: inputs.init_from != '' && matrix.side == 'candidate'
@@ -322,7 +350,7 @@ jobs:
           K="$RUNNER_TEMP/hist/history/kalshi"; mkdir -p "$K"
           # The range's day files and the day after each (contracts past midnight); crypto series only (no tennis tapes).
           python3 -c 'import sys,datetime as d; a=d.date.fromisoformat(sys.argv[1]); b=d.date.fromisoformat(sys.argv[2]); n=(b-a).days+3; [print("/KX*/%s.jsonl" % (a+d.timedelta(days=i-1)).isoformat()) for i in range(n)]' "$HFROM" "$HTO" > "$RUNNER_TEMP/kdays.txt"
-          rsync -a --bwlimit=8m --rsync-path="flock bot/data/locks/snn-ablation-copy.lock nice -n 19 ionice -c3 rsync" --include='/KX*/' --include-from="$RUNNER_TEMP/kdays.txt" --exclude='*' --prune-empty-dirs bot:bot/data/history/kalshi/ "$K/"
+          rsync -a --whole-file --bwlimit=8m --rsync-path="flock bot/data/locks/snn-ablation-copy.lock nice -n 19 ionice -c3 rsync" --include='/KX*/' --include-from="$RUNNER_TEMP/kdays.txt" --exclude='*' --prune-empty-dirs bot:bot/data/history/kalshi/ "$K/"
           echo "Kalshi day files: $(find "$K" -type f | wc -l) in $(ls "$K" | wc -l) series, $(du -sh "$K" | cut -f1)"
       - name: Train
         run: |
