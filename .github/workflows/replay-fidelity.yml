@@ -26,6 +26,10 @@ on:
         description: 'Older recorded days the depth fill-in is fitted on (never the compared ones)'
         required: false
         default: '3'
+      reuse_run:
+        description: 'Replay the days an earlier run copied (its run id; its cache is kept 7 days unused): no server copy at all'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -42,6 +46,7 @@ jobs:
     outputs:
       files: ${{ steps.pick.outputs.files }}
       fit: ${{ steps.pick.outputs.fit }}
+      key: ${{ steps.pick.outputs.key }}
     env:
       DAYS: ${{ inputs.days || '4' }}
       FIT_DAYS: ${{ inputs.fit_days || '3' }}
@@ -57,10 +62,31 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
           printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
           ssh bot true && echo "connected"
+      - name: The earlier run's days (reuse_run)
+        if: inputs.reuse_run != ''
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/recordings
+            data/fit
+            data/models
+          key: fidelity-data-${{ inputs.reuse_run }}-1
+          fail-on-cache-miss: true
       - name: Pick the days
         id: pick
+        env:
+          REUSE: ${{ inputs.reuse_run }}
         run: |
           set -euo pipefail
+          if [ -n "$REUSE" ]; then
+            [[ "$REUSE" =~ ^[0-9]+$ ]] || { echo "reuse_run must be a run id"; exit 1; }
+            echo "files=$(ls -1 data/recordings | sort | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+            echo "fit=$(ls -1 data/fit | sort | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+            echo "key=fidelity-data-$REUSE-1" >> "$GITHUB_OUTPUT"
+            echo "days of run $REUSE: $(ls -1 data/recordings | tr '\n' ' ')"
+            exit 0
+          fi
+          echo "key=fidelity-data-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
           [[ "$DAYS" =~ ^[0-9]+$ ]] && [ "$DAYS" -ge 2 ] || { echo "days must be a whole number of at least 2"; exit 1; }
           # The newest DAYS whole days and the day before them (today's is still being recorded), the same on every runner.
           TODAY=$(date -u +%F)
@@ -72,6 +98,7 @@ jobs:
           echo "fit=$FIT" >> "$GITHUB_OUTPUT"
           echo "days: $FILES | depth fitted on: $FIT"
       - name: Copy the days and the models once, capped at 8 MB/s (read-only, so the server is never burdened)
+        if: inputs.reuse_run == ''
         env:
           FILES: ${{ steps.pick.outputs.files }}
           FIT: ${{ steps.pick.outputs.fit }}
@@ -90,6 +117,7 @@ jobs:
       # Shared with this run's backtest runners through the Actions cache (never an artifact: no recordings leave the
       # server's and runners' disks), so the server is read once a run instead of once a runner.
       - uses: actions/cache/save@v4
+        if: inputs.reuse_run == ''
         with:
           path: |
             data/recordings
@@ -147,7 +175,7 @@ jobs:
             data/recordings
             data/fit
             data/models
-          key: fidelity-data-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ needs.pick.outputs.key }}
           fail-on-cache-miss: true
       - name: The settings (read-only)
         run: |
