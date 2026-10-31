@@ -24,9 +24,10 @@ const long = (o: Partial<MarketView> = {}) => view({ position: 10, entrySidePric
 const ioc = (out: StrategyOutput) => out.place.filter((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel');
 
 test('loser rules: on by default (gate 6c, cut 3c, window), each off by its flag', () => {
-  assert.deepEqual(base.loserExits, { gate: true, gateMargin: 0.06, cut: true, cutMargin: 0.03, window: true });
-  const c = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), FV_ENTRY_GATE: 'false', LOSER_CUT: 'false', LOSER_WINDOW_CUT: 'false', FV_ENTRY_GATE_MARGIN: '0.09', LOSER_CUT_MARGIN: '0.05' }).strategy;
-  assert.deepEqual(c.loserExits, { gate: false, gateMargin: 0.09, cut: false, cutMargin: 0.05, window: false });
+  assert.deepEqual(base.loserExits, { gate: true, gateMargin: 0.06, cut: true, cutMargin: 0.03, window: true, windowJudge: 'bid', windowShare: 0 });
+  const c = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), FV_ENTRY_GATE: 'false', LOSER_CUT: 'false', LOSER_WINDOW_CUT: 'false', FV_ENTRY_GATE_MARGIN: '0.09', LOSER_CUT_MARGIN: '0.05',
+    LOSER_WINDOW_JUDGE: 'cost', LOSER_WINDOW_SHARE: '0.25' }).strategy;
+  assert.deepEqual(c.loserExits, { gate: false, gateMargin: 0.09, cut: false, cutMargin: 0.05, window: false, windowJudge: 'cost', windowShare: 0.25 });
 });
 
 test('loser window cut: in the last share of the window or the final minute a position not in profit is sold at the bid; one in profit rides', () => {
@@ -57,6 +58,40 @@ test('loser window cut: in the last share of the window or the final minute a po
   assert.equal(ioc(decide(long({ exitWindowOpen: false, settleShare: true, tauSec: 30 }), off)).length, 0);
   // No cost basis: no judgement, nothing sold.
   assert.equal(loserExit(view({ position: 10, settleShare: true, tauSec: 70 }), cfg), undefined);
+});
+
+test('loser window judge: fair and cost ask the coin before a thin closing bid is hit; no fair value judges at the bid', () => {
+  // Long 10 YES at 0.55 + 1.75c (cost 0.5675), bid 0.50 (1.8c fee a contract: 0.482 net), the last share of the window.
+  const end = (pFair: number | undefined, judge: 'bid' | 'fair' | 'cost', o: Partial<MarketView> = {}) =>
+    ioc(decide(long({ settleShare: true, tauSec: 70, ...(pFair === undefined ? {} : { pFair }), ...o }), { ...cfg, loserExits: { ...cfg.loserExits!, windowJudge: judge } }));
+  // fair: sold only when the coin says the bid beats holding (fair value under 0.482); 0.60 rides, 0.47 is sold.
+  assert.equal(end(0.6, 'fair').length, 0);
+  assert.match(end(0.47, 'fair')[0]?.why ?? '', /^loser window cut: .* at bid 0\.50, fair value 0\.470 < bid less fee 0\.482, 70 s to the close/);
+  // cost: sold when the coin says the side is worth less than it cost (0.55 < 0.5675); 0.60 rides.
+  assert.equal(end(0.6, 'cost').length, 0);
+  assert.match(end(0.55, 'cost')[0]?.why ?? '', /^loser window cut: .* fair value 0\.550 < cost 0\.56\d, 70 s/);
+  // bid (as first built) sells at 0.60 too; no fair value known: every judge sells at the bid.
+  assert.equal(end(0.6, 'bid').length, 1);
+  assert.equal(end(undefined, 'fair').length, 1);
+  // Held by the judge in the final minute: it rides (no exit runs there), with the note.
+  const last = decide(long({ exitWindowOpen: false, settleShare: true, tauSec: 30, pFair: 0.6 }), { ...cfg, loserExits: { ...cfg.loserExits!, windowJudge: 'cost' } });
+  assert.equal(ioc(last).length, 0);
+  assert.ok(last.notes.includes('final minute: riding to settlement'));
+  // A side worth well under the bid (0.44) is sold under either judge.
+  assert.match(end(0.44, 'cost')[0]?.why ?? '', /^loser window cut: /);
+  assert.match(end(0.44, 'fair')[0]?.why ?? '', /^loser window cut: /);
+});
+
+test('loser window share: LOSER_WINDOW_SHARE starts the window cut earlier, while books are deeper', () => {
+  const early = { ...cfg, loserExits: { ...cfg.loserExits!, windowShare: 0.3 } };
+  // 900 s contract: the cut starts with 270 s left (30%), before the last 10%.
+  assert.match(loserExit(long({ tauSec: 250, windowSec: 900 }), early)?.why ?? '', /^loser window cut: .* 250 s to the close/);
+  assert.equal(loserExit(long({ tauSec: 300, windowSec: 900 }), early), undefined);
+  // Off (0), or the window's length unknown: only the last share and the final minute.
+  assert.equal(loserExit(long({ tauSec: 250, windowSec: 900 }), cfg), undefined);
+  assert.equal(loserExit(long({ tauSec: 250 }), early), undefined);
+  // In profit: never cut early (its own exits still run).
+  assert.equal(loserExit(long({ tauSec: 250, windowSec: 900, bestBid: { price: 0.7, size: 20 } }), early), undefined);
 });
 
 test('loser cut: a position not in profit is sold at once when the spot fair value of its side is under the bid less the fee less 3c', () => {
