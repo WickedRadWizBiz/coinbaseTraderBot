@@ -599,7 +599,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         sig_cache[j] = out
         return out
 
-    def pacer_run(paths, base, pacer, hourly=4.5, floor=0.75, cap=6.5, frac=0.10, no_exit_sec=60, size=None, reenter=False, depth=False, stake_fn=None, remap=None):
+    def pacer_run(paths, base, pacer, hourly=4.5, floor=0.75, cap=6.5, frac=0.10, no_exit_sec=60, size=None, reenter=False, depth=False, stake_fn=None, remap=None, loser=None):
         """One base exit with (or without) the pacer on top, every position in time order on one clock. base: a sim() rule or
         None (hold everything); pacer: None | (mode, group) with mode 'cumulative' | 'rolling_hour' | 'slices' (Steven's
         non-stacking spec of Oct 30, bot/risk/quotaPacer.ts: catch-up slices of at most the hourly target).
@@ -608,7 +608,12 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         only for old runs; Steven, Oct 31: not a method the bot uses, so the lab no longer measures it); reenter='any': once a
         pacer snipe banks its target, take the bot's next own taker entry
         signal (any market, either side) from the snipe to the end of its clock hour (at least 120 s), at the recorded ask, same stake. depth: contracts beyond the top-of-book size pay 2c worse
-        (the ask on entry, the bid on a sale): the lab otherwise fills every size at the top."""
+        (the ask on entry, the bid on a sale): the lab otherwise fills every size at the top.
+        loser (Steven, Oct 31: nothing holds to settlement unless it is in the last 10% of its window and in profit): a dict of
+        exits for positions not in profit, each a taker sale at the bid. 'window': inside the last share (or the final minute)
+        sell whenever net after fees <= 0; 'stop': f sells once net <= -f x stake; 'fvbid': sells when the spot fair value is
+        below the bid less its fee (holding is worth less than selling); 'fvcost': m sells when fair value < entry cost - m;
+        'time': f sells when only f of the window is left and net < 0; 'grace': s seconds after entry before any cut but the window."""
         DEPTH_PX = 0.02
         ps = []
         for k0, p in enumerate(paths):
@@ -649,7 +654,8 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             closes[sec if v is not None else p['c_sec']].append(i)
         st = {'real': 0.0, 'cyc': None, 'cyc_real': 0.0, 'bk': collections.defaultdict(float), 'base': 0, 'held': 0, 'snipe': 0, 'group': 0, 'cts': 0.0,
               'hours': 0, 'on_pace': 0, 'hkey': None, 'slice': 0.0, 'sl_h': 0,
-              'per': {}, 'stk': {}, 'entries': len(ps), 're': 0, 're_real': 0.0, 'cap_now': 0.0, 'cap_peak': 0.0, 'thin_n': 0, 'thin_usd': 0.0}
+              'per': {}, 'stk': {}, 'entries': len(ps), 're': 0, 're_real': 0.0, 'cap_now': 0.0, 'cap_peak': 0.0, 'thin_n': 0, 'thin_usd': 0.0,
+              'held_w': 0, 'held_w_usd': 0.0, 'held_l': 0, 'held_l_usd': 0.0, 'cut': 0, 'cut_usd': 0.0, 'cut_win': 0, 'nobid': 0}
         live = set(); done = [False] * len(ps); child = [False] * len(ps)
         for p in ps:
             if p.get('thin_in'): st['thin_n'] += 1; st['thin_usd'] += p['thin_in']
@@ -759,7 +765,32 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                     c = thin(p, t - p['s0'], p['path']['bsz'], p['n'])
                     if c > 0: st['thin_n'] += 1; st['thin_usd'] += c
                     close(i, t, (v - p['costF']) * p['n'] - c, 'base')
-                else: close(i, t, (p['payout'] - p['costF']) * p['n'], 'held')
+                else:
+                    x = (p['payout'] - p['costF']) * p['n']; close(i, t, x, 'held')
+                    if x > 0: st['held_w'] += 1; st['held_w_usd'] += x
+                    else: st['held_l'] += 1; st['held_l_usd'] += x
+            if loser:
+                for i in sorted(live):
+                    p = ps[i]; k = t - p['s0']
+                    b = p['bids'][k] if 0 <= k < len(p['bids']) else None
+                    inwin = t > p['c_sec'] - no_exit_sec or t > p['c_sec'] - frac * market_len(p)
+                    if b is None:
+                        if inwin and t == p['c_sec'] - 1: st['nobid'] += 1
+                        continue
+                    c = thin(p, k, p['path']['bsz'], p['n'])
+                    net = p['n'] * (b - p['costF']) - taker_fee(p['n'], b) - c
+                    if net > 1e-9: continue
+                    cut = inwin and loser.get('window', True)
+                    if not cut and t - p['s0'] >= loser.get('grace', 0):
+                        stake = p['n'] * p['costF']; q = p['fv'][k] if 0 <= k < len(p['fv']) else None
+                        if 'stop' in loser and net <= -loser['stop'] * stake: cut = True
+                        elif 'fvbid' in loser and q is not None and q < b - fee1(b, p['n']) - loser['fvbid']: cut = True
+                        elif 'fvcost' in loser and q is not None and q < p['costF'] - loser['fvcost']: cut = True
+                        elif 'time' in loser and t > p['c_sec'] - loser['time'] * market_len(p): cut = True
+                    if cut:
+                        if c > 0: st['thin_n'] += 1; st['thin_usd'] += c
+                        close(i, t, net, 'cut'); st['cut_usd'] += net
+                        if p['payout'] > 0.5: st['cut_win'] += 1  # would have settled a winner
             if pacer is None: continue
             members = []
             for i in sorted(live):
@@ -1116,6 +1147,23 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         print(f"    {lab:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['entries']:7d}  {r['re']:10d}  {r['re_real']:+10.2f}  {r['snipe']:6d}  {r['held']:4d}  {r['cap_peak']:14.2f}  {r['thin_usd']:7.2f}")
     stakes = sorted(ownv(p) for p in pathsB if p.get('costF') is not None)
     if stakes: print(f"    (paper's own stakes: median ${stakes[len(stakes) // 2]:.2f}, p10 ${stakes[len(stakes) // 10]:.2f}, p90 ${stakes[9 * len(stakes) // 10]:.2f})")
+    # ---- L. Steven, Oct 31: no holding to settlement unless in the last 10% and in profit; exits for losers, iterated ------
+    print('  L. loser exits on normal entries, the $10-$20 band per order, slices pacer: every position not in profit is sold at the bid')
+    print('     by the rule shown, and always inside the last 10% (or final minute) unless in profit. held W/L = settled winners/losers.')
+    print('     cut$ = what the cuts realized; cutW = cuts on positions that would have settled as winners.')
+    print('    loser rule                                                        realized $     $/h  snipes  heldW  heldW $  heldL  heldL $   cuts    cut $  cutW  nobid  depth $')
+    rowsL = [('none (today)', None), ('window only', {}),
+             ('stop 25%', {'stop': 0.25}), ('stop 50%', {'stop': 0.50}), ('stop 75%', {'stop': 0.75}),
+             ('fair value < bid - fee', {'fvbid': 0.0}), ('fair value < bid - fee - 3c', {'fvbid': 0.03}),
+             ('fair value < cost - 10c', {'fvcost': 0.10}), ('fair value < cost - 20c', {'fvcost': 0.20}),
+             ('half the window left, still losing', {'time': 0.5}), ('a quarter left, still losing', {'time': 0.25}),
+             ('fv < bid - fee, 60 s grace', {'fvbid': 0.0, 'grace': 60}), ('fv < cost - 10c or stop 50%', {'fvcost': 0.10, 'stop': 0.5})]
+    for lab, lz in rowsL:
+        for dp in (False, True):
+            r = pacer_run(pathsB, baseG, SL, remap=bando, loser=lz, depth=dp)
+            if r is None: print('    (no costed position)'); break
+            lb = lab + ('; depth' if dp else '')
+            print(f"    {lb:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['snipe']:6d}  {r['held_w']:5d}  {r['held_w_usd']:+8.2f}  {r['held_l']:5d}  {r['held_l_usd']:+8.2f}  {r['cut']:5d}  {r['cut_usd']:+8.2f}  {r['cut_win']:4d}  {r['nobid']:5d}  {r['thin_usd']:7.2f}")
 
     # ---- C. what separates the right stop sales from the wrong ones (at the 1-tick trail's trigger, from the locks) --
     print('  C. at the 1-tick trail\'s trigger (from the actual locks): the sale against settlement by what the rule could see')
