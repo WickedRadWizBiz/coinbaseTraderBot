@@ -57,6 +57,8 @@ export interface SideSummary {
   hunt?: string;
   /** The exit audit by kind (backtest ExitStats.byKind): sold after fees, held to settlement, the best later bid. */
   exitAudit?: string;
+  /** Lab: the entry rules, and settled markets / P&L by the first entry fill's seconds to the close, 15m and hourly apart. */
+  entryTiming?: string;
   /** Settled P&L by UTC hour (YYYY-MM-DDTHH). */
   byHour: Record<string, number>;
   /** Fills and contracts by order purpose (quote, entry, exit; other: an order the log does not name). */
@@ -704,8 +706,15 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const makerBufferPaper = mk.length >= 30 ? Math.min(S.makerBufferRange[1], Math.max(S.makerBufferRange[0], -mk.reduce((a, x) => a + x, 0) / mk.length)) : null;
   const inside = (t: number) => t >= from && t < to;
   for (const [w, b] of r.windows) if (inside(w)) { replay.fills += b.fills ?? 0; replay.contracts += b.contracts; replay.fees += b.fees; }
+  const timing: Record<string, Record<number, { n: number; pnl: number; train: number; trainPnl: number }>> = { '15m': {}, hourly: {} };
   for (const t of r.trades) {
     if (!inside(t.closeTs)) continue;
+    if (t.entrySec !== undefined) {
+      const k = t.kind === 'updown' ? '15m' : 'hourly', step = k === '15m' ? 60 : 300, lo = Math.floor(Math.max(0, t.entrySec) / step) * step;
+      const b = (timing[k][lo] ??= { n: 0, pnl: 0, train: 0, trainPnl: 0 });
+      b.n++; b.pnl += t.pnl;
+      if (t.entryTrain) { b.train++; b.trainPnl += t.pnl; }
+    }
     replay.pnl += t.pnl; replay.markets++;
     const h = hourOf(t.closeTs);
     replay.byHour[h] = (replay.byHour[h] ?? 0) + t.pnl;
@@ -719,6 +728,17 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   if (r.exits.contracts - tpContracts > 1e-9) replay.exits['model exit / ratchet'] = +(r.exits.contracts - tpContracts).toFixed(2);
   const x = r.exits;
   if (x.huntActivations || x.wallAsks || x.quotaSnipes) replay.hunt = `hunt mode in the replay: ${x.huntActivations} activations, ${x.ratchetTriggers} stop triggers, ${x.gaps} gaps, ${x.huntProfitTakes} profit takes, ${x.lockSales} lock sales, ${x.lockHolds} lock holds, ${x.wallAsks} wall asks (${x.wallFills.toFixed(0)} contracts filled on them), ${x.quotaSnipes} quota snipes (${x.quotaSnipeContracts.toFixed(0)} contracts)${x.floorArms || x.floorSales ? `, ${x.floorArms ?? 0} quota floors armed, ${x.floorSales ?? 0} floor sale calls` : ''}${x.floorHolds ? `, ${x.floorHolds} floor holds by the model` : ''}`;
+  {
+    const g = (x: number) => (x >= 0 ? '+' : '') + x.toFixed(2);
+    const kinds = (['15m', 'hourly'] as const).map((k) => {
+      const step = k === '15m' ? 60 : 300;
+      const rows = Object.entries(timing[k]).map(([lo, b]) => [Number(lo), b] as const).sort((a, b) => b[0] - a[0]);
+      const tot = rows.reduce((a, [, b]) => ({ n: a.n + b.n, pnl: a.pnl + b.pnl }), { n: 0, pnl: 0 });
+      return `${k} ${tot.n} / ${g(tot.pnl)}: ${rows.map(([lo, b]) => `${lo + step}-${lo} s ${b.n} / ${g(b.pnl)}${b.train ? ` (train ${b.train} / ${g(b.trainPnl)})` : ''}`).join(', ') || 'none'}`;
+    });
+    const L = S.loserExits;
+    replay.entryTiming = `entry timing (15m window ${S.entryWindowUpdown.join('-')} s, hourly ${S.entryWindowHourly.join('-')} s, cadence ${S.cadence}, training ${S.trainTrades}/h, gate ${L?.gate ? `on ${L.gateMargin}` : 'off'}, cut ${L?.cut ? 'on' : 'off'}, window cut ${L?.window ? `${L.windowJudge ?? 'bid'}${L.windowShare ? ` from ${L.windowShare}` : ''}` : 'off'}, no entry ${L?.noEntryShare ?? 0}, floor ticks ${S.pacer.floorTicks ?? 0}; settled markets / P&L by the first entry fill's seconds to the close): ${kinds.join(' | ')}`;
+  }
   if (x.byKind) replay.exitAudit = `exit audit${x.lateFills ? ` (entry and quote fills in the last 10% of the window: ${x.lateFills} fills ${(x.lateContracts ?? 0).toFixed(0)} c)` : ''}, sold after fees / held to settlement / best later bid after fees: ${Object.entries(x.byKind).sort((a, b) => b[1].contracts - a[1].contracts)
     .map(([k, v]) => `${k} ${v.fills} fills ${v.contracts.toFixed(0)} c $${v.proceeds.toFixed(2)} / $${v.settled.toFixed(2)} / $${v.best.toFixed(2)}`
       + (v.fv !== undefined ? `, fair value at the sale $${v.fv.toFixed(2)}` : '') + (v.tauC !== undefined && v.contracts > 0 ? ` ${(v.tauC / v.contracts).toFixed(0)} s to the close` : '')
@@ -815,6 +835,7 @@ async function main(): Promise<void> {
   row('paper', res.paper);
   if (res.replay.hunt) console.log(res.replay.hunt);
   if (res.replay.exitAudit) console.log(res.replay.exitAudit);
+  if (res.replay.entryTiming) console.log(res.replay.entryTiming);
   const purposes = (s: SideSummary) => Object.entries(s.byPurpose).sort().map(([k, x]) => `${k} ${x.fills}/${x.contracts.toFixed(0)}`).join(', ') || 'none';
   console.log(`fills/contracts by order purpose: replay ${purposes(res.replay)} | paper ${purposes(res.paper)}`);
   const X = res.replay.extra, rej = Object.entries(X.rejected).sort((x, y) => y[1] - x[1]).slice(0, 3).map(([k, n]) => `${k} x${n}`).join('; ');

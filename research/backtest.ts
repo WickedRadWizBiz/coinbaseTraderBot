@@ -133,7 +133,9 @@ export interface ExitStats {
 export interface SessionBreakdown { windows: number; pnl: number; contracts: number; fees: number }
 
 /** One traded contract (a market in which a position was taken), settled. */
-export interface TradeResult { ticker: string; closeTs: number; pnl: number; contracts: number; kind: string }
+export interface TradeResult { ticker: string; closeTs: number; pnl: number; contracts: number; kind: string;
+  /** Lab: seconds to the close at the market's first entry or quote fill, and whether that fill was a training trade. */
+  entrySec?: number; entryTrain?: boolean }
 
 export interface BacktestResult {
   exitPolicy: ExitPolicyName;
@@ -428,6 +430,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   let firstTs = 0;
   const closeOf = new Map<string, number>();
   const windowOf = new Map<string, number>(); // each market's window, open to close (ms)
+  const firstEntry = new Map<string, { sec: number; train: boolean }>(); // lab: each market's first entry or quote fill
+  const trainIds = new Set<string>(); // lab: the training trades' order ids
   const lastFair = new Map<string, number>(); // the exit audit: each market's last spot fair value (YES)
   const ratchets = new Map<string, LiquidityRatchet>();
   const hunts = new Map<string, ConfluenceRatchetExit>();
@@ -516,6 +520,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     if (opts.paper && !f.isTaker) markoutDue.push({ due: st.now + 60_000, ticker: f.ticker, sign: f.side === 'bid' ? 1 : -1, price: f.price });
     const winMs = windowOf.get(f.ticker);
     if (purposeOf(f.clientOrderId) !== 'exit' && winMs && w - st.now <= 0.1 * winMs) { exits.lateFills = (exits.lateFills ?? 0) + 1; exits.lateContracts = (exits.lateContracts ?? 0) + f.count; }
+    if (purposeOf(f.clientOrderId) !== 'exit' && !firstEntry.has(f.ticker)) firstEntry.set(f.ticker, { sec: (w - st.now) / 1000, train: trainIds.has(f.clientOrderId ?? '') });
     const bp = (res.byPurpose![purposeOf(f.clientOrderId)] ??= { fills: 0, contracts: 0 });
     bp.fills++; bp.contracts += f.count;
     if (f.clientOrderId?.endsWith('-exit-wall')) exits.wallFills += f.count;
@@ -651,7 +656,9 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
             pos.settle(m.ticker, result, st.now);
             pacer?.onSettled(m.ticker, p.realized ?? 0, st.now);
             const traded = res.windows.get(m.closeTime)?.contracts ?? 0;
-            if (traded > 0) res.trades.push({ ticker: m.ticker, closeTs: m.closeTime, pnl: p.realized ?? 0, contracts: traded, kind: m.kind });
+            const fe = firstEntry.get(m.ticker);
+            firstEntry.delete(m.ticker);
+            if (traded > 0) res.trades.push({ ticker: m.ticker, closeTs: m.closeTime, pnl: p.realized ?? 0, contracts: traded, kind: m.kind, ...(fe ? { entrySec: fe.sec, entryTrain: fe.train } : {}) });
             const b = res.windows.get(m.closeTime) ?? { pnl: 0, contracts: 0, fees: 0 };
             b.pnl += p.realized ?? 0;
             res.windows.set(m.closeTime, b);
@@ -1045,6 +1052,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         }
         if (/^(train|explore)/.test(p.why)) res.paper!.extraSent = (res.paper!.extraSent ?? 0) + 1;
         const clientOrderId = `${m.ticker}-${st.now}-${p.side}-${p.purpose}${p.why.startsWith('take-profit') ? '-tp' : p.why.startsWith('confluence ratchet wall ask') ? '-wall' : ''}`;
+        if (p.why.startsWith('train:')) trainIds.add(clientOrderId);
         await send(m.ticker, 'order', async () => {
           try {
             await ex.createOrder({ ticker: m.ticker, side: p.side, count: p.count, price: p.price, timeInForce: p.timeInForce, postOnly: p.postOnly, reduceOnly: p.reduceOnly, selfTradePrevention: 'taker_at_cross', clientOrderId, expirationTime: p.expirationTime });
