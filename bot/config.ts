@@ -911,6 +911,7 @@ function pacerConfig(env: Env): PacerConfig {
     // Steven (Oct 31): under a higher target the quota is the position's stop, not its sale.
     floor: oneOf(env, 'PACER_FLOOR', 'riding', ['off', 'targets', 'riding', 'trail'] as const),
     trailKeep: num(env, 'PACER_TRAIL_KEEP', 0.5, 0, 1),
+    floorTicks: num(env, 'PACER_FLOOR_TICKS', 0, 0, 50),
   };
 }
 
