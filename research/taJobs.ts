@@ -16,6 +16,7 @@ import path from 'path';
 import { rng } from './stats';
 import type { TrialResult } from './randomSweep';
 import type { EntryLogRow } from './backtest';
+import { recordingFiles } from '../bot/marketdata/recordingFiles';
 
 /** Each variant's bot.env lines on top of the server's settings. The jobs add theirs as they are built. */
 // Round 2 (run 41178608433, 120 days, $200 pool refilled like paper; $/h after Sep 1 vs the baseline's -2.50, with the
@@ -42,6 +43,20 @@ export const GATE_VARIANTS: Record<string, Record<string, string>> = {
   g_m2_j4v2: { TAKE_MID_GATE: GATE_FILE, TAKE_MID_MARGIN: '0.02', ...VARIANTS.j4_v2 },
   g_m2_full: { TAKE_MID_GATE: GATE_FILE, TAKE_MID_MARGIN: '0.02', ...LEANS, ...LAG, ...VARIANTS.j4_v2 },
 };
+
+/** The replay's days, or (when its cache is gone by report time) every calendar day the runs' results span: the history
+ *  replay has one per day, so the span is the same list. */
+function dayList(days: string, out: string): string[] {
+  const listed = fs.existsSync(days) ? recordingFiles(days).map((d) => d.day).sort() : [];
+  if (listed.length) return listed;
+  const seen: string[] = [];
+  for (const f of fs.existsSync(out) ? fs.readdirSync(out) : []) if (f.endsWith('.json')) seen.push(...Object.keys(JSON.parse(fs.readFileSync(path.join(out, f), 'utf8')).byDay ?? {}));
+  if (!seen.length) return [];
+  seen.sort();
+  const res: string[] = [];
+  for (let t = Date.parse(`${seen[0]}T00:00:00Z`); t <= Date.parse(`${seen[seen.length - 1]}T00:00:00Z`); t += 86_400_000) res.push(new Date(t).toISOString().slice(0, 10));
+  return res;
+}
 
 function arg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith('--') ? process.argv[i + 1] : d; }
 
@@ -135,7 +150,6 @@ async function main(): Promise<void> {
   const cmd = process.argv[2];
   const out = arg('out', 'research/out/ta-jobs');
   const days = arg('days', 'data/sweep-days');
-  const { recordingFiles } = await import('../bot/marketdata/recordingFiles');
   if (cmd === 'run') {
     const name = arg('variant', 'baseline');
     const env = VARIANTS[name] ?? GATE_VARIANTS[name];
@@ -151,7 +165,7 @@ async function main(): Promise<void> {
   if (cmd === 'train-gate') {
     // Job 3: the mid-anchored take gate from the baseline's entry fills before the split, checked on those after it.
     const { fitMidGate, midGateInputs, midGateProbability } = await import('../bot/model/midTakeGate');
-    const all = recordingFiles(days).map((d) => d.day).sort();
+    const all = dayList(days, out);
     const split = arg('split', all[Math.floor(all.length * 0.5)] ?? '');
     const rows = readLog(path.join(out, 'baseline.entries.jsonl')).map((r) => {
       const { x, midSide } = midGateInputs(r.side, r.price, !r.taker, r.pYes, r.mid, r.spread ?? 0.02, r.tauSec, r.f);
@@ -177,7 +191,7 @@ async function main(): Promise<void> {
   }
   if (cmd === 'report') {
     const { scoreOf } = await import('./randomSweep');
-    const all = recordingFiles(days).map((d) => d.day).sort();
+    const all = dayList(days, out);
     const split = arg('split', all[Math.floor(all.length * 0.5)] ?? '');
     const train = all.filter((d) => d < split), test = all.filter((d) => d >= split);
     const res = new Map<string, TrialResult>();

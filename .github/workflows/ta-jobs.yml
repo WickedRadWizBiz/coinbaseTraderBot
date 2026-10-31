@@ -247,7 +247,6 @@ jobs:
           restore-keys: |
             ta-jobs-replay-
             kalshi-replay-
-          fail-on-cache-miss: true
       - uses: actions/download-artifact@v4
         with:
           pattern: ta-jobs-*
@@ -257,7 +256,8 @@ jobs:
           github-token: ${{ github.token }}
       - name: Report
         run: |
-          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$TJ_DAYS"
+          # Without the replay (its caches evicted) the report takes the days the results span (taJobs.ts dayList).
+          [ -d data/history-replay ] && node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$TJ_DAYS"
           { node --import tsx research/taJobs.ts report --days data/sweep-days --out research/out/ta-jobs $([ -n "$TJ_SPLIT" ] && echo --split "$TJ_SPLIT") 2>&1
             echo "job 3, the mid-anchored take gate:"
             node --import tsx research/taJobs.ts train-gate --days data/sweep-days --out research/out/ta-jobs --gate-out "$RUNNER_TEMP/take_mid.json" $([ -n "$TJ_SPLIT" ] && echo --split "$TJ_SPLIT") 2>&1 | grep -E '^\[ta-jobs\]|Error'; } | tee "$RUNNER_TEMP/report.txt" | tail -80
