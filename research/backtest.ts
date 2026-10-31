@@ -121,7 +121,9 @@ export interface ExitStats {
 export interface SessionBreakdown { windows: number; pnl: number; contracts: number; fees: number }
 
 /** One traded contract (a market in which a position was taken), settled. */
-export interface TradeResult { ticker: string; closeTs: number; pnl: number; contracts: number; kind: string }
+export interface TradeResult { ticker: string; closeTs: number; pnl: number; contracts: number; kind: string;
+  /** The market-state reading (compactReading) at the last evaluation before the market's entry. */
+  mstate?: Record<string, number | null> }
 
 export interface BacktestResult {
   exitPolicy: ExitPolicyName;
@@ -377,6 +379,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const volFc = new VolForecaster(opts.volModel);
   // Market state, fed at each evaluation exactly as the engine feeds it (bot/marketdata/marketState.ts).
   const mstate = new MarketState();
+  // The reading at each market's last evaluation while flat: the state its entry was made in (research/stateAudit.ts).
+  const entryState = new Map<string, Record<string, number | null>>();
   const pos = new PositionBook();
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => DEFAULT_FEES, () => st.now);
   const gateway = new RiskGateway(limits);
@@ -619,7 +623,9 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
             pos.settle(m.ticker, result, st.now);
             pacer?.onSettled(m.ticker, p.realized ?? 0, st.now);
             const traded = res.windows.get(m.closeTime)?.contracts ?? 0;
-            if (traded > 0) res.trades.push({ ticker: m.ticker, closeTs: m.closeTime, pnl: p.realized ?? 0, contracts: traded, kind: m.kind });
+            const es = entryState.get(m.ticker);
+            entryState.delete(m.ticker);
+            if (traded > 0) res.trades.push({ ticker: m.ticker, closeTs: m.closeTime, pnl: p.realized ?? 0, contracts: traded, kind: m.kind, ...(es ? { mstate: es } : {}) });
             const b = res.windows.get(m.closeTime) ?? { pnl: 0, contracts: 0, fees: 0 };
             b.pnl += p.realized ?? 0;
             res.windows.set(m.closeTime, b);
@@ -730,6 +736,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         if (ruleShift) pYes = Math.max(0.001, Math.min(0.999, pYes + ruleShift));
       }
       const mRead = observeMarket(mstate, { asset: m.asset, ticker: m.ticker, index: idx!, now: st.now, bid, ask, trades: st.features.micro.get(m.ticker)?.tradesIn(st.now, 300_000) });
+      if (pos.position(m.ticker) === 0) entryState.set(m.ticker, compactReading(mRead));
       opts.onEval?.({ ticker: m.ticker, now: st.now, pYes, fv: fv.pYes, bid: bid.price, ask: ask.price, position: pos.position(m.ticker), spot: spot.value, strike: terms.strike, sigma: vol.sigmaPerSqrtSec, sigmaPricing: sigmaFv,
         pModel: pred.p, taVolMult, taShift, ruleShift, mstate: compactReading(mRead) });
       const pMarket = model.marketProbability(mid);
