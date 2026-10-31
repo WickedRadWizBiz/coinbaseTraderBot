@@ -558,14 +558,32 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
     sig_cache = {}
     sig_miss = set()
 
+    def settle_of(tk, close_ms):
+        """A market's YES / NO from the recorded settlement index: the average of the last 60 s before the close against the
+        strike (the recorder logs few 'result' records); the last recorded YES bid when there is no index."""
+        tm = terms.get(tk) or {}
+        ep = {'ticker': tk, 'asset': tm.get('asset')}
+        c = close_ms // 1000
+        K, cap, kind = strike_of(ep)
+        xs = [index_at(ep['asset'], x) for x in range(c - 60, c)] if ep['asset'] else []
+        xs = [x for x in xs if x]
+        if K and len(xs) >= 30:
+            S = sum(xs) / len(xs)
+            if kind == 'less': return 'yes' if S < (cap or K) else 'no'
+            return 'yes' if S >= K and (not cap or S < cap) else 'no'
+        tp = top_at(tk, c - 1)
+        if tp and tp[1] is not None and tp[1] >= 0.9: return 'yes'
+        if tp and tp[3] is not None and tp[3] <= 0.1: return 'no'
+        return None
+
     def sig_pos(j):
         """A position from entry signal j: the side's recorded ask at the signal second, the market's recorded result."""
         if j in sig_cache: return sig_cache[j]
         sec, tk, sign, px, edge = entry_sigs[j]
         tm = terms.get(tk) or {}
-        res = (mres or {}).get(tk)
         out = None
         if not tops.get(tk): sig_miss.add(tk)
+        res = (mres or {}).get(tk) or (settle_of(tk, int(tm['closeTime'])) if tm.get('closeTime') and tops.get(tk) else None)
         if res in ('yes', 'no') and tm.get('closeTime') and tops.get(tk):
             ep = {'ticker': tk, 'sign': sign, 'asset': tm.get('asset'), 'close_ms': int(tm['closeTime']), 'entries': [], 'exits': []}
             ep['payout'] = 1.0 if (sign > 0) == (res == 'yes') else 0.0
@@ -959,9 +977,13 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         more_books(new)
         for j in [j for j in sig_cache if entry_sigs[j][1] in new]: del sig_cache[j]
     ok = sum(1 for j in range(len(entry_sigs)) if sig_pos(j) is not None)
-    agree = [(1.0 if (mres or {}).get(ep['ticker']) == ('yes' if ep['sign'] > 0 else 'no') else 0.0) == ep['payout'] for ep in episodes if ep.get('payout') is not None and (mres or {}).get(ep['ticker'])]
+    agree = []
+    for ep in episodes:
+        if ep.get('payout') is None or not ep.get('close_ms'): continue
+        r = settle_of(ep['ticker'], ep['close_ms'])
+        if r: agree.append((1.0 if r == ('yes' if ep['sign'] > 0 else 'no') else 0.0) == ep['payout'])
     print(f"     'next signal' (to the end of the snipe's clock hour): the bot's own taker entry signals (decision records placing an entry): {len(entry_sigs)} in the window, {ok} with a")
-    print(f"     book path and a recorded result; signal markets paper itself traded within 5 min are skipped. Results agree with paper's settlements on {sum(agree)} of {len(agree)}.")
+    print(f"     book path and a recorded result; signal markets paper itself traded within 5 min are skipped. Settled from the index (last 60 s vs strike); that rule agrees with paper's settlements on {sum(agree)} of {len(agree)} of paper's markets.")
     print('    stake; pacer; re-entry; depth                                     realized $     $/h  entries  re-entries  re-entry $  base sales  snipes  held  peak $ at work  thin fills  depth $')
     for lab, pacer, kw in (
             ("paper's own sizes; slices no group", SL, {}),
