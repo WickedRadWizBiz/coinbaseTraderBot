@@ -55,6 +55,8 @@ export interface SideSummary {
   exits: Record<string, number>;
   /** confluence_ratchet: what hunt mode did in the replay (activations, stop triggers, lock sale judgements, wall asks). */
   hunt?: string;
+  /** The exit audit by kind (backtest ExitStats.byKind): sold after fees, held to settlement, the best later bid. */
+  exitAudit?: string;
   /** Settled P&L by UTC hour (YYYY-MM-DDTHH). */
   byHour: Record<string, number>;
   /** Fills and contracts by order purpose (quote, entry, exit; other: an order the log does not name). */
@@ -719,7 +721,9 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   if (tpContracts) replay.exits['take-profit'] = +tpContracts.toFixed(2);
   if (r.exits.contracts - tpContracts > 1e-9) replay.exits['model exit / ratchet'] = +(r.exits.contracts - tpContracts).toFixed(2);
   const x = r.exits;
-  if (x.huntActivations || x.wallAsks || x.quotaSnipes || x.crossSales) replay.hunt = `hunt mode in the replay: ${x.huntActivations} activations, ${x.ratchetTriggers} stop triggers, ${x.gaps} gaps, ${x.huntProfitTakes} profit takes, ${x.lockSales} lock sales, ${x.lockHolds} lock holds, ${x.wallAsks} wall asks (${x.wallFills.toFixed(0)} contracts filled on them), ${x.quotaSnipes} quota snipes (${x.quotaSnipeContracts.toFixed(0)} contracts)${x.floorArms || x.floorSales ? `, ${x.floorArms ?? 0} quota floors armed, ${x.floorSales ?? 0} floor sale calls` : ''}${x.crossSales ? `, ${x.crossSales} curve cross sales (${(x.crossContracts ?? 0).toFixed(0)} contracts filled)` : ''}`;
+  if (x.huntActivations || x.wallAsks || x.quotaSnipes || x.crossSales) replay.hunt = `hunt mode in the replay: ${x.huntActivations} activations, ${x.ratchetTriggers} stop triggers, ${x.gaps} gaps, ${x.huntProfitTakes} profit takes, ${x.lockSales} lock sales, ${x.lockHolds} lock holds, ${x.wallAsks} wall asks (${x.wallFills.toFixed(0)} contracts filled on them), ${x.quotaSnipes} quota snipes (${x.quotaSnipeContracts.toFixed(0)} contracts)${x.floorArms || x.floorSales ? `, ${x.floorArms ?? 0} quota floors armed, ${x.floorSales ?? 0} floor sale calls` : ''}${x.floorHolds ? `, ${x.floorHolds} floor holds by the model` : ''}${x.crossSales ? `, ${x.crossSales} curve cross sales (${(x.crossContracts ?? 0).toFixed(0)} contracts filled)` : ''}`;
+  if (x.byKind) replay.exitAudit = `exit audit, sold after fees / held to settlement / best later bid after fees: ${Object.entries(x.byKind).sort((a, b) => b[1].contracts - a[1].contracts)
+    .map(([k, v]) => `${k} ${v.fills} fills ${v.contracts.toFixed(0)} c $${v.proceeds.toFixed(2)} / $${v.settled.toFixed(2)} / $${v.best.toFixed(2)}`).join(' | ')}`;
   const paper = paperSummary(audit, from, to);
   const minHours = o.minHours ?? 3;
   const checked = hours >= minHours;
@@ -811,6 +815,7 @@ async function main(): Promise<void> {
   row('replay', res.replay);
   row('paper', res.paper);
   if (res.replay.hunt) console.log(res.replay.hunt);
+  if (res.replay.exitAudit) console.log(res.replay.exitAudit);
   const purposes = (s: SideSummary) => Object.entries(s.byPurpose).sort().map(([k, x]) => `${k} ${x.fills}/${x.contracts.toFixed(0)}`).join(', ') || 'none';
   console.log(`fills/contracts by order purpose: replay ${purposes(res.replay)} | paper ${purposes(res.paper)}`);
   const X = res.replay.extra, rej = Object.entries(X.rejected).sort((x, y) => y[1] - x[1]).slice(0, 3).map(([k, n]) => `${k} x${n}`).join('; ');

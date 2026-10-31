@@ -120,6 +120,12 @@ export interface ExitStats {
   /** The exit curve's cross (SINUOUS_CROSS): sales sent and their fills' contracts. */
   crossSales?: number;
   crossContracts?: number;
+  /** PACER_FLOOR_CONFIRM=model (lab): ticks a breached floor was held because the model valued the position above it. */
+  floorHolds?: number;
+  /** Exit audit by kind (a queued exit's client id ends -exit-<kind>: snipe, floor, tp, fv, ...), for the markets settled in
+   *  the replay: fills, contracts, net proceeds, what those contracts paid at settlement, and what the best side bid after
+   *  the sale up to the close would have fetched, less the sale's own fee. */
+  byKind?: Record<string, { fills: number; contracts: number; proceeds: number; settled: number; best: number }>;
   /** Mean (stop - fill price) in side terms for ratchet exits; positive = filled below the stop. */
   avgSlippage: number | null;
 }
@@ -428,7 +434,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const closeOf = new Map<string, number>();
   const ratchets = new Map<string, LiquidityRatchet>();
   const hunts = new Map<string, ConfluenceRatchetExit>();
-  const pending = new Map<string, { side: 'bid' | 'ask'; price: number; count: number; kind: 'fv' | 'tp' | 'rt' | 'snipe' | 'cut' | 'wcut' | 'cross'; stop?: number }>();
+  const pending = new Map<string, { side: 'bid' | 'ask'; price: number; count: number; kind: 'fv' | 'tp' | 'rt' | 'snipe' | 'floor' | 'cut' | 'wcut' | 'cross'; stop?: number }>();
   let exitSeq = 0;
   // The paper bot's exploration entries and training trades (with the paper options; see below).
   const exploreTs: number[] = [], trainTs: number[] = [];
@@ -445,7 +451,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   };
   res.makerBufferEnd = undefined;
   const stopByOrder = new Map<string, number>();
-  const exitLedger = new Map<string, Array<{ sideSign: number; n: number; proceeds: number }>>();
+  const exitLedger = new Map<string, Array<{ sideSign: number; n: number; proceeds: number; fee: number; kind: string; best: number }>>();
   let slipSum = 0, slipN = 0;
   const gate = opts.accuracyGate?.enabled ? new AccuracyGate(opts.accuracyGate, opts.accuracyGateFile, () => st.now) : undefined;
   // The bench's markets scored from the first trading moment on (the replay check sets them beside paper's).
@@ -519,7 +525,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     const bp = (res.byPurpose![purposeOf(f.clientOrderId)] ??= { fills: 0, contracts: 0 });
     bp.fills++; bp.contracts += f.count;
     if (f.clientOrderId?.endsWith('-exit-wall')) exits.wallFills += f.count;
-    if (f.clientOrderId?.endsWith('-exit-snipe')) { exits.quotaSnipes++; exits.quotaSnipeContracts += f.count; }
+    if (/-exit-(snipe|floor)$/.test(f.clientOrderId ?? '')) { exits.quotaSnipes++; exits.quotaSnipeContracts += f.count; }
     const hour = new Date(st.now).toISOString().slice(0, 13);
     res.contractsByHour![hour] = (res.contractsByHour![hour] ?? 0) + f.count;
     if (cancelInFlight.has(f.orderId)) { L.cancelRaceFills++; L.cancelRaceContracts += f.count; }
@@ -544,7 +550,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const proceeds = f.count * sidePrice - (f.fee ?? 0);
       exits.fills++; exits.contracts += f.count; exits.proceeds += proceeds;
       const arr = exitLedger.get(f.ticker) ?? [];
-      arr.push({ sideSign, n: f.count, proceeds });
+      arr.push({ sideSign, n: f.count, proceeds, fee: f.fee ?? 0, kind: /-exit-([a-z]+)$/.exec(f.clientOrderId)?.[1] ?? 'other', best: sidePrice });
       exitLedger.set(f.ticker, arr);
       const stop = stopByOrder.get(f.clientOrderId);
       if (stop !== undefined) { slipSum += stop - sidePrice; slipN++; }
@@ -628,6 +634,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
             const won = (x.sideSign > 0) === (result === 'yes');
             exits.regret += (won ? x.n : 0) - x.proceeds;
             if (won) exits.stoppedWinners++;
+            const k = ((exits.byKind ??= {})[x.kind] ??= { fills: 0, contracts: 0, proceeds: 0, settled: 0, best: 0 });
+            k.fills++; k.contracts += x.n; k.proceeds += x.proceeds; k.settled += won ? x.n : 0; k.best += x.n * x.best - x.fee;
           }
           exitLedger.delete(m.ticker);
           ratchets.delete(m.ticker);
@@ -665,6 +673,11 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const book = st.books.get(m.ticker);
       const idx = st.index.get(m.asset);
       const bid = book?.bestBid(), ask = book?.bestAsk();
+      // The exit audit: the best side bid after each sale, up to the close.
+      for (const x of exitLedger.get(m.ticker) ?? []) {
+        const b = x.sideSign > 0 ? bid?.price : ask ? 1 - ask.price : undefined;
+        if (b !== undefined && b > x.best) x.best = b;
+      }
       const spot = idx?.fresh(st.now, limits.maxIndexAgeMs);
       const vol = idx?.vol();
       const terms = st.terms(m);
@@ -944,6 +957,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       });
       if (plan.pacerArm && quotaFloors.arm(m.ticker, view.position, plan.pacerArm.usd)) exits.floorArms!++;
       if (plan.place.some((p) => p.purpose === 'exit' && p.why.startsWith('quota snipe (floor)'))) exits.floorSales!++;
+      if (plan.notes.some((n) => n.startsWith('quota floor held: '))) exits.floorHolds = (exits.floorHolds ?? 0) + 1;
       const nEntries = () => plan.place.filter((p) => p.purpose === 'entry').length;
       const funnelKey = (k: string) => `${st.now - firstTs < 6 * 3_600_000 ? 'first 6h' : 'after'}: ${k}`;
       if (reason && nEntries()) res.funnel![funnelKey('strategy entry')] = (res.funnel![funnelKey('strategy entry')] ?? 0) + 1;
@@ -1028,7 +1042,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         if (opts.tradeFromMs !== undefined && st.now < opts.tradeFromMs) break;
         if (p.purpose === 'exit') {
           // Queue for next tick, like every other exit (a take-profit keeps its name: its fills feed the bench).
-          if (!pending.has(m.ticker)) pending.set(m.ticker, { side: p.side, price: p.price, count: p.count, kind: p.why.startsWith('take-profit') ? 'tp' : p.why.startsWith('quota snipe') ? 'snipe' : p.why.startsWith('loser window cut') ? 'wcut' : p.why.startsWith('loser cut') ? 'cut' : p.why.startsWith('exit curve: cross') ? 'cross' : 'fv' });
+          if (!pending.has(m.ticker)) pending.set(m.ticker, { side: p.side, price: p.price, count: p.count, kind: p.why.startsWith('take-profit') ? 'tp' : p.why.startsWith('quota snipe (floor)') ? 'floor' : p.why.startsWith('quota snipe') ? 'snipe' : p.why.startsWith('loser window cut') ? 'wcut' : p.why.startsWith('loser cut') ? 'cut' : p.why.startsWith('exit curve: cross') ? 'cross' : 'fv' });
           continue;
         }
         // A taker entry against an existing position is an early exit in disguise

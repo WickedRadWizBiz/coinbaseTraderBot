@@ -33,8 +33,9 @@ export type PacerMode = 'slices' | 'cumulative' | 'rolling_hour';
 /** PACER_FLOOR: which exit rules count as aiming higher than the quota. riding: any rule still riding a winner (the hunt
  *  trailing its stop, the take-profit trailing its best, a perp signal or setup trade still open) or holding out for a set
  *  price; targets: only a set sell price (the model's, a resting take-profit, a setup's target, a rule's target passed in);
- *  off: the quota snipe sells at the quota whatever the other rules aim for. */
-export type PacerFloorMode = 'off' | 'targets' | 'riding';
+ *  off: the quota snipe sells at the quota whatever the other rules aim for; trail (lab, Oct 31): as riding, and a position
+ *  no other rule holds rides on the quota itself, every floor keeping PACER_TRAIL_KEEP of the profit above the need. */
+export type PacerFloorMode = 'off' | 'targets' | 'riding' | 'trail';
 
 export interface PacerConfig {
   /** PACER: the quota snipe is on. */
@@ -58,6 +59,15 @@ export interface PacerConfig {
   maxTargetUsd: number;
   /** PACER_FLOOR: the quota as a stop under a higher target (riding by default). */
   floor: PacerFloorMode;
+  /** PACER_TRAIL_KEEP (trail mode): the share of the profit above the need a floor keeps as the profit grows (0.5). */
+  trailKeep: number;
+  /** PACER_FLOOR_TICKS (lab, Oct 31): the floor sale waits until the profit is this many price ticks a contract below the
+   *  floor (0: at the floor), so a one-tick dip does not sell a winner. */
+  floorTicks: number;
+  /** PACER_FLOOR_CONFIRM (lab, Oct 31): 'model' sells a breached floor only when the model's value of the position (its side
+   *  at the model's probability, after the exit fee) is below the floor too, so a dip in the book that the coin's fair value
+   *  does not share does not sell a winner; 'none' (default) sells on the breach alone. */
+  floorConfirm: 'none' | 'model';
 }
 
 export const CYCLE_HOURS = 24;
@@ -245,11 +255,13 @@ export interface QuotaCall {
 /** The quota's call on one position: `net` its profit after fees at the touch now, `need` what the hour needs (undefined: the
  *  pacer is off or the position is not judged), `floor` its armed floor (QuotaFloors), `higher` why another exit rule aims
  *  higher (undefined: none, or PACER_FLOOR off). */
-export function quotaCall(net: number | undefined, need: number | undefined, floor: number | undefined, higher: string | undefined): QuotaCall {
+export function quotaCall(net: number | undefined, need: number | undefined, floor: number | undefined, higher: string | undefined, keep?: number, cushion = 0): QuotaCall {
   if (net === undefined) return {};
-  if (floor !== undefined && net < floor - 1e-9) return { sell: 'floor' };
+  // `cushion` (PACER_FLOOR_TICKS): dollars below the floor the profit may dip before the floor sells.
+  if (floor !== undefined && net < floor - cushion - 1e-9) return { sell: 'floor' };
   if (need === undefined || net < need - 1e-9) return {};
-  return higher !== undefined ? { arm: need } : { sell: 'snipe' };
+  // `keep` (trail mode): the floor trails the profit, keeping that share of what it has made above the need.
+  return higher !== undefined ? { arm: keep === undefined ? need : need + keep * (net - need) } : { sell: 'snipe' };
 }
 
 interface Saved { cycleStart: number; lastProfitTs: number; realized24h: number; buckets: Record<string, number>; fed: Record<string, number>; savedAt: number; activeHour?: number; slice?: number; slicesThisHour?: number }
