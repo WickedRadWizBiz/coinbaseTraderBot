@@ -222,6 +222,6 @@ test('quota floors (PACER_FLOOR, Steven Oct 31): armed at the need while a rule 
   assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PACER_FLOOR: 'targets' }).strategy.pacer.floor, 'targets');
   assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PACER_FLOOR: 'off' }).strategy.pacer.floor, 'off');
   assert.throws(() => loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PACER_FLOOR: 'maybe' }));
-  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).strategy.pacer.floorTicks, 16);
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).strategy.pacer.floorTicks, 8);
   assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PACER_FLOOR_TICKS: '0' }).strategy.pacer.floorTicks, 0);
 });

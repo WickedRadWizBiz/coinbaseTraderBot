@@ -58,7 +58,7 @@ export interface PacerConfig {
   maxTargetUsd: number;
   /** PACER_FLOOR: the quota as a stop under a higher target (riding by default). */
   floor: PacerFloorMode;
-  /** PACER_FLOOR_TICKS (16): the floor sells once the position's profit is this many price ticks a contract under it, not
+  /** PACER_FLOOR_TICKS (8): the floor sells once the position's profit is this many price ticks a contract under it, not
    *  at the first dip below it (Kalshi contracts: crypto and tennis; perps have no contract tick and keep the floor as is). */
   floorTicks: number;
 }

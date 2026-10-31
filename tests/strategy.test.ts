@@ -394,13 +394,13 @@ test('quota floor (PACER_FLOOR, Steven Oct 31): while another exit rule aims hig
   assert.deepEqual([fell.side, fell.price, fell.count, fell.reduceOnly], ['ask', 0.5, 10, true]);
   assert.match(fell.why, /^quota snipe \(floor\): \+\$0\.6\d net on 10 at bid 0\.5 fell below its \$0\.75 floor/);
   assert.equal(sale(decide(long(), at('riding'), { exits: true, pacerUsd: 0.75, pacerFloor: 0.75 })), undefined, 'above its floor: held');
-  // PACER_FLOOR_TICKS (16 by default): the floor sells once the profit is 16 ticks a contract under it ($1.60 on 10), not at
+  // PACER_FLOOR_TICKS (8 by default; 16 here): the floor sells once the profit is 16 ticks a contract under it ($1.60 on 10), not at
   // the first dip: +0.65 at 0.50 holds, -0.75 at 0.36 holds, -1.04 at 0.33 sells.
   const cushioned = (bid: number) => sale(decide(long({ bestBid: { price: bid, size: 50 } }), at('riding', 16), { exits: true, pacerUsd: 0.75, pacerFloor: 0.75 }));
   assert.equal(cushioned(0.5), undefined);
   assert.equal(cushioned(0.36), undefined);
   assert.match(cushioned(0.33)?.why ?? '', /^quota snipe \(floor\): -\$1\.0\d net on 10 at bid 0\.33 fell below its \$0\.75 floor/);
-  assert.equal(base.pacer.floorTicks, 16);
+  assert.equal(base.pacer.floorTicks, 8);
   // A sell price the market cannot pay (the model at 0.99) is settlement, which the quota still takes (Oct 29); in riding mode
   // the take-profit trailing its best still rides the winner.
   assert.match(sale(decide(long({ pYes: 0.99 }), at('targets'), { exits: true, pacerUsd: 0.75 }))!.why, /^quota snipe: /);
