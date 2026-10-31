@@ -27,7 +27,13 @@ export function exceedLabel(kind: string, role: ThresholdRole, result: 'yes' | '
   return yes ? 1 : 0; // updown / greater: exceed(strike)
 }
 
-export interface ReadoutOpts { eta: number; cap: number; tauC: number; eps: number; tagsPerContract: number; maxTagged: number; traceTauSec: number; useTags: boolean }
+export interface ReadoutOpts {
+  eta: number; cap: number; tauC: number; eps: number; tagsPerContract: number; maxTagged: number; traceTauSec: number; useTags: boolean;
+  /** The weight norm the fast-slow divergence is measured against at least. A mid-anchored readout starts at zero
+   *  correction, so |w_s| is tiny and the relative divergence would freeze learning almost always (97.9% of steps on
+   *  the Oct 30 ablation); it is measured against the plain readout's prior norm instead. Absent = |w_s| alone. */
+  divFloor?: number;
+}
 
 export class Readout {
   readonly wf: Float64Array;
@@ -124,10 +130,12 @@ export class Readout {
     }
   }
 
-  /** |w_f - w_s| / |w_s| (health: < 0.1). */
+  /** |w_f - w_s| / max(|w_s|, divFloor) (health: < 0.1). */
   divergence(): number {
     let d = 0, s = 0;
     for (let i = 0; i < this.n; i++) { d += (this.wf[i] - this.ws[i]) ** 2; s += this.ws[i] ** 2; }
+    const f = this.o.divFloor ?? 0;
+    s = Math.max(s, f * f);
     return s > 0 ? Math.sqrt(d / s) : 0;
   }
 }

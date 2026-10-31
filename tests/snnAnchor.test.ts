@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { snnParams } from '../bot/snn';
 import { loadConfig } from '../bot/config';
 import { SnnNetwork, type ColumnInput, type ContractQuery } from '../bot/snn/network';
-import { DEFAULT_SNN, versionHash, withFlags, type SnnParams } from '../bot/snn/params';
+import { anchorFor, DEFAULT_SNN, versionHash, withFlags, type SnnParams } from '../bot/snn/params';
 import { Xoshiro128 } from '../bot/snn/rng';
 import { fitLogistic } from '../research/trainSnn';
 
@@ -84,12 +84,48 @@ test('anchored readout: the setting is a version of its own; absent, every hash 
   assert.equal(versionHash(base), versionHash({ ...base }));
   assert.notEqual(versionHash(base), versionHash({ ...base, anchorMid: true }));
   assert.throws(() => new SnnNetwork(small({ anchorMid: true })).restore(new SnnNetwork(base).serialize()), /version/);
+  // On by default (Steven, Oct 30), and only on the crypto contract network, where it was measured.
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40) });
-  assert.equal(cfg.snn.anchorMid, false);
-  assert.equal('anchorMid' in snnParams(cfg.snn, 'crypto'), false, 'absent from the params without the setting');
-  const on = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), SNN_ANCHOR_MID: 'true' });
-  assert.equal(snnParams(on.snn, 'crypto').anchorMid, true);
-  assert.equal(snnParams(on.snn, 'perps').anchorMid, true);
+  assert.equal(cfg.snn.anchorMid, true);
+  assert.equal(snnParams(cfg.snn, 'crypto').anchorMid, true);
+  for (const d of ['perps', 'tennis'] as const) assert.equal('anchorMid' in snnParams(cfg.snn, d), false, `${d}: its params and version hash are unchanged`);
+  assert.equal('anchorMid' in snnParams(cfg.snn), false, 'no domain: unchanged');
+  assert.equal(anchorFor(true, 'crypto'), true);
+  assert.equal(anchorFor(false, 'crypto'), false);
+  const off = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), SNN_ANCHOR_MID: 'false' });
+  assert.equal('anchorMid' in snnParams(off.snn, 'crypto'), false, 'SNN_ANCHOR_MID=false restores the plain readout');
+});
+
+test('anchored readout: weights learned under the other kind are never carried over (checkpoint or model file)', () => {
+  const tp = tape(30);
+  // A plain network that has learned something.
+  const plain = new SnnNetwork(small({ readoutEta: 0.05, readoutCap: 1 }));
+  for (let s = 0; s < 30; s++) plain.step(T0 + s * 1000, tp[s]);
+  for (let k = 1; k <= 20; k++) { plain.score([query(`P${k}`)], T0 + (40 + k * 61) * 1000); plain.settle(`P${k}`, 'yes', T0 + (40 + k * 61) * 1000 + 1); }
+  const cp = plain.serialize();
+  assert.equal(cp.anchorMid, undefined, 'a plain checkpoint does not say anchored');
+  // Into an anchored network (the history walk and the tournament restore with allowParamChange): columns kept,
+  // contract readouts start at zero correction, so the price is the market.
+  const anch = new SnnNetwork(small({ anchorMid: true }));
+  anch.restore(cp, { allowParamChange: true });
+  const ro = anch.readouts.get('BTC-15m')!;
+  assert.ok(ro.wf.every((w) => w === 0) && ro.ws.every((w) => w === 0) && ro.tags.size === 0, 'zero correction, no tags');
+  assert.deepEqual(anch.columns.get('BTC-15m')!.arrays().U1, plain.columns.get('BTC-15m')!.arrays().U1, 'the column itself is kept');
+  assert.ok(Math.abs(anch.score([query('Q', { tag: false, mid: 0.37 })], T0 + 9000e3)[0].p - 0.37) < 1e-9, 'prices at the market');
+  // The same through a model file (the daily training's --init from the walk's elite).
+  const model = plain.exportModel('plain');
+  const fromModel = new SnnNetwork(small({ anchorMid: true }), { model });
+  for (let s = 0; s < 3; s++) fromModel.step(T0 + s * 1000, tp[s]);
+  assert.ok(fromModel.readouts.get('BTC-15m')!.wf.every((w) => w === 0), 'a plain model lends no contract readout');
+  // An anchored checkpoint written and restored keeps its kind and its weights.
+  const back = anch.serialize();
+  assert.equal(back.anchorMid, true);
+  // Anchored -> plain (the setting turned off): the crude prior, as a fresh plain network starts.
+  const again = new SnnNetwork(small());
+  again.restore(back, { allowParamChange: true });
+  const fresh = new SnnNetwork(small());
+  for (let s = 0; s < 3; s++) fresh.step(T0 + s * 1000, tp[s]);
+  assert.deepEqual([...again.readouts.get('BTC-15m')!.wf], [...fresh.readouts.get('BTC-15m')!.wf], 'the prior weights');
 });
 
 test('offline readout fit: with offsets the weights learn the correction to the market, not the market', () => {
@@ -107,4 +143,46 @@ test('offline readout fit: with offsets the weights learn the correction to the 
   // Without the offsets the same rows fit a different, worse model (the market is not in the features).
   const plain = fitLogistic(X, y, new Float64Array(2), 1e-4, 300);
   assert.ok(plain.loss > fit.loss + 0.02, `${plain.loss} > ${fit.loss}`);
+});
+
+test('anchored readout: learning a small correction does not read as fast-slow divergence (it froze 97.9% of steps)', () => {
+  const tp = tape(30);
+  const net = new SnnNetwork(small({ anchorMid: true, readoutEta: 0.05, readoutCap: 1 }));
+  for (let s = 0; s < 30; s++) net.step(T0 + s * 1000, tp[s]);
+  for (let k = 1; k <= 5; k++) { net.score([query(`D${k}`, { mid: 0.4 })], T0 + (40 + k * 61) * 1000); net.settle(`D${k}`, 'yes', T0 + (40 + k * 61) * 1000 + 1); }
+  const ro = net.readouts.get('BTC-15m')!;
+  let d = 0, s = 0;
+  for (let i = 0; i < ro.n; i++) { d += (ro.wf[i] - ro.ws[i]) ** 2; s += ro.ws[i] ** 2; }
+  assert.ok(Math.sqrt(d) > 0, 'it learned');
+  assert.ok(Math.sqrt(d / Math.max(s, 1e-300)) >= 0.1, 'relative to |w_s| alone it would breach the 0.1 band');
+  assert.ok(ro.divergence() < 0.1, `against the prior norm it does not: ${ro.divergence()}`);
+  assert.ok(Math.abs(ro.divergence() - Math.sqrt(d) / Math.hypot(4 * DEFAULT_SNN.priorSlope)) < 1e-12);
+  // A plain readout measures divergence exactly as before.
+  const plain = new SnnNetwork(small());
+  plain.step(T0, tp[0]);
+  const pr = plain.readouts.get('BTC-15m')!;
+  pr.wf[1] += 0.3;
+  assert.ok(Math.abs(pr.divergence() - 0.3 / (4 * DEFAULT_SNN.priorSlope)) < 1e-12);
+});
+
+test('anchor band: outside 50c +/- band the price is the market, inside it is the learned correction; learning is unchanged', () => {
+  const tp = tape(30);
+  const mk = (band?: number) => {
+    const net = new SnnNetwork(small({ anchorMid: true, readoutEta: 0.05, readoutCap: 1, ...(band !== undefined ? { anchorBand: band } : {}) }));
+    for (let s = 0; s < 30; s++) net.step(T0 + s * 1000, tp[s]);
+    for (let k = 1; k <= 40; k++) { net.score([query(`B${k}`, { mid: 0.45 })], T0 + (40 + k * 61) * 1000); net.settle(`B${k}`, 'yes', T0 + (40 + k * 61) * 1000 + 1); }
+    return net;
+  };
+  const banded = mk(0.1), free = mk();
+  // Same learning: the band only changes the price handed out.
+  assert.deepEqual([...banded.readouts.get('BTC-15m')!.wf], [...free.readouts.get('BTC-15m')!.wf], 'identical weights');
+  const at = (n: SnnNetwork, mid: number, tk: string) => n.score([query(tk, { tag: false, mid })], T0 + 9000e3)[0].p;
+  assert.equal(at(banded, 0.45, 'X1'), at(free, 0.45, 'X1'), 'inside the band: the learned price');
+  assert.ok(Math.abs(at(free, 0.45, 'X1') - 0.45) > 1e-6, 'which differs from the mid');
+  assert.ok(Math.abs(at(banded, 0.75, 'X2') - 0.75) < 1e-12, 'outside: the mid');
+  assert.ok(Math.abs(at(banded, 0.005, 'X3') - 0.02) < 1e-12, 'outside, clipped like the anchor');
+  assert.ok(Math.abs(at(free, 0.75, 'X2') - 0.75) > 1e-6, 'without the band it would have departed');
+  const base = small({ anchorMid: true });
+  assert.equal(versionHash(base), versionHash({ ...base }), 'absent: hash unchanged');
+  assert.notEqual(versionHash(base), versionHash({ ...base, anchorBand: 0.1 }));
 });
