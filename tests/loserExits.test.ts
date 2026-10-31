@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { loadConfig, type StrategyConfig } from '../bot/config';
 import { DEFAULT_FEES } from '../bot/fees';
-import { applyFvGate, decide, fvGatePasses, loserExit, type MarketView, type StrategyOutput } from '../bot/strategy/fairValueStrategy';
+import { applyFvGate, decide, fvGatePasses, loserExit, loserNoEntry, type MarketView, type StrategyOutput } from '../bot/strategy/fairValueStrategy';
 
 // Steven's settlement rule (Oct 31) and the sizing lab's loser exits: the entry gate, the loser cut and the window cut.
 const base = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_CADENCE: 'continuous' }).strategy;
@@ -24,10 +24,10 @@ const long = (o: Partial<MarketView> = {}) => view({ position: 10, entrySidePric
 const ioc = (out: StrategyOutput) => out.place.filter((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel');
 
 test('loser rules: on by default (gate 6c, cut 3c, window), each off by its flag', () => {
-  assert.deepEqual(base.loserExits, { gate: true, gateMargin: 0.06, cut: true, cutMargin: 0.03, window: true, windowJudge: 'bid', windowShare: 0 });
+  assert.deepEqual(base.loserExits, { gate: true, gateMargin: 0.06, cut: true, cutMargin: 0.03, window: true, windowJudge: 'bid', windowShare: 0, noEntryShare: 0 });
   const c = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), FV_ENTRY_GATE: 'false', LOSER_CUT: 'false', LOSER_WINDOW_CUT: 'false', FV_ENTRY_GATE_MARGIN: '0.09', LOSER_CUT_MARGIN: '0.05',
-    LOSER_WINDOW_JUDGE: 'cost', LOSER_WINDOW_SHARE: '0.25' }).strategy;
-  assert.deepEqual(c.loserExits, { gate: false, gateMargin: 0.09, cut: false, cutMargin: 0.05, window: false, windowJudge: 'cost', windowShare: 0.25 });
+    LOSER_WINDOW_JUDGE: 'cost', LOSER_WINDOW_SHARE: '0.25', LOSER_NO_ENTRY_SHARE: '0.2' }).strategy;
+  assert.deepEqual(c.loserExits, { gate: false, gateMargin: 0.09, cut: false, cutMargin: 0.05, window: false, windowJudge: 'cost', windowShare: 0.25, noEntryShare: 0.2 });
 });
 
 test('loser window cut: in the last share of the window or the final minute a position not in profit is sold at the bid; one in profit rides', () => {
@@ -92,6 +92,41 @@ test('loser window share: LOSER_WINDOW_SHARE starts the window cut earlier, whil
   assert.equal(loserExit(long({ tauSec: 250 }), early), undefined);
   // In profit: never cut early (its own exits still run).
   assert.equal(loserExit(long({ tauSec: 250, windowSec: 900, bestBid: { price: 0.7, size: 20 } }), early), undefined);
+});
+
+test('loser no-entry window: no new risk where the window cut would sell it straight back, nor from LOSER_NO_ENTRY_SHARE left', () => {
+  const ne = (share: number, o: Partial<StrategyConfig['loserExits']> = {}): StrategyConfig => ({ ...cfg, loserExits: { ...cfg.loserExits!, noEntryShare: share, ...o } });
+  // Off (0): entries run in the last share as before.
+  assert.equal(loserNoEntry({ settleShare: true, tauSec: 70, windowSec: 900 }, cfg), false);
+  // On: the window cut's stretch (last share, final minute) and from the share left (180 s of 900 at 0.2).
+  assert.equal(loserNoEntry({ settleShare: true, tauSec: 70, windowSec: 900 }, ne(0.1)), true);
+  assert.equal(loserNoEntry({ exitWindowOpen: false, tauSec: 30 }, ne(0.1)), true);
+  assert.equal(loserNoEntry({ tauSec: 150, windowSec: 900 }, ne(0.2)), true);
+  assert.equal(loserNoEntry({ tauSec: 200, windowSec: 900 }, ne(0.2)), false);
+  // With the window cut off only the share counts.
+  assert.equal(loserNoEntry({ settleShare: true, tauSec: 100, windowSec: 900 }, ne(0.1, { window: false })), false);
+  // A taker YES the model wants is not taken there, and a resting quote is pulled.
+  const taker = (o: Partial<MarketView>, c: StrategyConfig) => decide(view({ pYes: 0.75, pFair: 0.75, ...o }), { ...c, style: 'taker' });
+  assert.ok(taker({ tauSec: 400, windowSec: 900 }, ne(0.2)).place.some((p) => p.purpose === 'entry'));
+  const late = taker({ tauSec: 150, windowSec: 900 }, ne(0.2));
+  assert.equal(late.place.filter((p) => p.purpose === 'entry').length, 0);
+  assert.ok(late.notes.includes('loser window: no new risk this close to the end'));
+  const pulled = decide(view({ tauSec: 70, windowSec: 900, settleShare: true, restingBid: { clientOrderId: 'q1', price: 0.5, remaining: 5 } }), { ...ne(0.1), style: 'maker' });
+  assert.ok(pulled.cancel.some((c) => c.clientOrderId === 'q1'));
+  assert.equal(pulled.place.filter((p) => p.purpose === 'quote').length, 0);
+  // The finished plan (fill-model crosses, training trades): every order that adds is dropped, exits and reductions stay.
+  const plan = (): StrategyOutput => ({ cancel: [], notes: [], place: [
+    { side: 'bid', price: 0.6, count: 5, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: false, purpose: 'entry', edge: 0.1, why: 'fill model YES -> cross' },
+    { side: 'ask', price: 0.5, count: 3, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge: 0, why: 'exit' },
+    { side: 'ask', price: 0.5, count: 2, timeInForce: 'good_till_canceled', postOnly: true, reduceOnly: false, purpose: 'quote', edge: 0.02, why: 'maker ask' },
+  ] });
+  const flat = plan();
+  assert.equal(applyFvGate(flat, 0.9, 0, DEFAULT_FEES, off, true), 2, 'gate off: the late window still drops new risk');
+  assert.deepEqual(flat.place.map((p) => p.why), ['exit']);
+  assert.ok(flat.notes.some((n) => n.startsWith('loser window: dropped entry YES at 0.60')));
+  const held = plan();
+  assert.equal(applyFvGate(held, 0.9, 5, DEFAULT_FEES, off, true), 1);
+  assert.deepEqual(held.place.map((p) => p.why), ['exit', 'maker ask']);
 });
 
 test('loser cut: a position not in profit is sold at once when the spot fair value of its side is under the bid less the fee less 3c', () => {
