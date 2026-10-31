@@ -41,3 +41,12 @@ test('config reads DYN_EDGE_*', () => {
   assert.equal(cfg.strategy.dynamicEdge.maxUp, 0.04);
   assert.equal(loadConfig({} as NodeJS.ProcessEnv).strategy.dynamicEdge.vol, 0);
 });
+
+test('quiet: a coin that has not moved asks more edge, a moving one asks none', () => {
+  const p = { ...DYNAMIC_EDGE_OFF, quiet: 0.02 };
+  assert.equal(dynamicEdgeOn(p), true);
+  assert.ok(Math.abs(dynamicEdge(p, reading({ jump: 1.1 }), 0).parts.quiet - 0.01) < 1e-12, 'half the ref: half the weight');
+  assert.equal(dynamicEdge(p, reading({ jump: 3 }), 0).add, 0);
+  assert.equal(dynamicEdge(p, reading({ jump: null as unknown as number }), 0).add, 0, 'no reading adds 0');
+  assert.equal(loadConfig({ DYN_EDGE_QUIET: '0.03' } as NodeJS.ProcessEnv).strategy.dynamicEdge.quiet, 0.03);
+});

@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: scaling-lab
@@ -27,6 +28,7 @@ jobs:
       from: ${{ steps.p.outputs.from }}
       to: ${{ steps.p.outputs.to }}
       arms: ${{ steps.p.outputs.arms }}
+      reuse: ${{ steps.p.outputs.reuse }}
     steps:
       - uses: actions/checkout@v5
       - id: p
@@ -36,7 +38,7 @@ jobs:
           head, arms = {}, []
           for line in open('lab/scaling-arms.txt'):
               line = line.rstrip('\n')
-              m = re.match(r'^#\s*(days|from|to)=(\S+)', line)
+              m = re.match(r'^#\s*(days|from|to|reuse)=(\S+)', line)
               if m: head[m.group(1)] = m.group(2); continue
               if not line.strip() or line.lstrip().startswith('#'): continue
               tag, _, ov = line.partition(':')
@@ -46,12 +48,18 @@ jobs:
               arms.append({'tag': tag.strip(), 'overrides': ' '.join(ov.split())})
           assert arms and len(arms) <= 12
           print('days=' + head['days']); print('from=' + head['from']); print('to=' + head['to'])
+          # reuse=<run id>: the arms unpack that run's copy (kept 2 days) instead of copying from the server again, so a
+          # rerun of the same stretch puts no load on the server.
+          reuse = head.get('reuse', '')
+          assert re.match(r'^[0-9]*$', reuse), reuse
+          print('reuse=' + reuse)
           print('arms=' + json.dumps(arms))
           PY
           cat "$GITHUB_OUTPUT"
 
   copy:
     needs: [plan]
+    if: needs.plan.outputs.reuse == ''
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 60
@@ -199,6 +207,7 @@ jobs:
 
   arm:
     needs: [plan, copy]
+    if: always() && needs.plan.result == 'success' && (needs.copy.result == 'success' || (needs.copy.result == 'skipped' && needs.plan.outputs.reuse != ''))
     runs-on: ubuntu-latest
     timeout-minutes: 345
     strategy:
@@ -224,6 +233,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: lab-copy
+          run-id: ${{ needs.plan.outputs.reuse || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Unpack the copy
         run: |
           tar -xf lab-copy.tar && rm lab-copy.tar

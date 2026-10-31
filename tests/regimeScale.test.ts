@@ -55,3 +55,17 @@ test('drift watch: quiet on a steady record, alarms soon after it turns worse', 
   assert.ok(d.since! >= 280 && d.since! <= 320, `since ${d.since}`);
   assert.equal(pageHinkley(steady.slice(0, 10)).alarm, false, 'too few windows');
 });
+
+test('jump part: bigger after a large move (at the up weight), smaller while quiet', () => {
+  const p = { ...REGIME_SCALE_OFF, jump: 1 };
+  assert.equal(regimeScaleOn(p), true);
+  const big = regimeScale(p, reading({ jump: 3 }), 0);
+  assert.ok(Math.abs(big.parts.jump - 1.5) < 1e-12);
+  assert.ok(Math.abs(big.mult - 1.25) < 1e-12, 'a rise counts at half');
+  assert.ok(Math.abs(regimeScale(p, reading({ jump: 1 }), 0).mult - 0.5) < 1e-12);
+});
+
+test("otherCoinsHeld: a position stored with asset '' still counts its coin", () => {
+  const open = [{ ticker: 'KXETH-1', asset: '' }, { ticker: 'KXBTC-9', asset: '' }];
+  assert.equal(otherCoinsHeld(open, 'BTC', (t) => (t.startsWith('KXETH') ? 'ETH' : 'BTC')), 1);
+});
