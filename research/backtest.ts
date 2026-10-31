@@ -167,6 +167,10 @@ export interface BacktestResult {
   contractsByHour?: Record<string, number>;
   /** The maker buffer at the last evaluation (adaptive with the paper options). */
   makerBufferEnd?: number;
+  /** Why the paper exchange turned orders down (its reason codes, counted), and the account at the end of the replay:
+   *  cash, open positions (their worst loss) and resting orders. For the fidelity check's diagnostics. */
+  exchangeRejected?: Record<string, number>;
+  end?: { balance: number; openPositions: number; openMaxLoss: number; openOrders: number; lastFillAt?: number };
 }
 
 /**
@@ -983,13 +987,14 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         await send(m.ticker, 'order', async () => {
           try {
             await ex.createOrder({ ticker: m.ticker, side: p.side, count: p.count, price: p.price, timeInForce: p.timeInForce, postOnly: p.postOnly, reduceOnly: p.reduceOnly, selfTradePrevention: 'taker_at_cross', clientOrderId, expirationTime: p.expirationTime });
-          } catch { /* rejected like the exchange would */ }
+          } catch (e) { /* rejected like the exchange would */ const k = (e as { code?: string }).code ?? 'error'; (res.exchangeRejected ??= {})[k] = (res.exchangeRejected[k] ?? 0) + 1; }
         });
       }
       if (opts.paper && (opts.tradeFromMs === undefined || st.now >= opts.tradeFromMs)) await fireExit();
     }
   }
   exits.avgSlippage = slipN ? slipSum / slipN : null;
+  res.end = { balance: await ex.getBalance(), openPositions: pos.open().length, openMaxLoss: pos.open().reduce((a, p) => a + PositionBook.maxLoss(p), 0), openOrders: (await ex.getOpenOrders()).length };
   res.days = Math.max(1 / 24, (st.now - firstTs) / 86_400_000);
   res.vaultEnd = vault?.vaultTotal ?? 0;
   res.pocketEnd = vault?.pocketTotal ?? 0;
