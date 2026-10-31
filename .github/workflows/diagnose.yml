@@ -14,6 +14,10 @@ on:
         description: 'With exit_hours: the end of the window, an ISO UTC time such as 2026-10-28T03:10:00Z, or now'
         required: false
         default: 'now'
+      exit_runner:
+        description: "With exit_hours: copy the window's audit and recording files to this GitHub runner (rate-limited) and run the study here, not on the server"
+        type: boolean
+        default: false
       exit_models:
         description: 'With exit_hours: also run the decision study (the model against the market, log loss) and the component study (SNN, TA network, meta-model) on the last 3 days, read-only'
         required: false
@@ -211,7 +215,40 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
           printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
           ssh bot true && echo "connected"
+      - name: Copy the window's files to the runner (read-only on the server)
+        if: ${{ inputs.exit_runner }}
+        env:
+          HOURS: ${{ inputs.exit_hours }}
+          UNTIL: ${{ inputs.exit_until || 'now' }}
+        run: |
+          [[ "$HOURS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "hours must be a number"; exit 1; }
+          # The days the study reads: from a day before the window's start (books from the market's open, the audit's 2 h
+          # lead) to a day after its end (settlements). scp at 8 MB/s keeps the server's CPU near idle (Oct 30: burst credits).
+          read -r D0 D1 < <(python3 -c "
+          import datetime as d, sys
+          u = '$UNTIL'
+          e = d.datetime.now(d.timezone.utc) if u == 'now' else d.datetime.strptime(u, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=d.timezone.utc)
+          s = e - d.timedelta(hours=float('$HOURS'))
+          print((s - d.timedelta(days=1)).strftime('%Y-%m-%d'), (e + d.timedelta(days=1)).strftime('%Y-%m-%d'))")
+          mkdir -p data/audit data/recordings
+          ssh bot "ls ~/bot/data/audit/ ~/bot/data/recordings/" > "$RUNNER_TEMP/ls.txt"
+          for f in $(grep -oE '(audit|md)-[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl(\.gz)?' "$RUNNER_TEMP/ls.txt" | sort -u); do
+            day=$(echo "$f" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}')
+            [[ "$day" < "$D0" || "$day" > "$D1" ]] && continue
+            dir=recordings; [[ "$f" == audit-* ]] && dir=audit
+            scp -q -l 64000 "bot:bot/data/$dir/$f" "data/$dir/$f"
+          done
+          du -sh data/audit data/recordings; ls data/audit data/recordings
+      - name: Run the exit study on the runner
+        if: ${{ inputs.exit_runner }}
+        env:
+          HOURS: ${{ inputs.exit_hours }}
+          UNTIL: ${{ inputs.exit_until || 'now' }}
+        run: |
+          U=''; [ "$UNTIL" != now ] && U="$UNTIL"
+          { timeout 6600 python3 deploy/cross_study.py data "$HOURS" $U || echo "(exit study stopped: $?)"; } 2>&1 | tee "$RUNNER_TEMP/report.txt"
       - name: Run the exit study on the server (read-only)
+        if: ${{ !inputs.exit_runner }}
         env:
           HOURS: ${{ inputs.exit_hours }}
           UNTIL: ${{ inputs.exit_until || 'now' }}
