@@ -243,6 +243,10 @@ jobs:
             data/history
             data/history-replay
           key: ta-jobs-replay-${{ steps.src.outputs.run }}
+          # The run's own copy can be evicted by the time a long run reports; any later copy holds the same days.
+          restore-keys: |
+            ta-jobs-replay-
+            kalshi-replay-
           fail-on-cache-miss: true
       - uses: actions/download-artifact@v4
         with:
