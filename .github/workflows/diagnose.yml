@@ -244,9 +244,9 @@ jobs:
             DIRS=$(find . -maxdepth 6 -type d -path '*/history/kalshi' -not -path '*/node_modules/*' 2>/dev/null | sort)
             echo "== Kalshi history stores found: $(echo "$DIRS" | grep -c . || true)"
             [ -z "$DIRS" ] && exit 0
-            echo "== before"; python3 "$S" --dry-run $DIRS
-            echo "== repair"; python3 "$S" $DIRS
-            echo "== after (should be 0)"; python3 "$S" --dry-run $DIRS
+            echo "== before"; nice -n 19 ionice -c3 python3 "$S" --dry-run $DIRS
+            echo "== repair"; nice -n 19 ionice -c3 python3 "$S" $DIRS
+            echo "== after (should be 0)"; nice -n 19 ionice -c3 python3 "$S" --dry-run $DIRS
             rm -rf /tmp/kalshi-repair-${{ github.run_id }}
       - name: Post the counts on the commit
         if: always()
