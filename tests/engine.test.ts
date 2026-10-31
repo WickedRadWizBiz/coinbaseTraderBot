@@ -166,22 +166,33 @@ test('a location-attestation refusal on a tennis order pauses tennis only; on an
   } finally { engine.stop(); }
 });
 
-test('paper training trades: with no edge anywhere, 1 contract is still traded on the model side, once per contract', async () => {
-  const { engine, recon, oms, market, md } = await setup({ env: { STRATEGY_MIN_EDGE: '0.5', PAPER_EXPLORE: 'false', PAPER_TRAINING_TRADES_PER_HOUR: '12' } });
-  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.55, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, Date.now());
-  const r = await recon.run('startup');
-  engine.balance = r!.balance;
-  await engine.tick();
-  const entries = oms.allOrders().filter((o) => o.ticker === market.ticker && o.purpose === 'entry');
-  assert.equal(entries.length, 1, `status: ${JSON.stringify(engine.status.get(market.ticker))}`);
-  assert.equal(entries[0].count, 1);
-  // Spot above the strike: the model favours YES, bought at the ask.
-  assert.equal(entries[0].side, 'bid');
-  assert.equal(entries[0].price, 0.6);
-  // One per contract: a second pass does not add another.
-  md.book(market.ticker).applySnapshot({ bids: [{ price: 0.55, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, Date.now());
-  await engine.tick();
-  assert.equal(oms.allOrders().filter((o) => o.ticker === market.ticker && o.purpose === 'entry').length, 1);
+test('training trades: with no edge anywhere, the model side is still bought at the order band\'s minimum, once per contract, in paper and live alike', async () => {
+  const key = path.join(tmpDir(), 'k.pem');
+  fs.writeFileSync(key, 'x', { mode: 0o600 });
+  const LIVE = { TRADING_MODE: 'live', KALSHI_KEY_ID: 'id', KALSHI_PRIVATE_KEY_PATH: key, KALSHI_ENV: 'prod', LIVE_TRADING_ACKNOWLEDGED: 'I_ACCEPT_REAL_MONEY_RISK', LIVE_ALLOW_UNVALIDATED_MODEL: 'true' };
+  for (const [name, mode] of [['paper', {}], ['live', LIVE]] as const) {
+    const { engine, recon, oms, market, md } = await setup({ env: { STRATEGY_MIN_EDGE: '0.5', PAPER_EXPLORE: 'false', TRAINING_TRADES_PER_HOUR: '12', ...mode } });
+    md.book(market.ticker).applySnapshot({ bids: [{ price: 0.55, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, Date.now());
+    const r = await recon.run('startup');
+    engine.balance = r!.balance;
+    await engine.tick();
+    const entries = oms.allOrders().filter((o) => o.ticker === market.ticker && o.purpose === 'entry');
+    assert.equal(entries.length, 1, `${name} status: ${JSON.stringify(engine.status.get(market.ticker))}`);
+    // The band's $10 minimum at 60c plus the 1.68c taker fee a contract: 16.21 contracts.
+    assert.equal(entries[0].count, 16.21, name);
+    // Spot above the strike: the model favours YES, bought at the ask.
+    assert.equal(entries[0].side, 'bid');
+    assert.equal(entries[0].price, 0.6);
+    // One per contract: a second pass does not add another.
+    md.book(market.ticker).applySnapshot({ bids: [{ price: 0.55, size: 50 }], asks: [{ price: 0.6, size: 50 }] }, Date.now());
+    await engine.tick();
+    assert.equal(oms.allOrders().filter((o) => o.ticker === market.ticker && o.purpose === 'entry').length, 1, name);
+  }
+  // Off (0), and the old paper key still read when the new one is unset.
+  const off = await setup({ env: { STRATEGY_MIN_EDGE: '0.5', PAPER_EXPLORE: 'false', PAPER_TRAINING_TRADES_PER_HOUR: '0' } });
+  off.engine.balance = (await off.recon.run('startup'))!.balance;
+  await off.engine.tick();
+  assert.equal(off.oms.allOrders().filter((o) => o.purpose === 'entry').length, 0);
 });
 
 test('paper (PAPER_OUTSIDE_PRICE_FALLBACK=true) prices from Coinbase spot when the Kalshi index is stale or too sparse for volatility', async () => {
@@ -951,7 +962,7 @@ test('component trials: the trained model comes out of the price when its trial 
 
 test('the dashboard\'s snipe badge: the hour\'s target and the held position\'s profit after fees at the bid; pacer off, no target', async () => {
   for (const pacer of ['true', 'false']) {
-    const { engine, recon, market, md, oms } = await setup({ env: { PACER: pacer } });
+    const { engine, recon, market, md, oms } = await setup({ env: { PACER: pacer, TRAINING_TRADES_PER_HOUR: '0' } });
     const r = await recon.run('startup');
     engine.balance = r!.balance;
     md.book(market.ticker).applySnapshot({ bids: [{ price: 0.56, size: 50 }], asks: [{ price: 0.58, size: 50 }] }, Date.now());
