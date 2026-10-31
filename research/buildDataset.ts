@@ -44,6 +44,9 @@ export interface DatasetRow {
   sigmaPricing?: number;
   observedAvg?: number;
   schema?: string;
+  /** A contract the history replay built from the price path (research/history/historyReplay.ts synthetic): its quotes
+   *  are the fair value itself, so its mid says nothing about the market; its label and spot features are real. */
+  synthetic?: true;
   /** Every registered feature by name (NaN/null = unavailable). */
   fx: Record<string, number>;
   label: 0 | 1;
@@ -64,7 +67,7 @@ export function eventOf(ticker: string, event?: string): string {
 
 export async function buildDataset(
   dir: string, everySec: number, referenceSigma = 5e-5,
-  opts: { volProfile?: VolProfile; applyVolSeasonality?: boolean; volModel?: VolModel; entryWindowOnly?: boolean; calendar?: MacroEvent[]; entryWindowUpdown?: [number, number]; entryWindowHourly?: [number, number]; onRow?: (r: DatasetRow) => void } = {},
+  opts: { volProfile?: VolProfile; applyVolSeasonality?: boolean; volModel?: VolModel; entryWindowOnly?: boolean; calendar?: MacroEvent[]; entryWindowUpdown?: [number, number]; entryWindowHourly?: [number, number]; includeSynthetic?: boolean; onRow?: (r: DatasetRow) => void; /** A market to leave out before any feature is computed (a study's sample of contracts). */ skipMarket?: (m: RecMarket) => boolean } = {},
 ): Promise<DatasetRow[]> {
   const volProfile = opts.volProfile;
   const st = new ReplayState();
@@ -88,10 +91,13 @@ export async function buildDataset(
     if (st.now < nextSample) continue;
     nextSample = Math.floor(st.now / 1000 / everySec + 1) * everySec * 1000;
     for (const m of st.markets.values()) {
-      // Recorded for research, or synthesized from price history (its mid is the fair value itself): no rows.
-      if (m.recordOnly || m.synthetic) { if (st.now >= m.closeTime + 90_000) st.forget(m.ticker); continue; }
+      // Recorded for research, or synthesized from price history (its mid is the fair value itself): no rows, unless
+      // the caller wants the synthetic contracts' labels and spot features (research/taContractStudy.ts: years of
+      // history for a model that reads no market quote).
+      if (m.recordOnly || (m.synthetic && !opts.includeSynthetic)) { if (st.now >= m.closeTime + 90_000) st.forget(m.ticker); continue; }
       if (st.now >= m.closeTime + 90_000) { flush(m); st.forget(m.ticker); continue; }
       if (st.now < m.openTime || st.now >= m.closeTime) continue;
+      if (opts.skipMarket?.(m)) continue;
       const book = st.books.get(m.ticker);
       const idx = st.index.get(m.asset);
       const bid = book?.bestBid();
@@ -123,11 +129,12 @@ export async function buildDataset(
         t: st.now, ticker: m.ticker, asset: m.asset, window: m.closeTime, tauSec, fv: fv.pYes, mid, bid: bid.price, ask: ask.price, sigma: vol.sigmaPerSqrtSec,
         spot: spot.value, strike: terms.strike ?? terms.cap!, cap: terms.kind === 'between' ? terms.cap : terms.kind === 'less' ? terms.cap : undefined,
         kind: m.kind, event: eventOf(m.ticker, m.event), sigmaPricing: sigmaFv, observedAvg: observed, schema: FEATURE_SCHEMA_VERSION, fx,
+        ...(m.synthetic ? { synthetic: true as const } : {}),
       });
       pending.set(m.ticker, arr);
     }
   }
-  for (const m of st.markets.values()) if (!m.recordOnly && !m.synthetic && st.now >= m.closeTime + 60_000) flush(m);
+  for (const m of st.markets.values()) if (!m.recordOnly && (!m.synthetic || opts.includeSynthetic) && st.now >= m.closeTime + 60_000) flush(m);
   return rows;
 }
 

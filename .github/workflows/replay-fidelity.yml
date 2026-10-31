@@ -16,7 +16,8 @@ name: Replay fidelity
 on:
   schedule:
     # Every other day (Steven, Oct 29: the depth simulator must keep passing on fresh days before history training uses it).
-    - cron: '23 4 */2 * *'
+    # 08:30 UTC: after the night's other server copies (Steven, Oct 31: one copy off the server at a time).
+    - cron: '30 8 */2 * *'
   workflow_dispatch:
     inputs:
       days:
@@ -39,7 +40,7 @@ jobs:
   pick:
     runs-on: ubuntu-latest
     environment: production
-    timeout-minutes: 10
+    timeout-minutes: 90
     outputs:
       files: ${{ steps.pick.outputs.files }}
       fit: ${{ steps.pick.outputs.fit }}
@@ -72,6 +73,31 @@ jobs:
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
           echo "fit=$FIT" >> "$GITHUB_OUTPUT"
           echo "days: $FILES | depth fitted on: $FIT"
+      - name: Copy the days and the models once, capped at 8 MB/s (read-only, so the server is never burdened)
+        env:
+          FILES: ${{ steps.pick.outputs.files }}
+          FIT: ${{ steps.pick.outputs.fit }}
+        run: |
+          set -euo pipefail
+          DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/fit" "$DATA/models"
+          printf '%s\n' $FILES > "$RUNNER_TEMP/recordings.txt"
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 ionice -c3 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/"
+          if [ -n "$FIT" ]; then
+            printf '%s\n' $FIT > "$RUNNER_TEMP/fit.txt"
+            rsync -a --bwlimit=8000 --rsync-path="nice -n 19 ionice -c3 rsync" --files-from="$RUNNER_TEMP/fit.txt" bot:bot/data/recordings/ "$DATA/fit/"
+          fi
+          for f in model.json vol_model.json fill_model.json; do rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || echo "$f: not on the server"; done
+          [ -f "$DATA/models/model.json" ] || { echo "no decision model on the server yet"; exit 1; }
+          echo "copied $(ls "$DATA/recordings" | wc -l) recording file(s), $(ls "$DATA/fit" | wc -l) fit day(s), $(du -sm "$DATA" | cut -f1) MB"
+      # Shared with this run's backtest runners through the Actions cache (never an artifact: no recordings leave the
+      # server's and runners' disks), so the server is read once a run instead of once a runner.
+      - uses: actions/cache/save@v4
+        with:
+          path: |
+            data/recordings
+            data/fit
+            data/models
+          key: fidelity-data-${{ github.run_id }}-${{ github.run_attempt }}
 
   backtest:
     needs: pick
@@ -82,12 +108,12 @@ jobs:
       fail-fast: false
       matrix:
         how: [real, hold, requote, worst, noise, depth]
-        # The days split in two runs in a row, each backtested on a runner of its own from the day before it
-        # (one runner for all of them ran past the job's time limit on the depth fill-in).
-        part: [0, 1]
+        # The days split into four runs of one day, each backtested on a runner of its own from the day before it
+        # (two days of the depth fill-in took 4.5 hours or more, near the time limit).
+        part: [0, 1, 2, 3]
     env:
       DAYS: ${{ inputs.days || '4' }}
-      PARTS: 2
+      PARTS: 4
       FILES: ${{ needs.pick.outputs.files }}
       FIT: ${{ needs.pick.outputs.fit }}
     steps:
@@ -117,13 +143,21 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
           printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
           ssh bot true && echo "connected"
-      - name: Copy the days, the decision model and the settings (read-only)
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/recordings
+            data/fit
+            data/models
+          key: fidelity-data-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: The settings (read-only)
         run: |
           set -euo pipefail
           DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/models"
           printf '%s\n' $FILES > "$RUNNER_TEMP/recordings.txt"
-          rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/"
-          for f in model.json vol_model.json fill_model.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || echo "$f: not on the server"; done
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/"
+          for f in model.json vol_model.json fill_model.json; do rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || echo "$f: not on the server"; done
           [ -f "$DATA/models/model.json" ] || { echo "no decision model on the server yet"; exit 1; }
           echo "copied $(ls "$DATA/recordings" | wc -l) recording file(s)"
           # The server's settings without any credential, and without server paths (as Remote training copies them).
@@ -142,7 +176,7 @@ jobs:
           if [ "${{ matrix.how }}" = depth ]; then
             [ -n "$FIT" ] || { echo "no older recorded days to fit the depth model on"; exit 1; }
             mkdir -p "$DATA/fit" && printf '%s\n' $FIT > "$RUNNER_TEMP/fit.txt"
-            rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/fit.txt" bot:bot/data/recordings/ "$DATA/fit/"
+            rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/fit.txt" bot:bot/data/recordings/ "$DATA/fit/"
             node --import tsx research/depthStudy.ts --recordings "$DATA/fit" --out "$DATA/models/depth_model.json" 2>&1 | grep -E '^\[depth\] [0-9]' || true
             [ -s "$DATA/models/depth_model.json" ] || { echo "the depth study wrote no model"; exit 1; }
             run --stage prepare --only depth --depth-model "$DATA/models/depth_model.json"
@@ -220,6 +254,6 @@ jobs:
           set -euo pipefail
           # A depth verdict needs its model next to it (the tally falls back to the worst side without one).
           if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["choice"]["how"] == "depth" else 1)' "$GITHUB_WORKSPACE/data/models/replay_fidelity.json"; then
-            rsync -a --rsync-path="nice -n 19 rsync" "$RUNNER_TEMP/in/fidelity-depth-p0/depth_model.json" bot:bot/data/models/
+            rsync -a --bwlimit=8000 --whole-file --rsync-path="nice -n 19 rsync" "$RUNNER_TEMP/in/fidelity-depth-p0/depth_model.json" bot:bot/data/models/
           fi
-          rsync -a --rsync-path="nice -n 19 rsync" "$GITHUB_WORKSPACE/data/models/replay_fidelity.json" bot:bot/data/models/ && echo "verdict copied; the next training run plays history with it"
+          rsync -a --bwlimit=8000 --whole-file --rsync-path="nice -n 19 rsync" "$GITHUB_WORKSPACE/data/models/replay_fidelity.json" bot:bot/data/models/ && echo "verdict copied; the next training run plays history with it"

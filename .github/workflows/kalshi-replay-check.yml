@@ -1,11 +1,13 @@
 # Kalshi replay check (step 1 of the plan the owner approved on Oct 24): does the backtester trade like the paper bot?
 # research/replayCheck.ts replays the bot's own recordings with the server's settings and sets the result next to the
 # audit log over the stretch since the bot's last start (each deploy restarts it, so that stretch ran one version of
-# the code), up to now (the day being recorded is copied too, gzipped on the way at low priority) or the `to` input.
+# the code), up to now (the day being recorded is copied too, as it stands) or the `to` input.
 #
 # Its own concurrency group, so it never waits behind a sweep run. Read-only on the server, except the verdict, which
 # goes next to the sweep's proposal (data/models/sweeps/replay-check-latest.json), where the sweep's report reads it.
 # This repository is public: the job prints counts, $ totals and setting names, never the settings file, keys or logs.
+# The server only sends files (Steven, Oct 31: never burden the server CPU): every copy is capped at 8 MB/s and uncompressed,
+# and the runner does the parsing and the gzipping.
 #
 # Required secrets (the same as Deploy): LIGHTSAIL_HOST, LIGHTSAIL_USERNAME, LIGHTSAIL_SSH_KEY (optional LIGHTSAIL_PORT).
 name: Kalshi replay check
@@ -110,6 +112,8 @@ jobs:
           # A model file left out (skip_models): one the paper bot did not have yet in the stretch.
           wanted() { case " $SKIP_MODELS " in *" $1 "*) echo "$1 left out (skip_models)"; return 1;; esac; }
           vanished_ok() { local c=$?; [ $c -eq 24 ] && return 0; return $c; }
+          # Every file off the server at most 8 MB/s, uncompressed (rsync -z would compress on the server).
+          pull() { rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "$@"; }
           D=$(echo "${CHECK_DAYS:-$(date -u -d yesterday +%F),$(date -u +%F)}" | tr -d ' ')
           [[ "$D" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}(,[0-9]{4}-[0-9]{2}-[0-9]{2})*$ ]] || { echo "days must be YYYY-MM-DD[,YYYY-MM-DD...]"; exit 1; }
           echo "$D" > "$DATA/sweeps/check-days.txt"
@@ -122,35 +126,37 @@ jobs:
           echo "$TO" > "$DATA/sweeps/check-to.txt"
           PAT=$(echo "$D" | tr ',' '\n' | sed -E "s/^(.+)$/-name 'audit-\1*' -o/" | tr '\n' ' ' | sed -E 's/ -o $//')
           ssh bot "cd ~/bot/data/audit && find . -maxdepth 1 -type f \( $PAT \) -printf '%P\n'" > "$RUNNER_TEMP/audit.txt"
-          rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/audit.txt" bot:bot/data/audit/ "$DATA/audit/" || vanished_ok
+          pull --files-from="$RUNNER_TEMP/audit.txt" bot:bot/data/audit/ "$DATA/audit/" || vanished_ok
           # The take-profit bench's and the accuracy gate's scoreboards now, read right after the audit log (whose bench
           # events wind the bench back): the replay starts from them as they stood when the stretch began.
-          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/take-profit-bench.json "$RUNNER_TEMP/paper-tp-bench.json" 2>/dev/null || true
-          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/accuracy_gate.json "$RUNNER_TEMP/paper-accuracy-gate.json" 2>/dev/null || true
+          pull bot:bot/data/take-profit-bench.json "$RUNNER_TEMP/paper-tp-bench.json" 2>/dev/null || true
+          pull bot:bot/data/accuracy_gate.json "$RUNNER_TEMP/paper-accuracy-gate.json" 2>/dev/null || true
           # Paper's settled entries (the newest ~4 MB, as the bot reads them): the replay's optimal f cap starts from the
           # ones settled before the stretch.
           ssh bot "tail -c 4000000 ~/bot/data/trades.jsonl" > "$RUNNER_TEMP/paper-trades.jsonl" 2>/dev/null || rm -f "$RUNNER_TEMP/paper-trades.jsonl"
           # The stretches checked before, for the luck test's tally (the verdict adds this one and copies it back).
-          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/models/sweeps/replay-check-history.json "$DATA/sweeps/" 2>/dev/null || true
+          pull bot:bot/data/models/sweeps/replay-check-history.json "$DATA/sweeps/" 2>/dev/null || true
           # The paper account's equity at cost now (its cash plus what the contracts it holds cost; cash alone leaves out what
           # open positions tie up): the check backs out what paper settled since the stretch began.
-          ssh bot "python3 -" > "$RUNNER_TEMP/paper-balance" 2>/dev/null <<'PY' || rm -f "$RUNNER_TEMP/paper-balance"
-          import json, os
-          s = json.load(open(os.path.expanduser('~/bot/data/paper_exchange.json')))
+          pull bot:bot/data/paper_exchange.json "$RUNNER_TEMP/paper_exchange.json" 2>/dev/null || true
+          python3 - "$RUNNER_TEMP/paper_exchange.json" > "$RUNNER_TEMP/paper-balance" 2>/dev/null <<'PY' || rm -f "$RUNNER_TEMP/paper-balance"
+          import json, sys
+          s = json.load(open(sys.argv[1]))
           basis, held = s.get('basis') or {}, s.get('positions') or {}
           print(round(s['balance'] + sum((basis.get(t) or {}).get('yesCost', 0) + (basis.get(t) or {}).get('noCost', 0) for t, n in held.items() if n), 4))
           PY
           # The bot's equity guard (the break-even it sizes against, its tier) and the dashboard's kill-switch override (on
           # unless turned off), so the replay sizes and pauses as the bot does.
-          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/equity_guard.json "$RUNNER_TEMP/paper-guard.json" 2>/dev/null || rm -f "$RUNNER_TEMP/paper-guard.json"
-          ssh bot "python3 -c 'import json,os; s=json.load(open(os.path.expanduser(\"~/bot/data/control.json\"))); print(\"false\" if s.get(\"killOverride\") is False else \"true\")'" > "$RUNNER_TEMP/kill-override" 2>/dev/null || echo true > "$RUNNER_TEMP/kill-override"
+          pull bot:bot/data/equity_guard.json "$RUNNER_TEMP/paper-guard.json" 2>/dev/null || rm -f "$RUNNER_TEMP/paper-guard.json"
+          pull bot:bot/data/control.json "$RUNNER_TEMP/control.json" 2>/dev/null || true
+          python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); print("false" if s.get("killOverride") is False else "true")' "$RUNNER_TEMP/control.json" > "$RUNNER_TEMP/kill-override" 2>/dev/null || echo true > "$RUNNER_TEMP/kill-override"
           # The bot's recent maker fills' 60 s markouts, read as its TCA reloads them (the log's last 4 MB, paper fills of
           # the last 7 days, the newest 2000, maker fills with a 60 s markout): they seed the replay's maker buffer.
-          ssh bot "python3 -" > "$RUNNER_TEMP/maker-markouts.json" 2>/dev/null <<'PY' || echo '[]' > "$RUNNER_TEMP/maker-markouts.json"
-          import json, os, time
+          ssh bot "tail -c 4000000 ~/bot/data/tca/tca.jsonl" > "$RUNNER_TEMP/tca-tail.jsonl" 2>/dev/null || true
+          python3 - "$RUNNER_TEMP/tca-tail.jsonl" > "$RUNNER_TEMP/maker-markouts.json" 2>/dev/null <<'PY' || echo '[]' > "$RUNNER_TEMP/maker-markouts.json"
+          import json, sys, time
           now = time.time() * 1000
-          with open(os.path.expanduser('~/bot/data/tca/tca.jsonl'), 'rb') as fh:
-              fh.seek(0, 2); fh.seek(max(0, fh.tell() - 4000000)); text = fh.read().decode('utf8', 'replace')
+          text = open(sys.argv[1], 'rb').read().decode('utf8', 'replace')
           recs = []
           for line in text.split('\n'):
               try: r = json.loads(line)
@@ -163,34 +169,34 @@ jobs:
           [[ "$NEED" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}(,[0-9]{4}-[0-9]{2}-[0-9]{2})*$ ]] || { echo "could not work out the stretch"; exit 1; }
           for d in ${NEED//,/ }; do
             f="md-$d.jsonl"
-            # A plain file is the day being recorded (or one not compressed yet): gzipped on the way, at low priority
-            # (gzip's status 2 is its warning that the file grew while it read it; a torn last line is skipped).
+            # A plain file is the day being recorded (or one not compressed yet): copied as it stands and gzipped on the
+            # runner (a torn last line is skipped).
             if ssh bot "test -f ~/bot/data/recordings/$f"; then
-              ssh bot "nice -n 19 gzip -1 -c ~/bot/data/recordings/$f; [ \$? -le 2 ]" > "$DATA/recordings/$f.gz"
+              pull "bot:bot/data/recordings/$f" "$DATA/recordings/" || vanished_ok; [ ! -f "$DATA/recordings/$f" ] || gzip -1 "$DATA/recordings/$f"
             elif ssh bot "test -f ~/bot/data/recordings/$f.gz"; then
               # Today's is the bot's live gzip (#172: a member every few seconds): read as it stands, the readers skip a
               # last member still being written. Finished days are copied whole.
-              if [ "$d" = "$(date -u +%F)" ]; then ssh bot "nice -n 19 cat ~/bot/data/recordings/$f.gz" > "$DATA/recordings/$f.gz"
-              else rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/recordings/$f.gz" "$DATA/recordings/" || vanished_ok; fi
+              if [ "$d" = "$(date -u +%F)" ]; then scp -q -l 64000 "bot:bot/data/recordings/$f.gz" "$DATA/recordings/$f.gz"
+              else pull "bot:bot/data/recordings/$f.gz" "$DATA/recordings/" || vanished_ok; fi
             fi
           done
           echo "$(echo "$D,$NEED" | tr ',' '\n' | sort -u | paste -sd, -)" > "$DATA/sweeps/check-days.txt"
-          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/models/model.json "$DATA/models/" || echo "no trained model on the server: the check uses the identity model"
+          pull bot:bot/data/models/model.json "$DATA/models/" || echo "no trained model on the server: the check uses the identity model"
           # The other models the engine prices with (the vol profile, vol model and fill model), where the server has them;
           # else the shipped params/ files, as the bot picks them.
-          for f in vol_profile.json vol_model.json fill_model.json session_risk.json; do wanted "$f" || continue; rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
+          for f in vol_profile.json vol_model.json fill_model.json session_risk.json; do wanted "$f" || continue; pull "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
           # The validation gates' state (which books' unvalidated models are benched).
-          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/probation.json "$RUNNER_TEMP/paper-probation.json" 2>/dev/null || true
+          pull bot:bot/data/probation.json "$RUNNER_TEMP/paper-probation.json" 2>/dev/null || true
           # The TA network the engine prices with (its promoted copy and the newest archived versions its ensemble blends),
           # the rule book and the evolved formula (both among the signals that order the engine's markets), the component
           # trials' verdicts, and the index series the network's context and the market context read (dominance, the slow
           # indexes, the risk gauges) from the bot's history directory.
-          for f in ta_net.json rule_book.json gp_indicators.json; do wanted "$f" || continue; rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
+          for f in ta_net.json rule_book.json gp_indicators.json; do wanted "$f" || continue; pull "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
           mkdir -p "$DATA/models/archive/ta_net" "$DATA/history"
-          ssh bot 'ls -1 ~/bot/data/models/archive/ta_net/*.json 2>/dev/null | sort -r | head -4' | while read -r f; do rsync -a --rsync-path="nice -n 19 rsync" "bot:$f" "$DATA/models/archive/ta_net/" 2>/dev/null || true; done
-          rsync -a --rsync-path="nice -n 19 rsync" bot:bot/data/component_trials.json "$RUNNER_TEMP/paper-trials.json" 2>/dev/null || true
+          ssh bot 'ls -1 ~/bot/data/models/archive/ta_net/*.json 2>/dev/null | sort -r | head -4' | while read -r f; do pull "bot:$f" "$DATA/models/archive/ta_net/" 2>/dev/null || true; done
+          pull bot:bot/data/component_trials.json "$RUNNER_TEMP/paper-trials.json" 2>/dev/null || true
           INC=(--include='/*/'); for a in BTCDOM BTC.D USDT.D TOTAL3 OTHERS.D RTY DXY US10Y VIX HYG; do INC+=("--include=/*/$a/***"); done
-          rsync -a --rsync-path="nice -n 19 rsync" --prune-empty-dirs --max-size=50m "${INC[@]}" --exclude='*' bot:bot/data/history/ "$DATA/history/" 2>/dev/null || true
+          pull --prune-empty-dirs --max-size=50m "${INC[@]}" --exclude='*' bot:bot/data/history/ "$DATA/history/" 2>/dev/null || true
           echo "TA network $([ -f "$DATA/models/ta_net.json" ] && echo "from the server" || echo "shipped") + $(ls "$DATA/models/archive/ta_net" | wc -l) archived; rule book $([ -f "$DATA/models/rule_book.json" ] && echo read || echo 'not read'); trials $([ -s "$RUNNER_TEMP/paper-trials.json" ] && echo read || echo 'not read'); index series $(find "$DATA/history" -name '*.csv' | wc -l) file(s)"
           # The server's settings without any credential line and without server paths (the same filter as Remote training).
           ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$DATA/sweep-env/train.env" || true

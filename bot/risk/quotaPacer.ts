@@ -1,29 +1,46 @@
-// Hourly quota pacer (Steven's spec, Oct 29 2026 23:35 UTC): a 24-hour profit clock anchored to 10:00 AM New York time
+// Hourly quota pacer (Steven's spec, Oct 29 2026 23:35 UTC; the non-stacking slices, his spec of Oct 30 04:14 UTC): a
+// 24-hour profit clock anchored to 10:00 AM New York time
 // ($4.50 an hour, $108 a cycle) that tells the strategy the dollars a position must be up, net of fees, for its sale to put
 // the day back on pace before the current clock hour ends. The strategy sells such a position at once, whatever the exit
 // policy or the model says (the "quota snipe", bot/strategy/fairValueStrategy.ts), except inside the last share of a
 // contract's window when the position is in profit, where it rides to settlement (STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC).
 //
 //   cycle      the most recent anchor (10:00 AM New York) to the next one; hour #1 is 10-11 AM, #24 is 9-10 AM
-//   deficit    cumulative mode (the default): hour# x hourly - realized since the anchor, so a slow hour is owed by the
-//              next ones ("don't stack up deficit across hours"); rolling_hour: hourly - realized in this clock hour
-//   needed     max(min take, min(deficit, max target)): ahead of pace the floor still takes a profit at once ("if it's
-//              ahead it shouldn't slow down"), and a cold streak never demands more than the cap from one position
+//   slices     the default (Steven, Oct 30: "Do not stack deficit across hours"). The required rate is what the rest of the
+//              cycle owes an hour block, max(0, 24 x hourly - realized since the anchor) / the blocks left (this one
+//              included). Behind pace (rate > hourly: catch-up) the slice goal is the hourly target; on pace it is the
+//              rate. A position must be up the goal less what the running slice has banked; a slice reached rolls over
+//              at once (the excess carried), so a deficit is caught up in slices of at most the hourly target, never one
+//              oversized target; a new clock hour starts a fresh slice (a partial one is not owed); a loss never raises
+//              the target (the slice floors at 0); once a slice is banked in an hour on pace, the floor stands.
+//   needed     max(min take, min(..., hourly)) in slices; the older modes (PACER_MODE): cumulative, hour# x hourly -
+//              realized since the anchor clamped to [min take, max target] (a slow hour owed by the next ones), and
+//              rolling_hour, hourly - realized in this clock hour. Ahead of pace the floor still takes a profit at once
+//              ("if it's ahead it shouldn't slow down")
 //   realized   net of fees: each reducing fill credits its realized part against the position's cost basis (entry fee
 //              in), and a settlement credits whatever the market's realized total still lacks, so a market's credits
 //              always sum to the book's realized P&L (bot/oms/positions.ts)
+//   floor      PACER_FLOOR (Steven, Oct 31 00:21 UTC): when another exit rule aims higher than the quota, the quota lets the
+//              price go higher and is the position's stop instead (QuotaFloors, quotaCall)
 //
 // The engine and the backtester run the same class on their own clocks; the engine persists it (DATA_DIR) so a restart
 // mid-cycle resumes the running cycle rather than starting hour #1 at the restart.
 import fs from 'fs';
 import path from 'path';
 
-export type PacerMode = 'cumulative' | 'rolling_hour';
+export type PacerMode = 'slices' | 'cumulative' | 'rolling_hour';
+
+/** PACER_FLOOR: which exit rules count as aiming higher than the quota. riding: any rule still riding a winner (the hunt
+ *  trailing its stop, the take-profit trailing its best, a perp signal or setup trade still open) or holding out for a set
+ *  price; targets: only a set sell price (the model's, a resting take-profit, a setup's target, a rule's target passed in);
+ *  off: the quota snipe sells at the quota whatever the other rules aim for. */
+export type PacerFloorMode = 'off' | 'targets' | 'riding';
 
 export interface PacerConfig {
   /** PACER: the quota snipe is on. */
   enabled: boolean;
-  /** PACER_GROUP: positions each in profit after fees whose profits together cover the target are all sold (SnipeGroup). */
+  /** PACER_GROUP (off by default since Oct 30): positions each in profit after fees whose profits together cover the target are
+   *  all sold (SnipeGroup). */
   group: boolean;
   /** PACER_HOURLY_USD: the hourly target (4.50). */
   hourlyUsd: number;
@@ -36,8 +53,11 @@ export interface PacerConfig {
   mode: PacerMode;
   /** PACER_MIN_TAKE_USD: the floor on what a snipe takes (0.75), the whole threshold once ahead of pace. */
   minTakeUsd: number;
-  /** PACER_MAX_TARGET_USD: the cap on what one position is asked for (6.50). */
+  /** PACER_MAX_TARGET_USD: the cap on what one position is asked for in the cumulative and rolling_hour modes (6.50); the
+   *  slices mode never asks more than the hourly target. */
   maxTargetUsd: number;
+  /** PACER_FLOOR: the quota as a stop under a higher target (riding by default). */
+  floor: PacerFloorMode;
 }
 
 export const CYCLE_HOURS = 24;
@@ -56,14 +76,27 @@ export interface PacerStatus {
   realizedHourUsd: number;
   /** Where the straight $hourly/60-a-minute line is right now. */
   linearBenchmarkUsd: number;
-  /** The cumulative goal at the top of the next hour (cumulative) or the hour's target (rolling_hour). */
+  /** The cumulative goal at the top of the next hour (cumulative), the hour's target (rolling_hour) or the running slice's goal
+   *  (slices). */
   nextHourGoalUsd: number;
-  /** Goal less realized: what the rest of this hour owes (negative = ahead). */
+  /** Goal less realized: what the rest of this hour (slices: the running slice) owes (negative = ahead). */
   rawDeficitUsd: number;
   /** The clamped deficit: the net dollars a position must be up for a snipe. */
   neededUsd: number;
   requiredUsdPerMin: number;
   ahead: boolean;
+  mode: PacerMode;
+  /** Hour blocks left in the cycle, this one included. */
+  hoursRemaining: number;
+  /** The cycle's target (24 x hourly) less its realized total, at least 0. */
+  remainingGoalUsd: number;
+  /** remainingGoalUsd / hoursRemaining: the required hourly rate (slices: catch-up while above the hourly target). */
+  requiredPerHourUsd: number;
+  catchUp: boolean;
+  /** The running slice: its goal (at most the hourly target), what it has banked, and the slices completed this clock hour. */
+  sliceGoalUsd: number;
+  sliceRealizedUsd: number;
+  slicesThisHour: number;
 }
 
 interface Wall { y: number; mo: number; d: number; h: number; mi: number; s: number }
@@ -165,32 +198,121 @@ export class SnipeGroup {
   }
 }
 
-interface Saved { cycleStart: number; lastProfitTs: number; realized24h: number; buckets: Record<string, number>; fed: Record<string, number>; savedAt: number }
+/** Steven's rule (Oct 31 2026 00:21 UTC): "things in the bot setting higher targets than whatever the dynamic $4.50/hr quota is
+ *  setting as a target, then the quota should allow for the price to go higher and function as a stop loss instead". While
+ *  another exit rule aims higher (PACER_FLOOR), a position whose profit after fees covers what the hour needs is not sold: that
+ *  need becomes its floor, raised when a later need it covers is higher, and the position is sold once its profit falls below
+ *  it. Kept per contract, so a partial sale leaves the rest its share; a position opened, reversed or added to starts with
+ *  none. Every contract type's quota snipe keeps its floors here, the engine and the backtest alike; not persisted (after a
+ *  restart a floor is armed again when the profit covers the need). */
+export class QuotaFloors {
+  private readonly m = new Map<string, { sign: number; size: number; perUnit?: number }>();
+
+  /** Records the position this tick and returns its floor in dollars (undefined: flat or none armed). */
+  floor(key: string, position: number): number | undefined {
+    if (position === 0) { this.m.delete(key); return undefined; }
+    const sign = Math.sign(position), size = Math.abs(position);
+    const f = this.m.get(key);
+    if (f && f.sign === sign && size <= f.size + 1e-9) {
+      f.size = size;
+      return f.perUnit === undefined ? undefined : f.perUnit * size;
+    }
+    this.m.set(key, { sign, size });
+    return undefined;
+  }
+
+  /** The position's profit covers `usd` while a rule aims higher: its floor is at least `usd`. True when it was raised. */
+  arm(key: string, position: number, usd: number): boolean {
+    const size = Math.abs(position);
+    const f = this.m.get(key);
+    if (!f || f.sign !== Math.sign(position) || !(size > 0)) return false;
+    const perUnit = usd / size;
+    if (f.perUnit !== undefined && perUnit <= f.perUnit + 1e-12) return false;
+    f.perUnit = perUnit;
+    return true;
+  }
+
+  forget(key: string): void { this.m.delete(key); }
+}
+
+export interface QuotaCall {
+  /** Sell now: 'snipe', the profit covers the need and no rule aims higher; 'floor', the profit fell below the floor. */
+  sell?: 'snipe' | 'floor';
+  /** Arm the floor (or raise it) at this many dollars: the profit covers the need and a rule aims higher. */
+  arm?: number;
+}
+
+/** The quota's call on one position: `net` its profit after fees at the touch now, `need` what the hour needs (undefined: the
+ *  pacer is off or the position is not judged), `floor` its armed floor (QuotaFloors), `higher` why another exit rule aims
+ *  higher (undefined: none, or PACER_FLOOR off). */
+export function quotaCall(net: number | undefined, need: number | undefined, floor: number | undefined, higher: string | undefined): QuotaCall {
+  if (net === undefined) return {};
+  if (floor !== undefined && net < floor - 1e-9) return { sell: 'floor' };
+  if (need === undefined || net < need - 1e-9) return {};
+  return higher !== undefined ? { arm: need } : { sell: 'snipe' };
+}
+
+interface Saved { cycleStart: number; lastProfitTs: number; realized24h: number; buckets: Record<string, number>; fed: Record<string, number>; savedAt: number; activeHour?: number; slice?: number; slicesThisHour?: number }
 
 export class HourlyQuotaPacer {
   private cycleStart: number;
+  /** The next anchor, computed once a cycle (the wall-clock arithmetic is the costly part of a status read). */
+  private nextAnchor: number;
   private lastProfitTs: number;
   private realized24h = 0;
   private readonly buckets = new Map<number, number>();
   /** Realized P&L credited per open market, so its settlement credits only the rest. */
   private readonly fed = new Map<string, number>();
+  /** The slices: the clock hour they belong to, the running slice's banked dollars and the slices completed this hour. */
+  private activeHour: number;
+  private slice = 0;
+  private slicesThisHour = 0;
 
   constructor(readonly cfg: PacerConfig, now: number, private readonly file?: string) {
     this.cycleStart = anchorBefore(now, cfg);
+    this.nextAnchor = anchorAfter(this.cycleStart, cfg);
     this.lastProfitTs = now;
+    this.activeHour = this.hourIndex(now);
     this.load();
   }
 
-  /** Resets the cycle the moment the clock crosses an anchor. */
+  /** Resets the cycle the moment the clock crosses an anchor, and the slice the moment it crosses into a new clock hour (a
+   *  partial slice is never owed by the next hour). */
   private rollover(now: number): boolean {
-    const a = anchorBefore(now, this.cfg);
-    if (a <= this.cycleStart) return false;
-    this.cycleStart = a;
-    this.lastProfitTs = now;
-    this.realized24h = 0;
-    this.buckets.clear();
-    this.save(now);
-    return true;
+    let changed = false;
+    if (!(now >= this.cycleStart && now < this.nextAnchor)) {
+      const a = anchorBefore(now, this.cfg);
+      if (a > this.cycleStart) {
+        this.cycleStart = a;
+        this.nextAnchor = anchorAfter(a, this.cfg);
+        this.lastProfitTs = now;
+        this.realized24h = 0;
+        this.buckets.clear();
+        this.slice = 0;
+        this.slicesThisHour = 0;
+        this.activeHour = this.hourIndex(now);
+        changed = true;
+      }
+    }
+    const h = this.hourIndex(now);
+    if (h !== this.activeHour) {
+      this.activeHour = h;
+      this.slice = 0;
+      this.slicesThisHour = 0;
+      changed = true;
+    }
+    if (changed) this.save(now);
+    return changed;
+  }
+
+  /** What the rest of the cycle owes an hour block (the hour `h` included). */
+  private requiredPerHour(h: number): number {
+    return Math.max(0, this.cfg.hourlyUsd * CYCLE_HOURS - this.realized24h) / Math.max(1, CYCLE_HOURS - h + 1);
+  }
+
+  /** The running slice's goal: the hourly target behind pace, the required rate on pace. */
+  private sliceGoal(h: number): number {
+    return Math.min(this.cfg.hourlyUsd, this.requiredPerHour(h));
   }
 
   hourIndex(now: number): number {
@@ -205,6 +327,16 @@ export class HourlyQuotaPacer {
     const h = this.hourIndex(now);
     this.buckets.set(h, (this.buckets.get(h) ?? 0) + netUsd);
     if (netUsd > 0) this.lastProfitTs = now;
+    // A slice reached is banked and the next one starts at once with the excess; a loss never raises the target.
+    this.slice += netUsd;
+    let goal = this.sliceGoal(h);
+    for (let n = 0; goal > 0 && this.slice >= goal - 1e-9 && n < 1000; n++) {
+      this.slice -= goal;
+      this.slicesThisHour++;
+      goal = this.sliceGoal(h);
+      if (goal < this.cfg.minTakeUsd) break;
+    }
+    if (this.slice < 0) this.slice = 0;
     this.save(now);
   }
 
@@ -242,16 +374,31 @@ export class HourlyQuotaPacer {
     const secInto = elapsedSec % 3600;
     const minutesRemaining = Math.max(1 / 60, (3600 - secInto) / 60);
     const realizedHour = this.buckets.get(hourIndex) ?? 0;
-    const nextHourGoal = c.mode === 'cumulative' ? hourIndex * c.hourlyUsd : c.hourlyUsd;
-    const rawDeficit = c.mode === 'cumulative' ? nextHourGoal - this.realized24h : c.hourlyUsd - realizedHour;
-    const neededUsd = Math.max(c.minTakeUsd, Math.min(rawDeficit, c.maxTargetUsd));
+    const hoursRemaining = Math.max(1, CYCLE_HOURS - hourIndex + 1);
+    const remainingGoal = Math.max(0, c.hourlyUsd * CYCLE_HOURS - this.realized24h);
+    const perHour = this.requiredPerHour(hourIndex);
+    const catchUp = perHour > c.hourlyUsd + 1e-9;
+    const sliceGoal = this.sliceGoal(hourIndex);
+    let nextHourGoal: number, rawDeficit: number, neededUsd: number;
+    if (c.mode === 'slices') {
+      nextHourGoal = sliceGoal;
+      // on pace with a slice banked this hour the floor stands: no further slice is forced this hour
+      rawDeficit = this.slicesThisHour > 0 && !catchUp ? c.minTakeUsd : sliceGoal - this.slice;
+      neededUsd = Math.max(c.minTakeUsd, Math.min(rawDeficit, c.hourlyUsd));
+    } else {
+      nextHourGoal = c.mode === 'cumulative' ? hourIndex * c.hourlyUsd : c.hourlyUsd;
+      rawDeficit = c.mode === 'cumulative' ? nextHourGoal - this.realized24h : c.hourlyUsd - realizedHour;
+      neededUsd = Math.max(c.minTakeUsd, Math.min(rawDeficit, c.maxTargetUsd));
+    }
     const r4 = (x: number) => Math.round(x * 1e4) / 1e4;
     return {
-      anchorStart: this.cycleStart, nextReset: anchorAfter(this.cycleStart, c), elapsedSec: Math.round(elapsedSec), hourIndex,
+      anchorStart: this.cycleStart, nextReset: this.nextAnchor, elapsedSec: Math.round(elapsedSec), hourIndex,
       minutesIntoHour: r4(secInto / 60), minutesRemaining: r4(minutesRemaining), minutesSinceProfit: r4(Math.max(0, now - this.lastProfitTs) / 60_000),
       realized24hUsd: r4(this.realized24h), realizedHourUsd: r4(realizedHour), linearBenchmarkUsd: r4(elapsedSec * c.hourlyUsd / 3600),
       nextHourGoalUsd: r4(nextHourGoal), rawDeficitUsd: r4(rawDeficit), neededUsd: r4(neededUsd), requiredUsdPerMin: r4(Math.max(0, rawDeficit) / minutesRemaining),
-      ahead: rawDeficit <= 0,
+      ahead: c.mode === 'slices' ? !catchUp : rawDeficit <= 0,
+      mode: c.mode, hoursRemaining, remainingGoalUsd: r4(remainingGoal), requiredPerHourUsd: r4(perHour), catchUp,
+      sliceGoalUsd: r4(sliceGoal), sliceRealizedUsd: r4(this.slice), slicesThisHour: this.slicesThisHour,
     };
   }
 
@@ -262,7 +409,7 @@ export class HourlyQuotaPacer {
 
   private save(now: number): void {
     if (!this.file) return;
-    const s: Saved = { cycleStart: this.cycleStart, lastProfitTs: this.lastProfitTs, realized24h: this.realized24h, buckets: Object.fromEntries([...this.buckets].map(([k, v]) => [String(k), v])), fed: Object.fromEntries(this.fed), savedAt: now };
+    const s: Saved = { cycleStart: this.cycleStart, lastProfitTs: this.lastProfitTs, realized24h: this.realized24h, buckets: Object.fromEntries([...this.buckets].map(([k, v]) => [String(k), v])), fed: Object.fromEntries(this.fed), savedAt: now, activeHour: this.activeHour, slice: this.slice, slicesThisHour: this.slicesThisHour };
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
       fs.writeFileSync(this.file, JSON.stringify(s));
@@ -280,6 +427,12 @@ export class HourlyQuotaPacer {
       this.realized24h = Number.isFinite(s.realized24h) ? s.realized24h! : 0;
       if (typeof s.lastProfitTs === 'number') this.lastProfitTs = s.lastProfitTs;
       for (const [k, v] of Object.entries(s.buckets ?? {})) if (Number.isFinite(v)) this.buckets.set(Number(k), v as number);
+      // the slice resumes within its clock hour; a later hour starts a fresh one at the next read (rollover)
+      if (Number.isFinite(s.activeHour) && Number.isFinite(s.slice) && Number.isFinite(s.slicesThisHour)) {
+        this.activeHour = s.activeHour!;
+        this.slice = Math.max(0, s.slice!);
+        this.slicesThisHour = s.slicesThisHour!;
+      }
     } catch { /* unreadable state: a fresh cycle from this restart */ }
   }
 }

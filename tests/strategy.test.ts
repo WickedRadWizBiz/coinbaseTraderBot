@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { loadConfig, type StrategyConfig } from '../bot/config';
 import { DEFAULT_FEES } from '../bot/fees';
-import { decide, MarketView } from '../bot/strategy/fairValueStrategy';
+import { decide, MarketView, type StrategyOutput } from '../bot/strategy/fairValueStrategy';
 import { ProfitPeaks } from '../bot/strategy/profitPeaks';
 
 // Continuous cadence + Kelly sizing (the pre-relaxed behaviour these tests pin down).
@@ -243,6 +243,28 @@ test('paper fixed size: a quote sizing wants buys about fixedOrderUsd of contrac
   assert.equal(decide(view({ fixedOrderUsd: 10, maxOrderRiskUsd: 10, maxContracts: 100, bankroll: 0 }), cfg).place.length, 0);
 });
 
+test('order band (Steven, Oct 30): a quote sizing wants stakes its sized amount clamped to $10-$20, never less; the room binds inside the band', () => {
+  const bidOf = (v: MarketView) => decide(v, cfg).place.find((p) => p.side === 'bid');
+  const band = { min: 10, max: 20 };
+  const sized = bidOf(view({ maxOrderRiskUsd: 20, maxContracts: 100 }))!;
+  assert.ok(sized.count * sized.price < 9, 'Kelly alone stakes a few dollars here');
+  const low = bidOf(view({ orderBandUsd: band, maxOrderRiskUsd: 20, maxContracts: 100 }))!;
+  const usd = low.count * low.price;
+  assert.ok(usd > 9.4 && usd <= 10, `raised to the $10 minimum: ${low.count} at ${low.price} = $${usd.toFixed(2)} (fee included)`);
+  // A stake Kelly sizes above the top is cut to it.
+  const high = bidOf(view({ orderBandUsd: band, maxOrderRiskUsd: 20, maxContracts: 100, bankroll: 20_000 }))!;
+  assert.ok(high.count * high.price > 18 && high.count * high.price <= 20, `$${(high.count * high.price).toFixed(2)}`);
+  // The room binds inside the band: $15 of room, a $15 quote.
+  const room = bidOf(view({ orderBandUsd: band, maxOrderRiskUsd: 20, maxContracts: 100, bankroll: 20_000, newRiskRoomUsd: 15 }))!;
+  assert.ok(room.count * room.price > 13.5 && room.count * room.price <= 15, `$${(room.count * room.price).toFixed(2)}`);
+  // Never below the minimum: room for less than $10 still quotes the $10 minimum (the risk gateway refuses it and says
+  // why); no quote when the contract cap cannot fit $10, none where sizing wants none.
+  const tight = bidOf(view({ orderBandUsd: band, maxOrderRiskUsd: 20, maxContracts: 100, newRiskRoomUsd: 6 }))!;
+  assert.ok(tight.count * tight.price > 9.4 && tight.count * tight.price <= 10, `$${(tight.count * tight.price).toFixed(2)}`);
+  assert.equal(bidOf(view({ orderBandUsd: band, maxOrderRiskUsd: 20, maxContracts: 6 })), undefined);
+  assert.equal(decide(view({ orderBandUsd: band, maxOrderRiskUsd: 20, maxContracts: 100, bankroll: 0 }), cfg).place.length, 0);
+});
+
 test('a resting quote due to expire on the exchange is placed again, unless the replacement would end no later', () => {
   const first = decide(view(), cfg).place.find((p) => p.side === 'bid')!;
   const resting = { clientOrderId: 'b', price: first.price, remaining: first.count };
@@ -309,7 +331,8 @@ test('profit mandate: a position in profit after fees is sold at the bid whateve
   assert.match(e.why, /^profit mandate exit: bid 0\.47 - fee 0\.01\d >= cost 0\.41\d \+ 0\.01/);
   assert.ok(exitOf(long(), { exits: true }), 'with the model exit on as well');
   assert.equal(exitOf(long({ bestBid: { price: 0.43, size: 50 } })), undefined, 'not in profit after fees: nothing');
-  assert.equal(exitOf(long({ exitWindowOpen: false })), undefined, 'the last share of the window rides to settlement');
+  assert.equal(exitOf(long({ exitWindowOpen: false })), undefined, 'the final minute rides to settlement');
+  assert.equal(exitOf(long({ settleShare: true })), undefined, 'in profit in the last share of the window: rides to settlement');
   assert.equal(exitOf(long(), { profitMandate: undefined }), undefined, 'off');
   assert.equal(exitOf(long({ entrySidePrice: undefined })), undefined, 'no entry cost known: nothing');
   // Long NO: 10 NO at 0.40 plus the fee; the YES ask 0.53 makes the NO bid 0.47.
@@ -335,7 +358,12 @@ test('quota snipe: a position whose whole net profit after fees covers what the 
   assert.match(g.why, /^quota snipe \(group\): \+\$0\.6\d net on 10 at bid 0\.5, with 1 other position in profit \(\+\$1\.10 together\) covers the \$0\.75 the hour needs/);
   assert.equal(exitOf(long({ bestBid: { price: 0.43, size: 50 } }), { pacerGroup: { sumUsd: 1.1, members: 2 } }), undefined, 'not in profit itself: not a member');
   assert.ok(exitOf(long({ bestBid: { price: 0.5, size: 50 } }), { pacerUsd: 0.5 }), 'it does cover 0.50: the threshold moves with the clock');
-  assert.equal(exitOf(long({ exitWindowOpen: false })), undefined, 'the last share of the window rides to settlement');
+  assert.equal(exitOf(long({ exitWindowOpen: false })), undefined, 'the final minute rides to settlement');
+  assert.equal(exitOf(long({ settleShare: true })), undefined, 'in profit in the last share of the window: rides to settlement');
+  // Not in profit in the last share: the normal exits still act (here the model exit: the model values YES at 0.20).
+  const loser = decide(long({ settleShare: true, pYes: 0.2, bestBid: { price: 0.38, size: 50 } }), cfg, { exits: true, pacerUsd: 0.75 });
+  assert.ok(loser.place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel'), 'a losing position in the last share keeps its exits');
+  assert.ok(!decide(long({ settleShare: true, pYes: 0.2 }), cfg, { exits: true, pacerUsd: 0.75 }).place.some((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel'), 'a winning one does not');
   assert.equal(exitOf(long(), { pacerUsd: undefined }), undefined, 'pacer off');
   assert.equal(exitOf(long({ entrySidePrice: undefined })), undefined, 'no entry cost known: nothing');
   // A thin bid takes what it can; the whole position's profit is what is judged.
@@ -345,6 +373,50 @@ test('quota snipe: a position whose whole net profit after fees covers what the 
   const s = exitOf(short)!;
   assert.deepEqual([s.side, s.price, s.count], ['bid', 0.48, 10]);
   assert.match(s.why, /^quota snipe: \+\$0\.8\d net on 10 NO at bid 0\.52 covers/);
+});
+
+test('quota floor (PACER_FLOOR, Steven Oct 31): while another exit rule aims higher, the quota is the stop, not the sale', () => {
+  // As above: long 10 YES at 0.40 plus the fee, +0.85 net at the 0.52 bid. The model values YES at 0.70: with its exits on, its
+  // sell price (0.70 plus the fee and the margin) is above the bid, so it aims higher than the quota.
+  const long = (o: Partial<MarketView> = {}) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.52, size: 50 }, bestAsk: { price: 0.6, size: 50 }, ...o });
+  const at = (floor: 'off' | 'targets' | 'riding'): StrategyConfig => ({ ...cfg, pacer: { ...cfg.pacer, floor } });
+  const sale = (out: StrategyOutput) => out.place.find((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel');
+  for (const mode of ['riding', 'targets'] as const) {
+    const out = decide(long(), at(mode), { exits: true, pacerUsd: 0.75 });
+    assert.equal(sale(out), undefined, `${mode}: held`);
+    assert.equal(out.pacerArm?.usd, 0.75, `${mode}: the floor armed at the need`);
+    assert.match(out.pacerArm!.why, /^the model's sell price 0\.7\d$/);
+    assert.ok(out.notes.some((n) => /^quota floor: \+\$0\.8\d net covers the \$0\.75 the hour needs; held for the model's sell price/.test(n)));
+  }
+  assert.match(sale(decide(long(), at('off'), { exits: true, pacerUsd: 0.75 }))!.why, /^quota snipe: /, 'off: sold at the quota as before');
+  // The armed floor: a profit below it sells the position at the bid, whatever the other rules aim for; at or above it, held.
+  const fell = sale(decide(long({ bestBid: { price: 0.5, size: 50 } }), at('riding'), { exits: true, pacerUsd: 0.75, pacerFloor: 0.75 }))!;
+  assert.deepEqual([fell.side, fell.price, fell.count, fell.reduceOnly], ['ask', 0.5, 10, true]);
+  assert.match(fell.why, /^quota snipe \(floor\): \+\$0\.6\d net on 10 at bid 0\.5 fell below its \$0\.75 floor/);
+  assert.equal(sale(decide(long(), at('riding'), { exits: true, pacerUsd: 0.75, pacerFloor: 0.75 })), undefined, 'above its floor: held');
+  // A sell price the market cannot pay (the model at 0.99) is settlement, which the quota still takes (Oct 29); in riding mode
+  // the take-profit trailing its best still rides the winner.
+  assert.match(sale(decide(long({ pYes: 0.99 }), at('targets'), { exits: true, pacerUsd: 0.75 }))!.why, /^quota snipe: /);
+  assert.equal(decide(long({ pYes: 0.99 }), at('riding'), { exits: true, pacerUsd: 0.75 }).pacerArm?.why, 'the take-profit riding its best');
+  // The hunt trailing its stop (the engine says so) rides a winner: riding mode holds, targets mode sells at the quota.
+  const hunt = { exits: false, pacerUsd: 0.75, pacerHigher: 'the hunt riding its stop 0.5' };
+  assert.equal(sale(decide(long(), at('riding'), hunt)), undefined);
+  assert.equal(decide(long(), at('riding'), hunt).pacerArm?.why, 'the hunt riding its stop 0.5');
+  assert.match(sale(decide(long(), at('targets'), hunt))!.why, /^quota snipe: /);
+  // A rule's set price above the bid (the TA's take-profit, say) aims higher in either mode; at the bid it does not.
+  const ta = (px: number) => ({ exits: false, pacerUsd: 0.75, higherTargets: [{ why: "the TA's take-profit", sidePrice: px }] });
+  assert.equal(decide(long(), at('targets'), ta(0.6)).pacerArm?.why, "the TA's take-profit at 0.60");
+  assert.match(sale(decide(long(), at('targets'), ta(0.52)))!.why, /^quota snipe: /);
+  // The hunt's sell resting behind a wall above the bid is a set price too.
+  assert.match(decide(long({ huntRestSidePrice: 0.58 }), at('targets'), { exits: false, pacerUsd: 0.75 }).pacerArm!.why, /^the hunt's sell resting at the wall 0\.58$/);
+  // In profit in the last share of the window it rides to settlement, floor or not.
+  assert.equal(sale(decide(long({ settleShare: true, bestBid: { price: 0.5, size: 50 } }), at('riding'), { exits: true, pacerUsd: 0.75, pacerFloor: 0.75 })), undefined);
+  // Long NO: the model values NO at 0.70; the YES ask 0.48 makes the NO bid 0.52, then 0.50.
+  const short = (o: Partial<MarketView> = {}) => view({ position: -10, pYes: 0.3, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.4, size: 50 }, bestAsk: { price: 0.48, size: 50 }, ...o });
+  assert.match(decide(short(), at('riding'), { exits: true, pacerUsd: 0.75 }).pacerArm!.why, /^the model's sell price 0\.7\d$/);
+  const nf = sale(decide(short({ bestAsk: { price: 0.5, size: 50 } }), at('riding'), { exits: true, pacerUsd: 0.75, pacerFloor: 0.75 }))!;
+  assert.deepEqual([nf.side, nf.price, nf.count], ['bid', 0.5, 10]);
+  assert.match(nf.why, /^quota snipe \(floor\): \+\$0\.6\d net on 10 NO at bid 0\.50 fell below its \$0\.75 floor/);
 });
 
 test('exit curve rest mode: a NO position rests a YES bid at 1 - target, and the resting sell follows the position size exactly', () => {

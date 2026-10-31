@@ -32,11 +32,16 @@
 //     With a live score (TENNIS_SCORE_FEED) progress comes from the exact
 //     score. See MatchTracker.progress.
 //
+// Steven's profit rules apply here as on every contract type (Oct 29-30, see decideMatch): the quota snipe
+// sells a position whose profit after fees covers what the clock hour needs, and in the last 30% of the
+// match (by that progress, not the market's window) a position in profit rides to settlement.
+//
 // Pure logic (no I/O): the engine turns plans into risk-checked orders.
 
 import type { TennisConfig } from '../config';
 import type { OrderBook } from '../marketdata/orderBook';
 import { LiquidityRatchet } from '../strategy/exitPolicies';
+import { quotaCall, type PacerFloorMode, type QuotaFloors } from '../risk/quotaPacer';
 import { floorToTick, round } from '../util/num';
 import { impliedModel, scoreProgress, timeProgress, type MatchFormat, type TennisScore } from './tennisModel';
 
@@ -46,6 +51,9 @@ export interface MatchMarket {
   ticker: string; title?: string; quote: Quote; position: number; avgEntry?: number; book?: OrderBook;
   /** Signed taker flow on this market over the last minute: (YES-taker - NO-taker) / total, in [-1, 1]. */
   flow?: number;
+  /** The whole position's profit after fees if sold at the bid now, the entry fee in (the quota snipe's measure on every
+   *  contract type, bot/strategy/fairValueStrategy.ts positionNetAtBid); undefined when flat or unknown. */
+  netAtBid?: number;
 }
 
 export type MatchPhase = 'pre' | 'underdog_window' | 'live' | 'late' | 'done';
@@ -80,7 +88,7 @@ export interface TennisPlan {
   postOnly: boolean;
   reduceOnly: boolean;
   timeInForce: 'good_till_canceled' | 'immediate_or_cancel';
-  leg: 'underdog_entry' | 'underdog_tp' | 'underdog_trail' | 'underdog_late' | 'underdog_cut' | 'underdog_stop' | 'fav_entry' | 'fav_trail' | 'fav_stop';
+  leg: 'underdog_entry' | 'underdog_tp' | 'underdog_trail' | 'underdog_late' | 'underdog_cut' | 'underdog_stop' | 'fav_entry' | 'fav_trail' | 'fav_stop' | 'quota_snipe';
   why: string;
 }
 
@@ -101,6 +109,8 @@ export class MatchTracker {
   readonly stops = new Map<string, number>();
   /** When each trail armed, and the best bid seen since (conservative price hunt). */
   readonly armedAt = new Map<string, number>();
+  /** The price each trail starts at while the bid is still below it (PACER_FLOOR: a set price above the quota). */
+  readonly trailStart = new Map<string, number>();
   readonly peak = new Map<string, number>();
   /** Last tennis-confluence reading per held market (dashboard). */
   readonly signals = new Map<string, { score: number; momentum: boolean; flow: boolean; depth: boolean; crossMarket: boolean }>();
@@ -134,13 +144,15 @@ export class MatchTracker {
     return a ?? (b !== undefined ? 1 - b : undefined);
   }
 
-  /** Grand Slam main draw: best of 5 with a 10-point final-set tiebreak. Slam qualifying: best of 3
-   * with the 10-point final-set tiebreak. Everything else on the ATP tour: best of 3, 7-point tiebreaks. */
+  /** Grand Slam main draw: best of 5 with a 10-point final-set tiebreak. Slam qualifying, and the women's
+   * matches (WTA series) at the Slams: best of 3 with the 10-point final-set tiebreak. Everything else on
+   * the tours: best of 3, 7-point tiebreaks. */
   format(ms: MatchMarket[]): MatchFormat {
     const titles = ms.map((m) => m.title ?? '').join(' ');
     const slam = GRAND_SLAMS.test(titles);
     const quali = /qualif/i.test(titles);
-    return { bestOf: slam && !quali ? 5 : 3, finalTiebreak: slam ? 10 : 7 };
+    const wta = ms.some((m) => /^KXWTA/i.test(m.ticker));
+    return { bestOf: slam && !quali && !wta ? 5 : 3, finalTiebreak: slam ? 10 : 7 };
   }
 
   bestOf(ms: MatchMarket[]): 3 | 5 {
@@ -290,8 +302,10 @@ function huntExit(t: MatchTracker, m: MatchMarket, other: MatchMarket | undefine
   if (!t.armed.has(m.ticker)) {
     if (bid === undefined || bid < target - 1e-9) {
       notes.push(`${leg}: holding, hunt starts at ${target.toFixed(2)} (bid ${bid ?? '—'})`);
+      t.trailStart.set(m.ticker, target);
       return [];
     }
+    t.trailStart.delete(m.ticker);
     t.armed.add(m.ticker);
     t.armedAt.set(m.ticker, now);
   }
@@ -352,11 +366,82 @@ export function tennisSize(price: number, cfg: TennisConfig, b: BudgetView, make
   return Math.floor((room / cost) * 100) / 100;
 }
 
+/** Steven's profit rules as tennis sees them (Oct 29-30; bot/risk/quotaPacer.ts). */
+export interface TennisProfitRules {
+  /** The net dollars a position must be up for its sale now (the pacer's slice); undefined while the pacer is off. */
+  pacerUsd?: number;
+  /** The last share of the match (TENNIS_NO_EXIT_BEFORE_END_FRAC, 0.30) in which a position in profit after fees
+   *  rides to settlement. A share of the match's progress (MatchTracker.progress: the live score's sets, games and points
+   *  against the format's best-of, else the time and information clocks), not of the market's window: a match market
+   *  closes long after the match ends. 0 or unset = off. */
+  settleFrac?: number;
+  /** PACER_FLOOR (bot/risk/quotaPacer.ts): which legs count as aiming higher than the quota (off when unset), and the floors. */
+  floorMode?: PacerFloorMode;
+  floors?: QuotaFloors;
+}
+
 /**
  * Decide orders for one match. Returns the desired resting/IOC plans; the
  * caller cancels resting tennis orders that are not in the plan.
  */
-export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig, budget: BudgetView, tick = 0.01): { phase: MatchPhase; plans: TennisPlan[]; notes: string[] } {
+export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig, budget: BudgetView, tick = 0.01, rules: TennisProfitRules = {}): { phase: MatchPhase; plans: TennisPlan[]; notes: string[] } {
+  return applyProfitRules(t, s, decideLegs(t, s, cfg, budget, tick), rules, tick);
+}
+
+/**
+ * Steven's profit rules (Oct 29-30), on tennis as on every contract type. Inside the last share of the match a position in
+ * profit after fees rides to settlement: no exit sells it (one that is not keeps its exits: the stops, the late cut).
+ * Elsewhere the quota snipe sells a position whose whole profit after fees at the bid covers what the clock hour needs,
+ * whatever the legs planned for it (the hunt, the take-profit, the favorite's hold); a thin bid takes what it can and the
+ * rest is judged again next tick. Under PACER_FLOOR (Steven, Oct 31) a leg aiming higher keeps the position instead, the
+ * need it covered its floor, and the position is sold once its profit falls below that floor (tennisHigher).
+ */
+function applyProfitRules(t: MatchTracker, s: MatchSnapshot, out: { phase: MatchPhase; plans: TennisPlan[]; notes: string[] }, r: TennisProfitRules, tick: number): { phase: MatchPhase; plans: TennisPlan[]; notes: string[] } {
+  const frac = r.settleFrac ?? 0;
+  const prog = t.liveSince !== undefined ? t.progress(s.now, s.markets) : 0;
+  const lastShare = frac > 0 && prog >= 1 - frac - 1e-9;
+  const mode = r.floorMode ?? 'off';
+  for (const m of s.markets) {
+    const floor = mode === 'off' ? undefined : r.floors?.floor(m.ticker, Math.max(0, m.position));
+    if (!(m.position > 0)) continue;
+    const net = m.netAtBid;
+    const others = (p: TennisPlan) => p.ticker !== m.ticker || p.side !== 'ask';
+    if (lastShare && net !== undefined && net > 1e-9) {
+      out.plans = out.plans.filter(others);
+      out.notes.push(`${m.ticker}: match ${(prog * 100).toFixed(0)}% done (its last ${(frac * 100).toFixed(0)}%), +$${net.toFixed(2)} after fees: riding to settlement`);
+    } else if (r.pacerUsd !== undefined && net !== undefined && m.quote.bid !== undefined) {
+      const bid = m.quote.bid;
+      const selling = out.plans.some((p) => p.ticker === m.ticker && p.side === 'ask' && p.timeInForce === 'immediate_or_cancel');
+      const higher = mode === 'off' || selling ? undefined : tennisHigher(t, m, out.plans, bid, mode, tick);
+      const call = quotaCall(net, r.pacerUsd, floor, higher);
+      if (call.arm !== undefined) {
+        r.floors?.arm(m.ticker, m.position, call.arm);
+        out.notes.push(`${m.ticker}: quota floor: +$${net.toFixed(2)} net covers the $${call.arm.toFixed(2)} the hour needs; held for ${higher}, sold if the profit falls below its floor`);
+      }
+      if (call.sell) {
+        out.plans = out.plans.filter(others);
+        out.plans.push({ ticker: m.ticker, side: 'ask', price: bid, count: m.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg: 'quota_snipe',
+          why: call.sell === 'floor' ? `+$${net.toFixed(2)} net on ${m.position} at bid ${bid} fell below its $${floor!.toFixed(2)} floor` : `+$${net.toFixed(2)} net on ${m.position} at bid ${bid} covers the $${r.pacerUsd.toFixed(2)} the hour needs` });
+      }
+    }
+  }
+  return out;
+}
+
+/** PACER_FLOOR on tennis: why a leg aims higher than the quota for this held market (undefined: none). A set price below the
+ *  payout: a resting take-profit above the bid, or a trail's start the bid has not reached; riding mode adds a trail hunting
+ *  with its stop. The favorite held for settlement does not aim higher. */
+function tennisHigher(t: MatchTracker, m: MatchMarket, plans: TennisPlan[], bid: number, mode: PacerFloorMode, tick: number): string | undefined {
+  const set = (px: number | undefined) => px !== undefined && px > bid + 1e-9 && px <= 1 - tick + 1e-9;
+  const tp = plans.find((p) => p.ticker === m.ticker && p.side === 'ask' && p.postOnly && set(p.price));
+  if (tp) return `the take-profit resting at ${tp.price.toFixed(2)}`;
+  const start = t.trailStart.get(m.ticker);
+  if (!t.armed.has(m.ticker) && set(start)) return `the trail starting at ${start!.toFixed(2)}`;
+  if (mode === 'riding' && t.armed.has(m.ticker)) return `the trail riding its stop ${t.stops.get(m.ticker)?.toFixed(2) ?? ''}`.trim();
+  return undefined;
+}
+
+function decideLegs(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig, budget: BudgetView, tick: number): { phase: MatchPhase; plans: TennisPlan[]; notes: string[] } {
   const phase = t.observe(s);
   const plans: TennisPlan[] = [];
   const notes: string[] = [];
@@ -369,7 +454,7 @@ export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig
   const held = s.markets.filter((m) => m.position > 0);
 
   // A flat market has no trail (a later leg on the same player starts a fresh one).
-  for (const m of s.markets) if (m.position <= 0) { t.armed.delete(m.ticker); t.ratchets.delete(m.ticker); t.stops.delete(m.ticker); t.armedAt.delete(m.ticker); t.peak.delete(m.ticker); t.signals.delete(m.ticker); }
+  for (const m of s.markets) if (m.position <= 0) { t.armed.delete(m.ticker); t.ratchets.delete(m.ticker); t.stops.delete(m.ticker); t.armedAt.delete(m.ticker); t.peak.delete(m.ticker); t.signals.delete(m.ticker); t.trailStart.delete(m.ticker); }
 
   // After a restart the tracker is fresh: a held position bought cheap is the underdog trade.
   if (!t.underdogTicker && !t.underdogEntered && !t.favEntered && held.length) {

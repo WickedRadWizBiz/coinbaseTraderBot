@@ -270,10 +270,22 @@ async function backtestDir(dir: string, model: string): Promise<Windows> {
     model, exits: cfg.strategy.exitPolicy, 'vol-model': cfg.strategy.volModel ? opt('vol_model.json') : '', 'fill-model': opt('fill_model.json'),
     'hunt-grid': String(cfg.strategy.huntTargetMargin), 'hunt-confluence': String(cfg.strategy.huntMinConfluence),
     'ratchet-fill-grid': String(cfg.strategy.ratchetMinFillRatio), 'ratchet-age': String(cfg.strategy.ratchetMinWallAgeSec), 'ratchet-slip': String(cfg.strategy.ratchetSlippageTicks),
+    // The paper bot's pool is topped back up when it runs dry (bot/training/supervisor.ts): without it a losing replay goes
+    // broke on its first day ($10-$20 orders on a $200 pool) and trades nothing after.
+    refill: String(cfg.paperBankrollUsd),
   };
   const t0 = Date.now();
-  const w = (await backtestMain((k, d) => (k === 'recordings' ? dir : k in fixed ? fixed[k] : d), false)).windows;
+  const { windows: w, result: r } = await backtestMain((k, d) => (k === 'recordings' ? dir : k in fixed ? fixed[k] : d), false);
   console.log(`[fidelity] backtest on ${path.basename(dir)}: ${w.size} windows (${elapsed(t0)})`);
+  // Why a backtest traded what it did (counts only): the entry evaluations, the orders sent, the fills, and the risk
+  // gateway's commonest refusals.
+  const refused = Object.entries(r.paper?.rejected ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k} x${n}`).join('; ');
+  console.log(`[fidelity] ${path.basename(dir)}: ${r.entryEvaluations} entry evaluations, ${r.latency?.sent ?? 0} orders sent, ${r.fills} fills, ${r.contracts} contracts, optimal-f bound ${r.optimalFBound ?? 0}, refills ${r.refills?.length ?? 0} ($${(r.refills ?? []).reduce((a, x) => a + x.usd, 0).toFixed(2)})${refused ? ` | refused: ${refused}` : ''}`);
+  // Which windows it traded and when (counts only): a backtest that stops early, or trades only outside the compared days,
+  // shows here.
+  const byHour = Object.entries(r.contractsByHour ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  console.log(`[fidelity] ${path.basename(dir)}: ${r.trades.length} settled positions; traded hours ${byHour.length ? `${byHour[0][0]}h to ${byHour[byHour.length - 1][0]}h` : 'none'} (${byHour.map(([h, n]) => `${h.slice(11)}:${Math.round(n)}`).join(' ')})`);
+  console.log(`[fidelity] ${path.basename(dir)} windows: ${[...w].filter(([, x]) => x.contracts > 0).slice(0, 30).map(([k, x]) => `${Number.isFinite(k) ? new Date(k).toISOString().slice(5, 16) : String(k)} ${Math.round(x.contracts)}ct $${x.pnl.toFixed(2)}`).join('; ')}`);
   return w;
 }
 
@@ -286,6 +298,8 @@ function compare(meta: FidelityMeta, real: Windows, variants: Record<string, Win
   const best = [...rows].sort((a, b) => a.rmseUsd - b.rmseUsd)[0];
   const choice: QuoteFill = best.how === 'noise' ? { how: 'noise', sigma: +meta.sigmaAll.toPrecision(6) } : { how: best.how as QuoteFill['how'] };
   const realPnl = [...real.values()].reduce((a, x) => a + x.pnl, 0);
+  // Without a real baseline there is nothing to be closest to: no verdict (it would still pick a fill-in and send it).
+  if (![...real.values()].some((x) => x.contracts > 0)) throw new Error('the backtest on the real quotes traded no window: no verdict');
   const report = {
     at: new Date().toISOString(), days: meta.days, model: path.basename(model),
     real: { pnl: +realPnl.toFixed(4), windowsTraded: [...real.values()].filter((x) => x.contracts > 0).length },

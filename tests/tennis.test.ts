@@ -17,6 +17,7 @@ import { PaperExchange } from '../bot/paper/paperExchange';
 import { KillSwitch } from '../bot/risk/killSwitch';
 import { RiskGateway } from '../bot/risk/riskGateway';
 import { Reconciler } from '../bot/recon/reconciler';
+import { QuotaFloors, type PacerFloorMode } from '../bot/risk/quotaPacer';
 import { decideMatch, MatchTracker, tennisSize, type MatchMarket } from '../bot/tennis/tennisStrategy';
 import { openExchange, tmpAudit, tmpDir } from './helpers';
 
@@ -147,10 +148,96 @@ test('in-play detection without a start time, then favorite re-entry once half t
   assert.ok(slip.notes.some((n) => n.includes('slipping')));
 });
 
-test('grand slams are best of five (slower progress)', () => {
+test('grand slams are best of five (slower progress); the women\'s matches there best of three', () => {
   const tr = new MatchTracker('W', T);
   assert.equal(tr.bestOf([mk('W-A', 0.5, 0.52, { title: 'Will Sinner win the Sinner vs Alcaraz: Wimbledon Final match?' })]), 5);
   assert.equal(tr.bestOf([mk('X-A', 0.5, 0.52, { title: 'Will Sinner win the Sinner vs Alcaraz: Cincinnati match?' })]), 3);
+  assert.deepEqual(tr.format([mk('KXWTAMATCH-26JUL11SWISAB-SWI', 0.5, 0.52, { title: 'Will Swiatek win the Swiatek vs Sabalenka: Wimbledon Final match?' })]), { bestOf: 3, finalTiebreak: 10 });
+});
+
+test('profit rules on tennis (Steven, Oct 30): the quota snipe sells a position whose profit after fees covers the hour; in the last 30% of the match one in profit rides to settlement', () => {
+  assert.equal(T.settleFrac, 0.3);
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), TENNIS_NO_EXIT_BEFORE_END_FRAC: '0.1' }).tennis.settleFrac, 0.1);
+  const rules = { pacerUsd: 4.5, settleFrac: T.settleFrac };
+  // A favorite held from 0.80: its hunt starts at the 0.86 target, so below it the legs plan nothing.
+  const fav = (prog: number, bid: number, net: number | undefined, r: { pacerUsd?: number; settleFrac?: number }) => {
+    const tr = new MatchTracker('P', T);
+    tr.progress = () => prog; // progress itself is tested with the scoring model
+    return decideMatch(tr, { event: 'P', now: t0 + 3_600_000, startTime: t0, closeTime: t0 + 86_400_000, markets: [mk('P-FAV', bid, bid + 0.02, { position: 30, avgEntry: 0.8, netAtBid: net }), mk('P-DOG', 1 - bid - 0.02, 1 - bid)] }, T, budget, 0.01, r);
+  };
+  // Mid-match, +$5 after fees covers the $4.50 the hour needs: sold at the bid at once, though the legs would hold.
+  const snipe = fav(0.5, 0.84, 5, rules);
+  assert.equal(snipe.plans.length, 1, JSON.stringify(snipe));
+  const p = snipe.plans[0];
+  assert.deepEqual([p.leg, p.side, p.price, p.count, p.reduceOnly, p.postOnly, p.timeInForce], ['quota_snipe', 'ask', 0.84, 30, true, false, 'immediate_or_cancel']);
+  assert.equal(p.why, '+$5.00 net on 30 at bid 0.84 covers the $4.50 the hour needs');
+  // Less than the hour needs, or the pacer off: the legs decide (the favorite holds under its target).
+  assert.equal(fav(0.5, 0.84, 3, rules).plans.length, 0);
+  assert.equal(fav(0.5, 0.84, 5, { settleFrac: T.settleFrac }).plans.length, 0);
+  // At 65% the last 30% has not started: sniped. At 75% it has: in profit after fees, the position rides to settlement.
+  assert.equal(fav(0.65, 0.84, 5, rules).plans[0]?.leg, 'quota_snipe');
+  const ride = fav(0.75, 0.84, 5, rules);
+  assert.equal(ride.plans.length, 0);
+  assert.ok(ride.notes.includes('P-FAV: match 75% done (its last 30%), +$5.00 after fees: riding to settlement'), JSON.stringify(ride.notes));
+  // With the rule off (0) the snipe applies to the end.
+  assert.equal(fav(0.75, 0.84, 5, { pacerUsd: 4.5, settleFrac: 0 }).plans[0]?.leg, 'quota_snipe');
+  // The legs' own exits of a position in profit are held too: above its target without confluence the hunt takes the profit,
+  // except in the last 30%.
+  assert.equal(fav(0.5, 0.9, 2.5, rules).plans[0]?.leg, 'fav_trail');
+  assert.equal(fav(0.75, 0.9, 2.5, rules).plans.length, 0);
+  // A position not in profit keeps its exits there: the late cut still sells an underdog under water.
+  const dog = (bid: number, net: number) => {
+    const tr = new MatchTracker('U', T);
+    tr.liveSince = t0; tr.underdogTicker = 'U-DOG';
+    tr.progress = () => 0.8;
+    const now = t0 + 30 * 60_000;
+    return decideMatch(tr, { event: 'U', now, startTime: t0, closeTime: t0 + 86_400_000, markets: [mk('U-FAV', 1 - bid - 0.02, 1 - bid), mkb('U-DOG', bid, bid + 0.02, 300, 100, now, { position: 100, avgEntry: 0.15, netAtBid: net })] }, T, budget, 0.01, rules);
+  };
+  assert.deepEqual([dog(0.1, -5.5).plans[0]?.leg, dog(0.1, -5.5).plans[0]?.price], ['underdog_cut', 0.1]);
+  assert.equal(dog(0.2, 3.9).plans.length, 0, 'in profit: rides instead of the cut');
+});
+
+test('quota floor on tennis (PACER_FLOOR, Steven Oct 31): a leg aiming higher keeps the position, the need it covered becomes its floor, and it is sold once its profit falls below it', () => {
+  // The favorite held from 0.80 under its 0.86 hunt start: a set price above the bid, in either mode.
+  const floors = new QuotaFloors();
+  const tr = new MatchTracker('Q', T);
+  tr.progress = () => 0.5;
+  const at = (bid: number, net: number, r: { pacerUsd: number; floorMode: PacerFloorMode }) => decideMatch(tr, { event: 'Q', now: t0 + 3_600_000, startTime: t0, closeTime: t0 + 86_400_000,
+    markets: [mk('Q-FAV', bid, bid + 0.02, { position: 30, avgEntry: 0.8, netAtBid: net }), mk('Q-DOG', 1 - bid - 0.02, 1 - bid)] }, T, budget, 0.01, { ...r, settleFrac: T.settleFrac, floors });
+  const held = at(0.84, 5, { pacerUsd: 4.5, floorMode: 'riding' });
+  assert.equal(held.plans.length, 0, JSON.stringify(held));
+  assert.ok(held.notes.includes('Q-FAV: quota floor: +$5.00 net covers the $4.50 the hour needs; held for the trail starting at 0.86, sold if the profit falls below its floor'), JSON.stringify(held.notes));
+  assert.equal(floors.floor('Q-FAV', 30), 4.5);
+  // The hour needs less now, but the profit fell below the $4.50 floor: sold at the bid.
+  const fell = at(0.83, 4.4, { pacerUsd: 3, floorMode: 'riding' });
+  assert.deepEqual([fell.plans[0]?.leg, fell.plans[0]?.price, fell.plans[0]?.count, fell.plans[0]?.why], ['quota_snipe', 0.83, 30, '+$4.40 net on 30 at bid 0.83 fell below its $4.50 floor'], JSON.stringify(fell));
+  // targets counts the hunt start too; off sells at the quota as before.
+  floors.forget('Q-FAV');
+  assert.equal(at(0.84, 5, { pacerUsd: 4.5, floorMode: 'targets' }).plans.length, 0);
+  assert.equal(floors.floor('Q-FAV', 30), 4.5);
+  floors.forget('Q-FAV');
+  assert.equal(at(0.84, 5, { pacerUsd: 4.5, floorMode: 'off' }).plans[0]?.leg, 'quota_snipe');
+  assert.equal(floors.floor('Q-FAV', 30), undefined);
+  // A hunt riding its stop with confluence (the underdog surge above): riding holds it on a floor; targets has no set price
+  // there and sells at the quota.
+  const surge = (mode: PacerFloorMode) => {
+    const f = new QuotaFloors();
+    const h = new MatchTracker('H', T); h.underdogTicker = 'E-DOG';
+    const run = (now: number, dogBids: Array<[number, number]>, dogAsk: number, favBid: number, net: number, flow?: number) => {
+      const book = new OrderBook('E-DOG');
+      book.applySnapshot({ bids: dogBids.map(([price, size]) => ({ price, size })), asks: [{ price: dogAsk, size: 100 }] }, now);
+      const m = [mk('E-ALC', favBid, favBid + 0.02), { ...mk('E-DOG', dogBids[0][0], dogAsk, { position: 100, avgEntry: 0.15, flow, netAtBid: net }), book }];
+      return decideMatch(h, { event: 'E', now, startTime: t0 - 60_000, closeTime: t0 + 86_400_000, markets: m }, T, budget, 0.01, { pacerUsd: 4.5, settleFrac: T.settleFrac, floorMode: mode, floors: f });
+    };
+    let now = t0;
+    for (let i = 0; i < 13; i++) { run(now, [[0.15, 100]], 0.17, 0.83, -0.5); now += 5000; }
+    return { out: run(now, [[0.24, 400], [0.22, 400]], 0.25, 0.74, 7, 0.6), f };
+  };
+  const ride = surge('riding');
+  assert.equal(ride.out.plans.length, 0, JSON.stringify(ride.out));
+  assert.ok(ride.out.notes.some((n) => /^E-DOG: quota floor: \+\$7\.00 net covers the \$4\.50 the hour needs; held for the trail riding its stop 0\.\d\d, sold/.test(n)), JSON.stringify(ride.out.notes));
+  assert.equal(ride.f.floor('E-DOG', 100), 4.5);
+  assert.equal(surge('targets').out.plans[0]?.leg, 'quota_snipe');
 });
 
 test('engine trades tennis inside its own 25% budget and keeps it out of the crypto book', async () => {
@@ -195,6 +282,45 @@ test('engine trades tennis inside its own 25% budget and keeps it out of the cry
   assert.ok(blk.cells.some((x) => x !== 0), 'the tracked match lights the block');
   assert.match(blk.note, /1 matches · 0 held · 1 resting/);
   assert.ok(blk.activity > 0.1);
+});
+
+test('engine: the quota snipe sells a tennis position whose profit after fees (entry fee in) covers the hour; the clock audits it', async () => {
+  const run = async (entry: number) => {
+    const dir = tmpDir();
+    const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), DATA_DIR: dir, DOMINANCE_FEED: 'false', SPOT_FEED: 'false', PERPS_FEED: 'false', STRATEGY_SERIES: 'KXBTC15M', SESSION_EDGE_NO_ENTRY: 'false' });
+    const now = Date.now();
+    const m = (ticker: string, title: string): MarketInfo => ({ ticker, seriesTicker: 'KXATPMATCH', eventTicker: 'KXATPMATCH-E1', status: 'open', openTime: now - 3_600_000, closeTime: now + 6 * 3_600_000, tickSize: 0.01, title, startTime: now - 30 * 60_000 });
+    const markets = [m('KXATPMATCH-E1-FAV', 'Will Fav win?'), m('KXATPMATCH-E1-DOG', 'Will Dog win?')];
+    const rest = {
+      getSeriesFees: async () => ({ feeType: 'quadratic_with_maker_fees', multiplier: 1 }),
+      getOpenMarkets: async (s: string) => (s === 'KXATPMATCH' ? markets : []),
+      getMarket: async () => undefined,
+    } as unknown as KalshiRest;
+    const audit = tmpAudit();
+    const md = new MarketData(cfg, rest, undefined, new Recorder(path.join(dir, 'rec')));
+    await md.refreshCatalog(now);
+    md.book('KXATPMATCH-E1-FAV').applySnapshot({ bids: [{ price: 0.84, size: 100 }], asks: [{ price: 0.86, size: 100 }] }, Date.now());
+    md.book('KXATPMATCH-E1-DOG').applySnapshot({ bids: [{ price: 0.14, size: 300 }], asks: [{ price: 0.16, size: 100 }] }, Date.now());
+    const paper = new PaperExchange(undefined, 200, (t) => md.books.get(t), () => ({ takerMultiplier: 1, makerMultiplier: 1 }));
+    const kill = new KillSwitch(path.join(dir, 'kill.json'), audit);
+    const oms = new Oms({ gateway: paper, audit, statePath: path.join(dir, 'oms.json'), feesFor: (t) => md.feesFor(t), sleep: async () => undefined });
+    paper.on('fill', (f) => oms.onFill(f));
+    paper.on('order', (o) => oms.onExchangeOrder(o));
+    const recon = new Reconciler({ gateway: paper, oms, audit, getMarket: rest.getMarket, onPersistentBreak: () => undefined });
+    const engine = new Engine({ cfg, audit, alerter: new Alerter([], audit), md, gateway: paper, oms, risk: new RiskGateway(cfg.risk), kill, recon, model: MetaModel.identity(), exchangeStatus: openExchange() });
+    const r = await recon.run('startup');
+    engine.balance = r!.balance;
+    oms.adoptPosition('KXATPMATCH-E1-FAV', 50, entry);
+    await engine.tick();
+    return { snipes: audit.tail(500, 'pacer').map((x) => x.data as Record<string, unknown>).filter((x) => x.event === 'snipe'), status: engine.tennisStatus.get('KXATPMATCH-E1') };
+  };
+  // 50 from 0.70, bid 0.84: +$7.00 less the $0.48 taker fee covers the $4.50 a fresh clock needs.
+  const won = await run(0.7);
+  assert.equal(won.snipes.length, 1, JSON.stringify(won.status));
+  assert.deepEqual([won.snipes[0].ticker, won.snipes[0].book, won.snipes[0].price, won.snipes[0].count, won.snipes[0].neededUsd], ['KXATPMATCH-E1-FAV', 'tennis', 0.84, 50, 4.5]);
+  assert.equal(won.snipes[0].why, '+$6.52 net on 50 at bid 0.84 covers the $4.50 the hour needs');
+  // From 0.80: +$1.52 does not: the favorite's own legs decide.
+  assert.equal((await run(0.8)).snipes.length, 0);
 });
 
 import fs from 'fs';

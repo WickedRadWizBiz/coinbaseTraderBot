@@ -64,6 +64,8 @@ export interface LedgerInput {
   sizing: {
     /** PAPER_ORDER_FRAC / PAPER_ORDER_USD in dollars an order (0 = paper sizes like live). */
     paperOrderUsd: number;
+    /** ORDER_USD_MIN / ORDER_USD_MAX, paper and live (null = off). */
+    orderBandUsd?: { min: number; max: number } | null;
     tier: string;
     /** EquityGuard's loss-aware size scale (1 = full size). */
     sizeScale: number | null;
@@ -111,7 +113,8 @@ function trialRow(module: string, area: ModuleRow['area'], t: TrialReading | und
 export function buildLedger(x: LedgerInput): ModuleRow[] {
   const rows: ModuleRow[] = [];
   const tr = x.trials ?? {};
-  const paperSized = x.mode === 'paper' && x.sizing.paperOrderUsd > 0;
+  // A paper order size or the order band sizes every order: the tier, the loss scale, optimal f and portfolio Kelly stand by.
+  const paperSized = (x.mode === 'paper' && x.sizing.paperOrderUsd > 0) || Boolean(x.sizing.orderBandUsd);
 
   // Pricing.
   const mlpValid = x.model.liveBlockers.length === 0;
@@ -159,7 +162,9 @@ export function buildLedger(x: LedgerInput): ModuleRow[] {
   }
 
   // Sizing.
-  const sizingFlags = paperSized ? [`bypassed in paper: every order is $${x.sizing.paperOrderUsd.toFixed(2)} (PAPER_ORDER_FRAC/USD)`] : [];
+  const band = x.sizing.orderBandUsd;
+  const sizingFlags = !paperSized ? [] : x.mode === 'paper' && x.sizing.paperOrderUsd > 0 ? [`bypassed in paper: every order is $${x.sizing.paperOrderUsd.toFixed(2)} (PAPER_ORDER_FRAC/USD)`]
+    : band ? [`bypassed: every order is $${band.min}-$${band.max} (ORDER_USD_MIN/MAX)`] : [];
   rows.push({ module: 'sizing tier', area: 'sizing', state: paperSized ? 'shadow' : 'on', validated: null, score: null, flags: [...sizingFlags], note: x.sizing.tier });
   rows.push({ module: 'loss-aware size scale', area: 'sizing', state: paperSized ? 'shadow' : 'on', validated: null, score: { label: 'size multiplier', value: r4(x.sizing.sizeScale), n: 0 }, flags: [...sizingFlags] });
   const of = x.sizing.optimalF;

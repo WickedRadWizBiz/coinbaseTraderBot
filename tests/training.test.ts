@@ -157,6 +157,62 @@ test('break-even sizing: shrinks with net losses, back to full size once wins re
   assert.equal(be.scale(100, 0.15), 1);
 });
 
+test('supervisor: a larger paper pool (PAPER_BANKROLL_USD, Steven Oct 30: $200) tops the tradable bankroll up once as a new epoch, not a failure', async () => {
+  // A drawdown the top-up covers; profit kept in the vault (counted in the epoch's start equity, not tradable); an
+  // account the paper exchange's startup top-up (the difference in PAPER_BANKROLL_USD) already brought past the new pool.
+  await poolRaise({ startEquity: 100, balance: 66, vault: 0 });
+  await poolRaise({ startEquity: 230, balance: 236, vault: 90 });
+  await poolRaise({ startEquity: 100, balance: 205, vault: 0 });
+});
+
+async function poolRaise(c: { startEquity: number; balance: number; vault: number }): Promise<void> {
+  const dir = tmpDir();
+  // The state an older run left (no pool field yet).
+  fs.writeFileSync(path.join(dir, 'training.json'), JSON.stringify({
+    kalshi: { epoch: 3, startTs: 0, startEquity: c.startEquity, peak: 120, trough: 50, fills: 9, refills: 2, refilled: 180 },
+    perps: { epoch: 1, startTs: 0, startEquity: 100, peak: 100, trough: 100, fills: 0, refills: 0, refilled: 0 },
+  }));
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: dir, PAPER_BANKROLL_USD: '200' });
+  const audit = tmpAudit();
+  const control = new RunControl(path.join(dir, 'control.json'));
+  const kill = new KillSwitch(path.join(dir, 'kill.json'), audit);
+  let balance = c.balance;
+  const oms = Object.assign(new EventEmitter(), { cancelAll: async () => assert.fail('a top-up cancels nothing') }) as unknown as Oms;
+  const engine = {
+    bankroll: () => balance - c.vault, equity: () => balance, onBalance: (b: number) => { balance = b; },
+    riskScale: () => ({ scale: 1, parts: [] }), streak: { crypto: new StreakScaler(), tennis: new StreakScaler() }, noteCashFlow: () => {},
+  } as unknown as Engine;
+  const refills: number[] = [];
+  const guard = new EquityGuard({ ddScaleAt: 0.15, weeklyLossPause: 0.08 });
+  guard.update(100, Date.now());
+  const sup = new TrainingSupervisor({
+    cfg, control, kill, engine, oms, audit, alerter: new Alerter([], audit), equityGuard: guard,
+    kalshiPaper: { refill: (a) => { refills.push(a); balance += a; }, getBalance: async () => balance },
+  });
+  await sup.tick();
+  const bank = c.balance - c.vault, topUp = bank < 200 ? [+(200 - bank).toFixed(2)] : [];
+  assert.deepEqual(refills, topUp, JSON.stringify(c));
+  assert.equal(balance - c.vault, Math.max(200, bank));
+  assert.equal(fs.existsSync(path.join(dir, 'epochs.jsonl')), false, 'a top-up is not a training failure');
+  assert.equal(sup.status().kalshi.pool, 200);
+  const rec = audit.tail(10, 'training').map((r) => r.data as { event: string; from: number | null; to: number; topUp: number }).find((d) => d.event === 'pool_raised');
+  if (topUp.length) {
+    assert.equal(guard.kellyScale(balance), 1, 'a new epoch at full size');
+    assert.equal(sup.status().kalshi.epoch, 4);
+    assert.deepEqual([rec?.from, rec?.to, rec?.topUp], [null, 200, topUp[0]]);
+  } else {
+    assert.equal(sup.status().kalshi.epoch, 3, 'nothing to add: the epoch goes on, with the new pool recorded');
+    assert.equal(rec, undefined);
+  }
+  balance = 150 + c.vault; // a loss: no (second) top-up
+  await sup.tick();
+  assert.deepEqual(refills, topUp, 'once');
+  balance = 5 + c.vault; // an exhausted pool refills to the new size
+  (oms as unknown as { cancelAll: () => Promise<unknown> }).cancelAll = async () => ({ canceled: 0, errors: 0 });
+  await sup.tick();
+  assert.deepEqual(refills, [...topUp, 195]);
+}
+
 test('supervisor: live mode never refills; the override covers only the loss-limit trip', async () => {
   const dir = tmpDir();
   const cfg = { ...loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), DATA_DIR: dir }), mode: 'live' } as never;

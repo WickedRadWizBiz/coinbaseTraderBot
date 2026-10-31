@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { HourlyQuotaPacer, SnipeGroup, anchorAfter, anchorBefore, wallClock, wallToUtc, type PacerConfig } from '../bot/risk/quotaPacer';
+import { HourlyQuotaPacer, QuotaFloors, SnipeGroup, anchorAfter, anchorBefore, quotaCall, wallClock, wallToUtc, type PacerConfig } from '../bot/risk/quotaPacer';
 import { PositionBook } from '../bot/oms/positions';
+import { loadConfig } from '../bot/config';
 
-const CFG: PacerConfig = { enabled: true, group: true, hourlyUsd: 4.5, anchorHour: 10, anchorMinute: 0, tz: 'America/New_York', mode: 'cumulative', minTakeUsd: 0.75, maxTargetUsd: 6.5 };
+const CFG: PacerConfig = { enabled: true, group: true, hourlyUsd: 4.5, anchorHour: 10, anchorMinute: 0, tz: 'America/New_York', mode: 'cumulative', minTakeUsd: 0.75, maxTargetUsd: 6.5, floor: 'off' };
 const T = (iso: string) => Date.parse(iso);
 
 test('the cycle anchors on 10:00 AM New York wall time, EDT and EST alike', () => {
@@ -125,4 +126,97 @@ test('the state file resumes the running cycle after a restart and drops it afte
   const r = new HourlyQuotaPacer(CFG, t0 + 25 * 3_600_000, file);
   assert.equal(r.status(t0 + 25 * 3_600_000).realized24hUsd, 0);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('slices (Steven, Oct 30): never more than the hourly target, a deficit caught up in rolling slices, a fresh slice each hour, a loss never raising it', () => {
+  const S: PacerConfig = { ...CFG, mode: 'slices' };
+  const t0 = T('2026-10-29T14:00:00Z');
+  // Hour #1 with nothing realized: 108 over 24 blocks is exactly the hourly target, on pace.
+  let s = new HourlyQuotaPacer(S, t0 + 10 * 60_000).status(t0 + 10 * 60_000);
+  assert.deepEqual([s.hourIndex, s.hoursRemaining, s.requiredPerHourUsd, s.catchUp, s.sliceGoalUsd, s.neededUsd, s.ahead], [1, 24, 4.5, false, 4.5, 4.5, true]);
+  // A start at 9:31 PM (hour #12) with nothing realized: 108 over 13 blocks is 8.31 an hour, catch-up, yet one position is
+  // never asked for more than 4.50 (the cumulative mode asked its 6.50 cap for the 54 owed).
+  const t12 = t0 + 11 * 3_600_000 + 31 * 60_000;
+  const p = new HourlyQuotaPacer(S, t12);
+  s = p.status(t12);
+  assert.deepEqual([s.hourIndex, s.hoursRemaining, s.requiredPerHourUsd, s.catchUp, s.sliceGoalUsd, s.neededUsd, s.ahead], [12, 13, 8.3077, true, 4.5, 4.5, false]);
+  p.record(3, t12 + 60_000);
+  s = p.status(t12 + 60_000);
+  assert.deepEqual([s.sliceRealizedUsd, s.neededUsd], [3, 1.5], 'the running slice owes the rest of its 4.50');
+  // 2 more: the slice is reached and rolls over at once with 0.50 carried; still behind, the next slice asks 4.00.
+  p.record(2, t12 + 120_000);
+  s = p.status(t12 + 120_000);
+  assert.deepEqual([s.slicesThisHour, s.sliceRealizedUsd, s.neededUsd, s.catchUp], [1, 0.5, 4, true]);
+  // A loss floors the slice at 0: the target never rises above 4.50.
+  p.record(-3, t12 + 180_000);
+  s = p.status(t12 + 180_000);
+  assert.deepEqual([s.realized24hUsd, s.sliceRealizedUsd, s.neededUsd], [2, 0, 4.5]);
+  p.record(1.2, t12 + 240_000);
+  assert.equal(p.status(t12 + 240_000).neededUsd, 3.3);
+  // The next clock hour starts a fresh slice: the partial 1.20 is not owed on top of it.
+  s = p.status(t12 + 40 * 60_000);
+  assert.deepEqual([s.hourIndex, s.slicesThisHour, s.sliceRealizedUsd, s.neededUsd], [13, 0, 0, 4.5]);
+  // One big win banks several slices at once.
+  p.record(10, t12 + 41 * 60_000);
+  s = p.status(t12 + 41 * 60_000);
+  assert.deepEqual([s.slicesThisHour, s.sliceRealizedUsd, s.neededUsd], [2, 1, 3.5]);
+
+  // On pace (cruise): the goal is the required rate, and once a slice is banked in the hour the floor stands.
+  const c = new HourlyQuotaPacer(S, t0 + 21 * 3_600_000);
+  c.record(100, t0 + 21 * 3_600_000 + 60_000); // hour #22
+  s = c.status(t0 + 22 * 3_600_000 + 60_000); // hour #23: 8 left over 2 blocks
+  assert.deepEqual([s.hourIndex, s.requiredPerHourUsd, s.catchUp, s.sliceGoalUsd, s.slicesThisHour, s.neededUsd, s.ahead], [23, 4, false, 4, 0, 4, true]);
+  c.record(4.2, t0 + 22 * 3_600_000 + 120_000);
+  s = c.status(t0 + 22 * 3_600_000 + 120_000);
+  assert.deepEqual([s.catchUp, s.slicesThisHour > 0, s.neededUsd], [false, true, 0.75]);
+  // The day's target met: the floor.
+  c.record(10, t0 + 22 * 3_600_000 + 180_000);
+  assert.deepEqual([c.status(t0 + 22 * 3_600_000 + 180_000).requiredPerHourUsd, c.neededUsd(t0 + 22 * 3_600_000 + 180_000)], [0, 0.75]);
+
+  // The state file: a restart in the same hour resumes the slice; in a later hour the cycle's total, not the partial slice.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pacer-slices-'));
+  const file = path.join(dir, 'quota_pacer_state.json');
+  const q = new HourlyQuotaPacer(S, t12, file);
+  q.record(3, t12 + 60_000);
+  assert.equal(new HourlyQuotaPacer(S, t12 + 5 * 60_000, file).status(t12 + 5 * 60_000).neededUsd, 1.5);
+  s = new HourlyQuotaPacer(S, t12 + 45 * 60_000, file).status(t12 + 45 * 60_000);
+  assert.deepEqual([s.hourIndex, s.realized24hUsd, s.sliceRealizedUsd, s.neededUsd], [13, 3, 0, 4.5]);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('defaults: the pacer is on in slices mode; the group rule is off (Oct 30: it made less on 4 of 5 lab days); PACER_GROUP=true turns it on', () => {
+  const p = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).strategy.pacer;
+  assert.deepEqual([p.enabled, p.mode, p.group], [true, 'slices', false]);
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PACER_GROUP: 'true' }).strategy.pacer.group, true);
+});
+
+test('quota floors (PACER_FLOOR, Steven Oct 31): armed at the need while a rule aims higher, kept per contract, raised never lowered, gone with the position', () => {
+  const f = new QuotaFloors();
+  assert.equal(f.floor('A', 10), undefined, 'none armed');
+  assert.ok(f.arm('A', 10, 3));
+  assert.equal(f.floor('A', 10), 3);
+  assert.ok(!f.arm('A', 10, 2.5), 'a lower need does not lower it');
+  assert.ok(f.arm('A', 10, 4.5), 'a higher need the profit covers raises it');
+  assert.ok(Math.abs(f.floor('A', 4)! - 1.8) < 1e-9, 'a partial sale leaves the rest its share');
+  assert.equal(f.floor('A', 6), undefined, 'added to: a new position, no floor');
+  assert.ok(f.arm('A', 6, 2));
+  assert.equal(f.floor('A', -6), undefined, 'reversed: none');
+  assert.ok(f.arm('A', -6, 2));
+  assert.equal(f.floor('A', 0), undefined, 'flat: none');
+  assert.equal(f.floor('A', -6), undefined, 'and none after');
+  assert.ok(!f.arm('B', 5, 1), 'a market never seen is not armed');
+  // The call on one position: net now, the need, the floor, why a rule aims higher.
+  assert.deepEqual(quotaCall(5, 4.5, undefined, undefined), { sell: 'snipe' }, 'covers the need, nothing aims higher: the snipe');
+  assert.deepEqual(quotaCall(5, 4.5, undefined, "the model's sell price 0.80"), { arm: 4.5 }, 'something aims higher: the floor');
+  assert.deepEqual(quotaCall(4.4, 4.5, undefined, "the model's sell price 0.80"), {}, 'short of the need: nothing');
+  assert.deepEqual(quotaCall(4.49, 3, 4.5, "the model's sell price 0.80"), { sell: 'floor' }, 'below the floor: sold, whatever aims higher');
+  assert.deepEqual(quotaCall(4.5, 3, 4.5, "the model's sell price 0.80"), { arm: 3 }, 'at the floor: held');
+  assert.deepEqual(quotaCall(4.6, 6, 4.5, undefined), {}, 'nothing aims higher now but the need is above the profit: the floor holds it');
+  assert.deepEqual(quotaCall(-0.5, 3, 4.5, undefined), { sell: 'floor' }, 'gapped through it into a loss: still the stop');
+  assert.deepEqual(quotaCall(undefined, 4.5, 4.5, undefined), {});
+  // Settings: riding by default; targets and off.
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).strategy.pacer.floor, 'riding');
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PACER_FLOOR: 'targets' }).strategy.pacer.floor, 'targets');
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PACER_FLOOR: 'off' }).strategy.pacer.floor, 'off');
+  assert.throws(() => loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PACER_FLOOR: 'maybe' }));
 });

@@ -79,12 +79,13 @@ jobs:
           for d in $PREV ${D//,/ }; do
             if [ "$d" != "$PREV" ]; then
               ssh bot "cd ~/bot/data/audit && find . -maxdepth 1 -type f -name 'audit-$d*' -printf '%P\n'" > "$RUNNER_TEMP/audit-$d.txt"
-              rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/audit-$d.txt" bot:bot/data/audit/ "$DATA/audit/" || vanished_ok
+              rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/audit-$d.txt" bot:bot/data/audit/ "$DATA/audit/" || vanished_ok
             fi
             if ssh bot "test -f ~/bot/data/recordings/md-$d.jsonl.gz"; then
-              rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/recordings/md-$d.jsonl.gz" "$DATA/recordings/" || vanished_ok
+              rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "bot:bot/data/recordings/md-$d.jsonl.gz" "$DATA/recordings/" || vanished_ok
             elif ssh bot "test -f ~/bot/data/recordings/md-$d.jsonl"; then
-              ssh bot "nice -n 19 gzip -1 -c ~/bot/data/recordings/md-$d.jsonl; [ \$? -le 2 ]" > "$DATA/recordings/md-$d.jsonl.gz"
+              rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "bot:bot/data/recordings/md-$d.jsonl" "$DATA/recordings/" || vanished_ok
+              [ ! -f "$DATA/recordings/md-$d.jsonl" ] || gzip -1 "$DATA/recordings/md-$d.jsonl"
             else
               echo "no recording for $d on the server"
             fi
