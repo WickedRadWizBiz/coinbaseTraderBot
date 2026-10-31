@@ -284,6 +284,9 @@ export interface StrategyConfig {
   takeGate: 'validated' | 'off';
   /** Extra P(win) required above a trade's break-even (price + fee). */
   takeMargin: number;
+  /** The mid-anchored take gate's params file (bot/model/midTakeGate.ts; TAKE_MID_GATE, empty = off) and its margin. */
+  takeMidGate: string;
+  takeMidMargin: number;
 }
 
 export interface Config {
@@ -1205,6 +1208,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     fillMinEv: num(env, 'FILL_MIN_EV', 0, -0.5, 0.5),
     takeGate: oneOf(env, 'TAKE_GATE', 'validated', ['validated', 'off'] as const),
     takeMargin: num(env, 'TAKE_MARGIN', 0, 0, 0.2),
+    takeMidGate: (env.TAKE_MID_GATE ?? '').trim(),
+    takeMidMargin: num(env, 'TAKE_MID_MARGIN', 0, 0, 0.2),
   };
 
   const dataDir = path.resolve(env.DATA_DIR ?? './data');

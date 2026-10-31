@@ -31,6 +31,15 @@ export const VARIANTS: Record<string, Record<string, string>> = {
   all_on: { DYN_EDGE_VOL: '-0.02', DYN_EDGE_MAX_DOWN: '0.02', TA_LEAN_MAKER: '0.005', TA_LEAN_PRICE: '0.005' },
 };
 
+/** Where train-gate writes the mid-anchored take gate (job 3) the gate variants read. */
+export const GATE_FILE = 'data/models/take_mid.json';
+/** The variants that need the gate trained from the baseline's entry log first (a second round of runs). */
+export const GATE_VARIANTS: Record<string, Record<string, string>> = {
+  j3_gate: { TAKE_MID_GATE: GATE_FILE },
+  j3_gate_margin: { TAKE_MID_GATE: GATE_FILE, TAKE_MID_MARGIN: '0.01' },
+  all_in: { ...VARIANTS.all_on, TAKE_MID_GATE: GATE_FILE },
+};
+
 function arg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith('--') ? process.argv[i + 1] : d; }
 
 const f2 = (x: number) => (x >= 0 ? '+' : '') + x.toFixed(2);
@@ -126,14 +135,41 @@ async function main(): Promise<void> {
   const { recordingFiles } = await import('../bot/marketdata/recordingFiles');
   if (cmd === 'run') {
     const name = arg('variant', 'baseline');
-    const env = VARIANTS[name];
-    if (!env) throw new Error(`unknown variant ${name} (${Object.keys(VARIANTS).join(', ')})`);
+    const env = VARIANTS[name] ?? GATE_VARIANTS[name];
+    if (!env) throw new Error(`unknown variant ${name} (${[...Object.keys(VARIANTS), ...Object.keys(GATE_VARIANTS)].join(', ')})`);
     const { evalTrial } = await import('./randomSweep');
     const t0 = Date.now();
     const r = await evalTrial(days, arg('model', 'data/models/model.json'), env, 3, 'all', undefined, { entryLog: process.argv.includes('--entry-log') ? path.join(out, `${name}.entries.jsonl`) : undefined });
     fs.mkdirSync(out, { recursive: true });
     fs.writeFileSync(path.join(out, `${name}.json`), JSON.stringify({ name, ...r }));
     console.log(`[ta-jobs] ${name}: ${r.ok ? `P&L ${f2(r.pnl)}, fees ${r.fees.toFixed(2)}, ${r.trades} trades, ${r.contracts} contracts` : `FAILED ${r.error}`} in ${((Date.now() - t0) / 60_000).toFixed(1)} min`);
+    return;
+  }
+  if (cmd === 'train-gate') {
+    // Job 3: the mid-anchored take gate from the baseline's entry fills before the split, checked on those after it.
+    const { fitMidGate, midGateInputs, midGateProbability } = await import('../bot/model/midTakeGate');
+    const all = recordingFiles(days).map((d) => d.day).sort();
+    const split = arg('split', all[Math.floor(all.length * 0.5)] ?? '');
+    const rows = readLog(path.join(out, 'baseline.entries.jsonl')).map((r) => {
+      const { x, midSide } = midGateInputs(r.side, r.price, !r.taker, r.pYes, r.mid, r.spread ?? 0.02, r.tauSec, r.f);
+      return { x, midSide, won: Boolean(r.won), weight: r.count, day: new Date(r.t).toISOString().slice(0, 10), r };
+    });
+    const train = rows.filter((x) => x.day < split), test = rows.filter((x) => x.day >= split);
+    const fit = fitMidGate(train);
+    const ll = (p: number, y: boolean) => -Math.log(Math.max(1e-6, y ? p : 1 - p));
+    const w = test.reduce((a, x) => a + x.weight, 0) || 1;
+    const llMid = test.reduce((a, x) => a + x.weight * ll(Math.min(0.9999, Math.max(1e-4, x.midSide)), x.won), 0) / w;
+    const params = { ...fit, validation: { n: test.length, logLossMid: llMid, logLossGate: 0, validated: false, from: split, to: all[all.length - 1] } };
+    params.validation.logLossGate = test.reduce((a, x) => a + x.weight * ll(midGateProbability(params, x.x, x.midSide), x.won), 0) / w;
+    params.validation.validated = test.length >= 300 && params.validation.logLossGate < params.validation.logLossMid;
+    fs.mkdirSync(path.dirname(GATE_FILE), { recursive: true });
+    fs.writeFileSync(arg('gate-out', GATE_FILE), JSON.stringify(params));
+    console.log(`[ta-jobs] gate: trained on ${train.length} entry fills before ${split}, checked on ${test.length} after: log loss ${params.validation.logLossGate.toFixed(4)} vs the mid ${llMid.toFixed(4)} -> ${params.validation.validated ? 'VALIDATED' : 'not validated (the gate stays off in its variants)'}`);
+    const top = fit.features.map((n, i) => ({ n, w: fit.w[i] })).sort((a, b) => Math.abs(b.w) - Math.abs(a.w)).slice(0, 10);
+    console.log(`[ta-jobs] gate weights (per standard deviation, + = more likely to win): ${top.map((t) => `${t.n} ${f2(t.w)}`).join(', ')}`);
+    // What skipping would have done on the held-out fills (held to settlement): kept vs skipped, c/ct after fees.
+    const kept = test.filter((x) => midGateProbability(params, x.x, x.midSide) >= x.r.price + x.r.fee), skipped = test.filter((x) => !kept.includes(x));
+    console.log(`[ta-jobs] gate on held-out fills: kept ${summary(kept.map((x) => x.r))} | skipped ${summary(skipped.map((x) => x.r))}`);
     return;
   }
   if (cmd === 'report') {

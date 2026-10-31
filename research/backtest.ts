@@ -33,6 +33,7 @@ import { DEFAULT_FEES } from '../bot/fees';
 import { assetFeatureMap, computeFeatureMap } from '../bot/model/featureEngine';
 import { VolForecaster, VolModel } from '../bot/model/volModel';
 import { applyFillModel, FillModel } from '../bot/tca/fillModel';
+import { applyMidGate, loadMidGate } from '../bot/model/midTakeGate';
 import { applyTakeGate, TAKE_GATED_DRIVERS, TAKE_GATED_MICRO, TAKE_GATED_TREND } from '../bot/model/takeModel';
 import { dropTape, openTape, TapeMiss, tickerHash, type TapeReader, type TapeWriter } from './callTape';
 import { effectiveSigma, loadVolProfile, type VolProfile } from '../bot/model/volSeasonality';
@@ -120,7 +121,7 @@ export interface SessionBreakdown { windows: number; pnl: number; contracts: num
 /** One traded contract (a market in which a position was taken), settled. */
 /** One entry fill (BacktestResult.entryLog). price and fee are per contract on the bought side; f is the decision's feature
  *  map when the order was sent; won is set at settlement. */
-export interface EntryLogRow { ticker: string; asset: string; t: number; closeTs: number; side: 'yes' | 'no'; price: number; fee: number; count: number; taker: boolean; pYes: number; mid: number; tauSec: number; f: Record<string, number>; won?: boolean }
+export interface EntryLogRow { ticker: string; asset: string; t: number; closeTs: number; side: 'yes' | 'no'; price: number; fee: number; count: number; taker: boolean; pYes: number; mid: number; spread: number; tauSec: number; f: Record<string, number>; won?: boolean }
 
 export interface TradeResult { ticker: string; closeTs: number; pnl: number; contracts: number; kind: string }
 
@@ -926,6 +927,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       });
       const qDecision = decisionProbability(view, strat);
       if (strategy.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features: fmap, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: strategy.takeMargin });
+      if (strategy.takeMidGate) applyMidGate(plan, loadMidGate(strategy.takeMidGate), { pYes, mid, features: fmap, tauSec, bid: bid.price, ask: ask.price, margin: strategy.takeMidMargin });
       // Fill model (validated only), as live: quote, cross or skip each maker entry by expected value.
       applyFillModel(plan, opts.fillModel, { q: qDecision, book, tick: m.tickSize, tauSec, sigma: vol.sigmaPerSqrtSec, features: fmap, minEv: strategy.fillMinEv, takerMinEdge: strategy.takerBuffer + strategy.minEdge });
       // The paper bot's own extra entries (bot/engine.ts), when nothing else enters a flat market in its entry window:
@@ -1001,7 +1003,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         }
         if (/^(train|explore)/.test(p.why)) res.paper!.extraSent = (res.paper!.extraSent ?? 0) + 1;
         const clientOrderId = `${m.ticker}-${st.now}-${p.side}-${p.purpose}${p.why.startsWith('take-profit') ? '-tp' : p.why.startsWith('confluence ratchet wall ask') ? '-wall' : ''}`;
-        if (res.entryLog && !p.reduceOnly && (p.purpose === 'entry' || (p.purpose === 'quote' && p.why.startsWith('maker ')))) sentCtx.set(clientOrderId, { ticker: m.ticker, asset: m.asset, closeTs: m.closeTime, pYes, mid, tauSec, f: fmap });
+        if (res.entryLog && !p.reduceOnly && (p.purpose === 'entry' || (p.purpose === 'quote' && p.why.startsWith('maker ')))) sentCtx.set(clientOrderId, { ticker: m.ticker, asset: m.asset, closeTs: m.closeTime, pYes, mid, spread: ask.price - bid.price, tauSec, f: fmap });
         await send(m.ticker, 'order', async () => {
           try {
             await ex.createOrder({ ticker: m.ticker, side: p.side, count: p.count, price: p.price, timeInForce: p.timeInForce, postOnly: p.postOnly, reduceOnly: p.reduceOnly, selfTradePrevention: 'taker_at_cross', clientOrderId, expirationTime: p.expirationTime });
