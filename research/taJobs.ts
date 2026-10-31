@@ -142,10 +142,10 @@ async function main(): Promise<void> {
     if (!env) throw new Error(`unknown variant ${name} (${[...Object.keys(VARIANTS), ...Object.keys(GATE_VARIANTS)].join(', ')})`);
     const { evalTrial } = await import('./randomSweep');
     const t0 = Date.now();
-    const r = await evalTrial(days, arg('model', 'data/models/model.json'), env, 3, 'all', undefined, { entryLog: process.argv.includes('--entry-log') ? path.join(out, `${name}.entries.jsonl`) : undefined });
+    const r = await evalTrial(days, arg('model', 'data/models/model.json'), env, 3, 'all', undefined, { entryLog: process.argv.includes('--entry-log') ? path.join(out, `${name}.entries.jsonl`) : undefined, refill: true });
     fs.mkdirSync(out, { recursive: true });
     fs.writeFileSync(path.join(out, `${name}.json`), JSON.stringify({ name, ...r }));
-    console.log(`[ta-jobs] ${name}: ${r.ok ? `P&L ${f2(r.pnl)}, fees ${r.fees.toFixed(2)}, ${r.trades} trades, ${r.contracts} contracts` : `FAILED ${r.error}`} in ${((Date.now() - t0) / 60_000).toFixed(1)} min`);
+    console.log(`[ta-jobs] ${name}: ${r.ok ? `P&L ${f2(r.pnl)}, fees ${r.fees.toFixed(2)}, ${r.trades} trades, ${r.contracts} contracts, ${r.diag?.entryEvaluations ?? 0} decisions, ${r.diag?.accuracyBlocks ?? 0} accuracy blocks, ${r.diag?.refills ?? 0} refills ($${(r.diag?.refillUsd ?? 0).toFixed(0)})` : `FAILED ${r.error}`} in ${((Date.now() - t0) / 60_000).toFixed(1)} min`);
     return;
   }
   if (cmd === 'train-gate') {

@@ -104,6 +104,8 @@ export interface TrialResult {
   ok: boolean; error?: string; ms: number;
   pnl: number; fees: number; contracts: number; fills: number; trades: number;
   byDay: Record<string, number>; tradesByDay: Record<string, number>; byHour: Record<string, number>;
+  /** Diagnostics: decisions evaluated, entries the accuracy gate blocked, and refills of a pool that ran dry. */
+  diag?: { entryEvaluations: number; accuracyBlocks: number; refills: number; refillUsd: number };
 }
 
 export const trialId = (env: Record<string, string>) => crypto.createHash('sha1').update(JSON.stringify(Object.entries(env).sort())).digest('hex').slice(0, 12);
@@ -159,7 +161,7 @@ async function tapeFor(dir: string, modelPath: string, tapeDir: string | undefin
 
 /** One trial: the production backtester over every day in `dir`, as paper with these bot.env lines. */
 /** `entryLog`: also write every entry fill with its decision's inputs to this JSONL file (research/taJobs.ts). */
-export async function evalTrial(dir: string, modelPath: string, env: Record<string, string>, stage = 1, scope: Scope = 'sample', tapeDir?: string, extra: { entryLog?: string } = {}): Promise<TrialResult> {
+export async function evalTrial(dir: string, modelPath: string, env: Record<string, string>, stage = 1, scope: Scope = 'sample', tapeDir?: string, extra: { entryLog?: string; refill?: boolean } = {}): Promise<TrialResult> {
   const t0 = Date.now();
   const base = { id: trialId(env), stage, scope, env, ms: 0, pnl: 0, fees: 0, contracts: 0, fills: 0, trades: 0, byDay: {}, tradesByDay: {}, byHour: {} };
   try {
@@ -192,6 +194,8 @@ export async function evalTrial(dir: string, modelPath: string, env: Record<stri
       accuracyGate: S.accuracyGate, takeProfitBench: { enforce: S.takeProfitBench, rule }, tape, dailyGoalUsd: cfg.vault.dailyGoalUsd, sessionEdge: cfg.sessionEdge,
       volProfile: em.volProfile, applyVolSeasonality: Boolean(em.volProfile), volModel: em.volModel, fillModel: em.fillModel, calendar: em.calendar,
       taNet: true, trials: em.trials, marketContext: true, ...(seed ? { seedCandles: seed } : {}), entryLog: Boolean(extra.entryLog),
+      // Paper refills its pool when it can no longer trade; a comparison over months needs the same or it stops in week one.
+      ...(extra.refill ? { refillUsd: cfg.paperBankrollUsd } : {}),
     });
     if (extra.entryLog && r.entryLog) {
       fs.mkdirSync(path.dirname(extra.entryLog), { recursive: true });
@@ -204,7 +208,8 @@ export async function evalTrial(dir: string, modelPath: string, env: Record<stri
       tradesByDay[iso.slice(0, 10)] = (tradesByDay[iso.slice(0, 10)] ?? 0) + 1;
       byHour[iso.slice(0, 13)] = (byHour[iso.slice(0, 13)] ?? 0) + t.pnl;
     }
-    return { ...base, ok: true, ms: Date.now() - t0, pnl: r.pnl, fees: r.fees, contracts: r.contracts, fills: r.fills, trades: r.trades.length, byDay, tradesByDay, byHour };
+    return { ...base, ok: true, ms: Date.now() - t0, pnl: r.pnl, fees: r.fees, contracts: r.contracts, fills: r.fills, trades: r.trades.length, byDay, tradesByDay, byHour,
+      diag: { entryEvaluations: r.entryEvaluations, accuracyBlocks: r.paper?.accuracyBlocks ?? 0, refills: r.refills?.length ?? 0, refillUsd: (r.refills ?? []).reduce((a, x) => a + x.usd, 0) } };
   } catch (e) {
     return { ...base, ok: false, error: String((e as Error).message ?? e).slice(0, 300), ms: Date.now() - t0 };
   }

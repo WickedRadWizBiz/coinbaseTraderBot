@@ -30,7 +30,7 @@ concurrency:
 env:
   TJ_DAYS: ${{ inputs.days || '120' }}
   TJ_SPLIT: ${{ inputs.split || '' }}
-  SWEEP_BANKROLL_USD: '150'
+  SWEEP_BANKROLL_USD: '200'
 
 jobs:
   data:
