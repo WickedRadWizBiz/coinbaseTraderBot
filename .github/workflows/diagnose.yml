@@ -190,6 +190,32 @@ jobs:
               case "$p" in /api/*) ;; *) echo "skipping $p (only /api/... paths)"; continue;; esac
               echo "== GET $p"; api "$p" | head -c 6000; echo
             done
+            echo "== weekly review: pacer cycle 2026-10-30T14:00Z..2026-10-31T14:00Z"
+            cat ~/bot/data/quota_pacer_state.json 2>/dev/null | head -c 2000; echo
+            nice -n 19 python3 - <<'PYEOF' || true
+            import glob, json, os, collections
+            A, B = '2026-10-30T14', '2026-10-31T14'
+            S = []; P = collections.Counter(); PU = collections.Counter(); F = collections.Counter(); FEES = 0.0; ST = []
+            for f in sorted(glob.glob(os.path.expanduser('~/bot/data/audit/audit-2026-10-3*.jsonl'))):
+                for raw in open(f, 'rb'):
+                    l = raw[:200].decode('utf8', 'replace')
+                    if not any(k in l for k in ('"kind":"settlement"', '"kind":"pacer"', '"kind":"fill"', '"kind":"startup"')): continue
+                    try: r = json.loads(raw)
+                    except Exception: continue
+                    ts = r.get('ts', '')
+                    if not (A <= ts[:13] < B): continue
+                    d = r.get('data') or {}; k = r.get('kind')
+                    if k == 'settlement': S.append((ts, d.get('ticker', ''), d.get('realized') or 0))
+                    elif k == 'pacer': P[d.get('event')] += 1; PU[d.get('event')] += d.get('usd') or 0
+                    elif k == 'fill': F[d.get('purpose') or 'none'] += 1; FEES += d.get('fee') or 0
+                    elif k == 'startup': ST.append(ts[:16])
+            n = len(S); pnl = sum(x[2] for x in S); w = sum(1 for x in S if x[2] > 0)
+            print(f"settled markets {n}  realized {pnl:+.2f}  win% {100*w/max(1,n):.0f}  fills {dict(F)}  fill fees {FEES:.2f}  startups {ST}")
+            print('pacer events', dict(P), {k: round(v, 2) for k, v in PU.items()})
+            H = collections.defaultdict(float)
+            for ts, t, x in S: H[ts[:13]] += x
+            print('by hour', ' '.join(f"{h[5:]}:{v:+.1f}" for h, v in sorted(H.items())))
+            PYEOF
             if [ "$PNL" = "true" ]; then echo "== P&L forensics: in the 'forensics' job's log (they run on a GitHub runner, not on the server)"; fi
             if [ "$TIMINGS" = "true" ] && [ -f /tmp/diag/deploy/step_timings.py ]; then
               echo "== training step timings"; nice -n 19 python3 /tmp/diag/deploy/step_timings.py ~/bot/data 30 || true
