@@ -110,6 +110,10 @@ export interface ExitStats {
   /** Quota snipes (PACER, bot/risk/quotaPacer.ts): sales and the contracts they sold. */
   quotaSnipes: number;
   quotaSnipeContracts: number;
+  /** PACER_FLOOR: floors armed or raised (a rule aiming higher kept a position whose profit covered the need), and the
+   *  decisions to sell a position whose profit fell below its floor (their fills count among the quota snipes). */
+  floorArms?: number;
+  floorSales?: number;
   /** Mean (stop - fill price) in side terms for ratchet exits; positive = filled below the stop. */
   avgSlippage: number | null;
 }
@@ -372,7 +376,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const pos = new PositionBook();
   const ex = new PaperExchange(undefined, bankroll0, (t) => st.books.get(t), () => DEFAULT_FEES, () => st.now);
   const gateway = new RiskGateway(limits);
-  const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, huntProfitTakes: 0, lockSales: 0, lockHolds: 0, wallAsks: 0, wallFills: 0, quotaSnipes: 0, quotaSnipeContracts: 0, avgSlippage: null };
+  const exits: ExitStats = { orders: 0, fills: 0, contracts: 0, proceeds: 0, regret: 0, stoppedWinners: 0, ratchetTriggers: 0, gaps: 0, hybridHolds: 0, huntActivations: 0, huntDeactivations: 0, huntProfitTakes: 0, lockSales: 0, lockHolds: 0, wallAsks: 0, wallFills: 0, quotaSnipes: 0, quotaSnipeContracts: 0, floorArms: 0, floorSales: 0, avgSlippage: null };
   // The hourly quota pacer on the replay's clock (PACER, bot/risk/quotaPacer.ts), as the engine runs it.
   let pacer: HourlyQuotaPacer | undefined;
   const pacerAt = (now: number) => (pacer ??= new HourlyQuotaPacer(strategy.pacer, now));
@@ -897,7 +901,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         // PACER_FLOOR, as the engine: the hunt trailing its stop rides a winner (riding mode).
         ...(strategy.pacer.floor === 'off' ? {} : { pacerFloor: quotaFloors.floor(m.ticker, view.position), ...(strategy.pacer.floor === 'riding' && huntMode && !huntHold ? { pacerHigher: 'the hunt riding its stop' } : {}) }),
       });
-      if (plan.pacerArm) quotaFloors.arm(m.ticker, view.position, plan.pacerArm.usd);
+      if (plan.pacerArm && quotaFloors.arm(m.ticker, view.position, plan.pacerArm.usd)) exits.floorArms!++;
+      if (plan.place.some((p) => p.purpose === 'exit' && p.why.startsWith('quota snipe (floor)'))) exits.floorSales!++;
       const qDecision = decisionProbability(view, strat);
       if (strategy.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features: fmap, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: strategy.takeMargin });
       // Fill model (validated only), as live: quote, cross or skip each maker entry by expected value.
