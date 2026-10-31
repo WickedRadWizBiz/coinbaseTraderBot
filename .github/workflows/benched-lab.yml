@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: benched-lab
@@ -28,6 +29,7 @@ jobs:
       from: ${{ steps.p.outputs.from }}
       to: ${{ steps.p.outputs.to }}
       arms: ${{ steps.p.outputs.arms }}
+      reuse: ${{ steps.p.outputs.reuse }}
     steps:
       - uses: actions/checkout@v5
       - id: p
@@ -37,7 +39,7 @@ jobs:
           head, arms = {}, []
           for line in open('lab/benched-arms.txt'):
               line = line.rstrip('\n')
-              m = re.match(r'^#\s*(days|from|to)=(\S+)', line)
+              m = re.match(r'^#\s*(days|from|to|reuse_run)=(\S+)', line)
               if m: head[m.group(1)] = m.group(2); continue
               if not line.strip() or line.lstrip().startswith('#'): continue
               tag, _, ov = line.partition(':')
@@ -48,11 +50,16 @@ jobs:
           assert arms and len(arms) <= 12
           print('days=' + head['days']); print('from=' + head['from']); print('to=' + head['to'])
           print('arms=' + json.dumps(arms))
+          reuse = head.get('reuse_run', '')
+          assert re.match(r'^[0-9]*$', reuse), reuse
+          print('reuse=' + reuse)
           PY
           cat "$GITHUB_OUTPUT"
 
   copy:
     needs: [plan]
+    # `# reuse_run=<run id>` in the arms file: another lab's copy of the same stretch (its lab-copy artifact), no server read.
+    if: needs.plan.outputs.reuse == ''
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 60
@@ -200,6 +207,7 @@ jobs:
 
   arm:
     needs: [plan, copy]
+    if: always() && needs.plan.result == 'success' && (needs.copy.result == 'success' || needs.copy.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 345
     strategy:
@@ -225,6 +233,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: lab-copy
+          run-id: ${{ needs.plan.outputs.reuse || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Unpack the copy
         run: |
           tar -xf lab-copy.tar && rm lab-copy.tar

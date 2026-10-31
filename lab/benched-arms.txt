@@ -1,0 +1,19 @@
+# Benched lab round 1 (2026-10-31): the take-profit, the curve cross and the Kalshi probation reworked into stricter
+# levels instead of benches, against today's bot with PR #230's loser exits (base: the take-profit follows paper's bench,
+# the cross off, paper's probation). One arm per line: tag: KEY=VALUE ... (empty = base).
+# days=2026-10-29,2026-10-30
+# from=2026-10-29T15:40:00Z
+# to=2026-10-30T15:40:00Z
+# reuse_run=41210511914
+base:
+tp_l0: TP_LEVEL=0
+tp_l1: TP_LEVEL=1
+tp_l2: TP_LEVEL=2
+tp_l3: TP_LEVEL=3
+cross_l0: SINUOUS_EXIT=cross SINUOUS_CROSS=true SINUOUS_CROSS_LEVEL=0
+cross_l1: SINUOUS_EXIT=cross SINUOUS_CROSS=true SINUOUS_CROSS_LEVEL=1
+cross_l2: SINUOUS_EXIT=cross SINUOUS_CROSS=true SINUOUS_CROSS_LEVEL=2
+cross_book_l1: SINUOUS_EXIT=cross SINUOUS_CROSS=true SINUOUS_CROSS_SOURCE=book SINUOUS_CROSS_LEVEL=1
+prob_open: RS_PROBATION_OPEN=1
+all_l1: TP_LEVEL=1 SINUOUS_EXIT=cross SINUOUS_CROSS=true SINUOUS_CROSS_LEVEL=1 RS_PROBATION_OPEN=1
+all_l2: TP_LEVEL=2 SINUOUS_EXIT=cross SINUOUS_CROSS=true SINUOUS_CROSS_LEVEL=2 RS_PROBATION_OPEN=1
