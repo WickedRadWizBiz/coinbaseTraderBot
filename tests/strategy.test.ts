@@ -444,3 +444,20 @@ test('quota trail (PACER_FLOOR=trail, lab): a winner no other rule holds rides o
   // Below the armed floor it is sold at the bid.
   assert.match(sale(decide(long, { ...cfg, pacer: { ...cfg.pacer, floor: 'trail', trailKeep: 0.5 } }, { exits: false, pacerUsd: 0.75, pacerFloor: 0.95 }))!.why, /^quota snipe \(floor\): /);
 });
+
+test('quota floor confirmed by the model (PACER_FLOOR_CONFIRM=model, lab): a breached floor sells only when the model values the position below it too', () => {
+  // About +0.85 net at the 0.52 bid (10 at 0.40 plus the fee) under a $0.95 floor: breached.
+  const sale = (out: StrategyOutput) => out.place.find((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel');
+  const conf = { ...cfg, pacer: { ...cfg.pacer, floor: 'riding' as const, floorConfirm: 'model' as const } };
+  const long = (pYes: number) => view({ position: 10, pYes, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.52, size: 50 }, bestAsk: { price: 0.6, size: 50 } });
+  const opts = { exits: false, pacerUsd: 0.75, pacerFloor: 0.95 };
+  assert.match(sale(decide(long(0.75), { ...cfg, pacer: { ...cfg.pacer, floor: 'riding' } }, opts))!.why, /^quota snipe \(floor\): /, 'unconfirmed: sold on the breach');
+  const held = decide(long(0.75), conf, opts);
+  assert.equal(sale(held), undefined, 'the model values it at about +3.2: held');
+  assert.ok(held.notes.some((n) => n.startsWith('quota floor held: ')));
+  assert.match(sale(decide(long(0.45), conf, opts))!.why, /^quota snipe \(floor\): /, 'the model values it at about +0.15: sold');
+  // The NO side: 10 NO at 0.40 plus the fee, NO bid 0.52 (YES ask 0.48).
+  const short = (pYes: number) => view({ position: -10, pYes, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.4, size: 50 }, bestAsk: { price: 0.48, size: 50 } });
+  assert.equal(sale(decide(short(0.25), conf, opts)), undefined, 'NO worth 0.75 to the model: held');
+  assert.match(sale(decide(short(0.55), conf, opts))!.why, /^quota snipe \(floor\): /, 'NO worth 0.45 to the model: sold');
+});

@@ -7,7 +7,7 @@ import { HourlyQuotaPacer, QuotaFloors, SnipeGroup, anchorAfter, anchorBefore, q
 import { PositionBook } from '../bot/oms/positions';
 import { loadConfig } from '../bot/config';
 
-const CFG: PacerConfig = { enabled: true, group: true, hourlyUsd: 4.5, anchorHour: 10, anchorMinute: 0, tz: 'America/New_York', mode: 'cumulative', minTakeUsd: 0.75, maxTargetUsd: 6.5, floor: 'off', trailKeep: 0.5, floorTicks: 0 };
+const CFG: PacerConfig = { enabled: true, group: true, hourlyUsd: 4.5, anchorHour: 10, anchorMinute: 0, tz: 'America/New_York', mode: 'cumulative', minTakeUsd: 0.75, maxTargetUsd: 6.5, floor: 'off', trailKeep: 0.5, floorTicks: 0, floorConfirm: 'none' };
 const T = (iso: string) => Date.parse(iso);
 
 test('the cycle anchors on 10:00 AM New York wall time, EDT and EST alike', () => {

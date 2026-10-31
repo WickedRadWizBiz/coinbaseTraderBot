@@ -64,6 +64,10 @@ export interface PacerConfig {
   /** PACER_FLOOR_TICKS (lab, Oct 31): the floor sale waits until the profit is this many price ticks a contract below the
    *  floor (0: at the floor), so a one-tick dip does not sell a winner. */
   floorTicks: number;
+  /** PACER_FLOOR_CONFIRM (lab, Oct 31): 'model' sells a breached floor only when the model's value of the position (its side
+   *  at the model's probability, after the exit fee) is below the floor too, so a dip in the book that the coin's fair value
+   *  does not share does not sell a winner; 'none' (default) sells on the breach alone. */
+  floorConfirm: 'none' | 'model';
 }
 
 export const CYCLE_HOURS = 24;
