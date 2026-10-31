@@ -80,6 +80,10 @@ export interface LoserExitConfig {
   /** LOSER_WINDOW_SHARE (0: off): the window cut also runs once this share of the contract's window is left, when that is
    *  earlier than the last share (STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC), while the books are still deep. */
   windowShare: number;
+  /** LOSER_NO_ENTRY_SHARE (0: off): no new risk (entries, quotes that add, fill-model crosses, training trades) once this
+   *  share of the contract's window is left, nor anywhere the loser window cut runs: a position opened there is under water
+   *  by the spread and fees at once, and the window cut would sell it straight back into a thin closing bid. */
+  noEntryShare: number;
 }
 
 export interface StrategyConfig {
@@ -1183,6 +1187,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       window: bool(env, 'LOSER_WINDOW_CUT', true),
       windowJudge: oneOf(env, 'LOSER_WINDOW_JUDGE', 'bid', ['bid', 'fair', 'cost'] as const),
       windowShare: num(env, 'LOSER_WINDOW_SHARE', 0, 0, 0.9),
+      noEntryShare: num(env, 'LOSER_NO_ENTRY_SHARE', 0, 0, 0.9),
     },
     profitMandate: bool(env, 'PROFIT_MANDATE', false),
     profitMandateMin: num(env, 'PROFIT_MANDATE_MIN', 0.01, 0, 0.5),
