@@ -1041,6 +1041,14 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         r = pacer_run(pathsB, baseG, SL, **kw)
         if r is None: print('    (no costed position)'); break
         print(f"    {lab:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['entries']:7d}  {r['snipe']:6d}  {r['held']:4d}  {r['cap_peak']:14.2f}  {r['thin_usd']:7.2f}")
+    print('  G3. how far paper\'s own sizes scale: own stakes x1-x4, with and without the top-of-book depth charge')
+    print('    sizing variant                                                    realized $     $/h  entries  snipes  held  peak $ at work  depth $')
+    for m in (1, 2, 3, 4):
+        for dep in (False, True):
+            r = pacer_run(pathsB, baseG, SL, stake_fn=(lambda m: lambda p: ownv(p) * m)(m), depth=dep)
+            if r is None: break
+            lab = f"own sizes x{m}" + ('; depth' if dep else '')
+            print(f"    {lab:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['entries']:7d}  {r['snipe']:6d}  {r['held']:4d}  {r['cap_peak']:14.2f}  {r['thin_usd']:7.2f}")
     stakes = sorted(ownv(p) for p in pathsB if p.get('costF') is not None)
     if stakes: print(f"    (paper's own stakes: median ${stakes[len(stakes) // 2]:.2f}, p10 ${stakes[len(stakes) // 10]:.2f}, p90 ${stakes[9 * len(stakes) // 10]:.2f})")
 
