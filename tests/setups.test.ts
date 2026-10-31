@@ -4,6 +4,8 @@ import { test } from 'node:test';
 import type { Candle } from '../bot/ta/indicators';
 import { detectAt, detectLast, setupSeries, type SetupSignal } from '../bot/setups/detectors';
 import { openTrade, stepTrade, tradeResult, type CostModel } from '../bot/setups/exits';
+import { setupHigher } from '../bot/setups/setupTrader';
+import { QuotaFloors } from '../bot/risk/quotaPacer';
 
 const bar = (ts: number, o: number, h: number, l: number, c: number): Candle => ({ ts, o, h, l, c, v: 1 });
 const FREE: CostModel = { entry: 0, makerExit: 0, takerExit: 0, fundingPer8h: 0 };
@@ -172,6 +174,7 @@ test('live setup trader: detects on a closed candle, queues, re-checks, enters w
   // A restarted trader resumes the open trade.
   const again = new SetupTrader({ params: defaultSetupParams({ pilotMaxNotionalUsd: 1e9 }), hub, gateway, modelPath: modelFile, statePath: path.join(dir, 'state.json'), candles: () => set, spot: () => px.v });
   assert.equal(again.book.positions.size, 1);
+  const floored = new SetupTrader({ params: defaultSetupParams({ pilotMaxNotionalUsd: 1e9 }), hub, gateway, modelPath: modelFile, statePath: path.join(dir, 'state.json'), candles: () => set, spot: () => px.v });
   // The quota snipe on the restarted one (Steven's profit rules apply to every contract type; perps never settle, so no last
   // share of a window): once the trade's whole result after costs, closed at the price now, covers what the clock hour needs,
   // it is closed at once (urgent) and its result is credited to the clock; short of that, the plan runs.
@@ -192,6 +195,22 @@ test('live setup trader: detects on a closed candle, queues, re-checks, enters w
   assert.equal(credits.length, 1);
   assert.ok(Math.abs(credits[0] - wantUsd) < 1e-9, `credited ${credits[0]} = the trade's result ${wantUsd}`);
   assert.match(snipes[0], /^quota snipe: \+\$\d+\.\d\d net on the fast 15m \w+ (long|short) at [\d.]+ covers the \$\d+\.\d\d the hour needs$/);
+  // PACER_FLOOR (Steven, Oct 31): short of its first target the plan aims higher, so the same trade is held with the need as its
+  // floor, then closed at the price now once its result falls below that floor (whatever the hour needs by then).
+  const floors = new QuotaFloors();
+  const fpacer = (neededUsd: number) => ({ ...pacer(neededUsd), floorMode: 'riding' as const, floors });
+  const key = `BTC|${open.entryTs}`;
+  const ft = [...floored.book.positions.values()][0]; // the same trade, still open in this trader's book
+  const fh = await floored.targets({ positions: new Map([['BTC-PERP', { ticker: 'BTC-PERP', position: tgt.target } as never]]), hedge: [], now: now + 32_000 }, { pacer: fpacer(wantUsd - 0.01) });
+  assert.notEqual(fh.find((t) => t.asset === 'BTC')!.target, 0, 'held for the first target');
+  assert.ok(Math.abs(floors.floor(key, ft.dir * ft.frac)! - (wantUsd - 0.01)) < 1e-9);
+  px.v = open.entry + 0.5 * (win - open.entry);
+  hub.apply({ ticker: 'BTC-PERP', asset: 'BTC', ts: now + 33_000, bid: px.v * 1.001 - 0.01, ask: px.v * 1.001 + 0.01 });
+  const ff = (await floored.targets({ positions: new Map([['BTC-PERP', { ticker: 'BTC-PERP', position: tgt.target } as never]]), hedge: [], now: now + 33_000 }, { pacer: fpacer(wantUsd + 5) })).find((t) => t.asset === 'BTC')!;
+  assert.deepEqual([ff.target, ff.urgent, ff.reason], [0, true, 'exit: quota']);
+  assert.equal(snipes.length, 2);
+  assert.match(snipes[1], /^quota snipe \(floor\): \+\$\d+\.\d\d net on the fast 15m \w+ (long|short) at [\d.]+ fell below its \$\d+\.\d\d floor$/);
+  assert.equal(floors.floor(key, open.dir), undefined, 'forgotten once closed');
   px.v = sig.ref;
   // Price through the stop: flat, urgent, recorded as a stop.
   px.v = sig.stop - sig.dir * sig.atr;
@@ -202,6 +221,20 @@ test('live setup trader: detects on a closed candle, queues, re-checks, enters w
   const st = trader.status();
   assert.equal(st.recentTrades[0].reason, 'stop');
   assert.ok(st.recentTrades[0].r < -0.9);
+});
+
+test('setupHigher (PACER_FLOOR): the first target not yet taken, then the final target, beyond the price now; riding adds the trailing stop', () => {
+  const t = openTrade(fade(-1, 102, 98, 96), 100, 0, FREE)!;
+  assert.equal(setupHigher(t, 99, 'riding'), "the setup's first target 98");
+  assert.equal(setupHigher(t, 99, 'targets'), "the setup's first target 98");
+  assert.equal(setupHigher(t, 99, 'off'), undefined);
+  t.partialDone = true;
+  assert.equal(setupHigher(t, 97, 'targets'), "the setup's target 96");
+  assert.equal(setupHigher(t, 95.5, 'targets'), undefined, 'past both targets: no set price');
+  assert.equal(setupHigher(t, 95.5, 'riding'), `the setup trade riding its stop ${t.stop}`);
+  const long = openTrade(fade(1, 98, 102, 104), 100, 0, FREE)!;
+  assert.equal(setupHigher(long, 101, 'targets'), "the setup's first target 102");
+  assert.equal(setupHigher(long, 103, 'targets'), "the setup's target 104", 'past the first target before it is taken: the final target');
 });
 
 test('lane score: percentile of the prediction in the calibration quantiles; no model -> 1 or 0 by the lane average', async () => {

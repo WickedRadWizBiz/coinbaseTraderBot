@@ -31,6 +31,7 @@ import type { AuditLog } from '../audit/auditLog';
 import { logger } from '../util/log';
 import type { PerpHub } from './perpData';
 import type { PerpGateway, PerpOrder, PerpPosition } from './perpRest';
+import type { PacerFloorMode, QuotaFloors } from '../risk/quotaPacer';
 
 const log = logger('perp-executor');
 
@@ -121,8 +122,9 @@ export interface DirectionalContext { positions: Map<string, PerpPosition>; hedg
 /** The hourly quota pacer as a directional perp strategy sees it (bot/risk/quotaPacer.ts; Steven's profit rules apply to
  *  every contract type, Oct 30): the net dollars a position must be up for its sale now (undefined while the pacer is off),
  *  the credit of a closed trade's result net of fees, and the audit of a snipe. Perps never settle, so the rule for the last
- *  share of a contract's window does not apply to them. */
-export interface PerpPacer { neededUsd?: number; credit(usd: number, ticker: string): void; snipe(ticker: string, why: string): void }
+ *  share of a contract's window does not apply to them. PACER_FLOOR: which rules count as aiming higher than the quota, and
+ *  the floors (bot/risk/quotaPacer.ts). */
+export interface PerpPacer { neededUsd?: number; credit(usd: number, ticker: string): void; snipe(ticker: string, why: string): void; floorMode?: PacerFloorMode; floors?: QuotaFloors }
 
 export interface DirectionalGuards { halt?: string; noEntry?: string; lockedFrac?: number; pacer?: PerpPacer }
 
