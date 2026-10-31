@@ -58,6 +58,9 @@ export interface PacerConfig {
   maxTargetUsd: number;
   /** PACER_FLOOR: the quota as a stop under a higher target (riding by default). */
   floor: PacerFloorMode;
+  /** PACER_FLOOR_TICKS (16): the floor sells once the position's profit is this many price ticks a contract under it, not
+   *  at the first dip below it (Kalshi contracts: crypto and tennis; perps have no contract tick and keep the floor as is). */
+  floorTicks: number;
 }
 
 export const CYCLE_HOURS = 24;
@@ -245,9 +248,10 @@ export interface QuotaCall {
 /** The quota's call on one position: `net` its profit after fees at the touch now, `need` what the hour needs (undefined: the
  *  pacer is off or the position is not judged), `floor` its armed floor (QuotaFloors), `higher` why another exit rule aims
  *  higher (undefined: none, or PACER_FLOOR off). */
-export function quotaCall(net: number | undefined, need: number | undefined, floor: number | undefined, higher: string | undefined): QuotaCall {
+export function quotaCall(net: number | undefined, need: number | undefined, floor: number | undefined, higher: string | undefined, cushion = 0): QuotaCall {
   if (net === undefined) return {};
-  if (floor !== undefined && net < floor - 1e-9) return { sell: 'floor' };
+  // `cushion` (PACER_FLOOR_TICKS, in dollars for the position): how far under the floor the profit may dip before it sells.
+  if (floor !== undefined && net < floor - cushion - 1e-9) return { sell: 'floor' };
   if (need === undefined || net < need - 1e-9) return {};
   return higher !== undefined ? { arm: need } : { sell: 'snipe' };
 }

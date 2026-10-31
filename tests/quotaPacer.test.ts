@@ -7,7 +7,7 @@ import { HourlyQuotaPacer, QuotaFloors, SnipeGroup, anchorAfter, anchorBefore, q
 import { PositionBook } from '../bot/oms/positions';
 import { loadConfig } from '../bot/config';
 
-const CFG: PacerConfig = { enabled: true, group: true, hourlyUsd: 4.5, anchorHour: 10, anchorMinute: 0, tz: 'America/New_York', mode: 'cumulative', minTakeUsd: 0.75, maxTargetUsd: 6.5, floor: 'off' };
+const CFG: PacerConfig = { enabled: true, group: true, hourlyUsd: 4.5, anchorHour: 10, anchorMinute: 0, tz: 'America/New_York', mode: 'cumulative', minTakeUsd: 0.75, maxTargetUsd: 6.5, floor: 'off', floorTicks: 0 };
 const T = (iso: string) => Date.parse(iso);
 
 test('the cycle anchors on 10:00 AM New York wall time, EDT and EST alike', () => {
@@ -211,6 +211,9 @@ test('quota floors (PACER_FLOOR, Steven Oct 31): armed at the need while a rule 
   assert.deepEqual(quotaCall(4.4, 4.5, undefined, "the model's sell price 0.80"), {}, 'short of the need: nothing');
   assert.deepEqual(quotaCall(4.49, 3, 4.5, "the model's sell price 0.80"), { sell: 'floor' }, 'below the floor: sold, whatever aims higher');
   assert.deepEqual(quotaCall(4.5, 3, 4.5, "the model's sell price 0.80"), { arm: 3 }, 'at the floor: held');
+  // PACER_FLOOR_TICKS: the cushion (dollars for the position) lets the profit dip that far under the floor before it sells.
+  assert.deepEqual(quotaCall(4.3, 4.5, 4.5, "the model's sell price 0.80", 0.5), {}, 'cushion: a $0.20 dip under the floor holds');
+  assert.deepEqual(quotaCall(3.9, 4.5, 4.5, "the model's sell price 0.80", 0.5), { sell: 'floor' }, 'cushion: past it, sold');
   assert.deepEqual(quotaCall(4.6, 6, 4.5, undefined), {}, 'nothing aims higher now but the need is above the profit: the floor holds it');
   assert.deepEqual(quotaCall(-0.5, 3, 4.5, undefined), { sell: 'floor' }, 'gapped through it into a loss: still the stop');
   assert.deepEqual(quotaCall(undefined, 4.5, 4.5, undefined), {});
@@ -219,4 +222,6 @@ test('quota floors (PACER_FLOOR, Steven Oct 31): armed at the need while a rule 
   assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PACER_FLOOR: 'targets' }).strategy.pacer.floor, 'targets');
   assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PACER_FLOOR: 'off' }).strategy.pacer.floor, 'off');
   assert.throws(() => loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PACER_FLOOR: 'maybe' }));
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).strategy.pacer.floorTicks, 16);
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PACER_FLOOR_TICKS: '0' }).strategy.pacer.floorTicks, 0);
 });

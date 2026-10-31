@@ -293,7 +293,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: {
   };
   const quota = (netUsd: number, sideBid: number, modelPx: number, tp: { sell: boolean; riding?: boolean } | undefined, selling: boolean) => {
     const higher = sniping && !selling ? aimsHigher(sideBid, modelPx, tp) : undefined;
-    const call = sniping ? quotaCall(netUsd, pacerUsd, opts.pacerFloor, higher) : {};
+    const call = sniping ? quotaCall(netUsd, pacerUsd, opts.pacerFloor, higher, (cfg.pacer?.floorTicks ?? 0) * tick * Math.abs(v.position)) : {};
     if (call.arm !== undefined) {
       out.pacerArm = { usd: call.arm, why: higher! };
       out.notes.push(`quota floor: +$${netUsd.toFixed(2)} net covers the $${call.arm.toFixed(2)} the hour needs; held for ${higher}, sold if the profit falls below its floor`);
@@ -312,7 +312,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: {
     if (n > 0 && ((exits && (edge >= margin || tp?.sell)) || pm || snipe)) {
       out.place.push({ side: 'ask', price: bid.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge,
         ...(tp?.sell && tp.protective ? { protective: true } : {}),
-        why: tp?.sell ? tp.why : snipe ? (call.sell === 'floor' ? `quota snipe (floor): +$${netUsd.toFixed(2)} net on ${v.position} at bid ${bid.price} fell below its $${opts.pacerFloor!.toFixed(2)} floor`
+        why: tp?.sell ? tp.why : snipe ? (call.sell === 'floor' ? `quota snipe (floor): ${netUsd < 0 ? '-' : '+'}$${Math.abs(netUsd).toFixed(2)} net on ${v.position} at bid ${bid.price} fell below its $${opts.pacerFloor!.toFixed(2)} floor`
             : call.sell === 'snipe' ? `quota snipe: +$${netUsd.toFixed(2)} net on ${v.position} at bid ${bid.price} covers the $${pacerUsd!.toFixed(2)} the hour needs`
             : `quota snipe (group): +$${netUsd.toFixed(2)} net on ${v.position} at bid ${bid.price}, with ${opts.pacerGroup!.members - 1} other position${opts.pacerGroup!.members === 2 ? '' : 's'} in profit (+$${opts.pacerGroup!.sumUsd.toFixed(2)} together) covers the $${pacerUsd!.toFixed(2)} the hour needs`)
           : exits && edge >= margin ? `bid ${bid.price} - fee > q ${q.toFixed(3)} + ${margin}` : `profit mandate exit: bid ${bid.price} - fee ${fee.toFixed(3)} >= cost ${cost!.toFixed(3)} + ${mandateMin}` });
@@ -330,7 +330,7 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: {
     if (n > 0 && ((exits && (edge >= margin || tp?.sell)) || pm || snipe)) {
       out.place.push({ side: 'bid', price: ask.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge,
         ...(tp?.sell && tp.protective ? { protective: true } : {}),
-        why: tp?.sell ? tp.why : snipe ? (call.sell === 'floor' ? `quota snipe (floor): +$${netUsd.toFixed(2)} net on ${-v.position} NO at bid ${noBid.toFixed(2)} fell below its $${opts.pacerFloor!.toFixed(2)} floor`
+        why: tp?.sell ? tp.why : snipe ? (call.sell === 'floor' ? `quota snipe (floor): ${netUsd < 0 ? '-' : '+'}$${Math.abs(netUsd).toFixed(2)} net on ${-v.position} NO at bid ${noBid.toFixed(2)} fell below its $${opts.pacerFloor!.toFixed(2)} floor`
             : call.sell === 'snipe' ? `quota snipe: +$${netUsd.toFixed(2)} net on ${-v.position} NO at bid ${noBid.toFixed(2)} covers the $${pacerUsd!.toFixed(2)} the hour needs`
             : `quota snipe (group): +$${netUsd.toFixed(2)} net on ${-v.position} NO at bid ${noBid.toFixed(2)}, with ${opts.pacerGroup!.members - 1} other position${opts.pacerGroup!.members === 2 ? '' : 's'} in profit (+$${opts.pacerGroup!.sumUsd.toFixed(2)} together) covers the $${pacerUsd!.toFixed(2)} the hour needs`)
           : exits && edge >= margin ? `NO bid ${noBid.toFixed(2)} - fee > q + ${margin}` : `profit mandate exit: NO bid ${noBid.toFixed(2)} - fee ${fee.toFixed(3)} >= cost ${cost!.toFixed(3)} + ${mandateMin}` });
