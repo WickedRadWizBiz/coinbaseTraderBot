@@ -129,6 +129,8 @@ export class SnnNetwork {
   readonly version: string;
   readonly columns = new Map<string, Column>();
   readonly readouts = new Map<string, Readout>();
+  /** volNorm: per-asset slow average of the contracts' sigma (time-weighted, 6 h), the reference the ratio is read against. */
+  private sigmaRef = new Map<string, { v: number; ts: number }>();
   /** Direction heads (one per column): trained continuously on realised price moves, traded or not. */
   readonly dirReadouts = new Map<string, Readout>();
   readonly dirTags = new Map<string, DirTag[]>();
@@ -456,7 +458,7 @@ export class SnnNetwork {
       if (q.d !== undefined) {
         // Tennis: one threshold, distance given directly.
         if (!Number.isFinite(q.d)) continue;
-        const phi = this.volNormed(c, c.features(q.d, q.lifeFrac ?? 0, this.extras(c)));
+        const phi = c.features(q.d, q.lifeFrac ?? 0, this.extras(c));
         ths.push({ q, role: 'strike', K: 1, p: sigmoid(this.anchorLogit(q, 'strike', q.d) + ro.logit(phi)), phi });
         continue;
       }
@@ -466,7 +468,7 @@ export class SnnNetwork {
       for (const [role, K] of roles) {
         if (!(K && K > 0)) continue;
         const d = Math.log(q.spot / K) / (q.sigma * Math.sqrt(q.tauSec));
-        const phi = this.volNormed(c, c.features(d, life, this.extras(c)));
+        const phi = this.volNormed(c, c.features(d, life, this.extras(c)), this.sigmaRatio(c.asset, q.sigma, now));
         ths.push({ q, role, K, p: sigmoid(this.anchorLogit(q, role, d) + ro.logit(phi)), phi });
       }
     }
@@ -655,12 +657,24 @@ export class SnnNetwork {
    *  query without a usable mid falls back to the crude fair value sigma(priorSlope x d) the un-anchored readout starts
    *  from. Without the flag it is 0 (the weights carry the prior). Tags store the anchored p, so the settlement delta
    *  stays the exact log-loss gradient. */
-  /** volNorm: the contract features divided by (fast/slow activity ratio)^k when activity runs hot, so the readout's
-   *  correction does not grow with volatility. Off (absent) = the features unchanged. */
-  volNormed(c: Column, phi: Float64Array): Float64Array {
+  /** volNorm: the contract's volatility against its asset's slow average (the measure the Oct 31 audit sliced by:
+   *  sigma over a 6-hour time-weighted average of sigma). The average is updated as contracts are scored. */
+  sigmaRatio(asset: string, sigma: number, now: number): number {
+    if (!this.p.volNorm || !(sigma > 0) || !Number.isFinite(sigma)) return 1;
+    const r = this.sigmaRef.get(asset);
+    if (!r) { this.sigmaRef.set(asset, { v: sigma, ts: now }); return 1; }
+    const ratio = sigma / r.v;
+    const a = 1 - Math.exp(-Math.max(0, now - r.ts) / (6 * 3_600_000));
+    r.v += a * (sigma - r.v); r.ts = Math.max(r.ts, now);
+    return ratio;
+  }
+
+  /** volNorm: the contract features divided by ratio^k when its volatility runs above its slow average (ratio clipped
+   *  to [1, 5]), so the readout's correction does not grow with volatility. Off (absent) = the features unchanged. */
+  volNormed(_c: Column, phi: Float64Array, ratio: number): Float64Array {
     const k = this.p.volNorm;
-    if (!k || !(c.deltaSlow > 1e-9)) return phi;
-    const r = Math.min(5, Math.max(1, c.deltaFast / c.deltaSlow));
+    if (!k || !Number.isFinite(ratio)) return phi;
+    const r = Math.min(5, Math.max(1, ratio));
     if (r === 1) return phi;
     const s = Math.pow(r, -k);
     for (let i = 0; i < phi.length; i++) phi[i] *= s;

@@ -28,6 +28,10 @@ on:
         description: 'Judge only: re-judge the saved sides of this earlier run id (no replay, no server read; artifacts last 7 days)'
         required: false
         default: ''
+      base_from:
+        description: 'Reuse the baseline side saved by this earlier run id (same mechanism, unchanged baseline): only the candidate replays, so the server is read once instead of twice'
+        required: false
+        default: ''
       judge_args:
         description: 'Extra judge flags, e.g. --gain true --gainPrior 100 --gainForget 0.999 (the learned correction gain; --gainPerRow true weighs every row)'
         required: false
@@ -120,7 +124,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        side: [baseline, candidate]
+        side: ${{ fromJSON(inputs.base_from != '' && '["candidate"]' || '["baseline","candidate"]') }}
     env:
       ONLY: ${{ inputs.only }}
       DOMAIN: ${{ inputs.domain || 'crypto' }}
@@ -213,6 +217,14 @@ jobs:
           # Judge-only: the sides saved by an earlier run.
           run-id: ${{ inputs.from_run || github.run_id }}
           github-token: ${{ inputs.from_run != '' && github.token || '' }}
+      - uses: actions/download-artifact@v4
+        # The baseline side saved by an earlier run (base_from): no second replay, no second server read.
+        if: inputs.base_from != '' && inputs.from_run == ''
+        with:
+          name: snn-ablation-side-baseline
+          path: research/out
+          run-id: ${{ inputs.base_from }}
+          github-token: ${{ github.token }}
       - name: Judge
         env:
           JUDGE_ARGS: ${{ inputs.judge_args }}

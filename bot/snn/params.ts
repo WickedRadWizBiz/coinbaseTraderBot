@@ -87,11 +87,11 @@ export interface SnnParams {
    *  Oct 31 breakdown found the anchored correction beat the market at 40-60c and not in the tails. Optional: absent =
    *  no band, and the version hash is unchanged. */
   anchorBand?: number;
-  /** Volatility-normalized contract readout: the whole feature vector is divided by the column's fast/slow
-   *  activity ratio to this power when activity runs above its slow average (ratio clipped to [1, 5]). The Oct 31 audit
-   *  found the anchored correction several times too big in high volatility (calibration slope 0.13), because spike
-   *  rates, and so w . phi, grow with volatility. Tags store the scaled features, so learning follows the same scaled
-   *  output (the gradient stays exact). Optional: absent = off, and the version hash is unchanged. */
+  /** Volatility-normalized contract readout: the whole feature vector is divided by (contract sigma / its asset's
+   *  6-hour average sigma)^k when volatility runs above that average (ratio clipped to [1, 5]). The Oct 31 audit
+   *  found the anchored correction several times too big in high volatility (calibration slope 0.13). Tags store the
+   *  scaled features, so learning follows the same scaled output (the gradient stays exact). Optional: absent = off,
+   *  and the version hash is unchanged. */
   volNorm?: number;
   /** Wilson-Cowan regime drive gain; gap-junction coupling factor (<< 1). */
   wcGain: number; gapCoupling: number;
