@@ -17,6 +17,7 @@ import { PaperExchange } from '../bot/paper/paperExchange';
 import { KillSwitch } from '../bot/risk/killSwitch';
 import { RiskGateway } from '../bot/risk/riskGateway';
 import { Reconciler } from '../bot/recon/reconciler';
+import { QuotaFloors, type PacerFloorMode } from '../bot/risk/quotaPacer';
 import { decideMatch, MatchTracker, tennisSize, type MatchMarket } from '../bot/tennis/tennisStrategy';
 import { openExchange, tmpAudit, tmpDir } from './helpers';
 
@@ -194,6 +195,49 @@ test('profit rules on tennis (Steven, Oct 30): the quota snipe sells a position 
   };
   assert.deepEqual([dog(0.1, -5.5).plans[0]?.leg, dog(0.1, -5.5).plans[0]?.price], ['underdog_cut', 0.1]);
   assert.equal(dog(0.2, 3.9).plans.length, 0, 'in profit: rides instead of the cut');
+});
+
+test('quota floor on tennis (PACER_FLOOR, Steven Oct 31): a leg aiming higher keeps the position, the need it covered becomes its floor, and it is sold once its profit falls below it', () => {
+  // The favorite held from 0.80 under its 0.86 hunt start: a set price above the bid, in either mode.
+  const floors = new QuotaFloors();
+  const tr = new MatchTracker('Q', T);
+  tr.progress = () => 0.5;
+  const at = (bid: number, net: number, r: { pacerUsd: number; floorMode: PacerFloorMode }) => decideMatch(tr, { event: 'Q', now: t0 + 3_600_000, startTime: t0, closeTime: t0 + 86_400_000,
+    markets: [mk('Q-FAV', bid, bid + 0.02, { position: 30, avgEntry: 0.8, netAtBid: net }), mk('Q-DOG', 1 - bid - 0.02, 1 - bid)] }, T, budget, 0.01, { ...r, settleFrac: T.settleFrac, floors });
+  const held = at(0.84, 5, { pacerUsd: 4.5, floorMode: 'riding' });
+  assert.equal(held.plans.length, 0, JSON.stringify(held));
+  assert.ok(held.notes.includes('Q-FAV: quota floor: +$5.00 net covers the $4.50 the hour needs; held for the trail starting at 0.86, sold if the profit falls below its floor'), JSON.stringify(held.notes));
+  assert.equal(floors.floor('Q-FAV', 30), 4.5);
+  // The hour needs less now, but the profit fell below the $4.50 floor: sold at the bid.
+  const fell = at(0.83, 4.4, { pacerUsd: 3, floorMode: 'riding' });
+  assert.deepEqual([fell.plans[0]?.leg, fell.plans[0]?.price, fell.plans[0]?.count, fell.plans[0]?.why], ['quota_snipe', 0.83, 30, '+$4.40 net on 30 at bid 0.83 fell below its $4.50 floor'], JSON.stringify(fell));
+  // targets counts the hunt start too; off sells at the quota as before.
+  floors.forget('Q-FAV');
+  assert.equal(at(0.84, 5, { pacerUsd: 4.5, floorMode: 'targets' }).plans.length, 0);
+  assert.equal(floors.floor('Q-FAV', 30), 4.5);
+  floors.forget('Q-FAV');
+  assert.equal(at(0.84, 5, { pacerUsd: 4.5, floorMode: 'off' }).plans[0]?.leg, 'quota_snipe');
+  assert.equal(floors.floor('Q-FAV', 30), undefined);
+  // A hunt riding its stop with confluence (the underdog surge above): riding holds it on a floor; targets has no set price
+  // there and sells at the quota.
+  const surge = (mode: PacerFloorMode) => {
+    const f = new QuotaFloors();
+    const h = new MatchTracker('H', T); h.underdogTicker = 'E-DOG';
+    const run = (now: number, dogBids: Array<[number, number]>, dogAsk: number, favBid: number, net: number, flow?: number) => {
+      const book = new OrderBook('E-DOG');
+      book.applySnapshot({ bids: dogBids.map(([price, size]) => ({ price, size })), asks: [{ price: dogAsk, size: 100 }] }, now);
+      const m = [mk('E-ALC', favBid, favBid + 0.02), { ...mk('E-DOG', dogBids[0][0], dogAsk, { position: 100, avgEntry: 0.15, flow, netAtBid: net }), book }];
+      return decideMatch(h, { event: 'E', now, startTime: t0 - 60_000, closeTime: t0 + 86_400_000, markets: m }, T, budget, 0.01, { pacerUsd: 4.5, settleFrac: T.settleFrac, floorMode: mode, floors: f });
+    };
+    let now = t0;
+    for (let i = 0; i < 13; i++) { run(now, [[0.15, 100]], 0.17, 0.83, -0.5); now += 5000; }
+    return { out: run(now, [[0.24, 400], [0.22, 400]], 0.25, 0.74, 7, 0.6), f };
+  };
+  const ride = surge('riding');
+  assert.equal(ride.out.plans.length, 0, JSON.stringify(ride.out));
+  assert.ok(ride.out.notes.some((n) => /^E-DOG: quota floor: \+\$7\.00 net covers the \$4\.50 the hour needs; held for the trail riding its stop 0\.\d\d, sold/.test(n)), JSON.stringify(ride.out.notes));
+  assert.equal(ride.f.floor('E-DOG', 100), 4.5);
+  assert.equal(surge('targets').out.plans[0]?.leg, 'quota_snipe');
 });
 
 test('engine trades tennis inside its own 25% budget and keeps it out of the crypto book', async () => {

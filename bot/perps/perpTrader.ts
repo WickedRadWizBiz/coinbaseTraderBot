@@ -33,6 +33,7 @@ import type { PerpGateway } from './perpRest';
 import { perpFeatures, priorMuBps, type PerpFeatureSources, type PerpModel } from './perpSignal';
 import { liquidationLeverageCap, maintenanceRate } from '../risk/liquidation';
 import { gatePasses, probation } from '../risk/probation';
+import { quotaCall, type PacerFloorMode } from '../risk/quotaPacer';
 
 export interface PerpTraderParams {
   /** Liquidation beyond the stop (bot/risk/liquidation.ts): buffer and maintenance margin rate (0 / unset = from
@@ -92,9 +93,16 @@ export interface PerpDecisionInput {
   lockedFrac?: number;
   /** The net dollars a position must be up for its sale now (the quota pacer, bot/risk/quotaPacer.ts); undefined = off. */
   pacerUsd?: number;
+  /** PACER_FLOOR: which rules count as aiming higher than the quota (off when unset), and the position's armed floor. */
+  pacerFloorMode?: PacerFloorMode;
+  pacerFloor?: number;
 }
 
-export interface PerpDecision { target: number; urgent: boolean; reason: string; stopPrice?: number; netEdgeBps?: number; leverage?: number }
+export interface PerpDecision {
+  target: number; urgent: boolean; reason: string; stopPrice?: number; netEdgeBps?: number; leverage?: number;
+  /** PACER_FLOOR: the position's profit covers the need while the signal holds it; the caller arms its floor here (dollars). */
+  pacerArm?: number;
+}
 
 const floorStep = (x: number, step: number) => Math.sign(x) * Math.floor(Math.abs(x) / step + 1e-9) * step;
 
@@ -117,11 +125,19 @@ export function decidePerp(i: PerpDecisionInput, p: PerpTraderParams): PerpDecis
     const stop = stopFor(curDir, i.entryPrice);
     if (curDir > 0 ? i.bid <= stop : i.ask >= stop) return { target: 0, urgent: true, reason: `stop hit at ${stop}`, stopPrice: stop };
   }
-  // The quota snipe: closed at the touch whatever the signal says.
+  // The quota snipe: closed at the touch whatever the signal says. Under PACER_FLOOR's riding mode (Steven, Oct 31) a signal
+  // still holding the position rides it, the need it covered the position's floor, and it is closed once its profit falls below
+  // that floor. A perp has no set sell price, so the targets mode snipes as before.
   if (curDir !== 0 && i.entryPrice && i.pacerUsd !== undefined) {
     const px = curDir > 0 ? i.bid : i.ask;
     const net = perpNetUsd(cur, i.entryPrice, px, p);
-    if (net >= i.pacerUsd - 1e-9) return { target: 0, urgent: true, reason: `quota snipe: +$${net.toFixed(2)} net on ${cur} at ${px} covers the $${i.pacerUsd.toFixed(2)} the hour needs` };
+    const floorOn = i.pacerFloorMode !== undefined && i.pacerFloorMode !== 'off';
+    const rest = i.pacerFloorMode === 'riding' ? decidePerp({ ...i, pacerUsd: undefined }, p) : undefined;
+    const higher = rest && !rest.urgent && Math.sign(rest.target) === curDir ? `the ${i.source} signal holding the position` : undefined;
+    const call = quotaCall(net, i.pacerUsd, floorOn ? i.pacerFloor : undefined, higher);
+    if (call.sell === 'floor') return { target: 0, urgent: true, reason: `quota snipe (floor): +$${net.toFixed(2)} net on ${cur} at ${px} fell below its $${i.pacerFloor!.toFixed(2)} floor` };
+    if (call.sell === 'snipe') return { target: 0, urgent: true, reason: `quota snipe: +$${net.toFixed(2)} net on ${cur} at ${px} covers the $${i.pacerUsd.toFixed(2)} the hour needs` };
+    if (call.arm !== undefined) return { ...rest!, pacerArm: call.arm, reason: `${rest!.reason}; quota floor: +$${net.toFixed(2)} net covers the $${call.arm.toFixed(2)} the hour needs, held for ${higher}` };
   }
   if (i.muBps === undefined || !(i.sigmaHBps && i.sigmaHBps > 0)) {
     return { target: 0, urgent: false, reason: `no signal (${i.source}): flat` };
@@ -291,14 +307,17 @@ export class PerpTrader {
         ?? (P.requireValidation && !validated ? `perp model not validated (${model ? model.blockers().join('; ') : 'no params/perp_model.json'})` : undefined)
         ?? (l.isOpen === false ? 'market closed (schedule)' : undefined);
       const mine = Math.abs(current) * (px ?? 0);
+      const pacerFloor = guards.pacer?.floors?.floor(ticker, current);
       const dec = decidePerp({
         asset, ticker, muBps, sigmaHBps: sig, validated, source, bid: l.bid, ask: l.ask, fundingRate: l.fundingRate,
         current, entryPrice: current !== 0 ? c.positions.get(ticker)?.entryPrice : undefined,
         heldMin: this.heldSince.has(ticker) ? (now - this.heldSince.get(ticker)!) / 60_000 : undefined,
         equity: equity ?? 0, atrFrac, marketLeverage: l.leverage, step: l.fractional ? 0.01 : 1, otherNotional: used - mine,
         halt: guards.halt ?? (this.d.trainingOverride?.() ? undefined : this.dayHalt), noEntry, lockedFrac: guards.lockedFrac, pacerUsd: guards.pacer?.neededUsd,
+        pacerFloorMode: guards.pacer?.floorMode, pacerFloor,
       }, P);
       if (dec.reason.startsWith('quota snipe')) guards.pacer?.snipe(ticker, dec.reason);
+      if (dec.pacerArm !== undefined) guards.pacer?.floors?.arm(ticker, current, dec.pacerArm);
       this.lastDecisions.set(ticker, { ...dec, muBps, sigmaHBps: sig, source, current });
       if (dec.target !== current || dec.urgent) this.d.audit?.write('perp_decision', { asset, ticker, current, target: dec.target, reason: dec.reason, muBps, sigmaHBps: sig, source, validated, equity, stop: dec.stopPrice });
       out.push({ asset, ticker, target: dec.target, urgent: dec.urgent, reason: dec.reason, stopPrice: dec.stopPrice });

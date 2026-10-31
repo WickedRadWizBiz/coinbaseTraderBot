@@ -20,6 +20,8 @@
 //   realized   net of fees: each reducing fill credits its realized part against the position's cost basis (entry fee
 //              in), and a settlement credits whatever the market's realized total still lacks, so a market's credits
 //              always sum to the book's realized P&L (bot/oms/positions.ts)
+//   floor      PACER_FLOOR (Steven, Oct 31 00:21 UTC): when another exit rule aims higher than the quota, the quota lets the
+//              price go higher and is the position's stop instead (QuotaFloors, quotaCall)
 //
 // The engine and the backtester run the same class on their own clocks; the engine persists it (DATA_DIR) so a restart
 // mid-cycle resumes the running cycle rather than starting hour #1 at the restart.
@@ -27,6 +29,12 @@ import fs from 'fs';
 import path from 'path';
 
 export type PacerMode = 'slices' | 'cumulative' | 'rolling_hour';
+
+/** PACER_FLOOR: which exit rules count as aiming higher than the quota. riding: any rule still riding a winner (the hunt
+ *  trailing its stop, the take-profit trailing its best, a perp signal or setup trade still open) or holding out for a set
+ *  price; targets: only a set sell price (the model's, a resting take-profit, a setup's target, a rule's target passed in);
+ *  off: the quota snipe sells at the quota whatever the other rules aim for. */
+export type PacerFloorMode = 'off' | 'targets' | 'riding';
 
 export interface PacerConfig {
   /** PACER: the quota snipe is on. */
@@ -48,6 +56,8 @@ export interface PacerConfig {
   /** PACER_MAX_TARGET_USD: the cap on what one position is asked for in the cumulative and rolling_hour modes (6.50); the
    *  slices mode never asks more than the hourly target. */
   maxTargetUsd: number;
+  /** PACER_FLOOR: the quota as a stop under a higher target (riding by default). */
+  floor: PacerFloorMode;
 }
 
 export const CYCLE_HOURS = 24;
@@ -186,6 +196,60 @@ export class SnipeGroup {
     this.nets.delete(ticker);
     this.marked.delete(ticker);
   }
+}
+
+/** Steven's rule (Oct 31 2026 00:21 UTC): "things in the bot setting higher targets than whatever the dynamic $4.50/hr quota is
+ *  setting as a target, then the quota should allow for the price to go higher and function as a stop loss instead". While
+ *  another exit rule aims higher (PACER_FLOOR), a position whose profit after fees covers what the hour needs is not sold: that
+ *  need becomes its floor, raised when a later need it covers is higher, and the position is sold once its profit falls below
+ *  it. Kept per contract, so a partial sale leaves the rest its share; a position opened, reversed or added to starts with
+ *  none. Every contract type's quota snipe keeps its floors here, the engine and the backtest alike; not persisted (after a
+ *  restart a floor is armed again when the profit covers the need). */
+export class QuotaFloors {
+  private readonly m = new Map<string, { sign: number; size: number; perUnit?: number }>();
+
+  /** Records the position this tick and returns its floor in dollars (undefined: flat or none armed). */
+  floor(key: string, position: number): number | undefined {
+    if (position === 0) { this.m.delete(key); return undefined; }
+    const sign = Math.sign(position), size = Math.abs(position);
+    const f = this.m.get(key);
+    if (f && f.sign === sign && size <= f.size + 1e-9) {
+      f.size = size;
+      return f.perUnit === undefined ? undefined : f.perUnit * size;
+    }
+    this.m.set(key, { sign, size });
+    return undefined;
+  }
+
+  /** The position's profit covers `usd` while a rule aims higher: its floor is at least `usd`. True when it was raised. */
+  arm(key: string, position: number, usd: number): boolean {
+    const size = Math.abs(position);
+    const f = this.m.get(key);
+    if (!f || f.sign !== Math.sign(position) || !(size > 0)) return false;
+    const perUnit = usd / size;
+    if (f.perUnit !== undefined && perUnit <= f.perUnit + 1e-12) return false;
+    f.perUnit = perUnit;
+    return true;
+  }
+
+  forget(key: string): void { this.m.delete(key); }
+}
+
+export interface QuotaCall {
+  /** Sell now: 'snipe', the profit covers the need and no rule aims higher; 'floor', the profit fell below the floor. */
+  sell?: 'snipe' | 'floor';
+  /** Arm the floor (or raise it) at this many dollars: the profit covers the need and a rule aims higher. */
+  arm?: number;
+}
+
+/** The quota's call on one position: `net` its profit after fees at the touch now, `need` what the hour needs (undefined: the
+ *  pacer is off or the position is not judged), `floor` its armed floor (QuotaFloors), `higher` why another exit rule aims
+ *  higher (undefined: none, or PACER_FLOOR off). */
+export function quotaCall(net: number | undefined, need: number | undefined, floor: number | undefined, higher: string | undefined): QuotaCall {
+  if (net === undefined) return {};
+  if (floor !== undefined && net < floor - 1e-9) return { sell: 'floor' };
+  if (need === undefined || net < need - 1e-9) return {};
+  return higher !== undefined ? { arm: need } : { sell: 'snipe' };
 }
 
 interface Saved { cycleStart: number; lastProfitTs: number; realized24h: number; buckets: Record<string, number>; fed: Record<string, number>; savedAt: number; activeHour?: number; slice?: number; slicesThisHour?: number }
