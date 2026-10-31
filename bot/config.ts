@@ -1098,6 +1098,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       price: num(env, 'TA_LEAN_PRICE', 0, 0, 0.02),
       band: num(env, 'TA_LEAN_BAND', 0.15, 0, 0.5),
       max: num(env, 'TA_LEAN_MAX', 0.02, 0, 0.05),
+      exitVotes: num(env, 'TA_EXIT_EXTREME_VOTES', 0, 0, 3),
     },
     regimeScale: {
       volTarget: num(env, 'REGIME_VOL_TARGET', 0, 0, 2),

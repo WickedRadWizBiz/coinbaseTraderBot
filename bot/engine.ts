@@ -17,7 +17,7 @@ import type { ExchangeFill, ExchangeGateway } from './kalshi/types';
 import type { ActiveMarket, MarketData } from './marketdata/marketData';
 import type { IndexTracker } from './marketdata/indexTracker';
 import { dynamicEdge, dynamicEdgeOn } from './strategy/dynamicEdge';
-import { makerLean, priceLean } from './strategy/reversalLean';
+import { extremeExit, makerLean, priceLean } from './strategy/reversalLean';
 import { otherCoinsHeld, regimeScale, regimeScaleOn } from './strategy/regimeScale';
 import { compactReading, MarketState, observeMarket, type MarketStateReading } from './marketdata/marketState';
 import type { OrderBook } from './marketdata/orderBook';
@@ -2158,7 +2158,7 @@ export class Engine {
       newRiskRoomUsd: reason ? this.newRiskRoom(m, bankroll, tier) : undefined,
       tauSec, noEntryBeforeCloseSec: R.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: md.feesFor(m.ticker),
       restingBid, restingAsk, nowSec: Math.floor(now / 1000), closeSec: Math.floor(m.closeTime / 1000),
-      pMarket, pStd: pred.std, makerBuffer: this.makerBuffer(), makerLean: makerLean(S0.reversalLean, features), entrySidePrice: entrySidePrice !== undefined && entrySidePrice > 0 && entrySidePrice < 1 ? entrySidePrice : undefined,
+      pMarket, pStd: pred.std, makerBuffer: this.makerBuffer(), makerLean: makerLean(S0.reversalLean, features), extremeExit: extremeExit(S0.reversalLean, features, st.position), entrySidePrice: entrySidePrice !== undefined && entrySidePrice > 0 && entrySidePrice < 1 ? entrySidePrice : undefined,
       entryFeePerContract: pos && Math.abs(pos.yes) > 1e-9 ? pos.fees / Math.abs(pos.yes) : undefined,
       profitPeakSidePrice: this.profitPeaks.update(m.ticker, st.position, st.position > 0 ? bid.price : st.position < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
       ...(this.d.takeProfitBench?.benched ? { takeProfitBenched: this.d.takeProfitBench.benched } : {}),

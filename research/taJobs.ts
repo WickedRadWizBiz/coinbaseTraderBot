@@ -28,7 +28,10 @@ export const VARIANTS: Record<string, Record<string, string>> = {
   j2_maker_hi: { TA_LEAN_MAKER: '0.01' },
   // Direction: the reversal lean on close calls (fair value within 15 points of 50%).
   dir_lean: { TA_LEAN_PRICE: '0.005' },
-  all_on: { DYN_EDGE_VOL: '-0.02', DYN_EDGE_MAX_DOWN: '0.02', TA_LEAN_MAKER: '0.005', TA_LEAN_PRICE: '0.005' },
+  // Job 4, when to take profit: sell a position in profit after fees when the coin is stretched its way.
+  j4_extreme: { TA_EXIT_EXTREME_VOTES: '1.5' },
+  j4_extreme_lo: { TA_EXIT_EXTREME_VOTES: '1' },
+  all_on: { DYN_EDGE_VOL: '-0.02', DYN_EDGE_MAX_DOWN: '0.02', TA_LEAN_MAKER: '0.005', TA_LEAN_PRICE: '0.005', TA_EXIT_EXTREME_VOTES: '1.5' },
 };
 
 /** Where train-gate writes the mid-anchored take gate (job 3) the gate variants read. */

@@ -91,6 +91,9 @@ export interface MarketView {
   makerBuffer?: number;
   /** Shift of the quoted centre from the TA reversal lean (bot/strategy/reversalLean.ts; + = toward YES). */
   makerLean?: number;
+  /** The coin is stretched in the held side's favour (bot/strategy/reversalLean.ts extremeExit): a position in profit
+   *  after fees is sold at the bid (TA job 4). */
+  extremeExit?: boolean;
   /** Average entry price of the side currently held (profit target, Mode B take-profit). */
   entrySidePrice?: number;
   /** Fees already paid, a contract held (the profit target nets them out). */
@@ -274,10 +277,11 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     const pm = mandate && n > 0 && bid.price - fee >= cost! + mandateMin! - 1e-9;
     const netUsd = sniping ? netProfitAtBid(v) ?? 0 : 0;
     const snipe = sniping && n > 0 && (netUsd >= pacerUsd! - 1e-9 || (opts.pacerGroup !== undefined && netUsd > 1e-9));
-    if (n > 0 && ((exits && (edge >= margin || tp?.sell)) || pm || snipe)) {
+    const extreme = exitWindow && n > 0 && v.extremeExit === true && (netProfitAtBid(v) ?? 0) > 1e-9;
+    if (n > 0 && ((exits && (edge >= margin || tp?.sell)) || pm || snipe || extreme)) {
       out.place.push({ side: 'ask', price: bid.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge,
         ...(tp?.sell && tp.protective ? { protective: true } : {}),
-        why: tp?.sell ? tp.why : snipe ? (netUsd >= pacerUsd! - 1e-9 ? `quota snipe: +$${netUsd.toFixed(2)} net on ${v.position} at bid ${bid.price} covers the $${pacerUsd!.toFixed(2)} the hour needs`
+        why: tp?.sell ? tp.why : extreme && !snipe && !pm && !(exits && edge >= margin) ? `extreme take-profit: the coin is stretched YES's way, +$${(netProfitAtBid(v) ?? 0).toFixed(2)} net at bid ${bid.price}` : snipe ? (netUsd >= pacerUsd! - 1e-9 ? `quota snipe: +$${netUsd.toFixed(2)} net on ${v.position} at bid ${bid.price} covers the $${pacerUsd!.toFixed(2)} the hour needs`
             : `quota snipe (group): +$${netUsd.toFixed(2)} net on ${v.position} at bid ${bid.price}, with ${opts.pacerGroup!.members - 1} other position${opts.pacerGroup!.members === 2 ? '' : 's'} in profit (+$${opts.pacerGroup!.sumUsd.toFixed(2)} together) covers the $${pacerUsd!.toFixed(2)} the hour needs`)
           : exits && edge >= margin ? `bid ${bid.price} - fee > q ${q.toFixed(3)} + ${margin}` : `profit mandate exit: bid ${bid.price} - fee ${fee.toFixed(3)} >= cost ${cost!.toFixed(3)} + ${mandateMin}` });
     }
@@ -290,10 +294,11 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: { exits?: boole
     const pm = mandate && n > 0 && noBid - fee >= cost! + mandateMin! - 1e-9;
     const netUsd = sniping ? netProfitAtBid(v) ?? 0 : 0;
     const snipe = sniping && n > 0 && (netUsd >= pacerUsd! - 1e-9 || (opts.pacerGroup !== undefined && netUsd > 1e-9));
-    if (n > 0 && ((exits && (edge >= margin || tp?.sell)) || pm || snipe)) {
+    const extreme = exitWindow && n > 0 && v.extremeExit === true && (netProfitAtBid(v) ?? 0) > 1e-9;
+    if (n > 0 && ((exits && (edge >= margin || tp?.sell)) || pm || snipe || extreme)) {
       out.place.push({ side: 'bid', price: ask.price, count: round(n, 2), timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge,
         ...(tp?.sell && tp.protective ? { protective: true } : {}),
-        why: tp?.sell ? tp.why : snipe ? (netUsd >= pacerUsd! - 1e-9 ? `quota snipe: +$${netUsd.toFixed(2)} net on ${-v.position} NO at bid ${noBid.toFixed(2)} covers the $${pacerUsd!.toFixed(2)} the hour needs`
+        why: tp?.sell ? tp.why : extreme && !snipe && !pm && !(exits && edge >= margin) ? `extreme take-profit: the coin is stretched NO's way, +$${(netProfitAtBid(v) ?? 0).toFixed(2)} net at NO bid ${noBid.toFixed(2)}` : snipe ? (netUsd >= pacerUsd! - 1e-9 ? `quota snipe: +$${netUsd.toFixed(2)} net on ${-v.position} NO at bid ${noBid.toFixed(2)} covers the $${pacerUsd!.toFixed(2)} the hour needs`
             : `quota snipe (group): +$${netUsd.toFixed(2)} net on ${-v.position} NO at bid ${noBid.toFixed(2)}, with ${opts.pacerGroup!.members - 1} other position${opts.pacerGroup!.members === 2 ? '' : 's'} in profit (+$${opts.pacerGroup!.sumUsd.toFixed(2)} together) covers the $${pacerUsd!.toFixed(2)} the hour needs`)
           : exits && edge >= margin ? `NO bid ${noBid.toFixed(2)} - fee > q + ${margin}` : `profit mandate exit: NO bid ${noBid.toFixed(2)} - fee ${fee.toFixed(3)} >= cost ${cost!.toFixed(3)} + ${mandateMin}` });
     }

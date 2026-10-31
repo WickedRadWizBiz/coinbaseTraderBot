@@ -13,6 +13,9 @@
 // move, -clamp(z, -2, 2) / 2. Each shift is capped at +-max.
 
 export interface ReversalLeanParams {
+  /** Job 4: sell a position in profit after fees when the votes against the held side reach this (TA_EXIT_EXTREME_VOTES;
+   *  0 = off). The coin stretched in the position's favour is the bounce the lean expects, so the profit is taken first. */
+  exitVotes?: number;
   /** Probability points per vote on the quoted centre (TA_LEAN_MAKER; 0 = off). */
   maker: number;
   /** Probability points per vote on the decision probability (TA_LEAN_PRICE; 0 = off). */
@@ -37,6 +40,12 @@ export function reversalVotes(f: Record<string, number>): number {
   const z = f.ret_300s_z;
   if (fin(z)) v += -Math.max(-2, Math.min(2, z)) / 2;
   return v;
+}
+
+/** Whether a position of `position` contracts (+ YES, - NO) is at an extreme in its favour (job 4). */
+export function extremeExit(p: ReversalLeanParams, f: Record<string, number>, position: number): boolean {
+  if (!p.exitVotes || position === 0) return false;
+  return -Math.sign(position) * reversalVotes(f) >= p.exitVotes;
 }
 
 const cap = (x: number, m: number) => Math.max(-m, Math.min(m, x));

@@ -75,7 +75,7 @@ import { AccuracyGate, type AccuracyGateConfig } from '../bot/strategy/accuracyG
 import { TakeProfitBench } from '../bot/strategy/takeProfitBench';
 import { compactReading, MarketState, observeMarket } from '../bot/marketdata/marketState';
 import { dynamicEdge } from '../bot/strategy/dynamicEdge';
-import { makerLean, priceLean } from '../bot/strategy/reversalLean';
+import { extremeExit, makerLean, priceLean } from '../bot/strategy/reversalLean';
 import { otherCoinsHeld, regimeScale } from '../bot/strategy/regimeScale';
 import { gatePasses, type ProbationParams } from '../bot/risk/probation';
 import { bootstrapMeanCi, deflatedSharpe, pbo, rng, sharpe } from './stats';
@@ -907,7 +907,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         newRiskRoomUsd,
         tauSec, noEntryBeforeCloseSec: limits.noEntryBeforeCloseSec, fastMove, tickSize: m.tickSize, fees: DEFAULT_FEES,
         restingBid: rb, restingAsk: ra, nowSec: Math.floor(st.now / 1000), closeSec: Math.floor(m.closeTime / 1000),
-        pMarket, pStd: pred.std, makerBuffer: (res.makerBufferEnd = makerBuffer()), makerLean: makerLean(strategy.reversalLean, fmap), entrySidePrice: entrySide !== undefined && entrySide > 0 && entrySide < 1 ? entrySide : undefined,
+        pMarket, pStd: pred.std, makerBuffer: (res.makerBufferEnd = makerBuffer()), makerLean: makerLean(strategy.reversalLean, fmap), extremeExit: extremeExit(strategy.reversalLean, fmap, pos.position(m.ticker)), entrySidePrice: entrySide !== undefined && entrySide > 0 && entrySide < 1 ? entrySide : undefined,
         entryFeePerContract: pNow && Math.abs(pNow.yes) > 1e-9 ? pNow.fees / Math.abs(pNow.yes) : undefined,
         profitPeakSidePrice: peaks.update(m.ticker, posC, posC > 0 ? bid.price : posC < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
         entryWindowOpen, exitWindowOpen: tauSec > strategy.noExitBeforeCloseSec,

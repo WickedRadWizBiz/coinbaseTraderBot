@@ -37,3 +37,13 @@ test('a maker lean moves both quotes toward the favoured side', () => {
   assert.ok(b1 > b0);
   assert.ok(a1 > a0);
 });
+
+test('the extreme exit fires only against the held side and only when switched on', async () => {
+  const { extremeExit } = await import('../bot/strategy/reversalLean');
+  const f = { bb_pctb_300: 0.98, rsi_14_1m: 85, ret_300s_z: 1 }; // stretched up: votes -2.5
+  assert.equal(extremeExit(REVERSAL_LEAN_OFF, f, 10), false);
+  const p = { ...REVERSAL_LEAN_OFF, exitVotes: 1.5 };
+  assert.equal(extremeExit(p, f, 10), true); // long YES at an up extreme: take it
+  assert.equal(extremeExit(p, f, -10), false); // long NO: the stretch is against it
+  assert.equal(extremeExit(p, f, 0), false);
+});
