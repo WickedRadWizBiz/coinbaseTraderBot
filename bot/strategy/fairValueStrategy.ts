@@ -119,6 +119,8 @@ export interface MarketView {
   /** Inside the last STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC of the contract's window (Steven's rule, Oct 29): a position in profit
    *  after fees rides to settlement (no exit sells it); one that is not keeps its exits. Default false. */
   settleShare?: boolean;
+  /** The contract's whole window, open to close, in seconds (the loser exits' LOSER_WINDOW_SHARE). */
+  windowSec?: number;
 }
 
 export interface OrderPlan {
@@ -206,9 +208,18 @@ export function loserExit(v: MarketView, cfg: Pick<StrategyConfig, 'loserExits'>
   const fvSide = v.pFair === undefined ? undefined : long ? v.pFair : 1 - v.pFair;
   const held = `${Math.abs(v.position)}${long ? '' : ' NO'}`;
   let why: string | undefined;
-  if (L.window && (v.settleShare === true || v.exitWindowOpen === false)) {
-    why = `loser window cut: ${net.toFixed(2)} net after fees on ${held} at bid ${sideBid.toFixed(2)}, ${Math.round(v.tauSec)} s to the close (only a position in profit rides to settlement)`;
-  } else if (L.cut && fvSide !== undefined && fvSide < sideBid - fee - L.cutMargin - 1e-9) {
+  const inWindow = v.settleShare === true || v.exitWindowOpen === false
+    || ((L.windowShare ?? 0) > 0 && v.windowSec !== undefined && v.tauSec <= (L.windowShare ?? 0) * v.windowSec);
+  if (L.window && inWindow) {
+    // The judge (LOSER_WINDOW_JUDGE): bid sells whatever is not in profit at the bid; fair and cost first ask the coin's
+    // price (no fair value known: judged at the bid).
+    const cost = (v.entrySidePrice ?? 0) + (v.entryFeePerContract ?? 0);
+    const judge = L.windowJudge ?? 'bid';
+    const sells = judge === 'bid' || fvSide === undefined ? true : judge === 'fair' ? fvSide < sideBid - fee - 1e-9 : fvSide < cost - 1e-9;
+    const fair = judge === 'bid' || fvSide === undefined ? '' : judge === 'fair' ? `, fair value ${fvSide.toFixed(3)} < bid less fee ${(sideBid - fee).toFixed(3)}` : `, fair value ${fvSide.toFixed(3)} < cost ${cost.toFixed(3)}`;
+    if (sells) why = `loser window cut: ${net.toFixed(2)} net after fees on ${held} at bid ${sideBid.toFixed(2)}${fair}, ${Math.round(v.tauSec)} s to the close (only a position in profit rides to settlement)`;
+  }
+  if (!why && L.cut && fvSide !== undefined && fvSide < sideBid - fee - L.cutMargin - 1e-9) {
     why = `loser cut: fair value ${fvSide.toFixed(3)} < bid ${sideBid.toFixed(2)} - fee ${fee.toFixed(3)} - ${L.cutMargin}, ${net.toFixed(2)} net after fees on ${held}`;
   }
   if (!why) return undefined;
