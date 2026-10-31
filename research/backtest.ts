@@ -577,7 +577,9 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     // The supervisor's pass (bot/training/supervisor.ts checkKalshi): a pool that can no longer trade is refilled.
     if (opts.refillUsd !== undefined && opts.killOverride !== false && st.now - refillAt >= 5_000 && st.now >= (opts.tradeFromMs ?? -Infinity)) {
       refillAt = st.now;
-      const bank = (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0);
+      // The engine's bankroll (bot/engine.ts bankroll), as the supervisor reads it: vaulted and pocketed profit is not
+      // the pool's to trade, so it neither counts toward the floor nor stops a refill.
+      const bank = Math.max(0, (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0) - (vault?.reserved() ?? 0));
       if (bank < strategy.minTradableBankrollUsd && bank < opts.refillUsd) {
         for (const o of await ex.getOpenOrders()) await cancelNow(o.orderId);
         const usd = Math.round((opts.refillUsd - bank) * 100) / 100;
