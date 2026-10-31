@@ -209,6 +209,7 @@ async function main(): Promise<void> {
         vs = ` | vs baseline after split ${f2(bm.mean)}/h [${f2(bm.lo)}, ${f2(bm.hi)}]`;
       }
       console.log(`${name.padEnd(14)} before ${f2(a.perHour)}/h (${a.trades} trades, max drawdown ${a.maxDd.toFixed(0)}) | after ${f2(b.perHour)}/h (${b.trades} trades, max drawdown ${b.maxDd.toFixed(0)}, P&L ${f2(b.pnl)})${vs}`);
+      if (r.diag) console.log(`${''.padEnd(14)} ${r.diag.entryEvaluations} decisions, ${r.diag.accuracyBlocks} accuracy-gate blocks, ${r.diag.refills} refills ($${r.diag.refillUsd.toFixed(0)}), ${r.contracts} contracts, fees ${r.fees.toFixed(0)}, days traded ${Object.keys(r.tradesByDay ?? {}).length}`);
     }
     if (base?.ok) {
       const perDay = all.map((d) => base.byDay[d] ?? 0);
