@@ -118,8 +118,11 @@ export interface ExitStats {
   floorHolds?: number;
   /** Exit audit by kind (a queued exit's client id ends -exit-<kind>: snipe, floor, tp, fv, ...), for the markets settled in
    *  the replay: fills, contracts, net proceeds, what those contracts paid at settlement, and what the best side bid after
-   *  the sale up to the close would have fetched, less the sale's own fee. */
-  byKind?: Record<string, { fills: number; contracts: number; proceeds: number; settled: number; best: number }>;
+   *  the sale up to the close would have fetched, less the sale's own fee. fv: the spot fair value of the contracts sold
+   *  (priceContract, at the sale), tauC: contracts x seconds to the close at the sale; under*: the sales made under fair
+   *  value less a cent (contracts, net proceeds, paid at settlement, fair value). */
+  byKind?: Record<string, { fills: number; contracts: number; proceeds: number; settled: number; best: number; fv?: number; tauC?: number;
+    underC?: number; underProceeds?: number; underSettled?: number; underFv?: number }>;
   /** Mean (stop - fill price) in side terms for ratchet exits; positive = filled below the stop. */
   avgSlippage: number | null;
 }
@@ -421,6 +424,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   const stratRun: StrategyConfig = { ...strategy, exitPolicy: policy === 'take_profit' ? 'take_profit' : policy === 'hold' ? 'hold' : strategy.exitPolicy === 'take_profit' ? 'fair_value' : strategy.exitPolicy };
   let firstTs = 0;
   const closeOf = new Map<string, number>();
+  const lastFair = new Map<string, number>(); // the exit audit: each market's last spot fair value (YES)
   const ratchets = new Map<string, LiquidityRatchet>();
   const hunts = new Map<string, ConfluenceRatchetExit>();
   const pending = new Map<string, { side: 'bid' | 'ask'; price: number; count: number; kind: 'fv' | 'tp' | 'rt' | 'snipe' | 'floor' | 'cut' | 'wcut'; stop?: number }>();
@@ -440,7 +444,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   };
   res.makerBufferEnd = undefined;
   const stopByOrder = new Map<string, number>();
-  const exitLedger = new Map<string, Array<{ sideSign: number; n: number; proceeds: number; fee: number; kind: string; best: number }>>();
+  const exitLedger = new Map<string, Array<{ sideSign: number; n: number; proceeds: number; fee: number; kind: string; best: number; price: number; fv?: number; tau?: number }>>();
   let slipSum = 0, slipN = 0;
   const gate = opts.accuracyGate?.enabled ? new AccuracyGate(opts.accuracyGate, opts.accuracyGateFile, () => st.now) : undefined;
   // The bench's markets scored from the first trading moment on (the replay check sets them beside paper's).
@@ -529,7 +533,9 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const proceeds = f.count * sidePrice - (f.fee ?? 0);
       exits.fills++; exits.contracts += f.count; exits.proceeds += proceeds;
       const arr = exitLedger.get(f.ticker) ?? [];
-      arr.push({ sideSign, n: f.count, proceeds, fee: f.fee ?? 0, kind: /-exit-([a-z]+)$/.exec(f.clientOrderId)?.[1] ?? 'other', best: sidePrice });
+      const pf = lastFair.get(f.ticker), close = closeOf.get(f.ticker);
+      arr.push({ sideSign, n: f.count, proceeds, fee: f.fee ?? 0, kind: /-exit-([a-z]+)$/.exec(f.clientOrderId)?.[1] ?? 'other', best: sidePrice, price: sidePrice,
+        fv: pf === undefined ? undefined : sideSign > 0 ? pf : 1 - pf, tau: close === undefined ? undefined : Math.max(0, (close - st.now) / 1000) });
       exitLedger.set(f.ticker, arr);
       const stop = stopByOrder.get(f.clientOrderId);
       if (stop !== undefined) { slipSum += stop - sidePrice; slipN++; }
@@ -614,8 +620,15 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
             if (won) exits.stoppedWinners++;
             const k = ((exits.byKind ??= {})[x.kind] ??= { fills: 0, contracts: 0, proceeds: 0, settled: 0, best: 0 });
             k.fills++; k.contracts += x.n; k.proceeds += x.proceeds; k.settled += won ? x.n : 0; k.best += x.n * x.best - x.fee;
+            if (x.fv !== undefined) k.fv = (k.fv ?? 0) + x.n * x.fv;
+            if (x.tau !== undefined) k.tauC = (k.tauC ?? 0) + x.n * x.tau;
+            if (x.fv !== undefined && x.price < x.fv - 0.01) {
+              k.underC = (k.underC ?? 0) + x.n; k.underProceeds = (k.underProceeds ?? 0) + x.proceeds;
+              k.underSettled = (k.underSettled ?? 0) + (won ? x.n : 0); k.underFv = (k.underFv ?? 0) + x.n * x.fv;
+            }
           }
           exitLedger.delete(m.ticker);
+          lastFair.delete(m.ticker);
           ratchets.delete(m.ticker);
           hunts.delete(m.ticker);
           snipeGroup.forget(m.ticker);
@@ -693,6 +706,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
           : strategy.volFallbackMult ?? 1) * taVolMult;
       const fv = priceContract(terms, { spot: spot.value, sigmaPerSqrtSec: sigmaFv, tauSec, observedAvg: observed, observedCount, nu: model.params.tNu });
       if (!fv) continue;
+      lastFair.set(m.ticker, fv.pYes);
       const mid = (bid.price + ask.price) / 2;
       let fmap: Record<string, number>, pred: { p: number; std?: number };
       if (tape?.mode === 'replay') {
