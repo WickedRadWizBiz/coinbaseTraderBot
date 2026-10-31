@@ -68,7 +68,7 @@ jobs:
           REC="$GITHUB_WORKSPACE/data/recordings"; mkdir -p "$REC"
           TODAY=$(date -u +%F)
           ssh bot "cd ~/bot/data/recordings && ls -1 md-*.jsonl*" | sort | awk -v t="md-$TODAY" '$0 < t' | tail -n "$DAYS" > "$RUNNER_TEMP/days.txt"
-          rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/days.txt" bot:bot/data/recordings/ "$REC/"
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/days.txt" bot:bot/data/recordings/ "$REC/"
           echo "copied $(wc -l < "$RUNNER_TEMP/days.txt") day(s)"
       - name: Measure the depth
         run: |

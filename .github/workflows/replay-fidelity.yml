@@ -122,8 +122,8 @@ jobs:
           set -euo pipefail
           DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/models"
           printf '%s\n' $FILES > "$RUNNER_TEMP/recordings.txt"
-          rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/"
-          for f in model.json vol_model.json fill_model.json; do rsync -a --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || echo "$f: not on the server"; done
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/"
+          for f in model.json vol_model.json fill_model.json; do rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || echo "$f: not on the server"; done
           [ -f "$DATA/models/model.json" ] || { echo "no decision model on the server yet"; exit 1; }
           echo "copied $(ls "$DATA/recordings" | wc -l) recording file(s)"
           # The server's settings without any credential, and without server paths (as Remote training copies them).
@@ -142,7 +142,7 @@ jobs:
           if [ "${{ matrix.how }}" = depth ]; then
             [ -n "$FIT" ] || { echo "no older recorded days to fit the depth model on"; exit 1; }
             mkdir -p "$DATA/fit" && printf '%s\n' $FIT > "$RUNNER_TEMP/fit.txt"
-            rsync -a -z --compress-level=1 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/fit.txt" bot:bot/data/recordings/ "$DATA/fit/"
+            rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/fit.txt" bot:bot/data/recordings/ "$DATA/fit/"
             node --import tsx research/depthStudy.ts --recordings "$DATA/fit" --out "$DATA/models/depth_model.json" 2>&1 | grep -E '^\[depth\] [0-9]' || true
             [ -s "$DATA/models/depth_model.json" ] || { echo "the depth study wrote no model"; exit 1; }
             run --stage prepare --only depth --depth-model "$DATA/models/depth_model.json"
@@ -220,6 +220,6 @@ jobs:
           set -euo pipefail
           # A depth verdict needs its model next to it (the tally falls back to the worst side without one).
           if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["choice"]["how"] == "depth" else 1)' "$GITHUB_WORKSPACE/data/models/replay_fidelity.json"; then
-            rsync -a --rsync-path="nice -n 19 rsync" "$RUNNER_TEMP/in/fidelity-depth-p0/depth_model.json" bot:bot/data/models/
+            rsync -a --bwlimit=8000 --whole-file --rsync-path="nice -n 19 rsync" "$RUNNER_TEMP/in/fidelity-depth-p0/depth_model.json" bot:bot/data/models/
           fi
-          rsync -a --rsync-path="nice -n 19 rsync" "$GITHUB_WORKSPACE/data/models/replay_fidelity.json" bot:bot/data/models/ && echo "verdict copied; the next training run plays history with it"
+          rsync -a --bwlimit=8000 --whole-file --rsync-path="nice -n 19 rsync" "$GITHUB_WORKSPACE/data/models/replay_fidelity.json" bot:bot/data/models/ && echo "verdict copied; the next training run plays history with it"
