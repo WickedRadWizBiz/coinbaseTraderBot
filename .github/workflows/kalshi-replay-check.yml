@@ -172,7 +172,7 @@ jobs:
             # A plain file is the day being recorded (or one not compressed yet): copied as it stands and gzipped on the
             # runner (a torn last line is skipped).
             if ssh bot "test -f ~/bot/data/recordings/$f"; then
-              pull "bot:bot/data/recordings/$f" "$DATA/recordings/" || vanished_ok; gzip -1 "$DATA/recordings/$f"
+              pull "bot:bot/data/recordings/$f" "$DATA/recordings/" || vanished_ok; [ ! -f "$DATA/recordings/$f" ] || gzip -1 "$DATA/recordings/$f"
             elif ssh bot "test -f ~/bot/data/recordings/$f.gz"; then
               # Today's is the bot's live gzip (#172: a member every few seconds): read as it stands, the readers skip a
               # last member still being written. Finished days are copied whole.
