@@ -1,0 +1,17 @@
+# Scaling lab round 1 (2026-10-31): the dynamic edge and regime sizing, one reading at a time, together, and stronger,
+# against today's bot (base) on the losses thread's stretch. One arm per line: tag: KEY=VALUE ... (empty = base).
+# days=2026-10-29,2026-10-30
+# from=2026-10-29T15:40:00Z
+# to=2026-10-30T15:40:00Z
+base:
+edge_vol: DYN_EDGE_VOL=0.02
+edge_change: DYN_EDGE_CHANGE=0.03
+edge_spread: DYN_EDGE_SPREAD=0.5
+edge_flow: DYN_EDGE_FLOW=0.02
+edge_unc: DYN_EDGE_UNCERTAINTY=0.5
+edge_all: DYN_EDGE_VOL=0.02 DYN_EDGE_CHANGE=0.03 DYN_EDGE_SPREAD=0.5 DYN_EDGE_FLOW=0.02 DYN_EDGE_UNCERTAINTY=0.5
+edge_all_x2: DYN_EDGE_VOL=0.04 DYN_EDGE_CHANGE=0.06 DYN_EDGE_SPREAD=1 DYN_EDGE_FLOW=0.04 DYN_EDGE_UNCERTAINTY=1 DYN_EDGE_MAX_UP=0.08
+reg_vol: REGIME_VOL_TARGET=0.5
+reg_change: REGIME_CHANGE_DERISK=0.5
+reg_corr: REGIME_CORR_DERISK=0.5
+edge_reg: DYN_EDGE_VOL=0.02 DYN_EDGE_CHANGE=0.03 DYN_EDGE_SPREAD=0.5 DYN_EDGE_FLOW=0.02 DYN_EDGE_UNCERTAINTY=0.5 REGIME_VOL_TARGET=0.5 REGIME_CHANGE_DERISK=0.5 REGIME_CORR_DERISK=0.5
