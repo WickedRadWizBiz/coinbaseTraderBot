@@ -20,6 +20,8 @@ export interface MidGateParams {
   std: number[];
   w: number[];
   b: number;
+  /** Research control only (research/taJobs.ts adversaries): skip this share of entries at random instead of judging them. */
+  randomSkip?: number;
   /** Held-out check: entries, log loss of the mid alone and of the gate, and whether the gate won. */
   validation: { n: number; logLossMid: number; logLossGate: number; validated: boolean; from?: string; to?: string };
 }
@@ -105,6 +107,10 @@ function solve(A: number[][], b: number[]): number[] | undefined {
   return M.map((r, i) => r[n] / r[i]);
 }
 
+let controlSeed = 12345;
+/** A seeded draw for the random-skip control, so a replay repeats exactly. */
+function controlDraw(): number { controlSeed = (controlSeed * 16807) % 2147483647; return controlSeed / 2147483647; }
+
 const cache = new Map<string, MidGateParams | null>();
 /** The params file, read once (null when missing or unreadable: the gate is off). */
 export function loadMidGate(file: string): MidGateParams | null {
@@ -132,6 +138,7 @@ export function applyMidGate<T extends GateOrder>(plan: { place: T[]; notes: str
   const flips: Array<{ o: T; side: 'yes' | 'no'; price: number }> = [];
   plan.place = plan.place.filter((o) => {
     if (o.reduceOnly || o.purpose === 'exit' || (o.purpose === 'quote' && !o.why.startsWith('maker '))) return true;
+    if (p.randomSkip !== undefined) { if (controlDraw() >= p.randomSkip) return true; skipped++; return false; }
     const side = o.side === 'bid' ? 'yes' : 'no';
     const price = side === 'yes' ? o.price : 1 - o.price;
     const { x, midSide } = midGateInputs(side, price, o.postOnly, c.pYes, c.mid, c.ask - c.bid, c.tauSec, c.features);

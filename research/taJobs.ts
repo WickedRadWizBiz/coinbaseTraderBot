@@ -16,6 +16,7 @@ import path from 'path';
 import { rng } from './stats';
 import type { TrialResult } from './randomSweep';
 import type { EntryLogRow } from './backtest';
+import type { MidGateParams } from '../bot/model/midTakeGate';
 import { recordingFiles } from '../bot/marketdata/recordingFiles';
 
 /** Each variant's bot.env lines on top of the server's settings. The jobs add theirs as they are built. */
@@ -41,13 +42,16 @@ const gate = (m: string) => ({ TAKE_MID_GATE: GATE_FILE, TAKE_MID_MARGIN: m });
 export const GATE_VARIANTS: Record<string, Record<string, string>> = {
   j3_gate_margin: gate('0.01'),
   g_m3: gate('0.03'),
-  g_m4: gate('0.04'),
   g_m5: gate('0.05'),
   g_m3_maker: { ...gate('0.03'), TA_LEAN_MAKER: '0.01' },
   g_m3_full: { ...gate('0.03'), ...LEANS, ...LAG, ...VARIANTS.j4_v2 },
   // The skipped maker quotes lost 3c a contract: buy their other side instead when the gate favours it.
   g_m3_flip: { ...gate('0.03'), TAKE_MID_FLIP: 'true' },
-  g_m1_flip: { ...gate('0.01'), TAKE_MID_FLIP: 'true' },
+  // Adversaries for the 3c gate (train-gate writes their files beside the gate's): see train-gate.
+  adv_placebo: { ...gate('0.03'), TAKE_MID_GATE: GATE_FILE.replace('.json', '_placebo.json') },
+  adv_midonly: { ...gate('0.03'), TAKE_MID_GATE: GATE_FILE.replace('.json', '_midonly.json') },
+  adv_random: { ...gate('0.03'), TAKE_MID_GATE: GATE_FILE.replace('.json', '_random.json') },
+  adv_reverse: { ...gate('0.03'), TAKE_MID_GATE: GATE_FILE.replace('.json', '_reverse.json') },
 };
 
 function dayList(days: string, out: string): string[] {
@@ -201,7 +205,24 @@ async function main(): Promise<void> {
     params.validation.logLossGate = test.reduce((a, x) => a + x.weight * ll(midGateProbability(params, x.x, x.midSide), x.won), 0) / w;
     params.validation.validated = test.length >= 300 && params.validation.logLossGate < params.validation.logLossMid;
     fs.mkdirSync(path.dirname(GATE_FILE), { recursive: true });
-    fs.writeFileSync(arg('gate-out', GATE_FILE), JSON.stringify(params));
+    const gateOut = arg('gate-out', GATE_FILE);
+    fs.writeFileSync(gateOut, JSON.stringify(params));
+    // Adversaries (Steven, Nov 1: try to break what makes the gains). Each is forced on, so its replay shows what it does:
+    //   placebo  the same fit on shuffled win/loss labels: any gain it keeps is not the inputs' doing
+    //   midonly  no inputs at all (P(win) = the mid): what skipping on price vs the mid alone is worth
+    //   random   skips entries at random at the real gate's held-out skip share: what trading less alone is worth
+    //   reverse  fit on the days after the split, used on those before: the gain must hold backwards in time
+    const on = (g: Omit<MidGateParams, 'validation'>, extra: Record<string, unknown> = {}) => ({ ...g, ...extra, validation: { ...params.validation, validated: true } });
+    const shuf = rng(97);
+    const labels = train.map((x) => x.won);
+    for (let i = labels.length - 1; i > 0; i--) { const j = Math.floor(shuf() * (i + 1)); [labels[i], labels[j]] = [labels[j], labels[i]]; }
+    const ctl = (k: string) => gateOut.replace(/\.json$/, `_${k}.json`);
+    fs.writeFileSync(ctl('placebo'), JSON.stringify(on(fitMidGate(train.map((x, i) => ({ ...x, won: labels[i] }))))));
+    fs.writeFileSync(ctl('midonly'), JSON.stringify(on({ ...fit, w: fit.w.map(() => 0), b: 0 })));
+    const skipShare = test.length ? 1 - test.filter((x) => midGateProbability(params, x.x, x.midSide) >= x.r.price + x.r.fee).length / test.length : 0;
+    fs.writeFileSync(ctl('random'), JSON.stringify(on({ ...fit, w: fit.w.map(() => 0), b: 50 }, { randomSkip: skipShare })));
+    fs.writeFileSync(ctl('reverse'), JSON.stringify(on(fitMidGate(test))));
+    console.log(`[ta-jobs] adversary gates written (random skips ${(100 * skipShare).toFixed(0)}% of entries)`);
     console.log(`[ta-jobs] gate: trained on ${train.length} entry fills before ${split}, checked on ${test.length} after: log loss ${params.validation.logLossGate.toFixed(4)} vs the mid ${llMid.toFixed(4)} -> ${params.validation.validated ? 'VALIDATED' : 'not validated (the gate stays off in its variants)'}`);
     const top = fit.features.map((n, i) => ({ n, w: fit.w[i] })).sort((a, b) => Math.abs(b.w) - Math.abs(a.w)).slice(0, 10);
     console.log(`[ta-jobs] gate weights (per standard deviation, + = more likely to win): ${top.map((t) => `${t.n} ${f2(t.w)}`).join(', ')}`);
