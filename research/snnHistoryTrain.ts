@@ -85,6 +85,10 @@ async function main() {
   // built from the price path, quoted at a no-skill fair value (research/history/historyReplay.ts). They teach the
   // network the price path's direction only, never Kalshi's pricing: real days judge what that is worth.
   const synthetic = arg('synthetic', '') === 'true';
+  // Adversary (Steven, Nov 1: try to break whatever is producing gains): with --requote true the real contracts'
+  // quotes follow the index at every print between their minute candles instead of standing still for the minute.
+  // An edge that only exists against the standing minute quote is the replay's staleness, not the market's.
+  const requote = arg('requote', '') === 'true';
   const params = trainParams(stage, volNorm, soft);
   const calendar = loadCalendar(path.resolve('params/calendar.json'));
   let checkpoint: SnnCheckpoint | undefined;
@@ -97,7 +101,7 @@ async function main() {
     console.log(`[hist-train] continuing from ${ckIn}: last scored ${checkpoint.lastTs ? new Date(checkpoint.lastTs).toISOString() : 'never'}, ${upd} readout updates so far; resuming at ${start}`);
   }
   const ckOut = arg('checkpoint-out', path.join(work, 'checkpoint.json'));
-  console.log(`[hist-train] anchored crypto SNN, stage ${stage}${volNorm ? `, volNorm ${volNorm}` : ''}${soft ? ', soft labels' : ''}${synthetic ? ', synthetic contracts where Kalshi has none' : ''}, ${from}..${to}, ${assets.join(',')}`);
+  console.log(`[hist-train] anchored crypto SNN, stage ${stage}${volNorm ? `, volNorm ${volNorm}` : ''}${soft ? ', soft labels' : ''}${synthetic ? ', synthetic contracts where Kalshi has none' : ''}${requote ? ', ADVERSARY: quotes requoted between candles' : ''}, ${from}..${to}, ${assets.join(',')}`);
 
   const f5 = (x: { mean: number; lo: number; hi: number }) => `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]`;
   if (start > to) { console.log(`[hist-train] the checkpoint already covers ${from}..${to}`); if (checkpoint) { fs.mkdirSync(path.dirname(ckOut), { recursive: true }); fs.writeFileSync(ckOut, JSON.stringify(checkpoint)); } return; }
@@ -112,7 +116,7 @@ async function main() {
     await dl(['1m'], warm, 'binance-1m');
     await dl(['15m', '1h'], addDays(warm, -14));
     await dl(['1d'], addDays(warm, -310));
-    const built = await buildHistoryReplay({ historyDir: hist, outDir: rep, assets, fromDay: warm, toDay: b, synthetic, log: () => undefined });
+    const built = await buildHistoryReplay({ historyDir: hist, outDir: rep, assets, fromDay: warm, toDay: b, synthetic, requote, log: () => undefined });
     const res = await replaySnn(rep, { params, from: Date.parse(`${a}T00:00:00Z`), to: Date.parse(`${b}T23:59:59Z`), fromDay: warm, toDay: b, calendar, domain: 'crypto', checkpoint, skipModel: true });
     checkpoint = res.net.serialize();
     fs.mkdirSync(path.dirname(ckOut), { recursive: true });

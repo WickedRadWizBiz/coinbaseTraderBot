@@ -38,3 +38,12 @@ test('quote lag: hour-block CI brackets the mean', () => {
   const ci = hourBlockCi(tr);
   assert.ok(ci.lo <= ci.mean && ci.mean <= ci.hi);
 });
+
+test('quote lag adversary: a slower bot and a cent of slippage eat into the same trade', () => {
+  const close = 400 * S + 120 * S;
+  const fast = contractTrades(lagged(10), close, 5, 0.04, 10, 20, { latency: 1, slip: 0 })[0].pnl;
+  const slow = contractTrades(lagged(10), close, 5, 0.04, 10, 20, { latency: 3, slip: 0 })[0].pnl;
+  const slipped = contractTrades(lagged(10), close, 5, 0.04, 10, 20, { latency: 3, slip: 0.01 })[0].pnl;
+  assert.ok(slipped < slow && slow <= fast, `${fast} ${slow} ${slipped}`);
+  assert.ok(slow - slipped > 0.015 && slow - slipped < 0.03, 'about a cent each way, plus the fee on the worse price');
+});
