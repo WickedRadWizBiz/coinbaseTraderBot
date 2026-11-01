@@ -1,0 +1,223 @@
+name: Benched jobs comparison
+
+# The whole bot replayed on months of Kalshi history days with each reworked benched feature at its settings
+# (research/benchedJobs.ts; thread "Rework benched features to $4.50/h"; Steven, Nov 1: deep on days, several market
+# regimes). Reads the daily random sweep's caches from main (the Kalshi history and its replay, and the server's model and
+# settings it copied) and downloads the older days; the server is not touched. Prints aggregates only (this repository is
+# public) and posts the report as a comment on the commit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Most recent replay days to compare'
+        required: false
+        default: '200'
+      split:
+        description: 'First day scored as held out (YYYY-MM-DD; empty = the middle day)'
+        required: false
+        default: ''
+  push:
+    branches: ['claude/benched-lab']
+    paths: ['.github/workflows/benched-jobs.yml', 'research/benchedJobs.ts']
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: benched-jobs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TJ_DAYS: ${{ inputs.days || '200' }}
+  TJ_SPLIT: ${{ inputs.split || '' }}
+  SWEEP_BANKROLL_USD: '200'
+  # A push whose message holds [report-from:<run id>] only redoes the report of that earlier run (its replays and artifacts).
+  TJ_REPORT_FROM: ${{ contains(github.event.head_commit.message, '[report-from:') && github.event.head_commit.message || '' }}
+
+jobs:
+  data:
+    if: ${{ !contains(github.event.head_commit.message, '[report-from:') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    outputs:
+      variants: ${{ steps.v.outputs.variants }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - name: Restore the Kalshi history and its replay (this branch's, else the sweep's on main)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: benched-jobs-replay-${{ github.run_id }}
+          restore-keys: |
+            benched-jobs-replay-
+            ta-jobs-replay-
+            kalshi-replay-
+      - name: Repair stored quotes, download what is new, rebuild the replay
+        run: |
+          node --import tsx research/kalshiReplayData.ts --history data/history --out data/history-replay --days "$((TJ_DAYS + 3))" --budget-min 120 2>&1 \
+            | grep -vE '^\[kalshi-replay-data\] (binance|kalshi|replay): .*(skipp|already|listing|page)' | tail -30
+      - name: Save the Kalshi history and its replay
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: benched-jobs-replay-${{ github.run_id }}
+      # Pin one copy of the server's model and settings for every replay of this run: the daily sweep on main saves a new
+      # copy, and replays that start hours apart would otherwise compare different models (round 3, Oct 31).
+      - name: Restore the server's model and settings (the sweep's copy on main)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+          key: kalshi-server-none
+          restore-keys: kalshi-server-
+      - name: Stop when no copy of the server's model is cached (the daily sweep on main saves one at 09:23 UTC)
+        run: '[ -f data/models/model.json ] || { echo "::error::no server copy cached: rerun after the daily sweep"; exit 1; }'
+      - name: Pin that copy for every replay of this run
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+          key: benched-jobs-server-${{ github.run_id }}
+      - name: The variants
+        id: v
+        run: |
+          echo "variants=$(node --import tsx -e "import('./research/benchedJobs.ts').then((m) => console.log(JSON.stringify(Object.keys(m.VARIANTS))))")" >> "$GITHUB_OUTPUT"
+
+  run:
+    needs: [data]
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJson(needs.data.outputs.variants) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: benched-jobs-replay-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Restore the server's model and settings (the sweep's copy on main)
+        id: server
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+          key: benched-jobs-server-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Replay ${{ matrix.variant }}
+        env:
+          NODE_OPTIONS: --max-old-space-size=12288
+        run: |
+          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$TJ_DAYS"
+          if [ -f data/sweep-env/train.env ]; then set -a; . data/sweep-env/train.env; set +a; echo "server settings: $(wc -l < data/sweep-env/train.env) line(s)"; else echo "no server settings cached: the bot's defaults"; fi
+          cp -rn data/sweep-env/history/. data/history/ 2>/dev/null || true
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json" RS_TRIALS_FILE="$GITHUB_WORKSPACE/data/sweep-env/component_trials.json"
+          echo "model: $([ -f data/models/model.json ] && echo "the server's" || echo identity)"
+          node --import tsx research/benchedJobs.ts run --variant "${{ matrix.variant }}" --days data/sweep-days --model data/models/model.json --out research/out/benched-jobs \
+            2>&1 | grep -E '^\[benched-jobs\]|Error|error' | head -20
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benched-jobs-${{ matrix.variant }}
+          path: research/out/benched-jobs/
+          retention-days: 30
+
+  report:
+    needs: [data, run]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - name: Which run to report
+        id: src
+        run: |
+          from=$(printf '%s' "$TJ_REPORT_FROM" | grep -oE '\[report-from:[0-9]+\]' | grep -oE '[0-9]+' || true)
+          echo "run=${from:-${{ github.run_id }}}" >> "$GITHUB_OUTPUT"
+      # The same paths as the save in the data job: a cache's version covers its paths, so a subset never matches.
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: benched-jobs-replay-${{ steps.src.outputs.run }}
+          # The run's own copy can be evicted by the time a long run reports; any later copy holds the same days.
+          restore-keys: |
+            benched-jobs-replay-
+            ta-jobs-replay-
+            kalshi-replay-
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: benched-jobs-*
+          path: research/out/benched-jobs
+          merge-multiple: true
+          run-id: ${{ steps.src.outputs.run }}
+          github-token: ${{ github.token }}
+      - name: Report
+        run: |
+          # Without the replay (its caches evicted) the report takes the days the results span (benchedJobs.ts dayList).
+          [ -d data/history-replay ] && node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$TJ_DAYS"
+          { node --import tsx research/benchedJobs.ts report --days data/sweep-days --out research/out/benched-jobs $([ -n "$TJ_SPLIT" ] && echo --split "$TJ_SPLIT") 2>&1; } | tee "$RUNNER_TEMP/report.txt" | tail -80
+      - name: Post the report on the commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo "Benched jobs comparison (deep history), run ${{ steps.src.outputs.run }}"; echo; echo '```'; tail -120 "$RUNNER_TEMP/report.txt" 2>/dev/null; echo '```'; } > "$RUNNER_TEMP/comment.md"
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@"$RUNNER_TEMP/comment.md" --silent || echo "could not post the comment"
