@@ -287,7 +287,7 @@ async function backtestDir(dir: string, model: string): Promise<Windows> {
   console.log(`[fidelity] ${path.basename(dir)}: ${r.trades.length} settled positions; traded hours ${byHour.length ? `${byHour[0][0]}h to ${byHour[byHour.length - 1][0]}h` : 'none'} (${byHour.map(([h, n]) => `${h.slice(11)}:${Math.round(n)}`).join(' ')})`);
   console.log(`[fidelity] ${path.basename(dir)} windows: ${[...w].filter(([, x]) => x.contracts > 0).slice(0, 30).map(([k, x]) => `${Number.isFinite(k) ? new Date(k).toISOString().slice(5, 16) : String(k)} ${Math.round(x.contracts)}ct $${x.pnl.toFixed(2)}`).join('; ')}`);
   const rej = Object.entries(r.exchangeRejected ?? {}).map(([k, n]) => `${k} x${n}`).join('; ');
-  console.log(`[fidelity] ${path.basename(dir)} at the end: cash $${r.end?.balance.toFixed(2)}, ${r.end?.openPositions} open positions (worst loss $${r.end?.openMaxLoss.toFixed(2)}), ${r.end?.openOrders} resting orders${rej ? ` | exchange refused: ${rej}` : ''}`);
+  console.log(`[fidelity] ${path.basename(dir)} at the end: cash $${r.end?.balance.toFixed(2)}, ${r.end?.openPositions} open positions (worst loss $${r.end?.openMaxLoss.toFixed(2)}), ${r.end?.openOrders} resting orders${rej ? ` | exchange refused: ${rej}` : ''}${r.makerMarkout ? ` | maker fills' 60 s markout ${(r.makerMarkout.mean * 100).toFixed(2)}c a contract (${r.makerMarkout.n})` : ''}`);
   console.log(`[fidelity] ${path.basename(dir)} entry funnel: ${Object.entries(r.funnel ?? {}).map(([k, n]) => `${k} ${n}`).join('; ')}`);
   return w;
 }
