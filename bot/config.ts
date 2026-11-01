@@ -287,6 +287,8 @@ export interface StrategyConfig {
   /** The mid-anchored take gate's params file (bot/model/midTakeGate.ts; TAKE_MID_GATE, empty = off) and its margin. */
   takeMidGate: string;
   takeMidMargin: number;
+  /** Buy the other side of an entry the mid gate skips when the gate favours it (bot/model/midTakeGate.ts; TAKE_MID_FLIP). */
+  takeMidFlip: boolean;
 }
 
 export interface Config {
@@ -1213,6 +1215,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     takeMargin: num(env, 'TAKE_MARGIN', 0, 0, 0.2),
     takeMidGate: (env.TAKE_MID_GATE ?? '').trim(),
     takeMidMargin: num(env, 'TAKE_MID_MARGIN', 0, 0, 0.2),
+    takeMidFlip: bool(env, 'TAKE_MID_FLIP', false),
   };
 
   const dataDir = path.resolve(env.DATA_DIR ?? './data');

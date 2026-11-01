@@ -927,7 +927,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       });
       const qDecision = decisionProbability(view, strat);
       if (strategy.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features: fmap, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: strategy.takeMargin });
-      if (strategy.takeMidGate) applyMidGate(plan, loadMidGate(strategy.takeMidGate), { pYes, mid, features: fmap, tauSec, bid: bid.price, ask: ask.price, margin: strategy.takeMidMargin });
+      if (strategy.takeMidGate) applyMidGate(plan, loadMidGate(strategy.takeMidGate), { pYes, mid, features: fmap, tauSec, bid: bid.price, ask: ask.price, margin: strategy.takeMidMargin, flip: strategy.takeMidFlip, position: pos.position(m.ticker) });
       // Fill model (validated only), as live: quote, cross or skip each maker entry by expected value.
       applyFillModel(plan, opts.fillModel, { q: qDecision, book, tick: m.tickSize, tauSec, sigma: vol.sigmaPerSqrtSec, features: fmap, minEv: strategy.fillMinEv, takerMinEdge: strategy.takerBuffer + strategy.minEdge });
       // The paper bot's own extra entries (bot/engine.ts), when nothing else enters a flat market in its entry window:

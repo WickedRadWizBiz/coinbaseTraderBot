@@ -113,12 +113,23 @@ export function loadMidGate(file: string): MidGateParams | null {
   return cache.get(file)!;
 }
 
-export interface MidGateCtx { pYes: number; mid: number; features: Record<string, number>; tauSec: number; bid: number; ask: number; margin: number; fees?: FeeSchedule }
+export interface MidGateCtx {
+  pYes: number; mid: number; features: Record<string, number>; tauSec: number; bid: number; ask: number; margin: number; fees?: FeeSchedule;
+  /** Flip (TAKE_MID_FLIP, Steven's Nov 1 rule: turn what loses into profit): a skipped entry's other side is bought instead,
+   *  post-only at that side's best bid, when the gate gives it P(win) >= its price + margin. On the round 2 audit the
+   *  skipped entries won 24% at 27c (-3c a contract); the other side of them is the favourite that the longshot buyer
+   *  pays for (Burgi, Deng & Whelan 2026). Maker quotes only (they lost; the taker entries won), and only while flat or
+   *  already on the flipped side. */
+  flip?: boolean;
+  position?: number;
+}
 
 /** Drop the entry orders (takes and maker entry quotes) the gate says are not worth their price. Exits always pass. */
-export function applyMidGate(plan: { place: Array<{ side: 'bid' | 'ask'; price: number; postOnly: boolean; reduceOnly: boolean; purpose: string; why: string }>; notes: string[] }, p: MidGateParams | null, c: MidGateCtx): number {
+type GateOrder = { side: 'bid' | 'ask'; price: number; postOnly: boolean; reduceOnly: boolean; purpose: string; why: string; count?: number; timeInForce?: string };
+export function applyMidGate<T extends GateOrder>(plan: { place: T[]; notes: string[] }, p: MidGateParams | null, c: MidGateCtx): number {
   if (!p || !p.validation.validated) return 0;
   let skipped = 0;
+  const flips: Array<{ o: T; side: 'yes' | 'no'; price: number }> = [];
   plan.place = plan.place.filter((o) => {
     if (o.reduceOnly || o.purpose === 'exit' || (o.purpose === 'quote' && !o.why.startsWith('maker '))) return true;
     const side = o.side === 'bid' ? 'yes' : 'no';
@@ -129,7 +140,24 @@ export function applyMidGate(plan: { place: Array<{ side: 'bid' | 'ask'; price: 
     if (q >= breakeven) return true;
     skipped++;
     plan.notes.push(`mid gate: skip ${side.toUpperCase()} @ ${price.toFixed(2)} (P(win) ${q.toFixed(3)} < ${breakeven.toFixed(3)})`);
+    if (c.flip && o.purpose === 'quote') flips.push({ o, side, price }); // a maker quote keeps its expiry when flipped
     return false;
   });
+  for (const { o, side, price } of flips) {
+    const other = side === 'yes' ? 'no' : 'yes';
+    const pos = c.position ?? 0;
+    if (pos !== 0 && (other === 'yes') !== (pos > 0)) continue;
+    const bookSide = other === 'yes' ? 'bid' : 'ask';
+    if (plan.place.some((x) => x.side === bookSide && !x.reduceOnly)) continue;
+    const yesPrice = other === 'yes' ? c.bid : c.ask; // join the other side's best bid
+    const oPrice = other === 'yes' ? yesPrice : 1 - yesPrice;
+    if (!(oPrice > 0.01 && oPrice < 0.99)) continue;
+    const { x, midSide } = midGateInputs(other, oPrice, true, c.pYes, c.mid, c.ask - c.bid, c.tauSec, c.features);
+    const q = midGateProbability(p, x, midSide);
+    if (q < oPrice + c.margin) continue;
+    const count = Math.max(1, Math.floor((o.count ?? 1) * price / oPrice));
+    plan.place.push({ ...o, side: bookSide, price: Math.round(yesPrice * 100) / 100, count, postOnly: true, purpose: 'quote', reduceOnly: false, why: `maker flip: ${other.toUpperCase()} @ ${oPrice.toFixed(2)} instead of ${side.toUpperCase()} @ ${price.toFixed(2)} (P(win) ${q.toFixed(3)})` } as T);
+    plan.notes.push(`mid gate: flip to ${other.toUpperCase()} @ ${oPrice.toFixed(2)} (P(win) ${q.toFixed(3)})`);
+  }
   return skipped;
 }

@@ -45,6 +45,9 @@ export const GATE_VARIANTS: Record<string, Record<string, string>> = {
   g_m5: gate('0.05'),
   g_m3_maker: { ...gate('0.03'), TA_LEAN_MAKER: '0.01' },
   g_m3_full: { ...gate('0.03'), ...LEANS, ...LAG, ...VARIANTS.j4_v2 },
+  // The skipped maker quotes lost 3c a contract: buy their other side instead when the gate favours it.
+  g_m3_flip: { ...gate('0.03'), TAKE_MID_FLIP: 'true' },
+  g_m1_flip: { ...gate('0.01'), TAKE_MID_FLIP: 'true' },
 };
 
 function dayList(days: string, out: string): string[] {

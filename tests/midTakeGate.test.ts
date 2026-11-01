@@ -34,3 +34,25 @@ test('an unvalidated gate skips nothing; a validated one skips entries below bre
   assert.equal(applyMidGate(b, { ...p, validation: { ...p.validation, validated: true } }, ctx), 1);
   assert.deepEqual(b.place.map((o) => o.purpose), ['exit']);
 });
+
+test('with flip on, a skipped entry buys the other side post-only when the gate favours it, and only while flat or on that side', () => {
+  const k = MID_GATE_FEATURES.length;
+  const w = new Array(k).fill(0); w[0] = 10; // fair value minus the mid, for the side
+  const p: MidGateParams = { features: [...MID_GATE_FEATURES], mean: new Array(k).fill(0), std: new Array(k).fill(1), w, b: 0, validation: { n: 1000, logLossMid: 0.7, logLossGate: 0.6, validated: true } };
+  const plan = () => ({ notes: [] as string[], place: [{ side: 'bid' as const, price: 0.5, count: 10, postOnly: true, reduceOnly: false, purpose: 'quote', why: 'maker bid', timeInForce: 'good_till_canceled' }] });
+  const ctx = { pYes: 0.3, mid: 0.5, features: {}, tauSec: 600, bid: 0.49, ask: 0.51, margin: 0.02, flip: true };
+  const a = plan();
+  assert.equal(applyMidGate(a, p, ctx), 1);
+  assert.equal(a.place.length, 1);
+  const o = a.place[0];
+  assert.equal(o.side, 'ask'); // buys NO at 1 - 0.51
+  assert.equal(o.price, 0.51);
+  assert.equal(o.postOnly, true);
+  assert.ok(o.why.startsWith('maker flip'));
+  const b = plan();
+  applyMidGate(b, p, { ...ctx, position: 5 }); // holding YES: no flip into NO
+  assert.equal(b.place.length, 0);
+  const c = plan();
+  applyMidGate(c, p, { ...ctx, flip: false });
+  assert.equal(c.place.length, 0);
+});
