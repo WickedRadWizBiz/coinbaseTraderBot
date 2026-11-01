@@ -157,7 +157,7 @@ const HOUR = 3_600_000;
 const hourOf = (ms: number) => new Date(ms).toISOString().slice(0, 13);
 const isTennis = (t: string) => t.startsWith('KXATP') || t.startsWith('KXWTA');
 // The model exit names its prices ("bid 0.55 - fee > q 0.520 + 0.02", "NO bid 0.45 - fee > q + 0.02").
-const exitKind = (why: string) => /^quota snipe/.test(why) ? 'quota snipe' : /^profit mandate/.test(why) ? 'profit mandate' : /^take-profit/.test(why) ? 'take-profit' : /ratchet|stop/i.test(why) ? 'ratchet' : /cross|curve/i.test(why) ? 'cross' : /exit|fair|model|- fee > q/i.test(why) ? 'model exit' : 'other';
+const exitKind = (why: string) => /^loser window cut/.test(why) ? 'loser window cut' : /^loser cut/.test(why) ? 'loser cut' : /^quota snipe/.test(why) ? 'quota snipe' : /^profit mandate/.test(why) ? 'profit mandate' : /^take-profit/.test(why) ? 'take-profit' : /ratchet|stop/i.test(why) ? 'ratchet' : /cross|curve/i.test(why) ? 'cross' : /exit|fair|model|- fee > q/i.test(why) ? 'model exit' : 'other';
 /** A rejection reason with its numbers folded, so the same kind counts together (as research/backtest.ts folds them). */
 export const foldReason = (r: string) => r.replace(/[-+]?\$?\d[\d.,]*%?/g, '#');
 const empty = (): SideSummary => ({ fills: 0, contracts: 0, fees: 0, pnl: 0, markets: 0, exits: {}, byHour: {}, byPurpose: {}, contractsByHour: {}, bySeries: {} });
@@ -222,9 +222,9 @@ export async function readAudit(auditDir: string, days: string[], prices?: { fro
     for await (const line of rl) {
       const head = line.slice(0, 160);
       const decision = head.includes('"kind":"decision"');
-      // The decision that planned an exit names why (deploy/pnl_report.py reads it the same way); so does paper's training
-      // trade or exploration entry.
-      const exitPlan = decision && (line.includes('"purpose":"exit"') || line.includes('"why":"train (paper)') || line.includes('"why":"explore'));
+      // The decision that planned an exit names why (deploy/pnl_report.py reads it the same way); so does a training
+      // trade ("train (paper)" until Oct 31, "train:" since) or paper's exploration entry.
+      const exitPlan = decision && (line.includes('"purpose":"exit"') || line.includes('"why":"train (paper)') || line.includes('"why":"train:') || line.includes('"why":"explore'));
       const diagnosis = decision && head.includes('"event":"entry_diagnosis"');
       const swap = head.includes('"kind":"config"') && head.includes('"event":"model_swapped"');
       const hotSwap = head.includes('"kind":"config"') && head.includes('"event":"hot_swap"');

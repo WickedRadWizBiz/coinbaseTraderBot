@@ -197,6 +197,28 @@ test('profit rules on tennis (Steven, Oct 30): the quota snipe sells a position 
   assert.equal(dog(0.2, 3.9).plans.length, 0, 'in profit: rides instead of the cut');
 });
 
+test('tennis loser window cut (LOSER_WINDOW_CUT, Steven Oct 31): in the last 30% of the match a position not in profit is sold at the bid; one in profit rides', () => {
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).strategy.loserExits?.window, true);
+  const fav = (prog: number, bid: number, net: number | undefined, r: { pacerUsd?: number; settleFrac?: number; loserWindow?: boolean }) => {
+    const tr = new MatchTracker('P', T);
+    tr.progress = () => prog;
+    return decideMatch(tr, { event: 'P', now: t0 + 3_600_000, startTime: t0, closeTime: t0 + 86_400_000, markets: [mk('P-FAV', bid, bid + 0.02, { position: 30, avgEntry: 0.8, netAtBid: net }), mk('P-DOG', 1 - bid - 0.02, 1 - bid)] }, T, budget, 0.01, r);
+  };
+  const rules = { pacerUsd: 4.5, settleFrac: T.settleFrac, loserWindow: true };
+  // 75% done (inside the last 30%), -$1.00 after fees: sold at the bid.
+  const cut = fav(0.75, 0.78, -1, rules);
+  assert.equal(cut.plans.length, 1, JSON.stringify(cut));
+  const p = cut.plans[0];
+  assert.deepEqual([p.leg, p.side, p.price, p.count, p.reduceOnly, p.postOnly, p.timeInForce], ['loser_window_cut', 'ask', 0.78, 30, true, false, 'immediate_or_cancel']);
+  assert.equal(p.why, 'loser window cut: -1.00 net after fees on 30 at bid 0.78, match 75% done (its last 30%): only a position in profit rides to settlement');
+  // Break-even is not profit: sold too. In profit: rides.
+  assert.equal(fav(0.75, 0.78, 0, rules).plans[0]?.leg, 'loser_window_cut');
+  assert.equal(fav(0.75, 0.84, 5, rules).plans.length, 0);
+  // Before the last 30%, or with the flag off, the legs decide (the favorite holds under its target).
+  assert.equal(fav(0.5, 0.78, -1, rules).plans.length, 0);
+  assert.equal(fav(0.75, 0.78, -1, { pacerUsd: 4.5, settleFrac: T.settleFrac }).plans.length, 0);
+});
+
 test('quota floor on tennis (PACER_FLOOR, Steven Oct 31): a leg aiming higher keeps the position, the need it covered becomes its floor, and it is sold once its profit falls below it', () => {
   // The favorite held from 0.80 under its 0.86 hunt start: a set price above the bid, in either mode.
   const floors = new QuotaFloors();

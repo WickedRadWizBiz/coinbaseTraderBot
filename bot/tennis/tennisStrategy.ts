@@ -88,7 +88,7 @@ export interface TennisPlan {
   postOnly: boolean;
   reduceOnly: boolean;
   timeInForce: 'good_till_canceled' | 'immediate_or_cancel';
-  leg: 'underdog_entry' | 'underdog_tp' | 'underdog_trail' | 'underdog_late' | 'underdog_cut' | 'underdog_stop' | 'fav_entry' | 'fav_trail' | 'fav_stop' | 'quota_snipe';
+  leg: 'underdog_entry' | 'underdog_tp' | 'underdog_trail' | 'underdog_late' | 'underdog_cut' | 'underdog_stop' | 'fav_entry' | 'fav_trail' | 'fav_stop' | 'quota_snipe' | 'loser_window_cut';
   why: string;
 }
 
@@ -378,6 +378,9 @@ export interface TennisProfitRules {
   /** PACER_FLOOR (bot/risk/quotaPacer.ts): which legs count as aiming higher than the quota (off when unset), and the floors. */
   floorMode?: PacerFloorMode;
   floors?: QuotaFloors;
+  /** LOSER_WINDOW_CUT (Steven, Oct 31: nothing rides to settlement unless it is in the last share and in profit): inside the
+   *  match's last share a position not in profit after fees is sold at the bid. */
+  loserWindow?: boolean;
   /** PACER_FLOOR_TICKS: the floor's cushion, price ticks a contract. */
   floorTicks?: number;
 }
@@ -392,7 +395,8 @@ export function decideMatch(t: MatchTracker, s: MatchSnapshot, cfg: TennisConfig
 
 /**
  * Steven's profit rules (Oct 29-30), on tennis as on every contract type. Inside the last share of the match a position in
- * profit after fees rides to settlement: no exit sells it (one that is not keeps its exits: the stops, the late cut).
+ * profit after fees rides to settlement: no exit sells it; one that is not is sold at the bid under LOSER_WINDOW_CUT (Steven,
+ * Oct 31), else keeps its exits (the stops, the late cut).
  * Elsewhere the quota snipe sells a position whose whole profit after fees at the bid covers what the clock hour needs,
  * whatever the legs planned for it (the hunt, the take-profit, the favorite's hold); a thin bid takes what it can and the
  * rest is judged again next tick. Under PACER_FLOOR (Steven, Oct 31) a leg aiming higher keeps the position instead, the
@@ -411,6 +415,12 @@ function applyProfitRules(t: MatchTracker, s: MatchSnapshot, out: { phase: Match
     if (lastShare && net !== undefined && net > 1e-9) {
       out.plans = out.plans.filter(others);
       out.notes.push(`${m.ticker}: match ${(prog * 100).toFixed(0)}% done (its last ${(frac * 100).toFixed(0)}%), +$${net.toFixed(2)} after fees: riding to settlement`);
+    } else if (lastShare && r.loserWindow && net !== undefined && m.quote.bid !== undefined) {
+      // Only a position in profit rides to settlement: one that is not is sold at the bid (a thin bid takes what it can and the
+      // rest is judged again next tick).
+      out.plans = out.plans.filter(others);
+      out.plans.push({ ticker: m.ticker, side: 'ask', price: m.quote.bid, count: m.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg: 'loser_window_cut',
+        why: `loser window cut: ${net.toFixed(2)} net after fees on ${m.position} at bid ${m.quote.bid}, match ${(prog * 100).toFixed(0)}% done (its last ${(frac * 100).toFixed(0)}%): only a position in profit rides to settlement` });
     } else if (r.pacerUsd !== undefined && net !== undefined && m.quote.bid !== undefined) {
       const bid = m.quote.bid;
       const selling = out.plans.some((p) => p.ticker === m.ticker && p.side === 'ask' && p.timeInForce === 'immediate_or_cancel');
