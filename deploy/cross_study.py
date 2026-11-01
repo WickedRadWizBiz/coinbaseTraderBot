@@ -1251,6 +1251,107 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
             lb = lab + ('; depth' if dp else '')
             print(f"    {lb:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['snipe']:6d}  {r['held_w']:5d}  {r['held_w_usd']:+8.2f}  {r['held_l']:5d}  {r['held_l_usd']:+8.2f}  {r['cut']:5d}  {r['cut_usd']:+8.2f}  {r['cut_win']:4d}  {r['nobid']:5d}  {r['thin_usd']:7.2f}")
 
+    # ---- R. regime-conditional stakes (Steven, Nov 1 dynamics rule: x2-x5 on gated entries paid on Oct 24-25 only, so build the
+    # condition in rather than scale everywhere or nowhere; tested under the conditions it targets before it goes into the bot).
+    # Regime at each entry from what the bot could see then: trend z = 1 h log move of the index / (15-min sigma x sqrt(3600));
+    # |z| >= 1 is a trend, signed with or against the held side (range brackets have no side); vol ratio = 15-min sigma / mean of
+    # the hourly 15-min sigmas over the 6 h before (>= 1.25 rising, <= 0.8 falling). Base rule: every origin, gate 6c, 3c cut.
+    def regime_of(p):
+        a = p['ep'].get('asset'); s = p['s0']
+        if not a: return None
+        sg = sigma_cached(a, s); S1 = index_at(a, s); S0 = index_at(a, s - 3600)
+        if not sg or not S1 or not S0 or S0 <= 0: return None
+        z = math.log(S1 / S0) / (sg * math.sqrt(3600))
+        longs = [x for x in (sigma_cached(a, s - h * 3600) for h in range(1, 7)) if x]
+        vr = sg / mean(longs) if len(longs) >= 3 else None
+        K, cap, kind = strike_of(p['ep'])
+        if abs(z) < 1.0: tr = 'ranging'
+        elif cap and kind != 'less': tr = 'trend, bracket'
+        else:
+            d = -1 if kind == 'less' else 1
+            tr = 'trend with us' if (1 if z > 0 else -1) * d * p['ep']['sign'] > 0 else 'trend against us'
+        vb = 'vol n/a' if vr is None else ('vol rising' if vr >= 1.25 else 'vol falling' if vr <= 0.8 else 'vol steady')
+        return tr, vb, z, vr
+    baseR = gall(-0.06)
+    r1 = pacer_run(pathsB, baseG, SL, remap=baseR, loser=S3)
+    print('  R. regime-conditional stakes on the gated entries (every origin, gate fv >= cost + 6c, 3c cut, slices pacer)')
+    if r1 is None:
+        print('    (no costed position)')
+    else:
+        per, stk = r1['per'], r1['stk']
+        reg = {s: regime_of(pathsB[s]) for s in per}
+        cnt = collections.Counter(p['ep'].get('asset') for p in pathsB if p.get('costF') is not None)
+        if cnt:
+            a0 = cnt.most_common(1)[0][0]
+            T0 = min(pathsB[s]['s0'] for s in per); T1 = max(pathsB[s]['c_sec'] for s in per)
+            I0, I1 = index_at(a0, T0), index_at(a0, T1)
+            sgs = [x for x in (sigma_cached(a0, t) for t in range(T0, T1, 900)) if x]
+            zs = [abs(v[2]) for v in reg.values() if v]
+            if I0 and I1 and sgs:
+                print(f"     window regime ({a0}): index {I0:,.0f} -> {I1:,.0f} ({100 * math.log(I1 / I0):+.2f}%), mean 15-min sigma {1e4 * mean(sgs):.2f} bp/s^0.5,"
+                      f" entries trending (|z| >= 1) {100 * sum(1 for x in zs if x >= 1) / max(1, len(zs)):.0f}%")
+        print('     bucket                                   trades  won %  realized x1 $  $ per trade  return per $')
+        def show(name, keyf):
+            agg = collections.defaultdict(lambda: [0, 0, 0.0, 0.0])
+            for s, x in per.items():
+                b = keyf(s)
+                if b is None: b = 'no regime'
+                g = agg[b]; g[0] += 1; g[1] += x > 0; g[2] += x; g[3] += stk.get(s, 0.0)
+            for b, g in sorted(agg.items()):
+                print(f"     {name + ': ' + b:40s} {g[0]:6d}  {100 * g[1] / g[0]:5.0f}  {g[2]:+13.2f}  {g[2] / g[0]:+11.3f}  {g[2] / g[3] if g[3] else 0:+12.4f}")
+            return agg
+        kT = lambda s: reg[s][0] if reg.get(s) else None
+        kV = lambda s: reg[s][1] if reg.get(s) else None
+        kTV = lambda s: f'{reg[s][0]}, {reg[s][1]}' if reg.get(s) else None
+        aT = show('trend', kT); aV = show('vol', kV); aTV = show('both', kTV)
+        def online(keyf, nmin=8):
+            """Causal: scale an entry when its bucket's earlier gated trades (closed before it opens, x1 return per $) are net positive."""
+            memo = {}
+            def pick(s):
+                if s in memo: return memo[s]
+                b = keyf(s); ok = False
+                if b is not None:
+                    s0 = pathsB[s]['s0']
+                    xs = [per[j] / stk[j] for j in per if j != s and stk.get(j) and pathsB[j]['c_sec'] <= s0 and keyf(j) == b]
+                    ok = len(xs) >= nmin and mean(xs) > 0
+                memo[s] = ok
+                return ok
+            return pick
+        def oracle(keyf, agg):  # look-ahead ceiling: the buckets that ended net positive in this very window
+            return lambda s: keyf(s) is not None and agg[keyf(s)][2] > 0
+        def scaled(k, pick, slip=0.0):
+            def f(p):
+                q = baseR(p)
+                if q is None: return None
+                if slip: q = dict(q, costF=q['costF'] + slip)
+                return dict(q, n=k * q['n']) if pick(p['src']) else q
+            return f
+        rowsR = [('gated x1 (reference)', baseR, None)]
+        rowsR += [(f'gated x{k} everywhere (reference)', scaled(k, lambda s: True), None) for k in (2, 3, 5)]
+        picks = {}
+        for nm, kf, ag in (('trend', kT, aT), ('vol', kV, aV), ('trend+vol', kTV, aTV)):
+            on = online(kf); picks[nm] = on
+            for k in (2, 3, 5):
+                rowsR.append((f'ONLINE {nm}: x{k} where the bucket has paid so far', scaled(k, on), on))
+            rowsR.append((f'ORACLE {nm}: x3 where the bucket paid this window (look-ahead)', scaled(3, oracle(kf, ag)), oracle(kf, ag)))
+        rowsR.append(('ONLINE trend, nmin 20: x3', scaled(3, online(kT, 20)), online(kT, 20)))
+        # adversary: the same number of scaled entries chosen at random; 1c worse entry fills; 4c depth
+        n_on = sum(1 for s in per if picks['trend'](s))
+        share = n_on / max(1, len(per))
+        import random as _rr
+        for sd in (1, 2, 3):
+            rr = _rr.Random(sd); keep = {s: rr.random() < share for s in per}
+            rowsR.append((f'ADV placebo: x3 on a random {100 * share:.0f}% (seed {sd})', scaled(3, lambda s, kp=keep: kp.get(s, False)), None))
+        rowsR.append(('ADV ONLINE trend x3 + 1c worse entry fill', scaled(3, picks['trend'], 0.01), picks['trend']))
+        print('     stake rule                                                         realized $     $/h  scaled  snipes   cuts  peak $ at work  depth $')
+        for lab, rm, pk in rowsR:
+            nsc = sum(1 for s in per if pk(s)) if pk else (len(per) if 'everywhere' in lab else 0)
+            for dp in (False, True):
+                r = pacer_run(pathsB, baseG, SL, remap=rm, loser=S3, depth=dp, depth_px=0.04 if (dp and lab.startswith('ADV')) else 0.02)
+                if r is None: continue
+                lb = lab + ('; depth' if dp else '')
+                print(f"    {lb:68s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {nsc:6d}  {r['snipe']:6d}  {r['cut']:5d}  {r['cap_peak']:14.2f}  {r['thin_usd']:7.2f}")
+
     # ---- C. what separates the right stop sales from the wrong ones (at the 1-tick trail's trigger, from the locks) --
     print('  C. at the 1-tick trail\'s trigger (from the actual locks): the sale against settlement by what the rule could see')
     buckets = collections.defaultdict(lambda: [0, 0.0, 0.0, 0.0, 0.0])  # hunts, contracts, won, px, sell-vs-hold $
