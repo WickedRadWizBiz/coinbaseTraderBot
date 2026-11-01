@@ -615,7 +615,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       // Recorded for research, or synthesized from price history (quoted at the model's own fair value): never traded.
       if (m.recordOnly || m.synthetic) { if (st.now >= m.closeTime + 90_000) st.forget(m.ticker); continue; }
       closeOf.set(m.ticker, m.closeTime);
-      if (Number.isFinite(m.openTime)) windowOf.set(m.ticker, m.closeTime - m.openTime);
+      { const w = shareWindowSec(m.openTime, m.closeTime, strategy.shareWindowMaxSec); if (w !== undefined) windowOf.set(m.ticker, w * 1000); }
       // Settle closed markets.
       if (st.now >= m.closeTime + 60_000) {
         const out = st.outcome(m);
