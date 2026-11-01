@@ -1,0 +1,140 @@
+# Spot wall study (the owner's ask on Oct 31: use the Coinbase book already recorded instead of waiting). Two steps on the
+# days the recordings carry the spot book's depth bands (from Oct 29):
+#   1. research/spotWallStudy.ts: the recorded spot book's integrity per coin, then whether its walls stop the price
+#      more often than plain bands at the same distance (5 and 15 minutes ahead).
+#   2. research/makerExitStudy.ts: paper's own positions on those days replayed against the real Kalshi tape with
+#      resting take-profits, now including targets set at the spot walls (spotwall, spotwall+wall, sr+spotwall); run
+#      only if at least one coin's book passes step 1.
+#
+# Read-only on the server: it copies the audit log and the recorded days (today's up to now), nothing is written back.
+# This repository is public: the job prints counts, rates and $ totals only, never settings, keys or logs. The summary
+# is also posted as a comment on the commit (job logs cannot be read from the cloud sessions).
+#
+# Required secrets (the same as Deploy): LIGHTSAIL_HOST, LIGHTSAIL_USERNAME, LIGHTSAIL_SSH_KEY (optional LIGHTSAIL_PORT).
+name: Spot wall study
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: 'First day (the bands start 2026-10-29)'
+        required: false
+        default: '2026-10-29'
+  push:
+    branches: ['claude/spot-wall-study']
+    paths: ['.github/workflows/spot-wall-study.yml', 'research/spotWallStudy.ts', 'research/makerExitStudy.ts']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: spot-wall-study
+  cancel-in-progress: false
+
+jobs:
+  study:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Copy the audit log and the recorded days (read-only)
+        env:
+          RS_FROM: ${{ inputs.from || '2026-10-29' }}
+        run: |
+          set -euo pipefail
+          [[ "$RS_FROM" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "from must be YYYY-MM-DD"; exit 1; }
+          DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/audit" "$DATA/sweeps"
+          vanished_ok() { local c=$?; [ $c -eq 24 ] && return 0; return $c; }
+          TODAY=$(date -u +%F)
+          DAYS=""; d="$RS_FROM"
+          while [[ "$d" < "$TODAY" || "$d" == "$TODAY" ]]; do DAYS="$DAYS $d"; d=$(date -u -d "$d +1 day" +%F); done
+          # The day before the first one: its recording only (the exit study's warm-up: markets listed, books snapshotted).
+          PREV=$(date -u -d "$RS_FROM -1 day" +%F)
+          for d in $PREV $DAYS; do
+            if [ "$d" != "$PREV" ]; then
+              ssh bot "cd ~/bot/data/audit && find . -maxdepth 1 -type f -name 'audit-$d*' -printf '%P\n'" > "$RUNNER_TEMP/audit-$d.txt"
+              rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/audit-$d.txt" bot:bot/data/audit/ "$DATA/audit/" || vanished_ok
+            fi
+            for f in "md-$d.jsonl.gz" "md-$d.jsonl"; do
+              if ssh bot "test -f ~/bot/data/recordings/$f"; then
+                rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "bot:bot/data/recordings/$f" "$DATA/recordings/" || vanished_ok
+                break
+              fi
+            done
+          done
+          # Today's file is still being written: keep its complete lines only (a torn last gzip member or line is dropped).
+          for f in "$DATA/recordings/md-$TODAY.jsonl.gz" "$DATA/recordings/md-$TODAY.jsonl"; do
+            [ -f "$f" ] || continue
+            set +o pipefail
+            if [[ "$f" == *.gz ]]; then zcat "$f" 2>/dev/null | head -n -1 > "$RUNNER_TEMP/today.jsonl"; else head -n -1 "$f" > "$RUNNER_TEMP/today.jsonl"; fi
+            set -o pipefail
+            rm -f "$f"; gzip -1 -c "$RUNNER_TEMP/today.jsonl" > "$DATA/recordings/md-$TODAY.jsonl.gz"; rm -f "$RUNNER_TEMP/today.jsonl"
+          done
+          echo "$DAYS" | xargs | tr ' ' ',' > "$DATA/sweeps/study-days.txt"
+          echo "days $(cat "$DATA/sweeps/study-days.txt") (+ $PREV recording as warm-up): audit $(ls "$DATA/audit" | wc -l) file(s), recordings $(ls "$DATA/recordings" | wc -l) file(s)"
+          du -sh "$DATA/recordings" | cat
+      - name: Spot book integrity and walls
+        id: walls
+        run: |
+          set +e
+          D=$(cat data/sweeps/study-days.txt)
+          node --max-old-space-size=6144 --import tsx research/spotWallStudy.ts --recordings data/recordings --from "${D%%,*}" --to "${D##*,}" \
+            --out data/sweeps/spot-wall-study.json 2>&1 | grep -v '^\[walls\]' | tee data/sweeps/spot-wall-study.txt
+          code=${PIPESTATUS[0]}
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" = 0 ] || [ "$code" = 2 ] || exit "$code"
+      - name: Maker exit study with spot wall targets
+        if: steps.walls.outputs.code == '0'
+        run: |
+          set -o pipefail
+          T0=$(date +%s)
+          node --max-old-space-size=6144 --import tsx research/makerExitStudy.ts --recordings data/recordings --audit data/audit \
+            --days "$(cat data/sweeps/study-days.txt)" --out data/sweeps/maker-exit-study.json | tee data/sweeps/maker-exit-study.txt
+          echo "study took $(( ($(date +%s) - T0) / 60 )) min"
+      - name: Post the summary on the commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "**Spot wall study** (run ${{ github.run_id }})"; echo; echo '```'
+            cat data/sweeps/spot-wall-study.txt 2>/dev/null | tail -n 80
+            echo; cat data/sweeps/maker-exit-study.txt 2>/dev/null | grep -v '^recordings read' | tail -n 30
+            echo '```'
+          } > "$RUNNER_TEMP/summary.md"
+          gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@"$RUNNER_TEMP/summary.md" --silent || echo "comment not posted"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spot-wall-study
+          path: |
+            data/sweeps/spot-wall-study.json
+            data/sweeps/maker-exit-study.json
+          if-no-files-found: ignore
+          retention-days: 30

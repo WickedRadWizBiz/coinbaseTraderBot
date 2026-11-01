@@ -7,7 +7,11 @@
 //     share of time each level is quoted and its size's median and 90th percentile (log-normal);
 //   - until the next anchor, each level's orders arrive and are cancelled at the measured queue-reactive rates
 //     (Huang, Lehalle and Rosenbaum 2015: per distance from the best price and queue size), and trades take the best
-//     level at the measured rate, size and side.
+//     level at the measured rate, size and side;
+//   - the trades' rate and side follow where the mid goes by the next quote (the study's flow by move): on the way up,
+//     mostly YES takers lift the asks, so a resting order fills just before the price moves against it, as on the
+//     real book (adverse selection). Without it, the simulated flow was blind to the next quote, and resting orders
+//     filled at no cost: the Oct 27-30 check had depth at +$880 against the real quotes' -$4.51.
 // Every draw is seeded by the contract and the anchor's time, so a day plays out the same wherever it is replayed (the
 // GitHub runners and the Windows trainer, which bundles this file).
 
@@ -28,7 +32,13 @@ const Q_EDGES = [1, 10, 50, 200, 1000, Infinity];
 const bucket = (edges: number[], x: number) => { const i = edges.findIndex((e) => x < e); return i < 0 ? edges.length - 1 : i; };
 
 type Quant = { n: number; mean: number; p10: number; p50: number; p90: number };
-export interface ShapeCell { ti: number; mi: number; samples: number; levelQuoted: number[]; levelFilledP50: number[]; levelFilledP90: number[]; tradesPerMin: Quant; tradeSize: Quant; takerYesShare: number | null }
+/** The trade flow over a quarter-minute by where the mid went (research/depthStudy.ts byMove: down, flat, up). */
+export interface MoveFlow { segs: number; tradesPerSec: number; takerYesShare: number | null }
+export interface ShapeCell { ti: number; mi: number; samples: number; levelQuoted: number[]; levelFilledP50: number[]; levelFilledP90: number[]; tradesPerMin: Quant; tradeSize: Quant; takerYesShare: number | null; byMove?: MoveFlow[] }
+/** Fewest quarter-minutes a cell's flow by move needs before it is used (else the cell's flow over all moves). */
+export const MOVE_MIN_SEGS = 20;
+/** Where the mid goes: 0 down, 1 flat (within half a tick), 2 up. Mids in cents (as research/depthStudy.ts moveOf). */
+export const moveOf = (from: number, to: number): 0 | 1 | 2 => { const half = from < 10 || from > 90 ? 0.05 : 0.5, d = to - from; return d < -half ? 0 : d > half ? 2 : 1; };
 export interface FlowCell { offset: number; qi: number; seconds: number; addPerSec: number; cancelPerSec: number; addSize: Quant; cancelSize: Quant }
 /** research/depthStudy.ts's --out: the depth model. */
 export interface DepthModel { days: string[]; shape: ShapeCell[]; flow: FlowCell[] }
@@ -108,8 +118,9 @@ export class DepthSim {
   forget(ticker: string): void { this.books.delete(ticker); }
 
   /** The book at an anchor quote (bid and ask in dollars) and its life until `until`: a full snapshot at `t`, then
-   *  the changes and trades in between, in time order. `close` is the contract's close time. */
-  play(ticker: string, t: number, bid: number, ask: number, until: number, close: number): DepthEv[] {
+   *  the changes and trades in between, in time order. `close` is the contract's close time; `nextMid` (dollars), the
+   *  next quote's mid, sets the trade flow by where the price is going (unknown: the flow over all moves). */
+  play(ticker: string, t: number, bid: number, ask: number, until: number, close: number, nextMid?: number): DepthEv[] {
     const bB = Math.round(bid * PX), bA = Math.round(ask * PX);
     if (!(bB >= 1 && bA <= PX - 1 && bA > bB)) return [];
     const u = rng(hashStr(ticker) ^ Math.floor(t / 1000));
@@ -132,7 +143,10 @@ export class DepthSim {
     // Until the next anchor, second by second: each level's adds and cancels arrive at the measured queue-reactive rates
     // (Poisson counts per second, netted into one change per level), and the trades take the best level at the measured
     // rate, size and side. Counting per second, not event by event, keeps a busy book (hundreds of changes a second) cheap.
-    const tradeRate = Math.max(0, cell.tradesPerMin?.mean ?? 0) / 60;
+    const mv = nextMid !== undefined && Number.isFinite(nextMid) ? cell.byMove?.[moveOf((bB + bA) / 20, nextMid * 100)] : undefined;
+    const byMove = mv && mv.segs >= MOVE_MIN_SEGS ? mv : undefined;
+    const tradeRate = byMove ? Math.max(0, byMove.tradesPerSec) : Math.max(0, cell.tradesPerMin?.mean ?? 0) / 60;
+    const yesShare = (byMove ? byMove.takerYesShare : undefined) ?? cell.takerYesShare ?? 0.5;
     const best = (side: Side) => { const m = b![side]; let top = side === 'bid' ? -Infinity : Infinity; for (const p of m.keys()) if (side === 'bid' ? p > top : p < top) top = p; return top; };
     for (let sec = t; sec < until; sec += 1000) {
       const end = Math.min(sec + 1000, until);
@@ -141,7 +155,7 @@ export class DepthSim {
       for (let i = 0; i < nTr; i++) {
         const at = sec + Math.floor(((i + 1) * (end - sec)) / (nTr + 1));
         // A YES taker buys at the best ask; a NO taker sells YES at the best bid.
-        const yes = u() < (cell.takerYesShare ?? 0.5), side: Side = yes ? 'ask' : 'bid', m = b[side], top = best(side);
+        const yes = u() < yesShare, side: Side = yes ? 'ask' : 'bid', m = b[side], top = best(side);
         if (!Number.isFinite(top)) continue;
         const q = m.get(top)!, n = Math.min(q, lognormal(u, cell.tradeSize.p50, cell.tradeSize.p90));
         out.push({ t: at, k: 'trade', ticker, price: top / PX, count: n, takerSide: yes ? 'yes' : 'no', ts: at, sim: 1 });

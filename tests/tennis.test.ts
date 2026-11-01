@@ -224,7 +224,7 @@ test('quota floor on tennis (PACER_FLOOR, Steven Oct 31): a leg aiming higher ke
   const floors = new QuotaFloors();
   const tr = new MatchTracker('Q', T);
   tr.progress = () => 0.5;
-  const at = (bid: number, net: number, r: { pacerUsd: number; floorMode: PacerFloorMode }) => decideMatch(tr, { event: 'Q', now: t0 + 3_600_000, startTime: t0, closeTime: t0 + 86_400_000,
+  const at = (bid: number, net: number, r: { pacerUsd: number; floorMode: PacerFloorMode; floorTicks?: number }) => decideMatch(tr, { event: 'Q', now: t0 + 3_600_000, startTime: t0, closeTime: t0 + 86_400_000,
     markets: [mk('Q-FAV', bid, bid + 0.02, { position: 30, avgEntry: 0.8, netAtBid: net }), mk('Q-DOG', 1 - bid - 0.02, 1 - bid)] }, T, budget, 0.01, { ...r, settleFrac: T.settleFrac, floors });
   const held = at(0.84, 5, { pacerUsd: 4.5, floorMode: 'riding' });
   assert.equal(held.plans.length, 0, JSON.stringify(held));
@@ -233,6 +233,10 @@ test('quota floor on tennis (PACER_FLOOR, Steven Oct 31): a leg aiming higher ke
   // The hour needs less now, but the profit fell below the $4.50 floor: sold at the bid.
   const fell = at(0.83, 4.4, { pacerUsd: 3, floorMode: 'riding' });
   assert.deepEqual([fell.plans[0]?.leg, fell.plans[0]?.price, fell.plans[0]?.count, fell.plans[0]?.why], ['quota_snipe', 0.83, 30, '+$4.40 net on 30 at bid 0.83 fell below its $4.50 floor'], JSON.stringify(fell));
+  // PACER_FLOOR_TICKS: 2 ticks on 30 contracts is a $0.60 cushion: +$4.40 and +$3.95 hold, +$3.80 sells.
+  assert.equal(at(0.83, 4.4, { pacerUsd: 3, floorMode: 'riding', floorTicks: 2 }).plans.length, 0);
+  assert.equal(at(0.82, 3.95, { pacerUsd: 3, floorMode: 'riding', floorTicks: 2 }).plans.length, 0);
+  assert.equal(at(0.81, 3.8, { pacerUsd: 3, floorMode: 'riding', floorTicks: 2 }).plans[0]?.why, '+$3.80 net on 30 at bid 0.81 fell below its $4.50 floor');
   // targets counts the hunt start too; off sells at the quota as before.
   floors.forget('Q-FAV');
   assert.equal(at(0.84, 5, { pacerUsd: 4.5, floorMode: 'targets' }).plans.length, 0);
