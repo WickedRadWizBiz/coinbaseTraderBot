@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { loadConfig, type StrategyConfig } from '../bot/config';
 import { DEFAULT_FEES } from '../bot/fees';
-import { applyFvGate, decide, fvGatePasses, loserExit, loserNoEntry, type MarketView, type StrategyOutput } from '../bot/strategy/fairValueStrategy';
+import { applyFvGate, decide, fvGatePasses, inLoserWindow, loserExit, loserNoEntry, shareWindowSec, type MarketView, type StrategyOutput } from '../bot/strategy/fairValueStrategy';
 
 // Steven's settlement rule (Oct 31) and the sizing lab's loser exits: the entry gate, the loser cut and the window cut.
 const base = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_CADENCE: 'continuous' }).strategy;
@@ -190,4 +190,24 @@ test('applyFvGate: the finished plan keeps no entry the gate refuses (fill-model
   // Off, or no fair value: untouched.
   assert.equal(applyFvGate(plan(), 0.62, 0, DEFAULT_FEES, off), 0);
   assert.equal(applyFvGate(plan(), undefined, 0, DEFAULT_FEES, cfg), 0);
+});
+
+test('shareWindowSec: the share rules measure a contract\'s own hour, not a ladder\'s listing hours or a day ahead', () => {
+  const close = Date.parse('2026-10-30T17:00:00Z');
+  assert.equal(base.shareWindowMaxSec, 3600, 'an hour by default');
+  // A 15-minute contract keeps its 900 s (the last 10% is its last 90 s).
+  assert.equal(shareWindowSec(close - 900_000, close, 3600), 900);
+  // An hourly ladder listed an hour ahead, and a daily one listed 20 hours ahead: both an hour (the last 10% is 6 minutes).
+  assert.equal(shareWindowSec(close - 3_600_000, close, 3600), 3600);
+  assert.equal(shareWindowSec(close - 20 * 3_600_000, close, 3600), 3600);
+  // No cap (0): the listing, as before (20 h: its last 10% was the last 2 hours, the bot's whole entry window).
+  assert.equal(shareWindowSec(close - 20 * 3_600_000, close, 0), 72_000);
+  // No open time, or a broken one: no window.
+  assert.equal(shareWindowSec(Number.NaN, close, 3600), undefined);
+  assert.equal(shareWindowSec(close, close, 3600), undefined);
+  // At 30 minutes to the close a 20-hour listing is no longer inside the loser window (it was, measured on the listing).
+  const L = { ...cfg.loserExits!, windowShare: 0.1 };
+  const at = (maxSec: number) => inLoserWindow({ settleShare: false, exitWindowOpen: true, tauSec: 1800, windowSec: shareWindowSec(close - 20 * 3_600_000, close, maxSec) }, L);
+  assert.equal(at(3600), false);
+  assert.equal(at(0), true);
 });
