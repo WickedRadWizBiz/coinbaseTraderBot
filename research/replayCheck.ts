@@ -722,7 +722,11 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
         const c = t.entryCost ?? 0, e = t.entryFv !== undefined ? t.entryFv - c : undefined;
         addA(k, 'side', t.entrySide.toUpperCase(), t.pnl);
         addA(k, 'price', c < 0.25 ? '<25c' : c < 0.45 ? '25-45c' : c < 0.55 ? '45-55c' : c < 0.75 ? '55-75c' : '75c+', t.pnl);
-        addA(k, 'fv edge', e === undefined ? 'n/a' : e < 0 ? '<0' : e < 0.03 ? '0-3c' : e < 0.06 ? '3-6c' : e < 0.1 ? '6-10c' : '10c+', t.pnl);
+        const eb = e === undefined ? 'n/a' : e < 0 ? '<0' : e < 0.03 ? '0-3c' : e < 0.06 ? '3-6c' : e < 0.1 ? '6-10c' : '10c+';
+        addA(k, 'fv edge', eb, t.pnl);
+        // Lab (Nov 1): which way in and how much edge it had at the fill, together (a quote fills after the price moves).
+        addA(k, 'bought by x fv edge', `${t.entryHow ?? 'n/a'} ${eb}`, t.pnl);
+        addA(k, 'bought by x side', `${t.entryHow ?? 'n/a'} ${t.entrySide.toUpperCase()} ${t.won ? 'won' : 'lost'}`, t.pnl);
         addA(k, 'side bought', t.won ? 'won' : 'lost', t.pnl);
         addA(k, 'bought by', t.entryHow ?? 'n/a', t.pnl);
         addA(k, 'exit', t.exitKind ?? 'n/a', t.pnl);
