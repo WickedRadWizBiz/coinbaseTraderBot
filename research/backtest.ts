@@ -172,6 +172,8 @@ export interface BacktestResult {
   /** Why the paper exchange turned orders down (its reason codes, counted), and the account at the end of the replay:
    *  cash, open positions (their worst loss) and resting orders. For the fidelity check's diagnostics. */
   exchangeRejected?: Record<string, number>;
+  /** Taker contracts asked for / filled / refused because our own earlier takes had emptied the level (bot/paper/paperExchange.ts TAKEN_REPLENISH_MS), by series too. */
+  takerThin?: PaperExchange['takerStats'];
   /** The paper maker fills' 60 s markouts over the whole replay (mid then less the fill price, signed for the fill's
    *  side, in dollars a contract): negative when the price moved against the resting order once it filled. */
   makerMarkout?: { n: number; mean: number };
@@ -1029,6 +1031,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   exits.avgSlippage = slipN ? slipSum / slipN : null;
   res.end = { balance: await ex.getBalance(), openPositions: pos.open().length, openMaxLoss: pos.open().reduce((a, p) => a + PositionBook.maxLoss(p), 0), openOrders: (await ex.getOpenOrders()).length };
   res.days = Math.max(1 / 24, (st.now - firstTs) / 86_400_000);
+  res.takerThin = ex.takerStats;
   res.vaultEnd = vault?.vaultTotal ?? 0;
   res.pocketEnd = vault?.pocketTotal ?? 0;
   return res;
