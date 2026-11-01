@@ -40,6 +40,7 @@
     "research:librarian": "tsx research/librarian.ts",
     "research:oracle-cull": "tsx research/oracleCull.ts",
     "research:lead-lag": "tsx research/leadLag.ts",
+    "research:quote-lag": "tsx research/quoteLagStudy.ts",
     "research:xgraph": "tsx research/trainCrossGraph.ts",
     "research:cross-lead": "tsx research/crossLead.ts",
     "history:kalshi": "tsx research/history/kalshiHistory.ts",

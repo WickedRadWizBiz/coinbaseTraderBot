@@ -149,8 +149,89 @@ jobs:
           if-no-files-found: ignore
 
   # One mechanism: its baseline and candidate replay on two runners at once (each ~2-3 h), then one judge.
+  quote-lag:
+    if: inputs.only == 'quote-lag' && inputs.hist_from == ''
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 345
+    env:
+      ONLY: ${{ inputs.only }}
+      DOMAIN: ${{ inputs.domain || 'crypto' }}
+      DAYS: ${{ inputs.days || '8' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Recordings from the cache (only new or changed files are then read from the server)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/recordings
+          key: snn-recordings-${{ inputs.domain || 'crypto' }}-${{ github.run_id }}
+          restore-keys: snn-recordings-${{ inputs.domain || 'crypto' }}-
+      - name: Copy the recordings and the meta-model (read-only)
+        run: |
+          set -euo pipefail
+          [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days must be a number"; exit 1; }
+          [[ "$DOMAIN" =~ ^(crypto|perps)$ ]] || { echo "domain must be crypto or perps"; exit 1; }
+          DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/models"
+          vanished_ok() { local c=$?; [ $c -eq 24 ] && return 0; return $c; }
+          ssh bot "cd ~/bot/data/recordings && find . -type f \( ! -name 'md-*' -o -mtime -$DAYS \) -printf '%P\n'" > "$RUNNER_TEMP/recordings.txt"
+          # Cached files outside today's window are dropped (the replay starts at the oldest day present).
+          (cd "$DATA/recordings" && find . -type f -printf '%P\n' | sort > "$RUNNER_TEMP/have.txt"; sort "$RUNNER_TEMP/recordings.txt" | comm -23 "$RUNNER_TEMP/have.txt" - | xargs -r -d '\n' rm -f)
+          echo "cache held $(wc -l < "$RUNNER_TEMP/have.txt") file(s); rsync now reads only new or changed ones"
+          rsync -a --whole-file --bwlimit=8m --rsync-path="flock bot/data/locks/snn-ablation-copy.lock nice -n 19 ionice -c3 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/" || vanished_ok
+          rsync -a --rsync-path="nice -n 19 ionice -c3 rsync" bot:bot/data/models/model.json "$DATA/models/" 2>/dev/null || echo "no promoted meta-model on the server: the shipped params/model.json prices"
+          echo "copied $(wc -l < "$RUNNER_TEMP/recordings.txt") recording file(s); data $(du -sh "$DATA" | cut -f1)"
+          # The oldest complete recorded day copied: the replay starts there.
+          FROM=$(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | sed 's/^md-//' | head -1)
+          [ -n "$FROM" ] || { echo "no recordings copied"; exit 1; }
+          echo "FROM=$FROM" >> "$GITHUB_ENV"
+          echo "replay from $FROM ($(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | wc -l) day(s))"
+      - name: Save the recordings to the cache
+        if: matrix.side != 'baseline'
+        uses: actions/cache/save@v4
+        with:
+          path: data/recordings
+          key: snn-recordings-${{ inputs.domain || 'crypto' }}-${{ github.run_id }}
+      - name: Quote lag study
+        run: |
+          set -euo pipefail
+          mkdir -p research/out
+          export TRADING_MODE=paper AUTO_TRAIN=off
+          # Does the mid follow the coin's move a few seconds late, and does trading that pay after taker fees?
+          npm run --silent research:quote-lag -- --recordings "$GITHUB_WORKSPACE/data/recordings" --count 20 --out research/out/quote_lag.json 2>&1 | grep --line-buffered -E '^\[quote-lag\]|Error|FATAL'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quote-lag
+          path: research/out/quote_lag.json
+          if-no-files-found: ignore
+
   side:
-    if: inputs.only != '' && inputs.from_run == '' && inputs.hist_from == ''
+    if: inputs.only != '' && inputs.only != 'quote-lag' && inputs.from_run == '' && inputs.hist_from == ''
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 345
