@@ -132,6 +132,8 @@ jobs:
     timeout-minutes: 340
     strategy:
       fail-fast: false
+      # The account's runner cap is shared with every other lab (coordinator, Nov 1): three backtests at a time.
+      max-parallel: 3
       matrix:
         # Eight runners, not 24: queued behind the other labs, 24 waited so long that the cached copy of the days was
         # evicted before most of them started (run 41218659211). The real quotes and the four quick fill-ins run one
@@ -208,14 +210,18 @@ jobs:
             [ -s "$DATA/models/depth_model.json" ] || { echo "the depth study wrote no model"; exit 1; }
             run --stage prepare --only depth --depth-model "$DATA/models/depth_model.json"
             run --stage backtest --how depth
-            cp "$WORK"/windows-depth-p*.json "$DATA/models/depth_model.json" "$RUNNER_TEMP/out/"
+            # The adversary's probes on the depth fill-in (research/depthAdversary.ts).
+            run --stage adversary --how depth
+            cp "$WORK"/windows-depth-p*.json "$WORK"/adversary-depth-p*.json "$DATA/models/depth_model.json" "$RUNNER_TEMP/out/"
           else
             # One failed fill-in leaves the others standing (compare leaves it out); the real quotes are needed.
             run --stage backtest --how real
-            cp "$WORK"/windows-real-p*.json "$RUNNER_TEMP/out/"
+            # The adversary's probes on the real books (research/depthAdversary.ts): what each fill-in is held to.
+            run --stage adversary --how real
+            cp "$WORK"/windows-real-p*.json "$WORK"/adversary-real-p*.json "$RUNNER_TEMP/out/"
             for how in hold requote worst noise; do
-              if ( run --stage prepare --only "$how" && run --stage backtest --how "$how" ); then
-                cp "$WORK"/windows-$how-p*.json "$RUNNER_TEMP/out/"
+              if ( run --stage prepare --only "$how" && run --stage backtest --how "$how" && run --stage adversary --how "$how" ); then
+                cp "$WORK"/windows-$how-p*.json "$WORK"/adversary-$how-p*.json "$RUNNER_TEMP/out/"
               else
                 echo "::warning::the $how fill-in failed: left out of the comparison"
               fi
@@ -284,6 +290,19 @@ jobs:
           c = r['choice']
           print('closest to the real quotes:', c['how'] + (f" (bridge {c['sigma']})" if c.get('sigma') else ''))
           PY
+      # Advisory: a failure here never holds back the verdict below.
+      - name: The adversary's probes, real books vs each fill-in
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          export TRADING_MODE=paper AUTO_TRAIN=off
+          ARGS=""
+          for how in real hold requote worst noise depth; do
+            FILES=$(ls "$RUNNER_TEMP"/in/fidelity-*/adversary-$how-p*.json 2>/dev/null | paste -sd, - || true)
+            if [ -n "$FILES" ]; then ARGS="$ARGS $how=$FILES"; fi
+          done
+          case " $ARGS" in *" real="*) ;; *) echo "no adversary results on the real books: nothing to compare"; exit 0;; esac
+          node --import tsx research/depthAdversary.ts --compare "$ARGS" --out "$GITHUB_WORKSPACE/data/models/replay_adversary.json"
       - name: Send the verdict to the server
         run: |
           set -euo pipefail

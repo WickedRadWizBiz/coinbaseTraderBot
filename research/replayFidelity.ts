@@ -28,6 +28,7 @@ import { contractKind, type MarketKind } from '../bot/model/fairValue';
 import { backtestMain } from './backtest';
 import { fillDayFile, QUOTE_FILLS, type Ev, type QuoteFill } from './goLiveTally';
 import { readDepthModel, type DepthModel } from './history/depthSim';
+import { probeDays, probeStats, type AdversaryOut } from './depthAdversary';
 import { gkVariance, requoteBetween } from './history/historyReplay';
 
 const MIN = 60_000, SLOT = 15_000, DAY = 86_400_000;
@@ -345,6 +346,17 @@ export async function replayFidelityMain(argOf: (k: string, d: string) => string
     // The real backtest's runner has no prepare stage, so nothing has made the folder yet.
     fs.mkdirSync(work, { recursive: true });
     writeWindows(path.join(work, parts > 1 ? `windows-${how}-p${part}.json` : `windows-${how}.json`), onDays(w, sliced().days));
+    return undefined;
+  }
+  // The adversary's probes on the real books or a fill-in (research/depthAdversary.ts), on this part's days only.
+  if (stage === 'adversary') {
+    const how = argOf('how', '');
+    if (how !== 'real' && !(QUOTE_FILLS as readonly string[]).includes(how)) throw new Error(`--how must be real or one of ${QUOTE_FILLS.join(', ')}`);
+    const days = sliced().days, t0 = Date.now();
+    const res = await probeDays(dirOf(how), days);
+    fs.mkdirSync(work, { recursive: true });
+    fs.writeFileSync(path.join(work, parts > 1 ? `adversary-${how}-p${part}.json` : `adversary-${how}.json`), JSON.stringify({ how, days: res } satisfies AdversaryOut));
+    console.log(`[fidelity] adversary on ${how} (${elapsed(t0)}): ${probeStats(res).map((x) => `${x.probe} ${x.perHour}/h, markout ${x.markoutC}c, settled ${x.settledC}c (${x.n})`).join(' | ')}`);
     return undefined;
   }
   if (stage === 'compare') {
