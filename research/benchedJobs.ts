@@ -21,24 +21,26 @@ import { recordingFiles } from '../bot/marketdata/recordingFiles';
 /** Each variant's bot.env lines on top of the server's settings. The baseline is the branch's defaults: the take-profit's
  *  level ladder (adaptive), the model's skill weight (adaptive), the probation graded, the cross and the dip buy off. */
 export const VARIANTS: Record<string, Record<string, string>> = {
+  // Ordered by what each wave of three runners should answer first (the account runs at most three jobs at once).
   baseline: {},
+  placebo: { SINUOUS_DIP_BUY: 'true', SINUOUS_DIP_MARGIN: '0.99' },
+  skill_w75: { MODEL_SKILL_W: '0.75' },
   tp_l0: { TP_LEVEL: '0' },
   tp_l1: { TP_LEVEL: '1' },
-  tp_l2: { TP_LEVEL: '2' },
   skill_off: { MODEL_SKILL: 'false' },
-  skill_w75: { MODEL_SKILL_W: '0.75' },
+  dip8: { SINUOUS_DIP_BUY: 'true', SINUOUS_DIP_MARGIN: '0.08' },
+  cross_l3: { SINUOUS_CROSS: 'true', SINUOUS_CROSS_LEVEL: '3' },
+  gp_full: { PROBATION_GP_MULT: '1' },
+};
+
+/** Run after the first verdicts: neighbours of the winners, the latency stress, and the other levels and margins. */
+export const LATER: Record<string, Record<string, string>> = {
+  base_lat500: { RS_LATENCY_MS: '500' },
+  tp_l2: { TP_LEVEL: '2' },
   skill_w50: { MODEL_SKILL_W: '0.5' },
   cross_l1: { SINUOUS_CROSS: 'true', SINUOUS_CROSS_LEVEL: '1' },
-  cross_l3: { SINUOUS_CROSS: 'true', SINUOUS_CROSS_LEVEL: '3' },
-  dip8: { SINUOUS_DIP_BUY: 'true', SINUOUS_DIP_MARGIN: '0.08' },
   dip12: { SINUOUS_DIP_BUY: 'true', SINUOUS_DIP_MARGIN: '0.12' },
   dip8_1: { SINUOUS_DIP_BUY: 'true', SINUOUS_DIP_MARGIN: '0.08', SINUOUS_DIP_MAX: '1', SINUOUS_DIP_COOLDOWN_SEC: '300' },
-  // The adversary's controls. A placebo: the dip buy on with a margin no fair value clears, so it never acts; any gap from
-  // the baseline is the harness's own noise. A stress: the baseline with orders reaching the book half a second late
-  // (RS_LATENCY_MS); winners are run under it too before they are believed.
-  placebo: { SINUOUS_DIP_BUY: 'true', SINUOUS_DIP_MARGIN: '0.99' },
-  base_lat500: { RS_LATENCY_MS: '500' },
-  gp_full: { PROBATION_GP_MULT: '1' },
   gp_low: { PROBATION_GP_MULT: '0.1' },
 };
 
@@ -112,7 +114,7 @@ async function main(): Promise<void> {
   const days = arg('days', 'data/sweep-days');
   if (cmd === 'run') {
     const name = arg('variant', 'baseline');
-    const env = VARIANTS[name];
+    const env = VARIANTS[name] ?? LATER[name];
     if (!env) throw new Error(`unknown variant ${name} (${Object.keys(VARIANTS).join(', ')})`);
     const { evalTrial } = await import('./randomSweep');
     const t0 = Date.now();
