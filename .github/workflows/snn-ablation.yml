@@ -60,6 +60,10 @@ on:
         description: 'Extra judge flags, e.g. --gain true --gainPrior 100 --gainForget 0.999 (the learned correction gain; --gainPerRow true weighs every row)'
         required: false
         default: '--gain true'
+      fidelity_cache:
+        description: 'quote-lag only: an Actions cache key saved by Replay fidelity on main (e.g. fidelity-data-41351064742-1); its recorded days are used and the server is not read'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -179,6 +183,7 @@ jobs:
         if: steps.deps.outputs.cache-hit != 'true'
         run: npm ci --no-audit --no-fund --silent
       - name: SSH to the server
+        if: inputs.fidelity_cache == ''
         env:
           SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           HOST: ${{ secrets.LIGHTSAIL_HOST }}
@@ -189,13 +194,25 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
           printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
           ssh bot true && echo "connected"
+      - name: Recorded days from the Replay fidelity cache (no server read)
+        if: inputs.fidelity_cache != ''
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/recordings
+            data/fit
+            data/models
+          key: ${{ inputs.fidelity_cache }}
+          fail-on-cache-miss: true
       - name: Recordings from the cache (only new or changed files are then read from the server)
+        if: inputs.fidelity_cache == ''
         uses: actions/cache/restore@v4
         with:
           path: data/recordings
           key: snn-recordings-${{ inputs.domain || 'crypto' }}-${{ github.run_id }}
           restore-keys: snn-recordings-${{ inputs.domain || 'crypto' }}-
       - name: Copy the recordings and the meta-model (read-only)
+        if: inputs.fidelity_cache == ''
         run: |
           set -euo pipefail
           [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days must be a number"; exit 1; }
@@ -215,7 +232,7 @@ jobs:
           echo "FROM=$FROM" >> "$GITHUB_ENV"
           echo "replay from $FROM ($(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | wc -l) day(s))"
       - name: Save the recordings to the cache
-        if: matrix.side != 'baseline'
+        if: inputs.fidelity_cache == ''
         uses: actions/cache/save@v4
         with:
           path: data/recordings
