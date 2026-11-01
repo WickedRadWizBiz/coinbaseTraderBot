@@ -158,7 +158,8 @@ async function tapeFor(dir: string, modelPath: string, tapeDir: string | undefin
 }
 
 /** One trial: the production backtester over every day in `dir`, as paper with these bot.env lines. */
-export async function evalTrial(dir: string, modelPath: string, env: Record<string, string>, stage = 1, scope: Scope = 'sample', tapeDir?: string): Promise<TrialResult> {
+/** `refill`: refill the pool when it runs dry, as paper does (a comparison over months otherwise stops in week one). */
+export async function evalTrial(dir: string, modelPath: string, env: Record<string, string>, stage = 1, scope: Scope = 'sample', tapeDir?: string, extra: { refill?: boolean } = {}): Promise<TrialResult> {
   const t0 = Date.now();
   const base = { id: trialId(env), stage, scope, env, ms: 0, pnl: 0, fees: 0, contracts: 0, fills: 0, trades: 0, byDay: {}, tradesByDay: {}, byHour: {} };
   try {
@@ -191,6 +192,7 @@ export async function evalTrial(dir: string, modelPath: string, env: Record<stri
       accuracyGate: S.accuracyGate, takeProfitBench: { enforce: S.takeProfitBench, rule }, tape, dailyGoalUsd: cfg.vault.dailyGoalUsd, sessionEdge: cfg.sessionEdge,
       volProfile: em.volProfile, applyVolSeasonality: Boolean(em.volProfile), volModel: em.volModel, fillModel: em.fillModel, calendar: em.calendar,
       taNet: true, trials: em.trials, marketContext: true, ...(seed ? { seedCandles: seed } : {}),
+      ...(extra.refill ? { refillUsd: cfg.paperBankrollUsd } : {}),
     });
     const byDay: Record<string, number> = {}, tradesByDay: Record<string, number> = {}, byHour: Record<string, number> = {};
     for (const t of r.trades) {

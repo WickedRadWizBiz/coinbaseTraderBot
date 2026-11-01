@@ -1,0 +1,205 @@
+name: Scaling history lab
+
+# The scaling lab's arms (dynamic edge, regime sizing) replayed as the whole paper bot over months of Kalshi history,
+# paired day by day against today's bot (research/scalingHistory.ts; thread "Plan dynamic scaling across the bot", Nov 1).
+# Steven's rule (Nov 1): history research must be deep on days and cover several market regimes, so the report splits the
+# days by month and into calm / normal / wild BTC days. Reads the daily sweep's caches from main (the Kalshi history and
+# its replay, and the server's model and settings it copied): the server is not touched. Aggregates only (public repo);
+# the report is posted as a comment on the commit. Arms: lab/scaling-history.txt (tag: KEY=VALUE ..., header # days=N).
+
+on:
+  push:
+    branches: ['claude/project-thread-ks5pyx']
+    paths: ['lab/scaling-history.txt']
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: scaling-history-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  SWEEP_BANKROLL_USD: '200'
+
+jobs:
+  data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    outputs:
+      arms: ${{ steps.p.outputs.arms }}
+      days: ${{ steps.p.outputs.days }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: p
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, re
+          days, arms = '120', []
+          for line in open('lab/scaling-history.txt'):
+              line = line.rstrip('\n')
+              m = re.match(r'^#\s*days=([0-9]+)$', line)
+              if m: days = m.group(1); continue
+              if not line.strip() or line.lstrip().startswith('#'): continue
+              tag, _, ov = line.partition(':')
+              assert re.match(r'^[a-z0-9_]+$', tag.strip()), tag
+              for kv in ov.split():
+                  assert re.match(r'^[A-Z][A-Z0-9_]*=[A-Za-z0-9_.,:-]*$', kv), kv
+              arms.append({'tag': tag.strip(), 'overrides': ' '.join(ov.split())})
+          assert arms and arms[0]['tag'] == 'base' and len(arms) <= 16
+          print('days=' + days); print('arms=' + json.dumps(arms))
+          PY
+          cat "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - name: Restore the Kalshi history and its replay (this branch's, else the sweep's on main)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: scaling-history-replay-${{ github.run_id }}
+          restore-keys: |
+            scaling-history-replay-
+            kalshi-replay-
+      - name: Repair stored quotes, download what is new, rebuild the replay
+        run: |
+          node --import tsx research/kalshiReplayData.ts --history data/history --out data/history-replay --days "$(( ${{ steps.p.outputs.days }} + 3 ))" --budget-min 100 2>&1 \
+            | grep -vE '^\[kalshi-replay-data\] (binance|kalshi|replay): .*(skipp|already|listing|page)' | tail -30
+      - name: Save the Kalshi history and its replay
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: scaling-history-replay-${{ github.run_id }}
+      - name: Restore the server's model and settings (the sweep's copy on main)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+          key: kalshi-server-none
+          restore-keys: kalshi-server-
+      - name: Stop when no copy of the server's model is cached
+        run: '[ -f data/models/model.json ] || { echo "::error::no server copy cached: rerun after the daily sweep"; exit 1; }'
+      # One copy of the model and settings for every arm (a newer sweep copy mid-run would compare different models).
+      - name: Pin that copy for every replay of this run
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+          key: scaling-history-server-${{ github.run_id }}
+
+  run:
+    needs: [data]
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: ${{ fromJson(needs.data.outputs.arms) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: scaling-history-replay-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+          key: scaling-history-server-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Replay ${{ matrix.arm.tag }}
+        env:
+          NODE_OPTIONS: --max-old-space-size=12288
+          OVERRIDES: ${{ matrix.arm.overrides }}
+          TAG: ${{ matrix.arm.tag }}
+        run: |
+          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "${{ needs.data.outputs.days }}"
+          if [ -f data/sweep-env/train.env ]; then set -a; . data/sweep-env/train.env; set +a; echo "server settings: $(wc -l < data/sweep-env/train.env) line(s)"; else echo "no server settings cached: the bot's defaults"; fi
+          cp -rn data/sweep-env/history/. data/history/ 2>/dev/null || true
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json" RS_TRIALS_FILE="$GITHUB_WORKSPACE/data/sweep-env/component_trials.json"
+          node --import tsx research/scalingHistory.ts run --arm "$TAG" --env "$OVERRIDES" --days data/sweep-days --model data/models/model.json --out research/out/scaling-history 2>&1 \
+            | grep -E '^\[scaling-history\]|Error|error' | head -20
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scaling-history-${{ matrix.arm.tag }}
+          path: research/out/scaling-history/
+          retention-days: 14
+
+  report:
+    needs: [data, run]
+    if: ${{ !cancelled() && needs.data.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: scaling-history-replay-${{ github.run_id }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: scaling-history-*
+          path: research/out/scaling-history
+          merge-multiple: true
+      - name: Report and post it on the commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --import tsx research/scalingHistory.ts report --out research/out/scaling-history --candles data/history/binance/BTC/1d.csv --last "${{ needs.data.outputs.days }}" > report.txt 2>&1 || true
+          cat report.txt
+          { echo "**Scaling history lab** run [$GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"; echo; echo '```'; head -c 60000 report.txt; echo '```'; } > comment.md
+          jq -n --rawfile body comment.md '{body: $body}' | gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" --input - --jq '.html_url'
