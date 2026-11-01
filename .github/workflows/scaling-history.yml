@@ -9,7 +9,7 @@ name: Scaling history lab
 
 on:
   push:
-    branches: ['claude/project-thread-ks5pyx']
+    branches: ['claude/project-thread-ks5pyx', 'claude/project-thread-0pkw7f']
     paths: ['lab/scaling-history.txt']
 
 permissions:
@@ -26,6 +26,7 @@ env:
 jobs:
   data:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 150
     outputs:
       arms: ${{ steps.p.outputs.arms }}
@@ -36,11 +37,12 @@ jobs:
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, re
-          days, arms = '120', []
+          days, arms, copy = '120', [], '0'
           for line in open('lab/scaling-history.txt'):
               line = line.rstrip('\n')
               m = re.match(r'^#\s*days=([0-9]+)$', line)
               if m: days = m.group(1); continue
+              if re.match(r'^#\s*server_copy=1$', line): copy = '1'; continue
               if not line.strip() or line.lstrip().startswith('#'): continue
               tag, _, ov = line.partition(':')
               assert re.match(r'^[a-z0-9_]+$', tag.strip()), tag
@@ -48,7 +50,7 @@ jobs:
                   assert re.match(r'^[A-Z][A-Z0-9_]*=[A-Za-z0-9_.,:-]*$', kv), kv
               arms.append({'tag': tag.strip(), 'overrides': ' '.join(ov.split())})
           assert arms and arms[0]['tag'] == 'base' and len(arms) <= 16
-          print('days=' + days); print('arms=' + json.dumps(arms))
+          print('days=' + days); print('copy=' + copy); print('arms=' + json.dumps(arms))
           PY
           cat "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v5
@@ -95,6 +97,29 @@ jobs:
             data/sweep-env
           key: kalshi-server-none
           restore-keys: kalshi-server-
+      # Only with the header line '# server_copy=1' (the coordinator's copy slot) and no sweep copy on main: the same small,
+      # read-only copy the sweep makes (the model files and the settings without credentials), throttled. No recordings.
+      - name: Copy the server's model and settings (read-only, opt-in)
+        if: steps.p.outputs.copy == '1' && hashFiles('data/models/model.json') == ''
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/models" "$DATA/sweep-env"
+          R=(rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync")
+          "${R[@]}" bot:bot/data/models/model.json "$DATA/models/"
+          for f in vol_profile.json vol_model.json fill_model.json session_risk.json ta_net.json rule_book.json gp_indicators.json; do "${R[@]}" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || true; done
+          "${R[@]}" bot:bot/data/probation.json "$DATA/sweep-env/probation.json" 2>/dev/null || true
+          "${R[@]}" bot:bot/data/component_trials.json "$DATA/sweep-env/component_trials.json" 2>/dev/null || true
+          ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$DATA/sweep-env/train.env" || true
+          rm -f ~/.ssh/id_bot
+          echo "settings: $(wc -l < "$DATA/sweep-env/train.env") line(s); model: $(ls "$DATA/models" | wc -l) file(s)"
       - name: Stop when no copy of the server's model is cached
         run: '[ -f data/models/model.json ] || { echo "::error::no server copy cached: rerun after the daily sweep"; exit 1; }'
       # One copy of the model and settings for every arm (a newer sweep copy mid-run would compare different models).
