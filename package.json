@@ -51,6 +51,7 @@
     "research:seed-candles": "tsx research/seedCandles.ts",
     "research:kalshi-replay-data": "tsx research/kalshiReplayData.ts",
     "research:replay-fidelity": "tsx research/replayFidelity.ts",
+    "research:history-twin": "tsx research/historyTwin.ts",
     "research:whole-bot": "tsx research/wholeBot.ts",
     "research:setup-snn": "tsx research/setupSnnStudy.ts",
     "research:snn-pbt": "tsx research/snnPbt.ts",

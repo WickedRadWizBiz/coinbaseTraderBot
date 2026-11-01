@@ -61,6 +61,10 @@ interface PaperState {
 const KEEP_ORDERS_MS = 3_600_000, KEEP_ORDERS = 500;
 /** Fills kept: the last day, newest 2,000 (reconciliation replays from 10 minutes before the newest fill). */
 const KEEP_FILLS_MS = 86_400_000, KEEP_FILLS = 2000;
+/** How long the size our own taker orders took from a level stays missing from the (recorded / public) book we see:
+ *  the public book never shows our paper takes, so without this a thin level could be bought again and again
+ *  (Nov 1: the replay's KXDOGE hourly range profits). New size added at the level after our take counts at once. */
+export const TAKEN_REPLENISH_MS = Number(process.env.PAPER_TAKEN_REPLENISH_MS ?? 60_000);
 
 export class PaperExchange extends EventEmitter implements ExchangeGateway {
   readonly name = 'paper';
@@ -71,6 +75,10 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
   private readonly byId = new Map<string, PaperOrder>();
   private readonly byClientId = new Map<string, PaperOrder>();
   private readonly resting = new Map<string, PaperOrder>();
+  /** Size our taker fills removed from a book level (ticker|side|price): see TAKEN_REPLENISH_MS. */
+  private readonly taken = new Map<string, { size: number; taken: number; ts: number }>();
+  /** Taker contracts asked for, filled, and refused because the level was already taken by us. */
+  readonly takerStats: { asked: number; filled: number; blocked: number; bySeries: Record<string, { asked: number; filled: number; blocked: number }> } = { asked: 0, filled: 0, blocked: 0, bySeries: {} };
 
   constructor(
     /** State file; undefined = in-memory only (backtests). */
@@ -193,12 +201,28 @@ export class PaperExchange extends EventEmitter implements ExchangeGateway {
     if (crosses) {
       // Taker: walk the opposite side of the visible book.
       const levels = req.side === 'bid' ? book.snapshot(50).asks : book.snapshot(50).bids;
+      const bookSide = req.side === 'bid' ? 'ask' : 'bid';
+      const ser = (this.takerStats.bySeries[req.ticker.split('-')[0]] ??= { asked: 0, filled: 0, blocked: 0 });
+      this.takerStats.asked += o.remainingCount; ser.asked += o.remainingCount;
       for (const lvl of levels) {
         if (o.remainingCount <= 1e-9) break;
         const through = req.side === 'bid' ? lvl.price <= req.price : lvl.price >= req.price;
         if (!through) break;
-        this.fill(o, Math.min(lvl.size, o.remainingCount), lvl.price, true);
+        const key = `${req.ticker}|${bookSide}|${lvl.price}`;
+        let e = this.taken.get(key);
+        if (e && (TAKEN_REPLENISH_MS <= 0 || this.now() - e.ts >= TAKEN_REPLENISH_MS)) { this.taken.delete(key); e = undefined; }
+        // What we took is still missing from the level (size added since then is real); conservative while the
+        // recorded level shrinks, since the public book never knew our take.
+        const avail = e ? Math.max(0, lvl.size - e.taken) : lvl.size;
+        const blocked = Math.min(lvl.size, o.remainingCount) - Math.min(avail, o.remainingCount);
+        this.takerStats.blocked += blocked; ser.blocked += blocked;
+        const n = Math.min(avail, o.remainingCount);
+        if (n <= 1e-9) continue;
+        this.fill(o, n, lvl.price, true);
+        this.takerStats.filled += n; ser.filled += n;
+        if (TAKEN_REPLENISH_MS > 0) this.taken.set(key, { size: lvl.size, taken: (e?.taken ?? 0) + n, ts: this.now() });
       }
+      if (this.taken.size > 5000) for (const [k, v] of this.taken) if (this.now() - v.ts >= TAKEN_REPLENISH_MS) this.taken.delete(k);
     }
     if (o.remainingCount > 1e-9) {
       if (req.timeInForce === 'good_till_canceled') {

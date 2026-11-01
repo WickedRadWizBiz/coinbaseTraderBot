@@ -110,6 +110,9 @@ export interface ReplayOpts {
   /** Real contracts' quotes follow the index at every print between their minute candles (requoteBetween) instead of
    *  the minute's last quote standing until the next one (default off: a strategy backtest wants it on). */
   requote?: boolean;
+  /** With requote: the quote's lag behind the index between candles (requoteBetween `lag`); without it the quote
+   *  follows the index at once. */
+  requoteLag?: QuoteLag;
   /** Rebuild days already written (default: skip them unless the format version changed). */
   force?: boolean;
   /** Keep every built day's end-of-day state, not only the last KEEP_STATES days' and each month's last (the history
@@ -482,7 +485,7 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
   // next day's file, so every file stays in time order.
   let carry: Ev[] = [];
   const tennisSeries = o.tennisSeries ?? [];
-  const base = `${REPLAY_VERSION}:${assets.join(',')}:${synthetic ? 'synth' : 'real'}:${tennisSeries.join(',')}${o.requote ? ':requote' : ''}`;
+  const base = `${REPLAY_VERSION}:${assets.join(',')}:${synthetic ? 'synth' : 'real'}:${tennisSeries.join(',')}${o.requote ? ':requote' : ''}${o.requote && o.requoteLag ? `:lag${o.requoteLag.gInf}/${o.requoteLag.tauSec}` : ''}`;
   const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
   // A day's inputs: the Kalshi history it reads (a later download reached it), how far the 1-minute
   // history and funding rates reach into it, and the dominance anchors near it.
@@ -661,7 +664,7 @@ export async function buildHistoryReplay(o: ReplayOpts): Promise<{ days: number;
           // requote follows the index until then.
           const mid = (c.bidC + c.askC) / 2, until = Math.min(cs[i + 1]?.ts ?? m.closeTime, m.closeTime);
           if (mid >= 0.03 && mid <= 0.97) for (let at = c.ts + 15_000; at < until; at += 15_000) { const l = alive.get(at); if (l) l.push(m.ticker); else alive.set(at, [m.ticker]); }
-          if (ixs && sgs) requoteBetween(ev, { ...m, kind }, c.bidC, c.askC, c.ts, until, d0, ixs, sgs);
+          if (ixs && sgs) requoteBetween(ev, { ...m, kind }, c.bidC, c.askC, c.ts, until, d0, ixs, sgs, o.requoteLag);
         }
         if (c.volume && c.volume > 0 && c.last !== null) ev.push({ t: c.ts, k: 'trade', ticker: m.ticker, price: c.last, count: c.volume, ts: c.ts - 1 });
       }
@@ -755,7 +758,12 @@ const logit = (p: number) => { const q = Math.min(0.995, Math.max(0.005, p)); re
  *  45 s old (the random sweeps of Oct 25 turned that into +$400k on $150). The quote moves with a no-skill fair value
  *  of the contract (synthTick's), keeping the market's own view from the candle: its logit offset from that fair value
  *  and its spread. The candles themselves stay as they were. */
-export function requoteBetween(ev: Ev[], m: { ticker: string; kind: MarketKind; strike: number | null; cap: number | null; closeTime: number }, bid0: number, ask0: number, t0: number, until: number, d0: number, ixs: Float64Array, sgs: Float64Array): void {
+/** How a real Kalshi quote lags the index between candles (measured on the recordings, research/quoteLagStudy.ts): of a
+ *  fair-value move (in log-odds) the quote takes up only the share `gInf` within the minute, approaching it with time
+ *  constant `tauSec` (Oct 24-31: about 0.29 of the move, 0.21 of it within 5 s, so tauSec ~3.9). */
+export interface QuoteLag { gInf: number; tauSec: number }
+
+export function requoteBetween(ev: Ev[], m: { ticker: string; kind: MarketKind; strike: number | null; cap: number | null; closeTime: number }, bid0: number, ask0: number, t0: number, until: number, d0: number, ixs: Float64Array, sgs: Float64Array, lag?: QuoteLag): void {
   const slot = (t: number) => { const k = TICKS.indexOf((t - d0) % MIN); return t >= d0 && k >= 0 ? Math.floor((t - d0) / MIN) * TICKS.length + k : -1; };
   const terms = { kind: m.kind, strike: m.strike ?? undefined, cap: m.cap ?? undefined };
   const fvAt = (t: number): number | undefined => {
@@ -777,11 +785,21 @@ export function requoteBetween(ev: Ev[], m: { ticker: string; kind: MarketKind; 
   if (p0 === undefined) return;
   const off = logit((bid0 + ask0) / 2) - logit(p0);
   const w = Math.max(1, Math.round((ask0 - bid0) * 100));
+  // With a lag the quote carries a share of the fair value's move since the candle, reached through a first-order filter.
+  const l0 = logit(p0), keep = lag ? Math.exp(-1 / Math.max(1e-6, lag.tauSec)) : 0;
+  let y = 0, last = t0;
   for (let t = t0 + 1000; t < until; t += 1000) {
     if (slot(t) < 0) continue;
     const p = fvAt(t);
     if (p === undefined) continue;
-    const mid = 1 / (1 + Math.exp(-(logit(p) + off)));
+    let q = logit(p);
+    if (lag) {
+      const k = Math.pow(keep, (t - last) / 1000);
+      y = k * y + (1 - k) * lag.gInf * (q - l0);
+      last = t;
+      q = l0 + y;
+    }
+    const mid = 1 / (1 + Math.exp(-(q + off)));
     const bid = Math.min(99 - w, Math.max(1, Math.round(mid * 100 - w / 2)));
     ev.push({ t, k: 'book', ticker: m.ticker, bids: [{ price: bid / 100, size: 100 }], asks: [{ price: (bid + w) / 100, size: 100 }], ts: t });
   }
