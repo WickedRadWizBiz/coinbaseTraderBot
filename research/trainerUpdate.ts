@@ -12,7 +12,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-export const REPO = 'WickedRadWizBiz/coinbaseTraderBot';
+export const REPO = 'Wickedrad/coinbaseTraderBot';
 export const RELEASE_TAG = 'trainer-latest';
 export const RELEASE_PAGE = `https://github.com/${REPO}/releases/tag/${RELEASE_TAG}`;
 const ASSET = 'KalshiTrainer-windows.zip';
