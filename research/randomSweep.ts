@@ -427,7 +427,10 @@ async function main(): Promise<void> {
     const { replayKalshiDays } = await import('./history/historyReplay');
     const replay = arg('replay', 'data/history-replay'), out = arg('out', 'data/sweep-days');
     const kDays = new Set(fs.existsSync(replay) ? replayKalshiDays(replay) : []);
-    const use = (await daysIn(replay)).filter((d) => kDays.has(d.day)).slice(-Number(arg('days', '120')));
+    let use = (await daysIn(replay)).filter((d) => kDays.has(d.day)).slice(-Number(arg('days', '120')));
+    // --part i/n: the i-th of n equal stretches, oldest first (long comparisons split across runners).
+    const [pi, pn] = arg('part', '1/1').split('/').map(Number);
+    if (pn > 1) { const size = Math.ceil(use.length / pn); use = use.slice((pi - 1) * size, pi * size); }
     const { linkDays } = await import('../bot/marketdata/recordingFiles');
     fs.rmSync(out, { recursive: true, force: true });
     linkDays(use, out);

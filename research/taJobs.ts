@@ -104,6 +104,21 @@ export const CONDITIONERS: Array<{ name: string; read: (r: EntryLogRow) => numbe
   ];
 })();
 
+/** The baseline's entry log, from every part it ran in (baseline.entries.jsonl, baseline.p1.entries.jsonl, ...). */
+function baselineLog(out: string): EntryLogRow[] {
+  return (fs.existsSync(out) ? fs.readdirSync(out) : []).filter((f) => /^baseline(\.p\d+)?\.entries\.jsonl$/.test(f)).flatMap((f) => readLog(path.join(out, f)));
+}
+
+/** Two parts of one variant's replay (older and newer days) as one result. */
+function mergeParts(a: TrialResult, b: TrialResult): TrialResult {
+  const add = (x: Record<string, number>, y: Record<string, number>) => { const o = { ...x }; for (const [k, v] of Object.entries(y ?? {})) o[k] = (o[k] ?? 0) + v; return o; };
+  return {
+    ...a, ok: a.ok && b.ok, error: a.error ?? b.error, pnl: a.pnl + b.pnl, fees: a.fees + b.fees, contracts: a.contracts + b.contracts, fills: a.fills + b.fills, trades: a.trades + b.trades,
+    byDay: add(a.byDay, b.byDay), tradesByDay: add(a.tradesByDay, b.tradesByDay), byHour: add(a.byHour, b.byHour),
+    diag: a.diag && b.diag ? { entryEvaluations: a.diag.entryEvaluations + b.diag.entryEvaluations, accuracyBlocks: a.diag.accuracyBlocks + b.diag.accuracyBlocks, refills: a.diag.refills + b.diag.refills, refillUsd: a.diag.refillUsd + b.diag.refillUsd } : a.diag ?? b.diag,
+  };
+}
+
 function readLog(file: string): EntryLogRow[] {
   if (!fs.existsSync(file)) return [];
   return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as EntryLogRow).filter((r) => r.won !== undefined);
@@ -160,9 +175,11 @@ async function main(): Promise<void> {
     if (!env) throw new Error(`unknown variant ${name} (${[...Object.keys(VARIANTS), ...Object.keys(GATE_VARIANTS)].join(', ')})`);
     const { evalTrial } = await import('./randomSweep');
     const t0 = Date.now();
-    const r = await evalTrial(days, arg('model', 'data/models/model.json'), env, 3, 'all', undefined, { entryLog: process.argv.includes('--entry-log') ? path.join(out, `${name}.entries.jsonl`) : undefined, refill: true });
+    // --part p1: one stretch of the days (randomSweep.ts days --part); the report adds a variant's parts together.
+    const part = arg('part', ''), tag = part ? `${name}.${part}` : name;
+    const r = await evalTrial(days, arg('model', 'data/models/model.json'), env, 3, 'all', undefined, { entryLog: process.argv.includes('--entry-log') ? path.join(out, `${tag}.entries.jsonl`) : undefined, refill: true });
     fs.mkdirSync(out, { recursive: true });
-    fs.writeFileSync(path.join(out, `${name}.json`), JSON.stringify({ name, ...r }));
+    fs.writeFileSync(path.join(out, `${tag}.json`), JSON.stringify({ name, part, ...r }));
     console.log(`[ta-jobs] ${name}: ${r.ok ? `P&L ${f2(r.pnl)}, fees ${r.fees.toFixed(2)}, ${r.trades} trades, ${r.contracts} contracts, ${r.diag?.entryEvaluations ?? 0} decisions, ${r.diag?.accuracyBlocks ?? 0} accuracy blocks, ${r.diag?.refills ?? 0} refills ($${(r.diag?.refillUsd ?? 0).toFixed(0)})` : `FAILED ${r.error}`} in ${((Date.now() - t0) / 60_000).toFixed(1)} min`);
     return;
   }
@@ -171,7 +188,7 @@ async function main(): Promise<void> {
     const { fitMidGate, midGateInputs, midGateProbability } = await import('../bot/model/midTakeGate');
     const all = dayList(days, out);
     const split = arg('split', all[Math.floor(all.length * 0.5)] ?? '');
-    const rows = readLog(path.join(out, 'baseline.entries.jsonl')).map((r) => {
+    const rows = baselineLog(out).map((r) => {
       const { x, midSide } = midGateInputs(r.side, r.price, !r.taker, r.pYes, r.mid, r.spread ?? 0.02, r.tauSec, r.f);
       return { x, midSide, won: Boolean(r.won), weight: r.count, day: new Date(r.t).toISOString().slice(0, 10), r };
     });
@@ -212,7 +229,7 @@ async function main(): Promise<void> {
     const split = arg('split', all[Math.floor(all.length * 0.5)] ?? '');
     const train = all.filter((d) => d < split), test = all.filter((d) => d >= split);
     const res = new Map<string, TrialResult>();
-    for (const f of fs.existsSync(out) ? fs.readdirSync(out) : []) if (f.endsWith('.json')) { const j = JSON.parse(fs.readFileSync(path.join(out, f), 'utf8')); res.set(j.name, j); }
+    for (const f of fs.existsSync(out) ? fs.readdirSync(out) : []) if (f.endsWith('.json')) { const j = JSON.parse(fs.readFileSync(path.join(out, f), 'utf8')); const had = res.get(j.name); res.set(j.name, had ? mergeParts(had, j) : j); }
     const span = (d: string[]) => (d.length ? `${d[0]}..${d[d.length - 1]} (${d.length} d)` : 'none');
     console.log(`days: before split ${span(train)} | after ${span(test)}`);
     const base = res.get('baseline');
@@ -233,7 +250,7 @@ async function main(): Promise<void> {
       const pos = perDay.filter((v) => v > 0).length;
       console.log(`baseline: ${pos} of ${all.length} days profitable; best day ${f2(Math.max(...perDay))}, worst ${f2(Math.min(...perDay))}`);
     }
-    const log = readLog(path.join(out, 'baseline.entries.jsonl'));
+    const log = baselineLog(out);
     if (log.length) entryReport(log);
     return;
   }

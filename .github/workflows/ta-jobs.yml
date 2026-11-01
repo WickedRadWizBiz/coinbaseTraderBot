@@ -11,7 +11,7 @@ on:
       days:
         description: 'Most recent replay days to compare'
         required: false
-        default: '120'
+        default: '240'
       split:
         description: 'First day scored as held out (YYYY-MM-DD; empty = the middle day)'
         required: false
@@ -29,7 +29,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  TJ_DAYS: ${{ inputs.days || '120' }}
+  TJ_DAYS: ${{ inputs.days || '240' }}
+  # Each variant replays its days in two halves on two runners (one would pass GitHub's 6-hour job limit); the report adds
+  # them together. Steven (Nov 1): history iterations must be deep on days and cover several market regimes.
+  TJ_PARTS: '2'
   TJ_SPLIT: ${{ inputs.split || '' }}
   SWEEP_BANKROLL_USD: '200'
   # A push whose message holds [report-from:<run id>] only redoes the report of that earlier run (its replays and artifacts).
@@ -39,7 +42,7 @@ jobs:
   data:
     if: ${{ !contains(github.event.head_commit.message, '[report-from:') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 175
     outputs:
       variants: ${{ steps.v.outputs.variants }}
       gates: ${{ steps.v.outputs.gates }}
@@ -71,7 +74,7 @@ jobs:
             kalshi-replay-
       - name: Repair stored quotes, download what is new, rebuild the replay
         run: |
-          node --import tsx research/kalshiReplayData.ts --history data/history --out data/history-replay --days "$((TJ_DAYS + 3))" --budget-min 90 2>&1 \
+          node --import tsx research/kalshiReplayData.ts --history data/history --out data/history-replay --days "$((TJ_DAYS + 3))" --budget-min 140 2>&1 \
             | grep -vE '^\[kalshi-replay-data\] (binance|kalshi|replay): .*(skipp|already|listing|page)' | tail -30
       - name: Save the Kalshi history and its replay
         if: always()
@@ -114,6 +117,7 @@ jobs:
       fail-fast: false
       matrix:
         variant: ${{ fromJson(needs.data.outputs.variants) }}
+        part: [1, 2]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -150,17 +154,17 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=12288
         run: |
-          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$TJ_DAYS"
+          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$TJ_DAYS" --part "${{ matrix.part }}/$TJ_PARTS"
           if [ -f data/sweep-env/train.env ]; then set -a; . data/sweep-env/train.env; set +a; echo "server settings: $(wc -l < data/sweep-env/train.env) line(s)"; else echo "no server settings cached: the bot's defaults"; fi
           cp -rn data/sweep-env/history/. data/history/ 2>/dev/null || true
           export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json" RS_TRIALS_FILE="$GITHUB_WORKSPACE/data/sweep-env/component_trials.json"
           echo "model: $([ -f data/models/model.json ] && echo "the server's" || echo identity)"
-          node --import tsx research/taJobs.ts run --variant "${{ matrix.variant }}" --days data/sweep-days --model data/models/model.json --out research/out/ta-jobs \
+          node --import tsx research/taJobs.ts run --part "p${{ matrix.part }}" --variant "${{ matrix.variant }}" --days data/sweep-days --model data/models/model.json --out research/out/ta-jobs \
             $([ "${{ matrix.variant }}" = baseline ] && echo --entry-log) 2>&1 | grep -E '^\[ta-jobs\]|Error|error' | head -20
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ta-jobs-${{ matrix.variant }}
+          name: ta-jobs-${{ matrix.variant }}-p${{ matrix.part }}
           path: research/out/ta-jobs/
           retention-days: 30
 
@@ -173,6 +177,7 @@ jobs:
       fail-fast: false
       matrix:
         variant: ${{ fromJson(needs.data.outputs.gates) }}
+        part: [1, 2]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -207,8 +212,9 @@ jobs:
           fail-on-cache-miss: true
       - uses: actions/download-artifact@v4
         with:
-          name: ta-jobs-baseline
+          pattern: ta-jobs-baseline-p*
           path: research/out/ta-jobs
+          merge-multiple: true
       - name: Replay ${{ matrix.variant }}
         env:
           NODE_OPTIONS: --max-old-space-size=12288
@@ -219,13 +225,14 @@ jobs:
           export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper RS_PROBATION_FILE="$GITHUB_WORKSPACE/data/sweep-env/probation.json" RS_TRIALS_FILE="$GITHUB_WORKSPACE/data/sweep-env/component_trials.json"
           echo "model: $([ -f data/models/model.json ] && echo "the server's" || echo identity)"
           node --import tsx research/taJobs.ts train-gate --days data/sweep-days --out research/out/ta-jobs $([ -n "$TJ_SPLIT" ] && echo --split "$TJ_SPLIT") 2>&1 | grep -E '^\[ta-jobs\]|Error' | head -10
-          rm -f research/out/ta-jobs/baseline.json research/out/ta-jobs/baseline.entries.jsonl
-          node --import tsx research/taJobs.ts run --variant "${{ matrix.variant }}" --days data/sweep-days --model data/models/model.json --out research/out/ta-jobs \
+          rm -f research/out/ta-jobs/baseline*.json research/out/ta-jobs/baseline*.entries.jsonl
+          node --import tsx research/randomSweep.ts days --replay data/history-replay --out data/sweep-days --days "$TJ_DAYS" --part "${{ matrix.part }}/$TJ_PARTS"
+          node --import tsx research/taJobs.ts run --part "p${{ matrix.part }}" --variant "${{ matrix.variant }}" --days data/sweep-days --model data/models/model.json --out research/out/ta-jobs \
             $([ "${{ matrix.variant }}" = baseline ] && echo --entry-log) 2>&1 | grep -E '^\[ta-jobs\]|Error|error' | head -20
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ta-jobs-gate-${{ matrix.variant }}
+          name: ta-jobs-gate-${{ matrix.variant }}-p${{ matrix.part }}
           path: research/out/ta-jobs/
           retention-days: 30
 
