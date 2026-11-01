@@ -357,7 +357,7 @@ async function stageVerdict(): Promise<void> {
   report.realVsReal = +discriminate(half, other, FEATURES.map((_, j) => j)).toFixed(3);
   console.log(`[twin] adversary sanity, real vs real: AUC ${report.realVsReal}`);
   if (placebo) console.log(`[twin] placebo (real at +250 ms): P&L $${placebo.pnl.toFixed(2)} vs $${placebo.realPnl.toFixed(2)}, per-window error $${placebo.rmse.toFixed(2)}, corr ${placebo.corr.toFixed(2)}`);
-  for (const src of ['requote', 'depth', 'worst', 'hold']) {
+  for (const src of ['requote', 'depth', 'lag', 'lagdepth', 'worst', 'hold']) {
     const tw = rows(src);
     if (!tw.length) continue;
     const all = FEATURES.map((_, j) => j);

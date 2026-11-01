@@ -6,7 +6,7 @@
 // cached folder grows run by run (the Kalshi download runs at half Kalshi's public rate limit).
 //
 //   npm run research:kalshi-replay-data -- --history data/history --out data/history-replay [--days 365]
-//       [--assets BTC,ETH,SOL,XRP,DOGE] [--series KXBTC15M,...] [--budget-min 60]
+//       [--assets BTC,ETH,SOL,XRP,DOGE] [--series KXBTC15M,...] [--budget-min 60] [--requote-lag 0.29/3.9]
 //
 // Prints the days with real Kalshi contracts it has, and writes nothing else.
 
@@ -18,7 +18,7 @@ export const series15m = (assets: string[]) => assets.map((a) => `KX${a}15M`);
 
 function arg(k: string, d: string): string { const i = process.argv.indexOf(`--${k}`); return i >= 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith('--') ? process.argv[i + 1] : d; }
 
-export async function kalshiReplayData(o: { history: string; out: string; days: number; assets: string[]; series: string[]; budgetMin: number; restBaseUrl?: string; log?: (m: string) => void }): Promise<string[]> {
+export async function kalshiReplayData(o: { history: string; out: string; days: number; assets: string[]; series: string[]; budgetMin: number; restBaseUrl?: string; requoteLag?: { gInf: number; tauSec: number }; log?: (m: string) => void }): Promise<string[]> {
   const log = o.log ?? ((m: string) => console.log(`[kalshi-replay-data] ${m}`));
   const { downloadBinance } = await import('./history/binanceVision');
   const { downloadKalshiHistory } = await import('./history/kalshiHistory');
@@ -34,7 +34,7 @@ export async function kalshiReplayData(o: { history: string; out: string; days: 
   const left = Math.max(60_000, o.budgetMin * 60_000 - (Date.now() - t0));
   const k = await downloadKalshiHistory({ baseUrl: o.restBaseUrl ?? process.env.KALSHI_REST_URL ?? 'https://external-api.kalshi.com/trade-api/v2', series: o.series, days: o.days, out: path.join(o.history, 'kalshi'), budgetMs: left, log: (m) => log(`kalshi: ${m}`) });
   log(`kalshi: ${k.markets} new market(s), ${k.remaining} left for the next run${k.budgetHit ? ' (time budget reached)' : ''}`);
-  const r = await buildHistoryReplay({ historyDir: o.history, outDir: o.out, assets: o.assets, fromDay, toDay: yesterday, synthetic: false, requote: true, log: (m) => log(`replay: ${m}`) });
+  const r = await buildHistoryReplay({ historyDir: o.history, outDir: o.out, assets: o.assets, fromDay, toDay: yesterday, synthetic: false, requote: true, requoteLag: o.requoteLag, log: (m) => log(`replay: ${m}`) });
   log(`replay: ${r.written} day(s) written, ${r.skipped} already built${r.notes.length ? ` | ${r.notes.join('; ')}` : ''}`);
   const days = replayKalshiDays(o.out);
   log(`${days.length} day(s) with real Kalshi contracts${days.length ? `: ${days[0]}..${days[days.length - 1]}` : ''}`);
@@ -46,5 +46,7 @@ if (process.argv[1] && import.meta.url?.endsWith(path.basename(process.argv[1]))
   kalshiReplayData({
     history: arg('history', 'data/history'), out: arg('out', 'data/history-replay'), days: Number(arg('days', '365')), assets,
     series: arg('series', series15m(assets).join(',')).split(',').map((x) => x.trim()).filter(Boolean), budgetMin: Number(arg('budget-min', '60')),
+    // --requote-lag <share>/<seconds>: the quote's lag behind the index between candles (historyReplay QuoteLag).
+    requoteLag: arg('requote-lag', '') ? (([g, t]) => ({ gInf: Number(g), tauSec: Number(t) }))(arg('requote-lag', '').split('/')) : undefined,
   }).catch((e) => { console.error((e as Error).stack ?? e); process.exitCode = 1; });
 }

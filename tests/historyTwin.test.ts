@@ -55,3 +55,17 @@ test('dayRows reads a contract life from book snapshots and deltas alike', async
   assert.ok(r[FEATURES.indexOf('followIx')] > 0.5, 'the mid follows the index');
   assert.ok(Number.isFinite(r[FEATURES.indexOf('brierT5')]));
 });
+
+test('requoteBetween with a lag moves the quote only part of the way', async () => {
+  const { requoteBetween } = await import('../research/history/historyReplay');
+  const d0 = D0, MINS = 1440 * 4;
+  const ixs = new Float64Array(MINS).fill(70000), sgs = new Float64Array(MINS).fill(0.0003);
+  // The index jumps up 0.2% at the second print of minute 60.
+  for (let i = 60 * 4 + 1; i < MINS; i++) ixs[i] = 70140;
+  const m = { ticker: 'T', kind: 'updown' as never, strike: 70000, cap: null, closeTime: d0 + 70 * MIN };
+  const run = (lag?: { gInf: number; tauSec: number }) => { const ev: any[] = []; requoteBetween(ev, m, 0.49, 0.51, d0 + 60 * MIN, d0 + 61 * MIN, d0, ixs, sgs, lag); return ev.at(-1)?.bids[0].price as number; };
+  const free = run(), lagged = run({ gInf: 0.29, tauSec: 3.9 }), instant = run({ gInf: 1, tauSec: 1e-6 });
+  assert.ok(free > 0.5, `the free quote moves up (${free})`);
+  assert.equal(instant, free, 'a full, instant lag is the old behaviour');
+  assert.ok(lagged > 0.49 && lagged < free, `the lagged quote moves less (${lagged} vs ${free})`);
+});

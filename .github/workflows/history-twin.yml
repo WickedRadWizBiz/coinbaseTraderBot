@@ -133,6 +133,12 @@ jobs:
           BACK=$(( ( $(date -u +%s) - $(date -u -d "$WARM" +%s) ) / 86400 + 2 ))
           node --import tsx research/kalshiReplayData.ts --history data/history --out data/history-replay --days "$BACK" --budget-min 120 2>&1 | tee -a "$RUNNER_TEMP/build.log" \
             | grep -vE '^\[kalshi-replay-data\] (binance|kalshi|replay): .*(skipp|already|listing|page)' | tail -20
+      - name: The same twin with the quote lagging the index (the SNN thread's fit, Oct 24-31)
+        env:
+          WARM: ${{ steps.days.outputs.warm }}
+        run: |
+          BACK=$(( ( $(date -u +%s) - $(date -u -d "$WARM" +%s) ) / 86400 + 2 ))
+          node --import tsx research/kalshiReplayData.ts --history data/history --out data/history-replay-lag --days "$BACK" --budget-min 30 --requote-lag 0.29/3.9 2>&1 | tee -a "$RUNNER_TEMP/build.log" | grep -E 'replay: .*written|day\(s\) with' | tail -3
       - name: Save the Kalshi history and its replay
         if: always()
         uses: actions/cache/save@v4
@@ -152,7 +158,9 @@ jobs:
           node --import tsx research/depthStudy.ts --recordings data/fit --out data/models/depth_model.json 2>&1 | grep -E '^\[depth\] [0-9]' | tail -3 || true
           [ -s data/models/depth_model.json ] || { echo "no depth model"; exit 1; }
           node --import tsx research/historyTwin.ts --stage fill --src $T/requote --dst $T/depth --how depth --depth-model data/models/depth_model.json 2>&1 | grep '^\[twin\]'
-          node --import tsx research/historyTwin.ts --stage features --dirs real=$T/real,requote=$T/requote,depth=$T/depth --days "$DAYS" --out $T 2>&1 | tee -a "$RUNNER_TEMP/build.log" | grep '^\[twin\]'
+          mkdir -p $T/lag; for d in ${WARM} ${DAYS//,/ }; do if [ -f data/history-replay-lag/md-$d.jsonl.gz ]; then cp data/history-replay-lag/md-$d.jsonl.gz $T/lag/; fi; done
+          node --import tsx research/historyTwin.ts --stage fill --src $T/lag --dst $T/lagdepth --how depth --depth-model data/models/depth_model.json 2>&1 | grep '^\[twin\]'
+          node --import tsx research/historyTwin.ts --stage features --dirs real=$T/real,requote=$T/requote,depth=$T/depth,lag=$T/lag,lagdepth=$T/lagdepth --days "$DAYS" --out $T 2>&1 | tee -a "$RUNNER_TEMP/build.log" | grep '^\[twin\]'
           du -sh $T/* | cat
       - uses: actions/cache/save@v4
         with:
@@ -179,7 +187,7 @@ jobs:
       fail-fast: false
       max-parallel: 3
       matrix:
-        how: [real, placebo, requote, depth]
+        how: [real, placebo, requote, depth, lagdepth]
         part: [0, 1, 2, 3]
     env:
       DAYS: ${{ needs.build.outputs.days }}
@@ -266,7 +274,7 @@ jobs:
       - name: Verdict
         run: |
           set -euo pipefail
-          for how in real placebo requote depth; do
+          for how in real placebo requote depth lagdepth; do
             python3 - "$how" "$RUNNER_TEMP/in" data/twin <<'PY'
           import glob, json, sys
           how, src, out = sys.argv[1:]
