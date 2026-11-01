@@ -52,6 +52,10 @@ on:
         description: 'History training: the run id whose checkpoint this run continues from'
         required: false
         default: ''
+      hist_chain:
+        description: 'History training: when the job time limit stops the range, start a new run that continues it (true/false)'
+        required: false
+        default: 'false'
       judge_args:
         description: 'Extra judge flags, e.g. --gain true --gainPrior 100 --gainForget 0.999 (the learned correction gain; --gainPerRow true weighs every row)'
         required: false
@@ -59,7 +63,7 @@ on:
 
 permissions:
   contents: read
-  actions: read
+  actions: write # history training continues itself in a new run when a range outlasts the job time limit
 
 concurrency:
   group: snn-ablation-${{ inputs.hist_from != '' && 'history' || 'ablate' }}
@@ -413,11 +417,12 @@ jobs:
       - name: Kalshi history from the cache
         id: khist
         uses: actions/cache/restore@v4
+        if: "!contains(inputs.hist_args, 'synthetic')"
         with:
           path: ${{ runner.temp }}/hist/history/kalshi
           key: kalshi-history-${{ inputs.hist_from }}-${{ inputs.hist_to }}
       - name: SSH to the server
-        if: steps.khist.outputs.cache-hit != 'true'
+        if: steps.khist.outputs.cache-hit != 'true' && !contains(inputs.hist_args, 'synthetic')
         env:
           SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           HOST: ${{ secrets.LIGHTSAIL_HOST }}
@@ -429,7 +434,7 @@ jobs:
           printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
           ssh bot true && echo "connected"
       - name: Copy Kalshi's day files for the range (read-only, throttled, one copy at a time)
-        if: steps.khist.outputs.cache-hit != 'true'
+        if: steps.khist.outputs.cache-hit != 'true' && !contains(inputs.hist_args, 'synthetic')
         run: |
           set -euo pipefail
           K="$RUNNER_TEMP/hist/history/kalshi"; mkdir -p "$K"
@@ -438,7 +443,7 @@ jobs:
           rsync -a --whole-file --bwlimit=8m --rsync-path="flock bot/data/locks/snn-ablation-copy.lock nice -n 19 ionice -c3 rsync" --include='/KX*/' --include-from="$RUNNER_TEMP/kdays.txt" --exclude='*' --prune-empty-dirs bot:bot/data/history/kalshi/ "$K/"
           echo "Kalshi day files: $(find "$K" -type f | wc -l) in $(ls "$K" | wc -l) series, $(du -sh "$K" | cut -f1)"
       - name: Save the Kalshi history to the cache (right away, so a cancelled training still keeps it)
-        if: steps.khist.outputs.cache-hit != 'true'
+        if: steps.khist.outputs.cache-hit != 'true' && !contains(inputs.hist_args, 'synthetic')
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/hist/history/kalshi
@@ -452,6 +457,7 @@ jobs:
           run-id: ${{ inputs.hist_resume_from }}
           github-token: ${{ github.token }}
       - name: Train
+        id: train
         timeout-minutes: 330
         run: |
           set -euo pipefail
@@ -459,10 +465,16 @@ jobs:
           export TRADING_MODE=paper AUTO_TRAIN=off NODE_OPTIONS="--max-old-space-size=6144"
           EXTRA=$(printf '%s' "$HARGS" | tr -cd 'a-zA-Z0-9 .-')
           PREV=""; [ -f research/out/prev/snn-history-checkpoint.json ] && PREV="--checkpoint-in research/out/prev/snn-history-checkpoint.json"
-          node --import tsx research/snnHistoryTrain.ts --from "$HFROM" --to "$HTO" --history "$RUNNER_TEMP/hist/history" --work "$RUNNER_TEMP/hist" --minutes 285 --checkpoint-out research/out/snn-history-checkpoint.json $PREV $EXTRA 2>&1 | grep --line-buffered -E '^\[hist-train\]|failed|FATAL|heap' | stdbuf -oL cut -c1-260
+          node --import tsx research/snnHistoryTrain.ts --from "$HFROM" --to "$HTO" --history "$RUNNER_TEMP/hist/history" --work "$RUNNER_TEMP/hist" --minutes 285 --checkpoint-out research/out/snn-history-checkpoint.json $PREV $EXTRA 2>&1 | grep --line-buffered -E '^\[hist-train\]|failed|FATAL|heap' | stdbuf -oL cut -c1-260 | tee research/out/hist-train.log
+          if grep -q 'time is up' research/out/hist-train.log; then echo "more=true" >> "$GITHUB_OUTPUT"; else echo "more=false" >> "$GITHUB_OUTPUT"; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: snn-history-checkpoint
           path: research/out/snn-history-checkpoint.json
           if-no-files-found: ignore
+      - name: Continue the range in a new run (the job time limit stopped this one)
+        if: steps.train.outputs.more == 'true' && inputs.hist_chain == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run snn-ablation.yml --ref "$GITHUB_REF_NAME" -f hist_from="$HFROM" -f hist_to="$HTO" -f hist_args="$HARGS" -f hist_resume_from="${{ github.run_id }}" -f hist_chain=true

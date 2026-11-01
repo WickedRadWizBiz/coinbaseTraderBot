@@ -10,7 +10,7 @@
 // This is prediction learning, not trading: no fills are simulated, so the depth simulator's fill check does not gate it.
 //
 //   node --import tsx research/snnHistoryTrain.ts --from 2026-01-01 --to 2026-09-30 --history <dir with kalshi/> \
-//     --work <scratch> [--checkpoint-in in.json] --checkpoint-out out.json [--minutes 330] [--vol-norm 1]
+//     --work <scratch> [--checkpoint-in in.json] --checkpoint-out out.json [--minutes 330] [--vol-norm 1] [--synthetic true]
 
 import fs from 'fs';
 import path from 'path';
@@ -81,6 +81,10 @@ async function main() {
   const stage = (arg('stage', '') || cfg.snn.domains.crypto.stage) as Stage;
   const volNorm = Number(arg('vol-norm', '0')) || undefined;
   const soft = arg('soft', '') === 'true';
+  // Synthetic contracts (Steven, Nov 1): where Kalshi has no contract history, the same 15m Up/Down and hourly ladders
+  // built from the price path, quoted at a no-skill fair value (research/history/historyReplay.ts). They teach the
+  // network the price path's direction only, never Kalshi's pricing: real days judge what that is worth.
+  const synthetic = arg('synthetic', '') === 'true';
   const params = trainParams(stage, volNorm, soft);
   const calendar = loadCalendar(path.resolve('params/calendar.json'));
   let checkpoint: SnnCheckpoint | undefined;
@@ -93,14 +97,14 @@ async function main() {
     console.log(`[hist-train] continuing from ${ckIn}: last scored ${checkpoint.lastTs ? new Date(checkpoint.lastTs).toISOString() : 'never'}, ${upd} readout updates so far; resuming at ${start}`);
   }
   const ckOut = arg('checkpoint-out', path.join(work, 'checkpoint.json'));
-  console.log(`[hist-train] anchored crypto SNN, stage ${stage}${volNorm ? `, volNorm ${volNorm}` : ''}${soft ? ', soft labels' : ''}, ${from}..${to}, ${assets.join(',')}`);
+  console.log(`[hist-train] anchored crypto SNN, stage ${stage}${volNorm ? `, volNorm ${volNorm}` : ''}${soft ? ', soft labels' : ''}${synthetic ? ', synthetic contracts where Kalshi has none' : ''}, ${from}..${to}, ${assets.join(',')}`);
 
   const f5 = (x: { mean: number; lo: number; hi: number }) => `${x.mean.toFixed(5)} [${x.lo.toFixed(5)}, ${x.hi.toFixed(5)}]`;
   if (start > to) { console.log(`[hist-train] the checkpoint already covers ${from}..${to}`); if (checkpoint) { fs.mkdirSync(path.dirname(ckOut), { recursive: true }); fs.writeFileSync(ckOut, JSON.stringify(checkpoint)); } return; }
   for (const [a, b] of trainChunks(start, to)) {
     if (Date.now() > deadline) { console.log(`[hist-train] time is up before ${a}: the next run continues from the checkpoint`); break; }
     const warm = addDays(a, -1), t0 = Date.now();
-    if (!kalshiDays(path.join(hist, 'kalshi'), a, b)) { console.log(`[hist-train] ${a}..${b}: no Kalshi history on these days, skipped`); continue; }
+    if (!synthetic && !kalshiDays(path.join(hist, 'kalshi'), a, b)) { console.log(`[hist-train] ${a}..${b}: no Kalshi history on these days, skipped`); continue; }
     console.log(`[hist-train] ${a}..${b}: building and replaying`);
     const month = (d: string) => d.slice(0, 7);
     const dl = async (intervals: ('1m' | '15m' | '1h' | '1d')[], f: string, source?: string) =>
@@ -108,7 +112,7 @@ async function main() {
     await dl(['1m'], warm, 'binance-1m');
     await dl(['15m', '1h'], addDays(warm, -14));
     await dl(['1d'], addDays(warm, -310));
-    const built = await buildHistoryReplay({ historyDir: hist, outDir: rep, assets, fromDay: warm, toDay: b, synthetic: false, log: () => undefined });
+    const built = await buildHistoryReplay({ historyDir: hist, outDir: rep, assets, fromDay: warm, toDay: b, synthetic, log: () => undefined });
     const res = await replaySnn(rep, { params, from: Date.parse(`${a}T00:00:00Z`), to: Date.parse(`${b}T23:59:59Z`), fromDay: warm, toDay: b, calendar, domain: 'crypto', checkpoint, skipModel: true });
     checkpoint = res.net.serialize();
     fs.mkdirSync(path.dirname(ckOut), { recursive: true });
@@ -117,7 +121,7 @@ async function main() {
     const frozen = res.steps ? (100 * res.frozenSteps) / res.steps : 0;
     if (!res.rows.length) { console.log(`[hist-train] ${a}..${b}: no contracts scored (${built.written} day(s) built; Kalshi history missing for these days?)`); continue; }
     const vm = vsMarket(res.rows, 1000), c = correctionStats(res.rows);
-    console.log(`[hist-train] ${a}..${b}: ${windows} windows, vs market ${f5(vm)} ${vm.hi < 0 ? 'BEATS the market' : vm.lo > 0 ? 'worse' : 'undecided'}; correction size ${c.sizeCents.toFixed(2)}c edge ${c.edgeCents.toFixed(2)}c b ${c.slope.toFixed(2)}; learning frozen ${frozen.toFixed(1)}%; ${((Date.now() - t0) / 60000).toFixed(1)} min`);
+    console.log(`[hist-train] ${a}..${b}: ${windows} windows, vs market ${f5(vm)} ${vm.hi < 0 ? 'BEATS the market' : vm.lo > 0 ? 'worse' : 'undecided'}; correction size ${c.sizeCents.toFixed(2)}c edge ${c.edgeCents.toFixed(2)}c b ${c.slope.toFixed(2)}; learning frozen ${frozen.toFixed(1)}%;${built.synthetic ? ` ${built.synthetic} synthetic contracts;` : ''} ${((Date.now() - t0) / 60000).toFixed(1)} min`);
     // Rows of this month are not needed any more (memory over months).
     res.rows.length = 0;
   }
