@@ -372,7 +372,18 @@ async function stageVerdict(): Promise<void> {
       sameActivity: o ? Math.abs(o.traded - o.realTraded) <= 0.1 * Math.max(1, o.realTraded) : false,
     };
     const pass = Object.values(checks).every(Boolean);
-    report.twins[src] = { auc: +a.toFixed(3), features: each, outcome: o, checks, pass };
+    // Regimes (Steven, Nov 1: dynamics wherever possible): the adversary again within calm / normal / volatile contract
+    // lives (terciles of the index's 15 s move over the real rows), so a fill-in can be fitted per regime where they differ.
+    const vi = FEATURES.indexOf('ixMoveBps');
+    const cuts = [1 / 3, 2 / 3].map((q) => { const v = real.map((r) => r.f[vi]).filter(Number.isFinite).sort((x, y) => x - y); return v[Math.floor(q * v.length)] ?? 0; });
+    const regimeOf = (r: Row) => (r.f[vi] <= cuts[0] ? 'calm' : r.f[vi] <= cuts[1] ? 'normal' : 'volatile');
+    const regimes = Object.fromEntries(['calm', 'normal', 'volatile'].map((g) => {
+      const rr = real.filter((r) => regimeOf(r) === g), tt = tw.filter((r) => regimeOf(r) === g);
+      const top = FEATURES.map((name, j) => ({ name, auc: discriminate(rr, tt, [j]) })).sort((x, y) => Math.abs(y.auc - 0.5) - Math.abs(x.auc - 0.5))[0];
+      return [g, { real: rr.length, twin: tt.length, auc: rr.length > 20 && tt.length > 20 ? +discriminate(rr, tt, all).toFixed(3) : null, top: top ? `${top.name} ${top.auc.toFixed(3)}` : '' }];
+    }));
+    console.log(`[twin] ${src}: by regime: ${Object.entries(regimes).map(([g, x]) => `${g} AUC ${x.auc ?? 'n/a'} (${x.real}/${x.twin}; worst ${x.top})`).join('; ')}`);
+    report.twins[src] = { auc: +a.toFixed(3), features: each, regimes, outcome: o, checks, pass };
     console.log(`[twin] ${src}: adversary AUC ${a.toFixed(3)} (0.5 = can't tell; pass <= 0.60) over ${real.length} real / ${tw.length} twin contract lives`);
     console.log(`[twin] ${src}: gives it away most: ${each.slice(0, 5).map((e) => `${e.name} ${e.auc} (real ${e.real}, twin ${e.twin})`).join('; ')}`);
     if (o) console.log(`[twin] ${src}: backtest P&L $${o.pnl.toFixed(2)} vs real $${o.realPnl.toFixed(2)}; windows ${o.traded} vs ${o.realTraded}; per-window diff $${o.meanDiff.toFixed(3)} [${o.lo.toFixed(3)}, ${o.hi.toFixed(3)}]; error $${o.rmse.toFixed(2)} (placebo $${placebo?.rmse.toFixed(2) ?? '?'}); corr ${o.corr.toFixed(2)}`);
