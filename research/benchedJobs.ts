@@ -23,7 +23,9 @@ import { recordingFiles } from '../bot/marketdata/recordingFiles';
 export const VARIANTS: Record<string, Record<string, string>> = {
   // Ordered by what each wave of three runners should answer first (the account runs at most three jobs at once).
   baseline: {},
-  placebo: { SINUOUS_DIP_BUY: 'true', SINUOUS_DIP_MARGIN: '0.99' },
+  // The placebo: the same bot deciding on a tick shifted by half a second. Its gap from the baseline is path noise alone;
+  // a variant's gain smaller than that gap is not believed.
+  placebo: { RS_TICK_PHASE_MS: '500' },
   skill_w75: { MODEL_SKILL_W: '0.75' },
   tp_l0: { TP_LEVEL: '0' },
   tp_l1: { TP_LEVEL: '1' },
@@ -108,6 +110,24 @@ export function adversary(r: TrialResult, base: TrialResult, all: string[], afte
 export function perHour(r: TrialResult, days: string[]): number { return days.length ? days.reduce((a, d) => a + (r.byDay[d] ?? 0), 0) / (days.length * 24) : NaN; }
 export function vsBase(r: TrialResult, base: TrialResult, days: string[]) { return bootMean(days.map((d) => ((r.byDay[d] ?? 0) - (base.byDay[d] ?? 0)) / 24)); }
 
+/** Where a variant wins and loses against the baseline by market condition at entry (randomSweep.regimeKey), so a setting
+ *  that pays in some conditions becomes a dynamic one there (Steven, Nov 1) instead of on or off everywhere. Conditions
+ *  with fewer than `minN` markets in either run are pooled as 'thin'. */
+export function byCondition(r: TrialResult, base: TrialResult, minN = 40): string {
+  if (!r.byRegime || !base.byRegime) return '';
+  const keys = new Set([...Object.keys(r.byRegime), ...Object.keys(base.byRegime)]);
+  const rows: Array<{ k: string; d: number; n: number }> = [];
+  let thin = 0, thinN = 0;
+  for (const k of keys) {
+    const a = r.byRegime[k] ?? { pnl: 0, n: 0 }, b = base.byRegime[k] ?? { pnl: 0, n: 0 };
+    if (Math.min(a.n, b.n) < minN) { thin += a.pnl - b.pnl; thinN += b.n; continue; }
+    rows.push({ k, d: a.pnl - b.pnl, n: b.n });
+  }
+  rows.sort((x, y) => y.d - x.d);
+  const fmt = (x: { k: string; d: number; n: number }) => `${x.k} ${f2(x.d)} (${x.n} mkts)`;
+  return `\n${''.padEnd(10)} by condition ($ vs baseline): ${rows.map(fmt).join(', ')}${thinN ? `, thin ${f2(thin)} (${thinN} mkts)` : ''}`;
+}
+
 async function main(): Promise<void> {
   const cmd = process.argv[2];
   const out = arg('out', 'research/out/benched-jobs');
@@ -147,6 +167,7 @@ async function main(): Promise<void> {
         const a = vsBase(r, base, all), b = vsBase(r, base, after);
         const adv = adversary(r, base, all, after, blocks, res.size - 1);
         line += `\n${''.padEnd(10)} adversary: ${adv.verdict} (${adv.line})`;
+        line += byCondition(r, base);
         line += `\n${''.padEnd(10)} vs baseline: all ${f2(a.mean)}/h [${f2(a.lo)}, ${f2(a.hi)}] | after split ${f2(b.mean)}/h [${f2(b.lo)}, ${f2(b.hi)}] | by block ${blocks.map((x) => f2(vsBase(r, base, x).mean)).join(' ')}`;
       } else line += `\n${''.padEnd(10)} by block ${blocks.map((x) => f2(perHour(r, x))).join(' ')}/h; ${all.filter((x) => (r.byDay[x] ?? 0) > 0).length} of ${all.length} days profitable`;
       console.log(line);
