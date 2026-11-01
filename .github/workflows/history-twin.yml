@@ -12,14 +12,14 @@ name: History twin
 on:
   # A new workflow can't be dispatched until it is on main: while on its branch, a push of its own files runs it.
   push:
-    branches: [claude/project-thread-lq48hg]
+    branches: [claude/project-thread-lq48hg, claude/project-thread-qj4n4v]
     paths: ['.github/workflows/history-twin.yml', 'research/historyTwin.ts']
   workflow_dispatch:
     inputs:
       reuse_run:
         description: 'Replay fidelity run whose cached days (recordings, older fit days, models) are the real side'
         required: true
-        default: '41269805422'
+        default: '41351064742'
       parts:
         description: 'Runners per backtest (the compared days split into this many runs)'
         required: false
@@ -72,7 +72,7 @@ jobs:
             data/recordings
             data/fit
             data/models
-          key: fidelity-data-${{ inputs.reuse_run || '41269805422' }}-1
+          key: fidelity-data-${{ inputs.reuse_run || '41351064742' }}-1
           restore-keys: |
             twin-real-
             fidelity-data-
