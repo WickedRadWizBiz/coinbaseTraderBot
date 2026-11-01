@@ -209,8 +209,14 @@ export function fillQuotes(events: Ev[], fill: QuoteFill, depth?: DepthModel): E
 /** The time between the replay's quotes (research/history/historyReplay.ts requotes every quarter-minute). */
 const ANCHOR_MS = 15_000;
 
+/** How long the depth fill-in holds the stream back: past the next quote (every ANCHOR_MS), so each quote's simulated
+ *  book knows where the price goes next. */
+const LOOKAHEAD_MS = 20_000;
+
 /** quoteFiller as a stream that can add records: `depth` plays the simulated book around each quote, its changes and
- *  trades merged into the day in time order (a record is never written before one already written). */
+ *  trades merged into the day in time order (a record is never written before one already written). Each quote is
+ *  played once the contract's next quote is in (or LOOKAHEAD_MS has passed), from it to the next, with the trade flow
+ *  set by where the mid goes (research/history/depthSim.ts); so the stream comes out LOOKAHEAD_MS behind. */
 export function streamFiller(fill: QuoteFill, depth?: DepthModel): { push: (e: Ev) => Ev[]; end: () => Ev[] } {
   if (fill.how !== 'depth') {
     const f = quoteFiller(fill);
@@ -220,27 +226,68 @@ export function streamFiller(fill: QuoteFill, depth?: DepthModel): { push: (e: E
   const anchors = quoteFiller({ how: 'requote' });
   const sim = new DepthSim(depth);
   const close = new Map<string, number>();
-  let pending: Ev[] = [];
-  const due = (t: number) => { const i = pending.findIndex((x) => x.t >= t); const out = i < 0 ? pending : pending.slice(0, i); pending = i < 0 ? [] : pending.slice(i); return out; };
+  // The quote each contract's book is waiting to be played from, until its next quote is in.
+  const held = new Map<string, { e: Ev; close: number }>();
+  // What is not written yet: the day's own records in their order, and the simulated ones in time order.
+  let raw: Ev[] = [], simQ: Ev[] = [], ri = 0, si = 0, checked = -Infinity;
+  const mid = (e: Ev) => (e.bids![0].price + e.asks![0].price) / 2;
+  const play = (ticker: string, until: number, nextMid?: number) => {
+    const h = held.get(ticker);
+    if (!h) return;
+    held.delete(ticker);
+    const played = sim.play(ticker, h.e.t, h.e.bids![0].price, h.e.asks![0].price, until, h.close, nextMid) as Ev[];
+    if (!played.length) { raw = [...raw.slice(ri), h.e].sort((a, b) => a.t - b.t); ri = 0; return; }
+    simQ = [...simQ.slice(si), ...played].sort((a, b) => a.t - b.t); si = 0;
+  };
+  // Written: everything before `cut`, the day's records ahead of simulated ones at the same time.
+  const release = (cut: number): Ev[] => {
+    const out: Ev[] = [];
+    while (true) {
+      const r = raw[ri], x = simQ[si];
+      const rOk = r !== undefined && r.t < cut, xOk = x !== undefined && x.t < cut;
+      if (!rOk && !xOk) break;
+      if (rOk && (!xOk || r.t <= x.t)) { out.push(r); ri++; } else { out.push(x); si++; }
+    }
+    // The written part dropped now and then (not on every record: a busy day has millions).
+    if (ri > 4096 && ri * 2 > raw.length) { raw = raw.slice(ri); ri = 0; }
+    if (si > 4096 && si * 2 > simQ.length) { simQ = simQ.slice(si); si = 0; }
+    return out;
+  };
+  const dropSim = (ticker: string, from: number) => { simQ = simQ.slice(si).filter((x) => x.ticker !== ticker || x.t < from); si = 0; };
   return {
-    push: (raw) => {
-      const e = anchors(raw);
-      const out = due(raw.t);
-      if (!e) return out;
-      if (e.k === 'market' && e.ticker && e.closeTime) close.set(e.ticker, Number(e.closeTime));
-      const c = e.ticker ? close.get(e.ticker) : undefined;
-      if (c === undefined) return [...out, e];
-      if (e.k === 'trade') return out;
-      if (e.k === 'result') { sim.forget(e.ticker!); close.delete(e.ticker!); pending = pending.filter((x) => x.ticker !== e.ticker); return [...out, e]; }
-      if (e.k !== 'book' || !e.bids?.length || !e.asks?.length) return [...out, e];
-      // A new quote: what was simulated after it for this contract gives way to the book played from it.
-      pending = pending.filter((x) => x.ticker !== e.ticker);
-      const played = sim.play(e.ticker!, e.t, e.bids[0].price, e.asks[0].price, e.t + ANCHOR_MS, c) as Ev[];
-      if (!played.length) return [...out, e];
-      pending = [...pending, ...played.slice(1)].sort((a, b) => a.t - b.t);
-      return [...out, played[0]];
+    push: (input) => {
+      const e = anchors(input);
+      // A quote that waited LOOKAHEAD_MS without its next one is played without it (a gap, or the contract's last).
+      if (input.t - checked >= 1000) {
+        checked = input.t;
+        for (const [ticker, h] of [...held]) if (h.e.t + LOOKAHEAD_MS <= input.t) play(ticker, h.e.t + ANCHOR_MS);
+      }
+      if (e) {
+        if (e.k === 'market' && e.ticker && e.closeTime) close.set(e.ticker, Number(e.closeTime));
+        const c = e.ticker ? close.get(e.ticker) : undefined;
+        if (c === undefined) raw.push(e);
+        else if (e.k === 'trade') { /* the simulated book trades instead */ }
+        else if (e.k === 'result') {
+          play(e.ticker!, Math.min(e.t, (held.get(e.ticker!)?.e.t ?? e.t) + ANCHOR_MS));
+          sim.forget(e.ticker!); close.delete(e.ticker!);
+          dropSim(e.ticker!, e.t);
+          raw.push(e);
+        } else if (e.k !== 'book' || !e.bids?.length || !e.asks?.length) raw.push(e);
+        else {
+          // A new quote: the one before it is played up to it, its flow set by where the mid went.
+          const h = held.get(e.ticker!);
+          if (h) play(e.ticker!, Math.min(e.t, h.e.t + LOOKAHEAD_MS), mid(e));
+          dropSim(e.ticker!, e.t);
+          held.set(e.ticker!, { e, close: c });
+        }
+      }
+      // Held quotes are all newer than this (they are played within a second of input time of turning LOOKAHEAD_MS old).
+      return release(input.t - LOOKAHEAD_MS - 1000);
     },
-    end: () => { const out = pending; pending = []; return out; },
+    end: () => {
+      for (const [ticker, h] of [...held]) play(ticker, h.e.t + ANCHOR_MS);
+      return release(Infinity);
+    },
   };
 }
 

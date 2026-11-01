@@ -170,6 +170,9 @@ export interface BacktestResult {
   /** Why the paper exchange turned orders down (its reason codes, counted), and the account at the end of the replay:
    *  cash, open positions (their worst loss) and resting orders. For the fidelity check's diagnostics. */
   exchangeRejected?: Record<string, number>;
+  /** The paper maker fills' 60 s markouts over the whole replay (mid then less the fill price, signed for the fill's
+   *  side, in dollars a contract): negative when the price moved against the resting order once it filled. */
+  makerMarkout?: { n: number; mean: number };
   /** The entry funnel (counts of evaluations): what held entries back, and how many plans still held an entry after the
    *  strategy, the take gate and the fill model. For the fidelity check's diagnostics. */
   funnel?: Record<string, number>;
@@ -568,6 +571,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       if (mid === undefined) continue;
       markouts.push(x.sign * (mid - x.price));
       if (markouts.length > MARKOUT_KEEP) markouts.shift();
+      const mk = (res.makerMarkout ??= { n: 0, mean: 0 });
+      mk.n++; mk.mean += (x.sign * (mid - x.price) - mk.mean) / mk.n;
     }
     // Refreshed every minute, as bot/main.ts does.
     if (mctx && st.now - ctxAt >= 60_000) {
