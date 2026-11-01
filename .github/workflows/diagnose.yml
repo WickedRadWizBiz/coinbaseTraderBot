@@ -50,6 +50,10 @@ on:
         description: 'Instead of the server report: repair the Kalshi history quotes stored on the server once (deploy/kalshi_cents_repair.py; quotes saved in hundredths of a cent before PR #217). Rewrites only those day files; safe to run again'
         required: false
         default: 'false'
+      adversary:
+        description: 'Also run the health-check adversary (deploy/adversary_report.py) on a GitHub runner: the last 8 days of the audit log are copied off the server at 8 MB/s (read-only)'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
@@ -199,6 +203,40 @@ jobs:
   # One-time repair of the Kalshi history stored on the server (Steven's go, Oct 31): markets from Kalshi's /historical
   # endpoint were saved with quotes 100x too small until PR #217. Writes only data/history/kalshi day files, through a
   # temp file and a rename; the bot's own state is not touched. Prints counts, posted as a comment on the commit.
+  adversary:
+    if: inputs.adversary == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: SSH to the server
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          ssh bot true && echo "connected"
+      - name: Copy the last 8 days of the audit log and the latest replay check (read-only, 8 MB/s)
+        run: |
+          set -euo pipefail
+          mkdir -p data/audit
+          since=$(date -u -d '7 days ago' +%F)
+          ssh bot 'ls -1 ~/bot/data/audit/' | grep -E '^audit-[0-9-]{10}' | awk -v s="audit-$since" '$0 >= s' > "$RUNNER_TEMP/audit.txt"
+          echo "$(wc -l < "$RUNNER_TEMP/audit.txt") audit files"
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/audit.txt" bot:bot/data/audit/ data/audit/
+          for f in data/audit/*.gz; do [ -e "$f" ] && gunzip -f "$f"; done
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" bot:bot/data/models/sweeps/replay-check-latest.json data/ 2>/dev/null || echo "no replay check verdict on the server"
+          # data-lag and feed-drop warnings of the last day (times only)
+          ssh bot 'journalctl -u kalshi-bot --since "25 hours ago" --no-pager -o short-iso-precise 2>/dev/null | grep -E "behind real time|kalshi-ws\] closed|feed down" | cut -d" " -f1' > data/lags.txt || true
+          echo "$(wc -l < data/lags.txt) lag / feed-drop warnings"
+      - name: Adversary report
+        run: python3 deploy/adversary_report.py data 24 data/lags.txt
+
   kalshi-repair:
     if: inputs.kalshi_repair == 'true'
     runs-on: ubuntu-latest
