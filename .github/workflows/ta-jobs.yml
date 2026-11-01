@@ -91,6 +91,8 @@ jobs:
             data/sweep-env
           key: kalshi-server-none
           restore-keys: kalshi-server-
+      - name: Stop when no copy of the server's model is cached (the daily sweep on main saves one at 09:23 UTC)
+        run: '[ -f data/models/model.json ] || { echo "::error::no server copy cached: rerun after the daily sweep"; exit 1; }'
       - name: Pin that copy for every replay of this run
         uses: actions/cache/save@v4
         with:
