@@ -1,22 +1,21 @@
-# Benched lab round 2 (2026-10-31 ~23:00 UTC). Round 1b (Oct 29 15:40 -> Oct 30 15:40 UTC, mean of 5 bankrolls, $/day):
-# base -184 (take-profit benched as paper, cross off, probation as paper) | tp L0 -224 (the old take-profit: -40 vs base)
-# | tp L1 -175 (+9) | tp L2 -176 (+8) | tp L3 -188 (-4) | cross L0 -228 (-44) | cross L1 -237 (-53) | probation open -207 (-23)
-# | all L1 -184 (0). The fair-value confirm cut the take-profit's cost against settlement from $163 to $15 (L1).
-# Round 2: graded probation in the code (paper's benched file = level 1), take-profit L1 as the new base, then give-back,
-# margins, the curve's resting sell instead of the cross, the model skill weight, stricter probation steps.
+# Benched lab round 3 (2026-11-01 ~07:00 UTC / 3:00 AM EDT). Round 2 (same day, mean of 5 bankrolls, $/day): base -206.7
+# | tp1 -173.7 | tp1_gb50 -181.3 | tp2_gb50 -187.1 | tp1_tight -182.8 | rest_x3 -191.5 | skill75 -151.8 | skill50 -179.6
+# | skill25 -183.2 | rest, prob_hi, prob_open = tp1 (no resting sell in the backtest; the take/fill steps never bind).
+# Round 3: the cross inverted into a dip buy (SINUOUS_DIP_BUY), the skill weight around 0.75, the probation's GP vote
+# graded (PROBATION_GP_MULT), and combinations. Bankroll noise sd ~ $60/day.
 # days=2026-10-29,2026-10-30
 # from=2026-10-29T15:40:00Z
 # to=2026-10-30T15:40:00Z
 # reuse_run=41210511914
 base:
 tp1: TP_LEVEL=1
-tp1_gb50: TP_LEVEL=1 PROFIT_GIVE_BACK=0.5
-tp2_gb50: TP_LEVEL=2 PROFIT_GIVE_BACK=0.5
-tp1_tight: TP_LEVEL=1 TP_FV_MARGINS=0.03,0.02,0.01,0
-rest: TP_LEVEL=1 SINUOUS_EXIT=rest SINUOUS_CROSS=false
-rest_x3: TP_LEVEL=1 SINUOUS_EXIT=rest SINUOUS_CROSS=true SINUOUS_CROSS_LEVEL=3
+skill85: TP_LEVEL=1 MODEL_SKILL_W=0.85
 skill75: TP_LEVEL=1 MODEL_SKILL_W=0.75
-skill50: TP_LEVEL=1 MODEL_SKILL_W=0.5
-skill25: TP_LEVEL=1 MODEL_SKILL_W=0.25
-prob_hi: TP_LEVEL=1 PROBATION_TAKE_STEP=0.05 PROBATION_FILL_STEP=0.01
-prob_open: TP_LEVEL=1 RS_PROBATION_OPEN=1
+skill60: TP_LEVEL=1 MODEL_SKILL_W=0.6
+dip4: TP_LEVEL=1 SINUOUS_DIP_BUY=true SINUOUS_DIP_MARGIN=0.04
+dip8: TP_LEVEL=1 SINUOUS_DIP_BUY=true SINUOUS_DIP_MARGIN=0.08
+dip4_x3: TP_LEVEL=1 SINUOUS_DIP_BUY=true SINUOUS_DIP_MARGIN=0.04 SINUOUS_CROSS=true SINUOUS_CROSS_LEVEL=3
+gp25: TP_LEVEL=1 PROBATION_GP_MULT=0.25
+gp0: TP_LEVEL=1 PROBATION_GP_MULT=1
+s75_dip4: TP_LEVEL=1 MODEL_SKILL_W=0.75 SINUOUS_DIP_BUY=true SINUOUS_DIP_MARGIN=0.04
+s75_gp25: TP_LEVEL=1 MODEL_SKILL_W=0.75 PROBATION_GP_MULT=0.25

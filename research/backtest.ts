@@ -123,7 +123,6 @@ export interface ExitStats {
   /** The exit curve's cross (SINUOUS_CROSS): sales sent and their fills' contracts. */
   crossSales?: number;
   crossContracts?: number;
-<<<<<<< HEAD
   /** PACER_FLOOR_CONFIRM=model (lab): ticks a breached floor was held because the model valued the position above it. */
   floorHolds?: number;
   /** Exit audit by kind (a queued exit's client id ends -exit-<kind>: snipe, floor, tp, fv, ...), for the markets settled in
@@ -133,10 +132,8 @@ export interface ExitStats {
    *  value less a cent (contracts, net proceeds, paid at settlement, fair value). */
   byKind?: Record<string, { fills: number; contracts: number; proceeds: number; settled: number; best: number; fv?: number; tauC?: number;
     underC?: number; underProceeds?: number; underSettled?: number; underFv?: number }>;
-=======
   /** The dip buys sent (SINUOUS_DIP_BUY). */
   dipBuys?: number;
->>>>>>> claude/project-thread-k3s0ru
   /** Mean (stop - fill price) in side terms for ratchet exits; positive = filled below the stop. */
   avgSlippage: number | null;
 }
