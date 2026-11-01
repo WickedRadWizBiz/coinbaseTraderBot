@@ -63,7 +63,7 @@ test('progress: bars and time left follow the pipeline output and the steps\' ow
 test('updates: a new build is offered when the release was built from another commit; the installer keeps trainer-data', async () => {
   assert.equal(shaOf('built 2026-10-08 15:00:00Z from 0123456789abcdef0123456789abcdef01234567'), '0123456789abcdef0123456789abcdef01234567');
   assert.equal(shaOf('Unzip, double-click Train.cmd. Built from abcdef1234567.'), 'abcdef1234567');
-  const release = (sha: string) => (async () => new Response(JSON.stringify({ body: `Built from ${sha}.`, published_at: '2026-10-08T15:30:00Z', assets: [{ name: 'KalshiTrainer-windows.zip', browser_download_url: 'https://github.com/WickedRadWizBiz/coinbaseTraderBot/releases/download/trainer-latest/KalshiTrainer-windows.zip' }] }))) as unknown as typeof fetch;
+  const release = (sha: string) => (async () => new Response(JSON.stringify({ body: `Built from ${sha}.`, published_at: '2026-10-08T15:30:00Z', assets: [{ name: 'KalshiTrainer-windows.zip', browser_download_url: 'https://github.com/Wickedrad/coinbaseTraderBot/releases/download/trainer-latest/KalshiTrainer-windows.zip' }] }))) as unknown as typeof fetch;
   const root = tmpDir();
   const newer = await checkForUpdate({ fetchImpl: release('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'), current: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', root, platform: 'win32' });
   assert.equal(newer.available, true); assert.equal(newer.canInstall, true);
