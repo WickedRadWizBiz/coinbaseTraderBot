@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { at, contractMakerTrades, contractTimingGains, contractTrades, gapAt, hourBlockCi, type Tick } from '../research/quoteLagStudy';
+import { addBias, biasKey, at, contractMakerTrades, contractTimingGains, contractTrades, gapAt, hourBlockCi, type Tick } from '../research/quoteLagStudy';
 
 const S = 1000;
 // Fair jumps 10c at t=100 s; the quote follows 5 s later. Spread 2c around the mid.
@@ -71,4 +71,14 @@ test('quote lag: the timing filter measures what the disfavoured buyer saves by 
   const g = contractTimingGains(lagged(10), close, 5, 0.04, 10);
   assert.equal(g.length, 1);
   assert.ok(Math.abs(g[0].pnl - 0.1) < 1e-9, `NO at 51c now, 41c after the quote moved: ${g[0].pnl}`);
+});
+
+test('quote lag: bias cells key by mid band and time to close and average mid - fair', () => {
+  assert.equal(biasKey(0.55, 40 * 60_000), '2|0');
+  assert.equal(biasKey(0.99, 60_000), '4|3');
+  const map = new Map();
+  addBias(map, lagged(10), 400 * S + 40 * 60 * S, 1);
+  const c = map.get('2|0')!;
+  assert.ok(c.n > 0 && Math.abs(c.sum / c.n) < 0.01, 'mid tracks fair on average');
+  assert.ok(Math.abs(c.spread / c.n - 0.02) < 1e-9, '2c spread');
 });

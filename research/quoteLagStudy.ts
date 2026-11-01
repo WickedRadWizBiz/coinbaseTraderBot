@@ -157,6 +157,26 @@ export function contractTimingGains(ticks: Tick[], closeTime: number, w: number,
   return out;
 }
 
+/** Quote bias for the fidelity replay: mean (mid - fair) in cents by mid band and time to close, with the mean spread.
+ *  Positive = Kalshi's mid sits above the coin-implied fair value. Keyed `${band}|${ttc}` (band 0..4 = 0-20c..80-100c,
+ *  ttc 0..3 = >30 min, 10-30, 2-10, <2). */
+export interface BiasCell { n: number; sum: number; sumSq: number; spread: number }
+export const BIAS_BANDS = ['0-20c', '20-40c', '40-60c', '60-80c', '80-100c'], BIAS_TTC = ['>30m', '10-30m', '2-10m', '<2m'];
+export function biasKey(mid: number, msToClose: number): string {
+  const band = Math.min(4, Math.max(0, Math.floor(mid * 5)));
+  const m = msToClose / 60_000, ttc = m > 30 ? 0 : m > 10 ? 1 : m > 2 ? 2 : 3;
+  return `${band}|${ttc}`;
+}
+export function addBias(map: Map<string, BiasCell>, ticks: Tick[], closeTime: number, step = 5): void {
+  for (let i = 0; i < ticks.length; i += step) {
+    const x = ticks[i], mid = (x.bid + x.ask) / 2, k = biasKey(mid, closeTime - x.t);
+    let c = map.get(k);
+    if (!c) { c = { n: 0, sum: 0, sumSq: 0, spread: 0 }; map.set(k, c); }
+    const d = mid - x.fair;
+    c.n++; c.sum += d; c.sumSq += d * d; c.spread += x.ask - x.bid;
+  }
+}
+
 /** Mean with an hour-block bootstrap 95% interval (trades in the same hour resampled together). */
 export function hourBlockCi(trades: { t: number; pnl: number }[], iters = 2000, seed = 3): { mean: number; lo: number; hi: number } {
   if (!trades.length) return { mean: NaN, lo: NaN, hi: NaN };
@@ -183,6 +203,7 @@ async function main() {
   const st = new ReplayState(), model = MetaModel.identity();
   const ticks = new Map<string, Tick[]>();
   const cells = new Map<string, Cell>(), preds = new Map<string, Pred>();
+  const bias = new Map<string, BiasCell>();
   const makers = new Map<string, Cell>(), timings = new Map<string, { trades: { t: number; pnl: number }[] }>();
   for (const adv of ADVERSARIES) for (const w of WINDOWS) for (const th of THETAS) for (const H of HORIZONS) cells.set(`${w}|${th}|${H}|${adv.latency}|${adv.slip}`, { trades: [] });
   for (const adv of ADVERSARIES) for (const w of WINDOWS) for (const th of THETAS) for (const H of HORIZONS) { makers.set(`${w}|${th}|${H}|${adv.latency}|${adv.slip}`, { trades: [] }); timings.set(`${w}|${th}|${H}|${adv.latency}|${adv.slip}`, { trades: [] }); }
@@ -195,6 +216,7 @@ async function main() {
     if (!tk || tk.length < 120) return;
     contracts++;
     for (const [k, c] of cells) { const [w, th, H, lat, slip] = k.split('|').map(Number); for (const x of contractTrades(tk, m.closeTime, w, th, H, count, { latency: lat, slip })) c.trades.push(x); }
+    addBias(bias, tk, m.closeTime);
     for (const [k, c] of makers) { const [w, th, H, lat, slip] = k.split('|').map(Number); for (const x of contractMakerTrades(tk, m.closeTime, w, th, H, count, { latency: lat, slip })) c.trades.push(x); }
     for (const [k, c] of timings) { const [w, th, H, lat, slip] = k.split('|').map(Number); for (const x of contractTimingGains(tk, m.closeTime, w, th, H, { latency: lat, slip })) c.trades.push(x); }
     for (const [k, p] of preds) {
@@ -254,11 +276,24 @@ async function main() {
       }
     }
   };
+  console.log('[quote-lag] quote bias: mean (mid - fair) in cents [sd] and mean spread, by mid band x time to close (for the fidelity replay)');
+  const biasOut: Record<string, { n: number; meanC: number; sdC: number; spreadC: number }> = {};
+  for (let b = 0; b < BIAS_BANDS.length; b++) {
+    const parts: string[] = [];
+    for (let t = 0; t < BIAS_TTC.length; t++) {
+      const c = bias.get(`${b}|${t}`);
+      if (!c || !c.n) { parts.push(`${BIAS_TTC[t]}: -`); continue; }
+      const mean = c.sum / c.n, sd = Math.sqrt(Math.max(0, c.sumSq / c.n - mean * mean));
+      biasOut[`${BIAS_BANDS[b]}|${BIAS_TTC[t]}`] = { n: c.n, meanC: mean * 100, sdC: sd * 100, spreadC: (c.spread / c.n) * 100 };
+      parts.push(`${BIAS_TTC[t]}: ${(mean * 100).toFixed(2)}c [${(sd * 100).toFixed(1)}] sp ${((c.spread / c.n) * 100).toFixed(1)}c n ${c.n}`);
+    }
+    console.log(`[quote-lag]   mid ${BIAS_BANDS[b].padStart(7)}: ${parts.join(' | ')}`);
+  }
   table('trading the gap as a taker', 'taker', cells, true);
   table('resting a maker bid on the gap\'s side (fills only when the market crosses to it within H; maker fee in, taker out)', 'maker', makers, true);
   table('entry-timing filter: cents saved by waiting H before buying the side the gap disfavours', 'timing', timings, false);
   const out = arg('out');
-  if (out) fs.writeFileSync(out, JSON.stringify({ contracts, hours, count, preds: Object.fromEntries(preds), cells: summary }, null, 1));
+  if (out) fs.writeFileSync(out, JSON.stringify({ contracts, hours, count, preds: Object.fromEntries(preds), bias: biasOut, cells: summary }, null, 1));
 }
 
 if (process.argv[1] && /quoteLagStudy\.ts$/.test(process.argv[1])) main().catch((e) => { console.error(e instanceof Error ? e.stack : e); process.exit(1); });
