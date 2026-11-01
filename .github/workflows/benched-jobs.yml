@@ -18,7 +18,7 @@ on:
         required: false
         default: ''
   push:
-    branches: ['claude/benched-lab']
+    branches: ['claude/benched-lab', 'claude/project-thread-g22fyz']
     paths: ['.github/workflows/benched-jobs.yml', 'research/benchedJobs.ts']
 
 permissions:
