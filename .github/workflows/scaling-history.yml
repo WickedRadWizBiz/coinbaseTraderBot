@@ -31,6 +31,8 @@ jobs:
     outputs:
       arms: ${{ steps.p.outputs.arms }}
       days: ${{ steps.p.outputs.days }}
+      replay_key: ${{ steps.keys.outputs.replay }}
+      server_key: ${{ steps.keys.outputs.server }}
     steps:
       - uses: actions/checkout@v5
       - id: p
@@ -67,7 +69,10 @@ jobs:
       - name: Install dependencies
         if: steps.deps.outputs.cache-hit != 'true'
         run: npm ci --no-audit --no-fund --silent
-      - name: Restore the Kalshi history and its replay (this branch's, else the sweep's on main)
+      # Lean caches (the repo's 10 GB limit evicts other threads' copies): a sweep copy of the history on main from the last
+      # day is used as it is, by its own key, with no second copy; only a history built or updated here is saved.
+      - name: Restore the Kalshi history and its replay (the sweep's on main, else this branch's)
+        id: hist
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -75,14 +80,22 @@ jobs:
             data/history-replay
           key: scaling-history-replay-${{ github.run_id }}
           restore-keys: |
-            scaling-history-replay-
             kalshi-replay-
+            scaling-history-replay-
+      - name: Is the restored history fresh (a copy saved in the last 30 h)?
+        id: fresh
+        env:
+          K: ${{ steps.hist.outputs.cache-matched-key }}
+        run: |
+          f=$(find data/history-replay -type f -mmin -1800 2>/dev/null | head -1)
+          if [ -n "$K" ] && [ -n "$f" ]; then echo "fresh=1" >> "$GITHUB_OUTPUT"; echo "using $K as it is"; else echo "fresh=0" >> "$GITHUB_OUTPUT"; fi
       - name: Repair stored quotes, download what is new, rebuild the replay
+        if: steps.fresh.outputs.fresh != '1'
         run: |
           node --import tsx research/kalshiReplayData.ts --history data/history --out data/history-replay --days "$(( ${{ steps.p.outputs.days }} + 3 ))" --budget-min 100 2>&1 \
             | grep -vE '^\[kalshi-replay-data\] (binance|kalshi|replay): .*(skipp|already|listing|page)' | tail -30
       - name: Save the Kalshi history and its replay
-        if: always()
+        if: always() && steps.fresh.outputs.fresh != '1'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -90,6 +103,7 @@ jobs:
             data/history-replay
           key: scaling-history-replay-${{ github.run_id }}
       - name: Restore the server's model and settings (the sweep's copy on main)
+        id: srv
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -123,13 +137,23 @@ jobs:
       - name: Stop when no copy of the server's model is cached
         run: '[ -f data/models/model.json ] || { echo "::error::no server copy cached: rerun after the daily sweep"; exit 1; }'
       # One copy of the model and settings for every arm (a newer sweep copy mid-run would compare different models).
-      - name: Pin that copy for every replay of this run
+      - name: Pin that copy for every replay of this run (only when copied here; a sweep copy is pinned by its own key)
+        if: steps.srv.outputs.cache-matched-key == ''
         uses: actions/cache/save@v4
         with:
           path: |
             data/models
             data/sweep-env
           key: scaling-history-server-${{ github.run_id }}
+      - id: keys
+        env:
+          FRESH: ${{ steps.fresh.outputs.fresh }}
+          HK: ${{ steps.hist.outputs.cache-matched-key }}
+          SK: ${{ steps.srv.outputs.cache-matched-key }}
+        run: |
+          if [ "$FRESH" = 1 ]; then echo "replay=$HK"; else echo "replay=scaling-history-replay-${{ github.run_id }}"; fi >> "$GITHUB_OUTPUT"
+          if [ -n "$SK" ]; then echo "server=$SK"; else echo "server=scaling-history-server-${{ github.run_id }}"; fi >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT" | grep -E '^(replay|server)='
 
   run:
     needs: [data]
@@ -162,14 +186,14 @@ jobs:
           path: |
             data/history
             data/history-replay
-          key: scaling-history-replay-${{ github.run_id }}
+          key: ${{ needs.data.outputs.replay_key }}
           fail-on-cache-miss: true
       - uses: actions/cache/restore@v4
         with:
           path: |
             data/models
             data/sweep-env
-          key: scaling-history-server-${{ github.run_id }}
+          key: ${{ needs.data.outputs.server_key }}
           fail-on-cache-miss: true
       - name: Replay ${{ matrix.arm.tag }}
         env:
@@ -216,7 +240,7 @@ jobs:
           path: |
             data/history
             data/history-replay
-          key: scaling-history-replay-${{ github.run_id }}
+          key: ${{ needs.data.outputs.replay_key }}
       - uses: actions/download-artifact@v4
         with:
           pattern: scaling-history-*

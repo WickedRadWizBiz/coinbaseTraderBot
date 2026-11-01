@@ -1,7 +1,7 @@
 name: Cache probe
 
 # Does a server copy cache (kalshi-server-*) or a Kalshi history cache (kalshi-replay-*) from main exist? Lookup only, no
-# download, no server access; posts the matched keys as a commit comment (thread "Plan dynamic scaling", Nov 1).
+# download (plus deleting this thread's own stale caches), no server access; posts the matched keys as a commit comment (thread "Plan dynamic scaling", Nov 1).
 on:
   push:
     branches: ['claude/project-thread-0pkw7f']
@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   probe:
@@ -33,6 +34,13 @@ jobs:
           key: kalshi-replay-none
           restore-keys: kalshi-replay-
           lookup-only: true
+      # Free space (10 GB repo limit): drop this thread's caches that no run needs any more (listed here, exact keys only).
+      - name: Delete stale caches of this thread
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for k in scaling-history-replay-41351228092 scaling-history-server-41351228092; do gh cache delete "$k" -R "${{ github.repository }}" && echo "deleted $k" || echo "no cache $k"; done
+          gh cache list -R "${{ github.repository }}" -L 100 --json key,sizeInBytes,ref --jq '.[] | "\(.key) \(.ref) \(.sizeInBytes/1e6|floor)MB"' | head -60
       - env:
           GH_TOKEN: ${{ github.token }}
           S: ${{ steps.s.outputs.cache-matched-key }}
