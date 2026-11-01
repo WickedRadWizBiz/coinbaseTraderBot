@@ -1287,6 +1287,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       levelMax: Math.round(num(env, 'PROBATION_LEVEL_MAX', DEFAULT_PROBATION.levelMax!, 0, 10)),
       takeStep: num(env, 'PROBATION_TAKE_STEP', DEFAULT_PROBATION.takeStep!, 0, 0.2),
       fillStep: num(env, 'PROBATION_FILL_STEP', DEFAULT_PROBATION.fillStep!, 0, 0.1),
+      gpMult: num(env, 'PROBATION_GP_MULT', DEFAULT_PROBATION.gpMult!, 0.05, 1),
     },
     sinuousExit: {
       mode: oneOf(env, 'SINUOUS_EXIT', DEFAULT_SINUOUS_EXIT.mode, ['gate', 'monitor', 'rest', 'cross', 'off'] as const),
@@ -1317,6 +1318,12 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       crossFvMargins: parseLevelMargins(env.SINUOUS_CROSS_FV_MARGINS, DEFAULT_CROSS_FV_MARGINS),
       crossLevel: Math.round(num(env, 'SINUOUS_CROSS_LEVEL', -1, -1, 10)),
       crossLevelMax: Math.round(num(env, 'SINUOUS_CROSS_LEVEL_MAX', 4, 0, 10)),
+      // The dip buy (Nov 1: the cross's misreads turned into entries; off until the lab passes it).
+      dipBuy: bool(env, 'SINUOUS_DIP_BUY', false),
+      dipMargin: num(env, 'SINUOUS_DIP_MARGIN', 0.04, 0, 0.5),
+      dipFrac: num(env, 'SINUOUS_DIP_FRAC', 0.5, 0.05, 2),
+      dipMax: Math.round(num(env, 'SINUOUS_DIP_MAX', 2, 0, 20)),
+      dipCooldownSec: num(env, 'SINUOUS_DIP_COOLDOWN_SEC', 60, 1, 3600),
     },
     sinuousEntry: {
       mode: oneOf(env, 'SINUOUS_ENTRY', DEFAULT_SINUOUS_ENTRY.mode, ['gate', 'monitor', 'off'] as const),

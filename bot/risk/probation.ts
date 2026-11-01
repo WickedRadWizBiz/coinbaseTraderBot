@@ -44,9 +44,11 @@ export interface ProbationParams {
   levelMax?: number;
   takeStep?: number;
   fillStep?: number;
+  /** What an unvalidated evolved formula's vote is multiplied by, once per level (PROBATION_GP_MULT). */
+  gpMult?: number;
 }
 
-export const DEFAULT_PROBATION: ProbationParams = { mode: 'monitor', minTrades: 20, t: 1, maxLossUsd: 25, maxLossPct: 0.15, window: 200, levelMax: 4, takeStep: 0.02, fillStep: 0.005 };
+export const DEFAULT_PROBATION: ProbationParams = { mode: 'monitor', minTrades: 20, t: 1, maxLossUsd: 25, maxLossPct: 0.15, window: 200, levelMax: 4, takeStep: 0.02, fillStep: 0.005, gpMult: 0.5 };
 
 interface BookState { results: number[]; since: number; level?: number; benched?: { at: number; reason: string } }
 type State = Record<ProbationBook, BookState>;
@@ -166,6 +168,8 @@ export function probation(): Probation | undefined { return active; }
 export function probationLevel(book: ProbationBook): number { return active?.level(book) ?? 0; }
 /** What the level adds to an unvalidated take model's margin, and to an unvalidated fill model's expected-value bar. */
 export function probationTakeAdd(book: ProbationBook = 'kalshi'): number { return probationLevel(book) * (active?.p.takeStep ?? DEFAULT_PROBATION.takeStep!); }
+/** An unvalidated evolved formula's vote multiplier at the level: PROBATION_GP_MULT ^ level. */
+export function probationGpMult(book: ProbationBook = 'kalshi'): number { return (active?.p.gpMult ?? DEFAULT_PROBATION.gpMult!) ** probationLevel(book); }
 export function probationFillAdd(book: ProbationBook = 'kalshi'): number { return probationLevel(book) * (active?.p.fillStep ?? DEFAULT_PROBATION.fillStep!); }
 /** Validated, or unvalidated with this book on an open probation. */
 export function gatePasses(book: ProbationBook, validated: boolean): boolean { return validated || Boolean(active?.open(book)); }

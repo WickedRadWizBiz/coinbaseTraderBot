@@ -78,7 +78,7 @@ import { TakeProfitBench } from '../bot/strategy/takeProfitBench';
 import { compactReading, MarketState, observeMarket } from '../bot/marketdata/marketState';
 import { dynamicEdge } from '../bot/strategy/dynamicEdge';
 import { otherCoinsHeld, regimeScale } from '../bot/strategy/regimeScale';
-import { gatePasses, type ProbationParams } from '../bot/risk/probation';
+import { gatePasses, probationGpMult, probationLevel, type ProbationParams } from '../bot/risk/probation';
 import { bootstrapMeanCi, deflatedSharpe, pbo, rng, sharpe } from './stats';
 
 function arg(name: string, def: string): string {
@@ -120,6 +120,8 @@ export interface ExitStats {
   /** The exit curve's cross (SINUOUS_CROSS): sales sent and their fills' contracts. */
   crossSales?: number;
   crossContracts?: number;
+  /** The dip buys sent (SINUOUS_DIP_BUY). */
+  dipBuys?: number;
   /** Mean (stop - fill price) in side terms for ratchet exits; positive = filled below the stop. */
   avgSlippage: number | null;
 }
@@ -726,7 +728,10 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         const ctx = marketContext();
         const rb = strategy.ruleBook ? activeRuleBook()?.read(taSnapOf(m.asset), Math.max(1, tauSec / 3600), ctx?.character(m.asset)?.cls) : undefined;
         const gp = strategy.gp ? activeGpSignals()?.read(m.asset, (a) => st.features.candles.get(a)?.bars['1h']) : undefined;
-        const signals = orientedSignals(fmap, taView, false, rb, gp && (gp.validated || gp.speaks || gatePasses('kalshi', false)) ? gp : undefined);
+        const gpSpeaks = gp && (gp.validated || gp.speaks || gatePasses('kalshi', false)) ? gp : undefined;
+        // As the engine: an unvalidated formula's vote shrinks with the Kalshi book's probation level (graded, Oct 31).
+        const gpVote = gpSpeaks && !gpSpeaks.validated && probationLevel('kalshi') > 0 ? { ...gpSpeaks, exposure: gpSpeaks.exposure * probationGpMult('kalshi') } : gpSpeaks;
+        const signals = orientedSignals(fmap, taView, false, rb, gpVote);
         const rsi = [(m.closeTime - m.openTime) / 60_000 <= 20 ? fmap.ta_rsi_15m : fmap.ta_rsi_1h, fmap.rsi_14_1m].find((x) => x !== undefined && Number.isFinite(x));
         const alt = altcoinRiskOn(m.asset, fmap.usdtd_ret_15m_z, rsi, strategy);
         priority.set(m.ticker, selectionPriority(alt.active, taNetDirection(taView, false), confluenceBreadth(signals, 1).breadth, confluenceBreadth(signals, -1).breadth));
@@ -1021,6 +1026,15 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
                 plan.place.push({ side: sign > 0 ? 'ask' : 'bid', price: top.price, count: n, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: true, purpose: 'exit', edge: 0, why: c.why! });
               }
             }
+          }
+          // The dip buy, as the engine.
+          if (curveGate.p.dipBuy && entryWindowOpen && !huntMode && view.exitWindowOpen !== false && !ridesToSettlement(view) && !plan.place.some((p) => p.purpose === 'exit' || p.purpose === 'entry') && !pending.has(m.ticker)) {
+            const top = sign > 0 ? ask : bid;
+            const sideAsk = sign > 0 ? top.price : Math.round((1 - top.price) * 1e4) / 1e4;
+            const fvS = sign > 0 ? fv.pYes : 1 - fv.pYes;
+            const d = curveGate.dip(m.ticker, { sideAsk, takerFeePer: orderFee(1, sideAsk, true, DEFAULT_FEES), fvSide: fvS, tauSec, position: posX, exitFeePer: orderFee(held, sideBid, true, DEFAULT_FEES) / held }, st.now);
+            const n = Math.min(d.buy, floorCount(top.size), view.maxContracts);
+            if (n >= 1) { exits.dipBuys = (exits.dipBuys ?? 0) + 1; plan.place.push({ side: sign > 0 ? 'bid' : 'ask', price: top.price, count: n, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: false, purpose: 'entry', edge: fvS - sideAsk - orderFee(1, sideAsk, true, DEFAULT_FEES), why: d.why! }); }
           }
         } else curveGate.flat(m.ticker, st.now);
       }

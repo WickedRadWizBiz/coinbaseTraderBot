@@ -51,3 +51,10 @@ test('model skill weight: replaces the model-vs-market halt; leans toward the ma
   const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) });
   assert.deepEqual([cfg.strategy.modelHealthHalt, cfg.strategy.modelSkill.on, cfg.strategy.modelSkill.min], [false, true, 0.25]);
 });
+
+test('probation GP vote: an unvalidated formula votes at gpMult^level, full at level 0', async () => {
+  const { probationGpMult } = await import('../bot/risk/probation');
+  assert.equal(probationGpMult('kalshi'), 1, 'no probation installed: level 0');
+  const cfg = loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), PROBATION_GP_MULT: '0.25' });
+  assert.equal(cfg.probation.gpMult, 0.25);
+});
