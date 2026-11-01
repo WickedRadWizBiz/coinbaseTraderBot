@@ -888,6 +888,10 @@ function pacerConfig(env: Env): PacerConfig {
     maxTargetUsd: Math.max(minTakeUsd, num(env, 'PACER_MAX_TARGET_USD', 6.5, 0, 10_000)),
     // Steven (Oct 31): under a higher target the quota is the position's stop, not its sale.
     floor: oneOf(env, 'PACER_FLOOR', 'riding', ['off', 'targets', 'riding'] as const),
+    // Paired replays of Oct 29-30 (Oct 31): a floor armed at the profit just reached sold winners on a one-tick dip. Under
+    // today's other rules a cushion of 8 ticks a contract made $262 and $238 a day more than none (two batches, 5 bankrolls
+    // of 5 each); with the loser exits of PR #230, 16 ticks made $88 a day more than none.
+    floorTicks: num(env, 'PACER_FLOOR_TICKS', 8, 0, 50),
   };
 }
 
