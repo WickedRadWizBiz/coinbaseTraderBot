@@ -687,7 +687,7 @@ export class SnnNetwork {
     const r = this.sigmaRef.get(asset);
     if (!r) { this.sigmaRef.set(asset, { v: sigma, ts: now }); return 1; }
     const ratio = sigma / r.v;
-    const a = 1 - Math.exp(-Math.max(0, now - r.ts) / (6 * 3_600_000));
+    const a = 1 - Math.exp(-Math.max(0, now - r.ts) / ((this.p.volNormRefH ?? 6) * 3_600_000));
     r.v += a * (sigma - r.v); r.ts = Math.max(r.ts, now);
     return ratio;
   }

@@ -93,6 +93,9 @@ export interface SnnParams {
    *  scaled features, so learning follows the same scaled output (the gradient stays exact). Optional: absent = off,
    *  and the version hash is unchanged. */
   volNorm?: number;
+  /** volNorm's reference: hours of the time-weighted sigma average the contract's sigma is compared with (default 6).
+   *  A longer reference keeps a volatile stretch counted as volatile for longer. Optional, hash unchanged when absent. */
+  volNormRefH?: number;
   /** Learn every few minutes, not only at settlement (Steven, Oct 31: make the SNNs learn, fast). With anchorMid, a
    *  contract scored now is scored again `lagSec` later against the market's mid at that time, a soft label: the delta
    *  rule (target - p) phi at `etaScale` x the readout's eta. The later mid is the market's best estimate of the
