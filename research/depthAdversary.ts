@@ -36,7 +36,9 @@ export interface ProbeFill { probe: Probe; side: 'bid' | 'ask'; price: number; c
 /** One day's probe results per file (per day, so the comparison can bootstrap over days). */
 export interface AdversaryDay {
   day: string;
-  /** Contract-hours each probe side was resting (join, inside, behind) or taker attempts (taker). */
+  /** Hours of quoting per probe: each refresh of a contract's two sides counts REFRESH_MS once (so a probe resting on
+   *  one contract all day is 24 h); taker: attempts. The size is the same on real and fill-in, so fills a quoted hour
+   *  compare across them, which is all they are for. */
   quoted: Record<Probe, number>;
   fills: ProbeFill[];
 }
@@ -86,6 +88,8 @@ export async function probeDays(rec: string, days?: string[]): Promise<Adversary
     }
     if (e.tie || st.now - lastTick < 1000) continue;
     lastTick = st.now;
+    // Only the days asked for are probed (the span between them is read for the books and contracts carried over).
+    if (wanted.size && !wanted.has(dayOf(st.now))) continue;
     while (pending.length && pending[0].due <= st.now) {
       const x = pending.shift()!;
       const mid = st.books.get(x.ticker)?.mid();
@@ -135,7 +139,7 @@ export async function probeDays(rec: string, days?: string[]): Promise<Adversary
       }
     }
   }
-  return [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day));
+  return [...byDay.values()].filter((d) => !wanted.size || wanted.has(d.day)).sort((a, b) => a.day.localeCompare(b.day));
 }
 
 /** A probe's numbers over some days: fills a contract-hour quoted, the 60 s markout and the settlement P&L a contract

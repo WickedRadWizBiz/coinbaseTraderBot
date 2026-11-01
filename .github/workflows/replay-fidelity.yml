@@ -288,16 +288,18 @@ jobs:
           c = r['choice']
           print('closest to the real quotes:', c['how'] + (f" (bridge {c['sigma']})" if c.get('sigma') else ''))
           PY
+      # Advisory: a failure here never holds back the verdict below.
       - name: The adversary's probes, real books vs each fill-in
+        continue-on-error: true
         run: |
           set -euo pipefail
           export TRADING_MODE=paper AUTO_TRAIN=off
           ARGS=""
           for how in real hold requote worst noise depth; do
-            FILES=$(ls "$RUNNER_TEMP"/in/fidelity-*/adversary-$how-p*.json 2>/dev/null | paste -sd, -) || true
-            [ -n "$FILES" ] && ARGS="$ARGS $how=$FILES"
+            FILES=$(ls "$RUNNER_TEMP"/in/fidelity-*/adversary-$how-p*.json 2>/dev/null | paste -sd, - || true)
+            if [ -n "$FILES" ]; then ARGS="$ARGS $how=$FILES"; fi
           done
-          [ -n "$ARGS" ] || { echo "no adversary results"; exit 0; }
+          case " $ARGS" in *" real="*) ;; *) echo "no adversary results on the real books: nothing to compare"; exit 0;; esac
           node --import tsx research/depthAdversary.ts --compare "$ARGS" --out "$GITHUB_WORKSPACE/data/models/replay_adversary.json"
       - name: Send the verdict to the server
         run: |
