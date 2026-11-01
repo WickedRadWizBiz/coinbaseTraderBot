@@ -9,6 +9,9 @@ on:
       surrogates:
         description: 'placebo parents per kind'
         default: '60'
+      adv_by:
+        description: 'adversary on the best setting by score or by ic'
+        default: 'score'
   push:
     branches: [claude/project-thread-axoa26]
     paths:
@@ -52,7 +55,8 @@ jobs:
           npx tsx research/fractalStudy.ts --history "$RUNNER_TEMP/history" --out research/btcd_fractal/out/engine_study.json 2>&1 | tail -60
       - name: Study
         run: |
-          python3 research/btcd_fractal/study.py --data research/btcd_fractal/data --out research/btcd_fractal/out --surrogates "${{ github.event.inputs.surrogates || '60' }}" 2>&1 | tee "$RUNNER_TEMP/study.log" | tail -80
+          mkdir -p research/btcd_fractal/out/prev; cp research/btcd_fractal/out/results.json research/btcd_fractal/out/prev/results_score_adversary.json 2>/dev/null || true
+          python3 research/btcd_fractal/study.py --data research/btcd_fractal/data --out research/btcd_fractal/out --surrogates "${{ github.event.inputs.surrogates || '60' }}" --adv-by "${{ github.event.inputs.adv_by || 'ic' }}" 2>&1 | tee "$RUNNER_TEMP/study.log" | tail -80
       - name: Commit results to the branch
         if: always()
         run: |

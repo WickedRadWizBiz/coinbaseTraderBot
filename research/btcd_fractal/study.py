@@ -426,6 +426,7 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--surrogates", type=int, default=60, help="per surrogate kind")
+    ap.add_argument("--adv-by", default="score", choices=["score", "ic"])
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -558,7 +559,10 @@ def main():
     rng = np.random.default_rng(20261101)
     ch_spec, cidx_spec = window(childs[spec["child"]])
     par_spec = refpar
-    adv_cfg = dict(best["cfg"])
+    adv_src = best
+    if a.adv_by == "ic":  # the adversary on the setting whose projected moves correlate best with realized ones
+        adv_src = max(results, key=lambda r: r["skill"].get("h26", {}).get("ic") or -9)
+    adv_cfg = dict(adv_src["cfg"])
     par_best, _ = window(*parents[adv_cfg["parent"]])
     ch_best, cidx_best = window(childs[adv_cfg["child"]])
     jobs = []
@@ -592,8 +596,9 @@ def main():
             cc, _ = window(d0)
             cjobs.append((f"child@{d0}", cc, adv_cfg))
         advc = list(ex.map(_eval_child, cjobs))
-    real = {"score": best["score"], "r": best["fit"]["r"], "mae": best["fit"]["mae"], "cost": best["fit"]["cost"],
-            "h26": best["skill"].get("h26", {}).get("ratio"), "hit26": best["skill"].get("h26", {}).get("hit"), "ic26": best["skill"].get("h26", {}).get("ic")}
+    _r = adv_src
+    real = {"score": _r["score"], "r": _r["fit"]["r"], "mae": _r["fit"]["mae"], "cost": _r["fit"]["cost"],
+            "h26": _r["skill"].get("h26", {}).get("ratio"), "hit26": _r["skill"].get("h26", {}).get("hit"), "ic26": _r["skill"].get("h26", {}).get("ic")}
     kinds = {}
     for x in adv:
         k = x["kind"] if x["kind"] in ("iaaft", "block8", "walk", "reversed") else ("offset" if x["kind"].startswith("offset") else "otherBTCD")
