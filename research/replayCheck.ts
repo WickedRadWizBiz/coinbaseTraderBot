@@ -71,6 +71,8 @@ export interface SideSummary {
   contractsByHour: Record<string, number>;
   /** Settled markets and P&L by series (the ticker before its first dash: KXBTC15M, KXETHD, ...). */
   bySeries: Record<string, { markets: number; pnl: number }>;
+  /** Settled P&L by market ticker (lab: the per-market bootstrap reads it). */
+  byMarket?: Record<string, number>;
 }
 /** The two sides' prices at the paper bot's decision records (the replay's evaluation of the market within 1 s). */
 export interface PriceMatch {
@@ -168,10 +170,10 @@ const isTennis = (t: string) => t.startsWith('KXATP') || t.startsWith('KXWTA');
 const exitKind = (why: string) => /^loser window cut/.test(why) ? 'loser window cut' : /^loser cut/.test(why) ? 'loser cut' : /^quota snipe/.test(why) ? 'quota snipe' : /^profit mandate/.test(why) ? 'profit mandate' : /^take-profit/.test(why) ? 'take-profit' : /ratchet|stop/i.test(why) ? 'ratchet' : /cross|curve/i.test(why) ? 'cross' : /exit|fair|model|- fee > q/i.test(why) ? 'model exit' : 'other';
 /** A rejection reason with its numbers folded, so the same kind counts together (as research/backtest.ts folds them). */
 export const foldReason = (r: string) => r.replace(/[-+]?\$?\d[\d.,]*%?/g, '#');
-const empty = (): SideSummary => ({ fills: 0, contracts: 0, fees: 0, pnl: 0, markets: 0, exits: {}, byHour: {}, byPurpose: {}, contractsByHour: {}, bySeries: {} });
+const empty = (): SideSummary => ({ fills: 0, contracts: 0, fees: 0, pnl: 0, markets: 0, exits: {}, byHour: {}, byPurpose: {}, contractsByHour: {}, bySeries: {}, byMarket: {} });
 /** One market the take-profit bench scored: what its sales made against holding to settlement, the contracts sold, when. */
 export interface TakeProfitMarket { usd: number; contracts: number; t: number }
-const addSeries = (s: SideSummary, ticker: string, pnl: number) => { const x = (s.bySeries[ticker.split('-')[0]] ??= { markets: 0, pnl: 0 }); x.markets++; x.pnl += pnl; };
+const addSeries = (s: SideSummary, ticker: string, pnl: number) => { const x = (s.bySeries[ticker.split('-')[0]] ??= { markets: 0, pnl: 0 }); x.markets++; x.pnl += pnl; (s.byMarket ??= {})[ticker] = (s.byMarket[ticker] ?? 0) + pnl; };
 export type PaperSide = SideSummary & {
   gateShare: number | null; edgeShare?: number | null; lastFillAt: string | null;
   /** Fills of paper's own extra entries: training trades and exploration entries. */
@@ -883,6 +885,7 @@ async function main(): Promise<void> {
   console.log(`paper's last fill in the stretch: ${res.paper.lastFillAt ? hm(res.paper.lastFillAt) : 'none'}`);
   const series = [...new Set([...Object.keys(res.replay.bySeries), ...Object.keys(res.paper.bySeries)])].sort((x, y) => (res.paper.bySeries[y]?.markets ?? 0) - (res.paper.bySeries[x]?.markets ?? 0));
   console.log(`settled markets / P&L by series: ${series.map((k) => `${k} replay ${res.replay.bySeries[k]?.markets ?? 0} / ${f(res.replay.bySeries[k]?.pnl ?? 0)}, paper ${res.paper.bySeries[k]?.markets ?? 0} / ${f(res.paper.bySeries[k]?.pnl ?? 0)}`).join(' | ') || 'none'}`);
+  console.log(`replay settled P&L by market: ${Object.entries(res.replay.byMarket ?? {}).filter(([, v]) => Math.abs(v) >= 0.005).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${f(v)}`).join(' ') || 'none'}`);
   const top = (r: Record<string, number>) => Object.entries(r).filter(([k]) => k !== 'quoting').sort((x, y) => y[1] - x[1]).slice(0, 4).map(([k, n]) => `${k} x${n}`).join('; ');
   for (const [h, r] of Object.entries(res.paper.quietHours).sort()) console.log(`paper filled nothing in ${h.replace('T', ' ')}:00; its entry diagnoses then, markets by reason: ${top(r)}`);
   if (res.paper.quiet.diagnoses) console.log(`after it, ${res.paper.quiet.diagnoses} entry diagnoses (the last ${hm(res.paper.quiet.lastAt!)}), markets by reason summed over them: ${top(res.paper.quiet.reasons)}`);
