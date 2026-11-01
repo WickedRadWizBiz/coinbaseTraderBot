@@ -17,7 +17,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: scaling-lab
+  group: scaling-lab-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -35,25 +35,31 @@ jobs:
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, re
-          head, arms = {}, []
+          head, arms, extra = {}, [], []
           for line in open('lab/scaling-arms.txt'):
               line = line.rstrip('\n')
               m = re.match(r'^#\s*(days|from|to|reuse)=(\S+)', line)
               if m: head[m.group(1)] = m.group(2); continue
+              # also=<run id>,<from>: every arm also replays that earlier run's copy (another stretch), no server load.
+              m = re.match(r'^#\s*also=([0-9]+),(\S+)$', line)
+              if m: extra.append((m.group(1), m.group(2))); continue
               if not line.strip() or line.lstrip().startswith('#'): continue
               tag, _, ov = line.partition(':')
               assert re.match(r'^[a-z0-9_]+$', tag.strip()), tag
               for kv in ov.split():
                   assert re.match(r'^[A-Z][A-Z0-9_]*=[A-Za-z0-9_.,:-]*$', kv), kv
               arms.append({'tag': tag.strip(), 'overrides': ' '.join(ov.split())})
-          assert arms and len(arms) <= 12
+          assert arms and len(arms) * (1 + len(extra)) <= 24
           print('days=' + head['days']); print('from=' + head['from']); print('to=' + head['to'])
           # reuse=<run id>: the arms unpack that run's copy (kept 2 days) instead of copying from the server again, so a
           # rerun of the same stretch puts no load on the server.
           reuse = head.get('reuse', '')
           assert re.match(r'^[0-9]*$', reuse), reuse
           print('reuse=' + reuse)
-          print('arms=' + json.dumps(arms))
+          jobs = [dict(a, run=reuse, start=head['from'], label=a['tag']) for a in arms]
+          for i, (run, start) in enumerate(extra):
+              jobs += [dict(a, run=run, start=start, label=a['tag'] + '@' + start[:10]) for a in arms]
+          print('arms=' + json.dumps(jobs))
           PY
           cat "$GITHUB_OUTPUT"
 
@@ -233,7 +239,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: lab-copy
-          run-id: ${{ needs.plan.outputs.reuse || github.run_id }}
+          run-id: ${{ matrix.arm.run || github.run_id }}
           github-token: ${{ github.token }}
       - name: Unpack the copy
         run: |
@@ -241,7 +247,7 @@ jobs:
           cp data/lab-temp/* "$RUNNER_TEMP"/ 2>/dev/null || true
       - name: Replay check (backtester vs paper, since the bot's last start)
         env:
-          CHECK_FROM: ${{ needs.plan.outputs.from }}
+          CHECK_FROM: ${{ matrix.arm.start }}
           MIN_HOURS: '3'
           NEARBY: '0.95 0.975 1.025 1.05'
           PHASES: '200 400 600 800'
@@ -289,7 +295,7 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ matrix.arm.tag }}
+          TAG: ${{ matrix.arm.label }}
           OVERRIDES: ${{ matrix.arm.overrides }}
         run: |
           LOG="$RUNNER_TEMP/own.log"; [ -s "$LOG" ] || { echo "no replay output to post"; exit 0; }
