@@ -1,0 +1,836 @@
+{
+ "now": "2026-11-01",
+ "btcd": 60.47,
+ "horizonWeeks": 13,
+ "events_big": [
+  {
+   "peak": "2016-11-20",
+   "trough": "2017-05-21",
+   "from": 97.2,
+   "to": 65.5,
+   "days": 182,
+   "features": {
+    "ethbtc_13w": -0.3841,
+    "ethbtc_vs30w": null,
+    "usdtd_13w": -0.223,
+    "btc_vs30w": 0.1831,
+    "btc_dd": -0.0462,
+    "btc_13w": 0.2303,
+    "btcd_from52wHigh": -1.9396,
+    "btcd_13w": 1.4008,
+    "othersd_13w": -0.6413,
+    "dxy_13w": 0.0668,
+    "us10y_13w": 0.8122,
+    "m2_yoy": 0.0697,
+    "spx_vs30w": null,
+    "days_since_halving": 134.0
+   },
+   "pct": {
+    "ethbtc_13w": 0.1,
+    "ethbtc_vs30w": null,
+    "usdtd_13w": 0.17,
+    "btc_vs30w": 0.59,
+    "btc_dd": 0.82,
+    "btc_13w": 0.62,
+    "btcd_from52wHigh": 0.71,
+    "btcd_13w": 0.65,
+    "othersd_13w": 0.0,
+    "dxy_13w": 0.98,
+    "us10y_13w": 0.94,
+    "m2_yoy": 0.76,
+    "spx_vs30w": null,
+    "days_since_halving": 0.1
+   }
+  },
+  {
+   "peak": "2017-12-10",
+   "trough": "2018-01-14",
+   "from": 67.4,
+   "to": 36.8,
+   "days": 35,
+   "features": {
+    "ethbtc_13w": -0.8943,
+    "ethbtc_vs30w": -0.8835,
+    "usdtd_13w": -0.3733,
+    "btc_vs30w": 1.275,
+    "btc_dd": 0.0,
+    "btc_13w": 1.2459,
+    "btcd_from52wHigh": -28.5699,
+    "btcd_13w": 13.8064,
+    "othersd_13w": -0.2035,
+    "dxy_13w": 0.0214,
+    "us10y_13w": 0.2454,
+    "m2_yoy": 0.0514,
+    "spx_vs30w": 0.06,
+    "days_since_halving": 519.0
+   },
+   "pct": {
+    "ethbtc_13w": 0.01,
+    "ethbtc_vs30w": 0.0,
+    "usdtd_13w": 0.04,
+    "btc_vs30w": 1.0,
+    "btc_dd": 0.89,
+    "btc_13w": 0.99,
+    "btcd_from52wHigh": 0.12,
+    "btcd_13w": 0.99,
+    "othersd_13w": 0.17,
+    "dxy_13w": 0.76,
+    "us10y_13w": 0.69,
+    "m2_yoy": 0.57,
+    "spx_vs30w": 0.64,
+    "days_since_halving": 0.41
+   }
+  },
+  {
+   "peak": "2021-01-03",
+   "trough": "2021-05-16",
+   "from": 70.3,
+   "to": 40.8,
+   "days": 133,
+   "features": {
+    "ethbtc_13w": -0.1102,
+    "ethbtc_vs30w": -0.024,
+    "usdtd_13w": -0.6547,
+    "btc_vs30w": 0.9357,
+    "btc_dd": 0.0,
+    "btc_13w": 1.1321,
+    "btcd_from52wHigh": 0.0,
+    "btcd_13w": 10.9751,
+    "othersd_13w": -0.5085,
+    "dxy_13w": -0.0397,
+    "us10y_13w": 0.135,
+    "m2_yoy": 0.2125,
+    "spx_vs30w": 0.1009,
+    "days_since_halving": 237.0
+   },
+   "pct": {
+    "ethbtc_13w": 0.34,
+    "ethbtc_vs30w": 0.49,
+    "usdtd_13w": 0.0,
+    "btc_vs30w": 0.97,
+    "btc_dd": 0.89,
+    "btc_13w": 0.98,
+    "btcd_from52wHigh": 0.93,
+    "btcd_13w": 0.97,
+    "othersd_13w": 0.01,
+    "dxy_13w": 0.11,
+    "us10y_13w": 0.56,
+    "m2_yoy": 0.95,
+    "spx_vs30w": 0.94,
+    "days_since_halving": 0.19
+   }
+  }
+ ],
+ "events_medium": [
+  {
+   "peak": "2016-11-20",
+   "trough": "2017-05-21",
+   "from": 97.2,
+   "to": 65.5,
+   "days": 182,
+   "features": {
+    "ethbtc_13w": -0.3841,
+    "ethbtc_vs30w": null,
+    "usdtd_13w": -0.223,
+    "btc_vs30w": 0.1831,
+    "btc_dd": -0.0462,
+    "btc_13w": 0.2303,
+    "btcd_from52wHigh": -1.9396,
+    "btcd_13w": 1.4008,
+    "othersd_13w": -0.6413,
+    "dxy_13w": 0.0668,
+    "us10y_13w": 0.8122,
+    "m2_yoy": 0.0697,
+    "spx_vs30w": null,
+    "days_since_halving": 134.0
+   },
+   "pct": {
+    "ethbtc_13w": 0.1,
+    "ethbtc_vs30w": null,
+    "usdtd_13w": 0.17,
+    "btc_vs30w": 0.59,
+    "btc_dd": 0.82,
+    "btc_13w": 0.62,
+    "btcd_from52wHigh": 0.71,
+    "btcd_13w": 0.65,
+    "othersd_13w": 0.0,
+    "dxy_13w": 0.98,
+    "us10y_13w": 0.94,
+    "m2_yoy": 0.76,
+    "spx_vs30w": null,
+    "days_since_halving": 0.1
+   }
+  },
+  {
+   "peak": "2017-12-10",
+   "trough": "2018-01-14",
+   "from": 67.4,
+   "to": 36.8,
+   "days": 35,
+   "features": {
+    "ethbtc_13w": -0.8943,
+    "ethbtc_vs30w": -0.8835,
+    "usdtd_13w": -0.3733,
+    "btc_vs30w": 1.275,
+    "btc_dd": 0.0,
+    "btc_13w": 1.2459,
+    "btcd_from52wHigh": -28.5699,
+    "btcd_13w": 13.8064,
+    "othersd_13w": -0.2035,
+    "dxy_13w": 0.0214,
+    "us10y_13w": 0.2454,
+    "m2_yoy": 0.0514,
+    "spx_vs30w": 0.06,
+    "days_since_halving": 519.0
+   },
+   "pct": {
+    "ethbtc_13w": 0.01,
+    "ethbtc_vs30w": 0.0,
+    "usdtd_13w": 0.04,
+    "btc_vs30w": 1.0,
+    "btc_dd": 0.89,
+    "btc_13w": 0.99,
+    "btcd_from52wHigh": 0.12,
+    "btcd_13w": 0.99,
+    "othersd_13w": 0.17,
+    "dxy_13w": 0.76,
+    "us10y_13w": 0.69,
+    "m2_yoy": 0.57,
+    "spx_vs30w": 0.64,
+    "days_since_halving": 0.41
+   }
+  },
+  {
+   "peak": "2018-04-01",
+   "trough": "2018-05-06",
+   "from": 49.6,
+   "to": 39.9,
+   "days": 35,
+   "features": {
+    "ethbtc_13w": 0.0372,
+    "ethbtc_vs30w": -0.1241,
+    "usdtd_13w": 1.3237,
+    "btc_vs30w": -0.2054,
+    "btc_dd": -1.0231,
+    "btc_13w": -0.7115,
+    "btcd_from52wHigh": -38.9095,
+    "btcd_13w": 6.3434,
+    "othersd_13w": 0.0758,
+    "dxy_13w": -0.0227,
+    "us10y_13w": 0.3231,
+    "m2_yoy": 0.0426,
+    "spx_vs30w": -0.0021,
+    "days_since_halving": 631.0
+   },
+   "pct": {
+    "ethbtc_13w": 0.64,
+    "ethbtc_vs30w": 0.29,
+    "usdtd_13w": 0.99,
+    "btc_vs30w": 0.16,
+    "btc_dd": 0.15,
+    "btc_13w": 0.01,
+    "btcd_from52wHigh": 0.06,
+    "btcd_13w": 0.92,
+    "othersd_13w": 0.64,
+    "dxy_13w": 0.21,
+    "us10y_13w": 0.76,
+    "m2_yoy": 0.41,
+    "spx_vs30w": 0.18,
+    "days_since_halving": 0.5
+   }
+  },
+  {
+   "peak": "2018-09-09",
+   "trough": "2018-09-23",
+   "from": 59.8,
+   "to": 53.3,
+   "days": 14,
+   "features": {
+    "ethbtc_13w": -0.9042,
+    "ethbtc_vs30w": -0.7312,
+    "usdtd_13w": 0.4784,
+    "btc_vs30w": -0.2107,
+    "btc_dd": -1.1116,
+    "btc_13w": -0.0838,
+    "btcd_from52wHigh": -7.5795,
+    "btcd_13w": 17.5911,
+    "othersd_13w": -0.2737,
+    "dxy_13w": 0.0167,
+    "us10y_13w": -0.0202,
+    "m2_yoy": 0.0396,
+    "spx_vs30w": 0.0439,
+    "days_since_halving": 792.0
+   },
+   "pct": {
+    "ethbtc_13w": 0.0,
+    "ethbtc_vs30w": 0.0,
+    "usdtd_13w": 0.85,
+    "btc_vs30w": 0.15,
+    "btc_dd": 0.1,
+    "btc_13w": 0.31,
+    "btcd_from52wHigh": 0.33,
+    "btcd_13w": 1.0,
+    "othersd_13w": 0.09,
+    "dxy_13w": 0.7,
+    "us10y_13w": 0.39,
+    "m2_yoy": 0.35,
+    "spx_vs30w": 0.46,
+    "days_since_halving": 0.62
+   }
+  },
+  {
+   "peak": "2019-09-08",
+   "trough": "2020-02-23",
+   "from": 71.7,
+   "to": 63.8,
+   "days": 168,
+   "features": {
+    "ethbtc_13w": -0.5515,
+    "ethbtc_vs30w": -0.446,
+    "usdtd_13w": 0.1154,
+    "btc_vs30w": 0.3866,
+    "btc_dd": -0.6001,
+    "btc_13w": 0.3093,
+    "btcd_from52wHigh": 0.0,
+    "btcd_13w": 13.3659,
+    "othersd_13w": -0.3017,
+    "dxy_13w": 0.0156,
+    "us10y_13w": -0.5063,
+    "m2_yoy": 0.0456,
+    "spx_vs30w": 0.0313,
+    "days_since_halving": 1156.0
+   },
+   "pct": {
+    "ethbtc_13w": 0.05,
+    "ethbtc_vs30w": 0.05,
+    "usdtd_13w": 0.51,
+    "btc_vs30w": 0.81,
+    "btc_dd": 0.4,
+    "btc_13w": 0.7,
+    "btcd_from52wHigh": 0.93,
+    "btcd_13w": 0.98,
+    "othersd_13w": 0.05,
+    "dxy_13w": 0.69,
+    "us10y_13w": 0.08,
+    "m2_yoy": 0.47,
+    "spx_vs30w": 0.35,
+    "days_since_halving": 0.85
+   }
+  },
+  {
+   "peak": "2020-05-17",
+   "trough": "2020-09-13",
+   "from": 68.1,
+   "to": 58.2,
+   "days": 119,
+   "features": {
+    "ethbtc_13w": -0.2001,
+    "ethbtc_vs30w": -0.0,
+    "usdtd_13w": 0.7166,
+    "btc_vs30w": 0.1948,
+    "btc_dd": -0.6734,
+    "btc_13w": -0.0253,
+    "btcd_from52wHigh": -3.5724,
+    "btcd_13w": 3.9075,
+    "othersd_13w": 0.0265,
+    "dxy_13w": 0.0054,
+    "us10y_13w": -0.858,
+    "m2_yoy": 0.0963,
+    "spx_vs30w": -0.0515,
+    "days_since_halving": 6.0
+   },
+   "pct": {
+    "ethbtc_13w": 0.22,
+    "ethbtc_vs30w": 0.54,
+    "usdtd_13w": 0.92,
+    "btc_vs30w": 0.62,
+    "btc_dd": 0.34,
+    "btc_13w": 0.38,
+    "btcd_from52wHigh": 0.59,
+    "btcd_13w": 0.84,
+    "othersd_13w": 0.53,
+    "dxy_13w": 0.52,
+    "us10y_13w": 0.02,
+    "m2_yoy": 0.81,
+    "spx_vs30w": 0.08,
+    "days_since_halving": 0.0
+   }
+  },
+  {
+   "peak": "2021-01-03",
+   "trough": "2021-05-16",
+   "from": 70.3,
+   "to": 40.8,
+   "days": 133,
+   "features": {
+    "ethbtc_13w": -0.1102,
+    "ethbtc_vs30w": -0.024,
+    "usdtd_13w": -0.6547,
+    "btc_vs30w": 0.9357,
+    "btc_dd": 0.0,
+    "btc_13w": 1.1321,
+    "btcd_from52wHigh": 0.0,
+    "btcd_13w": 10.9751,
+    "othersd_13w": -0.5085,
+    "dxy_13w": -0.0397,
+    "us10y_13w": 0.135,
+    "m2_yoy": 0.2125,
+    "spx_vs30w": 0.1009,
+    "days_since_halving": 237.0
+   },
+   "pct": {
+    "ethbtc_13w": 0.34,
+    "ethbtc_vs30w": 0.49,
+    "usdtd_13w": 0.0,
+    "btc_vs30w": 0.97,
+    "btc_dd": 0.89,
+    "btc_13w": 0.98,
+    "btcd_from52wHigh": 0.93,
+    "btcd_13w": 0.97,
+    "othersd_13w": 0.01,
+    "dxy_13w": 0.11,
+    "us10y_13w": 0.56,
+    "m2_yoy": 0.95,
+    "spx_vs30w": 0.94,
+    "days_since_halving": 0.19
+   }
+  },
+  {
+   "peak": "2022-06-12",
+   "trough": "2022-09-04",
+   "from": 48.0,
+   "to": 39.7,
+   "days": 84,
+   "features": {
+    "ethbtc_13w": -0.2099,
+    "ethbtc_vs30w": -0.2844,
+    "usdtd_13w": 0.361,
+    "btc_vs30w": -0.4173,
+    "btc_dd": -0.9018,
+    "btc_13w": -0.3517,
+    "btcd_from52wHigh": 0.0,
+    "btcd_13w": 4.8481,
+    "othersd_13w": -0.3407,
+    "dxy_13w": 0.0596,
+    "us10y_13w": 1.228,
+    "m2_yoy": 0.0763,
+    "spx_vs30w": -0.1194,
+    "days_since_halving": 762.0
+   },
+   "pct": {
+    "ethbtc_13w": 0.2,
+    "ethbtc_vs30w": 0.11,
+    "usdtd_13w": 0.78,
+    "btc_vs30w": 0.03,
+    "btc_dd": 0.21,
+    "btc_13w": 0.09,
+    "btcd_from52wHigh": 0.93,
+    "btcd_13w": 0.88,
+    "othersd_13w": 0.04,
+    "dxy_13w": 0.96,
+    "us10y_13w": 0.99,
+    "m2_yoy": 0.79,
+    "spx_vs30w": 0.02,
+    "days_since_halving": 0.6
+   }
+  },
+  {
+   "peak": "2025-06-22",
+   "trough": "2025-09-14",
+   "from": 65.7,
+   "to": 57.8,
+   "days": 84,
+   "features": {
+    "ethbtc_13w": -0.0536,
+    "ethbtc_vs30w": -0.1813,
+    "usdtd_13w": -0.0175,
+    "btc_vs30w": 0.0571,
+    "btc_dd": -0.0767,
+    "btc_13w": 0.1599,
+    "btcd_from52wHigh": 0.0,
+    "btcd_13w": 3.9469,
+    "othersd_13w": -0.1945,
+    "dxy_13w": -0.0588,
+    "us10y_13w": 0.004,
+    "m2_yoy": 0.0464,
+    "spx_vs30w": 0.024,
+    "days_since_halving": 428.0
+   },
+   "pct": {
+    "ethbtc_13w": 0.46,
+    "ethbtc_vs30w": 0.18,
+    "usdtd_13w": 0.35,
+    "btc_vs30w": 0.41,
+    "btc_dd": 0.78,
+    "btc_13w": 0.55,
+    "btcd_from52wHigh": 0.93,
+    "btcd_13w": 0.85,
+    "othersd_13w": 0.18,
+    "dxy_13w": 0.04,
+    "us10y_13w": 0.44,
+    "m2_yoy": 0.49,
+    "spx_vs30w": 0.3,
+    "days_since_halving": 0.34
+   }
+  }
+ ],
+ "today": {
+  "ethbtc_13w": -0.0196,
+  "ethbtc_vs30w": -0.0099,
+  "usdtd_13w": -0.1978,
+  "btc_vs30w": 0.0646,
+  "btc_dd": -0.4627,
+  "btc_13w": 0.2027,
+  "btcd_from52wHigh": -0.4524,
+  "btcd_13w": 1.5048,
+  "othersd_13w": 0.0997,
+  "dxy_13w": 0.0195,
+  "us10y_13w": 0.257,
+  "m2_yoy": 0.0543,
+  "spx_vs30w": 0.0094,
+  "days_since_halving": 925.0
+ },
+ "todayPct": {
+  "ethbtc_13w": 0.53,
+  "ethbtc_vs30w": 0.52,
+  "usdtd_13w": 0.2,
+  "btc_vs30w": 0.41,
+  "btc_dd": 0.51,
+  "btc_13w": 0.59,
+  "btcd_from52wHigh": 0.88,
+  "btcd_13w": 0.67,
+  "othersd_13w": 0.69,
+  "dxy_13w": 0.74,
+  "us10y_13w": 0.7,
+  "m2_yoy": 0.6,
+  "spx_vs30w": 0.23,
+  "days_since_halving": 0.73
+ },
+ "checklist": {
+  "ethbtc_13w": {
+   "eventsPct": [
+    0.1,
+    0.01,
+    0.34
+   ],
+   "today": 0.53,
+   "inside": false
+  },
+  "ethbtc_vs30w": {
+   "eventsPct": [
+    0.0,
+    0.49
+   ],
+   "today": 0.52,
+   "inside": true
+  },
+  "usdtd_13w": {
+   "eventsPct": [
+    0.17,
+    0.04,
+    0.0
+   ],
+   "today": 0.2,
+   "inside": true
+  },
+  "btc_vs30w": {
+   "eventsPct": [
+    0.59,
+    1.0,
+    0.97
+   ],
+   "today": 0.41,
+   "inside": false
+  },
+  "btc_dd": {
+   "eventsPct": [
+    0.82,
+    0.89,
+    0.89
+   ],
+   "today": 0.51,
+   "inside": false
+  },
+  "btc_13w": {
+   "eventsPct": [
+    0.62,
+    0.99,
+    0.98
+   ],
+   "today": 0.59,
+   "inside": true
+  },
+  "btcd_from52wHigh": {
+   "eventsPct": [
+    0.71,
+    0.12,
+    0.93
+   ],
+   "today": 0.88,
+   "inside": true
+  },
+  "btcd_13w": {
+   "eventsPct": [
+    0.65,
+    0.99,
+    0.97
+   ],
+   "today": 0.67,
+   "inside": true
+  },
+  "othersd_13w": {
+   "eventsPct": [
+    0.0,
+    0.17,
+    0.01
+   ],
+   "today": 0.69,
+   "inside": false
+  },
+  "dxy_13w": {
+   "eventsPct": [
+    0.98,
+    0.76,
+    0.11
+   ],
+   "today": 0.74,
+   "inside": true
+  },
+  "us10y_13w": {
+   "eventsPct": [
+    0.94,
+    0.69,
+    0.56
+   ],
+   "today": 0.7,
+   "inside": true
+  },
+  "m2_yoy": {
+   "eventsPct": [
+    0.76,
+    0.57,
+    0.95
+   ],
+   "today": 0.6,
+   "inside": true
+  },
+  "spx_vs30w": {
+   "eventsPct": [
+    0.64,
+    0.94
+   ],
+   "today": 0.23,
+   "inside": false
+  },
+  "days_since_halving": {
+   "eventsPct": [
+    0.1,
+    0.41,
+    0.19
+   ],
+   "today": 0.73,
+   "inside": false
+  }
+ },
+ "checklistScore": "8/14",
+ "ic": {
+  "ethbtc_13w": {
+   "all": -0.003,
+   "2017-2019": 0.014,
+   "2020-2022": 0.156,
+   "2023-2026": 0.093,
+   "pShift": 0.978,
+   "signStable": true
+  },
+  "ethbtc_vs30w": {
+   "all": 0.039,
+   "2017-2019": 0.099,
+   "2020-2022": 0.215,
+   "2023-2026": 0.053,
+   "pShift": 0.767,
+   "signStable": true
+  },
+  "usdtd_13w": {
+   "all": -0.063,
+   "2017-2019": -0.077,
+   "2020-2022": 0.122,
+   "2023-2026": -0.209,
+   "pShift": 0.562,
+   "signStable": false
+  },
+  "btc_vs30w": {
+   "all": -0.141,
+   "2017-2019": -0.25,
+   "2020-2022": -0.299,
+   "2023-2026": 0.28,
+   "pShift": 0.292,
+   "signStable": false
+  },
+  "btc_dd": {
+   "all": -0.333,
+   "2017-2019": -0.548,
+   "2020-2022": -0.288,
+   "2023-2026": -0.239,
+   "pShift": 0.01,
+   "signStable": true
+  },
+  "btc_13w": {
+   "all": -0.088,
+   "2017-2019": -0.146,
+   "2020-2022": -0.293,
+   "2023-2026": 0.207,
+   "pShift": 0.527,
+   "signStable": false
+  },
+  "btcd_from52wHigh": {
+   "all": 0.023,
+   "2017-2019": -0.126,
+   "2020-2022": -0.324,
+   "2023-2026": -0.033,
+   "pShift": 0.887,
+   "signStable": true
+  },
+  "btcd_13w": {
+   "all": 0.025,
+   "2017-2019": 0.04,
+   "2020-2022": -0.154,
+   "2023-2026": -0.052,
+   "pShift": 0.845,
+   "signStable": false
+  },
+  "othersd_13w": {
+   "all": 0.024,
+   "2017-2019": -0.005,
+   "2020-2022": 0.0,
+   "2023-2026": 0.091,
+   "pShift": 0.802,
+   "signStable": false
+  },
+  "dxy_13w": {
+   "all": 0.006,
+   "2017-2019": 0.111,
+   "2020-2022": -0.009,
+   "2023-2026": 0.064,
+   "pShift": 0.958,
+   "signStable": false
+  },
+  "us10y_13w": {
+   "all": -0.118,
+   "2017-2019": -0.268,
+   "2020-2022": -0.006,
+   "2023-2026": 0.015,
+   "pShift": 0.383,
+   "signStable": false
+  },
+  "m2_yoy": {
+   "all": -0.438,
+   "2017-2019": -0.559,
+   "2020-2022": -0.305,
+   "2023-2026": -0.369,
+   "pShift": 0.0,
+   "signStable": true
+  },
+  "spx_vs30w": {
+   "all": -0.008,
+   "2017-2019": -0.175,
+   "2020-2022": -0.047,
+   "2023-2026": -0.063,
+   "pShift": 0.965,
+   "signStable": true
+  },
+  "days_since_halving": {
+   "all": 0.166,
+   "2017-2019": 0.288,
+   "2020-2022": 0.195,
+   "2023-2026": 0.016,
+   "pShift": 0.253,
+   "signStable": true
+  }
+ },
+ "compositeOOS": {
+  "2017-2019": 0.15,
+  "2020-2022": 0.253,
+  "2023-2026": 0.105,
+  "pooled": 0.085
+ },
+ "compositeNull": {
+  "median": 0.067,
+  "p95": 0.234,
+  "p": 0.41
+ },
+ "compositeEraNull": {
+  "2017-2019": 0.225,
+  "2020-2022": 0.2,
+  "2023-2026": 0.375
+ },
+ "compositeOOSStrict": {
+  "2017-2019": 0.559,
+  "2020-2022": 0.332,
+  "2023-2026": 0.085,
+  "pooled": 0.333
+ },
+ "compositeNullStrict": {
+  "median": 0.069,
+  "p95": 0.28,
+  "p": 0.02
+ },
+ "compositeEraNullStrict": {
+  "2017-2019": 0.0,
+  "2020-2022": 0.2,
+  "2023-2026": 0.3
+ },
+ "similarity": {
+  "today": 0.26,
+  "todayPct": 0.176,
+  "looEvents": {
+   "2016-11-20": {
+    "bestPctWithin8wBefore": 0.05
+   },
+   "2017-12-10": {
+    "bestPctWithin8wBefore": 0.108
+   },
+   "2021-01-03": {
+    "bestPctWithin8wBefore": 0.077
+   }
+  },
+  "precision": {
+   "0.1": {
+    "weeks": 15,
+    "fall5in26w": 0.07,
+    "fall10in26w": 0.0
+   },
+   "0.2": {
+    "weeks": 56,
+    "fall5in26w": 0.21,
+    "fall10in26w": 0.0
+   },
+   "0.3": {
+    "weeks": 105,
+    "fall5in26w": 0.19,
+    "fall10in26w": 0.0
+   },
+   "allAway": {
+    "weeks": 429,
+    "fall5in26w": 0.2,
+    "fall10in26w": 0.04
+   }
+  },
+  "note": "share of weeks closer to a past waterfall start than the given week (low = event-like)"
+ },
+ "placeboBestOf": {
+  "real": 0.438,
+  "median": 0.239,
+  "p": 0.0
+ },
+ "compositeToday": 0.093,
+ "compositeTodayPct": 0.48,
+ "afterSimilar": {
+  "n": 195,
+  "btcdMedianPts13w": -1.32,
+  "fallOver5ptsShare": 0.23
+ },
+ "baseRate": {
+  "fallOver5ptsShare13w": 0.158,
+  "fallOver10ptsShare13w": 0.096
+ }
+}
