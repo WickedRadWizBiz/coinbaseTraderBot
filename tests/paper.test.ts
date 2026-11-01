@@ -111,3 +111,23 @@ test('a resting order is filled only by trades the exchange printed after it was
   ex.onTrade('T', 0.42, 10, 'no');
   assert.equal(fills.length, 2);
 });
+
+test('a level our own taker order emptied is not bought again until it refills or the replenish time passes', async () => {
+  let now = 1_000_000;
+  const book = new OrderBook('T');
+  book.applySnapshot({ bids: [{ price: 0.45, size: 10 }], asks: [{ price: 0.2, size: 5 }, { price: 0.22, size: 10 }] }, now);
+  const ex = new PaperExchange(undefined, 100, () => book, () => DEFAULT_FEES, () => now);
+  const ioc = (count: number) => ex.createOrder(req({ side: 'bid', price: 0.2, postOnly: false, timeInForce: 'immediate_or_cancel', count }));
+  assert.equal((await ioc(5)).fillCount, 5);
+  // The recorded book still shows 5 at 20c, but those were ours: nothing left there.
+  now += 1000;
+  assert.equal((await ioc(5)).fillCount, 0);
+  assert.equal(ex.takerStats.blocked, 5);
+  // Someone adds 3 at the level: those 3 are real.
+  book.applySnapshot({ bids: [{ price: 0.45, size: 10 }], asks: [{ price: 0.2, size: 8 }, { price: 0.22, size: 10 }] }, now);
+  assert.equal((await ioc(5)).fillCount, 3);
+  // After the replenish time the recorded size counts again.
+  now += 61_000;
+  assert.equal((await ioc(5)).fillCount, 5);
+  assert.equal(ex.takerStats.bySeries.T.filled, 13);
+});

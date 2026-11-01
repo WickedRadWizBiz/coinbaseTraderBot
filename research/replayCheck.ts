@@ -696,7 +696,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const replay = {
     ...empty(), accuracyBlocks: r.paper?.accuracyBlocks ?? 0, sessionEdgeBlocks: r.paper?.sessionEdgeBlocks ?? 0, entryEvaluations: r.entryEvaluations,
     takeProfitBenchedAt: r.paper?.takeProfitBenchedAt ? new Date(r.paper.takeProfitBenchedAt).toISOString() : null, takeProfitScored: r.paper?.takeProfitScored ?? 0, takeProfitNetUsd: r.paper?.takeProfitNetUsd ?? 0, takeProfitByMarket: r.paper?.takeProfitByMarket ?? {}, rejected: r.paper?.rejected ?? {}, sizeScaleMin: r.sizeScaleMin ?? 1,
-    makerBufferEnd: r.makerBufferEnd ?? null, extra: { train: r.paper?.trainTrades ?? 0, explore: r.paper?.exploreEntries ?? 0, sent: r.paper?.extraSent ?? 0, rejected: r.paper?.extraRejected ?? {} },
+    makerBufferEnd: r.makerBufferEnd ?? null, takerThin: r.takerThin, extra: { train: r.paper?.trainTrades ?? 0, explore: r.paper?.exploreEntries ?? 0, sent: r.paper?.extraSent ?? 0, rejected: r.paper?.extraRejected ?? {} },
   };
   const mk = (o.makerMarkouts ?? []).slice(-2000);
   const makerBufferPaper = mk.length >= 30 ? Math.min(S.makerBufferRange[1], Math.max(S.makerBufferRange[0], -mk.reduce((a, x) => a + x, 0) / mk.length)) : null;
@@ -811,6 +811,8 @@ async function main(): Promise<void> {
   const purposes = (s: SideSummary) => Object.entries(s.byPurpose).sort().map(([k, x]) => `${k} ${x.fills}/${x.contracts.toFixed(0)}`).join(', ') || 'none';
   console.log(`fills/contracts by order purpose: replay ${purposes(res.replay)} | paper ${purposes(res.paper)}`);
   const X = res.replay.extra, rej = Object.entries(X.rejected).sort((x, y) => y[1] - x[1]).slice(0, 3).map(([k, n]) => `${k} x${n}`).join('; ');
+  const TT = (res.replay as { takerThin?: { asked: number; filled: number; blocked: number; bySeries: Record<string, { asked: number; filled: number; blocked: number }> } }).takerThin;
+  if (TT) console.log(`thin books: replay taker contracts asked ${TT.asked.toFixed(0)}, filled ${TT.filled.toFixed(0)}, refused because its own earlier takes emptied the level ${TT.blocked.toFixed(0)} | by series (asked/filled/refused): ${Object.entries(TT.bySeries).sort((a, b) => b[1].blocked - a[1].blocked).slice(0, 8).map(([k, v]) => `${k} ${v.asked.toFixed(0)}/${v.filled.toFixed(0)}/${v.blocked.toFixed(0)}`).join(' | ') || 'none'}`);
   console.log(`paper's extra entries: training trades replay ${X.train} planned, paper ${res.paper.extra.train} filled | exploration replay ${X.explore} planned, paper ${res.paper.extra.explore} filled | replay sent ${X.sent} past the risk gateway${rej ? `, turned down: ${rej}` : ''}`);
   console.log('hour (UTC)      replay contracts  paper contracts   replay P&L   paper P&L');
   for (const h of [...new Set([...Object.keys(res.replay.contractsByHour), ...Object.keys(res.paper.contractsByHour), ...Object.keys(res.replay.byHour), ...Object.keys(res.paper.byHour)])].sort()) {
