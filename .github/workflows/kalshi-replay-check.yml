@@ -234,8 +234,13 @@ jobs:
           cp -p data/runner-temp/* "$RUNNER_TEMP/" 2>/dev/null || true
           echo "replaying run ${{ inputs.reuse_run }}'s copy, no server read: $(du -sh data | cut -f1), days $(cat data/sweeps/check-days.txt), to $(cat data/sweeps/check-to.txt)"
       - name: Replay check (backtester vs paper, since the bot's last start)
+        # Lab: REPLAY_SKIP=1 among the overrides makes a copy-only run (the copy is cached for reuse arms, nothing replayed).
+        if: ${{ !contains(inputs.overrides, 'REPLAY_SKIP=1') }}
         env:
           CHECK_FROM: ${{ inputs.from || 'auto' }}
+          # Lab: a reuse arm may replay one day of a copy that holds several (its own `days` and `to`; the copy's otherwise).
+          CHECK_TO: ${{ inputs.to || 'now' }}
+          CHECK_DAYS_IN: ${{ inputs.reuse_run && inputs.days || '' }}
           MIN_HOURS: ${{ inputs.min_hours || '3' }}
           NEARBY: ${{ inputs.nearby || '0.95 0.975 1.025 1.05' }}
           PHASES: ${{ inputs.phases || '200 400 600 800' }}
@@ -249,7 +254,7 @@ jobs:
           BAL=$(cat "$RUNNER_TEMP/paper-balance" 2>/dev/null || true)
           GUARD="$RUNNER_TEMP/paper-guard.json"; [ -s "$GUARD" ] || GUARD=""
           OVERRIDE=$(cat "$RUNNER_TEMP/kill-override" 2>/dev/null || echo true)
-          ARGS=(--recordings data/recordings --audit data/audit --days "$(cat data/sweeps/check-days.txt)" --from "$CHECK_FROM" --to "$(cat data/sweeps/check-to.txt)"
+          ARGS=(--recordings data/recordings --audit data/audit --days "${CHECK_DAYS_IN:-$(cat data/sweeps/check-days.txt)}" --from "$CHECK_FROM" --to "$([ "$CHECK_TO" != now ] && echo "$CHECK_TO" || cat data/sweeps/check-to.txt)"
             --min-hours "$MIN_HOURS" ${BAL:+--paper-balance-now "$BAL"} ${GUARD:+--paper-guard "$GUARD"} --kill-override "$OVERRIDE"
             --maker-markouts "$RUNNER_TEMP/maker-markouts.json" --paper-probation "$RUNNER_TEMP/paper-probation.json" --paper-trials "$RUNNER_TEMP/paper-trials.json"
             --paper-tp-bench "$RUNNER_TEMP/paper-tp-bench.json" --paper-accuracy-gate "$RUNNER_TEMP/paper-accuracy-gate.json" --paper-trades "$RUNNER_TEMP/paper-trades.jsonl" --model data/models/model.json)
