@@ -18,23 +18,23 @@
     },
     "btcd": 60.56,
     "proj": {
-      "d30": 59.5,
-      "d90": 57.56,
+      "d30": 59.49,
+      "d90": 57.54,
       "d180": 57.36
     },
     "nextWaterfall": {
       "start": "2029-08-10",
       "end": "2029-11-08",
-      "from": 55.4,
-      "to": -21.1,
+      "from": 55.8,
+      "to": 35.7,
       "weeksAway": 145.6,
       "inside": false
     },
     "low": {
       "at": "2035-06-18",
-      "btcd": -62.6
+      "btcd": 30.4
     },
-    "gateCross": "2027-09-22"
+    "gateCross": "2029-08-12"
   },
   "weekly": [
     {
@@ -3722,7 +3722,7 @@
   "skill": {
     "d30": {
       "n": 405,
-      "maeEngine": 3.76,
+      "maeEngine": 3.52,
       "maeFlat": 1.97,
       "directionHit": 0.447,
       "byFit": {
@@ -3736,7 +3736,7 @@
     },
     "d90": {
       "n": 365,
-      "maeEngine": 6.5,
+      "maeEngine": 6.11,
       "maeFlat": 3.28,
       "directionHit": 0.455,
       "byFit": {
@@ -3750,7 +3750,7 @@
     },
     "d180": {
       "n": 205,
-      "maeEngine": 8.32,
+      "maeEngine": 8.03,
       "maeFlat": 6.56,
       "directionHit": 0.561,
       "byFit": {
