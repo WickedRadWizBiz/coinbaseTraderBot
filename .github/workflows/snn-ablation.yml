@@ -378,7 +378,7 @@ jobs:
           export TRADING_MODE=paper AUTO_TRAIN=off NODE_OPTIONS="--max-old-space-size=6144"
           EXTRA=$(printf '%s' "$HARGS" | tr -cd 'a-zA-Z0-9 .-')
           PREV=""; [ -f research/out/prev/snn-history-checkpoint.json ] && PREV="--checkpoint-in research/out/prev/snn-history-checkpoint.json"
-          node --import tsx research/snnHistoryTrain.ts --from "$HFROM" --to "$HTO" --history "$RUNNER_TEMP/hist/history" --work "$RUNNER_TEMP/hist" --minutes 285 --checkpoint-out research/out/snn-history-checkpoint.json $PREV $EXTRA 2>&1 | grep --line-buffered -E '^\[hist-train\]|failed|FATAL|heap' | cut -c1-260
+          node --import tsx research/snnHistoryTrain.ts --from "$HFROM" --to "$HTO" --history "$RUNNER_TEMP/hist/history" --work "$RUNNER_TEMP/hist" --minutes 285 --checkpoint-out research/out/snn-history-checkpoint.json $PREV $EXTRA 2>&1 | grep --line-buffered -E '^\[hist-train\]|failed|FATAL|heap' | stdbuf -oL cut -c1-260
       - uses: actions/upload-artifact@v4
         if: always()
         with:

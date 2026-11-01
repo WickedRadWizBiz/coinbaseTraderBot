@@ -58,6 +58,15 @@ export function resumeDay(from: string, lastTs: number | undefined): string {
   return next > from ? next : from;
 }
 
+/** How many of the days a..b have a Kalshi day file in any series (building a replay without one scores nothing). */
+export function kalshiDays(kalshiDir: string, a: string, b: string): number {
+  if (!fs.existsSync(kalshiDir)) return 0;
+  const series = fs.readdirSync(kalshiDir);
+  let n = 0;
+  for (let d = a; d <= b; d = addDays(d, 1)) if (series.some((s) => fs.existsSync(path.join(kalshiDir, s, `${d}.jsonl`)))) n++;
+  return n;
+}
+
 export function trainParams(stage: Stage, volNorm?: number, soft = false): SnnParams {
   return domainParams('crypto', { ...DEFAULT_SNN, anchorMid: true, ...(volNorm ? { volNorm } : {}), ...(soft ? { softLabel: { lagSec: 300, etaScale: 0.3 } } : {}), flags: { ...stageFlags(stage) } });
 }
@@ -91,6 +100,7 @@ async function main() {
   for (const [a, b] of trainChunks(start, to)) {
     if (Date.now() > deadline) { console.log(`[hist-train] time is up before ${a}: the next run continues from the checkpoint`); break; }
     const warm = addDays(a, -1), t0 = Date.now();
+    if (!kalshiDays(path.join(hist, 'kalshi'), a, b)) { console.log(`[hist-train] ${a}..${b}: no Kalshi history on these days, skipped`); continue; }
     console.log(`[hist-train] ${a}..${b}: building and replaying`);
     const month = (d: string) => d.slice(0, 7);
     const dl = async (intervals: ('1m' | '15m' | '1h' | '1d')[], f: string, source?: string) =>
