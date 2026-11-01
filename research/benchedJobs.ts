@@ -21,19 +21,26 @@ import { recordingFiles } from '../bot/marketdata/recordingFiles';
 /** Each variant's bot.env lines on top of the server's settings. The baseline is the branch's defaults: the take-profit's
  *  level ladder (adaptive), the model's skill weight (adaptive), the probation graded, the cross and the dip buy off. */
 export const VARIANTS: Record<string, Record<string, string>> = {
+  // Ordered by what each wave of three runners should answer first (the account runs at most three jobs at once).
   baseline: {},
+  placebo: { SINUOUS_DIP_BUY: 'true', SINUOUS_DIP_MARGIN: '0.99' },
+  skill_w75: { MODEL_SKILL_W: '0.75' },
   tp_l0: { TP_LEVEL: '0' },
   tp_l1: { TP_LEVEL: '1' },
-  tp_l2: { TP_LEVEL: '2' },
   skill_off: { MODEL_SKILL: 'false' },
-  skill_w75: { MODEL_SKILL_W: '0.75' },
+  dip8: { SINUOUS_DIP_BUY: 'true', SINUOUS_DIP_MARGIN: '0.08' },
+  cross_l3: { SINUOUS_CROSS: 'true', SINUOUS_CROSS_LEVEL: '3' },
+  gp_full: { PROBATION_GP_MULT: '1' },
+};
+
+/** Run after the first verdicts: neighbours of the winners, the latency stress, and the other levels and margins. */
+export const LATER: Record<string, Record<string, string>> = {
+  base_lat500: { RS_LATENCY_MS: '500' },
+  tp_l2: { TP_LEVEL: '2' },
   skill_w50: { MODEL_SKILL_W: '0.5' },
   cross_l1: { SINUOUS_CROSS: 'true', SINUOUS_CROSS_LEVEL: '1' },
-  cross_l3: { SINUOUS_CROSS: 'true', SINUOUS_CROSS_LEVEL: '3' },
-  dip8: { SINUOUS_DIP_BUY: 'true', SINUOUS_DIP_MARGIN: '0.08' },
   dip12: { SINUOUS_DIP_BUY: 'true', SINUOUS_DIP_MARGIN: '0.12' },
   dip8_1: { SINUOUS_DIP_BUY: 'true', SINUOUS_DIP_MARGIN: '0.08', SINUOUS_DIP_MAX: '1', SINUOUS_DIP_COOLDOWN_SEC: '300' },
-  gp_full: { PROBATION_GP_MULT: '1' },
   gp_low: { PROBATION_GP_MULT: '0.1' },
 };
 
@@ -60,6 +67,43 @@ export function bootMean(xs: number[], draws = 4000, seed = 5): { mean: number; 
   return { mean, lo: ms[Math.floor(draws * 0.025)], hi: ms[Math.floor(draws * 0.975)] };
 }
 
+/** Bootstrap of the mean resampling runs of `len` consecutive days (a regime lasts longer than a day; days are not
+ *  independent), at the two-sided level `alpha`. */
+export function blockBootMean(xs: number[], len = 7, alpha = 0.05, draws = 4000, seed = 9): { mean: number; lo: number; hi: number } {
+  if (!xs.length) return { mean: NaN, lo: NaN, hi: NaN };
+  const mean = xs.reduce((a, v) => a + v, 0) / xs.length;
+  const r = rng(seed), n = xs.length, L = Math.max(1, Math.min(len, n));
+  const ms: number[] = [];
+  for (let d = 0; d < draws; d++) {
+    let s = 0, k = 0;
+    while (k < n) { const st = Math.floor(r() * (n - L + 1)); for (let j = 0; j < L && k < n; j++, k++) s += xs[st + j]; }
+    ms.push(s / n);
+  }
+  ms.sort((a, b) => a - b);
+  return { mean, lo: ms[Math.floor(draws * alpha / 2)], hi: ms[Math.min(draws - 1, Math.floor(draws * (1 - alpha / 2)))] };
+}
+
+/** The adversary's verdict on a variant against the baseline (Steven, Nov 1: try to break whatever creates gains). A gain
+ *  counts as genuine only if it survives all of: the held-out days (after the split), a week-block bootstrap with the
+ *  level corrected for the number of variants tried (Bonferroni), and most blocks of days (regimes) on its side; a
+ *  variant whose gain rests on one block is reported with that block. */
+export function adversary(r: TrialResult, base: TrialResult, all: string[], after: string[], blocks: string[][], tried: number): { verdict: string; line: string } {
+  const diff = (ds: string[]) => ds.map((d) => ((r.byDay[d] ?? 0) - (base.byDay[d] ?? 0)) / 24);
+  const alpha = 0.05 / Math.max(1, tried);
+  const held = blockBootMean(diff(after), 7, alpha);
+  const per = blocks.map((b) => diff(b).reduce((a, v) => a + v, 0) / Math.max(1, b.length));
+  const wins = per.filter((v) => v > 0).length;
+  const total = diff(all).reduce((a, v) => a + v, 0);
+  const best = per.indexOf(Math.max(...per));
+  const withoutBest = per.length > 1 ? (total - per[best] * blocks[best].length) / Math.max(1, all.length - blocks[best].length) : NaN;
+  const genuine = held.lo > 0 && wins * 3 >= per.length * 2 && withoutBest > 0;
+  const hurt = held.hi < 0;
+  return {
+    verdict: genuine ? 'GENUINE' : hurt ? 'LOSES' : 'NOT PROVEN',
+    line: `held out, week blocks, ${(100 * (1 - alpha)).toFixed(1)}% for ${tried} variants: ${f2(held.mean)}/h [${f2(held.lo)}, ${f2(held.hi)}] | wins ${wins} of ${per.length} blocks | without its best block ${f2(withoutBest)}/h`,
+  };
+}
+
 /** $ an hour of a variant on `days` (its day P&L over 24 h), and against the baseline day by day. */
 export function perHour(r: TrialResult, days: string[]): number { return days.length ? days.reduce((a, d) => a + (r.byDay[d] ?? 0), 0) / (days.length * 24) : NaN; }
 export function vsBase(r: TrialResult, base: TrialResult, days: string[]) { return bootMean(days.map((d) => ((r.byDay[d] ?? 0) - (base.byDay[d] ?? 0)) / 24)); }
@@ -70,7 +114,7 @@ async function main(): Promise<void> {
   const days = arg('days', 'data/sweep-days');
   if (cmd === 'run') {
     const name = arg('variant', 'baseline');
-    const env = VARIANTS[name];
+    const env = VARIANTS[name] ?? LATER[name];
     if (!env) throw new Error(`unknown variant ${name} (${Object.keys(VARIANTS).join(', ')})`);
     const { evalTrial } = await import('./randomSweep');
     const t0 = Date.now();
@@ -101,6 +145,8 @@ async function main(): Promise<void> {
       let line = `${name.padEnd(10)} all ${f2(perHour(r, all))}/h | before ${f2(perHour(r, before))}/h | after ${f2(perHour(r, after))}/h | ${r.trades} trades, ${d?.refills ?? 0} refills, ${d?.crossSales ?? 0} cross sales, ${d?.dipBuys ?? 0} dip buys`;
       if (base?.ok && name !== 'baseline') {
         const a = vsBase(r, base, all), b = vsBase(r, base, after);
+        const adv = adversary(r, base, all, after, blocks, res.size - 1);
+        line += `\n${''.padEnd(10)} adversary: ${adv.verdict} (${adv.line})`;
         line += `\n${''.padEnd(10)} vs baseline: all ${f2(a.mean)}/h [${f2(a.lo)}, ${f2(a.hi)}] | after split ${f2(b.mean)}/h [${f2(b.lo)}, ${f2(b.hi)}] | by block ${blocks.map((x) => f2(vsBase(r, base, x).mean)).join(' ')}`;
       } else line += `\n${''.padEnd(10)} by block ${blocks.map((x) => f2(perHour(r, x))).join(' ')}/h; ${all.filter((x) => (r.byDay[x] ?? 0) > 0).length} of ${all.length} days profitable`;
       console.log(line);

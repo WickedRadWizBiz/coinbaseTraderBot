@@ -197,6 +197,8 @@ export async function evalTrial(dir: string, modelPath: string, env: Record<stri
       taNet: true, trials: em.trials, marketContext: true, ...(seed ? { seedCandles: seed } : {}),
       // Paper refills its pool when it can no longer trade; a comparison over months needs the same or it stops in week one.
       ...(extra.refill ? { refillUsd: cfg.paperBankrollUsd } : {}),
+      // Adversarial stress (research/benchedJobs.ts): orders reach the book this late, so the fills are the ones a slower bot gets.
+      ...(Number(env.RS_LATENCY_MS) > 0 ? { latency: { orderMs: Number(env.RS_LATENCY_MS), jitterMs: Number(env.RS_LATENCY_MS) / 2 } } : {}),
     });
     const byDay: Record<string, number> = {}, tradesByDay: Record<string, number> = {}, byHour: Record<string, number> = {};
     for (const t of r.trades) {
