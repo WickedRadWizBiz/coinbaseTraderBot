@@ -40,7 +40,7 @@ jobs:
               line = line.rstrip('\n')
               m = re.match(r'^#\s*(days|from|to|reuse)=(\S+)', line)
               if m: head[m.group(1)] = m.group(2); continue
-              # also=<run id>,<from>: every arm also replays that earlier run's copy (another stretch), no server load.
+              # also=<run id>,<from>: every arm also replays that earlier run's cached copy (another stretch), no server load.
               m = re.match(r'^#\s*also=([0-9]+),(\S+)$', line)
               if m: extra.append((m.group(1), m.group(2))); continue
               if not line.strip() or line.lstrip().startswith('#'): continue
@@ -51,7 +51,7 @@ jobs:
               arms.append({'tag': tag.strip(), 'overrides': ' '.join(ov.split())})
           assert arms and len(arms) * (1 + len(extra)) <= 24
           print('days=' + head['days']); print('from=' + head['from']); print('to=' + head['to'])
-          # reuse=<run id>: the arms unpack that run's copy (kept 2 days) instead of copying from the server again, so a
+          # reuse=<run id>: the arms unpack that run's cached copy (an Actions cache, kept until evicted) instead of copying from the server again, so a
           # rerun of the same stretch puts no load on the server.
           reuse = head.get('reuse', '')
           assert re.match(r'^[0-9]*$', reuse), reuse
@@ -205,11 +205,12 @@ jobs:
           cp "$RUNNER_TEMP"/paper-* "$RUNNER_TEMP"/kill-override "$RUNNER_TEMP"/maker-markouts.json data/lab-temp/ 2>/dev/null || true
           tar -cf lab-copy.tar data
           ls -la lab-copy.tar
-      - uses: actions/upload-artifact@v4
+      # An Actions cache, never an artifact: the repository is public and anyone signed in can download artifacts; the copy
+      # holds the server's audit log, recordings, paper state and settings (Nov 1).
+      - uses: actions/cache/save@v4
         with:
-          name: lab-copy
           path: lab-copy.tar
-          retention-days: 2
+          key: scaling-lab-copy-${{ github.run_id }}
 
   arm:
     needs: [plan, copy]
@@ -236,11 +237,11 @@ jobs:
       - name: Install dependencies
         if: steps.deps.outputs.cache-hit != 'true'
         run: npm ci --no-audit --no-fund --silent
-      - uses: actions/download-artifact@v4
+      - uses: actions/cache/restore@v4
         with:
-          name: lab-copy
-          run-id: ${{ matrix.arm.run || github.run_id }}
-          github-token: ${{ github.token }}
+          path: lab-copy.tar
+          key: scaling-lab-copy-${{ matrix.arm.run || github.run_id }}
+          fail-on-cache-miss: true
       - name: Unpack the copy
         run: |
           tar -xf lab-copy.tar && rm lab-copy.tar
