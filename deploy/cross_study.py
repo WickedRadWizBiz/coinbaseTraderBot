@@ -1195,6 +1195,22 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
     for wf in (0.10, 0.20, 0.30):
         rowsL.append((f'window cut from {int(wf * 100)}% left, top size', {'split': True, 'wfrac': wf}, bando))
         rowsL.append((f'ALL origins, gate 6c; 3c top size; window cut from {int(wf * 100)}% left', dict(S3, wfrac=wf), gall(-0.06)))
+    # round 8 (Steven, Nov 1: turn what we get wrong into profit): the entries the gate rejects (fair value under cost) as the
+    # OTHER side of the same market at the same second: buy it at 1 - our bid, its bids are 1 - our asks, it pays 1 - ours
+    def flip_of(q, m):
+        if q is None or q.get('q0') is None or q['q0'] >= q['costF'] - m: return None
+        pa = q['path']; b0 = pa['bids'][0] if pa['bids'] else None
+        if b0 is None or not (0.02 <= 1 - b0 <= 0.98): return None
+        inv = lambda xs: [None if x is None else round(1 - x, 4) for x in xs]
+        sub = dict(pa, bids=inv(pa['asks']), bsz=pa['asz'], asks=inv(pa['bids']), asz=pa['bsz'], fv=inv(pa['fv']))
+        a = 1 - b0; stake = q['n'] * q['costF']; n = stake / (a + fee1(a, stake / a)); cF = a + fee1(a, n)
+        return dict(q, n=n, cost=a, costF=cF, b0=a, path=sub, bids=sub['bids'], fv=sub['fv'], payout=1 - q['payout'],
+                    q0=next((x for x in sub['fv'] if x is not None), None), floor=None, actual=None)
+    flip = lambda m, alsokeep=None: (lambda p: (lambda q: flip_of(q, m) or (alsokeep(p) if alsokeep else None))(band_all(p)))
+    rowsL += [('FLIP: only the rejected entries, other side (fv < cost)', S3, flip(0.0)),
+              ('FLIP: rejected entries other side (fv < cost - 6c)', S3, flip(0.06)),
+              ('FLIP + gate 6c: gated entries kept, rejected ones flipped', S3, flip(0.0, gall(-0.06))),
+              ('FLIP + gate 6c, flips only where fv < cost - 6c', S3, flip(0.06, gall(-0.06)))]
     print('     entry gate: the position is skipped when the spot fair value at its entry is under its cost (fee in) less the margin shown.')
     for lab, lz, rm in rowsL:
         for dp in (False, True):
