@@ -167,6 +167,44 @@ export function entryReport(rows: EntryLogRow[], log = console.log): void {
   }
 }
 
+/** Regime terciles (Steven, Nov 1: a part that pays only in some conditions gets a regime switch, not a cut). Each day is
+ *  tagged by the median of a regime feature over the baseline's decisions that day (1 h realised vol, |Kaufman efficiency
+ *  120 s| for trend vs chop), the days are cut in thirds, and each variant's $/h and its difference to the baseline are
+ *  shown per third, so a variant that wins only in one regime shows where. */
+export const REGIME_TAGS: Array<{ name: string; read: (r: EntryLogRow) => number | undefined }> = [
+  { name: 'volatility (log rv 1h)', read: (r) => (Number.isFinite(r.f.log_rv_1h) ? r.f.log_rv_1h : undefined) },
+  { name: 'trend (|kaufman er 120s|)', read: (r) => (Number.isFinite(r.f.kaufman_er_120) ? Math.abs(r.f.kaufman_er_120) : undefined) },
+];
+
+export function dayRegimes(rows: EntryLogRow[], read: (r: EntryLogRow) => number | undefined): Map<string, number> {
+  const by = new Map<string, number[]>();
+  for (const r of rows) { const v = read(r); if (v === undefined) continue; const d = new Date(r.t).toISOString().slice(0, 10); (by.get(d) ?? by.set(d, []).get(d)!).push(v); }
+  const out = new Map<string, number>();
+  for (const [d, xs] of by) { xs.sort((a, b) => a - b); out.set(d, xs[Math.floor(xs.length / 2)]); }
+  return out;
+}
+
+function regimeReport(rows: EntryLogRow[], res: Map<string, TrialResult>, all: string[]): void {
+  const base = res.get('baseline');
+  for (const tag of REGIME_TAGS) {
+    const lvl = dayRegimes(rows, tag.read);
+    const tagged = all.filter((d) => lvl.has(d)).sort((a, b) => lvl.get(a)! - lvl.get(b)!);
+    if (tagged.length < 9) { console.log(`regime ${tag.name}: ${tagged.length} tagged days, too few`); continue; }
+    const thirds = [0, 1, 2].map((i) => tagged.slice(Math.floor((i * tagged.length) / 3), Math.floor(((i + 1) * tagged.length) / 3)));
+    console.log(`regime ${tag.name}: ${tagged.length} days; cuts ${thirds.map((t) => `${['low', 'mid', 'high'][thirds.indexOf(t)]} <= ${lvl.get(t[t.length - 1])!.toFixed(3)}`).join(', ')}`);
+    for (const [name, r] of [...res.entries()].sort((a, b) => (a[0] === 'baseline' ? -1 : b[0] === 'baseline' ? 1 : a[0].localeCompare(b[0])))) {
+      if (!r.ok) continue;
+      const cells = thirds.map((t) => {
+        const ph = t.reduce((a, d) => a + (r.byDay[d] ?? 0), 0) / (24 * t.length);
+        if (!base?.ok || name === 'baseline') return f2(ph);
+        const bm = bootMean(t.map((d) => ((r.byDay[d] ?? 0) - (base.byDay[d] ?? 0)) / 24));
+        return `${f2(ph)} (vs base ${f2(bm.mean)} [${f2(bm.lo)},${f2(bm.hi)}])`;
+      });
+      console.log(`  ${name.padEnd(14)} low ${cells[0]} | mid ${cells[1]} | high ${cells[2]}`);
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const cmd = process.argv[2];
   const out = arg('out', 'research/out/ta-jobs');
@@ -270,7 +308,7 @@ async function main(): Promise<void> {
       console.log(`baseline: ${pos} of ${all.length} days profitable; best day ${f2(Math.max(...perDay))}, worst ${f2(Math.min(...perDay))}`);
     }
     const log = baselineLog(out);
-    if (log.length) entryReport(log);
+    if (log.length) { regimeReport(log, res, all); entryReport(log); }
     return;
   }
   throw new Error('usage: taJobs.ts run|report (see the header)');
