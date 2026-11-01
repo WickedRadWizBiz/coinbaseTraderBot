@@ -174,6 +174,7 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--placebos", type=int, default=40)
+    ap.add_argument("--cap", type=int, default=16, help="most child weeks on one parent week (the warp's stretch limit)")
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -186,7 +187,7 @@ def main():
         parents[k], pidx[k] = x.values.astype(float), x.index
     cx = W[W.index >= pd.Timestamp("2018-01-01")]
     child, cidx = cx.values.astype(float), cx.index
-    base = {"maxstep": 2, "cap": 16, "j0": 0.15, "shapew": 8, "wfweeks": 13, "res": "W"}
+    base = {"maxstep": 2, "cap": a.cap, "j0": 0.15, "shapew": 8, "wfweeks": 13, "res": "W"}
     cfgs = []
     for pk, sp, (dm, bw), wsh in itertools.product(PARENTS, ["logit", "raw"], [(0, 0), (2, 104)], [1.0, 3.0]):
         c = dict(base, parent=pk, space=sp, dynmap=dm, bw=bw, wshape=wsh)
