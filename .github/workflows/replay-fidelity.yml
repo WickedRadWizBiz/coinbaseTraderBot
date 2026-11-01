@@ -132,6 +132,8 @@ jobs:
     timeout-minutes: 340
     strategy:
       fail-fast: false
+      # The account's runner cap is shared with every other lab (coordinator, Nov 1): three backtests at a time.
+      max-parallel: 3
       matrix:
         # Eight runners, not 24: queued behind the other labs, 24 waited so long that the cached copy of the days was
         # evicted before most of them started (run 41218659211). The real quotes and the four quick fill-ins run one
