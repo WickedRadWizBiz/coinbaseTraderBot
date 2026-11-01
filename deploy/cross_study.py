@@ -647,9 +647,20 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 c = DEPTH_PX * max(0.0, p['n'] - avail)
                 if c > 0: ps[k] = dict(p, costF=p['costF'] + c / p['n'], thin_in=c)
 
+        sold = collections.defaultdict(list)  # (ticker, bid) -> [(sec, contracts)]: sales share the bid's size for 60 s too
+
+        def bid_used(p, k):
+            bs_ = p['path']['bids']; b = bs_[k] if 0 <= k < len(bs_) else None
+            key = (p['ep']['ticker'], b); t_now = p['s0'] + k
+            return key, sum(n_ for t_, n_ in sold[key] if t_now - t_ < 60)
+
+        def took(p, k, n):  # a sale at path index k removes n contracts from that bid for 60 s (depth rows only)
+            if depth: sold[bid_used(p, k)[0]].append((p['s0'] + k, n))
+
         def thin(p, k, px_sz, n):  # the depth charge: contracts over the top-of-book size at path index k
             if not depth: return 0.0
             sz = px_sz[k] if 0 <= k < len(px_sz) else None
+            if p is not None and px_sz is p['path']['bsz']: sz = max(0.0, (sz or 0.0) - bid_used(p, k)[1])
             return DEPTH_PX * max(0.0, n - (sz or 0.0))
 
         outs = []
@@ -774,6 +785,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 if v is not None and sec == t:
                     c = thin(p, t - p['s0'], p['path']['bsz'], p['n'])
                     if c > 0: st['thin_n'] += 1; st['thin_usd'] += c
+                    took(p, t - p['s0'], p['n'])
                     close(i, t, (v - p['costF']) * p['n'] - c, 'base')
                 else:
                     x = (p['payout'] - p['costF']) * p['n']; close(i, t, x, 'held')
@@ -808,14 +820,16 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                     elif not cut: conf.pop(i, None)
                     if cut:
                         sz = p['path']['bsz'][k] if 0 <= k < len(p['path']['bsz']) else None
+                        if depth and sz is not None: sz = max(0.0, sz - bid_used(p, k)[1])
+                        if loser.get('split') and depth and sz is not None and sz <= 1e-9: continue  # the bid is used up: wait
                         if loser.get('split') and sz and sz < p['n'] - 1e-9:  # only the top bid's size this second, the rest waits
                             m = sz; x = m * (b - p['costF']) - taker_fee(m, b)
                             credit(x, t); st['cut_usd'] += x; st['cap_now'] -= m * p['costF']
                             if not child[i]: st['per'][p['src']] = st['per'].get(p['src'], 0.0) + x
-                            p['n'] -= m
+                            took(p, k, m); p['n'] -= m
                             continue
                         if c > 0: st['thin_n'] += 1; st['thin_usd'] += c
-                        close(i, t, net, 'cut'); st['cut_usd'] += net
+                        took(p, k, p['n']); close(i, t, net, 'cut'); st['cut_usd'] += net
                         if p['payout'] > 0.5: st['cut_win'] += 1  # would have settled a winner
             if pacer is None: continue
             members = []
@@ -829,7 +843,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 net = p['n'] * (b - p['costF']) - taker_fee(p['n'], b) - c
                 if net >= need(t) - 1e-9:
                     if c > 0: st['thin_n'] += 1; st['thin_usd'] += c
-                    close(i, t, net, 'snipe'); st['cts'] += p['n']
+                    took(p, k, p['n']); close(i, t, net, 'snipe'); st['cts'] += p['n']
                     if reenter == 'any': reenter_any(i, t)
                     elif reenter: reenter_at(i, t)
                 elif net > 1e-9:
