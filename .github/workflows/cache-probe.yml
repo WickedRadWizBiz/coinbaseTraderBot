@@ -40,7 +40,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           for k in scaling-history-replay-41351228092 scaling-history-server-41351228092; do gh cache delete "$k" -R "${{ github.repository }}" && echo "deleted $k" || echo "no cache $k"; done
-          gh cache list -R "${{ github.repository }}" -L 100 --json key,sizeInBytes,ref --jq '.[] | "\(.key) \(.ref) \(.sizeInBytes/1e6|floor)MB"' | head -60
+          gh cache list -R "${{ github.repository }}" -L 100 --json key,sizeInBytes,ref --jq '.[] | "\(.key) \(.ref) \(.sizeInBytes/1e6|floor)MB"' | head -60 > /tmp/caches.txt; cat /tmp/caches.txt
       - env:
           GH_TOKEN: ${{ github.token }}
           S: ${{ steps.s.outputs.cache-matched-key }}
@@ -48,4 +48,5 @@ jobs:
         run: |
           BODY="Cache probe: kalshi-server match: '${S:-none}'; kalshi-replay match: '${R:-none}'"
           echo "$BODY"
+          BODY="$BODY"$'\n\n```\n'"$(cat /tmp/caches.txt 2>/dev/null)"$'\n```'
           gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -f body="$BODY" > /dev/null
