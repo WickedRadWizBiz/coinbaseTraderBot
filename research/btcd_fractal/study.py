@@ -313,6 +313,8 @@ def evaluate(child_full, parent, cfg, dates, step=4, start=52, H=78, wf=None, wa
     errs = {h: [] for h in HORIZONS}
     flat = {h: [] for h in HORIZONS}
     hit = {h: [] for h in HORIZONS}
+    prs = {h: [] for h in HORIZONS}
+    acts = {h: [] for h in HORIZONS}
     track = []
     n = len(child)
     for t in range(start, n, step):
@@ -324,6 +326,8 @@ def evaluate(child_full, parent, cfg, dates, step=4, start=52, H=78, wf=None, wa
                 act = child[t + h] - child[t]
                 pr = p[h - 1] - child[t]
                 errs[h].append(abs(pr - act))
+                prs[h].append(pr)
+                acts[h].append(act)
                 flat[h].append(abs(act))
                 if abs(act) > 0.5:
                     hit[h].append(1.0 if np.sign(pr) == np.sign(act) else 0.0)
@@ -332,7 +336,9 @@ def evaluate(child_full, parent, cfg, dates, step=4, start=52, H=78, wf=None, wa
         if errs[h]:
             sk[f"h{h}"] = {"n": len(errs[h]), "mae": float(np.mean(errs[h])), "maeFlat": float(np.mean(flat[h])),
                            "ratio": float(np.mean(errs[h]) / max(np.mean(flat[h]), 1e-9)),
-                           "hit": float(np.mean(hit[h])) if hit[h] else None}
+                           "hit": float(np.mean(hit[h])) if hit[h] else None,
+                           # behaviour, not level: does the projected move line up with the realized one?
+                           "ic": float(np.corrcoef(prs[h], acts[h])[0, 1]) if len(prs[h]) > 3 and np.std(prs[h]) > 0 else 0.0}
     res["skill"] = sk
     res["track"] = track
     return res
@@ -396,7 +402,7 @@ def _eval_parent(args):
     wf, _ = waterfalls(par)
     r = evaluate(_G["child"], par, cfg, _G["dates"], step=8, wf=wf, want_paths=False)
     return {"kind": kind, "score": score(r), "r": r["fit"]["r"], "mae": r["fit"]["mae"], "cost": r["fit"]["cost"],
-            "h26": r["skill"].get("h26", {}).get("ratio"), "hit26": r["skill"].get("h26", {}).get("hit")}
+            "h26": r["skill"].get("h26", {}).get("ratio"), "hit26": r["skill"].get("h26", {}).get("hit"), "ic26": r["skill"].get("h26", {}).get("ic")}
 
 
 def _eval_child(args):
@@ -495,6 +501,13 @@ def main():
         c = r["cfg"]
         print(f"  score {r['score']:.3f} r {r['fit']['r']:.3f} | {c}")
 
+    for dm in (0, 1, 2):
+        rs = [r for r in results if r["cfg"].get("dynmap", 0) == dm]
+        if rs:
+            b_ = min(rs, key=lambda r: r["score"])
+            print(f"  dynmap {dm}: {len(rs)} settings, best score {b_['score']:.3f}, median {np.median([r['score'] for r in rs]):.3f}, best r {max(r['fit']['r'] for r in rs):.3f}, "
+                  f"best hit26 {max((r['skill'].get('h26', {}).get('hit') or 0) for r in rs):.2f}, best ic26 {max((r['skill'].get('h26', {}).get('ic') or 0) for r in rs):.2f}")
+
     # --- ensemble: weights from out-of-sample score (softmax over the best third)
     top = results[: max(8, len(results) // 3)]
     sc = np.array([r["score"] for r in top])
@@ -580,7 +593,7 @@ def main():
             cjobs.append((f"child@{d0}", cc, adv_cfg))
         advc = list(ex.map(_eval_child, cjobs))
     real = {"score": best["score"], "r": best["fit"]["r"], "mae": best["fit"]["mae"], "cost": best["fit"]["cost"],
-            "h26": best["skill"].get("h26", {}).get("ratio"), "hit26": best["skill"].get("h26", {}).get("hit")}
+            "h26": best["skill"].get("h26", {}).get("ratio"), "hit26": best["skill"].get("h26", {}).get("hit"), "ic26": best["skill"].get("h26", {}).get("ic")}
     kinds = {}
     for x in adv:
         k = x["kind"] if x["kind"] in ("iaaft", "block8", "walk", "reversed") else ("offset" if x["kind"].startswith("offset") else "otherBTCD")
@@ -594,8 +607,17 @@ def main():
                       "pScore": float((np.sum(s <= real["score"]) + 1) / (len(s) + 1)),
                       "rMedian": float(np.median(rr)), "pR": float((np.sum(rr >= real["r"]) + 1) / (len(rr) + 1)),
                       "costMedian": float(np.median(cst)), "pCost": float((np.sum(cst <= real["cost"]) + 1) / (len(cst) + 1))}
+        hs = np.array([x["hit26"] if x.get("hit26") is not None else np.nan for x in xs])
+        ics = np.array([x["ic26"] if x.get("ic26") is not None else np.nan for x in xs])
+        if real.get("hit26") is not None and np.isfinite(hs).any():
+            adv_sum[k]["hit26Median"] = float(np.nanmedian(hs))
+            adv_sum[k]["pHit26"] = float((np.nansum(hs >= real["hit26"]) + 1) / (np.isfinite(hs).sum() + 1))
+        if real.get("ic26") is not None and np.isfinite(ics).any():
+            adv_sum[k]["ic26Median"] = float(np.nanmedian(ics))
+            adv_sum[k]["pIc26"] = float((np.nansum(ics >= real["ic26"]) + 1) / (np.isfinite(ics).sum() + 1))
     print("adversary (real parent score %.3f, r %.3f, cost %.2f):" % (real["score"], real["r"], real["cost"]))
     for k, v in adv_sum.items():
+        print(f"  {k:10s} hit26 median {v.get('hit26Median')} p {v.get('pHit26')} | ic26 median {v.get('ic26Median')} p {v.get('pIc26')}")
         print(f"  {k:10s} n {v['n']:3d} score median {v['scoreMedian']:.3f} best {v['scoreBest']:.3f} p {v['pScore']:.3f} | r median {v['rMedian']:.3f} p {v['pR']:.3f} | cost p {v['pCost']:.3f}")
     for x in advc:
         print(f"  {x['kind']}: score {x['score']:.3f} r {x['r']:.3f} cost {x['cost']:.2f}")
@@ -651,6 +673,9 @@ def main():
         "adversary": {"real": real, "byKind": adv_sum, "placeboChildren": advc, "cfg": adv_cfg},
         "context": ctx, "halvingClock": halving_clock,
         "elapsedSec": round(time.time() - t0, 1),
+        "allSettings": [{"cfg": r["cfg"], "score": round(r["score"], 4), "r": round(r["fit"]["r"], 3), "cost": round(r["fit"]["cost"], 2),
+                         "nowParent": to_date(r, r["jend"]).date().isoformat(), "bNow": round(r["fit"]["b"], 3),
+                         "skill": {k: {kk: (round(vv, 3) if isinstance(vv, float) else vv) for kk, vv in v.items()} for k, v in r["skill"].items()}} for r in results],
     }
     with open(os.path.join(a.out, "results.json"), "w") as fh:
         json.dump(out, fh, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))

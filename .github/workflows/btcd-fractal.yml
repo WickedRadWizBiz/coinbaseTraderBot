@@ -59,6 +59,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898783+github-actions[bot]@users.noreply.github.com"
           cp "$RUNNER_TEMP/study.log" research/btcd_fractal/out/study.log 2>/dev/null || true
-          git add research/btcd_fractal/data research/btcd_fractal/out
+          git add -f research/btcd_fractal/data research/btcd_fractal/out
           git commit -q -m "BTC.D fractal study results (run ${{ github.run_id }}) [skip ci]" || { echo "nothing to commit"; exit 0; }
           for i in 1 2 3 4; do git pull -q --rebase origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}" && break; sleep $((2**i)); done
