@@ -599,7 +599,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         sig_cache[j] = out
         return out
 
-    def pacer_run(paths, base, pacer, hourly=4.5, floor=0.75, cap=6.5, frac=0.10, no_exit_sec=60, size=None, reenter=False, depth=False, stake_fn=None, remap=None, loser=None):
+    def pacer_run(paths, base, pacer, hourly=4.5, floor=0.75, cap=6.5, frac=0.10, no_exit_sec=60, size=None, reenter=False, depth=False, stake_fn=None, remap=None, loser=None, depth_px=0.02):
         """One base exit with (or without) the pacer on top, every position in time order on one clock. base: a sim() rule or
         None (hold everything); pacer: None | (mode, group) with mode 'cumulative' | 'rolling_hour' | 'slices' (Steven's
         non-stacking spec of Oct 30, bot/risk/quotaPacer.ts: catch-up slices of at most the hourly target).
@@ -615,7 +615,7 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
         below the bid less its fee (holding is worth less than selling); 'fvcost': m sells when fair value < entry cost - m;
         'time': f sells when only f of the window is left and net < 0; 'grace': s seconds after entry before any cut but the window;
         'confirm': s seconds the cut must hold in a row before it sells; 'split': each second sells at most the top bid's size."""
-        DEPTH_PX = 0.02
+        DEPTH_PX = depth_px
         ps = []
         for k0, p in enumerate(paths):
             p0 = p
@@ -781,11 +781,16 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                     c = thin(p, k, p['path']['bsz'], p['n'])
                     net = p['n'] * (b - p['costF']) - taker_fee(p['n'], b) - c
                     if net > 1e-9: continue
+                    if loser.get('slip'):  # adversary: every loser sale fills this much under the recorded bid
+                        b = max(0.01, b - loser['slip']); net = p['n'] * (b - p['costF']) - taker_fee(p['n'], b) - c
                     cut = inwin and loser.get('window', True)
                     if not cut and t - p['s0'] >= loser.get('grace', 0):
-                        stake = p['n'] * p['costF']; q = p['fv'][k] if 0 <= k < len(p['fv']) else None
+                        stake = p['n'] * p['costF']; kd = k - loser.get('delay', 0)  # adversary: the cut sees the book d s late
+                        q = p['fv'][kd] if 0 <= kd < len(p['fv']) else None
+                        if loser.get('delay'): bd = p['bids'][kd] if 0 <= kd < len(p['bids']) else None; b_sig = bd if bd is not None else b
+                        else: b_sig = b
                         if 'stop' in loser and net <= -loser['stop'] * stake: cut = True
-                        elif 'fvbid' in loser and q is not None and q < b - fee1(b, p['n']) - loser['fvbid']: cut = True
+                        elif 'fvbid' in loser and q is not None and q < b_sig - fee1(b_sig, p['n']) - loser['fvbid']: cut = True
                         elif 'fvcost' in loser and q is not None and q < p['costF'] - loser['fvcost']: cut = True
                         elif 'time' in loser and t > p['c_sec'] - loser['time'] * market_len(p): cut = True
                     if cut and not inwin and loser.get('confirm'):
@@ -1211,10 +1216,37 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
               ('FLIP: rejected entries other side (fv < cost - 6c)', S3, flip(0.06)),
               ('FLIP + gate 6c: gated entries kept, rejected ones flipped', S3, flip(0.0, gall(-0.06))),
               ('FLIP + gate 6c, flips only where fv < cost - 6c', S3, flip(0.06, gall(-0.06)))]
+    # ---- adversary (Steven, Nov 1: try to break whatever makes the gains) on the best rule: gate 6c over every origin + 3c cut
+    # strict: the gate reads fair value at the entry second only (q0 was the first fair value at or after it: look-ahead)
+    def gstrict(m, slip=0.0):
+        def f(p):
+            q = band_all(p)
+            if q is None: return None
+            v = q['fv'][0] if q['fv'] else None
+            if v is None or v < q['costF'] - m: return None
+            return dict(q, costF=q['costF'] + slip) if slip else q
+        return f
+    # placebo: skip the same share of entries at random (seeded), not by fair value
+    import random as _rnd
+    cand = [p for p in pathsB if p.get('costF') is not None and band_all(p) is not None and band_all(p).get('q0') is not None]
+    kept = sum(1 for p in cand if gall(-0.06)(p) is not None)
+    share = kept / len(cand) if cand else 0.0
+    def placebo(seed):
+        r = _rnd.Random(seed)
+        keep = {id(p): r.random() < share for p in pathsB}
+        return lambda p: (lambda q: q if q is not None and keep.get(id(p)) else None)(band_all(p))
+    print(f'     adversary: the gate keeps {kept} of {len(cand)} entries with a fair value ({100 * share:.0f}%); the placebo keeps the same share at random')
+    rowsL += [('ADV strict: gate on the entry second\'s fair value only', S3, gstrict(-0.06)),
+              ('ADV strict + 1c worse entry fill', S3, gstrict(-0.06, 0.01)),
+              ('ADV strict + cut sold 1c under the bid', dict(S3, slip=0.01), gstrict(-0.06)),
+              ('ADV strict + cut decided 2 s late', dict(S3, delay=2), gstrict(-0.06)),
+              ('ADV strict + cut decided 5 s late', dict(S3, delay=5), gstrict(-0.06)),
+              ('ADV strict + all of: 1c entry, 1c sale, 2 s late', dict(S3, slip=0.01, delay=2), gstrict(-0.06, 0.01))]
+    rowsL += [(f'ADV placebo: random skip, same share (seed {s})', S3, placebo(s)) for s in (1, 2, 3)]
     print('     entry gate: the position is skipped when the spot fair value at its entry is under its cost (fee in) less the margin shown.')
     for lab, lz, rm in rowsL:
         for dp in (False, True):
-            r = pacer_run(pathsB, baseG, SL, remap=rm, loser=lz, depth=dp)
+            r = pacer_run(pathsB, baseG, SL, remap=rm, loser=lz, depth=dp, depth_px=0.04 if (dp and lab.startswith('ADV')) else 0.02)
             if r is None: print('    (no costed position)'); break
             lb = lab + ('; depth' if dp else '')
             print(f"    {lb:66s} {r['real']:+10.2f}  {r['real'] / max(r['span_h'], 1e-9):+6.2f}  {r['snipe']:6d}  {r['held_w']:5d}  {r['held_w_usd']:+8.2f}  {r['held_l']:5d}  {r['held_l_usd']:+8.2f}  {r['cut']:5d}  {r['cut_usd']:+8.2f}  {r['cut_win']:4d}  {r['nobid']:5d}  {r['thin_usd']:7.2f}")
