@@ -1,0 +1,248 @@
+# Can a deep-history day stand in for a real recorded Kalshi day? (research/historyTwin.ts; Steven, Nov 1.) Each recorded
+# day is rebuilt by the deep-history pipeline itself (research/kalshiReplayData.ts: Binance 1-minute bars + Kalshi's
+# public minute candles, requote), then the tally's depth fill-in on top, and judged against the real day: paired
+# mechanics, a classifier adversary trying to tell the two apart, and the decision model's backtest window by window
+# beside a noise floor (the real days at +250 ms).
+#
+# No server access at all: the real days come from an earlier Replay fidelity run's cache (reuse_run), and both sides are
+# backtested with the repository's paper settings (the same settings both ways, which is all a like-for-like test needs). This repository is public: jobs
+# print counts, cents and $ only; recordings move between jobs through the Actions cache, never artifacts.
+name: History twin
+
+on:
+  # A new workflow can't be dispatched until it is on main: while on its branch, a push of its own files runs it.
+  push:
+    branches: [claude/project-thread-lq48hg]
+    paths: ['.github/workflows/history-twin.yml', 'research/historyTwin.ts']
+  workflow_dispatch:
+    inputs:
+      reuse_run:
+        description: 'Replay fidelity run whose cached days (recordings, older fit days, models) are the real side'
+        required: true
+        default: '41269805422'
+      parts:
+        description: 'Runners per backtest (the compared days split into this many runs)'
+        required: false
+        default: '4'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: history-twin
+  cancel-in-progress: false
+
+env:
+  NODE_OPTIONS: --max-old-space-size=12288
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    permissions:
+      contents: write
+    outputs:
+      days: ${{ steps.days.outputs.days }}
+      warm: ${{ steps.days.outputs.warm }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - name: The real days (an earlier Replay fidelity run's copy)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/recordings
+            data/fit
+            data/models
+          key: fidelity-data-${{ inputs.reuse_run || '41269805422' }}-1
+          fail-on-cache-miss: true
+      - name: Which days
+        id: days
+        run: |
+          set -euo pipefail
+          ALL=$(ls -1 data/recordings | sed -E 's/^md-([0-9-]{10}).*/\1/' | sort -u)
+          WARM=$(echo "$ALL" | head -1); DAYS=$(echo "$ALL" | tail -n +2 | paste -sd, -)
+          echo "days=$DAYS" >> "$GITHUB_OUTPUT"; echo "warm=$WARM" >> "$GITHUB_OUTPUT"
+          echo "warm-up $WARM, compared $DAYS; depth model fitted on $(ls data/fit | sed -E 's/^md-([0-9-]{10}).*/\1/' | paste -sd' ' -)"
+      - name: Restore the Kalshi history and its replay
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: kalshi-replay-twin-${{ github.run_id }}
+          restore-keys: kalshi-replay-
+      - name: The deep-history twin of those days (Binance + Kalshi public history, the deep history's own pipeline)
+        env:
+          WARM: ${{ steps.days.outputs.warm }}
+        run: |
+          set -euo pipefail
+          BACK=$(( ( $(date -u +%s) - $(date -u -d "$WARM" +%s) ) / 86400 + 2 ))
+          node --import tsx research/kalshiReplayData.ts --history data/history --out data/history-replay --days "$BACK" --budget-min 120 2>&1 | tee -a "$RUNNER_TEMP/build.log" \
+            | grep -vE '^\[kalshi-replay-data\] (binance|kalshi|replay): .*(skipp|already|listing|page)' | tail -20
+      - name: Save the Kalshi history and its replay
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: kalshi-replay-twin-${{ github.run_id }}
+      - name: Match, fill in, and describe every contract both ways
+        env:
+          DAYS: ${{ steps.days.outputs.days }}
+          WARM: ${{ steps.days.outputs.warm }}
+        run: |
+          set -euo pipefail
+          T=data/twin
+          node --import tsx research/historyTwin.ts --stage match --real data/recordings --twin data/history-replay --days "$WARM,$DAYS" --out $T 2>&1 | tee -a "$RUNNER_TEMP/build.log" | grep '^\[twin\]' || { echo "match failed"; exit 1; }
+          node --import tsx research/depthStudy.ts --recordings data/fit --out data/models/depth_model.json 2>&1 | grep -E '^\[depth\] [0-9]' | tail -3 || true
+          [ -s data/models/depth_model.json ] || { echo "no depth model"; exit 1; }
+          node --import tsx research/historyTwin.ts --stage fill --src $T/requote --dst $T/depth --how depth --depth-model data/models/depth_model.json 2>&1 | grep '^\[twin\]'
+          node --import tsx research/historyTwin.ts --stage features --dirs real=$T/real,requote=$T/requote,depth=$T/depth --days "$DAYS" --out $T 2>&1 | tee -a "$RUNNER_TEMP/build.log" | grep '^\[twin\]'
+          du -sh $T/* | cat
+      - uses: actions/cache/save@v4
+        with:
+          path: |
+            data/twin
+            data/models
+          key: history-twin-${{ github.run_id }}
+      - name: Report (commit comment; logs can't be read from the cloud session)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo "History twin build, run ${{ github.run_id }} (${{ job.status }})"; echo; echo '```'; grep -E '^\[(twin|kalshi-replay-data)\]' "$RUNNER_TEMP/build.log" 2>/dev/null | cut -c1-400 | tail -40; echo '```'; } > "$RUNNER_TEMP/comment.md"
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@"$RUNNER_TEMP/comment.md" --silent || echo "could not post the comment"
+
+  backtest:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        how: [real, placebo, requote, depth]
+        part: [0, 1, 2, 3]
+    env:
+      DAYS: ${{ needs.build.outputs.days }}
+      WARM: ${{ needs.build.outputs.warm }}
+      PARTS: ${{ inputs.parts || '4' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/twin
+            data/models
+          key: history-twin-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Backtest ${{ matrix.how }}, part ${{ matrix.part }}
+        run: |
+          set -euo pipefail
+          IFS=, read -ra D <<< "$DAYS"; N=${#D[@]}; PER=$(( (N + PARTS - 1) / PARTS )); S=$(( ${{ matrix.part }} * PER ))
+          [ "$S" -lt "$N" ] || { echo "no days in this part"; mkdir -p "$RUNNER_TEMP/out"; exit 0; }
+          MINE=("${D[@]:$S:$PER}"); PREV=$([ "$S" -eq 0 ] && echo "$WARM" || echo "${D[$((S-1))]}")
+          SRC=data/twin/${{ matrix.how }}; [ "${{ matrix.how }}" = placebo ] && SRC=data/twin/real
+          DIR="$RUNNER_TEMP/days"; mkdir -p "$DIR"
+          for d in "$PREV" "${MINE[@]}"; do ln -sf "$GITHUB_WORKSPACE/$SRC/md-$d.jsonl.gz" "$DIR/"; done
+          export DATA_DIR="$GITHUB_WORKSPACE/data" TRADING_MODE=paper AUTO_TRAIN=off
+          LAT=(); [ "${{ matrix.how }}" = placebo ] && LAT=(--latency-ms 250)
+          node --import tsx research/historyTwin.ts --stage backtest --dir "$DIR" --name "${{ matrix.how }}-p${{ matrix.part }}" --days "$(IFS=,; echo "${MINE[*]}")" --model data/models/model.json --out "$RUNNER_TEMP/out" "${LAT[@]}" > "$RUNNER_TEMP/bt.log" 2>&1 || { tail -5 "$RUNNER_TEMP/bt.log" | cut -c1-200; exit 1; }
+          grep '^\[fidelity\]' "$RUNNER_TEMP/bt.log" | grep -v ' windows: ' | cut -c1-300
+      # Per-window P&L only (no recordings, no settings).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: twin-${{ matrix.how }}-p${{ matrix.part }}
+          path: ${{ runner.temp }}/out/
+          retention-days: 3
+          if-no-files-found: ignore
+
+  verdict:
+    needs: [build, backtest]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Restore dependencies (node_modules + compiled TA-Lib)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            vendor/talib/build
+          key: train-deps-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vendor/talib/**/*.c', 'vendor/talib/**/*.cpp', 'vendor/talib/**/*.h', 'vendor/talib/binding.gyp', 'vendor/talib/package.json') }}
+      - name: Install dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund --silent
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/twin
+          key: history-twin-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: twin-*
+          path: ${{ runner.temp }}/in
+      - name: Verdict
+        run: |
+          set -euo pipefail
+          for how in real placebo requote depth; do
+            python3 - "$how" "$RUNNER_TEMP/in" data/twin <<'PY'
+          import glob, json, sys
+          how, src, out = sys.argv[1:]
+          parts = sorted(glob.glob(f"{src}/twin-{how}-p*/windows-{how}-p*.json"))
+          w = [x for f in parts for x in json.load(open(f))]
+          if parts: json.dump(w, open(f"{out}/windows-{how}.json", "w"))
+          print(f"{how}: {len(parts)} part(s), {len(w)} window(s)")
+          PY
+          done
+          node --import tsx research/historyTwin.ts --stage verdict --out data/twin 2>&1 | tee "$RUNNER_TEMP/verdict.log" | grep '^\[twin\]'
+          python3 - <<'PY' | tee -a "$RUNNER_TEMP/verdict.log"
+          import json
+          r = json.load(open('data/twin/verdict.json'))
+          for p in r['paired']:
+              print(f"{p['day']}: both {p['both']}, missing {p['onlyReal15m']}, quote off {p['quoteMaeC']:.2f}c, index off {p['indexMaeBps']:.1f} bps, results {p['resultsAgree']}/{p['results']}")
+          PY
+      - name: Report (commit comment)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo "History twin verdict, run ${{ github.run_id }} (${{ job.status }})"; echo; echo '```'; cut -c1-500 "$RUNNER_TEMP/verdict.log" 2>/dev/null | grep -v '^\[twin\] features'; echo '```'; } > "$RUNNER_TEMP/comment.md"
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@"$RUNNER_TEMP/comment.md" --silent || echo "could not post the comment"

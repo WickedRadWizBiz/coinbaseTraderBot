@@ -258,11 +258,11 @@ function realDir(rec: string, work: string, meta: FidelityMeta): string {
   return dir;
 }
 
-type Windows = Awaited<ReturnType<typeof backtestMain>>['windows'];
+export type Windows = Awaited<ReturnType<typeof backtestMain>>['windows'];
 
 /** The decision model's backtest on one folder of days, as the pipeline runs it for the decision model
  *  (research/pipeline.ts, mlp): the production exit settings, the vol forecast and the fill model next to the model. */
-async function backtestDir(dir: string, model: string): Promise<Windows> {
+export async function backtestDir(dir: string, model: string, extra: Record<string, string> = {}): Promise<Windows> {
   const cfg = loadConfig(paperEnv(process.env));
   const models = path.dirname(model);
   const opt = (f: string) => (fs.existsSync(path.join(models, f)) ? path.join(models, f) : '');
@@ -273,6 +273,7 @@ async function backtestDir(dir: string, model: string): Promise<Windows> {
     // The paper bot's pool is topped back up when it runs dry (bot/training/supervisor.ts): without it a losing replay goes
     // broke on its first day ($10-$20 orders on a $200 pool) and trades nothing after.
     refill: String(cfg.paperBankrollUsd),
+    ...extra,
   };
   const t0 = Date.now();
   const { windows: w, result: r } = await backtestMain((k, d) => (k === 'recordings' ? dir : k in fixed ? fixed[k] : d), false);
