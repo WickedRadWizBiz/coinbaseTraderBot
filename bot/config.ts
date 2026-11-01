@@ -61,6 +61,10 @@ export interface LoserExitConfig {
   gate: boolean;
   /** FV_ENTRY_GATE_MARGIN (0.06 a contract, the lab's best of 0, 3, 6, 9 and 12 cents). */
   gateMargin: number;
+  /** FV_ENTRY_GATE_QUOTE_MARGIN (unset = FV_ENTRY_GATE_MARGIN): the margin a resting maker quote that opens or adds to a
+   *  position needs. A quote fills later than it is placed, mostly when the price has moved through it, so it can need a
+   *  wider cushion than a taker entry, which fills at the price the gate saw. */
+  gateQuoteMargin?: number;
   /** LOSER_CUT (on): a position not in profit after fees is sold at the bid (the top bid's size each evaluation, no delay)
    *  as soon as the spot fair value of its side is below the bid less the taker fee a contract less LOSER_CUT_MARGIN. */
   cut: boolean;
@@ -1175,6 +1179,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     loserExits: {
       gate: bool(env, 'FV_ENTRY_GATE', true),
       gateMargin: num(env, 'FV_ENTRY_GATE_MARGIN', 0.06, 0, 0.5),
+      ...(env.FV_ENTRY_GATE_QUOTE_MARGIN !== undefined && env.FV_ENTRY_GATE_QUOTE_MARGIN !== '' ? { gateQuoteMargin: num(env, 'FV_ENTRY_GATE_QUOTE_MARGIN', 0.06, 0, 0.5) } : {}),
       cut: bool(env, 'LOSER_CUT', true),
       cutMargin: num(env, 'LOSER_CUT_MARGIN', 0.03, 0, 0.5),
       window: bool(env, 'LOSER_WINDOW_CUT', true),

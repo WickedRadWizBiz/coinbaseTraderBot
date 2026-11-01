@@ -157,6 +157,13 @@ test('fair value gate: new risk only where the spot fair value of the side bough
   assert.equal(fvGatePasses(0.3, 'no', 0.6, 0.02, cfg), true); // NO worth 0.70 against 0.68
   assert.equal(fvGatePasses(undefined, 'yes', 0.6, 0.02, cfg), true);
   assert.equal(fvGatePasses(0.5, 'yes', 0.6, 0.02, off), true);
+  // FV_ENTRY_GATE_QUOTE_MARGIN: a resting maker quote can need a wider cushion than a taker entry; unset, both use 6c.
+  const wide: StrategyConfig = { ...cfg, loserExits: { ...cfg.loserExits!, gateQuoteMargin: 0.1 } };
+  assert.equal(fvGatePasses(0.7, 'yes', 0.6, 0.02, cfg, true), true);
+  assert.equal(fvGatePasses(0.7, 'yes', 0.6, 0.02, wide, true), false); // a quote needs 0.60 + 0.02 + 0.10 = 0.72 with the wider margin
+  assert.equal(fvGatePasses(0.7, 'yes', 0.6, 0.02, wide, false), true); // a taker entry still needs only 6c
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).strategy.loserExits?.gateQuoteMargin, undefined);
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), FV_ENTRY_GATE_QUOTE_MARGIN: '0.1' }).strategy.loserExits?.gateQuoteMargin, 0.1);
   // A taker YES the model wants (q 0.75 against a 0.60 ask): taken only when the spot fair value clears the gate.
   const taker = (pFair?: number) => decide(view({ pYes: 0.75, pFair }), { ...cfg, style: 'taker' });
   const take = (out: StrategyOutput) => out.place.find((p) => p.purpose === 'entry');
