@@ -112,8 +112,8 @@ jobs:
     timeout-minutes: 330
     strategy:
       fail-fast: false
-      # The account's runners are shared by every thread: at most three replays at once.
-      max-parallel: 3
+      # The account's runners are shared by every thread (Nov 1: ~4 at once for the whole project): one replay at a time.
+      max-parallel: 1
       matrix:
         variant: ${{ fromJson(needs.data.outputs.variants) }}
     steps:
