@@ -1,0 +1,64 @@
+name: BTC.D fractal study
+
+# Walk-forward study of the BTC.D fractal (research/btcd_fractal/study.py, docs/FRACTAL.md): TradingView daily
+# history through tvdatafeed, the time-warp fit with a dynamic level map, the adversary, charts. Results and the
+# history it pulled are committed back to the branch (public market data; nothing from the server or bot.env).
+on:
+  workflow_dispatch:
+    inputs:
+      surrogates:
+        description: 'placebo parents per kind'
+        default: '60'
+  push:
+    branches: [claude/project-thread-axoa26]
+    paths:
+      - 'research/btcd_fractal/*.py'
+      - '.github/workflows/btcd-fractal.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: btcd-fractal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: |
+          pip install -q --disable-pip-version-check numpy pandas numba matplotlib websocket-client requests
+          pip install -q --disable-pip-version-check --no-cache-dir git+https://github.com/rongardF/tvdatafeed.git
+      - name: Fetch TradingView history
+        run: python3 research/btcd_fractal/fetch.py --out research/btcd_fractal/data
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - name: The bot's own engine on the same history (bot/macro/fractalEngine.ts)
+        continue-on-error: true
+        run: |
+          npm ci --silent --no-audit --no-fund
+          H="$RUNNER_TEMP/history/tradingview/BTC.D"; mkdir -p "$H"
+          cp research/btcd_fractal/data/BTC.D_1d.csv "$H/1d.csv"
+          if [ -f research/btcd_fractal/data/USDT.D_1d.csv ]; then mkdir -p "$RUNNER_TEMP/history/tradingview/USDT.D"; cp research/btcd_fractal/data/USDT.D_1d.csv "$RUNNER_TEMP/history/tradingview/USDT.D/1d.csv"; fi
+          mkdir -p research/btcd_fractal/out
+          npx tsx research/fractalStudy.ts --history "$RUNNER_TEMP/history" --out research/btcd_fractal/out/engine_study.json 2>&1 | tail -60
+      - name: Study
+        run: |
+          python3 research/btcd_fractal/study.py --data research/btcd_fractal/data --out research/btcd_fractal/out --surrogates "${{ github.event.inputs.surrogates || '60' }}" 2>&1 | tee "$RUNNER_TEMP/study.log" | tail -80
+      - name: Commit results to the branch
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898783+github-actions[bot]@users.noreply.github.com"
+          cp "$RUNNER_TEMP/study.log" research/btcd_fractal/out/study.log 2>/dev/null || true
+          git add research/btcd_fractal/data research/btcd_fractal/out
+          git commit -q -m "BTC.D fractal study results (run ${{ github.run_id }}) [skip ci]" || { echo "nothing to commit"; exit 0; }
+          for i in 1 2 3 4; do git pull -q --rebase origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}" && break; sleep $((2**i)); done
