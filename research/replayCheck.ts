@@ -59,6 +59,8 @@ export interface SideSummary {
   exitAudit?: string;
   /** Lab: the entry rules, and settled markets / P&L by the first entry fill's seconds to the close, 15m and hourly apart. */
   entryTiming?: string;
+  /** Lab (Nov 1): each underlying's spot inside the stretch (first, last, high, low), the day's regime for a sweep over many days. */
+  regime?: string;
   /** Lab: settled markets / P&L by the first entry's side, price, fair value edge, outcome, origin and exit, 15m and hourly apart. */
   anatomy?: string;
   /** Settled P&L by UTC hour (YYYY-MM-DDTHH). */
@@ -683,6 +685,17 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     seeded.push(`optimal f (${ofSeed.length} settled entries before the stretch)`);
   }
   const match = priceMatcher(audit.prices, from, to);
+  // Lab (Nov 1): the day's regime for the sweep over many days: each underlying's spot inside the stretch.
+  const regime = new Map<string, { first: number; last: number; hi: number; lo: number }>();
+  const underlyingOf = (ticker: string) => ticker.slice(0, Math.max(0, ticker.indexOf('-'))).replace(/^KX/, '').replace(/(15M|D)$/, '');
+  const onEval = (e: EvalReading) => {
+    match.onEval(e);
+    if (e.spot !== undefined && Number.isFinite(e.spot) && e.now >= from && e.now <= to) {
+      const u = underlyingOf(e.ticker), g = regime.get(u);
+      if (!g) regime.set(u, { first: e.spot, last: e.spot, hi: e.spot, lo: e.spot });
+      else { g.last = e.spot; if (e.spot > g.hi) g.hi = e.spot; if (e.spot < g.lo) g.lo = e.spot; }
+    }
+  };
   const r = await runBacktest(dir, model, S, cfg.risk, bankroll, {
     // The hunt and the ratchet as the engine builds them from the settings (bot/engine.ts), so HUNT_* and RATCHET_* overrides
     // reach the replay; before this the replay hunted with the code defaults whatever the settings said.
@@ -692,7 +705,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     sizingTiers: cfg.sizingTiers, paper: { orderFrac: S.paperOrderFrac, orderUsd: S.paperOrderUsd }, accuracyGate: S.accuracyGate,
     optimalF: { ...cfg.optimalF, ...(ofSeed ? { seed: ofSeed } : {}) },
     takeProfitBench: { enforce: S.takeProfitBench, rule: curveBench, stateFile: benchFile, ...(follow ? { follow } : {}) }, accuracyGateFile: gateFile, startMs, tradeFromMs: from,
-    dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, refillUsd: cfg.paperBankrollUsd, sessionEdge: cfg.sessionEdge, onEval: match.onEval, makerMarkouts: o.makerMarkouts,
+    dailyGoalUsd: cfg.vault.dailyGoalUsd, equityGuardFile: guardFile, killOverride, refillUsd: cfg.paperBankrollUsd, sessionEdge: cfg.sessionEdge, onEval, makerMarkouts: o.makerMarkouts,
     volProfile: models.volProfile, applyVolSeasonality: Boolean(models.volProfile), volModel: models.volModel, fillModel: models.fillModel, calendar: models.calendar,
     taNet: true, trials: models.trials, marketContext: true, ...(o.tickPhaseMs !== undefined ? { tickPhaseMs: o.tickPhaseMs } : {}), ...(seed ? { seedCandles: seed } : {}),
   });
@@ -757,6 +770,8 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
     const L = S.loserExits;
     replay.anatomy = `trade anatomy (settled markets / P&L by the first entry fill): ${(['15m', 'hourly'] as const).map((k) => `${k}: ${Object.entries(anat[k]).map(([dim, xs]) => `${dim} ${Object.entries(xs).sort((a, b) => b[1].n - a[1].n).map(([key, b]) => `${key} ${b.n} / ${g(b.pnl)}`).join(', ')}`).join('; ') || 'none'}`).join(' | ')}`;
     replay.entryTiming = `entry timing (15m window ${S.entryWindowUpdown.join('-')} s, hourly ${S.entryWindowHourly.join('-')} s, cadence ${S.cadence}, training ${S.trainTrades}/h, gate ${L?.gate ? `on ${L.gateMargin}` : 'off'}, cut ${L?.cut ? 'on' : 'off'}, window cut ${L?.window ? `${L.windowJudge ?? 'bid'}${L.windowShare ? ` from ${L.windowShare}` : ''}` : 'off'}, no entry ${L?.noEntryShare ?? 0}, share window ${S.shareWindowMaxSec > 0 ? `max ${S.shareWindowMaxSec} s` : 'the listing'}, floor ticks ${S.pacer.floorTicks ?? 0}; settled markets / P&L by the first entry fill's seconds to the close): ${kinds.join(' | ')}`;
+    const fmtSpot = (x: number) => x >= 1000 ? x.toFixed(0) : x >= 10 ? x.toFixed(2) : x.toFixed(4);
+    replay.regime = `regime (spot inside the stretch, first -> last, high/low range): ${[...regime].sort().map(([u, g]) => `${u} ${fmtSpot(g.first)} -> ${fmtSpot(g.last)} (${((g.last / g.first - 1) * 100).toFixed(1)}%), range ${((g.hi / g.lo - 1) * 100).toFixed(1)}%`).join(' | ') || 'none'}`;
   }
   if (x.byKind) replay.exitAudit = `exit audit${x.lateFills ? ` (entry and quote fills in the last 10% of the window: ${x.lateFills} fills ${(x.lateContracts ?? 0).toFixed(0)} c)` : ''}, sold after fees / held to settlement / best later bid after fees: ${Object.entries(x.byKind).sort((a, b) => b[1].contracts - a[1].contracts)
     .map(([k, v]) => `${k} ${v.fills} fills ${v.contracts.toFixed(0)} c $${v.proceeds.toFixed(2)} / $${v.settled.toFixed(2)} / $${v.best.toFixed(2)}`
@@ -855,6 +870,7 @@ async function main(): Promise<void> {
   if (res.replay.hunt) console.log(res.replay.hunt);
   if (res.replay.exitAudit) console.log(res.replay.exitAudit);
   if (res.replay.entryTiming) console.log(res.replay.entryTiming);
+  if (res.replay.regime) console.log(res.replay.regime);
   if (res.replay.anatomy) console.log(res.replay.anatomy);
   const purposes = (s: SideSummary) => Object.entries(s.byPurpose).sort().map(([k, x]) => `${k} ${x.fills}/${x.contracts.toFixed(0)}`).join(', ') || 'none';
   console.log(`fills/contracts by order purpose: replay ${purposes(res.replay)} | paper ${purposes(res.paper)}`);
