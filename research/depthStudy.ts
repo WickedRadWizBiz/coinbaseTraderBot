@@ -8,7 +8,9 @@
 //     (the biggest level, how big against the median level, and how far from the best price);
 //   - the flow, as a queue-reactive model calibrates it (Huang, Lehalle and Rosenbaum 2015): at each distance from the
 //     best price and each queue size, how often orders are added, cancelled and traded, per second spent in that state;
-//   - the trades: how many a minute, their sizes, and how often they take the bid or the ask.
+//   - the trades: how many a minute, their sizes, and how often they take the bid or the ask;
+//   - the same trades split by where the mid goes over the next quarter-minute (down, flat, up): the flow that moves
+//     the price is the flow that fills a resting order just before the price moves against it (adverse selection).
 // Read-only; prints aggregates and writes the tables to --out for the simulator to be fitted from.
 //
 //   node --import tsx research/depthStudy.ts --recordings data/recordings [--days 2026-10-25,2026-10-26] [--out depth_study.json]
@@ -17,7 +19,7 @@ import fs from 'fs';
 import path from 'path';
 import { OrderBook } from '../bot/marketdata/orderBook';
 import { recordingFiles, recordingLines } from '../bot/marketdata/recordingFiles';
-import { PX, ticksFrom } from './history/depthSim';
+import { moveOf, PX, ticksFrom } from './history/depthSim';
 
 const MIN = 60_000;
 const SAMPLE_MS = 15_000;
@@ -43,15 +45,20 @@ class Dist {
 interface Cell {
   samples: number; spread: Dist; quotedLevels: Dist; depth10: Dist; wallSize: Dist; wallRatio: Dist; wallOffset: Dist;
   levelSize: Dist[]; levelFilled: Dist[]; tradesPerMin: Dist; tradeSize: Dist; takerYes: number; trades: number; deltasPerMin: Dist;
+  /** Per quarter-minute, by where the mid went over it (0 down, 1 flat, 2 up): how many, their trades and YES takers. */
+  byMove: Array<{ segs: number; trades: number; yes: number }>;
 }
 const newCell = (): Cell => ({ samples: 0, spread: new Dist(), quotedLevels: new Dist(), depth10: new Dist(), wallSize: new Dist(), wallRatio: new Dist(), wallOffset: new Dist(),
-  levelSize: Array.from({ length: LEVELS }, () => new Dist()), levelFilled: Array.from({ length: LEVELS }, () => new Dist()), tradesPerMin: new Dist(), tradeSize: new Dist(), takerYes: 0, trades: 0, deltasPerMin: new Dist() });
+  levelSize: Array.from({ length: LEVELS }, () => new Dist()), levelFilled: Array.from({ length: LEVELS }, () => new Dist()), tradesPerMin: new Dist(), tradeSize: new Dist(), takerYes: 0, trades: 0, deltasPerMin: new Dist(),
+  byMove: [0, 1, 2].map(() => ({ segs: 0, trades: 0, yes: 0 })) });
 
 /** Queue-reactive counts: per (distance from best in ticks, queue size bucket), events and seconds spent there. */
 interface Qr { seconds: number; add: number; cancel: number; trade: number; addSize: Dist; cancelSize: Dist }
 const newQr = (): Qr => ({ seconds: 0, add: 0, cancel: 0, trade: 0, addSize: new Dist(), cancelSize: new Dist() });
 
-interface Contract { ticker: string; close: number; book: OrderBook; lastSample: number; minute: number; deltas: number; trades: number; seen: Set<string> }
+interface Contract { ticker: string; close: number; book: OrderBook; lastSample: number; minute: number; deltas: number; trades: number; seen: Set<string>;
+  /** The quarter-minute since the last sample: where the mid stood and its cell, and its trades so far. */
+  seg?: { mid: number; cell: Cell }; segTrades: number; segYes: number }
 /** Trades alike to one already seen in the same second (time, price, size and side; the recordings keep no trade id). Kept:
  *  trades are stamped in whole seconds, so on a busy book most are separate trades, not the recorder counting one twice. */
 export const tradeCount = { all: 0, repeated: 0 };
@@ -80,8 +87,12 @@ async function run(files: string[]) {
   };
   const sample = (c: Contract, t: number) => {
     const s = state(c, t);
+    // The quarter-minute that ends here: its trades, by where the mid went over it.
+    if (c.seg && s) { const m = c.seg.cell.byMove[moveOf(c.seg.mid, s.mid)]; m.segs++; m.trades += c.segTrades; m.yes += c.segYes; }
+    c.segTrades = 0; c.segYes = 0;
+    c.seg = s && s.tau >= 0 ? { mid: s.mid, cell: cellOf(s.tau, s.mid) } : undefined;
     if (!s || s.tau < 0) return;
-    const cell = cellOf(s.tau, s.mid);
+    const cell = c.seg!.cell;
     cell.samples++;
     const bids = sideLevels(c.book, 'bid'), asks = sideLevels(c.book, 'ask');
     cell.spread.add((asks[0][0] - bids[0][0]) / 10);
@@ -114,7 +125,7 @@ async function run(files: string[]) {
       try { e = JSON.parse(line); } catch { continue; }
       const t: number = e.t ?? e.ts;
       if (e.k === 'market' && e.ticker && e.closeTime && (e.kind === 'updown' || /15M/.test(e.series ?? ''))) {
-        if (!contracts.has(e.ticker)) contracts.set(e.ticker, { ticker: e.ticker, close: Number(e.closeTime), book: new OrderBook(e.ticker), lastSample: 0, minute: 0, deltas: 0, trades: 0, seen: new Set() });
+        if (!contracts.has(e.ticker)) contracts.set(e.ticker, { ticker: e.ticker, close: Number(e.closeTime), book: new OrderBook(e.ticker), lastSample: 0, minute: 0, deltas: 0, trades: 0, seen: new Set(), segTrades: 0, segYes: 0 });
         continue;
       }
       const c = e.ticker ? contracts.get(e.ticker) : undefined;
@@ -149,6 +160,7 @@ async function run(files: string[]) {
         c.seen.add(id);
         const s = state(c, t);
         if (s) { const cell = cellOf(s.tau, s.mid); cell.trades++; cell.tradeSize.add(Number(e.count)); if (e.takerSide === 'yes') cell.takerYes++; }
+        c.segTrades++; if (e.takerSide === 'yes') c.segYes++;
         // The trade takes the best level on the side it hits: the queue-reactive model's market orders.
         const side: Side = e.takerSide === 'yes' ? 'ask' : 'bid';
         const best = side === 'ask' ? c.book.bestAsk() : c.book.bestBid();
@@ -175,6 +187,8 @@ function report(cells: Map<string, Cell>, qr: Map<string, Qr>) {
       levelFilledP50: c.levelFilled.map((d) => d.q(0.5)), levelFilledP90: c.levelFilled.map((d) => d.q(0.9)),
       tradesPerMin: c.tradesPerMin.summary(), deltasPerMin: c.deltasPerMin.summary(), tradeSize: c.tradeSize.summary(),
       takerYesShare: c.trades ? +(c.takerYes / c.trades).toFixed(3) : null,
+      // The trade flow by where the mid goes over the quarter-minute (down, flat, up): its rate and its YES takers.
+      byMove: c.byMove.map((m) => ({ segs: m.segs, tradesPerSec: m.segs ? +(m.trades / (m.segs * (SAMPLE_MS / 1000))).toFixed(4) : 0, takerYesShare: m.trades ? +(m.yes / m.trades).toFixed(3) : null })),
     };
   });
   const flow = [...qr.entries()].filter(([, q]) => q.seconds > 60).map(([k, q]) => {
@@ -198,6 +212,9 @@ async function main() {
   const out = cliArg('out', '');
   if (out) { fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true }); fs.writeFileSync(out, JSON.stringify({ days: days.map((d) => d.day), ...r }, null, 1)); }
   console.log(`[depth] ${days.length} day(s): ${days[0].day}..${days[days.length - 1].day}`);
+  // All cells together: the trade flow by where the mid went over the quarter-minute.
+  const all = [0, 1, 2].map((k) => r.shape.reduce((m, c) => { const x = c.byMove[k]; return { segs: m.segs + x.segs, trades: m.trades + x.tradesPerSec * x.segs * (SAMPLE_MS / 1000), yes: m.yes + (x.takerYesShare ?? 0) * x.tradesPerSec * x.segs * (SAMPLE_MS / 1000) }; }, { segs: 0, trades: 0, yes: 0 }));
+  console.log(`[depth] ${all.reduce((a, m) => a + m.segs, 0)} quarter-minutes, by the mid's move over them (down / flat / up): share ${all.map((m) => (m.segs / Math.max(1, all.reduce((a, x) => a + x.segs, 0))).toFixed(2)).join(' / ')}, trades/s ${all.map((m) => (m.trades / Math.max(1, m.segs * (SAMPLE_MS / 1000))).toFixed(2)).join(' / ')}, YES takers ${all.map((m) => (m.yes / Math.max(1, m.trades)).toFixed(2)).join(' / ')}`);
   console.log('[depth] shape by minutes to close and mid (each side; sizes in contracts, spread and offsets in ticks: 1c, or 0.1c below 10c and above 90c)');
   for (const s of r.shape) {
     console.log(`  ${s.tau.padEnd(9)} ${s.mid.padEnd(7)} n=${String(s.samples).padStart(6)}  spread p50 ${s.spread.p50} p90 ${s.spread.p90} | levels in 10 ticks ${s.quotedLevels.p50} | depth10 p50 ${s.depth10.p50} | wall ${s.wallSize.p50} (x${(+s.wallRatio.p50).toFixed(1)} median, ${s.wallOffset.p50} ticks back) | lvl0-4 quoted ${s.levelQuoted.slice(0, 5).join('/')} size p50 ${s.levelFilledP50.slice(0, 5).join('/')} p90 ${s.levelFilledP90.slice(0, 5).join('/')} | trades/min ${s.tradesPerMin.mean} size p50 ${s.tradeSize.p50} | changes/min ${s.deltasPerMin.mean}`);

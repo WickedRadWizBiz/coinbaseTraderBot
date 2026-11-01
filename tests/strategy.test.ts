@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { loadConfig, type StrategyConfig } from '../bot/config';
 import { DEFAULT_FEES, orderFee } from '../bot/fees';
-import { decide, MarketView, trainingCount, type StrategyOutput } from '../bot/strategy/fairValueStrategy';
+import { decide, MarketView, shareWindowSec, trainingCount, type StrategyOutput } from '../bot/strategy/fairValueStrategy';
 import { ProfitPeaks } from '../bot/strategy/profitPeaks';
 
 // Continuous cadence + Kelly sizing (the pre-relaxed behaviour these tests pin down).
@@ -379,7 +379,7 @@ test('quota floor (PACER_FLOOR, Steven Oct 31): while another exit rule aims hig
   // As above: long 10 YES at 0.40 plus the fee, +0.85 net at the 0.52 bid. The model values YES at 0.70: with its exits on, its
   // sell price (0.70 plus the fee and the margin) is above the bid, so it aims higher than the quota.
   const long = (o: Partial<MarketView> = {}) => view({ position: 10, pYes: 0.7, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.52, size: 50 }, bestAsk: { price: 0.6, size: 50 }, ...o });
-  const at = (floor: 'off' | 'targets' | 'riding'): StrategyConfig => ({ ...cfg, pacer: { ...cfg.pacer, floor } });
+  const at = (floor: 'off' | 'targets' | 'riding', floorTicks = 0): StrategyConfig => ({ ...cfg, pacer: { ...cfg.pacer, floor, floorTicks } });
   const sale = (out: StrategyOutput) => out.place.find((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel');
   for (const mode of ['riding', 'targets'] as const) {
     const out = decide(long(), at(mode), { exits: true, pacerUsd: 0.75 });
@@ -394,6 +394,13 @@ test('quota floor (PACER_FLOOR, Steven Oct 31): while another exit rule aims hig
   assert.deepEqual([fell.side, fell.price, fell.count, fell.reduceOnly], ['ask', 0.5, 10, true]);
   assert.match(fell.why, /^quota snipe \(floor\): \+\$0\.6\d net on 10 at bid 0\.5 fell below its \$0\.75 floor/);
   assert.equal(sale(decide(long(), at('riding'), { exits: true, pacerUsd: 0.75, pacerFloor: 0.75 })), undefined, 'above its floor: held');
+  // PACER_FLOOR_TICKS (8 by default; 16 here): the floor sells once the profit is 16 ticks a contract under it ($1.60 on 10), not at
+  // the first dip: +0.65 at 0.50 holds, -0.75 at 0.36 holds, -1.04 at 0.33 sells.
+  const cushioned = (bid: number) => sale(decide(long({ bestBid: { price: bid, size: 50 } }), at('riding', 16), { exits: true, pacerUsd: 0.75, pacerFloor: 0.75 }));
+  assert.equal(cushioned(0.5), undefined);
+  assert.equal(cushioned(0.36), undefined);
+  assert.match(cushioned(0.33)?.why ?? '', /^quota snipe \(floor\): -\$1\.0\d net on 10 at bid 0\.33 fell below its \$0\.75 floor/);
+  assert.equal(base.pacer.floorTicks, 8);
   // A sell price the market cannot pay (the model at 0.99) is settlement, which the quota still takes (Oct 29); in riding mode
   // the take-profit trailing its best still rides the winner.
   assert.match(sale(decide(long({ pYes: 0.99 }), at('targets'), { exits: true, pacerUsd: 0.75 }))!.why, /^quota snipe: /);
@@ -431,37 +438,6 @@ test('exit curve rest mode: a NO position rests a YES bid at 1 - target, and the
   assert.equal(out.place.find((p) => p.side === 'bid' && p.purpose === 'exit')!.count, 6);
 });
 
-test('quota trail (PACER_FLOOR=trail, lab): a winner no other rule holds rides on the quota, its floor keeping a share of the gain', () => {
-  // Long 10 YES at 0.40 plus the fee, about +0.85 net at the 0.52 bid; the model's exits are off, so nothing else aims higher.
-  const long = view({ position: 10, pYes: 0.5, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.52, size: 50 }, bestAsk: { price: 0.6, size: 50 } });
-  const sale = (out: StrategyOutput) => out.place.find((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel');
-  const riding = decide(long, { ...cfg, pacer: { ...cfg.pacer, floor: 'riding' } }, { exits: false, pacerUsd: 0.75 });
-  assert.match(sale(riding)!.why, /^quota snipe: /, 'riding: nothing aims higher, sold at the quota');
-  const trail = decide(long, { ...cfg, pacer: { ...cfg.pacer, floor: 'trail', trailKeep: 0.5 } }, { exits: false, pacerUsd: 0.75 });
-  assert.equal(sale(trail), undefined, 'trail: held');
-  assert.equal(trail.pacerArm?.why, 'the quota trailing its best');
-  assert.ok(trail.pacerArm!.usd > 0.75 + 1e-9 && trail.pacerArm!.usd < 0.86, `trail: the floor keeps half the gain above the need (${trail.pacerArm!.usd})`);
-  // Below the armed floor it is sold at the bid.
-  assert.match(sale(decide(long, { ...cfg, pacer: { ...cfg.pacer, floor: 'trail', trailKeep: 0.5 } }, { exits: false, pacerUsd: 0.75, pacerFloor: 0.95 }))!.why, /^quota snipe \(floor\): /);
-});
-
-test('quota floor confirmed by the model (PACER_FLOOR_CONFIRM=model, lab): a breached floor sells only when the model values the position below it too', () => {
-  // About +0.85 net at the 0.52 bid (10 at 0.40 plus the fee) under a $0.95 floor: breached.
-  const sale = (out: StrategyOutput) => out.place.find((p) => p.purpose === 'exit' && p.timeInForce === 'immediate_or_cancel');
-  const conf = { ...cfg, pacer: { ...cfg.pacer, floor: 'riding' as const, floorConfirm: 'model' as const } };
-  const long = (pYes: number) => view({ position: 10, pYes, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.52, size: 50 }, bestAsk: { price: 0.6, size: 50 } });
-  const opts = { exits: false, pacerUsd: 0.75, pacerFloor: 0.95 };
-  assert.match(sale(decide(long(0.75), { ...cfg, pacer: { ...cfg.pacer, floor: 'riding' } }, opts))!.why, /^quota snipe \(floor\): /, 'unconfirmed: sold on the breach');
-  const held = decide(long(0.75), conf, opts);
-  assert.equal(sale(held), undefined, 'the model values it at about +3.2: held');
-  assert.ok(held.notes.some((n) => n.startsWith('quota floor held: ')));
-  assert.match(sale(decide(long(0.45), conf, opts))!.why, /^quota snipe \(floor\): /, 'the model values it at about +0.15: sold');
-  // The NO side: 10 NO at 0.40 plus the fee, NO bid 0.52 (YES ask 0.48).
-  const short = (pYes: number) => view({ position: -10, pYes, entrySidePrice: 0.4, entryFeePerContract: 0.0175, bestBid: { price: 0.4, size: 50 }, bestAsk: { price: 0.48, size: 50 } });
-  assert.equal(sale(decide(short(0.25), conf, opts)), undefined, 'NO worth 0.75 to the model: held');
-  assert.match(sale(decide(short(0.55), conf, opts))!.why, /^quota snipe \(floor\): /, 'NO worth 0.45 to the model: sold');
-});
-
 test('trainingCount: a training trade buys the order band\'s minimum with fees, within the band and the contract cap', () => {
   const band = { min: 10, max: 20 };
   // 60c plus the 1.68c taker fee a contract: 16.21 contracts reach $10 (contracts in 0.01 steps, as the strategy sizes).
@@ -473,4 +449,23 @@ test('trainingCount: a training trade buys the order band\'s minimum with fees, 
   assert.ok(n > 32 && n * 0.6 + orderFee(n, 0.6, true) <= 20 + 1e-9, `${n}`);
   // No size at all keeps the old single contract.
   assert.equal(trainingCount(0.5, { maxContracts: 1000, fees: DEFAULT_FEES }), 1);
+});
+
+test('share window: the last share of the window is measured on at most the last hour, not on the whole listing', () => {
+  const t0 = Date.parse('2026-10-30T12:00:00Z');
+  const min = 60_000;
+  // A 15-minute contract keeps its own 900 s window.
+  assert.equal(shareWindowSec(t0, t0 + 15 * min, 3600), 900);
+  // An hourly contract listed an hour ahead keeps 3600 s; one listed 20 h ahead (KX..D ladders, range brackets) is capped at 3600 s.
+  assert.equal(shareWindowSec(t0, t0 + 60 * min, 3600), 3600);
+  assert.equal(shareWindowSec(t0, t0 + 20 * 60 * min, 3600), 3600);
+  // 0 turns the cap off: the whole listing again.
+  assert.equal(shareWindowSec(t0, t0 + 20 * 60 * min, 0), 72_000);
+  // Broken times give no window, so nothing counts as the last share.
+  assert.equal(shareWindowSec(Number.NaN, t0, 3600), undefined);
+  assert.equal(shareWindowSec(t0, t0, 3600), undefined);
+  assert.equal(shareWindowSec(t0 + min, t0, 3600), undefined);
+  // The default cap is one hour, and the env key moves it.
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).strategy.shareWindowMaxSec, 3600);
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_SHARE_WINDOW_MAX_SEC: '1800' }).strategy.shareWindowMaxSec, 1800);
 });
