@@ -156,3 +156,17 @@ export function volScaled(mid: number, pSnn: number, volRatio: number, k: number
   const m = clipMid(mid), s = volRatio > 1 && Number.isFinite(volRatio) ? Math.pow(volRatio, -k) : 1;
   return Math.min(0.999, Math.max(0.001, m + s * (pSnn - m)));
 }
+
+/** Conditional correction (Steven's dynamics rule, Nov 1): the SNN's correction is applied in full only where the
+ *  ablation slices showed it paying (the mid inside [midLo, midHi] and volRatio at or below volMax); elsewhere it is
+ *  scaled by `outside` (0 = price at the mid, 1 = unchanged). Nothing is learned; the band is a pre-registered grid
+ *  confirmed on held-out days before it becomes a default. */
+export interface CondOpts { midLo: number; midHi: number; volMax: number; outside: number }
+export function inCondition(mid: number, volRatio: number, o: CondOpts): boolean {
+  const m = clipMid(mid);
+  return m >= o.midLo && m <= o.midHi && (!Number.isFinite(volRatio) || volRatio <= o.volMax);
+}
+export function conditionalCorrection(mid: number, pSnn: number, volRatio: number, o: CondOpts): number {
+  const m = clipMid(mid), s = inCondition(mid, volRatio, o) ? 1 : o.outside;
+  return Math.min(0.999, Math.max(0.001, m + s * (pSnn - m)));
+}

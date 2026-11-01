@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CorrectionGain, replayGain, volScaled } from '../bot/snn/correctionGain';
+import { CorrectionGain, replayGain, volScaled, conditionalCorrection, inCondition } from '../bot/snn/correctionGain';
 import { Xoshiro128 } from '../bot/snn/rng';
 
 type Row = { eventKey: string; column: string; ts: number; kind: string; mid: number; volRatio: number; pSnn: number; y: 0 | 1 };
@@ -58,4 +58,13 @@ test('fixed vol sizing: shrinks the correction only above normal volatility', ()
   assert.equal(volScaled(0.5, 0.6, 0.5, 2), 0.6);
   assert.ok(Math.abs(volScaled(0.5, 0.6, 2, 1) - 0.55) < 1e-12);
   assert.ok(Math.abs(volScaled(0.5, 0.6, 2, 2) - 0.525) < 1e-12);
+});
+
+test('conditional correction: full inside the band, scaled outside', () => {
+  const o = { midLo: 0.4, midHi: 0.6, volMax: 1.25, outside: 0 };
+  assert.equal(conditionalCorrection(0.5, 0.6, 1, o), 0.6);
+  assert.equal(conditionalCorrection(0.8, 0.9, 1, o), 0.8);
+  assert.equal(conditionalCorrection(0.5, 0.6, 2, o), 0.5);
+  assert.ok(Math.abs(conditionalCorrection(0.8, 0.9, 1, { ...o, outside: 0.5 }) - 0.85) < 1e-12);
+  assert.ok(inCondition(0.5, NaN, o));
 });

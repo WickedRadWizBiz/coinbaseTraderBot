@@ -22,7 +22,7 @@ import { dayBlockBootstrap } from '../bot/snn/blender';
 import { blend, brier, calibrationSlope, correlation, surpriseConfidence } from '../bot/snn/formulas';
 import { DEFAULT_SNN, domainParams, stageFlags, type SnnFlags, type SnnParams, type Stage } from '../bot/snn/params';
 import { replaySnn, type SnnReplayResult, type SnnRow } from './snnReplay';
-import { replayGain, volScaled, type GainOpts } from '../bot/snn/correctionGain';
+import { replayGain, volScaled, conditionalCorrection, inCondition, type GainOpts, type CondOpts } from '../bot/snn/correctionGain';
 
 export interface Mechanism { name: string; candidate: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams>; /** Start from the network in --init (a history-training checkpoint). */ init?: true }; baseline: { stage: Stage; flags?: Partial<SnnFlags>; params?: Partial<SnnParams> }; note: string }
 
@@ -283,6 +283,32 @@ export async function snnAblationMain(argOf: (k: string, d: string) => string = 
       for (const k of [0.5, 1, 2]) {
         const vg = vsMarket(c.res.rows.map((r) => ({ ...r, pSnn: volScaled(r.mid, r.pSnn, r.volRatio, k) })));
         console.log(`        fixed vol sizing (correction / volRatio^${k} above normal vol): vs market ${f5(vg)}`);
+      }
+      // Conditional correction (dynamics rule): full SNN correction only inside a mid band and vol cap, scaled by
+      // `outside` elsewhere. Tested under its own condition: rows inside vs outside the condition are judged apart,
+      // and the band is picked on the first half of the days and confirmed on the second (adversary: held-out days).
+      {
+        const days = [...new Set(c.res.rows.map((r) => new Date(r.ts).toISOString().slice(0, 10)))].sort();
+        const cut = days[Math.floor(days.length / 2)] ?? '';
+        const early = c.res.rows.filter((r) => new Date(r.ts).toISOString().slice(0, 10) < cut);
+        const late = c.res.rows.filter((r) => new Date(r.ts).toISOString().slice(0, 10) >= cut);
+        const condGrid: CondOpts[] = [];
+        for (const [midLo, midHi] of [[0.4, 0.6], [0.35, 0.65], [0.3, 0.7]]) for (const volMax of [1, 1.25, Infinity]) for (const outside of [0, 0.5]) condGrid.push({ midLo, midHi, volMax, outside });
+        const cc = (rows: typeof c.res.rows, o: CondOpts) => rows.map((r) => ({ ...r, pSnn: conditionalCorrection(r.mid, r.pSnn, r.volRatio, o) }));
+        const tag = (o: CondOpts) => `mid ${o.midLo}-${o.midHi}, vol<=${o.volMax}, outside x${o.outside}`;
+        let pick: { o: CondOpts; mean: number } | null = null;
+        for (const o of condGrid) {
+          const all = vsMarket(cc(c.res.rows, o));
+          const inside = c.res.rows.filter((r) => inCondition(r.mid, r.volRatio, o)), out2 = c.res.rows.filter((r) => !inCondition(r.mid, r.volRatio, o));
+          const vin = inside.length ? vsMarket(inside) : null, vout = out2.length ? vsMarket(out2) : null;
+          console.log(`        conditional correction ${tag(o)}: vs market ${f5(all)}; SNN inside ${vin ? f5(vin) : '-'} (${inside.length} rows), outside ${vout ? f5(vout) : '-'} (${out2.length} rows)`);
+          if (early.length) { const e = vsMarket(cc(early, o)); if (!pick || e.mean < pick.mean) pick = { o, mean: e.mean }; }
+        }
+        if (pick && late.length) {
+          const l = vsMarket(cc(late, pick.o)), lr = vsMarket(late);
+          console.log(`        conditional correction HELD-OUT: picked on days < ${cut} (${tag(pick.o)}), on days >= ${cut}: vs market ${f5(l)} (SNN as is ${f5(lr)}); ${l.hi < 0 ? 'BEATS the market' : l.lo > 0 ? 'worse' : 'undecided'}`);
+          v.extra = { ...(v.extra ?? {}), conditionalCorrection: { pick: pick.o, cut, heldOut: l, heldOutRaw: lr } };
+        }
       }
       const o: GainOpts = { prior: Number(argOf('gainPrior', '100')), forget: Number(argOf('gainForget', '0.999')), perRow: argOf('gainPerRow', '') === 'true' };
       const gained = replayGain(c.res.rows, o), raw = vsMarket(c.res.rows), vm = vsMarket(gained);
