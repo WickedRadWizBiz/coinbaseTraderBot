@@ -11,6 +11,8 @@
 #
 # Required secrets (the same as Deploy): LIGHTSAIL_HOST, LIGHTSAIL_USERNAME, LIGHTSAIL_SSH_KEY (optional LIGHTSAIL_PORT).
 name: Kalshi replay check
+# Lab: the run's title carries the overrides, so a dispatcher can find its own run (REPLAY_TAG) among several sent at once.
+run-name: "Kalshi replay check${{ inputs.overrides && format(' · {0}', inputs.overrides) || '' }}"
 
 on:
   schedule:
@@ -53,6 +55,10 @@ on:
         description: 'Replay-only settings, KEY=VALUE space separated (e.g. EXIT_POLICY=hold): the replay runs with them against what paper actually did, and the verdict is not copied to the server'
         required: false
         default: ''
+      reuse_run:
+        description: 'Replay what an earlier comparison run of this check on the same branch copied (its run id): no server read at all (its copy is cached 7 days unused)'
+        required: false
+        default: ''
   push:
     branches: ['claude/kalshi-random-sweep']
     paths: ['.github/workflows/kalshi-replay-check.yml', 'research/replayCheck.ts', 'research/backtest.ts', 'research/seedCandles.ts']
@@ -89,6 +95,7 @@ jobs:
         if: steps.deps.outputs.cache-hit != 'true'
         run: npm ci --no-audit --no-fund --silent
       - name: SSH to the server
+        if: ${{ !inputs.reuse_run }}
         env:
           SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           HOST: ${{ secrets.LIGHTSAIL_HOST }}
@@ -100,6 +107,7 @@ jobs:
           printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
           ssh bot true && echo "connected"
       - name: Copy the audit log, the recordings the stretch needs, the model and the settings (read-only)
+        if: ${{ !inputs.reuse_run }}
         env:
           CHECK_DAYS: ${{ inputs.days || '' }}
           CHECK_FROM: ${{ inputs.from || 'auto' }}
@@ -202,9 +210,37 @@ jobs:
           ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$DATA/sweep-env/train.env" || true
           echo "audit days $D: $(wc -l < "$RUNNER_TEMP/audit.txt") file(s); recorded days $NEED: $(ls "$DATA/recordings" | wc -l) file(s); settings $(wc -l < "$DATA/sweep-env/train.env") line(s); paper balance $([ -s "$RUNNER_TEMP/paper-balance" ] && echo read || echo 'not read'), equity guard $([ -s "$RUNNER_TEMP/paper-guard.json" ] && echo read || echo 'not read'), override $(cat "$RUNNER_TEMP/kill-override"), maker markouts $(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$RUNNER_TEMP/maker-markouts.json" 2>/dev/null || echo 0)"
           du -sh "$DATA/recordings" | cat
+          # Paper's state the replay reads from the runner's temp folder, kept with the copy for reruns (reuse_run).
+          mkdir -p "$DATA/runner-temp"
+          for f in kill-override maker-markouts.json paper-accuracy-gate.json paper-balance paper-guard.json paper-probation.json paper-tp-bench.json paper-trades.jsonl paper-trials.json; do
+            if [ -e "$RUNNER_TEMP/$f" ]; then cp -p "$RUNNER_TEMP/$f" "$DATA/runner-temp/"; fi
+          done
+      - name: Keep the copy for reruns of the same stretch (reuse_run)
+        if: ${{ !inputs.reuse_run && github.event_name == 'workflow_dispatch' && inputs.overrides }}
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: replay-check-copy-${{ github.run_id }}
+      - name: Restore an earlier run's copy (reuse_run)
+        if: ${{ inputs.reuse_run }}
+        uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: replay-check-copy-${{ inputs.reuse_run }}
+          fail-on-cache-miss: true
+      - name: Put that run's paper state back (reuse_run)
+        if: ${{ inputs.reuse_run }}
+        run: |
+          cp -p data/runner-temp/* "$RUNNER_TEMP/" 2>/dev/null || true
+          echo "replaying run ${{ inputs.reuse_run }}'s copy, no server read: $(du -sh data | cut -f1), days $(cat data/sweeps/check-days.txt), to $(cat data/sweeps/check-to.txt)"
       - name: Replay check (backtester vs paper, since the bot's last start)
+        # Lab: REPLAY_SKIP=1 among the overrides makes a copy-only run (the copy is cached for reuse arms, nothing replayed).
+        if: ${{ !contains(inputs.overrides, 'REPLAY_SKIP=1') }}
         env:
           CHECK_FROM: ${{ inputs.from || 'auto' }}
+          # Lab: a reuse arm may replay one day of a copy that holds several (its own `days` and `to`; the copy's otherwise).
+          CHECK_TO: ${{ inputs.to || 'now' }}
+          CHECK_DAYS_IN: ${{ inputs.reuse_run && inputs.days || '' }}
           MIN_HOURS: ${{ inputs.min_hours || '3' }}
           NEARBY: ${{ inputs.nearby || '0.95 0.975 1.025 1.05' }}
           PHASES: ${{ inputs.phases || '200 400 600 800' }}
@@ -218,7 +254,7 @@ jobs:
           BAL=$(cat "$RUNNER_TEMP/paper-balance" 2>/dev/null || true)
           GUARD="$RUNNER_TEMP/paper-guard.json"; [ -s "$GUARD" ] || GUARD=""
           OVERRIDE=$(cat "$RUNNER_TEMP/kill-override" 2>/dev/null || echo true)
-          ARGS=(--recordings data/recordings --audit data/audit --days "$(cat data/sweeps/check-days.txt)" --from "$CHECK_FROM" --to "$(cat data/sweeps/check-to.txt)"
+          ARGS=(--recordings data/recordings --audit data/audit --days "${CHECK_DAYS_IN:-$(cat data/sweeps/check-days.txt)}" --from "$CHECK_FROM" --to "$([ "$CHECK_TO" != now ] && echo "$CHECK_TO" || cat data/sweeps/check-to.txt)"
             --min-hours "$MIN_HOURS" ${BAL:+--paper-balance-now "$BAL"} ${GUARD:+--paper-guard "$GUARD"} --kill-override "$OVERRIDE"
             --maker-markouts "$RUNNER_TEMP/maker-markouts.json" --paper-probation "$RUNNER_TEMP/paper-probation.json" --paper-trials "$RUNNER_TEMP/paper-trials.json"
             --paper-tp-bench "$RUNNER_TEMP/paper-tp-bench.json" --paper-accuracy-gate "$RUNNER_TEMP/paper-accuracy-gate.json" --paper-trades "$RUNNER_TEMP/paper-trades.jsonl" --model data/models/model.json)
@@ -267,11 +303,14 @@ jobs:
         run: |
           LOG="$RUNNER_TEMP/own.log"; [ -s "$LOG" ] || { echo "no replay output to post"; exit 0; }
           { echo "**Replay check** run [$GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) · from $CHECK_FROM${OVERRIDES:+ · replay-only overrides: \`$OVERRIDES\`}"
-            echo; echo '```'; cut -c1-600 "$LOG" | head -n 150; echo '```'; } > "$RUNNER_TEMP/comment.md"
+            echo; echo '```'; grep -vE ' (WARN|INFO|DEBUG) +\[' "$LOG" | cut -c1-900 | head -n 120; echo '```'
+            echo; echo 'Every replay (own, then nearby by bankroll scale):'; echo; echo '```'
+            for L in "$LOG" "$RUNNER_TEMP"/nearby-*.log; do echo "== $(basename "$L" .log)"; grep -E '^replay  +fills|^hunt mode in the replay|^exit audit|^entry timing|^regime|^trade anatomy|^paper.s extra entries|^fills/contracts by order purpose|^settled markets / P&L by series' "$L" | cut -c1-1400; done
+            grep -E '^(nearby replays of the stretch|median )' "$LOG" | cut -c1-1500; echo '```'; } > "$RUNNER_TEMP/comment.md"
           jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' | gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" --input - --jq '.html_url'
       - name: Copy the verdict to the server
         # A replay with overrides is a comparison, not a fidelity check: it never touches the server's verdict or tally.
-        if: ${{ !inputs.overrides }}
+        if: ${{ !inputs.overrides && !inputs.reuse_run }}
         run: |
           [ -f data/sweeps/replay-check-latest.json ] || { echo "no verdict to copy"; exit 0; }
           ssh bot "mkdir -p ~/bot/data/models/sweeps"
