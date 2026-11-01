@@ -632,11 +632,20 @@ def ratchet_lab(acts, episodes, tops, terms, index_at, sigma_cached, top_at, tak
                 stake = stake_fn(p)
                 if stake is None or stake <= 0: continue
                 p = dict(p, n=stake / p['costF'])
-            if depth:  # entry depth folded into the cost a contract
-                c = DEPTH_PX * max(0.0, p['n'] - (p['path']['asz'][0] or 0.0))
-                if c > 0: p = dict(p, costF=p['costF'] + c / p['n'], thin_in=c)
             ps.append(p)
         if not ps: return None
+        if depth:  # entry depth folded into the cost a contract. The fidelity thread (Nov 1): a fill must remove what it took from
+            # the book, so entries on the same market and ask within 60 s share its top size (refilled after 60 s, as
+            # PAPER_TAKEN_REPLENISH_MS); without this, bigger stakes on repeated thin entries look better than they are.
+            taken = collections.defaultdict(list)  # (ticker, ask) -> [(sec, contracts)]
+            for k in sorted(range(len(ps)), key=lambda j: ps[j]['s0']):
+                p = ps[k]; a0 = p['path']['asks'][0] if p['path']['asks'] else None
+                key = (p['ep']['ticker'], a0); s0 = p['s0']
+                used_ = sum(n_ for t_, n_ in taken[key] if s0 - t_ < 60)
+                avail = max(0.0, (p['path']['asz'][0] or 0.0) - used_)
+                taken[key].append((s0, p['n']))
+                c = DEPTH_PX * max(0.0, p['n'] - avail)
+                if c > 0: ps[k] = dict(p, costF=p['costF'] + c / p['n'], thin_in=c)
 
         def thin(p, k, px_sz, n):  # the depth charge: contracts over the top-of-book size at path index k
             if not depth: return 0.0
