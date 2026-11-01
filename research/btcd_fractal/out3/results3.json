@@ -1,0 +1,2722 @@
+{
+ "generated": "2026-11-01T20:48:05+00:00",
+ "childLast": "2026-11-01",
+ "reference": {
+  "setting": "2016-01..2018-03 logit dyn0/0 wsh3.0",
+  "laws": {
+   "nStages": 6,
+   "dilWaterfall": 5.080357142857143,
+   "dilOther": 7.3046875,
+   "kindRatio": 1.437829525483304,
+   "logDilVsProgress": {
+    "slopePerParentWeek": 0.02738903069525356,
+    "r": 0.5536037663943129
+   },
+   "speedWaterfall": 0.6232060027817303,
+   "speedWaterfallCv": 0.8310635825012276,
+   "speedOther": 0.27969578463365075,
+   "speedOtherCv": 0.6176990041045118,
+   "logDilVsLogSlope": {
+    "slope": 0.32102713697484997,
+    "r": 0.417750690163991
+   }
+  },
+  "walkSkill": {
+   "n": 38,
+   "maeNaive": 35.1578947368421,
+   "predLocal": {
+    "mae": 72.39401775480319,
+    "logCorr": 0.5008553810626801,
+    "medianRatio": 1.2834110334110334
+   },
+   "predOverall": {
+    "mae": 35.94337856529093,
+    "logCorr": 0.35032693130976716,
+    "medianRatio": 0.6913363256646838
+   }
+  },
+  "rows": [
+   {
+    "from": 0,
+    "to": 64,
+    "move": -8.721542209338963,
+    "kind": "fall",
+    "childWeeks": 167,
+    "parentWeeks": 64,
+    "dil": 2.609375,
+    "childMove": 22.146312320038234,
+    "ampRatio": -2.539265623953998,
+    "complete": true,
+    "childSpeed": 0.13261264862298344,
+    "parentFrom": "2016-01-03",
+    "parentTo": "2017-03-26",
+    "childFrom": "2018-01-07",
+    "childTo": "2021-03-14"
+   },
+   {
+    "from": 64,
+    "to": 72,
+    "move": -24.786845174712013,
+    "kind": "waterfall",
+    "childWeeks": 15,
+    "parentWeeks": 8,
+    "dil": 1.875,
+    "childMove": -17.11694724134678,
+    "ampRatio": 0.6905657868396176,
+    "complete": true,
+    "childSpeed": 1.1411298160897851,
+    "parentFrom": "2017-03-26",
+    "parentTo": "2017-05-21",
+    "childFrom": "2021-03-21",
+    "childTo": "2021-06-27"
+   },
+   {
+    "from": 72,
+    "to": 79,
+    "move": 8.183411976432339,
+    "kind": "rise",
+    "childWeeks": 6,
+    "parentWeeks": 7,
+    "dil": 0.8571428571428571,
+    "childMove": -3.577261501841548,
+    "ampRatio": -0.43713569745038056,
+    "complete": true,
+    "childSpeed": 0.5962102503069246,
+    "parentFrom": "2017-05-21",
+    "parentTo": "2017-07-09",
+    "childFrom": "2021-07-04",
+    "childTo": "2021-08-08"
+   },
+   {
+    "from": 79,
+    "to": 86,
+    "move": -22.086522839529614,
+    "kind": "waterfall",
+    "childWeeks": 58,
+    "parentWeeks": 7,
+    "dil": 8.285714285714286,
+    "childMove": -6.106366989473173,
+    "ampRatio": 0.27647480021365023,
+    "complete": true,
+    "childSpeed": 0.1052821894736754,
+    "parentFrom": "2017-07-09",
+    "parentTo": "2017-08-27",
+    "childFrom": "2021-08-15",
+    "childTo": "2022-09-18"
+   },
+   {
+    "from": 86,
+    "to": 96,
+    "move": 14.255273382166301,
+    "kind": "rise",
+    "childWeeks": 147,
+    "parentWeeks": 10,
+    "dil": 14.7,
+    "childMove": 19.402087651029177,
+    "ampRatio": 1.3610463391955476,
+    "complete": true,
+    "childSpeed": 0.13198699082332774,
+    "parentFrom": "2017-08-27",
+    "parentTo": "2017-11-05",
+    "childFrom": "2022-09-25",
+    "childTo": "2025-07-13"
+   },
+   {
+    "from": 96,
+    "to": 97,
+    "move": -11.887161355651266,
+    "kind": "fall",
+    "childWeeks": 12,
+    "parentWeeks": 1,
+    "dil": 12.0,
+    "childMove": -5.121347047731817,
+    "ampRatio": 0.43083011111791475,
+    "complete": true,
+    "childSpeed": 0.42677892064431805,
+    "parentFrom": "2017-11-05",
+    "parentTo": "2017-11-12",
+    "childFrom": "2025-07-20",
+    "childTo": "2025-10-05"
+   },
+   {
+    "from": 97,
+    "to": 101,
+    "move": 13.398003253774398,
+    "kind": "rise",
+    "childWeeks": 56,
+    "parentWeeks": 4,
+    "dil": 14.0,
+    "childMove": 1.1517094038629452,
+    "ampRatio": 0.08596127214243608,
+    "complete": false,
+    "childSpeed": 0.02056623935469545,
+    "parentFrom": "2017-11-12",
+    "parentTo": "2017-12-10",
+    "childFrom": "2025-10-12",
+    "childTo": "2026-11-01"
+   },
+   {
+    "from": 101,
+    "to": 106,
+    "move": -30.564451196631367,
+    "kind": "waterfall",
+    "childWeeks": 0,
+    "parentWeeks": 5,
+    "dil": null,
+    "childMove": null,
+    "ampRatio": null,
+    "complete": false,
+    "parentFrom": "2017-12-10",
+    "parentTo": "2018-01-14",
+    "childFrom": null,
+    "childTo": null
+   }
+  ]
+ },
+ "settings": [
+  {
+   "setting": "2016-01..2018-03 logit dyn0/0 wsh1.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 6,
+    "dilWaterfall": 5.723214285714286,
+    "dilOther": 6.8125,
+    "kindRatio": 1.1903276131045242,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.02647408908758454,
+     "r": 0.4874432113522567
+    },
+    "speedWaterfall": 0.5507625725646943,
+    "speedWaterfallCv": 0.8326844082687141,
+    "speedOther": 0.20305085865208178,
+    "speedOtherCv": 0.5487519446341607,
+    "logDilVsLogSlope": {
+     "slope": 0.3275812758346147,
+     "r": 0.38830691756147334
+    }
+   },
+   "walkSkill": {
+    "n": 36,
+    "maeNaive": 47.22222222222222,
+    "predLocal": {
+     "mae": 128.2991877104377,
+     "logCorr": -0.14420643177191794,
+     "medianRatio": 1.8562017692452475
+    },
+    "predOverall": {
+     "mae": 60.16381965213913,
+     "logCorr": -0.29935412125722377,
+     "medianRatio": 0.6330398367587872
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 168,
+     "parentWeeks": 64,
+     "dil": 2.625,
+     "childMove": 21.827582312223896,
+     "ampRatio": -2.502720480885947,
+     "complete": true,
+     "childSpeed": 0.1299260851918089
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 15,
+     "parentWeeks": 8,
+     "dil": 1.875,
+     "childMove": -15.140609690959224,
+     "ampRatio": 0.610832463116603,
+     "complete": true,
+     "childSpeed": 1.0093739793972816
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 4,
+     "parentWeeks": 7,
+     "dil": 0.5714285714285714,
+     "childMove": 1.025214230404309,
+     "ampRatio": 0.12527955739694582,
+     "complete": true,
+     "childSpeed": 0.25630355760107726
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 67,
+     "parentWeeks": 7,
+     "dil": 9.571428571428571,
+     "childMove": -6.174128104051178,
+     "ampRatio": 0.2795427849331249,
+     "complete": true,
+     "childSpeed": 0.09215116573210713
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 139,
+     "parentWeeks": 10,
+     "dil": 13.9,
+     "childMove": 20.821944198729,
+     "ampRatio": 1.4606485361955783,
+     "complete": true,
+     "childSpeed": 0.14979815970308633
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 11,
+     "parentWeeks": 1,
+     "dil": 11.0,
+     "childMove": -5.293978558000752,
+     "ampRatio": 0.4453526287404138,
+     "complete": true,
+     "childSpeed": 0.4812707780000684
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 57,
+     "parentWeeks": 4,
+     "dil": 14.25,
+     "childMove": 1.9224361028127248,
+     "ampRatio": 0.14348676190022186,
+     "complete": false,
+     "childSpeed": 0.03372694917215307
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-03 logit dyn0/0 wsh3.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 6,
+    "dilWaterfall": 5.080357142857143,
+    "dilOther": 7.3046875,
+    "kindRatio": 1.437829525483304,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.02738903069525356,
+     "r": 0.5536037663943129
+    },
+    "speedWaterfall": 0.6232060027817303,
+    "speedWaterfallCv": 0.8310635825012276,
+    "speedOther": 0.27969578463365075,
+    "speedOtherCv": 0.6176990041045118,
+    "logDilVsLogSlope": {
+     "slope": 0.32102713697484997,
+     "r": 0.417750690163991
+    }
+   },
+   "walkSkill": {
+    "n": 38,
+    "maeNaive": 35.1578947368421,
+    "predLocal": {
+     "mae": 72.39401775480319,
+     "logCorr": 0.5008553810626801,
+     "medianRatio": 1.2834110334110334
+    },
+    "predOverall": {
+     "mae": 35.94337856529093,
+     "logCorr": 0.35032693130976716,
+     "medianRatio": 0.6913363256646838
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 167,
+     "parentWeeks": 64,
+     "dil": 2.609375,
+     "childMove": 22.146312320038234,
+     "ampRatio": -2.539265623953998,
+     "complete": true,
+     "childSpeed": 0.13261264862298344
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 15,
+     "parentWeeks": 8,
+     "dil": 1.875,
+     "childMove": -17.11694724134678,
+     "ampRatio": 0.6905657868396176,
+     "complete": true,
+     "childSpeed": 1.1411298160897851
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 6,
+     "parentWeeks": 7,
+     "dil": 0.8571428571428571,
+     "childMove": -3.577261501841548,
+     "ampRatio": -0.43713569745038056,
+     "complete": true,
+     "childSpeed": 0.5962102503069246
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 58,
+     "parentWeeks": 7,
+     "dil": 8.285714285714286,
+     "childMove": -6.106366989473173,
+     "ampRatio": 0.27647480021365023,
+     "complete": true,
+     "childSpeed": 0.1052821894736754
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 147,
+     "parentWeeks": 10,
+     "dil": 14.7,
+     "childMove": 19.402087651029177,
+     "ampRatio": 1.3610463391955476,
+     "complete": true,
+     "childSpeed": 0.13198699082332774
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 12,
+     "parentWeeks": 1,
+     "dil": 12.0,
+     "childMove": -5.121347047731817,
+     "ampRatio": 0.43083011111791475,
+     "complete": true,
+     "childSpeed": 0.42677892064431805
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 56,
+     "parentWeeks": 4,
+     "dil": 14.0,
+     "childMove": 1.1517094038629452,
+     "ampRatio": 0.08596127214243608,
+     "complete": false,
+     "childSpeed": 0.02056623935469545
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-03 logit dyn2/104 wsh1.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 6,
+    "dilWaterfall": 5.401785714285714,
+    "dilOther": 6.828125,
+    "kindRatio": 1.2640495867768595,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.02722854273796148,
+     "r": 0.5505514672899299
+    },
+    "speedWaterfall": 0.5082204851426828,
+    "speedWaterfallCv": 0.8268830632065565,
+    "speedOther": 0.15910891475148795,
+    "speedOtherCv": 0.6717695857882809,
+    "logDilVsLogSlope": {
+     "slope": 0.2879453450717565,
+     "r": 0.37483198679298213
+    }
+   },
+   "walkSkill": {
+    "n": 41,
+    "maeNaive": 48.853658536585364,
+    "predLocal": {
+     "mae": 112.99139566395664,
+     "logCorr": 0.049903859743143354,
+     "medianRatio": 1.2718446601941749
+    },
+    "predOverall": {
+     "mae": 60.82127491857947,
+     "logCorr": -0.1631245128259744,
+     "medianRatio": 0.7037985488689714
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 170,
+     "parentWeeks": 64,
+     "dil": 2.65625,
+     "childMove": 16.579771307860106,
+     "ampRatio": -1.9010137094912651,
+     "complete": true,
+     "childSpeed": 0.09752806651682415
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 11,
+     "parentWeeks": 8,
+     "dil": 1.375,
+     "childMove": -10.213053363499654,
+     "ampRatio": 0.4120352264078849,
+     "complete": true,
+     "childSpeed": 0.9284593966817867
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 7,
+     "parentWeeks": 7,
+     "dil": 1.0,
+     "childMove": -1.1789376885992269,
+     "ampRatio": -0.14406432084740275,
+     "complete": true,
+     "childSpeed": 0.16841966979988957
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 66,
+     "parentWeeks": 7,
+     "dil": 9.428571428571429,
+     "childMove": -5.806783857836216,
+     "ampRatio": 0.26291073067615045,
+     "complete": true,
+     "childSpeed": 0.08798157360357903
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 139,
+     "parentWeeks": 10,
+     "dil": 13.9,
+     "childMove": 20.821944198729,
+     "ampRatio": 1.4606485361955783,
+     "complete": true,
+     "childSpeed": 0.14979815970308633
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 11,
+     "parentWeeks": 1,
+     "dil": 11.0,
+     "childMove": -5.293978558000752,
+     "ampRatio": 0.4453526287404138,
+     "complete": true,
+     "childSpeed": 0.4812707780000684
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 57,
+     "parentWeeks": 4,
+     "dil": 14.25,
+     "childMove": 1.9224361028127248,
+     "ampRatio": 0.14348676190022186,
+     "complete": false,
+     "childSpeed": 0.03372694917215307
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-03 logit dyn2/104 wsh3.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 6,
+    "dilWaterfall": 5.9375,
+    "dilOther": 6.8046875,
+    "kindRatio": 1.1460526315789474,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.02671060764947687,
+     "r": 0.5436885673425768
+    },
+    "speedWaterfall": 0.6046543951783165,
+    "speedWaterfallCv": 0.8872430684197019,
+    "speedOther": 0.3149042300568313,
+    "speedOtherCv": 0.5984429196649397,
+    "logDilVsLogSlope": {
+     "slope": 0.31757754264572624,
+     "r": 0.41616856563954313
+    }
+   },
+   "walkSkill": {
+    "n": 40,
+    "maeNaive": 36.175,
+    "predLocal": {
+     "mae": 62.41614587139204,
+     "logCorr": 0.5024545336510811,
+     "medianRatio": 1.010719131614654
+    },
+    "predOverall": {
+     "mae": 39.79088001162645,
+     "logCorr": 0.2822221322645675,
+     "medianRatio": 0.559330655957162
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 167,
+     "parentWeeks": 64,
+     "dil": 2.609375,
+     "childMove": 22.146312320038234,
+     "ampRatio": -2.539265623953998,
+     "complete": true,
+     "childSpeed": 0.13261264862298344
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 15,
+     "parentWeeks": 8,
+     "dil": 1.875,
+     "childMove": -17.11694724134678,
+     "ampRatio": 0.6905657868396176,
+     "complete": true,
+     "childSpeed": 1.1411298160897851
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 6,
+     "parentWeeks": 7,
+     "dil": 0.8571428571428571,
+     "childMove": -3.577261501841548,
+     "ampRatio": -0.43713569745038056,
+     "complete": true,
+     "childSpeed": 0.5962102503069246
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 70,
+     "parentWeeks": 7,
+     "dil": 10.0,
+     "childMove": -4.772528198679353,
+     "ampRatio": 0.21608327545962394,
+     "complete": true,
+     "childSpeed": 0.06817897426684791
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 135,
+     "parentWeeks": 10,
+     "dil": 13.5,
+     "childMove": 20.05258708533522,
+     "ampRatio": 1.4066785355671607,
+     "complete": true,
+     "childSpeed": 0.14853768211359422
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 11,
+     "parentWeeks": 1,
+     "dil": 11.0,
+     "childMove": -5.293978558000752,
+     "ampRatio": 0.4453526287404138,
+     "complete": true,
+     "childSpeed": 0.4812707780000684
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 57,
+     "parentWeeks": 4,
+     "dil": 14.25,
+     "childMove": 1.9224361028127248,
+     "ampRatio": 0.14348676190022186,
+     "complete": false,
+     "childSpeed": 0.03372694917215307
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-03 raw dyn0/0 wsh1.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 5,
+    "dilWaterfall": 5.633928571428571,
+    "dilOther": 2.53125,
+    "kindRatio": 0.44928684627575277,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.021103153840229216,
+     "r": 0.34667644914684415
+    },
+    "speedWaterfall": 0.5396307298538883,
+    "speedWaterfallCv": 0.7955968877676143,
+    "speedOther": 0.13935641806013044,
+    "speedOtherCv": 1.0499911268212525,
+    "logDilVsLogSlope": {
+     "slope": 0.21986140854047675,
+     "r": 0.2035984572286203
+    }
+   },
+   "walkSkill": {
+    "n": 42,
+    "maeNaive": 51.976190476190474,
+    "predLocal": {
+     "mae": 142.98043690906314,
+     "logCorr": -0.33035192809517977,
+     "medianRatio": 1.6659595959595959
+    },
+    "predOverall": {
+     "mae": 66.92234076568431,
+     "logCorr": -0.5842683412429567,
+     "medianRatio": 0.6432853776581311
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 162,
+     "parentWeeks": 64,
+     "dil": 2.53125,
+     "childMove": 22.57573972574113,
+     "ampRatio": -2.5885031779777656,
+     "complete": true,
+     "childSpeed": 0.13935641806013044
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 17,
+     "parentWeeks": 8,
+     "dil": 2.125,
+     "childMove": -16.472307404179936,
+     "ampRatio": 0.664558449777436,
+     "complete": true,
+     "childSpeed": 0.968959259069408
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 3,
+     "parentWeeks": 7,
+     "dil": 0.42857142857142855,
+     "childMove": 3.9268782656146826,
+     "ampRatio": 0.47985831300242743,
+     "complete": true,
+     "childSpeed": 1.3089594218715608
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 64,
+     "parentWeeks": 7,
+     "dil": 9.142857142857142,
+     "childMove": -7.05934084085559,
+     "ampRatio": 0.3196221013214924,
+     "complete": true,
+     "childSpeed": 0.1103022006383686
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 147,
+     "parentWeeks": 10,
+     "dil": 14.7,
+     "childMove": 19.402087651029177,
+     "ampRatio": 1.3610463391955476,
+     "complete": true,
+     "childSpeed": 0.13198699082332774
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 0,
+     "parentWeeks": 1,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 68,
+     "parentWeeks": 4,
+     "dil": 17.0,
+     "childMove": -4.142269154137807,
+     "ampRatio": -0.30917063353980556,
+     "complete": false,
+     "childSpeed": 0.060915722854967755
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-03 raw dyn0/0 wsh3.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 5,
+    "dilWaterfall": 7.3125,
+    "dilOther": 2.03125,
+    "kindRatio": 0.2777777777777778,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.02528106422736398,
+     "r": 0.5020486678299242
+    },
+    "speedWaterfall": 0.19473589025962693,
+    "speedWaterfallCv": 0.7608711042016781,
+    "speedOther": 0.1884963848279805,
+    "speedOtherCv": 0.20423204641754875,
+    "logDilVsLogSlope": {
+     "slope": 0.4390001674737293,
+     "r": 0.4914322518942287
+    }
+   },
+   "walkSkill": {
+    "n": 38,
+    "maeNaive": 39.421052631578945,
+    "predLocal": {
+     "mae": 81.3722805230545,
+     "logCorr": -0.11686191145559595,
+     "medianRatio": 1.4833333333333334
+    },
+    "predOverall": {
+     "mae": 44.745048134528844,
+     "logCorr": -0.2655293465022457,
+     "medianRatio": 0.9643617021276596
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 130,
+     "parentWeeks": 64,
+     "dil": 2.03125,
+     "childMove": 24.504530027637465,
+     "ampRatio": -2.809655613590701,
+     "complete": true,
+     "childSpeed": 0.1884963848279805
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 53,
+     "parentWeeks": 8,
+     "dil": 6.625,
+     "childMove": -18.1739545117858,
+     "ampRatio": 0.7332096676154333,
+     "complete": true,
+     "childSpeed": 0.3429048021091661
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 6,
+     "parentWeeks": 7,
+     "dil": 0.8571428571428571,
+     "childMove": -1.3683939669130822,
+     "ampRatio": -0.16721557839859003,
+     "complete": true,
+     "childSpeed": 0.22806566115218038
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 56,
+     "parentWeeks": 7,
+     "dil": 8.0,
+     "childMove": -2.6077507909649142,
+     "ampRatio": 0.11806977539704265,
+     "complete": true,
+     "childSpeed": 0.04656697841008776
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 148,
+     "parentWeeks": 10,
+     "dil": 14.8,
+     "childMove": 20.155563563505247,
+     "ampRatio": 1.413902281854542,
+     "complete": true,
+     "childSpeed": 0.13618624029395437
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 0,
+     "parentWeeks": 1,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 68,
+     "parentWeeks": 4,
+     "dil": 17.0,
+     "childMove": -4.142269154137807,
+     "ampRatio": -0.30917063353980556,
+     "complete": false,
+     "childSpeed": 0.060915722854967755
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-03 raw dyn2/104 wsh1.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 5,
+    "dilWaterfall": 5.232142857142857,
+    "dilOther": 2.625,
+    "kindRatio": 0.5017064846416383,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.02207920078354659,
+     "r": 0.43306088899715584
+    },
+    "speedWaterfall": 0.5995934478197795,
+    "speedWaterfallCv": 0.8645238691595157,
+    "speedOther": 0.1369619015014731,
+    "speedOtherCv": 0.7583227683563656,
+    "logDilVsLogSlope": {
+     "slope": 0.17143304610775,
+     "r": 0.18954339636095155
+    }
+   },
+   "walkSkill": {
+    "n": 48,
+    "maeNaive": 52.791666666666664,
+    "predLocal": {
+     "mae": 108.22149895790513,
+     "logCorr": -0.006101422905702347,
+     "medianRatio": 1.145982142857143
+    },
+    "predOverall": {
+     "mae": 63.2707562185272,
+     "logCorr": -0.19592115178552955,
+     "medianRatio": 0.5756781524926686
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 168,
+     "parentWeeks": 64,
+     "dil": 2.625,
+     "childMove": 21.827582312223896,
+     "ampRatio": -2.502720480885947,
+     "complete": true,
+     "childSpeed": 0.1299260851918089
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 14,
+     "parentWeeks": 8,
+     "dil": 1.75,
+     "childMove": -15.651388133522815,
+     "ampRatio": 0.6314392986764868,
+     "complete": true,
+     "childSpeed": 1.1179562952516295
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 6,
+     "parentWeeks": 7,
+     "dil": 0.8571428571428571,
+     "childMove": -3.577261501841548,
+     "ampRatio": -0.43713569745038056,
+     "complete": true,
+     "childSpeed": 0.5962102503069246
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 61,
+     "parentWeeks": 7,
+     "dil": 8.714285714285714,
+     "childMove": -4.955066623663697,
+     "ampRatio": 0.22434797272820636,
+     "complete": true,
+     "childSpeed": 0.08123060038792947
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 145,
+     "parentWeeks": 10,
+     "dil": 14.5,
+     "childMove": 19.8594757177136,
+     "ampRatio": 1.393131873749843,
+     "complete": true,
+     "childSpeed": 0.1369619015014731
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 0,
+     "parentWeeks": 1,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 67,
+     "parentWeeks": 4,
+     "dil": 16.75,
+     "childMove": -0.39130876487137556,
+     "ampRatio": -0.029206498719213148,
+     "complete": false,
+     "childSpeed": 0.005840429326438441
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-03 raw dyn2/104 wsh3.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 6,
+    "dilWaterfall": 5.383928571428571,
+    "dilOther": 6.765625,
+    "kindRatio": 1.2566334991708126,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.026303329704109535,
+     "r": 0.5584699301927113
+    },
+    "speedWaterfall": 0.4056010211533301,
+    "speedWaterfallCv": 0.8493861996770491,
+    "speedOther": 0.18371103960615542,
+    "speedOtherCv": 0.5769850244824566,
+    "logDilVsLogSlope": {
+     "slope": 0.3296768094253145,
+     "r": 0.4506408122964888
+    }
+   },
+   "walkSkill": {
+    "n": 48,
+    "maeNaive": 46.854166666666664,
+    "predLocal": {
+     "mae": 67.5251262672799,
+     "logCorr": 0.11989338143407247,
+     "medianRatio": 0.7658119658119659
+    },
+    "predOverall": {
+     "mae": 52.09806234325986,
+     "logCorr": -0.01767985115484203,
+     "medianRatio": 0.5429246147556006
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 162,
+     "parentWeeks": 64,
+     "dil": 2.53125,
+     "childMove": 22.57573972574113,
+     "ampRatio": -2.5885031779777656,
+     "complete": true,
+     "childSpeed": 0.13935641806013044
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 21,
+     "parentWeeks": 8,
+     "dil": 2.625,
+     "childMove": -15.752371553013639,
+     "ampRatio": 0.6355133717898271,
+     "complete": true,
+     "childSpeed": 0.7501129310958875
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 6,
+     "parentWeeks": 7,
+     "dil": 0.8571428571428571,
+     "childMove": -1.3683939669130822,
+     "ampRatio": -0.16721557839859003,
+     "complete": true,
+     "childSpeed": 0.22806566115218038
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 57,
+     "parentWeeks": 7,
+     "dil": 8.142857142857142,
+     "childMove": -3.4820793390140423,
+     "ampRatio": 0.15765629403565282,
+     "complete": true,
+     "childSpeed": 0.06108911121077267
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 147,
+     "parentWeeks": 10,
+     "dil": 14.7,
+     "childMove": 19.402087651029177,
+     "ampRatio": 1.3610463391955476,
+     "complete": true,
+     "childSpeed": 0.13198699082332774
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 11,
+     "parentWeeks": 1,
+     "dil": 11.0,
+     "childMove": -5.293978558000752,
+     "ampRatio": 0.4453526287404138,
+     "complete": true,
+     "childSpeed": 0.4812707780000684
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 57,
+     "parentWeeks": 4,
+     "dil": 14.25,
+     "childMove": 1.9224361028127248,
+     "ampRatio": 0.14348676190022186,
+     "complete": false,
+     "childSpeed": 0.03372694917215307
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-01-15 logit dyn0/0 wsh1.0",
+   "now": "2016-12-11",
+   "laws": {
+    "nStages": 0
+   },
+   "walkSkill": {
+    "n": 0
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 461,
+     "parentWeeks": 64,
+     "dil": 7.203125,
+     "childMove": 21.298878861653485,
+     "ampRatio": -2.4421000724902533,
+     "complete": false,
+     "childSpeed": 0.04620147258493164
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 8,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 0,
+     "parentWeeks": 7,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 7,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 0,
+     "parentWeeks": 10,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 0,
+     "parentWeeks": 1,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 0,
+     "parentWeeks": 4,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-01-15 logit dyn0/0 wsh3.0",
+   "now": "2017-02-26",
+   "laws": {
+    "nStages": 0
+   },
+   "walkSkill": {
+    "n": 0
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 461,
+     "parentWeeks": 64,
+     "dil": 7.203125,
+     "childMove": 21.298878861653485,
+     "ampRatio": -2.4421000724902533,
+     "complete": false,
+     "childSpeed": 0.04620147258493164
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 8,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 0,
+     "parentWeeks": 7,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 7,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 0,
+     "parentWeeks": 10,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 0,
+     "parentWeeks": 1,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 0,
+     "parentWeeks": 4,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-01-15 logit dyn2/104 wsh1.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 6,
+    "dilWaterfall": 5.339285714285714,
+    "dilOther": 5.3359375,
+    "kindRatio": 0.9993729096989966,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.024704465682293317,
+     "r": 0.5125804536770221
+    },
+    "speedWaterfall": 0.44932373877968756,
+    "speedWaterfallCv": 0.8041911298910512,
+    "speedOther": 0.15910891475148795,
+    "speedOtherCv": 1.0055539758060084,
+    "logDilVsLogSlope": {
+     "slope": 0.2260080212690823,
+     "r": 0.30190025923055464
+    }
+   },
+   "walkSkill": {
+    "n": 38,
+    "maeNaive": 37.78947368421053,
+    "predLocal": {
+     "mae": 134.3935312763568,
+     "logCorr": 0.28065947803585317,
+     "medianRatio": 1.9179166666666665
+    },
+    "predOverall": {
+     "mae": 55.10490746972925,
+     "logCorr": 0.14128612332329876,
+     "medianRatio": 0.7466844919786095
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 171,
+     "parentWeeks": 64,
+     "dil": 2.671875,
+     "childMove": 13.276994952393444,
+     "ampRatio": -1.5223219281306162,
+     "complete": true,
+     "childSpeed": 0.07764324533563417
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 10,
+     "parentWeeks": 8,
+     "dil": 1.25,
+     "childMove": -8.106659039557961,
+     "ampRatio": 0.32705489474023586,
+     "complete": true,
+     "childSpeed": 0.8106659039557961
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 7,
+     "parentWeeks": 7,
+     "dil": 1.0,
+     "childMove": -1.1789376885992269,
+     "ampRatio": -0.14406432084740275,
+     "complete": true,
+     "childSpeed": 0.16841966979988957
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 66,
+     "parentWeeks": 7,
+     "dil": 9.428571428571429,
+     "childMove": -5.806783857836216,
+     "ampRatio": 0.26291073067615045,
+     "complete": true,
+     "childSpeed": 0.08798157360357903
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 139,
+     "parentWeeks": 10,
+     "dil": 13.9,
+     "childMove": 20.821944198729,
+     "ampRatio": 1.4606485361955783,
+     "complete": true,
+     "childSpeed": 0.14979815970308633
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 8,
+     "parentWeeks": 1,
+     "dil": 8.0,
+     "childMove": -6.819163408650503,
+     "ampRatio": 0.5736578485500754,
+     "complete": true,
+     "childSpeed": 0.8523954260813129
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 60,
+     "parentWeeks": 4,
+     "dil": 15.0,
+     "childMove": 2.0001460984928556,
+     "ampRatio": 0.14928687959001558,
+     "complete": false,
+     "childSpeed": 0.03333576830821426
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-01-15 logit dyn2/104 wsh3.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 6,
+    "dilWaterfall": 5.482142857142857,
+    "dilOther": 6.8359375,
+    "kindRatio": 1.2469462540716614,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.027360190183741882,
+     "r": 0.5437459152525436
+    },
+    "speedWaterfall": 0.45162362262682104,
+    "speedWaterfallCv": 0.7950033243182533,
+    "speedOther": 0.160467128120685,
+    "speedOtherCv": 0.7033556420903543,
+    "logDilVsLogSlope": {
+     "slope": 0.2834357288948919,
+     "r": 0.36264738283181064
+    }
+   },
+   "walkSkill": {
+    "n": 38,
+    "maeNaive": 39.10526315789474,
+    "predLocal": {
+     "mae": 73.69585331615485,
+     "logCorr": 0.4868713184400928,
+     "medianRatio": 1.2039390756302522
+    },
+    "predOverall": {
+     "mae": 41.35768536473204,
+     "logCorr": 0.35479995667990316,
+     "medianRatio": 0.5378282950278978
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 171,
+     "parentWeeks": 64,
+     "dil": 2.671875,
+     "childMove": 13.276994952393444,
+     "ampRatio": -1.5223219281306162,
+     "complete": true,
+     "childSpeed": 0.07764324533563417
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 10,
+     "parentWeeks": 8,
+     "dil": 1.25,
+     "childMove": -8.106659039557961,
+     "ampRatio": 0.32705489474023586,
+     "complete": true,
+     "childSpeed": 0.8106659039557961
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 7,
+     "parentWeeks": 7,
+     "dil": 1.0,
+     "childMove": -1.1789376885992269,
+     "ampRatio": -0.14406432084740275,
+     "complete": true,
+     "childSpeed": 0.16841966979988957
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 68,
+     "parentWeeks": 7,
+     "dil": 9.714285714285714,
+     "childMove": -6.295531208253529,
+     "ampRatio": 0.2850394900996379,
+     "complete": true,
+     "childSpeed": 0.09258134129784601
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 137,
+     "parentWeeks": 10,
+     "dil": 13.7,
+     "childMove": 20.89449834248282,
+     "ampRatio": 1.465738171575324,
+     "complete": true,
+     "childSpeed": 0.15251458644148044
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 11,
+     "parentWeeks": 1,
+     "dil": 11.0,
+     "childMove": -5.293978558000752,
+     "ampRatio": 0.4453526287404138,
+     "complete": true,
+     "childSpeed": 0.4812707780000684
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 57,
+     "parentWeeks": 4,
+     "dil": 14.25,
+     "childMove": 1.9224361028127248,
+     "ampRatio": 0.14348676190022186,
+     "complete": false,
+     "childSpeed": 0.03372694917215307
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-01-15 raw dyn0/0 wsh1.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 6,
+    "dilWaterfall": 6.303571428571429,
+    "dilOther": 3.5234375,
+    "kindRatio": 0.5589589235127479,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.022242146463671026,
+     "r": 0.43977958014632346
+    },
+    "speedWaterfall": 0.13309469264712648,
+    "speedWaterfallCv": 0.1504204223074777,
+    "speedOther": 0.5251700594430717,
+    "speedOtherCv": 1.1325086006904643,
+    "logDilVsLogSlope": {
+     "slope": 0.2822676890123848,
+     "r": 0.35931271737679216
+    }
+   },
+   "walkSkill": {
+    "n": 29,
+    "maeNaive": 60.3448275862069,
+    "predLocal": {
+     "mae": 155.27732736806198,
+     "logCorr": -0.7525762374971955,
+     "medianRatio": 2.4625
+    },
+    "predOverall": {
+     "mae": 77.37351931629468,
+     "logCorr": -0.7573804508996923,
+     "medianRatio": 0.5574074074074074
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 131,
+     "parentWeeks": 64,
+     "dil": 2.046875,
+     "childMove": 22.82529256024094,
+     "ampRatio": -2.6171165617704384,
+     "complete": true,
+     "childSpeed": 0.17423887450565603
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 38,
+     "parentWeeks": 8,
+     "dil": 4.75,
+     "childMove": -5.8183643958356654,
+     "ampRatio": 0.23473598010656338,
+     "complete": true,
+     "childSpeed": 0.1531148525219912
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 4,
+     "parentWeeks": 7,
+     "dil": 0.5714285714285714,
+     "childMove": -11.987358709269827,
+     "ampRatio": -1.4648362741351153,
+     "complete": true,
+     "childSpeed": 2.996839677317457
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 55,
+     "parentWeeks": 7,
+     "dil": 7.857142857142857,
+     "childMove": -6.2190993024743975,
+     "ampRatio": 0.2815789224795354,
+     "complete": true,
+     "childSpeed": 0.11307453277226177
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 168,
+     "parentWeeks": 10,
+     "dil": 16.8,
+     "childMove": 15.851698997049034,
+     "ampRatio": 1.1119884250609955,
+     "complete": true,
+     "childSpeed": 0.09435535117291091
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 5,
+     "parentWeeks": 1,
+     "dil": 5.0,
+     "childMove": -4.380506221902436,
+     "ampRatio": 0.3685073408900859,
+     "complete": true,
+     "childSpeed": 0.8761012443804873
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 60,
+     "parentWeeks": 4,
+     "dil": 15.0,
+     "childMove": 2.0001460984928556,
+     "ampRatio": 0.14928687959001558,
+     "complete": false,
+     "childSpeed": 0.03333576830821426
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-01-15 raw dyn0/0 wsh3.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 6,
+    "dilWaterfall": 7.607142857142857,
+    "dilOther": 6.515625,
+    "kindRatio": 0.8565140845070423,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.029225256691194513,
+     "r": 0.5386171531667902
+    },
+    "speedWaterfall": 0.1310952392781882,
+    "speedWaterfallCv": 0.6678017952539994,
+    "speedOther": 0.33488358141402447,
+    "speedOtherCv": 0.8988279918911154,
+    "logDilVsLogSlope": {
+     "slope": 0.43780570247713757,
+     "r": 0.5194650304094852
+    }
+   },
+   "walkSkill": {
+    "n": 36,
+    "maeNaive": 43.97222222222222,
+    "predLocal": {
+     "mae": 93.61385877361755,
+     "logCorr": -0.5235272474798199,
+     "medianRatio": 0.98859825620389
+    },
+    "predOverall": {
+     "mae": 57.04414656416592,
+     "logCorr": -0.6716947942849434,
+     "medianRatio": 0.5684734754427849
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 130,
+     "parentWeeks": 64,
+     "dil": 2.03125,
+     "childMove": 24.504530027637465,
+     "ampRatio": -2.809655613590701,
+     "complete": true,
+     "childSpeed": 0.1884963848279805
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 36,
+     "parentWeeks": 8,
+     "dil": 4.5,
+     "childMove": -1.567785713002614,
+     "ampRatio": 0.0632507163356996,
+     "complete": true,
+     "childSpeed": 0.0435496031389615
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 4,
+     "parentWeeks": 7,
+     "dil": 0.5714285714285714,
+     "childMove": -5.360479192239737,
+     "ampRatio": -0.655042078741428,
+     "complete": true,
+     "childSpeed": 1.3401197980599342
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 75,
+     "parentWeeks": 7,
+     "dil": 10.714285714285714,
+     "childMove": -16.398065656306116,
+     "ampRatio": 0.7424466845889153,
+     "complete": true,
+     "childSpeed": 0.2186408754174149
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 148,
+     "parentWeeks": 10,
+     "dil": 14.8,
+     "childMove": 20.155563563505247,
+     "ampRatio": 1.413902281854542,
+     "complete": true,
+     "childSpeed": 0.13618624029395437
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 11,
+     "parentWeeks": 1,
+     "dil": 11.0,
+     "childMove": -5.293978558000752,
+     "ampRatio": 0.4453526287404138,
+     "complete": true,
+     "childSpeed": 0.4812707780000684
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 57,
+     "parentWeeks": 4,
+     "dil": 14.25,
+     "childMove": 1.9224361028127248,
+     "ampRatio": 0.14348676190022186,
+     "complete": false,
+     "childSpeed": 0.03372694917215307
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-01-15 raw dyn2/104 wsh1.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 6,
+    "dilWaterfall": 5.544642857142857,
+    "dilOther": 5.2734375,
+    "kindRatio": 0.9510869565217392,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.023995471759036633,
+     "r": 0.5230479932902252
+    },
+    "speedWaterfall": 0.4637946564893782,
+    "speedWaterfallCv": 0.8248565410330685,
+    "speedOther": 0.2497307080860493,
+    "speedOtherCv": 0.618587562197605,
+    "logDilVsLogSlope": {
+     "slope": 0.27112043823281823,
+     "r": 0.38047625861601336
+    }
+   },
+   "walkSkill": {
+    "n": 44,
+    "maeNaive": 58.04545454545455,
+    "predLocal": {
+     "mae": 105.16546612606398,
+     "logCorr": -0.1626022637590041,
+     "medianRatio": 1.3663194444444444
+    },
+    "predOverall": {
+     "mae": 67.76493981941748,
+     "logCorr": -0.4103840553849192,
+     "medianRatio": 0.6367333128697399
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 163,
+     "parentWeeks": 64,
+     "dil": 2.546875,
+     "childMove": 23.2350378967786,
+     "ampRatio": -2.6640973968914228,
+     "complete": true,
+     "childSpeed": 0.1425462447655129
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 19,
+     "parentWeeks": 8,
+     "dil": 2.375,
+     "childMove": -16.08081553922571,
+     "ampRatio": 0.6487641095863078,
+     "complete": true,
+     "childSpeed": 0.8463587125908268
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 6,
+     "parentWeeks": 7,
+     "dil": 0.8571428571428571,
+     "childMove": -3.577261501841548,
+     "ampRatio": -0.43713569745038056,
+     "complete": true,
+     "childSpeed": 0.5962102503069246
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 61,
+     "parentWeeks": 7,
+     "dil": 8.714285714285714,
+     "childMove": -4.955066623663697,
+     "ampRatio": 0.22434797272820636,
+     "complete": true,
+     "childSpeed": 0.08123060038792947
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 147,
+     "parentWeeks": 10,
+     "dil": 14.7,
+     "childMove": 19.30941508592246,
+     "ampRatio": 1.3545454070406686,
+     "complete": true,
+     "childSpeed": 0.13135656521035688
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 8,
+     "parentWeeks": 1,
+     "dil": 8.0,
+     "childMove": -2.8553213712526855,
+     "ampRatio": 0.24020212108042427,
+     "complete": true,
+     "childSpeed": 0.3569151714065857
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 57,
+     "parentWeeks": 4,
+     "dil": 14.25,
+     "childMove": 1.9224361028127248,
+     "ampRatio": 0.14348676190022186,
+     "complete": false,
+     "childSpeed": 0.03372694917215307
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  },
+  {
+   "setting": "2016-01..2018-01-15 raw dyn2/104 wsh3.0",
+   "now": "2017-12-10",
+   "laws": {
+    "nStages": 6,
+    "dilWaterfall": 6.241071428571429,
+    "dilOther": 6.765625,
+    "kindRatio": 1.0840486409155936,
+    "logDilVsProgress": {
+     "slopePerParentWeek": 0.02635945235963459,
+     "r": 0.556360094591574
+    },
+    "speedWaterfall": 0.39062342604229316,
+    "speedWaterfallCv": 0.920296841118464,
+    "speedOther": 0.1883016716328873,
+    "speedOtherCv": 0.5547160711873809,
+    "logDilVsLogSlope": {
+     "slope": 0.34156874860623215,
+     "r": 0.4641418989688424
+    }
+   },
+   "walkSkill": {
+    "n": 49,
+    "maeNaive": 48.265306122448976,
+    "predLocal": {
+     "mae": 76.62776883047592,
+     "logCorr": -0.06418287507941282,
+     "medianRatio": 0.7987927565392354
+    },
+    "predOverall": {
+     "mae": 57.89320541200266,
+     "logCorr": -0.19777478004368945,
+     "medianRatio": 0.5152519893899205
+    }
+   },
+   "rows": [
+    {
+     "from": 0,
+     "to": 64,
+     "move": -8.721542209338963,
+     "kind": "fall",
+     "childWeeks": 162,
+     "parentWeeks": 64,
+     "dil": 2.53125,
+     "childMove": 22.57573972574113,
+     "ampRatio": -2.5885031779777656,
+     "complete": true,
+     "childSpeed": 0.13935641806013044
+    },
+    {
+     "from": 64,
+     "to": 72,
+     "move": -24.786845174712013,
+     "kind": "waterfall",
+     "childWeeks": 21,
+     "parentWeeks": 8,
+     "dil": 2.625,
+     "childMove": -15.752371553013639,
+     "ampRatio": 0.6355133717898271,
+     "complete": true,
+     "childSpeed": 0.7501129310958875
+    },
+    {
+     "from": 72,
+     "to": 79,
+     "move": 8.183411976432339,
+     "kind": "rise",
+     "childWeeks": 6,
+     "parentWeeks": 7,
+     "dil": 0.8571428571428571,
+     "childMove": -1.3683939669130822,
+     "ampRatio": -0.16721557839859003,
+     "complete": true,
+     "childSpeed": 0.22806566115218038
+    },
+    {
+     "from": 79,
+     "to": 86,
+     "move": -22.086522839529614,
+     "kind": "waterfall",
+     "childWeeks": 69,
+     "parentWeeks": 7,
+     "dil": 9.857142857142858,
+     "childMove": -2.1482405482202225,
+     "ampRatio": 0.09726476928162651,
+     "complete": true,
+     "childSpeed": 0.031133920988698875
+    },
+    {
+     "from": 86,
+     "to": 96,
+     "move": 14.255273382166301,
+     "kind": "rise",
+     "childWeeks": 135,
+     "parentWeeks": 10,
+     "dil": 13.5,
+     "childMove": 20.05258708533522,
+     "ampRatio": 1.4066785355671607,
+     "complete": true,
+     "childSpeed": 0.14853768211359422
+    },
+    {
+     "from": 96,
+     "to": 97,
+     "move": -11.887161355651266,
+     "kind": "fall",
+     "childWeeks": 11,
+     "parentWeeks": 1,
+     "dil": 11.0,
+     "childMove": -5.293978558000752,
+     "ampRatio": 0.4453526287404138,
+     "complete": true,
+     "childSpeed": 0.4812707780000684
+    },
+    {
+     "from": 97,
+     "to": 101,
+     "move": 13.398003253774398,
+     "kind": "rise",
+     "childWeeks": 57,
+     "parentWeeks": 4,
+     "dil": 14.25,
+     "childMove": 1.9224361028127248,
+     "ampRatio": 0.14348676190022186,
+     "complete": false,
+     "childSpeed": 0.03372694917215307
+    },
+    {
+     "from": 101,
+     "to": 106,
+     "move": -30.564451196631367,
+     "kind": "waterfall",
+     "childWeeks": 0,
+     "parentWeeks": 5,
+     "dil": null,
+     "childMove": null,
+     "ampRatio": null,
+     "complete": false
+    }
+   ]
+  }
+ ],
+ "adversary": {
+  "iaaft": {
+   "n": 60,
+   "logDilVsProgress.r": {
+    "real": 0.5536037663943129,
+    "median": 0.1104302672157166,
+    "p": 0.2459016393442623
+   },
+   "logDilVsLogSlope.r": {
+    "real": 0.417750690163991,
+    "median": -0.06529520924581929,
+    "p": 0.9180327868852459
+   },
+   "speedOtherCv": {
+    "real": 0.6176990041045118,
+    "median": 0.9548811106932525,
+    "p": 0.18032786885245902
+   },
+   "speedWaterfallCv": {
+    "real": 0.8310635825012276,
+    "median": 0.7985403785996076,
+    "p": 0.6101694915254238
+   },
+   "kindRatio": {
+    "real": 1.437829525483304,
+    "median": 1.0657194686925502,
+    "p": 0.32786885245901637
+   }
+  },
+  "block8": {
+   "n": 60,
+   "logDilVsProgress.r": {
+    "real": 0.5536037663943129,
+    "median": 0.18274508312339574,
+    "p": 0.3409090909090909
+   },
+   "logDilVsLogSlope.r": {
+    "real": 0.417750690163991,
+    "median": 0.14480505866727694,
+    "p": 0.6363636363636364
+   },
+   "speedOtherCv": {
+    "real": 0.6176990041045118,
+    "median": 0.6134666345095043,
+    "p": 0.525
+   },
+   "speedWaterfallCv": {
+    "real": 0.8310635825012276,
+    "median": 0.5764468329734996,
+    "p": 0.8214285714285714
+   },
+   "kindRatio": {
+    "real": 1.437829525483304,
+    "median": 1.2682411674347158,
+    "p": 0.40476190476190477
+   }
+  },
+  "walk": {
+   "n": 60,
+   "logDilVsProgress.r": {
+    "real": 0.5536037663943129,
+    "median": 0.2340026203514063,
+    "p": 0.2542372881355932
+   },
+   "logDilVsLogSlope.r": {
+    "real": 0.417750690163991,
+    "median": -0.04478123881692817,
+    "p": 0.9152542372881356
+   },
+   "speedOtherCv": {
+    "real": 0.6176990041045118,
+    "median": 0.8841709353036846,
+    "p": 0.11864406779661017
+   },
+   "speedWaterfallCv": {
+    "real": 0.8310635825012276,
+    "median": 0.3931901588780933,
+    "p": 0.8666666666666667
+   },
+   "kindRatio": {
+    "real": 1.437829525483304,
+    "median": 1.180983709273183,
+    "p": 0.42105263157894735
+   }
+  }
+ },
+ "howLong": [
+  {
+   "setting": "2016-01..2018-03 logit dyn0/0 wsh1.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 57,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 27.25,
+   "byProgressTotalWeeks": 30.83451844516854,
+   "bySpeedTotalWeeks": 29.385918427288914,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 28.616071428571427,
+    "bySpeedWeeks": 24.71474890358306
+   }
+  },
+  {
+   "setting": "2016-01..2018-03 logit dyn0/0 wsh3.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 56,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 29.21875,
+   "byProgressTotalWeeks": 33.70508860409059,
+   "bySpeedTotalWeeks": 26.858584782183122,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 25.401785714285715,
+    "bySpeedWeeks": 27.498812625550013
+   }
+  },
+  {
+   "setting": "2016-01..2018-03 logit dyn2/104 wsh1.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 57,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 27.3125,
+   "byProgressTotalWeeks": 32.7319094308508,
+   "bySpeedTotalWeeks": 36.09881096532378,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 27.008928571428573,
+    "bySpeedWeeks": 25.78171287990035
+   }
+  },
+  {
+   "setting": "2016-01..2018-03 logit dyn2/104 wsh3.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 57,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 27.21875,
+   "byProgressTotalWeeks": 33.231726168080854,
+   "bySpeedTotalWeeks": 24.164550957630695,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 29.6875,
+    "bySpeedWeeks": 28.70955975281708
+   }
+  },
+  {
+   "setting": "2016-01..2018-03 raw dyn0/0 wsh1.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 68,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 10.125,
+   "byProgressTotalWeeks": 23.329250923320625,
+   "bySpeedTotalWeeks": 55.01325207993876,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 28.169642857142854,
+    "bySpeedWeeks": 32.40963529269622
+   }
+  },
+  {
+   "setting": "2016-01..2018-03 raw dyn0/0 wsh3.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 68,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 8.125,
+   "byProgressTotalWeeks": 35.45929407753887,
+   "bySpeedTotalWeeks": 52.11529930070153,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 36.5625,
+    "bySpeedWeeks": 115.07971680439813
+   }
+  },
+  {
+   "setting": "2016-01..2018-03 raw dyn2/104 wsh1.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 67,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 10.5,
+   "byProgressTotalWeeks": 26.388774139700008,
+   "bySpeedTotalWeeks": 61.769190449926704,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 26.160714285714285,
+    "bySpeedWeeks": 32.18780274902791
+   }
+  },
+  {
+   "setting": "2016-01..2018-03 raw dyn2/104 wsh3.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 57,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 27.0625,
+   "byProgressTotalWeeks": 33.933056712987586,
+   "bySpeedTotalWeeks": 39.41365261185173,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 26.919642857142854,
+    "bySpeedWeeks": 40.72484338102295
+   }
+  },
+  {
+   "setting": "2016-01..2018-01-15 logit dyn0/0 wsh1.0",
+   "stage": "fall 2016-01-03..2017-03-26",
+   "spentWeeks": 461,
+   "parentWeeks": 64,
+   "parentWeeksLeft": 15,
+   "next": {
+    "stage": "waterfall 2017-03-26..2017-05-21",
+    "parentWeeks": 8,
+    "move": -24.786845174712013,
+    "byKindWeeks": null,
+    "bySpeedWeeks": null
+   }
+  },
+  {
+   "setting": "2016-01..2018-01-15 logit dyn0/0 wsh3.0",
+   "stage": "fall 2016-01-03..2017-03-26",
+   "spentWeeks": 461,
+   "parentWeeks": 64,
+   "parentWeeksLeft": 4,
+   "next": {
+    "stage": "waterfall 2017-03-26..2017-05-21",
+    "parentWeeks": 8,
+    "move": -24.786845174712013,
+    "byKindWeeks": null,
+    "bySpeedWeeks": null
+   }
+  },
+  {
+   "setting": "2016-01..2018-01-15 logit dyn2/104 wsh1.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 60,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 21.34375,
+   "byProgressTotalWeeks": 28.728693206586147,
+   "bySpeedTotalWeeks": 37.92292934738529,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 26.696428571428573,
+    "bySpeedWeeks": 30.634694217635232
+   }
+  },
+  {
+   "setting": "2016-01..2018-01-15 logit dyn2/104 wsh3.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 57,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 27.34375,
+   "byProgressTotalWeeks": 32.43574912322316,
+   "bySpeedTotalWeeks": 32.24560267898123,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 27.410714285714285,
+    "bySpeedWeeks": 26.13704296292181
+   }
+  },
+  {
+   "setting": "2016-01..2018-01-15 raw dyn0/0 wsh1.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 60,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 14.09375,
+   "byProgressTotalWeeks": 27.23858779633077,
+   "bySpeedTotalWeeks": 8.292416632715877,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 31.517857142857146,
+    "bySpeedWeeks": 74.64433583028459
+   }
+  },
+  {
+   "setting": "2016-01..2018-01-15 raw dyn0/0 wsh3.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 57,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 26.0625,
+   "byProgressTotalWeeks": 37.68096387362944,
+   "bySpeedTotalWeeks": 23.760703641577344,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 38.035714285714285,
+    "bySpeedWeeks": 138.46587543353647
+   }
+  },
+  {
+   "setting": "2016-01..2018-01-15 raw dyn2/104 wsh1.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 57,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 21.09375,
+   "byProgressTotalWeeks": 30.260504834131144,
+   "bySpeedTotalWeeks": 23.84643150666217,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 27.723214285714285,
+    "bySpeedWeeks": 29.29180467314088
+   }
+  },
+  {
+   "setting": "2016-01..2018-01-15 raw dyn2/104 wsh3.0",
+   "stage": "rise 2017-11-12..2017-12-10",
+   "spentWeeks": 57,
+   "parentWeeks": 4,
+   "parentWeeksLeft": 0,
+   "byKindTotalWeeks": 27.0625,
+   "byProgressTotalWeeks": 34.58528389607772,
+   "bySpeedTotalWeeks": 38.45278182190357,
+   "next": {
+    "stage": "waterfall 2017-12-10..2018-01-14",
+    "parentWeeks": 5,
+    "move": -30.564451196631367,
+    "byKindWeeks": 31.205357142857146,
+    "bySpeedWeeks": 42.28634782355301
+   }
+  }
+ ],
+ "elapsedSec": 23
+}

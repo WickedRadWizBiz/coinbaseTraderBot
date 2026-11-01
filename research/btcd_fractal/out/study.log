@@ -1,0 +1,36 @@
+BTC.D daily 2014-04-01..2026-11-01 (4595 bars), weekly 657
+round 1: 144 settings in 150s
+  score 1.904 r 0.466 | parent 2016-01..2018-03 child 2018-01-15 wshape 3.0 maxstep 2 j0 0.15
+  score 1.908 r 0.481 | parent 2016-01..2018-03 child 2018-01-15 wshape 3.0 maxstep 3 j0 0.15
+  score 1.935 r 0.447 | parent 2016-01..2018-03 child 2018-01-01 wshape 3.0 maxstep 2 j0 0.15
+  score 1.974 r 0.451 | parent 2016-01..2018-01-15 child 2018-01-01 wshape 3.0 maxstep 2 j0 0.15
+  score 1.992 r 0.464 | parent 2016-01..2018-03 child 2018-01-01 wshape 3.0 maxstep 3 j0 0.15
+round 2: 44 more settings, 182s
+  score 1.719 r 0.481 | {'maxstep': 3, 'cap': 16, 'j0': 0.15, 'dynmap': 0, 'bw': 0, 'wshape': 3.0, 'shapew': 8, 'bmin': 0.35, 'bmax': 2.5, 'wfweeks': 0, 'parent': '2016-01..2018-03', 'child': '2018-01-15'}
+  score 1.731 r 0.466 | {'maxstep': 2, 'cap': 16, 'j0': 0.15, 'dynmap': 0, 'bw': 0, 'wshape': 3.0, 'shapew': 8, 'bmin': 0.35, 'bmax': 2.5, 'wfweeks': 0, 'parent': '2016-01..2018-03', 'child': '2018-01-15'}
+  score 1.736 r 0.466 | {'maxstep': 2, 'cap': 16, 'j0': 0.15, 'dynmap': 0, 'bw': 0, 'wshape': 3.0, 'shapew': 8, 'bmin': 0.35, 'bmax': 2.5, 'wfweeks': 26, 'parent': '2016-01..2018-03', 'child': '2018-01-15'}
+  score 1.747 r 0.481 | {'maxstep': 3, 'cap': 16, 'j0': 0.15, 'dynmap': 0, 'bw': 0, 'wshape': 3.0, 'shapew': 8, 'bmin': 0.35, 'bmax': 2.5, 'wfweeks': 26, 'parent': '2016-01..2018-03', 'child': '2018-01-15'}
+  score 1.749 r 0.447 | {'maxstep': 2, 'cap': 16, 'j0': 0.15, 'dynmap': 0, 'bw': 0, 'wshape': 3.0, 'shapew': 8, 'bmin': 0.35, 'bmax': 2.5, 'wfweeks': 0, 'parent': '2016-01..2018-03', 'child': '2018-01-01'}
+  dynmap 0: 72 settings, best score 1.719, median 2.019, best r 0.706, best hit26 0.45, best ic26 0.49
+  dynmap 1: 36 settings, best score 3.551, median 4.344, best r 0.903, best hit26 0.46, best ic26 0.29
+  dynmap 2: 80 settings, best score 2.459, median 3.034, best r 0.956, best hit26 0.47, best ic26 0.65
+adversary (real parent score 3.195, r 0.801, cost 29.74):
+  iaaft      hit26 median 0.4883720930232558 p 0.7213114754098361 | ic26 median 0.11310672478540831 p 0.01639344262295082
+  iaaft      n  60 score median 1.618 best 1.071 p 0.984 | r median 0.859 p 0.803 | cost p 0.820
+  block8     hit26 median 0.4418604651162791 p 0.8524590163934426 | ic26 median 0.23325560924553712 p 0.03278688524590164
+  block8     n  60 score median 3.240 best 1.094 p 0.508 | r median 0.832 p 0.770 | cost p 0.738
+  walk       hit26 median 0.5 p 0.9016393442622951 | ic26 median 0.22922538649386887 p 0.01639344262295082
+  walk       n  60 score median 1.976 best 1.093 p 0.918 | r median 0.924 p 0.967 | cost p 0.951
+  reversed   hit26 median 0.3953488372093023 p 1.0 | ic26 median 0.09249148867462946 p 0.5
+  reversed   n   1 score median 0.993 best 0.993 p 1.000 | r median 0.734 p 0.500 | cost p 0.500
+  otherBTCD  hit26 median 0.37209302325581395 p 0.4666666666666667 | ic26 median -0.09273648733418871 p 0.06666666666666667
+  otherBTCD  n  14 score median 1.209 best 1.007 p 0.933 | r median 0.820 p 0.667 | cost p 0.067
+  offset     hit26 median 0.37209302325581395 p 0.4 | ic26 median 0.5546494629085138 p 0.08
+  offset     n  24 score median 2.795 best 1.938 p 1.000 | r median 0.801 p 0.520 | cost p 0.440
+  child@2017-06-01: score 2.819 r 0.781 cost 32.82
+  child@2018-06-01: score 3.490 r 0.850 cost 21.56
+  child@2019-01-01: score 3.126 r 0.898 cost 15.69
+  child@2019-07-01: score 3.440 r 0.939 cost 11.38
+  child@2020-01-01: score 3.601 r 0.924 cost 11.86
+done in 349s; today's parent week (weighted p10/p50/p90): ['2017-11-26', '2018-01-07', '2018-02-18']
+fan (BTC.D %): {"w4": {"p10": 59.03, "p25": 59.98, "p50": 60.47, "p75": 60.77, "p90": 61.32}, "w13": {"p10": 56.33, "p25": 58.93, "p50": 60.47, "p75": 61.21, "p90": 61.72}, "w26": {"p10": 54.63, "p25": 58.41, "p50": 60.47, "p75": 61.07, "p90": 61.65}, "w52": {"p10": 53.12, "p25": 54.04, "p50": 59.44, "p75": 61.53, "p90": 61.99}, "w78": {"p10": 52.83, "p25": 53.44, "p50": 59.98, "p75": 61.65, "p90": 62.29}}
