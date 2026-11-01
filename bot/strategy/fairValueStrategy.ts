@@ -31,7 +31,7 @@
 //
 // Pure function: no I/O. The engine turns plans into risk-checked orders.
 
-import type { StrategyConfig } from '../config';
+import type { LoserExitConfig, StrategyConfig } from '../config';
 import { orderFee, type FeeSchedule } from '../fees';
 import type { BookSide, TimeInForce } from '../kalshi/types';
 import type { OrderPurpose } from '../oms/orderState';
@@ -208,9 +208,7 @@ export function loserExit(v: MarketView, cfg: Pick<StrategyConfig, 'loserExits'>
   const fvSide = v.pFair === undefined ? undefined : long ? v.pFair : 1 - v.pFair;
   const held = `${Math.abs(v.position)}${long ? '' : ' NO'}`;
   let why: string | undefined;
-  const inWindow = v.settleShare === true || v.exitWindowOpen === false
-    || ((L.windowShare ?? 0) > 0 && v.windowSec !== undefined && v.tauSec <= (L.windowShare ?? 0) * v.windowSec);
-  if (L.window && inWindow) {
+  if (L.window && inLoserWindow(v, L)) {
     // The judge (LOSER_WINDOW_JUDGE): bid sells whatever is not in profit at the bid; fair and cost first ask the coin's
     // price (no fair value known: judged at the bid).
     const cost = (v.entrySidePrice ?? 0) + (v.entryFeePerContract ?? 0);
@@ -227,6 +225,44 @@ export function loserExit(v: MarketView, cfg: Pick<StrategyConfig, 'loserExits'>
     edge: fvSide === undefined ? 0 : sideBid - fee - fvSide, why };
 }
 
+/** A training trade's size (TRAINING_TRADES_PER_HOUR, paper and live): the order band's minimum (or the fixed paper order
+ *  size) in contracts (0.01 steps, as the strategy sizes) at `cost` with the taker fee, never past the band's maximum (or the
+ *  fixed size) once the fee rounds up on the whole order, within the per-order contract cap; 1 contract without a band. */
+export function trainingCount(cost: number, v: Pick<MarketView, 'orderBandUsd' | 'fixedOrderUsd' | 'maxContracts' | 'fees'>): number {
+  const fixed = (v.fixedOrderUsd ?? 0) > 0 ? v.fixedOrderUsd! : undefined;
+  const usd = fixed ?? v.orderBandUsd?.min;
+  if (!(usd !== undefined && usd > 0) || !(cost > 0 && cost < 1)) return 1;
+  const cap = fixed ?? Math.max(usd, v.orderBandUsd!.max);
+  const unit = cost + orderFee(100, cost, true, v.fees) / 100;
+  let n = floorCount(Math.min(v.maxContracts > 0 ? v.maxContracts : Infinity, usd / unit));
+  while (n > 0 && n * cost + orderFee(n, cost, true, v.fees) > cap + 1e-9) n = round(n - 0.01, 2);
+  return Math.max(n, 0.01);
+}
+
+/** The window the share rules measure (the last share STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC, LOSER_WINDOW_SHARE, LOSER_NO_ENTRY_SHARE):
+ *  open to close, at most `maxSec` (STRATEGY_SHARE_WINDOW_MAX_SEC, an hour; 0 = no cap). A 15-minute contract keeps its 900 s;
+ *  an hourly or daily ladder or a range bracket listed hours ahead is measured on the hour the bot trades it in. */
+export function shareWindowSec(openTime: number, closeTime: number, maxSec: number): number | undefined {
+  if (!Number.isFinite(openTime) || !(closeTime > openTime)) return undefined;
+  const span = (closeTime - openTime) / 1000;
+  return maxSec > 0 ? Math.min(span, maxSec) : span;
+}
+
+/** Where the loser window cut runs: the last share of the window (settleShare), the final minute, and from LOSER_WINDOW_SHARE
+ *  of the window left when that is set. */
+export function inLoserWindow(v: Pick<MarketView, 'settleShare' | 'exitWindowOpen' | 'tauSec' | 'windowSec'>, L: LoserExitConfig): boolean {
+  return v.settleShare === true || v.exitWindowOpen === false
+    || ((L.windowShare ?? 0) > 0 && v.windowSec !== undefined && v.tauSec <= (L.windowShare ?? 0) * v.windowSec);
+}
+
+/** LOSER_NO_ENTRY_SHARE (cfg.loserExits): no new risk from that share of the window left on, nor where the window cut runs. */
+export function loserNoEntry(v: Pick<MarketView, 'settleShare' | 'exitWindowOpen' | 'tauSec' | 'windowSec'>, cfg: Pick<StrategyConfig, 'loserExits'>): boolean {
+  const L = cfg.loserExits;
+  if (!L || !((L.noEntryShare ?? 0) > 0)) return false;
+  if (v.windowSec !== undefined && v.tauSec <= L.noEntryShare * v.windowSec) return true;
+  return L.window && inLoserWindow(v, L);
+}
+
 /** FV_ENTRY_GATE (cfg.loserExits): an entry's side, bought at `cost` a contract with `fee`, must leave the spot fair value of
  *  that side at least the margin above cost plus fee. True when the gate is off or no fair value is known. */
 export function fvGatePasses(pFair: number | undefined, side: 'yes' | 'no', cost: number, fee: number, cfg: Pick<StrategyConfig, 'loserExits'>): boolean {
@@ -238,14 +274,20 @@ export function fvGatePasses(pFair: number | undefined, side: 'yes' | 'no', cost
 /** The fair value gate on a finished plan (after the fill model turns quotes into crosses and paper adds its training trades):
  *  drops each order that opens or adds to a position at a cost the gate refuses. An order that only reduces the position is
  *  kept. Returns how many were dropped. */
-export function applyFvGate(plan: StrategyOutput, pFair: number | undefined, position: number, fees: FeeSchedule | undefined, cfg: Pick<StrategyConfig, 'loserExits'>): number {
-  if (!cfg.loserExits?.gate || pFair === undefined) return 0;
+export function applyFvGate(plan: StrategyOutput, pFair: number | undefined, position: number, fees: FeeSchedule | undefined, cfg: Pick<StrategyConfig, 'loserExits'>,
+  noEntry = false): number {
+  if (!noEntry && (!cfg.loserExits?.gate || pFair === undefined)) return 0;
   const before = plan.place.length;
   plan.place = plan.place.filter((p) => {
     if (p.reduceOnly || p.purpose === 'exit' || !(p.count > 0)) return true;
     const buysYes = p.side === 'bid';
     if (buysYes ? position < 0 && p.count <= -position + 1e-9 : position > 0 && p.count <= position + 1e-9) return true;
     const cost = buysYes ? p.price : round(1 - p.price, 4);
+    if (noEntry) {
+      plan.notes.push(`loser window: dropped ${p.purpose} ${buysYes ? 'YES' : 'NO'} at ${cost.toFixed(2)} (no new risk this close to the end)`);
+      return false;
+    }
+    if (!cfg.loserExits?.gate || pFair === undefined) return true;
     const ok = fvGatePasses(pFair, buysYes ? 'yes' : 'no', cost, orderFee(p.count, cost, !p.postOnly, fees) / p.count, cfg);
     if (!ok) plan.notes.push(`fair value gate: dropped ${p.purpose} ${buysYes ? 'YES' : 'NO'} at ${cost.toFixed(2)} (fair value ${(buysYes ? pFair : 1 - pFair).toFixed(3)} under cost + fee + ${cfg.loserExits!.gateMargin})`);
     return ok;
@@ -433,7 +475,9 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: {
 
   if (opts.entries === false) return out;
 
-  const entriesAllowed = (v.entryWindowOpen ?? true) && v.tauSec >= v.noEntryBeforeCloseSec;
+  const lateNoEntry = loserNoEntry(v, cfg);
+  const entriesAllowed = (v.entryWindowOpen ?? true) && v.tauSec >= v.noEntryBeforeCloseSec && !lateNoEntry;
+  if (lateNoEntry) out.notes.push('loser window: no new risk this close to the end');
   // Ensemble veto: the model's disagreement with the market must exceed its own uncertainty.
   const vetoed = v.pStd !== undefined && v.pMarket !== undefined && cfg.ensembleVetoSigmas > 0 && Math.abs(v.pYes - v.pMarket) < cfg.ensembleVetoSigmas * v.pStd;
   const newRisk = entriesAllowed && !vetoed;

@@ -80,6 +80,10 @@ export interface LoserExitConfig {
   /** LOSER_WINDOW_SHARE (0: off): the window cut also runs once this share of the contract's window is left, when that is
    *  earlier than the last share (STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC), while the books are still deep. */
   windowShare: number;
+  /** LOSER_NO_ENTRY_SHARE (0: off): no new risk (entries, quotes that add, fill-model crosses, training trades) once this
+   *  share of the contract's window is left, nor anywhere the loser window cut runs: a position opened there is under water
+   *  by the spread and fees at once, and the window cut would sell it straight back into a thin closing bid. */
+  noEntryShare: number;
 }
 
 export interface StrategyConfig {
@@ -157,6 +161,12 @@ export interface StrategyConfig {
    *  6 min of an hourly one) a position in profit after fees rides to settlement, no exit selling it (Steven's rule, Oct 29); a
    *  position that is not in profit keeps its exits until STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC. */
   noExitBeforeCloseFrac: number;
+  /** STRATEGY_SHARE_WINDOW_MAX_SEC (3600; 0 = no cap): the window the share rules measure (that last share, LOSER_WINDOW_SHARE,
+   *  LOSER_NO_ENTRY_SHARE) is open to close, at most this long (shareWindowSec). Kalshi lists the hourly and daily ladders and
+   *  the range brackets hours or a day before they close, and the bot trades them in their last hour: measured on the listing,
+   *  their "last 10%" covered the whole entry window, so every winner rode to settlement and the loser window cut sold every
+   *  new buy straight back into the bid (Nov 1 replay: window cut sales on average 1,828 s before the close). */
+  shareWindowMaxSec: number;
   /** PACER (Steven's spec, Oct 29 23:35 UTC): the hourly quota pacer (bot/risk/quotaPacer.ts). A 24-hour profit clock anchored
    *  to 10:00 AM New York time at PACER_HOURLY_USD (4.50) an hour; the strategy sells a position at once (the "quota snipe") when
    *  its net profit after fees, sold at the bid, covers the running slice's goal (PACER_MODE=slices, Steven's non-stacking
@@ -230,9 +240,11 @@ export interface StrategyConfig {
   exploreRate: number;
   exploreBand: number;
   exploreMaxPerHour: number;
-  /** Paper only: guaranteed 1-contract training trades per hour on the side the model favours, taken when
-   *  nothing qualifies on edge, so the bot always produces trades to learn from and to watch (0 = off). */
-  paperTrainTrades: number;
+  /** TRAINING_TRADES_PER_HOUR (12; the old paper-only PAPER_TRAINING_TRADES_PER_HOUR is no longer read): training
+   *  trades an hour on the side the model favours, taken when nothing qualifies on edge, so the bot keeps producing
+   *  trades to learn from (0 = off). Steven's pick on Oct 31 (sizing thread): back on, in paper and live alike, each
+   *  sized at the order band's minimum ($10) and screened by the fair value gate (FV_ENTRY_GATE) like every entry. */
+  trainTrades: number;
   /** Markets with no position and no resting order are fully re-evaluated at most every idleEvalSec
    *  (1 s otherwise): most of the bot's CPU is the per-second evaluation of markets it is not in. */
   idleEvalSec: number;
@@ -1171,6 +1183,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     hourlyMidBand: band(env, 'HOURLY_MID_BAND', [0.1, 0.9]),
     noExitBeforeCloseSec: num(env, 'STRATEGY_NO_EXIT_BEFORE_CLOSE_SEC', relaxed ? 60 : 0, 0, 600),
     noExitBeforeCloseFrac: num(env, 'STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC', 0.10, 0, 0.9),
+    shareWindowMaxSec: num(env, 'STRATEGY_SHARE_WINDOW_MAX_SEC', 3600, 0, 7 * 86_400),
     pacer: pacerConfig(env),
     loserExits: {
       gate: bool(env, 'FV_ENTRY_GATE', true),
@@ -1180,6 +1193,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       window: bool(env, 'LOSER_WINDOW_CUT', true),
       windowJudge: oneOf(env, 'LOSER_WINDOW_JUDGE', 'bid', ['bid', 'fair', 'cost'] as const),
       windowShare: num(env, 'LOSER_WINDOW_SHARE', 0, 0, 0.9),
+      noEntryShare: num(env, 'LOSER_NO_ENTRY_SHARE', 0, 0, 0.9),
     },
     profitMandate: bool(env, 'PROFIT_MANDATE', false),
     profitMandateMin: num(env, 'PROFIT_MANDATE_MIN', 0.01, 0, 0.5),
@@ -1209,7 +1223,7 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
     exploreRate: num(env, 'PAPER_EXPLORE_RATE', 0.1, 0, 1),
     exploreBand: num(env, 'PAPER_EXPLORE_BAND', 0.02, 0, 0.1),
     exploreMaxPerHour: num(env, 'PAPER_EXPLORE_MAX_PER_HOUR', 6, 0, 120),
-    paperTrainTrades: num(env, 'PAPER_TRAINING_TRADES_PER_HOUR', 0, 0, 120),
+    trainTrades: num(env, 'TRAINING_TRADES_PER_HOUR', 12, 0, 120),
     idleEvalSec: num(env, 'EVAL_IDLE_SEC', 5, 0, 60),
     outsidePriceFallback: bool(env, 'PAPER_OUTSIDE_PRICE_FALLBACK', false),
     adversarialBoost: bool(env, 'ADVERSARIAL_BOOST', true),
