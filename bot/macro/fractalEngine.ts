@@ -83,6 +83,8 @@ export interface FractalState {
   localDilation: number;
   /** Level map child = a + b x parent, and the fit after it. */
   map: { a: number; b: number };
+  /** The level map the projection uses, fitted in logit space (it keeps projected BTC.D inside 0-100%). */
+  projMap: { a: number; b: number };
   fit: { r: number; recentR: number; maePts: number; recentMaePts: number };
   btcd: number;
   /** The parent's remaining path on the child's scale (anchored at the current level). */
@@ -235,6 +237,9 @@ const sd = (x: number[]) => { const m = mean(x); return Math.sqrt(x.reduce((s, v
 /** Least-squares level map child = a + b x parent on aligned pairs (b kept in [B_MIN, B_MAX]: a child that has
  *  barely moved yet must not flatten the parent into a line every path fits). */
 const B_MIN = 0.35, B_MAX = 2.5;
+/** Dominance (%) to logit and back, kept off the 0 / 100 walls. */
+const logit = (x: number) => { const q = Math.min(0.995, Math.max(0.005, x / 100)); return Math.log(q / (1 - q)); };
+const unlogit = (y: number) => 100 / (1 + Math.exp(-y));
 function fitMap(c: number[], pAligned: number[]): { a: number; b: number } {
   const mx = mean(pAligned), my = mean(c);
   let sxy = 0, sxx = 0;
@@ -295,7 +300,11 @@ export function fractalState(btcdDaily: Candle[], at: number, cfg: FractalConfig
   // Projection: the parent ahead of jStar on the child's scale, anchored at today's level, at the blended dilation.
   const asOf = child[n - 1].ts, btcd = c[n - 1];
   const projDil = Math.max(0.5, Math.min(cfg.maxStall, Math.sqrt(Math.max(0.5, localDilation) * Math.max(0.5, dilation))));
-  const offset = btcd - (map.a + map.b * p[jStar]);
+  // The projection moves in logit space (dominance is a share in 0-100%): today's level plus the parent's moves
+  // ahead, scaled by a level map refitted on the aligned pairs in logit space. A raw-point map pinned at B_MAX
+  // (TradingView's 2016 BTC.D sits near 99%, which squeezes the parent's range) once projected BTC.D to -21%.
+  const lmap = fitMap(c.map(logit), path.map((j) => logit(p[j])));
+  const lvlAt = (j: number) => unlogit(logit(btcd) + lmap.b * (logit(p[j]) - logit(p[jStar])));
   // Child time of each parent bar ahead: a parent bar inside a waterfall's steep part takes its share of
   // waterfallDays, every other bar projDil bars (a waterfall already under way keeps only what is left of it).
   const stepMs = (j: number) => {
@@ -306,7 +315,7 @@ export function fractalState(btcdDaily: Candle[], at: number, cfg: FractalConfig
   tsOf[jStar] = asOf;
   for (let j = jStar + 1; j < m; j++) tsOf[j] = tsOf[j - 1] + stepMs(j - 1);
   const projection: FractalProjectionPoint[] = [];
-  for (let k = 1; jStar + k < m; k++) projection.push({ ts: tsOf[jStar + k], btcd: map.a + map.b * p[jStar + k] + offset, parentTs: parent[jStar + k].ts });
+  for (let k = 1; jStar + k < m; k++) projection.push({ ts: tsOf[jStar + k], btcd: lvlAt(jStar + k), parentTs: parent[jStar + k].ts });
   const at_ = (days: number) => {
     const ts = asOf + days * DAY;
     if (!projection.length || ts > projection[projection.length - 1].ts) return NaN;
@@ -315,7 +324,7 @@ export function fractalState(btcdDaily: Candle[], at: number, cfg: FractalConfig
     return NaN;
   };
   const toChild = (j: number) => tsOf[Math.max(j, jStar)];
-  const lvl = (j: number) => map.a + map.b * p[j] + offset;
+  const lvl = lvlAt;
   const wf = sw.find((s) => s.waterfall && s.to > jStar);
   const wfIn = !!wf && wf === cs && inMove;
   const nextWaterfall = wf
@@ -325,7 +334,7 @@ export function fractalState(btcdDaily: Candle[], at: number, cfg: FractalConfig
   for (const q of projection) if (!low || q.btcd < low.btcd) low = { ts: q.ts, btcd: q.btcd };
   return {
     asOf, childBars: n, parentTs: parent[jStar].ts, progress: jStar / Math.max(1, m - 1), swing, phase,
-    dilation, localDilation, map, fit: { r, recentR, maePts: mae, recentMaePts: recentMae }, btcd,
+    dilation, localDilation, map, projMap: lmap, fit: { r, recentR, maePts: mae, recentMaePts: recentMae }, btcd,
     projection, proj: { d30: at_(30), d90: at_(90), d180: at_(180) }, nextWaterfall, low,
     path: child.map((x, i) => ({ childTs: x.ts, parentTs: parent[path[i]].ts, btcd: c[i], mapped: pa[i] })),
   };

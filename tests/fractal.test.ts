@@ -257,3 +257,14 @@ test('lane book: a waterfall weight of 0 skips the setup with the waterfall reas
   // 1% risk x 1.5 at a 2% stop: $150 at risk -> $7,500 notional.
   assert.ok(Math.abs(entries[0].notional - 7500) < 1e-6, `${entries[0].notional}`);
 });
+
+test('projection stays a dominance: inside 0-100% when the parent sits near 99% (TradingView 2016) and the raw map pins', () => {
+  // The parent squeezed against 99% (its swings a tenth of the size), the child on its usual scale: the raw-point map
+  // pins at B_MAX; the projection, made in logit space, must still be a valid share and still fall into the waterfall.
+  const daily = synth(CHILD_DAYS).map((c) => (c.ts < C0 ? bar(c.ts, 99 - 0.1 * (95 - c.c)) : c));
+  const s = fractalState(daily, C0 + Math.floor(CHILD_DAYS * 0.95) * DAY)!;
+  assert.ok(s && s.projection.length > 0);
+  for (const q of s.projection) assert.ok(q.btcd > 0 && q.btcd < 100, `${q.btcd}`);
+  assert.ok(s.low!.btcd < s.btcd, 'the final waterfall is still projected');
+  assert.ok(s.projMap.b >= 0.35 && s.projMap.b <= 2.5);
+});
