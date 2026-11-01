@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { loadConfig, type StrategyConfig } from '../bot/config';
 import { DEFAULT_FEES } from '../bot/fees';
-import { decide, MarketView, type StrategyOutput } from '../bot/strategy/fairValueStrategy';
+import { decide, MarketView, shareWindowSec, type StrategyOutput } from '../bot/strategy/fairValueStrategy';
 import { ProfitPeaks } from '../bot/strategy/profitPeaks';
 
 // Continuous cadence + Kelly sizing (the pre-relaxed behaviour these tests pin down).
@@ -436,4 +436,23 @@ test('exit curve rest mode: a NO position rests a YES bid at 1 - target, and the
   const out = decide(short({ position: -6, curveRestSidePrice: 0.401, restingBid: { clientOrderId: 'b', price: 0.59, remaining: 10 } }), cfg);
   assert.ok(out.cancel.some((c) => c.clientOrderId === 'b'));
   assert.equal(out.place.find((p) => p.side === 'bid' && p.purpose === 'exit')!.count, 6);
+});
+
+test('share window: the last share of the window is measured on at most the last hour, not on the whole listing', () => {
+  const t0 = Date.parse('2026-10-30T12:00:00Z');
+  const min = 60_000;
+  // A 15-minute contract keeps its own 900 s window.
+  assert.equal(shareWindowSec(t0, t0 + 15 * min, 3600), 900);
+  // An hourly contract listed an hour ahead keeps 3600 s; one listed 20 h ahead (KX..D ladders, range brackets) is capped at 3600 s.
+  assert.equal(shareWindowSec(t0, t0 + 60 * min, 3600), 3600);
+  assert.equal(shareWindowSec(t0, t0 + 20 * 60 * min, 3600), 3600);
+  // 0 turns the cap off: the whole listing again.
+  assert.equal(shareWindowSec(t0, t0 + 20 * 60 * min, 0), 72_000);
+  // Broken times give no window, so nothing counts as the last share.
+  assert.equal(shareWindowSec(Number.NaN, t0, 3600), undefined);
+  assert.equal(shareWindowSec(t0, t0, 3600), undefined);
+  assert.equal(shareWindowSec(t0 + min, t0, 3600), undefined);
+  // The default cap is one hour, and the env key moves it.
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32) }).strategy.shareWindowMaxSec, 3600);
+  assert.equal(loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(32), STRATEGY_SHARE_WINDOW_MAX_SEC: '1800' }).strategy.shareWindowMaxSec, 1800);
 });
