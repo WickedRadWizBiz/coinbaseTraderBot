@@ -59,6 +59,8 @@ export interface SideSummary {
   exitAudit?: string;
   /** Lab: the entry rules, and settled markets / P&L by the first entry fill's seconds to the close, 15m and hourly apart. */
   entryTiming?: string;
+  /** Lab: settled markets / P&L by the first entry's side, price, fair value edge, outcome, origin and exit, 15m and hourly apart. */
+  anatomy?: string;
   /** Settled P&L by UTC hour (YYYY-MM-DDTHH). */
   byHour: Record<string, number>;
   /** Fills and contracts by order purpose (quote, entry, exit; other: an order the log does not name). */
@@ -707,6 +709,8 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
   const inside = (t: number) => t >= from && t < to;
   for (const [w, b] of r.windows) if (inside(w)) { replay.fills += b.fills ?? 0; replay.contracts += b.contracts; replay.fees += b.fees; }
   const timing: Record<string, Record<number, { n: number; pnl: number; train: number; trainPnl: number }>> = { '15m': {}, hourly: {} };
+  const anat: Record<string, Record<string, Record<string, { n: number; pnl: number }>>> = { '15m': {}, hourly: {} };
+  const addA = (k: string, dim: string, key: string, pnl: number) => { const b = ((anat[k][dim] ??= {})[key] ??= { n: 0, pnl: 0 }); b.n++; b.pnl += pnl; };
   for (const t of r.trades) {
     if (!inside(t.closeTs)) continue;
     if (t.entrySec !== undefined) {
@@ -714,6 +718,16 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
       const b = (timing[k][lo] ??= { n: 0, pnl: 0, train: 0, trainPnl: 0 });
       b.n++; b.pnl += t.pnl;
       if (t.entryTrain) { b.train++; b.trainPnl += t.pnl; }
+      if (t.entrySide) {
+        const c = t.entryCost ?? 0, e = t.entryFv !== undefined ? t.entryFv - c : undefined;
+        addA(k, 'side', t.entrySide.toUpperCase(), t.pnl);
+        addA(k, 'price', c < 0.25 ? '<25c' : c < 0.45 ? '25-45c' : c < 0.55 ? '45-55c' : c < 0.75 ? '55-75c' : '75c+', t.pnl);
+        addA(k, 'fv edge', e === undefined ? 'n/a' : e < 0 ? '<0' : e < 0.03 ? '0-3c' : e < 0.06 ? '3-6c' : e < 0.1 ? '6-10c' : '10c+', t.pnl);
+        addA(k, 'side bought', t.won ? 'won' : 'lost', t.pnl);
+        addA(k, 'bought by', t.entryHow ?? 'n/a', t.pnl);
+        addA(k, 'exit', t.exitKind ?? 'n/a', t.pnl);
+        addA(k, 'side x outcome', `${t.entrySide.toUpperCase()} ${t.won ? 'won' : 'lost'}`, t.pnl);
+      }
     }
     replay.pnl += t.pnl; replay.markets++;
     const h = hourOf(t.closeTs);
@@ -737,6 +751,7 @@ export async function replayCheck(o: ReplayCheckOpts): Promise<ReplayCheck> {
       return `${k} ${tot.n} / ${g(tot.pnl)}: ${rows.map(([lo, b]) => `${lo + step}-${lo} s ${b.n} / ${g(b.pnl)}${b.train ? ` (train ${b.train} / ${g(b.trainPnl)})` : ''}`).join(', ') || 'none'}`;
     });
     const L = S.loserExits;
+    replay.anatomy = `trade anatomy (settled markets / P&L by the first entry fill): ${(['15m', 'hourly'] as const).map((k) => `${k}: ${Object.entries(anat[k]).map(([dim, xs]) => `${dim} ${Object.entries(xs).sort((a, b) => b[1].n - a[1].n).map(([key, b]) => `${key} ${b.n} / ${g(b.pnl)}`).join(', ')}`).join('; ') || 'none'}`).join(' | ')}`;
     replay.entryTiming = `entry timing (15m window ${S.entryWindowUpdown.join('-')} s, hourly ${S.entryWindowHourly.join('-')} s, cadence ${S.cadence}, training ${S.trainTrades}/h, gate ${L?.gate ? `on ${L.gateMargin}` : 'off'}, cut ${L?.cut ? 'on' : 'off'}, window cut ${L?.window ? `${L.windowJudge ?? 'bid'}${L.windowShare ? ` from ${L.windowShare}` : ''}` : 'off'}, no entry ${L?.noEntryShare ?? 0}, share window ${S.shareWindowMaxSec > 0 ? `max ${S.shareWindowMaxSec} s` : 'the listing'}, floor ticks ${S.pacer.floorTicks ?? 0}; settled markets / P&L by the first entry fill's seconds to the close): ${kinds.join(' | ')}`;
   }
   if (x.byKind) replay.exitAudit = `exit audit${x.lateFills ? ` (entry and quote fills in the last 10% of the window: ${x.lateFills} fills ${(x.lateContracts ?? 0).toFixed(0)} c)` : ''}, sold after fees / held to settlement / best later bid after fees: ${Object.entries(x.byKind).sort((a, b) => b[1].contracts - a[1].contracts)
@@ -836,6 +851,7 @@ async function main(): Promise<void> {
   if (res.replay.hunt) console.log(res.replay.hunt);
   if (res.replay.exitAudit) console.log(res.replay.exitAudit);
   if (res.replay.entryTiming) console.log(res.replay.entryTiming);
+  if (res.replay.anatomy) console.log(res.replay.anatomy);
   const purposes = (s: SideSummary) => Object.entries(s.byPurpose).sort().map(([k, x]) => `${k} ${x.fills}/${x.contracts.toFixed(0)}`).join(', ') || 'none';
   console.log(`fills/contracts by order purpose: replay ${purposes(res.replay)} | paper ${purposes(res.paper)}`);
   const X = res.replay.extra, rej = Object.entries(X.rejected).sort((x, y) => y[1] - x[1]).slice(0, 3).map(([k, n]) => `${k} x${n}`).join('; ');

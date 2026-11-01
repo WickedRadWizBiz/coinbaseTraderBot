@@ -135,7 +135,11 @@ export interface SessionBreakdown { windows: number; pnl: number; contracts: num
 /** One traded contract (a market in which a position was taken), settled. */
 export interface TradeResult { ticker: string; closeTs: number; pnl: number; contracts: number; kind: string;
   /** Lab: seconds to the close at the market's first entry or quote fill, and whether that fill was a training trade. */
-  entrySec?: number; entryTrain?: boolean }
+  entrySec?: number; entryTrain?: boolean;
+  /** Lab (trade anatomy): that first fill's side, its cost and the spot fair value of the side then, how it was bought
+   *  (quote: a resting maker quote; entry: a taker entry; train: a training trade), whether the side bought settled in the
+   *  money, and the exit that sold most of the position (settled: none). */
+  entrySide?: 'yes' | 'no'; entryCost?: number; entryFv?: number; entryHow?: 'quote' | 'entry' | 'train'; won?: boolean; exitKind?: string }
 
 export interface BacktestResult {
   exitPolicy: ExitPolicyName;
@@ -430,7 +434,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
   let firstTs = 0;
   const closeOf = new Map<string, number>();
   const windowOf = new Map<string, number>(); // each market's window, open to close (ms)
-  const firstEntry = new Map<string, { sec: number; train: boolean }>(); // lab: each market's first entry or quote fill
+  const firstEntry = new Map<string, { sec: number; train: boolean; side: 'yes' | 'no'; cost: number; fv?: number; how: 'quote' | 'entry' | 'train' }>(); // lab: each market's first entry or quote fill
   const trainIds = new Set<string>(); // lab: the training trades' order ids
   const lastFair = new Map<string, number>(); // the exit audit: each market's last spot fair value (YES)
   const ratchets = new Map<string, LiquidityRatchet>();
@@ -520,7 +524,11 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     if (opts.paper && !f.isTaker) markoutDue.push({ due: st.now + 60_000, ticker: f.ticker, sign: f.side === 'bid' ? 1 : -1, price: f.price });
     const winMs = windowOf.get(f.ticker);
     if (purposeOf(f.clientOrderId) !== 'exit' && winMs && w - st.now <= 0.1 * winMs) { exits.lateFills = (exits.lateFills ?? 0) + 1; exits.lateContracts = (exits.lateContracts ?? 0) + f.count; }
-    if (purposeOf(f.clientOrderId) !== 'exit' && !firstEntry.has(f.ticker)) firstEntry.set(f.ticker, { sec: (w - st.now) / 1000, train: trainIds.has(f.clientOrderId ?? '') });
+    if (purposeOf(f.clientOrderId) !== 'exit' && !firstEntry.has(f.ticker)) {
+      const side = f.side === 'bid' ? 'yes' : 'no', fvYes = lastFair.get(f.ticker), train = trainIds.has(f.clientOrderId ?? '');
+      firstEntry.set(f.ticker, { sec: (w - st.now) / 1000, train, side, cost: side === 'yes' ? f.price : Math.round((1 - f.price) * 10000) / 10000,
+        ...(fvYes !== undefined ? { fv: side === 'yes' ? fvYes : 1 - fvYes } : {}), how: train ? 'train' : purposeOf(f.clientOrderId) === 'quote' ? 'quote' : 'entry' });
+    }
     const bp = (res.byPurpose![purposeOf(f.clientOrderId)] ??= { fills: 0, contracts: 0 });
     bp.fills++; bp.contracts += f.count;
     if (f.clientOrderId?.endsWith('-exit-wall')) exits.wallFills += f.count;
@@ -639,6 +647,9 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
               k.underSettled = (k.underSettled ?? 0) + (won ? x.n : 0); k.underFv = (k.underFv ?? 0) + x.n * x.fv;
             }
           }
+          const exitC: Record<string, number> = {};
+          for (const x of exitLedger.get(m.ticker) ?? []) exitC[x.kind] = (exitC[x.kind] ?? 0) + x.n;
+          const exitKind = Object.entries(exitC).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'settled';
           exitLedger.delete(m.ticker);
           lastFair.delete(m.ticker);
           windowOf.delete(m.ticker);
@@ -658,7 +669,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
             const traded = res.windows.get(m.closeTime)?.contracts ?? 0;
             const fe = firstEntry.get(m.ticker);
             firstEntry.delete(m.ticker);
-            if (traded > 0) res.trades.push({ ticker: m.ticker, closeTs: m.closeTime, pnl: p.realized ?? 0, contracts: traded, kind: m.kind, ...(fe ? { entrySec: fe.sec, entryTrain: fe.train } : {}) });
+            if (traded > 0) res.trades.push({ ticker: m.ticker, closeTs: m.closeTime, pnl: p.realized ?? 0, contracts: traded, kind: m.kind, exitKind,
+              ...(fe ? { entrySec: fe.sec, entryTrain: fe.train, entrySide: fe.side, entryCost: fe.cost, ...(fe.fv !== undefined ? { entryFv: fe.fv } : {}), entryHow: fe.how, won: fe.side === result } : {}) });
             const b = res.windows.get(m.closeTime) ?? { pnl: 0, contracts: 0, fees: 0 };
             b.pnl += p.realized ?? 0;
             res.windows.set(m.closeTime, b);
