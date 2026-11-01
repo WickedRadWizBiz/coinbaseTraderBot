@@ -226,6 +226,15 @@ export function trainingCount(cost: number, v: Pick<MarketView, 'orderBandUsd' |
   return Math.max(n, 0.01);
 }
 
+/** The window the share rules measure (the last share STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC, LOSER_WINDOW_SHARE, LOSER_NO_ENTRY_SHARE):
+ *  open to close, at most `maxSec` (STRATEGY_SHARE_WINDOW_MAX_SEC, an hour; 0 = no cap). A 15-minute contract keeps its 900 s;
+ *  an hourly or daily ladder or a range bracket listed hours ahead is measured on the hour the bot trades it in. */
+export function shareWindowSec(openTime: number, closeTime: number, maxSec: number): number | undefined {
+  if (!Number.isFinite(openTime) || !(closeTime > openTime)) return undefined;
+  const span = (closeTime - openTime) / 1000;
+  return maxSec > 0 ? Math.min(span, maxSec) : span;
+}
+
 /** Where the loser window cut runs: the last share of the window (settleShare), the final minute, and from LOSER_WINDOW_SHARE
  *  of the window left when that is set. */
 export function inLoserWindow(v: Pick<MarketView, 'settleShare' | 'exitWindowOpen' | 'tauSec' | 'windowSec'>, L: LoserExitConfig): boolean {
