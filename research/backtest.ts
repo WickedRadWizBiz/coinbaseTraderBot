@@ -502,7 +502,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       list.push({ side: f.side, cost: f.side === 'bid' ? f.price : 1 - f.price, count: f.count });
       ofOpen.set(f.ticker, list.slice(-50));
     }
-    if (opts.paper && !f.isTaker) markoutDue.push({ due: st.now + 60_000, ticker: f.ticker, sign: f.side === 'bid' ? 1 : -1, price: f.price });
+    // Every maker fill's markout is measured (the run's makerMarkout); only paper sizing feeds the adaptive buffer.
+    if (!f.isTaker) markoutDue.push({ due: st.now + 60_000, ticker: f.ticker, sign: f.side === 'bid' ? 1 : -1, price: f.price });
     const bp = (res.byPurpose![purposeOf(f.clientOrderId)] ??= { fills: 0, contracts: 0 });
     bp.fills++; bp.contracts += f.count;
     if (f.clientOrderId?.endsWith('-exit-wall')) exits.wallFills += f.count;
@@ -569,8 +570,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const x = markoutDue.shift()!;
       const mid = st.books.get(x.ticker)?.mid();
       if (mid === undefined) continue;
-      markouts.push(x.sign * (mid - x.price));
-      if (markouts.length > MARKOUT_KEEP) markouts.shift();
+      if (opts.paper) { markouts.push(x.sign * (mid - x.price)); if (markouts.length > MARKOUT_KEEP) markouts.shift(); }
       const mk = (res.makerMarkout ??= { n: 0, mean: 0 });
       mk.n++; mk.mean += (x.sign * (mid - x.price) - mk.mean) / mk.n;
     }
