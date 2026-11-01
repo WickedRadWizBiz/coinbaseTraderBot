@@ -1,21 +1,16 @@
-# Benched lab round 3 (2026-11-01 ~07:00 UTC / 3:00 AM EDT). Round 2 (same day, mean of 5 bankrolls, $/day): base -206.7
-# | tp1 -173.7 | tp1_gb50 -181.3 | tp2_gb50 -187.1 | tp1_tight -182.8 | rest_x3 -191.5 | skill75 -151.8 | skill50 -179.6
-# | skill25 -183.2 | rest, prob_hi, prob_open = tp1 (no resting sell in the backtest; the take/fill steps never bind).
-# Round 3: the cross inverted into a dip buy (SINUOUS_DIP_BUY), the skill weight around 0.75, the probation's GP vote
-# graded (PROBATION_GP_MULT), and combinations. Bankroll noise sd ~ $60/day.
+# Benched lab round 4 (2026-11-01 ~15:10 UTC / 10:10 AM EST), on the losses thread's latest loser exits (ef116e7).
+# Round 3 (mean of 5 bankrolls, $/day; paired vs tp1 -173.7): skill75 +22 | skill85 -41 | skill60 -25 | dip4 -65 (~225
+# dip buys a day) | dip8 -9 (58) | dip4_x3 -71 | s75_dip4 +3 | gp25 = gp0 = tp1 (no GP formula votes in the window).
+# Round 4: skill75 as the base for the dip buy, made rarer (wider margin, one per market, longer cooldown, smaller size).
 # days=2026-10-29,2026-10-30
 # from=2026-10-29T15:40:00Z
 # to=2026-10-30T15:40:00Z
 # reuse_run=41210511914
 base:
 tp1: TP_LEVEL=1
-skill85: TP_LEVEL=1 MODEL_SKILL_W=0.85
-skill75: TP_LEVEL=1 MODEL_SKILL_W=0.75
-skill60: TP_LEVEL=1 MODEL_SKILL_W=0.6
-dip4: TP_LEVEL=1 SINUOUS_DIP_BUY=true SINUOUS_DIP_MARGIN=0.04
-dip8: TP_LEVEL=1 SINUOUS_DIP_BUY=true SINUOUS_DIP_MARGIN=0.08
-dip4_x3: TP_LEVEL=1 SINUOUS_DIP_BUY=true SINUOUS_DIP_MARGIN=0.04 SINUOUS_CROSS=true SINUOUS_CROSS_LEVEL=3
-gp25: TP_LEVEL=1 PROBATION_GP_MULT=0.25
-gp0: TP_LEVEL=1 PROBATION_GP_MULT=1
-s75_dip4: TP_LEVEL=1 MODEL_SKILL_W=0.75 SINUOUS_DIP_BUY=true SINUOUS_DIP_MARGIN=0.04
-s75_gp25: TP_LEVEL=1 MODEL_SKILL_W=0.75 PROBATION_GP_MULT=0.25
+s75: TP_LEVEL=1 MODEL_SKILL_W=0.75
+s75_tp2: TP_LEVEL=2 MODEL_SKILL_W=0.75
+s75_dip8: TP_LEVEL=1 MODEL_SKILL_W=0.75 SINUOUS_DIP_BUY=true SINUOUS_DIP_MARGIN=0.08
+s75_dip12: TP_LEVEL=1 MODEL_SKILL_W=0.75 SINUOUS_DIP_BUY=true SINUOUS_DIP_MARGIN=0.12
+s75_dip8_1: TP_LEVEL=1 MODEL_SKILL_W=0.75 SINUOUS_DIP_BUY=true SINUOUS_DIP_MARGIN=0.08 SINUOUS_DIP_MAX=1 SINUOUS_DIP_COOLDOWN_SEC=300
+s75_dip8_q: TP_LEVEL=1 MODEL_SKILL_W=0.75 SINUOUS_DIP_BUY=true SINUOUS_DIP_MARGIN=0.08 SINUOUS_DIP_FRAC=0.25
