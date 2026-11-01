@@ -1,0 +1,3767 @@
+{
+  "now": {
+    "asOf": "2026-10-26",
+    "parent": "2016-12-16",
+    "progress": 0.476,
+    "phase": "base before the waterfall (parent swing 1 of 8)",
+    "dilation": 9.2,
+    "localDilation": 16,
+    "map": {
+      "a": -188.52,
+      "b": 2.5
+    },
+    "fit": {
+      "r": 0.54,
+      "recentR": -0.141,
+      "maePts": 6.31,
+      "recentMaePts": 5.3
+    },
+    "btcd": 60.56,
+    "proj": {
+      "d30": 59.5,
+      "d90": 57.56,
+      "d180": 57.36
+    },
+    "nextWaterfall": {
+      "start": "2029-08-10",
+      "end": "2029-11-08",
+      "from": 55.4,
+      "to": -21.1,
+      "weeksAway": 145.6,
+      "inside": false
+    },
+    "low": {
+      "at": "2035-06-18",
+      "btcd": -62.6
+    },
+    "gateCross": "2027-09-22"
+  },
+  "weekly": [
+    {
+      "asOf": "2018-12-31",
+      "parent": "2016-11-18",
+      "progress": 0.437,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.229,
+      "recentFit": 0.229,
+      "btcd": 54.59
+    },
+    {
+      "asOf": "2019-01-07",
+      "parent": "2016-11-18",
+      "progress": 0.437,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.234,
+      "recentFit": 0.309,
+      "btcd": 54.5
+    },
+    {
+      "asOf": "2019-01-14",
+      "parent": "2016-11-18",
+      "progress": 0.437,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.24,
+      "recentFit": 0.417,
+      "btcd": 55.99
+    },
+    {
+      "asOf": "2019-01-21",
+      "parent": "2016-11-18",
+      "progress": 0.437,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.245,
+      "recentFit": 0.515,
+      "btcd": 55.42
+    },
+    {
+      "asOf": "2019-01-28",
+      "parent": "2016-11-18",
+      "progress": 0.437,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.249,
+      "recentFit": 0.626,
+      "btcd": 55.9
+    },
+    {
+      "asOf": "2019-02-04",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.44,
+      "recentFit": -0.194,
+      "btcd": 56.29
+    },
+    {
+      "asOf": "2019-02-11",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.438,
+      "recentFit": -0.159,
+      "btcd": 55.24
+    },
+    {
+      "asOf": "2019-02-18",
+      "parent": "2016-11-18",
+      "progress": 0.437,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.288,
+      "recentFit": 0.913,
+      "btcd": 54.96
+    },
+    {
+      "asOf": "2019-02-25",
+      "parent": "2016-11-18",
+      "progress": 0.437,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.293,
+      "recentFit": 0.91,
+      "btcd": 55.22
+    },
+    {
+      "asOf": "2019-03-04",
+      "parent": "2016-11-18",
+      "progress": 0.437,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.296,
+      "recentFit": 0.908,
+      "btcd": 54.97
+    },
+    {
+      "asOf": "2019-03-11",
+      "parent": "2016-11-18",
+      "progress": 0.437,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.307,
+      "recentFit": 0.926,
+      "btcd": 54.41
+    },
+    {
+      "asOf": "2019-03-18",
+      "parent": "2016-03-18",
+      "progress": 0.097,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.446,
+      "recentFit": -0.06,
+      "btcd": 53.8
+    },
+    {
+      "asOf": "2019-03-25",
+      "parent": "2016-04-01",
+      "progress": 0.117,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.441,
+      "recentFit": -0.059,
+      "btcd": 53.57
+    },
+    {
+      "asOf": "2019-04-01",
+      "parent": "2016-02-12",
+      "progress": 0.049,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.774,
+      "recentFit": -0.71,
+      "btcd": 53.2
+    },
+    {
+      "asOf": "2019-04-08",
+      "parent": "2016-02-05",
+      "progress": 0.039,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.774,
+      "recentFit": -0.713,
+      "btcd": 53.35
+    },
+    {
+      "asOf": "2019-04-15",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.776,
+      "recentFit": -0.71,
+      "btcd": 54.61
+    },
+    {
+      "asOf": "2019-04-22",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.777,
+      "recentFit": -0.692,
+      "btcd": 55.51
+    },
+    {
+      "asOf": "2019-04-29",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.779,
+      "recentFit": -0.683,
+      "btcd": 57.43
+    },
+    {
+      "asOf": "2019-05-06",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.78,
+      "recentFit": -0.67,
+      "btcd": 58.64
+    },
+    {
+      "asOf": "2019-05-13",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.778,
+      "recentFit": -0.649,
+      "btcd": 61.48
+    },
+    {
+      "asOf": "2019-05-20",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.778,
+      "recentFit": -0.626,
+      "btcd": 59.36
+    },
+    {
+      "asOf": "2019-05-27",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.778,
+      "recentFit": -0.604,
+      "btcd": 60.08
+    },
+    {
+      "asOf": "2019-06-03",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.778,
+      "recentFit": -0.574,
+      "btcd": 58.49
+    },
+    {
+      "asOf": "2019-06-10",
+      "parent": "2016-03-04",
+      "progress": 0.078,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.782,
+      "recentFit": -0.554,
+      "btcd": 58.33
+    },
+    {
+      "asOf": "2019-06-17",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.781,
+      "recentFit": -0.508,
+      "btcd": 59.28
+    },
+    {
+      "asOf": "2019-06-24",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.78,
+      "recentFit": -0.454,
+      "btcd": 61.5
+    },
+    {
+      "asOf": "2019-07-01",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.776,
+      "recentFit": -0.379,
+      "btcd": 63.84
+    },
+    {
+      "asOf": "2019-07-08",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.772,
+      "recentFit": -0.288,
+      "btcd": 64.56
+    },
+    {
+      "asOf": "2019-07-15",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.763,
+      "recentFit": -0.17,
+      "btcd": 67.99
+    },
+    {
+      "asOf": "2019-07-22",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.756,
+      "recentFit": -0.071,
+      "btcd": 67.61
+    },
+    {
+      "asOf": "2019-07-29",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.751,
+      "recentFit": 0.007,
+      "btcd": 66.74
+    },
+    {
+      "asOf": "2019-08-05",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.744,
+      "recentFit": 0.105,
+      "btcd": 68.95
+    },
+    {
+      "asOf": "2019-08-12",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.735,
+      "recentFit": 0.159,
+      "btcd": 70.79
+    },
+    {
+      "asOf": "2019-08-19",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.728,
+      "recentFit": 0.178,
+      "btcd": 70.23
+    },
+    {
+      "asOf": "2019-08-26",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.717,
+      "recentFit": 0.231,
+      "btcd": 70.65
+    },
+    {
+      "asOf": "2019-09-02",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.714,
+      "recentFit": 0.206,
+      "btcd": 71.33
+    },
+    {
+      "asOf": "2019-09-09",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.708,
+      "recentFit": 0.206,
+      "btcd": 71.7
+    },
+    {
+      "asOf": "2019-09-16",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.703,
+      "recentFit": 0.213,
+      "btcd": 71.43
+    },
+    {
+      "asOf": "2019-09-23",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.7,
+      "recentFit": 0.247,
+      "btcd": 69.85
+    },
+    {
+      "asOf": "2019-09-30",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.698,
+      "recentFit": 0.28,
+      "btcd": 69.65
+    },
+    {
+      "asOf": "2019-10-07",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.697,
+      "recentFit": 0.308,
+      "btcd": 68.71
+    },
+    {
+      "asOf": "2019-10-14",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.695,
+      "recentFit": 0.328,
+      "btcd": 68.44
+    },
+    {
+      "asOf": "2019-10-21",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.694,
+      "recentFit": 0.355,
+      "btcd": 68.35
+    },
+    {
+      "asOf": "2019-10-28",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.685,
+      "recentFit": 0.447,
+      "btcd": 69.99
+    },
+    {
+      "asOf": "2019-11-04",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.683,
+      "recentFit": 0.492,
+      "btcd": 69.23
+    },
+    {
+      "asOf": "2019-11-11",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.681,
+      "recentFit": 0.542,
+      "btcd": 68.25
+    },
+    {
+      "asOf": "2019-11-18",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.68,
+      "recentFit": 0.594,
+      "btcd": 67.71
+    },
+    {
+      "asOf": "2019-11-25",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.679,
+      "recentFit": 0.645,
+      "btcd": 68.12
+    },
+    {
+      "asOf": "2019-12-02",
+      "parent": "2016-02-26",
+      "progress": 0.068,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.677,
+      "recentFit": 0.695,
+      "btcd": 68.35
+    },
+    {
+      "asOf": "2019-12-09",
+      "parent": "2016-03-04",
+      "progress": 0.078,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.679,
+      "recentFit": 0.696,
+      "btcd": 68.61
+    },
+    {
+      "asOf": "2019-12-16",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.776,
+      "recentFit": 0.113,
+      "btcd": 68.46
+    },
+    {
+      "asOf": "2019-12-23",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.772,
+      "recentFit": 0.119,
+      "btcd": 70.56
+    },
+    {
+      "asOf": "2019-12-30",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.77,
+      "recentFit": 0.106,
+      "btcd": 70.03
+    },
+    {
+      "asOf": "2020-01-06",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.768,
+      "recentFit": 0.094,
+      "btcd": 69.7
+    },
+    {
+      "asOf": "2020-01-13",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.764,
+      "recentFit": 0.096,
+      "btcd": 69.47
+    },
+    {
+      "asOf": "2020-01-20",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.774,
+      "recentFit": 0.003,
+      "btcd": 67.47
+    },
+    {
+      "asOf": "2020-01-27",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.753,
+      "recentFit": 0.101,
+      "btcd": 67.16
+    },
+    {
+      "asOf": "2020-02-03",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.777,
+      "recentFit": -0.042,
+      "btcd": 66.65
+    },
+    {
+      "asOf": "2020-02-10",
+      "parent": "2016-03-04",
+      "progress": 0.078,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.69,
+      "recentFit": 0.556,
+      "btcd": 65.06
+    },
+    {
+      "asOf": "2020-02-17",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.393,
+      "recentFit": 0.752,
+      "btcd": 64.22
+    },
+    {
+      "asOf": "2020-02-24",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.396,
+      "recentFit": 0.736,
+      "btcd": 63.84
+    },
+    {
+      "asOf": "2020-03-02",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.399,
+      "recentFit": 0.719,
+      "btcd": 65.48
+    },
+    {
+      "asOf": "2020-03-09",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.4,
+      "recentFit": 0.696,
+      "btcd": 66.14
+    },
+    {
+      "asOf": "2020-03-16",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.403,
+      "recentFit": 0.662,
+      "btcd": 65.55
+    },
+    {
+      "asOf": "2020-03-23",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.433,
+      "recentFit": 0.615,
+      "btcd": 66.89
+    },
+    {
+      "asOf": "2020-03-30",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.436,
+      "recentFit": 0.544,
+      "btcd": 66.42
+    },
+    {
+      "asOf": "2020-04-06",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.439,
+      "recentFit": 0.433,
+      "btcd": 66.42
+    },
+    {
+      "asOf": "2020-04-13",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.442,
+      "recentFit": 0.442,
+      "btcd": 65.3
+    },
+    {
+      "asOf": "2020-04-20",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.43,
+      "recentFit": 0.27,
+      "btcd": 64.52
+    },
+    {
+      "asOf": "2020-04-27",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.431,
+      "recentFit": 0.097,
+      "btcd": 64.72
+    },
+    {
+      "asOf": "2020-05-04",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.448,
+      "recentFit": -0.387,
+      "btcd": 66.74
+    },
+    {
+      "asOf": "2020-05-11",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.447,
+      "recentFit": -0.361,
+      "btcd": 67.98
+    },
+    {
+      "asOf": "2020-05-18",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.451,
+      "recentFit": -0.32,
+      "btcd": 68.13
+    },
+    {
+      "asOf": "2020-05-25",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.454,
+      "recentFit": -0.261,
+      "btcd": 66.65
+    },
+    {
+      "asOf": "2020-06-01",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.456,
+      "recentFit": -0.17,
+      "btcd": 66.39
+    },
+    {
+      "asOf": "2020-06-08",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.458,
+      "recentFit": -0.035,
+      "btcd": 64.16
+    },
+    {
+      "asOf": "2020-06-15",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.46,
+      "recentFit": 0.128,
+      "btcd": 64.38
+    },
+    {
+      "asOf": "2020-06-22",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.462,
+      "recentFit": 0.272,
+      "btcd": 64.33
+    },
+    {
+      "asOf": "2020-06-29",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.467,
+      "recentFit": 0.377,
+      "btcd": 64.34
+    },
+    {
+      "asOf": "2020-07-06",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.469,
+      "recentFit": 0.474,
+      "btcd": 63.67
+    },
+    {
+      "asOf": "2020-07-13",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.473,
+      "recentFit": 0.386,
+      "btcd": 61.99
+    },
+    {
+      "asOf": "2020-07-20",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.474,
+      "recentFit": 0.388,
+      "btcd": 61.77
+    },
+    {
+      "asOf": "2020-07-27",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.474,
+      "recentFit": 0.399,
+      "btcd": 60.76
+    },
+    {
+      "asOf": "2020-08-03",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.475,
+      "recentFit": 0.378,
+      "btcd": 60.65
+    },
+    {
+      "asOf": "2020-08-10",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.791,
+      "recentFit": 0.328,
+      "btcd": 60.37
+    },
+    {
+      "asOf": "2020-08-17",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.79,
+      "recentFit": 0.246,
+      "btcd": 58.63
+    },
+    {
+      "asOf": "2020-08-24",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.789,
+      "recentFit": 0.218,
+      "btcd": 59.61
+    },
+    {
+      "asOf": "2020-08-31",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.786,
+      "recentFit": 0.194,
+      "btcd": 58.93
+    },
+    {
+      "asOf": "2020-09-07",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.785,
+      "recentFit": 0.156,
+      "btcd": 58.89
+    },
+    {
+      "asOf": "2020-09-14",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.783,
+      "recentFit": 0.116,
+      "btcd": 58.18
+    },
+    {
+      "asOf": "2020-09-21",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.778,
+      "recentFit": 0.16,
+      "btcd": 59.55
+    },
+    {
+      "asOf": "2020-09-28",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.777,
+      "recentFit": 0.129,
+      "btcd": 59.31
+    },
+    {
+      "asOf": "2020-10-05",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.776,
+      "recentFit": 0.103,
+      "btcd": 59.37
+    },
+    {
+      "asOf": "2020-10-12",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.775,
+      "recentFit": 0.076,
+      "btcd": 59.87
+    },
+    {
+      "asOf": "2020-10-19",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.775,
+      "recentFit": 0.046,
+      "btcd": 60.14
+    },
+    {
+      "asOf": "2020-10-26",
+      "parent": "2016-05-20",
+      "progress": 0.184,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.773,
+      "recentFit": 0.037,
+      "btcd": 61.81
+    },
+    {
+      "asOf": "2020-11-02",
+      "parent": "2016-05-20",
+      "progress": 0.184,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.771,
+      "recentFit": 0.025,
+      "btcd": 63.57
+    },
+    {
+      "asOf": "2020-11-09",
+      "parent": "2016-05-20",
+      "progress": 0.184,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.771,
+      "recentFit": 0.067,
+      "btcd": 65.06
+    },
+    {
+      "asOf": "2020-11-16",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.643,
+      "recentFit": 0.773,
+      "btcd": 65.55
+    },
+    {
+      "asOf": "2020-11-23",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.644,
+      "recentFit": 0.767,
+      "btcd": 64.74
+    },
+    {
+      "asOf": "2020-11-30",
+      "parent": "2016-03-18",
+      "progress": 0.097,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.661,
+      "recentFit": 0.659,
+      "btcd": 62.76
+    },
+    {
+      "asOf": "2020-12-07",
+      "parent": "2016-03-18",
+      "progress": 0.097,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.658,
+      "recentFit": 0.646,
+      "btcd": 63.58
+    },
+    {
+      "asOf": "2020-12-14",
+      "parent": "2016-03-18",
+      "progress": 0.097,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.648,
+      "recentFit": 0.695,
+      "btcd": 64.22
+    },
+    {
+      "asOf": "2020-12-21",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.661,
+      "recentFit": 0.595,
+      "btcd": 66.99
+    },
+    {
+      "asOf": "2020-12-28",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.648,
+      "recentFit": 0.683,
+      "btcd": 70.21
+    },
+    {
+      "asOf": "2021-01-04",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.648,
+      "recentFit": 0.664,
+      "btcd": 70.35
+    },
+    {
+      "asOf": "2021-01-11",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.643,
+      "recentFit": 0.699,
+      "btcd": 68.72
+    },
+    {
+      "asOf": "2021-01-18",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.643,
+      "recentFit": 0.694,
+      "btcd": 66.81
+    },
+    {
+      "asOf": "2021-01-25",
+      "parent": "2016-04-22",
+      "progress": 0.146,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.644,
+      "recentFit": 0.679,
+      "btcd": 63.05
+    },
+    {
+      "asOf": "2021-02-01",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.661,
+      "recentFit": 0.52,
+      "btcd": 63.09
+    },
+    {
+      "asOf": "2021-02-08",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.661,
+      "recentFit": 0.51,
+      "btcd": 61.92
+    },
+    {
+      "asOf": "2021-02-15",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.661,
+      "recentFit": 0.506,
+      "btcd": 61.74
+    },
+    {
+      "asOf": "2021-02-22",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.666,
+      "recentFit": 0.501,
+      "btcd": 62.4
+    },
+    {
+      "asOf": "2021-03-01",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.667,
+      "recentFit": 0.484,
+      "btcd": 61.73
+    },
+    {
+      "asOf": "2021-03-08",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.667,
+      "recentFit": 0.455,
+      "btcd": 61.11
+    },
+    {
+      "asOf": "2021-03-15",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.667,
+      "recentFit": 0.442,
+      "btcd": 62.78
+    },
+    {
+      "asOf": "2021-03-22",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.667,
+      "recentFit": 0.403,
+      "btcd": 61.31
+    },
+    {
+      "asOf": "2021-03-29",
+      "parent": "2016-05-13",
+      "progress": 0.175,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.667,
+      "recentFit": 0.363,
+      "btcd": 60.99
+    },
+    {
+      "asOf": "2021-04-05",
+      "parent": "2016-07-15",
+      "progress": 0.262,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.453,
+      "recentFit": 0.349,
+      "btcd": 57.85
+    },
+    {
+      "asOf": "2021-04-12",
+      "parent": "2016-07-15",
+      "progress": 0.262,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.356,
+      "recentFit": 0.45,
+      "btcd": 55.74
+    },
+    {
+      "asOf": "2021-04-19",
+      "parent": "2016-07-15",
+      "progress": 0.262,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.276,
+      "recentFit": 0.581,
+      "btcd": 52.44
+    },
+    {
+      "asOf": "2021-04-26",
+      "parent": "2016-07-15",
+      "progress": 0.262,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": -0.218,
+      "recentFit": 0.659,
+      "btcd": 51.28
+    },
+    {
+      "asOf": "2021-05-03",
+      "parent": "2017-05-19",
+      "progress": 0.689,
+      "phase": "base before the dominance rising (parent swing 2 of 8)",
+      "fit": 0.033,
+      "recentFit": 0.723,
+      "btcd": 49.01
+    },
+    {
+      "asOf": "2021-05-10",
+      "parent": "2017-05-19",
+      "progress": 0.689,
+      "phase": "base before the dominance rising (parent swing 2 of 8)",
+      "fit": 0.092,
+      "recentFit": 0.797,
+      "btcd": 45.39
+    },
+    {
+      "asOf": "2021-05-17",
+      "parent": "2017-05-19",
+      "progress": 0.689,
+      "phase": "base before the dominance rising (parent swing 2 of 8)",
+      "fit": 0.154,
+      "recentFit": 0.85,
+      "btcd": 40.82
+    },
+    {
+      "asOf": "2021-05-24",
+      "parent": "2017-05-19",
+      "progress": 0.689,
+      "phase": "dominance rising (parent swing 2 of 8, 0% through)",
+      "fit": 0.181,
+      "recentFit": 0.869,
+      "btcd": 46.76
+    },
+    {
+      "asOf": "2021-05-31",
+      "parent": "2017-05-19",
+      "progress": 0.689,
+      "phase": "dominance rising (parent swing 2 of 8, 0% through)",
+      "fit": 0.213,
+      "recentFit": 0.888,
+      "btcd": 43.96
+    },
+    {
+      "asOf": "2021-06-07",
+      "parent": "2017-05-19",
+      "progress": 0.689,
+      "phase": "dominance rising (parent swing 2 of 8, 0% through)",
+      "fit": 0.247,
+      "recentFit": 0.903,
+      "btcd": 41.73
+    },
+    {
+      "asOf": "2021-06-14",
+      "parent": "2017-05-19",
+      "progress": 0.689,
+      "phase": "dominance rising (parent swing 2 of 8, 0% through)",
+      "fit": 0.267,
+      "recentFit": 0.91,
+      "btcd": 45.45
+    },
+    {
+      "asOf": "2021-06-21",
+      "parent": "2017-05-19",
+      "progress": 0.689,
+      "phase": "dominance rising (parent swing 2 of 8, 0% through)",
+      "fit": 0.286,
+      "recentFit": 0.917,
+      "btcd": 45.24
+    },
+    {
+      "asOf": "2021-06-28",
+      "parent": "2017-06-02",
+      "progress": 0.709,
+      "phase": "dominance rising (parent swing 2 of 8, 25% through)",
+      "fit": 0.297,
+      "recentFit": 0.92,
+      "btcd": 47.64
+    },
+    {
+      "asOf": "2021-07-05",
+      "parent": "2017-06-02",
+      "progress": 0.709,
+      "phase": "dominance rising (parent swing 2 of 8, 25% through)",
+      "fit": 0.312,
+      "recentFit": 0.924,
+      "btcd": 45.66
+    },
+    {
+      "asOf": "2021-07-12",
+      "parent": "2017-06-02",
+      "progress": 0.709,
+      "phase": "dominance rising (parent swing 2 of 8, 25% through)",
+      "fit": 0.325,
+      "recentFit": 0.928,
+      "btcd": 46.17
+    },
+    {
+      "asOf": "2021-07-19",
+      "parent": "2017-06-16",
+      "progress": 0.728,
+      "phase": "dominance rising (parent swing 2 of 8, 50% through)",
+      "fit": 0.336,
+      "recentFit": 0.931,
+      "btcd": 46.43
+    },
+    {
+      "asOf": "2021-07-26",
+      "parent": "2017-06-16",
+      "progress": 0.728,
+      "phase": "dominance rising (parent swing 2 of 8, 50% through)",
+      "fit": 0.344,
+      "recentFit": 0.921,
+      "btcd": 46.84
+    },
+    {
+      "asOf": "2021-08-02",
+      "parent": "2017-06-23",
+      "progress": 0.738,
+      "phase": "dominance rising (parent swing 2 of 8, 63% through)",
+      "fit": 0.354,
+      "recentFit": 0.924,
+      "btcd": 47.05
+    },
+    {
+      "asOf": "2021-08-09",
+      "parent": "2017-06-16",
+      "progress": 0.728,
+      "phase": "dominance rising (parent swing 2 of 8, 50% through)",
+      "fit": 0.363,
+      "recentFit": 0.928,
+      "btcd": 46.69
+    },
+    {
+      "asOf": "2021-08-16",
+      "parent": "2017-06-16",
+      "progress": 0.728,
+      "phase": "dominance rising (parent swing 2 of 8, 50% through)",
+      "fit": 0.376,
+      "recentFit": 0.936,
+      "btcd": 44.06
+    },
+    {
+      "asOf": "2021-08-23",
+      "parent": "2017-06-23",
+      "progress": 0.738,
+      "phase": "dominance rising (parent swing 2 of 8, 63% through)",
+      "fit": 0.388,
+      "recentFit": 0.939,
+      "btcd": 44.29
+    },
+    {
+      "asOf": "2021-08-30",
+      "parent": "2017-06-23",
+      "progress": 0.738,
+      "phase": "dominance rising (parent swing 2 of 8, 63% through)",
+      "fit": 0.399,
+      "recentFit": 0.944,
+      "btcd": 43.73
+    },
+    {
+      "asOf": "2021-09-06",
+      "parent": "2017-07-21",
+      "progress": 0.777,
+      "phase": "waterfall (parent swing 3 of 8, 14% through)",
+      "fit": 0.417,
+      "recentFit": 0.944,
+      "btcd": 41.03
+    },
+    {
+      "asOf": "2021-09-13",
+      "parent": "2017-07-21",
+      "progress": 0.777,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.432,
+      "recentFit": 0.954,
+      "btcd": 40.27
+    },
+    {
+      "asOf": "2021-09-20",
+      "parent": "2017-07-21",
+      "progress": 0.777,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.446,
+      "recentFit": 0.957,
+      "btcd": 41.51
+    },
+    {
+      "asOf": "2021-09-27",
+      "parent": "2017-07-21",
+      "progress": 0.777,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.458,
+      "recentFit": 0.961,
+      "btcd": 41.43
+    },
+    {
+      "asOf": "2021-10-04",
+      "parent": "2017-07-21",
+      "progress": 0.777,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.47,
+      "recentFit": 0.964,
+      "btcd": 41.45
+    },
+    {
+      "asOf": "2021-10-11",
+      "parent": "2017-08-18",
+      "progress": 0.816,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.477,
+      "recentFit": 0.964,
+      "btcd": 44.85
+    },
+    {
+      "asOf": "2021-10-18",
+      "parent": "2017-08-18",
+      "progress": 0.816,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.482,
+      "recentFit": 0.962,
+      "btcd": 46.54
+    },
+    {
+      "asOf": "2021-10-25",
+      "parent": "2017-08-18",
+      "progress": 0.816,
+      "phase": "waterfall (parent swing 3 of 8, 71% through)",
+      "fit": 0.488,
+      "recentFit": 0.961,
+      "btcd": 44.96
+    },
+    {
+      "asOf": "2021-11-01",
+      "parent": "2017-08-18",
+      "progress": 0.816,
+      "phase": "waterfall (parent swing 3 of 8, 71% through)",
+      "fit": 0.495,
+      "recentFit": 0.961,
+      "btcd": 44.11
+    },
+    {
+      "asOf": "2021-11-08",
+      "parent": "2017-08-18",
+      "progress": 0.816,
+      "phase": "waterfall (parent swing 3 of 8, 71% through)",
+      "fit": 0.502,
+      "recentFit": 0.96,
+      "btcd": 43.05
+    },
+    {
+      "asOf": "2021-11-15",
+      "parent": "2017-08-18",
+      "progress": 0.816,
+      "phase": "waterfall (parent swing 3 of 8, 71% through)",
+      "fit": 0.509,
+      "recentFit": 0.958,
+      "btcd": 43.63
+    },
+    {
+      "asOf": "2021-11-22",
+      "parent": "2017-08-18",
+      "progress": 0.816,
+      "phase": "waterfall (parent swing 3 of 8, 71% through)",
+      "fit": 0.516,
+      "recentFit": 0.957,
+      "btcd": 42.88
+    },
+    {
+      "asOf": "2021-11-29",
+      "parent": "2017-08-18",
+      "progress": 0.816,
+      "phase": "waterfall (parent swing 3 of 8, 71% through)",
+      "fit": 0.523,
+      "recentFit": 0.957,
+      "btcd": 42.81
+    },
+    {
+      "asOf": "2021-12-06",
+      "parent": "2017-08-25",
+      "progress": 0.825,
+      "phase": "waterfall (parent swing 3 of 8, 86% through)",
+      "fit": 0.532,
+      "recentFit": 0.956,
+      "btcd": 41.15
+    },
+    {
+      "asOf": "2021-12-13",
+      "parent": "2017-09-08",
+      "progress": 0.845,
+      "phase": "base before the dominance rising (parent swing 4 of 8)",
+      "fit": 0.54,
+      "recentFit": 0.955,
+      "btcd": 41.55
+    },
+    {
+      "asOf": "2021-12-20",
+      "parent": "2017-09-01",
+      "progress": 0.835,
+      "phase": "base before the dominance rising (parent swing 4 of 8)",
+      "fit": 0.548,
+      "recentFit": 0.954,
+      "btcd": 40.36
+    },
+    {
+      "asOf": "2021-12-27",
+      "parent": "2017-09-01",
+      "progress": 0.835,
+      "phase": "base before the dominance rising (parent swing 4 of 8)",
+      "fit": 0.556,
+      "recentFit": 0.957,
+      "btcd": 40.08
+    },
+    {
+      "asOf": "2022-01-03",
+      "parent": "2017-09-01",
+      "progress": 0.835,
+      "phase": "base before the dominance rising (parent swing 4 of 8)",
+      "fit": 0.564,
+      "recentFit": 0.962,
+      "btcd": 39.85
+    },
+    {
+      "asOf": "2022-01-10",
+      "parent": "2017-08-25",
+      "progress": 0.825,
+      "phase": "waterfall (parent swing 3 of 8, 86% through)",
+      "fit": 0.571,
+      "recentFit": 0.964,
+      "btcd": 40.34
+    },
+    {
+      "asOf": "2022-01-17",
+      "parent": "2017-09-01",
+      "progress": 0.835,
+      "phase": "base before the dominance rising (parent swing 4 of 8)",
+      "fit": 0.579,
+      "recentFit": 0.966,
+      "btcd": 39.36
+    },
+    {
+      "asOf": "2022-01-24",
+      "parent": "2017-09-15",
+      "progress": 0.854,
+      "phase": "dominance rising (parent swing 4 of 8, 13% through)",
+      "fit": 0.585,
+      "recentFit": 0.964,
+      "btcd": 41.06
+    },
+    {
+      "asOf": "2022-01-31",
+      "parent": "2017-09-15",
+      "progress": 0.854,
+      "phase": "dominance rising (parent swing 4 of 8, 13% through)",
+      "fit": 0.59,
+      "recentFit": 0.961,
+      "btcd": 42.38
+    },
+    {
+      "asOf": "2022-02-07",
+      "parent": "2017-10-06",
+      "progress": 0.883,
+      "phase": "dominance rising (parent swing 4 of 8, 50% through)",
+      "fit": 0.596,
+      "recentFit": 0.962,
+      "btcd": 41.99
+    },
+    {
+      "asOf": "2022-02-14",
+      "parent": "2017-10-13",
+      "progress": 0.893,
+      "phase": "dominance rising (parent swing 4 of 8, 63% through)",
+      "fit": 0.6,
+      "recentFit": 0.958,
+      "btcd": 43.01
+    },
+    {
+      "asOf": "2022-02-21",
+      "parent": "2017-10-13",
+      "progress": 0.893,
+      "phase": "dominance rising (parent swing 4 of 8, 63% through)",
+      "fit": 0.604,
+      "recentFit": 0.955,
+      "btcd": 42.48
+    },
+    {
+      "asOf": "2022-02-28",
+      "parent": "2017-10-13",
+      "progress": 0.893,
+      "phase": "dominance rising (parent swing 4 of 8, 63% through)",
+      "fit": 0.608,
+      "recentFit": 0.95,
+      "btcd": 42.58
+    },
+    {
+      "asOf": "2022-03-07",
+      "parent": "2017-10-13",
+      "progress": 0.893,
+      "phase": "dominance rising (parent swing 4 of 8, 63% through)",
+      "fit": 0.612,
+      "recentFit": 0.942,
+      "btcd": 43.28
+    },
+    {
+      "asOf": "2022-03-14",
+      "parent": "2017-10-13",
+      "progress": 0.893,
+      "phase": "dominance rising (parent swing 4 of 8, 63% through)",
+      "fit": 0.615,
+      "recentFit": 0.933,
+      "btcd": 43.18
+    },
+    {
+      "asOf": "2022-03-21",
+      "parent": "2017-10-13",
+      "progress": 0.893,
+      "phase": "dominance rising (parent swing 4 of 8, 63% through)",
+      "fit": 0.619,
+      "recentFit": 0.919,
+      "btcd": 43.05
+    },
+    {
+      "asOf": "2022-03-28",
+      "parent": "2017-10-13",
+      "progress": 0.893,
+      "phase": "dominance rising (parent swing 4 of 8, 63% through)",
+      "fit": 0.622,
+      "recentFit": 0.901,
+      "btcd": 42.98
+    },
+    {
+      "asOf": "2022-04-04",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "base before the dominance rising (parent swing 6 of 8)",
+      "fit": 0.626,
+      "recentFit": 0.886,
+      "btcd": 41.44
+    },
+    {
+      "asOf": "2022-04-11",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "base before the dominance rising (parent swing 6 of 8)",
+      "fit": 0.63,
+      "recentFit": 0.853,
+      "btcd": 41.68
+    },
+    {
+      "asOf": "2022-04-18",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "base before the dominance rising (parent swing 6 of 8)",
+      "fit": 0.634,
+      "recentFit": 0.821,
+      "btcd": 41.57
+    },
+    {
+      "asOf": "2022-04-25",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "base before the dominance rising (parent swing 6 of 8)",
+      "fit": 0.638,
+      "recentFit": 0.8,
+      "btcd": 41.75
+    },
+    {
+      "asOf": "2022-05-02",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "dominance rising (parent swing 6 of 8, 0% through)",
+      "fit": 0.641,
+      "recentFit": 0.783,
+      "btcd": 42.58
+    },
+    {
+      "asOf": "2022-05-09",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "base before the dominance rising (parent swing 6 of 8)",
+      "fit": 0.644,
+      "recentFit": 0.782,
+      "btcd": 41.61
+    },
+    {
+      "asOf": "2022-05-16",
+      "parent": "2017-12-01",
+      "progress": 0.961,
+      "phase": "dominance rising (parent swing 6 of 8, 50% through)",
+      "fit": 0.646,
+      "recentFit": 0.801,
+      "btcd": 44.63
+    },
+    {
+      "asOf": "2022-05-23",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.648,
+      "recentFit": 0.81,
+      "btcd": 45.06
+    },
+    {
+      "asOf": "2022-05-30",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.649,
+      "recentFit": 0.82,
+      "btcd": 46.39
+    },
+    {
+      "asOf": "2022-06-06",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.65,
+      "recentFit": 0.847,
+      "btcd": 46.91
+    },
+    {
+      "asOf": "2022-06-13",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.651,
+      "recentFit": 0.855,
+      "btcd": 48.03
+    },
+    {
+      "asOf": "2022-06-20",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.654,
+      "recentFit": 0.845,
+      "btcd": 44.46
+    },
+    {
+      "asOf": "2022-06-27",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.655,
+      "recentFit": 0.831,
+      "btcd": 43.55
+    },
+    {
+      "asOf": "2022-07-04",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.658,
+      "recentFit": 0.817,
+      "btcd": 43.26
+    },
+    {
+      "asOf": "2022-07-11",
+      "parent": "2017-11-10",
+      "progress": 0.932,
+      "phase": "dominance falling (parent swing 5 of 8, 33% through)",
+      "fit": 0.66,
+      "recentFit": 0.768,
+      "btcd": 43.94
+    },
+    {
+      "asOf": "2022-07-18",
+      "parent": "2017-12-01",
+      "progress": 0.961,
+      "phase": "base before the dominance rising (parent swing 6 of 8)",
+      "fit": 0.663,
+      "recentFit": 0.754,
+      "btcd": 42.63
+    },
+    {
+      "asOf": "2022-07-25",
+      "parent": "2017-12-01",
+      "progress": 0.961,
+      "phase": "base before the dominance rising (parent swing 6 of 8)",
+      "fit": 0.665,
+      "recentFit": 0.732,
+      "btcd": 42.29
+    },
+    {
+      "asOf": "2022-08-01",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.667,
+      "recentFit": 0.695,
+      "btcd": 42.01
+    },
+    {
+      "asOf": "2022-08-08",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "base before the dominance rising (parent swing 6 of 8)",
+      "fit": 0.67,
+      "recentFit": 0.671,
+      "btcd": 41.41
+    },
+    {
+      "asOf": "2022-08-15",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "base before the dominance rising (parent swing 6 of 8)",
+      "fit": 0.674,
+      "recentFit": 0.7,
+      "btcd": 40.76
+    },
+    {
+      "asOf": "2022-08-22",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "base before the dominance rising (parent swing 6 of 8)",
+      "fit": 0.677,
+      "recentFit": 0.738,
+      "btcd": 41.08
+    },
+    {
+      "asOf": "2022-08-29",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "base before the dominance rising (parent swing 6 of 8)",
+      "fit": 0.679,
+      "recentFit": 0.744,
+      "btcd": 40.52
+    },
+    {
+      "asOf": "2022-09-05",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "base before the dominance rising (parent swing 6 of 8)",
+      "fit": 0.683,
+      "recentFit": 0.737,
+      "btcd": 39.75
+    },
+    {
+      "asOf": "2022-09-12",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "dominance rising (parent swing 6 of 8, 0% through)",
+      "fit": 0.685,
+      "recentFit": 0.736,
+      "btcd": 40.7
+    },
+    {
+      "asOf": "2022-09-19",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "dominance rising (parent swing 6 of 8, 0% through)",
+      "fit": 0.688,
+      "recentFit": 0.735,
+      "btcd": 41.45
+    },
+    {
+      "asOf": "2022-09-26",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "base before the dominance rising (parent swing 6 of 8)",
+      "fit": 0.69,
+      "recentFit": 0.734,
+      "btcd": 40.58
+    },
+    {
+      "asOf": "2022-10-03",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "dominance rising (parent swing 6 of 8, 0% through)",
+      "fit": 0.693,
+      "recentFit": 0.735,
+      "btcd": 41.29
+    },
+    {
+      "asOf": "2022-10-10",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "dominance rising (parent swing 6 of 8, 0% through)",
+      "fit": 0.695,
+      "recentFit": 0.757,
+      "btcd": 41.18
+    },
+    {
+      "asOf": "2022-10-17",
+      "parent": "2017-11-24",
+      "progress": 0.951,
+      "phase": "dominance rising (parent swing 6 of 8, 0% through)",
+      "fit": 0.697,
+      "recentFit": 0.807,
+      "btcd": 41.73
+    },
+    {
+      "asOf": "2022-10-24",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.699,
+      "recentFit": 0.823,
+      "btcd": 41.8
+    },
+    {
+      "asOf": "2022-10-31",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.701,
+      "recentFit": 0.839,
+      "btcd": 40.72
+    },
+    {
+      "asOf": "2022-11-07",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.703,
+      "recentFit": 0.845,
+      "btcd": 40.89
+    },
+    {
+      "asOf": "2022-11-14",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.706,
+      "recentFit": 0.871,
+      "btcd": 40.03
+    },
+    {
+      "asOf": "2022-11-21",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.708,
+      "recentFit": 0.879,
+      "btcd": 40.88
+    },
+    {
+      "asOf": "2022-11-28",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.709,
+      "recentFit": 0.843,
+      "btcd": 39.96
+    },
+    {
+      "asOf": "2022-12-05",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.711,
+      "recentFit": 0.846,
+      "btcd": 40.39
+    },
+    {
+      "asOf": "2022-12-12",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.714,
+      "recentFit": 0.883,
+      "btcd": 40.8
+    },
+    {
+      "asOf": "2022-12-19",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.716,
+      "recentFit": 0.893,
+      "btcd": 41.91
+    },
+    {
+      "asOf": "2022-12-26",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.716,
+      "recentFit": 0.836,
+      "btcd": 42.06
+    },
+    {
+      "asOf": "2023-01-02",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.718,
+      "recentFit": 0.823,
+      "btcd": 42.12
+    },
+    {
+      "asOf": "2023-01-09",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.72,
+      "recentFit": 0.824,
+      "btcd": 41.33
+    },
+    {
+      "asOf": "2023-01-16",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.721,
+      "recentFit": 0.793,
+      "btcd": 42.86
+    },
+    {
+      "asOf": "2023-01-23",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.722,
+      "recentFit": 0.781,
+      "btcd": 44.16
+    },
+    {
+      "asOf": "2023-01-30",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.722,
+      "recentFit": 0.768,
+      "btcd": 44.39
+    },
+    {
+      "asOf": "2023-02-06",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.723,
+      "recentFit": 0.743,
+      "btcd": 43.54
+    },
+    {
+      "asOf": "2023-02-13",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.72,
+      "recentFit": 0.605,
+      "btcd": 43.41
+    },
+    {
+      "asOf": "2023-02-20",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.72,
+      "recentFit": 0.611,
+      "btcd": 44.05
+    },
+    {
+      "asOf": "2023-02-27",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.721,
+      "recentFit": 0.616,
+      "btcd": 43.95
+    },
+    {
+      "asOf": "2023-03-06",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.722,
+      "recentFit": 0.624,
+      "btcd": 43.79
+    },
+    {
+      "asOf": "2023-03-13",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.723,
+      "recentFit": 0.631,
+      "btcd": 43.67
+    },
+    {
+      "asOf": "2023-03-20",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.723,
+      "recentFit": 0.669,
+      "btcd": 47.48
+    },
+    {
+      "asOf": "2023-03-27",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.724,
+      "recentFit": 0.699,
+      "btcd": 47.63
+    },
+    {
+      "asOf": "2023-04-03",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.724,
+      "recentFit": 0.717,
+      "btcd": 47.76
+    },
+    {
+      "asOf": "2023-04-10",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.724,
+      "recentFit": 0.732,
+      "btcd": 47.62
+    },
+    {
+      "asOf": "2023-04-17",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.724,
+      "recentFit": 0.744,
+      "btcd": 47.18
+    },
+    {
+      "asOf": "2023-04-24",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.725,
+      "recentFit": 0.755,
+      "btcd": 47.31
+    },
+    {
+      "asOf": "2023-05-01",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.725,
+      "recentFit": 0.766,
+      "btcd": 48.68
+    },
+    {
+      "asOf": "2023-05-08",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.724,
+      "recentFit": 0.642,
+      "btcd": 48.41
+    },
+    {
+      "asOf": "2023-05-15",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.724,
+      "recentFit": 0.679,
+      "btcd": 47.82
+    },
+    {
+      "asOf": "2023-05-22",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.724,
+      "recentFit": 0.716,
+      "btcd": 47.88
+    },
+    {
+      "asOf": "2023-05-29",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.724,
+      "recentFit": 0.766,
+      "btcd": 48.33
+    },
+    {
+      "asOf": "2023-06-05",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.724,
+      "recentFit": 0.817,
+      "btcd": 47.52
+    },
+    {
+      "asOf": "2023-06-12",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.723,
+      "recentFit": 0.885,
+      "btcd": 49.15
+    },
+    {
+      "asOf": "2023-06-19",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.723,
+      "recentFit": 0.906,
+      "btcd": 49.66
+    },
+    {
+      "asOf": "2023-06-26",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.722,
+      "recentFit": 0.912,
+      "btcd": 51.51
+    },
+    {
+      "asOf": "2023-07-03",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.722,
+      "recentFit": 0.918,
+      "btcd": 51.1
+    },
+    {
+      "asOf": "2023-07-10",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.721,
+      "recentFit": 0.913,
+      "btcd": 51.5
+    },
+    {
+      "asOf": "2023-07-17",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.72,
+      "recentFit": 0.906,
+      "btcd": 50.11
+    },
+    {
+      "asOf": "2023-07-24",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.721,
+      "recentFit": 0.908,
+      "btcd": 50.15
+    },
+    {
+      "asOf": "2023-07-31",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.72,
+      "recentFit": 0.903,
+      "btcd": 49.73
+    },
+    {
+      "asOf": "2023-08-07",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.72,
+      "recentFit": 0.902,
+      "btcd": 50.33
+    },
+    {
+      "asOf": "2023-08-14",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.719,
+      "recentFit": 0.9,
+      "btcd": 50.22
+    },
+    {
+      "asOf": "2023-08-21",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "waterfall (parent swing 3 of 8, 0% through)",
+      "fit": 0.719,
+      "recentFit": 0.886,
+      "btcd": 49
+    },
+    {
+      "asOf": "2023-08-28",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "waterfall (parent swing 3 of 8, 0% through)",
+      "fit": 0.719,
+      "recentFit": 0.874,
+      "btcd": 49.14
+    },
+    {
+      "asOf": "2023-09-04",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "waterfall (parent swing 3 of 8, 0% through)",
+      "fit": 0.719,
+      "recentFit": 0.868,
+      "btcd": 49.33
+    },
+    {
+      "asOf": "2023-09-11",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "waterfall (parent swing 3 of 8, 0% through)",
+      "fit": 0.718,
+      "recentFit": 0.862,
+      "btcd": 49.52
+    },
+    {
+      "asOf": "2023-09-18",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.718,
+      "recentFit": 0.854,
+      "btcd": 49.98
+    },
+    {
+      "asOf": "2023-09-25",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.718,
+      "recentFit": 0.853,
+      "btcd": 50.01
+    },
+    {
+      "asOf": "2023-10-02",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.717,
+      "recentFit": 0.839,
+      "btcd": 50.12
+    },
+    {
+      "asOf": "2023-10-09",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.717,
+      "recentFit": 0.821,
+      "btcd": 50.93
+    },
+    {
+      "asOf": "2023-10-16",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.716,
+      "recentFit": 0.787,
+      "btcd": 51.03
+    },
+    {
+      "asOf": "2023-10-23",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.714,
+      "recentFit": 0.771,
+      "btcd": 52.11
+    },
+    {
+      "asOf": "2023-10-30",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.712,
+      "recentFit": 0.751,
+      "btcd": 54.09
+    },
+    {
+      "asOf": "2023-11-06",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.711,
+      "recentFit": 0.745,
+      "btcd": 52.92
+    },
+    {
+      "asOf": "2023-11-13",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.71,
+      "recentFit": 0.739,
+      "btcd": 52.34
+    },
+    {
+      "asOf": "2023-11-20",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.709,
+      "recentFit": 0.737,
+      "btcd": 52.6
+    },
+    {
+      "asOf": "2023-11-27",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.707,
+      "recentFit": 0.732,
+      "btcd": 52.53
+    },
+    {
+      "asOf": "2023-12-04",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.705,
+      "recentFit": 0.732,
+      "btcd": 53.38
+    },
+    {
+      "asOf": "2023-12-11",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.705,
+      "recentFit": 0.751,
+      "btcd": 53.47
+    },
+    {
+      "asOf": "2023-12-18",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "base before the waterfall (parent swing 3 of 8)",
+      "fit": 0.703,
+      "recentFit": 0.765,
+      "btcd": 53.04
+    },
+    {
+      "asOf": "2023-12-25",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "waterfall (parent swing 3 of 8, 0% through)",
+      "fit": 0.702,
+      "recentFit": 0.773,
+      "btcd": 52.22
+    },
+    {
+      "asOf": "2024-01-01",
+      "parent": "2017-07-14",
+      "progress": 0.767,
+      "phase": "waterfall (parent swing 3 of 8, 0% through)",
+      "fit": 0.701,
+      "recentFit": 0.78,
+      "btcd": 51.59
+    },
+    {
+      "asOf": "2024-01-08",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.703,
+      "recentFit": 0.7,
+      "btcd": 53.95
+    },
+    {
+      "asOf": "2024-01-15",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.72,
+      "recentFit": 0.754,
+      "btcd": 51.05
+    },
+    {
+      "asOf": "2024-01-22",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.72,
+      "recentFit": 0.74,
+      "btcd": 51.24
+    },
+    {
+      "asOf": "2024-01-29",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.719,
+      "recentFit": 0.717,
+      "btcd": 52.4
+    },
+    {
+      "asOf": "2024-02-05",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.718,
+      "recentFit": 0.697,
+      "btcd": 52.58
+    },
+    {
+      "asOf": "2024-02-12",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.717,
+      "recentFit": 0.692,
+      "btcd": 53.94
+    },
+    {
+      "asOf": "2024-02-19",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.716,
+      "recentFit": 0.611,
+      "btcd": 53.46
+    },
+    {
+      "asOf": "2024-02-26",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.715,
+      "recentFit": 0.552,
+      "btcd": 52.35
+    },
+    {
+      "asOf": "2024-03-04",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.715,
+      "recentFit": 0.502,
+      "btcd": 53.81
+    },
+    {
+      "asOf": "2024-03-11",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.714,
+      "recentFit": 0.435,
+      "btcd": 53.62
+    },
+    {
+      "asOf": "2024-03-18",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.714,
+      "recentFit": 0.451,
+      "btcd": 53.47
+    },
+    {
+      "asOf": "2024-03-25",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.713,
+      "recentFit": 0.396,
+      "btcd": 53.54
+    },
+    {
+      "asOf": "2024-04-01",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.712,
+      "recentFit": 0.345,
+      "btcd": 53.6
+    },
+    {
+      "asOf": "2024-04-08",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.71,
+      "recentFit": 0.341,
+      "btcd": 54.31
+    },
+    {
+      "asOf": "2024-04-15",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.709,
+      "recentFit": 0.374,
+      "btcd": 55.7
+    },
+    {
+      "asOf": "2024-04-22",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.708,
+      "recentFit": 0.42,
+      "btcd": 55.16
+    },
+    {
+      "asOf": "2024-04-29",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.707,
+      "recentFit": 0.387,
+      "btcd": 54.39
+    },
+    {
+      "asOf": "2024-05-06",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.708,
+      "recentFit": 0.427,
+      "btcd": 54.88
+    },
+    {
+      "asOf": "2024-05-13",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.707,
+      "recentFit": 0.48,
+      "btcd": 54.95
+    },
+    {
+      "asOf": "2024-05-20",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.706,
+      "recentFit": 0.512,
+      "btcd": 55.95
+    },
+    {
+      "asOf": "2024-05-27",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.705,
+      "recentFit": 0.527,
+      "btcd": 54.19
+    },
+    {
+      "asOf": "2024-06-03",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.704,
+      "recentFit": 0.539,
+      "btcd": 54.27
+    },
+    {
+      "asOf": "2024-06-10",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.702,
+      "recentFit": 0.557,
+      "btcd": 55.2
+    },
+    {
+      "asOf": "2024-06-17",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.701,
+      "recentFit": 0.602,
+      "btcd": 55.08
+    },
+    {
+      "asOf": "2024-06-24",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.7,
+      "recentFit": 0.59,
+      "btcd": 55.35
+    },
+    {
+      "asOf": "2024-07-01",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.699,
+      "recentFit": 0.594,
+      "btcd": 54.81
+    },
+    {
+      "asOf": "2024-07-08",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.697,
+      "recentFit": 0.602,
+      "btcd": 55.07
+    },
+    {
+      "asOf": "2024-07-15",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.695,
+      "recentFit": 0.618,
+      "btcd": 54.8
+    },
+    {
+      "asOf": "2024-07-22",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.694,
+      "recentFit": 0.64,
+      "btcd": 55.39
+    },
+    {
+      "asOf": "2024-07-29",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.692,
+      "recentFit": 0.626,
+      "btcd": 56.76
+    },
+    {
+      "asOf": "2024-08-05",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.69,
+      "recentFit": 0.578,
+      "btcd": 57.01
+    },
+    {
+      "asOf": "2024-08-12",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.688,
+      "recentFit": 0.531,
+      "btcd": 57.55
+    },
+    {
+      "asOf": "2024-08-19",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.687,
+      "recentFit": 0.575,
+      "btcd": 56.91
+    },
+    {
+      "asOf": "2024-08-26",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.685,
+      "recentFit": 0.581,
+      "btcd": 57.48
+    },
+    {
+      "asOf": "2024-09-02",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.684,
+      "recentFit": 0.589,
+      "btcd": 57.49
+    },
+    {
+      "asOf": "2024-09-09",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.684,
+      "recentFit": 0.48,
+      "btcd": 56.92
+    },
+    {
+      "asOf": "2024-09-16",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.682,
+      "recentFit": 0.534,
+      "btcd": 58.01
+    },
+    {
+      "asOf": "2024-09-23",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.68,
+      "recentFit": 0.581,
+      "btcd": 58
+    },
+    {
+      "asOf": "2024-09-30",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.678,
+      "recentFit": 0.605,
+      "btcd": 57.53
+    },
+    {
+      "asOf": "2024-10-07",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.677,
+      "recentFit": 0.599,
+      "btcd": 58.08
+    },
+    {
+      "asOf": "2024-10-14",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.675,
+      "recentFit": 0.622,
+      "btcd": 57.93
+    },
+    {
+      "asOf": "2024-10-21",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.674,
+      "recentFit": 0.656,
+      "btcd": 58.47
+    },
+    {
+      "asOf": "2024-10-28",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.671,
+      "recentFit": 0.672,
+      "btcd": 59.36
+    },
+    {
+      "asOf": "2024-11-04",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.669,
+      "recentFit": 0.702,
+      "btcd": 60.47
+    },
+    {
+      "asOf": "2024-11-11",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.667,
+      "recentFit": 0.726,
+      "btcd": 59
+    },
+    {
+      "asOf": "2024-11-18",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.67,
+      "recentFit": 0.721,
+      "btcd": 60.14
+    },
+    {
+      "asOf": "2024-11-25",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.668,
+      "recentFit": 0.723,
+      "btcd": 59.21
+    },
+    {
+      "asOf": "2024-12-02",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.666,
+      "recentFit": 0.677,
+      "btcd": 56.8
+    },
+    {
+      "asOf": "2024-12-09",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.665,
+      "recentFit": 0.663,
+      "btcd": 55.36
+    },
+    {
+      "asOf": "2024-12-16",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.664,
+      "recentFit": 0.665,
+      "btcd": 57.18
+    },
+    {
+      "asOf": "2024-12-23",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.662,
+      "recentFit": 0.643,
+      "btcd": 58.88
+    },
+    {
+      "asOf": "2024-12-30",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.659,
+      "recentFit": 0.603,
+      "btcd": 58.03
+    },
+    {
+      "asOf": "2025-01-06",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.657,
+      "recentFit": 0.571,
+      "btcd": 57.02
+    },
+    {
+      "asOf": "2025-01-13",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.654,
+      "recentFit": 0.557,
+      "btcd": 57.98
+    },
+    {
+      "asOf": "2025-01-20",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.651,
+      "recentFit": 0.501,
+      "btcd": 58.64
+    },
+    {
+      "asOf": "2025-01-27",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.649,
+      "recentFit": 0.439,
+      "btcd": 58.98
+    },
+    {
+      "asOf": "2025-02-03",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.645,
+      "recentFit": 0.347,
+      "btcd": 60.76
+    },
+    {
+      "asOf": "2025-02-10",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.641,
+      "recentFit": 0.248,
+      "btcd": 61.66
+    },
+    {
+      "asOf": "2025-02-17",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.637,
+      "recentFit": 0.179,
+      "btcd": 60.73
+    },
+    {
+      "asOf": "2025-02-24",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.634,
+      "recentFit": 0.113,
+      "btcd": 60.86
+    },
+    {
+      "asOf": "2025-03-03",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.63,
+      "recentFit": 0.061,
+      "btcd": 60.41
+    },
+    {
+      "asOf": "2025-03-10",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.627,
+      "recentFit": 0.004,
+      "btcd": 61.28
+    },
+    {
+      "asOf": "2025-03-17",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.623,
+      "recentFit": -0.054,
+      "btcd": 61.76
+    },
+    {
+      "asOf": "2025-03-24",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.633,
+      "recentFit": 0.491,
+      "btcd": 61.77
+    },
+    {
+      "asOf": "2025-03-31",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.632,
+      "recentFit": 0.536,
+      "btcd": 62.21
+    },
+    {
+      "asOf": "2025-04-07",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.629,
+      "recentFit": 0.588,
+      "btcd": 63.32
+    },
+    {
+      "asOf": "2025-04-14",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.626,
+      "recentFit": 0.596,
+      "btcd": 63.55
+    },
+    {
+      "asOf": "2025-04-21",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.623,
+      "recentFit": 0.64,
+      "btcd": 63.86
+    },
+    {
+      "asOf": "2025-04-28",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.62,
+      "recentFit": 0.709,
+      "btcd": 64.27
+    },
+    {
+      "asOf": "2025-05-05",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.617,
+      "recentFit": 0.75,
+      "btcd": 64.78
+    },
+    {
+      "asOf": "2025-05-12",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.614,
+      "recentFit": 0.783,
+      "btcd": 63.15
+    },
+    {
+      "asOf": "2025-05-19",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.611,
+      "recentFit": 0.806,
+      "btcd": 63.85
+    },
+    {
+      "asOf": "2025-05-26",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.607,
+      "recentFit": 0.794,
+      "btcd": 64.21
+    },
+    {
+      "asOf": "2025-06-02",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.604,
+      "recentFit": 0.772,
+      "btcd": 64.48
+    },
+    {
+      "asOf": "2025-06-09",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.6,
+      "recentFit": 0.768,
+      "btcd": 64.57
+    },
+    {
+      "asOf": "2025-06-16",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.597,
+      "recentFit": 0.766,
+      "btcd": 64.7
+    },
+    {
+      "asOf": "2025-06-23",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.593,
+      "recentFit": 0.775,
+      "btcd": 65.72
+    },
+    {
+      "asOf": "2025-06-30",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.59,
+      "recentFit": 0.775,
+      "btcd": 65.36
+    },
+    {
+      "asOf": "2025-07-07",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.587,
+      "recentFit": 0.774,
+      "btcd": 65.3
+    },
+    {
+      "asOf": "2025-07-14",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.584,
+      "recentFit": 0.773,
+      "btcd": 64.61
+    },
+    {
+      "asOf": "2025-07-21",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.58,
+      "recentFit": 0.753,
+      "btcd": 60.86
+    },
+    {
+      "asOf": "2025-07-28",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.577,
+      "recentFit": 0.73,
+      "btcd": 61.04
+    },
+    {
+      "asOf": "2025-08-04",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.576,
+      "recentFit": 0.714,
+      "btcd": 62.17
+    },
+    {
+      "asOf": "2025-08-11",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.573,
+      "recentFit": 0.699,
+      "btcd": 60.49
+    },
+    {
+      "asOf": "2025-08-18",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.571,
+      "recentFit": 0.698,
+      "btcd": 59.41
+    },
+    {
+      "asOf": "2025-08-25",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.569,
+      "recentFit": 0.707,
+      "btcd": 57.94
+    },
+    {
+      "asOf": "2025-09-01",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.567,
+      "recentFit": 0.716,
+      "btcd": 58.1
+    },
+    {
+      "asOf": "2025-09-08",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.565,
+      "recentFit": 0.726,
+      "btcd": 58.46
+    },
+    {
+      "asOf": "2025-09-15",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.564,
+      "recentFit": 0.739,
+      "btcd": 57.79
+    },
+    {
+      "asOf": "2025-09-22",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.563,
+      "recentFit": 0.747,
+      "btcd": 57.97
+    },
+    {
+      "asOf": "2025-09-29",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.561,
+      "recentFit": 0.756,
+      "btcd": 58.54
+    },
+    {
+      "asOf": "2025-10-06",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.558,
+      "recentFit": 0.759,
+      "btcd": 59.31
+    },
+    {
+      "asOf": "2025-10-13",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.556,
+      "recentFit": 0.763,
+      "btcd": 59.48
+    },
+    {
+      "asOf": "2025-10-20",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.554,
+      "recentFit": 0.765,
+      "btcd": 59.57
+    },
+    {
+      "asOf": "2025-10-27",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.552,
+      "recentFit": 0.765,
+      "btcd": 59.64
+    },
+    {
+      "asOf": "2025-11-03",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.55,
+      "recentFit": 0.762,
+      "btcd": 59.9
+    },
+    {
+      "asOf": "2025-11-10",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.548,
+      "recentFit": 0.749,
+      "btcd": 59.9
+    },
+    {
+      "asOf": "2025-11-17",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.548,
+      "recentFit": 0.736,
+      "btcd": 59.5
+    },
+    {
+      "asOf": "2025-11-24",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.547,
+      "recentFit": 0.744,
+      "btcd": 59.26
+    },
+    {
+      "asOf": "2025-12-01",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.545,
+      "recentFit": 0.713,
+      "btcd": 59.41
+    },
+    {
+      "asOf": "2025-12-08",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.542,
+      "recentFit": 0.668,
+      "btcd": 59.45
+    },
+    {
+      "asOf": "2025-12-15",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.54,
+      "recentFit": 0.571,
+      "btcd": 59.07
+    },
+    {
+      "asOf": "2025-12-22",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.537,
+      "recentFit": 0.491,
+      "btcd": 59.61
+    },
+    {
+      "asOf": "2025-12-29",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.535,
+      "recentFit": 0.409,
+      "btcd": 59.54
+    },
+    {
+      "asOf": "2026-01-05",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.532,
+      "recentFit": 0.312,
+      "btcd": 59.15
+    },
+    {
+      "asOf": "2026-01-12",
+      "parent": "2017-12-22",
+      "progress": 0.99,
+      "phase": "dominance rising (parent swing 8 of 8, 0% through)",
+      "fit": 0.524,
+      "recentFit": 0.789,
+      "btcd": 59.11
+    },
+    {
+      "asOf": "2026-01-19",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.535,
+      "recentFit": -0.384,
+      "btcd": 59.58
+    },
+    {
+      "asOf": "2026-01-26",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.533,
+      "recentFit": -0.369,
+      "btcd": 59.87
+    },
+    {
+      "asOf": "2026-02-02",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.532,
+      "recentFit": -0.348,
+      "btcd": 59.94
+    },
+    {
+      "asOf": "2026-02-09",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.53,
+      "recentFit": -0.332,
+      "btcd": 59.36
+    },
+    {
+      "asOf": "2026-02-16",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.529,
+      "recentFit": -0.309,
+      "btcd": 59.09
+    },
+    {
+      "asOf": "2026-02-23",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.527,
+      "recentFit": -0.323,
+      "btcd": 59.02
+    },
+    {
+      "asOf": "2026-03-02",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.525,
+      "recentFit": -0.322,
+      "btcd": 58.5
+    },
+    {
+      "asOf": "2026-03-09",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.523,
+      "recentFit": -0.286,
+      "btcd": 58.66
+    },
+    {
+      "asOf": "2026-03-16",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.521,
+      "recentFit": -0.297,
+      "btcd": 59.4
+    },
+    {
+      "asOf": "2026-03-23",
+      "parent": "2017-12-08",
+      "progress": 0.971,
+      "phase": "waterfall (parent swing 7 of 8, 0% through)",
+      "fit": 0.519,
+      "recentFit": -0.285,
+      "btcd": 58.59
+    },
+    {
+      "asOf": "2026-03-30",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.518,
+      "recentFit": -0.253,
+      "btcd": 58.4
+    },
+    {
+      "asOf": "2026-04-06",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.516,
+      "recentFit": -0.23,
+      "btcd": 59.04
+    },
+    {
+      "asOf": "2026-04-13",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.514,
+      "recentFit": -0.212,
+      "btcd": 59.35
+    },
+    {
+      "asOf": "2026-04-20",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.513,
+      "recentFit": -0.201,
+      "btcd": 59.84
+    },
+    {
+      "asOf": "2026-04-27",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.51,
+      "recentFit": -0.199,
+      "btcd": 60.62
+    },
+    {
+      "asOf": "2026-05-04",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.508,
+      "recentFit": -0.203,
+      "btcd": 60.92
+    },
+    {
+      "asOf": "2026-05-11",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.506,
+      "recentFit": -0.205,
+      "btcd": 60.81
+    },
+    {
+      "asOf": "2026-05-18",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.504,
+      "recentFit": -0.209,
+      "btcd": 60.84
+    },
+    {
+      "asOf": "2026-05-25",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.502,
+      "recentFit": -0.214,
+      "btcd": 60.69
+    },
+    {
+      "asOf": "2026-06-01",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "base before the waterfall (parent swing 7 of 8)",
+      "fit": 0.5,
+      "recentFit": -0.215,
+      "btcd": 59.78
+    },
+    {
+      "asOf": "2026-06-08",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.499,
+      "recentFit": -0.208,
+      "btcd": 58.79
+    },
+    {
+      "asOf": "2026-06-15",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.497,
+      "recentFit": -0.211,
+      "btcd": 59.33
+    },
+    {
+      "asOf": "2026-06-22",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.496,
+      "recentFit": -0.223,
+      "btcd": 58.9
+    },
+    {
+      "asOf": "2026-06-29",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.494,
+      "recentFit": -0.238,
+      "btcd": 58.58
+    },
+    {
+      "asOf": "2026-07-06",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.493,
+      "recentFit": -0.273,
+      "btcd": 58.61
+    },
+    {
+      "asOf": "2026-07-13",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.491,
+      "recentFit": -0.231,
+      "btcd": 58.91
+    },
+    {
+      "asOf": "2026-07-20",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.49,
+      "recentFit": -0.255,
+      "btcd": 59.18
+    },
+    {
+      "asOf": "2026-07-27",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.489,
+      "recentFit": -0.208,
+      "btcd": 59.18
+    },
+    {
+      "asOf": "2026-08-03",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.487,
+      "recentFit": -0.148,
+      "btcd": 58.96
+    },
+    {
+      "asOf": "2026-08-10",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.486,
+      "recentFit": -0.088,
+      "btcd": 59.39
+    },
+    {
+      "asOf": "2026-08-17",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.485,
+      "recentFit": 0.17,
+      "btcd": 58.88
+    },
+    {
+      "asOf": "2026-08-24",
+      "parent": "2017-12-15",
+      "progress": 0.981,
+      "phase": "waterfall (parent swing 7 of 8, 50% through)",
+      "fit": 0.483,
+      "recentFit": 0.132,
+      "btcd": 59.61
+    },
+    {
+      "asOf": "2026-08-31",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.548,
+      "recentFit": 0.165,
+      "btcd": 60.19
+    },
+    {
+      "asOf": "2026-09-07",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.548,
+      "recentFit": 0.093,
+      "btcd": 59.68
+    },
+    {
+      "asOf": "2026-09-14",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.547,
+      "recentFit": -0.012,
+      "btcd": 59.42
+    },
+    {
+      "asOf": "2026-09-21",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.546,
+      "recentFit": -0.119,
+      "btcd": 59.06
+    },
+    {
+      "asOf": "2026-09-28",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.545,
+      "recentFit": -0.166,
+      "btcd": 59.12
+    },
+    {
+      "asOf": "2026-10-05",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.544,
+      "recentFit": -0.222,
+      "btcd": 59.66
+    },
+    {
+      "asOf": "2026-10-12",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.543,
+      "recentFit": -0.272,
+      "btcd": 59.97
+    },
+    {
+      "asOf": "2026-10-19",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.542,
+      "recentFit": -0.235,
+      "btcd": 60.7
+    },
+    {
+      "asOf": "2026-10-26",
+      "parent": "2016-12-16",
+      "progress": 0.476,
+      "phase": "base before the waterfall (parent swing 1 of 8)",
+      "fit": 0.54,
+      "recentFit": -0.141,
+      "btcd": 60.56
+    }
+  ],
+  "skill": {
+    "d30": {
+      "n": 405,
+      "maeEngine": 3.76,
+      "maeFlat": 1.97,
+      "directionHit": 0.447,
+      "byFit": {
+        "high": {
+          "n": 0,
+          "maeEngine": 0,
+          "maeFlat": 0,
+          "directionHit": 0
+        }
+      }
+    },
+    "d90": {
+      "n": 365,
+      "maeEngine": 6.5,
+      "maeFlat": 3.28,
+      "directionHit": 0.455,
+      "byFit": {
+        "high": {
+          "n": 0,
+          "maeEngine": 0,
+          "maeFlat": 0,
+          "directionHit": 0
+        }
+      }
+    },
+    "d180": {
+      "n": 205,
+      "maeEngine": 8.32,
+      "maeFlat": 6.56,
+      "directionHit": 0.561,
+      "byFit": {
+        "high": {
+          "n": 0,
+          "maeEngine": 0,
+          "maeFlat": 0,
+          "directionHit": 0
+        }
+      }
+    }
+  },
+  "parentBars": 731
+}
