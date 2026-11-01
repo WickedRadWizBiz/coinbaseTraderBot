@@ -135,6 +135,9 @@ jobs:
           FROM=$(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | sed 's/^md-//' | head -1)
           [ -n "$FROM" ] || { echo "no recordings copied"; exit 1; }
           echo "FROM=$FROM" >> "$GITHUB_ENV"
+          # The repo's Actions caches share 10 GB and evict the least recently used: a copy above 3 GB is not cached,
+          # so it cannot push other threads' caches out (the run uses its own copy either way).
+          MB=$(du -sm "$DATA/recordings" | cut -f1); echo "CACHE_OK=$([ "$MB" -le 3000 ] && echo true || echo false)" >> "$GITHUB_ENV"; echo "recordings $MB MB"
           echo "replay from $FROM ($(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | wc -l) day(s))"
       - name: Save the recordings to the cache
         if: matrix.side != 'baseline'
@@ -230,9 +233,12 @@ jobs:
           FROM=$(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | sed 's/^md-//' | head -1)
           [ -n "$FROM" ] || { echo "no recordings copied"; exit 1; }
           echo "FROM=$FROM" >> "$GITHUB_ENV"
+          # The repo's Actions caches share 10 GB and evict the least recently used: a copy above 3 GB is not cached,
+          # so it cannot push other threads' caches out (the run uses its own copy either way).
+          MB=$(du -sm "$DATA/recordings" | cut -f1); echo "CACHE_OK=$([ "$MB" -le 3000 ] && echo true || echo false)" >> "$GITHUB_ENV"; echo "recordings $MB MB"
           echo "replay from $FROM ($(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | wc -l) day(s))"
       - name: Save the recordings to the cache
-        if: inputs.fidelity_cache == ''
+        if: inputs.fidelity_cache == '' && env.CACHE_OK == 'true'
         uses: actions/cache/save@v4
         with:
           path: data/recordings
@@ -315,6 +321,9 @@ jobs:
           FROM=$(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | sed 's/^md-//' | head -1)
           [ -n "$FROM" ] || { echo "no recordings copied"; exit 1; }
           echo "FROM=$FROM" >> "$GITHUB_ENV"
+          # The repo's Actions caches share 10 GB and evict the least recently used: a copy above 3 GB is not cached,
+          # so it cannot push other threads' caches out (the run uses its own copy either way).
+          MB=$(du -sm "$DATA/recordings" | cut -f1); echo "CACHE_OK=$([ "$MB" -le 3000 ] && echo true || echo false)" >> "$GITHUB_ENV"; echo "recordings $MB MB"
           echo "replay from $FROM ($(ls "$DATA/recordings" | grep -oE 'md-[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort -u | wc -l) day(s))"
       - name: Save the recordings to the cache
         if: matrix.side != 'baseline'
