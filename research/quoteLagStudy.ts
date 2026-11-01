@@ -20,7 +20,7 @@
 
 import fs from 'fs';
 import { priceContract, SETTLEMENT_AVG_SEC } from '../bot/model/fairValue';
-import { takerFee } from '../bot/fees';
+import { makerFee, takerFee } from '../bot/fees';
 import { MetaModel } from '../bot/model/metaModel';
 import { readRecordings, ReplayState, type RecMarket } from './replay';
 import { rng } from './stats';
@@ -59,6 +59,7 @@ export function fairMove(ticks: Tick[], i: number, w: number): number | undefine
 
 /** Per-contract fee in dollars at `count` contracts (Kalshi rounds the order's fee up). */
 const feePer = (price: number, count: number) => takerFee(count, price) / count;
+const makerFeePer = (price: number, count: number) => makerFee(count, price) / count;
 
 /** Trades of one contract for (w, theta, H): enter at the next second's ask (bid for NO), exit H later at the bid. */
 /** The adversary's knobs: a slower bot (latency, seconds from the signal to the fill) and a worse fill (slip, cents
@@ -93,6 +94,69 @@ export function contractTrades(ticks: Tick[], closeTime: number, w: number, thet
   return out;
 }
 
+/** Maker variant (Steven's add-dynamics rule, 11-01: the lag is a feature, so test it without paying the spread). On the
+ *  same signal, rest a bid for the favoured side at the current best bid (1 - ask for NO) one latency later; it fills
+ *  only if the market crosses to it (the ask comes down to the resting price) within H seconds, which is the
+ *  conservative fill rule; then exit H seconds after the fill at the bid as a taker. Maker fee in, taker fee out. */
+export function contractMakerTrades(ticks: Tick[], closeTime: number, w: number, theta: number, H: number, count: number, adv: Adversary = ADVERSARIES[0]): Trade[] {
+  const out: Trade[] = [];
+  let busyUntil = -Infinity;
+  for (let i = 0; i < ticks.length; i++) {
+    const t = ticks[i].t;
+    if (t < busyUntil || closeTime - t < 60 * S) continue;
+    const g = gapAt(ticks, i, w);
+    if (g === undefined || Math.abs(g) < theta) continue;
+    const f = fairMove(ticks, i, w);
+    if (f === undefined || Math.sign(f) !== Math.sign(g) || Math.abs(f) < theta) continue;
+    const e = at(ticks, t + adv.latency * S, i);
+    if (e <= i || ticks[e].t - t > (adv.latency + 2) * S) continue;
+    const yes = g > 0;
+    const rest = yes ? ticks[e].bid : 1 - ticks[e].ask;
+    if (!(rest > 0 && rest < 1)) continue;
+    const until = Math.min(ticks[e].t + H * S, closeTime - S);
+    let fill = -1;
+    for (let j = e + 1; j < ticks.length && ticks[j].t <= until; j++) {
+      const cross = yes ? ticks[j].ask <= rest : 1 - ticks[j].bid <= rest;
+      if (cross) { fill = j; break; }
+    }
+    busyUntil = until;
+    if (fill < 0) continue;
+    const xT = Math.min(ticks[fill].t + H * S, closeTime - S);
+    const x = at(ticks, xT, fill);
+    if (x <= fill) continue;
+    const exit = (yes ? ticks[x].bid : 1 - ticks[x].ask) - adv.slip;
+    if (!(exit >= 0 && exit <= 1)) continue;
+    const pnl = exit - rest - makerFeePer(rest, count) - (exit > 0 ? feePer(exit, count) : 0);
+    out.push({ t, pnl, side: yes ? 'yes' : 'no' });
+    busyUntil = ticks[x].t;
+  }
+  return out;
+}
+
+/** Entry-timing filter: what a trader who wants the side the gap disfavours saves by waiting H seconds for the quote to
+ *  move before entering, per contract (cents of entry price; fees are the same either way). Positive = waiting helped. */
+export function contractTimingGains(ticks: Tick[], closeTime: number, w: number, theta: number, H: number, adv: Adversary = ADVERSARIES[0]): { t: number; pnl: number }[] {
+  const out: { t: number; pnl: number }[] = [];
+  let busyUntil = -Infinity;
+  for (let i = 0; i < ticks.length; i++) {
+    const t = ticks[i].t;
+    if (t < busyUntil || closeTime - t < 60 * S) continue;
+    const g = gapAt(ticks, i, w);
+    if (g === undefined || Math.abs(g) < theta) continue;
+    const f = fairMove(ticks, i, w);
+    if (f === undefined || Math.sign(f) !== Math.sign(g) || Math.abs(f) < theta) continue;
+    const e = at(ticks, t + adv.latency * S, i);
+    if (e <= i || ticks[e].t - t > (adv.latency + 2) * S) continue;
+    const l = at(ticks, Math.min(ticks[e].t + H * S, closeTime - S), e);
+    if (l <= e) continue;
+    const wantsNo = g > 0; // the gap says the mid rises, so the disfavoured buyer wants NO
+    const now = wantsNo ? 1 - ticks[e].bid : ticks[e].ask, later = wantsNo ? 1 - ticks[l].bid : ticks[l].ask;
+    out.push({ t, pnl: now - later });
+    busyUntil = ticks[l].t;
+  }
+  return out;
+}
+
 /** Mean with an hour-block bootstrap 95% interval (trades in the same hour resampled together). */
 export function hourBlockCi(trades: { t: number; pnl: number }[], iters = 2000, seed = 3): { mean: number; lo: number; hi: number } {
   if (!trades.length) return { mean: NaN, lo: NaN, hi: NaN };
@@ -119,7 +183,9 @@ async function main() {
   const st = new ReplayState(), model = MetaModel.identity();
   const ticks = new Map<string, Tick[]>();
   const cells = new Map<string, Cell>(), preds = new Map<string, Pred>();
+  const makers = new Map<string, Cell>(), timings = new Map<string, { trades: { t: number; pnl: number }[] }>();
   for (const adv of ADVERSARIES) for (const w of WINDOWS) for (const th of THETAS) for (const H of HORIZONS) cells.set(`${w}|${th}|${H}|${adv.latency}|${adv.slip}`, { trades: [] });
+  for (const adv of ADVERSARIES) for (const w of WINDOWS) for (const th of THETAS) for (const H of HORIZONS) { makers.set(`${w}|${th}|${H}|${adv.latency}|${adv.slip}`, { trades: [] }); timings.set(`${w}|${th}|${H}|${adv.latency}|${adv.slip}`, { trades: [] }); }
   for (const w of WINDOWS) for (const H of HORIZONS) preds.set(`${w}|${H}`, { n: 0, sxy: 0, sxx: 0, big: 0, bigToward: 0 });
   let first = Infinity, last = -Infinity, contracts = 0, nextSec = 0;
 
@@ -129,6 +195,8 @@ async function main() {
     if (!tk || tk.length < 120) return;
     contracts++;
     for (const [k, c] of cells) { const [w, th, H, lat, slip] = k.split('|').map(Number); for (const x of contractTrades(tk, m.closeTime, w, th, H, count, { latency: lat, slip })) c.trades.push(x); }
+    for (const [k, c] of makers) { const [w, th, H, lat, slip] = k.split('|').map(Number); for (const x of contractMakerTrades(tk, m.closeTime, w, th, H, count, { latency: lat, slip })) c.trades.push(x); }
+    for (const [k, c] of timings) { const [w, th, H, lat, slip] = k.split('|').map(Number); for (const x of contractTimingGains(tk, m.closeTime, w, th, H, { latency: lat, slip })) c.trades.push(x); }
     for (const [k, p] of preds) {
       const [w, H] = k.split('|').map(Number);
       for (let i = 0; i < tk.length; i += 5) {
@@ -173,17 +241,22 @@ async function main() {
     console.log(`[quote-lag]   w ${w}s H ${H}s: slope ${(p.sxy / Math.max(1e-12, p.sxx)).toFixed(2)} over ${p.n}; big gaps ${p.big}, toward ${p.big ? ((100 * p.bigToward) / p.big).toFixed(1) : '-'}%`);
   }
   const summary: unknown[] = [];
-  for (const adv of ADVERSARIES) {
-    console.log(`[quote-lag] trading the gap, latency ${adv.latency} s, slip ${(adv.slip * 100).toFixed(0)}c (cents per contract after fees, hour-block 95% CI; $/h at the count above):`);
-    const rows = [...cells].filter(([k]) => k.endsWith(`|${adv.latency}|${adv.slip}`)).map(([k, c]) => ({ k, c, ci: hourBlockCi(c.trades) })).sort((a, b) => (b.ci.mean || -1e9) - (a.ci.mean || -1e9));
-    for (const { k, c, ci } of rows) {
-      const [w, th, H] = k.split('|');
-      const total = c.trades.reduce((s, x) => s + x.pnl, 0) * count;
-      const verdict = ci.lo > 0 ? 'PROFIT' : ci.hi < 0 ? 'loss' : 'undecided';
-      console.log(`[quote-lag]   w ${w.padStart(2)}s theta ${(Number(th) * 100).toFixed(0).padStart(2)}c H ${H.padStart(2)}s: ${String(c.trades.length).padStart(6)} trades, ${(ci.mean * 100).toFixed(2)}c [${(ci.lo * 100).toFixed(2)}, ${(ci.hi * 100).toFixed(2)}] ${verdict}; $${(total / hours).toFixed(2)}/h`);
-      summary.push({ ...adv, w: Number(w), theta: Number(th), H: Number(H), trades: c.trades.length, cents: ci.mean * 100, lo: ci.lo * 100, hi: ci.hi * 100, perHour: total / hours });
+  const table = (title: string, kind: string, map: Map<string, { trades: { t: number; pnl: number }[] }>, dollars: boolean) => {
+    for (const adv of ADVERSARIES) {
+      console.log(`[quote-lag] ${title}, latency ${adv.latency} s, slip ${(adv.slip * 100).toFixed(0)}c (cents per contract, hour-block 95% CI${dollars ? '; $/h at the count above' : ''}):`);
+      const rows = [...map].filter(([k]) => k.endsWith(`|${adv.latency}|${adv.slip}`)).map(([k, c]) => ({ k, c, ci: hourBlockCi(c.trades) })).sort((a, b) => (b.ci.mean || -1e9) - (a.ci.mean || -1e9));
+      for (const { k, c, ci } of rows) {
+        const [w, th, H] = k.split('|');
+        const total = c.trades.reduce((s, x) => s + x.pnl, 0) * count;
+        const verdict = ci.lo > 0 ? (dollars ? 'PROFIT' : 'HELPS') : ci.hi < 0 ? (dollars ? 'loss' : 'hurts') : 'undecided';
+        console.log(`[quote-lag]   w ${w.padStart(2)}s theta ${(Number(th) * 100).toFixed(0).padStart(2)}c H ${H.padStart(2)}s: ${String(c.trades.length).padStart(6)} ${dollars ? 'trades' : 'cases'}, ${(ci.mean * 100).toFixed(2)}c [${(ci.lo * 100).toFixed(2)}, ${(ci.hi * 100).toFixed(2)}] ${verdict}${dollars ? `; $${(total / hours).toFixed(2)}/h` : ''}`);
+        summary.push({ kind, ...adv, w: Number(w), theta: Number(th), H: Number(H), trades: c.trades.length, cents: ci.mean * 100, lo: ci.lo * 100, hi: ci.hi * 100, perHour: dollars ? total / hours : undefined });
+      }
     }
-  }
+  };
+  table('trading the gap as a taker', 'taker', cells, true);
+  table('resting a maker bid on the gap\'s side (fills only when the market crosses to it within H; maker fee in, taker out)', 'maker', makers, true);
+  table('entry-timing filter: cents saved by waiting H before buying the side the gap disfavours', 'timing', timings, false);
   const out = arg('out');
   if (out) fs.writeFileSync(out, JSON.stringify({ contracts, hours, count, preds: Object.fromEntries(preds), cells: summary }, null, 1));
 }
