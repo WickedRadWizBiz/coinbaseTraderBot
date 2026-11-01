@@ -34,10 +34,14 @@ concurrency:
 
 env:
   NODE_OPTIONS: --max-old-space-size=12288
+  # 'yes' only while the coordinator has handed this thread the server copy slot: with no cached copy of real days,
+  # the build then copies the newest 5 recorded days, 3 older fit days and the models once, capped at 8 MB/s.
+  SERVER_COPY: 'no'
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 200
     permissions:
       contents: write
@@ -60,7 +64,8 @@ jobs:
       - name: Install dependencies
         if: steps.deps.outputs.cache-hit != 'true'
         run: npm ci --no-audit --no-fund --silent
-      - name: The real days (an earlier Replay fidelity run's copy)
+      - name: The real days (an earlier Replay fidelity run's copy, or this workflow's own earlier copy)
+        id: real
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -68,7 +73,42 @@ jobs:
             data/fit
             data/models
           key: fidelity-data-${{ inputs.reuse_run || '41269805422' }}-1
-          fail-on-cache-miss: true
+          restore-keys: |
+            twin-real-
+            fidelity-data-
+      - name: Copy the real days from the server (only with the copy slot)
+        if: steps.real.outputs.cache-matched-key == '' && env.SERVER_COPY == 'yes'
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER_NAME: ${{ secrets.LIGHTSAIL_USERNAME || 'ubuntu' }}
+          PORT: ${{ secrets.LIGHTSAIL_PORT || 22 }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_bot && chmod 600 ~/.ssh/id_bot
+          printf 'Host bot\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_bot\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' "$HOST" "$USER_NAME" "$PORT" > ~/.ssh/config
+          TODAY=$(date -u +%F)
+          ALL=$(ssh bot "cd ~/bot/data/recordings && ls -1 md-*.jsonl*" | sort | awk -v t="md-$TODAY" '$0 < t')
+          echo "$ALL" | tail -n 5 > "$RUNNER_TEMP/rec.txt"; echo "$ALL" | head -n -5 | tail -n 3 > "$RUNNER_TEMP/fit.txt"
+          mkdir -p data/recordings data/fit data/models
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 ionice -c3 rsync" --files-from="$RUNNER_TEMP/rec.txt" bot:bot/data/recordings/ data/recordings/
+          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 ionice -c3 rsync" --files-from="$RUNNER_TEMP/fit.txt" bot:bot/data/recordings/ data/fit/
+          for f in model.json vol_model.json fill_model.json; do rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" data/models/ 2>/dev/null || echo "$f: not on the server"; done
+          echo "copied $(ls data/recordings | wc -l) day(s), $(ls data/fit | wc -l) fit day(s), $(du -sm data | cut -f1) MB"
+      - name: Keep the copy for later runs
+        if: steps.real.outputs.cache-matched-key == '' && env.SERVER_COPY == 'yes'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/recordings
+            data/fit
+            data/models
+          key: twin-real-${{ github.run_id }}
+      - name: Real days present?
+        run: |
+          [ -f data/models/model.json ] && [ "$(ls data/recordings 2>/dev/null | wc -l)" -ge 2 ] || { echo "[twin] no cached copy of real days (evicted); needs the server copy slot (SERVER_COPY=yes)" | tee -a "$RUNNER_TEMP/build.log"; exit 1; }
+          echo "[twin] real days from cache ${{ steps.real.outputs.cache-matched-key || 'server copy' }}: $(ls data/recordings | tr '\n' ' ')" | tee -a "$RUNNER_TEMP/build.log"
       - name: Which days
         id: days
         run: |
