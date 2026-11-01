@@ -132,8 +132,13 @@ jobs:
     timeout-minutes: 340
     strategy:
       fail-fast: false
+      # The account's runner cap is shared with every other lab (coordinator, Nov 1): three backtests at a time.
+      max-parallel: 3
       matrix:
-        how: [real, hold, requote, worst, noise, depth]
+        # Eight runners, not 24: queued behind the other labs, 24 waited so long that the cached copy of the days was
+        # evicted before most of them started (run 41218659211). The real quotes and the four quick fill-ins run one
+        # after another on one runner (about 25-45 minutes each); the depth fill-in (about 1.5 hours) on its own.
+        group: [fills, depth]
         # The days split into four runs of one day, each backtested on a runner of its own from the day before it
         # (two days of the depth fill-in took 4.5 hours or more, near the time limit).
         part: [0, 1, 2, 3]
@@ -182,13 +187,12 @@ jobs:
           set -euo pipefail
           DATA="$GITHUB_WORKSPACE/data"; mkdir -p "$DATA/recordings" "$DATA/models"
           printf '%s\n' $FILES > "$RUNNER_TEMP/recordings.txt"
-          rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/recordings.txt" bot:bot/data/recordings/ "$DATA/recordings/"
-          for f in model.json vol_model.json fill_model.json; do rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" "bot:bot/data/models/$f" "$DATA/models/" 2>/dev/null || echo "$f: not on the server"; done
-          [ -f "$DATA/models/model.json" ] || { echo "no decision model on the server yet"; exit 1; }
-          echo "copied $(ls "$DATA/recordings" | wc -l) recording file(s)"
+          # The days and the models come from the pick job's single copy (the cache above): nothing more is copied here.
+          [ -f "$DATA/models/model.json" ] || { echo "no decision model in the copy"; exit 1; }
+          echo "restored $(ls "$DATA/recordings" | wc -l) recording file(s)"
           # The server's settings without any credential, and without server paths (as Remote training copies them).
           ssh bot "grep -E '^[A-Z][A-Z0-9_]*=' ~/bot/bot.env" | grep -vE 'KEY|SECRET|TOKEN|PASSWORD|PRIVATE|PEM|CREDENTIAL|^BIND_HOST=|^ALLOW_NON_LOOPBACK|^PORT=' | grep -vE '^[A-Z0-9_]+=["'"'"']?(/|~)' > "$RUNNER_TEMP/train.env" || true
-      - name: Backtest (${{ matrix.how }})
+      - name: Backtest (${{ matrix.group }})
         run: |
           set -euo pipefail
           DATA="$GITHUB_WORKSPACE/data"; WORK="$DATA/fidelity"
@@ -199,23 +203,34 @@ jobs:
               tail -5 "$RUNNER_TEMP/fidelity.log" | cut -c1-200; exit 1
             fi
           }
-          if [ "${{ matrix.how }}" = depth ]; then
-            [ -n "$FIT" ] || { echo "no older recorded days to fit the depth model on"; exit 1; }
-            mkdir -p "$DATA/fit" && printf '%s\n' $FIT > "$RUNNER_TEMP/fit.txt"
-            rsync -a --bwlimit=8000 --rsync-path="nice -n 19 rsync" --files-from="$RUNNER_TEMP/fit.txt" bot:bot/data/recordings/ "$DATA/fit/"
+          mkdir -p "$RUNNER_TEMP/out"
+          if [ "${{ matrix.group }}" = depth ]; then
+            [ -n "$FIT" ] && [ -n "$(ls -A "$DATA/fit" 2>/dev/null)" ] || { echo "no older recorded days to fit the depth model on"; exit 1; }
             node --import tsx research/depthStudy.ts --recordings "$DATA/fit" --out "$DATA/models/depth_model.json" 2>&1 | grep -E '^\[depth\] [0-9]' || true
             [ -s "$DATA/models/depth_model.json" ] || { echo "the depth study wrote no model"; exit 1; }
             run --stage prepare --only depth --depth-model "$DATA/models/depth_model.json"
-          elif [ "${{ matrix.how }}" != real ]; then
-            run --stage prepare --only "${{ matrix.how }}"
+            run --stage backtest --how depth
+            # The adversary's probes on the depth fill-in (research/depthAdversary.ts).
+            run --stage adversary --how depth
+            cp "$WORK"/windows-depth-p*.json "$WORK"/adversary-depth-p*.json "$DATA/models/depth_model.json" "$RUNNER_TEMP/out/"
+          else
+            # One failed fill-in leaves the others standing (compare leaves it out); the real quotes are needed.
+            run --stage backtest --how real
+            # The adversary's probes on the real books (research/depthAdversary.ts): what each fill-in is held to.
+            run --stage adversary --how real
+            cp "$WORK"/windows-real-p*.json "$WORK"/adversary-real-p*.json "$RUNNER_TEMP/out/"
+            for how in hold requote worst noise; do
+              if ( run --stage prepare --only "$how" && run --stage backtest --how "$how" && run --stage adversary --how "$how" ); then
+                cp "$WORK"/windows-$how-p*.json "$WORK"/adversary-$how-p*.json "$RUNNER_TEMP/out/"
+              else
+                echo "::warning::the $how fill-in failed: left out of the comparison"
+              fi
+            done
           fi
-          run --stage backtest --how "${{ matrix.how }}"
-          mkdir -p "$RUNNER_TEMP/out" && cp "$WORK"/windows-${{ matrix.how }}-p*.json "$RUNNER_TEMP/out/"
           if [ -f "$WORK/meta.json" ]; then cp "$WORK/meta.json" "$RUNNER_TEMP/out/meta-p${{ matrix.part }}.json"; fi
-          if [ -f "$DATA/models/depth_model.json" ]; then cp "$DATA/models/depth_model.json" "$RUNNER_TEMP/out/"; fi
       - uses: actions/upload-artifact@v4
         with:
-          name: fidelity-${{ matrix.how }}-p${{ matrix.part }}
+          name: fidelity-${{ matrix.group }}-p${{ matrix.part }}
           path: ${{ runner.temp }}/out/
           retention-days: 1
 
@@ -263,7 +278,7 @@ jobs:
           WORK="$GITHUB_WORKSPACE/data/fidelity"; OUT="$GITHUB_WORKSPACE/data/models/replay_fidelity.json"
           mkdir -p "$WORK"
           cp "$RUNNER_TEMP"/in/fidelity-*/windows-*.json "$WORK/"
-          cp "$RUNNER_TEMP"/in/fidelity-hold-p*/meta-p*.json "$WORK/"
+          cp "$RUNNER_TEMP"/in/fidelity-fills-p*/meta-p*.json "$WORK/"
           export TRADING_MODE=paper AUTO_TRAIN=off
           node --import tsx research/replayFidelity.ts --stage compare --work "$WORK" --model model.json --out "$OUT" > "$RUNNER_TEMP/fidelity.log" 2>&1 || { tail -5 "$RUNNER_TEMP/fidelity.log" | cut -c1-200; exit 1; }
           python3 - "$OUT" <<'PY'
@@ -275,6 +290,19 @@ jobs:
           c = r['choice']
           print('closest to the real quotes:', c['how'] + (f" (bridge {c['sigma']})" if c.get('sigma') else ''))
           PY
+      # Advisory: a failure here never holds back the verdict below.
+      - name: The adversary's probes, real books vs each fill-in
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          export TRADING_MODE=paper AUTO_TRAIN=off
+          ARGS=""
+          for how in real hold requote worst noise depth; do
+            FILES=$(ls "$RUNNER_TEMP"/in/fidelity-*/adversary-$how-p*.json 2>/dev/null | paste -sd, - || true)
+            if [ -n "$FILES" ]; then ARGS="$ARGS $how=$FILES"; fi
+          done
+          case " $ARGS" in *" real="*) ;; *) echo "no adversary results on the real books: nothing to compare"; exit 0;; esac
+          node --import tsx research/depthAdversary.ts --compare "$ARGS" --out "$GITHUB_WORKSPACE/data/models/replay_adversary.json"
       - name: Send the verdict to the server
         run: |
           set -euo pipefail

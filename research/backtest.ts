@@ -55,7 +55,7 @@ import { PaperExchange } from '../bot/paper/paperExchange';
 import { marketWorstLoss } from '../bot/risk/exposure';
 import { EquityGuard } from '../bot/risk/equityGuard';
 import { RiskGateway } from '../bot/risk/riskGateway';
-import { decide, decisionProbability, netProfitAtBid, positionNetAtBid, type MarketView } from '../bot/strategy/fairValueStrategy';
+import { decide, decisionProbability, netProfitAtBid, positionNetAtBid, shareWindowSec, type MarketView } from '../bot/strategy/fairValueStrategy';
 import { ComponentTrials, type TrialName } from '../bot/strategy/componentTrials';
 import { activeRuleBook, RuleBook, setRuleBook } from '../bot/strategy/ruleBook';
 import { altcoinRiskOn, confluenceBreadth, orientedSignals, selectionPriority, taDrift, taNetDirection } from '../bot/strategy/taConviction';
@@ -172,6 +172,12 @@ export interface BacktestResult {
   /** Why the paper exchange turned orders down (its reason codes, counted), and the account at the end of the replay:
    *  cash, open positions (their worst loss) and resting orders. For the fidelity check's diagnostics. */
   exchangeRejected?: Record<string, number>;
+  /** The paper maker fills' 60 s markouts over the whole replay (mid then less the fill price, signed for the fill's
+   *  side, in dollars a contract): negative when the price moved against the resting order once it filled. */
+  makerMarkout?: { n: number; mean: number };
+  /** The entry funnel (counts of evaluations): what held entries back, and how many plans still held an entry after the
+   *  strategy, the take gate and the fill model. For the fidelity check's diagnostics. */
+  funnel?: Record<string, number>;
   end?: { balance: number; openPositions: number; openMaxLoss: number; openOrders: number; lastFillAt?: number };
 }
 
@@ -500,7 +506,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       list.push({ side: f.side, cost: f.side === 'bid' ? f.price : 1 - f.price, count: f.count });
       ofOpen.set(f.ticker, list.slice(-50));
     }
-    if (opts.paper && !f.isTaker) markoutDue.push({ due: st.now + 60_000, ticker: f.ticker, sign: f.side === 'bid' ? 1 : -1, price: f.price });
+    // Every maker fill's markout is measured (the run's makerMarkout); only paper sizing feeds the adaptive buffer.
+    if (!f.isTaker) markoutDue.push({ due: st.now + 60_000, ticker: f.ticker, sign: f.side === 'bid' ? 1 : -1, price: f.price });
     const bp = (res.byPurpose![purposeOf(f.clientOrderId)] ??= { fills: 0, contracts: 0 });
     bp.fills++; bp.contracts += f.count;
     if (f.clientOrderId?.endsWith('-exit-wall')) exits.wallFills += f.count;
@@ -567,8 +574,9 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       const x = markoutDue.shift()!;
       const mid = st.books.get(x.ticker)?.mid();
       if (mid === undefined) continue;
-      markouts.push(x.sign * (mid - x.price));
-      if (markouts.length > MARKOUT_KEEP) markouts.shift();
+      if (opts.paper) { markouts.push(x.sign * (mid - x.price)); if (markouts.length > MARKOUT_KEEP) markouts.shift(); }
+      const mk = (res.makerMarkout ??= { n: 0, mean: 0 });
+      mk.n++; mk.mean += (x.sign * (mid - x.price) - mk.mean) / mk.n;
     }
     // Refreshed every minute, as bot/main.ts does.
     if (mctx && st.now - ctxAt >= 60_000) {
@@ -578,7 +586,9 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
     // The supervisor's pass (bot/training/supervisor.ts checkKalshi): a pool that can no longer trade is refilled.
     if (opts.refillUsd !== undefined && opts.killOverride !== false && st.now - refillAt >= 5_000 && st.now >= (opts.tradeFromMs ?? -Infinity)) {
       refillAt = st.now;
-      const bank = (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0);
+      // The engine's bankroll (bot/engine.ts bankroll), as the supervisor reads it: vaulted and pocketed profit is not
+      // the pool's to trade, so it neither counts toward the floor nor stops a refill.
+      const bank = Math.max(0, (await ex.getBalance()) + pos.open().reduce((s, p) => s + PositionBook.maxLoss(p), 0) - (vault?.reserved() ?? 0));
       if (bank < strategy.minTradableBankrollUsd && bank < opts.refillUsd) {
         for (const o of await ex.getOpenOrders()) await cancelNow(o.orderId);
         const usd = Math.round((opts.refillUsd - bank) * 100) / 100;
@@ -835,7 +845,8 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         const pH = pos.get(m.ticker);
         const sideH = pH && pH.yes > 0 ? -pH.netCash / pH.yes : pH && pH.yes < 0 ? 1 - pH.netCash / -pH.yes : undefined;
         const costH = sideH !== undefined && sideH > 0 && sideH < 1 ? sideH + pH!.fees / Math.abs(pH!.yes) : undefined;
-        const shareH = Number.isFinite(m.openTime) && tauSec <= strategy.noExitBeforeCloseFrac * (m.closeTime - m.openTime) / 1000;
+        const winH = shareWindowSec(m.openTime, m.closeTime, strategy.shareWindowMaxSec);
+        const shareH = winH !== undefined && tauSec <= strategy.noExitBeforeCloseFrac * winH;
         const heldH = !(tauSec > strategy.noExitBeforeCloseSec) || (shareH && (positionNetAtBid(posH, costH, bid, ask, DEFAULT_FEES) ?? 0) > 1e-9);
         if (d.plan && !pending.has(m.ticker) && !heldH) {
           exits.ratchetTriggers++;
@@ -864,6 +875,17 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       lastPos.set(m.ticker, posC);
       const reason = cadence.check(m.ticker, { now: st.now, fairValue: pYes, entryWindowOpen, hasResting: Boolean(rb || ra), bookThroughQuote: through(rb, bid.price) || through(ra, ask.price), positionChanged });
       if (reason) res.entryEvaluations++;
+      if (reason) {
+        const fn = (res.funnel ??= {});
+        // First six hours apart from the rest: a replay that stops trading shows where it stopped.
+        const add = (k: string) => { const key = `${st.now - firstTs < 6 * 3_600_000 ? 'first 6h' : 'after'}: ${k}`; fn[key] = (fn[key] ?? 0) + 1; };
+        add('evaluated');
+        if (!kindWindow) add('outside entry window');
+        if (mt.inside || mt.minutesTo <= 30) add('maintenance');
+        if (bankroll < strategy.minTradableBankrollUsd) add('pool under tradable minimum');
+        if (accuracyBlock) add('accuracy gate');
+        if (entryWindowOpen) add('entry window open');
+      }
       if (reason && accuracyBlock) res.paper!.accuracyBlocks++;
       if (reason && kindWindow && edge !== undefined && res.paper) res.paper.sessionEdgeBlocks!++;
       const pNow = pos.get(m.ticker);
@@ -896,7 +918,7 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
         entryFeePerContract: pNow && Math.abs(pNow.yes) > 1e-9 ? pNow.fees / Math.abs(pNow.yes) : undefined,
         profitPeakSidePrice: peaks.update(m.ticker, posC, posC > 0 ? bid.price : posC < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
         entryWindowOpen, exitWindowOpen: tauSec > strategy.noExitBeforeCloseSec,
-        settleShare: Number.isFinite(m.openTime) && tauSec <= strategy.noExitBeforeCloseFrac * (m.closeTime - m.openTime) / 1000,
+        settleShare: ((w) => w !== undefined && tauSec <= strategy.noExitBeforeCloseFrac * w)(shareWindowSec(m.openTime, m.closeTime, strategy.shareWindowMaxSec)),
         ...(huntRest !== undefined ? { huntRestSidePrice: huntRest } : {}),
       };
       const strat = { ...stratRun, kellyFraction: tier.kellyFraction * sizeScale, minEdge: Math.max(0, strategy.minEdge + sessRisk.minEdgeAdd + dynamicEdge(strategy.dynamicEdge, mRead, pred.std).add), inventorySkewPerContract: strategy.inventorySkewPerContract * sessRisk.skewMult };
@@ -914,10 +936,14 @@ async function runBacktestOnce(dir: string, model: MetaModel, strategy: Strategy
       });
       if (plan.pacerArm && quotaFloors.arm(m.ticker, view.position, plan.pacerArm.usd)) exits.floorArms!++;
       if (plan.place.some((p) => p.purpose === 'exit' && p.why.startsWith('quota snipe (floor)'))) exits.floorSales!++;
+      const nEntries = () => plan.place.filter((p) => p.purpose === 'entry').length;
+      const funnelKey = (k: string) => `${st.now - firstTs < 6 * 3_600_000 ? 'first 6h' : 'after'}: ${k}`;
+      if (reason && nEntries()) res.funnel![funnelKey('strategy entry')] = (res.funnel![funnelKey('strategy entry')] ?? 0) + 1;
       const qDecision = decisionProbability(view, strat);
       if (strategy.takeGate === 'validated') applyTakeGate(plan, model.params.take, { pYes, features: fmap, tauSec, bid: bid.price, ask: ask.price, pStd: pred.std, margin: strategy.takeMargin });
       // Fill model (validated only), as live: quote, cross or skip each maker entry by expected value.
       applyFillModel(plan, opts.fillModel, { q: qDecision, book, tick: m.tickSize, tauSec, sigma: vol.sigmaPerSqrtSec, features: fmap, minEv: strategy.fillMinEv, takerMinEdge: strategy.takerBuffer + strategy.minEdge });
+      if (reason && nEntries()) res.funnel![funnelKey('after take gate + fill model')] = (res.funnel![funnelKey('after take gate + fill model')] ?? 0) + 1;
       // The paper bot's own extra entries (bot/engine.ts), when nothing else enters a flat market in its entry window:
       // an exploration entry (PAPER_EXPLORE: the best borderline one within PAPER_EXPLORE_BAND of the edge threshold, at
       // most 1 contract, at PAPER_EXPLORE_RATE, PAPER_EXPLORE_MAX_PER_HOUR), else a training trade (1 contract at the

@@ -378,6 +378,8 @@ export interface TennisProfitRules {
   /** PACER_FLOOR (bot/risk/quotaPacer.ts): which legs count as aiming higher than the quota (off when unset), and the floors. */
   floorMode?: PacerFloorMode;
   floors?: QuotaFloors;
+  /** PACER_FLOOR_TICKS: the floor's cushion, price ticks a contract. */
+  floorTicks?: number;
 }
 
 /**
@@ -413,7 +415,7 @@ function applyProfitRules(t: MatchTracker, s: MatchSnapshot, out: { phase: Match
       const bid = m.quote.bid;
       const selling = out.plans.some((p) => p.ticker === m.ticker && p.side === 'ask' && p.timeInForce === 'immediate_or_cancel');
       const higher = mode === 'off' || selling ? undefined : tennisHigher(t, m, out.plans, bid, mode, tick);
-      const call = quotaCall(net, r.pacerUsd, floor, higher);
+      const call = quotaCall(net, r.pacerUsd, floor, higher, (r.floorTicks ?? 0) * tick * m.position);
       if (call.arm !== undefined) {
         r.floors?.arm(m.ticker, m.position, call.arm);
         out.notes.push(`${m.ticker}: quota floor: +$${net.toFixed(2)} net covers the $${call.arm.toFixed(2)} the hour needs; held for ${higher}, sold if the profit falls below its floor`);
@@ -421,7 +423,7 @@ function applyProfitRules(t: MatchTracker, s: MatchSnapshot, out: { phase: Match
       if (call.sell) {
         out.plans = out.plans.filter(others);
         out.plans.push({ ticker: m.ticker, side: 'ask', price: bid, count: m.position, postOnly: false, reduceOnly: true, timeInForce: 'immediate_or_cancel', leg: 'quota_snipe',
-          why: call.sell === 'floor' ? `+$${net.toFixed(2)} net on ${m.position} at bid ${bid} fell below its $${floor!.toFixed(2)} floor` : `+$${net.toFixed(2)} net on ${m.position} at bid ${bid} covers the $${r.pacerUsd.toFixed(2)} the hour needs` });
+          why: call.sell === 'floor' ? `${net < 0 ? '-' : '+'}$${Math.abs(net).toFixed(2)} net on ${m.position} at bid ${bid} fell below its $${floor!.toFixed(2)} floor` : `+$${net.toFixed(2)} net on ${m.position} at bid ${bid} covers the $${r.pacerUsd.toFixed(2)} the hour needs` });
       }
     }
   }

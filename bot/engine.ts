@@ -31,7 +31,7 @@ import { marketWorstLoss, RestingLike } from './risk/exposure';
 import type { KillSwitch } from './risk/killSwitch';
 import { EXIT_RATE_RESERVE, RiskContext, RiskGateway } from './risk/riskGateway';
 import type { Reconciler } from './recon/reconciler';
-import { decide, decisionProbability, MarketView, netProfitAtBid, OrderPlan, positionNetAtBid, ridesToSettlement } from './strategy/fairValueStrategy';
+import { decide, decisionProbability, MarketView, netProfitAtBid, OrderPlan, positionNetAtBid, ridesToSettlement, shareWindowSec } from './strategy/fairValueStrategy';
 import { ProfitPeaks } from './strategy/profitPeaks';
 import { ConfluenceRatchetExit, HuntEvent } from './strategy/exitPolicies';
 import { HourlyQuotaPacer, QuotaFloors, SnipeGroup } from './risk/quotaPacer';
@@ -1408,7 +1408,8 @@ export class Engine {
       // (TENNIS_NO_EXIT_BEFORE_END_FRAC, 30%, by its progress: the live score against the format's sets, else the time and
       // information clocks) riding in profit.
       const out = decideMatch(tracker, { event, now, startTime: ms.find((m) => m.startTime)?.startTime, markets, closeTime: Math.min(...ms.map((m) => m.closeTime)), score: sc?.score, fairA }, T,
-        { bankroll, tennisRisk: totals.total, matchRisk: totals.window }, ms[0].tickSize, { pacerUsd: this.pacer.neededUsd(now), settleFrac: T.settleFrac, floorMode: this.d.cfg.strategy.pacer.floor, floors: this.quotaFloors });
+        { bankroll, tennisRisk: totals.total, matchRisk: totals.window }, ms[0].tickSize, { pacerUsd: this.pacer.neededUsd(now), settleFrac: T.settleFrac, floorMode: this.d.cfg.strategy.pacer.floor, floors: this.quotaFloors,
+          floorTicks: this.d.cfg.strategy.pacer.floorTicks });
       if (tradeable) for (const p of out.plans) if (p.leg === 'quota_snipe') this.d.audit.write('pacer', { event: 'snipe', ticker: p.ticker, book: 'tennis', why: p.why, count: p.count, price: p.price, ...this.pacer.status(now) });
       // Exit-in-profit curve (strategy/sinuousExit.ts) on each held player market: a take-profit (the target, the
       // late-match profit, a hunt's confluence fade or time limit) also needs the curve's signal; a broken trailing
@@ -2183,7 +2184,7 @@ export class Engine {
       profitPeakSidePrice: this.profitPeaks.update(m.ticker, st.position, st.position > 0 ? bid.price : st.position < 0 ? Math.round((1 - ask.price) * 1e4) / 1e4 : undefined),
       ...(this.d.takeProfitBench?.benched ? { takeProfitBenched: this.d.takeProfitBench.benched } : {}),
       entryWindowOpen, exitWindowOpen: tauSec > S.noExitBeforeCloseSec,
-      settleShare: Number.isFinite(m.openTime) && tauSec <= S.noExitBeforeCloseFrac * (m.closeTime - m.openTime) / 1000,
+      settleShare: ((w) => w !== undefined && tauSec <= S.noExitBeforeCloseFrac * w)(shareWindowSec(m.openTime, m.closeTime, S.shareWindowMaxSec)),
     };
     // Exit policy. confluence_ratchet: fair-value exit normally; "hunt" mode (liquidity ratchet
     // manages the exit, nothing else may reduce the position) only while the contract has beaten

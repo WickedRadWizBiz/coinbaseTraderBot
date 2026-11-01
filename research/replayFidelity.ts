@@ -28,6 +28,7 @@ import { contractKind, type MarketKind } from '../bot/model/fairValue';
 import { backtestMain } from './backtest';
 import { fillDayFile, QUOTE_FILLS, type Ev, type QuoteFill } from './goLiveTally';
 import { readDepthModel, type DepthModel } from './history/depthSim';
+import { probeDays, probeStats, type AdversaryOut } from './depthAdversary';
 import { gkVariance, requoteBetween } from './history/historyReplay';
 
 const MIN = 60_000, SLOT = 15_000, DAY = 86_400_000;
@@ -287,7 +288,8 @@ async function backtestDir(dir: string, model: string): Promise<Windows> {
   console.log(`[fidelity] ${path.basename(dir)}: ${r.trades.length} settled positions; traded hours ${byHour.length ? `${byHour[0][0]}h to ${byHour[byHour.length - 1][0]}h` : 'none'} (${byHour.map(([h, n]) => `${h.slice(11)}:${Math.round(n)}`).join(' ')})`);
   console.log(`[fidelity] ${path.basename(dir)} windows: ${[...w].filter(([, x]) => x.contracts > 0).slice(0, 30).map(([k, x]) => `${Number.isFinite(k) ? new Date(k).toISOString().slice(5, 16) : String(k)} ${Math.round(x.contracts)}ct $${x.pnl.toFixed(2)}`).join('; ')}`);
   const rej = Object.entries(r.exchangeRejected ?? {}).map(([k, n]) => `${k} x${n}`).join('; ');
-  console.log(`[fidelity] ${path.basename(dir)} at the end: cash $${r.end?.balance.toFixed(2)}, ${r.end?.openPositions} open positions (worst loss $${r.end?.openMaxLoss.toFixed(2)}), ${r.end?.openOrders} resting orders${rej ? ` | exchange refused: ${rej}` : ''}`);
+  console.log(`[fidelity] ${path.basename(dir)} at the end: cash $${r.end?.balance.toFixed(2)}, ${r.end?.openPositions} open positions (worst loss $${r.end?.openMaxLoss.toFixed(2)}), ${r.end?.openOrders} resting orders${rej ? ` | exchange refused: ${rej}` : ''}${r.makerMarkout ? ` | maker fills' 60 s markout ${(r.makerMarkout.mean * 100).toFixed(2)}c a contract (${r.makerMarkout.n})` : ''}`);
+  console.log(`[fidelity] ${path.basename(dir)} entry funnel: ${Object.entries(r.funnel ?? {}).map(([k, n]) => `${k} ${n}`).join('; ')}`);
   return w;
 }
 
@@ -344,6 +346,17 @@ export async function replayFidelityMain(argOf: (k: string, d: string) => string
     // The real backtest's runner has no prepare stage, so nothing has made the folder yet.
     fs.mkdirSync(work, { recursive: true });
     writeWindows(path.join(work, parts > 1 ? `windows-${how}-p${part}.json` : `windows-${how}.json`), onDays(w, sliced().days));
+    return undefined;
+  }
+  // The adversary's probes on the real books or a fill-in (research/depthAdversary.ts), on this part's days only.
+  if (stage === 'adversary') {
+    const how = argOf('how', '');
+    if (how !== 'real' && !(QUOTE_FILLS as readonly string[]).includes(how)) throw new Error(`--how must be real or one of ${QUOTE_FILLS.join(', ')}`);
+    const days = sliced().days, t0 = Date.now();
+    const res = await probeDays(dirOf(how), days);
+    fs.mkdirSync(work, { recursive: true });
+    fs.writeFileSync(path.join(work, parts > 1 ? `adversary-${how}-p${part}.json` : `adversary-${how}.json`), JSON.stringify({ how, days: res } satisfies AdversaryOut));
+    console.log(`[fidelity] adversary on ${how} (${elapsed(t0)}): ${probeStats(res).map((x) => `${x.probe} ${x.perHour}/h, markout ${x.markoutC}c, settled ${x.settledC}c (${x.n})`).join(' | ')}`);
     return undefined;
   }
   if (stage === 'compare') {

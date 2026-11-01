@@ -135,3 +135,48 @@ test('the days split into parts, each read from the day before it, and only thei
   // The warm-up day's windows are left out; a window closing at midnight belongs to the day before.
   assert.deepEqual([...onDays(w, ['2026-10-23']).values()].map((x) => x.pnl), [2, 3]);
 });
+
+test('the depth simulator trades the way the price goes: YES takers lift the asks before a rise, NO takers hit the bids before a fall', () => {
+  // The fixture's cell, with the study's flow by move: on the way up 90% YES takers, flat 50%, down 10%.
+  const moved = { ...depth, shape: depth.shape.map((c) => ({ ...c, byMove: [
+    { segs: 100, tradesPerSec: 2, takerYesShare: 0.1 }, { segs: 100, tradesPerSec: 0.5, takerYesShare: 0.5 }, { segs: 100, tradesPerSec: 2, takerYesShare: 0.9 }] })) };
+  const yesShare = (nextMid?: number) => {
+    let yes = 0, all = 0;
+    for (let i = 0; i < 40; i++) {
+      const sim = new DepthSim(moved);
+      for (const e of sim.play(`KXBTC15M-${i}`, D0 + i * 15_000, 0.45, 0.47, D0 + i * 15_000 + 15_000, D0 + 10 * MIN, nextMid)) if (e.k === 'trade') { all++; if (e.takerSide === 'yes') yes++; }
+    }
+    return { share: yes / Math.max(1, all), all };
+  };
+  const up = yesShare(0.50), down = yesShare(0.42), flat = yesShare(0.46);
+  assert.ok(up.share > 0.75, `before a rise: ${up.share}`);
+  assert.ok(down.share < 0.25, `before a fall: ${down.share}`);
+  assert.ok(flat.all < up.all / 2, 'fewer trades while the price stands still');
+  // Without the next quote (or without the study's flow by move), the flow over all moves, as before.
+  const plain = new DepthSim(depth).play('KXBTC15M-P', D0, 0.45, 0.47, D0 + 15_000, D0 + 10 * MIN, 0.50);
+  assert.deepEqual(plain, new DepthSim(depth).play('KXBTC15M-P', D0, 0.45, 0.47, D0 + 15_000, D0 + 10 * MIN));
+});
+
+test('the depth fill-in plays each quote with the next one in view, and still writes in time order', () => {
+  const dir = tmpDir();
+  const evs = read(recordedDay(dir).file);
+  const moved = { ...depth, shape: depth.shape.map((c) => ({ ...c, byMove: [
+    { segs: 100, tradesPerSec: 3, takerYesShare: 0 }, { segs: 100, tradesPerSec: 0, takerYesShare: 0.5 }, { segs: 100, tradesPerSec: 3, takerYesShare: 1 }] })) };
+  const out = fillQuotes(evs, { how: 'depth' }, moved);
+  assert.ok(out.every((e, i) => i === 0 || e.t >= out[i - 1].t), 'in time order');
+  assert.equal(out.length, new Set(out).size);
+  const books = out.filter((e) => e.k === 'book' && e.ticker === 'KXBTC15M-A');
+  assert.equal(books.length, fillQuotes(evs, { how: 'requote' }).filter((e) => e.k === 'book' && e.ticker === 'KXBTC15M-A').length);
+  // Each simulated trade's side matches where the mid went from its quote to the next one.
+  let checked = 0;
+  for (let i = 0; i + 1 < books.length; i++) {
+    const m0 = (books[i].bids![0].price + books[i].asks![0].price) / 2, m1 = (books[i + 1].bids![0].price + books[i + 1].asks![0].price) / 2;
+    const trades = out.filter((e) => e.k === 'trade' && e.t >= books[i].t && e.t < books[i + 1].t);
+    if (Math.abs(m1 - m0) < 0.006) { assert.equal(trades.length, 0, 'no trades while the price stands still'); continue; }
+    for (const x of trades) { assert.equal(x.takerSide, m1 > m0 ? 'yes' : 'no'); checked++; }
+  }
+  assert.ok(checked > 0);
+  // Every record of the day still comes out, the settlement last.
+  assert.equal(out.filter((e) => e.k === 'result').length, 1);
+  assert.equal(out.filter((e) => e.k === 'index').length, evs.filter((e) => e.k === 'index').length);
+});
