@@ -165,6 +165,15 @@ export function netProfitAtBid(v: MarketView): number | undefined {
   return positionNetAtBid(v.position, cost, v.bestBid, v.bestAsk, v.fees);
 }
 
+/** The window the last share (STRATEGY_NO_EXIT_BEFORE_CLOSE_FRAC) measures: open to close, at most `maxSec`
+ *  (STRATEGY_SHARE_WINDOW_MAX_SEC, an hour; 0 = no cap). A 15-minute contract keeps its 900 s; an hourly or daily ladder or a
+ *  range bracket listed hours ahead is measured on the hour the bot trades it in. */
+export function shareWindowSec(openTime: number, closeTime: number, maxSec: number): number | undefined {
+  if (!Number.isFinite(openTime) || !(closeTime > openTime)) return undefined;
+  const span = (closeTime - openTime) / 1000;
+  return maxSec > 0 ? Math.min(span, maxSec) : span;
+}
+
 /** Steven's rule (Oct 29): inside the last share of the window a position in profit after fees rides to settlement. */
 export function ridesToSettlement(v: MarketView): boolean {
   return v.exitWindowOpen !== false && v.settleShare === true && v.position !== 0 && (netProfitAtBid(v) ?? 0) > 1e-9;
