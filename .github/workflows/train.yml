@@ -50,6 +50,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The job's clock starts here, not at the Train step: copying from the server took 47 to 99 minutes on Oct 30 to
+      # Nov 1, and with the pipeline's 300 minutes counted from after the copy the job hit its 350-minute limit every
+      # day (cancelled mid-pipeline, Nov 1 also mid copy-back). The Train step plans its phases against this deadline.
+      - name: Job start
+        run: echo "JOB_T0=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Free disk space (preinstalled toolchains the pipeline does not use)
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
@@ -139,6 +145,11 @@ jobs:
           mkdir -p "$DATA/models/logs"
           LOG="$DATA/models/logs/pipeline-remote-$(date -u +%Y-%m-%dT%H-%M-%SZ).log"
           T0=$(date +%s)
+          # The pipeline must stop 25 minutes before the job's 350-minute limit (timeout's 2-minute kill grace, the summary
+          # and the copy-back to the server). left_min: minutes until then, never below 0.
+          DEADLINE=$(( ${JOB_T0:-$T0} + (350 - 25) * 60 ))
+          left_min() { local m=$(( (DEADLINE - $(date +%s)) / 60 - ${1:-0} )); [ "$m" -gt 0 ] && echo "$m" || echo 0; }
+          echo "pipeline budget: $(left_min) minutes (server copy took $(( (T0 - ${JOB_T0:-$T0}) / 60 )))"
           # Copies the models (and this run's log) to the server: every 45 minutes while training, and after the
           # quick phase. Tournaments resume from these checkpoints; rebuildable caches stay here.
           sync_models() {
@@ -151,6 +162,8 @@ jobs:
           # the pipeline is stopped (SIGTERM: it saves its progress) when less than 1.5 GB is left, and the job goes on.
           run_pipeline() {
             local minutes=$1; shift
+            # timeout 0m would mean no limit at all: no time left = skipped like a stop at the limit.
+            if [ "$minutes" -lt 1 ]; then echo "no time left for: $*"; return 124; fi
             timeout --signal=TERM --kill-after=2m "${minutes}m" node --import tsx research/pipeline.ts "$@" >> "$LOG" 2>&1 &
             local pid=$!
             ( while sleep 20; do
@@ -169,23 +182,26 @@ jobs:
           ( while sleep 2700; do sync_models; done ) &
           SYNC=$!
           if [ -n "$ONLY" ]; then
-            run_pipeline 300 --only "$ONLY"; code=$?
+            m=$(left_min); [ "$m" -gt 300 ] && m=300
+            run_pipeline "$m" --only "$ONLY"; code=$?
           else
             # 1. The models trained on the bot's own recordings first, copied back at once, in two parts. The pipeline
             # runs its steps in a fixed order (vol_model, dataset, mlp, then perps, tennis, fill, sizing), and the first
             # three alone took 182 minutes on Oct 24 (33 + 33 + 116): in one 150-minute part the MLP was cut every day and
             # the four after it never ran. The short four go first (at most 75 minutes; tennis read 8 recorded days in 102
             # minutes on Oct 28 before it skipped the crypto books); the MLP's three get what is left of 260 minutes.
-            run_pipeline 75 --only perps,tennis,fill,sizing; first=$?
+            # Limits are counted back from the deadline: the MLP's three end 40 minutes before it, so phase 2 always runs.
+            m=$(left_min 40); [ "$m" -gt 75 ] && m=75
+            run_pipeline "$m" --only perps,tennis,fill,sizing; first=$?
             echo "quick phase, perps / tennis / fill / sizing: exit $first"; sync_models
-            run_pipeline $(( 260 - ($(date +%s) - T0) / 60 )) --only vol_model,dataset,mlp; quick=$?
+            run_pipeline "$(left_min 40)" --only vol_model,dataset,mlp; quick=$?
             echo "quick phase, vol model / dataset / MLP: exit $quick"; sync_models
             case $quick in 0|124|137|143) quick=$first;; esac
             code=$quick
-            # 2. Everything else in the time left (5 h in all, so at least 40 minutes). The oracle cull is left to the laptop
+            # 2. Everything else until the deadline (at least 40 minutes). The oracle cull is left to the laptop
             # trainer: it builds TA rows for every coin over all of history (over 14 GB here) and runs weekly there; the TA
             # network and the Librarian read the oracle_cull.json the laptop sends.
-            left=$(( 300 - ($(date +%s) - T0) / 60 ))
+            left=$(left_min)
             if [ "$left" -gt 20 ]; then run_pipeline "$left" --skip oracle_cull; code=$?; fi
             # A failed step in the quick phase is not hidden by a second phase that finished.
             case $code in 0|124|137|143) case $quick in 0|124|137|143) ;; *) code=$quick;; esac;; esac
