@@ -191,6 +191,19 @@ async function main(): Promise<void> {
     // What skipping would have done on the held-out fills (held to settlement): kept vs skipped, c/ct after fees.
     const kept = test.filter((x) => midGateProbability(params, x.x, x.midSide) >= x.r.price + x.r.fee), skipped = test.filter((x) => !kept.includes(x));
     console.log(`[ta-jobs] gate on held-out fills: kept ${summary(kept.map((x) => x.r))} | skipped ${summary(skipped.map((x) => x.r))}`);
+    // Job 5, the signals reweighted by their record: does the frozen gate decay, and does refitting it every 15 days on
+    // every fill before the block (the weights follow each input's latest record; none is switched off) keep its edge?
+    const days15 = [...new Set(test.map((x) => x.day))].sort();
+    for (let i = 0; i < days15.length; i += 15) {
+      const from = days15[i], to = days15[Math.min(days15.length, i + 15) - 1];
+      const blk = test.filter((x) => x.day >= from && x.day <= to);
+      if (blk.length < 50) continue;
+      const refit = { ...fitMidGate(rows.filter((x) => x.day < from)), validation: params.validation };
+      const bw = blk.reduce((a, x) => a + x.weight, 0) || 1;
+      const llOf = (g: typeof params | null) => blk.reduce((a, x) => a + x.weight * ll(g ? midGateProbability(g, x.x, x.midSide) : Math.min(0.9999, Math.max(1e-4, x.midSide)), x.won), 0) / bw;
+      const keptBy = (g: typeof params) => blk.filter((x) => midGateProbability(g, x.x, x.midSide) >= x.r.price + x.r.fee).map((x) => x.r);
+      console.log(`[ta-jobs] job 5 ${from}..${to}: log loss mid ${llOf(null).toFixed(4)}, frozen ${llOf(params).toFixed(4)}, refit ${llOf(refit).toFixed(4)} | kept frozen ${summary(keptBy(params))} | kept refit ${summary(keptBy(refit))}`);
+    }
     return;
   }
   if (cmd === 'report') {
