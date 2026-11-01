@@ -13,8 +13,8 @@ on:
         description: 'adversary on the best setting by score or by ic'
         default: 'score'
       round:
-        description: 'study round: 1 (study.py) or 2 (study2.py)'
-        default: '2'
+        description: 'study round: 1 (study.py), 2 (study2.py) or 3 (study3.py, time dilation)'
+        default: '3'
   push:
     branches: [claude/project-thread-axoa26]
     paths:
@@ -57,14 +57,18 @@ jobs:
           mkdir -p research/btcd_fractal/out
           npx tsx research/fractalStudy.ts --history "$RUNNER_TEMP/history" --out research/btcd_fractal/out/engine_study.json 2>&1 | tail -60
       - name: Study
-        if: ${{ (github.event.inputs.round || '2') == '1' }}
+        if: ${{ (github.event.inputs.round || '3') == '1' }}
         run: |
           mkdir -p research/btcd_fractal/out/prev; cp research/btcd_fractal/out/results.json research/btcd_fractal/out/prev/results_score_adversary.json 2>/dev/null || true
           python3 research/btcd_fractal/study.py --data research/btcd_fractal/data --out research/btcd_fractal/out --surrogates "${{ github.event.inputs.surrogates || '60' }}" --adv-by "${{ github.event.inputs.adv_by || 'ic' }}" 2>&1 | tee "$RUNNER_TEMP/study.log" | tail -80
       - name: Study round 2
-        if: ${{ (github.event.inputs.round || '2') == '2' }}
+        if: ${{ (github.event.inputs.round || '3') == '2' }}
         run: |
           python3 research/btcd_fractal/study2.py --data research/btcd_fractal/data --out research/btcd_fractal/out2 --placebos 40 --k 6 2>&1 | tee "$RUNNER_TEMP/study2.log" | tail -120
+      - name: Study round 3 (time dilation)
+        if: ${{ (github.event.inputs.round || '3') == '3' }}
+        run: |
+          python3 research/btcd_fractal/study3.py --data research/btcd_fractal/data --out research/btcd_fractal/out3 --placebos 60 2>&1 | tee "$RUNNER_TEMP/study3.log" | tail -80
       - name: Commit results to the branch
         if: always()
         run: |
@@ -72,6 +76,7 @@ jobs:
           git config user.email "41898783+github-actions[bot]@users.noreply.github.com"
           cp "$RUNNER_TEMP/study.log" research/btcd_fractal/out/study.log 2>/dev/null || true
           mkdir -p research/btcd_fractal/out2; cp "$RUNNER_TEMP/study2.log" research/btcd_fractal/out2/study2.log 2>/dev/null || true
-          git add -f research/btcd_fractal/data research/btcd_fractal/out research/btcd_fractal/out2
+          mkdir -p research/btcd_fractal/out3; cp "$RUNNER_TEMP/study3.log" research/btcd_fractal/out3/study3.log 2>/dev/null || true
+          git add -f research/btcd_fractal/data research/btcd_fractal/out research/btcd_fractal/out2 research/btcd_fractal/out3
           git commit -q -m "BTC.D fractal study results (run ${{ github.run_id }}) [skip ci]" || { echo "nothing to commit"; exit 0; }
           for i in 1 2 3 4; do git pull -q --rebase origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}" && break; sleep $((2**i)); done
