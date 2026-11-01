@@ -1,0 +1,43 @@
+name: Cache probe
+
+# Does a server copy cache (kalshi-server-*) or a Kalshi history cache (kalshi-replay-*) from main exist? Lookup only, no
+# download, no server access; posts the matched keys as a commit comment (thread "Plan dynamic scaling", Nov 1).
+on:
+  push:
+    branches: ['claude/project-thread-0pkw7f']
+    paths: ['.github/workflows/cache-probe.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - id: s
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/models
+            data/sweep-env
+          key: kalshi-server-none
+          restore-keys: kalshi-server-
+          lookup-only: true
+      - id: r
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/history
+            data/history-replay
+          key: kalshi-replay-none
+          restore-keys: kalshi-replay-
+          lookup-only: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          S: ${{ steps.s.outputs.cache-matched-key }}
+          R: ${{ steps.r.outputs.cache-matched-key }}
+        run: |
+          BODY="Cache probe: kalshi-server match: '${S:-none}'; kalshi-replay match: '${R:-none}'"
+          echo "$BODY"
+          gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -f body="$BODY" > /dev/null
