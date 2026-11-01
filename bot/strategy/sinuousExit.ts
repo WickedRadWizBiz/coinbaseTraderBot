@@ -303,6 +303,17 @@ export interface SinuousExitParams {
   crossFvMargins?: number[];
   crossLevel?: number;
   crossLevelMax?: number;
+  /** The dip buy (Steven, Nov 1: turn what we get wrong into profit). The cross sold winners on book dips that recovered
+   *  (Oct 29-30 replay: 524 contracts sold for $200 that later bid $366): the book rolling over while the coin's fair value
+   *  of the side stays above the ask is noise in the book, not a reversal. So on that reading the position is ADDED to:
+   *  bought at the side's ask when the fair value is at least the ask plus the taker fee plus dipMargin (SINUOUS_DIP_BUY,
+   *  SINUOUS_DIP_MARGIN, SINUOUS_DIP_FRAC of the position, at most SINUOUS_DIP_MAX adds a market, SINUOUS_DIP_COOLDOWN_SEC
+   *  apart). The cross still sells when the coin agrees with the dip (its fair-value confirm). */
+  dipBuy?: boolean;
+  dipMargin?: number;
+  dipFrac?: number;
+  dipMax?: number;
+  dipCooldownSec?: number;
 }
 
 /** The cross needs the coin's price to have turned against the side held: 'against', 'with' it, or 'flat' (within
@@ -463,6 +474,28 @@ export class SinuousExitGate {
 
   /** Rest and cross modes: sell the position at the bid now? On a confirmed roll-over (see the header) that clears the
    *  take-profit floor. What the order fills is scored (crossFilled), not the call. */
+  /** The dip buy (see SinuousExitParams.dipBuy): add to the position now? `sideAsk` is what one more contract of the side
+   *  costs, `takerFeePer` its fee. Uses the book curve whatever the cross watches. */
+  dip(ticker: string, e: { sideAsk: number; takerFeePer: number; fvSide?: number; tauSec: number; position: number; exitFeePer: number }, now: number): { buy: number; why?: string } {
+    if (!this.p.dipBuy || e.fvSide === undefined || e.tauSec <= this.standDownSec) return { buy: 0 };
+    const k = this.trackers.get(ticker);
+    const r = k?.reading;
+    if (!k || !r || r.curve === undefined || r.projected === undefined || r.velocity === undefined) return { buy: 0 };
+    const depth = r.projected - r.curve;
+    if (!(r.velocity <= 0 && depth > 0 && depth >= (this.p.crossFeeMargin ?? 0.5) * e.exitFeePer - 1e-9)) return { buy: 0 };
+    const margin = this.p.dipMargin ?? 0.04;
+    if (!(e.fvSide >= e.sideAsk + e.takerFeePer + margin - 1e-9)) return { buy: 0 };
+    const d = this.dips.get(ticker) ?? { n: 0, last: -Infinity, sign: k.sign };
+    if (d.sign !== k.sign) { d.n = 0; d.last = -Infinity; d.sign = k.sign; }
+    if (d.n >= (this.p.dipMax ?? 2) || now - d.last < (this.p.dipCooldownSec ?? 60) * 1000) return { buy: 0 };
+    const n = Math.floor(Math.abs(e.position) * (this.p.dipFrac ?? 0.5));
+    if (!(n >= 1)) return { buy: 0 };
+    d.n++; d.last = now; this.dips.set(ticker, d);
+    if (this.dips.size > 256) for (const [t, x] of this.dips) if (now - x.last > 3_600_000) this.dips.delete(t);
+    return { buy: n, why: `exit curve: dip buy${k.sign < 0 ? ' NO' : ''} ${e.sideAsk} (book rolled over ${depth.toFixed(3)} under its projection, the coin's fair value ${e.fvSide.toFixed(3)} >= ask + fee + ${margin})` };
+  }
+  private readonly dips = new Map<string, { n: number; last: number; sign: 1 | -1 }>();
+
   cross(ticker: string, e: CrossCheck, now: number): { sell: boolean; why?: string; note?: string } {
     if (!this.crossing || this.p.cross === false || e.tauSec <= this.standDownSec) return { sell: false };
     if (this.p.crossSource === 'line') return this.lineCross(ticker, e);

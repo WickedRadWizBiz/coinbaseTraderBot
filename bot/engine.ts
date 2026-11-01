@@ -57,7 +57,7 @@ import { huntBlockedBySession, mergeSessionRisk, sessionRiskFor, type SessionRis
 import { playbook } from './strategy/playbook';
 import { compensator } from './strategy/compensator';
 import { macro } from './macro/macroService';
-import { gatePasses, probation, probationLevel } from './risk/probation';
+import { gatePasses, probation, probationGpMult, probationLevel } from './risk/probation';
 import { DEFAULT_STREAK, StreakScaler } from './risk/streakScaler';
 import { applyTakeGate } from './model/takeModel';
 import { effectiveSigma, type VolProfile } from './model/volSeasonality';
@@ -2076,7 +2076,7 @@ export class Engine {
     // On probation (VALIDATION_GATES=monitor) an unvalidated formula speaks too, live included.
     const gpSpeaks = gpRead && (gpRead.validated || (gpRead.speaks && !liveMode) || gatePasses('kalshi', false)) ? gpRead : undefined;
     // An unvalidated formula's vote is halved at each level of the Kalshi book's probation (graded, never benched, Oct 31).
-    const gpVote = gpSpeaks && !gpSpeaks.validated && probationLevel('kalshi') > 0 ? { ...gpSpeaks, exposure: gpSpeaks.exposure * 0.5 ** probationLevel('kalshi') } : gpSpeaks;
+    const gpVote = gpSpeaks && !gpSpeaks.validated && probationLevel('kalshi') > 0 ? { ...gpSpeaks, exposure: gpSpeaks.exposure * probationGpMult('kalshi') } : gpSpeaks;
     const signals = orientedSignals(features, taView, liveMode, rbRead, gpVote);
     const taDir = taNetDirection(taView, liveMode);
     const rsiTrade = [shortContract ? features.ta_rsi_15m : features.ta_rsi_1h, features.rsi_14_1m].find((x) => x !== undefined && Number.isFinite(x));
@@ -2453,6 +2453,16 @@ export class Engine {
               edge: sign > 0 ? top.price - q - exitFeePer : q - top.price - exitFeePer, why: c.why! });
           }
         }
+      }
+      // The dip buy (SINUOUS_DIP_BUY; Nov 1): the book rolled over while the coin's fair value of the side stays above the ask
+      // plus the fee and the margin: add to the position at the ask (the same rule in the replay, research/backtest.ts).
+      if (curve.p.dipBuy && entryWindowOpen && !huntMode && view.exitWindowOpen !== false && !ridesToSettlement(view) && !plan.place.some((p) => p.purpose === 'exit' || p.purpose === 'entry')) {
+        const top = sign > 0 ? ask : bid;
+        const sideAsk = sign > 0 ? top.price : Math.round((1 - top.price) * 1e4) / 1e4;
+        const d = curve.dip(m.ticker, { sideAsk, takerFeePer: orderFee(1, sideAsk, true, fees), fvSide: sign > 0 ? fv.pYes : 1 - fv.pYes, tauSec, position: st.position, exitFeePer: orderFee(held, sideBid, true, fees) / held }, now);
+        const n = Math.min(d.buy, floorCount(top.size), view.maxContracts);
+        if (n >= 1) plan.place.push({ side: sign > 0 ? 'bid' : 'ask', price: top.price, count: n, timeInForce: 'immediate_or_cancel', postOnly: false, reduceOnly: false, purpose: 'entry',
+          edge: (sign > 0 ? fv.pYes : 1 - fv.pYes) - sideAsk - orderFee(1, sideAsk, true, fees), why: d.why! });
       }
     } else curve?.flat(m.ticker, now);
     if (huntMode) plan.notes.push(huntHeld ?? `hunting: stop ${st.huntStop ?? 'forming'}`);

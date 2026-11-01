@@ -393,3 +393,29 @@ test('cross on the live line: sells on its break when the sale clears the floor;
   assert.equal(off.cross('V', { ...CROSS, line: line(true) }, 0).sell, false, 'off by default');
   assert.equal(new SinuousExitGate({ ...loadConfig({ DASHBOARD_TOKEN: 'x'.repeat(40), SINUOUS_CROSS: 'true' }).sinuousExit, minNetProfit: 0.015 }, { minTrades: 20, t: 1, maxLossUsd: 25, window: 200 }, undefined, undefined, 0).cross('V', { ...CROSS, line: line(true) }, 0).sell, true, 'SINUOUS_CROSS=true turns it on');
 });
+
+test('dip buy (the cross inverted): a roll-over with the coin still above the ask plus fee plus margin adds half the position, at most dipMax per market and side, after a cooldown', () => {
+  const D = { sideAsk: 0.64, takerFeePer: 0.017, fvSide: 0.72, tauSec: 400, position: 10, exitFeePer: 0.0165 };
+  const off = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015 }, BENCH, undefined, undefined, 0);
+  assert.equal(off.dip('T', D, rollOver(off, 'T', 0)).buy, 0, 'off by default');
+  const g = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015, dipBuy: true, dipMargin: 0.04, dipFrac: 0.5, dipMax: 2, dipCooldownSec: 60 }, BENCH, undefined, undefined, 0);
+  let now = rollOver(g, 'T', 0);
+  assert.equal(g.dip('T', { ...D, fvSide: 0.69 }, now).buy, 0, 'fair value under ask + fee + margin');
+  assert.equal(g.dip('T', { ...D, fvSide: undefined }, now).buy, 0, 'no fair value: no buy');
+  assert.equal(g.dip('T', { ...D, tauSec: 100 }, now).buy, 0, 'inside the stand-down');
+  assert.equal(g.dip('T', { ...D, position: 1 }, now).buy, 0, 'half of 1 rounds to 0');
+  const b = g.dip('T', D, now);
+  assert.equal(b.buy, 5);
+  assert.match(b.why!, /^exit curve: dip buy 0\.64 /);
+  assert.equal(g.dip('T', D, now + 1000).buy, 0, 'cooldown');
+  now += 61_000;
+  now = rollOver(g, 'T', now);
+  assert.equal(g.dip('T', D, now).buy, 5, 'second dip');
+  now = rollOver(g, 'T', now + 61_000);
+  assert.equal(g.dip('T', D, now).buy, 0, 'dipMax reached');
+  // A rising curve is no dip.
+  const up = new SinuousExitGate({ mode: 'gate', minNetProfit: 0.015, dipBuy: true }, BENCH, undefined, undefined, 0);
+  let t = 0;
+  for (let i = 0; i < 30; i++) up.observe('U', 'crypto_15m', obs((t += 1000), 0.55 + 0.005 * i));
+  assert.equal(up.dip('U', D, t).buy, 0);
+});
