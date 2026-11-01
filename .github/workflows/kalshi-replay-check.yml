@@ -11,6 +11,8 @@
 #
 # Required secrets (the same as Deploy): LIGHTSAIL_HOST, LIGHTSAIL_USERNAME, LIGHTSAIL_SSH_KEY (optional LIGHTSAIL_PORT).
 name: Kalshi replay check
+# Lab: the run's title carries the overrides, so a dispatcher can find its own run (REPLAY_TAG) among several sent at once.
+run-name: "Kalshi replay check${{ inputs.overrides && format(' · {0}', inputs.overrides) || '' }}"
 
 on:
   schedule:
