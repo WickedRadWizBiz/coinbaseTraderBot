@@ -58,7 +58,7 @@ jobs:
 
   copy:
     needs: [plan]
-    # `# reuse_run=<run id>` in the arms file: another lab's copy of the same stretch (its lab-copy artifact), no server read.
+    # `# reuse_run=<run id>` in the arms file: another lab's copy of the same stretch (its cached copy: lab-copy-<id> on this branch, or replay-check-copy-<id> saved on main), no server read.
     if: needs.plan.outputs.reuse == ''
     runs-on: ubuntu-latest
     environment: production
@@ -197,13 +197,12 @@ jobs:
         run: |
           mkdir -p data/lab-temp
           cp "$RUNNER_TEMP"/paper-* "$RUNNER_TEMP"/kill-override "$RUNNER_TEMP"/maker-markouts.json data/lab-temp/ 2>/dev/null || true
-          tar -cf lab-copy.tar data
-          ls -la lab-copy.tar
-      - uses: actions/upload-artifact@v4
+          du -sh data | cat
+      # A cache, never an artifact: the repository is public and its artifacts can be downloaded by anyone; caches cannot.
+      - uses: actions/cache/save@v4
         with:
-          name: lab-copy
-          path: lab-copy.tar
-          retention-days: 2
+          path: data
+          key: lab-copy-${{ github.run_id }}
 
   arm:
     needs: [plan, copy]
@@ -230,15 +229,15 @@ jobs:
       - name: Install dependencies
         if: steps.deps.outputs.cache-hit != 'true'
         run: npm ci --no-audit --no-fund --silent
-      - uses: actions/download-artifact@v4
+      # This run's copy, or with reuse_run another run's: a lab copy on this branch, or a replay-check copy saved on main.
+      - uses: actions/cache/restore@v4
         with:
-          name: lab-copy
-          run-id: ${{ needs.plan.outputs.reuse || github.run_id }}
-          github-token: ${{ github.token }}
+          path: data
+          key: lab-copy-${{ needs.plan.outputs.reuse || github.run_id }}
+          restore-keys: replay-check-copy-${{ needs.plan.outputs.reuse || github.run_id }}
+          fail-on-cache-miss: true
       - name: Unpack the copy
-        run: |
-          tar -xf lab-copy.tar && rm lab-copy.tar
-          cp data/lab-temp/* "$RUNNER_TEMP"/ 2>/dev/null || true
+        run: cp data/lab-temp/* "$RUNNER_TEMP"/ 2>/dev/null || true
       - name: Replay check (backtester vs paper, since the bot's last start)
         env:
           CHECK_FROM: ${{ needs.plan.outputs.from }}
