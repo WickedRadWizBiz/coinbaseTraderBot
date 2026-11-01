@@ -1,5 +1,5 @@
 {
- "generated": "2026-11-01T20:40:51+00:00",
+ "generated": "2026-11-01T20:45:43+00:00",
  "childLast": "2026-11-01",
  "reference": {
   "setting": "2016-01..2018-03 logit dyn0/0 wsh3.0",
@@ -146,10 +146,10 @@
     "childWeeks": 56,
     "parentWeeks": 4,
     "dil": 14.0,
-    "childMove": 1.150108795457335,
-    "ampRatio": 0.08584180595219171,
+    "childMove": 1.1524402225129577,
+    "ampRatio": 0.08601581897573429,
     "complete": false,
-    "childSpeed": 0.020537657061738126,
+    "childSpeed": 0.02057928968773139,
     "parentFrom": "2017-11-12",
     "parentTo": "2017-12-10",
     "childFrom": "2025-10-12",
@@ -296,10 +296,10 @@
      "childWeeks": 57,
      "parentWeeks": 4,
      "dil": 14.25,
-     "childMove": 1.9208354944071147,
-     "ampRatio": 0.1433672957099775,
+     "childMove": 1.9231669214627374,
+     "ampRatio": 0.14354130873352008,
      "complete": false,
-     "childSpeed": 0.033698868322931834
+     "childSpeed": 0.03373977055197785
     },
     {
      "from": 101,
@@ -437,10 +437,10 @@
      "childWeeks": 56,
      "parentWeeks": 4,
      "dil": 14.0,
-     "childMove": 1.150108795457335,
-     "ampRatio": 0.08584180595219171,
+     "childMove": 1.1524402225129577,
+     "ampRatio": 0.08601581897573429,
      "complete": false,
-     "childSpeed": 0.020537657061738126
+     "childSpeed": 0.02057928968773139
     },
     {
      "from": 101,
@@ -578,10 +578,10 @@
      "childWeeks": 57,
      "parentWeeks": 4,
      "dil": 14.25,
-     "childMove": 1.9208354944071147,
-     "ampRatio": 0.1433672957099775,
+     "childMove": 1.9231669214627374,
+     "ampRatio": 0.14354130873352008,
      "complete": false,
-     "childSpeed": 0.033698868322931834
+     "childSpeed": 0.03373977055197785
     },
     {
      "from": 101,
@@ -719,10 +719,10 @@
      "childWeeks": 57,
      "parentWeeks": 4,
      "dil": 14.25,
-     "childMove": 1.9208354944071147,
-     "ampRatio": 0.1433672957099775,
+     "childMove": 1.9231669214627374,
+     "ampRatio": 0.14354130873352008,
      "complete": false,
-     "childSpeed": 0.033698868322931834
+     "childSpeed": 0.03373977055197785
     },
     {
      "from": 101,
@@ -859,10 +859,10 @@
      "childWeeks": 68,
      "parentWeeks": 4,
      "dil": 17.0,
-     "childMove": -4.143869762543417,
-     "ampRatio": -0.30929009973004995,
+     "childMove": -4.141538335487795,
+     "ampRatio": -0.30911608670650736,
      "complete": false,
-     "childSpeed": 0.06093926121387378
+     "childSpeed": 0.06090497552187933
     },
     {
      "from": 101,
@@ -999,10 +999,10 @@
      "childWeeks": 68,
      "parentWeeks": 4,
      "dil": 17.0,
-     "childMove": -4.143869762543417,
-     "ampRatio": -0.30929009973004995,
+     "childMove": -4.141538335487795,
+     "ampRatio": -0.30911608670650736,
      "complete": false,
-     "childSpeed": 0.06093926121387378
+     "childSpeed": 0.06090497552187933
     },
     {
      "from": 101,
@@ -1139,10 +1139,10 @@
      "childWeeks": 67,
      "parentWeeks": 4,
      "dil": 16.75,
-     "childMove": -0.3929093732769857,
-     "ampRatio": -0.029325964909457523,
+     "childMove": -0.390577946221363,
+     "ampRatio": -0.029151951885914934,
      "complete": false,
-     "childSpeed": 0.005864319004134116
+     "childSpeed": 0.0058295215853934775
     },
     {
      "from": 101,
@@ -1280,10 +1280,10 @@
      "childWeeks": 57,
      "parentWeeks": 4,
      "dil": 14.25,
-     "childMove": 1.9208354944071147,
-     "ampRatio": 0.1433672957099775,
+     "childMove": 1.9231669214627374,
+     "ampRatio": 0.14354130873352008,
      "complete": false,
-     "childSpeed": 0.033698868322931834
+     "childSpeed": 0.03373977055197785
     },
     {
      "from": 101,
@@ -1317,10 +1317,10 @@
      "childWeeks": 461,
      "parentWeeks": 64,
      "dil": 7.203125,
-     "childMove": 21.297278253247875,
-     "ampRatio": -2.4419165489382033,
+     "childMove": 21.299609680303497,
+     "ampRatio": -2.442183867148637,
      "complete": false,
-     "childSpeed": 0.04619800054934463
+     "childSpeed": 0.0462030578748449
     },
     {
      "from": 64,
@@ -1426,10 +1426,10 @@
      "childWeeks": 461,
      "parentWeeks": 64,
      "dil": 7.203125,
-     "childMove": 21.297278253247875,
-     "ampRatio": -2.4419165489382033,
+     "childMove": 21.299609680303497,
+     "ampRatio": -2.442183867148637,
      "complete": false,
-     "childSpeed": 0.04619800054934463
+     "childSpeed": 0.0462030578748449
     },
     {
      "from": 64,
@@ -1639,10 +1639,10 @@
      "childWeeks": 60,
      "parentWeeks": 4,
      "dil": 15.0,
-     "childMove": 1.9985454900872455,
-     "ampRatio": 0.14916741339977121,
+     "childMove": 2.000876917142868,
+     "ampRatio": 0.1493414264233138,
      "complete": false,
-     "childSpeed": 0.03330909150145409
+     "childSpeed": 0.0333479486190478
     },
     {
      "from": 101,
@@ -1780,10 +1780,10 @@
      "childWeeks": 57,
      "parentWeeks": 4,
      "dil": 14.25,
-     "childMove": 1.9208354944071147,
-     "ampRatio": 0.1433672957099775,
+     "childMove": 1.9231669214627374,
+     "ampRatio": 0.14354130873352008,
      "complete": false,
-     "childSpeed": 0.033698868322931834
+     "childSpeed": 0.03373977055197785
     },
     {
      "from": 101,
@@ -1921,10 +1921,10 @@
      "childWeeks": 60,
      "parentWeeks": 4,
      "dil": 15.0,
-     "childMove": 1.9985454900872455,
-     "ampRatio": 0.14916741339977121,
+     "childMove": 2.000876917142868,
+     "ampRatio": 0.1493414264233138,
      "complete": false,
-     "childSpeed": 0.03330909150145409
+     "childSpeed": 0.0333479486190478
     },
     {
      "from": 101,
@@ -2062,10 +2062,10 @@
      "childWeeks": 57,
      "parentWeeks": 4,
      "dil": 14.25,
-     "childMove": 1.9208354944071147,
-     "ampRatio": 0.1433672957099775,
+     "childMove": 1.9231669214627374,
+     "ampRatio": 0.14354130873352008,
      "complete": false,
-     "childSpeed": 0.033698868322931834
+     "childSpeed": 0.03373977055197785
     },
     {
      "from": 101,
@@ -2203,10 +2203,10 @@
      "childWeeks": 57,
      "parentWeeks": 4,
      "dil": 14.25,
-     "childMove": 1.9208354944071147,
-     "ampRatio": 0.1433672957099775,
+     "childMove": 1.9231669214627374,
+     "ampRatio": 0.14354130873352008,
      "complete": false,
-     "childSpeed": 0.033698868322931834
+     "childSpeed": 0.03373977055197785
     },
     {
      "from": 101,
@@ -2344,10 +2344,10 @@
      "childWeeks": 57,
      "parentWeeks": 4,
      "dil": 14.25,
-     "childMove": 1.9208354944071147,
-     "ampRatio": 0.1433672957099775,
+     "childMove": 1.9231669214627374,
+     "ampRatio": 0.14354130873352008,
      "complete": false,
-     "childSpeed": 0.033698868322931834
+     "childSpeed": 0.03373977055197785
     },
     {
      "from": 101,

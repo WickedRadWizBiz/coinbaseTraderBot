@@ -1,4 +1,4 @@
-16 settings in 19s
+16 settings in 18s
 reference: 2016-01..2018-03 logit dyn0/0 wsh3.0
   fall      parent 2016-01-03..2017-03-26 ( 64 w,   -8.7 pts) | child 2018-01-07..2021-03-14 (167 w, move 22.1) dil 2.6 amp -2.54 speed 0.13 done
   waterfall parent 2017-03-26..2017-05-21 (  8 w,  -24.8 pts) | child 2021-03-21..2021-06-27 ( 15 w, move -17.1) dil 1.9 amp 0.69 speed 1.14 done
@@ -44,4 +44,4 @@ how long: {"setting": "2016-01..2018-01-15 raw dyn0/0 wsh1.0", "stage": "rise 20
 how long: {"setting": "2016-01..2018-01-15 raw dyn0/0 wsh3.0", "stage": "rise 2017-11-12..2017-12-10", "spentWeeks": 57, "parentWeeks": 4, "parentWeeksLeft": 0, "byKindTotalWeeks": 26.0625, "byProgressTotalWeeks": 37.68096387362944, "bySpeedTotalWeeks": 23.760703641577344, "next": {"stage": "waterfall 2017-12-10..2018-01-14", "parentWeeks": 5, "move": -30.564451196631367, "byKindWeeks": 38.035714285714285, "bySpeedWeeks": 138.46587543353647}}
 how long: {"setting": "2016-01..2018-01-15 raw dyn2/104 wsh1.0", "stage": "rise 2017-11-12..2017-12-10", "spentWeeks": 57, "parentWeeks": 4, "parentWeeksLeft": 0, "byKindTotalWeeks": 21.09375, "byProgressTotalWeeks": 30.260504834131144, "bySpeedTotalWeeks": 23.84643150666217, "next": {"stage": "waterfall 2017-12-10..2018-01-14", "parentWeeks": 5, "move": -30.564451196631367, "byKindWeeks": 27.723214285714285, "bySpeedWeeks": 29.29180467314088}}
 how long: {"setting": "2016-01..2018-01-15 raw dyn2/104 wsh3.0", "stage": "rise 2017-11-12..2017-12-10", "spentWeeks": 57, "parentWeeks": 4, "parentWeeksLeft": 0, "byKindTotalWeeks": 27.0625, "byProgressTotalWeeks": 34.58528389607772, "bySpeedTotalWeeks": 38.45278182190357, "next": {"stage": "waterfall 2017-12-10..2018-01-14", "parentWeeks": 5, "move": -30.564451196631367, "byKindWeeks": 31.205357142857146, "bySpeedWeeks": 42.28634782355301}}
-done in 26s
+done in 25s
