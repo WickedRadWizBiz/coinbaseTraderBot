@@ -178,11 +178,12 @@ def fit(child, parent, cfg, iters=4):
     b = np.full(n, b0)
     j0max = int(cfg["j0"] * m)
     kc = int(cfg["shapew"])
+    kmax = int(cfg.get("kmax", kc))  # parent bars a shape window can span (more than kc with finer parent bars)
     cshape = shift_diff(child, kc)
-    ptab = np.zeros((kc + 1, m))
-    for k in range(1, kc + 1):
+    ptab = np.zeros((kmax + 1, m))
+    for k in range(1, kmax + 1):
         ptab[k] = shift_diff(parent, k)
-    kidx = np.full(n, max(1, round(kc / (n / (0.8 * m)))), dtype=np.int64)
+    kidx = np.full(n, int(np.clip(round(kc / (n / (0.8 * m))), 1, kmax)), dtype=np.int64)
     last = path = None
     for _ in range(iters):
         last, path = dtw_open_end(child, parent, a, b, float(cfg["wshape"]), cshape, ptab, kidx, j0max, int(cfg["maxstep"]), int(cfg["cap"]))
@@ -194,7 +195,7 @@ def fit(child, parent, cfg, iters=4):
         for i in range(n):
             i0 = max(0, i - kc)
             adv = path[i] - path[i0]
-            kidx[i] = int(np.clip(round(adv if adv > 0 else 1), 1, kc))
+            kidx[i] = int(np.clip(round(adv if adv > 0 else 1), 1, kmax))
     span = path[-1] - path[0] + 1
     dil = n / max(span, 1)
     pred = a + b * parent[path]
