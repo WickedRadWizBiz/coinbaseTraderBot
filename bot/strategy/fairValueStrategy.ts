@@ -252,10 +252,16 @@ export function loserNoEntry(v: Pick<MarketView, 'settleShare' | 'exitWindowOpen
 
 /** FV_ENTRY_GATE (cfg.loserExits): an entry's side, bought at `cost` a contract with `fee`, must leave the spot fair value of
  *  that side at least the margin above cost plus fee. True when the gate is off or no fair value is known. */
-export function fvGatePasses(pFair: number | undefined, side: 'yes' | 'no', cost: number, fee: number, cfg: Pick<StrategyConfig, 'loserExits'>): boolean {
+export function fvGatePasses(pFair: number | undefined, side: 'yes' | 'no', cost: number, fee: number, cfg: Pick<StrategyConfig, 'loserExits'>, maker = false): boolean {
   const L = cfg.loserExits;
   if (!L?.gate || pFair === undefined) return true;
-  return (side === 'yes' ? pFair : 1 - pFair) >= cost + fee + L.gateMargin - 1e-9;
+  return (side === 'yes' ? pFair : 1 - pFair) >= cost + fee + gateMarginFor(cfg, maker) - 1e-9;
+}
+
+/** The gate's margin for an order: a resting maker quote's own (FV_ENTRY_GATE_QUOTE_MARGIN) when one is set. */
+export function gateMarginFor(cfg: Pick<StrategyConfig, 'loserExits'>, maker: boolean): number {
+  const L = cfg.loserExits;
+  return maker && L?.gateQuoteMargin !== undefined ? L.gateQuoteMargin : L?.gateMargin ?? 0;
 }
 
 /** The fair value gate on a finished plan (after the fill model turns quotes into crosses and paper adds its training trades):
@@ -275,8 +281,8 @@ export function applyFvGate(plan: StrategyOutput, pFair: number | undefined, pos
       return false;
     }
     if (!cfg.loserExits?.gate || pFair === undefined) return true;
-    const ok = fvGatePasses(pFair, buysYes ? 'yes' : 'no', cost, orderFee(p.count, cost, !p.postOnly, fees) / p.count, cfg);
-    if (!ok) plan.notes.push(`fair value gate: dropped ${p.purpose} ${buysYes ? 'YES' : 'NO'} at ${cost.toFixed(2)} (fair value ${(buysYes ? pFair : 1 - pFair).toFixed(3)} under cost + fee + ${cfg.loserExits!.gateMargin})`);
+    const ok = fvGatePasses(pFair, buysYes ? 'yes' : 'no', cost, orderFee(p.count, cost, !p.postOnly, fees) / p.count, cfg, p.postOnly);
+    if (!ok) plan.notes.push(`fair value gate: dropped ${p.purpose} ${buysYes ? 'YES' : 'NO'} at ${cost.toFixed(2)} (fair value ${(buysYes ? pFair : 1 - pFair).toFixed(3)} under cost + fee + ${gateMarginFor(cfg, p.postOnly)})`);
     return ok;
   });
   return before - plan.place.length;
@@ -477,8 +483,8 @@ export function decide(v: MarketView, cfg: StrategyConfig, opts: {
   // least its cost with the fee plus the margin (the positions that rode to settlement losing were bad from the start).
   const gate = (side: 'yes' | 'no', cost: number, n: number, taker: boolean): boolean => {
     const fee = n > 0 ? orderFee(n, cost, taker, v.fees) / n : 0;
-    if (fvGatePasses(v.pFair, side, cost, fee, cfg)) return true;
-    out.notes.push(`fair value gate: ${side.toUpperCase()} fair value ${(side === 'yes' ? v.pFair! : 1 - v.pFair!).toFixed(3)} < ${cost.toFixed(2)} + fee ${fee.toFixed(3)} + ${cfg.loserExits!.gateMargin}`);
+    if (fvGatePasses(v.pFair, side, cost, fee, cfg, !taker)) return true;
+    out.notes.push(`fair value gate: ${side.toUpperCase()} fair value ${(side === 'yes' ? v.pFair! : 1 - v.pFair!).toFixed(3)} < ${cost.toFixed(2)} + fee ${fee.toFixed(3)} + ${gateMarginFor(cfg, !taker)}`);
     return false;
   };
 
