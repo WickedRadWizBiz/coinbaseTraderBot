@@ -115,6 +115,8 @@ jobs:
     timeout-minutes: 330
     strategy:
       fail-fast: false
+      # The account's runner cap is shared by every thread (Nov 1): long replays run one at a time.
+      max-parallel: 1
       matrix:
         variant: ${{ fromJson(needs.data.outputs.variants) }}
         part: [1, 2]
@@ -175,6 +177,8 @@ jobs:
     timeout-minutes: 330
     strategy:
       fail-fast: false
+      # The account's runner cap is shared by every thread (Nov 1): long replays run one at a time.
+      max-parallel: 1
       matrix:
         variant: ${{ fromJson(needs.data.outputs.gates) }}
         part: [1, 2]

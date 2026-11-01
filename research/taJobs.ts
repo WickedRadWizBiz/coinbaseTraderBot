@@ -30,9 +30,10 @@ import { recordingFiles } from '../bot/marketdata/recordingFiles';
 // No job is switched off (Steven, Oct 31).
 export const VARIANTS: Record<string, Record<string, string>> = {
   baseline: {},
-  // Job 4, second iteration: sell on the stretch only near the fair value and for half of what is left to make.
-  j4_v2: { TA_EXIT_EXTREME_VOTES: '1.5', TA_EXIT_EXTREME_EDGE: '0', TA_EXIT_EXTREME_SHARE: '0.5' },
 };
+// Job 4, second iteration: sell on the stretch only near the fair value and for half of what is left to make (round 3:
+// +0.17/h alone; here only in the full stack, since runners are scarce).
+const J4_V2 = { TA_EXIT_EXTREME_VOTES: '1.5', TA_EXIT_EXTREME_EDGE: '0', TA_EXIT_EXTREME_SHARE: '0.5' };
 
 /** Where train-gate writes the mid-anchored take gate (job 3) the gate variants read. */
 const GATE_FILE = 'data/models/take_mid.json';
@@ -40,11 +41,8 @@ const LEANS = { TA_LEAN_MAKER: '0.01', TA_LEAN_PRICE: '0.005' };
 const LAG = { DYN_EDGE_VOL: '-0.02', DYN_EDGE_MAX_DOWN: '0.02' };
 const gate = (m: string) => ({ TAKE_MID_GATE: GATE_FILE, TAKE_MID_MARGIN: m });
 export const GATE_VARIANTS: Record<string, Record<string, string>> = {
-  j3_gate_margin: gate('0.01'),
   g_m3: gate('0.03'),
-  g_m5: gate('0.05'),
-  g_m3_maker: { ...gate('0.03'), TA_LEAN_MAKER: '0.01' },
-  g_m3_full: { ...gate('0.03'), ...LEANS, ...LAG, ...VARIANTS.j4_v2 },
+  g_m3_full: { ...gate('0.03'), ...LEANS, ...LAG, ...J4_V2 },
   // The skipped maker quotes lost 3c a contract: buy their other side instead when the gate favours it.
   g_m3_flip: { ...gate('0.03'), TAKE_MID_FLIP: 'true' },
   // Adversaries for the 3c gate (train-gate writes their files beside the gate's): see train-gate.
