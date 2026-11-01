@@ -58,9 +58,14 @@ jobs:
           npx tsx research/fractalStudy.ts --history "$RUNNER_TEMP/history" --out research/btcd_fractal/out/engine_study.json 2>&1 | tail -60
       - name: Study
         if: ${{ (github.event.inputs.round || '3') == '1' }}
+        # dispatch inputs reach the shell as environment variables, never pasted into the script
+        env:
+          SURROGATES: ${{ github.event.inputs.surrogates || '60' }}
+          ADV_BY: ${{ github.event.inputs.adv_by || 'ic' }}
         run: |
+          case "$SURROGATES" in ''|*[!0-9]*) echo "surrogates must be a number"; exit 1;; esac
           mkdir -p research/btcd_fractal/out/prev; cp research/btcd_fractal/out/results.json research/btcd_fractal/out/prev/results_score_adversary.json 2>/dev/null || true
-          python3 research/btcd_fractal/study.py --data research/btcd_fractal/data --out research/btcd_fractal/out --surrogates "${{ github.event.inputs.surrogates || '60' }}" --adv-by "${{ github.event.inputs.adv_by || 'ic' }}" 2>&1 | tee "$RUNNER_TEMP/study.log" | tail -80
+          python3 research/btcd_fractal/study.py --data research/btcd_fractal/data --out research/btcd_fractal/out --surrogates "$SURROGATES" --adv-by "$ADV_BY" 2>&1 | tee "$RUNNER_TEMP/study.log" | tail -80
       - name: Study round 2
         if: ${{ (github.event.inputs.round || '3') == '2' }}
         run: |
