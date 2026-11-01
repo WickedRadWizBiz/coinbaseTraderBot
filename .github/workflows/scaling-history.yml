@@ -112,6 +112,8 @@ jobs:
     timeout-minutes: 345
     strategy:
       fail-fast: false
+      # One long replay at a time: the account's runner cap is shared with every thread (coordinator, Nov 1).
+      max-parallel: 1
       matrix:
         arm: ${{ fromJson(needs.data.outputs.arms) }}
     steps:

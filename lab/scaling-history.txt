@@ -1,19 +1,10 @@
-# Scaling history lab, adversarial round (2026-11-01, Steven: try to break whatever produces gains). Attacks on e_novol:
-#  - "it only trades less": flat raises of the edge (bias 1-3c) with no market reading at all
-#  - "the reading doesn't matter": placebo hands back a random earlier add (same distribution, no link to the moment)
-#  - "a lucky point": every weight x0.5 and x1.5 must still win (a plateau, not a spike)
-#  - "one reading carries it": drop each reading in turn
-# The real result must beat bias and placebo, day by day, in most months and in calm, normal and wild days.
-# days=180
+# Scaling history lab, round 1 (2026-11-01): the recorded-day winner (e_novol) against today's bot and the two strongest
+# adversarial controls, on 120 history days (Jul-Oct, several regimes), one replay at a time (shared runner cap).
+#  - adv_placebo: same distribution of edge adds, drawn from earlier moments (does the market reading matter?)
+#  - adv_bias2: a flat 2c raise with no reading (does it only trade less?)
+# Pass = e_novol beats both day by day, in most months and in calm, normal and wild days. Next: neighbours, drop-one, fills.
+# days=120
 base:
 e_novol: DYN_EDGE_CHANGE=0.03 DYN_EDGE_SPREAD=0.5 DYN_EDGE_FLOW=0.02 DYN_EDGE_UNCERTAINTY=0.5
-adv_bias1: DYN_EDGE_BIAS=0.01
-adv_bias2: DYN_EDGE_BIAS=0.02
-adv_bias3: DYN_EDGE_BIAS=0.03
 adv_placebo: DYN_EDGE_CHANGE=0.03 DYN_EDGE_SPREAD=0.5 DYN_EDGE_FLOW=0.02 DYN_EDGE_UNCERTAINTY=0.5 DYN_EDGE_PLACEBO=true
-adv_half: DYN_EDGE_CHANGE=0.015 DYN_EDGE_SPREAD=0.25 DYN_EDGE_FLOW=0.01 DYN_EDGE_UNCERTAINTY=0.25
-adv_x15: DYN_EDGE_CHANGE=0.045 DYN_EDGE_SPREAD=0.75 DYN_EDGE_FLOW=0.03 DYN_EDGE_UNCERTAINTY=0.75
-adv_no_change: DYN_EDGE_SPREAD=0.5 DYN_EDGE_FLOW=0.02 DYN_EDGE_UNCERTAINTY=0.5
-adv_no_spread: DYN_EDGE_CHANGE=0.03 DYN_EDGE_FLOW=0.02 DYN_EDGE_UNCERTAINTY=0.5
-adv_no_flow: DYN_EDGE_CHANGE=0.03 DYN_EDGE_SPREAD=0.5 DYN_EDGE_UNCERTAINTY=0.5
-adv_no_unc: DYN_EDGE_CHANGE=0.03 DYN_EDGE_SPREAD=0.5 DYN_EDGE_FLOW=0.02
+adv_bias2: DYN_EDGE_BIAS=0.02
