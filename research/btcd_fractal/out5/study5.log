@@ -1,0 +1,54 @@
+dyn0 wsh3.0 now 2017-12-10 crossed {'first waterfall': '2021-03-14', 'second waterfall': '2021-08-15', 'final waterfall': '2026-07-12'}
+   halving_weeks   r 0.119 p 0.35
+   m2_yoy          r -0.492 p 0.092
+   btc_dd          r 0.07 p 0.812
+   btc_13w         r -0.169 p 0.163
+   btcd_activity   r -0.294 p 0.095
+dyn0 wsh1.0 now 2017-12-10 crossed {'first waterfall': '2021-02-28', 'second waterfall': '2021-08-08', 'final waterfall': '2026-07-12'}
+   halving_weeks   r 0.094 p 0.562
+   m2_yoy          r -0.392 p 0.24
+   btc_dd          r 0.097 p 0.672
+   btc_13w         r -0.198 p 0.055
+   btcd_activity   r -0.349 p 0.015
+dyn2 wsh3.0 now 2017-12-10 crossed {'first waterfall': '2021-03-14', 'second waterfall': '2021-08-15', 'final waterfall': '2026-08-09'}
+   halving_weeks   r 0.101 p 0.468
+   m2_yoy          r -0.455 p 0.233
+   btc_dd          r 0.157 p 0.608
+   btc_13w         r -0.148 p 0.215
+   btcd_activity   r -0.437 p 0.0
+dyn2 wsh1.0 now 2017-12-10 crossed {'first waterfall': '2021-04-11', 'second waterfall': '2021-08-15', 'final waterfall': '2026-08-09'}
+   halving_weeks   r 0.12 p 0.55
+   m2_yoy          r -0.443 p 0.128
+   btc_dd          r 0.12 p 0.7
+   btc_13w         r -0.224 p 0.005
+   btcd_activity   r -0.352 p 0.013
+2021 out of sample: {"overall": {"n": 25, "maeWeeksVsCross": 36.2, "maeWeeksVsTop": 32.6, "medianBiasVsTop": -15.1, "lastCallDate": "2021-03-11"}, "local": {"n": 25, "maeWeeksVsCross": 91.9, "maeWeeksVsTop": 97.6, "medianBiasVsTop": 70.7, "lastCallDate": "2021-02-10"}, "driver": {"n": 24, "maeWeeksVsCross": 117.5, "maeWeeksVsTop": 125.3, "medianBiasVsTop": 76.6, "lastCallDate": "2021-06-19"}, "halving": {"n": 25, "maeWeeksVsCross": 6.0, "maeWeeksVsTop": 4.0, "medianBiasVsTop": 4.0, "lastCallDate": "2021-01-31"}}
+   {'t': '2019-01-06', 'now': '2016-12-04', 'overall': '2019-06-19', 'local': '2020-02-26', 'driver': None, 'halving': '2021-01-31', 'note': None}
+   {'t': '2019-02-03', 'now': '2017-01-01', 'overall': '2019-06-02', 'local': '2019-10-03', 'driver': '2019-12-09', 'halving': '2021-01-31', 'note': None}
+   {'t': '2019-03-03', 'now': '2016-12-11', 'overall': '2019-08-23', 'local': '2021-08-29', 'driver': '2020-08-09', 'halving': '2021-01-31', 'note': None}
+   {'t': '2019-03-31', 'now': '2016-12-18', 'overall': '2019-09-14', 'local': '2020-12-27', 'driver': '2021-01-21', 'halving': '2021-01-31', 'note': None}
+   {'t': '2019-04-28', 'now': '2016-12-11', 'overall': '2019-11-09', 'local': '2021-10-24', 'driver': '2022-01-07', 'halving': '2021-01-31', 'note': None}
+   {'t': '2019-05-26', 'now': '2016-12-04', 'overall': '2020-01-08', 'local': '2023-05-21', 'driver': '2023-06-24', 'halving': '2021-01-31', 'note': None}
+   {'t': '2019-06-23', 'now': '2016-12-04', 'overall': '2020-02-17', 'local': '2027-06-13', 'driver': '2024-02-24', 'halving': '2021-01-31', 'note': None}
+   {'t': '2019-07-21', 'now': '2016-12-04', 'overall': '2020-03-29', 'local': '2027-07-11', 'driver': '2026-03-13', 'halving': '2021-01-31', 'note': None}
+   {'t': '2019-08-18', 'now': '2016-11-20', 'overall': '2020-06-28', 'local': '2024-02-11', 'driver': '2023-09-11', 'halving': '2021-01-31', 'note': None}
+   {'t': '2019-09-15', 'now': '2016-12-04', 'overall': '2020-06-17', 'local': '2022-05-12', 'driver': '2022-07-06', 'halving': '2021-01-31', 'note': None}
+   {'t': '2019-10-13', 'now': '2016-12-04', 'overall': '2020-07-28', 'local': '2022-06-09', 'driver': '2022-08-29', 'halving': '2021-01-31', 'note': None}
+   {'t': '2019-11-10', 'now': '2016-12-11', 'overall': '2020-08-11', 'local': '2021-02-07', 'driver': '2021-09-02', 'halving': '2021-01-31', 'note': None}
+   {'t': '2019-12-08', 'now': '2016-12-11', 'overall': '2020-09-19', 'local': '2021-03-07', 'driver': '2021-06-20', 'halving': '2021-01-31', 'note': None}
+   {'t': '2020-01-05', 'now': '2016-12-04', 'overall': '2020-11-26', 'local': '2021-08-09', 'driver': '2022-06-09', 'halving': '2021-01-31', 'note': None}
+   {'t': '2020-02-02', 'now': '2016-12-11', 'overall': '2020-12-07', 'local': '2021-05-02', 'driver': '2021-07-08', 'halving': '2021-01-31', 'note': None}
+   {'t': '2020-03-01', 'now': '2017-01-15', 'overall': '2020-09-19', 'local': '2020-10-14', 'driver': '2022-02-14', 'halving': '2021-01-31', 'note': None}
+   {'t': '2020-03-29', 'now': '2016-12-25', 'overall': '2020-12-27', 'local': '2022-05-26', 'driver': '2022-03-30', 'halving': '2021-01-31', 'note': None}
+   {'t': '2020-04-26', 'now': '2016-12-11', 'overall': '2021-04-04', 'local': '2024-01-21', 'driver': '2023-04-23', 'halving': '2021-01-31', 'note': None}
+   {'t': '2020-05-24', 'now': '2016-12-11', 'overall': '2021-05-13', 'local': '2024-02-18', 'driver': '2023-10-06', 'halving': '2021-01-31', 'note': None}
+   {'t': '2020-06-21', 'now': '2016-12-11', 'overall': '2021-06-22', 'local': '2027-12-12', 'driver': '2035-07-03', 'halving': '2021-01-31', 'note': None}
+   {'t': '2020-07-19', 'now': '2016-12-18', 'overall': '2021-06-27', 'local': '2022-11-15', 'driver': '2027-03-07', 'halving': '2021-01-31', 'note': None}
+   {'t': '2020-08-16', 'now': '2017-04-02', 'overall': None, 'local': None, 'driver': None, 'halving': None, 'note': 'already past the pivot'}
+   {'t': '2020-09-13', 'now': '2016-12-18', 'overall': '2021-09-11', 'local': '2023-01-10', 'driver': '2024-04-27', 'halving': '2021-01-31', 'note': None}
+   {'t': '2020-10-11', 'now': '2016-12-25', 'overall': '2021-09-14', 'local': '2022-12-08', 'driver': '2023-10-20', 'halving': '2021-01-31', 'note': None}
+   {'t': '2020-11-08', 'now': '2017-02-12', 'overall': '2021-04-02', 'local': '2021-02-25', 'driver': '2021-09-25', 'halving': '2021-01-31', 'note': None}
+   {'t': '2020-12-06', 'now': '2017-02-26', 'overall': '2021-03-11', 'local': '2021-02-10', 'driver': '2021-06-19', 'halving': '2021-01-31', 'note': None}
+halving clock: {"offsetsWeeks": [37, 52, 74], "events": ["2016-11-20", "2017-12-10", "2018-04-01", "2018-09-09", "2019-09-08", "2020-05-17", "2021-01-03", "2022-06-12", "2025-06-22"], "realMeanWeeksToNearestFall": 17.0, "calls": 6, "randomAnchorMedian": 23.5, "p": 0.145, "callDates": ["2021-01-25", "2021-05-10", "2021-10-11", "2025-01-04", "2025-04-19", "2025-09-20", "2028-12-30", "2029-04-14", "2029-09-15"]}
+halving 2021 one-event: {"realGapWeeks": 3.1, "p": 0.015}
+now: {"parentWeek": "2017-12-10", "finalWaterfallCrossed": "2026-07-12", "localDil": 26.0, "halvingClockNext": ["2028-12-30", "2029-04-14", "2029-09-15"]}
