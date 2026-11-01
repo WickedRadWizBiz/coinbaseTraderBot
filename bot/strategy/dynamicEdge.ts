@@ -26,12 +26,15 @@ export interface DynamicEdgeParams {
   quiet: number;
   /** Jump (1-hour sigmas) at or above which the quiet term adds nothing. */
   quietRef: number;
+  /** Adversarial controls (research): a flat add, and a placebo that hands back a random earlier add instead of this one. */
+  bias: number;
+  placebo: boolean;
   /** Most the edge can rise or fall from the static one (probability points). */
   maxUp: number;
   maxDown: number;
 }
 
-export const DYNAMIC_EDGE_OFF: DynamicEdgeParams = { vol: 0, change: 0, spread: 0, flow: 0, uncertainty: 0, quiet: 0, quietRef: 2.2, maxUp: 0.05, maxDown: 0.01 };
+export const DYNAMIC_EDGE_OFF: DynamicEdgeParams = { vol: 0, change: 0, spread: 0, flow: 0, uncertainty: 0, quiet: 0, quietRef: 2.2, bias: 0, placebo: false, maxUp: 0.05, maxDown: 0.01 };
 
 export interface DynamicEdge {
   /** What to add to minEdge (probability points). */
@@ -50,8 +53,21 @@ export function dynamicEdge(p: DynamicEdgeParams, r: MarketStateReading | undefi
     uncertainty: p.uncertainty * v(pStd),
     quiet: p.quiet && p.quietRef > 0 && r?.jump != null && Number.isFinite(r.jump) ? p.quiet * Math.max(0, 1 - r.jump / p.quietRef) : 0,
   };
-  const sum = parts.vol + parts.change + parts.spread + parts.flow + parts.uncertainty + parts.quiet;
-  return { add: Math.max(-p.maxDown, Math.min(p.maxUp, sum)), parts };
+  const sum = parts.vol + parts.change + parts.spread + parts.flow + parts.uncertainty + parts.quiet + p.bias;
+  const add = Math.max(-p.maxDown, Math.min(p.maxUp, sum));
+  return { add: p.placebo ? placeboAdd(add) : add, parts };
 }
 
-export const dynamicEdgeOn = (p: DynamicEdgeParams) => p.vol !== 0 || p.change !== 0 || p.spread !== 0 || p.flow !== 0 || p.uncertainty !== 0 || p.quiet !== 0;
+// The placebo (adversarial evaluator, Steven Nov 1): the same distribution of adds, but cut loose from the market state of
+// the moment. If the placebo earns as much as the real edge, the gain comes from asking more on average, not from reading
+// the market. Deterministic (fixed seed) so paired replays stay paired.
+const placeboBuf: number[] = [];
+let placeboSeed = 12345;
+function placeboAdd(add: number): number {
+  if (placeboBuf.length < 5000) placeboBuf.push(add);
+  else placeboBuf[placeboSeed % 5000] = add;
+  placeboSeed = (Math.imul(placeboSeed, 1664525) + 1013904223) >>> 0;
+  return placeboBuf[placeboSeed % placeboBuf.length];
+}
+
+export const dynamicEdgeOn = (p: DynamicEdgeParams) => p.vol !== 0 || p.change !== 0 || p.spread !== 0 || p.flow !== 0 || p.uncertainty !== 0 || p.quiet !== 0 || p.bias !== 0;

@@ -50,3 +50,12 @@ test('quiet: a coin that has not moved asks more edge, a moving one asks none', 
   assert.equal(dynamicEdge(p, reading({ jump: null as unknown as number }), 0).add, 0, 'no reading adds 0');
   assert.equal(loadConfig({ DYN_EDGE_QUIET: '0.03' } as NodeJS.ProcessEnv).strategy.dynamicEdge.quiet, 0.03);
 });
+
+test('adversarial controls: bias is a flat add; the placebo returns earlier adds, not the current one', () => {
+  assert.ok(Math.abs(dynamicEdge({ ...DYNAMIC_EDGE_OFF, bias: 0.02 }, reading(), 0).add - 0.02) < 1e-12);
+  const p = { ...DYNAMIC_EDGE_OFF, spread: 1, placebo: true };
+  const seen = new Set<number>();
+  for (let i = 0; i < 200; i++) seen.add(Math.round(dynamicEdge(p, reading({ spread: (i % 10) / 1000 }), 0).add * 1e6));
+  assert.ok(seen.size > 1 && seen.size <= 10, 'only adds already seen come back');
+  assert.equal(loadConfig({ DYN_EDGE_PLACEBO: 'true' } as NodeJS.ProcessEnv).strategy.dynamicEdge.placebo, true);
+});

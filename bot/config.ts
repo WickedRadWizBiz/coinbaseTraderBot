@@ -1093,6 +1093,8 @@ export function loadConfig(env: Env = process.env): Readonly<Config> {
       uncertainty: num(env, 'DYN_EDGE_UNCERTAINTY', 0, 0, 2),
       quiet: num(env, 'DYN_EDGE_QUIET', 0, 0, 0.2),
       quietRef: num(env, 'DYN_EDGE_QUIET_REF', 2.2, 0.5, 10),
+      bias: num(env, 'DYN_EDGE_BIAS', 0, -0.05, 0.1),
+      placebo: env.DYN_EDGE_PLACEBO === 'true',
       maxUp: num(env, 'DYN_EDGE_MAX_UP', 0.05, 0, 0.3),
       maxDown: num(env, 'DYN_EDGE_MAX_DOWN', 0.01, 0, 0.1),
     },
